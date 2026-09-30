@@ -23,10 +23,12 @@ corpus/
 | 条目 | 落点 | 存储 | 守卫 |
 |---|---|---|---|
 | `disasm/bundle` | `corpus/disasm/disasm-20260930.zip`（4 个 UTF-8 文件） | LFS（`*.zip`） | `recipe` 真跑 9 条保真断言（#7）；原件缺席时由 zip 反解 + 清单 sha256 自证 |
-| `fixtures/save-samples` | `corpus/fixtures/SAVE{76,77,78,79}.{DAT,STH}` | LFS（`*.DAT`/`*.STH`） | 副本与来源逐字节比对（#4）、`filter=lfs`（#6）；文件级事实（槽定位 / mtime）另见 `corpus/fixtures/samples.json`，两边文件集合一致性由 `tools/test/fixtures.test.mjs` 钉住 |
+| `fixtures/save-samples` | `corpus/fixtures/SAVE{76,77,78,79}.{DAT,STH}` | LFS（`*.DAT`/`*.STH`） | dest 下**每个已跟踪文件**的 `filter=lfs`（#6，不靠 origin 枚举）；文件级事实（槽定位 / mtime）另见 `corpus/fixtures/samples.json` |
 
-★ 两者的**来源记录**（`disasm/raw-source-*` / `fixtures/raw-source-save-samples`）都是 `external-only`
-并各自记着源件的 sha256 —— 这就是"没被改过"可复核的地方。
+★ **只有"有加工链的入库件"才配来源记录**（`disasm/bundle` ↔ `disasm/raw-source-*`，`external-only` + 逐件 sha256）
+—— 那是"转码前的忠实参照"这个能力的来源：**来源 ≠ 入库件**时才谈得上复核。
+`fixtures/save-samples` **不配**：它是**自足条目**（固化资源，没有加工链、没有可再取的上游，入库的那一份就是原件），
+登记 origin 等于把 dest 抄第二遍。口径见 `pnpm tools corpus describe` 的「自足条目」。
 
 ## 2. `assets.json` 是什么、不是什么
 

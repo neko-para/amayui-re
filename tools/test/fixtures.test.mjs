@@ -3,10 +3,10 @@
  *
  * 真源分工：
  *   · `samples.json` —— 这一批 fixture 的**结构化描述**：槽 → 游戏内定位（`where`）→ 各文件 mtime
- *   · `corpus/assets.json` —— 文件的**来源 / sha256 / 存储去向**（`fixtures/save-samples` 与来源记录）
- * 两边各管一摊、**不许互相抄**（README 里也不许列表）—— 本测试负责断言两边的**文件集合一致**。
+ *   · `corpus/assets.json` —— 只管"入库 / 去向 / 走哪种存储"：fixture 是**自足条目**
+ *     （固化资源，没有加工链）⇒ 它**不登记 origin**，"内容没变"由 git/LFS 与下面的 mtime 事实回答。
  *
- * 钉住：① 结构合法；② 槽 76–79 齐备且 .DAT/.STH 成对；③ 与清单的文件集合一致；
+ * 钉住：① 结构合法；② 槽 76–79 齐备且 .DAT/.STH 成对；③ 盘上文件与登记集合**两边相等**；
  *       ④ mtime 与 samples.json 一致时，「槽头 +264 起七个 u16 == 文件 mtime」必须成立；
  *       ⑤ mtime 已漂移时**如实 skip**（fresh clone 的正常状态）并指向恢复命令 —— 不假装通过。
  *
@@ -17,7 +17,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { DEFAULT_MANIFEST, loadManifest } from '../lib/manifest.mjs';
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { wallClock } from '../lib/time.mjs';
 
@@ -59,14 +58,6 @@ test('槽 76/77/78/79 齐备，且每个槽恰好 .DAT + .STH 成对', () => {
       `槽 ${slot} 的文件不成对`,
     );
   }
-});
-
-test('与清单的文件集合一致（samples.json 管文件级事实，清单管来源；两边不许漂）', () => {
-  const manifest = loadManifest(DEFAULT_MANIFEST);
-  const entry = manifest.entries.find((e) => e.id === 'fixtures/save-samples');
-  assert.ok(entry, '清单里必须有 fixtures/save-samples');
-  const fromManifest = entry.origin.map((o) => path.basename(o.path)).sort();
-  assert.deepEqual(allFiles().sort(), fromManifest, 'samples.json 与清单登记的文件集合不一致');
 });
 
 test('样本文件都在盘上且非空', () => {

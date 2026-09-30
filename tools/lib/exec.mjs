@@ -73,3 +73,32 @@ export function gitAttrFilter(repoRoot, relPath) {
   const m = /filter:\s*(\S+)/.exec(r.out);
   return { value: m ? m[1] : 'unspecified', detail: r.out.trim(), error: r.error };
 }
+
+/**
+ * `git check-attr -a -- <paths…>`：取回每个路径的**全部**属性（`{ <path>: { <attr>: <value> } }`）。
+ * 与 `gitAttrFilter` 的区别：`-a` 一次问一批、且 `-text` 这类布尔属性只有在这里才看得见。
+ * **不抛**（跑不起来时回 `error`，调用方决定 warning 还是失败）；路径传仓库相对路径。
+ * @returns {{attrs: Record<string, Record<string,string>>, error?: string}}
+ */
+export function gitAttrs(repoRoot, relPaths) {
+  if (relPaths.length === 0) return { attrs: {} };
+  const r = runCapture(repoRoot, 'git', ['check-attr', '-a', '--', ...relPaths]);
+  if (r.error) return { attrs: {}, error: r.error };
+  if (r.code !== 0) return { attrs: {}, error: `git check-attr 退出 ${r.code}` };
+  const attrs = {};
+  for (const line of r.out.split('\n')) {
+    // 形态：`<path>: <attr>: <value>`
+    const m = /^(.*?): ([^:]+): (.*)$/.exec(line.trim());
+    if (!m) continue;
+    (attrs[m[1]] ??= {})[m[2]] = m[3];
+  }
+  return { attrs };
+}
+
+/** 已入库（git 跟踪）的文件里落在 `<dirRel>/` 下的那些。**不抛** */
+export function gitLsFiles(repoRoot, dirRel) {
+  const r = runCapture(repoRoot, 'git', ['ls-files', '--', dirRel]);
+  if (r.error) return { files: [], error: r.error };
+  if (r.code !== 0) return { files: [], error: `git ls-files 退出 ${r.code}` };
+  return { files: r.out.split('\n').map((s) => s.trim()).filter(Boolean) };
+}

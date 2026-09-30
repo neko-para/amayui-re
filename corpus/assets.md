@@ -13,11 +13,15 @@
 
 ## 非显然的口径（脚本里学不到、必须写下来的那种）
 
-* **每批入库件都配两条记录**：**载荷**（`storage: lfs` + `dest`）说"仓库里有什么"；
-  **来源记录**（`external-only` + 逐件 sha256）说"从哪来、没被改过"。两者用 `derivedFrom` 相连
-  （范例：`disasm/bundle` ↔ `disasm/raw-source-*`、`fixtures/save-samples` ↔ `fixtures/raw-source-save-samples`）。
+* **"两条记录"只属于有加工链的入库件**：**载荷**（`storage: lfs` + `dest`）说"仓库里有什么"；
+  **来源记录**（`external-only` + 逐件 sha256）说"加工之前它长什么样、没被改过"。两者用 `derivedFrom` 相连
+  （范例：`disasm/bundle` ↔ `disasm/raw-source-*`）。
+  ★ 这条**不套用到自足条目**：入库的 `kind=fixture`（固化资源：没有加工链、没有可再取的上游，
+  入库的那一份就是原件）**允许 `origin` 为空**（`fixtures/save-samples` 就是这样）——
+  给它记来源等于把 `dest` 抄第二遍，也换不来任何"可复核"的能力。
 * **入库件的 `origin` 不许带 `sha256`**（校验和交给 git/LFS）；翻牌 `deferred → lfs` 时工具**会自动剔除**残留的。
-* **目录型 `dest` 的副本必须与来源逐字节相同**（每次 `validate` 现算 sha256 比对，不写进清单）。
+* **目录型 `dest` 的副本必须与来源逐字节相同**（每次 `validate` 现算 sha256 比对，不写进清单）——
+  ★ 只对**有 origin** 的条目生效；自足条目没有来源可比，它的完整性由 git/LFS 校验和 + 守卫 #6 回答。
 * **`root=staging` 是唯一的例外**：它的 origin 允许缺席（中转区，不是长期位置）—— 只 warning。
 * **守卫 #7 / #9 只对"真正入库的那一份"强制**（`storage ∈ {lfs,git}` 的 `disasm-corpus` 才必须有 `recipe`、
   必须有一条指向 `kind=binary` 的前身）；**"转码前的原件"与"明确不带的清单"豁免** —— 它们是参照件 / 清单，
@@ -47,7 +51,9 @@ pnpm tools corpus validate --json # 机器可读
 
 | | 本清单 | `samples.json`（说明书：`fixtures/samples.md`） |
 |---|---|---|
-| 管什么 | **来源 / sha256 / 存储去向**（跨域统一） | **文件级事实**：槽定位、源 mtime（git 存不下） |
+| 管什么 | **存储去向**（跨域统一）与（对有加工链的件）**来源 / sha256** | **文件级事实**：槽定位、源 mtime（git 存不下） |
 | 谁读 | 守卫、迁移轮 | 未来的模拟器测试 |
 
-两者**只重叠一个"文件集合"**，由 `tools/test/fixtures.test.mjs` 断言一致（各管一摊，不许互相抄）。
+两边各管一摊，**不互相抄**：本清单**不列** fixture 的文件名（自足条目的 `origin` 为空，
+`dest` 只是一个目录），`samples.json` 也不记存储去向；
+「盘上文件集合 == 登记集合」由 `tools/test/fixtures.test.mjs` 直接对目录断言。

@@ -17,7 +17,6 @@ import { tzOffsetMinutes, wallClock } from './time.mjs';
 export { DEFAULT_SAMPLES, FIXTURES_DIR, wallClock };
 
 export const CARRY_ID = 'fixtures/save-samples';
-export const SOURCE_ID = 'fixtures/raw-source-save-samples';
 const EXTS = ['DAT', 'STH'];
 const FILE_KEY_ORDER = ['name', 'mtimeMs', 'mtimeLocal', 'tzOffsetMinutes'];
 
@@ -31,21 +30,20 @@ export const DOMAIN = {
   title: '真存档样本（槽 76/77/78/79；文件级事实 + mtime）',
   data: [
     '`corpus/fixtures/samples.json`（本工具的唯一写入口）',
-    '`corpus/fixtures/SAVE*.DAT` / `.STH`（载荷，LFS）',
-    '`corpus/assets.json`（来源/哈希那一摊；**经 corpus.mjs 的 saveManifest 写**，不另开写路径）',
+    '`corpus/fixtures/SAVE*.DAT` / `.STH`（载荷，LFS；本工具是它们唯一的增删入口）',
   ],
-  access: 'rw（唯一编辑入口；缺省 dry-run，两侧都写后复验，不绿回滚）',
+  access: 'rw（唯一编辑入口；缺省 dry-run，写后复验，不绿回滚）',
   tool: 'tools/fixtures.mjs',
 };
 
 export const OPERATIONS = [
-  { name: 'list', argv: ['--list'], mutates: false, summary: '槽 / 定位 / 每个文件是否与记录的 instant 一致 / 来源' },
+  { name: 'list', argv: ['--list'], mutates: false, summary: '槽 / 定位 / 每个文件是否与记录的 instant 一致' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 不变量（含谁在守）/ 操作' },
   { name: 'restore-mtime', argv: ['--restore-mtime'], mutates: true, summary: '刚 clone：按记录的 instant 把 mtime 拨回（跨时区也对）[--write]' },
-  { name: 'add', argv: ['--add'], mutates: true, summary: '加一个槽：`<槽> --from <源目录> --root <roots 名> --where <定位>` [--write]' },
-  { name: 'refresh', argv: ['--refresh'], mutates: true, summary: '源更新后重取一个槽（重算 mtime + sha256）：`<槽>` [--write]' },
-  { name: 'refresh-all', argv: ['--refresh-all'], mutates: true, summary: '全部重取一遍 [--write]' },
-  { name: 'remove', argv: ['--remove'], mutates: true, summary: '删一个槽（文件 + 两个 JSON 的登记一起摘）：`<槽>` [--write]' },
+  { name: 'add', argv: ['--add'], mutates: true, summary: '加一个槽（拷文件 + 设 mtime）：`<槽> --from <源目录> [--root <roots 名>] --where <定位>` [--write]' },
+  { name: 'refresh', argv: ['--refresh'], mutates: true, summary: '重新取一个槽：`<槽> --from <源目录>`（缺省按登记的 origin 找，没有就如实报出）[--write]' },
+  { name: 'refresh-all', argv: ['--refresh-all'], mutates: true, summary: '按登记的 origin 全部重取一遍（没有 origin 就都给 --from）[--write]' },
+  { name: 'remove', argv: ['--remove'], mutates: true, summary: '删一个槽（文件 + samples.json 的登记；有 origin 就连它一起摘）：`<槽>` [--write]' },
   { name: 'normalize', argv: ['--normalize'], mutates: true, summary: 'schema 变过后拉回规范形态 [--write]' },
 ];
 
@@ -65,9 +63,8 @@ const SAMPLE_INVARIANTS = [
   ['每槽 DAT + STH 成对；槽号形态合法且不重复；where 非空', '本工具写入时自校验（`saveSamples` 写后复验，不绿回滚）'],
   ['每个文件三时间字段齐全', '同上'],
   ['槽头 +264 起七个 u16 的年月日时分秒 == `wallClock(mtimeMs, tzOffsetMinutes)`；星期与日期自洽', '`tools/test/fixtures.test.mjs`'],
-  ['文件集合与 `corpus/assets.json` 的 `fixtures/save-samples` 一致（跨源）', '`tools/test/fixtures.test.mjs`'],
-  ['目录里不许出现未登记的文件', '`tools/test/fixtures.test.mjs`'],
-  ['载荷副本与来源逐字节相同、且走 LFS', '`pnpm tools corpus validate` 的守卫 #4 / #6'],
+  ['目录里的文件集合 == 本文件登记的集合（两边都不许多）', '`tools/test/fixtures.test.mjs`'],
+  ['载荷的 `filter=lfs`（**不靠 origin 枚举**）', '`pnpm tools corpus validate` 的守卫 #6'],
 ];
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -160,13 +157,15 @@ export function describe() {
   return {
     file: 'corpus/fixtures/samples.json',
     purpose: '这一批真存档样本的结构化描述（每个样本 = 一个槽 = 一对 .DAT/.STH）；只管**文件级事实**',
-    notHere: '文件的来源 / sha256 / 存储去向**不在这里** —— 见 corpus/assets.json（说明书 corpus/assets.md）',
+    notHere:
+      '存储去向（LFS）与"这批样本在清单里是哪一条"不在这里 —— 见 corpus/assets.json 的 `fixtures/save-samples`（说明书 corpus/assets.md）。' +
+      '★ 该条目是**自足条目**（固化资源，没有加工链）⇒ **不登记 origin**：样本的"来源"就是入库的那一份本身',
     topLevel: { schemaVersion: 1, _doc: '由本工具拥有（写盘时自动注入指向本自描述的指针）', samples: '见下方字段表' },
     fields: SAMPLE_FIELD_DOC.map(([name, req, type, desc]) => ({ name, req, type, desc })),
     invariants: SAMPLE_INVARIANTS.map(([text, enforcedBy], i) => ({ id: i + 1, text, enforcedBy })),
     operations: OPERATIONS,
     writePath:
-      '只有本工具（唯一编辑入口）；缺省 dry-run，--write 才落盘；同时写本文件与 corpus/assets.json（后者走 corpus.mjs 的 saveManifest ⇒ 清单仍只有一个写入口），两侧都写后复验，不绿回滚。**不要手改 JSON，也不要手工 touch**。',
+      '只有本工具（唯一编辑入口）；缺省 dry-run，--write 才落盘；写后复验，不绿回滚。给了 `--from`（加样本 / 重取）时还会经 corpus.mjs 的 saveManifest 同步清单里那条 origin ⇒ 清单仍只有一个写入口。**不要手改 JSON，也不要手工 touch**。',
   };
 }
 

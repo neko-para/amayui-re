@@ -346,7 +346,7 @@ export function verifyAll(stagingDir = DEFAULT_STAGING, { zip = DEFAULT_ZIP } = 
       ok,
       checks: [
         {
-          label: '原件已不在 ⇒ 由 zip 反解，sha256 必须等于清单里记录的原件（fixtures/raw-source-* 口径）',
+          label: '原件已不在 ⇒ 由 zip 反解，sha256 必须等于清单里记录的原件（`disasm/raw-source-*` 口径）',
           ok,
           detail: exp === undefined ? '清单里没有该文件的原件 sha256' : `反解 ${act.slice(0, 12)}… / 清单 ${exp.slice(0, 12)}…`,
         },

@@ -413,111 +413,18 @@
       "note": "留档只为解释「为什么旧结论会不对」；新语料见 disasm/raw-source-agerc 与 disasm/bundle"
     },
     {
-      "id": "fixtures/raw-source-save-samples",
-      "kind": "fixture",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE76.DAT",
-          "sha256": "233d26f4811d46ad521ecc10aec59d5362adc91e38198cf42b0b9f5d480c335a"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE76.STH",
-          "sha256": "3fa7e3c900b4b261ef32f7db72ce06be4ccce3e6ecbe55860c1a6698eea0f6c6"
-        },
-        {
-          "root": "gameSaves",
-          "path": "SAVE77.DAT",
-          "sha256": "4c4611a4d70a50cf5bd08e4da101282bb54c239ba8ab65bdcd821d75bf78f1fc"
-        },
-        {
-          "root": "gameSaves",
-          "path": "SAVE77.STH",
-          "sha256": "b2ba86830de659a12bb24723e026afab911b48949d21b73862769cc69de3a6ea"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE78.DAT",
-          "sha256": "fa04e4fb70f4decc8d797b1a6114e5d9e67b9671812723d6eb55db799d44ed71"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE78.STH",
-          "sha256": "e162c3beee42ca06d32fe3b98374364cde74d81dcb9e0363c87155d6cc805e11"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE79.DAT",
-          "sha256": "100607c0875d09243769ac7fe93fe1385fdaf68354c50d0f6a594a76af48a991"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE79.STH",
-          "sha256": "8ea3ada0e8d963e75ea786389738844a4aea5d0c708f2975ccde926d76e544c2"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "转写/搬运之前的忠实参照（真玩家存档样本）：只用来复核入库副本没被改过，不参与构建",
-      "blocks": [
-        "M1"
-      ],
-      "note": "8 个文件（槽 76/77/78/79 × .DAT/.STH）：76/78/79 与旧仓 cache/ 同字节（那也是真存档目录的取样），77 只在真存档目录里（roots.gameSaves）。旧仓 cache/README.md 是旧仓的使用说明散文，属待重分类的旧知识 ⇒ 不搬，只记指向"
-    },
-    {
       "id": "fixtures/save-samples",
       "kind": "fixture",
       "role": "fixture",
       "storage": "lfs",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE76.DAT"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE76.STH"
-        },
-        {
-          "root": "gameSaves",
-          "path": "SAVE77.DAT"
-        },
-        {
-          "root": "gameSaves",
-          "path": "SAVE77.STH"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE78.DAT"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE78.STH"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE79.DAT"
-        },
-        {
-          "root": "oldRepo",
-          "path": "cache/SAVE79.STH"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "fixtures/raw-source-save-samples"
-        }
-      ],
+      "origin": [],
       "dest": "corpus/fixtures/",
       "readOnly": true,
-      "consume": "真玩家存档样本（SAVE76/78/79 的 .DAT + .STH + README）；落 corpus/fixtures/，走 LFS",
+      "consume": "真玩家存档样本（SAVE76/77/78/79 的 .DAT + .STH + README）；落 corpus/fixtures/，走 LFS",
       "blocks": [
         "M1"
       ],
-      "note": "8 个 .DAT/.STH（槽 76/77/78/79，全部走 LFS）：文件级事实（各槽在游戏里的定位 where、每个文件的源 mtime）在 corpus/fixtures/samples.json；之所以要记 mtime 是因为槽头 +264 起七个 u16 就是存档时刻、而 git 不保存 mtime"
+      "note": "8 个 .DAT/.STH（槽 76/77/78/79，全部走 LFS）：文件级事实（各槽在游戏里的定位 where、每个文件的源 mtime）在 corpus/fixtures/samples.json；之所以要记 mtime 是因为槽头 +264 起七个 u16 就是存档时刻、而 git 不保存 mtime。★ 固化资源：没有加工链、也没有可再取的上游 ⇒ 不登记 origin（见 pnpm tools corpus describe 的「自足条目」）"
     },
     {
       "id": "game/install-dir",

@@ -11,18 +11,21 @@
 | 想知道 | 真源 | 说明书 |
 |---|---|---|
 | 这一批有哪些**样本**、每个槽在游戏里的**定位**、每个文件的 **mtime** | `samples.json` | **[`samples.md`](./samples.md)** |
-| 文件的**来源 / sha256 / 存储去向** | `../assets.json` | [`../assets.md`](../assets.md) |
-| 副本是否与来源**逐字节相同**、有没有走 LFS | `pnpm tools corpus validate`（守卫 #3/#4/#6） | 同上 |
+| 这批样本在清单里是**哪一条**、走哪种**存储** | `../assets.json` 的 `fixtures/save-samples` | [`../assets.md`](../assets.md) |
+| 载荷有没有走 LFS | `pnpm tools corpus validate`（守卫 #6） | 同上 |
 
 ★ **载荷的 mtime 是判据的一部分**（槽头 `+264` 起那七个 u16 就是存档时刻），
 所以消费前必须按记录把 mtime 拨回去 —— **怎么拨、为什么跨时区也不会错，见 `samples.md`**。
 
-## 2. 两处**非显然的不对称**（散文该写的就只有这种）
+## 2. 三条**非显然**的口径（散文该写的就只有这种）
 
-* **来源不对称**：76/78/79 取自旧仓 `cache/`（实测与真存档目录里的同名文件**逐字节相同**）；
-  **77 只有真存档目录里有** ⇒ 清单为此加了 `roots.gameSaves`
-  （`%LOCALAPPDATA%\Eushully\天結いキャッスルマイスター\SAVE` —— 注意它是**活目录**：
-  被游戏覆盖会让守卫 #4 变红，这是设计使然，不是误报）。
+* **本目录是"自足条目"**：这些存档是**固化的资源**（引擎写出来的成品），**没有加工链**，
+  入库的那一份**就是**原件 ⇒ 清单里**不登记 `origin`**（`storage=lfs` 只说"它走 LFS"）。
+  不登记不是漏了：登记它等于把 `dest` 抄第二遍。口径见 `pnpm tools corpus describe` 的「自足条目」；
+  "内容没被改过"由 git/LFS 的校验和回答，不由"和某个外部目录比字节"回答。
+* **这四对文件都是真存档目录的样本**：76/78/79 经旧仓 `cache/` 中转了一手，77 直接取自真存档目录
+  （清单为此登记了 `roots.gameSaves`，`pnpm tools fixtures add|refresh` 缺省就用它当来源）。
+  ★ 中转与否**不影响**它们是同一批资源 —— 所以清单不按"从哪个目录拿的"分条。
 * **有一份旧文件没有搬**：旧仓 `cache/README.md` 是旧仓的使用说明散文，属**待重分类的旧知识**
   （见 `docs/00-origin/knowledge-rebuild.md`）⇒ 只记指向，重写模拟器时按需去旧仓读。
 
@@ -33,13 +36,14 @@
 2. **不要把样本伪装成真游戏目录**：跑不起来的用例应当**如实 skip**，
    而不是手写一份 `SAVE.DAT` / `SYS4REG.INI` 去骗过某条断言 —— 那会让红点出现在与实现无关的地方。
 3. **不要给样本改名来凑用例**（例如为了跑 `SAVE00` 的用例把 079 改名）：需要那些槽就补**真的**样本
-   （补样本走 `samples.md` 的 `--add`，不要手动拷文件）。
+   （补样本走 `samples.md` 的 `add`，不要手动拷文件）。
 4. 以上是本仓对这套 fixture 的**使用口径**；旧仓 `cache/README.md` 有更长的实例与理由，未复制（§2）。
 
 ## 4. 存储与校验
 
 * 载荷 `.DAT`/`.STH` 走 **LFS**（`.gitattributes` 按扩展名显式声明）；
   `README.md` / `samples.json` / `samples.md` 是纯文本，走 git（**不要**让它们落到 LFS）。
-* 守卫（`pnpm tools corpus validate`）：#4 副本 vs 来源逐字节 · #6 `filter=lfs` · #3 目录型 dest 非空。
-* 测试（`pnpm test`）：`samples.json` 的结构与槽齐备性、它与清单的文件集合一致、不许有未登记文件、
+* 守卫（`pnpm tools corpus validate`）：#6 核对 dest 下每个已跟踪文件的 `filter=lfs`（纯文本侧车放行）、
+  #3 目录型 dest 非空。
+* 测试（`pnpm test`）：`samples.json` 的结构与槽齐备性、**盘上文件集合与登记集合相等**（两边都不许多）、
   以及 `samples.md` 里那条 mtime 不变量。

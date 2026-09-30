@@ -21,7 +21,7 @@ import {
   saveManifest,
   validateManifest,
 } from '../lib/manifest.mjs';
-import { gitAttrFilter } from '../lib/exec.mjs';
+import { git, gitAttrFilter } from '../lib/exec.mjs';
 import { REPO_ROOT } from '../lib/paths.mjs';
 
 const CORPUS_MJS = path.join(REPO_ROOT, 'tools', 'corpus.mjs');
@@ -93,9 +93,24 @@ test('#1 schema：kind 非法 → 红', () => {
   assert.ok(failIds(check(root, [validEntry({ kind: 'nope' })])).includes(1));
 });
 
-test('#1 schema：origin 为空数组 → 红', () => {
+test('#1 schema：非自足条目的 origin 为空数组 → 红', () => {
   const root = makeRepo();
   assert.ok(failIds(check(root, [validEntry({ origin: [] })])).includes(1));
+  // 也允许整个字段缺席（同一个判据）
+  const noOrigin = validEntry();
+  delete noOrigin.origin;
+  assert.ok(failIds(check(root, [noOrigin])).includes(1));
+});
+
+test('#1 schema：★ 自足条目（入库的 kind=fixture）origin 允许为空 / 缺席', () => {
+  const root = makeRepo();
+  const base = { kind: 'fixture', role: 'fixture', storage: 'lfs', dest: 'corpus/payload.bin' };
+  assert.deepEqual(failIds(check(root, [validEntry({ ...base, origin: [] })])), []);
+  const noOrigin = validEntry(base);
+  delete noOrigin.origin;
+  assert.deepEqual(failIds(check(root, [noOrigin])), []);
+  // 但"自足"只认 kind=fixture：同样的 shape 换成别的 kind 仍然要 origin
+  assert.ok(failIds(check(root, [validEntry({ ...base, kind: 'asset', origin: [] })])).includes(1));
 });
 
 test('#2 自洽：external-only 却给了 dest → 红', () => {
@@ -200,6 +215,36 @@ test('#4 校验和：sha256 与盘上不符 → 红（这一条才是"没被改�
 test('#6 LFS 一致性：真仓的 .gitattributes 必须把 disasm zip 交给 LFS', () => {
   const r = gitAttrFilter(REPO_ROOT, 'corpus/disasm/disasm-20260930.zip');
   assert.equal(r.value, 'lfs', r.detail);
+});
+
+test('★ #6：目录型 dest 的载荷**不靠 origin 枚举**（自足条目 origin 为空也要看得见）', () => {
+  // 真仓、真 .gitattributes，两种"LFS 声明坏掉"的形态都必须红 —— 而 fixture 的 origin 已按自足条目清空，
+  // 靠"origin 里的来源文件"枚举的旧写法在这两种情形下都会**静默全绿**。
+  const attrPath = path.join(REPO_ROOT, '.gitattributes');
+  const original = fs.readFileSync(attrPath, 'utf8');
+  const entry = () =>
+    validEntry({ id: 'fixtures/save-samples', kind: 'fixture', role: 'fixture', storage: 'lfs', dest: 'corpus/fixtures', origin: [] });
+  const c6 = () =>
+    validateManifest(makeManifest(REPO_ROOT, [entry()]), { repoRoot: REPO_ROOT, runGit: true, checkHashes: false, runRecipe: false })
+      .checks.find((c) => c.id === 6);
+  const before = git(REPO_ROOT, ['status', '--porcelain']); // 只在 git 可用时才断言"没动 git 状态"
+
+  try {
+    // ① 规则还在、只是丢了 filter=lfs（保留 -text）⇒ 逐文件点名
+    fs.writeFileSync(attrPath, original.replace(/ filter=lfs diff=lfs merge=lfs/g, ''), 'utf8');
+    assert.equal(c6().status, 'fail', '① 载荷丢了 filter=lfs 必须红');
+    assert.ok(c6().details.some((d) => /SAVE79\.DAT/.test(d)), `① 必须点名盘上的载荷，实际：${JSON.stringify(c6().details)}`);
+
+    // ② LFS 规则整块被删（载荷会退化成 text: auto）⇒ 目录级兜底断言
+    fs.writeFileSync(attrPath, `${original.split('\n')[0]}\n`, 'utf8');
+    assert.equal(c6().status, 'fail', '② LFS 规则整块消失必须红');
+    assert.ok(c6().details.some((d) => /一个 filter=lfs 的文件都没有/.test(d)), `② 必须报"规则没覆盖"，实际：${JSON.stringify(c6().details)}`);
+  } finally {
+    fs.writeFileSync(attrPath, original, 'utf8'); // 逐字节还回去
+  }
+  assert.equal(fs.readFileSync(attrPath, 'utf8'), original, '测试必须把 .gitattributes 原样还回去');
+  assert.equal(c6().status, 'pass', '还原后必须恢复全绿');
+  if (before !== '') assert.equal(git(REPO_ROOT, ['status', '--porcelain']), before, '这条用例不得改动仓库的 git 状态');
 });
 
 test('#8 知识准入门：knowledge-source + lfs → 红', () => {

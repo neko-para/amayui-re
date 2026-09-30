@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { gitAttrFilter, gitCheckIgnore, runCapture } from './exec.mjs';
+import { gitAttrs, gitCheckIgnore, gitLsFiles, runCapture } from './exec.mjs';
 import { listFiles, sha256File, statKind, toPosix } from './fsx.mjs';
 import { DEFAULT_MANIFEST } from './paths.mjs';
 
@@ -38,7 +38,20 @@ export const CARRYING = new Set(['lfs', 'git']);
 /** 只登记、不进仓库的 storage */
 export const NOT_CARRYING = new Set(['external-only', 'deferred']);
 
-const REQUIRED_FIELDS = ['id', 'kind', 'role', 'storage', 'origin', 'dest', 'readOnly', 'consume'];
+/**
+ * **自足条目**：`kind=fixture` 的入库件 —— 固化资源（如实录下来的存档 / 截图），
+ * **没有加工链、也没有可再取的上游**：入库的那一份**就是**原件。
+ * ⇒ `origin` 允许缺席（写空数组或省略都一样，见 `originRequired`）。
+ * ★ 反例：`disasm-corpus` 的入库件是从二进制**转写**出来的（有 recipe / derivedFrom），它的 `origin`
+ *   记的是"转写前长什么样"的参照件；那个能力来自"来源 ≠ 入库件"，fixture 天生没有。
+ */
+export const SELF_CONTAINED = (e) => e?.kind === 'fixture' && CARRYING.has(e?.storage);
+
+/** 该条目是否必须登记 `origin`（非空）——"自足条目"豁免 */
+export const originRequired = (e) => !SELF_CONTAINED(e);
+
+/** 每条目必填（与 `origin` 无关的那部分）；`origin` 是**条件必填**，见 `originRequired` */
+const REQUIRED_FIELDS = ['id', 'kind', 'role', 'storage', 'dest', 'readOnly', 'consume'];
 const ENTRY_KEY_ORDER = [
   'id',
   'kind',
@@ -92,7 +105,7 @@ export const CHECK_TITLES = new Map([
   [3, '存在性：dest 与 origin 都能在盘上找到（staging 只 warning；目录型 dest 必须非空）'],
   [4, '校验和纪律：入库件不写 sha256；不入库的文件件必须写且与盘上一致；目录型 dest 的副本必须与来源逐字节相同'],
   [5, '忽略一致性：external-only 且 dest 在仓内 ⇒ 必须被 .gitignore 命中'],
-  [6, 'LFS 一致性：storage=lfs ⇒ dest（含目录型 dest 下的每个文件）filter = lfs'],
+  [6, 'LFS 一致性：storage=lfs ⇒ dest 下**每个已跟踪文件**（含目录型 dest 里的载荷，不靠 origin 枚举）filter = lfs；未跟踪的不算'],
   [7, '语料保真：入库的 disasm-corpus 必须有 recipe 且断言通过（豁免参照件/清单）'],
   [8, '知识准入门：knowledge-source 只能是 external-only/deferred'],
   [9, '真前身可解析：ref 必须存在；入库语料必须指到 kind=binary（豁免参照件/清单）'],
@@ -104,8 +117,8 @@ const ENTRY_FIELD_DOC = [
   ['kind', '✅', `\`${KINDS.join('` \\| `')}\``, '类别'],
   ['role', '✅', `\`${ROLES.join('` \\| `')}\``, '人类语义角色'],
   ['storage', '✅', `\`${STORAGES.join('` \\| `')}\``, '存储去向（也是进度：deferred → lfs）'],
-  ['origin', '✅', '非空数组 {root,path,sha256?}', '来源；root ∈ roots 的键或 abs'],
-  ['derivedFrom', '条件', '[{ref,tool?,note?}]', '真前身；入库的 disasm-corpus 必填且要指到 kind=binary'],
+  ['origin', '条件', '数组 {root,path,sha256?}', '来源；root ∈ roots 的键或 abs。★ **自足条目**（入库的 `kind=fixture`）允许缺席：它的"来源"就是入库的那一份本身，登记它等于把 dest 抄第二遍；其余条目必须非空'],
+  ['derivedFrom', '条件', '[{ref,tool?,note?}]', '真前身（**从**某个件、**用工具**产出的那份）；入库的 disasm-corpus 必填且要指到 kind=binary'],
   ['dest', '✅', 'string \\| null', '入库路径；external-only/deferred ⇒ 必须 null'],
   ['readOnly', '✅', 'boolean', '只读件禁止就地修改'],
   ['recipe', '条件', 'string', '加工 / 转码脚本；入库的 disasm-corpus 必填'],
@@ -231,10 +244,14 @@ export function validateManifest(manifest, opts = {}) {
       if (typeof e?.consume !== 'string' || e.consume.trim() === '') details.push(`${at}: consume 必须是非空字符串`);
       if (!(e?.dest === null || typeof e?.dest === 'string')) details.push(`${at}: dest 必须是 string | null`);
       if (Array.isArray(e?.dest)) details.push(`${at}: dest 必须是 string | null`);
-      if (!Array.isArray(e?.origin) || e.origin.length === 0) {
-        details.push(`${at}: origin 必须是**非空**数组`);
+      // ★ 自足条目（入库的 fixture：固化资源，没有加工链 / 没有可再取的上游）：
+      //   origin 可以**缺席或为空** —— 它的"来源"就是入库的那一份本身。
+      if (e?.origin !== undefined && !Array.isArray(e.origin)) {
+        details.push(`${at}: origin 必须是数组（或对自足条目留空）`);
+      } else if ((e?.origin ?? []).length === 0 && originRequired(e)) {
+        details.push(`${at}: origin 必须是**非空**数组（只有入库的 kind=fixture 可以空）`);
       } else {
-        for (const [j, o] of e.origin.entries()) {
+        for (const [j, o] of (e?.origin ?? []).entries()) {
           const oat = `${at}.origin[${j}]`;
           if (typeof o?.root !== 'string') details.push(`${oat}: root 必须是字符串`);
           else if (!(o.root in roots)) details.push(`${oat}: root "${o.root}" 不在 roots 里`);
@@ -392,6 +409,7 @@ export function validateManifest(manifest, opts = {}) {
   {
     const details = [];
     let checked = 0;
+    const lfsDirs = new Set(); // 目录型 dest 里**真的**核对到 filter=lfs 的那些（用于下面的"规则整块消失"断言）
     if (!useGit) details.push('warn: --no-git：跳过');
     else {
       for (const e of entries) {
@@ -399,20 +417,57 @@ export function validateManifest(manifest, opts = {}) {
         // 同上：dest 不是字符串时交给 #2 报，别在这里崩
         if (typeof e.dest !== 'string' || e.dest === '') continue;
         const destAbs = path.resolve(repoRoot, e.dest);
-        // 目录型 dest：只核对**由 origin 拷进来的那些载荷文件**（README / 侧车这类纯文本本来就不该走 LFS）
-        const targets =
-          statKind(destAbs) === 'dir'
-            ? (e.origin ?? [])
-                .map((o) => path.join(destAbs, path.basename(o.path)))
-                .filter((p) => statKind(p) === 'file')
-                .map((p) => toPosix(path.relative(repoRoot, p)))
-            : [e.dest];
-        for (const t of targets) {
-          checked += 1;
-          const r = gitAttrFilter(repoRoot, t);
-          if (r.error) details.push(`warn: ${e.id}: git 不可用 ⇒ 未执行 LFS 属性检查（${r.error}） → ${t}`);
-          else if (r.value !== 'lfs') details.push(`${e.id}: storage=lfs ⇒ git check-attr filter 必须是 lfs，实际 "${r.value}" → ${t}`);
+        const destKind = statKind(destAbs);
+        // ★ 目录型 dest：枚举**盘上真实存在**的已跟踪文件（不看 origin）。
+        //   为什么不用 origin 枚举：origin 是"来源"，它缺席时（自足条目）会**静默漏检**整片载荷；
+        //   而 `-text` 恰好是"字节不该被 eol 转换"的标记（LFS 规则都带它）⇒ 用 git 自己的属性判，
+        //   不在这里复制一份"哪些扩展名算载荷"的清单（那会与 .gitattributes 漂移）。
+        const tracked =
+          destKind === 'dir'
+            ? (() => {
+                const r = gitLsFiles(repoRoot, toPosix(e.dest));
+                if (r.error) {
+                  details.push(`warn: ${e.id}: git ls-files 跑不起来 ⇒ 未枚举目录内文件（${r.error}） → ${e.dest}`);
+                  return [];
+                }
+                return r.files.filter((f) => statKind(path.resolve(repoRoot, f)) === 'file');
+              })()
+            : [toPosix(e.dest)];
+        if (tracked.length === 0) continue;
+
+        const { attrs, error } = gitAttrs(repoRoot, tracked);
+        if (error) {
+          details.push(`warn: ${e.id}: git check-attr 跑不起来 ⇒ 未执行 LFS 属性检查（${error}）`);
+          continue;
         }
+        for (const t of tracked) {
+          checked += 1;
+          const a = attrs[t] ?? {};
+          if (destKind === 'file') {
+            if ((a.filter ?? 'unspecified') !== 'lfs') {
+              details.push(`${e.id}: storage=lfs ⇒ git check-attr filter 必须是 lfs，实际 "${a.filter ?? 'unspecified'}" → ${t}`);
+            }
+            continue;
+          }
+          // 目录型：**纯文本侧车**（.gitattributes 的 `* text=auto` 给的 `text: auto` / `set`）
+          // 本来就不该走 LFS，放行；其余（`text: unset` = 字节不该被 eol 转换，或已经 filter=lfs）必须走 LFS。
+          // ★ 判据故意**不**抄一份"哪些扩展名算载荷"的清单 —— 那是 .gitattributes 的事，抄过来必然漂。
+          if (a['text'] === 'auto' || a['text'] === 'set') continue;
+          if ((a.filter ?? 'unspecified') === 'lfs') {
+            lfsDirs.add(e.dest);
+            continue;
+          }
+          details.push(`${e.id}: 入库目录里的 ${t} 不是纯文本侧车却没有 filter=lfs ⇒ 它会以普通对象进 git，请补 .gitattributes 规则`);
+        }
+      }
+      // ★ 自足条目（fixture，origin 已按口径清空）没有"来源"可比对 ⇒ 它**只能**靠上面的属性判；
+      //   万一 .gitattributes 的 LFS 规则被整块删掉，所有载荷会一起退化成 `text: auto` 混过去。
+      //   这一条把那个缺口堵上：入库的目录型 dest 至少得有一个真的 filter=lfs 的文件。
+      for (const e of entries) {
+        if (e.storage !== 'lfs' || typeof e.dest !== 'string' || e.dest === '') continue;
+        if (statKind(path.resolve(repoRoot, e.dest)) !== 'dir') continue;
+        if (lfsDirs.has(e.dest)) continue;
+        details.push(`${e.id}: 目录型 dest 里一个 filter=lfs 的文件都没有 ⇒ .gitattributes 的 LFS 规则要么没覆盖、要么已被删掉 → ${e.dest}`);
       }
     }
     const hard = details.filter((d) => !d.startsWith('warn:'));
@@ -508,8 +563,12 @@ export function describe() {
     },
     entry: {
       required: REQUIRED_FIELDS,
+      conditionalRequired: ['origin（除**自足条目**外必填）', 'derivedFrom / recipe（入库的 disasm-corpus 必填）'],
       fields: ENTRY_FIELD_DOC.map(([name, req, type, desc]) => ({ name, req, type, desc })),
       notWritten: ['bytes', '入库件 sha256', 'LFS oid', 'status', 'generatedAt', '任何可从磁盘/git 推导的计数'],
+      selfContained:
+        '入库的 `kind=fixture`（固化资源：没有加工链）**允许 origin 缺席** —— 它的"来源"就是入库的那一份本身；' +
+        '因此"副本 == 来源"的逐字节断言只对**有 origin 的**目录型 dest 生效（fixture 的完整性交给 git/LFS 校验和）。',
     },
     invariants: [...CHECK_TITLES].map(([id, title]) => ({ id, title })),
     operations: OPERATIONS,
@@ -530,6 +589,7 @@ export function describeText(d = describe()) {
   L.push(`* _doc: ${d.topLevel._doc}`);
   L.push(`* roots: 必填 ${d.topLevel.roots.required.join(' / ')} —— ${d.topLevel.roots.note}`);
   L.push(`* entries: ${d.topLevel.entries}`);
+  if (d.entry.conditionalRequired) L.push(`* 条件必填：${d.entry.conditionalRequired.join(' / ')}`);
   L.push('');
   L.push('## entry 字段');
   L.push('| 字段 | 必填 | 类型 / 枚举 | 说明 |');
@@ -537,6 +597,8 @@ export function describeText(d = describe()) {
   for (const f of d.entry.fields) L.push(`| \`${f.name}\` | ${f.req} | ${f.type} | ${f.desc} |`);
   L.push('');
   L.push(`**刻意不写**：${d.entry.notWritten.join('、')}`);
+  L.push('');
+  L.push(`**自足条目**：${d.entry.selfContained}`);
   L.push('');
   L.push('## 不变量（`--validate` 的断言；标题即真源）');
   for (const c of d.invariants) L.push(`${c.id}. ${c.title}`);

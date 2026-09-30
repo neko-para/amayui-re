@@ -66,7 +66,7 @@ pnpm tools corpus validate                  # 跑 9 条不变量（全仓门禁�
 pnpm tools corpus list                      # 素材条目一览（+ --json）
 pnpm tools corpus scan --write              # 补 origin[].sha256（唯一写入口；缺省 dry-run）
 pnpm tools corpus set <id> '<patch-json>' --write   # 改条目（写前内存预验；写后回读复验，不绿回滚）
-pnpm tools fixtures list                    # 存档样本：槽 / 定位 / mtime 漂移 / 来源
+pnpm tools fixtures list                    # 存档样本：槽 / 定位 / 每个文件是否与记录的 instant 一致
 pnpm tools fixtures restore-mtime --write   # 刚 clone：把 mtime 按记录的 instant 拨回去（跨时区也对）
 pnpm tools disasm verify                    # 语料保真断言（原件在就按原件；不在就由 zip 反解 + 清单 sha256 自证）
 pnpm tools disasm build                     # 转写落盘 + 打确定性 zip（需要 .staging/ 里的原件）
@@ -95,4 +95,4 @@ pnpm tools old-repo inventory               # 重测旧仓 → docs/00-origin/ol
   **不写进 `tools/` 的脚本，就不该被反复用第二次**。
 * 这条纪律**立刻兑现过一次**：`corpus/fixtures/samples.json` 起初是用一次性命令生成的，
   结果里面的 `mtimeMs` 整整差了 8 小时（而同一个命令算出的墙上时间是对的，所以没有任何断言发现它）。
-  改成 `fixtures.mjs` 之后第一次 `--refresh-all` 就把这个错纠了出来 —— 因为工具用的是文件系统给的 instant。
+  改成 `fixtures.mjs` 之后第一次重取就把这个错纠了出来 —— 因为工具用的是文件系统给的 instant。
