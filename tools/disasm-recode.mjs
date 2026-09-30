@@ -30,20 +30,21 @@
  *   ⇒ 断言 #8 把这个差异**机械化**：宽串上下文里若出现「CP932 可解」且「UTF-16LE 也像正经文本」的歧义串，
  *     断言直接红，逼人裁决（而不是静默按某一边解）。
  *
- * 用法：
+ * 用法（经派发器：`pnpm tools disasm <verify|build|restore|describe> [args…]`）：
  *   node tools/disasm-recode.mjs --verify [--staging <dir>] [--json]     # 只断言，不落盘（缺省）
- *   node tools/disasm-recode.mjs --build  [--out-dir <dir>] [--zip <path>] # 转写落盘 + 确定性 zip（M1）
+ *   node tools/disasm-recode.mjs --build  [--out-dir <dir>] [--zip <path>] # 转写落盘 + 确定性 zip
  */
-import { deflateRawSync } from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const DEFAULT_STAGING = path.join(REPO_ROOT, '.staging');
-export const DEFAULT_OUT_DIR = path.join(REPO_ROOT, 'corpus', 'disasm', 'files');
-export const DEFAULT_ZIP = path.join(REPO_ROOT, 'corpus', 'disasm', 'disasm-20260930.zip');
+import { decodeCp932Run, decodeGbkLine, encodeBack, revCp932 } from './lib/cp932.mjs';
+import { sha256buf } from './lib/fsx.mjs';
+import { DEFAULT_OUT_DIR, DEFAULT_STAGING, DEFAULT_ZIP, REPO_ROOT } from './lib/paths.mjs';
+import { buildZip, readZip } from './lib/zip.mjs';
+
+export { DEFAULT_OUT_DIR, DEFAULT_STAGING, DEFAULT_ZIP, REPO_ROOT };
 
 /** 入库的 4 个文件（顺序即 zip 内顺序，固定 ⇒ 打包确定） */
 export const FILES = [
@@ -53,201 +54,69 @@ export const FILES = [
   { name: 'AGERC.DLL.lst', derivedFrom: 'binary/agerc-debug-unpacked' },
 ];
 
+/** 工具层的自我声明：**我动哪片数据、有哪些操作**（`tools/cli.mjs` 的域地图从它派生） */
+export const DOMAIN = {
+  id: 'disasm',
+  title: '反汇编语料（4 个 UTF-8 文件，一个 LFS zip）',
+  data: ['corpus/disasm/disasm-*.zip', 'corpus/disasm/files/（gitignore 的解压读区）', '.staging/（投递原件；中转区，可随时丢）'],
+  access: 'r：verify ／ w：build（产出 zip + 解压区）、restore（只写 .staging/）',
+  tool: 'tools/disasm-recode.mjs',
+};
+
+export const OPERATIONS = [
+  { name: 'verify', argv: ['--verify'], mutates: false, summary: '保真断言（原件在就按原件；不在就由 zip 反解 + 清单 sha256 自证）' },
+  { name: 'build', argv: ['--build'], mutates: true, summary: '转写落盘 + 打确定性 zip（需要 .staging/ 里的原件）' },
+  { name: 'restore', argv: ['--restore'], mutates: true, summary: '由 zip 反解回投递原件（默认写回 .staging/）' },
+  { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：数据 / 断言目录 / 操作' },
+];
+
+/** 断言目录（人读的静态列表；运行时逐文件逐条打印的细节不在此） */
+export const ASSERTIONS = [
+  [1, '源文件是干净的 CRLF（LF 数 == CRLF 数，无孤立 CR）'],
+  [2, '行数不变'],
+  [3, 'LF 数不变'],
+  [4, '输出是 LF-only（无任何 CR）'],
+  [5, '★ 逐行反解回字节 == 源字节（最强的一条：没有字符被丢、被换、被合并）'],
+  [6, '纯 ASCII 行原样'],
+  [7, '输出无 U+FFFD'],
+  [8, '编码判别器：CP932 产物含假名、整文件按 GBK 解不含假名'],
+  [9, '★ 宽串守卫：宽串上下文里的高歧义串必须红，不许静默选边'],
+];
+
+/** 自描述（`--describe`）：数据 / 断言目录 / 操作 / 写入口 */
+export function describe() {
+  return {
+    domain: DOMAIN,
+    assertions: ASSERTIONS.map(([id, text]) => ({ id, text, enforcedBy: '本工具的 `--verify`（也由 `pnpm tools corpus validate` 的 #7 触发）' })),
+    operations: OPERATIONS,
+    writePath: '入库件只由 `build` 产出；`verify` 只读；`restore` 只写 `.staging/`（中转区，不是来源）。',
+  };
+}
+
+export function describeText(d = describe()) {
+  const L = [];
+  L.push(`# ${d.domain.id} —— ${d.domain.title}（自描述）`);
+  L.push('');
+  L.push('## 我动哪片数据');
+  for (const x of d.domain.data) L.push(`* ${x}`);
+  L.push(`* 读写：${d.domain.access}`);
+  L.push(`* 工具：\`${d.domain.tool}\``);
+  L.push('');
+  L.push('## 断言目录');
+  for (const a of d.assertions) L.push(`${a.id}. ${a.text}`);
+  L.push('');
+  L.push('## 操作');
+  for (const o of d.operations) L.push(`* \`${o.name}\`${o.mutates ? '（会写）' : ''} —— ${o.summary}　→ \`pnpm tools ${d.domain.id} ${o.name}\``);
+  L.push('');
+  L.push(`写入口：${d.writePath}`);
+  return `${L.join('\n')}\n`;
+}
+
 const FILE_NAME_MARKER = '; File Name   :';
 const WIDE_MARKERS = ['(LPWSTR)', 'dwTypeData', 'text "UTF-16LE"', 'L"'];
 
-// ───────────────────────────────────────────────── CP932 / GBK 解码原语
-
-const CP932 = new TextDecoder('shift_jis', { fatal: true });
-const GBK = new TextDecoder('gbk', { fatal: true });
-
-/**
- * ★ Windows CP932 与 WHATWG `shift_jis` 的**全部**差异（实测对照 Python 的 cp932 表得到，共 8 个单字节）：
- *   · `0x1A/0x1C/0x7F`：WHATWG 会互相重映射（0x7F→U+001A！）—— 必须按 CP932 原样；
- *   · `0x80/0xA0/0xFD/0xFE/0xFF`：WHATWG 直接报错，CP932 有定义（U+0080 / U+F8F0..F8F3）。
- * 双字节部分两种实现**逐字一致**（9604 个已定义 pair 全比过，0 差异）⇒ 双字节交给 WHATWG 表。
- */
-const CP932_SINGLE = new Map([
-  [0x1a, 0x001a],
-  [0x1c, 0x001c],
-  [0x7f, 0x007f],
-  [0x80, 0x0080],
-  [0xa0, 0xf8f0],
-  [0xfd, 0xf8f1],
-  [0xfe, 0xf8f2],
-  [0xff, 0xf8f3],
-]);
-
-const isLead = (b) => (b >= 0x81 && b <= 0x9f) || (b >= 0xe0 && b <= 0xfc);
-const isTrail = (b) => (b >= 0x40 && b <= 0x7e) || (b >= 0x80 && b <= 0xfc);
-
-/** 单字节 CP932 解码（含上述差异修正）；不可解 ⇒ null */
-function cp932Single(b) {
-  if (CP932_SINGLE.has(b)) return String.fromCodePoint(CP932_SINGLE.get(b));
-  if (b < 0x80 || (b >= 0xa1 && b <= 0xdf)) return CP932.decode(Buffer.from([b]));
-  return null;
-}
-
-/** 双字节 CP932 解码；未定义 ⇒ null（如 `86 80` / `EC BD` 这两个在 CP932 里没有映射） */
-function cp932Pair(b0, b1) {
-  try {
-    return CP932.decode(Buffer.from([b0, b1]));
-  } catch {
-    return null;
-  }
-}
-
-/** 单条 CP932 字节串（规则 3）：按字节结构走，解不出的单字节保留原码位 */
-export function decodeCp932Run(buf, stats = {}) {
-  const out = [];
-  let i = 0;
-  while (i < buf.length) {
-    const c = buf[i];
-    if (c < 0x80) {
-      out.push(String.fromCharCode(c));
-      i += 1;
-      continue;
-    }
-    // IDA 的 GBK 箭头字形 A1 F4..FE（CP932 下这两字节不成字）
-    if (c === 0xa1 && i + 1 < buf.length && buf[i + 1] >= 0xf4 && buf[i + 1] <= 0xfe) {
-      try {
-        out.push(GBK.decode(buf.subarray(i, i + 2)));
-        stats.gbkArrows = (stats.gbkArrows ?? 0) + 1;
-        i += 2;
-        continue;
-      } catch {
-        /* 落到下面 */
-      }
-    }
-    // ★ 半角假名 A1..DF 是单字节，永远不是前导字节（旧仓的 bug 就在这里）
-    if (c >= 0xa1 && c <= 0xdf) {
-      const ch = cp932Single(c);
-      if (ch !== null) {
-        out.push(ch);
-        i += 1;
-        continue;
-      }
-    }
-    if (isLead(c) && i + 1 < buf.length && isTrail(buf[i + 1])) {
-      const pair = cp932Pair(c, buf[i + 1]);
-      if (pair !== null) {
-        out.push(pair);
-        i += 2;
-        continue;
-      }
-    }
-    // 单字节保留原码位（IDA 的 `; '\x80'` 字节字面量 ⇒ U+0080）
-    out.push(String.fromCharCode(c));
-    stats.fallback = (stats.fallback ?? 0) + 1;
-    i += 1;
-  }
-  return out.join('');
-}
-
-/** GBK 整行（规则 2）；整行解不出就逐字节退 */
-export function decodeGbkLine(buf, stats = {}) {
-  try {
-    return GBK.decode(buf);
-  } catch {
-    return decodeCp932Run(buf, stats); // 退化成逐字节（与旧脚本同口径）
-  }
-}
-
-// ───────────────────────────────────────────────── 反解（保真的证据）
-
-/** 反向表：文本 → 原字节。用"同一套解码原语"枚举所有可解序列构造，避免依赖任何编码器。 */
-function buildReverse(decodePair, decodeSingle, leads) {
-  const map = new Map();
-  const dups = new Map();
-  const put = (text, bytes) => {
-    if (text.length === 0) return;
-    if (map.has(text)) {
-      if (Buffer.compare(map.get(text), bytes) !== 0) {
-        dups.set(text, (dups.get(text) ?? 1) + 1);
-      }
-      return; // 首个（字典序最小）胜出
-    }
-    map.set(text, bytes);
-  };
-  for (let b = 0; b < 0x100; b += 1) {
-    const ch = decodeSingle(b);
-    if (ch !== null) put(ch, Buffer.from([b]));
-  }
-  for (const b0 of leads) {
-    for (let b1 = 0x40; b1 <= 0xfc; b1 += 1) {
-      if (b1 === 0x7f) continue;
-      if (!isTrail(b1)) continue;
-      const ch = decodePair(b0, b1);
-      if (ch !== null) put(ch, Buffer.from([b0, b1]));
-    }
-  }
-  return { map, dups };
-}
-
-const LEAD_BYTES = [
-  ...Array.from({ length: 0x9f - 0x81 + 1 }, (_, i) => 0x81 + i),
-  ...Array.from({ length: 0xfc - 0xe0 + 1 }, (_, i) => 0xe0 + i),
-];
-
-let REV_CP932 = null;
-let REV_GBK = null;
-
-function revCp932() {
-  if (!REV_CP932) {
-    REV_CP932 = buildReverse(cp932Pair, (b) => cp932Single(b), LEAD_BYTES);
-  }
-  return REV_CP932;
-}
-
-function revGbk() {
-  if (!REV_GBK) {
-    REV_GBK = buildReverse(
-      (b0, b1) => {
-        try {
-          return GBK.decode(Buffer.from([b0, b1]));
-        } catch {
-          return null;
-        }
-      },
-      (b) => {
-        try {
-          return GBK.decode(Buffer.from([b]));
-        } catch {
-          return null;
-        }
-      },
-      [...Array.from({ length: 0xfe - 0x81 + 1 }, (_, i) => 0x81 + i)],
-    );
-  }
-  return REV_GBK;
-}
-
-/**
- * 反解：把转写后的文本还原成源字节。
- * 落点规则与解码一一对应：能查到表就用表；查不到且码位 < 0x100 ⇒ 就是那个"保留原码位"的字节。
- * @returns {Buffer|null} null = 有字符无法还原（说明解码不可逆 ⇒ 断言该红）
- */
-export function encodeBack(text, { gbk = false } = {}) {
-  const rev = gbk ? revGbk() : revCp932();
-  // 预分配（CP932/GBK 每字符最多 2 字节；码位 < 0x100 的"保留原码位"字符是 1 字节）
-  const out = Buffer.allocUnsafe(text.length * 2 + 8);
-  let n = 0;
-  for (const ch of text) {
-    const hit = rev.map.get(ch);
-    if (hit !== undefined) {
-      for (let k = 0; k < hit.length; k += 1) out[n++] = hit[k];
-      continue;
-    }
-    const cp = ch.codePointAt(0);
-    if (cp < 0x100) {
-      out[n++] = cp;
-      continue;
-    }
-    return null;
-  }
-  return out.subarray(0, n);
-}
-
+// ───────────────────────────────────────────────── CP932 / GBK 编解码（纯工具在 lib/cp932.mjs）
+// ★ 纯工具在 lib/cp932.mjs（不认识任何语料规则）；本文件只决定**哪一行该怎么解**。
 // ───────────────────────────────────────────────── 逐行转写
 
 /**
@@ -424,110 +293,121 @@ export function checkFile(srcAbs) {
   };
 }
 
-export function verifyAll(stagingDir = DEFAULT_STAGING) {
-  const results = FILES.map((f) => {
-    const abs = path.join(stagingDir, f.name);
-    if (!fs.existsSync(abs)) {
-      return { name: f.name, ok: false, checks: [{ label: '源文件存在', ok: false, detail: `找不到 → ${abs}` }], stats: null };
-    }
-    return checkFile(abs);
+export function verifyAll(stagingDir = DEFAULT_STAGING, { zip = DEFAULT_ZIP } = {}) {
+  // ── 模式 A：投递原件还在 `.staging/` ⇒ 拿**原件**当基准跑全部断言，
+  //           并额外用清单里记录的 sha256 给"原件本身"上锚（否则只能证明"转写无损"，
+  //           证明不了"这份原件还是当初那一份"）。 ──
+  if (FILES.every((f) => fs.existsSync(path.join(stagingDir, f.name)))) {
+    const expected = expectedOriginHashes();
+    const results = FILES.map((f) => {
+      const abs = path.join(stagingDir, f.name);
+      const r = checkFile(abs);
+      const act = sha256buf(fs.readFileSync(abs));
+      const exp = expected.get(f.name);
+      const ok = exp !== undefined && exp === act;
+      r.checks.push({
+        label: '投递原件 sha256 == 清单里记录的原件（真实性锚）',
+        ok,
+        detail: exp === undefined ? '清单里没有该件的 sha256' : `${act.slice(0, 12)}… vs 清单 ${exp.slice(0, 12)}…`,
+      });
+      r.ok = r.ok && ok;
+      return r;
+    });
+    return { mode: 'staging', stagingDir, results, ok: results.every((r) => r.ok) };
+  }
+
+  // ── 模式 B：原件已不在（`.staging/` 是用完即弃的中转区，fresh clone 本来就没有）
+  //           ⇒ 由 zip **反解回原件**，并用清单里记录的**原件 sha256** 自证。
+  //           这不是"放宽"：反解是逐字节的（断言 #5 的同一个原语），比对的是外部锚（清单里的 sha256）。
+  if (!fs.existsSync(zip)) {
+    const results = FILES.map((f) => ({
+      name: f.name,
+      ok: false,
+      checks: [
+        {
+          label: '投递原件或 zip 至少有一个可用',
+          ok: false,
+          detail: `既没有 ${stagingDir} 下的原件，也没有 ${zip} ⇒ 无法证明任何保真性质`,
+        },
+      ],
+      stats: null,
+    }));
+    return { mode: 'missing', results, ok: false };
+  }
+
+  const expected = expectedOriginHashes();
+  const restored = restoreOriginals(zip);
+  const results = restored.map((r) => {
+    const exp = expected.get(r.name);
+    const act = sha256buf(r.bytes);
+    const ok = exp !== undefined && exp === act;
+    return {
+      name: r.name,
+      ok,
+      checks: [
+        {
+          label: '原件已不在 ⇒ 由 zip 反解，sha256 必须等于清单里记录的原件（fixtures/raw-source-* 口径）',
+          ok,
+          detail: exp === undefined ? '清单里没有该文件的原件 sha256' : `反解 ${act.slice(0, 12)}… / 清单 ${exp.slice(0, 12)}…`,
+        },
+      ],
+      stats: { bytes: r.bytes.length, restoredFromZip: true, expectedSha256: exp ?? null, actualSha256: act },
+    };
   });
-  return { results, ok: results.every((r) => r.ok) };
+  return { mode: 'restored', zip, results, ok: results.every((r) => r.ok) };
 }
 
-// ───────────────────────────────────────────────── zip（无依赖、确定性）
+// ───────────────────────────────────────────────── 从 zip 反解回原件
+// ★ zip 纯工具（读写、确定性）在 lib/zip.mjs；编解码在 lib/cp932.mjs。
 
-const CRC_TABLE = (() => {
-  const t = new Int32Array(256);
-  for (let n = 0; n < 256; n += 1) {
-    let c = n;
-    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c;
-  }
-  return t;
-})();
-
-export function crc32(buf) {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i += 1) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
+/** 把 zip 里的 4 个 UTF-8 文件反解回**逐字节相同**的原件（CRLF 也一并还原） */
+export function restoreOriginals(zipPath = DEFAULT_ZIP) {
+  const zip = readZip(fs.readFileSync(zipPath));
+  const CRLF = Buffer.from('\r\n');
+  return FILES.map((f) => {
+    const data = zip.get(f.name);
+    if (data === undefined) throw new Error(`zip 里没有 ${f.name}`);
+    const chunks = [];
+    data
+      .toString('utf8')
+      .split('\n')
+      .forEach((ln, i) => {
+        if (i > 0) chunks.push(CRLF);
+        const back = encodeBack(ln, { gbk: ln.includes(FILE_NAME_MARKER) });
+        if (back === null) throw new Error(`${f.name}: 有字符无法反解回字节（第 ${i + 1} 行）`);
+        chunks.push(back);
+      });
+    return { name: f.name, bytes: Buffer.concat(chunks) };
+  });
 }
 
-const ZIP_DOS_DATE = ((2026 - 1980) << 9) | (9 << 5) | 30; // 2026-09-30
-const ZIP_DOS_TIME = 0;
-
-/** 最小 ZIP 写入器：deflate + 固定时间戳 + 无 extra ⇒ 同输入同字节 */
-export function buildZip(entries) {
-  const locals = [];
-  const centrals = [];
-  let offset = 0;
-  for (const e of entries) {
-    const nameBuf = Buffer.from(e.name, 'utf8');
-    const crc = crc32(e.data);
-    const comp = deflateRawSync(e.data, { level: 9 });
-    const useDeflate = comp.length < e.data.length;
-    const payload = useDeflate ? comp : e.data;
-    const method = useDeflate ? 8 : 0;
-
-    const local = Buffer.alloc(30 + nameBuf.length);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0x0800, 6);
-    local.writeUInt16LE(method, 8);
-    local.writeUInt16LE(ZIP_DOS_TIME, 10);
-    local.writeUInt16LE(ZIP_DOS_DATE, 12);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(payload.length, 18);
-    local.writeUInt32LE(e.data.length, 22);
-    local.writeUInt16LE(nameBuf.length, 26);
-    local.writeUInt16LE(0, 28);
-    nameBuf.copy(local, 30);
-    locals.push(local, payload);
-
-    const central = Buffer.alloc(46 + nameBuf.length);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0x0800, 8);
-    central.writeUInt16LE(method, 10);
-    central.writeUInt16LE(ZIP_DOS_TIME, 12);
-    central.writeUInt16LE(ZIP_DOS_DATE, 14);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(payload.length, 20);
-    central.writeUInt32LE(e.data.length, 24);
-    central.writeUInt16LE(nameBuf.length, 28);
-    central.writeUInt16LE(0, 30);
-    central.writeUInt16LE(0, 32);
-    central.writeUInt16LE(0, 34);
-    central.writeUInt16LE(0, 36);
-    central.writeUInt32LE(0o644 << 16, 38);
-    central.writeUInt32LE(offset, 42);
-    nameBuf.copy(central, 46);
-    centrals.push(central);
-
-    offset += local.length + payload.length;
+/**
+ * 清单里登记的"**投递原件** sha256"（按文件名索引）。
+ * ★ 只取 `root === 'staging'` 的 origin：同名文件在别的条目里也存在
+ *   （旧仓 `engine/AGERC.DLL.c` vs 本次投递的 `AGERC.DLL.c`），不加限定就会张冠李戴（实测踩过）。
+ */
+export function expectedOriginHashes(manifestPath = path.join(REPO_ROOT, 'corpus', 'assets.json')) {
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const map = new Map();
+  for (const e of manifest.entries ?? []) {
+    for (const o of e.origin ?? []) {
+      if (o.root !== 'staging') continue;
+      if (typeof o.sha256 === 'string') map.set(path.basename(o.path), o.sha256);
+    }
   }
-  const centralBuf = Buffer.concat(centrals);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(0, 4);
-  eocd.writeUInt16LE(0, 6);
-  eocd.writeUInt16LE(entries.length, 8);
-  eocd.writeUInt16LE(entries.length, 10);
-  eocd.writeUInt32LE(centralBuf.length, 12);
-  eocd.writeUInt32LE(offset, 16);
-  eocd.writeUInt16LE(0, 20);
-  return Buffer.concat([...locals, centralBuf, eocd]);
+  return map;
 }
 
 // ───────────────────────────────────────────────── CLI
 
 function parseArgs(argv) {
-  const out = { action: 'verify', staging: DEFAULT_STAGING, outDir: DEFAULT_OUT_DIR, zip: DEFAULT_ZIP, json: false };
+  const out = { action: 'verify', staging: DEFAULT_STAGING, outDir: null, zip: DEFAULT_ZIP, json: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--verify') out.action = 'verify';
     else if (a === '--build') out.action = 'build';
+    else if (a === '--restore') out.action = 'restore';
+    else if (a === '--describe') out.action = 'describe';
     else if (a === '--staging') out.staging = path.resolve(argv[++i]);
     else if (a === '--out-dir') out.outDir = path.resolve(argv[++i]);
     else if (a === '--zip') out.zip = path.resolve(argv[++i]);
@@ -537,17 +417,24 @@ function parseArgs(argv) {
   return out;
 }
 
+const MODE_LINE = {
+  staging: '基准：`.staging/` 里的**投递原件**（拿原件跑全部断言）',
+  restored: '基准：原件已不在 ⇒ 由 **zip 反解**回原件，并用清单里记录的 sha256 自证',
+  missing: '基准：**既没有原件也没有 zip** ⇒ 无法证明任何保真性质',
+};
+
 function printVerify(report, json) {
   if (json) {
     process.stdout.write(
       `${JSON.stringify(
         {
           ok: report.ok,
+          mode: report.mode,
           results: report.results.map((r) => ({
             name: r.name,
             ok: r.ok,
             checks: r.checks,
-            stats: r.stats ? { ...r.stats, literals: r.stats.literals.length } : null,
+            stats: r.stats ? { ...r.stats, literals: r.stats.literals?.length } : null,
           })),
         },
         null,
@@ -556,25 +443,32 @@ function printVerify(report, json) {
     );
     return;
   }
+  process.stdout.write(`${MODE_LINE[report.mode] ?? ''}\n`);
   for (const r of report.results) {
     process.stdout.write(`${r.ok ? '[ok  ]' : '[FAIL]'} ${r.name}\n`);
     for (const c of r.checks) {
       process.stdout.write(`        ${c.ok ? 'ok  ' : 'FAIL'} ${c.label}${c.detail ? `  (${c.detail})` : ''}\n`);
     }
-    if (r.stats) {
+    if (r.stats && r.stats.literals) {
       const s = r.stats;
       process.stdout.write(
         `        · 统计：${s.lines} 行（非 ASCII ${s.nonAsciiLines}）/ GBK 行 ${s.gbkLines} / GBK 箭头 ${s.gbkArrows} / 保留原码位 ${s.fallbackChars} / 宽串上下文串 ${s.wideRuns} / '::' ${s.colonColon} / 'this' ${s.thisWord} / 字面量 ${s.literals.length}\n`,
       );
+    } else if (r.stats && r.stats.restoredFromZip) {
+      process.stdout.write(`        · 反解得到 ${r.stats.bytes} B\n`);
     }
   }
-  process.stdout.write(`\n${report.results.filter((r) => r.ok).length}/${report.results.length} 个文件通过全部断言\n`);
+  process.stdout.write(`\n${report.results.filter((r) => r.ok).length}/${report.results.length} 个文件通过\n`);
 }
 
 const HELP = `tools/disasm-recode.mjs — 反汇编语料的无损转写与保真断言（规则沿用旧仓 agerc-module.md §4）
 
-  node tools/disasm-recode.mjs --verify [--staging <dir>] [--json]
-  node tools/disasm-recode.mjs --build  [--out-dir <dir>] [--zip <path>]
+  node tools/disasm-recode.mjs --verify  [--staging <dir>] [--json]   # 断言（缺省）
+  node tools/disasm-recode.mjs --build   [--out-dir <dir>] [--zip <path>]  # 转写落盘 + 确定性 zip
+  node tools/disasm-recode.mjs --restore [--out-dir <dir>] [--zip <path>]  # 由 zip 反解回投递原件
+  node tools/disasm-recode.mjs --describe [--json]                    # 自描述：数据 / 断言 / 操作
+
+（经派发器：pnpm tools disasm <verify|build|restore|describe> [args]）
 `;
 
 export function main(argv = process.argv.slice(2)) {
@@ -583,25 +477,55 @@ export function main(argv = process.argv.slice(2)) {
     process.stdout.write(HELP);
     return 0;
   }
-  const report = verifyAll(args.staging);
+  if (args.action === 'describe') {
+    process.stdout.write(args.json ? `${JSON.stringify(describe(), null, 2)}\n` : describeText());
+    return 0;
+  }
+
+  if (args.action === 'restore') {
+    const dir = args.outDir ?? DEFAULT_STAGING;
+    const expected = expectedOriginHashes();
+    let bad = 0;
+    for (const r of restoreOriginals(args.zip)) {
+      const act = sha256buf(r.bytes);
+      const exp = expected.get(r.name);
+      const ok = exp !== undefined && exp === act;
+      if (!ok) bad += 1;
+      const dst = path.join(dir, r.name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(dst, r.bytes);
+      process.stdout.write(`${ok ? 'ok  ' : 'FAIL'} ${path.relative(REPO_ROOT, dst)}  (${r.bytes.length} B)  ${act.slice(0, 16)}…${exp ? ` vs 清单 ${exp.slice(0, 16)}…` : ' 清单里没有该件的 sha256'}\n`);
+    }
+    return bad === 0 ? 0 : 1;
+  }
+
+  const report = verifyAll(args.staging, { zip: args.zip });
   if (args.action === 'verify') {
     printVerify(report, args.json);
     return report.ok ? 0 : 1;
+  }
+  if (args.action === 'build' && report.mode !== 'staging') {
+    printVerify(report, false);
+    process.stderr.write(
+      '\n--build 需要 `.staging/` 里的**投递原件**（不接受"由 zip 反解再打一次 zip"）。先用 `--restore` 把原件还原回 .staging/。\n',
+    );
+    return 1;
   }
   if (!report.ok) {
     printVerify(report, false);
     process.stderr.write('\n保真断言未通过 ⇒ 拒绝产出任何工件（入库件必须是忠实的）。\n');
     return 1;
   }
-  fs.mkdirSync(args.outDir, { recursive: true });
+  const outDir = args.outDir ?? DEFAULT_OUT_DIR;
+  fs.mkdirSync(outDir, { recursive: true });
   const entries = [];
   for (const r of report.results) {
     const src = fs.readFileSync(path.join(args.staging, r.name));
     const { text } = transcode(src);
     const data = Buffer.from(text, 'utf8');
-    fs.writeFileSync(path.join(args.outDir, r.name), data);
+    fs.writeFileSync(path.join(outDir, r.name), data);
     entries.push({ name: r.name, data });
-    process.stdout.write(`写出 ${path.relative(REPO_ROOT, path.join(args.outDir, r.name))}  (${data.length} B)\n`);
+    process.stdout.write(`写出 ${path.relative(REPO_ROOT, path.join(outDir, r.name))}  (${data.length} B)\n`);
   }
   const zipBuf = buildZip(entries);
   fs.mkdirSync(path.dirname(args.zip), { recursive: true });

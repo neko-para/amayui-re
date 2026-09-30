@@ -16,11 +16,13 @@ import path from 'node:path';
 
 import {
   DEFAULT_MANIFEST,
-  REPO_ROOT,
   canonicalStringify,
-  gitAttrFilter,
+  loadManifest,
+  saveManifest,
   validateManifest,
-} from '../corpus.mjs';
+} from '../lib/manifest.mjs';
+import { gitAttrFilter } from '../lib/exec.mjs';
+import { REPO_ROOT } from '../lib/paths.mjs';
 
 const CORPUS_MJS = path.join(REPO_ROOT, 'tools', 'corpus.mjs');
 const HEX64 = 'a'.repeat(64);
@@ -106,10 +108,14 @@ test('#2 自洽：deferred 却给了 dest → 红', () => {
   assert.ok(failIds(check(root, [validEntry({ storage: 'deferred', dest: 'corpus/x' })])).includes(2));
 });
 
-test('#2 自洽：lfs 却没有 dest → 红', () => {
+test('#2 自洽：lfs 却没有 dest → 红（★ 守卫不得崩：dest=null 时不许走到 path.resolve）', () => {
   const root = makeRepo();
   const e = validEntry({ storage: 'lfs', dest: null, origin: [{ root: 'oldRepo', path: 'sub/x.c' }] });
-  assert.ok(failIds(check(root, [e])).includes(2));
+  let report;
+  assert.doesNotThrow(() => {
+    report = check(root, [e]);
+  }, 'dest 为 null 时必须报 #2 违规，而不是抛 "paths[1] must be of type string"');
+  assert.ok(failIds(report).includes(2));
 });
 
 test('#3 存在性：dest 不在盘上 → 红', () => {
@@ -148,6 +154,36 @@ test('#4 校验和：入库件写了 sha256 → 红', () => {
     origin: [{ root: 'oldRepo', path: 'sub/x.c', sha256: HEX64 }],
   });
   assert.ok(failIds(check(root, [e])).includes(4));
+});
+
+test('#3 存在性：目录型 dest 为空 → 红', () => {
+  const root = makeRepo();
+  fs.mkdirSync(path.join(root, 'corpus', 'fx'), { recursive: true });
+  const e = validEntry({ storage: 'lfs', dest: 'corpus/fx', origin: [{ root: 'oldRepo', path: 'sub/x.c' }] });
+  assert.ok(failIds(check(root, [e])).includes(3));
+});
+
+test('#4 校验和：目录型 dest 里缺来源文件 → 红', () => {
+  const root = makeRepo();
+  const d = path.join(root, 'corpus', 'fx');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'other.bin'), 'x');
+  const e = validEntry({ storage: 'lfs', dest: 'corpus/fx', origin: [{ root: 'oldRepo', path: 'sub/x.c' }] });
+  assert.ok(failIds(check(root, [e])).includes(4));
+});
+
+test('#4 校验和：目录型 dest 的副本必须与来源逐字节相同（篡改 ⇒ 红，拷回 ⇒ 绿）', () => {
+  const root = makeRepo();
+  const d = path.join(root, 'corpus', 'fx');
+  fs.mkdirSync(d, { recursive: true });
+  const e = validEntry({ storage: 'lfs', dest: 'corpus/fx', origin: [{ root: 'oldRepo', path: 'sub/x.c' }] });
+  const opts = { repoRoot: root, runGit: false, checkHashes: true, runRecipe: false };
+
+  fs.writeFileSync(path.join(d, 'x.c'), 'TAMPERED\n');
+  assert.ok(failIds(validateManifest(makeManifest(root, [e]), opts)).includes(4));
+
+  fs.copyFileSync(path.join(root, 'old', 'sub', 'x.c'), path.join(d, 'x.c'));
+  assert.deepEqual(failIds(validateManifest(makeManifest(root, [e]), opts)), []);
 });
 
 test('#4 校验和：sha256 与盘上不符 → 红（这一条才是"没被改过"的证据）', () => {
@@ -245,42 +281,37 @@ test('canonicalStringify：同输入 ⇒ 同字节，且键序固定', () => {
 });
 
 // ─────────────────────────────────────────── 端到端
+//
+// ★ 这些用例**刻意不捕获子进程输出**（`stdio: 'pipe'`）：在受限沙箱里捕获输出要开命名管道 ⇒ `spawn EPERM`。
+//   能直接调的就直接调（同一条代码路径，还更快）；要覆盖 CLI 外壳时用 `stdio: 'ignore'` + 退出码。
 
-test('端到端：真实 corpus/assets.json 过 --validate（退出码 0）', () => {
+test('端到端：真实 corpus/assets.json 过全部断言（含 git 检查、哈希复核、真跑 recipe）', () => {
   assert.ok(fs.existsSync(DEFAULT_MANIFEST), 'corpus/assets.json 必须存在');
-  const out = execFileSync(process.execPath, [CORPUS_MJS, '--validate', '--json'], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-  });
-  const report = JSON.parse(out);
+  const report = validateManifest(loadManifest(DEFAULT_MANIFEST), { repoRoot: REPO_ROOT });
   const bad = report.checks.filter((c) => c.status === 'fail').map((c) => `#${c.id} ${c.title}：${c.message}`);
   assert.deepEqual(bad, [], `守卫必须全绿，实际：\n${bad.join('\n')}`);
   assert.equal(report.failures, 0);
 });
 
-test('端到端：--list 能列出全部条目', () => {
-  const out = execFileSync(process.execPath, [CORPUS_MJS, '--list', '--json'], { cwd: REPO_ROOT, encoding: 'utf8' });
-  const rows = JSON.parse(out);
-  assert.ok(Array.isArray(rows) && rows.length > 10);
-  assert.ok(rows.every((r) => typeof r.id === 'string' && r.id.includes('/')));
+test('端到端：CLI `--validate` 退出码 0（外壳与退出码，不捕获输出）', () => {
+  assert.doesNotThrow(() => {
+    execFileSync(process.execPath, [CORPUS_MJS, '--validate'], { cwd: REPO_ROOT, stdio: 'ignore' });
+  }, 'pnpm tools corpus validate 必须退出 0');
 });
 
-test('端到端：写入非法状态会被回滚（清单不是"写什么是什么"）', () => {
+test('端到端：写入非法状态会被拒绝（清单不是"写什么是什么"）', () => {
   const root = makeRepo();
   const tmpManifest = path.join(root, 'assets.json');
   const original = fs.readFileSync(DEFAULT_MANIFEST, 'utf8');
   fs.writeFileSync(tmpManifest, original);
 
-  let failed = false;
-  try {
-    execFileSync(
-      process.execPath,
-      [CORPUS_MJS, '--manifest', tmpManifest, '--set', 'disasm/bundle', '{"storage":"lfs"}', '--write'],
-      { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    );
-  } catch {
-    failed = true;
-  }
-  assert.ok(failed, '把 deferred 的 bundle 直接改成 lfs（dest 仍是 null）必须被守卫拒绝');
-  assert.equal(fs.readFileSync(tmpManifest, 'utf8'), original, '回滚后清单必须与原文逐字节相同');
+  // ★ 这个 patch 在任何现有状态下都非法（lfs 必须有 dest）⇒ 与清单当前状态无关
+  const manifest = loadManifest(DEFAULT_MANIFEST);
+  const patched = {
+    ...manifest,
+    entries: manifest.entries.map((e) => (e.id === 'disasm/bundle' ? { ...e, storage: 'lfs', dest: null } : e)),
+  };
+  const res = saveManifest(patched, tmpManifest, { repoRoot: REPO_ROOT, runGit: false, checkHashes: false, runRecipe: false });
+  assert.equal(res.ok, false, 'lfs 却没有 dest 必须被拒绝');
+  assert.equal(fs.readFileSync(tmpManifest, 'utf8'), original, '被拒后清单必须与原文逐字节相同');
 });

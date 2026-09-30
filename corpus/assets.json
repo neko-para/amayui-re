@@ -1,36 +1,237 @@
 {
   "schemaVersion": 1,
+  "_doc": "本文件是**不透明数据**：字段语义 / 枚举 / 不变量 / 怎么查怎么改 见 `pnpm tools corpus describe`（说明书 corpus/assets.md）。不要手改。",
   "roots": {
     "oldRepo": "E:\\Games\\Eushully\\天結",
     "gameInstall": "E:\\Games\\Eushully\\天結いキャッスルマイスター",
-    "staging": ".staging"
+    "staging": ".staging",
+    "gameSaves": "C:\\Users\\liaoh\\AppData\\Local\\Eushully\\天結いキャッスルマイスター\\SAVE"
   },
   "entries": [
+    {
+      "id": "agent/plugins",
+      "kind": "agent-infra",
+      "role": "rebuild",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "plugins/"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "重写参考，不迁移：DSH 插件位置自由、靠软链接重新注册（确切命令待 M6 补进 AGENTS.md）",
+      "blocks": [
+        "M6"
+      ]
+    },
+    {
+      "id": "agent/skills",
+      "kind": "agent-infra",
+      "role": "rebuild",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": ".agents/skills/"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "重写参考，不迁移：技能几乎都要重新适配；新的必须落在固定的 .agents/skills/（DSH 发现路径）",
+      "blocks": [
+        "M6"
+      ]
+    },
+    {
+      "id": "app/emulator-old",
+      "kind": "tooling",
+      "role": "rebuild",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "app/amayui-emulator/"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "重写参考，不迁移（用户口径：apps 全部按新结构重写）；10 个跨域守卫寄生在其 test/ 下，重写时拆回各域",
+      "blocks": [
+        "M4"
+      ]
+    },
+    {
+      "id": "app/inspector-old",
+      "kind": "tooling",
+      "role": "rebuild",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "app/amayui-inspector/"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "重写参考，不迁移（.NET 10 / C# / WPF / CLI / Core）",
+      "blocks": [
+        "M7"
+      ]
+    },
+    {
+      "id": "app/wiki-archived",
+      "kind": "asset",
+      "role": "archived",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "app/amayui-toolkit/"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记：wiki（Vite+React+MUI，GitHub Pages）—— 不迁移，archive 在旧仓"
+    },
+    {
+      "id": "assets/fonts",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记：CN/JP 合并字体（旧仓走 LFS）"
+    },
+    {
+      "id": "assets/ui-images",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/images/"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记：UI 图片（旧仓走 LFS）",
+      "note": "落点待定（corpus/ 还是 packages/age-format 的测试夹具）"
+    },
+    {
+      "id": "binary/age-original",
+      "kind": "binary",
+      "role": "deferred",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "gameInstall",
+          "path": "AGE.EXE__dumped.EXE",
+          "sha256": "412393ff8df29644da380c3718d97920c9ef7c1a7c28d4bf1d99218f37e4ebc3"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记：PE 节表未还原，直接分析会丢数据段；本轮与 M1 都不入仓",
+      "note": "MD5 见 docs/02-engine/README.md（哈希是派生信息，不重复写进清单）"
+    },
+    {
+      "id": "binary/age-sectfix",
+      "kind": "binary",
+      "role": "deferred",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "raw-parts/AGE.EXE__dumped.sectfix.EXE",
+          "sha256": "1937f08628efcebbf4cdcf8fbb0c066a83b4c579cd9925ca7b441de343d3b134"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记：这是反汇编语料的真前身（新基线二进制）；本轮与 M1 都不入仓",
+      "note": "与原文件仅节表 24 字节不同；节表修补口径见 docs/02-engine/README.md"
+    },
+    {
+      "id": "binary/agerc-debug-unpacked",
+      "kind": "binary",
+      "role": "deferred",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "raw-parts/DATA1/AGERC.DLL",
+          "sha256": "f48d1c0fc09b486b003ebd829cf13c9970291a6eaeab13c6d7d0e68e61a297f4"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记：不带壳的调试版（有调试入口）⇒ 当前 AGERC 语料的真前身",
+      "note": "AGERC.DLL.c/.lst 就是从它导出的"
+    },
+    {
+      "id": "binary/agerc-modified-install",
+      "kind": "binary",
+      "role": "deferred",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "install/AGERC.DLL",
+          "sha256": "6241de666d2f533b66bd48ccd09fa5277acec6473bf099c7b81b0b2c113f977a"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记：文案被纯二进制替换过 ⇒ 不能作为语料来源（旧仓那两对 AGERC 语料就是它的导出）",
+      "note": "留档是为了解释 disasm/superseded-agerc-oldsrc 为什么作废"
+    },
+    {
+      "id": "binary/agerc-packed",
+      "kind": "binary",
+      "role": "deferred",
+      "storage": "deferred",
+      "origin": [
+        {
+          "root": "gameInstall",
+          "path": "AGERC.DLL",
+          "sha256": "5f318955f605818965e58d0da2bf9a2a4cef7770758d17e98600ef269035604b"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记：带壳发布版；旧仓 raw/ 是指向同一目录的符号链接",
+      "note": "反汇编不用它（带壳）"
+    },
     {
       "id": "disasm/bundle",
       "kind": "disasm-corpus",
       "role": "baseline",
-      "storage": "deferred",
+      "storage": "lfs",
       "origin": [
         {
           "root": "staging",
-          "path": "AGE.EXE__dumped.sectfix.EXE.c",
-          "sha256": "75ba5371aca6fe7f86b6ed217f06d53069f4f4dd653e5300b7fc8a4a2c97bd9e"
+          "path": "AGE.EXE__dumped.sectfix.EXE.c"
         },
         {
           "root": "staging",
-          "path": "AGE.EXE__dumped.sectfix.EXE.lst",
-          "sha256": "931c576f73bd33b955dbf35e6979a03ecfd98ef21c98350db35c669632da1352"
+          "path": "AGE.EXE__dumped.sectfix.EXE.lst"
         },
         {
           "root": "staging",
-          "path": "AGERC.DLL.c",
-          "sha256": "f213ac2e041b813f1f7ead1c1266435ab50ae9d98d4ebe398d65cb2ab5920aad"
+          "path": "AGERC.DLL.c"
         },
         {
           "root": "staging",
-          "path": "AGERC.DLL.lst",
-          "sha256": "f70bf5589692988987ae138a51a43c51f83056e22bbff4bdeca3cc791e495e71"
+          "path": "AGERC.DLL.lst"
         }
       ],
       "derivedFrom": [
@@ -45,114 +246,14 @@
           "note": "AGERC .c/.lst 的导出源（脱壳调试版；不是被改过文案的 install/AGERC.DLL）"
         }
       ],
-      "dest": null,
+      "dest": "corpus/disasm/disasm-20260930.zip",
       "readOnly": true,
       "recipe": "tools/disasm-recode.mjs",
       "consume": "只读归档：解压到 corpus/disasm/files/ 后由 agent 直接读；锚点锚二进制 EA，语料只提供 EA→行号映射；禁止任何符号改写",
       "blocks": [
         "M1"
       ],
-      "note": "M1：跑 `pnpm recode -- --build` 产出 corpus/disasm/disasm-20260930.zip（4 个 UTF-8 文件），然后 `pnpm corpus -- --set disasm/bundle '{\"storage\":\"lfs\",\"dest\":\"corpus/disasm/disasm-20260930.zip\"}' --write` 翻牌"
-    },
-    {
-      "id": "disasm/raw-source-sectfix",
-      "kind": "disasm-corpus",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "staging",
-          "path": "AGE.EXE__dumped.sectfix.EXE.c",
-          "sha256": "75ba5371aca6fe7f86b6ed217f06d53069f4f4dd653e5300b7fc8a4a2c97bd9e"
-        },
-        {
-          "root": "staging",
-          "path": "AGE.EXE__dumped.sectfix.EXE.lst",
-          "sha256": "931c576f73bd33b955dbf35e6979a03ecfd98ef21c98350db35c669632da1352"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "binary/age-sectfix",
-          "tool": "Hex-Rays"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "转码前的忠实参照（CP932 + 全 CRLF）：只用来复核「没被改过」，不参与构建",
-      "blocks": [
-        "M1"
-      ],
-      "note": "投递原件只在 .staging/ 过一手、不入库；这里记 sha256 就是为了让「逐行全等」可复核"
-    },
-    {
-      "id": "disasm/raw-source-agerc",
-      "kind": "disasm-corpus",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "staging",
-          "path": "AGERC.DLL.c",
-          "sha256": "f213ac2e041b813f1f7ead1c1266435ab50ae9d98d4ebe398d65cb2ab5920aad"
-        },
-        {
-          "root": "staging",
-          "path": "AGERC.DLL.lst",
-          "sha256": "f70bf5589692988987ae138a51a43c51f83056e22bbff4bdeca3cc791e495e71"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "binary/agerc-debug-unpacked",
-          "tool": "Hex-Rays"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "转码前的忠实参照（CP932 + 全 CRLF，单一编码、无 U+FFFD）：只用来复核「没被改过」，不参与构建",
-      "blocks": [
-        "M1"
-      ],
-      "note": "与旧仓 engine/AGERC.DLL.{c,lst} 不同：那份是混编（CP932 + GBK 文件名行 + UTF-16LE 宽字符串），裸按 CP932 解码会掉字符"
-    },
-    {
-      "id": "disasm/superseded-agerc-oldsrc",
-      "kind": "disasm-corpus",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "engine/AGERC.DLL.c",
-          "sha256": "911de2f79d47506de5871d2be8d4840919d5b7737d653020f4bdef27858875f9"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/AGERC.DLL.lst",
-          "sha256": "0438570f02d998a96803002343b0aa057d8604fcade7678ec1528b77e4b357a6"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/AGERC.DLL_utf8.c",
-          "sha256": "96f895056bdbd39e5689f695ce7c8d4ba58f6182663c493e4e9daf0b662292da"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/AGERC.DLL_utf8.lst",
-          "sha256": "d1314be663d5c459049ed44acff831264298a31ab0ee8ec85991aa6c7a8a4b48"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "binary/agerc-modified-install",
-          "tool": "Hex-Rays"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "禁止引用：反汇编目标是被改过文案的 install/AGERC.DLL，已被基于脱壳调试版的新导出取代",
-      "note": "留档只为解释「为什么旧结论会不对」；新语料见 disasm/raw-source-agerc 与 disasm/bundle"
+      "note": "M1 已完成：4 个文件（sectfix 两个 + AGERC 两个，均 UTF-8+LF）已打成 zip 入库（LFS）。原件在 .staging/ 时按原件跑断言；原件不在时由 zip 反解回原件并用本清单记录的 sha256 自证（pnpm tools disasm restore 可把原件还原）"
     },
     {
       "id": "disasm/excluded",
@@ -212,89 +313,211 @@
       "note": "修补前的 sectfix 导出已被取代（桌面那两个已移入 .staging/ 留档）；旧 exe 那对与 3 个头文件留在旧仓"
     },
     {
-      "id": "binary/age-original",
-      "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "id": "disasm/raw-source-agerc",
+      "kind": "disasm-corpus",
+      "role": "reference",
+      "storage": "external-only",
       "origin": [
         {
-          "root": "gameInstall",
-          "path": "AGE.EXE__dumped.EXE",
-          "sha256": "412393ff8df29644da380c3718d97920c9ef7c1a7c28d4bf1d99218f37e4ebc3"
+          "root": "staging",
+          "path": "AGERC.DLL.c",
+          "sha256": "f213ac2e041b813f1f7ead1c1266435ab50ae9d98d4ebe398d65cb2ab5920aad"
+        },
+        {
+          "root": "staging",
+          "path": "AGERC.DLL.lst",
+          "sha256": "f70bf5589692988987ae138a51a43c51f83056e22bbff4bdeca3cc791e495e71"
+        }
+      ],
+      "derivedFrom": [
+        {
+          "ref": "binary/agerc-debug-unpacked",
+          "tool": "Hex-Rays"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：PE 节表未还原，直接分析会丢数据段；本轮与 M1 都不入仓",
-      "note": "MD5 见 docs/02-engine/README.md（哈希是派生信息，不重复写进清单）"
+      "consume": "转码前的忠实参照（CP932 + 全 CRLF，单一编码、无 U+FFFD）：只用来复核「没被改过」，不参与构建",
+      "blocks": [
+        "M1"
+      ],
+      "note": "与旧仓 engine/AGERC.DLL.{c,lst} 不同：那份是混编（CP932 + GBK 文件名行 + UTF-16LE 宽字符串），裸按 CP932 解码会掉字符"
     },
     {
-      "id": "binary/age-sectfix",
-      "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "id": "disasm/raw-source-sectfix",
+      "kind": "disasm-corpus",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "staging",
+          "path": "AGE.EXE__dumped.sectfix.EXE.c",
+          "sha256": "75ba5371aca6fe7f86b6ed217f06d53069f4f4dd653e5300b7fc8a4a2c97bd9e"
+        },
+        {
+          "root": "staging",
+          "path": "AGE.EXE__dumped.sectfix.EXE.lst",
+          "sha256": "931c576f73bd33b955dbf35e6979a03ecfd98ef21c98350db35c669632da1352"
+        }
+      ],
+      "derivedFrom": [
+        {
+          "ref": "binary/age-sectfix",
+          "tool": "Hex-Rays"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "转码前的忠实参照（CP932 + 全 CRLF）：只用来复核「没被改过」，不参与构建",
+      "blocks": [
+        "M1"
+      ],
+      "note": "投递原件只在 .staging/ 过一手、不入库；这里记 sha256 就是为了让「逐行全等」可复核"
+    },
+    {
+      "id": "disasm/superseded-agerc-oldsrc",
+      "kind": "disasm-corpus",
+      "role": "archived",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "raw-parts/AGE.EXE__dumped.sectfix.EXE",
-          "sha256": "1937f08628efcebbf4cdcf8fbb0c066a83b4c579cd9925ca7b441de343d3b134"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：这是反汇编语料的真前身（新基线二进制）；本轮与 M1 都不入仓",
-      "note": "与原文件仅节表 24 字节不同；节表修补口径见 docs/02-engine/README.md"
-    },
-    {
-      "id": "binary/agerc-packed",
-      "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
-      "origin": [
+          "path": "engine/AGERC.DLL.c",
+          "sha256": "911de2f79d47506de5871d2be8d4840919d5b7737d653020f4bdef27858875f9"
+        },
         {
-          "root": "gameInstall",
-          "path": "AGERC.DLL",
-          "sha256": "5f318955f605818965e58d0da2bf9a2a4cef7770758d17e98600ef269035604b"
+          "root": "oldRepo",
+          "path": "engine/AGERC.DLL.lst",
+          "sha256": "0438570f02d998a96803002343b0aa057d8604fcade7678ec1528b77e4b357a6"
+        },
+        {
+          "root": "oldRepo",
+          "path": "engine/AGERC.DLL_utf8.c",
+          "sha256": "96f895056bdbd39e5689f695ce7c8d4ba58f6182663c493e4e9daf0b662292da"
+        },
+        {
+          "root": "oldRepo",
+          "path": "engine/AGERC.DLL_utf8.lst",
+          "sha256": "d1314be663d5c459049ed44acff831264298a31ab0ee8ec85991aa6c7a8a4b48"
+        }
+      ],
+      "derivedFrom": [
+        {
+          "ref": "binary/agerc-modified-install",
+          "tool": "Hex-Rays"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：带壳发布版；旧仓 raw/ 是指向同一目录的符号链接",
-      "note": "反汇编不用它（带壳）"
+      "consume": "禁止引用：反汇编目标是被改过文案的 install/AGERC.DLL，已被基于脱壳调试版的新导出取代",
+      "note": "留档只为解释「为什么旧结论会不对」；新语料见 disasm/raw-source-agerc 与 disasm/bundle"
     },
     {
-      "id": "binary/agerc-debug-unpacked",
-      "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "id": "fixtures/raw-source-save-samples",
+      "kind": "fixture",
+      "role": "reference",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "raw-parts/DATA1/AGERC.DLL",
-          "sha256": "f48d1c0fc09b486b003ebd829cf13c9970291a6eaeab13c6d7d0e68e61a297f4"
+          "path": "cache/SAVE76.DAT",
+          "sha256": "233d26f4811d46ad521ecc10aec59d5362adc91e38198cf42b0b9f5d480c335a"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE76.STH",
+          "sha256": "3fa7e3c900b4b261ef32f7db72ce06be4ccce3e6ecbe55860c1a6698eea0f6c6"
+        },
+        {
+          "root": "gameSaves",
+          "path": "SAVE77.DAT",
+          "sha256": "4c4611a4d70a50cf5bd08e4da101282bb54c239ba8ab65bdcd821d75bf78f1fc"
+        },
+        {
+          "root": "gameSaves",
+          "path": "SAVE77.STH",
+          "sha256": "b2ba86830de659a12bb24723e026afab911b48949d21b73862769cc69de3a6ea"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE78.DAT",
+          "sha256": "fa04e4fb70f4decc8d797b1a6114e5d9e67b9671812723d6eb55db799d44ed71"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE78.STH",
+          "sha256": "e162c3beee42ca06d32fe3b98374364cde74d81dcb9e0363c87155d6cc805e11"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE79.DAT",
+          "sha256": "100607c0875d09243769ac7fe93fe1385fdaf68354c50d0f6a594a76af48a991"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE79.STH",
+          "sha256": "8ea3ada0e8d963e75ea786389738844a4aea5d0c708f2975ccde926d76e544c2"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：不带壳的调试版（有调试入口）⇒ 当前 AGERC 语料的真前身",
-      "note": "AGERC.DLL.c/.lst 就是从它导出的"
+      "consume": "转写/搬运之前的忠实参照（真玩家存档样本）：只用来复核入库副本没被改过，不参与构建",
+      "blocks": [
+        "M1"
+      ],
+      "note": "8 个文件（槽 76/77/78/79 × .DAT/.STH）：76/78/79 与旧仓 cache/ 同字节（那也是真存档目录的取样），77 只在真存档目录里（roots.gameSaves）。旧仓 cache/README.md 是旧仓的使用说明散文，属待重分类的旧知识 ⇒ 不搬，只记指向"
     },
     {
-      "id": "binary/agerc-modified-install",
-      "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "id": "fixtures/save-samples",
+      "kind": "fixture",
+      "role": "fixture",
+      "storage": "lfs",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "install/AGERC.DLL",
-          "sha256": "6241de666d2f533b66bd48ccd09fa5277acec6473bf099c7b81b0b2c113f977a"
+          "path": "cache/SAVE76.DAT"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE76.STH"
+        },
+        {
+          "root": "gameSaves",
+          "path": "SAVE77.DAT"
+        },
+        {
+          "root": "gameSaves",
+          "path": "SAVE77.STH"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE78.DAT"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE78.STH"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE79.DAT"
+        },
+        {
+          "root": "oldRepo",
+          "path": "cache/SAVE79.STH"
         }
       ],
-      "dest": null,
+      "derivedFrom": [
+        {
+          "ref": "fixtures/raw-source-save-samples"
+        }
+      ],
+      "dest": "corpus/fixtures/",
       "readOnly": true,
-      "consume": "只登记：文案被纯二进制替换过 ⇒ 不能作为语料来源（旧仓那两对 AGERC 语料就是它的导出）",
-      "note": "留档是为了解释 disasm/superseded-agerc-oldsrc 为什么作废"
+      "consume": "真玩家存档样本（SAVE76/78/79 的 .DAT + .STH + README）；落 corpus/fixtures/，走 LFS",
+      "blocks": [
+        "M1"
+      ],
+      "note": "8 个 .DAT/.STH（槽 76/77/78/79，全部走 LFS）：文件级事实（各槽在游戏里的定位 where、每个文件的源 mtime）在 corpus/fixtures/samples.json；之所以要记 mtime 是因为槽头 +264 起七个 u16 就是存档时刻、而 git 不保存 mtime"
     },
     {
       "id": "game/install-dir",
@@ -310,22 +533,6 @@
       "dest": null,
       "readOnly": true,
       "consume": "只登记路径，不搬：外部游戏安装目录；需要用符号链接引用时链接本身 gitignore、不 track"
-    },
-    {
-      "id": "game/translated-install",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "install/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记路径，不搬：翻译产物编译后合并的目录",
-      "note": "用户口径：先保留、后续重新设计"
     },
     {
       "id": "game/raw-parts",
@@ -344,120 +551,20 @@
       "note": "外部索引改造后可能不再需要"
     },
     {
-      "id": "fixtures/save-samples",
-      "kind": "fixture",
-      "role": "fixture",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "cache/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "真玩家存档样本（SAVE76/78/79 的 .DAT + .STH + README）；落 corpus/fixtures/，走 LFS",
-      "blocks": [
-        "M1"
-      ],
-      "note": "M1：复制 7 个文件后加 mtime 侧车（存档头记录 mtime，测试断言依赖它），再把 storage 翻成 lfs 并补 dest"
-    },
-    {
-      "id": "translation/baseline",
+      "id": "game/translated-install",
       "kind": "asset",
       "role": "reference",
       "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "data/"
+          "path": "install/"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "日文只读基线：仅作 M5 的迁移来源，本轮不搬、不改",
-      "blocks": [
-        "M5"
-      ]
-    },
-    {
-      "id": "translation/translated",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "src/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "译文：与 data/ 同构；数据模型待定，M5 前拍板（见 docs/01-translation/README.md）",
-      "blocks": [
-        "M5"
-      ]
-    },
-    {
-      "id": "translation/patch",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "patch/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：补丁产物目录（旧仓 LFS + 忽略）"
-    },
-    {
-      "id": "assets/ui-images",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/images/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：UI 图片（旧仓走 LFS）",
-      "note": "落点待定（corpus/ 还是 packages/age-format 的测试夹具）"
-    },
-    {
-      "id": "assets/fonts",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：CN/JP 合并字体（旧仓走 LFS）"
-    },
-    {
-      "id": "tools/thirdparty",
-      "kind": "tooling",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "tools/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：第三方工具链（大多已在旧仓 ignore）"
+      "consume": "只登记路径，不搬：翻译产物编译后合并的目录",
+      "note": "用户口径：先保留、后续重新设计"
     },
     {
       "id": "knowledge/analysis",
@@ -473,6 +580,26 @@
       "dest": null,
       "readOnly": true,
       "consume": "禁止直接引用：机器台账真源，需清理 / 校验 / 重分类（见 docs/00-origin/knowledge-rebuild.md）",
+      "blocks": [
+        "K1",
+        "K2",
+        "K3"
+      ]
+    },
+    {
+      "id": "knowledge/docs",
+      "kind": "knowledge-source",
+      "role": "archived",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "docs-new/"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "禁止直接引用：叙述层文档（含跨域活文档），需清理 / 重分类",
       "blocks": [
         "K1",
         "K2",
@@ -500,23 +627,21 @@
       ]
     },
     {
-      "id": "knowledge/docs",
-      "kind": "knowledge-source",
-      "role": "archived",
-      "storage": "external-only",
+      "id": "native/host-input-old",
+      "kind": "tooling",
+      "role": "rebuild",
+      "storage": "deferred",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "docs-new/"
+          "path": "native/host-input/"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "禁止直接引用：叙述层文档（含跨域活文档），需清理 / 重分类",
+      "consume": "重写参考，不迁移（N-API + CMake + LFS prebuilds；不进 npm workspaces）",
       "blocks": [
-        "K1",
-        "K2",
-        "K3"
+        "M4"
       ]
     },
     {
@@ -555,26 +680,33 @@
       "consume": "禁止直接引用：旧仓的环境 / 权限须知（只作背景；新仓的口径以本仓 AGENTS.md 为准）"
     },
     {
-      "id": "tooling/re",
+      "id": "tooling/format-scripts",
       "kind": "tooling",
       "role": "rebuild",
       "storage": "deferred",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "scripts/re/"
+          "path": "scripts/asm/"
         },
         {
           "root": "oldRepo",
-          "path": "scripts/font_CN_JP.py",
-          "sha256": "258d3bd64b3b49dc2d5bac0f2bcaab71e6d5a5d4c47b79729af06a2e206b1c20"
+          "path": "scripts/alf/"
+        },
+        {
+          "root": "oldRepo",
+          "path": "scripts/agf/"
+        },
+        {
+          "root": "oldRepo",
+          "path": "scripts/uimap/"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "重写参考，不迁移：逆向脚本；⚠ 含会改坏语料的 sanitize_symbols.py（见 decisions.md §4）",
+      "consume": "重写参考，不迁移：AGE 容器格式工具（M2 的目标能力）",
       "blocks": [
-        "M6"
+        "M2"
       ]
     },
     {
@@ -638,33 +770,26 @@
       ]
     },
     {
-      "id": "tooling/format-scripts",
+      "id": "tooling/re",
       "kind": "tooling",
       "role": "rebuild",
       "storage": "deferred",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "scripts/asm/"
+          "path": "scripts/re/"
         },
         {
           "root": "oldRepo",
-          "path": "scripts/alf/"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/agf/"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/uimap/"
+          "path": "scripts/font_CN_JP.py",
+          "sha256": "258d3bd64b3b49dc2d5bac0f2bcaab71e6d5a5d4c47b79729af06a2e206b1c20"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "重写参考，不迁移：AGE 容器格式工具（M2 的目标能力）",
+      "consume": "重写参考，不迁移：逆向脚本；⚠ 含会改坏语料的 sanitize_symbols.py（见 decisions.md §4）",
       "blocks": [
-        "M2"
+        "M6"
       ]
     },
     {
@@ -688,108 +813,69 @@
       "note": "旧仓 scripts/ 一个目录混了 6 类关注点；新仓必须按域拆开，不要照抄结构"
     },
     {
-      "id": "app/emulator-old",
+      "id": "tools/thirdparty",
       "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "app/amayui-emulator/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移（用户口径：apps 全部按新结构重写）；10 个跨域守卫寄生在其 test/ 下，重写时拆回各域",
-      "blocks": [
-        "M4"
-      ]
-    },
-    {
-      "id": "app/inspector-old",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "app/amayui-inspector/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移（.NET 10 / C# / WPF / CLI / Core）",
-      "blocks": [
-        "M7"
-      ]
-    },
-    {
-      "id": "app/wiki-archived",
-      "kind": "asset",
-      "role": "archived",
+      "role": "reference",
       "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "app/amayui-toolkit/"
+          "path": "tools/"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：wiki（Vite+React+MUI，GitHub Pages）—— 不迁移，archive 在旧仓"
+      "consume": "只登记：第三方工具链（大多已在旧仓 ignore）"
     },
     {
-      "id": "native/host-input-old",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
+      "id": "translation/baseline",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "native/host-input/"
+          "path": "data/"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "重写参考，不迁移（N-API + CMake + LFS prebuilds；不进 npm workspaces）",
+      "consume": "日文只读基线：仅作 M5 的迁移来源，本轮不搬、不改",
       "blocks": [
-        "M4"
+        "M5"
       ]
     },
     {
-      "id": "agent/skills",
-      "kind": "agent-infra",
-      "role": "rebuild",
-      "storage": "deferred",
+      "id": "translation/patch",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
-          "path": ".agents/skills/"
+          "path": "patch/"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "重写参考，不迁移：技能几乎都要重新适配；新的必须落在固定的 .agents/skills/（DSH 发现路径）",
-      "blocks": [
-        "M6"
-      ]
+      "consume": "只登记：补丁产物目录（旧仓 LFS + 忽略）"
     },
     {
-      "id": "agent/plugins",
-      "kind": "agent-infra",
-      "role": "rebuild",
-      "storage": "deferred",
+      "id": "translation/translated",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "plugins/"
+          "path": "src/"
         }
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "重写参考，不迁移：DSH 插件位置自由、靠软链接重新注册（确切命令待 M6 补进 AGENTS.md）",
+      "consume": "译文：与 data/ 同构；数据模型待定，M5 前拍板（见 docs/01-translation/README.md）",
       "blocks": [
-        "M6"
+        "M5"
       ]
     }
   ]

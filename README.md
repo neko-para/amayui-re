@@ -39,16 +39,18 @@ mismatch → 稳定实体 target → 自动 context packet（已有事实 + 原�
 | wiki | `app/amayui-toolkit` | **不迁移**（archive 在旧仓） | 只登记 |
 | 知识台账 | `analysis/` `tickets/` `docs-new/` | **不带**（见 `docs/00-origin/knowledge-rebuild.md`） | 待清理 / 校验 / 重分类 |
 | agent 基建 | `.agents/skills/` `plugins/` | `.agents/skills/`（固定路径）+ `plugins/` | **不迁移、从零重建**（M6） |
-| 素材 / 语料 | `engine/` `install/` `raw/` `raw-parts/` `cache/` `tools/` | `corpus/`（只登记，不入 git） | 见 `corpus/assets.json` |
+| 素材 / 语料 | `engine/` `install/` `raw/` `raw-parts/` `cache/` `tools/` | `corpus/`（只登记；需要入库的走 LFS） | 入库与否看 `corpus/assets.json` 的 `storage`/`dest`（`pnpm tools corpus list`） |
 
 ## 3. 怎么跑
 
 ```bash
-pnpm install                 # 只有 workspace 链接，无第三方依赖
-pnpm validate                # ★ 素材清单守卫：corpus/assets.json 必须绿（这是"约束"所在）
-pnpm test                    # node --test tools/test/（守卫的单元 + 端到端测试）
-pnpm corpus -- --scan        # 补 origin[].sha256（缺省 dry-run，加 --write 落盘）
-pnpm inventory               # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
+pnpm install                 # 只有 workspace 链接，无第三方依赖（包管理用 pnpm）
+pnpm tools corpus validate                # ★ 素材清单守卫：corpus/assets.json 必须绿（这是"约束"所在）
+pnpm test                    # 守卫测试（单进程：node --test --test-isolation=none "tools/test/**/*.test.mjs"）
+pnpm tools corpus scan        # 补 origin[].sha256（缺省 dry-run，加 --write 落盘）
+pnpm tools old-repo inventory               # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
+pnpm tools disasm verify      # 反汇编语料保真断言（原件不在时由 zip 反解 + 清单 sha256 自证）
+pnpm tools disasm restore     # 由 zip 反解回投递原件（.staging/ 可随时丢）
 ```
 
 **语言口径**：除 `apps/emulator`（TypeScript，自带工具链）外，仓库内一切 JS —— `packages/*`、`tools/*`、
@@ -59,6 +61,7 @@ pnpm inventory               # 重新实测旧仓 → docs/00-origin/old-repo-in
 
 | 想了解 | 读 |
 |---|---|
+| **迁移到哪一步了 / 下一步做什么** | **`PLAN.md`**（批次级进度表；细节在各域文档） |
 | 为什么重建、有哪些**原创决策**（存储纪律 / 跨平台 / 已定口径） | `docs/00-origin/decisions.md` |
 | 知识层怎么重建（清理起点清单 + A/B/C 分级 + 准入规则） | `docs/00-origin/knowledge-rebuild.md` |
 | 立项原文（本轮提示词） | `docs/00-origin/init-prompt.md` |

@@ -38,6 +38,9 @@
 | 5 | LFS | **直接用**：大二进制走 LFS；两台机器都 `git lfs install`。**不要**为"不支持 LFS"设计降级 |
 | 6 | 非 ASCII 路径 | **可以用**：中 / 日文件名照旧。**不要**为了"怕出问题"改名，也不要把符号链接改造成配置索引 |
 
+★ **开发平台优先级**（用户口径）：**win32 优先**；macOS 侧只做**兼容性验证**、不阻塞任何一轮。
+⇒ 为此付出的唯一代价是"纯文本依赖"（一切结论落在文本里，而不是某个平台专属的工具状态里）。
+
 ## 3. 语言与代码口径
 
 * **只有 `apps/emulator` 用 TypeScript**（自带工具链；M4 才进 workspaces）。
@@ -55,13 +58,24 @@
 ## 5. 怎么跑
 
 ```bash
-pnpm install            # 只有 workspace 链接
-pnpm validate           # ★ 素材清单守卫（缺省 dry-run；红了就必须修，不是"看看"）
-pnpm test               # 守卫的单元测试 + 端到端测试（node --test "tools/test/**/*.test.mjs"）
-pnpm corpus -- --scan --write    # 补 origin[].sha256（唯一写入口）
-pnpm inventory          # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
-pnpm recode -- --verify # 反汇编语料保真断言（逐行反解回字节必须与源逐字节相同）
+pnpm install                    # 只有 workspace 链接（包管理用 pnpm，别用 npm）
+pnpm tools                      # ★ 先看这个：域地图（域 → 数据 → 读写 → 操作）
+pnpm tools corpus validate      # ★ 素材清单守卫（红了就必须修，不是"看看"）
+pnpm tools corpus scan --write  # 补 origin[].sha256（唯一写入口）
+pnpm tools fixtures list        # 存档样本：槽 / 定位 / mtime 漂移 / 来源
+pnpm tools disasm verify        # 反汇编语料保真断言（逐行反解回字节必须与源逐字节相同）
+pnpm tools old-repo inventory   # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
+pnpm test                       # 守卫测试（单进程跑，见下）
 ```
+
+* **命令一律经派发器**：`pnpm tools <域> <动作> [args…]`（域地图由各工具的自我声明派生 —— `tools/cli.mjs`）。
+  位置参数与 flag 直接跟在后面，**不必 `--`**。
+* 每个工具也都能**独立跑**（脱离 DSH / 脱离 pnpm，macOS 上一样）：`node tools/corpus.mjs --validate`。
+
+★ **两个环境口径**（代码里已处理，别绕开）：
+① **不要捕获子进程输出**（`stdio: 'pipe'`）：受限沙箱里捕获输出要开命名管道 ⇒ `spawn EPERM`。
+`tools/corpus.mjs` 的 `runCapture()` 用**文件描述符重定向**替代管道，拿到同一份 git/recipe 答案。
+② **`pnpm test` 用 `--test-isolation=none`**：默认隔离模式由 runner 起子进程走管道，同样会 EPERM。
 
 ## 6. 知识准入门（本轮**只立规矩，不落数据**）
 
@@ -86,7 +100,7 @@ pnpm recode -- --verify # 反汇编语料保真断言（逐行反解回字节必
 ## 8. 只读素材消费规则
 
 * `corpus/assets.json` 是 **lockfile 性质**的清单（记录"来源与去向"），**不是**约束；
-  唯一能把它变成约束的是 `pnpm validate` 必须红 —— **没有守卫的清单等于一份 Markdown**。
+  唯一能把它变成约束的是 `pnpm tools corpus validate` 必须红 —— **没有守卫的清单等于一份 Markdown**。
 * 素材按 `storage` 分四种去向：`lfs`（入库走 LFS）/ `git`（入库纯文本）/ `external-only`（留在仓库外，只登记）/
   `deferred`（后续批次才处理）。**不要在 `external-only` 的素材上"就地修改"**。
 * 反汇编语料：`readOnly`，**锚点锚二进制 EA**，语料只提供 `EA → 当前这份导出里的行号` 映射。
@@ -96,5 +110,31 @@ pnpm recode -- --verify # 反汇编语料保真断言（逐行反解回字节必
 * ❌ 把 `.sqlite` 提交进 git / ❌ 用 LFS 存 DB / ❌ 把 DB 当唯一存储 /
   ❌ 用 `sqlite3 .dump` 当文本真源 / ❌ 让 DB 参与写事务再"导出"成文本。
 * ❌ 把旧仓的知识文档"顺手"复制进 `docs/`；❌ 在 `data/ledger/` 里塞旧条目。
-* ❌ 手工编辑 `corpus/assets.json` 的 `sha256` / 大小：**用 `pnpm corpus -- --scan --write`**（那是唯一写入口）。
+* ❌ 手工编辑 `corpus/assets.json` 的 `sha256` / 大小：**用 `pnpm tools corpus scan --write`**（那是唯一写入口）。
 * ❌ 在 `corpus/assets.json` 里写体积、入库件校验和、LFS oid、`status`、`generatedAt`：那些 git / LFS / 文件系统已经是权威。
+
+## 10. 文档纪律：README **不写状态**
+
+* ✅ 只写**不变的东西**：口径 / 禁令 / 不变量 / 落点地图 / 怎么跑。
+* ❌ **状态、进度、计数、体积、哈希、快照数字一律不手写**。自检一句话：
+  **"这句话会不会因为下次干活而变错？"** 会 ⇒ 不要写进 README，改成**"怎么查"**。
+* **怎么查**（真源）：入库进度看 `corpus/assets.json` 的 `storage`/`dest`（`deferred` → `lfs` 就是进度）·
+  条目与去向 `pnpm tools corpus list` · 语料保真 `pnpm tools disasm verify` · 旧仓数字 `pnpm tools old-repo inventory` ·
+  变更历史 `git log` / `git log -L`。
+* ❌ 不要开 CHANGELOG / 进度表 / "已完成"清单：**`git log` 就是变更记录**。
+* 例外**只有两处**：**生成物**（整篇都是状态，但由脚本生成 + 文件头写明"别手改"），范例 `docs/00-origin/old-repo-inventory.md`；
+  以及**根目录 `PLAN.md`**（多轮迁移的**批次级**进度表）—— 只写「批次 / 状态 / 依赖 / 入口」，
+  **不落细节**（细节要么已在仓库里，要么在旧仓）；每轮结束**只改状态**。由 `tools/test/plan.test.mjs` 守。
+* **结构化数据不进散文**：文件清单 / 用途 / 定位 / mtime / 哈希一律**只留一份结构化真源**，README **不列表、不抄数**。
+* **JSON 是不透明数据**：任何 JSON 的字段语义 / 枚举 / 不变量 / 操作**只看它的控制脚本的自描述**
+  （`pnpm tools corpus describe`、`pnpm tools fixtures describe`），
+  ❌ **不要在文档里复述 schema**（那是第二份 schema，必然漂）；文档只写"它是什么 + 非显然口径 + 指向"。
+* **同名说明书**：每个**自有**的结构化数据文件旁边必须有同名 `.md`（`foo.json` ↔ `foo.md`），
+  且必须含 `## 怎么查` / `## 怎么改` 两节并**指向 `--describe`** —— 看到一个 JSON 就知道去哪看怎么处理它。
+  生态文件（`package.json` 等）不在范围内。由 `tools/test/json-docs.test.mjs` 守。
+  范例：`corpus/assets.md`、`corpus/fixtures/samples.md`。
+* **测试只测基建契约**：这里搭的是基建不是业务，所以测试的对象是
+  **守卫能不能红 · 写路径会不会写坏 · 发布物是否满足不变量 · 约定是否齐全**；
+  ❌ 不测业务结论，❌ 不复述代码逻辑，❌ 不断言数据的当前取值（那是 `pnpm tools corpus validate` 当哨兵的事）。
+* 确实需要两处都写的东西 ⇒ **先问"能不能只留一处"**；真需要就**钉住**（测试断言两处一致）。
+  ❌ 不加"不许出现某字符串"这类脆弱守卫 —— 守卫要**红得有意义**。详见 `docs/00-origin/decisions.md` §6。

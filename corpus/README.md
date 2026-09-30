@@ -10,47 +10,35 @@ corpus/
   assets.json      # ★ 素材清单（唯一的机器真源；唯一写入口是 tools/corpus.mjs）
   README.md        # 本文件：总则
   disasm/          # 反汇编语料：入库的是 zip，解压产物 gitignore
-    README.md      #   4 文件清单 + 来源 + sha256 + 解压/转码/断言口径
-    disasm-20260930.zip   ← M1 产出（LFS）
+    README.md      #   4 文件清单 + 来源 + sha256 + 转写规则 + 断言口径
+    disasm-20260930.zip   ← 入库（LFS）
     files/         ← gitignore：解压出的 4 个文件，agent 直接读这里
-  binaries/        # 脱壳件 / 节表修补件 —— 后续再处理（本轮为空，M1 也不含）
-  fixtures/        # 玩家存档样本（旧仓 cache/）落点（本轮为空）
+  binaries/        # 脱壳件 / 节表修补件 —— 后续再处理（尚未入库）
+  fixtures/        # 真存档样本（槽 76/77/78/79）+ samples.json（结构化描述）+ README
   game/            # 外部游戏目录 / 安装目录的**指针**（不搬数据）
 ```
 
+**两个载荷条目的分工**（"入库没有"一律看清单的 `storage`/`dest`，**不要**在文档里记进度）：
+
+| 条目 | 落点 | 存储 | 守卫 |
+|---|---|---|---|
+| `disasm/bundle` | `corpus/disasm/disasm-20260930.zip`（4 个 UTF-8 文件） | LFS（`*.zip`） | `recipe` 真跑 9 条保真断言（#7）；原件缺席时由 zip 反解 + 清单 sha256 自证 |
+| `fixtures/save-samples` | `corpus/fixtures/SAVE{76,77,78,79}.{DAT,STH}` | LFS（`*.DAT`/`*.STH`） | 副本与来源逐字节比对（#4）、`filter=lfs`（#6）；文件级事实（槽定位 / mtime）另见 `corpus/fixtures/samples.json`，两边文件集合一致性由 `tools/test/fixtures.test.mjs` 钉住 |
+
+★ 两者的**来源记录**（`disasm/raw-source-*` / `fixtures/raw-source-save-samples`）都是 `external-only`
+并各自记着源件的 sha256 —— 这就是"没被改过"可复核的地方。
+
 ## 2. `assets.json` 是什么、不是什么
 
-| | 是什么 | 该放哪 |
-|---|---|---|
-| **约束 / 纪律** | "什么能进 git"、"语料不得改写"、"锚点锚 EA"、"禁 `.sqlite`" | `AGENTS.md` 的规则条目 + `tools/` 的守卫 |
-| **素材清单** | 每个只读素材：从哪来、去哪、走哪种存储、怎么消费 | 本目录的 `assets.json` |
-| **派生数据** | 大小、入库件校验和、LFS oid、解压产物、文件/条目计数 | **不写进来**（git / LFS / 文件系统已是权威） |
+⇒ **`assets.json` 是 lockfile**（同 `package-lock.json` 的角色）：记录"来源与去向"，
+**不记录规则**，也**不重复校验和**。**唯一能把它变成约束的是守卫**：`pnpm tools corpus validate` 必须红
+—— **没有守卫的清单等于一份 Markdown**。
 
-⇒ `assets.json` 是 **lockfile**（同 `package-lock.json` 的角色）：记录"来源与去向"，
-**不记录规则**，也**不重复校验和**。**唯一能把它变成约束的是守卫**：`pnpm validate` 必须红。
-**没有守卫的清单等于一份 Markdown。**
+★ **它的字段字典、9 条不变量、以及"怎么查 / 怎么改"全部聚合在它旁边那份同名说明书里：
+[`assets.md`](./assets.md)** —— 本文件不重复那些内容（约定见 `../docs/00-origin/decisions.md` §6）。
 
-### 2.1 字段口径（详见 `../docs/00-origin/decisions.md` §7）
-
-* `storage ∈ { lfs, git, external-only, deferred }` 是**存储去向**；
-  `dest` 与它严格自洽（`external-only`/`deferred` ⇔ `dest === null`）。
-* `origin[].sha256` **只写"不入库件"**（那是"转码 / 搬运之前它长这样"的唯一证据）；
-  入库件的校验和交给 git / LFS。**目录型 origin 不写 sha256**（不可稳定复现）。
-* `derivedFrom` 是**真前身**：这份东西是从哪个件、用什么工具产生的（`kind=disasm-corpus` 且入库时必填，
-  且必须指向 `kind=binary` 的条目）。
-* **刻意不写**：`bytes`、入库件 `sha256`、LFS oid、`status`、`generatedAt`，以及一切能从磁盘 / git 推导的计数。
-
-### 2.2 唯一写入口
-
-```bash
-pnpm validate                    # 守卫（§3.3 的 9 条断言）；红了就是错，不是"看看"
-pnpm corpus -- --scan            # 补 origin[].sha256（缺省 dry-run）
-pnpm corpus -- --scan --write    # 落盘（写后回读 + 复验；不绿则回滚）
-pnpm corpus -- --add '<entry>'   # 加条目
-pnpm corpus -- --set <id> '<patch-json>'   # 改条目（如 M1 把 deferred 翻成 lfs）
-```
-
-★ **不要手工改 `assets.json` 的 `sha256`** —— 那是 `--scan` 的活；手工改会漂。
+一句话版：`storage ∈ { lfs, git, external-only, deferred }`，`dest` 与它严格自洽；
+`origin[].sha256` **只写不入库件**；**唯一写入口是 `pnpm corpus`**，别手改 JSON。
 
 ## 3. 按需迁移
 
@@ -60,6 +48,9 @@ pnpm corpus -- --set <id> '<patch-json>'   # 改条目（如 M1 把 deferred 翻
   再提交；**解压产物 / 中间视图永远 gitignore**。
 * **出仓带回来的东西先过 `.staging/`**（仓库内的中转区，gitignore）：它是**中转，不是"来源"**，
   所以 `roots` 里不写桌面路径，投递件的 sha256 仍记进清单以便复核。
+* ★ **`.staging/` 可以随时丢弃**：它只是中转。原件缺失时，`disasm/bundle` 的断言会自动切到
+  "由 zip 反解回原件 + 用清单里的 sha256 自证"（`pnpm tools disasm restore` 也能把原件写回来），
+  所以 fresh clone（`.staging/` 天生为空）上 `pnpm tools corpus validate` 一样是绿的。
 
 ## 4. 消费规则
 

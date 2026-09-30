@@ -16,9 +16,11 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const DEFAULT_OLD_REPO = 'E:\\Games\\Eushully\\天結';
-export const DEFAULT_OUT = path.join(REPO_ROOT, 'docs', '00-origin', 'old-repo-inventory.md');
+import { git as runGit } from './lib/exec.mjs';
+import { DEFAULT_INVENTORY_OUT as DEFAULT_OUT, DEFAULT_OLD_REPO, REPO_ROOT } from './lib/paths.mjs';
+
+export { DEFAULT_OLD_REPO, REPO_ROOT, DEFAULT_OUT };
+
 
 /** 体积统计时按二进制扩展名跳过（它们不需要行尾统计） */
 const BINARY_EXT = new Set([
@@ -39,13 +41,61 @@ const COUPLING = [
   { from: 'scripts', tokens: ['analysis/'] },
 ];
 
-function git(cwd, args) {
-  try {
-    return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch {
-    return '';
-  }
+/** 工具层的自我声明：**我动哪片数据、有哪些操作**（`tools/cli.mjs` 的域地图从它派生） */
+export const DOMAIN = {
+  id: 'old-repo',
+  title: '旧仓盘点（**只读外部仓库**）',
+  data: ['`<旧仓>`（仓库外，默认 `E:\\Games\\Eushully\\天結`；只跑只读 git 命令与 fs 读取）', '`docs/00-origin/old-repo-inventory.md`（生成物，由本工具拥有）'],
+  access: 'r only（对旧仓**严格只读**）／w：只写那份生成物',
+  tool: 'tools/old-repo-inventory.mjs',
+};
+
+export const OPERATIONS = [
+  { name: 'inventory', argv: [], mutates: true, summary: '重新实测旧仓 → `docs/00-origin/old-repo-inventory.md`（生成物）' },
+  { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：数据 / 操作' },
+];
+
+export function describe() {
+  return {
+    domain: DOMAIN,
+    invariants: [
+      {
+        id: 1,
+        text: '对旧仓严格只读：不改、不删、不移动它任何东西',
+        enforcedBy: '只用只读 git 命令与 `fs` 读取；证据 = 旧仓 `git status --porcelain` 必须为空',
+      },
+      {
+        id: 2,
+        text: '生成物是状态，因此**由脚本生成**：文件头写明"别手改，改脚本"，且不写生成时间（避免每次扫描都产生 diff）',
+        enforcedBy: '生成物头部自带说明；`pnpm tools old-repo inventory` 可随时重跑',
+      },
+    ],
+    operations: OPERATIONS,
+    writePath: '只写生成物 `docs/00-origin/old-repo-inventory.md`；对旧仓没有任何写操作。',
+  };
 }
+
+export function describeText(d = describe()) {
+  const L = [];
+  L.push(`# ${d.domain.id} —— ${d.domain.title}（自描述）`);
+  L.push('');
+  L.push('## 我动哪片数据');
+  for (const x of d.domain.data) L.push(`* ${x}`);
+  L.push(`* 读写：${d.domain.access}`);
+  L.push(`* 工具：\`${d.domain.tool}\``);
+  L.push('');
+  L.push('## 不变量（含"谁在守它"）');
+  for (const c of d.invariants) L.push(`${c.id}. ${c.text}　—　${c.enforcedBy}`);
+  L.push('');
+  L.push('## 操作');
+  for (const o of d.operations) L.push(`* \`${o.name}\`${o.mutates ? '（会写）' : ''} —— ${o.summary}　→ \`pnpm tools ${d.domain.id} ${o.name}\``);
+  L.push('');
+  L.push(`写入口：${d.writePath}`);
+  return `${L.join('\n')}\n`;
+}
+
+/** 只读 git 命令：直接用纯工具 `lib/exec.mjs` 的 `git()`（fd 重定向；非零退出即抛，绝不"读不到就当空"） */
+const git = runGit;
 
 function human(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -142,7 +192,7 @@ function gitFacts(oldRepo) {
     textEolRules: allAttrLines.length - lfsPatterns.length,
     hasRootPackageJson: fs.existsSync(path.join(oldRepo, 'package.json')),
     packBytes,
-    lfsFiles: git(oldRepo, ['lfs', 'ls-files']).split('\n').filter(Boolean).length,
+    lfsFiles: git(oldRepo, ['lfs', 'ls-files'], { tolerant: true }).split('\n').filter(Boolean).length,
   };
 }
 
@@ -268,7 +318,7 @@ export function renderMarkdown(data) {
   const L = [];
   L.push('# 旧仓盘点（实测快照）');
   L.push('');
-  L.push('> 本文件由 `pnpm inventory`（`tools/old-repo-inventory.mjs`）**重新实测生成** —— **不要手改，改脚本**。');
+  L.push('> 本文件由 `pnpm tools old-repo inventory`（`tools/old-repo-inventory.mjs`）**重新实测生成** —— **不要手改，改脚本**。');
   L.push('> 快照里**不写生成时间**（那只会让每次扫描都产生 diff）；只写实测数字与旧仓 HEAD。');
   L.push('> 旧仓全程**只读**：本脚本只跑只读 git 命令与 fs 读取。');
   L.push('');
@@ -342,6 +392,7 @@ function parseArgs(argv) {
     else if (a === '--out') out.out = path.resolve(argv[++i]);
     else if (a === '--no-coupling') out.coupling = false;
     else if (a === '--json') out.json = true;
+    else if (a === '--describe') out.describe = true;
     else if (a === '--help' || a === '-h') out.help = true;
   }
   return out;
@@ -373,6 +424,9 @@ export function collect(oldRepo, { coupling: withCoupling = true } = {}) {
 const HELP = `tools/old-repo-inventory.mjs — 重新实测旧仓，生成 docs/00-origin/old-repo-inventory.md
 
   node tools/old-repo-inventory.mjs [--old-repo <dir>] [--out <file>] [--no-coupling] [--json]
+  node tools/old-repo-inventory.mjs --describe [--json]     # 自描述：数据 / 操作
+
+（经派发器：pnpm tools old-repo <inventory|describe> [args]）
 `;
 
 export function main(argv = process.argv.slice(2)) {
@@ -381,11 +435,28 @@ export function main(argv = process.argv.slice(2)) {
     process.stdout.write(HELP);
     return 0;
   }
+  if (args.describe) {
+    process.stdout.write(args.json ? `${JSON.stringify(describe(), null, 2)}\n` : describeText());
+    return 0;
+  }
   if (!fs.existsSync(args.oldRepo)) {
     process.stderr.write(`旧仓不存在：${args.oldRepo}\n`);
     return 2;
   }
   const data = collect(args.oldRepo, { coupling: args.coupling });
+
+  // ★ 拒绝写出"错盘点"：git 事实拿不到（不是 git 仓库 / git 跑不起来）时，宁可失败也不写全 0 的文件。
+  //   （实测踩过：受限沙箱里管道 spawn EPERM 被 catch 吞掉 ⇒ 静默覆盖成一份全 0 的盘点。）
+  const suspicious = [];
+  if (!/^[0-9a-f]{40}$/.test(data.facts.headSha)) suspicious.push('HEAD 不是 40 位 sha（不是 git 仓库？）');
+  if (data.facts.trackedCount === 0) suspicious.push('跟踪文件数为 0');
+  if (data.facts.commits === 0) suspicious.push('提交数为 0');
+  if (suspicious.length) {
+    process.stderr.write(`拒绝写出盘点（实测结果不可信）：${suspicious.join('；')}\n`);
+    process.stderr.write(`（没有覆盖 ${path.relative(REPO_ROOT, args.out)}；请先确认 ${args.oldRepo} 是完好的 git 仓库、且 git 能跑起来）\n`);
+    return 2;
+  }
+
   if (args.json) {
     process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
     return 0;

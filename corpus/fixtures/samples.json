@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "_doc": "本文件是**不透明数据**：字段语义 / 不变量 / 怎么查怎么改 见 `pnpm tools fixtures describe`（说明书 corpus/fixtures/samples.md）。不要手改。",
+  "samples": [
+    {
+      "slot": "76",
+      "where": "SC0000 第一个战斗前",
+      "files": [
+        {
+          "name": "SAVE76.DAT",
+          "mtimeMs": 1790130898645,
+          "mtimeLocal": "2026-09-23T10:34:58",
+          "tzOffsetMinutes": 480
+        },
+        {
+          "name": "SAVE76.STH",
+          "mtimeMs": 1790130898689,
+          "mtimeLocal": "2026-09-23T10:34:58",
+          "tzOffsetMinutes": 480
+        }
+      ]
+    },
+    {
+      "slot": "77",
+      "where": "SC0000 入口",
+      "files": [
+        {
+          "name": "SAVE77.DAT",
+          "mtimeMs": 1790100533349,
+          "mtimeLocal": "2026-09-23T02:08:53",
+          "tzOffsetMinutes": 480
+        },
+        {
+          "name": "SAVE77.STH",
+          "mtimeMs": 1790100533393,
+          "mtimeLocal": "2026-09-23T02:08:53",
+          "tzOffsetMinutes": 480
+        }
+      ]
+    },
+    {
+      "slot": "78",
+      "where": "SN0000 结尾",
+      "files": [
+        {
+          "name": "SAVE78.DAT",
+          "mtimeMs": 1790009319067,
+          "mtimeLocal": "2026-09-22T00:48:39",
+          "tzOffsetMinutes": 480
+        },
+        {
+          "name": "SAVE78.STH",
+          "mtimeMs": 1790009319111,
+          "mtimeLocal": "2026-09-22T00:48:39",
+          "tzOffsetMinutes": 480
+        }
+      ]
+    },
+    {
+      "slot": "79",
+      "where": "SN0000 开头",
+      "files": [
+        {
+          "name": "SAVE79.DAT",
+          "mtimeMs": 1789749538228,
+          "mtimeLocal": "2026-09-19T00:38:58",
+          "tzOffsetMinutes": 480
+        },
+        {
+          "name": "SAVE79.STH",
+          "mtimeMs": 1789749538273,
+          "mtimeLocal": "2026-09-19T00:38:58",
+          "tzOffsetMinutes": 480
+        }
+      ]
+    }
+  ]
+}

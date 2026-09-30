@@ -3,45 +3,96 @@
 > 语言口径：本目录**一律 `.mjs`**（无构建步骤、无 `tsconfig`）—— 只有 `apps/emulator` 用 TypeScript。
 > 旧仓的工具（台账生成器 / 校验器 / `.tmp/` 里那些一次性脚本）**一律按"重建"处理**，只登记不迁移。
 
-## 1. 现有工具
+## 0. 分层：**纯工具 → 领域模型 → CLI**（依赖方向单向）
 
-| 工具 | 作用 |
-|---|---|
-| `corpus.mjs` | ★ **`corpus/assets.json` 的守卫 + 唯一写入口**（§3.3 的 9 条断言） |
-| `disasm-recode.mjs` | 反汇编语料的 **CP932→UTF-8 + CRLF→LF 无损转码**与保真断言（§1.8.1） |
-| `old-repo-inventory.mjs` | **重新实测旧仓** → `docs/00-origin/old-repo-inventory.md`（只读旧仓） |
-| `test/corpus-manifest.test.mjs` | 守卫的单元测试 + 端到端测试（`node --test`） |
-
-## 2. 怎么跑
-
-```bash
-pnpm validate                          # = node tools/corpus.mjs --validate
-pnpm test                              # = node --test "tools/test/**/*.test.mjs"
-pnpm corpus -- --list                  # 条目一览
-pnpm corpus -- --scan --write          # 补 origin[].sha256（唯一写入口；缺省 dry-run）
-pnpm corpus -- --set <id> '<patch-json>' --write   # 改条目（写后回读复验，不绿回滚）
-pnpm inventory                         # 重测旧仓 → docs/00-origin/old-repo-inventory.md
-pnpm recode -- --verify                # 语料转码断言（不落盘）
-pnpm recode -- --build                 # 转码落盘 + 打确定性 zip（M1 用）
+```
+tools/
+  cli.mjs            # 派发器：域地图 + 薄转发（认识各 CLI，但不实现任何规则）
+  corpus.mjs fixtures.mjs disasm-recode.mjs old-repo-inventory.mjs   # CLI：参数 → 模型 → 输出
+  lib/
+    paths.mjs fsx.mjs exec.mjs zip.mjs time.mjs cp932.mjs   # ★ 纯工具：不认识任何领域数据
+    manifest.mjs samples.mjs                                 # ★ 领域模型：schema / 不变量 / 读 / 写 / 自描述
+  test/*.test.mjs    # 基建契约测试
 ```
 
-## 3. `corpus.mjs` 的 9 条断言（§3.3）
+**为什么这么分**（用户口径）：*"为了方便在交叉 import/export；纯粹的工具（例如驱动 git）应该作为独立工具 mjs 提供，而非从业务 mjs 中导出。"*
+三层各自的边界：
 
-| # | 断言 | 备注 |
+| 层 | 认什么 | 不认什么 | 例 |
+|---|---|---|---|
+| **纯工具** `lib/{paths,fsx,exec,zip,time,cp932}` | 路径 / Buffer / 子进程 / 时间 / 编码 | **任何"素材 / 槽 / 语料"概念** | `exec.mjs` 的 `runCapture()`——驱动 git 的纯工具，谁都能用 |
+| **领域模型** `lib/{manifest,samples}` | 自己那份数据的 schema、不变量、读写、自描述 | **argv、打印** | `saveManifest()`（清单唯一写入口）；`saveSamples()` |
+| **CLI** `tools/*.mjs` | 参数解析、打印、dry-run 计划 | 规则本身（都在模型里） | `corpus.mjs --validate` |
+
+两条硬规则（由 `test/layering.test.mjs` 守）：
+
+1. **`lib/**` 不得 import `tools/*.mjs`** —— 模型不许依赖 CLI（`fixtures` 要用清单模型，import 的是 `lib/manifest.mjs`，**不是** `corpus.mjs`）。
+2. **CLI 之间不得互相 import** —— 只有派发器 `cli.mjs` 认识各 CLI；纯工具不得反向依赖领域模型。
+
+★ 判据一句话：**"这个函数认识'素材/槽/语料'吗？"** 不认识 ⇒ 进 `lib/` 的纯工具；认识但只是"数据怎么读怎么写" ⇒ 进领域模型；只有"怎么从命令行调、怎么打印" ⇒ 留 CLI。
+
+## 0.1 入口只有两个（`package.json` 不堆命令）
+
+```bash
+pnpm tools          # ① 域地图：域 → 数据 → 读写 → 操作（由各工具的自我声明**派生**）
+pnpm test           # ② 全仓测试（不属于任何域）
+```
+
+* **域命令一律经派发器**：`pnpm tools <域> <动作> [args…]` —— 位置参数与 flag 直接跟在后面（**不必 `--`**）。
+* `pnpm tools <域>` 看该域详情（数据 / 不变量 / 操作）；`pnpm tools --json` 给机器读。
+* ★ 为什么要这样：命令多了以后，**扁平的 `scripts` 回答不了"这个脚本动哪片数据"**。
+  现在每个工具自己声明 `DOMAIN`（动哪片数据 / 读写方式）与 `OPERATIONS`（有哪些动作、会不会写），
+  地图由声明派生 ⇒ **新增工具只改它自己**，`package.json` 不用动，也**漏不进地图**（`test/cli.test.mjs` 守）。
+* ★ 契约（`decisions.md` §7）：`cli.mjs` **只转发，不实现任何规则**；写操作永远落在各工具自己的写入口里。
+
+## 1. 现有工具
+
+| 工具 | 域 | 作用 |
 |---|---|---|
-| 1 | schema：必填齐全、枚举合法、`id` 全局唯一 | |
-| 2 | 自洽：`external-only`/`deferred` ⇔ `dest === null`；`lfs`/`git` ⇔ `dest` 非空 | |
-| 3 | 存在性：`dest` 在盘上；`origin[].path` 按 `roots[root]` 解析后必须存在 | ★ `root=staging` 例外：可缺失，只报 warning（中转区，不是长期位置） |
-| 4 | 校验和纪律：**入库件不得写 `origin[].sha256`**；**不入库的文件件必须写且与盘上一致**；目录型 origin 不写 | "没被改过"的唯一证据 |
-| 5 | 忽略一致性：`external-only` 且 `dest` 在仓内 ⇒ 必须被 `.gitignore` 命中 | |
-| 6 | LFS 一致性：`storage=lfs` ⇒ `git check-attr filter -- <dest>` 必须是 `lfs` | |
-| 7 | 语料保真：**入库的** `disasm-corpus` ⇒ `recipe` 必填且**真跑一次断言** | ★ 只对"真正入库的那一份"强制（用户拍板）：转码前的原件与"明确不带的清单"豁免 |
-| 8 | 知识准入门：`kind=knowledge-source` ⇒ `storage` 只能是 `external-only`/`deferred` | K3 通过前不得入库 |
-| 9 | 真前身可解析：`derivedFrom[].ref` 必须是存在的 `id`；**入库的** `disasm-corpus` 必须有一条指向 `kind=binary` | ★ 同 #7 的作用域 |
+| `cli.mjs` | —— | 入口：地图 + 薄转发（**不含任何业务规则**） |
+| `corpus.mjs` | `corpus` | ★ `corpus/assets.json` 的守卫 + 唯一写入口（schema/不变量见 `pnpm tools corpus describe`） |
+| `fixtures.mjs` | `fixtures` | ★ `corpus/fixtures/samples.json` 的查询 + 唯一编辑入口（见 `pnpm tools fixtures describe`） |
+| `disasm-recode.mjs` | `disasm` | 反汇编语料的**无损转写**与保真断言（见 `pnpm tools disasm describe`） |
+| `old-repo-inventory.mjs` | `old-repo` | **重新实测旧仓**（只读）→ `docs/00-origin/old-repo-inventory.md` |
+| `test/*.test.mjs` | —— | 基建契约测试（`node --test`） |
+
+★ **每个自有的结构化数据文件都有一份同名说明书**（`assets.json` → `assets.md`、`samples.json` → `samples.md`）：
+"它是什么 / 怎么查 / 怎么改"全在那一份里，本文件不重复（约定见 `../docs/00-origin/decisions.md` §6，由 `test/json-docs.test.mjs` 守）。
+
+## 2. 常用命令（都经派发器；每个工具也都能独立 `node tools/xxx.mjs …` 跑）
+
+```bash
+pnpm tools corpus validate                  # 跑 9 条不变量（全仓门禁）
+pnpm tools corpus list                      # 素材条目一览（+ --json）
+pnpm tools corpus scan --write              # 补 origin[].sha256（唯一写入口；缺省 dry-run）
+pnpm tools corpus set <id> '<patch-json>' --write   # 改条目（写前内存预验；写后回读复验，不绿回滚）
+pnpm tools fixtures list                    # 存档样本：槽 / 定位 / mtime 漂移 / 来源
+pnpm tools fixtures restore-mtime --write   # 刚 clone：把 mtime 按记录的 instant 拨回去（跨时区也对）
+pnpm tools disasm verify                    # 语料保真断言（原件在就按原件；不在就由 zip 反解 + 清单 sha256 自证）
+pnpm tools disasm build                     # 转写落盘 + 打确定性 zip（需要 .staging/ 里的原件）
+pnpm tools disasm restore                   # 由 zip 反解回投递原件（默认写回 .staging/）
+pnpm tools old-repo inventory               # 重测旧仓 → docs/00-origin/old-repo-inventory.md
+```
+
+> ★ **两个环境口径**（都在代码里，不靠人记）：
+> ① **不捕获子进程输出**：`stdio: 'pipe'` 在受限沙箱里要开命名管道 ⇒ `spawn EPERM`。
+>    `corpus.mjs` 的 `runCapture()` 把 stdout 重定向到**文件描述符**（临时文件在**系统临时区**，
+>    因此调用方那侧一个字节都不会被写），拿到同一份 git/recipe 答案而不开管道；
+>    命令真的跑不起来时按 **warning** 报出（不静默放过）；**而"盘点"类工具宁可失败也不写错文件**。
+> ② **测试跑在单进程里**：`--test-isolation=none` —— 默认隔离模式由 runner 起子进程并走管道，同样会 EPERM；
+>    in-process 还更快。测试内部也**刻意不捕获子进程输出**（能直接调的就直接调）。
+
+## 3. 守卫的 9 条断言在哪
+
+**在控制脚本的自描述里**：`pnpm tools corpus describe`（标题真源是 `corpus.mjs` 的 `CHECK_TITLES`，
+`--validate` 与 `--describe` 取同一份 ⇒ 不会两处漂移）。本文件不重复。
 
 ## 4. 为什么要有这些工具（而不是手写脚本）
 
 * 旧仓 `.tmp/` 里有 **724 个 `.mjs` + 431 个 `.py`** 一次性脚本 —— 那是"没有工具层"的代价：
   每次都临时写、写完就废、结论无处沉淀。
-* 因此新仓的工具是**长期资产**：有 `--help`、有退出码、有测试、有确定的输出格式；
+* 因此新仓的工具是**长期资产**：有 `--help` / `--describe`、有退出码、有测试、有确定的输出格式；
   **不写进 `tools/` 的脚本，就不该被反复用第二次**。
+* 这条纪律**立刻兑现过一次**：`corpus/fixtures/samples.json` 起初是用一次性命令生成的，
+  结果里面的 `mtimeMs` 整整差了 8 小时（而同一个命令算出的墙上时间是对的，所以没有任何断言发现它）。
+  改成 `fixtures.mjs` 之后第一次 `--refresh-all` 就把这个错纠了出来 —— 因为工具用的是文件系统给的 instant。

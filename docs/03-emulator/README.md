@@ -22,7 +22,7 @@
 ## 3. 语言与工具链口径
 
 * **`apps/emulator` 是本仓唯一使用 TypeScript 的子项目**（自带其工具链），M4 落地后进 workspaces；
-  其余 `packages/*` / `tools/*` 与所有测试**一律 `.mjs`**（见 `../00-origin/decisions.md` §6 与 `AGENTS.md` §3）。
+  其余 `packages/*` / `tools/*` 与所有测试**一律 `.mjs`**（见 `AGENTS.md` §3）。
 * `native/host-input` 走 **CMake / node-gyp**（C++），**不进 npm workspaces**；
   预编译产物的口径（哪些平台预置、为什么预置）随重写重新定，旧口径见旧仓 `native/host-input/README.md`。
 * 旧仓的 **10 个跨域守卫寄生在模拟器的 `test/` 下** —— 这是"目录混关注点"的典型症状，

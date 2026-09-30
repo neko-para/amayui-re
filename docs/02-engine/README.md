@@ -47,8 +47,8 @@
 
 ```text
 corpus/disasm/
-  disasm-20260930.zip    # ★ 入库（LFS）—— 内含 4 个 **UTF-8** 文件
-  README.md              # 清单 + 来源 + sha256 + 解压/转码/断言口径
+  disasm-20260930.zip    # ★ 入库（LFS）—— 内含 4 个 **UTF-8 + LF** 文件
+  README.md              # 清单 + 来源 + sha256 + 转写规则 + 断言口径
   files/                 # ← gitignore：解压产物，agent 直接读这里
 ```
 
@@ -86,5 +86,5 @@ IDA 输出**不具可复现性** ⇒ 整体作为只读资源保存。
 
 ## 5. 本轮明确不做
 
-* ❌ 不复制任何语料（连 4 个文件也还没入 zip —— 那是 M1）；❌ 不写任何字段 / 函数 / opcode 结论；
+* ❌ 不复制任何语料（语料以 zip 入库，见 `corpus/README.md`）；❌ 不写任何字段 / 函数 / opcode 结论；
 * ❌ 不处理两个 exe 的入库（本轮与 M1 都不含）。

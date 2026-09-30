@@ -8,10 +8,7 @@
     "tools"
   ],
   "scripts": {
-    "validate": "node tools/corpus.mjs --validate",
-    "test": "node --test \"tools/test/**/*.test.mjs\"",
-    "corpus": "node tools/corpus.mjs",
-    "inventory": "node tools/old-repo-inventory.mjs",
-    "recode": "node tools/disasm-recode.mjs"
+    "test": "node --test --test-isolation=none \"tools/test/**/*.test.mjs\"",
+    "tools": "node tools/cli.mjs"
   }
 }

@@ -1,6 +1,6 @@
 # 旧仓盘点（实测快照）
 
-> 本文件由 `pnpm inventory`（`tools/old-repo-inventory.mjs`）**重新实测生成** —— **不要手改，改脚本**。
+> 本文件由 `pnpm tools old-repo inventory`（`tools/old-repo-inventory.mjs`）**重新实测生成** —— **不要手改，改脚本**。
 > 快照里**不写生成时间**（那只会让每次扫描都产生 diff）；只写实测数字与旧仓 HEAD。
 > 旧仓全程**只读**：本脚本只跑只读 git 命令与 fs 读取。
 
