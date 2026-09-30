@@ -11,7 +11,7 @@ tools/
   corpus.mjs fixtures.mjs disasm-recode.mjs old-repo-inventory.mjs   # CLI：参数 → 模型 → 输出
   lib/
     paths.mjs fsx.mjs exec.mjs zip.mjs time.mjs cp932.mjs   # ★ 纯工具：不认识任何领域数据
-    manifest.mjs samples.mjs                                 # ★ 领域模型：schema / 不变量 / 读 / 写 / 自描述
+    manifest.mjs samples.mjs requirements.mjs                # ★ 领域模型：schema / 不变量 / 读 / 写 / 自描述
   test/*.test.mjs    # 基建契约测试
 ```
 
@@ -52,12 +52,14 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `cli.mjs` | —— | 入口：地图 + 薄转发（**不含任何业务规则**） |
 | `corpus.mjs` | `corpus` | ★ `corpus/assets.json` 的守卫 + 唯一写入口（schema/不变量见 `pnpm tools corpus describe`） |
 | `fixtures.mjs` | `fixtures` | ★ `corpus/fixtures/samples.json` 的查询 + 唯一编辑入口（见 `pnpm tools fixtures describe`） |
+| `requirements.mjs` | `requirements` | ★ `data/requirements/` 的进度视图 + 唯一编辑入口（需求/缺陷 + 父子树；见 `pnpm tools requirements describe`） |
 | `disasm-recode.mjs` | `disasm` | 反汇编语料的**无损转写**与保真断言（见 `pnpm tools disasm describe`） |
 | `old-repo-inventory.mjs` | `old-repo` | **重新实测旧仓**（只读）→ `docs/00-origin/old-repo-inventory.md` |
 | `test/*.test.mjs` | —— | 基建契约测试（`node --test`） |
 
 ★ **每个自有的结构化数据文件都有一份同名说明书**（`assets.json` → `assets.md`、`samples.json` → `samples.md`）：
 "它是什么 / 怎么查 / 怎么改"全在那一份里，本文件不重复（约定见 `../docs/00-origin/decisions.md` §6，由 `test/json-docs.test.mjs` 守）。
+需求台账是**多文件**结构（一个节点一个 `.md`），它的散文说明在同目录 `data/requirements/README.md`（同样只写口径，schema 指向 `--describe`）。
 
 ## 2. 常用命令（都经派发器；每个工具也都能独立 `node tools/xxx.mjs …` 跑）
 
@@ -67,6 +69,9 @@ pnpm tools corpus list                      # 素材条目一览（+ --json）
 pnpm tools corpus scan --write              # 补 origin[].sha256（唯一写入口；缺省 dry-run）
 pnpm tools corpus set <id> '<patch-json>' --write   # 改条目（写前内存预验；写后回读复验，不绿回滚）
 pnpm tools fixtures list                    # 存档样本：槽 / 定位 / 每个文件是否与记录的 instant 一致
+pnpm tools requirements plan                # ★ 进度视图：按父子树打印 + 聚合状态（唯一的进度真源）
+pnpm tools requirements serve               # 本地只读网页（总览 + 详情）：http://127.0.0.1:7788/
+pnpm tools requirements validate             # 需求台账的 5 条不变量（红 = 退出码 1）
 pnpm tools fixtures restore-mtime --write   # 刚 clone：把 mtime 按记录的 instant 拨回去（跨时区也对）
 pnpm tools disasm verify                    # 语料保真断言（原件在就按原件；不在就由 zip 反解 + 清单 sha256 自证）
 pnpm tools disasm build                     # 转写落盘 + 打确定性 zip（需要 .staging/ 里的原件）

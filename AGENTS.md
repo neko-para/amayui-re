@@ -62,7 +62,9 @@ pnpm install                    # 只有 workspace 链接（包管理用 pnpm，
 pnpm tools                      # ★ 先看这个：域地图（域 → 数据 → 读写 → 操作）
 pnpm tools corpus validate      # ★ 素材清单守卫（红了就必须修，不是"看看"）
 pnpm tools corpus scan --write  # 补 origin[].sha256（唯一写入口）
-pnpm tools fixtures list        # 存档样本：槽 / 定位 / mtime 漂移 / 来源
+pnpm tools fixtures list        # 存档样本：槽 / 定位 / mtime 漂移
+pnpm tools requirements plan    # ★ 进度：需求树（还要做什么、到哪一步）+ 聚合状态
+pnpm tools requirements validate # 需求台账守卫（红 = 退出码 1）
 pnpm tools disasm verify        # 反汇编语料保真断言（逐行反解回字节必须与源逐字节相同）
 pnpm tools old-repo inventory   # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm test                       # 守卫测试（单进程跑，见下）
@@ -118,13 +120,14 @@ pnpm test                       # 守卫测试（单进程跑，见下）
 * ✅ 只写**不变的东西**：口径 / 禁令 / 不变量 / 落点地图 / 怎么跑。
 * ❌ **状态、进度、计数、体积、哈希、快照数字一律不手写**。自检一句话：
   **"这句话会不会因为下次干活而变错？"** 会 ⇒ 不要写进 README，改成**"怎么查"**。
-* **怎么查**（真源）：入库进度看 `corpus/assets.json` 的 `storage`/`dest`（`deferred` → `lfs` 就是进度）·
+* **怎么查**（真源）：**进度与"还要做什么" = `pnpm tools requirements plan`（需求树 `data/requirements/`）**·
+  入库进度看 `corpus/assets.json` 的 `storage`/`dest`（`deferred` → `lfs` 就是进度）·
   条目与去向 `pnpm tools corpus list` · 语料保真 `pnpm tools disasm verify` · 旧仓数字 `pnpm tools old-repo inventory` ·
   变更历史 `git log` / `git log -L`。
 * ❌ 不要开 CHANGELOG / 进度表 / "已完成"清单：**`git log` 就是变更记录**。
-* 例外**只有两处**：**生成物**（整篇都是状态，但由脚本生成 + 文件头写明"别手改"），范例 `docs/00-origin/old-repo-inventory.md`；
-  以及**根目录 `PLAN.md`**（多轮迁移的**批次级**进度表）—— 只写「批次 / 状态 / 依赖 / 入口」，
-  **不落细节**（细节要么已在仓库里，要么在旧仓）；每轮结束**只改状态**。由 `tools/test/plan.test.mjs` 守。
+* 例外**只有一处**：**生成物**（整篇都是状态，但由脚本生成 + 文件头写明"别手改"），范例 `docs/00-origin/old-repo-inventory.md`。
+  ★ 进度**不在散文里**：它由需求树回答（`pnpm tools requirements plan`）——
+  所以本仓**没有**手写进度表，也没有"唯一允许手写状态的文件"这条例外。
 * **结构化数据不进散文**：文件清单 / 用途 / 定位 / mtime / 哈希一律**只留一份结构化真源**，README **不列表、不抄数**。
 * **JSON 是不透明数据**：任何 JSON 的字段语义 / 枚举 / 不变量 / 操作**只看它的控制脚本的自描述**
   （`pnpm tools corpus describe`、`pnpm tools fixtures describe`），

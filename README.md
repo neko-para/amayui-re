@@ -15,6 +15,7 @@
 | **AGE 二进制格式** | `packages/age-format/` | ALF / AGF / ASM 等容器格式 |
 | **AGE 脚本 DSL** | `packages/script-dsl/` | 脚本解析 / 组装 / reflow |
 | **台账** | `packages/ledger/` + `data/ledger/` | append-only 文本真源 + 可删可重建的派生 SQLite 查询层 |
+| **需求台账** | `data/requirements/` | ★ **高层次的进度视图**：需求/缺陷 + 父子树（`pnpm tools requirements plan`）；与业务不耦合 |
 | **模拟器** | `apps/emulator/` | 唯一使用 **TypeScript** 的子项目（见"语言口径"） |
 | **真机探针** | `apps/inspector/` | .NET 10 / C#，独立工具链 |
 | **跨域工具** | `tools/` | 素材清单守卫、语料转码、旧仓盘点（**纯 `.mjs`**） |
@@ -61,7 +62,8 @@ pnpm tools disasm restore     # 由 zip 反解回投递原件（.staging/ 可随
 
 | 想了解 | 读 |
 |---|---|
-| **迁移到哪一步了 / 下一步做什么** | **`PLAN.md`**（批次级进度表；细节在各域文档） |
+| **迁移到哪一步了 / 下一步做什么** | **`pnpm tools requirements plan`**（需求树 = 唯一的进度真源；原 `PLAN.md` 的批次表已并入其「仓库迁移与重建」一支，该文件已删除） |
+| 需求/缺陷怎么登记、父子怎么归、两类流程差在哪 | `data/requirements/README.md` + `pnpm tools requirements describe` |
 | 为什么重建、有哪些**原创决策**（存储纪律 / 跨平台 / 已定口径） | `docs/00-origin/decisions.md` |
 | 知识层怎么重建（清理起点清单 + A/B/C 分级 + 准入规则） | `docs/00-origin/knowledge-rebuild.md` |
 | 立项原文（本轮提示词） | `docs/00-origin/init-prompt.md` |

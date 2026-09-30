@@ -56,6 +56,9 @@ test('② CLI 之间不得互相 import（只有派发器 cli.mjs 认识各 CLI�
   const bad = [];
   for (const f of clis) {
     for (const s of importSpecifiers(path.join(TOOLS, f))) {
+      // ★ 按**同目录**解析判：`./x.mjs` 才算"另一个 CLI"。
+      //   （只比 basename 会把 `./lib/<与某 CLI 同名>.mjs` 误判成互相 import —— 领域模型与 CLI 同名是合法的。）
+      if (!/^\.\/[^/]+\.mjs$/.test(s)) continue;
       const base = path.basename(s);
       if (clis.includes(base)) bad.push(`${f} → ${s}`);
     }

@@ -63,8 +63,8 @@ test('地图覆盖全部工具，且 JSON 版形状稳定', async () => {
     assert.ok(d.id && d.title && d.tool && Array.isArray(d.data) && d.data.length > 0, `域 ${d.id} 的地图条目不完整`);
     assert.ok(d.operations.length > 0);
   }
-  // 已知四个域必须都在（漏一个就说明自我声明丢了）
-  assert.deepEqual(j.domains.map((d) => d.id).sort(), ['corpus', 'disasm', 'fixtures', 'old-repo']);
+  // 已知五个域必须都在（漏一个就说明自我声明丢了）
+  assert.deepEqual(j.domains.map((d) => d.id).sort(), ['corpus', 'disasm', 'fixtures', 'old-repo', 'requirements']);
 });
 
 test('转发可用：`tools <域> <只读动作>` 能真的跑到该工具（进程内调用，不捕获输出）', async () => {
@@ -72,6 +72,7 @@ test('转发可用：`tools <域> <只读动作>` 能真的跑到该工具（进
   // 只用**只读**动作，避免测试改数据
   assert.equal(await main(['corpus', 'list']), 0);
   assert.equal(await main(['fixtures', 'list']), 0);
+  assert.equal(await main(['requirements', 'list']), 0);
   assert.equal(await main(['disasm', 'describe']), 0);
   assert.equal(await main(['old-repo', 'describe']), 0);
 });

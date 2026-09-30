@@ -88,11 +88,12 @@
 用户口径：**过多 README 记录只是在制造污染与不一致**；**JSON 是不透明数据**；**这里搭的是基建不是业务**。
 
 1. **不写状态**。自检一句话：**"这句话会不会因为下次干活而变错？"** 会 ⇒ 不写，改成**"怎么查"**。
-   真源：入库进度 = 清单的 `storage`/`dest`；条目与去向 = `pnpm tools corpus list`；
+   真源：**进度与"还要做什么" = `pnpm tools requirements plan`（需求树 `data/requirements/`）**；
+   入库进度 = 清单的 `storage`/`dest`；条目与去向 = `pnpm tools corpus list`；
    语料保真 = `pnpm tools disasm verify`；旧仓数字 = `pnpm tools old-repo inventory`；变更历史 = `git log`。
-   **不开 CHANGELOG / 进度表**。例外**只有两处**：**生成物**（脚本产出 + 文件头写明"别手改"），
-   以及**根目录的 `PLAN.md`** —— 它是多轮迁移的**批次级进度表**，是本仓唯一允许手写状态的地方；
-   因此它只写"批次 / 状态 / 依赖 / 入口"，**不落任何细节**（由 `tools/test/plan.test.mjs` 守）。
+   **不开 CHANGELOG / 进度表**。例外**只有一处**：**生成物**（脚本产出 + 文件头写明"别手改"）。
+   ★ 进度原先是根目录一份手写的批次表（`PLAN.md`），现已被**需求树**取代并删除；
+   因此本仓不再有"唯一允许手写状态的文件"这条例外。
 2. **结构化数据不进散文**：文件清单 / 用途 / 定位 / mtime / 哈希**只留一份结构化真源**，README 不列表、不抄数。
    ★ 确实需要两处都出现时 ⇒ **先问"能不能只留一处"**；真需要就**钉住**（测试断言两处一致）。
    ❌ 不加"不许出现某字符串"这类脆弱守卫 —— 守卫要**红得有意义**。
@@ -107,7 +108,6 @@
    * 推论：**生成器宁可失败，也不许写出错文件**（拿不到事实就抛，不"读不到就当空"）。
 
 ## 7. 工具层的三条决定 `[本轮]`
-
 1. **脚本优先，工具只在真能带来新能力时才存在**：判据是"生命周期 / 人的参与 / 输出形态 / 调用频次 / 发现方式"
    —— 短命、无句柄、有 `--json`、低频、`pnpm` 足够 ⇒ 脚本（corpus 操作五项全落在脚本列）。
    工具 = 插件 = 环境级安装 × 每台机器 × DSH 升级要重装；**最大风险是写路径分裂**。
@@ -130,6 +130,7 @@
 | 素材清单的字段 / 9 条不变量 / 怎么查怎么改 | `corpus/assets.md` + `pnpm tools corpus describe` |
 | 存档样本的槽 / 定位 / mtime 判据 / 唯一编辑入口 | `corpus/fixtures/samples.md` + `pnpm tools fixtures describe` |
 | 素材总则：只读消费规则、LFS 口径、按需迁移、`.staging/` 定位 | `corpus/README.md` |
+| **需求台账**：需求/缺陷的流程差异、父子树、一屏预算、`pnpm tools requirements` 命令表 | `data/requirements/README.md` + `pnpm tools requirements describe` |
 | 引擎域：基线二进制与哈希、节表修补口径、AGERC 三份二进制与作废的旧语料 | `docs/02-engine/README.md` |
 | 翻译域：现状、双份 vs 单份待定、`install/` 先保留 | `docs/01-translation/README.md` |
 | 模拟器 / 探针域：按新结构重写、工具链、跨域守卫要拆回各域 | `docs/03-emulator/README.md`、`apps/*/README.md` |

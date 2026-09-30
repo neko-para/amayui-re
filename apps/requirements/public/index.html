@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>需求台账 · 本地只读</title>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-main">
+    <h1 class="brand">需求<span class="brand-dim">台账</span></h1>
+    <a class="btn" href="#/" data-nav="overview">总览</a>
+    <input id="search" class="search" type="search" placeholder="搜索 短名 / 标题 / id" aria-label="搜索需求">
+    <button id="filter" class="btn" type="button" aria-pressed="true">只看未收口</button>
+    <span class="grow"></span>
+    <button id="theme" class="btn" type="button" title="浅色 / 深色 / 跟随系统">◐ 跟随系统</button>
+    <button id="reload" class="btn" type="button">刷新</button>
+  </div>
+  <div id="summary" class="summary"></div>
+  <div id="notice" class="notice" hidden></div>
+</header>
+<main id="main" class="main"><p class="dim">正在读取…</p></main>
+<footer class="foot">
+  <span class="dim">只读 · 写入口 <code>pnpm tools requirements set --write</code></span>
+  <span class="grow"></span>
+  <span id="dir" class="dim"></span>
+</footer>
+
+<!-- One row of the tree. Content is filled with textContent only (never innerHTML).
+     The row is indented by `--depth` (see app.css) so parent/child is visible at a
+     glance; the title link IS the way into the detail page (no separate button). -->
+<template id="tpl-row">
+  <div class="row">
+    <button class="twist" type="button" aria-label="展开分支"></button>
+    <span class="mark"></span>
+    <div class="row-main">
+      <div class="title-line">
+        <a class="title" href="#/"></a>
+        <span class="flag warn"></span>
+      </div>
+      <div class="meta-line">
+        <span class="short"></span>
+        <button class="copy" type="button" title="复制完整 id">⧉</button>
+        <span class="prog"></span>
+        <span class="blocked"></span>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
