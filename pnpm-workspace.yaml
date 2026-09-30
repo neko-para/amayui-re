@@ -1,0 +1,6 @@
+# pnpm 的 workspace 真源（package.json 的 "workspaces" 字段保留，供不认 yaml 的工具读）
+# ★ apps/* 不在列表里：本轮 apps/emulator 与 apps/inspector 只有"重写计划"占位，
+#   代码还没搬进来，等 M4/M7 真正落地时再入 workspaces（见 docs/00-origin/decisions.md）。
+packages:
+  - packages/*
+  - tools

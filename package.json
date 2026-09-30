@@ -1,0 +1,17 @@
+{
+  "name": "amayui-re",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "workspaces": [
+    "packages/*",
+    "tools"
+  ],
+  "scripts": {
+    "validate": "node tools/corpus.mjs --validate",
+    "test": "node --test \"tools/test/**/*.test.mjs\"",
+    "corpus": "node tools/corpus.mjs",
+    "inventory": "node tools/old-repo-inventory.mjs",
+    "recode": "node tools/disasm-recode.mjs"
+  }
+}

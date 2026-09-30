@@ -1,0 +1,16 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+# 二进制 / LFS 载荷：不要补尾换行、不要动行尾
+[*.{BIN,DAT,STH,png,ttf,node,DLL,dll,exe,EXE,zip,7z,idb}]
+insert_final_newline = false

@@ -1,0 +1,30 @@
+* text=auto eol=lf
+# ★ 上面那行必须是首行（§1.7 第 1 条）。旧仓零 text/eol 规则、core.autocrlf=false，
+#   已实测出 8 个混合行尾文件 ⇒ 新仓从一开始就钉死 "默认文本 + LF"。
+
+# —— LFS：显式 track（§1.6 第 2 条）————————————————————————————
+# ★ LFS 只解决"大"，**不解决合并** —— 所以它救不了 DB（见 .gitignore 与 AGENTS.md 硬纪律 1）。
+# ★ 为什么**不**写 `corpus/disasm/**`：那会把 corpus/disasm/README.md 一起吞进 LFS。
+#   入库的是 zip（下面的 `*.zip` 已覆盖），解压产物走 .gitignore，README 必须留在 git 文本里。
+*.zip  filter=lfs diff=lfs merge=lfs -text
+*.BIN  filter=lfs diff=lfs merge=lfs -text
+*.DAT  filter=lfs diff=lfs merge=lfs -text
+*.STH  filter=lfs diff=lfs merge=lfs -text
+*.png  filter=lfs diff=lfs merge=lfs -text
+*.ttf  filter=lfs diff=lfs merge=lfs -text
+*.node filter=lfs diff=lfs merge=lfs -text
+*.DLL  filter=lfs diff=lfs merge=lfs -text
+*.dll  filter=lfs diff=lfs merge=lfs -text
+*.exe  filter=lfs diff=lfs merge=lfs -text
+*.EXE  filter=lfs diff=lfs merge=lfs -text
+*.7z   filter=lfs diff=lfs merge=lfs -text
+*.idb  filter=lfs diff=lfs merge=lfs -text
+
+# —— 明确不是文本、但也**不进 LFS** 的：任何 eol 转换都会毁掉它 ————————
+# （本轮没有这类在库文件；留规则是为了让后来者不必再想一遍。）
+*.lst  -text
+
+# —— 反汇编语料的解压产物不入库，但**不该**被当成二进制误伤 ————————————
+# 见 .gitignore 的 /corpus/disasm/files/
+corpus/disasm/files/*.c    text eol=lf
+corpus/disasm/files/*.lst  text eol=lf
