@@ -19,6 +19,8 @@
 *.EXE  filter=lfs diff=lfs merge=lfs -text
 *.7z   filter=lfs diff=lfs merge=lfs -text
 *.idb  filter=lfs diff=lfs merge=lfs -text
+*.cur  filter=lfs diff=lfs merge=lfs -text
+*.ico  filter=lfs diff=lfs merge=lfs -text
 
 # —— 明确不是文本、但也**不进 LFS** 的：任何 eol 转换都会毁掉它 ————————
 # （本轮没有这类在库文件；留规则是为了让后来者不必再想一遍。）
@@ -28,3 +30,10 @@
 # 见 .gitignore 的 /corpus/disasm/files/
 corpus/disasm/files/*.c    text eol=lf
 corpus/disasm/files/*.lst  text eol=lf
+
+# —— corpus/assets/（UI 图片 + 字体，M1b）————————————————————————————
+# ★ 这里的规则完全靠**扩展名**（`.png` / `.ttf` 已在上面），本目录**不加**路径式规则：
+#   路径规则会连 README / versions.json 这些纯文本侧车一起吞进 LFS —— 与上面不写
+#   `corpus/disasm/**` 是同一条理由（守卫 #6 会把纯文本侧车放行，但别自己制造混淆）。
+#   `.cur` / `.ico`（外部工具导出的光标与图标）已在上面的 LFS 组里。
+# ★ 字体只入库 7z 与派生 ttf；7z 的**解压产物**不入库（见 .gitignore）。

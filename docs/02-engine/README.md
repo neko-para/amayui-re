@@ -84,7 +84,28 @@ IDA 输出**不具可复现性** ⇒ 整体作为只读资源保存。
 | `engine/天结_unpacked.exe{,_utf8}.{c,lst}` | 汉化改写版的导出；其中 `_utf8.c` 还经过 `sanitize_symbols.py`（**非忠实**）⇒ 只作对照，登记在 `disasm/excluded` |
 | `engine/{defs.h,engine.hpp,hxclang_prelude.h}` | Hex-Rays 的配套头文件 ⇒ 本轮明确**不带**（登记在 `disasm/excluded`） |
 
-## 5. 本轮明确不做
+## 5. 本轮明确不做 / 已明确不做
 
 * ❌ 不复制任何语料（语料以 zip 入库，见 `corpus/README.md`）；❌ 不写任何字段 / 函数 / opcode 结论；
-* ❌ 不处理两个 exe 的入库（本轮与 M1 都不含）。
+* ❌ **不迁移两个 exe**（`binary/age-original` / `binary/age-sectfix`）：用户口径 —— M1b 与 M1 都不入仓，
+  两条登记**保持只登记**（`external-only` + 逐件 sha256；`raw-parts/*.idb`（IDA 库，63 MB）**永不入库**）。
+* ❌ **AGERC 三份二进制不迁移**（同上口径）：带壳 / 脱壳调试 / 改文案三份都只登记，逐件 sha256 记在清单里。
+  ★ **一处事实勘误**：`oldRepo:install/AGERC.DLL` 是 **848 896 B**（sha256 `6241de66…`），
+  旧仓 `docs-new/01-translation/ui-images.md` §4 写的 335 872 B 是**带壳发布版**的大小（`5f318955…`），那份文档此处错了。
+
+## 6. 已迁入新仓的资源（落点，不记进度）
+
+| 内容 | 新仓落点 | 清单条目 |
+|---|---|---|
+| 10 张汉化完成图的**生效版** PNG + 7 张未汉化图的 `-0` 原图 + 8 个 E 系列渲染参考块 + 版本表 | `corpus/assets/ui-images/`（LFS） | `assets/ui-images` |
+| 分发字体 `Amayui-CN_cnjp{,-Bold}.ttf` + 上游基底 `SarasaGothic{SC,J}-TTF-1.0.40.7z` | `corpus/assets/fonts/`（LFS；**7z 解压产物 ignore**） | `assets/fonts-dist` |
+| 简→日写法占位字典（旧仓 `res/subs_cn_jp.json`） | `data/translations/subs-cn-jp.json`（git 文本） | `translation/subs-cn-jp` |
+| 烘焙后的 10 个 AGF（注入 install overlay 的那一版） | **不入库**：`external-only` + 逐件 sha256（日后重建链的复现参照） | `assets/ui-images-baked` |
+| 中间版本 PNG、`patch/` 全部产物、WenQuanYi 系列 | **不入库**：只登记或有意跳过 | `assets/ui-images` / `translation/patch` |
+
+* `res/` 根下的**纯文本资源件**（`AGERC.DLL.rc` / `AGERC_RAW.DLL.rc` / `MANIFEST2_1.txt` /
+  `build-localized-agerc.ps1` / `inject-localized-agerc.rsh`）：用户口径 —— 走需求树
+  **「翻译环境重建」→「windows 资源重建」**（见 `data/requirements/`），**M1b 有意不迁**。
+* `CURSOR*.cur` / `IDI_ICON1.ico`：从 `AGERC.DLL` 导出、本身未修改 ⇒ 已随 UI 图片入 `corpus/assets/ui-images/`，
+  组织方式后续由那条需求单重定。
+

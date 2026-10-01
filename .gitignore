@@ -21,5 +21,10 @@ tmp/
 # —— 反汇编语料的解压产物（入库的是 zip，见 §1.8.1）——————————————
 /corpus/disasm/files/
 
+# —— 字体 7z 的解压产物（入库的只有 7z 与派生 ttf；解压目录各机器自建）——————
+# 判据：`corpus/assets/fonts/*.7z` 入库、同名解压目录不入库；由 tools/test 的守卫钉住。
+/corpus/assets/fonts/SarasaGothicJ/
+/corpus/assets/fonts/SarasaGothicSC/
+
 # —— 本机私有配置 ————————————————————————————————————————
 *.local.json

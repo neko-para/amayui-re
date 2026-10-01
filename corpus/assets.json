@@ -98,7 +98,7 @@
     {
       "id": "assets/fonts",
       "kind": "asset",
-      "role": "reference",
+      "role": "archived",
       "storage": "external-only",
       "origin": [
         {
@@ -108,12 +108,12 @@
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：CN/JP 合并字体（旧仓走 LFS）"
+      "consume": "只登记、不迁移：派生 cnjp 分发字体与 Sarasa 上游 7z 已迁入 corpus/assets/fonts；本条目只指向旧仓 res/fonts/ 原处"
     },
     {
       "id": "assets/ui-images",
       "kind": "asset",
-      "role": "reference",
+      "role": "archived",
       "storage": "external-only",
       "origin": [
         {
@@ -123,14 +123,14 @@
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：UI 图片（旧仓走 LFS）",
-      "note": "落点待定（corpus/ 还是 packages/age-format 的测试夹具）"
+      "consume": "只登记、不迁移：中间版本 PNG 与编译后的 AGF 都留在旧仓；生效版 PNG 已迁入 corpus/assets/ui-images（见该目录 versions.json）",
+      "note": "落点已定：corpus/assets/ui-images/（M1b）——从旧仓 res/images 取 10 张汉化完成图的生效版 + 7 张未汉化图的 -0 原图 + 8 个 E 系列渲染参考块；中间版本 PNG 与编译后的 AGF 都不入库"
     },
     {
       "id": "binary/age-original",
       "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "role": "archived",
+      "storage": "external-only",
       "origin": [
         {
           "root": "gameInstall",
@@ -140,14 +140,14 @@
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：PE 节表未还原，直接分析会丢数据段；本轮与 M1 都不入仓",
+      "consume": "只登记、不迁移：PE 节表未还原，直接分析会丢数据段；本轮与 M1 都不入仓（用户口径）",
       "note": "MD5 见 docs/02-engine/README.md（哈希是派生信息，不重复写进清单）"
     },
     {
       "id": "binary/age-sectfix",
       "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "role": "archived",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
@@ -157,14 +157,14 @@
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：这是反汇编语料的真前身（新基线二进制）；本轮与 M1 都不入仓",
+      "consume": "只登记、不迁移：它是反汇编语料的真前身（新基线二进制）；本轮与 M1 都不入仓（用户口径）",
       "note": "与原文件仅节表 24 字节不同；节表修补口径见 docs/02-engine/README.md"
     },
     {
       "id": "binary/agerc-debug-unpacked",
       "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "role": "archived",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
@@ -175,13 +175,13 @@
       "dest": null,
       "readOnly": true,
       "consume": "只登记：不带壳的调试版（有调试入口）⇒ 当前 AGERC 语料的真前身",
-      "note": "AGERC.DLL.c/.lst 就是从它导出的"
+      "note": "AGERC.DLL.c/.lst 就是从它导出的；AGERC.DLL 与中间产物 SarasaGothicSC-Regular_cnjp.ttf 都在 corpus/assets/fonts/SarasaGothicSC-TTF-1.0.40.7z 里，可按需解压（不必回旧仓取）"
     },
     {
       "id": "binary/agerc-modified-install",
       "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "role": "archived",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
@@ -197,8 +197,8 @@
     {
       "id": "binary/agerc-packed",
       "kind": "binary",
-      "role": "deferred",
-      "storage": "deferred",
+      "role": "archived",
+      "storage": "external-only",
       "origin": [
         {
           "root": "gameInstall",
@@ -208,7 +208,7 @@
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：带壳发布版；旧仓 raw/ 是指向同一目录的符号链接",
+      "consume": "只登记、不迁移：带壳发布版；旧仓 raw/ 是指向同一目录的符号链接",
       "note": "反汇编不用它（带壳）"
     },
     {
@@ -755,7 +755,7 @@
     {
       "id": "translation/patch",
       "kind": "asset",
-      "role": "reference",
+      "role": "archived",
       "storage": "external-only",
       "origin": [
         {
@@ -765,7 +765,7 @@
       ],
       "dest": null,
       "readOnly": true,
-      "consume": "只登记：补丁产物目录（旧仓 LFS + 忽略）"
+      "consume": "不迁移、不进新仓台账：旧仓 patch/ 整个目录（AGF / BIN / AGERC.DLL / CHANGELOG.md / patch.config.json / README-测试版说明.md）被有意跳过；打包清单与产物待需求树「翻译环境重建」节点重新设计"
     },
     {
       "id": "translation/translated",
@@ -784,6 +784,143 @@
       "blocks": [
         "M5"
       ]
+    },
+    {
+      "id": "assets/sarasa-upstream",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z",
+          "sha256": "bde7727d6f08e16667dd9a6ee9ad93c399b53da38d2e26dbead8b4b382b71d16"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z",
+          "sha256": "1eaa4017a1843179469827e6d32fa7a79b57ca2a439df6f99ec5857876ba1071"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记、不迁移：上游发行包（Sarasa Gothic SC/J 官方 TTF 1.0.40），登记 sha256 是为了能从上游复取同一版；cnjp 替换用的是 SC 那一份"
+    },
+    {
+      "id": "assets/ui-images-baked",
+      "kind": "asset",
+      "role": "archived",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO001.AGF",
+          "sha256": "689e89452c9aabfe7b13a9423e72a62cc1dfe9e81b4a1133246c36859080222b"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO002.AGF",
+          "sha256": "8369f7e1c35854ec7d179590ff07ae0e10d71391cbf070e9b8f0356650359beb"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO009A.AGF",
+          "sha256": "3a45335ec4cbfd33f99dbfc559899f3a276289aead6e3b023d67201815f059e5"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO009B.AGF",
+          "sha256": "bda4781840f846c4210d157f897b1bf575b95c71767476f513ac521286c99f79"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO017.AGF",
+          "sha256": "90b68a91bb031d94746384a3c489d6d35732675fad4658ac52d0145ddc2e0036"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO020.AGF",
+          "sha256": "d580ce6ec8e79d5f38c4fbe0d55702fa622dfbf922e147308e64cc1fc8bed533"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO021.AGF",
+          "sha256": "d71d4ae88fd81afd42dc076d318879fa41623c9efebefacb9f2d497977117a63"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO025.AGF",
+          "sha256": "0bac795dab9b59767fa24f2e8244d265ee475774d602321beaef235d018f5347"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO030.AGF",
+          "sha256": "df1e8f0ee7bae344edc18ba6d83a8f8e1e2ab516161d4aabb62849c2a592a06f"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO039.AGF",
+          "sha256": "253b201b1e39599f0f21bb9ae41bd7e47bbe48c04d67d96d1b8d4bc27b7208b6"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记、不入库（编译产物）：由 corpus/assets/ui-images/ 的生效版 PNG 烘焙出来、注入 install overlay 的那一版 AGF；sha256 是日后重建链能否复现同一份产物的唯一参照",
+      "blocks": [
+        "M2"
+      ],
+      "note": "旧仓 patch/AGF/ 与这 10 个文件同尺寸（同一批产物的副本），但 patch/ 整个目录有意不进新仓台账"
+    },
+    {
+      "id": "translation/subs-cn-jp",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "git",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/subs_cn_jp.json"
+        }
+      ],
+      "dest": "data/translations/subs-cn-jp.json",
+      "readOnly": true,
+      "consume": "只读：脚本写入时把编不进 cp932 的简体字换成同码位日文写法占位，渲染时由 cnjp 字体还原；与字体构建是同一方案的两半，必须成对演进",
+      "blocks": [
+        "M5"
+      ],
+      "note": "51 KB 纯文本、机器可校验；说明书 data/translations/subs-cn-jp.md"
+    },
+    {
+      "id": "assets/fonts-dist",
+      "kind": "asset",
+      "role": "module",
+      "storage": "lfs",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/Amayui-CN_cnjp.ttf"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/Amayui-CN_cnjp-Bold.ttf"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z"
+        }
+      ],
+      "dest": "corpus/assets/fonts",
+      "readOnly": true,
+      "consume": "只读：Amayui-CN_cnjp*.ttf 是 cnjp 分发字体（渲染简体所需，模拟器直接读）；两个 Sarasa 7z 是上游基底，解压产物 gitignore（见 .gitignore），派生链 = 7z 解压 + font_CN_JP.py",
+      "blocks": [
+        "M4",
+        "M5"
+      ],
+      "note": "WenQuanYi 系列被有意排除（已弃用、可回退）；中间产物 SarasaGothicSC-Regular_cnjp.ttf 不单独取，它在 SC 7z 里"
     }
   ]
 }

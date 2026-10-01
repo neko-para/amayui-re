@@ -13,22 +13,34 @@ corpus/
     README.md      #   4 文件清单 + 来源 + sha256 + 转写规则 + 断言口径
     disasm-20260930.zip   ← 入库（LFS）
     files/         ← gitignore：解压出的 4 个文件，agent 直接读这里
-  binaries/        # 脱壳件 / 节表修补件 —— 后续再处理（尚未入库）
+  binaries/        # 脱壳件 / 节表修补件 —— 用户口径：**不迁移**（只登记，见清单）
+  assets/          # UI 图片 / 字体（只读载荷，走 LFS）
+    ui-images/     #   UI 块图（生效版 + 未汉化原图）+ E 系列渲染参考块 + versions.json
+    fonts/         #   分发字体（派生 ttf）+ Sarasa 上游 7z（★ 解压产物 gitignore）
   fixtures/        # 真存档样本（槽 76/77/78/79）+ samples.json（结构化描述）+ README
   game/            # 外部游戏目录 / 安装目录的**指针**（不搬数据）
 ```
 
-**两个载荷条目的分工**（"入库没有"一律看清单的 `storage`/`dest`，**不要**在文档里记进度）：
+**载荷条目的分工**（"入库没有"一律看清单的 `storage`/`dest`，**不要**在文档里记进度）：
 
 | 条目 | 落点 | 存储 | 守卫 |
 |---|---|---|---|
 | `disasm/bundle` | `corpus/disasm/disasm-20260930.zip`（4 个 UTF-8 文件） | LFS（`*.zip`） | `recipe` 真跑 9 条保真断言（#7）；原件缺席时由 zip 反解 + 清单 sha256 自证 |
 | `fixtures/save-samples` | `corpus/fixtures/SAVE{76,77,78,79}.{DAT,STH}` | LFS（`*.DAT`/`*.STH`） | dest 下**每个已跟踪文件**的 `filter=lfs`（#6，不靠 origin 枚举）；文件级事实（槽定位 / mtime）另见 `corpus/fixtures/samples.json` |
+| `assets/ui-images` | `corpus/assets/ui-images/` | LFS（`*.png`） | #6 + `versions.json`（版本表；见该目录 `versions.md`） |
+| `assets/fonts-dist` | `corpus/assets/fonts/` | LFS（`*.ttf`/`*.7z`） | #6 + 「7z 的解压产物不入库」由 `tools/test/corpus-assets.test.mjs` 钉住 |
+| `translation/subs-cn-jp` | `data/translations/subs-cn-jp.json` | **git 文本** | #4（入库件不写 sha256）+ 同名说明书 |
+
+★ **`corpus/assets/` 里两件"看起来像源、其实是别的"**：
+`ui-images/versions.json` 是**版本表**（哪张 `-N` 生效 —— 入库的只有生效版，所以这件事推不出来）；
+`fonts/SarasaGothic*.7z` 是**上游发行包**，派生字体（`*_cnjp.ttf`）与它并列，**解压目录不入库**。
+
 
 ★ **只有"有加工链的入库件"才配来源记录**（`disasm/bundle` ↔ `disasm/raw-source-*`，`external-only` + 逐件 sha256）
 —— 那是"转码前的忠实参照"这个能力的来源：**来源 ≠ 入库件**时才谈得上复核。
 `fixtures/save-samples` **不配**：它是**自足条目**（固化资源，没有加工链、没有可再取的上游，入库的那一份就是原件），
 登记 origin 等于把 dest 抄第二遍。口径见 `pnpm tools corpus describe` 的「自足条目」。
+`assets/ui-images` 与 `assets/fonts-dist` **配**：两者的入库副本就是旧仓 `res/` 下的原件（逐字节相同，由 #4 现算现比）。
 
 ## 2. `assets.json` 是什么、不是什么
 
