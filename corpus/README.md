@@ -35,6 +35,10 @@ corpus/
 `ui-images/versions.json` 是**版本表**（哪张 `-N` 生效 —— 入库的只有生效版，所以这件事推不出来）；
 `fonts/SarasaGothic*.7z` 是**上游发行包**，派生字体（`*_cnjp.ttf`）与它并列，**解压目录不入库**。
 
+★ **`assets/samples-*` 三条没有 `dest`**（`storage: external-only`）：三套 AGE 格式（ALF / AGF / ASM）的
+**原始游戏文件样本**按用户口径**不入库**，只在清单里登记来源路径 + `sha256`（守卫 #4 现算现比）；
+消费口径（选样标准、"缺席即跳过"）见 [`assets/samples.md`](./assets/samples.md)。
+
 
 ★ **只有"有加工链的入库件"才配来源记录**（`disasm/bundle` ↔ `disasm/raw-source-*`，`external-only` + 逐件 sha256）
 —— 那是"转码前的忠实参照"这个能力的来源：**来源 ≠ 入库件**时才谈得上复核。

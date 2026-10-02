@@ -8,7 +8,7 @@
     "tools"
   ],
   "scripts": {
-    "test": "node --test --test-isolation=none \"tools/test/**/*.test.mjs\"",
+    "test": "node --test --test-isolation=none \"{tools/test/**/*.test.mjs,packages/*/test/**/*.test.mjs}\"",
     "tools": "node tools/cli.mjs"
   }
 }

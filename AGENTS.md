@@ -63,6 +63,8 @@ pnpm tools                      # ★ 先看这个：域地图（域 → 数据 
 pnpm tools corpus validate      # ★ 素材清单守卫（红了就必须修，不是"看看"）
 pnpm tools corpus scan --write  # 补 origin[].sha256（唯一写入口）
 pnpm tools fixtures list        # 存档样本：槽 / 定位 / mtime 漂移
+pnpm tools opcodes report       # 指令表对账：旧表条目数 / 将丢弃哪些知识层字段（handler / status）
+pnpm tools opcodes derive --write # 指令表派生（旧表 → 格式层四列；唯一写入口，缺省 dry-run）
 pnpm tools requirements plan    # ★ 进度：需求树（还要做什么、到哪一步）+ 聚合状态
 pnpm tools requirements validate # 需求台账守卫（红 = 退出码 1）
 pnpm tools disasm verify        # 反汇编语料保真断言（逐行反解回字节必须与源逐字节相同）

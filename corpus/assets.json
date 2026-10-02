@@ -111,6 +111,148 @@
       "consume": "只登记、不迁移：派生 cnjp 分发字体与 Sarasa 上游 7z 已迁入 corpus/assets/fonts；本条目只指向旧仓 res/fonts/ 原处"
     },
     {
+      "id": "assets/fonts-dist",
+      "kind": "asset",
+      "role": "module",
+      "storage": "lfs",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/Amayui-CN_cnjp.ttf"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/Amayui-CN_cnjp-Bold.ttf"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z"
+        }
+      ],
+      "dest": "corpus/assets/fonts",
+      "readOnly": true,
+      "consume": "只读：Amayui-CN_cnjp*.ttf 是 cnjp 分发字体（渲染简体所需，模拟器直接读）；两个 Sarasa 7z 是上游基底，解压产物 gitignore（见 .gitignore），派生链 = 7z 解压 + font_CN_JP.py",
+      "blocks": [
+        "M4",
+        "M5"
+      ],
+      "note": "WenQuanYi 系列被有意排除（已弃用、可回退）；中间产物 SarasaGothicSC-Regular_cnjp.ttf 不单独取，它在 SC 7z 里"
+    },
+    {
+      "id": "assets/samples-agf",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "gameInstall",
+          "path": "MI042.AGF",
+          "sha256": "7b76b4dd6b149dfa613a5156841e69f81f64ee8f27e2ac3e07aa0770c917e95a"
+        },
+        {
+          "root": "gameInstall",
+          "path": "MI040.AGF",
+          "sha256": "37d37be60d2a3aa38f8973284d9e45860af169d064b94ba432b6952d3f4d9ff4"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO002.AGF",
+          "sha256": "8369f7e1c35854ec7d179590ff07ae0e10d71391cbf070e9b8f0356650359beb"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记、不入库：必须覆盖 AGF 的两条分支 —— MI042 的 meta 是压缩形态（1080→159）、MI040 是原样形态（压不小才原样）；SO002 更小",
+      "blocks": [
+        "M2"
+      ],
+      "note": "ACIF 的 alpha 实测**也会压缩**（旧仓注释只说 meta/body），MI042/MI040 两件都带 ACIF；SO002 取旧仓 res/images 的**交付版**（完整 256 色调色板、body 原样 163840），而不是 install/_extracted 里那个 8bpp 截断调色板变体"
+    },
+    {
+      "id": "assets/samples-alf",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "gameInstall",
+          "path": "APPEND02.AAI",
+          "sha256": "a379153b3ef01fe14ee734727b4e6b0e31094ea784810000e72de5d7e6e50cbb"
+        },
+        {
+          "root": "gameInstall",
+          "path": "APPEND02.ALF",
+          "sha256": "8a84974f603a867783ce3c38f6990a406d7b5d03c16194ea31aa94c736d929f5"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记、**不入库**（用户口径：ALF/AAI 是很��的原始游戏文件）：ALF 的索引与数据体必须成对才能验证载荷搬运，取最小的归档家族（索引 5.8 KB + 数据体 49.4 MB）；sha256 是唯一能证明它没被换过的凭据",
+      "blocks": [
+        "M2"
+      ],
+      "note": "测试在文件缺席时**跳过**；判据的实测证据记在需求节点的凭据段，选样口径见 corpus/assets/samples.md"
+    },
+    {
+      "id": "assets/samples-asm",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "gameInstall",
+          "path": "$1$OFINIT.BIN",
+          "sha256": "44aa521713e3de94fe190ce065b5067bbbab60d962e8a7d7f7eb59c054c90091"
+        },
+        {
+          "root": "gameInstall",
+          "path": "READICON.BIN",
+          "sha256": "5ce9df6161bfbb61e825208ff396addb1a335f030d03ce77aad4542772ed2832"
+        },
+        {
+          "root": "gameInstall",
+          "path": "PLINIT.BIN",
+          "sha256": "ebcea961fc8f18ddaaf1d8f76ce0c6b67b1a2379c2c23cdb436bd323e4e979dc"
+        },
+        {
+          "root": "gameInstall",
+          "path": "INFOFA.BIN",
+          "sha256": "5e9fa2f29d4e9686bdafaa4b25ff5fbae096b5249a207923e054dabe27aa8101"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记、不入库：小件（284/440 B）验证极短脚本、中等件（21/52 KB）验证指令流与字符串；反汇编→重汇编必须逐字节回到原文件",
+      "blocks": [
+        "M2"
+      ]
+    },
+    {
+      "id": "assets/sarasa-upstream",
+      "kind": "asset",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z",
+          "sha256": "bde7727d6f08e16667dd9a6ee9ad93c399b53da38d2e26dbead8b4b382b71d16"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z",
+          "sha256": "1eaa4017a1843179469827e6d32fa7a79b57ca2a439df6f99ec5857876ba1071"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记、不迁移：上游发行包（Sarasa Gothic SC/J 官方 TTF 1.0.40），登记 sha256 是为了能从上游复取同一版；cnjp 替换用的是 SC 那一份"
+    },
+    {
       "id": "assets/ui-images",
       "kind": "asset",
       "role": "archived",
@@ -125,6 +267,71 @@
       "readOnly": true,
       "consume": "只登记、不迁移：中间版本 PNG 与编译后的 AGF 都留在旧仓；生效版 PNG 已迁入 corpus/assets/ui-images（见该目录 versions.json）",
       "note": "落点已定：corpus/assets/ui-images/（M1b）——从旧仓 res/images 取 10 张汉化完成图的生效版 + 7 张未汉化图的 -0 原图 + 8 个 E 系列渲染参考块；中间版本 PNG 与编译后的 AGF 都不入库"
+    },
+    {
+      "id": "assets/ui-images-baked",
+      "kind": "asset",
+      "role": "archived",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO001.AGF",
+          "sha256": "689e89452c9aabfe7b13a9423e72a62cc1dfe9e81b4a1133246c36859080222b"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO002.AGF",
+          "sha256": "8369f7e1c35854ec7d179590ff07ae0e10d71391cbf070e9b8f0356650359beb"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO009A.AGF",
+          "sha256": "3a45335ec4cbfd33f99dbfc559899f3a276289aead6e3b023d67201815f059e5"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO009B.AGF",
+          "sha256": "bda4781840f846c4210d157f897b1bf575b95c71767476f513ac521286c99f79"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO017.AGF",
+          "sha256": "90b68a91bb031d94746384a3c489d6d35732675fad4658ac52d0145ddc2e0036"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO020.AGF",
+          "sha256": "d580ce6ec8e79d5f38c4fbe0d55702fa622dfbf922e147308e64cc1fc8bed533"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO021.AGF",
+          "sha256": "d71d4ae88fd81afd42dc076d318879fa41623c9efebefacb9f2d497977117a63"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO025.AGF",
+          "sha256": "0bac795dab9b59767fa24f2e8244d265ee475774d602321beaef235d018f5347"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO030.AGF",
+          "sha256": "df1e8f0ee7bae344edc18ba6d83a8f8e1e2ab516161d4aabb62849c2a592a06f"
+        },
+        {
+          "root": "oldRepo",
+          "path": "res/images/SO039.AGF",
+          "sha256": "253b201b1e39599f0f21bb9ae41bd7e47bbe48c04d67d96d1b8d4bc27b7208b6"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记、不入库（编译产物）：由 corpus/assets/ui-images/ 的生效版 PNG 烘焙出来、注入 install overlay 的那一版 AGF；sha256 是日后重建链能否复现同一份产物的唯一参照",
+      "blocks": [
+        "M2"
+      ],
+      "note": "旧仓 patch/AGF/ 与这 10 个文件同尺寸（同一批产物的副本），但 patch/ 整个目录有意不进新仓台账"
     },
     {
       "id": "binary/age-original",
@@ -514,6 +721,28 @@
       ]
     },
     {
+      "id": "knowledge/opcode-table-source",
+      "kind": "knowledge-source",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "scripts/asm/opcodes.json",
+          "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "只登记、不入库：旧三方工具导出的指令表（AGE 脚本格式层数据的**待复核副本**）。它是 pnpm tools opcodes derive 的来源 ⇒ 来源可追溯、不依赖旧仓在线",
+      "blocks": [
+        "K1",
+        "K2",
+        "K3"
+      ],
+      "note": "handler 是 opcode → 引擎函数的**指针**（含 sub_XXXXXXXX、无 EA）—— 它是「从引擎机械复核 argc」的唯一入口，故不得随手丢；argc 的权威来自引擎而非本表（复核口径见 packages/age-format/README.md §3.3）；name/aliases 是三方工具旧资产、零独特信息，只作文本层兼容"
+    },
+    {
       "id": "knowledge/tickets",
       "kind": "knowledge-source",
       "role": "archived",
@@ -768,110 +997,6 @@
       "consume": "不迁移、不进新仓台账：旧仓 patch/ 整个目录（AGF / BIN / AGERC.DLL / CHANGELOG.md / patch.config.json / README-测试版说明.md）被有意跳过；打包清单与产物待需求树「翻译环境重建」节点重新设计"
     },
     {
-      "id": "translation/translated",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "src/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "译文：与 data/ 同构；数据模型待定，M5 前拍板（见 docs/01-translation/README.md）",
-      "blocks": [
-        "M5"
-      ]
-    },
-    {
-      "id": "assets/sarasa-upstream",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z",
-          "sha256": "bde7727d6f08e16667dd9a6ee9ad93c399b53da38d2e26dbead8b4b382b71d16"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z",
-          "sha256": "1eaa4017a1843179469827e6d32fa7a79b57ca2a439df6f99ec5857876ba1071"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不迁移：上游发行包（Sarasa Gothic SC/J 官方 TTF 1.0.40），登记 sha256 是为了能从上游复取同一版；cnjp 替换用的是 SC 那一份"
-    },
-    {
-      "id": "assets/ui-images-baked",
-      "kind": "asset",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO001.AGF",
-          "sha256": "689e89452c9aabfe7b13a9423e72a62cc1dfe9e81b4a1133246c36859080222b"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO002.AGF",
-          "sha256": "8369f7e1c35854ec7d179590ff07ae0e10d71391cbf070e9b8f0356650359beb"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO009A.AGF",
-          "sha256": "3a45335ec4cbfd33f99dbfc559899f3a276289aead6e3b023d67201815f059e5"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO009B.AGF",
-          "sha256": "bda4781840f846c4210d157f897b1bf575b95c71767476f513ac521286c99f79"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO017.AGF",
-          "sha256": "90b68a91bb031d94746384a3c489d6d35732675fad4658ac52d0145ddc2e0036"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO020.AGF",
-          "sha256": "d580ce6ec8e79d5f38c4fbe0d55702fa622dfbf922e147308e64cc1fc8bed533"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO021.AGF",
-          "sha256": "d71d4ae88fd81afd42dc076d318879fa41623c9efebefacb9f2d497977117a63"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO025.AGF",
-          "sha256": "0bac795dab9b59767fa24f2e8244d265ee475774d602321beaef235d018f5347"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO030.AGF",
-          "sha256": "df1e8f0ee7bae344edc18ba6d83a8f8e1e2ab516161d4aabb62849c2a592a06f"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO039.AGF",
-          "sha256": "253b201b1e39599f0f21bb9ae41bd7e47bbe48c04d67d96d1b8d4bc27b7208b6"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不入库（编译产物）：由 corpus/assets/ui-images/ 的生效版 PNG 烘焙出来、注入 install overlay 的那一版 AGF；sha256 是日后重建链能否复现同一份产物的唯一参照",
-      "blocks": [
-        "M2"
-      ],
-      "note": "旧仓 patch/AGF/ 与这 10 个文件同尺寸（同一批产物的副本），但 patch/ 整个目录有意不进新仓台账"
-    },
-    {
       "id": "translation/subs-cn-jp",
       "kind": "asset",
       "role": "reference",
@@ -891,36 +1016,61 @@
       "note": "51 KB 纯文本、机器可校验；说明书 data/translations/subs-cn-jp.md"
     },
     {
-      "id": "assets/fonts-dist",
+      "id": "translation/translated",
       "kind": "asset",
-      "role": "module",
-      "storage": "lfs",
+      "role": "reference",
+      "storage": "external-only",
       "origin": [
         {
           "root": "oldRepo",
-          "path": "res/fonts/Amayui-CN_cnjp.ttf"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/Amayui-CN_cnjp-Bold.ttf"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z"
+          "path": "src/"
         }
       ],
-      "dest": "corpus/assets/fonts",
+      "dest": null,
       "readOnly": true,
-      "consume": "只读：Amayui-CN_cnjp*.ttf 是 cnjp 分发字体（渲染简体所需，模拟器直接读）；两个 Sarasa 7z 是上游基底，解压产物 gitignore（见 .gitignore），派生链 = 7z 解压 + font_CN_JP.py",
+      "consume": "译文：与 data/ 同构；数据模型待定，M5 前拍板（见 docs/01-translation/README.md）",
       "blocks": [
-        "M4",
         "M5"
+      ]
+    },
+    {
+      "id": "knowledge/opcode-handlers",
+      "kind": "knowledge-source",
+      "role": "reference",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "scripts/asm/opcodes.json",
+          "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
+        }
       ],
-      "note": "WenQuanYi 系列被有意排除（已弃用、可回退）；中间产物 SarasaGothicSC-Regular_cnjp.ttf 不单独取，它在 SC 7z 里"
+      "dest": null,
+      "readOnly": true,
+      "consume": "**继承**：opcode → 引擎函数的映射（574 条 / 543 个不同函数）是**引擎观测**，与 argc 同类；格式层不需要它，但它是「从引擎机械复核 argc」的入口 ⇒ 登记它，别丢",
+      "blocks": [
+        "K1",
+        "K2",
+        "K3"
+      ],
+      "note": "⚠ 它现在**不满足准入**：值是 IDA 函数名（sub_XXXXXXXX）、**没有 EA** ⇒ 无法按「锚点锚 EA」重校验 ⇒ 只能 external-only。K 线的第一件事就是从引擎分派表把它重挂成 EA；挂上之前不得进台账"
+    },
+    {
+      "id": "knowledge/opcode-status-labels",
+      "kind": "knowledge-source",
+      "role": "archived",
+      "storage": "external-only",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "scripts/asm/opcodes.json",
+          "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
+        }
+      ],
+      "dest": null,
+      "readOnly": true,
+      "consume": "**不继承**：status（`已核对`/`仅映射`/`已核对（2026-09）`）是**人工自述标签**，与 handler/argc 不同类 —— 它没有机械复核路径，删掉它不损失任何可复核信息",
+      "note": "与 knowledge/opcode-handlers 同一份文件、同一次观测；本条只为「为什么单单它被丢掉」留痕。本仓口径：自述标签不可信（docs/00-origin/knowledge-rebuild.md §1.1）"
     }
   ]
 }

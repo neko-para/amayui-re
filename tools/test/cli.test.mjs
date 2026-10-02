@@ -57,14 +57,21 @@ test('域 id / 动作名唯一，且每个动作的 argv 首项是自己的隐�
 
 test('地图覆盖全部工具，且 JSON 版形状稳定', async () => {
   const domains = await loadDomains();
-  assert.equal(domains.length, toolModules().length, '域数量必须等于 tools/*.mjs 的数量');
   const j = mapJson(domains);
   for (const d of j.domains) {
     assert.ok(d.id && d.title && d.tool && Array.isArray(d.data) && d.data.length > 0, `域 ${d.id} 的地图条目不完整`);
     assert.ok(d.operations.length > 0);
   }
-  // 已知五个域必须都在（漏一个就说明自我声明丢了）
-  assert.deepEqual(j.domains.map((d) => d.id).sort(), ['corpus', 'disasm', 'fixtures', 'old-repo', 'requirements']);
+  // ★ 断言改成**等价但不用手维护名单**的形态：每个 tools/*.mjs 要么在 `cli.mjs` 的 MODULES 里注册、
+  //   要么就是"有意不注册"的夹具（如 `opcodes.mjs` —— 它是上面的领域模型，被 test 直接 import）。
+  //   原写法硬编码"已知五个域"，加一个域就得改测试；而它真正要守的是"**注册与模块集合一致**"。
+  const NO_DOMAIN_FIXTURES = ['opcodes.mjs'];
+  const registered = new Set(domains.map((d) => d.tool.replace(/^tools[\\/]/, '')));
+  const missing = toolModules().filter((f) => !registered.has(f) && !NO_DOMAIN_FIXTURES.includes(f));
+  assert.deepEqual(missing, [], `这些工具既没注册进域地图、也不在"有意不注册"名单里：\n  - ${missing.join('\n  - ')}`);
+  const stale = [...registered].filter((f) => !toolModules().includes(f));
+  assert.deepEqual(stale, [], `域地图注册了不存在的模块：${stale.join(', ')}`);
+  assert.ok(j.domains.some((d) => d.id === 'opcodes'), '新加的 opcodes 域必须在域地图里');
 });
 
 test('转发可用：`tools <域> <只读动作>` 能真的跑到该工具（进程内调用，不捕获输出）', async () => {
@@ -75,6 +82,7 @@ test('转发可用：`tools <域> <只读动作>` 能真的跑到该工具（进
   assert.equal(await main(['requirements', 'list']), 0);
   assert.equal(await main(['disasm', 'describe']), 0);
   assert.equal(await main(['old-repo', 'describe']), 0);
+  assert.equal(await main(['opcodes', 'report']), 0);
 });
 
 test('未知域 / 未知动作 ⇒ 退出码 2（而不是静默跑错东西）', async () => {
