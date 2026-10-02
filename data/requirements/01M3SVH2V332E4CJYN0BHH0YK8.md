@@ -23,7 +23,9 @@
 ## 要重建的能力
 1. **字体构建**：Sarasa SC 基底 + cnjp cmap 替换 + 族名 `Amayui CN` + 声明 Shift-JIS 932 码页；
 2. **文本渲染**：UI 截图链（headless + @font-face 引本地字体）与效果规范（E1…E10 参考块已入位）；
-3. **打包**：`patch.config.json` 式同步清单 + install-manifest 重建；旧仓 `patch/` 产物**不迁**。
+3. **打包**：`patch.config.json` 式同步清单 + install-manifest 重建；旧仓 `patch/` 产物**不迁**；
+4. **翻译数据模型**（已定案）= **patch 叠加层**：入库的只有 patch，`data`/`src` 都是实时视图 ——
+   实施在子节点 `REQ-01M3XJXVYBRFW1VT7RD8SNRXKV`（设计见 `docs/01-translation/patch-design.md`）。
 
 ## 判据
-（待写：每一件都要有可执行的守卫 —— 字体构建可复现、渲染参考块可对照、打包清单可校验。）
+（待写：每一件都要有可执行的守卫 —— 字体构建可复现、渲染参考块可对照、打包清单可校验、patch 可重建视图。）

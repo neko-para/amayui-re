@@ -137,6 +137,7 @@
 | UI 图片与字体：落点、版本表、7z 解压产物不入库 | `corpus/README.md` §1、`corpus/assets/ui-images/versions.md`、`pnpm tools corpus describe` |
 | 简→日写法占位字典（cp932 编码方案的一半） | `data/translations/README.md`、`data/translations/subs-cn-jp.md` |
 | 翻译域：现状、双份 vs 单份待定、`install/` 先保留 | `docs/01-translation/README.md` |
+| **翻译 patch 方案**：真源 = 叠加层，`data`/`src` 都是视图；锚定规则与支撑观测 | `docs/01-translation/patch-design.md` + `pnpm tools patch describe` + `pnpm tools requirements show 8SNRXKV` |
 | 模拟器 / 探针域：按新结构重写、工具链、跨域守卫要拆回各域 | `docs/03-emulator/README.md`、`apps/*/README.md` |
 | agent 基建：技能固定路径、插件软链接注册、按重建处理 | `docs/04-agent/README.md`、`AGENTS.md` §7 |
 | 知识层：清理起点清单、A/B/C 分级、准入规则、`callers/callees` 数据源缺失 | `knowledge-rebuild.md` |

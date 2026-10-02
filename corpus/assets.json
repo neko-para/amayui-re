@@ -1071,6 +1071,37 @@
       "readOnly": true,
       "consume": "**不继承**：status（`已核对`/`仅映射`/`已核对（2026-09）`）是**人工自述标签**，与 handler/argc 不同类 —— 它没有机械复核路径，删掉它不损失任何可复核信息",
       "note": "与 knowledge/opcode-handlers 同一份文件、同一次观测；本条只为「为什么单单它被丢掉」留痕。本仓口径：自述标签不可信（docs/00-origin/knowledge-rebuild.md §1.1）"
+    },
+    {
+      "id": "translation/patch-data",
+      "kind": "asset",
+      "role": "rebuild",
+      "storage": "git",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "install/"
+        }
+      ],
+      "derivedFrom": [
+        {
+          "ref": "translation/translated",
+          "tool": "pnpm tools patch extract",
+          "note": "旧仓 src/ 是文本视图；这里提取的是同一批译文的**可执行形态**（相对原版 BIN 的叠加层）"
+        },
+        {
+          "ref": "translation/subs-cn-jp",
+          "tool": "pnpm tools patch extract",
+          "note": "中文 → BIN 写法的映射是构建的一环；字典指纹写进 patch 的 subsSha"
+        }
+      ],
+      "dest": "data/translations/patch.json",
+      "readOnly": true,
+      "consume": "★ 翻译域**唯一入库的资产**：原版 BIN + 本件 ⇒ 逐字节重建汉化 BIN（`pnpm tools patch verify`）。data / src 视图都由它实时算出，不入库；旧仓 install/ 只是**提取期**的产物根，之后不再引用。schema 与不变量见 `pnpm tools patch describe`",
+      "blocks": [
+        "M5"
+      ],
+      "note": "说明书 data/translations/patch.md；控制脚本 tools/patch.mjs（模型 tools/lib/patch.mjs、基线解析层 tools/lib/bin-source.mjs）；设计与观测 docs/01-translation/patch-design.md"
     }
   ]
 }

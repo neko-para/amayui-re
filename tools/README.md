@@ -12,6 +12,7 @@ tools/
   lib/
     paths.mjs fsx.mjs exec.mjs zip.mjs time.mjs cp932.mjs   # ★ 纯工具：不认识任何领域数据
     manifest.mjs samples.mjs requirements.mjs                # ★ 领域模型：schema / 不变量 / 读 / 写 / 自描述
+    bin-source.mjs cn-jp.mjs patch.mjs                       # ★ 领域模型：BIN 来源解析 / 中文↔BIN 映射 / patch
   test/*.test.mjs    # 基建契约测试
 ```
 
@@ -54,6 +55,7 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `fixtures.mjs` | `fixtures` | ★ `corpus/fixtures/samples.json` 的查询 + 唯一编辑入口（见 `pnpm tools fixtures describe`） |
 | `requirements.mjs` | `requirements` | ★ `data/requirements/` 的进度视图 + 唯一编辑入口（需求/缺陷 + 父子树；见 `pnpm tools requirements describe`） |
 | `disasm-recode.mjs` | `disasm` | 反汇编语料的**无损转写**与保真断言（见 `pnpm tools disasm describe`） |
+| `patch.mjs` | `patch` | ★ 翻译 patch 的查询 / **提取（唯一写入口）** / 复验（见 `pnpm tools patch describe` 与 `tools/patch.md`） |
 | `old-repo-inventory.mjs` | `old-repo` | **重新实测旧仓**（只读）→ `docs/00-origin/old-repo-inventory.md` |
 | `test/*.test.mjs` | —— | 基建契约测试（`node --test`） |
 
@@ -73,7 +75,12 @@ pnpm tools requirements plan                # ★ 进度视图：按父子树打
 pnpm tools requirements serve               # 本地只读网页（总览 + 详情）：http://127.0.0.1:7788/
 pnpm tools requirements validate             # 需求台账的 5 条不变量（红 = 退出码 1）
 pnpm tools fixtures restore-mtime --write   # 刚 clone：把 mtime 按记录的 instant 拨回去（跨时区也对）
-pnpm tools disasm verify                    # 语料保真断言（原件在就按原件；不在就由 zip 反解 + 清单 sha256 自证）
+pnpm tools disasm verify                     # 语料保真断言（原件在就按原件；不在就由 zip 反解 + 清单 sha256 自证）
+pnpm tools patch describe                    # ★ 翻译 patch：字段 / 不变量 / 操作（schema 的唯一真源）
+pnpm tools patch verify                      # ★ 判据：基线 + patch ⇒ **逐字节**相同（缺产物根时只对 resultSha 自证）
+pnpm tools patch extract                     # 从旧仓产物提取（dry-run；--write 才落盘，写前逐条自证）
+pnpm tools patch view                        # 生成 data / src 视图 → dist/views/（生成物，不入库）
+pnpm tools patch edit                        # ★ 改过 src 视图之后，反解回 patch（dry-run；--write 落盘）
 pnpm tools disasm build                     # 转写落盘 + 打确定性 zip（需要 .staging/ 里的原件）
 pnpm tools disasm restore                   # 由 zip 反解回投递原件（默认写回 .staging/）
 pnpm tools old-repo inventory               # 重测旧仓 → docs/00-origin/old-repo-inventory.md
