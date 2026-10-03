@@ -29,6 +29,7 @@ import {
   loadNodes,
   nodeId,
   parseNode,
+  planAdd,
   rollup,
   saveNode,
   ulid,
@@ -270,6 +271,121 @@ test('CLI 写路径：`--set … --unset <字段>` 能删字段，且不合法�
     assert.equal(quiet(() => cliMain(['--set', kid.fields.id, '--status', 'blocked', '--dir', dir, '--write'])), 1, '非法改动必须被拒');
     assert.equal(fs.readFileSync(path.join(dir, `${kid.name}.md`), 'utf8'), before, '被拒后必须逐字节还原');
     assert.equal(fs.readdirSync(dir).filter((f) => f.includes('.tmp-')).length, 0, '不许留下临时文件');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ 建单只有一份规则（`planAdd`）：CLI `--add` 与工作台的 `POST /api/nodes` 都调它', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'amayui-req-add-'));
+  /** 每次重新读盘：`planAdd` 的 `nodes`/`tree` 是调用方给的**当时**快照 */
+  const ctx = () => {
+    const nodes = loadNodes(dir);
+    return { dir, nodes, tree: buildTree(nodes), repoRoot: REPO_ROOT };
+  };
+  try {
+    const rootN = N({ title: '根' });
+    assert.equal(saveNode(rootN, dir).ok, true);
+
+    // ① 最少输入（只有标题 + 父）⇒ 缺省 type/status + 缺省正文骨架，落盘即规范形态
+    const a = planAdd({ title: '子节点', parent: rootN.fields.id }, ctx());
+    assert.match(a.id, /^REQ-[0-9A-HJKMNP-TV-Z]{26}$/);
+    assert.equal(a.fields.type, 'req');
+    assert.equal(a.fields.status, 'open');
+    assert.equal(a.fields.parent, rootN.fields.id, 'parent 落成**完整 id**');
+    assert.match(a.body, /## 判据/);
+    assert.equal(a.apply().report.failures, 0, '缺省建出来的节点必须直接是绿的');
+    assert.equal(loadNodes(dir).length, 2);
+    assert.equal(
+      fs.readFileSync(path.join(dir, `${a.name}.md`), 'utf8'),
+      canonicalNode({ name: a.name, title: a.title, fields: a.fields, body: a.body }),
+      '落盘的就是规范形态（固定键序、同输入同字节）',
+    );
+
+    // ② 缺陷的缺省正文是**另一套**（"复现"），而且缺 repro 时守卫必须拒 + **文件要消失**
+    const bad = planAdd({ title: '缺 repro 的缺陷', type: 'bug', status: 'doing', parent: rootN.fields.id }, ctx());
+    assert.match(bad.body, /## 复现/, '缺陷的缺省正文该问"怎么复现"');
+    const rolled = bad.apply();
+    assert.equal(rolled.rollback, true, '缺 repro 必须被守卫拒回');
+    assert.ok(rolled.report.failures > 0);
+    assert.ok(!fs.existsSync(path.join(dir, `${bad.name}.md`)), '被拒的新增不许留残 file');
+    assert.equal(loadNodes(dir).length, 2, '回滚后节点数不变');
+
+    // ③ 写下去会出事的三种，必须在**写之前**就抛（不是写完再回滚）
+    assert.throws(() => planAdd({ title: 'x', id: rootN.fields.id }, ctx()), /已被占用/, 'id 撞车会覆盖同名文件 ⇒ 必须挡');
+    assert.throws(() => planAdd({ title: 'x', parnet: 'REQ-x' }, ctx()), /不认得/, '不认得的键不许静默忽略');
+    assert.throws(() => planAdd({ title: 'x', parent: 'REQ-不存在' }, ctx()), /parent/);
+    assert.throws(() => planAdd({}, ctx()), /标题/);
+    assert.throws(() => planAdd({ title: 'REQ-01ABC' }, ctx()), /不是 id/, '`--title` 是标题不是 id');
+    assert.throws(() => planAdd({ title: 'x', id: 'abc' }, ctx()), /形态非法/);
+    assert.throws(() => planAdd({ title: 'x', body: '没有小节' }, ctx()), /## 小节/);
+    // ★ 枚举非法**不在这里挡**：那是 `validateAll`（不变量 #1）的活 —— 这里只挡"写下去会出事"的。
+    //   换句话说：`planAdd` 不抄第二份裁决，非法的单子走"写后守卫拒回 + 删文件"那条路。
+    const badType = planAdd({ title: '类型非法', type: 'nope' }, ctx());
+    assert.equal(badType.apply().rollback, true, '枚举非法由写后守卫拒回');
+    assert.ok(!fs.existsSync(path.join(dir, `${badType.name}.md`)));
+
+    // ④ 空列表 / 空串不写（表单留空、`--tags ''` 都不该多出一行噪声）
+    const empty = planAdd({ title: '空列表', parent: rootN.fields.id, tags: [], blocked_by: '  ', order: '' }, ctx());
+    assert.equal(empty.fields.tags, undefined);
+    assert.equal(empty.fields.blocked_by, undefined);
+    assert.equal(empty.fields.order, undefined);
+
+    // ⑤ 逗号串也认（CLI 就是把 `--tags a,b` 原样递进来的）
+    const full = planAdd({ title: '给全', parent: rootN.fields.id, tags: 'a, b', order: '30' }, ctx());
+    assert.deepEqual(full.fields.tags, ['a', 'b']);
+    assert.equal(full.fields.order, '30');
+
+    // ⑥ plan 就是 CLI 打印的那三行（"写不写、写到哪、挂在哪"一眼可见）
+    assert.equal(full.plan.length, 3);
+    assert.match(full.plan[0], /^add REQ-/);
+    assert.match(full.plan[1], /parent: REQ-/);
+    assert.match(full.plan[2], /\.md$/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI `--add`：dry-run 不落盘；`--write` 落盘并跑写后守卫（走的就是 planAdd）', async () => {
+  const { main: cliMain } = await import('../requirements.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'amayui-req-cli-add-'));
+  const quiet = (fn) => {
+    const w = process.stdout.write.bind(process.stdout);
+    const e = process.stderr.write.bind(process.stderr);
+    process.stdout.write = () => true;
+    process.stderr.write = () => true;
+    try {
+      return fn();
+    } finally {
+      process.stdout.write = w;
+      process.stderr.write = e;
+    }
+  };
+  try {
+    const rootN = N({ title: '根' });
+    assert.equal(saveNode(rootN, dir).ok, true);
+
+    // ① dry-run：什么都不写
+    assert.equal(quiet(() => cliMain(['--add', '--title', '干跑', '--parent', rootN.fields.id, '--dir', dir])), 0);
+    assert.equal(loadNodes(dir).length, 1, 'dry-run 不许落盘');
+
+    // ② --write：落盘 + 全树守卫绿
+    assert.equal(quiet(() => cliMain(['--add', '--title', '真建', '--parent', rootN.fields.id, '--tags', 'a,b', '--dir', dir, '--write'])), 0);
+    const after = loadNodes(dir);
+    assert.equal(after.length, 2);
+    const made = after.find((n) => n.title === '真建');
+    assert.ok(made, '节点必须真的落盘');
+    assert.deepEqual(made.fields.tags, ['a', 'b']);
+    assert.equal(validateAll(after, { repoRoot: REPO_ROOT }).failures, 0);
+
+    // ③ 守卫不绿的建单：CLI 退出码 1，且**不留残 file**
+    const before = fs.readdirSync(dir).sort();
+    assert.equal(
+      quiet(() => cliMain(['--add', '--title', '缺 repro', '--type', 'bug', '--status', 'doing', '--parent', rootN.fields.id, '--dir', dir, '--write'])),
+      1,
+    );
+    assert.deepEqual(fs.readdirSync(dir).sort(), before, '被拒后目录必须回到原样');
+    assert.equal(loadNodes(dir).length, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

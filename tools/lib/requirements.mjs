@@ -22,7 +22,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { DEFAULT_REQUIREMENTS_DIR } from './paths.mjs';
+import { DEFAULT_REQUIREMENTS_DIR, REPO_ROOT } from './paths.mjs';
 
 export { DEFAULT_REQUIREMENTS_DIR };
 
@@ -89,10 +89,10 @@ export const DOMAIN = {
   id: 'requirements',
   title: '需求台账（高层次的进度视图：仓库迁移 / 模拟器 / 逆向 / 翻译 …）',
   data: [
-    '`data/requirements/*.md`（一个节点一个文件；本工具是唯一编辑入口）',
+    '`data/requirements/*.md`（一个节点一个文件；★ 写路径只有模型的 `planAdd` / `saveNode` —— CLI 与工作台是它的两个调用方）',
     '`data/requirements/README.md`（散文口径，不是节点）',
   ],
-  access: 'rw（唯一编辑入口；缺省 dry-run，写后复验，不绿回滚）',
+  access: 'rw（★ **写路径只有一条**：模型里的 `planAdd` / `saveNode`（写后回读复验、不绿回滚）。CLI 与工作台都只是它的调用方 —— 规则不写在任何一个前端里）',
   tool: 'tools/requirements.mjs',
 };
 
@@ -102,8 +102,8 @@ export const OPERATIONS = [
   { name: 'plan', argv: ['--plan'], mutates: false, summary: '★ 进度视图（唯一的进度真源）：按树打印 + 聚合状态' },
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '跑全部不变量（红/绿 + 逐条详情）—— 全仓门禁' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 不变量 / 预算 / 操作' },
-  { name: 'serve', argv: ['--serve'], mutates: false, summary: '起本地只读网页（需求 + AGE 脚本）：`--port 7788`；`apps/workbench/` 是那个项目' },
-  { name: 'add', argv: ['--add'], mutates: true, summary: '加节点：`--title <标题> [--type req] [--parent <id>] [--body <文件>] [--order n] [--tags a,b]` [--write]' },
+  { name: 'serve', argv: ['--serve'], mutates: false, summary: '起本地网页（需求 + AGE 脚本）：`--port 7788`；`apps/workbench/` 是那个项目（里面的"新建需求单"调的就是 planAdd）' },
+  { name: 'add', argv: ['--add'], mutates: true, summary: '加节点：`--title <标题> [--type req] [--parent <id>] [--body <文件>] [--order n] [--tags a,b]` [--write]（与工作台的"新建"同一个 `planAdd`）' },
   { name: 'set', argv: ['--set'], mutates: true, summary: '改节点：`<id> [--status …] [--verify …] [--parent …] [--title …] [--body <文件>] …` [--write]' },
 ];
 
@@ -266,6 +266,140 @@ export function deleteNode(name, dir = DEFAULT_REQUIREMENTS_DIR) {
   if (!fs.existsSync(abs)) return { ok: false, reason: `没有这个节点文件：${abs}` };
   fs.unlinkSync(abs);
   return { ok: true };
+}
+
+/** 建单时正文的缺省骨架（按 type 给不同的问句 —— "该写什么"比"空着"有用） */
+const DEFAULT_BODY = {
+  bug: '## 复现\n\n（待写：怎么观测到这个分歧，越短越好）\n\n## 期望 / 实际\n\n（待写）\n\n## 影响\n\n（待写）',
+  other: '## 判据\n\n（待写：怎么算做完，要可核对）\n\n## 范围 / 非目标\n\n（待写）',
+};
+
+/** 建单认得的所有输入键（★ 不认得的键**报错**，不许静默忽略 —— 与 validate 的"无未知字段"同一条纪律） */
+const ADD_KEYS = new Set([
+  'id',
+  'title',
+  'type',
+  'status',
+  'parent',
+  'order',
+  'tags',
+  'blocked_by',
+  'verify',
+  'repro',
+  'severity',
+  'done_reason',
+  'dropped_reason',
+  'supersedes',
+  'body',
+]);
+
+const asList = (v) =>
+  Array.isArray(v)
+    ? v.map((s) => String(s).trim()).filter(Boolean)
+    : String(v)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+/**
+ * ★ **建单的唯一实现**：规则在这里，**调用方只是取参数的人**。
+ *
+ * 两个调用方用同一份函数（见过的坑：规则写在 CLI 里，网页要建单就只能再抄一遍，两份必然漂）：
+ *   · `tools/requirements.mjs --add …`（先打印 plan，`--write` 才落盘）
+ *   · `apps/workbench/server.ts` 的 `POST /api/nodes`（工作台里手填一张单子）
+ *
+ * `spec` 是**值**（不是 argv）：`title` / `type` / `status` / `parent` / `order` / `tags` /
+ * `blocked_by` / `verify` / `repro` / `severity` / `done_reason` / `dropped_reason` / `supersedes` / `body`。
+ * 列表项既可以给数组，也可以给 `a,b` 逗号串（CLI 就是这么给的）。
+ *
+ * ★ 这里**只挡"写下去会出事"的**（标题缺失、id 撞车、parent 悬空、不认得的键）；
+ *   其余一律交给 `apply()` 里的 `validateAll` —— 它才是不变量的真源，这里不抄第二份裁决。
+ *   `apply()` 走的是"落盘 → 全树复验 → 不绿就**把新文件删掉**"那条路（与 CLI 的 `--set` 同一条纪律）。
+ *
+ * @returns {{name:string, id:string, title:string, fields:object, body:string,
+ *            file:string, plan:string[], apply:() => {report:object, rollback?:boolean, removed?:string}}}
+ */
+export function planAdd(spec = {}, ctx = {}) {
+  const dir = ctx.dir ?? DEFAULT_REQUIREMENTS_DIR;
+  const nodes = ctx.nodes ?? loadNodes(dir);
+  const tree = ctx.tree ?? buildTree(nodes);
+  const repoRoot = ctx.repoRoot ?? REPO_ROOT;
+
+  for (const k of Object.keys(spec)) {
+    if (!ADD_KEYS.has(k)) throw new Error(`不认得的字段：${k}（要么进 schema，要么删掉 —— 不许静默忽略）`);
+  }
+  const title = String(spec.title ?? '').trim();
+  if (title === '') throw new Error('建单需要标题（title）');
+  if (title.startsWith(ID_PREFIX)) throw new Error('title 是标题，不是 id');
+
+  // 身份：缺省由本模型生成；给了 id 就以调用方为准（种子 / 迁移要先知道 id 才能写父子引用）
+  let name;
+  if (spec.id !== undefined) {
+    const bare = String(spec.id).startsWith(ID_PREFIX) ? String(spec.id).slice(ID_PREFIX.length) : String(spec.id);
+    if (!ULID_RE.test(bare)) throw new Error(`id 形态非法：${spec.id}（应为 ${ID_PREFIX}<26 字符 Crockford base32>）`);
+    // ★ 撞车必须在这里挡住：`saveNode` 会**覆盖**同名文件 —— 那不是"新建"，是"毁掉一个已有节点"
+    if (nodes.some((n) => n.name === bare)) throw new Error(`id 已被占用：${nodeId(bare)}`);
+    name = bare;
+  } else {
+    name = ulid();
+  }
+
+  const type = spec.type === undefined ? 'req' : String(spec.type);
+  const status = spec.status === undefined ? 'open' : String(spec.status);
+  const fields = { id: nodeId(name), type, status };
+
+  if (spec.parent !== undefined && spec.parent !== null && spec.parent !== '') {
+    const raw = String(spec.parent);
+    if (raw === 'null') fields.parent = 'null';
+    else {
+      const p = tree.resolve(raw);
+      if (!p) throw new Error(`parent 指向的节点不存在：${raw}`);
+      fields.parent = p.fields.id;
+    }
+  }
+  if (spec.order !== undefined && spec.order !== null && String(spec.order) !== '') fields.order = String(spec.order);
+  for (const k of ['tags', 'blocked_by', 'supersedes']) {
+    if (spec[k] === undefined) continue;
+    const list = asList(spec[k]);
+    // ★ 空列表**不写**：`tags: []` 与"没有 tags"是同一件事，写进去只会多一行噪声（CLI 给 `--tags ''` 也会走到这）
+    if (list.length > 0) fields[k] = list;
+  }
+  for (const k of ['verify', 'repro', 'severity', 'done_reason', 'dropped_reason']) {
+    if (spec[k] !== undefined && spec[k] !== null && String(spec[k]) !== '') fields[k] = String(spec[k]);
+  }
+
+  const rawBody = spec.body === undefined || spec.body === null ? '' : String(spec.body).replace(/\r\n/g, '\n').trim();
+  const body = rawBody === '' ? (type === 'bug' ? DEFAULT_BODY.bug : DEFAULT_BODY.other) : rawBody;
+  if (!body.includes('## ')) throw new Error('正文至少要有一个 `## 小节`（台账的形态要求）');
+
+  const node = { name, title, fields, body };
+  const file = path.join(dir, `${name}${EXT}`);
+  const plan = [
+    `add ${fields.id}  ${title}`,
+    `  parent: ${fields.parent ?? '(缺！)'}  type: ${type}  status: ${status}`,
+    `  → ${path.relative(repoRoot, file) || file}`,
+  ];
+
+  return {
+    name,
+    id: fields.id,
+    title,
+    fields,
+    body,
+    file,
+    plan,
+    apply: () => {
+      const res = saveNode(node, dir);
+      if (!res.ok) throw new Error(res.reason);
+      const report = validateAll(loadNodes(dir), { repoRoot });
+      if (report.failures > 0) {
+        // ★ 写后守卫没过 ⇒ 必须把这颗新节点**整颗删掉**（否则树上留一个守卫不接受的文件）
+        deleteNode(name, dir);
+        return { rollback: true, report, removed: nodeId(name) };
+      }
+      return { report };
+    },
+  };
 }
 
 // ─────────────────────────────────────────────────────────── 树 / 派生
@@ -680,7 +814,8 @@ export function describe() {
     ].map((x) => ({ ...x, enforcedBy: '本工具的 validate（`pnpm tools requirements validate`）' })),
     operations: OPERATIONS,
     writePath:
-      '只有本工具（唯一编辑入口）；缺省 dry-run，--write 才落盘；写入用规范形态（固定键序、同输入同字节）并**写后回读复验，不绿回滚**。' +
+      '★ **写路径只有一条**：模型里的 `planAdd`（新建）与 `saveNode`（落盘 + 写后回读复验，不绿回滚）。' +
+      '两个调用方共用它：`pnpm tools requirements add`（缺省 dry-run，`--write` 才落盘）与工作台的"新建需求单"（`POST /api/nodes`）。' +
       '**不要手改格式、不要重命名或新建 .md**（validate 会红）。',
   };
 }

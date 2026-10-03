@@ -11,5 +11,10 @@
   "scripts": {
     "test": "node --test --test-isolation=none \"{tools/test/**/*.test.mjs,packages/*/test/**/*.test.mjs}\"",
     "tools": "node tools/cli.mjs"
+  },
+  "pnpm": {
+    "overrides": {
+      "markdown-it>entities": "^7.0.1"
+    }
   }
 }

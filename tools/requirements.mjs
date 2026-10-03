@@ -19,20 +19,18 @@ import {
   BUDGET,
   DEFAULT_REQUIREMENTS_DIR,
   DOMAIN,
-  ID_PREFIX,
   LIVE_STATUSES,
   OPERATIONS,
   STATUS_MARK,
   buildTree,
-  deleteNode,
   describe,
   describeText,
   flatten,
   loadNodes,
   nodeId,
+  planAdd,
   rollup,
   saveNode,
-  ulid,
   validateAll,
 } from './lib/requirements.mjs';
 import { REPO_ROOT } from './lib/paths.mjs';
@@ -183,54 +181,16 @@ function readBody(spec, fallback = null) {
   return fs.readFileSync(abs, 'utf8').replace(/\r\n/g, '\n').trim();
 }
 
+/**
+ * ★ `--add` 只是**取参数的人**：建单的规则（id / parent / 缺省正文 / 写后守卫 + 回滚）全在
+ * `lib/requirements.mjs` 的 `planAdd()` 里 —— 工作台的"新建需求单"调的是**同一个函数**，
+ * 所以网页与 CLI 不可能建出两种形态的节点。
+ */
 function cmdAdd(args, nodes, tree) {
   const f = collectFields(args);
-  if (!f.title) throw new Error('--add 需要 --title');
-  if (f.title.startsWith(ID_PREFIX)) throw new Error('--title 是标题，不是 id');
-  // 身份：缺省由本工具生成；给了 --id 就以调用方为准（种子/迁移需要预先知道 id 才能写父子引用）
-  let u;
-  if (f.id !== undefined) {
-    const bare = f.id.startsWith(ID_PREFIX) ? f.id.slice(ID_PREFIX.length) : f.id;
-    if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(bare)) {
-      throw new Error(`--id 形态非法：${f.id}（应为 ${ID_PREFIX}<26 字符 Crockford base32>）`);
-    }
-    if (nodes.some((n) => n.name === bare)) throw new Error(`--id 已被占用：${nodeId(bare)}`);
-    u = bare;
-  } else {
-    u = ulid();
-  }
-  const fields = { id: nodeId(u), type: f.type ?? 'req', status: f.status ?? 'open' };
-  if (f.parent !== undefined) {
-    if (f.parent !== 'null' && !tree.resolve(f.parent)) throw new Error(`--parent 指向的节点不存在：${f.parent}`);
-    fields.parent = f.parent === 'null' ? 'null' : tree.resolve(f.parent).fields.id;
-  }
-  if (f.order !== undefined) fields.order = String(f.order);
-  for (const k of ['tags', 'blocked_by', 'supersedes']) {
-    if (f[k] !== undefined) fields[k] = String(f[k]).split(',').map((s) => s.trim()).filter(Boolean);
-  }
-  for (const k of ['verify', 'repro', 'severity', 'done_reason', 'dropped_reason']) if (f[k] !== undefined) fields[k] = f[k];
-  const body =
-    readBody(f.body_file ?? f.body, null) ??
-    (fields.type === 'bug'
-      ? '## 复现\n\n（待写：怎么观测到这个分歧，越短越好）\n\n## 期望 / 实际\n\n（待写）\n\n## 影响\n\n（待写）'
-      : '## 判据\n\n（待写：怎么算做完，要可核对）\n\n## 范围 / 非目标\n\n（待写）');
-  const node = { name: u, title: f.title, fields, body };
-  const plan = [`add ${fields.id}  ${f.title}`, `  parent: ${fields.parent ?? '(缺！)'}  type: ${fields.type}  status: ${fields.status}`, `  → ${path.relative(REPO_ROOT, path.join(args.dir, `${u}.md`))}`];
-  return {
-    plan,
-    apply: () => {
-      const res = saveNode(node, args.dir);
-      if (!res.ok) throw new Error(res.reason);
-      const after = loadNodes(args.dir);
-      const report = validateAll(after, { repoRoot: REPO_ROOT });
-      if (report.failures > 0) {
-        // ★ 写后守卫没过 ⇒ 必须把这颗新节点**整颗删掉**（否则树上留一个守卫不接受的文件）
-        deleteNode(u, args.dir);
-        return { rollback: true, report, removed: nodeId(u) };
-      }
-      return { report };
-    },
-  };
+  const { body_file: bodyFile, ...rest } = f;
+  const built = planAdd({ ...rest, body: readBody(bodyFile ?? f.body, undefined) }, { dir: args.dir, nodes, tree });
+  return { plan: built.plan, apply: built.apply };
 }
 
 function cmdSet(args, nodes, tree) {

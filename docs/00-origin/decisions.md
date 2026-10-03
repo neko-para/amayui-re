@@ -107,7 +107,7 @@
    * 判据一句话：**"这条断言红的时候，指向的是一处真实的不一致吗？"** 不是 ⇒ 别写。
    * 推论：**生成器宁可失败，也不许写出错文件**（拿不到事实就抛，不"读不到就当空"）。
 
-## 7. 工具层的三条决定 `[本轮]`
+## 7. 工具层的四条决定 `[本轮]`
 1. **脚本优先，工具只在真能带来新能力时才存在**：判据是"生命周期 / 人的参与 / 输出形态 / 调用频次 / 发现方式"
    —— 短命、无句柄、有 `--json`、低频、`pnpm` 足够 ⇒ 脚本（corpus 操作五项全落在脚本列）。
    工具 = 插件 = 环境级安装 × 每台机器 × DSH 升级要重装；**最大风险是写路径分裂**。
@@ -118,8 +118,13 @@
    `lib/**` 不得 import CLI、CLI 之间不得互相 import、纯工具不得反向依赖领域模型。
    判据一句话：**"这个函数认识『素材/槽/语料』吗？"** 不认识 ⇒ 纯工具；只是"数据怎么读怎么写" ⇒ 领域模型；
    只有"怎么从命令行调、怎么打印" ⇒ CLI。
+4. **写路径只有一份，前端只是调用方**（`[2026-10]`，网页建单时定）：**规则住在领域模型里，不住在任何一个前端里**。
+   判据：**"第二个前端出现时，要不要抄一遍规则？"** 要抄 ⇒ 规则放错地方了，先挪进模型（`planAdd` 就是这么来的：
+   CLI `--add` 与工作台 `POST /api/nodes` 共用它）。推论：**有第二个消费者才提取**，不预支
+   （`--set` 至今只有一个调用方，就留在 CLI）；CLI 缺省 dry-run、写后回读复验、**不绿回滚**，
+   网页那边照抄同一条纪律（HTTP 层只把"不合格"翻成 400、"守卫不绿"翻成 422，自己不做任何裁决）。
 
-> 三条的实现细节 / 全图 / 命令表都在 `tools/README.md`（§0 分层、§0.1 入口、§2 常用命令），本文件只留决定本身。
+> 四条的实现细节 / 全图 / 命令表都在 `tools/README.md`（§0 分层、§0.1 入口、§2 常用命令），本文件只留决定本身。
 
 ## 8. 域内决定的去处（索引）
 
@@ -139,7 +144,7 @@
 | 翻译域：现状、双份 vs 单份待定、`install/` 先保留 | `docs/01-translation/README.md` |
 | **翻译 patch 方案**：真源 = 叠加层，`data`/`src` 都是视图；锚定规则与支撑观测 | `docs/01-translation/patch-design.md` + `pnpm tools patch describe` + `pnpm tools requirements show 8SNRXKV` |
 | 模拟器 / 探针域：按新结构重写、工具链、跨域守卫要拆回各域 | `docs/03-emulator/README.md`、`apps/*/README.md` |
-| **项目工作台（网页）**：需求 + AGE 脚本反汇编；Vue 3 + Vite + TS；服务端 `server.ts` 由 Node 原生 type stripping 直跑 | `apps/workbench/README.md` + `pnpm tools requirements show 1M3XWRXVB04WQ4J0MA6AXZY9D` |
+| **项目工作台（网页）**：需求 + AGE 脚本反汇编；Vue 3 + Vite + TS；服务端 `server.ts` 由 Node 原生 type stripping 直跑；正文 Markdown 渲染（`markdown-it`）+ 通用控件用 `naive-ui`；**唯一写端点** `POST /api/nodes`（建单，规则 = 模型的 `planAdd`，只在监听回环时开） | `apps/workbench/README.md` + `pnpm tools requirements show 1M3XWRXVB04WQ4J0MA6AXZY9D` |
 | agent 基建：技能固定路径、插件软链接注册、按重建处理 | `docs/04-agent/README.md`、`AGENTS.md` §7 |
 | 知识层：清理起点清单、A/B/C 分级、准入规则、`callers/callees` 数据源缺失 | `knowledge-rebuild.md` |
 | 环境与权限：五条硬纪律、跨平台六条、语言口径、怎么跑、两个沙箱口径 | `AGENTS.md` |
@@ -157,5 +162,7 @@
 | 旧仓保持原样可归档，**不要求**导出 bundle / tag | §1 的结论；只读边界见 `AGENTS.md` §0 |
 | 技能与插件**不迁移、只重建**（技能路径固定） | `docs/04-agent/README.md`、`AGENTS.md` §7 |
 | `install/` **先保留**、后续重新设计 | `docs/01-translation/README.md` |
+| 工作台可以**建单**（HTTP 写端点），但建单规则只有模型那一份；**改已有节点仍然只有 CLI** | §7 第 4 条、`apps/workbench/README.md` |
+| 需求正文按 **Markdown 渲染**（`markdown-it`，`html: false`）；通用控件用 `naive-ui` | `apps/workbench/README.md`、`apps/workbench/src/markdown.ts` |
 | `raw/` 继续用**符号链接**引用（不 track） | `corpus/README.md` §3 |
 | 知识线（K1/K2/K3）**先不启动**；`callers/callees` 数据源缺失，先不做 | `knowledge-rebuild.md` |

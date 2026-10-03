@@ -1,16 +1,24 @@
 <script setup lang="ts">
 /**
- * 需求详情：字段 + 正文（按 `## ` 切小节）+ 面包屑 + 直接子节点。
+ * 需求详情：字段 + 正文（按 `## ` 切小节，逐节 **Markdown 渲染**）+ 面包屑 + 直接子节点。
  *
  * ★ 数据一律走 `/api/node/<ref>`（服务端 `describeNode`）：小节的切法、父链、直接子
  *   **都是模型算的**，这里不重写"什么是一节"。这样"冷启动直达 `#/req/X`"与"总览里点进来"走同一条路。
+ * ★ 渲染是**客户端**的事（`src/markdown.ts`，naive-ui 不管 Markdown）：服务端照旧只给文本，
+ *   `sections[].text` 一个字节都不改。`v-html` 的内容来自我们自己的渲染器且 `html: false`
+ *   ⇒ 正文里的原始 HTML 只会以文本出现（不需要 sanitizer，见 markdown.ts 的口径）。
  */
-import { computed, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue';
+import { NButton } from 'naive-ui';
 
 import CopyId from '../components/CopyId.vue';
-import { loadNode } from '../data';
-import { hrefReq, hrefReqs } from '../router';
+import { canCreate, cannotCreateWhy, health, loadHealth, loadNode } from '../data';
+import { renderMarkdown } from '../markdown';
+import { go, hrefReq, hrefReqs } from '../router';
 import type { ChainItem, NodePayload } from '../api';
+
+/** ★ 懒加载：与总览同一份理由（表单 / 下拉 / 弹窗是 naive-ui 里最重的一组，不进外壳 chunk） */
+const NewRequirementDialog = defineAsyncComponent(() => import('../components/NewRequirementDialog.vue'));
 
 const props = defineProps<{ nodeRef: string }>();
 
@@ -54,6 +62,21 @@ const children = computed(() => (payload.value?.children ?? []).filter(keep));
 const hiddenChildren = computed(() => (payload.value?.children ?? []).length - children.value.length);
 const showAllChildren = ref(false);
 const shownChildren = computed(() => (showAllChildren.value ? payload.value?.children ?? [] : children.value));
+
+/** 新建**子**需求单：父节点预选成当前这条（能不能按由服务端的 `writes` 说了算） */
+const showCreate = ref(false);
+/** 首次打开后才挂载对话框（理由与总览一致：不让它在打开页面时就下载那个 chunk） */
+const dialogReady = ref(false);
+const openCreate = () => {
+  dialogReady.value = true;
+  showCreate.value = true;
+};
+onMounted(() => void loadHealth());
+/** 建完直接跳过去（本组件按 `nodeRef` 做 key，换一条会重挂） */
+const onCreated = (created: { short: string }) => go(hrefReq(created.short));
+
+/** 小节正文 → HTML（同一套渲染器，详情页与"新建"里的预览逐字节一致） */
+const sectionHtml = (text: string) => renderMarkdown(text);
 </script>
 
 <template>
@@ -77,8 +100,28 @@ const shownChildren = computed(() => (showAllChildren.value ? payload.value?.chi
           <span>{{ node.status }}</span>
           <span v-if="node.total > 0"> · 子树 {{ window_(node) }}</span>
           <span v-if="node.aggregated" class="flag warn"> · ⚠ 聚合状态与自身不一致</span>
+          <span class="grow"></span>
+          <n-button
+            size="tiny"
+            secondary
+            type="primary"
+            :disabled="!canCreate"
+            :title="canCreate ? '在这条下面新建一张子需求单' : cannotCreateWhy"
+            @click="openCreate"
+          >
+            ＋ 子需求单
+          </n-button>
         </div>
       </div>
+
+      <new-requirement-dialog
+        v-if="dialogReady"
+        v-model:show="showCreate"
+        :writes="health?.writes ?? null"
+        :nodes="[]"
+        :parent-id="node.id"
+        @created="onCreated"
+      />
 
       <section class="card">
         <h3>字段</h3>
@@ -130,8 +173,8 @@ const shownChildren = computed(() => (showAllChildren.value ? payload.value?.chi
         <h3>正文</h3>
         <div class="prose">
           <template v-for="(s, i) in node.sections" :key="i">
-            <h4 v-if="s.heading">{{ s.heading }}</h4>
-            <pre v-if="s.text">{{ s.text }}</pre>
+            <h4 v-if="s.heading" class="md-h">{{ s.heading }}</h4>
+            <div v-if="s.text" class="md" v-html="sectionHtml(s.text)"></div>
           </template>
         </div>
       </section>
@@ -139,9 +182,9 @@ const shownChildren = computed(() => (showAllChildren.value ? payload.value?.chi
       <section class="card">
         <h3>
           子节点<span v-if="shownChildren.length">（{{ shownChildren.length }}）</span>
-          <button v-if="hiddenChildren" class="btn tiny" type="button" @click="showAllChildren = !showAllChildren">
+          <n-button v-if="hiddenChildren" class="tiny" size="tiny" quaternary @click="showAllChildren = !showAllChildren">
             {{ showAllChildren ? '只看未收口' : `显示全部（还有 ${hiddenChildren} 个已收口）` }}
-          </button>
+          </n-button>
         </h3>
         <div v-if="shownChildren.length" class="kids">
           <div v-for="k in shownChildren" :key="k.id" class="kid" :data-dim="CLOSED.has(k.status) ? '1' : undefined">

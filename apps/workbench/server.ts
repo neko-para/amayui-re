@@ -1,18 +1,26 @@
 #!/usr/bin/env node
 /**
- * apps/workbench/server.ts — **项目工作台**的本地只读服务端（Node 直跑，无构建）。
+ * apps/workbench/server.ts — **项目工作台**的本地服务端（Node 直跑，无构建）。
  *
  * 它是什么：`data/requirements/`（需求树）与 `data/translations/patch.json`（AGE 脚本反汇编视图）
  * 的一层 HTTP。客户端在 `src/`（Vue 3 + Vite），构建产物 `dist/web/` 由本文件当根服务。
  *
  * ★ 与 DSH 无关：这是独立的本地网页；不引 DSH 的任何包、不依赖 DSH 在跑。
- * ★ **只读**：本服务没有任何写路径。改台账只有 `pnpm tools requirements set --write`，
- *   改 patch 只有 `pnpm tools patch extract|edit --write`。
- * ★ **单一真源**：解析 / 建树 / 聚合 / 引用解析 / 小节切分 / 反汇编视图**全部来自** `tools/lib/`：
- *   `requirements.mjs`（`loadNodes` / `buildTree` / `flatten` / `rollup` / `describeNode` / `describeText`）
+ * ★ **写路径只有一条，而且有三重限制**：`POST /api/nodes` —— 新建需求单，走的是模型里与
+ *   `pnpm tools requirements add` **同一个** `planAdd()`（规则只有一份：id / parent / 缺省正文 /
+ *   写后守卫 + 回滚都在 `tools/lib/requirements.mjs` 里）。三重限制：
+ *     ① **只在监听回环时开**（`--host` 给非回环 ⇒ 写路径关掉：绑到局域网等于把台账的写权限交出去）；
+ *     ② **只收 `Content-Type: application/json`**（跨站页面发不出这种"简单请求"⇒ 必须先过预检，
+ *        而本服务**从不回 CORS 头** ⇒ 浏览器会挡掉那个 POST）；
+ *     ③ **只新建、不改已有节点**（改字段仍然只有 `pnpm tools requirements set --write`）。
+ *   GET 一律不写任何东西（payload 里的 `readOnly: true` 就是"这个端点不改数据"）。
+ * ★ **单一真源**：解析 / 建树 / 聚合 / 引用解析 / 小节切分 / 反汇编视图 / **建单**全部来自 `tools/lib/`：
+ *   `requirements.mjs`（`loadNodes` / `buildTree` / `flatten` / `rollup` / `describeNode` / `describeText` /
+ *   `planAdd` / `TYPES` / `STATUSES` / `SEVERITIES` / `BUG_ONLY`）
  *   与 `patch.mjs`（`allScriptNames` / `SPEAKER_FILTER` / `openSides` / `buildView` / `rowsOf` /
  *   `mapperContext` / `NO_OPS_ENTRY`）· `bin-source.mjs`（`isAgeScript`）。
- *   这里一行都不重抄 —— 工作台是那套模型的第三个消费者（`requirements plan` / `patch view` 是前两个）。
+ *   这里一行都不重抄 —— 工作台是那套模型的第三个消费者（`requirements plan` / `patch view` 是前两个），
+ *   而"新建一张需求单"是它**第一个写入方向**的消费者。
  *   "这是不是 AGE 脚本"也只问模型：`isAgeScript()`（内层是 `readHeader()`，认不出签名即假）。
  *
  * ★ **脚本一览 = 基线根里所有能反汇编的 `.BIN`**（= `allScriptNames()` 的 `names`），
@@ -37,16 +45,21 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import {
+  BUG_ONLY,
   BUDGET,
+  DEFAULT_REQUIREMENTS_DIR,
+  SEVERITIES,
   STATUS_MARK,
+  STATUSES,
+  TYPES,
   buildTree,
   describeNode,
   describeText as requirementsDescribeText,
   flatten,
   loadNodes,
+  planAdd,
   rollup,
 } from '../../tools/lib/requirements.mjs';
-import { DEFAULT_REQUIREMENTS_DIR } from '../../tools/lib/paths.mjs';
 import {
   SPEAKER_FILTER,
   DEFAULT_PATCH,
@@ -72,6 +85,28 @@ const DEFAULT_PORT = 7788;
  * 等于把它们放到局域网上，所以那必须是**显式**选择（`--host`）。
  */
 const DEFAULT_HOST = '127.0.0.1';
+
+/**
+ * ★ **写路径的开关由"监听在哪儿"派生**，不是又一个 flag（少一个可以配错的东西）。
+ *
+ * 为什么：这个服务能读整个仓库；绑到非回环地址之后，**同一个局域网里的任何机器**都能 POST 建单。
+ * 于是规则很简单 —— 只有回环才有写权限。给 `--host 0.0.0.0` 时页面照常能看，只是"新建"按钮会
+ * 明写为什么不能按（`/api/health` 的 `writes.why`）。
+ *
+ * @returns {{allowed:boolean, why:string}}
+ */
+export function writesAllowed(host: string): { allowed: boolean; why: string } {
+  const h = String(host ?? '').toLowerCase().replace(/^\[|\]$/g, '');
+  const loopback = h === 'localhost' || h === '::1' || h === '::ffff:127.0.0.1' || /^127(\.\d{1,3}){3}$/.test(h);
+  return loopback
+    ? { allowed: true, why: `监听回环（${host}）⇒ 只有本机能连上，可以建单` }
+    : { allowed: false, why: `监听 ${host}（不是回环）⇒ 写路径关掉：绑到局域网等于把台账的写权限交出去` };
+}
+
+/** 写路径只有这一个；**只有 POST**（读是 `/api/node/<ref>`，写把 JSON POST 到这个集合上） */
+const WRITE_PATH = '/api/nodes';
+/** 请求体上限：一屏预算（≤80 行/节点）离这个数很远 —— 它是防"有人把整个文件塞进来" */
+const MAX_BODY = 256 * 1024;
 
 /** 服务端认的 MIME（够 `dist/web` 用：Vite 只会产出这几种） */
 const MIME: Record<string, string> = {
@@ -497,6 +532,142 @@ function sendFile(res: ServerResponse, abs: string) {
   res.end(data);
 }
 
+/** 建单响应里的 `writes` 块：**可写性 + 表单要用的枚举**（枚举只有一份真源 = 模型） */
+function writesPayload(host: string) {
+  const { allowed, why } = writesAllowed(host);
+  return {
+    enabled: allowed,
+    why,
+    endpoint: `POST ${WRITE_PATH}`,
+    /** 只有这些字段可以出现在请求体里（模型 `planAdd` 会拒收别的键，这里只是先给客户端一份清单） */
+    fields: [
+      'title',
+      'type',
+      'status',
+      'parent',
+      'order',
+      'tags',
+      'blocked_by',
+      'verify',
+      'repro',
+      'severity',
+      'done_reason',
+      'dropped_reason',
+      'supersedes',
+      'body',
+    ],
+    types: TYPES,
+    statuses: STATUSES,
+    severities: SEVERITIES,
+    /** 缺陷专属字段（`type=bug` 之外不许出现）—— 页面据此决定"显示哪几个输入框" */
+    bugOnly: BUG_ONLY,
+    /** 新建时的缺省：`planAdd` 的缺省值，写在这里免得页面猜 */
+    defaults: { type: 'req', status: 'open' },
+  };
+}
+
+/** 读请求体（限长、必须是 JSON）：这是唯一一处从 socket 读数据的地方 */
+async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    if (size > MAX_BODY) throw new HttpError(413, `请求体超过 ${MAX_BODY} 字节（一屏预算 ≤ 80 行/节点，用不到这么大）`);
+    chunks.push(buf);
+  }
+  const text = Buffer.concat(chunks).toString('utf8').trim();
+  if (text === '') return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new HttpError(400, `请求体不是合法 JSON：${(err as Error).message}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new HttpError(400, '请求体必须是一个 JSON 对象（字段见 /api/health 的 writes.fields）');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** 带状态码的错（只有 HTTP 层才有"状态码"这个概念，模型不认它） */
+class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/**
+ * ★ **唯一的写端点**：新建一张需求单。
+ *
+ * 它自己**不实现任何建单规则** —— 全部交给模型 `planAdd()`（与 `pnpm tools requirements add` 同一个函数）：
+ * 规则只有一份，"网页建的"与"命令行建的"因此不可能长得不一样。写后守卫（`validateAll`）不绿时，
+ * `planAdd().apply()` 已经把新文件删掉并回报 `rollback` —— 这里只把它如实变成 422。
+ */
+async function createNode(dir: string, host: string, req: IncomingMessage, res: ServerResponse) {
+  const { allowed, why } = writesAllowed(host);
+  if (!allowed) throw new HttpError(403, `写路径已关闭：${why}`);
+  // ★ 只收 application/json：跨站页面发不出这种"简单请求"⇒ 必须先过预检，而本服务从不回 CORS 头
+  //   ⇒ 浏览器会挡掉那个 POST。放宽成 text/plain 就等于把这道门拆了。
+  const type = String(req.headers['content-type'] ?? '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  if (type !== 'application/json') {
+    throw new HttpError(415, `只收 Content-Type: application/json（收到 ${type || '（空）'}）`);
+  }
+  const spec = await readJsonBody(req);
+  // 规则全在模型里；这里只把请求体当"值"喂进去。★ 模型抛的是**普通 Error**（它不认识 HTTP）：
+  //   那是"这单子不合格"⇒ 400（不是我们坏了）。写盘失败才是 500（下面那一段）。
+  let built: ReturnType<typeof planAdd>;
+  try {
+    built = planAdd(spec, { dir });
+  } catch (err) {
+    throw new HttpError(400, `${(err as Error).message}`);
+  }
+  let result: { report: any; rollback?: boolean; removed?: string };
+  try {
+    result = built.apply();
+  } catch (err) {
+    throw new HttpError(500, `落盘失败（没有改动被保留）：${(err as Error).message}`);
+  }
+  if (result.rollback) {
+    sendJson(res, 422, {
+      ok: false,
+      error: '写后守卫没过 —— 新建的节点已被删掉（没留残 file）；按下面的不变量改一版再试',
+      rolledBack: true,
+      removed: result.removed,
+      report: reportShape(result.report),
+    });
+    return;
+  }
+  sendJson(res, 201, {
+    ok: true,
+    created: {
+      id: built.id,
+      name: built.name,
+      /** 与 `requirements list` 的短名同一个口径（末 8 位）—— 页面用它跳 `#/req/<short>` */
+      short: built.name.slice(-8),
+      title: built.title,
+      /** 落盘的绝对路径（本地工具，如实给出：要手开这个文件时不用猜） */
+      file: built.file,
+    },
+    dir,
+    plan: built.plan,
+    report: reportShape(result.report),
+  });
+}
+
+/**
+ * 只把**客户端要用的那两段**发出去：`validateAll()` 的结果里还有一个 `tree`（`Map` + 节点对象），
+ * 它既不可序列化也没人要看 —— 发它会让人以为客户端能拿到整棵树。
+ */
+function reportShape(report: any) {
+  return { failures: report.failures, checks: report.checks };
+}
+
 export type ServerOptions = {
   port?: number;
   host?: string;
@@ -508,15 +679,22 @@ export type ServerOptions = {
   installSignalHandlers?: boolean;
 };
 
-function createHandler(dir: string, dev: boolean) {
-  return (req: IncomingMessage, res: ServerResponse) => {
+function createHandler(dir: string, dev: boolean, host: string) {
+  return async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
       const pathname = url.pathname;
 
-      // 只读：任何非 GET/HEAD 都是 405（不是"没实现"，是**刻意没有**写路径）
+      // 写路径只有一条（`POST /api/nodes`）；别的一律 405 —— 不是"没实现"，是**刻意没有**
       if (req.method !== 'GET' && req.method !== 'HEAD') {
-        sendJson(res, 405, { ok: false, error: `只读服务：不支持 ${req.method}。改数据走 CLI（requirements set --write / patch edit --write）。` });
+        if (req.method === 'POST' && pathname === WRITE_PATH) {
+          await createNode(dir, host, req, res);
+          return;
+        }
+        sendJson(res, 405, {
+          ok: false,
+          error: `不支持 ${req.method} ${pathname}。唯一写路径是 POST ${WRITE_PATH}（新建需求单）；改已有节点走 CLI：pnpm tools requirements set --write`,
+        });
         return;
       }
 
@@ -540,6 +718,8 @@ function createHandler(dir: string, dev: boolean) {
           base: base.dir,
           /** "旧管线标注过"的口径就是这条正则 —— **标签**，与任何产物根、与 patch 范围都无关 */
           annotatedFilter: String(SPEAKER_FILTER),
+          /** ★ 能不能建单（由监听地址派生）+ 表单要用的枚举（真源 = 模型） */
+          writes: writesPayload(host),
           webBuilt: staticIndex() !== null,
           viewCache: { max: VIEW_CACHE_MAX, size: viewCache.size, hits: viewCacheHits, misses: viewCacheMisses },
         });
@@ -597,6 +777,11 @@ function createHandler(dir: string, dev: boolean) {
         sendJson(res, 200, { ok: true, readOnly: true, ...got.value });
         return;
       }
+      if (pathname === WRITE_PATH) {
+        // GET 到这个集合：它只收 POST（读一个节点用 /api/node/<ref>）
+        sendJson(res, 405, { ok: false, error: `${WRITE_PATH} 只收 POST（新建需求单）。读一个节点用 GET /api/node/<ref>。` });
+        return;
+      }
       if (pathname.startsWith('/api/')) {
         sendJson(res, 404, { ok: false, error: `未知端点：${pathname}` });
         return;
@@ -633,7 +818,10 @@ function createHandler(dir: string, dev: boolean) {
       }
       sendJson(res, 404, { ok: false, error: `未知资源：${pathname}` });
     } catch (err) {
-      sendJson(res, 500, { ok: false, error: err && (err as Error).message ? (err as Error).message : String(err) });
+      // ★ 只有 HTTP 层认"状态码"（模型抛的是普通 Error）：`HttpError` 如实透传，其余算 500
+      const status = err instanceof HttpError ? err.status : 500;
+      const message = err && (err as Error).message ? (err as Error).message : String(err);
+      sendJson(res, status, { ok: false, error: message });
     }
   };
 }
@@ -643,17 +831,19 @@ export function startServer(opts: ServerOptions = {}): Promise<Server> {
   if (port !== 0 && (!Number.isInteger(port) || port < 0 || port > 65535)) {
     return Promise.reject(new Error(`--port 必须是端口号（0-65535），实际：${port}`));
   }
-  const server = http.createServer(createHandler(dir, dev));
+  const server = http.createServer(createHandler(dir, dev, host));
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
       server.removeListener('error', reject);
       const actual = (server.address() as { port: number }).port;
-      log('项目工作台（只读）');
+      const writes = writesAllowed(host);
+      log('项目工作台');
       log(`  页面  http://${host}:${actual}/` + (dev ? '   ← --dev：本进程只管 /api/*，页面走 Vite dev server' : ''));
       log(`  需求  ${dir}`);
       log(`  patch ${DEFAULT_PATCH}`);
-      log(`  API   http://${host}:${actual}/api/tree · /api/scripts · /api/health`);
+      log(`  API   http://${host}:${actual}/api/tree · /api/scripts · /api/health · POST /api/nodes`);
+      log(`  建单  ${writes.allowed ? '开（' + WRITE_PATH + '，仅回环 + 仅 application/json）' : '关 —— ' + writes.why}`);
       if (!dev && !staticIndex()) log('  ⚠ dist/web 还没构建：cd apps/workbench && node scripts/vite-cli.mjs build');
       log('  停    Ctrl+C');
       resolve(server);
@@ -663,24 +853,28 @@ export function startServer(opts: ServerOptions = {}): Promise<Server> {
 
 // ─────────────────────────────────────────────────────────── CLI
 
-const HELP = `apps/workbench/server.ts — 项目工作台的本地只读服务端（Node 直跑，无构建）
+const HELP = `apps/workbench/server.ts — 项目工作台的本地服务端（Node 直跑，无构建）
 
   node apps/workbench/server.ts [--port 7788] [--host 127.0.0.1] [--dir <需求目录>] [--dev]
 
   --port  监听端口（缺省 7788；0 = 让系统分配）
-  --host  监听地址（缺省 127.0.0.1。★ 绑到非回环**必须**显式给这一项）
+  --host  监听地址（缺省 127.0.0.1。★ 绑到非回环**必须**显式给这一项；**非回环会关掉写路径**）
   --dir   需求台账目录（缺省 data/requirements/）
   --dev   只服务 /api/*（页面由 Vite dev server 出，它的 proxy 转到这里）
 
-端点（全部 GET，全部只读）：
+端点（GET 一律不改数据）：
   /api/tree                     需求树 + 表头 + 预算 + 标记表 + 自描述
   /api/node/<ref>               一条需求：字段 + 正文小节 + 父链 + 直接子
   /api/scripts                  全部可反汇编的 AGE 脚本一览（「标注过」只是标签）+ 汇总
   /api/script/<name>?kind=…     一支脚本的反汇编正文（kind = data | src；text 就是 buildView 的输出）
-  /api/health                   轻量自检
+  /api/health                   轻量自检（含 writes：可写性 + 表单枚举）
   /                             客户端（dist/web/ 的白名单视图）
 
-★ 只读：没有任何写路径。改台账 \`pnpm tools requirements set --write\`；改 patch \`pnpm tools patch edit --write\`。
+写端点（**只有一个**）：
+  POST /api/nodes               新建一张需求单（JSON）—— 规则与 \`pnpm tools requirements add\` 同一个 planAdd()
+
+★ 写路径的三重限制：只在**监听回环**时开 · 只收 application/json（跨站发不出这种简单请求 ⇒ 浏览器预检挡掉）·
+  只**新建**（改已有节点仍然只有 \`pnpm tools requirements set --write\`）。
 `;
 
 function parseCli(argv: string[]) {

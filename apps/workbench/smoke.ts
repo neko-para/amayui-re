@@ -14,19 +14,32 @@
  *      —— **这里一个数字都不写死**（口径是"现算"，不是"记住 941"）；
  *   ④ `/api/script/<名>` 的 `text` 与直接调 `buildView` 的结果**逐字节相等**
  *      （最大的那支 + 有变更的一支 + 没有条目的一支 + **名字过滤器没命中的四支**：那批里既有
- *      "旧管线漏提"的真译文，也有真的没变更的）。
+ *      "旧管线漏提"的真译文，也有真的没变更的）；
+ *   ⑤ **写路径**（`POST /api/nodes`）：写在**临时台账目录**上（绝不碰真的 `data/requirements/` ——
+ *      自检里也断言这一点），断言的是"服务端没有自己的建单规则"（枚举来自模型、被拒的单子不留残 file、
+ *      守卫不绿就回滚）与三道门（只在回环 / 只收 JSON / 不吐 CORS 头）；
+ *   ⑥ **Markdown 渲染口径**（`src/markdown.ts`）：直接 import 那个模块断言四条口径
+ *      （原始 HTML 按文本、裸文本不自动变链接、仓库内路径不做成可点链接、小节里的小标题降两级）。
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 
 import {
+  BUG_ONLY,
   DEFAULT_REQUIREMENTS_DIR,
+  SEVERITIES,
+  STATUSES,
+  TYPES,
   buildTree,
   describeNode,
   flatten,
   loadNodes,
+  parseNode,
   splitSections,
+  validateAll,
 } from '../../tools/lib/requirements.mjs';
+import { REPO_ROOT } from '../../tools/lib/paths.mjs';
 import {
   SPEAKER_FILTER,
   DEFAULT_PATCH,
@@ -38,7 +51,8 @@ import {
   openSides,
   rowsOf,
 } from '../../tools/lib/patch.mjs';
-import { startServer } from './server.ts';
+import { startServer, writesAllowed } from './server.ts';
+import { MD_OPTIONS, renderMarkdown } from './src/markdown.ts';
 
 let pass = 0;
 const failures: string[] = [];
@@ -337,7 +351,7 @@ try {
     assert.ok(after > before, `第二次没有命中缓存（hits ${before} → ${after}）`);
   });
 
-  console.log('\n5) 边界与只读');
+  console.log('\n5) 边界：未知引用 / 非法 kind / 不是脚本的 BIN / 方法用错');
   const badKind = await get(`/api/script/${encodeURIComponent(picked[0].name)}?kind=nope`);
   await check('kind 非法 ⇒ 400', () => {
     assert.equal(badKind.status, 400);
@@ -373,10 +387,10 @@ try {
     assert.ok(!('target' in health.body), '旧 target 字段已废：标注标签不再从产物根推');
   });
 
-  // 只读是**纪律**：任何写动作都必须被拒（不是"没实现"，是刻意没有）
+  // 写路径只有一条：别的动作都必须被拒（不是"没实现"，是刻意没有）
   for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
     const res = await fetch(`${base}/api/tree`, { method });
-    await check(`${method} /api/tree ⇒ 405（没有任何写路径）`, async () => {
+    await check(`${method} /api/tree ⇒ 405（唯一写路径是 POST /api/nodes）`, async () => {
       assert.equal(res.status, 405);
       const body: any = await res.json();
       assert.equal(body.ok, false);
@@ -391,7 +405,276 @@ try {
   const traversal = await get('/../tools/lib/requirements.mjs');
   await check('路径穿越 ⇒ 404（白名单：请求路径只当查表的键）', () => assert.equal(traversal.status, 404));
 
-  console.log('\n6) 静态（dist/web 的白名单视图）');
+  // ───────────────────────────────────────────────────────── 写路径（建单）
+  console.log('\n6) 写路径（POST /api/nodes）：写在临时台账上，规则全部来自模型');
+  await check('可写性由监听地址派生：回环开、别的关（纯函数，不起服务）', () => {
+    for (const h of ['127.0.0.1', '127.0.0.5', 'localhost', '::1']) {
+      assert.equal(writesAllowed(h).allowed, true, `${h} 是回环，应当可写`);
+    }
+    for (const h of ['0.0.0.0', '::', '192.168.1.20', 'example.com']) {
+      const r = writesAllowed(h);
+      assert.equal(r.allowed, false, `${h} 不是回环，写路径必须关掉`);
+      assert.match(r.why, /不是回环/, '要明说为什么关（页面就显示这句话）');
+    }
+  });
+
+  // ★ 自检**绝不写真的台账**：另起一个服务，`--dir` 指向一份副本；
+  //   最后还会断言真的 `data/requirements/` 一个文件都没多。
+  const tmpRoot = path.join(REPO_ROOT, '.tmp');
+  fs.mkdirSync(tmpRoot, { recursive: true });
+  const writeDir = fs.mkdtempSync(path.join(tmpRoot, 'smoke-req-'));
+  for (const f of fs.readdirSync(DEFAULT_REQUIREMENTS_DIR)) {
+    if (f.endsWith('.md')) fs.copyFileSync(path.join(DEFAULT_REQUIREMENTS_DIR, f), path.join(writeDir, f));
+  }
+  const realBefore = fs.readdirSync(DEFAULT_REQUIREMENTS_DIR).sort();
+  const writeNodes = () => loadNodes(writeDir);
+
+  const wServer = await startServer({ port: 0, log: () => {}, dir: writeDir });
+  const wBase = `http://127.0.0.1:${(wServer.address() as { port: number }).port}`;
+  /** POST 一个 JSON 体进去（`type` 用来验"只收 application/json"那道门） */
+  const post = async (body: unknown, contentType = 'application/json', url = '/api/nodes') => {
+    const res = await fetch(`${wBase}${url}`, {
+      method: 'POST',
+      headers: contentType === '' ? {} : { 'content-type': contentType },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+    return { status: res.status, body: (await res.json().catch(() => null)) as any, res };
+  };
+
+  try {
+    const wHealth = await (await fetch(`${wBase}/api/health`)).json();
+    await check('health.writes：开了 + 表单枚举与模型逐项相等（服务端不另写一份枚举）', () => {
+      assert.equal(wHealth.writes.enabled, true);
+      assert.equal(wHealth.writes.endpoint, 'POST /api/nodes');
+      assert.deepEqual(wHealth.writes.types, TYPES);
+      assert.deepEqual(wHealth.writes.statuses, STATUSES);
+      assert.deepEqual(wHealth.writes.severities, SEVERITIES);
+      assert.deepEqual(wHealth.writes.bugOnly, BUG_ONLY);
+      assert.equal(wHealth.writes.defaults.type, 'req');
+      assert.equal(wHealth.writes.defaults.status, 'open');
+    });
+
+    const rootRow = tree.body.nodes.find((n: any) => n.parent === null);
+    const parentRow = tree.body.nodes.find((n: any) => n.kids > 0) ?? rootRow;
+
+    const relPath = 'docs/01-translation/patch-design.md';
+    const created = await post({
+      title: '自检临时节点（会被删掉）',
+      type: 'req',
+      status: 'open',
+      parent: parentRow.id,
+      tags: ['smoke', 'temp'],
+      verify: relPath,
+      body: '## 判据\n\n**自检**用的：`a|b` 与表格。\n\n| 列 | 值 |\n|---|---|\n| x | 1 |\n',
+    });
+    await check('合法建单 ⇒ 201 + id/短名/文件路径', () => {
+      assert.equal(created.status, 201);
+      assert.equal(created.body.ok, true);
+      assert.match(created.body.created.id, /^REQ-[0-9A-HJKMNP-TV-Z]{26}$/);
+      assert.equal(created.body.created.short, created.body.created.name.slice(-8));
+      assert.equal(created.body.dir, writeDir);
+      assert.ok(fs.existsSync(created.body.created.file), '返回的文件路径必须真的存在');
+      assert.equal(path.dirname(created.body.created.file), writeDir, '必须写在临时目录里');
+    });
+
+    const newName = created.body.created.name;
+    await check('落盘形态 = 模型口径（父是完整 id、标题/类型/状态如所发、正文按规范形态）', () => {
+      const text = fs.readFileSync(path.join(writeDir, `${newName}.md`), 'utf8');
+      const parsed = parseNode(text, `${newName}.md`);
+      assert.equal(parsed.title, '自检临时节点（会被删掉）');
+      assert.equal(parsed.fields.id, created.body.created.id);
+      assert.equal(parsed.fields.type, 'req');
+      assert.equal(parsed.fields.status, 'open');
+      assert.equal(parsed.fields.parent, parentRow.id, 'parent 要落成**完整 id**（不是短名）');
+      assert.deepEqual(parsed.fields.tags, ['smoke', 'temp']);
+      assert.equal(parsed.fields.verify, relPath);
+      assert.match(parsed.body, /## 判据/);
+      assert.ok(text.endsWith('\n'), '规范形态以换行收尾');
+    });
+
+    await check('写后全树守卫仍然全绿（新节点没把树弄坏）', () => {
+      const report = validateAll(writeNodes(), { repoRoot: REPO_ROOT });
+      assert.equal(report.failures, 0, JSON.stringify(report.checks.filter((c: any) => c.problems.length)));
+      assert.equal(writeNodes().length, nodes.length + 1);
+    });
+
+    await check('新节点立刻能从**读**端点拿到（短名解析，与列表同一套）', async () => {
+      const got = await (await fetch(`${wBase}/api/node/${created.body.created.short}`)).json();
+      assert.equal(got.ok, true);
+      assert.equal(got.node.id, created.body.created.id);
+      assert.equal(got.node.parent, parentRow.id);
+    });
+
+    // ★ 守卫不绿 ⇒ 422 + **磁盘上没有残 file**（回滚是模型 `planAdd().apply()` 干的）
+    const beforeFiles = fs.readdirSync(writeDir).sort();
+    const bad = await post({ title: '缺 repro 的缺陷', type: 'bug', status: 'doing', parent: parentRow.id });
+    await check('守卫不绿的建单 ⇒ 422 + report 点名 repro + 磁盘没留残 file（已回滚）', () => {
+      assert.equal(bad.status, 422);
+      assert.equal(bad.body.ok, false);
+      assert.equal(bad.body.rolledBack, true);
+      assert.ok(bad.body.report.failures > 0, '要带不变量报告');
+      const problems = bad.body.report.checks.flatMap((c: any) => c.problems).join('\n');
+      assert.match(problems, /repro/, '报告要点名缺什么：' + problems);
+      assert.deepEqual(fs.readdirSync(writeDir).sort(), beforeFiles, '回滚后目录必须回到原样');
+    });
+
+    await check('请求被拒的三种情形：非 JSON ⇒ 415、缺标题 ⇒ 400、不认得的字段 ⇒ 400', async () => {
+      const wrongType = await post({ title: 'x' }, 'text/plain');
+      assert.equal(wrongType.status, 415);
+      assert.match(wrongType.body.error, /application\/json/);
+
+      const noTitle = await post({ type: 'req', parent: parentRow.id });
+      assert.equal(noTitle.status, 400);
+      assert.match(noTitle.body.error, /标题/);
+
+      // ★ 静默忽略错别字会让"以为挂上了父节点"变成一棵孤立子树 ⇒ 必须报错
+      const typo = await post({ title: 'x', parnet: parentRow.id });
+      assert.equal(typo.status, 400);
+      assert.match(typo.body.error, /不认得/);
+
+      const badParent = await post({ title: 'x', parent: 'REQ-不存在' });
+      assert.equal(badParent.status, 400);
+      assert.match(badParent.body.error, /parent/);
+    });
+
+    await check('id 撞车 ⇒ 400（`saveNode` 会覆盖同名文件 —— 那不是新建，是毁掉一个已有节点）', async () => {
+      const taken = writeNodes()[0];
+      const res = await post({ title: '想顶掉别人', id: taken.fields.id });
+      assert.equal(res.status, 400);
+      assert.match(res.body.error, /已被占用/);
+      assert.ok(fs.existsSync(path.join(writeDir, `${taken.name}.md`)), '原文件必须还在');
+    });
+
+    await check('非 JSON 体 / 非对象体 / 端点与方法用错 ⇒ 400 / 405，且都不留文件', async () => {
+      const broken = await post('{不是 JSON');
+      assert.equal(broken.status, 400);
+      assert.match(broken.body.error, /JSON/);
+      const arr = await post([1, 2, 3]);
+      assert.equal(arr.status, 400);
+
+      const getOnWrite = await get('/api/nodes');
+      assert.equal(getOnWrite.status, 405);
+      assert.match(getOnWrite.body.error, /只收 POST/);
+
+      const before = fs.readdirSync(writeDir).sort();
+      assert.deepEqual(fs.readdirSync(writeDir).sort(), before);
+    });
+
+    await check('★ 不吐 CORS 头：跨站页面发不出 application/json 的简单请求 ⇒ 预检必然失败', async () => {
+      const options = await fetch(`${wBase}/api/nodes`, {
+        method: 'OPTIONS',
+        headers: { origin: 'http://evil.example', 'access-control-request-method': 'POST' },
+      });
+      assert.equal(options.headers.get('access-control-allow-origin'), null, '不许回 CORS 头');
+      const res = await fetch(`${wBase}/api/nodes`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: 'http://evil.example' },
+        body: JSON.stringify({ title: 'x', parent: parentRow.id }),
+      });
+      assert.equal(res.headers.get('access-control-allow-origin'), null, '响应也不许带 CORS 头');
+      await res.json();
+    });
+
+    await check('★ 真的台账一个文件都没多（自检只写临时副本）', () => {
+      assert.deepEqual(fs.readdirSync(DEFAULT_REQUIREMENTS_DIR).sort(), realBefore);
+    });
+  } finally {
+    await new Promise((resolve) => wServer.close(resolve));
+    fs.rmSync(writeDir, { recursive: true, force: true });
+  }
+
+  // 非回环监听 ⇒ `/api/health` 明说不能写、POST 直接 403（真正把门关上，而不是"界面禁用按钮"）
+  const openServer = await startServer({ port: 0, host: '0.0.0.0', log: () => {}, dir: writeDir });
+  const oBase = `http://127.0.0.1:${(openServer.address() as { port: number }).port}`;
+  try {
+    const oHealth = await (await fetch(`${oBase}/api/health`)).json();
+    await check('绑到 0.0.0.0 ⇒ health.writes.enabled=false 且写明理由', () => {
+      assert.equal(oHealth.writes.enabled, false);
+      assert.match(oHealth.writes.why, /0\.0\.0\.0/);
+    });
+    const refused = await fetch(`${oBase}/api/nodes`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'x' }),
+    });
+    await check('绑到 0.0.0.0 ⇒ POST 建单 403（不是靠界面藏按钮）', async () => {
+      assert.equal(refused.status, 403);
+      const body: any = await refused.json();
+      assert.equal(body.ok, false);
+      assert.match(body.error, /不是回环/);
+    });
+  } finally {
+    await new Promise((resolve) => openServer.close(resolve));
+  }
+
+  // ───────────────────────────────────────────────────────── Markdown 渲染口径
+  console.log('\n7) Markdown 渲染（`src/markdown.ts`，客户端与自检共用同一个模块）');
+  await check('渲染口径：不开原始 HTML（同一条结论解决"要不要 sanitize"）', () => {
+    assert.equal(MD_OPTIONS.html, false);
+    const html = renderMarkdown('<script>alert(1)</script>');
+    assert.ok(!html.includes('<script'), '原始 HTML 不许变成标签：' + html);
+    assert.match(html, /&lt;script&gt;/);
+  });
+  await check('渲染口径：不把裸文本自动变成链接（linkify 关）', () => {
+    assert.equal(MD_OPTIONS.linkify, false);
+    assert.ok(!renderMarkdown('看 https://example.com 与 1.2.3').includes('<a '), '裸链接不许自动变链接');
+  });
+  await check('常用语法真的渲染了：粗体 / 行内代码 / 表格 / 列表 / 引用', () => {
+    assert.match(renderMarkdown('**粗**'), /<strong>粗<\/strong>/);
+    assert.match(renderMarkdown('`码`'), /<code>码<\/code>/);
+    assert.match(renderMarkdown('| a | b |\n|---|---|\n| 1 | 2 |'), /<table>/);
+    assert.match(renderMarkdown('- x\n- y'), /<ul>/);
+    assert.match(renderMarkdown('> 引'), /<blockquote>/);
+    assert.match(renderMarkdown('```\ncode\n```'), /<pre><code>/);
+  });
+  /**
+   * ★ 实体（`&…;`）：这条同时是**依赖树**的哨兵 —— 本机是全扁平（hoisted）布局且 `fs.realpathSync`
+   * 不解析 junction ⇒ **一个包名在树里只能有一个版本**，否则根上的那个会遮蔽别人自己那份嵌套依赖
+   * （踩过：markdown-it 要 `entities@8`、`@vue/compiler-core` 要 `entities@7` ⇒ `vue-tsc` 一遇到
+   * 模板里的 `&lt;` 就崩在 `decode.fromCodePoint is not a function`）。现在 `markdown-it` 的
+   * `entities` 被钉在 `^7`（见根 `package.json` 的 `pnpm.overrides`），这里断言它**真的还能解码**。
+   */
+  await check('实体解码仍然正确（依赖钉版本的哨兵：&amp; / &copy; / &#65; / 未知实体 / 裸 &）', () => {
+    assert.equal(renderMarkdown('&amp;'), '<p>&amp;</p>\n', '`&amp;` 要解成 `&` 再为 HTML 转义回来');
+    assert.match(renderMarkdown('&copy;'), /©/, '命名实体要解开');
+    assert.match(renderMarkdown('&#65;'), /A/, '数字实体要解开');
+    assert.match(renderMarkdown('&lt;'), /&lt;/, '`&lt;` 解成 `<` 后再转义回 `&lt;`（绝不是真标签）');
+    assert.match(renderMarkdown('&nope;'), /&amp;nope;/, '不认识的实体原样显示');
+    assert.match(renderMarkdown('AT&T'), /AT&amp;T/, '裸 `&` 要转义');
+  });
+  await check('★ 仓库内路径不做成可点链接（工作台不服务仓库文件）；外链反而要能开', () => {
+    const rel = renderMarkdown('[设计](docs/01-translation/patch-design.md)');
+    assert.ok(!rel.includes('href='), '相对路径不许带 href（点了只会 404）：' + rel);
+    assert.match(rel, /class="md-ref"/);
+    assert.match(rel, /设计/);
+    const ext = renderMarkdown('[外链](https://example.com/a)');
+    assert.match(ext, /href="https:\/\/example\.com\/a"/);
+    assert.match(ext, /target="_blank"/);
+    assert.match(ext, /rel="noreferrer noopener"/);
+    assert.match(renderMarkdown('[邮件](mailto:a@b.c)'), /href="mailto:a@b.c"/);
+  });
+  await check('★ 小节正文里的小标题降两级（卡片标题 h3 ⇒ 正文 # → h4、### → h6 封顶）', () => {
+    const html = (src: string) => renderMarkdown(src);
+    assert.match(html('# 一级'), /<h3>一级<\/h3>/);
+    assert.match(html('## 二级'), /<h4>二级<\/h4>/);
+    assert.match(html('### 三级'), /<h5>三级<\/h5>/);
+    assert.match(html('##### 五级'), /<h6>五级<\/h6>/, '超过 h6 要封顶');
+    assert.ok(html('# 一级').includes('</h3>'), '开闭标签要成对');
+  });
+  await check('空输入给空串（调用方不必自己判空）', () => {
+    assert.equal(renderMarkdown(''), '');
+    assert.equal(renderMarkdown('   \n\n'), '');
+    assert.equal(renderMarkdown(null), '');
+    assert.equal(renderMarkdown(undefined), '');
+  });
+  await check('★ 详情页真的走这套渲染（页面里没有"把 Markdown 原文塞进 pre"的老路）', () => {
+    const view = fs.readFileSync(new URL('./src/views/RequirementDetail.vue', import.meta.url), 'utf8');
+    assert.match(view, /renderMarkdown/, '详情页必须用渲染器');
+    assert.match(view, /v-html/, '渲染结果要挂进 DOM');
+    assert.ok(!/<pre v-if="s\.text"/.test(view), '旧的 <pre> 原文展示必须已经撤掉');
+  });
+
+  console.log('\n8) 静态（dist/web 的白名单视图）');
   const built = fs.existsSync(new URL('./dist/web/index.html', import.meta.url));
   if (!built) {
     console.log('  skip dist/web 还没构建（先 node scripts/vite-cli.mjs build）');
@@ -411,9 +694,20 @@ try {
       assert.equal(js.status, 200);
       assert.match(js.headers.get('content-type') ?? '', /javascript/);
     });
+    await check('★ 建单对话框的 chunk 不被外壳预加载（懒加载要真的懒）', () => {
+      assert.ok(
+        !html.includes('NewRequirementDialog'),
+        'index.html 里不该出现对话框 chunk —— 出现了说明它被提升成静态依赖，页面一打开就下载表单那一坨',
+      );
+      const chunks = fs.readdirSync(new URL('./dist/web/assets/', import.meta.url));
+      assert.ok(
+        chunks.some((f) => f.startsWith('NewRequirementDialog') && f.endsWith('.js')),
+        '它仍应作为独立 chunk 存在（懒加载 ≠ 不打包）',
+      );
+    });
   }
 
-  console.log('\n7) 与旧 `apps/requirements/server.mjs` 的形状对照（旧目录退役后自动跳过）');
+  console.log('\n9) 与旧 `apps/requirements/server.mjs` 的**读**端点形状对照（旧目录退役后自动跳过）');
   const legacyEntry = new URL('../requirements/server.mjs', import.meta.url);
   if (!fs.existsSync(legacyEntry)) {
     console.log('  skip 旧目录已不在（正是需求单 §退役 的目标）');

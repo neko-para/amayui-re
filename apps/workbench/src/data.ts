@@ -5,13 +5,15 @@
  * 与**把错误变成可显示的状态**。聚合数字一律不在这里算 —— 那是 `tools/lib/requirements.mjs`
  * 在服务端算好的（与 `pnpm tools requirements plan` 同一份）。
  */
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 
 import {
+  getHealth,
   getNode,
   getScript,
   getScripts,
   getTree,
+  type HealthPayload,
   type NodePayload,
   type ScriptKind,
   type ScriptPayload,
@@ -38,6 +40,26 @@ export async function loadTree(force = false): Promise<void> {
     treeLoading.value = false;
   }
 }
+
+// ── 能力（能不能建单）：来自 `/api/health` 的 `writes`，由服务端的监听地址派生 ──────────
+
+export const health = ref<HealthPayload | null>(null);
+export const healthError = ref('');
+
+export async function loadHealth(force = false): Promise<void> {
+  if (health.value && !force) return;
+  healthError.value = '';
+  try {
+    health.value = await getHealth();
+  } catch (err) {
+    healthError.value = (err as Error).message;
+  }
+}
+
+/** 写路径开着吗（没读到 health 时**当作关**：按钮宁可晚一点能按，也不要按下才知道不行） */
+export const canCreate = computed(() => health.value?.writes.enabled === true);
+/** 建单为什么不能按 —— 服务端给的原话（绑非回环时就是这一条） */
+export const cannotCreateWhy = computed(() => health.value?.writes.why ?? healthError.value ?? '正在读取服务端能力…');
 
 /** 详情：**一律走 `/api/node`**（小节由服务端按模型的口径切好，客户端不重写"什么是一节"）。 */
 export const nodeLoading = ref(false);

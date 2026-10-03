@@ -51,8 +51,14 @@ pnpm tools requirements describe        # ★ 字段 / 不变量 / 预算 / 命�
 
 ## 5. 怎么改
 
-**唯一编辑入口**：`pnpm tools requirements`（直接手改参数区、重命名文件、新建 `.md` 都会被 `validate` 判红）。
-缺省 **dry-run**，`--write` 才落盘；写入用规范形态（固定键序、同输入同字节）并**写后回读复验，不绿回滚**。
+**写路径只有一条**（规则住在领域模型 `tools/lib/requirements.mjs` 里），两个调用方共用它：
+
+* **CLI**：`pnpm tools requirements`（缺省 **dry-run**，`--write` 才落盘）；
+* **工作台网页**：`apps/workbench/` 里的"新建需求单"（`POST /api/nodes`）—— 只有**新建**，
+  而且只在服务监听回环时开；它调的也是同一个 `planAdd()`，所以网页建的与命令行建的是同一种文件。
+
+直接手改参数区、重命名文件、新建 `.md` 都会被 `validate` 判红。写入一律用规范形态（固定键序、同输入同字节）
+并**写后回读复验，不绿回滚**。
 
 ```bash
 # 开一个需求（父是哪个节点就写哪个 id；根是唯一的 parent: null）
@@ -72,6 +78,7 @@ pnpm tools requirements set <前缀> --status done --done-reason "文档类：�
 
 ★ **`--id` 只在"已有外部编号表 / 种子脚本"这类场景用**（缺省由工具生成 ULID；给了就以调用方为准，但格式与唯一性仍会被校验）。
 ★ 被守卫拒绝时**写后回滚**：`add` 会把刚写的节点整颗删掉，`set` 会把原节点原样写回（都不留残file）。
+★ 字段 / 不变量 / 写入口的**真源**是 `pnpm tools requirements describe`；本文件只写口径与指向，不复述 schema。
 
 ## 6. 预算（"人看的"靠它）
 

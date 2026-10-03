@@ -24,7 +24,23 @@ import { describe as describeSamples } from '../lib/samples.mjs';
  * `tsconfig*.json` 与 `package.json` 同类：由 TypeScript / npm 定义，不是本仓的"结构化数据"。
  */
 const isEcosystem = (name) => name === 'package.json' || /^tsconfig[.-].*\.json$/.test(name) || name === 'tsconfig.json';
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.tmp', '.staging', 'files']);
+/**
+ * 不扫的目录：**本地派生区**（与 `.gitignore` 同一批理由 —— 它们本来就不入库，里面的 JSON 是工具自己的账本：
+ * pnpm 的内容寻址库、npm 的缓存、临时区、生成物）。漏一个就会像这样红得莫名其妙：
+ * `.pnpm-store/v10/index/*.json` 缺同名 `.md`。
+ */
+const SKIP_DIRS = new Set([
+  '.git',
+  'node_modules',
+  '.tmp',
+  '.staging',
+  'files',
+  '.pnpm-store',
+  '.npm-cache',
+  'dist',
+  'tmp',
+  '.cache',
+]);
 
 /** 说明书必须覆盖的三件事（正是"只讲查询不讲编辑"的反面）；最后一项是"指向脚本自描述" */
 const REQUIRED = ['## 怎么查', '## 怎么改', 'describe'];

@@ -1,9 +1,12 @@
-# apps/requirements/ — 需求台账的本地只读网页
+# apps/requirements/ — 需求台账的本地只读网页（**旧版，待删**）
 
-> ⚠️ **已被 `apps/workbench/` 取代**（后者是同一套只读视图的新技术栈重写：需求 + AGE 脚本反汇编）。
-> `pnpm tools requirements serve` 现在指向 `apps/workbench/server.ts`。
-> 目前**留着**的唯一理由是：`apps/workbench/smoke.ts` 第 7 组拿它当**离线对照物**
-> （把新旧两个服务的 `/api/tree`、`/api/node`、错误体**逐字段**比对），"新旧同形"因此是可机械复核的。
+> ⚠️ **已被 `apps/workbench/` 取代**（新技术栈重写：需求 + AGE 脚本反汇编；新版另外还会渲染正文 Markdown、
+> 并有一个建单端点 `POST /api/nodes`）。
+> `pnpm tools requirements serve` 现在指向 `apps/workbench/server.ts` —— 本文档下面那些"经派发器"的命令
+> **已经不再启动本目录**，要跑这个旧版请直接用 `node apps/requirements/server.mjs`。
+> 目前**留着**的唯一理由是：`apps/workbench/smoke.ts` 拿它当**离线对照物**
+> （把新旧两个服务的**读**端点 `/api/tree`、`/api/node`、错误体**逐字段**比对 —— 写路径是新增能力，
+> 旧目录没有对应的东西），"新旧读响应同形"因此是可机械复核的。
 > 按需求单 §退役，它**待用户确认后删除** —— 删掉之后那一组会自动 skip。
 > 在那之前：**不要往里加新东西，也不要按它改新应用**。
 
@@ -15,14 +18,13 @@
 > 也不要求 DSH 在跑。
 >
 > ★ 它是**只读**的：本服务**没有任何写路径**。改台账只有
-> `pnpm tools requirements set --write`（唯一写入口）。
+> `pnpm tools requirements set --write`（唯一写入口）—— 新版工作台例外的那一条见 `apps/workbench/README.md`。
 
 ## 怎么跑
 
 ```sh
-pnpm tools requirements serve                 # → http://127.0.0.1:7788/
-pnpm tools requirements serve --port 7800     # 换端口
-node apps/requirements/server.mjs             # 不经派发器，直接跑
+node apps/requirements/server.mjs             # → http://127.0.0.1:7788/（不经派发器，直接跑）
+# ★ 派发器那条路 `pnpm tools requirements serve` 已经指向新版：apps/workbench/
 ```
 
 启动时会把地址与数据目录打印出来（**固定端口 7788**，方便直接记地址；撞端口不会自动漂，

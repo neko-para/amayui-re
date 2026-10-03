@@ -49,8 +49,15 @@
 * 仓库内**其余一切 JS** —— `packages/*`、`tools/*`、守卫与测试 —— **一律直接写 `.mjs`**。
   根目录**不引入** `typescript` / `tsc` / `tsconfig`，因此没有构建步骤，`node` 直接跑。
 * 包管理**用 pnpm**（`pnpm-workspace.yaml` 是 workspace 真源）。禁止混用 `npm install` 生成 `package-lock.json`。
-  ★ `apps/workbench` 的 `.npmrc` 设了 `shamefully-hoist=true`：本机的 `fs.realpathSync` **不解析 pnpm 的 junction**，
-  严格布局会让 `vite` 里的 `import 'rolldown'` 直接 `ERR_MODULE_NOT_FOUND` ⇒ 那个项目的依赖必须扁平。
+  ★ **根 `.npmrc` 设了 `shamefully-hoist=true`**（键名**不能**写成 `npm_config_shamefully_hoist` —— 那是环境变量的
+  形式，pnpm 在 `.npmrc` 里不认它，症状是 install 完不 hoist、要到运行期才炸）：本机的 `fs.realpathSync`
+  **不解析 pnpm 的 junction**，严格布局会让 `vite` 里的 `import 'rolldown'` 直接 `ERR_MODULE_NOT_FOUND`
+  ⇒ `apps/workbench` 的依赖必须扁平。判据：`pnpm config get shamefully-hoist` 必须回 `true`。
+  ★★ 扁平布局有一条**硬约束**：**一个包名在树里只能有一个版本**。两个大版本共存时，根上 hoist 的那一份会
+  遮蔽别的包自己那份嵌套依赖（junction 解析不会走到 `.pnpm/*/node_modules/`）。踩过：`markdown-it` 要
+  `entities@^8`、`@vue/compiler-core` 要 `entities@^7` ⇒ `vue-tsc` 一遇模板里的 `&lt;` 就崩。
+  ⇒ 要么挑**零依赖**的库，要么在根 `package.json` 的 `pnpm.overrides` 里钉成同一个版本，**并给那条路径配断言**
+  （范例：`markdown-it>entities` + 工作台 smoke 的实体解码哨兵）。理由全文见 `.npmrc`。
 * `.NET`(C#) 与 `native`(C++/CMake) 各自独立工具链，**不进 npm workspaces**。
 
 ## 4. 搜索约定
@@ -71,6 +78,8 @@ pnpm tools opcodes report       # 指令表对账：旧表条目数 / 将丢弃�
 pnpm tools opcodes derive --write # 指令表派生（旧表 → 格式层四列；唯一写入口，缺省 dry-run）
 pnpm tools requirements plan    # ★ 进度：需求树（还要做什么、到哪一步）+ 聚合状态
 pnpm tools requirements validate # 需求台账守卫（红 = 退出码 1）
+pnpm tools requirements serve   # 项目工作台（需求 + AGE 脚本），项目在 apps/workbench/
+pnpm --filter @amayui/workbench verify # 工作台门禁：typecheck + build + smoke
 pnpm tools disasm verify        # 反汇编语料保真断言（逐行反解回字节必须与源逐字节相同）
 pnpm tools old-repo inventory   # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm test                       # 守卫测试（单进程跑，见下）

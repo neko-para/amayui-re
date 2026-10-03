@@ -1,17 +1,29 @@
 <script setup lang="ts">
 /**
- * 需求总览：整棵树 + 进度 + 搜索 + 只看未收口。
+ * 需求总览：整棵树 + 进度 + 搜索 + 只看未收口 + **新建一张需求单**。
  *
  * ★ **聚合不在这里算**：行里的 `[已收口/子孙总数]`、标记、深度（缩进）、父、聚合告警
  *   全部来自 `/api/tree`（服务端 `flatten` / `rollup`，与 `pnpm tools requirements plan` 同一份函数）。
  *   本文件只负责"谁显示、谁隐藏"这两件纯视图的事。
+ * ★ **能不能建单也不在这里判断**：来自 `/api/health` 的 `writes`（服务端按监听地址派生）。
+ *   建单本身由 `components/NewRequirementDialog.vue` 走 `POST /api/nodes`。
+ * ★ 通用控件（搜索 / 按钮）用 naive-ui；树形行仍是自己的 markup —— 每行都是**真 `<a href="#/req/…">`**
+ *   （中键开新 tab 是白送的，`n-tree` 给不了这一点）。
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
+import { NButton, NInput, NTooltip } from 'naive-ui';
 
 import CopyId from '../components/CopyId.vue';
-import { loadTree, tree, treeError, treeLoading } from '../data';
-import { hrefReq } from '../router';
+import { canCreate, cannotCreateWhy, health, loadHealth, loadTree, tree, treeError, treeLoading } from '../data';
+import { go, hrefReq } from '../router';
 import type { TreeRow } from '../api';
+
+/**
+ * ★ 建单对话框**懒加载**：它带着表单 / 下拉 / 弹窗那几组组件（naive-ui 里最重的一块），
+ *   而"打开总览"这件事用不到它们。`defineAsyncComponent` 让 Vite 把它切成单独的 chunk
+ *   —— 与 Monaco 那条纪律同一个道理（见 `README.md`「Monaco 还是懒加载的」）。
+ */
+const NewRequirementDialog = defineAsyncComponent(() => import('../components/NewRequirementDialog.vue'));
 
 const LIVE = new Set(['open', 'doing', 'blocked']);
 const CLOSED = new Set(['done', 'dropped', 'superseded']);
@@ -35,7 +47,29 @@ const toggle = (id: string) => {
   overrides.value = { ...overrides.value, [id]: !isOpen(id) };
 };
 
-onMounted(() => void loadTree());
+onMounted(() => {
+  void loadTree();
+  void loadHealth();
+});
+
+/** 新建对话框：`writes` 与父节点候选都由服务端数据喂给它（组件自己不做任何裁决） */
+const showCreate = ref(false);
+/**
+ * ★ **首次打开后才挂载**那个组件：`defineAsyncComponent` 只是把它的代码切成单独 chunk，
+ *   但"模板里一直有它"会让这次 `import()` 在**打开页面时**就发生 ⇒ 分块的意义就没了。
+ *   挂上之后**不再卸**（关掉对话框时保持挂载 ⇒ 关闭动画与滚动锁由 naive-ui 正常收尾）。
+ */
+const dialogReady = ref(false);
+const openCreate = () => {
+  dialogReady.value = true;
+  showCreate.value = true;
+};
+
+/** 建完单：刷新整棵树（新节点要立刻出现在树上），然后跳到它 —— 与"点某一行"走同一条 hash 路由 */
+async function onCreated(payload: { short: string }) {
+  await loadTree(true);
+  go(hrefReq(payload.short));
+}
 
 const nodes = computed(() => tree.value?.nodes ?? []);
 const byId = computed(() => new Map(nodes.value.map((n) => [n.id, n])));
@@ -132,13 +166,40 @@ const window_ = (n: TreeRow | { total: number; done: number }) => (n.total > 0 ?
 <template>
   <div class="view-scroll">
     <div class="toolbar">
-      <input v-model="query" class="search" type="search" placeholder="搜索 短名 / 标题 / id" aria-label="搜索需求" />
-      <button class="btn" type="button" :aria-pressed="liveOnly" @click="liveOnly = !liveOnly">
+      <n-input
+        v-model:value="query"
+        size="small"
+        clearable
+        style="width: 17rem"
+        placeholder="搜索 短名 / 标题 / id"
+        aria-label="搜索需求"
+      />
+      <n-button size="small" :type="liveOnly ? 'primary' : 'default'" :ghost="liveOnly" @click="liveOnly = !liveOnly">
         {{ liveOnly ? '只看未收口' : '全部' }}
-      </button>
+      </n-button>
+      <n-button size="small" :loading="treeLoading" @click="loadTree(true)">刷新</n-button>
       <span class="grow"></span>
-      <button class="btn" type="button" :disabled="treeLoading" @click="loadTree(true)">刷新</button>
+      <!-- 写路径关掉时**明写为什么**：悬停提示 + 一行可见的小字（禁用的按钮不该是"死"的） -->
+      <span v-if="health && !canCreate" class="dim writes-off" :title="cannotCreateWhy">建单已关：{{ cannotCreateWhy }}</span>
+      <n-tooltip :disabled="canCreate" trigger="hover">
+        <template #trigger>
+          <span class="tip-wrap">
+            <n-button size="small" type="primary" secondary :disabled="!canCreate" @click="openCreate">
+              ＋ 新建需求单
+            </n-button>
+          </span>
+        </template>
+        {{ cannotCreateWhy }}
+      </n-tooltip>
     </div>
+
+    <new-requirement-dialog
+      v-if="dialogReady"
+      v-model:show="showCreate"
+      :writes="health?.writes ?? null"
+      :nodes="nodes"
+      @created="onCreated"
+    />
 
     <div class="summary">
       <span v-for="p in pills" :key="p.status" class="pill">
@@ -213,7 +274,9 @@ const window_ = (n: TreeRow | { total: number; done: number }) => (n.total > 0 ?
     </div>
 
     <p class="foot-hint">
-      只读 · 写入口 <code>pnpm tools requirements set --write</code>
+      GET 只读（列表里的数字全部现算）；建单走 <code>POST /api/nodes</code> —— 与
+      <code>pnpm tools requirements add</code> 共用同一个 <code>planAdd()</code>；改已有节点仍只有
+      <code>pnpm tools requirements set --write</code>。
       <span v-if="tree"> · 数据 {{ tree.dir }}</span>
     </p>
   </div>
@@ -224,5 +287,16 @@ const window_ = (n: TreeRow | { total: number; done: number }) => (n.total > 0 ?
   margin-top: 1.2rem;
   border-top: 1px dashed var(--line);
   padding-top: 0.6rem;
+}
+/* 触发器的宿主：`n-tooltip` 要一个**可悬停**的元素 —— 禁用的按钮本身不派发鼠标事件 */
+.tip-wrap {
+  display: inline-flex;
+}
+.writes-off {
+  font-size: 11px;
+  max-width: 26rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
