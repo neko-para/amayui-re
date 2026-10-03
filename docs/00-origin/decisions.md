@@ -150,6 +150,7 @@
 | 翻译域：现状、数据模型（patch 叠加层）、**旧仓翻译文档快照 `ref/` 的地位与"先核实"口径** | `docs/01-translation/README.md` |
 | **翻译 patch 方案**：真源 = 叠加层，`data`/`src` 都是视图；锚定规则与支撑观测 | `docs/01-translation/patch-design.md` + `pnpm tools patch describe` + `pnpm tools requirements show 8SNRXKV` |
 | **翻译参考资产（只读快照）**：`assets/`（还能用的语言资产）vs `archive/`（历史工作单）的二分判据、来源、映射规则、为什么翻译资产可整棵迁而引擎知识不行 | `docs/01-translation/ref/README.md` + `tools/test/translation-ref.test.mjs` |
+| **AGERC.DLL 的汉化**：旧做法实测（两条链叠加、整份改动 < 2.5 KB）、占位码位与字典/字体的隐藏耦合、六个方案的评估、待做的五个实验 | `docs/01-translation/agerc-design.md` + `pnpm tools requirements show 1ENS6BN3090X8M` |
 | **发行（给玩家那一包）**：落点、包里每件的真源、CHANGELOG 规格、**三处缺口**（AGF 烘焙 / AGERC 链 / 打包动作）、有意不迁的件 | `release/README.md` + `pnpm tools requirements show 0RP2BN9S86K6SGEW671PYA` |
 | **翻译 / 更新译文的作业流程**（技能） | `.agents/skills/amayui-translate/SKILL.md`（+ `references/conventions.md` · `references/lookup.md`） |
 | 模拟器 / 探针域：按新结构重写、工具链、跨域守卫要拆回各域 | `docs/03-emulator/README.md`、`apps/*/README.md` |

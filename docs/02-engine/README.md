@@ -106,6 +106,7 @@ IDA 输出**不具可复现性** ⇒ 整体作为只读资源保存。
 * `res/` 根下的**纯文本资源件**（`AGERC.DLL.rc` / `AGERC_RAW.DLL.rc` / `MANIFEST2_1.txt` /
   `build-localized-agerc.ps1` / `inject-localized-agerc.rsh`）：用户口径 —— 走需求树
   **「翻译环境重建」→「windows 资源重建」**（见 `data/requirements/`），**M1b 有意不迁**。
+  ★ 该节点的**评估与设计**（旧做法实测、六个方案、待做实验）在 `../01-translation/agerc-design.md`。
 * `CURSOR*.cur` / `IDI_ICON1.ico`：从 `AGERC.DLL` 导出、本身未修改 ⇒ 已随 UI 图片入 `corpus/assets/ui-images/`，
   组织方式后续由那条需求单重定。
 

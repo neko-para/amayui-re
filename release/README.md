@@ -31,7 +31,7 @@
 | `Amayui-CN_cnjp{,-Bold}.ttf` | `corpus/assets/fonts/` | ✅ 现成入库件，直接复制 |
 | `安装说明.md` · `CHANGELOG.md` | 本目录 | ✅ |
 | `AGF\`（已汉化 UI 图） | `corpus/assets/ui-images/` 的**已汉化 PNG** → **烘焙**成 AGF | ❌ **缺烘焙链**（§5.1） |
-| `AGERC.DLL`（主菜单汉化） | 旧仓 `res/` 的 rc 系列 → 编译 → 注入 | ❌ **缺构建链**（§5.2） |
+| `AGERC.DLL`（主菜单汉化） | **入库的可信产物** `corpus/assets/agerc/AGERC.DLL`（条目 `binary/agerc-dist`） | ✅ **本版直接用它**（旧仓随包发布的那一份，sha256 由 `tools/test/agerc-artifact.test.mjs` 复核）；**自建链待重建**（§5.2） |
 
 ## 4. CHANGELOG 规格（★ 唯一真源；技能只引用、不复述）
 
@@ -63,11 +63,20 @@
 * **为什么不直接拿旧仓 `patch/AGF/`**：那是**产物**不是来源；来源是已入库的 PNG，注入链本身**本仓没有**。
   （生效版 PNG 已入库；烘焙后的 AGF 在清单里是 `external-only` + 逐件 sha256，只作重建链的复现参照。）
 
-### 5.2 AGERC.DLL 构建链 —— **缺**
+### 5.2 AGERC.DLL —— **本版用「可信产物」；自建链待重建**
 
-* **已有**：三条 AGERC 二进制（带壳发布 / 脱壳调试 / 改过文案）**只登记不迁移**（`corpus/assets.json` 的 `binary/agerc-*`）；
-  旧仓 `res/` 的 rc 系列（`AGERC.DLL.rc` / `AGERC_RAW.DLL.rc` / `MANIFEST2_1.txt` / `build-localized-agerc.ps1` / `inject-localized-agerc.rsh`）在那里只读存在。
-* **缺**：`rc → 编译 → 注入` 的整条链与其落点设计 —— 归 **`REQ-01M3SVH5F3VJ1ENS6BN3090X8M`（windows 资源重建）**。
+**已定案（2026-10-03）**：菜单使用面小 + 16 个对话框基本没汉化（只 `DIALOG 3`）⇒ 自建链收益有限，
+**先把旧仓随补丁发布的那一份入库当可信产物直接进包**：
+
+* **件**：`corpus/assets/agerc/AGERC.DLL`（= 旧仓 `patch/AGERC.DLL`，848,896 B，sha256 `6241de66…`）；
+  清单条目 `binary/agerc-dist`（`storage: lfs` · `readOnly` · `derivedFrom: binary/agerc-debug-unpacked`）。
+* **"可信"是可机械复核的**：`tools/test/agerc-artifact.test.mjs` 的基准**不是另写一份 sha**，
+  而是清单里 `binary/agerc-modified-install` 已记的那个（**一处真源**），并在旧仓在机时逐字节比对。
+* **待重建**：`rc → 编译 → 注入` 的链（还要摆脱 Resource Hacker 这条 Windows GUI 依赖）
+  ⇒ 归需求节点 **「AGERC.DLL 二进制重建（把可信产物换成自建链）」**；
+  评估与判据见 `docs/01-translation/agerc-design.md`（含"两条链叠加"的实测与六方案对比）。
+* 旧仓 `res/` 的 rc 系列与三条 AGERC 二进制**仍只登记**（`corpus/assets.json` 的 `binary/agerc-*`）；
+  注意 `binary/agerc-packed`（带壳根目录那份）**不可作可编辑素材** —— 它的资源字节不在盘上。
 
 ### 5.3 打包动作 —— **缺**
 
@@ -80,7 +89,8 @@
 | 旧仓件 | 为什么不迁 |
 |---|---|
 | `patch/patch.config.json`（30 KB） | BIN 清单**可由 `data/translations/patch.json` 的键派生** ⇒ 再存一份就是**第二真源**。（它那 400 条与 patch 的 453 条键本身就对不齐，正是"同一份信息两处写"的样本。） |
-| `patch/BIN` · `patch/AGF` · `patch/AGERC.DLL` · 字体 | 都是**产物**；来源在本仓（patch.json / UI PNG / rc 系列 / `corpus/assets/fonts/`） |
+| `patch/BIN` · `patch/AGF` · 字体 | 都是**产物**；来源在本仓（patch.json / UI PNG / `corpus/assets/fonts/`） |
+| `patch/AGERC.DLL` | ★ **只取了这一个** —— 它是本版要用的**可信产物**（入库为 `corpus/assets/agerc/AGERC.DLL`）；其余 `patch/` 内容仍不迁 |
 | `install-manifest.json` · `raw-manifest.json` | 那是"安装树自检"用的，与发行包无关 |
 
 ## 7. 怎么查 / 怎么改

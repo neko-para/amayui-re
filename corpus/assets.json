@@ -1102,6 +1102,29 @@
         "M5"
       ],
       "note": "说明书 data/translations/patch.md；控制脚本 tools/patch.mjs（模型 tools/lib/patch.mjs、基线解析层 tools/lib/bin-source.mjs）；设计与观测 docs/01-translation/patch-design.md"
+    },
+    {
+      "id": "binary/agerc-dist",
+      "kind": "binary",
+      "role": "module",
+      "storage": "lfs",
+      "origin": [
+        {
+          "root": "oldRepo",
+          "path": "patch/AGERC.DLL"
+        }
+      ],
+      "derivedFrom": [
+        {
+          "ref": "binary/agerc-debug-unpacked",
+          "tool": "Resource Hacker（重建 DIALOG/MENU）+ scripts/patch-menu.js（定点字节补丁）",
+          "note": "迁移期一次性：两条链叠加出的产物；本仓尚未重建该链"
+        }
+      ],
+      "dest": "corpus/assets/agerc/AGERC.DLL",
+      "readOnly": true,
+      "consume": "只读：当前发布用的 AGERC.DLL 可信产物（旧仓 patch/ 随补丁发布的那一份；与 install/AGERC.DLL 同 sha256）。★ 本仓尚无自建链 ⇒ 先按可信产物使用；重建见需求树（设计见 docs/01-translation/agerc-design.md）",
+      "note": "可信的判据 = 清单里 binary/agerc-modified-install 记的 sha256；tools/test/agerc-artifact.test.mjs 每次核对入库件与它一致"
     }
   ]
 }
