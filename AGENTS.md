@@ -43,10 +43,14 @@
 
 ## 3. 语言与代码口径
 
-* **只有 `apps/emulator` 用 TypeScript**（自带工具链；M4 才进 workspaces）。
+* **TypeScript 只用在"自带工具链的 app"上**：`apps/emulator`（M4 才进 workspaces）与
+  `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts` 由 **Node v24 原生 type stripping**
+  直接跑 ⇒ 服务端**无构建**，只用可擦除语法）。这是本条规律的**全部例外**，新增一个 app 就写在这里。
 * 仓库内**其余一切 JS** —— `packages/*`、`tools/*`、守卫与测试 —— **一律直接写 `.mjs`**。
   根目录**不引入** `typescript` / `tsc` / `tsconfig`，因此没有构建步骤，`node` 直接跑。
 * 包管理**用 pnpm**（`pnpm-workspace.yaml` 是 workspace 真源）。禁止混用 `npm install` 生成 `package-lock.json`。
+  ★ `apps/workbench` 的 `.npmrc` 设了 `shamefully-hoist=true`：本机的 `fs.realpathSync` **不解析 pnpm 的 junction**，
+  严格布局会让 `vite` 里的 `import 'rolldown'` 直接 `ERR_MODULE_NOT_FOUND` ⇒ 那个项目的依赖必须扁平。
 * `.NET`(C#) 与 `native`(C++/CMake) 各自独立工具链，**不进 npm workspaces**。
 
 ## 4. 搜索约定

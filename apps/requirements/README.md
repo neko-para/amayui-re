@@ -1,5 +1,12 @@
 # apps/requirements/ — 需求台账的本地只读网页
 
+> ⚠️ **已被 `apps/workbench/` 取代**（后者是同一套只读视图的新技术栈重写：需求 + AGE 脚本反汇编）。
+> `pnpm tools requirements serve` 现在指向 `apps/workbench/server.ts`。
+> 目前**留着**的唯一理由是：`apps/workbench/smoke.ts` 第 7 组拿它当**离线对照物**
+> （把新旧两个服务的 `/api/tree`、`/api/node`、错误体**逐字段**比对），"新旧同形"因此是可机械复核的。
+> 按需求单 §退役，它**待用户确认后删除** —— 删掉之后那一组会自动 skip。
+> 在那之前：**不要往里加新东西，也不要按它改新应用**。
+
 `data/requirements/` 的一层 HTTP + 浏览器视图：**总览**看整棵树与进度，**每条需求有自己的地址**，
 用浏览器自己的 tab 并排看。
 

@@ -1,0 +1,25 @@
+{
+  "name": "@amayui/workbench",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/vite-cli.mjs dev",
+    "build": "node scripts/vite-cli.mjs build",
+    "preview": "node scripts/vite-cli.mjs preview",
+    "serve": "node server.ts",
+    "smoke": "node smoke.ts",
+    "typecheck": "vue-tsc --noEmit",
+    "verify": "npm run typecheck && npm run build && npm run smoke"
+  },
+  "dependencies": {
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "monaco-editor": "^0.57.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.2",
+    "vue-tsc": "^3.3.11"
+  }
+}

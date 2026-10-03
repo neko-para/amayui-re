@@ -139,6 +139,7 @@
 | 翻译域：现状、双份 vs 单份待定、`install/` 先保留 | `docs/01-translation/README.md` |
 | **翻译 patch 方案**：真源 = 叠加层，`data`/`src` 都是视图；锚定规则与支撑观测 | `docs/01-translation/patch-design.md` + `pnpm tools patch describe` + `pnpm tools requirements show 8SNRXKV` |
 | 模拟器 / 探针域：按新结构重写、工具链、跨域守卫要拆回各域 | `docs/03-emulator/README.md`、`apps/*/README.md` |
+| **项目工作台（网页）**：需求 + AGE 脚本反汇编；Vue 3 + Vite + TS；服务端 `server.ts` 由 Node 原生 type stripping 直跑 | `apps/workbench/README.md` + `pnpm tools requirements show 1M3XWRXVB04WQ4J0MA6AXZY9D` |
 | agent 基建：技能固定路径、插件软链接注册、按重建处理 | `docs/04-agent/README.md`、`AGENTS.md` §7 |
 | 知识层：清理起点清单、A/B/C 分级、准入规则、`callers/callees` 数据源缺失 | `knowledge-rebuild.md` |
 | 环境与权限：五条硬纪律、跨平台六条、语言口径、怎么跑、两个沙箱口径 | `AGENTS.md` |
@@ -152,7 +153,7 @@
 | 口径 | 详情 |
 |---|---|
 | 平台优先级：**win32 优先**，macOS 只做兼容性验证 | `AGENTS.md` §2 末 |
-| 包管理 **pnpm**；**只有 emulator 用 TS**，其余一律 `.mjs` | `AGENTS.md` §3 |
+| 包管理 **pnpm**；**TS 只用在自带工具链的 app 上**（`apps/emulator`、`apps/workbench`），其余一律 `.mjs` | `AGENTS.md` §3 |
 | 旧仓保持原样可归档，**不要求**导出 bundle / tag | §1 的结论；只读边界见 `AGENTS.md` §0 |
 | 技能与插件**不迁移、只重建**（技能路径固定） | `docs/04-agent/README.md`、`AGENTS.md` §7 |
 | `install/` **先保留**、后续重新设计 | `docs/01-translation/README.md` |

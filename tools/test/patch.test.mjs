@@ -18,9 +18,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  SPEAKER_FILTER,
   DEFAULT_PATCH,
   DOMAIN,
-  OFFICIAL_FILTER,
   canonicalFormProblems,
   canonicalPatch,
   describe,
@@ -189,7 +189,7 @@ test('★ structuralProblems 对每条结构不变量都能红', () => {
   const cases = [
     ['schemaVersion 不是 1', { ...good, schemaVersion: 2 }, /schemaVersion/],
     ['subsSha 形态非法', { ...good, subsSha: 'zz' }, /subsSha/],
-    ['脚本名不在官方集口径内', docOf({ 'PLINIT.BIN': entryOf([]) }), /不在官方集口径内/],
+    ['键不是 .BIN 名字', docOf({ 'PLINIT.TXT': entryOf([]) }), /键必须是 \.BIN 名字/],
     ['baseSha 形态非法', docOf({ 'SC0000.BIN': { ...entryOf([]), baseSha: 'x' } }), /baseSha/],
     ['resultSha 形态非法', docOf({ 'SC0000.BIN': { ...entryOf([]), resultSha: null } }), /resultSha/],
     ['op 枚举之外', docOf({ 'SC0000.BIN': entryOf([{ op: 'rename', i: 1 }]) }), /op 非法/],
@@ -270,12 +270,51 @@ test('★ 发布物：data/translations/patch.json 处于规范形态（否则 g
   }
 });
 
-test('官方集口径只认 SC / SP（含 $N$ 前缀）', () => {
-  for (const ok of ['SC0000.BIN', 'SP0131.BIN', '$1$SC0330.BIN', '$5$SP0372.BIN']) assert.ok(OFFICIAL_FILTER.test(ok), ok);
-  for (const no of ['PLINIT.BIN', 'EBINIT.BIN', '$2$SKINIT.BIN', 'SYS4INI.BIN', 'SG0010.BIN']) assert.ok(!OFFICIAL_FILTER.test(no), no);
+test('范围口径：patch 的键只要求是 `.BIN` 名字；「标注集」只是标签、不是范围', () => {
+  // ★ 曾经的错：把旧仓 `annotate-speaker.js` 的正则（SC/SP）当成"有译文的脚本集合"，
+  //   于是漏掉了非 SC/SP 的 247 支真译文。⇒ 结构校验不再按名字筛，只要求是 .BIN。
+  assert.deepEqual(structuralProblems(docOf({ 'SG0010.BIN': entryOf([]), 'SN0000.BIN': entryOf([]) })), []);
+  assert.ok(SPEAKER_FILTER.test('SC0000.BIN') && SPEAKER_FILTER.test('$1$SC0330.BIN') && SPEAKER_FILTER.test('SP0131.BIN'));
+  for (const no of ['SG0010.BIN', 'SN0000.BIN', 'PLINIT.BIN', 'BIINIT.BIN', '$2$SKINIT.BIN']) {
+    assert.ok(!SPEAKER_FILTER.test(no), `${no} 不该落进"标注集"`);
+  }
 });
 
 // ─────────────────────────────────────────────────────────── ① 写路径
+
+/**
+ * ★ "整支删空"型条目**一个都不该有**。
+ * 曾经旧仓有一支（`$1$IMINIT.BIN`：工具链把整支 body 弄丢，见 `REQ-01M3YF5120V9WXB7NF36GVP52G`）——
+ * 迁移时**跳过**了它，所以发布物里本来就不该有这种条目。
+ * ⇒ 这条守卫**没有例外清单**：以后任何一支再出现这种形态，直接红。
+ */
+test('★ 发布物：没有"整支删空"型条目（那种形态不像译文）', () => {
+  if (!fs.existsSync(DEFAULT_PATCH)) return;
+  const doc = loadPatch(DEFAULT_PATCH);
+  const suspicious = Object.entries(doc.scripts)
+    .filter(([, e]) => e.ops.length >= 50 && e.ops.every((o) => o.op === 'delete'))
+    .map(([n, e]) => `${n}（${e.ops.length} 条 op 全是 delete）`);
+  assert.deepEqual(suspicious, [], `有"整支删空"型条目 —— 先确认它是译文还是产物异常：\n  - ${suspicious.join('\n  - ')}`);
+});
+
+test('replay：条目带 `header` 时用它替掉基线那 4 行（头部**不是**不变量）', () => {
+  const a = dis('i1f4\ni259');
+  const header = ['==Binary Information - do not edit==', 'signature = SYS4450 ', 'local_vars = { 1 1 1 1 1 1 }', '===='];
+  const out = replay(a, [{ op: 'delete', i: 1, sha8: sha8(rowsOf(a).masked[1]) }], { header });
+  assert.deepEqual(rowsOf(out.text).header, header);
+  assert.deepEqual(out.header, header);
+  // 不带 header ⇒ 一律取基线的
+  assert.deepEqual(rowsOf(replay(a, []).text).header, rowsOf(a).header);
+});
+
+test('structuralProblems：`header` 必须是 4 个字符串', () => {
+  const good = docOf({ 'SC0000.BIN': { ...entryOf([]), header: ['a', 'b', 'c', 'd'] } });
+  assert.deepEqual(structuralProblems(good), []);
+  for (const bad of [['a'], 'abc', ['a', 'b', 'c'], [1, 2, 3, 4]]) {
+    const doc = docOf({ 'SC0000.BIN': { ...entryOf([]), header: bad } });
+    assert.ok(structuralProblems(doc).some((b) => /header/.test(b)), `${JSON.stringify(bad)} 应当红`);
+  }
+});
 
 test('序列化 ↔ 解析往返等价，且**一行一个 op**（可 diff 是硬需求）', () => {
   const doc = docOf({

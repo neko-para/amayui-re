@@ -19,8 +19,11 @@ import { KINDS, ROLES, STORAGES, describe as describeManifest } from '../lib/man
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { describe as describeSamples } from '../lib/samples.mjs';
 
-/** 外部工具定义的文件（说明书不在本仓）—— 保持这份清单短且显式 */
-const ECOSYSTEM = new Set(['package.json']);
+/**
+ * 外部工具定义的 JSON（说明书不在本仓）—— 保持这份判据短且显式。
+ * `tsconfig*.json` 与 `package.json` 同类：由 TypeScript / npm 定义，不是本仓的"结构化数据"。
+ */
+const isEcosystem = (name) => name === 'package.json' || /^tsconfig[.-].*\.json$/.test(name) || name === 'tsconfig.json';
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.tmp', '.staging', 'files']);
 
 /** 说明书必须覆盖的三件事（正是"只讲查询不讲编辑"的反面）；最后一项是"指向脚本自描述" */
@@ -41,7 +44,7 @@ function walkJson(dir, out = []) {
 const rel = (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/');
 
 test('每个自有 JSON 都有同名 .md，且覆盖「怎么查」「怎么改」并指向脚本自描述', () => {
-  const files = walkJson(REPO_ROOT).filter((p) => !ECOSYSTEM.has(path.basename(p)));
+  const files = walkJson(REPO_ROOT).filter((p) => !isEcosystem(path.basename(p)));
   assert.ok(files.length > 0, '至少应当扫到 corpus/assets.json 与 corpus/fixtures/samples.json');
 
   const problems = [];

@@ -360,17 +360,18 @@ function parseArgs(argv) {
 /**
  * ★ `--serve` 的**薄启动器**。
  *
- * 网页是**独立项目** `apps/requirements/`（服务 + 客户端），不是 `tools/` 的一份子：
- * `test/layering.test.mjs` 要求每个 `tools/*.mjs` 只 import `./lib/*`，所以这里
- * **不能** import 那个项目 —— 只能 spawn 它，并把端口原样转发。
+ * 网页是**独立项目** `apps/workbench/`（服务端 `server.ts` 由 Node 直跑 + 客户端 Vue/Vite），
+ * 不是 `tools/` 的一份子：`test/layering.test.mjs` 要求每个 `tools/*.mjs` 只 import `./lib/*`，
+ * 所以这里**不能** import 那个项目 —— 只能 spawn 它，并把端口原样转发。
  *
  * `stdio: 'inherit'` 而不是捕获：受限沙箱里捕获子进程输出要开命名管道 ⇒ `spawn EPERM`。
  * 于是"启动时打印端口"这件事由服务自己写进这个终端，本文件不代抄一遍。
+ * `server.ts` 交给 `process.execPath` 直跑（Node v24 的原生 type stripping ⇒ 服务端无构建）。
  */
 function serveWeb(args) {
-  const server = path.join(REPO_ROOT, 'apps', 'requirements', 'server.mjs');
+  const server = path.join(REPO_ROOT, 'apps', 'workbench', 'server.ts');
   if (!fs.existsSync(server)) {
-    process.stderr.write(`找不到网页服务：${server}\n（apps/requirements/ 就是这个项目）\n`);
+    process.stderr.write(`找不到网页服务：${server}\n（apps/workbench/ 就是这个项目）\n`);
     return 2;
   }
   const argv = [server];
@@ -405,7 +406,7 @@ const HELP = `tools/requirements.mjs — data/requirements/ 的查询与唯一�
   node tools/requirements.mjs --list [--json]         # 一览
   node tools/requirements.mjs --show <id|前缀>         # 一个节点：字段 + 子树 + 正文
   node tools/requirements.mjs --validate [--json]     # 全部不变量（红 = 退出码 1）
-  node tools/requirements.mjs --serve [--port 7788]   # 本地只读网页（总览 + 详情），项目在 apps/requirements/
+  node tools/requirements.mjs --serve [--port 7788]   # 本地只读网页（需求 + AGE 脚本），项目在 apps/workbench/
   node tools/requirements.mjs --add --title <标题> [--parent <id>] [--type req] [--status open]
                                        [--order n] [--tags a,b] [--verify 路径#测试名] [--body <md 文件>] [--write]
   node tools/requirements.mjs --set <id|前缀> [--status doing] [--verify …] [--parent …] [--title …]
@@ -430,7 +431,7 @@ export function main(argv = process.argv.slice(2)) {
     // dry-run：也要先算一遍，才能报告"要是写会怎样"
   }
 
-  // ★ 网页服务：这是个**长驻进程**，而且是独立项目（`apps/requirements/`）。
+  // ★ 网页服务：这是个**长驻进程**，而且是独立项目（`apps/workbench/`）。
   //   本文件只做"薄启动器"——spawn 它、原样转发，不实现任何 HTTP / 渲染规则
   //   （否则 CLI 就要 import 模型之外的东西，`test/layering.test.mjs` 会红）。
   if (args.action === 'serve') return serveWeb(args);
@@ -480,10 +481,15 @@ export function main(argv = process.argv.slice(2)) {
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (isDirectRun) {
-  try {
-    process.exitCode = main();
-  } catch (err) {
-    process.stderr.write(`ERROR: ${err.message}\n`);
-    process.exitCode = 2;
-  }
+  // ★ `--serve` 是**长驻**的：它返回 Promise（等子进程退出）。同步 `process.exitCode = main()` 会把
+  //   一个 Promise 赋给 exitCode ⇒ `ERR_INVALID_ARG_TYPE`（起得来服务、但终端上多一条莫名其妙的错）。
+  Promise.resolve()
+    .then(() => main())
+    .then((code) => {
+      process.exitCode = code ?? 0;
+    })
+    .catch((err) => {
+      process.stderr.write(`ERROR: ${err.message}\n`);
+      process.exitCode = 2;
+    });
 }

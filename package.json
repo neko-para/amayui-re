@@ -5,7 +5,8 @@
   "packageManager": "pnpm@10.32.1",
   "workspaces": [
     "packages/*",
-    "tools"
+    "tools",
+    "apps/workbench"
   ],
   "scripts": {
     "test": "node --test --test-isolation=none \"{tools/test/**/*.test.mjs,packages/*/test/**/*.test.mjs}\"",

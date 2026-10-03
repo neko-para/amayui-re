@@ -58,7 +58,8 @@ data/translations/README.md   ← 本域的落点说明（本文件之外没有�
 ### 3.2 其它待定
 
 * **BIN 内嵌中日文的前瞻**：编码、切换时机、与 `packages/age-format` 的关系（M2 之后才有容器层结论）。
-* **`data` / `src` 视图与"改过的视图 ⇒ 反解回 patch"**：子节点 `REQ-01M3XP1ZV3YF5EYHTK2A3KV4CE`（判据 3 的后半）。
+* **旧式注释层**（页边界 / `// FROM:` / 原文存档块）：节点
+  `REQ-01M3XP1ZV3YF5EYHTK2A3KV4CE`。★ 视图与"改过的视图 ⇒ 反解回 patch"**已交付**（`patch view` / `patch edit`）。
 * **patch 的物理切分**（单文件 6.74 MB 已可行；并行编辑冲突变痛时再按脚本分片，纯物理切分不改语义）。
 
 ## 4. 本轮明确不做

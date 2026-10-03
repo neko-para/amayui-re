@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { LAYOUTS, indexEntries, readAlf } from '../../packages/age-format/src/alf.mjs';
+import { readHeader } from '../../packages/age-format/src/asm/index.mjs';
 
 /** 可能承载 ALF 索引的扩展名（大写比较） */
 const INDEX_EXT = new Set(['.AAI', '.BIN']);
@@ -119,4 +120,23 @@ export function openRoot(dir) {
   }
 
   return { dir, loose, indices, resolve, names, unreadable: absent };
+}
+
+/** 名字以 `.BIN` 结尾（大小写不敏感） */
+export const isBinName = (name) => /\.bin$/i.test(name);
+
+/**
+ * 这份字节是不是 AGE 脚本？（`readHeader` 认不出签名就抛 ⇒ 这里转成布尔）
+ *
+ * ★ 用格式层的 `readHeader` 而不是在这里抄 `SYS4` / `SYS5` 两个魔数：
+ *   那是**格式事实**，抄一份就等于给同一件事造了第二个真源。
+ * ★ 实测基线根 942 个 `.BIN` 里只有 `AGE.EXE__USERDATA.BIN` 落选。
+ */
+export function isAgeScript(buf) {
+  try {
+    readHeader(buf);
+    return true;
+  } catch {
+    return false;
+  }
 }

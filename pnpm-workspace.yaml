@@ -1,6 +1,7 @@
 # pnpm 的 workspace 真源（package.json 的 "workspaces" 字段保留，供不认 yaml 的工具读）
-# ★ apps/* 不在列表里：本轮 apps/emulator 与 apps/inspector 只有"重写计划"占位，
-#   代码还没搬进来，等 M4/M7 真正落地时再入 workspaces（见 docs/00-origin/decisions.md）。
+# ★ `apps/emulator` 与 `apps/inspector` 仍只有"重写计划"占位，代码还没搬进来，等 M4/M7 落地时再入（见 docs/00-origin/decisions.md）。
+# ★ `apps/workbench` 是**真项目**（有自己的依赖与构建），所以它入列表 —— 判据不是"在不在 apps/"，而是"有没有自己的工具链"。
 packages:
   - packages/*
   - tools
+  - apps/workbench

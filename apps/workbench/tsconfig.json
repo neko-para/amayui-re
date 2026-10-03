@@ -1,0 +1,19 @@
+{
+  "_doc": "客户端（src/）与 vite 配置的类型门禁。服务端 server.ts / smoke.ts 由 Node 原生 type stripping 直跑，不进这里（它们 import 的是 .mjs 模型，没有 .d.ts）。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "jsx": "preserve",
+    "useDefineForClassFields": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
+}

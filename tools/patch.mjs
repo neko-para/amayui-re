@@ -20,7 +20,8 @@ import {
   DEFAULT_PATCH,
   DOMAIN,
   OPERATIONS,
-  OFFICIAL_FILTER,
+  NO_OPS_ENTRY,
+  SPEAKER_FILTER,
   REPO_ROOT,
   buildView,
   canonicalFormProblems,
@@ -30,7 +31,7 @@ import {
   extractEntry,
   loadPatch,
   mapperContext,
-  officialNames,
+  allScriptNames,
   openSides,
   rebuildBin,
   savePatch,
@@ -53,8 +54,10 @@ const HELP = `tools/patch.mjs —— 翻译 patch（唯一入库物 = 变更叠�
 
 公共选项
   --base   <目录>    基线根（缺省取清单 roots.gameInstall）
-  --target <目录>    产物根（缺省 旧仓 install/；给 \`none\` 表示只做 resultSha 自证）
+  --target <目录>    **产物根**：\`--extract\` 必需；\`--verify\` **缺省不比产物**（旧仓只是迁移期的一次性来源），
+                     要跟产物复核就显式给
   --name   <脚本名>  只处理这一个（可重复；\`--extract\` 带它时**不许** --write）
+  --skip   <脚本名>  迁移期跳过某几支（可重复）—— ★ **理由写在文档里，代码里不维护名单**
   --limit  <n>       只处理前 n 个（同上：带它时不许 --write）
   --patch  <文件>    换一份 patch（诊断用；缺省 data/translations/patch.json）
   --out    <目录>    \`--view\` 的落点（缺省 dist/views/，已被 .gitignore 命中）
@@ -64,11 +67,12 @@ const HELP = `tools/patch.mjs —— 翻译 patch（唯一入库物 = 变更叠�
 
 ★ \`--extract\` 缺省 dry-run：只报告会写什么。加 \`--write\` 才落盘，且写前逐条复验（基线+patch ⇒ 逐字节等于产物），
   有条目过不去就**一个字都不写**。部分提取（--name/--limit）只能是 dry-run —— 否则会把其余条目删掉。
+★ \`--verify\` 缺省的判据是**自证**（重建的 sha256 == 条目里的 \`resultSha\`）；\`--target\` 是**迁移期**的额外一道。
 `;
 
 function parseArgs(argv) {
-  const out = { action: null, write: false, names: [], limit: null, base: null, target: undefined, patch: null, json: false, kind: 'both', out: null, stdout: false, bin: false };
-  const takesValue = new Set(['base', 'target', 'name', 'limit', 'patch', 'kind', 'out']);
+  const out = { action: null, write: false, names: [], skip: [], limit: null, base: null, target: undefined, patch: null, json: false, kind: 'both', out: null, stdout: false, bin: false };
+  const takesValue = new Set(['base', 'target', 'name', 'limit', 'patch', 'kind', 'out', 'skip']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (['--describe', '--status', '--baseline', '--extract', '--verify', '--view', '--edit', '--help', '-h'].includes(a)) {
@@ -83,6 +87,7 @@ function parseArgs(argv) {
       const v = argv[++i];
       if (v === undefined) throw new Error(`${a} 需要值`);
       if (k === 'name') out.names.push(v);
+      else if (k === 'skip') out.skip.push(v);
       else if (k === 'limit') out.limit = Number(v);
       else out[k] = v;
     } else if (['baseline', 'verify', 'extract', 'status', 'describe', 'view', 'edit'].includes(out.action)) {
@@ -99,13 +104,13 @@ function parseArgs(argv) {
 const pad = (s, n) => String(s).padEnd(n);
 const mb = (n) => `${(n / 1048576).toFixed(2)} MB`;
 
-/** 选名字：显式名字 > 官方集全量（可选截断） */
+/** 选名字：显式名字 > 该范围全量（可选截断） */
 function pickNames(explicit, all, limit) {
   if (explicit.length) {
     const want = new Set(explicit.map((n) => n.toUpperCase()));
     const hit = all.filter((n) => want.has(n.toUpperCase()));
     const miss = explicit.filter((n) => !all.some((a) => a.toUpperCase() === n.toUpperCase()));
-    for (const m of miss) process.stderr.write(`⚠ 官方集里没有这个脚本：${m}\n`);
+    for (const m of miss) process.stderr.write(`⚠ 这个范围里没有这个脚本：${m}\n`);
     return hit;
   }
   return limit === null ? all : all.slice(0, limit);
@@ -122,13 +127,9 @@ function cmdStatus(args) {
   const doc = loadPatch(p);
   const names = Object.keys(doc.scripts);
   const tally = { 'replace-line': 0, delete: 0, 'insert-after': 0 };
-  let empty = 0;
-  let changed = 0;
   let chars = 0;
   for (const n of names) {
     const e = doc.scripts[n];
-    if (e.ops.length === 0) empty += 1;
-    else changed += 1;
     for (const o of e.ops) {
       tally[o.op] = (tally[o.op] ?? 0) + 1;
       if (typeof o.line === 'string') chars += o.line.length;
@@ -138,7 +139,7 @@ function cmdStatus(args) {
   const ops = Object.values(tally).reduce((a, b) => a + b, 0);
   process.stdout.write(`patch        ${p}\n`);
   process.stdout.write(`体积         ${mb(fs.statSync(p).size)}（${fs.statSync(p).size} B）\n`);
-  process.stdout.write(`脚本         ${names.length}（有变更 ${changed} · 无变更 ${empty}）\n`);
+  process.stdout.write(`脚本         ${names.length}（**只含有变更的**；无变更的不进 patch）\n`);
   process.stdout.write(`操作         ${ops}\n`);
   for (const [k, v] of Object.entries(tally)) process.stdout.write(`             ${pad(k, 14)}${v}\n`);
   process.stdout.write(`新文本       ${chars} 字\n`);
@@ -181,7 +182,7 @@ function cmdStatus(args) {
 
 function cmdBaseline(args) {
   const sides = openSides({ baseDir: args.base ?? undefined, targetDir: args.target === 'none' ? null : (args.target ?? undefined) });
-  const all = args.target === 'none' ? Object.keys(loadPatch(args.patch ?? DEFAULT_PATCH).scripts) : officialNames(sides.target);
+  const all = allScriptNames(sides.base).names;
   const names = pickNames(args.names, all, args.limit);
   process.stdout.write(`基线根       ${sides.base.dir}\n`);
   process.stdout.write(`产物根       ${sides.target ? sides.target.dir : '（不解析）'}\n`);
@@ -213,16 +214,20 @@ function cmdExtract(args) {
   if (!sides.target) { process.stderr.write('✖ 提取必须要有产物根（--target），否则无从知道"变成了什么"\n'); return 2; }
 
   const { mapper, subsSha } = mapperContext();
-  const all = officialNames(sides.target);
+  // ★ 范围 = **基线根里全部能反汇编的 AGE 脚本**，不按名字过滤：
+  //   "有没有译文"只能由"产物 ≠ 基线"判定，任何名字过滤都会静默漏掉真译文（实测漏过 247 支）。
+  const { names: all, nonScript } = allScriptNames(sides.base);
+  const skipSet = new Set(args.skip.map((n) => n.toUpperCase()));
   const names = pickNames(args.names, all, args.limit);
   process.stdout.write(`基线根       ${sides.base.dir}\n`);
   process.stdout.write(`产物根       ${sides.target.dir}\n`);
-  process.stdout.write(`官方集口径   ${OFFICIAL_FILTER}\n`);
-  process.stdout.write(`带提取       ${names.length} 个脚本${partial ? '（dry-run；部分提取不许写盘）' : ''}\n\n`);
+  process.stdout.write(`范围         基线根里全部可反汇编的 AGE 脚本 ${all.length} 支${nonScript.length ? `（另有 ${nonScript.length} 个 .BIN 不是脚本：${nonScript.join(', ')}）` : ''}\n`);
+  process.stdout.write(`带提取       ${names.length} 支${partial ? '（dry-run；部分提取不许写盘）' : ''}\n\n`);
 
   const doc = { schemaVersion: 1, subsSha, scripts: {} };
   const failures = [];
   const missing = [];
+  const skipped = [];
   let ops = 0;
   let empty = 0;
   let checked = 0;
@@ -234,6 +239,8 @@ function cmdExtract(args) {
     const t = sides.target.resolve(name);
     if (!b) { missing.push(`${name}: 基线解析不出来（散装没有、ALF 里也没有）`); continue; }
     if (!t) { missing.push(`${name}: 产物解析不出来（散装没有、ALF 里也没有）`); continue; }
+    // 迁移期可以用 `--skip <名字>` 跳过某些支（**理由写在文档里**，不在代码里维护名单）
+    if (skipSet.has(name.toUpperCase())) { skipped.push(name); continue; }
     let entry;
     try {
       entry = extractEntry(b.buf, t.buf, mapper);
@@ -252,8 +259,19 @@ function cmdExtract(args) {
       failures.push(`${name}: 提取后重建失败 —— ${err.message}`);
       continue;
     }
-    doc.scripts[name] = { baseSha: entry.baseSha, resultSha: entry.resultSha, ops: entry.ops };
-    if (entry.ops.length === 0) empty += 1;
+    // ★ 逐字段构造**必须带上可选的 `header`**：`extractEntry` 的返回值里它是可选的，
+    //   漏掉它会让"提取时自证通过、落盘后 verify 失败"（实测 `$1$IMINIT.BIN` 就踩了这一脚）。
+    doc.scripts[name] = {
+      baseSha: entry.baseSha,
+      resultSha: entry.resultSha,
+      ...(entry.header ? { header: entry.header } : {}),
+      ops: entry.ops,
+    };
+    if (entry.ops.length === 0) {
+      // ★ **没有变更的脚本不进 patch**（"没改"不需要记录；空条目只会让 diff 变大）
+      delete doc.scripts[name];
+      empty += 1;
+    }
     ops += entry.ops.length;
     forced += entry.stats.forcedReplace ?? 0;
     locals += entry.stats.localLabels ?? 0;
@@ -262,8 +280,12 @@ function cmdExtract(args) {
   }
 
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  process.stdout.write(`\n提取完成     通过 ${checked} · 无变更 ${empty} · 操作 ${ops} · 用时 ${secs}s\n`);
-  process.stdout.write(`            其中"值相同但 label 目标变了 ⇒ 降级成 replace-line" ${forced} 处 · patch 局部 label ${locals} 个\n`);
+  process.stdout.write(`\n提取完成     通过 ${checked} · 操作 ${ops} · 用时 ${secs}s\n`);
+  process.stdout.write(`             其中**无变更、不进 patch** ${empty} 个（"没改"不记录）\n`);
+  if (skipped.length) {
+    process.stdout.write(`             **--skip 跳过** ${skipped.length} 个：${skipped.join(', ')}\n`);
+  }
+  process.stdout.write(`             "值相同但 label 目标变了 ⇒ 降级成 replace-line" ${forced} 处 · patch 局部 label ${locals} 个\n`);
   if (missing.length) {
     process.stdout.write(`✖ 解析不出来 ${missing.length} 条：\n`);
     for (const m of missing.slice(0, 20)) process.stdout.write(`   - ${m}\n`);
@@ -315,7 +337,10 @@ function cmdVerify(args) {
     return 1;
   }
   const { mapper, subsSha } = mapperContext();
-  const sides = openSides({ baseDir: args.base ?? undefined, targetDir: args.target === 'none' ? null : (args.target ?? undefined) });
+  // ★ 默认**不比产物**：产物根（旧仓 `install/`）只是**迁移期的一次性来源**，稳态校验靠 `resultSha` 自证。
+  //   要对产物复核就显式 `--target <目录>`。
+  const sides = openSides({ baseDir: args.base ?? undefined, targetDir: args.target ?? null });
+  const skipSet = new Set(args.skip.map((n) => n.toUpperCase()));
   const all = Object.keys(doc.scripts).sort();
   const names = pickNames(args.names, all, args.limit);
 
@@ -327,21 +352,21 @@ function cmdVerify(args) {
   );
   process.stdout.write(`带核对       ${names.length} 个脚本\n\n`);
 
-  // 官方集口径：patch 的键必须都在口径内（结构不变量已查），且**产物根在场时**必须覆盖全量官方集
+  // 覆盖：patch 的键必须是"基线根全部可反汇编脚本"的**子集**；缺席的就是"没有变更"（不进 patch）
   let coverage = null;
   if (sides.target) {
-    const official = new Set(officialNames(sides.target).map((n) => n.toUpperCase()));
-    const keys = new Set(all.map((n) => n.toUpperCase()));
-    const notInPatch = [...official].filter((n) => !keys.has(n));
-    const notOfficial = [...keys].filter((n) => !official.has(n));
-    coverage = { official: official.size, patch: keys.size, notInPatch, notOfficial };
+    const { names: range, nonScript } = allScriptNames(sides.base);
+    const rangeSet = new Set(range.map((n) => n.toUpperCase()));
+    const keys = new Set(Object.keys(doc.scripts).map((n) => n.toUpperCase()));
+    const notInRange = [...keys].filter((n) => !rangeSet.has(n));
+    const unchanged = range.filter((n) => !keys.has(n));
+    coverage = { range: range.length, patch: keys.size, notInRange, unchanged, nonScript: nonScript.length };
     process.stdout.write(
-      `官方集覆盖   产物根有 ${coverage.official} 个 · patch 有 ${coverage.patch} 个` +
-        `${notInPatch.length ? ` · ⚠ 产物有而 patch 没有 ${notInPatch.length}` : ''}` +
-        `${notOfficial.length ? ` · ⚠ patch 有而产物没有 ${notOfficial.length}` : ''}\n`,
+      `覆盖         基线根可反汇编 ${coverage.range} 支 · patch ${coverage.patch} 支 · 其余 ${unchanged.length} 支视为**无变更**` +
+        `（另有 ${coverage.nonScript} 个 .BIN 不是脚本）` +
+        `${notInRange.length ? ` · ✖ patch 里有 ${notInRange.length} 支不在这个范围里` : ''}\n`,
     );
-    for (const n of notInPatch.slice(0, 10)) process.stdout.write(`             - 缺：${n}\n`);
-    for (const n of notOfficial.slice(0, 10)) process.stdout.write(`             - 多：${n}\n`);
+    for (const n of notInRange.slice(0, 10)) process.stdout.write(`             - 不在范围：${n}\n`);
   }
 
   const failed = [];
@@ -356,6 +381,33 @@ function cmdVerify(args) {
     }
     if ((idx + 1) % 25 === 0) process.stdout.write(`… ${idx + 1}/${names.length}（失败 ${failed.length}）\n`);
   }
+
+  // ★ "没有条目"是一种**主张**："这个脚本没有变更"。有产物根时就要**验**它，
+  //   否则"少建条目"会变成一条静默丢改动的路。
+  //   调用方用 `--skip` 显式声明"这一支的差异是旧仓的坏文件、我知道"时，单独列出来、不当失败。
+  const untouchedFailed = [];
+  const skippedSeen = [];
+  if (coverage && sides.target) {
+    for (const name of coverage.unchanged) {
+      const b = sides.base.resolve(name);
+      const t = sides.target.resolve(name);
+      if (!b || !t) { untouchedFailed.push({ name, problems: ['基线或产物解析不出来'] }); continue; }
+      const eq = b.buf.equals(t.buf);
+      if (skipSet.has(name.toUpperCase())) { skippedSeen.push({ name, differs: !eq }); continue; }
+      if (!eq) {
+        untouchedFailed.push({
+          name,
+          problems: [`patch 里没有它，但产物与基线**不同**（基线 ${b.buf.length} B / 产物 ${t.buf.length} B）⇒ 漏改了`],
+        });
+      }
+    }
+    process.stdout.write(
+      `\n无条目复核   ${coverage.unchanged.length - untouchedFailed.length - skippedSeen.length}/${coverage.unchanged.length - skippedSeen.length} 个"无变更"脚本确实与基线逐字节相同\n`,
+    );
+    for (const a of skippedSeen) {
+      process.stdout.write(`--skip 复核   ${a.name}：产物与基线不同（${a.differs ? '是' : '⚠ 否'}）—— 按调用方的 --skip 跳过\n`);
+    }
+  }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   process.stdout.write(`\n核对完成     ${names.length - failed.length}/${names.length} 通过 · 失败 ${failed.length} · 用时 ${secs}s\n`);
   for (const f of failed.slice(0, 30)) {
@@ -363,8 +415,12 @@ function cmdVerify(args) {
     for (const q of f.problems) process.stdout.write(`   - ${q}\n`);
   }
   if (failed.length > 30) process.stdout.write(`… 还有 ${failed.length - 30} 条失败未列出\n`);
-  const covBad = coverage ? coverage.notInPatch.length + coverage.notOfficial.length : 0;
-  return failed.length || covBad ? 1 : 0;
+  for (const f of untouchedFailed) {
+    process.stdout.write(`✖ ${f.name}（无条目）\n`);
+    for (const q of f.problems) process.stdout.write(`   - ${q}\n`);
+  }
+  const covBad = coverage ? coverage.notInRange.length : 0;
+  return failed.length || untouchedFailed.length || covBad ? 1 : 0;
 }
 
 // ─────────────────────────────────────────────────────────── view
@@ -378,10 +434,10 @@ function cmdView(args) {
     process.stderr.write(`✖ 结构不变量不过（先修它）：\n  - ${structural.join('\n  - ')}\n`);
     return 1;
   }
-  const { mapper } = mapperContext();
+  const ctx = mapperContext();
   const sides = openSides({ baseDir: args.base ?? undefined, targetDir: null });
   const all = Object.keys(doc.scripts).sort();
-  const names = pickNames(args.names, all, args.limit);
+  const names = args.names.length ? args.names : pickNames([], all, args.limit);
   const kinds = args.kind === 'both' ? ['data', 'src'] : [args.kind];
   const outRoot = args.out ?? path.join(REPO_ROOT, 'dist', 'views');
 
@@ -401,7 +457,9 @@ function cmdView(args) {
       if (!hit) { process.stderr.write(`✖ ${name}：基线无法解析\n`); return 1; }
       let view;
       try {
-        view = buildView(kind, hit.buf, doc.scripts[name], { lineToBin: mapper.lineToBin });
+        // 没有条目的脚本 = 没有变更 ⇒ 用空叠加层（`src` 视图于是等于 `data` 视图）
+        const entry = doc.scripts[name] ?? NO_OPS_ENTRY(hit.buf);
+        view = buildView(kind, hit.buf, entry, { lineToBin: ctx.mapper.lineToBin });
       } catch (err) {
         process.stderr.write(`✖ ${name}（${kind}）：${err.message}\n`);
         return 1;
@@ -438,9 +496,13 @@ function cmdEdit(args) {
   }
   const ctx = mapperContext();
   const sides = openSides({ baseDir: args.base ?? undefined, targetDir: null });
-  const all = Object.keys(doc.scripts).sort();
-  const names = args.names.length ? pickNames(args.names, all, null) : all;
   const dir = args.out ?? path.join(REPO_ROOT, 'dist', 'views', 'src');
+  // ★ 默认扫**视图目录**：人能改的只有那里的文件（没有条目的脚本也在其中 ⇒ 给它建第一条 patch）
+  const names = args.names.length
+    ? args.names
+    : fs.existsSync(dir)
+      ? fs.readdirSync(dir).filter((f) => /\.BIN\.txt$/i.test(f)).map((f) => f.replace(/\.txt$/i, '')).sort()
+      : Object.keys(doc.scripts).sort();
 
   const changed = [];
   const failures = [];
@@ -450,19 +512,26 @@ function cmdEdit(args) {
     const edited = fs.readFileSync(file, 'utf8');
     const hit = sides.base.resolve(name);
     if (!hit) { failures.push(`${name}: 基线无法解析`); continue; }
+    const before = doc.scripts[name]?.ops.length ?? 0;
     let current;
     try {
-      current = buildView('src', hit.buf, doc.scripts[name], { lineToBin: ctx.mapper.lineToBin }).text;
+      current = buildView('src', hit.buf, doc.scripts[name] ?? NO_OPS_ENTRY(hit.buf), { lineToBin: ctx.mapper.lineToBin }).text;
     } catch (err) {
       failures.push(`${name}: 当前视图算不出来 —— ${err.message}`);
       continue;
     }
     if (edited === current) continue; // 没改过
-    const before = doc.scripts[name].ops.length;
     try {
       const { entry } = entryFromView(hit.buf, edited, ctx);
       const after = entry.ops.length;
-      doc.scripts[name] = { baseSha: entry.baseSha, resultSha: entry.resultSha, ops: entry.ops };
+      // ★ 逐字段构造**必须带上可选的 `header`**：`extractEntry` 的返回值里它是可选的，
+    //   漏掉它会让"提取时自证通过、落盘后 verify 失败"（实测 `$1$IMINIT.BIN` 就踩了这一脚）。
+    doc.scripts[name] = {
+      baseSha: entry.baseSha,
+      resultSha: entry.resultSha,
+      ...(entry.header ? { header: entry.header } : {}),
+      ops: entry.ops,
+    };
       changed.push(`${name}：操作 ${before} → ${after}（降级 ${entry.stats.forcedReplace} · 局部 label ${entry.stats.localLabels}）`);
     } catch (err) {
       failures.push(`${name}: ${err.message}`);
@@ -470,7 +539,7 @@ function cmdEdit(args) {
   }
 
   process.stdout.write(`视图来源     ${dir}\n`);
-  process.stdout.write(`扫描         ${names.length} 个脚本（只处理**与当前重建结果不同**的那些）\n`);
+  process.stdout.write(`扫描         ${names.length} 个视图文件（只处理**与当前重建结果不同**的那些）\n`);
   if (!changed.length && !failures.length) {
     process.stdout.write('\n没有发现改动 ⇒ 什么都不写。\n');
     return 0;

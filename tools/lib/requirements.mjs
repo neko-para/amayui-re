@@ -102,7 +102,7 @@ export const OPERATIONS = [
   { name: 'plan', argv: ['--plan'], mutates: false, summary: '★ 进度视图（唯一的进度真源）：按树打印 + 聚合状态' },
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '跑全部不变量（红/绿 + 逐条详情）—— 全仓门禁' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 不变量 / 预算 / 操作' },
-  { name: 'serve', argv: ['--serve'], mutates: false, summary: '起本地只读网页（总览 + 详情）：`--port 7788`；`apps/requirements/` 是那个项目' },
+  { name: 'serve', argv: ['--serve'], mutates: false, summary: '起本地只读网页（需求 + AGE 脚本）：`--port 7788`；`apps/workbench/` 是那个项目' },
   { name: 'add', argv: ['--add'], mutates: true, summary: '加节点：`--title <标题> [--type req] [--parent <id>] [--body <文件>] [--order n] [--tags a,b]` [--write]' },
   { name: 'set', argv: ['--set'], mutates: true, summary: '改节点：`<id> [--status …] [--verify …] [--parent …] [--title …] [--body <文件>] …` [--write]' },
 ];

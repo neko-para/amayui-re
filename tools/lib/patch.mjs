@@ -45,7 +45,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { assemble, disassemble } from '../../packages/age-format/src/asm/index.mjs';
-import { openRoot } from './bin-source.mjs';
+import { isAgeScript, isBinName, openRoot } from './bin-source.mjs';
 import { DEFAULT_SUBS, dictSha, loadDict, makeMapper } from './cn-jp.mjs';
 import { sha256buf } from './fsx.mjs';
 import { loadManifest } from './manifest.mjs';
@@ -56,10 +56,20 @@ export { DEFAULT_SUBS, REPO_ROOT };
 export const DEFAULT_PATCH = path.join(REPO_ROOT, 'data', 'translations', 'patch.json');
 
 /**
- * **"官方集"口径**：旧仓翻译管线真正处理过的脚本（`SC*` / `SP*`，含资料片的 `$N$` 前缀）。
- * 它是**迁移口径**（不是引擎事实）⇒ 只在这里写一次，供提取与将来的视图生成共用。
+ * **`SPEAKER_FILTER`** —— 旧仓 `scripts/annotate-speaker.js` 挑文件用的那个正则
+ * （`/^(SC|SP)/ || /^\$\d+\$(SC|SP)/`）。
+ *
+ * ★ **它不是 patch 的范围，也不是"一类脚本"。** 它只是**"说话人标注"这个任务**要处理哪些文件的口径。
+ *   用户口径（**不是**我从二进制推的结论）：有人说话的剧情来自 `SC`/`SP`；`SN` 是序言（纯旁白）、
+ *   `SG` 是系统文案（UI 那部分）、其余多为物品名称之类 —— 所以只有 `SC`/`SP` 需要标说话人。
+ *   ⇒ 这两类的"特殊性"完全来自**那个任务**，不构成脚本分类。
+ *
+ * ★ 曾经我把它当成"翻译管线处理过的脚本集合"并叫它「官方集」——**那是错的**：
+ *   实测旧仓 `src/` 有 **941** 个文本（全部脚本），其中**非 SC/SP 的 247 支同样有译文**
+ *   （产物与基线不同，且文本里有简体字）。⇒ patch 的范围 = **产物与基线不同的全部脚本**，
+ *   与这个正则**无关**。这里留着它，只为给页面打一个"说话人标注过"的标签。
  */
-export const OFFICIAL_FILTER = /^(\$\d+\$)?(SC|SP)/i;
+export const SPEAKER_FILTER = /^(\$\d+\$)?(SC|SP)/i;
 
 /** label 引用的形态：`label_` + 8 位十六进制（`labelHex` 定长补零） */
 const LABEL_RE = /label_[0-9a-f]{8}/g;
@@ -106,8 +116,8 @@ export const OPERATIONS = [
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 枚举 / 不变量（含谁在守）/ 操作' },
   { name: 'status', argv: ['--status'], mutates: false, summary: '规模与分布：脚本数 / 操作数 / 体积 / 基线解析来源' },
   { name: 'baseline', argv: ['--baseline'], mutates: false, summary: '某个脚本（或全部）的**基线与产物**从哪来：`[<脚本名>…]`' },
-  { name: 'extract', argv: ['--extract'], mutates: true, summary: '从旧仓产物提取 patch（**迁移期一次性**）：`[--base <目录>] [--target <目录>] [--name <脚本>] [--limit <n>] [--write]`' },
-  { name: 'verify', argv: ['--verify'], mutates: false, summary: '判据：基线 + patch ⇒ **逐字节**相同（有产物根就比产物，否则比 resultSha）`[--target <目录>] [--name <脚本>]' },
+  { name: 'extract', argv: ['--extract'], mutates: true, summary: '从旧仓产物提取 patch（**迁移期一次性**）：`[--base <目录>] [--target <目录>] [--name <脚本>] [--skip <脚本>] [--limit <n>] [--write]`' },
+  { name: 'verify', argv: ['--verify'], mutates: false, summary: '判据：基线 + patch ⇒ **逐字节**相同（**缺省自证 resultSha**；`--target <目录>` 才与产物比对）`[--name <脚本>]' },
   { name: 'view', argv: ['--view'], mutates: true, summary: '生成 `data` / `src` **视图**（生成物，不入库）：`[--kind data|src|both] [--name <脚本>] [--limit n] [--out <目录>] [--stdout] [--bin]`' },
   { name: 'edit', argv: ['--edit'], mutates: true, summary: '**改过的 `src` 视图 ⇒ 反解回 patch**（只碰与当前重建结果不同的那些）：`[--name <脚本>] [--out <视图目录>] [--write]`' },
 ];
@@ -120,7 +130,8 @@ const FIELD_DOC = [
   ['scripts', '✅', '对象：脚本名 → 条目', '键是 BIN 文件名（含 `$N$` 前缀），全大写比较友好但**按原样存**'],
   ['scripts[].baseSha', '✅', '64 位 hex', '该脚本**基线** BIN 的 sha256（防错误 apply；变即冲突）'],
   ['scripts[].resultSha', '✅', '64 位 hex', '该脚本**产物** BIN 的 sha256（判据的证人；由 extract 写、verify 只读）'],
-  ['scripts[].ops', '✅', '数组（可为空）', '空数组 = "这个官方集脚本**没有变更**"（不是漏了）'],
+  ['scripts[].header', '⬜', '4 个 string', '反汇编的头部 4 行。**只在产物与基线不同时出现**（实测 `$1$IMINIT.BIN` 的 `local_vars` 就变了）；重放时用它替掉基线的头部'],
+  ['scripts[].ops', '✅', '数组（可为空）', '空数组合法（手写 / 分片场景），但**提取器不会产出空条目**：没有变更的脚本就没有条目'],
   ['ops[].op', '✅', '`replace-line` \\| `delete` \\| `insert-after`', '操作类型'],
   ['ops[].i', '✅', '整数 ≥ -1', '**基线行序**（`-1` 只对 `insert-after` 有意义 = 插在最前）'],
   ['ops[].sha8', '条件', '8 位 hex', '`replace-line` / `delete` 必填：基线第 `i` 行的内容摘要'],
@@ -139,10 +150,14 @@ const INVARIANTS = [
     '`replay()` 打 patch 时逐条边界检查（越界即抛，不静默截断）'],
   ['`sha8` 必须与基线第 `i` 行的内容**对得上**（基线一换 ⇒ 报冲突，不静默改写）',
     '`replay()` 的正文校验'],
+  ['头部 4 行只在条目的 `header` 出现时才用它（且必须是 4 个字符串）；否则一律取基线的头部',
+    '`structuralProblems()` + `replay()`'],
   ['**label 指向也要对得上**：匹配上的行若"值相同但 label 指的地方变了"（遮蔽地址之后长得一样），提取时**降级成 `replace-line`**；重建时 `def` 里的符号**不许重复定义**',
     '`extractEntry()` 的 `matchIsFaithful()` + `replay()` 的 `emitDefs()`'],
-  ['`scripts` 的键是**官方集**（口径 `OFFICIAL_FILTER`）：`SC*` / `SP*` 含 `$N$` 前缀',
-    '`--verify`（逐条核口径）+ `extract`'],
+  ['`scripts` 的键是 `.BIN` 名字，范围 = **基线根里全部能反汇编的 AGE 脚本**（不是"官方集"、也不按名字过滤）',
+    '`--verify`（patch 的键必须是该范围的子集；不在范围里的键即报错）'],
+  ['**没有变更的脚本不进 patch**（空 patch 不建条目）⇒ "一共有多少脚本 / 其中多少有译文"不能从 patch 反推',
+    "`--verify` 的「无条目复核」：range 里没条目的那些，逐支断言**产物与基线逐字节相同**（少了这条，漏提取就会静默）"],
   ['`subsSha` 与当前字典一致（不一致 ⇒ 重建结果可能与 resultSha 不符）',
     '`--verify` 报出（不阻断：换字典的后果要显式看见）'],
   ['`resultSha` **只由 extract 写、verify 只读**（否则就是自证循环）',
@@ -375,14 +390,10 @@ export function extractEntry(baseBuf, tgtBuf, mapper) {
   const B = rowsOf(disassemble(baseBuf));
   const T = rowsOf(disassemble(tgtBuf));
 
-  const hb = B.header.join('\n');
-  const ht = T.header.join('\n');
-  if (hb !== ht) {
-    throw new Error(
-      '基线与产物的反汇编头部 4 行不同 ⇒ 行序锚定空间不成立（本方案的锚只覆盖指令行）。\n' +
-        `  基线：${JSON.stringify(hb)}\n  产物：${JSON.stringify(ht)}`,
-    );
-  }
+  // ★ 头部 4 行**通常**相同（实测 941 支里 940 支如此），但它**可以**变：
+  //   `$1$IMINIT.BIN` 的 `local_vars` 就从 `{ 3 1 1 2 1 1 }` 变成了 `{ 1 1 1 1 1 1 }`。
+  //   ⇒ 不同时**不要抛**，把整块头部带进 patch（`header`），重放时用它替掉基线的那 4 行。
+  const headerChanged = B.header.join('\n') === T.header.join('\n') ? null : T.header;
 
   const { ops: rawOps, align } = diffRows(B.masked, T.masked);
   const reverse = new Map(); // 基线行序 → 产物行序（只为"降级成 replace-line"时取载荷）
@@ -481,6 +492,7 @@ export function extractEntry(baseBuf, tgtBuf, mapper) {
   return {
     baseSha: sha256buf(baseBuf),
     resultSha: sha256buf(tgtBuf),
+    ...(headerChanged ? { header: headerChanged } : {}),
     ops,
     stats: { baseRows: B.raw.length, resultRows: T.raw.length, ...stats },
   };
@@ -499,9 +511,11 @@ export function extractEntry(baseBuf, tgtBuf, mapper) {
  * @returns {{text:string, rows:number, applied:object}}
  */
 export function replay(baseText, ops, opts = {}) {
-  const { lineToBin = (l) => l, verifySha = true } = opts;
+  const { lineToBin = (l) => l, verifySha = true, header } = opts;
   const B = rowsOf(baseText);
   const n = B.raw.length;
+  // 头部**通常**取基线的；条目带了 `header`（产物那 4 行与基线不同）时用它
+  const headerLines = header ?? B.header;
 
   const byI = new Map();
   const dropped = new Set();
@@ -553,15 +567,26 @@ export function replay(baseText, ops, opts = {}) {
   for (const id of B.defsBefore[n]) out.push(symOf(id));
   if (dropped.size) applied.delete = dropped.size;
 
-  return { text: `${B.header.join('\n')}\n\n${out.join('\n')}\n`, rows: out.length, applied };
+  return { text: `${headerLines.join('\n')}\n\n${out.join('\n')}\n`, rows: out.length, applied, header: headerLines };
 }
 
 /** 基线 BIN + 条目 ⇒ 重建出来的 BIN（判据的机械版） */
 export function rebuildBin(baseBuf, entry, opts = {}) {
   const baseText = disassemble(baseBuf);
-  const { text } = replay(baseText, entry.ops, opts);
+  const { text } = replay(baseText, entry.ops, { header: entry.header, ...opts });
   return assemble(text);
 }
+
+/**
+ * **没有条目的脚本 = 它没有变更**（提取器不为空 patch 建条目）。
+ * 视图侧拿它当"空叠加层"用：`src` 视图于是等于 `data` 视图。
+ * ★ 它只是**调用方**的便利构造，不会被写进 patch —— 空 ops 的条目不再入库。
+ */
+export const NO_OPS_ENTRY = (baseBuf) => ({
+  baseSha: sha256buf(baseBuf),
+  resultSha: sha256buf(baseBuf),
+  ops: [],
+});
 
 /**
  * 视图文本 → **汇编能吃**的文本（把字符串里的中文落成 BIN 写法），头部 4 行原样。
@@ -631,12 +656,12 @@ export function buildView(kind, baseBuf, entry, opts = {}) {
   const baseText = disassemble(baseBuf);
   if (kind === 'data') return { text: baseText, bin: baseBuf, stats: { rows: 0, stringSubstitutions: 0 } };
 
-  const { text: replayed } = replay(baseText, entry.ops, opts);
+  const { text: replayed } = replay(baseText, entry.ops, { header: entry.header, ...opts });
   const bin = assemble(replayed);
   const direct = disassemble(bin);
   // ★ 载荷里存的是**中文**，而"汇编用的那份文本"已经被映射成 BIN 写法（占位字）——
   //   要拿到中文就得再重放一次（这次不做映射）。两次重放的行结构必然一致（只有字符串不同）。
-  const display = rowsOf(replay(baseText, entry.ops, { ...opts, lineToBin: (l) => l }).text).raw;
+  const display = rowsOf(replay(baseText, entry.ops, { header: entry.header, ...opts, lineToBin: (l) => l }).text).raw;
   const R = rowsOf(replayed);
   const D = rowsOf(direct);
   if (R.raw.length !== D.raw.length || display.length !== D.raw.length) {
@@ -732,6 +757,7 @@ export function canonicalPatch(doc) {
     scripts[name] = {
       baseSha: e.baseSha,
       resultSha: e.resultSha,
+      ...(e.header ? { header: e.header } : {}),
       ops: (e.ops ?? []).map((o) => {
         const out = {};
         for (const k of OP_KEYS[o.op] ?? Object.keys(o)) if (k in o) out[k] = o[k];
@@ -770,6 +796,7 @@ export function serializePatch(doc) {
     L.push(`  ${JSON.stringify(name)}: {`);
     L.push(`   "baseSha": ${JSON.stringify(e.baseSha)},`);
     L.push(`   "resultSha": ${JSON.stringify(e.resultSha)},`);
+    if (e.header) L.push(`   "header": ${JSON.stringify(e.header)},`);
     if (e.ops.length === 0) L.push('   "ops": []');
     else {
       L.push('   "ops": [');
@@ -796,11 +823,14 @@ export function structuralProblems(doc) {
   }
   for (const [name, e] of Object.entries(doc.scripts)) {
     const at = `scripts["${name}"]`;
-    if (!OFFICIAL_FILTER.test(name) || !/\.BIN$/i.test(name)) {
-      bad.push(`${at}: 不在官方集口径内（${OFFICIAL_FILTER}）或不是 .BIN`);
-    }
+    if (!isBinName(name)) bad.push(`${at}: 键必须是 .BIN 名字`);
     if (!HEX64.test(e?.baseSha ?? '')) bad.push(`${at}: baseSha 必须是 64 位小写 hex`);
     if (!HEX64.test(e?.resultSha ?? '')) bad.push(`${at}: resultSha 必须是 64 位小写 hex`);
+    if ('header' in (e ?? {})) {
+      if (!Array.isArray(e.header) || e.header.length !== 4 || !e.header.every((l) => typeof l === 'string')) {
+        bad.push(`${at}: header 必须是 4 个字符串（反汇编的头部 4 行）；只在**与基线不同**时才该出现`);
+      }
+    }
     if (!Array.isArray(e?.ops)) { bad.push(`${at}: ops 必须是数组`); continue; }
     let last = -2;
     let prevNonInsertI = -2;
@@ -882,13 +912,34 @@ export function defaultTargetDir(manifest) {
 }
 
 /**
- * 官方集名单（**只从产物根推** ⇒ 不需要 `raw-parts`）。去重、按名排序。
+ * 官方**标注**集名单（只用于打标签，**不是** patch 的范围）。去重、按名排序。
  * @param {ReturnType<typeof openRoot>} root
  */
-export function officialNames(root) {
+export function annotatedNames(root) {
   const out = [];
-  for (const n of root.names()) if (OFFICIAL_FILTER.test(n) && /\.BIN$/i.test(n)) out.push(n);
+  for (const n of root.names()) if (SPEAKER_FILTER.test(n) && isBinName(n)) out.push(n);
   return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * **patch 的范围**：基线根里全部**能反汇编的 AGE 脚本**（不是"官方集"，也不是"有译文的那些"）。
+ *
+ * ★ 为什么用这个范围而不是按名字筛：译文的存在与否**只能由"产物 ≠ 基线"判定**；
+ *   任何名字过滤都会**静默漏掉真译文**（实测就是这样漏掉了 247 支）。
+ *   所以这里给出**全部**脚本，交给 `extract` 用"有没有产生 op"来判——没有变更的脚本自然不会进 patch。
+ * @param {ReturnType<typeof openRoot>} root
+ */
+export function allScriptNames(root) {
+  const out = [];
+  const nonScript = [];
+  for (const n of root.names()) {
+    if (!isBinName(n)) continue;
+    const hit = root.resolve(n);
+    if (!hit) continue;
+    if (isAgeScript(hit.buf)) out.push(n);
+    else nonScript.push(n);
+  }
+  return { names: out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)), nonScript: nonScript.sort() };
 }
 
 /**
@@ -975,16 +1026,18 @@ export function describe() {
       schemaVersion: 1,
       _doc: '由本工具拥有（写盘时自动注入指向本自描述的指针）',
       subsSha: '简→日写法字典的指纹（构建的一环：换字典 ⇒ 重建结果会变）',
-      scripts: '见下方字段表；★ 收录**全部官方集脚本**（空 ops 表示"没有变更"）',
+      scripts: '见下方字段表；★ **只收录有变更的脚本** —— 没有变更的脚本**不进 patch**（"没改"不需要记录）',
     },
     fields: FIELD_DOC.map(([name, req, type, desc]) => ({ name, req, type, desc })),
     invariants: INVARIANTS.map(([text, enforcedBy], i) => ({ id: i + 1, text, enforcedBy })),
     operations: OPERATIONS,
-    officialSet: {
-      filter: String(OFFICIAL_FILTER),
+    annotatedSet: {
+      filter: String(SPEAKER_FILTER),
       note:
-        '官方集**只从产物根推**（旧仓 `install/` 的散装 + ALF 目录）⇒ 不需要 `raw-parts/`。' +
-        '实测：散装 209 + ALF 补 14 = 223；其中 16 个两侧逐字节相同（INIT/JUMP 类）。数字由 `--status` 现算，不手抄。',
+        '★ **这不是 patch 的范围**：它是旧仓 `scripts/annotate-speaker.js` 挑文件用的正则，' +
+        '含义只有"旧管线给这批做过**页 / 说话人标注**"。实测旧仓 `src/` 有 941 个文本（全部脚本），' +
+        '其中**非 SC/SP 的也有译文** ⇒ 曾经的「官方集 = 有译文的脚本」是错的，patch 因此漏过 247 支。' +
+        '现在 patch 的范围 = 基线根里全部能反汇编的脚本，有变更才进 patch；这个正则只用来打标签。',
     },
     canonicalForm: {
       indent: '每层 1 个空格',
@@ -994,7 +1047,8 @@ export function describe() {
       invariant: '「盘上字节 == `serializePatch(解析出来的文档)`」由 `canonicalFormProblems()` 判；成立 ⇒ 重跑必得同字节、diff 里出现的每一行都是真改动',
     },
     writePath:
-      '只有本工具（唯一写入口），且**只有 `extract` 会写**；缺省 dry-run，--write 才落盘；写后回读复验，不绿回滚。' +
+      '唯一写入口是本工具，且只有两条写路径：`extract`（从旧仓产物重取）与 `edit`（把改过的 `src` 视图反解回来）；' +
+      '两者都缺省 dry-run，--write 才落盘；写后回读复验，不绿回滚。' +
       '`verify` 只读不写 —— `resultSha` 若能在 verify 里被改写，判据就变成自证循环。**不要手改 JSON**。',
   };
 }
@@ -1014,9 +1068,10 @@ export function describeText(d = describe()) {
   L.push('|---|---|---|---|');
   for (const f of d.fields) L.push(`| \`${f.name}\` | ${f.req} | ${f.type} | ${f.desc} |`);
   L.push('');
-  L.push(`## 官方集（\`scripts\` 的键从哪来）`);
-  L.push(`口径：\`${d.officialSet.filter}\``);
-  L.push(d.officialSet.note);
+  L.push(`## 范围与标签（\`scripts\` 的键从哪来）`);
+  L.push(`**范围**：基线根里全部能反汇编的 AGE 脚本；**有变更才进 patch**（没变更的不进）。`);
+  L.push(`**标签** \`annotated\`：\`SPEAKER_FILTER\`（说话人标注的口径 ${d.annotatedSet.filter}）—— 只表示"做过说话人标注"，**不是一类脚本**。`);
+  L.push(d.annotatedSet.note);
   L.push('');
   L.push('## 规范形态（顺序是它的一部分）');
   for (const [k, v] of Object.entries(d.canonicalForm)) L.push(`* ${k}：${v}`);
