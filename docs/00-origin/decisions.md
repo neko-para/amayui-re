@@ -91,9 +91,15 @@
    真源：**进度与"还要做什么" = `pnpm tools requirements plan`（需求树 `data/requirements/`）**；
    入库进度 = 清单的 `storage`/`dest`；条目与去向 = `pnpm tools corpus list`；
    语料保真 = `pnpm tools disasm verify`；旧仓数字 = `pnpm tools old-repo inventory`；变更历史 = `git log`。
-   **不开 CHANGELOG / 进度表**。例外**只有一处**：**生成物**（脚本产出 + 文件头写明"别手改"）。
+   **不开内部变更记录 / 进度表**。例外**有两处**：
+   ① **生成物**（脚本产出 + 文件头写明"别手改"，范例 `old-repo-inventory.md`）；
+   ② **面向用户的发行文本**（`release/CHANGELOG.md` · `release/安装说明.md`）——
+   它们是**产品的一部分**（随补丁包发给玩家），与"内部沿革只有 `git log`"是两件事。
+   ★ 这条②判过一次**改判**：批 M1b 曾以"CHANGELOG 是手写状态而 `git log` 已足够"为由把 `CHANGELOG.md`
+   连产物一起跳过；2026-10-03 用户口径推翻该理由（原结论在 M1b 节点里**保留可见**，未静默改写）。
+   规格真源 = `release/README.md` §4；工作项 = `REQ-01M40RP2BN9S86K6SGEW671PYA`。
    ★ 进度原先是根目录一份手写的批次表（`PLAN.md`），现已被**需求树**取代并删除；
-   因此本仓不再有"唯一允许手写状态的文件"这条例外。
+   因此本仓没有"唯一允许手写状态的文件"，两处例外**也都不是进度表**。
 2. **结构化数据不进散文**：文件清单 / 用途 / 定位 / mtime / 哈希**只留一份结构化真源**，README 不列表、不抄数。
    ★ 确实需要两处都出现时 ⇒ **先问"能不能只留一处"**；真需要就**钉住**（测试断言两处一致）。
    ❌ 不加"不许出现某字符串"这类脆弱守卫 —— 守卫要**红得有意义**。
@@ -141,8 +147,11 @@
 | ASM 指令集表（`opcodes.json`）的身份与改法 | `packages/age-format/src/asm/opcodes.md` |
 | UI 图片与字体：落点、版本表、7z 解压产物不入库 | `corpus/README.md` §1、`corpus/assets/ui-images/versions.md`、`pnpm tools corpus describe` |
 | 简→日写法占位字典（cp932 编码方案的一半） | `data/translations/README.md`、`data/translations/subs-cn-jp.md` |
-| 翻译域：现状、双份 vs 单份待定、`install/` 先保留 | `docs/01-translation/README.md` |
+| 翻译域：现状、数据模型（patch 叠加层）、**旧仓翻译文档快照 `ref/` 的地位与"先核实"口径** | `docs/01-translation/README.md` |
 | **翻译 patch 方案**：真源 = 叠加层，`data`/`src` 都是视图；锚定规则与支撑观测 | `docs/01-translation/patch-design.md` + `pnpm tools patch describe` + `pnpm tools requirements show 8SNRXKV` |
+| **翻译参考资产（只读快照）**：`assets/`（还能用的语言资产）vs `archive/`（历史工作单）的二分判据、来源、映射规则、为什么翻译资产可整棵迁而引擎知识不行 | `docs/01-translation/ref/README.md` + `tools/test/translation-ref.test.mjs` |
+| **发行（给玩家那一包）**：落点、包里每件的真源、CHANGELOG 规格、**三处缺口**（AGF 烘焙 / AGERC 链 / 打包动作）、有意不迁的件 | `release/README.md` + `pnpm tools requirements show 0RP2BN9S86K6SGEW671PYA` |
+| **翻译 / 更新译文的作业流程**（技能） | `.agents/skills/amayui-translate/SKILL.md`（+ `references/conventions.md` · `references/lookup.md`） |
 | 模拟器 / 探针域：按新结构重写、工具链、跨域守卫要拆回各域 | `docs/03-emulator/README.md`、`apps/*/README.md` |
 | **项目工作台（网页）**：需求 + AGE 脚本反汇编；Vue 3 + Vite + TS；服务端 `server.ts` 由 Node 原生 type stripping 直跑；正文 Markdown 渲染（`markdown-it`）+ 通用控件用 `naive-ui`；**唯一写端点** `POST /api/nodes`（建单，规则 = 模型的 `planAdd`，只在监听回环时开） | `apps/workbench/README.md` + `pnpm tools requirements show 1M3XWRXVB04WQ4J0MA6AXZY9D` |
 | agent 基建：技能固定路径、插件软链接注册、按重建处理 | `docs/04-agent/README.md`、`AGENTS.md` §7 |
@@ -166,3 +175,6 @@
 | 需求正文按 **Markdown 渲染**（`markdown-it`，`html: false`）；通用控件用 `naive-ui` | `apps/workbench/README.md`、`apps/workbench/src/markdown.ts` |
 | `raw/` 继续用**符号链接**引用（不 track） | `corpus/README.md` §3 |
 | 知识线（K1/K2/K3）**先不启动**；`callers/callees` 数据源缺失，先不做 | `knowledge-rebuild.md` |
+| **翻译文档按「只读快照 + 先核实再用」迁回**（旧仓 `docs/translate/**` + `docs/translation/README.md`），并按**还能不能用**二分：`ref/assets/**`（语言资产，**散文件**要能 rg）/ `ref/archive.zip`（历史工作单，**打包**只要内容还在）；引擎知识仍必须过准入门 | `docs/01-translation/README.md` §5、`ref/README.md`、`pnpm tools old-repo translate-ref` |
+| **CHANGELOG 与安装说明随包保留**（产品文本，不是内部变更记录）⇒ §6 的第②处例外；**发行目录叫 `release/` 不叫 `patch/`**（"patch" 已被变更叠加层占用） | `release/README.md`、`AGENTS.md` §10 |
+| 技能「不迁移、只重建」的**第一个实例**：`amayui-translate`（继承纯约定、丢弃旧工具绑定） | `docs/04-agent/README.md` §6、`.agents/skills/amayui-translate/SKILL.md` |

@@ -56,7 +56,7 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `requirements.mjs` | `requirements` | ★ `data/requirements/` 的进度视图 + 唯一编辑入口（需求/缺陷 + 父子树；见 `pnpm tools requirements describe`） |
 | `disasm-recode.mjs` | `disasm` | 反汇编语料的**无损转写**与保真断言（见 `pnpm tools disasm describe`） |
 | `patch.mjs` | `patch` | ★ 翻译 patch 的查询 / **提取（唯一写入口）** / 复验（见 `pnpm tools patch describe` 与 `tools/patch.md`） |
-| `old-repo-inventory.mjs` | `old-repo` | **重新实测旧仓**（只读）→ `docs/00-origin/old-repo-inventory.md` |
+| `old-repo-inventory.mjs` | `old-repo` | **只读旧仓**：重新实测 → `docs/00-origin/old-repo-inventory.md`；重建翻译参考快照 → `docs/01-translation/ref/`（资产散件 + `archive.zip`） |
 | `test/*.test.mjs` | —— | 基建契约测试（`node --test`） |
 
 ★ **每个自有的结构化数据文件都有一份同名说明书**（`assets.json` → `assets.md`、`samples.json` → `samples.md`）：
@@ -84,6 +84,7 @@ pnpm tools patch edit                        # ★ 改过 src 视图之后，反
 pnpm tools disasm build                     # 转写落盘 + 打确定性 zip（需要 .staging/ 里的原件）
 pnpm tools disasm restore                   # 由 zip 反解回投递原件（默认写回 .staging/）
 pnpm tools old-repo inventory               # 重测旧仓 → docs/00-origin/old-repo-inventory.md
+pnpm tools old-repo translate-ref           # 翻译参考快照对账（dry-run；--write 重建 assets/ + archive.zip）
 ```
 
 > ★ **两个环境口径**（都在代码里，不靠人记）：

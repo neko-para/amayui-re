@@ -22,7 +22,13 @@
 * **补丁产物（标题里那项）：旧仓 `patch/` 整个目录有意跳过** —— `AGF/`(10) `BIN/`(453) `AGERC.DLL`
   `CHANGELOG.md` `patch.config.json` `README-测试版说明.md` **既不入仓、也不在新仓台账登记**
   （`translation/patch` 只说明"为何弃置"）。理由：产物是容器层输出（M2 重建）、打包清单待
-  「翻译环境重建」重设计、CHANGELOG 是手写状态而 `-N` 序列 + 逐文件 git log 已足够。
+  「翻译环境重建」重设计。
+  ★ **其中一项已改判（2026-10-03，用户口径，原结论保留可见）**：`CHANGELOG.md` 与
+  `README-测试版说明.md` 是**随补丁包发给玩家的产品文本**，不是内部变更记录 ⇒ **必须保留**
+  （不能与"内部沿革只有 `git log`"混为一谈）。原理由的后半句"CHANGELOG 是手写状态而
+  `-N` 序列 + 逐文件 git log 已足够"**作废**；**产物**（`BIN/` `AGF/` `AGERC.DLL`）与
+  `patch.config.json` 的跳过**不变**（后者可由 `patch.json` 的键派生 ⇒ 存它就是第二真源）。
+  落点与规格见 `release/README.md`；工作项 = `REQ-01M40RP2BN9S86K6SGEW671PYA`。
 * `res/` 根下的 rc 系列（`AGERC.DLL.rc` / `MANIFEST2_1.txt` / `build-localized-agerc.ps1` /
   `inject-localized-agerc.rsh`）：走需求树 **「翻译环境重建」→「windows 资源重建」**。
 * 中间版本 PNG、WenQuanYi 字体、`raw-parts/*.idb`（63 MB，永不入库）、`raw-parts/*.AGF`。

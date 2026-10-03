@@ -30,7 +30,7 @@
 | `native` | DIR | 15 | 864 | 6.9 MiB | 否 |  |
 | `scripts` | DIR | 115 | 184 | 6.1 MiB | 否 |  |
 | `docs-new` | DIR | 123 | 123 | 6.1 MiB | 否 |  |
-| `plugins` | DIR | 47 | 648 | 5.1 MiB | 否 |  |
+| `plugins` | DIR | 47 | 648 | 5.2 MiB | 否 |  |
 | `cache` | DIR | 7 | 7 | 3.4 MiB | 否 |  |
 | `output` | DIR | 10 | 10 | 3.2 MiB | 否 |  |
 | `analysis` | DIR | 7 | 7 | 2.5 MiB | 否 |  |

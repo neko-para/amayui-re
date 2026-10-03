@@ -109,7 +109,7 @@ pnpm test                       # 守卫测试（单进程跑，见下）
 
 | | 落点 | 注册方式 |
 |---|---|---|
-| **技能** | **`.agents/skills/<名字>/SKILL.md`** —— 路径**固定、不可改名/移位** | DSH 按该固定路径发现，**无需注册**。本仓该目录必须存在，但内容从零重写（M6） |
+| **技能** | **`.agents/skills/<名字>/SKILL.md`** —— 路径**固定、不可改名/移位** | DSH 按该固定路径发现，**无需注册**。内容从零重写（不抄旧仓）；**已重建第一个：`amayui-translate`** |
 | **DSH 插件** | `plugins/` 只是**源码落点**，位置自由 | 插件通过 DSH 的插件安装机制以**软链接**注册（环境级、要重装）。**确切命令留待 M6 重建第一个插件时补进本节**（标 `TBD-M6`，不凭记忆编） |
 
 ★ **不要为了迎合注册方式去扭曲仓库结构**：技能必须遵守固定路径，而插件位置自由。
@@ -126,7 +126,10 @@ pnpm test                       # 守卫测试（单进程跑，见下）
 
 * ❌ 把 `.sqlite` 提交进 git / ❌ 用 LFS 存 DB / ❌ 把 DB 当唯一存储 /
   ❌ 用 `sqlite3 .dump` 当文本真源 / ❌ 让 DB 参与写事务再"导出"成文本。
-* ❌ 把旧仓的知识文档"顺手"复制进 `docs/`；❌ 在 `data/ledger/` 里塞旧条目。
+* ❌ 把旧仓的**知识文档**"顺手"复制进 `docs/`；❌ 在 `data/ledger/` 里塞旧条目。
+  ★ **例外只有一处、且口径相反**：**翻译参考资产**（术语表 / 角色语气 / 剧情联动）按
+  **只读快照 + 显式"未复核"口径**迁进 `docs/01-translation/ref/`，并由守卫钉住字节保真 ——
+  理由（为什么它和引擎知识不同）见 `docs/01-translation/README.md` §5。引擎语义结论仍然只能走 §6 准入门。
 * ❌ 手工编辑 `corpus/assets.json` 的 `sha256` / 大小：**用 `pnpm tools corpus scan --write`**（那是唯一写入口）。
 * ❌ 在 `corpus/assets.json` 里写体积、入库件校验和、LFS oid、`status`、`generatedAt`：那些 git / LFS / 文件系统已经是权威。
 
@@ -139,10 +142,13 @@ pnpm test                       # 守卫测试（单进程跑，见下）
   入库进度看 `corpus/assets.json` 的 `storage`/`dest`（`deferred` → `lfs` 就是进度）·
   条目与去向 `pnpm tools corpus list` · 语料保真 `pnpm tools disasm verify` · 旧仓数字 `pnpm tools old-repo inventory` ·
   变更历史 `git log` / `git log -L`。
-* ❌ 不要开 CHANGELOG / 进度表 / "已完成"清单：**`git log` 就是变更记录**。
-* 例外**只有一处**：**生成物**（整篇都是状态，但由脚本生成 + 文件头写明"别手改"），范例 `docs/00-origin/old-repo-inventory.md`。
+* ❌ 不要开**内部**变更记录 / 进度表 / "已完成"清单：**`git log` 就是变更记录**。
+* 例外**有两处**：
+  ① **生成物**（整篇都是状态，但由脚本生成 + 文件头写明"别手改"），范例 `docs/00-origin/old-repo-inventory.md`；
+  ② **面向用户的发行文本** —— `release/CHANGELOG.md` 与 `release/安装说明.md`：它们是**产品的一部分**
+     （随补丁包发给玩家），不是内部沿革。规格的真源是 `release/README.md` §4（技能只引用、不复述）。
   ★ 进度**不在散文里**：它由需求树回答（`pnpm tools requirements plan`）——
-  所以本仓**没有**手写进度表，也没有"唯一允许手写状态的文件"这条例外。
+  所以本仓**没有**手写进度表；两处例外都不是进度表。
 * **结构化数据不进散文**：文件清单 / 用途 / 定位 / mtime / 哈希一律**只留一份结构化真源**，README **不列表、不抄数**。
 * **JSON 是不透明数据**：任何 JSON 的字段语义 / 枚举 / 不变量 / 操作**只看它的控制脚本的自描述**
   （`pnpm tools corpus describe`、`pnpm tools fixtures describe`），

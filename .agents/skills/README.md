@@ -3,13 +3,21 @@
 > ★ 这个目录**必须存在**、且**必须叫这个名字**：DSH 按 `.agents/skills/<名字>/SKILL.md` 的固定路径发现技能。
 > 这不是风格问题，是**硬要求** —— 不要为了迎合别的注册方式去改名 / 移位 / 加一层中间目录。
 
-## 1. 本轮状态
+## 1. 现状
 
-**只有这份说明性 README，没有任何技能。**
+```text
+.agents/skills/
+  README.md              ← 本说明
+  amayui-translate/      ← 已重建的**第一个**技能（翻译 / 更新译文）
+```
 
 旧仓的 `.agents/skills/`（实测 **8** 个技能）**不迁移**：用户口径是"几乎所有技能与工具都需要重新适配"，
 因此全部按 `rebuild` 处理 —— 只留"重写时读得到旧实现"的指针
 （`corpus/assets.json` 的 `agent/skills`）。
+
+`amayui-translate` 是**重写**的范例：它按新模型（`pnpm tools patch view/edit/verify`）从零写，
+只把旧技能的**纯约定**继承下来（`references/conventions.md`），与旧仓工具 / 路径绑死的部分一律丢弃。
+它消费的参考资产是只读快照 `docs/01-translation/ref/`，并且强制"旧文档的结论先核实再用"。
 
 ## 2. 怎么写（M6 重建时）
 

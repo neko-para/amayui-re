@@ -36,6 +36,17 @@
 
 ## 5. 本轮明确不做
 
-* ❌ 不建任何技能（`.agents/skills/` 下**只有说明性 README**）；
 * ❌ 不迁任何插件源码（`plugins/` 下**只有说明性 README**）；
 * ❌ 不注册 / 安装任何东西。
+
+## 6. 已重建的第一个技能
+
+`.agents/skills/amayui-translate/` —— **翻译 / 更新译文**（批 M6 · agent 基建重建的第一件，
+提前于整批落地：它是翻译域数据模型（patch 叠加层）定案后的直接消费方）。
+
+* 它是**重写**，不是迁移：机制完全按新模型（`pnpm tools patch view/edit/verify`），
+  旧仓 `amayui-script-translate` / `amayui-script-update` 只作"当时怎么约定"的参照
+  （纯约定被继承进 `references/conventions.md`，与旧仓工具/路径绑死的部分**全部丢弃**）。
+* 技能消费的参考资产是 `docs/01-translation/ref/`（只读快照）—— 技能里写死了
+  「旧文档的结论与计数一律先核实再用」，见 `docs/01-translation/README.md` §5。
+* **其余技能仍按 `rebuild` 处理**：`.agents/skills/` 下除这一个之外不放内容，直到各自的前置稳定。
