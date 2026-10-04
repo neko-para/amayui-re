@@ -25,9 +25,11 @@ import { describe as describeSamples } from '../lib/samples.mjs';
  */
 const isEcosystem = (name) => name === 'package.json' || /^tsconfig[.-].*\.json$/.test(name) || name === 'tsconfig.json';
 /**
- * 不扫的目录：**本地派生区**（与 `.gitignore` 同一批理由 —— 它们本来就不入库，里面的 JSON 是工具自己的账本：
- * pnpm 的内容寻址库、npm 的缓存、临时区、生成物）。漏一个就会像这样红得莫名其妙：
+ * 不扫的目录：**本地派生区与工具目录**（与 `.gitignore` 同一批理由 —— 它们本来就不入库，
+ * 或者里面的 JSON 由别的工具拥有，不是本仓的结构化数据）。漏一个就会像这样红得莫名其妙：
  * `.pnpm-store/v10/index/*.json` 缺同名 `.md`。
+ * `.vscode` 属后者：里面的 `settings.json` 是**编辑器**的配置（本仓那份只做 `files.exclude`），
+ * 与 `package.json` 同类，不该被要求配说明书。
  */
 const SKIP_DIRS = new Set([
   '.git',
@@ -40,6 +42,7 @@ const SKIP_DIRS = new Set([
   'dist',
   'tmp',
   '.cache',
+  '.vscode',
 ]);
 
 /** 说明书必须覆盖的三件事（正是"只讲查询不讲编辑"的反面）；最后一项是"指向脚本自描述" */
