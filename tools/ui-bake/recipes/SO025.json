@@ -1,0 +1,480 @@
+{
+  "schemaVersion": 1,
+  "block": "SO025",
+  "blockId": 3,
+  "source": {
+    "kind": "loose",
+    "entry": 0,
+    "agf": "SO025.AGF"
+  },
+  "note": "1280×512。三段旧工作合并成一条链：① 菜单块 A(154×48 @418,71)+B(122×29 @421,122) → E2/E3（旧仓 `.tmp/ui-redraw/SO025/render1.html`）；② 6 个按钮（2 行 × 3 列，93×73，x=133/228/323，y=70/145，`top = y0 - 1`）→ E9 黑红混排（旧仓 `.tmp/so025_render.html`）。清理口径照旧仓：**只在左列两块上跑填充分解，再把左格的干净版整块复制给同排其余两格**（`op:\"template\"` 先复制原始左格 → 三格一致 → 再逐格列/行填充，等价于旧仓「复用清理底板」）。⚠ 生效版 SO025-2.png 的底图来自 **install 根裸件 overlay 变体**（见报告），本配方按 ALF 里的 AGF 取件。判据：与 corpus/assets/ui-images/SO025-2.png 逐像素相同。",
+  "clean": [
+    {
+      "op": "fill",
+      "box": {
+        "x0": 418,
+        "y0": 71,
+        "x1": 571,
+        "y1": 118
+      },
+      "keepL": 40,
+      "keepR": 40,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 458,
+      "_note": "菜单块 A（旧仓 `.tmp/ui-redraw/SO025/clean.py`：保留左右各 40px，中间 x=458..531 复制 x=458 列）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 421,
+        "y0": 122,
+        "x1": 542,
+        "y1": 150
+      },
+      "keepL": 23,
+      "keepR": 23,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 444,
+      "_note": "菜单块 B（保留左右各 23px，中间 x=444..519 复制 x=444 列）"
+    },
+    {
+      "op": "template",
+      "source": "<self>",
+      "from": {
+        "x0": 133,
+        "y0": 70,
+        "x1": 225,
+        "y1": 142
+      },
+      "at": [
+        {
+          "x": 228,
+          "y": 70
+        },
+        {
+          "x": 323,
+          "y": 70
+        }
+      ],
+      "_note": "上排：把左格 #3 整块（93×73）复制到 #4/#5 —— 旧仓「同排三格边框逐像素一致 ⇒ 右、中格直接复用左格清理底板」"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 133,
+        "y0": 70,
+        "x1": 225,
+        "y1": 142
+      },
+      "keepL": 15,
+      "keepR": 14,
+      "keepT": 19,
+      "keepB": 18,
+      "fillRow": 87,
+      "_note": "块 #3 行填充（旧仓 `.tmp/SO025-1_clean.json`）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 228,
+        "y0": 70,
+        "x1": 320,
+        "y1": 142
+      },
+      "keepL": 15,
+      "keepR": 14,
+      "keepT": 19,
+      "keepB": 18,
+      "fillRow": 87,
+      "_note": "块 #4（复制后与 #3 同像素 ⇒ 结果与旧仓复用底板一致）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 323,
+        "y0": 70,
+        "x1": 415,
+        "y1": 142
+      },
+      "keepL": 15,
+      "keepR": 14,
+      "keepT": 19,
+      "keepB": 18,
+      "fillRow": 87,
+      "_note": "块 #5"
+    },
+    {
+      "op": "template",
+      "source": "<self>",
+      "from": {
+        "x0": 133,
+        "y0": 145,
+        "x1": 225,
+        "y1": 217
+      },
+      "at": [
+        {
+          "x": 228,
+          "y": 145
+        },
+        {
+          "x": 323,
+          "y": 145
+        }
+      ],
+      "_note": "下排：左格 #24 → #25/#26"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 133,
+        "y0": 145,
+        "x1": 225,
+        "y1": 217
+      },
+      "keepL": 11,
+      "keepR": 10,
+      "keepT": 12,
+      "keepB": 14,
+      "fillCol": 214,
+      "_note": "块 #24 列填充（旧仓 `.tmp/SO025-1_clean.json`）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 228,
+        "y0": 145,
+        "x1": 320,
+        "y1": 217
+      },
+      "keepL": 11,
+      "keepR": 10,
+      "keepT": 12,
+      "keepB": 14,
+      "fillCol": 309,
+      "_note": "块 #25：同一相对列（214 + 95）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 323,
+        "y0": 145,
+        "x1": 415,
+        "y1": 217
+      },
+      "keepL": 11,
+      "keepR": 10,
+      "keepT": 12,
+      "keepB": 14,
+      "fillCol": 404,
+      "_note": "块 #26：同一相对列（214 + 190）"
+    }
+  ],
+  "text": {
+    "effect": "E8",
+    "compose": "canvas",
+    "fontSize": 20,
+    "letterSpacing": 1,
+    "layers": [
+      {
+        "text": "菜单",
+        "pos": {
+          "x": 418,
+          "y": 71
+        },
+        "lineHeight": 48,
+        "width": 154,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "菜单块 A = E2（旧仓 ui-redraw/SO025/render1.html #a .in）"
+      },
+      {
+        "text": "菜单",
+        "pos": {
+          "x": 421,
+          "y": 123
+        },
+        "lineHeight": 29,
+        "width": 122,
+        "role": "outline",
+        "z": 1,
+        "css": "-webkit-text-stroke:2px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);",
+        "_note": "菜单块 B = E3 外层（#b .out）"
+      },
+      {
+        "text": "菜单",
+        "pos": {
+          "x": 421,
+          "y": 123
+        },
+        "lineHeight": 29,
+        "width": 122,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "菜单块 B = E3 字身（#b .in；top 从 122 下移到 123）"
+      },
+      {
+        "text": [
+          {
+            "text": "城砦效果",
+            "css": "display:inline-block; transform:scaleX(0.75); transform-origin:50% 50%;"
+          }
+        ],
+        "pos": {
+          "x": 133,
+          "y": 70
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "outline",
+        "z": 1,
+        "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "上排列1 #3 外层。旧仓把 X 轴压缩 75% 写在最内层 <span class=\"s20 x75\"> 上（flex item ⇒ 宽度 fit-content、按自身中心缩放）；这里用「片段 span + inline-block + 同一 transform」复刻同一结构"
+      },
+      {
+        "text": [
+          {
+            "text": "城砦效果",
+            "css": "display:inline-block; transform:scaleX(0.75); transform-origin:50% 50%;"
+          }
+        ],
+        "pos": {
+          "x": 133,
+          "y": 70
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#FD480A; -webkit-text-stroke:0;",
+        "_note": "上排列1 #3 字身（红 .e6，无黑描边）"
+      },
+      {
+        "text": [
+          {
+            "text": "阿瓦罗\n",
+            "css": "color:#000; -webkit-text-stroke:0.5px #000;"
+          },
+          {
+            "text": "的",
+            "css": "font-size:18px; color:#000; -webkit-text-stroke:0.5px #000;"
+          },
+          {
+            "text": "工房",
+            "css": "color:#FD480A; -webkit-text-stroke:0;"
+          }
+        ],
+        "pos": {
+          "x": 228,
+          "y": 69
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "fill",
+        "z": 2,
+        "css": "-webkit-text-stroke:0; margin-top:13.5px; line-height:23px; white-space:pre;",
+        "_note": "上排列2 #4 字身：旧仓是 flex column + line-height:23px + justify-content:center 的两行排版（行距 23px、在 73px 盒内居中 ⇒ 首行顶 = y0-1+13.5）；这里用 white-space:pre + 换行 + margin-top:13.5px 复现同一几何"
+      },
+      {
+        "text": [
+          {
+            "text": "阿瓦罗\n"
+          },
+          {
+            "text": "的",
+            "css": "font-size:18px;"
+          },
+          {
+            "text": "工房"
+          }
+        ],
+        "pos": {
+          "x": 228,
+          "y": 69
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "outline",
+        "z": 1,
+        "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); margin-top:13.5px; line-height:23px; white-space:pre;",
+        "_note": "上排列2 #4 外层（整串白描边 + 阴影）"
+      },
+      {
+        "text": [
+          {
+            "text": "出",
+            "css": "font-size:18px; color:#000; -webkit-text-stroke:0.5px #000;"
+          },
+          {
+            "text": "城门",
+            "css": "color:#FD480A; -webkit-text-stroke:0;"
+          }
+        ],
+        "pos": {
+          "x": 323,
+          "y": 70
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0;",
+        "_note": "上排列3 #5 字身（出 = E5 上半 18px 黑、城门 = E6 20px 红）"
+      },
+      {
+        "text": [
+          {
+            "text": "出",
+            "css": "font-size:18px;"
+          },
+          {
+            "text": "城门"
+          }
+        ],
+        "pos": {
+          "x": 323,
+          "y": 70
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "outline",
+        "z": 1,
+        "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "上排列3 #5 外层"
+      },
+      {
+        "text": [
+          {
+            "text": "城砦效果",
+            "css": "display:inline-block; transform:scaleX(0.75); transform-origin:50% 50%;"
+          }
+        ],
+        "pos": {
+          "x": 133,
+          "y": 145
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "outline",
+        "z": 1,
+        "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);"
+      },
+      {
+        "text": [
+          {
+            "text": "城砦效果",
+            "css": "display:inline-block; transform:scaleX(0.75); transform-origin:50% 50%;"
+          }
+        ],
+        "pos": {
+          "x": 133,
+          "y": 145
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#FD480A; -webkit-text-stroke:0;",
+        "_note": "下排列1 #24 字身"
+      },
+      {
+        "text": [
+          {
+            "text": "阿瓦罗\n",
+            "css": "color:#000; -webkit-text-stroke:0.5px #000;"
+          },
+          {
+            "text": "的",
+            "css": "font-size:18px; color:#000; -webkit-text-stroke:0.5px #000;"
+          },
+          {
+            "text": "工房",
+            "css": "color:#FD480A; -webkit-text-stroke:0;"
+          }
+        ],
+        "pos": {
+          "x": 228,
+          "y": 144
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "fill",
+        "z": 2,
+        "css": "-webkit-text-stroke:0; margin-top:13.5px; line-height:23px; white-space:pre;",
+        "_note": "下排列2 #25 字身"
+      },
+      {
+        "text": [
+          {
+            "text": "阿瓦罗\n"
+          },
+          {
+            "text": "的",
+            "css": "font-size:18px;"
+          },
+          {
+            "text": "工房"
+          }
+        ],
+        "pos": {
+          "x": 228,
+          "y": 144
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "outline",
+        "z": 1,
+        "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); margin-top:13.5px; line-height:23px; white-space:pre;",
+        "_note": "下排列2 #25 外层"
+      },
+      {
+        "text": [
+          {
+            "text": "出",
+            "css": "font-size:18px; color:#000; -webkit-text-stroke:0.5px #000;"
+          },
+          {
+            "text": "城门",
+            "css": "color:#FD480A; -webkit-text-stroke:0;"
+          }
+        ],
+        "pos": {
+          "x": 323,
+          "y": 145
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0;",
+        "_note": "下排列3 #26 字身"
+      },
+      {
+        "text": [
+          {
+            "text": "出",
+            "css": "font-size:18px;"
+          },
+          {
+            "text": "城门"
+          }
+        ],
+        "pos": {
+          "x": 323,
+          "y": 145
+        },
+        "lineHeight": 73,
+        "width": 93,
+        "role": "outline",
+        "z": 1,
+        "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "下排列3 #26 外层"
+      }
+    ],
+    "_note": "层序：同一按钮内 outline(z1) 在下、fill(z2) 在上（旧仓 .out/.in 的 z-index 1/2）；渲染器按数组顺序写 DOM、z-index 显式给。CSS 逐字搬自旧仓 `.tmp/so025_render.html`。"
+  }
+}

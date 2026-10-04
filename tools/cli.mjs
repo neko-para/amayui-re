@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 域注册表：**只登记模块**；域 id / 数据 / 操作全部从模块自己的声明读 */
-const MODULES = ['./corpus.mjs', './fixtures.mjs', './requirements.mjs', './disasm-recode.mjs', './old-repo-inventory.mjs', './opcodes.mjs', './patch.mjs'];
+const MODULES = ['./corpus.mjs', './fixtures.mjs', './requirements.mjs', './disasm-recode.mjs', './old-repo-inventory.mjs', './opcodes.mjs', './patch.mjs', './ui-bake.mjs'];
 
 export async function loadDomains() {
   const out = [];

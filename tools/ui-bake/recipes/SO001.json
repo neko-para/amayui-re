@@ -1,0 +1,2002 @@
+{
+  "schemaVersion": 1,
+  "block": "SO001",
+  "blockId": 0,
+  "source": {
+    "kind": "alf",
+    "entry": 0,
+    "agf": "SO001.AGF"
+  },
+  "_doc": "1280×1792 ADV 窗口图集（槽 0x11）。四组文字：①中簇 15 按钮（5 行 × 3 列，格 77×78，x603/685/767，y795…1127；列1 三层=黑阴影+深棕描边+金渐变、列2 两层=深蓝描边+白青渐变、列3 两层=半透明黑渐变+半透明黑描边；22px bold，4 字 scaleX0.6 / 2·3 字 0.8；**文字盒** left=格x-8、top=格y+24、width 93、高 26）②右带上半 7×3（暖三层，格 78×45，x849/931/1013，y795…1089）③右带下半 7×3（青两层，y1285…1579）④「操作説明」面板 5×3（靛蓝，格 77×44，x330/420/510，y911…1111，16px bold，#8A8CFC + 2px 黑描边）。来源：旧仓 docs/images/SO001.md 与 .tmp/so001_render15.html、so001_2_render.html、so001_panel_render.html、so001_clean15.py。本文件由 .tmp/gen-so001.mjs 生成。",
+  "note": "★ 清理口径：中簇 15 块用拉普拉斯模板插值（与旧仓 so001_clean15.py 逐像素等价，已用 15 张旧块产物核过）；右带与面板用**块内空白钮**作模板覆盖（上半 (1013,893)、下半 (1013,1432)、面板 (330,1262)）。 ★ 已知残差（如实记录，别再花力气猜参数）：单条链重放与生效版差 128110 通道 / 47528 像素（最大差 252；约 2.1% 的像素有差），集中在四组文字的**抗锯齿边缘**与**底图散色**。两条已排除的路径：（a）**多段模型**：生效版 SO001-4 是旧仓分四段整画布截图叠出来的（-1 中簇 → -2 右带 → -3 面板 → -4 中簇下移 1px）。实测把它当多段链重放、逐段与旧仓 -1/-2/-3/-4 对照：**stage1 就差 52713 通道**（比单条链的中心区残差还大）⇒ 中间段所用的清理底板与旧参数**已经不在手上**（旧仓那批 HTML / 一次性脚本后来被覆盖），多段模型并不能救这一张。（b）**文字侧已按会话档案的 0 差异证据钉死**（见下方「会话档案核对」）。⇒ 剩余差异来自\"底图经过几轮 Chrome premultiply 往返\"的历史，现有算子表达不了。需求节点已把这张按**算法 / 多段型图**接受较高偏差处理。 ★ 会话档案核对（2026-10-04，用户提供当年做第一步的历史会话 zip）：会话里留下了第一步的生成器原文 `gen15.py`，并经独立复核：把旧仓 `.tmp/so001_render15.html`（= 该生成器产物，4802 B）连同清理底图 `.tmp/so001_clean_full.png` 喂同一套 Chrome flag，与 `res/images/SO001-1.png` **逐像素 0 差异** ⇒ 第一步样式真值已确定：`.tb{display:grid;place-items:center;font-weight:700;font-size:22px;letter-spacing:1px;white-space:nowrap;line-height:22px}`；盒 `left=x0-8`（595/677/759）、`top=y0+24`（819/902/985/1068/1151）、`width:93`、`height:26`；warm 三层 `shd→out→gin`、cyan/gray 两层 `out→gin`；三条描边都是 2px（`#3A2709` / `#1438E0` / `rgba(0,0,0,.6)`）；`.w-shd` 是独立透明层 + `text-shadow:2px 2px 1px rgba(0,0,0,1)`（实测每按钮贡献 435 px，不能省）。本 recipe 已按此逐条落地（第四步 `top +1` 用 `shift:{y:-1}` 表达），复验 **128110 通道 / 47528 像素**（约 2.1% 像素）。**结论：残差不在第一步的参数** —— 清理侧已逐像素确证与旧仓等价（对 15 张 `so001_cl_*.png` 0 差异），第一步样式也已被 0 差异证据钉死；剩下的差来自\"生效版是分四段整画布截图叠出来的\"那段历史（每段都把 Chrome 的 premultiply 往返烙进底图，实测底图往返噪声就有 13,601 px / |ΔRGB| 99,560），而本链只有一次 canvas 渲染。要再逼近需要多段模型 + 那几段中间底板（旧仓 `.tmp` 里只剩产物，生成脚本已被覆盖）。",
+  "clean": [
+    {
+      "op": "laplace",
+      "rows": [
+        795,
+        878,
+        961,
+        1044,
+        1127
+      ],
+      "cols": [
+        [
+          603,
+          "warm"
+        ],
+        [
+          685,
+          "cyan"
+        ],
+        [
+          767,
+          "gray"
+        ]
+      ],
+      "w": 77,
+      "h": 78,
+      "iters": 700,
+      "ix0": 7,
+      "ix1": 70,
+      "iy1": 71,
+      "_note": "旧仓 so001_clean15.py：块内自动找文字包围盒 → 暖/灰走 700 轮拉普拉斯插值、青直接填纯青 (1,254,255)。"
+    },
+    {
+      "op": "template",
+      "source": "<self>",
+      "from": {
+        "x0": 1013,
+        "y0": 893,
+        "x1": 1090,
+        "y1": 937
+      },
+      "at": [
+        {
+          "x": 849,
+          "y": 795
+        },
+        {
+          "x": 931,
+          "y": 795
+        },
+        {
+          "x": 1013,
+          "y": 795
+        },
+        {
+          "x": 849,
+          "y": 844
+        },
+        {
+          "x": 931,
+          "y": 844
+        },
+        {
+          "x": 1013,
+          "y": 844
+        },
+        {
+          "x": 849,
+          "y": 893
+        },
+        {
+          "x": 931,
+          "y": 893
+        },
+        {
+          "x": 849,
+          "y": 942
+        },
+        {
+          "x": 931,
+          "y": 942
+        },
+        {
+          "x": 849,
+          "y": 991
+        },
+        {
+          "x": 931,
+          "y": 991
+        },
+        {
+          "x": 849,
+          "y": 1040
+        },
+        {
+          "x": 931,
+          "y": 1040
+        },
+        {
+          "x": 849,
+          "y": 1089
+        }
+      ],
+      "_note": "右带上半：以第 3 列空白钮 (1013,893) 为模板覆盖 15 块（列3 从第 3 行起是空白）。"
+    },
+    {
+      "op": "template",
+      "source": "<self>",
+      "from": {
+        "x0": 1013,
+        "y0": 1432,
+        "x1": 1090,
+        "y1": 1476
+      },
+      "at": [
+        {
+          "x": 849,
+          "y": 1285
+        },
+        {
+          "x": 931,
+          "y": 1285
+        },
+        {
+          "x": 1013,
+          "y": 1285
+        },
+        {
+          "x": 849,
+          "y": 1334
+        },
+        {
+          "x": 931,
+          "y": 1334
+        },
+        {
+          "x": 1013,
+          "y": 1334
+        },
+        {
+          "x": 849,
+          "y": 1383
+        },
+        {
+          "x": 931,
+          "y": 1383
+        },
+        {
+          "x": 849,
+          "y": 1432
+        },
+        {
+          "x": 931,
+          "y": 1432
+        },
+        {
+          "x": 849,
+          "y": 1481
+        },
+        {
+          "x": 931,
+          "y": 1481
+        },
+        {
+          "x": 849,
+          "y": 1530
+        },
+        {
+          "x": 931,
+          "y": 1530
+        },
+        {
+          "x": 849,
+          "y": 1579
+        }
+      ],
+      "_note": "右带下半：同口径，模板取下半的空白钮 (1013,1432)。"
+    },
+    {
+      "op": "template",
+      "source": "<self>",
+      "from": {
+        "x0": 330,
+        "y0": 1262,
+        "x1": 407,
+        "y1": 1305
+      },
+      "at": [
+        {
+          "x": 330,
+          "y": 911
+        },
+        {
+          "x": 420,
+          "y": 911
+        },
+        {
+          "x": 510,
+          "y": 911
+        },
+        {
+          "x": 330,
+          "y": 961
+        },
+        {
+          "x": 420,
+          "y": 961
+        },
+        {
+          "x": 510,
+          "y": 961
+        },
+        {
+          "x": 330,
+          "y": 1011
+        },
+        {
+          "x": 420,
+          "y": 1011
+        },
+        {
+          "x": 330,
+          "y": 1061
+        },
+        {
+          "x": 420,
+          "y": 1061
+        },
+        {
+          "x": 330,
+          "y": 1111
+        },
+        {
+          "x": 420,
+          "y": 1111
+        }
+      ],
+      "_note": "「操作説明」面板：以行 8 列 A 的空白靛蓝钮（内部纯色 RGB(71,70,142)）为模板覆盖 15 块。"
+    }
+  ],
+  "text": {
+    "effect": "E10",
+    "letterSpacing": 1,
+    "layers": [
+      {
+        "pos": {
+          "x": 849,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "菜单面板",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "菜单面板",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "菜单面板",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1285
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "菜单面板",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1285
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "菜单面板",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.SAVE",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1);"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.SAVE",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.SAVE",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1285
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.SAVE",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1285
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.SAVE",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "返回标题",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "返回标题",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 795
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "返回标题",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 1285
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "返回标题",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 1285
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "返回标题",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过消息",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过消息",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过消息",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1334
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过消息",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1334
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过消息",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.LOAD",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1);"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.LOAD",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.LOAD",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1334
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.LOAD",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1334
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "Q.LOAD",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "结束游戏",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "结束游戏",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 844
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "结束游戏",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 1334
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "结束游戏",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 1013,
+          "y": 1334
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "结束游戏",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 893
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过已读",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 893
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过已读",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 893
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过已读",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1383
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过已读",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1383
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "跳过已读",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 893
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "SAVE",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1);"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 893
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "SAVE",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 893
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "SAVE",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1383
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "SAVE",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1383
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "SAVE",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 942
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "自动模式",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 942
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "自动模式",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 942
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "自动模式",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1432
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "自动模式",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1432
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "自动模式",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 942
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "LOAD",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1);"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 942
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "LOAD",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 942
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "LOAD",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1432
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "LOAD",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1432
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "LOAD",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 991
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "重播语音",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 991
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "重播语音",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 991
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "重播语音",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1481
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "重播语音",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1481
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "重播语音",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 991
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "环境设定",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 991
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "环境设定",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 991
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "环境设定",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1481
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "环境设定",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1481
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "环境设定",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1040
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "历史",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1);"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1040
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "历史",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1040
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "历史",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1530
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "历史",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1530
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "历史",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1040
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "情报",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1);"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1040
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "情报",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1040
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "情报",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1530
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "情报",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0;"
+      },
+      {
+        "pos": {
+          "x": 931,
+          "y": 1530
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "情报",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1089
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "隐藏窗口",
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:16px; font-weight:bold; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1089
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "隐藏窗口",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1089
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "隐藏窗口",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1579
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "隐藏窗口",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 849,
+          "y": 1579
+        },
+        "lineHeight": 45,
+        "width": 78,
+        "text": "隐藏窗口",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 911
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "菜单面板",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 911
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "菜单面板",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 911
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "Q.SAVE",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 911
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "Q.SAVE",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 510,
+          "y": 911
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "返回标题",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 510,
+          "y": 911
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "返回标题",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 961
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "跳过消息",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 961
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "跳过消息",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 961
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "Q.LOAD",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 961
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "Q.LOAD",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 510,
+          "y": 961
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "结束游戏",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 510,
+          "y": 961
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "结束游戏",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 1011
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "跳过已读",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 1011
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "跳过已读",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 1011
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "SAVE",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 1011
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "SAVE",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 1061
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "自动模式",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 1061
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "自动模式",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 1061
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "LOAD",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 1061
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "LOAD",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 1111
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "重播语音",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 330,
+          "y": 1111
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "重播语音",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 1111
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "环境设定",
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:16px; font-weight:bold; -webkit-text-stroke:2px #000; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "pos": {
+          "x": 420,
+          "y": 1111
+        },
+        "lineHeight": 44,
+        "width": 77,
+        "text": "环境设定",
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:16px; font-weight:bold; color:#8A8CFC; -webkit-text-fill-color:#8A8CFC; -webkit-text-stroke:0; transform:scaleX(0.9); transform-origin:center center;"
+      },
+      {
+        "text": "变更设置",
+        "pos": {
+          "x": 595,
+          "y": 819
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "变更设置",
+        "pos": {
+          "x": 595,
+          "y": 819
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "变更设置",
+        "pos": {
+          "x": 677,
+          "y": 819
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "变更设置",
+        "pos": {
+          "x": 677,
+          "y": 819
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "变更设置",
+        "pos": {
+          "x": 759,
+          "y": 819
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px rgba(0,0,0,0.6); transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "变更设置",
+        "pos": {
+          "x": 759,
+          "y": 819
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,rgba(0,0,0,0) 0%,rgba(0,0,0,0.22) 45%,rgba(0,0,0,0.45) 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "初始化",
+        "pos": {
+          "x": 595,
+          "y": 902
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "初始化",
+        "pos": {
+          "x": 595,
+          "y": 902
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "初始化",
+        "pos": {
+          "x": 677,
+          "y": 902
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "初始化",
+        "pos": {
+          "x": 677,
+          "y": 902
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "初始化",
+        "pos": {
+          "x": 759,
+          "y": 902
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px rgba(0,0,0,0.6); transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "初始化",
+        "pos": {
+          "x": 759,
+          "y": 902
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,rgba(0,0,0,0) 0%,rgba(0,0,0,0.22) 45%,rgba(0,0,0,0.45) 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "全部移除",
+        "pos": {
+          "x": 595,
+          "y": 985
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "全部移除",
+        "pos": {
+          "x": 595,
+          "y": 985
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "全部移除",
+        "pos": {
+          "x": 677,
+          "y": 985
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "全部移除",
+        "pos": {
+          "x": 677,
+          "y": 985
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "全部移除",
+        "pos": {
+          "x": 759,
+          "y": 985
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px rgba(0,0,0,0.6); transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "全部移除",
+        "pos": {
+          "x": 759,
+          "y": 985
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,rgba(0,0,0,0) 0%,rgba(0,0,0,0.22) 45%,rgba(0,0,0,0.45) 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "关闭",
+        "pos": {
+          "x": 595,
+          "y": 1068
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "关闭",
+        "pos": {
+          "x": 595,
+          "y": 1068
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "关闭",
+        "pos": {
+          "x": 677,
+          "y": 1068
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "关闭",
+        "pos": {
+          "x": 677,
+          "y": 1068
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "关闭",
+        "pos": {
+          "x": 759,
+          "y": 1068
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px rgba(0,0,0,0.6); transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "关闭",
+        "pos": {
+          "x": 759,
+          "y": 1068
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,rgba(0,0,0,0) 0%,rgba(0,0,0,0.22) 45%,rgba(0,0,0,0.45) 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 595,
+          "y": 1151
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #3A2709; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 595,
+          "y": 1151
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#FDD896 30%,#FBC568 62%,#FDAB0A 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 677,
+          "y": 1151
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px #1438E0; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 677,
+          "y": 1151
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,#FFFFFF 0%,#C8ECFF 30%,#4FD4FF 70%,#01FEFF 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 759,
+          "y": 1151
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "outline",
+        "z": 2,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:2px rgba(0,0,0,0.6); transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 759,
+          "y": 1151
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "fill",
+        "z": 3,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; -webkit-text-fill-color:transparent; background:linear-gradient(to bottom,rgba(0,0,0,0) 0%,rgba(0,0,0,0.22) 45%,rgba(0,0,0,0.45) 100%); -webkit-background-clip:text; background-clip:text; transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        },
+        "_note": "SO001 中簇：布局口径见本文件 note；layer.css 落在盒上、background*/text-shadow 由生成器分流"
+      },
+      {
+        "text": "变更设置",
+        "pos": {
+          "x": 595,
+          "y": 819
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        }
+      },
+      {
+        "text": "初始化",
+        "pos": {
+          "x": 595,
+          "y": 902
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        }
+      },
+      {
+        "text": "全部移除",
+        "pos": {
+          "x": 595,
+          "y": 985
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.6); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        }
+      },
+      {
+        "text": "关闭",
+        "pos": {
+          "x": 595,
+          "y": 1068
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        }
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 595,
+          "y": 1151
+        },
+        "lineHeight": 22,
+        "width": 93,
+        "role": "shadow",
+        "z": 1,
+        "css": "font-size:22px; font-weight:bold; color:transparent; -webkit-text-stroke:0; text-shadow:2px 2px 1px rgba(0,0,0,1); transform:scaleX(0.8); transform-origin:center center;",
+        "shift": {
+          "y": -1
+        }
+      }
+    ],
+    "compose": "canvas"
+  }
+}

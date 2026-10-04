@@ -1,0 +1,1182 @@
+{
+  "schemaVersion": 1,
+  "block": "SO030",
+  "blockId": 55,
+  "source": {
+    "kind": "alf",
+    "entry": 0,
+    "agf": "SO030.AGF"
+  },
+  "note": "2000×2000 四轮累计改图（旧仓 docs/images/SO030.md §3/§6/§7/§8；阶段归属按旧仓 res/images 实测：-0→-1 换「菜单」、-1→-2 换 16 个 103×73 按钮、-2→-3 换 4 个 213/207×73 按钮、-3→-4 加 6 个 123/117×53 按钮）：①「菜单」20px 黑字（块 A 0.5px 黑描边；块 B = 白描边 2px 50% 垫底 + 黑字，top=y0+1 人工偏移）；②16 按钮 30px（E5：上半=白描边 4px 100% + 阴影 0 4px 4px、下半=白描边 4px 50%，top=y0-1 且整体 translateY(-0.5px)）；③4 按钮同骨架，上半改 E6 红字 #FD480A 且无 0.5px 黑描边；④6 按钮 24px（列1=E5 上半 / 列2=E5 下半 / 列3=E8 三段式：白剪影阴影 + 深绿 3px 描边 + 上白下浅绿渐变字，top=y0 无偏移）。★ 字体：旧 HTML（SO030_render16.html 等）写的是 WenQuanYi（文泉驿微米黑），但把生效版逐像素比对后，四个阶段的字形实测都是 **Sarasa Gothic SC**（WenQuanYi 变体在菜单/16/4 按钮上 max 差 254，Sarasa 变体 max 差 ≤4）⇒ 与 FONT.md「全量重绘起由 Sarasa 替换」一致，故 recipe 一律用效果字典的默认族，不写 WenQuanYi。★ 合成口径：四个阶段的旧渲染页都把清理底图作 `<img id=\"bg\" src=\"...\">` 贴进页面再整画布截图（so030_render.html / SO030_render16.html / SO030-1_render4.html / so0303_render.html）⇒ `compose:\"canvas\"`。",
+  "clean": [
+    {
+      "op": "fill",
+      "box": {
+        "x0": 568,
+        "y0": 1374,
+        "x1": 721,
+        "y1": 1421
+      },
+      "fillCol": 608,
+      "keepL": 40,
+      "keepR": 40,
+      "keepT": 0,
+      "keepB": 0,
+      "_note": "菜单块 A 154×48：中间 x=608..681 逐行复制第 608 列"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 742,
+        "y0": 1383,
+        "x1": 863,
+        "y1": 1411
+      },
+      "fillCol": 765,
+      "keepL": 23,
+      "keepR": 23,
+      "keepT": 0,
+      "keepB": 0,
+      "_note": "菜单块 B 122×29：中间 x=765..840 逐行复制第 765 列"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 674,
+        "y0": 562,
+        "x1": 776,
+        "y1": 634
+      },
+      "fillCol": 693,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "_note": "16 按钮·上半模板（#55）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 674,
+        "y0": 712,
+        "x1": 776,
+        "y1": 784
+      },
+      "fillCol": 693,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "_note": "16 按钮·上半模板（#55）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 781,
+        "y0": 562,
+        "x1": 883,
+        "y1": 634
+      },
+      "fillCol": 800,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "_note": "16 按钮·上半模板（#55）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 781,
+        "y0": 712,
+        "x1": 883,
+        "y1": 784
+      },
+      "fillCol": 800,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "_note": "16 按钮·上半模板（#55）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 888,
+        "y0": 562,
+        "x1": 990,
+        "y1": 634
+      },
+      "fillCol": 907,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "_note": "16 按钮·上半模板（#55）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1176,
+        "y0": 371,
+        "x1": 1278,
+        "y1": 443
+      },
+      "fillCol": 1195,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "_note": "16 按钮·上半模板（#55）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1176,
+        "y0": 446,
+        "x1": 1278,
+        "y1": 518
+      },
+      "fillCol": 1195,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "_note": "16 按钮·上半模板（#55）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1234,
+        "y0": 1153,
+        "x1": 1336,
+        "y1": 1225
+      },
+      "fillCol": 1253,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "_note": "16 按钮·上半模板（#55）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 674,
+        "y0": 637,
+        "x1": 776,
+        "y1": 709
+      },
+      "fillCol": 693,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "_note": "16 按钮·下半模板（#70）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 674,
+        "y0": 787,
+        "x1": 776,
+        "y1": 859
+      },
+      "fillCol": 693,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "_note": "16 按钮·下半模板（#70）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 781,
+        "y0": 637,
+        "x1": 883,
+        "y1": 709
+      },
+      "fillCol": 800,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "_note": "16 按钮·下半模板（#70）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 781,
+        "y0": 787,
+        "x1": 883,
+        "y1": 859
+      },
+      "fillCol": 800,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "_note": "16 按钮·下半模板（#70）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 888,
+        "y0": 637,
+        "x1": 990,
+        "y1": 709
+      },
+      "fillCol": 907,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "_note": "16 按钮·下半模板（#70）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1176,
+        "y0": 521,
+        "x1": 1278,
+        "y1": 593
+      },
+      "fillCol": 1195,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "_note": "16 按钮·下半模板（#70）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1176,
+        "y0": 596,
+        "x1": 1278,
+        "y1": 668
+      },
+      "fillCol": 1195,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "_note": "16 按钮·下半模板（#70）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1234,
+        "y0": 1228,
+        "x1": 1336,
+        "y1": 1300
+      },
+      "fillCol": 1253,
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "_note": "16 按钮·下半模板（#70）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1017,
+        "y0": 1153,
+        "x1": 1229,
+        "y1": 1225
+      },
+      "fillCol": 1047,
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 15,
+      "keepB": 17,
+      "_note": "防卫开始/决定 4 按钮（第二轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1017,
+        "y0": 1228,
+        "x1": 1229,
+        "y1": 1300
+      },
+      "fillCol": 1049,
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 15,
+      "keepB": 17,
+      "_note": "防卫开始/决定 4 按钮（第二轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1017,
+        "y0": 1304,
+        "x1": 1223,
+        "y1": 1376
+      },
+      "fillCol": 1047,
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 15,
+      "keepB": 17,
+      "_note": "防卫开始/决定 4 按钮（第二轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1017,
+        "y0": 1378,
+        "x1": 1223,
+        "y1": 1450
+      },
+      "fillCol": 1048,
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 15,
+      "keepB": 17,
+      "_note": "防卫开始/决定 4 按钮（第二轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 998,
+        "y0": 1832,
+        "x1": 1120,
+        "y1": 1884
+      },
+      "fillCol": 1010,
+      "keepL": 10,
+      "keepR": 11,
+      "keepT": 0,
+      "keepB": 0,
+      "_note": "普通/简易动画 6 按钮（第三轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1252,
+        "y0": 1832,
+        "x1": 1374,
+        "y1": 1884
+      },
+      "fillCol": 1263,
+      "keepL": 10,
+      "keepR": 11,
+      "keepT": 0,
+      "keepB": 0,
+      "_note": "普通/简易动画 6 按钮（第三轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1128,
+        "y0": 1835,
+        "x1": 1244,
+        "y1": 1881
+      },
+      "fillCol": 1137,
+      "keepL": 7,
+      "keepR": 11,
+      "keepT": 0,
+      "keepB": 0,
+      "_note": "普通/简易动画 6 按钮（第三轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 998,
+        "y0": 1889,
+        "x1": 1120,
+        "y1": 1941
+      },
+      "fillCol": 1010,
+      "keepL": 10,
+      "keepR": 11,
+      "keepT": 0,
+      "keepB": 0,
+      "_note": "普通/简易动画 6 按钮（第三轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1252,
+        "y0": 1889,
+        "x1": 1374,
+        "y1": 1941
+      },
+      "fillCol": 1265,
+      "keepL": 10,
+      "keepR": 11,
+      "keepT": 0,
+      "keepB": 0,
+      "_note": "普通/简易动画 6 按钮（第三轮）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1128,
+        "y0": 1892,
+        "x1": 1244,
+        "y1": 1938
+      },
+      "fillCol": 1138,
+      "keepL": 10,
+      "keepR": 9,
+      "keepT": 0,
+      "keepB": 0,
+      "_note": "普通/简易动画 6 按钮（第三轮）"
+    }
+  ],
+  "text": {
+    "effect": "E5",
+    "fontSize": 30,
+    "letterSpacing": 1,
+    "compose": "canvas",
+    "layers": [
+      {
+        "text": "菜单",
+        "pos": {
+          "x": 568,
+          "y": 1374
+        },
+        "lineHeight": 48,
+        "width": 154,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:20px; color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "菜单块 A：旧 .lnA top=1374（无偏移）"
+      },
+      {
+        "text": "菜单",
+        "pos": {
+          "x": 742,
+          "y": 1384
+        },
+        "lineHeight": 29,
+        "width": 122,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:20px; -webkit-text-stroke:2px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);",
+        "_note": "菜单块 B 白描边层（旧 .lnB .out）"
+      },
+      {
+        "text": "菜单",
+        "pos": {
+          "x": 742,
+          "y": 1384
+        },
+        "lineHeight": 29,
+        "width": 122,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:20px; color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "菜单块 B 黑字层（旧 .lnB .in）；top=1384 = y0+1（旧仓人工 +1px）"
+      },
+      {
+        "text": "归还",
+        "pos": {
+          "x": 674,
+          "y": 561
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E5 上半：白描边 100% + 阴影 0 4px 4px"
+      },
+      {
+        "text": "归还",
+        "pos": {
+          "x": 674,
+          "y": 561
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 上半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "上锁",
+        "pos": {
+          "x": 674,
+          "y": 711
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E5 上半：白描边 100% + 阴影 0 4px 4px"
+      },
+      {
+        "text": "上锁",
+        "pos": {
+          "x": 674,
+          "y": 711
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 上半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "撤退",
+        "pos": {
+          "x": 781,
+          "y": 561
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E5 上半：白描边 100% + 阴影 0 4px 4px"
+      },
+      {
+        "text": "撤退",
+        "pos": {
+          "x": 781,
+          "y": 561
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 上半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "开锁",
+        "pos": {
+          "x": 781,
+          "y": 711
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E5 上半：白描边 100% + 阴影 0 4px 4px"
+      },
+      {
+        "text": "开锁",
+        "pos": {
+          "x": 781,
+          "y": 711
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 上半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "转移",
+        "pos": {
+          "x": 888,
+          "y": 561
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E5 上半：白描边 100% + 阴影 0 4px 4px"
+      },
+      {
+        "text": "转移",
+        "pos": {
+          "x": 888,
+          "y": 561
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 上半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "待机",
+        "pos": {
+          "x": 1176,
+          "y": 370
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E5 上半：白描边 100% + 阴影 0 4px 4px"
+      },
+      {
+        "text": "待机",
+        "pos": {
+          "x": 1176,
+          "y": 370
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 上半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1176,
+          "y": 445
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E5 上半：白描边 100% + 阴影 0 4px 4px"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1176,
+          "y": 445
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 上半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1234,
+          "y": 1152
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E5 上半：白描边 100% + 阴影 0 4px 4px"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1234,
+          "y": 1152
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 上半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "归还",
+        "pos": {
+          "x": 674,
+          "y": 636
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "归还",
+        "pos": {
+          "x": 674,
+          "y": 636
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "上锁",
+        "pos": {
+          "x": 674,
+          "y": 786
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "上锁",
+        "pos": {
+          "x": 674,
+          "y": 786
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "撤退",
+        "pos": {
+          "x": 781,
+          "y": 636
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "撤退",
+        "pos": {
+          "x": 781,
+          "y": 636
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "开锁",
+        "pos": {
+          "x": 781,
+          "y": 786
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "开锁",
+        "pos": {
+          "x": 781,
+          "y": 786
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "转移",
+        "pos": {
+          "x": 888,
+          "y": 636
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "转移",
+        "pos": {
+          "x": 888,
+          "y": 636
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "待机",
+        "pos": {
+          "x": 1176,
+          "y": 520
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "待机",
+        "pos": {
+          "x": 1176,
+          "y": 520
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1176,
+          "y": 595
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1176,
+          "y": 595
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1234,
+          "y": 1227
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1234,
+          "y": 1227
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "防卫开始",
+        "pos": {
+          "x": 1017,
+          "y": 1152
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E6 上半：白描边 100% + 阴影"
+      },
+      {
+        "text": "防卫开始",
+        "pos": {
+          "x": 1017,
+          "y": 1152
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#FD480A; transform:translateY(-0.5px);",
+        "_note": "E6 上半：红字 #FD480A、无 0.5px 黑描边"
+      },
+      {
+        "text": "防卫开始",
+        "pos": {
+          "x": 1017,
+          "y": 1227
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "防卫开始",
+        "pos": {
+          "x": 1017,
+          "y": 1227
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "决定",
+        "pos": {
+          "x": 1017,
+          "y": 1303
+        },
+        "lineHeight": 73,
+        "width": 207,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "E6 上半：白描边 100% + 阴影"
+      },
+      {
+        "text": "决定",
+        "pos": {
+          "x": 1017,
+          "y": 1303
+        },
+        "lineHeight": 73,
+        "width": 207,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#FD480A; transform:translateY(-0.5px);",
+        "_note": "E6 上半：红字 #FD480A、无 0.5px 黑描边"
+      },
+      {
+        "text": "决定",
+        "pos": {
+          "x": 1017,
+          "y": 1377
+        },
+        "lineHeight": 73,
+        "width": 207,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "E5 下半：白描边 50%"
+      },
+      {
+        "text": "决定",
+        "pos": {
+          "x": 1017,
+          "y": 1377
+        },
+        "lineHeight": 73,
+        "width": 207,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "E5 下半：黑字 + 0.5px 黑描边"
+      },
+      {
+        "text": "普通动画",
+        "pos": {
+          "x": 998,
+          "y": 1832
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "列1 = E5 上半"
+      },
+      {
+        "text": "普通动画",
+        "pos": {
+          "x": 998,
+          "y": 1832
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "列1 = E5 上半 黑字"
+      },
+      {
+        "text": "简易动画",
+        "pos": {
+          "x": 998,
+          "y": 1889
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; -webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "列1 = E5 上半"
+      },
+      {
+        "text": "简易动画",
+        "pos": {
+          "x": 998,
+          "y": 1889
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "列1 = E5 上半 黑字"
+      },
+      {
+        "text": "普通动画",
+        "pos": {
+          "x": 1128,
+          "y": 1835
+        },
+        "lineHeight": 47,
+        "width": 117,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);",
+        "_note": "列2 = E5 下半"
+      },
+      {
+        "text": "普通动画",
+        "pos": {
+          "x": 1128,
+          "y": 1835
+        },
+        "lineHeight": 47,
+        "width": 117,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "列2 = E5 下半 黑字"
+      },
+      {
+        "text": "简易动画",
+        "pos": {
+          "x": 1128,
+          "y": 1892
+        },
+        "lineHeight": 47,
+        "width": 117,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; -webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);",
+        "_note": "列2 = E5 下半"
+      },
+      {
+        "text": "简易动画",
+        "pos": {
+          "x": 1128,
+          "y": 1892
+        },
+        "lineHeight": 47,
+        "width": 117,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "列2 = E5 下半 黑字"
+      },
+      {
+        "text": "普通动画",
+        "pos": {
+          "x": 1252,
+          "y": 1832
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "shadow",
+        "z": 0,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; color:#fff; -webkit-text-stroke:3px #fff; text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "E8 阴影层 .shd：白字形剪影 + 黑下阴影"
+      },
+      {
+        "text": "普通动画",
+        "pos": {
+          "x": 1252,
+          "y": 1832
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; color:transparent; -webkit-text-stroke:3px #015514;",
+        "_note": "E8 描边层 .gout：深绿 3px"
+      },
+      {
+        "text": "普通动画",
+        "pos": {
+          "x": 1252,
+          "y": 1832
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; -webkit-text-stroke:0; background:linear-gradient(to bottom, #FFFFFF 0%, #FFFFFF 50%, #CDFDCD 50%, #CDFDCD 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "E8 渐变层 .gin：上白下浅绿两段式（background* 由 buildTextHtml 落到 span 上）"
+      },
+      {
+        "text": "简易动画",
+        "pos": {
+          "x": 1252,
+          "y": 1889
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "shadow",
+        "z": 0,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; color:#fff; -webkit-text-stroke:3px #fff; text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "E8 阴影层 .shd：白字形剪影 + 黑下阴影"
+      },
+      {
+        "text": "简易动画",
+        "pos": {
+          "x": 1252,
+          "y": 1889
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "outline",
+        "z": 1,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; color:transparent; -webkit-text-stroke:3px #015514;",
+        "_note": "E8 描边层 .gout：深绿 3px"
+      },
+      {
+        "text": "简易动画",
+        "pos": {
+          "x": 1252,
+          "y": 1889
+        },
+        "lineHeight": 53,
+        "width": 123,
+        "role": "fill",
+        "z": 2,
+        "css": "font-family:\"Sarasa Gothic SC\"; font-size:24px; -webkit-text-stroke:0; background:linear-gradient(to bottom, #FFFFFF 0%, #FFFFFF 50%, #CDFDCD 50%, #CDFDCD 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "E8 渐变层 .gin：上白下浅绿两段式（background* 由 buildTextHtml 落到 span 上）"
+      }
+    ]
+  }
+}

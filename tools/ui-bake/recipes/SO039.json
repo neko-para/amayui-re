@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "block": "SO039",
+  "blockId": 43,
+  "source": { "kind": "alf", "entry": 0, "agf": "SO039.AGF" },
+  "note": "1280×1280 的 6 个「锁定/释放」按钮（2 行 × 3 列）中文化。清理 = 逐块列填充（旧仓 `.tmp/clean_so039.py`，6 块全部列出：JSON 导出件 `SO039-0_clean.json` 只记了 5 块、漏 #60，脚本才是实际跑的那份）。文字 = 24px / 字距 1px，逐块行高 = 块高（块内垂直居中），`top = y0`（旧仓 §3.2 明确「无上移」）。列 1 = E5 上半（黑字 + 0.5px 黑描边 + 4px 100% 白描边 + 0 4px 4px 黑阴影）、列 2 = E5 下半（同上但白描边 50%、无阴影）、列 3 = 两段式渐变（#FFFFFF 上 / #CDFDCD 下）+ #015514 深绿描边 + 黑阴影（旧仓 `.tmp/so039_render.html` 的 .shd/.gout/.gin 三层逐字搬运）。判据：与 corpus/assets/ui-images/SO039-1.png 逐像素相同。",
+  "clean": [
+    { "op": "fill", "box": { "x0": 818, "y0": 671, "x1": 940, "y1": 723 }, "keepL": 18, "keepR": 15, "keepT": 0, "keepB": 0, "fillCol": 840, "_note": "块 #43（行1 列1）" },
+    { "op": "fill", "box": { "x0": 1072, "y0": 671, "x1": 1194, "y1": 723 }, "keepL": 18, "keepR": 15, "keepT": 0, "keepB": 0, "fillCol": 1093, "_note": "块 #44（行1 列3）" },
+    { "op": "fill", "box": { "x0": 948, "y0": 674, "x1": 1064, "y1": 720 }, "keepL": 16, "keepR": 15, "keepT": 0, "keepB": 0, "fillCol": 966, "_note": "块 #48（行1 列2）" },
+    { "op": "fill", "box": { "x0": 818, "y0": 728, "x1": 940, "y1": 780 }, "keepL": 16, "keepR": 15, "keepT": 0, "keepB": 0, "fillCol": 843, "_note": "块 #58（行2 列1）" },
+    { "op": "fill", "box": { "x0": 1072, "y0": 728, "x1": 1194, "y1": 780 }, "keepL": 16, "keepR": 15, "keepT": 0, "keepB": 0, "fillCol": 1095, "_note": "块 #59（行2 列3）" },
+    { "op": "fill", "box": { "x0": 948, "y0": 731, "x1": 1064, "y1": 777 }, "keepL": 16, "keepR": 15, "keepT": 0, "keepB": 0, "fillCol": 966, "_note": "块 #60（行2 列2，镜像 #48）" }
+  ],
+  "text": {
+    "effect": "E8",
+    "compose": "canvas",
+    "fontSize": 24,
+    "letterSpacing": 1,
+    "layers": [
+      { "text": "锁定", "pos": { "x": 818, "y": 671 }, "lineHeight": 53, "width": 123, "role": "outline", "z": 1, "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);" },
+      { "text": "锁定", "pos": { "x": 818, "y": 671 }, "lineHeight": 53, "width": 123, "role": "fill", "z": 2, "css": "color:#000; -webkit-text-stroke:0.5px #000;" },
+
+      { "text": "锁定", "pos": { "x": 948, "y": 674 }, "lineHeight": 47, "width": 117, "role": "outline", "z": 1, "css": "-webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);" },
+      { "text": "锁定", "pos": { "x": 948, "y": 674 }, "lineHeight": 47, "width": 117, "role": "fill", "z": 2, "css": "color:#000; -webkit-text-stroke:0.5px #000;" },
+
+      { "text": "锁定", "pos": { "x": 1072, "y": 671 }, "lineHeight": 53, "width": 123, "role": "shadow", "z": 0, "css": "color:#fff; -webkit-text-stroke:3px #fff; text-shadow:0 4px 4px rgba(0,0,0,1);" },
+      { "text": "锁定", "pos": { "x": 1072, "y": 671 }, "lineHeight": 53, "width": 123, "role": "outline", "z": 1, "css": "color:transparent; -webkit-text-stroke:3px #015514;" },
+      { "text": "锁定", "pos": { "x": 1072, "y": 671 }, "lineHeight": 53, "width": 123, "role": "fill", "z": 2, "css": "-webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FFFFFF 0%, #FFFFFF 50%, #CDFDCD 50%, #CDFDCD 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;", "_note": "旧 HTML 的 .gin 三层里最上面那层；background/-webkit-background-clip 由生成器落到 <span> 上（只裁声明它的那个元素自己的文字）。" },
+
+      { "text": "释放", "pos": { "x": 818, "y": 728 }, "lineHeight": 53, "width": 123, "role": "outline", "z": 1, "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);" },
+      { "text": "释放", "pos": { "x": 818, "y": 728 }, "lineHeight": 53, "width": 123, "role": "fill", "z": 2, "css": "color:#000; -webkit-text-stroke:0.5px #000;" },
+
+      { "text": "释放", "pos": { "x": 948, "y": 731 }, "lineHeight": 47, "width": 117, "role": "outline", "z": 1, "css": "-webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);" },
+      { "text": "释放", "pos": { "x": 948, "y": 731 }, "lineHeight": 47, "width": 117, "role": "fill", "z": 2, "css": "color:#000; -webkit-text-stroke:0.5px #000;" },
+
+      { "text": "释放", "pos": { "x": 1072, "y": 728 }, "lineHeight": 53, "width": 123, "role": "shadow", "z": 0, "css": "color:#fff; -webkit-text-stroke:3px #fff; text-shadow:0 4px 4px rgba(0,0,0,1);" },
+      { "text": "释放", "pos": { "x": 1072, "y": 728 }, "lineHeight": 53, "width": 123, "role": "outline", "z": 1, "css": "color:transparent; -webkit-text-stroke:3px #015514;" },
+      { "text": "释放", "pos": { "x": 1072, "y": 728 }, "lineHeight": 53, "width": 123, "role": "fill", "z": 2, "css": "-webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FFFFFF 0%, #FFFFFF 50%, #CDFDCD 50%, #CDFDCD 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;" }
+    ],
+    "_note": "层序照旧仓 `.tmp/so039_render.html`：列1/列2 = <span class=\"in\"> + <span class=\"out\">（z 2/1）；列3 = <span class=\"shd\"> + <span class=\"gout\"> + <span class=\"gin\">（z 0/1/2）。CSS 逐字搬运，未改一个字符。"
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "_doc": "tools/ui-bake/effects.json —— UI 文字效果字典（E1…E10）。字段 / 不变量 / 命令见 `pnpm tools ui-bake describe`；docs 只解释'哪种效果用在哪张图'，**不复述 CSS**。",
+  "font": {
+    "family": "Sarasa Gothic SC",
+    "base": { "fontSize": 20, "letterSpacing": 1 }
+  },
+  "roles": {
+    "fill": { "title": "字身（纯色/渐变填充，`background-clip:text` 时给 background)" },
+    "outline": { "title": "描边层（`-webkit-text-stroke` 比字身粗，垫在字身下面）" },
+    "shadow": { "title": "阴影层（`text-shadow`，垫在最下面）" }
+  },
+  "svg": {
+    "E11": {
+      "title": "阴刻（outline）三列式中第一列：28px bold，fill #26201E/0.5 + 内阴影 + 棕褐膨胀外环",
+      "parts": ["fill", "inset", "ring"],
+      "fontFamily": "Sarasa Gothic SC",
+      "fontWeight": "bold",
+      "fill": "#26201E",
+      "fillOpacity": 0.5,
+      "ringColor": "#b4887c"
+    }
+  },
+  "effects": {
+    "E1": {
+      "title": "纯文本行（金 / 青；同色 0.5px 描边 + 2px2px1px 黑阴影）",
+      "layers": ["fill"]
+    },
+    "E2": {
+      "title": "纯色底按钮（黑字，20px + 0.5px 黑描边，居中）",
+      "layers": ["fill"],
+      "css": { "fill": "color:#000; -webkit-text-stroke:0.5px #000;" }
+    },
+    "E3": {
+      "title": "渐变底按钮（黑字 + 2px 半透明白描边）",
+      "layers": ["outline", "fill"],
+      "css": {
+        "outline": "-webkit-text-stroke:2px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);",
+        "fill": "color:#000; -webkit-text-stroke:0.5px #000;"
+      }
+    },
+    "E4": {
+      "title": "红描边渐变字（兵种技能名，22px 白心纵向渐变 + 2px #C90000 描边 + 黑阴影）",
+      "layers": ["outline", "fill"],
+      "fontSize": 22
+    },
+    "E5": {
+      "title": "30px 规则（黑字 + 0.5px 黑描边；白描边 4px：上半 100%+阴影 / 下半 50%）",
+      "layers": ["outline", "fill"],
+      "fontSize": 30
+    },
+    "E6": {
+      "title": "红字 + 白描边（同 E5 骨架，内层 #FD480A 无黑描边）",
+      "layers": ["outline", "fill"],
+      "fontSize": 30
+    },
+    "E8": {
+      "title": "两段式渐变字（上白 #FFFFFF / 下浅绿 #CDFDCD + 深绿描边 + 黑阴影）",
+      "layers": ["shadow", "outline", "fill"],
+      "fontSize": 24
+    },
+    "E9": {
+      "title": "黑红混排按钮字（黑 E5 上半 + 红 E6 同框；部件字号各自给）",
+      "layers": ["outline", "fill"]
+    },
+    "E10": {
+      "title": "列变体按钮字（SO001 中簇：暖金 / 纯青 / 灰 三列各一套）",
+      "layers": ["shadow", "outline", "fill"],
+      "fontSize": 22
+    }
+  }
+}

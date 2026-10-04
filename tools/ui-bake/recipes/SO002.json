@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "block": "SO002",
+  "blockId": 0,
+  "source": { "kind": "alf", "entry": 0, "agf": "SO002.AGF" },
+  "note": "640×256 底部两块「メニュー」按钮中文化：块 A 154×48 奶油底 = E2 黑字；块 B 122×29 青渐变底 = E3 黑字 + 2px 半透明白描边。pos.y 上的 +7 / +7.5 取整成 +7、+8 是 line-height 居中（块高 48 → (48-20)/2=14；块高 29 → 4.5）叠加旧仓的人工偏移（块 B 的 top 从 101 下移到 102）后的落点；两块都是 20px / 字距 1px / 居中。判据：与 corpus/assets/ui-images/SO002-1.png 逐像素相同。",
+  "clean": [
+    {
+      "op": "fill",
+      "box": { "x0": 274, "y0": 50, "x1": 427, "y1": 97 },
+      "keepL": 36,
+      "keepR": 35,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 313,
+      "_note": "fillCol 外移到文字区**左侧干净区**（313）而不是字符间隙：间隙列会混入相邻笔画边缘的插值/阴影，复制后横穿文字区形成黑线。"
+    },
+    {
+      "op": "fill",
+      "box": { "x0": 277, "y0": 101, "x1": 398, "y1": 129 },
+      "keepL": 21,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 300,
+      "_note": "同上，fillCol=300 在块 B 文字区左侧。"
+    }
+  ],
+  "text": {
+    "effect": "E2",
+    "fontSize": 20,
+    "letterSpacing": 1,
+    "layers": [
+      { "text": "菜单", "pos": { "x": 274, "y": 50 }, "lineHeight": 48, "width": 154, "role": "fill", "z": 2 },
+      { "text": "菜单", "pos": { "x": 277, "y": 102 }, "lineHeight": 29, "width": 122, "role": "fill", "z": 2, "css": "-webkit-text-stroke:0.5px #000; color:#000;" },
+      { "text": "菜单", "pos": { "x": 277, "y": 102 }, "lineHeight": 29, "width": 122, "role": "outline", "z": 1, "css": "-webkit-text-stroke:2px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);" }
+    ],
+    "_note": "块 A 用 E2 的共享 CSS；块 B 是 E3 两层（outline 在下、fill 在上），recipe 里显式给（旧仓模板同值）。"
+  }
+}

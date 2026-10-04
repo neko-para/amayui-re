@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "block": "SO021",
+  "blockId": 28,
+  "source": { "kind": "alf", "entry": 0, "agf": "SO021.AGF" },
+  "note": "1280×1280。两段旧工作合并成一条链：① 菜单块 A(154×48 @660,749)+B(122×29 @663,800) → E2/E3（旧仓 `.tmp/ui-redraw/SO021/render1.html`）；② 2 个「去城砦」按钮 #28/#29（93×73 @794,634 / @889,634，`top = y0 - 1`）→ E9 黑红混排（旧仓 `.tmp/so021_render.html`）：「去」= E5 上半 18px 黑字 + 0.5px 黑描边、「城砦」= E6 20px 红字 #FD480A 无黑描边，两者共用 4px 100% 白描边 + `0 4px 4px` 黑阴影。旧仓是「整画布截图」（HTML 里有 `<img id=\"bg\">`）⇒ `compose:\"canvas\"`。判据：与 corpus/assets/ui-images/SO021-3.png 逐像素相同。",
+  "clean": [
+    { "op": "fill", "box": { "x0": 660, "y0": 749, "x1": 813, "y1": 796 }, "keepL": 40, "keepR": 40, "keepT": 0, "keepB": 0, "fillCol": 700, "_note": "菜单块 A（旧仓 `.tmp/ui-redraw/SO021/clean.py`：保留左右各 40px，中间 x=700..773 复制 x=700 列）" },
+    { "op": "fill", "box": { "x0": 663, "y0": 800, "x1": 784, "y1": 828 }, "keepL": 23, "keepR": 23, "keepT": 0, "keepB": 0, "fillCol": 686, "_note": "菜单块 B（保留左右各 23px，中间 x=686..761 复制 x=686 列）" },
+    { "op": "fill", "box": { "x0": 794, "y0": 634, "x1": 886, "y1": 706 }, "keepL": 15, "keepR": 15, "keepT": 16, "keepB": 16, "fillCol": 811, "_note": "按钮 #28（旧仓 `.tmp/SO021-1_clean.json`）" },
+    { "op": "fill", "box": { "x0": 889, "y0": 634, "x1": 981, "y1": 706 }, "keepL": 15, "keepR": 15, "keepT": 16, "keepB": 16, "fillCol": 905, "_note": "按钮 #29" }
+  ],
+  "text": {
+    "effect": "E8",
+    "compose": "canvas",
+    "fontSize": 20,
+    "letterSpacing": 1,
+    "layers": [
+      { "text": "菜单", "pos": { "x": 660, "y": 749 }, "lineHeight": 48, "width": 154, "role": "fill", "z": 2, "css": "color:#000; -webkit-text-stroke:0.5px #000;", "_note": "块 A = E2（旧仓 render1.html #a .in）" },
+      { "text": "菜单", "pos": { "x": 663, "y": 801 }, "lineHeight": 29, "width": 122, "role": "outline", "z": 1, "css": "-webkit-text-stroke:2px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5);", "_note": "块 B = E3 外层（旧仓 render1.html #b .out）" },
+      { "text": "菜单", "pos": { "x": 663, "y": 801 }, "lineHeight": 29, "width": 122, "role": "fill", "z": 2, "css": "color:#000; -webkit-text-stroke:0.5px #000;", "_note": "块 B = E3 字身（旧仓 render1.html #b .in；top 从 800 下移到 801）" },
+
+      { "text": [{ "text": "去", "css": "font-size:18px;" }, { "text": "城砦" }], "pos": { "x": 794, "y": 633 }, "lineHeight": 73, "width": 93, "role": "outline", "z": 1, "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);", "_note": "按钮 #28 外层（so021_render.html .out）。旧 HTML 是 <span class=\"out\"><span class=\"s18\">去</span>城砦</span> ⇒ 片段写法一一对应。" },
+      { "text": [{ "text": "去", "css": "font-size:18px; color:#000; -webkit-text-stroke:0.5px #000;" }, { "text": "城砦", "css": "color:#FD480A; -webkit-text-stroke:0;" }], "pos": { "x": 794, "y": 633 }, "lineHeight": 73, "width": 93, "role": "fill", "z": 2, "css": "color:#000; -webkit-text-stroke:0;", "_note": "按钮 #28 字身（so021_render.html .in=<span class=\"s18 e5\">去</span><span class=\"e6\">城砦</span>）；层 css 只是旧仓 .in 从 .btn 继承到的初始值" },
+
+      { "text": [{ "text": "去", "css": "font-size:18px;" }, { "text": "城砦" }], "pos": { "x": 889, "y": 633 }, "lineHeight": 73, "width": 93, "role": "outline", "z": 1, "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);" },
+      { "text": [{ "text": "去", "css": "font-size:18px; color:#000; -webkit-text-stroke:0.5px #000;" }, { "text": "城砦", "css": "color:#FD480A; -webkit-text-stroke:0;" }], "pos": { "x": 889, "y": 633 }, "lineHeight": 73, "width": 93, "role": "fill", "z": 2, "css": "color:#000; -webkit-text-stroke:0;", "_note": "按钮 #29 字身" }
+    ],
+    "_note": "层序与旧 HTML 的 span 顺序/z-index 对齐；z 越大越在上。块 A/B 的 菜单 与 #28/#29 的 去城砦 在空间上不相交。"
+  }
+}

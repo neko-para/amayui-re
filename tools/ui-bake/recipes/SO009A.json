@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "block": "SO009A",
+  "blockId": 42,
+  "source": { "kind": "alf", "entry": 0, "agf": "SO009A.AGF" },
+  "note": "设置页 1280×1152：① 三行金色文字（返回 / 初始化本页 / 初始化全部，E1 口径 20px 单层）② 两个「返回」大按钮 117×81（E5 30px 规则：黑字 0.5px 黑描边 + 4px 白描边，上半 100%+阴影 / 下半 50%）。清理 = 旧仓 .tmp/ui-redraw/SO009A/clean1.py（区域置透明 x969-1136 y683-765，保留 y=682）+ clean2.py（两块列填充 keep=20/20/17/17，fillCol=1049/1052）；文字 CSS/left/top 逐字搬运自旧仓 render1.html / render2.html（含 .btn 的 transform:translateY(-0.5px) 与 top=y0-1）。旧仓以两次「整画布贴底图截图」产出（res/images/SO009A-1.png → -2.png），故 compose=\"canvas\"（干净底图作 <img id=\"bg\"> 贴进页面、整画布截图即成品）—— 这条口径会把 Chrome 的 premultiply 往返烙进底图，而生效版里就有那些像素；实测 canvas 口径下本配方的 clean 底图 + 7 层 HTML 与生效版逐字节相同。文案与坐标出处：.tmp/docs/images/SO009A.md §2/§3/§7。",
+  "clean": [
+    {
+      "op": "transparent",
+      "box": { "x0": 969, "y0": 683, "x1": 1136, "y1": 765 },
+      "_note": "clean1.py：x 969..1136 / y 683..765（含端）逐像素 alpha=0（RGB 原样保留）；y=682 那一撮无关白点不动。"
+    },
+    {
+      "op": "fill",
+      "box": { "x0": 1025, "y0": 809, "x1": 1141, "y1": 889 },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 17,
+      "keepB": 17,
+      "fillCol": 1049,
+      "_note": "clean2.py 上按钮：x0=1025 y0=809 W=117 H=81 ⇒ x1=1141 y1=889；中间带 x[1045,1121] y[826,872] 逐行复制第 1049 列。"
+    },
+    {
+      "op": "fill",
+      "box": { "x0": 1025, "y0": 891, "x1": 1141, "y1": 971 },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 17,
+      "keepB": 17,
+      "fillCol": 1052,
+      "_note": "clean2.py 下按钮：y0=891 ⇒ y1=971；中间带 x[1045,1121] y[908,954] 逐行复制第 1052 列（与上块不同列，避开各自文字笔画）。"
+    }
+  ],
+  "text": {
+    "effect": "E5",
+    "compose": "canvas",
+    "fontSize": 30,
+    "letterSpacing": 1,
+    "layers": [
+      {
+        "text": "返回",
+        "pos": { "x": 975, "y": 687 },
+        "lineHeight": 20,
+        "role": "fill",
+        "z": 1,
+        "css": "text-align:left; font-size:20px; letter-spacing:0; color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);",
+        "_note": "render1.html .ln 第 1 行：left:975 top:687 line-height:1(→20px)；.ln 无 width/无 text-align ⇒ 本层显式 text-align:left 复现「文字起点=left」；字距 0（.ln 未给 letter-spacing）。"
+      },
+      {
+        "text": "初始化本页",
+        "pos": { "x": 999, "y": 714 },
+        "lineHeight": 20,
+        "role": "fill",
+        "z": 1,
+        "css": "text-align:left; font-size:20px; letter-spacing:0; color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);",
+        "_note": "render1.html 第 2 行：left:999（= 975+24）top:714。"
+      },
+      {
+        "text": "初始化全部",
+        "pos": { "x": 999, "y": 740 },
+        "lineHeight": 20,
+        "role": "fill",
+        "z": 1,
+        "css": "text-align:left; font-size:20px; letter-spacing:0; color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);",
+        "_note": "render1.html 第 3 行：left:999 top:740。"
+      },
+      {
+        "text": "返回",
+        "pos": { "x": 1025, "y": 809 },
+        "shift": { "x": 0, "y": 1 },
+        "lineHeight": 81,
+        "width": 117,
+        "role": "outline",
+        "z": 2,
+        "css": "-webkit-text-stroke:4px rgba(255,255,255,1); color:rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1); transform:translateY(-0.5px);",
+        "_note": "render2.html .btn.up 的 .out（白描边 4px 100% + 阴影）：left:1025 top:808（= y0-1，用 shift 表达）width:117 line-height:81。"
+      },
+      {
+        "text": "返回",
+        "pos": { "x": 1025, "y": 809 },
+        "shift": { "x": 0, "y": 1 },
+        "lineHeight": 81,
+        "width": 117,
+        "role": "fill",
+        "z": 3,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "render2.html .btn.up 的 .in（黑字 + 0.5px 黑描边），z-index:2 压在 .out 之上。"
+      },
+      {
+        "text": "返回",
+        "pos": { "x": 1025, "y": 891 },
+        "shift": { "x": 0, "y": 1 },
+        "lineHeight": 81,
+        "width": 117,
+        "role": "outline",
+        "z": 2,
+        "css": "-webkit-text-stroke:4px rgba(255,255,255,0.5); color:rgba(255,255,255,0.5); transform:translateY(-0.5px);",
+        "_note": "render2.html .btn.down 的 .out（白描边 50%、无阴影）：left:1025 top:890（= y0-1）。"
+      },
+      {
+        "text": "返回",
+        "pos": { "x": 1025, "y": 891 },
+        "shift": { "x": 0, "y": 1 },
+        "lineHeight": 81,
+        "width": 117,
+        "role": "fill",
+        "z": 3,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000; transform:translateY(-0.5px);",
+        "_note": "render2.html .btn.down 的 .in（黑字 + 0.5px 黑描边）。"
+      }
+    ],
+    "_note": "compose=canvas：干净底图作 <img id=\"bg\"> 贴进页面、整画布截图即成品（旧仓 render1/render2.html 就是这么贴底图的）。字体 Sarasa Gothic SC（渲染页 @font-face 由工具注入）；按钮块 letter-spacing:1px 取自旧仓 .btn，三行金文字 .ln 未给字距 ⇒ 逐层覆盖为 0。金文字层的 text-align:left 是把 .ln（无 width、初始值 left）的语义钉住：工具 .b 自带 text-align:center，实测无 width 时两者产物逐字节相同，写出来只为不依赖 Chrome 收缩盒的对齐行为。本块 7 层的 css 里没有 background / background-clip:text / -webkit-text-fill-color，故不受「span 域声明」拆分影响。"
+  }
+}

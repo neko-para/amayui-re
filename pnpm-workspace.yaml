@@ -5,3 +5,13 @@ packages:
   - packages/*
   - tools
   - apps/workbench
+
+# ★ 项目级设置写在**这里**，不写 `.npmrc`：
+#   官方口径（https://pnpm.io/settings）：`.npmrc` 只读 auth 与 registry；**定义 `node_modules` 结构的设置
+#   （`nodeLinker` / `shamefullyHoist` 等）只能写在 `pnpm-workspace.yaml`**。
+#   pnpm 10 还认 `.npmrc` 里的老写法，pnpm 11 起会忽略 ⇒ 写在这里才**不会随大版本升级静默失效**。
+#   `nodeLinker: hoisted` 的用途见 AGENTS.md §3：默认 `isolated` 用 junction 链到 `.pnpm/…`，
+#   而本机 `fs.realpathSync` 不解析 junction ⇒ `vite` 的 `import 'rolldown'` 会炸。
+#   ★ 机器级设置（如 store 位置）**不放这里**：用全局 `pnpm config set store-dir <路径>`。
+nodeLinker: hoisted
+shamefullyHoist: true

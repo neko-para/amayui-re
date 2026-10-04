@@ -56,6 +56,7 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `requirements.mjs` | `requirements` | ★ `data/requirements/` 的进度视图 + 唯一编辑入口（需求/缺陷 + 父子树；见 `pnpm tools requirements describe`） |
 | `disasm-recode.mjs` | `disasm` | 反汇编语料的**无损转写**与保真断言（见 `pnpm tools disasm describe`） |
 | `patch.mjs` | `patch` | ★ 翻译 patch 的查询 / **提取（唯一写入口）** / 复验（见 `pnpm tools patch describe` 与 `tools/patch.md`） |
+| `ui-bake.mjs` | `ui-bake` | ★ **UI 图片烘焙链**：原始 ALF → 改图配方（`tools/ui-bake/recipes/*.json`）→ 生效版 PNG / 注回 AGF；判据是**逐像素相同**（见 `pnpm tools ui-bake describe` 与 `tools/ui-bake.md`） |
 | `old-repo-inventory.mjs` | `old-repo` | **只读旧仓**：重新实测 → `docs/00-origin/old-repo-inventory.md`；重建翻译参考快照 → `docs/01-translation/ref/`（资产散件 + `archive.zip`） |
 | `test/*.test.mjs` | —— | 基建契约测试（`node --test`） |
 

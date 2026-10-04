@@ -49,15 +49,30 @@
 * 仓库内**其余一切 JS** —— `packages/*`、`tools/*`、守卫与测试 —— **一律直接写 `.mjs`**。
   根目录**不引入** `typescript` / `tsc` / `tsconfig`，因此没有构建步骤，`node` 直接跑。
 * 包管理**用 pnpm**（`pnpm-workspace.yaml` 是 workspace 真源）。禁止混用 `npm install` 生成 `package-lock.json`。
-  ★ **根 `.npmrc` 设了 `shamefully-hoist=true`**（键名**不能**写成 `npm_config_shamefully_hoist` —— 那是环境变量的
-  形式，pnpm 在 `.npmrc` 里不认它，症状是 install 完不 hoist、要到运行期才炸）：本机的 `fs.realpathSync`
-  **不解析 pnpm 的 junction**，严格布局会让 `vite` 里的 `import 'rolldown'` 直接 `ERR_MODULE_NOT_FOUND`
-  ⇒ `apps/workbench` 的依赖必须扁平。判据：`pnpm config get shamefully-hoist` 必须回 `true`。
-  ★★ 扁平布局有一条**硬约束**：**一个包名在树里只能有一个版本**。两个大版本共存时，根上 hoist 的那一份会
-  遮蔽别的包自己那份嵌套依赖（junction 解析不会走到 `.pnpm/*/node_modules/`）。踩过：`markdown-it` 要
-  `entities@^8`、`@vue/compiler-core` 要 `entities@^7` ⇒ `vue-tsc` 一遇模板里的 `&lt;` 就崩。
-  ⇒ 要么挑**零依赖**的库，要么在根 `package.json` 的 `pnpm.overrides` 里钉成同一个版本，**并给那条路径配断言**
-  （范例：`markdown-it>entities` + 工作台 smoke 的实体解码哨兵）。理由全文见 `.npmrc`。
+  ★ **根 `.npmrc` 设了 `node-linker=hoisted`**：pnpm 默认（`isolated`）把包放进 `node_modules/.pnpm/…`
+  再用 **junction** 链到 `node_modules/<包>`；本机的 `fs.realpathSync` **不解析 junction**，于是 `vite` 里的
+  `import 'rolldown'` 会从 junction 路径逐级向上找 ⇒ `ERR_MODULE_NOT_FOUND`，**构建在加载配置之前就炸**。
+  `node-linker=hoisted` 生成的是"与 npm 相同的扁平**实体**目录布局"（实测：顶层 junction 77 → **0**），
+  解析不再经过 junction ⇒ 受限沙箱下也能构建。判据：`pnpm config get node-linker` 回 `hoisted`，
+  且 `node_modules/` 顶层**没有 junction**。
+  ⚠ `shamefully-hoist=true` 也留着，但它只做"提升"、**不消除 junction** —— 不要把它当成这条的解法。
+  ★★ **本环境下 store 的现实**（实测 2026-10，别照抄结论要照抄判据）：
+  · pnpm 的默认 store 是 `$PNPM_HOME/store`；**若工作区所在盘没有 home / 沙箱只允许写工作区，
+    它会回退到 `<workspace>/.pnpm-store`**（官方文档与 [pnpm#13525](https://github.com/pnpm/pnpm/issues/13525) 明写）。
+    本仓在 E 盘、沙箱只写工作区 ⇒ 不提权时**就是** `<仓库>/.pnpm-store`（`.gitignore` 已忽略，不入库）。
+  · **写工作区外的 store 需要提权**（用户口径：可接受）。不提权时 `pnpm install` 会尝试写外部 store
+    并报 `ERR_PNPM_EPERM`，但**仍能靠回退把依赖装上** —— 所以"不提权也能干活"，只是 store 在仓库里。
+  · ★ **不要**在仓库 `.npmrc` 写 `store-dir`：`.npmrc` 不做变量展开，写进去就是把机器相关绝对路径
+    硬编码进可入库文本（`${USERPROFILE}` 之类展开后同样是绝对路径）。要移出工作区就用**全局**配置：
+    `pnpm config set store-dir <工作区外路径> --global`。
+  · ★ `node-linker=hoisted` 与 store 位置**无关**：它把包落成 `node_modules/<包>` 的实体目录（junction 0），
+    但**文件本身仍是硬链接回 store**（实测 `nlink = 2`）⇒ **别删 store**，否则 `node_modules` 变空壳。
+  · **换 npm 不解决问题**：npm 的 cache 在 `%LOCALAPPDATA%\npm-cache`，沙箱同样拒写
+    （实测 `npm install` 直接失败：`lack permissions to access it` / 日志目录写不了）。
+    区别只是 npm **硬失败**、pnpm **降级**到项目内 store。
+  · **幽灵依赖**风险仍在：新增依赖前先确认它不是靠"根上恰好有一份"解析的。历史坑（保留参考）：
+    `markdown-it` 要 `entities@^8`、`@vue/compiler-core` 要 `entities@^7`，严格布局下 `vue-tsc`
+    一遇模板实体就崩；解法是 `pnpm.overrides` 钉成同一版本 + 给那条路径配断言。
 * `.NET`(C#) 与 `native`(C++/CMake) 各自独立工具链，**不进 npm workspaces**。
 
 ## 4. 搜索约定

@@ -93,10 +93,12 @@ pnpm verify                             # typecheck + build + smoke 一条龙
   （要开命名管道 ⇒ `EPERM`）。Vite 在 Windows 启动时有一次 `exec('net use')` 探测映射网络盘，
   在沙箱里直接抛 `spawn EPERM`，构建在加载配置之前就炸。那个入口把 `exec/execFile` 换成"空结果"桩
   （结论与真实机器一致：本仓不依赖映射盘），**不改变产物**。⇒ 一律 `node scripts/vite-cli.mjs build|dev|preview`。
-- **依赖必须扁平（根 `.npmrc` 的 `shamefully-hoist`）**：pnpm 默认布局用 junction 链到 `node_modules/<包>`，
+- **依赖必须扁平（根 `.npmrc` 的 `node-linker=hoisted`）**：pnpm 默认布局用 junction 链到 `node_modules/<包>`，
   而本机的 `fs.realpathSync` **不解析 junction** ⇒ `vite` 里 `import 'rolldown'` 会 `ERR_MODULE_NOT_FOUND`。
-  hoist 之后依赖真的躺在 `node_modules/<包>` 下，解析不再依赖 realpath。代价是放弃了
-  "依赖不可提升"的严格性（本仓其余部分没有运行期依赖，所以代价目前为零）。
+  `node-linker=hoisted` 生成"与 npm 相同的扁平**实体**目录布局"（实测顶层 junction 77 → 0），解析不再经过
+  junction。⚠ `shamefully-hoist=true` 只做"提升"、**不消除 junction**，别拿它当解法。
+  ★ store **不需要配**：pnpm 默认就建在项目所在盘的根（工作区外）；唯一判据是
+  `pnpm store path` 不得落在仓库目录之下。详见 `AGENTS.md` §3 与 `.npmrc` 的注释。
 - **Monaco 是瘦引入**：`monaco-editor/editor/editor.api.js`（只有 API）+ `monaco-editor/features/register.all.js`
   （编辑器**功能**：查找 / 折叠 / 多光标 / 跳行…，**不含** `languages/**`）+ `editor/editor.worker?worker`。
 - **Monaco 还是懒加载的**：`MonacoViewer.vue` 里用 `await import('../monaco')`，Vite 因此把它切成单独的 chunk。

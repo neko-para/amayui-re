@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "block": "SO009B",
+  "blockId": 4,
+  "source": { "kind": "alf", "entry": 0, "agf": "SO009B.AGF" },
+  "_doc": "712×256 设置页菜单文字样式测试图。三列：第一列 SVG 阴刻（28px bold 三层：fill #26201E/0.5 + 内阴影 + 棕褐膨胀外环）、第二列金 #ffd6a4、第三列青 #08F4F4（均 20px、0.5px 同色描边、2px2px1px 黑阴影、左对齐）。★ compose=render-only：旧仓 res/images/SO009B-4.png 与渲染 PNG **逐字节相同**（实测），成品不含任何原始像素。来源：旧仓 .tmp/ui-redraw/SO009B/col1/render_final.html。判据：与 corpus/assets/ui-images/SO009B-4.png 逐像素相同。",
+  "source": { "kind": "alf", "entry": 0, "agf": "SO009B.AGF" },
+  "clean": [],
+  "text": {
+    "effect": "E1",
+    "letterSpacing": 0,
+    "compose": "render-only",
+    "layers": [
+      {
+        "kind": "svg",
+        "effect": "E11",
+        "fontSize": 28,
+        "rows": [
+          { "x": 4, "y": 3, "text": "系统设定" },
+          { "x": 4, "y": 40, "text": "游戏设定" },
+          { "x": 4, "y": 77, "text": [{ "text": "ADV", "css": "letter-spacing:-1.6px" }, { "text": "设定" }] },
+          { "x": 4, "y": 114, "text": "声音设定" },
+          { "x": 4, "y": 151, "text": "角色设定" },
+          { "x": 4, "y": 188, "text": "操作设定" }
+        ]
+      },
+      { "text": "系统设定", "pos": { "x": 387, "y": 4 }, "lineHeight": 1, "role": "fill", "css": "color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "游戏设定", "pos": { "x": 387, "y": 31 }, "lineHeight": 1, "role": "fill", "css": "color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": [{ "text": "ADV", "css": "letter-spacing:-0.4px" }, { "text": "设定" }], "pos": { "x": 387, "y": 58 }, "lineHeight": 1, "role": "fill", "css": "color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "声音设定", "pos": { "x": 387, "y": 85 }, "lineHeight": 1, "role": "fill", "css": "color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "角色设定", "pos": { "x": 387, "y": 112 }, "lineHeight": 1, "role": "fill", "css": "color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "操作设定", "pos": { "x": 387, "y": 139 }, "lineHeight": 1, "role": "fill", "css": "color:#ffd6a4; -webkit-text-stroke:0.5px #ffd6a4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "系统设定", "pos": { "x": 578, "y": 4 }, "lineHeight": 1, "role": "fill", "css": "color:#08F4F4; -webkit-text-stroke:0.5px #08F4F4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "游戏设定", "pos": { "x": 578, "y": 31 }, "lineHeight": 1, "role": "fill", "css": "color:#08F4F4; -webkit-text-stroke:0.5px #08F4F4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": [{ "text": "ADV", "css": "letter-spacing:-0.4px" }, { "text": "设定" }], "pos": { "x": 578, "y": 58 }, "lineHeight": 1, "role": "fill", "css": "color:#08F4F4; -webkit-text-stroke:0.5px #08F4F4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "声音设定", "pos": { "x": 578, "y": 85 }, "lineHeight": 1, "role": "fill", "css": "color:#08F4F4; -webkit-text-stroke:0.5px #08F4F4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "角色设定", "pos": { "x": 578, "y": 112 }, "lineHeight": 1, "role": "fill", "css": "color:#08F4F4; -webkit-text-stroke:0.5px #08F4F4; text-shadow:2px 2px 1px rgba(0,0,0,1);" },
+      { "text": "操作设定", "pos": { "x": 578, "y": 139 }, "lineHeight": 1, "role": "fill", "css": "color:#08F4F4; -webkit-text-stroke:0.5px #08F4F4; text-shadow:2px 2px 1px rgba(0,0,0,1);" }
+    ]
+  }
+}

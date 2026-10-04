@@ -1,0 +1,1448 @@
+{
+  "schemaVersion": 1,
+  "block": "SO020",
+  "source": {
+    "kind": "alf",
+    "entry": 0,
+    "agf": "SO020.AGF"
+  },
+  "_doc": "★ 本图**必须** `compose:\"canvas\"`（整画布贴底图截图），不许改成 `over-base`：旧仓这条链的每一步都是整画布截图 —— `render1.html`…`render4.html` 里都有 `<img id=\"bg\" src=\"cleanN.png\">`，成品 = headless Chrome 把「底图 + 文字」**一步**复合出来的 PNG（分四步、步间各往返一次，但 premultiply 往返幂等 ⇒ 等价于一步）。所以生效版里带着 Chrome premultiply 往返留下的像素（`a=0` 但 RGB≠0 的像素被归零、`0<a<255` 的像素被取整），本工具缺省的 `over-base`（文字层 `src over` **未经 Chrome 的**原始底图）复现不了它。证据链（脚本与中间图都在 `.tmp/ui-bake/SO020/`）：① 旧仓 `render1..4.html` 用本工具封装的 Chrome 重放，与 `res/images/SO020-1..4.png` 各 **0 差**；② 同一份 clean 段 + 同一份 60 层文字，走 `over-base` 与生效版差 **145985 通道（89553 px，max 75）**，走 `canvas` 为 **0**（`emulate-canvas.mjs`、`probe-onepass.mjs`、`report-table.py`）。其余参数（clean 44 步的坐标/保留带/填充列、60 层文字、`top=y0-1`、`translateY(-0.5px)`）见 `clean` 各条的 `_note`、`text._note` 与本文件的 `note`。",
+  "note": "1792×1280 菜单界面：22 个按钮（上半 11 纯色底 142×20 / 下半 11 渐变底 150×28）+ 两个「关闭菜单」面板（154×48，从 SO021 干净块贴底图）+ 4 个「探索开始/出击」（213×73）+ 8 个「返回/物品/装备/技能」（103×73），全中文。参数出处：旧仓 `.tmp/ui-redraw/SO020/clean1.py` / `compose2.py` / `clean3.py` / `clean4.py` 与 `render1.html`…`render4.html`（旧仓文档副本 `.tmp/docs/images/SO020.md` §4–§8）。effect 选 E5 是**刻意的**：E5 没有共享 CSS（`css` 为空），于是每一层的 CSS 全落在盒子（div）上、由 span 继承 —— 这样同一条 recipe 里能同时表达 E2/E3/E5/E6 四种效果的逐层差异（若选 E2，效果字典会把 `#lN .fill` 写在 span 上，压过层自己的 css）。",
+  "clean": [
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 6,
+        "x1": 1147,
+        "y1": 25
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #1 情报"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 40,
+        "x1": 1147,
+        "y1": 59
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #2 セーブ"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 74,
+        "x1": 1147,
+        "y1": 93
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #3 ロード"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 108,
+        "x1": 1147,
+        "y1": 127
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #4 環境設定"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 142,
+        "x1": 1147,
+        "y1": 161
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #5 勝敗条件"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 176,
+        "x1": 1147,
+        "y1": 195
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #6 城塞情報"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 210,
+        "x1": 1147,
+        "y1": 229
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #7 拠点情報"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 811,
+        "x1": 1147,
+        "y1": 830
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #15 タイトルへ戻る"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1006,
+        "y0": 845,
+        "x1": 1147,
+        "y1": 864
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1021,
+      "_note": "clean1 #16 ゲームを終了する"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1021,
+        "y0": 946,
+        "x1": 1162,
+        "y1": 965
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1036,
+      "_note": "clean1 #19 履歴"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1492,
+        "y0": 796,
+        "x1": 1633,
+        "y1": 815
+      },
+      "keepL": 15,
+      "keepR": 15,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1507,
+      "_note": "clean1 #21 ルートマップ"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 240,
+        "x1": 1151,
+        "y1": 267
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #8 情報（渐变底：逐行复制保留每行渐变值）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 274,
+        "x1": 1151,
+        "y1": 301
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #9 セーブ"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 308,
+        "x1": 1151,
+        "y1": 335
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #10 ロード"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 342,
+        "x1": 1151,
+        "y1": 369
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #11 環境設定"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 376,
+        "x1": 1151,
+        "y1": 403
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #12 勝敗条件"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 410,
+        "x1": 1151,
+        "y1": 437
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #13 城塞情報"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 444,
+        "x1": 1151,
+        "y1": 471
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #14 拠点情報"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 875,
+        "x1": 1151,
+        "y1": 902
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #17 タイトルへ戻る"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1002,
+        "y0": 909,
+        "x1": 1151,
+        "y1": 936
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1022,
+      "_note": "clean1 #18 ゲームを終了する"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1017,
+        "y0": 976,
+        "x1": 1166,
+        "y1": 1003
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1037,
+      "_note": "clean1 #20 履歴"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1488,
+        "y0": 826,
+        "x1": 1637,
+        "y1": 853
+      },
+      "keepL": 20,
+      "keepR": 20,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1508,
+      "_note": "clean1 #22 ルートマップ"
+    },
+    {
+      "op": "paste",
+      "fromBlock": "SO021",
+      "from": {
+        "x0": 660,
+        "y0": 749,
+        "x1": 813,
+        "y1": 796
+      },
+      "to": {
+        "x0": 1113,
+        "y0": 602,
+        "x1": 1266,
+        "y1": 649
+      },
+      "_note": "compose2 上半面板：旧仓 compose2.py 先对 SO021 块 A 做 colfill(keepL=40,keepR=40,fillCol=700) 再 1:1 贴到 (1113,602)。这里改成「先 1:1 贴、再在目标上做同参数的列填充」（下一条）—— 两者逐像素等价（列填充按行复制，粘贴按行 1:1 映射）。"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1113,
+        "y0": 602,
+        "x1": 1266,
+        "y1": 649
+      },
+      "keepL": 40,
+      "keepR": 40,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1153,
+      "_note": "= panelA_clean 的 colfill（700-660=40 → 1153-1113=40）"
+    },
+    {
+      "op": "paste",
+      "fromBlock": "SO021",
+      "from": {
+        "x0": 660,
+        "y0": 749,
+        "x1": 813,
+        "y1": 796
+      },
+      "to": {
+        "x0": 1113,
+        "y0": 653,
+        "x1": 1266,
+        "y1": 700
+      },
+      "_note": "compose2 下半面板：同一个 panelA_clean 贴到 (1113,653)"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1113,
+        "y0": 653,
+        "x1": 1266,
+        "y1": 700
+      },
+      "keepL": 40,
+      "keepR": 40,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1153,
+      "_note": "同上"
+    },
+    {
+      "op": "paste",
+      "fromBlock": "SO021",
+      "from": {
+        "x0": 663,
+        "y0": 800,
+        "x1": 784,
+        "y1": 828
+      },
+      "to": {
+        "x0": 1129,
+        "y0": 662,
+        "x1": 1250,
+        "y1": 690
+      },
+      "_note": "compose2 下半面板内层：SO021 块 B（122×29），旧仓 colfill(keepL=23,keepR=23,fillCol=686)"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1129,
+        "y0": 662,
+        "x1": 1250,
+        "y1": 690
+      },
+      "keepL": 23,
+      "keepR": 23,
+      "keepT": 0,
+      "keepB": 0,
+      "fillCol": 1152,
+      "_note": "= panelB_clean 的 colfill（686-663=23 → 1152-1129=23）"
+    },
+    {
+      "op": "restore",
+      "box": {
+        "x0": 1113,
+        "y0": 653,
+        "x1": 1266,
+        "y1": 662
+      },
+      "_note": "compose2 恢复原图：y≤662（全宽）"
+    },
+    {
+      "op": "restore",
+      "box": {
+        "x0": 1113,
+        "y0": 688,
+        "x1": 1266,
+        "y1": 700
+      },
+      "_note": "compose2 恢复原图：y≥688（全宽）"
+    },
+    {
+      "op": "restore",
+      "box": {
+        "x0": 1113,
+        "y0": 663,
+        "x1": 1145,
+        "y1": 687
+      },
+      "_note": "compose2 恢复原图：x≤1145"
+    },
+    {
+      "op": "restore",
+      "box": {
+        "x0": 1234,
+        "y0": 663,
+        "x1": 1266,
+        "y1": 687
+      },
+      "_note": "compose2 恢复原图：x≥1234"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 114,
+        "y0": 779,
+        "x1": 326,
+        "y1": 851
+      },
+      "keepL": 26,
+      "keepR": 25,
+      "keepT": 15,
+      "keepB": 15,
+      "fillCol": 155,
+      "_note": "clean3 #151 探索開始"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 330,
+        "y0": 779,
+        "x1": 542,
+        "y1": 851
+      },
+      "keepL": 26,
+      "keepR": 25,
+      "keepT": 15,
+      "keepB": 15,
+      "fillCol": 374,
+      "_note": "clean3 #152 出撃"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 114,
+        "y0": 854,
+        "x1": 326,
+        "y1": 926
+      },
+      "keepL": 26,
+      "keepR": 25,
+      "keepT": 15,
+      "keepB": 15,
+      "fillCol": 163,
+      "_note": "clean3 #173 探索開始"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 330,
+        "y0": 854,
+        "x1": 542,
+        "y1": 926
+      },
+      "keepL": 26,
+      "keepR": 25,
+      "keepT": 15,
+      "keepB": 15,
+      "fillCol": 380,
+      "_note": "clean3 #174 出撃"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1104,
+        "y0": 1049,
+        "x1": 1206,
+        "y1": 1121
+      },
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "fillCol": 1123,
+      "_note": "clean4 #218 戻る（上）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1104,
+        "y0": 1124,
+        "x1": 1206,
+        "y1": 1196
+      },
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "fillCol": 1123,
+      "_note": "clean4 #230 戻る（下）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1209,
+        "y0": 1049,
+        "x1": 1311,
+        "y1": 1121
+      },
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "fillCol": 1226,
+      "_note": "clean4 #219 物品（上）：fillCol 比默认 x0+19 左移 2px"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1209,
+        "y0": 1124,
+        "x1": 1311,
+        "y1": 1196
+      },
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "fillCol": 1228,
+      "_note": "clean4 #231 物品（下）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1314,
+        "y0": 1049,
+        "x1": 1416,
+        "y1": 1121
+      },
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "fillCol": 1333,
+      "_note": "clean4 #220 装備（上）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1314,
+        "y0": 1124,
+        "x1": 1416,
+        "y1": 1196
+      },
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "fillCol": 1333,
+      "_note": "clean4 #232 装備（下）"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1419,
+        "y0": 1049,
+        "x1": 1521,
+        "y1": 1121
+      },
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 17,
+      "keepB": 17,
+      "fillCol": 1436,
+      "_note": "clean4 #221 技能（上）：fillCol 比默认 x0+19 左移 2px"
+    },
+    {
+      "op": "fill",
+      "box": {
+        "x0": 1419,
+        "y0": 1124,
+        "x1": 1521,
+        "y1": 1196
+      },
+      "keepL": 17,
+      "keepR": 18,
+      "keepT": 13,
+      "keepB": 12,
+      "fillCol": 1438,
+      "_note": "clean4 #233 技能（下）"
+    }
+  ],
+  "text": {
+    "effect": "E5",
+    "fontSize": 20,
+    "letterSpacing": 1,
+    "_note": "逐层 CSS 一律照抄旧仓 render1…render4.html 的 `.btn/.in/.out` 声明；`transform:translateY(-0.5px)` 与 `top = y0-1`（render3/4）是旧仓的人工偏移，原样搬。",
+    "layers": [
+      {
+        "text": "情报",
+        "pos": {
+          "x": 1006,
+          "y": 6
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#1 情報"
+      },
+      {
+        "text": "保存",
+        "pos": {
+          "x": 1006,
+          "y": 40
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#2 セーブ"
+      },
+      {
+        "text": "读取",
+        "pos": {
+          "x": 1006,
+          "y": 74
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#3 ロード"
+      },
+      {
+        "text": "环境设定",
+        "pos": {
+          "x": 1006,
+          "y": 108
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#4 環境設定"
+      },
+      {
+        "text": "胜负条件",
+        "pos": {
+          "x": 1006,
+          "y": 142
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#5 勝敗条件"
+      },
+      {
+        "text": "城塞情报",
+        "pos": {
+          "x": 1006,
+          "y": 176
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#6 城塞情報"
+      },
+      {
+        "text": "据点情报",
+        "pos": {
+          "x": 1006,
+          "y": 210
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#7 拠点情報"
+      },
+      {
+        "text": "返回标题",
+        "pos": {
+          "x": 1006,
+          "y": 811
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#15 タイトルへ戻る"
+      },
+      {
+        "text": "结束游戏",
+        "pos": {
+          "x": 1006,
+          "y": 845
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#16 ゲームを終了する"
+      },
+      {
+        "text": "历史",
+        "pos": {
+          "x": 1021,
+          "y": 946
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#19 履歴"
+      },
+      {
+        "text": "路线地图",
+        "pos": {
+          "x": 1492,
+          "y": 796
+        },
+        "lineHeight": 20,
+        "width": 142,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#21 ルートマップ"
+      },
+      {
+        "text": "情报",
+        "pos": {
+          "x": 1002,
+          "y": 240
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#8 情報 白描边层"
+      },
+      {
+        "text": "情报",
+        "pos": {
+          "x": 1002,
+          "y": 240
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#8 情報 字身层"
+      },
+      {
+        "text": "保存",
+        "pos": {
+          "x": 1002,
+          "y": 274
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#9 セーブ 白描边层"
+      },
+      {
+        "text": "保存",
+        "pos": {
+          "x": 1002,
+          "y": 274
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#9 セーブ 字身层"
+      },
+      {
+        "text": "读取",
+        "pos": {
+          "x": 1002,
+          "y": 308
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#10 ロード 白描边层"
+      },
+      {
+        "text": "读取",
+        "pos": {
+          "x": 1002,
+          "y": 308
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#10 ロード 字身层"
+      },
+      {
+        "text": "环境设定",
+        "pos": {
+          "x": 1002,
+          "y": 342
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#11 環境設定 白描边层"
+      },
+      {
+        "text": "环境设定",
+        "pos": {
+          "x": 1002,
+          "y": 342
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#11 環境設定 字身层"
+      },
+      {
+        "text": "胜负条件",
+        "pos": {
+          "x": 1002,
+          "y": 376
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#12 勝敗条件 白描边层"
+      },
+      {
+        "text": "胜负条件",
+        "pos": {
+          "x": 1002,
+          "y": 376
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#12 勝敗条件 字身层"
+      },
+      {
+        "text": "城塞情报",
+        "pos": {
+          "x": 1002,
+          "y": 410
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#13 城塞情報 白描边层"
+      },
+      {
+        "text": "城塞情报",
+        "pos": {
+          "x": 1002,
+          "y": 410
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#13 城塞情報 字身层"
+      },
+      {
+        "text": "据点情报",
+        "pos": {
+          "x": 1002,
+          "y": 444
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#14 拠点情報 白描边层"
+      },
+      {
+        "text": "据点情报",
+        "pos": {
+          "x": 1002,
+          "y": 444
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#14 拠点情報 字身层"
+      },
+      {
+        "text": "返回标题",
+        "pos": {
+          "x": 1002,
+          "y": 875
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#17 タイトルへ戻る 白描边层"
+      },
+      {
+        "text": "返回标题",
+        "pos": {
+          "x": 1002,
+          "y": 875
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#17 タイトルへ戻る 字身层"
+      },
+      {
+        "text": "结束游戏",
+        "pos": {
+          "x": 1002,
+          "y": 909
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#18 ゲームを終了する 白描边层"
+      },
+      {
+        "text": "结束游戏",
+        "pos": {
+          "x": 1002,
+          "y": 909
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#18 ゲームを終了する 字身层"
+      },
+      {
+        "text": "历史",
+        "pos": {
+          "x": 1017,
+          "y": 976
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#20 履歴 白描边层"
+      },
+      {
+        "text": "历史",
+        "pos": {
+          "x": 1017,
+          "y": 976
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#20 履歴 字身层"
+      },
+      {
+        "text": "路线地图",
+        "pos": {
+          "x": 1488,
+          "y": 826
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "#22 ルートマップ 白描边层"
+      },
+      {
+        "text": "路线地图",
+        "pos": {
+          "x": 1488,
+          "y": 826
+        },
+        "lineHeight": 28,
+        "width": 150,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#22 ルートマップ 字身层"
+      },
+      {
+        "text": "关闭菜单",
+        "pos": {
+          "x": 1113,
+          "y": 602
+        },
+        "lineHeight": 48,
+        "width": 154,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "上半面板（无白描边）"
+      },
+      {
+        "text": "关闭菜单",
+        "pos": {
+          "x": 1113,
+          "y": 653
+        },
+        "lineHeight": 48,
+        "width": 154,
+        "role": "outline",
+        "z": 1,
+        "css": "color:rgba(255,255,255,0.5); -webkit-text-stroke:2px rgba(255,255,255,0.5);",
+        "_note": "下半面板 白描边层"
+      },
+      {
+        "text": "关闭菜单",
+        "pos": {
+          "x": 1113,
+          "y": 653
+        },
+        "lineHeight": 48,
+        "width": 154,
+        "role": "fill",
+        "z": 2,
+        "css": "color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "下半面板 字身层"
+      },
+      {
+        "text": "探索开始",
+        "pos": {
+          "x": 114,
+          "y": 778
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:28px; transform:translateY(-0.5px); color:rgba(255,255,255,1); -webkit-text-stroke:4px rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "#151 探索開始 白描边层"
+      },
+      {
+        "text": "探索开始",
+        "pos": {
+          "x": 114,
+          "y": 778
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:28px; transform:translateY(-0.5px); color:#FD480A; -webkit-text-stroke:0;",
+        "_note": "#151 探索開始 红字层"
+      },
+      {
+        "text": "出击",
+        "pos": {
+          "x": 330,
+          "y": 778
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,1); -webkit-text-stroke:4px rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "#152 出撃 白描边层"
+      },
+      {
+        "text": "出击",
+        "pos": {
+          "x": 330,
+          "y": 778
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#FD480A; -webkit-text-stroke:0;",
+        "_note": "#152 出撃 红字层"
+      },
+      {
+        "text": "探索开始",
+        "pos": {
+          "x": 114,
+          "y": 853
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:28px; transform:translateY(-0.5px); color:rgba(255,255,255,1); -webkit-text-stroke:4px rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "#173 探索開始 白描边层"
+      },
+      {
+        "text": "探索开始",
+        "pos": {
+          "x": 114,
+          "y": 853
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:28px; transform:translateY(-0.5px); color:#FD480A; -webkit-text-stroke:0;",
+        "_note": "#173 探索開始 红字层"
+      },
+      {
+        "text": "出击",
+        "pos": {
+          "x": 330,
+          "y": 853
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,1); -webkit-text-stroke:4px rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "#174 出撃 白描边层"
+      },
+      {
+        "text": "出击",
+        "pos": {
+          "x": 330,
+          "y": 853
+        },
+        "lineHeight": 73,
+        "width": 213,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#FD480A; -webkit-text-stroke:0;",
+        "_note": "#174 出撃 红字层"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1104,
+          "y": 1048
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,1); -webkit-text-stroke:4px rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "#218 戻る（上）白描边层"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1104,
+          "y": 1048
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#218 戻る（上）字身层"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1104,
+          "y": 1123
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,0.5); -webkit-text-stroke:4px rgba(255,255,255,0.5);",
+        "_note": "#230 戻る（下）白描边层"
+      },
+      {
+        "text": "返回",
+        "pos": {
+          "x": 1104,
+          "y": 1123
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#230 戻る（下）字身层"
+      },
+      {
+        "text": "物品",
+        "pos": {
+          "x": 1209,
+          "y": 1048
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,1); -webkit-text-stroke:4px rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "#219 物品（上）白描边层"
+      },
+      {
+        "text": "物品",
+        "pos": {
+          "x": 1209,
+          "y": 1048
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#219 物品（上）字身层"
+      },
+      {
+        "text": "物品",
+        "pos": {
+          "x": 1209,
+          "y": 1123
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,0.5); -webkit-text-stroke:4px rgba(255,255,255,0.5);",
+        "_note": "#231 物品（下）白描边层"
+      },
+      {
+        "text": "物品",
+        "pos": {
+          "x": 1209,
+          "y": 1123
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#231 物品（下）字身层"
+      },
+      {
+        "text": "装备",
+        "pos": {
+          "x": 1314,
+          "y": 1048
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,1); -webkit-text-stroke:4px rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "#220 装備（上）白描边层"
+      },
+      {
+        "text": "装备",
+        "pos": {
+          "x": 1314,
+          "y": 1048
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#220 装備（上）字身层"
+      },
+      {
+        "text": "装备",
+        "pos": {
+          "x": 1314,
+          "y": 1123
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,0.5); -webkit-text-stroke:4px rgba(255,255,255,0.5);",
+        "_note": "#232 装備（下）白描边层"
+      },
+      {
+        "text": "装备",
+        "pos": {
+          "x": 1314,
+          "y": 1123
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#232 装備（下）字身层"
+      },
+      {
+        "text": "技能",
+        "pos": {
+          "x": 1419,
+          "y": 1048
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,1); -webkit-text-stroke:4px rgba(255,255,255,1); text-shadow:0 4px 4px rgba(0,0,0,1);",
+        "_note": "#221 技能（上）白描边层"
+      },
+      {
+        "text": "技能",
+        "pos": {
+          "x": 1419,
+          "y": 1048
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#221 技能（上）字身层"
+      },
+      {
+        "text": "技能",
+        "pos": {
+          "x": 1419,
+          "y": 1123
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "outline",
+        "z": 1,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:rgba(255,255,255,0.5); -webkit-text-stroke:4px rgba(255,255,255,0.5);",
+        "_note": "#233 技能（下）白描边层"
+      },
+      {
+        "text": "技能",
+        "pos": {
+          "x": 1419,
+          "y": 1123
+        },
+        "lineHeight": 73,
+        "width": 103,
+        "role": "fill",
+        "z": 2,
+        "css": "font-size:30px; transform:translateY(-0.5px); color:#000; -webkit-text-stroke:0.5px #000;",
+        "_note": "#233 技能（下）字身层"
+      }
+    ],
+    "compose": "canvas"
+  }
+}

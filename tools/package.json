@@ -1,5 +1,8 @@
 {
   "name": "@amayui/tools",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "jimp": "^1.6.1"
+  }
 }

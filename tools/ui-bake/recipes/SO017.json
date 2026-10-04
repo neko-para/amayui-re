@@ -1,0 +1,4342 @@
+{
+  "schemaVersion": 1,
+  "block": "SO017",
+  "blockId": 0,
+  "source": {
+    "kind": "alf",
+    "entry": 0,
+    "agf": "SO017.AGF"
+  },
+  "note": "900×1280 兵种技能名表：96 格按公式排版（中心 X = 88 + 列×180、中心 Y = 16 + 行×32，行为含空行的全局行号），文案与日文对照见 docs/images/SO017.md。清理 = 96 个矩形（技能名外接框）各向外扩 5px **置 alpha=0**（旧 so017_clean_all.py 的 `px[x,y]=(r,g,b,0)`，RGB 保留，不用列填充）。文字 = 每格三层：`.sh` 白心字型剪影 + 黑阴影 2px 2px 2px（最底）→ `.out` 2px #C90000 描边 → `.in` 纵向渐变 #FEFE13→#FEFEFD(38%–62%)→#FEFE13（`background-clip:text`，必须显式清零描边，否则继承外层红描边盖住渐变）。定位 = 旧 `.ln` 的 `left/top` 即中心坐标 + `transform:translate(-50%,-50%)`，行高 `line-height:1`（= 22px），所以每层的盒子必须按内容宽度自适应：recipe 里**不给 width**，并在第一层注入 `.b > span { position:static; display:inline-block; }` —— 这一步是必需的（实测三连）：① 工具缺省把 span 绝对定位（left:0;right:0）⇒ 容器缩成 0 宽，文字虽然居中位置正确，但 `background-clip:text` 的绘制区无宽度，渐变不上字（残差 5 万+）；② 只改成 `position:static`（inline）⇒ 渐变落在**行内盒**上，盒高 = 字体的 ascent+descent ≈ 26.6px 而不是行高 22px，渐变被纵向拉伸（残差 1.4 万，蓝通道最大差 41）；③ 再补 `display:inline-block` ⇒ span 的盒子 = 文字宽 × 行高 22px，与旧 `.in` 的盒完全一致，残差归 0。★ 合成口径：旧渲染页（.tmp/ui-redraw/SO017/render1.html / render2.html）把清理底图作 `<img id=\"bg\" src=\"clean1.png\">` 贴进页面再整画布截图 ⇒ `compose:\"canvas\"`（Chrome 的 premultiply 往返烙在生效版里）。★ 字体：旧 render1 用 WenQuanYi、render2 加 @font-face 钉 Sarasa；旧仓实测 -1 vs -2 全图 0 差异，本机 Sarasa 与旧仓 res/fonts 那份字形逐像素一致 ⇒ 直接用效果字典默认族。★ 注意 letter-spacing：旧 `.ln` **没有**字距，故 recipe 显式给 0（效果字典缺省是 1px，不写会整体偏宽）。★ 96 格 = 288 层全部显式写进 recipe（机械、可 diff）；**不需要**「按网格生成层」的新算子。",
+  "clean": [
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 38,
+        "y0": 0,
+        "x1": 136,
+        "y1": 32
+      },
+      "_note": "col0 row0：矩形 (43,3)-(132,28) 各向外扩 5px 后置透明（= 旧 so017_clean_all.py 的 range 半开区间）"
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 39,
+        "y0": 30,
+        "x1": 136,
+        "y1": 65
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 27,
+        "y0": 62,
+        "x1": 140,
+        "y1": 97
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 27,
+        "y0": 94,
+        "x1": 140,
+        "y1": 129
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 27,
+        "y0": 126,
+        "x1": 140,
+        "y1": 161
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 39,
+        "y0": 158,
+        "x1": 129,
+        "y1": 193
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 28,
+        "y0": 190,
+        "x1": 140,
+        "y1": 225
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 17,
+        "y0": 223,
+        "x1": 151,
+        "y1": 256
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 28,
+        "y0": 254,
+        "x1": 140,
+        "y1": 289
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 49,
+        "y0": 286,
+        "x1": 118,
+        "y1": 320
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 39,
+        "y0": 318,
+        "x1": 129,
+        "y1": 352
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 50,
+        "y0": 350,
+        "x1": 118,
+        "y1": 385
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 49,
+        "y0": 382,
+        "x1": 118,
+        "y1": 416
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 50,
+        "y0": 414,
+        "x1": 118,
+        "y1": 448
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 50,
+        "y0": 448,
+        "x1": 118,
+        "y1": 482
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 50,
+        "y0": 480,
+        "x1": 118,
+        "y1": 513
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 49,
+        "y0": 511,
+        "x1": 118,
+        "y1": 546
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 27,
+        "y0": 543,
+        "x1": 140,
+        "y1": 578
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 28,
+        "y0": 575,
+        "x1": 140,
+        "y1": 610
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 27,
+        "y0": 607,
+        "x1": 140,
+        "y1": 642
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 60,
+        "y0": 639,
+        "x1": 107,
+        "y1": 674
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 49,
+        "y0": 671,
+        "x1": 118,
+        "y1": 706
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 50,
+        "y0": 703,
+        "x1": 118,
+        "y1": 738
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 49,
+        "y0": 735,
+        "x1": 118,
+        "y1": 770
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 28,
+        "y0": 767,
+        "x1": 140,
+        "y1": 802
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 50,
+        "y0": 799,
+        "x1": 118,
+        "y1": 833
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 49,
+        "y0": 831,
+        "x1": 118,
+        "y1": 866
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 49,
+        "y0": 895,
+        "x1": 126,
+        "y1": 929
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 27,
+        "y0": 959,
+        "x1": 140,
+        "y1": 994
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 38,
+        "y0": 991,
+        "x1": 138,
+        "y1": 1026
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 13,
+        "y0": 1023,
+        "x1": 155,
+        "y1": 1058
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 13,
+        "y0": 1055,
+        "x1": 163,
+        "y1": 1090
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 38,
+        "y0": 1216,
+        "x1": 137,
+        "y1": 1251
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 218,
+        "y0": 0,
+        "x1": 316,
+        "y1": 33
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 218,
+        "y0": 30,
+        "x1": 318,
+        "y1": 64
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 207,
+        "y0": 62,
+        "x1": 323,
+        "y1": 97
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 207,
+        "y0": 94,
+        "x1": 323,
+        "y1": 129
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 207,
+        "y0": 127,
+        "x1": 323,
+        "y1": 162
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 219,
+        "y0": 159,
+        "x1": 312,
+        "y1": 194
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 208,
+        "y0": 191,
+        "x1": 323,
+        "y1": 226
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 197,
+        "y0": 224,
+        "x1": 334,
+        "y1": 257
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 208,
+        "y0": 255,
+        "x1": 323,
+        "y1": 290
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 229,
+        "y0": 287,
+        "x1": 301,
+        "y1": 321
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 219,
+        "y0": 319,
+        "x1": 312,
+        "y1": 353
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 230,
+        "y0": 351,
+        "x1": 301,
+        "y1": 386
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 229,
+        "y0": 383,
+        "x1": 301,
+        "y1": 417
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 230,
+        "y0": 415,
+        "x1": 301,
+        "y1": 449
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 230,
+        "y0": 448,
+        "x1": 301,
+        "y1": 482
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 230,
+        "y0": 480,
+        "x1": 301,
+        "y1": 513
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 229,
+        "y0": 511,
+        "x1": 301,
+        "y1": 546
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 207,
+        "y0": 543,
+        "x1": 323,
+        "y1": 578
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 208,
+        "y0": 575,
+        "x1": 323,
+        "y1": 610
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 207,
+        "y0": 607,
+        "x1": 323,
+        "y1": 642
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 240,
+        "y0": 639,
+        "x1": 290,
+        "y1": 674
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 229,
+        "y0": 671,
+        "x1": 301,
+        "y1": 706
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 230,
+        "y0": 703,
+        "x1": 301,
+        "y1": 738
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 229,
+        "y0": 735,
+        "x1": 301,
+        "y1": 770
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 208,
+        "y0": 768,
+        "x1": 323,
+        "y1": 803
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 230,
+        "y0": 800,
+        "x1": 301,
+        "y1": 834
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 229,
+        "y0": 832,
+        "x1": 301,
+        "y1": 867
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 219,
+        "y0": 896,
+        "x1": 317,
+        "y1": 931
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 207,
+        "y0": 960,
+        "x1": 323,
+        "y1": 995
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 193,
+        "y0": 1024,
+        "x1": 338,
+        "y1": 1059
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 399,
+        "y0": 0,
+        "x1": 496,
+        "y1": 33
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 398,
+        "y0": 30,
+        "x1": 496,
+        "y1": 64
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 387,
+        "y0": 62,
+        "x1": 505,
+        "y1": 97
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 387,
+        "y0": 94,
+        "x1": 505,
+        "y1": 129
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 387,
+        "y0": 126,
+        "x1": 505,
+        "y1": 161
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 399,
+        "y0": 158,
+        "x1": 494,
+        "y1": 193
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 388,
+        "y0": 190,
+        "x1": 505,
+        "y1": 225
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 377,
+        "y0": 223,
+        "x1": 516,
+        "y1": 256
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 388,
+        "y0": 254,
+        "x1": 505,
+        "y1": 289
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 409,
+        "y0": 286,
+        "x1": 483,
+        "y1": 320
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 399,
+        "y0": 318,
+        "x1": 494,
+        "y1": 352
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 410,
+        "y0": 350,
+        "x1": 483,
+        "y1": 385
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 409,
+        "y0": 382,
+        "x1": 483,
+        "y1": 416
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 410,
+        "y0": 414,
+        "x1": 483,
+        "y1": 448
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 410,
+        "y0": 448,
+        "x1": 483,
+        "y1": 482
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 410,
+        "y0": 480,
+        "x1": 483,
+        "y1": 513
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 409,
+        "y0": 511,
+        "x1": 483,
+        "y1": 546
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 387,
+        "y0": 543,
+        "x1": 505,
+        "y1": 578
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 388,
+        "y0": 575,
+        "x1": 505,
+        "y1": 610
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 387,
+        "y0": 607,
+        "x1": 505,
+        "y1": 642
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 420,
+        "y0": 639,
+        "x1": 472,
+        "y1": 674
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 409,
+        "y0": 671,
+        "x1": 483,
+        "y1": 706
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 410,
+        "y0": 703,
+        "x1": 483,
+        "y1": 738
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 409,
+        "y0": 735,
+        "x1": 483,
+        "y1": 770
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 388,
+        "y0": 767,
+        "x1": 505,
+        "y1": 802
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 410,
+        "y0": 799,
+        "x1": 483,
+        "y1": 833
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 409,
+        "y0": 831,
+        "x1": 483,
+        "y1": 866
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 387,
+        "y0": 959,
+        "x1": 505,
+        "y1": 994
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 373,
+        "y0": 1023,
+        "x1": 520,
+        "y1": 1058
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 578,
+        "y0": 0,
+        "x1": 676,
+        "y1": 33
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 578,
+        "y0": 30,
+        "x1": 678,
+        "y1": 64
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 758,
+        "y0": 0,
+        "x1": 856,
+        "y1": 33
+      }
+    },
+    {
+      "op": "transparent",
+      "box": {
+        "x0": 737,
+        "y0": 959,
+        "x1": 879,
+        "y1": 994
+      }
+    }
+  ],
+  "text": {
+    "effect": "E4",
+    "fontSize": 22,
+    "letterSpacing": 0,
+    "compose": "canvas",
+    "layers": [
+      {
+        "text": "人类杀手",
+        "pos": {
+          "x": 88,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 0,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1); } .b > span { position:static; display:inline-block; } #l1 { ",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "人类杀手",
+        "pos": {
+          "x": 88,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 1,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "人类杀手",
+        "pos": {
+          "x": 88,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 2,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "幻兽杀手",
+        "pos": {
+          "x": 88,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 4,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "幻兽杀手",
+        "pos": {
+          "x": 88,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 5,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "幻兽杀手",
+        "pos": {
+          "x": 88,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 6,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "对空迎击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 8,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "对空迎击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 9,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "对空迎击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 10,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "对潜迎击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 12,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "对潜迎击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 13,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "对潜迎击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 14,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "先制攻击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 16,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "先制攻击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 17,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "先制攻击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 18,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "看破Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 20,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "看破Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 21,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "看破Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 22,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "白刃流Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 24,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "白刃流Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 25,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "白刃流Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 26,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "反击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 28,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "反击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 29,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "反击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 30,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "即死反击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 32,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "即死反击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 33,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "即死反击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 34,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "决死Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 36,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "决死Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 37,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "决死Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 38,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "狂暴化Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 40,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "狂暴化Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 41,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "狂暴化Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 42,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "隐匿Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 44,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "隐匿Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 45,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "隐匿Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 46,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "反射Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 48,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "反射Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 49,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "反射Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 50,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "吸收Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 52,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "吸收Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 53,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "吸收Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 54,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "威压Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 56,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "威压Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 57,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "威压Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 58,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "贯通Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 60,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "贯通Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 61,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "贯通Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 62,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "连击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 64,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "连击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 65,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "连击Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 66,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "魔术结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 68,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "魔术结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 69,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "魔术结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 70,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "防护结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 72,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "防护结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 73,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "防护结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 74,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "灵魂结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 76,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "灵魂结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 77,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "灵魂结界Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 78,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 80,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 81,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 82,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "大盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 84,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "大盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 85,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "大盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 86,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "冰盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 88,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "冰盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 89,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "冰盾Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 90,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "复活Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 92,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "复活Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 93,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "复活Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 94,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "精神统一Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 96,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "精神统一Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 97,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "精神统一Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 98,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "心眼Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 100,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "心眼Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 101,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "心眼Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 102,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "料理Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 104,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "料理Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 105,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "料理Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 106,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "手下留情",
+        "pos": {
+          "x": 88,
+          "y": 912
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 108,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "手下留情",
+        "pos": {
+          "x": 88,
+          "y": 912
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 109,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "手下留情",
+        "pos": {
+          "x": 88,
+          "y": 912
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 110,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "援护防御Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 112,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "援护防御Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 113,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "援护防御Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 114,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "女神援护",
+        "pos": {
+          "x": 88,
+          "y": 1008
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 116,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "女神援护",
+        "pos": {
+          "x": 88,
+          "y": 1008
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 117,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "女神援护",
+        "pos": {
+          "x": 88,
+          "y": 1008
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 118,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "替身达摩Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 120,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "替身达摩Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 121,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "替身达摩Ⅰ",
+        "pos": {
+          "x": 88,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 122,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "封印反击的诅咒",
+        "pos": {
+          "x": 88,
+          "y": 1072
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 124,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "封印反击的诅咒",
+        "pos": {
+          "x": 88,
+          "y": 1072
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 125,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "封印反击的诅咒",
+        "pos": {
+          "x": 88,
+          "y": 1072
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 126,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "极限集中",
+        "pos": {
+          "x": 88,
+          "y": 1232
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 128,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "极限集中",
+        "pos": {
+          "x": 88,
+          "y": 1232
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 129,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "极限集中",
+        "pos": {
+          "x": 88,
+          "y": 1232
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 130,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "魔物杀手",
+        "pos": {
+          "x": 268,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 132,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "魔物杀手",
+        "pos": {
+          "x": 268,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 133,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "魔物杀手",
+        "pos": {
+          "x": 268,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 134,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "创造破坏",
+        "pos": {
+          "x": 268,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 136,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "创造破坏",
+        "pos": {
+          "x": 268,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 137,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "创造破坏",
+        "pos": {
+          "x": 268,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 138,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "对空迎击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 140,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "对空迎击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 141,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "对空迎击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 142,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "对潜迎击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 144,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "对潜迎击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 145,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "对潜迎击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 146,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "先制攻击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 148,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "先制攻击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 149,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "先制攻击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 150,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "看破Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 152,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "看破Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 153,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "看破Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 154,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "白刃流Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 156,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "白刃流Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 157,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "白刃流Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 158,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "反击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 160,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "反击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 161,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "反击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 162,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "即死反击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 164,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "即死反击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 165,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "即死反击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 166,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "决死Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 168,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "决死Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 169,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "决死Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 170,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "狂暴化Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 172,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "狂暴化Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 173,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "狂暴化Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 174,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "隐匿Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 176,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "隐匿Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 177,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "隐匿Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 178,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "反射Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 180,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "反射Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 181,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "反射Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 182,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "吸收Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 184,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "吸收Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 185,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "吸收Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 186,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "威压Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 188,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "威压Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 189,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "威压Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 190,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "贯通Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 192,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "贯通Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 193,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "贯通Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 194,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "连击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 196,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "连击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 197,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "连击Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 198,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "魔术结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 200,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "魔术结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 201,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "魔术结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 202,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "防护结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 204,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "防护结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 205,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "防护结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 206,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "灵魂结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 208,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "灵魂结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 209,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "灵魂结界Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 210,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 212,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 213,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 214,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "大盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 216,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "大盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 217,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "大盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 218,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "冰盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 220,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "冰盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 221,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "冰盾Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 222,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "复活Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 224,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "复活Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 225,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "复活Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 226,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "精神统一Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 228,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "精神统一Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 229,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "精神统一Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 230,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "心眼Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 232,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "心眼Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 233,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "心眼Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 234,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "料理Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 236,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "料理Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 237,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "料理Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 238,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "间接减轻",
+        "pos": {
+          "x": 268,
+          "y": 912
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 240,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "间接减轻",
+        "pos": {
+          "x": 268,
+          "y": 912
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 241,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "间接减轻",
+        "pos": {
+          "x": 268,
+          "y": 912
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 242,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "援护防御Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 244,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "援护防御Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 245,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "援护防御Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 246,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "替身达摩Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 248,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "替身达摩Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 249,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "替身达摩Ⅱ",
+        "pos": {
+          "x": 268,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 250,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "精灵杀手",
+        "pos": {
+          "x": 448,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 252,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "精灵杀手",
+        "pos": {
+          "x": 448,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 253,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "精灵杀手",
+        "pos": {
+          "x": 448,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 254,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "大物杀手",
+        "pos": {
+          "x": 448,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 256,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "大物杀手",
+        "pos": {
+          "x": 448,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 257,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "大物杀手",
+        "pos": {
+          "x": 448,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 258,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "对空迎击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 260,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "对空迎击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 261,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "对空迎击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 80
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 262,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "对潜迎击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 264,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "对潜迎击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 265,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "对潜迎击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 112
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 266,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "先制攻击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 268,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "先制攻击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 269,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "先制攻击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 144
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 270,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "看破Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 272,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "看破Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 273,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "看破Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 176
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 274,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "白刃流Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 276,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "白刃流Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 277,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "白刃流Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 208
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 278,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "反击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 280,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "反击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 281,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "反击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 240
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 282,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "即死反击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 284,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "即死反击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 285,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "即死反击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 272
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 286,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "决死Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 288,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "决死Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 289,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "决死Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 304
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 290,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "狂暴化Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 292,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "狂暴化Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 293,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "狂暴化Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 336
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 294,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "隐匿Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 296,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "隐匿Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 297,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "隐匿Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 368
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 298,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "反射Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 300,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "反射Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 301,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "反射Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 400
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 302,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "吸收Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 304,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "吸收Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 305,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "吸收Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 432
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 306,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "威压Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 308,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "威压Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 309,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "威压Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 464
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 310,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "贯通Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 312,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "贯通Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 313,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "贯通Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 496
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 314,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "连击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 316,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "连击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 317,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "连击Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 528
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 318,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "魔术结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 320,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "魔术结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 321,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "魔术结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 560
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 322,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "防护结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 324,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "防护结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 325,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "防护结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 592
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 326,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "灵魂结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 328,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "灵魂结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 329,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "灵魂结界Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 624
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 330,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 332,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 333,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 656
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 334,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "大盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 336,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "大盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 337,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "大盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 688
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 338,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "冰盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 340,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "冰盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 341,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "冰盾Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 720
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 342,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "复活Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 344,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "复活Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 345,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "复活Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 752
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 346,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "精神统一Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 348,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "精神统一Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 349,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "精神统一Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 784
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 350,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "心眼Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 352,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "心眼Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 353,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "心眼Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 816
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 354,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "料理Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 356,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "料理Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 357,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "料理Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 848
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 358,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "援护防御Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 360,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "援护防御Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 361,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "援护防御Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 362,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "替身达摩Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 364,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "替身达摩Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 365,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "替身达摩Ⅲ",
+        "pos": {
+          "x": 448,
+          "y": 1040
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 366,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "天使杀手",
+        "pos": {
+          "x": 628,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 368,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "天使杀手",
+        "pos": {
+          "x": 628,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 369,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "天使杀手",
+        "pos": {
+          "x": 628,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 370,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "死灵破坏",
+        "pos": {
+          "x": 628,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 372,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "死灵破坏",
+        "pos": {
+          "x": 628,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 373,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "死灵破坏",
+        "pos": {
+          "x": 628,
+          "y": 48
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 374,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "恶魔杀手",
+        "pos": {
+          "x": 808,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 376,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "恶魔杀手",
+        "pos": {
+          "x": 808,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 377,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "恶魔杀手",
+        "pos": {
+          "x": 808,
+          "y": 16
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 378,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      },
+      {
+        "text": "助人女仆",
+        "pos": {
+          "x": 808,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "shadow",
+        "z": 380,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000; text-shadow:2px 2px 2px rgba(0,0,0,1);",
+        "_note": "阴影层 .sh：描边字型 + 黑阴影 2px 2px 2px（最底）"
+      },
+      {
+        "text": "助人女仆",
+        "pos": {
+          "x": 808,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "outline",
+        "z": 381,
+        "css": "transform:translate(-50%,-50%); color:transparent; -webkit-text-stroke:2px #C90000;",
+        "_note": "描边层 .out：2px #C90000（内层渐变覆盖内侧 ⇒ 只露外 1px）"
+      },
+      {
+        "text": "助人女仆",
+        "pos": {
+          "x": 808,
+          "y": 976
+        },
+        "lineHeight": 1,
+        "role": "fill",
+        "z": 382,
+        "css": "transform:translate(-50%,-50%); -webkit-text-stroke:0; -webkit-text-stroke-width:0; background:linear-gradient(to bottom, #FEFE13 0%, #FEFEFD 38%, #FEFEFD 62%, #FEFE13 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;",
+        "_note": "渐变层 .in：纵向 #FEFE13→#FEFEFD(38%-62%)→#FEFE13；background* 由 buildTextHtml 落到 span"
+      }
+    ]
+  }
+}
