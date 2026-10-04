@@ -6,10 +6,11 @@
   "workspaces": [
     "packages/*",
     "tools",
-    "apps/workbench"
+    "apps/workbench",
+    "plugins/*"
   ],
   "scripts": {
-    "test": "node --test --test-isolation=none \"{tools/test/**/*.test.mjs,packages/*/test/**/*.test.mjs}\"",
+    "test": "node --test --test-isolation=none \"{tools/test/**/*.test.mjs,packages/*/test/**/*.test.mjs,plugins/*/test/**/*.test.mjs}\"",
     "tools": "node tools/cli.mjs"
   },
   "pnpm": {

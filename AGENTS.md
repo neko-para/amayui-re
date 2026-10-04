@@ -52,8 +52,12 @@
   ★ **结构类设置只写 `pnpm-workspace.yaml`，不写 `.npmrc`**：`.npmrc` 只读 auth 与 registry；
   定义 `node_modules` 结构的键写在那里会在 pnpm 11 起**静默失效**。
   ★ **不写 `nodeLinker`**（用默认 `isolated`）、**不写 `shamefullyHoist`**（默认就是 `true`，写了不生效）。
-  ★ **`storeDir: '.pnpm-store'`**（相对路径，相对 workspace 根）⇒ 可移植、在工作区内 ⇒
-  受限沙箱下 `pnpm install` **不需要提权**。
+  ★ **`storeDir: '.pnpm-store'`**（相对路径，相对 workspace 根）⇒ 可移植，且**落在工作区内** ⇒
+  store 本身不需要提权。★ **但 Windows 上"装依赖"这一步仍要提权**：pnpm 建的是**目录符号链接**
+  （要 `SeCreateSymbolicLinkPrivilege`），受限沙箱里会被拒，而 pnpm 会**静默降级成 junction** ——
+  Node **不能 realpath junction**（`lstatSync().isSymbolicLink === false`，实测）⇒ **传递依赖解析不到**
+  （实测：`plugins/deploy` 里 `schemastery` 的 `cosmokit` 报 `ERR_MODULE_NOT_FOUND`）。
+  判据：`lstatSync('<包>').isSymbolicLink === true`；修法：**提权重跑 `pnpm install`**（删掉那层 `node_modules` 更稳）。
   ★ **判据**：① `pnpm store path` 落在工作区内；② `node_modules/.modules.yaml` 的 `nodeLinker`
   是你期望的布局 —— 实物形状由**上一次安装时的配置**决定，pnpm 不会替你清理遗留的树。
   ★ **数 junction 用 node:fs 的 `lstatSync`**：PowerShell 的 `Get-ChildItem -Directory`
@@ -102,8 +106,18 @@ pnpm test                       # 守卫测试（单进程跑，见下）
 ② **`pnpm test` 用 `--test-isolation=none`**：默认隔离模式由 runner 起子进程走管道，同样会 EPERM。
 ③ **headless Chrome 在受限沙箱下跑不了**（`tools/ui-bake` 的渲染步骤）：要提权。
 判据（用 `data:text/html,<h1>x</h1>` 也失败 ⇒ 不是配方问题）与处置见 `tools/ui-bake.md` §5.1。
-★ 装依赖往工作区外写（store）也属这一类 ⇒ **提权只发生在"装依赖"与"headless 渲染"两步**；
+★ 装依赖往工作区外写（store）也属这一类；**Windows 上更要提权**：pnpm 的目录符号链接要
+`SeCreateSymbolicLinkPrivilege`，沙箱里被拒后它会**静默降级成 junction**，而 Node 解析不了 junction
+（判据与修法见 §3 的 `storeDir` 那条）⇒ **提权只发生在"装依赖"与"headless 渲染"两步**；
 `pnpm test` / `pnpm tools` / vite 构建都只读 `node_modules`，不提权照跑。
+
+★ **第四条（Windows + DSH ≥ 0.2 才有）：工作区里的文件带 Low 完整性标签**
+（`@deepseek-ai/dsh-sandbox-windows-acl` 按设计给授权根下的**常驻**可继承标签，会话结束也不撤）⇒
+**从带 Low 标签的 exe 起的进程本身就是 Low 完整性**，于是"产物要被别的进程执行"的那类会**在 DSH 之外也受影响**：
+实测症状 = 测试安装树用 Locale Emulator **进程起来、窗口没建出来**（直接双击却正常）、游戏写存档目录被拒。
+**处置**：产物建到工作区**之外**（同卷），或落盘后 `icacls <目标> /setintegritylevel Medium /T /C`
+（代价：该子树随即落在沙箱可写范围之外）。成因 / 实测 / 命令见 `tools/release.md` §3.1。
+★ 只影响"要被执行"的产物；纯文本产物与入库件不受影响。
 
 ## 6. 知识准入门（本轮**只立规矩，不落数据**）
 
@@ -121,7 +135,7 @@ pnpm test                       # 守卫测试（单进程跑，见下）
 | | 落点 | 注册方式 |
 |---|---|---|
 | **技能** | **`.agents/skills/<名字>/SKILL.md`** —— 路径**固定、不可改名/移位** | DSH 按该固定路径发现，**无需注册**。内容从零重写（不抄旧仓）；**已重建第一个：`amayui-translate`** |
-| **DSH 插件** | `plugins/` 只是**源码落点**，位置自由 | 插件通过 DSH 的插件安装机制以**软链接**注册（环境级、要重装）。**确切命令留待 M6 重建第一个插件时补进本节**（标 `TBD-M6`，不凭记忆编） |
+| **DSH 插件** | `plugins/` 只是**源码落点**，位置自由 | **`dsh plugin --profile web install "<插件绝对路径>"`**（环境级、要提权：写 `$DSH_HOME`）。包必须声明 `dsh.bundle.patch`（否则只当普通依赖装进来、**不会**被组合）；宿主插件代码**不热重载** ⇒ 改完要重启。首个插件：`plugins/deploy`（宿主侧特权工具，见其 `README.md`） |
 
 ★ **不要为了迎合注册方式去扭曲仓库结构**：技能必须遵守固定路径，而插件位置自由。
 

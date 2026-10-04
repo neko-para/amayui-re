@@ -2,39 +2,39 @@
 
 - id: REQ-01M40RP2BN9S86K6SGEW671PYA
 - type: req
-- status: open
+- status: doing
 - parent: REQ-01M3SVH2V332E4CJYN0BHH0YK8
 - order: 50
 - tags: [translation, release]
 
 ## 范围
-把 `data/translations/patch.json` + 字体 + 面向用户的文本，打成**发给玩家的那一包**，
-落到 `dist/patch/<版本>/`（生成物、不入库）。设计（含缺口与"有意不迁"的清单）见 `release/README.md`。
+把 `data/translations/patch.json` + 字体 + 面向用户的文本，打成**发给玩家的那一包**（一个 zip），落到
+`dist/patch/<版本>.zip`；同一批字节还能铺成**可运行测试树** `dist/install/`。
+
+## 已实施（一条命令一条链）
+* **`pnpm tools release pack --write`** ⇒ `dist/patch/<版本>.zip`（+ 同名 `.manifest.json`：每件指回真源 + sha256）。
+  变更集 = `patch.json` 的**键**（BIN，逐支复核 `resultSha`）· ui-bake 的**配方集合**（AGF，取 `dist/ui-bake/` 的产物）·
+  `corpus/assets/agerc/AGERC.DLL` · 发行字体 · `release/CHANGELOG.md` + `release/安装说明.md`。
+  ★ **不存同步清单**：旧仓 `patch/patch.config.json` 那种第二真源不再存在。
+* **`pnpm tools release install --write`** ⇒ `dist/install/`（= 《安装说明》第 1–5 步做成一条命令；
+  `*.ALF` 走**硬链接**，其余复制 —— 代价是那 13 个 ALF 与游戏本体同 inode）。
+* **自检（红 = 退出码 1 且一个字都不写）**：缺件 / 与 patch 的键集不一致 / 与 `resultSha` 不符 /
+  CHANGELOG 没有当前版本节；打包后**回读逐条目复验**、同输入同字节。
+* **文档**：`release/README.md`（形状 / 每件的真源 / 缺口）· `tools/release.md`（落点 / 禁令 / 踩过的坑）。
 
 ## 已完成
-* **落点定了**：入库的只有三份文本 —— `release/README.md`（设计 / 配方 / CHANGELOG 规格）·
-  `release/CHANGELOG.md`（★ 随包发给玩家）· `release/安装说明.md`（随包）；
-  产物一律 `dist/patch/<版本>/`（`.gitignore` 的 `dist/` 已命中）。
-* **CHANGELOG 已迁回**：旧仓 `patch/CHANGELOG.md` 的 15 个版本节逐字迁入（v1.14 为「开发中」节）。
-  ★ 它是**唯一允许手写的状态类文件** —— 因为它是**产品的一部分**，不是内部变更记录（内部沿革仍只有 `git log`）。
-* **有意不迁 `patch/patch.config.json`**（30 KB）：BIN 清单可由 `patch.json` 的键派生 ⇒ 再存一份就是第二真源。
+* 落点定了（三份文本入库、产物入 `dist/`，不进 LFS）· CHANGELOG 已迁回 · 有意不迁 `patch.config.json`。
+* **对账（迁移期实测）**：本仓重建出来的 453 支 BIN 与旧仓 `install/` **逐字节相同**（453/453）；
+  其中 451 支也与旧仓 `patch/BIN` 逐字节相同 —— 差的 2 支正是那份手维护清单漏掉的
+  （`$1$SCINIT.BIN` / `$1$SCJUMP.BIN` 没进旧包，`$3$DPINIT.BIN` / `$5$AMINIT2.BIN` 多出来）。
 
-## 缺（**留空并记录** —— 不许在缺口上"先对付一下"）
-1. **AGF 烘焙链**：已汉化 PNG（`corpus/assets/ui-images/`，已入库）→ **有头注入** AGF。
-   旧仓走 `scripts/agf/` 的 Node 版或 `tools/Eushully_AGF_TooL`，本仓没有。
-   进包清单旧仓是 **10 个**：`SO001` `SO002` `SO009A` `SO009B` `SO017` `SO020` `SO021` `SO025` `SO030` `SO039`。
-   ★ 不要直接拿旧仓 `patch/AGF/` —— 那是**产物**不是来源。
-2. **AGERC.DLL 构建链**（`rc → 编译 → 注入`）：归子节点 `REQ-01M3SVH5F3VJ1ENS6BN3090X8M`（windows 资源重建）。
-3. **打包动作本身**：`patch.json → BIN` 的能力已在（`pnpm tools patch`），
-   缺的是"按发行包形状铺开 + 自检"那一步。
+## 缺（**留空并记录**）
+1. `SO001` 的 AGF 层重放残差：属 ui-bake 链，归 `REQ-01M42S9QSMTPCYTHDEDCHWX3R5`；打包只如实搬运它的产物。
+2. **AGF 产物新鲜度没有守卫**：`pack` 只在清单里记 sha256，不判断 `dist/ui-bake/` 那批图是否按**当前**配方烧的
+   （确认方式：重跑 `pnpm tools ui-bake build` 再 `pack`；`build` 确定性，重跑产物逐字节相同）。
+3. AGERC 自建链：见 `REQ-01M411CSDXDVGTP83BPS6TNV48`；本版仍用入库的可信产物。
 
 ## 判据
-* 一条命令能从**文本真源**（`patch.json` + 入库 PNG / 字体 + rc 系列）打出完整的包，
-  且在干净目录里**可复现**（同输入同字节）；
-* 包里每一件都能指回它的真源；三处缺口要么补齐、要么在包说明里**显式声明"本版不含"**；
-* 打包自检**能红**：缺件 / 多出件 / 与 `patch.json` 的键集不一致 / CHANGELOG 里没有当前版本节
-  ⇒ 失败，而不是出个残包。
-
-## 非目标
-* 不发版、不打 tag、不建 CI（提交与发布时机由用户决定）；
-* **不把产物入库**（含 LFS）：产物可由文本真源重建 ⇒ 入库只会制造"你覆盖我"。
+* `tools/test/release.test.mjs`：条目表**只由真源算出来**（键集 / AGF 配方集 / 字体集合 / 版本节）·
+  形状不变量 · 守卫能红（缺件 / 无版本节 ⇒ 退出 1 且不留残件）· 同输入同字节 · 安装树的硬链接与幂等。
+* 出包前的查看路径：`pnpm tools release plan pack`（不落盘）→ 绿了再 `--write`。

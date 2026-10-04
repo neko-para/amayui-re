@@ -1,0 +1,27 @@
+{
+  "name": "@amayui/dsh-plugin-deploy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "受信任的部署工具（宿主侧特权）：把沙箱拒绝的那几步（游戏目录硬链接 / headless Chrome / 完整性标签）做成一个**窄接口**工具",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none test/*.test.mjs"
+  }
+}

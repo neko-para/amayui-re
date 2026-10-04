@@ -13,6 +13,7 @@ tools/
     paths.mjs fsx.mjs exec.mjs zip.mjs time.mjs cp932.mjs   # ★ 纯工具：不认识任何领域数据
     manifest.mjs samples.mjs requirements.mjs                # ★ 领域模型：schema / 不变量 / 读 / 写 / 自描述
     bin-source.mjs cn-jp.mjs patch.mjs                       # ★ 领域模型：BIN 来源解析 / 中文↔BIN 映射 / patch
+    release.mjs ui-bake/                                     # ★ 领域模型：发行打包（变更集 → 测试树 / zip）/ UI 烘焙链
   test/*.test.mjs    # 基建契约测试
 ```
 
@@ -57,6 +58,7 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `disasm-recode.mjs` | `disasm` | 反汇编语料的**无损转写**与保真断言（见 `pnpm tools disasm describe`） |
 | `patch.mjs` | `patch` | ★ 翻译 patch 的查询 / **提取（唯一写入口）** / 复验（见 `pnpm tools patch describe` 与 `tools/patch.md`） |
 | `ui-bake.mjs` | `ui-bake` | ★ **UI 图片烘焙链**：原始 ALF → 改图配方（`tools/ui-bake/recipes/*.json`）→ 生效版 PNG / 注回 AGF；判据是**逐像素相同**（见 `pnpm tools ui-bake describe` 与 `tools/ui-bake.md`） |
+| `release.mjs` | `release` | ★ **发行打包**：把「当前所有变更过的资源」（patch 的键 + ui-bake 的配方集 + AGERC/字体）算成**测试安装树**（ALF 硬链接）或**发给玩家的 zip**（见 `pnpm tools release describe` 与 `tools/release.md`） |
 | `old-repo-inventory.mjs` | `old-repo` | **只读旧仓**：重新实测 → `docs/00-origin/old-repo-inventory.md`；重建翻译参考快照 → `docs/01-translation/ref/`（资产散件 + `archive.zip`） |
 | `test/*.test.mjs` | —— | 基建契约测试（`node --test`） |
 
@@ -86,6 +88,11 @@ pnpm tools disasm build                     # 转写落盘 + 打确定性 zip（
 pnpm tools disasm restore                   # 由 zip 反解回投递原件（默认写回 .staging/）
 pnpm tools old-repo inventory               # 重测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm tools old-repo translate-ref           # 翻译参考快照对账（dry-run；--write 重建 assets/ + archive.zip）
+pnpm tools release plan install             # ★ 发行打包：测试安装树的计划（不落盘）
+pnpm tools release install --write          # 同步出测试安装树 → dist/install/（ALF 硬链接，其余复制）
+pnpm tools release install --write --le-cmd "<LEProc.exe>" [--le-profile <guid>] [--relabel-medium]
+                                            #   顺带写 启动游戏-LE.cmd / 把 Low 完整性标签改回 Medium（见 tools/release.md §3.1）
+pnpm tools release pack    --write          # 打包给玩家 → dist/patch/<版本>.zip（+ 同名自检清单）
 ```
 
 > ★ **两个环境口径**（都在代码里，不靠人记）：
