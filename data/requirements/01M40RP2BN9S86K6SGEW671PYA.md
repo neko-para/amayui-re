@@ -2,9 +2,10 @@
 
 - id: REQ-01M40RP2BN9S86K6SGEW671PYA
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M3SVH2V332E4CJYN0BHH0YK8
 - order: 50
+- verify: tools/test/release.test.mjs#★ pack：条目表只由真源算出来（键集 / AGF 集合 / 版本节）
 - tags: [translation, release]
 
 ## 范围

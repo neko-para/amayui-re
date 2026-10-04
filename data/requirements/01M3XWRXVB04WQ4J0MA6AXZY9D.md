@@ -2,9 +2,10 @@
 
 - id: REQ-01M3XWRXVB04WQ4J0MA6AXZY9D
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M3SVH2V332E4CJYN0BHH0YK8
 - order: 40
+- verify: tools/test/requirements.test.mjs#★ 建单只有一份规则（`planAdd`）：CLI `--add` 与工作台的 `POST /api/nodes` 都调它
 - tags: [web, workbench, tooling]
 
 ## 范围
@@ -70,7 +71,6 @@ pnpm 10 还认 `.npmrc` 的老写法、**pnpm 11 起会忽略**。现状与判�
   实现与理由见子节点「工作台：Markdown 渲染 · 组件库 · 网页建单」。留着划掉的原句，因为"当时为什么不做"也是信息。
 
 ## 退役
-`apps/requirements/`（无构建的旧版）**在新的一能跑之后删掉**，不并留两份。
-目前**留着**的唯一理由：`smoke.ts` 拿它当**离线对照物**（逐字段比对**读**端点 `/api/tree`、`/api/node`；
-写路径是新增能力，旧目录没有对应的东西）⇒ 旧目录一删，那一组自动 skip。
-⇒ 用户确认后同一提交里删目录 + 更新 `smoke.ts` 的说明。
+`apps/requirements/`（无构建的旧版）**已删除**（2026-10，用户确认；不与新版并留两份）。
+`apps/workbench/smoke.ts` 的第 ⑨ 组对照因此**自动 skip**（它的提示语早就写着"旧目录已不在正是本节点 §退役 的目标"），
+**不需要改代码**；要复现那一组对照，从 git 历史取回那一版旧目录即可。
