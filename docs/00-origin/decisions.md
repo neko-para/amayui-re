@@ -132,6 +132,55 @@
 
 > 四条的实现细节 / 全图 / 命令表都在 `tools/README.md`（§0 分层、§0.1 入口、§2 常用命令），本文件只留决定本身。
 
+## 7.1 依赖布局与 store：为什么是 `isolated` + 仓库内 store `[本轮]`
+
+`AGENTS.md` §3 只留"写什么"，这一节留"为什么"。
+
+**(1) 为什么 `.npmrc` 里不放结构设置。** 官方口径（<https://pnpm.io/settings>）：`.npmrc`
+**只读 auth 与 registry**；定义 `node_modules` 结构的设置（`nodeLinker` / `shamefullyHoist`）**只能**写在
+`pnpm-workspace.yaml`。pnpm 10 还认 `.npmrc` 的老写法、**pnpm 11 起忽略** ⇒ 写错地方会在某次升级后
+**静默失效**。所以本仓 `.npmrc` 现在没有任何有效键，项目级设置全在 `pnpm-workspace.yaml`。
+
+**(2) 为什么不设 `nodeLinker`（用默认 `isolated`）。** 起因是仓库里曾写的一条病因：
+"本机 `fs.realpathSync` 不解析 junction ⇒ `vite` 的 `import 'rolldown'` 会 `ERR_MODULE_NOT_FOUND`"。
+**这条病因已被直接实验推翻**：在 `.tmp` 里复刻 pnpm 的 `isolated` 布局（顶层 junction → `.pnpm/…` 实体），
+从 junction 路径 `import` 那个包自己的嵌套依赖，**成功**（Node 的 ESM 解析走真实路径；
+`realpathSync` 确实不解析 junction，但它不挡模块解析）。
+随后做了**干净对照**（副本里，同一份真实依赖，只差这一个设置）：
+
+| 配置 | 根 `node_modules` | `tools/node_modules` | `.modules.yaml` 记的 |
+|---|---|---|---|
+| **只有 `storeDir`（采用）** | **0 个** | 1 个 junction（`jimp`） | `nodeLinker: "isolated"` |
+| 加 `nodeLinker: hoisted` | **91 个实体目录** | **不存在** | `nodeLinker: "hoisted"` |
+
+两者**都能正常解析依赖**（`tools` 解析 `jimp` 均 OK）⇒ `hoisted` **不是必须的**；
+而它把依赖全摊到**根**上（91 个实体目录）⇒ **遮蔽风险更大**。⇒ 用默认 `isolated`。
+
+**(3) 为什么不写 `shamefullyHoist`。** 它默认就是 `true`，显式写是冗余；且实测上述两种形态下
+`.modules.yaml` 记的都是 `publicHoistPattern: []` ⇒ 那一行**不生效**。
+
+**(4) 为什么 store 用仓库内的相对路径。** `storeDir: '.pnpm-store'` 相对 workspace 根 ⇒ **可移植**
+（换机器、换盘符都不用改），且**落在工作区内** ⇒ 受限沙箱下 `pnpm install` **不需要提权**。
+放 `.npmrc` 不行：那里不做变量展开，只能写**绝对路径** ⇒ 机器相关。
+背景：pnpm 默认 store 是 `$PNPM_HOME/store`，而**若工作区所在盘没有 home、或沙箱只允许写工作区，
+它会回退到 `<workspace>/.pnpm-store`**（[pnpm#13525](https://github.com/pnpm/pnpm/issues/13525) 的标题
+就是"AI agent 沙箱里出现项目内 `.pnpm-store`"）。显式钉死是为了**沙箱内外落点一致**。
+
+**(5) 为什么"删不掉 `node_modules`"不是 bug。** `isolated` 布局下包文件是**硬链接**回 store
+（实测 `nlink>1`），而受限沙箱只允许写工作区 ⇒ `Remove-Item node_modules` 会报成千上万条
+`Access denied`（实测 23772 条）且**删不干净**。⇒ 换布局/重装一律**改名让开**（`Rename-Item`），
+**不要**指望删除；也**别删 store**（它是 `node_modules` 的支撑）。
+附带一条运营事实：改名后的遗留树若叫 `node_modules-xxx`，会被 `json-docs` 守卫当成"自有 JSON"而变红
+⇒ 让开的树请挪进 `.tmp/`。
+
+**(6) 换 npm 解决不了。** npm 的 cache 在 `%LOCALAPPDATA%\npm-cache`，沙箱同样拒写
+（实测 `npm install` 直接失败：`lack permissions to access it` / 日志目录写不了）。
+区别只是 npm **硬失败**、pnpm 能**降级**到项目内 store。
+
+**(7) 提权只发生在两步。** "装依赖"（写工作区外的 store）与"headless 渲染"（Chrome 的 mojo IPC
+要开命名管道）。`pnpm test` / `pnpm tools` / vite 构建都只读 `node_modules`，**不提权照跑**。
+第三条环境口径见 `AGENTS.md` §5。
+
 ## 8. 域内决定的去处（索引）
 
 | 主题 | 权威文档 |
@@ -157,7 +206,8 @@
 | **项目工作台（网页）**：需求 + AGE 脚本反汇编；Vue 3 + Vite + TS；服务端 `server.ts` 由 Node 原生 type stripping 直跑；正文 Markdown 渲染（`markdown-it`）+ 通用控件用 `naive-ui`；**唯一写端点** `POST /api/nodes`（建单，规则 = 模型的 `planAdd`，只在监听回环时开） | `apps/workbench/README.md` + `pnpm tools requirements show 1M3XWRXVB04WQ4J0MA6AXZY9D` |
 | agent 基建：技能固定路径、插件软链接注册、按重建处理 | `docs/04-agent/README.md`、`AGENTS.md` §7 |
 | 知识层：清理起点清单、A/B/C 分级、准入规则、`callers/callees` 数据源缺失 | `knowledge-rebuild.md` |
-| 环境与权限：五条硬纪律、跨平台六条、语言口径、怎么跑、两个沙箱口径 | `AGENTS.md` |
+| 环境与权限：五条硬纪律、跨平台六条、语言口径、怎么跑、三个沙箱口径 | `AGENTS.md` |
+| **依赖布局与 store**：为什么不设 `nodeLinker`（`isolated` vs `hoisted` 的实测对照）、为什么不写 `shamefullyHoist`、为什么 store 用仓库内相对路径、硬链接删不掉的处置 | §7.1；纪律在 `AGENTS.md` §3 |
 | 旧仓盘点（实测数字、跨域引用、混合行尾） | `docs/00-origin/old-repo-inventory.md`（生成物） |
 
 ★ 用户已定、但**不属于本仓设计**的口径（保持旧仓原样不导出 bundle/tag、技能与插件不迁移只重建、

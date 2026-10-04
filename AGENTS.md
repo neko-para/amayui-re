@@ -49,30 +49,22 @@
 * 仓库内**其余一切 JS** —— `packages/*`、`tools/*`、守卫与测试 —— **一律直接写 `.mjs`**。
   根目录**不引入** `typescript` / `tsc` / `tsconfig`，因此没有构建步骤，`node` 直接跑。
 * 包管理**用 pnpm**（`pnpm-workspace.yaml` 是 workspace 真源）。禁止混用 `npm install` 生成 `package-lock.json`。
-  ★ **根 `.npmrc` 设了 `node-linker=hoisted`**：pnpm 默认（`isolated`）把包放进 `node_modules/.pnpm/…`
-  再用 **junction** 链到 `node_modules/<包>`；本机的 `fs.realpathSync` **不解析 junction**，于是 `vite` 里的
-  `import 'rolldown'` 会从 junction 路径逐级向上找 ⇒ `ERR_MODULE_NOT_FOUND`，**构建在加载配置之前就炸**。
-  `node-linker=hoisted` 生成的是"与 npm 相同的扁平**实体**目录布局"（实测：顶层 junction 77 → **0**），
-  解析不再经过 junction ⇒ 受限沙箱下也能构建。判据：`pnpm config get node-linker` 回 `hoisted`，
-  且 `node_modules/` 顶层**没有 junction**。
-  ⚠ `shamefully-hoist=true` 也留着，但它只做"提升"、**不消除 junction** —— 不要把它当成这条的解法。
-  ★★ **本环境下 store 的现实**（实测 2026-10，别照抄结论要照抄判据）：
-  · pnpm 的默认 store 是 `$PNPM_HOME/store`；**若工作区所在盘没有 home / 沙箱只允许写工作区，
-    它会回退到 `<workspace>/.pnpm-store`**（官方文档与 [pnpm#13525](https://github.com/pnpm/pnpm/issues/13525) 明写）。
-    本仓在 E 盘、沙箱只写工作区 ⇒ 不提权时**就是** `<仓库>/.pnpm-store`（`.gitignore` 已忽略，不入库）。
-  · **写工作区外的 store 需要提权**（用户口径：可接受）。不提权时 `pnpm install` 会尝试写外部 store
-    并报 `ERR_PNPM_EPERM`，但**仍能靠回退把依赖装上** —— 所以"不提权也能干活"，只是 store 在仓库里。
-  · ★ **不要**在仓库 `.npmrc` 写 `store-dir`：`.npmrc` 不做变量展开，写进去就是把机器相关绝对路径
-    硬编码进可入库文本（`${USERPROFILE}` 之类展开后同样是绝对路径）。要移出工作区就用**全局**配置：
-    `pnpm config set store-dir <工作区外路径> --global`。
-  · ★ `node-linker=hoisted` 与 store 位置**无关**：它把包落成 `node_modules/<包>` 的实体目录（junction 0），
-    但**文件本身仍是硬链接回 store**（实测 `nlink = 2`）⇒ **别删 store**，否则 `node_modules` 变空壳。
-  · **换 npm 不解决问题**：npm 的 cache 在 `%LOCALAPPDATA%\npm-cache`，沙箱同样拒写
-    （实测 `npm install` 直接失败：`lack permissions to access it` / 日志目录写不了）。
-    区别只是 npm **硬失败**、pnpm **降级**到项目内 store。
-  · **幽灵依赖**风险仍在：新增依赖前先确认它不是靠"根上恰好有一份"解析的。历史坑（保留参考）：
-    `markdown-it` 要 `entities@^8`、`@vue/compiler-core` 要 `entities@^7`，严格布局下 `vue-tsc`
-    一遇模板实体就崩；解法是 `pnpm.overrides` 钉成同一版本 + 给那条路径配断言。
+  ★ **结构类设置只写 `pnpm-workspace.yaml`，不写 `.npmrc`**：`.npmrc` 只读 auth 与 registry；
+  定义 `node_modules` 结构的键写在那里会在 pnpm 11 起**静默失效**。
+  ★ **不写 `nodeLinker`**（用默认 `isolated`）、**不写 `shamefullyHoist`**（默认就是 `true`，写了不生效）。
+  ★ **`storeDir: '.pnpm-store'`**（相对路径，相对 workspace 根）⇒ 可移植、在工作区内 ⇒
+  受限沙箱下 `pnpm install` **不需要提权**。
+  ★ **判据**：① `pnpm store path` 落在工作区内；② `node_modules/.modules.yaml` 的 `nodeLinker`
+  是你期望的布局 —— 实物形状由**上一次安装时的配置**决定，pnpm 不会替你清理遗留的树。
+  ★ **数 junction 用 node:fs 的 `lstatSync`**：PowerShell 的 `Get-ChildItem -Directory`
+  不跟随也不显示 junction，用它数会得出全 0 的假象。
+  ★ **换布局/重装用 `Rename-Item` 让开，不要删**（`isolated` 下包文件是硬链接回 store，
+  workspace-write 里删不掉）；让开的树挪进 `.tmp/`，否则会被 `json-docs` 守卫当成自有 JSON 而变红。
+  **别删 store**（它是 `node_modules` 的支撑）。
+  ★ **换 npm 不解决问题**：npm 的 cache 同样在工作区外、同样拒写，只是**硬失败**而非降级。
+  ★ **幽灵依赖**风险仍在：新增依赖前先确认它不是靠"根上恰好有一份"解析的。
+  ⇒ **为什么**（`isolated` vs `hoisted` 的实测对照、store 落点、提权边界）见
+  `docs/00-origin/decisions.md` §7.1。
 * `.NET`(C#) 与 `native`(C++/CMake) 各自独立工具链，**不进 npm workspaces**。
 
 ## 4. 搜索约定
@@ -104,10 +96,14 @@ pnpm test                       # 守卫测试（单进程跑，见下）
   位置参数与 flag 直接跟在后面，**不必 `--`**。
 * 每个工具也都能**独立跑**（脱离 DSH / 脱离 pnpm，macOS 上一样）：`node tools/corpus.mjs --validate`。
 
-★ **两个环境口径**（代码里已处理，别绕开）：
+★ **三个环境口径**（前两条代码里已处理，别绕开；第三条只能靠提权）：
 ① **不要捕获子进程输出**（`stdio: 'pipe'`）：受限沙箱里捕获输出要开命名管道 ⇒ `spawn EPERM`。
 `tools/corpus.mjs` 的 `runCapture()` 用**文件描述符重定向**替代管道，拿到同一份 git/recipe 答案。
 ② **`pnpm test` 用 `--test-isolation=none`**：默认隔离模式由 runner 起子进程走管道，同样会 EPERM。
+③ **headless Chrome 在受限沙箱下跑不了**（`tools/ui-bake` 的渲染步骤）：要提权。
+判据（用 `data:text/html,<h1>x</h1>` 也失败 ⇒ 不是配方问题）与处置见 `tools/ui-bake.md` §5.1。
+★ 装依赖往工作区外写（store）也属这一类 ⇒ **提权只发生在"装依赖"与"headless 渲染"两步**；
+`pnpm test` / `pnpm tools` / vite 构建都只读 `node_modules`，不提权照跑。
 
 ## 6. 知识准入门（本轮**只立规矩，不落数据**）
 

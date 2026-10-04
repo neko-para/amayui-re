@@ -10,8 +10,31 @@ packages:
 #   官方口径（https://pnpm.io/settings）：`.npmrc` 只读 auth 与 registry；**定义 `node_modules` 结构的设置
 #   （`nodeLinker` / `shamefullyHoist` 等）只能写在 `pnpm-workspace.yaml`**。
 #   pnpm 10 还认 `.npmrc` 里的老写法，pnpm 11 起会忽略 ⇒ 写在这里才**不会随大版本升级静默失效**。
-#   `nodeLinker: hoisted` 的用途见 AGENTS.md §3：默认 `isolated` 用 junction 链到 `.pnpm/…`，
-#   而本机 `fs.realpathSync` 不解析 junction ⇒ `vite` 的 `import 'rolldown'` 会炸。
-#   ★ 机器级设置（如 store 位置）**不放这里**：用全局 `pnpm config set store-dir <路径>`。
-nodeLinker: hoisted
-shamefullyHoist: true
+#
+# ★ `storeDir` 用**相对路径**（相对本文件所在目录 = workspace 根）：
+#   这样它是可移植的（换机器/换盘符都不用改），并且**落在工作区内**——
+#   受限沙箱只允许写工作区，store 在工作区内 ⇒ `pnpm install` **不需要提权**。
+#   ⚠ 这条与"README 不写状态"无关：它是**配置**不是状态，且随仓库入库、每台机器都一样地解析。
+#   ⚠ `.npmrc` 不做变量展开、写进去只能是绝对路径 ⇒ store 设置**不要**放 `.npmrc`。
+storeDir: '.pnpm-store'
+#
+# ★ **只放 `storeDir`**（用户口径 2026-10）：本仓**不**显式设 `nodeLinker`，用 pnpm 默认的 `isolated`。
+#   为什么不当"扁平"来配（实测对照，副本里跑的，见下表）：
+#
+#   | 配置 | 根 node_modules | tools/node_modules | .modules.yaml |
+#   |---|---|---|---|
+#   | **只有 storeDir（采用）** | **0 个** | 1 个 junction（jimp） | `nodeLinker: "isolated"` |
+#   | 加 `nodeLinker: hoisted` | **91 个实体目录** | **不存在** | `nodeLinker: "hoisted"` |
+#
+#   两者**都能正常解析依赖**（`tools` 解析 `jimp` 均 OK）⇒ `hoisted` **不是必须的**。
+#   ⚠ 本文件与 `AGENTS.md` 曾写过的病因 —— ~~"`fs.realpathSync` 不解析 junction ⇒ `vite` 的
+#   `import 'rolldown'` 会 `ERR_MODULE_NOT_FOUND`"~~ —— **已被直接实验推翻**：
+#   在 `.tmp` 复刻 isolated 布局后从 junction 路径 `import` 是**成功**的（Node 的 ESM 解析走真实路径）。
+#   所以那一行没有存在理由；`hoisted` 反而把依赖全摊到根上，遮蔽风险更大。
+#
+#   ★ 也**不写 `shamefullyHoist`**：它的默认值就是 `true`，写出来是冗余；
+#   实测两种形态下 `.modules.yaml` 记的都是 `publicHoistPattern: []` ⇒ 那行不生效。
+#
+#   ★ 注意本仓 `node_modules` 的**现状可能与配置不一致**：它的实际形状由**上一次安装时的配置**决定
+#   （pnpm 见 `.modules.yaml` 与配置一致就跳过重链）。判据：`node_modules/.modules.yaml` 里的
+#   `nodeLinker` 值 = 你期望的布局。

@@ -28,9 +28,12 @@
 | 构建 | 只有客户端一条：`vite build` → `dist/web/` | 服务端零构建 ⇒ `serve` 的启动路径不变（spawn 一个进程） |
 
 ★ 这是 `AGENTS.md` §3（"只有 `apps/emulator` 用 TypeScript"）的**第二处例外**，已同步写进 `AGENTS.md` 与 `docs/00-origin/decisions.md`。
-★ **环境约束**（依赖必须扁平 / 构建入口不能是 `vite` / TS 钉 `~5.9`）**只在 `apps/workbench/README.md` 写一份**，本节点不复述；
-唯一值得记在这里的坑：根 `.npmrc` 的键必须写 `shamefully-hoist=true`，写成 `npm_config_shamefully_hoist` 是**环境变量的形式**，
-pnpm 在 `.npmrc` 里不认它 ⇒ install 出来不 hoist，症状要到运行期才炸。
+★ **环境约束**（依赖布局 / store 落点 / 构建入口不能是 `vite` / TS 钉 `~5.9`）**只在 `AGENTS.md` §3 与 `apps/workbench/README.md` 写一份**，本节点不复述。
+★ **2026-10 修正**：本节原先记的坑（"根 `.npmrc` 的键必须写 `shamefully-hoist=true`，写成
+`npm_config_shamefully_hoist` 没人认"）已**整体过期**——那一类设置**不再写 `.npmrc`**：
+官方口径（<https://pnpm.io/settings>）是 `.npmrc` 只读 auth/registry，定义 `node_modules` 结构的设置
+（`nodeLinker` / `shamefullyHoist` / `storeDir`）**只能写在 `pnpm-workspace.yaml`**，
+pnpm 10 还认 `.npmrc` 的老写法、**pnpm 11 起会忽略**。现状与判据见 `AGENTS.md` §3。
 
 ## 数据来源（**不重造轮子**）
 | 内容 | 来自 |

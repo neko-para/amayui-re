@@ -85,6 +85,12 @@ pnpm tools ui-bake apply  <块> [--write]# 写回 corpus/assets/ui-images/<块>-
 
 1. **headless 必须 `--headless=old`**：`--headless` / `=new` 在 Windows 上会**真开一个窗口**；
    三者产物逐字节相同，但只有 `=old` 不弹窗。★ 同一 HTML 重复渲染**确定性**。
+   ★★ **受限沙箱下这一步会失败，且失败原因与配方无关**：Chrome 的 mojo IPC 要开**命名管道**，
+   沙箱禁止 ⇒ 报 `FATAL:mojo…platform_channel.cc: Check failed: . : 拒绝访问。(0x5)`，
+   随后 `crashpad` 自杀、`--screenshot` 拿不到文件。**判据**：先在 `read-only`/`workspace-write` 下
+   直接跑一次 `chrome --headless=old --screenshot=… data:text/html,<h1>x</h1>`；
+   如果它也失败，就别去动配方 —— 那是**这一步需要提权**（与 `pnpm install` 同一类）。
+   本仓 `AGENTS.md` §5 记的"不要捕获子进程输出（要开命名管道 ⇒ EPERM）"是同一堵墙的表现。
 2. **不整画布截图**（除非该块声明 `canvas`）：把底图贴进页面让 Chrome 重画，会引入
    premultiply 往返散色（SO002 实测 1544 px 偏差）。
 3. **合成用 PIL 口径**，不要用 Jimp 自带的 `composite`/`blit`：后者是 `alpha = dstA + srcA`

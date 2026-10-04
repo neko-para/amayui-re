@@ -54,13 +54,15 @@
    与 `pnpm test` 全绿。
 
 ## 依赖地雷（引 `markdown-it` 引出来的，已修 + 已记录）
-本机是**全扁平（hoisted）**布局，且 `fs.realpathSync` **不解析 junction** ⇒ **一个包名在树里只能有一个版本**：
-两个大版本共存时，根上 hoist 的那份会**遮蔽**别的包自己那份嵌套依赖。实测踩到：`markdown-it@15` 要
-`entities@^8`、`@vue/compiler-core@3.5` 要 `entities@^7` ⇒ `vue-tsc` **一遇到模板里出现 `&lt;` 就崩**
-（`decode.fromCodePoint is not a function`）。修法：`markdown-it` 只用 `decodeHTMLStrict`（7 与 8 行为相同）
-⇒ 在根 `package.json` 的 `pnpm.overrides` 里把 `markdown-it>entities` 钉 `^7`，并给这条路径配断言（判据 1 的哨兵）。
-理由全文写在 `.npmrc`，纪律写进 `AGENTS.md` §3。
-
+实测踩到：`markdown-it@15` 要 `entities@^8`、`@vue/compiler-core@3.5` 要 `entities@^7` ⇒ `vue-tsc`
+**一遇到模板里出现 `&lt;` 就崩**（`decode.fromCodePoint is not a function`）。修法：`markdown-it` 只用
+`decodeHTMLStrict`（7 与 8 行为相同）⇒ 在根 `package.json` 的 `pnpm.overrides` 里把
+`markdown-it>entities` 钉 `^7`，并给这条路径配断言（判据 1 的哨兵）。
+★ **2026-10 修正前提**：本节原先写"本机是全扁平（hoisted）⇒ 一个包名只能有一个版本"——**不准确**。
+实测本仓并非全扁平（`nodeLinker: hoisted` 只是把 junction 从根移到各 workspace 包自己的 `node_modules`），
+真正的地雷是**幽灵依赖**：没声明该依赖的包也能解析到根上 hoist 的那一份、两个大版本共存时拿错。
+纪律：**新增依赖前先确认它不是靠"根上恰好有一份"解析的**；判据见 `AGENTS.md` §3（机器配置已移至
+`pnpm-workspace.yaml`，`.npmrc` 只读 auth/registry）。
 ## 非目标
 * **不重写**需求树 / 脚本页的 markup：树里每一行都是**真 `<a href="#/req/…">`**（中键开新 tab 是白送的，
   `n-tree` 给不了这一点）。组件库只用在"通用控件"上（搜索 / 按钮 / 表单 / 对话框 / 消息条）；

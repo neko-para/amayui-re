@@ -93,12 +93,20 @@ pnpm verify                             # typecheck + build + smoke 一条龙
   （要开命名管道 ⇒ `EPERM`）。Vite 在 Windows 启动时有一次 `exec('net use')` 探测映射网络盘，
   在沙箱里直接抛 `spawn EPERM`，构建在加载配置之前就炸。那个入口把 `exec/execFile` 换成"空结果"桩
   （结论与真实机器一致：本仓不依赖映射盘），**不改变产物**。⇒ 一律 `node scripts/vite-cli.mjs build|dev|preview`。
-- **依赖必须扁平（根 `.npmrc` 的 `node-linker=hoisted`）**：pnpm 默认布局用 junction 链到 `node_modules/<包>`，
-  而本机的 `fs.realpathSync` **不解析 junction** ⇒ `vite` 里 `import 'rolldown'` 会 `ERR_MODULE_NOT_FOUND`。
-  `node-linker=hoisted` 生成"与 npm 相同的扁平**实体**目录布局"（实测顶层 junction 77 → 0），解析不再经过
-  junction。⚠ `shamefully-hoist=true` 只做"提升"、**不消除 junction**，别拿它当解法。
-  ★ store **不需要配**：pnpm 默认就建在项目所在盘的根（工作区外）；唯一判据是
-  `pnpm store path` 不得落在仓库目录之下。详见 `AGENTS.md` §3 与 `.npmrc` 的注释。
+- **依赖布局**：本仓**不写 `nodeLinker`**（用 pnpm 默认的 `isolated`，2026-10 实测定案）。
+  ⚠ 官方口径是 `.npmrc` 只读 auth/registry，结构类设置（`nodeLinker` / `shamefullyHoist`）**只能**写在
+  `pnpm-workspace.yaml`，pnpm 11 起会忽略 `.npmrc` 的老写法。**当前该文件里只有 `storeDir`。**
+  ★ 曾经写在这里的病因 —— ~~"`fs.realpathSync` 不解析 junction ⇒ `vite` 里 `import 'rolldown'` 会
+  `ERR_MODULE_NOT_FOUND`"~~ —— **已被直接实验推翻**（在 `.tmp` 复刻 isolated 布局后从 junction 路径
+  `import` 是**成功**的）。所以从未需要 `nodeLinker: hoisted`；实测加了它反而把依赖全摊到**根**上
+  （91 个实体目录，遮蔽风险更大）。对照表与判据见 `AGENTS.md` §3。
+  ⚠ `node_modules` 的实际形状由**上一次安装时的配置**决定（pnpm 不会替你清理遗留的树）；
+  判据是 `node_modules/.modules.yaml` 里的 `nodeLinker` 值。
+  ⚠ 数 junction 要用 node:fs 的 `lstatSync`：PowerShell 的 `Get-ChildItem -Directory` **不跟随也不显示** junction。
+- **store 落点**：`pnpm-workspace.yaml` 的 `storeDir: '.pnpm-store'`（**相对路径**，相对 workspace 根）
+  ⇒ 可移植，且在工作区内 ⇒ 受限沙箱下 `pnpm install` **不需要提权**。判据：`pnpm store path` 在工作区内。
+  ⚠ workspace-write 下 `node_modules` 里的文件是**硬链接**（`nlink>1`）⇒ **删不掉**（实测数万条 `Access denied`）；
+  换布局要 `Rename-Item` 让开，别指望删除，也别删 store。详见 `AGENTS.md` §3。
 - **Monaco 是瘦引入**：`monaco-editor/editor/editor.api.js`（只有 API）+ `monaco-editor/features/register.all.js`
   （编辑器**功能**：查找 / 折叠 / 多光标 / 跳行…，**不含** `languages/**`）+ `editor/editor.worker?worker`。
 - **Monaco 还是懒加载的**：`MonacoViewer.vue` 里用 `await import('../monaco')`，Vite 因此把它切成单独的 chunk。
