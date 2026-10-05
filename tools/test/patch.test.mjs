@@ -21,19 +21,39 @@ import {
   SPEAKER_FILTER,
   DEFAULT_PATCH,
   DOMAIN,
+  VIEW_SCOPES,
+  alignRows,
+  applyAnchorHunks,
+  assemble,
+  baseIndexProblems,
+  buildBaseIndex,
   canonicalFormProblems,
   canonicalPatch,
+  codecContext,
   describe,
+  describeText,
   diffRows,
+  editRowAtAnchor,
+  literalShape,
   loadPatch,
+  maskLabels,
+  mergeViewManifest,
   mergeStringLiterals,
+  parseEditList,
+  projectedRows,
   replay,
+  rowIndexByLine,
+  rowKeyLabel,
   rowsOf,
   savePatch,
+  scopeNames,
   serializePatch,
   sha8,
   structuralProblems,
+  substituteLiterals,
   symbolize,
+  textAtRowKey,
+  viewProblems,
   viewToBinText,
 } from '../lib/patch.mjs';
 import { makeMapper } from '../lib/cn-jp.mjs';
@@ -369,4 +389,265 @@ test('自描述可用：字段 / 不变量（含谁在守）/ 操作都在，且
   assert.match(d.writePath, /唯一写入口/);
   assert.equal(DOMAIN.id, 'patch');
   assert.ok(DOMAIN.data.some((x) => x.includes('patch.json')));
+  // ★ 视图的范围口径必须出现在自描述里（它是"检索少报"那类事故的唯一防线，不能只活在代码注释里）
+  assert.deepEqual(d.views.scopes, VIEW_SCOPES);
+  assert.equal(d.views.defaultScope, 'all');
+  for (const need of ['where', 'kinds', 'scopeNote', 'manifest', 'howToSearch']) assert.ok(d.views[need], `自描述少了 views.${need}`);
+  assert.ok(describeText(d).includes('## 视图'), 'describeText 里要有「视图」一节');
+});
+
+// ─────────────────────────────────────────────────────────── 视图：范围 / 清单 / 配对
+
+test('★ 视图范围：`all` / `patch` / `annotated` 是**三个不同的集合**（混过一次，代价是检索静默少报）', () => {
+  const all = ['SC0000.BIN', 'SP0131.BIN', 'SG0010.BIN', 'SN0000.BIN', 'PLINIT.BIN', '$1$SC0330.BIN'];
+  const doc = { scripts: { 'SC0000.BIN': {}, 'PLINIT.BIN': {} } };
+  assert.deepEqual(scopeNames('all', { all, doc }), all, 'all = 基线根里全部可反汇编脚本');
+  assert.deepEqual(scopeNames('patch', { all, doc }), ['PLINIT.BIN', 'SC0000.BIN'], 'patch 只看"有变更的"');
+  assert.deepEqual(scopeNames('annotated', { all, doc }), ['SC0000.BIN', 'SP0131.BIN', '$1$SC0330.BIN']);
+  // ★ 三者互不相等：任何"用 annotated 当视图范围"的写法都会被这条抓住
+  assert.notDeepEqual(scopeNames('annotated', { all, doc }), scopeNames('patch', { all, doc }));
+  assert.equal(scopeNames('annotated', { all, doc }).length, 3, 'annotated 只是"旧管线标注过的那批"');
+  assert.throws(() => scopeNames('nope', { all, doc }), /不认识的视图范围/);
+  // patch 里有基线根不认识的键 ⇒ 抛（不静默按名字生成一个查不到的视图）
+  assert.throws(() => scopeNames('patch', { all, doc: { scripts: { 'XX.BIN': {} } } }), /不在基线根/);
+});
+
+test('★ 视图清单：逐脚本记账（指纹 + 覆盖了哪几侧），陈旧要报出"为什么"与"怎么修"', () => {
+  const entries = { 'SC0000.BIN': { baseSha: 'b1', resultSha: 'r1' }, 'PLINIT.BIN': { baseSha: 'aa', resultSha: 'aa' } };
+  const manifest = mergeViewManifest(null, { scope: 'all', kinds: ['data', 'src'], entries, subsSha: 'subs', full: true });
+  const dir = 'dist/views';
+  const doc = (scripts) => ({ scripts });
+
+  // ① 新鲜：patch 条目的两个指纹与清单一致；无条目的那支"基线 == 产物"
+  assert.deepEqual(
+    viewProblems({ manifest, dir, kinds: ['data', 'src'], names: ['SC0000.BIN', 'PLINIT.BIN'], subsSha: 'subs', doc: doc({ 'SC0000.BIN': { baseSha: 'b1', resultSha: 'r1' } }) }).problems,
+    [],
+  );
+
+  // ② patch 条目变了 ⇒ 点名那一支，并给出**只重建它**的命令
+  const stale = viewProblems({ manifest, dir, kinds: ['src'], names: ['SC0000.BIN'], subsSha: 'subs', doc: doc({ 'SC0000.BIN': { baseSha: 'b1', resultSha: 'r2' } }) });
+  assert.equal(stale.ok, false);
+  assert.ok(stale.problems.some((p) => /比 patch 旧/.test(p)), stale.problems.join(' | '));
+  assert.ok(stale.problems.some((p) => /SC0000\.BIN/.test(p)));
+
+  // ③ 只生成了 data、却要搜 src ⇒ 点名"缺哪一侧"；缺整支脚本也要红
+  const dataOnly = mergeViewManifest(null, { scope: 'all', kinds: ['data'], entries, subsSha: 'subs', full: true });
+  const missKind = viewProblems({ manifest: dataOnly, dir, kinds: ['src'], names: ['SC0000.BIN'], subsSha: 'subs', doc: doc({ 'SC0000.BIN': { baseSha: 'b1', resultSha: 'r1' } }) });
+  assert.ok(missKind.problems.some((p) => /不含请求的那一侧/.test(p)), '少一侧要红');
+  const missName = viewProblems({ manifest, dir, kinds: ['src'], names: ['NOPE.BIN'], subsSha: 'subs', doc: doc({}) });
+  assert.ok(missName.problems.some((p) => /没有这 1 支脚本的视图/.test(p)));
+  assert.match(missName.fix, /patch view/);
+
+  // ④ 字典换了 ⇒ 红（换字典会让 src 的字符串和盘上那份不一样）
+  assert.ok(viewProblems({ manifest, dir, kinds: ['src'], names: ['PLINIT.BIN'], subsSha: 'SUBS2', doc: doc({}) }).problems.some((p) => /字典指纹变了/.test(p)));
+
+  // ⑤ 无变更的那支：现在 patch 里却有条目 ⇒ 也陈旧；清单不存在 ⇒ 报"先生成"
+  assert.equal(viewProblems({ manifest, dir, kinds: ['src'], names: ['PLINIT.BIN'], subsSha: 'subs', doc: doc({ 'PLINIT.BIN': { baseSha: 'aa', resultSha: 'bb' } }) }).ok, false);
+  assert.equal(viewProblems({ manifest: null, dir, kinds: ['src'], names: [], subsSha: 's', doc: doc({}) }).ok, false);
+
+  // ⑥ **增量记账**：部分生成只动自己那一格；字典换了则全部作废（不给旧记账背书）
+  const merged = mergeViewManifest(manifest, { scope: 'all', kinds: ['src'], entries: { 'SC0000.BIN': { baseSha: 'b1', resultSha: 'r9' } }, subsSha: 'subs', full: false });
+  assert.deepEqual(merged.scripts['SC0000.BIN'].kinds, ['src'], '这一次只做了 src ⇒ 只声称 src');
+  assert.deepEqual(merged.scripts['PLINIT.BIN'].kinds, ['data', 'src'], '没动的那支保持原记录');
+  assert.deepEqual(
+    Object.keys(mergeViewManifest(manifest, { scope: 'all', kinds: ['data'], entries: { 'SC0000.BIN': { baseSha: 'b1', resultSha: 'r1' } }, subsSha: 'SUBS2', full: false }).scripts),
+    ['SC0000.BIN'],
+    '字典换过 ⇒ 旧记账一律作废（只保留这一次真的生成了的那些）',
+  );
+  assert.deepEqual(Object.keys(mergeViewManifest(manifest, { scope: 'all', kinds: ['data'], entries, subsSha: 'subs', full: true }).scripts).length, 2, '全量生成 = 整个替换');
+});
+
+test('★ 编辑清单（锚寻址）：`-` 必须与当前内容逐字相同；改字面量 / 插一行 / 删一行各映到对应 op', () => {
+  // 行序空间：`dis()` 是 4 行头部 + 空行 + 正文 ⇒ 正文的行序从 0 开始
+  const view = dis('i1f4\ncomment "原生标记"\nset-string (global-string f17) "旧中文"\nshow-text 0 "第二行"');
+  const B = rowsOf(view);
+  const entryOf2 = (ops) => ({ baseSha: 'x'.repeat(64), resultSha: 'y'.repeat(64), ops });
+
+  // ① 改字面量：锚 2 = `set-string … "旧中文"` 那一行
+  const one = applyAnchorHunks({
+    baseMasked: B.masked,
+    entry: entryOf2([{ op: 'replace-line', i: 2, sha8: sha8(B.masked[2]), line: 'set-string (global-string f17) "旧中文"' }]),
+    hunks: parseEditList('SC.BIN 2\n- set-string (global-string f17) "旧中文"\n+ set-string (global-string f17) "新中文"'),
+  });
+  assert.equal(one.entry.ops.find((o) => o.i === 2).line, 'set-string (global-string f17) "新中文"');
+  assert.equal(one.entry.ops.find((o) => o.i === 2).sha8, sha8(B.masked[2]), '锚与摘要都不动');
+  assert.deepEqual(one.report.map((r) => [r.verb, r.created]), [['replace', false]]);
+
+  // ② 还没翻译的行（没有条目）⇒ 新建一条 replace-line，sha8 由基线现算
+  const created = applyAnchorHunks({
+    baseMasked: B.masked,
+    entry: entryOf2([]),
+    hunks: parseEditList('SC.BIN 3\n- show-text 0 "第二行"\n+ show-text 0 "第二行改"'),
+  });
+  assert.equal(created.entry.ops.length, 1);
+  assert.deepEqual(created.entry.ops[0], { op: 'replace-line', i: 3, sha8: sha8(B.masked[3]), line: 'show-text 0 "第二行改"' });
+  assert.equal(created.report[0].created, true);
+
+  // ③ 插一行（挂在锚 3 之后）＋ 再删掉它（行键 `3+1`）—— 行键会随着插入整体后移
+  const ins = applyAnchorHunks({ baseMasked: B.masked, entry: entryOf2([]), hunks: parseEditList('SC.BIN 3\n+ end-text-line 0') });
+  assert.deepEqual(ins.entry.ops[0], { op: 'insert-after', i: 3, instr: 'end-text-line 0' });
+  assert.equal(textAtRowKey(B.masked, ins.entry.ops, 3, 1), 'end-text-line 0');
+  const del = applyAnchorHunks({
+    baseMasked: B.masked,
+    entry: ins.entry,
+    hunks: parseEditList('SC.BIN 3+1\n- end-text-line 0'),
+  });
+  assert.equal(del.entry.ops.length, 0, '删掉刚插的那一行 ⇒ 条目又空了');
+  assert.equal(del.report[0].verb, 'delete');
+
+  // ④ 删掉基线行 ⇒ delete op（原来那条 replace-line 先撤掉）
+  const delBase = applyAnchorHunks({
+    baseMasked: B.masked,
+    entry: entryOf2([{ op: 'replace-line', i: 2, sha8: sha8(B.masked[2]), line: 'set-string (global-string f17) "旧中文"' }]),
+    hunks: parseEditList('SC.BIN 2\n- set-string (global-string f17) "旧中文"'),
+  });
+  assert.deepEqual(delBase.entry.ops, [{ op: 'delete', i: 2, sha8: sha8(B.masked[2]) }]);
+
+  // ⑤ 护栏：绑定对不上 / 行键不存在 / 块替换要拒绝并指向 `patch edit`
+  const throwsWith = (fn, needle) => {
+    let msg = '';
+    try { fn(); } catch (e) { msg = e.message; }
+    assert.ok(msg.includes(needle), `期望报错里含 ${needle}，实际：${msg || '(没抛)'}`);
+  };
+  const H = (t) => parseEditList(t);
+  throwsWith(
+    () => applyAnchorHunks({ baseMasked: B.masked, entry: entryOf2([]), hunks: H('SC.BIN 2\n- 别的内容\n+ x') }),
+    '期望的当前内容对不上',
+  );
+  throwsWith(
+    () => applyAnchorHunks({ baseMasked: B.masked, entry: entryOf2([]), hunks: H('SC.BIN 2+3\n- x\n+ y') }),
+    '在当前 src 视图里不存在',
+  );
+  throwsWith(() => H('SC.BIN 2\n- a\n- b\n+ c\n+ d'), '不在 `set` 的词汇里');
+  throwsWith(() => H('SC.BIN 2\n- a\n- b'), '一次最多删一行');
+  throwsWith(() => H('SC.BIN 2\n+ a\n+ b'), '一次最多插一行');
+  throwsWith(() => H('SC.BIN 2\n+ 新内容\n- 旧内容'), '`-` 行必须集中在 `+` 行之前');
+  throwsWith(() => H('- 没有头行\n+ x'), '先给头行');
+  throwsWith(() => H('SC.BIN 2'), '既没有');
+  throwsWith(() => H('# 只有注释'), '一条编辑都没有');
+  // 只改字面量才允许：动结构要走渲染+反解
+  throwsWith(
+    () => applyAnchorHunks({ baseMasked: B.masked, entry: entryOf2([]), hunks: H('SC.BIN 3\n- show-text 0 "第二行"\n+ comment "第二行"') }),
+    '只改引号里的字面量',
+  );
+});
+
+test('★ merge on read：`projectedRows` 与真视图的行空间一致（src = base 行 ∖ 被 replace/delete ∪ op 载荷）', () => {
+  const a = dis('i1f4\ni259\ni258 3 1\ni258 4 1\ni258 5 1');
+  const A = rowsOf(a);
+  const ops = [
+    { op: 'replace-line', i: 1, sha8: sha8(A.masked[1]), line: 'comment "换成中文"' },
+    { op: 'insert-after', i: 2, instr: 'end-text-line 0' },
+    { op: 'delete', i: 3, sha8: sha8(A.masked[3]) },
+  ];
+  const { rows } = projectedRows(A.masked, ops);
+  assert.deepEqual(rows.map((r) => r.text), ['i1f4', 'comment "换成中文"', 'i258 3 1', 'end-text-line 0', 'i258 5 1']);
+  assert.deepEqual(rows.map((r) => r.kind), ['same', 'replace', 'same', 'insert', 'same']);
+  // 与重放出来的行空间逐行相同（**除了 label 地址**：投影沿用基线那份，真视图用重建后的）
+  const replayed = rowsOf(replay(a, ops).text);
+  assert.equal(replayed.raw.length, rows.length);
+  assert.deepEqual(replayed.masked, rows.map((r) => maskLabels(r.text)));
+  // 行键：锚 2 那一行 + 挂在它后面的第 1 条插入行
+  assert.equal(textAtRowKey(A.masked, ops, 2, 0), 'i258 3 1');
+  assert.equal(textAtRowKey(A.masked, ops, 2, 1), 'end-text-line 0');
+  assert.equal(textAtRowKey(A.masked, ops, 3, 0), null, '被 delete 的行在 src 视图里没有');
+  assert.equal(rowKeyLabel(2, 1), 'i=2+1');
+  // 锚 + k 直改（快路径）：只动载荷，锚与摘要不动
+  const { entry } = editRowAtAnchor({ baseMasked: A.masked, entry: { ops }, anchor: 1, newText: 'comment "再换一次"' });
+  assert.equal(entry.ops.find((o) => o.i === 1).line, 'comment "再换一次"');
+  assert.equal(entry.ops.find((o) => o.i === 1).sha8, sha8(A.masked[1]));
+});
+
+test('★ 基线索引：只依赖不可变的东西（基线 + codec）⇒ 永不陈旧；codec 一变就红', () => {
+  // 假根：只实现 `names()` / `resolve()` / 那三个廉价指纹要用的字段。
+  // ★ 字节要是**真的 AGE 脚本**（`allScriptNames` 按头部签名判定）⇒ 用汇编器造两份。
+  const binA = assemble(dis('i1f4\ni259'));
+  const binB = assemble(dis('i1f4\ni258 3 1'));
+  const bufs = { 'SC0000.BIN': binA, 'SP0001.BIN': binB };
+  const loose = new Map(Object.keys(bufs).map((n) => [n, path.join(os.tmpdir(), n)]));
+  const root = {
+    dir: os.tmpdir(),
+    loose,
+    indices: [],
+    names: () => new Set(loose.keys()),
+    resolve: (n) => (bufs[n] ? { buf: bufs[n], from: `loose:${n}` } : null),
+  };
+  const realStat = fs.statSync;
+  fs.statSync = ((p) => (typeof p === 'string' && /SC0000|SP0001/.test(p) ? { size: 1, mtimeMs: 1 } : realStat(p)));
+  try {
+    const idx = buildBaseIndex({ root, subsSha: 'subs', codecSha: 'codec1' });
+    assert.deepEqual(idx.scripts, ['SC0000.BIN', 'SP0001.BIN']);
+    assert.equal(idx.entries['SC0000.BIN'].bytes, binA.length);
+    assert.ok(idx.baselineKey);
+    assert.deepEqual(baseIndexProblems({ index: idx, root, codecSha: 'codec1' }).problems, []);
+    // codec 变了（改汇编器 / 指令表）⇒ 旧索引里的文本不再担保能重建出同样字节
+    assert.ok(baseIndexProblems({ index: idx, root, codecSha: 'codec2' }).problems.some((x) => /codec 指纹变了/.test(x)));
+    assert.match(baseIndexProblems({ index: idx, root, codecSha: 'codec2' }).fix, /patch index --write/);
+    assert.equal(baseIndexProblems({ index: null, root, codecSha: 'codec1' }).ok, false);
+  } finally {
+    fs.statSync = realStat;
+  }
+  // codec 指纹本身：64 位 hex，且覆盖到指令表（文件清单里有它）
+  const ctx = codecContext();
+  assert.match(ctx.codecSha, /^[0-9a-f]{64}$/);
+  assert.ok(ctx.files.some((f) => f === 'instruction-set.json'), `codec 指纹要覆盖指令表：${ctx.files.join(', ')}`);
+});
+
+test('★ `find --edits --to` 的填充口径：只动引号里的字面量、跳过 `comment`、不动行尾注释', () => {
+  const view = dis(
+    ['i1f4  // 行尾注释里也有 赫塔 字样',
+      'comment "▼G1 赫塔标记"',
+      'set-string (global-string f17) "赫塔雷斯之戒"',
+      'display-furigana 0 "赫塔" "ヘタ"',
+      'label_00000040',
+      'show-text 0 "去吧"'].join('\n'),
+  );
+  const { text, changes } = substituteLiterals(view, [{ from: '赫塔', to: '废柴' }]);
+  assert.ok(text.includes('i1f4  // 行尾注释里也有 赫塔 字样'), '行尾注释不碰');
+  assert.ok(text.includes('comment "▼G1 赫塔标记"'), 'comment 是原文标记，一律跳过');
+  assert.ok(text.includes('set-string (global-string f17) "废柴雷斯之戒"'));
+  assert.ok(text.includes('display-furigana 0 "废柴" "ヘタ"'), '两个参数都是文本 ⇒ 都换');
+  assert.ok(text.includes('label_00000040'));
+  assert.equal(changes.length, 2);
+  // ★ 机械填充**会误伤同形词**（这就是"填好只是省事、仍然要逐条看"的原因）：
+  const mangled = substituteLiterals(view, [{ from: '赫塔雷斯', to: '废柴雷斯' }]);
+  assert.ok(mangled.text.includes('"废柴雷斯之戒"'), '按整词替换才是对的');
+  const over = substituteLiterals(view, [{ from: '赫塔', to: '废柴雷斯' }]);
+  assert.ok(over.text.includes('"废柴雷斯雷斯之戒"'), '按词根替换会把已有后缀叠加出来 ⇒ 必须人看');
+  // 多对替换按顺序叠加；正则写法也能用
+  const multi = substituteLiterals(view, [{ from: '赫塔', to: '废柴' }, { from: '废柴雷斯', to: '废柴' }]);
+  assert.ok(multi.text.includes('"废柴之戒"'), multi.text);
+  const rx = substituteLiterals(view, [{ from: '赫[塔太]', to: 'X' }], { regex: true });
+  assert.ok(rx.text.includes('"X雷斯之戒"'), rx.text);
+});
+
+test('★ 配对（对齐）：`replace` / `insert` / `delete` 之后，src 的每一行都还有基线身份', () => {
+  const a = dis('i1f4\ni259\ni258 3 1\ni258 4 1\ni258 5 1\ni1a7');
+  const b = dis('i1f4\ni259\ni258 3 1\ncomment "插进来的"\ni258 4 1\ni1a7'); // 删一行、插一行
+  const A = rowsOf(a);
+  const B = rowsOf(b);
+  const ops = opsFrom(a, b);
+  const { rows, dropped } = alignRows(A.raw, ops);
+  const R = rowsOf(replay(a, ops).text);
+  assert.equal(rows.length, R.raw.length, 'src 的行数必须与重放出来的行数相同');
+  // 非插入行：src 的内容仍然等于它所锚的基线行（`replace` 是"换了"，锚还是那一行）
+  for (const r of rows) {
+    if (r.op !== 'insert') continue;
+    assert.ok(r.base >= -1, '插入行要挂在某一行后面');
+  }
+  assert.ok(rows.some((r) => r.op === 'insert'), '要认出插入行');
+  assert.equal(dropped.length, 1, '要认出被删的那一行');
+  // 行序空间的下标与 `rowsOf` 完全一致（否则检索报出的行号会对不上 patch 的锚）
+  const src = a.split('\n');
+  const idx = rowIndexByLine(a);
+  assert.equal(idx.filter((x) => x !== null).length, A.raw.length);
+  for (const [i, r] of idx.entries()) {
+    if (r === null) continue;
+    assert.equal(src[i].replace(/\s+\/\/.*$/, '').trim(), A.raw[r], `第 ${i + 1} 行应当对应行序 ${r}`);
+  }
+  // 没有 ops 的脚本：一一对应（视图 = 基线）
+  const id = alignRows(A.raw, []);
+  assert.deepEqual(id.rows.map((r) => r.base), A.raw.map((_, i) => i));
+  // 越界的 op ⇒ 抛（不让"错位的 patch"悄悄产出一份错位的检索结果）
+  assert.throws(() => alignRows(A.raw, [{ op: 'replace-line', i: 99 }]), /行序越界/);
 });

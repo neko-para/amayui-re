@@ -13,7 +13,7 @@
 | 世界观总览、作品标题、CAST · **首列中文**、覆盖面更广（二手草稿） | `assets/glossary-draft.md` |
 | 单位名 / 道具装备 / 技能 / 称号 / 状态 / 地形 / 卡片 … | `assets/keywords/keywords-*.md` 同名主题件 |
 | 系统提示与剧情的联动口径（SG 编号 = SC 内 G 分节编号） | `assets/SG与SC分节对应.md` |
-| **"当时提过什么问题"** | `archive.zip` 里的 `archive/**`（**只当历史工作单，结论与计数一律不采信**；要读先摊到 `.tmp/`） |
+| **"当时提过什么问题 / 当年定过什么"** | `archive.zip` → `archive/prob/prob-决策清单.md`（★ 主决策清单）与 `archive/prob/prob-*.md`（**只当历史工作单**；要读先摊到 `.tmp/`） |
 
 ★ **首列方向不一样**：术语词典是 `日文 | 中文 | 备注`，glossary-draft 是 `中文译名 | 日文原名 | …`
 ⇒ 互查必须**两边都试**，只按一边会漏。
@@ -49,12 +49,22 @@ rg -n '^# [0-9a-f]+ .+（角色语气）' docs/01-translation/ref/assets/keyword
 
 ## 3. 核实旧文档的断言（★ 用之前必做）
 
-快照里每条「不一致 / 待定 / 已回改 / 出现 N 处」都是**旧仓当时的观察**。核实的唯一办法是拿**当前译文**实测：
+快照里每条「不一致 / 待定 / 已回改 / 出现 N 处」都是**旧仓当时的观察**。核实的唯一办法是拿**当前译文**实测 ——
+**首选 `patch find`**（范围取自基线索引；日文查 base、中文查 op 载荷，按**锚**配对）：
 
 ```bash
-pnpm tools patch view --kind src            # 生成 dist/views/src/<脚本>.BIN.txt（= 基线重放 patch，字符串取 patch 里的中文）
-rg -n --no-ignore '<字串>' dist/views/src   # 现在还在不在、有几处、在哪些脚本
-rg -c --no-ignore '<字串>' dist/views/src   # 只要计数
+pnpm tools patch find '<字串>'            # 日文原文 ↔ 当前中文，按锚配对打出来
+pnpm tools patch find '<字串>' --count    # 只要"有几处、在哪几支脚本"
+pnpm tools patch find --regex 'A|B'       # 两种写法一起搜（活冲突一看便知）
+```
+
+★ **别拿裸 `rg dist/views/**` 当"全库证据"**：`dist/views` 只是缓存，而且**只常驻 base（日文）那一侧** ——
+`src`（中文）不落盘，`rg` 根本看不到它。实测踩过：范围只按"说话人标注集"生成 ⇒ data 少 718 支且不报错。
+`patch find` 的名单与 base 文本都问**基线索引**（它只依赖不可变的东西 ⇒ 永不陈旧），
+中文侧直接扫 op 载荷 —— 所以它才是唯一可信的清单来源。
+
+```bash
+rg -n --no-ignore '<字串>' dist/views/src   # 仅在已确认视图是当前 patch 的时使用
 ```
 
 **判读口径**：
@@ -66,22 +76,31 @@ rg -c --no-ignore '<字串>' dist/views/src   # 只要计数
 | 两边都 0 | 相关台词可能已随改稿消失，或旧文档写的是别的对象 ⇒ 标"无法判定" |
 
 ★ **"文档说已经改完了"不算证据** —— 唯一证据是你刚跑出来的那次检索。
-★ 计数是**当时的下界**（`rg` 命中数随时会变），引用时带上跑它的日期。
+★ 计数是**当时的下界**（命中数随时会变），引用时带上跑它的日期。
+★ 若要复核的是**一个已经定稿的命名 / 术语口径**（"这套译法丢了原义"），走 `consistency-review.md` 的 C 模式配方
+（多两步：词形穷举 + 决策史）。
 
 ## 4. 其他常用配方
 
 ```bash
 # 先例优先：工程里这个日文词/句式以前怎么译的
-rg -n --no-ignore '<日文或中文>' dist/views/src
+pnpm tools patch find '<日文词或句式>'
 
-# 日文对照（data 视图与 src 视图**同构**：同地址、同行形状 ⇒ 可并排 diff）
+# 只要分布（术语统一前后各跑一次，看还剩几支脚本）
+pnpm tools patch find '<字串>' --count
+
+# 成批回改：生成清单 → 逐条审 → 一次写盘（★ 别指望"一条命令全库替换"）
+pnpm tools patch find '<旧串>' --edits e.txt --to '<新串>'   # 机械生成（只写 e.txt）
+pnpm tools patch set --edits e.txt --write                   # 逐条应用（缺省 dry-run）
+
+# 日文对照（单支脚本；`data` 与 `src` 同构，但**行数可能不同** —— 配对锚基线行序，别按行号）
 pnpm tools patch view --kind data --name SC0000.BIN --stdout | less
 
 # 某个脚本到底有没有译文
 pnpm tools patch baseline SC0000.BIN        # 产物 = 基线 ⇒ 没变更；≠ ⇒ 有变更
 
 # 繁体/异体字形混入（简繁混用是实测存在的一类残留）
-rg -n --no-ignore '[嵐華燐韓]' dist/views/src
+pnpm tools patch find --regex '[嵐華燐韓]'
 ```
 
 ## 5. 快照里**不能**采信的东西

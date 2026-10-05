@@ -51,7 +51,7 @@ import { sha256buf } from './fsx.mjs';
 import { loadManifest } from './manifest.mjs';
 import { DEFAULT_MANIFEST, REPO_ROOT } from './paths.mjs';
 
-export { DEFAULT_SUBS, REPO_ROOT };
+export { DEFAULT_SUBS, REPO_ROOT, disassemble, assemble };
 
 export const DEFAULT_PATCH = path.join(REPO_ROOT, 'data', 'translations', 'patch.json');
 
@@ -106,6 +106,9 @@ export const DOMAIN = {
   data: [
     '`data/translations/patch.json`（**唯一写入口就是本工具**）',
     '`data/translations/subs-cn-jp.json`（简→日写法字典；**只读**，是构建的一环 ⇒ 指纹进 patch）',
+    '`dist/index/base.json`（**基线索引**，生成物不入库：脚本清单 + 逐支指纹 + codec/基线指纹 ⇒ **永不陈旧**）',
+    '`dist/views/data/*.txt` + `dist/views/src/*.txt`（**视图缓存**，生成物不入库：`data` 缺省写、`src` 只在整篇改时物化）',
+    '`dist/views/manifest.json`（**src 草稿账本**：只记哪几支被物化过 ⇒ 供 `edit` 验来源）',
     '外部只读来源：`gameInstall`（基线根）· 旧仓 `install/`（**仅提取期**读一次）',
   ],
   access: 'rw（唯一写入口；缺省 dry-run，写后回读复验，不绿回滚）',
@@ -113,13 +116,45 @@ export const DOMAIN = {
 };
 
 export const OPERATIONS = [
-  { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 枚举 / 不变量（含谁在守）/ 操作' },
-  { name: 'status', argv: ['--status'], mutates: false, summary: '规模与分布：脚本数 / 操作数 / 体积 / 基线解析来源' },
+  { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 枚举 / 不变量（含谁在守）/ 操作 / 视图范围 / 基线索引' },
+  { name: 'status', argv: ['--status'], mutates: false, summary: '规模与分布：脚本数 / 操作数 / 体积 / 基线解析来源 / **基线索引还新不新**' },
   { name: 'baseline', argv: ['--baseline'], mutates: false, summary: '某个脚本（或全部）的**基线与产物**从哪来：`[<脚本名>…]`' },
+  {
+    name: 'index',
+    argv: ['--index'],
+    mutates: true,
+    summary:
+      '★ 建 **基线索引**（脚本清单 + 逐支指纹 + codec / 基线指纹）⇒ `dist/index/base.json`：' +
+      '`[--out <文件>] [--write]`。它只依赖不可变的东西 ⇒ **永不陈旧**；检索/编辑都先问它',
+  },
   { name: 'extract', argv: ['--extract'], mutates: true, summary: '从旧仓产物提取 patch（**迁移期一次性**）：`[--base <目录>] [--target <目录>] [--name <脚本>] [--skip <脚本>] [--limit <n>] [--write]`' },
   { name: 'verify', argv: ['--verify'], mutates: false, summary: '判据：基线 + patch ⇒ **逐字节**相同（**缺省自证 resultSha**；`--target <目录>` 才与产物比对）`[--name <脚本>]' },
-  { name: 'view', argv: ['--view'], mutates: true, summary: '生成 `data` / `src` **视图**（生成物，不入库）：`[--kind data|src|both] [--name <脚本>] [--limit n] [--out <目录>] [--stdout] [--bin]`' },
-  { name: 'edit', argv: ['--edit'], mutates: true, summary: '**改过的 `src` 视图 ⇒ 反解回 patch**（只碰与当前重建结果不同的那些）：`[--name <脚本>] [--out <视图目录>] [--write]`' },
+  {
+    name: 'view',
+    argv: ['--view'],
+    mutates: true,
+    summary:
+      '写视图**缓存**（生成物，不入库）：缺省只写 `data`（= **基线侧，永不陈旧**）；' +
+      '`--kind src` 只在"要用编辑器整篇改"时按支物化：`[--scope all|patch|annotated] [--kind data|src|both] [--name <脚本>] [--out <目录>] [--stdout] [--bin]`',
+  },
+  {
+    name: 'find',
+    argv: ['--find'],
+    mutates: false,
+    summary:
+      '**检索**（术语 / 字串 / 先例）：**不物化 src 投影** —— 日文查基线、中文查 op 载荷，按锚配对；' +
+      '`[--kind data|src|both] [--name <脚本>] [--count] [--limit n] [--json]`；' +
+      '★ `--edits <文件> [--to <新串>]` = **生成编辑清单**（锚寻址，只写那份文件）',
+  },
+  {
+    name: 'set',
+    argv: ['--set'],
+    mutates: true,
+    summary:
+      '★ **按锚直改 op ⇒ 一次写盘进 patch**（不渲染视图、不重跑 diff）：`--edits <文件>`' +
+      '（头行 `<脚本> <锚>[+<k>]` + `- 当前内容` / `+ 新内容`）；行数变化请走 `edit`',
+  },
+  { name: 'edit', argv: ['--edit'], mutates: true, summary: '**视图文件已经被人改好了**时的批量反解（整篇翻译 / 折行重排走这条）：`[--name <脚本>] [--out <视图目录>] [--allow-stale] [--write]`' },
 ];
 
 /** 字段说明（`--describe` 用；这是**自描述**，不是第二份 schema） */
@@ -129,7 +164,7 @@ const FIELD_DOC = [
   ['subsSha', '✅', '64 位 hex', '`subs-cn-jp.json` 的 sha256 —— **构建的一环**：换字典 ⇒ 重建结果会变'],
   ['scripts', '✅', '对象：脚本名 → 条目', '键是 BIN 文件名（含 `$N$` 前缀），全大写比较友好但**按原样存**'],
   ['scripts[].baseSha', '✅', '64 位 hex', '该脚本**基线** BIN 的 sha256（防错误 apply；变即冲突）'],
-  ['scripts[].resultSha', '✅', '64 位 hex', '该脚本**产物** BIN 的 sha256（判据的证人；由 extract 写、verify 只读）'],
+  ['scripts[].resultSha', '✅', '64 位 hex', '该脚本**产物** BIN 的 sha256（判据的证人）。`extract` 时 = 旧仓当年那份产物；**编辑之后** = 本工具新产物的 sha（译文变了，它当然跟着变）'],
   ['scripts[].header', '⬜', '4 个 string', '反汇编的头部 4 行。**只在产物与基线不同时出现**（实测 `$1$IMINIT.BIN` 的 `local_vars` 就变了）；重放时用它替掉基线的头部'],
   ['scripts[].ops', '✅', '数组（可为空）', '空数组合法（手写 / 分片场景），但**提取器不会产出空条目**：没有变更的脚本就没有条目'],
   ['ops[].op', '✅', '`replace-line` \\| `delete` \\| `insert-after`', '操作类型'],
@@ -160,8 +195,8 @@ const INVARIANTS = [
     "`--verify` 的「无条目复核」：range 里没条目的那些，逐支断言**产物与基线逐字节相同**（少了这条，漏提取就会静默）"],
   ['`subsSha` 与当前字典一致（不一致 ⇒ 重建结果可能与 resultSha 不符）',
     '`--verify` 报出（不阻断：换字典的后果要显式看见）'],
-  ['`resultSha` **只由 extract 写、verify 只读**（否则就是自证循环）',
-    '`savePatch()` 不接受"verify 之后回写 resultSha"这条路径 —— 写入只发生在 extract'],
+  ['`resultSha` **只由编辑类操作写、`verify` 只读**（否则就是自证循环）',
+    '`savePatch()` 不接受"verify 之后回写 resultSha"这条路径 —— 写入只发生在 extract / set / edit'],
 ];
 
 // ─────────────────────────────────────────────────────────── 行序空间
@@ -894,6 +929,650 @@ export function savePatch(doc, p = DEFAULT_PATCH) {
   return { ok: true, bytes: Buffer.byteLength(text) };
 }
 
+// ─────────────────────────────────────────────────────────── 视图（范围 / 清单 / 检索对齐）
+
+/** 视图的落点（**生成物**，已被 `.gitignore` 命中）。`data` = 基线的反汇编；`src` = 基线 + patch */
+export const DEFAULT_VIEW_DIR = path.join(REPO_ROOT, 'dist', 'views');
+
+/**
+ * **视图清单**（生成物）：**每次非 `--stdout` 的 `patch view` 都更新它**（逐脚本记账，可增量）。
+ *
+ * ★ 它存在的唯一理由：视图是**生成物**，而**陈旧的视图不会自己报错** ——
+ *   实测踩过：`data` 视图停在 223 支（旧范围）而 patch 早已是 453 支，于是"全库 rg"**静默少报**。
+ *   清单让"检索 / 反解"能把"你手上这份视图不是当前 patch 的"变成一条**显式错误**（见 `viewProblems()`）。
+ * ★ 记账是**逐脚本**的（`baseSha` / `resultSha` / `kinds`）：所以只重建一支脚本也只让它那一格变新，
+ *   其余格子照旧 —— 于是"改一处 ⇒ 刷新一处"是可行的，不必每次全量。
+ * ★ 逐脚本的 `kinds` 是"这一次生成覆盖了哪几侧"，**覆盖式**写（不做并集）：只重建了 `data` 就别声称 `src` 新。
+ */
+export const DEFAULT_VIEW_MANIFEST = path.join(DEFAULT_VIEW_DIR, 'manifest.json');
+
+const VIEW_MANIFEST_DOC =
+  'src **草稿账本**（**生成物**，不入库）：只记"哪几支的 `src` 被物化过"（`baseSha`/`resultSha`/字典与 codec 指纹）。' +
+  '`patch edit` 靠它验来源（对不上就拒绝）；★ `patch find` **不需要**它 —— 查询按锚现算，不读 `src` 文件。**不要手改**。';
+
+/**
+ * **视图的范围**（三选一）—— 这三个范围**不是一回事**（混过一次，代价见 `docs/01-translation/patch-design.md` §2.3）：
+ *
+ * | scope | = 什么 | 为什么存在 |
+ * |---|---|---|
+ * | `all`（**缺省**） | 基线根里**全部**能反汇编的脚本 | ★ 视图是**全库检索 / 并排读**的工作面：`SG`/`SN`/`CONFIG`/物品表… 也得搜得到 |
+ * | `patch` | patch 里有条目的（= 有变更的） | 只看"动过什么"时用 |
+ * | `annotated` | `SPEAKER_FILTER` 挑出来的那批 | 旧管线做过**页 / 说话人标注**的那批 —— **只是那个任务的口径**，不是"一类脚本"、更不是视图范围 |
+ *
+ * ★ 缺省为什么是 `all`：视图的作用是"**把整个语料摆成可检索/可并排读的文本**"，
+ *   而"有没有译文"只由 patch 有没有条目判定 ⇒ 若只给有变更的脚本建视图，
+ *   那 488 支没变更的脚本就**搜不到**（它们同样有日文原文、同样要被引用为先例）。
+ */
+export const VIEW_SCOPES = ['all', 'patch', 'annotated'];
+
+/**
+ * 某个范围里有**哪些脚本**。
+ * @param {'all'|'patch'|'annotated'} scope
+ * @param {{all:string[], doc:object}} ctx `all` = `allScriptNames(base).names`（**由调用方给**，
+ *   因为解析 941 个 BIN 是这层最贵的一步 —— 这里不再解析一遍）；`doc` = patch 文档
+ */
+export function scopeNames(scope, { all, doc }) {
+  if (!VIEW_SCOPES.includes(scope)) throw new Error(`不认识的视图范围：${scope}（只有 ${VIEW_SCOPES.join(' / ')}）`);
+  if (!Array.isArray(all)) throw new Error('scopeNames 需要调用方给 `all`（= allScriptNames().names）');
+  if (scope === 'all') return all;
+  if (scope === 'annotated') return all.filter((n) => SPEAKER_FILTER.test(n));
+  const keys = Object.keys(doc?.scripts ?? {}).sort();
+  const inRange = new Set(all.map((n) => n.toUpperCase()));
+  const outside = keys.filter((n) => !inRange.has(n.toUpperCase()));
+  if (outside.length) {
+    throw new Error(
+      `patch 里有 ${outside.length} 个键不在基线根的可反汇编脚本里：${outside.slice(0, 5).join(' / ')}` +
+        '（先 `patch verify` 看基线是不是换过了）',
+    );
+  }
+  return keys;
+}
+
+/**
+ * 把"这一次物化了 `src`"记进**草稿账本**（逐脚本覆盖，不并集）。
+ *
+ * ★ 字典或 **codec** 换过 ⇒ **丢弃全部旧记账**：`src` 侧的文本可能已经不是盘上那份了
+ *   （宁可让 `edit` 重新要求生成，也不要拿旧记录给陈旧草稿背书）。
+ *
+ * @param {object|null} prev 上一次的账本（没有就传 null）
+ * @param {{scope:string, kinds:string[], entries:object, subsSha:string, codecSha?:string, full:boolean}} now
+ *   `full` = 本次覆盖了 `scope` 的全部脚本（此时不保留任何旧记账）
+ */
+export function mergeViewManifest(prev, { scope, kinds, entries, subsSha, codecSha, full }) {
+  const poison = prev && (prev.subsSha !== subsSha || (codecSha !== undefined && prev.codecSha !== undefined && prev.codecSha !== codecSha));
+  const keep = !full && prev && !poison ? { ...(prev.scripts ?? {}) } : {};
+  for (const n of Object.keys(entries)) keep[n] = { ...entries[n], kinds: [...kinds], scope };
+  const scripts = {};
+  for (const n of Object.keys(keep).sort()) scripts[n] = keep[n];
+  return {
+    schemaVersion: 2,
+    _doc: VIEW_MANIFEST_DOC,
+    subsSha,
+    ...(codecSha !== undefined ? { codecSha } : {}),
+    scripts,
+  };
+}
+
+export function saveViewManifest(m, p = DEFAULT_VIEW_MANIFEST) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  const text = `${JSON.stringify(m, null, 1)}\n`;
+  fs.writeFileSync(p, text, 'utf8');
+  return { ok: true, bytes: Buffer.byteLength(text) };
+}
+
+export function loadViewManifest(p = DEFAULT_VIEW_MANIFEST) {
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
+/**
+ * **手头这份视图还能不能用**（`patch find` 的前置判据 / `patch edit` 的护栏）——
+ * 逐条给出**为什么不行**与**怎么修**。
+ *
+ * 判据（全部机械、全部看见真源）：
+ * ① 清单存在；② 请求的脚本每一支都在清单里；③ 该脚本那一次生成**覆盖了请求的那几侧**；
+ * ④ 字典指纹一致（换字典 ⇒ `src` 的字符串会变）；
+ * ⑤ 逐脚本比对**指纹**：patch 里有条目的，清单里的 `baseSha`/`resultSha` 必须与当前条目相同；
+ *    patch 里没有条目的，清单里必须是"基线 == 产物"（否则视图生成于"那时有变更"的旧状态）。
+ *
+ * ★ 已知边界：**无变更脚本的基线漂移检测不到**（那要逐支哈希 941 个 BIN）——
+ *   基线换过就跑一次 `patch view`（`patch verify` 会把有变更的那些报出来）。
+ */
+export function viewProblems({ manifest, dir, kinds, names, subsSha, codecSha, doc }) {
+  if (!manifest) {
+    return {
+      ok: false,
+      problems: [`草稿账本不存在（还没物化过 src）：${path.join(dir, 'manifest.json')}`],
+      fix: "pnpm tools patch view --kind src --name '<脚本>' --out dist/views",
+    };
+  }
+  const problems = [];
+  const covered = manifest.scripts ?? {};
+  if (codecSha !== undefined && manifest.codecSha !== undefined && manifest.codecSha !== codecSha) {
+    problems.push('codec 指纹变了（汇编器 / 反汇编器 / 指令表改过）⇒ 旧草稿不再担保能重建出同样字节');
+  }
+  const missing = names.filter((n) => !(n in covered));
+  if (missing.length) {
+    problems.push(
+      `清单里没有这 ${missing.length} 支脚本的视图：${missing.slice(0, 5).join(' / ')}${missing.length > 5 ? ' …' : ''}`,
+    );
+  }
+  const noKind = [];
+  const stale = [];
+  for (const n of names) {
+    const m = covered[n];
+    if (!m) continue;
+    for (const k of kinds) if (!(m.kinds ?? []).includes(k)) noKind.push(`${n}（缺 ${k}）`);
+    const e = doc?.scripts?.[n];
+    if (e) {
+      if (m.baseSha !== e.baseSha) stale.push(`${n}（基线指纹变了）`);
+      else if (m.resultSha !== e.resultSha) stale.push(`${n}（patch 条目变了）`);
+    } else if (m.baseSha !== m.resultSha) {
+      stale.push(`${n}（那时有 patch 条目，现在没有了）`);
+    }
+  }
+  if (noKind.length) {
+    problems.push(`有 ${noKind.length} 支脚本的视图不含请求的那一侧：${noKind.slice(0, 5).join(' / ')}${noKind.length > 5 ? ' …' : ''}`);
+  }
+  if (manifest.subsSha !== subsSha) problems.push('字典指纹变了（`subs-cn-jp.json`）⇒ `src` 侧的字符串可能已与账本不同');
+  if (stale.length) {
+    problems.push(
+      `有 ${stale.length} 支脚本的视图比 patch 旧：${stale.slice(0, 5).join(' / ')}${stale.length > 5 ? ' …' : ''}`,
+    );
+  }
+  const bare = (s) => s.replace(/（.*$/, '');
+  const few = [...new Set([...missing, ...noKind.map(bare), ...stale.map(bare)])];
+  const fix =
+    few.length > 0 && few.length <= 5 && names.length > few.length
+      ? `pnpm tools patch view --kind ${kinds.join(',')} ${few.map((n) => `--name '${n}'`).join(' ')}`
+      : `pnpm tools patch view --kind ${kinds.join(',')}`;
+  return { ok: problems.length === 0, problems, stale, missing, fix };
+}
+
+/** label 引用 → `label_?`（与 `rowsOf().masked` 同一口径；编辑后的行空间比对要用它） */
+export const maskLabels = (line) => line.replace(LABEL_RE, 'label_?');
+
+/**
+ * 一个 op 的**载荷文本**（玩家可见的那一行）：`replace-line` → `line`；`insert-after` → `instr`；`delete` → `null`。
+ * ★ 这是"patch 里存中文"的直接后果：**查询中文不需要投影** —— op 载荷就是中文。
+ */
+export const opPayload = (o) => (o.op === 'replace-line' ? o.line : o.op === 'insert-after' ? o.instr : null);
+
+/**
+ * **两侧的行怎么对齐**（`data` ↔ `src`）—— 检索要把"日文原文"和"当前中文"摆在一起，就得知道谁对谁。
+ *
+ * ★ 为什么不能按行号对：`insert-after` / `delete` 会让两侧行数不同（这就是 patch 的内容）。
+ *   行号对不上，但**基线的行序**在两侧都有身份（`replace-line` 占着基线那一行的位置、
+ *   插入的行**挂在**它后面那一行的身份上）⇒ 对齐 = 拿 `ops` 走一遍重放的语义。
+ *
+ * @param {string[]} baseRaw `rowsOf(dataText).raw`（基线行序空间）
+ * @param {Array<object>} ops patch 条目的操作（没有条目就传 `[]`）
+ * @returns {{rows:Array<{src:number,base:number,op:string,payload:string|null}>, dropped:number[]}}
+ *   `rows[src]` 给 `src` 侧每一行的身份：`base` = 对应的基线行序（插入行取"挂在哪一行后面"），
+ *   `op` ∈ `same` / `replace` / `insert`，`payload` = 该行的**中文**载荷（`same` 行没有载荷）。
+ */
+export function alignRows(baseRaw, ops = []) {
+  const n = baseRaw.length;
+  const drops = new Set();
+  const byI = new Map();
+  for (const o of ops) {
+    if (!Number.isInteger(o.i)) throw new Error(`op.i 必须是整数：${JSON.stringify(o)}`);
+    if (o.op === 'insert-after') {
+      if (o.i < -1 || o.i > n - 1) throw new Error(`insert-after 的行序越界：i=${o.i}（基线 ${n} 行）`);
+    } else if (o.op === 'replace-line' || o.op === 'delete') {
+      if (o.i < 0 || o.i >= n) throw new Error(`${o.op} 的行序越界：i=${o.i}（基线 ${n} 行）`);
+      if (o.op === 'delete') drops.add(o.i);
+    } else throw new Error(`不认识的 op：${JSON.stringify(o.op)}`);
+    if (!byI.has(o.i)) byI.set(o.i, []);
+    byI.get(o.i).push(o);
+  }
+  const rows = [];
+  for (const o of byI.get(-1) ?? []) if (o.op === 'insert-after') rows.push({ src: rows.length, base: -1, op: 'insert', payload: o.instr });
+  for (let i = 0; i < n; i += 1) {
+    const list = byI.get(i) ?? [];
+    const rep = list.find((o) => o.op === 'replace-line');
+    if (rep) rows.push({ src: rows.length, base: i, op: 'replace', payload: rep.line });
+    else if (!drops.has(i)) rows.push({ src: rows.length, base: i, op: 'same', payload: null });
+    for (const o of list) if (o.op === 'insert-after') rows.push({ src: rows.length, base: i, op: 'insert', payload: o.instr });
+  }
+  return { rows, dropped: [...drops].sort((a, b) => a - b) };
+}
+
+/**
+ * **src 侧的行**（不重建 BIN）：`replace` / `insert` 取 op 载荷（中文），其余取基线行文本。
+ *
+ * ★ 这就是 **merge on read** 的落地：`src` 视图 = `base 行 ∖ {被 replace/delete} ∪ op 载荷`，
+ *   是一条**谓词**，不需要把 941 支脚本的投影物化出来。
+ * ★ 与真正的 `buildView('src')` 的差别只有一处：**label 操作数**。真视图里是重建后的**真实地址**，
+ *   这里沿用基线那份地址。检索（按助记符 / 字符串 / 中文）不受影响；要"逐字节同真视图"，就现算那一支。
+ */
+export function projectedRows(baseRaw, ops = []) {
+  const { rows, dropped } = alignRows(baseRaw, ops);
+  return {
+    rows: rows.map((r) => ({
+      text: r.payload ?? baseRaw[r.base],
+      base: r.base,
+      kind: r.op,
+      index: r.src,
+    })),
+    dropped,
+  };
+}
+
+/**
+ * 一行在 src 视图里的**行键**：`(锚, k)`。
+ * `k = 0` = 锚上那一行（基线行，或它的 `replace-line`）；`k ≥ 1` = 挂在它后面的第 k 条 `insert-after`。
+ * ★ 用锚而不是"文件行号"：文件行号是**渲染产物**（label 定义行的位置由汇编器决定），锚才是 patch 自己的键空间。
+ */
+export function rowKeyOf(baseRaw, ops, anchor, k) {
+  const { rows } = alignRows(baseRaw, ops);
+  const hit = rows.find((r) => r.base === anchor && (k === 0 ? r.op !== 'insert' : r.op === 'insert'));
+  if (!hit) return null;
+  if (k > 0) {
+    const same = rows.filter((r) => r.base === anchor && r.op === 'insert');
+    return same[k - 1] ?? null;
+  }
+  return hit;
+}
+
+/** 行键 → 文本（`null` = 这一行在 src 视图里不存在，例如被 `delete`） */
+export function textAtRowKey(baseRaw, ops, anchor, k = 0) {
+  const r = rowKeyOf(baseRaw, ops, anchor, k);
+  if (!r) return null;
+  return r.payload ?? baseRaw[r.base];
+}
+
+/**
+ * **在锚上直接改一行文案**（快路径：不渲染视图、不重跑 diff）。
+ *
+ * 语义 = "把 src 视图里 `(anchor, k)` 那一行换成 `newText`"，且要求**只有引号里的字面量不同**
+ * （`literalShape` 相等）—— 于是它在构造上**不可能**改坏指令结构：
+ * * 该行本来就有 `replace-line` ⇒ 只改它的载荷（**锚 `i` 与 `sha8` 原样不动**）；
+ * * 该行是 `insert-after` 插出来的 ⇒ 只改那条的载荷；
+ * * 该行还是基线行（= 还没翻译）⇒ **新建**一条 `replace-line`（`sha8` 由基线行现算，与提取器同一口径）。
+ *
+ * @returns {{entry:object, created:boolean}}
+ */
+export function editRowAtAnchor({ baseMasked, entry, anchor, k = 0, newText }) {
+  const current = textAtRowKey(baseMasked, entry.ops ?? [], anchor, k);
+  if (current === null) throw new Error(`锚 ${anchor}${k ? `+${k}` : ''} 在 src 视图里不存在（那一行被 delete 了？）`);
+  if (literalShape(current) !== literalShape(newText)) {
+    throw new Error(
+      `只改引号里的字面量才能用快路径（这一处动了结构）\n  现在：${current}\n  改后：${newText}\n` +
+        '  ⇒ 折行 / 合并 / 增删行请写成多行 hunk（会走"渲染 + 反解"那条路）',
+    );
+  }
+  const ops = (entry.ops ?? []).map((o) => ({ ...o }));
+  const rep = k === 0 ? ops.find((o) => o.op === 'replace-line' && o.i === anchor) : null;
+  if (rep) {
+    rep.line = newText;
+    return { entry: { ...entry, ops }, created: false };
+  }
+  if (k > 0) {
+    const ins = ops.filter((o) => o.op === 'insert-after' && o.i === anchor);
+    const target = ins[k - 1];
+    if (!target) throw new Error(`锚 ${anchor}+${k} 找不到对应的 insert-after 条目`);
+    target.instr = newText;
+    return { entry: { ...entry, ops }, created: false };
+  }
+  const op = { op: 'replace-line', i: anchor, sha8: sha8(baseMasked[anchor]), line: newText };
+  ops.push(op);
+  ops.sort((a, b) => a.i - b.i);
+  return { entry: { ...entry, ops }, created: true };
+}
+
+/**
+ * **文件行号 → 行序空间的下标**（`null` = 那一行不进序空间：空行 / label 定义行 / 行尾注释行）。
+ * ★ 口径必须与 `rowsOf()` 完全一致，否则检索报出的行号会对不上 patch 的锚。
+ * @returns {Array<number|null>} 下标 = 文件行号 − 1
+ */
+export function rowIndexByLine(text) {
+  const out = [];
+  let row = 0;
+  for (const [idx, line] of text.split('\n').entries()) {
+    if (idx < 4) { out.push(null); continue; }
+    const t = line.replace(/\s+\/\/.*$/, '').trim();
+    if (t === '' || LABEL_LINE_RE.test(t)) { out.push(null); continue; }
+    out.push(row);
+    row += 1;
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────── 直改（声明式编辑 ⇒ 直出 patch）
+
+/**
+ * **把一行里的"字面量"换成占位**，其余部分原样（用来判"这次改动是不是只动了引号里的字符串"）。
+ * ★ 这是"直改"的核心护栏：助记符 / 操作数 / label 引用**一个字符都不许变**，
+ *   所以"行号写错、改到别的行"这类错误会**当场报错**，而不是悄悄改出一行怪东西。
+ */
+export const literalShape = (line) => line.replace(/"(?:[^"\\]|\\.)*"/g, '"\u0000"');
+
+/**
+ * **编辑清单的语法**（v3）：一条记录 = 一个 hunk，头行用**锚**（不是文件行号）：
+ *
+ * ```
+ * # 注释（整行以 # 开头）
+ * <脚本名> <锚>[+<k>]      ← 锚 = 基线行序；`+k` = "挂在它后面的第 k 条插入行"（缺省 0 = 锚上那一行）
+ * - <当前内容>             ← 期望的当前内容；必须与**当前 src 视图**那一行逐字相同
+ * + <新内容>               ← 换成什么
+ * ```
+ *
+ * | 形态 | 映到的 op |
+ * |---|---|
+ * | `- 1 / + 1`（只有字面量不同） | 改 `replace-line` 的载荷；没有条目就**新建**一条（`sha8` 现算） |
+ * | 只有 `+` | 在该行**之后**插一条 `insert-after`（`+k` 决定顺序） |
+ * | 只有 `-` | `delete`（那一行本来是 `replace-line` 就先撤掉它） |
+ *
+ * ★ **为什么用锚而不是文件行号**：`src` 视图不再常驻（merge on read），而文件行号是**渲染产物**
+ *   （label 定义行落在哪里由汇编器决定）⇒ 只有锚既稳定、又能从"基线 + patch"现算出来。
+ * ★ **块替换（`- N / + M`）不在 `set` 的词汇里**：它会让后续行重新对齐，只有整支 diff 才算得出来
+ *   （`patch view --out` + `patch edit` 那条路）；这里**明确拒绝**，不假装能算。
+ *
+ * @returns {Array<{name:string, at:number, k:number, minus:string[], plus:string[], line:number}>}
+ */
+export function parseEditList(text, where = '<edits>') {
+  const hunks = [];
+  let cur = null;
+  let phase = null;
+  for (const [i, raw] of text.split('\n').entries()) {
+    const at = `${where}:${i + 1}`;
+    const line = raw.replace(/\s+$/, '');
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    const head = /^(\S+)\s+(-?\d+)(?:\+(\d+))?$/.exec(line.trim());
+    if (head) {
+      if (cur) hunks.push(cur);
+      cur = {
+        name: head[1],
+        at: Number(head[2]),
+        k: head[3] === undefined ? 0 : Number(head[3]),
+        minus: [],
+        plus: [],
+        line: i + 1,
+      };
+      phase = null;
+      continue;
+    }
+    if (!cur) throw new Error(`${at}: 先给头行（\`<脚本> <锚>[+<k>]\`），再给 \`-\` / \`+\` 行`);
+    if (line.startsWith('-')) {
+      if (phase === 'plus') throw new Error(`${at}: \`-\` 行必须集中在 \`+\` 行之前（与 diff 一样）`);
+      phase = 'minus';
+      cur.minus.push(line.slice(1).trim());
+      continue;
+    }
+    if (line.startsWith('+')) {
+      phase = 'plus';
+      cur.plus.push(line.slice(1).trim());
+      continue;
+    }
+    throw new Error(`${at}: 看不懂这一行：${raw}\n  形态：\`<脚本> <锚>[+<k>]\` 头行 + \`- 当前内容\` / \`+ 新内容\``);
+  }
+  if (cur) hunks.push(cur);
+  if (!hunks.length) throw new Error(`${where}: 一条编辑都没有`);
+  for (const h of hunks) {
+    if (!h.minus.length && !h.plus.length) throw new Error(`${where}:${h.line}: 这个 hunk 既没有 \`-\` 也没有 \`+\``);
+    if (h.minus.length > 1 || h.plus.length > 1) {
+      if (h.minus.length && h.plus.length) {
+        throw new Error(
+          `${where}:${h.line}: 块替换（\`- ${h.minus.length}\` / \`+ ${h.plus.length}\`）不在 \`set\` 的词汇里 —— ` +
+            '它需要重新对齐整支脚本，请走"渲染 + 反解"：\n' +
+            `    pnpm tools patch view --kind src --name '${h.name}' --out dist/views\n` +
+            `    # 改 dist/views/src/${h.name}.txt\n` +
+            `    pnpm tools patch edit --name '${h.name}' --write`,
+        );
+      }
+      if (h.minus.length > 1) throw new Error(`${where}:${h.line}: 一次最多删一行（\`set\` 不做块删除）`);
+      throw new Error(`${where}:${h.line}: 一次最多插一行 —— 多行请写多条 hunk（用 \`<锚>+1\` / \`<锚>+2\` 指定顺序）`);
+    }
+  }
+  return hunks;
+}
+
+/** 行键的可读写法：`i=30` / `i=30+1` */
+export const rowKeyLabel = (at, k) => `i=${at}${k ? `+${k}` : ''}`;
+
+/** 新的插入行该放进 ops 数组的哪个位置（保持"按 i 非递减、同 i 内保持顺序"） */
+function insertPosAfterAnchor(ops, anchor) {
+  for (let j = 0; j < ops.length; j += 1) if (ops[j].i > anchor) return j;
+  return ops.length;
+}
+
+/**
+ * **按锚把编辑清单落成新的条目**（`set` 的引擎：不渲染、不重跑 diff）。
+ *
+ * 为什么这样是安全的：三种形态各自只做"改一个载荷 / 加一条 insert-after / 加一条 delete"，
+ * **锚 `i` 与 `sha8` 都不动**；能不能成立由之后的**组装 + 重建视图逐行比对**来判（见 CLI 的 `set`）。
+ *
+ * @returns {{entry:object, report:Array<object>}}
+ */
+export function applyAnchorHunks({ baseMasked, entry, hunks, where = '<edits>' }) {
+  let ops = (entry.ops ?? []).map((o) => ({ ...o }));
+  const report = [];
+  for (const h of hunks) {
+    const label = `${where}:${h.line}（${h.name} ${rowKeyLabel(h.at, h.k)}）`;
+    const cur = textAtRowKey(baseMasked, ops, h.at, h.k);
+    if (cur === null) {
+      throw new Error(`${label}：这一行在当前 src 视图里不存在（被 delete 了？还是 \`+k\` 写大了？）`);
+    }
+    if (h.minus.length === 1) {
+      if (h.minus[0] !== cur) {
+        throw new Error(`${label}：期望的当前内容对不上（清单是照着当时那份视图写的）\n  清单：${h.minus[0]}\n  现在：${cur}`);
+      }
+      if (h.plus.length === 1) {
+        if (literalShape(h.plus[0]) !== literalShape(cur)) {
+          throw new Error(
+            `${label}：只改引号里的字面量才能走这条路径（这一处动了指令结构）\n  现在：${cur}\n  改后：${h.plus[0]}`,
+          );
+        }
+        const next = editRowAtAnchor({ baseMasked, entry: { ...entry, ops }, anchor: h.at, k: h.k, newText: h.plus[0] });
+        ops = next.entry.ops;
+        report.push({ key: rowKeyLabel(h.at, h.k), verb: 'replace', before: cur, after: h.plus[0], created: next.created });
+        continue;
+      }
+      // 只有 `-`：删掉这一行
+      if (h.k > 0) {
+        const ins = ops.map((o, j) => ({ o, j })).filter((x) => x.o.op === 'insert-after' && x.o.i === h.at);
+        const target = ins[h.k - 1];
+        if (!target) throw new Error(`${label}：找不到对应的 insert-after 条目`);
+        ops.splice(target.j, 1);
+      } else {
+        const idx = ops.findIndex((o) => o.op === 'replace-line' && o.i === h.at);
+        if (idx >= 0) ops.splice(idx, 1);
+        ops.push({ op: 'delete', i: h.at, sha8: sha8(baseMasked[h.at]) });
+        ops.sort((a, b) => a.i - b.i);
+      }
+      report.push({ key: rowKeyLabel(h.at, h.k), verb: 'delete', before: cur, after: '', created: false });
+      continue;
+    }
+    // 只有 `+`：在这一行之后插一行
+    if (h.minus.length === 0) {
+      const ins = ops.map((o, j) => ({ o, j })).filter((x) => x.o.op === 'insert-after' && x.o.i === h.at);
+      const pos = h.k === 0 ? (ins.length ? ins[0].j : insertPosAfterAnchor(ops, h.at)) : ins[h.k - 1] ? ins[h.k - 1].j + 1 : insertPosAfterAnchor(ops, h.at);
+      ops.splice(pos, 0, { op: 'insert-after', i: h.at, instr: h.plus[0] });
+      report.push({ key: rowKeyLabel(h.at, h.k), verb: 'insert', before: '', after: h.plus[0], created: true });
+      continue;
+    }
+    throw new Error(`${label}：这条编辑形态不受支持（见 pnpm tools patch describe）`);
+  }
+  return { entry: { ...entry, ops }, report };
+}
+
+/**
+ * **全库字串替换**（术语 / 命名回改的机械一步）：只动**引号里**的字面量，`comment "…"` 一律跳过
+ * （那是**日文原文标记**，不是玩家可见文本；改了它反而毁掉分节注释）。
+ *
+ * ★ 不碰行尾 `// …` 注释；不改助记符与操作数 —— 所以替换**不可能**改坏指令结构。
+ * @param {string} viewText 一份视图（`src` 侧）
+ * @param {Array<{from:string,to:string}>} pairs 依次作用（同一行上按顺序叠加）
+ * @param {{regex?:boolean}} [opts] `regex` = `from` 当正则（默认按字面量）
+ * @returns {{text:string, changes:Array<{line:number,before:string,after:string,literals:number}>}}
+ */
+export function substituteLiterals(viewText, pairs, opts = {}) {
+  const { regex = false } = opts;
+  const changes = [];
+  const out = viewText.split('\n').map((line, i) => {
+    const t = line.replace(/\s+\/\/.*$/, '').trim();
+    if (t === '' || LABEL_LINE_RE.test(t)) return line;
+    if (/^comment\b/.test(t)) return line;
+    // 行尾 `// …` 是反汇编器加的注释：只替换**代码段**里的字面量
+    const cm = /\s+\/\/.*$/.exec(line);
+    const code = cm ? line.slice(0, cm.index) : line;
+    const tail = cm ? line.slice(cm.index) : '';
+    let literals = 0;
+    const nextCode = code.replace(QUOTED_G, (full) => {
+      const inner = full.slice(1, -1);
+      let changed = inner;
+      for (const { from, to } of pairs) {
+        if (from === '') continue;
+        changed = regex ? changed.replace(new RegExp(from, 'gu'), to) : changed.split(from).join(to);
+      }
+      if (changed === inner) return full;
+      literals += 1;
+      return `"${changed}"`;
+    });
+    if (!literals) return line;
+    const next = nextCode + tail;
+    changes.push({ line: i + 1, before: line, after: next, literals });
+    return next;
+  });
+  return { text: out.join('\n'), changes };
+}
+
+/**
+ * **一次写盘、多条脚本**（`set` / `edit` 两条编辑路径共用的落点）。
+ *
+ * ★ 为什么必须"一次"：一条命令改到的脚本要么**全落地**、要么**一个字都不写** ——
+ *   分成两步（先改视图文件、再跑一条同步命令）迟早会在"视图是生成物"这件事上出错：
+ *   中间任何一次 `patch view` 都会把没同步的改动**覆盖掉**，而陈旧视图反解会把旧状态**悄悄写回 patch**。
+ *
+ * @param {object} doc 当前 patch 文档
+ * @param {Record<string, object>} updates 脚本名 → 新条目（整条覆盖）
+ * @returns {{ok:boolean, bytes?:number, reason?:string, doc:object}}
+ */
+export function applyEntries(doc, updates, patchPath = DEFAULT_PATCH) {
+  const next = { ...doc, scripts: { ...doc.scripts } };
+  for (const [n, e] of Object.entries(updates)) next.scripts[n] = e;
+  const res = savePatch(next, patchPath);
+  return { ...res, doc: res.ok ? next : doc };
+}
+
+// ─────────────────────────────────────────────────────────── 基线索引（持久侧只依赖"不可变的东西"）
+
+/** 基线索引的落点（**生成物**，不入库） */
+export const DEFAULT_BASE_INDEX = path.join(REPO_ROOT, 'dist', 'index', 'base.json');
+
+/**
+ * **codec 指纹** —— 钉住"文本 ⇄ BIN"这一对函数（汇编器 / 反汇编器 / 指令表）。
+ *
+ * ★ 为什么必须有它：本方案的主张是"**BIN 是文本的可逆像**"，而**可逆性依赖反函数**。
+ *   换一次指令表或改一次 asm，同一份文本就可能重建出**不同字节** —— 那时"文本是真源"这句话
+ *   就失去了证人。字典有 `subsSha`，指令表与 asm 也得有对应的指纹。
+ * ★ 指纹只覆盖**codec 本身**（`packages/age-format/src/asm/**`）：它是"文本 ⇄ BIN"的规则所在，
+ *   不包含 overlay 的规则（那是本文件）也不包含字典（那是 `subsSha`）。
+ */
+export function codecContext() {
+  const dir = path.join(REPO_ROOT, 'packages', 'age-format', 'src', 'asm');
+  const files = fs
+    .readdirSync(dir)
+    .filter((f) => /\.(mjs|json)$/i.test(f))
+    .sort();
+  const h = createHash('sha256');
+  for (const f of files) {
+    h.update(`\u0000${f}\u0000`);
+    h.update(fs.readFileSync(path.join(dir, f)));
+  }
+  return { codecSha: h.digest('hex'), files };
+}
+
+/**
+ * 基线根的**廉价指纹**：散装件与归档的 `(名字, size, mtime)` 清单。
+ *
+ * ★ 它回答的是"游戏安装换过没有"，只需几十次 `statSync`（毫秒级）——
+ *   而"逐支 BIN 哈希"要读 110 MB（秒级）。两者的分工：
+ *   廉价指纹判**整份索引**新不新；单支的 `baseSha` 在**命中那一支**时再核对（见 `find`）。
+ */
+export function baselineQuickKey(root) {
+  const lines = [];
+  for (const [name, abs] of [...root.loose.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const st = fs.statSync(abs);
+    lines.push(`loose\t${name}\t${st.size}\t${Math.round(st.mtimeMs)}`);
+  }
+  for (const ix of [...root.indices].sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    const st = fs.statSync(ix.abs);
+    lines.push(`index\t${ix.name}\t${st.size}\t${Math.round(st.mtimeMs)}`);
+    for (const arc of [...ix.alf.archives].sort((a, b) => (a.filename < b.filename ? -1 : 1))) {
+      const p = path.join(root.dir, arc.filename);
+      const ast = fs.existsSync(p) ? fs.statSync(p) : null;
+      lines.push(`arc\t${arc.filename}\t${ast ? ast.size : -1}\t${ast ? Math.round(ast.mtimeMs) : -1}`);
+    }
+  }
+  return sha256buf(Buffer.from(lines.join('\n'), 'utf8'));
+}
+
+/**
+ * 建**基线索引**：脚本清单 + 非脚本清单 + 逐支指纹 + codec / 基线指纹。
+ *
+ * ★ 它是**持久侧唯一该长期存在的东西** —— 因为它的输入**全是不可变的**（基线 BIN + codec），
+ *   所以它**永不陈旧**；`src` 投影依赖可变的 patch ⇒ 一律现算（merge on read）。
+ * ★ 顺带干掉两笔固定开销：`allScriptNames`（941 支的枚举与签名判定，进索引）与
+ *   `patch view --kind data` 的全量反汇编（文本落 `dist/views/data/**`，由索引的 `baselineKey` 担保）。
+ * ★ 它**不**逐支重哈希来自证：`baselineKey` 用 mtime+size 判"安装换没换"，单支 `baseSha` 在用到那一支时核对。
+ *
+ * @param {{root:object, subsSha:string, codecSha:string, entries?:object}} ctx
+ *   `entries` 可给（`view` 生成时顺手收集到的 baseSha/bytes/baseFrom，省一次重解析）
+ */
+export function buildBaseIndex({ root, subsSha, codecSha, entries }) {
+  const { names: scripts, nonScript } = allScriptNames(root);
+  const out = entries ?? {};
+  if (!entries) {
+    for (const n of scripts) {
+      const hit = root.resolve(n);
+      if (!hit) continue;
+      out[n] = { baseSha: sha256buf(hit.buf), bytes: hit.buf.length, baseFrom: hit.from };
+    }
+  }
+  const only = {};
+  for (const n of scripts) if (out[n]) only[n] = out[n];
+  return {
+    schemaVersion: 1,
+    _doc:
+      '基线索引（**生成物**，不入库）：脚本清单 + 逐支 baseSha/bytes/baseFrom + codec 指纹 + 基线指纹。' +
+      '★ 它只依赖不可变的东西（基线 BIN 与 codec）⇒ **永不陈旧**；`src` 投影一律现算，不在这里。',
+    codecSha,
+    subsSha,
+    baselineKey: baselineQuickKey(root),
+    scripts,
+    nonScript,
+    entries: only,
+  };
+}
+
+export function saveBaseIndex(index, p = DEFAULT_BASE_INDEX) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  // ★ 落盘用**缩进 1 空格**（与草稿账本同一口径）：单行省不了多少体积，却彻底没法看 ——
+  //   它是生成物、gitignore，体积不是约束；"能不能直接打开看"才是。
+  const text = `${JSON.stringify(index, null, 1)}\n`;
+  fs.writeFileSync(p, text, 'utf8');
+  return { ok: true, bytes: Buffer.byteLength(text) };
+}
+
+export function loadBaseIndex(p = DEFAULT_BASE_INDEX) {
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
+/**
+ * 这份基线索引还能不能用：① 存在 ② schema 对 ③ **codec 指纹一致** ④ **基线指纹一致**。
+ * @returns {{ok:boolean, problems:string[], fix:string}}
+ */
+export function baseIndexProblems({ index, root, codecSha }) {
+  const fix = '重建基线索引：pnpm tools patch index --write';
+  if (!index) return { ok: false, problems: [`基线索引不存在或读不出来：${DEFAULT_BASE_INDEX}`], fix };
+  const problems = [];
+  if (index.schemaVersion !== 1) problems.push(`schemaVersion 不是 1（拿到 ${index.schemaVersion}）`);
+  if (index.codecSha !== codecSha) problems.push('codec 指纹变了（汇编器 / 反汇编器 / 指令表改过）⇒ 旧索引里的文本不再担保能重建出同样字节');
+  if (index.baselineKey !== baselineQuickKey(root)) problems.push('基线指纹变了（游戏安装里的散装件或归档变过）');
+  return { ok: problems.length === 0, problems, fix };
+}
+
 // ─────────────────────────────────────────────────────────── 两侧的根（清单是唯一写绝对路径的地方）
 
 /** 从清单 `roots` 取根；`--base` / `--target` 可覆盖（诊断用） */
@@ -1039,6 +1718,49 @@ export function describe() {
         '其中**非 SC/SP 的也有译文** ⇒ 曾经的「官方集 = 有译文的脚本」是错的，patch 因此漏过 247 支。' +
         '现在 patch 的范围 = 基线根里全部能反汇编的脚本，有变更才进 patch；这个正则只用来打标签。',
     },
+    views: {
+      where: '`dist/views/<kind>/<脚本>.BIN.txt` —— ★ **只是缓存**（生成物，不入库；真源只有基线与 patch）。' +
+        '★ 三件东西的**寿命不一样**：**基线索引**与**base 文本**只依赖不可变的东西（基线 + codec）⇒ **永不陈旧**；' +
+        '**src 投影**依赖可变的 patch ⇒ **不常驻**（查询按锚现算 = merge on read），只在"要用编辑器整篇改"时物化一支。',
+      kinds: {
+        data: '基线 BIN 的反汇编（日文原文）—— `--view` 的**缺省**；只依赖基线 ⇒ 永不陈旧',
+        src: '基线 + patch 的反汇编（字符串取 patch 里的中文）—— **按需物化**（`--kind src --name X`）',
+      },
+      scopes: VIEW_SCOPES,
+      defaultScope: 'all',
+      scopeNote:
+        '★ **三个范围不是一回事**：`all` = 基线根里全部能反汇编的脚本（**缺省**）；`patch` = patch 里有条目的；' +
+        '`annotated` = `SPEAKER_FILTER` 那 223 支（**只是那个任务的口径**）。' +
+        '曾经 `view` 只按 `annotated` 生成 ⇒ `data` 视图只有 223 支 ⇒ "全库 rg"静默少报。' +
+        '★ 现在连这个风险也被基线索引掐掉：名单与逐支指纹取自索引（键 = 基线指纹 + codec 指纹）。',
+      manifest:
+        '`dist/views/manifest.json` = **src 草稿账本**：只记"哪几支的 `src` 被物化过"（`baseSha`/`resultSha`/`subsSha`/`codecSha`）。' +
+        '`edit` 靠它验来源（对不上就拒绝）；★ `find` **不需要**它 —— 查询不读 `src` 文件。',
+      howToSearch:
+        '检索一律走 `pnpm tools patch find`：**不物化投影** —— 日文侧扫 `base` 文本、中文侧扫 **op 载荷**' +
+        '（patch 里存的就是中文），命中之后按**锚**配对（`i=<基线行序>`，`i=<锚>+k` = 挂在它后面的第 k 条插入行）。' +
+        '名单与 base 文本的可用性都问**基线索引**；索引不在就当场反汇编（慢一点，一样全）。',
+      howToEdit:
+        '改文案两条路，都缺省 dry-run、`--write` 才落盘：' +
+        '① `patch find <串> --edits e.txt [--to <新串>]` **生成**编辑清单（只写清单文件；`+` 行默认与 `-` 相同 ⇒ 必须人去改），' +
+        '再 `patch set --edits e.txt --write` **按锚直改 op**（改字面量 / 插一行 / 删一行；不渲染、不重跑 diff，' +
+        '判据 = 重建行空间逐行等于独立算出的期望）；' +
+        '② `patch view --kind src --name X --out dist/views` 物化一支草稿 ⇒ 编辑器整篇改 ⇒ `patch edit` 反解（折行重排走这条）。' +
+        '★ 没有"无条件全库替换"这条写路径。',
+    },
+    baseIndex: {
+      file: '`dist/index/base.json`（生成物，不入库）',
+      what: '脚本清单 + 非脚本清单 + 逐支 `{baseSha, bytes, baseFrom}` + `codecSha` + `baselineKey` + `subsSha`。',
+      why:
+        '★ 它只依赖**不可变**的东西（基线 BIN + codec）⇒ **永不陈旧** —— 这是"持久侧"与"投影侧"的分界：' +
+        '持久侧可以放心留着，投影侧（`src`）一律现算。它同时干掉两笔固定开销：`allScriptNames`（941 支枚举与签名判定）与' +
+        '全量反汇编（base 文本落 `dist/views/data/**`，由 `baselineKey` 担保）。',
+      codec:
+        '`codecSha` = `packages/age-format/src/asm/**`（汇编器 / 反汇编器 / 指令表）的内容哈希 ⇒ ' +
+        '"BIN 是文本的可逆像"这句话的**证人**：它一变，旧索引里的文本就不再担保能重建出同样字节。',
+      baselineKey: '基线根的廉价指纹（散装件与归档的 `size+mtime`）：判"游戏安装换过没有"只需几十次 `statSync`。',
+      howToCheck: '`pnpm tools patch status`（报"与当前基线 + codec 一致吗"）；重建：`pnpm tools patch index --write`。',
+    },
     canonicalForm: {
       indent: '每层 1 个空格',
       scripts: '**按脚本名字典序**（`Object.keys` 的插入顺序不参与：序列化时显式排一次）',
@@ -1047,9 +1769,13 @@ export function describe() {
       invariant: '「盘上字节 == `serializePatch(解析出来的文档)`」由 `canonicalFormProblems()` 判；成立 ⇒ 重跑必得同字节、diff 里出现的每一行都是真改动',
     },
     writePath:
-      '唯一写入口是本工具，且只有两条写路径：`extract`（从旧仓产物重取）与 `edit`（把改过的 `src` 视图反解回来）；' +
-      '两者都缺省 dry-run，--write 才落盘；写后回读复验，不绿回滚。' +
-      '`verify` 只读不写 —— `resultSha` 若能在 verify 里被改写，判据就变成自证循环。**不要手改 JSON**。',
+      '唯一写入口是本工具，写路径只有这三条：`extract`（从旧仓产物重取，**迁移期一次性**）· ' +
+      '`set`（逐条应用编辑清单）· `edit`（反解磁盘上改过的 `src` 视图）；' +
+      '三条都缺省 dry-run，`--write` 才落盘；写前逐条断言、写后回读复验，不绿**回滚**。' +
+      '`verify` / `find` 只读不写（`find --edits` 只写那份**清单文件**，不碰 patch）—— ' +
+      '`resultSha` 若能在 verify 里被改写，判据就变成自证循环。**不要手改 JSON**。' +
+      '★ 编辑类操作会**更新**被改脚本的 `resultSha`（= 新产物 BIN 的 sha）：从那以后它与"旧仓当年那份产物"不再相等，' +
+      '这是"译文变了"的必然结果 —— `verify --target <旧产物>` 对**改过**的脚本因此不再适用（它只对没改过的脚本有意义）。',
   };
 }
 
@@ -1072,6 +1798,23 @@ export function describeText(d = describe()) {
   L.push(`**范围**：基线根里全部能反汇编的 AGE 脚本；**有变更才进 patch**（没变更的不进）。`);
   L.push(`**标签** \`annotated\`：\`SPEAKER_FILTER\`（说话人标注的口径 ${d.annotatedSet.filter}）—— 只表示"做过说话人标注"，**不是一类脚本**。`);
   L.push(d.annotatedSet.note);
+  L.push('');
+  L.push('## 视图（生成物：`data` / `src`）');
+  L.push(`落点：${d.views.where}`);
+  for (const [k, v] of Object.entries(d.views.kinds)) L.push(`* \`${k}\`：${v}`);
+  L.push(`范围：\`${d.views.scopes.join('` / `')}\`（缺省 \`${d.views.defaultScope}\`）`);
+  L.push(d.views.scopeNote);
+  L.push(`清单：${d.views.manifest}`);
+  L.push(`检索：${d.views.howToSearch}`);
+  L.push(`编辑：${d.views.howToEdit}`);
+  L.push('');
+  L.push('## 基线索引（持久侧：只依赖不可变的东西）');
+  L.push(`文件：${d.baseIndex.file}`);
+  L.push(`内容：${d.baseIndex.what}`);
+  L.push(d.baseIndex.why);
+  L.push(`codec：${d.baseIndex.codec}`);
+  L.push(`基线指纹：${d.baseIndex.baselineKey}`);
+  L.push(`怎么查：${d.baseIndex.howToCheck}`);
   L.push('');
   L.push('## 规范形态（顺序是它的一部分）');
   for (const [k, v] of Object.entries(d.canonicalForm)) L.push(`* ${k}：${v}`);

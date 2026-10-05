@@ -152,9 +152,19 @@ patch 为什么必须带**字典指纹**（`subsSha`）：换字典 ⇒ 重建�
 * **`data` 视图**由基线 BIN 反汇编得到；**`src` 视图** = 基线 BIN → 指令流 → 应用 patch → 按规则重贴注释。
   ★ 落地的形态：`src` = **重建 BIN 的反汇编，但字符串取 patch 里的中文**（BIN 里只有占位写法，见 §2.5）；
   两份视图**同构**（同样的行数口径与**真实地址**）⇒ 可直接并排 diff。
-* **编辑回路**：`view --kind src` → 人改中文 → `edit` 反解回 patch。
+* **编辑回路**（两条路，同一套"独立算期望 + 逐行比"的判据）：
+  * `find --edits`（**生成**清单，锚寻址）→ `set --edits`（**按锚直改 op**：改字面量 / 插一行 / 删一行）；
+  * `edit`（**整篇翻译**：`view --kind src --name X --out` 物化一支草稿 → 编辑器改 → 反解；折行重排走这条）。
+  ★ **为什么不做"一条命令全库替换"**（用户口径）：替换必须**逐条确认**。所以机械的那一半只做"生成清单"，
+  落笔的一半是"按锚直改 op" —— 指令行与 op 的对应关系由锚给定，不需要重新对齐（实测：`赫塔→废柴雷斯` 会得到
+  "废柴雷斯雷斯"，机械替换会误伤同形词）。见 `REQ-01M43YPP863JQW6JJQD6GK6BCQ`。
+  ★ **为什么编辑不重跑整支 diff**：`entryFromView` 那套"渲染 → 汇编 → 整支 patience 对齐"只在行数会变时才必要；
+  改一个载荷 / 插一行 / 删一行都可以**直接落在锚上**（锚 `i` 与 `sha8` 不动），
+  判据换成"**重建出来的行空间 == 独立算出的期望行空间**（逐行，label 遮蔽后）"—— 更快、更强（多一层独立核算）。
   反解走的是**同一条对齐/锚定路径**（`extractEntry`），所以锚永远在**基线行序**上、**不在旧 ops 上叠加**。
   实测往返：改一处中文 ⇒ 反解 ⇒ 重新生成 `src` ⇒ 与改过的那份逐字节相同；改回原样 ⇒ 操作集与 `resultSha` 都回到原值。
+  ★ 编辑会**更新** `resultSha`（= 新产物 BIN 的 sha）：此后它与"旧仓当年那份产物"不再相等，
+  所以 `verify --target <旧产物>` 只对**没改过**的脚本有意义。
 * **唯一需要旁挂的人工数据**：`NAME_OVERRIDES` **5 行**（`b`/`c`/`81`/`138`/`170`；实测 5 条全被用到）。
 
 ### 3.1 patch 用 JSON + 控制脚本（用户口径）
@@ -162,8 +172,9 @@ patch 为什么必须带**字典指纹**（`subsSha`）：换字典 ⇒ 重建�
 后续很多工具要**直接分析** patch（构建视图、比对、审计），所以：
 
 * **数据** = JSON（不透明数据；字段语义只在控制脚本的自描述里）；
-* **控制脚本** = 唯一写入口（`apply` / `extract` / `verify` / `--describe`），并**负责**：
-  生成 `data` 视图、生成 `src` 视图、把"改过的 `src` 视图"反解回 patch、校验 patch 与基线是否仍匹配；
+* **控制脚本** = 唯一写入口（`extract` / `set` / `edit` / `verify` / `--describe`），并**负责**：
+  生成 `data` 视图、生成 `src` 视图、把编辑清单**逐条应用**成 patch（或把改过的 `src` 视图反解回来）、
+  校验 patch 与基线是否仍匹配；
 * **配套**：`data/translations/patch.json` + 同名说明书 `patch.md`（含「怎么查 / 怎么改」并指向 `--describe`）。
 
 ### 3.2 格式骨架（**已实施**；字段语义的真源是 `pnpm tools patch describe`）
@@ -253,12 +264,17 @@ gameInstall/   ──解析层① ②──▶  基线 BIN ─┘
 ## 6. 怎么查
 
 ```bash
-pnpm tools patch describe                 # ★ 字段 / 不变量 / 操作（schema 的唯一真源，本文件不复述）
-pnpm tools patch status                   # 当前规模：脚本数 / 操作数 / 体积 / 基线解析来源分布
+pnpm tools patch describe                 # ★ 字段 / 不变量 / 操作 / 视图 / 基线索引（schema 的唯一真源，本文件不复述）
+pnpm tools patch status                   # 规模 + 字典指纹 + 基线索引/草稿账本 新不新
+pnpm tools patch index --write            # ★ 建**基线索引**（名单 + 逐支指纹 + codec/基线指纹；~0.2 s）
 pnpm tools patch baseline [<脚本名>]       # 某个脚本的基线从哪来（散装 / 哪个 ALF 的哪一段）+ sha256
 pnpm tools patch verify                   # 判据 2：基线 + patch ⇒ 逐字节相同（有产物根时比对产物；否则对 resultSha）
-pnpm tools patch view --kind src --name SC0000.BIN --stdout   # 看 src 视图（生成物，不入库）
-pnpm tools patch edit                     # ★ 改完 src 视图 ⇒ 反解回 patch（dry-run；--write 落盘）
+pnpm tools patch view                     # 建/刷新 **base 文本**（缺省只写 data；941 支 ≈ 3.3 s，顺手写索引）
+pnpm tools patch find 'ヘタレ'             # ★ 检索：日文查 base、中文查 op 载荷，按**锚**配对（不物化投影）
+pnpm tools patch find '赫塔' --edits e.txt --to '废柴'   # ★ 生成编辑清单（锚寻址；只写 e.txt）
+pnpm tools patch set --edits e.txt --write # ★ 按锚直改 op ⇒ 一次写盘进 patch（缺省 dry-run）
+pnpm tools patch view --kind src --name <脚本>   # 只有要用编辑器整篇改时才物化这一支的 src
+pnpm tools patch edit --name <脚本> --write      # …改完反解（来源对不上会拒绝；折行重排走这条）
 pnpm tools requirements show 8SNRXKV       # 本方案的工作项、判据、非目标
 pnpm tools requirements plan              # 进度树
 pnpm tools corpus list                    # 素材的去向（`translation/patch-data` 一条）
@@ -267,6 +283,10 @@ pnpm tools corpus list                    # 素材的去向（`translation/patch
 ★ **`data` / `src` 视图同构**：都是"某个 BIN 的反汇编"形状、都用**真实地址**；
 差别只在字符串 —— `data` 是基线的日文，`src` 取 patch 里的**中文**
 （不能拿"重建 BIN 的反汇编"当 `src`：BIN 里是**占位写法**，中文只存在于 patch 里，见 §2.5）。
+★ **行数可以不同**（`insert-after` / `delete` 正是 patch 的内容）⇒ 两侧配对锚在**基线行序**上、不按行号
+（`patch find` 就是这么配的）。
+★ **`src` 不常驻**：它就是 base 与 patch 的 join 结果（`base 行 ∖ {被 replace/delete} ∪ op 载荷`），
+按锚现算即可 —— 只有"用编辑器整篇改"需要一份 `src` **文件**当工作面。
 
 ## 7. 边界与坑（写规格时必须带上）
 
@@ -300,3 +320,20 @@ pnpm tools corpus list                    # 素材的去向（`translation/patch
    实测这一改让操作数从 78 082 降到 **65 465**，并让 `$1$SCJUMP.BIN` 从"表达不了"变成"逐字节相同"。
 11. **`rowsOf` 认 label 定义行时不能要求 8 位 hex**：patch 放出的**符号**是 6~7 位
     （`0x100000 + id`）。要求 8 位会把符号行当成指令行 ⇒"打上 patch 的文本"再也解析不出 label 定义。
+12. **视图的范围 ≠ patch 的范围 ≠ 标注的范围**（§2.3 那个错在**视图层又犯过一次**，2026 修）：
+    三个范围的真源是 `pnpm tools patch describe` 的 `views.scopes`（本文件不复述个数）——
+    缺省 `all`（基线根里**全部**可反汇编脚本）才是"全库检索 / 并排读"要的工作面。
+    * 实测症状：`dist/views/data` 停在 `annotated`（`SPEAKER_FILTER`）那 223 支，而 patch 已是 453 支
+      ⇒ `rg dist/views/data` 拿到的是"223 支上的答案"，**少报且不报错**；
+    * ★ **持久侧与投影侧要分开**（merge on read）：**基线索引**（`dist/index/base.json`：名单 + 逐支指纹 +
+      **codec 指纹** + 基线指纹）与 **base 文本**（`dist/views/data/**`）只依赖**不可变**的东西 ⇒ **永不陈旧**；
+      **`src` 投影**依赖可变的 patch ⇒ **不常驻**，查询时按**锚**现算
+      （`src` = `base 行 ∖ {被 replace/delete} ∪ op 载荷`，而 op 载荷**就是中文**）。实测全库检索 **1.4 s**（旧法 10 s / 57 s）；
+      `set` 直改 op（不渲染、不重跑 diff），判据 = **重建行空间逐行等于独立算出的期望**；
+    * `dist/views/manifest.json` 退化成 **src 草稿账本**（只记哪几支被物化过 ⇒ 供 `edit` 验来源）；
+
+    * 两侧**配对**锚在**基线行序**（与 patch 同一个锚）：`insert-after` / `delete` 会让两侧行数不同 ⇒
+      按行号配对必错。`tools/test/patch.test.mjs` 用合成用例钉住"三个范围互不相等"与"配对仍带基线身份"。
+13. **`data` 视图只给"日文原文"、`src` 视图只给"当前中文"**：两者都不是"答案"，
+    把它们摆在一起才是。检索必须是**配对**输出（`patch find`），单侧 `rg` 会让"日文有、中文没有"与
+    "中文有、日文改了"这两类分歧漏过去。

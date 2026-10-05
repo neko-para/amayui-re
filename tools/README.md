@@ -56,7 +56,7 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `fixtures.mjs` | `fixtures` | ★ `corpus/fixtures/samples.json` 的查询 + 唯一编辑入口（见 `pnpm tools fixtures describe`） |
 | `requirements.mjs` | `requirements` | ★ `data/requirements/` 的进度视图 + 唯一编辑入口（需求/缺陷 + 父子树；见 `pnpm tools requirements describe`） |
 | `disasm-recode.mjs` | `disasm` | 反汇编语料的**无损转写**与保真断言（见 `pnpm tools disasm describe`） |
-| `patch.mjs` | `patch` | ★ 翻译 patch 的查询 / **提取（唯一写入口）** / 复验（见 `pnpm tools patch describe` 与 `tools/patch.md`） |
+| `patch.mjs` | `patch` | ★ 翻译 patch 的查询 / **提取（唯一写入口）** / 复验 / **视图（`data`·`src`）与全库检索**（见 `pnpm tools patch describe` 与 `tools/patch.md`） |
 | `ui-bake.mjs` | `ui-bake` | ★ **UI 图片烘焙链**：原始 ALF → 改图配方（`tools/ui-bake/recipes/*.json`）→ 生效版 PNG / 注回 AGF；判据是**逐像素相同**（见 `pnpm tools ui-bake describe` 与 `tools/ui-bake.md`） |
 | `release.mjs` | `release` | ★ **发行打包**：把「当前所有变更过的资源」（patch 的键 + ui-bake 的配方集 + AGERC/字体）算成**测试安装树**（ALF 硬链接）或**发给玩家的 zip**（见 `pnpm tools release describe` 与 `tools/release.md`） |
 | `old-repo-inventory.mjs` | `old-repo` | **只读旧仓**：重新实测 → `docs/00-origin/old-repo-inventory.md`；重建翻译参考快照 → `docs/01-translation/ref/`（资产散件 + `archive.zip`） |
@@ -82,8 +82,13 @@ pnpm tools disasm verify                     # 语料保真断言（原件在就
 pnpm tools patch describe                    # ★ 翻译 patch：字段 / 不变量 / 操作（schema 的唯一真源）
 pnpm tools patch verify                      # ★ 判据：基线 + patch ⇒ **逐字节**相同（缺产物根时只对 resultSha 自证）
 pnpm tools patch extract                     # 从旧仓产物提取（dry-run；--write 才落盘，写前逐条自证）
-pnpm tools patch view                        # 生成 data / src 视图 → dist/views/（生成物，不入库）
-pnpm tools patch edit                        # ★ 改过 src 视图之后，反解回 patch（dry-run；--write 落盘）
+pnpm tools patch index --write                # ★ 建**基线索引**（名单 + 逐支指纹 + codec 指纹 ⇒ 永不陈旧）
+pnpm tools patch view                        # 建/刷新 **base 文本**（缺省只写 data；941 支 ≈ 3.3 s，顺手写索引）
+pnpm tools patch find 'ヘタレ'                # ★ 检索：日文查 base、中文查 op 载荷，按锚配对（不物化投影）
+pnpm tools patch find '赫塔' --edits e.txt --to '废柴'   # ★ 生成编辑清单（锚寻址；只写清单文件）
+pnpm tools patch set --edits e.txt --write    # ★ 按锚直改 op ⇒ 一次写盘进 patch（缺省 dry-run）
+pnpm tools patch view --kind src --name <脚本> # 只有要用编辑器整篇改时才物化这一支的 src 草稿
+pnpm tools patch edit --name <脚本> --write    # …改完反解（来源对不上会拒绝；折行重排走这条）
 pnpm tools disasm build                     # 转写落盘 + 打确定性 zip（需要 .staging/ 里的原件）
 pnpm tools disasm restore                   # 由 zip 反解回投递原件（默认写回 .staging/）
 pnpm tools old-repo inventory               # 重测旧仓 → docs/00-origin/old-repo-inventory.md
