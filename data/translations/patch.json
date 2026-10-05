@@ -73,7 +73,7 @@
   },
   "$1$EBINIT.BIN": {
    "baseSha": "9e4405273ec9ccf049356cd53038cc58ba49f16940408392758c74a9d5651fa8",
-   "resultSha": "3859b1e01ba2d3ed1ad7e137f3bc99fd8dcac3fecdfbdc9df4bb816a6c0d0aed",
+   "resultSha": "36b3d348c3bb967aca9da62098c9b13447f32983a64ab8fa03a67e7be680ffc2",
    "ops": [
     {"op":"replace-line","i":3,"sha8":"dd7b4fc7","line":"set-string (global-string 17acb) \"莉莉\""},
     {"op":"replace-line","i":4,"sha8":"51614bec","line":"set-string (global-string 17eb3) \"迷路的使魔\""},
@@ -83,14 +83,14 @@
     {"op":"replace-line","i":370,"sha8":"c4e5f9e8","line":"set-string (global-string 17d06) \"彷徨的歪鱼\""},
     {"op":"replace-line","i":433,"sha8":"0a55f0fc","line":"set-string (global-string 17d4d) \"魔灵梅亚基奥托\""},
     {"op":"replace-line","i":523,"sha8":"d41de3ae","line":"set-string (global-string 17da5) \"盗狮子觉醒的厉害家伙\""},
-    {"op":"replace-line","i":585,"sha8":"d8d88ce4","line":"set-string (global-string 17e3a) \"赫塔泰特\""},
-    {"op":"replace-line","i":586,"sha8":"43651706","line":"set-string (global-string 18222) \"一般属／赫塔种\""},
-    {"op":"replace-line","i":634,"sha8":"433dadf0","line":"set-string (global-string 17e3b) \"赫塔宝\""},
-    {"op":"replace-line","i":635,"sha8":"bd94e4dc","line":"set-string (global-string 18223) \"人类族／赫塔种\""},
-    {"op":"replace-line","i":704,"sha8":"e2b9fd67","line":"set-string (global-string 17e3c) \"赫塔连\""},
-    {"op":"replace-line","i":705,"sha8":"d4f5d0a2","line":"set-string (global-string 18224) \"精灵／赫塔种\""},
+    {"op":"replace-line","i":585,"sha8":"d8d88ce4","line":"set-string (global-string 17e3a) \"废柴史莱姆\""},
+    {"op":"replace-line","i":586,"sha8":"43651706","line":"set-string (global-string 18222) \"一般属／废柴种\""},
+    {"op":"replace-line","i":634,"sha8":"433dadf0","line":"set-string (global-string 17e3b) \"废柴小子\""},
+    {"op":"replace-line","i":635,"sha8":"bd94e4dc","line":"set-string (global-string 18223) \"人类族／废柴种\""},
+    {"op":"replace-line","i":704,"sha8":"e2b9fd67","line":"set-string (global-string 17e3c) \"废柴水精\""},
+    {"op":"replace-line","i":705,"sha8":"d4f5d0a2","line":"set-string (global-string 18224) \"精灵／废柴种\""},
     {"op":"replace-line","i":782,"sha8":"e47d3903","line":"set-string (global-string 17e3f) \"史莱姆王\""},
-    {"op":"replace-line","i":783,"sha8":"45f596cc","line":"set-string (global-string 18227) \"一般属／赫塔种\""},
+    {"op":"replace-line","i":783,"sha8":"45f596cc","line":"set-string (global-string 18227) \"一般属／废柴种\""},
     {"op":"replace-line","i":847,"sha8":"f1df6f10","line":"set-string (global-string 17e44) \"扭曲的精灵王女\""},
     {"op":"replace-line","i":848,"sha8":"fd6d1626","line":"set-string (global-string 1822c) \"沉睡于狭间者\""},
     {"op":"replace-line","i":933,"sha8":"3c0e34a0","line":"set-string (global-string 1822d) \"沉睡于狭间者\""},
@@ -116,7 +116,7 @@
   },
   "$1$ITINIT.BIN": {
    "baseSha": "84a5cfeb6a201b2cf64dd90bc1937f9a3d5da2fe66d8fa13126f2fa702cca026",
-   "resultSha": "39f6ef6ddab2bc699ac020934e786345b643efc66caf7dde857f73c77e8a2dac",
+   "resultSha": "15d409ae1bf5e25bf1d81cf007bc594ae064cf90485e15e1f3ede230509a76db",
    "ops": [
     {"op":"replace-line","i":0,"sha8":"79ba0701","line":"set-string (global-string 19247) \"软乎乎手套\""},
     {"op":"replace-line","i":15,"sha8":"02a2fe91","line":"set-string (global-string 1b58e) \"【拳：软乎乎手套／莉莉专用】\""},
@@ -178,8 +178,8 @@
     {"op":"replace-line","i":300,"sha8":"2841d23d","line":"set-string (global-string 197d5) \"歪精域之靴\""},
     {"op":"replace-line","i":314,"sha8":"d031d482","line":"set-string (global-string 1c0aa) \"【轻靴：歪精域之靴】\""},
     {"op":"replace-line","i":315,"sha8":"498b4d4b","line":"set-string (global-string 1c0ab) \"　由精域世界与歪曲世界诞生的虹色神奇靴\""},
-    {"op":"replace-line","i":316,"sha8":"6489ec76","line":"set-string (global-string 19964) \"赫塔雷斯之戒\""},
-    {"op":"replace-line","i":329,"sha8":"88803640","line":"set-string (global-string 1c3c8) \"【装饰：赫塔雷斯之戒】\""},
+    {"op":"replace-line","i":316,"sha8":"6489ec76","line":"set-string (global-string 19964) \"废柴戒指\""},
+    {"op":"replace-line","i":329,"sha8":"88803640","line":"set-string (global-string 1c3c8) \"【装饰：废柴戒指】\""},
     {"op":"replace-line","i":330,"sha8":"e6ddeb74","line":"set-string (global-string 1c3c9) \"　装备后不知为何会悲伤，但会附上『努力家』的戒指\""},
     {"op":"replace-line","i":331,"sha8":"f2025d2d","line":"set-string (global-string 1999b) \"怪盗之假面\""},
     {"op":"replace-line","i":339,"sha8":"7f954b90","line":"set-string (global-string 1c436) \"【装饰：怪盗之假面／莉莉专用】\""},
@@ -245,7 +245,7 @@
   },
   "$1$PLINIT.BIN": {
    "baseSha": "c5db38af053d02721b7f6dd5b0c270b03bc14767d2e7232d98ed1108b5055351",
-   "resultSha": "b894d2e822206ecf07b3673986504e4e0829ae732dafdc878f7e20536c396389",
+   "resultSha": "e23b2c5fef4d042240614cbbe85394ebd82407222b1ab4e489cb3cd8eb631ec8",
    "ops": [
     {"op":"replace-line","i":0,"sha8":"c26b3ac6","line":"set-string (global-string 1f5c8) \"庭园\""},
     {"op":"replace-line","i":17,"sha8":"8ac27ef0","line":"set-string (global-string 1f95a) \"【设施：庭园】　无结阵\""},
@@ -292,8 +292,8 @@
     {"op":"replace-line","i":239,"sha8":"f43af249","line":"set-string (global-string 1fa27) \"　神圣耐性＋１　恢复HP时＋５％效果\""},
     {"op":"replace-line","i":240,"sha8":"f3ae45ce","line":"set-string (global-string 1f7ce) \"【配置】神圣耐性+1\""},
     {"op":"replace-line","i":241,"sha8":"44d9b190","line":"set-string (global-string 1f7cf) \"【特殊】HP恢复+5%效果\""},
-    {"op":"replace-line","i":242,"sha8":"82351f28","line":"set-string (global-string 1f636) \"赫塔泰特的像\""},
-    {"op":"replace-line","i":258,"sha8":"94f2d259","line":"set-string (global-string 1fa36) \"【设施：赫塔泰特的像】　无结阵\""},
+    {"op":"replace-line","i":242,"sha8":"82351f28","line":"set-string (global-string 1f636) \"废柴史莱姆的像\""},
+    {"op":"replace-line","i":258,"sha8":"94f2d259","line":"set-string (global-string 1fa36) \"【设施：废柴史莱姆的像】　无结阵\""},
     {"op":"replace-line","i":259,"sha8":"8ef01fb9","line":"set-string (global-string 1fa37) \"　废柴的证明　可变更难度\""},
     {"op":"replace-line","i":260,"sha8":"8a5f7cd3","line":"set-string (global-string 1f7de) \"【配置】无\""},
     {"op":"replace-line","i":261,"sha8":"d7899a2e","line":"set-string (global-string 1f7df) \"【特殊】可变更难度\""}
@@ -1416,7 +1416,7 @@
   },
   "$1$SG6832A.BIN": {
    "baseSha": "574031973cc17fe1b66626be2d07358a70cbae9c1fa3bc7180967edb45ed517d",
-   "resultSha": "80bf64f586beb5696b49d6bcf7137f4ebdb984e8b0aa3f0718340fb56d063929",
+   "resultSha": "650e0db2de153730d68603affb9ea20ea36f2433341add988e8dab304c65aa53",
    "ops": [
     {"op":"replace-line","i":474,"sha8":"78f684f0","line":"set-string (global-string f17) \"要返回标题画面吗？\""},
     {"op":"replace-line","i":477,"sha8":"b851ef24","line":"set-string (local-string-ptr 0) \"是\""},
@@ -1426,14 +1426,14 @@
     {"op":"replace-line","i":530,"sha8":"387e5b79","line":"set-string (local-string-ptr 0) \"否\""},
     {"op":"replace-line","i":606,"sha8":"8e8d90f7","line":"set-string (local-string-ptr 0) \"场景回放结束\""},
     {"op":"replace-line","i":612,"sha8":"75bb603c","line":"set-string (local-string-ptr 0) \"取消\""},
-    {"op":"replace-line","i":772,"sha8":"35f8170f","line":"show-text 0 \"因闯入赫塔雷斯迷宫\""},
+    {"op":"replace-line","i":772,"sha8":"35f8170f","line":"show-text 0 \"因闯入废柴迷宫\""},
     {"op":"replace-line","i":774,"sha8":"0e2ca2e6","line":"show-text 0 \"获得了『废柴认定』称号。\""},
     {"op":"delete","i":775,"sha8":"1be824b0"}
    ]
   },
   "$1$SG6832B.BIN": {
    "baseSha": "6ee20b64900b4c011c73ee9c15e49adec013970844312938ea6991c47dad3518",
-   "resultSha": "6f96122d5505e9ce2690c2029132984f23c67f4c70b3e2eaf72bd7ff0cab15b4",
+   "resultSha": "521d8472729fcce2b4ace8a647dced82e7177015c2c08c0b0c78d78ca5c08448",
    "ops": [
     {"op":"replace-line","i":474,"sha8":"78f684f0","line":"set-string (global-string f17) \"要返回标题画面吗？\""},
     {"op":"replace-line","i":477,"sha8":"b851ef24","line":"set-string (local-string-ptr 0) \"是\""},
@@ -1443,7 +1443,7 @@
     {"op":"replace-line","i":530,"sha8":"387e5b79","line":"set-string (local-string-ptr 0) \"否\""},
     {"op":"replace-line","i":606,"sha8":"8e8d90f7","line":"set-string (local-string-ptr 0) \"场景回放结束\""},
     {"op":"replace-line","i":612,"sha8":"75bb603c","line":"set-string (local-string-ptr 0) \"取消\""},
-    {"op":"replace-line","i":772,"sha8":"539fb5b2","line":"show-text 0 \"获得了『赫塔泰特的像』。\""},
+    {"op":"replace-line","i":772,"sha8":"539fb5b2","line":"show-text 0 \"获得了『废柴史莱姆的像』。\""},
     {"op":"replace-line","i":774,"sha8":"34176339","line":"show-text 0 \"配置在城砦中，即可更改游戏难度。\""},
     {"op":"delete","i":775,"sha8":"1be824b0"}
    ]
@@ -1543,17 +1543,17 @@
   },
   "$1$STINIT2.BIN": {
    "baseSha": "2123e36b1be828b9b49572db3898b16e37852aafc238972ca7a835e64c483e41",
-   "resultSha": "a1f5ea9513935d8e229171f98b6b5206658d942c3226b2404919a5471d200884",
+   "resultSha": "9fba1995bd4ca5c6d30419551cfe043e70dc29b324b0ea295fa5d1f0f69d601f",
    "ops": [
     {"op":"replace-line","i":0,"sha8":"947152ea","line":"set-string (global-string 1217f) \"弱者的遗迹\""},
     {"op":"replace-line","i":1,"sha8":"eee60fe7","line":"set-string (global-string 12180) \"歪精域之森\""},
     {"op":"replace-line","i":15,"sha8":"0d250c8c","line":"set-string (global-string 12201) \"转移镜之间\""},
-    {"op":"replace-line","i":24,"sha8":"e22775f7","line":"set-string (global-string 12323) \"赫塔雷斯迷宫１Ｆ\""},
-    {"op":"replace-line","i":34,"sha8":"4f79b7cf","line":"set-string (global-string 12324) \"赫塔雷斯迷宫２Ｆ\""},
-    {"op":"replace-line","i":48,"sha8":"3ba3a94c","line":"set-string (global-string 12325) \"赫塔雷斯迷宫３Ｆ\""},
-    {"op":"replace-line","i":62,"sha8":"6283a297","line":"set-string (global-string 12326) \"赫塔雷斯迷宫４Ｆ\""},
-    {"op":"replace-line","i":76,"sha8":"3ffab480","line":"set-string (global-string 12327) \"赫塔雷斯迷宫５Ｆ\""},
-    {"op":"replace-line","i":90,"sha8":"447eee23","line":"set-string (global-string 12328) \"赫塔雷斯迷宫６Ｆ\""},
+    {"op":"replace-line","i":24,"sha8":"e22775f7","line":"set-string (global-string 12323) \"废柴迷宫１Ｆ\""},
+    {"op":"replace-line","i":34,"sha8":"4f79b7cf","line":"set-string (global-string 12324) \"废柴迷宫２Ｆ\""},
+    {"op":"replace-line","i":48,"sha8":"3ba3a94c","line":"set-string (global-string 12325) \"废柴迷宫３Ｆ\""},
+    {"op":"replace-line","i":62,"sha8":"6283a297","line":"set-string (global-string 12326) \"废柴迷宫４Ｆ\""},
+    {"op":"replace-line","i":76,"sha8":"3ffab480","line":"set-string (global-string 12327) \"废柴迷宫５Ｆ\""},
+    {"op":"replace-line","i":90,"sha8":"447eee23","line":"set-string (global-string 12328) \"废柴迷宫６Ｆ\""},
     {"op":"replace-line","i":112,"sha8":"d746da2a","line":"set-string (global-string 12338) \"异界断层之玉座\""}
    ]
   },
