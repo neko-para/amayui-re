@@ -68,8 +68,8 @@ tools/test/emulator-*.test.mjs          ← 它们的守卫（@env assets：回�
 它们各自的落点在**知识层**（`packages/age-format/src/engine/`），带 EA 出处、由守卫回语料复核：
 
 ```text
-packages/age-format/src/engine/layout.mjs    ← 槽位/偏移/步长/池的计数槽与基址槽（观察）
-packages/age-format/src/engine/handlers.mjs  ← opcode → handler（IDA 符号；"哪段代码实现了它"）
+packages/age-format/src/engine/layout.mts    ← 槽位/偏移/步长/池的计数槽与基址槽（观察）
+packages/age-format/src/engine/handlers.mts  ← opcode → handler（IDA 符号；"哪段代码实现了它"）
 ```
 
 ⇒ 接口是**语义名**：`localPoolByTypeTag(tag)` ↔ `LOCAL_POOL_SLOTS[].name`。
@@ -100,7 +100,7 @@ packages/age-format/src/engine/handlers.mjs  ← opcode → handler（IDA 符号
 * ❌ 不含循环副作用（渲染 / 音频 / 输入）—— 遇到就登记，不实现。
 
 **两条不许动摇的口径**（都由守卫钉住）：
-1. **int 族槽的值是编码位模式** ⇒ 读必须过 DEC、写必须过 ENC（`packages/age-format/src/asm/value-codec.mjs`）；
+1. **int 族槽的值是编码位模式** ⇒ 读必须过 DEC、写必须过 ENC（`packages/age-format/src/asm/value-codec.mts`）；
    **float 族不过**；**下标不过**（`base + idx*4` 是纯算术）。`enc_zero ≠ 0` ⇒ "未初始化 = 0"是错的。
 2. **引擎不做越界检查** ⇒ 模型也**不** clamp、**不**补 0：未初始化/越界读返回 `null`，并记进 `LocalPools.noteOOB`
    （"引擎没做的事"必须**显式留痕**，不是悄悄替它做）。

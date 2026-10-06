@@ -51,27 +51,35 @@
   ❌ 不用 `enum` / `namespace` / 构造器参数属性 / 装饰器（它们要**代码生成**，会逼出构建步骤）。
   ★ 它**已进 workspaces**（因为它的模型要 import `@amayui/age-format`）⇒ 有 `apps/emulator/package.json`，
   依赖写在 `dependencies` 里、跨包引用走包名。入列表的判据是**"有没有自己的依赖"**，不是"在不在 `apps/`"。
-* 仓库内**其余一切 JS** —— `packages/*`、`tools/*`、守卫与测试 —— **一律直接写 `.mjs`**。
-  根目录**不引入** `typescript` / `tsc` / `tsconfig`，因此没有构建步骤，`node` 直接跑。
-  ★ **类型声明写在拥有它的包里**：`packages/age-format` 的每个模块旁边是配对的 **`.d.mts`**
-  （`foo.mjs` ↔ `foo.d.mts` —— `.d.mts` 才是 `.mjs` 的配对形式，`.d.ts` 配 `.js`）。
-  ⇒ 消费方 `import type { Header } from '@amayui/age-format/src/asm/index.mjs'`，
-  **不许**在消费方自己声明别人的类型、也不许用 `as` 把跨包边界糊过去。
-  ★ `.d.mts` 与 `.mjs` **TypeScript 不交叉校验**（声明里写错名字 `tsc` 不响）⇒ 由
-  `tools/test/age-format-types.test.mjs` 机械对账两条：**幽灵声明**（声明了实现没有的）与
-  **公开面可达**（有配对声明，或已被入口再导出）。⚠ 它**验不了参数类型** —— 每条签名仍须读实现再写。
+* 仓库内**其余一切 JS** —— `tools/*`、守卫与测试 —— **一律直接写 `.mjs`**。
+  根目录**不引入** `typescript` 的构建步骤，`node` 直接跑（`tsc` 只用于 `noEmit` 检查，见下）。
+  ★ **`packages/age-format` 的源码是 `.mts`（一份真源）**：类型就写在**实现里**，
+  **没有**配对的 `.d.mts`，也**不许**消费方自己声明别人的类型、或用 `as` 把跨包边界糊过去。
+  ⇒ 消费方 `import type { Header } from '@amayui/age-format/src/asm/index.mts'`（类型由入口 `export type { … }` 再导出）。
+  ★ **为什么从 `.mjs` + 手写 `.d.mts` 改成 `.mts`**：`.d.mts` 与 `.mjs` **TypeScript 不交叉校验**
+  —— 声明里写错**参数类型**`tsc` 完全不响。实测代价：本包那份手写声明里，`roundTripBytes` 被写成
+  `boolean`（真值是**字节**）、`parseWhBpp` / `extractPaletteRgb` / `packSection` / `decodeRgba` 的返回
+  全写错 —— 名字层面对得上，签名全错。改成一份真源后这些**立刻**变成 `tsc` 错误。
+  ★ `tools/test/age-format-types.test.mjs` 仍然守着三条：**幽灵声明**（`export declare` 的名字实现里要有）·
+  **公开面类型可达**（自己就是 `.mts`、或有配对 `.d.mts`、或已被入口再导出）· **未注解导出为 0**。
 * ★ **跨包引用一律走包名**（`@amayui/age-format/src/...`），**不要**用 `../../packages/...` 相对路径。
   ★ **前提是"声明了依赖"**：pnpm 只为**在 `dependencies` 里写了**的 workspace 包建
   `node_modules/@amayui/*` 链接。没声明 ⇒ 包名导入直接 `ERR_MODULE_NOT_FOUND`
   （实测：`tools/package.json` 原先把 `age-format`/`ledger` 漏在 `dependencies` 之外，
   于是"相对路径能跑、包名跑不了"）。加一个跨包引用 = 在消费者清单里加一行 `"@amayui/x": "workspace:*"` + `pnpm install`。
   ★ 各包 `package.json` 的 `exports` 用 `"./*": "./*"`：**无构建 ⇒ 不做打包边界**，只是让"包内路径"有个显式入口集合。
-  ★ Windows 上那个链接是 **junction**（无提权时 pnpm 的降级形态）—— `tools/` 下的导入**实测能解析**（Node 走真实路径）。
-* ★ **类型检查只在 app 内、用 `noEmit`**：`pnpm typecheck`（= `tsc -p apps/emulator/tsconfig.json --noEmit`）。
-  `.ts` 仍然由 **Node 原生 type stripping** 直接跑 ⇒ **没有构建步骤**，`tsc` 的唯一职责是"把类型写错变成红灯"。
+  ★ Windows 上那个链接**必须是真符号链接**（`lstat.isSymbolicLink === true`）：Node **拒绝为 `node_modules`
+  下的文件剥类型**（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`）⇒ 跨包 `.mts` 只在真符号链接下走得通。
+  无提权时 pnpm 会**静默降级成 junction**（装完不报错、链接形态却是错的）⇒ 提权安装见 `plugins/pnpm-priv`。
+* ★ **类型检查用 `noEmit`，覆盖两个工程**：`pnpm typecheck`
+  （= `tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit`）。
+  `.ts`/`.mts` 仍然由 **Node 原生 type stripping** 直接跑 ⇒ **没有构建步骤**，`tsc` 的唯一职责是"把类型写错变成红灯"。
   `erasableSyntaxOnly` 把"Node 剥壳不支持的语法"（`enum`/`namespace`/参数属性/装饰器）提前变成类型错误。
-  ★ `apps/emulator` 的模型**不用 Node 平台类型**（`Buffer` → 结构化的 `ByteSource`），
-  因此它的 tsconfig **不需要** `@types/node`。
+  ★ **模拟器的工程会把 `age-format` 的源码一起拉进来**（它 `import` 它）—— 这是**有意的**：
+  一条命令就能看见"消费方 + 被消费方的类型是否自洽"，不需要给 `age-format` 做 `composite` 工程引用
+  （那要产出 `.d.ts`，与"无构建"冲突）。
+  ★ `packages/age-format` 的 tsconfig 需要 `@types/node`（它用 `Buffer` / `node:fs` / `__dirname`）；
+  `apps/emulator` 的模型**不用 Node 平台类型**（`Buffer` → 结构化的 `ByteSource`），因此它自己那份不需要。
 * 包管理**用 pnpm**（`pnpm-workspace.yaml` 是 workspace 真源）。禁止混用 `npm install` 生成 `package-lock.json`。
   ★ **结构类设置只写 `pnpm-workspace.yaml`，不写 `.npmrc`**：`.npmrc` 只读 auth 与 registry；
   定义 `node_modules` 结构的键写在那里会在 pnpm 11 起**静默失效**。
@@ -122,7 +130,7 @@ pnpm test:list                  # 看分级集合与每个文件的声明（先�
 pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
 pnpm test:mutation              # ★ **守卫自检**：改坏一处关键常量 ⇒ 确认对应守卫**当场红**（红得有意义）
-pnpm typecheck                  # ★ `tsc --noEmit`（只查 `apps/emulator` 的 `.ts`；**不产出** ⇒ 仍无构建步骤）
+pnpm typecheck                  # ★ `tsc --noEmit`，**两个工程**（`packages/age-format` + `apps/emulator`）；不产出 ⇒ 仍无构建步骤
 ```
 
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`
@@ -195,7 +203,7 @@ pnpm typecheck                  # ★ `tsc --noEmit`（只查 `apps/emulator` �
 | | 落点 | 注册方式 |
 |---|---|---|
 | **技能** | **`.agents/skills/<名字>/SKILL.md`** —— 路径**固定、不可改名/移位** | DSH 按该固定路径发现，**无需注册**（落盘即进技能目录，当前会话就能用）。内容从零重写（不抄旧仓）；**有哪些技能看目录本身** —— 不在这里列清单（列了必随下一次重建变错，见 §10） |
-| **DSH 插件** | `plugins/` 只是**源码落点**，位置自由 | **`dsh plugin --profile web install "<插件绝对路径>"`**（环境级、要提权：写 `$DSH_HOME`）。包必须声明 `dsh.bundle.patch`（否则只当普通依赖装进来、**不会**被组合）；宿主插件代码**不热重载** ⇒ 改完要重启。首个插件：`plugins/deploy`（宿主侧特权工具，见其 `README.md`） |
+| **DSH 插件** | `plugins/` 只是**源码落点**，位置自由 | **`dsh plugin --profile web install "<插件绝对路径>"`**（环境级、要提权：写 `$DSH_HOME`）。包必须声明 `dsh.bundle.patch`（否则只当普通依赖装进来、**不会**被组合）；宿主插件代码**不热重载** ⇒ 改完要重启。现有两个：`plugins/deploy`（部署那几步：游戏目录硬链接 / headless Chrome / 完整性标签）与 `plugins/pnpm-priv`（**提权安装依赖**：让 pnpm 建**真符号链接**而不是 junction —— 跨包 `.mts` 的前提） |
 
 ★ **不要为了迎合注册方式去扭曲仓库结构**：技能必须遵守固定路径，而插件位置自由。
 

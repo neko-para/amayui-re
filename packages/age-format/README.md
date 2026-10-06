@@ -12,12 +12,30 @@ AGE 引擎的**容器 / 资源格式**读写：**ALF**（归档）、**AGF**（�
 ```text
 packages/age-format/
   cli.mjs              # CLI（查看 / 解包 / 重打包 / ★ verify 往返复验）
-  src/lzss.mjs         # 纯工具：ALF 族的 LZSS（两个方向）
-  src/alf.mjs          # 领域模型：ALF 归档（索引 + 数据体）
-  src/agf.mjs          # 领域模型：AGF 图像（含 AGF 族的 LZSS 与像素排布）
-  src/asm/             # 领域模型：AGE 脚本（指令表 + CP932 编解码 + 反汇编/重汇编 + ★ reflow 的落点）
+  tsconfig.json        # ★ 只做类型检查（noEmit）—— 本包**没有构建步骤**
+  src/**.mts           # ★ 源码是 TypeScript，且**类型就写在实现里**（没有配对的 .d.mts）
+    src/lzss.mts       #   纯工具：ALF 族的 LZSS（两个方向）
+    src/alf.mts        #   领域模型：ALF 归档（索引 + 数据体）
+    src/agf.mts        #   领域模型：AGF 图像（含 AGF 族的 LZSS 与像素排布）
+    src/asm/           #   领域模型：AGE 脚本（指令表 + CP932 编解码 + 反汇编/重汇编 + ★ reflow 的落点）
+    src/engine/        #   ★ **引擎镜像布局的观察记录**（槽位/偏移/opcode→handler）—— 逆向知识，不属于模拟器
   test/                # 守卫：三套格式的「解包 → 重打包逐字节相同」
 ```
+
+★ **为什么是 `.mts` 而不是 `.mjs` + 手写 `.d.mts`**（2026-10 变更）：
+`.d.mts` 与 `.mjs` 之间 **TypeScript 不交叉校验** —— 声明里写错**参数类型**，`tsc` 完全不响。
+实测代价：那份手写声明里 `roundTripBytes` 被写成 `boolean`（真值是**字节**）、
+`parseWhBpp` / `extractPaletteRgb` / `packSection` / `decodeRgba` 的返回**全写错** ——
+名字层面对得上，签名全错。改成一份真源后，这些**立刻**变成 `tsc` 错误。
+⇒ 消费方 `import type { Header } from '@amayui/age-format/src/asm/index.mts'`（入口用 `export type { … }` 再导出）。
+
+★ **没有构建步骤**：`.mts` 由 **Node v24 的原生 type stripping** 直接跑（`node cli.mjs` 照旧）。
+`tsc` 的唯一职责是"把类型写错变成红灯"：`pnpm typecheck`（根目录，覆盖本包与 `apps/emulator` 两个工程）。
+⇒ 写法约束：**只许可擦除语法**（类型标注 / `interface` / `type` / `import type`），
+❌ 不用 `enum` / `namespace` / 构造器参数属性 / 装饰器（它们要**代码生成**，会逼出构建步骤；
+`tsconfig.json` 的 `erasableSyntaxOnly` 会提前把它变成类型错误）。
+★ 本包需要 `@types/node`（用 `Buffer` / `node:fs` / `__dirname`）。
+★ 守卫：`tools/test/age-format-types.test.mjs` 盯三条 —— **幽灵声明** · **公开面类型可达** · **未注解导出为 0**。
 
 ## 2. 判据：**解包 → 重打包逐字节相同**
 
@@ -73,7 +91,7 @@ pnpm test                                          # 全仓测试（含本包的
   `name` / `aliases`（87 条）是三方工具旧资产、**无独特信息**，只作文本层兼容层。
   口径详见 `src/asm/instruction-set.md`。
 * 码页：CP932 两个方向自持（含外字区 `0xF040–0xF9FC ↔ U+E000–U+E757` 与 IBM 扩展区归属，
-  详见 `src/asm/codec.mjs` 头注释）。
+  详见 `src/asm/codec.mts` 头注释）。
 * ★ 旧仓对 **v5 头字段整块错位 8 字节**（`parseNumericFields(buf, 16)` 又内用 `+8…+56`）；
   真实语料全是 v4 故一直没暴露。本包按字段顺序修正，并用合成 v5 脚本验过往返逐字节相同。
 

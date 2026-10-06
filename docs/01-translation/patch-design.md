@@ -301,7 +301,7 @@ pnpm tools corpus list                    # 素材的去向（`translation/patch
 3. **`_extracted/` 里 84 个 BIN 反汇编失败**：它们是**老汉化的 overlay**，不是脚本来源，**不在重建范围**。
 4. **不可再生的集合是空的**（本文件 §2.2 逐项实测）——所以"没有 `src` 会丢东西"这个顾虑不成立；
    真正要小心的是**工具没做对**（视图算错）而不是**数据丢了**（patch 里都留着）。
-5. 已知实现边界：`packages/age-format/src/asm/disassemble.mjs` 对 v5 头字段是有意修正（真实语料无 v5）。
+5. 已知实现边界：`packages/age-format/src/asm/disassemble.mts` 对 v5 头字段是有意修正（真实语料无 v5）。
 6. **头部也能变**：反汇编的头部 4 行**通常**与基线相同，但**不是**不变量 ——
    唯一实测到的一例是 `$1$IMINIT.BIN` 的 `local_vars` 从 `{ 3 1 1 2 1 1 }` 变成 `{ 1 1 1 1 1 1 }`
    （而那一支是**旧仓的坏文件**、迁移时没取，见 §2.3）。

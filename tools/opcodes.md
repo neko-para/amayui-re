@@ -8,7 +8,7 @@
 | | 落点 |
 |---|---|
 | **来源（只读）** | `corpus/assets.json` 的 `knowledge/opcode-table-source` 条目 ⇒ 旧仓 `scripts/asm/opcodes.json`（`external-only`，只登记不入库） |
-| **产物** | `packages/age-format/src/asm/instruction-set.json`（**唯一写入口就是本工具**；消费者 `src/asm/opcodes.mjs`） |
+| **产物** | `packages/age-format/src/asm/instruction-set.json`（**唯一写入口就是本工具**；消费者 `src/asm/opcodes.mts`） |
 
 ★ **来源登记在清单里、不硬编码旧仓路径**：换机器 / 旧仓搬家 / 旧仓移除，都只改登记一处，派生链不断。
 （这正是清单作为 lockfile 的用法：记「来源与去向」。）

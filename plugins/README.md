@@ -8,10 +8,17 @@ DSH 插件的源码放这里。**位置是自由的** —— 与技能不同，�
 
 ## 2. 本轮状态
 
-**已重建第一个插件：`deploy`**（`plugins/deploy/`，DSH 宿主侧特权工具；设计/安全口径/装法见其 `README.md`）。
-它属于**反面情形**那一类（§2 的判据："**需要的是文件，还是需要 DSH 的运行时？**"）——
-它要的既不是台账文件、也不是网页视图，而是**宿主进程的权限**（沙箱拒绝的那几步：游戏目录硬链接 /
-headless Chrome / 完整性标签）。
+**已重建两个插件**（都属于**反面情形**那一类，判据见 §2："**需要的是文件，还是需要 DSH 的运行时？**"）：
+
+* **`deploy`**（`plugins/deploy/`）—— 沙箱拒绝的那几步：游戏目录硬链接 / headless Chrome / 完整性标签。
+* **`pnpm-priv`**（`plugins/pnpm-priv/`）—— **提权安装依赖**：让 `pnpm` 建**真符号链接**而不是 junction。
+  ★ 它存在的唯一理由：Node **拒绝为 `node_modules` 下的文件剥类型**
+  （`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`），而"跨包用包名导入 `.mts`"必然解析到
+  `node_modules/@amayui/<包>` ⇒ 那条路**只在真符号链接下走得通**（实测：symbolic link 成功 / junction 报错）；
+  Windows 上建真符号链接要 `SeCreateSymbolicLinkPrivilege`，沙箱里拿不到 ⇒ pnpm **静默降级成 junction**。
+  判据不是"pnpm 退出 0"，而是 `pnpm_priv op=check-links` 里**"不是真符号链接"为 0**。
+
+两者的设计 / 安全口径 / 装法见各自的 `README.md`。
 
 更早那版 DSH 插件（右栏「需求」面板 + 正文引用）**已删除** —— 结论是**那一版**不划算，
 **不是"插件这条路整体不成立"**：
