@@ -1,0 +1,27 @@
+{
+  "name": "@amayui/dsh-plugin-pnpm-priv",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "提权安装依赖（宿主侧特权）：让 pnpm 以**真符号链接**建 workspace 链接而不是 junction —— 这是 Node 能对 `.mts` 剥类型的必要条件",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none test/*.test.mjs"
+  }
+}

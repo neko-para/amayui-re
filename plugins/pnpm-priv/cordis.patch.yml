@@ -1,0 +1,17 @@
+# plugins/pnpm-priv 的 bundle patch —— 本插件作为 profile 的**一个 patch 层**被组合进来。
+#
+# 形态与 `plugins/deploy` / `@deepseek-ai/dsh-base` 一致：一次 `insert`、一条 loader entry；
+# `name` 是**包名**，DSH 按它 import 本包的主入口（`index.mjs`）。
+#
+# ★ 部署方（人）要改的是**这一层的 config**（允许在哪些仓库根里装、要不要禁掉某些 verb），
+#   改法是在 profile 的 `cordis.patch.yml` 里按 id 覆盖（last write wins）：
+#
+#     - id: amayui-pnpm-priv
+#       name: '@amayui/dsh-plugin-pnpm-priv'
+#       config:
+#         repoRoot: 'E:\Projects\amayui-re'
+#         allowedVerbs: ['install', 'add']
+#
+- insert:
+    - id: amayui-pnpm-priv
+      name: '@amayui/dsh-plugin-pnpm-priv'
