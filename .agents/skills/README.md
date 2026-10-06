@@ -5,19 +5,18 @@
 
 ## 1. 现状
 
-```text
-.agents/skills/
-  README.md              ← 本说明
-  amayui-translate/      ← 已重建的**第一个**技能（翻译 / 更新译文）
-```
+**落点里有哪些技能 —— 看目录本身**（一个子目录一个技能；DSH 落盘即发现）。
+本文件**不列清单**：列了必随下一次重建变错（`AGENTS.md` §10 的自检："这句话会不会因为下次干活而变错？"）。
 
 旧仓的 `.agents/skills/`（实测 **8** 个技能）**不迁移**：用户口径是"几乎所有技能与工具都需要重新适配"，
 因此全部按 `rebuild` 处理 —— 只留"重写时读得到旧实现"的指针
 （`corpus/assets.json` 的 `agent/skills`）。
 
-`amayui-translate` 是**重写**的范例：它按新模型（`pnpm tools patch view/edit/verify`）从零写，
+**重写范例**：`amayui-translate`（翻译 / 更新译文）—— 按新模型（`pnpm tools patch view/edit/verify`）从零写，
 只把旧技能的**纯约定**继承下来（`references/conventions.md`），与旧仓工具 / 路径绑死的部分一律丢弃。
 它消费的参考资产是只读快照 `docs/01-translation/ref/`，并且强制"旧文档的结论先核实再用"。
+**形状**同理：技能只带「什么时候用 + 怎么判 + 常踩的坑」，schema / 口径一律指向
+`pnpm tools <域> describe` 与同名 `README.md`（不复述 = 不会漂）。
 
 ## 2. 怎么写（M6 重建时）
 
