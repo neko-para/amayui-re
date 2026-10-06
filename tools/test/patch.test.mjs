@@ -1,3 +1,4 @@
+/** @env pure @kind safety @why 翻译 patch 的写路径或锚定坏了 */
 /**
  * tools/test/patch.test.mjs — 翻译 patch 的**基建契约**测试
  *

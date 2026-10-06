@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/** @env pure @kind gate @why 台账 schema/锚点/分类轴/DB 可重建被破坏 */
 /**
  * tools/test/ledger.test.mjs —— **知识台账的守卫**（M3 的判据 G1–G5 + 分类轴节点全在这里）
  *

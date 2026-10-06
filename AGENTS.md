@@ -93,8 +93,33 @@ pnpm tools requirements serve   # 项目工作台（需求 + AGE 脚本），项
 pnpm --filter @amayui/workbench verify # 工作台门禁：typecheck + build + smoke
 pnpm tools disasm verify        # 反汇编语料保真断言（逐行反解回字节必须与源逐字节相同）
 pnpm tools old-repo inventory   # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
-pnpm test                       # 守卫测试（单进程跑，见下）
+pnpm test                       # ★ 测试（默认只跑 @env pure；分级见下）
+pnpm test:list                  # 看分级集合与每个文件的声明（先看这个）
+pnpm test:assets                # 只跑要 LFS/游戏安装的那档
+pnpm test:all                   # 全部（含 @env external：旧仓/真机）
 ```
+
+### 测试分级（★ 判据写在文件首行的 pragma 里，**不建清单文件**）
+
+每个 `*.test.mjs` 首行必须是：
+
+```js
+/** @env pure @kind gate @why 一句话说清"红了意味着什么" */
+```
+
+| `@env` | 这台机器上它有没有意义 | 默认跑？ |
+|---|---|---|
+| `pure` | 只读仓库内文本 / 纯函数 | ✅ **`pnpm test` 只跑这档** |
+| `assets` | 要 LFS 资产或**游戏安装**（控制类内容很稳定 ⇒ 不值得每次跑） | `pnpm test:assets` |
+| `external` | 要**旧仓**或真机 | `pnpm test:all` |
+
+`@kind` ∈ `gate`（不变量/清单/约定）· `contract`（领域能力行为）· `safety`（写路径不写坏数据）· `product`（产出物不变量）。
+
+★ 为什么要有分级（实测）：旧形态一条命令跑全部 = 23 文件 / 220 用例 / **~28.7 s**，其中
+`inventory` 13.8 s + `corpus-manifest` 9.8 s 占了 **82%**；而且 **13/23 个文件依赖仓库外的东西**，
+"这台机器上没跑"与"跑了且绿"在输出里长得一样。选择器是 `tools/test-run.mjs`。
+★ **测试卫生**：缺席时用 `t.skip(...)`，**不许** `t.diagnostic(...)` + 裸 `return`
+（实测那会被 node:test 记成 **pass**）；`layering.test.mjs` 有一条守卫盯着这件事。
 
 * **命令一律经派发器**：`pnpm tools <域> <动作> [args…]`（域地图由各工具的自我声明派生 —— `tools/cli.mjs`）。
   位置参数与 flag 直接跟在后面，**不必 `--`**。

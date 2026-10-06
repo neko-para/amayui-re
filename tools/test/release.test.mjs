@@ -1,3 +1,4 @@
+/** @env pure @kind product @why 发行物不满足不变量 */
 /**
  * tools/test/release.test.mjs — 发行打包（`tools/lib/release.mjs` + `tools/release.mjs`）的**基建契约**测试
  *

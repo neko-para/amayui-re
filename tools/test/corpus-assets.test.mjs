@@ -1,3 +1,4 @@
+/** @env pure @kind gate @why LFS 规则/忽略规则/说明书约定被破坏 */
 /**
  * tools/test/corpus-assets.test.mjs — `corpus/assets/`（M1b 的 UI 图片 + 字体）的**基建契约**
  *

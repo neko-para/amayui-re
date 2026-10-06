@@ -1,3 +1,4 @@
+/** @env pure @kind gate @why 指令表派生链断了或混进知识层字段 */
 /**
  * tools/test/opcodes.test.mjs — 指令表**派生**的守卫
  *
@@ -7,6 +8,11 @@
  *   ③ 落盘形态**同输入同字节**（一个 opcode 一行、键序固定）。
  *
  * ❌ 不测"当前表里有什么值"（那是状态，交给 `packages/age-format/test/asm.test.mjs` 与 `pnpm tools opcodes report`）。
+ *
+ * ★ **拆过一刀**（本轮测试分级）：原先还有一条"来源在场时它的 sha256 必须与登记一致" ——
+ *   它按清单条目解析到**旧仓**里的 `opcodes.json` ⇒ 属 `@env external`，已移到
+ *   `opcodes.external.test.mjs`（那条原来还是**裸 `return` ⇒ 被记成 pass** 的无痕假绿）。
+ *
  * 运行：`pnpm test`
  */
 import { test } from 'node:test';
@@ -131,18 +137,4 @@ test('④ 派生链**不硬编码旧仓路径**：来源必须登记在清单条
   const src = fs.readFileSync(new URL('../opcodes.mjs', import.meta.url), 'utf8');
   assert.ok(src.includes("'knowledge/opcode-table-source'"), '派生器必须按条目 id 解析来源');
   assert.ok(!/DEFAULT_SOURCE\s*=\s*'scripts\//.test(src), '派生器不得硬编码旧仓相对路径');
-});
-
-test('④ 来源在场时，它的 sha256 必须与登记一致（来源被换过 ⇒ 红）', async () => {
-  const manifest = JSON.parse(fs.readFileSync(DEFAULT_MANIFEST, 'utf8'));
-  const entry = manifest.entries.find((e) => e.id === 'knowledge/opcode-table-source');
-  const origin = (entry.origin ?? [])[0];
-  const abs = path.join(manifest.roots[origin.root], origin.path);
-  if (!fs.existsSync(abs)) {
-    // 旧仓是每台机器不同的绝对路径：不在场就跳过（与 age-format 的样本同一口径）
-    return;
-  }
-  const { createHash } = await import('node:crypto');
-  const got = createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
-  assert.equal(got, origin.sha256, '来源文件的 sha256 与登记不符 ⇒ 派生链的证据变了');
 });

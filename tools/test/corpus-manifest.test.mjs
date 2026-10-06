@@ -1,11 +1,15 @@
+/** @env pure @kind gate @why 清单不变量被破坏（合成清单路径：#1–#9 的守卫不再会红） */
 /**
- * tools/test/corpus-manifest.test.mjs — 素材清单守卫的测试
+ * tools/test/corpus-manifest.test.mjs — 素材清单守卫的**单元**层
  *
- * 分两层：
- *   ① **单元**：对合成清单逐条验证 §3.3 的 9 个断言**真的能红**（守卫不能是"永远绿"的摆设）；
- *   ② **端到端**：对真实 `corpus/assets.json` 跑一次 CLI `--validate`，并要求退出码 0。
+ * 对**合成清单**逐条验证 §3.3 的 9 个断言**真的能红**（守卫不能是"永远绿"的摆设）。
  *
- * 运行：`pnpm test`（根 package.json 的 test 脚本 = node --test 加 glob；glob 形态见该脚本，别写进本注释）
+ * ★ **拆过一刀**（本轮测试分级）：原先还有两条"端到端"（真实 `corpus/assets.json` + CLI 退出码）——
+ *   它们要求 47 个条目的 `dest`/`origin` 都在盘上（= 装了游戏 / LFS 已 smudge），
+ *   实测（`gameInstall` 指空）会**红 2 条**，而本文件这 27 条合成用例照样全绿
+ *   ⇒ 已移到 `corpus-manifest.assets.test.mjs`（`@env assets`），免得"纯路径的守卫"跟着机器环境一起红。
+ *
+ * 运行：`pnpm test`（默认档 = `@env pure`）
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -325,24 +329,10 @@ test('canonicalStringify：同输入 ⇒ 同字节，且键序固定', () => {
   assert.ok(text.endsWith('\n'));
 });
 
-// ─────────────────────────────────────────── 端到端
+// ─────────────────────────────────────────── 端到端（**已移走**）
 //
-// ★ 这些用例**刻意不捕获子进程输出**（`stdio: 'pipe'`）：在受限沙箱里捕获输出要开命名管道 ⇒ `spawn EPERM`。
-//   能直接调的就直接调（同一条代码路径，还更快）；要覆盖 CLI 外壳时用 `stdio: 'ignore'` + 退出码。
-
-test('端到端：真实 corpus/assets.json 过全部断言（含 git 检查、哈希复核、真跑 recipe）', () => {
-  assert.ok(fs.existsSync(DEFAULT_MANIFEST), 'corpus/assets.json 必须存在');
-  const report = validateManifest(loadManifest(DEFAULT_MANIFEST), { repoRoot: REPO_ROOT });
-  const bad = report.checks.filter((c) => c.status === 'fail').map((c) => `#${c.id} ${c.title}：${c.message}`);
-  assert.deepEqual(bad, [], `守卫必须全绿，实际：\n${bad.join('\n')}`);
-  assert.equal(report.failures, 0);
-});
-
-test('端到端：CLI `--validate` 退出码 0（外壳与退出码，不捕获输出）', () => {
-  assert.doesNotThrow(() => {
-    execFileSync(process.execPath, [CORPUS_MJS, '--validate'], { cwd: REPO_ROOT, stdio: 'ignore' });
-  }, 'pnpm tools corpus validate 必须退出 0');
-});
+// ★ 原先这里的两条"端到端"（真实清单全绿 / CLI 退出码 0）依赖**盘上资产是否齐全** ⇒
+//   已移到 `corpus-manifest.assets.test.mjs`（`@env assets`）。本文件只管**合成清单**的单元路径。
 
 test('端到端：写入非法状态会被拒绝（清单不是"写什么是什么"）', () => {
   const root = makeRepo();

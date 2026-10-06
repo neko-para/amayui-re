@@ -1,3 +1,4 @@
+/** @env pure @kind gate @why 需求树不变量被破坏 */
 /**
  * tools/test/requirements.test.mjs — 需求模型（`data/requirements/`）的守卫测试
  *

@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 10
-- verify: tools/test/corpus-manifest.test.mjs#端到端：真实 corpus/assets.json 过全部断言
+- verify: tools/test/corpus-manifest.assets.test.mjs#端到端：真实 corpus/assets.json 过全部断言
 
 ## 判据（已完成）
 `corpus/assets.json` 过 9 条守卫；`.gitattributes` 首行是 `* text=auto eol=lf`；

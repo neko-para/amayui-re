@@ -10,7 +10,10 @@
     "plugins/*"
   ],
   "scripts": {
-    "test": "node --test --test-isolation=none \"{tools/test/**/*.test.mjs,packages/*/test/**/*.test.mjs,plugins/*/test/**/*.test.mjs}\"",
+    "test": "node tools/test-run.mjs",
+    "test:assets": "node tools/test-run.mjs --env assets",
+    "test:all": "node tools/test-run.mjs --all",
+    "test:list": "node tools/test-run.mjs --list",
     "tools": "node tools/cli.mjs"
   },
   "pnpm": {

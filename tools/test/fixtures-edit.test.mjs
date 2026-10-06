@@ -1,3 +1,4 @@
+/** @env pure @kind safety @why 样本台账的写路径写坏了数据 */
 /**
  * tools/test/fixtures-edit.test.mjs — **编辑路径**（`tools/fixtures.mjs`）的安全性质
  *

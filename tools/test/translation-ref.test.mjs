@@ -1,3 +1,4 @@
+/** @env external @kind gate @why 翻译参考快照不再与旧仓逐字节相同 */
 /**
  * tools/test/translation-ref.test.mjs —— **翻译参考快照的保真守卫**
  *
@@ -50,7 +51,7 @@ test('快照区只含「映射规则说得出的」东西（不许就地加文�
 
 test('★ assets/ 与旧仓来源**逐字节**相同（旧仓不在本机时如实 skip）', (t) => {
   if (!repo || !fs.existsSync(repo)) {
-    t.diagnostic(`旧仓不在 ${repo ?? '(未登记)'} ⇒ 跳过逐字节比对`);
+    t.skip(`旧仓不在 ${repo ?? '(未登记)'}`);
     return;
   }
   const assets = plan(repo).filter((i) => !i.packed);
@@ -72,15 +73,15 @@ test('★ assets/ 与旧仓来源**逐字节**相同（旧仓不在本机时如�
 
 test('★ archive.zip 与旧仓来源**逐字节**相同，且条目集合精确相等', (t) => {
   if (!repo || !fs.existsSync(repo)) {
-    t.diagnostic(`旧仓不在 ${repo ?? '(未登记)'} ⇒ 跳过逐字节比对`);
+    t.skip(`旧仓不在 ${repo ?? '(未登记)'}`);
     return;
   }
   if (!fs.existsSync(ARCHIVE_ZIP)) {
-    t.diagnostic(`没有 ${ARCHIVE_ZIP_REL} ⇒ 跳过（先跑 pnpm tools old-repo translate-ref --write）`);
+    t.skip(`没有 ${ARCHIVE_ZIP_REL}（先跑 pnpm tools old-repo translate-ref --write）`);
     return;
   }
   if (isLfsPointer(fs.readFileSync(ARCHIVE_ZIP).subarray(0, 64))) {
-    t.diagnostic(`${ARCHIVE_ZIP_REL} 是 LFS 指针（未 smudge）⇒ 跳过；先 \`git lfs pull\``);
+    t.skip(`${ARCHIVE_ZIP_REL} 是 LFS 指针（未 smudge）；先 git lfs pull`);
     return;
   }
 

@@ -1,3 +1,4 @@
+/** @env pure @kind contract @why 插件的自我声明/接线坏了 */
 /**
  * plugins/deploy/test/plugin.test.mjs —— **宿主侧加载**的基建契约（能加载 / 接口是闭的 / 探针能跑）
  *

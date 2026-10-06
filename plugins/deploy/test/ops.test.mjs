@@ -1,3 +1,4 @@
+/** @env pure @kind contract @why 部署工具的行为契约被破坏 */
 /**
  * plugins/deploy/test/ops.test.mjs —— **闭接口与审计行**的基建契约
  *

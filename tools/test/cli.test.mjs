@@ -1,3 +1,4 @@
+/** @env pure @kind gate @why 有工具从域地图上消失、或动作转发坏了 */
 /**
  * tools/test/cli.test.mjs — **工具层入口**（`tools/cli.mjs`）的两条契约
  *
@@ -26,8 +27,12 @@ const toolModules = () =>
     .map((e) => e.name);
 
 test('★ 每个 tools/*.mjs 都自我声明了 DOMAIN + OPERATIONS（否则它会从域地图上消失）', async () => {
+  // ★ "有意不注册"的两种：`opcodes.mjs` 是**领域模型**（被别的测试直接 import）；
+  //   `test-run.mjs` 是**测试基础设施**（它不是"动哪片数据"的域，只是按 pragma 选集合）。
+  const EXEMPT = new Set(['test-run.mjs']);
   const problems = [];
   for (const f of toolModules()) {
+    if (EXEMPT.has(f)) continue;
     const mod = await import(`../${f}`);
     if (!mod.DOMAIN) problems.push(`${f} 缺 DOMAIN（我动哪片数据）`);
     if (!Array.isArray(mod.OPERATIONS) || mod.OPERATIONS.length === 0) problems.push(`${f} 缺 OPERATIONS（我有哪些操作）`);
@@ -63,9 +68,9 @@ test('地图覆盖全部工具，且 JSON 版形状稳定', async () => {
     assert.ok(d.operations.length > 0);
   }
   // ★ 断言改成**等价但不用手维护名单**的形态：每个 tools/*.mjs 要么在 `cli.mjs` 的 MODULES 里注册、
-  //   要么就是"有意不注册"的夹具（如 `opcodes.mjs` —— 它是上面的领域模型，被 test 直接 import）。
-  //   原写法硬编码"已知五个域"，加一个域就得改测试；而它真正要守的是"**注册与模块集合一致**"。
-  const NO_DOMAIN_FIXTURES = ['opcodes.mjs'];
+  //   要么就是"有意不注册"的夹具（`opcodes.mjs` 是领域模型；`test-run.mjs` 是**测试基础设施**，
+  //   它不是"动哪片数据"的域，所以不该进域地图）。
+  const NO_DOMAIN_FIXTURES = ['opcodes.mjs', 'test-run.mjs'];
   const registered = new Set(domains.map((d) => d.tool.replace(/^tools[\\/]/, '')));
   const missing = toolModules().filter((f) => !registered.has(f) && !NO_DOMAIN_FIXTURES.includes(f));
   assert.deepEqual(missing, [], `这些工具既没注册进域地图、也不在"有意不注册"名单里：\n  - ${missing.join('\n  - ')}`);

@@ -45,7 +45,8 @@ mismatch → 稳定实体 target → 自动 context packet（已有事实 + 原�
 ```bash
 pnpm install                 # 只有 workspace 链接，无第三方依赖（包管理用 pnpm）
 pnpm tools corpus validate                # ★ 素材清单守卫：corpus/assets.json 必须绿（这是"约束"所在）
-pnpm test                    # 守卫测试（单进程：node --test --test-isolation=none "tools/test/**/*.test.mjs"）
+pnpm test                    # ★ 测试（默认只跑 @env pure；`pnpm test:list` 看分级，`pnpm test:all` 跑全量）
+pnpm test:assets             # 只跑要 LFS / 游戏安装的那档（控制类内容稳定 ⇒ 不值得每次跑）
 pnpm tools corpus scan        # 补 origin[].sha256（缺省 dry-run，加 --write 落盘）
 pnpm tools old-repo inventory               # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm tools disasm verify      # 反汇编语料保真断言（原件不在时由 zip 反解 + 清单 sha256 自证）

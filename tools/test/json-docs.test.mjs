@@ -1,3 +1,4 @@
+/** @env pure @kind gate @why 结构化数据没有说明书、或自描述失效 */
 /**
  * tools/test/json-docs.test.mjs — 两条**约定**的守卫
  *

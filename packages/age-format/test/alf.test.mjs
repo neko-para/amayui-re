@@ -1,3 +1,4 @@
+/** @env assets @kind contract @why ALF 索引/数据体往返不再逐字节相同（原始游戏文件被换/坏了） */
 /**
  * packages/age-format/test/alf.test.mjs —— ALF 的**往返判据**：解包 → 重打包必须逐字节相同
  *

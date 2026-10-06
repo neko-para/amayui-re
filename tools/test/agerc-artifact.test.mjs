@@ -1,3 +1,4 @@
+/** @env assets @kind product @why AGERC 可信产物的身份（sha256 与清单基准不符） */
 /**
  * tools/test/agerc-artifact.test.mjs —— **AGERC.DLL 可信产物的身份守卫**
  *
@@ -8,11 +9,12 @@
  * ★ 判据**不另写一份**：基准取清单里 `binary/agerc-modified-install` 的 `origin[].sha256`
  *   —— 那条 `external-only` 条目的 sha256 正是"旧仓那一份长这样"的唯一证据。
  *   一处真源 ⇒ 不存在"第二个 sha 会不会漂"的问题。
- * ★ 旧仓在本机时再做一次**逐字节**比对：防"盘上那份被换掉了、而 sha 常量还恰好对得上"。
- *   （★ 这条守卫本来能抓到一次真实事故：有人为测"加壳 vs 不加壳"把旧仓 `install/AGERC.DLL`
- *     换成了加壳版，当时是 `pnpm tools corpus validate` 报的红。）
  *
- * 运行：`pnpm test`
+ * ★ **拆过一刀**（本轮测试分级）：原先还有一条"与旧仓逐字节比对"的用例，它依赖**旧仓在场** ⇒
+ *   已移到 `agerc-artifact.external.test.mjs`（`@env external`）。本文件只剩**不需要旧仓**的那条：
+ *   它读的是**已入库**的 `corpus/assets/agerc/AGERC.DLL` 与清单基准（`@env assets`）。
+ *
+ * 运行：`pnpm test:assets`（或 `pnpm test:all`）
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -39,21 +41,4 @@ test('可信产物已入库，且**sha256 与清单里那条 external-only 记�
   const want = baselineEntry.origin[0].sha256;
   const got = sha256(fs.readFileSync(ARTIFACT));
   assert.equal(got, want, `${ARTIFACT_REL} 的 sha256 与清单记录的基准不符（入库件被换掉了？）`);
-});
-
-test('★ 与旧仓那份**逐字节**相同（旧仓不在本机时如实 skip）', (t) => {
-  const repo = manifest.roots?.oldRepo;
-  if (!repo || !fs.existsSync(repo)) {
-    t.diagnostic(`旧仓不在 ${repo ?? '(未登记)'} ⇒ 跳过逐字节比对`);
-    return;
-  }
-  const src = path.join(repo, 'patch', 'AGERC.DLL');
-  if (!fs.existsSync(src)) {
-    t.diagnostic(`旧仓 ${src} 不在 ⇒ 跳过逐字节比对`);
-    return;
-  }
-  assert.ok(
-    fs.readFileSync(ARTIFACT).equals(fs.readFileSync(src)),
-    `${ARTIFACT_REL} 与旧仓 patch/AGERC.DLL 不逐字节相同`,
-  );
 });

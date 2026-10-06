@@ -1,3 +1,4 @@
+/** @env pure @kind gate @why 分层被破坏、或测试分级声明缺失 */
 /**
  * tools/test/layering.test.mjs — **分层不会被破坏**的守卫
  *
@@ -89,3 +90,64 @@ test('分层齐全：纯工具与领域模型都在 lib/，且每个 CLI 只用 
     }
   }
 });
+
+/**
+ * ★ **测试分级声明必须齐全**（旧仓 `organization.test.ts` 的 R1 搬过来，判据换成本仓的 pragma）。
+ *
+ * 为什么放在**分层守卫**里：它俩守的是同一类东西 —— "结构约定不许靠记得"。
+ * 为什么要有它：没有声明 ⇒ 文件**静默落进默认档**或干脆不被选到，于是
+ * "我这次跑的是全量还是半量"没人答得出（这正是本轮体检暴露的那个问题）。
+ */
+test('★ 测试分级：每个 *.test.mjs 首行必须有合法 pragma（@env / @kind / @why）', async () => {
+  const { survey } = await import('../test-run.mjs');
+  const { decls, problems } = survey(REPO_ROOT);
+  assert.ok(decls.length > 0, '至少要扫到一个测试文件');
+  assert.deepEqual(problems, [], `分级声明不齐（档位不许靠记得）：\n  - ${problems.join('\n  - ')}`);
+  // 三个档都要有人（否则"分级"是空的）
+  const envs = new Set(decls.map((d) => d.env));
+  for (const e of ['pure', 'assets', 'external']) assert.ok(envs.has(e), `没有任何文件声明 @env ${e}（分级形同虚设）`);
+});
+
+/**
+ * ★ **不许用"静默 pass"冒充跳过**（旧仓 `organization.test.ts` 的 R3）。
+ *
+ * 实测（本仓）：`t.diagnostic(...)` 后面**裸 `return`** —— node:test 把它记成 **pass**；
+ * 连 `t.diagnostic` 都没有的裸 `return`（`opcodes.test.mjs` 原来那处）同样记成 pass。
+ * ⇒ "这台机器上没跑"与"跑了且绿"在门禁输出里长得**一模一样**。
+ * 正确写法只有 `t.skip(...)`（记成 skipped）或干脆去掉那条用例。
+ *
+ * 判据落在源码上（node:test 的报告里区分不出这两种写法）。范围只到"测试体内层"（缩进 ≤ 4 空格），
+ * 免得把 `.map(() => { return; })` 这类回调里的 return 误判成跳过。
+ */
+test('★ 测试卫生：不许用 `t.diagnostic` + 裸 `return` 冒充跳过（要被记成 pass）', () => {
+  const scan = (dir, label) => {
+    const bad = [];
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.test.mjs') || f === 'layering.test.mjs') continue;
+      const src = fs.readFileSync(path.join(dir, f), 'utf8');
+      const lines = src.split('\n');
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!/^\s{0,4}return;\s*$/.test(lines[i])) continue;
+        // ★ **同一条用例里**既有 `t.diagnostic(` 又**没有** `t.skip(` ⇒ 那条 return 是"静默 pass"的源：
+        //   看它往前最近的 `test(` 到后面 24 行这段窗口。
+        const from = Math.max(0, i - 24);
+        const win = lines.slice(from, i + 24).join('\n');
+        if (/t\.diagnostic\(/.test(win) && !/t\.skip\(/.test(win)) {
+          bad.push(`${label}${f}:${i + 1}：窗口里既有 t.diagnostic 又无 t.skip ⇒ 这条用例会被记成 pass（改用 t.skip）`);
+        }
+      }
+    }
+    return bad;
+  };
+  const bad = [...scan(path.join(REPO_ROOT, 'tools', 'test'), 'tools/test/')];
+  for (const d of ['packages', 'plugins']) {
+    const base = path.join(REPO_ROOT, d);
+    if (!fs.existsSync(base)) continue;
+    for (const pkg of fs.readdirSync(base)) {
+      const dir = path.join(base, pkg, 'test');
+      if (fs.existsSync(dir)) bad.push(...scan(dir, `${d}/${pkg}/test/`));
+    }
+  }
+  assert.deepEqual(bad, [], `静默 pass 冒充跳过：\n  - ${bad.join('\n  - ')}`);
+});
+

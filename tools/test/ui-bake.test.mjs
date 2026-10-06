@@ -1,3 +1,4 @@
+/** @env pure @kind product @why UI 烘焙配方不满足不变量 */
 /**
  * tools/test/ui-bake.test.mjs — **UI 烘焙链的基建契约**（不测业务结论、不测数据取值）
  *

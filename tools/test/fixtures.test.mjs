@@ -1,3 +1,4 @@
+/** @env pure @kind gate @why 样本台账与判据脱节 */
 /**
  * tools/test/fixtures.test.mjs — 真存档样本（`corpus/fixtures/`）的守卫
  *
@@ -91,9 +92,11 @@ test('每个 .DAT 的槽头时刻 == wallClock(mtimeMs, tzOffsetMinutes)（mtime
     const cur = Math.round(fs.statSync(p).mtimeMs);
     if (Math.abs(cur - rec.mtimeMs) > 1000) {
       drifted += 1;
+      // ★ 这条**不是 skip**：本用例仍然在断言其它样本，而且末尾有"不许全部静默跳过"的兜底断言。
+      //   所以这里只报告"哪一个漂了"，措辞别写"跳过不变量断言"（那会让人以为整个用例没跑）。
       t.diagnostic(
         `${rec.name}: mtime 与记录的 instant 不一致（盘上 ${new Date(cur).toISOString()} / 记录 ${new Date(rec.mtimeMs).toISOString()}）` +
-          `⇒ 跳过不变量断言；恢复：pnpm tools fixtures restore-mtime --write`,
+          `⇒ 该样本不参与断言；恢复：pnpm tools fixtures restore-mtime --write`,
       );
       continue;
     }
