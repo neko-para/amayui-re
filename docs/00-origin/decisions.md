@@ -191,6 +191,7 @@
 | 存档样本的槽 / 定位 / mtime 判据 / 唯一编辑入口 | `corpus/fixtures/samples.md` + `pnpm tools fixtures describe` |
 | 素材总则：只读消费规则、LFS 口径、按需迁移、`.staging/` 定位 | `corpus/README.md` |
 | **需求台账**：需求/缺陷的流程差异、父子树、一屏预算、`pnpm tools requirements` 命令表 | `data/requirements/README.md` + `pnpm tools requirements describe` |
+| **知识台账**：append-only 文本真源、记录 schema（`id`/`at`/`kind`/`subject`/`claim`/`anchor[]`/`status`）、**锚点两形态**（二进制 EA / 可执行守卫用例 `路径#用例名`）、`repo=self/reference` 与"参考仓不在场只 warn"、`status`（声称）vs `effective`（投影）、冲突显式化、DB 可重建的判据 | `data/ledger/README.md` + `packages/ledger/README.md` + **`pnpm tools ledger describe`** |
 | 引擎域：基线二进制与哈希、节表修补口径、AGERC 三份二进制与作废的旧语料 | `docs/02-engine/README.md` |
 | 格式层：ALF / AGF / ASM 三套容器的盘上事实、"解包→重打包逐字节相同"判据 | `packages/age-format/README.md` + `node packages/age-format/cli.mjs verify` |
 | ASM 指令集表（`opcodes.json`）的身份与改法 | `packages/age-format/src/asm/opcodes.md` |
@@ -232,4 +233,6 @@
 | **删掉 `packages/script-dsl/` 占位包**（[本轮]）：它无代码、无人依赖；声称的"解析 / 组装"本来就在 `packages/age-format/src/asm/`（旧仓模拟器也只自带一份 `src/script/bin.ts`，`dependencies` 只有 `pixi.js`）⇒ **AGE 脚本文本层的落点 = `age-format`**，"排版 / reflow 要不要机械化"另立跟踪单（挂在「翻译更新」下，下游依赖是软的：翻译域现在接受手工折行） | `packages/age-format/README.md` §3.4；`pnpm tools requirements show 7SGPFRBWPEQA8AF1WYQ8KP` |
 | **模拟器分两层**（[本轮]）：**M4-1 无头核心**（是知识线 K2/K3 的前置）与 **M4-2 表现层与窗口**（不是）—— 依据：79 条 `modeled-verified` 的守卫**全在 T0/T1 档**，T2 全仓只有 1 个文件且不进 `verify` ⇒ 复核不需要窗口、原生输入、真游戏安装 | `docs/03-emulator/README.md` §4.1；`pnpm tools requirements show 7SGXYWPQ1KWET2J49TJQST` |
 | **`apps/inspector` ≠ 模拟器**（[本轮]）：前者是**真机探针**（C#/.NET 10 + WPF，读真进程内存，M7），后者自己的窗口壳是 `app/amayui-emulator/electron/`（8 文件，M4-2）；"都按新结构重写"不等于它们是同一件事 | `packages/host-input/README.md` §4、`apps/emulator/README.md` §5.1 |
+| **节点预算只数活节点**（[本轮]）：`done`/`dropped`/`superseded` **不占** `maxNodes`。预算是给"还要人读它才能推进"的待办表设的；否则树会因为"做过的事变多"而爆预算、逼人删掉**已经交付的**记录，而拆一个节点出来（本该鼓励的动作）反而要先删两个已完成节点 | `tools/lib/requirements.mjs` 的 `BUDGET` 注释 + `data/requirements/README.md` §6 |
+| **动作名与字段名不许同名**（[本轮]，工具层通则）：`pnpm tools ledger` 的概览动作叫 **`report`** 而不是 `status` —— 因为 `--status` 是**字段**（`--add … --status accepted`）。同名会让参数被**静默吃掉**（实测踩过：`--write` 被忽略、什么都没写）；判据 = "把动作名当字段名再用一次，会不会有歧义？" | `tools/ledger.mjs` 的 `parseArgs` 注释 |
 | 技能「不迁移、只重建」的**第一个实例**：`amayui-translate`（继承纯约定、丢弃旧工具绑定） | `docs/04-agent/README.md` §6、`.agents/skills/amayui-translate/SKILL.md` |

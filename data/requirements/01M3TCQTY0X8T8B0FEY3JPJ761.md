@@ -2,9 +2,10 @@
 
 - id: REQ-01M3TCQTY0X8T8B0FEY3JPJ761
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 50
+- verify: tools/test/ledger.test.mjs#派生 DB：由文本真源重建**两次**
 
 ## 范围
 **只建框架，不装数据**：台账的**记录 schema** 与在本仓落地所需的**基建** —— append-only 文本真源（`data/ledger/`）

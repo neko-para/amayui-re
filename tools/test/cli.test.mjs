@@ -80,6 +80,7 @@ test('转发可用：`tools <域> <只读动作>` 能真的跑到该工具（进
   assert.equal(await main(['corpus', 'list']), 0);
   assert.equal(await main(['fixtures', 'list']), 0);
   assert.equal(await main(['requirements', 'list']), 0);
+  assert.equal(await main(['ledger', 'report']), 0);
   assert.equal(await main(['disasm', 'describe']), 0);
   assert.equal(await main(['old-repo', 'describe']), 0);
   assert.equal(await main(['opcodes', 'report']), 0);
