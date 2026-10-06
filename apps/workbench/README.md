@@ -53,8 +53,9 @@ pnpm verify                             # typecheck + build + smoke 一条龙
 （表单枚举与模型逐项相等）、被拒的单子**不留残 file**、以及三道门（只在回环 / 只收 JSON / 不吐 CORS 头，
 含"绑 `0.0.0.0` ⇒ 建单 403"这一条真的把门关上）；⑥ **Markdown 渲染口径**：直接 import `src/markdown.ts`
 断言那四条（原始 HTML 按文本 / 裸文本不变链接 / 仓库内路径不做成可点链接 / 小节小标题降两级）；
-⑦ **只要旧 `apps/requirements/` 还在**，就把两个服务的**读**端点 `/api/tree`、`/api/node` **逐字段对照**
-（写路径是新增能力，旧目录没有对应的东西；旧目录按需求单退役后这一步自动跳过）。
+⑦ **与旧版服务的读端点逐字段对照**：旧 `apps/requirements/`（无构建的单页看板）**已退役删除**，
+所以这一步现在是**自动 skip**；要复现它，从 git 历史取回那一版旧目录再跑（`smoke.ts` 会自己认出来）。
+（写路径是新增能力，旧目录没有对应的东西。）
 
 页面里怎么用：
 
@@ -158,7 +159,7 @@ pnpm verify                             # typecheck + build + smoke 一条龙
 
 | 端点 | 用途 | 形状 |
 |---|---|---|
-| `GET /api/tree` | 需求树 + 表头 + 预算 + 标记表 + 自描述 | 与旧 `apps/requirements/server.mjs` **逐字段相同** |
+| `GET /api/tree` | 需求树 + 表头 + 预算 + 标记表 + 自描述 | 形状沿用旧 `apps/requirements/server.mjs`（该目录已退役删除，形状口径不变） |
 | `GET /api/node/<ref>` | 一条需求：字段 + 正文小节 + 父链 + 直接子 | 同上（`ref` 认完整 id / 唯一前缀 / 唯一后缀） |
 | `GET /api/scripts` | **全部可反汇编的 AGE 脚本**一览（「旧管线标注过」只是标签；**只算元信息**，不含正文） | `{ name, baseFrom, baseBytes, annotated, hasPatch, opCount }[]`（在 `scripts` 下）+ 汇总 `{ count, annotated, hasPatch, unchanged, nonScript, source: 'baseline' }` |
 | `GET /api/script/<name>?kind=data\|src` | 一支脚本的反汇编正文（名字有没有被标注、在不在 patch 里都不影响） | `{ name, kind, text, bytes, rows, stats, baseFrom, baseBytes, hasPatch }` |
