@@ -15,6 +15,10 @@
 
 ```text
 data/ledger/<kind>/<YYYY-MM>.jsonl    # ★ 真源：一行一条记录（JSON，字段序固定）
+  claim/        语义结论
+  observation/  观察（二进制 / 运行时的原始事实）
+  note/         杂项
+  domain/       ★ **域词汇表本身**（分类轴的处置声明，见 §3.2）
 ```
 
 **文件里没有别的东西**：没有 `index.*`、没有 `PROGRESS.md`、没有 snapshot。
@@ -25,13 +29,17 @@ data/ledger/<kind>/<YYYY-MM>.jsonl    # ★ 真源：一行一条记录（JSON�
 旧仓的知识资产（`analysis/` `tickets/` `docs-new/`）**一律不迁移**：它们需要清理 / 校验 / 重分类。
 见 `docs/00-origin/knowledge-rebuild.md`。**K3 通过前，任何知识条目不得进这里。**
 
+★ **域词汇表也留空**：归一到哪 ~15 个域、旧仓两套词表（`capabilities` 的中文粗标签 / `fields` 的英文细标识）
+怎么合，是 **K1 的活**（要摊开旧仓实测取证）—— 机制先在场，值后填。
+
 ## 3. 格式与不变量（★ **唯一真源是自描述，不在本文件**）
 
 | 想知道 | 看哪 |
 |---|---|
-| 字段 / 枚举 / 锚点两种形态 / 不变量 / 操作 / 怎么查怎么改 | **`pnpm tools ledger describe`**（机器可读加 `--json`） |
-| 台账现状：条数 / 有效状态 / 锚点可解析率 / 冲突 | `pnpm tools ledger status` |
-| 门禁（6 条不变量，红 = 退出码 1） | `pnpm tools ledger validate` |
+| 字段 / 枚举 / 锚点两种形态 / 不变量 / **分类轴** / 操作 / 怎么查怎么改 | **`pnpm tools ledger describe`**（机器可读加 `--json`） |
+| 台账现状：条数 / 有效状态 / **域分布** / 锚点可解析率 / 冲突 | `pnpm tools ledger report` |
+| **域词汇表**：当前域 / 别名链 / 被拆分的值 / 逐值解析表 | `pnpm tools ledger domains` |
+| 门禁（7 条不变量，红 = 退出码 1） | `pnpm tools ledger validate` |
 | 派生 DB 可删可重建 | `pnpm tools ledger rebuild-db`（缺省 dry-run；打印"两次重建的逻辑内容"摘要） |
 
 本文件**只写非显然的口径与"为什么"**，不复述 schema（否则就会出现第二份 schema，必然漂）。
@@ -54,6 +62,32 @@ data/ledger/<kind>/<YYYY-MM>.jsonl    # ★ 真源：一行一条记录（JSON�
 * **"DB 可删可重建"的判据不是"文件字节相同"**：SQLite 文件头带变更计数器、页里可能有空闲区 ⇒
   比的是**逻辑内容**（建表 SQL + 按主键排序的行）的摘要。口径同 `decisions.md` §2 第 3 条。
 
+### 3.2 分类轴（`system`）—— 知识按域查
+
+**一条记录 = 关于引擎哪一块的哪一条结论**，这就是 `system`（必填）。它**不是 tag**，理由见
+`docs/00-origin/decisions.md` §8.1；权威依据：CloudEvents 把 `type` 定为 REQUIRED 核心属性并规定命名、
+schema.org 用多条并行类型轴、`ADR-0009` 把分类写成"必填 + 受治理枚举 + 版本"。
+
+| | |
+|---|---|
+| **域词汇表住哪** | ★ **就是本目录里 `kind=domain` 的记录** —— 不另造第二个真源、也不新增第二套读写路径 |
+| **它为什么也 append-only** | 词表的读者有两个：人（读当前态）与**校验器**（要判断**已经写下的历史行**）。就地编辑会让历史行的值**悬空**（一改名要么全红、要么只能放宽校验）；需求单可以就地编辑，是因为**没人需要重放它的历史** |
+| **改名 / 归并** | 记 `aliases` ⇒ 历史值**仍可解析**，历史行**一个字节都不用动**（`--list --system <旧值>` 照旧查得到） |
+| **拆分 / 重定义** | ★ **别名救不了**：`系统` 被拆成 A/B 之后，一条历史记录写 `system=旧值` 永远分不出该归谁 ⇒ 必须按台账纪律**追加一条更正记录**（`replaces` 指向它）把值落到具体的新域。**不许靠词表悄悄改结论的含义** |
+| **校验** | `system` 值既不是当前域、也不是任何已登记历史值的别名 ⇒ 不变量 #7 点名（= 待裁决），**不静默放过**：否则 K1/K3 写进去的值会静默长出多套写法（旧仓实测：`capabilities` 用中文粗标签、`fields` 用英文细标识，两套无法 join） |
+| **域记录也要带锚** | "域怎么分"是**知识**（要 K1 摊开旧仓取证），不是配置 ⇒ 域记录同样必须过 #3/#4 |
+
+**怎么查**：
+
+```bash
+pnpm tools ledger domains                  # 当前域 / 别名链 / 被拆分的值 + 逐值解析表
+pnpm tools ledger list --system <域或旧值>   # 按域列记录（旧值走别名解析）
+pnpm tools ledger describe                 # "分类轴"一节的唯一真源（口径 / 处置枚举 / 规则 / 怎么查）
+sqlite3 .cache/ledger.sqlite \
+  "select system, system_current, count(*) from record group by 1,2"        # 域分布
+```
+
+
 ## 4. 为什么不能反过来（反模式）
 
 把 `.sqlite` 提交进 git / 用 LFS 存 DB（LFS 不解决合并）/ 把 DB 当唯一存储 /
@@ -68,3 +102,7 @@ data/ledger/<kind>/<YYYY-MM>.jsonl    # ★ 真源：一行一条记录（JSON�
 ★ **为什么这四个守卫归台账域**：它们是**判据的机械执行者**（schema 合法、锚点真的存在、锚真的出现在声明的区间里、
 收口必须带真守卫）。没有它们，K1 的清理与 K2 的重挂就只能靠人眼 —— 而"没有守卫的清单等于一份 Markdown"。
 ★ M3 之后：**K3 是这里唯一的写入者**。
+
+**分类轴（`REQ-01M480JQMWJF82GGBTTERMZFNC`）**：`system` 必填字段 + 域词汇表机制（`kind=domain` 的
+`disposition` ∈ added/renamed/merged/split + 别名链）。**机制已落地、词表留空** ——
+填值（归一到哪 ~15 个域）是 **K1** 的活。

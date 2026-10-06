@@ -46,6 +46,7 @@ import {
   rebuildDb,
   rebuildTwiceDigest,
   resolveAnchor,
+  resolveDomain,
   serializeRecord,
   validateAll,
 } from './lib/ledger.mjs';
@@ -57,16 +58,22 @@ const REPO_ROOT = path.resolve(HERE, '..');
 
 const HELP = `tools/ledger.mjs —— 知识台账（append-only 文本真源 + 派生只读 SQLite）
 
-  node tools/ledger.mjs --describe                 # ★ schema 唯一真源：字段 / 枚举 / 不变量 / 锚点口径
-  node tools/ledger.mjs --report                   # 体检：各 kind 条数 / 有效状态 / 锚点可解析率 / 冲突数
-  node tools/ledger.mjs --list [--only-kind claim] [--only-effective stale] [--subject X] [--status accepted] [--json]
+  node tools/ledger.mjs --describe                 # ★ schema 唯一真源：字段 / 枚举 / 不变量 / 锚点与分类轴口径
+  node tools/ledger.mjs --report                   # 体检：各 kind 条数 / 有效状态 / 域分布 / 锚点可解析率 / 冲突数
+  node tools/ledger.mjs --domains                  # ★ 域词汇表：当前域 / 别名链 / 被拆分的值 + 逐值解析表
+  node tools/ledger.mjs --list [--only-kind claim] [--only-effective stale] [--system <域>] [--subject X] [--json]
   node tools/ledger.mjs --show <id|唯一前缀>
-  node tools/ledger.mjs --add --kind <k> --subject <s> --claim <c> --anchor <json>… [--status …] [--write]
+  node tools/ledger.mjs --add --kind <k> --system <域> --subject <s> --claim <c> --anchor <json>… [--status …] [--write]
+  node tools/ledger.mjs --add --kind domain --system <父域> --subject <域名> --disposition added --claim … --anchor … --write
   node tools/ledger.mjs --retract <id> --claim <理由> [--write]     # ★ 追加一条 replaces 它的记录
-  node tools/ledger.mjs --validate [--json]                        # 6 条不变量；红 = 退出码 1
+  node tools/ledger.mjs --validate [--json]                        # 7 条不变量；红 = 退出码 1
   node tools/ledger.mjs --rebuild-db [--write] [--db <路径>]        # 缺省 dry-run；判据 = 逻辑内容两次相同
   node tools/ledger.mjs --compact [--write]                        # 分片归位 + 同 id 去重（不删任何结论）
 
+★ 分类轴：\`system\`（**必填字段**，不是标签）＝这条结论关于引擎的哪一块；
+  **域词汇表 = 台账里 \`kind=domain\` 的记录**（\`disposition\` ∈ added/renamed/merged/split）——
+  改名/归并靠 \`aliases\` 让历史值**仍可解析**（历史行一个字节都不用动）；
+  **拆分**别名救不了 ⇒ 必须追加更正记录（不许靠词表悄悄改结论的含义）。
 ★ 概览那个动作叫 **--report**，不叫 --status —— 因为 **--status 是字段名**（--add … --status accepted）。
   动作名与字段名撞车会让参数被静默吃掉（真踩过），所以两者不许同名。
 ★ 日志是 **append-only**：不许手改 .jsonl、不许删行；"撤回"是**追加**一条 replaces 它的记录。
@@ -81,12 +88,13 @@ const HELP = `tools/ledger.mjs —— 知识台账（append-only 文本真源 + 
  *     `accepted` 变成多余位置参数，**静默变成"打印概览"**（真踩过：`--write` 被忽略、什么都没写）。
  *   ★ 同理 `list` 的筛选用 `--only-kind` / `--only-effective`，不叫 `--kind` / `--effective`（那是 add 的字段）。
  */
-const ACTIONS = ['describe', 'report', 'list', 'show', 'add', 'retract', 'validate', 'rebuild-db', 'compact', 'help'];
+const ACTIONS = ['describe', 'report', 'list', 'domains', 'show', 'add', 'retract', 'validate', 'rebuild-db', 'compact', 'help'];
 
 function parseArgs(argv) {
   const out = { action: null, write: false, json: false, anchors: [], rest: [] };
   const takesValue = new Set([
-    'kind', 'subject', 'claim', 'status', 'note', 'anchor', 'db', 'tz', 'replaces', 'why', 'dir', 'id', 'at',
+    'kind', 'system', 'subject', 'claim', 'status', 'note', 'anchor', 'db', 'tz', 'replaces', 'why', 'dir', 'id', 'at',
+    'disposition', 'aliases', 'split-into',
     'only-kind', 'only-effective',
   ]);
   for (let i = 0; i < argv.length; i += 1) {
@@ -178,6 +186,7 @@ export function main(argv = process.argv.slice(2)) {
 
   if (args.action === 'report') return cmdReport(args, proj, ledgerDir);
   if (args.action === 'list') return cmdList(args, proj);
+  if (args.action === 'domains') return cmdDomains(args, proj, ledgerDir);
   if (args.action === 'show') return cmdShow(args, proj);
   if (args.action === 'add') return cmdAdd(args, proj, ledgerDir, opts);
   if (args.action === 'retract') return cmdRetract(args, proj, ledgerDir);
@@ -201,7 +210,7 @@ function cmdReport(args, proj, ledgerDir) {
   const files = listFiles(ledgerDir);
   if (args.json) {
     process.stdout.write(
-      `${JSON.stringify({ files: files.length, records: proj.entries.length, byKind, byEffective: proj.byEffective, anchors: { total: anchors.length, ok, warn, err }, conflicts: proj.conflicts.length }, null, 2)}\n`,
+      `${JSON.stringify({ files: files.length, records: proj.entries.length, byKind, byEffective: proj.byEffective, bySystem: proj.bySystem, domains: proj.vocab.canonical.size, anchors: { total: anchors.length, ok, warn, err }, conflicts: proj.conflicts.length }, null, 2)}\n`,
     );
     return 0;
   }
@@ -209,10 +218,65 @@ function cmdReport(args, proj, ledgerDir) {
   L.push(`文件        ${files.length} 个分片（kind/月）`);
   L.push(`记录        ${proj.entries.length} 条　${KINDS.map((k) => `${k}=${byKind[k]}`).join(' · ')}`);
   L.push(`有效状态    ${EFFECTIVE.map((s) => `${s}=${proj.byEffective[s] ?? 0}`).join(' · ')}`);
+  L.push(`域          ${proj.vocab.canonical.size} 个当前域${proj.vocab.aliasOf.size ? ` · ${[...proj.vocab.aliasOf].filter(([a, b]) => a !== b).length} 条别名` : ''}${proj.vocab.splits.size ? ` · ${proj.vocab.splits.size} 个被拆分` : ''}　⇒ \`pnpm tools ledger domains\``);
+  L.push(`域分布      ${Object.entries(proj.bySystem).map(([k, v]) => `${k}=${v}`).join(' · ') || '（无）'}`);
   L.push(`锚点        ${anchors.length} 条　可解析=${ok} · 参考仓不在场=${warn} · **红**=${err}`);
   L.push(`冲突        ${proj.conflicts.length} 组${proj.conflicts.length ? '　⇒ 见 `--validate` 的 #5' : ''}`);
   L.push('');
   L.push(proj.entries.length === 0 ? '（台账是空的 —— 这是**有意为之**：K3 通过前任何知识条目不得进来）' : '体检口径：`--validate` 是门禁，本命令只是概览。');
+  process.stdout.write(`${L.join('\n')}\n`);
+  return 0;
+}
+
+function cmdDomains(args, proj, ledgerDir) {
+  const v = proj.vocab;
+  const all = [...proj.entries];
+  if (args.json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        canonical: [...v.canonical].sort(),
+        aliasOf: Object.fromEntries([...v.aliasOf].sort()),
+        splits: Object.fromEntries([...v.splits].sort()),
+        records: v.records.length,
+        resolution: all
+          .map((e) => ({ value: e.system.value, canonical: e.system.canonical, via: e.system.via, chain: e.system.chain }))
+          .filter((r, i, arr) => arr.findIndex((x) => x.value === r.value) === i)
+          .sort((a, b) => a.value.localeCompare(b.value)),
+        problems: v.problems,
+      }, null, 2)}\n`,
+    );
+    return 0;
+  }
+  const L = [];
+  L.push(`域记录      ${v.records.length} 条（kind=domain）`);
+  L.push(`当前域      ${v.canonical.size} 个${v.canonical.size ? `　${[...v.canonical].sort().join(' · ')}` : '　（空词表 —— 见下）'}`);
+  if (v.aliasOf.size) L.push(`别名        ${v.aliasOf.size} 条（历史值 → 当前域，单向）`);
+  for (const [a, c] of [...v.aliasOf].sort()) if (a !== c) L.push(`              ${a} → ${c}`);
+  if (v.splits.size) {
+    L.push(`被拆分      ${v.splits.size} 个（★ 别名不覆盖它们：必须走追加更正记录）`);
+    for (const [k, into] of [...v.splits].sort()) L.push(`              ${k} → ${into.join(' / ')}`);
+  }
+  for (const x of v.problems) L.push(`词表歧义    ${x.reason}`);
+
+  // 逐值解析表：把"记录里出现过的值"与"词表登记过的历史值"都列出来
+  const values = new Set([...all.map((e) => e.system.value), ...v.aliasOf.keys(), ...v.splits.keys()]);
+  L.push('');
+  if (v.canonical.size === 0 && v.records.length === 0) {
+    L.push('（词表是空的 —— 这是**有意为之**：归一到哪些域是 K1 的活，本节点只落机制）');
+    L.push('  怎么填：追加一条 kind=domain 的记录 ——');
+    L.push('    pnpm tools ledger add --kind domain --system <父域> --subject <域名> \\');
+    L.push('      --disposition added --claim <一句话> --anchor <json> --write');
+    L.push('  ★ 而且它**必须带锚**（"域怎么分"是知识，不是配置）。');
+  } else if (values.size === 0) {
+    L.push('（还没有任何记录引用过域名 ⇒ 没有可解析的值）');
+  } else {
+    L.push(`${'值'.padEnd(24)} ${'有效域'.padEnd(20)} 依据`);
+    for (const value of [...values].sort()) {
+      const r = resolveDomain(value, v);
+      const canon = r.via === 'split' ? `(已拆分：${(r.splitInto ?? []).join('/')})` : r.canonical ?? '(未在词表中：待裁决)';
+      L.push(`${value.padEnd(24)} ${canon.padEnd(20)} ${r.via}${r.chain.length > 1 ? `　链：${r.chain.join(' → ')}` : ''}`);
+    }
+  }
   process.stdout.write(`${L.join('\n')}\n`);
   return 0;
 }
@@ -224,17 +288,24 @@ function cmdList(args, proj) {
   if (args['only-effective']) rows = rows.filter((e) => e.effective === args['only-effective']);
   if (args.subject) rows = rows.filter((e) => e.subject === args.subject);
   if (args.status) rows = rows.filter((e) => (e.status ?? 'proposed') === args.status);
+  // ★ `--system` 走**别名解析**：给历史值也能查到（例：给 `声音` 能查到已归一到 `音频` 的记录）
+  if (args.system) {
+    const want = proj.vocab.canonical.has(args.system) || proj.vocab.aliasOf.has(args.system)
+      ? resolveDomain(args.system, proj.vocab).canonical
+      : args.system;
+    rows = rows.filter((e) => (e.system.via === 'split' || e.system.via === 'unknown' ? e.system.value === args.system : e.system.canonical === want));
+  }
   rows = [...rows].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   if (args.json) {
-    process.stdout.write(`${JSON.stringify(rows.map((e) => ({ id: e.id, at: e.at, kind: e.kind, subject: e.subject, status: e.status ?? 'proposed', effective: e.effective, claim: e.claim, anchors: e.anchors.map((a) => ({ ...a.anchor, resolved: a.ok ? 'ok' : a.kind })) })), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(rows.map((e) => ({ id: e.id, at: e.at, kind: e.kind, system: e.system.value, systemCurrent: e.system.canonical, systemVia: e.system.via, subject: e.subject, status: e.status ?? 'proposed', effective: e.effective, claim: e.claim, anchors: e.anchors.map((a) => ({ ...a.anchor, resolved: a.ok ? 'ok' : a.kind })) })), null, 2)}\n`);
     return 0;
   }
   if (rows.length === 0) {
     process.stdout.write('（没有匹配的记录）\n');
     return 0;
   }
-  const L = [`${'id'.padEnd(30)} ${'kind'.padEnd(12)} ${'eff'.padEnd(10)} subject`];
-  for (const e of rows) L.push(`${e.id.padEnd(30)} ${e.kind.padEnd(12)} ${e.effective.padEnd(10)} ${e.subject}`);
+  const L = [`${'id'.padEnd(30)} ${'kind'.padEnd(12)} ${'system'.padEnd(14)} ${'eff'.padEnd(10)} subject`];
+  for (const e of rows) L.push(`${e.id.padEnd(30)} ${e.kind.padEnd(12)} ${String(e.system.canonical ?? e.system.value).padEnd(14)} ${e.effective.padEnd(10)} ${e.subject}`);
   L.push('', `${rows.length} 条`);
   process.stdout.write(`${L.join('\n')}\n`);
   return 0;
@@ -275,6 +346,8 @@ function cmdAdd(args, proj, ledgerDir, opts) {
     id: id.startsWith(ID_PREFIX) ? id.slice(ID_PREFIX.length) : id,
     at: args.at ?? isoNow(now),
     kind: args.kind,
+    // ★ 分类轴：`--system` 必填（词表为空时也不能省 —— 见 describe 的"分类轴"一节）
+    system: args.system,
     subject: args.subject,
     claim: args.claim,
     anchor: args.anchors.map(parseAnchorSpec),
@@ -282,6 +355,10 @@ function cmdAdd(args, proj, ledgerDir, opts) {
   if (args.status !== undefined) rec.status = args.status;
   if (args.note !== undefined) rec.note = args.note;
   if (args.replaces !== undefined) rec.replaces = args.replaces.startsWith(ID_PREFIX) ? args.replaces.slice(ID_PREFIX.length) : args.replaces;
+  // 域记录专属（`--aliases a,b` / `--split-into x,y`）
+  if (args.disposition !== undefined) rec.disposition = args.disposition;
+  if (args.aliases !== undefined) rec.aliases = String(args.aliases).split(',').map((s) => s.trim()).filter(Boolean);
+  if (args['split-into'] !== undefined) rec.splitInto = String(args['split-into']).split(',').map((s) => s.trim()).filter(Boolean);
 
   if (!ULID_RE.test(rec.id)) throw new Error(`id 非法（应是 26 字符 ULID；缺省自动生成）：${rec.id}`);
   if (proj.entries.some((e) => e.id === rec.id)) throw new Error(`id 已存在：${ID_PREFIX}${rec.id}（台账是 append-only，要改就追加一条 replaces 它的记录）`);
@@ -290,9 +367,14 @@ function cmdAdd(args, proj, ledgerDir, opts) {
   //   顺序要紧：**先校验、后序列化** —— serializeRecord 对非法锚点 type 是抛错的（它不该悄悄改写数据）。
   const trial = { ...rec, _file: path.join(ledgerDir, rec.kind ?? '?', `${monthOf(rec.id)}.jsonl`), _line: 0, _fileKind: rec.kind };
   const report = validateAll([...proj.entries, trial], { ...opts, ledgerDir, parsedProblems: [] });
-  const own = [...(report.checks.find((c) => c.id === 1)?.problems ?? []), ...(report.checks.find((c) => c.id === 3)?.problems ?? [])].filter(
-    (p) => p.line === 0 && !/id 与 .* 重复/.test(p.reason),
-  );
+  const own = [
+    ...(report.checks.find((c) => c.id === 1)?.problems ?? []),
+    ...(report.checks.find((c) => c.id === 3)?.problems ?? []),
+    ...(report.checks.find((c) => c.id === 7)?.problems ?? []),
+  ].filter((p) => p.line === 0 && !/id 与 .* 重复/.test(p.reason))
+    // ★ **引导（bootstrap）**：往空词表里加**第一条**域记录时，它自己的 `system`（父域）当然还不在词表里 ——
+    //   那是正常的，不是错。除此之外任何"值追不到词表"都必须拦住。
+    .filter((p) => !(rec.kind === 'domain' && /不在域词汇表里/.test(p.reason)));
   if (own.length) {
     process.stderr.write(`✗ 自校验不通过，不写（${ID_PREFIX}${rec.id}）：\n  - ${own.map((p) => p.reason).join('\n  - ')}\n`);
     return 1;

@@ -191,7 +191,7 @@
 | 存档样本的槽 / 定位 / mtime 判据 / 唯一编辑入口 | `corpus/fixtures/samples.md` + `pnpm tools fixtures describe` |
 | 素材总则：只读消费规则、LFS 口径、按需迁移、`.staging/` 定位 | `corpus/README.md` |
 | **需求台账**：需求/缺陷的流程差异、父子树、一屏预算、`pnpm tools requirements` 命令表 | `data/requirements/README.md` + `pnpm tools requirements describe` |
-| **知识台账**：append-only 文本真源、记录 schema（`id`/`at`/`kind`/`subject`/`claim`/`anchor[]`/`status`）、**锚点两形态**（二进制 EA / 可执行守卫用例 `路径#用例名`）、`repo=self/reference` 与"参考仓不在场只 warn"、`status`（声称）vs `effective`（投影）、冲突显式化、DB 可重建的判据 | `data/ledger/README.md` + `packages/ledger/README.md` + **`pnpm tools ledger describe`** |
+| **知识台账**：append-only 文本真源、记录 schema（`id`/`at`/`kind`/`system`/`subject`/`claim`/`anchor[]`/`status`）、**锚点两形态**（二进制 EA / 可执行守卫用例 `路径#用例名`）、`repo=self/reference` 与"参考仓不在场只 warn"、`status`（声称）vs `effective`（投影）、冲突显式化、**分类轴（`system` + 域词汇表）**、DB 可重建的判据 | `data/ledger/README.md` + `packages/ledger/README.md` + **`pnpm tools ledger describe`** |
 | 引擎域：基线二进制与哈希、节表修补口径、AGERC 三份二进制与作废的旧语料 | `docs/02-engine/README.md` |
 | 格式层：ALF / AGF / ASM 三套容器的盘上事实、"解包→重打包逐字节相同"判据 | `packages/age-format/README.md` + `node packages/age-format/cli.mjs verify` |
 | ASM 指令集表（`opcodes.json`）的身份与改法 | `packages/age-format/src/asm/opcodes.md` |
@@ -235,4 +235,6 @@
 | **`apps/inspector` ≠ 模拟器**（[本轮]）：前者是**真机探针**（C#/.NET 10 + WPF，读真进程内存，M7），后者自己的窗口壳是 `app/amayui-emulator/electron/`（8 文件，M4-2）；"都按新结构重写"不等于它们是同一件事 | `packages/host-input/README.md` §4、`apps/emulator/README.md` §5.1 |
 | **节点预算只数活节点**（[本轮]）：`done`/`dropped`/`superseded` **不占** `maxNodes`。预算是给"还要人读它才能推进"的待办表设的；否则树会因为"做过的事变多"而爆预算、逼人删掉**已经交付的**记录，而拆一个节点出来（本该鼓励的动作）反而要先删两个已完成节点 | `tools/lib/requirements.mjs` 的 `BUDGET` 注释 + `data/requirements/README.md` §6 |
 | **动作名与字段名不许同名**（[本轮]，工具层通则）：`pnpm tools ledger` 的概览动作叫 **`report`** 而不是 `status` —— 因为 `--status` 是**字段**（`--add … --status accepted`）。同名会让参数被**静默吃掉**（实测踩过：`--write` 被忽略、什么都没写）；判据 = "把动作名当字段名再用一次，会不会有歧义？" | `tools/ledger.mjs` 的 `parseArgs` 注释 |
+| **知识分类做成必填字段，不做 tag**（[本轮]）：`system` 必填、且必须**沿别名链追到当前域词汇表**。为什么：词表的读者有两个 —— 人（读当前态）与**校验器**（要判断**已经写下的历史行**）；做成自由标签则"哪个写法才对"没有任何东西能判红 ⇒ 多套写法静默共存（旧仓实测：`capabilities` 用中文粗标签、`fields` 用英文细标识，**两套无法 join**）。外部依据：CloudEvents 把 `type` 定为 REQUIRED 核心属性并规定命名、schema.org 用多条并行类型轴、`ADR-0009` 把分类写成"必填 + 受治理枚举 + 版本" | `pnpm tools ledger describe` 的"分类轴"一节 + `data/ledger/README.md` §3.2 |
+| **域词汇表 append-only，且"别名"与"数据迁移"分开**（[本轮]）：词表 = 台账里 `kind=domain` 的记录（不另造第二个真源）。**改名/归并**记 `aliases` ⇒ 历史值仍可解析、历史行**一个字节都不用动**；**拆分/重定义**别名救不了（旧值永远分不出该归谁）⇒ 必须**追加更正记录**（`replaces`）。★ **词表不许用来悄悄改结论的含义**。为什么不就地编辑：见上一条的"两个读者" | `docs/00-origin/knowledge-rebuild.md` 的 K1/K2/K3 + `REQ-01M480JQMWJF82GGBTTERMZFNC` |
 | 技能「不迁移、只重建」的**第一个实例**：`amayui-translate`（继承纯约定、丢弃旧工具绑定） | `docs/04-agent/README.md` §6、`.agents/skills/amayui-translate/SKILL.md` |

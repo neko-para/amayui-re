@@ -33,8 +33,12 @@ import { createRequire } from 'node:module';
 
 // ─────────────────────────────────────────────────────────── 常量（枚举只有这一份）
 
-/** 记录种类（可扩展；先立三种，K 线按需再加） */
-export const KINDS = ['claim', 'observation', 'note'];
+/**
+ * 记录种类 = **台账自己的机制分类**（一行记录是哪一类事件）。
+ * ★ 别与 `system`（域）混：`kind` 回答"这条记录是什么"，`system` 回答"它关于引擎的哪一块"。
+ * ★ `domain` 这一类就是**域词汇表本身**（见文件头的"分类轴"一节）—— 不另造第二个真源。
+ */
+export const KINDS = ['claim', 'observation', 'note', 'domain'];
 /** 作者声称的状态 */
 export const STATUSES = ['proposed', 'accepted', 'retracted'];
 /** 投影算出来的**有效**状态（★ 与上面的 STATUSES 不是一个东西） */
@@ -45,6 +49,20 @@ export const ANCHOR_TYPES = ['bin', 'guard'];
 export const REPOS = ['self', 'reference'];
 /** 只读参考仓的键（在 `corpus/assets.json` 的 `roots` 里） */
 export const REFERENCE_ROOT_KEY = 'oldRepo';
+
+/**
+ * ★ **域处置**（闭集合）—— 只出现在 `kind=domain` 的记录上，它就是词表的"覆盖机制"。
+ *
+ * | disposition | 含义 | 历史行里的旧值怎么办 |
+ * |---|---|---|
+ * | `added` | 一个新域进词表 | 纯追加，不影响任何历史行 |
+ * | `renamed` | 改名（**含义没变、只是叫法归一**） | `aliases` 让它**仍可解析** ⇒ 历史行一个字节都不用动 |
+ * | `merged` | 多个旧域并成一个 | 同上（旧域名进 `aliases`） |
+ * | `split` | 一个域**被拆成多个**（含义变了） | ★ **别名救不了** ⇒ 必须走**追加更正记录**（台账的 `replaces`），不许靠词表悄悄改含义 |
+ */
+export const DISPOSITIONS = ['added', 'renamed', 'merged', 'split'];
+/** `domain` 记录专属字段（别的 kind 上出现即错 —— 同"缺陷专属字段"的纪律） */
+export const DOMAIN_ONLY = ['disposition', 'aliases', 'splitInto'];
 
 export const ID_PREFIX = 'KN-';
 export const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -69,11 +87,12 @@ export const DOMAIN = {
 };
 
 export const OPERATIONS = [
-  { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 枚举 / 不变量 / 锚点口径 / 操作（schema 唯一真源）' },
-  { name: 'report', argv: ['--report'], mutates: false, summary: '体检：各 kind 条数 / 有效状态 / 锚点可解析率 / 冲突数（★ 不叫 status —— 那是字段名）' },
-  { name: 'list', argv: ['--list'], mutates: false, summary: '列记录：按 `--only-kind` / `--only-effective` / `--subject` / `--status` 筛（`--json` 给机器读）' },
+  { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 枚举 / 不变量 / 锚点与分类轴口径 / 操作（schema 唯一真源）' },
+  { name: 'report', argv: ['--report'], mutates: false, summary: '体检：各 kind 条数 / 有效状态 / 锚点可解析率 / 冲突数 / **域**分布（★ 不叫 status —— 那是字段名）' },
+  { name: 'list', argv: ['--list'], mutates: false, summary: '列记录：按 `--only-kind` / `--only-effective` / `--system` / `--subject` / `--status` 筛（`--json` 给机器读）' },
+  { name: 'domains', argv: ['--domains'], mutates: false, summary: '★ 域词汇表：当前值 / 别名链 / 被拆分的值 + 逐值解析表（空词表也要能看）' },
   { name: 'show', argv: ['--show'], mutates: false, summary: '一条记录的全文 + 它的锚点解析结果 + 冲突对家' },
-  { name: 'add', argv: ['--add'], mutates: true, summary: '追加一条记录（缺省 dry-run）[--write]：`--kind --subject --claim --anchor <json>…`' },
+  { name: 'add', argv: ['--add'], mutates: true, summary: '追加一条记录（缺省 dry-run）[--write]：`--kind --system --subject --claim --anchor <json>…`' },
   { name: 'retract', argv: ['--retract'], mutates: true, summary: '撤回一条（**追加**一条 `replaces` 它的记录，不改历史）[--write]' },
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '不变量（红 = 退出码 1）；只读参考仓不在场时只 warn' },
   { name: 'rebuild-db', argv: ['--rebuild-db'], mutates: true, summary: '由文本真源确定性重建派生 SQLite（缺省 dry-run）[--write]' },
@@ -82,13 +101,16 @@ export const OPERATIONS = [
 
 /** 不变量标题（`validate` 与 `describe` 共用这一份） */
 export const CHECK_TITLES = new Map([
-  [1, '形态：记录 schema 合法（ULID / ISO 时刻 / kind / subject / claim / status / 锚点非空）、同文件内 id 不重复'],
+  [1, '形态：记录 schema 合法（ULID / ISO 时刻 / kind / **system** / subject / claim / status / 锚点非空）、' +
+    '域专属字段只出现在 `kind=domain` 上、同文件内 id 不重复'],
   [2, '追加序：每条记录的 `at` 与文件名月份自洽；文件内 ULID **严格递增**（只许追加，不许插中间）'],
   [3, '锚点：形态合法、`repo` 合法且**不越出对应仓库根**；`self` 锚必须落在**本仓已跟踪**的文件上'],
   [4, '观察可再校验：`accepted`（或 `stale`/`conflict` 的）记录，其 `self` 锚必须**当场解析得到**；' +
     '`reference` 锚在只读参考仓不在场时只 warn'],
   [5, '引线与冲突：`replaces` 必须指向**已存在**的记录且不成环；同一 `kind+subject` 上多个不同 claim ⇒ **显式冲突**'],
   [6, '派生 DB：删掉本地 DB 后一条命令能重建，且**同输入同逻辑内容**'],
+  [7, '分类轴：`system` 必填且无空白；**沿别名链能追到当前域词汇表**（追不到 ⇒ 待裁决，点名但不静默过）；' +
+    '被 `disposition=split` 拆过的值**不许当别名放过**（必须走追加更正记录的数据迁移）；词表自身无歧义'],
 ]);
 
 // ─────────────────────────────────────────────────────────── ULID / 时间
@@ -152,12 +174,17 @@ export function serializeRecord(r) {
     id: r.id,
     at: r.at,
     kind: r.kind,
+    system: r.system,
     subject: r.subject,
     claim: r.claim,
     anchor: r.anchor.map((a) => (a.type === 'bin' ? orderBin(a) : orderGuard(a))),
   };
   if (r.status !== undefined) out.status = r.status;
   if (r.replaces !== undefined) out.replaces = r.replaces;
+  // ★ 域专属字段（只在 kind=domain 上；其它 kind 出现即由不变量 #1 报错，这里只管序列化顺序）
+  if (r.disposition !== undefined) out.disposition = r.disposition;
+  if (r.aliases !== undefined) out.aliases = [...r.aliases].sort();
+  if (r.splitInto !== undefined) out.splitInto = [...r.splitInto].sort();
   if (r.note !== undefined) out.note = r.note;
   if (r.tags !== undefined) out.tags = [...r.tags].sort();
   return JSON.stringify(out);
@@ -346,6 +373,77 @@ export function resolveAnchor(a, { repoRoot, referenceRoot, tracked } = {}) {
   return { ok: true, kind: 'ok', why: `EA ${a.ea} → 偏移 0x${off.toString(16)}`, file: abs };
 }
 
+// ─────────────────────────────────────────────────────────── 分类轴（域词汇表）
+
+/**
+ * **域词汇表** —— 由 `kind=domain` 的记录**投影**出来（不另造第二个真源）。
+ *
+ * 为什么词表要 append-only（而不是像需求单那样就地编辑）：词表的读者有两个 ——
+ * 人（读当前态）与**校验器**（要判断**已经写下的历史行**合不合法）。就地编辑会让历史行的值**悬空**：
+ * 一改名就让全部历史记录变红，或只能放宽校验（等于没校验）。需求单可以就地编辑，是因为**没人需要重放它的历史**。
+ *
+ * @returns {{canonical:Set<string>, aliasOf:Map<string,string>, splits:Map<string,string[]>, records:Array, problems:Array}}
+ *   * `canonical`：当前**有效**的域名（`disposition != 'split'`；被 split 取代的旧域不再是当前值）
+ *   * `aliasOf`：历史值 → 它归属的域名（改名/归并产生的别名，**可传递**）
+ *   * `splits`：历史值 → 它被拆成的域名列表（★ **别名不覆盖它**：必须走数据迁移）
+ */
+export function buildVocabulary(records) {
+  const problems = [];
+  const domains = records.filter((r) => r.kind === 'domain');
+  const canonical = new Set();
+  const aliasOf = new Map();
+  const splits = new Map();
+  const seenKey = new Map();
+
+  // 当前值 = 词表里 domain 记录的 subject（split 的旧域不算"当前值"，它已被取代）
+  for (const r of domains) {
+    if (r.disposition === 'split') {
+      splits.set(r.subject, [...(r.splitInto ?? [])]);
+      continue;
+    }
+    if (seenKey.has(r.subject)) {
+      problems.push({ id: r.id, reason: `域名 ${r.subject} 在词表里出现 ${seenKey.get(r.subject)} 与 ${r.id} 两次（词表不许有歧义）` });
+      continue;
+    }
+    seenKey.set(r.subject, r.id);
+    canonical.add(r.subject);
+    for (const a of r.aliases ?? []) {
+      if (aliasOf.has(a) && aliasOf.get(a) !== r.subject) {
+        problems.push({ id: r.id, reason: `别名 ${a} 同时归属 ${aliasOf.get(a)} 与 ${r.subject}（一个历史值只能有一个去处）` });
+        continue;
+      }
+      aliasOf.set(a, r.subject);
+    }
+  }
+  // 当前值也是自己的别名（查表统一）
+  for (const k of canonical) if (!aliasOf.has(k)) aliasOf.set(k, k);
+  return { canonical, aliasOf, splits, records: domains, problems };
+}
+
+/**
+ * 把一个 `system` 值解析到**当前词表**里的域名。
+ * @returns {{value:string, canonical:string|null, via:'canonical'|'alias'|'split'|'unknown', chain:string[], splitInto?:string[]}}
+ *   * `unknown` —— 词表里既不是当前值也不是别名 ⇒ **待裁决**（不变量会点名，但**不许静默过**）
+ *   * `split` —— 它被拆过 ⇒ **别名不覆盖**，必须走"追加更正记录"的数据迁移；解析**到此为止**（不许猜）
+ */
+export function resolveDomain(value, vocab) {
+  const chain = [value];
+  if (vocab.splits.has(value)) {
+    return { value, canonical: null, via: 'split', chain, splitInto: vocab.splits.get(value) };
+  }
+  if (vocab.canonical.has(value)) return { value, canonical: value, via: 'canonical', chain };
+  let cur = value;
+  for (let i = 0; i < vocab.aliasOf.size + 1; i += 1) {
+    const next = vocab.aliasOf.get(cur);
+    if (next === undefined || next === cur) break;
+    chain.push(next);
+    if (vocab.splits.has(next)) return { value, canonical: null, via: 'split', chain, splitInto: vocab.splits.get(next) };
+    cur = next;
+    if (vocab.canonical.has(cur)) return { value, canonical: cur, via: 'alias', chain };
+  }
+  return { value, canonical: null, via: 'unknown', chain };
+}
+
 // ─────────────────────────────────────────────────────────── 投影（有效状态 / 冲突）
 
 /**
@@ -354,6 +452,7 @@ export function resolveAnchor(a, { repoRoot, referenceRoot, tracked } = {}) {
  *   entry = 记录 + `anchors[]`（逐条解析结果）+ `effective` + `conflictWith[]`
  */
 export function project(records, opts = {}) {
+  const vocab = buildVocabulary(records);
   const entries = records.map((r) => {
     const anchors = (r.anchor ?? []).map((a) => ({ anchor: a, ...resolveAnchor(a, opts) }));
     const hardFail = anchors.filter((x) => x.kind === 'error');
@@ -361,7 +460,10 @@ export function project(records, opts = {}) {
     if (effective === 'accepted' && hardFail.length > 0) effective = 'stale';
     // 锚点一条都没有可用的（含"参考仓不在场"）⇒ 不许再算 accepted
     if (effective === 'accepted' && anchors.every((x) => !x.ok)) effective = 'stale';
-    return { ...r, anchors, effective, conflictWith: [] };
+    // ★ 分类轴：值追不到当前词表 ⇒ 这条记录**待裁决**（不是 stale —— stale 说的是"观察失效"）
+    const systemValue = typeof r.system === 'string' ? r.system : '';
+    const system = resolveDomain(systemValue, vocab);
+    return { ...r, anchors, system, effective, conflictWith: [] };
   });
 
   // 冲突：同 kind+subject 上**多个不同 claim** ⇒ 显式化
@@ -372,6 +474,9 @@ export function project(records, opts = {}) {
   const groups = new Map();
   for (const e of entries) {
     if (retractedIds.has(e.id)) continue;
+    // ★ 域记录不进冲突判定：同一个域可以有多条处置（added → renamed → merged…），
+    //   那不是"两种说法打架"，而是**同一条时间线上的叠加**（由 aliases / replaces 表达）。
+    if (e.kind === 'domain') continue;
     const key = `${e.kind}\u0000${e.subject}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(e);
@@ -395,7 +500,16 @@ export function project(records, opts = {}) {
   const byEffective = {};
   for (const s of EFFECTIVE) byEffective[s] = 0;
   for (const e of entries) byEffective[e.effective] = (byEffective[e.effective] ?? 0) + 1;
-  return { entries, conflicts, byEffective };
+
+  // 分类轴：按当前域名统计（`unknown` / `split` 单列 —— 它们不是"某个域"）
+  const bySystem = {};
+  for (const e of entries) {
+    const k = e.system.via === 'canonical' || e.system.via === 'alias' ? e.system.canonical
+      : e.system.via === 'split' ? '(已被拆分：待数据迁移)'
+        : '(未在词表中：待裁决)';
+    bySystem[k] = (bySystem[k] ?? 0) + 1;
+  }
+  return { entries, conflicts, byEffective, bySystem, vocab };
 }
 
 // ─────────────────────────────────────────────────────────── 不变量
@@ -441,6 +555,38 @@ export function validateAll(records, opts = {}) {
       }
       if (typeof r.subject !== 'string' || r.subject.trim() === '' || /\s/.test(r.subject)) {
         p.push(bad(r._file, r._line, `${at}: subject 必须是非空、**无空白**的稳定键（例 Engine+0x5D880；别用 name —— 旧仓实测 9 组同名跨 scope）`));
+      }
+      // ★ 分类轴：`system` 必填（机制在场；**值**有没有进词表由 #7 判）
+      if (typeof r.system !== 'string' || r.system.trim() === '' || /\s/.test(r.system)) {
+        p.push(bad(r._file, r._line, `${at}: system 必须是非空、**无空白**的域名（这条结论关于引擎的哪一块；词表见 \`pnpm tools ledger domains\`）`));
+      }
+      // ★ 域专属字段只许出现在 `kind=domain` 上（同"缺陷专属字段"的纪律）
+      for (const k of DOMAIN_ONLY) {
+        if (r[k] !== undefined && r.kind !== 'domain') {
+          p.push(bad(r._file, r._line, `${at}: ${k} 是**域记录专属**字段（当前 kind=${r.kind}）`));
+        }
+      }
+      if (r.kind === 'domain') {
+        if (!DISPOSITIONS.includes(r.disposition)) {
+          p.push(bad(r._file, r._line, `${at}: 域记录必须写 disposition，且取值为 ${DISPOSITIONS.join('/')}（实际 ${JSON.stringify(r.disposition)}）`));
+        }
+        if (r.disposition === 'split') {
+          if (!Array.isArray(r.splitInto) || r.splitInto.length < 2) {
+            p.push(bad(r._file, r._line, `${at}: disposition=split 必须写 splitInto，且至少 2 项（拆成多个才有意义）`));
+          }
+        } else if (r.splitInto !== undefined) {
+          p.push(bad(r._file, r._line, `${at}: 只有 disposition=split 才写 splitInto`));
+        }
+        if (r.aliases !== undefined) {
+          if (!Array.isArray(r.aliases) || r.aliases.some((a) => typeof a !== 'string' || a.trim() === '' || /\s/.test(a))) {
+            p.push(bad(r._file, r._line, `${at}: aliases 必须是非空字符串数组，且每项**无空白**`));
+          }
+        }
+        if (r.disposition === 'renamed' || r.disposition === 'merged') {
+          if (!Array.isArray(r.aliases) || r.aliases.length === 0) {
+            p.push(bad(r._file, r._line, `${at}: disposition=${r.disposition} 必须写 aliases —— **它就是"历史行里的旧值仍可解析"的唯一依据**`));
+          }
+        }
       }
       if (typeof r.claim !== 'string' || r.claim.trim() === '') p.push(bad(r._file, r._line, `${at}: claim 必须是非空字符串`));
       if (r.status !== undefined && !STATUSES.includes(r.status)) {
@@ -579,6 +725,55 @@ export function validateAll(records, opts = {}) {
     add(6, (opts.dbProblems ?? []).map((x) => bad(opts.dbProblemsFile ?? '', x.line ?? 0, x.reason)));
   }
 
+  // 7 分类轴（域词汇表）
+  {
+    const p = [];
+    // 7a 词表自身的歧义（同名两个来源、一个别名两个去处）
+    for (const x of proj.vocab.problems) p.push(bad(ledgerDir ?? '', 0, `词表歧义：${x.reason}`));
+    // 7b 每条记录的 system 值与词表的关系
+    //   ★ 已经被**更正记录**取代的行（别的记录 `replaces` 指向它）不再按当前词表判它的值：
+    //     它的值与它的 claim 都已被新记录接管 —— 这正是"拆分/重定义走追加更正"那条路的收尾。
+    const replacedIds = new Set(proj.entries.filter((e) => typeof e.replaces === 'string').map((e) => e.replaces));
+    for (const e of proj.entries) {
+      const sv = e.system;
+      const at = `${path.basename(e._file)}:${e._line}`;
+      if (replacedIds.has(e.id)) continue;
+      if (sv.via === 'unknown') {
+        p.push(
+          bad(
+            e._file,
+            e._line,
+            `${at}: system=${JSON.stringify(sv.value)} **不在域词汇表里，也不是任何已登记历史值的别名** ⇒ 待裁决：` +
+              `要么补一条 \`kind=domain\` 的处置记录（added/renamed/merged），要么改这条记录的值。` +
+              `★ 不静默放过 —— 否则 K1/K3 写进去的值会静默长出多套写法（旧仓实测：capability 用中文粗标签、field 用英文细标识，两套无法 join）`,
+          ),
+        );
+      } else if (sv.via === 'split') {
+        p.push(
+          bad(
+            e._file,
+            e._line,
+            `${at}: system=${JSON.stringify(sv.value)} **已被拆分**（→ ${(sv.splitInto ?? []).join(' / ')}）⇒ ` +
+              `别名救不了这一类：必须按台账纪律**追加一条更正记录**（\`replaces\` 指向本条）把值落到具体的新域。` +
+              `★ 不许靠词表悄悄改结论的含义`,
+          ),
+        );
+      } else if (sv.via === 'alias') {
+        // 别名可解析 ⇒ **合法**（历史行一个字节都不用动）。这里只提示别名链，不报错。
+      }
+    }
+    // 7c 域记录：subject 就是域名，不许含空白；splitInto 的目标必须是当前值（不能指向一个不存在的域）
+    for (const e of proj.entries) {
+      if (e.kind !== 'domain' || e.disposition !== 'split') continue;
+      for (const t of e.splitInto ?? []) {
+        if (!proj.vocab.canonical.has(t)) {
+          p.push(bad(e._file, e._line, `splitInto 指向 ${JSON.stringify(t)}，但它不是当前词表里的域 ⇒ 拆分目标必须是已登记的域`));
+        }
+      }
+    }
+    add(7, p);
+  }
+
   const failures = checks.filter((c) => c.problems.length > 0).length;
   return { checks, failures, project: proj };
 }
@@ -615,8 +810,9 @@ export function rebuildDb(records, dbPath, opts = {}) {
     db.exec(`
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE record (
-        id TEXT PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, subject TEXT NOT NULL,
-        claim TEXT NOT NULL, status TEXT NOT NULL, effective TEXT NOT NULL,
+        id TEXT PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL,
+        system TEXT NOT NULL, system_current TEXT, system_via TEXT NOT NULL,
+        subject TEXT NOT NULL, claim TEXT NOT NULL, status TEXT NOT NULL, effective TEXT NOT NULL,
         replaces TEXT, note TEXT
       );
       CREATE TABLE anchor (
@@ -629,24 +825,39 @@ export function rebuildDb(records, dbPath, opts = {}) {
         kind TEXT NOT NULL, subject TEXT NOT NULL, claim TEXT NOT NULL, record_id TEXT NOT NULL,
         PRIMARY KEY (kind, subject, claim, record_id)
       );
+      -- ★ 域词汇表（由 kind=domain 的记录投影）：别名链与"被拆分"的旧值都在这 —— 查询按域过滤走它
+      CREATE TABLE domain (
+        record_id TEXT NOT NULL, key TEXT NOT NULL, disposition TEXT NOT NULL,
+        alias TEXT, split_into TEXT, claim TEXT NOT NULL,
+        PRIMARY KEY (record_id, key, alias)
+      );
+      CREATE TABLE domain_resolution (
+        value TEXT PRIMARY KEY, canonical TEXT, via TEXT NOT NULL, chain TEXT NOT NULL, split_into TEXT
+      );
       CREATE INDEX record_subject ON record (kind, subject);
+      CREATE INDEX record_system ON record (system, kind);
       CREATE INDEX anchor_path ON anchor (path);
+      CREATE INDEX domain_alias ON domain (alias);
     `);
     const insMeta = db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)');
-    insMeta.run('schema', '1');
+    insMeta.run('schema', '2');
     insMeta.run('records', String(proj.entries.length));
     const insRec = db.prepare(
-      'INSERT INTO record (id, at, kind, subject, claim, status, effective, replaces, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO record (id, at, kind, system, system_current, system_via, subject, claim, status, effective, replaces, note) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     );
     const insAnchor = db.prepare(
       'INSERT INTO anchor (record_id, ord, type, repo, path, ea, len, sha256, test, resolved, why) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     );
     const insConflict = db.prepare('INSERT INTO conflict (kind, subject, claim, record_id) VALUES (?, ?, ?, ?)');
+    const insDomain = db.prepare('INSERT INTO domain (record_id, key, disposition, alias, split_into, claim) VALUES (?, ?, ?, ?, ?, ?)');
+    const insResolve = db.prepare('INSERT INTO domain_resolution (value, canonical, via, chain, split_into) VALUES (?, ?, ?, ?, ?)');
     // ★ 一律按 id 排序写入 ⇒ 与文件枚举顺序、与追加历史无关
     const sorted = [...proj.entries].sort((a, b) => String(a.id).localeCompare(String(b.id)));
     for (const e of sorted) {
       insRec.run(
-        e.id, e.at, e.kind, e.subject, e.claim, e.status ?? 'proposed', e.effective,
+        e.id, e.at, e.kind, e.system.value, e.system.canonical, e.system.via,
+        e.subject, e.claim, e.status ?? 'proposed', e.effective,
         e.replaces ?? null, e.note ?? null,
       );
       e.anchors.forEach((x, i) => {
@@ -666,12 +877,29 @@ export function rebuildDb(records, dbPath, opts = {}) {
         for (const id of [...cl.ids].sort()) insConflict.run(c.kind, c.subject, cl.claim, id);
       }
     }
+    // 域词汇表投影：每条 domain 记录按 (key, alias) 展开成行（便于按历史值反查）
+    for (const d of [...proj.vocab.records].sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
+      const split = d.disposition === 'split' ? (d.splitInto ?? []).join(',') : null;
+      const aliases = d.aliases ?? [null];
+      for (const a of aliases) insDomain.run(d.id, d.subject, d.disposition, a, split, d.claim);
+    }
+    // 解析表：每个出现过的值 + 每个已登记的历史值（含别名），都记一条 → 查询/排查都查这一张
+    const values = new Set([
+      ...proj.entries.map((e) => e.system.value),
+      ...proj.vocab.aliasOf.keys(),
+      ...proj.vocab.splits.keys(),
+    ]);
+    for (const v of [...values].sort()) {
+      const r = resolveDomain(v, proj.vocab);
+      insResolve.run(v, r.canonical, r.via, r.chain.join(' → '), r.splitInto ? r.splitInto.join(',') : null);
+    }
     return {
       ok: true,
       dbPath,
       records: proj.entries.length,
       anchors: proj.entries.reduce((n, e) => n + e.anchors.length, 0),
       conflicts: proj.conflicts.length,
+      domains: proj.vocab.canonical.size,
       digest: dbDigest(db),
     };
   } finally {
@@ -684,7 +912,7 @@ export function dbDigest(db) {
   const h = crypto.createHash('sha256');
   const schema = db.prepare("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
   for (const s of schema) h.update(`${s.type}|${s.name}|${s.sql ?? ''}\n`);
-  for (const t of ['record', 'anchor', 'conflict']) {
+  for (const t of ['record', 'anchor', 'conflict', 'domain', 'domain_resolution']) {
     const cols = db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
     const order = cols.join(', ');
     for (const row of db.prepare(`SELECT ${order} FROM ${t} ORDER BY ${order}`).all()) {
@@ -718,20 +946,31 @@ function require$sqlite() {
 const CONDITIONAL = {
   status: '⬜ 缺省 = `proposed`（推荐显式写）。**它只是"作者声称"** —— 有效状态由投影现算。',
   replaces: '条件：仅"撤回/纠错"用（**追加**一条新记录并指向被取代的那条）。日志永不就地改。',
+  disposition:
+    '★ **域记录专属**（`kind=domain`）：added=新域进词表 · renamed=改名（含义没变）· merged=多个旧域并成一个 · ' +
+    'split=**一个域被拆成多个**（含义变了 ⇒ 别名不覆盖它，必须走追加更正记录的数据迁移）。',
+  aliases:
+    '★ 域记录专属。**"历史行里的旧值仍然可解析"的唯一依据**（改名/归并必填）。' +
+    '别名是**单向**的：老名字指向新域，不是同义词 —— 查询按当前域名归一。',
+  splitInto: '★ 域记录专属，只在 `disposition=split` 上：它被拆成哪几个域（每项必须是当前词表里已登记的域）。',
   note: '⬜ 自由文本（人读的补充）。**不放结论** —— 结论在 `claim`，证据在 `anchor`。',
-  tags: '⬜ 自由标签（只当标签，不当分组真源）。',
+  tags: '⬜ 自由标签（只当标签，**不参与治理、不当分组真源**；域分类走 `system`）。',
 };
 
 export function describe() {
   const fields = [
     ['id', '✅', `${ID_PREFIX}<26 字符 ULID>`, '身份。★ **字典序 == 时间序** ⇒ 追加序直接由它决定（不依赖文件位置）；同文件内必须**严格递增**'],
     ['at', '✅', 'ISO-8601 毫秒 UTC', '时刻。★ 必须与 ULID 推出来的月份一致（分片：按 kind + 月）'],
-    ['kind', '✅', KINDS.join(' | '), 'claim=一条语义结论 · observation=一条观察（二进制/运行时的原始事实）· note=杂项。★ 必须等于所在目录名'],
+    ['kind', '✅', KINDS.join(' | '), '★ **台账自己的机制分类**（这条记录是哪一类事件）：claim=一条语义结论 · observation=一条观察 · note=杂项 · **domain=域词汇表的一条处置声明**。必须等于所在目录名。别与 `system` 混'],
+    ['system', '✅', '无空白的域名', '★ **知识本身的分类轴**：这条结论关于引擎的哪一块（音频 / 渲染 / …）。**必填**，且必须**沿别名链追到当前域词汇表**（追不到 ⇒ validate #7 点名，不静默放过）。★ 分类是**字段不是标签** —— 判据见 `docs/00-origin/decisions.md` §8.1'],
     ['subject', '✅', '无空白的稳定键', '这条是关于**什么**的。★ 键必须是 `scope+offset` 这类稳定身份，**绝不能是 name** —— 旧仓 `fields.json` 实测 9 组同名跨 scope、2 组同 `scope+offset` 双 `confirmed`'],
     ['claim', '✅', '非空 string', '断言本身（人读的一句话）'],
     ['anchor', '✅', '非空数组（≤ 无上限）', '★ **每条结论至少绑一条可再校验的观察**；形态见下表'],
     ['status', '⬜', STATUSES.join(' | '), CONDITIONAL.status],
     ['replaces', '⬜', `${ID_PREFIX}…`, CONDITIONAL.replaces],
+    ['disposition', 'domain 必填', DISPOSITIONS.join(' | '), CONDITIONAL.disposition],
+    ['aliases', '⬜（renamed/merged 必填）', '[历史值…]', CONDITIONAL.aliases],
+    ['splitInto', '⬜（split 必填）', '[域名…]', CONDITIONAL.splitInto],
     ['note', '⬜', 'string', CONDITIONAL.note],
     ['tags', '⬜', '[a, b]', CONDITIONAL.tags],
   ];
@@ -767,6 +1006,28 @@ export function describe() {
       ],
     },
     budget: { note: '台账没有条数预算 —— 它是"知道什么"的仓库，不是"还要做什么"的待办表。' },
+    classification: {
+      note:
+        '★ **知识本身的分类轴 = `system`（必填字段），不是 tag**。读者有两个：人（读当前态）与**校验器**（要判断**已经写下的历史行**）。' +
+        '做成自由标签的代价是"哪个写法才对"没有任何东西能判红 ⇒ 多套写法会静默共存（旧仓实测：`capabilities` 用中文粗标签、`fields` 用英文细标识，两套无法 join）。',
+      vocabulary:
+        '★ **域词汇表 = 台账里 `kind=domain` 的记录**（同一套 append-only 纪律、同一套锚点要求）—— 不另造第二个真源。' +
+        '为什么词表要 append-only：就地编辑会让历史行的值**悬空**（一改名就让全部历史记录变红，或只能放宽校验）。' +
+        '需求单可以就地编辑，是因为**没人需要重放它的历史**。',
+      dispositions: DISPOSITIONS.join(' | '),
+      rules: [
+        '**改名 / 归并**（含义没变）⇒ 记 `aliases` ⇒ 别名可解析，**历史行一个字节都不用动**',
+        '**拆分 / 重定义**（含义变了）⇒ **别名救不了**：必须按台账纪律**追加一条更正记录**（`replaces` 指向旧的）把值落到具体的新域',
+        '★ **词表不许用来悄悄改结论的含义** —— 含义变了就是一条新知识，要过准入门、要带锚',
+        '`system` 值既不是当前域、也不是任何已登记历史值的别名 ⇒ **待裁决**（validate #7 点名，不静默放过）',
+        '域记录本身也**必须带锚**（"域怎么分"是知识，不是配置）—— 由 #3/#4 一起管',
+      ],
+      query: [
+        '`pnpm tools ledger domains` —— 当前域 / 别名链 / 被拆分的值 + 逐值解析表',
+        '`pnpm tools ledger list --system <域>` —— 按域列记录（支持历史值：走别名解析）',
+        '派生 DB：`record.system` / `record.system_current` 列 + `domain` / `domain_resolution` 两张表（任意 join 走它）',
+      ],
+    },
     invariants: [...CHECK_TITLES].map(([id, text]) => ({ id, text, enforcedBy: '本工具的 validate（`pnpm tools ledger validate`）' })),
     operations: OPERATIONS,
     determinism: {
@@ -804,6 +1065,14 @@ export function describeText(d = describe()) {
   L.push(d.effective.note);
   L.push(`* 取值：${d.effective.values}`);
   for (const r of d.effective.rules) L.push(`* ${r}`);
+  L.push('');
+  L.push('## 分类轴：`system`（域）—— 为什么是字段而不是标签');
+  L.push(d.classification.note);
+  L.push(`* ${d.classification.vocabulary}`);
+  L.push(`* 处置取值：${d.classification.dispositions}`);
+  for (const r of d.classification.rules) L.push(`* ${r}`);
+  L.push('* 怎么查：');
+  for (const q of d.classification.query) L.push(`  * ${q}`);
   L.push('');
   L.push('## 不变量（含"谁在守它"）');
   for (const i of d.invariants) L.push(`${i.id}. ${i.text}　—　${i.enforcedBy}`);
