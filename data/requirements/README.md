@@ -82,6 +82,11 @@ pnpm tools requirements set <前缀> --status done --done-reason "文档类：�
 
 ## 6. 预算（"人看的"靠它）
 
-单节点 **≤ 80 行**、节点总数 **≤ 40**。两个数都在 `pnpm tools requirements describe` 里，
+单节点 **≤ 80 行**；**活节点**（`open` / `doing` / `blocked`）**≤ 40**。两个数都在 `pnpm tools requirements describe` 里，
 改它们 = 改 `tools/lib/requirements.mjs` 的 `BUDGET`（改完守卫立刻按新预算判）。
 超了**不要放宽**，先问："这一层是不是塞了本该更低层或本该进知识台账的东西？"
+
+★ **`done` / `dropped` / `superseded` 不占节点预算**（口径与"为什么"在 `BUDGET` 的注释里）：
+预算是给"**还要人读它才能推进**"的待办表设的，已收口的节点不在待办里。
+否则树会因为"做过的事变多"而爆预算，逼人删掉**已经交付的**记录 —— 那是把台账当垃圾桶用。
+判据一句话：**"这个节点还需要有人去读它才能推进吗？"** 不需要 ⇒ 不占预算。

@@ -23,6 +23,7 @@ import {
   OPERATIONS,
   STATUS_MARK,
   buildTree,
+  budgeted,
   describe,
   describeText,
   flatten,
@@ -72,7 +73,14 @@ function cmdList(args, nodes, tree) {
   ]);
   const w = head.map((h, i) => Math.max(h.length, ...cells.map((c) => c[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join('  ');
-  return [line(head), line(w.map((n) => '-'.repeat(n))), ...cells.map(line), '', `${rows.length} 个节点（预算 ${BUDGET.maxNodes}）`];
+  const live = budgeted(nodes).length;
+  return [
+    line(head),
+    line(w.map((n) => '-'.repeat(n))),
+    ...cells.map(line),
+    '',
+    `${rows.length} 个节点（活 ${live} / 预算 ${BUDGET.maxNodes}；收口的 ${rows.length - live} 个不计）`,
+  ];
 }
 
 function cmdShow(args, nodes, tree) {
@@ -103,8 +111,12 @@ function cmdPlan(args, nodes, tree) {
     if (n.fields.status in totals) totals[n.fields.status] += 1;
     if (n.fields.type === 'bug' && LIVE_STATUSES.includes(n.fields.status)) bugs += 1;
   }
+  const liveCount = budgeted(nodes).length;
+  const closedCount = nodes.length - liveCount;
   L.push(
-    `进度（${nodes.length} 个节点 / 预算 ${BUDGET.maxNodes}）　` +
+    `进度（活节点 ${liveCount} / 预算 ${BUDGET.maxNodes}` +
+      (closedCount ? `　·　已收口 ${closedCount} 不计预算` : '') +
+      `）　` +
       `🔜 doing ${totals.doing} · ⛔ blocked ${totals.blocked} · ⬜ open ${totals.open} · ✅ done ${totals.done} · 🚫 dropped ${totals.dropped}` +
       (bugs ? `　｜　未收口缺陷 ${bugs} 🐞` : ''),
   );
@@ -374,7 +386,7 @@ const HELP = `tools/requirements.mjs — data/requirements/ 的查询与唯一�
   pnpm tools requirements describe                    # 自描述：字段 / 不变量 / 预算 / 操作
 
 ★ 字段与不变量只有一份真源：本文件的 --describe（文档 data/requirements/README.md 只写口径与指向）。
-★ 层次：parent 只写在子节点上；children 一律派生。预算：单节点 ≤ ${BUDGET.maxLinesPerNode} 行、总数 ≤ ${BUDGET.maxNodes}。
+★ 层次：parent 只写在子节点上；children 一律派生。预算：单节点 ≤ ${BUDGET.maxLinesPerNode} 行、**活节点** ≤ ${BUDGET.maxNodes}（收口的 done/dropped/superseded **不计**）。
 `;
 
 export function main(argv = process.argv.slice(2)) {

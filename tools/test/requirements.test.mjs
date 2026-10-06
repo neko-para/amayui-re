@@ -168,11 +168,44 @@ test('#4 父不先于子收口：父 done 而子树里还有活节点 → 红', 
   assert.deepEqual(ids(validateAll([root2, k1, k2])), [], '子全收口（done/dropped）后父可以 done');
 });
 
-test('#5 一屏预算：单节点超行数 / 总数超上限 → 红', () => {
+test('#5 一屏预算：单节点超行数 / **活节点**超上限 → 红；收口的节点不占预算', () => {
   const root = N();
   assert.ok(ids(validateAll([root, N({ lines: BUDGET.maxLinesPerNode + 1 })])).includes(5), '单节点超行数要红');
+
+  // 活节点超上限 ⇒ 红
   const many = [root, ...Array.from({ length: BUDGET.maxNodes }, () => N({ fields: { parent: root.fields.id } }))];
-  assert.ok(ids(validateAll(many)).includes(5), '节点总数超上限要红');
+  const r = validateAll(many);
+  assert.ok(ids(r).includes(5), '活节点超上限要红');
+  assert.ok(
+    r.checks[4].problems.some((p) => /活节点/.test(p)),
+    '点名要说清数的是"活节点"（收口的那些不算，否则树会因为"做过的事变多"而爆预算）',
+  );
+
+  // ★ 同样多的节点，只要**已收口**就不占预算
+  const closed = [
+    root,
+    ...Array.from({ length: BUDGET.maxNodes }, () =>
+      N({ fields: { parent: root.fields.id, status: 'done', done_reason: '收口了' } }),
+    ),
+  ];
+  assert.deepEqual(ids(validateAll(closed)), [], `${BUDGET.maxNodes} 个 done + 1 个 root 必须绿（done 不计预算）`);
+
+  // dropped / superseded 同样不计
+  const dropped = [
+    root,
+    ...Array.from({ length: BUDGET.maxNodes }, () => N({ fields: { parent: root.fields.id, status: 'dropped', dropped_reason: '不做了' } })),
+  ];
+  assert.deepEqual(ids(validateAll(dropped)), [], 'dropped 不计预算');
+
+  // 但"活"与"收口"混在一起时，只有活的那些计数
+  const mixed = [
+    root,
+    ...Array.from({ length: BUDGET.maxNodes }, () =>
+      N({ fields: { parent: root.fields.id, status: 'done', done_reason: 'y' } }),
+    ),
+    N({ fields: { parent: root.fields.id, status: 'doing' } }),
+  ];
+  assert.deepEqual(ids(validateAll(mixed)), [], '收口节点不参与计数 ⇒ 再加一个 doing 仍绿');
 });
 
 test('★ schema 覆盖计划要求的那几个字段，且 `blocked_by` 的正例成立（依赖指向真实节点）', () => {

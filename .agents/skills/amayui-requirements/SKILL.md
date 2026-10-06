@@ -28,7 +28,7 @@ description: 在本仓（《天結いキャッスルマイスター》汉化工�
 ## 2. 四步工作流
 
 ```bash
-pnpm tools requirements plan                 # ① 全局：树 + 聚合状态（先看总预算，别撞 ≤40 个节点）
+pnpm tools requirements plan                 # ① 全局：树 + 聚合状态（先看**活节点**预算，别撞 ≤40）
 pnpm tools requirements show <引用>          # ② 一个节点：字段 + 子树 + 正文（正文里才有"判据"）
 pnpm tools requirements add … / set … --write # ③ 动作（缺省 dry-run；★ 只在确认后才 --write）
 pnpm tools requirements validate             # ④ 改完必跑：5 条不变量，红 = 退出码 1
@@ -54,9 +54,12 @@ pnpm tools requirements validate             # ④ 改完必跑：5 条不变量
 
 * **父不先于子**：`父 done ⇒ 子树里不许还有 open / doing / blocked`。
   ⇒ "父能不能关"永远先看 `plan` 那一行的聚合状态（形如 `[10/12]`）。
-* **预算**：单节点 ≤ 80 行、节点总数 ≤ 40。超了**不要放宽**，先问：
+* **预算**：单节点 ≤ 80 行、**活节点**（`open`/`doing`/`blocked`）≤ 40。超了**不要放宽**，先问：
   "这一层是不是塞了本该更低层、或本该进知识台账的东西？"⇒ 往下拆新节点。
   （两个数都在 `--describe` 里，改预算＝改模型里的 `BUDGET`。）
+  ★ **收口的 `done`/`dropped`/`superseded` 不占预算** —— 预算是给"还要人读它才能推进"的待办表设的；
+  若把历史也数进去，树会因为"做过的事变多"而爆预算、逼人删掉**已经交付的**记录
+  ⇒ 所以"拆一个节点出来"不该先付两个已完成节点的代价。
 
 ## 5. 五种常见局面的处置（都附本仓真实先例）
 

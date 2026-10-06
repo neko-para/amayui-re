@@ -54,8 +54,28 @@ export const CLOSURE = {
   bug: 'status=done ⇒ 必须 `verify` 或 `repro`（分歧消失的证据）；两者都指真实存在的文件，锚点必须找得到',
 };
 
-/** ★ 一屏预算（守卫会红；放宽也要有数 —— 没数的预算等于没有） */
-export const BUDGET = { maxLinesPerNode: 80, maxNodes: 40 };
+/**
+ * ★ 一屏预算（守卫会红；放宽也要有数 —— 没数的预算等于没有）
+ *
+ * ★ **只有"活节点"（`open`/`doing`/`blocked`）计入 `maxNodes`**，`done`/`dropped`/`superseded` 不计。
+ * 为什么：预算是给"人还能一眼看完的待办表"设的 —— 收口的节点**已经不在待办里**了。
+ * 若把历史也数进去，树只会因为"做过的事变多"而爆预算，逼人删掉**已经交付的**节点的记录，
+ * 那是把台账当垃圾桶用；而拆一个节点出来（本该鼓励的动作）反而要先删两个已完成节点。
+ * ⇒ 判据一句话：**"这个节点还需要有人去读它才能推进吗？"** 不需要 ⇒ 不占预算。
+ * 引用真源：`BUDGET_COUNTS`；`pnpm tools requirements describe` 会把它印出来。
+ */
+export const BUDGET_COUNTS = LIVE_STATUSES;
+export const BUDGET = { maxLinesPerNode: 80, maxNodes: 40, counts: BUDGET_COUNTS };
+
+/** 计入节点预算的那些节点 */
+export const budgeted = (nodes) => nodes.filter((n) => BUDGET_COUNTS.includes(n.fields.status));
+
+/**
+ * 不变量 #5 的标题 —— **只此一份**：`validate` 与 `describe` 都用它，
+ * 所以"守卫说的"和"文档说的"不可能漂（`BUDGET` 的注解决定措辞）。
+ */
+export const BUDGET_TEXT = (b = BUDGET) =>
+  `一屏预算：单节点 ≤ ${b.maxLinesPerNode} 行；**活节点**（${b.counts.join('/')}）≤ ${b.maxNodes}`;
 
 /** 参数区的键序（写盘时固定，diff 干净）；不在表里的键 = 未知字段 ⇒ 报错，绝不静默忽略 */
 export const KEY_ORDER = [
@@ -756,8 +776,15 @@ export function validateAll(nodes, opts = {}) {
         bad.push(`${n.name}: ${n.lines} 行 > 预算 ${budget.maxLinesPerNode} 行（细节请开更低层节点，或移去知识台账 / docs）`);
       }
     }
-    if (nodes.length > budget.maxNodes) bad.push(`节点总数 ${nodes.length} > 预算 ${budget.maxNodes}（超了要提升抽象，不是加节点）`);
-    add(5, `一屏预算：单节点 ≤ ${budget.maxLinesPerNode} 行、总数 ≤ ${budget.maxNodes}`, bad);
+    // ★ 只数活节点（见 BUDGET 的注释）：收口的节点不占"待办表"的位置
+    const live = budgeted(nodes);
+    if (live.length > budget.maxNodes) {
+      bad.push(
+        `活节点 ${live.length} > 预算 ${budget.maxNodes}（收口的 done/dropped/superseded 不计；` +
+          `超了要提升抽象或先收口，不是加节点）`,
+      );
+    }
+    add(5, BUDGET_TEXT(budget), bad);
   }
 
   const failures = checks.filter((c) => c.problems.length > 0).length;
@@ -810,7 +837,7 @@ export function describe() {
       { id: 2, text: '树闭合：恰好一个根、parent 不悬空、不成环、不孤立' },
       { id: 3, text: '状态自洽：需求 done 看 verify（能力在不在）/ 缺陷 done 看 verify 或 repro（分歧还在不在）；blocked 有前置、dropped 有理由' },
       { id: 4, text: '父不先于子收口：父 done ⇒ 子树里不许还有 open/doing/blocked' },
-      { id: 5, text: `一屏预算：单节点 ≤ ${BUDGET.maxLinesPerNode} 行、总数 ≤ ${BUDGET.maxNodes}` },
+      { id: 5, text: BUDGET_TEXT() },
     ].map((x) => ({ ...x, enforcedBy: '本工具的 validate（`pnpm tools requirements validate`）' })),
     operations: OPERATIONS,
     writePath:
@@ -846,7 +873,11 @@ export function describeText(d = describe()) {
   L.push(`* **superseded**：${d.lifecycle.superseded}`);
   L.push('');
   L.push('## 预算（★ "人看的"靠它）');
-  L.push(`单节点 ≤ ${d.budget.maxLinesPerNode} 行；节点总数 ≤ ${d.budget.maxNodes}`);
+  L.push(`单节点 ≤ ${d.budget.maxLinesPerNode} 行；**活节点** ≤ ${d.budget.maxNodes}`);
+  L.push(
+    `★ 数的是 **${d.budget.counts.join(' / ')}** —— 收口的 done / dropped / superseded **不占预算**：` +
+      `预算是给"还要人读才能推进"的待办表设的，历史不该把待办挤出去（口径与"为什么"见模型里 BUDGET 的注释）。`,
+  );
   L.push('');
   L.push('## 操作');
   for (const o of d.operations) L.push(`* \`${o.name}\`${o.mutates ? '（会写）' : ''} —— ${o.summary}　→ \`pnpm tools requirements ${o.name}\``);

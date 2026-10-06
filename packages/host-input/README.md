@@ -21,6 +21,11 @@ darwin/win32）登记为 `corpus/assets.json` 的 `native/host-input-old`（`rol
 本包作为模拟器的输入层随之重写，**预编译产物的平台口径也重新定**
 （旧仓的取舍与守卫见旧仓 `native/host-input/README.md`，仅作参考）。
 
+★ **本包落在 M4-2（表现层与窗口），不进 M4-1（无头核心）的关键路径**：旧仓引用它只有 3 处
+（`src/vm/native.ts` / `src/vm/handlers/input.ts` / `src/renderer/ipcProtocol.ts`），
+且被知识线复核的那些守卫跑的是 `StubNative` ⇒ 无头核心与知识线都不需要它。
+★ **`apps/inspector` 不是本包、也不是模拟器**：那是**真机探针**（C# / .NET 10 + WPF，读真游戏进程内存），归 M7。
+
 ## 5. 落点与纪律
 
 * 构建产物（`.node` / obj / CMake 中间件 / `prebuilds/`）**永远 gitignore**；

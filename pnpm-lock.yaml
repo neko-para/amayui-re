@@ -43,8 +43,6 @@ importers:
 
   packages/ledger: {}
 
-  packages/script-dsl: {}
-
   plugins/deploy:
     dependencies:
       '@deepseek-ai/cordis':

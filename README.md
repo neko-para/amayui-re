@@ -12,8 +12,7 @@
 | 交付 | 落点 | 说明 |
 |---|---|---|
 | **翻译** | `data/translations/` | 日文只读基线 + 译文（数据模型待定，见 `docs/01-translation/`） |
-| **AGE 二进制格式** | `packages/age-format/` | ALF / AGF / ASM 等容器格式 |
-| **AGE 脚本 DSL** | `packages/script-dsl/` | 脚本解析 / 组装 / reflow |
+| **AGE 二进制格式** | `packages/age-format/` | ALF / AGF / ASM 等容器格式；★ **AGE 脚本**的解析 / 组装 / 文本 **reflow** 也在这里（`src/asm/`） |
 | **台账** | `packages/ledger/` + `data/ledger/` | append-only 文本真源 + 可删可重建的派生 SQLite 查询层 |
 | **需求台账** | `data/requirements/` | ★ **高层次的进度视图**：需求/缺陷 + 父子树（`pnpm tools requirements plan`）；与业务不耦合 |
 | **模拟器** | `apps/emulator/` | 唯一使用 **TypeScript** 的子项目（见"语言口径"） |
@@ -33,8 +32,7 @@ mismatch → 稳定实体 target → 自动 context packet（已有事实 + 原�
 | 域 | 旧仓位置 | 新仓落点 | 本轮状态 |
 |---|---|---|---|
 | 翻译 | `data/` `src/` `res/fonts` `patch/` | `data/translations/` | 只登记 |
-| AGE 格式 | `scripts/{asm,alf,agf,uimap}` | `packages/age-format/` | 只登记（M2 搬） |
-| 脚本 DSL | `scripts/`（reflow…） | `packages/script-dsl/` | 只登记 |
+| AGE 格式 | `scripts/{asm,alf,agf,uimap}` | `packages/age-format/` | 只登记（M2 搬）；★ AGE 脚本的解析 / 组装 / **reflow** 同在此域（`src/asm/`） |
 | 模拟器 | `app/amayui-emulator` + `native/host-input` + `plugins/amayui-emulator` | `apps/emulator/` + `packages/host-input/` | **按新结构重写**（M4） |
 | 真机探针 | `app/amayui-inspector` | `apps/inspector/` | **按新结构重写**（M7） |
 | wiki | `app/amayui-toolkit` | **不迁移**（archive 在旧仓） | 只登记 |

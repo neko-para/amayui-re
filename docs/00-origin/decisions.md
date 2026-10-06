@@ -194,6 +194,7 @@
 | 引擎域：基线二进制与哈希、节表修补口径、AGERC 三份二进制与作废的旧语料 | `docs/02-engine/README.md` |
 | 格式层：ALF / AGF / ASM 三套容器的盘上事实、"解包→重打包逐字节相同"判据 | `packages/age-format/README.md` + `node packages/age-format/cli.mjs verify` |
 | ASM 指令集表（`opcodes.json`）的身份与改法 | `packages/age-format/src/asm/opcodes.md` |
+| **AGE 脚本文本层**：谁负责解析 / 组装 / **reflow**（原 `packages/script-dsl` 占位包已删） | `packages/age-format/README.md` §1 / §3.4 + 跟踪单 `pnpm tools requirements show 7SGPFRBWPEQA8AF1WYQ8KP` |
 | UI 图片与字体：落点、版本表、7z 解压产物不入库 | `corpus/README.md` §1、`corpus/assets/ui-images/versions.md`、`pnpm tools corpus describe` |
 | 简→日写法占位字典（cp932 编码方案的一半） | `data/translations/README.md`、`data/translations/subs-cn-jp.md` |
 | 翻译域：现状、数据模型（patch 叠加层）、**旧仓翻译文档快照 `ref/` 的地位与"先核实"口径** | `docs/01-translation/README.md` |
@@ -228,4 +229,7 @@
 | 知识线（K1/K2/K3）**先不启动**；`callers/callees` 数据源缺失，先不做 | `knowledge-rebuild.md` |
 | **翻译文档按「只读快照 + 先核实再用」迁回**（旧仓 `docs/translate/**` + `docs/translation/README.md`），并按**还能不能用**二分：`ref/assets/**`（语言资产，**散文件**要能 rg）/ `ref/archive.zip`（历史工作单，**打包**只要内容还在）；引擎知识仍必须过准入门 | `docs/01-translation/README.md` §5、`ref/README.md`、`pnpm tools old-repo translate-ref` |
 | **CHANGELOG 与安装说明随包保留**（产品文本，不是内部变更记录）⇒ §6 的第②处例外；**发行目录叫 `release/` 不叫 `patch/`**（"patch" 已被变更叠加层占用） | `release/README.md`、`AGENTS.md` §10 |
+| **删掉 `packages/script-dsl/` 占位包**（[本轮]）：它无代码、无人依赖；声称的"解析 / 组装"本来就在 `packages/age-format/src/asm/`（旧仓模拟器也只自带一份 `src/script/bin.ts`，`dependencies` 只有 `pixi.js`）⇒ **AGE 脚本文本层的落点 = `age-format`**，"排版 / reflow 要不要机械化"另立跟踪单（挂在「翻译更新」下，下游依赖是软的：翻译域现在接受手工折行） | `packages/age-format/README.md` §3.4；`pnpm tools requirements show 7SGPFRBWPEQA8AF1WYQ8KP` |
+| **模拟器分两层**（[本轮]）：**M4-1 无头核心**（是知识线 K2/K3 的前置）与 **M4-2 表现层与窗口**（不是）—— 依据：79 条 `modeled-verified` 的守卫**全在 T0/T1 档**，T2 全仓只有 1 个文件且不进 `verify` ⇒ 复核不需要窗口、原生输入、真游戏安装 | `docs/03-emulator/README.md` §4.1；`pnpm tools requirements show 7SGXYWPQ1KWET2J49TJQST` |
+| **`apps/inspector` ≠ 模拟器**（[本轮]）：前者是**真机探针**（C#/.NET 10 + WPF，读真进程内存，M7），后者自己的窗口壳是 `app/amayui-emulator/electron/`（8 文件，M4-2）；"都按新结构重写"不等于它们是同一件事 | `packages/host-input/README.md` §4、`apps/emulator/README.md` §5.1 |
 | 技能「不迁移、只重建」的**第一个实例**：`amayui-translate`（继承纯约定、丢弃旧工具绑定） | `docs/04-agent/README.md` §6、`.agents/skills/amayui-translate/SKILL.md` |

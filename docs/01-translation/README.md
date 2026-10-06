@@ -8,7 +8,7 @@
 | 译文 | `src/` | 941 文件 / 91.8 MB | 与 `data/` 同构（370 相同 / 571 不同） |
 | 字体 | `res/fonts/` | 含 CN/JP 合并字体（`Amayui-CN_cnjp*.ttf` 等） | 交付素材 |
 | 补丁产物 | `patch/` | LFS + 忽略（BIN / AGF 等） | 编译产物 |
-| 翻译管线 | `scripts/`（一半） | `translate.js` / `reflow*.js` / `sync-*.js` / 抽取与校验脚本 | 工具（按"重建"处理，不迁移） |
+| 翻译管线 | `scripts/`（一半） | `translate.js` / `reflow*.js` / `sync-*.js` / 抽取与校验脚本 | 工具（按"重建"处理，不迁移）；★ `reflow*.js` 的职责归 **`packages/age-format`**（脚本成品的文本层，见其 §3.4） |
 
 旧仓的行尾实测：`src/` 抽样 300 个里 297 个纯 LF、**3 个混合行尾** —— 这正是新仓 `.gitattributes` 首行
 `* text=auto eol=lf` 要钉死的东西（见 `../00-origin/decisions.md` §3）。
@@ -64,6 +64,9 @@ data/translations/README.md   ← 本域的落点说明（本文件之外没有�
   `patch find`（merge on read：日文查 base、中文查 op 载荷，按锚配对）·
   `patch find --edits` + `patch set`（生成清单 → 按锚直改 op）· `patch edit`（整篇翻译：物化一支草稿再反解）。
 * **patch 的物理切分**（单文件 6.74 MB 已可行；并行编辑冲突变痛时再按脚本分片，纯物理切分不改语义）。
+* **AGE 脚本文本的 reflow（排版）要不要机械化**：节点 `REQ-01M47SGPFRBWPEQA8AF1WYQ8KP`（挂在「翻译更新」下）。
+  落点已定为 `packages/age-format`（脚本成品的文本层，见其 §3.4）—— 原 `packages/script-dsl` 占位包已删除。
+  现状是**手工折行**（技能 §8 明写不假定 reflow 存在）⇒ 本项**不阻塞**任何一批迁移；要做的只是裁决。
 
 ## 4. 本轮明确不做
 
