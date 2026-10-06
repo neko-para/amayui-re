@@ -2,9 +2,10 @@
 
 - id: REQ-01M411CSDXDVGTP83BPS6TNV48
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3SVH2V332E4CJYN0BHH0YK8
 - order: 60
+- dropped_reason: 裁决：不做自建链。AGERC.DLL 用入库可信产物（corpus/assets/agerc/AGERC.DLL）+ tools/test/agerc-artifact.test.mjs 的机械复核已足够 —— 16 个对话框基本没汉化（只 DIALOG 3 一个）、使用人少；自建要重写 11 个对话框过程 + 80 处 CheckMenuItem 状态同步，还会失去逐字节判据。『将来要不要重建』这个可能性改由 REQ-01M469TFXAJV1K8E1EWZ63P3JF 跟踪（挂在翻译更新下）。
 - tags: [translation, release, agerc]
 
 ## 现状（2026-10-03 定案）

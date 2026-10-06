@@ -2,9 +2,10 @@
 
 - id: REQ-01M3SVH2V332E4CJYN0BHH0YK8
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 35
+- verify: tools/test/fonts.test.mjs#★ 判据：两支的构建结果与可信产物**除 head.modified（时间戳）外逐字节相同**
 
 ## 范围
 旧仓翻译工具链（`scripts/` 里的翻译管线 + `res/` 的资源构建）**按新结构重写**，不逐文件搬运。
@@ -21,7 +22,8 @@
 `data/translations/subs-cn-jp.json`（简→日写法占位字典）。
 
 ## 要重建的能力
-1. **字体构建**：Sarasa SC 基底 + cnjp cmap 替换 + 族名 `Amayui CN` + 声明 Shift-JIS 932 码页；
+1. **字体构建**（★ **已落点**）：`pnpm tools fonts build|verify` —— Sarasa SC 基底 + cnjp cmap 替换
+   + 族名 `Amayui CN` + 声明 Shift-JIS 932 码页；判据是**除 `head.modified` 外与可信产物逐字节相同**；
 2. **文本渲染**：UI 截图链（headless + @font-face 引本地字体）与效果规范；
 3. **打包**（★ **已落点**）：`pnpm tools release` 的 `install` / `pack` 两条命令 ——
    变更集**算出来**（`patch.json` 的键 + ui-bake 的配方集 + 入库的 AGERC / 字体），
@@ -37,7 +39,13 @@
   ⇒ Locale Emulator 起不来（现象：**进程起来了、窗口没建出来**；直接双击却能看到窗口只是没转码）。
   处置 `--relabel-medium` 或建到工作区外。两条的成因与命令见 `tools/release.md` §3.1。
 
-## 判据
-（待写：每一件都要有可执行的守卫 —— 字体构建可复现、渲染参考块可对照、打包清单可校验、patch 可重建视图。）
-* **打包**那一件的守卫已经在了：`tools/test/release.test.mjs`（+ `pnpm tools release plan install|pack`）；
-* 其余三件（字体构建可复现 / 渲染参考块可对照 / patch 可重建视图）分别归各自的子节点。
+## 判据（四件能力各自的守卫）
+| 能力 | 落点 | 守卫 |
+|---|---|---|
+| ① **字体构建** | `pnpm tools fonts build\|verify`（纯 Node；三步变换与序列化口径见 `tools/fonts.md`） | `tools/test/fonts.test.mjs`（与可信产物**除 `head.modified` 外逐字节相同** ＋ "改一个字节必须红"自检） |
+| ② 文本渲染 | UI 图片烘焙链（子节点 `REQ-01M41554NN4ACPMY01BB2CHZM8`） | `tools/test/ui-bake.test.mjs` |
+| ③ 打包 | `pnpm tools release install\|pack`（子节点 `REQ-01M40RP2BN9S86K6SGEW671PYA`） | `tools/test/release.test.mjs` |
+| ④ 翻译数据模型（patch 叠加层） | 子节点 `REQ-01M3XJXVYBRFW1VT7RD8SNRXKV` 及其三个孙节点 | `tools/test/patch.test.mjs` |
+
+★ **唯一没跟到字节的只剩时间戳**：字体写盘会更新 `head.modified`，它连带改掉 head 的表校验和与
+文件级 `checkSumAdjustment`（实测 11 字节）⇒ 判据把这三处归一化后再比；模型与序列化口径见 `tools/lib/fonts.mjs`。

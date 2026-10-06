@@ -135,7 +135,7 @@
       ],
       "dest": "corpus/assets/fonts",
       "readOnly": true,
-      "consume": "只读：Amayui-CN_cnjp*.ttf 是 cnjp 分发字体（渲染简体所需，模拟器直接读）；两个 Sarasa 7z 是上游基底，解压产物 gitignore（见 .gitignore），派生链 = 7z 解压 + font_CN_JP.py",
+      "consume": "只读：Amayui-CN_cnjp*.ttf 是 cnjp 分发字体（渲染简体所需，模拟器直接读），也是 `pnpm tools fonts verify` 的校验基准；两个 Sarasa 7z 是上游基底，解压产物 gitignore（见 .gitignore）：派生链 = 7z 解压（前置）+ `pnpm tools fonts build`（旧链 = font_CN_JP.py；三步变换 / 判据 / 序列化口径见 tools/fonts.md）",
       "blocks": [
         "M4",
         "M5"
