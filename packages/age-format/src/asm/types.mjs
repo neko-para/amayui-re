@@ -56,6 +56,13 @@ export function getTypeLabel(type) {
     case 4: return 'global-float';
     case 5: return 'global-string';
     case 6: return 'global-ptr';
+    // ★ type 7 = **global 的 float 指针池**（operand type 7）。补它的依据**不是**旧仓文档，而是语料里
+    //   取址原语 `sub_42AEA0` 的跳转表 `jpt_42AF16`（12 个 case，覆盖 0..13）——它在 case 7 上
+    //   算出"global float 指针池的第 idx 项"。原先这里缺 7 ⇒ `getTypeLabel(7)` **抛**，
+    //   而同一包的 `disassemble.mjs` 却允许 7 通过范围检查（两处自相矛盾）。
+    //   守卫：`tools/test/engine-operand-types.test.mjs`（红 = 引擎 case 集与类型表不再一致）。
+    //   ★ 与 `local-float-ptr`(0xd) 配对读：**global** 一侧是 7、**local** 一侧是 0xd。
+    case 7: return 'global-float-ptr';
     case 8: return 'global-string-ptr';
     case 9: return 'local-int';
     case 0xa: return 'local-float';
@@ -76,7 +83,7 @@ export function getTypeLabel(type) {
 export function getType(name) {
   const map = {
     'local-int': 9, 'local-ptr': 0xc, 'global-int': 3, 'global-float': 4,
-    'global-string': 5, 'global-ptr': 6, 'global-string-ptr': 8,
+    'global-string': 5, 'global-ptr': 6, 'global-float-ptr': 7, 'global-string-ptr': 8,
     'local-float': 0xa, 'local-string': 0xb, 'local-string-ptr': 0xe,
     float: 1, 'local-float-ptr': 0xd,
   };

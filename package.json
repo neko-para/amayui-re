@@ -14,11 +14,15 @@
     "test:assets": "node tools/test-run.mjs --env assets",
     "test:all": "node tools/test-run.mjs --all",
     "test:list": "node tools/test-run.mjs --list",
-    "tools": "node tools/cli.mjs"
+    "tools": "node tools/cli.mjs",
+    "test:mutation": "node tools/mutate-check.mjs"
   },
   "pnpm": {
     "overrides": {
       "markdown-it>entities": "^7.0.1"
     }
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

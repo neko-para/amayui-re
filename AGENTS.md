@@ -43,9 +43,13 @@
 
 ## 3. 语言与代码口径
 
-* **TypeScript 只用在"自带工具链的 app"上**：`apps/emulator`（M4 才进 workspaces）与
-  `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts` 由 **Node v24 原生 type stripping**
-  直接跑 ⇒ 服务端**无构建**，只用可擦除语法）。这是本条规律的**全部例外**，新增一个 app 就写在这里。
+* **TypeScript 只用在"自带工具链的 app"上**：`apps/emulator` 与
+  `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）。这是本条规律的**全部例外**，新增一个 app 就写在这里。
+  ★ **`apps/emulator` 现在也没有构建步骤**：它的 `.ts`（`src/model/*.ts`）由 **Node v24 原生 type stripping** 直接跑，
+  守卫（`tools/test/*.mjs`）就 `import '../../apps/emulator/src/model/pools.ts'` —— 实测 `node` 直接从 `.mjs` import `.ts` 可用。
+  ⇒ 写法约束：**只许可擦除语法**（类型标注 / `interface` / `type` / `import type`），
+  ❌ 不用 `enum` / `namespace` / 构造器参数属性 / 装饰器（它们要**代码生成**，会逼出构建步骤）。
+  ★ 它**尚未进 workspaces**（按批次 M4 才进）⇒ 现在**没有** `apps/emulator/package.json`，它作为**路径**被引用。
 * 仓库内**其余一切 JS** —— `packages/*`、`tools/*`、守卫与测试 —— **一律直接写 `.mjs`**。
   根目录**不引入** `typescript` / `tsc` / `tsconfig`，因此没有构建步骤，`node` 直接跑。
 * 包管理**用 pnpm**（`pnpm-workspace.yaml` 是 workspace 真源）。禁止混用 `npm install` 生成 `package-lock.json`。
@@ -97,7 +101,14 @@ pnpm test                       # ★ 测试（默认只跑 @env pure；分级�
 pnpm test:list                  # 看分级集合与每个文件的声明（先看这个）
 pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
+pnpm test:mutation              # ★ **守卫自检**：改坏一处关键常量 ⇒ 确认对应守卫**当场红**（红得有意义）
 ```
+
+★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`
+的断言都能"一直绿"。它按 `tools/mutate-check.mjs` 里的清单，对每个关键常量施加**一处已知破坏**，
+要求指定守卫**退出码非 0**。⇒ 加新守卫时**顺手往清单里加一条**，否则"它会红"只是个声称。
+（清单现状 7 条：DEC/ENC 移位量 · 帧步长 · `local_float` 基址 · 指令字节长度 · 零出现指令的计数 · `argc`。）
+★ 它动的是**工作树里的文件**：施加前原文进内存、`finally` 里写回并**比对全文**；不一致就**立刻中止**（避免半坏的工作树）。
 
 ### 测试分级（★ 判据写在文件首行的 pragma 里，**不建清单文件**）
 
@@ -152,8 +163,11 @@ pnpm test:all                   # 全部（含 @env external：旧仓/真机）
    **不得再进 accepted**，但**不删除**。
 4. 冲突**显式化**为产物，不允许静默改写已有结论。
 5. **不需要人工审核全部历史结论** —— 靠上面的机械失效暴露问题，而不是靠人逐条看。
-6. 知识条目在 **K3 通过前不得进新仓台账**；`kind=knowledge-source` 的素材在清单里只能 `external-only` / `deferred`
-   （守卫 #8 会红）。
+6. **知识条目进新仓台账的闸门是"每条都绑可再校验观察"，不是"整本必须空"**。
+   ★ **2026-10 变更**（原口径：K3 通过前一律不许写）：批 R1 的"重写核验"工作被显式当作 **K3 的写入者** ——
+   它做的是"按准入门核验后登记"，不是"把旧仓条目倒进来"。判据落在守卫里
+   （`tools/test/ledger.test.mjs` 的"写入闸门"）：**每条**的锚都必须能解析、域要么留空（待定域）要么追得到词表。
+   `kind=knowledge-source` 的素材在清单里仍然只能 `external-only` / `deferred`（守卫 #8 会红）。
 
 ## 7. agent 基建怎么注册（**环境级动作**）
 

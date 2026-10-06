@@ -70,7 +70,8 @@ const HELP = `tools/ledger.mjs —— 知识台账（append-only 文本真源 + 
   node tools/ledger.mjs --rebuild-db [--write] [--db <路径>]        # 缺省 dry-run；判据 = 逻辑内容两次相同
   node tools/ledger.mjs --compact [--write]                        # 分片归位 + 同 id 去重（不删任何结论）
 
-★ 分类轴：\`system\`（**必填字段**，不是标签）＝这条结论关于引擎的哪一块；
+★ 分类轴：\`system\`（**可缺省**，不是标签）＝这条结论关于引擎的哪一块；
+  不写 ⇒ 进"待定域"名单（不报红，\`--report\` 单列计数）；写了就必须能追到词表（见 \`--describe\`）。
   **域词汇表 = 台账里 \`kind=domain\` 的记录**（\`disposition\` ∈ added/renamed/merged/split）——
   改名/归并靠 \`aliases\` 让历史值**仍可解析**（历史行一个字节都不用动）；
   **拆分**别名救不了 ⇒ 必须追加更正记录（不许靠词表悄悄改结论的含义）。
@@ -220,6 +221,8 @@ function cmdReport(args, proj, ledgerDir) {
   L.push(`有效状态    ${EFFECTIVE.map((s) => `${s}=${proj.byEffective[s] ?? 0}`).join(' · ')}`);
   L.push(`域          ${proj.vocab.canonical.size} 个当前域${proj.vocab.aliasOf.size ? ` · ${[...proj.vocab.aliasOf].filter(([a, b]) => a !== b).length} 条别名` : ''}${proj.vocab.splits.size ? ` · ${proj.vocab.splits.size} 个被拆分` : ''}　⇒ \`pnpm tools ledger domains\``);
   L.push(`域分布      ${Object.entries(proj.bySystem).map(([k, v]) => `${k}=${v}`).join(' · ') || '（无）'}`);
+  // ★ "待定域"单列一行：它不是错误，但**必须看得见**（缺省 ≠ 失效，可见性不能少）
+  L.push(`待定域      ${proj.pendingDomain} 条没填 \`system\`${proj.pendingDomain ? '　⇒ 渐进填域：确定一块就补一块（`--system`），词表按使用长出来' : ''}`);
   L.push(`锚点        ${anchors.length} 条　可解析=${ok} · 参考仓不在场=${warn} · **红**=${err}`);
   L.push(`冲突        ${proj.conflicts.length} 组${proj.conflicts.length ? '　⇒ 见 `--validate` 的 #5' : ''}`);
   L.push('');
@@ -250,6 +253,11 @@ function cmdDomains(args, proj, ledgerDir) {
   const L = [];
   L.push(`域记录      ${v.records.length} 条（kind=domain）`);
   L.push(`当前域      ${v.canonical.size} 个${v.canonical.size ? `　${[...v.canonical].sort().join(' · ')}` : '　（空词表 —— 见下）'}`);
+  // ★ 待定域：没填 `system` 的记录数（可缺省 ≠ 看不见）
+  const pending = proj.entries.filter((e) => e.system.via === 'absent').length;
+  if (pending) L.push(`待定域      ${pending} 条记录没填 \`system\`（渐进填域：确定一块就补一块）`);
+  if (v.splits.size) L.push(`被拆分      ${v.splits.size} 条（别名不覆盖 ⇒ 必须走追加更正记录）`);
+  L.push('');
   if (v.aliasOf.size) L.push(`别名        ${v.aliasOf.size} 条（历史值 → 当前域，单向）`);
   for (const [a, c] of [...v.aliasOf].sort()) if (a !== c) L.push(`              ${a} → ${c}`);
   if (v.splits.size) {
@@ -258,8 +266,14 @@ function cmdDomains(args, proj, ledgerDir) {
   }
   for (const x of v.problems) L.push(`词表歧义    ${x.reason}`);
 
+  /**
+   * ★ 待定域：没填 `system` 的记录数（可缺省 ≠ 看不见）。
+   *   它放在**逐值表之后** —— 因为"没填"不是"某个值"，混进逐值表会被读成"待裁决"。
+   */
+  const pendingDomains = proj.entries.filter((e) => e.system.via === 'absent').length;
+
   // 逐值解析表：把"记录里出现过的值"与"词表登记过的历史值"都列出来
-  const values = new Set([...all.map((e) => e.system.value), ...v.aliasOf.keys(), ...v.splits.keys()]);
+  const values = new Set([...all.map((e) => e.system.value).filter(Boolean), ...v.aliasOf.keys(), ...v.splits.keys()]);
   L.push('');
   if (v.canonical.size === 0 && v.records.length === 0) {
     L.push('（词表是空的 —— 这是**有意为之**：归一到哪些域是 K1 的活，本节点只落机制）');
@@ -268,7 +282,9 @@ function cmdDomains(args, proj, ledgerDir) {
     L.push('      --disposition added --claim <一句话> --anchor <json> --write');
     L.push('  ★ 而且它**必须带锚**（"域怎么分"是知识，不是配置）。');
   } else if (values.size === 0) {
-    L.push('（还没有任何记录引用过域名 ⇒ 没有可解析的值）');
+    L.push(pendingDomains
+      ? `（${pendingDomains} 条记录都**没填** \`system\` ⇒ 没有可解析的值；这是合法的中间态，不是错误）`
+      : '（还没有任何记录引用过域名 ⇒ 没有可解析的值）');
   } else {
     L.push(`${'值'.padEnd(24)} ${'有效域'.padEnd(20)} 依据`);
     for (const value of [...values].sort()) {
@@ -276,6 +292,7 @@ function cmdDomains(args, proj, ledgerDir) {
       const canon = r.via === 'split' ? `(已拆分：${(r.splitInto ?? []).join('/')})` : r.canonical ?? '(未在词表中：待裁决)';
       L.push(`${value.padEnd(24)} ${canon.padEnd(20)} ${r.via}${r.chain.length > 1 ? `　链：${r.chain.join(' → ')}` : ''}`);
     }
+    if (pendingDomains) L.push(`（另有 ${pendingDomains} 条没填 \`system\` —— 它们没有"值"可列，见上面的"待定域"）`);
   }
   process.stdout.write(`${L.join('\n')}\n`);
   return 0;
@@ -346,7 +363,9 @@ function cmdAdd(args, proj, ledgerDir, opts) {
     id: id.startsWith(ID_PREFIX) ? id.slice(ID_PREFIX.length) : id,
     at: args.at ?? isoNow(now),
     kind: args.kind,
-    // ★ 分类轴：`--system` 必填（词表为空时也不能省 —— 见 describe 的"分类轴"一节）
+    // ★ 分类轴：`--system` **可缺省**（渐进填域）—— 不写 ⇒ 进"待定域"名单，不报红；
+  //   写了就必须非空无空白、且能沿别名链追到词表（见 describe 的"分类轴"一节）。
+  //   ⚠ 这句曾经写成"必填"，与 `--describe` 的 `system ⬜ 可缺省` **自相矛盾**（独立评审抓到的）。
     system: args.system,
     subject: args.subject,
     claim: args.claim,

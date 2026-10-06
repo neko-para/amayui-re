@@ -64,6 +64,9 @@ export const DISPOSITIONS = ['added', 'renamed', 'merged', 'split'];
 /** `domain` 记录专属字段（别的 kind 上出现即错 —— 同"缺陷专属字段"的纪律） */
 export const DOMAIN_ONLY = ['disposition', 'aliases', 'splitInto'];
 
+/** 域名的合法形态：非空、无空白（`system` 写了就必须过这一关；不写则进"待定域"） */
+export const isDomainToken = (v) => typeof v === 'string' && v.trim() !== '' && !/\s/.test(v);
+
 export const ID_PREFIX = 'KN-';
 export const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 /** 一行一条；一个 kind 一月一个文件 */
@@ -101,7 +104,7 @@ export const OPERATIONS = [
 
 /** 不变量标题（`validate` 与 `describe` 共用这一份） */
 export const CHECK_TITLES = new Map([
-  [1, '形态：记录 schema 合法（ULID / ISO 时刻 / kind / **system** / subject / claim / status / 锚点非空）、' +
+  [1, '形态：记录 schema 合法（ULID / ISO 时刻 / kind / **system（可缺省，写了必须无空白）** / subject / claim / status / 锚点非空）、' +
     '域专属字段只出现在 `kind=domain` 上、同文件内 id 不重复'],
   [2, '追加序：每条记录的 `at` 与文件名月份自洽；文件内 ULID **严格递增**（只许追加，不许插中间）'],
   [3, '锚点：形态合法、`repo` 合法且**不越出对应仓库根**；`self` 锚必须落在**本仓已跟踪**的文件上'],
@@ -109,8 +112,8 @@ export const CHECK_TITLES = new Map([
     '`reference` 锚在只读参考仓不在场时只 warn'],
   [5, '引线与冲突：`replaces` 必须指向**已存在**的记录且不成环；同一 `kind+subject` 上多个不同 claim ⇒ **显式冲突**'],
   [6, '派生 DB：删掉本地 DB 后一条命令能重建，且**同输入同逻辑内容**'],
-  [7, '分类轴：`system` 必填且无空白；**沿别名链能追到当前域词汇表**（追不到 ⇒ 待裁决，点名但不静默过）；' +
-    '被 `disposition=split` 拆过的值**不许当别名放过**（必须走追加更正记录的数据迁移）；词表自身无歧义'],
+  [7, '分类轴：`system` **写了就必须**无空白、且**沿别名链能追到当前域词汇表**（追不到 ⇒ 待裁决，点名但不静默过）；' +
+    '**没写** ⇒ 进"待定域"名单（不报红）；被 `disposition=split` 拆过的值**不许当别名放过**（必须走追加更正记录的数据迁移）；词表自身无歧义'],
 ]);
 
 // ─────────────────────────────────────────────────────────── ULID / 时间
@@ -174,11 +177,13 @@ export function serializeRecord(r) {
     id: r.id,
     at: r.at,
     kind: r.kind,
-    system: r.system,
-    subject: r.subject,
-    claim: r.claim,
-    anchor: r.anchor.map((a) => (a.type === 'bin' ? orderBin(a) : orderGuard(a))),
   };
+  // ★ `system` 可缺省：**没写就不要写进盘**（`undefined` 会让 JSON.stringify 直接丢掉这个键 ——
+  //   但显式判一下更好读，也免得将来有人给个 `''`）
+  if (isDomainToken(r.system)) out.system = r.system;
+  out.subject = r.subject;
+  out.claim = r.claim;
+  out.anchor = r.anchor.map((a) => (a.type === 'bin' ? orderBin(a) : orderGuard(a)));
   if (r.status !== undefined) out.status = r.status;
   if (r.replaces !== undefined) out.replaces = r.replaces;
   // ★ 域专属字段（只在 kind=domain 上；其它 kind 出现即由不变量 #1 报错，这里只管序列化顺序）
@@ -260,27 +265,54 @@ export function appendRecord(ledgerDir, r) {
 // ─────────────────────────────────────────────────────────── 锚点解析
 
 /**
- * PE 里 `EA → 文件偏移`（★ EA 是虚拟地址，**不能**直接当偏移读）。
- * 只做最小实现：找 `PE\0\0` → `NumberOfSections` → 遍历节表，用 `VirtualAddress/SizeOfRawData` 映射。
+ * PE 里 `EA → 文件偏移`（★ EA 是**虚拟地址 VA**，既不能直接当偏移、**也不能直接当 RVA**）。
+ *
+ * ★ **实测踩过（由独立评审复现）**：节表里的 `VirtualAddress` 是 **RVA**，而锚点里的 EA 是
+ * IDA 报的 **VA**（`Imagebase 400000` + RVA）。第一版拿 `ea` 直接和 RVA 比 ⇒ 对**任何真实镜像恒 null**，
+ * 报出"EA 不在任何 PE 节里（或不是 PE）" —— 那句话**看起来像正常的地址错误**，实际是口径错。
+ * 单元测试没红是因为合成 PE 的 ImageBase 是 0（VA ≡ RVA）。
+ *
+ * 口径：`rva = ea - ImageBase`；`ImageBase === 0` 时按"给的就是 RVA"兜底（合成夹具与 PE32+ 的稳健处理）。
  * @returns {number|null} 映射不到（不在任何节里）返回 null
  */
 export function peOffsetOf(buf, ea) {
+  return peMap(buf, ea)?.offset ?? null;
+}
+
+/**
+ * 同上的完整版：连**映射的依据**一起给出来（诊断用 —— "为什么这个 EA 映射不到"要有话说）。
+ * @returns {{rva:number, imageBase:number, section:string, offset:number}|null}
+ */
+export function peMap(buf, ea) {
   if (buf.length < 0x40 || buf.toString('latin1', 0, 2) !== 'MZ') return null;
   const peAt = buf.readUInt32LE(0x3c);
   if (peAt + 24 > buf.length || buf.toString('latin1', peAt, peAt + 4) !== 'PE\0\0') return null;
   const nSections = buf.readUInt16LE(peAt + 6);
   const optSize = buf.readUInt16LE(peAt + 20);
+  const imageBase = peImageBase(buf, peAt);
+  const rva = imageBase === 0 ? ea >>> 0 : (ea >>> 0) - imageBase;
   const table = peAt + 24 + optSize;
   for (let i = 0; i < nSections; i += 1) {
     const s = table + i * 40;
     if (s + 40 > buf.length) return null;
-    const va = buf.readUInt32LE(s + 12);
+    const name = buf.toString('latin1', s, s + 8).replace(/\0+$/, '');
+    const va = buf.readUInt32LE(s + 12); // ← RVA
     const rawSize = buf.readUInt32LE(s + 16);
     const rawPtr = buf.readUInt32LE(s + 20);
     if (va === 0) continue;
-    if (ea >= va && ea < va + Math.max(rawSize, 1)) return rawPtr + (ea - va);
+    if (rva >= va && rva < va + Math.max(rawSize, 1)) {
+      return { rva, imageBase, section: name, offset: rawPtr + (rva - va) };
+    }
   }
   return null;
+}
+
+/** PE 的 ImageBase：PE32（0x10B）在可选头 +28 是 u32；PE32+（0x20B）在 +24 是 u64 */
+export function peImageBase(buf, peAt) {
+  const magic = buf.readUInt16LE(peAt + 24);
+  if (magic === 0x20b) return Number(buf.readBigUInt64LE(peAt + 24 + 24));
+  if (magic === 0x10b) return buf.readUInt32LE(peAt + 24 + 28);
+  return 0;
 }
 
 /** 锚点的人读形态（日志 / 报告里一律用它，别各写各的） */
@@ -422,11 +454,15 @@ export function buildVocabulary(records) {
 
 /**
  * 把一个 `system` 值解析到**当前词表**里的域名。
- * @returns {{value:string, canonical:string|null, via:'canonical'|'alias'|'split'|'unknown', chain:string[], splitInto?:string[]}}
- *   * `unknown` —— 词表里既不是当前值也不是别名 ⇒ **待裁决**（不变量会点名，但**不许静默过**）
+ * @returns {{value:string, canonical:string|null, via:'canonical'|'alias'|'split'|'unknown'|'absent', chain:string[], splitInto?:string[]}}
+ *   * `absent` —— **根本没写 `system`** ⇒ 进"待定域"名单（允许，但**看得见**；不是错误）
+ *   * `unknown` —— 词表里既不是当前值也不是别名 ⇒ **待裁决**（不变量 #7 会点名，但**不许静默过**）
  *   * `split` —— 它被拆过 ⇒ **别名不覆盖**，必须走"追加更正记录"的数据迁移；解析**到此为止**（不许猜）
  */
 export function resolveDomain(value, vocab) {
+  if (value === undefined || value === null || value === '') {
+    return { value: '', canonical: null, via: 'absent', chain: [] };
+  }
   const chain = [value];
   if (vocab.splits.has(value)) {
     return { value, canonical: null, via: 'split', chain, splitInto: vocab.splits.get(value) };
@@ -453,13 +489,24 @@ export function resolveDomain(value, vocab) {
  */
 export function project(records, opts = {}) {
   const vocab = buildVocabulary(records);
+  // ★ "撤回"有两种表达：自己 `status: retracted`，或**被别条 `replaces` 指向**。
+  //   ⚠ 实测踩过：这两个集合原先只在**冲突分组**里被用到（把被撤回的排除出去），
+  //   于是"被 replaces 指向"的那条 `effective` **仍然是 accepted/proposed** ——
+  //   代码注释写着"它不再算数"，但投影里根本没体现。现在它一并在**状态投影**里生效。
+  const selfRetracted = new Set(records.filter((r) => r.status === 'retracted').map((r) => r.id));
+  const replacedIds = new Set(records.filter((r) => typeof r.replaces === 'string').map((r) => r.replaces));
   const entries = records.map((r) => {
     const anchors = (r.anchor ?? []).map((a) => ({ anchor: a, ...resolveAnchor(a, opts) }));
     const hardFail = anchors.filter((x) => x.kind === 'error');
     let effective = r.status ?? 'proposed';
-    if (effective === 'accepted' && hardFail.length > 0) effective = 'stale';
-    // 锚点一条都没有可用的（含"参考仓不在场"）⇒ 不许再算 accepted
-    if (effective === 'accepted' && anchors.every((x) => !x.ok)) effective = 'stale';
+    if (replacedIds.has(r.id) || selfRetracted.has(r.id)) {
+      // ★ 被更正记录取代（或自己声明撤回）⇒ 不再算数；**但不删除**（历史留在日志里）
+      effective = 'retracted';
+    } else {
+      if (effective === 'accepted' && hardFail.length > 0) effective = 'stale';
+      // 锚点一条都没有可用的（含"参考仓不在场"）⇒ 不许再算 accepted
+      if (effective === 'accepted' && anchors.every((x) => !x.ok)) effective = 'stale';
+    }
     // ★ 分类轴：值追不到当前词表 ⇒ 这条记录**待裁决**（不是 stale —— stale 说的是"观察失效"）
     const systemValue = typeof r.system === 'string' ? r.system : '';
     const system = resolveDomain(systemValue, vocab);
@@ -467,10 +514,8 @@ export function project(records, opts = {}) {
   });
 
   // 冲突：同 kind+subject 上**多个不同 claim** ⇒ 显式化
-  //   ★ "撤回"有两种表达：自己 `status: retracted`，或**被别条 `replaces` 指向**。
-  //     被指向的那条不该再跟别人冲突 —— 撤回的语义就是"它不再算数"。
+  //   ★ 被撤回/被取代的那条**不该再跟别人冲突**
   const retractedIds = new Set(entries.filter((e) => e.effective === 'retracted').map((e) => e.id));
-  for (const e of entries) if (typeof e.replaces === 'string') retractedIds.add(e.replaces);
   const groups = new Map();
   for (const e of entries) {
     if (retractedIds.has(e.id)) continue;
@@ -501,15 +546,22 @@ export function project(records, opts = {}) {
   for (const s of EFFECTIVE) byEffective[s] = 0;
   for (const e of entries) byEffective[e.effective] = (byEffective[e.effective] ?? 0) + 1;
 
-  // 分类轴：按当前域名统计（`unknown` / `split` 单列 —— 它们不是"某个域"）
+  // 分类轴：按当前域名统计；`待定域`（没写 system）/ `split` / `unknown` 各自单列
   const bySystem = {};
+  let pendingDomain = 0;
   for (const e of entries) {
-    const k = e.system.via === 'canonical' || e.system.via === 'alias' ? e.system.canonical
-      : e.system.via === 'split' ? '(已被拆分：待数据迁移)'
+    const via = e.system.via;
+    if (via === 'absent') {
+      pendingDomain += 1;
+      bySystem['(待定域：尚未填 system)'] = (bySystem['(待定域：尚未填 system)'] ?? 0) + 1;
+      continue;
+    }
+    const k = via === 'canonical' || via === 'alias' ? e.system.canonical
+      : via === 'split' ? '(已被拆分：待数据迁移)'
         : '(未在词表中：待裁决)';
     bySystem[k] = (bySystem[k] ?? 0) + 1;
   }
-  return { entries, conflicts, byEffective, bySystem, vocab };
+  return { entries, conflicts, byEffective, bySystem, pendingDomain, vocab };
 }
 
 // ─────────────────────────────────────────────────────────── 不变量
@@ -556,9 +608,11 @@ export function validateAll(records, opts = {}) {
       if (typeof r.subject !== 'string' || r.subject.trim() === '' || /\s/.test(r.subject)) {
         p.push(bad(r._file, r._line, `${at}: subject 必须是非空、**无空白**的稳定键（例 Engine+0x5D880；别用 name —— 旧仓实测 9 组同名跨 scope）`));
       }
-      // ★ 分类轴：`system` 必填（机制在场；**值**有没有进词表由 #7 判）
-      if (typeof r.system !== 'string' || r.system.trim() === '' || /\s/.test(r.system)) {
-        p.push(bad(r._file, r._line, `${at}: system 必须是非空、**无空白**的域名（这条结论关于引擎的哪一块；词表见 \`pnpm tools ledger domains\`）`));
+      // ★ 分类轴：`system` 可缺省（渐进填域），但**写了就必须合规**。
+      //   缺省 = 进"待定域"名单（#7 单列，**不报红**）：内容可以先落，域后补。
+      //   这与"锚可以指向只读参考仓"同源 —— **缺失 ≠ 失效，但要看得见**。
+      if (r.system !== undefined && !isDomainToken(r.system)) {
+        p.push(bad(r._file, r._line, `${at}: system 要么不写（⇒ 进"待定域"名单），要么是非空、**无空白**的域名（词表见 \`pnpm tools ledger domains\`）`));
       }
       // ★ 域专属字段只许出现在 `kind=domain` 上（同"缺陷专属字段"的纪律）
       for (const k of DOMAIN_ONLY) {
@@ -636,10 +690,20 @@ export function validateAll(records, opts = {}) {
     add(2, p);
   }
 
-  // 3 锚点形态 / 不越界 / self 必须已跟踪
+  /**
+   * 3 锚点形态 / 不越界 / self 必须已跟踪
+   * ★ **只判"在场"的记录**（`effective !== 'retracted'`）—— 与 #4 同一口径：
+   *   被 `replaces` 取代的历史行**不再算数**，它的锚可能指向一条后来被改名/删掉的用例，
+   *   那是**历史事实**而不是当下的错误。否则"更正一条记录"会连带要求"顺带修好历史行的死锚"，
+   *   而那正好会逼人**就地改历史**（本仓禁）。
+   *   ⚠ 实测踩过：批 R1 改名了几条守卫用例名 ⇒ 3 条已被取代的旧记录留下死锚 ⇒ #3 红，
+   *   而它们的"取代者"完全健康。放宽到"只看在场"之后，#3 仍然能抓到**真**错误
+   *   （有人新写一条记录的锚指向不存在的文件/非法 path/悬空用例）。
+   */
   {
     const p = [];
     for (const e of proj.entries) {
+      if (e.effective === 'retracted') continue;
       const at = `${path.basename(e._file)}:${e._line}`;
       for (const { anchor: a, kind, why } of e.anchors) {
         if (!ANCHOR_TYPES.includes(a.type)) { p.push(bad(e._file, e._line, `${at}: 锚点 type 非法 ${JSON.stringify(a.type)}`)); continue; }
@@ -673,6 +737,10 @@ export function validateAll(records, opts = {}) {
     const p = [];
     for (const e of proj.entries) {
       if (e.status !== 'accepted' || !recheckStatus) continue;
+      // ★ 已被 `replaces` 取代（或被自己撤回）的历史行**不再算数**：它的锚可能指向后来改名的用例，
+      //   那是历史事实。要求"顺带修好历史行的死锚"会逼人**就地改历史**（本仓禁）。
+      //   ⇒ 与 #3 同一口径：只判**在场**的记录。
+      if (e.effective === 'retracted') continue;
       const at = `${path.basename(e._file)}:${e._line}`;
       const selfs = e.anchors.filter((x) => x.anchor.repo === 'self');
       if (selfs.length === 0) {
@@ -738,6 +806,7 @@ export function validateAll(records, opts = {}) {
       const sv = e.system;
       const at = `${path.basename(e._file)}:${e._line}`;
       if (replacedIds.has(e.id)) continue;
+      if (sv.via === 'absent') continue; // ★ 没填域 = 待定，不是错（`report` 会单列计数）
       if (sv.via === 'unknown') {
         p.push(
           bad(
@@ -962,7 +1031,7 @@ export function describe() {
     ['id', '✅', `${ID_PREFIX}<26 字符 ULID>`, '身份。★ **字典序 == 时间序** ⇒ 追加序直接由它决定（不依赖文件位置）；同文件内必须**严格递增**'],
     ['at', '✅', 'ISO-8601 毫秒 UTC', '时刻。★ 必须与 ULID 推出来的月份一致（分片：按 kind + 月）'],
     ['kind', '✅', KINDS.join(' | '), '★ **台账自己的机制分类**（这条记录是哪一类事件）：claim=一条语义结论 · observation=一条观察 · note=杂项 · **domain=域词汇表的一条处置声明**。必须等于所在目录名。别与 `system` 混'],
-    ['system', '✅', '无空白的域名', '★ **知识本身的分类轴**：这条结论关于引擎的哪一块（音频 / 渲染 / …）。**必填**，且必须**沿别名链追到当前域词汇表**（追不到 ⇒ validate #7 点名，不静默放过）。★ 分类是**字段不是标签** —— 判据见 `docs/00-origin/decisions.md` §8.1'],
+    ['system', '⬜', '无空白的域名', '★ **知识本身的分类轴**：这条结论关于引擎的哪一块（音频 / 渲染 / …）。**可缺省**（渐进填域：内容可以先落、域后补），但**写了就必须沿别名链追到当前域词汇表**（追不到 ⇒ #7 点名）。缺省 = 进"待定域"名单（`report` 单列计数，**不报红**）。★ 分类是**字段不是标签** —— 判据见 `docs/00-origin/decisions.md` §8.1'],
     ['subject', '✅', '无空白的稳定键', '这条是关于**什么**的。★ 键必须是 `scope+offset` 这类稳定身份，**绝不能是 name** —— 旧仓 `fields.json` 实测 9 组同名跨 scope、2 组同 `scope+offset` 双 `confirmed`'],
     ['claim', '✅', '非空 string', '断言本身（人读的一句话）'],
     ['anchor', '✅', '非空数组（≤ 无上限）', '★ **每条结论至少绑一条可再校验的观察**；形态见下表'],
@@ -1019,7 +1088,8 @@ export function describe() {
         '**改名 / 归并**（含义没变）⇒ 记 `aliases` ⇒ 别名可解析，**历史行一个字节都不用动**',
         '**拆分 / 重定义**（含义变了）⇒ **别名救不了**：必须按台账纪律**追加一条更正记录**（`replaces` 指向旧的）把值落到具体的新域',
         '★ **词表不许用来悄悄改结论的含义** —— 含义变了就是一条新知识，要过准入门、要带锚',
-        '`system` 值既不是当前域、也不是任何已登记历史值的别名 ⇒ **待裁决**（validate #7 点名，不静默放过）',
+        '**`system` 可缺省**（渐进填域）⇒ 进"待定域"名单，`report` 单列计数，**不报红**：内容可以先落、域后补',
+        '`system` 写了但既不是当前域、也不是任何已登记历史值的别名 ⇒ **待裁决**（#7 点名，不静默放过）',
         '域记录本身也**必须带锚**（"域怎么分"是知识，不是配置）—— 由 #3/#4 一起管',
       ],
       query: [

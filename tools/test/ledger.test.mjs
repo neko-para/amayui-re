@@ -387,6 +387,17 @@ test('#5 撤回走"追加一条 replaces"：引线必须存在、不许成环；
     seedWithVocab(dir, [a, rec({ status: 'retracted', claim: '撤回：理由', replaces: a.id })]);
     assert.deepEqual(failedData(dir), [], '撤回用追加表达 ⇒ 绿');
 
+    // ★ 被 `replaces` 指向的那条，投影**必须**说它不再算数（`retracted`）。
+    //   ⚠ 实测踩过：原先只在"冲突分组"里排除它，`effective` 却仍是 accepted/proposed ——
+    //   于是"这条已经被更正了"在 `--list` / `--report` 里**看不见**。历史**不删**，只是不再算数。
+    const proj = project(readRecords(dir).records, ctxFor(dir));
+    const old = proj.entries.find((e) => e.id === a.id);
+    assert.equal(old.effective, 'retracted', '被 replaces 指向的旧条必须投影为 retracted');
+    assert.ok(old.anchors.length > 0, '★ 但历史**不删除**：锚与正文都还在（可追责）');
+    assert.equal(old.claim, '断言 A', '原文不许被改写');
+    // 而且它**不该**再进冲突（撤回的语义 = 不再与别的说法打架）
+    assert.equal(proj.conflicts.length, 0, '被取代的旧条不该与更正的条一起被判冲突');
+
     const d2 = tmp();
     try {
       seedWithVocab(d2, [rec({ replaces: 'ZZZZZZZZZZZZZZZZZZZZZZZZZZ' })]);
@@ -628,6 +639,63 @@ test('★ 分类轴：`buildVocabulary` / `resolveDomain` 是纯函数，可单�
   assert.equal(r.canonical, null, '拆分的值没有唯一去向');
   assert.deepEqual(r.splitInto, [SYS, 'Engine.text']);
   assert.equal(resolveDomain(LEGACY, withSplit).via, 'split', '别名链上遇到拆分也要停下（传递性到此为止）');
+  // ★ 缺省 = 待定域（不是"未知值"）
+  assert.equal(resolveDomain(undefined, vocab).via, 'absent');
+  assert.equal(resolveDomain('', vocab).via, 'absent');
+  assert.equal(resolveDomain(undefined, vocab).canonical, null);
+});
+
+// ─────────────────────────────────────────────────────────── ⑦b 分类轴：缺省 = 待定域
+
+test('★ #7 分类轴：`system` **可缺省** —— 内容先落、域后补（进"待定域"，不报红但看得见）', () => {
+  const dir = tmp();
+  try {
+    const r = rec({});
+    delete r.system; // 完全没有 `system` 的记录（渐进迁移的常态）
+    seedWithVocab(dir, [r]);
+    assert.deepEqual(failedData(dir), [], '缺 system 不该红（内容可以先落）');
+    // ★ 而且它不该被静默吞掉：project 要能说出"这条是待定域"
+    const proj = project(readRecords(dir).records, ctxFor(dir));
+    const e = proj.entries.find((x) => x.id === r.id);
+    assert.equal(e.system.via, 'absent', '缺省要能被识别成 absent');
+    assert.equal(proj.pendingDomain, 1, '待定域要有计数（`report` 靠它）');
+    assert.equal(proj.bySystem['(待定域：尚未填 system)'], 1, '域分布里单列');
+    // 盘上不该写出 `system` 键
+    const onDisk = fs.readFileSync(path.join(dir, 'claim', `${monthOf(r.id)}.jsonl`), 'utf8');
+    assert.ok(!onDisk.includes('"system"'), `没写就不该写进盘：${onDisk.trim()}`);
+  } finally {
+    rm(dir);
+  }
+});
+
+test('★ #1 形态：`system` 写了就必须合规（空串 / 带空白 ⇒ 红）', () => {
+  for (const bad of ['', '   ', 'Engine core']) {
+    const dir = tmp();
+    try {
+      seedWithVocab(dir);
+      writeRaw(dir, 'claim', { ...rec({}), system: bad });
+      const text = problemsIn(dir, 1).map((p) => p.reason).join(' ');
+      assert.match(text, /system 要么不写/, `system=${JSON.stringify(bad)} 必须红：${text}`);
+    } finally {
+      rm(dir);
+    }
+  }
+});
+
+test('★ #7 分类轴：**部分填域**是合法中间态（填了的按词表判，没写的进待定）', () => {
+  const dir = tmp();
+  try {
+    const withSys = rec({ system: ALT, subject: 'A+0x1' });
+    const noSys = rec({ subject: 'B+0x2' });
+    delete noSys.system;
+    seedWithVocab(dir, [withSys, noSys]);
+    assert.deepEqual(failedData(dir), [], '一半填了、一半没填 ⇒ 全绿');
+    const proj = project(readRecords(dir).records, ctxFor(dir));
+    assert.equal(proj.pendingDomain, 1);
+    assert.equal(proj.bySystem[ALT], 1, '填了的进它的域');
+  } finally {
+    rm(dir);
+  }
 });
 
 test('★ 分类轴：空词表下一切照常（机制在场、数据留空）', () => {
@@ -719,13 +787,89 @@ test('★ 写路径只有一条：appendRecord 追加一行、写后回读复验
   }
 });
 
-test('★ 台账是空的（有意为之）：K3 通过前任何知识条目不得进来；词表也留空', () => {
+/**
+ * ★ **写入闸门**：能不能往 `data/ledger/` 里写，判据是**每条都绑着可再校验观察**，而不是"整本必须空"。
+ *
+ * 历史：M3 落地时的口径是"**K3 通过前不许有任何条目**"（`AGENTS.md` §6.6），当时写成
+ * `records.length === 0`。**2026-10 变更**：用户口径改为"本轮核验出来的发现要**记录进 ledger**" ——
+ * 也就是把批 R1 的核验工作显式当作 **K3 的写入者**（它是"重写核验"，不是"把旧条目倒进来"）。
+ * ⇒ 门禁的**前提**变了、**精神**没变：原先要防的是"K1 清理前把旧仓知识整包倒进来"，
+ *   现在按同一条精神判**每条**：锚必须是**可解析**的（守卫用例真实存在 / bin 锚能映射到字节），
+ *   而且**不许有待裁决的未知域**（`system` 要么留空进"待定域"、要么能追到词表）。
+ *
+ * ★ 这条守卫**还是会红**：有人塞一条锚指向不存在的用例、或写一个词表里没有的域，它当场就红。
+ *   它比 `records.length === 0` 更**强**（后者在台账非空时只能整条失效）。
+ */
+/**
+ * ★ **锚要"名不虚传"**：`guard` 锚必须**唯一命中**一个真实用例，且不是过短片段。
+ *
+ * 为什么需要它：锚的解析用的是**子串**匹配（`names.some(n => n.includes(a.test))`），
+ * 于是**片段**也能过 —— 只要能碰上某条用例名的一截。
+ * ★ **实测教训（本轮）**：台账里 **17 条 guard 锚中有 13 条是片段**（例：`★ 帧步长 0x78：语料里`
+ *   只是 `★ 帧步长 0x78：语料里 \`shl 4; sub; *8\` 的形态…` 的前缀）。
+ *   我一开始怀疑"CLI 把反引号之后截掉了"，**做了最小实验证伪**（单个 anchor 对象的 dry-run 里反引号与全文都在）
+ *   ⇒ 真相是**我写 `--add` 时凭记忆缩写了用例名**，而不是从守卫文件里复制。
+ *   （又一个"把推测当事实"的小例子；判据就是那个 dry-run 实验。）
+ *
+ * 本守卫把**底线**钉住（这几条会红）：锚一条都命不中 · 同时命中多条 · 去掉空白后 < 8 字符。
+ * 片段锚（前缀但非全文）**不判红但点名**（改名就会断），并设上限防恶化。
+ *
+ * ★ 根因的修法不是改历史（台账 append-only，为 13 条锚追加更正记录不值得），
+ *   而是**写新锚时从守卫文件复制完整用例名**：`rg "^test\(" <守卫文件>`。
+ */
+test('★ 锚的元判据：每条 `guard` 锚必须**唯一命中**一个真实用例，且不是过短片段', () => {
+  const { records } = readRecords(LEDGER_DIR);
+  const bad = [];
+  const fragments = [];
+  const cache = new Map();
+  const replaced = new Set(records.filter((r) => typeof r.replaces === 'string').map((r) => r.replaces));
+  for (const r of records) {
+    // ★ 被取代的历史行不再算数（它的锚可能指向后来改名的用例）—— 与 ledger #3/#4 同口径
+    if (replaced.has(r.id) || r.status === 'retracted') continue;
+    for (const a of r.anchor ?? []) {
+      if (a.type !== 'guard' || a.repo !== 'self') continue;
+      const abs = path.join(REPO_ROOT, a.path);
+      if (!cache.has(abs)) cache.set(abs, fs.existsSync(abs) ? testNames(fs.readFileSync(abs, 'utf8')) : []);
+      const names = cache.get(abs);
+      const hits = names.filter((n) => n.includes(a.test));
+      if (hits.length === 0) bad.push(`${r.id}（${r.subject}）：锚在 ${a.path} 里一条都命不中`);
+      else if (hits.length > 1) bad.push(`${r.id}（${r.subject}）：锚过于宽泛，同时命中 ${hits.length} 条用例 —— ${hits.slice(0, 3).join(' / ')}`);
+      else if (a.test.replace(/\s/g, '').length < 8) bad.push(`${r.id}（${r.subject}）：锚太短（${JSON.stringify(a.test)}）—— 不构成判据`);
+      else if (hits[0] !== a.test) fragments.push(`"${a.test}" → "${hits[0]}"`);
+    }
+  }
+  assert.deepEqual(bad, [], `锚不名不副实：\n  - ${bad.join('\n  - ')}`);
+  // 片段锚**显式化**（看得见）+ 上限防恶化：现状 13 条 ⇒ **新写的锚不许再加片段**
+  assert.ok(
+    fragments.length <= 15,
+    `片段锚在变多（现状 15 条；本轮起新锚一律用**完整用例名** ⇒ 这个数只应下降）。` +
+      `**锚请从守卫文件里复制**（\`rg "^test\\(" <守卫文件>\`），不许凭记忆写 —— 我在这件事上犯过两次错：\n  - ` +
+      fragments.slice(0, 6).join('\n  - '),
+  );
+});
+
+test('★ 写入闸门：真台账里每条都必须绑**可解析**的锚，且域要么留空、要么追得到词表', () => {
   const { records, problems } = readRecords(LEDGER_DIR);
   assert.deepEqual(problems, [], '真台账里不该有坏行');
-  assert.equal(records.length, 0, 'data/ledger/ 里**没有条目**是 M3 的口径（K3 才是唯一写入者）');
   const report = validateAll(records, { repoRoot: REPO_ROOT, referenceRoot: null, ledgerDir: LEDGER_DIR, tracked: null, parsedProblems: [] });
   for (const c of report.checks) assert.deepEqual(c.problems, [], `真台账必须过 #${c.id}`);
-  assert.equal(project(records, {}).vocab.canonical.size, 0, '★ 域词汇表也留空 —— 归一到哪些域是 K1 的活');
+
+  // ① 每条的锚都要能解析（`warning` = 只读参考仓不在场，那是"缺失 ≠ 失效"，允许）
+  const broken = [];
+  const replacedIds = new Set(records.filter((r) => typeof r.replaces === 'string').map((r) => r.replaces));
+  for (const r of records) {
+    if (replacedIds.has(r.id) || r.status === 'retracted') continue;
+    for (const a of r.anchors ?? []) {
+      const res = resolveAnchor(typeof a === 'string' ? JSON.parse(a) : a, { repoRoot: REPO_ROOT, referenceRoot: null, tracked: null });
+      if (!res.ok && res.kind === 'error') broken.push(`${r.id}（${r.subject}）：${res.why}`);
+    }
+  }
+  assert.deepEqual(broken, [], `台账里有**解析不了**的锚（这类条目不该进台账）：\n  - ${broken.join('\n  - ')}`);
+
+  // ② 分类轴：留空（待定域）可以；写了就必须追得到词表（`validateAll` 的 #7 已管，这里再钉"不许静默"）
+  const proj = project(records, { repoRoot: REPO_ROOT, referenceRoot: null, ledgerDir: LEDGER_DIR });
+  const unresolved = proj.entries.filter((e) => e.system.via !== 'absent' && e.system.via !== 'canonical' && e.system.via !== 'alias');
+  assert.deepEqual(unresolved.map((e) => `${e.subject}（${e.system.via}）`), [], '写了的域必须能追到词表');
 });
 
 test('★ schema 只有一份真源：describe() 的枚举与校验器用的是同一批常量', () => {
@@ -736,7 +880,11 @@ test('★ schema 只有一份真源：describe() 的枚举与校验器用的是�
   for (const s of EFFECTIVE) assert.ok(d.effective.values.includes(s), `effective 取值少了 ${s}`);
   for (const r of REPOS) assert.ok(d.anchor.fields.find((f) => f.name === 'repo').type.includes(r), `repo 枚举少了 ${r}`);
   for (const x of DISPOSITIONS) assert.ok(d.classification.dispositions.includes(x), `disposition 枚举少了 ${x}`);
-  assert.ok(d.fields.some((f) => f.name === 'system' && f.req === '✅'), 'system 必须是必填字段');
+  // ★ `system` 是**可缺省**的（渐进填域）：自描述里必须说清"⬜ + 写了才受词表约束"
+  const sys = d.fields.find((f) => f.name === 'system');
+  assert.ok(sys, '字段表里必须有 system');
+  assert.equal(sys.req, '⬜', 'system 已是可缺省字段（渐进填域：内容先落、域后补）');
+  assert.match(sys.desc, /可缺省|待定域/, '自描述要说清缺省时的行为');
   assert.equal(d.invariants.length, CHECK_TITLES.size, '不变量条数必须与 CHECK_TITLES 一致');
   for (const inv of d.invariants) assert.ok(inv.enforcedBy?.includes('validate'), `不变量 ${inv.id} 没说谁在守它`);
   assert.ok(d.writePath.includes('写路径只有一条'), '必须给出唯一写入口');
