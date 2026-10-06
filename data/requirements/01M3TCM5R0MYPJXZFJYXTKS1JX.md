@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 30
-- verify: tools/test/corpus-assets.test.mjs#7z 的
+- verify: tools/test/corpus-assets.test.mjs#① 7z 的**解压产物**不得入库：.gitignore 逐目录命中，且 7z 本身不被忽略
 
 ## 判据（已完成的部分）
 1. **UI 图片**：10 张汉化完成图的**生效版**（版本号最高者）+ 7 张未汉化图的 `-0` 原图 + 8 个 E 系列渲染

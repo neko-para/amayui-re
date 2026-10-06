@@ -4,7 +4,7 @@
 - type: bug
 - status: done
 - parent: REQ-01M3XJXVYBRFW1VT7RD8SNRXKV
-- verify: tools/test/patch.test.mjs#★ 视图范围
+- verify: tools/test/patch.test.mjs#★ 视图范围：`all` / `patch` / `annotated` 是**三个不同的集合**（混过一次，代价是检索静默少报）
 - repro: tools/test/patch.test.mjs#★ 视图范围
 - severity: S2
 

@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M3XJXVYBRFW1VT7RD8SNRXKV
-- verify: tools/test/patch.test.mjs#★ merge on read
+- verify: tools/test/patch.test.mjs#★ merge on read：`projectedRows` 与真视图的行空间一致（src = base 行 ∖ 被 replace/delete ∪ op 载荷）
 - tags: [translation patch]
 
 ## 范围

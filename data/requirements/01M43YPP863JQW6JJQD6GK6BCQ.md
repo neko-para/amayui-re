@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M3XJXVYBRFW1VT7RD8SNRXKV
-- verify: tools/test/patch.test.mjs#★ 编辑清单
+- verify: tools/test/patch.test.mjs#★ 编辑清单（锚寻址）：`-` 必须与当前内容逐字相同；改字面量 / 插一行 / 删一行各映到对应 op
 - tags: [translation patch]
 
 ## 范围
