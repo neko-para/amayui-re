@@ -24,8 +24,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { LAYOUTS, indexEntries, readAlf } from '../../packages/age-format/src/alf.mjs';
-import { readHeader } from '../../packages/age-format/src/asm/index.mjs';
+import { LAYOUTS, indexEntries, readAlf } from '@amayui/age-format/src/alf.mts';
+import { readHeader } from '@amayui/age-format/src/asm/index.mts';
 
 /** 可能承载 ALF 索引的扩展名（大写比较） */
 const INDEX_EXT = new Set(['.AAI', '.BIN']);

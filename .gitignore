@@ -31,3 +31,5 @@ tmp/
 
 # —— 本机私有配置 ————————————————————————————————————————
 *.local.json
+
+/data/privileged-audit.log

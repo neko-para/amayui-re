@@ -22,19 +22,16 @@
  * * 终点 = `头部长度 + min(三张表的 offset) * 4`（三张表紧跟在指令区之后）
  * * `opcode == 0` ⇒ 引擎直接报 "bad opcode : 0"（语料里不该出现）
  */
-import { readHeader } from '../../../../packages/age-format/src/asm/index.mjs';
+/**
+ * ★ `ByteSource` / `Header` / `OpcodeDef` / `OpcodeTable` 都是**格式层的类型** ——
+ * 由 `packages/age-format/src/asm/index.d.mts` 定义，这里只 `import type`。
+ * （类型属于拥有它的包；消费方不再自己声明、也不再用 `as` 把边界糊过去。）
+ * 它们都刻意用**结构化类型**（`Uint8Array` / 最小接口）而不是 `NodeJS.Buffer` ⇒ 不需要 `@types/node`。
+ */
+import { readHeader } from '@amayui/age-format/src/asm/index.mts';
+import type { ByteSource, Header, OpcodeDef, OpcodeTable } from '@amayui/age-format/src/asm/index.mts';
 
-/** 指令表里的一条（本模块只用到这三列） */
-export interface OpcodeDef {
-  opcode: number;
-  argc: number;
-  name: string;
-}
-
-/** 指令表（`packages/age-format` 的 `loadOpcodeTable()` 返回形状中本模块要用的部分） */
-export interface OpcodeTable {
-  byOpcode: Map<number, OpcodeDef>;
-}
+export type { ByteSource, Header, OpcodeDef, OpcodeTable };
 
 /** 一条指令的**操作数**（只切边界，不解释 `type` 的含义） */
 export interface InstrArg {
@@ -62,7 +59,7 @@ export interface IterProblem {
 }
 
 export interface IterateResult {
-  header: { length: number; fields: Record<string, number>; isVer5: boolean };
+  header: Header;
   headerLen: number;
   instructions: Instr[];
   endOffset: number;
@@ -85,7 +82,7 @@ export const lengthInvariantHolds = (argc: number): boolean =>
  * @param bin 脚本字节码
  * @param opts.table 指令表（`loadOpcodeTable()`）；`opts.strict` = 遇到结构问题是否立刻停（缺省 true）
  */
-export function iterate(bin: Buffer, { table, strict = true }: { table: OpcodeTable; strict?: boolean }): IterateResult {
+export function iterate(bin: ByteSource, { table, strict = true }: { table: OpcodeTable; strict?: boolean }): IterateResult {
   const header = readHeader(bin);
   const headerLen = header.length;
   const minTableOffset = Math.min(header.fields.table_1_offset, header.fields.table_2_offset, header.fields.table_3_offset);

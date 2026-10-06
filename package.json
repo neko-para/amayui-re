@@ -6,6 +6,7 @@
   "workspaces": [
     "packages/*",
     "tools",
+    "apps/emulator",
     "apps/workbench",
     "plugins/*"
   ],
@@ -15,7 +16,8 @@
     "test:all": "node tools/test-run.mjs --all",
     "test:list": "node tools/test-run.mjs --list",
     "tools": "node tools/cli.mjs",
-    "test:mutation": "node tools/mutate-check.mjs"
+    "test:mutation": "node tools/mutate-check.mjs",
+    "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit"
   },
   "pnpm": {
     "overrides": {
@@ -23,6 +25,7 @@
     }
   },
   "devDependencies": {
+    "@types/node": "^26.6.4",
     "typescript": "^5.9.3"
   }
 }

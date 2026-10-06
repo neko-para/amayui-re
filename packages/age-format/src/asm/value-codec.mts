@@ -29,36 +29,36 @@
  */
 
 /** 32 位循环左移（`n` 取模 32） */
-export const rol32 = (x, n) => {
+export const rol32 = (x: number, n: number): number => {
   const s = ((n % 32) + 32) % 32;
   return ((x << s) | (x >>> (32 - s))) >>> 0;
 };
 
 /** 32 位循环右移（`n` 取模 32） */
-export const ror32 = (x, n) => {
+export const ror32 = (x: number, n: number): number => {
   const s = ((n % 32) + 32) % 32;
   return ((x >>> s) | (x << (32 - s))) >>> 0;
 };
 
 /**
  * DEC —— 内存里的**编码位模式** → 原值。
- * @param {number} x 从池里读出来的 dword（按 uint32 解释）
- * @param {number} key `Engine+0x5EC8C`
+ * @param x 从池里读出来的 dword（按 uint32 解释）
+ * @param key `Engine+0x5EC8C`
  */
-export const decInt = (x, key) => ror32(rol32(x >>> 0, 11) ^ (key >>> 0), 25);
+export const decInt = (x: number, key: number): number => ror32(rol32(x >>> 0, 11) ^ (key >>> 0), 25);
 
 /**
  * ENC —— 原值 → 内存里的**编码位模式**（`decInt` 的逆）。
- * @param {number} v 原值（按 uint32 解释）
- * @param {number} key `Engine+0x5EC8C`
+ * @param v 原值（按 uint32 解释）
+ * @param key `Engine+0x5EC8C`
  */
-export const encInt = (v, key) => rol32(ror32(v >>> 0, 7) ^ (key >>> 0), 21);
+export const encInt = (v: number, key: number): number => rol32(ror32(v >>> 0, 7) ^ (key >>> 0), 21);
 
 /** `Engine+0x5EC90` 那个槽的语义：`ENC(key, 0)`（局部 int 池的初值就是它） */
-export const encZero = (key) => encInt(0, key);
+export const encZero = (key: number): number => encInt(0, key);
 
 /** 池/槽的索引换算：`base + idx*4`（★ 下标**不过**编解码） */
-export const intSlotOffset = (idx) => (idx >>> 0) * 4;
+export const intSlotOffset = (idx: number): number => (idx >>> 0) * 4;
 
 /** 本模块的公式与证据（供守卫/文档引用，避免两处各写一份） */
 export const CODEC = {

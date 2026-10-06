@@ -15,10 +15,10 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { readAlf, writeIndex, writeArchive, loadPayloads, unpackTo, declaredPayloadBytes } from './src/alf.mjs';
-import * as lzss from './src/lzss.mjs';
-import { readAgf, writeAgf, roundTripEqual, decodeRgba } from './src/agf.mjs';
-import { disassemble, assemble } from './src/asm/index.mjs';
+import { readAlf, writeIndex, writeArchive, loadPayloads, unpackTo, declaredPayloadBytes } from './src/alf.mts';
+import * as lzss from './src/lzss.mts';
+import { readAgf, writeAgf, roundTripEqual, decodeRgba } from './src/agf.mts';
+import { disassemble, assemble } from './src/asm/index.mts';
 import { loadSample, fileOf, sha256 } from './test/samples.mjs';
 
 const HELP = `packages/age-format/cli.mjs —— AGE 容器（ALF / AGF / ASM）

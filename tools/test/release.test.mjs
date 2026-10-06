@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { assemble } from '../../packages/age-format/src/asm/index.mjs';
+import { assemble } from '@amayui/age-format/src/asm/index.mts';
 import { extractEntry, loadPatch, mapperContext, savePatch } from '../lib/patch.mjs';
 import { listRecipes } from '../lib/ui-bake/recipe.mjs';
 import {

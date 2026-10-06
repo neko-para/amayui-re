@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { canEncodeCp932 } from '../../packages/age-format/src/asm/codec.mjs';
+import { canEncodeCp932 } from '@amayui/age-format/src/asm/codec.mts';
 import { REPO_ROOT } from './paths.mjs';
 
 export const DEFAULT_SUBS = path.join(REPO_ROOT, 'data', 'translations', 'subs-cn-jp.json');

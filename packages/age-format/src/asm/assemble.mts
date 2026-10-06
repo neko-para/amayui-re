@@ -28,11 +28,13 @@
  */
 import {
   loadOpcodeTable, instructionForToken, instructionByteLength,
-} from './opcodes.mjs';
-import { defaultCodec, encodeUtf16Le } from './codec.mjs';
+} from './opcodes.mts';
+import type { OpcodeDef, OpcodeTable } from './opcodes.mts';
+import type { Header, Instr, InstrArg } from './disassemble.mts';
+import { defaultCodec, encodeUtf16Le } from './codec.mts';
 import {
   getType, FIELD_NAMES, FIELD_OFFSETS, fieldBlockShift,
-} from './types.mjs';
+} from './types.mts';
 
 const HEADER_LEN_V4 = 0x3c;
 const HEADER_LEN_V5 = 0x44;
@@ -41,7 +43,7 @@ const HEADER_LEN_V5 = 0x44;
 const RE_PARSE_ARGS = /\((\w+?\-?\w+?\-?\w+?) ([0-9a-fA-F]+)\)|(".*?")|label_([0-9a-fA-F]+)|\[(.+?)\]|([0-9a-fA-F]+)/g;
 
 /** 把一行参数串切成若干"参数原文"，每项 6 个捕获组（与 `RE_PARSE_ARGS` 对齐） */
-function parseMultipleArguments(line) {
+function parseMultipleArguments(line: string): string[][] {
   const out = [];
   RE_PARSE_ARGS.lastIndex = 0;
   let m;
@@ -53,7 +55,7 @@ function parseMultipleArguments(line) {
 }
 
 /** 从反汇编文本的第 2/3 行读签名与 `local_vars` */
-function parseHeader(lines) {
+function parseHeader(lines: string[]): Header {
   const sigLine = lines[1] || '';
   const sigStart = sigLine.indexOf('= ') + 2;
   const signature = sigLine.slice(sigStart, sigStart + 8).padEnd(8, ' ');
@@ -95,14 +97,14 @@ function parseHeader(lines) {
  * 没有 `sigBytes` 时按 `header.signature` 字符串编（v5 = UTF-16LE，v4 = latin1）。
  * 13 个数值字段的顺序 / 偏移 / v5 位移全部来自 `types.mjs`（与读侧共用同一张表）。
  */
-export function writeHeaderBytes(header) {
+export function writeHeaderBytes(header: Header): Buffer {
   const { fields, isVer5, signature, sigBytes } = header;
   const out = isVer5 ? Buffer.alloc(HEADER_LEN_V5) : Buffer.alloc(HEADER_LEN_V4);
   if (isVer5) {
-    const raw = Buffer.isBuffer(sigBytes) && sigBytes.length >= 16
+    const raw: Uint8Array = Buffer.isBuffer(sigBytes) && sigBytes.length >= 16
       ? sigBytes.subarray(0, 16)
       : encodeUtf16Le((String(signature || 'SYS5501 ').replace(/\u0000+$/, '') || 'SYS5501 ').padEnd(8, ' '));
-    raw.copy(out, 0, 0, Math.min(16, raw.length));
+    for (let k = 0; k < Math.min(16, raw.length); k += 1) out[k] = raw[k];
   } else {
     const raw = Buffer.isBuffer(sigBytes) && sigBytes.length >= 8
       ? sigBytes.subarray(0, 8)
@@ -115,7 +117,7 @@ export function writeHeaderBytes(header) {
 }
 
 /** 跳过空行 / `//` 行注释 / 成对块注释，返回下一条要处理的指令行 */
-function nextCodeLine(lines, i) {
+function nextCodeLine(lines: readonly string[], i: number): { line: string; next: number } | null {
   while (i < lines.length) {
     let line = lines[i];
     if (line === '' || line.startsWith('//')) { i++; continue; }
@@ -138,7 +140,15 @@ function nextCodeLine(lines, i) {
  * `opts.codec` 缺省 CP932（脚本 v5 的字符串走 UTF-16LE，与此无关）；
  * `opts.table` 缺省在本目录加载 `instruction-set.json`（格式层四列；由 `pnpm tools opcodes derive` 派生）。
  */
-export function assemble(text, { codec = defaultCodec, table } = {}) {
+/** `assemble` 的选项（只声明函数体真正读的那几个键） */
+export interface AssembleOptions {
+  /** 码页编解码器；缺省 `codec.mts` 的 `defaultCodec`（CP932） */
+  codec?: { decode(b: Uint8Array): string; encode(s: string): Uint8Array } | null;
+  /** 指令表；缺省由 `loadOpcodeTable()` 装载 */
+  table?: OpcodeTable;
+}
+
+export function assemble(text: string, { codec = defaultCodec, table }: AssembleOptions = {}): Buffer {
   if (typeof text !== 'string') throw new Error('assemble: text 必须是 string');
   const tbl = table || loadOpcodeTable();
   const cp = codec || defaultCodec;
@@ -147,13 +157,13 @@ export function assemble(text, { codec = defaultCodec, table } = {}) {
   const headerLen = header.length;
 
   const instructions = [];
-  const labelToOffset = new Map();
+  const labelToOffset = new Map<number, number>();
   const labelArguments = [];
   const stringArguments = [];
   const arrayArguments = [];
-  const instr3Offsets = new Set();
-  const instr71Offsets = new Set();
-  const instr8fOffsets = new Set();
+  const instr3Offsets = new Set<number>();
+  const instr71Offsets = new Set<number>();
+  const instr8fOffsets = new Set<number>();
 
   let dataArrayEnd = headerLen;
   let lineCount = 6;
@@ -177,7 +187,7 @@ export function assemble(text, { codec = defaultCodec, table } = {}) {
     if (!def) throw new Error(`Unknown instruction : ${instrToken} on line ${lineCount}`);
     if (def.argc === null) throw new Error(`Unknown argc for instruction ${instrToken}`);
 
-    const instr = { def, args: [], byteOffset: dataArrayEnd, offset: (dataArrayEnd - headerLen) >> 2 };
+    const instr: Instr = { def, args: [] as InstrArg[], offset: (dataArrayEnd - headerLen) >> 2 };
 
     if (def.argc > 0) {
       const argStr = line.substring(instrToken.length + 1);
@@ -189,7 +199,7 @@ export function assemble(text, { codec = defaultCodec, table } = {}) {
         );
       }
       for (const a of parsed) {
-        const arg = { type: 0, raw_data: 0, text: undefined, bytes: undefined, data_array: null };
+        const arg: InstrArg = { type: 0, raw_data: 0 };
         const idx = [instructions.length, instr.args.length];
         if (a[0] !== '') {
           arg.type = getType(a[0]);
@@ -198,7 +208,7 @@ export function assemble(text, { codec = defaultCodec, table } = {}) {
           const content = a[2].slice(1, -1);
           arg.type = 2;
           if (header.isVer5) arg.bytes = encodeUtf16Le(content);
-          else arg.bytes = cp.encode(content);
+          else arg.bytes = cp!.encode(content);
           stringArguments.push(idx);
         } else if (a[3] !== '') {
           arg.type = 0;
@@ -267,13 +277,13 @@ export function assemble(text, { codec = defaultCodec, table } = {}) {
   for (const [instrIdx, argIdx] of arrayArguments) {
     const arg = instructions[instrIdx].args[argIdx];
     arg.raw_data = currentArrayOffset;
-    footerData.push(arg.data_array.length);
-    currentArrayOffset += arg.data_array.length + 1;
-    footerData.push(...arg.data_array.data);
+    footerData.push(arg.data_array!.length);
+    currentArrayOffset += arg.data_array!.length + 1;
+    footerData.push(...arg.data_array!.data);
   }
 
-  const toIndex = (off) => (off - headerLen) >> 2;
-  const sorted = (set) => [...set].map(toIndex).sort((a, b) => a - b);
+  const toIndex = (off: number): number => (off - headerLen) >> 2;
+  const sorted = (set: Iterable<number>): number[] => [...set].map(toIndex).sort((a, b) => a - b);
 
   const instr71Vec = sorted(instr71Offsets);
   footerData.push(...instr71Vec);

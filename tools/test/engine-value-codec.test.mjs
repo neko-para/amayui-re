@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { REPO_ROOT } from '../lib/paths.mjs';
-import { CODEC, decInt, encInt, encZero, intSlotOffset, rol32, ror32 } from '../../packages/age-format/src/asm/value-codec.mjs';
+import { CODEC, decInt, encInt, encZero, intSlotOffset, rol32, ror32 } from '@amayui/age-format/src/asm/value-codec.mts';
 
 const FILES_DIR = path.join(REPO_ROOT, 'corpus', 'disasm', 'files');
 const listing = (() => {

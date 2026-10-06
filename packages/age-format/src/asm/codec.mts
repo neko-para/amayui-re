@@ -63,17 +63,17 @@ export const GAIJI_LEAD_LO = 0xf0;
 export const GAIJI_LEAD_HI = 0xf9;
 
 /** 前导字节：`0x81–0x9F` / `0xE0–0xFC` */
-export const isLeadByte = (b) => (b >= 0x81 && b <= 0x9f) || (b >= 0xe0 && b <= 0xfc);
+export const isLeadByte = (b: number): boolean => (b >= 0x81 && b <= 0x9f) || (b >= 0xe0 && b <= 0xfc);
 /** 后继字节：`0x40–0x7E` / `0x80–0xFC`（`0x7F` 永远不是后继） */
-export const isTrailByte = (b) => (b >= 0x40 && b <= 0x7e) || (b >= 0x80 && b <= 0xfc);
+export const isTrailByte = (b: number): boolean => (b >= 0x40 && b <= 0x7e) || (b >= 0x80 && b <= 0xfc);
 
 /** 该码位是否落在游戏外字区（`U+E000–U+E757`） */
-export const isGaijiCodePoint = (cp) => cp >= GAIJI_LO && cp <= GAIJI_HI;
+export const isGaijiCodePoint = (cp: number): boolean => cp >= GAIJI_LO && cp <= GAIJI_HI;
 
 // ───────────────────────────────────────────────────────── 外字区线性映射
 
 /** 外字区读写位置 ← [前导, 后继]（调用方已保证前导在 `0xF0–0xF9`、后继合法） */
-function gaijiIndex(lead, trail) {
+function gaijiIndex(lead: number, trail: number): number {
   const trailIndex = trail < 0x7f ? trail - 0x40 : trail - 0x41;
   return (lead - GAIJI_LEAD_LO) * 188 + trailIndex;
 }
@@ -81,7 +81,7 @@ function gaijiIndex(lead, trail) {
 // ───────────────────────────────────────────────────────── 平台表封装
 
 /** 双字节按平台 CP932 表解；未定义 ⇒ null（如 `0x86 0x80` / `0xEC 0xBD` 在 CP932 里没有映射） */
-function tablePair(b0, b1) {
+function tablePair(b0: number, b1: number): string | null {
   try {
     return CP932.decode(Buffer.from([b0, b1]));
   } catch {
@@ -90,7 +90,7 @@ function tablePair(b0, b1) {
 }
 
 /** 单字节按平台 CP932 表解；未定义 ⇒ null */
-function tableSingle(b) {
+function tableSingle(b: number): string | null {
   try {
     return CP932.decode(Buffer.from([b]));
   } catch {
@@ -100,7 +100,7 @@ function tableSingle(b) {
 
 // ───────────────────────────────────────────────────────── 反向表（编码方向）
 
-let REVERSE = null;
+let REVERSE: Map<string, Uint8Array> | null = null;
 
 /**
  * 编码方向**不采用**的字节对区间：`0xED40–0xF940`。
@@ -126,7 +126,7 @@ export const ENCODE_SKIP_LO = 0xed40;
 export const ENCODE_SKIP_HI = 0xf940;
 
 /** 该字节对是否属于"编码方向跳过"的区间 */
-export const isEncodeSkipped = (lead, trail) => {
+export const isEncodeSkipped = (lead: number, trail: number): boolean => {
   const mb = (lead << 8) | trail;
   return mb >= ENCODE_SKIP_LO && mb <= ENCODE_SKIP_HI;
 };
@@ -137,15 +137,15 @@ export const isEncodeSkipped = (lead, trail) => {
  * 每个前导内后继字节升序（= 字典序最小者胜，与旧仓 `iconv-lite` 的 `_fillEncodeTable` 同序）。
  * `0xED40–0xF940` 段跳过（见 `ENCODE_SKIP_*` 的说明）；外字区**不跳**（比 iconv 强的那一处）。
  */
-function reverseTable() {
+function reverseTable(): Map<string, Uint8Array> {
   if (REVERSE) return REVERSE;
-  const map = new Map();
-  const put = (text, bytes) => {
+  const map = new Map<string, Uint8Array>();
+  const put = (text: string, bytes: Uint8Array): void => {
     if (text === '' || text === undefined || map.has(text)) return;
     map.set(text, bytes);
   };
   // 1) 单字节
-  for (let b = 0; b < 0x100; b += 1) put(tableSingle(b), Buffer.from([b]));
+  for (let b = 0; b < 0x100; b += 1) { const t = tableSingle(b); if (t !== null) put(t, Buffer.from([b])); }
   // 2) 标准双字节区（跳过 0xED40–0xF940）
   const leads = [];
   for (let b = 0x81; b <= 0x9f; b += 1) leads.push(b);
@@ -154,7 +154,8 @@ function reverseTable() {
     for (let trail = 0x40; trail <= 0xfc; trail += 1) {
       if (!isTrailByte(trail)) continue;
       if (isEncodeSkipped(lead, trail)) continue;
-      put(tablePair(lead, trail), Buffer.from([lead, trail]));
+      const t2 = tablePair(lead, trail);
+      if (t2 !== null) put(t2, Buffer.from([lead, trail]));
     }
   }
   // 3) 外字区（线性，最后兜底：它覆盖 U+E000–U+E757，且必须始终可编码）
@@ -175,7 +176,7 @@ function reverseTable() {
  * @param {Buffer|Uint8Array} buf
  * @returns {string}
  */
-export function decodeCp932(buf) {
+export function decodeCp932(buf: Uint8Array): string {
   if (!buf || buf.length === 0) return '';
   const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
   let out = '';
@@ -218,7 +219,7 @@ export function decodeCp932(buf) {
  * @returns {Buffer}
  * @throws 表里没有该字符时抛错（不静默替换）
  */
-export function encodeCp932(str) {
+export function encodeCp932(str: string): Uint8Array {
   const rev = reverseTable();
   const out = Buffer.allocUnsafe(str.length * 2 + 8);
   let n = 0;
@@ -228,7 +229,7 @@ export function encodeCp932(str) {
       for (let k = 0; k < hit.length; k += 1) out[n++] = hit[k];
       continue;
     }
-    const cp = ch.codePointAt(0);
+    const cp = ch.codePointAt(0) ?? 0;
     // 外字区（U+E000–U+E757 = 1880 个位）已全部在反查表里；走到这里就是真编不出去。
     throw new Error(`encodeCp932: 无法编码字符 U+${cp.toString(16).toUpperCase()} (${ch})`);
   }
@@ -236,14 +237,14 @@ export function encodeCp932(str) {
 }
 
 /** 一个字符能否按 CP932 编出去（编码方向的探针；外字区算"能"） */
-export function canEncodeCp932(ch) {
-  const cp = ch.codePointAt(0);
+export function canEncodeCp932(ch: string): boolean {
+  const cp = ch.codePointAt(0) ?? 0;
   if (isGaijiCodePoint(cp)) return true;
   return reverseTable().has(ch);
 }
 
 /** 字符串里第一个编不出去的字符；全部可编码 ⇒ null */
-export function firstUnencodable(str) {
+export function firstUnencodable(str: string): string | null {
   for (const ch of str) if (!canEncodeCp932(ch)) return ch;
   return null;
 }
@@ -252,7 +253,7 @@ export function firstUnencodable(str) {
  * UTF-16LE 字节 → 字符串（脚本 v5 的字符串区用）。
  * 口径同旧仓 `cpToUtf16(CP_UTF16, buf)`：按 16 位小端读，**去掉尾部 NUL**。
  */
-export function decodeUtf16Le(buf) {
+export function decodeUtf16Le(buf: Uint8Array): string {
   if (!buf || buf.length === 0) return '';
   const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
   // 分批 fromCharCode：v5 的长串可能上万字符，一次性 spread 会顶到引擎的参数上限
@@ -270,7 +271,7 @@ export function decodeUtf16Le(buf) {
 }
 
 /** 字符串 → UTF-16LE 字节（脚本 v5；不含尾部 NUL —— 那是调用方的排版责任） */
-export function encodeUtf16Le(str) {
+export function encodeUtf16Le(str: string): Uint8Array {
   const s = String(str);
   const out = Buffer.alloc(s.length * 2);
   for (let i = 0; i < s.length; i += 1) out.writeUInt16LE(s.charCodeAt(i), i * 2);
@@ -287,7 +288,7 @@ export function encodeUtf16Le(str) {
  * 脚本 v5 字符串区的 UTF-16LE 走 `codec.decodeUtf16Le` / `codec.encodeUtf16Le`（与 `id` 无关）。
  * `cp` 可以是码页号，也可以是名字（`sjis`/`shiftjis`/`shift-jis`/`cp932`/`utf16le`/`utf16`）。
  */
-export function codecFor(cp) {
+export function codecFor(cp: number): { id: number; name: string; decode: (b: Uint8Array) => string; encode: (s: string) => Uint8Array; canEncode: (ch: string) => boolean } | null {
   const n = typeof cp === 'string' ? parseCodepage(cp) : cp;
   const common = { decodeUtf16Le, encodeUtf16Le };
   if (n === CP_932) {
@@ -300,7 +301,7 @@ export function codecFor(cp) {
 }
 
 /** 码页名字/数字 → 码页号；不认识 ⇒ 0（与旧仓 `parseCodepage` 同口径：0 表示"不认识"） */
-export function parseCodepage(s) {
+export function parseCodepage(s: string): number {
   if (typeof s === 'number') return Number.isFinite(s) && s > 0 ? s : 0;
   const t = String(s).toLowerCase();
   if (t === 'utf8' || t === 'utf-8') return CP_UTF8;

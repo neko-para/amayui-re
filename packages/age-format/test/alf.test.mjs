@@ -20,8 +20,8 @@ import {
   loadPayloads,
   declaredPayloadBytes,
   buildToc,
-} from '../src/alf.mjs';
-import * as lzss from '../src/lzss.mjs';
+} from '../src/alf.mts';
+import * as lzss from '../src/lzss.mts';
 import { loadSample, fileOf, sha256 } from './samples.mjs';
 
 const sample = loadSample('assets/samples-alf');

@@ -1,0 +1,40 @@
+{
+  // apps/emulator/tsconfig.json —— **只做类型检查，不产出**（`noEmit`）
+  //
+  // ★ 为什么是 `noEmit`：`.ts` 由 **Node v24 的原生 type stripping** 直接跑（守卫 `.mjs` 直接
+  //   `import '.../pools.ts'`）⇒ 本仓**没有构建步骤**，`tsc` 在这里的唯一职责是"把类型写错这件事变成红灯"。
+  //
+  // ★ 为什么 `allowJs` + `checkJs:false`：
+  //   模拟器要 import `packages/age-format` 的 `.mjs`（编解码 / 布局知识）。
+  //   `allowJs` 让那些**被引用的** `.js/.mjs` 参与解析；`checkJs:false` 表示**不去检查它们**
+  //   （它们是 `packages/*`，按 `AGENTS.md` §3 属"其余一切 JS"，不归本 app 的 tsconfig 管）。
+  //
+  // ★ 为什么 `verbatimModuleSyntax`：本仓是**无构建**的 ESM —— import/export 语句原样进 Node。
+  //   打开它 ⇒ `import type` 与普通 `import` 的区分是**语法事实**，不会出现"被 tsc 擦掉后运行期少了模块"。
+  //
+  // ★ 为什么 `erasableSyntaxOnly`：Node 的原生剥壳**只支持可擦除语法**。
+  //   `enum` / `namespace` / 构造器参数属性 / 装饰器在**运行期直接抛错** —— 这个开关把它们提前变成类型错误。
+  //   （它需要 TS 5.8+；本仓 TS 是 5.9。）
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": false,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts"]
+}

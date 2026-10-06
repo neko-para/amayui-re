@@ -5,7 +5,7 @@
  *
  * 用法：
  * ```js
- * import { disassemble, assemble, defaultCodec } from '../asm/index.mjs';
+ * import { disassemble, assemble, defaultCodec } from '../asm/index.mts';
  * const text = disassemble(fs.readFileSync('SC0000.BIN'));           // Buffer -> string
  * const bin  = assemble(text);                                      // string -> Buffer
  * bin.equals(fs.readFileSync('SC0000.BIN'));                        // true（往返逐字节相同）
@@ -17,7 +17,9 @@
 export {
   loadOpcodeTable, instructionForOpCode, instructionForLabel, instructionForToken,
   opcodeLabel, normalizedOpcode, instructionByteLength, OPCODES_JSON,
-} from './opcodes.mjs';
+} from './opcodes.mts';
+/** ★ 类型也从入口再导出：消费方只需要认识 `@amayui/age-format/src/asm/index.mts` 一个门 */
+export type { OpcodeDef, OpcodeTable } from './opcodes.mts';
 
 export {
   decodeCp932, encodeCp932, canEncodeCp932, firstUnencodable,
@@ -25,13 +27,15 @@ export {
   isLeadByte, isTrailByte, isGaijiCodePoint,
   defaultCodec, CP_932, CP_UTF8, CP_936, CP_UTF16,
   GAIJI_LO, GAIJI_HI, GAIJI_LEAD_LO, GAIJI_LEAD_HI,
-} from './codec.mjs';
+} from './codec.mts';
 
-export { disassemble, readHeader, S5_SIG4 } from './disassemble.mjs';
-export { assemble, writeHeaderBytes } from './assemble.mjs';
+export { disassemble, readHeader, S5_SIG4 } from './disassemble.mts';
+/** ★ 字节源 / 脚本头的类型也从入口再导出（模拟器的迭代系统就用它） */
+export type { ByteSource, ByteView, Header, HeaderFields } from './disassemble.mts';
+export { assemble, writeHeaderBytes } from './assemble.mts';
 
 export {
   getTypeLabel, getType, isControlFlowOpcode, isArrayOpcode, isLabelArgument,
   FIELD_OFFSETS, FIELD_NAMES, fieldBlockShift,
   hex, labelHex,
-} from './types.mjs';
+} from './types.mts';

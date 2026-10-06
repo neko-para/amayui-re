@@ -33,10 +33,78 @@ import { Buffer } from 'node:buffer';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import * as lzss from './lzss.mjs';
+import * as lzss from './lzss.mts';
+
+/** 一种盘上布局（按索引文件签名定；`detectLayout` 会补上后四个字段） */
+export interface AlfLayout {
+  unicode: boolean;
+  hdrSize: number;
+  addonPos: number;
+  arcEntry: number;
+  filName: number;
+  filEntry: number;
+  sigs: string[];
+  name?: string;
+  signature?: string;
+  addon?: boolean;
+  sectionPos: number;
+}
+
+/** 目录里的一个归档 */
+export interface AlfArchive {
+  filename: string;
+  raw: Buffer;
+  tocOffset: number;
+}
+
+/** 目录里的一条文件条目（`payload` 由 `loadPayloads` / `applyReplacements` 填） */
+export interface AlfEntry {
+  filename: string;
+  archiveIndex: number;
+  fileIndex: number;
+  offset: number;
+  length: number;
+  raw: Buffer;
+  tocOffset: number;
+  payload?: Buffer;
+}
+
+/** 一个段：`S4SECTHDR` 头 + LZSS 数据 */
+export interface AlfSection {
+  originalLength: number;
+  originalLength2: number;
+  length: number;
+  packed: Buffer;
+  data: Buffer;
+  size: number;
+}
+
+/** 一段不可压缩区 */
+export interface AlfGap { offset: number; length: number }
+
+/** 一次 `readAlfBuffer` 的结果（`alf`）—— 逐字抄自它的 `return` */
+export interface AlfIndex {
+  file: string;
+  buf: Buffer;
+  layout: AlfLayout;
+  header: Buffer;
+  section: AlfSection;
+  toc: Buffer;
+  archiveCount: number;
+  archives: AlfArchive[];
+  fileCount: number;
+  fileHdrOffset: number;
+  entries: AlfEntry[];
+  tocTrailing: Buffer;
+  /** 归档文件名的绝对路径（按索引所在目录解析） */
+  archivePath(name: string): string;
+  baseDir: string;
+}
+
+
 
 /** 索引文件的签名（前 4 或前 8 字节）→ 盘上布局参数 */
-export const LAYOUTS = {
+export const LAYOUTS: Record<string, Omit<AlfLayout, "sectionPos" | "name" | "signature" | "addon">> = {
   S4: { unicode: false, hdrSize: 300, addonPos: 268, arcEntry: 256, filName: 64, filEntry: 80, sigs: ['S3IC', 'S4IC', 'S3AC', 'S4AC'] },
   S5: { unicode: true, hdrSize: 540, addonPos: 532, arcEntry: 512, filName: 128, filEntry: 144, sigs: ['S5IC', 'S5AC'] },
 };
@@ -44,7 +112,7 @@ export const LAYOUTS = {
 export const SECT_HDR_SIZE = 12;
 
 /** 读定长单字节字符串（遇 NUL 截断；按 latin1 逐字节解码 —— 与旧仓口径一致） */
-function readAnsiField(buf, off, len) {
+function readAnsiField(buf: Buffer, off: number, len: number): string {
   let end = off;
   const limit = off + len;
   while (end < limit && buf[end] !== 0) end += 1;
@@ -52,7 +120,7 @@ function readAnsiField(buf, off, len) {
 }
 
 /** 读定长 UTF-16LE 字符串（遇 2 字节 NUL 截断） */
-function readWideField(buf, off, len) {
+function readWideField(buf: Buffer, off: number, len: number): string {
   const limit = off + len;
   let end = off;
   for (let p = off; p + 1 < limit; p += 2) {
@@ -66,13 +134,13 @@ function readWideField(buf, off, len) {
   return buf.toString('utf16le', off, end);
 }
 
-const readField = (unicode, buf, off, len) => (unicode ? readWideField(buf, off, len) : readAnsiField(buf, off, len));
+const readField = (unicode: boolean, buf: Buffer, off: number, len: number): string => (unicode ? readWideField(buf, off, len) : readAnsiField(buf, off, len));
 
 /**
  * 把字符串写进定长字段：**只覆写字符串本身与其 1 个 NUL 终止符**，其余字节原样保留。
  * @returns {number} 下一个字段的偏移（恒等于 off + fieldLen；返回它只是让调用点更清楚）
  */
-function writeField(buf, off, fieldLen, str, unicode) {
+function writeField(buf: Buffer, off: number, fieldLen: number, str: string, unicode: boolean): number {
   const raw = unicode ? Buffer.from(str, 'utf16le') : Buffer.from(str, 'latin1');
   const max = fieldLen - (unicode ? 2 : 1); // 至少留一个终止符
   if (raw.length > max) throw new Error(`文件名太长（${raw.length} > ${max} 字节）：${str}`);
@@ -87,7 +155,7 @@ function writeField(buf, off, fieldLen, str, unicode) {
  * @param {Buffer} buf
  * @param {number} pos 段起点
  */
-export function readSection(buf, pos) {
+export function readSection(buf: Buffer, pos: number): AlfSection {
   if (pos + SECT_HDR_SIZE > buf.length) throw new Error(`段头越界：pos=${pos}, 文件 ${buf.length} 字节`);
   const originalLength = buf.readUInt32LE(pos);
   const originalLength2 = buf.readUInt32LE(pos + 4);
@@ -95,13 +163,13 @@ export function readSection(buf, pos) {
   if (pos + SECT_HDR_SIZE + length > buf.length) {
     throw new Error(`压缩数据越界：声明 ${length} 字节，文件只剩 ${buf.length - pos - SECT_HDR_SIZE}`);
   }
-  const packed = buf.subarray(pos + SECT_HDR_SIZE, pos + SECT_HDR_SIZE + length);
+  const packed = Buffer.from(buf.subarray(pos + SECT_HDR_SIZE, pos + SECT_HDR_SIZE + length));
   const { data, size } = lzss.unpack(packed, length, originalLength);
   return { originalLength, originalLength2, length, packed, data, size };
 }
 
 /** 按签名判定盘上布局；认不出来就抛（"拿不到事实就抛"，不猜） */
-export function detectLayout(buf) {
+export function detectLayout(buf: Buffer): AlfLayout {
   for (const [name, l] of Object.entries(LAYOUTS)) {
     for (const sig of l.sigs) {
       const want = l.unicode
@@ -123,7 +191,7 @@ export function detectLayout(buf) {
  * 这样"看一眼目录"不需要 7.7 GB 的归档在场。
  * @param {string} file 索引文件路径
  */
-export function readAlf(file) {
+export function readAlf(file: string): AlfIndex {
   return readAlfBuffer(fs.readFileSync(file), file);
 }
 
@@ -132,14 +200,14 @@ export function readAlf(file) {
  * @param {Buffer} buf
  * @param {string} [file] 只用于报错与 `baseDir` 推导
  */
-export function readAlfBuffer(buf, file = '<memory>') {
+export function readAlfBuffer(buf: Buffer, file = '<memory>'): AlfIndex {
   const layout = detectLayout(buf);
   const header = buf.subarray(0, layout.sectionPos);
   const sect = readSection(buf, layout.sectionPos);
   const toc = sect.data;
 
   const archiveCount = toc.readUInt32LE(0);
-  const archives = [];
+  const archives: AlfArchive[] = [];
   let off = 4;
   for (let i = 0; i < archiveCount; i += 1) {
     archives.push({
@@ -153,7 +221,7 @@ export function readAlfBuffer(buf, file = '<memory>') {
   const fileHdrOffset = off;
   off += 4;
 
-  const entries = [];
+  const entries: AlfEntry[] = [];
   for (let i = 0; i < fileCount; i += 1) {
     const name = readField(layout.unicode, toc, off, layout.filName);
     entries.push({
@@ -190,9 +258,9 @@ export function readAlfBuffer(buf, file = '<memory>') {
 }
 
 /** 目录项按名字建索引（重名保留先出现的那个，并在 `duplicates` 里报出来） */
-export function indexEntries(alf) {
-  const map = new Map();
-  const duplicates = [];
+export function indexEntries(alf: AlfIndex): { map: Map<string, AlfEntry>; duplicates: string[] } {
+  const map = new Map<string, AlfEntry>();
+  const duplicates: string[] = [];
   for (const e of alf.entries) {
     if (map.has(e.filename)) duplicates.push(e.filename);
     else map.set(e.filename, e);
@@ -205,7 +273,7 @@ export function indexEntries(alf) {
  * @param {object} alf `readAlf` 的返回值
  * @param {{entries?: object[], archives?: object[], fileCount?: number}} [patch] 可选的目录变更
  */
-export function buildToc(alf, patch = {}) {
+export function buildToc(alf: AlfIndex, patch: { entries?: AlfEntry[]; archives?: AlfArchive[]; fileCount?: number } = {}): Buffer {
   const { layout } = alf;
   const archives = patch.archives ?? alf.archives;
   const entries = patch.entries ?? alf.entries;
@@ -245,9 +313,9 @@ export function buildToc(alf, patch = {}) {
  * @param {{patch?: object}} [opts]
  * @returns {Buffer} 索引文件字节
  */
-export function writeIndex(alf, opts = {}) {
+export function writeIndex(alf: AlfIndex, opts: { patch?: { entries?: AlfEntry[]; archives?: AlfArchive[] } } = {}): Buffer {
   const toc = buildToc(alf, opts.patch ?? {});
-  const packed = lzss.pack(toc);
+  const packed = Buffer.from(lzss.pack(toc));
   const out = Buffer.alloc(alf.layout.sectionPos + SECT_HDR_SIZE + packed.length);
   alf.header.copy(out, 0);
   const sp = alf.layout.sectionPos;
@@ -272,14 +340,14 @@ export function writeIndex(alf, opts = {}) {
  * @param {{entries?: object[], allowGaps?: boolean, padByte?: number}} [opts]
  * @returns {{data: Buffer, gaps: Array<{offset:number,length:number}>}}
  */
-export function writeArchive(alf, archiveIndex, opts = {}) {
+export function writeArchive(alf: AlfIndex, archiveIndex: number, opts: { entries?: AlfEntry[]; allowGaps?: boolean; padByte?: number } = {}): { data: Buffer; gaps: AlfGap[] } {
   const entries = (opts.entries ?? alf.entries).filter((e) => e.archiveIndex === archiveIndex && e.length > 0);
   const allowGaps = opts.allowGaps === true;
   const padByte = opts.padByte ?? 0;
   const sorted = [...entries].sort((a, b) => a.offset - b.offset);
   const end = sorted.reduce((n, e) => Math.max(n, e.offset + e.length), 0);
   const out = Buffer.alloc(end, padByte);
-  const gaps = [];
+  const gaps: AlfGap[] = [];
   let cursor = 0;
   for (const e of sorted) {
     if (e.offset > cursor) gaps.push({ offset: cursor, length: e.offset - cursor });
@@ -308,9 +376,9 @@ export function writeArchive(alf, archiveIndex, opts = {}) {
  * @param {Map<string, Buffer>|Record<string, Buffer>} replacements 条目名 → 新载荷
  * @returns {{patched: string[], changedArchives: number[]}}
  */
-export function applyReplacements(alf, replacements) {
+export function applyReplacements(alf: AlfIndex, replacements: Map<string, Buffer> | Record<string, Buffer>): { patched: string[]; changedArchives: number[] } {
   const map = replacements instanceof Map ? replacements : new Map(Object.entries(replacements));
-  const patched = [];
+  const patched: string[] = [];
   for (const [name, buf] of map) {
     const e = alf.entries.find((x) => x.filename === name);
     if (!e) throw new Error(`目录里没有这个条目：${name}`);
@@ -330,7 +398,7 @@ export function applyReplacements(alf, replacements) {
 }
 
 /** 只改归档文件名（TOC 里的那一条），其余原样 —— `rename` 之外没有任何推断 */
-export function renameArchive(alf, index, newName) {
+export function renameArchive(alf: AlfIndex, index: number, newName: string): AlfArchive {
   const a = alf.archives[index];
   if (!a) throw new Error(`没有第 ${index} 个归档`);
   const raw = Buffer.from(a.raw);
@@ -347,16 +415,17 @@ export function renameArchive(alf, index, newName) {
  * @param {{wanted?: string[]|Set<string>, onProgress?: (done: number, total: number) => void}} [opts]
  * @returns {{loaded: number, missingArchives: string[], missingEntries: string[]}}
  */
-export function loadPayloads(alf, opts = {}) {
+export function loadPayloads(alf: AlfIndex, opts: { wanted?: string[] | Set<string>; onProgress?: (done: number, total: number) => void } = {}): { loaded: number; missingArchives: string[]; missingEntries: string[] } {
   const wanted = opts.wanted ? new Set(opts.wanted) : null;
   const targets = alf.entries.filter((e) => e.length > 0 && (!wanted || wanted.has(e.filename)));
-  const byArchive = new Map();
+  const byArchive = new Map<number, AlfEntry[]>();
   for (const e of targets) {
-    if (!byArchive.has(e.archiveIndex)) byArchive.set(e.archiveIndex, []);
-    byArchive.get(e.archiveIndex).push(e);
+    const list0 = byArchive.get(e.archiveIndex);
+    if (list0) list0.push(e);
+    else byArchive.set(e.archiveIndex, [e]);
   }
-  const missingArchives = [];
-  const missingEntries = [];
+  const missingArchives: string[] = [];
+  const missingEntries: string[] = [];
   let loaded = 0;
   for (const [arcIndex, list] of byArchive) {
     const info = alf.archives[arcIndex];
@@ -397,7 +466,7 @@ export function loadPayloads(alf, opts = {}) {
 }
 
 /** 只算载荷的"声明总量"（不解包任何归档）—— 给"这个归档有多大"这类问句用 */
-export function declaredPayloadBytes(alf) {
+export function declaredPayloadBytes(alf: AlfIndex): number {
   return alf.entries.reduce((n, e) => n + (e.length >>> 0), 0);
 }
 
@@ -405,10 +474,10 @@ export function declaredPayloadBytes(alf) {
  * 解包到目录：`<outDir>/<归档名前缀>/<条目名>`（与旧仓 `unpack_alf.mjs` 的落点一致）。
  * @returns {{written: number, skipped: string[]}}
  */
-export function unpackTo(alf, outDir) {
+export function unpackTo(alf: AlfIndex, outDir: string): { written: string[]; skipped: string[] } {
   fs.mkdirSync(outDir, { recursive: true });
-  const written = [];
-  const skipped = [];
+  const written: string[] = [];
+  const skipped: string[] = [];
   const { map: arcByName } = indexEntries(alf);
   void arcByName;
   for (let i = 0; i < alf.archives.length; i += 1) {
@@ -424,6 +493,7 @@ export function unpackTo(alf, outDir) {
         skipped.push(e.filename);
         continue;
       }
+      if (!e.payload) continue;
       fs.writeFileSync(path.join(dir, safe), e.payload);
       written.push(`${prefix}/${safe}`);
     }

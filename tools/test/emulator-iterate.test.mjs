@@ -30,7 +30,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { REPO_ROOT } from '../lib/paths.mjs';
-import { loadOpcodeTable } from '../../packages/age-format/src/asm/index.mjs';
+import { loadOpcodeTable } from '@amayui/age-format/src/asm/index.mts';
 import { iterate, instrByteLength, instrDwords, lengthInvariantHolds } from '../../apps/emulator/src/model/iterate.ts';
 
 const BIN_DIR = path.join(REPO_ROOT, 'dist', 'install');

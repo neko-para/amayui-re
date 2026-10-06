@@ -25,7 +25,7 @@ import {
   lzssDecompress,
   strideFor,
   sizeFor,
-} from '../src/agf.mjs';
+} from '../src/agf.mts';
 import { loadSample, fileOf, sha256 } from './samples.mjs';
 
 const sample = loadSample('assets/samples-agf');

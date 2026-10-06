@@ -33,7 +33,7 @@ export const THRESHOLD = 2;
  * @param {number} outputLen 期望解压出的字节数（调用方从段头拿）
  * @returns {{data: Buffer, size: number}} `size` = 实际写出字节数（输入提前耗尽时 < outputLen）
  */
-export function unpack(input, inputLen, outputLen) {
+export function unpack(input: Uint8Array, inputLen: number, outputLen: number): { data: Buffer; size: number } {
   const out = Buffer.alloc(outputLen);
   const text = new Uint8Array(N + F - 1);
   let r = N - F;
@@ -79,7 +79,7 @@ export function unpack(input, inputLen, outputLen) {
  * @param {Buffer|Uint8Array} input
  * @returns {Buffer} 压缩数据
  */
-export function pack(input) {
+export function pack(input: Uint8Array): Uint8Array {
   const size0 = input.length;
   const lson = new Int32Array(N + 1);
   const rson = new Int32Array(N + 257);
@@ -96,7 +96,7 @@ export function pack(input) {
   let matchLength = 0;
 
   /** 把 text_buf[r..r+F-1] 插入第 text_buf[r] 棵树，回填 matchPosition/matchLength */
-  const insertNode = (r) => {
+  const insertNode = (r: number): void => {
     let cmp = 1;
     let p = N + 1 + text[r];
     rson[r] = N;
@@ -138,7 +138,7 @@ export function pack(input) {
     dad[p] = N;
   };
 
-  const deleteNode = (p) => {
+  const deleteNode = (p: number): void => {
     if (dad[p] === N) return;
     let q;
     if (rson[p] === N) q = lson[p];
@@ -164,7 +164,7 @@ export function pack(input) {
   };
 
   const codeBuf = new Uint8Array(17); // [0] = 8 个 flag；[1..16] = 最多 8 个单位
-  const flush = (n) => {
+  const flush = (n: number): void => {
     for (let k = 0; k < n; k += 1) out[outputIndex++] = codeBuf[k];
   };
 
@@ -231,6 +231,6 @@ export function pack(input) {
 }
 
 /** 便捷：把一段数据压成"解压回原样"的 LZSS 字节（`unpack(pack(x), x.length) === x`） */
-export function roundTripBytes(data) {
+export function roundTripBytes(data: Uint8Array): Uint8Array {
   return pack(data);
 }

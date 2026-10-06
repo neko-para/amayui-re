@@ -84,8 +84,11 @@ packages/age-format/src/engine/handlers.mjs  ← opcode → handler（IDA 符号
 `import '../../apps/emulator/src/model/pools.ts'` —— 一条命令都别加。
 ⇒ 由此带来的**写法约束**：只许用**可擦除**语法（类型标注 / `interface` / `type` / `import type`）；
 ❌ 不用 `enum` / `namespace` / 构造器参数属性 / 装饰器（它们要**代码生成**，会要求构建步骤）。
-★ `apps/emulator` **尚未进 pnpm workspaces**（按批次 M4 才进），所以现在**没有** `apps/emulator/package.json`；
-它作为**路径**被守卫与工具直接引用。
+★ `apps/emulator` **已进 pnpm workspaces**（判据是"有没有自己的依赖"：它的模型要 import `@amayui/age-format`）
+⇒ 有 `apps/emulator/package.json`，跨包引用走包名（`@amayui/age-format/src/...`），
+**不用** `../../../../packages/...` 那种绑死目录层级的相对路径。
+★ 类型检查：`pnpm typecheck`（`tsc -p apps/emulator/tsconfig.json --noEmit`）。
+它**只做检查、不产出**；那份 tsconfig 里的 `erasableSyntaxOnly` 把"Node 剥壳跑不了的语法"提前变成类型错误。
 
 **它是什么**：`GLOBAL`（global 池族的基址/`*_alt`/计数槽）· `FRAME`（基址 / 步长 / 帧内偏移）·
 `LOCAL_POOLS`（6 个 local 池的计数与基址）· `GlobalPools` / `LocalPools` 两个视图 ·

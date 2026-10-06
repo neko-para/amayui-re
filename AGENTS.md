@@ -49,9 +49,29 @@
   守卫（`tools/test/*.mjs`）就 `import '../../apps/emulator/src/model/pools.ts'` —— 实测 `node` 直接从 `.mjs` import `.ts` 可用。
   ⇒ 写法约束：**只许可擦除语法**（类型标注 / `interface` / `type` / `import type`），
   ❌ 不用 `enum` / `namespace` / 构造器参数属性 / 装饰器（它们要**代码生成**，会逼出构建步骤）。
-  ★ 它**尚未进 workspaces**（按批次 M4 才进）⇒ 现在**没有** `apps/emulator/package.json`，它作为**路径**被引用。
+  ★ 它**已进 workspaces**（因为它的模型要 import `@amayui/age-format`）⇒ 有 `apps/emulator/package.json`，
+  依赖写在 `dependencies` 里、跨包引用走包名。入列表的判据是**"有没有自己的依赖"**，不是"在不在 `apps/`"。
 * 仓库内**其余一切 JS** —— `packages/*`、`tools/*`、守卫与测试 —— **一律直接写 `.mjs`**。
   根目录**不引入** `typescript` / `tsc` / `tsconfig`，因此没有构建步骤，`node` 直接跑。
+  ★ **类型声明写在拥有它的包里**：`packages/age-format` 的每个模块旁边是配对的 **`.d.mts`**
+  （`foo.mjs` ↔ `foo.d.mts` —— `.d.mts` 才是 `.mjs` 的配对形式，`.d.ts` 配 `.js`）。
+  ⇒ 消费方 `import type { Header } from '@amayui/age-format/src/asm/index.mjs'`，
+  **不许**在消费方自己声明别人的类型、也不许用 `as` 把跨包边界糊过去。
+  ★ `.d.mts` 与 `.mjs` **TypeScript 不交叉校验**（声明里写错名字 `tsc` 不响）⇒ 由
+  `tools/test/age-format-types.test.mjs` 机械对账两条：**幽灵声明**（声明了实现没有的）与
+  **公开面可达**（有配对声明，或已被入口再导出）。⚠ 它**验不了参数类型** —— 每条签名仍须读实现再写。
+* ★ **跨包引用一律走包名**（`@amayui/age-format/src/...`），**不要**用 `../../packages/...` 相对路径。
+  ★ **前提是"声明了依赖"**：pnpm 只为**在 `dependencies` 里写了**的 workspace 包建
+  `node_modules/@amayui/*` 链接。没声明 ⇒ 包名导入直接 `ERR_MODULE_NOT_FOUND`
+  （实测：`tools/package.json` 原先把 `age-format`/`ledger` 漏在 `dependencies` 之外，
+  于是"相对路径能跑、包名跑不了"）。加一个跨包引用 = 在消费者清单里加一行 `"@amayui/x": "workspace:*"` + `pnpm install`。
+  ★ 各包 `package.json` 的 `exports` 用 `"./*": "./*"`：**无构建 ⇒ 不做打包边界**，只是让"包内路径"有个显式入口集合。
+  ★ Windows 上那个链接是 **junction**（无提权时 pnpm 的降级形态）—— `tools/` 下的导入**实测能解析**（Node 走真实路径）。
+* ★ **类型检查只在 app 内、用 `noEmit`**：`pnpm typecheck`（= `tsc -p apps/emulator/tsconfig.json --noEmit`）。
+  `.ts` 仍然由 **Node 原生 type stripping** 直接跑 ⇒ **没有构建步骤**，`tsc` 的唯一职责是"把类型写错变成红灯"。
+  `erasableSyntaxOnly` 把"Node 剥壳不支持的语法"（`enum`/`namespace`/参数属性/装饰器）提前变成类型错误。
+  ★ `apps/emulator` 的模型**不用 Node 平台类型**（`Buffer` → 结构化的 `ByteSource`），
+  因此它的 tsconfig **不需要** `@types/node`。
 * 包管理**用 pnpm**（`pnpm-workspace.yaml` 是 workspace 真源）。禁止混用 `npm install` 生成 `package-lock.json`。
   ★ **结构类设置只写 `pnpm-workspace.yaml`，不写 `.npmrc`**：`.npmrc` 只读 auth 与 registry；
   定义 `node_modules` 结构的键写在那里会在 pnpm 11 起**静默失效**。
@@ -102,6 +122,7 @@ pnpm test:list                  # 看分级集合与每个文件的声明（先�
 pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
 pnpm test:mutation              # ★ **守卫自检**：改坏一处关键常量 ⇒ 确认对应守卫**当场红**（红得有意义）
+pnpm typecheck                  # ★ `tsc --noEmit`（只查 `apps/emulator` 的 `.ts`；**不产出** ⇒ 仍无构建步骤）
 ```
 
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`

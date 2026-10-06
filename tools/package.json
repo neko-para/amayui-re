@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@amayui/age-format": "workspace:*",
+    "@amayui/ledger": "workspace:*",
     "jimp": "^1.6.1"
   }
 }

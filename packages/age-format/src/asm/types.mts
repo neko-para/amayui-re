@@ -43,11 +43,11 @@ export const FIELD_NAMES = [
 ];
 
 /** 数值字段块相对"签名起点"的位移：v4 = 0、v5 = 8 */
-export const fieldBlockShift = (isVer5) => (isVer5 ? 8 : 0);
+export const fieldBlockShift = (isVer5: boolean): number => (isVer5 ? 8 : 0);
 
 
 /** `type` 字段 → 文本里的类型标签；空串表示"无标签"（标量 / 字符串 / 数组各有自己的写法） */
-export function getTypeLabel(type) {
+export function getTypeLabel(type: number): string {
   switch (type) {
     case 0: return '';
     case 1: return 'float';
@@ -80,15 +80,15 @@ export function getTypeLabel(type) {
 }
 
 /** 文本里的类型标签 → `type` 字段（`getTypeLabel` 的逆） */
-export function getType(name) {
-  const map = {
+export function getType(name: string): number {
+  const map: Record<string, number> = {
     'local-int': 9, 'local-ptr': 0xc, 'global-int': 3, 'global-float': 4,
     'global-string': 5, 'global-ptr': 6, 'global-float-ptr': 7, 'global-string-ptr': 8,
     'local-float': 0xa, 'local-string': 0xb, 'local-string-ptr': 0xe,
     float: 1, 'local-float-ptr': 0xd,
   };
   if (name in map) return map[name];
-  const special = {
+  const special: Record<string, number> = {
     '0x8003': 0x8003, '0x8005': 0x8005, '0x8009': 0x8009, '0x800B': 0x800B,
     unknown0x8003: 0x8003, unknown0x8005: 0x8005,
     unknown0x8009: 0x8009, unknown0x800B: 0x800B,
@@ -98,14 +98,22 @@ export function getType(name) {
 }
 
 /** 控制流指令（操作数可能是 label） */
-export const isControlFlowOpcode = (op) =>
+export const isControlFlowOpcode = (op: number): boolean =>
   [0x8c, 0x8f, 0xa0, 0xcc, 0xfb, 0xd4, 0x90, 0x7b, 0xa2, 0xa3].includes(op);
 
 /** 数组指令（第 2 个操作数是"数组块引用"） */
-export const isArrayOpcode = (op) => op === 0x64;
+export const isArrayOpcode = (op: number): boolean => op === 0x64;
+
+/** `isLabelArgument` 要看的那两部分（只声明**本函数用到的**形状，不把整个指令结构搬进来） */
+export interface LabelArgProbe {
+  /** 指令定义（本函数只读 `opcode`） */
+  readonly def: { readonly opcode: number };
+  /** 操作数数组（本函数只读第 `x` 个的 `raw_data`） */
+  readonly args: readonly { readonly raw_data: number }[];
+}
 
 /** 第 `x` 个操作数是不是 label（`0xFFFFFFFF` = 无 label 哨兵） */
-export function isLabelArgument(instr, x) {
+export function isLabelArgument(instr: LabelArgProbe, x: number): boolean {
   const { opcode } = instr.def;
   const raw = instr.args[x].raw_data;
   if ((opcode === 0x8c || opcode === 0x8f) && raw !== 0xffffffff) return true;
@@ -120,6 +128,6 @@ export function isLabelArgument(instr, x) {
 }
 
 /** 十六进制（小写、无补零；对应 C++ `std::hex` 默认） */
-export const hex = (v) => (v >>> 0).toString(16);
+export const hex = (v: number): string => (v >>> 0).toString(16);
 /** 8 位小写十六进制（对应 `std::setw(8) << std::setfill('0') << std::hex`） */
-export const labelHex = (v) => (v >>> 0).toString(16).padStart(8, '0');
+export const labelHex = (v: number): string => (v >>> 0).toString(16).padStart(8, '0');

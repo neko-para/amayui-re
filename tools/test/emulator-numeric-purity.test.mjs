@@ -32,7 +32,7 @@ import { REPO_ROOT } from '../lib/paths.mjs';
 import { buildIndex, spanOfFunction } from '../lib/disasm.mjs';
 import { NUMERIC_OPS, TOUCHES_ENGINE_STATE } from '../../apps/emulator/src/model/numeric-ops.ts';
 // ★ handler 名（`sub_xxxxxx`）是**逆向观察**（哪段代码实现了它）⇒ 在知识层，不在模拟器里
-import { OPCODE_HANDLERS } from '../../packages/age-format/src/engine/handlers.mjs';
+import { OPCODE_HANDLERS } from '@amayui/age-format/src/engine/handlers.mts';
 
 const FILES_DIR = path.join(REPO_ROOT, 'corpus', 'disasm', 'files');
 const listing = (() => {

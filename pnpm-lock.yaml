@@ -11,9 +11,18 @@ importers:
 
   .:
     devDependencies:
+      '@types/node':
+        specifier: ^26.6.4
+        version: 26.6.4
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+
+  apps/emulator:
+    dependencies:
+      '@amayui/age-format':
+        specifier: workspace:*
+        version: link:../../packages/age-format
 
   apps/workbench:
     dependencies:
@@ -29,7 +38,7 @@ importers:
     devDependencies:
       '@vitejs/plugin-vue':
         specifier: ^6.0.9
-        version: 6.0.9(vite@8.3.2)(vue@3.5.43(typescript@5.9.3))
+        version: 6.0.9(vite@8.3.2(@types/node@26.6.4))(vue@3.5.43(typescript@5.9.3))
       monaco-editor:
         specifier: ^0.57.0
         version: 0.57.0
@@ -38,12 +47,14 @@ importers:
         version: 5.9.3
       vite:
         specifier: ^8.3.2
-        version: 8.3.2
+        version: 8.3.2(@types/node@26.6.4)
       vue-tsc:
         specifier: ^3.3.11
         version: 3.3.11(typescript@5.9.3)
 
   packages/age-format: {}
+
+  packages/host-input: {}
 
   packages/ledger: {}
 
@@ -59,8 +70,26 @@ importers:
         specifier: ~3.18.4
         version: 3.18.4
 
+  plugins/pnpm-priv:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.4
+        version: 4.0.4
+      '@deepseek-ai/dsh-tools':
+        specifier: 0.2.0-rc.2
+        version: 0.2.0-rc.2(c6e351a6a6cfd1c2a664558bffcd410d)
+      '@deepseek-ai/schemastery':
+        specifier: ~3.18.4
+        version: 3.18.4
+
   tools:
     dependencies:
+      '@amayui/age-format':
+        specifier: workspace:*
+        version: link:../packages/age-format
+      '@amayui/ledger':
+        specifier: workspace:*
+        version: link:../packages/ledger
       jimp:
         specifier: ^1.6.1
         version: 1.6.1
@@ -486,6 +515,9 @@ packages:
   '@types/node@16.9.1':
     resolution: {integrity: sha512-QpLcX9ZSsq3YYUUnD3nFDY8H7wctAhQj/TFKL8Ya8v5fMm3CFXxo8zStsLAl780ltoYoo1WvKUVGBQK+1ifr7g==}
 
+  '@types/node@26.6.4':
+    resolution: {integrity: sha512-ldVPDCzj7fsaGZrLB0NuHuTvJcsNasysBAqMolr/cgxrLd1xbqxIr3XJiPnHHJUCxj5sNF1vnRj9aWnrVh5Jcg==}
+
   '@types/trusted-types@2.0.7':
     resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
 
@@ -855,6 +887,9 @@ packages:
   uint8array-extras@1.6.0:
     resolution: {integrity: sha512-8iAasVS4wUx0gPLjH8Xtz2PeDzTSiy8QiLGu2DT3X5GU+egFEQhpnbtkehbAwjvDcxIERmCYcysiODFmE3Ud0Q==}
     engines: {node: '>=18'}
+
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   utif2@4.1.0:
     resolution: {integrity: sha512-+oknB9FHrJ7oW7A2WZYajOcv4FcDR4CfoGB0dPNfxbi4GO05RRnFmt5oa23+9w32EanrYcSJWspUiJkLMs+37w==}
@@ -1414,13 +1449,17 @@ snapshots:
 
   '@types/node@16.9.1': {}
 
+  '@types/node@26.6.4':
+    dependencies:
+      undici-types: 8.9.0
+
   '@types/trusted-types@2.0.7':
     optional: true
 
-  '@vitejs/plugin-vue@6.0.9(vite@8.3.2)(vue@3.5.43(typescript@5.9.3))':
+  '@vitejs/plugin-vue@6.0.9(vite@8.3.2(@types/node@26.6.4))(vue@3.5.43(typescript@5.9.3))':
     dependencies:
       '@rolldown/pluginutils': 1.0.1
-      vite: 8.3.2
+      vite: 8.3.2(@types/node@26.6.4)
       vue: 3.5.43(typescript@5.9.3)
 
   '@volar/language-core@2.4.28':
@@ -1805,6 +1844,8 @@ snapshots:
 
   uint8array-extras@1.6.0: {}
 
+  undici-types@8.9.0: {}
+
   utif2@4.1.0:
     dependencies:
       pako: 1.0.11
@@ -1814,7 +1855,7 @@ snapshots:
       evtd: 0.2.4
       vue: 3.5.43(typescript@5.9.3)
 
-  vite@8.3.2:
+  vite@8.3.2(@types/node@26.6.4):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -1822,6 +1863,7 @@ snapshots:
       rolldown: 1.2.12
       tinyglobby: 0.2.17
     optionalDependencies:
+      '@types/node': 26.6.4
       fsevents: 2.3.3
 
   vooks@0.2.12(vue@3.5.43(typescript@5.9.3)):

@@ -28,7 +28,7 @@ export const DOMAIN = {
   id: 'mutate',
   title: '守卫自检（变异测试）：改坏一处关键常量 ⇒ 确认指定守卫**当场红**',
   data: [
-    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mjs` · `apps/emulator/src/model/*.mjs`）—— ★ **临时改写后必还原**',
+    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.mjs`）—— ★ **临时改写后必还原**',
     '`tools/mutate-check.mjs` 里的**变异清单**（本工具的真源：一处破坏 + 该抓它的守卫）',
   ],
   access: 'r（读原文进内存）→ rw（写入变异）→ **w（还原，且比对全文）**；★ 不写别的文件、不碰旧仓',
@@ -48,25 +48,25 @@ export { MUTATIONS };
  */
 const MUTATIONS = [
   {
-    file: 'packages/age-format/src/asm/value-codec.mjs',
+    file: 'packages/age-format/src/asm/value-codec.mts',
     from: 'rol32(x >>> 0, 11)', to: 'rol32(x >>> 0, 12)',
     guard: 'tools/test/engine-value-codec.test.mjs',
     what: 'DEC 的移位量 11 → 12',
   },
   {
-    file: 'packages/age-format/src/asm/value-codec.mjs',
+    file: 'packages/age-format/src/asm/value-codec.mts',
     from: 'ror32(v >>> 0, 7)', to: 'ror32(v >>> 0, 8)',
     guard: 'tools/test/engine-value-codec.test.mjs',
     what: 'ENC 的移位量 7 → 8',
   },
   {
-    file: 'packages/age-format/src/engine/layout.mjs',
+    file: 'packages/age-format/src/engine/layout.mts',
     from: 'stride: 0x78,', to: 'stride: 0x80,',
     guard: 'tools/test/emulator-model.test.mjs',
     what: '帧步长 0x78 → 0x80（★ 变量在布局知识层，不在模拟器里）',
   },
   {
-    file: 'packages/age-format/src/engine/layout.mjs',
+    file: 'packages/age-format/src/engine/layout.mts',
     from: "{ name: 'float', count: 0x20, base: 0x38 }",
     to: "{ name: 'float', count: 0x20, base: 0x84 }",
     guard: 'tools/test/emulator-model.test.mjs',

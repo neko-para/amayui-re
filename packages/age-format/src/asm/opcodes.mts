@@ -31,11 +31,38 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const OPCODES_JSON = path.join(__dirname, 'instruction-set.json');
 
 /**
+ * 指令表里的一条（= `instruction-set.json` 的一个元素）。
+ * ★ 类型住在**实现旁边**（本包全 `.mts`，一份真源）：消费方
+ *   `import type { OpcodeDef } from '@amayui/age-format/src/asm/index.mts'`，
+ *   不许各自再声明一份（两边说法不一致时没人会发现）。
+ */
+export interface OpcodeDef {
+  readonly opcode: number;
+  readonly name: string;
+  readonly argc: number;
+  readonly aliases?: readonly string[];
+  /** 表里可能还有别的列（本层不解释语义） */
+  readonly [k: string]: unknown;
+}
+
+/** 指令表：`loadOpcodeTable()` 的返回形状 */
+export interface OpcodeTable {
+  /** 原始数组（顺序即文件顺序） */
+  readonly entries: readonly OpcodeDef[];
+  /** opcode → 条目 */
+  readonly byOpcode: Map<number, OpcodeDef>;
+  /** name / 别名 → 条目 */
+  readonly byLabel: Map<string, OpcodeDef>;
+  /** 表的来源路径（诊断用） */
+  readonly source: string;
+}
+
+/**
  * 加载指令表。`file` 缺省指向本目录 `instruction-set.json`。
  * 返回 `{ entries, byOpcode, byLabel, source }`：`entries` 是原始数组，
  * `byOpcode` 是 opcode → 条目，`byLabel` 是 name/别名 → 条目。
  */
-export function loadOpcodeTable(file) {
+export function loadOpcodeTable(file?: string): OpcodeTable {
   const p = file || OPCODES_JSON;
   const entries = JSON.parse(fs.readFileSync(p, 'utf8'));
   if (!Array.isArray(entries)) throw new Error(`指令表不是数组: ${p}`);
@@ -53,18 +80,18 @@ export function loadOpcodeTable(file) {
 }
 
 /** 规范名 `iXXX` → opcode；不是这个形状 ⇒ null */
-export function normalizedOpcode(token) {
+export function normalizedOpcode(token: string): number | null {
   const m = /^i([0-9a-fA-F]+)$/.exec(token);
   return m ? parseInt(m[1], 16) : null;
 }
 
 /** opcode → 指令条目；未知 ⇒ null */
-export function instructionForOpCode(table, op) {
+export function instructionForOpCode(table: OpcodeTable, op: number): OpcodeDef | null {
   return table.byOpcode.get(op) ?? null;
 }
 
 /** 助记符（name 或 aliases）→ 指令条目；未知 ⇒ null */
-export function instructionForLabel(table, label) {
+export function instructionForLabel(table: OpcodeTable, label: string): OpcodeDef | null {
   return table.byLabel.get(label) ?? null;
 }
 
@@ -72,7 +99,7 @@ export function instructionForLabel(table, label) {
  * 指令的显示名（反汇编输出用）。
  * 有助记符用助记符；无助记符则按 opcode 生成规范 `iXXX`（`XXX` 左补 0 至少 3 位）。
  */
-export function opcodeLabel(def) {
+export function opcodeLabel(def: OpcodeDef): string {
   if (def.name) return def.name;
   return 'i' + (def.opcode >>> 0).toString(16).padStart(3, '0');
 }
@@ -81,7 +108,7 @@ export function opcodeLabel(def) {
  * 解析指令 token（重汇编用）：先按助记符（name/aliases）查；否则按规范 `iXXX` 反查 opcode。
  * ⇒ "反汇编输出（含未命名指令的 `iXXX`）→ 重汇编" 不丢信息。
  */
-export function instructionForToken(table, token) {
+export function instructionForToken(table: OpcodeTable, token: string): OpcodeDef | null {
   const found = table.byLabel.get(token);
   if (found) return found;
   const op = normalizedOpcode(token);
@@ -90,4 +117,4 @@ export function instructionForToken(table, token) {
 }
 
 /** 一条指令在字节码里占多少字节（`4 + argc*8`） */
-export const instructionByteLength = (def) => 4 + ((def.argc >>> 0) << 3);
+export const instructionByteLength = (def: Pick<OpcodeDef, 'argc'>): number => 4 + ((def.argc >>> 0) << 3);

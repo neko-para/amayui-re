@@ -33,6 +33,54 @@
  * 见 `lzss.mjs` 头注释：这里匹配长度是 `(hi & 0x0f) + 3`、起始窗口位 `4096-18`，
  * 而 ALF 那套是 `+2`。两者都叫 LZSS、都能解压对方的部分数据，但**字节层不互逆** ⇒ 各自实现。
  */
+/**
+ * 一个 AGF/ACIF 容器（`readAgfBuffer()` 的**真实**返回形状 —— 字段逐字抄自它的 `return`）。
+ * ★ 不猜：本接口由实现的 `return` 决定；改实现要同步改这里。
+ */
+/** ACIF 变体的附加段（readAcifSection 的产物；没有 ⇒ null） */
+export interface AcifSection {
+  offset: number;
+  gap: Buffer;
+  prefix: Buffer;
+  alphaUnpackedSize: number;
+  alphaPackedSize: number;
+  alphaRaw: Buffer;
+  alpha: Buffer;
+  end: number;
+}
+
+export interface AgfImage {
+  header: Buffer;
+  /** 容器版本（头里偏移 4 的 int32） */
+  version: number;
+  metaUnpackedSize: number;
+  metaPackedSize: number;
+  metaRaw: Buffer;
+  /** meta 解包后的字节（`parseWhBpp` / `extractPaletteRgb` 吃它） */
+  meta: Buffer;
+  bodyHeaderOffset: number;
+  bodyHeader: Buffer;
+  bodyUnknown: number;
+  bodyUnpackedSize: number;
+  bodyPackedSize: number;
+  bodyRaw: Buffer;
+  /** 图像体解包后的字节 */
+  body: Buffer;
+  /** ACIF 附加段（不是布尔：它带 offset/gap/prefix/alpha 等字段）；没有 ⇒ null */
+  acif: AcifSection | null;
+  /** 尾部附加段（可缺） */
+  trailer?: Buffer;
+  width: number;
+  height: number;
+  bpp: number;
+  /** 头里偏移 8 的第二个版本号 */
+  version2: number;
+  /** ★ 读进来时的**原始文件缓冲**（`roundTripEqual` 逐字节比对用） */
+  buf: Buffer;
+  /** 其余字段本层不解释（`writeAgf` 的 override 会动态取用） */
+  [k: string]: unknown;
+}
+
 import { Buffer } from 'node:buffer';
 import fs from 'node:fs';
 
@@ -51,11 +99,11 @@ export const MIN_MATCH = 3;
 
 /**
  * 解压 AGF 族的 LZSS 数据。
- * @param {Buffer|Uint8Array} data
+ * @param {Buffer|Buffer} data
  * @param {number} outputLen
  * @returns {Buffer}
  */
-export function lzssDecompress(data, outputLen) {
+export function lzssDecompress(data: Buffer, outputLen: number): Buffer {
   const out = Buffer.alloc(outputLen);
   const frame = Buffer.alloc(FRAME);
   let outPtr = 0;
@@ -96,15 +144,15 @@ export function lzssDecompress(data, outputLen) {
 /**
  * 压缩 AGF 族的 LZSS 数据（算法与 ALF 族同源，**两处参数不同**：最短匹配 3、mask 换块时机）。
  * ★ 与 ALF 那套一样是确定性的；能否对真实文件逐字节复现由调用方实测（见 `.tmp` 探针结论）。
- * @param {Buffer|Uint8Array} input
+ * @param {Buffer|Buffer} input
  * @returns {Buffer}
  */
-export function lzssCompress(input) {
+export function lzssCompress(input: Buffer): Buffer {
   const size0 = input.length;
   const lson = new Int32Array(FRAME + 1);
   const rson = new Int32Array(FRAME + 257);
   const dad = new Int32Array(FRAME + 1);
-  const text = new Uint8Array(FRAME + 18 - 1);
+  const text = new Buffer(FRAME + 18 - 1);
   const out = Buffer.alloc(size0 * 2 + Math.ceil(size0 / 8) + 32);
   let outputIndex = 0;
 
@@ -115,7 +163,7 @@ export function lzssCompress(input) {
   let matchLength = 0;
   const maxLen = 18;
 
-  const insertNode = (r) => {
+  const insertNode = (r: number): void => {
     let cmp = 1;
     let p = FRAME + 1 + text[r];
     rson[r] = FRAME;
@@ -147,7 +195,7 @@ export function lzssCompress(input) {
     else lson[dad[p]] = r;
     dad[p] = FRAME;
   };
-  const deleteNode = (p) => {
+  const deleteNode = (p: number): void => {
     if (dad[p] === FRAME) return;
     let q;
     if (rson[p] === FRAME) q = lson[p];
@@ -170,8 +218,8 @@ export function lzssCompress(input) {
     dad[p] = FRAME;
   };
 
-  const codeBuf = new Uint8Array(17);
-  const flush = (n) => { for (let k = 0; k < n; k += 1) out[outputIndex++] = codeBuf[k]; };
+  const codeBuf = new Buffer(17);
+  const flush = (n: number): void => { for (let k = 0; k < n; k += 1) out[outputIndex++] = codeBuf[k]; };
 
   let codeBufPtr = 1;
   let mask = 1;
@@ -239,7 +287,7 @@ export function lzssCompress(input) {
 // ─────────────────────────────────────────────────────────── 元数据（像素排布）
 
 /** 每行字节数（**4 字节对齐**：8bpp 与 24bpp 都要补，32bpp 天然对齐） */
-export function strideFor(w, bpp) {
+export function strideFor(w: number, bpp: number): number {
   if (bpp === 8) return (w + 3) & -4;
   if (bpp === 24) return (w * 3 + 3) & -4;
   if (bpp === 32) return w * 4;
@@ -247,13 +295,13 @@ export function strideFor(w, bpp) {
 }
 
 /** 一整帧的字节数（含行填充） */
-export function sizeFor(w, h, bpp) {
+export function sizeFor(w: number, h: number, bpp: number): number {
   const s = strideFor(w, bpp);
   return s > 0 ? s * h : 0;
 }
 
 /** 从元数据里取宽高与 bpp（`injectAcgfFixed` 写出的口径：+20/+24/+30） */
-export function parseWhBpp(meta) {
+export function parseWhBpp(meta: Buffer): number[] {
   let w = 0;
   let h = 0;
   let bpp = 0;
@@ -284,7 +332,7 @@ export function parseWhBpp(meta) {
  *   ② 元数据恰好 1024 字节左右（没有头部）⇒ 调色板就是**最后 1024 字节**。
  * ★ 一项都取不到时返回 `null` —— **不编造灰度**（旧仓会造灰度表；静默给出错颜色比报错更难查）。
  */
-export function extractPaletteRgb(meta) {
+export function extractPaletteRgb(meta: Buffer): number[][] | null {
   let palOff;
   if (meta.length >= 56 + 4) palOff = 56;
   else if (meta.length >= 1024) palOff = meta.length - 1024;
@@ -301,7 +349,7 @@ export function extractPaletteRgb(meta) {
 // ─────────────────────────────────────────────────────────── 容器读写
 
 /** 读一个"可压缩段"：`unpacked === packed` 时原样，否则解压 */
-function readPackedSection(buf, off, unpacked, packed) {
+function readPackedSection(buf: Buffer, off: number, unpacked: number, packed: number): Buffer {
   const raw = buf.subarray(off, off + packed);
   if (raw.length !== packed) throw new Error(`段越界：期望 ${packed} 字节，实际 ${raw.length}`);
   return unpacked === packed ? Buffer.from(raw) : lzssDecompress(raw, unpacked);
@@ -311,13 +359,13 @@ function readPackedSection(buf, off, unpacked, packed) {
  * 读一个 AGF（**只支持 ACGF**；无头变体不猜）。
  * @param {string} file
  */
-export function readAgf(file) {
+export function readAgf(file: string): AgfImage {
   const buf = fs.readFileSync(file);
   return readAgfBuffer(buf, file);
 }
 
 /** 同上，但吃内存里的字节（给"从 ALF 里解出来的 AGF"用） */
-export function readAgfBuffer(buf, file = '<memory>') {
+export function readAgfBuffer(buf: Buffer, file = '<memory>'): AgfImage {
   if (buf.length < HEADER_SIZE + BODY_HDR_SIZE) throw new Error(`太短，不是 ACGF：${buf.length} 字节`);
   const magic = buf.subarray(0, 4).toString('latin1');
   if (magic !== MAGIC) throw new Error(`不是 ACGF（前 4 字节 ${JSON.stringify(magic)}）：${file}`);
@@ -397,7 +445,7 @@ export function readAgfBuffer(buf, file = '<memory>') {
  * @param {object} agf
  * @param {{metaRaw?: Buffer, bodyRaw?: Buffer, bodyUnpackedSize?: number, alphaRaw?: Buffer, alphaUnpackedSize?: number}} [override]
  */
-export function writeAgf(agf, override = {}) {
+export function writeAgf(agf: AgfImage, override: Record<string, any> = {}): Buffer {
   const metaRaw = override.metaRaw ?? agf.metaRaw;
   const bodyRaw = override.bodyRaw ?? agf.bodyRaw;
   const alphaRaw = override.alphaRaw ?? (agf.acif ? agf.acif.alphaRaw : null);
@@ -430,10 +478,17 @@ export function writeAgf(agf, override = {}) {
 
 /**
  * 按实测规则把一段数据装成"盘上形态"：**压得小就压，否则原样**（见文件头 ★★）。
- * @param {Buffer|Uint8Array} data
+ * @param {Buffer|Buffer} data
  * @returns {{raw: Buffer, unpackedSize: number, compressed: boolean}}
  */
-export function packSection(data) {
+/** 一个"可压缩段"打好的结果 */
+export interface PackedSection {
+  raw: Buffer;
+  unpackedSize: number;
+  compressed: boolean;
+}
+
+export function packSection(data: Buffer): PackedSection {
   const src = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const packed = lzssCompress(src);
   if (packed.length < src.length) return { raw: packed, unpackedSize: src.length, compressed: true };
@@ -441,7 +496,7 @@ export function packSection(data) {
 }
 
 /** 便捷：只判"这个 AGF 读进来再写出去是否逐字节相同" */
-export function roundTripEqual(agf) {
+export function roundTripEqual(agf: AgfImage): boolean {
   const out = writeAgf(agf);
   return out.length === agf.buf.length && out.equals(agf.buf);
 }
@@ -454,7 +509,7 @@ export function roundTripEqual(agf) {
  * @param {object} agf `readAgf` 的返回值
  * @returns {{width:number, height:number, rgba:Buffer}}
  */
-export function decodeRgba(agf) {
+export function decodeRgba(agf: AgfImage): { width: number; height: number; rgba: Buffer } {
   const { width: w, height: h, bpp, body, meta, acif } = agf;
   const s = strideFor(w, bpp);
   const need = s * h;
@@ -473,10 +528,10 @@ export function decodeRgba(agf) {
       const d = (y * w + x) * 4;
       if (bpp === 8) {
         const idx = pixels[srcRow + x];
-        const c = palette[idx];
+        const c = palette![idx];
         if (!c) {
           throw new Error(
-            `8bpp 像素索引 ${idx} 超出调色板范围（只有 ${palette.length} 项）—— 这是坏件或调色板被截断得更狠`,
+            `8bpp 像素索引 ${idx} 超出调色板范围（只有 ${palette!.length} 项）—— 这是坏件或调色板被截断得更狠`,
           );
         }
         rgba[d] = c[0];
@@ -508,7 +563,7 @@ export function decodeRgba(agf) {
  * @param {number} bpp
  * @param {Array<[number,number,number]>|null} [paletteRgb] 8bpp 时必给（不量化、只做最近色）
  */
-export function encodeBody(img, bpp, paletteRgb = null) {
+export function encodeBody(img: { width: number; height: number; rgba: Buffer }, bpp: number, paletteRgb: number[][] | null = null): Buffer {
   const { width: w, height: h, rgba } = img;
   const s = strideFor(w, bpp);
   const out = Buffer.alloc(s * h);
@@ -547,7 +602,7 @@ export function encodeBody(img, bpp, paletteRgb = null) {
 }
 
 /** 从 RGBA 抽 alpha 通道（ACIF 存的就是这个） */
-export function alphaFromRgba(img) {
+export function alphaFromRgba(img: { width: number; height: number; rgba: Buffer }): Buffer {
   const n = img.width * img.height;
   const out = Buffer.alloc(n);
   for (let i = 0; i < n; i += 1) out[i] = img.rgba[i * 4 + 3];

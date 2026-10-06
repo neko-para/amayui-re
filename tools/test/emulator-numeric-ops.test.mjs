@@ -24,7 +24,7 @@ import { REPO_ROOT } from '../lib/paths.mjs';
 import { NUMERIC_OPS, SEMANTICS_UNKNOWN, UNUSED_IN_CORPUS } from '../../apps/emulator/src/model/numeric-ops.ts';
 // ★ handler 名是**逆向观察**（哪段代码实现了它）⇒ 来自知识层，不在模拟器里。
 //   本守卫就是"布局/观察 ↔ 语义"的对账方：拿知识层的 handler 表回语料现算复核。
-import { OPCODE_HANDLERS } from '../../packages/age-format/src/engine/handlers.mjs';
+import { OPCODE_HANDLERS } from '@amayui/age-format/src/engine/handlers.mts';
 
 const DISPATCH_BASE = 0xa509c;
 const RE_DISPATCH = /mov\s+dword ptr \[[a-z]{2,3}\+(0A5[0-9A-F]{3})h\], offset (sub_[0-9A-F]+)/;

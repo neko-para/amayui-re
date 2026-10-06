@@ -26,7 +26,7 @@
  *   所以本层**不写容量** —— 用稀疏 Map，`null` 表示"这里没东西"，而不是编一个数出来。
  */
 
-import { decInt, encInt, encZero, intSlotOffset } from '../../../../packages/age-format/src/asm/value-codec.mjs';
+import { decInt, encInt, encZero, intSlotOffset } from '@amayui/age-format/src/asm/value-codec.mts';
 
 /** 一个槽里装得下的东西 */
 export type SlotValue = number | string;

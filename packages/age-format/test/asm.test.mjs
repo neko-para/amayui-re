@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { disassemble, assemble, loadOpcodeTable } from '../src/asm/index.mjs';
+import { disassemble, assemble, loadOpcodeTable } from '../src/asm/index.mts';
 
 test('ASM：指令表只含**格式层**四列（知识层字段不得入库）', () => {
   const table = loadOpcodeTable();

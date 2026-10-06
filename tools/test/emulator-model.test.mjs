@@ -23,7 +23,7 @@ import { REPO_ROOT } from '../lib/paths.mjs';
 // ★ 两边的分工（这就是本支守卫的意义）：
 //   布局常量来自 **age-format 的知识层**（带 EA 出处，随这份镜像而变）
 //   语义模型来自 **模拟器**（池有哪几个 / 编码与否 / 越界怎么办 —— 不含偏移）
-import { GLOBAL_SLOTS as GLOBAL, FRAME_LAYOUT as FRAME, FRAME_SLOTS_OBSERVED, LOCAL_POOL_SLOTS } from '../../packages/age-format/src/engine/layout.mjs';
+import { GLOBAL_SLOTS as GLOBAL, FRAME_LAYOUT as FRAME, FRAME_SLOTS_OBSERVED, LOCAL_POOL_SLOTS } from '@amayui/age-format/src/engine/layout.mts';
 import { LOCAL_POOLS, GlobalPools, LocalPools } from '../../apps/emulator/src/model/pools.ts';
 import * as poolsModule from '../../apps/emulator/src/model/pools.ts';
 

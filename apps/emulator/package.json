@@ -1,0 +1,9 @@
+{
+  "name": "@amayui/emulator",
+  "private": true,
+  "type": "module",
+  "description": "《天結いキャッスルマイスター》引擎的重新实现（按建模语义，不绑镜像布局）。★ 无构建步骤：.ts 由 Node 原生 type stripping 跑，pnpm typecheck 只做 noEmit 类型检查。",
+  "dependencies": {
+    "@amayui/age-format": "workspace:*"
+  }
+}

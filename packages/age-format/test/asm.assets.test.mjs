@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { disassemble, assemble } from '../src/asm/index.mjs';
+import { disassemble, assemble } from '../src/asm/index.mts';
 import { loadSample, fileOf, sha256 } from './samples.mjs';
 
 const sample = loadSample('assets/samples-asm');

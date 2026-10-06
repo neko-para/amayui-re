@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseWhBpp } from '../src/agf.mjs';
+import { parseWhBpp } from '../src/agf.mts';
 
 test('AGF：parseWhBpp 的兜底分支（+20/+24 为 0 时退回 +0/+4）', () => {
   const meta = Buffer.alloc(32);

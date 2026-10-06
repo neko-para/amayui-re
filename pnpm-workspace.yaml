@@ -1,9 +1,13 @@
 # pnpm 的 workspace 真源（package.json 的 "workspaces" 字段保留，供不认 yaml 的工具读）
-# ★ `apps/emulator` 与 `apps/inspector` 仍只有"重写计划"占位，代码还没搬进来，等 M4/M7 落地时再入（见 docs/00-origin/decisions.md）。
-# ★ `apps/workbench` 是**真项目**（有自己的依赖与构建），所以它入列表 —— 判据不是"在不在 apps/"，而是"有没有自己的工具链"。
+# ★ 入列表的判据不是"在不在 apps/"，而是**有没有自己的依赖**：
+#   `apps/emulator` 现在有 `@amayui/age-format` 依赖（它的模型要用编解码与格式层）⇒ **入列表**。
+#   理由不只是"能装依赖"：**只有声明了依赖，pnpm 才建 `node_modules/@amayui/*` 链接**，
+#   包名导入才解析得到（否则只能写 `../../../../packages/...` 这种绑死目录层级的相对路径）。
+# ★ `apps/inspector` 仍只有"重写计划"占位（无代码、无依赖），等 M7 落地时再入。
 packages:
   - packages/*
   - tools
+  - apps/emulator
   - apps/workbench
   # ★ `plugins/*` 入列表的判据与 `apps/workbench` 相同：**它有自己的依赖**
   #   （`@deepseek-ai/dsh-tools` / `schemastery` 是普通 dependencies ⇒ 由本仓 `pnpm install` 装，

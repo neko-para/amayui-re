@@ -44,7 +44,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { assemble, disassemble } from '../../packages/age-format/src/asm/index.mjs';
+import { assemble, disassemble } from '@amayui/age-format/src/asm/index.mts';
 import { isAgeScript, isBinName, openRoot } from './bin-source.mjs';
 import { DEFAULT_SUBS, dictSha, loadDict, makeMapper } from './cn-jp.mjs';
 import { sha256buf } from './fsx.mjs';

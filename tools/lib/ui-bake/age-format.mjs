@@ -7,7 +7,7 @@
  *
  * 方向：`tools/lib/**` → `packages/age-format`（包是更底层的格式层，不是 CLI）。
  */
-export { readAlf, indexEntries } from '../../../packages/age-format/src/alf.mjs';
+export { readAlf, indexEntries } from '@amayui/age-format/src/alf.mts';
 export {
   readAgfBuffer,
   decodeRgba,
@@ -17,4 +17,4 @@ export {
   packSection,
   parseWhBpp,
   extractPaletteRgb,
-} from '../../../packages/age-format/src/agf.mjs';
+} from '@amayui/age-format/src/agf.mts';

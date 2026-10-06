@@ -122,8 +122,10 @@ export const NOT_IN_FAMILY = {
   opcodes: [0x64, 0x6c, 0x61, 0x63, 0x12c, 0x1b0, 0x2c9, 0x2d8, 0x12f, 0x192, 0x193, 0x194, 0x195, 0x1a6, 0x1b2, 0x2c5, 0x2c6, 0x2c7, 0x2c8, 0x2de, 0x2ec],
 };
 
-export const byOpcode = (op) => NUMERIC_OPS.find((o) => o.opcode === op) ?? null;
-export const hasSemantics = (op) => {
+/** 按 opcode 找一条（不在族里 ⇒ `null`） */
+export const byOpcode = (op: number): NumericOp | null => NUMERIC_OPS.find((o) => o.opcode === op) ?? null;
+/** 这条的语义是否已知（"未解"的**不许**被当成已知用） */
+export const hasSemantics = (op: number): boolean => {
   const e = byOpcode(op);
   return Boolean(e && !e.semanticsUnknown);
 };

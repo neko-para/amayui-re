@@ -29,7 +29,7 @@ import path from 'node:path';
 
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { buildIndex, spanOfFunction, switchTables } from '../lib/disasm.mjs';
-import { getTypeLabel } from '../../packages/age-format/src/asm/types.mjs';
+import { getTypeLabel } from '@amayui/age-format/src/asm/types.mts';
 
 const FILES_DIR = path.join(REPO_ROOT, 'corpus', 'disasm', 'files');
 const listing = (() => {
@@ -146,7 +146,7 @@ test('★ 类型表 vs 引擎 case 集：取址原语枚举的每个 type 都必
 });
 
 test('★ 类型表的逆映射与正映射必须同构（`getType(getTypeLabel(v)) === v`）', { skip }, async () => {
-  const { getType } = await import('../../packages/age-format/src/asm/types.mjs');
+  const { getType } = await import('@amayui/age-format/src/asm/types.mts');
   const bad = [];
   for (let v = 0; v <= 0xd; v += 1) {
     let label;
