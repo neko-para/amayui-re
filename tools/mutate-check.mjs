@@ -28,7 +28,7 @@ export const DOMAIN = {
   id: 'mutate',
   title: '守卫自检（变异测试）：改坏一处关键常量 ⇒ 确认指定守卫**当场红**',
   data: [
-    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.mjs`）—— ★ **临时改写后必还原**',
+    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.ts`）—— ★ **临时改写后必还原**',
     '`tools/mutate-check.mjs` 里的**变异清单**（本工具的真源：一处破坏 + 该抓它的守卫）',
   ],
   access: 'r（读原文进内存）→ rw（写入变异）→ **w（还原，且比对全文）**；★ 不写别的文件、不碰旧仓',
@@ -92,6 +92,20 @@ const MUTATIONS = [
     to: "{ opcode: 0x50, name: 'add', argc: 2,",
     guard: 'tools/test/emulator-numeric-ops.test.mjs',
     what: 'add 的 argc 3 → 2（argc 错 ⇒ 整条流错位）',
+  },
+  {
+    file: 'apps/emulator/src/model/pools.ts',
+    from: 'return [...m.entries()].sort((a, b) => a[0] - b[0]);',
+    to: 'return [...m.entries()];',
+    guard: 'tools/test/emulator-snapshot.test.mjs',
+    what: '快照不再按键升序 ⇒ 同样状态给出不同字节（`Map` 的迭代顺序 = 插入顺序）',
+  },
+  {
+    file: 'apps/emulator/src/model/pools.ts',
+    from: "LocalPools: { key: 'engine', pools: 'engine', oob: 'diagnostic' },",
+    to: "LocalPools: { key: 'engine', pools: 'engine', oob: 'engine' },",
+    guard: 'tools/test/emulator-state-partition.test.mjs',
+    what: '把 `oob` 从 diagnostic 改成 engine（诊断被当成引擎态 ⇒ 快照会多带一个会涨的量）',
   },
 ];
 
