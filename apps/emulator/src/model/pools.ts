@@ -33,6 +33,9 @@
  */
 
 import { decInt, encInt, encZero, intSlotOffset } from '@amayui/age-format/src/asm/value-codec.mts';
+import { AddressSpace } from './address-space.ts';
+import { bitsFromFloat, floatFromBits } from './float-bits.ts';
+import type { Region } from './address-space.ts';
 
 /** 一个槽里装得下的东西 */
 export type SlotValue = number | string;
@@ -100,14 +103,29 @@ export interface OobSummary {
   first: OobRecord[];
 }
 
-/** 6 个 local 池（语义；与 operand type 9..14 对应） */
+/**
+ * 6 个 local 池（语义；与 operand type 9..14 对应）。
+ *
+ * ★★ **`encoded` 已订正（2026-10，逐字判据）**：`ptr` / `stringPtr` **不是** `encoded`
+ * —— 指针池的格内容就是**原始地址**，读的时候**不 DEC**，而是"取格 → 解引用 → 对解出的 dword DEC"。
+ * 判据（`sub_41BF50` 的两支对比，锚 = EA）：
+ * ```
+ *   case 9（局部 int）0x41C01A: mov eax,[ecx+esi*8+5D8B4h] / mov edx,[eax+edx*4]
+ *                              → rol 0Bh / xor [5EC8Ch] / ror 19h        ★ 取格后 **DEC**
+ *   case 12（局部 ptr）0x41C049: mov eax,[ecx+esi*8+5D8C0h] / mov edx,[eax+edx*4]
+ *                              / mov eax,[edx]                          ★ **不 DEC，直接当地址**
+ *                              → rol 0Bh / xor [5EC8Ch] / ror 19h        ★ DEC 作用于**解引用出来的** dword
+ * ```
+ * ⇒ 若按"指针格也编码"实现，`lookup-array` → `save-int` 这条链会解引用 `ENC(地址)` = 垃圾
+ * （而两条路都"看起来正常"）。
+ */
 export const LOCAL_POOLS: LocalPoolDef[] = [
   { name: 'int', kind: 'int', elemBytes: 4, encoded: true, typeTag: 9 },
   { name: 'float', kind: 'float', elemBytes: 4, encoded: false, typeTag: 10 },
   { name: 'string', kind: 'string', elemBytes: 28, encoded: false, typeTag: 11 },
-  { name: 'ptr', kind: 'int', elemBytes: 4, encoded: true, typeTag: 12 },
+  { name: 'ptr', kind: 'int', elemBytes: 4, encoded: false, typeTag: 12 },
   { name: 'floatPtr', kind: 'float', elemBytes: 4, encoded: false, typeTag: 13 },
-  { name: 'stringPtr', kind: 'int', elemBytes: 4, encoded: true, typeTag: 14 },
+  { name: 'stringPtr', kind: 'int', elemBytes: 4, encoded: false, typeTag: 14 },
 ];
 
 /** global 池族的**语义名**（`*Ref` 是从别处取来的一份引用；`*_alt` 是 memflip 的第二份缓冲） */
@@ -143,8 +161,21 @@ export class LocalPools {
   readonly key: number;
   readonly pools: Map<string, Map<number, SlotValue>>;
   readonly oob: OobRecord[];
+  /**
+   * ★★ **迁移到区域的池**（只有 `kind === 'int'` 的那些：`int` / `ptr` / `stringPtr`）。
+   *
+   * 为什么是它们：这些池**本来存的就是位模式**（`write` 存 `encInt(...)`、`read` 做 `decInt`）
+   * ⇒ 区域的一格（4 字节）**恰好**就是那个位模式 ⇒ 迁过去**不改语义**，只是"值存在哪"变了。
+   * float 池存的是 JS 数值、string 池是 28 字节 SSO ⇒ 留到后面（见需求树）。
+   *
+   * ★ 只有构造时给了 `space` 才有内容；没给 ⇒ 走老的 `Map` 路径（**一套代码两条存储**，
+   *   这是迁移中途的既成事实，不是终态）。终态见 ADR：**一份数据**。
+   */
+  readonly regions: Map<string, Region>;
+  /** 承载区域的地址空间（`null` = 还没迁） */
+  readonly space: AddressSpace | null;
 
-  constructor(key: number, pools?: Map<string, Map<number, SlotValue>>) {
+  constructor(key: number, pools?: Map<string, Map<number, SlotValue>>, opts: { space?: AddressSpace | null } = {}) {
     this.key = key >>> 0;
     this.pools = pools ?? new Map(LOCAL_POOLS.map((p) => [p.name, new Map<number, SlotValue>()]));
     // ★ 不变式：实例必须**恰好**覆盖本类认得的池。`read()` 内部是 `this.pools.get(def.name)!.get(idx)`
@@ -152,32 +183,79 @@ export class LocalPools {
     //   两条路都在这里红，于是**凡是能构造出来的实例，`read()` 都是全的**。
     assertPoolCoverage(this.pools, LOCAL_POOLS.map((p) => p.name));
     this.oob = [];
+    this.space = opts.space ?? null;
+    this.regions = new Map();
+    if (this.space) {
+      for (const def of LOCAL_POOLS) {
+        if (!MIGRATED_TO_REGION(def)) continue;
+        // ★ 容量**初值 0**（决策 REQ-01M4B969TBWVERFCB1MXS2Q2E1：不编常数，按需增长）
+        const r = this.space.alloc({ tag: `local:${def.name}`, elemBytes: def.elemBytes, capacity: 0 });
+        this.regions.set(def.name, r);
+        // ★ 把（可能来自快照的）Map 里的值**搬进区域**，搬完清空 ⇒ 数据只有一份。
+        //   ★ float 族**必须过 `valueToCell`**：快照/Map 里存的是**数值**，而区域里要的是**位模式**
+        //     （直接把数值写成 u32 会得到 1.5 → 1 —— 守卫当场抓到过）。
+        const src = this.pools.get(def.name)!;
+        for (const [idx, value] of src) {
+          this.space.ensureCapacity(r, idx, `${def.name} 池：快照搬家`);
+          this.space.writeU32(r.addressOf(idx), snapshotToCell(def, value));
+        }
+        src.clear();
+      }
+    }
   }
 
   /** 读一个槽（int 族过 DEC）。未初始化 ⇒ `null` */
   read(tag: number, idx: number): SlotValue | null {
     const def = localPoolByTypeTag(tag);
     if (!def) throw new Error(`不是 local 池的 operand type：${tag}`);
+    const reg = this.regions.get(def.name);
+    if (reg) {
+      // ★ 读也要按需增长：局部池的容量来自脚本头，而**这份实例的头部计数可能没被喂进来**
+      //   ⇒ 与其"编一个容量"或"悄悄返回 null"，不如**显式增长并留痕**（每次都会进副作用日志）。
+      this.space!.ensureCapacity(reg, idx, `${def.name} 池：读第 ${idx} 格`);
+      const raw = this.space!.readU32(reg.addressOf(idx));
+      if (raw === null) return null;
+      return cellToValue(def, raw, this.key);
+    }
     const raw = this.pools.get(def.name)!.get(idx);
     if (raw === undefined) return null;
+    // ★ Map 路径：编码族取解码值，其余（float/string）**就是值本身**
     if (!def.encoded) return raw;
     return decInt(raw as number, this.key);
   }
 
-  /** 写一个槽（int 族过 ENC）。返回值 = 落到"内存"里的位模式 */
+  /** 写一个槽（int 族过 ENC、float 族收敛成 float32）。返回值 = 落到"内存"里的位模式 */
   write(tag: number, idx: number, value: SlotValue): SlotValue {
     const def = localPoolByTypeTag(tag);
     if (!def) throw new Error(`不是 local 池的 operand type：${tag}`);
+    const reg = this.regions.get(def.name);
+    if (reg) {
+      // ★ 区域路径：格内容 = **位模式**（float 族要过 `bitsFromFloat`，走 `valueToCell` 的统一口径）
+      const bits = valueToCell(def, value, this.key);
+      this.space!.ensureCapacity(reg, idx, `${def.name} 池：写第 ${idx} 格`);
+      this.space!.writeU32(reg.addressOf(idx), bits);
+      return bits;
+    }
+    // ★ Map 路径（迁移中途的兼容路径）：口径与迁移前**逐字一致** —— 编码族存位模式，其余存**值本身**
+    //   （float 族在这里存的是 JS 数值；两条路"格内容"本就不同，换算只在区域路径做 —— 这一点由
+    //    "两种存储的快照必须逐值相同"那条守卫钉住）
     const bits: SlotValue = def.encoded ? encInt(value as number, this.key) : value;
     this.pools.get(def.name)!.set(idx, bits);
     return bits;
   }
 
-  /** 引擎的初值口径：int 族填 `enc_zero`（**不是 0**），其余填 0 */
+  /** 引擎的初值口径：int 族填 `enc_zero`（**不是 0**），其余填 0（float 的 0 位模式也是 0） */
   initZero(tag: number, count: number): void {
     const def = localPoolByTypeTag(tag);
     if (!def) throw new Error(`不是 local 池的 operand type：${tag}`);
     const init: SlotValue = def.encoded ? encZero(this.key) : 0;
+    const reg = this.regions.get(def.name);
+    if (reg) {
+      // ★ 直接写**位模式**（不过 ENC）：`enc_zero` 是"已经编码好的 0"
+      this.space!.ensureCapacity(reg, count, `${def.name} 池：initZero`);
+      for (let i = 0; i <= count; i += 1) this.space!.writeU32(reg.addressOf(i), init as number);
+      return;
+    }
     for (let i = 0; i <= count; i += 1) this.pools.get(def.name)!.set(i, init);
   }
 
@@ -187,11 +265,29 @@ export class LocalPools {
   }
 
   /**
+   * 池 → **区域**（取址用）。没迁到区域 ⇒ **抛**（取址需要池已经有地址 —— 这正是 ADR 第 ② 步的意义）。
+   * ⛔ 不许"顺手建一个"：那会让"这个池还没迁"与"这个池是空的"变得不可区分。
+   */
+  regionOf(tag: number): Region {
+    const def = localPoolByTypeTag(tag);
+    if (!def) throw new Error(`不是 local 池的 operand type：${tag}`);
+    const r = this.regions.get(def.name);
+    if (!r) {
+      throw new Error(
+        `局部池 ${def.name} 还没有区域 ⇒ **取址不可用**（ADR 第 ② 步的迁移只覆盖 kind === 'int' 的族）`,
+      );
+    }
+    return r;
+  }
+
+  /**
    * 一份**规范化快照**（纯数据）。★ 口径见 `PoolsSnapshot` 的三条。
    * `oob` **不**进快照 —— 它是**诊断**，不是引擎态（见 `STATE_PARTITION`）。
+   * ★ **格式与迁移前逐字相同**（`[池名, [下标, 位模式][]]`）：迁到区域的池从**区域**取出同样的位模式
+   *   ⇒ 快照读法、分区表、恢复路径都不用改（这是"迁移不改外部形状"那条口径的落地）。
    */
   snapshot(): PoolsSnapshot {
-    return { key: this.key, pools: canonicalPools(this.pools) };
+    return { key: this.key, pools: canonicalPools(this.pools, this.regions, { key: this.key, kindOf: localKindOf }) };
   }
 
   /**
@@ -199,12 +295,13 @@ export class LocalPools {
    * ★ 不是"往现有实例里灌"：`key` 是只读的，而且"恢复"不该悄悄改掉调用者手上的对象。
    * ★ 快照里任何不认识的东西都**响亮失败**（未知池名 / 缺池 / 下标重复 / 值类型不符），不静默跳过。
    */
-  static restore(snap: PoolsSnapshot): LocalPools {
+  static restore(snap: PoolsSnapshot, opts: { space?: AddressSpace | null } = {}): LocalPools {
     const pools = expandPools(snap, LOCAL_POOLS.map((p) => p.name), (n) => {
       const kind = localPoolKindOf(n);
       return kind === null ? null : kind === 'string' ? 'string' : 'number';
     });
-    return new LocalPools(snap.key, pools);
+    // ★ 给了 space ⇒ 构造器会把快照里的值**搬进区域并清空 Map**（数据只有一份）
+    return new LocalPools(snap.key, pools, opts);
   }
 
   /** `oob` 的**摘要**（全量数组会随执行步数无限涨 ⇒ 不进快照，但它必须可被看见） */
@@ -220,17 +317,47 @@ export class LocalPools {
 export class GlobalPools {
   readonly key: number;
   readonly pools: Map<string, Map<number, SlotValue>>;
+  /** ★ 见 `LocalPools.regions`：**只有存位模式的那两族**（`int` / `intRef`）迁到区域 */
+  readonly regions: Map<string, Region>;
+  /** 承载区域的地址空间（`null` = 还没迁） */
+  readonly space: AddressSpace | null;
 
-  constructor(key: number, pools?: Map<string, Map<number, SlotValue>>) {
+  constructor(key: number, pools?: Map<string, Map<number, SlotValue>>, opts: { space?: AddressSpace | null } = {}) {
     this.key = key >>> 0;
     this.pools = pools ?? new Map(GLOBAL_POOL_NAMES.map((n) => [n, new Map<number, SlotValue>()]));
     // ★ 同 `LocalPools`：认得的池一个都不许缺（`read()` 会因此运行期崩）
     assertPoolCoverage(this.pools, [...GLOBAL_POOL_NAMES]);
+    this.space = opts.space ?? null;
+    this.regions = new Map();
+    if (this.space) {
+      for (const name of GLOBAL_POOL_NAMES) {
+        // ★ 判据 = "**格内容就是一个 4 字节位模式**"：int 族（过编解码）+ float 族（float32 位模式）。
+        //   ⛔ 只剩 `string`/`stringRef`（28 字节）没迁 —— 它要 SSO + 长串的堆。
+        if (GLOBAL_KIND[name] === 'string') continue;
+        const r = this.space.alloc({ tag: `global:${name}`, elemBytes: 4, capacity: 0 });
+        this.regions.set(name, r);
+        const src = this.pools.get(name)!;
+        const gdef = globalKindOf(name);
+        for (const [idx, value] of src) {
+          this.space.ensureCapacity(r, idx, `${name} 池：快照搬家`);
+          this.space.writeU32(r.addressOf(idx), snapshotToCell(gdef, value));
+        }
+        src.clear();
+      }
+    }
   }
 
   /** `base + idx*4`（★ 下标不过编码 —— 它是纯算术，不参与 DEC/ENC） */
   static slotOffset(idx: number): number {
     return intSlotOffset(idx);
+  }
+
+  /** 池 → **区域**（取址用）；没迁 ⇒ 抛。口径同 `LocalPools.regionOf` */
+  regionOf(name: string): Region {
+    if (!this.pools.has(name)) throw new Error(`未知的全局池：${name}`);
+    const r = this.regions.get(name);
+    if (!r) throw new Error(`全局池 ${name} 还没有区域 ⇒ **取址不可用**（迁移只覆盖过编解码的族）`);
+    return r;
   }
 
   /**
@@ -241,6 +368,14 @@ export class GlobalPools {
   read(name: string, idx: number): SlotValue | null {
     const pool = this.pools.get(name);
     if (!pool) throw new Error(`未知的全局池：${name}`);
+    const reg = this.regions.get(name);
+    if (reg) {
+      this.space!.ensureCapacity(reg, idx, `${name} 池：读第 ${idx} 格`);
+      const raw = this.space!.readU32(reg.addressOf(idx));
+      if (raw === null) return null;
+      // ★ 与 `LocalPools.read` 同一条换算（float 族在这里也是位模式 ⇒ 要转回数值）
+      return cellToValue(globalKindOf(name), raw, this.key);
+    }
     const raw = pool.get(idx);
     if (raw === undefined) return null;
     return GLOBAL_ENCODED[name] ? decInt(raw as number, this.key) : raw;
@@ -249,14 +384,22 @@ export class GlobalPools {
   /** 写一个全局池槽（`int` / `intRef` 过 ENC）。返回值 = 落到内存里的位模式 */
   write(name: string, idx: number, value: SlotValue): SlotValue {
     if (!this.pools.has(name)) throw new Error(`未知的全局池：${name}`);
+    const reg = this.regions.get(name);
+    if (reg) {
+      const bits = valueToCell(globalKindOf(name), value, this.key);
+      this.space!.ensureCapacity(reg, idx, `${name} 池：写第 ${idx} 格`);
+      this.space!.writeU32(reg.addressOf(idx), bits);
+      return bits;
+    }
     const bits: SlotValue = GLOBAL_ENCODED[name] ? encInt(value as number, this.key) : value;
     this.pools.get(name)!.set(idx, bits);
     return bits;
   }
 
-  /** 一份**规范化快照**（纯数据；口径同 `LocalPools.snapshot()`） */
+  /** 一份**规范化快照**（纯数据；口径同 `LocalPools.snapshot()`，格式**逐字相同**） */
   snapshot(): PoolsSnapshot {
-    return { key: this.key, pools: canonicalPools(this.pools) };
+    // ★ 这里必须用 **global** 的族查找（用错会在快照时抛"不是 local 池：intRef" —— 实测踩过）
+    return { key: this.key, pools: canonicalPools(this.pools, this.regions, { key: this.key, kindOf: globalKindOf }) };
   }
 
   /**
@@ -265,9 +408,9 @@ export class GlobalPools {
    *   （`GLOBAL_ENCODED` 说它**不过**编解码，而 local 的 `stringPtr` 是过编解码的 —— 两边不同形）
    *   ⇒ 这里**不按名字猜**，只挡住"明显不是值"的东西。
    */
-  static restore(snap: PoolsSnapshot): GlobalPools {
+  static restore(snap: PoolsSnapshot, opts: { space?: AddressSpace | null } = {}): GlobalPools {
     const pools = expandPools(snap, [...GLOBAL_POOL_NAMES], () => null);
-    return new GlobalPools(snap.key, pools);
+    return new GlobalPools(snap.key, pools, opts);
   }
 }
 
@@ -287,8 +430,11 @@ export class GlobalPools {
  *   （`numeric-ops.ts` 的 `TOUCHES_ENGINE_STATE`）**尚无承载面** —— 它们一落地就必须进这张表。
  */
 export const STATE_PARTITION: Record<string, Record<string, StateClass>> = {
-  LocalPools: { key: 'engine', pools: 'engine', oob: 'diagnostic' },
-  GlobalPools: { key: 'engine', pools: 'engine' },
+  // ★ `space`：**注入的引用**（数据在 `Machine.space` 那一项里计账 ⇒ 这里只是"谁承载"）⇒ host。
+  //   `regions`：池名 → 区域的索引，可**从空间按 tag 重算** ⇒ derived（不进快照）。
+  //   ⛔ 两条都不是"第二份数据"：位模式只存在区域里（迁移后 Map 是空的）。
+  LocalPools: { key: 'engine', pools: 'engine', oob: 'diagnostic', space: 'host', regions: 'derived' },
+  GlobalPools: { key: 'engine', pools: 'engine', space: 'host', regions: 'derived' },
 };
 
 /** 池名 → 值的族（从 `LOCAL_POOLS` 派生，**不另写一份**）；不是 local 池 ⇒ `null` */
@@ -301,9 +447,110 @@ function sortedPairs<V>(m: Map<number, V>): [number, V][] {
 }
 
 /** 池族 → 规范化快照（★ 池名也排：`Map` 的迭代顺序是插入顺序，不是声明的顺序） */
-function canonicalPools(pools: Map<string, Map<number, SlotValue>>): [string, [number, SlotValue][]][] {
-  return [...pools.keys()].sort().map((n) => [n, sortedPairs(pools.get(n)!)]);
+/**
+ * 哪些池**已经迁到区域**：`kind === 'int'`（= `int` / `ptr` / `stringPtr`）。
+ *
+ * ★ 判据是"**存的是位模式**"：这三族的 `write` 存 `encInt(...)`、`read` 做 `decInt`
+ *   ⇒ 区域的一格（4 字节）恰好就是那个位模式。float 池存 JS 数值、string 池是 28 字节 SSO
+ *   ⇒ 它们要额外的编码步骤，**留到后面**（需求树里点名了）。
+ */
+/**
+ * 哪些池**已经迁到区域**：`int` 与 `float` 两族（都是 4 字节格）。
+ *
+ * ★ 判据是"**格内容就是一个 4 字节位模式**"：
+ *   * `int` / `ptr` / `stringPtr`：格内容 = 编码后的位模式（或原始地址）；
+ *   * `float` / `floatPtr`：格内容 = **float32 位模式**（`fstp dword ptr` 取证）。
+ * ⛔ 只剩 **`string`（28 字节）**没迁 —— 它要 SSO 那块（见需求树 `REQ-01M4BEHCHZE5QDHCNTA77V8ZJG`）。
+ */
+const MIGRATED_TO_REGION = (def: localPoolDefShape): boolean => (def.kind === 'int' || def.kind === 'float') && def.elemBytes === 4;
+
+/**
+ * **格内容 → 快照里的值**。
+ *
+ * ★★ 它**不等于** `cellToValue`（`read()` 那条），差别是**故意的**：
+ * 快照的口径是"**与 Map 路径存的东西逐值相同**"（`PoolsSnapshot` 写着 `[下标, 位模式][]`）——
+ *   * 编码族（int）在 Map 路径里存的就是**位模式** ⇒ 快照也写位模式（**不做 DEC**）；
+ *   * float 族在 Map 路径里存的是**数值** ⇒ 快照写数值；
+ *   * ptr 族 `encoded: false` ⇒ 存的就是地址本身，两边一致。
+ * ⛔ 若让快照走 `cellToValue`（带 DEC），int 族的快照会从位模式变成解码值 ⇒ **改了外部形状**
+ *   （本仓实测被"两种存储的快照必须逐值相同"那条守卫抓到）。
+ */
+function cellToSnapshot(def: { kind: string }, bits: number): SlotValue {
+  return def.kind === 'float' ? floatFromBits(bits) : bits;
 }
+function cellToValue(def: { kind: string; encoded: boolean }, bits: number, key: number): SlotValue {
+  if (def.kind === 'float') return floatFromBits(bits);
+  return def.encoded ? decInt(bits, key) : bits;
+}
+
+/** 值 → **格内容（位模式）**（`cellToValue` 的逆） */
+function valueToCell(def: { kind: string; encoded: boolean }, value: SlotValue, key: number): number {
+  if (def.kind === 'float') return bitsFromFloat(value as number) >>> 0;
+  return (def.encoded ? encInt(value as number, key) : (value as number)) >>> 0;
+}
+
+/**
+ * **快照里的值 → 格内容（位模式）**（`cellToSnapshot` 的逆）。
+ * ★ 与 `valueToCell` 的差别同样**是故意的**：快照里编码族已经是**位模式** ⇒ 直接搬，⛔ **不再 ENC**
+ *   （再编码一次 = 双重编码；本仓实测被"快照往返"那条守卫抓到）。
+ */
+function snapshotToCell(def: { kind: string }, value: SlotValue): number {
+  return (def.kind === 'float' ? bitsFromFloat(value as number) : (value as number)) >>> 0;
+}
+
+/** 池定义里这条判据要用的最小形状（`LOCAL_POOLS` 的元素满足它） */
+interface localPoolDefShape {
+  kind: string;
+  elemBytes: number;
+}
+
+/** 区域里的**位模式**（4 字节小端）—— 与 `Map` 路径存的值**逐位相同**，所以快照格式不用改 */
+function bitsFromCell(bytes: Uint8Array): number {
+  return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+}
+
+/**
+ * 规范化的池快照：**迁到区域的池从区域取**，其余从 `Map` 取 —— 两边给出的是**同一种数据**
+ * （`[下标, 位模式][]`），所以快照格式、分区表、恢复路径都不必改。
+ */
+function canonicalPools(
+  pools: Map<string, Map<number, SlotValue>>,
+  regions: Map<string, Region> | undefined,
+  meta: { key: number; kindOf: (name: string) => { kind: string; encoded: boolean } },
+): [string, [number, SlotValue][]][] {
+  return [...pools.keys()].sort().map((n) => {
+    const reg = regions?.get(n);
+    if (!reg) return [n, sortedPairs(pools.get(n)!)] as [string, [number, SlotValue][]];
+    // ★ 快照里的值必须是**换算后**的值（float 族尤其：格内容 = 位模式，快照要的是数值）
+    //   ⇒ 与 `read()` 走同一条换算（`cellToValue`），否则两条路会分叉 —— 那正是 ADR 那条判据要防的。
+    const def = meta.kindOf(n);
+    const cells: [number, SlotValue][] = [];
+    for (const [offset, bytes] of reg.cells) {
+      cells.push([offset / reg.elemBytes, cellToSnapshot(def, bitsFromCell(bytes))]);
+    }
+    cells.sort((a, b) => a[0] - b[0]);
+    return [n, cells] as [string, [number, SlotValue][]];
+  });
+}
+
+/** `LOCAL_POOLS` 的族查找（快照换算要用；名字不认识 ⇒ 抛，⛔ 不许猜） */
+const localKindOf = (name: string): { kind: string; encoded: boolean } => {
+  const d = LOCAL_POOLS.find((p) => p.name === name);
+  if (!d) throw new Error(`不是 local 池：${name}`);
+  return { kind: d.kind, encoded: d.encoded };
+};
+
+/** global 池名 → 族（`float`/`floatRef` 是浮点族；`encoded` 仍由 `GLOBAL_ENCODED` 说了算） */
+const GLOBAL_KIND: Record<string, string> = {
+  int: 'int', intRef: 'int', float: 'float', floatRef: 'float', string: 'string', stringRef: 'string',
+};
+
+/** `GLOBAL_KIND` 的查找（不认识 ⇒ 抛） */
+const globalKindOf = (name: string): { kind: string; encoded: boolean } => {
+  const k = GLOBAL_KIND[name];
+  if (!k) throw new Error(`未知的全局池：${name}`);
+  return { kind: k, encoded: GLOBAL_ENCODED[name] === true };
+};
 
 /**
  * 快照 → 池族（**逐步校验，任何不认识的东西都抛**）。

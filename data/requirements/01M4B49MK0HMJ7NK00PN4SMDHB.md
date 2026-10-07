@@ -2,10 +2,12 @@
 
 - id: REQ-01M4B49MK0HMJ7NK00PN4SMDHB
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M4B248NB8FWDN61E2NMK8N6V
-- repro: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）—— 计数 6 个 + 基址 6 个
+- verify: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）★ **已按本仓取证订正：基址实为 帧+0x3C…+0x54**
+- repro: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）★ **已按本仓取证订正：基址实为 帧+0x3C…+0x54**
 - severity: S3
+- done_reason: 已按用户口径裁决（以本仓重新发现的内容为准；与旧仓冲突的记录即可）：LOCAL_POOL_SLOTS 基址改为 0x3C/0x40/0x44/0x48/0x50/0x54、ELEM_BYTES_VERIFIED.string 改为 true；旧表（来源=旧仓 fields.json）保留在台账里作历史。
 
 ## 冲突是什么
 

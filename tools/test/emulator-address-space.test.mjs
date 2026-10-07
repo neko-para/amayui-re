@@ -141,6 +141,31 @@ test('★ 快照：同状态 ⇒ 逐值相同；恢复后**不许重发**已用�
   assert.throws(() => AddressSpace.restore(bad), /会重发已用过的地址/);
 });
 
+test('★ 按需增长：初值 0、只增不减、**每次真涨都留痕**、越界仍然响亮失败', () => {
+  const grew = [];
+  const sp = new AddressSpace({ onGrow: (e) => grew.push(e) });
+  const r = sp.alloc({ tag: 'pool', elemBytes: 4, capacity: 0 });
+  assert.equal(r.capacity, 0, '★ 初值 0（不编默认值）');
+
+  // ★ 关键：**读/写本身不会自动扩容** —— 越界必须仍然响亮失败（引擎那边是 UB，本层不模仿）
+  assert.throws(() => sp.writeU32(r.addressOf(0), 1), /不落在任何区域里/, '未增长前访问第 0 格 ⇒ 抛');
+  assert.equal(grew.length, 0, '那次失败**不该**顺手扩容');
+
+  // 显式增长 ⇒ 留痕一次，之后可访问
+  assert.equal(sp.ensureCapacity(r, 3, 'test'), true, '涨了');
+  assert.equal(r.capacity, 4, '涨到"容得下第 3 格"= 4');
+  assert.equal(grew.length, 1, '★ 每次真涨都要留痕');
+  assert.deepEqual({ tag: grew[0].tag, from: grew[0].from, to: grew[0].to }, { tag: 'pool', from: 0, to: 4 });
+  sp.writeU32(r.addressOf(3), 0xabcd);
+  assert.equal(sp.readU32(r.addressOf(3)), 0xabcd, '增长后可访问');
+
+  // 只增不减 + 幂等：已经够大 ⇒ 不再留痕
+  assert.equal(sp.ensureCapacity(r, 2), false, '已经容得下 ⇒ 不涨');
+  assert.equal(grew.length, 1, '没涨就不留痕');
+  assert.equal(r.growTo(2), false, '★ 缩小 ⇒ 返回 false（不抛：调用方只需要知道"没涨"）');
+  assert.equal(r.capacity, 4, '★ 容量只增不减（缩小被拒绝）');
+});
+
 test('★ 区域身份不许含糊：`regionByTag` 遇同名多个必须抛（取第一个会掩盖命名错误）', () => {
   const sp = new AddressSpace();
   sp.alloc({ tag: 'dup', elemBytes: 4, capacity: 1 });
@@ -148,8 +173,10 @@ test('★ 区域身份不许含糊：`regionByTag` 遇同名多个必须抛（�
   sp.alloc({ tag: 'dup', elemBytes: 4, capacity: 1 });
   assert.throws(() => sp.regionByTag('dup'), /tag 不唯一/);
   assert.throws(() => sp.regionByTag('nope'), /没有这个 tag/);
-  // capability 必须是正整数（本层不编默认值）
-  assert.throws(() => new Region('x', 0, 4, 0), /capacity 必须是正整数/);
+  // ★ 容量：`0` 是**合法**的（决策 `REQ-01M4B969TBWVERFCB1MXS2Q2E1`：初值 0 + 按需增长）
+  assert.equal(new Region('x', 0, 4, 0).capacity, 0, 'capacity = 0 合法（不编默认值）');
+  assert.throws(() => new Region('x', 0, 4, -1), /capacity 必须是非负整数/);
+  assert.throws(() => new Region('x', 0, 4, 1.5), /capacity 必须是非负整数/);
   assert.throws(() => new Region('x', 0, 0, 1), /elemBytes 必须是正整数/);
 });
 

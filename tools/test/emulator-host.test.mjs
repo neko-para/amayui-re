@@ -23,6 +23,7 @@ import { LayeredFilesystem, MemoryStore, normalizeEngineName, requireEngineName 
 import { EffectLog, isKnownAction, EFFECT_DOMAINS, EFFECT_ACTIONS } from '../../apps/emulator/src/host/effects.ts';
 import { VirtualClock } from '../../apps/emulator/src/host/clock.ts';
 import { MemoryConfig } from '../../apps/emulator/src/host/config.ts';
+import { AddressSpace } from '../../apps/emulator/src/model/address-space.ts';
 import { assertInstanceId, resolveEnvironment } from '../../apps/emulator/src/host/environment.ts';
 import { Instance, InstanceRegistry, sharedMutableState } from '../../apps/emulator/src/host/instance.ts';
 import { SceneModel } from '../../apps/emulator/src/model/scene.ts';
@@ -264,9 +265,24 @@ test('★ `type` 表：只把"池里那一格就是值"的几个当普通池（3
   assert.deepEqual([...POINTER_OPERAND_TYPES].sort((a, b) => a - b), [0x6, 0x7, 0x8, 0xc, 0xd, 0xe]);
 });
 
-test('★ 指针族 type **必须抛**（当普通池读会"类型对、值错"且不报错）', () => {
-  const ctx = { locals: new LocalPools(0), globals: new GlobalPools(0), script: {} };
-  for (const t of POINTER_OPERAND_TYPES) {
+test('★ 指针族 type **必须抛**（当普通池读会"类型对、值错"且不报错）★ 已实现 0x6/0xc（读=解引用+DEC、写=存原始地址），其余四支仍抛', () => {
+  const space = new AddressSpace();
+  const locals = new LocalPools(0, undefined, { space });
+  const globals = new GlobalPools(0, undefined, { space });
+  const ctx = { locals, globals, script: {}, space };
+
+  // ★ 已实现的两支：写一个地址进指针格 ⇒ 读它 = 解引用那个地址处的**编码 dword** 再 DEC
+  const target = locals.regionOf(9).addressOf(4); // 局部 int 第 4 格的地址
+  locals.write(9, 4, 0x2a);                        // 目标格里放 42（经过 ENC）
+  writeOperand(ctx, { type: 0xc, rawData: 0 }, 0, target);
+  assert.equal(readOperand(ctx, { type: 0xc, rawData: 0 }, 0).value, 0x2a,
+    '读指针 = 取地址 → 解引用 → DEC（逐字见 operand.ts 那一支）');
+  // 写的是**原始地址**（不编码）—— 若编码了，上面那一步会解引用一个编码过的数
+  assert.equal(locals.pools.get('ptr').size, 0, 'ptr 池已迁区域 ⇒ Map 为空');
+  assert.equal(space.readU32(locals.regionOf(0xc).addressOf(0)), target, '指针格里存的就是地址本身');
+
+  // ★ 剩下的四支（7/8/0xd/0xe）**仍然抛** —— 它们要 4 字节浮点 / 28 字节字符串那块
+  for (const t of POINTER_OPERAND_TYPES.filter((x) => x !== 0x6 && x !== 0xc)) {
     assert.throws(() => readOperand(ctx, { type: t, rawData: 0 }, 0), /需要\*\*地址空间\*\*才能实现/, `type 0x${t.toString(16)} 读应当抛`);
     assert.throws(() => writeOperand(ctx, { type: t, rawData: 0 }, 0, 1), /需要\*\*地址空间\*\*才能实现/, `type 0x${t.toString(16)} 写应当抛`);
   }

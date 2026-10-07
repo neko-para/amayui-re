@@ -91,18 +91,37 @@ export class Region {
   /** 合成基址（`ORIGIN` 起按分配顺序 bump）—— 只在本趟运行内唯一 */
   readonly base: number;
   readonly elemBytes: number;
-  readonly capacity: number;
+  /**
+   * 容量（格数）。★ 不再是 `readonly`：本层按**决策 `REQ-01M4B969TBWVERFCB1MXS2Q2E1`**
+   * 采取"**初值 0 + 按需增长、每次增长留痕**" ——
+   * 依据是两条已登记事实：① 引擎对池的下标访问**没有上界检查**（越界是 UB，不是语义）；
+   * ② 全局池的容量字段在整份 `.lst` 里**无 store** ⇒ 按"必须拿到来源"会永久卡住。
+   * ★ 增长**只增不减**（`growTo` 拒绝缩小）；初值 `0` = **不编任何常数**。
+   */
+  capacity: number;
   /** 偏移 → 该格的原始字节（长度恒等于 `elemBytes`）。★ 稀疏：没写过的格子**不在这里** */
   readonly cells: Map<number, CellBytes>;
 
   constructor(tag: string, base: number, elemBytes: number, capacity: number, cells?: Map<number, CellBytes>) {
     if (!Number.isInteger(elemBytes) || elemBytes <= 0) throw new Error(`区域的 elemBytes 必须是正整数：${elemBytes}`);
-    if (!Number.isInteger(capacity) || capacity <= 0) throw new Error(`区域的 capacity 必须是正整数：${capacity}（本层不编默认值）`);
+    if (!Number.isInteger(capacity) || capacity < 0) throw new Error(`区域的 capacity 必须是非负整数：${capacity}`);
     this.tag = tag;
     this.base = base;
     this.elemBytes = elemBytes;
     this.capacity = capacity;
     this.cells = cells ?? new Map();
+  }
+
+  /**
+   * 把容量涨到至少 `capacity` 格（**只增不减**）。
+   * @returns 真的涨了吗（没涨 ⇒ `false`，调用方不必留痕）
+   * ★ ⛔ 不许实现成"悄悄放过去"：每次真涨都要由调用方**留痕**（见 `AddressSpace` 的增长钩子）。
+   */
+  growTo(capacity: number): boolean {
+    if (!Number.isInteger(capacity) || capacity < 0) throw new Error(`growTo 的容量必须是非负整数：${capacity}`);
+    if (capacity <= this.capacity) return false; // ★ 缩 = 拒绝（静默丢弃已写过的格子是不可逆的坏）
+    this.capacity = capacity;
+    return true;
   }
 
   /** 区域字节长（末地址 = `byteLength - 1`） */
@@ -160,6 +179,25 @@ export interface AddressSpaceSnapshot {
 export const ORIGIN = 0x10000000;
 
 /**
+ * **一个区域独占的地址窗口大小**（`0x2000_0000` = 512 MiB）。
+ *
+ * ## 为什么需要它（本仓实测踩过两次静默串数据）
+ * ① `capacity === 0` 的区域 `byteLength === 0` ⇒ 若按字节长推进，下一个区域会**拿到同一个基址**；
+ * ② 更糟的是**增长**：区域构造时容量 0、之后涨到 N ⇒ 末尾**越过**下一个区域的基址 ⇒
+ *    "写进 A 的值"能从 B 的地址读到（两条路都"看起来正常"）。
+ * ⇒ 每个区域独占一个窗口，窗口内随便涨（`ensureCapacity` 拒绝越窗）。
+ *
+ * ## 这个数不是"编"的：它由两条硬约束夹出来
+ * 1. **地址必须装进 4 字节单元**（指针池的一格就是 4 字节）⇒ 整个空间必须落在 `u32` 内
+ *    ⇒ `ORIGIN + k*STRIDE ≤ 0xFFFFFFFF` ⇒ 窗口数上限 ≈ `(0xFFFFFFFF − ORIGIN)/STRIDE` = **7**；
+ * 2. 窗口内的容量上限 = `STRIDE / elemBytes`（4 字节元素 ⇒ **1.34 亿格**），
+ *    对"引擎自己用固定大数组"的量级足够；真不够时 `ensureCapacity` **响亮失败**，
+ *    由人决定"拆区域"还是"提高 STRIDE"。
+ * ★ 它**不影响**任何语义：基址只通过 `addressOf` 被比较，别处不依赖具体值。
+ */
+export const REGION_STRIDE = 0x20000000;
+
+/**
  * **一个地址空间**。持有若干区域，回答"这个地址落在哪一格的哪个偏移"。
  *
  * ★ 与 `pools.ts` 的关系（本批**只立接缝、不动池**）：池层现在的存储是
@@ -174,11 +212,72 @@ export class AddressSpace {
   baseCursor: number;
   /** 诊断（不进快照：它不是引擎态，而且会随访问增长） */
   readonly diagnostics: Map<string, MemoryDiagnostic>;
+  /**
+   * **增长钩子**（可选）：每次真的增长时回调一次。
+   * ★ 存在的理由：本层的策略是"按需增长"，而"增长"**必须留痕** ——
+   *   否则它会退化成"悄悄把越界放过去"（那正是本仓最忌讳的静默）。钩子由 `Machine` 接到副作用日志。
+   * ⛔ 本层**不**自己发日志（`model/` 不依赖 `host/effects`）。
+   */
+  onGrow: ((e: { tag: string; index: number; from: number; to: number; note: string }) => void) | null;
 
-  constructor(init?: { regions?: Region[]; baseCursor?: number }) {
+  constructor(init?: { regions?: Region[]; baseCursor?: number; onGrow?: AddressSpace['onGrow'] }) {
     this.regions = init?.regions ?? [];
     this.baseCursor = init?.baseCursor ?? ORIGIN;
     this.diagnostics = new Map();
+    this.onGrow = init?.onGrow ?? null;
+  }
+
+  /**
+   * 确保某区域**至少**容得下第 `index` 格（**只增不减**），并把这次增长交给钩子留痕。
+   *
+   * ★ 为什么不让 `readCell`/`writeCell` 自动增长：那样"越界"就会变成"悄悄扩容" ——
+   *   而引擎那边越界是 **UB**（无上界检查，见台账），本层要**响亮失败**。
+   *   ⇒ 增长必须是**显式**的一步（由池层在它知道自己在干什么时调用）。
+   * @returns 真的涨了吗
+   */
+  ensureCapacity(region: Region, index: number, note = ''): boolean {
+    if (!Number.isInteger(index) || index < 0) throw new Error(`ensureCapacity 的下标必须是非负整数：${index}`);
+    const need = index + 1;
+    if (need <= region.capacity) return false;
+    // ★★ **不许越出本区域的地址窗口**：窗口是 `[base, base + REGION_STRIDE)`，
+    //   越过它就必然**重叠下一个区域** ⇒ "写进 A 的值从 B 的地址读到"（静默串数据）。
+    //   ⛔ 宁可响亮失败：这条要人决定"拆区域"还是"提高 STRIDE"，不许自动重叠。
+    if (need * region.elemBytes > REGION_STRIDE) {
+      throw new Error(
+        `区域 ${region.tag} 需要 ${need * region.elemBytes} 字节 > 一个地址窗口（${REGION_STRIDE} B）` +
+        ` ⇒ 增长会与下一个区域重叠（**静默串数据**）⇒ 拒绝。${note ? `（${note}）` : ''}`,
+      );
+    }
+    const from = region.capacity;
+    if (!region.growTo(need)) return false;
+    this.onGrow?.({ tag: region.tag, index, from, to: region.capacity, note });
+    return true;
+  }
+
+  /** 地址版：确保该地址落在一个**容得下它**的区域里（地址不属于任何区域 ⇒ 抛，不许"顺便建一个"） */
+  ensureAddress(address: number, note = ''): void {
+    // ★★ 按**窗口**找区域，不是按"当前 byteLength"：
+    //   窗口 = 本区域分到的地址范围；`byteLength` = 已经长到哪。
+    //   地址落在窗口内而在容量外 = "还没长到" ⇒ **按需增长**（决策 REQ-01M4B969TBWVERFCB1MXS2Q2E1）；
+    //   落在所有窗口外 = 未映射 ⇒ 抛（响亮）。
+    //   实测踩到：`global:int[1353969]` 的地址在窗口内、却在 45495 格的 byteLength 之外。
+    const hit = this.regionByWindow(address);
+    if (!hit) throw new Error(`ensureAddress：0x${address.toString(16)} 不落在任何区域窗口里${note ? `（${note}）` : ''}`);
+    const index = Math.floor((address - hit.base) / hit.elemBytes);
+    this.ensureCapacity(hit, index, note);
+  }
+
+  /**
+   * 地址 → **窗口内**的区域（不看 `capacity`）。`null` = 落在所有窗口之外（未映射）。
+   * ★ 与 `regionAt` 的分工：`regionAt` 答"这一格**现在在**吗"（受 `byteLength` 限制，用于真实访问）；
+   *   `regionByWindow` 答"这个地址**归谁管**"（用于按需增长）。两者混用会得到
+   *   "窗口内的地址被当成未映射" ⇒ 那条路只能抛，永远涨不起来（本仓实测踩到过）。
+   */
+  regionByWindow(address: number): Region | null {
+    for (const r of this.regions) {
+      if (Number.isInteger(address) && address >= r.base && address < r.base + REGION_STRIDE) return r;
+    }
+    return null;
   }
 
   /**
@@ -192,7 +291,13 @@ export class AddressSpace {
     const r = new Region(spec.tag, base, spec.elemBytes, spec.capacity);
     this.regions.push(r);
     this.regions.sort((a, b) => a.base - b.base);
-    this.baseCursor = base + r.byteLength;
+    // ★★ 推进**一个完整的地址窗口**（`REGION_STRIDE`），不是按当前字节长。
+    //   为什么（本仓实测踩过两次）：
+    //   ① `capacity === 0` 的区域 `byteLength === 0` ⇒ 按字节长推进会让下一个区域**拿到同一个基址**；
+    //   ② 更糟的是**增长**：区域在构造时容量为 0，之后涨到 N ⇒ 它的末尾会**越过**下一个区域的基址
+    //      ⇒ "写进 A 的值"能从 B 的地址读到（**静默串数据**，而且两条路都"看起来正常"）。
+    //   ⇒ 每个区域独占一个窗口，窗口内随便涨（`ensureCapacity` 会拒绝越窗）。
+    this.baseCursor = base + REGION_STRIDE;
     return r;
   }
 
@@ -364,6 +469,6 @@ export class AddressSpace {
  * * `Region`：只有 `cells` 会变 ⇒ 唯一进快照的字段；其余是分配时定死的身份。
  */
 export const STATE_PARTITION: Record<string, Record<string, string>> = {
-  AddressSpace: { regions: 'engine', baseCursor: 'engine', diagnostics: 'diagnostic' },
+  AddressSpace: { regions: 'engine', baseCursor: 'engine', diagnostics: 'diagnostic', onGrow: 'host' },
   Region: { tag: 'derived', base: 'derived', elemBytes: 'derived', capacity: 'derived', cells: 'engine' },
 };

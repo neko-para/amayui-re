@@ -108,6 +108,13 @@ test('★ 前段那批：`form` 真的生效（`bool(op1)` 归一，不是原值
   }
   for (const [opcode, names] of byOpcode) {
     const m = machineStub();
+    // ★ `form: 'unsupported'` 的那几条**故意抛**（引擎明确不支持）⇒ 它们不该在这里被当成"写标量"
+    if (ENGINE_SCALAR_WRITES.some((w) => w.opcode === opcode && w.form === 'unsupported')) {
+      assert.throws(() => HANDLERS[opcode](ctxOf(m, [imm(3), imm(4)], opcode)), /引擎明确不支持/,
+        `0x${opcode.toString(16)} 登记为"引擎不支持" ⇒ 必须抛`);
+      assert.deepEqual(m.scalars.snapshot().values, [], '抛了就不该写任何标量');
+      continue;
+    }
     // ★ 给**两个**操作数：x1a4 是 orm: ''op2''（第二个操作数），只给一个会在桩里读到 undefined
     HANDLERS[opcode](ctxOf(m, [imm(3), imm(4)], opcode));
     assert.deepEqual(m.scalars.snapshot().values.map(([k]) => k).sort(), [...names].sort(),
@@ -292,6 +299,54 @@ test('★ `0x76`/`0x77`：写的是 **bswap24(op1)**（不是原值），且**�
   assert.equal(fwd.length, 2, '每条都要记一次未建模的子系统调用');
   assert.ok(fwd.every((e) => e.detail.callee === 'sub_459F40'), '被调符号要写清');
   assert.ok(fwd.every((e) => e.disposition === 'logged-only'), '未建模 ⇒ logged-only');
+});
+
+test('★ 标量**数组**族：`0x107` 的索引来自 op1、`0x10b` 的来自 op2（角色互换不许合并实现）', () => {
+  const m = machineStub();
+  // `0x107`：`Engine[551 + op1] = op2`
+  HANDLERS[0x107](ctxOf(m, [imm(3), imm(77)], 0x107));
+  assert.equal(m.scalars.read('Engine.d551+3'), 77, '★ 索引必须进键名（否则两次不同的写会互相覆盖）');
+  HANDLERS[0x107](ctxOf(m, [imm(4), imm(88)], 0x107));
+  assert.equal(m.scalars.read('Engine.d551+4'), 88);
+  assert.equal(m.scalars.read('Engine.d551+3'), 77, '两次写互不干扰');
+  // 越界 ⇒ 引擎**静默跳过**（不抛），但必须留一笔
+  const m2 = machineStub();
+  HANDLERS[0x107](ctxOf(m2, [imm(0x20), imm(5)], 0x107));
+  assert.deepEqual(m2.scalars.snapshot().values, [], '越界不写');
+  assert.ok(m2.notes.some((n) => n.startsWith('scalar-array-skip')), '★ 跳过要可见（不许静默丢弃一次写）');
+
+  // `0x10b`：**角色互换** —— 索引 = op2、值 = op1，表基址 1383
+  const m3 = machineStub();
+  HANDLERS[0x10b](ctxOf(m3, [imm(9), imm(5)], 0x10b));
+  assert.equal(m3.scalars.read('Engine.d1383+5'), 9, '★ 索引来自 op2、值来自 op1');
+});
+
+test('★ 派发表**没登记**的 opcode：报"引擎明确不支持"，⛔ 不许与"本批未实现"混为一谈', () => {
+  const m = machineStub();
+  for (const op of [0x110, 0x111, 0x112]) {
+    assert.throws(() => HANDLERS[op](ctxOf(m, [imm(1)], op)), /引擎明确不支持/,
+      `0x${op.toString(16)}：派发表没有登记 ⇒ 默认 handler 抛「此命令不支持」—— 走到这里说明**分支走错了**`);
+    assert.throws(() => HANDLERS[op](ctxOf(m, [imm(1)], op)), /不是"本批未实现"/, '两种处境必须能分辨');
+  }
+});
+
+test('★ `0xfe` **照抄引擎的范围检查**（`op1 > 0x1F` ⇒ 抛，⛔ 不许 clamp/截断）；`0x10c` 的间接写必须留痕', () => {
+  const m = machineStub();
+  // 合法值：写进 `Engine.d517`
+  HANDLERS[0xfe](ctxOf(m, [imm(12)], 0xfe));
+  assert.equal(m.scalars.read('Engine.d517'), 12, '合法值照写');
+  // ★ 越界：引擎在这里 `throw (aSetkeytotal, 65541)` ⇒ 本层也抛（**不**静默截断成 0x1F）
+  assert.throws(() => HANDLERS[0xfe](ctxOf(m, [imm(0x20)], 0xfe)), /超出引擎的范围检查/, '0x20 必须抛');
+  assert.equal(m.scalars.read('Engine.d517'), 12, '抛了就不该改状态');
+
+  // `0x10c`：值合法 ⇒ **只记录**（间接写目标未取证），并且规则要看得见
+  const m2 = machineStub();
+  HANDLERS[0x10c](ctxOf(m2, [imm(3), imm(7)], 0x10c));
+  const rec = m2.effects.filter((e) => e.action === 'engine.indirect-write');
+  assert.equal(rec.length, 1, '必须留一条（⛔ 不许静默）');
+  assert.equal(rec[0].disposition, 'logged-only', '未建模 ⇒ logged-only（会进「保真欠账」）');
+  assert.deepEqual([rec[0].detail.slotIndex, rec[0].detail.value], [7, 3], '两个操作数都要记全');
+  assert.throws(() => HANDLERS[0x10c](ctxOf(m2, [imm(0x20), imm(0)], 0x10c)), /超出引擎的范围检查/, '越界同样照抄引擎的异常');
 });
 
 test('★ 转发那批：**不建模**但**逐次留痕**（写明被调符号与实参）—— 绝不静默空操作', () => {

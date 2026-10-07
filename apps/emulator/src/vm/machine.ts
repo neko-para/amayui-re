@@ -36,6 +36,7 @@
 import { GlobalPools, LocalPools } from '../model/pools.ts';
 import { SceneModel } from '../model/scene.ts';
 import { EngineScalars } from '../model/engine-scalars.ts';
+import { AddressSpace } from '../model/address-space.ts';
 import { OPCODE_TABLE } from '@amayui/age-format/src/asm/runtime.mts';
 import type { EffectDisposition, EffectRecord } from '../host/effects.ts';
 import type { Instance } from '../host/instance.ts';
@@ -92,10 +93,14 @@ export class ScriptFrame {
    */
   readonly returnStack: number[] = [];
 
-  constructor(scriptName: string, cur: number, key: number, caller = -1) {
+  /**
+   * @param space 地址空间（ADR 第 ② 步）—— 给了它，本帧的 `int`/`ptr` 池就**存在区域里**（一份数据）。
+   *   缺省 `null` ⇒ 走老的 `Map` 路径（迁移中途的兼容路径；终态是"只有区域"）。
+   */
+  constructor(scriptName: string, cur: number, key: number, caller = -1, space: AddressSpace | null = null) {
     this.scriptName = scriptName;
     this.cur = cur;
-    this.locals = new LocalPools(key);
+    this.locals = new LocalPools(key, undefined, { space });
     this.caller = caller;
   }
 
@@ -206,6 +211,17 @@ export class Machine {
    * ⛔ 本层只存值、不解释槽的含义；名字来自知识层 `layout.mts` 的 `ENGINE_SCALAR_WRITES`。
    */
   readonly scalars: EngineScalars;
+  /**
+   * ★★ **引擎的地址空间**（`model/address-space.ts`）—— 指针族（operand type 6/7/8/c/d/e）与
+   * "按地址连写 N 格"（`fill-zero`/`set-array-to`/`lookup-array`）要用的那块地基。
+   *
+   * 现状（诚实写清）：**已建、已进快照、增长已接到副作用日志**，但**池还没有绑到它上面**
+   * ⇒ 目前没有 handler 真的往里写。这是 ADR `REQ-01M4ARC3CPM00CC1KC4Q3HF550` 第 ② 步的**半步**：
+   * 下一步是把 int/ptr 池的存储换成这里的区域（一份数据），判据 = 既有守卫全绿 +
+   * "经地址空间读到的池值 == 经池 API 读到的值"。
+   * ★ 容量策略见决策 `REQ-01M4B969TBWVERFCB1MXS2Q2E1`：初值 0 + 按需增长、**每次增长留痕**。
+   */
+  readonly space: AddressSpace;
   /** 诊断 */
   readonly diag: MachineDiagnostics;
   /** 帧号（主循环的"第几帧"） */
@@ -217,7 +233,13 @@ export class Machine {
 
   constructor(instance: Instance) {
     this.instance = instance;
-    this.globals = new GlobalPools(instance.env.codecKey);
+    // ★ 顺序要求：**先建地址空间**，再建池 —— 池的 int/ptr 族要绑到它的区域上（ADR 第 ② 步）。
+    this.space = new AddressSpace({
+      onGrow: (e) => this.effect('system', 'region.grow', 'modeled', {
+        region: e.tag, index: e.index, from: e.from, to: e.to, note: e.note,
+      }),
+    });
+    this.globals = new GlobalPools(instance.env.codecKey, undefined, { space: this.space });
     this.frames = [];
     this.scene = new SceneModel();
     this.scalars = new EngineScalars();
@@ -301,7 +323,7 @@ export class Machine {
    *   引擎在那里抛 `Command_Exit_Exception`，主循环接住后关窗退出）。
    */
   pushFrame(scriptName: string, caller = -1): ScriptFrame {
-    const f = new ScriptFrame(scriptName, this.frames.length, this.instance.env.codecKey, caller);
+    const f = new ScriptFrame(scriptName, this.frames.length, this.instance.env.codecKey, caller, this.space);
     this.frames.push(f);
     return f;
   }
@@ -484,6 +506,7 @@ export class Machine {
     frames: ReturnType<ScriptFrame['snapshot']>[];
     scene: ReturnType<SceneModel['snapshot']>;
     scalars: ReturnType<EngineScalars['snapshot']>;
+    space: ReturnType<AddressSpace['snapshot']>;
     frameNo: number;
   } {
     return {
@@ -491,6 +514,7 @@ export class Machine {
       frames: this.frames.map((f) => f.snapshot()),
       scene: this.scene.snapshot(),
       scalars: this.scalars.snapshot(),
+      space: this.space.snapshot(),
       frameNo: this.frameNo,
     };
   }
@@ -521,7 +545,7 @@ export const STATE_PARTITION: Record<string, Record<string, string>> = {
   Machine: {
     instance: 'host', scripts: 'host',
     diag: 'diagnostic', effectCounter: 'diagnostic', gateBlockLogged: 'diagnostic',
-    globals: 'engine', frames: 'engine', scene: 'engine', scalars: 'engine', frameNo: 'engine',
+    globals: 'engine', frames: 'engine', scene: 'engine', scalars: 'engine', space: 'engine', frameNo: 'engine',
   },
   ScriptFrame: {
     scriptName: 'engine', cur: 'engine', locals: 'engine',

@@ -25,11 +25,11 @@
 import type { InstrArg } from '../model/iterate.ts';
 import type { LoadedScript } from './script.ts';
 import type { Machine, ScriptFrame } from './machine.ts';
-import { asFloat, asInt32, asUint32, floatFromBits, GLOBAL_POOL_BY_TYPE_TAG, readOperand, readOperandAsText, writeOperand } from './operand.ts';
+import { addressOfOperand, asFloat, asInt32, asUint32, floatFromBits, GLOBAL_POOL_BY_TYPE_TAG, readOperand, readOperandAsText, writeOperand } from './operand.ts';
 import { instructionIndexAt, labelByteOffsetOf } from './script.ts';
 import type { OperandValue } from './operand.ts';
 import { localPoolByTypeTag } from '../model/pools.ts';
-import { ENGINE_SCALAR_WRITES } from '@amayui/age-format/src/engine/layout.mts';
+import { ENGINE_SCALAR_ARRAYS, ENGINE_SCALAR_WRITES } from '@amayui/age-format/src/engine/layout.mts';
 import { encInt, encZero } from '@amayui/age-format/src/asm/value-codec.mts';
 
 /** 一个 handler 拿到的东西（**够用就好**：不要把手伸进 machine 的内部状态） */
@@ -56,7 +56,7 @@ function unimplemented(ctx: VmContext, why: string): never {
 
 /** 读第 `i` 个操作数的**数值**（int 族按 u32） */
 function num(ctx: VmContext, i: number): number {
-  const r = readOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script }, ctx.ins.args[i], i);
+  const r = readOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script, space: ctx.machine.space }, ctx.ins.args[i], i);
   if (r.value === null) {
     // ★ 未初始化：引擎的池在装载时被填过初值（`ENC(key,0)`），而**本仓还没取证"填多少、填哪几个池"**
     //   ⇒ 这里按 0 继续，但**每一次都留痕**：于是"这次跑依赖了未初始化的池"是可见的，不是静默的。
@@ -68,7 +68,7 @@ function num(ctx: VmContext, i: number): number {
 
 /** 读第 `i` 个操作数的**浮点值**（int 立即数 → 浮点；LOGO 的 `float-mov (global-float 9) 500` 就是这条） */
 function fnum(ctx: VmContext, i: number): number {
-  const r = readOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script }, ctx.ins.args[i], i);
+  const r = readOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script, space: ctx.machine.space }, ctx.ins.args[i], i);
   if (r.value === null) {
     ctx.machine.note('uninitialized-read', `${r.where}（浮点，指令 0x${ctx.ins.opcode.toString(16)} 操作数 #${i}）`);
     return 0;
@@ -78,7 +78,7 @@ function fnum(ctx: VmContext, i: number): number {
 
 /** 写第 `i` 个操作数 */
 function put(ctx: VmContext, i: number, value: OperandValue): void {
-  writeOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script }, ctx.ins.args[i], i, value);
+  writeOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script, space: ctx.machine.space }, ctx.ins.args[i], i, value);
 }
 
 /** 第 `i` 个操作数的**槽位号**（数组基址那一族用它：引擎把"槽号"本身当基址，不去读槽里的值） */
@@ -467,6 +467,9 @@ const PROLOGUE: PrologueEntry[] = [
   //   （对操作数做了算术）。记进日志时也照原样记，别把 `+12` 抹掉：那正是"它要一个结构里的字段"的线索。
   { opcode: 0x2f8, kind: 'forward', callee: 'sub_4B6940', argc: 2, note: '转发进 `Engine+0x48E8`；第一个实参 = `op1 + 12`（对操作数做了算术），第二个 = op2' },
   { opcode: 0x303, kind: 'forward', callee: 'sub_456600', argc: 3, note: '转发进 `Engine+0x14D30`（同族里 argc 3 的那条）' },
+  // ★ `0x308`（`sub_426B20`，argc 1）：读 op1 → `sub_407B20(dword_55E1BC, Engine[96981], op1)`，
+  //   **返回值不写回操作数**（handler 的返回值交给派发器）⇒ 只记欠账。
+  { opcode: 0x308, kind: 'forward', callee: 'sub_407B20', argc: 1, note: '实参 = (全局对象 dword_55E1BC, Engine[96981], op1)' },
 ];
 
 /**
@@ -503,11 +506,30 @@ const bswap24 = (v: number): number => (((v & 0xff) << 16) | (v & 0xff00) | ((v 
 /** 生成一个"写标量"handler（每条登记都自带它的写形态） */
 function scalarHandler(opcode: number, extra?: (ctx: VmContext, v: number) => void): Handler {
   const writes = SCALARS_BY_OPCODE.get(opcode) ?? [];
+  // ★★ 引擎**明确不支持**这条命令：派发表里没有它 ⇒ 落到 `rep stosd` 预填的默认 handler
+  //    （`sub_418E30`，体是抛「このコマンドはサポートされていません．」）。
+  //    ⛔ 这与"本批还没实现"**不是一回事** —— 走到这里意味着**分支走错了**（真实流程不该执行它），
+  //    所以错误信息必须把这件事说清，否则两种完全不同的处境会长得一样。
+  if (writes.some((w) => w.form === 'unsupported')) {
+    const sym = writes[0].handler;
+    return () => {
+      throw new Error(
+        `opcode 0x${opcode.toString(16)} **引擎明确不支持**（派发表没有该 opcode 的登记 ⇒ 默认 handler ${sym} ` +
+        `抛「このコマンドはサポートされていません．」）—— 这不是"本批未实现"，而是**走到了不该走的分支**`,
+      );
+    };
+  }
   if (!writes.length) throw new Error(`opcode 0x${opcode.toString(16)} 声称写标量，但知识层没有对应登记`);
   return (ctx) => {
     const v = num(ctx, 0);
     for (const w of writes) {
       const value = w.form === 'op2' ? num(ctx, 1) : w.form === 'bool(op1)' ? (v !== 0 ? 1 : 0) : w.form === 'bswap24(op1)' ? bswap24(v) : v;
+      // ★ 知识层登记了 `max` ⇒ 这是**引擎自己**的范围检查（越界它抛 C++ 异常）——
+      //   本层照抄：⛔ 不许 clamp、不许静默截断（那会把"脚本写错了"变成"值变了一点"）。
+      const capped = (w as { max?: number }).max;
+      if (capped !== undefined && value > capped) {
+        throw new Error(`opcode 0x${opcode.toString(16)} 的操作数 ${value} 超出引擎的范围检查（> 0x${capped.toString(16)}）—— 引擎这里抛异常`);
+      }
       ctx.machine.scalars.write(scalarName(w.name), value);
       // ★★ 写完标量之后那次子系统调用**必须记进欠账**（知识层的 `callsAfter`）。
       //    少了这一条，"handler 里未建模的那次调用"就不会出现在保真欠账里 ⇒ 日志显得比实际干净。
@@ -534,6 +556,13 @@ const opScalar252 = scalarHandler(0x252);
 const opScalar76 = scalarHandler(0x76);
 const opScalar77 = scalarHandler(0x77);
 const opScalar1a4 = scalarHandler(0x1a4);
+const opScalar2ee = scalarHandler(0x2ee);
+const opScalarFe = scalarHandler(0xfe);
+const opScalar10f = scalarHandler(0x10f);
+/** 0x110/0x111/0x112：引擎明确不支持（见 ENGINE_SCALAR_WRITES 里那三条的注释） */
+const opUnsupported110 = scalarHandler(0x110);
+const opUnsupported111 = scalarHandler(0x111);
+const opUnsupported112 = scalarHandler(0x112);
 const opScalar78 = scalarHandler(0x78);
 const opScalar2db = scalarHandler(0x2db);
 
@@ -658,7 +687,7 @@ const opLoadInt: Handler = (ctx) => {
   const key = configKeyInt(k);
   const raw = ctx.machine.instance.config.get(key);
   const value = raw === undefined ? 0 : Number.parseInt(raw, 10) | 0;
-  writeOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script }, ctx.ins.args[0], 0, value);
+  writeOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script, space: ctx.machine.space }, ctx.ins.args[0], 0, value);
   ctx.machine.effect('system', 'config.read', 'modeled', {
     opcode: '0x1a3', key: printableKey(key), stored: raw ?? null, value,
     note: `查不到 ⇒ 0（引擎逐字如此）· ${KEY_PRIMITIVE_NOTE}`,
@@ -685,7 +714,7 @@ const opSaveInt: Handler = (ctx) => {
 
 /** 每个 handler 都要的那个"操作数上下文"（三处各写一遍容易写漏，收成一处） */
 function operandCtx(ctx: VmContext) {
-  return { locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script };
+  return { locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script, space: ctx.machine.space };
 }
 
 /**
@@ -884,6 +913,143 @@ const opFontIndex2de: Handler = (ctx) => {
   });
 };
 
+/**
+ * `0x61 lookup-array`：把 `base[op3]` —— **目标是指针时给"那一格的地址"** —— 写进 op1。
+ *
+ * 取证（锚 = EA）：handler = `sub_42CB00`（表项 `Engine+0x0A5220`），体逐字：
+ * ```
+ *   v4 = sub_41BF50(this, 3)              ; idx = op3
+ *   v2 = sub_42AEA0(this, 2)              ; base = **op2 那一格的地址**（取址原语）
+ *   sub_418CC0(this, 1, v2, v4, -1, -1)   ; 写进 op1
+ * ```
+ * 目标语义由 `sub_418CC0` 的写法钉住：它算 `lea edx,[esi+edx*4]`（= `base + idx*4`）之后
+ * **`mov [ecx+eax*4],edx`** —— 对**指针类**目标存的是**那个地址本身**（⛔ 不是那一格的值）；
+ * 4 字节步长对应 6/7/12/13 族、28 字节步长对应 8/14 族。
+ * ★ 这条判据让 `INITCONFIG4` 的循环**说得通**：`lookup-array (local-ptr 0) (global-int A) (i)`
+ *   取到 `&A[i]`，接着 `save-int (local-ptr 0)` 解引用它 ⇒ 存的是 `A[i]` 的**值**。
+ *   若把指针目标当成"存值"，那一步就会去解引用一个**编码过的整数**（而两条路都"看起来正常"）。
+ * ★ 本批只支持 4 字节族（6/12）；28 字节族（8/14，字符串指针）会抛（要 SSO 那块，见需求树）。
+ */
+const opLookupArray: Handler = (ctx) => {
+  const dest = ctx.ins.args[0];
+  if (dest.type !== 0x6 && dest.type !== 0xc) {
+    throw new Error(
+      `lookup-array 的目标 type 0x${dest.type.toString(16)}：本批只实现 4 字节族（0x6 全局 / 0xc 局部）；` +
+      `8/14（字符串指针，28 字节步长）要等 SSO 那块`,
+    );
+  }
+  const idx = num(ctx, 2);
+  const base = addressOfOperand(operandCtx(ctx), ctx.ins.args[1], 1);
+  const addr = (base + 4 * idx) >>> 0;
+  writeOperand(operandCtx(ctx), dest, 0, addr);
+  ctx.machine.effect('system', 'array.lookup', 'modeled', {
+    opcode: '0x61', base: `0x${base.toString(16)}`, index: idx, wroteAddress: `0x${addr.toString(16)}`,
+  });
+};
+
+/** `copy-local-array` 一次最多拷多少格（★ 元素个数来自**脚本字节**，坏 raw 不许把内存吃光） */
+const COPY_ARRAY_MAX = 1 << 20;
+
+/**
+ * `0x64 copy-local-array`：把脚本里**一块解码后的整数**逐格 ENC 后写进 `op1` 的地址。
+ *
+ * 取证（锚 = EA）：handler = `sub_42CBE0`，体逐字：
+ * ```
+ *   v2 = sub_42AEA0(this, 1)                                    ; dest = **op1 那一格的地址**
+ *   v3 = 代码区基址 + 4*sub_41BF50(this,2) + 4                  ; src  = 块基址 + 4*raw + 4
+ *   result = *(代码区基址 + 4*sub_41BF50(this,2))               ; count = **块首 u32**
+ *   if (result > 0) do {
+ *     result = __ROL4__(this[97059] ^ __ROR4__(*(v2 + v5), 7), 21);   ; ★ ENC(源 dword)
+ *     *v2++ = result;                                            ; 逐格写
+ *   } while (--v6);
+ * ```
+ * ⇒ 文件口径：块首 = `headerLen + 4*raw`（`帧+0x5D894` 就是代码区基址），数据从 `+4` 起。
+ * ★ 值的编码是**无条件**的（源码里没有按目标池分派），所以这里也直接写 `ENC(源)`；
+ *   对 `encoded` 池这与"经池 API 写"逐位相同，对非编码池则正是引擎的行为。
+ * ★ `count <= 0` ⇒ 引擎**什么都不做**（逐字 `if (result > 0)`）—— 这里是记一笔后返回，不抛。
+ */
+const opCopyLocalArray: Handler = (ctx) => {
+  const dest = addressOfOperand(operandCtx(ctx), ctx.ins.args[0], 0);
+  const raw = num(ctx, 1) >>> 0;
+  const blockOff = ctx.script.headerLen + 4 * raw;
+  const bytes = ctx.script.bytes;
+  const u32 = (o: number): number =>
+    ((bytes[o]! | (bytes[o + 1]! << 8) | (bytes[o + 2]! << 16) | (bytes[o + 3]! << 24)) >>> 0);
+  if (blockOff + 4 > bytes.length) {
+    throw new Error(`copy-local-array 的块首越出脚本：raw=${raw} ⇒ ${blockOff}（脚本 ${bytes.length} B）`);
+  }
+  const count = u32(blockOff);
+  if (count === 0) {
+    ctx.machine.note('copy-local-array-empty', `raw=${raw} 的块元素个数为 0 ⇒ 引擎什么都不做`);
+    return;
+  }
+  if (count > COPY_ARRAY_MAX) {
+    throw new Error(`copy-local-array 的块声明了 ${count} 个元素（> ${COPY_ARRAY_MAX}）—— raw=${raw} 口径错了？`);
+  }
+  if (blockOff + 4 + 4 * count > bytes.length) {
+    throw new Error(`copy-local-array 的块越出脚本：${count} 格从 ${blockOff + 4} 起（脚本 ${bytes.length} B）`);
+  }
+  const key = ctx.frame.locals.key;
+  // ★ 目标按需增长（决策 REQ-01M4B969TBWVERFCB1MXS2Q2E1）：一次把要写到的最后一格覆盖上
+  ctx.machine.space.ensureAddress(dest + 4 * (count - 1), 'copy-local-array 目标按需增长');
+  for (let i = 0; i < count; i += 1) {
+    ctx.machine.space.writeU32(dest + 4 * i, encInt(u32(blockOff + 4 + 4 * i), key), `copy-local-array 第 ${i} 格`);
+  }
+  ctx.machine.effect('system', 'array.copy', 'modeled', {
+    opcode: '0x64', dest: `0x${dest.toString(16)}`, count, block: `0x${blockOff.toString(16)}`,
+  });
+};
+
+/**
+ * `0x10c`（无名，handler `sub_4220B0`，argc 2）：**带范围检查的间接引擎态写**。
+ *
+ * 逐字：
+ * ```
+ *   v2     = sub_41BF50(this, 2)                 ; op2 = 索引
+ *   result = sub_41BF50(this, 1)                 ; op1 = 值
+ *   if (result > 0x1F) throw (aSetkeymulti, 65541)
+ *   this[this[v2 + 1690] + 1434] = result        ; ★ 写目标是**两次索引**：Engine[1434 + Engine[1690 + op2]]
+ * ```
+ * ★ 范围检查（`<= 0x1F`）照抄 —— 那是引擎自己抛的异常，不是"顺手加的守卫"。
+ * ★ 写目标**只记录、不建模**：`Engine+0x1A68`（= `1690*4`）那张索引表的内容**没有取证**
+ *   （没有已知的写入点）⇒ 猜"它是 0"就等于凭空造一条结论。于是这里发一条 `logged-only`，
+ *   它会出现在 `[保真欠账]` 里（⛔ 不许静默）。
+ */
+const opSetKeyMulti: Handler = (ctx) => {
+  const value = num(ctx, 0);
+  const slotIndex = num(ctx, 1);
+  if (value > 0x1f) {
+    throw new Error(`0x10c 的操作数 ${value} 超出引擎的范围检查（> 0x1f）—— 引擎这里抛 aSetkeymulti 异常`);
+  }
+  ctx.machine.effect('system', 'engine.indirect-write', 'logged-only', {
+    opcode: '0x10c', slotIndex, value,
+    note: '写目标是 `Engine[1434 + Engine[1690 + op2]]` —— 索引表 `Engine+0x1A68` 的内容未取证 ⇒ 只记录、不建模（保真欠账）',
+  });
+};
+
+/**
+ * `ENGINE_SCALAR_ARRAYS` 的通用 handler：`Engine[base + 索引操作数] = 值操作数`。
+ *
+ * ★ 索引**必须进键名**（`Engine.d551` / `Engine.d552`…）：这类写入的下标来自操作数，
+ *   若所有写入都落到同一个键上，两次不同的写会互相覆盖，而日志看不出异常。
+ * ★ `outOfRange: 'skip'` ⇒ 越界**静默跳过**（照抄引擎），但记一笔（可见）。
+ */
+function scalarArrayHandler(spec: (typeof ENGINE_SCALAR_ARRAYS)[number]): Handler {
+  return (ctx) => {
+    const idx = num(ctx, spec.indexOperand);
+    const value = num(ctx, spec.valueOperand);
+    if (idx > spec.maxIndex) {
+      ctx.machine.note('scalar-array-skip', `opcode 0x${spec.opcode.toString(16)} 的索引 ${idx} > 0x${spec.maxIndex.toString(16)} ⇒ 引擎**跳过**这次写（不抛）`);
+      return;
+    }
+    const key = `${spec.name}+${idx}`;
+    ctx.machine.scalars.write(key, value);
+    ctx.machine.effect('system', 'engine.scalar.array-write', 'modeled', {
+      opcode: `0x${spec.opcode.toString(16)}`, slot: key, index: idx, value,
+    });
+  };
+}
+
 /** 生成"响亮失败"的 handler：错误信息里必须写明**缺哪条取证**，不许只说不支持 */
 const unverifiedValueProducer = (e: (typeof VALUE_PRODUCING_UNVERIFIED)[number]): Handler => (ctx) => {
   throw new Error(
@@ -904,7 +1070,10 @@ function prologueHandlers(): Record<number, Handler> {
   return {
     ...out,
     0x149: opScalar149, 0x21b: opScalar21b, 0x252: opScalar252,
-    0x76: opScalar76, 0x77: opScalar77, 0x1a4: opScalar1a4, 0x78: opScalar78, 0x2db: opScalar2db, 0x88: opScalar88,
+    0x76: opScalar76, 0x77: opScalar77, 0x1a4: opScalar1a4, 0x2ee: opScalar2ee, 0xfe: opScalarFe, 0x10f: opScalar10f, 0x10c: opSetKeyMulti,
+    0x110: opUnsupported110, 0x111: opUnsupported111, 0x112: opUnsupported112,
+  0x107: scalarArrayHandler(ENGINE_SCALAR_ARRAYS[0]),
+  0x10b: scalarArrayHandler(ENGINE_SCALAR_ARRAYS[1]), 0x78: opScalar78, 0x2db: opScalar2db, 0x88: opScalar88,
   };
 }
 
@@ -1194,6 +1363,8 @@ export const HANDLERS: Record<number, Handler> = {
   0x6c: opFillZero,
   0x2d8: opSetArrayTo,
   0x2de: opFontIndex2de,
+  0x61: opLookupArray,
+  0x64: opCopyLocalArray,
   // ★ 有返回值但语义未取证的那些：**注册成响亮失败**（不是"还没轮到"，见上面的长注释）
   ...Object.fromEntries(VALUE_PRODUCING_UNVERIFIED.map((e) => [e.opcode, unverifiedValueProducer(e)])),
   0x1a7: opComment,

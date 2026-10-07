@@ -32,6 +32,8 @@ import type { GlobalPools, LocalPools, SlotValue } from '../model/pools.ts';
 import { LOCAL_POOLS, localPoolByTypeTag, localPoolTypeTags } from '../model/pools.ts';
 import type { LoadedScript } from './script.ts';
 import { inlineString } from './script.ts';
+import type { AddressSpace } from '../model/address-space.ts';
+import { decInt } from '@amayui/age-format/src/asm/value-codec.mts';
 
 /** 一个操作数读出来的值（int 族是 u32，字符串是 `string`） */
 export type OperandValue = number | string;
@@ -51,6 +53,11 @@ export interface OperandContext {
   locals: LocalPools;
   globals: GlobalPools;
   script: LoadedScript;
+  /**
+   * ★ **地址空间**（ADR 第 ② 步）：指针族要"取址 / 解引用"，两者都只能在这个空间里做。
+   * ⛔ 不要求它是可选的：少了它，指针族只能"抛"或"猜" —— 显式要求它，编译期就把话说清。
+   */
+  space: AddressSpace;
 }
 
 /**
@@ -84,22 +91,10 @@ export const IMPLEMENTED_OPERAND_TYPES: readonly number[] = [
 export const UNVERIFIED_OPERAND_TYPES: readonly number[] = [2, 0x8003, 0x8005, 0x8009, 0x800b];
 
 /** 一个 4 字节暂存：dword **位模式** ↔ float32（type 1 的浮点立即数、浮点池落槽） */
-const F32 = new DataView(new ArrayBuffer(4));
-
-/** dword 位模式 → float32（写成读回同一端序 ⇒ 与宿主端序无关） */
-export const floatFromBits = (bits: number): number => {
-  F32.setUint32(0, bits >>> 0, true);
-  return F32.getFloat32(0, true);
-};
-
-/** float32 → dword 位模式 */
-export const bitsFromFloat = (v: number): number => {
-  F32.setFloat32(0, v, true);
-  return F32.getUint32(0, true);
-};
-
-/** 收敛成 float32（浮点池落的是 **4 字节单精度** —— 取证：`fstp dword ptr`） */
-export const asFloat32 = (v: number): number => floatFromBits(bitsFromFloat(v));
+// ★ 位模式换算的**一份真源**在 `model/float-bits.ts`（池层也要用，而 `model/` 不许反向依赖 `vm/`）
+//   ⚠ `export … from` 只再导出、**不进本地作用域** ⇒ 本文件自己用还得 import 一次。
+import { asFloat32, bitsFromFloat, floatFromBits } from '../model/float-bits.ts';
+export { asFloat32, bitsFromFloat, floatFromBits };
 
 /** 未取证的 type ⇒ 抛（错误消息必须说清"这是没取证，不是坏数据"） */
 function unverified(type: number): never {
@@ -145,6 +140,30 @@ export function readOperand(ctx: OperandContext, arg: InstrArg, index: number): 
     return { value: floatFromBits(raw), kind: 'immediate.float', where: `immediate-float#${index}` };
   }
 
+  // ★★ 指针族（本批只实现了存 4 字节整数的两支：0x6 全局 / 0xc 局部）。
+  //   语义（逐字，锚 = EA）：`sub_41BF50` 的 case 12（局部 ptr，`0x41C049`）
+  //   ```
+  //     mov eax,[ecx+esi*8+5D8C0h]   ; ptr 池基址
+  //     mov edx,[eax+edx*4]          ; 取第 idx 格 —— ★ **不 DEC**：格内容就是**地址**
+  //     mov eax,[edx]                ; ★ 解引用
+  //     rol 0Bh / xor [5EC8Ch] / ror 19h   ; ★ DEC 作用于**解引用出来的** dword
+  //   ```
+  //   ⇒ 读 = 取地址 → 解引用 → DEC。（对照 case 9 的 int：取格后**直接** DEC ⇒ 见 `LOCAL_POOLS` 的 `encoded` 订正。）
+  if (type === 0x6 || type === 0xc) {
+    const isLocal = type === 0xc;
+    const addr = (isLocal ? ctx.locals.read(type, raw) : ctx.globals.read('intRef', raw)) as number | null;
+    // 未写过 ⇒ 引擎那边是 `initZero` 的 0 ⇒ 解引用地址 0（**会响亮失败**：0 不在任何区域里）
+    const target = (addr ?? 0) >>> 0;
+    // ★★ 解引用前**按需增长**（决策 `REQ-01M4B969TBWVERFCB1MXS2Q2E1`）：
+    //   地址可能落在区域的**窗口内**却超出它**当前**的 `byteLength`（实测：`global:int[1353969]`
+    //   的地址 `0x1052a3c4` —— 大下标数组还没被写过）⇒ 不增长就会抛"不落在任何区域里"。
+    //   增长由 `Machine` 的钩子逐条留痕（`system.region.grow`），所以这**不是**静默扩容。
+    ctx.space.ensureAddress(target, `指针 type 0x${type.toString(16)} 第 ${raw} 格 → 解引用前的增长`);
+    const cell = ctx.space.readU32(target, `指针 type 0x${type.toString(16)} 第 ${raw} 格 → 解引用`);
+    if (cell === null) return { value: null, kind: 'pointer.unwritten', where: `ptr[${raw}]→0x${target.toString(16)}` };
+    return { value: decInt(cell, isLocal ? ctx.locals.key : ctx.globals.key), kind: 'pointer.deref', where: `ptr[${raw}]→0x${target.toString(16)}` };
+  }
+
   if (POINTER_OPERAND_TYPES.includes(type)) unimplementedPointerType(type);
 
   const globalName = GLOBAL_POOL_BY_TYPE_TAG[type];
@@ -179,6 +198,14 @@ export function writeOperand(ctx: OperandContext, arg: InstrArg, index: number, 
       `操作数 #${index} 是立即数（type ${type}），**不是 lvalue**（引擎的取址原语只覆盖 3..14，遇到立即数抛类型异常）—— ` +
       `值 ${JSON.stringify(value)} 无处可写`,
     );
+  }
+
+  if (type === 0x6 || type === 0xc) {
+    // ★ 写指针格 = 存**地址本身**（`encoded: false` ⇒ 不过 ENC）—— 见读那一支的逐字。
+    if (typeof value !== 'number') throw new Error(`操作数 #${index} 是指针格，只能写数字（收了 ${JSON.stringify(value)}）`);
+    if (type === 0xc) ctx.locals.write(type, raw, value >>> 0);
+    else ctx.globals.write('intRef', raw, value >>> 0);
+    return;
   }
 
   if (POINTER_OPERAND_TYPES.includes(type)) unimplementedPointerType(type);
@@ -227,6 +254,20 @@ export const asUint32 = (v: OperandValue): number => (typeof v === 'string' ? Nu
 
 /** 把读出来的值当**浮点**用（int 立即数 → 浮点值；LOGO 里 `float-mov (global-float 9) 500` 就是这条） */
 export const asFloat = (v: OperandValue): number => (typeof v === 'string' ? Number(v) : v >>> 0);
+
+/**
+ * **取址**（对应引擎的取址原语 `sub_42AEA0`，只覆盖 type 3..14）：操作数 → 它那一格的**地址**。
+ * ★ 需要池已经迁到区域（ADR 第 ② 步）—— 没迁的池会**抛**（见 `LocalPools.regionOf`）。
+ */
+export function addressOfOperand(ctx: OperandContext, arg: InstrArg, index: number): number {
+  const type = arg.type;
+  const raw = arg.rawData >>> 0;
+  const globalName = GLOBAL_POOL_BY_TYPE_TAG[type];
+  if (globalName) return ctx.globals.regionOf(globalName).addressOf(raw);
+  const def = localPoolByTypeTag(type);
+  if (def) return ctx.locals.regionOf(type).addressOf(raw);
+  throw new Error(`操作数 #${index} 的 type 0x${type.toString(16)} 不能取址（引擎的取址原语只覆盖 3..14）`);
+}
 
 /** 浮点族的操作数 type（"浮点 → 文本"的格式**未取证** ⇒ 文本路遇到它们要抛） */
 export const FLOAT_OPERAND_TYPES: readonly number[] = [1, 4, 0xa];

@@ -47,6 +47,69 @@ export { MUTATIONS };
  * ★ 加新守卫时顺手加一条 —— 否则"这个守卫会红"只是个声称。
  */
 const MUTATIONS = [
+  // ── float 族迁区域：格内容 = **位模式**，读的时候必须换算回数值 ──
+  {
+    file: 'apps/emulator/src/model/pools.ts',
+    from: "  if (def.kind === 'float') return floatFromBits(bits);",
+    to: "  if (def.kind === 'float') return bits;",
+    guard: 'tools/test/emulator-pool-regions.test.mjs',
+    what: 'float 池读回来的是**位模式**（1067450368）而不是数值（1.25）—— 用错的地方会"看起来是个整数"',
+  },
+  // ── 标量数组：索引**必须**进键名（★ 否则两次不同的写互相覆盖，而日志看不出异常）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: '    const key = `${spec.name}+${idx}`;',
+    to: '    const key = spec.name;',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '标量数组的索引不进键名 ⇒ 第 3 格与第 4 格的写互相覆盖，且快照只看到一个键',
+  },
+  // ── 引擎自己的范围检查（★ 改成 clamp 会把"脚本写错了"变成"值变了一点"）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: '      if (capped !== undefined && value > capped) {',
+    to: '      if (false && capped !== undefined && value > capped) {',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '知识层登记的 `max`（引擎自己抛异常的那条）被忽略 ⇒ 越界值静默写进去',
+  },
+  // ── `0x64` 的块偏移（★ 少一个 +4 就会把"元素个数"当成第一个元素）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: 'encInt(u32(blockOff + 4 + 4 * i), key)',
+    to: 'encInt(u32(blockOff + 4 * i), key)',
+    guard: 'tools/test/emulator-pool-regions.test.mjs',
+    what: '`copy-local-array` 的数据起点少算 4 字节 ⇒ 把"元素个数"当成第一个元素写进去',
+  },
+  // ── 指针族的语义（★ 错一处就会"解引用一个编码过的数"，而两条路都看起来正常）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: '  writeOperand(operandCtx(ctx), dest, 0, addr);',
+    to: '  writeOperand(operandCtx(ctx), dest, 0, ctx.machine.space.readU32(addr) ?? 0);',
+    guard: 'tools/test/emulator-pool-regions.test.mjs',
+    what: '`lookup-array` 往指针格写**那一格的值**而不是**它的地址** ⇒ 下一步会去解引用那个值',
+  },
+  {
+    file: 'apps/emulator/src/vm/operand.ts',
+    from: '    const target = (addr ?? 0) >>> 0;',
+    to: '    const target = (decInt((addr ?? 0) >>> 0, isLocal ? ctx.locals.key : ctx.globals.key) >>> 0);',
+    guard: 'tools/test/emulator-pool-regions.test.mjs',
+    what: '指针读**先 DEC 再解引用**（顺序反了）⇒ 会去解引用一个编码过的地址（逐字是"取格→解引用→DEC"）',
+  },
+  // ── 区域窗口（★ 本仓实测踩过两次静默串数据：容量 0 同基址；增长吞掉邻居）──
+  {
+    file: 'apps/emulator/src/model/address-space.ts',
+    from: 'this.baseCursor = base + REGION_STRIDE;',
+    to: 'this.baseCursor = base + r.byteLength;',
+    guard: 'tools/test/emulator-pool-regions.test.mjs',
+    what: '按当前字节长推进基址（而不是整个窗口）⇒ 容量 0 的区域同基址、增长还吞邻居 = **静默串数据**',
+  },
+  // ── 按需增长：**越界不许变成"悄悄扩容"**（★ 这一塌，引擎的 UB 就被伪装成了一种语义）──
+  {
+    file: 'apps/emulator/src/model/address-space.ts',
+    from: '    if (need <= region.capacity) return false;',
+    to: '    if (need <= region.capacity) return false;\n    if (need > region.capacity) { region.growTo(need); }',
+    guard: 'tools/test/emulator-address-space.test.mjs',
+    what: '越界访问顺手扩容（且不经过留痕钩子）⇒ 静默把 UB 放过去，日志里看不到任何增长',
+  },
   // ── `0x76` 的 bswap24（★ 写成原值 = 颜色通道反了，而没人会报错）──
   {
     file: 'apps/emulator/src/vm/ops.ts',
@@ -214,10 +277,10 @@ const MUTATIONS = [
   },
   {
     file: 'packages/age-format/src/engine/layout.mts',
-    from: "{ name: 'float', count: 0x20, base: 0x38 }",
+    from: "{ name: 'float', count: 0x20, base: 0x44 }",
     to: "{ name: 'float', count: 0x20, base: 0x84 }",
     guard: 'tools/test/emulator-model.test.mjs',
-    what: 'local_float 基址 0x38 → 0x84（★ 这正是我批 R1 犯过的错：把 array_container 当成池基址）',
+    what: 'local_float 基址 0x44 → 0x84（★ 这正是我批 R1 犯过的错：把 array_container 当成池基址）',
   },
   {
     file: 'apps/emulator/src/model/iterate.ts',
@@ -249,8 +312,9 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator/src/model/pools.ts',
-    from: "LocalPools: { key: 'engine', pools: 'engine', oob: 'diagnostic' },",
-    to: "LocalPools: { key: 'engine', pools: 'engine', oob: 'engine' },",
+    // ★ 钉**最稳定的子串**（`oob: 'diagnostic'`）：整行会随"新增字段"变，子串不会
+    from: "oob: 'diagnostic',",
+    to: "oob: 'engine',",
     guard: 'tools/test/emulator-state-partition.test.mjs',
     what: '把 `oob` 从 diagnostic 改成 engine（诊断被当成引擎态 ⇒ 快照会多带一个会涨的量）',
   },

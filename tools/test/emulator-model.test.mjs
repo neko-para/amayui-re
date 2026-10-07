@@ -109,12 +109,15 @@ function frameCensus() {
   return { literals, folded };
 }
 
-test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）—— 计数 6 个 + 基址 6 个', { skip }, () => {
+test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）★ **已按本仓取证订正：基址实为 帧+0x3C…+0x54** —— 计数 6 个 + 基址 6 个', { skip }, () => {
   assert.equal(LOCAL_POOLS.length, 6, 'local 池是 6 个（int/float/string/ptr/floatPtr/stringPtr）');
   assert.deepEqual(LOCAL_POOLS.map((p) => p.typeTag), [9, 10, 11, 12, 13, 14], 'operand type 9..14 依次对应 6 个池');
   assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.count), [0x1c, 0x20, 0x24, 0x28, 0x2c, 0x30], '6 个计数槽连续');
-  // ★ 基址也连续：+0x34 +0x38 +0x3C +0x40 +0x44 +0x48（**与旧仓 fields.json 一致**）
-  assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.base), [0x34, 0x38, 0x3c, 0x40, 0x44, 0x48], '6 个基址槽连续');
+  // ★★ 基址：`+0x3C/0x40/0x44/0x48/0x50/0x54`（**按本仓取证**：`sub_40ED40` 里"分配紧接着写基址"的局部性，
+  //    EA `0x40F3B1/0x40F2E9/0x40F31B/0x40F3F0/0x40F42F/0x40F471`；读取侧 `sub_41BF50` 的 case 0xB/9/0xA/0xC/0xD/0xE）。
+  //    ⛔ 旧值 `+0x34…+0x48` 的来源是**旧仓 `fields.json`**、本仓没为它找到判据 ⇒ 已弃用（用户口径：以本仓重发现为准）。
+  //    ★ 旁证：`set-string` 对 type 11 的目标 = `[Engine+0x5D8BC] + 28*idx`，`0x5D8BC − 0x5D880 = 0x3C` ✓（新旧一致的那一格）
+  assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.base), [0x40, 0x44, 0x3c, 0x48, 0x50, 0x54], '6 个基址槽（按池名 int/float/string/ptr/floatPtr/stringPtr）');
   // ★ 而且**语义池名与布局槽名必须一一对上**（这是"布局 ↔ 语义"的接口；改名或加池都会红）
   assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.name), LOCAL_POOLS.map((p) => p.name),
     '布局里的池名集合必须与模拟器语义模型的池名集合完全一致');
@@ -130,9 +133,9 @@ test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）�
     assert.ok(!('base' in p), `模拟器的池定义不许带 \`base\`（偏移属于布局层）：${p.name}`);
     assert.ok(!('count' in p), `模拟器的池定义不许带 \`count\`（帧内计数槽属于布局层）：${p.name}`);
   }
-  // `+0x38` 只以**折叠形态**出现 —— 这条把"我上一轮的错误结论"钉成可判的
-  assert.equal(literals.get(0x38) ?? 0, 0, '`+0x38` 在语料里确实没有**字面**形态（这正是我当初被误导的原因）');
-  assert.ok((folded.get(0x38) ?? 0) > 0, '★ 但它在**折叠形态**里存在：`[esi+edx*8]`（`edx = 15*(cur+0xC79)`）');
+  // ★ 订正后必须**不再**声称旧值：`+0x34/+0x38` 已不是任何池的基址（`+0x34` 是 size/count 族里的一个）
+  assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === 0x34 || p.base === 0x38),
+    '旧表里的 +0x34/+0x38 不许再作为基址出现（它们是 size/count 字段）');
 });
 
 test('★ `帧+0x84` 是 `array_container`（std::vector），**不是** local_float 基址', { skip }, () => {
@@ -146,7 +149,11 @@ test('★ `帧+0x84` 是 `array_container`（std::vector），**不是** local_f
   const cleared = win.filter((l) => /^mov \[eax(\+\d+)?\],ebx$/.test(l));
   assert.equal(cleared.length, 3, `新对象应被清零 3 个 dword（begin/end/cap），实际 ${cleared.length} 条：${JSON.stringify(win.slice(0, 12))}`);
   assert.equal(FRAME.off.arrayContainer, 0x84, '模型里 `+0x84` 记为 array_container');
-  assert.equal(LOCAL_POOL_SLOTS.find((p) => p.name === 'float').base, 0x38, '★ local_float 的基址不是 0x84');
+  // ★ 这一条的本意是"`+0x84` 不是任何 local 池的基址"。旧的写法顺便断言了 `local_float = 0x38`，
+  //   而那张旧表（来源 = 旧仓 `fields.json`）已被本仓取证订正为 `0x44` ⇒ 这里改成**不依赖旧值**的写法：
+  //   `+0x84` 不在基址集合里，且它确实是 array_container。
+  assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === 0x84), '★ `+0x84` 不是任何 local 池的基址');
+  assert.equal(LOCAL_POOL_SLOTS.find((p) => p.name === 'float').base, 0x44, 'local_float 的基址（按本仓取证；旧表写 0x38）');
 });
 
 test('★ 帧区 slot 的全集：模型声明的那份观察结果必须与语料一致（逐个复核 + 关键槽点名）', { skip }, () => {

@@ -5,28 +5,29 @@
 - status: open
 - parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
 
-## 当前实测（可复算）
+## 当前实测（本轮：前沿**未回退**，290 步 → 14288 步不变）
 
-| 入口 | 结果 |
+| 入口 | 现在 |
 |---|---|
-| 启动链根脚本 | 140 步 ⇒ `INITCONFIG4.BIN#7 = 0x61 lookup-array` |
-| `LOADCONFIG.BIN`（直跑） | 32 步 ⇒ `#33 = 0x61 lookup-array` |
-| `CHECKCONFIG.BIN`（直跑） | **37 步**（本轮 34 → 37）⇒ `#55 = 0x1a4` |
-| `INITCONFIG.BIN` | 跑通（含 `INITCONFIG0..4`）⇒ `INITCONFIG4#7` |
+| 启动链根脚本 | **14288 步** ⇒ `SYSTEM4.BIN#100 = 0x30a` |
+| `LOADCONFIG` / `CHECKCONFIG` / `INITCONFIG(0..5)` / `INITCHARM` | 都**跑完** |
 
-## 本轮做完
+## 本轮做完（ADR 第 ② 步的剩余 —— **float 族已迁**）
 
-* **`0x76`/`0x77`**：写 `Engine+0x15280` / `+0x15284` 两个槽，值是 **`bswap24(op1)`**（低 24 位字节序倒过来，
-  `b0<<16|b1<<8|b2` —— 像 BGR↔RGB），且**都**在写完后调 `sub_459F40`。
-* ★★ **修掉我自己的一处静默遗漏**：`0x78`/`0x2db` 的体里**也有** `sub_459F40(...)`，而我的标量 handler
-  **没记录那次调用** ⇒ 保真欠账被**少算**（日志显得比实际干净）。
-  做法：知识层的表加一列 **`callsAfter`**（写完标量之后还调了谁），handler 按它逐次发 `logged-only`。
-  判据：`CHECKCONFIG` 直跑的**保真欠账从 0 变成 3**（`0x76`/`0x77`/`0x78` 各一次）—— 这就是修好的证据。
-* 棘轮更新（CHECKCONFIG 34 → 37 步 / `0x1a4` / `#55`）、守卫 +1 例（bswap24 的值 + callsAfter 必须留痕）、
-  变异条目 +1 条（`bswap24` 改成恒等 ⇒ 当场红）。
+* **float 族（`float`/`floatPtr`/`float`/`floatRef`）迁到区域**：格内容 = **float32 位模式**
+  （`fstp dword ptr` 取证），读/写/快照各自在边界换算。
+* ★★ 途中把**三条换算口径**分开写清（这是本轮最容易出错的地方，守卫逐条抓过）：
+  1. **`read()`**：编码族 DEC、float 族 `floatFromBits`、ptr 族原样 ⇒ `cellToValue`；
+  2. **快照**：口径是"**与 Map 路径存的东西逐值相同**"（`[下标, 位模式][]`）⇒ 编码族**不 DEC**、
+     float 族写**数值** ⇒ `cellToSnapshot`（⛔ 用 `cellToValue` 会把 int 族的快照从位模式变成解码值 = **改外部形状**）；
+  3. **搬进区域**（构造器 / `restore`）：快照里编码族**已经是位模式** ⇒ `snapshotToCell`（⛔ 再 ENC 一次 = 双重编码）。
+* 位模式换算提到 `model/float-bits.ts`（**一份真源**）：原来它在 `vm/operand.ts`，而 `model/pools.ts` 不许反向依赖 `vm/`。
+* ⛔ **只剩 `string` 族没迁**（28 字节 SSO）：它是**一等一的树节点** `REQ-01M4BEHCHZE5QDHCNTA77V8ZJG`，
+  里面写清了为什么不能照做（长串 ≥16 字节时 `+0` 存的是**指向堆的指针**，而本层没有堆 ⇒ 要么加"字符串数据区 + 分配器"，要么承认指针语义），
+  以及**明确否掉的替代方案**（把 JS 字符串塞进 28 字节格 —— 那样任何按字节读这一格的地方都会得到"看起来正常"的错值）。
 
-## 下一块
+## 下一单元
 
-1. `0x1a4`（`CHECKCONFIG#55` 的新墙）。
-2. **`0x61 lookup-array` + 指针/地址空间**（三条子脚本的共同墙）—— 前置是池基址冲突 `REQ-01M4B49MK0HMJ7NK00PN4SMDHB` 与容量来源。
-3. 引擎侧配置门 `REQ-01M4B416EKPVZWHFWT283C1T3Q`。
+1. **先核对路径**（见上一轮的建议，仍然成立）：`REQ-01M4B416EKPVZWHFWT283C1T3Q`（`SYSTEM4#56` 的配置门）。
+2. `0x30a` 等 `SYSTEM4` 长尾 opcode。
+3. string 族迁移（要先裁决"堆"这件事）。
