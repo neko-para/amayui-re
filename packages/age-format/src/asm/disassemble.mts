@@ -26,61 +26,22 @@
  * 6. **本轮不移植 header 里的 delta/probe 机制**（旧仓 Node 版也没有；见旧仓 C++ `disassembler.cpp`
  *    的那条分支）。反汇编输出只保留"重汇编需要的最小集"。
  */
-import { loadOpcodeTable, instructionForOpCode, opcodeLabel } from './opcodes.mts';
+import { instructionForOpCode, opcodeLabel, OPCODE_TABLE } from './opcodes.mts';
 import type { OpcodeDef, OpcodeTable } from './opcodes.mts';
 import { defaultCodec, CP_932 } from './codec.mts';
+import { ByteReader } from './bytes.mts';
 import {
   getTypeLabel, isControlFlowOpcode, isLabelArgument, hex, labelHex,
-  FIELD_NAMES, FIELD_OFFSETS, fieldBlockShift,
 } from './types.mts';
+/** ★ 头部结构（含 `readHeader` / 类型）住在 `header.mts`（零 Node）；这里再导出，保持既有 import 路径可用 */
+import { readHeader, S5_SIG4, HEADER_LEN_V4, HEADER_LEN_V5 } from './header.mts';
+import type { ByteSource, ByteView, Header, HeaderFields } from './header.mts';
 
 export { getType, isArrayOpcode } from './types.mts';
+export { readHeader, S5_SIG4, HEADER_LEN_V4, HEADER_LEN_V5 };
+export type { ByteSource, ByteView, Header, HeaderFields };
 
-// ───────────────────────────────────────────────────────── 头部结构
-
-const S4_SIG = Buffer.from('SYS4', 'latin1');
-/** v5 签名前 4 字节 = UTF-16LE 的 "SY" */
-export const S5_SIG4 = Buffer.from([0x53, 0x00, 0x59, 0x00]);
-
-const HEADER_LEN_V4 = 0x3c;
-const HEADER_LEN_V5 = 0x44;
-
-/**
- * "能按小端读 u32、能把一段字节当文本看、且知道长度"的字节源。
- * ★ 刻意用**结构性最小接口**（而不是只写 `Buffer`）：本包不绑死宿主 ——
- *   `Buffer` 与 `Uint8Array`(+DataView 语义) 都能满足它，消费方（如模拟器的迭代系统）
- *   也能拿一个同形状的对象进来。
- */
-export interface ByteSource extends Uint8Array {
-  readUInt32LE(offset: number): number;
-  readUInt16LE(offset: number): number;
-  indexOf(value: number, byteOffset?: number): number;
-  toString(encoding?: string): string;
-  equals(other: Uint8Array): boolean;
-  /** ★ 覆盖 `Uint8Array.subarray`：切片之后**仍然是** `ByteSource`（否则丢掉 readUInt*） */
-  subarray(begin?: number, end?: number): ByteSource;
-}
-
-/** ★ 旧名保留为别名（模拟器侧 import 的是 `ByteView`） */
-export type ByteView = ByteSource;
-
-/** 脚本头里那 13 个 u32 数值字段（键名见 `FIELD_NAMES`，顺序见 `FIELD_OFFSETS`） */
-export type HeaderFields = Record<string, number>;
-
-/**
- * 脚本头。v4 与 v5 的**共同形状**：`isVer5` / `length` 区分两者。
- * ★ 类型住在实现旁边（消费方 `import type { Header } from '@amayui/age-format/src/asm/index.mts'`）。
- */
-export interface Header {
-  readonly fields: HeaderFields;
-  readonly isVer5: boolean;
-  /** v4 = 60（`0x3C`）· v5 = 68（`0x44`） */
-  readonly length: number;
-  /** 签名的**可显示形式**（v4 按 latin1 · v5 按 UTF-16） */
-  readonly signature: string;
-  /** 签名的**原始字节**（8 或 16 字节；`Buffer` 是 `Uint8Array` 的子类） */
-  readonly sigBytes?: Uint8Array;
-}
+// ───────────────────────────────────────────────────────── 指令区
 
 /** 一条指令的操作数（反汇编会**逐个字段填**，所以这里是可变的） */
 export interface InstrArg {
@@ -101,47 +62,6 @@ export interface Instr {
   /** 指令起点（**dword 下标**，相对头部末尾） */
   offset: number;
   [k: string]: unknown;
-}
-
-/** 从签名起点读 13 个 u32 数值字段；`shift` 见 `types.mts` 的 `fieldBlockShift` */
-function parseNumericFields(buf: ByteSource, sigStart: number, shift: number): HeaderFields {
-  const fields: HeaderFields = {};
-  for (let i = 0; i < FIELD_NAMES.length; i++) fields[FIELD_NAMES[i]] = buf.readUInt32LE(sigStart + shift + FIELD_OFFSETS[i]);
-  return fields;
-}
-
-/** 解析脚本头；签名不认识 ⇒ 抛 `Could not determine header version!` */
-export function readHeader(buf: ByteSource): Header {
-  if (buf.length < 4) throw new Error('file too small');
-  const sig4 = buf.subarray(0, 4);
-  if (sig4.equals(S4_SIG)) {
-    return {
-      fields: parseNumericFields(buf, 0, fieldBlockShift(false)),
-      isVer5: false,
-      length: HEADER_LEN_V4,
-      // 8 字节签名按 latin1 逐字节保真（只用于显示 / 回写）
-      signature: buf.subarray(0, 8).toString('latin1'),
-      sigBytes: Buffer.from(buf.subarray(0, 8)),
-    };
-  }
-  if (sig4.equals(S5_SIG4)) {
-    const sig16 = buf.subarray(0, 16);
-    // v5 签名字节里带 NUL（UTF-16LE 编码），latin1 保真；显示用去掉尾部 NUL 的 UTF-16 解读
-    return {
-      fields: parseNumericFields(buf, 0, fieldBlockShift(true)),
-      isVer5: true,
-      length: HEADER_LEN_V5,
-      signature: decodeUtf16Sig(sig16),
-      sigBytes: Buffer.from(sig16),
-    };
-  }
-  throw new Error('Could not determine header version!');
-}
-
-function decodeUtf16Sig(sig16: ByteView): string {
-  const u16 = [];
-  for (let p = 0; p + 1 < sig16.length; p += 2) u16.push(sig16.readUInt16LE(p));
-  return String.fromCharCode(...u16).replace(/\u0000+$/, '');
 }
 
 // ───────────────────────────────────────────────────────── 文本输出
@@ -224,7 +144,7 @@ function writeScriptFile(header: Header, instructions: readonly Instr[]): string
 export interface DisassembleOptions {
   /** 码页编解码器；缺省 `codec.mts` 的 `defaultCodec`（CP932） */
   codec?: { decode(bytes: Uint8Array): string } | null;
-  /** 指令表；缺省由 `loadOpcodeTable()` 装载 */
+  /** 指令表；缺省用本包自带的 `OPCODE_TABLE` */
   table?: OpcodeTable;
   /** true（缺省）= 字符串区越界即抛；false = 尽量反汇编、越界处填 `U+FFFD` 并记进 `report` */
   strict?: boolean;
@@ -232,9 +152,10 @@ export interface DisassembleOptions {
   report?: { push(item: unknown): void; outOfRange?: number };
 }
 
-export function disassemble(bin: Buffer, { codec = defaultCodec, table, strict = true, report }: DisassembleOptions = {}): string {
-  if (!Buffer.isBuffer(bin)) throw new Error('disassemble: bin 必须是 Buffer');
-  const tbl = table || loadOpcodeTable();
+export function disassemble(bin: Uint8Array, { codec = defaultCodec, table, strict = true, report }: DisassembleOptions = {}): string {
+  if (!(bin instanceof Uint8Array)) throw new Error('disassemble: bin 必须是 Uint8Array（Buffer 是它的子类）');
+  const rd = new ByteReader(bin);
+  const tbl = table || OPCODE_TABLE;
   const header = readHeader(bin);
   const { fields } = header;
   const headerLen = header.length;
@@ -264,7 +185,7 @@ export function disassemble(bin: Buffer, { codec = defaultCodec, table, strict =
   while (pos < dataArrayEnd) {
     const byteOffset = pos;
     if (pos + 4 > bin.length) { oob('指令 opcode', pos); break; }
-    const opCode = bin.readUInt32LE(pos);
+    const opCode = rd.u32(pos);
     pos += 4;
     if (opCode === 0x0) throw new Error(`Offset 0x${byteOffset.toString(16)} bad opcode : 0`);
 
@@ -276,8 +197,8 @@ export function disassemble(bin: Buffer, { codec = defaultCodec, table, strict =
 
     for (let current = 0; current < def.argc; current++) {
       if (pos + 8 > bin.length) { oob(`指令 0x${opCode.toString(16)} 的操作数 ${current}`, pos); break; }
-      const type = bin.readUInt32LE(pos); pos += 4;
-      const rawData = bin.readUInt32LE(pos); pos += 4;
+      const type = rd.u32(pos); pos += 4;
+      const rawData = rd.u32(pos); pos += 4;
       const arg: InstrArg = { type, raw_data: rawData, text: undefined, bytes: undefined, data_array: null };
 
       if (type === 2) {
@@ -290,7 +211,7 @@ export function disassemble(bin: Buffer, { codec = defaultCodec, table, strict =
           let p = stringOffset;
           for (;;) {
             if (p + 2 > bin.length) { oob('v5 字符串', p); break; }
-            const ch = bin.readUInt16LE(p); p += 2;
+            const ch = rd.u16(p); p += 2;
             if (ch === 0xffff) break;
             utf16.push(ch ^ 0xffff);
           }
@@ -314,12 +235,12 @@ export function disassemble(bin: Buffer, { codec = defaultCodec, table, strict =
           oob('数组块头', arrayOffset);
           arg.data_array = { length: 0, data: [] };
         } else {
-          const length = bin.readUInt32LE(arrayOffset);
+          const length = rd.u32(arrayOffset);
           const data = [];
           for (let i = 0; i < length; i++) {
             const at = arrayOffset + 4 + i * 4;
             if (at + 4 > bin.length) { oob('数组块元素', at); break; }
-            data.push(bin.readUInt32LE(at));
+            data.push(rd.u32(at));
           }
           arg.data_array = { length, data };
         }
@@ -341,8 +262,8 @@ export function disassemble(bin: Buffer, { codec = defaultCodec, table, strict =
 }
 
 /** `b ^ 0xFF` 整段取反（不就地改输入） */
-function invertBytes(src: Uint8Array): Buffer {
-  const out = Buffer.allocUnsafe(src.length);
+function invertBytes(src: Uint8Array): Uint8Array {
+  const out = new Uint8Array(src.length);
   for (let i = 0; i < src.length; i++) out[i] = src[i] ^ 0xff;
   return out;
 }

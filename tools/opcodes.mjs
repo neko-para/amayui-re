@@ -27,7 +27,7 @@ export { DOMAIN, OPERATIONS, describe, describeText };
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..');
-/** 派生表落点（消费者：packages/age-format/src/asm/opcodes.mjs 的 `loadOpcodeTable`） */
+/** 派生表落点（消费者：packages/age-format/src/asm/opcodes.mts 的 `OPCODE_TABLE` —— ESM JSON import，不走 fs） */
 const DEFAULT_TARGET = path.join(REPO_ROOT, 'packages', 'age-format', 'src', 'asm', 'instruction-set.json');
 /**
  * ★ 旧表来源**登记在清单里**（`knowledge/opcode-table-source`），不硬编码旧仓路径：

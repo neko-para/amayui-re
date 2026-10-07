@@ -605,11 +605,16 @@ export function replay(baseText, ops, opts = {}) {
   return { text: `${headerLines.join('\n')}\n\n${out.join('\n')}\n`, rows: out.length, applied, header: headerLines };
 }
 
-/** 基线 BIN + 条目 ⇒ 重建出来的 BIN（判据的机械版） */
+/** 基线 BIN + 条目 ⇒ 重建出来的 BIN（判据的机械版）
+ *
+ * ★ `Buffer.from(...)`：`age-format` 的 `assemble()` 现在返回 **`Uint8Array`**（那一层要能跑在前端，
+ *   不许绑 Node —— 见该包 `src/asm/bytes.mts` 头注）。本工具是 **Node 侧**，契约里写的就是 `Buffer`
+ *   （下游 `x.buf.equals(...)` 各处依赖它）⇒ 在这个边界上转一次。
+ */
 export function rebuildBin(baseBuf, entry, opts = {}) {
   const baseText = disassemble(baseBuf);
   const { text } = replay(baseText, entry.ops, { header: entry.header, ...opts });
-  return assemble(text);
+  return Buffer.from(assemble(text));
 }
 
 /**
@@ -656,7 +661,8 @@ export function viewToBinText(viewText, mapper) {
  */
 export function entryFromView(baseBuf, viewText, ctx) {
   const asmText = viewToBinText(viewText, ctx.mapper);
-  const bin = assemble(asmText);
+  // ★ 转 `Buffer`：本函数契约给的是 Node 的 `Buffer`（`assemble()` 现在返回 `Uint8Array`）
+  const bin = Buffer.from(assemble(asmText));
   const entry = extractEntry(baseBuf, bin, ctx.mapper);
   const rebuilt = rebuildBin(baseBuf, entry, { lineToBin: ctx.mapper.lineToBin });
   if (rebuilt.length !== bin.length || !rebuilt.equals(bin)) {
@@ -692,7 +698,8 @@ export function buildView(kind, baseBuf, entry, opts = {}) {
   if (kind === 'data') return { text: baseText, bin: baseBuf, stats: { rows: 0, stringSubstitutions: 0 } };
 
   const { text: replayed } = replay(baseText, entry.ops, { header: entry.header, ...opts });
-  const bin = assemble(replayed);
+  // ★ 转 `Buffer`：本函数契约里 `bin` 是 `Buffer`（`assemble()` 现在返回 `Uint8Array`）
+  const bin = Buffer.from(assemble(replayed));
   const direct = disassemble(bin);
   // ★ 载荷里存的是**中文**，而"汇编用的那份文本"已经被映射成 BIN 写法（占位字）——
   //   要拿到中文就得再重放一次（这次不做映射）。两次重放的行结构必然一致（只有字符串不同）。

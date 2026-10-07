@@ -30,14 +30,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { REPO_ROOT } from '../lib/paths.mjs';
-import { loadOpcodeTable } from '@amayui/age-format/src/asm/index.mts';
+import { OPCODE_TABLE } from '@amayui/age-format/src/asm/index.mts';
 import { iterate, instrByteLength, instrDwords, lengthInvariantHolds } from '../../apps/emulator/src/model/iterate.ts';
 
 const BIN_DIR = path.join(REPO_ROOT, 'dist', 'install');
 const bins = fs.existsSync(BIN_DIR) ? fs.readdirSync(BIN_DIR).filter((f) => f.toLowerCase().endsWith('.bin')).map((f) => path.join(BIN_DIR, f)) : [];
 const skip = bins.length ? false : '没有 .BIN 语料（先 `pnpm tools release install`）';
 
-const table = loadOpcodeTable();
+const table = OPCODE_TABLE;
 
 test('★ 长度恒等式对整个指令表成立：`4 + 8*argc == (2*argc+1) * 4`', () => {
   const bad = [];

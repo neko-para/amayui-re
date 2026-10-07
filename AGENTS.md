@@ -43,8 +43,10 @@
 
 ## 3. 语言与代码口径
 
-* **TypeScript 只用在"自带工具链的 app"上**：`apps/emulator` 与
-  `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）。这是本条规律的**全部例外**，新增一个 app 就写在这里。
+* **TypeScript 只出现在两类落点**：① **自带工具链的 app** —— `apps/emulator` 与
+  `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）；② **`packages/age-format`**
+  （源码是 `.mts` 的**一份真源**，见下 —— 它**没有**自己的工具链，只靠根上的 `tsc --noEmit` 检查）。
+  仓库内**其余一切 JS 一律 `.mjs`**。★ 新增一个带工具链的 app 就写在这里。
   ★ **`apps/emulator` 现在也没有构建步骤**：它的 `.ts`（`src/model/*.ts`）由 **Node v24 原生 type stripping** 直接跑，
   守卫（`tools/test/*.mjs`）就 `import '../../apps/emulator/src/model/pools.ts'` —— 实测 `node` 直接从 `.mjs` import `.ts` 可用。
   ⇒ 写法约束：**只许可擦除语法**（类型标注 / `interface` / `type` / `import type`），
@@ -78,8 +80,24 @@
   ★ **模拟器的工程会把 `age-format` 的源码一起拉进来**（它 `import` 它）—— 这是**有意的**：
   一条命令就能看见"消费方 + 被消费方的类型是否自洽"，不需要给 `age-format` 做 `composite` 工程引用
   （那要产出 `.d.ts`，与"无构建"冲突）。
-  ★ `packages/age-format` 的 tsconfig 需要 `@types/node`（它用 `Buffer` / `node:fs` / `__dirname`）；
-  `apps/emulator` 的模型**不用 Node 平台类型**（`Buffer` → 结构化的 `ByteSource`），因此它自己那份不需要。
+  ★ `packages/age-format` 的 tsconfig 需要 `@types/node`（**工具侧**用 `Buffer` / `node:fs` / `process`）。
+  ★ `apps/emulator` 那份是 **`"types": []`** —— 这一行就是**"核心不许碰 Node"的守卫本身**：
+  模拟器核心将来跑在**浏览器**里，`Buffer` 要 polyfill、**`node:fs` 没有 polyfill 可打**。
+  ⇒ 用**类型系统**而不是"扫源码的测试"来守（后者只认字面量，认不出间接 import 与别名）。
+  实测：往核心的可达闭包（如 `asm/bytes.mts`）加一行 `Buffer.alloc(1)` ⇒ `Cannot find name 'Buffer'`；
+  加 `import fs from 'node:fs'` ⇒ `Cannot find module 'node:fs'` —— 都当场红。
+  ⇒ 推论（**务必记住**）：`age-format` 的 `src/asm/**` **整个目录零 Node 依赖**（判据：`rg 'node:' packages/age-format/src/asm/` 为空）。
+  ★ 它是怎么做到的：指令表**随模块自带** —— `import defs from './instruction-set.json' with { type: 'json' }`
+  （Node / 打包器 / 浏览器三方都支持 ESM JSON 模块）。**别再用 `node:fs` 读本包自己的数据文件**。
+  ⇒ 两个入口的分工因此只是**范围**：`asm/runtime.mts` = 运行期要的那一份（核心用它）；
+  `asm/index.mts` = 全部（再加反汇编 / 重汇编 / 码页编解码）。
+  ⇒ "加载任意一份表"不是那一层的事：要读别的文件的调用方自己 `buildOpcodeTable(JSON.parse(...), p)`。
+  ★ **WHATWG 通用类型**（`TextDecoder` / `URL` / `AbortController` / `structuredClone`…）走 TypeScript
+  **内置的宿主库** `lib: ["ES2023", "WebWorker"]` —— 实测：给全这批 API，且**不给** `document` / `window`；
+  ⚠ 代价：会给 worker 专属的 `self` / `postMessage`（写错了会在 Node 侧守卫里**当场炸**，不是静默）。
+  ★ 不选另两条的理由：`lib: DOM` 会把 DOM 全局全放行（而核心还要能在 Node 里跑）；
+  `@types/web` 是 `lib.dom.d.ts` 的**同一份生成物**（仍只有 DOM）。上游"把 Node 与 DOM 公共的 API 抽成
+  `lib.common.d.ts`"那条（TypeScript #41727）**至今只是提案**（`Awaiting More Feedback`）⇒ 没有官方方案可用。
 * 包管理**用 pnpm**（`pnpm-workspace.yaml` 是 workspace 真源）。禁止混用 `npm install` 生成 `package-lock.json`。
   ★ **结构类设置只写 `pnpm-workspace.yaml`，不写 `.npmrc`**：`.npmrc` 只读 auth 与 registry；
   定义 `node_modules` 结构的键写在那里会在 pnpm 11 起**静默失效**。
@@ -136,7 +154,7 @@ pnpm typecheck                  # ★ `tsc --noEmit`，**两个工程**（`packa
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`
 的断言都能"一直绿"。它按 `tools/mutate-check.mjs` 里的清单，对每个关键常量施加**一处已知破坏**，
 要求指定守卫**退出码非 0**。⇒ 加新守卫时**顺手往清单里加一条**，否则"它会红"只是个声称。
-（清单现状 7 条：DEC/ENC 移位量 · 帧步长 · `local_float` 基址 · 指令字节长度 · 零出现指令的计数 · `argc`。）
+★ **清单有几条、是哪几条不写在这里**（写了必随下一次加守卫而变错）：`node tools/mutate-check.mjs --list`。
 ★ 它动的是**工作树里的文件**：施加前原文进内存、`finally` 里写回并**比对全文**；不一致就**立刻中止**（避免半坏的工作树）。
 
 ### 测试分级（★ 判据写在文件首行的 pragma 里，**不建清单文件**）

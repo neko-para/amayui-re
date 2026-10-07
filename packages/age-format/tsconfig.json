@@ -1,23 +1,51 @@
 {
+  // packages/age-format/tsconfig.json —— **只做类型检查，不产出**（`noEmit`）
+  //
+  // ★ 为什么是 `noEmit`：本包的源码是 `.mts`，由 **Node v24 的原生 type stripping** 直接跑
+  //   （`import { decInt } from '@amayui/age-format/src/asm/value-codec.mts'`）⇒ **没有构建步骤**，
+  //   `tsc` 在这里的唯一职责是"把类型写错这件事变成红灯"。
+  //
+  // ★ 为什么 `include` 是 `src/**/*.mts` 而**不是** `src/**/*`：本包**只有 `.mts`**（一份真源，
+  //   没有配对的 `.d.mts`）。★ 显式写扩展名 ⇒ 将来谁往 `src/` 里丢一个别的形态的实现文件，
+  //   它**不会**被静默纳入检查（要纳入就得改这一行 —— 这是个应该被看见的动作）。
+  //
+  // ★ 为什么 `allowJs: false`：`src/` 下一个 `.js`/`.mjs` 都没有。★ 与 `apps/emulator/tsconfig.json`
+  //   的处置一致（那边原先写着 `allowJs`，实测是空档 ⇒ 已删）。真需要 import 一个 `.js` 的那天，
+  //   报错会直接点名"考虑 allowJs"，那时再加。
+  //
+  // ★ 为什么 `resolveJsonModule`：指令表**随模块自带** —— `asm/opcodes.mts` 用
+  //   `import defs from './instruction-set.json' with { type: 'json' }` 把它读进来（零 `fs`）。
+  //   没有这个开关，TS 不认 JSON 模块。（★ 实测：JSON 推断出的类型**直接可赋**给 `readonly OpcodeDef[]`，
+  //   不需要 `as` 断言。）
+  //
+  // ★ 为什么 `types: ["node"]`：本包用 `Buffer` / `node:fs` / `node:path` / `__dirname`
+  //   （`agf` / `alf` / `lzss` / `asm/{codec,disassemble,opcodes}`）。★ **显式写出来**是为了不靠
+  //   "`tsc` 自动收集 `node_modules/@types/*`，而根上恰好装了一份 `@types/node`"。
+  //
+  // ★ 为什么 `verbatimModuleSyntax`：本仓是**无构建**的 ESM —— import/export 语句原样进 Node。
+  //   打开它 ⇒ `import type` 与普通 `import` 的区分是**语法事实**，不会出现"被 tsc 擦掉后运行期少了模块"。
+  //
+  // ★ 为什么 `erasableSyntaxOnly`：Node 的原生剥壳**只支持可擦除语法**。
+  //   `enum` / `namespace` / 构造器参数属性 / 装饰器在**运行期直接抛错** —— 这个开关把它们提前变成类型错误。
+  //
+  // ★ 为什么 `allowImportingTsExtensions`：`.mts` 之间的 import **必须写扩展名**（`./opcodes.mts`），
+  //   否则 Node 的 ESM 解析器找不到文件。它要求 `noEmit` —— 正好与本文件的用途一致。
   "compilerOptions": {
     "target": "ES2023",
-    "lib": [
-      "ES2023"
-    ],
+    "lib": ["ES2023"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
+
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "allowJs": false,
-    "strict": true,
-    "skipLibCheck": true,
-    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
-    "types": [
-      "node"
-    ],
-    "allowImportingTsExtensions": true
+    "erasableSyntaxOnly": true,
+    "types": ["node"],
+
+    "strict": true,
+    "skipLibCheck": true
   },
-  "include": [
-    "src/**/*.mts"
-  ]
+  "include": ["src/**/*.mts"]
 }

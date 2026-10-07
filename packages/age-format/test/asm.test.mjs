@@ -18,10 +18,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { disassemble, assemble, loadOpcodeTable } from '../src/asm/index.mts';
+import { disassemble, assemble, OPCODE_TABLE } from '../src/asm/index.mts';
 
 test('ASM：指令表只含**格式层**四列（知识层字段不得入库）', () => {
-  const table = loadOpcodeTable();
+  const table = OPCODE_TABLE;
   assert.ok(Array.isArray(table.entries), '指令表要给出 entries 数组');
   assert.ok(table.entries.length > 500, `指令表条目数应当有几百条，实际 ${table.entries.length}`);
   assert.ok(table.byOpcode instanceof Map, 'byOpcode 是查表入口（argc 决定指令边界）');

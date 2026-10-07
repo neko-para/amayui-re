@@ -27,17 +27,16 @@
  *    但老文本里可能用 `unknown0x8003` ⇒ 两条都认。
  */
 import {
-  loadOpcodeTable, instructionForToken, instructionByteLength,
+  instructionForToken, instructionByteLength, OPCODE_TABLE,
 } from './opcodes.mts';
 import type { OpcodeDef, OpcodeTable } from './opcodes.mts';
 import type { Header, Instr, InstrArg } from './disassemble.mts';
+import { HEADER_LEN_V4, HEADER_LEN_V5 } from './header.mts';
 import { defaultCodec, encodeUtf16Le } from './codec.mts';
+import { ByteWriter, concatBytes, encodeLatin1 } from './bytes.mts';
 import {
   getType, FIELD_NAMES, FIELD_OFFSETS, fieldBlockShift,
 } from './types.mts';
-
-const HEADER_LEN_V4 = 0x3c;
-const HEADER_LEN_V5 = 0x44;
 
 /** 参数解析：与旧仓同一条正则（顺序即优先级） */
 const RE_PARSE_ARGS = /\((\w+?\-?\w+?\-?\w+?) ([0-9a-fA-F]+)\)|(".*?")|label_([0-9a-fA-F]+)|\[(.+?)\]|([0-9a-fA-F]+)/g;
@@ -97,22 +96,25 @@ function parseHeader(lines: string[]): Header {
  * 没有 `sigBytes` 时按 `header.signature` 字符串编（v5 = UTF-16LE，v4 = latin1）。
  * 13 个数值字段的顺序 / 偏移 / v5 位移全部来自 `types.mjs`（与读侧共用同一张表）。
  */
-export function writeHeaderBytes(header: Header): Buffer {
+export function writeHeaderBytes(header: Header): Uint8Array {
   const { fields, isVer5, signature, sigBytes } = header;
-  const out = isVer5 ? Buffer.alloc(HEADER_LEN_V5) : Buffer.alloc(HEADER_LEN_V4);
+  const w = new ByteWriter(isVer5 ? HEADER_LEN_V5 : HEADER_LEN_V4);
+  const out = w.bytes;
   if (isVer5) {
-    const raw: Uint8Array = Buffer.isBuffer(sigBytes) && sigBytes.length >= 16
+    const raw: Uint8Array = sigBytes instanceof Uint8Array && sigBytes.length >= 16
       ? sigBytes.subarray(0, 16)
       : encodeUtf16Le((String(signature || 'SYS5501 ').replace(/\u0000+$/, '') || 'SYS5501 ').padEnd(8, ' '));
     for (let k = 0; k < Math.min(16, raw.length); k += 1) out[k] = raw[k];
   } else {
-    const raw = Buffer.isBuffer(sigBytes) && sigBytes.length >= 8
+    const raw: Uint8Array = sigBytes instanceof Uint8Array && sigBytes.length >= 8
       ? sigBytes.subarray(0, 8)
-      : Buffer.from(String(signature || '        ').padEnd(8, ' '), 'latin1');
-    raw.copy(out, 0, 0, Math.min(8, raw.length));
+      : encodeLatin1(String(signature || '        ').padEnd(8, ' '));
+    // ★ `set` 是拷贝语义（与旧仓 `raw.copy(out, 0, 0, n)` 一致）；`Uint8Array` 的 `slice` 才是拷贝，
+    //   而这里要的是"把 raw 的前 n 字节写进 out" ⇒ 用 `subarray` + `set`
+    out.set(raw.subarray(0, Math.min(8, raw.length)), 0);
   }
   const shift = fieldBlockShift(isVer5);
-  for (let i = 0; i < FIELD_NAMES.length; i++) out.writeUInt32LE(fields[FIELD_NAMES[i]] >>> 0, shift + FIELD_OFFSETS[i]);
+  for (let i = 0; i < FIELD_NAMES.length; i++) w.u32(shift + FIELD_OFFSETS[i], fields[FIELD_NAMES[i]] >>> 0);
   return out;
 }
 
@@ -134,7 +136,9 @@ function nextCodeLine(lines: readonly string[], i: number): { line: string; next
 }
 
 /**
- * 反汇编文本 → AGE 脚本字节码，返回 Buffer。
+ * 反汇编文本 → AGE 脚本字节码，返回 `Uint8Array`。
+ * ★ 需要 `Buffer` 专有方法（`.equals` / `.toString('hex')`）的调用方请自己包一层
+ *   `Buffer.from(bytes)` —— 本包**不绑 Node**（见 `bytes.mts` 头注的三条静默陷阱）。
  *
  * `text` 是反汇编文本（UTF-8 读入的字符串）。
  * `opts.codec` 缺省 CP932（脚本 v5 的字符串走 UTF-16LE，与此无关）；
@@ -144,13 +148,13 @@ function nextCodeLine(lines: readonly string[], i: number): { line: string; next
 export interface AssembleOptions {
   /** 码页编解码器；缺省 `codec.mts` 的 `defaultCodec`（CP932） */
   codec?: { decode(b: Uint8Array): string; encode(s: string): Uint8Array } | null;
-  /** 指令表；缺省由 `loadOpcodeTable()` 装载 */
+  /** 指令表；缺省用本包自带的 `OPCODE_TABLE` */
   table?: OpcodeTable;
 }
 
-export function assemble(text: string, { codec = defaultCodec, table }: AssembleOptions = {}): Buffer {
+export function assemble(text: string, { codec = defaultCodec, table }: AssembleOptions = {}): Uint8Array {
   if (typeof text !== 'string') throw new Error('assemble: text 必须是 string');
-  const tbl = table || loadOpcodeTable();
+  const tbl = table || OPCODE_TABLE;
   const cp = codec || defaultCodec;
   const lines = text.split(/\r?\n/);
   const header = parseHeader(lines);
@@ -252,7 +256,7 @@ export function assemble(text: string, { codec = defaultCodec, table }: Assemble
   let currentStringOffset = dataArrayEnd;
   for (const [instrIdx, argIdx] of stringArguments) {
     const arg = instructions[instrIdx].args[argIdx];
-    const bytes = arg.bytes || Buffer.alloc(0);
+    const bytes = arg.bytes || new Uint8Array(0);
     if (header.isVer5) {
       const charCount = bytes.length / 2;
       arg.raw_data = (currentStringOffset - headerLen) >> 2;
@@ -301,21 +305,21 @@ export function assemble(text: string, { codec = defaultCodec, table }: Assemble
   header.fields.table_3_offset = header.fields.table_2_offset + header.fields.table_2_length;
 
   // 写字节
-  const parts = [writeHeaderBytes(header)];
-  const code = Buffer.alloc(dataArrayEnd - headerLen);
+  const parts: Uint8Array[] = [writeHeaderBytes(header)];
+  const code = new ByteWriter(dataArrayEnd - headerLen);
   let pos = 0;
   for (const instr of instructions) {
-    code.writeUInt32LE(instr.def.opcode, pos); pos += 4;
+    code.u32(pos, instr.def.opcode); pos += 4;
     for (const arg of instr.args) {
-      code.writeUInt32LE(arg.type >>> 0, pos); pos += 4;
-      code.writeUInt32LE(arg.raw_data >>> 0, pos); pos += 4;
+      code.u32(pos, arg.type >>> 0); pos += 4;
+      code.u32(pos, arg.raw_data >>> 0); pos += 4;
     }
   }
-  parts.push(code);
-  parts.push(Buffer.from(stringData));
-  const footer = Buffer.alloc(footerData.length * 4);
-  for (let k = 0; k < footerData.length; k++) footer.writeUInt32LE(footerData[k] >>> 0, k * 4);
-  parts.push(footer);
+  parts.push(code.bytes);
+  parts.push(Uint8Array.from(stringData));
+  const footer = new ByteWriter(footerData.length * 4);
+  for (let k = 0; k < footerData.length; k++) footer.u32(k * 4, footerData[k] >>> 0);
+  parts.push(footer.bytes);
 
-  return Buffer.concat(parts);
+  return concatBytes(parts);
 }

@@ -44,7 +44,7 @@
  * 7. 本文件**不依赖 `tools/lib/cp932.mjs`**（那是语料转写工具，带 GBK 箭头等语料专用口径）；
  *    这里是格式层，口径必须与运行时（emulator 的 `TextDecoder('shift_jis')`）一致。
  */
-import { Buffer } from 'node:buffer';
+import { ByteReader, ByteWriter, toBytes } from './bytes.mts';
 
 const CP932 = new TextDecoder('shift_jis', { fatal: true });
 
@@ -83,7 +83,7 @@ function gaijiIndex(lead: number, trail: number): number {
 /** 双字节按平台 CP932 表解；未定义 ⇒ null（如 `0x86 0x80` / `0xEC 0xBD` 在 CP932 里没有映射） */
 function tablePair(b0: number, b1: number): string | null {
   try {
-    return CP932.decode(Buffer.from([b0, b1]));
+    return CP932.decode(Uint8Array.of(b0, b1));
   } catch {
     return null;
   }
@@ -92,7 +92,7 @@ function tablePair(b0: number, b1: number): string | null {
 /** 单字节按平台 CP932 表解；未定义 ⇒ null */
 function tableSingle(b: number): string | null {
   try {
-    return CP932.decode(Buffer.from([b]));
+    return CP932.decode(Uint8Array.of(b));
   } catch {
     return null;
   }
@@ -145,7 +145,7 @@ function reverseTable(): Map<string, Uint8Array> {
     map.set(text, bytes);
   };
   // 1) 单字节
-  for (let b = 0; b < 0x100; b += 1) { const t = tableSingle(b); if (t !== null) put(t, Buffer.from([b])); }
+  for (let b = 0; b < 0x100; b += 1) { const t = tableSingle(b); if (t !== null) put(t, Uint8Array.of(b)); }
   // 2) 标准双字节区（跳过 0xED40–0xF940）
   const leads = [];
   for (let b = 0x81; b <= 0x9f; b += 1) leads.push(b);
@@ -155,14 +155,14 @@ function reverseTable(): Map<string, Uint8Array> {
       if (!isTrailByte(trail)) continue;
       if (isEncodeSkipped(lead, trail)) continue;
       const t2 = tablePair(lead, trail);
-      if (t2 !== null) put(t2, Buffer.from([lead, trail]));
+      if (t2 !== null) put(t2, Uint8Array.of(lead, trail));
     }
   }
   // 3) 外字区（线性，最后兜底：它覆盖 U+E000–U+E757，且必须始终可编码）
   for (let lead = GAIJI_LEAD_LO; lead <= GAIJI_LEAD_HI; lead += 1) {
     for (let trail = 0x40; trail <= 0xfc; trail += 1) {
       if (!isTrailByte(trail)) continue;
-      put(String.fromCharCode(GAIJI_LO + gaijiIndex(lead, trail)), Buffer.from([lead, trail]));
+      put(String.fromCharCode(GAIJI_LO + gaijiIndex(lead, trail)), Uint8Array.of(lead, trail));
     }
   }
   REVERSE = map;
@@ -173,12 +173,12 @@ function reverseTable(): Map<string, Uint8Array> {
 
 /**
  * CP932 字节 → 字符串（外字区按线性表，其余按平台表；解不出的单字节保留原码位）。
- * @param {Buffer|Uint8Array} buf
- * @returns {string}
+ * @param buf 任意 `Uint8Array`（`Buffer` 是它的子类，照收）
+ * @returns 解码结果
  */
 export function decodeCp932(buf: Uint8Array): string {
   if (!buf || buf.length === 0) return '';
-  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  const b = toBytes(buf);
   let out = '';
   let p = 0;
   while (p < b.length) {
@@ -214,14 +214,14 @@ export function decodeCp932(buf: Uint8Array): string {
 }
 
 /**
- * 字符串 → CP932 字节。
- * @param {string} str
- * @returns {Buffer}
+ * 字符串 → CP932 字节。返回**定长分配后的切片**（视图，不是拷贝 —— 与旧行为一致）。
+ * @param str 要编码的字符串
+ * @returns 编码结果（`Uint8Array`）
  * @throws 表里没有该字符时抛错（不静默替换）
  */
 export function encodeCp932(str: string): Uint8Array {
   const rev = reverseTable();
-  const out = Buffer.allocUnsafe(str.length * 2 + 8);
+  const out = new Uint8Array(str.length * 2 + 8);
   let n = 0;
   for (const ch of str) {
     const hit = rev.get(ch);
@@ -255,12 +255,13 @@ export function firstUnencodable(str: string): string | null {
  */
 export function decodeUtf16Le(buf: Uint8Array): string {
   if (!buf || buf.length === 0) return '';
-  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  const b = toBytes(buf);
+  const rd = new ByteReader(b);
   // 分批 fromCharCode：v5 的长串可能上万字符，一次性 spread 会顶到引擎的参数上限
   const parts = [];
   const batch = [];
   for (let p = 0; p + 1 < b.length; p += 2) {
-    batch.push(b.readUInt16LE(p));
+    batch.push(rd.u16(p));
     if (batch.length === 2048) {
       parts.push(String.fromCharCode(...batch));
       batch.length = 0;
@@ -273,9 +274,9 @@ export function decodeUtf16Le(buf: Uint8Array): string {
 /** 字符串 → UTF-16LE 字节（脚本 v5；不含尾部 NUL —— 那是调用方的排版责任） */
 export function encodeUtf16Le(str: string): Uint8Array {
   const s = String(str);
-  const out = Buffer.alloc(s.length * 2);
-  for (let i = 0; i < s.length; i += 1) out.writeUInt16LE(s.charCodeAt(i), i * 2);
-  return out;
+  const w = new ByteWriter(s.length * 2);
+  for (let i = 0; i < s.length; i += 1) w.u16(i * 2, s.charCodeAt(i));
+  return w.bytes;
 }
 
 /**

@@ -18,6 +18,11 @@ packages/age-format/
     src/alf.mts        #   领域模型：ALF 归档（索引 + 数据体）
     src/agf.mts        #   领域模型：AGF 图像（含 AGF 族的 LZSS 与像素排布）
     src/asm/           #   领域模型：AGE 脚本（指令表 + CP932 编解码 + 反汇编/重汇编 + ★ reflow 的落点）
+      src/asm/bytes.mts     #   字节原语（比较 / 拼接 / latin1 / DataView 读写）
+      src/asm/header.mts    #   脚本头结构 + readHeader
+      src/asm/opcodes.mts   #   指令表：★ 随模块自带的 instruction-set.json（ESM JSON import）+ 建表 + 三向查找
+      src/asm/runtime.mts   # ★ **运行期子集入口** —— 模拟器核心只 import 这个
+      src/asm/index.mts     #   工具侧总入口（= 运行期子集 + 反汇编/重汇编 + 码页编解码）
     src/engine/        #   ★ **引擎镜像布局的观察记录**（槽位/偏移/opcode→handler）—— 逆向知识，不属于模拟器
   test/                # 守卫：三套格式的「解包 → 重打包逐字节相同」
 ```
@@ -34,8 +39,45 @@ packages/age-format/
 ⇒ 写法约束：**只许可擦除语法**（类型标注 / `interface` / `type` / `import type`），
 ❌ 不用 `enum` / `namespace` / 构造器参数属性 / 装饰器（它们要**代码生成**，会逼出构建步骤；
 `tsconfig.json` 的 `erasableSyntaxOnly` 会提前把它变成类型错误）。
-★ 本包需要 `@types/node`（用 `Buffer` / `node:fs` / `__dirname`）。
+★ 本包**工具侧**需要 `@types/node`（`alf` / `agf` / `lzss` 用 `Buffer` / `node:fs` / `process`）。
+★ 但 **`src/asm/**` 整个目录零 Node 依赖**（判据：`rg 'node:' packages/age-format/src/asm/` 为空）—— 见 §1.1。
 ★ 守卫：`tools/test/age-format-types.test.mjs` 盯三条 —— **幽灵声明** · **公开面类型可达** · **未注解导出为 0**。
+
+### 1.1 ★ `src/asm/**`：**整个目录零 Node 依赖**，分界只剩"范围"
+
+模拟器的核心**将来要跑在浏览器里**。这条口径的**根因**曾经是 `node:fs`：`opcodes.mts` 在模块顶层
+`import fs` 读 `instruction-set.json` —— `Buffer` 还能 polyfill，**`fs` 没有 polyfill 可打**。
+
+★ **根因已经拔掉**：指令表改成 **ESM JSON 模块 import**
+（`import defs from './instruction-set.json' with { type: 'json' }`）—— Node 原生支持、打包器支持、
+浏览器也支持（`with { type: 'json' }`）。⇒ 现在：
+
+```
+判据：rg 'node:' packages/age-format/src/asm/   →   空
+```
+
+于是两个入口的分工不再是"谁能跑在前端"，而是**范围**：
+
+| 入口 | 是什么 | 谁 import |
+|---|---|---|
+| `asm/runtime.mts` | **运行期要的那一份**：`bytes` + `header` + `opcodes`(含自带指令表) + `types` | 模拟器核心（`apps/emulator`） |
+| `asm/index.mts` | **全部**：上面的 ＋ `disassemble` / `assemble` / `codec` | `tools/**`、本包 `cli.mjs`、守卫 |
+
+★ **"加载任意一份表"不是本层的事**：`buildOpcodeTable(entries, source)` 就是那道缝 —— 要读别的文件 /
+从网络取的调用方自己把数组弄来。（原有个 `loadOpcodeTable(file?)`，实测**全仓无一处传路径** ⇒ 已删。）
+
+★ **边界仍由类型系统强制**：`apps/emulator/tsconfig.json` 是 **`"types": []`** ⇒ 谁把 `Buffer`（TS2591）
+或 `node:*`（TS2307）拉进**可达闭包**，`pnpm typecheck` **当场红**（实测，不需要"扫源码的测试"）。
+⇒ 入参一律收 `Uint8Array`（`Buffer` 是它的子类 ⇒ Node 侧调用方零改动）；**返回 `Uint8Array`** 而**不是 `Buffer`**
+—— ⚠ 代价是三个"`tsc` 抓不到"的静默陷阱（`.equals` 没了、`.toString()` 语义变了、`.slice()` 从视图变拷贝），
+**逐条记在 `src/asm/bytes.mts` 头注里**，改动返回值类型时必须人肉过一遍（审计命令也写在那里）。
+★ **WHATWG 通用类型怎么来**（`TextDecoder` / `URL` / `AbortController` / `structuredClone`…）：
+用 TypeScript **内置的宿主库** `lib: ["ES2023", "WebWorker"]` —— 实测它给全这批 API，
+且**不给** `document` / `window` / `HTMLElement` / `localStorage`（⚠ 但会给 worker 专属的 `self` / `postMessage`）。
+★ 为什么不用另两条：`lib: DOM` 会把 DOM 全局全放行（而核心还要能在 Node 里跑）；
+`@types/web` 就是 `lib.dom.d.ts` 的**同一份生成物**（解包 9.6 MB，仍然只有 DOM）。
+上游那条"把 Node 与 DOM 公共的 API 抽成 `lib.common.d.ts`"**至今只是提案**（TypeScript #41727，标签 `Awaiting More Feedback`）。
+★ 运行期子集**目前不含 `codec.mts`**，但那已经是**范围**问题、不再是类型问题（理由见 `runtime.mts` 头注）。
 
 ## 2. 判据：**解包 → 重打包逐字节相同**
 

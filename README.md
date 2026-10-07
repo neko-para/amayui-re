@@ -15,7 +15,7 @@
 | **AGE 二进制格式** | `packages/age-format/` | ALF / AGF / ASM 等容器格式；★ **AGE 脚本**的解析 / 组装 / 文本 **reflow** 也在这里（`src/asm/`） |
 | **台账** | `packages/ledger/` + `data/ledger/` | append-only 文本真源 + 可删可重建的派生 SQLite 查询层 |
 | **需求台账** | `data/requirements/` | ★ **高层次的进度视图**：需求/缺陷 + 父子树（`pnpm tools requirements plan`）；与业务不耦合 |
-| **模拟器** | `apps/emulator/` | 唯一使用 **TypeScript** 的子项目（见"语言口径"） |
+| **模拟器** | `apps/emulator/` | 按建模语义**重新实现**；`.ts` 无构建步骤（见"语言口径"） |
 | **真机探针** | `apps/inspector/` | .NET 10 / C#，独立工具链 |
 | **跨域工具** | `tools/` | 素材清单守卫、语料转码、旧仓盘点（**纯 `.mjs`**） |
 | **只读素材** | `corpus/` | 反汇编语料 / 二进制 / fixtures 的**登记 + 消费规则**（大件不入 git） |
@@ -43,7 +43,7 @@ mismatch → 稳定实体 target → 自动 context packet（已有事实 + 原�
 ## 3. 怎么跑
 
 ```bash
-pnpm install                 # 只有 workspace 链接，无第三方依赖（包管理用 pnpm）
+pnpm install                 # workspace 链接 + 根上两个 devDependencies（typescript 只用于 pnpm typecheck）
 pnpm tools corpus validate                # ★ 素材清单守卫：corpus/assets.json 必须绿（这是"约束"所在）
 pnpm test                    # ★ 测试（默认只跑 @env pure；`pnpm test:list` 看分级，`pnpm test:all` 跑全量）
 pnpm test:assets             # 只跑要 LFS / 游戏安装的那档（控制类内容稳定 ⇒ 不值得每次跑）
@@ -53,9 +53,10 @@ pnpm tools disasm verify      # 反汇编语料保真断言（原件不在时由
 pnpm tools disasm restore     # 由 zip 反解回投递原件（.staging/ 可随时丢）
 ```
 
-**语言口径**：除 `apps/emulator`（TypeScript，自带工具链）外，仓库内一切 JS —— `packages/*`、`tools/*`、
-守卫与测试 —— **一律直接写 `.mjs`**，不引入 `typescript` / `tsc` / `tsconfig`，因此没有构建步骤。
-`.NET`(C#) 与 `native`(C++/CMake) 各自独立工具链，不在此列。
+**语言口径**：真源是 **`AGENTS.md` §3** —— TypeScript 只出现在两类落点（自带工具链的 app：`apps/emulator`、
+`apps/workbench`；以及 `packages/age-format` 的 `.mts` 一份真源），仓库内**其余一切 JS 一律 `.mjs`**；
+`.NET`(C#) 与 `native`(C++/CMake) 各自独立工具链，不在此列。★ 这里**不复述**细则（复述必漂）。
+根上只有 `typescript` + `@types/node` 两个 devDependencies，且**只用于 `pnpm typecheck`（`noEmit`）**。
 
 ## 4. 从哪读起
 

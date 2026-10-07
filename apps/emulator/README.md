@@ -94,9 +94,26 @@ packages/age-format/src/engine/handlers.mts  ← opcode → handler（IDA 符号
 ★ 类型检查：`pnpm typecheck`（`tsc -p apps/emulator/tsconfig.json --noEmit`）。
 它**只做检查、不产出**；那份 tsconfig 里的 `erasableSyntaxOnly` 把"Node 剥壳跑不了的语法"提前变成类型错误。
 
+★★ **两条边界，都由类型系统强制（不靠"扫源码的测试"）**：
+
+1. **跨包 import 走 `@amayui/age-format/src/asm/runtime.mts`（运行期子集），不走 `asm/index.mts`** ——
+   后者是**工具侧总入口**，会把反汇编器 / 重汇编器（工具侧语义 + 体积）一起拉进前端 bundle。
+   ★ 注意这条分界**不是平台**：`src/asm/**` 现在**整个目录零 Node 依赖**（判据：`rg 'node:' packages/age-format/src/asm/` 为空）——
+   指令表随模块自带（ESM JSON import），所以核心要指令表就直接 `import { OPCODE_TABLE } from '…/runtime.mts'`。
+2. `apps/emulator/tsconfig.json` 里是 **`"types": []`**（**不是** `["node"]`）：核心将来跑在**浏览器**里，
+   `Buffer` 要 polyfill、**`node:fs` 没有 polyfill 可打** ⇒ 谁把 Node 平台依赖拉进**可达闭包**，`tsc` 当场红。
+   ★ 实测：往 `asm/bytes.mts` 加 `Buffer.alloc(1)` ⇒ `Cannot find name 'Buffer'`；
+   加 `import fs from 'node:fs'` ⇒ `Cannot find module 'node:fs'`。
+   ★ 代价（已知、有意）：`lib` 只给到 `webworker`，所以 **worker 专属全局**（`self` / `postMessage` /
+   `importScripts`）也会被放行 —— 写错了会在 Node 侧守卫里**当场炸**，不是静默。
+   ★ **WHATWG 通用类型**（`TextDecoder` / `URL` / `AbortController` / `structuredClone`…）就靠这个宿主库拿到：
+   `lib: ["ES2023", "WebWorker"]`。为什么不用别的见 `AGENTS.md` §3（一句话：`lib: DOM` 会把 DOM 放行、
+   `@types/web` 只是同一份 DOM 生成物、上游的 `lib.common.d.ts` 至今只是提案）。
+
 **它是什么**（★ 只有语义，一个偏移都没有）：`LOCAL_POOLS`（6 个 local 池的族 / 元素宽度 / 是否过编解码 / operand type tag）·
 `GLOBAL_POOL_NAMES` / `GLOBAL_ENCODED` · `LocalPools` / `GlobalPools` 两个视图（`read` / `write` / `initZero` / `noteOOB`）·
 `snapshot()` / `restore()` / `oobSummary()`（快照接缝，见 §7）· `STATE_PARTITION`（状态分区表）· `iterate()`（字节流 → 指令，只切边界）。
+★ 它依赖的格式层东西**全部来自运行期子集**（`asm/runtime.mts`）：`readHeader` / `ByteReader` / `ByteSource` / `Header` / `OpcodeTable`。
 
 ★ 池的**计数槽 / 基址槽**（`GLOBAL_SLOTS` / `FRAME_LAYOUT` / `LOCAL_POOL_SLOTS`）与**按地址取操作数**的算法
 （`frameBaseOf` / `operandAt`）**不在本目录**：它们是布局知识（上面那条硬口径）。

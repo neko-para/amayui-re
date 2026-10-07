@@ -4,10 +4,52 @@
   // ★ 为什么是 `noEmit`：`.ts` 由 **Node v24 的原生 type stripping** 直接跑（守卫 `.mjs` 直接
   //   `import '.../pools.ts'`）⇒ 本仓**没有构建步骤**，`tsc` 在这里的唯一职责是"把类型写错这件事变成红灯"。
   //
-  // ★ 为什么 `allowJs` + `checkJs:false`：
-  //   模拟器要 import `packages/age-format` 的 `.mjs`（编解码 / 布局知识）。
-  //   `allowJs` 让那些**被引用的** `.js/.mjs` 参与解析；`checkJs:false` 表示**不去检查它们**
-  //   （它们是 `packages/*`，按 `AGENTS.md` §3 属"其余一切 JS"，不归本 app 的 tsconfig 管）。
+  // ★ 为什么 `types: []`（**不是** `["node"]`）—— 这一行就是**"核心不许碰 Node"的守卫本身**。
+  //
+  //   模拟器的核心将来要跑在**浏览器**里，所以它的**可达闭包**（本 app 的 src + 被它 import 的
+  //   `age-format` 源码）一个 Node 平台类型都不许用：`Buffer` ⇒ 要 polyfill；
+  //   `node:fs` ⇒ **没有 polyfill 可打**（bundler 只能造假实现）。旧仓正是踩过的：
+  //   `src/live2d/moc.ts` 里写着"不能用 Node 的 `Buffer` …… `Buffer is not defined` 的运行时炸弹，
+  //   **而 Node 侧的测试有 `Buffer` ⇒ 全绿，抓不到这个分叉**"。
+  //   ⇒ 所以**不用"扫源码的测试"当守卫**（那种守卫既慢又不可靠：它只认字面量，
+  //     认不出间接 import、认不出别名），改用**类型系统**：类型不存在 ⇒ 写出来就是**编译错误**。
+  //
+  //   ★ 判据（实测）：把这一行改成 `["node"]`，再往 `apps/emulator/src` 或运行期子集里加一行
+  //     `Buffer.alloc(1)` ⇒ `pnpm typecheck` **必须红**；改回 `[]` ⇒ 绿。
+  //
+  // ★ 为什么 `lib` 里多一个 **`WebWorker`**（宿主库）—— 这是"WHATWG 通用类型"的正解。
+  //
+  //   核心要的那批 API（`TextDecoder` / `TextEncoder` / `URL` / `AbortController` / `structuredClone` /
+  //   `ReadableStream` / `crypto`…）在**浏览器与 Node 双方都有**，但 TS 把它们放在 `lib.dom.d.ts` 里。
+  //   三条路里这条最好：
+  //     ❌ `lib: DOM` —— 会把 `document` / `window` / `HTMLElement` / `localStorage` 全部放行，
+  //        而核心必须**同时**能在 Node 里跑；
+  //     ❌ 手写 ambient 声明 —— 那又是一份"手写的类型"，会漂（本仓刚在 `.mjs` + 手写 `.d.mts` 上吃过这个亏）；
+  //     ✅ `webworker` 宿主库 —— 它正是 TypeScript 为"没有 DOM 的 WHATWG 环境"提供的那一份。
+  //   ★ 实测（探针）：`TextDecoder` / `TextEncoder` / `URL` / `URLSearchParams` / `AbortController` /
+  //     `structuredClone` / `ReadableStream` / `crypto.randomUUID()` 全部解析；
+  //     `document` / `window` / `HTMLElement` / `localStorage` **全部被拒**（`TS2584` / `TS2304`）。
+  //     ★ 而**它解决的正是我们的具体问题**：把 `codec.mts` 拉进本工程的闭包 ⇒ `["ES2023","WebWorker"]`
+  //       下 exit 0，只有 `["ES2023"]` 时报 `codec.mts(49): Cannot find name 'TextDecoder'`。
+  //   ⚠️ **已知代价**（实测，不掩饰）：`webworker` 也会放行 **worker 专属全局** —— `self` / `postMessage` /
+  //     `importScripts`。它们在浏览器里是真的存在，但在"同一份代码还要能在 Node 里跑"的前提下是隐患；
+  //     缓解：真写错了会在 Node 侧的守卫里**当场炸**（不是静默）。
+  //   ★ 上游背景（为什么只能这样绕）：官方三条提案都停在反馈阶段 ——
+  //     TypeScript#6974（Modularize Library，已关闭）落在"宿主级细分的最后一项 `Add node.d.ts and browser.d.ts`
+  //     从未完成"；#39255（拆 lib.dom）仍 open 且 2020 后没动；**#41727（"把 Node 与 DOM 公共的 API 抽出来"）
+  //     至今 open + `Awaiting More Feedback`** —— 所以没有 `lib.common.d.ts` 可用。
+  //     ⇒ 结论：**没有官方方案可等**，所以用 `webworker` 这条内置路。
+  //       （被否掉的那两条路各自的理由，也在 `apps/emulator/README.md` §6 与
+  //        `docs/00-origin/decisions.md` 的口径表里各留了一份。）
+  //
+  // ★ 为什么**不写** `allowJs` / `checkJs`：本 app 只 import `age-format` 的 `.mts`
+  //   （`packages/age-format/src` 下**已经一个 `.mjs` 都没有**）⇒ 这两个开关是**空档**。
+  //   ★ 实测：去掉它们 ⇒ `tsc` 仍然 exit 0。真需要的那天（要 import 一个 `.js`/`.mjs`）报错会直接点名
+  //   "考虑 allowJs"，那时再加回来。
+  //
+  // ★ 为什么 `resolveJsonModule`：模拟器核心要的指令表**随模块自带** —— `asm/runtime.mts` 再导出的
+  //   `OPCODE_TABLE` 来自 `asm/opcodes.mts` 的 `import defs from './instruction-set.json' with { type: 'json' }`。
+  //   ⇒ **本工程的可达闭包里一个 `node:fs` 都不需要了**（原先它是靠 `node:fs` 读那个 JSON 的）。
   //
   // ★ 为什么 `verbatimModuleSyntax`：本仓是**无构建**的 ESM —— import/export 语句原样进 Node。
   //   打开它 ⇒ `import type` 与普通 `import` 的区分是**语法事实**，不会出现"被 tsc 擦掉后运行期少了模块"。
@@ -17,16 +59,16 @@
   //   （它需要 TS 5.8+；本仓 TS 是 5.9。）
   "compilerOptions": {
     "target": "ES2023",
-    "lib": ["ES2023"],
+    "lib": ["ES2023", "WebWorker"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
 
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "allowJs": true,
-    "checkJs": false,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "types": [],
 
     "strict": true,
     "noUncheckedIndexedAccess": false,

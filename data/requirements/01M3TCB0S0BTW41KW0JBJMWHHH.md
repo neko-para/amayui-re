@@ -8,8 +8,11 @@
 - tags: [emulator]
 
 ## 范围
-`apps/emulator`（唯一使用 TypeScript 的子项目）+ `packages/host-input`：无头驱动、帧循环、输入、渲染、存档。
+`apps/emulator` + `packages/host-input`：无头驱动、帧循环、输入、渲染、存档。
 旧仓 `app/amayui-emulator` 与其寄生在 `test/` 下的 10 个跨域守卫**只作参考**，重写时拆回各域。
+
+★ 语言与工具链口径**不在本单复述**（真源 `AGENTS.md` §3）：`apps/emulator` 的 `.ts` 无构建步骤
+（Node 原生剥壳直接跑，`tsc` 只做 `noEmit` 检查）。
 
 ## 判据
 （待写：能起一个无头实例、能按脚本推进到指定界面并断言可观测输出。）

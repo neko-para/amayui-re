@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { disassemble, assemble } from '../src/asm/index.mts';
+import { disassemble, assemble, bytesEqual } from '../src/asm/index.mts';
 import { loadSample, fileOf, sha256 } from './samples.mjs';
 
 const sample = loadSample('assets/samples-asm');
@@ -29,7 +29,7 @@ test('ASM：四个样本 反汇编 → 重汇编 逐字节相同', { skip }, () 
     assert.ok(text.length > 0, `${name} 反汇编不该为空`);
     const back = assemble(text);
     assert.equal(back.length, f.buf.length, `${name} 重汇编长度必须一致（原始 ${f.buf.length}）`);
-    assert.ok(back.equals(f.buf), `${name} 重汇编必须逐字节相同`);
+    assert.ok(bytesEqual(back, f.buf), `${name} 重汇编必须逐字节相同`);
     assert.equal(sha256(back), f.sha256, `${name} 与清单登记 sha256 一致`);
   }
 });
@@ -38,12 +38,16 @@ test('ASM：反汇编是确定性的（同输入两次 ⇒ 同文本）', { skip
   const f = fileOf(sample, 'PLINIT.BIN');
   assert.equal(disassemble(f.buf), disassemble(Buffer.from(f.buf)));
   const t1 = disassemble(f.buf);
-  assert.equal(assemble(t1).toString('hex'), assemble(t1).toString('hex'));
+  // ★ 这里原先写的是 `assemble(t1).toString('hex')` —— `assemble()` 现在返回 **`Uint8Array`**，
+  //   而 `Uint8Array.prototype.toString()` 是 `"1,2,3"`（不是 hex）⇒ 那样写会**静默退化**成
+  //   "自己和自己比逗号串"（仍然绿，但不再是比较字节）。见 `src/asm/bytes.mts` 头注陷阱 1。
+  const hexOf = (b) => Buffer.from(b).toString('hex');
+  assert.equal(hexOf(assemble(t1)), hexOf(assemble(t1)));
 });
 
 test('ASM：极短脚本也不崩（最小的那个样本只有 14 行反汇编）', { skip }, () => {
   const f = fileOf(sample, '$1$OFINIT.BIN');
   const text = disassemble(f.buf);
   assert.ok(text.split('\n').length >= 1);
-  assert.ok(assemble(text).equals(f.buf));
+  assert.ok(bytesEqual(assemble(text), f.buf));
 });

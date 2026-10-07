@@ -19,15 +19,19 @@
 因此旧代码在 `corpus/assets.json` 里登记为 `kind: tooling` + `role: rebuild`（`app/emulator-old` / `app/inspector-old` /
 `native/host-input-old`），**不迁移**。
 
-由此推出的两条落点事实：
+由此推出的落点事实：
 
-* `apps/*` **本轮不进 workspaces**（`pnpm-workspace.yaml` 只列 `packages/*` 与 `tools`）—— 代码还没落地；
-* 重写完成前，`apps/emulator/README.md` 只承担"重写计划"。
+* **`apps/emulator` 已进 workspaces**（判据 = "有没有自己的依赖"：它的模型 `import @amayui/age-format`）⇒
+  必须有 `apps/emulator/package.json`，跨包引用走包名（口径见 `AGENTS.md` §3）；
+* **实现按层落地**：**语义层** = `apps/emulator/src/model/`（它**不含执行核心** ⇒ 只靠它模拟器启动不了）；
+  **表现层与窗口** = M4-2。
+  ★ **哪一层到哪一步不写在这里**：看 `apps/emulator/README.md` §1 与 `pnpm tools requirements plan`（`AGENTS.md` §10）。
 
 ## 3. 语言与工具链口径
 
-* **`apps/emulator` 是本仓唯一使用 TypeScript 的子项目**（自带其工具链），M4 落地后进 workspaces；
-  其余 `packages/*` / `tools/*` 与所有测试**一律 `.mjs`**（见 `AGENTS.md` §3）。
+* **`apps/emulator` 有自己的工具链，但同样没有构建步骤**：`.ts` 由 Node 原生 type stripping 直接跑，
+  `tsc` 只做 `noEmit` 检查（`pnpm typecheck`）。
+  ★ **语言口径的真源是 `AGENTS.md` §3**，本文档**不复述**（复述必漂）；
 * `native/host-input` 走 **CMake / node-gyp**（C++），**不进 npm workspaces**；
   预编译产物的口径（哪些平台预置、为什么预置）随重写重新定，旧口径见旧仓 `native/host-input/README.md`。
 * 旧仓的 **10 个跨域守卫寄生在模拟器的 `test/` 下** —— 这是"目录混关注点"的典型症状，
@@ -57,6 +61,21 @@
 `harness-convergence` 是测试组织自身的棘轮（随 M4-1）；`doc-model` / `audit-report-completeness`
 要的是**文档域的 kind/state 约定**，归文档域。
 
-## 5. 本轮明确不做
+## 5. 明确不做
 
-* ❌ 不搬任何旧代码（含 589 个跟踪文件与 268 个测试文件）；❌ 不建 TS 工具链；❌ 不写 `apps/emulator` 的实现。
+* ❌ 不搬任何旧代码（含 589 个跟踪文件与 268 个测试文件）—— 旧实现只作**重写参考**；
+* ❌ 不引入构建步骤：`.ts` 由 Node 原生剥壳直接跑，`tsc` 只做 `noEmit` 检查。
+
+## 6. 状态与快照（★ 真源在 `apps/emulator/README.md` §7，这里只留指针）
+
+模拟器迟早需要"把某一刻的引擎态存下来、之后反复回到这一刻做对照"的能力 —— 排查的本质是**二分**
+（"这一帧的状态是从哪一步开始不对的"）。★ 但**口径与格式的真源不在本文档**：
+
+| 要什么 | 看哪 |
+|---|---|
+| **口径**（状态四分 · 快照三条不变量 · 边界 · 恢复 = 构造新实例） | `apps/emulator/README.md` §7 |
+| **可执行形式**（状态分区表） | `apps/emulator/src/model/pools.ts` 的 `STATE_PARTITION` |
+| **守卫** | `tools/test/emulator-state-partition.test.mjs`（反射核"每个可变字段必须归类"）· `tools/test/emulator-snapshot.test.mjs`（同样状态 ⇒ 逐字节相同） |
+| **待定项与重开条件**（别名语义 / RNG 承载面 / float 落槽宽度 / `initZero` 边界 / **文件格式与版本号**） | 需求树：`REQ-01M48ZGEJ2S8TDVC1DAY4MM0KQ`（挂在 M4-1 下） |
+
+★ **文件格式与版本号故意还没定**（理由见上面那两处）：此刻没有"状态的第二个来源"，定格式只能靠猜。

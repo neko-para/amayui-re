@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { readAlf, writeIndex, writeArchive, loadPayloads, unpackTo, declaredPayloadBytes } from './src/alf.mts';
 import * as lzss from './src/lzss.mts';
 import { readAgf, writeAgf, roundTripEqual, decodeRgba } from './src/agf.mts';
-import { disassemble, assemble } from './src/asm/index.mts';
+import { disassemble, assemble, bytesEqual } from './src/asm/index.mts';
 import { loadSample, fileOf, sha256 } from './test/samples.mjs';
 
 const HELP = `packages/age-format/cli.mjs —— AGE 容器（ALF / AGF / ASM）
@@ -131,7 +131,8 @@ function cmdVerify() {
     const detail = [];
     for (const e of asm.entries) {
       const back = assemble(disassemble(e.buf));
-      const eq = back.equals(e.buf);
+      // ★ 用包自己的 `bytesEqual`：`assemble()` 返回 `Uint8Array`（不许绑 Node）⇒ 没有 `.equals`
+      const eq = bytesEqual(back, e.buf);
       if (!eq) ok = false;
       detail.push(`${path.basename(e.rel)}${eq ? '✔' : '✖'}`);
     }

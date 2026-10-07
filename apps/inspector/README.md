@@ -17,7 +17,7 @@
 ## 4. 工具链口径
 
 * **独立工具链**（.NET 10），**不进 npm workspaces**（与 `packages/host-input` 的 CMake 同理）；
-* 语言口径不适用于它（本仓 JS/TS 口径只管 JS：只有 `apps/emulator` 用 TS）。
+* **语言口径不适用于它**（`AGENTS.md` §3 那条只管 JS/TS 落点；本 app 是 .NET，走自己的工具链）。
 
 ## 5. 重写时必须钉住的纪律
 

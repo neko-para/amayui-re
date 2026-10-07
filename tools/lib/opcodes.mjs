@@ -41,7 +41,7 @@ export const DOMAIN = {
   id: 'opcodes',
   title: 'AGE 脚本指令表（从旧仓旧表机械派生格式层四列）',
   data: [
-    '`packages/age-format/src/asm/instruction-set.json`（**唯一写入口就是本工具**；消费者是 `src/asm/opcodes.mjs`）',
+    '`packages/age-format/src/asm/instruction-set.json`（**唯一写入口就是本工具**；消费者是 `src/asm/opcodes.mts` 的 `OPCODE_TABLE` —— 它随模块自带、走 ESM JSON import，不再用 `fs` 读）',
   ],
   access: 'rw（唯一写入口；缺省 dry-run，写后回读复验，不绿回滚）',
   tool: 'tools/opcodes.mjs',

@@ -194,7 +194,7 @@
 | **知识台账**：append-only 文本真源、记录 schema（`id`/`at`/`kind`/`system`/`subject`/`claim`/`anchor[]`/`status`）、**锚点两形态**（二进制 EA / 可执行守卫用例 `路径#用例名`）、`repo=self/reference` 与"参考仓不在场只 warn"、`status`（声称）vs `effective`（投影）、冲突显式化、**分类轴（`system` + 域词汇表）**、DB 可重建的判据 | `data/ledger/README.md` + `packages/ledger/README.md` + **`pnpm tools ledger describe`** |
 | 引擎域：基线二进制与哈希、节表修补口径、AGERC 三份二进制与作废的旧语料 | `docs/02-engine/README.md` |
 | 格式层：ALF / AGF / ASM 三套容器的盘上事实、"解包→重打包逐字节相同"判据 | `packages/age-format/README.md` + `node packages/age-format/cli.mjs verify` |
-| ASM 指令集表（`opcodes.json`）的身份与改法 | `packages/age-format/src/asm/opcodes.md` |
+| ASM 指令集表（`instruction-set.json`）的身份与改法 | `packages/age-format/src/asm/instruction-set.md` + `tools/opcodes.md` |
 | **AGE 脚本文本层**：谁负责解析 / 组装 / **reflow**（原 `packages/script-dsl` 占位包已删） | `packages/age-format/README.md` §1 / §3.4 + 跟踪单 `pnpm tools requirements show 7SGPFRBWPEQA8AF1WYQ8KP` |
 | UI 图片与字体：落点、版本表、7z 解压产物不入库 | `corpus/README.md` §1、`corpus/assets/ui-images/versions.md`、`pnpm tools corpus describe` |
 | 简→日写法占位字典（cp932 编码方案的一半） | `data/translations/README.md`、`data/translations/subs-cn-jp.md` |
@@ -213,14 +213,15 @@
 | 旧仓盘点（实测数字、跨域引用、混合行尾） | `docs/00-origin/old-repo-inventory.md`（生成物） |
 
 ★ 用户已定、但**不属于本仓设计**的口径（保持旧仓原样不导出 bundle/tag、技能与插件不迁移只重建、
-平台优先 win32、包管理用 pnpm、只有 emulator 用 TS）分别记在上面这些文档里；本文件不重复。
+平台优先 win32、包管理用 pnpm、JS/TS 的落点只有两类：自带工具链的 app + `packages/age-format` 的 `.mts`）
+分别记在上面这些文档里；本文件不重复。
 
 ### 8.1 一行口径（用户已定；详情在各域文档）
 
 | 口径 | 详情 |
 |---|---|
 | 平台优先级：**win32 优先**，macOS 只做兼容性验证 | `AGENTS.md` §2 末 |
-| 包管理 **pnpm**；**TS 只用在自带工具链的 app 上**（`apps/emulator`、`apps/workbench`），其余一律 `.mjs` | `AGENTS.md` §3 |
+| 包管理 **pnpm**；**TS 只出现在两类落点**：自带工具链的 app（`apps/emulator`、`apps/workbench`）+ `packages/age-format` 的 `.mts` 一份真源，其余一律 `.mjs` | `AGENTS.md` §3 |
 | 旧仓保持原样可归档，**不要求**导出 bundle / tag | §1 的结论；只读边界见 `AGENTS.md` §0 |
 | 技能与插件**不迁移、只重建**（技能路径固定） | `docs/04-agent/README.md`、`AGENTS.md` §7 |
 | `install/` **先保留**、后续重新设计 | `docs/01-translation/README.md` |
@@ -232,7 +233,9 @@
 | **CHANGELOG 与安装说明随包保留**（产品文本，不是内部变更记录）⇒ §6 的第②处例外；**发行目录叫 `release/` 不叫 `patch/`**（"patch" 已被变更叠加层占用） | `release/README.md`、`AGENTS.md` §10 |
 | **删掉 `packages/script-dsl/` 占位包**（[本轮]）：它无代码、无人依赖；声称的"解析 / 组装"本来就在 `packages/age-format/src/asm/`（旧仓模拟器也只自带一份 `src/script/bin.ts`，`dependencies` 只有 `pixi.js`）⇒ **AGE 脚本文本层的落点 = `age-format`**，"排版 / reflow 要不要机械化"另立跟踪单（挂在「翻译更新」下，下游依赖是软的：翻译域现在接受手工折行） | `packages/age-format/README.md` §3.4；`pnpm tools requirements show 7SGPFRBWPEQA8AF1WYQ8KP` |
 | **模拟器分两层**（[本轮]）：**M4-1 无头核心**（是知识线 K2/K3 的前置）与 **M4-2 表现层与窗口**（不是）—— 依据：79 条 `modeled-verified` 的守卫**全在 T0/T1 档**，T2 全仓只有 1 个文件且不进 `verify` ⇒ 复核不需要窗口、原生输入、真游戏安装 | `docs/03-emulator/README.md` §4.1；`pnpm tools requirements show 7SGXYWPQ1KWET2J49TJQST` |
+| **引擎态快照/恢复：只立口径与接缝，格式押后**（[本轮]）：① **状态四分**（`engine` / `derived` / `diagnostic` / `host`，只有 `engine` 进快照）；② **同样状态 ⇒ 逐字节相同**（`Map` 的迭代顺序是**插入顺序** ⇒ 池名与下标一律升序，否则"不同写入历史"会给出不同字节、而恢复又按键序重建 ⇒ 与自然运行分叉）；③ **稀疏保真**（"这里没东西" ≠ "值是 0"）；④ **必带 `key`**（int 族槽是编码位模式）、**不存解码值**（那是第二份真源）；⑤ **恢复 = 构造新实例**（`key` 只读）、**快照边界 = 帧边界**、**不可信输入响亮失败**；⑥ **`diagnostic` 不进快照**（否则等价判据红得没意义）。★ **文件格式与版本号故意不定**：此刻没有"状态的第二个来源"（没有引擎对象、没有执行循环），定格式只能靠猜 | `apps/emulator/README.md` §7（口径真源）· `apps/emulator/src/model/pools.ts` 的 `STATE_PARTITION`（可执行形式）· `tools/test/emulator-{snapshot,state-partition}.test.mjs`（守卫）· 待定项 `REQ-01M48ZGEJ2S8TDVC1DAY4MM0KQ` |
 | **`apps/inspector` ≠ 模拟器**（[本轮]）：前者是**真机探针**（C#/.NET 10 + WPF，读真进程内存，M7），后者自己的窗口壳是 `app/amayui-emulator/electron/`（8 文件，M4-2）；"都按新结构重写"不等于它们是同一件事 | `packages/host-input/README.md` §4、`apps/emulator/README.md` §5.1 |
+| **`age-format/src/asm/**` 全域零 Node：数据随模块自带，不用 `fs`**（[本轮]）：模拟器核心将来跑在**浏览器**里 —— `Buffer` 还能 polyfill，**`node:fs` 没有 polyfill 可打**。★ 根因是 `opcodes.mts` 曾在模块顶层 `import fs` 读 `instruction-set.json` ⇒ 改成 **ESM JSON 模块 import**（`import defs from './instruction-set.json' with { type: 'json' }`；Node / 打包器 / 浏览器三方都支持）⇒ **判据：`rg 'node:' packages/age-format/src/asm/` 为空**，`opcodes-node.mts` 整个删掉。★ **推论（通则，别只当个例）**："除非真的需要加载文件，否则模型层不该碰 `fs`" —— 本包自己的数据文件是**代码的一部分**，不是运行期要去"加载"的东西；"加载任意一份表"这种能力若无人用就不该存在（实测 `loadOpcodeTable(file?)` **全仓无一处传路径** ⇒ 已删，留给调用方的缝是纯函数 `buildOpcodeTable`）。★ 附带收益：表在**模块加载时构建一次**，工具侧一次进程里 `assemble()` 被调多次不再反复重读+重解析 JSON。★ 于是 `runtime.mts` / `index.mts` 的分界从"平台"变成**范围**（核心只需前者，免得把反汇编器打进前端 bundle）。★ **入参收 `Uint8Array`、返回 `Uint8Array`**（`Buffer` 是子类 ⇒ Node 侧零改动；Node 工具侧在边界上 `Buffer.from()` 一次）。**不用"扫源码的测试"当守卫**（不可靠：只认字面量）：`apps/emulator/tsconfig.json` 是 **`"types": []`** ⇒ 类型不存在就是**编译错误**（实测 `Buffer` ⇒ TS2591、`node:fs` ⇒ TS2307）。★ WHATWG 通用类型（`TextDecoder` 等）走内置宿主库 `lib: ["ES2023","WebWorker"]`。★ 三个 `tsc` 抓不到的静默陷阱（`.equals` 没了、`Uint8Array.toString()` 不是 hex、`.slice()` 从视图变拷贝）逐条记在 `src/asm/bytes.mts` 头注 | `packages/age-format/README.md` §1.1 与 `src/asm/{opcodes,bytes,header,runtime}.mts` 头注；`AGENTS.md` §3 |
 | **节点预算只数活节点**（[本轮]）：`done`/`dropped`/`superseded` **不占** `maxNodes`。预算是给"还要人读它才能推进"的待办表设的；否则树会因为"做过的事变多"而爆预算、逼人删掉**已经交付的**记录，而拆一个节点出来（本该鼓励的动作）反而要先删两个已完成节点 | `tools/lib/requirements.mjs` 的 `BUDGET` 注释 + `data/requirements/README.md` §6 |
 | **动作名与字段名不许同名**（[本轮]，工具层通则）：`pnpm tools ledger` 的概览动作叫 **`report`** 而不是 `status` —— 因为 `--status` 是**字段**（`--add … --status accepted`）。同名会让参数被**静默吃掉**（实测踩过：`--write` 被忽略、什么都没写）；判据 = "把动作名当字段名再用一次，会不会有歧义？" | `tools/ledger.mjs` 的 `parseArgs` 注释 |
 | **知识分类做成必填字段，不做 tag**（[本轮]）：`system` 必填、且必须**沿别名链追到当前域词汇表**。为什么：词表的读者有两个 —— 人（读当前态）与**校验器**（要判断**已经写下的历史行**）；做成自由标签则"哪个写法才对"没有任何东西能判红 ⇒ 多套写法静默共存（旧仓实测：`capabilities` 用中文粗标签、`fields` 用英文细标识，**两套无法 join**）。外部依据：CloudEvents 把 `type` 定为 REQUIRED 核心属性并规定命名、schema.org 用多条并行类型轴、`ADR-0009` 把分类写成"必填 + 受治理枚举 + 版本" | `pnpm tools ledger describe` 的"分类轴"一节 + `data/ledger/README.md` §3.2 |

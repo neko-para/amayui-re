@@ -24,12 +24,19 @@
  */
 /**
  * ★ `ByteSource` / `Header` / `OpcodeDef` / `OpcodeTable` 都是**格式层的类型** ——
- * 由 `packages/age-format/src/asm/index.d.mts` 定义，这里只 `import type`。
+ * 由 `packages/age-format/src/asm/header.mts` / `opcodes.mts` 定义，这里只 `import type`。
  * （类型属于拥有它的包；消费方不再自己声明、也不再用 `as` 把边界糊过去。）
- * 它们都刻意用**结构化类型**（`Uint8Array` / 最小接口）而不是 `NodeJS.Buffer` ⇒ 不需要 `@types/node`。
+ * 它们都刻意用**结构化类型**（`Uint8Array` / 最小接口）而不是 `NodeJS.Buffer`。
+ *
+ * ★★ **入口是 `asm/runtime.mts`，不是 `asm/index.mts`**：后者是**工具侧总入口**，会把反汇编器 /
+ * 重汇编器（工具侧语义 + 体积）一起拖进前端 bundle。★ 这条分界**不是平台** —— `age-format` 的
+ * `src/asm/**` 现在**整个目录零 Node 依赖**（指令表随模块自带，走 ESM JSON import），
+ * 所以核心要表时直接 `import { OPCODE_TABLE }` 即可。★ 边界仍由 `apps/emulator/tsconfig.json` 的
+ * **`"types": []`** 兜底：谁把 `node:*` / `Buffer` 拉进可达闭包，`pnpm typecheck` 当场红
+ * （不需要"扫源码"的守卫 —— 见 `decisions.md` 里那条"用类型系统而不是测试当守卫"）。
  */
-import { readHeader } from '@amayui/age-format/src/asm/index.mts';
-import type { ByteSource, Header, OpcodeDef, OpcodeTable } from '@amayui/age-format/src/asm/index.mts';
+import { ByteReader, readHeader } from '@amayui/age-format/src/asm/runtime.mts';
+import type { ByteSource, Header, OpcodeDef, OpcodeTable } from '@amayui/age-format/src/asm/runtime.mts';
 
 export type { ByteSource, Header, OpcodeDef, OpcodeTable };
 
@@ -80,10 +87,12 @@ export const lengthInvariantHolds = (argc: number): boolean =>
  * 把一段脚本字节流迭代成指令序列（**只切边界，不解释**）。
  *
  * @param bin 脚本字节码
- * @param opts.table 指令表（`loadOpcodeTable()`）；`opts.strict` = 遇到结构问题是否立刻停（缺省 true）
+ * @param opts.table 指令表（本包自带的 `OPCODE_TABLE`，见 `asm/runtime.mts`）；`opts.strict` = 遇到结构问题是否立刻停（缺省 true）
  */
 export function iterate(bin: ByteSource, { table, strict = true }: { table: OpcodeTable; strict?: boolean }): IterateResult {
   const header = readHeader(bin);
+  // ★ 一次构造、循环里复用（`ByteReader` 内部是 `DataView(b.buffer, b.byteOffset, b.byteLength)`）
+  const rd = new ByteReader(bin);
   const headerLen = header.length;
   const minTableOffset = Math.min(header.fields.table_1_offset, header.fields.table_2_offset, header.fields.table_3_offset);
   let endOffset = headerLen + (minTableOffset << 2);
@@ -104,7 +113,7 @@ export function iterate(bin: ByteSource, { table, strict = true }: { table: Opco
       problems.push({ byteOffset: pos, kind: 'opcode-past-eof', message: 'opcode 越界' });
       break;
     }
-    const opcode = bin.readUInt32LE(pos);
+    const opcode = rd.u32(pos);
     const byteOffset = pos;
     if (opcode === 0) {
       // 引擎在这一步是**直接报错**（"bad opcode : 0"）—— 模拟器不许悄悄跳过
@@ -128,8 +137,8 @@ export function iterate(bin: ByteSource, { table, strict = true }: { table: Opco
     }
     const args: InstrArg[] = [];
     for (let k = 0; k < argc; k += 1) {
-      const type = bin.readUInt32LE(pos + 4 + 8 * k);
-      const rawData = bin.readUInt32LE(pos + 8 + 8 * k);
+      const type = rd.u32(pos + 4 + 8 * k);
+      const rawData = rd.u32(pos + 8 + 8 * k);
       args.push({ type, rawData });
       // ★ **动态前压指令区终点**（与反汇编器同口径）：type-2（字符串）的数据块偏移，
       //   以及 `0x64` 第 2 操作数（数组块）的偏移 —— 它们才是指令区真正的末尾。
