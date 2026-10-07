@@ -62,14 +62,21 @@ test('★ 标准启动流程：按统一文件 id 装载根脚本（不是按名
   assert.equal(asm.machine.frame.scriptName.toUpperCase(), 'SYSTEM4.BIN');
   assert.equal(asm.machine.scriptOf().instructions.length, 545, 'SYSTEM4.BIN 的指令数（结构基准）');
 
-  // 第 0 条是 `comment`（no-op，判据见 ops.ts 的 opComment）⇒ 它必须被正常执行掉
+  // ★ 第 0 条是 `comment`（no-op），第 1 条是 `0x1a8`（no-op）⇒ 它们必须被正常执行掉。
   const r = asm.machine.run({ stopAtOpcode: 0xffff });
-  assert.ok(r.steps >= 1, `启动流程至少要能派发指令（实际 ${r.steps}）—— ${describeStop(r.reason)}`);
-  // ★ 停下来的原因必须**点名哪份脚本的第几条、哪个 opcode**（否则"跑到哪了"不可复核）
+  // ★★ **前沿棘轮**：启动链能执行的**指令数**与**停在哪**都只许往前走。
+  //    数字由实跑复算（不是手写）；实现新 handler 会让它涨 ⇒ 那时**要同步抬高这里**。
+  //    它防的是"某个 handler 悄悄坏了 ⇒ 前沿倒退"（那种倒退否则只会表现成日志变短）。
+  assert.ok(r.steps >= 140, `启动链至少能执行 140 步（实际 ${r.steps}）—— ${describeStop(r.reason)}`);
   if (r.reason.kind === 'error') {
-    assert.equal(r.reason.script.toUpperCase(), 'SYSTEM4.BIN', '停在根脚本里');
-    assert.ok(Number.isInteger(r.reason.index) && r.reason.index >= 0, '必须给出指令下标');
-    assert.ok(Number.isInteger(r.reason.opcode), '必须给出 opcode');
+    // ★★ 前沿走过的路（每一步都由棘轮钉住）：根脚本 → `call` 子程序 → `jcc` 配置门 → `call-script`
+    //    → `INITCONFIG.BIN` → `INITCONFIG0.BIN`（**跑完**）→ … → `INITCONFIG4.BIN`（初始化三个 1000 项数组）
+    //    ← 现在停在它的循环体里：**需要指针/地址空间**（`local-ptr`）。
+    assert.equal(r.reason.script.toUpperCase(), 'INITCONFIG4.BIN', '当前停在子脚本 `INITCONFIG4.BIN` 里');
+    assert.equal(r.reason.opcode, 0x61, '当前停点 = `0x61 lookup-array`（它的输出目标是 `local-ptr` ⇒ 需要地址空间）');
+    assert.equal(r.reason.index, 7, '当前停点的指令下标');
+  } else {
+    assert.fail(`启动链应当仍停在某个明确缺口上，实际：${describeStop(r.reason)}`);
   }
 });
 
@@ -77,8 +84,10 @@ test('★ 启动链的规模与缺口可复算（到 LOGO 为止：脚本数 / �
   const asm = createHeadlessInstance({
     repoRoot: REPO_ROOT, instanceId: 'guard-chain', cliInstall: installDir, cliUser: null, env: {},
   });
-  const alfSource = asm.instance.fs.sources[asm.instance.fs.sources.length - 1];
-  const report = buildChainReport(alfSource, path.join(installDir, 'SYS4INI.BIN'));
+  // ★ 与实跑走同一条路径（分层 fs ⇒ **松散文件优先**）。⛔ 不要只读归档源：
+  //   实测这台安装有 107 个松散 `.BIN`，松散 `SYSTEM4.BIN` 12012 B ≠ 归档 TOC 的 11992 B
+  //   ⇒ 只读归档会量到**另一份没人跑的文件**，报告的缺口清单就是假的。
+  const report = buildChainReport(asm.instance.fs, path.join(installDir, 'SYS4INI.BIN'));
 
   // ★ 截断点：闭包必须停在 SYSTEM4 里 `call-script LOGO.BIN` 那一条（否则它会把整个游戏拉进来）
   assert.ok(report.cut, '必须报出闭包截断点');
@@ -89,10 +98,11 @@ test('★ 启动链的规模与缺口可复算（到 LOGO 为止：脚本数 / �
   // —— 这三个数字是"实现启动链"的工作量基准（它们变了就说明链本身或口径变了）——
   assert.equal(report.scripts.length, 65, '到 LOGO 为止的脚本数');
   const totalIns = report.scripts.reduce((n, s) => n + s.instructions, 0);
-  assert.equal(totalIns, 74541, '到 LOGO 为止的指令总数');
+  assert.equal(totalIns, 74031, '到 LOGO 为止的指令总数（★ 走**分层 fs**：松散脚本优先，与实跑同一条输入）');
+  assert.equal(report.cut.at, 'SYSTEM4.BIN#134', '截断点的位置（松散的 SYSTEM4 比归档多一条指令）');
   // ★ 缺口种数是**棘轮**：只许下降（实现 handler 会让它变小；变小不用改这条，
   //   而"某个 handler 没了"会让它变大 ⇒ 当场红）。数字由上面的报告复算得出，不手写。
-  assert.ok(report.missing.length <= 79, `缺 handler 的 opcode 种数只许下降，现在 ${report.missing.length}（上限 79）`);
+  assert.ok(report.missing.length <= 62, `缺 handler 的 opcode 种数只许下降，现在 ${report.missing.length}（上限 62）`);
   // 缺的那几个必须是**真缺**（不能因为有 handler 而被算进来）
   for (const m of report.missing) assert.ok(m.sites > 0 && m.scripts > 0, `${m.name} 的出现/脚本数必须是正的`);
   // ★ 报告的**契约**（不依赖当前实现了哪些 handler，所以实现推进时它不会假红）：
@@ -110,6 +120,31 @@ test('★ 启动链的规模与缺口可复算（到 LOGO 为止：脚本数 / �
   //   棘轮：这个数不许涨（涨 = 出现了新的"静态算不出"形态，那要单独看）。
   assert.ok(report.unresolved.length <= 2, `静态算不出的目标只许是已知那几处，现在 ${report.unresolved.length} 处：\n${report.unresolved.join('\n')}`);
   for (const u of report.unresolved) assert.ok(u.length > 0 && u.includes('call-script'), `算不出的项必须说清是哪条 call-script：${u}`);
+});
+
+test('★ 三条子脚本各自跑到"下一个明确缺口"（`LOADCONFIG` / `CHECKCONFIG` 直跑量出来）', { skip }, () => {
+  // ★ 为什么"直跑"而不是走启动链：`SYSTEM4#56` 的 `jcc (global-int 5)` 由**引擎侧**驱动
+  //   （配置存在 ⇒ 置某个 global），**不是脚本自己读配置** —— 那是已登记的能力缺口
+  //   （实测：同一实例连跑两次，配置确实落盘了 14 条，但两次走的是同一条支）。
+  //   ⇒ 在补上那个能力之前，**以子脚本为根**是唯一诚实且可复算的量法。
+  const cases = /** @type {const} */ ([
+    [21080, 'LOADCONFIG.BIN', 0x61, 33, 32],
+    [20955, 'CHECKCONFIG.BIN', 0x2ee, 27, 40],
+  ]);
+  for (const [id, name, opcode, index, steps] of cases) {
+    const asm = createHeadlessInstance({
+      repoRoot: REPO_ROOT, instanceId: `guard-sub-${id}`, cliInstall: installDir, cliUser: null, env: {},
+    });
+    asm.machine.loadScriptById(id);
+    assert.equal(asm.machine.frame.scriptName.toUpperCase(), name, `id ${id} 应当是 ${name}`);
+    const r = asm.machine.run({ stopAtOpcode: 0xffff });
+    assert.equal(r.steps, steps, `${name} 的步数（实跑复算；前沿往前走了就抬高这条）`);
+    assert.equal(r.reason.kind, 'error', `${name} 应当停在一个明确缺口上：${describeStop(r.reason)}`);
+    if (r.reason.kind === 'error') {
+      assert.equal(r.reason.opcode, opcode, `${name} 的停点 opcode`);
+      assert.equal(r.reason.index, index, `${name} 的停点下标`);
+    }
+  }
 });
 
 test('★ 从归档里取 LOGO.BIN 并跑到 `play-movie`（步数 / 帧数 / 虚拟时刻 / 副作用归类都要对）', { skip }, () => {

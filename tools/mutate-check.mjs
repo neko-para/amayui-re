@@ -47,6 +47,94 @@ export { MUTATIONS };
  * ★ 加新守卫时顺手加一条 —— 否则"这个守卫会红"只是个声称。
  */
 const MUTATIONS = [
+  // ── `0x76` 的 bswap24（★ 写成原值 = 颜色通道反了，而没人会报错）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: 'const bswap24 = (v: number): number => (((v & 0xff) << 16) | (v & 0xff00) | ((v >>> 16) & 0xff)) >>> 0;',
+    to: 'const bswap24 = (v: number): number => v >>> 0;',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: 'bswap24 变成恒等 ⇒ `0x76`/`0x77` 写进去的是未交换的值（颜色通道反了，没有任何报错）',
+  },
+  // ── 字体表查找的"未命中 ⇒ -1"（★ 写成 0 会让"没找到"与"第 0 个"混起来）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: 'const value = index < 0 ? -1 : index;',
+    note: '（先放这儿：bswap24 的条目在下面）',
+    to: 'const value = index < 0 ? 0 : index;',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`0x2de` 未命中时给 0（= "第 0 个字体"）而不是 -1 ⇒ 脚本找不到字体却以为找到了',
+  },
+  // ── 配置文件的版本行（★ 不检查它 ⇒ 旧格式被静默当空配置 = "配置丢了"看起来像"第一次运行"）──
+  {
+    file: 'apps/emulator/frontends/headless/file-config.ts',
+    from: '  if (lines[0] !== CONFIG_HEADER) {',
+    to: '  if (false) {',
+    guard: 'tools/test/emulator-file-config.test.mjs',
+    what: '解析时不校验版本行 ⇒ 认不出的格式被静默当成空配置',
+  },
+  // ── load-string 的"查不到 ⇒ 空串"（★ 写成 "0" 会让配置缺失与"值是 0"混起来）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: "  const text = stored ?? '';",
+    to: "  const text = stored ?? '0';",
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`load-string` 查不到时给 "0" 而不是空串 ⇒ "配置里没有这一项" 被静默变成 "值是 0"',
+  },
+  // ── fill-zero 的"填的不是 0"（★ 助记名骗人；日志跟着骗就没人能发现）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: "filled: 'encZero（DEC 后是 0；float 池按 float32 解释）',",
+    to: "filled: '0',",
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`fill-zero` 的记录里不写"填的是 encZero" ⇒ 日志与助记名一起骗人（真键下 int/float 池会分叉）',
+  },
+  // ── 内联字符串（type 2）的偏移口径（★ 与 label 同一算式，错一格就解出另一段字节而**不报错**）──
+  {
+    file: 'apps/emulator/src/vm/script.ts',
+    from: 'const offset = script.headerLen + (raw >>> 0) * 4;',
+    to: 'const offset = (raw >>> 0) * 4;',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '内联字符串的偏移漏掉 headerLen ⇒ 每次跳转/每次读串都偏 15 条指令（60 B / 4）',
+  },
+  // ── 配置的键（★ 键拼错 ⇒ 读到的永远是"查不到"，而日志看着一切正常）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: "return `\\u0003${(value >>> 0).toString(16).padStart(8, '0')}`;",
+    to: "return `\\u0003${(value >>> 0).toString(16)}`;",
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '配置键不补零（`%8.8x` 的"8 位"丢了）⇒ 键与引擎不一致，永远查不到（而日志一切正常）',
+  },
+  // ── 未建模的东西**不许**被记成"做了"（★ 这是本批最容易发生的自欺）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: '      applied: false,\n      reason:',
+    to: '      applied: true,\n      reason:',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '对象字段写记成 `applied: true`（对象根本不在场）—— 日志会让人以为这些写发生了',
+  },
+  // ── 引擎标量堆与前段那批 setter（★ 塌了会静默：值丢了/形态错了，都没人报错）──
+  {
+    file: 'apps/emulator/src/model/engine-scalars.ts',
+    from: 'return this.values.get(name) ?? 0;',
+    to: 'return this.values.get(name) ?? 1;',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '没写过的标量槽返回 1 而不是 0 —— 引擎把这片清零了（取证在 layout.mts 的 EVIDENCE）',
+  },
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: "w.form === 'bool(op1)' ? (v !== 0 ? 1 : 0)",
+    to: "w.form === 'bool(op1)' ? v",
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`bool(op1)` 形态不归一（写原值 7 而不是 1）—— 知识层登记的形态被静默忽略',
+  },
+  // ── opcode→handler 的机械查询（★ 塌了会让实现者按错的符号去读函数体）──
+  {
+    file: 'tools/lib/opcodes.mjs',
+    from: 'export const DISPATCH_BASE = 0xa509c;',
+    to: 'export const DISPATCH_BASE = 0xa50a0;',
+    guard: 'tools/test/opcodes-handlers.assets.test.mjs',
+    what: '分派表基址挪一槽（0xa509c → 0xa50a0）—— 每个 opcode 的 handler 都归错人（这正是某份取证包犯过的错）',
+  },
   // ── 帧机制（★ 塌了会静默：单层调用看起来正常，只在嵌套/多次调用时错开）──
   {
     file: 'apps/emulator/src/vm/machine.ts',

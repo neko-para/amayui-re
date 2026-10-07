@@ -139,7 +139,10 @@ function main(): number {
 
   // —— `--chain-report`：只算启动链的指令缺口，不跑任何脚本 ——
   if (cli.chainReport) {
-    const report = buildChainReport(asm.instance.fs.sources[asm.instance.fs.sources.length - 1], path.join(asm.env.install.label, cli.indexFile ?? 'SYS4INI.BIN'));
+    // ★ 必须走**分层 fs**（而不是"只读归档"）：实测这台安装里有 107 个松散 `.BIN`，
+    //   松散 `SYSTEM4.BIN` = 12012 B，而归档 TOC 声明 11992 B ⇒ 两条路径拿到的是**两份不同的输入**。
+    //   报告要与**实跑**量同一份东西（否则"缺口清单"描述的是一份没人跑的文件）。
+    const report = buildChainReport(asm.instance.fs, path.join(asm.env.install.label, cli.indexFile ?? 'SYS4INI.BIN'));
     for (const line of out) console.log(line);
     console.log(describeChainReport(report));
     if (cli.json) console.log(JSON.stringify(report, null, 2));
@@ -183,6 +186,13 @@ function main(): number {
     out.push(`[统计] 步数 ${result.steps} · 帧数 ${result.ticks} · 虚拟时刻 ${result.atMs}ms · 副作用 ${asm.log.length} 条`);
     out.push('[副作用·按动作] ' + asm.log.countsByAction().map(([k, n]) => `${k}=${n}`).join(' '));
     out.push('[副作用·按归类] ' + asm.log.countsByDisposition().map(([k, n]) => `${k}=${n}`).join(' '));
+    // ★★ **保真欠账**必须单独报出来：`engine.forward` 那些是"**跳过了**这次子系统调用、只记了一笔"。
+    //    没有这一行，"跑到 LOGO"会被读成"全都做了" —— 而它们恰恰是**没做**的那部分。
+    //    ★ 键是**带域前缀**的（`system.engine.forward`）—— 用 endsWith 匹配，别写死前缀。
+    const forwarded = asm.log.countsByAction().find(([k]) => k.endsWith('.engine.forward'))?.[1] ?? 0;
+    if (forwarded > 0) {
+      out.push(`[保真欠账] 未建模的子系统调用 ${forwarded} 次（只记录、未建模）—— **这些不算已完成**，清单见 --json 的 effects`);
+    }
     const oob = [...asm.machine.diag.oobByKind.entries()].sort();
     if (oob.length) out.push('[留痕] ' + oob.map(([k, n]) => `${k}=${n}`).join(' · '));
   }

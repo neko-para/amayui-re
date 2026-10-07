@@ -106,6 +106,22 @@ export interface InstanceServices {
    *   "取不到"绝不许表现成"这份脚本是空的"（那会让后面每条指令都在错的上下文里跑）。
    */
   scripts?: ScriptLoader | null;
+  /**
+   * **宿主提供的字体名表**（`0x2de` 要查它）。
+   *
+   * 取证（锚 = EA）：`0x2de` 的体是
+   * ```
+   *   v2 = sub_41B640(this, 2)            ; ★ 第四个取值原语：操作数 → cp932 文本
+   *   v3 = sub_428990(Engine+0x14D30, v2) ; 在元素 0x20 字节的 vector 里**线性扫描**（内含 std::string，
+   *                                       ;   memcmp 精确相等、**跳过前导 '@'**）⇒ 命中给 0 基下标、否则 **-1**
+   *   sub_42B4B0(this, 1, v3)             ; 写回 op1
+   * ```
+   * 那个 vector 是**字体名表**（判据：`0x459B56–0x459B6A` 拿 `LOGFONT+0x1C`（= `lfFaceName`）去查它）。
+   * ⇒ **表里有什么是宿主事实**（这台机器装了哪些字体），不是引擎语义。
+   * ★ 不给（`null`）⇒ 该条指令**响亮失败**（不许假装"表里什么都没有"）；
+   *   给**空表**（`[]`）是一个**显式的宿主选择**，并且每次查找都会留痕。
+   */
+  fonts?: readonly string[] | null;
 }
 
 /**
@@ -124,6 +140,8 @@ export class Instance {
   readonly input: InputSource | null;
   readonly random: RandomSource | null;
   readonly scripts: ScriptLoader | null;
+  /** 宿主字体名表（`0x2de` 查它）；`null` = 没提供 ⇒ 那条指令响亮失败 */
+  readonly fonts: readonly string[] | null;
 
   constructor(services: InstanceServices) {
     this.id = assertInstanceId(services.env.instanceId);
@@ -137,6 +155,7 @@ export class Instance {
     this.input = services.input ?? null;
     this.random = services.random ?? null;
     this.scripts = services.scripts ?? null;
+    this.fonts = services.fonts ?? null;
   }
 
   /** 这个实例有没有"动画未完成"的判据来源？（没有 ⇒ 等待门的行为必须被显式记账） */
@@ -214,6 +233,7 @@ export function sharedMutableState(a: Instance, b: Instance): string[] {
     ['input', a.input, b.input],
     ['random', a.random, b.random],
     ['scripts', a.scripts, b.scripts],
+    ['fonts', a.fonts, b.fonts],
   ];
   const shared: string[] = [];
   for (const [name, x, y] of parts) {

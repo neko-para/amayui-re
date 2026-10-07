@@ -110,3 +110,44 @@ export const EVIDENCE = {
   /** ★ `enc_zero` 在 `Engine+0x5EC90` = `ENC(key,0)` ⇒ **非 0** */
   encZero: { at: '.text:00415990', insns: ['mov [esi+5EC90h], eax'], note: 'eax = rol(key,21) = ENC(key,0)' },
 };
+
+/**
+ * ★★ **引擎标量槽的写入观察** —— 只登记"**哪个 opcode 的 handler 写了哪个 dword 槽、写成什么形态**"，
+ *   **语义一律未定**（⛔ 不给含义、不解释用途、不代表它属于哪个子系统）。
+ *
+ * ## 为什么需要它
+ * 启动链前段有一批薄 handler，形状就是"读操作数 → 写引擎的某个 dword"（例：`0x149` 写 `this[97058]`）。
+ * 模拟器要跑过去就得**把值存下来**：否则后面若有分支读同一个槽，我们会**静默走错**（不报错，只是路径不同）。
+ * 而 `apps/emulator` 里**不许出现偏移**（本仓硬口径）⇒ 偏移留在这里，模型只按 `name` 引用。
+ *
+ * ## 判据（都可复跑）
+ * * `handler`：`pnpm tools opcodes handlers --opcode <opcode>` **现算**所得
+ *   —— 守卫 `tools/test/opcodes-handlers.assets.test.mjs` 逐条对账；
+ * * `dword`：handler 体（`pnpm tools disasm-at pseudo --sym <handler>`）里**逐字出现** `this[<dword>]`
+ *   （一个 handler 写多个槽 ⇒ 多条记录）；
+ * * `form`：值的来源 —— `op1` = 操作数 1 的原值、`bool(op1)` = 非 0 归一成 1、
+ *   `bswap24(op1)` = 在**低 24 位内**把字节序倒过来（`b0<<16 | b1<<8 | b2`；像 BGR↔RGB）；
+ * * `callsAfter`：**写完标量之后**还有哪次子系统调用 —— ★ 这一列是**必需的诚实**：
+ *   少了它，"handler 里那次未建模的调用"就不会进保真欠账，日志会显得比实际干净
+ *   （本仓踩过：`0x78`/`0x2db` 的体里都有 `sub_459F40(...)`，第一版没记）。
+ *
+ * ## ⛔ 它**不是**语义结论
+ * `Engine.d97058` 只是一个**稳定身份**（dword 下标），**不是含义**。含义要等有人按 handler 的
+ * 调用方 / 读者去核 —— 那才是知识（准入门见 `AGENTS.md` §6）。
+ */
+export const ENGINE_SCALAR_WRITES = [
+  { name: 'Engine.d97058', dword: 97058, opcode: 0x149, handler: 'sub_4229A0', form: 'op1' },
+  { name: 'Engine.d166965', dword: 166965, opcode: 0x21b, handler: 'sub_423C20', form: 'bool(op1)' },
+  { name: 'Engine.d92323', dword: 92323, opcode: 0x252, handler: 'sub_425AB0', form: 'op1' },
+  { name: 'Engine.d1415', dword: 1415, opcode: 0x88, handler: 'sub_41FAB0', form: 'op1' },
+  { name: 'Engine.d97050', dword: 97050, opcode: 0x88, handler: 'sub_41FAB0', form: 'op1' },
+  { name: 'Engine.d21667', dword: 21667, opcode: 0x78, handler: 'sub_41F450', form: 'op1', callsAfter: ['sub_459F40'] },
+  { name: 'Engine.d71744', dword: 71744, opcode: 0x2db, handler: 'sub_426500', form: 'op1', callsAfter: ['sub_459F40'] },
+  // ★ `0x76`：写 `Engine+0x15280`（紧邻 `0x78` 的 `+0x1528C`，同一个结构的不同字段）+ 同一次 `sub_459F40`
+  { name: 'Engine.d21664', dword: 21664, opcode: 0x76, handler: 'sub_41F390', form: 'bswap24(op1)', callsAfter: ['sub_459F40'] },
+  // ★ `0x77` 与 `0x76` **同形**（只差槽：`+0x15284`），体逐字 `this[21665] = BYTE2(v2) + ((BYTE1(v2) + ((u8)v2 << 8)) << 8)`
+  { name: 'Engine.d21665', dword: 21665, opcode: 0x77, handler: 'sub_41F3F0', form: 'bswap24(op1)', callsAfter: ['sub_459F40'] },
+  // ★ `0x1a4`（argc 2）：**两个槽、两个操作数**（`this[21671] = op2; this[21670] = op1`，无子系统调用）
+  { name: 'Engine.d21670', dword: 21670, opcode: 0x1a4, handler: 'sub_41FE60', form: 'op1' },
+  { name: 'Engine.d21671', dword: 21671, opcode: 0x1a4, handler: 'sub_41FE60', form: 'op2' },
+];

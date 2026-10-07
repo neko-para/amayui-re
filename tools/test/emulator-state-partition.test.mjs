@@ -34,6 +34,8 @@ import * as addressSpaceModule from '../../apps/emulator/src/model/address-space
 import { AddressSpace, Region, STATE_PARTITION as ADDRESS_STATE_PARTITION } from '../../apps/emulator/src/model/address-space.ts';
 import * as randomModule from '../../apps/emulator/src/host/random.ts';
 import { SeededRandom, STATE_PARTITION as RANDOM_STATE_PARTITION } from '../../apps/emulator/src/host/random.ts';
+import * as scalarsModule from '../../apps/emulator/src/model/engine-scalars.ts';
+import { EngineScalars, STATE_PARTITION as SCALARS_STATE_PARTITION } from '../../apps/emulator/src/model/engine-scalars.ts';
 import { Instance } from '../../apps/emulator/src/host/instance.ts';
 import { resolveEnvironment } from '../../apps/emulator/src/host/environment.ts';
 import { LayeredFilesystem, MemoryStore } from '../../apps/emulator/src/host/fs.ts';
@@ -56,6 +58,7 @@ const MODULES = [
   { path: 'vm/machine.ts', mod: machineModule, table: VM_STATE_PARTITION },
   { path: 'model/address-space.ts', mod: addressSpaceModule, table: ADDRESS_STATE_PARTITION },
   { path: 'host/random.ts', mod: randomModule, table: RANDOM_STATE_PARTITION },
+  { path: 'model/engine-scalars.ts', mod: scalarsModule, table: SCALARS_STATE_PARTITION },
 ];
 
 /** 造一个能跑的最小实例（只为拿到一个 `Machine`；不读盘、不碰语料） */
@@ -80,6 +83,7 @@ const PARTITIONED = [
   // ★ `SeededRandom` 是**宿主服务却持有引擎态**（随机状态决定后续序列）⇒ 它必须表态。
   //   这正是这张表存在的意义：不然"随机源的状态没进快照"会表现成"恢复后随机序列从头来"。
   ['SeededRandom', () => new SeededRandom(0)],
+  ['EngineScalars', () => new EngineScalars()],
 ];
 
 test('★ 每个自有字段都必须归类，表里也不许有过期条目（两边逐一对齐）', () => {

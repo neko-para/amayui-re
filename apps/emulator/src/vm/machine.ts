@@ -35,6 +35,7 @@
 
 import { GlobalPools, LocalPools } from '../model/pools.ts';
 import { SceneModel } from '../model/scene.ts';
+import { EngineScalars } from '../model/engine-scalars.ts';
 import { OPCODE_TABLE } from '@amayui/age-format/src/asm/runtime.mts';
 import type { EffectDisposition, EffectRecord } from '../host/effects.ts';
 import type { Instance } from '../host/instance.ts';
@@ -199,6 +200,12 @@ export class Machine {
   readonly scene: SceneModel;
   /** 已装载脚本的缓存（外部内容，不是引擎态） */
   readonly scripts: Map<string, LoadedScript>;
+  /**
+   * ★ **引擎标量槽**（`model/engine-scalars.ts`）—— 启动链前段那批"读操作数 → 写一个引擎标量"的
+   * handler 就写在这里。它是**引擎态**（快照要带上，否则恢复后那些槽会静默变回 0）。
+   * ⛔ 本层只存值、不解释槽的含义；名字来自知识层 `layout.mts` 的 `ENGINE_SCALAR_WRITES`。
+   */
+  readonly scalars: EngineScalars;
   /** 诊断 */
   readonly diag: MachineDiagnostics;
   /** 帧号（主循环的"第几帧"） */
@@ -213,6 +220,7 @@ export class Machine {
     this.globals = new GlobalPools(instance.env.codecKey);
     this.frames = [];
     this.scene = new SceneModel();
+    this.scalars = new EngineScalars();
     this.scripts = new Map();
     this.diag = { steps: 0, stopReason: '', oobByKind: new Map() };
   }
@@ -475,12 +483,14 @@ export class Machine {
     globals: ReturnType<GlobalPools['snapshot']>;
     frames: ReturnType<ScriptFrame['snapshot']>[];
     scene: ReturnType<SceneModel['snapshot']>;
+    scalars: ReturnType<EngineScalars['snapshot']>;
     frameNo: number;
   } {
     return {
       globals: this.globals.snapshot(),
       frames: this.frames.map((f) => f.snapshot()),
       scene: this.scene.snapshot(),
+      scalars: this.scalars.snapshot(),
       frameNo: this.frameNo,
     };
   }
@@ -511,7 +521,7 @@ export const STATE_PARTITION: Record<string, Record<string, string>> = {
   Machine: {
     instance: 'host', scripts: 'host',
     diag: 'diagnostic', effectCounter: 'diagnostic', gateBlockLogged: 'diagnostic',
-    globals: 'engine', frames: 'engine', scene: 'engine', frameNo: 'engine',
+    globals: 'engine', frames: 'engine', scene: 'engine', scalars: 'engine', frameNo: 'engine',
   },
   ScriptFrame: {
     scriptName: 'engine', cur: 'engine', locals: 'engine',

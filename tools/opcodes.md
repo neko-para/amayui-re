@@ -1,7 +1,7 @@
 # tools/opcodes.md — `tools/opcodes.mjs`（指令表派生器）的**落点说明**
 
 > 它**不是**工具台账（那个要 append-only 文本 + `--describe`）；这里只写"它动哪片数据、为什么这么动"。
-> 命令与自描述：**`pnpm tools opcodes describe`** / `--report` / `--derive`。
+> 命令与自描述：**`pnpm tools opcodes describe`** / `--report` / `--derive` / `--handlers`。
 
 ## 它动哪片数据
 
@@ -31,11 +31,30 @@
 ## 怎么改
 
 ```bash
-pnpm tools opcodes report          # ★ 先看：来源条目 / 条目数 / 将丢弃哪些字段与取值
-pnpm tools opcodes derive          # dry-run：看派生结果（条数与字节数）
-pnpm tools opcodes derive --write  # 落盘（写后回读复验，不绿回滚）
-pnpm test                          # 守卫：tools/test/opcodes.test.mjs + packages/age-format/test/asm.test.mjs
+pnpm tools opcodes report           # ★ 先看：来源条目 / 条目数 / 将丢弃哪些字段与取值
+pnpm tools opcodes derive           # dry-run：看派生结果（条数与字节数）
+pnpm tools opcodes derive --write   # 落盘（写后回读复验，不绿回滚）
+pnpm tools opcodes handlers         # ★ opcode → handler：**从本仓语料现算**（不复述旧仓的 handler 列）
+pnpm tools opcodes handlers --gaps  # 指令表里有、而分派表里没有的（⇒ 引擎抛「不支持」= 实现清单）
+pnpm test                           # 守卫：tools/test/opcodes.test.mjs + packages/age-format/test/asm.test.mjs
 ```
+
+## `--handlers` 是什么、为什么它不算"把旧仓的 handler 列搬进来"
+
+上面那条口径是"**派生只抽四列**（opcode / argc / name / aliases），`handler` 与 `status` 留在旧仓"。
+`--handlers` 与它**不矛盾**：它一名一符都不从旧表读，而是**从本仓语料的分派表重新提取**：
+
+```
+判据：opcode = (表项偏移 − Engine+0xA509C) / 4      # 基址由同一函数里的 `lea edi,[esi+0A509Ch]` 给出
+形态：mov dword ptr [esi+0A5728h], offset sub_42DF40
+```
+
+为什么非要它：**"某 opcode 的 handler 是谁"以前只能靠旧仓索引认，而旧索引实测错位**
+（实测：旧索引把 `0x8c jmp` 记成 `sub_41C900`，而按算式 `sub_41C900` 的真实 opcode 是 **0x08**，
+`0x8c` 是 `sub_4203D0`）。⇒ 认 handler **必须现算**，不许按符号名或旧索引认。
+
+它是"argc 的权威来自引擎"那条口径的**第一步**：先能机械点名 handler，才谈得上按 handler 体复核 argc。
+守卫：`tools/test/opcodes-handlers.assets.test.mjs`（把一组独立核过的对照逐条钉死）。
 
 * ❌ **不要手改** `instruction-set.json`（唯一写入口是本工具）；
 * ❌ **不要**把 `handler` / `status` 加回来 —— 那会让格式层携带未过准入的知识；

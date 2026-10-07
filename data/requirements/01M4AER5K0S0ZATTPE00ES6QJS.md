@@ -2,8 +2,9 @@
 
 - id: REQ-01M4AER5K0S0ZATTPE00ES6QJS
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M3TCB0S0BTW41KW0JBJMWHHH
+- verify: tools/test/opcodes-handlers.assets.test.mjs#★ 逐条钉死
 - tags: [emulator]
 
 ## 范围

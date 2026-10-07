@@ -50,8 +50,55 @@ export const DOMAIN = {
 export const OPERATIONS = [
   { name: 'report', argv: ['--report'], mutates: false, summary: '对账：旧表条目数 / 各类字段数 / 派生后会丢哪些字段、哪些取值' },
   { name: 'derive', argv: ['--derive'], mutates: true, summary: '从旧表派生格式层四列并写入（缺省 dry-run）[--write]' },
+  { name: 'handlers', argv: ['--handlers'], mutates: false, summary: 'opcode → handler 的**机械查询**（从语料的分派表提取）[--opcode N | --gaps | --json]' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：口径 / 字段 / 不变量 / 操作' },
 ];
+
+// ───────────────────────────────────────────────────────── 语料侧：opcode → handler 的机械提取
+//
+// ★ 为什么这**不算**"把旧仓的 handler 列搬进来"：它不从旧表读任何 handler，而是**从本仓语料
+//   重新提取一遍** —— 分派表基址 `Engine+0xA509C`（由同一函数里的 `lea edi,[esi+0A509Ch]` 给出），
+//   `opcode = (表项偏移 − 基址) / 4`。判据与守卫同源（`tools/test/disasm.test.mjs`）。
+//   它补的是那个已登记的缺口：**"某 opcode 的 handler 是谁"以前只能靠旧仓索引认，而旧索引会错位**
+//   （实测：旧索引把 `0x8c` 记成 `sub_41C900`，而按算式那个表项是 opcode `0x23`）。
+
+/** 语料里的 opcode→handler 赋值行（IDA 形态）：`mov dword ptr [esi+0A5728h], offset sub_42DF40` */
+export const DISPATCH_RE = /mov\s+dword ptr \[[a-z]{2,3}\+(0A5[0-9A-F]{3})h\], offset (sub_[0-9A-F]+)/;
+/** 分派表基址：`opcode = (表项偏移 − 它) / 4`（10 处已知表项逐个验过） */
+export const DISPATCH_BASE = 0xa509c;
+/** 缺省 handler：`rep stosd` 填的那一个，体是抛「このコマンドはサポートされていません．」 */
+export const DEFAULT_HANDLER = 'sub_418E30';
+
+/** 反汇编语料里的 `.lst`（解压产物）；不在场 ⇒ `null`（调用方报错，不"跳过"） */
+export function listingPath(repoRoot) {
+  const dir = path.join(repoRoot, 'corpus', 'disasm', 'files');
+  if (!fs.existsSync(dir)) return null;
+  const lst = fs.readdirSync(dir).filter((f) => f.endsWith('.lst')).sort();
+  return lst.length ? path.join(dir, lst[0]) : null;
+}
+
+/**
+ * 从语料机械提取 `opcode → handler 符号`。
+ * ★ **opcode 由算式得出**，不是按行序数出来的 —— 语料里的写入**不是**按 opcode 排的
+ *   （实测有非连续写入：`0x192` 的表项夹在别的写入之间）。
+ * @returns {{ byOpcode: Map<number, string>, rows: number, problems: string[] }}
+ */
+export function extractHandlers(lstText) {
+  const byOpcode = new Map();
+  const problems = [];
+  let rows = 0;
+  for (const line of lstText.split('\n')) {
+    const m = DISPATCH_RE.exec(line);
+    if (!m) continue;
+    rows += 1;
+    const off = Number.parseInt(m[1], 16);
+    const opcode = (off - DISPATCH_BASE) / 4;
+    if (!Number.isInteger(opcode) || opcode <= 0) { problems.push(`表项偏移对齐不上：0x${m[1]} → opcode ${opcode}`); continue; }
+    if (byOpcode.has(opcode)) { problems.push(`同一个 opcode 有两条 handler：0x${opcode.toString(16)}`); continue; }
+    byOpcode.set(opcode, m[2]);
+  }
+  return { byOpcode, rows, problems };
+}
 
 export const CHECK_TITLES = new Map([
   [1, '派生表只含格式层四列（`handler` / `status` 一律不出现）'],

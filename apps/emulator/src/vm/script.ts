@@ -25,6 +25,44 @@
 import { iterate } from '../model/iterate.ts';
 import type { Instr, IterateResult } from '../model/iterate.ts';
 import type { ByteSource, Header, OpcodeTable } from '@amayui/age-format/src/asm/runtime.mts';
+import { decodeCp932 } from '@amayui/age-format/src/asm/codec.mts';
+
+/** 内联字符串的长度上限（防御：地址算错时不要一路读到脚本末尾） */
+const INLINE_STRING_MAX = 4096;
+
+/**
+ * `type 2`（引擎的「内联字符串」）→ 文本。
+ *
+ * ## ★★ 判据（实证 + 与 label 同一算式）
+ * 1. **文件偏移 = `headerLen + 4*raw`** —— 与 label **完全同一个算式**（两者都是"文件内的字节偏移 ÷ 4"）。
+ *    实证：`INITCONFIG0.BIN` 共 484 B；代码区占 `60 + 356 = 416` B，而该脚本五条 `set-string`
+ *    的 raw 是 89/92/96/99/102 ⇒ `60 + 4*89 = 416` **正好是代码区之后第一字节**。
+ * 2. 该处起**逐字节 `^0xFF`**，解出来为 0 即终止（原始字节是 `0xFF`）。
+ * 3. 结果是 **cp932（Shift-JIS）** 文本。
+ *
+ * 实证结果（可复跑）：raw = 89/92/96/99/102 ⇒ `メイリオ` / `ＭＳ ゴシック` / `游ゴシック` / `メイリオ` / `ＭＳ ゴシック`
+ * —— 正是"首次运行时把默认字体名写进配置"该有的值（`INITCONFIG0.BIN` 的用途）。
+ *
+ * ★ **只给"文本"这一路用**：引擎里 `type 2` 还有一条**整型**读法（`atoi` 未解码字节），
+ *   那条**没有取证** ⇒ 本函数**不**承担它（`readOperand` 仍然对 `type 2` 响亮失败）。
+ */
+export function inlineString(script: LoadedScript, raw: number): string {
+  const offset = script.headerLen + (raw >>> 0) * 4;
+  const bytes = script.bytes;
+  if (offset >= bytes.length) {
+    throw new Error(`内联字符串的偏移越出脚本：raw=${raw} ⇒ offset=${offset}（脚本 ${bytes.length} B）`);
+  }
+  const out: number[] = [];
+  for (let p = offset; p < bytes.length; p += 1) {
+    const c = bytes[p] ^ 0xff;
+    if (c === 0) return decodeCp932(Uint8Array.from(out));
+    out.push(c);
+    if (out.length > INLINE_STRING_MAX) {
+      throw new Error(`内联字符串没有终止符（>` + INLINE_STRING_MAX + ` B，raw=${raw}，offset=${offset}）—— 偏移口径错了？`);
+    }
+  }
+  throw new Error(`内联字符串读到脚本末尾都没有终止符（raw=${raw}，offset=${offset}）`);
+}
 
 /** 一份装载好的脚本（执行期的全部静态信息） */
 export interface LoadedScript {

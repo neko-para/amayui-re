@@ -31,6 +31,7 @@ import type { InstrArg } from '../model/iterate.ts';
 import type { GlobalPools, LocalPools, SlotValue } from '../model/pools.ts';
 import { LOCAL_POOLS, localPoolByTypeTag, localPoolTypeTags } from '../model/pools.ts';
 import type { LoadedScript } from './script.ts';
+import { inlineString } from './script.ts';
 
 /** 一个操作数读出来的值（int 族是 u32，字符串是 `string`） */
 export type OperandValue = number | string;
@@ -226,3 +227,44 @@ export const asUint32 = (v: OperandValue): number => (typeof v === 'string' ? Nu
 
 /** 把读出来的值当**浮点**用（int 立即数 → 浮点值；LOGO 里 `float-mov (global-float 9) 500` 就是这条） */
 export const asFloat = (v: OperandValue): number => (typeof v === 'string' ? Number(v) : v >>> 0);
+
+/** 浮点族的操作数 type（"浮点 → 文本"的格式**未取证** ⇒ 文本路遇到它们要抛） */
+export const FLOAT_OPERAND_TYPES: readonly number[] = [1, 4, 0xa];
+
+/**
+ * **字符串池的两个 type**（全局 5 / 局部 11）。
+ * ★ 它与 `GLOBAL_POOL_BY_TYPE_TAG`（`5: 'string'`）和局部池表里的 string 项**是同一件事的两处写法**；
+ *   改了一边就要改另一边（`tools/test/emulator-host.test.mjs` 钉着那张 type→池 的表）。
+ */
+export const STRING_POOL_TYPES: readonly number[] = [5, 0xb];
+
+/**
+ * ★ **按"文本"语义读一个操作数** —— 对应引擎的**另一个**取值原语（`sub_42A420`），
+ * 与 `readOperand`（`sub_41BF50` 那一族，整型语义）**不是同一件事**。
+ *
+ * 分流：
+ * * `type 2`（内联字符串）⇒ `inlineString`（判据见 `vm/script.ts` 的头注：
+ *   文件偏移 = `headerLen + 4*raw`、字节 `^0xFF`、cp932、到 0 止）；
+ * * 字符串池（type 5 / 11 …）⇒ 取格子里那个字符串；
+ * * 整型族 ⇒ **十进制文本**（引擎在这一路用 `_itoa_s` 的 `%d`）。
+ *
+ * ⛔ **浮点族不在这里**：引擎对浮点源转文本用的格式串（`%f` 还是别的）**没有取证**
+ * ⇒ 遇到就抛，不猜（猜出来的格式会让字符串内容静默错，而日志看着一切正常）。
+ */
+export function readOperandAsText(ctx: OperandContext, arg: InstrArg, index: number): string {
+  if (arg.type === 2) return inlineString(ctx.script, arg.rawData >>> 0);
+  if (FLOAT_OPERAND_TYPES.includes(arg.type)) {
+    throw new Error(
+      `操作数 #${index} 是浮点（type ${arg.type}），而"浮点 → 文本"的格式**未取证**` +
+      `（引擎这一路的格式串没有逐字确认）⇒ 拒绝猜一个格式`,
+    );
+  }
+  const r = readOperand(ctx, arg, index);
+  if (r.value === null) {
+    // 未写过的格子：**字符串池 ⇒ 空串**（引擎那边 28 字节元素的 size = 0）；
+    // **整型池 ⇒ "0"**（装载期被填了 `encZero`，DEC 之后就是 0）。两者都不是"不知道"。
+    return STRING_POOL_TYPES.includes(arg.type) ? '' : '0';
+  }
+  if (typeof r.value === 'string') return r.value;
+  return String(asInt32(r.value));
+}

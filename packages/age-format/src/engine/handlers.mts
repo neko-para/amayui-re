@@ -51,4 +51,22 @@ export const OPCODE_HANDLERS = {
   0x2e2: 'sub_430F80', // (无名) · argc 3
   0x2e3: 'sub_430FF0', // (无名) · argc 3
   0x2e4: 'sub_431060', // (无名) · argc 3
+  // ── ★ 启动链前段（SYSTEM4 的前 70 条会撞到的那批）──
+  //    argc 的判据：**handler 体自己写的长度字** `帧+0x5D8F4 = 2·argc+1`（与指令表的 argc 互为独立核验）。
+  //    形态：多数是"读操作数 → 写一个引擎标量"或"转发进某个子系统"（见 layout.mts 的 ENGINE_SCALAR_WRITES）。
+  0x1a8: 'sub_419690', // dev_ukn · argc 0（体只有协议写 ⇒ no-op）
+  0x2f6: 'sub_426820', // (无名) · argc 1（清某个 per-slot 状态 + 子系统调用）
+  0x149: 'sub_4229A0', // (无名) · argc 1
+  0x21b: 'sub_423C20', // (无名) · argc 1
+  0x88: 'sub_41FAB0', // (无名) · argc 1
+  0x1ca: 'sub_420240', // (无名) · argc 1（走 vtable 的子系统调用）
+  0x252: 'sub_425AB0', // (无名) · argc 1
+  0x324: 'sub_41A470', // (无名) · argc 0（子系统调用）
+  0x32f: 'sub_4272B0', // (无名) · argc 1
+  0x70: 'sub_41ED20', // (无名) · argc 5
+  0x71: 'sub_41ED80', // (无名) · argc 1
+  0x73: 'sub_41F250', // (无名) · argc 10
+  0x78: 'sub_41F450', // (无名) · argc 1
+  0x79: 'sub_41F490', // (无名) · argc 3
+  0x1c1: 'sub_420070', // (无名) · argc 3
 };

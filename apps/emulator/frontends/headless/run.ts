@@ -8,7 +8,7 @@
  * | `WriteArea`（可写） | 用户根（存档 / 配置） |
  * | `EffectSink` | `EffectLog`（内存）+ 由入口决定怎么落盘 |
  * | `Clock` | `VirtualClock`（虚拟时间：5 秒的窗在几毫秒的墙上时间里跑完） |
- * | `ConfigStore` | `MemoryConfig`（本批还没有 INI 解析 —— 见文件末的缺口） |
+ * | `ConfigStore` | `FileConfig`（**文件**、实例隔离：落在该实例的用户根下）。★ 引擎侧那把「配置存在 ⇒ 置 global」的钥匙**未建模** ⇒ `LOADCONFIG` 那条支走不到，见需求树 |
  * | `AnimationGate` / `Presenter` / `InputSource` | **都不给** —— headless 的语义就是"没有这些能力"， |
  * | | 而且"没有"会被**记账**（`not-provided`），不是静默空操作 |
  *
@@ -36,6 +36,7 @@ import type { ReadSource } from '../../src/host/fs.ts';
 import { Instance } from '../../src/host/instance.ts';
 import type { ScriptLoader } from '../../src/host/scripts.ts';
 import { MemoryConfig } from '../../src/host/config.ts';
+import { FileConfig } from './file-config.ts';
 import { VirtualClock } from '../../src/host/clock.ts';
 import { SeededRandom } from '../../src/host/random.ts';
 import { Machine } from '../../src/vm/machine.ts';
@@ -142,11 +143,18 @@ export function createHeadlessInstance(opts: HeadlessOptions): HeadlessAssembly 
     fs,
     effects: log,
     clock: new VirtualClock(0),
-    config: new MemoryConfig(),
+    // ★ **文件配置**（实例隔离：落在该实例的用户根下）。为什么不是内存配置：
+    //   `SYSTEM4#56` 的 `jcc (global-int 5)` 决定走 `LOADCONFIG` 还是 `INITCONFIG` 那条支，
+    //   而 `global5` 由 `load-int` **从配置里读** ⇒ 配置不落盘 ⇒ `LOADCONFIG` **永远不会被走到**。
+    config: new FileConfig(path.join(roots.userRoot.label, 'amayui-config.txt')),
     // ★ 随机源**必须给**（`0x60` 语料里 22 处；不给就该条指令响亮失败，而不是偷偷用 Math.random）。
     //   种子来自前端输入（`--rng-seed` / `AMAYUI_RNG_SEED`），**默认值是一个显式常量** ——
     //   "同种子 ⇒ 同日志"这条判据依赖它；换成时刻就等于把不可复现藏进库里。
     random: new SeededRandom(opts.rngSeed ?? DEFAULT_RNG_SEED),
+    // ★ 字体名表：`0x2de` 要查它。**headless 没有真字体表** ⇒ 给**空表**（显式选择，不是"忘了给"）：
+    //   每次查找都会发一条 `font.lookup`，未命中 ⇒ -1 —— 于是"与真机可能不同"这件事在日志里**看得见**。
+    //   ⛔ `null`（不给）会让那条指令响亮失败，那是"没能力"，与"表是空的"必须分开。
+    fonts: [],
     scripts,
     // ★ gate / present / input **都不给** —— 见文件头那张表
   });

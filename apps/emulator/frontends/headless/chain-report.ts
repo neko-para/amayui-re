@@ -22,7 +22,6 @@ import { readAlf } from '@amayui/age-format/src/alf.mts';
 import { OPCODE_TABLE, instructionForLabel } from '@amayui/age-format/src/asm/runtime.mts';
 import { iterate } from '../../src/model/iterate.ts';
 import { HANDLERS } from '../../src/vm/ops.ts';
-import type { ReadSource } from '../../src/host/fs.ts';
 
 /** 一条"某个 opcode 缺 handler"的记录（按用到它的脚本数降序 = 优先级） */
 export interface MissingOpcode {
@@ -61,6 +60,16 @@ export interface ChainReport {
   unresolved: string[];
 }
 
+/**
+ * 报告只需要"**能按名字读到字节**"这一点能力 —— 单个源（归档 / 目录）与**分层 fs** 都满足。
+ * ★ 传分层 fs 是**正确**用法：实测这台安装有 107 个松散 `.BIN`，松散 `SYSTEM4.BIN` = 12012 B
+ *   而归档 TOC 声明 11992 B ⇒ 只读归档会量到**另一份没人跑的文件**（报告就是假的）。
+ */
+export interface ChainByteSource {
+  readonly label: string;
+  read(name: string): Uint8Array | null;
+}
+
 /** `call-script` 的 opcode 号**从指令表查**（不写死）；查不到就直接报错 */
 function callScriptOpcode(): number {
   const def = instructionForLabel(OPCODE_TABLE, 'call-script');
@@ -82,7 +91,7 @@ const AUTORUN_RE = /^\$\d+\$AUTORUN\.BIN$/i;
  *   传 `until: null` 得到全闭包（那是"整个游戏要什么"，是另一个问题）。
  */
 export function buildChainReport(
-  read: ReadSource,
+  read: ChainByteSource,
   indexPath: string,
   opts: { roots?: number[]; until?: string | null } = {},
 ): ChainReport {

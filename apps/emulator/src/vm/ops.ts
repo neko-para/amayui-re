@@ -25,9 +25,12 @@
 import type { InstrArg } from '../model/iterate.ts';
 import type { LoadedScript } from './script.ts';
 import type { Machine, ScriptFrame } from './machine.ts';
-import { asFloat, asInt32, asUint32, readOperand, writeOperand } from './operand.ts';
+import { asFloat, asInt32, asUint32, floatFromBits, GLOBAL_POOL_BY_TYPE_TAG, readOperand, readOperandAsText, writeOperand } from './operand.ts';
 import { instructionIndexAt, labelByteOffsetOf } from './script.ts';
 import type { OperandValue } from './operand.ts';
+import { localPoolByTypeTag } from '../model/pools.ts';
+import { ENGINE_SCALAR_WRITES } from '@amayui/age-format/src/engine/layout.mts';
+import { encInt, encZero } from '@amayui/age-format/src/asm/value-codec.mts';
 
 /** 一个 handler 拿到的东西（**够用就好**：不要把手伸进 machine 的内部状态） */
 export interface VmContext {
@@ -415,6 +418,496 @@ const opRet: Handler = (ctx) => {
   ctx.machine.effect('system', 'script.exit', 'modeled', { via: 'ret', script: ctx.script.name, returnedTo: target, depth: ctx.frame.returnStack.length });
 };
 
+// ───────────────────────────────────────────────────────── 启动链前段（"薄转发 / 写标量"那一批）
+
+/**
+ * ## 为什么这一批是**表驱动**的，而不是 16 个手写函数
+ *
+ * 启动链前段的 handler 形状高度重复，只有两种：
+ * 1. **读操作数 → 写引擎的某个 dword 标量**（观察登记在 `layout.mts` 的 `ENGINE_SCALAR_WRITES`）；
+ * 2. **转发进某个子系统**（`sub_45D660(Engine+0x14D30, op1..op5)` 这种，语义在**被调方**里）。
+ *
+ * ⇒ 手写 16 遍只会把同一件事写 16 次，而且每次都要问"偏移写哪"（本仓禁止）。表驱动还带来一个好处：
+ * **这一批"没建模到什么程度"是一眼可见的**（见下面的 `kind`），而不是散在 16 个函数体里。
+ *
+ * ## ★ 三条不许越的线
+ * * ⛔ **偏移/EA 不进本文件**：标量的名字来自 `layout.mts`（知识层），本文件只按名字引用。
+ * * ⛔ **不发明语义**：`kind: 'forward'` 的那些**没有**被建模 —— 每次执行都发一条
+ *   `logged-only` 记录，写明**被调符号**与实参 ⇒ "我们跳过了这次子系统调用"是**可见的**，
+ *   不是静默空操作（本仓最忌讳的正是后者）。日志会告诉我们启动链**真的**依赖哪些子系统。
+ * * ⛔ **不猜 argc**：每条都照 handler 体自己写的长度字核对过（见 `handlers.mts` 的注释）。
+ */
+type PrologueEntry =
+  /** 体里除了协议写什么都没有 ⇒ 真 no-op（判据：`sub_419690` 的整个体） */
+  | { opcode: number; kind: 'noop'; why: string }
+  /** 读操作数 → 写标量；标量名由 `ENGINE_SCALAR_WRITES` 给 */
+  | { opcode: number; kind: 'scalar' }
+  /** 转发进子系统（**未建模**）：逐次记 `logged-only`，附被调符号 */
+  | { opcode: number; kind: 'forward'; callee: string; argc: number; note: string };
+
+const PROLOGUE: PrologueEntry[] = [
+  { opcode: 0x1a8, kind: 'noop', why: '`sub_419690` 体只有两条：写长度字 + 读 cur ⇒ 无操作数、无可执行语义' },
+  { opcode: 0x149, kind: 'scalar' },
+  { opcode: 0x21b, kind: 'scalar' },
+  { opcode: 0x252, kind: 'scalar' },
+  { opcode: 0x88, kind: 'scalar' },
+  { opcode: 0x78, kind: 'scalar' },
+  { opcode: 0x2db, kind: 'scalar' },
+  { opcode: 0x2f6, kind: 'forward', callee: 'sub_4BB9F0/sub_404CB0', argc: 1, note: '按 op1 清某个 per-slot 状态（4 个字段）后重算一处' },
+  { opcode: 0x1ca, kind: 'forward', callee: '(vtable+12)', argc: 1, note: '对 `Engine+0xAA614` 的对象走 vtable 调用，实参含 op1 与一个静态字符串' },
+  { opcode: 0x324, kind: 'forward', callee: 'sub_453530', argc: 0, note: '无操作数；实参取自 `Engine` 的某个字段' },
+  { opcode: 0x32f, kind: 'forward', callee: 'sub_49A150', argc: 1, note: '转发进 `Engine+0x4ED10` 那个容器（与 draw-item/计时窗同族）' },
+  { opcode: 0x70, kind: 'forward', callee: 'sub_45D660', argc: 5, note: '转发进 `Engine+0x14D30` 那个子系统，argc 5' },
+  { opcode: 0x71, kind: 'forward', callee: 'sub_45EC60/sub_48FFB0', argc: 1, note: '转发 + 两处整块拷贝 + 一次 vtable 调用（体较长，未逐句建模）' },
+  { opcode: 0x73, kind: 'forward', callee: 'sub_453AD0/+', argc: 10, note: '前段最长的一条（10 个操作数）' },
+  { opcode: 0x79, kind: 'forward', callee: 'sub_4563A0', argc: 3, note: '转发进 `Engine+0x14D30`' },
+  { opcode: 0x1c1, kind: 'forward', callee: 'sub_4563D0', argc: 3, note: '转发进 `Engine+0x14D30`' },
+  // ★ `0x2f8`：当前启动链的停止点（SYSTEM4 的 `call` 跳进的那个子程序的头三条）。
+  //   体（`sub_4268D0`）：`sub_4B6940(Engine+0x48E8, op1 + 12, op2)` —— 注意**第一个实参是 `op1 + 12`**
+  //   （对操作数做了算术）。记进日志时也照原样记，别把 `+12` 抹掉：那正是"它要一个结构里的字段"的线索。
+  { opcode: 0x2f8, kind: 'forward', callee: 'sub_4B6940', argc: 2, note: '转发进 `Engine+0x48E8`；第一个实参 = `op1 + 12`（对操作数做了算术），第二个 = op2' },
+  { opcode: 0x303, kind: 'forward', callee: 'sub_456600', argc: 3, note: '转发进 `Engine+0x14D30`（同族里 argc 3 的那条）' },
+];
+
+/**
+ * 给守卫看的**表摘要**（`opcode → kind`）—— 守卫要能断言"表里每一行都真的注册进了 `HANDLERS`"。
+ * ★ 为什么必须能断言：`prologueHandlers()` 只把 `noop`/`forward` 两态映射成函数，`scalar` 那几条是
+ *   **具名常量手工接上**的 ⇒ "往表里加一行 `scalar` 却忘了接常量"是一个不会被类型系统抓住的疏漏。
+ */
+export const PROLOGUE_OPCODES: readonly { opcode: number; kind: PrologueEntry['kind'] }[] =
+  Object.freeze(PROLOGUE.map((e) => Object.freeze({ opcode: e.opcode, kind: e.kind })));
+
+/** 知识层登记过的标量名（模型引用的名字必须在这里 —— 否则就是模型自己编了个偏移） */
+const SCALAR_NAMES = new Set(ENGINE_SCALAR_WRITES.map((w) => w.name));
+
+/** 按 opcode 归拢"要写哪些标量"（名字与形态都来自知识层，本文件不重复它们） */
+const SCALARS_BY_OPCODE = new Map<number, (typeof ENGINE_SCALAR_WRITES)[number][]>();
+for (const w of ENGINE_SCALAR_WRITES) {
+  const list = SCALARS_BY_OPCODE.get(w.opcode) ?? [];
+  list.push(w);
+  SCALARS_BY_OPCODE.set(w.opcode, list);
+}
+
+/** 取一个**知识层登记过**的标量名（没登记 ⇒ 抛：那说明模型引用了知识层不认识的名字） */
+function scalarName(name: string): string {
+  if (!SCALAR_NAMES.has(name)) {
+    throw new Error(`模型引用了知识层没登记的标量槽「${name}」—— 见 age-format/src/engine/layout.mts 的 ENGINE_SCALAR_WRITES`);
+  }
+  return name;
+}
+
+/** `bswap24`：在**低 24 位内**把字节序倒过来（`b0<<16 | b1<<8 | b2` —— 像 BGR↔RGB）。
+ *  判据（锚 = EA）：`0x76` 的体逐字 `this[21664] = BYTE2(v2) + ((BYTE1(v2) + ((u8)v2 << 8)) << 8)`。*/
+const bswap24 = (v: number): number => (((v & 0xff) << 16) | (v & 0xff00) | ((v >>> 16) & 0xff)) >>> 0;
+
+/** 生成一个"写标量"handler（每条登记都自带它的写形态） */
+function scalarHandler(opcode: number, extra?: (ctx: VmContext, v: number) => void): Handler {
+  const writes = SCALARS_BY_OPCODE.get(opcode) ?? [];
+  if (!writes.length) throw new Error(`opcode 0x${opcode.toString(16)} 声称写标量，但知识层没有对应登记`);
+  return (ctx) => {
+    const v = num(ctx, 0);
+    for (const w of writes) {
+      const value = w.form === 'op2' ? num(ctx, 1) : w.form === 'bool(op1)' ? (v !== 0 ? 1 : 0) : w.form === 'bswap24(op1)' ? bswap24(v) : v;
+      ctx.machine.scalars.write(scalarName(w.name), value);
+      // ★★ 写完标量之后那次子系统调用**必须记进欠账**（知识层的 `callsAfter`）。
+      //    少了这一条，"handler 里未建模的那次调用"就不会出现在保真欠账里 ⇒ 日志显得比实际干净。
+      for (const callee of w.callsAfter ?? []) {
+        ctx.machine.effect('system', 'engine.forward', 'logged-only', {
+          opcode: `0x${opcode.toString(16)}`, callee, args: [v],
+          note: '标量写**之后**的一次未建模子系统调用（知识层 `callsAfter`）',
+        });
+      }
+    }
+    extra?.(ctx, v);
+    ctx.machine.effect('system', 'engine.scalar.write', 'modeled', {
+      opcode: `0x${opcode.toString(16)}`,
+      slots: writes.map((w) => w.name),
+      value: v,
+      note: '槽的**含义未定**（知识层只登记了"谁写它"）—— 本层只保证"写进去的读出来还是它"',
+    });
+  };
+}
+
+const opScalar149 = scalarHandler(0x149);
+const opScalar21b = scalarHandler(0x21b);
+const opScalar252 = scalarHandler(0x252);
+const opScalar76 = scalarHandler(0x76);
+const opScalar77 = scalarHandler(0x77);
+const opScalar1a4 = scalarHandler(0x1a4);
+const opScalar78 = scalarHandler(0x78);
+const opScalar2db = scalarHandler(0x2db);
+
+/**
+ * `0x88`：写两个标量（都 = op1），**外加两个条件副作用**（取证：`sub_41FAB0` 体）
+ * ```
+ *   if (op1) this[122368] = 1; else this[174801] &= ~0x8000000;
+ * ```
+ * ★ 那两个槽**不在** `ENGINE_SCALAR_WRITES` 里：那张表登记的形态是"写成 op1 原值"，
+ *   而这两条是**常量写 / 位清除**，形态不同 ⇒ 本批**只记录、不建模**它们，并留痕。
+ *   ⇒ 这是一个**已知欠账**（已登记进需求树），不假装它已经解决。
+ */
+const opScalar88 = scalarHandler(0x88, (ctx, v) => {
+  const side = v !== 0 ? '常量写 1（`this[122368] = 1`）' : '位清除（`this[174801] &= ~0x8000000`）';
+  ctx.machine.effect('system', 'engine.scalar.bits', 'logged-only', {
+    opcode: '0x88', side,
+    note: '★ 形态是"常量/位操作"而非"= op1" ⇒ **未登记进知识层**、目前只记录不建模（欠账见需求树）',
+  });
+});
+
+const opNoop1a8: Handler = () => { /* 体只有协议写（取证见 PROLOGUE 表里的 why） */ };
+
+/** 转发类：**不建模**，但**逐次留痕**（写明被调符号与实参值）—— 绝不静默空操作 */
+function forwardHandler(entry: Extract<PrologueEntry, { kind: 'forward' }>): Handler {
+  return (ctx) => {
+    const args: number[] = [];
+    for (let i = 0; i < entry.argc; i += 1) args.push(num(ctx, i));
+    ctx.machine.effect('system', 'engine.forward', 'logged-only', {
+      opcode: `0x${entry.opcode.toString(16)}`, callee: entry.callee, args, note: entry.note,
+    });
+    ctx.machine.note('forward-not-modelled', `0x${entry.opcode.toString(16)} → ${entry.callee}（子系统未建模，只记录）`);
+  };
+}
+
+/**
+ * ★★ **"对象表 + 字段写"一族**（`Engine+0x15144[op1]` 那些）—— 带守卫的对象字段写。
+ *
+ * ## 形状（两条已取的证，同形）
+ * ```
+ * 0x212  sub_423A30：v = this[op1 + 21585]; if (v) *(v + 100) = op2
+ * 0x25d  sub_425EF0：v = this[op1 + 21585]; if (v) { *(v + 276) = op2; *(v + 280) = op3 }
+ * ```
+ * 表 = `Engine + 4*21585` = **`Engine+0x15144`**，按 `op1`（槽号）取指针；**表项为空 ⇒ 什么都不做**
+ * （不抛、不报错 —— 又一处"静默"）。
+ *
+ * ## ★ 为什么这一族只**记欠账**、不建模
+ * 表里那些对象是**别处创建**的，而创建它们的子系统正是本批**跳过**的那些（`engine.forward` 一族）。
+ * ⇒ 现阶段的模型里这张表**恒为空**，这些 handler 只会走 `if` 的假支。本层**如实记录**
+ * "引擎本会写 `[对象+偏移] = 操作数`，但对象不在场"，并计入保真欠账。
+ * ⛔ **不许**记成"写成功了" —— 那会让后面的分歧无从追溯。
+ *
+ * ## 机械量出的族规模（可复算）
+ * `.c` 里引用 `+ 21585]` 的函数共 **9** 个：`sub_408F10 · sub_41A420 · sub_41EEF0 · sub_4200C0 ·
+ * sub_420110 · sub_4213F0 · sub_423A30 · sub_423A80 · sub_425EF0`。
+ * 其中已确认是 opcode handler 的 = **2**（`0x212` / `0x25d`）⇒ 另外 7 个待逐个核（见需求树）。
+ */
+const OBJECT_FIELD_WRITES: {
+  opcode: number;
+  argc: number;
+  handler: string;
+  /** 写哪些字段（元素顺序照抄体里的读序无关，这里按"字段偏移升序"写） */
+  fields: { from: 'op2' | 'op3'; offset: number }[];
+}[] = [
+  { opcode: 0x212, argc: 2, handler: 'sub_423A30', fields: [{ from: 'op2', offset: 100 }] },
+  { opcode: 0x25d, argc: 3, handler: 'sub_425EF0', fields: [{ from: 'op2', offset: 276 }, { from: 'op3', offset: 280 }] },
+  // ★ 同族第三条（启动链 `#52/#53/#54/#56/#58/#60/#62/#63` 就是它，共 7 处）
+  { opcode: 0x213, argc: 3, handler: 'sub_423A80', fields: [{ from: 'op2', offset: 104 }, { from: 'op3', offset: 108 }] },
+];
+
+/** 生成"带守卫的对象字段写"handler（读全部操作数 ⇒ 操作数有问题会当场抛出，而不是被静默吞掉） */
+function objectFieldWriter(entry: (typeof OBJECT_FIELD_WRITES)[number]): Handler {
+  return (ctx) => {
+    const slot = num(ctx, 0);
+    const values: Record<string, number> = {};
+    for (let i = 1; i < entry.argc; i += 1) values[`op${i + 1}`] = num(ctx, i);
+    ctx.machine.effect('system', 'engine.object-field-write', 'logged-only', {
+      opcode: `0x${entry.opcode.toString(16)}`,
+      slot,
+      writes: entry.fields.map((f) => ({ field: `+${f.offset}`, value: values[f.from] })),
+      applied: false,
+      reason: '目标对象不在场：创建它的子系统尚未建模（见 engine.forward 那些记录）—— 这些写**没有发生**',
+    });
+  };
+}
+
+// ───────────────────────────────────────────────────────── 配置（`load-int` / `save-int`）
+
+/**
+ * 配置的**键**：引擎是**运行时拼**出来的（**没有静态键表**）。
+ *
+ * 取证（锚 = EA，见台账 `KN-01M4ASXQ587J7G7E6E5R3R2Y2K`）：`load-int` = `sub_42DF40`、
+ * `save-int` = `sub_434F60`，两者都是
+ * ```
+ *   wsprintfA(buf, "%c%8.8x", 3, <操作数 1 的整数值>)     ; 类型码 3 = 整型（字面量就是 3，不是 'K'）
+ * ```
+ * ⇒ 键 = 一个字节 `\x03` + **8 位十六进制**（`%8.8x`：至少 8 位、零填充）。
+ * ★ 字符串版（`load-string`/`save-string`）同形但类型码是 **5**，而且值是 28 字节的字符串元素
+ *   ⇒ 那两条要等字符串池落地（见需求树）。
+ */
+function configKeyInt(value: number): string {
+  return `\u0003${(value >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+/** 键里那个字节不可打印 ⇒ 打日志时转义（否则日志里出现控制字符，没法读也没法 diff） */
+function printableKey(key: string): string {
+  return `\\x${key.charCodeAt(0).toString(16).padStart(2, '0')}${key.slice(1)}`;
+}
+
+/**
+ * ★ **已知欠账**：键取自另一个取值原语 `sub_418A30`（`load-int`/`save-int` 都用它），
+ *   而本模型只实现了 `sub_41BF50`。两者**在哪些 type 上一致、哪些上不一致没有取证**
+ *   ⇒ 这里用 `sub_41BF50` 的读法**近似**，并把这件事写进每一条副作用记录（⛔ 不静默）。
+ */
+const KEY_PRIMITIVE_NOTE = '键取自 sub_41BF50 的读法；引擎用的是 sub_418A30（**未建模**，两者差异未取证）';
+
+/**
+ * `0x1a3 load-int`：**查不到 ⇒ 0**（不是"不写"），然后把结果**写回 op1**。
+ * 逐字：`v3 = sub_428E00(配置对象, key); v4 = v3 ? *v3 : 0; sub_42B4B0(this, 1, v4)`。
+ */
+const opLoadInt: Handler = (ctx) => {
+  const k = num(ctx, 0);
+  const key = configKeyInt(k);
+  const raw = ctx.machine.instance.config.get(key);
+  const value = raw === undefined ? 0 : Number.parseInt(raw, 10) | 0;
+  writeOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script }, ctx.ins.args[0], 0, value);
+  ctx.machine.effect('system', 'config.read', 'modeled', {
+    opcode: '0x1a3', key: printableKey(key), stored: raw ?? null, value,
+    note: `查不到 ⇒ 0（引擎逐字如此）· ${KEY_PRIMITIVE_NOTE}`,
+  });
+};
+
+/**
+ * `0x1a2 save-int`：把 op1 的值存进配置，**键由同一个值算出**。
+ * 逐字：`v3 = sub_41BF50(this,1)`（要存的值）· `v2 = sub_418A30(this,1)`（键的来源）· `sub_434D00(配置对象, key, &v3)`。
+ * ★ 本仓的 `ConfigStore` 是**文本**接口（配置文件就是文本）⇒ 这里把整型存成**十进制文本**；
+ *   这是**宿主表示**的选择，不是引擎语义（引擎那一格是个 dword）。
+ */
+const opSaveInt: Handler = (ctx) => {
+  const v = num(ctx, 0);
+  const key = configKeyInt(v);
+  ctx.machine.instance.config.set(key, String(v | 0));
+  ctx.machine.effect('system', 'config.write', 'modeled', {
+    opcode: '0x1a2', key: printableKey(key), value: v,
+    note: `整型以十进制文本存进宿主 ConfigStore（宿主表示）· ${KEY_PRIMITIVE_NOTE}`,
+  });
+};
+
+// ───────────────────────────────────────────────────────── 字符串（`set-string` / `save-string`）
+
+/** 每个 handler 都要的那个"操作数上下文"（三处各写一遍容易写漏，收成一处） */
+function operandCtx(ctx: VmContext) {
+  return { locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script };
+}
+
+/**
+ * `0x192 set-string`：把**操作数 2 的文本**写进**操作数 1**（目标按 op1 的 type 分派到不同串池）。
+ *
+ * 取证（锚 = EA）：handler = `sub_433660`（分派表项 `Engine+0x0A56E4` ⇒ `(0xA56E4−0xA509C)/4 = 0x192` ✓）。
+ * * 它用 `sub_42A420(this, v3, 2)` **一次把两个操作数都读成文本** ⇒ 源侧走的是**文本**原语，
+ *   所以 `type 2`（内联字符串）在这里是合法的源（见 `readOperandAsText` 头注）。
+ * * 落点由 `sub_433310` 按 **op1 的 type** 分派：type 5 → 全局串池、type 11 → 局部串池、
+ *   type 8/14 另有分支，**其余 type 抛 `Command_Type_Exception`**。本模型里这一步由 `writeOperand`
+ *   的池分派承担（它同样按 type 选池；不支持的 type 会抛）。
+ * ★ 它是启动链里出现最多的一条（7731 处）：`INITCONFIG0.BIN` 用它把默认字体名写进全局串。
+ */
+const opSetString: Handler = (ctx) => {
+  const text = readOperandAsText(operandCtx(ctx), ctx.ins.args[1], 1);
+  writeOperand(operandCtx(ctx), ctx.ins.args[0], 0, text);
+  ctx.machine.effect('system', 'string.set', 'modeled', {
+    opcode: '0x192', text,
+    targetType: `0x${ctx.ins.args[0].type.toString(16)}`, targetIndex: ctx.ins.args[0].rawData >>> 0,
+    sourceType: `0x${ctx.ins.args[1].type.toString(16)}`,
+  });
+};
+
+/**
+ * `0x1a9 save-string`：把**操作数 1** 那个字符串格子的内容存进配置。
+ *
+ * 取证（锚 = EA，台账 `KN-01M4ASXQ587J7G7E6E5R3R2Y2K`）：handler = `sub_434FE0`。
+ * * **键**由 `sub_418AE0` 算出 —— 对 **type 5 直接返回下标**、对 8/14 用 `(指针 − 全局串池基址)/28` 反算下标；
+ *   然后 `wsprintfA(buf, "%c%8.8x", 5, 那个下标)` ⇒ 键 = `\x05` + **8 位十六进制**（与整型版同形，类型码 5）。
+ * * **值**是该 28 字节字符串元素的内容；写进**字符串配置对象**（`Engine+0xAA5A4`）的 `sub_434E00`。
+ * ★ 本仓的 `ConfigStore` 是文本接口 ⇒ 字符串按原样存（这一路**没有**表示损失）。
+ * ★ **未支持**：type 8/14 的"反算下标"（需要地址空间，见 ADR）⇒ 遇到就抛，不猜。
+ */
+const opSaveString: Handler = (ctx) => {
+  const arg = ctx.ins.args[0];
+  if (arg.type !== 5 && arg.type !== 0xb) {
+    throw new Error(
+      `save-string 的操作数 type 0x${arg.type.toString(16)}：键的下标反算只对字符串池（type 5/11）取证过` +
+      `（type 8/14 要按指针与池基址反算，需要地址空间）⇒ 拒绝猜`,
+    );
+  }
+  const index = arg.rawData >>> 0;
+  const key = `\u0005${index.toString(16).padStart(8, '0')}`;
+  const text = readOperandAsText(operandCtx(ctx), arg, 0);
+  ctx.machine.instance.config.set(key, text);
+  ctx.machine.effect('system', 'config.write', 'modeled', {
+    opcode: '0x1a9', key: printableKey(key), value: text, kind: 'string',
+    note: '字符串按原样存进宿主 ConfigStore（这一路没有表示损失）· 键的下标来自 sub_418AE0（type 5 = 直接用下标）',
+  });
+};
+
+// ───────────────────────────────────────────────────────── 数组填充（`fill-zero` / `set-array-to`）
+
+/**
+ * 取址语义（`sub_42AEA0`）：把操作数解析成"**哪个池的第几格**"，供"按地址连写 N 格"用。
+ * ★ `fill-zero` / `set-array-to` 的第一个操作数走的是**取址**原语（不是取值）
+ *   ⇒ 它们写的是**从那一格开始连续 N 格**。
+ */
+type FillTarget =
+  | { where: 'global'; pool: string; kind: string; index: number }
+  | { where: 'local'; typeTag: number; kind: string; index: number };
+
+function targetOf(ctx: VmContext, i: number): FillTarget {
+  const type = ctx.ins.args[i].type;
+  const index = ctx.ins.args[i].rawData >>> 0;
+  const g = GLOBAL_POOL_BY_TYPE_TAG[type];
+  if (g) return { where: 'global', pool: g, kind: g, index };
+  const l = localPoolByTypeTag(type);
+  if (l) return { where: 'local', typeTag: type, kind: l.kind, index };
+  throw new Error(`操作数 #${i} 的 type 0x${type.toString(16)} 不是可寻址的池槽（取址原语只覆盖 3..14）`);
+}
+
+/**
+ * 往 (池, 起始下标) 连写 `count` 格。
+ * ★ 值按**池的族**决定：int 族池里存的是**解码后**的值 ⇒ 写 `intValue`；
+ *   float 族池里引擎写的是那个 **dword**、而池按 float32 读 ⇒ 写"该 dword 当 float32 看"的那个数。
+ *   （键为 0 时 `encZero`/`encInt` 与字面值重合，**真键下不是** —— 两者必须分开。）
+ * ★ 全局池按**名字**寻址、局部池按 **type tag** 寻址（`LocalPools` 的既有口径）。
+ */
+function fillRange(ctx: VmContext, t: FillTarget, count: number, intValue: number, rawDword: number): void {
+  const valueOf = (kind: string): number => (kind === 'float' ? floatFromBits(rawDword >>> 0) : intValue);
+  if (t.where === 'global') {
+    for (let k = 0; k < count; k += 1) ctx.machine.globals.write(t.pool, t.index + k, valueOf(t.kind));
+  } else {
+    for (let k = 0; k < count; k += 1) ctx.frame.locals.write(t.typeTag, t.index + k, valueOf(t.kind));
+  }
+}
+
+/** 日志里的池标识（两种寻址方式在日志里要能分开看） */
+const poolLabel = (t: FillTarget): string => (t.where === 'global' ? t.pool : `local(type 0x${t.typeTag.toString(16)})`);
+
+/**
+ * `0x6c fill-zero`：把从 op1 **地址**开始的 op2 个 dword 填成 `Engine+0x5EC90`（= **encZero**）。
+ *
+ * ★★ **助记名骗人**：它填的**不是 0**。
+ * 取证（锚 = EA）：handler = `sub_42CE70`（表项 `Engine+0x0A524C`），体逐字：
+ * ```
+ *   v2 = sub_42AEA0(this, 1)                     ; 取址（目标地址）
+ *   result = sub_41BF50(this, 2)                 ; 个数（<= 0 ⇒ 什么都不做）
+ *   if (result > 0) do { *v2++ = this[97060]; } while (--result);
+ * ```
+ * `this[97060]` = `Engine + 4*97060` = **`Engine+0x5EC90`** —— 那一格在引擎构造时被写成 `ENC(key,0)`
+ * （本仓 `layout.mts` 的 `EVIDENCE.encZero` 与 `value-codec.mts` 的 `encZeroField` 都登记了它）。
+ */
+const opFillZero: Handler = (ctx) => {
+  const t = targetOf(ctx, 0);
+  const count = num(ctx, 1);
+  if (count > 0) fillRange(ctx, t, count, 0, encZero(ctx.machine.instance.env.codecKey));
+  ctx.machine.effect('system', 'array.fill', 'modeled', {
+    opcode: '0x6c', where: t.where, pool: poolLabel(t), from: t.index, count: Math.max(0, count),
+    filled: 'encZero（DEC 后是 0；float 池按 float32 解释）',
+    note: '★ 助记名 `fill-zero` 骗人：填的是 Engine+0x5EC90 = ENC(key,0)，不是字面 0',
+  });
+};
+
+/**
+ * `0x2d8 set-array-to`：把从 op1 **地址**开始的 op3 个 dword 填成 **`ENC(key, op2)`**。
+ * 取证（锚 = EA）：handler = `sub_430CF0`，体逐字：
+ * ```
+ *   v2 = sub_42AEA0(this, 1)                                          ; 取址
+ *   v5 = __ROL4__(this[97059] ^ __ROR4__(sub_41BF50(this,2), 7), 21)   ; = ENC(key, op2)
+ *   result = sub_41BF50(this, 3)                                      ; 个数
+ *   if (result > 0) memset32(v2, v5, result);
+ * ```
+ * `this[97059]` = `Engine+0x5EC8C` = **键**；那个表达式**正是本仓登记的 ENC**
+ * （`ror 7 → xor key → rol 21`，见 `value-codec.mts`）⇒ 又一处独立互证。
+ */
+const opSetArrayTo: Handler = (ctx) => {
+  const t = targetOf(ctx, 0);
+  const value = num(ctx, 1);
+  const count = num(ctx, 2);
+  if (count > 0) fillRange(ctx, t, count, value, encInt(value, ctx.machine.instance.env.codecKey));
+  ctx.machine.effect('system', 'array.fill', 'modeled', {
+    opcode: '0x2d8', where: t.where, pool: poolLabel(t), from: t.index, count: Math.max(0, count), value,
+    filled: 'ENC(key, op2)', note: '式子与 value-codec 的 ENC 逐字一致（独立互证）',
+  });
+};
+
+// ───────────────────────────────────────────────────────── ★ 有返回值的"转发"（**不许**当 logged-only）
+
+/**
+ * ★★ **这一类 handler 与"转发"（`kind: 'forward'`）必须分开对待**，否则会造成**静默分歧**。
+ *
+ * 转发那批（`engine.forward`）是**语句**：跳过一次子系统调用，脚本的后续行为不依赖它的结果
+ * ⇒ `logged-only` 是诚实的（缺的是副作用）。
+ *
+ * 但还有一类是**函数调用**：它的返回值**写回操作数 1**，而脚本会拿那个值去分支/存盘。
+ * 对它只记一笔 = 让 op1 保留**旧值** ⇒ 后续分支走错，**而日志一切正常**（最难查的一类）。
+ *
+ * ⇒ 本层对这类 handler 的规矩是：**要么真实现，要么响亮失败**（带上"缺哪条取证"），
+ *   ⛔ 不许给一个"看起来合理"的假值（0 也不行）。
+ *
+ * 下表登记**已确认为这一类、但语义尚未取证**的 opcode —— 它们的"响亮失败"是**有意**的，
+ * 不是"还没轮到"。新增一条时把 handler 符号与逐字判据写在同一条注释里。
+ */
+/**
+ * ★ 空表是**正常状态**：这一类里没有任何一条"语义未取证"的了（取证到位就该从这里删掉、改成真实现）。
+ *   表还在的理由是"这一类必须被显式对待"——下次遇到同类，往这里加一行即可得到**响亮失败**。
+ */
+const VALUE_PRODUCING_UNVERIFIED: { opcode: number; handler: string; why: string }[] = [];
+
+/**
+ * `0x2de`（argc 2）：在**宿主字体名表**里查一个名字，把**下标**（未命中 ⇒ **-1**）写回 op1。
+ *
+ * 取证（锚 = EA）：handler = `sub_430DF0`（表项 `Engine+0x0A5D58`），体逐字：
+ * ```
+ *   v2 = sub_41B640(this, 2)              ; ★ 第四个取值原语：操作数 → cp932 文本（**不是** sub_41BF50）
+ *   v3 = sub_428990(this + 21324, v2)     ; this + 21324*4 = Engine+0x14D30
+ *   return sub_42B4B0(this, 1, v3)        ; 写回 op1
+ * ```
+ * `sub_428990`（`0x428990`）逐字：`[this+0x313C0]`/`[this+0x313C4]` 是 vector 的 begin/end，
+ * 元素 **0x20** 字节（`sar ecx,5`），元素里 +0 是 std::string 数据、+0x10 是 size（+0x14 与 0x10 比决定堆/内联）；
+ * 逐元素 `memcmp` 且要求长度相等；**键首字节是 `'@'`(0x40) 时跳过它再比**（`0x4289C8`/`0x4289D0`/`0x4289D3`）；
+ * 命中 ⇒ `eax = 0 基下标`（`0x428A4C`），未命中 ⇒ `or eax,-1`（`0x428A38`）。**无副作用**。
+ * ⇒ 那个 vector 是**字体名表**（判据：`0x459B56–0x459B6A` 拿 `LOGFONT+0x1C` = `lfFaceName` 去查它）。
+ * ★ **表的内容是宿主事实** ⇒ 从 `instance.fonts` 取；没提供（`null`）⇒ 响亮失败。
+ * ★ 顺带：`sub_41B640` 对 `type 2` 用的是**同一条** `^0xFF` + "存储字高字节 0FFh 即停" 的判据
+ *   ⇒ 与 `vm/script.ts` 的 `inlineString` 是**独立互证**。
+ */
+const opFontIndex2de: Handler = (ctx) => {
+  const fonts = ctx.machine.instance.fonts;
+  if (!fonts) {
+    throw new Error('0x2de 要在宿主的字体名表里查名字，而本实例没有提供 `fonts`（见 host/instance.ts）—— 拒绝假装"表里什么都没有"');
+  }
+  const raw = readOperandAsText(operandCtx(ctx), ctx.ins.args[1], 1);
+  // ★ 跳过前导 '@'（引擎逐字如此：`cmp byte ptr [eax],40h` / `setz cl` / `add eax,ecx`）
+  const key = raw.startsWith('@') ? raw.slice(1) : raw;
+  const index = fonts.indexOf(key);
+  const value = index < 0 ? -1 : index;
+  writeOperand(operandCtx(ctx), ctx.ins.args[0], 0, value);
+  ctx.machine.effect('system', 'font.lookup', 'modeled', {
+    opcode: '0x2de', key, index: value, tableSize: fonts.length,
+    note: index < 0
+      ? '★ 未命中 ⇒ -1（引擎逐字 `or eax,-1`）。**表来自宿主**：headless 目前给的是空表 ⇒ 这一支与真机可能不同'
+      : '命中 ⇒ 0 基下标',
+  });
+};
+
+/** 生成"响亮失败"的 handler：错误信息里必须写明**缺哪条取证**，不许只说不支持 */
+const unverifiedValueProducer = (e: (typeof VALUE_PRODUCING_UNVERIFIED)[number]): Handler => (ctx) => {
+  throw new Error(
+    `opcode 0x${e.opcode.toString(16)} 的 handler（${e.handler}）**存在**，但它的返回值语义未取证 ⇒ 本层拒绝执行。` +
+    `★ 这类 handler 与"转发"不同：它的结果会写回操作数并影响后续分支，给假值会造成**静默分歧**。` +
+    `缺的取证：${e.why}`,
+  );
+  void ctx;
+};
+
+/** 由 `PROLOGUE` 表生成注册项（★ 新增一条 = 在表里加一行，不必写函数） */
+function prologueHandlers(): Record<number, Handler> {
+  const out: Record<number, Handler> = {};
+  for (const e of PROLOGUE) {
+    if (e.kind === 'noop') out[e.opcode] = opNoop1a8;
+    else if (e.kind === 'forward') out[e.opcode] = forwardHandler(e);
+  }
+  return {
+    ...out,
+    0x149: opScalar149, 0x21b: opScalar21b, 0x252: opScalar252,
+    0x76: opScalar76, 0x77: opScalar77, 0x1a4: opScalar1a4, 0x78: opScalar78, 0x2db: opScalar2db, 0x88: opScalar88,
+  };
+}
+
 // ───────────────────────────────────────────────────────── B 档：纹理与绘制项
 // handler 符号（旧仓观测索引；**本仓尚未逐字复核**，复核单见需求树）：
 //   0x1F7 detach-texture = sub_422BC0 · 0x1F8 create-texture = sub_422C20 ·
@@ -449,6 +942,40 @@ const opCreateTexture: Handler = (ctx) => {
   const kind = num(ctx, 3);
   ctx.machine.scene.createTexture(slot, w, h);
   ctx.machine.effect('render', 'texture.create', 'modeled', { slot, width: w, height: h, kind, offscreen: true });
+};
+
+/**
+ * `0x1aa load-string`：把配置里那个字符串读回**操作数 1**。**查不到 ⇒ 空串**（⛔ 不是 0）。
+ *
+ * 取证（锚 = EA）：handler = `sub_433A70`（表项 `Engine+0x0A5744` ⇒ `(0xA5744−0xA509C)/4 = 0x1AA` ✓），体逐字：
+ * ```
+ *   this[30*cur + 95805] = 3                  ; 长度字 ⇒ argc 1
+ *   v2 = sub_418AE0(this, 1)                  ; 键的下标（type 5 ⇒ 直接是 raw）
+ *   v3 = sub_429390(this + 5191, 5, v2)       ; 查字符串配置对象（Engine+0x511C；表在其 +0x464 = Engine+0x5580）
+ *   return sub_433310(this, 1, (int)v3)       ; 把结果写回 op1（与 set-string **同一个**写目标函数）
+ * ```
+ * ★ 查不到时 `sub_429390` 返回的是**一个静态空串**的地址 ⇒ 本层读回 **`''`**。
+ * ★ 与 `save-string`（`sub_434FE0`）对称：同一套键、同一个对象。★ `Engine+0x511C` 与
+ *   `save-string` 那侧看到的 `Engine+0x5580` 是**同一个对象的两层**（`0x511C + 281*4 = 0x5580`），
+ *   不是两个不同的对象 —— 这条把早先一处"对象 EA 不一致"的记录订正了。
+ */
+const opLoadString: Handler = (ctx) => {
+  const arg = ctx.ins.args[0];
+  if (arg.type !== 5 && arg.type !== 0xb) {
+    throw new Error(
+      `load-string 的操作数 type 0x${arg.type.toString(16)}：键的下标只对字符串池（type 5/11）取证过` +
+      `（type 8/14 要按指针与池基址反算，需要地址空间）⇒ 拒绝猜`,
+    );
+  }
+  const index = arg.rawData >>> 0;
+  const key = `\u0005${index.toString(16).padStart(8, '0')}`;
+  const stored = ctx.machine.instance.config.get(key);
+  const text = stored ?? '';
+  writeOperand(operandCtx(ctx), arg, 0, text);
+  ctx.machine.effect('system', 'config.read', 'modeled', {
+    opcode: '0x1aa', key: printableKey(key), stored: stored ?? null, value: text, kind: 'string',
+    note: '查不到 ⇒ **空串**（引擎返回一个静态空串的地址，不是 0）',
+  });
 };
 
 /** `0x1FA release-texture`：`op1 = 槽`；释放该槽（`applied: false` = 本来就空） */
@@ -659,9 +1186,23 @@ export const HANDLERS: Record<number, Handler> = {
   0x8c: opJmp,
   0x8f: opCall,
   0xa0: opJcc,
+  0x1a2: opSaveInt,
+  0x1a3: opLoadInt,
+  0x192: opSetString,
+  0x1a9: opSaveString,
+  0x1aa: opLoadString,
+  0x6c: opFillZero,
+  0x2d8: opSetArrayTo,
+  0x2de: opFontIndex2de,
+  // ★ 有返回值但语义未取证的那些：**注册成响亮失败**（不是"还没轮到"，见上面的长注释）
+  ...Object.fromEntries(VALUE_PRODUCING_UNVERIFIED.map((e) => [e.opcode, unverifiedValueProducer(e)])),
   0x1a7: opComment,
   0x101: opPollInput,
   0x21c: opWait,
+
+  // —— 启动链前段（表驱动；`forward` 那些**未建模**、逐次留痕）——
+  ...prologueHandlers(),
+  ...Object.fromEntries(OBJECT_FIELD_WRITES.map((e) => [e.opcode, objectFieldWriter(e)])),
 
   // —— B 档：纹理与绘制项 ——
   0x1f7: opDetachTexture,
