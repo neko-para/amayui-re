@@ -65,6 +65,11 @@ corpus/disasm/
 pnpm tools disasm verify          # 断言（守卫 #7 也走这条）
 pnpm tools disasm build           # 转写落盘到 files/ + 打确定性 zip（需要 .staging/ 里的原件）
 pnpm tools disasm restore         # 由 zip **反解回投递原件**（默认写回 .staging/）
+
+# ★ 读语料是**另一个域**（`disasm-at`：只读定位与切片，`--describe` 看全部动作）
+pnpm tools disasm-at stats                        # 段 / 行数 / EA 范围 / 单调性
+pnpm tools disasm-at at --ea 0x401000 --lines 60  # 有界上下文（.lst；截断会明说）
+pnpm tools disasm-at pseudo --ea 0x40D500         # ★ 该 EA **所属函数**的 Hex-Rays C 体 + .lst 区间
 ```
 
 `--verify` 有**两种基准**，按 `.staging/` 在不在自动选，两种都会用清单里的 sha256 上锚：
@@ -97,6 +102,12 @@ pnpm tools disasm restore         # 由 zip **反解回投递原件**（默认�
 ## 4. 消费规则
 
 * **只读**：不得就地修改；任何"解析友好化"只能是**派生的内存视图**，不得落回语料文件。
+* ★ **两层分工：C 读 / lst 证**。`.c` 是 Hex-Rays 的**改写视图**（类型 / 变量名 / 结构都是它的推断，
+  而且**一处地址都没有** —— 实测 `0x00xxxxxx` 计数为 0）⇒ 它**只用来提假设与看结构**；
+  结论必须回 `.lst` / 字节核验，**锚只锚 EA**（`.c` 的行号与文本不许当锚）。
+  ★ 不是每个 EA 都是函数起点、也不是每个函数都有 C ⇒ 用 `disasm-at pseudo` 让它**算**给你（别自己看行区间）。
+  机械判据：`tools/test/disasm-pseudo.assets.test.mjs`；完整工作流与常踩的坑：
+  技能 `.agents/skills/amayui-re-engine/SKILL.md`。
 * **锚点锚二进制 EA**：语料只提供 `EA → 当前这份导出里的行号` 映射。
   换一次反汇编**只重建映射，不改任何锚**（这正是旧仓 `raw N` 行号锚全废的教训）。
 * `files/` 里的解压产物**不入库**（`.gitignore` 的 `/corpus/disasm/files/`），本机解一次即可。

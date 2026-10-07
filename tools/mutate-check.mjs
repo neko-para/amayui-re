@@ -107,6 +107,13 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-state-partition.test.mjs',
     what: '把 `oob` 从 diagnostic 改成 engine（诊断被当成引擎态 ⇒ 快照会多带一个会涨的量）',
   },
+  {
+    file: 'tools/lib/disasm.mjs',
+    from: "const PROC_EA_RE = /^([A-Za-z_.][\\w.]*):([0-9A-Fa-f]{8})\\s+([A-Za-z_][\\w.]{0,40})\\s+proc near/;",
+    to: "const PROC_EA_RE = /^([A-Za-z_][\\w.]*):([0-9A-Fa-f]{8})\\s+([A-Za-z_][\\w.]{0,40})\\s+proc near/;",
+    guard: 'tools/test/disasm-pseudo.assets.test.mjs',
+    what: '段名首字符不许 `.` ⇒ `.text` 的 proc near 全漏（这个坑在本仓踩过两次）',
+  },
 ];
 
 /**

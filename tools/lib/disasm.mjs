@@ -41,6 +41,7 @@ export const OPERATIONS = [
   { name: 'span', argv: ['--span'], mutates: false, summary: '一个名字/串的**行号区间**：`--match <子串>`（或 `--regex`）' },
   { name: 'search', argv: ['--search'], mutates: false, summary: '机械检索：`--match <子串>` 找出现的**全部位置**（带行号，可 `--limit`）' },
   { name: 'cases', argv: ['--cases'], mutates: false, summary: '★ **枚举函数里的 switch / 跳转表**：`--ea <EA>` ⇒ case 数 + 每个 case 的目标（类型分派 / opcode 分派全靠它）' },
+  { name: 'pseudo', argv: ['--pseudo'], mutates: false, summary: '★ **一层工作流**：`--ea <EA>`（或 `--sym sub_XXXXXX`）⇒ 它**所属函数**的 Hex-Rays **C 体** + `.lst` 行区间（`--ea` 不是函数起点时会明说）' },
   { name: 'index', argv: ['--index'], mutates: true, summary: '建/刷新派生索引到 `.cache/`（缺省 dry-run）[--write]' },
 ];
 
@@ -409,6 +410,13 @@ export function switchTables(file, idx, ea, { maxLines = 6000, fileLines = null 
 }
 
 /** 给一个 EA，求它所在**函数的行区间**（`proc near` … `endp`；IDA 的 `; END OF FUNCTION CHUNK` 也认） */
+/**
+ * 取一个符号/EA 所在函数的**行区间**。
+ *
+ * ⚠️ **只对"函数起点"的 EA 正确**：它从 EA 那一行**向后**找第一个 `proc near`。
+ * EA 落在函数体内时，它找到的是**后一个**函数（`--at --fn` 原先就是这么用它的 ⇒ 那是错的）。
+ * ★ 要"**包含**这个 EA 的函数"（EA 在体内也算）请用 `enclosingFunction()`。
+ */
 export function spanOfFunction(file, idx, ea, { maxLines = 4000 } = {}) {
   const ctx = contextAt(file, idx, ea, { lines: maxLines });
   if (!ctx.seg) return ctx;
@@ -437,6 +445,191 @@ export function spanOfFunction(file, idx, ea, { maxLines = 4000 } = {}) {
     lines: all.slice(head, tail + 1),
     truncated: { head: head === 0, tail: tail === all.length - 1 },
   };
+}
+
+const PROC_RE = /^(\S+)\s+([A-Za-z_][\w.]{0,40})\s+proc near/;
+/** ★ 段名可以以 `.` 开头（`.text` / `.data`）—— 首字符限 `[A-Za-z_]` 会让 `.text` 整段漏掉（踩过两次） */
+const PROC_EA_RE = /^([A-Za-z_.][\w.]*):([0-9A-Fa-f]{8})\s+([A-Za-z_][\w.]{0,40})\s+proc near/;
+const ENDP_RE = /^\S+\s+([A-Za-z_][\w.]{0,40})\s+endp\b/;
+
+/**
+ * ★ **包含**这个 EA 的函数（EA 落在函数体内也算），以及它的符号名。
+ *
+ * 为什么不能拿 `spanOfFunction` 凑合：它只向后看 400 行，且从 EA 那一行起找 ——
+ * 实测 `0x40D500`（DEC 公式的锚）**不是函数起点**：它属于 `sub_40CD10`，而那个函数起点在它**前面 683 行**
+ * ⇒ 向后找只会撞上**后一个**函数，给出"看起来对、其实错"的区间。
+ *
+ * @returns {{seg, ea, fromLine, toLine, lines, symbol, symbolEa, truncated}} 或 `contextAt` 的边界提示
+ */
+export function enclosingFunction(file, idx, ea, { maxLines = 20000 } = {}) {
+  const target = parseEa(ea);
+  // 先在段表上挡掉"这个 EA 根本不在语料里"（不必读 18 MB 才发现）
+  const seg = idx.segs.find((s) => target >= s.lo && target <= s.hi);
+  if (!seg) {
+    return { seg: null, ea: target, fromLine: 0, toLine: 0, lines: [], symbol: null, symbolEa: null, truncated: { head: false, tail: false }, hint: `EA 0x${target.toString(16)} 不落在任何已索引段内（段的 EA 范围见 \`--stats\`）` };
+  }
+  const all = fs.readFileSync(file, 'utf8').split('\n');
+  // ★ **不许**用 `contextAt` 定位行：它给的是"最近的**前一个 mark**"的行，而 marks 是**稀疏**的
+  //   ⇒ 对"函数起点这个 EA"，它会落到**前一个函数体内**，再往回找就把 `sub_40CB00` 当成 `sub_40CD10`
+  //   （实测踩过：守卫 `disasm-pseudo.assets.test.mjs` 抓出来的）。
+  //   ⇒ 正确地扫一遍：取**最后一个 EA ≤ target** 的 `proc near`。
+  let head = -1;
+  for (let i = all.length - 1; i >= 0; i -= 1) {
+    const m = PROC_EA_RE.exec(all[i]);
+    if (m && Number.parseInt(m[2], 16) <= target) {
+      head = i;
+      break;
+    }
+  }
+  if (head < 0) {
+    return { seg: seg.name, ea: target, fromLine: 0, toLine: 0, lines: [], symbol: null, symbolEa: null, truncated: { head: false, tail: false }, hint: `0x${target.toString(16)} 之前没有任何 \`proc near\` ⇒ 它不在函数里` };
+  }
+  let tail = all.length - 1;
+  for (let i = head; i < all.length; i += 1) {
+    if (ENDP_RE.test(all[i])) {
+      tail = i;
+      break;
+    }
+  }
+  const m = PROC_EA_RE.exec(all[head]);
+  return {
+    seg: seg.name,
+    ea: target,
+    fromLine: head + 1,
+    toLine: tail + 1,
+    lines: all.slice(head, Math.min(tail + 1, head + maxLines)),
+    symbol: m[3],
+    symbolEa: Number.parseInt(m[2], 16),
+    truncated: { head: head > 0, tail: tail === all.length - 1 },
+  };
+}
+
+// ───────────────────────────────────────────────────── Hex-Rays 伪代码（.c）
+
+/**
+ * `.c` 里的一行**函数定义**（`int __thiscall sub_42CA50(char *this)`）。
+ * ★ 只认行首（`^[A-Za-z_]`）⇒ 缩进的**调用**（`  return sub_42CA50(a1);`）不会被当成定义。
+ */
+export const C_DEF_RE = /^[A-Za-z_][\w \t*]*?\b(sub_[0-9A-F]{6})\s*\(/;
+
+/** `.lst` → **同名的 `.c`**（Hex-Rays 伪代码）；不在场 ⇒ `null`（**调用方必须明说**，不许静默降级） */
+export function pickDecompiled(lstFile) {
+  const c = String(lstFile).replace(/\.lst$/, '.c');
+  return fs.existsSync(c) ? c : null;
+}
+
+/**
+ * 扫一遍 `.c`，建**符号 → 函数体行区间**的表。
+ *
+ * ★ **不写缓存**（与 `.lst` 的索引相反）：`.c` 只有 5 MB / 17.8 万行，扫一遍 ~0.5 s；
+ *   为它引第二份派生缓存（还要自己校验陈旧）不划算。
+ *
+ * @returns {{file:string, lines:string[], defs:Map<string,{sym:string,from:number,to:number}>, protos:Map<string,number>}}
+ */
+export function buildSymbolIndex(cFile) {
+  const lines = fs.readFileSync(cFile, 'utf8').split('\n');
+  const defs = new Map();
+  const protos = new Map();
+  let cur = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const l = lines[i];
+    const m = C_DEF_RE.exec(l);
+    if (m) {
+      if (/;\s*$/.test(l)) {
+        if (!protos.has(m[1])) protos.set(m[1], i + 1);
+        continue;
+      }
+      if (!defs.has(m[1])) {
+        cur = { sym: m[1], from: i + 1, to: null };
+        defs.set(m[1], cur);
+      }
+      continue;
+    }
+    // ★ 函数体的收尾是**第 0 列的** `}`（内层块都缩进）—— 这个判据必须钉住，否则会把
+    //   "下一个函数的结尾"当成自己的结尾，给出**看起来对、其实错**的行区间。
+    if (cur && l === '}') {
+      cur.to = i + 1;
+      cur = null;
+    }
+  }
+  for (const d of defs.values()) if (d.to === null) d.to = d.from; // 未闭合（异常导出）⇒ 只说"只有定义行"
+  return { file: cFile, lines, defs, protos };
+}
+
+/**
+ * ★ **一层工作流的机械核心**：给一个 **EA**（或符号），一路上取
+ * ① 它**所属函数**（由 `.lst` 的 `proc near`/`endp` 定）② 该函数的 **Hex-Rays C 体**（在 `.c` 里）。
+ *
+ * 为什么必须机械：`.c` **一处地址都没有**（实测 `0x00xxxxxx` 计数 = 0）⇒ 从 C 里回不到 EA；
+ * 而大量被引用的 EA **根本不是函数起点**（实测：`0x40D500` 是 `loc_40D500`，属于 `sub_40CD10` 体内的一块）
+ * ⇒ 靠人肉 grep + 猜行区间必然出错。本函数把"是不是函数起点"和"归属于哪个符号"变成**算出来的**。
+ *
+ * @param lstFile  `.lst` 路径
+ * @param idx      `--lst` 的索引
+ * @param o.sym    `sub_XXXXXX`
+ * @param o.ea     EA（与 `sym` 二选一；给了 `ea` 就顺带判定"是不是函数起点"）
+ * @param o.lines  C 体的**有界**上限（被截断必须明说）
+ */
+export function pseudoOfFunction(lstFile, idx, { sym = null, ea = null, lines = DEFAULT_MAX_LINES } = {}) {
+  let wantSym = sym;
+  let lstSpan = null;
+  let containing = null;
+  let isFunctionStart = null;
+  if (ea !== null) {
+    const eaNum = parseEa(ea);
+    // ★ 用 `enclosingFunction`（能处理"EA 在函数体内"）—— `spanOfFunction` 只对函数起点正确
+    lstSpan = enclosingFunction(lstFile, idx, eaNum);
+    containing = lstSpan.symbol ?? null;
+    if (containing && /^sub_[0-9A-F]{6}$/i.test(containing)) {
+      isFunctionStart = parseInt(containing.slice(4), 16) === eaNum;
+      if (!wantSym) wantSym = containing;
+    }
+  }
+  if (!wantSym || !/^sub_[0-9A-F]{6}$/i.test(wantSym)) {
+    throw new Error(
+      `定位不到函数符号（给的是 ${sym ? JSON.stringify(sym) : 'EA ' + ea}）—— ` +
+        'EA 不是函数起点、或它所在的那一段不是函数（取操作数原语常被内联进 handler，没有 C 体）。',
+    );
+  }
+  const fnEa = parseInt(wantSym.slice(4), 16);
+  // 给了符号（而不是 EA）时，那个符号名**本身就是函数起点** ⇒ `spanOfFunction` 这时是对的
+  if (!lstSpan) lstSpan = spanOfFunction(lstFile, idx, fnEa);
+
+  const cFile = pickDecompiled(lstFile);
+  const out = {
+    sym: wantSym,
+    fnEa,
+    isFunctionStart,
+    containing,
+    lst: { fromLine: lstSpan.fromLine, toLine: lstSpan.toLine, lines: lstSpan.toLine - lstSpan.fromLine + 1 },
+    c: null,
+    note: null,
+  };
+  if (!cFile) {
+    out.note = `语料里没有配套的 .c（只看 .lst）：${path.basename(String(lstFile).replace(/\.lst$/, '.c'))} 不在场`;
+    return out;
+  }
+  const cidx = buildSymbolIndex(cFile);
+  const def = cidx.defs.get(wantSym);
+  if (!def) {
+    out.note =
+      `★ \`${wantSym}\` 在 .c 里**没有定义**（实测 3807 个 \`proc near\` 里有 77 个如此）` +
+      '—— Hex-Rays 没反编译它。只能读 .lst（下面给了行区间）。';
+    return out;
+  }
+  const body = cidx.lines.slice(def.from - 1, Math.min(def.to, def.from - 1 + lines));
+  out.c = {
+    file: cFile,
+    fromLine: def.from,
+    toLine: def.to,
+    bodyLines: def.to - def.from + 1,
+    body,
+    truncated: body.length < def.to - def.from + 1,
+  };
+  if (isFunctionStart === false) {
+    out.note = `★ 该 EA **不是函数起点**：它属于 \`${containing}\`（函数起点 0x${containing.slice(4)}）⇒ 下面给的是**整个函数**的 C 体`;
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────── 自描述
