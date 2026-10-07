@@ -124,6 +124,13 @@ export const localPoolByTypeTag = (tag: number): LocalPoolDef | null =>
   LOCAL_POOLS.find((p) => p.typeTag === tag) ?? null;
 
 /**
+ * local 池的 type tag 集合（**从 `LOCAL_POOLS` 派生，不另写一份**）。
+ * ★ 消费方（操作数层）拿它来回答"这个 type 我认不认得" —— 而"认不认得"必须与
+ *   "池定义里有哪些"同源，否则加一个池会让两层不一起动（症状是**静默走错分支**）。
+ */
+export const localPoolTypeTags = (): number[] => LOCAL_POOLS.map((p) => p.typeTag);
+
+/**
  * 一个**帧**的 local 池视图。
  *
  * ★ 故意的两个取舍：

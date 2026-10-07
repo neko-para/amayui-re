@@ -47,6 +47,65 @@ export { MUTATIONS };
  * ★ 加新守卫时顺手加一条 —— 否则"这个守卫会红"只是个声称。
  */
 const MUTATIONS = [
+  // ── 帧机制（★ 塌了会静默：单层调用看起来正常，只在嵌套/多次调用时错开）──
+  {
+    file: 'apps/emulator/src/vm/machine.ts',
+    from: 'return v === undefined ? null : v;',
+    to: 'return v === undefined ? 0 : v;',
+    guard: 'tools/test/emulator-frames.test.mjs',
+    what: '`ret` 空栈返回 0 而不是 `null` ⇒ 空栈变成"返回到第 0 条"（引擎是直接 retn、什么都不做）',
+  },
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: 'const next = ctx.frame.ip + 1; // ★ 引擎压的 `序号+3`（3 = call 的 dword 数）换算成下标就是 ip+1',
+    to: 'const next = ctx.frame.ip; // MUTANT',
+    guard: 'tools/test/emulator-frames.test.mjs',
+    what: '`call` 压错返回点（压调用点本身而不是它的下一条）⇒ 每次返回都重执行调用指令 = 死循环',
+  },
+  // ── 地址空间与随机源（★ 这两样塌了，"指针能解引用"与"同种子同日志"都会变成假象）──
+  {
+    file: 'apps/emulator/src/model/address-space.ts',
+    from: 'return this.base + this.elemBytes * index;',
+    to: 'return this.base + this.elemBytes * (index + 1);',
+    guard: 'tools/test/emulator-address-space.test.mjs',
+    what: '`base + elemBytes*index` 整体偏移一格 —— 数组遍历会读到相邻的池（类型对、值错）',
+  },
+  {
+    file: 'apps/emulator/src/model/address-space.ts',
+    from: 'if (snap.baseCursor < end) {',
+    to: 'if (false) {',
+    guard: 'tools/test/emulator-address-space.test.mjs',
+    what: '恢复时不再拒绝"baseCursor 落在已有区域里" ⇒ 恢复后重发地址 = 两块数据别名',
+  },
+  {
+    file: 'apps/emulator/src/host/random.ts',
+    from: 'this.state = (this.state + 0x6d2b79f5) >>> 0;',
+    to: 'this.state = (this.state + 0x6d2b79f6) >>> 0;',
+    guard: 'tools/test/emulator-address-space.test.mjs',
+    what: 'PRNG 的推进常数改一位 ⇒ 序列变了（守卫里逐值钉死了种子 1 的前三个数）',
+  },
+  // ── headless 前端（宿主层 / 操作数 / 场景）★ 这三条守的都是"静默"型坏结果 ──
+  {
+    file: 'apps/emulator/src/host/fs.ts',
+    from: "if (s === '..')",
+    to: "if (s === '..\\u0000')",
+    guard: 'tools/test/emulator-host.test.mjs',
+    what: '名字归一化里的 `..` 拒绝失效 —— 引擎侧的名字就能逃出根（而**不会报错**）',
+  },
+  {
+    file: 'apps/emulator/src/vm/operand.ts',
+    from: 'export const POINTER_OPERAND_TYPES: readonly number[] = [0x6, 0x7, 0x8, 0xc, 0xd, 0xe];',
+    to: 'export const POINTER_OPERAND_TYPES: readonly number[] = [0x6, 0x7, 0x8, 0xc, 0xd];',
+    guard: 'tools/test/emulator-host.test.mjs',
+    what: '指针族少一个 type（0xe）—— 于是它会被当普通池读：**类型对、值错，且不报错**',
+  },
+  {
+    file: 'apps/emulator/src/model/scene.ts',
+    from: 'if (it) { it.workingArgb = w.window.toArgb >>> 0; it.window = null; }',
+    to: 'if (it) { it.workingArgb = w.window.fromArgb >>> 0; it.window = null; }',
+    guard: 'tools/test/emulator-host.test.mjs',
+    what: '计时窗跑完时把工作色提交成 **FROM**（而不是 TO）—— 画面上是"淡入淡出永远停在起点"',
+  },
   {
     file: 'packages/age-format/src/asm/value-codec.mts',
     from: 'rol32(x >>> 0, 11)', to: 'rol32(x >>> 0, 12)',

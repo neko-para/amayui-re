@@ -1,0 +1,37 @@
+{
+  // apps/emulator/tsconfig.frontends.json —— 前端（**允许用 Node**）的类型工程
+  //
+  // ★ 为什么要有第二个工程：`apps/emulator/tsconfig.json` 里那一行 `"types": []`
+  //   就是"核心不许碰 Node"的守卫本身。而前端（`frontends/`）**恰恰相反** ——
+  //   它的全部职责就是"把 node:fs 接上核心定义的接口"。
+  //   ⇒ 两者不能共用一份 tsconfig：要么核心的守卫失效，要么前端写不了 `node:fs`。
+  //
+  // ★ 与 `packages/age-format` 的分工是同一个形状：那份 tsconfig 给工具侧 `@types/node`，
+  //   而 `apps/emulator/tsconfig.json` 给核心 `types: []`。
+  //
+  // ★ 本工程 `include` 只有 `frontends/**`，但通过 import 会把 `src/**` 一起拉进来检查 ——
+  //   这是**有意的**：核心不允许依赖 Node，而"核心 + 前端"合起来必须自洽。
+  //   核心的守卫不受影响：`tsconfig.json` 仍然只带 `src/**` 且 `types: []`。
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "WebWorker"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["frontends/**/*.ts"]
+}

@@ -16,8 +16,9 @@
     "test:all": "node tools/test-run.mjs --all",
     "test:list": "node tools/test-run.mjs --list",
     "tools": "node tools/cli.mjs",
+    "emulator": "node apps/emulator/frontends/headless/main.ts",
     "test:mutation": "node tools/mutate-check.mjs",
-    "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit"
+    "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit"
   },
   "pnpm": {
     "overrides": {

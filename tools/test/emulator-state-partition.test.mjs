@@ -28,20 +28,64 @@ import assert from 'node:assert/strict';
 
 import * as poolsModule from '../../apps/emulator/src/model/pools.ts';
 import { GLOBAL_POOL_NAMES, GlobalPools, LOCAL_POOLS, LocalPools, STATE_PARTITION } from '../../apps/emulator/src/model/pools.ts';
+import * as machineModule from '../../apps/emulator/src/vm/machine.ts';
+import { Machine, ScriptFrame, STATE_PARTITION as VM_STATE_PARTITION } from '../../apps/emulator/src/vm/machine.ts';
+import * as addressSpaceModule from '../../apps/emulator/src/model/address-space.ts';
+import { AddressSpace, Region, STATE_PARTITION as ADDRESS_STATE_PARTITION } from '../../apps/emulator/src/model/address-space.ts';
+import * as randomModule from '../../apps/emulator/src/host/random.ts';
+import { SeededRandom, STATE_PARTITION as RANDOM_STATE_PARTITION } from '../../apps/emulator/src/host/random.ts';
+import { Instance } from '../../apps/emulator/src/host/instance.ts';
+import { resolveEnvironment } from '../../apps/emulator/src/host/environment.ts';
+import { LayeredFilesystem, MemoryStore } from '../../apps/emulator/src/host/fs.ts';
+import { EffectLog } from '../../apps/emulator/src/host/effects.ts';
+import { VirtualClock } from '../../apps/emulator/src/host/clock.ts';
+import { MemoryConfig } from '../../apps/emulator/src/host/config.ts';
 
 /** 类别的**闭集合**（与 `pools.ts` 的 `StateClass` 一致；改了这里就要改那里，反之亦然） */
 const STATE_CLASSES = ['engine', 'derived', 'diagnostic', 'host'];
 
-/** 被分区的类（**新加一个带状态的类就要加进这张表** —— 否则它的字段没人管） */
+/**
+ * ★ **四个模块**各有一张 `STATE_PARTITION`（分区表是「按类名 → 字段 → 类别」，
+ *   而类分散在四个域里：池模型 / 执行核心 / 地址空间 / 随机源）。守卫对每个模块各跑一遍同样的 5 条。
+ * ★ 新加一个**持有引擎态**的类 ⇒ 在这里加一条 `[类名, 造一个实例, 模块]`。
+ *   不持有引擎态的宿主服务（文件系统 / 日志 / 时钟 / 配置 / 实例）**不在**这张表里 ——
+ *   它们全是注入的服务类（快照一个服务没有意义），见 `host/instance.ts` 的头注。
+ */
+const MODULES = [
+  { path: 'model/pools.ts', mod: poolsModule, table: STATE_PARTITION },
+  { path: 'vm/machine.ts', mod: machineModule, table: VM_STATE_PARTITION },
+  { path: 'model/address-space.ts', mod: addressSpaceModule, table: ADDRESS_STATE_PARTITION },
+  { path: 'host/random.ts', mod: randomModule, table: RANDOM_STATE_PARTITION },
+];
+
+/** 造一个能跑的最小实例（只为拿到一个 `Machine`；不读盘、不碰语料） */
+function makeMachine() {
+  const { env } = resolveEnvironment({
+    instanceId: 'partition',
+    installRoot: { label: 'x', identity: 'x' },
+    userRoot: { label: 'y', identity: 'y' },
+  });
+  const fsys = new LayeredFilesystem({ label: 'x', sources: [new MemoryStore('src', 'x')], writable: new MemoryStore('w', 'y') });
+  return new Machine(new Instance({ env, fs: fsys, effects: new EffectLog(), clock: new VirtualClock(0), config: new MemoryConfig() }));
+}
+
+/** 被分区的类（新加一个带状态的类就要加进这张表 —— 否则它的字段没人管） */
 const PARTITIONED = [
   ['LocalPools', () => new LocalPools(0xdeadbeef)],
   ['GlobalPools', () => new GlobalPools(0xdeadbeef)],
+  ['Machine', () => makeMachine()],
+  ['ScriptFrame', () => new ScriptFrame('LOGO.BIN', 0, 0)],
+  ['AddressSpace', () => new AddressSpace()],
+  ['Region', () => new Region('probe', 0, 4, 1)],
+  // ★ `SeededRandom` 是**宿主服务却持有引擎态**（随机状态决定后续序列）⇒ 它必须表态。
+  //   这正是这张表存在的意义：不然"随机源的状态没进快照"会表现成"恢复后随机序列从头来"。
+  ['SeededRandom', () => new SeededRandom(0)],
 ];
 
 test('★ 每个自有字段都必须归类，表里也不许有过期条目（两边逐一对齐）', () => {
   for (const [cls, make] of PARTITIONED) {
-    const declared = STATE_PARTITION[cls];
-    assert.ok(declared, `\`STATE_PARTITION\` 里没有 ${cls} —— 它的状态字段因此没人管`);
+    const declared = MODULES.map((m) => m.table[cls]).find(Boolean);
+    assert.ok(declared, `两张 \`STATE_PARTITION\` 里都没有 ${cls} —— 它的状态字段因此没人管`);
     const own = Object.keys(make());
     const unclassified = own.filter((p) => !(p in declared));
     assert.deepEqual(unclassified, [], `★ ${cls} 这些字段没归类（新增状态必须表态：engine/derived/diagnostic/host）：${unclassified.join(' / ')}`);
@@ -52,20 +96,25 @@ test('★ 每个自有字段都必须归类，表里也不许有过期条目（�
 
 test('★ 类别必须在闭集合里，而且表里点名的类必须真的存在', () => {
   const bad = [];
-  for (const [cls, decl] of Object.entries(STATE_PARTITION)) {
-    for (const [field, kind] of Object.entries(decl)) {
-      if (!STATE_CLASSES.includes(kind)) bad.push(`${cls}.${field} = ${JSON.stringify(kind)}`);
+  for (const { table } of MODULES) {
+    for (const [cls, decl] of Object.entries(table)) {
+      for (const [field, kind] of Object.entries(decl)) {
+        if (!STATE_CLASSES.includes(kind)) bad.push(`${cls}.${field} = ${JSON.stringify(kind)}`);
+      }
     }
   }
   assert.deepEqual(bad, [], `类别非法（闭集合 ${STATE_CLASSES.join(' / ')}）：${bad.join(' / ')}`);
-  // 反射导出：点名了一个不存在的类 ⇒ 表已经过期
-  const ghost = Object.keys(STATE_PARTITION).filter((cls) => typeof poolsModule[cls] !== 'function');
-  assert.deepEqual(ghost, [], `分区表点名的类在本模块里不是类（改名/删掉了？）：${ghost.join(' / ')}`);
+  // 反射导出：点名了一个不存在的类 ⇒ 表已经过期（**按各表自己的模块**核，不许跨模块借名）
+  const ghost = [];
+  for (const { path, mod, table } of MODULES) {
+    for (const cls of Object.keys(table)) if (typeof mod[cls] !== 'function') ghost.push(`${path}: ${cls}`);
+  }
+  assert.deepEqual(ghost, [], `分区表点名的类在它自己的模块里不是类（改名/删掉了/表放错了模块？）：${ghost.join(' / ')}`);
 });
 
 test('★ `engine` 类的字段**恰好**就是快照的顶层键（把"进不进快照"变成等式）', () => {
   for (const [cls, make] of PARTITIONED) {
-    const decl = STATE_PARTITION[cls];
+    const decl = MODULES.map((m) => m.table[cls]).find(Boolean);
     const engineFields = Object.entries(decl).filter(([, k]) => k === 'engine').map(([f]) => f).sort();
     const snapKeys = Object.keys(make().snapshot()).sort();
     assert.deepEqual(
@@ -79,7 +128,7 @@ test('★ `engine` 类的字段**恰好**就是快照的顶层键（把"进不�
 
 test('★ `diagnostic` 类的字段不得进快照（`oob` 是样本：它随执行步数涨，但不是引擎态）', () => {
   for (const [cls, make] of PARTITIONED) {
-    const decl = STATE_PARTITION[cls];
+    const decl = MODULES.map((m) => m.table[cls]).find(Boolean);
     const diag = Object.entries(decl).filter(([, k]) => k === 'diagnostic').map(([f]) => f);
     const snapKeys = Object.keys(make().snapshot());
     for (const f of diag) {

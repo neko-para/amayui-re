@@ -1,0 +1,99 @@
+/**
+ * apps/emulator/src/vm/script.ts —— **装载一份脚本**（★ 核心层：零 Node 依赖）
+ *
+ * ## 它做什么
+ * 把一份脚本的字节变成"可以执行的东西"：头 + 切好边界的指令序列 + **字节偏移 → 指令下标**的映射。
+ *
+ * ★ 它**不解释**任何语义（那是 handler 的事），也**不读文件**（字节由宿主给）。
+ *   切边界那件事已经由 `src/model/iterate.ts` 做了 —— 本模块只在它之上补两样执行期需要的东西：
+ *
+ * 1. **字节偏移 → 指令下标**：控制流的 label 是**绝对字节偏移**
+ *    （`headerLen + raw_data*4`），而执行是按"第几条指令"推进的。两者的换算只该有一处。
+ * 2. **装载期的记账**：池初值、脚本名。★ 这些**不是**可选的收尾工作：
+ *    引擎在装载时就给 local 池填了初值（`ENC(key,0)`），**不是 0** ——
+ *    "未初始化 = 0" 是错的，而错了以后症状是"某个初值相关的分支偶尔走错"。
+ *
+ * ## ★ 本批的诚实缺口（登记在需求树里，不在这里糊过去）
+ * * **local 池的初值数量**：头部那 6 个 `local_*` 数各自喂给哪个池，
+ *   是**装载器**的观察（`.text:00405693..004056AB` 那一族写基址的代码附近），本批没有取证。
+ *   ⇒ 本模块**不猜**：`initLocalPools` 只按调用方显式给的计数初始化，缺省**一个都不初始化**，
+ *     并把"这次没初始化"记进 `notes`（于是"读到 null"能被解释，而不是看起来像数据坏了）。
+ * * **字符串操作数**（`type 2`）：要码页解码器（`asm/codec.mts`，不在运行期子集里）。
+ *   LOGO.BIN 到 `play-movie` 为止**一个字符串操作数都没有** ⇒ 本批不接，遇到就响亮失败。
+ */
+
+import { iterate } from '../model/iterate.ts';
+import type { Instr, IterateResult } from '../model/iterate.ts';
+import type { ByteSource, Header, OpcodeTable } from '@amayui/age-format/src/asm/runtime.mts';
+
+/** 一份装载好的脚本（执行期的全部静态信息） */
+export interface LoadedScript {
+  /** 引擎侧的名字（`LOGO.BIN` 这类） */
+  name: string;
+  bytes: ByteSource;
+  header: Header;
+  /** 头部长度（label 换算要用） */
+  headerLen: number;
+  instructions: Instr[];
+  /** **字节偏移 → 指令下标**（label 是绝对字节偏移，执行按下标推进） */
+  indexByByteOffset: Map<number, number>;
+  /** 装载期的说明（缺口、可疑结构）—— 必须能看见，不许静默 */
+  notes: string[];
+}
+
+/** 装载的选项 */
+export interface LoadScriptOptions {
+  /** 指令表（核心用 `asm/runtime.mts` 自带的 `OPCODE_TABLE`） */
+  table: OpcodeTable;
+  /** 遇到结构问题是否立刻停（缺省 true：宁可响亮失败，也不要在错位的指令流上跑下去） */
+  strict?: boolean;
+}
+
+/**
+ * 装载一份脚本。
+ *
+ * ★ `strict` 缺省 **true**：切边界一旦错位，后面每条指令都是垃圾，而"在垃圾上继续跑"
+ *   会产出**看起来正常**的日志（只是全错）。⇒ 结构问题必须在这里就停。
+ */
+export function loadScript(name: string, bytes: ByteSource, opts: LoadScriptOptions): LoadedScript {
+  const iter: IterateResult = iterate(bytes, { table: opts.table, strict: opts.strict ?? true });
+  const notes: string[] = [];
+  for (const p of iter.problems) notes.push(`+0x${p.byteOffset.toString(16)} ${p.kind}: ${p.message}`);
+  if (iter.problems.length && (opts.strict ?? true)) {
+    throw new Error(`脚本 ${name} 的结构问题使指令边界不可信（${iter.problems.length} 条），拒绝装载：${notes[0]}`);
+  }
+  const indexByByteOffset = new Map<number, number>();
+  for (const ins of iter.instructions) indexByByteOffset.set(ins.byteOffset, ins.index);
+  return {
+    name,
+    bytes,
+    header: iter.header,
+    headerLen: iter.headerLen,
+    instructions: iter.instructions,
+    indexByByteOffset,
+    notes,
+  };
+}
+
+/** label（绝对字节偏移）→ 指令下标；找不到 ⇒ `null`（**不抛**：调用方要能报"跳到了一条指令中间"） */
+export function instructionIndexAt(script: LoadedScript, byteOffset: number): number | null {
+  const i = script.indexByByteOffset.get(byteOffset);
+  return i === undefined ? null : i;
+}
+
+/** label 操作数（`raw_data`）→ 绝对字节偏移（**唯一**一处换算） */
+export function labelByteOffsetOf(script: LoadedScript, rawData: number): number {
+  return script.headerLen + ((rawData >>> 0) << 2);
+}
+
+/** 头的 `local_vars` 六个数（**按头里的字段顺序**，不做"哪个数喂哪个池"的猜测） */
+export function localVarCounts(header: Header): {
+  localInteger1: number; localFloats: number; localStrings1: number;
+  localInteger2: number; unknownData: number; localStrings2: number;
+} {
+  const f = header.fields;
+  return {
+    localInteger1: f.local_integer_1, localFloats: f.local_floats, localStrings1: f.local_strings_1,
+    localInteger2: f.local_integer_2, unknownData: f.unknown_data, localStrings2: f.local_strings_2,
+  };
+}

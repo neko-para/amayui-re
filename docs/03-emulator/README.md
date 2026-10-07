@@ -23,8 +23,11 @@
 
 * **`apps/emulator` 已进 workspaces**（判据 = "有没有自己的依赖"：它的模型 `import @amayui/age-format`）⇒
   必须有 `apps/emulator/package.json`，跨包引用走包名（口径见 `AGENTS.md` §3）；
-* **实现按层落地**：**语义层** = `apps/emulator/src/model/`（它**不含执行核心** ⇒ 只靠它模拟器启动不了）；
-  **表现层与窗口** = M4-2。
+* **实现按层落地**（★ 落点地图，不含进度）：
+  **平台无关核心** = `apps/emulator/src/`（`model/` 语义模型 · `host/` 宿主抽象 · `vm/` 执行核心）
+  —— 整个 `src/` **零 Node 依赖**，由那份 tsconfig 的 `"types": []` 机械强制；
+  **前端** = `apps/emulator/frontends/`（headless 先落地；渲染器 / Electron / 浏览器壳在 M4-2）
+  —— 前端**允许**用 Node，因此它有**自己的一份 tsconfig**（见 `AGENTS.md` §3）。
   ★ **哪一层到哪一步不写在这里**：看 `apps/emulator/README.md` §1 与 `pnpm tools requirements plan`（`AGENTS.md` §10）。
 
 ## 3. 语言与工具链口径
