@@ -187,12 +187,16 @@ export class LocalPools {
     this.regions = new Map();
     if (this.space) {
       for (const def of LOCAL_POOLS) {
-        if (!MIGRATED_TO_REGION(def)) continue;
-        // ★ 容量**初值 0**（决策 REQ-01M4B969TBWVERFCB1MXS2Q2E1：不编常数，按需增长）
+        // ★★ **每个池都进地址空间**（都发地址）—— 连 string 也要，因为 `0xe`（local string-ptr）
+        //    在语料里**真的在用**（104 份脚本计 1446 次）：解引用它必须能把地址定位到一个字符串元素。
+        //    区域步长用**池自己的** `elemBytes`（string 是 **28**，与引擎一致，`base + 28*idx` 才对得上）。
         const r = this.space.alloc({ tag: `local:${def.name}`, elemBytes: def.elemBytes, capacity: 0 });
         this.regions.set(def.name, r);
+        // ★ 但**只有 data-in-region 的族**才把数据搬进区域：
+        //   string 族按用户裁决是**不透明的 JS 字符串**（数据留在 Map，区域只负责"发地址"）。
+        if (!DATA_IN_REGION(def)) continue;
         // ★ 把（可能来自快照的）Map 里的值**搬进区域**，搬完清空 ⇒ 数据只有一份。
-        //   ★ float 族**必须过 `valueToCell`**：快照/Map 里存的是**数值**，而区域里要的是**位模式**
+        //   ★ float 族**必须过 `snapshotToCell`**：快照/Map 里存的是**数值**，而区域里要的是**位模式**
         //     （直接把数值写成 u32 会得到 1.5 → 1 —— 守卫当场抓到过）。
         const src = this.pools.get(def.name)!;
         for (const [idx, value] of src) {
@@ -209,7 +213,9 @@ export class LocalPools {
     const def = localPoolByTypeTag(tag);
     if (!def) throw new Error(`不是 local 池的 operand type：${tag}`);
     const reg = this.regions.get(def.name);
-    if (reg) {
+    // ★ `DATA_IN_REGION` 而不是"有没有区域"：string 族**有区域（发地址）但数据在 Map** ——
+    //   按裁决字符串元素是**不透明的 JS 字符串**，区域里没有任何字符串数据。
+    if (reg && DATA_IN_REGION(def)) {
       // ★ 读也要按需增长：局部池的容量来自脚本头，而**这份实例的头部计数可能没被喂进来**
       //   ⇒ 与其"编一个容量"或"悄悄返回 null"，不如**显式增长并留痕**（每次都会进副作用日志）。
       this.space!.ensureCapacity(reg, idx, `${def.name} 池：读第 ${idx} 格`);
@@ -229,13 +235,16 @@ export class LocalPools {
     const def = localPoolByTypeTag(tag);
     if (!def) throw new Error(`不是 local 池的 operand type：${tag}`);
     const reg = this.regions.get(def.name);
-    if (reg) {
+    if (reg && DATA_IN_REGION(def)) {
       // ★ 区域路径：格内容 = **位模式**（float 族要过 `bitsFromFloat`，走 `valueToCell` 的统一口径）
       const bits = valueToCell(def, value, this.key);
       this.space!.ensureCapacity(reg, idx, `${def.name} 池：写第 ${idx} 格`);
       this.space!.writeU32(reg.addressOf(idx), bits);
       return bits;
     }
+    // ★ string 族（不透明）：数据进 Map，**但区域要长大** —— 否则 `addressOf(idx)` 落在容量外，
+    //   `0xe` 解引用时会响亮失败（"地址不落在任何区域里"）。这里增长的是**地址窗口**，不是数据。
+    if (reg) this.space!.ensureCapacity(reg, idx, `${def.name} 池：写第 ${idx} 格（只为让它的地址有效）`);
     // ★ Map 路径（迁移中途的兼容路径）：口径与迁移前**逐字一致** —— 编码族存位模式，其余存**值本身**
     //   （float 族在这里存的是 JS 数值；两条路"格内容"本就不同，换算只在区域路径做 —— 这一点由
     //    "两种存储的快照必须逐值相同"那条守卫钉住）
@@ -455,14 +464,18 @@ function sortedPairs<V>(m: Map<number, V>): [number, V][] {
  *   ⇒ 它们要额外的编码步骤，**留到后面**（需求树里点名了）。
  */
 /**
- * 哪些池**已经迁到区域**：`int` 与 `float` 两族（都是 4 字节格）。
+ * 哪些池的**数据真的存在区域里**（格内容 = 4 字节位模式）：`int` 与 `float` 两族。
  *
  * ★ 判据是"**格内容就是一个 4 字节位模式**"：
  *   * `int` / `ptr` / `stringPtr`：格内容 = 编码后的位模式（或原始地址）；
  *   * `float` / `floatPtr`：格内容 = **float32 位模式**（`fstp dword ptr` 取证）。
- * ⛔ 只剩 **`string`（28 字节）**没迁 —— 它要 SSO 那块（见需求树 `REQ-01M4BEHCHZE5QDHCNTA77V8ZJG`）。
+ * ★★ **`string` 族不在其中** —— 按用户裁决，字符串元素是**不透明的 JS 字符串**（数据留在 Map）。
+ *   但它**仍有区域**：那是为了**发地址**（`0xe` local string-ptr 在语料里用了 1446 次，
+ *   解引用必须能把地址定位到一个字符串元素）。⇒ 判据见决策 `REQ-01M4E07ZQ9S7EBA1SK0PREPY4E`。
+ *   ⛔ 不许把 JS 字符串编进 28 字节格：那样"格内容"与真机不同，而任何按字节读这一格的地方
+ *   （`copy-local-array`、`fill-zero`）都会得到"看起来正常"的错值。
  */
-const MIGRATED_TO_REGION = (def: localPoolDefShape): boolean => (def.kind === 'int' || def.kind === 'float') && def.elemBytes === 4;
+const DATA_IN_REGION = (def: localPoolDefShape): boolean => (def.kind === 'int' || def.kind === 'float') && def.elemBytes === 4;
 
 /**
  * **格内容 → 快照里的值**。
@@ -510,8 +523,10 @@ function bitsFromCell(bytes: Uint8Array): number {
 }
 
 /**
- * 规范化的池快照：**迁到区域的池从区域取**，其余从 `Map` 取 —— 两边给出的是**同一种数据**
- * （`[下标, 位模式][]`），所以快照格式、分区表、恢复路径都不必改。
+ * 规范化的池快照：**数据在区域里的池从区域取**，其余从 `Map` 取 —— 两边给出的是**同一种数据**
+ * （`[下标, 位模式][]` / `[下标, 字符串]`），所以快照格式、分区表、恢复路径都不必改。
+ * ★ 判据是 `DATA_IN_REGION`（**数据在哪**），不是"有没有区域"：string 族有区域（发地址）但数据在 Map
+ *   —— 按"有没有区域"分流会让字符串池的快照**丢掉全部字符串**（区域里没有它们的数据）。
  */
 function canonicalPools(
   pools: Map<string, Map<number, SlotValue>>,
@@ -520,10 +535,11 @@ function canonicalPools(
 ): [string, [number, SlotValue][]][] {
   return [...pools.keys()].sort().map((n) => {
     const reg = regions?.get(n);
-    if (!reg) return [n, sortedPairs(pools.get(n)!)] as [string, [number, SlotValue][]];
-    // ★ 快照里的值必须是**换算后**的值（float 族尤其：格内容 = 位模式，快照要的是数值）
-    //   ⇒ 与 `read()` 走同一条换算（`cellToValue`），否则两条路会分叉 —— 那正是 ADR 那条判据要防的。
     const def = meta.kindOf(n);
+    // ★ 判据是 `DATA_IN_REGION`（**数据在哪**），不是"有没有区域" ——
+    //   string 族有区域（发地址）但数据在 Map，按"有没有区域"分流会让它**丢掉全部字符串**。
+    if (!reg || !DATA_IN_REGION({ ...def, elemBytes: reg?.elemBytes ?? 4 })) return [n, sortedPairs(pools.get(n)!)] as [string, [number, SlotValue][]];
+    // ★ 快照里的值必须是**换算后**的值（float 族尤其：格内容 = 位模式，快照要的是数值）
     const cells: [number, SlotValue][] = [];
     for (const [offset, bytes] of reg.cells) {
       cells.push([offset / reg.elemBytes, cellToSnapshot(def, bitsFromCell(bytes))]);

@@ -47,6 +47,14 @@ export { MUTATIONS };
  * ★ 加新守卫时顺手加一条 —— 否则"这个守卫会红"只是个声称。
  */
 const MUTATIONS = [
+  // ── 字符串指针的定位（★ 步长必须是 28：用 4 会静默定位到**另一个元素**）──
+  {
+    file: 'apps/emulator/src/vm/operand.ts',
+    from: '  const idx = off / hit.elemBytes;',
+    to: '  const idx = off / 4;',
+    guard: 'tools/test/emulator-host.test.mjs',
+    what: '字符串元素的定位用 4 字节步长（应当是 28）⇒ 静默定位到别的元素，而"读到了一个字符串"看起来很正常',
+  },
   // ── float 族迁区域：格内容 = **位模式**，读的时候必须换算回数值 ──
   {
     file: 'apps/emulator/src/model/pools.ts',

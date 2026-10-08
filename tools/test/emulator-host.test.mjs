@@ -281,8 +281,23 @@ test('★ 指针族 type **必须抛**（当普通池读会"类型对、值错"�
   assert.equal(locals.pools.get('ptr').size, 0, 'ptr 池已迁区域 ⇒ Map 为空');
   assert.equal(space.readU32(locals.regionOf(0xc).addressOf(0)), target, '指针格里存的就是地址本身');
 
-  // ★ 剩下的四支（7/8/0xd/0xe）**仍然抛** —— 它们要 4 字节浮点 / 28 字节字符串那块
-  for (const t of POINTER_OPERAND_TYPES.filter((x) => x !== 0x6 && x !== 0xc)) {
+  // ★★ 字符串指针（`0xe` 局部 / `0x8` 全局）也已实现：按用户裁决字符串是**不透明元素**，
+  //    地址只用来**定位元素**（`idx = (addr − 基址)/28`）—— 见决策 `REQ-01M4E07ZQ9S7EBA1SK0PREPY4E`。
+  locals.write(11, 2, 'こんにちは');                      // 局部字符串池第 2 格
+  const strAddr = locals.regionOf(11).addressOf(2);        // 它的地址（步长 28）
+  writeOperand(ctx, { type: 0xe, rawData: 1 }, 0, strAddr);
+  assert.equal(space.readU32(locals.regionOf(0xe).addressOf(1)), strAddr, '字符串指针格里存的是地址');
+  assert.equal(readOperand(ctx, { type: 0xe, rawData: 1 }, 0).value, 'こんにちは',
+    '★ 读字符串指针 = 取地址 → 定位字符串元素 → 那个 JS 字符串');
+  // ⛔ 指向非字符串区域 ⇒ 抛（不许"顺手当成一个字符串"）
+  writeOperand(ctx, { type: 0xe, rawData: 1 }, 0, locals.regionOf(9).addressOf(4));
+  assert.throws(() => readOperand(ctx, { type: 0xe, rawData: 1 }, 0), /不是字符串元素/, '指向 int 池 ⇒ 抛');
+  // ⛔ 没对齐到 28 字节边界 ⇒ 抛
+  writeOperand(ctx, { type: 0xe, rawData: 1 }, 0, locals.regionOf(11).addressOf(2) + 3);
+  assert.throws(() => readOperand(ctx, { type: 0xe, rawData: 1 }, 0), /没对齐/, '未对齐 ⇒ 抛');
+
+  // ★ 剩下的两支（0x7 / 0xd：**浮点指针**）**仍然抛** —— 语料里一次都没出现（104 份脚本实测）
+  for (const t of POINTER_OPERAND_TYPES.filter((x) => x !== 0x6 && x !== 0xc && x !== 0x8 && x !== 0xe)) {
     assert.throws(() => readOperand(ctx, { type: t, rawData: 0 }, 0), /需要\*\*地址空间\*\*才能实现/, `type 0x${t.toString(16)} 读应当抛`);
     assert.throws(() => writeOperand(ctx, { type: t, rawData: 0 }, 0, 1), /需要\*\*地址空间\*\*才能实现/, `type 0x${t.toString(16)} 写应当抛`);
   }

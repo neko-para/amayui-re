@@ -149,6 +149,16 @@ export function readOperand(ctx: OperandContext, arg: InstrArg, index: number): 
   //     rol 0Bh / xor [5EC8Ch] / ror 19h   ; ★ DEC 作用于**解引用出来的** dword
   //   ```
   //   ⇒ 读 = 取地址 → 解引用 → DEC。（对照 case 9 的 int：取格后**直接** DEC ⇒ 见 `LOCAL_POOLS` 的 `encoded` 订正。）
+  // ★★ 字符串指针族（`0x8` 全局 / `0xe` 局部）：取格（地址）→ **定位字符串元素** → 返回那个 JS 字符串。
+  //   实测：`0xe` 在 104 份脚本里出现 **1446** 次（`0x8` 一次都没有 ⇒ 一起实现，代价为零）。
+  //   逐字对照（`sub_41BF50` 的 case 14）：取格 → 解引用 → 按 **28 字节**格取文本。
+  if (type === 0x8 || type === 0xe) {
+    const isLocal = type === 0xe;
+    const addr = (isLocal ? ctx.locals.read(type, raw) : ctx.globals.read('stringRef', raw)) as number | null;
+    const where = `字符串指针 type 0x${type.toString(16)} 第 ${raw} 格`;
+    return { value: stringElementAt(ctx, (addr ?? 0) >>> 0, where), kind: 'pointer.string', where };
+  }
+
   if (type === 0x6 || type === 0xc) {
     const isLocal = type === 0xc;
     const addr = (isLocal ? ctx.locals.read(type, raw) : ctx.globals.read('intRef', raw)) as number | null;
@@ -198,6 +208,14 @@ export function writeOperand(ctx: OperandContext, arg: InstrArg, index: number, 
       `操作数 #${index} 是立即数（type ${type}），**不是 lvalue**（引擎的取址原语只覆盖 3..14，遇到立即数抛类型异常）—— ` +
       `值 ${JSON.stringify(value)} 无处可写`,
     );
+  }
+
+  if (type === 0x8 || type === 0xe) {
+    // ★ 字符串指针格也存**地址本身**（`stringPtr` 池 `encoded: false`）
+    if (typeof value !== 'number') throw new Error(`操作数 #${index} 是字符串指针格，只能写地址（收了 ${JSON.stringify(value)}）`);
+    if (type === 0xe) ctx.locals.write(type, raw, value >>> 0);
+    else ctx.globals.write('stringRef', raw, value >>> 0);
+    return;
   }
 
   if (type === 0x6 || type === 0xc) {
@@ -267,6 +285,32 @@ export function addressOfOperand(ctx: OperandContext, arg: InstrArg, index: numb
   const def = localPoolByTypeTag(type);
   if (def) return ctx.locals.regionOf(type).addressOf(raw);
   throw new Error(`操作数 #${index} 的 type 0x${type.toString(16)} 不能取址（引擎的取址原语只覆盖 3..14）`);
+}
+
+/**
+ * 地址 → **字符串元素**（字符串指针的解引用）。
+ *
+ * ★ 按用户裁决（决策 `REQ-01M4E07ZQ9S7EBA1SK0PREPY4E`）：字符串元素是**不透明的 JS 字符串**，
+ *   不模拟 28 字节 `std::string`。地址在这个池上只用来**定位元素**：
+ *   `idx = (addr − 区域基址) / 28`（28 = 引擎的元素步长，不是随便取的）。
+ * ⛔ 指针指向的若不是**字符串池**的区域 ⇒ 抛（不许"顺手当成一个字符串"）。
+ * ⛔ 没对齐 ⇒ 抛（`sub_41BF50` 的 case 14 也是按 28 字节格取的）。
+ */
+function stringElementAt(ctx: OperandContext, addr: number, where: string): SlotValue | null {
+  const hit = ctx.space.regionByWindow(addr);
+  if (!hit) throw new Error(`${where}：地址 0x${addr.toString(16)} 不落在任何区域窗口里`);
+  if (hit.tag !== 'local:string' && hit.tag !== 'global:string') {
+    throw new Error(
+      `${where}：地址 0x${addr.toString(16)} 指向区域 \`${hit.tag}\` —— **不是字符串元素**` +
+      `（字符串指针只能指向字符串池；字符串按裁决是不透明元素）`,
+    );
+  }
+  const off = addr - hit.base;
+  if (off % hit.elemBytes !== 0) {
+    throw new Error(`${where}：地址 0x${addr.toString(16)} 没对齐到字符串元素边界（步长 ${hit.elemBytes}）`);
+  }
+  const idx = off / hit.elemBytes;
+  return hit.tag === 'local:string' ? ctx.locals.read(11, idx) : ctx.globals.read('string', idx);
 }
 
 /** 浮点族的操作数 type（"浮点 → 文本"的格式**未取证** ⇒ 文本路遇到它们要抛） */

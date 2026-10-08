@@ -22,7 +22,7 @@ import { AddressSpace, REGION_STRIDE } from '../../apps/emulator/src/model/addre
 import { encInt } from '@amayui/age-format/src/asm/value-codec.mts';
 import { bitsFromFloat } from '../../apps/emulator/src/model/float-bits.ts';
 import { HANDLERS } from '../../apps/emulator/src/vm/ops.ts';
-import { readOperand } from '../../apps/emulator/src/vm/operand.ts';
+import { readOperand, writeOperand } from '../../apps/emulator/src/vm/operand.ts';
 
 const KEY = 0x5a5a1234; // ★ 用一个**非 0** 的键：键为 0 时 ENC 退化成恒等，那样守卫会失去分辨力
 
@@ -108,6 +108,33 @@ test('★★ `0x64 copy-local-array`：块首 u32 = 元素个数、数据从 +4 
   assert.ok(machine.notes.some((n) => n.startsWith('copy-local-array-empty')), 'count=0 要留一笔（可见），而不是静默');
 });
 
+test('★★ 决策：string 元素**不透明**（JS 字符串）—— 区域只发地址、数据在 Map、`0xe` 靠地址定位元素', () => {
+  const space = new AddressSpace();
+  const locals = new LocalPools(0, undefined, { space });
+  const globals = new GlobalPools(0, undefined, { space });
+  const ctx = { locals, globals, script: {}, space };
+
+  locals.write(11, 3, 'こんにちは');                       // 局部字符串池第 3 格
+  const addr = locals.regionOf(11).addressOf(3);
+  assert.equal(addr, locals.regions.get('string').base + 28 * 3, '★ 元素步长是 **28**（与引擎一致）');
+  assert.equal(space.readU32(addr), null, '★ 区域里**没有**字符串数据（格是空的）');
+  assert.equal(locals.pools.get('string').get(3), 'こんにちは', '数据在 Map 里');
+
+  // `0xe`：取地址 → 定位元素 → 那个 JS 字符串
+  writeOperand(ctx, { type: 0xe, rawData: 0 }, 0, addr);
+  assert.equal(readOperand(ctx, { type: 0xe, rawData: 0 }, 0).value, 'こんにちは', '经 `0xe` 读回来是同一个字符串');
+
+  // ⛔ 两处必须**响亮失败**：指向非字符串区域、没对齐
+  writeOperand(ctx, { type: 0xe, rawData: 0 }, 0, locals.regionOf(9).addressOf(0));
+  assert.throws(() => readOperand(ctx, { type: 0xe, rawData: 0 }, 0), /不是字符串元素/);
+  writeOperand(ctx, { type: 0xe, rawData: 0 }, 0, addr + 4);
+  assert.throws(() => readOperand(ctx, { type: 0xe, rawData: 0 }, 0), /没对齐/);
+
+  // ★ 快照口径不变：字符串池从 **Map** 取（区域里没有它的数据）
+  assert.deepEqual(locals.snapshot().pools.find(([n]) => n === 'string')[1], [[3, 'こんにちは']],
+    '字符串池的快照 = Map 的内容（不是区域里那堆空格子）');
+});
+
 test('★ 一份数据：迁移后 Map 是空的，位模式**只在区域里**', () => {
   const { pools, space } = regionLocal();
   const bits = pools.write(9, 7, 0x1234); // type 9 = local int
@@ -173,19 +200,19 @@ test('★ 增长：初值 0、每次真涨都留痕；未迁移的池族（float
   pools.write(9, 3, 2);
   assert.equal(grew.length, 1, '已经容得下 ⇒ 不涨、不留痕');
 
-  // ★ 迁到区域的是 **int 与 float 两族**（格都是 4 字节位模式）；只剩 string（28 字节）没迁
-  assert.deepEqual([...pools.regions.keys()].sort(), ['float', 'floatPtr', 'int', 'ptr', 'stringPtr'],
-    '迁到区域的是 int / float 两族 —— 与 LOCAL_POOLS 的 kind 判据同源');
-  for (const def of LOCAL_POOLS) {
-    assert.equal(pools.regions.has(def.name), def.kind !== 'string',
-      `${def.name}：kind=${def.kind} ⇒ 迁移=${def.kind !== 'string'}`);
-  }
-  // ★ string（28 字节）仍然走 Map：写进去能读出来，且**不碰空间**
-  //   （它要 SSO + 长串的堆，见需求树 `REQ-01M4BEHCHZE5QDHCNTA77V8ZJG`）
-  const before = space.regions.length;
+  // ★★ 现在 **6 个池都有区域** —— 连 string 也有。但两者的**职责不同**：
+  //   * int/float 族：区域里**就是数据**（4 字节位模式）；
+  //   * string 族：区域**只负责发地址**（`0xe` local string-ptr 要解引用到字符串元素），数据在 Map。
+  assert.deepEqual([...pools.regions.keys()].sort(),
+    ['float', 'floatPtr', 'int', 'ptr', 'string', 'stringPtr'],
+    '每个池都进地址空间（都能取址）');
+  // ★ string 的"只发地址"契约：写完字符串后，**格仍然没被写过**，而它的地址是有效的
   pools.write(11, 0, 'インライン');
-  assert.equal(pools.read(11, 0), 'インライン');
-  assert.equal(space.regions.length, before, '未迁的池（string）不该往空间里建区域');
+  assert.equal(pools.read(11, 0), 'インライン', '数据在 Map 里');
+  const strReg = pools.regions.get('string');
+  assert.equal(strReg.elemBytes, 28, '★ 字符串区域的步长必须是 **28**（与引擎的元素步长一致，`base + 28*idx` 才对得上）');
+  assert.equal(space.readU32(strReg.addressOf(0)), null, '★ 区域里**没有字符串数据**（格是空的）');
+  assert.ok(strReg.capacity >= 1, '★ 但容量要长到那一格 —— 否则 `0xe` 解引用会响亮失败');
   // ★ float 族在区域里存的是 **float32 位模式**（不是数值）
   pools.write(10, 0, 2.5);
   assert.equal(space.readU32(pools.regions.get('float').addressOf(0)), bitsFromFloat(2.5), 'float 格 = float32 位模式');
