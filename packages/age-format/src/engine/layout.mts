@@ -107,6 +107,11 @@ export const ENGINE_SCALAR_ARRAYS = [
   //   ⇒ 索引来自 **op2**、范围检查落在 **op1** 上。两处差别（谁当索引 / 哪张表）都写在字段里，
   //   ⛔ 不要用"看起来差不多"把两条 opcode 合并实现。
   { name: 'Engine.d1383', base: 1383, len: 32, opcode: 0x10b, handler: 'sub_422070', indexOperand: 1, valueOperand: 0, maxIndex: 0x1f, outOfRange: 'skip', note: '另一张按索引写的表（下标由 op2 给出）' },
+  // ★ `0x30a`（`sub_426B60`，argc 2）：表 1969，**两条范围检查且越界都抛**
+  //   `v2 = op2（索引）; result = op1（值）; if (result > 0x1F || v2 > 7) throw (aSetgeskey); this[v2 + 1969] = result;`
+  //   ⇒ `outOfRange: 'throw'`（与上面两条的 `'skip'` **不同**，这正是它们必须分成两条登记的理由）；
+  //   另注意索引上界是 **7**（不是 0x1F）：这张表只有 8 格。
+  { name: 'Engine.d1969', base: 1969, len: 8, opcode: 0x30a, handler: 'sub_426B60', indexOperand: 1, valueOperand: 0, maxIndex: 0x7, maxValue: 0x1f, outOfRange: 'throw', note: '8 格的表；值与索引都有范围检查，越界抛 aSetgeskey' },
 ];
 
 /**
@@ -171,8 +176,13 @@ export const EVIDENCE = {
  *   —— 守卫 `tools/test/opcodes-handlers.assets.test.mjs` 逐条对账；
  * * `dword`：handler 体（`pnpm tools disasm-at pseudo --sym <handler>`）里**逐字出现** `this[<dword>]`
  *   （一个 handler 写多个槽 ⇒ 多条记录）；
- * * `form`：值的来源 —— `op1` = 操作数 1 的原值、`bool(op1)` = 非 0 归一成 1、
+ * * `form`：值的来源 —— `op1` = 操作数 1 的原值、`op2` = 操作数 2、`const` = **写死的常量**（`value` 给出）、
+ *   `bool(op1)` = 非 0 归一成 1、
  *   `bswap24(op1)` = 在**低 24 位内**把字节序倒过来（`b0<<16 | b1<<8 | b2`；像 BGR↔RGB）；
+ * * `max`：引擎**自己**的范围检查（越界它抛 C++ 异常）—— ⛔ 不许 clamp，照抄成抛；
+ * * ★ **名字前缀区分两种存储**（同一个存储按名字寻址，但语义不同，别混）：
+ *   `Engine.dNNN` = `this[NNN]`（引擎对象里的字段）；`Global.dNNNNNN` = **进程全局**（不在 `Engine` 里，
+ *   例如 `0x248` 写的 `dword_55052C`）。
  * * `callsAfter`：**写完标量之后**还有哪次子系统调用 —— ★ 这一列是**必需的诚实**：
  *   少了它，"handler 里那次未建模的调用"就不会进保真欠账，日志会显得比实际干净
  *   （本仓踩过：`0x78`/`0x2db` 的体里都有 `sub_459F40(...)`，第一版没记）。
@@ -205,6 +215,16 @@ export const ENGINE_SCALAR_WRITES = [
   { name: 'Engine.d517', dword: 517, opcode: 0xfe, handler: 'sub_421CA0', form: 'op1', max: 0x1f },
   // ★ `0x10f`（argc 1）：普通标量写（`sub_422120`：`this[122369] = op1`）
   { name: 'Engine.d122369', dword: 122369, opcode: 0x10f, handler: 'sub_422120', form: 'op1' },
+  // ★ `0x25b`（`sub_425E20`，argc 1）：
+  //   `result = op1; this[92379] = 2; this[92381] = result;
+  //    if (!this[167990]) { v3 = op1; sub_408440(this, v3); }`
+  //   ⇒ 两个固定槽（一个写**常量 2**、一个写 op1）+ 一次**条件**子系统调用
+  //   （条件读的是 `Engine.d167990` —— 那个槽谁写的**还没取证**，见 handler 里的说明）。
+  { name: 'Engine.d92379', dword: 92379, opcode: 0x25b, handler: 'sub_425E20', form: 'const', value: 2 },
+  { name: 'Engine.d92381', dword: 92381, opcode: 0x25b, handler: 'sub_425E20', form: 'op1' },
+  // ★ `0x248`（`sub_4252E0`，argc 1）：`result = op1; dword_55052C = result;`
+  //   ⇒ 写的是**进程全局**（不在 `Engine` 里）⇒ 名字前缀用 `Global.`，别让"Engine 字段"这个说法变成谎
+  { name: 'Global.d55052C', dword: 55052, opcode: 0x248, handler: 'sub_4252E0', form: 'op1' },
   // ★★ `0x110` / `0x111` / `0x112`：**派发表里没有登记**它们（实测：`byOpcode.get(0x110)` 为空）。
   //   而表是 `rep stosd` **预填**成默认 handler 的 —— 那个默认 handler（`sub_418E30`）的体是
   //   抛「このコマンドはサポートされていません．」⇒ **引擎明确不支持这三条命令**。

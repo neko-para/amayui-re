@@ -435,17 +435,25 @@ export function main(argv = process.argv.slice(2)) {
     return 2;
   }
   const { plan, apply } = cmd();
-  for (const l of plan) process.stdout.write(`${l}\n`);
   if (!args.write) {
+    for (const l of plan) process.stdout.write(`${l}\n`);
     process.stdout.write('\n（dry-run）加 --write 落盘。\n');
     return 0;
   }
   const res = apply();
   if (res?.rollback) {
+    // ★ **被拒时 stdout 上只留一行"没有落盘"**。
+    //   原来那三行计划（含 `→ …md`）是先于写盘打印的，于是"写进去又被写后守卫删掉"在终端上
+    //   长得跟"成功"一模一样 —— 实测症状：打印了落点、`Test-Path` 却是 False（最坏的一种：报成功没落盘）。
+    //   ⇒ 计划改成**落盘成功之后**才打印；被拒时改挂 stderr（"我到底递了什么参数"仍然看得到，只是不再与成功同流）。
+    const what = res.removed ? `新节点已删除：${res.removed}` : `原文件已还原：${res.restored ?? '(未知)'}`;
+    process.stdout.write(`\n⛔ 未落盘（写后守卫未过，已回滚）—— ${what}\n`);
+    for (const l of plan) process.stderr.write(`被拒的计划  ${l}\n`);
     process.stderr.write(`写后守卫未过 —— 已回滚（节点文件恢复原状）：\n`);
     for (const l of printReport(res.report, {})) process.stderr.write(`${l}\n`);
     return 1;
   }
+  for (const l of plan) process.stdout.write(`${l}\n`);
   process.stdout.write('\n已落盘。\n');
   for (const l of printReport(res.report, {})) process.stdout.write(`${l}\n`);
   return res.report.failures > 0 ? 1 : 0;

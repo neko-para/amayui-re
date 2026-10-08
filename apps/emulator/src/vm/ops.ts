@@ -523,7 +523,11 @@ function scalarHandler(opcode: number, extra?: (ctx: VmContext, v: number) => vo
   return (ctx) => {
     const v = num(ctx, 0);
     for (const w of writes) {
-      const value = w.form === 'op2' ? num(ctx, 1) : w.form === 'bool(op1)' ? (v !== 0 ? 1 : 0) : w.form === 'bswap24(op1)' ? bswap24(v) : v;
+      // ★ `const`：引擎写的是**常量**（逐字里就是立即数），与操作数无关
+      const value = w.form === 'const' ? (w as { value?: number }).value!
+        : w.form === 'op2' ? num(ctx, 1)
+          : w.form === 'bool(op1)' ? (v !== 0 ? 1 : 0)
+            : w.form === 'bswap24(op1)' ? bswap24(v) : v;
       // ★ 知识层登记了 `max` ⇒ 这是**引擎自己**的范围检查（越界它抛 C++ 异常）——
       //   本层照抄：⛔ 不许 clamp、不许静默截断（那会把"脚本写错了"变成"值变了一点"）。
       const capped = (w as { max?: number }).max;
@@ -559,6 +563,33 @@ const opScalar1a4 = scalarHandler(0x1a4);
 const opScalar2ee = scalarHandler(0x2ee);
 const opScalarFe = scalarHandler(0xfe);
 const opScalar10f = scalarHandler(0x10f);
+const opScalar248 = scalarHandler(0x248);
+/**
+ * `0x25b`（无名，handler `sub_425E20`，argc 1）：**标量写 + 条件子系统调用**。
+ *
+ * 逐字：
+ * ```
+ *   result = sub_41BF50(this, 1)     ; op1
+ *   this[92379] = 2                  ; ★ 常量 2（`form: 'const'`）
+ *   this[92381] = result             ; ★ op1
+ *   if (!this[167990]) { v3 = sub_41BF50(this, 1); return sub_408440(this, v3); }
+ * ```
+ * ★ 那次调用是**条件**的（读 `Engine.d167990`）—— 所以**不能**用无条件的 `callsAfter` 登记：
+ *   那会把"引擎会调"与"引擎不调"混成同一种表现，保真欠账也会**多算**。
+ * ★ `Engine.d167990` 的**写入点还没取证**：本层读到的是标量默认值 0 ⇒ 条件**总是成立** ⇒
+ *   当条件不成立时，我会**多记一笔**欠账（不会少记）—— 这个方向是安全的，且记在这里以备考证。
+ */
+const opSetMessage25b = scalarHandler(0x25b, (ctx, v) => {
+  const gate = ctx.machine.scalars.read('Engine.d167990');
+  if (gate === 0) {
+    ctx.machine.effect('system', 'engine.forward', 'logged-only', {
+      opcode: '0x25b', callee: 'sub_408440', args: [v],
+      note: '**条件**转发（逐字 `if (!this[167990]) sub_408440(this, op1)`）—— 未建模；d167990 的来源未取证 ⇒ 条件视为成立',
+    });
+  } else {
+    ctx.machine.note('forward-skipped', `0x25b：Engine.d167990 = ${gate} ⇒ 引擎**不**调 sub_408440（逐字条件不成立）`);
+  }
+});
 /** 0x110/0x111/0x112：引擎明确不支持（见 ENGINE_SCALAR_WRITES 里那三条的注释） */
 const opUnsupported110 = scalarHandler(0x110);
 const opUnsupported111 = scalarHandler(0x111);
@@ -1038,9 +1069,19 @@ function scalarArrayHandler(spec: (typeof ENGINE_SCALAR_ARRAYS)[number]): Handle
   return (ctx) => {
     const idx = num(ctx, spec.indexOperand);
     const value = num(ctx, spec.valueOperand);
-    if (idx > spec.maxIndex) {
-      ctx.machine.note('scalar-array-skip', `opcode 0x${spec.opcode.toString(16)} 的索引 ${idx} > 0x${spec.maxIndex.toString(16)} ⇒ 引擎**跳过**这次写（不抛）`);
-      return;
+    const maxValue = (spec as { maxValue?: number }).maxValue;
+    const bad = idx > spec.maxIndex || (maxValue !== undefined && value > maxValue);
+    if (bad) {
+      // ★ 越界口径**由知识层说了算**（它是逐字读出来的）：`skip` = 引擎静默跳过、`throw` = 引擎抛异常。
+      //   ⛔ 不许把两者统一 —— 那会把"引擎会崩"与"引擎当无事发生"变成同一种表现。
+      if (spec.outOfRange === 'skip') {
+        ctx.machine.note('scalar-array-skip', `opcode 0x${spec.opcode.toString(16)} 越界（索引 ${idx} > 0x${spec.maxIndex.toString(16)}${maxValue !== undefined ? ` 或值 ${value} > 0x${maxValue.toString(16)}` : ''}）⇒ 引擎**跳过**这次写（不抛）`);
+        return;
+      }
+      throw new Error(
+        `opcode 0x${spec.opcode.toString(16)} 越界：索引 ${idx}（上界 ${spec.maxIndex}）` +
+        `${maxValue !== undefined ? ` / 值 ${value}（上界 0x${maxValue.toString(16)}）` : ''} —— 引擎这里抛异常`,
+      );
     }
     const key = `${spec.name}+${idx}`;
     ctx.machine.scalars.write(key, value);
@@ -1070,10 +1111,11 @@ function prologueHandlers(): Record<number, Handler> {
   return {
     ...out,
     0x149: opScalar149, 0x21b: opScalar21b, 0x252: opScalar252,
-    0x76: opScalar76, 0x77: opScalar77, 0x1a4: opScalar1a4, 0x2ee: opScalar2ee, 0xfe: opScalarFe, 0x10f: opScalar10f, 0x10c: opSetKeyMulti,
+    0x76: opScalar76, 0x77: opScalar77, 0x1a4: opScalar1a4, 0x2ee: opScalar2ee, 0xfe: opScalarFe, 0x10f: opScalar10f, 0x25b: opSetMessage25b, 0x248: opScalar248, 0x10c: opSetKeyMulti,
     0x110: opUnsupported110, 0x111: opUnsupported111, 0x112: opUnsupported112,
   0x107: scalarArrayHandler(ENGINE_SCALAR_ARRAYS[0]),
-  0x10b: scalarArrayHandler(ENGINE_SCALAR_ARRAYS[1]), 0x78: opScalar78, 0x2db: opScalar2db, 0x88: opScalar88,
+  0x10b: scalarArrayHandler(ENGINE_SCALAR_ARRAYS[1]),
+  0x30a: scalarArrayHandler(ENGINE_SCALAR_ARRAYS[2]), 0x78: opScalar78, 0x2db: opScalar2db, 0x88: opScalar88,
   };
 }
 

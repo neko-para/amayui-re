@@ -47,6 +47,14 @@ export { MUTATIONS };
  * ★ 加新守卫时顺手加一条 —— 否则"这个守卫会红"只是个声称。
  */
 const MUTATIONS = [
+  // ── 越界口径：`0x107` 是"静默跳过"、`0x30a` 是"抛"（★ 统一它们会把"引擎会崩"与"无事发生"变成同一种表现）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: "      if (spec.outOfRange === 'skip') {",
+    to: '      if (true) {',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '把所有标量数组的越界都当成"静默跳过" ⇒ 引擎会抛的那条（0x30a）变成了无声无息',
+  },
   // ── 字符串指针的定位（★ 步长必须是 28：用 4 会静默定位到**另一个元素**）──
   {
     file: 'apps/emulator/src/vm/operand.ts',
@@ -332,6 +340,14 @@ const MUTATIONS = [
     to: "const PROC_EA_RE = /^([A-Za-z_][\\w.]*):([0-9A-Fa-f]{8})\\s+([A-Za-z_][\\w.]{0,40})\\s+proc near/;",
     guard: 'tools/test/disasm-pseudo.assets.test.mjs',
     what: '段名首字符不许 `.` ⇒ `.text` 的 proc near 全漏（这个坑在本仓踩过两次）',
+  },
+  // ── 需求台账：写路径"报的落盘"必须与磁盘一致 ──
+  {
+    file: 'tools/requirements.mjs',
+    from: '  if (res?.rollback) {',
+    to: '  if (false) {',
+    guard: 'tools/test/requirements-add-lands.test.mjs',
+    what: '被写后守卫拒回时不再拒绝（继续按"已落盘"打印计划）⇒ stdout 报成功而盘上什么都没有',
   },
 ];
 

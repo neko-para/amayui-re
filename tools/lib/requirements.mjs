@@ -643,8 +643,8 @@ export function validateAll(nodes, opts = {}) {
       if (!ULID_RE.test(n.name)) bad.push(`${at}: 文件名不是 26 字符 ULID`);
       if (f.id === undefined) bad.push(`${at}: 缺 id`);
       else if (f.id !== nodeId(n.name)) bad.push(`${at}: id (${f.id}) 必须等于 ${ID_PREFIX}${n.name}（文件名即身份）`);
-      if (!TYPES.includes(f.type)) bad.push(`${at}: type 非法 ${JSON.stringify(f.type)}`);
-      if (!STATUSES.includes(f.status)) bad.push(`${at}: status 非法 ${JSON.stringify(f.status)}`);
+      if (!TYPES.includes(f.type)) bad.push(`${at}: type 非法 ${JSON.stringify(f.type)}（应为 ${TYPES.join(' | ')}）`);
+      if (!STATUSES.includes(f.status)) bad.push(`${at}: status 非法 ${JSON.stringify(f.status)}（应为 ${STATUSES.join(' | ')}）`);
       if (n.title.trim() === '') bad.push(`${at}: 标题为空`);
       // ★ 缺陷专属字段不许出现在别的 type 上（防止"需求也塞 repro/severity"把两类混起来）
       for (const k of BUG_ONLY) {

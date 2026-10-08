@@ -330,6 +330,34 @@ test('★ 派发表**没登记**的 opcode：报"引擎明确不支持"，⛔ �
   }
 });
 
+test('★ `0x30a` 与 `0x107` 的**越界口径不同**（一个是抛、一个是静默跳过）—— 不许统一', () => {
+  const m = machineStub();
+  // `0x30a`：表 1969、索引来自 op2（上界 **7**）、值来自 op1（上界 0x1F）
+  HANDLERS[0x30a](ctxOf(m, [imm(5), imm(6)], 0x30a));
+  assert.equal(m.scalars.read('Engine.d1969+6'), 5, '索引来自 op2、值来自 op1');
+  assert.throws(() => HANDLERS[0x30a](ctxOf(m, [imm(5), imm(8)], 0x30a)), /引擎这里抛异常/, '索引 > 7 ⇒ 抛');
+  assert.throws(() => HANDLERS[0x30a](ctxOf(m, [imm(0x20), imm(0)], 0x30a)), /引擎这里抛异常/, '值 > 0x1F ⇒ 抛');
+  // 对照：`0x107` 同样越界**不抛**（逐字 `if (result <= 0x1F)`，没有异常）
+  const m2 = machineStub();
+  assert.doesNotThrow(() => HANDLERS[0x107](ctxOf(m2, [imm(0x20), imm(1)], 0x107)), '0x107 越界**不抛**');
+  assert.ok(m2.notes.some((n) => n.startsWith('scalar-array-skip')), '但必须留痕');
+});
+
+test('★ `0x25b`：写**常量**槽 + 条件转发（条件不成立时**不许**记成欠账）', () => {
+  const m = machineStub();
+  HANDLERS[0x25b](ctxOf(m, [imm(0x77)], 0x25b));
+  assert.equal(m.scalars.read('Engine.d92379'), 2, '★ 常量 2（`form: const`，与操作数无关）');
+  assert.equal(m.scalars.read('Engine.d92381'), 0x77, 'op1 进另一个槽');
+  assert.equal(m.effects.filter((e) => e.action === 'engine.forward').length, 1,
+    '门（Engine.d167990）默认为 0 ⇒ 条件成立 ⇒ 记一笔欠账');
+  // ★ 门非 0 ⇒ 引擎**不调** ⇒ 不许记成欠账（否则保真欠账会多算），但要有 note
+  const m2 = machineStub();
+  m2.scalars.write('Engine.d167990', 1);
+  HANDLERS[0x25b](ctxOf(m2, [imm(1)], 0x25b));
+  assert.equal(m2.effects.filter((e) => e.action === 'engine.forward').length, 0, '条件不成立 ⇒ 不记欠账');
+  assert.ok(m2.notes.some((n) => n.startsWith('forward-skipped')), '但要留一笔（可见）');
+});
+
 test('★ `0xfe` **照抄引擎的范围检查**（`op1 > 0x1F` ⇒ 抛，⛔ 不许 clamp/截断）；`0x10c` 的间接写必须留痕', () => {
   const m = machineStub();
   // 合法值：写进 `Engine.d517`
