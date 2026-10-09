@@ -15,14 +15,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { DEFAULT_OLD_REPO, collect } from '../old-repo-inventory.mjs';
+import { collect, defaultOldRepo } from '../old-repo-inventory.mjs';
 
 test('真旧仓可盘点（旧仓不在本机时如实 skip）', (t) => {
-  if (!fs.existsSync(DEFAULT_OLD_REPO)) {
-    t.skip(`旧仓不在 ${DEFAULT_OLD_REPO}`);
+  const oldRepo = defaultOldRepo();
+  if (!fs.existsSync(oldRepo)) {
+    t.skip(`旧仓不在 ${oldRepo}`);
     return;
   }
-  const data = collect(DEFAULT_OLD_REPO, { coupling: false });
+  const data = collect(oldRepo, { coupling: false });
   assert.match(data.facts.headSha, /^[0-9a-f]{40}$/, 'HEAD 必须是 40 位 sha');
   assert.ok(data.facts.trackedCount > 0, '跟踪文件数应 > 0');
   assert.ok(data.facts.commits > 0, '提交数应 > 0');

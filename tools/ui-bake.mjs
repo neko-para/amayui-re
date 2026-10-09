@@ -18,7 +18,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { REPO_ROOT } from './lib/paths.mjs';
-import { bake, DEFAULT_GAME, verifyAgainstCorpus } from './lib/ui-bake/bake.mjs';
+import { bake, defaultGameDir, defaultOldRepo, verifyAgainstCorpus } from './lib/ui-bake/bake.mjs';
 import { loadEffects, listRecipes, loadRecipe, validateRecipe } from './lib/ui-bake/recipe.mjs';
 import { readAgfBuffer, decodeRgba } from './lib/ui-bake/age-format.mjs';
 import { diff } from './lib/ui-bake/image.mjs';
@@ -61,7 +61,8 @@ const HELP = `${DOMAIN.tool} —— UI 图片烘焙链
   pnpm tools ui-bake build                 ★ 全部配方完整构建 → dist/ui-bake/（PNG + AGF + 报告）
   pnpm tools ui-bake apply <块> [--write]  写回 corpus/assets/ui-images/<块>-<版>.png
 
-  选项  --game <安装目录>   原始游戏件所在目录（默认 ${DEFAULT_GAME}）
+  选项  --game <安装目录>   原始游戏件所在目录（默认 = 清单 roots.gameInstall；本机不同见 corpus/assets.md）
+        --old-repo <目录>   旧仓目录（默认 = 清单 roots.oldRepo）
         --chrome <路径>     浏览器可执行文件（默认自动探测；也可用 UI_BAKE_CHROME）
         --quiet             少打印
 `;
@@ -148,7 +149,8 @@ export function describeText() {
 // ─────────────────────────────────────────────────────────── CLI
 
 function parseArgs(argv) {
-  const out = { action: null, rest: [], game: DEFAULT_GAME, chrome: undefined, write: false, quiet: false, json: false };
+  // ★ `game` 缺省**在这里不定**（`null`）—— 到用的时候才问清单；硬编码平台路径会在别的机器上直接找不到索引
+  const out = { action: null, rest: [], game: null, oldRepo: null, chrome: undefined, write: false, quiet: false, json: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--describe') out.action = 'describe';
@@ -161,6 +163,7 @@ function parseArgs(argv) {
     else if (a === '--build') out.action = 'build';
     else if (a === '--agf') out.action = 'agf';
     else if (a === '--game') out.game = argv[++i];
+    else if (a === '--old-repo') out.oldRepo = argv[++i];
     else if (a === '--out') out.out = argv[++i];
     else if (a === '--chrome') out.chrome = argv[++i];
     else if (a === '--write') out.write = true;
@@ -267,7 +270,7 @@ async function cmdVerify(args) {
 async function cmdBuild(args) {
   const outDir = args.out ?? path.join(REPO_ROOT, 'dist', 'ui-bake');
   fs.mkdirSync(outDir, { recursive: true });
-  const oldRepo = args.oldRepo ?? 'E:\\Games\\Eushully\\天結';
+  const oldRepo = args.oldRepo ?? defaultOldRepo();
   const versions = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'corpus/assets/ui-images/versions.json'), 'utf8'));
   const img = await import('./lib/ui-bake/image.mjs');
   const rows = [];
@@ -364,7 +367,7 @@ async function cmdList(args) {
 
 /** AGF 层判据：把 `corpus/assets/ui-images-baked` 登记的旧仓 AGF 与我们注回的产物**解码后**比像素 */
 async function cmdAgf(args) {
-  const oldRepo = args.rest[0] ?? 'E:\\Games\\Eushully\\天結';
+  const oldRepo = args.rest[0] ?? defaultOldRepo();
   const rows = [];
   for (const block of listRecipes()) {
     const r = await runOne(block, args, { log: () => {} });

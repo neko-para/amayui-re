@@ -109,33 +109,138 @@ function frameCensus() {
   return { literals, folded };
 }
 
-test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）★ **已按本仓取证订正：基址实为 帧+0x3C…+0x54** —— 计数 6 个 + 基址 6 个', { skip }, () => {
+/**
+ * ★ **基址的语料判据**（2026-10 二次订正后重写）：不再问"这个偏移在语料里出现过吗"——
+ *   那种问法**绿而错**（`+0x50`/`+0x54` 是别的帧字段，照样"出现过"，于是旧表蒙混过关）。
+ *   现在问两件**能定配对**的事：
+ *   ① **装载器 `sub_40ED40` 里那 6 处 store 写的是哪 6 个地址**（集合必须与模型相等）；
+ *   ② **取址原语 `sub_42AEA0` 的跳转表里，case 号（= operand type）各自读哪个地址**
+ *      （逐个与 `LOCAL_POOL_SLOTS[typeTag]` 相等 —— 这才把"int / float / string"钉死）。
+ *   ⇒ 改错任何一个偏移（或把两个池的位置对调）都会当场红。
+ */
+function corpusLocalPoolEvidence() {
+  const lines = fs.readFileSync(listing, 'utf8').split('\n');
+  const unhex = (h) => Number.parseInt(h, 16);
+
+  // ① 装载器：**跟着 `operator new[]` 走** —— 每个池 `new[]` 之后那次"写基址"才是池基址
+  //   （★ 不能只按"形如 `mov [esi+edx*8+5D8??h],r32`"扫：`sub_40ED40` 里另外还写 `+0x14`（代码区基址）
+  //     与 `+0x4C` —— 那两处不在分配之后，按结构筛就自然排除掉了）
+  const loader = new Set();
+  {
+    const from = lines.findIndex((l) => / sub_40ED40 proc near$/.test(l));
+    assert.ok(from > 0, '语料里应能找到 `sub_40ED40 proc near`（装载器）');
+    const to = lines.findIndex((l, i) => i > from && / sub_40ED40 endp$/.test(l));
+    const body = lines.slice(from, to > 0 ? to : from + 4000);
+    let allocs = 0;
+    for (let i = 0; i < body.length; i += 1) {
+      if (!/operator new\[\]\(uint\)/.test(body[i])) continue;
+      allocs += 1;
+      // 窗口 60 行：分配之后还有"算 size / 建对象 / memset"若干步（实测最长的一处隔了 30 行）
+      for (let k = i + 1; k < Math.min(i + 60, body.length); k += 1) {
+        const m = /mov\s+\[esi\+edx\*8\+(5D8[0-9A-F]{2})h\],\s*(?:eax|ecx|edx|ebx)/.exec(body[k]);
+        if (m) { loader.add(unhex(m[1])); break; }
+        // 折叠形：`add ecx,0C79h` ⇒ 地址 = 0xC79 × 步长（自证：0x5D8B8 / 0x78 = 0xC79）
+        const f = /add\s+ecx,\s*(0?[0-9A-F]{2,4})h/.exec(body[k]);
+        if (f) {
+          const addr = unhex(f[1]) * FRAME.stride;
+          if (addr >= FRAME.base && addr <= FRAME.base + 0x98) { loader.add(addr); break; }
+        }
+      }
+    }
+    // ★ 装载器里**不止 6 次**分配（实测 7 次：6 个池 + `帧+0x78` 那个 cur 索引数组，
+    //   `FRAME_SLOTS_OBSERVED` 里有名）⇒ 不硬性要求"恰好 6 次"，改由下面的"多出来的必须是已登记帧槽"兜底。
+    assert.ok(allocs >= 6, `装载器里应当至少有 6 次分配（6 个池），实际 ${allocs}`);
+  }
+
+  // ② 取址原语：跳转表 case 标签 → 该分支读的地址
+  const byType = new Map();
+  {
+    const from = lines.findIndex((l) => / sub_42AEA0 proc near$/.test(l));
+    assert.ok(from > 0, '语料里应能找到 `sub_42AEA0 proc near`（取址原语）');
+    const to = lines.findIndex((l, i) => i > from && / sub_42AEA0 endp$/.test(l));
+    const body = lines.slice(from, to > 0 ? to : from + 4000);
+    for (let i = 0; i < body.length; i += 1) {
+      const c = /; jumptable 0042AF16 case (\d+)/.exec(body[i]);
+      if (!c) continue;
+      const type = Number(c[1]);
+      let addr = null;
+      for (let k = i; k < Math.min(i + 20, body.length); k += 1) {
+        const m = /\[esi\+edx\*8\+(5D8[0-9A-F]{2})h\]/.exec(body[k]);
+        if (m) { addr = unhex(m[1]); break; }
+        const f = /add\s+ecx,\s*(0?[0-9A-F]{2,4})h/.exec(body[k]);
+        if (f) {
+          const a = unhex(f[1]) * FRAME.stride;
+          if (a >= FRAME.base && a <= FRAME.base + 0x98) { addr = a; break; }
+        }
+      }
+      if (addr !== null) byType.set(type, addr);
+    }
+  }
+  return { loader, byType };
+}
+
+test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）—— 且按 EA 回语料核过（装载器 6 处 store + 6 个 type 的读侧 case 双向对上）', { skip }, () => {
   assert.equal(LOCAL_POOLS.length, 6, 'local 池是 6 个（int/float/string/ptr/floatPtr/stringPtr）');
   assert.deepEqual(LOCAL_POOLS.map((p) => p.typeTag), [9, 10, 11, 12, 13, 14], 'operand type 9..14 依次对应 6 个池');
   assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.count), [0x1c, 0x20, 0x24, 0x28, 0x2c, 0x30], '6 个计数槽连续');
-  // ★★ 基址：`+0x3C/0x40/0x44/0x48/0x50/0x54`（**按本仓取证**：`sub_40ED40` 里"分配紧接着写基址"的局部性，
-  //    EA `0x40F3B1/0x40F2E9/0x40F31B/0x40F3F0/0x40F42F/0x40F471`；读取侧 `sub_41BF50` 的 case 0xB/9/0xA/0xC/0xD/0xE）。
-  //    ⛔ 旧值 `+0x34…+0x48` 的来源是**旧仓 `fields.json`**、本仓没为它找到判据 ⇒ 已弃用（用户口径：以本仓重发现为准）。
-  //    ★ 旁证：`set-string` 对 type 11 的目标 = `[Engine+0x5D8BC] + 28*idx`，`0x5D8BC − 0x5D880 = 0x3C` ✓（新旧一致的那一格）
-  assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.base), [0x40, 0x44, 0x3c, 0x48, 0x50, 0x54], '6 个基址槽（按池名 int/float/string/ptr/floatPtr/stringPtr）');
-  // ★ 而且**语义池名与布局槽名必须一一对上**（这是"布局 ↔ 语义"的接口；改名或加池都会红）
+  // ★ 池名顺序必须与语义模型一致（这是"布局 ↔ 语义"的接口；改名或加池都会红）
   assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.name), LOCAL_POOLS.map((p) => p.name),
     '布局里的池名集合必须与模拟器语义模型的池名集合完全一致');
-  const { literals, folded } = frameCensus();
-  // ★ 遍历**布局**里的槽（不是语义模型里的池 —— 模拟器那边已经没有 `base` 这个字段了）
+
+  // ★★ 决定性判据：拿**语料**算出来的两件事与模型比（不是"偏移出现过"）
+  const { loader, byType } = corpusLocalPoolEvidence();
+  const modelAddrs = [...LOCAL_POOL_SLOTS.map((p) => FRAME.base + p.base)].sort((a, b) => a - b);
+  // ① 每个池的基址都必须真的**在装载器的分配点被写下**（不是"这个偏移在别处出现过"）
   for (const p of LOCAL_POOL_SLOTS) {
-    const off = p.base;
-    const hits = (literals.get(off) ?? 0) + (folded.get(off) ?? 0);
-    assert.ok(hits > 0, `基址槽 帧+0x${off.toString(16)}（${p.name}）在两个形态里都该有访问（字面 ${literals.get(off) ?? 0} / 折叠 ${folded.get(off) ?? 0}）`);
+    assert.ok(
+      loader.has(FRAME.base + p.base),
+      `① 装载器 ` + `\`sub_40ED40\` 的分配点必须写下 帧+0x${p.base.toString(16)}（池 ${p.name}）`,
+    );
   }
+  // ①b 分配点写下的**其它**地址必须是布局里**已登记名字**的帧槽（不许有来历不明的写点）
+  const namedSlots = new Set(FRAME_SLOTS_OBSERVED.map((o) => FRAME.base + o));
+  const extraAlloc = [...loader].filter((a) => !modelAddrs.includes(a));
+  assert.ok(
+    extraAlloc.every((a) => namedSlots.has(a)),
+    `①b 分配点写下的非池基址必须在 \`FRAME_SLOTS_OBSERVED\` 里有名，实际多出：${extraAlloc.map((a) => `0x${a.toString(16)}`).join(',')}`,
+  );
+  // ①c ★ 上一版"绿而错"的回归钉：`+0x50`/`+0x54` 在语料里**确实出现过**（那是别的帧字段），
+  //   但它们**不在装载器的分配点**上 ⇒ 不许再被当成池基址。
+  for (const bad of [0x50, 0x54]) {
+    assert.ok(
+      !loader.has(FRAME.base + bad),
+      `①c 帧+0x${bad.toString(16)} 不是池基址：它不在装载器的分配点（上一版就是被"这个偏移在语料里出现过"骗过去的）`,
+    );
+  }
+  for (const p of LOCAL_POOL_SLOTS) {
+    // ★ `typeTag` 在**语义模型**（`LOCAL_POOLS`）那边 —— 布局层只有 `name`/`count`/`base`。
+    //   两者按**名字**接起来：这正是"布局 ↔ 语义"的接口，名字对不上或池被改名都会红。
+    const sem = LOCAL_POOLS.find((x) => x.name === p.name);
+    assert.ok(sem, `语义模型里应有池 ${p.name}`);
+    assert.equal(
+      byType.get(sem.typeTag),
+      FRAME.base + p.base,
+      `② 取址原语 \`sub_42AEA0\` 的 case ${sem.typeTag}（= operand type ${sem.typeTag}，池 ${p.name}）读的地址必须 == 帧+0x${p.base.toString(16)}`,
+    );
+  }
+  // ★ 这条 switch 覆盖 type **3..14**（12 个 case）：3..8 是 global 族，**9..14 才是 local 池**。
+  //   所以判据不是"表里恰好 6 项"，而是"6 个 local type 全在，且它们读的地址集合 == 模型的 6 个基址"。
+  const localTypes = [9, 10, 11, 12, 13, 14];
+  assert.deepEqual(localTypes.filter((t) => !byType.has(t)), [], `取址原语里 6 个 local type（9..14）都必须认出，实际表里有 ${[...byType.keys()].sort((a, b) => a - b).join(',')}`);
+  assert.deepEqual(
+    localTypes.map((t) => byType.get(t)).sort((a, b) => a - b),
+    modelAddrs,
+    '②b 6 个 local case 读的地址**集合**必须正好是模型声明的 6 个基址',
+  );
+
   // ★ 语义模型里**不许**有 `base` / `count` 这类偏移字段（那是布局知识）
   for (const p of LOCAL_POOLS) {
     assert.ok(!('base' in p), `模拟器的池定义不许带 \`base\`（偏移属于布局层）：${p.name}`);
     assert.ok(!('count' in p), `模拟器的池定义不许带 \`count\`（帧内计数槽属于布局层）：${p.name}`);
   }
-  // ★ 订正后必须**不再**声称旧值：`+0x34/+0x38` 已不是任何池的基址（`+0x34` 是 size/count 族里的一个）
-  assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === 0x34 || p.base === 0x38),
-    '旧表里的 +0x34/+0x38 不许再作为基址出现（它们是 size/count 字段）');
+  // ★ 这次翻案的教训写成断言：`+0x50`/`+0x54` 是**别的帧字段**，不许再被当成池基址
+  assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === 0x50 || p.base === 0x54),
+    '`+0x50`/`+0x54` 不是任何 local 池的基址（它们在语料里确实出现过 —— 那正是上一版"绿而错"的原因）');
 });
 
 test('★ `帧+0x84` 是 `array_container`（std::vector），**不是** local_float 基址', { skip }, () => {
@@ -149,11 +254,10 @@ test('★ `帧+0x84` 是 `array_container`（std::vector），**不是** local_f
   const cleared = win.filter((l) => /^mov \[eax(\+\d+)?\],ebx$/.test(l));
   assert.equal(cleared.length, 3, `新对象应被清零 3 个 dword（begin/end/cap），实际 ${cleared.length} 条：${JSON.stringify(win.slice(0, 12))}`);
   assert.equal(FRAME.off.arrayContainer, 0x84, '模型里 `+0x84` 记为 array_container');
-  // ★ 这一条的本意是"`+0x84` 不是任何 local 池的基址"。旧的写法顺便断言了 `local_float = 0x38`，
-  //   而那张旧表（来源 = 旧仓 `fields.json`）已被本仓取证订正为 `0x44` ⇒ 这里改成**不依赖旧值**的写法：
-  //   `+0x84` 不在基址集合里，且它确实是 array_container。
+  // ★ 本意是"`+0x84` 不是任何 local 池的基址"。★ 2026-10 二次订正后 `local_float` 回到 **0x38**
+  //   （基址 = 帧+0x34/0x38/0x3C/0x40/0x44/0x48；判据与两次订正的经过见 `LOCAL_POOL_SLOTS` 头注）。
   assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === 0x84), '★ `+0x84` 不是任何 local 池的基址');
-  assert.equal(LOCAL_POOL_SLOTS.find((p) => p.name === 'float').base, 0x44, 'local_float 的基址（按本仓取证；旧表写 0x38）');
+  assert.equal(LOCAL_POOL_SLOTS.find((p) => p.name === 'float').base, 0x38, 'local_float 的基址（取址原语 case 10 读 帧+0x38）');
 });
 
 test('★ 帧区 slot 的全集：模型声明的那份观察结果必须与语料一致（逐个复核 + 关键槽点名）', { skip }, () => {

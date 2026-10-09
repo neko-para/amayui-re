@@ -17,7 +17,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { git as runGit } from './lib/exec.mjs';
-import { DEFAULT_INVENTORY_OUT as DEFAULT_OUT, DEFAULT_OLD_REPO, REPO_ROOT } from './lib/paths.mjs';
+import { DEFAULT_INVENTORY_OUT as DEFAULT_OUT, REPO_ROOT } from './lib/paths.mjs';
 import {
   ARCHIVE_ZIP,
   ARCHIVE_ZIP_REL,
@@ -32,7 +32,17 @@ import {
   SOURCE_COMMIT,
 } from './lib/translate-ref.mjs';
 
-export { DEFAULT_OLD_REPO, REPO_ROOT, DEFAULT_OUT };
+export { REPO_ROOT, DEFAULT_OUT };
+
+/**
+ * 旧仓目录的**缺省值**：真源 = 清单 `roots.oldRepo`（本机不同就覆盖 `corpus/assets.local.json`）。
+ * ★ 原先这里是从 `lib/paths.mjs` 抄来的硬编码 `E:\\Games\\...` ⇒ 换平台必错。
+ */
+export function defaultOldRepo() {
+  const r = oldRepoRoot();
+  if (!r) throw new Error('清单里没有 `roots.oldRepo`（旧仓在哪？本机不同见 corpus/assets.md）');
+  return r;
+}
 
 
 /** 体积统计时按二进制扩展名跳过（它们不需要行尾统计） */
@@ -59,7 +69,7 @@ export const DOMAIN = {
   id: 'old-repo',
   title: '旧仓（**只读外部仓库**）：盘点 + 翻译参考快照重建',
   data: [
-    '`<旧仓>`（仓库外，默认 `E:\\Games\\Eushully\\天結`；只跑只读 git 命令与 fs 读取）',
+    '`<旧仓>`（仓库外；缺省 = 清单 `roots.oldRepo`，本机不同见 `corpus/assets.md`；只跑只读 git 命令与 fs 读取）',
     '`docs/00-origin/old-repo-inventory.md`（生成物，由本工具拥有）',
     `\`${ARCHIVE_ZIP_REL}\` + \`docs/01-translation/ref/assets/**\`（翻译参考快照；由本工具按规则重建）`,
   ],
@@ -548,7 +558,7 @@ export function cmdTranslateRef(repo, { write = false } = {}) {
 // ─────────────────────────────────────────────────────────── CLI
 
 function parseArgs(argv) {
-  const out = { oldRepo: DEFAULT_OLD_REPO, out: DEFAULT_OUT, coupling: true, json: false, write: false, action: null };
+  const out = { oldRepo: defaultOldRepo(), out: DEFAULT_OUT, coupling: true, json: false, write: false, action: null };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--old-repo') out.oldRepo = argv[++i];

@@ -1,42 +1,49 @@
-# 冲突 · local 池基址：新取证（+0x3C..+0x54，池序不同）vs 已登记守卫（+0x34..+0x48，来源=旧仓 fields.json）
+# 🐞S3 冲突 · local 池基址：两次「新取证」互相矛盾（最终以「装载器 store + 取址原语 case 号」双向核对为准，回到 +0x34…+0x48）
 
 - id: REQ-01M4B49MK0HMJ7NK00PN4SMDHB
 - type: bug
 - status: done
 - parent: REQ-01M4B248NB8FWDN61E2NMK8N6V
-- verify: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）★ **已按本仓取证订正：基址实为 帧+0x3C…+0x54**
-- repro: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）★ **已按本仓取证订正：基址实为 帧+0x3C…+0x54**
+- verify: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）—— 且按 EA 回语料核过（装载器 6 处 store + 6 个 type 的读侧 case 双向对上）
+- repro: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）—— 且按 EA 回语料核过（装载器 6 处 store + 6 个 type 的读侧 case 双向对上）
 - severity: S3
-- done_reason: 已按用户口径裁决（以本仓重新发现的内容为准；与旧仓冲突的记录即可）：LOCAL_POOL_SLOTS 基址改为 0x3C/0x40/0x44/0x48/0x50/0x54、ELEM_BYTES_VERIFIED.string 改为 true；旧表（来源=旧仓 fields.json）保留在台账里作历史。
+- done_reason: 已收口，但**结论翻过两次**：第一次"以本仓重发现为准"改到 0x3C…0x54（错，根因是把 0x40F2E9 的 store 读成 帧+0x40）；第二次复核按用户口径「冲突以最新复核结论为准」回到 0x34…0x38…0x48 —— 判据是"装载器读计数→new[]→写基址"的相邻性 **加** 取址原语 case 号（=operand type）的配对，两条一起把六对配光。同时把守卫从"偏移在语料里出现过"（绿而错，+0x50/+0x54 是别的帧字段）改成"两件能定配对的事"，并加两条变异钉住。
 
-## 冲突是什么
+## 这条冲突（已两次翻案，最终以**双向核对**收口）
 
-**同一件事有两份互斥的登记**（局部池的基址）：
+**同一件事有三份说法**（local 池的基址）：
 
-| 来源 | local 池基址（按池名） |
+| 来源 | 基址（按池名 int/float/string/ptr/floatPtr/stringPtr） |
 |---|---|
-| 新取证（`sub_40ED40`：分配紧随其后的那次 store；EA `0x40F3B1/0x2E9/0x31B/0x3F0/0x42F/0x471`） | string `+0x3C` · int `+0x40` · float `+0x44` · ptr `+0x48` · floatPtr `+0x50` · stringPtr `+0x54` |
-| 已登记守卫 `tools/test/emulator-model.test.mjs`「local 池的 slot 几何」（注释写明来源 = **旧仓 `fields.json`**） | int `+0x34` · float `+0x38` · string `+0x3C` · ptr `+0x40` · floatPtr `+0x44` · stringPtr `+0x48` |
+| 旧仓 `fields.json`（**最终被证实是对的**） | `+0x34 / +0x38 / +0x3C / +0x40 / +0x44 / +0x48` |
+| 本仓第一次"新取证"（2026-10 早，**错**） | `+0x40 / +0x44 / +0x3C / +0x48 / +0x50 / +0x54` |
+| 本仓第二次复核（2026-10 晚，**采用**） | `+0x34 / +0x38 / +0x3C / +0x40 / +0x44 / +0x48` |
 
-**两者只在 `string = 0x3C` 上一致** —— 而 `0x3C` 恰好是本仓**自己独立验证过**的那一格：
-`set-string` 对 type 11（局部串）的目标 = `[Engine+0x5D8BC] + 28*idx`，`0x5D8BC − 0x5D880 = 0x3C`。
+## 第一次为什么错（可复核的根因）
 
-## 为什么现在**不**改
+不是"旧仓对/本仓错"，而是**把装载器的 store 地址抄成了别的偏移**：
+它引用 `0x40F2E9` 说"写 `帧+0x40`"，而逐字是
+`25262 .text:0040F2E9 mov [esi+edx*8+5D8B4h], eax` ⇒ `0x5D8B4 − 0x5D880 = 0x34`。
 
-* 新证据自己标注了两处不确定：「float/string 与 `+0x50`/`+0x54` 与头 dword 的**二元归属**只有"读取顺序 + 元素宽"的交叉，
-  **没有**"读字段→传参"的显式指令」。
-* 而改 `LOCAL_POOL_SLOTS` 会让那条守卫变红 —— 那需要**先裁决**，不是先改表（§6.4：冲突显式化，不就地改写）。
+## 收口判据（两条独立判据 + 一条旁证，**不再靠"分配顺序"猜配对**）
 
-## 对运行中的模型**零影响**（这点很关键）
+1. **装载器 `sub_40ED40`**：每一步是"读计数槽 → `operator new[]` → 写基址槽"，
+   6 处 store 逐字见 `packages/age-format/src/engine/layout.mts` 的 `LOCAL_POOL_SLOTS` 头注；
+2. **取址原语 `sub_42AEA0` 的跳转表 case 号 = operand type**：
+   case 9→`+0x34`(int) · 10→`+0x38`(float) · 11→`+0x3C`(string) · 12→`+0x40`(ptr) · 13→`+0x44`(floatPtr) · 14→`+0x48`(stringPtr)
+   （`.lst:66246/66256/66278/66288/66313/66325` 的 case 标签 + 各分支的池读取）；
+3. **旁证**：`ENC(key,0)` 的初值填在 `帧+0x34` 那一池（`.lst:25404/25407`，`edx = [esi+5EC90h]`）⇒ 那格是 int 池。
 
-那条守卫**自己**就断言了：`LOCAL_POOLS`（语义层）**不带** `base` / `count` 字段。
-⇒ 这两张表只在**布局知识**层，前沿与语义都不依赖它们。
-⇒ 所以这条冲突**不阻塞**本目标的下一步（地址空间），但**必须裁**，因为地址空间的
-`capacity` 最终要从"池容量字段"来，而"哪个字段是哪个池"正是这条冲突的核心。
+## ★ 更值钱的产物：**守卫从"绿而错"改成"会红"**
 
-## 收口判据
+旧守卫问的是"这个偏移在语料里**出现过**吗" —— 而 `+0x50`/`+0x54` 作为**别的帧字段**确实出现过
+⇒ **错表照样通过**（实测 12 pass / 0 fail）。现在改成问两件能定配对的事：
+① 装载器分配点写下的地址集合；② 6 个 type 的 case 各自读哪个地址。
+⇒ 改错一个偏移、或把两个池对调，都会当场红（`tools/mutate-check.mjs` 里有两条对应变异）。
 
-裁出来之后：
-1. `LOCAL_POOL_SLOTS` 按裁定的值改（或确认旧表对）；
-2. 那条守卫的断言与注释同步（它现在写着"与旧仓一致"—— 那是**来源**，不是**判据**）；
-3. 在本条写 `done_reason`（说明依据哪一份取证）。
+## 落地
+
+* `packages/age-format/src/engine/layout.mts` 的 `LOCAL_POOL_SLOTS` → 上述六值（逐字与两次订正的经过写在该常量头注里）；
+* 守卫用例改名并换判据：`tools/test/emulator-model.test.mjs` 的「★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）—— 且按 EA 回语料核过（装载器 6 处 store + 6 个 type 的读侧 case 双向对上）」；
+* 台账按 append-only 追加更正记录：`sub_414AC0|sub_40ED40/pool-allocation-and-capacity` 与
+  `Engine+0x5D880/local-pool-bases/code-vs-corpus/RESOLVED`（后者记的是**裁决与依据**）。

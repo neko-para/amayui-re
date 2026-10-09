@@ -21,14 +21,17 @@
 | 件 | 集合从哪来 | 字节从哪来 |
 |---|---|---|
 | `*.BIN` | `data/translations/patch.json` 的**键** | 基线（`gameInstall` 的散装 / ALF）+ patch **重建**，逐支复核 `resultSha` |
-| `*.AGF` | `tools/ui-bake/recipes/*.json` 的**配方集合** | `pnpm tools ui-bake build` 的产物 `dist/ui-bake/<块>.AGF` |
+| `*.AGF` | 清单条目 `assets/ui-agf-dist` | **入库件** `corpus/assets/ui-agf/*.AGF`（= 上一版发出去的字节，**默认不重烧**）；集合与 `tools/ui-bake/recipes/*.json` 对账 |
 | `AGERC.DLL` | 清单条目 `binary/agerc-dist` | 入库的可信产物 `corpus/assets/agerc/AGERC.DLL` |
 
 另有两件**只进发行包、不进测试树**：`corpus/assets/fonts/Amayui-CN_cnjp{,-Bold}.ttf`（字体是装进系统的，
 见 `release/安装说明.md` 第 6 步）与 `release/CHANGELOG.md` · `release/安装说明.md`（随包文本）。
 
-★ **为什么 AGF 不由本工具烧**：烧图要 headless Chrome（字形光栅化在 Chrome 里，换光栅化器就换像素），
-那是 `tools/ui-bake.mjs` 的活；本工具**只消费它的产物**，缺产物就报"先跑哪条命令"，不自己凑一张图。
+★ **为什么 AGF 不由本工具烧、默认也不重烧**：烧图要 headless Chrome（字形光栅化在 Chrome 里，
+换光栅化器就换像素）⇒ 把**默认路径**绑在浏览器上等于"没有浏览器就发不出包"，而且"这次烧出来的"
+未必等于"上次发出去的那一版"。所以缺省读**入库件**（逐字节固定）；要换成就地烧的那份：
+`--baked dist/ui-bake`（那是把新配方变成入库件的路径，固化那一步由人决定）。
+★ **两个集合都要对账**：配方有、入库件没有 ⇒ 报"先烧一次"；入库件有、配方没有 ⇒ 警告（孤儿产物）。
 
 ## 3. 测试安装树 = 《安装说明》第 1–5 步做成一条命令
 
@@ -104,7 +107,8 @@
 | | 归谁 |
 |---|---|
 | `patch.json` 的读写 | `pnpm tools patch`（本工具**只读**它） |
-| AGF 的生成与像素判据 | `pnpm tools ui-bake`（本工具**只读**它的产物） |
+| AGF 的**再生成**与像素判据 | `pnpm tools ui-bake`（本工具只读它的产物；缺省不调用它） |
+| AGF 入库件（缺省来源） | 清单条目 `assets/ui-agf-dist` + `corpus/assets/ui-agf/`（本工具只读） |
 | 字体 / AGERC 的入库与来源 | `pnpm tools corpus`（本工具**只读**入库件） |
 | 包的形状 / 随包文本规格 / 缺口 | `release/README.md`（本文件不复述） |
 | 产物落点 | `dist/`（生成物区，`.gitignore` 命中）——**产物一律不入库** |
@@ -127,4 +131,5 @@ pnpm test                            # 基建契约：tools/test/release.test.mj
 * ❌ **不要手工拼包**（手工拼出来的包没有可复现性，出问题分不清是源错了还是手抖了）；
 * ❌ **不要在测试树里改东西**（ALF 与本体同 inode；要改就改真源再重跑本命令）；
 * ❌ 不要把本工具的产物当来源（`dist/install` 与 zip 都是**下游**，真源永远在上表那三处）；
-* ✅ 缺 AGF ⇒ 先 `pnpm tools ui-bake build`（要提权；判据见 `tools/ui-bake.md` §5.1），再 `release pack`。
+* ✅ 缺 AGF（配方有、入库件没有）⇒ 先 `pnpm tools ui-bake build`（要提权；判据见 `tools/ui-bake.md` §5.1），
+  再用 `--baked dist/ui-bake` 进包，或把产物固化进 `corpus/assets/ui-agf/`（后者才改缺省行为）。

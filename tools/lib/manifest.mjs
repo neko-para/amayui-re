@@ -507,6 +507,26 @@ export function validateManifest(manifest, opts = {}) {
         if (e.storage !== 'lfs' || typeof e.dest !== 'string' || e.dest === '') continue;
         if (statKind(path.resolve(repoRoot, e.dest)) !== 'dir') continue;
         if (lfsDirs.has(e.dest)) continue;
+        // ★ 「**还没入库**」（目录里有文件，但 git 一个都还没跟踪）与「LFS 规则没了」是两件事：
+        //   前者是 `git add` 之前的状态 —— 提交时机由用户定（`AGENTS.md` §0 第 2 条），
+        //   所以它只能 warn：否则每新增一个入库件都会把门禁搞红，逼人为了过门禁去 `git add`。
+        //   后者（已跟踪、却一个 lfs 都没有）才是要红的那个缺口 —— 说明 .gitattributes 的规则被整块删了。
+        const destAbs2 = path.resolve(repoRoot, e.dest);
+        const onDisk = (() => {
+          try {
+            return fs.readdirSync(destAbs2).length;
+          } catch {
+            return 0;
+          }
+        })();
+        const trackedCount = (() => {
+          const r = gitLsFiles(repoRoot, toPosix(e.dest));
+          return r.error ? -1 : r.files.length;
+        })();
+        if (onDisk > 0 && trackedCount === 0) {
+          details.push(`warn: ${e.id}: 目录里的 ${onDisk} 个文件**还没入库**（git 未跟踪）⇒ 现在看不出 LFS 属性；\`git add\` 之后这条才会核对 → ${e.dest}`);
+          continue;
+        }
         details.push(`${e.id}: 目录型 dest 里一个 filter=lfs 的文件都没有 ⇒ .gitattributes 的 LFS 规则要么没覆盖、要么已被删掉 → ${e.dest}`);
       }
     }

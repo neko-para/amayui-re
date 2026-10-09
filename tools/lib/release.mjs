@@ -15,7 +15,8 @@
  * | 件 | 真源 | 谁是"变了"的判据 |
  * |---|---|---|
  * | `*.BIN`（453 支） | `data/translations/patch.json` 的**键** | 基线 + patch 重建出来的字节（`resultSha` 逐支复核） |
- * | `*.AGF`（10 张） | `tools/ui-bake/recipes/*.json` 的**配方集合** | `pnpm tools ui-bake build` 的产物 `dist/ui-bake/<块>.AGF` |
+ * | `*.AGF`（10 张） | **入库件** `corpus/assets/ui-agf/*.AGF`（= 上一版发布出去的那批字节） | 集合还要与 `tools/ui-bake/recipes/*.json` 对账：配方有、入库件没有 ⇒ 先烧一次 |
+ * |                  | ⛔ **默认不重烧**（`ui-bake build` 要 headless Chrome） | 要换成就地烧的那份：`--baked dist/ui-bake` |
  * | `AGERC.DLL`（1 个） | `corpus/assets/agerc/AGERC.DLL`（可信产物，见 `release/README.md` §5.2） | 入库件本身就是成品 |
  *
  * ★ **不存同步清单**：旧仓 `patch.config.json` 那种"再把上面三处的结论抄一遍"的文件，
@@ -53,6 +54,15 @@ import { buildZip, readZip } from './zip.mjs';
 export const DEFAULT_INSTALL_DIR = path.join(REPO_ROOT, 'dist', 'install');
 export const DEFAULT_INSTALL_MANIFEST = path.join(REPO_ROOT, 'dist', 'install-manifest.json');
 export const DEFAULT_PATCH_DIR = path.join(REPO_ROOT, 'dist', 'patch');
+/**
+ * AGF 的**缺省来源 = 入库件**（`corpus/assets/ui-agf/`，清单条目 `assets/ui-agf-dist`）。
+ * ★ 为什么不再默认重烧：`ui-bake build` 要 headless Chrome（`tools/ui-bake.md` §5.1），
+ *   把发布链的**默认路径**绑在浏览器上，等于"没有浏览器就发不出包"；而入库件已经是
+ *   上一版发布出去的那批字节 ⇒ 默认直接用它们，**逐字节可复现**。
+ *   要改用刚烧出来的那份：`--baked dist/ui-bake`（那也是把新配方变成入库件的**唯一**路径）。
+ */
+export const DEFAULT_AGF_DIR = path.join(REPO_ROOT, 'corpus', 'assets', 'ui-agf');
+/** 就地烧出来的产物目录（`pnpm tools ui-bake build`）；**只作显式覆盖**，不再是缺省 */
 export const DEFAULT_BAKED_DIR = path.join(REPO_ROOT, 'dist', 'ui-bake');
 export const DEFAULT_AGERC = path.join(REPO_ROOT, 'corpus', 'assets', 'agerc', 'AGERC.DLL');
 export const DEFAULT_FONTS_DIR = path.join(REPO_ROOT, 'corpus', 'assets', 'fonts');
@@ -186,11 +196,11 @@ export function loadContext(opts = {}) {
     baseDir: opts.base ?? rootFromManifest(manifest, 'gameInstall'),
     patchPath: opts.patch ?? DEFAULT_PATCH,
     subsPath: opts.subs ?? DEFAULT_SUBS,
-    bakedDir: opts.baked ?? DEFAULT_BAKED_DIR,
+    agfDir: opts.baked ?? opts.agfDir ?? DEFAULT_AGF_DIR,
     agerc: opts.agerc ?? DEFAULT_AGERC,
     fontsDir: opts.fonts ?? DEFAULT_FONTS_DIR,
     releaseDir: opts.releaseDir ?? DEFAULT_RELEASE_DIR,
-    /** AGF 进包集合：缺省 = 有配方的那批（`ui-bake` 的配方集合就是"我们改过哪些图"的真源） */
+    /** AGF 进包集合：缺省 = 有配方的那批 ∪ 入库件那批（两边不一致会各自报出来，见 `collectAgfs`） */
     blocks: opts.blocks ?? null,
     /** ALF 走硬链接（缺省）还是真拷贝：`copy` 只用在"不同卷 / 拿不到权限"的机器上 */
     alfMode: opts.alfMode === 'copy' ? 'copy' : 'hardlink',
@@ -207,6 +217,51 @@ export function loadContext(opts = {}) {
 }
 
 // ─────────────────────────────────────────────────────────── 变更集
+
+/**
+ * 收集进包的 AGF（**默认从入库件取字节，不重烧**）。
+ *
+ * 两边的**集合**都要对账，因为它们是两件事：
+ * * `tools/ui-bake/recipes/*.json` = "我们改过哪些图"（**来源**，新增配方必须先烧一次才有字节）；
+ * * `corpus/assets/ui-agf/*.AGF` = 已经**固化入库**的那批字节（**产物**，默认进包的就是它）。
+ *
+ * ⇒ 配方有、入库件没有：**problem**（先烧、再 `--baked` 用它，或把它固化进 `corpus/assets/ui-agf/`）；
+ *    入库件有、配方没有：**warning**（孤儿产物 —— 可能是有意留的上一版，也可能是配方被删了）。
+ *
+ * @param {{agfDir:string, blocks?:string[]|null}} ctx
+ * @returns {{agfs:Array<{block:string,name:string,buf:Buffer,sha256:string,file:string}>, problems:string[], warnings:string[]}}
+ */
+export function collectAgfs(ctx) {
+  const problems = [];
+  const warnings = [];
+  const dir = ctx.agfDir;
+  //   `recipeBlocks` 只为**可测**而存在（缺省 = 真配方集合）：让守卫能造"配方里没有的孤儿入库件"
+  const recipes = ctx.recipeBlocks ?? listRecipes();
+  const onDisk = new Set(
+    (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((f) => f.toUpperCase().endsWith('.AGF')).map((f) => f.slice(0, -4)),
+  );
+
+  // ★ `ctx.blocks` 是**显式收窄**（调用方说"就这些"）⇒ 不再与盘上的并集；
+  //   缺省才对账两个集合（配方 = 来源、入库件 = 产物）—— 否则"显式指定"根本收不窄。
+  const blocks = ctx.blocks ? [...ctx.blocks] : [...new Set([...recipes, ...onDisk])].sort();
+  const agfs = [];
+  for (const block of blocks) {
+    const file = path.join(dir, `${block}.AGF`);
+    if (!fs.existsSync(file)) {
+      problems.push(
+        `AGF 缺件 ${relToRepo(file)}：配方 \`tools/ui-bake/recipes/${block}.json\` 还没有对应的入库件 —— ` +
+          `先 \`pnpm tools ui-bake build\`（要 headless Chrome），再把产物固化进 ${relToRepo(dir)}/（或本次用 \`--baked dist/ui-bake\`）`,
+      );
+      continue;
+    }
+    const buf = fs.readFileSync(file);
+    agfs.push({ block, name: `${block}.AGF`, buf, sha256: sha256buf(buf), file: relToRepo(file) });
+    if (!ctx.blocks && !recipes.includes(block)) {
+      warnings.push(`${block}.AGF 在入库件里，却没有配方（\`tools/ui-bake/recipes/${block}.json\`）—— 孤儿产物？还是配方被删了？`);
+    }
+  }
+  return { agfs, problems, warnings };
+}
 
 /**
  * 算变更集（读 + 重建 + 逐支复核）。
@@ -266,18 +321,10 @@ export function collectChanged(ctx, { onProgress } = {}) {
     }
   }
 
-  // ── ② AGF：集合来自配方，字节来自 ui-bake 的构建产物（本工具不烧图） ──
-  const blocks = ctx.blocks ?? listRecipes();
-  const agfs = [];
-  for (const block of blocks) {
-    const file = path.join(ctx.bakedDir, `${block}.AGF`);
-    if (!fs.existsSync(file)) {
-      problems.push(`AGF 缺件 ${relToRepo(file)} —— 先跑 \`pnpm tools ui-bake build\`（烧图要 headless Chrome，见 tools/ui-bake.md §5.1）`);
-      continue;
-    }
-    const buf = fs.readFileSync(file);
-    agfs.push({ block, name: `${block}.AGF`, buf, sha256: sha256buf(buf), file: relToRepo(file) });
-  }
+  // ── ② AGF：**缺省字节来自入库件**，本工具不烧图 ──
+  const { agfs, problems: agfProblems, warnings: agfWarnings } = collectAgfs(ctx);
+  problems.push(...agfProblems);
+  warnings.push(...agfWarnings);
 
   // ── ③ AGERC.DLL：入库的可信产物 ──
   let agerc = null;
@@ -737,7 +784,7 @@ export const DOMAIN = {
   tool: 'tools/release.mjs',
   data: [
     'data/translations/patch.json（只读：BIN 键集 + resultSha 判据）',
-    'tools/ui-bake/recipes/*.json（只读：AGF 进包集合）· dist/ui-bake/*.AGF（只读：AGF 字节，由 ui-bake build 产出）',
+    'corpus/assets/ui-agf/*.AGF（只读：AGF 缺省字节 = 入库件）· tools/ui-bake/recipes/*.json（只读：AGF 集合对账）· dist/ui-bake/*.AGF（只读：显式 --baked 时的字节）',
     'corpus/assets/agerc/AGERC.DLL · corpus/assets/fonts/Amayui-CN_cnjp*.ttf（只读）',
     'release/CHANGELOG.md · release/安装说明.md（只读：随包文本；版本节决定 zip 名）',
     '<gameInstall>（只读：基础树；ALF 走硬链接）',
@@ -770,10 +817,10 @@ export function describe() {
     file: '（无自有 JSON：本工具只**读**三处真源、只**写** dist/ 下的生成物）',
     purpose:
       '把「当前所有变更过的资源」铺成两种形状：测试安装树（dist/install/）与发行包（dist/patch/<版本>.zip）。' +
-      '变更集 = patch.json 的键（BIN）+ ui-bake 的配方集合（AGF）+ corpus 里的 AGERC/字体；**不存在第四处同步清单**。',
+      '变更集 = patch.json 的键（BIN）+ **入库件** corpus/assets/ui-agf/*.AGF（AGF，缺省不重烧；集合与 ui-bake 配方对账）+ corpus 里的 AGERC/字体；**不存在第四处同步清单**。',
     changedSet: [
       { kind: 'bin', from: 'data/translations/patch.json 的键', note: '字节 = 基线（gameInstall 的散装/ALF）+ patch 重建；逐支复核 resultSha' },
-      { kind: 'agf', from: 'tools/ui-bake/recipes/*.json（集合）→ dist/ui-bake/<块>.AGF（字节）', note: '烧图是 ui-bake 的活（headless Chrome），本工具只消费产物' },
+      { kind: 'agf', from: 'corpus/assets/ui-agf/<块>.AGF（入库件，缺省字节）· 集合与 tools/ui-bake/recipes/*.json 对账（配方有、入库件没有 ⇒ 先烧）', note: '★ 默认不重烧（烧图要 headless Chrome）；要换成就地烧的那份用 --baked dist/ui-bake' },
       { kind: 'agerc', from: 'corpus/assets/agerc/AGERC.DLL', note: '本版用入库的可信产物；自建链见 REQ-01M411CSDXDVGTP83BPS6TNV48' },
       { kind: 'font', from: 'corpus/assets/fonts/Amayui-CN_cnjp*.ttf', note: '只进**发行包**，不进测试树（字体是装进系统的，安装说明第 6 步）' },
       { kind: 'text', from: 'release/CHANGELOG.md · release/安装说明.md', note: '只进发行包；逐字节复制' },

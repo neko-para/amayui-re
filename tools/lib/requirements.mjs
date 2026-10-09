@@ -65,7 +65,16 @@ export const CLOSURE = {
  * 引用真源：`BUDGET_COUNTS`；`pnpm tools requirements describe` 会把它印出来。
  */
 export const BUDGET_COUNTS = LIVE_STATUSES;
-export const BUDGET = { maxLinesPerNode: 80, maxNodes: 40, counts: BUDGET_COUNTS };
+/**
+ * ★ `maxNodes` 2026-10 由 **40 放宽到 100**（用户口径）。**为什么放宽、为什么仍有数**：
+ * `pnpm tools ledger coverage` 把"引擎还没分析到的函数"变成了一张**机械可复算的工作清单**
+ * （直接调用前沿 106 个、传递可达 413 个），而这类活天然是"**一函数一节点**"——
+ * 40 的上限会让"登记下一步该取证谁"变成"先删两个别的节点"，正好把预算用在错的地方。
+ * ⇒ 100 是"一张还能被人读完的待办表"的**新上界**（不是取消预算）：它一旦被顶满，
+ * 说明该收口/该降级/该把细节搬去 `data/ledger/`，而不是再加到 200。
+ * ★ 与 `maxLinesPerNode` 一样，**放宽也要有数**（原话见上一段）。
+ */
+export const BUDGET = { maxLinesPerNode: 80, maxNodes: 100, counts: BUDGET_COUNTS };
 
 /** 计入节点预算的那些节点 */
 export const budgeted = (nodes) => nodes.filter((n) => BUDGET_COUNTS.includes(n.fields.status));

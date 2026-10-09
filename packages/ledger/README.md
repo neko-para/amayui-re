@@ -13,8 +13,10 @@
 
 ## 2. 现状
 
-`package.json`（`type: module`）+ 本 README；**实现与守卫已落地**（工具层 + `tools/test/ledger.test.mjs`），
-`data/ledger/` 里**没有任何条目** —— 这是有意为之（K3 才是唯一写入者）。
+`package.json`（`type: module`）+ 本 README；**实现与守卫已落地**（工具层 `tools/lib/ledger.mjs` +
+`tools/test/ledger.test.mjs` / `ledger-coverage.test.mjs`）。条目按 §3.3 的准入门往里写
+（闸门是"**每条都绑可再校验的观察**"，不是"整本必须空"）。
+★ **条数与域分布不写在这里**（`AGENTS.md` §10）：跑 `pnpm tools ledger report`。
 
 ## 3. 三条不可谈判的点
 

@@ -34,9 +34,13 @@
  *
  * ## ★ 本批的诚实缺口（登记在需求树，不在这里糊过去）
  * * **区域的容量从哪来**：`alloc` 的 `capacity` 是**必填**的（本层不编默认值）。
- *   当前没有任何调用方传它，因为头部 6 个计数 → 6 个池的映射还没逐字取证
- *   （装载器 `.text:0040F222..0040F288` 把计数写进 帧+0x1C..+0x30，而 `LOCAL_POOL_SLOTS`
- *   的池序是 int/float/string/ptr/floatPtr/stringPtr —— 两者是否同序**未核**）。
+ *   ★ **"计数槽 → 哪个池"这条曾列为未取证，2026-10 已经机械取证**：装载器 `sub_40ED40` 的形态是
+ *   **"读计数 → `operator new[]` → 写基址"**（如 `.lst:25262`：`0x40F2BE mov eax,[esi+ecx*8+5D89Ch]`
+ *   = 帧+0x1C → `0x40F2D7 call operator new[]` → `0x40F2E9 mov [esi+edx*8+5D8B4h],eax` = 帧+0x34），
+ *   而基址一侧的池身份由取址原语 `sub_42AEA0` 的 **case 号（= operand type）** 钉死
+ *   （case 9→+0x34 int … case 14→+0x48 stringPtr）⇒ 相邻性 + case 号两件事一起把六对配光。
+ *   逐字与两次订正的经过见 `layout.mts` 的 `LOCAL_POOL_SLOTS` 头注。
+ *   剩下的只是**调用方还没把容量传进来**（实现进度，见需求树），不是"不知道从哪来"。
  * * **`*_alt` 池（memflip）**：`Engine+0x5D804/0x5D80C/…` 那 6 个"另一半"是成对交换的缓冲
  *   （取证：`.text:0041AAD9..0041AB66` 六对 `[5D800]↔[5D804]` 交换，开关是配置键
  *   `set:EnableMemFlip`）⇒ 它们是**同一批数据的两个区域**，本层能表达（两个区域 + 一次交换），

@@ -125,7 +125,10 @@ test('★ 类型表 vs 引擎 case 集：取址原语枚举的每个 type 都必
   const addr = switchTables(listing, idx, 0x42aea0, { fileLines: all })[0];
   assert.equal(addr.cases, 12, `取址原语的 case 数变了：${addr.cases}`);
 
-  // 取址原语入口用 `cmp … 0Eh` + `ja`（边界 = 14）⇒ 表覆盖 case 0..13，其中走 default 的 case 见注释
+  // ★ 取址原语入口逐字是 `sub ecx,3` + `cmp ecx,0Bh` + `ja def`（归一化后的 case **3..14**，见上面两条断言）。
+  //   ⛔ 这里原先写「入口用 `cmp … 0Eh` + `ja`（边界 = 14）⇒ 表覆盖 case 0..13」—— **那是错的**：
+  //   `cmp …, 0Eh` 是**文本原语** `sub_41B640` 的形态（它的表 15 项、default = 下标 7/13）。
+  //   （2026-10 由 `sub_41BF50` 取证包顺带核出；断言本身一直是对的，只有这条注释错。）
   const facts = entryFacts(all, addr.insnLine);
   const noLabel = [];
   for (let v = 0; v <= 0xd; v += 1) {

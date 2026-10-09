@@ -2,6 +2,18 @@
 
 - id: REQ-01M4FEEKZ5S4TYW881T5HMXGPK
 - type: bug
+- status: done
+- parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
+- verify: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）—— 且按 EA 回语料核过（装载器 6 处 store + 6 个 type 的读侧 case 双向对上）
+- repro: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何
+- severity: S2
+- done_reason: 按用户口径"冲突以最新复核结论为准"裁定为语料侧（帧+0x34/0x38/0x3C/0x40/0x44/0x48）：两条独立判据（装载器"读计数→new[]→写基址"的 6 处 store；取址原语 case 号=operand type 的配对）+ 一条旁证（ENC(key,0) 填在 +0x34 那池）。已改 LOCAL_POOL_SLOTS、把守卫判据从"偏移在语料里出现过"（绿而错）换成"双向对上"、加两条变异，并按 append-only 追加台账更正记录。
+- tags: [emulator, layout, guard]
+
+# 🐞S2 local 池基址：语料逐字 = 帧+0x34..+0x48（读侧+装载器+ENC(key,0) 三者互证），代码/守卫写 0x3C..+0x54 且守卫绿而错
+
+- id: REQ-01M4FEEKZ5S4TYW881T5HMXGPK
+- type: bug
 - status: open
 - parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
 - repro: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何
@@ -52,3 +64,16 @@ local 池的 **6 个基址偏移**与 **type 9..14 的配对**，语料逐字支
    ★ 判据：改错一个偏移，这条守卫必须**当场红**（现在是绿的）。
 3. 台账：把本条证据**追加**成一条更正记录（`replaces` 指向被更正的那条），
    并把本轮已写的对照 note（`Engine+0x5D880/local-pool-bases/code-vs-corpus`）链上。
+
+## ✅ 已收口（2026-10，按用户口径"冲突以最新复核结论为准"）
+
+**裁定：语料侧胜** —— 基址 = `帧+0x34/0x38/0x3C/0x40/0x44/0x48`（与旧仓 `fields.json` 一致，
+但**不是因为旧仓写了它**，而是因为它被两条独立判据复核过）：
+
+1. **装载器 `sub_40ED40`**：形态是"读计数 → `operator new[]` → 写基址"，6 处 store 逐字留在
+   `layout.mts` 的 `LOCAL_POOL_SLOTS` 头注里（`0x40F2E9` 那条 = 帧+0x34 —— 上一版读成了 +0x40）；
+2. **取址原语 `sub_42AEA0` 的跳转表 case 号 = operand type**（case 9→+0x34 … case 14→+0x48）；
+3. **旁证**：`ENC(key,0)` 初值填在 `帧+0x34` 那一池（`.lst:25404/25407`）⇒ 那格是 int。
+
+**改了什么**：`LOCAL_POOL_SLOTS` 六值 + 守卫**换判据**（"偏移出现过" → "装载器 store 与读侧 case 双向对上"；
+旧判据**绿而错**：`+0x50/+0x54` 是别的帧字段）+ 两条变异；台账 `…/RESOLVED` 记裁决与依据。

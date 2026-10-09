@@ -14,6 +14,14 @@
 - parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
 - tags: [emulator, ledger, guard]
 
+# 注释/守卫与二进制不一致的一批（bad opcode:0 · 重掷 12 次 · 0x192 读两个操作数 · int 配置对象 0xAA514 · sub_41BF50 无 case 14 · EVIDENCE/需求单 指针落空）+ 四处守卫欠账
+
+- id: REQ-01M4FEF7VH1N0JDT5ZVPZS204M
+- type: req
+- status: open
+- parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
+- tags: [emulator, ledger, guard]
+
 ## 背景
 
 本轮把 `apps/emulator/**` 注释里的"设计取舍"迁进知识台账（域 `Emulator`，46 条）并对注释里的
@@ -51,22 +59,17 @@
 上面 10 条逐条对齐二进制（注释改写或台账追加更正）；守卫欠账的每一条补成**会让它红**的断言
 （并往 `tools/mutate-check.mjs` 加一条变异）。
 
-## 补：`pnpm test:mutation` 的实测结果（本轮跑过全套）
+## 补：`pnpm test:mutation` 的实测结果（★ 含一处**误报**的订正）
 
-45 条变异里 **44 条按预期变红**，**1 条没红**（⇒ 那条守卫不名不副实）：
+首轮报"47 条里 1 条没红"（`0x2D2` 的 `staticUses` 0 → 7）。**订正：那条不是"没抓住"，是守卫在本机 skip** ——
+`emulator-numeric-ops.test.mjs` 的两条 corpus 用例要 `<repo>/dist/install`（`pnpm tools release install` 的产物），
+本机没有 ⇒ `node --test` **退出码 0**（skip 也是 0）⇒ 只看退出码的变异工具把它误报成"守卫没红"。
+★ 教训：**"没红"与"没跑"在退出码上是同一种表现**。
 
-| 变异 | 该抓它的守卫 | 结果 |
-|---|---|---|
-| `0x2D2` 的 `staticUses` **0 → 7** | `tools/test/emulator-numeric-ops.test.mjs#★ 静态出现次数可复算：0 次的那批必须真的是 0` | ❌ **没红** |
+**已修**（`tools/mutate-check.mjs`）：用**文件描述符重定向**取子进程输出（沙箱不能开管道 ⇒ 同 `corpus.mjs`
+的 `runCapture()`），解析 `ℹ pass/fail/skipped`：非 0 ⇒ ✅红；0 且 `skipped>0 && fail===0` ⇒ `⏭ 无法判定`
+（附 skip 原因，**不算失败**）；其余 ⇒ ❌没红。⇒ 本机现在是 **46/47 红 · 1 无法判定**，退出码 0。
 
-★ 根因（**同一个病**）：那条用例大概是**从模型里取"`staticUses === 0` 的清单"再去核**，于是把某条的
-`staticUses` 改成 7 之后，它**从待核清单里消失了** ⇒ 用例没有东西可核，静默通过。
-⇒ 正确的形状是"**从语料现算**每个 opcode 的出现次数，与模型**逐个**比"（多一个或少一个都红），
-而不是"拿模型自己的零清单去验模型自己的零"。**这就是本单的主病**：判据看起来在守，其实在复述。
-
-## 补：另一条被本轮踩到的纪律（写给下一个写锚的人）
-
-台账新锚**必须从守卫文件里复制完整用例名**（`rg "^test\(" <守卫文件>`）——本轮先写了缩写片段，
-被 `tools/test/ledger.test.mjs` 的元判据抓住 16 条（去掉空白 < 8 字符），追了 16 条撤回 + 更正记录才修好。
-★ 现状：在play的 guard 锚 126 条里**片段锚正好 15 条**（上限就是 15，全是历史遗留）⇒ **headroom = 0**：
-**下一条新锚只要还是片段，门禁立刻红**。（修法不是改历史，而是新锚一律复制完整名。）
+**仍欠**：那两条 corpus 从 `<repo>/dist/install`（**发行产物**，还会被 patch 过）取，而 `staticUses` 是按
+**原始语料**数的 ⇒ 换一台机器就可能不一致。应改成"从清单 `gameInstall` + ALF 解出原始语料"（与
+`emulator-headless-logo.assets.test.mjs` 同源），或明写"这条要在发行树在场时跑"。

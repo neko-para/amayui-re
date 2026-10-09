@@ -108,3 +108,23 @@ test('★ 两层实现必须一致：app 侧的 `rootFromAssetsJson` 与 tools �
     );
   }
 });
+
+test('★ 平台相关路径的**代码缺省值**必须来自清单（`ui-bake` / 旧仓盘点）—— 换清单就换值，缺键就响亮失败', async () => {
+  const { defaultGameDir, defaultOldRepo } = await import('../lib/ui-bake/bake.mjs');
+  // ① 换个清单 ⇒ 换个值（证明它是"读清单"而不是"代码里有个常量"）
+  const man = { schemaVersion: 1, roots: { oldRepo: '/old-repo', gameInstall: 'E:\\Games\\Eushully\\天結いキャッスルマイスター' }, entries: [] };
+  const { manifestPath } = fixture({ manifest: man, local: { roots: { gameInstall: '/game-from-local' } } });
+  assert.equal(defaultGameDir(manifestPath), '/game-from-local', '清单（+本机覆盖）说在哪就得在哪');
+  assert.equal(defaultOldRepo(manifestPath), '/old-repo');
+  // ② 清单里没有那个键 ⇒ **抛**（⛔ 不许退回某个内置平台路径 —— 那正是本条的由来）
+  const bare = fixture({ manifest: { schemaVersion: 1, roots: { staging: '.staging' }, entries: [] } });
+  assert.throws(() => defaultGameDir(bare.manifestPath), /roots\.gameInstall/, '缺键必须响亮失败并点名清单键');
+  assert.throws(() => defaultOldRepo(bare.manifestPath), /roots\.oldRepo/);
+  // ③ 真实清单：两个入口取**同一个真源**（旧仓盘点不再自己抄一份）
+  const real = loadManifest();
+  assert.equal(defaultOldRepo(), real.roots.oldRepo);
+  assert.equal(defaultGameDir(), real.roots.gameInstall);
+  // ④ 反面：`lib/paths.mjs` 不许再长出平台路径常量（那条路会成环，且是"清单被人绕开"的入口）
+  const pathsSrc = fs.readFileSync(path.join(REPO_ROOT, 'tools', 'lib', 'paths.mjs'), 'utf8');
+  assert.ok(!/DEFAULT_OLD_REPO\s*=/.test(pathsSrc), '`tools/lib/paths.mjs` 不许再硬编码旧仓路径（真源是清单 roots.oldRepo）');
+});

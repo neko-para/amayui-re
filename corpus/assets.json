@@ -1,1130 +1,1157 @@
 {
-  "schemaVersion": 1,
-  "_doc": "本文件是**不透明数据**：字段语义 / 枚举 / 不变量 / 怎么查怎么改 见 `pnpm tools corpus describe`（说明书 corpus/assets.md）。不要手改。",
-  "roots": {
-    "oldRepo": "E:\\Games\\Eushully\\天結",
-    "gameInstall": "E:\\Games\\Eushully\\天結いキャッスルマイスター",
-    "staging": ".staging",
-    "gameSaves": "C:\\Users\\liaoh\\AppData\\Local\\Eushully\\天結いキャッスルマイスター\\SAVE"
-  },
-  "entries": [
+ "schemaVersion": 1,
+ "_doc": "本文件是**不透明数据**：字段语义 / 枚举 / 不变量 / 怎么查怎么改 见 `pnpm tools corpus describe`（说明书 corpus/assets.md）。不要手改。",
+ "roots": {
+  "oldRepo": "E:\\Games\\Eushully\\天結",
+  "gameInstall": "E:\\Games\\Eushully\\天結いキャッスルマイスター",
+  "staging": ".staging",
+  "gameSaves": "C:\\Users\\liaoh\\AppData\\Local\\Eushully\\天結いキャッスルマイスター\\SAVE"
+ },
+ "entries": [
+  {
+   "id": "agent/plugins",
+   "kind": "agent-infra",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
     {
-      "id": "agent/plugins",
-      "kind": "agent-infra",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "plugins/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移：DSH 插件位置自由、靠软链接重新注册（确切命令待 M6 补进 AGENTS.md）",
-      "blocks": [
-        "M6"
-      ]
-    },
-    {
-      "id": "agent/skills",
-      "kind": "agent-infra",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": ".agents/skills/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移：技能几乎都要重新适配；新的必须落在固定的 .agents/skills/（DSH 发现路径）",
-      "blocks": [
-        "M6"
-      ]
-    },
-    {
-      "id": "app/emulator-old",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "app/amayui-emulator/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移（用户口径：apps 全部按新结构重写）；10 个跨域守卫寄生在其 test/ 下，重写时拆回各域",
-      "blocks": [
-        "M4"
-      ]
-    },
-    {
-      "id": "app/inspector-old",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "app/amayui-inspector/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移（.NET 10 / C# / WPF / CLI / Core）",
-      "blocks": [
-        "M7"
-      ]
-    },
-    {
-      "id": "app/wiki-archived",
-      "kind": "asset",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "app/amayui-toolkit/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：wiki（Vite+React+MUI，GitHub Pages）—— 不迁移，archive 在旧仓"
-    },
-    {
-      "id": "assets/fonts",
-      "kind": "asset",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不迁移：派生 cnjp 分发字体与 Sarasa 上游 7z 已迁入 corpus/assets/fonts；本条目只指向旧仓 res/fonts/ 原处"
-    },
-    {
-      "id": "assets/fonts-dist",
-      "kind": "asset",
-      "role": "module",
-      "storage": "lfs",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/Amayui-CN_cnjp.ttf"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/Amayui-CN_cnjp-Bold.ttf"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z"
-        }
-      ],
-      "dest": "corpus/assets/fonts",
-      "readOnly": true,
-      "consume": "只读：Amayui-CN_cnjp*.ttf 是 cnjp 分发字体（渲染简体所需，模拟器直接读），也是 `pnpm tools fonts verify` 的校验基准；两个 Sarasa 7z 是上游基底，解压产物 gitignore（见 .gitignore）：派生链 = 7z 解压（前置）+ `pnpm tools fonts build`（旧链 = font_CN_JP.py；三步变换 / 判据 / 序列化口径见 tools/fonts.md）",
-      "blocks": [
-        "M4",
-        "M5"
-      ],
-      "note": "WenQuanYi 系列被有意排除（已弃用、可回退）；中间产物 SarasaGothicSC-Regular_cnjp.ttf 不单独取，它在 SC 7z 里"
-    },
-    {
-      "id": "assets/samples-agf",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "gameInstall",
-          "path": "MI042.AGF",
-          "sha256": "7b76b4dd6b149dfa613a5156841e69f81f64ee8f27e2ac3e07aa0770c917e95a"
-        },
-        {
-          "root": "gameInstall",
-          "path": "MI040.AGF",
-          "sha256": "37d37be60d2a3aa38f8973284d9e45860af169d064b94ba432b6952d3f4d9ff4"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO002.AGF",
-          "sha256": "8369f7e1c35854ec7d179590ff07ae0e10d71391cbf070e9b8f0356650359beb"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不入库：必须覆盖 AGF 的两条分支 —— MI042 的 meta 是压缩形态（1080→159）、MI040 是原样形态（压不小才原样）；SO002 更小",
-      "blocks": [
-        "M2"
-      ],
-      "note": "ACIF 的 alpha 实测**也会压缩**（旧仓注释只说 meta/body），MI042/MI040 两件都带 ACIF；SO002 取旧仓 res/images 的**交付版**（完整 256 色调色板、body 原样 163840），而不是 install/_extracted 里那个 8bpp 截断调色板变体"
-    },
-    {
-      "id": "assets/samples-alf",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "gameInstall",
-          "path": "APPEND02.AAI",
-          "sha256": "a379153b3ef01fe14ee734727b4e6b0e31094ea784810000e72de5d7e6e50cbb"
-        },
-        {
-          "root": "gameInstall",
-          "path": "APPEND02.ALF",
-          "sha256": "8a84974f603a867783ce3c38f6990a406d7b5d03c16194ea31aa94c736d929f5"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、**不入库**（用户口径：ALF/AAI 是很��的原始游戏文件）：ALF 的索引与数据体必须成对才能验证载荷搬运，取最小的归档家族（索引 5.8 KB + 数据体 49.4 MB）；sha256 是唯一能证明它没被换过的凭据",
-      "blocks": [
-        "M2"
-      ],
-      "note": "测试在文件缺席时**跳过**；判据的实测证据记在需求节点的凭据段，选样口径见 corpus/assets/samples.md"
-    },
-    {
-      "id": "assets/samples-asm",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "gameInstall",
-          "path": "$1$OFINIT.BIN",
-          "sha256": "44aa521713e3de94fe190ce065b5067bbbab60d962e8a7d7f7eb59c054c90091"
-        },
-        {
-          "root": "gameInstall",
-          "path": "READICON.BIN",
-          "sha256": "5ce9df6161bfbb61e825208ff396addb1a335f030d03ce77aad4542772ed2832"
-        },
-        {
-          "root": "gameInstall",
-          "path": "PLINIT.BIN",
-          "sha256": "ebcea961fc8f18ddaaf1d8f76ce0c6b67b1a2379c2c23cdb436bd323e4e979dc"
-        },
-        {
-          "root": "gameInstall",
-          "path": "INFOFA.BIN",
-          "sha256": "5e9fa2f29d4e9686bdafaa4b25ff5fbae096b5249a207923e054dabe27aa8101"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不入库：小件（284/440 B）验证极短脚本、中等件（21/52 KB）验证指令流与字符串；反汇编→重汇编必须逐字节回到原文件",
-      "blocks": [
-        "M2"
-      ]
-    },
-    {
-      "id": "assets/sarasa-upstream",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z",
-          "sha256": "bde7727d6f08e16667dd9a6ee9ad93c399b53da38d2e26dbead8b4b382b71d16"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z",
-          "sha256": "1eaa4017a1843179469827e6d32fa7a79b57ca2a439df6f99ec5857876ba1071"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不迁移：上游发行包（Sarasa Gothic SC/J 官方 TTF 1.0.40），登记 sha256 是为了能从上游复取同一版；cnjp 替换用的是 SC 那一份"
-    },
-    {
-      "id": "assets/ui-images",
-      "kind": "asset",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/images/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不迁移：中间版本 PNG 与编译后的 AGF 都留在旧仓；生效版 PNG 已迁入 corpus/assets/ui-images（见该目录 versions.json）",
-      "note": "落点已定：corpus/assets/ui-images/（M1b）——从旧仓 res/images 取 10 张汉化完成图的生效版 + 7 张未汉化图的 -0 原图 + 8 个 E 系列渲染参考块；中间版本 PNG 与编译后的 AGF 都不入库"
-    },
-    {
-      "id": "assets/ui-images-baked",
-      "kind": "asset",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO001.AGF",
-          "sha256": "689e89452c9aabfe7b13a9423e72a62cc1dfe9e81b4a1133246c36859080222b"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO002.AGF",
-          "sha256": "8369f7e1c35854ec7d179590ff07ae0e10d71391cbf070e9b8f0356650359beb"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO009A.AGF",
-          "sha256": "3a45335ec4cbfd33f99dbfc559899f3a276289aead6e3b023d67201815f059e5"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO009B.AGF",
-          "sha256": "bda4781840f846c4210d157f897b1bf575b95c71767476f513ac521286c99f79"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO017.AGF",
-          "sha256": "90b68a91bb031d94746384a3c489d6d35732675fad4658ac52d0145ddc2e0036"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO020.AGF",
-          "sha256": "d580ce6ec8e79d5f38c4fbe0d55702fa622dfbf922e147308e64cc1fc8bed533"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO021.AGF",
-          "sha256": "d71d4ae88fd81afd42dc076d318879fa41623c9efebefacb9f2d497977117a63"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO025.AGF",
-          "sha256": "0bac795dab9b59767fa24f2e8244d265ee475774d602321beaef235d018f5347"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO030.AGF",
-          "sha256": "df1e8f0ee7bae344edc18ba6d83a8f8e1e2ab516161d4aabb62849c2a592a06f"
-        },
-        {
-          "root": "oldRepo",
-          "path": "res/images/SO039.AGF",
-          "sha256": "253b201b1e39599f0f21bb9ae41bd7e47bbe48c04d67d96d1b8d4bc27b7208b6"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不入库（编译产物）：由 corpus/assets/ui-images/ 的生效版 PNG 烘焙出来、注入 install overlay 的那一版 AGF；sha256 是日后重建链能否复现同一份产物的唯一参照",
-      "blocks": [
-        "M2"
-      ],
-      "note": "旧仓 patch/AGF/ 与这 10 个文件同尺寸（同一批产物的副本），但 patch/ 整个目录有意不进新仓台账"
-    },
-    {
-      "id": "binary/age-original",
-      "kind": "binary",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "gameInstall",
-          "path": "AGE.EXE__dumped.EXE",
-          "sha256": "412393ff8df29644da380c3718d97920c9ef7c1a7c28d4bf1d99218f37e4ebc3"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不迁移：PE 节表未还原，直接分析会丢数据段；本轮与 M1 都不入仓（用户口径）",
-      "note": "MD5 见 docs/02-engine/README.md（哈希是派生信息，不重复写进清单）"
-    },
-    {
-      "id": "binary/age-sectfix",
-      "kind": "binary",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "raw-parts/AGE.EXE__dumped.sectfix.EXE",
-          "sha256": "1937f08628efcebbf4cdcf8fbb0c066a83b4c579cd9925ca7b441de343d3b134"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不迁移：它是反汇编语料的真前身（新基线二进制）；本轮与 M1 都不入仓（用户口径）",
-      "note": "与原文件仅节表 24 字节不同；节表修补口径见 docs/02-engine/README.md"
-    },
-    {
-      "id": "binary/agerc-debug-unpacked",
-      "kind": "binary",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "raw-parts/DATA1/AGERC.DLL",
-          "sha256": "f48d1c0fc09b486b003ebd829cf13c9970291a6eaeab13c6d7d0e68e61a297f4"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：不带壳的调试版（有调试入口）⇒ 当前 AGERC 语料的真前身",
-      "note": "AGERC.DLL.c/.lst 就是从它导出的；AGERC.DLL 与中间产物 SarasaGothicSC-Regular_cnjp.ttf 都在 corpus/assets/fonts/SarasaGothicSC-TTF-1.0.40.7z 里，可按需解压（不必回旧仓取）"
-    },
-    {
-      "id": "binary/agerc-modified-install",
-      "kind": "binary",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "install/AGERC.DLL",
-          "sha256": "6241de666d2f533b66bd48ccd09fa5277acec6473bf099c7b81b0b2c113f977a"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：文案被纯二进制替换过 ⇒ 不能作为语料来源（旧仓那两对 AGERC 语料就是它的导出）",
-      "note": "留档是为了解释 disasm/superseded-agerc-oldsrc 为什么作废"
-    },
-    {
-      "id": "binary/agerc-packed",
-      "kind": "binary",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "gameInstall",
-          "path": "AGERC.DLL",
-          "sha256": "5f318955f605818965e58d0da2bf9a2a4cef7770758d17e98600ef269035604b"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不迁移：带壳发布版；旧仓 raw/ 是指向同一目录的符号链接",
-      "note": "反汇编不用它（带壳）"
-    },
-    {
-      "id": "disasm/bundle",
-      "kind": "disasm-corpus",
-      "role": "baseline",
-      "storage": "lfs",
-      "origin": [
-        {
-          "root": "staging",
-          "path": "AGE.EXE__dumped.sectfix.EXE.c"
-        },
-        {
-          "root": "staging",
-          "path": "AGE.EXE__dumped.sectfix.EXE.lst"
-        },
-        {
-          "root": "staging",
-          "path": "AGERC.DLL.c"
-        },
-        {
-          "root": "staging",
-          "path": "AGERC.DLL.lst"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "binary/age-sectfix",
-          "tool": "Hex-Rays",
-          "note": "基线 .c/.lst 的导出源"
-        },
-        {
-          "ref": "binary/agerc-debug-unpacked",
-          "tool": "Hex-Rays",
-          "note": "AGERC .c/.lst 的导出源（脱壳调试版；不是被改过文案的 install/AGERC.DLL）"
-        }
-      ],
-      "dest": "corpus/disasm/disasm-20260930.zip",
-      "readOnly": true,
-      "recipe": "tools/disasm-recode.mjs",
-      "consume": "只读归档：解压到 corpus/disasm/files/ 后由 agent 直接读；锚点锚二进制 EA，语料只提供 EA→行号映射；禁止任何符号改写",
-      "blocks": [
-        "M1"
-      ],
-      "note": "M1 已完成：4 个文件（sectfix 两个 + AGERC 两个，均 UTF-8+LF）已打成 zip 入库（LFS）。原件在 .staging/ 时按原件跑断言；原件不在时由 zip 反解回原件并用本清单记录的 sha256 自证（pnpm tools disasm restore 可把原件还原）"
-    },
-    {
-      "id": "disasm/excluded",
-      "kind": "disasm-corpus",
-      "role": "deferred",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "staging",
-          "path": "AGE.EXE__dumped.EXE.c",
-          "sha256": "a7d4dc2cd266586de86265b828e7e71e370a981763a1395997888ff4be490359"
-        },
-        {
-          "root": "staging",
-          "path": "AGE.EXE__dumped.EXE.lst",
-          "sha256": "40110c4c9e85479d8194b35ad4e7144a523a735526684bde24a85737f47962f9"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/天结_unpacked.exe.c",
-          "sha256": "0e5f6cff2e7eac0fe1911f11ee552fe5794947d7aefe0c6952b32381fb97e0a5"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/天结_unpacked.exe.lst",
-          "sha256": "6f4d72a7bb2edd006c00890beb92ea8f8fe2b7a956c84525d05f7675969a8c27"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/天结_unpacked.exe_utf8.c",
-          "sha256": "0f21fc7f9a88eb455adbd87f1c55e174fd690d1e147ab1460ff3c1fe72dfdfb4"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/天结_unpacked.exe_utf8.lst",
-          "sha256": "d741ccf982554b380463a2e6062d13ec2d00c9475d8fc4f873893f20f4ed6124"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/defs.h",
-          "sha256": "c9508e21af4393b22a2acc620e93c44f5d99747089f5912a17c0f3beea88973f"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/engine.hpp",
-          "sha256": "ff155189d66a7c63bfeb57be9ad8c649713bca2fb758c5167840b69e19dc5442"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/hxclang_prelude.h",
-          "sha256": "7cee33b2616a9e2bd59ebcf43ebed7c563eff0bd8f53f75d1f371e1d81abb652"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "明确不带：只作为「为什么带的是另一份」的证据；其中 _utf8.c 被 sanitize_symbols.py 改过，字符串层结论不可用",
-      "note": "修补前的 sectfix 导出已被取代（桌面那两个已移入 .staging/ 留档）；旧 exe 那对与 3 个头文件留在旧仓"
-    },
-    {
-      "id": "disasm/raw-source-agerc",
-      "kind": "disasm-corpus",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "staging",
-          "path": "AGERC.DLL.c",
-          "sha256": "f213ac2e041b813f1f7ead1c1266435ab50ae9d98d4ebe398d65cb2ab5920aad"
-        },
-        {
-          "root": "staging",
-          "path": "AGERC.DLL.lst",
-          "sha256": "f70bf5589692988987ae138a51a43c51f83056e22bbff4bdeca3cc791e495e71"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "binary/agerc-debug-unpacked",
-          "tool": "Hex-Rays"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "转码前的忠实参照（CP932 + 全 CRLF，单一编码、无 U+FFFD）：只用来复核「没被改过」，不参与构建",
-      "blocks": [
-        "M1"
-      ],
-      "note": "与旧仓 engine/AGERC.DLL.{c,lst} 不同：那份是混编（CP932 + GBK 文件名行 + UTF-16LE 宽字符串），裸按 CP932 解码会掉字符"
-    },
-    {
-      "id": "disasm/raw-source-sectfix",
-      "kind": "disasm-corpus",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "staging",
-          "path": "AGE.EXE__dumped.sectfix.EXE.c",
-          "sha256": "75ba5371aca6fe7f86b6ed217f06d53069f4f4dd653e5300b7fc8a4a2c97bd9e"
-        },
-        {
-          "root": "staging",
-          "path": "AGE.EXE__dumped.sectfix.EXE.lst",
-          "sha256": "931c576f73bd33b955dbf35e6979a03ecfd98ef21c98350db35c669632da1352"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "binary/age-sectfix",
-          "tool": "Hex-Rays"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "转码前的忠实参照（CP932 + 全 CRLF）：只用来复核「没被改过」，不参与构建",
-      "blocks": [
-        "M1"
-      ],
-      "note": "投递原件只在 .staging/ 过一手、不入库；这里记 sha256 就是为了让「逐行全等」可复核"
-    },
-    {
-      "id": "disasm/superseded-agerc-oldsrc",
-      "kind": "disasm-corpus",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "engine/AGERC.DLL.c",
-          "sha256": "911de2f79d47506de5871d2be8d4840919d5b7737d653020f4bdef27858875f9"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/AGERC.DLL.lst",
-          "sha256": "0438570f02d998a96803002343b0aa057d8604fcade7678ec1528b77e4b357a6"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/AGERC.DLL_utf8.c",
-          "sha256": "96f895056bdbd39e5689f695ce7c8d4ba58f6182663c493e4e9daf0b662292da"
-        },
-        {
-          "root": "oldRepo",
-          "path": "engine/AGERC.DLL_utf8.lst",
-          "sha256": "d1314be663d5c459049ed44acff831264298a31ab0ee8ec85991aa6c7a8a4b48"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "binary/agerc-modified-install",
-          "tool": "Hex-Rays"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "禁止引用：反汇编目标是被改过文案的 install/AGERC.DLL，已被基于脱壳调试版的新导出取代",
-      "note": "留档只为解释「为什么旧结论会不对」；新语料见 disasm/raw-source-agerc 与 disasm/bundle"
-    },
-    {
-      "id": "fixtures/save-samples",
-      "kind": "fixture",
-      "role": "fixture",
-      "storage": "lfs",
-      "origin": [],
-      "dest": "corpus/fixtures/",
-      "readOnly": true,
-      "consume": "真玩家存档样本（SAVE76/77/78/79 的 .DAT + .STH + README）；落 corpus/fixtures/，走 LFS",
-      "blocks": [
-        "M1"
-      ],
-      "note": "8 个 .DAT/.STH（槽 76/77/78/79，全部走 LFS）：文件级事实（各槽在游戏里的定位 where、每个文件的源 mtime）在 corpus/fixtures/samples.json；之所以要记 mtime 是因为槽头 +264 起七个 u16 就是存档时刻、而 git 不保存 mtime。★ 固化资源：没有加工链、也没有可再取的上游 ⇒ 不登记 origin（见 pnpm tools corpus describe 的「自足条目」）"
-    },
-    {
-      "id": "game/install-dir",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "gameInstall",
-          "path": "."
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记路径，不搬：外部游戏安装目录；需要用符号链接引用时链接本身 gitignore、不 track"
-    },
-    {
-      "id": "game/raw-parts",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "raw-parts/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记路径，不搬：外部素材的分解件（含 DATA1/ 与两个已知二进制）",
-      "note": "外部索引改造后可能不再需要"
-    },
-    {
-      "id": "game/translated-install",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "install/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记路径，不搬：翻译产物编译后合并的目录",
-      "note": "用户口径：先保留、后续重新设计"
-    },
-    {
-      "id": "knowledge/analysis",
-      "kind": "knowledge-source",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "analysis/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "禁止直接引用：机器台账真源，需清理 / 校验 / 重分类（见 docs/00-origin/knowledge-rebuild.md）",
-      "blocks": [
-        "K1",
-        "K2",
-        "K3"
-      ]
-    },
-    {
-      "id": "knowledge/docs",
-      "kind": "knowledge-source",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "docs-new/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "禁止直接引用：叙述层文档（含跨域活文档），需清理 / 重分类",
-      "blocks": [
-        "K1",
-        "K2",
-        "K3"
-      ]
-    },
-    {
-      "id": "knowledge/opcode-table-source",
-      "kind": "knowledge-source",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "scripts/asm/opcodes.json",
-          "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记、不入库：旧三方工具导出的指令表（AGE 脚本格式层数据的**待复核副本**）。它是 pnpm tools opcodes derive 的来源 ⇒ 来源可追溯、不依赖旧仓在线",
-      "blocks": [
-        "K1",
-        "K2",
-        "K3"
-      ],
-      "note": "handler 是 opcode → 引擎函数的**指针**（含 sub_XXXXXXXX、无 EA）—— 它是「从引擎机械复核 argc」的唯一入口，故不得随手丢；argc 的权威来自引擎而非本表（复核口径见 packages/age-format/README.md §3.3）；name/aliases 是三方工具旧资产、零独特信息，只作文本层兼容"
-    },
-    {
-      "id": "knowledge/tickets",
-      "kind": "knowledge-source",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "tickets/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "禁止直接引用：票据台账；带 tests[] 的票是 B 类抢救的主要来源",
-      "blocks": [
-        "K1",
-        "K2",
-        "K3"
-      ]
-    },
-    {
-      "id": "native/host-input-old",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "native/host-input/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移（N-API + CMake + LFS prebuilds；不进 npm workspaces）",
-      "blocks": [
-        "M4"
-      ]
-    },
-    {
-      "id": "reference/design-discussion",
-      "kind": "knowledge-source",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "DESIGN.md",
-          "sha256": "af28b41af61911fb12ab338d5ba9d876cf41107c49aaf35ff51cb956ae89e824"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "禁止直接引用：工作流与知识消费的设计讨论（只作背景）",
-      "blocks": [
-        "K1"
-      ]
-    },
-    {
-      "id": "reference/old-agents-md",
-      "kind": "knowledge-source",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "AGENTS.md",
-          "sha256": "49a2c37f410da417c1f4922f686779019f8107f65a9839e918acbf0a17b1801d"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "禁止直接引用：旧仓的环境 / 权限须知（只作背景；新仓的口径以本仓 AGENTS.md 为准）"
-    },
-    {
-      "id": "tooling/format-scripts",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "scripts/asm/"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/alf/"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/agf/"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/uimap/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移：AGE 容器格式工具（M2 的目标能力）",
-      "blocks": [
-        "M2"
-      ]
-    },
-    {
-      "id": "tooling/ledger",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "scripts/build-callgraph.mjs",
-          "sha256": "caf96f0d2f259c61e382b400e3f5e9b117593cd38c5c12b26fecc334732184de"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/build-capabilities.mjs",
-          "sha256": "5ac619df25fa5b47d8fa04a5b5ad594bb72095ee7b3d00e5394a24bcb4ea125f"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/build-doc-index.mjs",
-          "sha256": "8e8c257b0b0e9ebe81e6786cfc64afa5f600565c0a723cfbc6d917278ca43363"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/build-opcode-gaps.mjs",
-          "sha256": "26121b512a2ca42c460ced624651223512780b539ba25b7c36a753593a23de76"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/build-opcode-table.mjs",
-          "sha256": "7248f6f33d6f65b32ad68e8b87c8e224216bb8f65ed1a74f2e08b93ee88c2869"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/build-scripts.mjs",
-          "sha256": "831e34781d7360dcc9a4f5144f3c390b37aa27f0455ec2b3154041ec38eabe2f"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/build-status.mjs",
-          "sha256": "4d6675a242a09755c0f9ac268edfedb9f0732be94620f7680745f64a07ae035f"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/build-tickets.mjs",
-          "sha256": "fe584ec15975b4beb6a02967a7c6cbce9d90e15d0197060891eb5d098b5480ce"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/journal.js",
-          "sha256": "c8de597145211a3b3ade3a5362599d0535c7d2045789a5da6962494452a4e101"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移：台账生成器；台账形态要换（真源/派生不分区是旧仓的症状之一）",
-      "blocks": [
-        "M3",
-        "M6"
-      ]
-    },
-    {
-      "id": "tooling/re",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "scripts/re/"
-        },
-        {
-          "root": "oldRepo",
-          "path": "scripts/font_CN_JP.py",
-          "sha256": "258d3bd64b3b49dc2d5bac0f2bcaab71e6d5a5d4c47b79729af06a2e206b1c20"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移：逆向脚本；⚠ 含会改坏语料的 sanitize_symbols.py（见 decisions.md §4）",
-      "blocks": [
-        "M6"
-      ]
-    },
-    {
-      "id": "tooling/translation-pipeline",
-      "kind": "tooling",
-      "role": "rebuild",
-      "storage": "deferred",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "scripts/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "重写参考，不迁移：整个 scripts/（god dir）的参考入口 —— 翻译管线 / 数据导出 / 引擎精化都在这里",
-      "blocks": [
-        "M5",
-        "M6"
-      ],
-      "note": "旧仓 scripts/ 一个目录混了 6 类关注点；新仓必须按域拆开，不要照抄结构"
-    },
-    {
-      "id": "tools/thirdparty",
-      "kind": "tooling",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "tools/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "只登记：第三方工具链（大多已在旧仓 ignore）"
-    },
-    {
-      "id": "translation/baseline",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "data/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "日文只读基线：仅作 M5 的迁移来源，本轮不搬、不改",
-      "blocks": [
-        "M5"
-      ]
-    },
-    {
-      "id": "translation/patch",
-      "kind": "asset",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "patch/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "不迁移、不进新仓台账：旧仓 patch/ 整个目录（AGF / BIN / AGERC.DLL / CHANGELOG.md / patch.config.json / README-测试版说明.md）被有意跳过；打包清单与产物待需求树「翻译环境重建」节点重新设计"
-    },
-    {
-      "id": "translation/subs-cn-jp",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "git",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "res/subs_cn_jp.json"
-        }
-      ],
-      "dest": "data/translations/subs-cn-jp.json",
-      "readOnly": true,
-      "consume": "只读：脚本写入时把编不进 cp932 的简体字换成同码位日文写法占位，渲染时由 cnjp 字体还原；与字体构建是同一方案的两半，必须成对演进",
-      "blocks": [
-        "M5"
-      ],
-      "note": "51 KB 纯文本、机器可校验；说明书 data/translations/subs-cn-jp.md"
-    },
-    {
-      "id": "translation/translated",
-      "kind": "asset",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "src/"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "译文：与 data/ 同构；数据模型待定，M5 前拍板（见 docs/01-translation/README.md）",
-      "blocks": [
-        "M5"
-      ]
-    },
-    {
-      "id": "knowledge/opcode-handlers",
-      "kind": "knowledge-source",
-      "role": "reference",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "scripts/asm/opcodes.json",
-          "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "**继承**：opcode → 引擎函数的映射（574 条 / 543 个不同函数）是**引擎观测**，与 argc 同类；格式层不需要它，但它是「从引擎机械复核 argc」的入口 ⇒ 登记它，别丢",
-      "blocks": [
-        "K1",
-        "K2",
-        "K3"
-      ],
-      "note": "⚠ 它现在**不满足准入**：值是 IDA 函数名（sub_XXXXXXXX）、**没有 EA** ⇒ 无法按「锚点锚 EA」重校验 ⇒ 只能 external-only。K 线的第一件事就是从引擎分派表把它重挂成 EA；挂上之前不得进台账"
-    },
-    {
-      "id": "knowledge/opcode-status-labels",
-      "kind": "knowledge-source",
-      "role": "archived",
-      "storage": "external-only",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "scripts/asm/opcodes.json",
-          "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
-        }
-      ],
-      "dest": null,
-      "readOnly": true,
-      "consume": "**不继承**：status（`已核对`/`仅映射`/`已核对（2026-09）`）是**人工自述标签**，与 handler/argc 不同类 —— 它没有机械复核路径，删掉它不损失任何可复核信息",
-      "note": "与 knowledge/opcode-handlers 同一份文件、同一次观测；本条只为「为什么单单它被丢掉」留痕。本仓口径：自述标签不可信（docs/00-origin/knowledge-rebuild.md §1.1）"
-    },
-    {
-      "id": "translation/patch-data",
-      "kind": "asset",
-      "role": "rebuild",
-      "storage": "git",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "install/"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "translation/translated",
-          "tool": "pnpm tools patch extract",
-          "note": "旧仓 src/ 是文本视图；这里提取的是同一批译文的**可执行形态**（相对原版 BIN 的叠加层）"
-        },
-        {
-          "ref": "translation/subs-cn-jp",
-          "tool": "pnpm tools patch extract",
-          "note": "中文 → BIN 写法的映射是构建的一环；字典指纹写进 patch 的 subsSha"
-        }
-      ],
-      "dest": "data/translations/patch.json",
-      "readOnly": true,
-      "consume": "★ 翻译域**唯一入库的资产**：原版 BIN + 本件 ⇒ 逐字节重建汉化 BIN（`pnpm tools patch verify`）。data / src 视图都由它实时算出，不入库；旧仓 install/ 只是**提取期**的产物根，之后不再引用。schema 与不变量见 `pnpm tools patch describe`",
-      "blocks": [
-        "M5"
-      ],
-      "note": "说明书 data/translations/patch.md；控制脚本 tools/patch.mjs（模型 tools/lib/patch.mjs、基线解析层 tools/lib/bin-source.mjs）；设计与观测 docs/01-translation/patch-design.md"
-    },
-    {
-      "id": "binary/agerc-dist",
-      "kind": "binary",
-      "role": "module",
-      "storage": "lfs",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "patch/AGERC.DLL"
-        }
-      ],
-      "derivedFrom": [
-        {
-          "ref": "binary/agerc-debug-unpacked",
-          "tool": "Resource Hacker（重建 DIALOG/MENU）+ scripts/patch-menu.js（定点字节补丁）",
-          "note": "迁移期一次性：两条链叠加出的产物；本仓尚未重建该链"
-        }
-      ],
-      "dest": "corpus/assets/agerc/AGERC.DLL",
-      "readOnly": true,
-      "consume": "只读：当前发布用的 AGERC.DLL 可信产物（旧仓 patch/ 随补丁发布的那一份；与 install/AGERC.DLL 同 sha256）。★ 本仓尚无自建链 ⇒ 先按可信产物使用；重建见需求树（设计见 docs/01-translation/agerc-design.md）",
-      "note": "可信的判据 = 清单里 binary/agerc-modified-install 记的 sha256；tools/test/agerc-artifact.test.mjs 每次核对入库件与它一致"
+     "root": "oldRepo",
+     "path": "plugins/"
     }
-  ]
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移：DSH 插件位置自由、靠软链接重新注册（确切命令待 M6 补进 AGENTS.md）",
+   "blocks": [
+    "M6"
+   ]
+  },
+  {
+   "id": "agent/skills",
+   "kind": "agent-infra",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": ".agents/skills/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移：技能几乎都要重新适配；新的必须落在固定的 .agents/skills/（DSH 发现路径）",
+   "blocks": [
+    "M6"
+   ]
+  },
+  {
+   "id": "app/emulator-old",
+   "kind": "tooling",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "app/amayui-emulator/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移（用户口径：apps 全部按新结构重写）；10 个跨域守卫寄生在其 test/ 下，重写时拆回各域",
+   "blocks": [
+    "M4"
+   ]
+  },
+  {
+   "id": "app/inspector-old",
+   "kind": "tooling",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "app/amayui-inspector/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移（.NET 10 / C# / WPF / CLI / Core）",
+   "blocks": [
+    "M7"
+   ]
+  },
+  {
+   "id": "app/wiki-archived",
+   "kind": "asset",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "app/amayui-toolkit/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记：wiki（Vite+React+MUI，GitHub Pages）—— 不迁移，archive 在旧仓"
+  },
+  {
+   "id": "assets/fonts",
+   "kind": "asset",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "res/fonts/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不迁移：派生 cnjp 分发字体与 Sarasa 上游 7z 已迁入 corpus/assets/fonts；本条目只指向旧仓 res/fonts/ 原处"
+  },
+  {
+   "id": "assets/fonts-dist",
+   "kind": "asset",
+   "role": "module",
+   "storage": "lfs",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "res/fonts/Amayui-CN_cnjp.ttf"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/fonts/Amayui-CN_cnjp-Bold.ttf"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z"
+    }
+   ],
+   "dest": "corpus/assets/fonts",
+   "readOnly": true,
+   "consume": "只读：Amayui-CN_cnjp*.ttf 是 cnjp 分发字体（渲染简体所需，模拟器直接读），也是 `pnpm tools fonts verify` 的校验基准；两个 Sarasa 7z 是上游基底，解压产物 gitignore（见 .gitignore）：派生链 = 7z 解压（前置）+ `pnpm tools fonts build`（旧链 = font_CN_JP.py；三步变换 / 判据 / 序列化口径见 tools/fonts.md）",
+   "blocks": [
+    "M4",
+    "M5"
+   ],
+   "note": "WenQuanYi 系列被有意排除（已弃用、可回退）；中间产物 SarasaGothicSC-Regular_cnjp.ttf 不单独取，它在 SC 7z 里"
+  },
+  {
+   "id": "assets/samples-agf",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "gameInstall",
+     "path": "MI042.AGF",
+     "sha256": "7b76b4dd6b149dfa613a5156841e69f81f64ee8f27e2ac3e07aa0770c917e95a"
+    },
+    {
+     "root": "gameInstall",
+     "path": "MI040.AGF",
+     "sha256": "37d37be60d2a3aa38f8973284d9e45860af169d064b94ba432b6952d3f4d9ff4"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO002.AGF",
+     "sha256": "8369f7e1c35854ec7d179590ff07ae0e10d71391cbf070e9b8f0356650359beb"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不入库：必须覆盖 AGF 的两条分支 —— MI042 的 meta 是压缩形态（1080→159）、MI040 是原样形态（压不小才原样）；SO002 更小",
+   "blocks": [
+    "M2"
+   ],
+   "note": "ACIF 的 alpha 实测**也会压缩**（旧仓注释只说 meta/body），MI042/MI040 两件都带 ACIF；SO002 取旧仓 res/images 的**交付版**（完整 256 色调色板、body 原样 163840），而不是 install/_extracted 里那个 8bpp 截断调色板变体"
+  },
+  {
+   "id": "assets/samples-alf",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "gameInstall",
+     "path": "APPEND02.AAI",
+     "sha256": "a379153b3ef01fe14ee734727b4e6b0e31094ea784810000e72de5d7e6e50cbb"
+    },
+    {
+     "root": "gameInstall",
+     "path": "APPEND02.ALF",
+     "sha256": "8a84974f603a867783ce3c38f6990a406d7b5d03c16194ea31aa94c736d929f5"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、**不入库**（用户口径：ALF/AAI 是很��的原始游戏文件）：ALF 的索引与数据体必须成对才能验证载荷搬运，取最小的归档家族（索引 5.8 KB + 数据体 49.4 MB）；sha256 是唯一能证明它没被换过的凭据",
+   "blocks": [
+    "M2"
+   ],
+   "note": "测试在文件缺席时**跳过**；判据的实测证据记在需求节点的凭据段，选样口径见 corpus/assets/samples.md"
+  },
+  {
+   "id": "assets/samples-asm",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "gameInstall",
+     "path": "$1$OFINIT.BIN",
+     "sha256": "44aa521713e3de94fe190ce065b5067bbbab60d962e8a7d7f7eb59c054c90091"
+    },
+    {
+     "root": "gameInstall",
+     "path": "READICON.BIN",
+     "sha256": "5ce9df6161bfbb61e825208ff396addb1a335f030d03ce77aad4542772ed2832"
+    },
+    {
+     "root": "gameInstall",
+     "path": "PLINIT.BIN",
+     "sha256": "ebcea961fc8f18ddaaf1d8f76ce0c6b67b1a2379c2c23cdb436bd323e4e979dc"
+    },
+    {
+     "root": "gameInstall",
+     "path": "INFOFA.BIN",
+     "sha256": "5e9fa2f29d4e9686bdafaa4b25ff5fbae096b5249a207923e054dabe27aa8101"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不入库：小件（284/440 B）验证极短脚本、中等件（21/52 KB）验证指令流与字符串；反汇编→重汇编必须逐字节回到原文件",
+   "blocks": [
+    "M2"
+   ]
+  },
+  {
+   "id": "assets/sarasa-upstream",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "res/fonts/SarasaGothicSC-TTF-1.0.40.7z",
+     "sha256": "bde7727d6f08e16667dd9a6ee9ad93c399b53da38d2e26dbead8b4b382b71d16"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/fonts/SarasaGothicJ-TTF-1.0.40.7z",
+     "sha256": "1eaa4017a1843179469827e6d32fa7a79b57ca2a439df6f99ec5857876ba1071"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不迁移：上游发行包（Sarasa Gothic SC/J 官方 TTF 1.0.40），登记 sha256 是为了能从上游复取同一版；cnjp 替换用的是 SC 那一份"
+  },
+  {
+   "id": "assets/ui-images",
+   "kind": "asset",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "res/images/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不迁移：中间版本 PNG 与编译后的 AGF 都留在旧仓；生效版 PNG 已迁入 corpus/assets/ui-images（见该目录 versions.json）",
+   "note": "落点已定：corpus/assets/ui-images/（M1b）——从旧仓 res/images 取 10 张汉化完成图的生效版 + 7 张未汉化图的 -0 原图 + 8 个 E 系列渲染参考块；中间版本 PNG 与编译后的 AGF 都不入库"
+  },
+  {
+   "id": "assets/ui-images-baked",
+   "kind": "asset",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO001.AGF",
+     "sha256": "689e89452c9aabfe7b13a9423e72a62cc1dfe9e81b4a1133246c36859080222b"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO002.AGF",
+     "sha256": "8369f7e1c35854ec7d179590ff07ae0e10d71391cbf070e9b8f0356650359beb"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO009A.AGF",
+     "sha256": "3a45335ec4cbfd33f99dbfc559899f3a276289aead6e3b023d67201815f059e5"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO009B.AGF",
+     "sha256": "bda4781840f846c4210d157f897b1bf575b95c71767476f513ac521286c99f79"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO017.AGF",
+     "sha256": "90b68a91bb031d94746384a3c489d6d35732675fad4658ac52d0145ddc2e0036"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO020.AGF",
+     "sha256": "d580ce6ec8e79d5f38c4fbe0d55702fa622dfbf922e147308e64cc1fc8bed533"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO021.AGF",
+     "sha256": "d71d4ae88fd81afd42dc076d318879fa41623c9efebefacb9f2d497977117a63"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO025.AGF",
+     "sha256": "0bac795dab9b59767fa24f2e8244d265ee475774d602321beaef235d018f5347"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO030.AGF",
+     "sha256": "df1e8f0ee7bae344edc18ba6d83a8f8e1e2ab516161d4aabb62849c2a592a06f"
+    },
+    {
+     "root": "oldRepo",
+     "path": "res/images/SO039.AGF",
+     "sha256": "253b201b1e39599f0f21bb9ae41bd7e47bbe48c04d67d96d1b8d4bc27b7208b6"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不入库（编译产物）：由 corpus/assets/ui-images/ 的生效版 PNG 烘焙出来、注入 install overlay 的那一版 AGF；sha256 是日后重建链能否复现同一份产物的唯一参照",
+   "blocks": [
+    "M2"
+   ],
+   "note": "旧仓 patch/AGF/ 与这 10 个文件同尺寸（同一批产物的副本），但 patch/ 整个目录有意不进新仓台账"
+  },
+  {
+   "id": "assets/ui-agf-dist",
+   "kind": "binary",
+   "role": "module",
+   "storage": "lfs",
+   "origin": [
+    {
+     "root": "staging",
+     "path": "release-v1.14-261005/AGF/"
+    }
+   ],
+   "derivedFrom": [
+    {
+     "ref": "assets/ui-images",
+     "tool": "pnpm tools ui-bake build（v1.14 那一版；链见 tools/ui-bake.md）",
+     "note": "发布件即真源：这批字节来自 v1.14（261005）发布包里的 AGF/，本仓把它固化下来当入库版本"
+    }
+   ],
+   "dest": "corpus/assets/ui-agf",
+   "readOnly": true,
+   "consume": "只读：`pnpm tools release` 的 **AGF 缺省来源**（默认不重新烘焙 ⇒ 发布链不再依赖 headless Chrome）。要换成就地烧出来的那份，用 `release pack --baked dist/ui-bake`。★ 判据是「进包的 AGF 与这里的字节逐字节相同」，由 tools/test/release-agf-source.test.mjs 钉住；想核对「入库件是否仍等于配方渲染的结果」跑 `pnpm tools ui-bake verify`（要 Chrome）",
+   "blocks": [
+    "M4",
+    "M5"
+   ],
+   "note": "来源 = 用户手上的 v1.14 发布包（`AGF/` 10 张）。★ 旧仓 `patch/AGF/` **不是**它的来源：只有 6 张、且 SO009A 等字节已不同（实测 sha256 不同）⇒ 只把发布包当来源。入库件按纪律**不写 sha256**（git/LFS 已经钉住）；来源的 materialize = 把发布包解到 `.staging/release-v1.14-261005/`（staging 允许缺席，validate 只 warning）"
+  },
+  {
+   "id": "binary/age-original",
+   "kind": "binary",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "gameInstall",
+     "path": "AGE.EXE__dumped.EXE",
+     "sha256": "412393ff8df29644da380c3718d97920c9ef7c1a7c28d4bf1d99218f37e4ebc3"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不迁移：PE 节表未还原，直接分析会丢数据段；本轮与 M1 都不入仓（用户口径）",
+   "note": "MD5 见 docs/02-engine/README.md（哈希是派生信息，不重复写进清单）"
+  },
+  {
+   "id": "binary/age-sectfix",
+   "kind": "binary",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "raw-parts/AGE.EXE__dumped.sectfix.EXE",
+     "sha256": "1937f08628efcebbf4cdcf8fbb0c066a83b4c579cd9925ca7b441de343d3b134"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不迁移：它是反汇编语料的真前身（新基线二进制）；本轮与 M1 都不入仓（用户口径）",
+   "note": "与原文件仅节表 24 字节不同；节表修补口径见 docs/02-engine/README.md"
+  },
+  {
+   "id": "binary/agerc-debug-unpacked",
+   "kind": "binary",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "raw-parts/DATA1/AGERC.DLL",
+     "sha256": "f48d1c0fc09b486b003ebd829cf13c9970291a6eaeab13c6d7d0e68e61a297f4"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记：不带壳的调试版（有调试入口）⇒ 当前 AGERC 语料的真前身",
+   "note": "AGERC.DLL.c/.lst 就是从它导出的；AGERC.DLL 与中间产物 SarasaGothicSC-Regular_cnjp.ttf 都在 corpus/assets/fonts/SarasaGothicSC-TTF-1.0.40.7z 里，可按需解压（不必回旧仓取）"
+  },
+  {
+   "id": "binary/agerc-modified-install",
+   "kind": "binary",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "install/AGERC.DLL",
+     "sha256": "6241de666d2f533b66bd48ccd09fa5277acec6473bf099c7b81b0b2c113f977a"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记：文案被纯二进制替换过 ⇒ 不能作为语料来源（旧仓那两对 AGERC 语料就是它的导出）",
+   "note": "留档是为了解释 disasm/superseded-agerc-oldsrc 为什么作废"
+  },
+  {
+   "id": "binary/agerc-packed",
+   "kind": "binary",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "gameInstall",
+     "path": "AGERC.DLL",
+     "sha256": "5f318955f605818965e58d0da2bf9a2a4cef7770758d17e98600ef269035604b"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不迁移：带壳发布版；旧仓 raw/ 是指向同一目录的符号链接",
+   "note": "反汇编不用它（带壳）"
+  },
+  {
+   "id": "disasm/bundle",
+   "kind": "disasm-corpus",
+   "role": "baseline",
+   "storage": "lfs",
+   "origin": [
+    {
+     "root": "staging",
+     "path": "AGE.EXE__dumped.sectfix.EXE.c"
+    },
+    {
+     "root": "staging",
+     "path": "AGE.EXE__dumped.sectfix.EXE.lst"
+    },
+    {
+     "root": "staging",
+     "path": "AGERC.DLL.c"
+    },
+    {
+     "root": "staging",
+     "path": "AGERC.DLL.lst"
+    }
+   ],
+   "derivedFrom": [
+    {
+     "ref": "binary/age-sectfix",
+     "tool": "Hex-Rays",
+     "note": "基线 .c/.lst 的导出源"
+    },
+    {
+     "ref": "binary/agerc-debug-unpacked",
+     "tool": "Hex-Rays",
+     "note": "AGERC .c/.lst 的导出源（脱壳调试版；不是被改过文案的 install/AGERC.DLL）"
+    }
+   ],
+   "dest": "corpus/disasm/disasm-20260930.zip",
+   "readOnly": true,
+   "recipe": "tools/disasm-recode.mjs",
+   "consume": "只读归档：解压到 corpus/disasm/files/ 后由 agent 直接读；锚点锚二进制 EA，语料只提供 EA→行号映射；禁止任何符号改写",
+   "blocks": [
+    "M1"
+   ],
+   "note": "M1 已完成：4 个文件（sectfix 两个 + AGERC 两个，均 UTF-8+LF）已打成 zip 入库（LFS）。原件在 .staging/ 时按原件跑断言；原件不在时由 zip 反解回原件并用本清单记录的 sha256 自证（pnpm tools disasm restore 可把原件还原）"
+  },
+  {
+   "id": "disasm/excluded",
+   "kind": "disasm-corpus",
+   "role": "deferred",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "staging",
+     "path": "AGE.EXE__dumped.EXE.c",
+     "sha256": "a7d4dc2cd266586de86265b828e7e71e370a981763a1395997888ff4be490359"
+    },
+    {
+     "root": "staging",
+     "path": "AGE.EXE__dumped.EXE.lst",
+     "sha256": "40110c4c9e85479d8194b35ad4e7144a523a735526684bde24a85737f47962f9"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/天结_unpacked.exe.c",
+     "sha256": "0e5f6cff2e7eac0fe1911f11ee552fe5794947d7aefe0c6952b32381fb97e0a5"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/天结_unpacked.exe.lst",
+     "sha256": "6f4d72a7bb2edd006c00890beb92ea8f8fe2b7a956c84525d05f7675969a8c27"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/天结_unpacked.exe_utf8.c",
+     "sha256": "0f21fc7f9a88eb455adbd87f1c55e174fd690d1e147ab1460ff3c1fe72dfdfb4"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/天结_unpacked.exe_utf8.lst",
+     "sha256": "d741ccf982554b380463a2e6062d13ec2d00c9475d8fc4f873893f20f4ed6124"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/defs.h",
+     "sha256": "c9508e21af4393b22a2acc620e93c44f5d99747089f5912a17c0f3beea88973f"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/engine.hpp",
+     "sha256": "ff155189d66a7c63bfeb57be9ad8c649713bca2fb758c5167840b69e19dc5442"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/hxclang_prelude.h",
+     "sha256": "7cee33b2616a9e2bd59ebcf43ebed7c563eff0bd8f53f75d1f371e1d81abb652"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "明确不带：只作为「为什么带的是另一份」的证据；其中 _utf8.c 被 sanitize_symbols.py 改过，字符串层结论不可用",
+   "note": "修补前的 sectfix 导出已被取代（桌面那两个已移入 .staging/ 留档）；旧 exe 那对与 3 个头文件留在旧仓"
+  },
+  {
+   "id": "disasm/raw-source-agerc",
+   "kind": "disasm-corpus",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "staging",
+     "path": "AGERC.DLL.c",
+     "sha256": "f213ac2e041b813f1f7ead1c1266435ab50ae9d98d4ebe398d65cb2ab5920aad"
+    },
+    {
+     "root": "staging",
+     "path": "AGERC.DLL.lst",
+     "sha256": "f70bf5589692988987ae138a51a43c51f83056e22bbff4bdeca3cc791e495e71"
+    }
+   ],
+   "derivedFrom": [
+    {
+     "ref": "binary/agerc-debug-unpacked",
+     "tool": "Hex-Rays"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "转码前的忠实参照（CP932 + 全 CRLF，单一编码、无 U+FFFD）：只用来复核「没被改过」，不参与构建",
+   "blocks": [
+    "M1"
+   ],
+   "note": "与旧仓 engine/AGERC.DLL.{c,lst} 不同：那份是混编（CP932 + GBK 文件名行 + UTF-16LE 宽字符串），裸按 CP932 解码会掉字符"
+  },
+  {
+   "id": "disasm/raw-source-sectfix",
+   "kind": "disasm-corpus",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "staging",
+     "path": "AGE.EXE__dumped.sectfix.EXE.c",
+     "sha256": "75ba5371aca6fe7f86b6ed217f06d53069f4f4dd653e5300b7fc8a4a2c97bd9e"
+    },
+    {
+     "root": "staging",
+     "path": "AGE.EXE__dumped.sectfix.EXE.lst",
+     "sha256": "931c576f73bd33b955dbf35e6979a03ecfd98ef21c98350db35c669632da1352"
+    }
+   ],
+   "derivedFrom": [
+    {
+     "ref": "binary/age-sectfix",
+     "tool": "Hex-Rays"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "转码前的忠实参照（CP932 + 全 CRLF）：只用来复核「没被改过」，不参与构建",
+   "blocks": [
+    "M1"
+   ],
+   "note": "投递原件只在 .staging/ 过一手、不入库；这里记 sha256 就是为了让「逐行全等」可复核"
+  },
+  {
+   "id": "disasm/superseded-agerc-oldsrc",
+   "kind": "disasm-corpus",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "engine/AGERC.DLL.c",
+     "sha256": "911de2f79d47506de5871d2be8d4840919d5b7737d653020f4bdef27858875f9"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/AGERC.DLL.lst",
+     "sha256": "0438570f02d998a96803002343b0aa057d8604fcade7678ec1528b77e4b357a6"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/AGERC.DLL_utf8.c",
+     "sha256": "96f895056bdbd39e5689f695ce7c8d4ba58f6182663c493e4e9daf0b662292da"
+    },
+    {
+     "root": "oldRepo",
+     "path": "engine/AGERC.DLL_utf8.lst",
+     "sha256": "d1314be663d5c459049ed44acff831264298a31ab0ee8ec85991aa6c7a8a4b48"
+    }
+   ],
+   "derivedFrom": [
+    {
+     "ref": "binary/agerc-modified-install",
+     "tool": "Hex-Rays"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "禁止引用：反汇编目标是被改过文案的 install/AGERC.DLL，已被基于脱壳调试版的新导出取代",
+   "note": "留档只为解释「为什么旧结论会不对」；新语料见 disasm/raw-source-agerc 与 disasm/bundle"
+  },
+  {
+   "id": "fixtures/save-samples",
+   "kind": "fixture",
+   "role": "fixture",
+   "storage": "lfs",
+   "origin": [],
+   "dest": "corpus/fixtures/",
+   "readOnly": true,
+   "consume": "真玩家存档样本（SAVE76/77/78/79 的 .DAT + .STH + README）；落 corpus/fixtures/，走 LFS",
+   "blocks": [
+    "M1"
+   ],
+   "note": "8 个 .DAT/.STH（槽 76/77/78/79，全部走 LFS）：文件级事实（各槽在游戏里的定位 where、每个文件的源 mtime）在 corpus/fixtures/samples.json；之所以要记 mtime 是因为槽头 +264 起七个 u16 就是存档时刻、而 git 不保存 mtime。★ 固化资源：没有加工链、也没有可再取的上游 ⇒ 不登记 origin（见 pnpm tools corpus describe 的「自足条目」）"
+  },
+  {
+   "id": "game/install-dir",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "gameInstall",
+     "path": "."
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记路径，不搬：外部游戏安装目录；需要用符号链接引用时链接本身 gitignore、不 track"
+  },
+  {
+   "id": "game/raw-parts",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "raw-parts/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记路径，不搬：外部素材的分解件（含 DATA1/ 与两个已知二进制）",
+   "note": "外部索引改造后可能不再需要"
+  },
+  {
+   "id": "game/translated-install",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "install/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记路径，不搬：翻译产物编译后合并的目录",
+   "note": "用户口径：先保留、后续重新设计"
+  },
+  {
+   "id": "knowledge/analysis",
+   "kind": "knowledge-source",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "analysis/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "禁止直接引用：机器台账真源，需清理 / 校验 / 重分类（见 docs/00-origin/knowledge-rebuild.md）",
+   "blocks": [
+    "K1",
+    "K2",
+    "K3"
+   ]
+  },
+  {
+   "id": "knowledge/docs",
+   "kind": "knowledge-source",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "docs-new/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "禁止直接引用：叙述层文档（含跨域活文档），需清理 / 重分类",
+   "blocks": [
+    "K1",
+    "K2",
+    "K3"
+   ]
+  },
+  {
+   "id": "knowledge/opcode-table-source",
+   "kind": "knowledge-source",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "scripts/asm/opcodes.json",
+     "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记、不入库：旧三方工具导出的指令表（AGE 脚本格式层数据的**待复核副本**）。它是 pnpm tools opcodes derive 的来源 ⇒ 来源可追溯、不依赖旧仓在线",
+   "blocks": [
+    "K1",
+    "K2",
+    "K3"
+   ],
+   "note": "handler 是 opcode → 引擎函数的**指针**（含 sub_XXXXXXXX、无 EA）—— 它是「从引擎机械复核 argc」的唯一入口，故不得随手丢；argc 的权威来自引擎而非本表（复核口径见 packages/age-format/README.md §3.3）；name/aliases 是三方工具旧资产、零独特信息，只作文本层兼容"
+  },
+  {
+   "id": "knowledge/tickets",
+   "kind": "knowledge-source",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "tickets/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "禁止直接引用：票据台账；带 tests[] 的票是 B 类抢救的主要来源",
+   "blocks": [
+    "K1",
+    "K2",
+    "K3"
+   ]
+  },
+  {
+   "id": "native/host-input-old",
+   "kind": "tooling",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "native/host-input/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移（N-API + CMake + LFS prebuilds；不进 npm workspaces）",
+   "blocks": [
+    "M4"
+   ]
+  },
+  {
+   "id": "reference/design-discussion",
+   "kind": "knowledge-source",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "DESIGN.md",
+     "sha256": "af28b41af61911fb12ab338d5ba9d876cf41107c49aaf35ff51cb956ae89e824"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "禁止直接引用：工作流与知识消费的设计讨论（只作背景）",
+   "blocks": [
+    "K1"
+   ]
+  },
+  {
+   "id": "reference/old-agents-md",
+   "kind": "knowledge-source",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "AGENTS.md",
+     "sha256": "49a2c37f410da417c1f4922f686779019f8107f65a9839e918acbf0a17b1801d"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "禁止直接引用：旧仓的环境 / 权限须知（只作背景；新仓的口径以本仓 AGENTS.md 为准）"
+  },
+  {
+   "id": "tooling/format-scripts",
+   "kind": "tooling",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "scripts/asm/"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/alf/"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/agf/"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/uimap/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移：AGE 容器格式工具（M2 的目标能力）",
+   "blocks": [
+    "M2"
+   ]
+  },
+  {
+   "id": "tooling/ledger",
+   "kind": "tooling",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "scripts/build-callgraph.mjs",
+     "sha256": "caf96f0d2f259c61e382b400e3f5e9b117593cd38c5c12b26fecc334732184de"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/build-capabilities.mjs",
+     "sha256": "5ac619df25fa5b47d8fa04a5b5ad594bb72095ee7b3d00e5394a24bcb4ea125f"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/build-doc-index.mjs",
+     "sha256": "8e8c257b0b0e9ebe81e6786cfc64afa5f600565c0a723cfbc6d917278ca43363"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/build-opcode-gaps.mjs",
+     "sha256": "26121b512a2ca42c460ced624651223512780b539ba25b7c36a753593a23de76"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/build-opcode-table.mjs",
+     "sha256": "7248f6f33d6f65b32ad68e8b87c8e224216bb8f65ed1a74f2e08b93ee88c2869"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/build-scripts.mjs",
+     "sha256": "831e34781d7360dcc9a4f5144f3c390b37aa27f0455ec2b3154041ec38eabe2f"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/build-status.mjs",
+     "sha256": "4d6675a242a09755c0f9ac268edfedb9f0732be94620f7680745f64a07ae035f"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/build-tickets.mjs",
+     "sha256": "fe584ec15975b4beb6a02967a7c6cbce9d90e15d0197060891eb5d098b5480ce"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/journal.js",
+     "sha256": "c8de597145211a3b3ade3a5362599d0535c7d2045789a5da6962494452a4e101"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移：台账生成器；台账形态要换（真源/派生不分区是旧仓的症状之一）",
+   "blocks": [
+    "M3",
+    "M6"
+   ]
+  },
+  {
+   "id": "tooling/re",
+   "kind": "tooling",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "scripts/re/"
+    },
+    {
+     "root": "oldRepo",
+     "path": "scripts/font_CN_JP.py",
+     "sha256": "258d3bd64b3b49dc2d5bac0f2bcaab71e6d5a5d4c47b79729af06a2e206b1c20"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移：逆向脚本；⚠ 含会改坏语料的 sanitize_symbols.py（见 decisions.md §4）",
+   "blocks": [
+    "M6"
+   ]
+  },
+  {
+   "id": "tooling/translation-pipeline",
+   "kind": "tooling",
+   "role": "rebuild",
+   "storage": "deferred",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "scripts/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "重写参考，不迁移：整个 scripts/（god dir）的参考入口 —— 翻译管线 / 数据导出 / 引擎精化都在这里",
+   "blocks": [
+    "M5",
+    "M6"
+   ],
+   "note": "旧仓 scripts/ 一个目录混了 6 类关注点；新仓必须按域拆开，不要照抄结构"
+  },
+  {
+   "id": "tools/thirdparty",
+   "kind": "tooling",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "tools/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "只登记：第三方工具链（大多已在旧仓 ignore）"
+  },
+  {
+   "id": "translation/baseline",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "data/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "日文只读基线：仅作 M5 的迁移来源，本轮不搬、不改",
+   "blocks": [
+    "M5"
+   ]
+  },
+  {
+   "id": "translation/patch",
+   "kind": "asset",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "patch/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "不迁移、不进新仓台账：旧仓 patch/ 整个目录（AGF / BIN / AGERC.DLL / CHANGELOG.md / patch.config.json / README-测试版说明.md）被有意跳过；打包清单与产物待需求树「翻译环境重建」节点重新设计"
+  },
+  {
+   "id": "translation/subs-cn-jp",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "git",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "res/subs_cn_jp.json"
+    }
+   ],
+   "dest": "data/translations/subs-cn-jp.json",
+   "readOnly": true,
+   "consume": "只读：脚本写入时把编不进 cp932 的简体字换成同码位日文写法占位，渲染时由 cnjp 字体还原；与字体构建是同一方案的两半，必须成对演进",
+   "blocks": [
+    "M5"
+   ],
+   "note": "51 KB 纯文本、机器可校验；说明书 data/translations/subs-cn-jp.md"
+  },
+  {
+   "id": "translation/translated",
+   "kind": "asset",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "src/"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "译文：与 data/ 同构；数据模型待定，M5 前拍板（见 docs/01-translation/README.md）",
+   "blocks": [
+    "M5"
+   ]
+  },
+  {
+   "id": "knowledge/opcode-handlers",
+   "kind": "knowledge-source",
+   "role": "reference",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "scripts/asm/opcodes.json",
+     "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "**继承**：opcode → 引擎函数的映射（574 条 / 543 个不同函数）是**引擎观测**，与 argc 同类；格式层不需要它，但它是「从引擎机械复核 argc」的入口 ⇒ 登记它，别丢",
+   "blocks": [
+    "K1",
+    "K2",
+    "K3"
+   ],
+   "note": "⚠ 它现在**不满足准入**：值是 IDA 函数名（sub_XXXXXXXX）、**没有 EA** ⇒ 无法按「锚点锚 EA」重校验 ⇒ 只能 external-only。K 线的第一件事就是从引擎分派表把它重挂成 EA；挂上之前不得进台账"
+  },
+  {
+   "id": "knowledge/opcode-status-labels",
+   "kind": "knowledge-source",
+   "role": "archived",
+   "storage": "external-only",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "scripts/asm/opcodes.json",
+     "sha256": "4735cbd00e6c7fb573277e0f9ba49d0f8662fd170130f2ba4abf4f7883241355"
+    }
+   ],
+   "dest": null,
+   "readOnly": true,
+   "consume": "**不继承**：status（`已核对`/`仅映射`/`已核对（2026-09）`）是**人工自述标签**，与 handler/argc 不同类 —— 它没有机械复核路径，删掉它不损失任何可复核信息",
+   "note": "与 knowledge/opcode-handlers 同一份文件、同一次观测；本条只为「为什么单单它被丢掉」留痕。本仓口径：自述标签不可信（docs/00-origin/knowledge-rebuild.md §1.1）"
+  },
+  {
+   "id": "translation/patch-data",
+   "kind": "asset",
+   "role": "rebuild",
+   "storage": "git",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "install/"
+    }
+   ],
+   "derivedFrom": [
+    {
+     "ref": "translation/translated",
+     "tool": "pnpm tools patch extract",
+     "note": "旧仓 src/ 是文本视图；这里提取的是同一批译文的**可执行形态**（相对原版 BIN 的叠加层）"
+    },
+    {
+     "ref": "translation/subs-cn-jp",
+     "tool": "pnpm tools patch extract",
+     "note": "中文 → BIN 写法的映射是构建的一环；字典指纹写进 patch 的 subsSha"
+    }
+   ],
+   "dest": "data/translations/patch.json",
+   "readOnly": true,
+   "consume": "★ 翻译域**唯一入库的资产**：原版 BIN + 本件 ⇒ 逐字节重建汉化 BIN（`pnpm tools patch verify`）。data / src 视图都由它实时算出，不入库；旧仓 install/ 只是**提取期**的产物根，之后不再引用。schema 与不变量见 `pnpm tools patch describe`",
+   "blocks": [
+    "M5"
+   ],
+   "note": "说明书 data/translations/patch.md；控制脚本 tools/patch.mjs（模型 tools/lib/patch.mjs、基线解析层 tools/lib/bin-source.mjs）；设计与观测 docs/01-translation/patch-design.md"
+  },
+  {
+   "id": "binary/agerc-dist",
+   "kind": "binary",
+   "role": "module",
+   "storage": "lfs",
+   "origin": [
+    {
+     "root": "oldRepo",
+     "path": "patch/AGERC.DLL"
+    }
+   ],
+   "derivedFrom": [
+    {
+     "ref": "binary/agerc-debug-unpacked",
+     "tool": "Resource Hacker（重建 DIALOG/MENU）+ scripts/patch-menu.js（定点字节补丁）",
+     "note": "迁移期一次性：两条链叠加出的产物；本仓尚未重建该链"
+    }
+   ],
+   "dest": "corpus/assets/agerc/AGERC.DLL",
+   "readOnly": true,
+   "consume": "只读：当前发布用的 AGERC.DLL 可信产物（旧仓 patch/ 随补丁发布的那一份；与 install/AGERC.DLL 同 sha256）。★ 本仓尚无自建链 ⇒ 先按可信产物使用；重建见需求树（设计见 docs/01-translation/agerc-design.md）",
+   "note": "可信的判据 = 清单里 binary/agerc-modified-install 记的 sha256；tools/test/agerc-artifact.test.mjs 每次核对入库件与它一致"
+  }
+ ]
 }

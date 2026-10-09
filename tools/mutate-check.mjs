@@ -17,6 +17,7 @@
  * 用法：`pnpm test:mutation`（也可 `node tools/mutate-check.mjs --list` 只看变异清单）
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
@@ -316,11 +317,21 @@ const MUTATIONS = [
     what: '帧步长 0x78 → 0x80（★ 变量在布局知识层，不在模拟器里）',
   },
   {
+    // ★ 这一条是 2026-10 二次订正留下的**回归钉**：`float` 的基址从 0x44 改回 **0x38**，
+    //   而守卫现在按"取址原语 case 10 读哪个地址"判 ⇒ 值错、或把它挪到 `array_container`(+0x84) 都会红。
     file: 'packages/age-format/src/engine/layout.mts',
-    from: "{ name: 'float', count: 0x20, base: 0x44 }",
+    from: "{ name: 'float', count: 0x20, base: 0x38 }",
     to: "{ name: 'float', count: 0x20, base: 0x84 }",
     guard: 'tools/test/emulator-model.test.mjs',
-    what: 'local_float 基址 0x44 → 0x84（★ 这正是我批 R1 犯过的错：把 array_container 当成池基址）',
+    what: 'local_float 基址 0x38 → 0x84（把 array_container 当成池基址；两次订正都栽在"看成对的偏移"上）',
+  },
+  {
+    // ★ 另一条回归钉：把两个池的**偏移对调**（集合不变、配对错）—— 只有"按 case 号配 type"的判据能抓它
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: "{ name: 'int', count: 0x1c, base: 0x34 },",
+    to: "{ name: 'int', count: 0x1c, base: 0x38 },",
+    guard: 'tools/test/emulator-model.test.mjs',
+    what: '把 int 的基址 0x34 改成 0x38（与 float 撞车）⇒ "6 个基址的集合"少了 0x34、且 case 9 读的不是它 ⇒ 配对判据必须红',
   },
   {
     file: 'apps/emulator/src/model/iterate.ts',
@@ -381,6 +392,46 @@ const MUTATIONS = [
     guard: 'tools/test/requirements-add-lands.test.mjs',
     what: '被写后守卫拒回时不再拒绝（继续按"已落盘"打印计划）⇒ stdout 报成功而盘上什么都没有',
   },
+  // ── 发布链：AGF 缺省来源必须还是"入库件"（★ 别退回"每次重烧"）──
+  {
+    file: 'tools/lib/release.mjs',
+    from: "    agfDir: opts.baked ?? opts.agfDir ?? DEFAULT_AGF_DIR,",
+    to: '    agfDir: opts.baked ?? opts.agfDir ?? DEFAULT_BAKED_DIR,',
+    guard: 'tools/test/release-agf-source.test.mjs',
+    what: '发布链的 AGF 缺省来源退回 `dist/ui-bake`（每次重烧）⇒ 又要 headless Chrome，且发出去的字节变成"这次烧出来的"',
+  },
+  // ── 平台路径的缺省值必须来自清单（★ 硬编码回去了 ⇒ 换机器就"找不到原始件"）──
+  {
+    file: 'tools/lib/ui-bake/bake.mjs',
+    from: '  if (!roots.gameInstall) throw new Error(',
+    to: '  if (false) throw new Error(',
+    guard: 'tools/test/manifest-local.test.mjs',
+    what: '清单里缺 `roots.gameInstall` 时不再响亮失败 ⇒ 退回 `undefined`，换机器时表现为"素材没到位"而不是"清单该覆盖"',
+  },
+  // ── 函数覆盖度：库代码分类（★ 不分出来 ⇒ "下一步该取证谁"会指向 CRT/STL 的库代码）──
+  {
+    file: 'tools/lib/coverage.mjs',
+    from: "  if (f.callees.length === 0 && !f.hasMemoryOperand && f.externalTargets.length > 0) reasons.push('thin-forwarder-to-library');",
+    to: '  // (mutated: 不再判"只往库里转一手")',
+    guard: 'tools/test/ledger-coverage.test.mjs',
+    what: '库代码分类失效（/GS 桩那类"只往库里转一手"的函数会被算进引擎宇宙）⇒ 分桶与前沿都会指向库代码',
+  },
+  // ── 函数覆盖度：`complete` 的不动点（★ 不删"callee 没登记"的成员 ⇒ 所有 observed 都被算成收口）──
+  {
+    file: 'tools/lib/coverage.mjs',
+    from: '      const bad = (f?.callees ?? []).some((c) => !complete.has(c));',
+    to: '      const bad = false;',
+    guard: 'tools/test/ledger-coverage.test.mjs',
+    what: '覆盖度的不动点不再剔除"callee 未登记"的成员 ⇒ `partial-rooted` 桶清零、把没收口的函数说成收口（"下一步该取证谁"跟着错）',
+  },
+  // ── 函数覆盖度：锚 EA 归属的上界（★ 去掉"最后一条 EA"这一界 ⇒ 段尾/`.data` 的地址被算进最后一个函数）──
+  {
+    file: 'tools/lib/disasm.mjs',
+    from: '  if (ea > f.lastEa) return null;',
+    to: '  if (false) return null;',
+    guard: 'tools/test/ledger-coverage.test.mjs',
+    what: 'EA 归属只看"下一个函数的起点" ⇒ 函数末尾之后的空隙（padding / 段尾）被错误归属给前一个函数',
+  },
   // ── 本机私有清单覆盖（平台相关路径）──
   {
     file: 'tools/lib/manifest.mjs',
@@ -423,11 +474,26 @@ export function main(argv = process.argv.slice(2)) {
     }
     fs.writeFileSync(abs, before.replace(m.from, m.to));
     let code = null;
+    let ran = null; // {pass, fail, skipped, skipReason}
+    const log = path.join(os.tmpdir(), `amayui-mutate-${process.pid}.log`);
     try {
-      // ★ 沙箱里不能捕获子进程输出（管道要命名管道 ⇒ EPERM）⇒ 只看**退出码**
-      const r = spawnSync(process.execPath, ['--test', '--test-isolation=none', m.guard], { cwd: ROOT, stdio: 'ignore' });
-      code = r.status;
+      // ★ 沙箱里不能**捕获**子进程输出（管道要命名管道 ⇒ EPERM）⇒ 用**文件描述符重定向**拿同一份答案
+      //   （`tools/corpus.mjs` 的 `runCapture()` 就是这么绕的）。为什么要这份输出：
+      //   **守卫 skip 时退出码也是 0** —— 只看退出码会把"这台机器上没跑"误报成"守卫没红"（实测踩过：
+      //   `emulator-numeric-ops` 的两条要 `dist/install`，本机没有 ⇒ 变异看起来"没抓住"，其实是没跑）。
+      const fd = fs.openSync(log, 'w');
+      try {
+        const r = spawnSync(process.execPath, ['--test', '--test-isolation=none', m.guard], { cwd: ROOT, stdio: ['ignore', fd, fd] });
+        code = r.status;
+      } finally {
+        fs.closeSync(fd);
+      }
+      const text = fs.readFileSync(log, 'utf8');
+      const num = (k) => Number(new RegExp(`^ℹ ${k} (\\d+)$`, 'm').exec(text)?.[1] ?? 0);
+      const skipReason = /^﹣ .*?# (.+)$/m.exec(text)?.[1] ?? null;
+      ran = { pass: num('pass'), fail: num('fail'), skipped: num('skipped'), skipReason };
     } finally {
+      fs.rmSync(log, { force: true });
       // ★ 无论成败都还原；还原后**比对全文**（只比长度不够）
       fs.writeFileSync(abs, before);
     }
@@ -435,13 +501,30 @@ export function main(argv = process.argv.slice(2)) {
       console.error(`\n✗ **还原失败**：${m.file} 与施加前不一致 —— 已中止（工作树可能被污染，请查 git diff）`);
       return 2;
     }
-    results.push({ ...m, code, verdict: code !== 0 ? `✅ 守卫红了（退出码 ${code}）` : '❌ **守卫没红**（退出码 0）', ok: code !== 0 });
+    const skipped = ran && ran.fail === 0 && ran.skipped > 0;
+    results.push({
+      ...m,
+      code,
+      ran,
+      verdict: code !== 0
+        ? `✅ 守卫红了（退出码 ${code}）`
+        : skipped
+          ? `⏭ **无法判定**（守卫 skip，退出码 0）：${ran.skipReason ?? '（无原因）'}`
+          : `❌ **守卫没红**（退出码 0${ran ? `，跑了 ${ran.pass} 条` : ''}）`,
+      ok: code !== 0,
+      unverifiable: Boolean(skipped),
+    });
   }
 
   console.log('守卫自检（改坏一处常量 ⇒ 指定守卫是否当场红）：\n');
   for (const r of results) console.log(`  ${r.verdict}  ${r.what}`);
-  const failed = results.filter((r) => !r.ok);
-  console.log(`\n${results.length - failed.length}/${results.length} 条按预期变红。`);
+  const failed = results.filter((r) => !r.ok && !r.unverifiable);
+  const unver = results.filter((r) => r.unverifiable);
+  console.log(`\n${results.length - failed.length - unver.length}/${results.length} 条按预期变红${unver.length ? ` · ${unver.length} 条**无法判定**（守卫在本机 skip ⇒ 不能算"没红"）` : ''}。`);
+  if (unver.length) {
+    console.log('⏭ 这些守卫在**本机**跑不起来（不是"没抓住"）—— 要它有意义就得先备齐它的语料/资产：');
+    for (const u of unver) console.log(`  - ${u.what}（${u.guard}）：${u.ran.skipReason ?? '（无原因）'}`);
+  }
   if (failed.length) {
     console.error('★ 这些守卫**没抓住**已知的破坏 ⇒ 它们不是"会红的守卫"（断言恒真？或压根没验那个常量）：');
     for (const f of failed) console.error(`  - ${f.what}（${f.guard}）`);

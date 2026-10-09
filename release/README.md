@@ -18,6 +18,7 @@
 | `release/README.md` | ✅ | 本文件：设计 / 配方 / 缺口 |
 | `release/CHANGELOG.md` | ✅ | ★ **随包发给玩家的更新记录**（规格见 §4；它决定 zip 叫什么版本） |
 | `release/安装说明.md` | ✅ | **随包发给玩家的安装步骤**（逐字迁自旧仓 `patch/README-测试版说明.md`） |
+| `corpus/assets/ui-agf/` | ✅ | **进包的 AGF 字节（入库件）**：v1.14 发布包里那 10 张，原样固化；`release` 默认用它（§5.1） |
 | `dist/patch/<版本>.zip` | ❌ | 打出来的包（`BIN/` `AGF/` `AGERC.DLL` 字体 两份文本），**一个 zip**；旁边落一份同名 `.manifest.json`（每一件指回真源） |
 | `dist/install/` | ❌ | **测试安装树**（旧仓 `install/` 的等价物：同一批字节 + 游戏本体，ALF 走硬链接） |
 
@@ -34,7 +35,7 @@
 | 包内件 | 来源（真源） | 为什么是它 |
 |---|---|---|
 | `BIN\`（已汉化脚本） | `data/translations/patch.json` 的**键** + 基线（`gameInstall` 的散装 / ALF） | 范围与"有没有变更"由 patch 说了算（旧仓那份手维护的 `patch.config.json` 实测与它对不齐） |
-| `AGF\`（已汉化 UI 图） | `tools/ui-bake/recipes/*.json` 的**配方集合** → `pnpm tools ui-bake build` 的产物 | 配方就是"我们改过哪些图"的真源；烧图归 ui-bake（要 Chrome 的光栅化） |
+| `AGF\`（已汉化 UI 图） | **入库件** `corpus/assets/ui-agf/*.AGF`（清单条目 `assets/ui-agf-dist`；= v1.14 发布包里的那 10 张） | ★ **默认不重新烘焙**：烧图要 headless Chrome，把发布链的默认路径绑在浏览器上等于「没有浏览器就发不出包」；而入库件是**发出去过的那批字节** ⇒ 逐字节可复现。集合还要与配方对账（配方有、入库件没有 ⇒ 报「先烧一次」） |
 | `AGERC.DLL`（主菜单汉化） | 入库的可信产物 `corpus/assets/agerc/AGERC.DLL`（条目 `binary/agerc-dist`） | 本版直接用它（旧仓随包发布的那一份，sha256 由 `tools/test/agerc-artifact.test.mjs` 复核）；**自建链待重建**（§5.2） |
 | `Amayui-CN_cnjp{,-Bold}.ttf` | `corpus/assets/fonts/`（条目 `assets/fonts-dist`） | 现成入库件，直接复制；**两份都要装**（族名同、按 Regular/Bold 配对） |
 | `安装说明.md` · `CHANGELOG.md` | 本目录 | 逐字节复制（不是生成物）；CHANGELOG 的版本节决定 zip 名 |
@@ -72,8 +73,20 @@
 * **进包清单不在这里维护**：`release pack` 按配方集合取，缺哪张就报"先跑 `ui-bake build`"。
 * **已知残差**：`SO001` 的 AGF 层重放有偏差 —— 那是 ui-bake 链上的**未收口缺陷**
   （需求节点 `REQ-01M42S9QSMTPCYTHDEDCHWX3R5`），**不是**打包链的问题；打包只如实搬运它的产物。
-* **为什么不直接拿旧仓 `patch/AGF/`**：那是**产物**不是来源（来源是原始 ALF + 配方），且两边字节必然不同
-  （8bpp 调色板领域只认解码后的像素）。
+* **AGF 的来源口径（2026-10 变更）**：**默认 = 入库件**（`corpus/assets/ui-agf/*.AGF`，清单 `assets/ui-agf-dist`），
+  **不重烧**。原因有二：① `ui-bake build` 要 headless Chrome（`tools/ui-bake.md` §5.1）⇒ 默认路径绑浏览器 =
+  「没有浏览器就发不出包」；② 同一个配方在不同 Chrome / 字体环境下烧出来的**字节不同**，而「发出去的那一版」
+  必须是固定的 —— 所以发布链读固化下来的字节，读不到就**报错**（不静默回退去烧）。
+* **入库件从哪来**：v1.14（261005）发布包里的 `AGF/` 10 张，原样固化（来源材料化 = 解到 `.staging/release-v1.14-261005/`，
+  由 `pnpm tools corpus validate` 逐字节比对「入库副本 == 来源」）。
+  ⛔ **旧仓 `patch/AGF/` 不是它的来源**：只有 6 张、且 SO009A 等**字节已不同**（实测 sha256 不同）⇒ 不能当来源记。
+* **烧图链还在，只是退到「再生成」**：`pnpm tools ui-bake build` 产出 `dist/ui-bake/*.AGF`；
+  要拿它进包就显式 `release pack --baked dist/ui-bake`。**判据仍然是像素**：`pnpm tools ui-bake verify`
+  把「配方渲染的结果」与 `corpus/assets/ui-images/` 的生效版逐像素比 —— 这才是「入库件是否还等于配方」的核对。
+  把新一轮烧出来的产物**固化**成入库件 = 复制进 `corpus/assets/ui-agf/`（那一步要人决定"这次就发它"）。
+* **已知残差**：`SO001` 的 AGF 层重放有偏差 —— 那是 ui-bake 链上的未收口缺陷
+  （需求节点 `REQ-01M42S9QSMTPCYTHDEDCHWX3R5`）。**本版口径下它不再影响发布**（发布不重烧），
+  只影响「想用 ui-bake 再生成一份」时的判据。
 
 ### 5.2 AGERC.DLL —— **本版用「可信产物」；自建链待重建**
 

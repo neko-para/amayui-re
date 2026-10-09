@@ -24,13 +24,15 @@ data/ledger/<kind>/<YYYY-MM>.jsonl    # ★ 真源：一行一条记录（JSON�
 **文件里没有别的东西**：没有 `index.*`、没有 `PROGRESS.md`、没有 snapshot。
 派生 SQLite 由 `packages/ledger` 生成到 `.cache/`（gitignore），**永不入库**。
 
-## 2. 本轮状态：**没有任何条目（有意为之）**
+## 2. 谁能往里写
 
-旧仓的知识资产（`analysis/` `tickets/` `docs-new/`）**一律不迁移**：它们需要清理 / 校验 / 重分类。
-见 `docs/00-origin/knowledge-rebuild.md`。**K3 通过前，任何知识条目不得进这里。**
+**旧仓的知识资产（`analysis/` `tickets/` `docs-new/`）一律不迁移**：它们需要清理 / 校验 / 重分类
+（见 `docs/00-origin/knowledge-rebuild.md`）。写入者只有一类：**按 §3 的准入门核验过、每条都绑了可再校验观察**的结论
+（`AGENTS.md` §6.6 —— 闸门是"每条都绑观察"，不是"整本必须空"）。
 
-★ **域词汇表也留空**：归一到哪 ~15 个域、旧仓两套词表（`capabilities` 的中文粗标签 / `fields` 的英文细标识）
-怎么合，是 **K1 的活**（要摊开旧仓实测取证）—— 机制先在场，值后填。
+★ **域词汇表也是台账自己长出来的**（`kind=domain` 记录）：归一到哪些域、旧仓两套词表
+（`capabilities` 的中文粗标签 / `fields` 的英文细标识）怎么合，由实际写下的条目喂养出来 ——
+机制先在场、值后填。**现状**别写在这里（`AGENTS.md` §10）：跑 `pnpm tools ledger report` / `pnpm tools ledger domains`。
 
 ## 3. 格式与不变量（★ **唯一真源是自描述，不在本文件**）
 
@@ -91,6 +93,25 @@ pnpm tools ledger describe                 # "分类轴"一节的唯一真源（
 sqlite3 .cache/ledger.sqlite \
   "select system, system_current, count(*) from record group by 1,2"        # 域分布
 ```
+
+★ **"拆分"是唯一不能靠别名收场的一类**：一条历史行写 `system=旧值` 时，旧值被拆成 A/B 之后
+**永远分不出该归谁** ⇒ 必须按台账纪律**逐条追加更正记录**（`replaces` 指向它），把值落到具体的新域。
+判据：#7 会把每个仍带"被拆分的值"的**在场**记录点名叫红；`kind=domain` 记录自己的 `system` 不判
+（它写的就是那个被拆掉的值 —— 否则没法声明"它被拆了"）。
+
+### 3.3 函数覆盖度（`--coverage`）—— 台账 × 语料的派生查询
+
+「这 3800 多个 `sub_XXXXXX`，哪些有人登记过、哪些收了口、**下一步该取证谁**」由一条命令回答：
+
+```bash
+pnpm tools ledger coverage [--json] [--top N] [--lst <路径>]
+```
+
+它把每条记录 `bin` 锚的 **EA** 机械归属到**包含它的函数**（这就是"机械发现它面向哪个函数"那条能力），
+再按 `complete` / `partial-rooted` / `partial-spotty` / `unobserved` 分桶，并给出"**未被登记却被已登记函数直接调用**"
+的前沿（按调用方个数降序）。★ 算法口径的**唯一真源**是 `pnpm tools ledger describe` 的「函数覆盖度」一节
+（含必须一起报出来的诚实项：解不出目标的调用点、归属不到的锚、`callee` 不在清单里…）。
+★ 它是**派生视图**：不落盘、不改任何记录；语料不在场时**报错**（不许"查不到就报 0"）。
 
 
 ## 4. 为什么不能反过来（反模式）

@@ -119,26 +119,51 @@ export const ENGINE_SCALAR_ARRAYS = [
 /**
  * 各 local 池在帧内的**计数槽 / 基址槽**（观测；与 `apps/emulator` 里的语义池名对应）。
  *
- * ## ★★ 已订正（2026-10）：基址是 `帧+0x3C/0x40/0x44/0x48/0x50/0x54`，**不是** `+0x34…+0x48`
- * 判据（本仓自己取的证，锚 = EA）：`sub_40ED40`（脚本装载器）里**分配紧跟着写基址** ——
- * `local_string` 28B 池 `new[]`@`0x40F365` → 基址写 `帧+0x3C`@`0x40F3B1`；
- * `local_int`@`0x40F2D7` → `帧+0x40`@`0x40F2E9`；`local_float`@`0x40F316` → `帧+0x44`@`0x40F31B`；
- * `local_ptr`@`0x40F3DE` → `帧+0x48`@`0x40F3F0`；`+0x50`@`0x40F41D`；`+0x54`@`0x40F45C`。
- * 读取侧由 `sub_41BF50` 的 case `0xB/9/0xA/0xC/0xD/0xE` 钉住（`[帧+0x3C]`… `[帧+0x54]`）。
- * 旁证：`set-string` 对 type 11（局部串）的目标 = `[Engine+0x5D8BC] + 28*idx`，而 `0x5D8BC − 0x5D880 = 0x3C` ✓
- * —— **这一格新旧两份说法一致**，其余五格是旧表错。
+ * ## ★★ 2026-10 二次订正：基址 = `帧+0x34/0x38/0x3C/0x40/0x44/0x48`（**与旧仓 `fields.json` 一致**）
  *
- * ★ 旧表（`+0x34…+0x48`）的来源是**旧仓 `fields.json`**，本仓没有为它找到判据 ⇒
- * 按用户口径「**以本仓重新发现的内容为准**」，此处采用本仓的取证；旧说法记在台账里，不再使用。
- * ★ `count` 那六格（`帧+0x1C..+0x30`）**不变**：新证据同样给出这六格。
+ * 上一版（同一批）把基址写成 `+0x3C…+0x54`，**那是错的**，错在**把装载器的 6 处 store 与池名配错了**：
+ * 它引的 store 地址本身没问题，但把 `0x40F2E9` 那条读成了写 `帧+0x40` —— 逐字是
+ * `25262 .text:0040F2E9 mov [esi+edx*8+5D8B4h], eax`，而 `0x5D8B4 − 0x5D880 = 0x34`。
+ *
+ * ### 判据一：装载器 `sub_40ED40` 的 6 处 store（逐字，本轮复核）
+ * ```
+ * 25262 .text:0040F2E9 mov [esi+edx*8+5D8B4h], eax   ;; 帧+0x34
+ * 25282 .text:0040F321 …（折叠形：`0xC79` ⇒ 0xC79*0x78 = 0x5D8B8 = 帧+0x38）
+ * 25332 .text:0040F3B1 mov [esi+edx*8+5D8BCh], ecx   ;; 帧+0x3C
+ * 25351 .text:0040F3F0 mov [esi+edx*8+5D8C0h], eax   ;; 帧+0x40
+ * 25370 .text:0040F42F mov [esi+edx*8+5D8C4h], eax   ;; 帧+0x44
+ * 25390 .text:0040F471 mov [esi+edx*8+5D8C8h], eax   ;; 帧+0x48
+ * ```
+ *
+ * ### 判据二（**定配对的那一半**）：取址原语 `sub_42AEA0` 的跳转表按 **operand type** 分派
+ * 入口 `sub ecx,3` + `cmp ecx,0Bh` ⇒ case `3..14`（`.lst:66226-66232`，表 `jpt_42AF16` @`0x42B47C`）。
+ * IDA 在**每个 case 标签上写了 case 号**，而 case 号 = type ⇒ 池名与偏移是**机械对上**的，不靠顺序猜：
+ * ```
+ * 66256 loc_42AF5B ; jumptable case 9  → 66262 mov ecx,[esi+edx*8+5D8B4h]   ⇒ int       = 帧+0x34
+ * 66288 loc_42AFB7 ; jumptable case 10 → 66295 mov ecx,[esi+edx*8]（0xC79 折叠）= 帧+0x38 ⇒ float
+ * 66313 loc_42B000 ; jumptable case 11 → 66319 mov edx,[esi+edx*8+5D8BCh]   ⇒ string    = 帧+0x3C
+ * 66246 loc_42AF3D ; jumptable case 12 → 66251 mov ecx,[esi+edx*8+5D8C0h]   ⇒ ptr       = 帧+0x40
+ * 66278 loc_42AF99 ; jumptable case 13 → 66283 mov ecx,[esi+edx*8+5D8C4h]   ⇒ floatPtr  = 帧+0x44
+ * 66325 loc_42B027 ; jumptable case 14 → 66330 mov ecx,[esi+edx*8+5D8C8h]   ⇒ stringPtr = 帧+0x48
+ * ```
+ * ★ 折叠形的算术（自证 `0xC79` 这个魔数）：`(帧基址 + 0x38) / 步长 = 0x5D8B8 / 0x78 = 0xC79`，
+ *   而 case 10 的体是 `ecx = cur + 0xC79; edx = 15*ecx; [esi + edx*8]` ⇒ 地址 = `帧 + 120*cur + 0x38`。
+ *
+ * ### 判据三（旁证）：`ENC(key,0)` 的初值填在 `帧+0x34` 那一池
+ * `.lst:25404 mov eax,[eax+5D8B4h]` + `.lst:25407 mov [eax+ecx*4],edx`，而 `edx = [esi+5EC90h] = ENC(key,0)`
+ * ⇒ 那个池是 **int 池**（int 族初值口径），与判据二的 case 9 相互印证。
+ *
+ * ★ `count` 那六格（`帧+0x1C..+0x30`）**两次订正都没动**：两种读法给出同一组。
+ * ★ 教训（写给下一个复核者）：这次翻案的根因不是"旧仓对/本仓错"，而是**把 store 地址抄成了别的偏移**；
+ *   所以本条把**逐字行号**留在上面 —— 判据要能当场复算，别只留结论。
  */
 export const LOCAL_POOL_SLOTS = [
-  { name: 'int', count: 0x1c, base: 0x40 },
-  { name: 'float', count: 0x20, base: 0x44 },
+  { name: 'int', count: 0x1c, base: 0x34 },
+  { name: 'float', count: 0x20, base: 0x38 },
   { name: 'string', count: 0x24, base: 0x3c },
-  { name: 'ptr', count: 0x28, base: 0x48 },
-  { name: 'floatPtr', count: 0x2c, base: 0x50 },
-  { name: 'stringPtr', count: 0x30, base: 0x54 },
+  { name: 'ptr', count: 0x28, base: 0x40 },
+  { name: 'floatPtr', count: 0x2c, base: 0x44 },
+  { name: 'stringPtr', count: 0x30, base: 0x48 },
 ];
 
 /**
@@ -154,8 +179,11 @@ export const EVIDENCE = {
   frameStride: { at: '.text:0041BF64..0041BF69', insns: ['shl edx,4', 'sub edx,eax', 'mov eax,[ecx+edx*8+5D898h]'], note: '15·cur ×8 = 120·cur（两条取操作数原语同形）' },
   localPoolBases: {
     at: '.text:0040F2E9..0040F471',
-    insns: ['mov [esi+ecx*8+5D8FCh],eax', 'mov edx,1Ch', 'mul edx', 'operator new[]'],
-    note: '装载器 `sub_40ED40` 把 **基址**写进 帧+0x3C/0x40/0x44/0x48/0x50/0x54（分配紧随其后）；★ 旧注写的 "+0x34/…/+0x48" 已订正',
+    insns: ['mov [esi+edx*8+5D8B4h],eax', 'mov [esi+edx*8+5D8BCh],ecx', 'mov [esi+edx*8+5D8C0h],eax', 'mov [esi+edx*8+5D8C8h],eax'],
+    note:
+      '装载器 `sub_40ED40` 把 6 个 local 池的**基址**写进 帧+0x34/0x38/0x3C/0x40/0x44/0x48；' +
+      '★ **配对**由取址原语 `sub_42AEA0` 的跳转表 case 号（= operand type）钉住（case 9→+0x34 … case 14→+0x48），' +
+      '不是靠"分配顺序"猜。逐字行号见 `LOCAL_POOL_SLOTS` 的头注（两次订正的经过也写在那里）',
   },
   intPoolBase: { at: '.text:0042AF2F..0042AF35', insns: ['mov edx,[esi+5D800h]', 'lea eax,[edx+ecx*4]'], note: 'operand type 3 的取址：base + idx*4（下标不过编码）' },
   /** ★ int 族的 `key` 在 `Engine+0x5EC8C`（运行期赋值，从不出现在立即数里） */
@@ -200,6 +228,11 @@ export const ENGINE_SCALAR_WRITES = [
   { name: 'Engine.d92323', dword: 92323, opcode: 0x252, handler: 'sub_425AB0', form: 'op1' },
   { name: 'Engine.d1415', dword: 1415, opcode: 0x88, handler: 'sub_41FAB0', form: 'op1' },
   { name: 'Engine.d97050', dword: 97050, opcode: 0x88, handler: 'sub_41FAB0', form: 'op1' },
+  // ★★ `callsAfter` 的**参数口径**（2026-10 取证）：`sub_459F40` 的 `this` **不是 Engine**，
+  //   而是**字体管理器子对象 `Engine+0x14D30`** —— 5 个调用方在调用点前逐字 `lea ecx, [..+14D30h]`
+  //   （`.lst:46607/46647/46670/57911/78916`）。★ 所以 `+0x15280/84/8C` 的宿主是**那个子对象**，
+  //   写这些槽的是"往子对象里写"，不是"往 Engine 顶层的这三个偏移写"。
+  // ★ 另一条形态差别：`0x78`/`0x2db` 是**尾跳** `jmp sub_459F40`（无返回），`0x76`/`0x77` 是 `call`。
   { name: 'Engine.d21667', dword: 21667, opcode: 0x78, handler: 'sub_41F450', form: 'op1', callsAfter: ['sub_459F40'] },
   { name: 'Engine.d71744', dword: 71744, opcode: 0x2db, handler: 'sub_426500', form: 'op1', callsAfter: ['sub_459F40'] },
   // ★ `0x76`：写 `Engine+0x15280`（紧邻 `0x78` 的 `+0x1528C`，同一个结构的不同字段）+ 同一次 `sub_459F40`

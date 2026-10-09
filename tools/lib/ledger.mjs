@@ -97,6 +97,7 @@ export const OPERATIONS = [
   { name: 'show', argv: ['--show'], mutates: false, summary: '一条记录的全文 + 它的锚点解析结果 + 冲突对家' },
   { name: 'add', argv: ['--add'], mutates: true, summary: '追加一条记录（缺省 dry-run）[--write]：`--kind --system --subject --claim --anchor <json>…`' },
   { name: 'retract', argv: ['--retract'], mutates: true, summary: '撤回一条（**追加**一条 `replaces` 它的记录，不改历史）[--write]' },
+  { name: 'coverage', argv: ['--coverage'], mutates: false, summary: '★ **函数覆盖度**（台账 × 语料）：把每个 `bin` 锚的 EA 机械归属到包含它的函数，分桶 complete / partial-rooted / partial-spotty / unobserved + 「下一步该取证谁」的前沿（`--json` / `--top N` / `--lst <路径>`）' },
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '不变量（红 = 退出码 1）；只读参考仓取不到时只 warn（不可校验 ≠ 失效）' },
   { name: 'rebuild-db', argv: ['--rebuild-db'], mutates: true, summary: '由文本真源确定性重建派生 SQLite（缺省 dry-run）[--write]' },
   { name: 'compact', argv: ['--compact'], mutates: true, summary: '分片归位 + 同 id 去重（只重排，**不删任何结论**）[--write]' },
@@ -824,6 +825,11 @@ export function validateAll(records, opts = {}) {
       const sv = e.system;
       const at = `${path.basename(e._file)}:${e._line}`;
       if (replacedIds.has(e.id)) continue;
+      // ★ **域记录自己的 `system` 不判**：域记录声明的是**词表**（它的身份在 `subject`），
+      //   而 `system` 那里只是"这条关于谁"的上下文。★ 关键：一条 `disposition=split` 的记录
+      //   必然写着**那个被拆掉的值**（不然它怎么声明"它被拆了"）⇒ 判它就是"拆一次红一次"。
+      //   （#1 仍然管它的形态；`splitInto` 的目标由 7c 管。）
+      if (e.kind === 'domain') continue;
       if (sv.via === 'absent') continue; // ★ 没填域 = 待定，不是错（`report` 会单列计数）
       if (sv.via === 'unknown') {
         p.push(
@@ -1117,6 +1123,45 @@ export function describe() {
       ],
     },
     invariants: [...CHECK_TITLES].map(([id, text]) => ({ id, text, enforcedBy: '本工具的 validate（`pnpm tools ledger validate`）' })),
+    coverage: {
+      what:
+        '★ **函数覆盖度**（`pnpm tools ledger coverage`）：回答"语料里 3800+ 个 `sub_XXXXXX`，哪些有人登记过结论、哪些收了口、下一步该取证谁"。' +
+        '它是**派生查询**（现算、不落盘、不改任何记录），读台账 + 反汇编语料两样输入。',
+      how: [
+        '**锚 → 函数**：一条记录的每个 `bin` 锚取 **EA**，用 `functionOfEa` 归属到**包含它的函数**（★ 这是"机械发现它面向哪个函数"那条能力的落点）。',
+        '**observed(F)** = 存在**在场**记录（`effective !== retracted`）其 aimed 集合含 F；**atStart(F)** = 至少一个锚 EA **恰好是 F 的起点**（有人把整个函数当对象，而不只是引用它体内某条指令）。',
+        '**callees(F)** = F 体内 `call`/`jmp sub_XXXXXX`（尾跳也算）。',
+        '**complete(F)** = **最大不动点**：初始 = observed，反复删掉"有 callee 不在 complete 里"的成员直到稳定（互递归天然成立）。',
+      ],
+      library: [
+        '★ **静态链接库代码（CRT / MSVC STL）先摘出去**：实测前沿榜里混着 `sub_4E73EB`（MSVC `/GS` 栈 cookie 校验桩，' +
+          '15 字节，全语料 1144 个调用点都只是各函数的 /GS 尾声）与 `sub_40C210`（`std::basic_string<char>::assign`）—— ' +
+          '不分出来，"下一步该取证谁"会把**读库代码**排在最前面。',
+        '判据（机械、**只作候选**，理由会一起印出来）：`thin-forwarder-to-library`（体内无 `[` 内存操作数 ∧ 不调 `sub_XXXXXX` ' +
+          '∧ 有非 `sub_` 的转移目标）、`calls-stl-internal`（转移目标里有 MSVC STL 内部符号 `^\\?(?:_X|__).*@std@@`）。',
+        '★ **判据故意窄**：见到 `?` 修饰名就算库会把 **657 个**函数摘掉（游戏自身也是 C++），只有"STL 内部符号"这条才是个位数加法。',
+        '★ 摘出去的**看得见**：`honest.libraryCandidates`（名单 + 每条的 reasons），且它们算"无需分析" ⇒ 调 /GS 桩不会让调用方收不了口。',
+      ].join('\n'),
+      buckets: [
+        '`complete` —— observed ∧ complete ∧ atStart：自己被人整体看过，且它调用的也都收口了',
+        '`partial-rooted` —— atStart 但闭包不全 ⇒ **差在它调用的那些**',
+        '`partial-spotty` —— 只有体内锚（点状事实），**没人把它当整体看过**',
+        '`unobserved` —— 一条都没有',
+      ],
+      frontier: [
+        '★ **直接调用前沿**：未被登记、但被**已登记**函数直接调用的函数（按已登记调用方数降序）= "它挡了多少活"。',
+        '★ 每一行给**两个数**：`calledBy`（已登记调用方）与 `calledByAll`（**全语料**调用方）—— 后者是必要的，' +
+          '因为**叶子助手**（如 `sub_408050`：全语料 110 个调用方 / 205 处调用，自己没有 callee）在"挡活"榜上排不高，' +
+          '却是"用得最广、最该先登记"的那一类。',
+        '★ **第二张榜**（`mostUsedUnregistered`）：全语料用得最多、而自己还没登记的函数 —— triage 用。',
+        '另有**传递前沿**（从已登记函数 BFS，按跳数分层）。',
+      ].join('\n'),
+      honest: [
+        '**解不出目标的调用点**（`call eax` / `call dword ptr […]`）必须报出来 —— 有它，任何"调用闭包"都只是**下界**（全语料 3000+ 个）。',
+        '`callee` 不在函数清单里 / 锚 EA 归属不到任何函数 / `subject` 里点名但无锚 —— 各自单列，**不许静默丢**。',
+        '它**不**判断结论对不对（那是准入与守卫的事），也**不说**"没登记 = 不重要"。',
+      ],
+    },
     operations: OPERATIONS,
     determinism: {
       note: '★ "DB 可删可重建"的判据不是"文件字节相同"（SQLite 文件头带变更计数器、页里可能有空闲区），而是**逻辑内容相同**：',
@@ -1169,6 +1214,23 @@ export function describeText(d = describe()) {
   L.push(d.determinism.note);
   L.push(`怎么判：${d.determinism.how}`);
   L.push('');
+  if (d.coverage) {
+    L.push('## 函数覆盖度（`--coverage`）');
+    L.push('');
+    L.push(d.coverage.what);
+    L.push('');
+    L.push('**怎么算**：');
+    for (const x of d.coverage.how) L.push(`* ${x}`);
+    L.push('');
+    L.push('**四个桶**：');
+    for (const x of d.coverage.buckets) L.push(`* ${x}`);
+    L.push('');
+    L.push(`**前沿**：${d.coverage.frontier}`);
+    L.push('');
+    L.push('**必须一起报出来的诚实项**：');
+    for (const x of d.coverage.honest) L.push(`* ${x}`);
+    L.push('');
+  }
   L.push('## 操作');
   for (const o of d.operations) L.push(`* \`${o.name}\`${o.mutates ? '（会写）' : ''} —— ${o.summary}　→ \`pnpm tools ledger ${o.name}\``);
   L.push('');

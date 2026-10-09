@@ -53,11 +53,16 @@ create-mesh ：mov eax,[ecx]     ; ★ 第 i 个顶点 = 操作数解出的**地
 ## 5. 它顺手逼出来的三件事（都要收口，登记在需求树）
 
 1. **区域的容量从哪来**：`alloc` 的 `capacity` **必填**（本层不编默认值）。
-   它来自装载器写进 `帧+0x1C..+0x30` 的六个计数，而"头部那 6 个 `local_*` 字段
-   → 6 个池"的**对应顺序未逐字取证**（`LOCAL_POOL_SLOTS` 的池序是
-   int/float/string/ptr/floatPtr/stringPtr，头里的字段序是
-   `local_integer_1/local_floats/local_strings_1/local_integer_2/unknown_data/local_strings_2`）。
-   ★ 换句话说：**采用地址空间这件事，把一条"未取证"从"可以绕开"变成了"必须解决"** —— 这是好事。
+   它来自装载器写进 `帧+0x1C..+0x30` 的六个计数。
+   ★ **"计数槽 → 哪个池"这条曾在这里被登记为"未逐字取证"，2026-10 已取证**（原先的说法保留一句在下面作沿革）：
+   装载器 `sub_40ED40` 的形态是 **"读计数 → `operator new[]` → 写基址"**，而基址一侧的身份由取址原语
+   `sub_42AEA0` 的 **case 号（= operand type）** 钉死 ⇒ 相邻性 + case 号两件事一起把六对配光：
+   `帧+0x1C`(local_integer_1)↔`+0x34`=int · `+0x20`(local_floats)↔`+0x38`=float ·
+   `+0x24`(local_strings_1)↔`+0x3C`=string · `+0x28`(local_integer_2)↔`+0x40`=ptr ·
+   `+0x2C`(unknown_data)↔`+0x44`=floatPtr · `+0x30`(local_strings_2)↔`+0x48`=stringPtr。
+   逐字与两次订正的经过见 `packages/age-format/src/engine/layout.mts` 的 `LOCAL_POOL_SLOTS` 头注。
+   ★ 剩下的只是"**调用方还没把容量传进来**"（实现进度，见需求树）—— 不是"不知道它从哪来"。
+   沿革：采用地址空间这件事，把一条"未取证"从"可以绕开"变成了"必须解决"，于是它被解决了。
 2. **`*_alt` 池（memflip）**：`Engine+0x5D804/0x5D80C/…` 那六对是**同一批数据的两个区域**
    （取证：`.text:0041AAD9..0041AB66` 六对交换，开关是配置键 `set:EnableMemFlip`）。
    本层能表达（两个区域 + 一次交换），但"何时交换"未取证 ⇒ 不实现。

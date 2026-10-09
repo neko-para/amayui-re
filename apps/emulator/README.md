@@ -222,17 +222,53 @@ packages/age-format/src/engine/handlers.mts  ← opcode → handler（IDA 符号
 
 本目录的**设计取舍与不变量**（为什么文件系统接口是同步的 · 为什么状态四分 · 为什么 `wait` 不是 no-op ·
 快照的三条口径 · 地址空间为什么是"扁平 + 合成 + 稀疏"…）**不在源码注释里，也不在本文件里** ——
-它们是知识台账 `data/ledger/` 的 **`Emulator` 域**：一条一条、**以可执行守卫用例为锚**，
+它们是知识台账 `data/ledger/` 的知识域：一条一条、**以可执行守卫用例为锚**，
 于是它们**可查询、参与校验、且不会与代码漂**（注释漂过两处，见域记录里的记录）。
 
+### 8.1 四个域（★ 先问层次，再问"引擎 / 实现"之分）
+
+| 域 | 是什么 | 本目录的落点 | 锚（判据） |
+|---|---|---|---|
+| **`Emulator.host`** | 宿主抽象与**引擎外面那一圈**：fs / 副作用 / 时钟 / 配置 / 环境 / 实例 / 随机源 / 脚本取用 | [`src/host/`](apps/emulator/src/host) | `tools/test/emulator-host.test.mjs` 一族 |
+| **`Emulator.frontend`** | 把某个平台**接上去**的那一层（headless：ALF 来源 / 缺口报告 / 文件配置 / 入口 / 路径解析） | [`frontends/headless/`](apps/emulator/frontends/headless) | `emulator-file-config` / `emulator-headless-logo.assets` |
+| **`Emulator.model`** | 语义模型（池 / 场景 / 地址空间 / 引擎标量 / 迭代 / 纯数值族）—— **零镜像布局** | [`src/model/`](apps/emulator/src/model) | `emulator-model` / `emulator-state-partition` / `emulator-snapshot` |
+| **`Emulator.vm`** | 执行核心（主循环 / 操作数 / 脚本装载 / 指令语义） | [`src/vm/`](apps/emulator/src/vm) | `emulator-frames` / `emulator-engine-scalars` |
+
+★ **`host` 与 `frontend` 的分界不是"目录"，是"平台无关 / 平台相关"**：`host/` 零 Node（由 `types: []` 机械挡），
+`frontends/` 的全部职责就是"把 `node:fs` 接上核心定义的接口"。
+★ **入域判据**（域记录里也写着）：① 这条结论是"**引擎在做什么**"（锚 = 二进制 EA ⇒ `Engine.*`）还是
+"**我们这一层怎么做**"（锚 = 守卫用例 ⇒ `Emulator.*`）？② 是"引擎外面那一圈"（`.host` / `.frontend`）
+还是"引擎内部的模型与执行"（`.model` / `.vm`）？③ 分不清就**先不填** `system`（进"待定域"名单，看得见但**不报红**）。
+
+### 8.2 怎么查
+
 ```bash
-pnpm tools ledger list --system Emulator   # 本域的全部条目（subject 就是注释里那行指针的落点）
-pnpm tools ledger domains                  # 词表：当前域 / 别名链
-pnpm tools ledger describe                 # 字段与口径的唯一真源
+pnpm tools ledger list --system Emulator.model   # 按域列条目（subject 就是注释里那行指针的落点）
+pnpm tools ledger domains                       # 词表：当前域 / 别名链 / 被拆分的值
+pnpm tools ledger describe                      # 字段与口径的唯一真源（含 `--coverage` 的算法口径）
 ```
 
-★ 源码注释现在只保留：**一行要点 + 一行指针**（`★ …。口径与理由见知识台账：data/ledger/（域 Emulator，subject …）`）、
+★ 源码注释现在只保留：**一行要点 + 一行指针**（`★ …。口径与理由见知识台账：data/ledger/（域 …，subject …）`）、
 **代码级说明**、以及**逐字证据**（`.lst` 行号与指令 —— 那是可再校验的锚，不许删）。
-★ **引擎语义**（opcode / handler / 帧与池布局）仍然归 **`Engine.*`** 域（锚 = 二进制 EA）；
-两边的分工判据写在 `Emulator` 的**域记录**里（换一份反汇编导出还成立吗）。
+★ **引擎语义**（opcode / handler / 帧与池布局）仍然归 **`Engine.*`** 域（锚 = 二进制 EA）。
+
+### 8.3 ★ 反过来看：**引擎那边还有多少没做** —— `pnpm tools ledger coverage`
+
+台账 + 语料能机械回答"这 3800 多个 `sub_XXXXXX`，哪些有人登记过、哪些收了口、**下一步该取证谁**"：
+
+```bash
+pnpm tools ledger coverage            # 三桶 + 前沿（默认列前 30）
+pnpm tools ledger coverage --json     # 机器读（`--all` 连逐函数表一起给）
+pnpm tools ledger coverage --top 100  # 前沿列长一点（0 = 全给）
+```
+
+口径（唯一真源是 `pnpm tools ledger describe` 的「函数覆盖度」一节）：把每条记录 `bin` 锚的 **EA**
+机械归属到**包含它的函数**；`complete` 是"自己被人整体看过（锚在函数起点）**且**它调用的也都收口"的
+**最大不动点**。★ 它会一起报出**解不出目标的调用点**（`call eax` 之类 3000+ 个）—— 所以"闭包"只是**下界**。
+
+★ 前沿给**两张榜**，别只看第一张：
+* **直接调用前沿**（按"被多少**已登记**函数调用"降序）= 它挡了多少活；
+* **全语料用得最多、而自己还没登记** = 用得有多广 —— **叶子助手**（如 `sub_408050`：110 个调用方 / 205 处调用、
+  自己没有 callee）在第一张榜上排不高，却是"最该先登记"的那一类。每行都给 `调用方数` 与 `调用处数` 两个数。
+
 

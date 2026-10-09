@@ -37,11 +37,28 @@ import {
   writePng,
 } from './image.mjs';
 import { buildHtml, loadEffects, loadRecipe } from './recipe.mjs';
+import { loadManifest } from '../manifest.mjs';
 import { renderHtml } from './render.mjs';
 
-/** 旧仓 AGF 的"来源"清册：真源是 `corpus/assets/ui-images/versions.json` 与 recipe 的 `source` */
-export const DEFAULT_GAME = 'E:\\Games\\Eushully\\天結いキャッスルマイスター';
-export const DEFAULT_OLD_REPO = 'E:\\Games\\Eushully\\天結';
+/**
+ * 原始件 / 旧仓的目录**不写死在代码里**（`AGENTS.md` §2：平台相关路径一律走清单）：
+ * 真源 = `corpus/assets.json` 的 `roots.gameInstall` / `roots.oldRepo`，**可被本机私有覆盖**
+ * `corpus/assets.local.json` 改写（口径见 `corpus/assets.md` 的「怎么改」）。
+ * ★ 实测踩过：这里原先硬编码 `E:\\Games\\...` ⇒ 在 macOS 上 `ui-bake build` 直接找不到 ALF 索引，
+ *   而清单里**早就有**正确的本机路径（`loadManifest()` 会合并它）—— 有清单却不用，等于没有清单。
+ */
+export function defaultGameDir(manifestPath) {
+  const roots = loadManifest(manifestPath).roots ?? {};
+  if (!roots.gameInstall) throw new Error('清单里没有 `roots.gameInstall` —— 原始游戏件在哪？（本机不同用 `corpus/assets.local.json` 覆盖，见 `corpus/assets.md`）');
+  return roots.gameInstall;
+}
+
+/** 旧仓（`res/images/*.AGF` 那一份）的目录；口径同 `defaultGameDir` */
+export function defaultOldRepo(manifestPath) {
+  const roots = loadManifest(manifestPath).roots ?? {};
+  if (!roots.oldRepo) throw new Error('清单里没有 `roots.oldRepo` —— 旧仓在哪？（本机不同用 `corpus/assets.local.json` 覆盖，见 `corpus/assets.md`）');
+  return roots.oldRepo;
+}
 
 /**
  * 读 recipe 算"生效版是第几版"：真源是 `corpus/assets/ui-images/versions.json`（不要手写进 recipe）。
@@ -141,7 +158,8 @@ export function applyClean(recipe, base, archive, log = () => {}) {
  * @param {boolean} [o.keepWork] 是否保留中间 PNG 之外的临时 HTML
  * @param {(s:string)=>void} [o.log]
  */
-export async function bake({ block, repoRoot, game = DEFAULT_GAME, workDir, chrome, log = () => {} }) {
+export async function bake({ block, repoRoot, game, workDir, chrome, log = () => {} }) {
+  game = game ?? defaultGameDir();
   const root = repoRoot ?? process.cwd();
   const work = workDir ?? path.join(root, '.tmp', 'ui-bake');
   fs.mkdirSync(work, { recursive: true });

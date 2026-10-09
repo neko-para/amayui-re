@@ -47,7 +47,12 @@ export function openGame(gameDir) {
       return { alf, indexFile: p, gameDir, entries: indexEntries(alf).map };
     }
   }
-  throw new Error(`在 ${gameDir} 里找不到 ALF 索引（找过：${INDEX_CANDIDATES.join(' / ')}）`);
+  throw new Error(
+    `在 ${gameDir} 里找不到 ALF 索引（找过：${INDEX_CANDIDATES.join(' / ')}）。\n` +
+      `★ 这个目录来自清单 \`roots.gameInstall\`（\`corpus/assets.json\`）—— 本机路径不同就**覆盖它**，\n` +
+      `  不要改代码：在 \`corpus/assets.local.json\` 写 \`{"roots":{"gameInstall":"…","oldRepo":"…"}}\`，\n` +
+      `  或用 \`pnpm tools corpus set-root gameInstall <路径> --local\`（口径见 \`corpus/assets.md\`）。`,
+  );
 }
 
 /** 从 ALF 数据体里读一个条目的原始字节 */

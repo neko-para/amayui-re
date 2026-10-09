@@ -867,8 +867,19 @@ test('★ 写入闸门：真台账里每条都必须绑**可解析**的锚，且
   assert.deepEqual(broken, [], `台账里有**解析不了**的锚（这类条目不该进台账）：\n  - ${broken.join('\n  - ')}`);
 
   // ② 分类轴：留空（待定域）可以；写了就必须追得到词表（`validateAll` 的 #7 已管，这里再钉"不许静默"）
+  //   ★ **口径必须与 #7 逐字一致**：已被 `replaces` 取代 / `retracted` 的行**不再按当前词表判它的值** ——
+  //     那正是"拆分 / 重定义走**追加更正记录**"那条路的**收尾**（不跳它 ⇒ 任何一次 `split` 都会把门禁永久搞红）。
+  //     实测踩过：把 `Emulator` 拆成四个域时，45 条历史行按纪律逐条追加了更正记录，而这里原先连历史行一起判。
   const proj = project(records, { repoRoot: REPO_ROOT, referenceRoot: null, ledgerDir: LEDGER_DIR });
-  const unresolved = proj.entries.filter((e) => e.system.via !== 'absent' && e.system.via !== 'canonical' && e.system.via !== 'alias');
+  const unresolved = proj.entries.filter(
+    (e) =>
+      e.effective !== 'retracted' &&
+      // ★ 域记录自己的 `system` 不判（同 #7）：一条 `disposition=split` 的记录**必然**写着那个被拆掉的值
+      e.kind !== 'domain' &&
+      e.system.via !== 'absent' &&
+      e.system.via !== 'canonical' &&
+      e.system.via !== 'alias',
+  );
   assert.deepEqual(unresolved.map((e) => `${e.subject}（${e.system.via}）`), [], '写了的域必须能追到词表');
 });
 

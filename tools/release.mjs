@@ -17,6 +17,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import {
+  DEFAULT_AGF_DIR,
   DEFAULT_BAKED_DIR,
   DEFAULT_INSTALL_DIR,
   DEFAULT_INSTALL_MANIFEST,
@@ -62,7 +63,8 @@ const HELP = `tools/release.mjs —— 发行打包：测试安装树（旧仓 i
   --json               机器可读（计划 / 结果）
   --base   <目录>      基线根（缺省清单 roots.gameInstall）
   --patch  <文件>      换一份 patch（诊断用；缺省 data/translations/patch.json）
-  --baked  <目录>      AGF 来源（缺省 ${relToRepo(DEFAULT_BAKED_DIR)}，由 ui-bake build 产出）
+  --baked  <目录>      AGF 来源**覆盖**（缺省 = 入库件 ${relToRepo(DEFAULT_AGF_DIR)}；
+                       要用刚烧出来的那份就写 --baked ${relToRepo(DEFAULT_BAKED_DIR)}）
   --agerc  <文件>      AGERC.DLL 来源（缺省 corpus/assets/agerc/AGERC.DLL）
   --fonts  <目录>      字体目录（缺省 corpus/assets/fonts）
   --release-dir <目录> 随包文本目录（缺省 release/）
@@ -78,7 +80,7 @@ const HELP = `tools/release.mjs —— 发行打包：测试安装树（旧仓 i
                         而"从 Low 标签的 EXE 起的进程"会让 Locale Emulator 起不了窗口）
   --exclude <名字>     install：额外排除的基础树文件（可重复；理由见 --describe）
 
-★ 变更集**算出来**，不存同步清单：BIN ← patch.json 的键 · AGF ← ui-bake 的配方集合 · AGERC ← 入库可信产物。
+★ 变更集**算出来**，不存同步清单：BIN ← patch.json 的键 · AGF ← **入库件**（缺省不重烧）· AGERC ← 入库可信产物。
 ★ 测试安装树里的 *.ALF 与游戏安装根**是同一个 inode** ⇒ 别往那棵树里写东西（本工具只写自己的产物）。
 `;
 
@@ -141,7 +143,10 @@ function printChanged(changed, ctx) {
   L.push(`基线根     ${ctx.baseDir}`);
   L.push(`patch      ${relToRepo(ctx.patchPath)}`);
   L.push(`变更集     BIN ${changed.bins.length} 支（操作 ${changed.stats.ops}）· AGF ${changed.agfs.length} 张 · AGERC ${changed.stats.agerc} 个`);
-  if (changed.agfs.length) L.push(`AGF 来源   ${relToRepo(ctx.bakedDir)}（由 pnpm tools ui-bake build 产出）`);
+  if (changed.agfs.length) {
+    const fromBaked = path.resolve(ctx.agfDir) === path.resolve(DEFAULT_BAKED_DIR);
+    L.push(`AGF 来源   ${relToRepo(ctx.agfDir)}（${fromBaked ? '★ 就地烧出来的那份（显式覆盖）' : '入库件，默认不重烧'}）`);
+  }
   return L;
 }
 

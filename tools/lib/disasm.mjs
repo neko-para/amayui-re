@@ -532,6 +532,153 @@ export function enclosingFunction(file, idx, ea, { maxLines = 20000 } = {}) {
  */
 export const C_DEF_RE = /^[A-Za-z_][\w \t*]*?\b(sub_[0-9A-F]{6})\s*\(/;
 
+// ─────────────────────────────────────────────────────────── 函数清单 / 调用图（**派生视图**）
+
+/** `call sub_XXXXXX` / `jmp sub_XXXXXX`（★ 尾跳也算一条边：它同样把控制权交出去） */
+const CALL_RE = /\b(call|jmp)\s+(sub_[0-9A-F]{6})\b/;
+/** 寄存器名（`call eax` / `jmp ebx` 这类**不是符号目标**，别把它当成"调用了叫 eax 的东西"） */
+const REG_RE = /^(?:e?[abcd]x|e?[sd]i|e?[sb]p|e?sp|r\d+|[abcd][lh]|dword|word|byte|ptr|qword|fs|ds|es|ss|cs|gs)$/i;
+/** `call/jmp <符号>`（**任意**符号，含 CRT 的 `___report_gsfailure` 这种）—— 行尾或 `;` 收尾才算 */
+const CALL_SYM_RE = /\b(call|jmp)\s+([A-Za-z_$?@][\w.$?@]*)\s*(?:;|$)/;
+/** 体内是否出现内存操作数（`[...]`）—— "有没有碰结构"的最小机械判据 */
+const MEM_OPERAND_RE = /\[/;
+/** `.lst` 每行开头的 `段:EA`（用于算函数体内**最后一个 EA** ⇒ EA 归属要能拒绝"越过函数末尾"的地址） */
+const LINE_EA_RE = /^[A-Za-z_.][\w.]*:([0-9A-Fa-f]{8})\s/;
+/** 解不出目标的调用点（`call eax` / `call dword ptr [...]` / `call [esi+4]`）—— 只**计数**，不猜目标 */
+const INDIRECT_CALL_RE = /\b(call|jmp)\s+(?:eax|ebx|ecx|edx|esi|edi|ebp|esp|dword ptr|\[)/;
+
+/**
+ * 一遍扫出**全部 `proc near` 的函数清单**与**调用图**（`call`/`jmp sub_XXXXXX`）。
+ *
+ * ★ 这是**派生视图**：不落盘、不缓存。语料是只读真源；换一次导出重建一次即可（实测 ~0.2 s / 53 万行）。
+ * ★ 它只做**机械提取**：不解语义、不判"分析过没有"。谁"分析过"由台账（锚）回答 —— 两者在本模块外合流
+ *   （见 `lib/coverage.mjs`：锚 EA → 包含它的函数）。
+ * ★ `indirectCallSites` 必须**报出来**：解不出目标的调用点意味着任何"调用闭包"都只是**下界**
+ *   （实测全语料 3000+ 个）—— 不报出来，读者会把"闭包完整"当成事实。
+ *
+ * @returns {{file:string, dataEas:Set<number>, functions:Array<{sym:string,ea:number,fromLine:number,toLine:number,lastEa:number,callees:string[],calleeHits:Map<string,number>,externalTargets:string[],hasMemoryOperand:boolean,callSites:number,indirectCallSites:number}>, bySym:Map<string,object>, starts:number[], indirectCallSites:number}}
+ */
+export function functionInventory(lstFile) {
+  /** ★ 非 `.text` 段里的行 EA（= **数据/全局**的定义点）：锚落在这些地址上**不是**"归属失败" */
+  const dataEas = new Set();
+  const lines = fs.readFileSync(lstFile, 'utf8').split('\n');
+  const functions = [];
+  const bySym = new Map();
+  let cur = null;
+  let indirectCallSites = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const l = lines[i];
+    // 段名不是 `.text` ⇒ 记下它的 EA（`seg002:00559A68 …` / `.data:0051E988 …`）
+    {
+      const seg = /^([^.\s:][\w.]*|\.(?!text)[\w]+):([0-9A-Fa-f]{8})\s/.exec(l);
+      if (seg) dataEas.add(Number.parseInt(seg[2], 16));
+    }
+    const p = PROC_EA_RE.exec(l);
+    if (p) {
+      cur = {
+        sym: p[3],
+        ea: Number.parseInt(p[2], 16),
+        fromLine: i + 1,
+        toLine: null,
+        lastEa: Number.parseInt(p[2], 16),
+        callees: new Set(),
+        calleeHits: new Map(),
+        externalTargets: new Set(),
+        hasMemoryOperand: false,
+        callSites: 0,
+        indirectCallSites: 0,
+      };
+      functions.push(cur);
+      // ★ 同名重复（IDA 偶有）**保留第一个**，与"取第一个"以外的做法不同：这里明确写下来，不静默
+      if (!bySym.has(cur.sym)) bySym.set(cur.sym, cur);
+      continue;
+    }
+    if (!cur) continue;
+    const le = LINE_EA_RE.exec(l);
+    if (le) {
+      const v = Number.parseInt(le[1], 16);
+      if (v > cur.lastEa) cur.lastEa = v;
+    }
+    if (ENDP_RE.test(l)) {
+      cur.toLine = i + 1;
+      cur = null;
+      continue;
+    }
+    if (MEM_OPERAND_RE.test(l)) cur.hasMemoryOperand = true;
+    const c = CALL_RE.exec(l);
+    if (c) {
+      cur.callSites += 1;
+      cur.callees.add(c[2]);
+      // ★ 逐目标计数（不只是去重集合）：前沿要区分"110 个调用方"与"205 处调用"（叶子助手两者差得远）
+      cur.calleeHits.set(c[2], (cur.calleeHits.get(c[2]) ?? 0) + 1);
+      continue;
+    }
+    // ★ 非 `sub_` 的转移目标（CRT / 导入）：`jmp ___report_gsfailure` 这种是"库桩"的指纹
+    const e = CALL_SYM_RE.exec(l);
+    if (e && !REG_RE.test(e[2])) {
+      cur.callSites += 1;
+      cur.externalTargets.add(e[2]);
+      continue;
+    }
+    if (INDIRECT_CALL_RE.test(l)) {
+      cur.callSites += 1;
+      cur.indirectCallSites += 1;
+      indirectCallSites += 1;
+    }
+  }
+  for (const f of functions) {
+    if (f.toLine === null) f.toLine = f.fromLine; // 未闭合（异常导出）⇒ 只说"只有头一行"
+    f.callees = [...f.callees].sort();
+    f.calleeHits = new Map([...f.calleeHits].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+    f.externalTargets = [...f.externalTargets].sort();
+  }
+  const starts = functions.map((f) => f.ea); // ★ 段内 EA 单调（`--stats` 有单调性断言）⇒ 可直接二分
+  return { file: lstFile, functions, bySym, starts, dataEas, indirectCallSites };
+}
+
+/**
+ * **EA → 包含它的函数**（二分；不在任何函数里 ⇒ `null`）。
+ *
+ * ★ 与 `enclosingFunction` 的分工：那个要**读文件**（用于取上下文 / C 体，一次一个 EA 还带区间）；
+ *   这个用在"**几百个锚 EA 一次性归属**"的场景（覆盖度查询），只吃一份已建好的清单。
+ * ★ `span` 判据：`起点 ≤ EA ≤ 该函数最后一条有 EA 的行`，且 `EA < 下一个函数的起点`。
+ *   用"最后一条 EA"而不是 `endp` 行号 —— 没有 `endp` 的函数段（异常导出）也要能归属；
+ *   而**只看下一个函数的起点**会把"最后一个函数之后的地址"（`.data` / 段尾）错误归属给它。
+ */
+export function functionOfEa(inv, ea) {
+  const { starts, functions } = inv;
+  if (functions.length === 0) return null;
+  let lo = 0;
+  let hi = starts.length - 1;
+  let hit = -1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (starts[m] <= ea) {
+      hit = m;
+      lo = m + 1;
+    } else hi = m - 1;
+  }
+  if (hit < 0) return null;
+  const f = functions[hit];
+  // ★ 上界两个都要：**下一个函数的起点**（函数体不许与它重叠）与**本函数最后一条有 EA 的行**
+  //   ——只看前者会把"最后一个函数之后的地址"（`.data` / 段尾）错误归属给最后一个函数（实测踩过）。
+  const next = functions[hit + 1];
+  if (next && ea >= next.ea) return null;
+  if (ea > f.lastEa) return null;
+  return f.sym;
+}
+
+/** `corpus/disasm/files/` → 那份 `.lst`（按名字排序取第一份；不在场 ⇒ `null`，**调用方必须明说**） */
+export function pickListing(filesDir) {
+  if (!fs.existsSync(filesDir)) return null;
+  const hit = fs
+    .readdirSync(filesDir)
+    .filter((f) => f.endsWith('.lst'))
+    .sort()
+    .map((f) => path.join(filesDir, f))[0];
+  return hit ?? null;
+}
+
 /** `.lst` → **同名的 `.c`**（Hex-Rays 伪代码）；不在场 ⇒ `null`（**调用方必须明说**，不许静默降级） */
 export function pickDecompiled(lstFile) {
   const c = String(lstFile).replace(/\.lst$/, '.c');
@@ -553,6 +700,11 @@ export function buildSymbolIndex(cFile) {
   let cur = null;
   for (let i = 0; i < lines.length; i += 1) {
     const l = lines[i];
+    // 段名不是 `.text` ⇒ 记下它的 EA（`seg002:00559A68 …` / `.data:0051E988 …`）
+    {
+      const seg = /^([^.\s:][\w.]*|\.(?!text)[\w]+):([0-9A-Fa-f]{8})\s/.exec(l);
+      if (seg) dataEas.add(Number.parseInt(seg[2], 16));
+    }
     const m = C_DEF_RE.exec(l);
     if (m) {
       if (/;\s*$/.test(l)) {

@@ -35,6 +35,11 @@ export const DEFAULT_ZIP = path.join(REPO_ROOT, 'corpus', 'disasm', 'disasm-2026
 /** 需求台账（一个节点一个文件；文件名 = ULID = 身份） */
 export const DEFAULT_REQUIREMENTS_DIR = path.join(REPO_ROOT, 'data', 'requirements');
 
-/** 旧仓盘点 */
-export const DEFAULT_OLD_REPO = 'E:\\Games\\Eushully\\天結';
+/**
+ * 旧仓盘点。
+ * ★ **旧仓目录不在这里**：它是平台相关路径，真源 = 清单 `roots.oldRepo`
+ *   （+ 本机私有覆盖 `corpus/assets.local.json`）⇒ 用 `translate-ref.mjs` 的 `oldRepoRoot()`，
+ *   或 `manifest.mjs` 的 `loadManifest()`。本模块**不许**再长出平台路径常量
+ *   （`manifest.mjs` import 本模块 ⇒ 在这里 import 它会成环）。
+ */
 export const DEFAULT_INVENTORY_OUT = path.join(REPO_ROOT, 'docs', '00-origin', 'old-repo-inventory.md');

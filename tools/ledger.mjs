@@ -51,6 +51,8 @@ import {
   validateAll,
 } from './lib/ledger.mjs';
 import { loadManifest } from './lib/manifest.mjs';
+import { coverage, coverageText } from './lib/coverage.mjs';
+import { pickListing } from './lib/disasm.mjs';
 
 export { DOMAIN, OPERATIONS, describe, describeText };
 
@@ -62,6 +64,9 @@ const HELP = `tools/ledger.mjs —— 知识台账（append-only 文本真源 + 
   node tools/ledger.mjs --describe                 # ★ schema 唯一真源：字段 / 枚举 / 不变量 / 锚点与分类轴口径
   node tools/ledger.mjs --report                   # 体检：各 kind 条数 / 有效状态 / 域分布 / 锚点可解析率 / 冲突数
   node tools/ledger.mjs --domains                  # ★ 域词汇表：当前域 / 别名链 / 被拆分的值 + 逐值解析表
+  node tools/ledger.mjs --coverage [--json] [--top N] [--lst <路径>]
+                                                   # ★ **函数覆盖度**（台账 × 语料）：3800+ 个 sub_XXXXXX 里
+                                                   #   多少有人登记过 / 多少收了口 / **下一步该取证谁**（前沿）
   node tools/ledger.mjs --list [--only-kind claim] [--only-effective stale] [--system <域>] [--subject X] [--json]
   node tools/ledger.mjs --show <id|唯一前缀>
   node tools/ledger.mjs --add --kind <k> --system <域> --subject <s> --claim <c> --anchor <json>… [--status …] [--write]
@@ -90,14 +95,14 @@ const HELP = `tools/ledger.mjs —— 知识台账（append-only 文本真源 + 
  *     `accepted` 变成多余位置参数，**静默变成"打印概览"**（真踩过：`--write` 被忽略、什么都没写）。
  *   ★ 同理 `list` 的筛选用 `--only-kind` / `--only-effective`，不叫 `--kind` / `--effective`（那是 add 的字段）。
  */
-const ACTIONS = ['describe', 'report', 'list', 'domains', 'show', 'add', 'retract', 'validate', 'rebuild-db', 'compact', 'help'];
+const ACTIONS = ['describe', 'report', 'list', 'domains', 'show', 'add', 'retract', 'validate', 'rebuild-db', 'compact', 'coverage', 'help'];
 
 function parseArgs(argv) {
   const out = { action: null, write: false, json: false, anchors: [], rest: [] };
   const takesValue = new Set([
     'kind', 'system', 'subject', 'claim', 'status', 'note', 'anchor', 'db', 'tz', 'replaces', 'why', 'dir', 'id', 'at',
     'disposition', 'aliases', 'split-into',
-    'only-kind', 'only-effective',
+    'only-kind', 'only-effective', 'lst', 'top',
   ]);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -105,6 +110,7 @@ function parseArgs(argv) {
     else if (a.startsWith('--') && ACTIONS.includes(a.slice(2))) out.action = a.slice(2);
     else if (a === '--write') out.write = true;
     else if (a === '--json') out.json = true;
+    else if (a === '--all') out.all = true;
     else if (a.startsWith('--')) {
       const k = a.slice(2);
       if (!takesValue.has(k)) throw new Error(`不认识的选项：${a}`);
@@ -189,6 +195,7 @@ export function main(argv = process.argv.slice(2)) {
   if (args.action === 'report') return cmdReport(args, proj, ledgerDir);
   if (args.action === 'list') return cmdList(args, proj);
   if (args.action === 'domains') return cmdDomains(args, proj, ledgerDir);
+  if (args.action === 'coverage') return cmdCoverage(args, proj);
   if (args.action === 'show') return cmdShow(args, proj);
   if (args.action === 'add') return cmdAdd(args, proj, ledgerDir, opts);
   if (args.action === 'retract') return cmdRetract(args, proj, ledgerDir);
@@ -225,9 +232,31 @@ function cmdReport(args, proj, ledgerDir) {
   L.push(`记录        ${proj.entries.length} 条　${KINDS.map((k) => `${k}=${byKind[k]}`).join(' · ')}`);
   L.push(`有效状态    ${EFFECTIVE.map((s) => `${s}=${proj.byEffective[s] ?? 0}`).join(' · ')}`);
   L.push(`域          ${proj.vocab.canonical.size} 个当前域${proj.vocab.aliasOf.size ? ` · ${[...proj.vocab.aliasOf].filter(([a, b]) => a !== b).length} 条别名` : ''}${proj.vocab.splits.size ? ` · ${proj.vocab.splits.size} 个被拆分` : ''}　⇒ \`pnpm tools ledger domains\``);
-  L.push(`域分布      ${Object.entries(proj.bySystem).map(([k, v]) => `${k}=${v}`).join(' · ') || '（无）'}`);
+  L.push(`域分布      ${Object.entries(proj.bySystem).map(([k, v]) => `${k}=${v}`).join(' · ') || '（无）'}　（★ 含历史行）`);
+  // ★ **在场**的域分布单列：`bySystem` 把历史行也算进去，于是一次 `split` 之后
+  //   "(已被拆分：待数据迁移)" 会一直挂着一大坨 —— 而**在场**的行其实早就迁完了。
+  //   两个数分开看，才知道"还有没有活要干"。
+  {
+    const live = {};
+    for (const e of proj.entries) {
+      if (e.effective === 'retracted') continue;
+      const via = e.system.via;
+      const k = via === 'canonical' || via === 'alias' ? e.system.canonical
+        : via === 'split' ? `(已被拆分：待数据迁移=${e.kind})`
+          : via === 'unknown' ? '(未在词表中：待裁决)'
+            : '(待定域：尚未填 system)';
+      live[k] = (live[k] ?? 0) + 1;
+    }
+    L.push(`在场域分布  ${Object.entries(live).map(([k, v]) => `${k}=${v}`).join(' · ') || '（无）'}`);
+  }
   // ★ "待定域"单列一行：它不是错误，但**必须看得见**（缺省 ≠ 失效，可见性不能少）
-  L.push(`待定域      ${proj.pendingDomain} 条没填 \`system\`${proj.pendingDomain ? '　⇒ 渐进填域：确定一块就补一块（`--system`），词表按使用长出来' : ''}`);
+  {
+    const livePending = proj.entries.filter((e) => e.effective !== 'retracted' && e.system.via === 'absent').length;
+    L.push(
+      `待定域      ${proj.pendingDomain} 条没填 \`system\`（★ 含历史行；**在场 ${livePending}**）` +
+        (proj.pendingDomain ? '　⇒ 渐进填域：确定一块就补一块（`--system`），词表按使用长出来' : ''),
+    );
+  }
   L.push(`锚点        ${anchors.length} 条　可解析=${ok} · 参考仓取不到（warn）=${warn} · **红**=${errLive}${errHist ? ` · 历史行死锚=${errHist}（已被取代，不管）` : ''}`);
   L.push(`冲突        ${proj.conflicts.length} 组${proj.conflicts.length ? '　⇒ 见 `--validate` 的 #5' : ''}`);
   L.push('');
@@ -419,6 +448,32 @@ function cmdAdd(args, proj, ledgerDir, opts) {
   }
   appendRecord(ledgerDir, rec);
   process.stdout.write(`${L.join('\n')}\n\n已追加      ${ID_PREFIX}${rec.id}\n`);
+  return 0;
+}
+
+/**
+ * `--coverage`：**函数覆盖度**（台账 × 语料 的派生查询）。
+ * ★ 口径的唯一真源是 `tools/lib/coverage.mjs` 的模块注释 + 本工具的 `--describe`；这里只做"参数 → 模型 → 输出"。
+ * ★ 语料不在场时**报错**，不许"没有语料就报 0"（那会把"查不到"伪装成"覆盖度是 0"）。
+ */
+function cmdCoverage(args, proj) {
+  const lst = args.lst ? path.resolve(args.lst) : pickListing(path.join(REPO_ROOT, 'corpus', 'disasm', 'files'));
+  if (!lst || !fs.existsSync(lst)) {
+    process.stderr.write(
+      '✗ 语料不在场（找不到 `.lst`）—— 覆盖度查询要读反汇编语料，而它是**解压产物**（不入库）：\n' +
+        '  unzip -o corpus/disasm/disasm-20260930.zip -d corpus/disasm/files\n' +
+        '（也可以 `--lst <路径>` 显式给一份。）★ 不许"没有语料就报 0" —— 那会把"查不到"伪装成"覆盖度是 0"。\n',
+    );
+    return 1;
+  }
+  const top = args.top === undefined ? 30 : Number(args.top);
+  if (!Number.isInteger(top) || top < 0) throw new Error(`--top 必须是非负整数（0 = 全给），实际 ${JSON.stringify(args.top)}`);
+  const r = coverage(proj.entries, { lstFile: lst, top });
+  if (args.json) {
+    process.stdout.write(`${JSON.stringify(args.all ? r : { ...r, allRows: undefined }, null, 2)}\n`);
+    return 0;
+  }
+  process.stdout.write(`${coverageText(r)}\n`);
   return 0;
 }
 
