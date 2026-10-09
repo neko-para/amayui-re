@@ -20,11 +20,6 @@
     "test:mutation": "node tools/mutate-check.mjs",
     "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit"
   },
-  "pnpm": {
-    "overrides": {
-      "markdown-it>entities": "^7.0.1"
-    }
-  },
   "devDependencies": {
     "@types/node": "^26.6.4",
     "typescript": "^5.9.3"

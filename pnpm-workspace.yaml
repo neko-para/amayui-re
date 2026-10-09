@@ -48,3 +48,6 @@ storeDir: '.pnpm-store'
 #   ★ 注意本仓 `node_modules` 的**现状可能与配置不一致**：它的实际形状由**上一次安装时的配置**决定
 #   （pnpm 见 `.modules.yaml` 与配置一致就跳过重链）。判据：`node_modules/.modules.yaml` 里的
 #   `nodeLinker` 值 = 你期望的布局。
+
+overrides:
+  'markdown-it>entities': "^7.0.1"
