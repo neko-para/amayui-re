@@ -68259,7 +68259,7 @@
   },
   "SG2502A.BIN": {
    "baseSha": "010a587a30fc0de58b3bf382ad5f9fcc9b766bcdfa75671a32e87a9c31f7b368",
-   "resultSha": "344e95349b8d6720a04d28a7299536c8d248c195e62df7566c1321e3772f33df",
+   "resultSha": "70a1960ace1417c83fe8a8c3525818c82a3e6ecba26540301f06c499a8f28c23",
    "ops": [
     {"op":"replace-line","i":474,"sha8":"78f684f0","line":"set-string (global-string f17) \"要返回标题画面吗？\""},
     {"op":"replace-line","i":477,"sha8":"b851ef24","line":"set-string (local-string-ptr 0) \"是\""},
@@ -68269,12 +68269,10 @@
     {"op":"replace-line","i":530,"sha8":"387e5b79","line":"set-string (local-string-ptr 0) \"否\""},
     {"op":"replace-line","i":606,"sha8":"8e8d90f7","line":"set-string (local-string-ptr 0) \"场景回放结束\""},
     {"op":"replace-line","i":612,"sha8":"75bb603c","line":"set-string (local-string-ptr 0) \"取消\""},
-    {"op":"replace-line","i":772,"sha8":"c579a2c2","line":"show-text 0 \"阿瓦罗的技能『被吸收的力量』已解除。至今下降的\""},
-    {"op":"replace-line","i":773,"sha8":"1be824b0","line":"display-furigana 0 \"ＦＳ\" \"疲劳强度\""},
-    {"op":"replace-line","i":774,"sha8":"8c57cdbb","line":"end-text-line 0"},
-    {"op":"replace-line","i":775,"sha8":"d13c6943","line":"show-text 0 \"值增加１０。已可使用强化系魔法『斗精灵赋予』。使用\""},
-    {"op":"replace-line","i":776,"sha8":"4462da0f","line":"end-text-line 0"},
-    {"op":"insert-after","i":776,"instr":"show-text 0 \"时需预先装备技能。\""},
+    {"op":"replace-line","i":772,"sha8":"c579a2c2","line":"show-text 0 \"阿瓦罗的技能『被吸收的力量』已解除。\""},
+    {"op":"replace-line","i":774,"sha8":"8c57cdbb","line":"show-text 0 \"至今下降的\""},
+    {"op":"replace-line","i":775,"sha8":"d13c6943","line":"display-furigana 0 \"ＦＳ\" \"疲劳强度\""},
+    {"op":"replace-line","i":776,"sha8":"4462da0f","line":"show-text 0 \"值增加１０。\""},
     {"op":"replace-line","i":809,"sha8":"30c2d8b8","line":"show-text 0 \"已可使用强化系魔法『斗精灵赋予』。\""},
     {"op":"delete","i":810,"sha8":"ba6e0265"},
     {"op":"delete","i":811,"sha8":"57452aa1"},
@@ -68822,7 +68820,7 @@
   },
   "SG4900.BIN": {
    "baseSha": "bae4bbdd6cdefcd348d8dce22831e904e48504ba6059f20d686898c216a75b16",
-   "resultSha": "3f2f19c392d05af1c25d02cea5d8d7f2a3757ff5211696cc35c6c2d0314148fa",
+   "resultSha": "63de72fd3fd1a556c0fd82be87ecc637fbb735e7ed05ebef066cd7c6e7ce6d76",
    "ops": [
     {"op":"replace-line","i":474,"sha8":"78f684f0","line":"set-string (global-string f17) \"要返回标题画面吗？\""},
     {"op":"replace-line","i":477,"sha8":"b851ef24","line":"set-string (local-string-ptr 0) \"是\""},
@@ -68832,10 +68830,8 @@
     {"op":"replace-line","i":530,"sha8":"387e5b79","line":"set-string (local-string-ptr 0) \"否\""},
     {"op":"replace-line","i":606,"sha8":"8e8d90f7","line":"set-string (local-string-ptr 0) \"场景回放结束\""},
     {"op":"replace-line","i":612,"sha8":"75bb603c","line":"set-string (local-string-ptr 0) \"取消\""},
-    {"op":"replace-line","i":772,"sha8":"ce9e8d29","line":"show-text 0 \"鼠标操作时，右键选择阿瓦罗，会显示道具与装备的按\""},
-    {"op":"replace-line","i":774,"sha8":"0f213a7e","line":"show-text 0 \"钮。另外，使用道具会消耗，但无论使用多少个都不会结\""},
-    {"op":"insert-after","i":774,"instr":"end-text-line 0"},
-    {"op":"insert-after","i":774,"instr":"show-text 0 \"束行动，请记住。\""},
+    {"op":"replace-line","i":772,"sha8":"ce9e8d29","line":"show-text 0 \"鼠标操作时，右键选择阿瓦罗，\""},
+    {"op":"replace-line","i":774,"sha8":"0f213a7e","line":"show-text 0 \"会显示道具与装备的按钮。\""},
     {"op":"replace-line","i":807,"sha8":"411046be","line":"show-text 0 \"另外，使用道具会消耗，但无论使用多少个\""},
     {"op":"replace-line","i":809,"sha8":"9568ed8d","line":"show-text 0 \"都不会结束行动，请记住。\""}
    ]
