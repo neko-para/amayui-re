@@ -1,24 +1,18 @@
 /**
  * apps/emulator/src/model/engine-scalars.ts —— **引擎标量槽的寄存器堆**（★ 语义层：零 Node、零偏移）
  *
- * ## 它解决什么
- * 启动链前段有一批 handler 的形状是"**读一个操作数 → 写引擎的某个 dword 标量**"
- * （观察登记在知识层 `packages/age-format/src/engine/layout.mts` 的 `ENGINE_SCALAR_WRITES`）。
- * 模拟器要能跑过去，就必须**把那个值存下来** —— 否则后面若有分支读同一个槽，
- * 我们会**静默走错**（不报错，只是路径不同）。
+ * 启动链前段有一批 handler 的形状是"**读一个操作数 → 写引擎的某个 dword 标量**"（观察登记在知识层
+ * `packages/age-format/src/engine/layout.mts` 的 `ENGINE_SCALAR_WRITES`）。不把值存下来，后面若有分支
+ * 读同一个槽就会**静默走错**（不报错，只是路径不同）。键是知识层给的**稳定身份**（`Engine.d97058`），值是 u32。
  *
- * ## ★ 本层**不解释**任何槽
- * 键是知识层给的**稳定身份**（`Engine.d97058` 这种），值是 u32。
- * ⛔ 这里没有名字、没有含义、没有读写规则 —— 那些要等有人按 handler 的**读者/调用方**去核。
- * 本层只保证一件事：**写进去的东西，读出来还是它**。
- *
- * ## ★ 初值是 0（这一条有取证，不是随手选的）
- * 引擎构造函数把一大片 `Engine+0x5EC9C…0x5ECE8` 清零（取证：`.text:00415C0F-00415C87`），
- * 而帧区/池区各由自己的装载器初始化。⇒ 对**没有写过**的标量槽，返回 0 是与引擎同形的。
- * （与 int 池不同：池的初值是 `encZero`，**不是** 0 —— 两者的取证结论不一样，别混。）
- *
- * ## 稀疏 + 快照
- * 只存**被写过**的槽（`Map<name, u32>`）⇒ 快照与写入历史无关（按键升序）。
+ * ★ 本层只保证"**写进去的东西，读出来还是它**"，**不解释**任何槽（没有名字/含义/读写规则）。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/engine-scalars-names-from-knowledge`）。
+ * ★ **没写过的槽读 0**：引擎构造函数把 `Engine+0x5EC9C…0x5ECE8` 逐个写 0 —— 逐字证据 `.lst:33974-33994`
+ *   （`33974 .text:00415C0F mov [esi+5EC9Ch],edi` … `33994 .text:00415C81 mov [esi+5ECE8h],edi`）。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/engine-scalars-default-zero`；
+ *   取证 subject `Engine+0x5EC9C..0x5ECE8/ctor-zero-fill`，该条 `system` 域尚未填）。
+ * ★ 与 int 池的初值 `encZero`（**非 0 的位模式**）**不是**一回事 —— 两条取证结论不一样，别混。
+ * ★ 稀疏 + 快照：只存**被写过**的槽（`Map<name, u32>`）⇒ 快照与写入历史无关（按键升序）。
  */
 
 /** 一个槽的值：u32 */

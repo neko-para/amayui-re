@@ -15,7 +15,8 @@
  * ⇒ 按名字模式直接扫索引，把它们一并算进链里。
  *
  * ## ★ 它**不跑**任何东西
- * 只反汇编 + 数数。这是刻意的：报告要能在"模拟器还跑不起来"的时候就用（否则它就是鸡生蛋）。
+ * 只反汇编 + 数数 —— 报告要能在"模拟器还跑不起来"的时候就用（否则它就是鸡生蛋）。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/chain-report-static-closure`）。
  */
 
 import { readAlf } from '@amayui/age-format/src/alf.mts';
@@ -84,11 +85,9 @@ const AUTORUN_RE = /^\$\d+\$AUTORUN\.BIN$/i;
  * 从入口 id 出发算出 `call-script` 闭包，并对每份脚本统计指令缺口。
  *
  * ★ `until`（缺省 `LOGO.BIN`）是**截断点**：某份脚本里一旦遇到 `call-script <until>`，
- *   就**不再从那之后**的指令里收目标 id。理由：`SYSTEM4` 是**线性**启动脚本
- *   （`… → INIT2 → LOGO → INIT → TITLE`），而 `TITLE` 会 `call-script` 出**整个游戏**
- *   （实测不截断时闭包 = 212 份脚本 / 15 万条指令，其中绝大多数与"启动到 LOGO"无关）。
- *   ⇒ 截断让这份报告回答的是"**跑到 LOGO 为止还差什么**"。
+ *   就**不再从那之后**的指令里收目标 id ⇒ 截断让这份报告回答的是"**跑到 LOGO 为止还差什么**"。
  *   传 `until: null` 得到全闭包（那是"整个游戏要什么"，是另一个问题）。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/chain-report-static-closure`）。
  */
 export function buildChainReport(
   read: ChainByteSource,

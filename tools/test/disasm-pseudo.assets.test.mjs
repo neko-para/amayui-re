@@ -101,3 +101,24 @@ test('★ 定位不到函数时要**抛**（不许编一个符号出来）', { s
   assert.throws(() => pseudoOfFunction(LST, idx, { ea: 0x1 }), /定位不到函数符号|不落在任何已索引段/);
   assert.throws(() => pseudoOfFunction(LST, idx, { sym: 'not_a_symbol' }), /定位不到函数符号/);
 });
+
+test('★ 符号名带 `@` 的函数也必须被认作函数头（MSVC 修饰名）—— 否则**静默**给前一个函数', { skip }, () => {
+  // 反例（本轮实测）：`PROC_EA_RE` 的符号组原先是 `[A-Za-z_][\w.]{0,40}`（不含 `@`）⇒
+  // `.text:004BA890 _WinMain@16 proc near` 不被认作函数头，`enclosingFunction(0x4BAA3A)` 落到
+  // **前一个**函数 `sub_4BA6B0`（lst 295655-295810）—— 而 `--pseudo` 照样打出 C 体：
+  // 那不是"查不到"，是**给了一个看起来对的错答案**。
+  const winMain = Object.entries(idx.segs ?? {}).length ? 0x4baa3a : 0x4baa3a;
+  const fn = enclosingFunction(LST, idx, winMain);
+  assert.equal(fn.symbol, '_WinMain@16', `EA 0x4baa3a 必须归属 _WinMain@16，实际 ${fn.symbol}`);
+  assert.equal(fn.fromLine, 295818, `函数起点行必须是 295818（\`_WinMain@16 proc near\`），实际 ${fn.fromLine}`);
+  assert.equal(fn.toLine, 296907, `函数结束行必须是 296907（\`_WinMain@16 endp\`），实际 ${fn.toLine}`);
+
+  // 而 `--pseudo` 这条路：`_WinMain@16` 不进 `.c` 索引（本索引只索引 `sub_XXXXXX`）⇒
+  // 必须**给 .lst 区间 + 明说没有 C 体**，不许抛、也不许退回前一个函数。
+  const p = pseudoOfFunction(LST, idx, { ea: winMain });
+  assert.equal(p.sym, '_WinMain@16');
+  assert.equal(p.containing, '_WinMain@16', 'containing 不许退回 sub_4BA6B0');
+  assert.equal(p.isFunctionStart, false, '0x4baa3a 不是 _WinMain@16 的起点（起点是 0x4ba890）');
+  assert.equal(p.c, null);
+  assert.match(String(p.note), /没有定义|修饰名/, '缺 C 体必须明说，并点出这是修饰名');
+});

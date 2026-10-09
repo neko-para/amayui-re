@@ -17,9 +17,9 @@ import path from 'node:path';
 
 import { gitAttrs, gitCheckIgnore, gitLsFiles, runCapture } from './exec.mjs';
 import { listFiles, sha256File, statKind, toPosix } from './fsx.mjs';
-import { DEFAULT_MANIFEST } from './paths.mjs';
+import { DEFAULT_LOCAL_MANIFEST, DEFAULT_MANIFEST } from './paths.mjs';
 
-export { DEFAULT_MANIFEST };
+export { DEFAULT_LOCAL_MANIFEST, DEFAULT_MANIFEST };
 
 export const KINDS = [
   'disasm-corpus',
@@ -92,7 +92,7 @@ export const OPERATIONS = [
   { name: 'scan', argv: ['--scan'], mutates: true, summary: '补不入库件的 origin[].sha256（缺省 dry-run，加 --write 落盘）' },
   { name: 'add', argv: ['--add'], mutates: true, summary: '加条目：`<entry-json>` [--write]' },
   { name: 'set', argv: ['--set'], mutates: true, summary: "改条目（如 deferred → lfs 翻牌）：`<id> '<patch-json>'` [--write]" },
-  { name: 'set-root', argv: ['--set-root'], mutates: true, summary: '加/改来源根：`<name> <path>` [--write]' },
+  { name: 'set-root', argv: ['--set-root'], mutates: true, summary: "加/改来源根：`<name> <path>` [--local] [--write]（`--local` ⇒ 写本机私有覆盖 `assets.local.json`，不入库）" },
   { name: 'normalize', argv: ['--normalize'], mutates: true, summary: '拉回规范形态（剔多余顶层键、重排、重写 _doc）[--write]' },
 ];
 
@@ -129,8 +129,48 @@ const ENTRY_FIELD_DOC = [
 
 // ─────────────────────────────────────────────────────────── 读 / 规范化
 
-export function loadManifest(manifestPath = DEFAULT_MANIFEST) {
-  return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+export function loadManifest(manifestPath = DEFAULT_MANIFEST, localPath = localManifestFor(manifestPath)) {
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const local = readLocalOverrides(localPath);
+  if (local) manifest.roots = { ...(manifest.roots ?? {}), ...local.roots };
+  return manifest;
+}
+
+/** 「本机私有覆盖」与它覆盖的那份清单位于**同一目录**（`assets.json` ↔ `assets.local.json`） */
+export function localManifestFor(manifestPath = DEFAULT_MANIFEST) {
+  if (manifestPath === DEFAULT_MANIFEST) return DEFAULT_LOCAL_MANIFEST;
+  return path.join(path.dirname(manifestPath), `${path.basename(manifestPath, '.json')}.local.json`);
+}
+
+/**
+ * 读本机私有覆盖（**只认 `roots`**；文件不在 ⇒ `null`，这不是错误）。
+ *
+ * ★ 只覆盖 `roots`：条目（来源与去向）是仓库事实，不许被本机私有文件改写 ——
+ *   否则"这台机器上清单少了一条"会表现成"仓库里少了一条"，而那是查不出来的静默分歧。
+ * ★ 覆盖**逐键**进行（`assets.json` 里没写的键也可以新增）；非法形态一律**抛**（不静默忽略）。
+ */
+export function readLocalOverrides(localPath = DEFAULT_LOCAL_MANIFEST) {
+  if (!localPath || !fs.existsSync(localPath)) return null;
+  const raw = JSON.parse(fs.readFileSync(localPath, 'utf8'));
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${localPath}：必须是一个 JSON 对象`);
+  const extra = Object.keys(raw).filter((k) => k !== 'roots');
+  if (extra.length) throw new Error(`${localPath}：只认 "roots"（多出的键：${extra.join(', ')}）—— 条目是仓库事实，不许本机覆盖`);
+  const roots = raw.roots ?? {};
+  if (typeof roots !== 'object' || roots === null || Array.isArray(roots)) throw new Error(`${localPath}：roots 必须是对象`);
+  for (const [k, v] of Object.entries(roots)) {
+    if (typeof v !== 'string' || v === '') throw new Error(`${localPath}：roots.${k} 必须是非空路径字符串`);
+  }
+  return { roots: { ...roots }, path: localPath };
+}
+
+/** 写本机私有覆盖（只写 `roots`；键序 = 清单的 `ROOT_KEY_ORDER`，其余键按字典序 ⇒ 同输入同字节） */
+export function saveLocalOverrides(roots, localPath = DEFAULT_LOCAL_MANIFEST) {
+  const ordered = orderKeys(roots, ROOT_KEY_ORDER);
+  fs.mkdirSync(path.dirname(localPath), { recursive: true });
+  const tmp = `${localPath}.$$tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify({ roots: ordered }, null, 2)}\n`);
+  fs.renameSync(tmp, localPath);
+  return localPath;
 }
 
 function orderKeys(obj, order) {
@@ -558,6 +598,10 @@ export function describe() {
       roots: {
         required: [...ROOT_KEY_ORDER],
         note: '绝对路径只写在这里；条目里一律相对路径；额外来源根用 --set-root 登记',
+        localOverride:
+          '★ **本机私有覆盖**（`assets.local.json`，与清单同目录、`.gitignore` 命中 ⇒ 不入库）：逐键覆盖 `roots`，' +
+          '用于**平台相关路径**（win32 与 macOS 的旧仓/安装目录不同）。只覆盖 `roots`；条目是仓库事实，不许本机改写。' +
+          '读它的是**唯一的清单加载器**（所有消费者都走 `loadManifest`）；`--set-root <名> <路径> --local` 是唯一写入口。',
       },
       entries: '见下方 entry 字段表',
     },
@@ -588,6 +632,7 @@ export function describeText(d = describe()) {
   L.push(`* schemaVersion: ${d.topLevel.schemaVersion}`);
   L.push(`* _doc: ${d.topLevel._doc}`);
   L.push(`* roots: 必填 ${d.topLevel.roots.required.join(' / ')} —— ${d.topLevel.roots.note}`);
+  if (d.topLevel.roots.localOverride) L.push(`* ${d.topLevel.roots.localOverride}`);
   L.push(`* entries: ${d.topLevel.entries}`);
   if (d.entry.conditionalRequired) L.push(`* 条件必填：${d.entry.conditionalRequired.join(' / ')}`);
   L.push('');

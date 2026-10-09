@@ -50,6 +50,7 @@ import {
   serializeRecord,
   validateAll,
 } from './lib/ledger.mjs';
+import { loadManifest } from './lib/manifest.mjs';
 
 export { DOMAIN, OPERATIONS, describe, describeText };
 
@@ -117,10 +118,10 @@ function parseArgs(argv) {
   return out;
 }
 
-/** 只读参考仓的根：**从清单解析**（`roots.oldRepo`），不硬编码 */
+/** 只读参考仓的根：**从清单解析**（`roots.oldRepo`，含本机私有覆盖），不硬编码 */
 function referenceRoot(manifestPath = path.join(REPO_ROOT, DEFAULT_MANIFEST)) {
   try {
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const manifest = loadManifest(manifestPath);
     const root = manifest.roots?.[REFERENCE_ROOT_KEY];
     return typeof root === 'string' ? root : null;
   } catch {
@@ -208,10 +209,14 @@ function cmdReport(args, proj, ledgerDir) {
   const ok = anchors.filter((a) => a.ok).length;
   const warn = anchors.filter((a) => a.kind === 'warning').length;
   const err = anchors.filter((a) => a.kind === 'error').length;
+  // ★ 历史行的死锚**不算当下的错误**（口径同 `--validate` #3：被 `replaces` 取代的行是历史事实，
+  //   逼人修它等于逼人就地改历史）。分开计数 ⇒ "要不要管"一眼可判。
+  const errLive = proj.entries.filter((e) => e.effective !== 'retracted').flatMap((e) => e.anchors).filter((a) => a.kind === 'error').length;
+  const errHist = err - errLive;
   const files = listFiles(ledgerDir);
   if (args.json) {
     process.stdout.write(
-      `${JSON.stringify({ files: files.length, records: proj.entries.length, byKind, byEffective: proj.byEffective, bySystem: proj.bySystem, domains: proj.vocab.canonical.size, anchors: { total: anchors.length, ok, warn, err }, conflicts: proj.conflicts.length }, null, 2)}\n`,
+      `${JSON.stringify({ files: files.length, records: proj.entries.length, byKind, byEffective: proj.byEffective, bySystem: proj.bySystem, domains: proj.vocab.canonical.size, anchors: { total: anchors.length, ok, warn, err, errLive, errHist }, conflicts: proj.conflicts.length }, null, 2)}\n`,
     );
     return 0;
   }
@@ -223,7 +228,7 @@ function cmdReport(args, proj, ledgerDir) {
   L.push(`域分布      ${Object.entries(proj.bySystem).map(([k, v]) => `${k}=${v}`).join(' · ') || '（无）'}`);
   // ★ "待定域"单列一行：它不是错误，但**必须看得见**（缺省 ≠ 失效，可见性不能少）
   L.push(`待定域      ${proj.pendingDomain} 条没填 \`system\`${proj.pendingDomain ? '　⇒ 渐进填域：确定一块就补一块（`--system`），词表按使用长出来' : ''}`);
-  L.push(`锚点        ${anchors.length} 条　可解析=${ok} · 参考仓不在场=${warn} · **红**=${err}`);
+  L.push(`锚点        ${anchors.length} 条　可解析=${ok} · 参考仓取不到（warn）=${warn} · **红**=${errLive}${errHist ? ` · 历史行死锚=${errHist}（已被取代，不管）` : ''}`);
   L.push(`冲突        ${proj.conflicts.length} 组${proj.conflicts.length ? '　⇒ 见 `--validate` 的 #5' : ''}`);
   L.push('');
   L.push(proj.entries.length === 0 ? '（台账是空的 —— 这是**有意为之**：K3 通过前任何知识条目不得进来）' : '体检口径：`--validate` 是门禁，本命令只是概览。');
@@ -436,6 +441,11 @@ function cmdRetract(args, proj, ledgerDir) {
     status: 'retracted',
     replaces: target.id,
   };
+  // ★ **域记录专属字段必须跟着走**：撤回一条 `kind=domain` 的记录时若不带上 `disposition`，
+  //   这条撤回记录自己就违反不变量 #1（"域记录必须写 disposition"）—— 实测踩过（把词表搞红）。
+  for (const k of ['disposition', 'aliases', 'splitInto']) {
+    if (target[k] !== undefined) rec[k] = target[k];
+  }
   const L = [`将**追加**（不改历史）：`, serializeRecord(rec), '', `它 replaces ${ID_PREFIX}${target.id}`];
   if (!args.write) {
     process.stdout.write(`${L.join('\n')}\n\n（dry-run）加 --write 落盘。\n`);

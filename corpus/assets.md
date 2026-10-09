@@ -27,6 +27,11 @@
   必须有一条指向 `kind=binary` 的前身）；**"转码前的原件"与"明确不带的清单"豁免** —— 它们是参照件 / 清单，
   不是被加工的语料。
 * **刻意不写**：体积、入库件 `sha256`、LFS oid、`status`、`generatedAt`、任何可从磁盘 / git 推导的计数。
+* **平台相关的绝对路径走「本机私有覆盖」**：清单里的 `roots`（`oldRepo` / `gameInstall` / `gameSaves`）是绝对路径，
+  而它们**平台相关**（同一份清单要同时服务 win32 与 macOS）。⇒ 入库的清单只留"已知的那一份"，
+  本机用**同目录的 `corpus/assets.local.json`**（`.gitignore` 命中 `*.local.json` ⇒ **不入库**）**逐键覆盖 `roots`**。
+  ★ 它**只覆盖 `roots`**：条目（来源与去向）是仓库事实，多写一个键就抛 —— 否则"这台机器上少一条"会表现成"仓库里少一条"。
+  ★ 读它的是**唯一的清单加载器**（`loadManifest`，所有消费者共用）；`--set-root <名> <路径> --local [--write]` 是唯一写入口。
 
 ## 怎么查
 
@@ -37,6 +42,8 @@ pnpm tools corpus list                   # 条目一览
 pnpm tools corpus validate --json # 机器可读
 ```
 
+★ 本机覆盖若在场，非 `--json` 的输出会在最上面打一行 `★ 本机私有覆盖：…（roots: …）`（"路径名不可靠，不做猜测" ⇒ 那就把它打出来）。
+
 > ⚠ `docs/00-origin/init-prompt.md`（立项原文）里也有一份当年的字段表 —— 那是**历史记录，不是现行 schema**；
 > 现行 schema 永远以 `--describe` 为准。
 
@@ -44,6 +51,13 @@ pnpm tools corpus validate --json # 机器可读
 
 **唯一写入口**：`tools/corpus.mjs`（`--add` / `--set` / `--set-root` / `--scan --write` / `--normalize --write`）。
 缺省 **dry-run**；`--write` 时**写前先在内存里复验**（不绿一个字都不写）+ **写后回读复验**（不绿自动回滚）。
+
+★ **改平台路径用 `--local`**（写进不入库的 `assets.local.json`，不动仓库里的清单）：
+
+```bash
+pnpm tools corpus set-root oldRepo /Users/<你>/Projects/amayui-cn --local --write
+pnpm tools corpus set-root gameInstall /Users/<你>/Projects/amayui-cn/raw --local --write
+```
 
 完整命令表见 `--describe` 的「怎么查 / 怎么改」一节；`deferred → lfs` 的翻牌示例也写在那里。
 

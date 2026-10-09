@@ -1,28 +1,19 @@
 /**
  * apps/emulator/src/host/effects.ts —— **副作用日志**（★ 核心层：零 Node 依赖）
  *
- * ## headless 前端到底是什么
- * 一句话：**它的"渲染 / 音频 / 输入"不产生像素与声音，只产生记录**。
- * ⇒ 这一层就是 headless 前端的**产物本身**，不是"没有实现的桩"。
+ * headless 前端的"渲染 / 音频 / 输入"**不产生像素与声音，只产生记录** ⇒ 这一层就是它的**产物本身**，
+ * 不是"没有实现的桩"。
  *
- * ## ★★ 为什么每条记录都要带 `disposition`（本文件最重要的一个字段）
- * "宿主没做这件事"与"宿主做了、但什么都没发生"在日志里**长得一样**，而这正是旧仓踩过的最贵的坑：
- * `NativeBridge` 的方法几乎都是可选的，宿主没实现时**静默变成空操作**，
- * 于是"opcode 标着已实现、画面上什么都没有"可以一路绿到底。
- * ⇒ 每条记录必须自己说清它属于哪一类：
- * * `modeled` —— 引擎态**真的**按引擎语义改了（这条副作用是"被建模的行为"）；
- * * `logged-only` —— 只是记下来了（headless 没有对应子系统：没有像素、没有声音）；
- * * `not-provided` —— 这个能力**宿主根本没提供**（不是"提供了但没做事"）。
- * ★ 三者**不许合并**：`logged-only` 是"我知道我跳过了什么"，`not-provided` 是"我连跳过了什么都不确定"。
+ * ★★ 每条记录必须自带 `disposition`，且三态**不许合并**：`modeled` = 引擎态真的按语义改了；
+ *   `logged-only` = 只是记下来了（headless 没有对应子系统）；`not-provided` = 宿主根本没提供这能力。
+ *   合并就分不清"我知道我跳过了什么"与"我连跳过了什么都不确定"，也分不清"没有输入源"与"输入源坏了"。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/effects-disposition-three-state`）。
+ * ★ 域与动作名是**闭集合**、由守卫逐条核：开放字符串会让打错的动作名变成"新增一类记录"，
+ *   而那类错不报错、只让统计悄悄少一块（动作名是产物的一部分）⇒ 新增动作必须同时改表与守卫。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/effects-action-closed-set`）。
  *
- * ## ★ 域与动作是**闭集合**，由守卫核
- * 开放字符串会让"打错一个动作名"变成新增一类记录，而那类错**不会报错**，只会让统计悄悄少一块。
- * ⇒ `EFFECT_DOMAINS` 与每个域的动作表都在这里显式声明（`EFFECT_ACTIONS`），守卫逐条核。
- *
- * ## 顺序与可比性
- * `seq` 单调递增、由日志自己发号（不靠调用方传），因为"两条记录谁先"在 headless 复现里
- * 就是判据本身。`atMs` 由机器在 emit 时从**注入的时钟**取样 —— 于是"同一脚本 + 同一初始时钟
- * ⇒ 逐字节相同的日志"，这是后续拿日志当回归基准的前提。
+ * `seq` 单调递增、由日志自己发号；`atMs` 由机器在 emit 时从**注入的时钟**取样 ⇒
+ * "同一脚本 + 同一初始时钟 ⇒ 逐字节相同的日志"，这是拿日志当回归基准的前提。
  */
 
 /** 副作用所属的域（闭集合） */
@@ -30,8 +21,8 @@ export const EFFECT_DOMAINS = ['render', 'audio', 'input', 'resource', 'system']
 export type EffectDomain = (typeof EFFECT_DOMAINS)[number];
 
 /**
- * 每个域的动作名**闭集合**。新增动作必须同时改这里与守卫 —— 这是有意的摩擦：
- * 动作名是**产物的一部分**（下游按它做统计与断言）。
+ * 每个域的动作名**闭集合**。新增动作必须同时改这里与守卫（有意的摩擦）。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/effects-action-closed-set`）。
  */
 export const EFFECT_ACTIONS: Record<EffectDomain, readonly string[]> = {
   render: [
@@ -72,9 +63,8 @@ export const EFFECT_ACTIONS: Record<EffectDomain, readonly string[]> = {
     'script.load',
     'script.exit',
     /**
-     * ★ `0x60 random` 取了一次随机数。**为什么非确定性也要记**：
-     * 不记的话，"两次跑结果不同"就只能靠比对最终状态才发现；记了之后
-     * **取数次数**本身就是复现性判据 —— 同种子却给出不同次数，说明控制流在更早的地方就分叉了。
+     * ★ `0x60 random` 取了一次随机数：**取数次数本身就是复现性判据**（同种子却给出不同次数 ⇒ 控制流更早分叉）。
+     *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/random-seeded-injection`）。
      */
     'random.draw',
   ],

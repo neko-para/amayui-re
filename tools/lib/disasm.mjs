@@ -447,10 +447,30 @@ export function spanOfFunction(file, idx, ea, { maxLines = 4000 } = {}) {
   };
 }
 
-const PROC_RE = /^(\S+)\s+([A-Za-z_][\w.]{0,40})\s+proc near/;
+/**
+ * ★ 符号名字符类（三处正则共用一份）：**必须含 `@` / `?` / `$`** —— MSVC 的修饰名会长这样：
+ * `_WinMain@16`、`??2@YAPAXI@Z`、`??_7?$Stack@H@@6B@`。
+ *
+ * ⚠ **实测踩过**（本轮）：旧类 `[A-Za-z_][\w.]{0,40}` **不含 `@`** ⇒ `_WinMain@16 proc near` 不被认作函数头，
+ * `enclosingFunction(0x4BAA3A)` **静默**返回**前一个**函数 `sub_4BA6B0`（而 `--pseudo` 还照样打出 C 体）——
+ * 那不是"查不到"，是**给了一个看起来对的错答案**，正好违反本层"缺事实要报错"的口径。
+ * 判据：`node tools/disasm.mjs --pseudo --ea 0x4BAA3A` 必须报 `_WinMain@16`（`.lst:295818-296907`）。
+ */
+const SYM = '[A-Za-z_$?@][\\w.$?@]{0,60}';
+/**
+ * MSVC **修饰名 → `.c` 里的可读名**：`_WinMain@16` ⇒ `WinMain`（`--pseudo` 的 C 体查找用它兜一层）。
+ * ★ Hex-Rays 打印函数**头**时用可读名（`int __stdcall WinMain(...)`），而 `.lst` 的 `proc near` 用修饰名
+ * ⇒ 只按符号名查 `.c` 会"找不到定义"，而那**不是**"没有 C 体"。
+ * ⛔ 它只做这一种最常见形态（`_Name@NN`）；`??2@YAPAXI@Z` 这种留给 `.c` 索引自己去碰（碰不到就如实说"没有定义"）。
+ */
+const undecorate = (sym) => {
+  const m = /^[_@]([A-Za-z_]\w*)@\d+$/.exec(sym);
+  return m ? m[1] : sym;
+};
+const PROC_RE = new RegExp(`^(\\S+)\\s+(${SYM})\\s+proc near`);
 /** ★ 段名可以以 `.` 开头（`.text` / `.data`）—— 首字符限 `[A-Za-z_]` 会让 `.text` 整段漏掉（踩过两次） */
-const PROC_EA_RE = /^([A-Za-z_.][\w.]*):([0-9A-Fa-f]{8})\s+([A-Za-z_][\w.]{0,40})\s+proc near/;
-const ENDP_RE = /^\S+\s+([A-Za-z_][\w.]{0,40})\s+endp\b/;
+const PROC_EA_RE = new RegExp(`^([A-Za-z_.][\\w.]*):([0-9A-Fa-f]{8})\\s+(${SYM})\\s+proc near`);
+const ENDP_RE = new RegExp(`^\\S+\\s+(${SYM})\\s+endp\\b`);
 
 /**
  * ★ **包含**这个 EA 的函数（EA 落在函数体内也算），以及它的符号名。
@@ -580,18 +600,27 @@ export function pseudoOfFunction(lstFile, idx, { sym = null, ea = null, lines = 
     // ★ 用 `enclosingFunction`（能处理"EA 在函数体内"）—— `spanOfFunction` 只对函数起点正确
     lstSpan = enclosingFunction(lstFile, idx, eaNum);
     containing = lstSpan.symbol ?? null;
-    if (containing && /^sub_[0-9A-F]{6}$/i.test(containing)) {
-      isFunctionStart = parseInt(containing.slice(4), 16) === eaNum;
+    if (containing) {
+      // ★ 起点判定用 `symbolEa`，**不许**再 `slice(4)` 猜 —— 符号名不一定是 `sub_XXXXXX`
+      //   （`_WinMain@16` 之类会让 `slice` 切出垃圾）
+      isFunctionStart = lstSpan.symbolEa !== null && lstSpan.symbolEa !== undefined ? lstSpan.symbolEa === eaNum : null;
       if (!wantSym) wantSym = containing;
     }
   }
-  if (!wantSym || !/^sub_[0-9A-F]{6}$/i.test(wantSym)) {
+  if (!wantSym || !new RegExp(`^${SYM}$`).test(wantSym)) {
     throw new Error(
       `定位不到函数符号（给的是 ${sym ? JSON.stringify(sym) : 'EA ' + ea}）—— ` +
-        'EA 不是函数起点、或它所在的那一段不是函数（取操作数原语常被内联进 handler，没有 C 体）。',
+        'EA 不在任何 `proc near` 里、或符号形态不认识（支持 `sub_XXXXXX` 与 MSVC 修饰名如 `_WinMain@16`）。',
     );
   }
-  const fnEa = parseInt(wantSym.slice(4), 16);
+  const mSub = /^sub_([0-9A-F]{6})$/i.exec(wantSym);
+  const fnEa = mSub ? Number.parseInt(mSub[1], 16) : (lstSpan?.symbolEa ?? null);
+  if (fnEa === null) {
+    throw new Error(
+      `定位不到函数符号（给的是 ${sym ? JSON.stringify(sym) : 'EA ' + ea}）—— ` +
+        `“${wantSym}”不是 \`sub_XXXXXX\` ⇒ 必须**同时给 \`--ea <它所在函数里的某个 EA>\`**（否则算不出函数起点）。`,
+    );
+  }
   // 给了符号（而不是 EA）时，那个符号名**本身就是函数起点** ⇒ `spanOfFunction` 这时是对的
   if (!lstSpan) lstSpan = spanOfFunction(lstFile, idx, fnEa);
 
@@ -610,11 +639,17 @@ export function pseudoOfFunction(lstFile, idx, { sym = null, ea = null, lines = 
     return out;
   }
   const cidx = buildSymbolIndex(cFile);
-  const def = cidx.defs.get(wantSym);
+  // ★ `.lst` 用修饰名、`.c` 头用可读名 ⇒ 按原名找不到时再按去修饰名找一次（别把"有 C 体"误报成"没有定义"）
+  const def = cidx.defs.get(wantSym) ?? (undecorate(wantSym) === wantSym ? null : cidx.defs.get(undecorate(wantSym)));
   if (!def) {
+    const und = undecorate(wantSym);
     out.note =
       `★ \`${wantSym}\` 在 .c 里**没有定义**（实测 3807 个 \`proc near\` 里有 77 个如此）` +
-      '—— Hex-Rays 没反编译它。只能读 .lst（下面给了行区间）。';
+      '—— Hex-Rays 没反编译它。只能读 .lst（下面给了行区间）。' +
+      (und === wantSym
+        ? ''
+        : `★ 注意这是**修饰名**（去修饰 = \`${und}\`），而本索引**只索引 \`sub_XXXXXX\`** ⇒ ` +
+          '具名函数（`WinMain` / `operator new` / 带 vtable 的方法…）本来就不进索引；要它的 C 体就直接去 `.c` 里按名读。');
     return out;
   }
   const body = cidx.lines.slice(def.from - 1, Math.min(def.to, def.from - 1 + lines));
@@ -627,7 +662,7 @@ export function pseudoOfFunction(lstFile, idx, { sym = null, ea = null, lines = 
     truncated: body.length < def.to - def.from + 1,
   };
   if (isFunctionStart === false) {
-    out.note = `★ 该 EA **不是函数起点**：它属于 \`${containing}\`（函数起点 0x${containing.slice(4)}）⇒ 下面给的是**整个函数**的 C 体`;
+    out.note = `★ 该 EA **不是函数起点**：它属于 \`${containing}\`（函数起点 0x${(lstSpan.symbolEa ?? fnEa).toString(16)}）⇒ 下面给的是**整个函数**的 C 体`;
   }
   return out;
 }

@@ -26,6 +26,12 @@ import { describe as describeSamples } from '../lib/samples.mjs';
  */
 const isEcosystem = (name) => name === 'package.json' || /^tsconfig[.-].*\.json$/.test(name) || name === 'tsconfig.json';
 /**
+ * **本机私有配置**：`*.local.json`（`.gitignore` 命中 ⇒ 不入库）—— 它是**这台机器**的事实
+ * （平台相关的绝对路径等），不是仓库的结构化数据 ⇒ 不该被要求配说明书。
+ * 机制见 `pnpm tools corpus describe` 的 `roots.localOverride`（`corpus/assets.local.json`）。
+ */
+const isLocalPrivate = (name) => /\.local\.json$/.test(name);
+/**
  * 不扫的目录：**本地派生区与工具目录**（与 `.gitignore` 同一批理由 —— 它们本来就不入库，
  * 或者里面的 JSON 由别的工具拥有，不是本仓的结构化数据）。漏一个就会像这样红得莫名其妙：
  * `.pnpm-store/v10/index/*.json` 缺同名 `.md`。
@@ -64,7 +70,7 @@ function walkJson(dir, out = []) {
 const rel = (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/');
 
 test('每个自有 JSON 都有同名 .md，且覆盖「怎么查」「怎么改」并指向脚本自描述', () => {
-  const files = walkJson(REPO_ROOT).filter((p) => !isEcosystem(path.basename(p)));
+  const files = walkJson(REPO_ROOT).filter((p) => !isEcosystem(path.basename(p)) && !isLocalPrivate(path.basename(p)));
   assert.ok(files.length > 0, '至少应当扫到 corpus/assets.json 与 corpus/fixtures/samples.json');
 
   const problems = [];

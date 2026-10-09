@@ -97,7 +97,7 @@ export const OPERATIONS = [
   { name: 'show', argv: ['--show'], mutates: false, summary: '一条记录的全文 + 它的锚点解析结果 + 冲突对家' },
   { name: 'add', argv: ['--add'], mutates: true, summary: '追加一条记录（缺省 dry-run）[--write]：`--kind --system --subject --claim --anchor <json>…`' },
   { name: 'retract', argv: ['--retract'], mutates: true, summary: '撤回一条（**追加**一条 `replaces` 它的记录，不改历史）[--write]' },
-  { name: 'validate', argv: ['--validate'], mutates: false, summary: '不变量（红 = 退出码 1）；只读参考仓不在场时只 warn' },
+  { name: 'validate', argv: ['--validate'], mutates: false, summary: '不变量（红 = 退出码 1）；只读参考仓取不到时只 warn（不可校验 ≠ 失效）' },
   { name: 'rebuild-db', argv: ['--rebuild-db'], mutates: true, summary: '由文本真源确定性重建派生 SQLite（缺省 dry-run）[--write]' },
   { name: 'compact', argv: ['--compact'], mutates: true, summary: '分片归位 + 同 id 去重（只重排，**不删任何结论**）[--write]' },
 ];
@@ -109,7 +109,7 @@ export const CHECK_TITLES = new Map([
   [2, '追加序：每条记录的 `at` 与文件名月份自洽；文件内 ULID **严格递增**（只许追加，不许插中间）'],
   [3, '锚点：形态合法、`repo` 合法且**不越出对应仓库根**；`self` 锚必须落在**本仓已跟踪**的文件上'],
   [4, '观察可再校验：`accepted`（或 `stale`/`conflict` 的）记录，其 `self` 锚必须**当场解析得到**；' +
-    '`reference` 锚在只读参考仓不在场时只 warn'],
+    '`reference` 锚取不到时只 warn（参考仓是 external-only 素材，本来就可能缺件；判红会让观察集体假 stale）'],
   [5, '引线与冲突：`replaces` 必须指向**已存在**的记录且不成环；同一 `kind+subject` 上多个不同 claim ⇒ **显式冲突**'],
   [6, '派生 DB：删掉本地 DB 后一条命令能重建，且**同输入同逻辑内容**'],
   [7, '分类轴：`system` **写了就必须**无空白、且**沿别名链能追到当前域词汇表**（追不到 ⇒ 待裁决，点名但不静默过）；' +
@@ -337,8 +337,12 @@ export function testNames(text) {
  * @returns {{ok:boolean, kind:'ok'|'warning'|'error', why:string, file?:string}}
  *   * `self` 锚：文件必须在**本仓**；`guard` 还要**用例名**真的在该文件里（不是"随便一个子串"）；
  *     `bin` 还要算得出 PE 偏移、且在给了 `sha256` 时**逐字节对上**（这是"这条观测没被换掉"的唯一证据）。
- *   * `reference` 锚：只读参考仓**不在场** ⇒ `warning`（不可校验，**不是**"失效"）——
- *     否则 K2 重挂之前 79 条 B 类会集体假红。
+ *   * `reference` 锚：**取不到就是 `warning`**（不可校验 ≠ 失效）——
+ *     只读参考仓的绝对路径是**平台相关**的（本机私有覆盖 `corpus/assets.local.json`），
+ *     而且它是 `external-only` 素材：里面**本来就可能**缺件（实测 `raw-parts/AGE.EXE__dumped.sectfix.EXE`
+ *     在两台机器上都不在盘上）。⇒ 拿"参考仓里没有这个文件"判红，会让一批观察集体假 `stale`，
+ *     而 `stale` 的含义是"**这条观察失效了**"，不是"这台机器上查不到"。
+ *     ★ 与 `self` 锚的不对称是**有意**的：本仓的文件是仓库事实（缺了就是真错），参考仓不是。
  */
 export function resolveAnchor(a, { repoRoot, referenceRoot, tracked } = {}) {
   const where = a.repo === 'self' ? repoRoot : referenceRoot;
@@ -359,7 +363,10 @@ export function resolveAnchor(a, { repoRoot, referenceRoot, tracked } = {}) {
     return { ok: false, kind: 'error', why: `锚点越出仓库根：${a.path}` };
   }
   if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
-    // 本仓的"不存在"是**真红**；参考仓的不存在只在"参考仓在场却没这个文件"时才是红
+    // 本仓的"不存在"是**真红**（文件是仓库事实）；参考仓的"不存在"是 warn（不可校验）—— 见上注
+    if (a.repo === 'reference') {
+      return { ok: false, kind: 'warning', why: `只读参考仓里取不到（无法校验，按 warn 处理）：${a.repo}:${a.path}` };
+    }
     return { ok: false, kind: 'error', why: `文件不存在：${a.repo}:${a.path}` };
   }
   if (tracked && a.repo === 'self' && !tracked.has(a.path.replace(/\\/g, '/'))) {
@@ -421,7 +428,13 @@ export function resolveAnchor(a, { repoRoot, referenceRoot, tracked } = {}) {
  */
 export function buildVocabulary(records) {
   const problems = [];
-  const domains = records.filter((r) => r.kind === 'domain');
+  // ★ **历史行不进词表**（口径同投影 / #1 / #3 / #4 的"被 replaces 取代的行不再算数"）：
+  //   撤回一条域记录会追加一条 `replaces` 行（kind/subject 跟着走）⇒ 若两条都算，词表立刻"自己跟自己歧义"
+  //   （实测踩过：撤回 `Emulator` 域记录后 #7 报"域名出现两次"）。
+  //   词表的读者是**当下**（`system` 值要解析到当前域），历史留给 `git log` 与 `--show`。
+  const selfRetracted = new Set(records.filter((r) => r.status === 'retracted').map((r) => r.id));
+  const replacedIds = new Set(records.filter((r) => typeof r.replaces === 'string').map((r) => r.replaces));
+  const domains = records.filter((r) => r.kind === 'domain' && !selfRetracted.has(r.id) && !replacedIds.has(r.id));
   const canonical = new Set();
   const aliasOf = new Map();
   const splits = new Map();
@@ -620,7 +633,12 @@ export function validateAll(records, opts = {}) {
           p.push(bad(r._file, r._line, `${at}: ${k} 是**域记录专属**字段（当前 kind=${r.kind}）`));
         }
       }
-      if (r.kind === 'domain') {
+      if (r.kind === 'domain' && r.status !== 'retracted') {
+        // ★ **撤回行豁免**（口径同 #3/#4 的"历史行不再算数"）：`retract` 产生的那条 `replaces` 记录
+        //   kind/subject 会跟着被撤回的域记录走，但它**本身不是一条词表主张**。
+        //   ⚠ 实测踩过：撤回一条域记录后，那条撤回行没有 `disposition` ⇒ #1 常红（词表被自己搞挂）。
+        //   两处一起修：`cmdRetract` 现在会把 `disposition`/`aliases`/`splitInto` 一起带过来；
+        //   这里再豁免**更早写下的**那种行（日志 append-only ⇒ 改不了，也不该改）。
         if (!DISPOSITIONS.includes(r.disposition)) {
           p.push(bad(r._file, r._line, `${at}: 域记录必须写 disposition，且取值为 ${DISPOSITIONS.join('/')}（实际 ${JSON.stringify(r.disposition)}）`));
         }

@@ -25,7 +25,7 @@ import {
   loadSourceTable,
   report,
 } from './lib/opcodes.mjs';
-import { DEFAULT_MANIFEST } from './lib/manifest.mjs';
+import { DEFAULT_MANIFEST, loadManifest } from './lib/manifest.mjs';
 
 export { DOMAIN, OPERATIONS, describe, describeText };
 
@@ -144,7 +144,7 @@ function handlersAction(args) {
  */
 function sourcePathFromManifest(override) {
   if (override) return path.resolve(override);
-  const manifest = JSON.parse(fs.readFileSync(DEFAULT_MANIFEST, 'utf8'));
+  const manifest = loadManifest(DEFAULT_MANIFEST);
   const entry = manifest.entries.find((e) => e.id === SOURCE_ENTRY);
   if (!entry) throw new Error(`清单里没有 ${SOURCE_ENTRY} 条目 ⇒ 派生器的来源丢了（这是真错误，不是"跳过"）`);
   const origin = (entry.origin ?? [])[0];
@@ -177,7 +177,7 @@ export function main(argv = process.argv.slice(2)) {
   const raw = loadSourceTable(sourceAbs);
   if (args.action === 'report') {
     const r = report(raw);
-    const manifest = JSON.parse(fs.readFileSync(DEFAULT_MANIFEST, 'utf8'));
+    const manifest = loadManifest(DEFAULT_MANIFEST);
     const entry = manifest.entries.find((e) => e.id === SOURCE_ENTRY);
     const wantHash = (entry?.origin ?? [])[0]?.sha256;
     if (args.json) {

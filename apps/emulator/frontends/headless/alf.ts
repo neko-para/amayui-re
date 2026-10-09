@@ -7,16 +7,14 @@
  * **裸拼**（无头、无目录区）。
  *
  * ## ★ 为什么"索引"与"归档"要分开注入（而不是合成一个"文件系统"）
- * 索引只有几百 KB，归档有 **6.7 GB**。合成一个对象会让"只想看看目录"的人也去碰归档；
- * 分开之后：**看目录**只读索引，**取载荷**才按 `(偏移,长度)` 打开归档 ——
- * 而 `readPrefix` 让"只要头几十字节"的调用方**不必把整份文件读进来**
- * （旧仓实测：1~1.5 MB 的档被每帧问上百次 ⇒ 整份读是一帧 4.8 s）。
+ * 索引只有几百 KB、归档有 6.7 GB ⇒ 分开之后**看目录**只读索引、**取载荷**才按 `(偏移,长度)` 打开归档；
+ * `readPrefix` 让"只要头几十字节"的调用方**不必把整份文件读进来**。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/alf-lazy-payload`）。
  *
  * ## ★ 松散文件优先
- * 安装根上**同时**可能有同名的松散文件（打补丁/改过的件）。旧仓的判据是
- * "先找松散文件，找不到再按索引切片"。这一条**不在本文件里**做 ——
- * 它由核心的 `LayeredFilesystem` 用"源的顺序"表达（松散目录在前、本来源在后）：
- * 于是"哪个优先"是**注入方的显式选择**，而不是本文件里一个隐式 if。
+ * 安装根上可能有同名的松散文件（打补丁/改过的件），这一条**不在本文件里**做 ——
+ * 它由核心的 `LayeredFilesystem` 用"源的顺序"表达（松散目录在前、本来源在后）。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/fs-layer-order-and-demand`）。
  */
 
 import * as fs from 'node:fs';
@@ -104,8 +102,8 @@ export class AlfIndexSource implements ReadSource {
   }
 
   /**
-   * **统一文件 id → 名字**（已登记进台账的观察：id == 目录条目下标，根脚本 = id 0）。
-   * ★ 名字只用于日志与报错；核心的引用一律走 id（见 `host/scripts.ts` 头注）。
+   * **统一文件 id → 名字**（id == 目录条目下标，根脚本 = id 0）；名字只用于日志与报错，核心一律走 id。
+   * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/scripts-by-file-id`）。
    */
   nameOfId(id: number): string | null {
     return this.index.entries[id >>> 0]?.filename ?? null;
@@ -157,9 +155,8 @@ export class AlfIndexSource implements ReadSource {
   }
 
   /**
-   * ★ 短读**必须响亮失败**：索引说这个条目有 N 字节，而归档里没读满 N 字节
-   * ⇒ 要么索引/归档不是一对，要么归档被截断。这两种都不是"文件短一点"，
-   * 而静默返回短的那份会让下游把它当成一份**内容错的完整文件**。
+   * ★ 短读**必须响亮失败**（索引声明 N 字节而归档读不满 N ⇒ 索引与归档不是一对、或归档被截断）。
+   * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/alf-lazy-payload`）。
    */
   #assertFull(e: IndexedFile, name: string, got: number): void {
     if (got === e.length) return;

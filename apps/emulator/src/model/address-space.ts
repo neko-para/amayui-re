@@ -2,9 +2,8 @@
  * apps/emulator/src/model/address-space.ts —— **地址空间**（★ 语义层核心：零 Node、零镜像偏移）
  *
  * ## 为什么需要它（决策：ADR「模拟器要有统一地址空间」）
- * 用户口径：**这个模拟器要像真正的引擎一样驱动游戏** ⇒ 凡是游戏**确实用到**的能力都必须支持，
- * 不许留"永久不支持"。而引擎的机器模型里有一样东西是"按语义槽建模"**表达不出来**的：
- * **指针**。取证（锚 = EA，见台账）说得很直白：
+ * 用户口径：**要像真正的引擎一样驱动游戏** ⇒ 凡是游戏**确实用到**的能力都必须支持。而"按语义槽建模"
+ * **表达不出指针** —— 取证（锚 = EA）：
  *
  * ```
  * global-ptr 读：mov edx,[ecx+5D818h] / mov eax,[edx+eax*4] / mov edx,[eax]
@@ -12,24 +11,16 @@
  * create-mesh ：mov eax,[ecx]        ; ★ 第 i 个顶点 = 操作数解出的**地址** + 4*i
  * ```
  *
- * ⇒ "池里那一格装的是**地址**、值在 `[地址]` 里"这件事，要求模型里存在**地址**这个概念。
- * 之前 `type 6/7/8/c/d/e` 一律响亮失败，就是因为没有它 —— 而按用户口径，那不是终局。
+ * ⇒ "池里那一格装的是**地址**、值在 `[地址]` 里"要求模型里存在**地址**这个概念
+ *   （此前 `type 6/7/8/c/d/e` 一律响亮失败，就是因为没有它）。
  *
- * ## ★★ 形状：**扁平 + 合成 + 稀疏**（另外两种形状被否掉的理由）
- * * ✅ **扁平**：`区域 = [base, base + capacity*elemBytes)`，`地址 = base + index*elemBytes`。
- *   于是引擎的 `base + 4*i`（数组遍历）、`lea`、指针加减**全部原样成立** ——
- *   因为它们本来就是地址算术。
- * * ❌ **结构化指针**（`{池名, 下标}`）：一旦脚本对地址做算术（`地址 ± 常数`、
- *   取结构体中间某个字段的地址），"这是哪个池的第几格"就没有唯一答案了
- *   ⇒ 要么在算术处失败，要么猜。**否掉**。
- * * ❌ **继续不支持**：与用户口径直接冲突（"确实涉及到的能力都是要支持的"）。**否掉**。
- * * ✅ **合成**：地址由本层自己发（`ORIGIN` 起、按分配顺序 bump），**不是**宿主真地址。
- *   理由：真地址取决于宿主分配器 ⇒ 两次运行不同 ⇒ 快照不可比、日志不可 diff。
- *   ★ **判据**：同一脚本 + 同一环境 ⇒ **同一批地址**（分配顺序由脚本与头里的计数决定）。
- * * ✅ **稀疏**：一个区域的格子按需出现（`cells: Map<偏移, 字节>`）。
- *   理由：**池的容量至今没有逐字取证**（头部那 6 个计数怎么分派给 6 个池，见"缺口"）。
- *   稀疏 ⇒ 现在就能建、能寻址、能解引用，而**不必先编一个容量出来**。
- *   ★ 与 `pools.ts` 同口径：**"这里没东西"与"这里的值是 0"是两件事**（`has()` 就是那条判据）。
+ * ## ★★ 形状：**扁平 + 合成 + 稀疏**（另两种形状 —— 结构化指针 / 继续不支持 —— 被否掉的理由见台账）
+ * * ✅ **扁平**：`地址 = base + index*elemBytes` ⇒ 引擎的 `base + 4*i` / `lea` / 指针加减原样成立。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/address-space-flat`）。
+ * * ✅ **合成**：地址按分配顺序发号（`ORIGIN` 起 bump）⇒ 同脚本 + 同环境 ⇒ 同一批地址、快照可比。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/address-space-synthetic`）。
+ * * ✅ **稀疏**：格子按需出现（`cells: Map<偏移, 字节>`）—— 池容量无取证也不必先编一个；"没东西"≠"值是 0"。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/address-space-sparse-null-not-zero`）。
  *
  * ## ★ 本层**只管字节**：不认 DEC/ENC、不认 SSO、不认容器
  * 值的"含义"（int 族要过编解码、字符串是 28 字节小对象…）属于**池层 / 容器层**。
@@ -37,12 +28,9 @@
  * （取证：`sub_42AEA0` 的 case 3 逐字是 `mov ecx,[eax]` / `lea eax,[edx+ecx*4]`，没有任何位运算）。
  *
  * ## ★ 越界 / 未映射 / 未对齐一律**响亮失败**（不许补 0）
- * 引擎在越界时**没有边界检查**（它会安静地读到相邻内存）—— 那是 UB，不是可模仿的行为。
- * 本层因此不假装能重现它，而是把三种情况都变成**带地址的**响亮失败：
- * * `unmapped` —— 地址不落在任何区域里；
- * * `misaligned` —— 偏移不是元素宽的整数倍（引擎会读到一个跨格子的半字）；
- * * `unwritten` —— 该格还没被写过（读它得到 `null` 而不是 0；由调用方决定怎么办）。
- * 这三种都进 `diagnostics`（计数），于是"这次跑依赖了未写过的格子"是**看得见**的。
+ * 引擎越界时**没有边界检查**（那是 UB，不是可模仿的行为）⇒ `unmapped` / `misaligned` / `unwritten`
+ * 三种都变成**带地址的**响亮失败，并都进 `diagnostics`（计数）⇒ "依赖了未写过的格子"看得见。
+ * 口径同 `model/address-space-sparse-null-not-zero`（台账 `data/ledger/`）。
  *
  * ## ★ 本批的诚实缺口（登记在需求树，不在这里糊过去）
  * * **区域的容量从哪来**：`alloc` 的 `capacity` 是**必填**的（本层不编默认值）。
@@ -71,10 +59,9 @@ export interface RegionSpec {
   /**
    * ★ 本区域独占的**地址窗口**大小（字节）。缺省 `REGION_STRIDE`。
    *
-   * ⛔ **不许所有池都用一个值**：本仓实测 —— 全局 int 池一次跑到第 **7,355,801** 格
-   * （≈29 MB），而每帧还要 6 个局部池区域、引擎帧深上限 40 ⇒ 最多 ~246 个区域。
-   * 若都给 32 MB 会**溢出 u32**（指针格只有 4 字节）；若都给 4 MB，全局 int 池装不下。
-   * ⇒ 窗口按**池的用途**给（见 `pools.ts` 的 `SPAN_*`），总面积由 `alloc` 的 u32 预算检查兜底。
+   * ⛔ **不许所有池都用一个值**：窗口按**池的用途**给（见 `pools.ts` 的 `SPAN_*`），
+   *    总面积由 `alloc` 的 u32 预算检查兜底。
+   *    口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/address-space-region-window`）。
    */
   span?: number;
 }
@@ -109,11 +96,8 @@ export class Region {
    */
   capacity: number;
   /**
-   * ★ 本区域独占的**地址窗口**（字节）—— **不可变身份**。
-   *
-   * ⛔ 不许所有池共用一个值：全局 int 池一次跑到第 **7,355,801** 格（≈29 MB），
-   * 而每帧还要 6 个局部池区域、帧深上限 40 ⇒ 最多 ~246 个区域 ⇒
-   * 若都给 32 MB 会**溢出 u32**（指针格只有 4 字节），若都给 4 MB 则全局 int 池装不下。
+   * ★ 本区域独占的**地址窗口**（字节）—— **不可变身份**（基址按整个窗口推进 ⇒ 区域绝不重叠）。
+   *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/address-space-region-window`）。
    */
   readonly span: number;
   /** 偏移 → 该格的原始字节（长度恒等于 `elemBytes`）。★ 稀疏：没写过的格子**不在这里** */
@@ -198,33 +182,30 @@ export interface AddressSpaceSnapshot {
 export const ORIGIN = 0x10000000;
 
 /**
- * **一个区域独占的地址窗口大小**（`0x0100_0000` = 16 MiB）。
+ * **一个区域独占的地址窗口大小的缺省值**（`0x0040_0000` = **4 MiB**）。
  *
- * ## 为什么需要它（本仓实测踩过三次静默串数据 / 一次地址溢出）
- * ① `capacity === 0` 的区域 `byteLength === 0` ⇒ 若按字节长推进，下一个区域会**拿到同一个基址**；
- * ② 更糟的是**增长**：区域构造时容量 0、之后涨到 N ⇒ 末尾**越过**下一个区域的基址 ⇒
- *    "写进 A 的值"能从 B 的地址读到（两条路都"看起来正常"）；
- * ③ ★ 窗口**太大**会让地址**溢出 4 字节格**：每帧建 6 个局部池区域 + 6 个全局池区域，
- *    而 `load-frame` 的逐字把帧深上限定在 **40** ⇒ 区域数上限 ≈ `40*6 + 6 = 246`。
- *    最初用 512 MiB：`ORIGIN + 11*512MiB` 就已越过 `0xFFFFFFFF`，写进指针格时被**截断**
- *    （实测：`actual` 与 `expected` 正好差 `2^32`，而日志一切正常）。
+ * ## 这个数由两条约束夹出来（不是拍的）
+ * 1. **地址必须装进 4 字节格**（指针池的一格就是 4 字节）⇒ `ORIGIN + k*STRIDE ≤ 0xFFFFFFFF`。
+ *    `load-frame` 的逐字把帧深上限定在 **40**，而每帧建 6 个局部 + 6 个全局池区域 ⇒ 区域数上限
+ *    ≈ `40*6 + 6 = 246` ⇒ `ORIGIN + 246*4MiB ≈ ORIGIN + 984 MiB`，**远小于 4 GiB**（很宽松）；
+ * 2. 窗口内容量上限 = `STRIDE / elemBytes` ⇒ 4 字节元素 = **1,048,576 格**。这一条**故意不够用**：
+ *    ★ 全局数值族（`int` / `intRef` / `float` / `floatRef`）由 `pools.ts` 的
+ *    `SPAN_GLOBAL_NUMERIC = 48 MiB` **覆盖**这个缺省值（本仓实测写到第 **7,355,801** 格 ≈29 MB）；
+ *    真不够时 `ensureCapacity` **响亮失败**，由人决定拆区域还是换口径。
  *
- * ## 这个数由两条硬约束夹出来（不是拍的）
- * 1. **地址必须装进 4 字节单元**（指针池的一格就是 4 字节）⇒ `ORIGIN + k*STRIDE ≤ 0xFFFFFFFF`
- *    ⇒ `STRIDE ≤ (0xFFFFFFFF − ORIGIN) / 246` ≈ **17.4 MB** ⇒ 取 2 的幂 **16 MiB**（留余量）；
- * 2. 窗口内容量上限 = `STRIDE / elemBytes`（4 字节元素 ⇒ **419 万格**）—— 已远超实测需要的最大下标
- *    （`global:int[1353969]`）；真不够时 `ensureCapacity` **响亮失败**，由人决定拆区域还是换口径。
- * ★ 它**不影响**任何语义：基址只通过 `addressOf` 被比较，别处不依赖具体值。
+ * ★ 它**不影响**任何语义：基址只通过 `addressOf` 被比较，别处不依赖具体值。窗口语义（基址按整个窗口
+ *   推进、区域不许重叠）见知识台账：`data/ledger/`（域 `Emulator`，subject `model/address-space-region-window`）。
+ * ★ 订正（2026-10）：本块原写"取 2 的幂 **16 MiB**（`0x0100_0000`）"，与代码的 `0x00400000`（4 MiB）
+ *   分叉；现已与代码对齐，u32 预算口径见台账 subject `model/address-space-u32-budget-stride`。
  */
 export const REGION_STRIDE = 0x00400000;
 
 /**
  * **一个地址空间**。持有若干区域，回答"这个地址落在哪一格的哪个偏移"。
  *
- * ★ 与 `pools.ts` 的关系（本批**只立接缝、不动池**）：池层现在的存储是
- *   `Map<池名, Map<下标, 值>>` —— 它没有地址概念。**迁移**（把池的存储换成区域）是一次
- *   明确的改动，登记在需求树里；本批先让地址空间**独立可测**，于是迁移时它是既成事实，
- *   而不是"边迁边设计"。
+ * ★ 与 `pools.ts` 的关系：池的 int / float 族**已经**把存储搬进区域（一位模式只有一份，
+ *   迁移后 `Map` 为空）。口径与理由见知识台账：`data/ledger/`
+ *   （域 `Emulator`，subject `model/pools-data-in-region-one-copy`）。
  */
 export class AddressSpace {
   /** 区域（按 `base` 升序 —— 分配顺序即升序，因为基址是 bump 出来的） */
@@ -260,9 +241,8 @@ export class AddressSpace {
     if (!Number.isInteger(index) || index < 0) throw new Error(`ensureCapacity 的下标必须是非负整数：${index}`);
     const need = index + 1;
     if (need <= region.capacity) return false;
-    // ★★ **不许越出本区域自己的地址窗口**：窗口是 `[base, base + region.span)`，
-    //   越过它就必然**重叠下一个区域** ⇒ "写进 A 的值从 B 的地址读到"（静默串数据）。
-    //   ⛔ 宁可响亮失败：这条要人决定"拆区域"还是"给这个池更大的 span"，不许自动重叠。
+    // ★★ **不许越出本区域自己的地址窗口**（`[base, base + region.span)`）：越过它就必然**重叠下一个
+    //   区域** ⇒ "写进 A 的值从 B 的地址读到"（静默串数据）⇒ 宁可响亮失败，由人决定拆区域还是加大 span。
     if (need * region.elemBytes > region.span) {
       throw new Error(
         `区域 ${region.tag} 需要 ${need * region.elemBytes} 字节 > 它自己的地址窗口（${region.span} B）` +
@@ -277,11 +257,8 @@ export class AddressSpace {
 
   /** 地址版：确保该地址落在一个**容得下它**的区域里（地址不属于任何区域 ⇒ 抛，不许"顺便建一个"） */
   ensureAddress(address: number, note = ''): void {
-    // ★★ 按**窗口**找区域，不是按"当前 byteLength"：
-    //   窗口 = 本区域分到的地址范围；`byteLength` = 已经长到哪。
-    //   地址落在窗口内而在容量外 = "还没长到" ⇒ **按需增长**（决策 REQ-01M4B969TBWVERFCB1MXS2Q2E1）；
-    //   落在所有窗口外 = 未映射 ⇒ 抛（响亮）。
-    //   实测踩到：`global:int[1353969]` 的地址在窗口内、却在 45495 格的 byteLength 之外。
+    // ★★ 按**窗口**找区域，不是按"当前 byteLength"：地址落在窗口内而在容量外 = "还没长到"
+    //   ⇒ **按需增长**（决策 REQ-01M4B969TBWVERFCB1MXS2Q2E1）；落在所有窗口外 = 未映射 ⇒ 抛（响亮）。
     const hit = this.regionByWindow(address);
     if (!hit) throw new Error(`ensureAddress：0x${address.toString(16)} 不落在任何区域窗口里${note ? `（${note}）` : ''}`);
     const index = Math.floor((address - hit.base) / hit.elemBytes);
@@ -291,8 +268,9 @@ export class AddressSpace {
   /**
    * 地址 → **窗口内**的区域（不看 `capacity`）。`null` = 落在所有窗口之外（未映射）。
    * ★ 与 `regionAt` 的分工：`regionAt` 答"这一格**现在在**吗"（受 `byteLength` 限制，用于真实访问）；
-   *   `regionByWindow` 答"这个地址**归谁管**"（用于按需增长）。两者混用会得到
-   *   "窗口内的地址被当成未映射" ⇒ 那条路只能抛，永远涨不起来（本仓实测踩到过）。
+   *   `regionByWindow` 答"这个地址**归谁管**"（用于按需增长）。两者混用会让"窗口内的地址被当成未映射"
+   *   ⇒ 那条路只能抛、永远涨不起来。口径与理由见知识台账：`data/ledger/`
+   *   （域 `Emulator`，subject `model/address-space-region-window`）。
    */
   regionByWindow(address: number): Region | null {
     for (const r of this.regions) {
@@ -313,15 +291,12 @@ export class AddressSpace {
     const r = new Region(spec.tag, base, spec.elemBytes, spec.capacity, undefined, span);
     this.regions.push(r);
     this.regions.sort((a, b) => a.base - b.base);
-    // ★★ 推进**一个完整的地址窗口**（`REGION_STRIDE`），不是按当前字节长。
-    //   为什么（本仓实测踩过两次）：
-    //   ① `capacity === 0` 的区域 `byteLength === 0` ⇒ 按字节长推进会让下一个区域**拿到同一个基址**；
-    //   ② 更糟的是**增长**：区域在构造时容量为 0，之后涨到 N ⇒ 它的末尾会**越过**下一个区域的基址
-    //      ⇒ "写进 A 的值"能从 B 的地址读到（**静默串数据**，而且两条路都"看起来正常"）。
-    //   ⇒ 每个区域独占一个窗口，窗口内随便涨（`ensureCapacity` 会拒绝越窗）。
-    // ★★ 而且**整个空间必须装进 4 字节格**（指针池的一格就是 4 字节）——
-    //   区域发多了会溢出去、写指针格时被**截断**（实测：`actual` 与 `expected` 正好差 `2^32`）。
-    //   ⛔ 不许让它静默截断：越界就抛，由人决定拆区域还是换口径。
+    // ★★ 推进**一个完整的地址窗口**，不是按当前字节长：`capacity === 0` 的区域 `byteLength === 0`
+    //   ⇒ 下一个区域会拿到同一个基址；而**增长**会越过邻居的基址 ⇒ 静默串数据。窗口语义见知识台账：
+    //   `data/ledger/`（域 `Emulator`，subject `model/address-space-region-window`）。
+    // ★★ 而且**整个空间必须装进 4 字节格**（指针池的一格就是 4 字节）⇒ 越界就抛，不许静默截断
+    //   （实测：截断后 `actual` 与 `expected` 正好差 `2^32`）。口径见知识台账：`data/ledger/`
+    //   （域 `Emulator`，subject `model/address-space-u32-budget-stride`）。
     if (base + span > 0x1_0000_0000) {
       throw new Error(
         `地址空间用尽：再发一个区域（tag=${spec.tag}，span=${span}）会让基址越过 u32（0x${this.baseCursor.toString(16)}）—— ` +
@@ -351,9 +326,8 @@ export class AddressSpace {
 
   /**
    * 地址 → `{区域, 字节偏移}`，**字节粒度**（不做对齐检查）。
-   * ★ 为什么需要它：`readBytes` 要按字节走（一段 28 字节的字符串里第 3 个字节是合法地址），
-   *   而 `resolve` 是元素粒度的（"取第 i 格"）。两者混用会让**按字节读一段**永远失败 ——
-   *   那正是本文件第一版犯的错（守卫当场抓到）。
+   * ★ 分工：`readBytes` 要按字节走（28 字节字符串里第 3 个字节也是合法地址），而 `resolve` 是
+   *   元素粒度的（"取第 i 格"）；两者混用会让"按字节读一段"永远失败。
    */
   regionAt(address: number): { region: Region; byteOffset: number } | null {
     for (const r of this.regions) {
@@ -498,6 +472,7 @@ export class AddressSpace {
  * ★ 状态分区（口径与 `model/pools.ts` 的同一张表一致）：**`engine` 类的字段恰好是快照的顶层键**。
  * * `AddressSpace`：`regions` 与 `baseCursor` 是引擎态（内存内容 + 发号进度）；`diagnostics` 是诊断。
  * * `Region`：只有 `cells` 会变 ⇒ 唯一进快照的字段；其余是分配时定死的身份。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/state-partition-engine-is-snapshot-keys`）。
  */
 export const STATE_PARTITION: Record<string, Record<string, string>> = {
   AddressSpace: { regions: 'engine', baseCursor: 'engine', diagnostics: 'diagnostic', onGrow: 'host' },

@@ -1,36 +1,21 @@
 /**
  * apps/emulator/src/vm/machine.ts —— **执行核心**（★ 零 Node 依赖）
  *
- * ## 它是什么 / 不是什么
- * ✅ 它按"第几条指令"推进脚本、维护帧栈与池、在等待门挡住时推进时钟。
- * ✅ 它是**引擎态**的持有者（因此进状态分区表 —— 见文件末尾的 `STATE_PARTITION`）。
- * ❌ 它**不**知道文件从哪来（那是 `host/fs.ts`）、**不**知道画到哪去（那是宿主的能力）。
- * ❌ 它**不含**任何镜像偏移/EA（本仓硬口径）。
+ * ✅ 按"第几条指令"推进脚本、维护帧栈与池、在等待门挡住时推进时钟；它是**引擎态**的持有者
+ *    （因此进状态分区表 —— 见文件末尾的 `STATE_PARTITION`）。
+ * ❌ 不知道文件从哪来（那是 `host/fs.ts`）、不知道画到哪去（那是宿主的能力）；**不含**任何镜像偏移/EA。
  *
- * ## ★ 主循环的形状（为什么"执行一条指令"与"过一帧"是两件事）
- * 引擎的主循环每帧做两件事之一：**派发脚本指令**，或者（等待门挡住时）**继续跑这一帧的其它事**。
- * `0x21C wait` 就是那个门的开关：置位之后，主循环在门开之前**不再派发脚本指令**。
- * ⇒ 写成显式两态循环：
- * ```
- * 门关着？ ── 是 ──▶ tick()：时钟前进、场景推进（门可能因此变开）
- *           └─ 否 ──▶ step()：执行一条指令
- * ```
- * ★ 为什么不许把 `wait` 写成"no-op 直接过"：版权页那 5 秒的窗**就是**这个门在等的东西。
- *   把门删掉 = 把那 5 秒连同"窗有没有跑完"这条判据一起删掉 —— 那不是加速，是把观测面做没了。
+ * ★ 主循环写成**显式两态**：门关着 ⇒ `tick()`（时钟前进 + 场景推进，门可能因此变开），
+ *   门开着 ⇒ `step()`（派发一条指令）；`0x21C wait` 就是那个门的开关。口径与理由见知识台账：
+ *   `data/ledger/`（域 `Emulator`，subject `vm/machine-two-state-loop-wait-gate`）。
  *
- * ## ★ ip 的语义：**指令下标**，不是字节地址
- * 引擎按 dword 偏移推进（每条指令推进 `2*argc+1` 个 dword，那个数它自己写进帧里）。
- * 本模型里 `ip` 是**第几条指令**，推进规则是"handler 没改过就 +1"。
- * ⇒ 模型里一个偏移都没有；代价是控制流 handler **必须显式**改 `ip`
- *   （这是刻意的：跳转是一次语义动作，不该藏在算术里）。
- *
- * ## ★ 帧与脚本分离
- * `ScriptFrame` 里**没有**脚本对象，只有 `scriptName`（+ `ip`）。脚本内容在 `Machine.scripts` 里 ——
- * 它是**外部内容**（与文件系统同类），不是引擎态：快照里不该塞进整份脚本字节。
- *
- * ## ★ 可变字段一律**公开**（不用 `#`）
- * 状态分区守卫靠**反射**核"每个可变字段都表了态"。`#private` 字段对反射**不可见** ——
- * 用它藏可变状态 = 让那条守卫静默失效。⇒ 本类不藏：每个可变字段都在文末的表里。
+ * ★ `ip` 的语义是**指令下标**（不是字节地址）：引擎按 dword 偏移推进（每条指令推进 `2*argc+1`
+ *   个 dword，那个数它自己写进帧里），本模型的推进规则是"handler 没改过就 +1" ⇒ 一个偏移都没有；
+ *   代价是控制流 handler **必须显式**改 `ip`（刻意的：跳转是一次语义动作，不该藏在算术里）。
+ * ★ `ScriptFrame` 里**没有**脚本对象，只有 `scriptName`（+ `ip`）：脚本内容在 `Machine.scripts` 里 ——
+ *   它是**外部内容**（与文件系统同类），不是引擎态：快照里不该塞进整份脚本字节。
+ * ★ 可变字段一律**公开**（不用 `#`）。口径与理由见知识台账：`data/ledger/`
+ *   （域 `Emulator`，subject `model/state-partition-reflective`）。
  */
 
 import { GlobalPools, LocalPools } from '../model/pools.ts';
@@ -47,8 +32,7 @@ import { HANDLERS, ExitScript } from './ops.ts';
 import type { VmContext } from './ops.ts';
 
 /**
- * 帧上的标志位。
- * ★ 目前只建模了**一个**：等待门。其余（跳读/自动/共存消息…）都还没有承载面 ——
+ * 帧上的标志位。★ 目前只建模了**一个**：等待门。其余（跳读/自动/共存消息…）都还没有承载面 ——
  *   登记在需求树，不在这里编一个数。
  */
 export const FRAME_FLAGS = {
@@ -105,7 +89,8 @@ export class ScriptFrame {
   }
 
   /**
-   * 规范化快照（纯数据）。★ `engine` 类字段恰好就是它的顶层键（由守卫核）。
+   * 规范化快照（纯数据）。★ `engine` 类字段恰好就是它的顶层键（由守卫核）—— 口径与理由见知识台账：
+   * `data/ledger/`（域 `Emulator`，subject `model/state-partition-engine-is-snapshot-keys`）。
    * ★ `scriptName` 与 `cur` **在**快照里：恢复一段执行必须知道"跑的是哪份脚本、这是第几号帧"，
    *   否则恢复出来的实例连下一步该派发哪条都不知道。
    */
@@ -208,18 +193,21 @@ export class Machine {
   /**
    * ★ **引擎标量槽**（`model/engine-scalars.ts`）—— 启动链前段那批"读操作数 → 写一个引擎标量"的
    * handler 就写在这里。它是**引擎态**（快照要带上，否则恢复后那些槽会静默变回 0）。
-   * ⛔ 本层只存值、不解释槽的含义；名字来自知识层 `layout.mts` 的 `ENGINE_SCALAR_WRITES`。
+   * ⛔ 本层只存值、不解释槽的含义（名字来自知识层 `layout.mts` 的 `ENGINE_SCALAR_WRITES`）。
+   * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/engine-scalars-names-from-knowledge`）。
    */
   readonly scalars: EngineScalars;
   /**
    * ★★ **引擎的地址空间**（`model/address-space.ts`）—— 指针族（operand type 6/7/8/c/d/e）与
-   * "按地址连写 N 格"（`fill-zero`/`set-array-to`/`lookup-array`）要用的那块地基。
+   * "按地址连写 N 格"（`fill-zero`/`set-array-to`/`lookup-array`）要用的那块地基。形状与理由
+   * （扁平 / 按分配顺序发号 / 稀疏 / 窗口独占 / u32 预算）见知识台账：`data/ledger/`
+   * （域 `Emulator`，subject `model/address-space-flat`）。
    *
-   * 现状（诚实写清）：**已建、已进快照、增长已接到副作用日志**，但**池还没有绑到它上面**
+   * ★ 现状（诚实写清）：**已建、已进快照、增长已接到副作用日志**，但**池还没有绑到它上面**
    * ⇒ 目前没有 handler 真的往里写。这是 ADR `REQ-01M4ARC3CPM00CC1KC4Q3HF550` 第 ② 步的**半步**：
    * 下一步是把 int/ptr 池的存储换成这里的区域（一份数据），判据 = 既有守卫全绿 +
-   * "经地址空间读到的池值 == 经池 API 读到的值"。
-   * ★ 容量策略见决策 `REQ-01M4B969TBWVERFCB1MXS2Q2E1`：初值 0 + 按需增长、**每次增长留痕**。
+   * "经地址空间读到的池值 == 经池 API 读到的值"；容量策略见决策
+   * `REQ-01M4B969TBWVERFCB1MXS2Q2E1`（初值 0 + 按需增长、**每次增长留痕**）。
    */
   readonly space: AddressSpace;
   /** 诊断 */
@@ -267,10 +255,10 @@ export class Machine {
 
   /**
    * ★ **按统一文件 id 装载**（引擎自己的寻址方式）：`call-script <id>` 与"装载根脚本"都走它。
-   *
-   * 与 `loadScriptBytes` 的分工：本函数负责"**从哪拿字节**"（问 `instance.scripts`），
-   * 后者负责"拿到之后怎么建帧"。⇒ 两条路径（直装 / 启动链）共用同一份建帧逻辑。
-   *
+   *   与 `loadScriptBytes` 的分工：本函数"**从哪拿字节**"（问 `instance.scripts`），后者负责
+   *   "拿到之后怎么建帧" ⇒ 两条路径（直装 / 启动链）共用同一份建帧逻辑。
+   *   口径与理由（按 id 不按名字、取不到必须响亮失败）见知识台账：`data/ledger/`
+   *   （域 `Emulator`，subject `host/scripts-by-file-id`）。
    * @param asRoot true = 压一个新帧（根脚本）；false = **只登记**进缓存（`call-script` 会自己压帧）
    */
   loadScriptById(id: number, opts: { asRoot?: boolean } = {}): LoadedScript {
@@ -500,7 +488,7 @@ export class Machine {
 
   // ── 快照 ──────────────────────────────────────────────────────────────────
 
-  /** 规范化快照（纯数据）。★ `engine` 类字段恰好就是它的顶层键（由守卫核） */
+  /** 规范化快照（纯数据）。★ `engine` 类字段恰好就是它的顶层键（由守卫核；口径见 `ScriptFrame.snapshot` 的指针） */
   snapshot(): {
     globals: ReturnType<GlobalPools['snapshot']>;
     frames: ReturnType<ScriptFrame['snapshot']>[];
@@ -534,10 +522,11 @@ export function describeStop(r: StopReason): string {
 /**
  * ★ 状态分区（**可执行形式**）：类名 → 字段名 → 类别。
  *
- * 口径与 `model/pools.ts` 的同一张表一致（见那里的长注）：**`engine` 类的字段恰好就是快照的顶层键**。
+ * 口径与 `model/pools.ts` 的同一张表一致：**`engine` 类的字段恰好就是快照的顶层键**。口径与理由
+ * 见知识台账：`data/ledger/`（域 `Emulator`，subject `model/state-partition-engine-is-snapshot-keys`）。
  * 这里只列**持有引擎态**的类：
- * * `Machine` —— `globals` / `frames` / `scene` / `frameNo` 是引擎态；`instance`（注入的服务）与
- *   `scripts`（外部内容）是宿主类；`diag` / `effectCounter` / `gateBlockLogged` 是诊断。
+ * * `Machine` —— `globals` / `frames` / `scene` / `scalars` / `space` / `frameNo` 是引擎态；
+ *   `instance`（注入的服务）与 `scripts`（外部内容）是宿主类；`diag` / `effectCounter` / `gateBlockLogged` 是诊断。
  * * `ScriptFrame` —— 六个字段全是引擎态；它**没有**宿主字段（脚本内容在 `Machine.scripts` 里）。
  * ★ 本表由 `tools/test/emulator-state-partition.test.mjs` 反射核对（新增可变字段忘了归类就红）。
  */

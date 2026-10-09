@@ -2,11 +2,11 @@
  * apps/emulator/frontends/headless/paths.ts —— **宿主路径的唯一解析点**（Node 侧）
  *
  * ## 为什么值得单独一个文件
- * 核心（`src/host/environment.ts`）**故意**不接受路径、也猜不出路径
- * （它没有 `node:os`、读不到环境变量、也不知道谁是"安装目录"）。于是"路径从哪来"
- * 必然落在前端身上 —— 那就必须**只有一个地方**回答它。
+ * 核心（`src/host/environment.ts`）**故意**不接受路径、也猜不出路径（它没有 `node:os`、
+ * 读不到环境变量、也不知道谁是"安装目录"）⇒ 路径只能由前端回答，那就必须**只有一个地方**回答它。
  * ★ 旧仓为此付过代价：资源根一度散落在 **9 处**（4 个模块 + 5 个测试各自硬编码），
  *   结果是"换一套资源要改 9 个地方"，而且**测试用的语料和产品读的可以是两份**。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/env-undefinedness-levels`）。
  *
  * ## 优先级（**显式**，不猜）
  * ```
@@ -18,11 +18,10 @@
  *   本文件只按名字读那几个根，**不解释**它的其它字段（schema 的真源是 `pnpm tools corpus describe`）。
  *
  * ## ★★ 默认用户根**故意不**指向玩家的真实存档目录
- * 旧仓的默认是 `%LOCALAPPDATA%\Eushully\天結いキャッスルマイスター`（那是玩家真在用的地方）。
- * 对**开发/回归用**的 headless 前端来说，这个默认是个陷阱：
- * 一次回归就会往真存档目录里写东西，而且"这次跑的结果"从此取决于那一堆残留。
- * ⇒ 本前端的默认落点是**仓库内**的 `.tmp/emulator-headless/<实例 id>/user`（gitignore 区），
- *   要跑真实数据必须**显式** `--user`。★ 这不是"忘了实现"，是一条有意的取舍，写在这里以免被"顺手修正"。
+ * 旧仓的默认是 `%LOCALAPPDATA%\Eushully\天結いキャッスルマイスター`（玩家真在用的地方）⇒ 一次回归就会
+ * 往真存档目录里写东西。本前端默认落在**仓库内**的 `.tmp/emulator-headless/<实例 id>/user`（gitignore 区），
+ * 要跑真实数据必须**显式** `--user`。★ 这不是"忘了实现"，是一条有意的取舍。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/paths-default-user-root`）。
  *
  * ## 不用 `import.meta`
  * 旧仓实测：同时被 Electron 主进程（esbuild 打成 CJS）与 Node 工具引用的模块里写 `import.meta`
@@ -59,12 +58,26 @@ export interface RootResolution {
 /** `.tmp` 下的默认落点（生成物区，gitignore；**不入库**） */
 export const HEADLESS_TMP_REL = path.join('.tmp', 'emulator-headless');
 
-/** 从 `corpus/assets.json` 读一个根（读不到 ⇒ `null`，**不抛**：这只是一条回落路径） */
+/**
+ * 从 `corpus/assets.json` 读一个根（读不到 ⇒ `null`，**不抛**：这只是一条回落路径）。
+ *
+ * ★ **必须认「本机私有覆盖」**（同目录的 `assets.local.json`，`.gitignore` 命中 ⇒ 不入库）：
+ * 清单里的 `roots` 是**平台相关**的绝对路径（win32 与 macOS 的旧仓/安装目录不同），
+ * 不认覆盖 ⇒ 在这台机器上"安装根不存在"（症状是整批 assets 用例静默 `skip`，而不是报错）。
+ * 规则本身只有一份描述：`pnpm tools corpus describe` 的 `roots.localOverride`（工具侧的加载器在
+ * `tools/lib/manifest.mjs` 的 `loadManifest`）。★ 两处实现由 `tools/test/manifest-local.test.mjs` 钉住一致。
+ */
 export function rootFromAssetsJson(repoRoot: string, name: string): string | null {
   const file = path.join(repoRoot, 'corpus', 'assets.json');
+  const local = path.join(repoRoot, 'corpus', 'assets.local.json');
   try {
     const j = JSON.parse(fs.readFileSync(file, 'utf8')) as { roots?: Record<string, string> };
-    const v = j.roots?.[name];
+    let roots: Record<string, string> = j.roots ?? {};
+    if (fs.existsSync(local)) {
+      const o = JSON.parse(fs.readFileSync(local, 'utf8')) as { roots?: Record<string, string> };
+      roots = { ...roots, ...(o.roots ?? {}) };
+    }
+    const v = roots[name];
     return typeof v === 'string' && v !== '' ? v : null;
   } catch {
     return null;
@@ -109,9 +122,8 @@ export function resolveRoots(input: RootInputs): RootResolution {
   const userAbs = path.resolve(userRaw);
   problems.push(`用户根 = ${userAbs}（来源：${userFrom}）`);
 
-  // ★ 身份标记与 `NodeDirSource` / `NodeWriteArea` **同源**（都用 `identityOf`）。
-  //   两边算法不同的话，"可写区与只读源是不是同一块地方"这条判据会**永远判否** ——
-  //   那是静默失效，比判错更糟。
+  // ★ 身份标记与 `NodeDirSource` / `NodeWriteArea` **同源**（都用 `identityOf`）—— 两边算法不同，
+  //   这条判据就会**永远判否**。口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/fs-writable-readonly-identity`）。
   return {
     installRoot: { label: installAbs, identity: identityOf(installAbs) },
     userRoot: { label: userAbs, identity: identityOf(userAbs) },

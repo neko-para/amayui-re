@@ -13,12 +13,12 @@
  *
  * ## 格式：**全十六进制、逐行**（不是 JSON）
  * 键里带控制字节（`\x03`/`\x05` 打头，见 `ops.ts` 的 `configKeyInt`），值可以是任意的日文文本、
- * 也可能含换行/制表符 ⇒ 任何"用分隔符切"的文本格式都会被值里的分隔符打穿。
- * 所以两个字段都**按 UTF-8 逐字节十六进制编码**：
+ * 也可能含换行/制表符 ⇒ 两个字段都**按 UTF-8 逐字节十六进制编码**：
  * ```
  *   # amayui-emulator-config/1        ← 版本行（不认识就不读，宁可报错也不猜）
  *   03 000004d2|e383a1e382a4e383aa...  ← <hex(键)>|<hex(值 utf8)>
  * ```
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/file-config-hex-encoding`）。
  * ★ 不用 JSON 的另一个理由：仓库里有"自有 JSON 必须有同名 `.md`"的守卫，而这是**运行时产物**、
  *   不是自有数据文件 —— 用一个没有 schema 争议的纯文本格式最省事。
  *
@@ -40,8 +40,8 @@ const toHex = (s: string): string => Buffer.from(s, 'utf8').toString('hex');
 const fromHex = (h: string): string => Buffer.from(h, 'hex').toString('utf8');
 
 /**
- * 序列化（纯函数）。★ 键**排序**：同样内容 ⇒ 同样字节（便于 diff 与快照比对）。
- * ★ 值里含 `|` / 换行 / 制表符都无所谓 —— 十六进制编码之后只剩 `[0-9a-f]`。
+ * 序列化（纯函数）。★ 键**排序** ⇒ 同样内容同样字节（便于 diff 与快照比对）。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/file-config-header-guard`）。
  */
 export function serializeConfig(entries: readonly ConfigEntryTuple[]): string {
   const lines = [...entries]

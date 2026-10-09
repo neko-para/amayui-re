@@ -217,3 +217,22 @@ packages/age-format/src/engine/handlers.mts  ← opcode → handler（IDA 符号
 不许"顺手 `this.foo = …`"就完事 —— 那正是"有个量没回去"的来历（这类错**不报错**，只让两条路径静静分叉）。
 ★ 确实有几类量今天还没有承载面（非确定源 · 数组容器与外挂缓冲的**别名语义** · float 族的落槽宽度 ·
 `initZero` 的边界）。它们的**待定登记与重开条件不写在这里**：看 `pnpm tools requirements plan`（`AGENTS.md` §10）。
+
+## 8. ★ 知识住在哪儿（注释不再承载"为什么"）
+
+本目录的**设计取舍与不变量**（为什么文件系统接口是同步的 · 为什么状态四分 · 为什么 `wait` 不是 no-op ·
+快照的三条口径 · 地址空间为什么是"扁平 + 合成 + 稀疏"…）**不在源码注释里，也不在本文件里** ——
+它们是知识台账 `data/ledger/` 的 **`Emulator` 域**：一条一条、**以可执行守卫用例为锚**，
+于是它们**可查询、参与校验、且不会与代码漂**（注释漂过两处，见域记录里的记录）。
+
+```bash
+pnpm tools ledger list --system Emulator   # 本域的全部条目（subject 就是注释里那行指针的落点）
+pnpm tools ledger domains                  # 词表：当前域 / 别名链
+pnpm tools ledger describe                 # 字段与口径的唯一真源
+```
+
+★ 源码注释现在只保留：**一行要点 + 一行指针**（`★ …。口径与理由见知识台账：data/ledger/（域 Emulator，subject …）`）、
+**代码级说明**、以及**逐字证据**（`.lst` 行号与指令 —— 那是可再校验的锚，不许删）。
+★ **引擎语义**（opcode / handler / 帧与池布局）仍然归 **`Engine.*`** 域（锚 = 二进制 EA）；
+两边的分工判据写在 `Emulator` 的**域记录**里（换一份反汇编导出还成立吗）。
+

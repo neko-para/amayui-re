@@ -186,9 +186,9 @@ function main(): number {
     out.push(`[统计] 步数 ${result.steps} · 帧数 ${result.ticks} · 虚拟时刻 ${result.atMs}ms · 副作用 ${asm.log.length} 条`);
     out.push('[副作用·按动作] ' + asm.log.countsByAction().map(([k, n]) => `${k}=${n}`).join(' '));
     out.push('[副作用·按归类] ' + asm.log.countsByDisposition().map(([k, n]) => `${k}=${n}`).join(' '));
-    // ★★ **保真欠账**必须单独报出来：`engine.forward` 那些是"**跳过了**这次子系统调用、只记了一笔"。
-    //    没有这一行，"跑到 LOGO"会被读成"全都做了" —— 而它们恰恰是**没做**的那部分。
+    // ★★ **保真欠账**必须单独报出来（`engine.forward` 那些是"**跳过了**这次子系统调用、只记了一笔"）。
     //    ★ 键是**带域前缀**的（`system.engine.forward`）—— 用 endsWith 匹配，别写死前缀。
+    //    口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/main-fidelity-debt-and-exit-code`）。
     const forwarded = asm.log.countsByAction().find(([k]) => k.endsWith('.engine.forward'))?.[1] ?? 0;
     if (forwarded > 0) {
       out.push(`[保真欠账] 未建模的子系统调用 ${forwarded} 次（只记录、未建模）—— **这些不算已完成**，清单见 --json 的 effects`);
@@ -225,8 +225,8 @@ function main(): number {
     }, null, 2));
   }
 
-  // ★ 退出码的判据是"**有没有到达停止点**"，不是"有没有抛"：
-  //   跑到一半因为未实现的指令停下来，在 CI 里必须是一次失败。
+  // ★ 退出码的判据是"**有没有到达停止点**"，不是"有没有抛"（跑到一半因未实现的指令停下，在 CI 里必须算失败）。
+  //   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `headless/main-fidelity-debt-and-exit-code`）。
   return result.reason.kind === 'instruction' ? 0 : 1;
 }
 

@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
 import { runCapture } from './exec.mjs';
+import { loadManifest } from './manifest.mjs';
 import { buildZip, readZip } from './zip.mjs';
 import { REPO_ROOT } from './paths.mjs';
 
@@ -68,7 +69,7 @@ export const isPacked = (refRel) => refRel.startsWith('archive/');
 
 /** 旧仓根（`corpus/assets.json` 的 `roots.oldRepo`；**只读来源**） */
 export function oldRepoRoot() {
-  const m = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'corpus', 'assets.json'), 'utf8'));
+  const m = loadManifest();
   return m.roots?.oldRepo ?? null;
 }
 

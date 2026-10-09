@@ -221,7 +221,7 @@ const MUTATIONS = [
     from: 'return this.values.get(name) ?? 0;',
     to: 'return this.values.get(name) ?? 1;',
     guard: 'tools/test/emulator-engine-scalars.test.mjs',
-    what: '没写过的标量槽返回 1 而不是 0 —— 引擎把这片清零了（取证在 layout.mts 的 EVIDENCE）',
+    what: '没写过的标量槽返回 1 而不是 0 —— 引擎把 Engine+0x5EC9C..0x5ECE8 那片清零了（逐字 .lst:33974-33994；台账 subject Engine+0x5EC9C..0x5ECE8/ctor-zero-fill）',
   },
   {
     file: 'apps/emulator/src/vm/ops.ts',
@@ -360,10 +360,18 @@ const MUTATIONS = [
   },
   {
     file: 'tools/lib/disasm.mjs',
-    from: "const PROC_EA_RE = /^([A-Za-z_.][\\w.]*):([0-9A-Fa-f]{8})\\s+([A-Za-z_][\\w.]{0,40})\\s+proc near/;",
-    to: "const PROC_EA_RE = /^([A-Za-z_][\\w.]*):([0-9A-Fa-f]{8})\\s+([A-Za-z_][\\w.]{0,40})\\s+proc near/;",
+    from: "const PROC_EA_RE = new RegExp(`^([A-Za-z_.][\\\\w.]*):([0-9A-Fa-f]{8})\\\\s+(${SYM})\\\\s+proc near`);",
+    to: "const PROC_EA_RE = new RegExp(`^([A-Za-z_][\\\\w.]*):([0-9A-Fa-f]{8})\\\\s+(${SYM})\\\\s+proc near`);",
     guard: 'tools/test/disasm-pseudo.assets.test.mjs',
     what: '段名首字符不许 `.` ⇒ `.text` 的 proc near 全漏（这个坑在本仓踩过两次）',
+  },
+  // ── 符号名不许含 `@`（MSVC 修饰名）⇒ `_WinMain@16` 不被认作函数头，`enclosingFunction` **静默**给前一个函数 ──
+  {
+    file: 'tools/lib/disasm.mjs',
+    from: "const SYM = '[A-Za-z_$?@][\\\\w.$?@]{0,60}';",
+    to: "const SYM = '[A-Za-z_][\\\\w.]{0,60}';",
+    guard: 'tools/test/disasm-pseudo.assets.test.mjs',
+    what: '符号名不许含 `@` ⇒ `_WinMain@16 proc near` 不被认作函数头，`--pseudo --ea 0x4BAA3A` 静默报出**前一个**函数（`sub_4BA6B0`）',
   },
   // ── 需求台账：写路径"报的落盘"必须与磁盘一致 ──
   {
@@ -373,6 +381,14 @@ const MUTATIONS = [
     guard: 'tools/test/requirements-add-lands.test.mjs',
     what: '被写后守卫拒回时不再拒绝（继续按"已落盘"打印计划）⇒ stdout 报成功而盘上什么都没有',
   },
+  // ── 本机私有清单覆盖（平台相关路径）──
+  {
+    file: 'tools/lib/manifest.mjs',
+    from: '  if (local) manifest.roots = { ...(manifest.roots ?? {}), ...local.roots };',
+    to: '  if (local) void local;',
+    guard: 'tools/test/manifest-local.test.mjs',
+    what: '本机私有覆盖被静默忽略 ⇒ 换一台机器（win32 ↔ macOS）所有来源根都指向另一台机器的路径',
+  },
 ];
 
 /**
@@ -380,6 +396,18 @@ const MUTATIONS = [
  * @returns {number} 退出码：0 = 全部按预期变红；1 = 有守卫没抓住破坏；2 = 还原失败（已中止）
  */
 export function main(argv = process.argv.slice(2)) {
+  // ★ `--help` 必须**只打用法就走**：它原先落到"跑全套变异"那条路（实测踩过一次）——
+  //   而本工具**会临时改写工作树里的文件**，在有别的进程（人或 agent）正在编辑时跑，
+  //   还原那一步可能把别人的改动一起写回去。
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(
+      '用法：node tools/mutate-check.mjs [--list]\n\n' +
+        '  不带参数 = 逐条施加变异 ⇒ 跑对应守卫 ⇒ 要求退出码非 0（最后逐条还原并比对全文）。\n' +
+        '  ⛔ **它会临时改写工作树里的文件** ⇒ 有别的进程正在编辑本仓时**不要**跑（还原会覆盖别人的改动）。\n' +
+        '  --list 只列清单（不动任何文件）。',
+    );
+    return 0;
+  }
   if (argv.includes('--list')) {
     for (const m of MUTATIONS) console.log(`${m.what}\n    ${m.file}  ⇒ 守卫 ${m.guard}`);
     return 0;

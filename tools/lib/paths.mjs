@@ -12,6 +12,17 @@ export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url
 /** 素材清单 */
 export const DEFAULT_MANIFEST = path.join(REPO_ROOT, 'corpus', 'assets.json');
 
+/**
+ * **本机私有的清单覆盖**（`corpus/assets.local.json`；`.gitignore` 的 `*.local.json` 命中 ⇒ **不入库**）。
+ *
+ * 为什么需要它：清单里的 `roots`（`oldRepo` / `gameInstall` / `gameSaves`）是**绝对路径**，
+ * 而它们**平台相关** —— 同一份清单要同时服务 Windows 与 macOS。把平台路径写进入库的清单 ⇒ 换台机器就红；
+ * 每台机器各改一次清单 ⇒ 两台机器互相打架。⇒ 入库的清单只留"已知的那一份"，本机用这份覆盖**逐键覆盖 `roots`**。
+ *
+ * ★ 它**只覆盖 `roots`**：条目（来源与去向）是仓库事实，不许被本机私有文件改写。
+ */
+export const DEFAULT_LOCAL_MANIFEST = path.join(REPO_ROOT, 'corpus', 'assets.local.json');
+
 /** 存档样本 */
 export const FIXTURES_DIR = path.join(REPO_ROOT, 'corpus', 'fixtures');
 export const DEFAULT_SAMPLES = path.join(FIXTURES_DIR, 'samples.json');

@@ -1,30 +1,22 @@
 /**
  * apps/emulator/src/vm/operand.ts —— **操作数的读写**（★ 核心层：零 Node 依赖）
  *
- * ## 这一层是什么
- * 一条指令的每个操作数都是一个 `{ type, raw_data }` 对。`type` 说"这是什么种类的东西"
- * （立即数 / 某个池的第几号槽 / 字符串…），`raw_data` 说"具体是哪一个"。
- * 把 `(type, raw_data)` 变成"内存里的那个位置"（并且读写它）就是本模块的全部职责。
+ * 一条指令的每个操作数都是 `{ type, raw_data }`：`type` 说"这是什么种类"（立即数 / 某个池的第几号
+ * 槽 / 字符串…），`raw_data` 说"具体是哪一个"；把这一对变成"内存里的那个位置"（并读写它）
+ * 就是本模块的全部职责。
  *
- * ## ★★ 值的口径：**int 族一律按 u32 看，符号由用它的那条指令决定**
- * 引擎的池槽是 dword。`sub (local-int 0) 0 1` 的结果是 `0xFFFFFFFF`（不是 `-1`）——
- * 因为它在盘上/内存里就是那 32 个位。而**用到它的指令**才决定符号：例如 `set-texture` 的
- * 颜色操作数是"`< 0` 就取 0"，那一步才做 `| 0`。
- * ⇒ 本层**归一化到 u32**（`>>> 0`），于是"同一个位模式只有一种表示"。
- *   把 `-1` 和 `0xFFFFFFFF` 都放进模型里 = 同一件事两种写法 ⇒ 比较与快照都会分叉。
+ * ★★ 值的口径：**int 族一律按 u32 看**（`>>> 0`），**符号由用它的那条指令决定** ——
+ *   引擎的池槽是 dword，`sub (local-int 0) 0 1` 的结果在盘上/内存里就是 `0xFFFFFFFF`；
+ *   例如 `set-texture` 的颜色操作数是"`< 0` 就取 0"，那一步才做 `| 0`。
+ *   ⇒ 同一个位模式只有一种表示（把 `-1` 与 `0xFFFFFFFF` 都放进模型 ⇒ 比较与快照都会分叉）。
  *
- * ## ★ 未初始化 ⇒ `null`（不是 0）
- * 池模型是稀疏的（容量未知，不许编一个数出来）。读到一个**没有的槽**返回 `null`，
- * 由调用方决定怎么办（记一笔 `oob`，再按引擎初值语义处理）。★ 不许在这里补 0：
- * int 族的初值是 `ENC(key,0)`（**非 0 的位模式**），"补 0"会把
- * "我不知道这里有什么"伪装成"这里就是 0"。
- *
- * ## ★ 本批**没有**取证的那些 type ⇒ **响亮失败**，不许猜
- * `0x8003 / 0x8005 / 0x8009 / 0x800B`（高位种类）、`type 1`（float 立即数）、
- * `type 2`（字符串，要码页解码器）都在本批之外。遇到它们**抛**，
- * 错误消息里说清"这是未取证，不是坏数据" —— 静默当成某个已知种类是本仓最贵的一类错。
- * ★ 判据：LOGO.BIN 从第 1 条到 `play-movie` 用到的 type 只有 `0`、`3`、`4`、`9`
- *   （立即数 + global-int + global-float + local-int），**上列缺口一条都不碰**。
+ * ★ 未初始化 ⇒ `null`（不是 0）。口径与理由见知识台账：`data/ledger/`
+ *   （域 `Emulator`，subject `model/pools-capacity-unknown-sparse`）。
+ * ★ 本批**没有取证**的那些 type ⇒ **响亮失败**，不许猜。口径与理由见知识台账：`data/ledger/`
+ *   （域 `Emulator`，subject `vm/operand-unverified-types-loud`）。
+ *   ★ 名单 = `UNVERIFIED_OPERAND_TYPES`（`type 2` + 高位种类 `0x8003/0x8005/0x8009/0x800B`）。
+ *   ★ 判据：LOGO.BIN 从第 1 条到 `play-movie` 用到的 type 只有 `0`、`3`、`4`、`9`
+ *     （立即数 + global-int + global-float + local-int），**上列缺口一条都不碰**。
  */
 
 import type { InstrArg } from '../model/iterate.ts';
@@ -151,7 +143,10 @@ export function readOperand(ctx: OperandContext, arg: InstrArg, index: number): 
   //   ⇒ 读 = 取地址 → 解引用 → DEC。（对照 case 9 的 int：取格后**直接** DEC ⇒ 见 `LOCAL_POOLS` 的 `encoded` 订正。）
   // ★★ 字符串指针族（`0x8` 全局 / `0xe` 局部）：取格（地址）→ **定位字符串元素** → 返回那个 JS 字符串。
   //   实测：`0xe` 在 104 份脚本里出现 **1446** 次（`0x8` 一次都没有 ⇒ 一起实现，代价为零）。
-  //   逐字对照（`sub_41BF50` 的 case 14）：取格 → 解引用 → 按 **28 字节**格取文本。
+  //   逐字对照（**`sub_41B640` 的 case 14**，`.lst:40896-40903`，`0x41B92D`；同形副本 `sub_41B9B0` `0x41BCFD`）：
+  //   取格 → 解引用 → 按 **28 字节**格取文本。
+  //   ★ 订正出处：`sub_41BF50` **没有 case 14** —— `.lst:41465 cmp edx,0Dh` / `ja def_41BF99`
+  //   ⇒ type `0xe` 走 default 抛（`.lst:41726`）。行为不变，只是原先的出处写错了。
   if (type === 0x8 || type === 0xe) {
     const isLocal = type === 0xe;
     const addr = (isLocal ? ctx.locals.read(type, raw) : ctx.globals.read('stringRef', raw)) as number | null;
@@ -290,11 +285,12 @@ export function addressOfOperand(ctx: OperandContext, arg: InstrArg, index: numb
 /**
  * 地址 → **字符串元素**（字符串指针的解引用）。
  *
- * ★ 按用户裁决（决策 `REQ-01M4E07ZQ9S7EBA1SK0PREPY4E`）：字符串元素是**不透明的 JS 字符串**，
- *   不模拟 28 字节 `std::string`。地址在这个池上只用来**定位元素**：
- *   `idx = (addr − 区域基址) / 28`（28 = 引擎的元素步长，不是随便取的）。
+ * ★ 地址在这个池上只用来**定位元素**：`idx = (addr − 区域基址) / 28`
+ *   （28 = 引擎的元素步长，不是随便取的）。口径与理由（字符串元素是**不透明的 JS 字符串**、
+ *   不模拟 28 字节 `std::string`；决策 `REQ-01M4E07ZQ9S7EBA1SK0PREPY4E`）见知识台账：
+ *   `data/ledger/`（域 `Emulator`，subject `model/pools-string-opaque`）。
  * ⛔ 指针指向的若不是**字符串池**的区域 ⇒ 抛（不许"顺手当成一个字符串"）。
- * ⛔ 没对齐 ⇒ 抛（`sub_41BF50` 的 case 14 也是按 28 字节格取的）。
+ * ⛔ 没对齐 ⇒ 抛（`sub_41B640` 的 case 14 也是按 28 字节格取的；出处订正见 `readOperand` 里的同名注）。
  */
 function stringElementAt(ctx: OperandContext, addr: number, where: string): SlotValue | null {
   const hit = ctx.space.regionByWindow(addr);

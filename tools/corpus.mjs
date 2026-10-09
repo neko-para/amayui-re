@@ -21,7 +21,10 @@ import {
   describe,
   describeText,
   loadManifest,
+  localManifestFor,
+  readLocalOverrides,
   resolveOrigin,
+  saveLocalOverrides,
   saveManifest,
   validateManifest,
 } from './lib/manifest.mjs';
@@ -40,6 +43,7 @@ function parseArgs(argv) {
     else if (a === '--add') { out.action = 'add'; out.rest.push(argv[++i]); }
     else if (a === '--set') { out.action = 'set'; out.rest.push(argv[++i], argv[++i]); }
     else if (a === '--set-root') { out.action = 'set-root'; out.rest.push(argv[++i], argv[++i]); }
+    else if (a === '--local') out.local = true;
     else if (a === '--manifest') out.manifest = path.resolve(argv[++i]);
     else if (a === '--write') out.write = true;
     else if (a === '--json') out.json = true;
@@ -170,14 +174,27 @@ function cmdSet(manifest, manifestPath, args) {
 
 function cmdSetRoot(manifest, manifestPath, args) {
   const [name, value] = args.rest;
-  if (!name || !value) throw new Error('--set-root 需要 <root 名> <路径>');
-  const before = manifest.roots?.[name];
-  const preview = { ...manifest, roots: { ...manifest.roots, [name]: value } };
-  process.stdout.write(`roots.${name}: ${before === undefined ? '（新增）' : JSON.stringify(before)} → ${JSON.stringify(value)}\n`);
+  if (!name || !value) throw new Error('--set-root 需要 <root 名> <路径> [--local]');
+  // ★ `--local`：写**本机私有覆盖**（`assets.local.json`，不入库）而不是改仓库里的清单 ——
+  //   平台相关路径（win32 / macOS 的旧仓与安装目录）就该走这条，否则两台机器会互相打架。
+  const localPath = localManifestFor(manifestPath);
+  const local = readLocalOverrides(localPath);
+  const before = args.local ? local?.roots?.[name] : manifest.roots?.[name];
+  process.stdout.write(
+    `roots.${name}${args.local ? '（本机私有覆盖）' : ''}: ` +
+      `${before === undefined ? '（新增）' : JSON.stringify(before)} → ${JSON.stringify(value)}\n`,
+  );
   if (!args.write) {
     process.stdout.write('（dry-run）加 --write 落盘。\n');
     return 0;
   }
+  if (args.local) {
+    const next = { ...(local?.roots ?? {}), [name]: value };
+    saveLocalOverrides(next, localPath);
+    process.stdout.write(`已更新 ${path.relative(REPO_ROOT, localPath)}（**不入库**；条目不受影响）。\n`);
+    return 0;
+  }
+  const preview = { ...manifest, roots: { ...manifest.roots, [name]: value } };
   const res = saveManifest(preview, manifestPath, validateOpts(args));
   if (!res.ok) {
     process.stderr.write(`--set-root 失败：${res.reason}\n`);
@@ -233,7 +250,8 @@ const HELP = `tools/corpus.mjs — corpus/assets.json 的守卫与唯一写入�
   node tools/corpus.mjs --scan [--write]
   node tools/corpus.mjs --add '<entry-json>' [--write]
   node tools/corpus.mjs --set <id> '<patch-json>' [--write]
-  node tools/corpus.mjs --set-root <name> <path> [--write]
+  node tools/corpus.mjs --set-root <name> <path> [--local] [--write]
+                                                   # 加/改来源根；--local ⇒ 写**本机私有覆盖**（assets.local.json，不入库）
   node tools/corpus.mjs --list [--json]
   pnpm tools corpus describe [--json]        # 自描述：字段 / 枚举 / 不变量 / 怎么查怎么改
   node tools/corpus.mjs --normalize [--write]      # 拉回规范形态（剔多余顶层键、重排、重写 _doc）
@@ -251,6 +269,14 @@ export function main(argv = process.argv.slice(2)) {
     return 0;
   }
   const manifest = loadManifest(args.manifest);
+  // ★ 本机私有覆盖必须**看得见**（"路径名不可靠，不做猜测" ⇒ 那就把它打出来）。JSON 模式不打（会破坏解析）。
+  if (!args.json) {
+    const local = readLocalOverrides(localManifestFor(args.manifest));
+    if (local) {
+      const keys = Object.keys(local.roots).sort().join(', ');
+      process.stdout.write(`★ 本机私有覆盖：${path.relative(REPO_ROOT, local.path)}（roots: ${keys}）\n`);
+    }
+  }
   switch (args.action) {
     case 'validate': {
       const report = validateManifest(manifest, validateOpts(args));

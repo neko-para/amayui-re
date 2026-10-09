@@ -13,9 +13,9 @@
  * | | 而且"没有"会被**记账**（`not-provided`），不是静默空操作 |
  *
  * ## ★ 为什么"不给能力"要写成显式的一行（而不是什么都不写）
- * 因为"没给"与"给了个空实现"在日志里必须分得开。前者是 `not-provided`（我知道我跳过了什么），
- * 后者会让"没有输入"与"输入源坏了"永远分不清 —— 而那正是旧仓那些
- * "opcode 标着已实现、画面上什么都没发生"的来历。
+ * 因为"没给"（`not-provided`，我知道我跳过了什么）与"给了个空实现"在日志里必须分得开 ——
+ * 后者会让"没有输入"与"输入源坏了"永远分不清。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/effects-disposition-three-state`）。
  *
  * ## ★ 装配是**纯函数式**的：所有路径来自参数
  * 本文件**不读** `process.env`、**不读** `import.meta`、**不** `chdir`。
@@ -55,8 +55,9 @@ export interface HeadlessOptions extends RootInputs {
 }
 
 /**
- * 默认随机种子。★ 它是一个**显式常量**，理由是"同种子 ⇒ 同日志"这条判据：
- * 取当前时刻当默认值会让两次跑不同，而那**不会报错**（只会让回归基准失效）。
+ * 默认随机种子。★ 它是一个**显式常量**：取当前时刻当默认值会让两次跑不同，而那**不会报错**
+ * （只会让"同种子 ⇒ 同日志"这条判据失效）。
+ * 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/random-seeded-injection`）。
  */
 export const DEFAULT_RNG_SEED = 0x5eed_1234;
 
@@ -104,8 +105,8 @@ export function createHeadlessInstance(opts: HeadlessOptions): HeadlessAssembly 
   ensureDir(roots.userRoot.label);
   const writable = new NodeWriteArea(`用户根${roots.userRoot.label}`, roots.userRoot.label);
 
-  // ★ 身份标记必须**两侧同源**（都用 `identityOf`）：核心靠它判"可写区与只读源是不是同一块地方"，
-  //   两边算法不同的话这条判据就永远判否 —— 那是**静默失效**，比判错更糟。
+  // ★ 身份标记必须**两侧同源**（都用 `identityOf`）—— 核心靠它判"可写区与只读源是不是同一块地方"；
+  //   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/fs-writable-readonly-identity`）。
   const installIdentity = identityOf(roots.installRoot.label);
   const userIdentity = identityOf(roots.userRoot.label);
 
@@ -122,9 +123,9 @@ export function createHeadlessInstance(opts: HeadlessOptions): HeadlessAssembly 
   problems.push(...envProblems);
 
   const log = new EffectLog();
-  // ★ 脚本来源：**id → 名字**（ALF 索引）→ **字节**（分层 fs，松散文件优先）。
-  //   为什么两步：引擎按 id 引用脚本（`call-script 5262`），而"名字"只用于日志；
-  //   而"松散文件优先于归档"这条口径已经在分层 fs 里了 —— 不必在这里再来一遍。
+  // ★ 脚本来源：**id → 名字**（ALF 索引）→ **字节**（分层 fs，松散文件优先）—— 引擎按 id 引用脚本
+  //   （`call-script 5262`），而"名字"只用于日志；"松散文件优先于归档"已在分层 fs 里，不必再来一遍。
+  //   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/scripts-by-file-id`）。
   const alfSource = sources.find((s) => s instanceof AlfIndexSource) as AlfIndexSource | undefined;
   const scripts: ScriptLoader | null = alfSource
     ? {
@@ -143,13 +144,11 @@ export function createHeadlessInstance(opts: HeadlessOptions): HeadlessAssembly 
     fs,
     effects: log,
     clock: new VirtualClock(0),
-    // ★ **文件配置**（实例隔离：落在该实例的用户根下）。为什么不是内存配置：
-    //   `SYSTEM4#56` 的 `jcc (global-int 5)` 决定走 `LOADCONFIG` 还是 `INITCONFIG` 那条支，
-    //   而 `global5` 由 `load-int` **从配置里读** ⇒ 配置不落盘 ⇒ `LOADCONFIG` **永远不会被走到**。
+    // ★ **文件配置**（实例隔离：落在该实例的用户根下）—— 为什么不是内存配置见 `file-config.ts` 头注
+    //   （`SYSTEM4#56` 的 `jcc (global-int 5)` 决定走 `LOADCONFIG` 还是 `INITCONFIG`）。
     config: new FileConfig(path.join(roots.userRoot.label, 'amayui-config.txt')),
     // ★ 随机源**必须给**（`0x60` 语料里 22 处；不给就该条指令响亮失败，而不是偷偷用 Math.random）。
-    //   种子来自前端输入（`--rng-seed` / `AMAYUI_RNG_SEED`），**默认值是一个显式常量** ——
-    //   "同种子 ⇒ 同日志"这条判据依赖它；换成时刻就等于把不可复现藏进库里。
+    //   种子来自前端输入（`--rng-seed` / `AMAYUI_RNG_SEED`），**默认值是一个显式常量**（见上）。
     random: new SeededRandom(opts.rngSeed ?? DEFAULT_RNG_SEED),
     // ★ 字体名表：`0x2de` 要查它。**headless 没有真字体表** ⇒ 给**空表**（显式选择，不是"忘了给"）：
     //   每次查找都会发一条 `font.lookup`，未命中 ⇒ -1 —— 于是"与真机可能不同"这件事在日志里**看得见**。

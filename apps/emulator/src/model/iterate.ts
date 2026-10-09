@@ -1,25 +1,24 @@
 /**
  * apps/emulator/src/model/iterate.ts —— **迭代系统**：`字节流 → 指令`（批 R1 迭代点 ⑥）
  *
- * ## 它是什么 / 不是什么
  * ✅ 它把脚本字节流按 **opcode + argc** 机械地切成一条条指令，并算出每条指令的**字节长度**。
  * ❌ 它**不做执行**：不解释 operand type、不读写池、不改任何状态（用户口径：不含整体执行流程）。
- *    ⇒ 它的职责只有"边界算得对"这一件事 —— 而这恰恰是**一切后续工作的前提**：
- *      argc 错 1，整条流都错位（后面每条指令都变成垃圾）。
+ *    ⇒ 职责只有"**边界算得对**"这一件事 —— argc 错 1，整条流都错位（后面每条指令都变成垃圾）。
  *
- * ## 布局（三条口径，都有语料证据）
+ * ## 布局（三条口径；唯一真源就是下面这个算式）
  * ```
  * 指令 = opcode(u32) + argc × { type(u32), raw_data(u32) }        ⇒ 字节长度 = 4 + 8*argc
  * dword 长度 = 2*argc + 1                                         ⇒ 与字节长度恒等（4*(2*argc+1) = 4+8*argc）
  * 下一条指令的字节偏移 = 上一条 + 4 + 8*argc
  * ```
- * ★ 第二条是**引擎自己在写的**：每条 handler 体内都 `mov dword ptr [esi+ecx*8+5D8F4h], N`（`帧+0x74`），
- *   `N = 2*argc+1`（实测 `add` ⇒ 7、`mov` ⇒ 5）；主循环则 `ip += 4 * 该槽`。
- *   守卫会**对整个指令表**核对这条恒等式 —— 它把"指令表"与"引擎的推进口径"绑在一起。
+ * ★ 第二条是**引擎自己在写的**（逐字：`mov dword ptr [esi+ecx*8+5D8F4h], N`，`N = 2*argc+1`；
+ *   实测 `add` ⇒ 7、`mov` ⇒ 5），主循环则 `ip += 4 * 该槽`。
+ *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/iterate-length-identity`）。
  *
  * ## 指令区边界
  * * 起点 = 头部长度（v4 = 60 字节；v5 = 68）
- * * 终点 = `头部长度 + min(三张表的 offset) * 4`（三张表紧跟在指令区之后）
+ * * 终点 = `头部长度 + min(三张表的 offset) * 4`（三张表紧跟在指令区之后），再由数据块偏移动态前压
+ *   —— 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/iterate-dynamic-end`）。
  * * `opcode == 0` ⇒ 引擎直接报 "bad opcode : 0"（语料里不该出现）
  */
 /**
@@ -140,9 +139,9 @@ export function iterate(bin: ByteSource, { table, strict = true }: { table: Opco
       const type = rd.u32(pos + 4 + 8 * k);
       const rawData = rd.u32(pos + 8 + 8 * k);
       args.push({ type, rawData });
-      // ★ **动态前压指令区终点**（与反汇编器同口径）：type-2（字符串）的数据块偏移，
-      //   以及 `0x64` 第 2 操作数（数组块）的偏移 —— 它们才是指令区真正的末尾。
-      //   不这么做会走过头、撞上数据区里的字节（实测表现：一堆 `opcode=0`）。
+      // ★ **动态前压指令区终点**：`type-2`（字符串）的数据块偏移，以及 `0x64` 第 2 操作数（数组块）的
+      //   偏移 —— 它们才是指令区真正的末尾。口径与理由见知识台账：`data/ledger/`
+      //   （域 `Emulator`，subject `model/iterate-dynamic-end`）。
       if (type === 2 || (opcode === 0x64 && k === 1)) {
         endOffset = Math.min(endOffset, headerLen + (rawData << 2));
       }

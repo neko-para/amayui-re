@@ -11,11 +11,12 @@
  *   而"把 B 当 A 用"是本仓最容易发生的一次静默降级（K2/K3 整条知识线就是为这件事存在的）。
  *
  * ## ★ `disposition` 与 `detail.applied` 是**两个正交的事实**（别混）
- * * `disposition`（在 `host/effects.ts` 里定义）= **宿主有没有这张能力**：headless 没有播放器 ⇒
- *   `audio.movie.play` 记 `logged-only`；没有输入源 ⇒ `input.poll` 记 `not-provided`。
- * * `detail.applied` = **引擎态有没有因此改变**：例如 `set-vertex-color` 指到一个不存在的网格 ⇒
- *   `applied: false`（但宿主能力是齐的 ⇒ 仍是 `modeled`）。
- * ⇒ 两者混起来会出现"因为找不到网格，所以看起来像宿主没实现"这种无法排查的日志。
+ * `disposition`（在 `host/effects.ts` 里定义）= **宿主有没有这张能力**（headless 没有播放器 ⇒
+ * `audio.movie.play` 记 `logged-only`；没有输入源 ⇒ `input.poll` 记 `not-provided`）；
+ * `detail.applied` = **引擎态有没有因此改变**（`set-vertex-color` 指到不存在的网格 ⇒ `applied: false`，
+ * 但宿主能力是齐的 ⇒ 仍是 `modeled`）。两者混起来会出现"因为找不到网格，所以看起来像宿主没实现"
+ * 这种无法排查的日志。口径与理由见知识台账：`data/ledger/`
+ * （域 `Emulator`，subject `host/effects-disposition-three-state`）。
  *
  * ## ★ 操作数一律按 u32 读，符号由用它的那条指令决定
  * 见 `vm/operand.ts` 头注。颜色分量到处要做 `< 0 ⇒ 取当前值` 的回退，所以本文件里
@@ -59,7 +60,7 @@ function num(ctx: VmContext, i: number): number {
   const r = readOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script, space: ctx.machine.space }, ctx.ins.args[i], i);
   if (r.value === null) {
     // ★ 未初始化：引擎的池在装载时被填过初值（`ENC(key,0)`），而**本仓还没取证"填多少、填哪几个池"**
-    //   ⇒ 这里按 0 继续，但**每一次都留痕**：于是"这次跑依赖了未初始化的池"是可见的，不是静默的。
+    //   ⇒ 这里按 0 继续但**每次留痕**；口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/pools-capacity-unknown-sparse`）。
     ctx.machine.note('uninitialized-read', `${r.where}（指令 0x${ctx.ins.opcode.toString(16)} 操作数 #${i}）`);
     return 0;
   }
@@ -157,18 +158,18 @@ const opCheckBit: Handler = (ctx) => {
 /**
  * `0x60 random` —— **本族唯一的非确定源**（A 档：语义 = `op1 = rand() % op2`；`op2 == 0` ⇒ 先写 `op1 = 0` 再抛）。
  *
- * ★★ 三条口径，每条都是为了"不把不可复现藏起来"：
- * 1. **随机源是注入的**（`Instance.random`）。没有它 ⇒ **抛**，不许退回 `Math.random()`
- *    —— 那会让"同种子同日志"这条判据变成假象（而失效方式极隐蔽：两次跑都"正常"）。
- * 2. **每一次取数都发一条 `system.random.draw`**：于是"这一趟依赖了多少次随机"是产物的一部分。
- * 3. `op2 == 0` **先写 0 再抛**（引擎就是这个次序：写操作数在前、抛异常在后）——
- *    反过来写会让"抛之前的操作数状态"与引擎不一致。
+ * ★ 随机源由**宿主注入**（`Instance.random`）、缺席即抛（不许退回 `Math.random()`），且**每一次取数都发一条
+ *   `system.random.draw`**：于是"这一趟依赖了多少次随机"是产物的一部分。口径与理由见知识台账：
+ *   `data/ledger/`（域 `Emulator`，subject `host/random-seeded-injection`）。
+ * ★ `op2 == 0` **先写 0 再抛**（引擎就是这个次序：写操作数在前、抛异常在后）——
+ *   反过来写会让"抛之前的操作数状态"与引擎不一致。
  *
- * ★ 已登记的附带观察：体内还有一个**上限 12 的重掷计数器** —— 那条属于知识层
- *   （`apps/emulator/src/model/numeric-ops.ts` 的 `touchesEngineState`，台账 `01M48H8Y912C4D035W1P5W443F`）。
- *   **为什么本批不实现它**：登记的语义只到 `rand() % op2`，
- *   而"在什么条件下重掷"没有取证 ⇒ 实现一个猜出来的重试循环比不实现更糟（它会让取数次数错）。
- *   ⇒ 登记在需求树，不在这里编。
+ * ★ 订正（逐字，台账 `01M4FECQEZ4X4G3N3M4V0Z6P2Y`）：体内**没有重掷循环** —— `sub_42CA50` 只有一次
+ *   `call _rand`（`.lst:68768`）；`[esi+69330h]` 是**进入次数**计数器：`inc`（`.lst:68762`）→
+ *   `cmp …,0Ch`（`.lst:68763`）→ `jle` 跳过归零 / 第 13 次进入时归零（`.lst:68765`）。
+ *   ⇒ 旧注"上限 12 的重掷计数器"与"什么条件下重掷没有取证"两句都错；台账
+ *   `01M48H8Y912C4D035W1P5W443F` 的同一说法由 `01M4FECQEZ4X4G3N3M4V0Z6P2Y` 订正
+ *   （语义面不变：`rand() % op2`、`op2 == 0` 先写 0 再抛）。
  */
 const opRandom: Handler = (ctx) => {
   const rng = ctx.machine.instance.random;
@@ -232,7 +233,8 @@ export class ExitScript extends Error {
 /**
  * `0x21C wait` —— 置等待门（B 档；handler = `sub_41A260`，写的是 `Engine` 的 effect_flags 的
  * 那一位 —— 置位点/清除点与归属见知识层台账 `01M4AGT6F1287G2604152V1354`）。
- * ★ 门**不是** no-op：它挡住主循环派发，直到场景里的计时窗跑完（见 `machine.ts` 头注）。
+ * ★ 门**不是** no-op：它挡住主循环派发，直到场景里的计时窗跑完。口径与理由见知识台账：
+ * `data/ledger/`（域 `Emulator`，subject `vm/machine-two-state-loop-wait-gate`）。
  */
 const opWait: Handler = (ctx) => {
   const reason = ctx.machine.setWaitGate();
@@ -242,12 +244,15 @@ const opWait: Handler = (ctx) => {
 /**
  * `0x101 poll-input` —— **采样并丢弃已积累的输入，再标记"从现在起等输入"**（B 档，已回语料复核）。
  *
- * 取证（`.lst`）：`sub_419CC0` @ `0x419CC0`，`.lst:38249-38269`。它调 `sub_478090` 把这一瞬的
- * 键鼠/手柄状态**写进输入掩码字段**，紧接着 `38263 mov dword ptr [edi],0` 把它**清零**，
- * 再清"未消费输入"闩锁，最后写两个"等输入"状态字段。
+ * 取证（`.lst`，台账 `01M4FECE3M346Z7K5D4N3N0141`）：`sub_419CC0` @ `0x419CC0`，`.lst:38249-38269`。
+ * 它调 `sub_478090` 把这一瞬的键鼠/手柄状态**写进输入掩码字段**，然后**先**清"未消费输入"闩锁
+ * （`.lst:38262 and dword ptr [esi+0AAB44h],0F7FFFFFFh`，清 bit27），**再**清输入掩码
+ * （`.lst:38263 mov dword ptr [edi],0`），最后置两个"等输入"字段（`.lst:38265/38266`）。
  * ⇒ 语义**不是**"把这次采样留下"，而是"**把已积累的输入丢掉、从现在起等新的**"。
  * ★ 这一条最容易被实现成"读一次输入并保存" —— 那样脚本里那些"等一次点击"的循环会
  *   **看起来正常**地空转，而玩家永远点不动（一次静默的行为差异）。
+ * ★ 现有守卫只断言 `input.poll` 记一条 `not-provided`，**没有任何守卫断言"丢弃 + 置等输入"**
+ *   （欠账，见需求单 `REQ-01M4FEF7VH1N0JDT5ZVPZS204M`）。
  */
 const opPollInput: Handler = (ctx) => {
   const input = ctx.machine.instance.input;
@@ -270,10 +275,13 @@ const opPollInput: Handler = (ctx) => {
 /**
  * `0x1a7 comment` —— **no-op**（脚本里的注释行；`argc = 1`，操作数是那句注释文本）。
  *
- * ★ 判据（取证，锚 = EA）：handler = `sub_4191B0` @ `0x4191B0`（`.lst` 37340-37347）。
- *   它**整个体只有两条指令**：写"本指令的长度字"（= 知识层 `FRAME_LAYOUT.off.operandCount`，
+ * ★ 判据（取证，锚 = EA）：handler = `sub_4191B0` @ `0x4191B0`（`.lst:37340-37347`）。
+ *   它只做**分派器协议写**：写"本指令的长度字"（= 知识层 `FRAME_LAYOUT.off.operandCount`，
  *   值 `2*argc+1`）+ 读 `cur`（`FRAME_LAYOUT.off.cur`）—— 两件事在本模型里**自动成立**
  *   ⇒ 它**什么都不做**。所以把它实现成 no-op 是**有判据的**，不是"看名字猜的"。
+ *   ★ 订正（台账 `01M4FECPXH1Q0X1V7R7Q7V085K`）：原先写"它**整个体只有两条指令**" —— 那是
+ *   Hex-Rays 的**两条 C 语句**；`.lst:37340-37347` 层是 **6 条指令**（`mov eax,[ecx+5D880h]` /
+ *   `mov edx,eax` / `shl edx,4` / `sub edx,eax` / `mov [ecx+edx*8+5D8F4h],3` / `retn`）。
  */
 const opComment: Handler = () => { /* 见上：只有协议写，故无可执行语义 */ };
 
@@ -310,9 +318,8 @@ function jumpToLabel(ctx: VmContext, i: number): boolean {
  * 的算式见知识层 `packages/age-format/src/engine/handlers.mts` 头注；逐字体与表项偏移见台账
  * `01M4AV69BC3S00577K22566653`）。
  * ★ **为什么引擎要清长度字**：长度字（知识层 `FRAME_LAYOUT.off.operandCount`）是分派器用来
- *   "自动推进 PC"的；PC 已被这条 handler 改写 ⇒ 必须清 0，
- *   否则分派器会在**新 PC** 上再加一次本指令的长度。在本模型里这条由 `Machine.step()` 的
- *   规则表达（"handler 改过 `ip` 就不 +1"）⇒ **语义等价，不需要那个字段**。
+ *   "自动推进 PC"的；PC 已被这条 handler 改写 ⇒ 必须清 0，否则分派器会在**新 PC** 上再加一次。
+ *   本模型由 `Machine.step()` 的"handler 改过 `ip` 就不 +1"表达 ⇒ 语义等价、不需要那个字段。
  * ★ 哨兵 `-1` ⇒ **静默落下**（引擎只是跳过整段 if）。我上一版在这里**抛错**，那是比引擎更严
  *   —— 已改成与引擎同形（no-op + 留痕）。
  */
@@ -330,10 +337,9 @@ const opJmp: Handler = (ctx) => {
  * `handlers.mts` 头注）。体的分支形状：读 op1 → `test/jz`（op1 == 0 ⇒ 目标改用 op3）→ 读 op2 →
  * `cmp eax,0FFFFFFFFh` + `jz`（哨兵 ⇒ **不跳**、直接 `retn`）→ 否则目标 = op2；
  * PC ← 脚本基址 + 4*raw。
- * ★ 这段逐字**目前只有本注释与守卫用例两个锚**（`0x8c`/`0x8f` 那两条已在台账
- *   `01M4AV69BC3S00577K22566653` 里，本条还没有台账条目）—— 补条目后这里改成指针。
- * ★ 这与"脚本自身的控制流"给出的形状**一致**（三处独立互证见旧注）：全部实测站点里
- *   `op2` 都是哨兵 ⇒ 可观测行为就是"条件非 0 落下、为 0 跳 `op3`"。
+ * ★ 逐字见台账 `01M4FECQ223V2450452S6J520A`（`0x8c`/`0x8f` 那两条在 `01M4AV69BC3S00577K22566653`）。
+ * ★ 这与"脚本自身的控制流"给出的形状**一致**：全部实测站点里 `op2` 都是哨兵 ⇒ 可观测行为就是
+ *   "条件非 0 落下、为 0 跳 `op3`"。
  */
 const opJcc: Handler = (ctx) => {
   const cond = num(ctx, 0);
@@ -386,10 +392,9 @@ const opCallScript: Handler = (ctx) => {
  * `0x05 ret`：**同帧**返回 —— 弹本帧的返回栈，PC 回到 `0x8f call` 压下的那一点。
  * **空栈 ⇒ 什么都不做**（引擎逐字：`cmp edx,0FFFFFFFFh / jz locret_41AA4D` ⇒ 直接 `retn`）。
  *
- * ★★ 这一条曾经实现错（**弹帧**，即当成 `exit`），已按取证订正：
- * `ret` **不换帧、不读 caller 回链、不改 `cur`** —— 它与 `call` 成对，作用域是**同一帧内**。
- * 换帧的返回是 `exit`(0x02)（读 `FRAME_LAYOUT.off.caller` → `FRAME_LAYOUT.off.callerChain`
- * —— 知识层把它记作"其实是 Engine 级寄存器"那一格 —— → `cur`；逐字见台账 `01M48HPTQQ12637R71596T5160`）。
+ * ★★ 这一条曾经实现错（**弹帧**，即当成 `exit`），已按取证订正：`ret` **不换帧、不读 caller 回链、
+ *   不改 `cur`** —— 它与 `call` 成对，作用域是**同一帧内**；换帧的返回是 `exit`(0x02)（读
+ *   `FRAME_LAYOUT.off.caller` → `callerChain` → `cur`；逐字见台账 `01M48HPTQQ12637R71596T5160`）。
  */
 const opRet: Handler = (ctx) => {
   const target = ctx.frame.popReturn();
@@ -405,19 +410,16 @@ const opRet: Handler = (ctx) => {
 
 /**
  * ## 为什么这一批是**表驱动**的，而不是 16 个手写函数
- *
- * 启动链前段的 handler 形状高度重复，只有两种：
- * 1. **读操作数 → 写引擎的某个 dword 标量**（观察登记在 `layout.mts` 的 `ENGINE_SCALAR_WRITES`）；
- * 2. **转发进某个子系统**（被调方是谁、收几个操作数 ⇒ 见下面表里的 `callee`/`argc`；语义在**被调方**里）。
- *
- * ⇒ 手写 16 遍只会把同一件事写 16 次，而且每次都要问"偏移写哪"（本仓禁止）。表驱动还带来一个好处：
- * **这一批"没建模到什么程度"是一眼可见的**（见下面的 `kind`），而不是散在 16 个函数体里。
+ * 启动链前段的 handler 形状高度重复，只有两种：① **读操作数 → 写引擎的某个 dword 标量**
+ * （观察登记在 `layout.mts` 的 `ENGINE_SCALAR_WRITES`）；② **转发进某个子系统**（被调方是谁、收几个
+ * 操作数 ⇒ 见下面表里的 `callee`/`argc`；语义在**被调方**里）。表驱动让"这一批没建模到什么程度"
+ * 一眼可见（见下面的 `kind`），也免得把同一件事写 16 遍、每次都问"偏移写哪"（本仓禁止）。
  *
  * ## ★ 三条不许越的线
  * * ⛔ **偏移/EA 不进本文件**：标量的名字来自 `layout.mts`（知识层），本文件只按名字引用。
- * * ⛔ **不发明语义**：`kind: 'forward'` 的那些**没有**被建模 —— 每次执行都发一条
- *   `logged-only` 记录，写明**被调符号**与实参 ⇒ "我们跳过了这次子系统调用"是**可见的**，
- *   不是静默空操作（本仓最忌讳的正是后者）。日志会告诉我们启动链**真的**依赖哪些子系统。
+ * * ⛔ **不发明语义**：`kind: 'forward'` 的那些**没有**被建模 —— 每次执行都发一条 `logged-only`
+ *   记录（写明**被调符号**与实参）。口径与理由见知识台账：`data/ledger/`
+ *   （域 `Emulator`，subject `vm/ops-forward-logged-only`）。
  * * ⛔ **不猜 argc**：每条都照 handler 体自己写的长度字核对过（见 `handlers.mts` 的注释）。
  */
 type PrologueEntry =
@@ -429,6 +431,8 @@ type PrologueEntry =
   | { opcode: number; kind: 'forward'; callee: string; argc: number; note: string };
 
 const PROLOGUE: PrologueEntry[] = [
+  // ★ 订正（台账 `01M4FECPZS5F60297T5S2Q253Z`）：下面那条 `why` 里的"体只有两条"是 Hex-Rays 的
+  //   两条 C 语句；`.lst:37721-37728` 层是 **6 条**（`15·cur` 算术 + 写长度字 + `retn`，与 `0x1a7` 同形）。
   { opcode: 0x1a8, kind: 'noop', why: '`sub_419690` 体只有两条：写长度字 + 读 cur ⇒ 无操作数、无可执行语义' },
   { opcode: 0x149, kind: 'scalar' },
   { opcode: 0x21b, kind: 'scalar' },
@@ -616,10 +620,11 @@ function forwardHandler(entry: Extract<PrologueEntry, { kind: 'forward' }>): Han
  * ★ 表项为空时**不抛、不报错** —— 又一处"静默"（这里照抄，但**留痕**）。
  *
  * ## ★ 为什么这一族只**记欠账**、不建模
- * 表里那些对象是**别处创建**的，而创建它们的子系统正是本批**跳过**的那些（`engine.forward` 一族）。
+ * 表里那些对象是**别处创建**的，而创建它们的子系统正是本批**跳过**的那些（`engine.forward` 一族）
  * ⇒ 现阶段的模型里这张表**恒为空**，这些 handler 只会走 `if` 的假支。本层**如实记录**
- * "引擎本会写 `[对象+偏移] = 操作数`，但对象不在场"，并计入保真欠账。
- * ⛔ **不许**记成"写成功了" —— 那会让后面的分歧无从追溯。
+ * "引擎本会写 `[对象+偏移] = 操作数`，但对象不在场"。⛔ **不许**记成"写成功了" —— 那会让后面的
+ * 分歧无从追溯。欠账口径见知识台账：`data/ledger/`
+ * （域 `Emulator`，subject `headless/main-fidelity-debt-and-exit-code`）。
  *
  * ## 机械量出的族规模（可复算）
  * `.c` 里引用那张表的函数共 **9** 个：`sub_408F10 · sub_41A420 · sub_41EEF0 · sub_4200C0 ·
@@ -661,9 +666,13 @@ function objectFieldWriter(entry: (typeof OBJECT_FIELD_WRITES)[number]): Handler
  * 配置的**键**：引擎是**运行时拼**出来的（**没有静态键表**）。
  *
  * 取证（锚 = EA，台账 `KN-01M4ASXQ587J7G7E6E5R3R2Y2K`）：`load-int` = `sub_42DF40`、
- * `save-int` = `sub_434F60`，两者都用 `wsprintfA` 现拼键 ——
- * 类型码是字面量 **3**（不是 `'K'`），格式 `%8.8x` ⇒ 键 = 一个字节 `\x03` + **8 位十六进制**
- * （至少 8 位、零填充；逐字体在那条台账条目里）。
+ * `save-int` = `sub_434F60`，两者都用 `wsprintfA` 现拼键 —— 类型码是字面量 **3**（不是 `'K'`），
+ * 格式串逐字是 **`"%c%8.8x"`**（`.data:00520450`；`%c` 提供的那个字节就是类型码，
+ * **不是**裸 `%8.8x`）⇒ 键 = 一个字节 `\x03` + **8 位十六进制**（至少 8 位、零填充）。
+ * ★ int 配置哈希表 = **`Engine+0x5530`**（两个调用点逐字 `lea ecx,[esi+5530h]`：`.lst:71000` / `.lst:83032`）。
+ * ★ 与台账的出入：`01M4ASXQ587J7G7E6E5R3R2Y2K` 把 int 侧写成 `Engine+0xAA514` 是**错的**
+ *   （`AA514h` 是**另一个**带 vtable 的子系统对象，`.lst:8650-8654`）—— 已另记更正条目
+ *   `01M4FECQAN527X3P0S2Z13206P`。
  * ★ 字符串版（`load-string`/`save-string`）同形但类型码是 **5**，而且值是 28 字节的字符串元素
  *   ⇒ 那两条要等字符串池落地（见需求树）。
  */
@@ -705,7 +714,8 @@ const opLoadInt: Handler = (ctx) => {
  * 逐字（handler = `sub_434F60`，锚 = EA，台账 `01M4ASXQ587J7G7E6E5R3R2Y2K`）：值取自读操作数原语、
  *   键取自另一个原语（`sub_418A30`，**键的原语与值的原语不是同一条** —— 那就是下面这条欠账）。
  * ★ 本仓的 `ConfigStore` 是**文本**接口（配置文件就是文本）⇒ 这里把整型存成**十进制文本**；
- *   这是**宿主表示**的选择，不是引擎语义（引擎那一格是个 dword）。
+ *   这是**宿主表示**的选择，不是引擎语义（引擎那一格是个 dword）。口径与理由见知识台账：
+ *   `data/ledger/`（域 `Emulator`，subject `host/config-values-opaque`）。
  */
 const opSaveInt: Handler = (ctx) => {
   const v = num(ctx, 0);
@@ -727,12 +737,19 @@ function operandCtx(ctx: VmContext) {
 /**
  * `0x192 set-string`：把**操作数 2 的文本**写进**操作数 1**（目标按 op1 的 type 分派到不同串池）。
  *
- * 取证（锚 = EA）：handler = `sub_433660`（表项算式与基址见知识层 `handlers.mts` 头注）。
- * * 它用 `sub_42A420(this, v3, 2)` **一次把两个操作数都读成文本** ⇒ 源侧走的是**文本**原语，
- *   所以 `type 2`（内联字符串）在这里是合法的源（见 `readOperandAsText` 头注）。
+ * 取证（锚 = EA，台账 `01M4FECQ485K5K7A214A4Z0254`）：handler = `sub_433660`
+ * （表项算式与基址见知识层 `handlers.mts` 头注）。
+ * * ★ 订正：`sub_42A420` 的第 3 个参数是**操作数序号**，它只读**一个**操作数
+ *   （`.lst:65076/65081/65083`）；`0x192` 只 `call sub_42A420` **一次**（`.lst:80212`，读 op2）
+ *   ⇒ 源侧走的是**文本**原语，所以 `type 2`（内联字符串）在这里是合法的源
+ *   （见 `readOperandAsText` 头注）。★ 真正"一次读两个操作数"的是 `0x194` 的 `sub_42CF10`
+ *   （`.lst:69309/69318`），不是这一条。
  * * 落点由 `sub_433310` 按 **op1 的 type** 分派：type 5 → 全局串池、type 11 → 局部串池、
- *   type 8/14 另有分支，**其余 type 抛 `Command_Type_Exception`**。本模型里这一步由 `writeOperand`
- *   的池分派承担（它同样按 type 选池；不支持的 type 会抛）。
+ *   type 8/14 另有分支；★ **`0x8005`/`0x800B` 也有分支且不抛**（`.lst:79960/79962`），
+ *   **其余 type 抛 `Command_Type_Exception`**。本模型里这一步由 `writeOperand` 的池分派承担
+ *   （它同样按 type 选池；不支持的 type 会抛）。
+ *   ★ 键的原语 `sub_418AE0` **不支持 type 11**（会抛，`.lst:36720-36724`）⇒ "局部串（`0xb`）也能存"
+ *   只到"落点写得进去"这一层，**进配置那一路不成立**（本文件 `save-string`/`load-string` 允许 `0xb` 是**过宽**）。
  * ★ 它是启动链里出现最多的一条（7731 处）：`INITCONFIG0.BIN` 用它把默认字体名写进全局串。
  */
 const opSetString: Handler = (ctx) => {
@@ -755,6 +772,8 @@ const opSetString: Handler = (ctx) => {
  *   —— 那个对象的 EA **有过一次订正**（见台账 `01M4B3XQKE0D1D652J0A7Y7E7Z`）⇒ 本层不抄具体数值。
  * ★ 本仓的 `ConfigStore` 是文本接口 ⇒ 字符串按原样存（这一路**没有**表示损失）。
  * ★ **未支持**：type 8/14 的"反算下标"（需要地址空间，见 ADR）⇒ 遇到就抛，不猜。
+ * ★ 另注（见 `0x192` 的同名注）：键的原语 `sub_418AE0` **不支持 type 11**（会抛，`.lst:36720-36724`）
+ *   ⇒ 本 handler 接受 `0xb` 是**过宽**（落点写得进去 ≠ 键算得出来）。
  */
 const opSaveString: Handler = (ctx) => {
   const arg = ctx.ins.args[0];
@@ -1159,7 +1178,9 @@ const normalizeTextureColor = (c: number): number => (asInt32(c) < 0 ? 0 : (0xff
 
 /**
  * `0x1F9 set-texture`：`op1 = imgid`、`op2 = 槽`、`op3 = 颜色`。
- * ★ 引擎在这一条里**同步读文件 + 解码**（所以同一条指令序列里紧接着问尺寸必然一致）。
+ * ★ 引擎在这一条里**同步读文件 + 解码**（所以同一条指令序列里紧接着问尺寸必然一致）—— 宿主文件
+ *   系统接口必须是同步的。口径与理由见知识台账：`data/ledger/`
+ *   （域 `Emulator`，subject `host/fs-sync-interface`）。
  *   headless **不做**这件事 ⇒ 记两条：绑定（`modeled`）+ 资源请求（`logged-only`）。
  *   ★ 两条都要：只记"绑定成功"会让"这份安装里其实没有这张图"看不出来。
  */
@@ -1194,6 +1215,8 @@ const opCreateTexture: Handler = (ctx) => {
  * ★ 查不到时那次查询返回的是**一个静态空串**的地址 ⇒ 本层读回 **`''`**。
  * ★ 与 `save-string`（`sub_434FE0`）对称：同一套键、同一个对象（对象 EA 的那处订正见台账
  *   `01M4B3XQKE0D1D652J0A7Y7E7Z` —— 本层不抄数值）。
+ * ★ 另注（同 `save-string`）：键的原语 `sub_418AE0` **不支持 type 11**（会抛，`.lst:36720-36724`）
+ *   ⇒ 本 handler 接受 `0xb` 同样**过宽**。
  */
 const opLoadString: Handler = (ctx) => {
   const arg = ctx.ins.args[0];
