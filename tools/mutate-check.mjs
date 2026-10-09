@@ -47,6 +47,30 @@ export { MUTATIONS };
  * ★ 加新守卫时顺手加一条 —— 否则"这个守卫会红"只是个声称。
  */
 const MUTATIONS = [
+  // ── 数组类 opcode 的目标步长（★ 写死 4 会让 28 字节族算到别的元素上；语料里 723 个站点）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: '    case 0x8: case 0xe: return 28;',
+    to: '    case 0x8: case 0xe: return 4;',
+    guard: 'tools/test/emulator-pool-regions.test.mjs',
+    what: '`0x61`/`0x12c` 对 28 字节族也用 4 字节步长 ⇒ 字符串指针会指到错元素（而"读到一个字符串"看起来正常）',
+  },
+  // ── 台账覆盖率棘轮（★ 模拟"新增一条知识层登记却不配台账条目"）──
+  {
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: "  { name: 'Engine.d517', dword: 517, opcode: 0xfe,",
+    to: "  { name: 'Engine.d999', dword: 999, opcode: 0x999, handler: 'sub_999999', form: 'op1' },\n  { name: 'Engine.d517', dword: 517, opcode: 0xfe,",
+    guard: 'tools/test/ledger.test.mjs',
+    what: '知识层凭空多一条 opcode（`0x999`）而台账没有它 ⇒ 覆盖率比率下降（这正是"结论只写在注释里"的机械化）',
+  },
+  // ── `0x6 load-frame` 的帧深上限（★ 去掉它 ⇒ 引擎会抛的那条变成"照跑不误"）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: '  if (cur >= 40) {',
+    to: '  if (false) {',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`load-frame` 去掉帧深上限 ⇒ 引擎抛「階層が深すぎます」那条变成无声通过',
+  },
   // ── 越界口径：`0x107` 是"静默跳过"、`0x30a` 是"抛"（★ 统一它们会把"引擎会崩"与"无事发生"变成同一种表现）──
   {
     file: 'apps/emulator/src/vm/ops.ts',
@@ -113,7 +137,7 @@ const MUTATIONS = [
   // ── 区域窗口（★ 本仓实测踩过两次静默串数据：容量 0 同基址；增长吞掉邻居）──
   {
     file: 'apps/emulator/src/model/address-space.ts',
-    from: 'this.baseCursor = base + REGION_STRIDE;',
+    from: 'this.baseCursor = base + span;',
     to: 'this.baseCursor = base + r.byteLength;',
     guard: 'tools/test/emulator-pool-regions.test.mjs',
     what: '按当前字节长推进基址（而不是整个窗口）⇒ 容量 0 的区域同基址、增长还吞邻居 = **静默串数据**',

@@ -27,6 +27,9 @@ import { createHeadlessInstance } from '../../apps/emulator/frontends/headless/r
 import { rootFromAssetsJson } from '../../apps/emulator/frontends/headless/paths.ts';
 import { buildChainReport } from '../../apps/emulator/frontends/headless/chain-report.ts';
 import { describeStop } from '../../apps/emulator/src/vm/machine.ts';
+// ★ 语料普查要用装载器 + 指令表（普查那条测的是"哪些操作数 type 真被用到" ⇒ 它决定实现范围）
+import { loadScript } from '../../apps/emulator/src/vm/script.ts';
+import { OPCODE_TABLE } from '@amayui/age-format/src/asm/runtime.mts';
 
 const PLAY_MOVIE = 0x20f;
 
@@ -72,21 +75,57 @@ test('★ 标准启动流程：按统一文件 id 装载根脚本（不是按名
 
   // ★ 第 0 条是 `comment`（no-op），第 1 条是 `0x1a8`（no-op）⇒ 它们必须被正常执行掉。
   const r = asm.machine.run({ stopAtOpcode: 0xffff });
+  // ★★ `0x6 load-frame`：**帧记录没建**，必须每次留痕（不许静默）—— 这是本轮唯一"故意欠着"的那一步
+  const lf = asm.log.records.filter((e) => e.action === 'engine.load-frame');
+  assert.ok(lf.length >= 4, `0x6 load-frame 在这次运行里至少 4 次（实测 ${lf.length}）—— 每次都要进保真欠账`);
+  for (const e of lf) {
+    assert.equal(e.disposition, 'logged-only', '未建模 ⇒ logged-only（会进「保真欠账」）');
+    assert.ok(e.detail.cur < 40, '目标帧深必须在引擎的上限 40 之内');
+    assert.match(String(e.detail.note), /帧记录没建/, '欠账信息里要写明"帧记录没建"与原因');
+    assert.ok(typeof e.detail.script === 'string' && e.detail.script.length > 0, '要记下装载到的是哪份脚本');
+  }
   // ★★ **前沿棘轮**：启动链能执行的**指令数**与**停在哪**都只许往前走。
   //    数字由实跑复算（不是手写）；实现新 handler 会让它涨 ⇒ 那时**要同步抬高这里**。
   //    它防的是"某个 handler 悄悄坏了 ⇒ 前沿倒退"（那种倒退否则只会表现成日志变短）。
   // ★★ 前沿棘轮（数字由实跑复算；往前走了就抬高它）
   //    走过的路：根脚本 → `call` 子程序 → `jcc` 配置门 → `call-script` → `INITCONFIG.BIN`
   //    → `INITCONFIG0..5`（**全部跑完**，含 `INITCONFIG4` 那个 1000 次循环）
-  //    → `call-script INITCHARM.BIN`（**跑完**）→ 回到 `SYSTEM4` 后半段，逐条推 `0x107/0x10b/0xfe/0x10c/
-  //    0x10f/0x308/0x30a/0x25b/0x248` 那条链 → 现在停在 `#103 = 0x6 load-frame`（**结构性** opcode）。
-  assert.ok(r.steps >= 14291, `启动链至少能执行 14291 步（实际 ${r.steps}）—— ${describeStop(r.reason)}`);
+  //    → `call-script INITCHARM.BIN`（**跑完**）→ `SYSTEM4` 后半段逐条推
+  //    `0x107/0x10b/0xfe/0x10c/0x10f/0x308/0x30a/0x25b/0x248` 那条链 → `0x6 load-frame` ×4
+  //    → 进入 `INIT2.BIN`，它依次 `call-script` 一整套 init：`WDINIT` / `LKINIT` / `DPINIT` /
+  //    `ALINIT`(3993) / `IMINIT`(6070) / `VIINIT`(643) / `CIINIT`(470) / `BIINIT`(961) / `BTANINIT2`(1063)
+  //    → 现在停在 `INIT2.BIN#134 = 0x143`。
+  assert.ok(r.steps >= 85994, `启动链至少能执行 85994 步（实际 ${r.steps}）—— ${describeStop(r.reason)}`);
   if (r.reason.kind === 'error') {
-    assert.equal(r.reason.script.toUpperCase(), 'SYSTEM4.BIN', '当前在根脚本 SYSTEM4.BIN 的后半段');
-    assert.equal(r.reason.opcode, 0x6, '当前停点 = `0x6 load-frame`（框架装载）');
-    assert.equal(r.reason.index, 103, '当前停点的指令下标（SYSTEM4#103）');
+    assert.equal(r.reason.script.toUpperCase(), 'INIT2.BIN', '当前在 `INIT2.BIN`（各 INIT 子脚本的调用者）');
+    assert.equal(r.reason.opcode, 0x143, '当前停点 = `0x143`（指令表没命名的那一族）');
+    assert.equal(r.reason.index, 134, '当前停点的指令下标（INIT2#134）');
   } else {
     assert.fail(`启动链应当仍停在某个明确缺口上，实际：${describeStop(r.reason)}`);
+  }
+});
+
+test('★ 语料的操作数 type 普查：指针族里**只有 0xc/0xe 用得上**（0x6/0x7/0x8/0xd 一次都没出现）', { skip }, () => {
+  const files = fs.readdirSync(installDir).filter((f) => f.toUpperCase().endsWith('.BIN'));
+  assert.ok(files.length >= 100, `安装目录里的散装脚本数（实测 ${files.length}）`);
+  const byType = new Map();
+  let scripts = 0;
+  for (const f of files) {
+    let s;
+    try {
+      s = loadScript(f, new Uint8Array(fs.readFileSync(path.join(installDir, f))), { table: OPCODE_TABLE });
+    } catch { continue; }
+    scripts += 1;
+    for (const ins of s.instructions) for (const a of ins.args) byType.set(a.type, (byType.get(a.type) ?? 0) + 1);
+  }
+  assert.ok(scripts >= 100, `能装载的脚本数（实测 ${scripts}）`);
+  // ★ 用了的：0xc（local-ptr）与 0xe（local string-ptr）—— 后者的量决定了"字符串也要能发地址"
+  assert.ok((byType.get(0xc) ?? 0) > 10000, `type 0xc 的出现次数（实测 ${byType.get(0xc) ?? 0}）`);
+  assert.ok((byType.get(0xe) ?? 0) > 1000, `type 0xe 的出现次数（实测 ${byType.get(0xe) ?? 0}）`);
+  // ★ 一次都没出现的：0x6（全局指针）/ 0x7（全局浮点指针）/ 0x8（全局字符串指针）/ 0xd（局部浮点指针）
+  //   ⇒ 本层不实现它们（**写**那两支顺手实现了，代价为零）；真出现时会响亮失败（不是静默）
+  for (const t of [0x6, 0x7, 0x8, 0xd]) {
+    assert.equal(byType.get(t) ?? 0, 0, `type 0x${t.toString(16)} 在本语料里应当一次都不出现（实测 ${byType.get(t) ?? 0}）`);
   }
 });
 

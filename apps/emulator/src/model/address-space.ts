@@ -68,6 +68,15 @@ export interface RegionSpec {
   elemBytes: number;
   /** 能寻址几个格子（**必填**，见文件头上的缺口） */
   capacity: number;
+  /**
+   * ★ 本区域独占的**地址窗口**大小（字节）。缺省 `REGION_STRIDE`。
+   *
+   * ⛔ **不许所有池都用一个值**：本仓实测 —— 全局 int 池一次跑到第 **7,355,801** 格
+   * （≈29 MB），而每帧还要 6 个局部池区域、引擎帧深上限 40 ⇒ 最多 ~246 个区域。
+   * 若都给 32 MB 会**溢出 u32**（指针格只有 4 字节）；若都给 4 MB，全局 int 池装不下。
+   * ⇒ 窗口按**池的用途**给（见 `pools.ts` 的 `SPAN_*`），总面积由 `alloc` 的 u32 预算检查兜底。
+   */
+  span?: number;
 }
 
 /** 一次"引擎不会检查"的访问记录（诊断；不进快照） */
@@ -99,12 +108,22 @@ export class Region {
    * ★ 增长**只增不减**（`growTo` 拒绝缩小）；初值 `0` = **不编任何常数**。
    */
   capacity: number;
+  /**
+   * ★ 本区域独占的**地址窗口**（字节）—— **不可变身份**。
+   *
+   * ⛔ 不许所有池共用一个值：全局 int 池一次跑到第 **7,355,801** 格（≈29 MB），
+   * 而每帧还要 6 个局部池区域、帧深上限 40 ⇒ 最多 ~246 个区域 ⇒
+   * 若都给 32 MB 会**溢出 u32**（指针格只有 4 字节），若都给 4 MB 则全局 int 池装不下。
+   */
+  readonly span: number;
   /** 偏移 → 该格的原始字节（长度恒等于 `elemBytes`）。★ 稀疏：没写过的格子**不在这里** */
   readonly cells: Map<number, CellBytes>;
 
-  constructor(tag: string, base: number, elemBytes: number, capacity: number, cells?: Map<number, CellBytes>) {
+  constructor(tag: string, base: number, elemBytes: number, capacity: number, cells?: Map<number, CellBytes>, span = REGION_STRIDE) {
     if (!Number.isInteger(elemBytes) || elemBytes <= 0) throw new Error(`区域的 elemBytes 必须是正整数：${elemBytes}`);
     if (!Number.isInteger(capacity) || capacity < 0) throw new Error(`区域的 capacity 必须是非负整数：${capacity}`);
+    if (!Number.isInteger(span) || span <= 0) throw new Error(`区域的 span 必须是正整数：${span}`);
+    this.span = span;
     this.tag = tag;
     this.base = base;
     this.elemBytes = elemBytes;
@@ -179,23 +198,25 @@ export interface AddressSpaceSnapshot {
 export const ORIGIN = 0x10000000;
 
 /**
- * **一个区域独占的地址窗口大小**（`0x2000_0000` = 512 MiB）。
+ * **一个区域独占的地址窗口大小**（`0x0100_0000` = 16 MiB）。
  *
- * ## 为什么需要它（本仓实测踩过两次静默串数据）
+ * ## 为什么需要它（本仓实测踩过三次静默串数据 / 一次地址溢出）
  * ① `capacity === 0` 的区域 `byteLength === 0` ⇒ 若按字节长推进，下一个区域会**拿到同一个基址**；
  * ② 更糟的是**增长**：区域构造时容量 0、之后涨到 N ⇒ 末尾**越过**下一个区域的基址 ⇒
- *    "写进 A 的值"能从 B 的地址读到（两条路都"看起来正常"）。
- * ⇒ 每个区域独占一个窗口，窗口内随便涨（`ensureCapacity` 拒绝越窗）。
+ *    "写进 A 的值"能从 B 的地址读到（两条路都"看起来正常"）；
+ * ③ ★ 窗口**太大**会让地址**溢出 4 字节格**：每帧建 6 个局部池区域 + 6 个全局池区域，
+ *    而 `load-frame` 的逐字把帧深上限定在 **40** ⇒ 区域数上限 ≈ `40*6 + 6 = 246`。
+ *    最初用 512 MiB：`ORIGIN + 11*512MiB` 就已越过 `0xFFFFFFFF`，写进指针格时被**截断**
+ *    （实测：`actual` 与 `expected` 正好差 `2^32`，而日志一切正常）。
  *
- * ## 这个数不是"编"的：它由两条硬约束夹出来
- * 1. **地址必须装进 4 字节单元**（指针池的一格就是 4 字节）⇒ 整个空间必须落在 `u32` 内
- *    ⇒ `ORIGIN + k*STRIDE ≤ 0xFFFFFFFF` ⇒ 窗口数上限 ≈ `(0xFFFFFFFF − ORIGIN)/STRIDE` = **7**；
- * 2. 窗口内的容量上限 = `STRIDE / elemBytes`（4 字节元素 ⇒ **1.34 亿格**），
- *    对"引擎自己用固定大数组"的量级足够；真不够时 `ensureCapacity` **响亮失败**，
- *    由人决定"拆区域"还是"提高 STRIDE"。
+ * ## 这个数由两条硬约束夹出来（不是拍的）
+ * 1. **地址必须装进 4 字节单元**（指针池的一格就是 4 字节）⇒ `ORIGIN + k*STRIDE ≤ 0xFFFFFFFF`
+ *    ⇒ `STRIDE ≤ (0xFFFFFFFF − ORIGIN) / 246` ≈ **17.4 MB** ⇒ 取 2 的幂 **16 MiB**（留余量）；
+ * 2. 窗口内容量上限 = `STRIDE / elemBytes`（4 字节元素 ⇒ **419 万格**）—— 已远超实测需要的最大下标
+ *    （`global:int[1353969]`）；真不够时 `ensureCapacity` **响亮失败**，由人决定拆区域还是换口径。
  * ★ 它**不影响**任何语义：基址只通过 `addressOf` 被比较，别处不依赖具体值。
  */
-export const REGION_STRIDE = 0x20000000;
+export const REGION_STRIDE = 0x00400000;
 
 /**
  * **一个地址空间**。持有若干区域，回答"这个地址落在哪一格的哪个偏移"。
@@ -239,12 +260,12 @@ export class AddressSpace {
     if (!Number.isInteger(index) || index < 0) throw new Error(`ensureCapacity 的下标必须是非负整数：${index}`);
     const need = index + 1;
     if (need <= region.capacity) return false;
-    // ★★ **不许越出本区域的地址窗口**：窗口是 `[base, base + REGION_STRIDE)`，
+    // ★★ **不许越出本区域自己的地址窗口**：窗口是 `[base, base + region.span)`，
     //   越过它就必然**重叠下一个区域** ⇒ "写进 A 的值从 B 的地址读到"（静默串数据）。
-    //   ⛔ 宁可响亮失败：这条要人决定"拆区域"还是"提高 STRIDE"，不许自动重叠。
-    if (need * region.elemBytes > REGION_STRIDE) {
+    //   ⛔ 宁可响亮失败：这条要人决定"拆区域"还是"给这个池更大的 span"，不许自动重叠。
+    if (need * region.elemBytes > region.span) {
       throw new Error(
-        `区域 ${region.tag} 需要 ${need * region.elemBytes} 字节 > 一个地址窗口（${REGION_STRIDE} B）` +
+        `区域 ${region.tag} 需要 ${need * region.elemBytes} 字节 > 它自己的地址窗口（${region.span} B）` +
         ` ⇒ 增长会与下一个区域重叠（**静默串数据**）⇒ 拒绝。${note ? `（${note}）` : ''}`,
       );
     }
@@ -275,7 +296,7 @@ export class AddressSpace {
    */
   regionByWindow(address: number): Region | null {
     for (const r of this.regions) {
-      if (Number.isInteger(address) && address >= r.base && address < r.base + REGION_STRIDE) return r;
+      if (Number.isInteger(address) && address >= r.base && address < r.base + r.span) return r;
     }
     return null;
   }
@@ -287,8 +308,9 @@ export class AddressSpace {
    */
   alloc(spec: RegionSpec): Region {
     const align = Math.max(8, spec.elemBytes);
+    const span = spec.span ?? REGION_STRIDE;
     const base = Math.ceil(this.baseCursor / align) * align;
-    const r = new Region(spec.tag, base, spec.elemBytes, spec.capacity);
+    const r = new Region(spec.tag, base, spec.elemBytes, spec.capacity, undefined, span);
     this.regions.push(r);
     this.regions.sort((a, b) => a.base - b.base);
     // ★★ 推进**一个完整的地址窗口**（`REGION_STRIDE`），不是按当前字节长。
@@ -297,7 +319,16 @@ export class AddressSpace {
     //   ② 更糟的是**增长**：区域在构造时容量为 0，之后涨到 N ⇒ 它的末尾会**越过**下一个区域的基址
     //      ⇒ "写进 A 的值"能从 B 的地址读到（**静默串数据**，而且两条路都"看起来正常"）。
     //   ⇒ 每个区域独占一个窗口，窗口内随便涨（`ensureCapacity` 会拒绝越窗）。
-    this.baseCursor = base + REGION_STRIDE;
+    // ★★ 而且**整个空间必须装进 4 字节格**（指针池的一格就是 4 字节）——
+    //   区域发多了会溢出去、写指针格时被**截断**（实测：`actual` 与 `expected` 正好差 `2^32`）。
+    //   ⛔ 不许让它静默截断：越界就抛，由人决定拆区域还是换口径。
+    if (base + span > 0x1_0000_0000) {
+      throw new Error(
+        `地址空间用尽：再发一个区域（tag=${spec.tag}，span=${span}）会让基址越过 u32（0x${this.baseCursor.toString(16)}）—— ` +
+        '指针池的一格只有 4 字节 ⇒ 地址必须装进 u32。见 address-space.ts 里 span/REGION_STRIDE 的推导。',
+      );
+    }
+    this.baseCursor = base + span;
     return r;
   }
 
@@ -470,5 +501,6 @@ export class AddressSpace {
  */
 export const STATE_PARTITION: Record<string, Record<string, string>> = {
   AddressSpace: { regions: 'engine', baseCursor: 'engine', diagnostics: 'diagnostic', onGrow: 'host' },
-  Region: { tag: 'derived', base: 'derived', elemBytes: 'derived', capacity: 'derived', cells: 'engine' },
+  // ★ `span` 与 `base`/`elemBytes`/`capacity` 同类：**不可变身份**（分配时定）⇒ derived（不进快照）
+  Region: { tag: 'derived', base: 'derived', elemBytes: 'derived', capacity: 'derived', span: 'derived', cells: 'engine' },
 };

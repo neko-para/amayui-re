@@ -909,6 +909,55 @@ test('★ 锚点用 EA 不用行号：EA → 文件偏移由 PE 节表现算（�
   assert.equal(peOffsetOf(Buffer.from('not a pe'), 0x1000), null);
 });
 
+/**
+ * ★★ **覆盖率棘轮**：知识层登记/实现的 opcode，必须在台账里**被提到过**。
+ *
+ * ## 为什么需要它（这不是假想的风险 —— 已经发生过）
+ * 有一段时间我实现了一批 opcode（`0xfe`/`0x107`/`0x10b`/`0x10b`/`0x248`/`0x25b`/`0x2ee`/`0x30a`/`0x308`/`0x6`…），
+ * 结论只写进了**代码注释里的逐字**与**守卫用例**——两者确实是合法锚，但**台账没动**。
+ * ⇒ 结论落到了工具管不到的地方：`ledger validate` 不检查注释，"降级为 stale"（`AGENTS.md` §6.3）也管不到它们。
+ * 用户先发现"台账好几轮没变化"，这条守卫就是那次偏离的**机械化**。
+ *
+ * ## 判据
+ * `提到过 / 知识层总数` 这个**比率**不许下降（棘轮）：
+ * * 新增一条知识层登记而**不配台账条目** ⇒ 分母涨、比率跌 ⇒ **红**；
+ * * 补一条台账条目（提到该 opcode）⇒ 比率回到位，可以把下面的数字抬上去。
+ * ★ 数字由**本文件现算**（不手写）：`COVERED_AT` / `TOTAL_AT` 是"上一次实测"，只作棘轮的基准。
+ */
+test('★ 覆盖率棘轮：知识层每个 handler 的 **EA** 都要作为台账锚登记过（比率只增不减）', () => {
+  const COVERED_AT = 31;
+  const TOTAL_AT = 31;
+  const layout = fs.readFileSync(path.join(REPO_ROOT, 'packages/age-format/src/engine/layout.mts'), 'utf8');
+  const ops = fs.readFileSync(path.join(REPO_ROOT, 'apps/emulator/src/vm/ops.ts'), 'utf8');
+  const ledgerLines = fs.readFileSync(path.join(REPO_ROOT, 'data/ledger/observation/2026-10.jsonl'), 'utf8').trim().split('\n');
+
+  // 知识层两种登记，字段名**不同**（别混）：
+  //   * `ENGINE_SCALAR_WRITES` / `ENGINE_SCALAR_ARRAYS` 的 `handler:` = **handler 符号**（表项真源）；
+  //   * `PROLOGUE` 的 `callee:` = **被调符号**（handler 是另一回事，见 `opcodes handlers --opcode`）。
+  // ⇒ 判据是"**这个符号的 EA 有没有作为 bin 锚进台账**"，两种字段都算（字段名不同的原因写在上面）。
+  const rows = [];
+  for (const m of layout.matchAll(/opcode:\s*(0x[0-9a-f]+)[^}]*?handler:\s*'([^']+)'/g)) rows.push({ opcode: m[1], sym: m[2], field: 'handler' });
+  for (const m of ops.matchAll(/\{\s*opcode:\s*(0x[0-9a-f]+),\s*kind:\s*'(?:noop|forward)'[^}]*?callee:\s*'([^']+)'/g)) rows.push({ opcode: m[1], sym: m[2], field: 'callee' });
+
+  // ★ 判据是**可再校验的观察**（§6）：这个符号的 EA 必须以 `bin` 锚的形式出现在台账里。
+  //   ⛔ 只"在正文里提一句 opcode"不算 —— 那种提及无法被重校验（这就是本仓踩过的那次偏离：
+  //   结论只写在代码注释里，台账一条没动；当时这个数是 **0/31**）。
+  const eaOf = (h) => { const m = /^sub_([0-9A-F]{6})$/.exec(h); return m ? parseInt(m[1], 16) : null; };
+  const ledgerEas = new Set();
+  for (const line of ledgerLines) {
+    for (const a of (JSON.parse(line).anchor ?? [])) if (a.ea !== undefined) ledgerEas.add(a.ea);
+  }
+  const withEa = rows.filter((r) => eaOf(r.sym) !== null);
+  assert.ok(withEa.length >= TOTAL_AT, `可算 EA 的符号数不该缩水（基准 ${TOTAL_AT}，实测 ${withEa.length}）`);
+  const missing = withEa.filter((r) => !ledgerEas.has(eaOf(r.sym)));
+  const covered = withEa.length - missing.length;
+  assert.ok(covered * TOTAL_AT >= COVERED_AT * withEa.length,
+    `EA 锚覆盖率下降了：现在 ${covered}/${withEa.length}（基准 ${COVERED_AT}/${TOTAL_AT}）。\n`
+    + '⇒ 新实现/新登记的 opcode 要**配一条台账条目**（`pnpm tools ledger add`，bin 锚用它的 EA），\n'
+    + '   或者补一条把已有结论绑上去的条目。\n'
+    + `还没有 EA 锚的：${missing.map((r) => `${r.opcode}/${r.sym}(${r.field})`).join(' ')}`);
+});
+
 test('ULID：字典序 == 时间序；月份与 at 自洽（分片规则依赖它）', () => {
   const a = newUlid(Date.parse('2026-01-31T23:59:59.999Z'));
   const b = newUlid(Date.parse('2026-02-01T00:00:00.000Z'));

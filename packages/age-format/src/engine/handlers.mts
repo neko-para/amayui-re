@@ -70,3 +70,35 @@ export const OPCODE_HANDLERS = {
   0x79: 'sub_41F490', // (无名) · argc 3
   0x1c1: 'sub_420070', // (无名) · argc 3
 };
+
+/**
+ * ## 尚未进 `OPCODE_HANDLERS` 的 handler 符号（★ 本仓**尚未**逐字复核 / 未取 EA 锚）
+ *
+ * 下面这批是"读实现或复核时要能点名 handler"的 opcode。它们的符号原先只写在
+ * `apps/emulator/src/vm/ops.ts` 的注释里 —— 那是**实现层**，不该是"引擎事实"的家
+ * （house rule：opcode → handler 符号属于本文件）。
+ *
+ * ⛔ 它们**不是** `OPCODE_HANDLERS` 的成员：那张表的每一条都由
+ * `tools/test/opcodes-handlers.assets.test.mjs` 回**语料**现算对账，而下面这些**还没有**独立复核。
+ * ⇒ 复核一条（`pnpm tools opcodes handlers --opcode <opcode>` + 读 `.lst`）就把它搬成上面的数据行。
+ * ★ 已经在台账里取了 EA 锚的那些（`0x02` `0x03` `0x05` `0x06` `0x20f` `0x21c` `0x6c` `0x1a2`
+ * `0x1a3` `0x1a9` `0x1aa` `0x2de` `0x10c` …）**不在**下面的名单里 —— 台账是那些结论的真源。
+ *
+ * 控制与流程：
+ *   `0x1a7 comment` → `sub_4191B0` · `0x101 poll-input` → `sub_419CC0`
+ * 数据搬运 / 数组：
+ *   `0x2d8 set-array-to` → `sub_430CF0` · `0x61 lookup-array` → `sub_42CB00` ·
+ *   `0x64 copy-local-array` → `sub_42CBE0`
+ * 字符串：
+ *   `0x192 set-string` → `sub_433660`
+ * 对象表（表基址 `Engine+0x15144` 见 `layout.mts`）：
+ *   `0x212` → `sub_423A30` · `0x25d` → `sub_425EF0` · `0x213` → `sub_423A80`
+ * 启动链前段里 handler ≠ 被转发符号的那两条（被转发符号见 `ops.ts` 的 `PROLOGUE` 表）：
+ *   `0x2f8` → `sub_4268D0` · `0x308` → `sub_426B20`
+ * 渲染（纹理 / 绘制项 / 颜色 / 网格）与音频 —— **整批**来自旧仓观测索引，未复核：
+ *   `0x1f7 detach-texture` → `sub_422BC0` · `0x1f8 create-texture` → `sub_422C20` ·
+ *   `0x1f9 set-texture` → `sub_422CB0` · `0x1fa release-texture` → `sub_422E00` ·
+ *   `0x1fb draw-texture` → `sub_422E70` · `0x202 set-draw-color` → `sub_4231F0` ·
+ *   `0x203 set-draw-color-alpha` → `sub_4232C0` · `0x320 create-mesh` → `sub_432150` ·
+ *   `0x322 set-vertex-color` → `sub_426C20` · `0x323 set-vertex-color-alpha` → `sub_426CF0`
+ */

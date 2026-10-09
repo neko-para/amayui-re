@@ -330,6 +330,19 @@ test('★ 派发表**没登记**的 opcode：报"引擎明确不支持"，⛔ �
   }
 });
 
+test('★ `0x6 load-frame` 的**帧深上限 40**（越界抛，错误信息照抄引擎那句日文）', () => {
+  const m = machineStub();
+  // ★ 逐字 `if (v4 >= 40) throw ShowMessage("ファイルの階層が深すぎます．最大は%dです．", 40);`
+  assert.throws(() => HANDLERS[0x6](ctxOf(m, [imm(20936), imm(40)], 0x6)), /階層が深すぎます/);
+  assert.throws(() => HANDLERS[0x6](ctxOf(m, [imm(20936), imm(999)], 0x6)), /階層が深すぎます/);
+  // 39 是允许的（边界）：它会走到 `loadScriptById` —— 桩机没有那个方法，所以这里只断言**不是**深度错误
+  assert.throws(
+    () => HANDLERS[0x6](ctxOf(m, [imm(20936), imm(39)], 0x6)),
+    (e) => !/階層が深すぎます/.test(String(e?.message ?? e)),
+    '39 < 40 ⇒ 不该报帧深',
+  );
+});
+
 test('★ `0x30a` 与 `0x107` 的**越界口径不同**（一个是抛、一个是静默跳过）—— 不许统一', () => {
   const m = machineStub();
   // `0x30a`：表 1969、索引来自 op2（上界 **7**）、值来自 op1（上界 0x1F）

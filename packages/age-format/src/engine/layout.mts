@@ -91,11 +91,13 @@ export const FRAME_SLOTS_OBSERVED = [
  * **引擎标量数组**：`Engine[base + 索引] = 值` 这种按索引写的槽族。
  *
  * ★ 与 `ENGINE_SCALAR_WRITES` 的差别：那里的槽下标是**指令里写死的**（每个 opcode 一个固定 dword），
- *   这里下标由**操作数**给出 ⇒ 必须把索引记进键名（`Engine.d551`、`Engine.d552`…），
- *   否则两次不同的写入会互相覆盖（而日志看起来一切正常）。
+ *   这里下标由**操作数**给出。
+ *   ★ 由操作数给出的下标**怎么落地**（键名要不要带索引、越界要不要留痕）是**实现口径**，不在本层 ——
+ *   它在 `apps/emulator/src/vm/ops.ts` 的 `scalarArrayHandler`。
  *
- * ★ `outOfRange: 'skip'` = 引擎**静默跳过**这次写（逐字 `if (result <= 0x1F) …`，**没有**异常）
- *   —— ⛔ 本层照抄"跳过"，但**必须记一笔**（不可见地丢弃一次写是最难查的一类）。
+ * ★ `outOfRange` = **引擎自己怎么做**：`'skip'` = 引擎**静默跳过**这次写（逐字 `if (result <= 0x1F) …`，
+ *   **没有**异常）；`'throw'` = 引擎抛（见 `0x30a`）。⛔ 两者不许混成一条 —— 那会把"引擎会崩"与
+ *   "引擎当无事发生"变成同一种表现（照抄与留痕的做法在 `ops.ts` 的 `scalarArrayHandler`）。
  */
 export const ENGINE_SCALAR_ARRAYS = [
   // `0x107`（`sub_421E50`，argc 2）：`v2 = op2; result = op1; if (result <= 0x1F) this[result + 551] = v2;`
@@ -179,7 +181,8 @@ export const EVIDENCE = {
  * * `form`：值的来源 —— `op1` = 操作数 1 的原值、`op2` = 操作数 2、`const` = **写死的常量**（`value` 给出）、
  *   `bool(op1)` = 非 0 归一成 1、
  *   `bswap24(op1)` = 在**低 24 位内**把字节序倒过来（`b0<<16 | b1<<8 | b2`；像 BGR↔RGB）；
- * * `max`：引擎**自己**的范围检查（越界它抛 C++ 异常）—— ⛔ 不许 clamp，照抄成抛；
+ * * `max`：引擎**自己**的范围检查（越界它抛 C++ 异常）—— 值的形态与上界是**事实**；
+ *   照抄成抛（⛔ 不许 clamp）是**实现口径**，在 `apps/emulator/src/vm/ops.ts` 的 `scalarHandler`；
  * * ★ **名字前缀区分两种存储**（同一个存储按名字寻址，但语义不同，别混）：
  *   `Engine.dNNN` = `this[NNN]`（引擎对象里的字段）；`Global.dNNNNNN` = **进程全局**（不在 `Engine` 里，
  *   例如 `0x248` 写的 `dword_55052C`）。
@@ -206,9 +209,12 @@ export const ENGINE_SCALAR_WRITES = [
   // ★ `0x1a4`（argc 2）：**两个槽、两个操作数**（`this[21671] = op2; this[21670] = op1`，无子系统调用）
   { name: 'Engine.d21670', dword: 21670, opcode: 0x1a4, handler: 'sub_41FE60', form: 'op1' },
   { name: 'Engine.d21671', dword: 21671, opcode: 0x1a4, handler: 'sub_41FE60', form: 'op2' },
-  // ★ `0x2ee`（argc 1）：`this[80106] = op1` 之后对 `Engine+0xAA554` 那个对象走 **vtable+12**
+  // ★ `0x2ee`（argc 1）：`this[80106] = op1` 之后对 `Engine+0xAA514` 那个对象走 **vtable+12**
   //   （实参含静态串 `aMessageMessage_0` 与 op1）——与 `0x1ca` 同形。**返回值不写回操作数**。
-  { name: 'Engine.d80106', dword: 80106, opcode: 0x2ee, handler: 'sub_426650', form: 'op1', callsAfter: ['(vtable+12) on Engine+0xAA554（aMessageMessage_0）'] },
+  //   ★ **偏移订正**（逐字）：`sub_426650` 的 `this[174405]` ⇒ `174405*4 = 0xAA514`；同族 `0x1ca`
+  //     （`sub_420240`）逐字也是 `lea esi, [ecx+0AA514h]` ⇒ 原先的 `0xAA554` / `ops.ts` 的 `0xAA614`
+  //     **都是抄错的数字**（514 被写成 554/614）。
+  { name: 'Engine.d80106', dword: 80106, opcode: 0x2ee, handler: 'sub_426650', form: 'op1', callsAfter: ['(vtable+12) on Engine+0xAA514（aMessageMessage_0）'] },
   // ★ `0xfe`（argc 1）：**带范围检查**的标量写（`sub_421CA0`）——
   //   `result = op1; if (result > 0x1F) throw (aSetkeytotal, 65541); this[517] = result;`
   //   ⇒ 上界不是"顺手加的守卫"，是**引擎自己抛的异常**（`max` 一字不差照抄 0x1F）。
@@ -234,3 +240,22 @@ export const ENGINE_SCALAR_WRITES = [
   { name: 'Engine.unsupported', dword: -1, opcode: 0x111, handler: 'sub_418E30', form: 'unsupported' },
   { name: 'Engine.unsupported', dword: -1, opcode: 0x112, handler: 'sub_418E30', form: 'unsupported' },
 ];
+
+/**
+ * **同族但进不了上面那两张表的槽写**（形态不同 ⇒ 表里放不下）—— 观察，仍是引擎事实。
+ *
+ * 登记它的理由与 `ENGINE_SCALAR_WRITES` 相同：**"哪个 handler 碰了引擎的哪个 dword、写成什么"**
+ * 是引擎事实，而 `apps/emulator` 里不许出现偏移 ⇒ 偏移留在本层，模型只按名字引用。
+ * ⛔ 这里同样**不给含义**（只有"谁写它、写成什么形态"）。
+ *
+ * * `0x88`（handler `sub_41FAB0`，argc 1）的两个**条件**副作用：
+ *   `if (op1) this[122368] = 1; else this[174801] &= ~0x8000000;`
+ *   ⇒ 名字 `Engine.d122368`（**写常量 1**）/ `Engine.d174801`（**位清除 `0x8000000`**）。
+ *   ★ 不进 `ENGINE_SCALAR_WRITES` 的理由是**形态**：那张表登记的是"写成 op1 原值 / 常量 / bswap24"
+ *     这几族，而这两条是"条件二选一 + 位清除" ⇒ 本批**只记录、不建模**（欠账见需求树）。
+ * * `0x212` / `0x25d` / `0x213` 的**对象表**：表基址 = `Engine + 4*21585` = **`Engine+0x15144`**，
+ *   按 `op1`（槽号）取指针取对象；**表项为空 ⇒ 什么都不做**（不抛、不报错 —— 又一处"静默"）；
+ *   取到对象后写"对象 + 字段偏移"（字段偏移见 `apps/emulator/src/vm/ops.ts` 的 `OBJECT_FIELD_WRITES`
+ *   数据行 —— 那几行**暂未**进本层，别在这里重抄一遍）。
+ *   ★ "这一族有多大 / 还有几个待核"是**进度**，在需求树里，不在本文件。
+ */

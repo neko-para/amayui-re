@@ -340,13 +340,20 @@ export class GlobalPools {
     this.regions = new Map();
     if (this.space) {
       for (const name of GLOBAL_POOL_NAMES) {
-        // ★ 判据 = "**格内容就是一个 4 字节位模式**"：int 族（过编解码）+ float 族（float32 位模式）。
-        //   ⛔ 只剩 `string`/`stringRef`（28 字节）没迁 —— 它要 SSO + 长串的堆。
-        if (GLOBAL_KIND[name] === 'string') continue;
-        const r = this.space.alloc({ tag: `global:${name}`, elemBytes: 4, capacity: 0 });
-        this.regions.set(name, r);
-        const src = this.pools.get(name)!;
         const gdef = globalKindOf(name);
+        // ★★ 与局部池**同一套口径**：**每个池都进地址空间**（都能取址）。字符串族也要 ——
+        //   `0xe`/`0x8` 的**基址** `&op2` 可以是全局字符串池的某一格（语料里 `0x61`/`0x12c` 的
+        //   目标虽是局部指针，源却常指到全局池）。`string` 族用 **28**（与引擎元素步长一致）。
+        const elemBytes = gdef.kind === 'string' ? 28 : 4;
+        // ★★ 窗口**按池的用途给**（⛔ 不许所有池一个值）：全局数值族是"引擎的大数组"
+        //   （实测写到第 7,355,801 格 ≈29 MB）⇒ 给 48 MiB；字符串族与局部池用默认（4 MiB）。
+        const span = gdef.kind === 'string' ? undefined : SPAN_GLOBAL_NUMERIC;
+        const r = this.space.alloc({ tag: `global:${name}`, elemBytes, capacity: 0, span });
+        this.regions.set(name, r);
+        // ★ 但只有 **data-in-region** 的族才把数据搬进去：字符串族按裁决是**不透明的 JS 字符串**
+        //   （区域只负责发地址，数据留在 Map）。
+        if (!DATA_IN_REGION({ kind: gdef.kind, elemBytes })) continue;
+        const src = this.pools.get(name)!;
         for (const [idx, value] of src) {
           this.space.ensureCapacity(r, idx, `${name} 池：快照搬家`);
           this.space.writeU32(r.addressOf(idx), snapshotToCell(gdef, value));
@@ -378,7 +385,8 @@ export class GlobalPools {
     const pool = this.pools.get(name);
     if (!pool) throw new Error(`未知的全局池：${name}`);
     const reg = this.regions.get(name);
-    if (reg) {
+    // ★ 判据是 `DATA_IN_REGION`（**数据在哪**），不是"有没有区域"：字符串族有区域（发地址）但数据在 Map。
+    if (reg && DATA_IN_REGION({ ...globalKindOf(name), elemBytes: reg.elemBytes })) {
       this.space!.ensureCapacity(reg, idx, `${name} 池：读第 ${idx} 格`);
       const raw = this.space!.readU32(reg.addressOf(idx));
       if (raw === null) return null;
@@ -394,12 +402,15 @@ export class GlobalPools {
   write(name: string, idx: number, value: SlotValue): SlotValue {
     if (!this.pools.has(name)) throw new Error(`未知的全局池：${name}`);
     const reg = this.regions.get(name);
-    if (reg) {
-      const bits = valueToCell(globalKindOf(name), value, this.key);
+    const gdef = globalKindOf(name);
+    if (reg && DATA_IN_REGION({ ...gdef, elemBytes: reg.elemBytes })) {
+      const bits = valueToCell(gdef, value, this.key);
       this.space!.ensureCapacity(reg, idx, `${name} 池：写第 ${idx} 格`);
       this.space!.writeU32(reg.addressOf(idx), bits);
       return bits;
     }
+    // ★ string 族（不透明）：数据进 Map，**但区域要长大**（让 `addressOf(idx)` 有效，`0xe` 才能解引用）
+    if (reg) this.space!.ensureCapacity(reg, idx, `${name} 池：写第 ${idx} 格（只为让它的地址有效）`);
     const bits: SlotValue = GLOBAL_ENCODED[name] ? encInt(value as number, this.key) : value;
     this.pools.get(name)!.set(idx, bits);
     return bits;
@@ -476,6 +487,16 @@ function sortedPairs<V>(m: Map<number, V>): [number, V][] {
  *   （`copy-local-array`、`fill-zero`）都会得到"看起来正常"的错值。
  */
 const DATA_IN_REGION = (def: localPoolDefShape): boolean => (def.kind === 'int' || def.kind === 'float') && def.elemBytes === 4;
+
+/**
+ * 全局**数值族**（`int`/`intRef`/`float`/`floatRef`）的地址窗口：**48 MiB**。
+ *
+ * ★ 为什么单独给它们：它们是"引擎的大数组" —— 实测启动链写到 `global:int` 的第 **7,355,801** 格
+ *   （≈29 MB）⇒ 默认的 4 MiB（1M 格）装不下；而"所有池都给 32 MB"又会**溢出 u32**
+ *   （每帧还有 6 个局部池区域、引擎帧深上限 40 ⇒ 最多 ~246 个区域）。
+ *   ⇒ 按**用途**给窗口，总面积由 `alloc` 的 u32 预算检查兜底。
+ */
+const SPAN_GLOBAL_NUMERIC = 0x03000000;
 
 /**
  * **格内容 → 快照里的值**。

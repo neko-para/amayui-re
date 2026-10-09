@@ -164,8 +164,9 @@ const opCheckBit: Handler = (ctx) => {
  * 3. `op2 == 0` **先写 0 再抛**（引擎就是这个次序：写操作数在前、抛异常在后）——
  *    反过来写会让"抛之前的操作数状态"与引擎不一致。
  *
- * ★ 已登记的附带观察（`numeric-ops.ts` 的 `touchesEngineState`）：体内还有一个**上限 12 的重掷计数器**
- *   （`Engine+0x69330`）。**为什么本批不实现它**：登记的语义只到 `rand() % op2`，
+ * ★ 已登记的附带观察：体内还有一个**上限 12 的重掷计数器** —— 那条属于知识层
+ *   （`apps/emulator/src/model/numeric-ops.ts` 的 `touchesEngineState`，台账 `01M48H8Y912C4D035W1P5W443F`）。
+ *   **为什么本批不实现它**：登记的语义只到 `rand() % op2`，
  *   而"在什么条件下重掷"没有取证 ⇒ 实现一个猜出来的重试循环比不实现更糟（它会让取数次数错）。
  *   ⇒ 登记在需求树，不在这里编。
  */
@@ -205,8 +206,9 @@ const opIntToFloat: Handler = (ctx) => put(ctx, 0, fnum(ctx, 1));
 
 /**
  * `0x02 exit` —— 跨脚本**返回调用层**（`cur = frame.caller`）。
- * ★ B 档（handler 旧仓记为 `sub_41A820`；`>=0` 切帧 / `-10` / `-11` / 其它抛退出的三支，
- *   本仓只实现**顶层退出**与**返回调用者**两支 —— 另两支的语义锚还没复核，故不写）。
+ * ★ B 档（handler = `sub_41A820`，台账 `01M4AV69BC3S00577K22566653` 与 `01M48HPTQQ12637R71596T5160`；
+ *   `>=0` 切帧 / `-10` / `-11` / 其它抛退出的三支，本仓只实现**顶层退出**与**返回调用者**两支
+ *   —— 另两支的语义锚还没复核，故不写）。
  */
 const opExit: Handler = (ctx) => {
   const f = ctx.frame;
@@ -228,7 +230,8 @@ export class ExitScript extends Error {
 }
 
 /**
- * `0x21C wait` —— 置等待门（B 档；handler 旧仓记为 `sub_41A260`，写 `effect_flags |= 0x400`）。
+ * `0x21C wait` —— 置等待门（B 档；handler = `sub_41A260`，写的是 `Engine` 的 effect_flags 的
+ * 那一位 —— 置位点/清除点与归属见知识层台账 `01M4AGT6F1287G2604152V1354`）。
  * ★ 门**不是** no-op：它挡住主循环派发，直到场景里的计时窗跑完（见 `machine.ts` 头注）。
  */
 const opWait: Handler = (ctx) => {
@@ -267,15 +270,10 @@ const opPollInput: Handler = (ctx) => {
 /**
  * `0x1a7 comment` —— **no-op**（脚本里的注释行；`argc = 1`，操作数是那句注释文本）。
  *
- * ★ 判据（取证，锚 = EA）：handler = `sub_4191B0` @ `0x4191B0`（分派表项 `.text:004162FE`，
- * `.lst` 37340-37347）。它**整个体只有两条指令**：
- * ```
- *   this[30*cur + 95805] = 3      ; 帧+0x5D8F4 = 3 = 2*argc+1 —— **分派器协议的长度字**
- *   return this[95776]            ; 读 cur（Engine+0x5D880）
- * ```
- * ⇒ 除了"写本指令的长度字"（那是**每条** handler 都必须做的协议写，在本模型里自动成立），
- *   它**什么都不做**。所以把它实现成 no-op 是**有判据的**，不是"看名字猜的"。
- * ★ 顺带：这条也再次印证了"长度字 = 2·argc+1"那条恒等式。
+ * ★ 判据（取证，锚 = EA）：handler = `sub_4191B0` @ `0x4191B0`（`.lst` 37340-37347）。
+ *   它**整个体只有两条指令**：写"本指令的长度字"（= 知识层 `FRAME_LAYOUT.off.operandCount`，
+ *   值 `2*argc+1`）+ 读 `cur`（`FRAME_LAYOUT.off.cur`）—— 两件事在本模型里**自动成立**
+ *   ⇒ 它**什么都不做**。所以把它实现成 no-op 是**有判据的**，不是"看名字猜的"。
  */
 const opComment: Handler = () => { /* 见上：只有协议写，故无可执行语义 */ };
 
@@ -308,15 +306,11 @@ function jumpToLabel(ctx: VmContext, i: number): boolean {
 /**
  * `0x8c jmp`：无条件 PC 重定向到 `op1`（label）；`0xFFFFFFFF`（−1）⇒ **什么都不做**（落下）。
  *
- * 取证（锚 = EA）：handler = `sub_4203D0` @ `0x4203D0`（分派表项 `Engine+0x0A52CC` ⇒
- * `(0xA52CC−0xA509C)/4 = 0x8C` ✓）。逐字：
- * ```
- *   this[30*cur + 95805] = 3                 ; 帧+0x5D8F4（长度字）= 1+2*1
- *   r = sub_41BF50(this, 1)                  ; op1
- *   if (r != -1) { this[30*cur+95782] = this[30*cur+95781] + 4*r;  ; PC ← 脚本基址 + 4*op1
- *                  this[30*cur + 95805] = 0; }                     ; ★ 长度字清 0
- * ```
- * ★ **为什么清长度字**：长度字是分派器用来"自动推进 PC"的。PC 已经被改写 ⇒ 必须清 0，
+ * 取证（锚 = EA）：handler = `sub_4203D0` @ `0x4203D0`（表基址与 `opcode = (表项偏移 − 基址)/4`
+ * 的算式见知识层 `packages/age-format/src/engine/handlers.mts` 头注；逐字体与表项偏移见台账
+ * `01M4AV69BC3S00577K22566653`）。
+ * ★ **为什么引擎要清长度字**：长度字（知识层 `FRAME_LAYOUT.off.operandCount`）是分派器用来
+ *   "自动推进 PC"的；PC 已被这条 handler 改写 ⇒ 必须清 0，
  *   否则分派器会在**新 PC** 上再加一次本指令的长度。在本模型里这条由 `Machine.step()` 的
  *   规则表达（"handler 改过 `ip` 就不 +1"）⇒ **语义等价，不需要那个字段**。
  * ★ 哨兵 `-1` ⇒ **静默落下**（引擎只是跳过整段 if）。我上一版在这里**抛错**，那是比引擎更严
@@ -332,16 +326,12 @@ const opJmp: Handler = (ctx) => {
  * `0xa0 jcc`：`op1 != 0` ⇒ 跳到 `op2`（但 `op2 == −1` 时**不跳**）；`op1 == 0` ⇒ 跳到 `op3`。
  * 三条里任何一条的目标是 `0xFFFFFFFF` ⇒ 该支"没有目标" = 落下。
  *
- * 取证（锚 = EA）：handler = `sub_4209B0` @ `0x4209B0`（表项 `Engine+0x0A531C` ⇒ `(0xA531C−0xA509C)/4 = 0xA0` ✓）。逐字：
- * ```
- *   4209CF call sub_41BF50 (push 1)      ; op1 = 条件
- *   4209D6 test eax,eax / 4209D8 jz  4209EA   ; op1==0 ⇒ 目标改用 op3
- *   4209DC call sub_41BF50 (push 2)      ; op2
- *   4209E1 cmp  eax,0FFFFFFFFh / 4209E4 jz 420A42   ; op2==−1 ⇒ 不跳、直接 retn
- *   4209E6 push 2 / jmp 4209F8                    ; 目标 = op2
- *   4209EA push 3                                 ; 目标 = op3
- *   420A13 lea edx,[ecx+eax*4] / 420A23 mov [帧+5D898h],edx   ; PC ← 脚本基址 + 4*raw
- * ```
+ * 取证（锚 = EA）：handler = `sub_4209B0` @ `0x4209B0`（`0x8c`/`0x8f` 的同族；表项算式与基址见
+ * `handlers.mts` 头注）。体的分支形状：读 op1 → `test/jz`（op1 == 0 ⇒ 目标改用 op3）→ 读 op2 →
+ * `cmp eax,0FFFFFFFFh` + `jz`（哨兵 ⇒ **不跳**、直接 `retn`）→ 否则目标 = op2；
+ * PC ← 脚本基址 + 4*raw。
+ * ★ 这段逐字**目前只有本注释与守卫用例两个锚**（`0x8c`/`0x8f` 那两条已在台账
+ *   `01M4AV69BC3S00577K22566653` 里，本条还没有台账条目）—— 补条目后这里改成指针。
  * ★ 这与"脚本自身的控制流"给出的形状**一致**（三处独立互证见旧注）：全部实测站点里
  *   `op2` 都是哨兵 ⇒ 可观测行为就是"条件非 0 落下、为 0 跳 `op3`"。
  */
@@ -360,17 +350,9 @@ const opJcc: Handler = (ctx) => {
  * 再把 PC 重定向到 `op1` 指的 label；`op1 == −1`（哨兵）⇒ **什么都不做**（引擎是"先压后撤"，
  * 净效果等于不压也不跳）。
  *
- * 取证（锚 = EA）：handler = `sub_420560` @ `0x420560`（表项 `Engine+0x0A52D8` ⇒
- * `(0xA52D8−0xA509C)/4 = 0x8F` ✓）。逐字：
- * ```
- *   this[30*cur + 95805] = 3
- *   this[256*cur + 97193 + this[cur + 97153]++] = ((PC − 脚本基址) >> 2) + 3;   ; ★ 压返回点
- *   if (sub_41BF50(this,1) == -1) { --this[cur + 97153]; ... }                  ; 哨兵 ⇒ 撤销
- *   else { PC ← 脚本基址 + 4*op1; this[30*cur + 95805] = 0; }
- * ```
- * 偏移逐字对上：`97153*4 = 0x5EE04`（层数）、`97193*4 = 0x5EEA4`（返回表，**每帧 256 槽**）、
- * 压入的 `(PC−基址)>>2 + 3` = 调用点的**下一条**（3 = `call` 自己占的 dword 数）。
- * ★ **它不换帧**（不 `inc [5D880h]`、不写 caller 回链）—— 换帧的是 `call-script`(0x03)。
+ * 取证（锚 = EA）：handler = `sub_420560` @ `0x420560`（分派表项、逐字体、以及返回栈那两处
+ * **Engine 级**下标与压入值 `(PC−基址)>>2 + 3` 的算法 —— 全部见台账 `01M4AV69BC3S00577K22566653`）。
+ * ★ **它不换帧**（不推进 `cur`、不写 caller 回链）—— 换帧的是 `call-script`(0x03)。
  */
 const opCall: Handler = (ctx) => {
   const raw = ctx.ins.args[0].rawData >>> 0;
@@ -406,7 +388,8 @@ const opCallScript: Handler = (ctx) => {
  *
  * ★★ 这一条曾经实现错（**弹帧**，即当成 `exit`），已按取证订正：
  * `ret` **不换帧、不读 caller 回链、不改 `cur`** —— 它与 `call` 成对，作用域是**同一帧内**。
- * 换帧的返回是 `exit`(0x02)（读 `帧+0x5D8CC` → `Engine+0x5D884` → `Engine+0x5D880`）。
+ * 换帧的返回是 `exit`(0x02)（读 `FRAME_LAYOUT.off.caller` → `FRAME_LAYOUT.off.callerChain`
+ * —— 知识层把它记作"其实是 Engine 级寄存器"那一格 —— → `cur`；逐字见台账 `01M48HPTQQ12637R71596T5160`）。
  */
 const opRet: Handler = (ctx) => {
   const target = ctx.frame.popReturn();
@@ -425,7 +408,7 @@ const opRet: Handler = (ctx) => {
  *
  * 启动链前段的 handler 形状高度重复，只有两种：
  * 1. **读操作数 → 写引擎的某个 dword 标量**（观察登记在 `layout.mts` 的 `ENGINE_SCALAR_WRITES`）；
- * 2. **转发进某个子系统**（`sub_45D660(Engine+0x14D30, op1..op5)` 这种，语义在**被调方**里）。
+ * 2. **转发进某个子系统**（被调方是谁、收几个操作数 ⇒ 见下面表里的 `callee`/`argc`；语义在**被调方**里）。
  *
  * ⇒ 手写 16 遍只会把同一件事写 16 次，而且每次都要问"偏移写哪"（本仓禁止）。表驱动还带来一个好处：
  * **这一批"没建模到什么程度"是一眼可见的**（见下面的 `kind`），而不是散在 16 个函数体里。
@@ -454,7 +437,7 @@ const PROLOGUE: PrologueEntry[] = [
   { opcode: 0x78, kind: 'scalar' },
   { opcode: 0x2db, kind: 'scalar' },
   { opcode: 0x2f6, kind: 'forward', callee: 'sub_4BB9F0/sub_404CB0', argc: 1, note: '按 op1 清某个 per-slot 状态（4 个字段）后重算一处' },
-  { opcode: 0x1ca, kind: 'forward', callee: '(vtable+12)', argc: 1, note: '对 `Engine+0xAA614` 的对象走 vtable 调用，实参含 op1 与一个静态字符串' },
+  { opcode: 0x1ca, kind: 'forward', callee: '(vtable+12)', argc: 1, note: '对 `Engine+0xAA514` 的对象走 vtable 调用，实参含 op1 与一个静态字符串（★ 偏移订正：逐字 `lea esi,[ecx+0AA514h]`；原先写 `0xAA614` 是抄错）' },
   { opcode: 0x324, kind: 'forward', callee: 'sub_453530', argc: 0, note: '无操作数；实参取自 `Engine` 的某个字段' },
   { opcode: 0x32f, kind: 'forward', callee: 'sub_49A150', argc: 1, note: '转发进 `Engine+0x4ED10` 那个容器（与 draw-item/计时窗同族）' },
   { opcode: 0x70, kind: 'forward', callee: 'sub_45D660', argc: 5, note: '转发进 `Engine+0x14D30` 那个子系统，argc 5' },
@@ -499,8 +482,9 @@ function scalarName(name: string): string {
   return name;
 }
 
-/** `bswap24`：在**低 24 位内**把字节序倒过来（`b0<<16 | b1<<8 | b2` —— 像 BGR↔RGB）。
- *  判据（锚 = EA）：`0x76` 的体逐字 `this[21664] = BYTE2(v2) + ((BYTE1(v2) + ((u8)v2 << 8)) << 8)`。*/
+/** `bswap24`：实现知识层登记的那个写形态 `bswap24(op1)` —— 定义见 `layout.mts` 的
+ *  `ENGINE_SCALAR_WRITES` 头注，`0x76`/`0x77` 两条条目注释里有逐字体。
+ *  语义：在**低 24 位内**把字节序倒过来（`b0<<16 | b1<<8 | b2` —— 像 BGR↔RGB）。*/
 const bswap24 = (v: number): number => (((v & 0xff) << 16) | (v & 0xff00) | ((v >>> 16) & 0xff)) >>> 0;
 
 /** 生成一个"写标量"handler（每条登记都自带它的写形态） */
@@ -567,14 +551,10 @@ const opScalar248 = scalarHandler(0x248);
 /**
  * `0x25b`（无名，handler `sub_425E20`，argc 1）：**标量写 + 条件子系统调用**。
  *
- * 逐字：
- * ```
- *   result = sub_41BF50(this, 1)     ; op1
- *   this[92379] = 2                  ; ★ 常量 2（`form: 'const'`）
- *   this[92381] = result             ; ★ op1
- *   if (!this[167990]) { v3 = sub_41BF50(this, 1); return sub_408440(this, v3); }
- * ```
- * ★ 那次调用是**条件**的（读 `Engine.d167990`）—— 所以**不能**用无条件的 `callsAfter` 登记：
+ * 两个槽各写什么、写成什么形态 ⇒ 知识层 `ENGINE_SCALAR_WRITES` 的 `Engine.d92379`（常量）/`Engine.d92381`
+ * （op1）两条条目（逐字体也在那两条的注释里；台账 `01M4E511661D5D3F5220763X0G`）。
+ *
+ * ★ 那次调用是**条件**的（门 = `Engine.d167990`）—— 所以**不能**用无条件的 `callsAfter` 登记：
  *   那会把"引擎会调"与"引擎不调"混成同一种表现，保真欠账也会**多算**。
  * ★ `Engine.d167990` 的**写入点还没取证**：本层读到的是标量默认值 0 ⇒ 条件**总是成立** ⇒
  *   当条件不成立时，我会**多记一笔**欠账（不会少记）—— 这个方向是安全的，且记在这里以备考证。
@@ -598,13 +578,11 @@ const opScalar78 = scalarHandler(0x78);
 const opScalar2db = scalarHandler(0x2db);
 
 /**
- * `0x88`：写两个标量（都 = op1），**外加两个条件副作用**（取证：`sub_41FAB0` 体）
- * ```
- *   if (op1) this[122368] = 1; else this[174801] &= ~0x8000000;
- * ```
- * ★ 那两个槽**不在** `ENGINE_SCALAR_WRITES` 里：那张表登记的形态是"写成 op1 原值"，
- *   而这两条是**常量写 / 位清除**，形态不同 ⇒ 本批**只记录、不建模**它们，并留痕。
- *   ⇒ 这是一个**已知欠账**（已登记进需求树），不假装它已经解决。
+ * `0x88`：写两个标量（都 = op1），**外加两个条件副作用**。
+ * 那两个副作用的**槽与形态**在知识层 `layout.mts`（`Engine.d122368` 写常量 1 /
+ * `Engine.d174801` 清 `0x8000000` —— 形态是"常量写 / 位清除"）。
+ * ★ 它们**不在** `ENGINE_SCALAR_WRITES` 里（那张表登记的形态是"写成 op1 原值"）⇒ 本批**只记录、不建模**，
+ *   并留痕。⇒ 这是一个**已知欠账**（已登记进需求树），不假装它已经解决。
  */
 const opScalar88 = scalarHandler(0x88, (ctx, v) => {
   const side = v !== 0 ? '常量写 1（`this[122368] = 1`）' : '位清除（`this[174801] &= ~0x8000000`）';
@@ -629,15 +607,13 @@ function forwardHandler(entry: Extract<PrologueEntry, { kind: 'forward' }>): Han
 }
 
 /**
- * ★★ **"对象表 + 字段写"一族**（`Engine+0x15144[op1]` 那些）—— 带守卫的对象字段写。
+ * ★★ **"对象表 + 字段写"一族** —— 带守卫的对象字段写。
  *
- * ## 形状（两条已取的证，同形）
- * ```
- * 0x212  sub_423A30：v = this[op1 + 21585]; if (v) *(v + 100) = op2
- * 0x25d  sub_425EF0：v = this[op1 + 21585]; if (v) { *(v + 276) = op2; *(v + 280) = op3 }
- * ```
- * 表 = `Engine + 4*21585` = **`Engine+0x15144`**，按 `op1`（槽号）取指针；**表项为空 ⇒ 什么都不做**
- * （不抛、不报错 —— 又一处"静默"）。
+ * ## 形状（三条已取的证，同形）
+ * 都是"按 `op1`（槽号）去**同一张对象表**取指针 → 有对象就写它的字段"。
+ * 表基址与"表项为空 ⇒ 什么都不做"那条口径在知识层 `layout.mts`（见那节注释）；
+ * **字段偏移**是下面 `OBJECT_FIELD_WRITES` 的数据行（暂未进知识层）。
+ * ★ 表项为空时**不抛、不报错** —— 又一处"静默"（这里照抄，但**留痕**）。
  *
  * ## ★ 为什么这一族只**记欠账**、不建模
  * 表里那些对象是**别处创建**的，而创建它们的子系统正是本批**跳过**的那些（`engine.forward` 一族）。
@@ -646,9 +622,9 @@ function forwardHandler(entry: Extract<PrologueEntry, { kind: 'forward' }>): Han
  * ⛔ **不许**记成"写成功了" —— 那会让后面的分歧无从追溯。
  *
  * ## 机械量出的族规模（可复算）
- * `.c` 里引用 `+ 21585]` 的函数共 **9** 个：`sub_408F10 · sub_41A420 · sub_41EEF0 · sub_4200C0 ·
+ * `.c` 里引用那张表的函数共 **9** 个：`sub_408F10 · sub_41A420 · sub_41EEF0 · sub_4200C0 ·
  * sub_420110 · sub_4213F0 · sub_423A30 · sub_423A80 · sub_425EF0`。
- * 其中已确认是 opcode handler 的 = **2**（`0x212` / `0x25d`）⇒ 另外 7 个待逐个核（见需求树）。
+ * 其中已确认是 opcode handler 的就是下面表里的那几条 ⇒ 其余待逐个核（见需求树）。
  */
 const OBJECT_FIELD_WRITES: {
   opcode: number;
@@ -684,12 +660,10 @@ function objectFieldWriter(entry: (typeof OBJECT_FIELD_WRITES)[number]): Handler
 /**
  * 配置的**键**：引擎是**运行时拼**出来的（**没有静态键表**）。
  *
- * 取证（锚 = EA，见台账 `KN-01M4ASXQ587J7G7E6E5R3R2Y2K`）：`load-int` = `sub_42DF40`、
- * `save-int` = `sub_434F60`，两者都是
- * ```
- *   wsprintfA(buf, "%c%8.8x", 3, <操作数 1 的整数值>)     ; 类型码 3 = 整型（字面量就是 3，不是 'K'）
- * ```
- * ⇒ 键 = 一个字节 `\x03` + **8 位十六进制**（`%8.8x`：至少 8 位、零填充）。
+ * 取证（锚 = EA，台账 `KN-01M4ASXQ587J7G7E6E5R3R2Y2K`）：`load-int` = `sub_42DF40`、
+ * `save-int` = `sub_434F60`，两者都用 `wsprintfA` 现拼键 ——
+ * 类型码是字面量 **3**（不是 `'K'`），格式 `%8.8x` ⇒ 键 = 一个字节 `\x03` + **8 位十六进制**
+ * （至少 8 位、零填充；逐字体在那条台账条目里）。
  * ★ 字符串版（`load-string`/`save-string`）同形但类型码是 **5**，而且值是 28 字节的字符串元素
  *   ⇒ 那两条要等字符串池落地（见需求树）。
  */
@@ -711,7 +685,8 @@ const KEY_PRIMITIVE_NOTE = '键取自 sub_41BF50 的读法；引擎用的是 sub
 
 /**
  * `0x1a3 load-int`：**查不到 ⇒ 0**（不是"不写"），然后把结果**写回 op1**。
- * 逐字：`v3 = sub_428E00(配置对象, key); v4 = v3 ? *v3 : 0; sub_42B4B0(this, 1, v4)`。
+ * 逐字（handler = `sub_42DF40`，锚 = EA，台账 `01M4ASXQ587J7G7E6E5R3R2Y2K`）：查表拿到
+ * "指向槽的指针或 0"，`0` 归一成 `0`，再由写操作数原语把它写回 op1。
  */
 const opLoadInt: Handler = (ctx) => {
   const k = num(ctx, 0);
@@ -727,7 +702,8 @@ const opLoadInt: Handler = (ctx) => {
 
 /**
  * `0x1a2 save-int`：把 op1 的值存进配置，**键由同一个值算出**。
- * 逐字：`v3 = sub_41BF50(this,1)`（要存的值）· `v2 = sub_418A30(this,1)`（键的来源）· `sub_434D00(配置对象, key, &v3)`。
+ * 逐字（handler = `sub_434F60`，锚 = EA，台账 `01M4ASXQ587J7G7E6E5R3R2Y2K`）：值取自读操作数原语、
+ *   键取自另一个原语（`sub_418A30`，**键的原语与值的原语不是同一条** —— 那就是下面这条欠账）。
  * ★ 本仓的 `ConfigStore` 是**文本**接口（配置文件就是文本）⇒ 这里把整型存成**十进制文本**；
  *   这是**宿主表示**的选择，不是引擎语义（引擎那一格是个 dword）。
  */
@@ -751,7 +727,7 @@ function operandCtx(ctx: VmContext) {
 /**
  * `0x192 set-string`：把**操作数 2 的文本**写进**操作数 1**（目标按 op1 的 type 分派到不同串池）。
  *
- * 取证（锚 = EA）：handler = `sub_433660`（分派表项 `Engine+0x0A56E4` ⇒ `(0xA56E4−0xA509C)/4 = 0x192` ✓）。
+ * 取证（锚 = EA）：handler = `sub_433660`（表项算式与基址见知识层 `handlers.mts` 头注）。
  * * 它用 `sub_42A420(this, v3, 2)` **一次把两个操作数都读成文本** ⇒ 源侧走的是**文本**原语，
  *   所以 `type 2`（内联字符串）在这里是合法的源（见 `readOperandAsText` 头注）。
  * * 落点由 `sub_433310` 按 **op1 的 type** 分派：type 5 → 全局串池、type 11 → 局部串池、
@@ -772,10 +748,11 @@ const opSetString: Handler = (ctx) => {
 /**
  * `0x1a9 save-string`：把**操作数 1** 那个字符串格子的内容存进配置。
  *
- * 取证（锚 = EA，台账 `KN-01M4ASXQ587J7G7E6E5R3R2Y2K`）：handler = `sub_434FE0`。
+ * 取证（锚 = EA，台账 `01M4ASXQ587J7G7E6E5R3R2Y2K`）：handler = `sub_434FE0`。
  * * **键**由 `sub_418AE0` 算出 —— 对 **type 5 直接返回下标**、对 8/14 用 `(指针 − 全局串池基址)/28` 反算下标；
- *   然后 `wsprintfA(buf, "%c%8.8x", 5, 那个下标)` ⇒ 键 = `\x05` + **8 位十六进制**（与整型版同形，类型码 5）。
- * * **值**是该 28 字节字符串元素的内容；写进**字符串配置对象**（`Engine+0xAA5A4`）的 `sub_434E00`。
+ *   然后按与整型版同形的格式拼 ⇒ 键 = `\x05` + **8 位十六进制**（类型码 5）。
+ * * **值**是该 28 字节字符串元素的内容；写进**字符串配置对象**的 `sub_434E00`
+ *   —— 那个对象的 EA **有过一次订正**（见台账 `01M4B3XQKE0D1D652J0A7Y7E7Z`）⇒ 本层不抄具体数值。
  * ★ 本仓的 `ConfigStore` 是文本接口 ⇒ 字符串按原样存（这一路**没有**表示损失）。
  * ★ **未支持**：type 8/14 的"反算下标"（需要地址空间，见 ADR）⇒ 遇到就抛，不猜。
  */
@@ -838,17 +815,12 @@ function fillRange(ctx: VmContext, t: FillTarget, count: number, intValue: numbe
 const poolLabel = (t: FillTarget): string => (t.where === 'global' ? t.pool : `local(type 0x${t.typeTag.toString(16)})`);
 
 /**
- * `0x6c fill-zero`：把从 op1 **地址**开始的 op2 个 dword 填成 `Engine+0x5EC90`（= **encZero**）。
+ * `0x6c fill-zero`：把从 op1 **地址**开始的 op2 个 dword 填成 **encZero**。
  *
  * ★★ **助记名骗人**：它填的**不是 0**。
- * 取证（锚 = EA）：handler = `sub_42CE70`（表项 `Engine+0x0A524C`），体逐字：
- * ```
- *   v2 = sub_42AEA0(this, 1)                     ; 取址（目标地址）
- *   result = sub_41BF50(this, 2)                 ; 个数（<= 0 ⇒ 什么都不做）
- *   if (result > 0) do { *v2++ = this[97060]; } while (--result);
- * ```
- * `this[97060]` = `Engine + 4*97060` = **`Engine+0x5EC90`** —— 那一格在引擎构造时被写成 `ENC(key,0)`
- * （本仓 `layout.mts` 的 `EVIDENCE.encZero` 与 `value-codec.mts` 的 `encZeroField` 都登记了它）。
+ * 取证（锚 = EA）：handler = `sub_42CE70`；它填的那个槽 = 知识层 `layout.mts` 的 `EVIDENCE.encZero`
+ * （`= ENC(key,0)`；`value-codec.mts` 的 `encZeroField` 是同一格的另一处登记）——
+ * 逐字体与那个槽的语义都在台账 `01M4ASXQ587J7G7E6E5R3R2Y2K` 里，本层不重复。
  */
 const opFillZero: Handler = (ctx) => {
   const t = targetOf(ctx, 0);
@@ -863,15 +835,9 @@ const opFillZero: Handler = (ctx) => {
 
 /**
  * `0x2d8 set-array-to`：把从 op1 **地址**开始的 op3 个 dword 填成 **`ENC(key, op2)`**。
- * 取证（锚 = EA）：handler = `sub_430CF0`，体逐字：
- * ```
- *   v2 = sub_42AEA0(this, 1)                                          ; 取址
- *   v5 = __ROL4__(this[97059] ^ __ROR4__(sub_41BF50(this,2), 7), 21)   ; = ENC(key, op2)
- *   result = sub_41BF50(this, 3)                                      ; 个数
- *   if (result > 0) memset32(v2, v5, result);
- * ```
- * `this[97059]` = `Engine+0x5EC8C` = **键**；那个表达式**正是本仓登记的 ENC**
- * （`ror 7 → xor key → rol 21`，见 `value-codec.mts`）⇒ 又一处独立互证。
+ * 取证（锚 = EA）：handler = `sub_430CF0`；它用的 key 就是知识层 `EVIDENCE.codecKey` 那一格
+ * （`dword 97059`），而填的表达式**正是本仓登记的 ENC**（`ror 7 → xor key → rol 21`，
+ * 见 `value-codec.mts`）⇒ 又一处独立互证。
  */
 const opSetArrayTo: Handler = (ctx) => {
   const t = targetOf(ctx, 0);
@@ -910,19 +876,15 @@ const VALUE_PRODUCING_UNVERIFIED: { opcode: number; handler: string; why: string
 /**
  * `0x2de`（argc 2）：在**宿主字体名表**里查一个名字，把**下标**（未命中 ⇒ **-1**）写回 op1。
  *
- * 取证（锚 = EA）：handler = `sub_430DF0`（表项 `Engine+0x0A5D58`），体逐字：
- * ```
- *   v2 = sub_41B640(this, 2)              ; ★ 第四个取值原语：操作数 → cp932 文本（**不是** sub_41BF50）
- *   v3 = sub_428990(this + 21324, v2)     ; this + 21324*4 = Engine+0x14D30
- *   return sub_42B4B0(this, 1, v3)        ; 写回 op1
- * ```
- * `sub_428990`（`0x428990`）逐字：`[this+0x313C0]`/`[this+0x313C4]` 是 vector 的 begin/end，
- * 元素 **0x20** 字节（`sar ecx,5`），元素里 +0 是 std::string 数据、+0x10 是 size（+0x14 与 0x10 比决定堆/内联）；
- * 逐元素 `memcmp` 且要求长度相等；**键首字节是 `'@'`(0x40) 时跳过它再比**（`0x4289C8`/`0x4289D0`/`0x4289D3`）；
- * 命中 ⇒ `eax = 0 基下标`（`0x428A4C`），未命中 ⇒ `or eax,-1`（`0x428A38`）。**无副作用**。
- * ⇒ 那个 vector 是**字体名表**（判据：`0x459B56–0x459B6A` 拿 `LOGFONT+0x1C` = `lfFaceName` 去查它）。
+ * 取证（锚 = EA）：handler = `sub_430DF0`；**查表那一侧的全部引擎事实**（对象基址、vector 的元素
+ * 宽度 0x20、元素内 `+0`/`+0x10`/`+0x14` 的含义、`memcmp` 要求长度相等、`'@'` 跳过、
+ * 命中给 0 基下标 / 未命中 `-1`、以及"那个 vector 是字体名表"的判据）**都在台账
+ * `01M4B4HE3Z6T6K7M114D0V5J2T`** —— 本层只留实现要用的那几条：
+ * * 取文本走的是**第四个取值原语**（操作数 → cp932 文本，**不是**读整数值那条）；
+ * * **键首字节是 `'@'`(0x40) 时跳过它再比**（下面 `raw.startsWith('@')` 就是这一条）；
+ * * **无副作用**（只读那个 vector）。
  * ★ **表的内容是宿主事实** ⇒ 从 `instance.fonts` 取；没提供（`null`）⇒ 响亮失败。
- * ★ 顺带：`sub_41B640` 对 `type 2` 用的是**同一条** `^0xFF` + "存储字高字节 0FFh 即停" 的判据
+ * ★ 顺带：那个取值原语对 `type 2` 用的是**同一条** `^0xFF` + "存储字高字节 0FFh 即停" 的判据
  *   ⇒ 与 `vm/script.ts` 的 `inlineString` 是**独立互证**。
  */
 const opFontIndex2de: Handler = (ctx) => {
@@ -947,34 +909,76 @@ const opFontIndex2de: Handler = (ctx) => {
 /**
  * `0x61 lookup-array`：把 `base[op3]` —— **目标是指针时给"那一格的地址"** —— 写进 op1。
  *
- * 取证（锚 = EA）：handler = `sub_42CB00`（表项 `Engine+0x0A5220`），体逐字：
- * ```
- *   v4 = sub_41BF50(this, 3)              ; idx = op3
- *   v2 = sub_42AEA0(this, 2)              ; base = **op2 那一格的地址**（取址原语）
- *   sub_418CC0(this, 1, v2, v4, -1, -1)   ; 写进 op1
- * ```
- * 目标语义由 `sub_418CC0` 的写法钉住：它算 `lea edx,[esi+edx*4]`（= `base + idx*4`）之后
- * **`mov [ecx+eax*4],edx`** —— 对**指针类**目标存的是**那个地址本身**（⛔ 不是那一格的值）；
+ * 取证（锚 = EA）：handler = `sub_42CB00`；`op2` 走的是**取址**原语（不是取值）⇒ `base` = 那一格的地址；
+ * 写进 op1 的落点由写操作数原语里那条"指针类目标存**地址本身**"的口径决定（逐字体见台账
+ * `01M4ASXQ587J7G7E6E5R3R2Y2K` 一族的取值/取址/写原语条目）：它算 `base + idx*4` 之后
+ * **把那个地址存进目标格** —— 对**指针类**目标存的是**那个地址本身**（⛔ 不是那一格的值）；
  * 4 字节步长对应 6/7/12/13 族、28 字节步长对应 8/14 族。
  * ★ 这条判据让 `INITCONFIG4` 的循环**说得通**：`lookup-array (local-ptr 0) (global-int A) (i)`
  *   取到 `&A[i]`，接着 `save-int (local-ptr 0)` 解引用它 ⇒ 存的是 `A[i]` 的**值**。
  *   若把指针目标当成"存值"，那一步就会去解引用一个**编码过的整数**（而两条路都"看起来正常"）。
  * ★ 本批只支持 4 字节族（6/12）；28 字节族（8/14，字符串指针）会抛（要 SSO 那块，见需求树）。
  */
+/**
+ * 数组类 opcode（`0x61` / `0x12c`）的**元素步长由目标族决定**。
+ *
+ * ★ 逐字（`sub_418CC0`，两个 opcode 共用这个写入器）：它算 `base + 步长*下标` 之后写进 op1 ——
+ *   **4 字节族**（`6` 全局指针 / `7` 全局浮点指针 / `12` 局部指针 / `13` 局部浮点指针）⇒ 步长 **4**；
+ *   **28 字节族**（`8` 全局字符串指针 / `14` 局部字符串指针）⇒ 步长 **28**。
+ * ★ 语料普查（104 份脚本）：`0x61` 的目标是 `0xc` ×34269 / **`0xe` ×674**；`0x12c` 是 `0xc` ×4220 / **`0xe` ×49**
+ *   ⇒ 「目标永远是指针」成立，但**步长必须按族取** —— 早先写死 4，那 723 个 `0xe` 站点会算错地址。
+ */
+function arrayStrideOf(type: number): number {
+  switch (type) {
+    case 0x6: case 0x7: case 0xc: case 0xd: return 4;
+    case 0x8: case 0xe: return 28;
+    default:
+      throw new Error(
+        `数组类 opcode 的目标 type 0x${type.toString(16)} 不是指针族 —— ` +
+        `逐字的写入器只覆盖 6/7/8/12/13/14（其它类型应当另有语义，⛔ 不许按 4 糊过去）`,
+      );
+  }
+}
+
 const opLookupArray: Handler = (ctx) => {
   const dest = ctx.ins.args[0];
-  if (dest.type !== 0x6 && dest.type !== 0xc) {
-    throw new Error(
-      `lookup-array 的目标 type 0x${dest.type.toString(16)}：本批只实现 4 字节族（0x6 全局 / 0xc 局部）；` +
-      `8/14（字符串指针，28 字节步长）要等 SSO 那块`,
-    );
-  }
+  const stride = arrayStrideOf(dest.type);
   const idx = num(ctx, 2);
   const base = addressOfOperand(operandCtx(ctx), ctx.ins.args[1], 1);
-  const addr = (base + 4 * idx) >>> 0;
+  const addr = (base + stride * idx) >>> 0;
   writeOperand(operandCtx(ctx), dest, 0, addr);
   ctx.machine.effect('system', 'array.lookup', 'modeled', {
-    opcode: '0x61', base: `0x${base.toString(16)}`, index: idx, wroteAddress: `0x${addr.toString(16)}`,
+    opcode: '0x61', base: `0x${base.toString(16)}`, index: idx, stride, wroteAddress: `0x${addr.toString(16)}`,
+  });
+};
+
+/**
+ * `0x12c lookup-array-2d`：`base[op3 * op4 + op5]` —— 二维索引（`op4` 是**行宽**）。
+ *
+ * 逐字（`sub_42EFD0`，argc 5 —— 长度字 `11 = 2*5+1`）：
+ * ```
+ *   v2 = sub_41BF50(this, 4)                 ; op4 = 行宽
+ *   v3 = sub_41BF50(this, 3) * v2            ; op3 * 行宽
+ *   v6 = v3 + sub_41BF50(this, 5)            ; + op5 = 列
+ *   v4 = sub_42AEA0(this, 2)                 ; base = &op2
+ *   sub_418CC0(this, 1, v4, v6, -1, -1)      ; ★ 与 `0x61` **同一个写入器** ⇒ 同样的目标语义与步长
+ * ```
+ * ★ 实测（`IMINIT#3`）：`lookup-array-2d (local-ptr 0) (global-int 6445189) (1001) (130) (local int i)`
+ *   ⇒ 索引 = `1001*130 + i`（1001 行 × 130 列的二维表）。
+ */
+const opLookupArray2d: Handler = (ctx) => {
+  const dest = ctx.ins.args[0];
+  const stride = arrayStrideOf(dest.type);
+  const base = addressOfOperand(operandCtx(ctx), ctx.ins.args[1], 1);
+  const row = num(ctx, 2);
+  const rowWidth = num(ctx, 3);
+  const col = num(ctx, 4);
+  const idx = (row * rowWidth + col) >>> 0;
+  const addr = (base + stride * idx) >>> 0;
+  writeOperand(operandCtx(ctx), dest, 0, addr);
+  ctx.machine.effect('system', 'array.lookup', 'modeled', {
+    opcode: '0x12c', base: `0x${base.toString(16)}`, row, rowWidth, col, index: idx, stride,
+    wroteAddress: `0x${addr.toString(16)}`,
   });
 };
 
@@ -984,17 +988,10 @@ const COPY_ARRAY_MAX = 1 << 20;
 /**
  * `0x64 copy-local-array`：把脚本里**一块解码后的整数**逐格 ENC 后写进 `op1` 的地址。
  *
- * 取证（锚 = EA）：handler = `sub_42CBE0`，体逐字：
- * ```
- *   v2 = sub_42AEA0(this, 1)                                    ; dest = **op1 那一格的地址**
- *   v3 = 代码区基址 + 4*sub_41BF50(this,2) + 4                  ; src  = 块基址 + 4*raw + 4
- *   result = *(代码区基址 + 4*sub_41BF50(this,2))               ; count = **块首 u32**
- *   if (result > 0) do {
- *     result = __ROL4__(this[97059] ^ __ROR4__(*(v2 + v5), 7), 21);   ; ★ ENC(源 dword)
- *     *v2++ = result;                                            ; 逐格写
- *   } while (--v6);
- * ```
- * ⇒ 文件口径：块首 = `headerLen + 4*raw`（`帧+0x5D894` 就是代码区基址），数据从 `+4` 起。
+ * 取证（锚 = EA）：handler = `sub_42CBE0`。体做三件事：`dest` 走取址原语（= **op1 那一格的地址**）·
+ * `src = 代码区基址 + 4*raw + 4`、`count = 块首 u32`（两者读同一次）· 逐格 `ENC(源 dword)` 后写。
+ * ⇒ 文件口径：块首 = `headerLen + 4*raw`（代码区基址 = 知识层 `FRAME_LAYOUT.off.strBase` 那一格
+ *   —— 本层同名还有一处 `off.strTable` 指向同一个偏移），数据从 `+4` 起。
  * ★ 值的编码是**无条件**的（源码里没有按目标池分派），所以这里也直接写 `ENC(源)`；
  *   对 `encoded` 池这与"经池 API 写"逐位相同，对非编码池则正是引擎的行为。
  * ★ `count <= 0` ⇒ 引擎**什么都不做**（逐字 `if (result > 0)`）—— 这里是记一笔后返回，不抛。
@@ -1034,17 +1031,11 @@ const opCopyLocalArray: Handler = (ctx) => {
 /**
  * `0x10c`（无名，handler `sub_4220B0`，argc 2）：**带范围检查的间接引擎态写**。
  *
- * 逐字：
- * ```
- *   v2     = sub_41BF50(this, 2)                 ; op2 = 索引
- *   result = sub_41BF50(this, 1)                 ; op1 = 值
- *   if (result > 0x1F) throw (aSetkeymulti, 65541)
- *   this[this[v2 + 1690] + 1434] = result        ; ★ 写目标是**两次索引**：Engine[1434 + Engine[1690 + op2]]
- * ```
- * ★ 范围检查（`<= 0x1F`）照抄 —— 那是引擎自己抛的异常，不是"顺手加的守卫"。
- * ★ 写目标**只记录、不建模**：`Engine+0x1A68`（= `1690*4`）那张索引表的内容**没有取证**
- *   （没有已知的写入点）⇒ 猜"它是 0"就等于凭空造一条结论。于是这里发一条 `logged-only`，
- *   它会出现在 `[保真欠账]` 里（⛔ 不许静默）。
+ * 逐字（含写目标的**两次索引**与那张索引表的 EA）登记在台账 `01M4E510JP06185M2S58313T12` ——
+ * 本层不重复它。本层要用到的两条：
+ * ★ 值上界 `0x1F` 的**范围检查照抄** —— 那是引擎自己抛的异常，不是"顺手加的守卫"。
+ * ★ 写目标**只记录、不建模**：那张索引表的内容**没有取证**（没有已知的写入点）⇒ 猜"它是 0"
+ *   就等于凭空造一条结论。于是这里发一条 `logged-only`，它会出现在 `[保真欠账]` 里（⛔ 不许静默）。
  */
 const opSetKeyMulti: Handler = (ctx) => {
   const value = num(ctx, 0);
@@ -1091,6 +1082,45 @@ function scalarArrayHandler(spec: (typeof ENGINE_SCALAR_ARRAYS)[number]): Handle
   };
 }
 
+/**
+ * `0x6 load-frame`（handler `sub_41C7C0`，argc 2）：**帧装载**（结构性 opcode）。
+ *
+ * ★ 逐字（三条前置条件、保存/恢复 `cur`、装载器的实参）**完整登记在台账
+ *   `01M4E548CH4C0G45171Z564G7K`** —— 本层不复制那一段。
+ * ★ 三处已建模/已检查的：
+ *   1. **前置条件**：codec key（知识层 `EVIDENCE.codecKey`）为 0 ⇒ 引擎抛 Exit 异常。
+ *      另一条 `ROL(encZero, 11) != key` 是**自洽检查**：`encZero = ENC(key,0) = ROL(key,21)`
+ *      ⇒ `ROL(encZero,11) = ROL(key,32) = key`，只要两者同源就恒成立（见 `value-codec.mts`）。
+ *   2. **帧深上限**（知识层 `FRAME_LAYOUT.count`）⇒ 越界抛（错误信息照抄引擎那句日文）。
+ *   3. **按 id 取脚本字节**（`system.script.load`）——那是可观测的副作用。
+ * ★★ **没建模的（记账，不静默）**：装载器真正做的是**在槽 `op2` 上建帧记录**（局部池、
+ *   头部计数、ip/flags…），而本层的帧模型是**栈**（`frames[]`，`cur` = 栈深），**表达不了
+ *   "往任意槽 `op2` 写记录、装完再切回原来的 cur"**。⇒ 这里只发一条 `logged-only` 欠账，
+ *   并把"帧模型要改成 槽 + cur"登记成单（`REQ-01M4E1EH…` 见需求树）。
+ */
+const opLoadFrame: Handler = (ctx) => {
+  const id = num(ctx, 0);
+  const cur = num(ctx, 1);
+  // ★ 逐字有两条前置条件：第二条（codec key 与 encZero 的自洽检查）对**任何** key 都恒成立（见上）
+  //   ⇒ 不必照抄；⛔ 但第一条（key 为 0 ⇒ 抛）**不能照抄成抛**：
+  //   本层的 key 是**宿主给的自由参数**（`ENV_DEFAULTS.codecKey = 0`），
+  //   而引擎那份是**它启动时自己赋的**、本仓**没有取证**。若照抄，前沿会停在"我的占位值不合法"上 ——
+  //   那是**模型的问题**，不是脚本的问题。⇒ 记一笔（可见），继续走；见需求树的 key 取证单。
+  const key = ctx.frame.locals.key >>> 0;
+  if (key === 0) {
+    ctx.machine.note('codec-key-placeholder', 'load-frame：本层 codec key 为 0（宿主默认值）—— 引擎自己的那份在启动时赋值、未取证；逐字要求非 0，这里只记录不抛');
+  }
+  if (cur >= 40) {
+    throw new Error(`load-frame：目标帧深 ${cur} ≥ 40 —— 引擎抛「ファイルの階層が深すぎます．最大は%dです．」`);
+  }
+  const script = ctx.machine.loadScriptById(id, { asRoot: false });
+  ctx.machine.effect('system', 'engine.load-frame', 'logged-only', {
+    opcode: '0x6', scriptId: id, script: script.name, cur,
+    note: '★ **帧记录没建**：本层帧模型是**栈**，表达不了"往槽 cur 写记录 + 装完恢复 cur"；'
+      + '引擎那边的 `sub_40ED40` 会在槽上建局部池/头部计数 ⇒ 这是**保真欠账**（见需求树的帧模型单）',
+  });
+};
+
 /** 生成"响亮失败"的 handler：错误信息里必须写明**缺哪条取证**，不许只说不支持 */
 const unverifiedValueProducer = (e: (typeof VALUE_PRODUCING_UNVERIFIED)[number]): Handler => (ctx) => {
   throw new Error(
@@ -1111,6 +1141,7 @@ function prologueHandlers(): Record<number, Handler> {
   return {
     ...out,
     0x149: opScalar149, 0x21b: opScalar21b, 0x252: opScalar252,
+    0x6: opLoadFrame,
     0x76: opScalar76, 0x77: opScalar77, 0x1a4: opScalar1a4, 0x2ee: opScalar2ee, 0xfe: opScalarFe, 0x10f: opScalar10f, 0x25b: opSetMessage25b, 0x248: opScalar248, 0x10c: opSetKeyMulti,
     0x110: opUnsupported110, 0x111: opUnsupported111, 0x112: opUnsupported112,
   0x107: scalarArrayHandler(ENGINE_SCALAR_ARRAYS[0]),
@@ -1120,10 +1151,8 @@ function prologueHandlers(): Record<number, Handler> {
 }
 
 // ───────────────────────────────────────────────────────── B 档：纹理与绘制项
-// handler 符号（旧仓观测索引；**本仓尚未逐字复核**，复核单见需求树）：
-//   0x1F7 detach-texture = sub_422BC0 · 0x1F8 create-texture = sub_422C20 ·
-//   0x1F9 set-texture    = sub_422CB0 · 0x1FA release-texture = sub_422E00 ·
-//   0x1FB draw-texture   = sub_422E70
+// handler 符号（旧仓观测索引；**本仓尚未逐字复核**）⇒ 引擎事实，已搬到知识层
+// `packages/age-format/src/engine/handlers.mts` 的"尚未进 `OPCODE_HANDLERS` 的符号"一节。
 
 /** `set-texture` 的 `op3` 颜色归一化：`< 0 ⇒ 0`，否则 `0xFFrrggbb`（A 通道被强置 `0xFF`） */
 const normalizeTextureColor = (c: number): number => (asInt32(c) < 0 ? 0 : (0xff000000 | (c & 0xffffff)) >>> 0);
@@ -1158,17 +1187,13 @@ const opCreateTexture: Handler = (ctx) => {
 /**
  * `0x1aa load-string`：把配置里那个字符串读回**操作数 1**。**查不到 ⇒ 空串**（⛔ 不是 0）。
  *
- * 取证（锚 = EA）：handler = `sub_433A70`（表项 `Engine+0x0A5744` ⇒ `(0xA5744−0xA509C)/4 = 0x1AA` ✓），体逐字：
- * ```
- *   this[30*cur + 95805] = 3                  ; 长度字 ⇒ argc 1
- *   v2 = sub_418AE0(this, 1)                  ; 键的下标（type 5 ⇒ 直接是 raw）
- *   v3 = sub_429390(this + 5191, 5, v2)       ; 查字符串配置对象（Engine+0x511C；表在其 +0x464 = Engine+0x5580）
- *   return sub_433310(this, 1, (int)v3)       ; 把结果写回 op1（与 set-string **同一个**写目标函数）
- * ```
- * ★ 查不到时 `sub_429390` 返回的是**一个静态空串**的地址 ⇒ 本层读回 **`''`**。
- * ★ 与 `save-string`（`sub_434FE0`）对称：同一套键、同一个对象。★ `Engine+0x511C` 与
- *   `save-string` 那侧看到的 `Engine+0x5580` 是**同一个对象的两层**（`0x511C + 281*4 = 0x5580`），
- *   不是两个不同的对象 —— 这条把早先一处"对象 EA 不一致"的记录订正了。
+ * 取证（锚 = EA）：handler = `sub_433A70`（表项算式见知识层 `handlers.mts` 头注）。体做四件事：
+ *   写长度字（知识层 `FRAME_LAYOUT.off.operandCount`；值 `2*argc+1`）· 键的下标由 `sub_418AE0`
+ *   算（type 5 ⇒ 直接是 raw）· 查字符串配置对象 · 再由 `sub_433310` 把结果写回 op1
+ *   （**与 `set-string` 同一个**写目标函数）。
+ * ★ 查不到时那次查询返回的是**一个静态空串**的地址 ⇒ 本层读回 **`''`**。
+ * ★ 与 `save-string`（`sub_434FE0`）对称：同一套键、同一个对象（对象 EA 的那处订正见台账
+ *   `01M4B3XQKE0D1D652J0A7Y7E7Z` —— 本层不抄数值）。
  */
 const opLoadString: Handler = (ctx) => {
   const arg = ctx.ins.args[0];
@@ -1220,9 +1245,8 @@ const opDetachTexture: Handler = (ctx) => {
 };
 
 // ───────────────────────────────────────────────────────── B 档：颜色与网格
-//   0x202 set-draw-color         = sub_4231F0 · 0x203 set-draw-color-alpha = sub_4232C0
-//   0x320 create-mesh            = sub_432150 · 0x322 set-vertex-color     = sub_426C20
-//   0x323 set-vertex-color-alpha = sub_426CF0
+// handler 符号（旧仓观测索引；**本仓尚未逐字复核**）⇒ 已搬到知识层
+// `packages/age-format/src/engine/handlers.mts` 的"尚未进 `OPCODE_HANDLERS` 的符号"一节。
 
 /** 颜色分量的 clamp / 回退：`> 255 ⇒ 255`、`< 0 ⇒ 取当前值的该通道` */
 const channelWithFallback = (raw: number, current: number, shift: number): number => {
@@ -1406,6 +1430,7 @@ export const HANDLERS: Record<number, Handler> = {
   0x2d8: opSetArrayTo,
   0x2de: opFontIndex2de,
   0x61: opLookupArray,
+  0x12c: opLookupArray2d,
   0x64: opCopyLocalArray,
   // ★ 有返回值但语义未取证的那些：**注册成响亮失败**（不是"还没轮到"，见上面的长注释）
   ...Object.fromEntries(VALUE_PRODUCING_UNVERIFIED.map((e) => [e.opcode, unverifiedValueProducer(e)])),

@@ -135,6 +135,39 @@ test('★★ 决策：string 元素**不透明**（JS 字符串）—— 区域�
     '字符串池的快照 = Map 的内容（不是区域里那堆空格子）');
 });
 
+test('★★ 数组类 opcode 的步长**按目标族取**（`0xc` ⇒ 4、`0xe` ⇒ 28）；`0x12c` 是二维索引 `op3*op4+op5`', () => {
+  const space = new AddressSpace();
+  const locals = new LocalPools(0, undefined, { space });
+  const globals = new GlobalPools(0, undefined, { space });
+  const ctx = { locals, globals, script: {}, space };
+  const machine = { space, globals, notes: [], note(k, d) { this.notes.push(`${k}:${d}`); }, effect() {} };
+
+  // ★ `0xe`（局部字符串指针）：步长必须是 **28** —— 写死 4 会算到别的元素上（语料里 674 个站点）
+  globals.write('string', 2, 'ふたつめ');
+  const strBase = globals.regionOf('string').addressOf(0);          // &global:string[0]（步长 28）
+  HANDLERS[0x61]({
+    machine, frame: { locals }, script: {},
+    ins: { opcode: 0x61, name: 'lookup-array', argc: 3, index: 0,
+      args: [{ type: 0xe, rawData: 0 }, { type: 5, rawData: 0 }, { type: 0, rawData: 2 }] },
+  });
+  assert.equal(space.readU32(locals.regionOf(0xe).addressOf(0)), strBase + 28 * 2,
+    '★ 28 字节族：写进字符串指针格的是 `base + 28*idx`（⛔ 不是 `base + 4*idx`）');
+  assert.equal(readOperand(ctx, { type: 0xe, rawData: 0 }, 0).value, 'ふたつめ', '解引用拿到第 2 个字符串元素');
+
+  // ★ `0x12c` 的二维索引：`base[op3*op4 + op5]`
+  for (let i = 0; i < 200; i += 1) globals.write('int', 100 + i, i);
+  const intBase = globals.regionOf('int').addressOf(100);
+  HANDLERS[0x12c]({
+    machine, frame: { locals }, script: {},
+    ins: { opcode: 0x12c, name: 'lookup-array-2d', argc: 5, index: 0,
+      args: [{ type: 0xc, rawData: 0 }, { type: 3, rawData: 100 }, { type: 0, rawData: 3 },
+        { type: 0, rawData: 10 }, { type: 0, rawData: 4 }] },
+  });
+  assert.equal(space.readU32(locals.regionOf(0xc).addressOf(0)), intBase + 4 * 34,
+    '★ 索引 = 3*10 + 4 = 34（行 3、行宽 10、列 4）');
+  assert.equal(readOperand(ctx, { type: 0xc, rawData: 0 }, 0).value, 34, '解引用拿到 `global:int[134]` 的值');
+});
+
 test('★ 一份数据：迁移后 Map 是空的，位模式**只在区域里**', () => {
   const { pools, space } = regionLocal();
   const bits = pools.write(9, 7, 0x1234); // type 9 = local int
@@ -229,7 +262,18 @@ test('★ 全局池同形：`int`/`intRef` 迁到区域，且与 Map 版快照�
     plain.write(name, idx, v);
   }
   assert.deepEqual(g.snapshot(), plain.snapshot(), '全局池：两种存储的快照逐值相同');
-  assert.deepEqual([...g.regions.keys()].sort(), ['float', 'floatRef', 'int', 'intRef'], 'int 与 float 两族（各含 Ref）迁过去');
+  // ★★ 全局池现在**六个都有区域**（与局部池同一套口径）：都能取址；但 string 族**数据仍在 Map**
+  //   （区域只发地址 —— `0xe`/`0x8` 的基址 `&op2` 可能是全局字符串池的某一格）
+  assert.deepEqual([...g.regions.keys()].sort(),
+    ['float', 'floatRef', 'int', 'intRef', 'string', 'stringRef'],
+    '每个全局池都进地址空间（都能取址）');
+  assert.equal(g.regions.get('string').elemBytes, 28, '字符串族的元素步长是 **28**（与引擎一致）');
+  // ★ 容量 0 的区域里那个地址**还不存在** ⇒ 直接读会响亮失败（这是正确行为，不是缺陷）
+  assert.throws(() => space.readU32(g.regions.get('string').addressOf(0)), /不落在任何区域里/,
+    '容量 0 ⇒ 地址还不存在 ⇒ 读它要抛（⛔ 不是安静地读别处）');
+  g.write('string', 0, 'インライン');
+  assert.ok(g.regions.get('string').capacity >= 1, '★ 写字符串要让它能**发地址**（容量随之长大）');
+  assert.equal(space.readU32(g.regions.get('string').addressOf(0)), null, '★ 但区域里没有数据（格是空的）');
   for (const name of ['int', 'intRef']) {
     const reg = g.regions.get(name);
     assert.equal(space.readU32(reg.addressOf(name === 'int' ? 9 : 1)), encInt(name === 'int' ? 42 : 7, KEY),
