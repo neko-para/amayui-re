@@ -75,14 +75,33 @@ test('★ 标准启动流程：按统一文件 id 装载根脚本（不是按名
 
   // ★ 第 0 条是 `comment`（no-op），第 1 条是 `0x1a8`（no-op）⇒ 它们必须被正常执行掉。
   const r = asm.machine.run({ stopAtOpcode: 0xffff });
-  // ★★ `0x6 load-frame`：**帧记录没建**，必须每次留痕（不许静默）—— 这是本轮唯一"故意欠着"的那一步
+  // ★★ `0x6 load-frame`：**帧记录真的建在槽 `op2` 上**（2026-10 起；上一版这里是
+  //    `logged-only` + "帧记录没建" —— 帧模型还是栈，表达不了槽语义）。棘轮留在原位：条数不变。
   const lf = asm.log.records.filter((e) => e.action === 'engine.load-frame');
-  assert.ok(lf.length >= 4, `0x6 load-frame 在这次运行里至少 4 次（实测 ${lf.length}）—— 每次都要进保真欠账`);
+  assert.ok(lf.length >= 4, `0x6 load-frame 在这次运行里至少 4 次（实测 ${lf.length}）`);
   for (const e of lf) {
-    assert.equal(e.disposition, 'logged-only', '未建模 ⇒ logged-only（会进「保真欠账」）');
-    assert.ok(e.detail.cur < 40, '目标帧深必须在引擎的上限 40 之内');
-    assert.match(String(e.detail.note), /帧记录没建/, '欠账信息里要写明"帧记录没建"与原因');
+    assert.equal(e.disposition, 'modeled', '★ 帧记录**建了** ⇒ modeled（栈模型下这里只能是 logged-only）');
+    assert.ok(e.detail.slot < 40, '目标槽号必须在引擎的上限 40 之内');
     assert.ok(typeof e.detail.script === 'string' && e.detail.script.length > 0, '要记下装载到的是哪份脚本');
+    // ★★ 判据（节点 `REQ-01M4E4Q11P12MD0PJJDFZPZ5H0` 第 2 条）：**槽 `op2` 上真的有帧记录**，
+    //    而且脚本名 / 槽号 / 头 6 个 local 计数都对得上 —— 这些在栈模型里**一个都拿不出来**。
+    const rec = asm.machine.slots[e.detail.slot];
+    assert.ok(rec, `★ 槽 ${e.detail.slot} 上必须真的有帧记录（栈模型下槽号 = 深度，这里什么都没有）`);
+    assert.equal(rec.scriptName, e.detail.script, '记录里的脚本名必须与日志一致');
+    assert.equal(rec.cur, e.detail.slot, '记录知道自己是第几号槽');
+    assert.deepEqual([...rec.localCounts], e.detail.localCounts, '★ 帧记录上那 6 个 local 计数（按池序）要与日志一致');
+    assert.notEqual(rec.locals, asm.machine.frame.locals, '★ 每个槽的记录有**自己**的 local 池');
+    assert.ok(e.detail.cur !== e.detail.slot,
+      `★ 目标槽不许是**当时**的活动槽（${e.detail.cur}）：那样就等于把正在跑的帧换掉了 —— 而"装完恢复 cur"正是逐字里那两步的意思`);
+  }
+  // ★★ 欠账**收窄了但没消失**（⛔ 不许假称"帧记录全建好了"）：另有一条 `logged-only` 记 `sub_40ED40` 里
+  //    本模型没有承载面的那些字段/表。两条一起看才是诚实的账。
+  const lfFields = asm.log.records.filter((e) => e.action === 'engine.load-frame-fields');
+  assert.equal(lfFields.length, lf.length, '每次 load-frame 都要同时记一条"仍欠哪些字段"');
+  for (const e of lfFields) {
+    assert.equal(e.disposition, 'logged-only', '未建模的字段 ⇒ logged-only（会进「保真欠账」）');
+    assert.match(String(e.detail.note), /sub_40ED40/, '欠账必须点名 `sub_40ED40`（读者要能去取证）');
+    assert.match(String(e.detail.note), /帧\+0x14/, '欠账要列清具体欠哪些字段');
   }
   // ★★ **前沿棘轮**：启动链能执行的**指令数**与**停在哪**都只许往前走。
   //    数字由实跑复算（不是手写）；实现新 handler 会让它涨 ⇒ 那时**要同步抬高这里**。
@@ -127,6 +146,53 @@ test('★ 语料的操作数 type 普查：指针族里**只有 0xc/0xe 用得�
   for (const t of [0x6, 0x7, 0x8, 0xd]) {
     assert.equal(byType.get(t) ?? 0, 0, `type 0x${t.toString(16)} 在本语料里应当一次都不出现（实测 ${byType.get(t) ?? 0}）`);
   }
+});
+
+/**
+ * ★★ `0x61 lookup-array` / `0x12c lookup-array-2d` 的**目标 type 计数**（逐字 `sub_418CC0` 的判据）
+ *
+ * ## 为什么必须**钉死数**而不是写 `> 10000`
+ * 上面那条只断了 `0xc > 10000` / `0xe > 1000` —— 那是**阈值**：目标 type 换掉一半、或步长口径改坏，
+ * 只要还过阈值就一路绿。而这两个 opcode 的**步长按目标族取**（4 vs 28）正是"算错地址却不报错"的那一处
+ * （`ops.ts` 的 `arrayStrideOf`）：`0xe` 用 4 会静默定位到另一个字符串元素。
+ *
+ * ## 逐字（`sub_418CC0` @ `0x418CC0`，`.lst:36906-36923` 与 `.lst:36969-36981`）
+ * 它按**目标操作数 type** 做 9 路 switch（`sub esi,0FFFFFFFAh` ⇒ case = type − 6，`cmp esi,8`）：
+ *   * case **6**（type `0xc`）：`lea edx,[esi+edx*4]` ⇒ 步长 **4**
+ *   * case **8**（type `0xe`）：`lea esi,ds:0[edx*8]` / `sub esi,edx` / `lea edx,[edx+esi*4]`
+ *     ⇒ 步长 **28**（`(type−6)` 那一路是 `8*idx − idx = 7*idx`，再 `*4` = `28*idx`）
+ * ⇒ 这两个 opcode 在语料里**只指向 `0xc` 与 `0xe`**，且两种类型的**确切次数**就是下面这四个数。
+ * ★ 数字**由语料现算**（不是手抄的）：改坏目标 type / 改坏步长口径 / 语料换了都会红。
+ */
+test('★★ `0x61`/`0x12c` 的目标 type 只有 `0xc`/`0xe`，且次数钉死（`0xc`×34269 / `0xe`×674；`0x12c`：`0xc`×4220 / `0xe`×49）', { skip }, () => {
+  const files = fs.readdirSync(installDir).filter((f) => f.toUpperCase().endsWith('.BIN'));
+  const dest = new Map([[0x61, new Map()], [0x12c, new Map()]]);
+  const counts = new Map();
+  for (const f of files) {
+    let s;
+    try {
+      s = loadScript(f, new Uint8Array(fs.readFileSync(path.join(installDir, f))), { table: OPCODE_TABLE });
+    } catch { continue; }
+    for (const ins of s.instructions) {
+      const m = dest.get(ins.opcode);
+      if (!m || ins.args.length === 0) continue;
+      const t = ins.args[0].type;
+      m.set(t, (m.get(t) ?? 0) + 1);
+      counts.set(ins.opcode, (counts.get(ins.opcode) ?? 0) + 1);
+    }
+  }
+  // ① 目标 type **只有** `0xc`（4 字节族）与 `0xe`（28 字节族）—— 出现别的 type 就说明 `arrayStrideOf` 的对象变了
+  assert.deepEqual([...dest.get(0x61).keys()].sort((a, b) => a - b), [0xc, 0xe],
+    `0x61 的目标 type 集合（实测 ${[...dest.get(0x61).keys()].map((t) => `0x${t.toString(16)}`).join(',')}）`);
+  assert.deepEqual([...dest.get(0x12c).keys()].sort((a, b) => a - b), [0xc, 0xe],
+    `0x12c 的目标 type 集合（实测 ${[...dest.get(0x12c).keys()].map((t) => `0x${t.toString(16)}`).join(',')}）`);
+  // ② 四个数**钉死**（这是"步长按族取"的实测依据：0xe 那 723 个站点用 4 就会算错地址）
+  assert.equal(dest.get(0x61).get(0xc), 34269, '`0x61` 指向 `0xc` 的次数');
+  assert.equal(dest.get(0x61).get(0xe), 674, '★ `0x61` 指向 `0xe` 的次数（这 674 个站点步长必须是 28）');
+  assert.equal(dest.get(0x12c).get(0xc), 4220, '`0x12c` 指向 `0xc` 的次数');
+  assert.equal(dest.get(0x12c).get(0xe), 49, '★ `0x12c` 指向 `0xe` 的次数（这 49 个站点步长必须是 28）');
+  assert.equal(dest.get(0x61).get(0xc) + dest.get(0x61).get(0xe), counts.get(0x61), '0x61 每一处都必须归到这两个 type 之一');
+  assert.equal(dest.get(0x12c).get(0xc) + dest.get(0x12c).get(0xe), counts.get(0x12c), '0x12c 同上');
 });
 
 test('★ 启动链的规模与缺口可复算（到 LOGO 为止：脚本数 / 指令数 / 缺 handler 的 opcode 数）', { skip }, () => {

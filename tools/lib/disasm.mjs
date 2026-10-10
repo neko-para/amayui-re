@@ -542,6 +542,23 @@ const REG_RE = /^(?:e?[abcd]x|e?[sd]i|e?[sb]p|e?sp|r\d+|[abcd][lh]|dword|word|by
 const CALL_SYM_RE = /\b(call|jmp)\s+([A-Za-z_$?@][\w.$?@]*)\s*(?:;|$)/;
 /** 体内是否出现内存操作数（`[...]`）—— "有没有碰结构"的最小机械判据 */
 const MEM_OPERAND_RE = /\[/;
+/**
+ * ★ **一个内存操作数里的"引擎尺度位移"**（`disasm-at` 只做切片，这一条是给 `lib/coverage.mjs`
+ * 的 `libraryLikely` 用的机械事实 —— 判据与"为什么需要它"见那里的长注释）。
+ *
+ * 实测口径（全语料 53 万行）：
+ * * 这份 IDA 导出里，内存操作数的位移**一律 `…h` 后缀**：`[esi+5D880h]` / `[esi+ecx*8+5D8B4h]`；
+ *   含 `[…]` 的行里带 `0x…` 常量的 = **0 行** ⇒ 只认 `h` 形态即可，不必再兜一层。
+ * * **基址是栈（`ebp`/`esp`）的操作数要排除**：栈帧可以很大（大局部数组 / `__chkstk`），
+ *   它不是"在一个大对象上干活"的证据。⇒ 判据 = "基址不是栈 ∧ 位移 ≥ 0x1000"。
+ *   ⚠ 代价（照抄，不掩盖）：`[ebp+…]` 里的大位移**看不见**；这是有意的保守方向
+ *   （漏掉只会少取消几个库候选，而"取消"本身是往"更容易看见"的方向走的）。
+ */
+const MEM_OPERAND_BODY_RE = /\[([^\]]*)\]/g;
+/** 操作数的基址是不是栈：`ebp` / `esp` 开头（`[ebp+var_C]` / `[esp+10h]`） */
+const STACK_BASE_RE = /^\s*e?[sb]p\b/i;
+/** `h` 后缀十六进制位移（4..8 位）：`1000h` / `5D880h` / `0AA514h` */
+const DISP_H_RE = /\b([0-9A-F]{4,8})h\b/g;
 /** `.lst` 每行开头的 `段:EA`（用于算函数体内**最后一个 EA** ⇒ EA 归属要能拒绝"越过函数末尾"的地址） */
 const LINE_EA_RE = /^[A-Za-z_.][\w.]*:([0-9A-Fa-f]{8})\s/;
 /** 解不出目标的调用点（`call eax` / `call dword ptr [...]` / `call [esi+4]`）—— 只**计数**，不猜目标 */
@@ -556,7 +573,7 @@ const INDIRECT_CALL_RE = /\b(call|jmp)\s+(?:eax|ebx|ecx|edx|esi|edi|ebp|esp|dwor
  * ★ `indirectCallSites` 必须**报出来**：解不出目标的调用点意味着任何"调用闭包"都只是**下界**
  *   （实测全语料 3000+ 个）—— 不报出来，读者会把"闭包完整"当成事实。
  *
- * @returns {{file:string, dataEas:Set<number>, functions:Array<{sym:string,ea:number,fromLine:number,toLine:number,lastEa:number,callees:string[],calleeHits:Map<string,number>,externalTargets:string[],hasMemoryOperand:boolean,callSites:number,indirectCallSites:number}>, bySym:Map<string,object>, starts:number[], indirectCallSites:number}}
+ * @returns {{file:string, dataEas:Set<number>, functions:Array<{sym:string,ea:number,fromLine:number,toLine:number,lastEa:number,callees:string[],calleeHits:Map<string,number>,externalTargets:string[],hasMemoryOperand:boolean,maxNonStackDisp:number,callSites:number,indirectCallSites:number}>, bySym:Map<string,object>, starts:number[], indirectCallSites:number}}
  */
 export function functionInventory(lstFile) {
   /** ★ 非 `.text` 段里的行 EA（= **数据/全局**的定义点）：锚落在这些地址上**不是**"归属失败" */
@@ -585,6 +602,7 @@ export function functionInventory(lstFile) {
         calleeHits: new Map(),
         externalTargets: new Set(),
         hasMemoryOperand: false,
+        maxNonStackDisp: 0,
         callSites: 0,
         indirectCallSites: 0,
       };
@@ -605,6 +623,21 @@ export function functionInventory(lstFile) {
       continue;
     }
     if (MEM_OPERAND_RE.test(l)) cur.hasMemoryOperand = true;
+    // ★ 顺带记下"最大的**非栈**内存位移"（引擎尺度位移；判据与用途见上面的常量注释）
+    if (l.includes('[')) {
+      MEM_OPERAND_BODY_RE.lastIndex = 0;
+      let mo;
+      while ((mo = MEM_OPERAND_BODY_RE.exec(l))) {
+        const inner = mo[1];
+        if (STACK_BASE_RE.test(inner)) continue;
+        DISP_H_RE.lastIndex = 0;
+        let d;
+        while ((d = DISP_H_RE.exec(inner))) {
+          const v = Number.parseInt(d[1], 16);
+          if (v > cur.maxNonStackDisp) cur.maxNonStackDisp = v;
+        }
+      }
+    }
     const c = CALL_RE.exec(l);
     if (c) {
       cur.callSites += 1;

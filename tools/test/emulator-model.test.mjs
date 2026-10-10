@@ -78,12 +78,12 @@ test('★ global 池基址/计数槽必须与语料里 type 3/4 的取址一致'
 });
 
 /**
- * ★ **帧内 slot 的机械普查（两种寻址形态）** —— 这是本轮修掉那个真错的产物。
+ * ★ **记录内 slot 的机械普查（两种寻址形态）** —— 这是本轮修掉那个真错的产物。
  *
  * 为什么不能只认字面常量：偏移会被**折叠进索引寄存器**。
  * 实测反例：`local_float` 的基址写入是 `.text:0040F31B..F335`
  *   `mov ecx,[esi+5D880h]` → `add ecx,0C79h` → `mov edx,ecx; shl edx,4; sub edx,ecx`（`edx = 15*(cur+0xC79)`）
- *   → `mov [esi+edx*8],eax` ⇒ 目标 = `Engine + 120*cur + 0x5D8B8` = **帧+0x38**。
+ *   → `mov [esi+edx*8],eax` ⇒ 目标 = `Engine + 120*cur + 0x5D8B8` = **记录+0x24**（旧基址记法写作 `帧+0x38`）。
  * 语料里**没有** `5D8B8h` 这个字面（0 次），却有 192 处 `[reg+reg*8]` 折叠形态。
  * ⇒ 我上一轮用"字面 0 次"推出"`+0x38` 不存在"，**那个全称否定是方法坏掉造成的**。
  *   （独立复核者抓到了这条；我复算后确认它是对的。）
@@ -94,16 +94,18 @@ function frameCensus() {
   const lines = fs.readFileSync(listing, 'utf8').split('\n');
   const literals = new Map();
   const folded = new Map();
+  // ★ 折叠形 `add ecx,0C79h` 的等效记录内偏移（自证：`0xC79 × 0x78 = 0x5D8B8`，而 `0x5D8B8 − 0x5D894 = 0x24`）
+  const FOLDED_OFF = 0x5d8b8 - FRAME.base;
   for (let i = 0; i < lines.length; i += 1) {
     const raw = lines[i];
     for (const m of raw.matchAll(/(5D[89][0-9A-F]{2})h/gi)) {
       const v = Number.parseInt(m[1], 16);
       if (v >= FRAME.base && v <= FRAME.base + 0x98) literals.set(v - FRAME.base, (literals.get(v - FRAME.base) ?? 0) + 1);
     }
-    // 折叠形态：`[reg+reg*8]`，且前 12 行里有 `…,0C79h`（⇒ 该处等效帧偏移 0x38）
+    // 折叠形态：`[reg+reg*8]`，且前 12 行里有 `…,0C79h`（⇒ 该处等效记录内偏移 `+0x24`）
     if (/\[(?:esi|ecx|eax|edx|ebx)\+\w{2,3}\*8\]/.test(raw)) {
       const win = lines.slice(Math.max(0, i - 12), i).join(' ');
-      if (/0C79h/.test(win)) folded.set(0x38, (folded.get(0x38) ?? 0) + 1);
+      if (/0C79h/.test(win)) folded.set(FOLDED_OFF, (folded.get(FOLDED_OFF) ?? 0) + 1);
     }
   }
   return { literals, folded };
@@ -147,8 +149,8 @@ function corpusLocalPoolEvidence() {
         }
       }
     }
-    // ★ 装载器里**不止 6 次**分配（实测 7 次：6 个池 + `帧+0x78` 那个 cur 索引数组，
-    //   `FRAME_SLOTS_OBSERVED` 里有名）⇒ 不硬性要求"恰好 6 次"，改由下面的"多出来的必须是已登记帧槽"兜底。
+    // ★ 装载器里**不止 6 次**分配（实测 7 次：6 个池 + 记录 `+0x64` 那个 cur 索引数组，
+    //   `FRAME_SLOTS_OBSERVED` 里有名；旧基址记法写作 `帧+0x78`）⇒ 不硬性要求"恰好 6 次"，改由下面的"多出来的必须是已登记帧槽"兜底。
     assert.ok(allocs >= 6, `装载器里应当至少有 6 次分配（6 个池），实际 ${allocs}`);
   }
 
@@ -182,7 +184,11 @@ function corpusLocalPoolEvidence() {
 test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）—— 且按 EA 回语料核过（装载器 6 处 store + 6 个 type 的读侧 case 双向对上）', { skip }, () => {
   assert.equal(LOCAL_POOLS.length, 6, 'local 池是 6 个（int/float/string/ptr/floatPtr/stringPtr）');
   assert.deepEqual(LOCAL_POOLS.map((p) => p.typeTag), [9, 10, 11, 12, 13, 14], 'operand type 9..14 依次对应 6 个池');
-  assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.count), [0x1c, 0x20, 0x24, 0x28, 0x2c, 0x30], '6 个计数槽连续');
+  assert.deepEqual(
+    LOCAL_POOL_SLOTS.map((p) => p.count),
+    [0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c],
+    '6 个计数槽连续（绝对 `0x5D89C..0x5D8B0`；旧基址记法 `帧+0x1C..+0x30`）',
+  );
   // ★ 池名顺序必须与语义模型一致（这是"布局 ↔ 语义"的接口；改名或加池都会红）
   assert.deepEqual(LOCAL_POOL_SLOTS.map((p) => p.name), LOCAL_POOLS.map((p) => p.name),
     '布局里的池名集合必须与模拟器语义模型的池名集合完全一致');
@@ -204,12 +210,13 @@ test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）�
     extraAlloc.every((a) => namedSlots.has(a)),
     `①b 分配点写下的非池基址必须在 \`FRAME_SLOTS_OBSERVED\` 里有名，实际多出：${extraAlloc.map((a) => `0x${a.toString(16)}`).join(',')}`,
   );
-  // ①c ★ 上一版"绿而错"的回归钉：`+0x50`/`+0x54` 在语料里**确实出现过**（那是别的帧字段），
+  // ①c ★ 上一版"绿而错"的回归钉：`frameArg` / 三组第一项的**长度**这两格在语料里**确实出现过**
+  //   （绝对 `0x5D8D0`/`0x5D8D4`；★ 旧基址记法写作 `帧+0x50`/`帧+0x54` —— 现在的记录内偏移是 `+0x3C`/`+0x40`），
   //   但它们**不在装载器的分配点**上 ⇒ 不许再被当成池基址。
-  for (const bad of [0x50, 0x54]) {
+  for (const bad of [FRAME.off.frameArg, FRAME.off.triples[0].len]) {
     assert.ok(
       !loader.has(FRAME.base + bad),
-      `①c 帧+0x${bad.toString(16)} 不是池基址：它不在装载器的分配点（上一版就是被"这个偏移在语料里出现过"骗过去的）`,
+      `①c 记录+0x${bad.toString(16)} 不是池基址：它不在装载器的分配点（上一版就是被"这个偏移在语料里出现过"骗过去的）`,
     );
   }
   for (const p of LOCAL_POOL_SLOTS) {
@@ -220,7 +227,7 @@ test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）�
     assert.equal(
       byType.get(sem.typeTag),
       FRAME.base + p.base,
-      `② 取址原语 \`sub_42AEA0\` 的 case ${sem.typeTag}（= operand type ${sem.typeTag}，池 ${p.name}）读的地址必须 == 帧+0x${p.base.toString(16)}`,
+      `② 取址原语 \`sub_42AEA0\` 的 case ${sem.typeTag}（= operand type ${sem.typeTag}，池 ${p.name}）读的地址必须 == 记录+0x${p.base.toString(16)}`,
     );
   }
   // ★ 这条 switch 覆盖 type **3..14**（12 个 case）：3..8 是 global 族，**9..14 才是 local 池**。
@@ -238,29 +245,131 @@ test('★ local 池的 slot 几何：**6 个整齐基址**（与旧仓一致）�
     assert.ok(!('base' in p), `模拟器的池定义不许带 \`base\`（偏移属于布局层）：${p.name}`);
     assert.ok(!('count' in p), `模拟器的池定义不许带 \`count\`（帧内计数槽属于布局层）：${p.name}`);
   }
-  // ★ 这次翻案的教训写成断言：`+0x50`/`+0x54` 是**别的帧字段**，不许再被当成池基址
-  assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === 0x50 || p.base === 0x54),
-    '`+0x50`/`+0x54` 不是任何 local 池的基址（它们在语料里确实出现过 —— 那正是上一版"绿而错"的原因）');
+  // ★ 这次翻案的教训写成断言：`frameArg` / 三组第一项的长度是**别的记录字段**，不许再被当成池基址
+  assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === FRAME.off.frameArg || p.base === FRAME.off.triples[0].len),
+    '它们不是任何 local 池的基址（在语料里确实出现过 —— 那正是上一版"绿而错"的原因）');
 });
 
-test('★ `帧+0x84` 是 `array_container`（std::vector），**不是** local_float 基址', { skip }, () => {
+test('★ 脚本头 6 个 local 声明 = 6 个**连续 u32**（读窗口 +8..+28）↔ 6 个池：位置对应、每项就是一个 count', { skip }, () => {
+  // ## 为什么要有这一条
+  // 原先把 6 个声明写成"按脚本头**第 8..13 个 dword**建" —— 那是**字节 32..52**，
+  // 而装载器只做**一次 32 字节定长读**（`push 20h` + `call ReadFile`）⇒ 那些字节根本读不到。
+  // 逐字事实是：读窗口 = `Buffer`（栈 `-144h`）起 32 字节，6 个计数声明 = `Buffer+8 … Buffer+28`，
+  // 即窗口内的字节 **8/12/16/20/24/28**；每项 4 字节、**整个 u32 就是一个 count**（没有 type 位、没有槽号位），
+  // 声明 ↔ 池是**位置对应**（第 i 项 = 第 i 个池的计数，operand type `9+i`）。
+  // ★ 原先那条 `LOCAL_POOL_SLOTS.map(p=>p.count)` 的断言是**字面量自证**（无语料 oracle）—— 这条把它变成机械可复核的。
+  const lines = fs.readFileSync(listing, 'utf8').split('\n');
+  const from = lines.findIndex((l) => / sub_40ED40 proc near$/.test(l));
+  assert.ok(from > 0, '语料里应能找到 `sub_40ED40 proc near`（装载器）');
+  const to = lines.findIndex((l, i) => i > from && / sub_40ED40 endp$/.test(l));
+  const body = lines.slice(from, to > 0 ? to : from + 4000)
+    .map((l) => l.replace(/^\S+:[0-9A-F]{8}\s*/, '').trim().replace(/\s+/g, ' ').replace(/, /g, ','));
+
+  // ① 栈帧声明表：`Buffer` 与 6 个计数声明的**栈偏移**（IDA 写作 `var_XXX= dword ptr -YYYh`）
+  const slotOf = new Map();
+  for (const l of body) {
+    const m = /^(\w+)= (?:byte|dword) ptr -([0-9A-F]+)h$/.exec(l);
+    if (m) slotOf.set(m[1], -Number.parseInt(m[2], 16));
+  }
+  const buf = slotOf.get('Buffer');
+  assert.ok(Number.isInteger(buf), '装载器的栈帧里应有 `Buffer`（那次定长读的落点）');
+
+  // ② 6 对「计数源 → 计数槽」：`mov edx,[ebp+var_X]` 紧跟 `mov [esi+ecx*8+5D89Ch],edx`
+  //   ★ 同一个形态在装载器里还写三组 (len,ptr)（记录 `+0x40..+0x54`）⇒ 按**落点范围**筛出计数那一族
+  //   ★ 范围由模型常量算（`count0` 起 6 格）⇒ 记数槽的起点被改坏这条一起红。
+  const COUNT_LO = FRAME.off.count0;
+  const COUNT_HI = FRAME.off.count0 + 4 * 5;
+  const pairs = [];
+  for (let i = 0; i < body.length; i += 1) {
+    const s = /^mov edx,\[ebp\+(\w+)\]$/.exec(body[i]);
+    if (!s) continue;
+    for (let k = i + 1; k < Math.min(i + 8, body.length); k += 1) {
+      const t = /^mov \[esi\+ecx\*8\+(5D8[0-9A-F]{2})h\],edx$/.exec(body[k]);
+      if (!t) continue;
+      const off = Number.parseInt(t[1], 16) - FRAME.base;
+      if (off >= COUNT_LO && off <= COUNT_HI) pairs.push({ src: s[1], off });
+      break;
+    }
+  }
+  assert.equal(pairs.length, 6, `装载器里「计数源 → 计数槽」的 store 应有 6 处，实测 ${pairs.length}`);
+
+  // ③ 目标严格递增 4 且 == count0 + 4i；来源 = 读缓冲 +8+4i；**模型的 count 槽必须等于语料算出来的那个**
+  for (let i = 0; i < 6; i += 1) {
+    const p = pairs[i];
+    assert.equal(p.off, FRAME.off.count0 + 4 * i,
+      `第 ${i} 处计数 store 的落点应是 记录+0x${(FRAME.off.count0 + 4 * i).toString(16)}，实际 记录+0x${p.off.toString(16)}（0x${(FRAME.base + p.off).toString(16)}）`);
+    assert.ok(slotOf.has(p.src), `计数源 ${p.src} 应是栈帧里声明过的槽`);
+    assert.equal(slotOf.get(p.src) - buf, 8 + 4 * i,
+      `第 ${i} 个计数声明应是 读缓冲+${8 + 4 * i}，实际 ${p.src} = 缓冲+${slotOf.get(p.src) - buf}`);
+    assert.equal(LOCAL_POOL_SLOTS[i].count, p.off,
+      `LOCAL_POOL_SLOTS[${i}]（${LOCAL_POOL_SLOTS[i].name}）的 count 槽必须 == 语料算出来的 记录+0x${p.off.toString(16)}（这就是"位置对应"：第 i 项 = 第 i 个池）`);
+  }
+  const srcs = pairs.map((p) => slotOf.get(p.src));
+  assert.equal(srcs[0] - buf, 8, '第一个计数声明就在读缓冲 +8');
+  assert.equal(srcs[5] - buf + 4, 0x20, '★ 第 6 个声明正好读到 32 字节窗口的末尾（+28 起 4 字节 ⇒ 0x20）');
+  for (let i = 1; i < 6; i += 1) {
+    assert.equal(srcs[i] - srcs[i - 1], 4,
+      `6 个计数声明的栈偏移必须严格递增 4（⇒ IDA 的 var_ 编号严格递减 4：var_13C/138/134/130/12C/128）；第 ${i} 处不符：${srcs[i - 1]} vs ${srcs[i]}`);
+  }
+
+  // ④ 定长读：一次 `push 20h`（= 32 字节）到 `Buffer`，紧接着 `call ReadFile`
+  const ri = body.findIndex((l) => /^lea ecx,\[ebp\+Buffer\]$/.test(l));
+  assert.ok(ri > 0, '读缓冲的地址应由 `lea ecx,[ebp+Buffer]` 取得');
+  const readWin = body.slice(Math.max(0, ri - 3), ri + 7);
+  assert.ok(readWin.some((l) => /^push 20h/.test(l)),
+    `★ 定长读必须是 32 字节（push 20h）—— 这是"6 个声明落在 8..28"的上界（字节 32..52 读不到）。实测窗口：${JSON.stringify(readWin)}`);
+  assert.ok(readWin.some((l) => /^call ReadFile$/.test(l)), '紧跟着必须是 `call ReadFile`');
+
+  // ⑤ `mul` 宽度序列：按计数槽绑定 ⇒ 4,4,1Ch,4,4,4（只有 string 池是 28 字节元素）
+  const widths = [];
+  for (let i = 0; i < body.length - 1; i += 1) {
+    if (body[i + 1] !== 'mul edx') continue;
+    const m = /^mov edx,([0-9A-F]+h|\d+)$/.exec(body[i]);
+    if (!m) continue;
+    let slot = null;
+    for (let k = i - 1; k >= Math.max(0, i - 12); k -= 1) {
+      const q = /^mov (?:eax|edi),\[esi\+ecx\*8\+(5D8[0-9A-F]{2})h\]$/.exec(body[k]);
+      if (q) { slot = Number.parseInt(q[1], 16) - FRAME.base; break; }
+    }
+    if (slot !== null && slot >= COUNT_LO && slot <= COUNT_HI) widths.push({ slot, w: m[1] });
+  }
+  assert.deepEqual(
+    widths.map((x) => x.slot),
+    LOCAL_POOL_SLOTS.map((p) => p.count),
+    '`mul` 必须按计数槽顺序各出现一次（6 个池）—— 槽号由 `LOCAL_POOL_SLOTS` 算，改坏它这条一起红',
+  );
+  assert.deepEqual(widths.map((x) => x.w), ['4', '4', '1Ch', '4', '4', '4'], '6 个池的元素宽度（`mov edx,N` + `mul edx`）');
+});
+
+test('★ `记录+0x70`（绝对 `0x5D904`）是 `array_container`（std::vector），**不是** local_float 基址', { skip }, () => {
   const all = fs.readFileSync(listing, 'utf8').split('\n').map((l) => l.replace(/^\S+:[0-9A-F]{8}\s*/, '').trim().replace(/\s+/g, ' ').replace(/, /g, ','));
   const i = all.findIndex((l) => l.includes('mov [esi+edx*8+5D904h],ecx'));
-  assert.ok(i > 0, '应能找到写 `帧+0x84` 的那一行（`.text:0040F63B`）');
+  assert.ok(i > 0, '应能找到写 `0x5D904`（记录 `+0x70`；旧基址记法 `帧+0x84`）的那一行（`.text:0040F63B`）');
   const win = all.slice(i, i + 16);
-  assert.ok(win.some((l) => /^push 10h ; Size$/.test(l)), '写 `+0x84` 之后应紧跟 `push 10h ; Size`（16 字节对象）');
+  assert.ok(win.some((l) => /^push 10h ; Size$/.test(l)), '写 `+0x70` 之后应紧跟 `push 10h ; Size`（16 字节对象）');
   assert.ok(win.some((l) => l.includes('operator new(uint)')), '再跟 `operator new(uint)` ⇒ 那是**容器对象**，不是池');
   // 三个 dword 清零：IDA 写作 `[eax]` / `[eax+4]` / `[eax+8]`（十进制偏移，不带 h）
   const cleared = win.filter((l) => /^mov \[eax(\+\d+)?\],ebx$/.test(l));
   assert.equal(cleared.length, 3, `新对象应被清零 3 个 dword（begin/end/cap），实际 ${cleared.length} 条：${JSON.stringify(win.slice(0, 12))}`);
-  assert.equal(FRAME.off.arrayContainer, 0x84, '模型里 `+0x84` 记为 array_container');
-  // ★ 本意是"`+0x84` 不是任何 local 池的基址"。★ 2026-10 二次订正后 `local_float` 回到 **0x38**
-  //   （基址 = 帧+0x34/0x38/0x3C/0x40/0x44/0x48；判据与两次订正的经过见 `LOCAL_POOL_SLOTS` 头注）。
-  assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === 0x84), '★ `+0x84` 不是任何 local 池的基址');
-  assert.equal(LOCAL_POOL_SLOTS.find((p) => p.name === 'float').base, 0x38, 'local_float 的基址（取址原语 case 10 读 帧+0x38）');
+  assert.equal(FRAME.off.arrayContainer, 0x70, '模型里记录 `+0x70` 记为 array_container');
+  // ★ 本意是"它不是任何 local 池的基址"。★ 2026-10 三次订正后 `local_float` 是 `+0x24`
+  //   （基址 = 记录+0x20/0x24/0x28/0x2C/0x30/0x34；判据与三次订正的经过见 `LOCAL_POOL_SLOTS` 头注）。
+  assert.ok(!LOCAL_POOL_SLOTS.some((p) => p.base === FRAME.off.arrayContainer), '★ `+0x70` 不是任何 local 池的基址');
+  assert.equal(LOCAL_POOL_SLOTS.find((p) => p.name === 'float').base, 0x24, 'local_float 的基址（取址原语 case 10 读 `0x5D8B8` = 记录 `+0x24`）');
 });
 
 test('★ 帧区 slot 的全集：模型声明的那份观察结果必须与语料一致（逐个复核 + 关键槽点名）', { skip }, () => {
+  // ★ 记录区的三个数与**尾部三格**的算术关系（改 40 / 0x78 / base 任何一个都会红 —— 变异清单里有两条钉它）：
+  //   记录步长 0x78、槽数 40、基址 0x5D894 ⇒ 记录区末尾 0x5EB54；而那三格是 `+0x64/+0x68/+0x6C`（**记录内**）
+  //   —— 旧口径把它们写成 `帧+0x78/+0x7C/+0x80`（`+0x78` 正好等于 stride），于是被误读成"独立数组"；
+  //   归属已裁决，见 `tools/test/engine-frame.test.mjs`。
+  assert.equal(FRAME.count, 40, '槽数 40（`call-script` 的 cur>=39 抛「階層が深すぎます」）');
+  assert.equal(FRAME.base + FRAME.stride * FRAME.count, 0x5eb54, '记录区末尾 = 0x5D894 + 40×0x78 = 0x5EB54');
+  for (const off of FRAME.off.grids) {
+    assert.ok(FRAME_SLOTS_OBSERVED.includes(off), `记录内三格 +0x${off.toString(16)} 必须在观察表里`);
+    assert.ok(off < FRAME.stride, `三格 +0x${off.toString(16)} 落在**本条记录内**（< stride 0x78）—— 它们不是"下一帧的 +0x00"`);
+  }
+  assert.deepEqual([...FRAME.off.grids], [0x64, 0x68, 0x6c], '三格 = 记录内 `+0x64/+0x68/+0x6C`（`0x5D8F8/0x5D8FC/0x5D900`）');
   const { literals, folded } = frameCensus();
   const observed = new Set([...literals.keys(), ...folded.keys()]);
   // 逐个复核"在"
@@ -270,11 +379,89 @@ test('★ 帧区 slot 的全集：模型声明的那份观察结果必须与语�
   // 反向：语料里出现的、模型没登记的（只报警不判红会太松 ⇒ 这里直接判红，逼着两边对齐）
   const missing = [...observed].filter((o) => !FRAME_SLOTS_OBSERVED.includes(o)).sort((a, b) => a - b);
   assert.deepEqual(missing.map((o) => `+0x${o.toString(16)}`), [], '语料里有访问、而观察表漏登记的槽');
-  // 关键槽点名核
-  for (const off of [0x0, 0x14, 0x18, 0x1c, 0x30, 0x34, 0x38, 0x4c, 0x74, 0x84]) {
-    assert.ok(observed.has(off), `关键槽 帧+0x${off.toString(16)} 必须真的在场`);
+  // 关键槽点名核（用模型常量点名 ⇒ 改坏任一个偏移这条一起红）
+  const named = [
+    FRAME.off.strBase, FRAME.off.operands, FRAME.off.count0, FRAME.off.base0,
+    FRAME.off.caller, FRAME.off.frameArg, FRAME.off.operandCount, FRAME.off.arrayContainer,
+  ];
+  for (const off of named) assert.ok(observed.has(off), `关键槽 记录+0x${off.toString(16)} 必须真的在场`);
+  assert.ok(observed.has(0x24), '★ `+0x24` 在场（折叠形态 `0xC79`）—— 我上一轮说它不存在，那是错的');
+  assert.equal(FRAME_SLOTS_OBSERVED.length, 30, '★ 观察表 = 逐 dword 连续 30 格（`0x00..0x74`）⇒ 记录大小 = `0x78`');
+});
+
+
+test('★ 记录 `+0x70`/`+0x74` 的访问普查：同一格有**两种寻址形态**，读点在**值/取址原语**里 —— 形态不能当"记录字段 vs Engine 级"的判据', { skip }, () => {
+  // ## 这条守的是"方法"，不是某个数字
+  // 实测反例：同一格 `记录+0x70`（绝对 `5D904h`；旧基址记法 `帧+0x84`）**两种形态都在**
+  //   * 扁平形（基址被提升进寄存器）：`.text:0040EBA2 mov eax,[esi+5D904h]`、`0040EC41 mov [esi+5D904h],ebx`、`004056D3 mov [eax+5D904h],esi`
+  //   * `*8` 索引形（`reg = 15·cur`）：`.text:0040F63B mov [esi+edx*8+5D904h],ecx`、`0042B362 mov ecx,[esi+ecx*8+5D904h]`
+  // ⇒ **"扁平 vs `*8` 索引"不能当"记录字段 vs Engine 级寄存器"的判据**：形态会随编译器的基址提升而漂，
+  //   判据要用"**谁在算索引**"（这里是 `cur` ⇒ 记录内）。只按字面地址统计会给同一字段两种计数。
+  // ★ 这两个槽的**读点**落在四个不同的原语里（`+0x70`）/（`+0x74`），不是某一个函数的分支 —— 归错函数会让人去读错函数体。
+  const raw = fs.readFileSync(listing, 'utf8').split('\n');
+  const byEa = new Map();
+  for (const l of raw) {
+    const m = /:([0-9A-F]{8})\s+(.*?)\s*$/.exec(l.trim());
+    if (m) byEa.set(Number.parseInt(m[1], 16), m[2].replace(/\s+/g, ' ').replace(/, /g, ','));
   }
-  assert.ok(observed.has(0x38), '★ +0x38 在场（折叠形态）—— 我上一轮说它不存在，那是错的');
+  const at = (off) => `${(FRAME.base + off).toString(16).toUpperCase()}h`;
+  const all = [...byEa.values()];
+  const flat = (off) => all.filter((l) => new RegExp(`\\[[a-z]{2,3}\\+${at(off)}\\]`).test(l));
+  const indexed = (off) => all.filter((l) => new RegExp(`\\[[a-z]{2,3}\\+[a-z]{2,3}\\*8\\+${at(off)}\\]`).test(l));
+
+  // ① ★ 两种形态都必须在（`FRAME.off.arrayContainer` 被改坏 ⇒ 这里的地址变了 ⇒ 当场红）
+  for (const off of [FRAME.off.arrayContainer, 0x74]) {
+    assert.ok(flat(off).length > 0,
+      `记录+0x${off.toString(16)}（${at(off)}）应出现**扁平形态**（基址提升进寄存器）—— 没有它说明普查漏了形态`);
+    assert.ok(indexed(off).length > 0,
+      `记录+0x${off.toString(16)}（${at(off)}）应出现 **\`*8\` 索引形态**（\`reg = 15·cur\`）`);
+  }
+  // ② `+0x70` 的索引形态读点：取址原语 + 三个值原语（★ 不是"全在 sub_42B4B0 里"）
+  for (const ea of [0x42b362, 0x42b91c, 0x42be8a, 0x42c422]) {
+    assert.equal(byEa.get(ea), `mov ecx,[esi+ecx*8+${at(FRAME.off.arrayContainer)}]`,
+      `0x${ea.toString(16).toUpperCase()} 必须以 \`*8\` 索引形态读 记录+0x70（逐字是 ecx = 15·cur 之后的 \`mov ecx,[esi+ecx*8+…]\`）`);
+  }
+  // ③ `+0x74`（绝对 `0x5D908`）的索引形态读点（含 `sub_433310` —— 它不是那四个"取地址/写值"原语之一）
+  for (const ea of [0x42b24a, 0x42c30a, 0x433507]) {
+    assert.equal(byEa.get(ea), `mov ecx,[esi+ecx*8+${at(0x74)}]`,
+      `0x${ea.toString(16).toUpperCase()} 必须以 \`*8\` 索引形态读 记录+0x74`);
+  }
+  // ④ 装载器**写**它们（容器对象指针），拆卸器**读并清 0** —— 与"读点"是两拨人，别混
+  assert.equal(byEa.get(0x40f63b), `mov [esi+edx*8+${at(FRAME.off.arrayContainer)}],ecx`, '装载器写 记录+0x70（`operator new(0x10)` 的容器对象）');
+  assert.equal(byEa.get(0x40f678), `mov [esi+edx*8+${at(0x74)}],ecx`, '装载器写 记录+0x74');
+  assert.equal(byEa.get(0x40ed1a), 'mov dword ptr [esi+5D908h],0', '拆卸路径把 记录+0x74 清 0（`*8` 索引形态**没有**出现 —— 又一个"形态会漂"的例子）');
+});
+test('★ 帧尾三格 `0x5D8F8/0x5D8FC/0x5D900` 全语料**只有 6 处引用**（建立 + `_memset` + 释放）⇒ **没有读者**', { skip }, () => {
+  // 这条把"用途"从一个**未查明项**变成一个**结论**：三个 per-cur dword 格每格装一个
+  // `operator new[](8*(n+1))` 出来的 8 字节元素表，建立后**除了释放路径没人读**。
+  // ★ 复算方式：全语料逐行找这三个**字面地址**（`5D8F8h` / `5D8FCh` / `5D900h`）—— 必须**恰好**这 6 行，
+  //   且其中唯一的"读指针"发生在 `lea ebx,[esi+5D8F8h]`（+`edi=3`）之后的 `operator delete[]`。
+  const raw = fs.readFileSync(listing, 'utf8').split('\n');
+  const byEa = new Map();
+  for (const l of raw) {
+    const m = /:([0-9A-F]{8})\s+(.*?)\s*$/.exec(l.trim());
+    if (m) byEa.set(Number.parseInt(m[1], 16), m[2].replace(/\s+/g, ' ').replace(/, /g, ','));
+  }
+  const expected = [
+    [0x4056bd, 'mov [ecx+edx*4+5D8F8h],esi'],
+    [0x4056c4, 'mov [ecx+edx*4+5D8FCh],esi'],
+    [0x4056cb, 'mov [ecx+edx*4+5D900h],esi'],
+    [0x40eb7c, 'lea ebx,[esi+5D8F8h]'],
+    [0x40f5c1, 'mov [esi+ecx*4+5D8F8h],eax'],
+    [0x40f5ec, 'mov eax,[esi+eax*4+5D8F8h]'],
+  ];
+  for (const [ea, text] of expected) {
+    assert.equal(byEa.get(ea), text, `0x${ea.toString(16).toUpperCase()} 的逐字形态变了`);
+  }
+  const mentioned = [...byEa.entries()].filter(([, t]) => /5D8F[8C]h|5D900h/.test(t)).map(([ea]) => ea).sort((a, b) => a - b);
+  assert.deepEqual(mentioned, expected.map(([ea]) => ea).sort((a, b) => a - b),
+    `★ 全语料提到这三个字面地址的行必须**恰好**这 6 处 —— 多出来的那处很可能就是"读者"（实测：${mentioned.map((e) => '0x' + e.toString(16)).join(', ')}）`);
+  // 释放路径：`mov edi,3` 轮三格，唯一的"读指针"在这里
+  assert.equal(byEa.get(0x40eb82), 'mov edi,3', '释放路径以 `edi = 3` 轮三格');
+  assert.equal(byEa.get(0x40eb87), 'mov eax,[ebx]', '★ 唯一的"读指针"发生在释放路径（`lea ebx,[esi+5D8F8h]` 之后）');
+  assert.ok((byEa.get(0x40eb8e) ?? '').startsWith('call ??_V@YAXPAX@Z'), '⇒ 紧接着是 `operator delete[]`');
+  // 建立路径里那一次读是为了 `_memset` 的落点（不是使用数据）
+  assert.ok((byEa.get(0x40f5f4) ?? '').startsWith('call _memset'), '`0x40F5EC` 取指针之后紧跟 `_memset`（⇒ 那次读只为填 `0xFF`）');
 });
 
 
@@ -284,22 +471,23 @@ test('★ 帧内其它字段的**用法形态**（traceable 到语料，而不�
   const all = fs.readFileSync(listing, 'utf8').split('\n').map((l) => l.replace(/^\S+:[0-9A-F]{8}\s*/, '').trim().replace(/\s+/g, ' ').replace(/, /g, ','));
   const at = (off) => `${(FRAME.base + off).toString(16).toUpperCase()}h`;
   const has = (off, re) => all.some((l) => l.includes(at(off)) && re.test(l));
-  // `+0x14` 脚本缓冲基址：装载器里由 GlobalAlloc 出来（写），并被用作 (len,ptr) 的基址
-  assert.ok(has(0x14, /GlobalAlloc/i) || has(0x14, /mov \[.*\],.*eax/), '`+0x14` 应被写（脚本缓冲基址）');
-  // `+0x4C` caller：装载时写入；**退出路径读它**（`.text:0041A834`，在 exit handler 里）
-  assert.ok(has(0x4c, /mov \[.*\],/), '`+0x4C` 应被写（caller 回链）');
+  // `+0x00` 脚本缓冲基址（绝对 `0x5D894`）：装载器里由 GlobalAlloc 出来（写），并被用作 (len,ptr) 的基址
+  assert.ok(has(FRAME.off.strBase, /GlobalAlloc/i) || has(FRAME.off.strBase, /mov \[.*\],.*eax/), '`+0x00` 应被写（脚本缓冲基址）');
+  // `+0x38` caller（绝对 `0x5D8CC`）：装载时写入；**退出路径读它**（`.text:0041A834`，在 exit handler 里）
+  assert.ok(has(FRAME.off.caller, /mov \[.*\],/), '`+0x38` 应被写（caller 回链）');
   assert.ok(
-    all.some((l) => l === `mov eax,[esi+ecx*8+${at(0x4c)}]`),
-    '`+0x4C` 应在**帧内索引**形态下被读（exit 路径用它取回链）',
+    all.some((l) => l === `mov eax,[esi+ecx*8+${at(FRAME.off.caller)}]`),
+    '`+0x38` 应在**记录内索引**形态下被读（exit 路径用它取回链）',
   );
-  // `+0x50` frameArg：被当作**键**比较（`cmp …, eax`）
-  assert.ok(has(0x50, /^cmp /) || all.some((l) => l.startsWith(`cmp [esi+`) && l.includes(at(0x50))), '`+0x50` 应被当作键比较');
-  // `+0x54..+0x68` 三组 (len,ptr)：装载器写、消息调用点读（见上面那条用例）
-  for (const off of [0x54, 0x58, 0x5c, 0x60, 0x64, 0x68]) {
-    assert.ok(all.some((l) => l.includes(at(off))), `三组 (len,ptr) 的槽 帧+0x${off.toString(16)} 必须在语料里出现`);
+  // `+0x3C` frameArg：被当作**键**比较（`cmp …, eax`）
+  assert.ok(has(FRAME.off.frameArg, /^cmp /) || all.some((l) => l.startsWith(`cmp [esi+`) && l.includes(at(FRAME.off.frameArg))), '`+0x3C` 应被当作键比较');
+  // 三组 (len,ptr)（`+0x40..+0x54`）：装载器写、消息调用点读（见上面那条用例）
+  for (const t of FRAME.off.triples) {
+    for (const off of [t.len, t.ptr]) {
+      assert.ok(all.some((l) => l.includes(at(off))), `三组 (len,ptr) 的槽 记录+0x${off.toString(16)} 必须在语料里出现`);
+    }
   }
   assert.equal(FRAME.off.triples.length, 3, '三组 (len,ptr)');
-  for (const t of FRAME.off.triples) assert.ok(all.some((l) => l.includes(at(t.ptr))), `ptr 槽 帧+0x${t.ptr.toString(16)} 必须在场`);
 });
 
 test('★ int 族过 DEC、float 族不过、下标不过 —— 三条口径一起判', () => {
@@ -367,7 +555,7 @@ test('★ 操作数寻址：每个操作数 8 字节，且 opcode 在 `[第一�
   assert.ok(!('operandAt' in poolsModule), '模拟器不该导出按地址算操作数的 API（那是布局知识）');
 });
 
-test('★ 三组 (长度, 指针) + `+0x6C` 索引 + `+0x14` 基址：一起喂给 `sub_48E870`（逐字形态）', { skip }, () => {
+test('★ 三组 (长度, 指针) + `0x5D8EC` 位置 + `0x5D894` 基址：一起喂给 `sub_48E870`（逐字形态）', { skip }, () => {
   const all = fs.readFileSync(listing, 'utf8').split('\n').map((l) => l.replace(/^\S+:[0-9A-F]{8}\s*/, '').trim().replace(/\s+/g, ' ').replace(/, /g, ','));
   const i = all.findIndex((l) => l.includes('mov edx,[esi+ecx*8+5D8D4h]') && l.includes('5D8D4h'));
   assert.ok(i > 0, '语料里应能找到 `mov edx,[esi+ecx*8+5D8D4h]`（第一组的长度）');
@@ -375,27 +563,36 @@ test('★ 三组 (长度, 指针) + `+0x6C` 索引 + `+0x14` 基址：一起喂�
   const seq = ['mov edx,[esi+ecx*8+5D8D4h]', 'mov ecx,[eax+5D8D8h]', 'mov edx,[eax+5D8ECh]', 'lea ecx,[esi+4E3ACh]', 'call sub_48E870'];
   let k = 0;
   for (let j = 0; j < win.length && k < seq.length; j += 1) if (win[j] === seq[k]) k += 1;
-  assert.equal(k, seq.length, `三组 (len,ptr)+索引 → 消息引擎 的序列不完整（只对上 ${k}/${seq.length}）：\n${win.join('\n')}`);
+  assert.equal(k, seq.length, `三组 (len,ptr)+位置 → 消息引擎 的序列不完整（只对上 ${k}/${seq.length}）：\n${win.join('\n')}`);
   // 三对必须两两相邻（len 在 ptr 前 4 字节）
-  for (const t of FRAME.off.triples) assert.equal(t.ptr - t.len, 4, `帧+0x${t.len.toString(16)}/0x${t.ptr.toString(16)} 必须相邻（长度在前、指针在后）`);
-  assert.deepEqual(FRAME.off.triples.map((t) => t.len), [0x54, 0x5c, 0x64], '三组 (len,ptr) 的起始偏移');
-  // 三对 + 索引 + 基址，全部落在第二个 8 字节数组之外（不是"池基址"那一组）
-  assert.equal(FRAME.off.state6C - FRAME.off.triples[2].ptr, 4, '`+0x6C` 紧跟在第三组之后');
+  for (const t of FRAME.off.triples) assert.equal(t.ptr - t.len, 4, `记录+0x${t.len.toString(16)}/0x${t.ptr.toString(16)} 必须相邻（长度在前、指针在后）`);
+  assert.deepEqual(FRAME.off.triples.map((t) => t.len), [0x40, 0x48, 0x50], '三组 (len,ptr) 的起始偏移（绝对 `0x5D8D4/0x5D8DC/0x5D8E4`）');
+  // 三对之后紧跟那个**位置**格（`0x5D8EC` = 记录 `+0x58`）
+  assert.equal(FRAME.off.position58 - FRAME.off.triples[2].ptr, 4, '`0x5D8EC` 紧跟在第三组之后');
+  assert.equal(FRAME.base + FRAME.off.position58, 0x5d8ec, '★ 位置格 = 绝对 `0x5D8EC`（旧基址记法写作 `帧+0x6C`）');
 });
 
-test('★ 帧 +0x78/+0x7C/+0x80/+0x84/+0x88 各自归属：与"帧 = 0x78 字节"**不冲突**（它们是 `15·cur` 索引的平行结构）', () => {
-  // 这一条是本轮最该留下的教训：**"帧的步长是 0x78"并不意味着"帧内偏移不能 ≥ 0x78"** ——
-  // 关键在**索引方式**：帧内字段用 `[reg+reg*8+5D8xxh]`（`reg = 15·cur` ⇒ `120·cur`），
-  // 而那些 `≥ 0x78` 的槽用 `[reg+reg*8]`（`reg = 15*(cur+0xC79)` ⇒ `120·cur + 0x5D8B8` 之类）——
-  // 净步长**同样是 120/cur**，所以它们是**与帧同一步长的平行 per-frame 结构**。
-  assert.equal(FRAME.stride, 0x78, '帧步长 0x78（三处独立机械证据）');
-  // 逐字验：`.text:0040F31B..F335` 的 `15*(cur+0xC79)` ⇒ 目标 = Engine + 120*cur + 0x5D8B8 = 帧+0x38
-  assert.equal(0x5d880 + 0x38, 0x5d8b8, '帧+0x38 的绝对值');
+test('★ 记录尾部 `+0x64/+0x68/+0x6C`（= `0x5D8F8/0x5D8FC/0x5D900`）与 `+0x70/+0x74` 的归属：**索引步长 0x78 就是记录大小**（旧的"两个量"口径已否）', () => {
+  // ★ 这一条留下的教训（四次翻案的收敛结果）：**"记录内字段的索引步长是 0x78"** 就是 **"记录是 0x78 字节"** ——
+  //   旧口径之所以认为"是两个不同的量"，是因为把 **`0x5D880`（`cur` 的槽）** 当成了记录基址：
+  //   于是 `0x5D904/0x5D908` 被读成 `+0x84/+0x88` ⇒ 得出"下界 0x8C > 0x78"。
+  //   真基址 `0x5D894` 之下它们是 `+0x70/+0x74`，**落在 `0x78` 之内**。
+  //   ① 三格 `0x5D8F8/0x5D8FC/0x5D900` 写作 `[reg+edx*4+5D8xxh]` 而 `edx = 30·cur` ⇒ 净字节步长**同为 0x78**
+  //      ⇒ 它们是**记录内三格**（`+0x64/+0x68/+0x6C`），不是"下一帧的 +0x00"。
+  //   ② 记录里被写的**最大**偏移 = `+0x74`（`0x40F678 [esi+edx*8+5D908h]`）⇒ 记录大小 = `0x74 + 4 = 0x78`。
+  //   ③ ⛔ `imul eax,84h`（`0x40EB3F`）**不是**记录大小 —— 它的落点是 `Engine+0x69334 + 0x84*cur`（另一个块）。
+  //   台账：`KN-01M4H0MZGD4K4P4F0J1E7E5G79`；可执行判据在 `tools/test/engine-frame.test.mjs`。
+  assert.equal(FRAME.stride, 0x78, '记录的**字段索引**步长 0x78（三处独立机械证据）');
+  // 逐字验：`.text:0040F31B..F335` 的 `15*(cur+0xC79)` ⇒ 目标 = Engine + 120*cur + 0x5D8B8 = 记录+0x24
+  assert.equal(FRAME.base + FRAME.off.base0 + 4, 0x5d8b8, '`local_float` 基址格 = 绝对 `0x5D8B8`（记录 `+0x24`；旧基址记法 `帧+0x38`）');
   assert.equal(15 * 8, 120, '`shl 4; sub` 得到的是 15·x，再 `*8` ⇒ 每 cur 120 字节');
-  // `+0x84` 那个对象是容器（见上一条用例的逐字断言）
-  assert.equal(FRAME.off.arrayContainer, 0x84);
-  // ★ 两个都成立：`local_float` 基址在 +0x38，`array_container` 在 +0x84
+  // `+0x70` 那个对象是容器（见上一条用例的逐字断言）
+  assert.equal(FRAME.off.arrayContainer, 0x70);
+  // ★ 两个都成立，且**不相等**：`local_float` 基址在 `+0x24`，`array_container` 在 `+0x70`
   assert.notEqual(LOCAL_POOL_SLOTS.find((p) => p.name === 'float').base, FRAME.off.arrayContainer);
+  // ★ 把"大小 = 步长"写成断言（而不是散文）：最大字段偏移 `+0x74`，`+4` 正好是 `0x78`
+  assert.ok(0x74 + 4 === FRAME.stride, '★ 最大字段偏移 + 4 **等于**索引步长 ⇒ "记录大小与索引步长是两个量"这条**不成立**');
+  assert.ok(FRAME.off.grids.every((off) => off < FRAME.stride), '★ 三格全在记录**之内**（< stride）—— "`+0x78` 区是下一帧"那条推理无法复活');
 });
 
 test('★ 越界**不检查**但要**留痕**（引擎没有下标检查 ⇒ 模型不许悄悄 clamp 或补 0）', () => {

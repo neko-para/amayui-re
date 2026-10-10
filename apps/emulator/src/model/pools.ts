@@ -418,7 +418,8 @@ export class GlobalPools {
  * （守卫反射核对），而不是顺手 `this.foo = 0`。
  *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/state-partition-engine-is-snapshot-keys`）。
  * ★ 今天这张表只有两个池视图：模型里还没有引擎对象 / 执行循环，所以"非确定源"（`0x60 random` 的 RNG
- *   与重掷计数器）与"碰引擎状态的那 4 条"（`numeric-ops.ts` 的 `TOUCHES_ENGINE_STATE`）**尚无承载面**。
+ *   与 `Engine+0x69330h` 那个**进入次数**计数器 —— 见 `numeric-ops.ts` 的注）与"碰引擎状态的那 4 条"
+ *   （`numeric-ops.ts` 的 `TOUCHES_ENGINE_STATE`）**尚无承载面**。
  */
 export const STATE_PARTITION: Record<string, Record<string, StateClass>> = {
   // ★ `space`：**注入的引用**（数据在 `Machine.space` 那一项里计账 ⇒ 这里只是"谁承载"）⇒ host。

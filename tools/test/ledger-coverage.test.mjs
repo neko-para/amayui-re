@@ -77,6 +77,27 @@ const LST_TEXT = [
   '.text:00401700 NamedThing proc near',
   '.text:00401700 retn',
   '.text:00401701 NamedThing endp',
+  // ★ 库候选的**假阳性**（2026-10 收窄）：内联的 STL 抛出出口 + **Engine 尺度位移**（0x5D880h）
+  //   ⇒ 这是个在 `Engine` 大对象上干活的引擎函数，⛔ 不许被摘出分桶与两张榜
+  '.text:00401A00 sub_401A00 proc near',
+  '.text:00401A00 mov     eax, [ecx+5D880h]',
+  '.text:00401A06 call    ?_Xout_of_range@std@@YAXPBD@Z',
+  '.text:00401A0B retn',
+  '.text:00401A0C sub_401A00 endp',
+  // ★ 对照 ①：同一形态，但位移只有 SSO 量级（0x10h）⇒ **仍然**算库候选（收窄不许滥杀真库代码）
+  '.text:00401B00 sub_401B00 proc near',
+  '.text:00401B00 mov     eax, [ecx+10h]',
+  '.text:00401B06 call    ?_Xout_of_range@std@@YAXPBD@Z',
+  '.text:00401B0B retn',
+  '.text:00401B0C sub_401B00 endp',
+  // ★ 对照 ②：**栈基址**上的大位移不算"引擎尺度"（栈帧可以很大）⇒ 仍算库候选
+  '.text:00401C00 sub_401C00 proc near',
+  '.text:00401C00 sub     esp, 4000h',
+  '.text:00401C06 mov     eax, [ebp-4000h]',
+  '.text:00401C0C call    ?_Xout_of_range@std@@YAXPBD@Z',
+  '.text:00401C12 leave',
+  '.text:00401C13 retn',
+  '.text:00401C14 sub_401C00 endp',
 ].join('\n') + '\n';
 
 /** 合成台账条目：只给覆盖度要用到的三个字段（`effective` / `anchor` / `subject`） */
@@ -105,7 +126,7 @@ function fixture() {
 test('★ 函数清单与 EA 归属：起止行、`jmp` 尾跳、具名函数', () => {
   const { lst } = fixture();
   const inv = functionInventory(lst);
-  assert.equal(inv.functions.length, 10, '10 个 proc near（含 1 个具名 + 1 个库桩 + 1 个调库桩的引擎函数）');
+  assert.equal(inv.functions.length, 13, '13 个 proc near（含 1 个具名 + 1 个库桩 + 1 个调库桩的引擎函数 + 3 个收窄判据的样本）');
   const f = inv.bySym.get('sub_401000');
   assert.equal(f.ea, 0x401000);
   assert.equal(f.fromLine, 1);
@@ -143,8 +164,31 @@ test('★ 库代码分类：/GS 桩那样的"只往库里转一手"必须被摘�
   assert.ok(!lib.has('sub_401900'), '有 `[` 内存操作数的函数不算"只往库里转一手"');
   assert.ok(r.allRows.some((x) => x.sym === 'sub_401900'), '引擎函数要在桶里');
   // ★ 库代码算"无需分析"：一个只调库桩（+CRT）的引擎函数，callee 闭包不该因此算不全
-  assert.equal(r.universe.library, 1, '合成语料里恰好 1 个库桩');
-  assert.equal(r.universe.counted, 8, '宇宙 = 9 个 sub_ 减去 1 个库桩');
+  assert.equal(r.universe.library, 3, '合成语料里恰好 3 个库候选（1 个库桩 + 2 个真 STL 形态）');
+  assert.equal(r.universe.counted, 9, '宇宙 = 12 个 sub_ 减去 3 个库候选');
+});
+
+test('★ 库候选的收窄（`calls-stl-internal` 的假阳性）：Engine 尺度位移 ⇒ 判回引擎代码，且"取消"看得见', () => {
+  const { lst, entries } = fixture();
+  const r = coverage(entries, { lstFile: lst, top: 0 });
+  const lib = new Map(r.honest.libraryCandidates.map((x) => [x.sym, x.reasons]));
+  const cancelled = r.honest.libraryCandidatesCancelled;
+
+  // ★ 假阳性：内联的 `vector<T>::operator[]` 抛出口 + `[ecx+5D880h]` ⇒ **不许**判成库候选
+  assert.ok(!lib.has('sub_401A00'), '体内有 ≥0x1000 的非栈位移 ⇒ `calls-stl-internal` 不作数（这正是 `sub_42B4B0` 的假阳性）');
+  // ★ 而且它必须**看得见**：既在"被取消"名单里（带理由 + 那个位移），又在引擎宇宙的分桶里
+  assert.deepEqual(cancelled.map((x) => x.sym).sort(), ['sub_401A00'], '被取消的候选单列，不许静默改口径');
+  assert.equal(cancelled[0].maxNonStackDisp, 0x5d880, '取消的理由要带上现算出来的那个位移（可复核）');
+  assert.ok(cancelled[0].reasons.includes('calls-stl-internal'));
+  assert.ok(r.allRows.some((x) => x.sym === 'sub_401A00'), '取消后它回到引擎宇宙（于是分桶与两张榜里都能看到）');
+  assert.ok(!r.frontier.mostUsedUnregistered.some((x) => x.sym === 'sub_401A00'), '★ 它没人调用 ⇒ 不假造前沿（收窄只让该看见的看见）');
+
+  // ★ 对照 ①：位移只有 SSO 量级 ⇒ 仍算库候选（收窄不许滥杀）
+  assert.ok(lib.has('sub_401B00'), '位移 0x10h（SSO 量级）⇒ 还是库候选');
+  assert.ok(lib.get('sub_401B00').includes('calls-stl-internal'));
+  assert.ok(!cancelled.some((x) => x.sym === 'sub_401B00'));
+  // ★ 对照 ②：**栈基址**的大位移不算引擎尺度（栈帧可以很大）
+  assert.ok(lib.has('sub_401C00'), '`[ebp-4000h]` 是栈 ⇒ 不算引擎尺度位移，仍算库候选');
 });
 
 test('★ 分桶：起点锚 / 体内锚 / callee 未登记 / 互递归（最大不动点）', () => {
@@ -157,7 +201,7 @@ test('★ 分桶：起点锚 / 体内锚 / callee 未登记 / 互递归（最大
   assert.deepEqual(r.partialRootedList, ['sub_401200']);
   assert.equal(r.buckets['partial-spotty'], 1, 'R4：只有体内锚 ⇒ 没人把它当整体看过');
   assert.deepEqual(r.partialSpottyList, ['sub_401400']);
-  assert.equal(r.buckets.unobserved, 2, '未登记 = sub_401300 + sub_401900（具名的 NamedThing 与库桩 sub_401800 都不计入）');
+  assert.equal(r.buckets.unobserved, 3, '未登记 = sub_401300 + sub_401900 + sub_401A00（具名的 NamedThing 与库候选 sub_401800/401B00/401C00 都不计入）');
   // ★ 具名函数不进宇宙（问题是按 `sub_` 问的），但要在报告里点名
   assert.ok(!r.allRows.some((x) => x.sym === 'NamedThing'), '具名函数不计入 sub_ 宇宙');
   assert.deepEqual(r.universe.named, ['NamedThing']);
@@ -201,7 +245,7 @@ test('★ 历史行不参与：被 `replaces` 取代 / `retracted` 的记录不�
   const revoked = entries.map((e) => (e.id === 'R3' ? { ...e, effective: 'retracted' } : e));
   const r = coverage(revoked, { lstFile: lst, top: 0 });
   assert.equal(r.buckets['partial-rooted'], 0, '撤回掉的记录不再让 sub_401200 算"有登记"');
-  assert.equal(r.buckets.unobserved, 3, '于是 sub_401200 也回到未登记');
+  assert.equal(r.buckets.unobserved, 4, '于是 sub_401200 也回到未登记');
   // ★ 因果链：撤回那条记录，**它指向的前沿也一起塌掉** —— 因为 sub_401200 自己都不再算"已登记"，
   //   于是"被已登记函数调用"这个条件对 sub_401300 也不再成立。
   assert.equal(r.frontier.directCount, 0, '前沿随记录一起塌');

@@ -62,9 +62,20 @@ export const ENV_DEFAULTS = {
    */
   frameMs: 16,
   /**
-   * int 族编解码的 key。引擎里它由启动代码**运行期赋值**（`Engine+0x5EC8C`）、从不出现在脚本里
-   * ⇒ 对脚本的可观测行为没有影响（DEC/ENC 互逆，key 只是把位模式重排）⇒ **自由参数**。
-   * 这里固定成 0 以便两次运行逐字节可比；要换 key 就显式注入。
+   * int 族编解码的 key（`Engine+0x5EC8C`）。
+   *
+   * ★★ **它不是配置项、也不是"自由参数"** —— 已取证（锚 = EA）：
+   *   `0x415953 call timeGetTime` → `0x41595B mov eax,51EB851Fh` / `0x415960 mul edx` / `0x415962 shr edx,5`
+   *   （= ÷100）→ `0x415966 call _srand` → `0x415970…0x415986` 抽 `key = (rand()<<16) + rand()`（为 0 就重抽）
+   *   → `0x417359 mov [esi+5EC8Ch],edx`（全语料**唯一写点**）
+   *   ⇒ **每个进程一份、随进程而变**；任何写死的 key 都会让 int 池全部读错。
+   *   台账：`Engine+0x5EC8C/codec-key-is-rand-derived`（`01M4GTYZ2D2G0V5B2B0Q510G24`）。
+   *
+   * ★ 默认 0 无害的范围只有两处：**盘上位模式**（DEC/ENC 互逆，key 只是重排位模式）与
+   *   **压栈前的可观测性**（key 从不出现在脚本里）。⇒ ⛔ 它**会**让 `0x6 load-frame` 的
+   *   **前置条件不成立**（引擎逐字要求 key 非 0，key = 0 时抛 `Command_Exit_Exception`）——
+   *   那是**本层占位值**不合法，不是脚本的问题 ⇒ `0x6` 只记一笔不抛（见 `vm/ops.ts` 的 `opLoadFrame`）。
+   *   这里固定成 0 是为了两次运行逐字节可比；要换 key 就显式注入。
    *   口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `host/env-undefinedness-levels`）。
    */
   codecKey: 0,
@@ -139,11 +150,11 @@ export function resolveEnvironment(inputs: EnvironmentInputs): { env: EngineEnvi
     if (!Number.isInteger(frameMs) || frameMs <= 0) throw new Error(`frameMs 必须是正整数：${frameMs}（0 会让计时窗永远跑不完）`);
   }
 
-  // —— 编解码 key：u32（自由参数，见 ENV_DEFAULTS.codecKey）
+  // —— 编解码 key：u32（★ **不是**自由参数：引擎那份是运行期 `rand` 抽的、随进程而变；见 ENV_DEFAULTS.codecKey）
   let codecKey: number;
   if (inputs.codecKey === undefined || inputs.codecKey === null) {
     codecKey = ENV_DEFAULTS.codecKey;
-    notes.push(`codecKey 未给 ⇒ 用 ${ENV_DEFAULTS.codecKey}（自由参数：它对脚本的可观测行为没有影响，只影响盘上位模式）`);
+    notes.push(`codecKey 未给 ⇒ 用 ${ENV_DEFAULTS.codecKey}（★ **不是**自由参数：对盘上位模式与压栈前的可观测性无害，但会让 0x6 的前置条件不成立 —— 引擎那份 key 是运行期 rand 抽的、恒非 0）`);
   } else {
     codecKey = inputs.codecKey;
     if (!Number.isInteger(codecKey) || codecKey < 0 || codecKey > 0xffffffff) throw new Error(`codecKey 必须是 u32：${codecKey}`);

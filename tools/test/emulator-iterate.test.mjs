@@ -8,9 +8,9 @@
  *
  * 1. ★ **引擎自己的推进式**（逐字取自语料 `.text:0041345x`）：
  *    ```
- *    mov edx,[eax+5D8F4h]   ; [帧+0x74] = operand_count = 2*argc+1
+ *    mov edx,[eax+5D8F4h]   ; [记录+0x60] = operand_count = 2*argc+1（旧基址记法 `帧+0x74`）
  *    add edx,edx / add edx,edx
- *    add [eax+5D898h],edx   ; ip += 4 * operand_count
+ *    add [eax+5D898h],edx   ; ip += 4 * operand_count（记录+0x04）
  *    ```
  *    ⇒ 字节长度必须是 `4 * (2*argc+1) = 4 + 8*argc`。**这条恒等式对整个指令表成立**，
  *      它把"指令表里的 argc"与"引擎真的怎么推进"绑在一起 —— 两边任何一处被改都会红。
@@ -58,7 +58,7 @@ test('★ 长度恒等式对整个指令表成立：`4 + 8*argc == (2*argc+1) * 
   assert.equal(instrByteLength(0), 4, 'argc=0 ⇒ 只有 opcode');
 });
 
-test('★ 引擎的推进式（逐字）：`ip += 4 * [帧+0x74]`，而 `[帧+0x74] = 2*argc+1`', { skip }, () => {
+test('★ 引擎的推进式（逐字）：`ip += 4 * [记录+0x60]`，而 `[记录+0x60] = 2*argc+1`', { skip }, () => {
   const listing = (() => {
     const d = path.join(REPO_ROOT, 'corpus', 'disasm', 'files');
     if (!fs.existsSync(d)) return null;
@@ -79,9 +79,9 @@ test('★ 引擎的推进式（逐字）：`ip += 4 * [帧+0x74]`，而 `[帧+0x
     ['mov edx,[eax+5D8F4h]', 'add edx,edx', 'add edx,edx', 'add [eax+5D898h],edx'],
     `推进序列与模型不符：\n${win.slice(0, 4).join('\n')}`,
   );
-  // `[eax+5D8F4h]` = 帧 + (5D8F4 − 5D880) = 帧+0x74
-  assert.equal(0x5d8f4 - 0x5d880, 0x74, '那个槽必须是 帧+0x74（operand_count）');
-  assert.equal(0x5d898 - 0x5d880, 0x18, '被推进的是 帧+0x18（ip）');
+  // `[eax+5D8F4h]` = 记录 + (5D8F4 − 5D894) = 记录+0x60（旧基址 `0x5D880` 记法写作 `帧+0x74`）
+  assert.equal(0x5d8f4 - 0x5d894, 0x60, '那个槽必须是 记录+0x60（operand_count）');
+  assert.equal(0x5d898 - 0x5d894, 0x04, '被推进的是 记录+0x04（ip）');
 });
 
 test('★ 真实脚本语料全走一遍：有脚本签名的**必须全部解析成功、0 问题**', { skip }, () => {

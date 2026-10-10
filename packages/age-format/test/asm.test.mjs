@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { disassemble, assemble, OPCODE_TABLE } from '../src/asm/index.mts';
+import { disassemble, assemble, OPCODE_TABLE, FIELD_OFFSETS, FIELD_NAMES } from '../src/asm/index.mts';
 
 test('ASM：指令表只含**格式层**四列（知识层字段不得入库）', () => {
   const table = OPCODE_TABLE;
@@ -64,4 +64,21 @@ test('ASM：非脚本的 BIN（SYS4INI.BIN 的头）必须被拒绝', () => {
 test('ASM：入口齐备（`disassemble` / `assemble` 都是函数）', () => {
   assert.equal(typeof disassemble, 'function');
   assert.equal(typeof assemble, 'function');
+});
+
+test('★ 脚本头前 6 个 u32 字段是**连续**的（文件字节 8/12/16/20/24/28），第 7 项起 = 32', () => {
+  // ## 这条判的是什么（★ 不是复述常量）
+  // 引擎的**局部变量声明区**是"6 个连续 u32"，每项就是一个 **count**（没有 type 位、没有槽号位），
+  // 声明 ↔ 池是**位置对应**：第 i 项 = 第 i 个池的计数（operand type `9+i`）。
+  // 语料侧的逐字判据（装载器 `sub_40ED40`：6 对「计数源 → 帧+0x1C+4i」+ 一次 32 字节定长读）在
+  // `tools/test/emulator-model.test.mjs` 的「★ 脚本头 6 个 local 声明 …」用例里；
+  // 这里钉的是同一件事在**布局表**上的形态 —— 前 6 项必须是 4 字节步长的连续槽。
+  // ⇒ 把第 0 项从 8 改成别处（那会让第 0 个声明落到别的字节上）当场红。
+  assert.deepEqual(FIELD_OFFSETS.slice(0, 6), [8, 12, 16, 20, 24, 28], '前 6 个字段必须是连续 u32（文件字节 8/12/16/20/24/28）');
+  assert.equal(FIELD_OFFSETS[6], 32, '★ 第 7 个字段紧接其后（= 32）—— 声明区只有 6 项，第 7 项已经不属于它');
+  assert.equal(FIELD_OFFSETS.length, 13, '头部 13 个 u32 数值字段');
+  assert.equal(FIELD_NAMES.length, FIELD_OFFSETS.length, '`FIELD_NAMES` 与 `FIELD_OFFSETS` 必须一一对应');
+  for (let i = 0; i < FIELD_OFFSETS.length; i += 1) {
+    assert.equal(FIELD_OFFSETS[i], 8 + 4 * i, `第 ${i} 个字段的偏移必须是 8+4i（连续 u32 区）`);
+  }
 });

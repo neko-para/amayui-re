@@ -137,3 +137,18 @@ export function localVarCounts(header: Header): {
     localInteger2: f.local_integer_2, unknownData: f.unknown_data, localStrings2: f.local_strings_2,
   };
 }
+
+/**
+ * 头的 6 个 local 声明 → **按池序**的计数数组（第 `i` 项 = `LOCAL_POOLS[i]` 的计数）。
+ *
+ * ★★ 凭什么敢按**位置**对应（而不是"猜哪个数喂哪个池"）：装载器里那 6 处 store 的**落点顺序**
+ *   就是池序 —— 判据（语料 + 守卫，锚 = EA 在 `layout.mts` 的 `LOCAL_POOL_SLOTS` 头注里）：
+ *   第 `i` 处「读计数（读缓冲 `+8+4i`）→ `operator new[]` → 写基址」的计数槽是 `记录+0x08+4i`（绝对 `0x5D89C+4i`），
+ *   而 `记录+0x08+4i` ↔ `LOCAL_POOL_SLOTS[i]` ↔ operand type `9+i` 两两对上
+ *   （守卫：`tools/test/emulator-model.test.mjs` 的「脚本头 6 个 local 声明 … 位置对应」用例）。
+ *   ⇒ 本函数的**位置对应**不是本层的假设，它由那条语料守卫钉住；改了这里的顺序，那条会红。
+ */
+export function localCountList(header: Header): number[] {
+  const c = localVarCounts(header);
+  return [c.localInteger1, c.localFloats, c.localStrings1, c.localInteger2, c.unknownData, c.localStrings2];
+}

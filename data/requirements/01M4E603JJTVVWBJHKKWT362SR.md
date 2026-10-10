@@ -2,8 +2,10 @@
 
 - id: REQ-01M4E603JJTVVWBJHKKWT362SR
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
+- verify: tools/test/emulator-engine-scalars.test.mjs#★ `0x78` 的欠账看得出是**尾跳**（`transfer: tail`）、`0x76` 是 `call`；实参是子对象槽不是 op1
+- done_reason: 落点：① 知识层 `packages/age-format/src/engine/layout.mts` 新增 `CallArgForm`（`operand` / `const` / `slot` 三形态）与 `ScalarCallAfter`（`callee` + `transfer: call|tail` + `args`），`ENGINE_SCALAR_WRITES` 标上 `ScalarWrite` 接口（原先**无注解** ⇒ `callsAfter` 被推断成 `string[]`，形态与尾跳**根本没处表达**）；四行 `callsAfter` 按事实写实（`0x78`/`0x2db` = `tail`、`0x76`/`0x77` = `call`，实参 = 子对象槽 `Engine.d21324`）；`PROLOGUE` 的 `0x70`/`0x71` 行新增 `callArgs`（`0x70` 末位 = **写死的 0**；`0x71` = 接收者槽 + op1 + **引擎槽 `Engine.d97055`**）。② 模型 `apps/emulator/src/vm/ops.ts` 的欠账载荷新增 `transfer` 与 `argForms`，`args` 记实参真值；`layout.mts:217` 的口径段与 `ops.ts` 的 `SCALARS_BY_OPCODE`/`scalarHandler` 消费者同步。③ 收口凭据 = 两条守用例（`0x70` 的常量实参 0 与 `0x71` 的引擎槽实参被记下 / `0x78` 的欠账看得出是尾跳）。台账：`KN-01M4GZ0G441A4A0P0C166B1G26`（accepted，`Emulator.vm`，锚 = 7 个 EA + 上述两条守卫）；它 replaces 了 `opcode/0x71`（撤回记录 `KN-01M4GZ037S7D186F5W6Y7E7F4H`，只更正"不在记录里 / 没有守卫"两句）。★ 未声称：其余转发 handler 的非操作数实参未逐个取证（欠账仍按"只有操作数"记，少记 ≠ 只收这些）。
 
 ## 缺口（`PROLOGUE` 的转发记录**只有符号，没有实参**）
 

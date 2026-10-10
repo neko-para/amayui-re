@@ -173,7 +173,7 @@ test('★ 环境初始化：缺根 ⇒ **抛**（核心不许猜宿主路径）�
   assert.equal(env.frameMs, 16);
   assert.equal(env.codecKey, 0);
   assert.ok(problems.length >= 2, '用了默认值必须记 problem（"我配了"与"它默认了"要分得开）');
-  assert.ok(env.notes.length >= 1, 'codecKey 是自由参数这件事必须写在 notes 里');
+  assert.ok(env.notes.length >= 1, 'codecKey 未给 ⇒ 用了默认值这件事必须写在 notes 里（★ 它**不是**自由参数：默认 0 会让 0x6 的前置条件不成立）');
   assert.throws(
     () => resolveEnvironment({ instanceId: 'a', installRoot: { label: 'x', identity: 'x' }, userRoot: { label: 'y', identity: 'y' }, frameMs: 0 }),
     /frameMs 必须是正整数/,

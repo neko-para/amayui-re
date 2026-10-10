@@ -12,6 +12,14 @@
  * ★ 本守卫**故意不判语义**（`add` 到底是不是加法）：那需要逐条读 handler 体，属下一步；
  *   语义未解的条目在模型里标了 `semanticsUnknown`，守卫只确保它们**没被偷偷写成已知**。
  *
+ * ## ★★ 语料来源（2026-10 订正，需求单 `REQ-01M4G9YTEKGER7N99C3M7F443R`）
+ * 从清单 `corpus/assets.json` 的 `roots.gameInstall` 取根、用 `SYS4INI.BIN` 当 ALF 索引，
+ * `readAlf` + `loadPayloads` 解出**原始语料**（本机实测 565 个 `.BIN` 条目全部取到）。
+ * ★ 原先读的是 `<repo>/dist/install`（`pnpm tools release install` 的**发行产物**：基础树 +
+ *   `patch.json` 覆盖件）—— 那**换一台机器就不存在**（守卫静默 skip），而且**不是同一份语料**
+ *   （实测 `0x50`：原始 62945 / 发行树 70439）⇒ `staticUses` 会随每次重装漂。
+ *   取法与 `tools/test/emulator-headless-logo.assets.test.mjs` **同源**。
+ *
  * 运行：`pnpm test:assets`
  */
 import { test } from 'node:test';
@@ -25,6 +33,9 @@ import { NUMERIC_OPS, SEMANTICS_UNKNOWN, UNUSED_IN_CORPUS } from '../../apps/emu
 // ★ handler 名是**逆向观察**（哪段代码实现了它）⇒ 来自知识层，不在模拟器里。
 //   本守卫就是"布局/观察 ↔ 语义"的对账方：拿知识层的 handler 表回语料现算复核。
 import { OPCODE_HANDLERS } from '@amayui/age-format/src/engine/handlers.mts';
+// ★ 语料来源：清单 roots.gameInstall + ALF 解出原始语料（与 headless 那条 assets 守卫同源）
+import { readAlf, loadPayloads } from '@amayui/age-format/src/alf.mts';
+import { rootFromAssetsJson } from '../../apps/emulator/frontends/headless/paths.ts';
 
 const DISPATCH_BASE = 0xa509c;
 const RE_DISPATCH = /mov\s+dword ptr \[[a-z]{2,3}\+(0A5[0-9A-F]{3})h\], offset (sub_[0-9A-F]+)/;
@@ -35,9 +46,28 @@ const listing = (() => {
   const lst = fs.readdirSync(FILES_DIR).filter((f) => f.endsWith('.lst')).sort();
   return lst.length ? path.join(FILES_DIR, lst[0]) : null;
 })();
-const BIN_DIR = path.join(REPO_ROOT, 'dist', 'install');
-const bins = fs.existsSync(BIN_DIR) ? fs.readdirSync(BIN_DIR).filter((f) => f.toLowerCase().endsWith('.bin')).map((f) => path.join(BIN_DIR, f)) : [];
-const skip = listing && bins.length ? false : '语料未解压或没有 .BIN（先 `pnpm tools disasm build` / `pnpm tools release install`）';
+
+/**
+ * 原始语料：清单里的 `gameInstall` 根 + ALF 索引 → 565 个 `.BIN` 条目的字节。
+ * ★ 缺席（换机器 / 没装游戏）⇒ `null`，各用例 `skip` —— **不是**红（语料是 external-only 素材）。
+ */
+const payloadMissing = [];
+const corpusBins = (() => {
+  const root = rootFromAssetsJson(REPO_ROOT, 'gameInstall');
+  if (!root) { payloadMissing.push('corpus/assets.json 没有 roots.gameInstall'); return null; }
+  const index = path.join(root, 'SYS4INI.BIN');
+  if (!fs.existsSync(index)) { payloadMissing.push(`ALF 索引不在场：${index}`); return null; }
+  const alf = readAlf(index);
+  const wanted = new Set(alf.entries.filter((e) => /\.BIN$/i.test(e.filename) && e.length > 0).map((e) => e.filename));
+  const r = loadPayloads(alf, { wanted });
+  if (r.missingArchives.length || r.missingEntries.length) {
+    payloadMissing.push(`ALF 取不全：缺归档 ${r.missingArchives.join(',')} / 缺条目 ${r.missingEntries.length} 个`);
+    return null;
+  }
+  return alf.entries.filter((e) => e.payload && /\.BIN$/i.test(e.filename)).map((e) => ({ name: e.filename, buf: e.payload }));
+})();
+const bins = corpusBins ?? [];
+const skip = listing && bins.length ? false : `语料未解压或 ALF 取不到（${payloadMissing.join('；') || '先 pnpm tools disasm build'}）`;
 
 /** 现算分派表（opcode → handler） */
 async function dispatchTable() {
@@ -85,7 +115,7 @@ test('★ 静态出现次数可复算：0 次的那批必须真的是 0（不是
   const argc = new Map([...table].map(([op, e]) => [op, Number(e.argc)]));
   const count = new Map();
   for (const b of bins) {
-    const buf = fs.readFileSync(b);
+    const buf = b.buf;
     const isVer5 = buf.toString('latin1', 0, 6).includes('SYS5');
     let p = isVer5 ? 64 : 56;
     while (p + 4 <= buf.length) {
@@ -110,7 +140,8 @@ test('★ 静态出现次数可复算：0 次的那批必须真的是 0（不是
     if (real !== op.staticUses) bad.push(`0x${op.opcode.toString(16)}：模型 ${op.staticUses} ≠ 现算 ${real}`);
   }
   assert.deepEqual(bad, [], `staticUses 与现算不一致：\n  - ${bad.join('\n  - ')}`);
-  assert.ok(bins.length > 100, `.BIN 语料应当有上百个，实际 ${bins.length}`);
+  // ★ 语料规模是"这不是数了个空集"的判据：ALF 解出的 .BIN 条目数（本机实测 565）
+  assert.ok(bins.length > 100, `解出的 .BIN 语料应当有上百个，实际 ${bins.length}`);
 });
 
 test('★ 语义未解的条目**不许**在模型里被写成已知（防止"顺手补语义"）', () => {

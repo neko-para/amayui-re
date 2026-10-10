@@ -10,6 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -22,7 +23,7 @@ import {
   buildToc,
 } from '../src/alf.mts';
 import * as lzss from '../src/lzss.mts';
-import { loadSample, fileOf, sha256 } from './samples.mjs';
+import { loadSample, loadManifest, fileOf, sha256 } from './samples.mjs';
 
 const sample = loadSample('assets/samples-alf');
 if (!sample) console.log('[ALF] 跳过：样本不在场（原始游戏文件不入库，见 corpus/assets/samples.md）');
@@ -135,3 +136,49 @@ test('ALF：写数据体时"有空洞"必须报错（而不是静默补零）', 
   assert.equal(gaps[0].offset, 0);
   assert.equal(gaps[0].length, 16);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★ 2026-10 追加（`REQ-01M4GSWZXXFV2Q2Q88QQC68TKB` 的两问收口）：把「3,335,068 的来路」与
+//    「7,375,836 vs 7,375,580 的 +256」两处**都钉在可再校验的字节上**。
+// ★ 这两条用的是**安装根里的 `SYS4INI.BIN`**（清单 `roots.gameInstall`），与上面那组 `assets/samples-alf`
+//   样本无关 ⇒ 各自的 skip 条件分开写（样本不在场 ≠ 索引件不在场）。
+// ★ 关键区分：**盘上那份是 LZSS 压缩件**；旧仓读到的 `0x10` 是**解压后 TOC** 的 `0x10` —— 两者不是同一段字节，
+//   拿压缩件去证伪"解压 TOC 0x10"是**核错了件**。
+// ─────────────────────────────────────────────────────────────────────────────
+const sys4 = (() => {
+  const gi = loadManifest().roots?.gameInstall;
+  if (typeof gi !== 'string') return null;
+  const p = path.join(gi, 'SYS4INI.BIN');
+  return fs.existsSync(p) ? p : null;
+})();
+const skipSys4 = sys4 ? false : '安装根里没有 SYS4INI.BIN（清单 roots.gameInstall 未配/未装游戏）';
+
+test('★★ 解压 TOC 偏移 `0x10` = `3,335,068`（8 条归档记录各一处、落在归档记录的文件名字段内）；**盘上压缩件**的 `0x10` 不是它', { skip: skipSys4 }, () => {
+  const raw = fs.readFileSync(sys4);
+  const alf = readAlf(sys4);
+  const toc = alf.section.data;
+  assert.equal(alf.archiveCount, 8, `SYS4INI.BIN 的归档数应为 8，实际 ${alf.archiveCount}`);
+  // ① 旧仓那条读法的落点：**解压后** TOC + 0x10
+  assert.equal(toc.readUInt32LE(0x10), 3335068, '`解压 TOC + 0x10` 必须逐字节是 3,335,068（0x32E39C）');
+  // ② 8 条归档记录各一处（记录宽 = `layout.arcEntry` = 256 ⇒ 步长 0x100）
+  const step = alf.layout.arcEntry;
+  assert.equal(step, 256, 'S4 系归档记录宽应为 256');
+  for (let k = 0; k < alf.archiveCount; k += 1) {
+    assert.equal(toc.readUInt32LE(0x10 + step * k), 3335068, `第 ${k} 条归档记录的同一位移应为 3,335,068`);
+  }
+  // ③ 它落在**归档记录 #0 的文件名字段内部**（字段从 0x04 起、宽 256）⇒ 是名字终止符之后的尾巴，不是"池容量"
+  assert.equal(alf.archives[0].filename, 'DATA1.ALF');
+  assert.ok(0x10 > 0x04 && (0x10 + 4) <= 0x04 + step, '0x10 应落在归档 #0 的文件名字段内部');
+  // ④ 盘上那份**压缩件**的同一位移不是它 ⇒ "全件 0 次命中"只能证伪"盘上件的 0x10"，不能证伪"解压 TOC 的 0x10"
+  assert.notEqual(raw.readUInt32LE(0x10), 3335068, '盘上压缩件的 0x10 不该是该值（这正是上一轮核错件的地方）');
+});
+
+test('★★ int 池容量格 = 安装件偏移 `0x114` = `7,375,580`（`0x708ADC`）；`7,375,836` = `0x708BDC` = 该格 `+0x100`', { skip: skipSys4 }, () => {
+  const raw = fs.readFileSync(sys4);
+  assert.equal(raw.readUInt32LE(0x114), 7375580, '安装件 0x114 必须是 0x00708ADC = 7,375,580');
+  assert.equal(raw.readUInt32LE(0x114).toString(16), '708adc');
+  // 旧仓那一处把**同一格**的十六进制与另一个十进制并排（"同值"）—— 那个十进制恰好是本值 +0x100：
+  assert.equal(7375836, 0x708bdc, '7,375,836 的十六进制就是 0x708BDC（不是 0x708ADC）');
+  assert.equal(7375836 - raw.readUInt32LE(0x114), 0x100, '两者相差正好 0x100 = 256');
+});
+

@@ -17,9 +17,21 @@
  *   基址 `0xA509C`，`opcode = (偏移−0xA509C)/4`）——与旧仓 `analysis/opcodes.json` **逐条一致**。
  * * `name` / `argc`：来自本仓 `packages/age-format/src/asm/instruction-set.json`（它由旧表派生，
  *   派生链见 `pnpm tools opcodes`）。
- * * `staticUses`：在 492 个反汇编 .BIN 上按 argc 走一遍数出来的**出现次数**。
+ * * `staticUses`：在一份**可复算的语料**上按 argc 走一遍数出来的**出现次数**（走法见下面那段）。
  *   ★ 它是**可复算的观察**（不是估计）：`0` 表示"整个语料里一条都没有"。
  *   这批 0 是很有用的判据 —— 未出现的指令**不可能**被语料当作已验证行为，动它们只影响推理不影响产物。
+ *
+ * ★★ **语料来源的订正（2026-10，需求单 `REQ-01M4G9YTEKGER7N99C3M7F443R`）**：
+ *   原口径是"`<repo>/dist/install` 那 492 个 `.BIN`"—— 那是 `pnpm tools release install` 的
+ *   **发行产物**（基础树 + `patch.json` 覆盖件），**换一台机器就不存在**，而且它还会随译文变
+ *   ⇒ 守卫在那里只会**静默 skip**，而 `staticUses` 会随每次重装漂。
+ *   现口径 = **清单 `corpus/assets.json` 的 `roots.gameInstall` + ALF 解出的原始语料**
+ *   （与 `tools/test/emulator-headless-logo.assets.test.mjs` 同源取法）：`SYS4INI.BIN` 当索引、
+ *   `readAlf` + `loadPayloads` 取 **565 个 `.BIN` 条目**（本机实测 565 个全部取到）。
+ *   ⇒ **这一次把全部 39 条按新语料重数了一遍**（旧值 = 发行树那一份，逐条可见 `git log -L`）。
+ *   ★ 零出现集合随之变化（**6 条 → 7 条**）：
+ *     旧 = `0x2D2 0x2D4 0x2D6 0x2DF 0x2E0 0x2E1`；新 = 旧 + **`0x2E4`**（`0x2E4` 旧语料算到 1、新语料 0）。
+ *     ⚠ 这正是"发行树 vs 原始语料**不是同一份语料**"的证据：拿哪一份量，结论就不同。
  *
  * ## 边界（★ 不硬塞进来的）
  * * `0x5D/0x60` 之外的"内存/数组/指针"族（`0x2D8 set-array-to` / `0x64 copy-local-array` /
@@ -38,8 +50,10 @@
  * （独立复核抓到，我复算确认）：
  *   * **走法 A（当前口径）**：起点 = v4 的 56 字节 / v5 的 64 字节；遇到未知 opcode 就 `+4` **重同步**；一直扫到文件尾。
  *   * **走法 B（引擎迭代器 `iterate.mjs`）**：起点 = 头部长度（v4 **60**）；按**动态前压的指令区终点**停。
- * ⇒ 两者给出**同一组 6 条零出现**（`0x2D2 0x2D4 0x2D6 0x2DF 0x2E0 0x2E1`），但 B 另外把 6 条
- *   （`0x2D7 0x2D9 0x2DD 0x2E2 0x2E3 0x2E4`）也算成 0 —— 因为**每个文件它只解析到第一个结构异常为止**。
+ * ⇒ 两者在**旧（发行树）语料**上都给出同一组 6 条零出现（`0x2D2 0x2D4 0x2D6 0x2DF 0x2E0 0x2E1`），
+ *   但 B 另外把 6 条（`0x2D7 0x2D9 0x2DD 0x2E2 0x2E3 0x2E4`）也算成 0 —— 因为**每个文件它只解析到第一个结构异常为止**。
+ *   ★ 换成**新（ALF 原始）语料**之后两法也会分叉（实测 `0x50` 走法 A 62945 / 装载器 62932；`0x2D2` A 1 / 装载器 0）
+ *   ⇒ 语料来源与走法是**两件必须一起说清**的事。
  * ★ **该用哪个是"判断"而不是"测量"**（A 量"文件里有多少条"，B 量"引擎会执行多少条"）：
  *   本模型暂用 A 的数，并把这个选择**显式留在这里**，等迭代系统接入执行时再定。
  */
@@ -61,48 +75,48 @@ export interface NumericOp {
 
 export const NUMERIC_OPS: NumericOp[] = [
   // —— 0x50..0x5F：整数双目 + mov（旧仓 ARITHMETIC_OPS，逐条机械核实）
-  { opcode: 0x50, name: 'add', argc: 3, staticUses: 70439, semantics: 'op1 = op2 + op3' },
-  { opcode: 0x51, name: 'sub', argc: 3, staticUses: 48129, semantics: 'op1 = op2 − op3' },
-  { opcode: 0x52, name: 'mul', argc: 3, staticUses: 7475, semantics: 'op1 = op2 * op3' },
-  { opcode: 0x53, name: 'div', argc: 3, staticUses: 2487, semantics: 'op1 = op2 / op3（除 0 ⇒ 引擎抛）' },
-  { opcode: 0x54, name: 'mod', argc: 3, staticUses: 758, semantics: 'op1 = op2 % op3（C 截断；0 ⇒ 抛）' },
-  { opcode: 0x55, name: 'mov', argc: 2, staticUses: 448922, semantics: 'op1 = op2（只读 op2、只写 op1）' },
-  { opcode: 0x56, name: 'and', argc: 3, staticUses: 57685, semantics: 'op1 = op2 & op3' },
-  { opcode: 0x57, name: 'or', argc: 3, staticUses: 52973, semantics: 'op1 = op2 | op3' },
-  { opcode: 0x58, name: 'sar', argc: 3, staticUses: 8, semantics: 'op1 = op2 >> op3（算术右移）' },
-  { opcode: 0x59, name: 'shl', argc: 3, staticUses: 348, semantics: 'op1 = op2 << op3' },
-  { opcode: 0x5a, name: 'eq', argc: 3, staticUses: 211725, semantics: 'op1 = (op2 == op3)' },
-  { opcode: 0x5b, name: 'ne', argc: 3, staticUses: 5254, semantics: 'op1 = (op2 != op3)' },
-  { opcode: 0x5c, name: 'lt', argc: 3, staticUses: 40661, semantics: 'op1 = (op2 < op3)（有符号）' },
-  { opcode: 0x5d, name: 'lte', argc: 3, staticUses: 624, semantics: 'op1 = (op2 <= op3)' },
-  { opcode: 0x5e, name: 'gr', argc: 3, staticUses: 3424, semantics: 'op1 = (op2 > op3)' },
-  { opcode: 0x5f, name: 'gre', argc: 3, staticUses: 5859, semantics: 'op1 = (op2 >= op3)' },
+  { opcode: 0x50, name: 'add', argc: 3, staticUses: 62945, semantics: 'op1 = op2 + op3' },
+  { opcode: 0x51, name: 'sub', argc: 3, staticUses: 41053, semantics: 'op1 = op2 − op3' },
+  { opcode: 0x52, name: 'mul', argc: 3, staticUses: 7188, semantics: 'op1 = op2 * op3' },
+  { opcode: 0x53, name: 'div', argc: 3, staticUses: 2265, semantics: 'op1 = op2 / op3（除 0 ⇒ 引擎抛）' },
+  { opcode: 0x54, name: 'mod', argc: 3, staticUses: 761, semantics: 'op1 = op2 % op3（C 截断；0 ⇒ 抛）' },
+  { opcode: 0x55, name: 'mov', argc: 2, staticUses: 388871, semantics: 'op1 = op2（只读 op2、只写 op1）' },
+  { opcode: 0x56, name: 'and', argc: 3, staticUses: 50770, semantics: 'op1 = op2 & op3' },
+  { opcode: 0x57, name: 'or', argc: 3, staticUses: 46511, semantics: 'op1 = op2 | op3' },
+  { opcode: 0x58, name: 'sar', argc: 3, staticUses: 58, semantics: 'op1 = op2 >> op3（算术右移）' },
+  { opcode: 0x59, name: 'shl', argc: 3, staticUses: 368, semantics: 'op1 = op2 << op3' },
+  { opcode: 0x5a, name: 'eq', argc: 3, staticUses: 184707, semantics: 'op1 = (op2 == op3)' },
+  { opcode: 0x5b, name: 'ne', argc: 3, staticUses: 4798, semantics: 'op1 = (op2 != op3)' },
+  { opcode: 0x5c, name: 'lt', argc: 3, staticUses: 35539, semantics: 'op1 = (op2 < op3)（有符号）' },
+  { opcode: 0x5d, name: 'lte', argc: 3, staticUses: 712, semantics: 'op1 = (op2 <= op3)' },
+  { opcode: 0x5e, name: 'gr', argc: 3, staticUses: 3329, semantics: 'op1 = (op2 > op3)' },
+  { opcode: 0x5f, name: 'gre', argc: 3, staticUses: 4945, semantics: 'op1 = (op2 >= op3)' },
   // —— 单目 / 位 / 随机
-  { opcode: 0x60, name: 'random', argc: 2, staticUses: 22, semantics: 'op1 = rand() % op2（★ 本族**唯一非确定性**；op2==0 ⇒ 先写 op1=0 再抛）', touchesEngineState: '写 `Engine+0x69330h`（`inc` / `cmp …,0Ch` / 归零 ⇒ **上限 12 的计数器**：每条指令最多重掷 12 次）' },
-  { opcode: 0x135, name: 'bit-set', argc: 2, staticUses: 1088, semantics: 'op1 |= (1<<op2)（位号 >0x1F ⇒ 打错误串后继续，不写 op1）' },
-  { opcode: 0x136, name: 'bit-reset', argc: 2, staticUses: 194, semantics: 'op1 &= ~(1<<op2)（同上越界）' },
-  { opcode: 0x13f, name: 'check-bit', argc: 3, staticUses: 93, semantics: 'op1 = ((1<<op3) & op2) != 0（**位号是 op3**）' },
+  { opcode: 0x60, name: 'random', argc: 2, staticUses: 79, semantics: 'op1 = rand() % op2（★ 本族**唯一非确定性**；op2==0 ⇒ 先写 op1=0 再抛）', touchesEngineState: '写 `Engine+0x69330h`（`inc` / `cmp …,0Ch` / `jle` / 归零 ⇒ **进入次数**计数器，第 13 次进入归零；★ 体内**没有重掷循环**，只有一次 `call _rand`）' },
+  { opcode: 0x135, name: 'bit-set', argc: 2, staticUses: 1089, semantics: 'op1 |= (1<<op2)（位号 >0x1F ⇒ 打错误串后继续，不写 op1）' },
+  { opcode: 0x136, name: 'bit-reset', argc: 2, staticUses: 236, semantics: 'op1 &= ~(1<<op2)（同上越界）' },
+  { opcode: 0x13f, name: 'check-bit', argc: 3, staticUses: 175, semantics: 'op1 = ((1<<op3) & op2) != 0（**位号是 op3**）' },
   // —— 浮点族
   { opcode: 0x191, name: '', argc: 2, staticUses: 14, semantics: 'op1 = fabs(op2)（浮点）' },
-  { opcode: 0x2d0, name: '', argc: 3, staticUses: 11, semantics: '浮点双目（fadd 位）' },
-  { opcode: 0x2d1, name: '', argc: 3, staticUses: 12, semantics: '浮点双目（fsub 位）' },
-  { opcode: 0x2d2, name: '', argc: 3, staticUses: 0, semantics: '浮点双目（fmul 位）' },
-  { opcode: 0x2d3, name: '', argc: 3, staticUses: 4, semantics: '浮点双目（fdiv 位）' },
+  { opcode: 0x2d0, name: '', argc: 3, staticUses: 13, semantics: '浮点双目（fadd 位）' },
+  { opcode: 0x2d1, name: '', argc: 3, staticUses: 13, semantics: '浮点双目（fsub 位）' },
+  { opcode: 0x2d2, name: '', argc: 3, staticUses: 1, semantics: '浮点双目（fmul 位）' },
+  { opcode: 0x2d3, name: '', argc: 3, staticUses: 8, semantics: '浮点双目（fdiv 位）' },
   { opcode: 0x2d4, name: '', argc: 3, staticUses: 0, semantics: 'fmod(op2,op3)（符号跟随除数）' },
-  { opcode: 0x2d5, name: 'float-mov', argc: 2, staticUses: 13076, semantics: 'op1 = op2（float→float）' },
+  { opcode: 0x2d5, name: 'float-mov', argc: 2, staticUses: 11109, semantics: 'op1 = op2（float→float）' },
   { opcode: 0x2d6, name: '', argc: 2, staticUses: 0, semantics: '类型转换：整数 op2 → 浮点 op1' },
   // —— 语义未解（★ 只登记存在，不写语义）
   { opcode: 0x2d7, name: '', argc: 2, staticUses: 1, semanticsUnknown: true },
-  { opcode: 0x2d9, name: '', argc: 2, staticUses: 2, semanticsUnknown: true },
-  { opcode: 0x2da, name: '', argc: 8, staticUses: 93, semanticsUnknown: true, touchesEngineState: '体内出现 `Engine+0x14D30` / `+0x313D0`（语义未解，不猜）' },
+  { opcode: 0x2d9, name: '', argc: 2, staticUses: 3, semanticsUnknown: true },
+  { opcode: 0x2da, name: '', argc: 8, staticUses: 99, semanticsUnknown: true, touchesEngineState: '体内出现 `Engine+0x14D30` / `+0x313D0`（语义未解，不猜）' },
   { opcode: 0x2db, name: '', argc: 1, staticUses: 1, semanticsUnknown: true, touchesEngineState: '写 `Engine+0x313D0`（实测 `mov [esi+313D0h],eax`）' },
-  { opcode: 0x2dd, name: '', argc: 2, staticUses: 3, semanticsUnknown: true, touchesEngineState: '读 `Engine+0x460F0` / `+0x460F4`' },
+  { opcode: 0x2dd, name: '', argc: 2, staticUses: 5, semanticsUnknown: true, touchesEngineState: '读 `Engine+0x460F0` / `+0x460F4`' },
   { opcode: 0x2df, name: '', argc: 3, staticUses: 0, semanticsUnknown: true },
-  { opcode: 0x2e0, name: '', argc: 3, staticUses: 0, semanticsUnknown: true },
-  { opcode: 0x2e1, name: '', argc: 3, staticUses: 0, semanticsUnknown: true },
+  { opcode: 0x2e0, name: '', argc: 3, staticUses: 1, semanticsUnknown: true },
+  { opcode: 0x2e1, name: '', argc: 3, staticUses: 1, semanticsUnknown: true },
   { opcode: 0x2e2, name: '', argc: 3, staticUses: 1, semanticsUnknown: true },
   { opcode: 0x2e3, name: '', argc: 3, staticUses: 1, semanticsUnknown: true },
-  { opcode: 0x2e4, name: '', argc: 3, staticUses: 1, semanticsUnknown: true },
+  { opcode: 0x2e4, name: '', argc: 3, staticUses: 0, semanticsUnknown: true },
 ];
 
 /** ★ 语料里**一条都没有**的那些（静态出现次数 0）—— 有意义的判据，不是"没见过"的含糊说法 */
@@ -110,7 +124,9 @@ export const UNUSED_IN_CORPUS = NUMERIC_OPS.filter((o) => o.staticUses === 0).ma
 
 /**
  * ★★ **本族里"并不纯"的例外**（独立复核抓到；原先那条全称断言**不成立**）：
- * * `0x60 random` —— 写 `Engine+0x69330h`（`inc` / `cmp …,0Ch` / 归零）：**上限 12 的计数器**。
+ * * `0x60 random` —— 写 `Engine+0x69330h`（`inc` / `cmp …,0Ch` / `jle` / 归零）：**进入次数**计数器
+ *   （★ 不是"重掷计数器"：体内**没有回跳重掷循环**，只有一次 `call _rand`；`.lst:68761-68768`，
+ *   第 13 次进入归零）。
  * * `0x2DA` / `0x2DB` / `0x2DD` —— 分别碰 `+0x14D30` `+0x313D0` / `+0x313D0` / `+0x460F0`/`+0x460F4`。
  * ⇒ 正确的说法是"**这一族是数值搬运/算术，其中 4 条还碰引擎状态**"。逐条列在这里，由守卫核对
  *   （谁改动它、或新增例外，都会红）。口径与理由见知识台账：`data/ledger/`

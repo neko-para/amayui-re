@@ -26,11 +26,12 @@
 import type { InstrArg } from '../model/iterate.ts';
 import type { LoadedScript } from './script.ts';
 import type { Machine, ScriptFrame } from './machine.ts';
+import { FRAME_SLOT_COUNT } from './machine.ts';
 import { addressOfOperand, asFloat, asInt32, asUint32, floatFromBits, GLOBAL_POOL_BY_TYPE_TAG, readOperand, readOperandAsText, writeOperand } from './operand.ts';
-import { instructionIndexAt, labelByteOffsetOf } from './script.ts';
+import { instructionIndexAt, labelByteOffsetOf, localCountList } from './script.ts';
 import type { OperandValue } from './operand.ts';
 import { localPoolByTypeTag } from '../model/pools.ts';
-import { ENGINE_SCALAR_ARRAYS, ENGINE_SCALAR_WRITES } from '@amayui/age-format/src/engine/layout.mts';
+import { ENGINE_SCALAR_ARRAYS, ENGINE_SCALAR_BITS, ENGINE_SCALAR_WRITES, type CallArgForm } from '@amayui/age-format/src/engine/layout.mts';
 import { encInt, encZero } from '@amayui/age-format/src/asm/value-codec.mts';
 
 /** 一个 handler 拿到的东西（**够用就好**：不要把手伸进 machine 的内部状态） */
@@ -214,11 +215,13 @@ const opIntToFloat: Handler = (ctx) => put(ctx, 0, fnum(ctx, 1));
 const opExit: Handler = (ctx) => {
   const f = ctx.frame;
   if (f.caller < 0) {
-    ctx.machine.effect('system', 'script.exit', 'modeled', { script: f.scriptName, depth: ctx.machine.frames.length });
+    ctx.machine.effect('system', 'script.exit', 'modeled', { script: f.scriptName, depth: ctx.machine.depth });
     ctx.machine.diag.stopReason = 'exit';
     throw new ExitScript();
   }
-  ctx.machine.frames.pop();
+  // ★ 弹帧走 `Machine.popFrame()`（`slots[cur--] = null`）—— ⛔ 不许再在这里裸改 `Machine` 的槽数组：
+  //   那样"帧怎么弹"就有两处口径，而 `popFrame` 会变成**零调用点**的死方法（本仓上一版就是这样）。
+  ctx.machine.popFrame();
   ctx.machine.effect('system', 'script.exit', 'modeled', { script: f.scriptName, returnedTo: f.caller });
 };
 
@@ -381,7 +384,7 @@ const opCallScript: Handler = (ctx) => {
   const id = num(ctx, 0);
   const script = ctx.machine.loadScriptById(id, { asRoot: false }); // 只登记字节；压帧在下面（顺序清楚）
   const caller = ctx.frame;
-  const frame = ctx.machine.pushFrame(script.name, caller.cur);
+  const frame = ctx.machine.pushFrame(script.name, caller.cur, localCountList(script.header));
   ctx.machine.effect('system', 'script.load', 'modeled', {
     via: 'call-script', id, target: script.name, from: caller.scriptName,
     instructions: script.instructions.length, callerCur: caller.cur, newCur: frame.cur,
@@ -421,14 +424,20 @@ const opRet: Handler = (ctx) => {
  *   记录（写明**被调符号**与实参）。口径与理由见知识台账：`data/ledger/`
  *   （域 `Emulator`，subject `vm/ops-forward-logged-only`）。
  * * ⛔ **不猜 argc**：每条都照 handler 体自己写的长度字核对过（见 `handlers.mts` 的注释）。
+ *   ★ `argc` = **handler 读几个操作数**；`callArgs` = **callee 收到哪些实参**（两者不必相等：
+ *   `0x70` 的 argc 5，而 callee 收 6 个显式实参 —— 最后一个是**写死的 0**）。
  */
 type PrologueEntry =
   /** 体里除了协议写什么都没有 ⇒ 真 no-op（判据：`sub_419690` 的整个体） */
   | { opcode: number; kind: 'noop'; why: string }
   /** 读操作数 → 写标量；标量名由 `ENGINE_SCALAR_WRITES` 给 */
   | { opcode: number; kind: 'scalar' }
-  /** 转发进子系统（**未建模**）：逐次记 `logged-only`，附被调符号 */
-  | { opcode: number; kind: 'forward'; callee: string; argc: number; note: string };
+  /**
+   * 转发进子系统（**未建模**）：逐次记 `logged-only`，附被调符号 + **完整实参形态**。
+   * ★ `callArgs`（可选）描述 **callee 收到的实参序列**（含接收者/`this`，因为它同样不是操作数）；
+   *   ⛔ 不写 ⇒ 按"只有操作数 0..argc-1"记（那是**没取证更多**，不是"callee 只收这些"）。
+   */
+  | { opcode: number; kind: 'forward'; callee: string; argc: number; note: string; callArgs?: readonly CallArgForm[] };
 
 const PROLOGUE: PrologueEntry[] = [
   // ★ 订正（台账 `01M4FECPZS5F60297T5S2Q253Z`）：下面那条 `why` 里的"体只有两条"是 Hex-Rays 的
@@ -444,8 +453,16 @@ const PROLOGUE: PrologueEntry[] = [
   { opcode: 0x1ca, kind: 'forward', callee: '(vtable+12)', argc: 1, note: '对 `Engine+0xAA514` 的对象走 vtable 调用，实参含 op1 与一个静态字符串（★ 偏移订正：逐字 `lea esi,[ecx+0AA514h]`；原先写 `0xAA614` 是抄错）' },
   { opcode: 0x324, kind: 'forward', callee: 'sub_453530', argc: 0, note: '无操作数；实参取自 `Engine` 的某个字段' },
   { opcode: 0x32f, kind: 'forward', callee: 'sub_49A150', argc: 1, note: '转发进 `Engine+0x4ED10` 那个容器（与 draw-item/计时窗同族）' },
-  { opcode: 0x70, kind: 'forward', callee: 'sub_45D660', argc: 5, note: '转发进 `Engine+0x14D30` 那个子系统，argc 5' },
-  { opcode: 0x71, kind: 'forward', callee: 'sub_45EC60/sub_48FFB0', argc: 1, note: '转发 + 两处整块拷贝 + 一次 vtable 调用（体较长，未逐句建模）' },
+  // ★ `0x70`（handler `sub_41ED20`，argc 5）：callee `sub_45D660` 收 **6 个显式实参** ——
+  //   操作数 1..5 **加一个写死的 `0`**。逐字（`.lst:46036-46069`）：`0x41ED30 push 0` 是**最先压**的那个
+  //   （= 最深的实参），随后 5 次 `push k` + `call sub_41BF50` 取回操作数逐个 `push eax`
+  //   ⇒ 栈上从顶到底 = op1,op2,op3,op4,op5,**0**。callee 的形参是 `(this, a2..a7)`
+  //   ⇒ `a7 == 0` **恒成立** ⇒ callee 里 `if (a7 >= 0)` 那条门在本层**永远看不见**（原先只记了 5 个操作数）。
+  { opcode: 0x70, kind: 'forward', callee: 'sub_45D660', argc: 5, note: '转发进 `Engine+0x14D30` 那个子系统，argc 5；★ callee 还收一个**写死的 0**（第 6 个显式实参 = `a7`）', callArgs: [{ kind: 'slot', name: 'Engine.d21324' }, { kind: 'operand', index: 0 }, { kind: 'operand', index: 1 }, { kind: 'operand', index: 2 }, { kind: 'operand', index: 3 }, { kind: 'operand', index: 4 }, { kind: 'const', value: 0 }] },
+  // ★ `0x71`（handler `sub_41ED80`，argc 1）：`sub_45EC60(Engine+0x14D30, op1, Engine[97055])` ——
+  //   第 3 个实参**不是操作数**，是引擎槽 `Engine.d97055`（callee 里当 **bit31 门**用）。
+  //   逐字（`.lst:46147` 上游）：`0x41EE8D or dword ptr [ebx+0AAB44h], 8000000h` 是**置 bit27**（见 `ENGINE_SCALAR_BITS`）。
+  { opcode: 0x71, kind: 'forward', callee: 'sub_45EC60/sub_48FFB0', argc: 1, note: '转发 + 两处整块拷贝 + 一次 vtable 调用（体较长，未逐句建模）；★ 第 3 个实参是引擎槽 `Engine.d97055`', callArgs: [{ kind: 'slot', name: 'Engine.d21324' }, { kind: 'operand', index: 0 }, { kind: 'slot', name: 'Engine.d97055' }] },
   { opcode: 0x73, kind: 'forward', callee: 'sub_453AD0/+', argc: 10, note: '前段最长的一条（10 个操作数）' },
   { opcode: 0x79, kind: 'forward', callee: 'sub_4563A0', argc: 3, note: '转发进 `Engine+0x14D30`' },
   { opcode: 0x1c1, kind: 'forward', callee: 'sub_4563D0', argc: 3, note: '转发进 `Engine+0x14D30`' },
@@ -467,8 +484,13 @@ const PROLOGUE: PrologueEntry[] = [
 export const PROLOGUE_OPCODES: readonly { opcode: number; kind: PrologueEntry['kind'] }[] =
   Object.freeze(PROLOGUE.map((e) => Object.freeze({ opcode: e.opcode, kind: e.kind })));
 
-/** 知识层登记过的标量名（模型引用的名字必须在这里 —— 否则就是模型自己编了个偏移） */
-const SCALAR_NAMES = new Set(ENGINE_SCALAR_WRITES.map((w) => w.name));
+/** 知识层登记过的标量名（模型引用的名字必须在这里 —— 否则就是模型自己编了个偏移）。
+ *  ★ **两张表都算**：`ENGINE_SCALAR_WRITES`（"= 操作数"那族）与 `ENGINE_SCALAR_BITS`（条件位副作用那族，
+ *  例 `Engine.d174801` 只出现在后者里）。 */
+const SCALAR_NAMES = new Set([
+  ...ENGINE_SCALAR_WRITES.map((w) => w.name),
+  ...ENGINE_SCALAR_BITS.map((b) => b.name),
+]);
 
 /** 按 opcode 归拢"要写哪些标量"（名字与形态都来自知识层，本文件不重复它们） */
 const SCALARS_BY_OPCODE = new Map<number, (typeof ENGINE_SCALAR_WRITES)[number][]>();
@@ -484,6 +506,56 @@ function scalarName(name: string): string {
     throw new Error(`模型引用了知识层没登记的标量槽「${name}」—— 见 age-format/src/engine/layout.mts 的 ENGINE_SCALAR_WRITES`);
   }
   return name;
+}
+
+/**
+ * 实参形态 → **记账标签**（★ 欠账里必须一眼看出"这个位置传的是操作数 / 常量 / 引擎槽"）。
+ * ★ 为什么值得单独记一个标签：`args` 里的**数值**分不出"脚本给的操作数 0"与"handler 写死的 0" ——
+ *   而那正是同一条分支"永远走不到"与"走了但没记录"的唯一区别。
+ */
+function callArgLabel(a: CallArgForm): string {
+  if (a.kind === 'operand') return `operand#${a.index}`;
+  if (a.kind === 'const') return `const ${a.value}`;
+  return a.name;
+}
+
+/** 实参形态 → 当前值（**只为记账**；不参与建模，⛔ 不拿它当门判分支） */
+function callArgValue(ctx: VmContext, a: CallArgForm): number {
+  if (a.kind === 'operand') return num(ctx, a.index);
+  if (a.kind === 'const') return a.value;
+  return ctx.machine.scalars.read(a.name);
+}
+
+/** 缺省形态：操作数 0..argc-1（= "还没取证更多实参"那档） */
+function operandForms(argc: number): CallArgForm[] {
+  return Array.from({ length: argc }, (_, i) => ({ kind: 'operand', index: i }) as const);
+}
+
+/**
+ * 应用知识层登记的**条件副作用**（`ENGINE_SCALAR_BITS`）：写常量 / 位置位 / 位清除。
+ *
+ * ★ 为什么必须真的**落状态**（而不是只记一笔）：只发日志的话，"这个位现在是 0 还是 1"就**答不出来** ——
+ *   后面若有分支读它，本层会**静默走错**（而日志看起来一切正常）。这正是原欠账的内容。
+ * ★ 门（`when`）与形态（`op`/`value`/`mask`）都是**知识层的事实**，本层只照抄（⛔ 不在这里判"该不该置位"）。
+ * ★ 表驱动：**没登记的 opcode ⇒ 什么都不做、也不发记录**（新增一条 = 在表里加一行）。
+ * ★ 两个 handler 族都调它（`scalarHandler` 与 `forwardHandler`）：`0x88` 属前者、`0x71` 属后者。
+ */
+function applyScalarBits(ctx: VmContext, opcode: number, v: number): void {
+  for (const b of ENGINE_SCALAR_BITS) {
+    if (b.opcode !== opcode) continue;
+    const hit = b.when === 'always' ? true : b.when === 'op1!=0' ? v !== 0 : v === 0;
+    if (!hit) continue;
+    const name = scalarName(b.name);
+    if (b.op === 'write') ctx.machine.scalars.write(name, b.value!);
+    else if (b.op === 'set') ctx.machine.scalars.setBits(name, b.mask!);
+    else ctx.machine.scalars.clearBits(name, b.mask!);
+    ctx.machine.effect('system', 'engine.scalar.bits', 'modeled', {
+      opcode: `0x${opcode.toString(16)}`, slot: name, op: b.op, when: b.when,
+      ...(b.op === 'write' ? { value: b.value } : { mask: b.mask }),
+      now: ctx.machine.scalars.read(name),
+      note: '★ 条件副作用（知识层 `ENGINE_SCALAR_BITS`）——**已落状态**："这个位现在 0 还是 1"答得出来',
+    });
+  }
 }
 
 /** `bswap24`：实现知识层登记的那个写形态 `bswap24(op1)` —— 定义见 `layout.mts` 的
@@ -512,23 +584,29 @@ function scalarHandler(opcode: number, extra?: (ctx: VmContext, v: number) => vo
     const v = num(ctx, 0);
     for (const w of writes) {
       // ★ `const`：引擎写的是**常量**（逐字里就是立即数），与操作数无关
-      const value = w.form === 'const' ? (w as { value?: number }).value!
+      const value = w.form === 'const' ? w.value!
         : w.form === 'op2' ? num(ctx, 1)
           : w.form === 'bool(op1)' ? (v !== 0 ? 1 : 0)
             : w.form === 'bswap24(op1)' ? bswap24(v) : v;
       // ★ 知识层登记了 `max` ⇒ 这是**引擎自己**的范围检查（越界它抛 C++ 异常）——
       //   本层照抄：⛔ 不许 clamp、不许静默截断（那会把"脚本写错了"变成"值变了一点"）。
-      const capped = (w as { max?: number }).max;
+      const capped = w.max;
       if (capped !== undefined && value > capped) {
         throw new Error(`opcode 0x${opcode.toString(16)} 的操作数 ${value} 超出引擎的范围检查（> 0x${capped.toString(16)}）—— 引擎这里抛异常`);
       }
       ctx.machine.scalars.write(scalarName(w.name), value);
       // ★★ 写完标量之后那次子系统调用**必须记进欠账**（知识层的 `callsAfter`）。
       //    少了这一条，"handler 里未建模的那次调用"就不会出现在保真欠账里 ⇒ 日志显得比实际干净。
-      for (const callee of w.callsAfter ?? []) {
+      //    ★ 2026-10：欠账里还要能看出 ① 是**尾跳**还是会回来的调用（`transfer`）、
+      //      ② 每个位置的实参**形态**（操作数 / 常量 / 引擎槽）—— 见 `ScalarCallAfter`。
+      for (const call of w.callsAfter ?? []) {
+        const forms = call.args ?? operandForms(1);
         ctx.machine.effect('system', 'engine.forward', 'logged-only', {
-          opcode: `0x${opcode.toString(16)}`, callee, args: [v],
-          note: '标量写**之后**的一次未建模子系统调用（知识层 `callsAfter`）',
+          opcode: `0x${opcode.toString(16)}`, callee: call.callee, transfer: call.transfer,
+          args: forms.map((a) => callArgValue(ctx, a)),
+          argForms: forms.map(callArgLabel),
+          note: `标量写**之后**的一次未建模子系统调用（知识层 \`callsAfter\`；transfer = ${call.transfer}` +
+            `${call.transfer === 'tail' ? ' = **尾跳**，本 handler 不回来' : ' = 会返回'}）`,
         });
       }
     }
@@ -539,6 +617,9 @@ function scalarHandler(opcode: number, extra?: (ctx: VmContext, v: number) => vo
       value: v,
       note: '槽的**含义未定**（知识层只登记了"谁写它"）—— 本层只保证"写进去的读出来还是它"',
     });
+    // ★★ 写完标量之后的**条件副作用**（知识层 `ENGINE_SCALAR_BITS`）—— 必须真的落状态，
+    //    否则"这个位现在是 0 还是 1"答不出来（`0x88` 就是这类：清 `Engine.d174801` 的 bit27）。
+    applyScalarBits(ctx, opcode, v);
   };
 }
 
@@ -582,31 +663,38 @@ const opScalar78 = scalarHandler(0x78);
 const opScalar2db = scalarHandler(0x2db);
 
 /**
- * `0x88`：写两个标量（都 = op1），**外加两个条件副作用**。
- * 那两个副作用的**槽与形态**在知识层 `layout.mts`（`Engine.d122368` 写常量 1 /
- * `Engine.d174801` 清 `0x8000000` —— 形态是"常量写 / 位清除"）。
- * ★ 它们**不在** `ENGINE_SCALAR_WRITES` 里（那张表登记的形态是"写成 op1 原值"）⇒ 本批**只记录、不建模**，
- *   并留痕。⇒ 这是一个**已知欠账**（已登记进需求树），不假装它已经解决。
+ * `0x88`：写两个**登记过的**标量（都 = op1），**外加两条条件副作用**（知识层 `ENGINE_SCALAR_BITS`）：
+ * ```
+ *   if (op1) Engine.d122368 = 1;          ; 写常量 1     （`.text:0041FAE4`）
+ *   else     Engine.d174801 &= ~0x8000000 ; 清 bit27     （`.text:0041FAF0`）
+ * ```
+ * ★ 这两条**不在** `ENGINE_SCALAR_WRITES` 里（那张表的 `form` 表达不了"条件二选一 + 位操作"）
+ *   ⇒ 它们在**另一张**知识层表 `ENGINE_SCALAR_BITS`，由 `scalarHandler` 末尾的 `applyScalarBits` 落地。
+ * ★ 对偶（观察，不是解释）：`0x71`（`sub_41ED80`）**置**同一位（`.text:0041EE8D`）。
  */
-const opScalar88 = scalarHandler(0x88, (ctx, v) => {
-  const side = v !== 0 ? '常量写 1（`this[122368] = 1`）' : '位清除（`this[174801] &= ~0x8000000`）';
-  ctx.machine.effect('system', 'engine.scalar.bits', 'logged-only', {
-    opcode: '0x88', side,
-    note: '★ 形态是"常量/位操作"而非"= op1" ⇒ **未登记进知识层**、目前只记录不建模（欠账见需求树）',
-  });
-});
+const opScalar88 = scalarHandler(0x88);
 
 const opNoop1a8: Handler = () => { /* 体只有协议写（取证见 PROLOGUE 表里的 why） */ };
 
-/** 转发类：**不建模**，但**逐次留痕**（写明被调符号与实参值）—— 绝不静默空操作 */
+/**
+ * 转发类：**不建模**，但**逐次留痕**（写明被调符号与实参）—— 绝不静默空操作。
+ * ★ 实参按知识层的 `callArgs` 记**形态**（操作数 / 常量 / 引擎槽）；没写 `callArgs` ⇒ 只有操作数
+ *   （= "还没取证更多"，**不**等于 callee 只收这些）。
+ */
 function forwardHandler(entry: Extract<PrologueEntry, { kind: 'forward' }>): Handler {
   return (ctx) => {
-    const args: number[] = [];
-    for (let i = 0; i < entry.argc; i += 1) args.push(num(ctx, i));
+    const forms = entry.callArgs ?? operandForms(entry.argc);
     ctx.machine.effect('system', 'engine.forward', 'logged-only', {
-      opcode: `0x${entry.opcode.toString(16)}`, callee: entry.callee, args, note: entry.note,
+      opcode: `0x${entry.opcode.toString(16)}`, callee: entry.callee,
+      transfer: 'call', // ★ 转发类的 handler 体都是 `call … ; retn`（会回来）；**尾跳**只出现在 `callsAfter`
+      args: forms.map((a) => callArgValue(ctx, a)),
+      argForms: forms.map(callArgLabel),
+      note: entry.note,
     });
     ctx.machine.note('forward-not-modelled', `0x${entry.opcode.toString(16)} → ${entry.callee}（子系统未建模，只记录）`);
+    // ★★ 转发类里也有**条件副作用**（知识层 `ENGINE_SCALAR_BITS`）：`0x71` 置 `Engine.d174801` 的 bit27。
+    //    ⛔ 不落状态就等于"这个位永远是 0" —— 而 `0x88` 正是那个清它的人（成对）。
+    applyScalarBits(ctx, entry.opcode, entry.argc > 0 ? num(ctx, 0) : 0);
   };
 }
 
@@ -1009,8 +1097,8 @@ const COPY_ARRAY_MAX = 1 << 20;
  *
  * 取证（锚 = EA）：handler = `sub_42CBE0`。体做三件事：`dest` 走取址原语（= **op1 那一格的地址**）·
  * `src = 代码区基址 + 4*raw + 4`、`count = 块首 u32`（两者读同一次）· 逐格 `ENC(源 dword)` 后写。
- * ⇒ 文件口径：块首 = `headerLen + 4*raw`（代码区基址 = 知识层 `FRAME_LAYOUT.off.strBase` 那一格
- *   —— 本层同名还有一处 `off.strTable` 指向同一个偏移），数据从 `+4` 起。
+ * ⇒ 文件口径：块首 = `headerLen + 4*raw`（代码区基址 = 知识层 `FRAME_LAYOUT.off.strBase` 那一格，
+ *   绝对 `Engine+0x5D894`），数据从 `+4` 起。
  * ★ 值的编码是**无条件**的（源码里没有按目标池分派），所以这里也直接写 `ENC(源)`；
  *   对 `encoded` 池这与"经池 API 写"逐位相同，对非编码池则正是引擎的行为。
  * ★ `count <= 0` ⇒ 引擎**什么都不做**（逐字 `if (result > 0)`）—— 这里是记一笔后返回，不抛。
@@ -1112,31 +1200,50 @@ function scalarArrayHandler(spec: (typeof ENGINE_SCALAR_ARRAYS)[number]): Handle
  *      ⇒ `ROL(encZero,11) = ROL(key,32) = key`，只要两者同源就恒成立（见 `value-codec.mts`）。
  *   2. **帧深上限**（知识层 `FRAME_LAYOUT.count`）⇒ 越界抛（错误信息照抄引擎那句日文）。
  *   3. **按 id 取脚本字节**（`system.script.load`）——那是可观测的副作用。
- * ★★ **没建模的（记账，不静默）**：装载器真正做的是**在槽 `op2` 上建帧记录**（局部池、
- *   头部计数、ip/flags…），而本层的帧模型是**栈**（`frames[]`，`cur` = 栈深），**表达不了
- *   "往任意槽 `op2` 写记录、装完再切回原来的 cur"**。⇒ 这里只发一条 `logged-only` 欠账，
- *   并把"帧模型要改成 槽 + cur"登记成单（`REQ-01M4E1EH…` 见需求树）。
+ * ★★ **已建 / 欠账的关系（2026-10 重构后，别再把两者混起来写）**
+ *   * **已建**：帧记录真的落到槽 `op2` 上 —— 脚本名 / `cur` = 槽号 / **本帧自己的 local 池** /
+ *     脚本头那 6 个 local 计数（按池序）。落地点 = `Machine.loadFrameAt()`。⇒ `engine.load-frame`
+ *     这一条记 **`modeled`**（引擎态确实变了）。
+ *   * **仍欠**：`sub_40ED40` 里本模型**没有承载面**的那些字段与表（记录 `+0x00` 脚本缓冲、记录 `+0x04` 的 `ip`、
+ *     三组 `(长度, 指针)`（三张 opcode 位置表，记录 `+0x40..+0x54`）、`array_container`(记录 `+0x70`) …）⇒ 另发一条 `logged-only`
+ *     （`engine.load-frame-fields`，仍进 `logged-only` 计数与 `[保真欠账]` 那一档）。
+ *   ⛔ 两条都要发：只发第一条 = "帧记录全建好了"的假象；只发第二条 = 把**已经做了的事**记成没做。
+ *   ★ 槽语义本身的取证**不在这里重复** —— 它登记在台账 `01M4E548CH4C0G45171Z564G7K`（proposed、无 `system`）；
+ *     本轮只补"实现侧已按槽语义落地 + 守卫"。★ 那条记录里的**指针**原先指向 `REQ-01M4E1EH…`
+ *     （**不存在**），真正的单是 `REQ-01M4E4Q11P12MD0PJJDFZPZ5H0`。
  */
 const opLoadFrame: Handler = (ctx) => {
   const id = num(ctx, 0);
-  const cur = num(ctx, 1);
+  const slot = num(ctx, 1);
   // ★ 逐字有两条前置条件：第二条（codec key 与 encZero 的自洽检查）对**任何** key 都恒成立（见上）
   //   ⇒ 不必照抄；⛔ 但第一条（key 为 0 ⇒ 抛）**不能照抄成抛**：
-  //   本层的 key 是**宿主给的自由参数**（`ENV_DEFAULTS.codecKey = 0`），
-  //   而引擎那份是**它启动时自己赋的**、本仓**没有取证**。若照抄，前沿会停在"我的占位值不合法"上 ——
-  //   那是**模型的问题**，不是脚本的问题。⇒ 记一笔（可见），继续走；见需求树的 key 取证单。
+  //   引擎那份 key 是**运行期 `rand` 抽的**（`0x415970` 起 `(rand()<<16)+rand()`、种子 `timeGetTime()/100`、
+  //   全语料唯一写点 `0x417359`；台账 `Engine+0x5EC8C/codec-key-is-rand-derived` = `01M4GTYZ2D2G0V5B2B0Q510G24`）
+  //   ⇒ 它**恒非 0**；而本层的 `ENV_DEFAULTS.codecKey = 0` 是**占位值**。若照抄成抛，前沿会停在
+  //   "我的占位值不合法"上 —— 那是**模型的问题**，不是脚本的问题。⇒ 记一笔（可见），继续走。
   const key = ctx.frame.locals.key >>> 0;
   if (key === 0) {
-    ctx.machine.note('codec-key-placeholder', 'load-frame：本层 codec key 为 0（宿主默认值）—— 引擎自己的那份在启动时赋值、未取证；逐字要求非 0，这里只记录不抛');
+    ctx.machine.note('codec-key-placeholder', 'load-frame：本层 codec key 为 0（宿主占位值）—— 引擎那份是运行期 rand 抽的、恒非 0（唯一写点 EA 0x417359）⇒ 逐字那条前置条件在本层不成立，只记录不抛');
   }
-  if (cur >= 40) {
-    throw new Error(`load-frame：目标帧深 ${cur} ≥ 40 —— 引擎抛「ファイルの階層が深すぎます．最大は%dです．」`);
+  // ★★ 帧深上限（逐字 `0x41C85A cmp eax,28h` / `0x41C85D jl`）：抛的那句日文照抄引擎
+  if (slot >= FRAME_SLOT_COUNT) {
+    throw new Error(`load-frame：目标帧深 ${slot} ≥ ${FRAME_SLOT_COUNT} —— 引擎抛「ファイルの階層が深すぎます．最大は%dです．」`);
   }
   const script = ctx.machine.loadScriptById(id, { asRoot: false });
-  ctx.machine.effect('system', 'engine.load-frame', 'logged-only', {
-    opcode: '0x6', scriptId: id, script: script.name, cur,
-    note: '★ **帧记录没建**：本层帧模型是**栈**，表达不了"往槽 cur 写记录 + 装完恢复 cur"；'
-      + '引擎那边的 `sub_40ED40` 会在槽上建局部池/头部计数 ⇒ 这是**保真欠账**（见需求树的帧模型单）',
+  // ★★ **真的建记录**：落在槽 `slot` 上，而这里**一点都没碰 `cur`** ——
+  //    引擎"临时把 cur 切过去、装完再切回来"的**净效果**就是这件事（逐字见 `Machine.loadFrameAt` 的注释）。
+  const curBefore = ctx.machine.cur;
+  const record = ctx.machine.loadFrameAt(slot, script);
+  ctx.machine.effect('system', 'engine.load-frame', 'modeled', {
+    opcode: '0x6', scriptId: id, script: script.name, slot, cur: ctx.machine.cur,
+    localCounts: [...record.localCounts],
+    note: '★ 帧记录**已建在槽 op2 上**（脚本名 / cur = 槽号 / 本帧自己的 local 池 / 头 6 个 local 计数）；'
+      + `装载前后 cur 都是 ${curBefore}（**没变**）—— 这正是那条槽语义`,
+  });
+  ctx.machine.effect('system', 'engine.load-frame-fields', 'logged-only', {
+    opcode: '0x6', scriptId: id, script: script.name, slot,
+    note: '★ **仍欠**：`sub_40ED40` 里本模型没有承载面的那些字段/表 —— `帧+0x14` 脚本缓冲、`帧+0x18` 的 `ip`、'
+      + '三组 `(长度, 指针)`（三张 opcode 位置表）、`array_container`(`帧+0x84`) 等；它们没有进帧记录 ⇒ 这是**收窄后**的保真欠账',
   });
 };
 

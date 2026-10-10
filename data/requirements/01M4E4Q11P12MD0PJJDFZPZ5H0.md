@@ -2,8 +2,9 @@
 
 - id: REQ-01M4E4Q11P12MD0PJJDFZPZ5H0
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
+- verify: tools/test/emulator-frames.test.mjs#★★ `0x6 load-frame` 的槽语义：记录建在**指定槽 `op2`** 上，而 `cur` **一动都不动**
 
 ## 缺口
 
@@ -29,7 +30,7 @@ Engine[0x5D880] = Engine[0x5D884];      ; ★ **恢复** cur
 把帧模型从**栈**改成**槽数组 + cur**：
 * `slots: (ScriptFrame|null)[]` + `cur: number`；`frame` = `slots[cur]`；
 * `pushFrame` = `slots[++cur] = …`、`popFrame` = `slots[cur--] = null`；
-* **新增** `loadFrameAt(cur, scriptId)` = 在槽上建记录（不改 cur）；
+* **新增** `loadFrameAt(slot, script)` = 在槽上建记录（不改 cur）；★ 实际落地时第二个参数取**已装载的脚本**（"从哪拿字节"与"建记录"分开 —— 与 `loadScriptById`/`pushFrame` 的分工同形），措辞上原先写的 `scriptId` 由 `0x6` 自己先换成脚本；
 * `snapshot()` 要带上 `cur` 与整条 `slots`（含空槽）⇒ 分区表/往返守卫要同步。
 
 ## 判据
@@ -38,3 +39,12 @@ Engine[0x5D880] = Engine[0x5D884];      ; ★ **恢复** cur
 2. 新增守卫：`load-frame` 之后**槽 `op2` 上真的有帧记录**（脚本名 / 局部池 / 头部计数都对得上），
    且**当时的 cur 没变**；
 3. 快照往返仍然逐字节相同。
+
+
+## 收口（2026-10，实现侧已落地）
+
+帧模型已改成**槽数组 + `cur`**（`Machine.slots` / `Machine.cur`）；新增 `Machine.loadFrameAt(slot, script)` =
+在指定槽上建帧记录、**不改 `cur`**，`0x6` 真的用它；`0x02 exit` 改走 `Machine.popFrame()`。
+欠账**收窄**（⛔ 不是消失）：`engine.load-frame` 由 `logged-only` → `modeled`，另加一条
+`logged-only` 的 `engine.load-frame-fields` 记 `sub_40ED40` 里仍无承载面的字段。
+口径与依据见知识台账 `KN-01M4GZSAD4643F4M6K1V075M4D`（槽语义的取证在 `KN-01M4E548CH4C0G45171Z564G7K`，本条不重复）。

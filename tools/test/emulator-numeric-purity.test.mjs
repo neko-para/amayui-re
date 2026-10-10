@@ -12,7 +12,9 @@
  * 1. 体内**必须**调用取操作数原语（`sub_41BF50` 读值 / `sub_42B4B0` 写值；
  *    float 变体 `sub_41C300` / `sub_42BA00`）—— 否则它凭什么叫"操作数指令"。
  * 2. 体内的 `Engine` 字段访问**只允许 dispatcher 的出参那三处**（所有指令都做，不是本条指令的副作用）：
- *    `帧+0x00`(cur) · `帧+0x18`(操作数基址) · `帧+0x74`(本指令 arity = `2*argc+1`)。
+ *    `0x5D880`(Engine 级标量 `cur`) · `0x5D898`(记录 `+0x04`，操作数基址) · `0x5D8F4`(记录 `+0x60`，本指令 arity = `2*argc+1`)。
+ *    ★ ★ 记法：`0x5D880` 是 **Engine 级标量**（`cur` 自身），另两格在**记录**里（记录基址 `0x5D894`）——
+ *      旧基址记法把它们写作 `帧+0x00/+0x18/+0x74`（见 `layout.mts` 的 `FRAME_LAYOUT` 头注）。
  *    ★ 实测样例：`add` 的体内是 `mov eax,[esi+5D880h]` → `15·cur` → `mov dword ptr [esi+ecx*8+5D8F4h], 7`
  *    （7 = `2*3+1`），随后两次 `call sub_41BF50`（读 op2/op3）与一次 `call sub_42B4B0`（写 op1）。
  * 3. `Command_Type_Exception` 那个全局（`dword_55D528`）**只许读、不许写**
@@ -44,11 +46,12 @@ const skip = listing ? false : '语料未解压（先 `pnpm tools disasm build`�
 
 /** 取操作数的四个原语（值与 float 变体） */
 const OPERAND_PRIMITIVES = ['sub_41BF50', 'sub_42B4B0', 'sub_41C300', 'sub_42BA00'];
-/** dispatcher 的出参：所有指令都会写的帧内字段（允许出现） */
+/** dispatcher 的出参：所有指令都会写的那几格（允许出现）
+ *  ★ `0x5D880` = Engine 级标量 `cur` 自身；`0x5D898`/`0x5D8F4` = 记录 `+0x04`（操作数基址）/ `+0x60`（arity） */
 const DISPATCH_ALLOWED = new Map([
-  [0x5d880, 'cur（当前帧下标）'],
-  [0x5d898, '操作数基址槽'],
-  [0x5d8f4, '本指令 arity（= 2*argc+1）'],
+  [0x5d880, 'Engine 级标量 cur（当前帧号）'],
+  [0x5d898, '记录+0x04 操作数基址槽'],
+  [0x5d8f4, '记录+0x60 本指令 arity（= 2*argc+1）'],
 ]);
 /** `Command_Type_Exception` 的暂存全局：只许读 */
 const CMD_TYPE_TMP = 0x55d528;
@@ -125,8 +128,8 @@ test('★ 判据修正：**"纯数值"不是"不碰引擎状态"** —— 碰的
   const found = new Map(); // opcode -> Set(位移)
   for (const { op, body } of analysis().values()) {
     const d = displacements(body);
-    // 允许清单：帧内 dispatcher 出参（cur / 操作数基址 / arity）
-    for (const a of [0x5d880, 0x5d898, 0x5d8f4]) d.delete(a);
+    // 允许清单：dispatcher 出参（Engine 级 `cur` / 记录内 操作数基址 / arity）—— 与 `DISPATCH_ALLOWED` 同源
+    for (const a of DISPATCH_ALLOWED.keys()) d.delete(a);
     if (d.size) found.set(op.opcode, d);
   }
   const declared = new Set(TOUCHES_ENGINE_STATE);
@@ -151,12 +154,12 @@ test('★ `Command_Type_Exception` 的暂存全局只许读、不许写', { skip
   assert.deepEqual(bad, [], `不许写 dword_55D528（取址原语的暂存）:\n  - ${bad.join('\n  - ')}`);
 });
 
-test('★ dispatcher 出参那条口径要对（`帧+0x74 ← 2*argc+1`）—— 抽 `add` 与 `mov` 两条验', { skip }, () => {
+test('★ dispatcher 出参那条口径要对（`记录+0x60 ← 2*argc+1`，绝对 `0x5D8F4`）—— 抽 `add` 与 `mov` 两条验', { skip }, () => {
   for (const opcode of [0x50, 0x55]) {
     const { op, body } = analysis().get(opcode);
     const want = 2 * op.argc + 1;
     const m = body.map((l) => /mov dword ptr \[esi\+ecx\*8\+5D8F4h\],(\d+)/.exec(l)).find(Boolean);
-    assert.ok(m, `${OPCODE_HANDLERS[op.opcode]} 体内应写着 \`帧+0x74 ← N\`（dispatcher 出参）`);
+    assert.ok(m, `${OPCODE_HANDLERS[op.opcode]} 体内应写着 \`记录+0x60 ← N\`（dispatcher 出参）`);
     assert.equal(Number(m[1]), want, `${OPCODE_HANDLERS[op.opcode]}（argc=${op.argc}）的出参应是 ${want}，实际 ${m[1]}`);
   }
 });

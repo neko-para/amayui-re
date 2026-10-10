@@ -67,10 +67,20 @@ const MUTATIONS = [
   // ── `0x6 load-frame` 的帧深上限（★ 去掉它 ⇒ 引擎会抛的那条变成"照跑不误"）──
   {
     file: 'apps/emulator/src/vm/ops.ts',
-    from: '  if (cur >= 40) {',
+    from: '  if (slot >= FRAME_SLOT_COUNT) {',
     to: '  if (false) {',
     guard: 'tools/test/emulator-engine-scalars.test.mjs',
     what: '`load-frame` 去掉帧深上限 ⇒ 引擎抛「階層が深すぎます」那条变成无声通过',
+  },
+  // ── `0x6 load-frame` 的**槽语义**（★★ 这一条是本轮重构的核心判据）──
+  //   `loadFrameAt` 顺手把 `cur` 也改掉 ⇒ "往槽 op2 写记录、装完**恢复**旧 cur"当场不成立：
+  //   表现是"当前帧被换成了刚装的那份"（主循环会在错的帧上继续跑），而日志看起来一切正常。
+  {
+    file: 'apps/emulator/src/vm/machine.ts',
+    from: '    while (this.slots.length <= slot) this.slots.push(null);',
+    to: '    while (this.slots.length <= slot) this.slots.push(null);\n    this.cur = slot;',
+    guard: 'tools/test/emulator-frames.test.mjs',
+    what: '`loadFrameAt` 顺手改 `cur`（= 把"装完恢复旧 cur"实现成"切过去就不回来了"）⇒ 槽语义与"cur 不变"那条判据必须当场红',
   },
   // ── 越界口径：`0x107` 是"静默跳过"、`0x30a` 是"抛"（★ 统一它们会把"引擎会崩"与"无事发生"变成同一种表现）──
   {
@@ -217,6 +227,39 @@ const MUTATIONS = [
     what: '对象字段写记成 `applied: true`（对象根本不在场）—— 日志会让人以为这些写发生了',
   },
   // ── 引擎标量堆与前段那批 setter（★ 塌了会静默：值丢了/形态错了，都没人报错）──
+  // ── 条件位副作用（★ `0x71` **置** bit27 / `0x88` 在 `op1 == 0` 时**清**它，两条成对）──
+  {
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: "when: 'op1==0', name: 'Engine.d174801', dword: 174801, op: 'clear',",
+    to: "when: 'op1==0', name: 'Engine.d174801', dword: 174801, op: 'set',",
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`0x88` 假支的**位清除**被写成**置位** ⇒ "`0x71` 置位后 `0x88` 能把它清掉"当场不成立（位只增不减，而日志看起来正常）',
+  },
+  {
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: "when: 'always', name: 'Engine.d174801', dword: 174801, op: 'set', mask: 0x08000000 },",
+    to: "when: 'always', name: 'Engine.d174801', dword: 174800, op: 'set', mask: 0x08000000 },",
+    guard: 'tools/test/emulator-engine-scalars.assets.test.mjs',
+    what: '★ 语料锚版：`0x71` 置位的槽号 174801 → 174800（字节偏移 `0AAB44h` 抄成 `0AAB40h`）⇒ `.lst` 里那条 `or [ebx+0AAB44h], 8000000h` 对不上',
+  },
+  // ── 转发的**完整实参**（★ `0x70` 给 callee 传了一个**写死的 0**；只记操作数 ⇒ 那条 `if (a7 >= 0)`
+  //    分支在欠账里"永远看不见"，与"走了但没记录"变成同一种表现）──
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: "{ kind: 'operand', index: 4 }, { kind: 'const', value: 0 }] },",
+    to: "{ kind: 'operand', index: 4 }, { kind: 'operand', index: 4 }] },",
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`0x70` 的**常量实参 0** 被当成又一个操作数（= 退回"只记操作数"的旧口径）⇒ "第 6 个显式实参是 0"这条当场红',
+  },
+  // ── **尾跳 vs 调用**（★ 四行原先 `callsAfter:['sub_459F40']` 长得一样；把尾跳写成 call ⇒
+  //    "控制流交给它、本 handler 到此结束"被伪装成"调完会回来接着跑"）──
+  {
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: "{ name: 'Engine.d21667', dword: 21667, opcode: 0x78, handler: 'sub_41F450', form: 'op1', callsAfter: [{ callee: 'sub_459F40', transfer: 'tail',",
+    to: "{ name: 'Engine.d21667', dword: 21667, opcode: 0x78, handler: 'sub_41F450', form: 'op1', callsAfter: [{ callee: 'sub_459F40', transfer: 'call',",
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`0x78` 的**尾跳**（逐字 `.text:0041F47F jmp sub_459F40`）被写成 `call` ⇒ "欠账里分得出尾跳与调用"当场不成立',
+  },
   {
     file: 'apps/emulator/src/model/engine-scalars.ts',
     from: 'return this.values.get(name) ?? 0;',
@@ -311,27 +354,88 @@ const MUTATIONS = [
     what: 'ENC 的移位量 7 → 8',
   },
   {
+    // ★ 这一条是 2026-10 三次订正留下的**回归钉**：记录基址 `0x5D894`（旧口径把它取成 `0x5D880` = `cur` 的槽）。
+    //   把基址改回旧值 ⇒ 记录内偏移全错（`0x5D904` 会被记成 `+0x84` 而不是 `+0x70`）⇒ 新判据**当场红**。
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: 'base: 0x5d894,',
+    to: 'base: 0x5d880,',
+    guard: 'tools/test/engine-frame.test.mjs',
+    what: '记录基址 `0x5D894` 改回 `0x5D880`（= 把 `cur` 那个 Engine 级标量的槽当成记录基址）⇒ 以 cur 索引的字段落点与记录大小判据当场红',
+  },
+  {
+    // ★ 同一条订正的另一半：`stride` 既是索引步长又是**记录大小**（最大字段偏移 `+0x74`，`+4` = 记录边界）。
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: 'stride: 0x78,', to: 'stride: 0x8c,',
+    guard: 'tools/test/engine-frame.test.mjs',
+    what: '记录大小/步长 `0x78` 改成 `0x8c`（= 旧口径"至少 0x8C"那个假大小）⇒ "`+0x74 + 4 == stride`"与 40 份记录末尾的边界判据当场红',
+  },
+  {
+    // ★ 回归钉：把 `array_container` 挪到相邻格（`+0x70` → `+0x74`）⇒ 两格混成一格，
+    //   而"同一格有扁平与索引两种形态"那条普查判据 + 逐字读点 EA 必须一起红。
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: '    arrayContainer: 0x70,',
+    to: '    arrayContainer: 0x74,',
+    guard: 'tools/test/emulator-model.test.mjs',
+    what: '`记录+0x70`（array_container，绝对 `0x5D904`）挪到 `+0x74`（两个相邻格混成一格）—— 普查出的读点 EA 与形态必须一起红',
+  },
+  {
     file: 'packages/age-format/src/engine/layout.mts',
     from: 'stride: 0x78,', to: 'stride: 0x80,',
     guard: 'tools/test/emulator-model.test.mjs',
-    what: '帧步长 0x78 → 0x80（★ 变量在布局知识层，不在模拟器里）',
+    what: '记录步长 0x78 → 0x80（★ 变量在布局知识层，不在模拟器里）',
+  },
+  // ── 帧数（★ 改坏了 ⇒ 帧区末尾与"每个 per-cur 记录占 0x78 字节"这条已被守卫钉住的判据一起红）──
+  {
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: '  count: 40,', to: '  count: 39,',
+    guard: 'tools/test/emulator-model.test.mjs',
+    what: '记录数 40 → 39（记录区末尾 0x5EB54 与"记录大小 = 索引步长 = 0x78"的算术判据必须一起红）',
   },
   {
-    // ★ 这一条是 2026-10 二次订正留下的**回归钉**：`float` 的基址从 0x44 改回 **0x38**，
-    //   而守卫现在按"取址原语 case 10 读哪个地址"判 ⇒ 值错、或把它挪到 `array_container`(+0x84) 都会红。
+    // ★ 这一条是 2026-10 三次订正留下的**回归钉**：`float` 的基址在记录 `+0x24`（绝对 `0x5D8B8`），
+    //   而守卫按"取址原语 case 10 读哪个地址"判 ⇒ 值错、或把它挪到 `array_container`(`+0x70`) 都会红。
     file: 'packages/age-format/src/engine/layout.mts',
-    from: "{ name: 'float', count: 0x20, base: 0x38 }",
-    to: "{ name: 'float', count: 0x20, base: 0x84 }",
+    from: "{ name: 'float', count: 0x0c, base: 0x24 }",
+    to: "{ name: 'float', count: 0x0c, base: 0x70 }",
     guard: 'tools/test/emulator-model.test.mjs',
-    what: 'local_float 基址 0x38 → 0x84（把 array_container 当成池基址；两次订正都栽在"看成对的偏移"上）',
+    what: 'local_float 基址 `+0x24` → `+0x70`（把 array_container 当成池基址；两次订正都栽在"看成对的偏移"上）',
   },
   {
     // ★ 另一条回归钉：把两个池的**偏移对调**（集合不变、配对错）—— 只有"按 case 号配 type"的判据能抓它
     file: 'packages/age-format/src/engine/layout.mts',
-    from: "{ name: 'int', count: 0x1c, base: 0x34 },",
-    to: "{ name: 'int', count: 0x1c, base: 0x38 },",
+    from: "{ name: 'int', count: 0x08, base: 0x20 },",
+    to: "{ name: 'int', count: 0x08, base: 0x24 },",
     guard: 'tools/test/emulator-model.test.mjs',
-    what: '把 int 的基址 0x34 改成 0x38（与 float 撞车）⇒ "6 个基址的集合"少了 0x34、且 case 9 读的不是它 ⇒ 配对判据必须红',
+    what: '把 int 的基址 `+0x20` 改成 `+0x24`（与 float 撞车）⇒ "6 个基址的集合"少了 `0x5D8B4`、且 case 9 读的不是它 ⇒ 配对判据必须红',
+  },
+  {
+    // ★ 脚本头那 6 个 local 声明：**每项 4 字节、整个 u32 就是一个 count**，声明 ↔ 池是**位置对应**。
+    //   把前两池的 count 槽对调 ⇒ 语料侧的判据（6 对「计数源 → 记录+0x08+4i」+ 32 字节定长读）必须当场红；
+    //   同时 `types.mts` 的 `FIELD_OFFSETS` 那条变异覆盖"文件字节 8/12/16/20/24/28"这一半。
+    file: 'packages/age-format/src/engine/layout.mts',
+    from: "{ name: 'int', count: 0x08, base: 0x20 },\n  { name: 'float', count: 0x0c, base: 0x24 }",
+    to: "{ name: 'int', count: 0x0c, base: 0x20 },\n  { name: 'float', count: 0x08, base: 0x24 }",
+    guard: 'tools/test/emulator-model.test.mjs',
+    what: '脚本头两个 local 声明的 count 槽对调（`int` `+0x08` ↔ `float` `+0x0C`）—— "位置对应"这条口径被破坏，而只按字面表自证的断言看不出来',
+  },
+  {
+    // ★ 头部 13 个 u32 字段的**顺序与相对偏移**：前 6 项 = local 声明区（读窗口字节 8..28）。
+    //   把第 0 项从 8 挪到 12 ⇒ 第 0 个声明落到别的字节上 ⇒ pure 用例当场红。
+    file: 'packages/age-format/src/asm/types.mts',
+    from: 'export const FIELD_OFFSETS = [8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56];',
+    to: 'export const FIELD_OFFSETS = [12, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56];',
+    guard: 'packages/age-format/test/asm.test.mjs',
+    what: '`FIELD_OFFSETS[0]` 8 → 12（第 0 个 local 声明落到别的文件字节上）—— 前 6 项必须是从字节 8 起的连续 u32',
+  },
+  {
+    // ── codec key：`CODEC.keyField.dword` 是"key 在 Engine 里的 dword 索引"（97059 ⇒ 0x5EC8C）。
+    //   ★ 加这条之前，把它改成别的数**无声通过**（`dec.keyLoad`/`enc.keyLoad` 是写死的字面串，
+    //     与 `keyField.dword` 脱钩）⇒ G1 把两者**钉在一起**（唯一写入点 EA + dword×4 == 0x5EC8C）。
+    file: 'packages/age-format/src/asm/value-codec.mts',
+    from: "keyField: { name: 'Engine+0x5EC8C', dword: 97059 },",
+    to: "keyField: { name: 'Engine+0x5EC8C', dword: 97060 },",
+    guard: 'tools/test/engine-value-codec.test.mjs',
+    what: 'codec key 的槽号 97059 → 97060（0x5EC8C → 0x5EC90 = enc_zero 那一格）—— 会把"key"与"enc_zero"静默混成一格',
   },
   {
     file: 'apps/emulator/src/model/iterate.ts',
@@ -342,10 +446,12 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator/src/model/numeric-ops.ts',
-    from: '{ opcode: 0x2d2, name: \'\', argc: 3, staticUses: 0,',
+    // ★ 字面量随**语料来源订正**改过（2026-10 需求单 `REQ-01M4G9YTEKGER7N99C3M7F443R`）：
+    //   `0x2D2` 在**原始语料**里出现 **1** 次（发行树那一份才是 0）。下面那条是"抹成 0"的反方向破坏。
+    from: '{ opcode: 0x2d2, name: \'\', argc: 3, staticUses: 1,',
     to: '{ opcode: 0x2d2, name: \'\', argc: 3, staticUses: 7,',
     guard: 'tools/test/emulator-numeric-ops.test.mjs',
-    what: '0x2D2 的 staticUses 0 → 7（「语料里零出现」那条判据）',
+    what: '0x2D2 的 staticUses 1 → 7（「语料里出现几次」那条判据；★ 语料来源已改成清单 `gameInstall` + ALF ⇒ 这条在本机真的会跑）',
   },
   {
     file: 'apps/emulator/src/model/numeric-ops.ts',
@@ -416,6 +522,14 @@ const MUTATIONS = [
     guard: 'tools/test/ledger-coverage.test.mjs',
     what: '库代码分类失效（/GS 桩那类"只往库里转一手"的函数会被算进引擎宇宙）⇒ 分桶与前沿都会指向库代码',
   },
+  // ── 库候选的**收窄**（★ 阈值一放宽 ⇒ `sub_42B4B0` 这类引擎原语又会被摘出前沿榜与分桶）──
+  {
+    file: 'tools/lib/coverage.mjs',
+    from: 'export const ENGINE_SCALE_DISP = 0x1000;',
+    to: 'export const ENGINE_SCALE_DISP = 0x100000;',
+    guard: 'tools/test/ledger-coverage.test.mjs',
+    what: '库候选收窄的阈值 0x1000 → 0x100000 ⇒「内联 STL 抛出口 + Engine 字段位移」的引擎原语（`sub_42B4B0`/`sub_42BA00`）又被判成库候选，整条从两张前沿榜与分桶里消失（真语料那条判据另有 `ledger-coverage.assets.test.mjs`）',
+  },
   // ── 函数覆盖度：`complete` 的不动点（★ 不删"callee 没登记"的成员 ⇒ 所有 observed 都被算成收口）──
   {
     file: 'tools/lib/coverage.mjs',
@@ -439,6 +553,47 @@ const MUTATIONS = [
     to: '  if (local) void local;',
     guard: 'tools/test/manifest-local.test.mjs',
     what: '本机私有覆盖被静默忽略 ⇒ 换一台机器（win32 ↔ macOS）所有来源根都指向另一台机器的路径',
+  },
+  // ── 头部三组 (长度, 偏移) 的**配对**（★ 把 `table_1_offset` 与 `table_2_length` 的槽抄错一格 ⇒ 表读到别处，而"读到一张表"看起来正常）──
+  {
+    file: 'packages/age-format/src/asm/types.mts',
+    from: 'export const FIELD_OFFSETS = [8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56];',
+    to: 'export const FIELD_OFFSETS = [8, 12, 16, 20, 24, 28, 32, 36, 44, 40, 48, 52, 56];',
+    guard: 'tools/test/emulator-frame-tables.assets.test.mjs',
+    what: '头部 `table_1_offset` ↔ `table_2_length` 的槽互换（40 ↔ 44）⇒ 三张表读到别处：`headerLen + 4*表项` 处不再是该类 opcode（"表项 = 位置"这条读数失效）',
+  },
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: 'const jumped = cond !== 0 ? jumpToLabel(ctx, 1) : jumpToLabel(ctx, 2);',
+    to: 'const jumped = cond === 0 ? jumpToLabel(ctx, 1) : jumpToLabel(ctx, 2);',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`0xa0 jcc` 的两支**对调**（条件非 0 跳 op3）—— 每一条 `if` 都走反，而"程序还在跑"',
+  },
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: 'maskDiscarded: true, latchCleared: true,',
+    to: 'maskDiscarded: false, latchCleared: true,',
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '`0x101 poll-input` 的"采样被丢弃"不再成立（写反成"这次采样留下"）—— 脚本里"等一次点击"的循环会**看起来正常地空转**',
+  },
+  {
+    file: 'apps/emulator/src/model/numeric-ops.ts',
+    // ★ 与上面那条 `staticUses: 1 → 7` **同值、不同破坏**：`0x2D2` 在新语料里出现 **1** 次
+    //   ⇒ "把出现次数抹成 0"也是一种破坏（它与"零出现集合"那条断言直接冲突）。
+    //   ⛔ 别再写成迁移前的 `0 → 7`：那个字面量已随语料来源订正消失（见 numeric-ops.ts 文件头）。
+    from: '{ opcode: 0x2d2, name: \'\', argc: 3, staticUses: 1,',
+    to: '{ opcode: 0x2d2, name: \'\', argc: 3, staticUses: 0,',
+    guard: 'tools/test/emulator-numeric-ops.test.mjs',
+    what: '`0x2D2` 的 staticUses 1 → 0（把"原始语料里出现过"抹成"零出现" ⇒ 零出现集合那条断言当场红）',
+  },
+  {
+    // ★ 语料锚（`emulator-engine-scalars.assets.test.mjs`）：它拿 `CTOR_ZERO_FILLED` 去 `.lst` 里
+    //   **逐字**对那 20 格。纯用例那条断言 `?? 1` 是**另一件事**（模型行为），这条守的是**取证本身**。
+    file: 'apps/emulator/src/model/engine-scalars.ts',
+    from: "Array.from({ length: 20 }, (_, i) => 0x5ec9c + 4 * i),",
+    to: "Array.from({ length: 20 }, (_, i) => 0x5ec9c + 4 * i).slice(0, 19),",
+    guard: 'tools/test/emulator-engine-scalars.assets.test.mjs',
+    what: '★ 语料锚版：清零格数 20 → 19（那片 `Engine+0x5EC9C..0x5ECE8` 少一格）⇒ `.lst` 里那 20 条逐字对不上',
   },
 ];
 

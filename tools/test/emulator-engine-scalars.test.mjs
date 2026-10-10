@@ -7,8 +7,10 @@
  *    `mov [esi+5EC9Ch..5ECE8h],edi`，`edi = 0`）⇒ 没写过的槽读出来必须是 **0**。
  *    ★ 与 int 池**不同**：池的初值是 `encZero`，**不是** 0。
  *    ★ 台账口径见 `data/ledger/`（subject `Engine+0x5EC9C..0x5ECE8/ctor-zero-fill`）。
- *    ⚠ **本条断言的欠账**：它只断言"空的 `EngineScalars` 读 0" —— 那是**恒真**的（构造出来就是空），
- *      回不了语料。要真的守住上面那条取证，判据得挂在"构造函数**写 0** 的那 20 条逐字"上（见需求单）。
+ *    ✅ **欠账已补**（需求单 `REQ-01M4FEF7VH1N0JDT5ZVPZS204M`）：那条"回不了语料"的恒真断言，
+ *      现在由 `tools/test/emulator-engine-scalars.assets.test.mjs` 承担 —— 它把那 20 条逐字
+ *      （含"写的是 0"与"边界就是 0x5ECE8"）钉在 `.lst:33974-33993`（EA `0x415C0F..`）上。
+ *      ★ 本文件这几条**保持不变**（纯用例仍不该去读语料）；两条的分工写在这里，免得下次又混。
  * 2. **写进去的读出来还是它**（u32 归一）—— 这一条塌了，前段那批 setter 就白写了。
  * 3. **`form` 要真的生效**：`bool(op1)` 必须**归一成 0/1**（不是原值）。
  * 4. **no-op 要真是 no-op**：`0x1a8` 除了协议写（本模型里自动）什么都不做。
@@ -22,26 +24,41 @@ import { EngineScalars } from '../../apps/emulator/src/model/engine-scalars.ts';
 import { HANDLERS } from '../../apps/emulator/src/vm/ops.ts';
 import { ScriptFrame } from '../../apps/emulator/src/vm/machine.ts';
 import { GlobalPools } from '../../apps/emulator/src/model/pools.ts';
-import { ENGINE_SCALAR_WRITES } from '@amayui/age-format/src/engine/layout.mts';
+import { AddressSpace } from '../../apps/emulator/src/model/address-space.ts';
+import { ENGINE_SCALAR_BITS, ENGINE_SCALAR_WRITES } from '@amayui/age-format/src/engine/layout.mts';
 import { MemoryConfig } from '../../apps/emulator/src/host/config.ts';
 import { inlineString } from '../../apps/emulator/src/vm/script.ts';
 
-/** 最小 machine 桩（只需要标量堆 + 记账；与 `emulator-frames.test.mjs` 同形） */
+/** 最小 machine 桩（只需要标量堆 + 记账；与 `emulator-frames.test.mjs` **同形**：槽数组 + `cur`） */
 function machineStub() {
   const frame = new ScriptFrame('STUB.BIN', 0, 0, -1);
   return {
     globals: new GlobalPools(0),
     scalars: new EngineScalars(),
     instance: { config: new MemoryConfig(), env: { codecKey: 0 } },
-    frames: [frame],
+    slots: [frame],
+    cur: 0,
     diag: { stopReason: '', steps: 0, oobByKind: new Map() },
     notes: [],
     effects: [],
-    get frame() { return this.frames[this.frames.length - 1]; },
+    get frame() { return this.slots[this.cur]; },
+    get depth() { return this.cur + 1; },
     note(kind, detail) { this.notes.push(`${kind}${detail ? `: ${detail}` : ''}`); },
     effect(domain, action, disposition, detail) { this.effects.push({ domain, action, disposition, detail }); },
-    pushFrame(name, caller) { const f = new ScriptFrame(name, this.frames.length, 0, caller); this.frames.push(f); return f; },
-    popFrame() { return this.frames.pop(); },
+    pushFrame(name, caller, localCounts = []) {
+      const slot = this.cur + 1;
+      const f = new ScriptFrame(name, slot, 0, caller, null, localCounts);
+      this.slots[slot] = f;
+      this.cur = slot;
+      return f;
+    },
+    popFrame() {
+      const f = this.slots[this.cur];
+      if (!f) throw new Error('没有活动帧：popFrame 没有可弹出的帧');
+      this.slots[this.cur] = null;
+      this.cur -= 1;
+      return f;
+    },
   };
 }
 const ctxOf = (m, args, opcode) => ({
@@ -104,6 +121,12 @@ test('★ 前段那批：`form` 真的生效（`bool(op1)` 归一，不是原值
 
   // ★ 每个"写标量"的 handler 写出来的**键集合**必须恰好等于知识层给它的那些名字
   //   （多写 = 模型在编偏移；少写 = 知识层的登记没落地）
+  //   ★ 2026-10 补充：**条件副作用**（`ENGINE_SCALAR_BITS`）也算"知识层给的" —— 它们真的落状态了
+  //   （此前是 `logged-only` ⇒ 位永远是 0）。下面按"这道门在这个操作数下成不成立"现算应写集合。
+  const bitSlotsFor = (opcode, op1) => ENGINE_SCALAR_BITS
+    .filter((b) => b.opcode === opcode)
+    .filter((b) => (b.when === 'always' ? true : b.when === 'op1!=0' ? op1 !== 0 : op1 === 0))
+    .map((b) => b.name);
   const byOpcode = new Map();
   for (const w of ENGINE_SCALAR_WRITES) {
     const list = byOpcode.get(w.opcode) ?? [];
@@ -121,8 +144,9 @@ test('★ 前段那批：`form` 真的生效（`bool(op1)` 归一，不是原值
     }
     // ★ 给**两个**操作数：x1a4 是 orm: ''op2''（第二个操作数），只给一个会在桩里读到 undefined
     HANDLERS[opcode](ctxOf(m, [imm(3), imm(4)], opcode));
-    assert.deepEqual(m.scalars.snapshot().values.map(([k]) => k).sort(), [...names].sort(),
-      `0x${opcode.toString(16)} 写的槽集合必须恰好是知识层登记的那些`);
+    const want = [...names, ...bitSlotsFor(opcode, 3)].sort();
+    assert.deepEqual(m.scalars.snapshot().values.map(([k]) => k).sort(), want,
+      `0x${opcode.toString(16)} 写的槽集合必须恰好是知识层登记的那些（含 ENGINE_SCALAR_BITS 里门成立的那些）`);
   }
 });
 
@@ -133,6 +157,96 @@ test('★ `0x1a8` 是**真 no-op**：不碰任何标量、不动池、只留一�
   assert.deepEqual(m.scalars.snapshot(), { values: [] }, '不该写任何标量');
   assert.deepEqual(m.globals.snapshot(), before, '不该碰全局池');
   assert.deepEqual(m.effects, [], 'no-op 不该发副作用记录（那会把日志淹掉）');
+});
+
+/**
+ * ★★ `0x101 poll-input`：**采样并丢弃已积累的输入，再标记"从现在起等输入"**
+ * （逐字 `.lst:38259-38266`：`call sub_478090`（采样）→ `and [esi+0AAB44h],0F7FFFFFFh`（先清 bit27
+ * 那个"未消费输入"闩锁）→ `mov [edi],0`（再清输入掩码）→ 两个"等输入"字段置 1/0）。
+ *
+ * ## 这条守卫守的三件事（每一条都对应一种**写反了也看不出来**的实现）
+ * 1. **调了一次**（`pollCalls === 1`）：不许"每次问一点"（那会让一次 `poll-input` 吃掉多帧的输入）。
+ * 2. **采到的值被丢弃**（`maskDiscarded`/`latchCleared`）：写反成"读一次输入并保存"的实现
+ *    —— 即"这次采样留下、以后接着用" —— 会与这两个字段直接冲突。
+ * 3. ★ **不许在地址空间里留下这次采样**（`space.snapshot()` 逐值不变）：这一条是**真判据** ——
+ *    "保存采样"最自然的落点就是往 `Engine+0xAAB48`（输入掩码）那类格子写一个 u32；
+ *    本模型没有那个槽，所以"存起来"这件事一旦写进地址空间，快照当场不同。
+ *    ⚠ **已知欠账（不掩盖）**：`maskDiscarded`/`latchCleared` 是**本模型自己的措辞**（效应记录字段），
+ *    它们本身是"模型说它丢了" —— 一个把采样留在**别处**（模型外的宿主状态）的实现抓不住。
+ *    要真抓住那一类，得先把 `Engine+0xAAB44` / `+0xAAB48` / `+0x777FC` / `+0x77808` 建模
+ *    （那是新能力，不在本轮范围）。
+ */
+test('★ `0x101 poll-input`：采样一次后**丢弃**（不留在任何状态里）、只发一条 modeled 记录', () => {
+  const m = machineStub();
+  m.space = new AddressSpace();
+  let pollCalls = 0;
+  m.instance.input = {
+    label: 'stub-input',
+    poll() { pollCalls += 1; return { buttons: 0x10, wheel: -1, mouseX: 11, mouseY: 22 }; },
+  };
+  const before = m.space.snapshot();
+  HANDLERS[0x101](ctxOf(m, [], 0x101));
+
+  assert.equal(pollCalls, 1, '★ 一次 `poll-input` 只许采样一次（多采 = 会吃掉后面几帧的输入）');
+  assert.deepEqual(m.space.snapshot(), before, '★ 采样结果必须**被丢弃** —— 不许留在地址空间的任何格子里');
+  assert.deepEqual(m.scalars.snapshot(), { values: [] }, '也不许顺手写标量堆');
+  assert.equal(m.effects.length, 1, '只发一条效应记录');
+  const e = m.effects[0];
+  assert.equal(e.domain, 'input');
+  assert.equal(e.action, 'poll');
+  assert.equal(e.disposition, 'modeled', '宿主提供了输入源 ⇒ 不是 not-provided');
+  assert.equal(e.detail.maskDiscarded, true, '★ 语义是"把已积累的输入丢掉"（⛔ 不是"这次采样留下"）');
+  assert.equal(e.detail.latchCleared, true, '★ 未消费输入闩锁（bit27）也必须被清');
+});
+
+/**
+ * ★★ `0xa0 jcc`：`op1 != 0` ⇒ 跳 `op2`；`op1 == 0` ⇒ 跳 `op3`；**任一支的 `0xFFFFFFFF` = 该支没有目标（落下）**。
+ *
+ * ## 逐字（`sub_4209B0` @ `0x4209B0`，`.lst:48686-48716`）—— 三处**独立互证**
+ * ```
+ *   .text:004209CB push 1        / call sub_41BF50   ; 读 op1
+ *   .text:004209D6 test eax,eax  / jz loc_4209EA     ; ← ① op1 == 0 走另一支
+ *   .text:004209DA push 2        / call sub_41BF50   ; op1 != 0 ⇒ 读 op2
+ *   .text:004209E1 cmp eax,0FFFFFFFFh / jz loc_420A42; ← ② 哨兵 ⇒ **不跳**、直接 retn
+ *   .text:004209EA loc_4209EA:  push 3 / call sub_41BF50 ; ← ③ op1 == 0 时读 op3（同一条哨兵判据）
+ * ```
+ * ⇒ 三种形状（非 0 跳 op2 / 为 0 跳 op3 / 哨兵落下）都要**可观测**：
+ *    本模型里"跳了"体现为 `frame.ip` 被改写（改过 ⇒ `Machine.step()` 不再 +1），
+ *    "落下"体现为 `frame.ip` 不动 + 一条 `jcc-fallthrough` note（"关掉的分支"与"我们算错了 label"必须分得开）。
+ */
+test('★ `0xa0 jcc`：非 0 跳 op2 / 为 0 跳 op3 / 哨兵**落下**（三支都要可观测）', () => {
+  // 一份最小脚本：4 条指令，label 的 raw 就是「(绝对偏移 − headerLen) / 4」
+  const mkScript = () => ({
+    name: 'JCC.BIN', headerLen: 60, bytes: new Uint8Array(256),
+    instructions: [{ byteOffset: 60 }, { byteOffset: 64 }, { byteOffset: 68 }, { byteOffset: 72 }],
+    indexByByteOffset: new Map([[60, 0], [64, 1], [68, 2], [72, 3]]),
+  });
+  const call = (cond, trueLabel, falseLabel) => {
+    const m = machineStub();
+    const frame = { ip: 1, locals: m.frame.locals };
+    const script = mkScript();
+    const ins = {
+      opcode: 0xa0, name: 'jcc', argc: 3, index: 1,
+      args: [imm(cond), imm(trueLabel), imm(falseLabel)],
+    };
+    HANDLERS[0xa0]({ machine: m, frame, script, ins });
+    return { frame, notes: m.notes };
+  };
+
+  // ① 条件非 0 ⇒ 跳 **op2**（op3 完全不该被看一眼）
+  assert.equal(call(7, 2, 3).frame.ip, 2, '★ 条件非 0 ⇒ 跳 op2');
+  // ② 条件为 0 ⇒ 跳 **op3**（★ 这一支写反了会让每条 `if` 都走反，而"程序还在跑"）
+  assert.equal(call(0, 2, 3).frame.ip, 3, '★ 条件为 0 ⇒ 跳 op3');
+  // ③ 哨兵 `0xFFFFFFFF`（= 那一支"没有目标"）⇒ **落下**（ip 不动）且**留一笔**
+  const fallTrue = call(7, 0xffffffff, 3);
+  assert.equal(fallTrue.frame.ip, 1, '★ 非 0 支的哨兵 ⇒ 不跳（落下），且 ip 不许被改写');
+  assert.ok(fallTrue.notes.some((n) => n.startsWith('jcc-fallthrough')), '★ 落下必须留一笔（与"算错 label"分得开）');
+  const fallFalse = call(0, 2, 0xffffffff);
+  assert.equal(fallFalse.frame.ip, 1, '★ 为 0 支的哨兵 ⇒ 同样落下');
+  assert.ok(fallFalse.notes.some((n) => n.startsWith('jcc-fallthrough')), '为 0 支落下也要留一笔');
+  // ④ 非哨兵但**指向一条指令中间** ⇒ 响亮失败（结构性错误，不许猜"最近的那条"）
+  //    label raw = 15 ⇒ 绝对偏移 60 + 60 = 120，不在 `indexByByteOffset` 里（那是"指令中间"）
+  assert.throws(() => call(7, 15, 3), /不是指令起点/, 'label 落在指令中间必须抛');
 });
 
 test('★ `0x2de`：在**宿主字体表**里查名字 ⇒ 下标；未命中 ⇒ **-1**；跳过前导 `@`；没给表 ⇒ 响亮失败', () => {
@@ -303,6 +417,87 @@ test('★ `0x76`/`0x77`：写的是 **bswap24(op1)**（不是原值），且**�
   assert.equal(fwd.length, 2, '每条都要记一次未建模的子系统调用');
   assert.ok(fwd.every((e) => e.detail.callee === 'sub_459F40'), '被调符号要写清');
   assert.ok(fwd.every((e) => e.disposition === 'logged-only'), '未建模 ⇒ logged-only');
+  assert.ok(fwd.every((e) => e.detail.transfer === 'call'), '★ `0x76`/`0x77` 是 `call`（会返回），不是尾跳');
+});
+
+/**
+ * ★★ `0x78`/`0x2db` 是**尾跳**（逐字 `jmp sub_459F40`：`.text:0041F47F` / `.text:0042652F`），
+ * 而 `0x76`/`0x77` 是 `call`（`.text:0041F3DB`）—— 两者在 `[保真欠账]` 里**必须分得开**。
+ *
+ * ## 为什么这不是格式洁癖
+ * 原先四条 `callsAfter:['sub_459F40']` **长得完全一样** ⇒ 读日志的人分不出"调完会回来接着跑"
+ * 与"控制流交给它、本 handler 到此结束"；后者意味着**后面若还有代码，在引擎里根本不会执行**。
+ * ★ 实参也必须记：这里 callee 的实参是**子对象槽** `Engine+0x14D30`（`Engine.d21324`），
+ *   ⛔ 不是 op1 —— 记成 op1 会把"往那个子对象里写"伪装成"写本次操作数"。
+ */
+test('★ `0x78` 的欠账看得出是**尾跳**（`transfer: tail`）、`0x76` 是 `call`；实参是子对象槽不是 op1', () => {
+  const detailOf = (opcode, args) => {
+    const m = machineStub();
+    HANDLERS[opcode](ctxOf(m, args, opcode));
+    return m.effects.find((e) => e.action === 'engine.forward').detail;
+  };
+  const tail = detailOf(0x78, [imm(5)]);
+  const call = detailOf(0x76, [imm(5)]);
+  assert.equal(tail.transfer, 'tail', '★ `0x78` 的体尾是 `jmp sub_459F40`（尾跳，不回来）');
+  assert.equal(call.transfer, 'call', '★ `0x76` 的体尾是 `call sub_459F40`（会回来）');
+  assert.notEqual(tail.transfer, call.transfer, '★ 两者在欠账里必须分得开（这就是这条用例的全部意义）');
+  assert.ok(String(tail.note).includes('尾跳'), 'note 里也要写明（日志读者不必去翻知识层）');
+  // ★ 实参：callee 的接收者是子对象槽（没写过 ⇒ 0），**不是** op1 的 5
+  assert.deepEqual(tail.argForms, ['Engine.d21324'], '实参形态 = 子对象槽');
+  assert.deepEqual(tail.args, [0], '★ 记的是**槽的值**，不是 op1（op1 = 5）');
+  assert.deepEqual(call.args, [0]);
+  // ★ 2db 与 78 同形（尾跳）
+  assert.equal(detailOf(0x2db, [imm(5)]).transfer, 'tail');
+  assert.equal(detailOf(0x77, [imm(5)]).transfer, 'call');
+});
+
+/**
+ * ★★ 转发的**完整实参**：`0x70` 的 callee 收 6 个显式实参，最后一个是**写死的 `0`**；
+ * `0x71` 的第 3 个实参是**引擎槽** `Engine.d97055`。
+ *
+ * 逐字（锚 = EA）：
+ * ```
+ *   0x41ED30 push 0                 ;; 0x70：最先压 ⇒ 最深的那个实参（callee 的 a7）
+ *   0x41ED75 call sub_45D660        ;; 栈上从顶到底 = op1..op5, 0
+ *   0x41ED80 sub_41ED80             ;; 0x71：sub_45EC60(Engine+0x14D30, op1, Engine[97055])
+ * ```
+ * ⇒ callee `sub_45D660` 里 `if (a7 >= 0)` 那条门**恒真**：原先本层只记 5 个操作数，这条分支
+ *   在欠账里**完全看不见** ⇒ "永远不会走"与"走了但没记录"变成同一种表现。
+ */
+test('★ `0x70` 的**常量实参 0** 与接收者槽、`0x71` 的**引擎槽实参**都必须记进欠账（`args` + `argForms`）', () => {
+  // ① 0x70：接收者槽 + op1..op5 + 写死的 0
+  const m = machineStub();
+  HANDLERS[0x70](ctxOf(m, [imm(11), imm(12), imm(13), imm(14), imm(15)], 0x70));
+  const d = m.effects.find((e) => e.action === 'engine.forward').detail;
+  assert.equal(d.callee, 'sub_45D660');
+  assert.equal(d.transfer, 'call', '`0x70` 的 handler 是 `call sub_45D660; … retn`（会回来）');
+  assert.deepEqual(d.argForms,
+    ['Engine.d21324', 'operand#0', 'operand#1', 'operand#2', 'operand#3', 'operand#4', 'const 0'],
+    '★ 每个位置的**形态**都要记（数值里分不出"操作数 0"与"常量 0"）');
+  assert.deepEqual(d.args, [0, 11, 12, 13, 14, 15, 0],
+    '★ 最后那个 **0 是 handler 写死的**（callee 的 a7）—— 它是 `if (a7 >= 0)` 恒真的原因');
+  assert.equal(d.argForms[d.argForms.length - 1], 'const 0', '★ 常量必须落在**最后一个**位置');
+  assert.ok(String(d.note).includes('第 6 个显式实参'), 'note 要写明它收 6 个显式实参（否则读者不知道多了什么）');
+
+  // ② 0x71：第 3 个实参是**引擎槽**（值随槽变 —— 这才是"读的是槽不是操作数"的判据）
+  const m2 = machineStub();
+  m2.scalars.write('Engine.d97055', 0x80000000);
+  HANDLERS[0x71](ctxOf(m2, [imm(3)], 0x71));
+  const d2 = m2.effects.find((e) => e.action === 'engine.forward').detail;
+  assert.deepEqual(d2.argForms, ['Engine.d21324', 'operand#0', 'Engine.d97055'], '实参形态 = 接收者槽 + op1 + 门槽');
+  assert.deepEqual(d2.args, [0, 3, 0x80000000], '★ 槽的**当前值**也要记（门就是它）');
+  // ★ 槽没写过 ⇒ 0（同一条记录会因此不同 ⇒ 证明记的是槽而不是某个常量）
+  const m3 = machineStub();
+  HANDLERS[0x71](ctxOf(m3, [imm(3)], 0x71));
+  assert.deepEqual(m3.effects.find((e) => e.action === 'engine.forward').detail.args, [0, 3, 0],
+    '★ 换成没写过的槽值 ⇒ 记录跟着变（常量就不会变）');
+
+  // ③ 没取证 `callArgs` 的那些（例 0x2f6）：仍按"只有操作数"记（口径：少记 ≠ callee 只收这些）
+  const m4 = machineStub();
+  HANDLERS[0x2f6](ctxOf(m4, [imm(2)], 0x2f6));
+  const d4 = m4.effects.find((e) => e.action === 'engine.forward').detail;
+  assert.deepEqual(d4.args, [2]);
+  assert.deepEqual(d4.argForms, ['operand#0'], '默认形态 = 操作数（⛔ 不猜常量/槽）');
 });
 
 test('★ 标量**数组**族：`0x107` 的索引来自 op1、`0x10b` 的来自 op2（角色互换不许合并实现）', () => {
@@ -392,6 +587,53 @@ test('★ `0xfe` **照抄引擎的范围检查**（`op1 > 0x1F` ⇒ 抛，⛔ �
   assert.equal(rec[0].disposition, 'logged-only', '未建模 ⇒ logged-only（会进「保真欠账」）');
   assert.deepEqual([rec[0].detail.slotIndex, rec[0].detail.value], [7, 3], '两个操作数都要记全');
   assert.throws(() => HANDLERS[0x10c](ctxOf(m2, [imm(0x20), imm(0)], 0x10c)), /超出引擎的范围检查/, '越界同样照抄引擎的异常');
+});
+
+/**
+ * ★★ `0x71` **置** bit27 ⇒ `0x88` 能把它**清掉**（★ 状态真的变，不是只多两条日志）。
+ *
+ * 逐字（锚 = EA）：`0x71`（`sub_41ED80`）`.text:0041EE8D or dword ptr [ebx+0AAB44h], 8000000h`；
+ * `0x88`（`sub_41FAB0`）`.text:0041FAF0 and dword ptr [esi+0AAB44h], 0F7FFFFFFh`（`0xAAB44 / 4 = 174801`）、
+ * 真支 `.text:0041FAE4 mov dword ptr [esi+77800h], 1`（`77800h / 4 = 122368`）。
+ *
+ * ## 它守的三件事（每一条都对应一种"看起来正常"的坏实现）
+ * 1. **位真的落状态**：只发 `logged-only` 日志的实现（本仓原先就是）在这里会红 —— 读出来永远是 0。
+ * 2. **两条成对**：`0x71` 置 / `0x88`（`op1 == 0`）清**同一格同一位**；把清写成置、或换一位 ⇒ 红。
+ * 3. **常量的真支**：`op1 != 0` 时写的是**常量 1**（不是 op1 的原值）⇒ 写原值也红。
+ */
+test('★ `0x71` 置 bit27 ⇒ `0x88` 能把它清掉（位状态真的变；记录是 `modeled`）', () => {
+  const BIT = 0x08000000;
+  // ① 置位 ⇒ 位从 0 变 1
+  const m = machineStub();
+  assert.equal(m.scalars.read('Engine.d174801'), 0, '没跑过 ⇒ 没写过的槽读 0');
+  HANDLERS[0x71](ctxOf(m, [imm(1)], 0x71));
+  assert.equal(m.scalars.read('Engine.d174801') & BIT, BIT, '★ `0x71` 之后 bit27 必须是 1');
+  // ② 清位 ⇒ 位从 1 变 0（★ 这一条就是"成对"的判据：只置不清 / 只清不置 都会红）
+  HANDLERS[0x88](ctxOf(m, [imm(0)], 0x88));
+  assert.equal(m.scalars.read('Engine.d174801') & BIT, 0, '★ op1 = 0 ⇒ `0x88` 的假支必须把 bit27 清掉');
+  assert.equal(m.scalars.read('Engine.d174801'), 0, '清的是**这一位**，不是整格（原先那一位之外没有别的写入）');
+  // ③ 真支：`op1 != 0` ⇒ 写**常量 1**（另一格），且**不动** bit27
+  const m2 = machineStub();
+  HANDLERS[0x88](ctxOf(m2, [imm(7)], 0x88));
+  assert.equal(m2.scalars.read('Engine.d122368'), 1, '★ 真支写的是常量 1（⛔ 不是 op1 的原值 7）');
+  assert.equal(m2.scalars.read('Engine.d174801') & BIT, 0, '真支**不**置位（条件二选一）');
+  // ④ 两条记录都必须是 `modeled`（退回 `logged-only` = 又变成"只记录、不落状态"）
+  const bitsOf = (mm) => mm.effects.filter((e) => e.action === 'engine.scalar.bits');
+  assert.deepEqual(bitsOf(m).map((e) => e.detail.op), ['set', 'clear'], '置 → 清，两次各留一笔（且顺序照执行序）');
+  assert.deepEqual(bitsOf(m2).map((e) => e.detail.op), ['write'], '真支只写常量（不清位）');
+  const bits = [...bitsOf(m), ...bitsOf(m2)];
+  assert.ok(bits.every((e) => e.disposition === 'modeled'),
+    '★ 已建成状态 ⇒ `modeled`（写 `logged-only` 就是"这个位答不出来"那个欠账又回来了）');
+  assert.equal(bitsOf(m2)[0].detail.value, 1, '记录里的常量必须是 1（与槽里的值一致）');
+  assert.equal(bitsOf(m)[0].detail.slot, 'Engine.d174801', '记录里要写明是哪个槽（否则读者只能去翻代码）');
+  // ⑤ 与知识层逐条对上（槽名 / 形态 / 掩码都从表里现取 —— 表改了这里跟着说话）
+  const set = ENGINE_SCALAR_BITS.find((b) => b.opcode === 0x71);
+  const clear = ENGINE_SCALAR_BITS.find((b) => b.opcode === 0x88 && b.op === 'clear');
+  assert.ok(set && clear, '知识层必须同时有"置位"与"清位"两条（成对）');
+  assert.equal(set.name, clear.name, '★ 置与清必须是**同一个槽**');
+  assert.equal(set.mask, clear.mask, '★ 置与清必须是**同一位**');
+  assert.equal(set.op, 'set');
+  assert.equal(clear.op, 'clear');
 });
 
 test('★ 转发那批：**不建模**但**逐次留痕**（写明被调符号与实参）—— 绝不静默空操作', () => {

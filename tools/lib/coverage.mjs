@@ -63,21 +63,66 @@ const SYM_IN_SUBJECT_RE = /\bsub_[0-9A-F]{6}\b/g;
  * |---|---|
  * | `thin-forwarder-to-library` | 体内**无内存操作数** ∧ **不调 `sub_XXXXXX`** ∧ 有**非 `sub_`** 的转移目标 ⇒ "只往库里转一手"（/GS 桩的典型形状） |
  * | `calls-stl-internal` | 转移目标里有 **MSVC STL 的内部符号**（`^\?(?:_X|__).*@std@@`，如 `?_Xlength_error@std@@YAXPBD@Z`）⇒ 这一段是 STL 的抛出/内部实现 |
+ * | ~~`calls-stl-internal`~~ **被取消**（见下） | 同上，**但**体内出现 ≥ `ENGINE_SCALE_DISP` 的**非栈**内存位移 ⇒ 它在大对象（`Engine`）上干活 ⇒ **不是**库内部实现 |
  *
  * ★ **为什么不是"见到 `?` 修饰名就算库"**：游戏自身也是 C++ —— 实测那样会把 **657 个**函数判成库
  *   （`??0GameClass@@…` 这类游戏自己的符号），而"STL 内部符号"这一条只剩个位数。
  *   ⇒ 判据要**窄**：宁可漏（少摘几个），不可滥（把引擎代码摘掉就再也看不见了）。
  * ★ 它**不**判决"这不是引擎的"；它只把"看起来是库代码"的那批**单列 + 给理由**，并从分桶/前沿里摘出去。
  *   摘出去的**看得见**（`library` 名单 + 每个的理由，`--json` 全给）。
+ *
+ * ### ★★ 2026-10 收窄：`calls-stl-internal` 的**假阳性**（一条机械可判的收窄规则）
+ *
+ * **实测的假阳性**：`sub_42B4B0`（操作数**写值原语**，全语料 131 个调用方 / 223 处调用）与它的
+ * float 兄弟 `sub_42BA00` 被判成库候选，理由**只有** `calls-stl-internal` —— 因为它们内联了
+ * `vector<int>::operator[]` 的越界抛出口（`0x42B805 push offset aInvalidVectorT` /
+ * `0x42B80A call ?_Xout_of_range@std@@YAXPBD@Z`）。⇒ 后果：**两个引擎原语整条从两张前沿榜与分桶里消失**，
+ * 节点正文里"它在第二榜上"当场不成立，后人照"榜单滚动"核还会**误判它已被登记**。
+ * 这正是上面那句"不可滥"说的失败模式。
+ *
+ * **收窄规则（机械、可判、方向保守）**：`calls-stl-internal` **只在体内没有"引擎尺度位移"时才算数** ——
+ * * 「引擎尺度位移」= 某个内存操作数的位移 **≥ `ENGINE_SCALE_DISP`（0x1000）** 且**基址不是栈**（`ebp`/`esp`）。
+ * * **为什么 `0x1000` 是这条判据的界**（不是随手挑的数）：`Engine` 是个**同一个基址 + 大位移**访问的巨型对象
+ *   （台账/语料里的字段都在 `+0x14D30` / `+0x5D880` / `+0x5EC8C` / `+0xA30D0` / `+0xAA514` 这一量级），
+ *   而 STL 的内部实现只认**自己的小布局**（`std::string` 的 SSO 是 `+0x10`/`+0x14`、`vector` 是三指针 `+0`/`+4`/`+8`）。
+ *   ⇒ "在一个位移上万字节的对象上干活"就是**引擎代码**的机械指纹。
+ * * 机械事实**由 `lib/disasm.mjs` 的 `functionInventory` 现算**（`maxNonStackDisp`），本文件只做判断 ——
+ *   于是它可复跑、可变异、不靠任何人读一遍反汇编。
+ * * ★ **方向保守**：它只**取消**库候选（= 让更多函数**可见**），**不**新增任何库候选；栈基址的大位移一律看不见
+ *   （代价写在 `disasm.mjs` 的常量注释里）。
+ * * ★ **取消也要看得见**：被这条规则取消的候选单列在 `honest.libraryCandidatesCancelled`
+ *   （否则"收窄"就成了一次静默的改口径）。
+ * * 实测：它取消 **18/107** 个候选，逐条都是**碰引擎字段**的函数（`sub_42B4B0` / `sub_42BA00` /
+ *   `sub_42A420`（文本原语）/ `sub_428990`（字体名表查找）/ `sub_40EA00`（帧拆卸）/ `sub_414AC0`（全局池分配）/ …），
+ *   而**真库内部实现**（`sub_40C210` = `basic_string::assign`、`sub_40C120`）位移全是 `+0x10` 这种量级 ⇒ 保留。
+ *   清单本身由 `tools/test/ledger-coverage.assets.test.mjs` 钉住（语料不在场时它 skip，不假装绿）。
  */
 /** MSVC STL 的内部符号（`?_Xlength_error@std@@YAXPBD@Z` / `?_Xout_of_range@…` / `?__…@std@@`） */
 const STL_INTERNAL_RE = /^\?(?:_X|__)[^@]*@std@@/;
 
+/**
+ * ★ **引擎尺度位移的阈值**（见上方长注释）：`Engine` 的字段离对象基址几十万字节，
+ * 而 STL 内部实现只认自己的小布局 ⇒ ≥ 这个数的非栈位移是"引擎代码"的机械指纹。
+ */
+export const ENGINE_SCALE_DISP = 0x1000;
+
+/** `calls-stl-internal` 的**触发条件**（不含收窄）—— 收窄与"被取消"共用这一份判据，不许写两遍 */
+const callsStlInternal = (f) => f.externalTargets.some((t) => STL_INTERNAL_RE.test(t));
+
+/** ★ 收窄判据：体内有 ≥ `ENGINE_SCALE_DISP` 的**非栈**位移（机械事实由 `functionInventory` 现算） */
+const engineScaleOperand = (f) => (f.maxNonStackDisp ?? 0) >= ENGINE_SCALE_DISP;
+
 export function libraryLikely(f) {
   const reasons = [];
   if (f.callees.length === 0 && !f.hasMemoryOperand && f.externalTargets.length > 0) reasons.push('thin-forwarder-to-library');
-  if (f.externalTargets.some((t) => STL_INTERNAL_RE.test(t))) reasons.push('calls-stl-internal');
+  // ★ 收窄（2026-10）：`calls-stl-internal` 只在"体内没有引擎尺度位移"时才算数 —— 理由与实测见上方长注释
+  if (callsStlInternal(f) && !engineScaleOperand(f)) reasons.push('calls-stl-internal');
   return reasons;
+}
+
+/** ★ 被收窄规则**取消**的库候选理由（"取消也要看得见"：这些函数回到了引擎宇宙里） */
+export function libraryLikelyCancelled(f) {
+  return callsStlInternal(f) && engineScaleOperand(f) ? ['calls-stl-internal'] : [];
 }
 
 export function coverage(entries, { lstFile, onlySub = true, top = 30 } = {}) {
@@ -130,6 +175,10 @@ export function coverage(entries, { lstFile, onlySub = true, top = 30 } = {}) {
     .filter((x) => x.reasons.length > 0);
   const librarySet = new Set(library.map((x) => x.sym));
   const engine = universe.filter((f) => !librarySet.has(f.sym));
+  // ★ 被收窄规则**取消**的库候选：也要看得见（否则"收窄"成了一次静默的改口径）
+  const libraryCancelled = universe
+    .map((f) => ({ sym: f.sym, reasons: libraryLikelyCancelled(f), maxNonStackDisp: f.maxNonStackDisp ?? 0 }))
+    .filter((x) => x.reasons.length > 0);
 
   // ── complete 的最大不动点 ──
   //   ★ 库代码**直接算作已满足**：引擎函数调 `/GS` 桩（1144 处）不是"它的 callee 没收口"
@@ -275,6 +324,8 @@ export function coverage(entries, { lstFile, onlySub = true, top = 30 } = {}) {
       indirectCallSites: inv.indirectCallSites,
       // ★ 摘出去的东西必须看得见（库代码候选 + 每个的理由）
       libraryCandidates: slice(library),
+      // ★ **被收窄规则取消**的那些也要看得见（它们回到了引擎宇宙：分桶 / 两张榜里都能看到）
+      libraryCandidatesCancelled: slice(libraryCancelled),
       calleesNotInInventory: [...calleesNotInInventory].sort(),
       unattributedAnchors: slice(unattributed.filter((x) => x.kind === 'unknown')),
       dataAnchors: slice(unattributed.filter((x) => x.kind === 'data')),
@@ -315,6 +366,7 @@ export function coverageText(r) {
   L.push('诚实项（★ 不报出来就会被读成事实）');
   L.push(`  ★ **解不出目标的调用点 ${r.honest.indirectCallSites} 个**（\`call eax\` / \`call dword ptr […]\`）⇒ 上面的"调用闭包"只是**下界**`);
   L.push(`  callee 不在函数清单里：${r.honest.calleesNotInInventory.length} 个${r.honest.calleesNotInInventory.length ? `（${r.honest.calleesNotInInventory.slice(0, 5).join(' · ')}…）` : ''}`);
+  L.push(`  ★ **被收窄规则取消**的库候选：${r.honest.libraryCandidatesCancelled.length} 个（体内有 ≥ 0x${ENGINE_SCALE_DISP.toString(16)} 的非栈位移 ⇒ 判回引擎代码，于是它们在分桶与两张榜里都看得见）` + (r.honest.libraryCandidatesCancelled.length ? `：${r.honest.libraryCandidatesCancelled.slice(0, 6).map((x) => x.sym).join(' · ')}${r.honest.libraryCandidatesCancelled.length > 6 ? ' …' : ''}` : ''));
   L.push(`  锚 EA 归属不到任何函数：${r.anchors.unattributed} 个（\`.text\` 里不被任何 \`proc near\` 覆盖 —— 例如 COLLAPSED 的库函数）`);
   L.push(`  锚在**数据 / 全局**上：${r.anchors.dataAnchors} 个（★ 正常：那是 \`.data\` / \`seg002\` 里的定义点，不是归属失败）`);
   L.push(`  \`subject\` 里点名、但没有任何锚落在它身上：${r.honest.subjectNamedButUnanchored.length} 个（诊断项，不参与分桶）`);

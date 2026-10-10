@@ -1,8 +1,13 @@
 /**
  * apps/emulator/src/vm/machine.ts —— **执行核心**（★ 零 Node 依赖）
  *
- * ✅ 按"第几条指令"推进脚本、维护帧栈与池、在等待门挡住时推进时钟；它是**引擎态**的持有者
+ * ✅ 按"第几条指令"推进脚本、维护帧**槽数组 + `cur`** 与池、在等待门挡住时推进时钟；它是**引擎态**的持有者
  *    （因此进状态分区表 —— 见文件末尾的 `STATE_PARTITION`）。
+ * ★★ **帧不是栈，是"槽数组 + cur"**：引擎的帧区有 40 个 per-cur 记录，`Engine[0x5D880]` 是**当前槽号**；
+ *    `0x6 load-frame` 逐字是"保存旧 cur → `cur = op2` → 在槽 `op2` 上建记录 → **恢复旧 cur**"
+ *    （锚 = EA `0x41C84E` / `0x41C854` / `0x41C89A` / `0x41C8A6`）⇒ "往任意槽写记录、装完再切回来"
+ *    用栈（`frames.push`）**表达不了**。栈模型的另一半后果：`pushFrame` 拿"栈深"当 `cur`，
+ *    于是槽号只能等于深度 —— 而引擎里 `0x3 call-script` 是 `cur++` 后装载、`0x6` 是**任意槽**。
  * ❌ 不知道文件从哪来（那是 `host/fs.ts`）、不知道画到哪去（那是宿主的能力）；**不含**任何镜像偏移/EA。
  *
  * ★ 主循环写成**显式两态**：门关着 ⇒ `tick()`（时钟前进 + 场景推进，门可能因此变开），
@@ -26,7 +31,7 @@ import { OPCODE_TABLE } from '@amayui/age-format/src/asm/runtime.mts';
 import type { EffectDisposition, EffectRecord } from '../host/effects.ts';
 import type { Instance } from '../host/instance.ts';
 import type { Instr } from '../model/iterate.ts';
-import { loadScript } from './script.ts';
+import { loadScript, localCountList } from './script.ts';
 import type { LoadedScript } from './script.ts';
 import { HANDLERS, ExitScript } from './ops.ts';
 import type { VmContext } from './ops.ts';
@@ -40,20 +45,45 @@ export const FRAME_FLAGS = {
   WAIT_GATE: 0x400,
 } as const;
 
+/**
+ * 帧**槽**数（= 知识层 `FRAME_LAYOUT.count` 的 40）。
+ *
+ * ★ 两个用它的人，同一个事实、含义不同：`0x6 load-frame` 检查 `op2 >= FRAME_SLOT_COUNT` ⇒ 抛那句
+ *   「ファイルの階層が深すぎます．最大は%dです．」（逐字 `0x41C85A cmp eax,28h` / `0x41C85D jl`），
+ *   而**模型**这边是"`slots` 数组不许被写到第 40 格"。
+ * ★ 它**不是**偏移/EA：是本层的数组上界（这个布局数字属于知识层）。
+ */
+export const FRAME_SLOT_COUNT = 40;
+
 /** "门在等什么"的分类（**闭集合**；`'none'` = 压根没有判据来源，那要记账，不许当成"没有动画"） */
 export type WaitReason = 'scene-window' | 'host' | 'none';
 
 /**
  * 一段脚本的执行状态（**引擎态**）。
  * ★ 没有脚本对象、没有字节数组 —— 只有"我叫什么、走到第几条、我这一帧的池、门在等什么"。
+ * ★ 它是**某一号槽上的帧记录**（见 `Machine.slots` / `Machine.cur`）：引擎每帧一份记录，
+ *   `0x6 load-frame` 能在**任意槽**上建一份（`cur` 只是"现在是哪一号"）。
  */
 export class ScriptFrame {
   /** 脚本名（引擎侧的名字，例如 `LOGO.BIN`） */
   readonly scriptName: string;
-  /** 帧序号（引擎里是 `0..39` 的 `cur`；模拟器只用它做**身份**，不用它算地址） */
+  /** **槽号**（引擎里 `0x5D880` 的 `cur` 就是这个数：`0..39`；本模型也用它算地址无关的身份） */
   readonly cur: number;
   /** 本帧的 local 池 */
   readonly locals: LocalPools;
+  /**
+   * ★ **本帧的 6 个 local 计数**（脚本头那 6 个 `local_*` 声明，**按池序**：第 i 项 = 第 i 个 local 池）。
+   *
+   * 为什么在**帧**上而不在池定义上：引擎把它们写进**每帧一份的帧记录**里
+   * （知识层 `LOCAL_POOL_SLOTS[i].count` = 记录 `+0x08 + 4i`（绝对 `0x5D89C + 4i`）；装载器 `sub_40ED40` 的"读计数 → `operator new[]` → 写基址"
+   * 三连，逐字见 `layout.mts` 的 `LOCAL_POOL_SLOTS` 头注），而**池定义**里带 `count` 是
+   * `tools/test/emulator-model.test.mjs` 明令不许的（"记录内计数槽属于布局层"）。
+   * ★ "声明顺序 = 池序"这条**位置对应**由守卫 `tools/test/emulator-model.test.mjs` 的
+   *   「脚本头 6 个 local 声明 … 位置对应」用例钉住（语料判据：第 i 处计数 store 落在 `记录+0x08+4i`）。
+   * ★ 记录基址 = `0x5D894`（知识层 `FRAME_LAYOUT.base`）；旧基址（`0x5D880`）记法要 **+0x14**。
+   * ★ 缺省 `[]` = "这份记录不是按脚本头建的"（例如测试桩）—— **不许**拿它当"计数是 0"。
+   */
+  readonly localCounts: readonly number[];
   /** 当前指令下标 */
   ip = 0;
   /** 标志位（见 `FRAME_FLAGS`） */
@@ -80,12 +110,17 @@ export class ScriptFrame {
   /**
    * @param space 地址空间（ADR 第 ② 步）—— 给了它，本帧的 `int`/`ptr` 池就**存在区域里**（一份数据）。
    *   缺省 `null` ⇒ 走老的 `Map` 路径（迁移中途的兼容路径；终态是"只有区域"）。
+   * @param localCounts 本帧的 6 个 local 计数（按池序；见字段注）。缺省 `[]` = 未给（⛔ 不等于"都是 0"）。
    */
-  constructor(scriptName: string, cur: number, key: number, caller = -1, space: AddressSpace | null = null) {
+  constructor(
+    scriptName: string, cur: number, key: number, caller = -1, space: AddressSpace | null = null,
+    localCounts: readonly number[] = [],
+  ) {
     this.scriptName = scriptName;
     this.cur = cur;
     this.locals = new LocalPools(key, undefined, { space });
     this.caller = caller;
+    this.localCounts = [...localCounts];
   }
 
   /**
@@ -93,12 +128,15 @@ export class ScriptFrame {
    * `data/ledger/`（域 `Emulator`，subject `model/state-partition-engine-is-snapshot-keys`）。
    * ★ `scriptName` 与 `cur` **在**快照里：恢复一段执行必须知道"跑的是哪份脚本、这是第几号帧"，
    *   否则恢复出来的实例连下一步该派发哪条都不知道。
+   * ★ `localCounts` 也在：引擎把它放在**帧记录里**（记录 `+0x08..+0x1C`，见字段注）⇒ 它是引擎态；
+   *   不放进快照就等于"恢复后这份记录的计数没了"，而它决定池的几何。
    */
   snapshot(): {
     scriptName: string; cur: number;
     ip: number; flags: number; caller: number; waitSinceMs: number | null; waitReason: WaitReason;
     locals: ReturnType<LocalPools['snapshot']>;
     returnStack: number[];
+    localCounts: number[];
   } {
     return {
       scriptName: this.scriptName, cur: this.cur,
@@ -106,6 +144,7 @@ export class ScriptFrame {
       waitSinceMs: this.waitSinceMs, waitReason: this.waitReason,
       locals: this.locals.snapshot(),
       returnStack: [...this.returnStack],
+      localCounts: [...this.localCounts],
     };
   }
 
@@ -175,7 +214,7 @@ export interface RunOptions {
 }
 
 /**
- * 执行核心。**引擎态**：`globals` / `frames` / `scene` / `frameNo`。
+ * 执行核心。**引擎态**：`globals` / `slots` / `cur` / `scene` / `frameNo`。
  *
  * ★ `scripts` 与 `instance` 是**宿主类**字段：前者是外部内容，后者是注入的服务。
  */
@@ -184,8 +223,23 @@ export class Machine {
   readonly instance: Instance;
   /** 引擎级池（跨脚本保留、不随装载脚本帧而重建） */
   readonly globals: GlobalPools;
-  /** 帧栈（`frames[0]` 是顶层） */
-  readonly frames: ScriptFrame[];
+  /**
+   * ★★ **帧槽数组**（引擎的 40 个 per-cur 帧记录；空槽是 `null`）。
+   *
+   * 形状为什么是"槽"而不是"栈"：`0x6 load-frame` 的逐字是**在槽 `op2` 上建记录、装完恢复旧 `cur`**
+   * （锚 = EA `0x41C84E`（存旧 cur）· `0x41C854`（`cur = op2`）· `0x41C89A`（`call sub_40ED40` 建记录）
+   * · `0x41C8A6`（恢复 cur））⇒ "往**任意**槽写、写完切回来"这件事，栈（`push`/`pop` 只能动末端）
+   * 表达不了；而且栈模型会把"槽号"和"深度"绑死。
+   * ★ 槽是**稀疏**的：`slots[26]` 有记录时 8..25 可以是空的（预装帧就是这样）。
+   * 快照要带上**整条**数组（含空槽）—— 见 `snapshot()`。
+   */
+  readonly slots: (ScriptFrame | null)[];
+  /**
+   * **当前槽号**（引擎 `Engine[0x5D880]` 那一格；`slots[cur]` 就是活动帧）。
+   * ★ 初值 `-1` = "还没有活动帧"：`pushFrame` 是 `slots[++cur]`，所以**根脚本落在槽 0**
+   *   （与引擎一致：`0x5D880` 是槽号，根脚本占 0 号槽）。
+   */
+  cur: number;
   /** 场景模型（绘制项 / 纹理槽 / 网格 / 计时窗）——**引擎态**，见 `model/scene.ts` 头注 */
   readonly scene: SceneModel;
   /** 已装载脚本的缓存（外部内容，不是引擎态） */
@@ -228,7 +282,8 @@ export class Machine {
       }),
     });
     this.globals = new GlobalPools(instance.env.codecKey, undefined, { space: this.space });
-    this.frames = [];
+    this.slots = [];
+    this.cur = -1;
     this.scene = new SceneModel();
     this.scalars = new EngineScalars();
     this.scripts = new Map();
@@ -237,16 +292,25 @@ export class Machine {
 
   // ── 基本访问 ──────────────────────────────────────────────────────────────
 
-  /** 当前帧（栈顶） */
+  /** 当前帧（槽 `cur` 上的那一份记录） */
   get frame(): ScriptFrame {
-    const f = this.frames[this.frames.length - 1];
+    const f = this.slots[this.cur];
     if (!f) throw new Error('没有活动帧：先 loadScriptBytes() 再 run()');
     return f;
   }
 
-  /** 顶层脚本帧（`frames[0]`） */
+  /** 顶层脚本帧（槽 `0`） */
   get root(): ScriptFrame | undefined {
-    return this.frames[0];
+    return this.slots[0] ?? undefined;
+  }
+
+  /**
+   * **活动调用链的帧数** = `cur + 1`。
+   * ★ ⛔ 它**不数**那些不在链上的槽（`0x6 load-frame` 预装在槽 26 的记录不在活动链里）——
+   *   所以别拿 `slots` 的长度当深度。
+   */
+  get depth(): number {
+    return this.cur + 1;
   }
 
   get clockMs(): number {
@@ -277,7 +341,7 @@ export class Machine {
   /** 当前帧的脚本（装载缓存里的那份） */
   scriptOf(frame: ScriptFrame = this.frame): LoadedScript {
     const s = this.scripts.get(frame.scriptName);
-    if (!s) throw new Error(`脚本 ${frame.scriptName} 还没装载（frames 里的名字与 scripts 缓存不同步）`);
+    if (!s) throw new Error(`脚本 ${frame.scriptName} 还没装载（帧记录里的名字与 scripts 缓存不同步）`);
     return s;
   }
 
@@ -293,7 +357,7 @@ export class Machine {
     this.scripts.set(name, script);
     for (const note of script.notes) this.note('script-note', `${name} ${note}`);
     if (opts.asRoot ?? true) {
-      this.pushFrame(name, -1);
+      this.pushFrame(name, -1, localCountList(script.header));
     }
     this.effect('system', 'script.load', 'modeled', {
       script: name,
@@ -305,21 +369,62 @@ export class Machine {
   }
 
   /**
-   * 压一个**新帧**（`call-script` 与装载根脚本共用）。
-   * ★ `caller` 是**调用者帧的 `cur`**（引擎里它是 `帧+0x4C` 那条回链；`exit`/`ret` 靠它回去）。
+   * 在**下一个槽**（`slots[++cur]`）上建一份新帧记录（`call-script` 与装载根脚本共用）。
+   * ★ `caller` 是**调用者帧的 `cur`**（引擎里它是记录 `+0x38`（绝对 `0x5D8CC`）那条回链；`exit`/`ret` 靠它回去）。
    *   顶层帧的 caller = `-1` ⇒ 顶层 `exit` = 程序退出（已取证：`-1` 既不是 -10 也不是 -11，
    *   引擎在那里抛 `Command_Exit_Exception`，主循环接住后关窗退出）。
+   * ★ 与 `loadScriptAt()` 的分工：这一条走**调用链**（`cur+1`，槽号与深度同步增长），
+   *   那一条是 `0x6 load-frame` 的**任意槽**（⛔ 不动 `cur`）。
+   * @param localCounts 本帧的 6 个 local 计数（按池序）；没给 ⇒ 空（⛔ 不等于"都是 0"，见字段注）
    */
-  pushFrame(scriptName: string, caller = -1): ScriptFrame {
-    const f = new ScriptFrame(scriptName, this.frames.length, this.instance.env.codecKey, caller, this.space);
-    this.frames.push(f);
+  pushFrame(scriptName: string, caller = -1, localCounts: readonly number[] = []): ScriptFrame {
+    const slot = this.cur + 1;
+    const f = new ScriptFrame(scriptName, slot, this.instance.env.codecKey, caller, this.space, localCounts);
+    this.slots[slot] = f;
+    this.cur = slot;
     return f;
   }
 
-  /** 弹掉当前帧（`exit`/`ret` 的正面支）；栈空 ⇒ 抛（"没有帧"不是"回到顶层"） */
+  /** 弹掉当前帧（`exit` 的正面支：`slots[cur--] = null`）；没有活动帧 ⇒ 抛（"没有帧"不是"回到顶层"） */
   popFrame(): ScriptFrame {
-    const f = this.frames.pop();
-    if (!f) throw new Error('帧栈空了：popFrame 没有可弹出的帧');
+    const f = this.slots[this.cur];
+    if (!f) throw new Error('没有活动帧：popFrame 没有可弹出的帧');
+    this.slots[this.cur] = null;
+    this.cur -= 1;
+    return f;
+  }
+
+  /**
+   * ★★ **在指定槽上建一份帧记录** —— `0x6 load-frame` 的核心，**不改 `cur`**。
+   *
+   * 逐字（锚 = EA，`sub_41C7C0`）：`0x41C84E mov [esi+5D884h],ecx`（存旧 cur）→
+   * `0x41C854 mov [esi+5D880h],eax`（`cur = op2`）→ `0x41C89A call sub_40ED40`（**在槽 `cur` 上建记录**）
+   * → `0x41C8A6 mov [esi+5D880h],ecx`（**恢复旧 cur**）。
+   * ⇒ 本函数就是中间那一步的**净效果**：记录落在槽 `slot` 上、`cur` 一个字节都不动。
+   *   "临时把 `cur` 切过去再切回来"是引擎实现那个净效果的**手段**，不是它的语义 —— 所以本层
+   *   不需要真的切 `cur`（切了反而会让主循环在错的帧上跑）。
+   *
+   * ★ **建了什么**（已建的部分）：帧记录本身 —— 脚本名 / `cur` = 槽号 / **本帧自己的 local 池**
+   *   （`LocalPools`，与活动帧的那份是**两个对象**）/ 脚本头那 6 个 local 计数（按池序）。
+   * ★ **欠什么**（⛔ 不许当成"全建好了"）：`sub_40ED40` 里的其余字段与表 —— 三组 `(长度, 指针)`、
+   *   `ip`（记录 `+0x04`）、记录 `+0x00` 的脚本缓冲、`array_container`(记录 `+0x70`) …
+   *   那些在本模型里没有承载面 ⇒ `0x6` 每次仍发一条欠账记录（见 `vm/ops.ts` 的 `opLoadFrame`）。
+   * ★ **池的初值**：引擎装载时给池填过初值（int 族是 `enc_zero`，见知识层 `EVIDENCE.encZero`），
+   *   而"每个池填多少、填哪几格"**没有取证** ⇒ 这里**不填**（`LocalPools` 的容量本来就未知）；
+   *   计数只**记在帧记录上**（`localCounts`），不冒充容量。
+   *
+   * @param slot 目标槽号（`0..FRAME_SLOT_COUNT-1`）
+   * @param script 已装载的脚本（字节来源的选取在调用方 —— 与 `loadScriptById` 的分工同形）
+   */
+  loadFrameAt(slot: number, script: LoadedScript): ScriptFrame {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= FRAME_SLOT_COUNT) {
+      throw new Error(`load-frame 的槽号 ${slot} 不在 0..${FRAME_SLOT_COUNT - 1} 之内 —— 这不是脚本的问题，是调用点算错了`);
+    }
+    const f = new ScriptFrame(script.name, slot, this.instance.env.codecKey, -1, this.space, localCountList(script.header));
+    // ★ 槽是**一整条**数组（空槽是 `null`）：`slots[26]` 有记录时 8..25 显式是空槽，不是"洞"
+    //   （洞在 JSON 往返里会变成 `null`，"快照逐字节相同"那条判据就说不清了）
+    while (this.slots.length <= slot) this.slots.push(null);
+    this.slots[slot] = f;
     return f;
   }
 
@@ -488,10 +593,16 @@ export class Machine {
 
   // ── 快照 ──────────────────────────────────────────────────────────────────
 
-  /** 规范化快照（纯数据）。★ `engine` 类字段恰好就是它的顶层键（由守卫核；口径见 `ScriptFrame.snapshot` 的指针） */
+  /**
+   * 规范化快照（纯数据）。★ `engine` 类字段恰好就是它的顶层键（由守卫核；口径见 `ScriptFrame.snapshot` 的指针）
+   * ★★ 帧部分带的是 **`cur` + 整条 `slots`（含空槽）**：只存"活动链"是不够的 ——
+   *   `0x6 load-frame` 会把记录放进**不在链上**的槽（实测启动链：槽 26/28/29/30/31），
+   *   丢掉它们等于"恢复后那些预装记录凭空消失"。空槽用 `null` **显式**占位（不是洞）⇒ JSON 往返逐字节相同。
+   */
   snapshot(): {
     globals: ReturnType<GlobalPools['snapshot']>;
-    frames: ReturnType<ScriptFrame['snapshot']>[];
+    slots: (ReturnType<ScriptFrame['snapshot']> | null)[];
+    cur: number;
     scene: ReturnType<SceneModel['snapshot']>;
     scalars: ReturnType<EngineScalars['snapshot']>;
     space: ReturnType<AddressSpace['snapshot']>;
@@ -499,7 +610,8 @@ export class Machine {
   } {
     return {
       globals: this.globals.snapshot(),
-      frames: this.frames.map((f) => f.snapshot()),
+      slots: Array.from({ length: this.slots.length }, (_, i) => this.slots[i]?.snapshot() ?? null),
+      cur: this.cur,
       scene: this.scene.snapshot(),
       scalars: this.scalars.snapshot(),
       space: this.space.snapshot(),
@@ -525,20 +637,21 @@ export function describeStop(r: StopReason): string {
  * 口径与 `model/pools.ts` 的同一张表一致：**`engine` 类的字段恰好就是快照的顶层键**。口径与理由
  * 见知识台账：`data/ledger/`（域 `Emulator`，subject `model/state-partition-engine-is-snapshot-keys`）。
  * 这里只列**持有引擎态**的类：
- * * `Machine` —— `globals` / `frames` / `scene` / `scalars` / `space` / `frameNo` 是引擎态；
+ * * `Machine` —— `globals` / `slots` / `cur` / `scene` / `scalars` / `space` / `frameNo` 是引擎态；
  *   `instance`（注入的服务）与 `scripts`（外部内容）是宿主类；`diag` / `effectCounter` / `gateBlockLogged` 是诊断。
- * * `ScriptFrame` —— 六个字段全是引擎态；它**没有**宿主字段（脚本内容在 `Machine.scripts` 里）。
+ * * `ScriptFrame` —— 七个字段全是引擎态；它**没有**宿主字段（脚本内容在 `Machine.scripts` 里）。
  * ★ 本表由 `tools/test/emulator-state-partition.test.mjs` 反射核对（新增可变字段忘了归类就红）。
  */
 export const STATE_PARTITION: Record<string, Record<string, string>> = {
   Machine: {
     instance: 'host', scripts: 'host',
     diag: 'diagnostic', effectCounter: 'diagnostic', gateBlockLogged: 'diagnostic',
-    globals: 'engine', frames: 'engine', scene: 'engine', scalars: 'engine', space: 'engine', frameNo: 'engine',
+    globals: 'engine', slots: 'engine', cur: 'engine', scene: 'engine', scalars: 'engine', space: 'engine', frameNo: 'engine',
   },
   ScriptFrame: {
     scriptName: 'engine', cur: 'engine', locals: 'engine',
     ip: 'engine', flags: 'engine', caller: 'engine', waitSinceMs: 'engine', waitReason: 'engine',
     returnStack: 'engine',
+    localCounts: 'engine',
   },
 };

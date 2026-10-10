@@ -52,7 +52,7 @@ export const OPCODE_HANDLERS = {
   0x2e3: 'sub_430FF0', // (无名) · argc 3
   0x2e4: 'sub_431060', // (无名) · argc 3
   // ── ★ 启动链前段（SYSTEM4 的前 70 条会撞到的那批）──
-  //    argc 的判据：**handler 体自己写的长度字** `帧+0x5D8F4 = 2·argc+1`（与指令表的 argc 互为独立核验）。
+  //    argc 的判据：**handler 体自己写的长度字** `记录+0x60（绝对 0x5D8F4）= 2·argc+1`（与指令表的 argc 互为独立核验）。
   //    形态：多数是"读操作数 → 写一个引擎标量"或"转发进某个子系统"（见 layout.mts 的 ENGINE_SCALAR_WRITES）。
   0x1a8: 'sub_419690', // dev_ukn · argc 0（体只有协议写 ⇒ no-op）
   0x2f6: 'sub_426820', // (无名) · argc 1（清某个 per-slot 状态 + 子系统调用）

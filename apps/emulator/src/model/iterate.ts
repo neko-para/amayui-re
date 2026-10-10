@@ -19,7 +19,12 @@
  * * 起点 = 头部长度（v4 = 60 字节；v5 = 68）
  * * 终点 = `头部长度 + min(三张表的 offset) * 4`（三张表紧跟在指令区之后），再由数据块偏移动态前压
  *   —— 口径与理由见知识台账：`data/ledger/`（域 `Emulator`，subject `model/iterate-dynamic-end`）。
- * * `opcode == 0` ⇒ 引擎直接报 "bad opcode : 0"（语料里不该出现）
+ * * `opcode == 0` 与**任何未登记的 opcode 同形**：引擎拿它直接查派发表，而那张表在初始化时
+ *   被 `mov ecx,400h` / `rep stosd` **1024 项全部预填**成默认 handler `sub_418E30`
+ *   （逐字 `.lst:34077-34079`）⇒ 落到默认 handler 抛 `このコマンドはサポートされていません．`
+ *   （错误码 `0x10001`，`.lst:37038-37045`）。
+ *   ★ 订正：这里原先写「引擎直接报 `bad opcode : 0`」—— **全语料 / `.c` / 原始字节里都没有那个串**，
+ *     那是一句不存在的台词。不变量本身不变：**语料里不该出现 opcode 0**。
  */
 /**
  * ★ `ByteSource` / `Header` / `OpcodeDef` / `OpcodeTable` 都是**格式层的类型** ——
@@ -75,7 +80,7 @@ export interface IterateResult {
 /** 一条指令的**字节长度**（唯一真源：`4 + 8*argc`） */
 export const instrByteLength = (argc: number): number => 4 + 8 * (argc >>> 0);
 
-/** 一条指令占的 **dword 数**（引擎 `帧+0x74` 那个槽写的值） */
+/** 一条指令占的 **dword 数**（引擎写进记录 `+0x60`（绝对 `0x5D8F4`）那个槽的值） */
 export const instrDwords = (argc: number): number => 2 * (argc >>> 0) + 1;
 
 /** 恒等式：字节长度 == dword 数 × 4（★ 由它把"指令表"与"引擎推进口径"绑起来） */
@@ -115,8 +120,11 @@ export function iterate(bin: ByteSource, { table, strict = true }: { table: Opco
     const opcode = rd.u32(pos);
     const byteOffset = pos;
     if (opcode === 0) {
-      // 引擎在这一步是**直接报错**（"bad opcode : 0"）—— 模拟器不许悄悄跳过
-      problems.push({ byteOffset, kind: 'bad-opcode-zero', message: 'opcode = 0（引擎会报 "bad opcode : 0"）' });
+      // ★ 引擎在这一步**不是**"直接报错"：opcode 0 与其他任何值一样**直接查派发表**，
+      //   而表里那一格预填的是默认 handler `sub_418E30`（`rep stosd` 1024 项，`.lst:34077-34079`）
+      //   ⇒ 它抛的是 `このコマンドはサポートされていません．`（`0x10001`，`.lst:37038-37045`）。
+      //   ⇒ 模型不许悄悄跳过：报出一条问题（kind 名沿用 `bad-opcode-zero`，那是本模型的记号）。
+      problems.push({ byteOffset, kind: 'bad-opcode-zero', message: 'opcode = 0（引擎会查表落到默认 handler ⇒ 抛「このコマンドはサポートされていません．」0x10001）' });
       if (strict) break;
       pos += 4;
       continue;

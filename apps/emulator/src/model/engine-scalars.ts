@@ -18,6 +18,20 @@
 /** 一个槽的值：u32 */
 export type ScalarValue = number;
 
+/**
+ * ★★ **构造函数清零的那 20 格**的绝对偏移（`Engine+0x5EC9C..0x5ECE8`，步长 4）。
+ *
+ * 逐字证据：`.lst:33974-33993`（EA `0x415C0F..0x415C81`）连续 20 条 `mov [esi+5EC9Ch..5ECE8h], edi`，
+ * 而 `edi` 在**同一函数里**被 `xor edi, edi` 清过（`.lst:33680`，其后到这批写之前没有别的 `edi` 写）
+ * ⇒ **这些槽的"没写过"就是 0**。台账 subject：`Engine+0x5EC9C..0x5ECE8/ctor-zero-fill`。
+ * ★ **本常量是给守卫用的可再校验锚**（`tools/test/emulator-engine-scalars.assets.test.mjs` 拿它去
+ *   `.lst` 里逐字对；改这里 ⇒ 守卫当场红）。它**不是**模型行为的一部分：`read()` 的"没写过 ⇒ 0"
+ *   是那 20 格的结果，本层不按格子存值（稀疏 `Map`，见类注释）。
+ */
+export const CTOR_ZERO_FILLED = Object.freeze(
+  Array.from({ length: 20 }, (_, i) => 0x5ec9c + 4 * i),
+);
+
 /** 一份**规范化**的寄存器堆快照（纯数据 ⇒ 可 `JSON.stringify` 往返；键升序） */
 export interface EngineScalarsSnapshot {
   /** `[名字, u32][]`，按名字升序 */
