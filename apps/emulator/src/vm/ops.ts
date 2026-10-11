@@ -764,9 +764,30 @@ function objectFieldWriter(entry: (typeof OBJECT_FIELD_WRITES)[number]): Handler
  * ★ 字符串版（`load-string`/`save-string`）同形但类型码是 **5**，而且值是 28 字节的字符串元素
  *   ⇒ 那两条要等字符串池落地（见需求树）。
  */
-function configKeyInt(value: number): string {
+function configKeyIntByValue(value: number): string {
   return `\u0003${(value >>> 0).toString(16).padStart(8, '0')}`;
 }
+
+/**
+ * ★★ **本层的近似实现**（导出只为了给守卫一个"能被变异打中"的点）：键里的那个数 = **操作数的值**。
+ *
+ * ⛔ **这不是引擎口径**。引擎逐字是：`load-int`（`sub_42DF40`，`0x42DF6F`）与 `save-int`（`sub_434F60`，
+ *   `0x434F8F`）都把**立即数 `1`（= 操作数序号）**交给 `sub_418A30`，而 `sub_418A30` 的三条臂
+ *   （`0x418A5B` type 3 / `0x418A60` type 6 / `0x418A65` type 12）**返回的都是表下标** ——
+ *   所以引擎的键**只跟"第几个操作数"有关**，`SYSTEM4.BIN` 里 `load-int (global-int 5)` 的键是
+ *   `"\x03 00000001"`（序号 1）而**不是** `global5` 当时的值。
+ *   取证：台账 `Engine+0x5D880/operand-ordinal-to-table-index` 与 `config/global5-jcc-source-and-existence-probe`。
+ *
+ * ## 为什么现在**不改**成引擎口径（这是有意的欠账，不是遗漏）
+ * 键从"值"改成"序号"会**真的改变启动链的分叉**：`SYSTEM4` 里 `load-int (global-int 5)` 紧挨
+ * `jcc (global-int 5)`，改对之后第二次运行会**第一次**读到上一次 `save-int` 写下的那一条
+ * （序号的键在两次运行之间是稳定的）⇒ 脚本会走 `LOADCONFIG` 支 —— 那条支**从没被本仓跑过**。
+ * 按用户限制「**不推进指令/启动链**」，这一步**不在本轮范围**；它由缺陷单
+ * `REQ-01M4N29QFPHW3X0VKP1YWGDDC7` 跟踪（`pnpm tools requirements show 29TY8341`）。
+ *
+ * ⇒ 本条下面两个 handler 记的 `KEY_PRIMITIVE_NOTE` 必须**同时**说清"键取的是值、而引擎取的是序号"。
+ */
+export const __configKeyIntByValue = configKeyIntByValue;
 
 /** 键里那个字节不可打印 ⇒ 打日志时转义（否则日志里出现控制字符，没法读也没法 diff） */
 function printableKey(key: string): string {
@@ -774,11 +795,20 @@ function printableKey(key: string): string {
 }
 
 /**
- * ★ **已知欠账**：键取自另一个取值原语 `sub_418A30`（`load-int`/`save-int` 都用它），
- *   而本模型只实现了 `sub_41BF50`。两者**在哪些 type 上一致、哪些上不一致没有取证**
- *   ⇒ 这里用 `sub_41BF50` 的读法**近似**，并把这件事写进每一条副作用记录（⛔ 不静默）。
+ * ★ **已知欠账（两条，别混）**：
+ * 1. **取值原语**：键由另一个取值原语 `sub_418A30` 算出，而本模型只实现了 `sub_41BF50`
+ *    —— 两者在哪些 type 上一致、哪些上不一致**没有取证** ⇒ 这里用 `sub_41BF50` 的读法近似。
+ * 2. ★★ **键里的那个数到底是"值"还是"序号"**：引擎是**序号 / 表下标**
+ *    （`0x42DF6F` 与 `0x434F8F` 两处都 `push 1`，再 `call sub_418A30` ⇒ 返回表下标；三条臂
+ *    `0x418A5B`/`0x418A60`/`0x418A65` 逐字见台账 `Engine+0x5D880/operand-ordinal-to-table-index`）。
+ *    而**本模型用的是操作数的值**（`configKeyIntByValue`）—— 那是个**被证伪的前提**留下来的近似
+ *    （原假设："键取自该变量当时的值，所以 `jcc` 之前 `global5` 必然是引擎初值"）。
+ *    ⇒ 改它**会推进启动链**（`load-int (global-int 5)` 紧挨 `jcc (global-int 5)`）⇒ 按用户限制不在本轮，
+ *    由需求单跟踪。**这一条不许静默**：每条副作用记录的 note 里都要看得见它。
  */
-const KEY_PRIMITIVE_NOTE = '键取自 sub_41BF50 的读法；引擎用的是 sub_418A30（**未建模**，两者差异未取证）';
+const KEY_PRIMITIVE_NOTE =
+  '键里的数取自**操作数的值**（本层近似）；引擎取的是**操作数序号/表下标**（`sub_418A30`，' +
+  '两处调用点都 `push 1`）· 取值原语 `sub_41BF50` 与引擎的 `sub_418A30` 差异未取证';
 
 /**
  * `0x1a3 load-int`：**查不到 ⇒ 0**（不是"不写"），然后把结果**写回 op1**。
@@ -787,7 +817,7 @@ const KEY_PRIMITIVE_NOTE = '键取自 sub_41BF50 的读法；引擎用的是 sub
  */
 const opLoadInt: Handler = (ctx) => {
   const k = num(ctx, 0);
-  const key = configKeyInt(k);
+  const key = configKeyIntByValue(k);
   const raw = ctx.machine.instance.config.get(key);
   const value = raw === undefined ? 0 : Number.parseInt(raw, 10) | 0;
   writeOperand({ locals: ctx.frame.locals, globals: ctx.machine.globals, script: ctx.script, space: ctx.machine.space }, ctx.ins.args[0], 0, value);
@@ -807,7 +837,7 @@ const opLoadInt: Handler = (ctx) => {
  */
 const opSaveInt: Handler = (ctx) => {
   const v = num(ctx, 0);
-  const key = configKeyInt(v);
+  const key = configKeyIntByValue(v);
   ctx.machine.instance.config.set(key, String(v | 0));
   ctx.machine.effect('system', 'config.write', 'modeled', {
     opcode: '0x1a2', key: printableKey(key), value: v,

@@ -31,12 +31,15 @@ import {
   ID_PREFIX,
   KINDS,
   OPERATIONS,
+  REFERENCE_BIN_DIGEST_DEBT_MAX,
   REFERENCE_ROOT_KEY,
   ULID_RE,
   anchorText,
   appendRecord,
+  binDigestAdvice,
   describe,
   describeText,
+  hashAnchorAt,
   isoNow,
   listFiles,
   monthOf,
@@ -45,6 +48,7 @@ import {
   readRecords,
   rebuildDb,
   rebuildTwiceDigest,
+  referenceBinDigestGaps,
   resolveAnchor,
   resolveDomain,
   serializeRecord,
@@ -69,12 +73,22 @@ const HELP = `tools/ledger.mjs —— 知识台账（append-only 文本真源 + 
                                                    #   多少有人登记过 / 多少收了口 / **下一步该取证谁**（前沿）
   node tools/ledger.mjs --list [--only-kind claim] [--only-effective stale] [--system <域>] [--subject X] [--json]
   node tools/ledger.mjs --show <id|唯一前缀>
+  node tools/ledger.mjs --hash-anchor <path> <ea> <len> [--repo self|reference]
+                                                   # ★ **只读**：按 PE 节表把 EA 映射成偏移，打印该处 len 字节的
+                                                   #   offset / 十六进制 / **sha256** ⇒ 照抄进 bin 锚（见下）
   node tools/ledger.mjs --add --kind <k> --system <域> --subject <s> --claim <c> --anchor <json>… [--status …] [--write]
   node tools/ledger.mjs --add --kind domain --system <父域> --subject <域名> --disposition added --claim … --anchor … --write
   node tools/ledger.mjs --retract <id> --claim <理由> [--write]     # ★ 追加一条 replaces 它的记录
-  node tools/ledger.mjs --validate [--json]                        # 7 条不变量；红 = 退出码 1
+  node tools/ledger.mjs --validate [--json]                        # 8 条不变量；红 = 退出码 1
   node tools/ledger.mjs --rebuild-db [--write] [--db <路径>]        # 缺省 dry-run；判据 = 逻辑内容两次相同
   node tools/ledger.mjs --compact [--write]                        # 分片归位 + 同 id 去重（不删任何结论）
+
+★ **摘要**（\`repo=reference\` 的 \`bin\` 锚，**新记录硬要求**）：必须带 \`len\` + \`sha256\`
+  （= 该 EA 处 \`len\` 字节的摘要 —— "这条观察没被换掉"的**唯一证据**；只记 EA 的锚在二进制被换掉之后
+  **看起来仍然正常**）。缺了 \`--add\` **在写盘之前就拒**（dry-run 也拒），不变量 #8 也会红。
+  补摘要的现成命令：\`node tools/ledger.mjs --hash-anchor <path> <ea> <len>\`（只读、不写任何东西）。
+  ★ **存量欠账不因此变红**：缺摘要的在场 reference bin 锚条数钉成**棘轮上限**
+  （\`REFERENCE_BIN_DIGEST_DEBT_MAX\`，现况见 \`--report\` 的"摘要欠账"那一行，**只许下降**）。
 
 ★ 分类轴：\`system\`（**可缺省**，不是标签）＝这条结论关于引擎的哪一块；
   不写 ⇒ 进"待定域"名单（不报红，\`--report\` 单列计数）；写了就必须能追到词表（见 \`--describe\`）。
@@ -95,14 +109,14 @@ const HELP = `tools/ledger.mjs —— 知识台账（append-only 文本真源 + 
  *     `accepted` 变成多余位置参数，**静默变成"打印概览"**（真踩过：`--write` 被忽略、什么都没写）。
  *   ★ 同理 `list` 的筛选用 `--only-kind` / `--only-effective`，不叫 `--kind` / `--effective`（那是 add 的字段）。
  */
-const ACTIONS = ['describe', 'report', 'list', 'domains', 'show', 'add', 'retract', 'validate', 'rebuild-db', 'compact', 'coverage', 'help'];
+const ACTIONS = ['describe', 'report', 'list', 'domains', 'show', 'hash-anchor', 'add', 'retract', 'validate', 'rebuild-db', 'compact', 'coverage', 'help'];
 
 function parseArgs(argv) {
   const out = { action: null, write: false, json: false, anchors: [], rest: [] };
   const takesValue = new Set([
     'kind', 'system', 'subject', 'claim', 'status', 'note', 'anchor', 'db', 'tz', 'replaces', 'why', 'dir', 'id', 'at',
     'disposition', 'aliases', 'split-into',
-    'only-kind', 'only-effective', 'lst', 'top',
+    'only-kind', 'only-effective', 'lst', 'top', 'repo',
   ]);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -187,6 +201,9 @@ export function main(argv = process.argv.slice(2)) {
     process.stdout.write(args.json ? `${JSON.stringify(describe(), null, 2)}\n` : describeText());
     return 0;
   }
+  // ★ `hash-anchor` 是**只读帮助动作**：它只读一个文件的字节，与台账内容无关
+  //   ⇒ 在读台账 / 跑 `git ls-files` 之前就返回（写手在还没写记录时就要用它）。
+  if (args.action === 'hash-anchor') return cmdHashAnchor(args);
 
   const ctx = loadContext(args);
   const { ledgerDir, records, opts } = ctx;
@@ -220,10 +237,17 @@ function cmdReport(args, proj, ledgerDir) {
   //   逼人修它等于逼人就地改历史）。分开计数 ⇒ "要不要管"一眼可判。
   const errLive = proj.entries.filter((e) => e.effective !== 'retracted').flatMap((e) => e.anchors).filter((a) => a.kind === 'error').length;
   const errHist = err - errLive;
+  /**
+   * ★ **摘要欠账**（要求 3：让"没有摘要"这件事**看得见**，而不是靠人记得）：
+   * 在场 `reference` `bin` 锚里没有 `len`+`sha256` 的条数 = 不变量 #8 那个棘轮的**现算量**。
+   * ★ 同时报**余量**：上限是冻结的实测值，债务下降后会出现余量 ⇒ 棘轮变瞎 ⇒ 该把上限调低。
+   */
+  const digestGaps = referenceBinDigestGaps(proj.entries);
+  const digestSlack = REFERENCE_BIN_DIGEST_DEBT_MAX - digestGaps.length;
   const files = listFiles(ledgerDir);
   if (args.json) {
     process.stdout.write(
-      `${JSON.stringify({ files: files.length, records: proj.entries.length, byKind, byEffective: proj.byEffective, bySystem: proj.bySystem, domains: proj.vocab.canonical.size, anchors: { total: anchors.length, ok, warn, err, errLive, errHist }, conflicts: proj.conflicts.length }, null, 2)}\n`,
+      `${JSON.stringify({ files: files.length, records: proj.entries.length, byKind, byEffective: proj.byEffective, bySystem: proj.bySystem, domains: proj.vocab.canonical.size, anchors: { total: anchors.length, ok, warn, err, errLive, errHist }, digestDebt: { missing: digestGaps.length, ratchetMax: REFERENCE_BIN_DIGEST_DEBT_MAX, slack: digestSlack }, conflicts: proj.conflicts.length }, null, 2)}\n`,
     );
     return 0;
   }
@@ -258,6 +282,15 @@ function cmdReport(args, proj, ledgerDir) {
     );
   }
   L.push(`锚点        ${anchors.length} 条　可解析=${ok} · 参考仓取不到（warn）=${warn} · **红**=${errLive}${errHist ? ` · 历史行死锚=${errHist}（已被取代，不管）` : ''}`);
+  L.push(
+    `摘要欠账    ${digestGaps.length} 条**在场** \`reference\` \`bin\` 锚没有 \`len\`+\`sha256\`` +
+      `（★ 新记录由 \`add\` 硬拒 + 不变量 #8；存量棘轮上限 ${REFERENCE_BIN_DIGEST_DEBT_MAX}）` +
+      (digestSlack > 0
+        ? `　★ 有余量 ${digestSlack} ⇒ 有记录补过摘要：把 \`REFERENCE_BIN_DIGEST_DEBT_MAX\` 调低到 ${digestGaps.length}（否则棘轮会变瞎）`
+        : digestSlack === 0
+          ? '　（余量 0 ⇒ 棘轮不瞎：再多一条就红）'
+          : `　✗ **超上限 ${-digestSlack} 条** ⇒ \`--validate\` #8 会红`),
+  );
   L.push(`冲突        ${proj.conflicts.length} 组${proj.conflicts.length ? '　⇒ 见 `--validate` 的 #5' : ''}`);
   L.push('');
   L.push(proj.entries.length === 0 ? '（台账是空的 —— 这是**有意为之**：K3 通过前任何知识条目不得进来）' : '体检口径：`--validate` 是门禁，本命令只是概览。');
@@ -380,6 +413,86 @@ function cmdShow(args, proj) {
   return 0;
 }
 
+/**
+ * `--hash-anchor <path> <ea> <len> [--repo self|reference]` —— **只读**：算出 `bin` 锚该填的 `len` + `sha256`。
+ *
+ * 为什么它不是"锦上添花"：不变量 #8 要求**新记录**的 `repo=reference` `bin` 锚带摘要，
+ * 而写手**必须先能算出那个数**才写得出来。错误信息里讲一遍算法是次优的 —— 这里给的是一条能照抄的命令。
+ *
+ * ★ **只读**：不写台账、不改任何文件。路径可以是仓库内相对路径（按 `--repo` 选根，缺省先只读参考仓、
+ *   再本仓），也可以是**绝对路径**（给仓库外的候选件算摘要用）。
+ * ★ `sha256` 的定义只有一条：**该 EA 处 `len` 字节**的摘要（偏移由 `peOffsetOf` 按 PE 节表现算）。
+ */
+function cmdHashAnchor(args) {
+  const [p, eaArg, lenArg] = args.rest;
+  if (!p || eaArg === undefined || lenArg === undefined) {
+    throw new Error(
+      '--hash-anchor 需要 <path> <ea> <len>（例：node tools/ledger.mjs --hash-anchor raw-parts/AGE.EXE__dumped.sectfix.EXE 0x497620 70）',
+    );
+  }
+  const ea = /^0x/i.test(eaArg) ? Number.parseInt(eaArg, 16) : Number(eaArg);
+  const len = Number.parseInt(lenArg, 10);
+  const abs0 = path.isAbsolute(p);
+  const roots = abs0
+    ? [{ repo: '(绝对路径)', root: '' }]
+    : args.repo === 'self'
+      ? [{ repo: 'self', root: REPO_ROOT }]
+      : args.repo === 'reference'
+        ? [{ repo: 'reference', root: referenceRoot() }]
+        : [
+            { repo: 'reference', root: referenceRoot() },
+            { repo: 'self', root: REPO_ROOT },
+          ];
+  let picked = null;
+  for (const r of roots) {
+    if (r.root === null) continue;
+    const abs = abs0 ? p : path.resolve(r.root, p);
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+      picked = { ...r, abs };
+      break;
+    }
+  }
+  if (!picked) {
+    const tried = roots.map((r) => `${r.repo}=${r.root === null ? '（不在场）' : r.root}`).join(' · ');
+    process.stderr.write(`✗ 找不到文件：${p}\n  找过：${tried}\n`);
+    return 1;
+  }
+  const r = hashAnchorAt(fs.readFileSync(picked.abs), ea, len);
+  if (!r.ok) {
+    process.stderr.write(`✗ ${r.why}\n  文件：${picked.abs}\n`);
+    return 1;
+  }
+  // ★ 锚点里的 `path` 是**相对所选仓库根**的路径（不是相对本仓、也不是绝对路径）——
+  //   印错的话写手会照抄出一个 `../../Games/…` 的锚，`#3` 当场判"越出仓库根"。
+  const rel = abs0 ? p : path.relative(picked.root, picked.abs).split(path.sep).join('/');
+  if (!abs0 && (rel.startsWith('..') || path.isAbsolute(rel))) {
+    process.stderr.write(`✗ 文件在 ${picked.repo} 根之外：${picked.abs}\n  （锚点只许写仓库内相对路径，不许含 ..）\n`);
+    return 1;
+  }
+  const carried = { path: rel, ea: r.ea, len: r.len, sha256: r.sha256 };
+  const anchor = { type: 'bin', repo: picked.repo === 'self' ? 'self' : 'reference', ...carried };
+  const L = [
+    `文件        ${picked.repo}:${rel}`,
+    `EA          0x${r.ea.toString(16)}（十进制 ${r.ea}）→ 文件偏移 0x${r.offset.toString(16)}${r.section ? `（节 ${r.section}）` : ''}`,
+    `len         ${r.len}`,
+    `字节        ${r.hex}${r.hexTruncated ? '…（只印了前 64 字节，摘要算的是全部 ' + r.len + ' 字节）' : ''}`,
+    `sha256      ${r.sha256}`,
+    '',
+    '照抄进锚点（`--anchor` 就吃这份 JSON）：',
+    `  ${JSON.stringify(anchor)}`,
+  ];
+  if (abs0) {
+    L.push(
+      '',
+      '★ 路径是绝对路径 ⇒ 台账锚点只许写**仓库内相对路径**：把 `path` 换成相对路径、`repo` 选成 self / reference。',
+    );
+  } else if (picked.repo === 'reference') {
+    L.push('', '★ 这是`repo=reference` 的 `bin` 锚 ⇒ 不变量 #8 要求 `len` + `sha256` **都在**（上面这份 JSON 已带齐）。');
+  }
+  process.stdout.write(`${L.join('\n')}\n`);
+  return 0;
+}
+
 function parseAnchorSpec(spec) {
   let a;
   try {
@@ -419,6 +532,26 @@ function cmdAdd(args, proj, ledgerDir, opts) {
   // ★ 落盘前先自校验：拿"现有 + 这条"跑不变量，挑出**由这条记录引起**的问题。
   //   顺序要紧：**先校验、后序列化** —— serializeRecord 对非法锚点 type 是抛错的（它不该悄悄改写数据）。
   const trial = { ...rec, _file: path.join(ledgerDir, rec.kind ?? '?', `${monthOf(rec.id)}.jsonl`), _line: 0, _fileKind: rec.kind };
+
+  /**
+   * ★★ **写路径上的硬要求**（这就是不变量 #8 里"只约束新记录"的那一半，而且在这里是**逐条**判的）：
+   * `repo=reference` 的 `bin` 锚必须带 `len` + `sha256`。
+   *
+   * 为什么不只靠下面的 `validateAll` #8：那条是**棘轮**（上限 = 存量实测值，只许下降）——
+   * 一旦有人补过摘要、上限出现余量，它对"这一条新记录"就会变瞎。写路径这一关与存量**无关**
+   * （存量从不经过写路径）⇒ 两处都要有：这里是"拒之门外"，#8 是"绕过写路径也看得见"。
+   */
+  const digestGaps = referenceBinDigestGaps([trial]);
+  if (digestGaps.length) {
+    process.stderr.write(
+      `✗ 拒绝写入（${ID_PREFIX}${rec.id}）：这条记录里有 ${digestGaps.length} 个 \`repo=reference\` 的 \`bin\` 锚没带 \`len\`/\`sha256\`。\n` +
+        digestGaps.map((g) => `  - ${g.path} @ EA 0x${Number(g.ea).toString(16)}：缺 ${g.lacks.join(' + ')}\n`).join('') +
+        `${binDigestAdvice(digestGaps[0])}\n` +
+        '  ★ 存量欠账**不因此变红**（另有跟踪单）：本条只拒绝**新记录**。\n',
+    );
+    return 1;
+  }
+
   const report = validateAll([...proj.entries, trial], { ...opts, ledgerDir, parsedProblems: [] });
   const own = [
     ...(report.checks.find((c) => c.id === 1)?.problems ?? []),

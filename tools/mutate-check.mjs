@@ -218,6 +218,18 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-engine-scalars.test.mjs',
     what: '配置键不补零（`%8.8x` 的"8 位"丢了）⇒ 键与引擎不一致，永远查不到（而日志一切正常）',
   },
+  // ── ★★ 配置键里那个数：**值** vs **序号**（这一条守的是"近似不许被悄悄换成引擎口径"）──
+  //   引擎逐字是**序号**（`sub_42DF40` 的 `0x42DF6F push 1` + `call sub_418A30` 返回表下标），
+  //   而本层实现用的是**操作数的值** —— 换成序号会**真的推进启动链**（SYSTEM4 的 `load-int (global-int 5)`
+  //   紧挨 `jcc (global-int 5)`）⇒ 按用户限制不在本轮。所以这里要一个**会红**的钉子：
+  //   一旦有人把 `configKeyIntByValue` 换成序号口径，指定用例必须当场红（而不是靠读注释发现）。
+  {
+    file: 'apps/emulator/src/vm/ops.ts',
+    from: "return `\\u0003${(value >>> 0).toString(16).padStart(8, '0')}`;",
+    to: "return `\\u0003${(1).toString(16).padStart(8, '0')}`;",
+    guard: 'tools/test/emulator-engine-scalars.test.mjs',
+    what: '★ 配置键从"操作数的**值**"变成"操作数**序号**"（= 引擎口径）⇒ "本层近似"那条断言必须当场红（否则这个近似会在没人注意的时候被换掉，且启动链分叉随之改变）',
+  },
   // ── 未建模的东西**不许**被记成"做了"（★ 这是本批最容易发生的自欺）──
   {
     file: 'apps/emulator/src/vm/ops.ts',
@@ -594,6 +606,31 @@ const MUTATIONS = [
     to: "Array.from({ length: 20 }, (_, i) => 0x5ec9c + 4 * i).slice(0, 19),",
     guard: 'tools/test/emulator-engine-scalars.assets.test.mjs',
     what: '★ 语料锚版：清零格数 20 → 19（那片 `Engine+0x5EC9C..0x5ECE8` 少一格）⇒ `.lst` 里那 20 条逐字对不上',
+  },
+  // ── 台账锚点的 PE 映射（★ 偏移整体少 0x1000 ⇒ 观察静默落到**前一个函数的体内**，而"读到字节"看起来正常）──
+  {
+    file: 'tools/lib/ledger.mjs',
+    from: '      return { rva, imageBase, section: name, offset: rawPtr + (rva - va) };',
+    to: '      return { rva, imageBase, section: name, offset: rawPtr + (rva - va) - 0x1000 };',
+    guard: 'tools/test/ledger.pe.external.test.mjs',
+    what: 'EA → 文件偏移整体少一页 0x1000（= 那次误判里"工具打 0x95a20"那个数）⇒ 段内函数起点的字节不再是 `.lst` 里那条指令的编码',
+  },
+  // ── 台账摘要棘轮（★ 模拟"只给 len 就算齐"⇒ 缺摘要的观察可以静默进台账，而 sha256 是唯一证据）──
+  {
+    file: 'tools/lib/ledger.mjs',
+    from: '      if (a.len === undefined || a.sha256 === undefined) {',
+    to: '      if (a.len === undefined) {',
+    guard: 'tools/test/ledger-reference-bin-digest.test.mjs',
+    what: '缺摘要的判据从"`len` 或 `sha256` 缺一即算缺"缩成"只缺 `len` 才算缺" ⇒ 只给 `len` 的 `reference` `bin` 锚被当成齐的（写路径与门禁同时失守：换了二进制也验不出来）',
+  },
+  // ── 台账 `bin` 锚的**站点口径**（★ 去掉"落指令中间必须在 allowlist 里"这条判据 ⇒ 锚 EA 与 claim 引用地址
+  //   错位（指令中间 / 0x1000 级）整类静默通过 —— 而"EA 能映射成偏移、字节也读得到"看起来一切正常）──
+  {
+    file: 'tools/lib/anchor-lst.mjs',
+    from: "      if (c.cls === 'B') {",
+    to: '      if (false) {',
+    guard: 'tools/test/ledger.anchor-lst.assets.test.mjs',
+    what: '★ 站点口径：去掉"落在指令中间的锚必须在 AUDIT_ALLOWLIST 里"这条判据 ⇒ 落指令中间的锚不再报红（锚点整类绿而错）',
   },
 ];
 

@@ -95,6 +95,7 @@ export const OPERATIONS = [
   { name: 'list', argv: ['--list'], mutates: false, summary: '列记录：按 `--only-kind` / `--only-effective` / `--system` / `--subject` / `--status` 筛（`--json` 给机器读）' },
   { name: 'domains', argv: ['--domains'], mutates: false, summary: '★ 域词汇表：当前值 / 别名链 / 被拆分的值 + 逐值解析表（空词表也要能看）' },
   { name: 'show', argv: ['--show'], mutates: false, summary: '一条记录的全文 + 它的锚点解析结果 + 冲突对家' },
+  { name: 'hash-anchor', argv: ['--hash-anchor'], mutates: false, summary: '★ **只读**帮助：`--hash-anchor <path> <ea> <len>` ⇒ 按 PE 节表算偏移、打印该处字节的 `sha256`（写手照抄进 `bin` 锚的 `len` + `sha256`）' },
   { name: 'add', argv: ['--add'], mutates: true, summary: '追加一条记录（缺省 dry-run）[--write]：`--kind --system --subject --claim --anchor <json>…`' },
   { name: 'retract', argv: ['--retract'], mutates: true, summary: '撤回一条（**追加**一条 `replaces` 它的记录，不改历史）[--write]' },
   { name: 'coverage', argv: ['--coverage'], mutates: false, summary: '★ **函数覆盖度**（台账 × 语料）：把每个 `bin` 锚的 EA 机械归属到包含它的函数，分桶 complete / partial-rooted / partial-spotty / unobserved + 「下一步该取证谁」的前沿（`--json` / `--top N` / `--lst <路径>`）' },
@@ -115,7 +116,30 @@ export const CHECK_TITLES = new Map([
   [6, '派生 DB：删掉本地 DB 后一条命令能重建，且**同输入同逻辑内容**'],
   [7, '分类轴：`system` **写了就必须**无空白、且**沿别名链能追到当前域词汇表**（追不到 ⇒ 待裁决，点名但不静默过）；' +
     '**没写** ⇒ 进"待定域"名单（不报红）；被 `disposition=split` 拆过的值**不许当别名放过**（必须走追加更正记录的数据迁移）；词表自身无歧义'],
+  [8, '★ **摘要**：`repo=reference` 的 `bin` 锚在**新记录**上必须带 `len` + `sha256`（= 该 EA 处 `len` 字节的摘要，' +
+    '"这条观察没被换掉"的唯一证据）；**存量欠账不许因此变红** —— 缺摘要的**在场** reference bin 锚条数钉成**棘轮上限**' +
+    '（`REFERENCE_BIN_DIGEST_DEBT_MAX`，只许下降）⇒ 新记录缺摘要就把现算值顶过上限 ⇒ 红（`add` 更是在写盘之前就拒）'],
 ]);
+
+/**
+ * ★★ **存量欠账棘轮**：`repo=reference` 的 `bin` 锚必须带 `len` + `sha256`。
+ *
+ * 这条要求**只约束新记录**：存量记录不许因此变红（本机实测：在场记录里 **276** 个 reference bin 锚没有摘要，
+ * 见 `pnpm tools ledger report` 的"摘要欠账"那一行 —— 它现算的就是同一个量）。
+ *   ★ 2026-10-11 由 **338 → 282 → 276**（本轮 12 条"锚点订正版"把 12 条被取代记录的 62 个无摘要
+ *     `reference` `bin` 锚退出了"在场"集合；逐条见需求单 `REQ-01M4N3QC4SYG4C36QDBQCFRMSW` 的正文）。
+ *     **只许继续下降** —— 余量必须恒为 0（`report` 会打出余量）。
+ *
+ * ★ **新/旧分界用的是本仓既有那套，不是新发明的**：与 `tools/test/ledger.test.mjs` 的
+ *   "片段锚上限（新锚只许完整名）"同形 —— **把存量欠账钉成一个上限常量（棘轮），只许下降**；
+ *   任何**新增**的违规都会让现算值超上限 ⇒ 当场红，而存量恰好停在上限上 ⇒ 不红。
+ *   （为什么不用"某个时刻/某条 id 之后算新"：那种分界要写死一个时刻，且会随着 compaction / 跨设备合并
+ *     悄悄改变语义；**计数棘轮**是自描述的、可复核的：上限就是实测值。）
+ *
+ * ★ **补一条摘要就把它调低**（只许下降，与 `coverage` 的棘轮同一条纪律）。
+ *   上限值由 `pnpm tools ledger report` 现算的同一个量复算，改它之前先跑那条命令。
+ */
+export const REFERENCE_BIN_DIGEST_DEBT_MAX = 276;
 
 // ─────────────────────────────────────────────────────────── ULID / 时间
 
@@ -411,6 +435,86 @@ export function resolveAnchor(a, { repoRoot, referenceRoot, tracked } = {}) {
     if (got !== a.sha256) return { ok: false, kind: 'error', why: `字节摘要不匹配（EA ${a.ea}：期望 ${a.sha256}，实际 ${got}）`, file: abs };
   }
   return { ok: true, kind: 'ok', why: `EA ${a.ea} → 偏移 0x${off.toString(16)}`, file: abs };
+}
+
+// ─────────────────────────────────────────────────────────── 摘要（"观察没被换掉"的唯一证据）
+
+/**
+ * ★ **缺摘要的 `repo=reference` `bin` 锚清单**（只看**在场**记录 —— 被 `replaces` 取代 / `retracted`
+ * 的历史行不算，口径同不变量 #3/#4：历史是事实，逼人修它等于逼人就地改历史）。
+ *
+ * 输入项只要带 `anchor`（**原始**数组，不是解析结果）与可选的 `effective` ⇒
+ * **投影后的 entry** 与 `cmdAdd` 的 trial 记录都能直接喂进来 ⇒ 门禁与写路径用的是**同一个判据、同一个数**。
+ *
+ * 它是 `REFERENCE_BIN_DIGEST_DEBT_MAX` 那个棘轮的"现算量"，也是 `report` 的"摘要欠账"那一行。
+ */
+export function referenceBinDigestGaps(entries) {
+  const out = [];
+  for (const e of entries) {
+    if (!e || e.effective === 'retracted') continue;
+    for (const a of e.anchor ?? []) {
+      if (!a || a.type !== 'bin' || a.repo !== 'reference') continue;
+      if (a.len === undefined || a.sha256 === undefined) {
+        out.push({
+          id: e.id,
+          at: e.at,
+          subject: e.subject,
+          file: e._file,
+          line: e._line,
+          path: a.path,
+          ea: a.ea,
+          lacks: [a.len === undefined ? 'len' : null, a.sha256 === undefined ? 'sha256' : null].filter(Boolean),
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * **可执行的**补摘要指引（错误信息要能**照抄**，不是"请填摘要"）。
+ * ★ 一条命令 + 一句话算法：给 `--hash-anchor` 的是**文件相对路径 + EA + 字节数**，它打印 offset / 字节 / sha256。
+ */
+export function binDigestAdvice({ path: p, ea, len } = {}) {
+  const n = Number.isInteger(len) && len > 0 ? len : 16;
+  const at = Number.isInteger(ea) ? `0x${ea.toString(16)}` : '<ea>';
+  return (
+    '★ 怎么补（照抄）：\n' +
+    `    node tools/ledger.mjs --hash-anchor ${p ?? '<path>'} ${at} ${n}\n` +
+    '  它按 PE 节表把 EA 映射成文件偏移，打印 offset / 十六进制字节 / sha256 ⇒ 把 `len` 与 `sha256` 抄进锚点。\n' +
+    '  ★ `sha256` = **该 EA 处 `len` 字节的摘要**，是"这条观察没被换掉"的**唯一证据**：\n' +
+    '    只记 EA 的锚在二进制被换掉之后**看起来仍然正常**（EA → 偏移那条映射照旧成立），摘要才会当场对不上。'
+  );
+}
+
+/**
+ * `--hash-anchor` 的**纯核心**（只读帮助动作）：给定 PE 字节、EA、`len` ⇒ 偏移 / 字节 / sha256。
+ *
+ * 为什么要有它（而不是只在错误信息里写算法）：写手要填 `len` + `sha256`，就得**先知道该填什么**；
+ * 让他自己拿别的手段算，就是把"唯一证据"降级成"手抄的数"。给一条能照抄的命令才是把门槛降到零。
+ * ★ 它**只读**（不写台账、不改任何文件），也不校验摘要对不对（那是 `resolveAnchor` 的事）。
+ */
+export function hashAnchorAt(buf, ea, len, { hexLimit = 64 } = {}) {
+  if (typeof ea !== 'number' || !Number.isInteger(ea) || ea < 0) {
+    return { ok: false, why: `EA 必须是非负整数（EA，不是文件偏移）：${JSON.stringify(ea)}` };
+  }
+  if (!Number.isInteger(len) || len <= 0) return { ok: false, why: `len 必须是正整数：${JSON.stringify(len)}` };
+  const off = peOffsetOf(buf, ea);
+  if (off === null) return { ok: false, why: `EA 0x${ea.toString(16)} 不在任何 PE 节里（或不是 PE）` };
+  if (off + len > buf.length) {
+    return { ok: false, why: `EA 0x${ea.toString(16)} + len ${len} 越出文件（该文件 ${buf.length} 字节）` };
+  }
+  const bytes = buf.subarray(off, off + len);
+  return {
+    ok: true,
+    ea,
+    len,
+    offset: off,
+    section: peMap(buf, ea)?.section ?? null,
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    hex: bytes.subarray(0, hexLimit).toString('hex'),
+    hexTruncated: bytes.length > hexLimit,
+  };
 }
 
 // ─────────────────────────────────────────────────────────── 分类轴（域词汇表）
@@ -867,6 +971,44 @@ export function validateAll(records, opts = {}) {
     add(7, p);
   }
 
+  /**
+   * 8 摘要：`repo=reference` 的 `bin` 锚在**新记录**上必须带 `len` + `sha256`。
+   *
+   * ★ **存量不许红**：判据不是"每条都必须有摘要"（那会把本机实测 338 条存量一起搞红），
+   *   而是"缺摘要的在场 anchor 数 ≤ 棘轮上限"。新记录缺摘要 ⇒ 现算值 +1 ⇒ 顶过上限 ⇒ 红。
+   *   与 `tools/test/ledger.test.mjs` 的"片段锚上限"**同一套机制**（不是第二套分界）。
+   * ★ 报告要点名**最新的**那几条：ULID 字典序 == 时间序 ⇒ 追加进来的就在最前面，一眼看得出是谁干的。
+   */
+  {
+    const p = [];
+    const gaps = referenceBinDigestGaps(proj.entries);
+    const max = opts.referenceBinDigestDebtMax ?? REFERENCE_BIN_DIGEST_DEBT_MAX;
+    if (gaps.length > max) {
+      const newest = [...gaps].sort((a, b) => String(b.id).localeCompare(String(a.id))).slice(0, 10);
+      p.push(
+        bad(
+          ledgerDir ?? '',
+          0,
+          `缺摘要的**在场** reference bin 锚 **${gaps.length}** 条 > 棘轮上限 **${max}**（多出 ${gaps.length - max} 条）` +
+            `⇒ 有**新**记录写了 \`repo=reference\` 的 \`bin\` 锚却没带摘要。`,
+        ),
+      );
+      for (const g of newest) {
+        p.push(bad(g.file ?? ledgerDir ?? '', g.line ?? 0, `  · KN-${g.id}（${g.subject}）：${g.path} @ EA 0x${Number(g.ea).toString(16)} 缺 ${g.lacks.join(' + ')}`));
+      }
+      p.push(bad(ledgerDir ?? '', 0, binDigestAdvice(newest[0] ?? {})));
+      p.push(
+        bad(
+          ledgerDir ?? '',
+          0,
+          `  ★ **存量欠账另行跟踪**（上限 = 实测值，**只许下降**：补一条摘要就把 \`REFERENCE_BIN_DIGEST_DEBT_MAX\` 调低）—— ` +
+            `现况见 \`pnpm tools ledger report\` 的"摘要欠账"那一行。`,
+        ),
+      );
+    }
+    add(8, p);
+  }
+
   const failures = checks.filter((c) => c.problems.length > 0).length;
   return { checks, failures, project: proj };
 }
@@ -1072,8 +1214,8 @@ export function describe() {
     ['repo', '✅', REPOS.join(' | '), '★ `self`=本仓 · `reference`=只读参考仓（旧仓）。**这一维不可省**：K2 重挂之前 79 条 B 类的锚全在参考仓'],
     ['path', '✅', '仓库内相对路径', 'bin 锚 = 二进制文件；guard 锚 = 测试文件'],
     ['ea', 'bin 必填', '非负整数', '★ **EA（虚拟地址）不是文件偏移** —— 映射由 `peOffsetOf`（PE 节表）现算，**不落盘成行号**'],
-    ['len', '⬜', '正整数', '要摘的字节数（给了 `sha256` 才有意义）'],
-    ['sha256', '⬜', '64 位小写 hex', '★ 该 EA 处 `len` 字节的摘要 —— "这条观测没被换掉"的唯一证据'],
+    ['len', 'bin（`reference`）必填', '正整数', '要摘的字节数。★ **新**记录里 `repo=reference` 的 `bin` 锚**必须**给（与 `sha256` 成对，不变量 #8）；缺了就是"这条观察验不了"。存量欠账见 `--report` 的"摘要欠账"（棘轮上限，只许下降）'],
+    ['sha256', 'bin（`reference`）必填', '64 位小写 hex', '★ **该 EA 处 `len` 字节的摘要** —— "这条观测没被换掉"的唯一证据（换了二进制，摘要当场对不上；只记 EA 的锚看起来仍然正常）。新记录缺它就是拒写，存量欠账见 `--report`'],
     ['test', 'guard 必填', '非空 string', '★ **测试名里的一个片段**（子串匹配）—— 文件存在 ≠ 用例存在'],
   ];
   return {
@@ -1170,7 +1312,10 @@ export function describe() {
     writePath:
       '★ **写路径只有一条**：模型里的 `appendRecord`（一行一条、写后回读复验、不绿回滚）。两个调用方共用它：' +
       '`pnpm tools ledger add`（写在 `tools/ledger.mjs`，缺省 dry-run）与测试。**不要手改 `.jsonl`、不要新建/重命名文件、不要删除行** —— ' +
-      '日志是 append-only，撤回靠 `retract`（追加一条 `replaces`）。',
+      '日志是 append-only，撤回靠 `retract`（追加一条 `replaces`）。' +
+      '★ `add` 在**写盘之前**先跑一遍不变量（只取"由这条记录引起"的那些）：不变量 #8 会让' +
+      '「`repo=reference` 的 `bin` 锚缺 `len`/`sha256`」的记录**当场被拒**（dry-run 就拒，`--write` 更不落盘）—— ' +
+      '补摘要的现成命令：`node tools/ledger.mjs --hash-anchor <path> <ea> <len>`。',
   };
 }
 

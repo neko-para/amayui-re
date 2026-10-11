@@ -921,6 +921,38 @@ test('★ 锚点用 EA 不用行号：EA → 文件偏移由 PE 节表现算（�
 });
 
 /**
+ * ★ **EA → 文件偏移只有一条路**（`peOffsetOf`）。
+ *
+ * 为什么要有这条：`--add` 的落盘前校验与 `validate` 的 #3/#4 都经 `resolveAnchor` → `peOffsetOf`。
+ * 一旦有人在别处再写一份"我自己算 EA→偏移"，两条路就会**在某些记录上**给出不同的数 ——
+ * 而"带 sha256 的锚 = 这条观察没被换掉"这条机制会在两条路之间悄悄失真（绿而错）。
+ *
+ * 判据是机械的：读 PE 节表的两个特征串只许出现在 `tools/lib/ledger.mjs`（`tools/test/**` 除外 —— 那边造合成 PE）。
+ */
+test('★ EA → 文件偏移只有一条路：除 `tools/lib/ledger.mjs` 外，工具侧不许自己解析 PE 节表', () => {
+  const FEATURES = [/readUInt32LE\(\s*0x3c\s*\)/, /'PE\\0\\0'/];
+  const offenders = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== 'test') walk(p);
+        continue;
+      }
+      if (!e.name.endsWith('.mjs')) continue;
+      const src = fs.readFileSync(p, 'utf8');
+      if (FEATURES.some((re) => re.test(src))) offenders.push(path.relative(REPO_ROOT, p).split(path.sep).join('/'));
+    }
+  };
+  walk(path.join(REPO_ROOT, 'tools'));
+  assert.deepEqual(
+    offenders,
+    ['tools/lib/ledger.mjs'],
+    `工具侧出现了**第二处** PE 节表解析 ⇒ "add 与 validate 同一个数"不再由结构保证：\n  - ${offenders.join('\n  - ')}`,
+  );
+});
+
+/**
  * ★★ **覆盖率棘轮**：知识层登记/实现的 opcode，必须在台账里**被提到过**。
  *
  * ## 为什么需要它（这不是假想的风险 —— 已经发生过）

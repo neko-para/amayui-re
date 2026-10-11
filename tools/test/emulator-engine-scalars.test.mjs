@@ -21,7 +21,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { EngineScalars } from '../../apps/emulator/src/model/engine-scalars.ts';
-import { HANDLERS } from '../../apps/emulator/src/vm/ops.ts';
+import { HANDLERS, __configKeyIntByValue } from '../../apps/emulator/src/vm/ops.ts';
 import { ScriptFrame } from '../../apps/emulator/src/vm/machine.ts';
 import { GlobalPools } from '../../apps/emulator/src/model/pools.ts';
 import { AddressSpace } from '../../apps/emulator/src/model/address-space.ts';
@@ -376,14 +376,38 @@ test('★ 对象字段写那一族：**只记欠账**（`applied:false` + 原因
   assert.equal(e2.detail.applied, false);
 });
 
-test('★ 配置四条里的整型两条：键是**运行时拼**的（`\\x03` + 8 位十六进制）、查不到 ⇒ 0、写回是 lvalue', () => {
+/**
+ * ★★ **这条验的是「本层的近似实现」，不是「引擎口径」** —— 名字与断言都不许让它看起来像在守引擎语义。
+ *
+ * ## 引擎口径（逐字，锚 = EA）
+ * `load-int`（`sub_42DF40`，`0x42DF6F push 1` + `call sub_418A30`）与 `save-int`
+ * （`sub_434F60`，`0x434F8F push 1` + `call sub_418A30`）传的都是**立即数 `1`（= 操作数序号）**；
+ * `sub_418A30` 的三条臂（`0x418A5B` type 3 / `0x418A60` type 6 / `0x418A65` type 12）
+ * **返回的都是表下标** ⇒ 引擎的键**只跟"第几个操作数"有关**：
+ * `load-int (global-int 5)` 的键是 `"\x03 00000001"`，**不是** `global5` 当时的值。
+ * 台账：`Engine+0x5D880/operand-ordinal-to-table-index` · `config/global5-jcc-source-and-existence-probe`。
+ *
+ * ## 本层实现（被守卫钉住的那一个）
+ * `configKeyIntByValue(value)` = `\x03` + `%8.8x`**(操作数的值)** ⇒ 下面 1234 那条拼出 `\x03 000004d2`。
+ * ⛔ **这就是被证伪的前提留下来的近似**（原假设："键取自该变量当时的值"）。
+ * ⇒ 改名 + 这条守卫一起保证：**想把它改成引擎口径（序号）的实现，会当场被这条用例打红**，
+ *   而不是靠读注释发现。
+ *
+ * ## 为什么本轮**不**改对
+ * 键从"值"改成"序号"会真的改变启动链分叉（`SYSTEM4` 里 `load-int (global-int 5)` 紧挨
+ * `jcc (global-int 5)`）⇒ 按用户限制「不推进指令/启动链」，由需求单跟踪。
+ */
+test('★ 配置的整型两条：**本层把键取成操作数的值**（引擎取的是序号/表下标 —— 逐字见上）、查不到 ⇒ 0、写回是 lvalue', () => {
   const m = machineStub();
+  // ★ 先钉住"本层近似"这条规则本身（`__configKeyIntByValue` 是 ops.ts 导出的**近似实现**，不是引擎语义）
+  assert.equal(__configKeyIntByValue(0), '\u000300000000', '本层键 = 类型码 `\\x03` + 8 位十六进制（%8.8x，零填充）');
+  assert.equal(__configKeyIntByValue(1234), '\u0003000004d2', '键里的那个数是**操作数的值**（1234 ⇒ 000004d2）—— ★ 引擎那里它是**序号 1**');
   // 键的形态：1234 ⇒ \x03 + 000004d2（%8.8x）
   HANDLERS[0x1a2](ctxOf(m, [imm(1234)], 0x1a2));
   const key = '\u0003000004d2';
   assert.equal(m.instance.config.get(key), '1234', '键必须是 类型码字节 + 8 位十六进制（%8.8x）');
 
-  // load-int：**键取自操作数当时的值** ⇒ 先把这个局部格设成 1234（用已实现的 `mov`，走同一条操作数写路径），
+  // 本层load-int：**键取自操作数当时的值** ⇒ 先把这个局部格设成 1234（用已实现的 `mov`，走同一条操作数写路径），
   // 再 load-int 它：应当查得到并把值写回同一格。
   const m2 = machineStub();
   m2.instance.config.set(key, '1234');
@@ -392,9 +416,14 @@ test('★ 配置四条里的整型两条：键是**运行时拼**的（`\\x03` +
   HANDLERS[0x1a3]({ ...ctxOf(m2, [local], 0x1a3) });
   const fx = m2.effects.find((e) => e.action === 'config.read');
   assert.ok(fx, '读配置要留痕');
-  assert.equal(fx.detail.key, '\\x03000004d2', '★ 键 = 类型码字节 + 8 位十六进制（`%8.8x`，零填充）');
+  assert.equal(fx.detail.key, '\\x03000004d2', '★ 本层键 = 类型码字节 + 8 位十六进制（`%8.8x`，零填充）—— 引擎那里这一格是**操作数序号 1**');
   assert.equal(fx.detail.value, 1234, '读回来的值');
   assert.ok(String(fx.detail.note).includes('sub_418A30'), '★ 键的取值原语欠账必须写在记录里（不静默）');
+  // ★★ 两条欠账**都要**在记录里看得见：(1) 取值原语；(2) **键里那个数是值还是序号**
+  assert.ok(
+    String(fx.detail.note).includes('引擎取的是**操作数序号/表下标**'),
+    '★★ 记录必须写明"引擎的键是序号/表下标，而本层用的是值" —— 只写 sub_418A30 会让人以为两者只差取值原语',
+  );
 
   // 查不到 ⇒ 0（引擎逐字：`v4 = v3 ? *v3 : 0`）
   const m3 = machineStub();

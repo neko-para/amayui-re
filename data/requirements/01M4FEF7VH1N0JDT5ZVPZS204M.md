@@ -2,16 +2,9 @@
 
 - id: REQ-01M4FEF7VH1N0JDT5ZVPZS204M
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
-- tags: [emulator, ledger, guard]
-
-# 注释/守卫与二进制不一致的一批（bad opcode:0 · 重掷 12 次 · 0x192 读两个操作数 · int 配置对象 0xAA514 · sub_41BF50 无 case 14 · EVIDENCE/需求单 指针落空）+ 四处守卫欠账
-
-- id: REQ-01M4FEF7VH1N0JDT5ZVPZS204M
-- type: req
-- status: open
-- parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
+- verify: tools/test/emulator-engine-scalars.test.mjs#★ `0x101 poll-input`：采样一次后**丢弃**（不留在任何状态里）、只发一条 modeled 记录
 - tags: [emulator, ledger, guard]
 
 ## 背景
@@ -66,7 +59,17 @@
   的正当读数；`git show 16fbd0a:corpus/assets.json` 显示该条**自 init 起**就是 `install/AGERC.DLL + 6241de…`
   ⇒ 是**跨机器 root 解析差异**，真问题由 `REQ-01M4FEFA9RRP5TKVWH351NV1RD` 跟踪。★ mac 侧无法在本机验证。
 
-## 本父单为什么不关
+## 收口（父不先于子已满足）
 
-两个子单都已收口，但本单自己只剩"注释措辞"这类裁决项（无独立守卫可挂）；父 `…592` 还有别的活节点
-⇒ **先不关父**，等那条支线一起收口时再决定本单是 `done`（挂上面四条 `verify` 中最强者）还是并入。
+两个子单各自已 `done` / `dropped` ⇒ 子树**无 open/doing/blocked**（派生 `[2/2]`）⇒ 本单可收口。
+四条守卫欠账全部在位、且各有变异条目（实测红）⇒ `verify` 挂四条里第 1 条（`@env pure`，默认 `pnpm test` 就会跑）：
+
+★ 收口凭据 `verify` = `tools/test/emulator-engine-scalars.test.mjs`#★ `0x101 poll-input`：采样一次后**丢弃**（不留在任何状态里）、只发一条 modeled 记录
+
+另外三条（`0xa0 jcc` 三支 · `0x61`/`0x12c` 的目标 type 计数 34269/674、4220/49 ·
+`Engine+0x5EC9C..0x5ECE8` 构造器连续 20 条写 0）见上面的欠账表；其中第 3、4 条是 `@env assets`
+（要安装语料）⇒ 父的 `verify` 选默认档里真会跑的那条，另三条按正文表格继续可查。
+
+★ 收口 ≠ "无残余"：欠账 1 的残余边界（把采样留在**模型外宿主状态**的实现抓不住）需要建模
+`Engine+0xAAB44/+0xAAB48/+0x777FC/+0x77808`，那是**新能力**、不在本单 ⇒ 已在上面显式写明，不掩盖。
+★ 本单**不是**被并入父 `…592`：当时父还有别的活节点；本单自己的子树现在干净了 ⇒ 独立收口。
