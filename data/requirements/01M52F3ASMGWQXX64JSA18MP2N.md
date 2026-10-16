@@ -1,0 +1,60 @@
+# 批 S1 · 对象 shape 普查与独立复核（一次性产物 + 复核器）：槽 / 宽度 / 数组 / 步长 / 未知区间 + 函数间 this 链接
+
+- id: REQ-01M52F3ASMGWQXX64JSA18MP2N
+- type: req
+- status: open
+- parent: REQ-01M3TCCVC01AWFEMP6GJM96KQ4
+- order: 40
+- tags: [engine, shape, tooling]
+
+## 目标（shape，**不是**名字与语义）
+把"这个对象在内存里长什么样"变成**可复核的数据**：有哪些槽、各多宽、哪里是数组、元素多大、步长多少、
+索引从哪个槽来、哪些区间**未观察到**。名字 / 用途 / 类型身份**不在本单**（那是后续知识分析，走台账）。
+
+## 为什么值得单独做
+优化过的代码不按 `a.b.c` 走，而是**把偏移折进算术**。实测（本仓语料）：
+* `sub_42CA50` 的 `*(_DWORD *)&this[120 * *((_DWORD *)this + 95776) + 383220] = 5`，在 `.lst` 里是
+  `mov eax,[esi+5D880h]` / `shl ecx,4` / `sub ecx,eax` / `mov [esi+ecx*8+5D8F4h],5`
+  ⇒ `stride = 15*8 = 120`（= 帧记录 `0x78`）、`disp = 0x5D8F4`、索引来自 `+0x5D880` 的 u32。
+* 函数体内非栈内存操作数 **57,934** 条，其中**只有 22% 带显式尺寸关键字** ⇒ 宽度须由助记符/寄存器推，推不出报 `unknown`。
+* `call sub_XXXXXX` **11,004** 处，按调用点 `ecx` 来源：`ecx ← this` 3,696（34%，**同对象**）·
+  `lea ecx,[this+D]` 1,461（13%，**内嵌子对象**）· `ecx ← *(this+D)` 368（3%，**成员指针 ⇒ 另一个对象**）·
+  尾跳 `jmp sub_` 164（同帧，this/参数原样继承）· 真未解析 112（1%）。
+⇒ 没有 shape，就会把 `this[383220]` 读成"大结构里的一个槽"，并把"子对象"与"成员指针"当同一对象合并。
+
+## 口径（三条，决定架构）
+1. **一次性工作，不要求机械可重现；但必须可独立复核** ⇒ 承重件是**复核器**，扫描器只是助手。
+2. **复核器与助手必须是两个实现**（不共用折叠/解析代码），复核器**只读语料**、不读助手缓存；
+   否则"独立验证"是自证的。
+3. **宽度的闭集合来自 `defs.h`**（`_BYTE`=1 / `_WORD`=2 / `_DWORD`=4 / `_QWORD`=8 / `_UNKNOWN`=1）；推不出 ⇒ `unknown`，**不许当 4**。
+
+## 范围
+* 产物 = shape 表（`SLOT` / `HOLE` / `LINK`，每条带 **witness EA**）。它是"哪个 EA 以什么形状碰了哪个偏移"的
+  **转写**（观察），可以入库；语义结论仍走 §6 准入门。
+* 链接**三类必须分开记**（同对象 / 内嵌子对象 / 成员指针），尾跳单独一类；跨函数合并**只允许**在有链接证据时做。
+* 未解析项（base / index / 宽度）**必须报数**，不许静默丢。
+
+## 判据（分期，逐期挂守卫）
+| 期 | 件 | 判据 |
+|---|---|---|
+| S1a | `shape check <file>`：按 witness EA 回语料**独立重解**一条指令并与声明比对（verified / drifted / unverifiable） | 已知实例同时给出 verified 与 drifted 两种话 |
+| S1b | `shape ctx <sym>`：一个函数的原始材料（访问点 + 调用点链接分类 + 折叠链） | 每条访问的 EA 能回读到同一条指令 |
+| S1c | 逐函数填 shape 表（一次性；从最大的 this 簇与帧记录起步） | 表里每条都能过 S1a |
+| S1d | 名字 / 语义 → 台账（每条挂 witness EA） | `pnpm tools ledger` 的准入门 |
+
+## 与既有工作的关系（不重复造）
+* `packages/age-format/src/engine/layout.mts` 已有**手写槽普查**（`FRAME_SLOTS_OBSERVED` = 记录内 `0x00..0x74` 逐 dword 30 格、
+  `FRAME_ENGINE_SCALARS`、`LOCAL_POOL_SLOTS`），守卫 `tools/test/engine-frame.test.mjs`。
+  本单是把它**从"手写常量"升级成"普查产物 + 独立复核"**并扩到整个对象，**不新建第二套记录**。
+* ★ **两套原点必须显式**：`0x5D880 + 0x78*cur`（相对 cur 标量）与 `0x5D894 + 0x78*cur`（记录）是同一字节的两种写法
+  ⇒ shape 表要记**原点约定**，不许静默选一个（先例：R1 的基址订正 `01M4H0Q2TQ…`）。
+* `disasm-fn` 域已把两侧扫描合成一遍（`buildCatalog`，~0.7 s）⇒ 助手侧的 per-site 普查塞进同一遍，不新增第二个扫描器。
+
+## 参照物：`defs.h` **已入库**（清单条目待补）
+* `corpus/disasm/defs.h` —— Hex-Rays 固定词表：宽度别名（`_BYTE`=1 / `_WORD`=2 / `_DWORD`=4 / `_QWORD`=8 / `_UNKNOWN`=1）
+  与折叠内在函数（`__ROL4__` / `WORD1` / `SLODWORD` …）。**shape 的宽度闭集合与折叠识别以它为准**；只读，
+  行尾按仓规统一为 LF。
+* ★ 它的清单条目（`disasm/c-vocabulary`，origin `oldRepo:engine/defs.h`）**目前落不下来**：
+  `corpus add --write` 被与本条目无关的既有红灯挡死（本机两次实测回滚）⇒ `REQ-01M52F9K25YNPJEXQ74QE4CT9Z`。
+  **在条目补上之前，不要把 `corpus/disasm/defs.h` 当"已登记素材"。**
+* ⛔ **不使用** `engine.hpp` 之类前人推断：未按 §6 复核过，不得当底座（它只能作为待核验的假设来源）。
