@@ -48,6 +48,49 @@ export { MUTATIONS };
  * ★ 加新守卫时顺手加一条 —— 否则"这个守卫会红"只是个声称。
  */
 const MUTATIONS = [
+  // ── 语料 item 目录：**定义 vs 原型**的判据（★ 旧判据只看"行首 + 名字像函数 + 行尾 `;`"，
+  //    于是**带尾注释的原型**（`…); // idb`）被当成定义，该符号的"C 体"是**文件顶部的一行原型**，
+  //    调用方照样打印、不报错 —— 实测 40 个符号）──
+  //   ★ 这条变异必须**同时**拿掉两个判据（`;` 收尾 与 "下一个非空行恰为 `{`"）：只拿掉一个，
+  //     合成样本里的单行原型仍会被另一个挡住 ⇒ 守卫不会红，而那**不是**"守卫没用"。
+  {
+    file: 'tools/lib/catalog.mjs',
+    from:
+      "  if (text.slice(text.lastIndexOf(')') + 1).trim().startsWith(';')) return null; // 原型\n" +
+      '  let j = k + 1;\n' +
+      "  while (j < lines.length && lines[j].trim() === '') j += 1;\n" +
+      "  if (lines[j] !== '{') return null; // 不是\"定义 + 紧跟函数体\"",
+    to:
+      '  if (false) return null; // 变异：原型与定义都不再被排除\n' +
+      '  let j = k + 1;\n' +
+      "  while (j < lines.length && lines[j].trim() === '') j += 1;",
+    guard: 'tools/test/disasm-fn-format.test.mjs',
+    what: '原型不再被排除 ⇒ 带尾注释的原型被当成定义，C 行区间落进原型区（"一行 C 体"看起来完全正常）',
+  },
+  // ── 语料 item 目录：**参数配对**是"名字优先、顺序兜底"（★ 只按位置会给出错的偏移，实测 sub_401100）──
+  {
+    file: 'tools/lib/catalog.mjs',
+    from: '&& o.name === p.name);',
+    to: '&& false);',
+    guard: 'tools/test/disasm-fn-format.test.mjs',
+    what: '去掉"名字优先"这一步 ⇒ 两边逐字同名的 `lpFileName` 被按位置配到 0Ch，参数偏移全错而**看不出来**',
+  },
+  // ── 语料 item 目录：数据长度要算**字符串的字符数**（★ 只数元素个数 ⇒ `.lst` 给 2、`.c` 写 `char aError[6]`）──
+  {
+    file: 'tools/lib/catalog.mjs',
+    from: 'return parts.length + strBytes - strSlots;',
+    to: 'return parts.length;',
+    guard: 'tools/test/disasm-fn-format.test.mjs',
+    what: '数据 item 的长度只数"元素个数" ⇒ 字符串只算 1 字节（`char aError[6]` 与 `.lst` 侧的 6 字节对不上）',
+  },
+  // ── 格式词汇表：间接调用**必须认 `ds:`**（★ 旧正则漏掉这一整类，实测 69 处被静默丢出调用图）──
+  {
+    file: 'tools/lib/lst-format.mjs',
+    from: '|ds:|es:|ss:|cs:)/;',
+    to: ')/;',
+    guard: 'tools/test/disasm-fn-format.test.mjs',
+    what: '`INDIRECT_CALL_RE` 去掉 `ds:` ⇒ `call ds:dword_X` 这一整类调用点**既不进直接边、也不计间接**（只是数字变小）',
+  },
   // ── 数组类 opcode 的目标步长（★ 写死 4 会让 28 字节族算到别的元素上；语料里 723 个站点）──
   {
     file: 'apps/emulator/src/vm/ops.ts',
@@ -488,18 +531,18 @@ const MUTATIONS = [
     what: '把 `oob` 从 diagnostic 改成 engine（诊断被当成引擎态 ⇒ 快照会多带一个会涨的量）',
   },
   {
-    file: 'tools/lib/disasm.mjs',
-    from: "const PROC_EA_RE = new RegExp(`^([A-Za-z_.][\\\\w.]*):([0-9A-Fa-f]{8})\\\\s+(${SYM})\\\\s+proc near`);",
-    to: "const PROC_EA_RE = new RegExp(`^([A-Za-z_][\\\\w.]*):([0-9A-Fa-f]{8})\\\\s+(${SYM})\\\\s+proc near`);",
-    guard: 'tools/test/disasm-pseudo.assets.test.mjs',
+    file: 'tools/lib/lst-format.mjs',
+    from: "export const PROC_EA_RE = new RegExp(`^([A-Za-z_.][\\\\w.]*):([0-9A-Fa-f]{8})\\\\s+(${SYM})\\\\s+proc near`);",
+    to: "export const PROC_EA_RE = new RegExp(`^([A-Za-z_][\\\\w.]*):([0-9A-Fa-f]{8})\\\\s+(${SYM})\\\\s+proc near`);",
+    guard: 'tools/test/disasm-enclosing.assets.test.mjs',
     what: '段名首字符不许 `.` ⇒ `.text` 的 proc near 全漏（这个坑在本仓踩过两次）',
   },
   // ── 符号名不许含 `@`（MSVC 修饰名）⇒ `_WinMain@16` 不被认作函数头，`enclosingFunction` **静默**给前一个函数 ──
   {
-    file: 'tools/lib/disasm.mjs',
-    from: "const SYM = '[A-Za-z_$?@][\\\\w.$?@]{0,60}';",
-    to: "const SYM = '[A-Za-z_][\\\\w.]{0,60}';",
-    guard: 'tools/test/disasm-pseudo.assets.test.mjs',
+    file: 'tools/lib/lst-format.mjs',
+    from: "export const SYM = '[A-Za-z_$?@][\\\\w.$?@]{0,60}';",
+    to: "export const SYM = '[A-Za-z_][\\\\w.]{0,60}';",
+    guard: 'tools/test/disasm-enclosing.assets.test.mjs',
     what: '符号名不许含 `@` ⇒ `_WinMain@16 proc near` 不被认作函数头，`--pseudo --ea 0x4BAA3A` 静默报出**前一个**函数（`sub_4BA6B0`）',
   },
   // ── 需求台账：写路径"报的落盘"必须与磁盘一致 ──
@@ -552,7 +595,7 @@ const MUTATIONS = [
   },
   // ── 函数覆盖度：锚 EA 归属的上界（★ 去掉"最后一条 EA"这一界 ⇒ 段尾/`.data` 的地址被算进最后一个函数）──
   {
-    file: 'tools/lib/disasm.mjs',
+    file: 'tools/lib/catalog.mjs',
     from: '  if (ea > f.lastEa) return null;',
     to: '  if (false) return null;',
     guard: 'tools/test/ledger-coverage.test.mjs',

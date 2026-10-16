@@ -17,16 +17,26 @@
  * * 每行前缀是 **`.text:00401000`** 这种 `段:EA` 形式；**同一 EA 会连续出现在多行**上。
  * * `Imagebase 400000` 写在头部注释里 ⇒ **EA 是虚拟地址**，要读字节得先映射到文件偏移（PE 节表，见 `ledger.mjs` 的 `peOffsetOf`）。
  * * 实测段：`.text` / `.data` / `seg002` / `.idata` / `poly` / `seg003`（**不止 .text**）⇒ 索引必须按段分组。
+ *
+ * ## ★ 分工（重划）：本模块**只做定位与切片**
+ * 「函数 / 定义」那一层 —— 逐 item 切分、`.c` ↔ `.lst` 两侧关联、调用链 / 全局变量 / 参数偏移 ——
+ * **不在这里**：它在 `lib/catalog.mjs` 的 `buildCatalog()`，命令行是 `pnpm tools disasm-fn`。
+ * 为什么搬走：那些信息要**一遍扫完** 53 万行才能同时拿到 callee / 全局访问 / 参数声明，
+ * 而本模块的 `--at` 只需要"EA → 行号"。混在一起的结果是"为了拿 item 信息反复重扫大文件"
+ * 且判据各写一份（实测：`.c` 侧"原型 vs 定义"的判据就是这么分叉出错的）。
+ * 格式词汇表（`段:EA` / `proc near` / `call` 目标 / 自动名编码）全仓**只有一份**：`lib/lst-format.mjs`。
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
+import { ENDP_RE, IMAGEBASE_RE, PREFIX_RE, PROC_EA_RE } from './lst-format.mjs';
+
 export const DOMAIN = {
   // ★ 域 id 不叫 `disasm` —— 那个已被 `tools/disasm-recode.mjs`（语料**保真**：转写/打 zip/反解）占用。
   //   同一个词在下游是两件事，所以两个域各自有名字：`disasm`=保真，`disasm-at`=**只读定位与切片**。
   id: 'disasm-at',
-  title: '反汇编语料的机械提取（EA → 行号 → 有界上下文；**只读**，不改语料）',
+  title: '反汇编语料的**定位与切片**（EA → 行号 → 有界上下文；**只读**，不改语料）',
   data: [
     '`corpus/disasm/files/*.lst` / `*.c`（**只读**语料；解压产物，gitignore）',
     '`.cache/disasm/*.idx.txt`（**派生**索引：段 → `[起始行, EA]` 稀疏表；可删可重建）',
@@ -41,19 +51,19 @@ export const OPERATIONS = [
   { name: 'span', argv: ['--span'], mutates: false, summary: '一个名字/串的**行号区间**：`--match <子串>`（或 `--regex`）' },
   { name: 'search', argv: ['--search'], mutates: false, summary: '机械检索：`--match <子串>` 找出现的**全部位置**（带行号，可 `--limit`）' },
   { name: 'cases', argv: ['--cases'], mutates: false, summary: '★ **枚举函数里的 switch / 跳转表**：`--ea <EA>` ⇒ case 数 + 每个 case 的目标（类型分派 / opcode 分派全靠它）' },
-  { name: 'pseudo', argv: ['--pseudo'], mutates: false, summary: '★ **一层工作流**：`--ea <EA>`（或 `--sym sub_XXXXXX`）⇒ 它**所属函数**的 Hex-Rays **C 体** + `.lst` 行区间（`--ea` 不是函数起点时会明说）' },
   { name: 'index', argv: ['--index'], mutates: true, summary: '建/刷新派生索引到 `.cache/`（缺省 dry-run）[--write]' },
 ];
 
 /**
- * 一行开头的 `段:EA` 前缀（IDA 导出形态）。
- * ★ **段名可以以 `.` 开头**（`.text` / `.data` / `.idata`）—— 第一版把首字符限成 `[A-Za-z_]`，
- *   于是 `.text` 36.5 万行 + `.data` 7.6 万行**整段漏掉**（实测：索引里只剩 seg002/seg003/poly）。
- *   这条错误很危险：漏掉的段在 `--at` 里表现为"地址不在语料覆盖范围内"，**看起来像正常的边界提示**。
+ * ★ **`pseudo` 去哪了**：它连同"函数 / 定义"那一层整体搬到了 `pnpm tools disasm-fn`（`lib/catalog.mjs`）。
+ * 搬走的理由不是"换个名字"：旧 `--pseudo` 每次调用都要**重扫整个 `.c`（5 MB）**建一份符号索引、
+ * 而且它的"原型 vs 定义"判据实测会把 40 个带尾注释的原型当成定义 ⇒
+ * 对一个真有定义的函数给出**只有一行（就是原型那行）**的"C 体"，且不报错（详见该模块头部注释）。
  */
-const PREFIX_RE = /^([A-Za-z_.][\w.]{0,30}):([0-9A-Fa-f]{8})\s?(.*)$/;
-/** 头部注释里的 Imagebase */
-const IMAGEBASE_RE = /^\S+\s*;\s*Imagebase\s*:\s*([0-9A-Fa-f]+)/;
+
+// ★ `PREFIX_RE` / `IMAGEBASE_RE` / `PROC_EA_RE` / `ENDP_RE` 现在住在 `lib/lst-format.mjs`
+//   （语料格式词汇表，只有一份）。它们的**教训注释**（段名以 `.` 开头、符号类必须含 `@`）
+//   跟着一起搬过去了 —— 改判据请去那里改，改在本文件里等于制造第二份。
 
 export const DEFAULT_MAX_LINES = 120;
 
@@ -447,30 +457,9 @@ export function spanOfFunction(file, idx, ea, { maxLines = 4000 } = {}) {
   };
 }
 
-/**
- * ★ 符号名字符类（三处正则共用一份）：**必须含 `@` / `?` / `$`** —— MSVC 的修饰名会长这样：
- * `_WinMain@16`、`??2@YAPAXI@Z`、`??_7?$Stack@H@@6B@`。
- *
- * ⚠ **实测踩过**（本轮）：旧类 `[A-Za-z_][\w.]{0,40}` **不含 `@`** ⇒ `_WinMain@16 proc near` 不被认作函数头，
- * `enclosingFunction(0x4BAA3A)` **静默**返回**前一个**函数 `sub_4BA6B0`（而 `--pseudo` 还照样打出 C 体）——
- * 那不是"查不到"，是**给了一个看起来对的错答案**，正好违反本层"缺事实要报错"的口径。
- * 判据：`node tools/disasm.mjs --pseudo --ea 0x4BAA3A` 必须报 `_WinMain@16`（`.lst:295818-296907`）。
- */
-const SYM = '[A-Za-z_$?@][\\w.$?@]{0,60}';
-/**
- * MSVC **修饰名 → `.c` 里的可读名**：`_WinMain@16` ⇒ `WinMain`（`--pseudo` 的 C 体查找用它兜一层）。
- * ★ Hex-Rays 打印函数**头**时用可读名（`int __stdcall WinMain(...)`），而 `.lst` 的 `proc near` 用修饰名
- * ⇒ 只按符号名查 `.c` 会"找不到定义"，而那**不是**"没有 C 体"。
- * ⛔ 它只做这一种最常见形态（`_Name@NN`）；`??2@YAPAXI@Z` 这种留给 `.c` 索引自己去碰（碰不到就如实说"没有定义"）。
- */
-const undecorate = (sym) => {
-  const m = /^[_@]([A-Za-z_]\w*)@\d+$/.exec(sym);
-  return m ? m[1] : sym;
-};
-const PROC_RE = new RegExp(`^(\\S+)\\s+(${SYM})\\s+proc near`);
-/** ★ 段名可以以 `.` 开头（`.text` / `.data`）—— 首字符限 `[A-Za-z_]` 会让 `.text` 整段漏掉（踩过两次） */
-const PROC_EA_RE = new RegExp(`^([A-Za-z_.][\\w.]*):([0-9A-Fa-f]{8})\\s+(${SYM})\\s+proc near`);
-const ENDP_RE = new RegExp(`^\\S+\\s+(${SYM})\\s+endp\\b`);
+// ★ `SYM` / `undecorate` / `PROC_EA_RE` / `ENDP_RE` 住在 `lib/lst-format.mjs`（语料格式词汇表，只有一份）。
+//   它们的**教训注释**（符号类必须含 `@`，否则 `_WinMain@16` 不被认作函数头 ⇒ 静默返回前一个函数）
+//   跟着搬过去了 —— 要改判据请去那里改。
 
 /**
  * ★ **包含**这个 EA 的函数（EA 落在函数体内也算），以及它的符号名。
@@ -491,7 +480,7 @@ export function enclosingFunction(file, idx, ea, { maxLines = 20000 } = {}) {
   const all = fs.readFileSync(file, 'utf8').split('\n');
   // ★ **不许**用 `contextAt` 定位行：它给的是"最近的**前一个 mark**"的行，而 marks 是**稀疏**的
   //   ⇒ 对"函数起点这个 EA"，它会落到**前一个函数体内**，再往回找就把 `sub_40CB00` 当成 `sub_40CD10`
-  //   （实测踩过：守卫 `disasm-pseudo.assets.test.mjs` 抓出来的）。
+  //   （实测踩过：守卫 `disasm-enclosing.assets.test.mjs` 抓出来的）。
   //   ⇒ 正确地扫一遍：取**最后一个 EA ≤ target** 的 `proc near`。
   let head = -1;
   for (let i = all.length - 1; i >= 0; i -= 1) {
@@ -524,182 +513,6 @@ export function enclosingFunction(file, idx, ea, { maxLines = 20000 } = {}) {
   };
 }
 
-// ───────────────────────────────────────────────────── Hex-Rays 伪代码（.c）
-
-/**
- * `.c` 里的一行**函数定义**（`int __thiscall sub_42CA50(char *this)`）。
- * ★ 只认行首（`^[A-Za-z_]`）⇒ 缩进的**调用**（`  return sub_42CA50(a1);`）不会被当成定义。
- */
-export const C_DEF_RE = /^[A-Za-z_][\w \t*]*?\b(sub_[0-9A-F]{6})\s*\(/;
-
-// ─────────────────────────────────────────────────────────── 函数清单 / 调用图（**派生视图**）
-
-/** `call sub_XXXXXX` / `jmp sub_XXXXXX`（★ 尾跳也算一条边：它同样把控制权交出去） */
-const CALL_RE = /\b(call|jmp)\s+(sub_[0-9A-F]{6})\b/;
-/** 寄存器名（`call eax` / `jmp ebx` 这类**不是符号目标**，别把它当成"调用了叫 eax 的东西"） */
-const REG_RE = /^(?:e?[abcd]x|e?[sd]i|e?[sb]p|e?sp|r\d+|[abcd][lh]|dword|word|byte|ptr|qword|fs|ds|es|ss|cs|gs)$/i;
-/** `call/jmp <符号>`（**任意**符号，含 CRT 的 `___report_gsfailure` 这种）—— 行尾或 `;` 收尾才算 */
-const CALL_SYM_RE = /\b(call|jmp)\s+([A-Za-z_$?@][\w.$?@]*)\s*(?:;|$)/;
-/** 体内是否出现内存操作数（`[...]`）—— "有没有碰结构"的最小机械判据 */
-const MEM_OPERAND_RE = /\[/;
-/**
- * ★ **一个内存操作数里的"引擎尺度位移"**（`disasm-at` 只做切片，这一条是给 `lib/coverage.mjs`
- * 的 `libraryLikely` 用的机械事实 —— 判据与"为什么需要它"见那里的长注释）。
- *
- * 实测口径（全语料 53 万行）：
- * * 这份 IDA 导出里，内存操作数的位移**一律 `…h` 后缀**：`[esi+5D880h]` / `[esi+ecx*8+5D8B4h]`；
- *   含 `[…]` 的行里带 `0x…` 常量的 = **0 行** ⇒ 只认 `h` 形态即可，不必再兜一层。
- * * **基址是栈（`ebp`/`esp`）的操作数要排除**：栈帧可以很大（大局部数组 / `__chkstk`），
- *   它不是"在一个大对象上干活"的证据。⇒ 判据 = "基址不是栈 ∧ 位移 ≥ 0x1000"。
- *   ⚠ 代价（照抄，不掩盖）：`[ebp+…]` 里的大位移**看不见**；这是有意的保守方向
- *   （漏掉只会少取消几个库候选，而"取消"本身是往"更容易看见"的方向走的）。
- */
-const MEM_OPERAND_BODY_RE = /\[([^\]]*)\]/g;
-/** 操作数的基址是不是栈：`ebp` / `esp` 开头（`[ebp+var_C]` / `[esp+10h]`） */
-const STACK_BASE_RE = /^\s*e?[sb]p\b/i;
-/** `h` 后缀十六进制位移（4..8 位）：`1000h` / `5D880h` / `0AA514h` */
-const DISP_H_RE = /\b([0-9A-F]{4,8})h\b/g;
-/** `.lst` 每行开头的 `段:EA`（用于算函数体内**最后一个 EA** ⇒ EA 归属要能拒绝"越过函数末尾"的地址） */
-const LINE_EA_RE = /^[A-Za-z_.][\w.]*:([0-9A-Fa-f]{8})\s/;
-/** 解不出目标的调用点（`call eax` / `call dword ptr [...]` / `call [esi+4]`）—— 只**计数**，不猜目标 */
-const INDIRECT_CALL_RE = /\b(call|jmp)\s+(?:eax|ebx|ecx|edx|esi|edi|ebp|esp|dword ptr|\[)/;
-
-/**
- * 一遍扫出**全部 `proc near` 的函数清单**与**调用图**（`call`/`jmp sub_XXXXXX`）。
- *
- * ★ 这是**派生视图**：不落盘、不缓存。语料是只读真源；换一次导出重建一次即可（实测 ~0.2 s / 53 万行）。
- * ★ 它只做**机械提取**：不解语义、不判"分析过没有"。谁"分析过"由台账（锚）回答 —— 两者在本模块外合流
- *   （见 `lib/coverage.mjs`：锚 EA → 包含它的函数）。
- * ★ `indirectCallSites` 必须**报出来**：解不出目标的调用点意味着任何"调用闭包"都只是**下界**
- *   （实测全语料 3000+ 个）—— 不报出来，读者会把"闭包完整"当成事实。
- *
- * @returns {{file:string, dataEas:Set<number>, functions:Array<{sym:string,ea:number,fromLine:number,toLine:number,lastEa:number,callees:string[],calleeHits:Map<string,number>,externalTargets:string[],hasMemoryOperand:boolean,maxNonStackDisp:number,callSites:number,indirectCallSites:number}>, bySym:Map<string,object>, starts:number[], indirectCallSites:number}}
- */
-export function functionInventory(lstFile) {
-  /** ★ 非 `.text` 段里的行 EA（= **数据/全局**的定义点）：锚落在这些地址上**不是**"归属失败" */
-  const dataEas = new Set();
-  const lines = fs.readFileSync(lstFile, 'utf8').split('\n');
-  const functions = [];
-  const bySym = new Map();
-  let cur = null;
-  let indirectCallSites = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const l = lines[i];
-    // 段名不是 `.text` ⇒ 记下它的 EA（`seg002:00559A68 …` / `.data:0051E988 …`）
-    {
-      const seg = /^([^.\s:][\w.]*|\.(?!text)[\w]+):([0-9A-Fa-f]{8})\s/.exec(l);
-      if (seg) dataEas.add(Number.parseInt(seg[2], 16));
-    }
-    const p = PROC_EA_RE.exec(l);
-    if (p) {
-      cur = {
-        sym: p[3],
-        ea: Number.parseInt(p[2], 16),
-        fromLine: i + 1,
-        toLine: null,
-        lastEa: Number.parseInt(p[2], 16),
-        callees: new Set(),
-        calleeHits: new Map(),
-        externalTargets: new Set(),
-        hasMemoryOperand: false,
-        maxNonStackDisp: 0,
-        callSites: 0,
-        indirectCallSites: 0,
-      };
-      functions.push(cur);
-      // ★ 同名重复（IDA 偶有）**保留第一个**，与"取第一个"以外的做法不同：这里明确写下来，不静默
-      if (!bySym.has(cur.sym)) bySym.set(cur.sym, cur);
-      continue;
-    }
-    if (!cur) continue;
-    const le = LINE_EA_RE.exec(l);
-    if (le) {
-      const v = Number.parseInt(le[1], 16);
-      if (v > cur.lastEa) cur.lastEa = v;
-    }
-    if (ENDP_RE.test(l)) {
-      cur.toLine = i + 1;
-      cur = null;
-      continue;
-    }
-    if (MEM_OPERAND_RE.test(l)) cur.hasMemoryOperand = true;
-    // ★ 顺带记下"最大的**非栈**内存位移"（引擎尺度位移；判据与用途见上面的常量注释）
-    if (l.includes('[')) {
-      MEM_OPERAND_BODY_RE.lastIndex = 0;
-      let mo;
-      while ((mo = MEM_OPERAND_BODY_RE.exec(l))) {
-        const inner = mo[1];
-        if (STACK_BASE_RE.test(inner)) continue;
-        DISP_H_RE.lastIndex = 0;
-        let d;
-        while ((d = DISP_H_RE.exec(inner))) {
-          const v = Number.parseInt(d[1], 16);
-          if (v > cur.maxNonStackDisp) cur.maxNonStackDisp = v;
-        }
-      }
-    }
-    const c = CALL_RE.exec(l);
-    if (c) {
-      cur.callSites += 1;
-      cur.callees.add(c[2]);
-      // ★ 逐目标计数（不只是去重集合）：前沿要区分"110 个调用方"与"205 处调用"（叶子助手两者差得远）
-      cur.calleeHits.set(c[2], (cur.calleeHits.get(c[2]) ?? 0) + 1);
-      continue;
-    }
-    // ★ 非 `sub_` 的转移目标（CRT / 导入）：`jmp ___report_gsfailure` 这种是"库桩"的指纹
-    const e = CALL_SYM_RE.exec(l);
-    if (e && !REG_RE.test(e[2])) {
-      cur.callSites += 1;
-      cur.externalTargets.add(e[2]);
-      continue;
-    }
-    if (INDIRECT_CALL_RE.test(l)) {
-      cur.callSites += 1;
-      cur.indirectCallSites += 1;
-      indirectCallSites += 1;
-    }
-  }
-  for (const f of functions) {
-    if (f.toLine === null) f.toLine = f.fromLine; // 未闭合（异常导出）⇒ 只说"只有头一行"
-    f.callees = [...f.callees].sort();
-    f.calleeHits = new Map([...f.calleeHits].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
-    f.externalTargets = [...f.externalTargets].sort();
-  }
-  const starts = functions.map((f) => f.ea); // ★ 段内 EA 单调（`--stats` 有单调性断言）⇒ 可直接二分
-  return { file: lstFile, functions, bySym, starts, dataEas, indirectCallSites };
-}
-
-/**
- * **EA → 包含它的函数**（二分；不在任何函数里 ⇒ `null`）。
- *
- * ★ 与 `enclosingFunction` 的分工：那个要**读文件**（用于取上下文 / C 体，一次一个 EA 还带区间）；
- *   这个用在"**几百个锚 EA 一次性归属**"的场景（覆盖度查询），只吃一份已建好的清单。
- * ★ `span` 判据：`起点 ≤ EA ≤ 该函数最后一条有 EA 的行`，且 `EA < 下一个函数的起点`。
- *   用"最后一条 EA"而不是 `endp` 行号 —— 没有 `endp` 的函数段（异常导出）也要能归属；
- *   而**只看下一个函数的起点**会把"最后一个函数之后的地址"（`.data` / 段尾）错误归属给它。
- */
-export function functionOfEa(inv, ea) {
-  const { starts, functions } = inv;
-  if (functions.length === 0) return null;
-  let lo = 0;
-  let hi = starts.length - 1;
-  let hit = -1;
-  while (lo <= hi) {
-    const m = (lo + hi) >> 1;
-    if (starts[m] <= ea) {
-      hit = m;
-      lo = m + 1;
-    } else hi = m - 1;
-  }
-  if (hit < 0) return null;
-  const f = functions[hit];
-  // ★ 上界两个都要：**下一个函数的起点**（函数体不许与它重叠）与**本函数最后一条有 EA 的行**
-  //   ——只看前者会把"最后一个函数之后的地址"（`.data` / 段尾）错误归属给最后一个函数（实测踩过）。
-  const next = functions[hit + 1];
-  if (next && ea >= next.ea) return null;
-  if (ea > f.lastEa) return null;
-  return f.sym;
-}
 
 /** `corpus/disasm/files/` → 那份 `.lst`（按名字排序取第一份；不在场 ⇒ `null`，**调用方必须明说**） */
 export function pickListing(filesDir) {
@@ -718,139 +531,6 @@ export function pickDecompiled(lstFile) {
   return fs.existsSync(c) ? c : null;
 }
 
-/**
- * 扫一遍 `.c`，建**符号 → 函数体行区间**的表。
- *
- * ★ **不写缓存**（与 `.lst` 的索引相反）：`.c` 只有 5 MB / 17.8 万行，扫一遍 ~0.5 s；
- *   为它引第二份派生缓存（还要自己校验陈旧）不划算。
- *
- * @returns {{file:string, lines:string[], defs:Map<string,{sym:string,from:number,to:number}>, protos:Map<string,number>}}
- */
-export function buildSymbolIndex(cFile) {
-  const lines = fs.readFileSync(cFile, 'utf8').split('\n');
-  const defs = new Map();
-  const protos = new Map();
-  let cur = null;
-  for (let i = 0; i < lines.length; i += 1) {
-    const l = lines[i];
-    // 段名不是 `.text` ⇒ 记下它的 EA（`seg002:00559A68 …` / `.data:0051E988 …`）
-    {
-      const seg = /^([^.\s:][\w.]*|\.(?!text)[\w]+):([0-9A-Fa-f]{8})\s/.exec(l);
-      if (seg) dataEas.add(Number.parseInt(seg[2], 16));
-    }
-    const m = C_DEF_RE.exec(l);
-    if (m) {
-      if (/;\s*$/.test(l)) {
-        if (!protos.has(m[1])) protos.set(m[1], i + 1);
-        continue;
-      }
-      if (!defs.has(m[1])) {
-        cur = { sym: m[1], from: i + 1, to: null };
-        defs.set(m[1], cur);
-      }
-      continue;
-    }
-    // ★ 函数体的收尾是**第 0 列的** `}`（内层块都缩进）—— 这个判据必须钉住，否则会把
-    //   "下一个函数的结尾"当成自己的结尾，给出**看起来对、其实错**的行区间。
-    if (cur && l === '}') {
-      cur.to = i + 1;
-      cur = null;
-    }
-  }
-  for (const d of defs.values()) if (d.to === null) d.to = d.from; // 未闭合（异常导出）⇒ 只说"只有定义行"
-  return { file: cFile, lines, defs, protos };
-}
-
-/**
- * ★ **一层工作流的机械核心**：给一个 **EA**（或符号），一路上取
- * ① 它**所属函数**（由 `.lst` 的 `proc near`/`endp` 定）② 该函数的 **Hex-Rays C 体**（在 `.c` 里）。
- *
- * 为什么必须机械：`.c` **一处地址都没有**（实测 `0x00xxxxxx` 计数 = 0）⇒ 从 C 里回不到 EA；
- * 而大量被引用的 EA **根本不是函数起点**（实测：`0x40D500` 是 `loc_40D500`，属于 `sub_40CD10` 体内的一块）
- * ⇒ 靠人肉 grep + 猜行区间必然出错。本函数把"是不是函数起点"和"归属于哪个符号"变成**算出来的**。
- *
- * @param lstFile  `.lst` 路径
- * @param idx      `--lst` 的索引
- * @param o.sym    `sub_XXXXXX`
- * @param o.ea     EA（与 `sym` 二选一；给了 `ea` 就顺带判定"是不是函数起点"）
- * @param o.lines  C 体的**有界**上限（被截断必须明说）
- */
-export function pseudoOfFunction(lstFile, idx, { sym = null, ea = null, lines = DEFAULT_MAX_LINES } = {}) {
-  let wantSym = sym;
-  let lstSpan = null;
-  let containing = null;
-  let isFunctionStart = null;
-  if (ea !== null) {
-    const eaNum = parseEa(ea);
-    // ★ 用 `enclosingFunction`（能处理"EA 在函数体内"）—— `spanOfFunction` 只对函数起点正确
-    lstSpan = enclosingFunction(lstFile, idx, eaNum);
-    containing = lstSpan.symbol ?? null;
-    if (containing) {
-      // ★ 起点判定用 `symbolEa`，**不许**再 `slice(4)` 猜 —— 符号名不一定是 `sub_XXXXXX`
-      //   （`_WinMain@16` 之类会让 `slice` 切出垃圾）
-      isFunctionStart = lstSpan.symbolEa !== null && lstSpan.symbolEa !== undefined ? lstSpan.symbolEa === eaNum : null;
-      if (!wantSym) wantSym = containing;
-    }
-  }
-  if (!wantSym || !new RegExp(`^${SYM}$`).test(wantSym)) {
-    throw new Error(
-      `定位不到函数符号（给的是 ${sym ? JSON.stringify(sym) : 'EA ' + ea}）—— ` +
-        'EA 不在任何 `proc near` 里、或符号形态不认识（支持 `sub_XXXXXX` 与 MSVC 修饰名如 `_WinMain@16`）。',
-    );
-  }
-  const mSub = /^sub_([0-9A-F]{6})$/i.exec(wantSym);
-  const fnEa = mSub ? Number.parseInt(mSub[1], 16) : (lstSpan?.symbolEa ?? null);
-  if (fnEa === null) {
-    throw new Error(
-      `定位不到函数符号（给的是 ${sym ? JSON.stringify(sym) : 'EA ' + ea}）—— ` +
-        `“${wantSym}”不是 \`sub_XXXXXX\` ⇒ 必须**同时给 \`--ea <它所在函数里的某个 EA>\`**（否则算不出函数起点）。`,
-    );
-  }
-  // 给了符号（而不是 EA）时，那个符号名**本身就是函数起点** ⇒ `spanOfFunction` 这时是对的
-  if (!lstSpan) lstSpan = spanOfFunction(lstFile, idx, fnEa);
-
-  const cFile = pickDecompiled(lstFile);
-  const out = {
-    sym: wantSym,
-    fnEa,
-    isFunctionStart,
-    containing,
-    lst: { fromLine: lstSpan.fromLine, toLine: lstSpan.toLine, lines: lstSpan.toLine - lstSpan.fromLine + 1 },
-    c: null,
-    note: null,
-  };
-  if (!cFile) {
-    out.note = `语料里没有配套的 .c（只看 .lst）：${path.basename(String(lstFile).replace(/\.lst$/, '.c'))} 不在场`;
-    return out;
-  }
-  const cidx = buildSymbolIndex(cFile);
-  // ★ `.lst` 用修饰名、`.c` 头用可读名 ⇒ 按原名找不到时再按去修饰名找一次（别把"有 C 体"误报成"没有定义"）
-  const def = cidx.defs.get(wantSym) ?? (undecorate(wantSym) === wantSym ? null : cidx.defs.get(undecorate(wantSym)));
-  if (!def) {
-    const und = undecorate(wantSym);
-    out.note =
-      `★ \`${wantSym}\` 在 .c 里**没有定义**（实测 3807 个 \`proc near\` 里有 77 个如此）` +
-      '—— Hex-Rays 没反编译它。只能读 .lst（下面给了行区间）。' +
-      (und === wantSym
-        ? ''
-        : `★ 注意这是**修饰名**（去修饰 = \`${und}\`），而本索引**只索引 \`sub_XXXXXX\`** ⇒ ` +
-          '具名函数（`WinMain` / `operator new` / 带 vtable 的方法…）本来就不进索引；要它的 C 体就直接去 `.c` 里按名读。');
-    return out;
-  }
-  const body = cidx.lines.slice(def.from - 1, Math.min(def.to, def.from - 1 + lines));
-  out.c = {
-    file: cFile,
-    fromLine: def.from,
-    toLine: def.to,
-    bodyLines: def.to - def.from + 1,
-    body,
-    truncated: body.length < def.to - def.from + 1,
-  };
-  if (isFunctionStart === false) {
-    out.note = `★ 该 EA **不是函数起点**：它属于 \`${containing}\`（函数起点 0x${(lstSpan.symbolEa ?? fnEa).toString(16)}）⇒ 下面给的是**整个函数**的 C 体`;
-  }
-  return out;
-}
 
 // ─────────────────────────────────────────────────────────── 自描述
 
@@ -869,7 +549,9 @@ export function describe() {
       '这是所有引擎分析的第一步 —— 分析不该以"读几十 MB 反汇编"开始。',
     notHere:
       '索引**不是真源**（它落 `.cache/`、可删可重建）；语料**不得就地修改**（任何友好化只许是派生的内存视图）。' +
-      '也不是"语义层"：本工具只做**定位与切片**，不做解释（解释是分析的事，要过 `AGENTS.md` §6 准入门）。',
+      '也不是"语义层"：本工具只做**定位与切片**，不做解释（解释是分析的事，要过 `AGENTS.md` §6 准入门）。' +
+      '★ 也不放「函数 / 定义」那一层（逐 item 切分、C↔lst 关联、调用链 / 全局变量 / 参数偏移）——' +
+      '那在 `pnpm tools disasm-fn`（`lib/catalog.mjs`）；本域只回答"某个 EA 在哪一行"这类问题。',
     fields: [
       ['ea', '✅', 'EA（虚拟地址）', '★ **锚点锚 EA，不锚行号**：`EA → 行号` 是本工具**现算**的映射。换一次反汇编只重建映射。'],
       ['seg', '⬜', 'IDA 段名', '实测有 `.text` / `.data` / `seg002` / `.idata` / `poly` / `seg003`。不给就按 EA 范围自动选段。'],

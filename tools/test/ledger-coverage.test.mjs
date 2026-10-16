@@ -21,7 +21,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { coverage, TIERS } from '../lib/coverage.mjs';
-import { functionOfEa, functionInventory, pickListing } from '../lib/disasm.mjs';
+import { buildCatalog, functionOfEa } from '../lib/catalog.mjs';
+import { pickListing } from '../lib/disasm.mjs';
 
 /** 合成语料：4 个函数 + 一条间接调用 + 一对互递归 + 一个体内锚的目标 */
 const LST_TEXT = [
@@ -125,15 +126,15 @@ function fixture() {
 
 test('★ 函数清单与 EA 归属：起止行、`jmp` 尾跳、具名函数', () => {
   const { lst } = fixture();
-  const inv = functionInventory(lst);
+  const inv = buildCatalog({ lstFile: lst, cFile: null });
   assert.equal(inv.functions.length, 13, '13 个 proc near（含 1 个具名 + 1 个库桩 + 1 个调库桩的引擎函数 + 3 个收窄判据的样本）');
   const f = inv.bySym.get('sub_401000');
   assert.equal(f.ea, 0x401000);
   assert.equal(f.fromLine, 1);
   assert.equal(f.toLine, 5);
-  assert.deepEqual(f.callees, ['sub_401100'], 'call 目标要进 callees');
+  assert.deepEqual(f.calleeSyms, ['sub_401100'], 'call 目标要进 callees');
   assert.equal(f.indirectCallSites, 1, '`call eax` 必须计入间接调用点');
-  assert.deepEqual(inv.bySym.get('sub_401600').callees, ['sub_401500'], '`jmp sub_…`（尾跳）也算一条边');
+  assert.deepEqual(inv.bySym.get('sub_401600').calleeSyms, ['sub_401500'], '`jmp sub_…`（尾跳）也算一条边');
 
   // 归属：起点 / 体内 / 之后 / 之前
   assert.equal(functionOfEa(inv, 0x401000), 'sub_401000');

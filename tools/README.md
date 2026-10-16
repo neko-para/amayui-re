@@ -14,6 +14,8 @@ tools/
     manifest.mjs samples.mjs requirements.mjs                # ★ 领域模型：schema / 不变量 / 读 / 写 / 自描述
     bin-source.mjs cn-jp.mjs patch.mjs                       # ★ 领域模型：BIN 来源解析 / 中文↔BIN 映射 / patch
     release.mjs ui-bake/                                     # ★ 领域模型：发行打包（变更集 → 测试树 / zip）/ UI 烘焙链
+    lst-format.mjs                                           # ★ 语料**格式词汇表**（`.lst` 行文法 / 自动名编码）—— 只此一份
+    disasm.mjs catalog.mjs                                   # ★ 领域模型：`.lst` 定位与切片 / **item 目录与影响面**
   test/*.test.mjs    # 基建契约测试
 ```
 
@@ -56,6 +58,8 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `fixtures.mjs` | `fixtures` | ★ `corpus/fixtures/samples.json` 的查询 + 唯一编辑入口（见 `pnpm tools fixtures describe`） |
 | `requirements.mjs` | `requirements` | ★ `data/requirements/` 的进度视图 + 唯一编辑入口（需求/缺陷 + 父子树；见 `pnpm tools requirements describe`） |
 | `disasm-recode.mjs` | `disasm` | 反汇编语料的**无损转写**与保真断言（见 `pnpm tools disasm describe`） |
+| `disasm.mjs` | `disasm-at` | 语料的**定位与切片**：`EA → 行号`、有界上下文、switch/跳转表、派生索引（见 `pnpm tools disasm-at describe`） |
+| `disasm-fn.mjs` | `disasm-fn` | ★ **item 目录与影响面**：逐函数/逐定义切分、`.c` ↔ `.lst` 关联、调用链 / 全局变量 / 参数偏移（见 `pnpm tools disasm-fn describe`） |
 | `patch.mjs` | `patch` | ★ 翻译 patch 的查询 / **提取（唯一写入口）** / 复验 / **视图（`data`·`src`）与全库检索**（见 `pnpm tools patch describe` 与 `tools/patch.md`） |
 | `ui-bake.mjs` | `ui-bake` | ★ **UI 图片烘焙链**：原始 ALF → 改图配方（`tools/ui-bake/recipes/*.json`）→ 生效版 PNG / 注回 AGF；判据是**逐像素相同**（见 `pnpm tools ui-bake describe` 与 `tools/ui-bake.md`） |
 | `release.mjs` | `release` | ★ **发行打包**：把「当前所有变更过的资源」（patch 的键 + ui-bake 的配方集 + AGERC/字体）算成**测试安装树**（ALF 硬链接）或**发给玩家的 zip**（见 `pnpm tools release describe` 与 `tools/release.md`） |
@@ -91,6 +95,11 @@ pnpm tools patch view --kind src --name <脚本> # 只有要用编辑器整篇�
 pnpm tools patch edit --name <脚本> --write    # …改完反解（来源对不上会拒绝；折行重排走这条）
 pnpm tools disasm build                     # 转写落盘 + 打确定性 zip（需要 .staging/ 里的原件）
 pnpm tools disasm restore                   # 由 zip 反解回投递原件（默认写回 .staging/）
+pnpm tools disasm-at at --ea 0x401000 --lines 40   # 语料定位：有界上下文（`--cases` / `--search` / `--stats`）
+pnpm tools disasm-fn show sub_42CA50        # ★ item 全貌：两侧区间 + 参数 + 全局 + 调用关系（`--lst` 看逐字证据）
+pnpm tools disasm-fn impact sub_415640 --up --depth 3   # ★ 影响面闭包（**必带下界说明**）
+pnpm tools disasm-fn globals --who dword_559A68         # 反向：谁碰这个全局
+pnpm tools disasm-fn catalog --write        # 派生快照 → .cache/disasm/<module>.catalog.txt
 pnpm tools old-repo inventory               # 重测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm tools old-repo translate-ref           # 翻译参考快照对账（dry-run；--write 重建 assets/ + archive.zip）
 pnpm tools release plan install             # ★ 发行打包：测试安装树的计划（不落盘）

@@ -23,11 +23,12 @@ description: 在本仓推进《天結いキャッスルマイスター》引擎*
 ```bash
 # ① 这条指令在表里吗？argc 多少？（argc 是**唯一边界**：长度 = 4 + argc*8）
 pnpm tools opcodes report                    # 旧表 ↔ 本仓派生表对账
+pnpm tools disasm-fn summary                  # 语料目录一览：函数 / 数据 item / 诚实项
 pnpm tools disasm-at stats                   # 语料段/EA 范围（要先有语料）
 # ★ 已知缺口：**没有** "opcode → handler EA" 的工具动作（见 §3）—— 先按 §3 处理，别自己拍
 
 # ② 取证（**下一层**，可 subagent 扇出）—— 拿到"取证包"（§2.1）
-#    交 `amayui-re-engine`：`pnpm tools disasm-at pseudo --sym sub_XXXXXX` → C 体 + .lst 窗口
+#    交 `amayui-re-engine`：`pnpm tools disasm-fn show sub_XXXXXX` → C 体 + .lst 窗口 + 参数/全局/调用关系
 
 # ③ 建模：apps/emulator/src/model/*.ts
 #    ★ 硬口径：**语义层不写偏移/EA**（那是 packages/age-format/src/engine/layout.mts）
@@ -123,7 +124,7 @@ Hex-Rays 编的名字当证据 · 顺手去改别的文件。
 
 ```bash
 # ① 定位主循环（一次性；判据 + 守卫钉住）—— 见需求单 REQ-01M4AF3G7RR2DG33CJD0GSDJY7
-pnpm tools disasm-at pseudo --sym <主循环符号>
+pnpm tools disasm-fn show <主循环符号>
 # ② 机械抽候选：主循环的 callee ∪ 它读的字段（＋ 另两类的分配/释放点）
 #    ★ 从 C 体抽 callee 就是"列出里面的 sub_XXXXXX("；抽读字段就是"列出 this + N"
 # ③ 逐条判定：是不是"常态"（在帧尺度上重复）+ **帧两端的可观测差异**是什么
@@ -173,6 +174,7 @@ pnpm tools disasm-at pseudo --sym <主循环符号>
 | 模拟器域的全貌（来源 / 两层 M4-1·M4-2 / 依赖 / 边界） | `apps/emulator/README.md` + `docs/03-emulator/README.md` |
 | **逆向取证怎么读**（C 读 / lst 证、硬口径、六条坑） | 技能 `amayui-re-engine` |
 | 语料是什么、怎么定位与切片 | `corpus/disasm/README.md` + `pnpm tools disasm-at describe` |
+| 逐函数/逐定义（item 目录）与影响面 | `pnpm tools disasm-fn describe`（不变量与诚实项的唯一真源） |
 | 指令表（argc / 助记符）身份与改法 | `tools/opcodes.md` + `packages/age-format/src/asm/instruction-set.md` |
 | 引擎**布局观察**（槽位/偏移/opcode→handler） | `packages/age-format/src/engine/{layout,handlers}.mts` |
 | 结论怎么登记、锚的闭集合 | `pnpm tools ledger describe` + `AGENTS.md` §6 |

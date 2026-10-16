@@ -66,11 +66,22 @@ pnpm tools disasm verify          # 断言（守卫 #7 也走这条）
 pnpm tools disasm build           # 转写落盘到 files/ + 打确定性 zip（需要 .staging/ 里的原件）
 pnpm tools disasm restore         # 由 zip **反解回投递原件**（默认写回 .staging/）
 
-# ★ 读语料是**另一个域**（`disasm-at`：只读定位与切片，`--describe` 看全部动作）
-pnpm tools disasm-at stats                        # 段 / 行数 / EA 范围 / 单调性
-pnpm tools disasm-at at --ea 0x401000 --lines 60  # 有界上下文（.lst；截断会明说）
-pnpm tools disasm-at pseudo --ea 0x40D500         # ★ 该 EA **所属函数**的 Hex-Rays C 体 + .lst 区间
+# ★ 读语料分两层（两个域）：
+pnpm tools disasm-at stats                        # ① **定位与切片**：段 / 行数 / EA 范围 / 单调性
+pnpm tools disasm-at at --ea 0x401000 --lines 60  #    有界上下文（.lst；截断会明说）
+pnpm tools disasm-at cases --ea 0x41BF50          #    switch / 跳转表（case 数 + 目标）
+pnpm tools disasm-fn summary                      # ② **item 目录与影响面**：一览 + 诚实项 + 不变量自检
+pnpm tools disasm-fn show sub_42CA50              # ★ 一个函数的全貌：两侧区间 + 参数 + 全局 + 调用关系
+pnpm tools disasm-fn show 0x42CA50 --lst          #    换成 .lst 那一侧（逐字核验用；给 EA 也行）
+pnpm tools disasm-fn impact sub_415640 --up --depth 3   # ★ 影响面闭包（**必带下界说明**）
+pnpm tools disasm-fn globals --who dword_559A68   #    反向索引：谁碰这个全局
+pnpm tools disasm-fn catalog --write              #    派生快照（一 item 一行）→ .cache/disasm/
 ```
+
+★ 为什么分成两个域：① 只回答"某个 EA 在哪一行"（要扫 18 MB 的 `.lst`，只此一件事）；
+② 回答"这个函数是什么 / 谁调它 / 它碰了哪些全局 / 参数在哪个偏移"（两侧各扫一遍，产出 **item**）。
+混在一起的代价实测过：旧 `disasm-at --pseudo` 每次重扫 5 MB 的 `.c`，而且它的"原型 vs 定义"判据
+会把 **40 个带尾注释的原型**当成定义 ⇒ 给出**一行"C 体"**（就是原型那行）而**不报错**。
 
 `--verify` 有**两种基准**，按 `.staging/` 在不在自动选，两种都会用清单里的 sha256 上锚：
 
@@ -105,9 +116,14 @@ pnpm tools disasm-at pseudo --ea 0x40D500         # ★ 该 EA **所属函数**�
 * ★ **两层分工：C 读 / lst 证**。`.c` 是 Hex-Rays 的**改写视图**（类型 / 变量名 / 结构都是它的推断，
   而且**一处地址都没有** —— 实测 `0x00xxxxxx` 计数为 0）⇒ 它**只用来提假设与看结构**；
   结论必须回 `.lst` / 字节核验，**锚只锚 EA**（`.c` 的行号与文本不许当锚）。
-  ★ 不是每个 EA 都是函数起点、也不是每个函数都有 C ⇒ 用 `disasm-at pseudo` 让它**算**给你（别自己看行区间）。
-  机械判据：`tools/test/disasm-pseudo.assets.test.mjs`；完整工作流与常踩的坑：
-  技能 `.agents/skills/amayui-re-engine/SKILL.md`。
+  ★ 不是每个 EA 都是函数起点、也不是每个函数都有 C ⇒ 用 `disasm-fn show` 让它**算**给你（别自己看行区间）。
+  机械判据：`tools/test/disasm-fn-format.test.mjs`（合成文法，`@env pure`）+
+  `tools/test/disasm-fn.assets.test.mjs`（真语料契约）+ `tools/test/disasm-enclosing.assets.test.mjs`（定位）。
+  完整工作流与常踩的坑：技能 `.agents/skills/amayui-re-engine/SKILL.md`。
+* ★ **item 目录是派生视图**（`pnpm tools disasm-fn …`）：逐函数 / 逐定义切开、按**符号名（= EA）**关联两侧，
+  并在同一遍扫描里给出调用边（**带来源**）、全局变量的读/写、参数的栈偏移/寄存器、函数指针表。
+  ⛔ 它**不**宣称"调用闭包完整"（间接调用解不出目标 ⇒ 永远是下界）、**不**做 demangle、**不**做语义。
+  ★ 快照落在 `.cache/disasm/*.catalog.txt`（`--write`），**查询永远现算**（不引"缓存陈旧"那套机制）。
 * **锚点锚二进制 EA**：语料只提供 `EA → 当前这份导出里的行号` 映射。
   换一次反汇编**只重建映射，不改任何锚**（这正是旧仓 `raw N` 行号锚全废的教训）。
 * `files/` 里的解压产物**不入库**（`.gitignore` 的 `/corpus/disasm/files/`），本机解一次即可。

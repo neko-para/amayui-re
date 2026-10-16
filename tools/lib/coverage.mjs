@@ -33,7 +33,7 @@
  * * ⛔ 不把结果落盘（派生视图，随语料/台账现算）；
  * * ⛔ 不说"没登记 = 不重要"——只回答"有没有人登记过"。
  */
-import { functionInventory, functionOfEa } from './disasm.mjs';
+import { buildCatalog, functionOfEa } from './catalog.mjs';
 
 /** 桶名（闭集合；报告与 `--json` 共用一份） */
 export const TIERS = ['complete', 'partial-rooted', 'partial-spotty', 'unobserved'];
@@ -86,7 +86,7 @@ const SYM_IN_SUBJECT_RE = /\bsub_[0-9A-F]{6}\b/g;
  *   （台账/语料里的字段都在 `+0x14D30` / `+0x5D880` / `+0x5EC8C` / `+0xA30D0` / `+0xAA514` 这一量级），
  *   而 STL 的内部实现只认**自己的小布局**（`std::string` 的 SSO 是 `+0x10`/`+0x14`、`vector` 是三指针 `+0`/`+4`/`+8`）。
  *   ⇒ "在一个位移上万字节的对象上干活"就是**引擎代码**的机械指纹。
- * * 机械事实**由 `lib/disasm.mjs` 的 `functionInventory` 现算**（`maxNonStackDisp`），本文件只做判断 ——
+ * * 机械事实**由 `lib/catalog.mjs` 的 `buildCatalog()` 现算**（`maxNonStackDisp`），本文件只做判断 ——
  *   于是它可复跑、可变异、不靠任何人读一遍反汇编。
  * * ★ **方向保守**：它只**取消**库候选（= 让更多函数**可见**），**不**新增任何库候选；栈基址的大位移一律看不见
  *   （代价写在 `disasm.mjs` 的常量注释里）。
@@ -109,7 +109,7 @@ export const ENGINE_SCALE_DISP = 0x1000;
 /** `calls-stl-internal` 的**触发条件**（不含收窄）—— 收窄与"被取消"共用这一份判据，不许写两遍 */
 const callsStlInternal = (f) => f.externalTargets.some((t) => STL_INTERNAL_RE.test(t));
 
-/** ★ 收窄判据：体内有 ≥ `ENGINE_SCALE_DISP` 的**非栈**位移（机械事实由 `functionInventory` 现算） */
+/** ★ 收窄判据：体内有 ≥ `ENGINE_SCALE_DISP` 的**非栈**位移（机械事实由 `buildCatalog()` 现算） */
 const engineScaleOperand = (f) => (f.maxNonStackDisp ?? 0) >= ENGINE_SCALE_DISP;
 
 export function libraryLikely(f) {
@@ -126,7 +126,9 @@ export function libraryLikelyCancelled(f) {
 }
 
 export function coverage(entries, { lstFile, onlySub = true, top = 30 } = {}) {
-  const inv = functionInventory(lstFile);
+  // ★ 机械事实由 `lib/catalog.mjs` 现算（**一遍**扫完 .lst：函数 + 全局 + 参数 + 边）。
+  //   `cFile: null` —— 覆盖度视图只用 .lst 侧（不花时间读 5 MB 的 .c）。
+  const inv = buildCatalog({ lstFile, cFile: null });
   const live = entries.filter((e) => e.effective !== 'retracted');
 
   // ── 锚 → 函数（机械归属）──
@@ -231,7 +233,7 @@ export function coverage(entries, { lstFile, onlySub = true, top = 30 } = {}) {
   const allCallers = new Map(); // sym → Set(caller sym)
   const allSites = new Map(); // sym → 全语料的**调用处数**（同一函数调两次算两处）
   for (const f of engine) {
-    for (const c of f.callees) {
+    for (const c of f.calleeSyms) {
       if (!allCallers.has(c)) allCallers.set(c, new Set());
       allCallers.get(c).add(f.sym);
       allSites.set(c, (allSites.get(c) ?? 0) + (f.calleeHits?.get(c) ?? 1));
@@ -242,7 +244,7 @@ export function coverage(entries, { lstFile, onlySub = true, top = 30 } = {}) {
   const callers = new Map(); // sym → Set(caller sym)，只算**已登记**的调用方
   for (const f of engine) {
     if (!aimed.has(f.sym)) continue;
-    for (const c of f.callees) {
+    for (const c of f.calleeSyms) {
       if (aimed.has(c) || librarySet.has(c)) continue;
       if (!callers.has(c)) callers.set(c, new Set());
       callers.get(c).add(f.sym);
@@ -268,7 +270,7 @@ export function coverage(entries, { lstFile, onlySub = true, top = 30 } = {}) {
     d += 1;
     const next = [];
     for (const sym of layer) {
-      for (const c of inv.bySym.get(sym)?.callees ?? []) {
+      for (const c of inv.bySym.get(sym)?.calleeSyms ?? []) {
         if (!known.has(c) || depth.has(c)) continue;
         depth.set(c, d);
         next.push(c);
@@ -281,7 +283,7 @@ export function coverage(entries, { lstFile, onlySub = true, top = 30 } = {}) {
 
   const slice = (arr) => (top > 0 ? arr.slice(0, top) : arr);
   const calleesNotInInventory = new Set();
-  for (const f of universe) for (const c of f.callees) if (!inv.bySym.has(c)) calleesNotInInventory.add(c);
+  for (const f of universe) for (const c of f.calleeSyms) if (!inv.bySym.has(c)) calleesNotInInventory.add(c);
 
   return {
     listing: lstFile,

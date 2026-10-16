@@ -26,7 +26,7 @@ import path from 'node:path';
 
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { coverage, ENGINE_SCALE_DISP, libraryLikely, libraryLikelyCancelled } from '../lib/coverage.mjs';
-import { functionInventory } from '../lib/disasm.mjs';
+import { buildCatalog } from '../lib/catalog.mjs';
 
 const FILES_DIR = path.join(REPO_ROOT, 'corpus', 'disasm', 'files');
 const LST = fs.existsSync(FILES_DIR)
@@ -57,7 +57,7 @@ test('★ `sub_42B4B0` / `sub_42BA00`（引擎写值原语）必须**不被**判
     );
   }
   // ★ 判据本身也要对得上语料：`sub_42B4B0` 体内那个最大非栈位移就是编解码 key 那一格（`Engine+0x5EC8C`）
-  const inv = functionInventory(LST);
+  const inv = buildCatalog({ lstFile: LST, cFile: null });
   assert.equal(inv.bySym.get('sub_42B4B0').maxNonStackDisp, 0x5ec8c, '写值原语体内最大的非栈位移 = `Engine+0x5EC8C`（编解码 key）');
 });
 
@@ -82,7 +82,7 @@ test('★ 收窄不许滥杀：真库内部实现留在候选里，且每条"取
   assert.equal(r.universe.library, r.honest.libraryCandidates.length, '`universe.library` 与候选名单必须是同一份');
   for (const sym of cancelled.map((x) => x.sym)) assert.ok(!lib.has(sym), `${sym} 不许同时出现在两个名单里`);
   // ④ 收窄确实**只取消不新增**：`calls-stl-internal` 只可能因为"引擎尺度位移"而消失
-  const inv = functionInventory(LST);
+  const inv = buildCatalog({ lstFile: LST, cFile: null });
   for (const x of cancelled) {
     assert.deepEqual(libraryLikely(inv.bySym.get(x.sym)), [], `${x.sym} 取消后不该还有任何库理由`);
     assert.deepEqual(libraryLikelyCancelled(inv.bySym.get(x.sym)), ['calls-stl-internal'], `${x.sym} 的取消理由就是 calls-stl-internal`);

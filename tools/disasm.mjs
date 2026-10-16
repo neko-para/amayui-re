@@ -28,7 +28,6 @@ import {
   indexSummary,
   parseEa,
   parseIndexText,
-  pseudoOfFunction,
   search,
   serializeIndex,
   spanOfFunction,
@@ -43,18 +42,18 @@ const REPO_ROOT = path.resolve(HERE, '..');
 const FILES_DIR = path.join(REPO_ROOT, 'corpus', 'disasm', 'files');
 const CACHE_DIR = path.join(REPO_ROOT, '.cache', 'disasm');
 
-const HELP = `tools/disasm.mjs —— 反汇编语料的机械提取（只读语料；不许在大文件里漫游）
+const HELP = `tools/disasm.mjs —— 反汇编语料的**定位与切片**（只读语料；不许在大文件里漫游）
 
   node tools/disasm.mjs --stats                          # 语料盘点：段 / 行数 / EA 范围 / 单调性
   node tools/disasm.mjs --at --ea 0x401000 [--lines 60]   # ★ 取有界上下文（被截断会明说）
   node tools/disasm.mjs --at --ea 0x401000 --fn           # 取它所在函数的区间
   node tools/disasm.mjs --search --match "某串" [--regex] [--limit 50]
   node tools/disasm.mjs --cases --ea 0x41BF50             # ★ 机械枚举函数里的 switch/跳转表（case 数 + 目标）
-  node tools/disasm.mjs --pseudo --ea 0x40D500            # ★ 该 EA 所属函数的 Hex-Rays C 体 + .lst 行区间
-  node tools/disasm.mjs --pseudo --sym sub_415640 [--lines 200]
   node tools/disasm.mjs --span --match "某串"              # 只看命中位置的**行号区间**
   node tools/disasm.mjs --index [--write]                 # 建/刷新派生索引到 .cache/（缺省 dry-run）
 
+★ **逐函数 / 逐定义**那一层（C 体 + 两侧行关联 + 调用链 / 全局变量 / 参数偏移）不在本工具：
+  \`pnpm tools disasm-fn show <sym|EA>\`（\`--describe\` 看全部动作）。
 ★ 锚点锚 **EA，不锚行号**：\`EA → 行号\` 由本工具现算；换一次反汇编只重建映射。
 ★ 索引是**派生缓存**（\`.cache/\`，可删可重建），**不是真源**。
 ★ 语料**只读**：本工具不改它一个字。
@@ -63,7 +62,7 @@ const HELP = `tools/disasm.mjs —— 反汇编语料的机械提取（只读语
 function parseArgs(argv) {
   const out = { action: null, write: false, json: false, lines: DEFAULT_MAX_LINES, limit: 200, regex: false, fn: false, file: null, sym: null };
   const takesValue = new Set(['ea', 'match', 'lines', 'limit', 'seg', 'file', 'sym']);
-  const ACTIONS = ['stats', 'at', 'span', 'search', 'cases', 'pseudo', 'index', 'describe', 'help'];
+  const ACTIONS = ['stats', 'at', 'span', 'search', 'cases', 'index', 'describe', 'help'];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--help' || a === '-h') out.action = 'help';
@@ -269,34 +268,6 @@ export function main(argv = process.argv.slice(2)) {
     }
     L.push('');
     L.push('★ 表里的**下标**只是序号：真正的 case 值要看跳转点前后的 `cmp`/`sub` 归零式。');
-    process.stdout.write(`${L.join('\n')}\n`);
-    return 0;
-  }
-
-  if (args.action === 'pseudo') {
-    if (!args.ea && !args.sym) throw new Error('--pseudo 需要 --ea <EA> 或 --sym sub_XXXXXX');
-    const r = pseudoOfFunction(file, idx, { ea: args.ea, sym: args.sym, lines: args.lines });
-    if (args.json) {
-      process.stdout.write(`${JSON.stringify({ ...r, c: r.c ? { ...r.c, body: undefined } : null }, null, 2)}\n`);
-      return 0;
-    }
-    const L = [
-      `函数        ${r.sym}（起点 0x${r.fnEa.toString(16)}）${r.isFunctionStart === false ? '　★ 你给的 EA 不是函数起点' : ''}`,
-      `lst         行 ${r.lst.fromLine}-${r.lst.toLine}（${r.lst.lines} 行）`,
-    ];
-    if (r.note) L.push(`★ 提示      ${r.note}`);
-    if (!r.c) {
-      L.push('');
-      L.push('（没有 C 体可给 —— 按上面的 .lst 行区间读，或 `--at --ea 0x… --fn`）');
-      process.stdout.write(`${L.join('\n')}\n`);
-      return 0;
-    }
-    L.push(`C 体        ${path.relative(REPO_ROOT, r.c.file)} 行 ${r.c.fromLine}-${r.c.toLine}（共 ${r.c.bodyLines} 行）`);
-    if (r.c.truncated) L.push(`★ 截断      只给了前 ${r.c.body.length} 行（--lines 调大；别把"没给"当成"没有"）`);
-    L.push('');
-    L.push(r.c.body.map((l, i) => `${String(r.c.fromLine + i).padStart(7)}  ${l}`).join('\n'));
-    L.push('');
-    L.push('★ C 是 Hex-Rays 的**改写**（类型 / 变量名 / 结构都是它的推断）⇒ 结论必须回 .lst 核验，锚记函数起点 EA。');
     process.stdout.write(`${L.join('\n')}\n`);
     return 0;
   }
