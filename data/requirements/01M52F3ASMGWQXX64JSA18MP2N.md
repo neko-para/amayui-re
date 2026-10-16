@@ -50,11 +50,11 @@
   ⇒ shape 表要记**原点约定**，不许静默选一个（先例：R1 的基址订正 `01M4H0Q2TQ…`）。
 * `disasm-fn` 域已把两侧扫描合成一遍（`buildCatalog`，~0.7 s）⇒ 助手侧的 per-site 普查塞进同一遍，不新增第二个扫描器。
 
-## 参照物：`defs.h` **已入库**（清单条目待补）
+## 参照物：`defs.h` **已入库 + 已登记**（条目 `disasm/c-vocabulary`）
 * `corpus/disasm/defs.h` —— Hex-Rays 固定词表：宽度别名（`_BYTE`=1 / `_WORD`=2 / `_DWORD`=4 / `_QWORD`=8 / `_UNKNOWN`=1）
   与折叠内在函数（`__ROL4__` / `WORD1` / `SLODWORD` …）。**shape 的宽度闭集合与折叠识别以它为准**；只读，
   行尾按仓规统一为 LF。
-* ★ 它的清单条目（`disasm/c-vocabulary`，origin `oldRepo:engine/defs.h`）**目前落不下来**：
-  `corpus add --write` 被与本条目无关的既有红灯挡死（本机两次实测回滚）⇒ `REQ-01M52F9K25YNPJEXQ74QE4CT9Z`。
-  **在条目补上之前，不要把 `corpus/disasm/defs.h` 当"已登记素材"。**
+* ★ 清单条目 `disasm/c-vocabulary`（origin `oldRepo:engine/defs.h`）**已登记**（2026-10，随
+  `REQ-01M52F9K25YNPJEXQ74QE4CT9Z` 的写入口修复一起落地：那条旧闸门"零失败"在缺件机器上把这条也挡死了）。
+  ⇒ 现在可以把它当"已登记素材"引用（宽度闭集合的真源）。
 * ⛔ **不使用** `engine.hpp` 之类前人推断：未按 §6 复核过，不得当底座（它只能作为待核验的假设来源）。

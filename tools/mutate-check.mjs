@@ -609,6 +609,22 @@ const MUTATIONS = [
     guard: 'tools/test/manifest-local.test.mjs',
     what: '本机私有覆盖被静默忽略 ⇒ 换一台机器（win32 ↔ macOS）所有来源根都指向另一台机器的路径',
   },
+  // ── 清单写入口的闸门：「不新增失败」（★ 改回"零失败"或让差集恒空 ⇒ 缺件机器上写不进去 / 什么都能写进去）──
+  {
+    file: 'tools/lib/manifest.mjs',
+    from: '  return failureKeys(afterReport).filter((k) => !before.has(k));',
+    to: '  return [];',
+    guard: 'tools/test/corpus-manifest.test.mjs',
+    what: '写入口的差集恒空 ⇒ **新写入自己引出来的失败也不再挡**（清单变成"写什么是什么"；`REQ-01M52F9K25YNPJEXQ74QE4CT9Z` 的判据 1 另一半）',
+  },
+  // ── origin 的 machine-local 档（★ 抹掉这一档 ⇒ 本机现场产物又被判红，缺件机器回到"什么都写不了"）──
+  {
+    file: 'tools/lib/manifest.mjs',
+    from: "export const isMachineLocal = (o) => o?.disposition === 'machine-local';",
+    to: 'export const isMachineLocal = () => false;',
+    guard: 'tools/test/corpus-manifest.test.mjs',
+    what: 'machine-local 档整条失效（#3 缺件重新硬红、#4 又要求 pin、`--scan` 又给本机产物补 pin）⇒ 缺件机器上 `corpus validate` 长期红且写不进去',
+  },
   // ── 头部三组 (长度, 偏移) 的**配对**（★ 把 `table_1_offset` 与 `table_2_length` 的槽抄错一格 ⇒ 表读到别处，而"读到一张表"看起来正常）──
   {
     file: 'packages/age-format/src/asm/types.mts',

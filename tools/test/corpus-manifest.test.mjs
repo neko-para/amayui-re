@@ -25,7 +25,7 @@ import {
   saveManifest,
   validateManifest,
 } from '../lib/manifest.mjs';
-import { git, gitAttrFilter } from '../lib/exec.mjs';
+import { git, gitAttrFilter, runCapture } from '../lib/exec.mjs';
 import { REPO_ROOT } from '../lib/paths.mjs';
 
 const CORPUS_MJS = path.join(REPO_ROOT, 'tools', 'corpus.mjs');
@@ -348,5 +348,108 @@ test('端到端：写入非法状态会被拒绝（清单不是"写什么是什�
   };
   const res = saveManifest(patched, tmpManifest, { repoRoot: REPO_ROOT, runGit: false, checkHashes: false, runRecipe: false });
   assert.equal(res.ok, false, 'lfs 却没有 dest 必须被拒绝');
+  // ★ 拒的理由必须是**这条 patch 自己的**（#2）—— 只断言 `ok === false` 会在"缺件的机器"上**假绿**：
+  //   那里到处是无关红灯，写入被拒的理由跟这条 patch 毫无关系（实测见 `.tmp/req-verify/probe.mjs`）。
+  assert.match(res.reason, /#2/, `拒的理由必须点到 #2，实际：${res.reason}`);
   assert.equal(fs.readFileSync(tmpManifest, 'utf8'), original, '被拒后清单必须与原文逐字节相同');
+});
+
+// ─────────────────────────────────────────── 写入口：闸门 = **不新增失败**
+//   `REQ-01M52F9K25YNPJEXQ74QE4CT9Z`：旧闸门是"零失败" ⇒ 缺件的机器（macOS 侧没有游戏安装树、
+//   旧仓 `install/`+`raw-parts/` 被上游 .gitignore 忽略）上**任何**条目都写不进去，挡它的红灯却与要写的条目无关。
+
+/** 盘上先放一条"与本条目无关的红"（origin 缺失），返回 {root, tmp, manifest} */
+function withStaleRed() {
+  const root = makeRepo();
+  const tmp = path.join(root, 'assets.json');
+  const stale = validEntry({ id: 'x/stale', origin: [{ root: 'oldRepo', path: 'sub/nope.c', sha256: HEX64 }] });
+  fs.writeFileSync(tmp, canonicalStringify(makeManifest(root, [stale])));
+  return { root, tmp, manifest: loadManifest(tmp) };
+}
+const WRITE_OPTS = (root) => ({ repoRoot: root, runGit: false, checkHashes: false, runRecipe: false });
+
+test('★ 写入口：这台机器本来就有的红灯**不挡**写入（闸门是"不新增失败"，不是"零失败"）', () => {
+  const { root, tmp, manifest } = withStaleRed();
+  const fresh = validEntry({ id: 'x/fresh' });
+  const res = saveManifest({ ...manifest, entries: [...manifest.entries, fresh] }, tmp, WRITE_OPTS(root));
+  assert.equal(res.ok, true, `与本条目无关的红灯不许掐死写入：${res.reason}`);
+  const text = fs.readFileSync(tmp, 'utf8');
+  assert.match(text, /x\/fresh/, '新条目要真的落盘');
+  assert.match(text, /sub\/nope\.c/, '那条机器本地的红灯要**原样留着**（不是被吞掉、也不是被"修好"）');
+});
+
+test('★ 写入口：**新写入**引出来的失败照样挡（dest 不在盘上 ⇒ 拒 + 一个字节都不留）', () => {
+  const { root, tmp, manifest } = withStaleRed();
+  const before = fs.readFileSync(tmp, 'utf8');
+  const bad = validEntry({ id: 'x/bad', storage: 'lfs', dest: 'corpus/absent.bin', origin: [{ root: 'oldRepo', path: 'sub/x.c' }] });
+  const res = saveManifest({ ...manifest, entries: [...manifest.entries, bad] }, tmp, WRITE_OPTS(root));
+  assert.equal(res.ok, false, '新条目自己引出的失败必须挡（否则"不新增失败"就是放宽守卫）');
+  assert.match(res.reason, /#3/, `理由要点到它自己那处失败，实际：${res.reason}`);
+  assert.equal(fs.readFileSync(tmp, 'utf8'), before, '被拒后清单必须逐字节不变');
+});
+
+test('★ 写入口：比较粒度必须是**明细集合** —— 失败"条数"没变但换了项，也要挡（只比计数会假绿）', () => {
+  const { root, tmp, manifest } = withStaleRed();
+  // 候选：原来那处缺失变成"在盘上"（该失败消失），同时新条目引入**另一处**缺失 ⇒ #3 的计数**还是 1**
+  const fixed = validEntry({ id: 'x/now-present', origin: [{ root: 'oldRepo', path: 'sub/x.c', sha256: HEX64 }] });
+  const bad = validEntry({ id: 'x/other-missing', origin: [{ root: 'oldRepo', path: 'sub/nope2.c', sha256: HEX64 }] });
+  const candidate = { ...manifest, entries: [fixed, bad] };
+  const beforeRep = validateManifest(manifest, WRITE_OPTS(root));
+  const afterRep = validateManifest(candidate, WRITE_OPTS(root));
+  assert.equal(afterRep.failures, beforeRep.failures, '前置：两次的**失败条数**必须相同，否则这条守卫测不到粒度');
+  const res = saveManifest(candidate, tmp, WRITE_OPTS(root));
+  assert.equal(res.ok, false, '换了一个失败项也算新增失败；只比计数会在这里假绿');
+  assert.match(res.reason, /nope2\.c/, `理由要点到那个**新**失败项，实际：${res.reason}`);
+});
+
+// ─────────────────────────────────────────── origin 的 machine-local 档
+
+test('#3：disposition=machine-local 的 origin 缺件 ⇒ 只 warn，且**逐条报数**（不许静默丢）', () => {
+  const root = makeRepo();
+  const e = validEntry({ origin: [{ root: 'oldRepo', path: 'sub/gone.bin', disposition: 'machine-local' }] });
+  const report = check(root, [e]);
+  assert.deepEqual(failIds(report), []);
+  const c3 = report.checks.find((c) => c.id === 3);
+  assert.equal(c3.status, 'warn');
+  assert.match(c3.message, /1 处允许的暂缺/);
+  assert.match(c3.details.join('\n'), /machine-local/);
+});
+
+test('#4：machine-local **既不要求 pin、也不比对**（文件在盘上、没有 sha256 同样合规）', () => {
+  const root = makeRepo();
+  const e = validEntry({ origin: [{ root: 'oldRepo', path: 'sub/x.c', disposition: 'machine-local' }] });
+  assert.deepEqual(failIds(check(root, [e])), []);
+  // ★ 开哈希也要一样（上层那个 check() 关掉了哈希比对）
+  const rep = validateManifest(makeManifest(root, [e]), { repoRoot: root, runGit: false, checkHashes: true, runRecipe: false });
+  assert.deepEqual(failIds(rep), [], 'machine-local 不进 #4：既不要求 pin，也不比对');
+});
+
+test('#1：machine-local 与 sha256 不许共存 · 入库件不许标 machine-local · 闭集合外的值要红', () => {
+  const root = makeRepo();
+  const withPin = validEntry({ origin: [{ root: 'oldRepo', path: 'sub/x.c', sha256: HEX64, disposition: 'machine-local' }] });
+  assert.ok(failIds(check(root, [withPin])).includes(1), 'machine-local 与 sha256 并存 ⇒ #1 红');
+  const carried = validEntry({
+    storage: 'lfs',
+    dest: 'corpus/payload.bin',
+    origin: [{ root: 'oldRepo', path: 'sub/x.c', disposition: 'machine-local' }],
+  });
+  assert.ok(failIds(check(root, [carried])).includes(1), '入库件的来源必须可再取 ⇒ 不许 machine-local');
+  const bogus = validEntry({ origin: [{ root: 'oldRepo', path: 'sub/x.c', disposition: 'nope' }] });
+  assert.ok(failIds(check(root, [bogus])).includes(1), 'disposition 是闭集合');
+});
+
+test('★ --scan 只补**该补的** pin：machine-local 跳过（本机产物写 pin 只会制造机器相关的红）', () => {
+  const root = makeRepo();
+  const tmp = path.join(root, 'assets.json');
+  const normal = validEntry({ id: 'x/normal', origin: [{ root: 'oldRepo', path: 'sub/x.c' }] }); // 缺 pin ⇒ 会被补
+  const local = validEntry({ id: 'x/machine-local', origin: [{ root: 'oldRepo', path: 'sub/x.c', disposition: 'machine-local' }] });
+  fs.writeFileSync(tmp, canonicalStringify(makeManifest(root, [normal, local])));
+  const args = [CORPUS_MJS, '--scan', '--manifest', tmp, '--write', '--no-git', '--no-recipe'];
+  const r = runCapture(REPO_ROOT, process.execPath, args);
+  assert.equal(r.code, 0, `--scan 必须成功：${r.out}${r.error}`);
+  assert.match(r.out, /另有 1 处 machine-local 跳过/, `--scan 要说清它跳过了什么：${r.out}`);
+  const after = JSON.parse(fs.readFileSync(tmp, 'utf8'));
+  const get = (id) => after.entries.find((e) => e.id === id).origin[0];
+  assert.equal(typeof get('x/normal').sha256, 'string', '普通 origin 的 pin 必须补上');
+  assert.equal(get('x/machine-local').sha256, undefined, 'machine-local 的 pin 不许补');
 });

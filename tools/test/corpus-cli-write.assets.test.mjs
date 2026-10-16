@@ -2,10 +2,12 @@
 /**
  * tools/test/corpus-cli-write.assets.test.mjs — **corpus 写命令**的冒烟（要真清单的 origin 都在盘上）
  *
- * ★ 从 `cli-write.test.mjs` 拆出来的原因（本轮测试分级）：这两条拿**真清单**当底稿，
- *   而守卫 #3/#4 会去现算那些 `origin` 文件的 sha256 ⇒ **要求装了游戏 / 资产在场**。
- *   实测（把 `gameInstall` 临时指空）：这两条**红**（`--scan` 退出 1；`--normalize` 撞上"11 处缺失"的回滚），
- *   而 fixtures 那三条照样绿 ⇒ 两类混在一起时，"写路径冒烟"会跟着机器环境一起红。
+ * ★ 从 `cli-write.test.mjs` 拆出来的原因（本轮测试分级）：这两条拿**真清单**当底稿 ——
+ *   ① `--scan` 那条要求 `reference/old-agents-md` 的 origin 文件**真在盘上**（否则没有东西可补）；
+ *   ② `--normalize` 那条的底稿里所有 origin 都要在盘上。⇒ 与 `fixtures` 那三条（纯合成数据）分档：
+ *   混在一起时，"写路径冒烟"会跟着机器环境一起红。
+ *   ★ 2026-10 起写入口的闸门是「**不新增失败**」（`REQ-01M52F9K25YNPJEXQ74QE4CT9Z`）⇒ 缺件**不再**让这两条红，
+ *     但上面那两条判据仍要求资产在场 ⇒ 仍留在 `@env assets`。
  *
  * ★ 不碰真 JSON：清单先拷到 `.tmp/` 下的副本，`--manifest` 指向副本 ⇒ `--write` 改的是副本。
  * ★ 跑 `--no-hash --no-recipe`：本用例只测**写入路径**；守卫 #4/#7 由 `pnpm tools corpus validate`

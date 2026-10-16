@@ -18,8 +18,10 @@ import {
   DEFAULT_MANIFEST,
   DOMAIN,
   OPERATIONS,
+  addedFailures,
   describe,
   describeText,
+  isMachineLocal,
   loadManifest,
   localManifestFor,
   readLocalOverrides,
@@ -85,9 +87,16 @@ function validateOpts(args) {
 function cmdScan(manifest, manifestPath, args) {
   const roots = manifest.roots ?? {};
   const plan = [];
+  let skipped = 0;
   for (const e of manifest.entries) {
     if (CARRYING.has(e.storage)) continue; // 入库件不写 sha256
     for (const o of e.origin ?? []) {
+      // ★ machine-local（本机现场产物）：**不补 pin** —— 本机产物的哈希不可跨机器校验，
+      //   写上去只会制造"换台机器就红"（#1 也禁止它与 sha256 共存，见 DISPOSITIONS 的注释）。
+      if (isMachineLocal(o)) {
+        skipped += 1;
+        continue;
+      }
       const abs = resolveOrigin(REPO_ROOT, roots, o);
       if (abs === null || statKind(abs) !== 'file') continue; // 目录 / 缺失：不写
       const actual = sha256File(abs);
@@ -96,12 +105,17 @@ function cmdScan(manifest, manifestPath, args) {
     }
   }
   if (plan.length === 0) {
-    process.stdout.write('--scan：没有需要补的 sha256（全部与盘上一致）。\n');
+    process.stdout.write(
+      `--scan：没有需要补的 sha256（全部与盘上一致）。` +
+        (skipped ? `\n        跳过 ${skipped} 处 machine-local（本机现场产物：不写 pin）。` : '') +
+        '\n',
+    );
     return 0;
   }
   for (const p of plan) {
     process.stdout.write(`${p.from ? 'update' : 'fill  '} ${p.entry}  ${p.origin.root}:${p.origin.path}\n        ${p.to}\n`);
   }
+  if (skipped) process.stdout.write(`（另有 ${skipped} 处 machine-local 跳过：本机现场产物不写 pin）\n`);
   if (!args.write) {
     process.stdout.write(`\n（dry-run）共 ${plan.length} 处待写。加 --write 落盘。\n`);
     return 0;
@@ -122,18 +136,24 @@ function cmdAdd(manifest, manifestPath, args) {
   const entry = JSON.parse(raw);
   if ((manifest.entries ?? []).some((e) => e.id === entry.id)) throw new Error(`id 已存在：${entry.id}`);
   const preview = { ...manifest, entries: [...manifest.entries, entry] };
-  const { failures, checks } = validateManifest(preview, validateOpts(args));
-  const bad = checks.filter((c) => c.status === 'fail');
-  for (const c of bad) process.stdout.write(`[FAIL] #${c.id} ${c.title}\n        → ${c.message}\n`);
-  if (failures > 0 && !args.write) {
-    process.stdout.write(`\n（dry-run）新增会让守卫红 ${failures} 条；--write 也会被回滚。\n`);
+  const opts = validateOpts(args);
+  // ★ 报的是"**这次新增**引出来的失败"（与写入口同一把尺子）；这台机器本来就有的红灯另说 —— 否则
+  //   缺件机器上会把无关红灯显示成"你这条不合法"（`REQ-01M52F9K25YNPJEXQ74QE4CT9Z`）。
+  const before = validateManifest(manifest, opts);
+  const added = addedFailures(before, validateManifest(preview, opts));
+  for (const k of added) process.stdout.write(`[FAIL] ${k}\n`);
+  if (added.length && !args.write) {
+    process.stdout.write(`\n（dry-run）新增会让守卫**新红** ${added.length} 处；--write 也会被回滚。\n`);
     return 0;
+  }
+  if (before.failures > 0) {
+    process.stdout.write(`（这台机器上本就有 ${before.failures} 条失败（与本条目无关）：写入口只挡"新增失败"）\n`);
   }
   if (!args.write) {
     process.stdout.write('（dry-run）新增合法。加 --write 落盘。\n');
     return 0;
   }
-  const res = saveManifest(preview, manifestPath, validateOpts(args));
+  const res = saveManifest(preview, manifestPath, opts);
   if (!res.ok) {
     process.stderr.write(`--add 失败：${res.reason}\n`);
     return 1;
@@ -166,7 +186,7 @@ function cmdSet(manifest, manifestPath, args) {
     return 1;
   }
   if (res.dropped?.length) {
-    process.stdout.write(`（已自动剔除 ${res.dropped.length} 处入库件 origin 上的 sha256：#4 规则）\n  ${res.dropped.join('\n  ')}\n`);
+    process.stdout.write(`（已自动剔除 ${res.dropped.length} 处 origin 上的 sha256：#4 规则 —— 入库件交给 git/LFS；machine-local 不可跨机器校验）\n  ${res.dropped.join('\n  ')}\n`);
   }
   process.stdout.write(`已更新 ${id} 并回读复验通过。\n`);
   return 0;

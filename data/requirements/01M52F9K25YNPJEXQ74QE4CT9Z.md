@@ -2,55 +2,40 @@
 
 - id: REQ-01M52F9K25YNPJEXQ74QE4CT9Z
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M4FEFA9RRP5TKVWH351NV1RD
 - order: 10
-- repro: tools/lib/manifest.mjs#if (pre.failures > 0) return { ok: false
+- repro: tools/test/corpus-manifest.test.mjs#★ 写入口：这台机器本来就有的红灯**不挡**写入
 - severity: S2
 - tags: [corpus, manifest, tooling]
 
-## 现场（本机 macOS）
+## 现场（原始报告，macOS）
 
-给 `corpus/assets.json` 加一条**完全合法**的 entry（`dest` 与 `origin` 都在盘上、无 sha256、kind/role 合法）：
-```
-pnpm tools corpus add '{"id":"disasm/c-vocabulary", …}' --write
-```
-⇒ **回滚**、退出码 1：
+给 `corpus/assets.json` 加一条**完全合法**的 entry（`dest`/`origin` 都在盘上、无 sha256、kind/role 合法）⇒ **回滚**、退出码 1：
+
 ```
 --add 失败：写后复验未通过（已回滚）：
-  - #3 存在性：… 3 处缺失
-  - #4 校验和纪律：… 1 处违规
+  - #3 存在性：… 3 处缺失      # binary/age-original、binary/age-sectfix、reference/design-discussion
+  - #4 校验和纪律：… 1 处违规  # binary/agerc-modified-install：清单 6241de66… / 实际 5f318955… → install/AGERC.DLL
 ```
-`--write --no-hash` 只去掉 #4，**#3 仍挡**；两次都**没有**改动清单（回滚是对的，缺的是"能不能写"）。
 
-## 挡住它的两条，与本条目**无关**
+`--no-hash` 只去掉 #4，**#3 仍挡**；两次都没改动清单（回滚是对的，缺的是"能不能写"）。
+★ 挡它的两条与本条目**无关**：#4 那条已由 `REQ-01M4GE4HSJGZ4XF9BSTZFHKXKG`（dropped）裁决为**跨机器 root 解析差异**，真问题在母单。
 
-* **#3** 缺的是 `binary/age-original`（`gameInstall:AGE.EXE__dumped.EXE`）与
-  `binary/age-sectfix`（`oldRepo:raw-parts/AGE.EXE__dumped.sectfix.EXE`）—— 两者是 **Windows 侧**的文件；
-  本机实测整个旧仓（含 `raw-parts/`、`.staging/`）**找不到**它们，`--no-hash` 也救不了。
-* **#4** 是 `binary/agerc-modified-install` 的 pin（`6241de…`）与**只读**旧仓 `install/AGERC.DLL`（`5f3189…`）不符 ——
-  已由 `REQ-01M4GE4HSJGZ4XF9BSTZFHKXKG`（dropped）裁决为**跨机器 root 解析差异**，真问题在父单。
+## 复核（2026-10，本机 win32，真代码复现）
 
-⇒ 结论：**写入口的预验是"零失败"而不是"不新增失败"**（`tools/lib/manifest.mjs` 的 `if (pre.failures > 0) return { ok: false …`），
-于是在任何"缺件"的机器上，**任何**条目都加不了、也改不了（翻牌 `deferred → lfs` 同样写不了）。
+* 本机 `corpus validate` = 8 通过 / 0 失败 / 1 警告（只有 staging 暂缺）；探针 `.tmp/req-verify/probe.mjs` 造"类 mac"的树（`oldRepo` 无 `install/` `raw-parts/`、`install/AGERC.DLL` = 带壳原版）⇒ #3/#4 复现出与报告**逐字相同**的那两行。
+* ★ **只改条目字段清不掉红**（同一棵树上逐条实测）：①「去掉 sha256」⇒ 文件在盘上时 #4 变成"必须写 sha256"（**红从 mac 挪到 win**）；②「改成 `deferred`」⇒ #3 仍点名它（`#3` 的唯一豁免是 `root === 'staging'`，与 `storage` 无关）⇒ 修法只能落在**检查层**。
+* 三条 origin 都是**机器本地产物**：`AGE.EXE__dumped.EXE` 是本机 dump 产物（与 `install/AGE_free.EXE` 逐字节相同）；`raw-parts/`、`install/` 被旧仓 `.gitignore:3`/`:1` 忽略且 `git log --all` 为空（**从未跟踪**）。第三处 `DESIGN.md` 是旧仓 HEAD `e90722fe`（2026-09-30）才加的 ⇒ **克隆过期**（另一类）。
 
-## 判据（修法方向，二选一）
+## 落地（2026-10）
 
-1. 预验改成 **"不新增失败"**：对比写前/写后的失败集合，与本条目无关的既有红灯不再挡写；
-2. 或给"本机不可见的 origin"一个**显式处置**（entry 级，如 `originUnavailable: 'platform'`），使 #3 只对"本机应可见"的来源报红。
+1. **闸门改成"不新增失败"**：`tools/lib/manifest.mjs` 的 `saveManifest` 比写前/写后的失败**明细集合**（新增 `addedFailures`）—— ❌ 不比检查计数（#3 的 message 是「N 处缺失」这种计数 ⇒ 只比计数会在"+1 处又 −1 处"时**假绿**）。CLI 的 `--add` dry-run 也改成只报"这次新增引出来的失败"。
+2. **`origin[].disposition = "machine-local"`**（闭集合 `DISPOSITIONS`）：#3 缺件只 warn **且逐条报数**、#4 不要求也不比对 pin；**入库件不许标它**、**它与 `sha256` 不许共存**；`--scan` 跳过它。
+3. **三条 entry 各自落地**：`binary/age-original` · `binary/age-sectfix` 标 machine-local、去掉 pin（字节判据 = `docs/02-engine/README.md` 的 MD5）；`binary/agerc-modified-install` 的 origin 改指 `oldRepo:patch/AGERC.DLL`（**跟踪且走 LFS**、同字节 `6241de66…`）⇒ 保留一个跨机器可校验的 pin（`tools/test/agerc-artifact.test.mjs` 的基准仍是它）。
+4. **被本单挡住的那条条目已补**：`disasm/c-vocabulary`（`oldRepo:engine/defs.h` → `corpus/disasm/defs.h`）。
 
-★ 两条都**不是放宽守卫**：新写入的条目自身仍不许引入失败（判据 1 就是拿这个当准）。
+## 凭据与边界
 
-## 边界
-
-* win32 侧据 dropped 单的实测是**全绿**的 ⇒ 本单影响面 = **macOS（兼容性机器）与任何缺件的机器**；
-  win32 的行为本机无法验证，只有 mac 侧是直接观察。
-* 绕道：换一台绿的机器跑 `corpus add`（这也是本单先落在父单名下的原因 —— 与"origin 与机器绑定"同一根）。
-
-## 待落地的命令（修好后、或换一台绿的机器）
-
-`corpus/disasm/defs.h` 已就位（LF 已按仓规统一），条目只差这一步：
-```bash
-pnpm tools corpus add '{"id":"disasm/c-vocabulary","kind":"tooling","role":"reference","storage":"git","origin":[{"root":"oldRepo","path":"engine/defs.h"}],"dest":"corpus/disasm/defs.h","readOnly":true,"consume":"只读：Hex-Rays 固定词表（宽度别名 + 折叠内在函数）。`pnpm tools disasm-fn shape` 用它定宽度闭集合。","note":"IDA/Hex-Rays 8.3 随包 defs.h。"}' --write
-```
-（本机 dry-run 已证明该 entry **自身合法**：唯一挡住它的是上面那两条与本条目无关的红灯。）
+* 守卫 = `tools/test/corpus-manifest.test.mjs#★ 写入口：这台机器本来就有的红灯**不挡**写入`（同文件另有"新引入的失败照样挡"与"明细集合粒度"两条）；`tools/mutate-check.mjs` 有两条对应变异（差集恒空 / machine-local 档失效），实测都会让该守卫红。
+* 边界：mac 侧仍**无直接观察**（本机是 win32）；旧克隆上 `DESIGN.md` 那条红**仍会红**（真实且可处置：`git pull`），但它**不再掐死写入**。

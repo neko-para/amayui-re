@@ -20,7 +20,7 @@
 |---|---|---|
 | 带壳发布版 | `gameInstall:AGERC.DLL`（旧仓 `raw/` 是指向同一目录的符号链接） | 打包发布件 |
 | **脱壳调试版** | `oldRepo:raw-parts/DATA1/AGERC.DLL` | 不带壳、有调试入口 ⇒ **当前 AGERC 语料的真前身** |
-| 改过文案的版本 | `oldRepo:install/AGERC.DLL` | ⚠ 旧仓那两对 AGERC 语料是针对**它**反汇编的 ⇒ 已作废（见 §4） |
+| 改过文案的版本 | 条目 `binary/agerc-modified-install` → `oldRepo:patch/AGERC.DLL`（登记路径 = **跟踪且走 LFS** 的补丁件；旧仓 `install/AGERC.DLL` 是**本机构建产物**、目录被旧仓 `.gitignore:1` 忽略 ⇒ 不进清单的 origin） | ⚠ 旧仓那两对 AGERC 语料是针对**它**反汇编的 ⇒ 已作废（见 §4） |
 
 ### 1.1 节表修补做了什么（24 字节）
 
@@ -88,9 +88,13 @@ IDA 输出**不具可复现性** ⇒ 整体作为只读资源保存。
 
 * ❌ 不复制任何语料（语料以 zip 入库，见 `corpus/README.md`）；❌ 不写任何字段 / 函数 / opcode 结论；
 * ❌ **不迁移两个 exe**（`binary/age-original` / `binary/age-sectfix`）：用户口径 —— M1b 与 M1 都不入仓，
-  两条登记**保持只登记**（`external-only` + 逐件 sha256；`raw-parts/*.idb`（IDA 库，63 MB）**永不入库**）。
-* ❌ **AGERC 三份二进制不迁移**（同上口径）：带壳 / 脱壳调试 / 改文案三份都只登记，逐件 sha256 记在清单里。
-  ★ **一处事实勘误**：`oldRepo:install/AGERC.DLL` 是 **848 896 B**（sha256 `6241de66…`），
+  两条登记**保持只登记**（`external-only`；它们的 origin 都是**本机现场产物** ⇒ 记 `disposition: machine-local`、不写 pin，
+  字节判据用上面的 MD5；`raw-parts/*.idb`（IDA 库，63 MB）**永不入库**）。
+* ❌ **AGERC 三份二进制不迁移**（同上口径）：带壳 / 脱壳调试 / 改文案三份都只登记。
+  ★ 其中**只有"改过文案的那一份"能记 sha256**：登记的 origin 指 `oldRepo:patch/AGERC.DLL`（跟踪且走 LFS）——
+  旧仓 `install/AGERC.DLL` 与本机 `gameInstall` 里那些 `*__dumped*` 都是**本机现场产物**（目录被上游 `.gitignore` 忽略 /
+  本机工具跑出来的），换个机器路径上就是另一份内容，记 pin 只会制造机器相关的红。
+  ★ **一处事实勘误**：改文案那一份是 **848 896 B**（sha256 `6241de66…`），
   旧仓 `docs-new/01-translation/ui-images.md` §4 写的 335 872 B 是**带壳发布版**的大小（`5f318955…`），那份文档此处错了。
 
 ## 6. 已迁入新仓的资源（落点，不记进度）

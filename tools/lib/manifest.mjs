@@ -39,6 +39,25 @@ export const CARRYING = new Set(['lfs', 'git']);
 export const NOT_CARRYING = new Set(['external-only', 'deferred']);
 
 /**
+ * `origin[].disposition` 的**闭集合**：这条 origin 是**本机现场产物**，不是可再取的来源。
+ *
+ * ★ 为什么需要这一档（实测）：旧仓 `install/` 与 `raw-parts/` 被**上游 `.gitignore`** 忽略
+ *   （`/install` `/raw-parts`，`git log --all` 为空 ⇒ 从未跟踪），游戏目录里的 `*__dumped*` 则是本机跑工具产出的
+ *   ⇒ 它们在**另一台机器上本来就不该存在**，内容也**本机有关**（实测：`install/AGERC.DLL` 在 win 侧是本机构建产物
+ *   `6241de66…`、在 mac 侧那份带壳原版是 `5f318955…`）。
+ *   把这种 origin 判红 = 让"缺件的机器"永远红，并**掐死它的写入口**（现象见 `REQ-01M52F9K25YNPJEXQ74QE4CT9Z`）。
+ * ⇒ 这一档的判据：**#3 缺件只 warn（仍逐条报数）**、**#4 既不要求 pin 也不比对**（机器相关的数字没有可校验性）。
+ *
+ * ★ 它**不是**"放宽守卫"：
+ *   ① 入库件（`lfs`/`git`）**不许**标 machine-local（"这份入库件从哪来"必须可再取）；
+ *   ② 未声明这一档的 origin：缺件仍硬红、哈希不符仍硬红、缺 pin 仍硬红；
+ *   ③ 它只是把仓里已有的另一条口径**对齐过来**：`tools/lib/ledger.mjs` 对只读参考仓的锚就是
+ *      「取不到 ⇒ warning（**不可校验 ≠ 失效**）」。
+ */
+export const DISPOSITIONS = ['machine-local'];
+export const isMachineLocal = (o) => o?.disposition === 'machine-local';
+
+/**
  * **自足条目**：`kind=fixture` 的入库件 —— 固化资源（如实录下来的存档 / 截图），
  * **没有加工链、也没有可再取的上游**：入库的那一份**就是**原件。
  * ⇒ `origin` 允许缺席（写空数组或省略都一样，见 `originRequired`）。
@@ -66,7 +85,7 @@ const ENTRY_KEY_ORDER = [
   'blocks',
   'note',
 ];
-const ORIGIN_KEY_ORDER = ['root', 'path', 'sha256'];
+const ORIGIN_KEY_ORDER = ['root', 'path', 'sha256', 'disposition'];
 const DERIVED_KEY_ORDER = ['ref', 'tool', 'note'];
 const ROOT_KEY_ORDER = ['oldRepo', 'gameInstall', 'staging'];
 const ID_RE = /^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9._-]*$/;
@@ -89,8 +108,8 @@ export const OPERATIONS = [
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '跑 9 条不变量（红/绿 + 逐条详情）—— 全仓门禁' },
   { name: 'list', argv: ['--list'], mutates: false, summary: '条目一览（id/kind/role/storage/dest/origin 数）' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 枚举 / 不变量 / 操作' },
-  { name: 'scan', argv: ['--scan'], mutates: true, summary: '补不入库件的 origin[].sha256（缺省 dry-run，加 --write 落盘）' },
-  { name: 'add', argv: ['--add'], mutates: true, summary: '加条目：`<entry-json>` [--write]' },
+  { name: 'scan', argv: ['--scan'], mutates: true, summary: '补不入库件的 origin[].sha256（machine-local 跳过：本机产物不写 pin；缺省 dry-run，加 --write 落盘）' },
+  { name: 'add', argv: ['--add'], mutates: true, summary: '加条目：`<entry-json>` [--write]（闸门 = 不新增失败）' },
   { name: 'set', argv: ['--set'], mutates: true, summary: "改条目（如 deferred → lfs 翻牌）：`<id> '<patch-json>'` [--write]" },
   { name: 'set-root', argv: ['--set-root'], mutates: true, summary: "加/改来源根：`<name> <path>` [--local] [--write]（`--local` ⇒ 写本机私有覆盖 `assets.local.json`，不入库）" },
   { name: 'normalize', argv: ['--normalize'], mutates: true, summary: '拉回规范形态（剔多余顶层键、重排、重写 _doc）[--write]' },
@@ -102,8 +121,8 @@ export const OPERATIONS = [
 export const CHECK_TITLES = new Map([
   [1, 'schema：必填齐全 / 枚举合法 / id 全局唯一'],
   [2, '自洽：external-only/deferred ⇔ dest=null；lfs/git ⇔ dest 非空'],
-  [3, '存在性：dest 与 origin 都能在盘上找到（staging 只 warning；目录型 dest 必须非空）'],
-  [4, '校验和纪律：入库件不写 sha256；不入库的文件件必须写且与盘上一致；目录型 dest 的副本必须与来源逐字节相同'],
+  [3, '存在性：dest 与 origin 都能在盘上找到（staging / machine-local 只 warning；目录型 dest 必须非空）'],
+  [4, '校验和纪律：入库件不写 sha256；不入库的文件件必须写且与盘上一致（machine-local 例外）；目录型 dest 的副本必须与来源逐字节相同'],
   [5, '忽略一致性：external-only 且 dest 在仓内 ⇒ 必须被 .gitignore 命中'],
   [6, 'LFS 一致性：storage=lfs ⇒ dest 下**每个已跟踪文件**（含目录型 dest 里的载荷，不靠 origin 枚举）filter = lfs；未跟踪的不算'],
   [7, '语料保真：入库的 disasm-corpus 必须有 recipe 且断言通过（豁免参照件/清单）'],
@@ -117,7 +136,7 @@ const ENTRY_FIELD_DOC = [
   ['kind', '✅', `\`${KINDS.join('` \\| `')}\``, '类别'],
   ['role', '✅', `\`${ROLES.join('` \\| `')}\``, '人类语义角色'],
   ['storage', '✅', `\`${STORAGES.join('` \\| `')}\``, '存储去向（也是进度：deferred → lfs）'],
-  ['origin', '条件', '数组 {root,path,sha256?}', '来源；root ∈ roots 的键或 abs。★ **自足条目**（入库的 `kind=fixture`）允许缺席：它的"来源"就是入库的那一份本身，登记它等于把 dest 抄第二遍；其余条目必须非空'],
+  ['origin', '条件', '数组 {root,path,sha256?,disposition?}', '来源；root ∈ roots 的键或 abs。★ **自足条目**（入库的 `kind=fixture`）允许缺席：它的"来源"就是入库的那一份本身，登记它等于把 dest 抄第二遍；其余条目必须非空。★ `disposition` 是**闭集合**（见 `originDisposition`）'],
   ['derivedFrom', '条件', '[{ref,tool?,note?}]', '真前身（**从**某个件、**用工具**产出的那份）；入库的 disasm-corpus 必填且要指到 kind=binary'],
   ['dest', '✅', 'string \\| null', '入库路径；external-only/deferred ⇒ 必须 null'],
   ['readOnly', '✅', 'boolean', '只读件禁止就地修改'],
@@ -297,6 +316,18 @@ export function validateManifest(manifest, opts = {}) {
           else if (!(o.root in roots)) details.push(`${oat}: root "${o.root}" 不在 roots 里`);
           if (typeof o?.path !== 'string' || o.path === '') details.push(`${oat}: path 必须是非空字符串`);
           if ('sha256' in (o ?? {}) && !SHA256_RE.test(o.sha256)) details.push(`${oat}: sha256 形态非法`);
+          // ★ `disposition`（本机现场产物）：闭集合 + 两条不许共存的组合（见 DISPOSITIONS 的注释）
+          if ('disposition' in (o ?? {})) {
+            if (!DISPOSITIONS.includes(o.disposition)) {
+              details.push(`${oat}: disposition 非法 ${JSON.stringify(o.disposition)}（闭集合：${DISPOSITIONS.join(' / ')}）`);
+            }
+            if (isMachineLocal(o) && 'sha256' in o) {
+              details.push(`${oat}: disposition=machine-local ⇒ 不许写 sha256（本机产物不可跨机器校验；要留字节就写进 docs / 入库件）`);
+            }
+            if (isMachineLocal(o) && CARRYING.has(e?.storage)) {
+              details.push(`${oat}: storage=${e.storage} 是入库件 ⇒ origin 不许标 machine-local（"这份入库件从哪来"必须可再取）`);
+            }
+          }
         }
       }
       if ('derivedFrom' in (e ?? {})) {
@@ -356,10 +387,15 @@ export function validateManifest(manifest, opts = {}) {
         const abs = resolveOrigin(repoRoot, roots, o);
         if (abs === null) continue; // (1) 已报
         if (statKind(abs) === 'missing') {
-          // ★ staging 例外：它是用完即弃的中转，不是长期位置 ⇒ 只报 warning
+          // ★ 两档"允许的暂缺"：staging 是用完即弃的中转；machine-local 是**本机现场产物**
+          //   （上游 .gitignore 忽略的目录 / 本机工具跑出来的件）⇒ 换个机器它本来就该不在。
+          //   两者都**只 warn 且逐条报数**，不许静默丢。
           if (o.root === 'staging') {
             warns += 1;
             details.push(`warn: ${e.id}: origin 暂缺（root=staging，允许） → ${o.path}`);
+          } else if (isMachineLocal(o)) {
+            warns += 1;
+            details.push(`warn: ${e.id}: origin 是本机现场产物（disposition=machine-local），本机缺件不算红 → ${o.root}:${o.path}`);
           } else {
             details.push(`${e.id}: origin 在盘上不存在 → ${o.root}:${o.path}`);
           }
@@ -369,7 +405,7 @@ export function validateManifest(manifest, opts = {}) {
     const hard = details.filter((d) => !d.startsWith('warn:'));
     add(3,
       hard.length ? 'fail' : warns ? 'warn' : 'pass',
-      hard.length ? `${hard.length} 处缺失` : warns ? `${warns} 处 staging 暂缺（允许）` : '全部存在', details);
+      hard.length ? `${hard.length} 处缺失` : warns ? `${warns} 处允许的暂缺（staging / machine-local，逐条列出）` : '全部存在', details);
   }
 
   // (4) 校验和纪律 ───────────────────────────────────────────
@@ -377,6 +413,9 @@ export function validateManifest(manifest, opts = {}) {
     const details = [];
     for (const e of entries) {
       for (const o of e.origin ?? []) {
+        // ★ machine-local：本机现场产物 ⇒ 既不要求 pin、也不比对（见 DISPOSITIONS 的注释）。
+        //   规则 #1 已经保证：入库件不许标 machine-local；带 sha256 的 machine-local 也是非法的。
+        if (isMachineLocal(o)) continue;
         const abs = resolveOrigin(repoRoot, roots, o);
         const kind = abs === null ? 'missing' : statKind(abs);
         const has = typeof o.sha256 === 'string';
@@ -630,6 +669,14 @@ export function describe() {
       conditionalRequired: ['origin（除**自足条目**外必填）', 'derivedFrom / recipe（入库的 disasm-corpus 必填）'],
       fields: ENTRY_FIELD_DOC.map(([name, req, type, desc]) => ({ name, req, type, desc })),
       notWritten: ['bytes', '入库件 sha256', 'LFS oid', 'status', 'generatedAt', '任何可从磁盘/git 推导的计数'],
+      originDisposition: {
+        enum: DISPOSITIONS,
+        meaning:
+          '`origin[].disposition="machine-local"` = 这条 origin 是**本机现场产物**（上游 `.gitignore` 忽略的目录 / 本机跑工具产出的件）' +
+          '⇒ #3 缺件只 warn（**仍逐条报数**）、#4 既不要求 pin 也不比对。★ 两条约束：**入库件不许标它**（"这份入库件从哪来"必须可再取）、' +
+          '**它与 `sha256` 不许共存**（本机产物不可跨机器校验；要留字节就写进 docs 或入库件）。' +
+          '未声明这一档的 origin 依旧：缺件硬红、哈希不符硬红、缺 pin 硬红。',
+      },
       selfContained:
         '入库的 `kind=fixture`（固化资源：没有加工链）**允许 origin 缺席** —— 它的"来源"就是入库的那一份本身；' +
         '因此"副本 == 来源"的逐字节断言只对**有 origin 的**目录型 dest 生效（fixture 的完整性交给 git/LFS 校验和）。',
@@ -637,7 +684,9 @@ export function describe() {
     invariants: [...CHECK_TITLES].map(([id, title]) => ({ id, title })),
     operations: OPERATIONS,
     writePath:
-      '只有本工具（唯一写入口）；缺省 dry-run，--write 才落盘；写前内存预验 + 写后回读复验，不绿回滚。**不要手改 JSON**。',
+      '只有本工具（唯一写入口）；缺省 dry-run，--write 才落盘；写前内存预验 + 写后回读复验，不绿回滚。' +
+      '★ 闸门是「**不新增失败**」（比写前/写后的失败**明细集合**，不是比检查计数）：这台机器**本来就有的**红灯（参考仓/安装树不在场、本机现场产物缺失…）' +
+      '不再掐死与它无关的写入，而这次写入**自己引出来的**失败照样挡。**不要手改 JSON**。',
   };
 }
 
@@ -664,6 +713,10 @@ export function describeText(d = describe()) {
   L.push(`**刻意不写**：${d.entry.notWritten.join('、')}`);
   L.push('');
   L.push(`**自足条目**：${d.entry.selfContained}`);
+  if (d.entry.originDisposition) {
+    L.push('');
+    L.push(`**origin.disposition**（闭集合：\`${d.entry.originDisposition.enum.join('` \\| `')}\`）：${d.entry.originDisposition.meaning}`);
+  }
   L.push('');
   L.push('## 不变量（`--validate` 的断言；标题即真源）');
   for (const c of d.invariants) L.push(`${c.id}. ${c.title}`);
@@ -684,7 +737,8 @@ function writeAtomically(target, text) {
 }
 
 /**
- * 规范化：**入库件（lfs/git）的 origin 不允许带 sha256**（规则 #4）。
+ * 规范化：**入库件（lfs/git）的 origin 不允许带 sha256**（规则 #4）；
+ * **machine-local 的 origin 同样不允许**（本机产物不可跨机器校验，写 pin 只会制造机器相关的红）。
  * 翻牌（deferred → lfs）时最容易踩：`--scan` 在它还是 deferred 时已经补过 sha256。
  * ⇒ 写入前自动剔除并报告，而不是让用户去手改（手改必然漂）。
  * @returns {string[]} 被剔除的项（人类可读）
@@ -692,10 +746,13 @@ function writeAtomically(target, text) {
 export function normalizeManifest(manifest) {
   const dropped = [];
   for (const e of manifest.entries ?? []) {
-    if (!CARRYING.has(e.storage)) continue;
     for (const o of e.origin ?? []) {
-      if ('sha256' in o) {
-        dropped.push(`${e.id}  ${o.root}:${o.path}`);
+      if (!('sha256' in o)) continue;
+      if (CARRYING.has(e.storage)) {
+        dropped.push(`${e.id}  ${o.root}:${o.path}（入库件）`);
+        delete o.sha256;
+      } else if (isMachineLocal(o)) {
+        dropped.push(`${e.id}  ${o.root}:${o.path}（machine-local）`);
         delete o.sha256;
       }
     }
@@ -704,24 +761,60 @@ export function normalizeManifest(manifest) {
 }
 
 /**
- * 落盘 + 回读 + 复验；**任何**异常或红灯都回滚。
- * 两道闸：① 先在**内存里**复验（不绿就一个字都不写）；② 写后回读再验（二道闸，异常也回滚）。
+ * 一个失败项的**身份**：检查号 + 明细文本（无明细时退回 `message`）。
+ * ★ 为什么要有它：写入口的闸门是"**不新增**失败"（见 `saveManifest`），
+ *   而**不能**比检查计数 —— 实测 #3 的 `message` 是「N 处缺失」这种计数，
+ *   只比计数会在"新增 1 处、另有 1 处变好"时**假绿**。
+ */
+export function failureKeys(report) {
+  const keys = [];
+  for (const c of report?.checks ?? []) {
+    if (c.status !== 'fail') continue;
+    if (c.details?.length) for (const d of c.details) keys.push(`#${c.id} ${d}`);
+    else keys.push(`#${c.id} ${c.message}`);
+  }
+  return keys;
+}
+
+/** 写入口的闸门：`after` 里**新出现**的失败（before 里没有的）。空数组 = 这次写入不新增任何失败。 */
+export function addedFailures(beforeReport, afterReport) {
+  const before = new Set(failureKeys(beforeReport));
+  return failureKeys(afterReport).filter((k) => !before.has(k));
+}
+
+/**
+ * 落盘 + 回读 + 复验；不绿回滚。
+ *
+ * ★ **闸门是"不新增失败"，不是"零失败"**（`REQ-01M52F9K25YNPJEXQ74QE4CT9Z` 的判据 1）：
+ *   清单里的红灯**分两类** —— ①"这次写入引出来的"（必须挡）；②"这台机器本来就有的"
+ *   （参考仓/安装树不在场、本机现场产物缺失…）。旧实现用"零失败"当闸门 ⇒ 在**任何缺件的机器**上，
+ *   **任何**条目都写不进去（连"翻牌 `deferred → lfs`"也写不了），而挡它的红灯与要写的条目**毫无关系**。
+ *   两条闸都改成比**失败明细集合**（`addedFailures`）：新写入的条目自身仍不许引入失败
+ *   （★ 所以这不是放宽守卫：把 `before` 换成空报告就退回旧语义）。
+ *
+ * 三道：① 先在**内存里**预验（新增失败 ⇒ 一个字都不写）；② 写后回读再验（新增失败 ⇒ 回滚）；
+ * ③ 任何异常 ⇒ 回滚。
  * @returns {{ok:boolean, restored?:boolean, failures?:number, dropped?:string[], reason?:string}}
  */
 export function saveManifest(manifest, manifestPath, opts = {}) {
   const backup = fs.readFileSync(manifestPath, 'utf8');
   const dropped = normalizeManifest(manifest);
 
-  const failText = (checks) =>
-    `写后复验未通过（已回滚）：\n  - ${checks
-      .filter((c) => c.status === 'fail')
-      .map((c) => `#${c.id} ${c.title}：${c.message}`)
-      .join('\n  - ')}`;
+  const failText = (verb, keys) => `${verb}：**新增** ${keys.length} 处失败\n  - ${keys.join('\n  - ')}`;
 
-  // ① 内存预验：不绿就根本不落盘
+  // ⓪ 基线：**盘上那份**现在的失败集合（写入口的闸门只对它取差集）
+  let before;
   try {
-    const pre = validateManifest(manifest, opts);
-    if (pre.failures > 0) return { ok: false, restored: false, failures: pre.failures, reason: failText(pre.checks) };
+    before = validateManifest(loadManifest(manifestPath), opts);
+  } catch (err) {
+    // 拿不到基线就没法判断"新增"⇒ 保守拒写（fail closed），并说清原因
+    return { ok: false, restored: false, reason: `读当前清单作基线失败（未写盘）：${err.message}` };
+  }
+
+  // ① 内存预验：不新增失败才落盘
+  try {
+    const added = addedFailures(before, validateManifest(manifest, opts));
+    if (added.length) return { ok: false, restored: false, failures: added.length, reason: failText('预验未通过（未写盘）', added) };
   } catch (err) {
     return { ok: false, restored: false, reason: `预验抛错（未写盘）：${err.message}` };
   }
@@ -730,10 +823,10 @@ export function saveManifest(manifest, manifestPath, opts = {}) {
   try {
     writeAtomically(manifestPath, canonicalStringify(manifest));
     const reread = loadManifest(manifestPath);
-    const post = validateManifest(reread, opts);
-    if (post.failures > 0) {
+    const added = addedFailures(before, validateManifest(reread, opts));
+    if (added.length) {
       fs.writeFileSync(manifestPath, backup, 'utf8');
-      return { ok: false, restored: true, failures: post.failures, reason: failText(post.checks) };
+      return { ok: false, restored: true, failures: added.length, reason: failText('写后复验未通过（已回滚）', added) };
     }
   } catch (err) {
     fs.writeFileSync(manifestPath, backup, 'utf8');
