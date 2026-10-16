@@ -52,6 +52,10 @@ export const OPERATIONS = [
   { name: 'search', argv: ['--search'], mutates: false, summary: '机械检索：`--match <子串>` 找出现的**全部位置**（带行号，可 `--limit`）' },
   { name: 'cases', argv: ['--cases'], mutates: false, summary: '★ **枚举函数里的 switch / 跳转表**：`--ea <EA>` ⇒ case 数 + 每个 case 的目标（类型分派 / opcode 分派全靠它）' },
   { name: 'index', argv: ['--index'], mutates: true, summary: '建/刷新派生索引到 `.cache/`（缺省 dry-run）[--write]' },
+  // ★ 补登记：`--describe` 在 `tools/disasm.mjs`（140 行）里**早就实现了**（含 `--json`），却漏在本表里
+  //   ⇒ 派发器路由不到 `pnpm tools disasm-at describe`，而 `amayui-re-engine` / `amayui-emulator` 两个技能的
+  //   真源表都指向它（表现是"命令不存在"，不是报错）。守卫：`tools/test/skills.test.mjs` 会盯着这类指空。
+  { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：动作 / 参数 / 索引口径 / 诚实项（`--json` 机器可读；schema 的真源）' },
 ];
 
 /**

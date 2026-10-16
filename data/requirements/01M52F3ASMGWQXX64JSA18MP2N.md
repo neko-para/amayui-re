@@ -42,6 +42,15 @@
 | S1c | 逐函数填 shape 表（一次性；从最大的 this 簇与帧记录起步） | 表里每条都能过 S1a |
 | S1d | 名字 / 语义 → 台账（每条挂 witness EA） | `pnpm tools ledger` 的准入门 |
 
+## 工作流程（口径已实写 → `docs/02-engine/shape-census.md`）
+记录模型 / 两实现独立性的**可执行判据** / 三档话 / 原点约定 / 计数单位 / 未解析报数口径都在那份文档里。
+★ 下面两条是**在一批"已经分析过的函数"上跑过一遍流程之后**才补上的判据（S1a 的守卫要把它们钉住）：
+* **循环变量（loop-swept）必须单列一类**：索引是循环计数器时，同一个 EA 的三次迭代落在**三个不同的槽**上
+  ⇒ 报成单个槽就是**假 verified**（复核"通过"而结论是错的）。判据 = 复核器把"索引依赖链里存在被回边区间
+  改写的寄存器"判成 `unverifiable`，**不许**取"第一轮的值"当答案。
+* **复核器按字段分"证明 / 推断"**：只有**证明**出的不一致才叫 `drifted`；带局部推断（最近定义 / 本块无写）
+  的不一致只能 `unverifiable` —— 否则"复核器的近似"会红成"声明的错"，红得没意义。
+
 ## 与既有工作的关系（不重复造）
 * `packages/age-format/src/engine/layout.mts` 已有**手写槽普查**（`FRAME_SLOTS_OBSERVED` = 记录内 `0x00..0x74` 逐 dword 30 格、
   `FRAME_ENGINE_SCALARS`、`LOCAL_POOL_SLOTS`），守卫 `tools/test/engine-frame.test.mjs`。

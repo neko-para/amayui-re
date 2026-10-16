@@ -75,6 +75,9 @@ corpus/disasm/
 IDA 输出**不具可复现性** ⇒ 整体作为只读资源保存。
 **锚点锚二进制里的 EA**；语料只提供 `EA → 当前这份导出里的行号` 映射。
 换一次反汇编**只重建映射，不改任何锚**（这条正是旧仓 `raw N` 行号锚全废的教训）。
+★ **对象 shape（"哪个 EA 以什么形状碰了哪个偏移"）**的做法与判据见 `shape-census.md`
+（承重件是**独立复核器**：按 witness EA 回语料重解，给 verified / drifted / unverifiable）；
+落点是 `pnpm tools shape`（`access` / `verify` / `regions` / `claims` / `describe`，**只读、不写任何文件**）。
 
 ## 4. 旧仓语料的地位（本轮只登记，不复制）
 

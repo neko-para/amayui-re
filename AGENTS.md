@@ -149,6 +149,7 @@ pnpm tools requirements validate # 需求台账守卫（红 = 退出码 1）
 pnpm tools requirements serve   # 项目工作台（需求 + AGE 脚本），项目在 apps/workbench/
 pnpm --filter @amayui/workbench verify # 工作台门禁：typecheck + build + smoke
 pnpm tools disasm verify        # 反汇编语料保真断言（逐行反解回字节必须与源逐字节相同）
+pnpm tools shape claims --sample # ★ 对象 shape：claims 校验（访问记录 / 段落导出 / 独立复核见 `pnpm tools shape describe`）
 pnpm tools old-repo inventory   # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm test                       # ★ 测试（默认只跑 @env pure；分级见下）
 pnpm test:list                  # 看分级集合与每个文件的声明（先看这个）

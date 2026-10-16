@@ -691,6 +691,21 @@ const MUTATIONS = [
     guard: 'tools/test/ledger.anchor-lst.assets.test.mjs',
     what: '★ 站点口径：去掉"落在指令中间的锚必须在 AUDIT_ALLOWLIST 里"这条判据 ⇒ 落指令中间的锚不再报红（锚点整类绿而错）',
   },
+  // ── shape 域（`tools/shape.mjs` + `tools/lib/shape-*.mjs`）：段落划分判据与两道守卫 ──
+  {
+    file: 'tools/lib/shape-regions.mjs',
+    from: "const CALLER_SAVED = new Set(['eax', 'ecx', 'edx']);",
+    to: "const CALLER_SAVED = new Set(['ecx', 'edx']);",
+    guard: 'tools/test/shape-regions.test.mjs',
+    what: '★ caller-saved 集合删掉 `eax` ⇒ "段落活着的窗口里被 `call` 碰过"这条判据对 `eax` 失效（值随时可能被抹掉，却仍被当成连续推进）⇒ 纯测试当场红',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: "export const VOCAB = ['opcode', 'argc', 'operand', 'lengthWord', 'op1', 'op2', '操作数', '长度字'];",
+    to: "export const VOCAB = ['opcode', 'operand', 'lengthWord', 'op1', 'op2', '操作数', '长度字'];",
+    guard: 'tools/test/shape-regions.test.mjs',
+    what: '词汇守卫词表去掉 `argc` ⇒ "业务概念混进汇编层"整类不再报红（引擎层的东西会静默长进 claims 文件）⇒ 纯测试当场红',
+  },
 ];
 
 /**
