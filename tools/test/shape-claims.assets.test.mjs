@@ -120,3 +120,44 @@ test('★ 第二批函数（6 个）：残差如实报出 · 带修饰符的调�
   assert.ok(b03.total > 100, `sub_412290 以 ecx 为根有大量 obj0 访问，实际 ${b03.total}（0 就是假绿）`);
   assert.ok(rep.cons.pointeeBad > 0, '这一批含"二级对象宿主未声明"的访问 ⇒ 必须进残差');
 });
+
+/**
+ * ★ **入库的模型**（`data/shape/`）必须与语料自洽 —— 否则它们会**静默腐烂**：
+ * 语料换一次导出、判定器加一条义务、类型表被改一处，入库的 claims 都可能不再成立，
+ * 而没有一条守卫会响（"改了模型就跑一下"是靠人记的，靠不住）。
+ * ★ 这里**不**断言解释/残差的**具体数目**（那是随语料与族边界而变的数据）——
+ * 只断言：① 逐族全绿（findings 空）；② 三条守恒闭合；③ 每族都真的被检查到了（`perCarrier.length === carriers.length`）。
+ */
+test('★ 入库的 shape 模型（data/shape/）逐族全绿 + 守恒闭合', { skip }, () => {
+  const dir = path.join(REPO_ROOT, 'data', 'shape');
+  const families = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'types.json').sort();
+  assert.ok(families.length > 0, 'data/shape/ 里至少应有一个族文件（types.json 是中心真源，不算族）');
+  const declared = new Map();      // 视图（推测）在全库口径下被观察到几次
+  const observedViaView = new Map();
+  for (const f of families) {
+    const model = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    const rep = checkClaims(model, { lines: ctx.lines, observed: ctx.observed, baseDir: dir });
+    assert.deepEqual(rep.findings, [], `${f} 与语料不再自洽：${JSON.stringify(rep.findings, null, 2)}`);
+    const { cons } = rep;
+    assert.equal(cons.obj0Acc, cons.obj0Explained + cons.obj0Residue, `${f} 守恒① 不闭合`);
+    assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad, `${f} 守恒② 不闭合`);
+    assert.equal(cons.sites, cons.obj0Acc + cons.partial + cons.pointee + cons.local + cons.symbol + cons.unresolvedBase, `${f} 守恒③ 不闭合`);
+    assert.equal(cons.obj0Explained, cons.obj0ExplainedObserved + cons.obj0ExplainedViaView, `${f} 守恒④ 不闭合`);
+    // ★ 载体分两种：对象根载体（进 perCarrier）与**局部类型载体**（进 localCarriers）——
+    //   两者都必须逐个被检查到（漏一个就是静默丢）。
+    const rootCarriers = model.carriers.filter((x) => x.kind !== 'local');
+    const localCarriers = model.carriers.filter((x) => x.kind === 'local');
+    assert.equal(rep.perCarrier.length, rootCarriers.length, `${f} 有对象根载体没被检查到（静默漏）`);
+    assert.equal((rep.localCarriers ?? []).length, localCarriers.length, `${f} 有局部载体没被检查到（静默漏）`);
+    assert.ok(cons.sites > 0, `${f} 一个站点都没检查到（载体全废 ⇒ 假绿）`);
+    for (const v of rep.declaredViews) {
+      const k = `${v.tid}|${v.off}|${v.delta}`;
+      declared.set(k, true);
+      if (cons.obj0ExplainedViaView > 0 && !rep.unfalsifiable.some((u) => u.delta === v.delta && u.off === v.off)) observedViaView.set(k, true);
+    }
+  }
+  // ★ **声明的视图必须至少被一个族文件观察到** —— 否则库里就躺着一条谁也没约束的"推测"
+  //   （单族文件里"零观察"是正常的：类型是共享的、观察它的可能是别的族；全库口径下就说不通了）
+  const neverObserved = [...declared.keys()].filter((k) => !observedViaView.has(k));
+  assert.deepEqual(neverObserved, [], `这些视图（推测）在全库口径下零观察 ⇒ 要么补观察、要么删掉：${neverObserved.join(' ')}`);
+});

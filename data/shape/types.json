@@ -1,0 +1,388 @@
+{
+  "schema": "amayui.claims/1",
+  "obj0": {
+    "isGlobal": true
+  },
+  "types": {
+    "T0": {
+      "size": null,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0x408",
+          "width": 4
+        },
+        {
+          "off": "0x1ee8",
+          "width": 4
+        },
+        {
+          "off": "0x3064",
+          "width": 4
+        },
+        {
+          "off": "0x3068",
+          "width": 4
+        },
+        {
+          "off": "0x306c",
+          "width": 4
+        },
+        {
+          "off": "0x3070",
+          "width": 4
+        },
+        {
+          "off": "0x3088",
+          "width": 4
+        },
+        {
+          "off": "0x308c",
+          "width": 4
+        },
+        {
+          "off": "0x3090",
+          "width": 4
+        },
+        {
+          "off": "0x3094",
+          "width": 4
+        },
+        {
+          "off": "0x30ac",
+          "width": 4
+        },
+        {
+          "off": "0x30b0",
+          "width": 4
+        },
+        {
+          "off": "0x30b4",
+          "width": 4
+        },
+        {
+          "off": "0x30b8",
+          "width": 4
+        },
+        {
+          "off": "0x3e78",
+          "width": 4
+        },
+        {
+          "off": "0x3e7c",
+          "width": 4
+        },
+        {
+          "off": "0x3e80",
+          "width": 4
+        },
+        {
+          "off": "0x3e84",
+          "width": 4
+        },
+        {
+          "off": "0x3ee8",
+          "width": 4
+        },
+        {
+          "off": "0x3eec",
+          "width": 4
+        },
+        {
+          "off": "0x3ef0",
+          "width": 4
+        },
+        {
+          "off": "0x3ef4",
+          "width": 4
+        },
+        {
+          "off": "0x511c",
+          "width": 4
+        },
+        {
+          "off": "0x55d8",
+          "width": 4
+        },
+        {
+          "off": "0xca80",
+          "width": 4
+        },
+        {
+          "off": "0xca88",
+          "width": 4
+        },
+        {
+          "off": "0xcac0",
+          "width": 4
+        },
+        {
+          "off": "0x13f68",
+          "width": 4
+        },
+        {
+          "off": "0x13f70",
+          "width": 4
+        },
+        {
+          "off": "0x4ed10",
+          "width": 4
+        },
+        {
+          "off": "0x5d7e8",
+          "width": 4
+        },
+        {
+          "off": "0x5d7ec",
+          "width": 4
+        },
+        {
+          "off": "0x5d7f0",
+          "width": 4
+        },
+        {
+          "off": "0x5d7f4",
+          "width": 4
+        },
+        {
+          "off": "0x5d7f8",
+          "width": 4
+        },
+        {
+          "off": "0x5d7fc",
+          "width": 4
+        },
+        {
+          "off": "0x5d808",
+          "width": 4
+        },
+        {
+          "off": "0x5d880",
+          "width": 4
+        },
+        {
+          "off": "0x5d884",
+          "width": 4
+        },
+        {
+          "off": "0x5d888",
+          "width": 4
+        },
+        {
+          "off": "0x5d88c",
+          "width": 4
+        },
+        {
+          "off": "0x5d894",
+          "type": "T1",
+          "count": 40,
+          "views": [
+            {
+              "elementDelta": -1,
+              "label": "同一记录数组、索引差 −1（同一个字节族的另一种原点写法）"
+            }
+          ]
+        },
+        {
+          "off": "0x5eb54",
+          "width": 4
+        },
+        {
+          "off": "0x5eb5c",
+          "width": 4
+        },
+        {
+          "off": "0x5eb64",
+          "width": 4
+        },
+        {
+          "off": "0x5ec8c",
+          "width": 4
+        },
+        {
+          "off": "0x5ec90",
+          "width": 4
+        },
+        {
+          "off": "0x5ec98",
+          "width": 4
+        },
+        {
+          "off": "0x5ee04",
+          "type": "T2",
+          "count": null,
+          "sweep": {
+            "stride": 4,
+            "index": "*(Engine+0x5d880)"
+          }
+        },
+        {
+          "off": "0x68eb0",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_68eb0"
+        },
+        {
+          "off": "0x68eb4",
+          "width": 4
+        },
+        {
+          "off": "0x69278",
+          "width": 4
+        },
+        {
+          "off": "0x69330",
+          "width": 4
+        },
+        {
+          "off": "0x77950",
+          "width": 4
+        },
+        {
+          "off": "0x77954",
+          "width": 4
+        },
+        {
+          "off": "0x796e4",
+          "width": 4
+        },
+        {
+          "off": "0x796e8",
+          "width": 4
+        },
+        {
+          "off": "0x796f8",
+          "width": 4
+        },
+        {
+          "off": "0xa30cc",
+          "width": 4
+        },
+        {
+          "off": "0xa30d0",
+          "width": 4
+        },
+        {
+          "off": "0xa537c",
+          "width": 4
+        },
+        {
+          "off": "0xa609c",
+          "width": 4
+        },
+        {
+          "off": "0xaa514",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_aa514"
+        },
+        {
+          "off": "0xaab44",
+          "width": 4
+        },
+        {
+          "off": "0xaab48",
+          "width": 4
+        },
+        {
+          "off": "0xaab6c",
+          "width": 4
+        }
+      ]
+    },
+    "T1": {
+      "size": 120,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x38",
+          "width": 4
+        },
+        {
+          "off": "0x3c",
+          "width": 4
+        },
+        {
+          "off": "0x5c",
+          "width": 4
+        },
+        {
+          "off": "0x60",
+          "width": 4
+        }
+      ]
+    },
+    "T2": {
+      "size": 4,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        }
+      ]
+    },
+    "T_aa514": {
+      "size": null,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x1c",
+          "width": 4
+        }
+      ]
+    },
+    "T_68eb0": {
+      "size": null,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        }
+      ]
+    },
+    "T_5c73c_0": {
+      "size": null,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x20",
+          "width": 4
+        },
+        {
+          "off": "0x30",
+          "width": 4
+        }
+      ]
+    }
+  }
+}

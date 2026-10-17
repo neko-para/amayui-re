@@ -21,9 +21,16 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { analyzeLines, functionSpans, loadListing, objRootRegs } from './lib/shape-access.mjs';
+import { censusBodies, renderBodies } from './lib/shape-bodies.mjs';
+import { censusHandlers, renderCensus } from './lib/shape-census.mjs';
 import { checkClaims, DRILL_MAX_LEVEL, objectLevel, renderReport, sampleModel, VOCAB, REDUNDANT } from './lib/shape-claims.mjs';
 import { deriveRegions, insnsOf } from './lib/shape-regions.mjs';
 import { checkRow, describeEa, loadRaw } from './lib/shape-verify.mjs';
+import { coverageOf, renderCoverage } from './lib/shape-coverage.mjs';
+import { fileURLToPath } from 'node:url';
+
+/** 本仓根（本域要拿语料分派表 ⇒ 与 `lib/opcodes.mjs` 的口径一致；不 import `cli.mjs`，免得转出循环依赖） */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 export const DOMAIN = {
   id: 'shape',
@@ -41,7 +48,10 @@ export const OPERATIONS = [
   { name: 'verify', argv: ['--verify'], mutates: false, summary: '★ **独立复核器**：按 witness EA 回语料重解（verified / drifted / unverifiable；证明 vs 推断按字段）' },
   { name: 'regions', argv: ['--regions'], mutates: false, summary: '★ **功能①**：机械导出某函数某寄存器的拆分范围（段落 / 类别 / 段首形态 / 是否被 call 打断）' },
   { name: 'depth', argv: ['--depth'], mutates: false, summary: '**对象层级分布**（level 1 / 2 / 3+）：`[<sym>]`；用来现跑"下钻上限冻结在层级 2"这个判决（层级 ≥3 单列，不静默丢）' },
+  { name: 'census', argv: ['--census'], mutates: false, summary: '★ **全表普查**：每个**有 handler 的 opcode**（判据 = 语料分派表）的站点分类 / `obj0` 偏移聚类 / 索引簇 / 未解析三类报数（`--match <sym>` 收窄 · `--json` 全量）' },
+  { name: 'bodies', argv: ['--bodies'], mutates: false, summary: '★ **handler 体骨架普查**：记录槽写法（哪个立即数写进哪个位移）+ 调用序列（每个 callee 的实参立即数）⇒ 按骨架分组（`--match` · `--json`）—— 这是 A1–A6 的**可算版**' },
   { name: 'claims', argv: ['--claims'], mutates: false, summary: '★ **功能②**：校验 claims 文件（守卫 / G1..G6 / J3 / 双守恒）；`--sample` 用内置样本' },
+  { name: 'coverage', argv: ['--coverage'], mutates: false, summary: '★ **闭合度**：指令级记账 —— 未归类行 / 间接调用 / 间接跳转 / 抛异常 / x87·SSE 内存操作数 / 基址未解析 ⇒ 判 `L0 形状闭合`（**回答"这个函数分析完了吗"**；`--all [--limit N]`）' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：claims 分节 / 义务 / 两道守卫 / 诚实项（schema 的真源）' },
 ];
 
@@ -52,34 +62,80 @@ export function describeText() {
 
 数据    corpus/disasm/files/*.{lst,c}（只读语料）· claims 文件（人/模型给；本域只读）
 读写    r（本域没有任何写操作）
-操作    access · verify · regions · depth · claims · describe
+操作    access · verify · regions · depth · census · claims · describe
 
 分节（claims 文件 = 模型的**判断**，不是转录）
   types      每个类型**按 id 共享一份**：成员 = { off(必填) · width | type+count · kind · name(非键) }；洞不写
+             ★ 成员有**三种合法形态**（缺一半 ⇒ G8 红，否则跨度算不出、判定器会把它**静默当 1 字节槽**）：
+               ① 内联值：\`width\`；
+               ② 数组：\`type\` + \`count\`（元素类型必须给 \`size\`）；
+               ③ **条数未观察的数组**：\`type\` + \`count: null\` + \`sweep:{stride,index}\` ——
+                  形态（步长 + 索引身份）说得出来、边界说不出来；⛔ 缺 \`sweep\` 会让窗口**无界**（吞掉别的偏移）
+             ★ \`kind\` 只有 \`"ptr"\` 有意义 —— 意思是"这个成员的值是**另一个对象的基址**"（会被解引用）。
+               ⛔ 不是"标量"的标记：不写 kind 就只是内联值/数组。标量**再被当基址用** ⇒ G5' 红
+             ★ \`views\`（可选，数组成员上）：\`[{ elementDelta, label? }]\` = **模型的推测**——
+               "这一段字节是**同一个数组**、索引差 k"（先例：\`0x5d894 + 0x78·(索引−1)\` ≡ \`0x5d81c + 0x78·索引\`）。
+               依据 shape-census §4：**原点表是声明的约定，不是语料事实** ⇒ 判定器只做**算术自洽** +
+               **可证伪性**（零观察 / 多余的视图单列），语义**不由本层背书**
+             ★ \`type\` 在成员上有**两个意思**，按 \`kind\` 分岔：\`kind:"ptr"\` 时是**被指向的类型**（不该配 \`count\`）；
+               否则是**数组元素类型**（必须配 \`count\`——写 \`null\` 就得配 \`sweep\`）
+             ★ 类型**集中在自己的文件里**（本仓落点 data/shape/types.json）—— 族文件只放**载体**，
+               一律 typesFrom 引用它；⛔ 不许把类型写进某个族文件（那会逼别的族文件去引用它）
   carriers   机器槽 → 类型：kind ∈ arg{fn,reg|off} / local{fn,off} / global{sym}
              ★ 字段**不是**载体 —— 它是容器的成员（写在 types 里）
+             ★ **局部类型载体**（G10）：\`{kind:"local", fn, reg, span:[from,to], type:"T*"}\` = "这个寄存器在这一段里
+               装的是 T 的对象"。⛔ 不许自己写 span：它必须逐字等于 \`regions\` 的**活窗口** \`[from..liveTo]\`；
+               活窗口里被 call 打断的 caller-saved 寄存器不许用（值可能已被抹掉）；段落类别必须是 load/ptr/other。
+               ★ 用途：指针来源**不可表达**时（参数 / 调用返回值 / 数据段），路径没有任何东西可写 —— 而且它
+               **跨得过下钻上限**（实测：用它判掉了层级 3 的站点）。两者对同一处并存 ⇒ G10 报 note（同一事实两套声明）
   roles      { fn, reg, span, role, bound, carryFrom, uses }；span **必须逐字等于** \`regions\` 导出的一个段落
   domains / escapes / identities   可选（本版只做结构检查）
-  typesFrom  引用另一个 claims 文件共享类型；**同名类型按成员增量合并**（同 off 本地优先）
+  typesFrom  引用**类型真源**；**同名类型按成员增量合并**（同 off 本地优先）
 
 义务（红了都要有理由；⛔ 没有一档是"静默通过"）
   G1 类型自洽（成员不重叠 / 不越 size）
   G2 覆盖（两级：容器的成员 + **数组成员的元素内成员**）· G3 步长（数组形态 == size(元素类型)）
-  G4 数组边界（末尾地址必须在语料里被引用）· G5/G5' **二级对象下钻**
-     （宿主是 ptr + 声明了目标类型 ⇒ 用目标类型的成员表再跑一遍；type=null ⇒ **不透明桶**单列；没声明 ptr ⇒ 红）
+  G4 数组边界（末尾地址必须在语料里被引用；**条数未观察**则明说"判不了"）
+  G5/G5' **二级对象（只管一跳）**（宿主必须是已声明的 \`kind:"ptr"\` + 目标类型 ⇒ 用目标类型的成员表跑一遍；
+     \`type:null\` ⇒ **不透明桶**单列；没声明 ptr ⇒ 红）
+     ⛔ **不遍历多跳**：一跳 = **推导**（一次成员查找）；跨两级以上一律进"跨两级以上（未判）"档
+     （带 EA + 路径），要判就用 **局部类型载体**（\`kind:"local"\`）断言 —— 深度不是校验该管的东西
   G6 未观察成员（用**形状层观察集**判定：它能解折叠形态；字面量扫描只是下界）
+  G7 **可证伪性**（声明了 \`kind:"ptr"\` 却在**本模型的载体集里零解引用** ⇒ 单列"空话声明"：
+     ⛔ **不算通过**，但**不判红** —— 类型是共享的，别的族文件可能才用它）
+  G8 **成员声明自洽**（内联值 / 数组 / 条数未观察 三选一且给全；\`kind\` 闭集合 = {"ptr"}）
+  G9 **视图自洽与可证伪性**（算术：\`成员 off + 步长·elementDelta == 被解释的位移\`；
+     零观察 / 多余的视图 ⇒ 单列"空话声明"，⛔ 不算通过、不判红）
   J3 角色（span == 导出段落，且段内全 ±const/init）
   守恒①（obj0 访问）· 守恒②（二级对象 = 解释 + 不透明 + 拒绝）
+  守恒③（**站点按基址分桶**：obj0 相对 + **位移不可用**（lea 取址 / 索引未解析）+ 二级对象 +
+     **二级对象内嵌派生** + **数据段符号** + **未解析基址**）
+     ★ 没有这一条时，这几类会**从访问总数里静默消失**（数字变小，不报错）
+     ★ 未解析**按载体**报数并给样例 EA（按基址寄存器分组）；⛔ 那不是"已通过"，是"形状层表达不了"
+  守恒④（**解释分档**：解释 = **观测档** + **视图推测档**）—— 分不开就审不出"哪条结论是猜的"
 
 两道守卫
   词汇  出现 ${VOCAB.join(' / ')} ⇒ 红（那是 B 层：data/ledger/，走 AGENTS §6 准入门）
   冗余  字段名出现 ${REDUNDANT.join(' / ')} ⇒ 红（这些都能从 EA + 语料机械读出）
+  ★ 两道守卫跑在 **typesFrom 解析之后**的模型上 ⇒ 被引用的类型文件同样受守（否则守卫只守族文件、不守类型表）
 
 诚实项
   · 二级对象**只下钻到层级 2**；层级 ≥3 单列"超出解析深度"（带 EA，不静默丢）
   · 守恒②里"目标类型解释"的那一档只覆盖**声明了 type 的指针成员**；不透明档是不可检查，不是通过
   · 观察集必须由调用方算（本模块不落缓存文件）⇒ 不传就退成字面量下界并**明说**
+  · **视图（\`views\`）是模型的推测**：算术自洽由工具校验，**"它是同一个数组"这个判断不由本层背书** ——
+    它只保证"要么被站点约束、要么被单列成空话声明"（可证伪性）
+  · **多窗口同分**时选不出宿主 ⇒ 单列"ambiguous"（⛔ 不许靠"谁先声明"决定）
   · J4/J5/J6 三节本版只做结构检查；J3 只做"span == 导出段落"
+  · **闭合度**（--coverage）：站点全绿**不等于**函数分析完了 —— L0 判据 = 没有未归类的内存行 ·
+    没有目标未知的间接调用/跳转 · 没有基址未解析站点；L1 只点名直接调用与抛出，L2 归台账
+  · **值传播的两个已知边界**（助手侧；改它要连带改守卫 ★⑪/★⑫）：
+    ① \`noreturn\` 调用（闭集合只有 \`__CxxThrowException@8\`，语料里 288 处）之后**没有** fall-through；
+       否则抛出路径上的写会污染汇合点后面的块（实测：\`sub_41C6A0\` 的 9 处访问整类丢掉）
+    ② **栈槽只做值传播、不做站点**（\`mov [ebp+x],reg\` → 之后 \`mov reg,[ebp+x]\` 拿回同一个值）；
+       ⛔ 栈槽本身永远不进任何桶（"栈槽不是本单的对象形状"这条不变）
+    ⇒ 但 **SEH catch 块没有静态入边**（唯一引用在 \`.data\` 的 SEH 表里）⇒ 块内寄存器状态**解不出**，
+    那里的访问只能靠 \`kind:"local"\` + \`type:"T0*"\` 表达（⛔ 不许编"匿名类型"把 obj0 变成假的）
 `;
 }
 
@@ -125,7 +181,7 @@ function runRegions(sym, reg) {
     if (!d || d.writes.length === 0) continue;
     process.stdout.write(`\n## ${r}（写点 ${d.writes.length} 处 ⇒ ${d.regions.length} 个段落）\n`);
     for (const [i, g] of d.regions.entries()) {
-      process.stdout.write(`  S${i + 1} [${hex(g.from)}..${hex(g.to)}] 类别=${String(g.cat).padEnd(5)}`
+      process.stdout.write(`  S${i + 1} [${hex(g.from)}..${hex(g.to)}] 活着到 ${hex(g.liveTo)} 类别=${String(g.cat).padEnd(5)}`
         + ` ${g.allConstOrInit ? '全 ±const/init' : '含非常量形态'}${g.openedByInit ? ' 段首是 init' : ' **段首不是 init**'}`
         + `${g.brokenByCall ? ' ⚠被调用打断' : ''}\n`);
       for (const w of g.writes) process.stdout.write(`        ${hex(w.ea)} 行${w.line}  ${String(w.kind).padEnd(7)} ${w.text}\n`);
@@ -165,6 +221,66 @@ function runDepth(sym) {
   return 0;
 }
 
+/**
+ * **全表普查**（只读）：handler 集合来自**语料的分派表**（桥），站点分类 / 偏移聚类来自**助手**。
+ * ★ 为什么要它：单族 claims 只能回答"这一族碰了什么" —— **族边界本身要有依据**，
+ *   而"哪些偏移被碰、被谁碰、多少处没解析"只有全表口径才答得出来（`docs/02-engine/shape-census.md` §7）。
+ */
+function runCensus(args) {
+  const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? (args[i + 1] ?? null) : null; };
+  const lines = loadListing();
+  const r = censusHandlers({ lines, repoRoot: REPO_ROOT, match: opt('--match') });
+  process.stdout.write(args.includes('--json') ? `${JSON.stringify(r, null, 2)}\n` : renderCensus(r));
+  return r.problems.length ? 1 : 0;
+}
+
+/**
+ * **handler 体骨架普查**（只读）：记录槽写法 + 调用序列 ⇒ 按骨架分组。
+ * ★ 这一段原来在 `shape-census.md` §10 里是一张 **A1–A6 义务表**（声明 + 校验）。
+ *   审计结论：六条**全是能从 EA + 语料机械读出的观察** ⇒ 按硬口径不该做成声明（产物会变第二份真源），
+ *   改成在这里**算出来**；真正需要判断的只剩"族边界"（= 这里的分组）。
+ */
+function runBodies(args) {
+  const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? (args[i + 1] ?? null) : null; };
+  const r = censusBodies({ lines: loadListing(), repoRoot: REPO_ROOT, match: opt('--match') });
+  process.stdout.write(args.includes('--json') ? `${JSON.stringify(r, null, 2)}\n` : renderBodies(r));
+  return r.problems.length ? 1 : 0;
+}
+
+/** ★ 闭合度：一个/多个函数的指令级记账（回答"这函数分析完了吗"） */
+function runCoverage(args) {
+  const lines = loadListing();
+  const spanOf = new Map(functionSpans(lines).map((s) => [s.sym, s]));
+  const roots = objRootRegs();
+  const all = args.includes('--all');
+  const li = args.indexOf('--limit');
+  const limit = li >= 0 ? Number(args[li + 1] ?? 40) : 40;
+  const targets = all
+    ? functionSpans(lines).map((s) => s.sym)
+    : args.filter((a) => /^sub_[0-9A-F]{6}$/i.test(a));
+  if (!targets.length) { process.stderr.write('用法：shape coverage <sub_XXXXXX>… | --all [--limit N]\n'); return 2; }
+  let closed = 0; let unclosed = 0;
+  const tally = new Map();
+  for (const sym of targets.slice(0, all ? limit : targets.length)) {
+    const sp = spanOf.get(sym);
+    if (!sp) { process.stderr.write(`找不到函数 ${sym}\n`); continue; }
+    const { sites } = analyzeLines(lines, sp.from, sp.to, roots.get(sym) ?? null, {});
+    const cov = coverageOf(lines, sym, sp, roots.get(sym) ?? null, sites);
+    if (cov.closed) closed += 1;
+    else {
+      unclosed += 1;
+      for (const r of cov.reasons) {
+        const k = r.replace(/^\d+ /, '').replace(/：.*$/, '');
+        tally.set(k, (tally.get(k) ?? 0) + 1);
+      }
+    }
+    process.stdout.write(renderCoverage(cov) + '\n\n');
+  }
+  process.stdout.write(`## 合计：L0 闭合 ${closed} · 未闭合 ${unclosed}\n`);
+  for (const [k, v] of [...tally].sort((a, b) => b[1] - a[1])) process.stdout.write(`  ${v} 个函数：${k}\n`);
+  return 0;
+}
+
 function runClaims(target) {
   const lines = loadListing();
   let model;
@@ -181,6 +297,25 @@ function runClaims(target) {
   }
   const rep = checkClaims(model, { lines, baseDir, observed: observedSet(lines) });
   process.stdout.write(renderReport(rep, { title }));
+  // ★ **闭合度**：站点全绿 ≠ 函数分析完了 —— 载体函数逐个给 L0 判据，未闭合的点名原因
+  {
+    const spanOf = new Map(functionSpans(lines).map((s) => [s.sym, s]));
+    const roots = objRootRegs();
+    const fns = [...new Set((model.carriers ?? []).map((c) => c.fn))];
+    const bad = [];
+    let closedN = 0;
+    for (const fn of fns) {
+      const sp = spanOf.get(fn);
+      if (!sp) continue;
+      const { sites: ss } = analyzeLines(lines, sp.from, sp.to, roots.get(fn) ?? null, {});
+      const cov = coverageOf(lines, fn, sp, roots.get(fn) ?? null, ss);
+      if (cov.closed) { closedN += 1; continue; }
+      bad.push(`  ❌ ${fn}：${cov.reasons.join('；')}`);
+    }
+    process.stdout.write(`\n## 闭合度（**站点全绿 ≠ 函数分析完了**）：${fns.length} 个载体函数，L0 闭合 ${closedN} · 未闭合 ${fns.length - closedN}\n`);
+    for (const l of bad.slice(0, 12)) process.stdout.write(l + '\n');
+    if (bad.length > 12) process.stdout.write(`  …（另有 ${bad.length - 12} 个；跑「pnpm tools shape coverage --all」看全量）\n`);
+  }
   return rep.findings.length ? 1 : 0;
 }
 
@@ -198,10 +333,13 @@ export async function main(argv = process.argv.slice(2)) {
     }
     case '--regions': return runRegions(pos[0], pos[1]);
     case '--depth': return runDepth(pos[0]);
+    case '--census': return runCensus(argv);
+    case '--coverage': return runCoverage(argv);
+    case '--bodies': return runBodies(argv);
     case '--claims': return runClaims(pos[0]);
     case '--describe': process.stdout.write(describeText()); return 0;
     default:
-      process.stderr.write(`未知参数：${argv.join(' ')}\n可用：--access <sym> · --verify <EA> · --regions <sym> [reg] · --claims <file>|--sample · --describe\n`);
+      process.stderr.write(`未知参数：${argv.join(' ')}\n可用：--access <sym> · --verify <EA> · --regions <sym> [reg] · --depth [sym] · --census [--match <sym>] [--json] · --claims <file>|--sample · --describe\n`);
       return 2;
   }
 }

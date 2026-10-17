@@ -706,6 +706,107 @@ const MUTATIONS = [
     guard: 'tools/test/shape-regions.test.mjs',
     what: '词汇守卫词表去掉 `argc` ⇒ "业务概念混进汇编层"整类不再报红（引擎层的东西会静默长进 claims 文件）⇒ 纯测试当场红',
   },
+  // ── shape 域（第二组）：**类型真源 `typesFrom` 的守卫覆盖** 与 **站点分桶守恒** ──
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '  for (const w of vocabViolations(M)) red(',
+    to: '  for (const w of vocabViolations(model0)) red(',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 两道守卫退回"只查原始 model0" ⇒ `typesFrom` 引用的类型文件里塞 `argc` / `mn` 时**两道守卫一起静默失效**（类型集中在 types.json 之后，那等于守卫只守族文件、不守类型表）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: "    const symbolSites = sites.filter((s) => s.baseKind === 'absolute');",
+    to: '    const symbolSites = [];',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 守恒③ 的"数据段符号"桶被清空 ⇒ `ds:` 符号站点从访问总数里**静默消失**（表现是数字变小，不是报错）⇒ 纯测试当场红',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '      if (seen.has(m.offN)) continue;',
+    to: '      continue;',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ G7 不再过滤"已观察到解引用"的 `kind:"ptr"` 成员 ⇒ 每条指针声明都被报成"空话声明"（噪声淹掉真问题：该报的那条再也挑不出来）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: "  if (s.problems?.includes('index')) return 'index-unresolved';",
+    to: '  if (false) return \'index-unresolved\';',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 索引未解析的访问重新被当成"偏移观察" ⇒ 位移少了索引那一项却被当成偏移 0/N（轻则假残差，重则**假解释**：正好命中某个成员）',
+  },
+  {
+    file: 'tools/lib/shape-census.mjs',
+    from: '        const o = offsets.get(key);',
+    to: '        const o = { abs: key, sites: 0, handlers: new Set(), eas: [] };',
+    guard: 'tools/test/shape-census.assets.test.mjs',
+    what: '★ 全表普查的偏移聚类不再落账 ⇒ `Σ 偏移簇站点 ≠ obj0 站点`（"哪些偏移被碰、被谁碰"整类静默消失）',
+  },
+  // ── shape 域（第三组）：**声明的视图（推测）** 与 **条数未观察的数组** ──
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '  if (s.absDisp < w.from || s.absDisp >= w.to) return false;',
+    to: '  if (false) return false;',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 窗口**范围**判据被拆掉（`count:null` 的成员本可无界）⇒ 窗口外的偏移被"吞掉"成**假解释**（实测形态：`0x5ee04` 一路吞到 `0xa609c`）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '        if (!sw || sw.stride == null || !sw.index) {',
+    to: '        if (false) {',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ `count:null`（条数未观察）不再要求 `sweep` ⇒ "形态不可判定"的成员照样被当成数组解释（声明不可判定却不报）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: 'explained.push({ ea: s.ea, abs: s.absDisp, member: host, leaf, delta: w.delta, viaView: w.delta !== 0 });',
+    to: 'explained.push({ ea: s.ea, abs: s.absDisp, member: host, leaf, delta: w.delta, viaView: false });',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 视图解释不再标成**推断** ⇒ 观测档与推测档混在一起（"哪条结论是模型猜的"看不出，守恒④ 也就名存实亡）',
+  },
+  // ── shape 域（第四组）：**对象身份的路径**（只管一跳）与**局部类型载体** ──
+  {
+    file: 'tools/lib/shape-access.mjs',
+    from: '      pointeePath: path,',
+    to: '      pointeePath: [],',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 站点上的**路径**被抹掉（`lea` 派生退回"只剩最后一跳"）⇒ 二级对象整类掉出所有桶（守恒③ 当场差数）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '      if (path.length + 1 > 2) { pointeeMulti += 1; multiHopSites.push(s); continue; }',
+    to: '      if (false) { pointeeMulti += 1; multiHopSites.push(s); continue; }',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ "跨两级以上**不判**"被拆掉 ⇒ 三跳链被拿 `path[0]`（第一跳）去硬判 = **认错层**（早先那个假解释的来源）',
+  },
+  {
+    file: 'tools/lib/shape-coverage.mjs',
+    from: '  if (REG_NAME.has(s.toLowerCase())) return false;',
+    to: '  return true;',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 闭合度不再区分"间接调用"（`call eax` 被当成直接调用）⇒ 副作用无界的函数会被判成 **L0 闭合**（"分析完成了吗"这个判据变假）',
+  },
+  {
+    file: 'tools/lib/shape-access.mjs',
+    from: "    if (mn === 'call' && NORETURN.test((operands[0] ?? '').trim())) { insns[k].succ = []; continue; }",
+    to: '    if (false) { insns[k].succ = []; continue; }',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ `noreturn` 之后的 fall-through 又被连上 ⇒ 抛出路径上的写污染汇合点，汇合后面的访问整类判成"未解析基址"（实测：sub_41C6A0 的 9 处）',
+  },
+  {
+    file: 'tools/lib/shape-access.mjs',
+    from: '        if (!dm.explicit || dm.explicit === 4) fr.set(slotKey(dm), evalOperand(fr, s));',
+    to: '        if (false) fr.set(slotKey(dm), evalOperand(fr, s));',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 栈槽的值传播被拆掉 ⇒ 对象根溢出/读回后身份断掉，catch 块里的访问全成"未解析基址"（实测：sub_429460 的 8 处）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '    if (hit.brokenByCall) {',
+    to: '    if (false) {',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 局部载体不再拒绝"活窗口里被 call 打断的 caller-saved 寄存器" ⇒ 值可能已被抹掉的断言照样被接受（**假绿**）',
+  },
 ];
 
 /**
@@ -713,25 +814,37 @@ const MUTATIONS = [
  * @returns {number} 退出码：0 = 全部按预期变红；1 = 有守卫没抓住破坏；2 = 还原失败（已中止）
  */
 export function main(argv = process.argv.slice(2)) {
+  // ★ `--match <子串>`：只跑匹配的变异（匹配 `file` / `what` / `guard`）。
+  //   ★ 为什么必须有：本工具**会临时改写工作树里的文件** ⇒ 只想验"我这一域新加的守卫会不会红"时，
+  //     不该被迫把全部变异跑一遍（窗口越长，越可能撞上别的进程在编辑）。技能文档里写的
+  //     `pnpm tools mutate check --match shape` 原先**只是个不存在的 flag**（被静默忽略 ⇒ 跑全套）。
+  const mi = argv.indexOf('--match');
+  const match = mi >= 0 ? (argv[mi + 1] ?? null) : null;
+  const selected = match ? MUTATIONS.filter((m) => `${m.file} ${m.what} ${m.guard}`.includes(match)) : MUTATIONS;
   // ★ `--help` 必须**只打用法就走**：它原先落到"跑全套变异"那条路（实测踩过一次）——
   //   而本工具**会临时改写工作树里的文件**，在有别的进程（人或 agent）正在编辑时跑，
   //   还原那一步可能把别人的改动一起写回去。
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(
-      '用法：node tools/mutate-check.mjs [--list]\n\n' +
+      '用法：node tools/mutate-check.mjs [--list] [--match <子串>]\n\n' +
         '  不带参数 = 逐条施加变异 ⇒ 跑对应守卫 ⇒ 要求退出码非 0（最后逐条还原并比对全文）。\n' +
         '  ⛔ **它会临时改写工作树里的文件** ⇒ 有别的进程正在编辑本仓时**不要**跑（还原会覆盖别人的改动）。\n' +
-        '  --list 只列清单（不动任何文件）。',
+        '  --list 只列清单（不动任何文件）。\n' +
+        '  --match <子串> 只跑 file / what / guard 里含该子串的变异（例：--match shape）。',
     );
     return 0;
   }
   if (argv.includes('--list')) {
-    for (const m of MUTATIONS) console.log(`${m.what}\n    ${m.file}  ⇒ 守卫 ${m.guard}`);
+    for (const m of selected) console.log(`${m.what}\n    ${m.file}  ⇒ 守卫 ${m.guard}`);
     return 0;
+  }
+  if (match && selected.length === 0) {
+    console.error(`没有匹配「${match}」的变异（--list 看清单）`);
+    return 1;
   }
 
   const results = [];
-  for (const m of MUTATIONS) {
+  for (const m of selected) {
     const abs = path.join(ROOT, m.file);
     const before = fs.readFileSync(abs, 'utf8');
     if (!before.includes(m.from)) {

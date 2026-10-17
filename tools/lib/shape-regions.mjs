@@ -92,6 +92,10 @@ export function deriveRegions(lines, sym, reg) {
     const next = regions[i + 1];
     const winEnd = next ? next.writes[0].k - 1 : f.out.length - 1;
     r.brokenByCall = CALLER_SAVED.has(reg) && f.out.some((x, k) => x.mn === 'call' && k >= r.writes[0].k && k <= winEnd);
+    // ★ 段落的**活着的窗口**（机械导出，供"局部类型载体"引用）：本段第一处写点 → 下一段写点前的最后一条指令。
+    //   为什么要它：`regions` 的 `[from, to]` 只框住**写点**，而这个寄存器在 `to` 之后、下一次写之前**仍然持有那个值**
+    //   （实测：`sub_421450` 的 `edi` 段 `[0x421544..0x421576]`，可 `[edi+30h]` 的用法落在 `0x421588`——在 `to` 之后）。
+    r.liveTo = f.out[winEnd]?.ea ?? r.to;
   }
   return { f, writes, regions };
 }

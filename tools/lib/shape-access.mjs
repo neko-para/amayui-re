@@ -92,6 +92,23 @@ function parseMem(raw) {
   return t;
 }
 
+/**
+ * **noreturn** 调用：返回后**没有** fall-through。
+ * ★ 闭集合只有它 —— 语料里 `__CxxThrowException@8` 出现 **288 次**，是唯一一个"调用即抛"的帮手
+ *   （`RaiseException` 那几处是导入表/文本行，不是 call）。新增一个名字 = 一条语料观察，不许凭印象扩。
+ */
+const NORETURN = /^_*CxxThrowException(@\d+)?$/i;
+
+/**
+ * 栈槽的键（**只做值传播，不做站点**）。
+ * ★ 为什么必须做：对象根会被溢出到栈槽、在 catch / 循环块里读回来
+ *   （实测 `sub_429460`：`mov esi,ecx` → `mov [ebp+var_354],esi` → `mov esi,[ebp+var_354]`
+ *   ⇒ 8 处访问本该按 obj0 判，早先全成"未解析基址"）。⛔ 栈槽本身仍然**不算**对象形状
+ *   （`siteOf` 直接跳过栈操作数），这里只让"值"能过桥。
+ * ★ 键用 `inner`（括号里那段）：它与尺寸关键字无关（`dword ptr [ebp+var_4]` 与 `[ebp+var_4]` 同键）。
+ */
+const slotKey = (mem) => `@slot:${mem.inner.toLowerCase().replace(/\\s+/g, '')}`;
+
 // ───────────────────────────────────────────────────────────── 值模型
 const UNK = { t: 'unk' };
 const isUnk = (v) => !v || v.t === 'unk';
@@ -140,17 +157,27 @@ function foldNote(v) {
  * 一个内存操作数 → 形状（obj / 绝对位移 / 步长 / 索引来源）。
  * `base` 与 `indices` 都是**进入本条指令时**的寄存器值。
  */
+/**
+ * 一个内存操作数 → 形状（obj / 绝对位移 / 步长 / 索引来源 / **路径**）。
+ * `base` 与 `indices` 都是**进入本条指令时**的寄存器值。
+ *
+ * ★ **路径（`basePath`）是"基址经过了几跳指针"的身份**：`[]` = 就是 `obj0`；`[A]` = "从 `obj0+A` 读出的指针"；
+ *   `[A,B]` = 再一跳。它是**对象层级 = 路径长度 + 1** 的唯一依据（`baseHop` 的精确版）。
+ *   ★ 踩过：早先只有 `pointeeHost`（**最后一跳**的偏移），于是
+ *   ① `lea eax,[<二级对象>+k]` 之后再解引用 ⇒ 路径丢了（报成层级 1，从所有桶里掉出去）；
+ *   ② 三跳链报成 `pointeeHost = 第二跳的偏移` ⇒ 拿它去对 `obj0` 的成员表 = **宿主认错层**（会假解释）。
+ */
 function shapeOf(fr, mem) {
-  const out = { obj: null, off: 0, terms: [], absolute: false, problems: [] };
+  const out = { obj: null, off: 0, terms: [], absolute: false, problems: [], basePath: null };
   if (!mem.base) {
     if (mem.indices.length === 0) { out.problems.push('base'); return out; }
     out.problems.push('base');
     return out;
   }
   const bv = fr.get(mem.base);
-  if (bv && bv.t === 'this') { out.obj = 'this'; out.off = 0; }
-  else if (bv && bv.t === 'addr') { out.obj = bv.obj; out.off = bv.off; out.terms.push(...bv.terms); }
-  else if (bv && bv.t === 'load') { out.obj = objName(bv.obj, bv.off); out.off = 0; }
+  if (bv && bv.t === 'this') { out.obj = 'this'; out.off = 0; out.basePath = []; }
+  else if (bv && bv.t === 'addr') { out.obj = bv.obj; out.off = bv.off; out.terms.push(...bv.terms); out.basePath = bv.path ?? []; }
+  else if (bv && bv.t === 'load') { out.obj = objName(bv.obj, bv.off); out.off = 0; out.basePath = bv.path ?? []; }
   else { out.problems.push('base'); }
   for (const { reg, scale } of mem.indices) {
     const v = fr.get(reg);
@@ -224,8 +251,8 @@ function vkey(v) {
   if (!v || v.t === 'unk') return 'unk';
   if (v.t === 'this') return 'this';
   if (v.t === 'flag') return 'flag';
-  if (v.t === 'addr') return `addr:${v.obj}:${v.off}:${(v.terms ?? []).map((t) => `${t.sym}*${t.k}*${t.scale}`).join(',')}`;
-  if (v.t === 'load') return `load:${v.obj}:${v.off}`;
+  if (v.t === 'addr') return `addr:${v.obj}:${v.off}:${(v.path ?? []).join(',')}:${(v.terms ?? []).map((t) => `${t.sym}*${t.k}*${t.scale}`).join(',')}`;
+  if (v.t === 'load') return `load:${v.obj}:${v.off}:${(v.path ?? []).join(',')}`;
   if (v.t === 'val') return `val:${v.sym ?? ''}:${v.k}:${v.b}`;
   return 'unk';
 }
@@ -330,6 +357,10 @@ function parseFunction(lines, from, to) {
       insns[k].succ = (t !== null ? [t, next] : [next]).filter((x) => x !== null);
       continue;
     }
+    // ★★ `noreturn` 之后**没有** fall-through：否则抛出路径上的寄存器值会污染汇合点后面的块。
+    //   实测（`sub_41C6A0`）：`add esi,8` 在抛异常路径上，而 `jl` 那条边的块里 `esi` 仍是 obj0
+    //   ⇒ 早先汇合后判 UNK，后面 9 处访问（+8 后落在已声明成员 0x5d888/0x5d88c/0x5eb5c）全丢。
+    if (mn === 'call' && NORETURN.test((operands[0] ?? '').trim())) { insns[k].succ = []; continue; }
     insns[k].succ = next === null ? [] : [next];
   }
   return { insns, labels, jumptable };
@@ -365,10 +396,11 @@ function siteOf(fr, mn, operands, idx, ea, line, rawLine) {
   };
   if (seg && !mem) {
     // `mov eax, ds:dword_559A68` —— 进程全局 / 数据段符号：也是内存访问，**不许静默丢**
-    Object.assign(row, { baseKind: 'absolute', obj: seg[2], absDisp: null, stride: 0, indexSym: null, fold: `&${seg[2]}` });
+    Object.assign(row, { baseKind: 'absolute', obj: seg[2], absDisp: null, stride: 0, indexSym: null, fold: `&${seg[2]}`, pointeePath: [] });
   } else {
     const sh = shapeOf(fr, mem);
     const baseV = mem.base ? fr.get(mem.base) : UNK;
+    const path = sh.basePath ?? [];
     Object.assign(row, {
       baseReg: mem.base ?? null,
       baseKind: sh.obj === 'this' ? 'this' : !sh.obj ? 'unresolved' : baseV.t === 'addr' ? 'embed' : 'memberptr',
@@ -376,11 +408,14 @@ function siteOf(fr, mn, operands, idx, ea, line, rawLine) {
       absDisp: sh.absDisp,
       stride: sh.stride,
       indexSym: sh.indexSym,
-      // ★ 二级对象用（判定器"下钻"要的两个量）：宿主在 obj0 内的偏移 + 二级对象内的偏移 + 寻址 scale
-      pointeeHost: baseV.t === 'load' && typeof baseV.obj === 'string' ? baseV.off : null,
-      pointeeOff: baseV.t === 'load' ? sh.off : null,
+      // ★ 二级对象用（判定器"下钻"要的）：**路径**（几跳、每跳哪个成员偏移）+ 最后一跳对象内的偏移 + 寻址 scale
+      pointeePath: path,                                        // [] = obj0 相对；[A] = 二级；[A,B] = 三级
+      pointeeHost: path.length === 1 ? path[0] : null,           // 旧字段（**只对一跳**有意义）——保留兼容
+      pointeeOff: path.length ? sh.off : null,
+      // ★ 相对**基址那个对象**的偏移：路径解不出时 `pointeeOff` 是 null，但"这个访问打在基址对象的哪个偏移上"总是知道的
+      baseOff: sh.off,
       memScale: mem.indices.length ? mem.indices[0].scale : 1,
-      baseHop: baseV.t === 'addr' ? 1 : baseV.t === 'load' ? (baseV.hop ?? 1) : null,
+      baseHop: path.length,                                      // 对象层级 = baseHop + 1（精确值）
       fold: mem.indices.map((x) => `[${x.reg}*${x.scale}]=${foldNote(fr.get(x.reg))}`).join(' ') || null,
     });
     row.problems.push(...sh.problems);
@@ -456,6 +491,13 @@ function step(fr, mn, o, ctx) {
     case 'mov': {
       const [d, s] = o;
       if (!d || !s) return;
+      // ★ 栈槽溢出：`mov [ebp+x], <值>` ⇒ 记下来，后面 `mov reg,[ebp+x]` 才能把身份找回来。
+      //   ⛔ 只记**整宽**写（没有 byte/word 之类尺寸关键字）——半宽写会让 4 字节槽里留下陈旧的上半段。
+      const dm = parseMem(d);
+      if (dm && dm.stack) {
+        if (!dm.explicit || dm.explicit === 4) fr.set(slotKey(dm), evalOperand(fr, s));
+        return;
+      }
       const dl = R(d);
       if (!(dl in REG_BYTES)) return;
       fr.set(dl, evalOperand(fr, s));
@@ -468,7 +510,7 @@ function step(fr, mn, o, ctx) {
       const mem = parseMem(s);
       if (!mem || mem.stack) { fr.set(dl, UNK); return; }
       const sh = shapeOf(fr, mem);
-      if (sh.obj) { fr.set(dl, { t: 'addr', obj: sh.obj, off: sh.off, terms: sh.terms }); return; }
+      if (sh.obj) { fr.set(dl, { t: 'addr', obj: sh.obj, off: sh.off, terms: sh.terms, path: sh.basePath ?? [] }); return; }
       const n = numOf(fr, mem);
       fr.set(dl, n ?? UNK);
       return;
@@ -566,19 +608,27 @@ function evalOperand(fr, raw) {
   if (m) return aff(0, Number(m[1]));
   if (/^offset\s+/i.test(s)) return UNK; // 立即数地址：不是"碰了某个偏移"
   const mem = parseMem(s);
+  if (mem && mem.stack) {
+    // ★ 栈槽**只**在"存过"的时候有值；没存过 ⇒ UNK（⛔ 不许猜成"某个对象"）
+    return fr.r.get(slotKey(mem)) ?? UNK;
+  }
   if (mem && !mem.stack) {
     const sh = shapeOf(fr, mem);
-    // 一跳：基址是 obj0（`this`）或 obj0 的 `lea` ⇒ 值 = `*(obj0+off)`，hop=1
+    const basePath = sh.basePath ?? [];
+    // 一跳：基址是 obj0（`this`）或 obj0 的 `lea` ⇒ 值 = `*(obj0+off)`，跳数 = 1
     if (sh.obj === 'this' && !sh.indexSym && !sh.problems.includes('index')) {
-      return { t: 'load', obj: 'this', off: sh.off, name: ofThis(sh.off), sym: `*(${ofThis(sh.off)})`, hop: 1 };
+      return { t: 'load', obj: 'this', off: sh.off, name: ofThis(sh.off), sym: `*(${ofThis(sh.off)})`, hop: 1, path: [sh.off] };
     }
-    // ★★ **多跳**（本轮的补充）：基址本身是"从某个对象里读出来的指针"（`sh.obj` 形如 `Engine+0x…`）
-    //   ⇒ 值 = `*(宿主+元素内偏移)`，hop = 宿主那一跳 + 1。
-    //   ★ 身份只能写成**路径字符串**（`Engine+0x5d818+0x10`）—— 这正是"深度受限于身份表达"的根源（见报告）。
+    // ★★ **多跳**：基址本身是"从某个对象里读出来的指针"（`sh.obj` 形如 `Engine+0x…`）
+    //   ⇒ 值 = `*(宿主+元素内偏移)`，路径 = 宿主的路径 + 这一跳的偏移。
+    //   ★ 身份仍只能写成**路径字符串**（`Engine+0x5d818+0x10`）给人看；判定器用的是 `path` 数字数组。
     if (typeof sh.obj === 'string' && sh.obj !== 'this' && !sh.indexSym && !sh.problems.includes('index')) {
       const host = sh.obj;
-      const hop = (fr.get(mem.base)?.hop ?? 1) + 1;
-      return { t: 'load', obj: host, off: sh.off, name: `${host}+0x${sh.off.toString(16)}`, sym: `*(${host}+0x${sh.off.toString(16)})`, hop };
+      return {
+        t: 'load', obj: host, off: sh.off, name: `${host}+0x${sh.off.toString(16)}`,
+        sym: `*(${host}+0x${sh.off.toString(16)})`, hop: basePath.length + 1,
+        path: [...basePath, sh.off],
+      };
     }
     return UNK;
   }
