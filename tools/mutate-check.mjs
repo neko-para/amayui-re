@@ -780,6 +780,13 @@ const MUTATIONS = [
     what: '★ "跨两级以上**不判**"被拆掉 ⇒ 三跳链被拿 `path[0]`（第一跳）去硬判 = **认错层**（早先那个假解释的来源）',
   },
   {
+    file: 'tools/lib/shape-calls.mjs',
+    from: "        if (ct && calleeType) verdict = ct === calleeType ? 'same' : 'mismatch';",
+    to: "        if (ct && calleeType) verdict = 'same';",
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 调用链对账不再区分"不一致"（两侧类型不同也判 same）⇒ 跨函数的类型冲突永远发现不了（★⑭ 当场红）',
+  },
+  {
     file: 'tools/lib/shape-coverage.mjs',
     from: '  if (REG_NAME.has(s.toLowerCase())) return false;',
     to: '  return true;',

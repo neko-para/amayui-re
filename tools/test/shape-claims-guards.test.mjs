@@ -498,3 +498,51 @@ test('★⑬ 闭合度：间接调用 / 间接跳转 / 抛异常 / x87 / 字符�
   assert.equal(cov2.escapes.indirectCall.length, 0);
   assert.equal(cov2.closed, true, `去掉逃逸后应当闭合：${JSON.stringify(cov2.reasons)}`);
 });
+
+test('★⑭ 调用链一致性：调用方实参类型 ↔ 被调方载体声明（same / **mismatch** / 单侧）', async () => {
+  const { auditCalls } = await import('../lib/shape-calls.mjs');
+  // 三个被调方：都声明成 T0* 的 / 声明 T0* 但调用方传的是 *(this+0xaa514) / 完全不声明
+  const L = [
+    '.text:0040D000 sub_40D000 proc near',
+    '.text:0040D000 mov     [ebp+var_4], ecx',   // 溢出 this（call 会清 ecx）
+    '.text:0040D003 call    sub_40D100',          // ① ecx = this（调用方 T0）
+    '.text:0040D008 mov     eax, [ebp+var_4]',    // 取回 this（栈槽传播）
+    '.text:0040D00B mov     ecx, eax',
+    '.text:0040D00D mov     eax, [ecx+0AA514h]',  // eax = *(this+0xaa514) ⇒ T_aa514
+    '.text:0040D013 mov     ecx, eax',
+    '.text:0040D015 call    sub_40D200',          // ② 调用方 T_aa514、被调方声明 T0* ⇒ **不一致**
+    '.text:0040D01A mov     ecx, [ebp+var_4]',    // 取回 this
+    '.text:0040D01D call    sub_40D300',          // ③ 被调方没声明 ⇒ **单侧**
+    '.text:0040D022 retn',
+    '.text:0040D022 sub_40D000 endp',
+    '.text:0040D100 sub_40D100 proc near',
+    '.text:0040D100 retn',
+    '.text:0040D100 sub_40D100 endp',
+    '.text:0040D200 sub_40D200 proc near',
+    '.text:0040D200 retn',
+    '.text:0040D200 sub_40D200 endp',
+    '.text:0040D300 sub_40D300 proc near',
+    '.text:0040D300 retn',
+    '.text:0040D300 sub_40D300 endp',
+  ];
+
+  const types = {
+    T0: { size: null, complete: false, members: [{ off: '0xaa514', width: 4, kind: 'ptr', type: 'T_aa514' }] },
+    T_aa514: { size: null, complete: false, members: [{ off: '0x4', width: 4 }] },
+  };
+  const models = [
+    { file: 'a.json', model: { carriers: [{ id: 'a1', kind: 'arg', fn: 'sub_40D000', reg: 'ecx', type: 'T0*' }] } },
+    { file: 'b.json', model: { carriers: [{ id: 'b1', kind: 'arg', fn: 'sub_40D100', reg: 'ecx', type: 'T0*' }] } },
+    { file: 'c.json', model: { carriers: [{ id: 'c1', kind: 'arg', fn: 'sub_40D200', reg: 'ecx', type: 'T0*' }] } },
+  ];
+  const roots = new Map([['sub_40D000', 'ecx']]);
+  const r = auditCalls({ lines: L, fns: ['sub_40D000'], models, types, selfTypeOf: () => 'T0', roots });
+  const at = (callee) => r.rows.filter((x) => x.callee === callee && x.reg === 'ecx');
+  assert.equal(at('sub_40D100')[0]?.verdict, 'same', `传 this、被调方声明 T0* ⇒ 一致：${JSON.stringify(at('sub_40D100'))}`);
+  assert.equal(at('sub_40D200')[0]?.verdict, 'mismatch', `传 *(this+0xaa514)（T_aa514）、被调方却声明 T0* ⇒ **必须判不一致**；实得 ${JSON.stringify(at('sub_40D200'))}`);
+  assert.equal(at('sub_40D300')[0]?.verdict, 'calleeUntyped', '被调方没声明 ⇒ **单侧**（这是"另一侧缺声明"的探测器）');
+  // 再验一次"一致"的正例：把 sub_40D200 改声明成 T_aa514* ⇒ 判定要翻
+  models[2].model.carriers[0].type = 'T_aa514*';
+  const r2 = auditCalls({ lines: L, fns: ['sub_40D000'], models, types, selfTypeOf: () => 'T0', roots });
+  assert.equal(r2.rows.filter((x) => x.callee === 'sub_40D200' && x.reg === 'ecx')[0]?.verdict, 'same', '改成 T_aa514* 后应当一致');
+});

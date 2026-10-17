@@ -436,7 +436,19 @@ function linkOf(fr, body, ea, line, rawLine) {
   else if (v.t === 'load' && v.obj === 'this') { cls = 'memberptr'; detail = `*(this+0x${v.off.toString(16)})`; }
   else if (v.t === 'val') cls = 'other-value';
   else if (fr.get('#ecxSet').t === 'flag') cls = 'defined-unclassified';
-  return { ea, line, raw: rawLine, target: cs[2], kind: cs[1], cls, tail: cs[1] === 'jmp', detail, ecx: foldNote(v) };
+  // ★ 调用点的**实参来源**（6 个通用寄存器）：给"调用方 ↔ 被调方 类型一致性"用（见 shape-calls.mjs）。
+  //   ⛔ 栈上传参（`push`）本版不覆盖：那要假设 ABI 的"参数位 ↔ push 顺序"映射，属未证约定。
+  const prov = (reg) => {
+    const x = fr.get(reg);
+    if (!x || x.t === 'unk' || x.t === 'flag') return { k: 'unknown' };
+    if (x.t === 'this') return { k: 'this' };
+    if (x.t === 'addr') return { k: 'interior', obj: x.obj, off: x.off, path: x.path ?? [] };
+    if (x.t === 'load') return { k: 'member', obj: x.obj, off: x.off, path: x.path ?? [] };
+    if (x.t === 'val') return { k: 'val', sym: x.sym ?? null };
+    return { k: 'unknown' };
+  };
+  const args = Object.fromEntries(['ecx', 'eax', 'edx', 'esi', 'edi', 'ebx'].map((r) => [r, prov(r)]));
+  return { ea, line, raw: rawLine, target: cs[2], kind: cs[1], cls, tail: cs[1] === 'jmp', detail, ecx: foldNote(v), args };
 }
 
 /**

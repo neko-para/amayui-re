@@ -27,6 +27,7 @@ import { checkClaims, DRILL_MAX_LEVEL, objectLevel, renderReport, sampleModel, V
 import { deriveRegions, insnsOf } from './lib/shape-regions.mjs';
 import { checkRow, describeEa, loadRaw } from './lib/shape-verify.mjs';
 import { coverageOf, renderCoverage } from './lib/shape-coverage.mjs';
+import { auditCalls, renderCalls } from './lib/shape-calls.mjs';
 import { fileURLToPath } from 'node:url';
 
 /** 本仓根（本域要拿语料分派表 ⇒ 与 `lib/opcodes.mjs` 的口径一致；不 import `cli.mjs`，免得转出循环依赖） */
@@ -51,6 +52,7 @@ export const OPERATIONS = [
   { name: 'census', argv: ['--census'], mutates: false, summary: '★ **全表普查**：每个**有 handler 的 opcode**（判据 = 语料分派表）的站点分类 / `obj0` 偏移聚类 / 索引簇 / 未解析三类报数（`--match <sym>` 收窄 · `--json` 全量）' },
   { name: 'bodies', argv: ['--bodies'], mutates: false, summary: '★ **handler 体骨架普查**：记录槽写法（哪个立即数写进哪个位移）+ 调用序列（每个 callee 的实参立即数）⇒ 按骨架分组（`--match` · `--json`）—— 这是 A1–A6 的**可算版**' },
   { name: 'claims', argv: ['--claims'], mutates: false, summary: '★ **功能②**：校验 claims 文件（守卫 / G1..G6 / J3 / 双守恒）；`--sample` 用内置样本' },
+  { name: 'calls', argv: ['--calls'], mutates: false, summary: '★ 调用点类型对账（跨函数）：调用方实参来源 → 被调方的载体声明 ⇒ 一致 / 不一致 / 单侧缺声明（不拿同偏移顶替类型；栈上传参本版不覆盖）' },
   { name: 'coverage', argv: ['--coverage'], mutates: false, summary: '★ **闭合度**：指令级记账 —— 未归类行 / 间接调用 / 间接跳转 / 抛异常 / x87·SSE 内存操作数 / 基址未解析 ⇒ 判 `L0 形状闭合`（**回答"这个函数分析完了吗"**；`--all [--limit N]`）' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：claims 分节 / 义务 / 两道守卫 / 诚实项（schema 的真源）' },
 ];
@@ -127,6 +129,8 @@ export function describeText() {
     它只保证"要么被站点约束、要么被单列成空话声明"（可证伪性）
   · **多窗口同分**时选不出宿主 ⇒ 单列"ambiguous"（⛔ 不许靠"谁先声明"决定）
   · J4/J5/J6 三节本版只做结构检查；J3 只做"span == 导出段落"
+  · **调用链一致性**（--calls）：A 传给 B 的 reg 与 B 的载体声明是否同一个类型 —— 三态 一致/不一致/单侧；
+    不拿偏移相同顶替类型；两侧都解不出时不入账；栈上传参与间接调用不覆盖
   · **闭合度**（--coverage）：站点全绿**不等于**函数分析完了 —— L0 判据 = 没有未归类的内存行 ·
     没有目标未知的间接调用/跳转 · 没有基址未解析站点；L1 只点名直接调用与抛出，L2 归台账
   · **值传播的两个已知边界**（助手侧；改它要连带改守卫 ★⑪/★⑫）：
@@ -281,6 +285,29 @@ function runCoverage(args) {
   return 0;
 }
 
+/** ★ 调用点类型对账（跨族文件；回答"两侧引用的是不是同一个类型"） */
+function runCalls(args) {
+  const dir = 'data/shape';
+  const models = [];
+  let types = { types: {} };
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
+    const m = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    if (f === 'types.json' || m.types) { types = m.types ? m : types; continue; }
+    models.push({ file: f, model: m });
+  }
+  const carrierOf = new Map();
+  for (const { model } of models) {
+    for (const c of model.carriers ?? []) {
+      if (c.kind === 'arg' && c.reg) carrierOf.set(c.fn, (c.type ?? '').replace(/\*$/, ''));
+    }
+  }
+  const fns = [...carrierOf.keys()];
+  const lines = loadListing();
+  const r = auditCalls({ lines, fns, models, types: types.types, selfTypeOf: (fn) => carrierOf.get(fn) ?? null });
+  process.stdout.write(args.includes('--json') ? `${JSON.stringify(r, null, 2)}\n` : `${renderCalls(r)}\n`);
+  return r.rows.some((x) => x.verdict === 'mismatch') ? 1 : 0;
+}
+
 function runClaims(target) {
   const lines = loadListing();
   let model;
@@ -335,6 +362,7 @@ export async function main(argv = process.argv.slice(2)) {
     case '--depth': return runDepth(pos[0]);
     case '--census': return runCensus(argv);
     case '--coverage': return runCoverage(argv);
+    case '--calls': return runCalls(argv);
     case '--bodies': return runBodies(argv);
     case '--claims': return runClaims(pos[0]);
     case '--describe': process.stdout.write(describeText()); return 0;
