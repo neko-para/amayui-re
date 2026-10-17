@@ -472,7 +472,9 @@ test('★⑬ 闭合度：间接调用 / 间接跳转 / 抛异常 / x87 / 字符�
     '.text:0040C00A call    dword ptr [esi+4]',        // 间接调用（经内存）
     '.text:0040C00E call    sub_123456',               // 直接调用
     '.text:0040C013 call    __CxxThrowException@8',    // 直接调用 + 抛出
-    '.text:0040C018 jmp     ds:off_412345',            // 间接跳转
+    '.text:0040C018 jmp     ds:off_412345',            // 间接跳转（跳表）
+    '.text:0040C01A jmp     short loc_40C022',        // 函数内标签 ⇒ **直接**跳转（别算间接）
+    '.text:0040C01C call    ??_U@YAPAXI@Z',          // MSVC 装饰名（operator new[]）⇒ **直接**调用
     '.text:0040C01D fld     dword ptr [esi+8]',        // x87 内存操作数（模型之外）
     '.text:0040C020 rep movsd',                        // 字符串指令（不经寄存器模型）
     '.text:0040C022 retn',
@@ -488,6 +490,9 @@ test('★⑬ 闭合度：间接调用 / 间接跳转 / 抛异常 / x87 / 字符�
   assert.equal(cov.escapes.floatMem.length, 1, '一处 x87 内存操作数');
   assert.equal(cov.escapes.stringOps.length, 1, '一处字符串指令');
   assert.equal(cov.kinds.stack, 1, '栈槽行要单独算（⛔ 不算缺口）');
+  // ★ 回归（实测假阳）：函数内标签跳转与装饰名调用都**不是**间接目标
+  assert.equal(cov.escapes.indirectJmp.length, 1, 'jmp ds:… 才是间接；jmp short loc_* 是直接');
+  assert.ok(!cov.escapes.indirectCall.some((x) => /\?\?/.test(x.text)), `装饰名不是间接调用：${JSON.stringify(cov.escapes.indirectCall)}`);
   assert.equal(cov.closed, false, '有间接调用 ⇒ **未闭合**');
   assert.ok(cov.reasons.some((r) => r.includes('间接调用')), `原因里必须点名间接调用：${JSON.stringify(cov.reasons)}`);
 
@@ -545,4 +550,305 @@ test('★⑭ 调用链一致性：调用方实参类型 ↔ 被调方载体声�
   models[2].model.carriers[0].type = 'T_aa514*';
   const r2 = auditCalls({ lines: L, fns: ['sub_40D000'], models, types, selfTypeOf: () => 'T0', roots });
   assert.equal(r2.rows.filter((x) => x.callee === 'sub_40D200' && x.reg === 'ecx')[0]?.verdict, 'same', '改成 T_aa514* 后应当一致');
+});
+
+test('★⑮ 类型传播（全图 BFS）：this/interior 同类 · member(path) 换类 · 冲突要报', async () => {
+  const { propagate, nextCandidates } = await import('../lib/shape-propagate.mjs');
+  const types = {
+    T0: { size: null, complete: false, members: [{ off: '0xaa514', width: 4, kind: 'ptr', type: 'TX' }, { off: '0x408', type: 'TX', count: 1 }] },
+    TX: { size: null, complete: false, members: [{ off: '0x4', width: 4 }] },
+  };
+  // A（已声明 T0）调用 B（传 this）、C（传 interior）、D（传 *(this+0xaa514)）、E（传未知）
+  const links = {
+    sub_A: [
+      { kind: 'call', target: 'sub_B', ea: 0xa01, args: { ecx: { k: 'this' } } },
+      { kind: 'call', target: 'sub_C', ea: 0xa02, args: { ecx: { k: 'interior', obj: 'this', off: 8 } } },
+      { kind: 'call', target: 'sub_D', ea: 0xa03, args: { ecx: { k: 'member', path: [0xaa514], off: 4 } } },
+      { kind: 'call', target: 'sub_E', ea: 0xa04, args: { ecx: { k: 'unknown' } } },
+      { kind: 'call', target: 'sub_F', ea: 0xa05, args: { ecx: { k: 'this' } } },   // 与 G 冲突用
+      { kind: 'call', target: 'sub_C8', ea: 0xa06, args: { ecx: { k: 'interior', obj: 'this', off: 0x408 } } },
+      { kind: 'call', target: 'sub_C0', ea: 0xa07, args: { ecx: { k: 'interior', obj: 'this', off: 0 } } },
+    ],
+    sub_G: [{ kind: 'call', target: 'sub_F', ea: 0xb01, args: { ecx: { k: 'member', path: [0xaa514] } } }],
+  };
+  const carriers = [
+    { id: 'a', kind: 'arg', fn: 'sub_A', reg: 'ecx', type: 'T0*' },
+    { id: 'g', kind: 'arg', fn: 'sub_G', reg: 'ecx', type: 'T0*' },
+  ];
+  const analyzeFn = (sym) => (links[sym] ? { links: links[sym] } : null);
+  const r = propagate({ carriers, types, analyzeFn });
+  assert.equal(r.inferred.get('sub_B')?.type, 'T0', 'this ⇒ 同类');
+  // ★ interior 的**类型层**规则（batch-01/a+c 实测证伪了"同类"）：
+  //   k===0 ⇒ 同类；k 是已声明的**内嵌子对象** ⇒ 那个子类；否则**不传播**（⛔ 不许当同类）。
+  assert.equal(r.inferred.has('sub_C'), false, 'interior(this+0x8) 的 0x8 未声明成内嵌子对象 ⇒ **不传播**');
+  assert.equal(r.inferred.get('sub_C8')?.type, 'TX', 'interior(this+0x408) 是已声明的内嵌子对象 ⇒ 换类成 TX');
+  assert.equal(r.inferred.get('sub_D')?.type, 'TX', 'member(path) ⇒ 沿 types 解析成目标类型');
+  assert.equal(r.inferred.has('sub_E'), false, 'unknown ⇒ **不传播**（⛔ 不猜）');
+  assert.equal(r.inferred.get('sub_C0')?.type, 'T0', 'interior+0 ⇒ 对象本身，同类');
+  assert.equal(r.inferred.has('sub_G'), true, 'G 自己有载体 ⇒ 已知');
+  // sub_F 被 A 传 this（T0）、被 G 传 TX ⇒ 冲突必须报出来
+  assert.equal(r.conflicts.length, 1, `必须报 1 处传播冲突：${JSON.stringify(r.conflicts)}`);
+  assert.equal(r.conflicts[0].target, 'sub_F');
+  // 下一批候选：已推出类型但没有载体的
+  const next = nextCandidates({ inferred: r.inferred, carriers });
+  const fns = next.map((x) => x.fn);
+  assert.ok(fns.includes('sub_B') && fns.includes('sub_D'), `候选应含 B/D：${fns.join(',')}`);
+  assert.ok(!fns.includes('sub_A'), 'A 自己有载体 ⇒ 不是候选');
+
+  // ★ 回归：**local 载体只说明那个寄存器**，不许被当成"函数的 this 是什么"的种子
+  const r2 = propagate({
+    carriers: [
+      { id: 's', kind: 'arg', fn: 'sub_S', reg: 'ecx', type: 'T0*' },
+      { id: 'l', kind: 'local', fn: 'sub_L', reg: 'edi', type: 'TX*' },
+    ],
+    types,
+    analyzeFn: (sym) => (sym === 'sub_L' ? { links: [{ kind: 'call', target: 'sub_N', ea: 0xc01, args: { ecx: { k: 'this' } } }] } : null),
+  });
+  assert.equal(r2.inferred.has('sub_L'), false, 'local 载体**不许**给函数定根类型');
+  assert.equal(r2.inferred.has('sub_N'), false, 'local 载体也不许把类型传播到它的被调方（会被污染成 TX）');
+});
+
+test('★⑯ 争议台账（G12）：拒绝声明也要留下**可检查**的争议（缺 EA / 过期 / 没落点都红）', () => {
+  // 为什么需要：判据只在"有站点落地"时说话。若用法全是 lea 或基址未解析，站点不成立 ⇒ 工具全绿，
+  // 而"这里其实是指针/是数组、只是我说不出目标/条数"这件事**无处安放**。争议台账就是它的家。
+  const mkModel = (disputes) => {
+    const m = base([{ off: '0x5d800', width: 4 }]);
+    m.types.TB = { size: null, complete: false, members: [{ off: '0x0', width: 4 }] };
+    m.carriers[0].fn = 'sub_409000';
+    m.disputes = disputes;
+    return m;
+  };
+  const L = ['.text:00409000 sub_409000 proc near', '.text:00409000 mov eax, [ecx+5D800h]', '.text:00409006 retn', '.text:00409006 sub_409000 endp'];
+  const R = new Map([['sub_409000', 'ecx']]);
+  const run = (d) => checkClaims(mkModel(d), { lines: L, baseDir: '.', observed: OBS, roots: R });
+
+  // ① 合法：关于已声明成员的 size 争议 + 有 witness
+  const okRep = run([{ container: 'T0', off: '0x5d800', kind: 'size-unknown', why: '条数未证', evidence: ['0x409000'] }]);
+  assert.deepEqual(okRep.findings, [], `合法争议不该红：${JSON.stringify(okRep.findings)}`);
+  assert.equal(okRep.disputes.length, 1, '合法争议要进报告');
+  assert.equal(okRep.disputes[0].kind, 'size-unknown');
+
+  // ② 缺 witness EA ⇒ 红（⛔ 不许只写一句"我觉得是指针"）
+  const noEv = run([{ container: 'T0', off: '0x5d800', kind: 'ptr-unknown', why: '' }]);
+  assert.ok(noEv.findings.some((f) => f.where.startsWith('G12') && f.why.includes('witness')), `缺 EA 必须红：${JSON.stringify(noEv.findings)}`);
+
+  // ③ 落点不是已声明成员 ⇒ 红（争议必须有落点）
+  const noMember = run([{ container: 'T0', off: '0x9999', kind: 'ptr-unknown', why: '', evidence: ['0x409000'] }]);
+  assert.ok(noMember.findings.some((f) => f.where.startsWith('G12') && f.why.includes('不是已声明成员')), '没落点必须红');
+
+  // ④ 过期：声明已经回答了这条争议 ⇒ 红（删掉旧账）
+  const m2 = base([{ off: '0x5d800', width: 4, kind: 'ptr', type: 'TB' }]);
+  m2.types.TB = { size: null, complete: false, members: [{ off: '0x0', width: 4 }] };
+  m2.carriers[0].fn = 'sub_409000';
+  m2.disputes = [{ container: 'T0', off: '0x5d800', kind: 'ptr-unknown', why: '目标不明', evidence: ['0x409000'] }];
+  const stale = checkClaims(m2, { lines: L, baseDir: '.', observed: OBS, roots: R });
+  assert.ok(stale.findings.some((f) => f.where.startsWith('G12') && f.why.includes('已解决')), `过期争议必须红：${JSON.stringify(stale.findings)}`);
+
+  // ⑤ kind 不在闭集合 ⇒ 红
+  const badKind = run([{ container: 'T0', off: '0x5d800', kind: '随便', why: '', evidence: ['0x409000'] }]);
+  assert.ok(badKind.findings.some((f) => f.where.startsWith('G12')), 'kind 越界必须红');
+});
+
+test('★⑰ 全局载体（G13）：**根对象唯一的来源**是"某个全局槽里装着它"，从根正向传播靠它', async () => {
+  // 为什么需要这一条：Engine（IDA 类名 `Command`）**不是任何函数的参数** ——
+  // `_WinMain@16`(0x4ba890) 里 `push 0AABC8h` → `operator new`（0x4baa11）→ `call sub_415640`（构造器，0x4baa2e）
+  // → `mov ds:dword_55E1BC, eax`（0x4baa3a）才把它存进全局。
+  // 于是所有 `mov ecx, ds:dword_55E1BC; call X` 都是"X 的 this = 根对象"的机械证据；
+  // 而在加这一类之前，这类调用点上 ecx 的来源整类是 `unknown`（实测 4256 个 unknown 里的一大撮）。
+  const { analyzeLines } = await import('../lib/shape-access.mjs');
+  const { propagate } = await import('../lib/shape-propagate.mjs');
+
+  // ── ① 访问助手：`mov ecx, ds:<全局>` 之后 call ⇒ 该调用点的 ecx 来源必须是 `global`（不是 unknown）
+  const LW = [
+    '.text:0040D000 _WinMain@16 proc near',
+    '.text:0040D000 push    ebp',
+    '.text:0040D001 mov     ebp, esp',
+    '.text:0040D003 push    0AABC8h',
+    '.text:0040D008 call    ??2@YAPAXI@Z',
+    '.text:0040D00D mov     ecx, eax',
+    '.text:0040D00F call    sub_40D100',
+    '.text:0040D014 mov     ds:dword_55E1BC, eax',
+    '.text:0040D01A mov     ecx, ds:dword_55E1BC',
+    '.text:0040D020 call    sub_40D200',
+    '.text:0040D026 mov     eax, ds:dword_55E1BC',
+    '.text:0040D02C mov     edx, [eax+5D818h]',
+    '.text:0040D032 retn',
+    '.text:0040D032 _WinMain@16 endp',
+  ];
+  const { links } = analyzeLines(LW, 0, LW.length - 1, null, {});
+  const toRoot = links.find((l) => l.target === 'sub_40D200');
+  assert.equal(toRoot?.args?.ecx?.k, 'global', `必须认成 global：${JSON.stringify(toRoot?.args?.ecx)}`);
+  assert.equal(toRoot.args.ecx.sym, 'dword_55E1BC', '符号名要原样带出来（⛔ 不许折成 "unknown"）');
+  // ★ 带方括号的（`ds:0[ecx*4]`，位移写在段前缀里，语料 363 处）**不是**符号 —— 别把段前缀整类吃掉
+  const sz = analyzeLines([
+    '.text:0040D100 sub_40D100 proc near',
+    '.text:0040D100 lea     eax, ds:0[ecx*4]',      // 纯算术（语料形态）
+    '.text:0040D107 mov     ecx, eax',
+    '.text:0040D109 call    sub_SZ',
+    '.text:0040D10E mov     ecx, ds:5D100h[ecx*4]',  // 带索引的段前缀：解不出值
+    '.text:0040D116 call    sub_SZ2',
+    '.text:0040D11B retn',
+    '.text:0040D11B sub_40D100 endp',
+  ], 0, 7, null, {});
+  const mk1 = sz.links.find((l) => l.target === 'sub_SZ');
+  assert.notEqual(mk1?.args?.ecx?.k, 'global', '`ds:位移[索引]` 是算术，不是"全局槽里装着的东西"');
+  const mk2 = sz.links.find((l) => l.target === 'sub_SZ2');
+  assert.notEqual(mk2?.args?.ecx?.k, 'global', '带索引的段前缀解不出值 ⇒ 不许当 glob（⛔ 也不许猜成常量）');
+
+  // ── ② 传播规则：只有**声明过**的全局能定类；没声明 ⇒ 不传播（⛔ 不猜）
+  const types = { T0: { size: null, complete: false, members: [{ off: '0x5d818', width: 4 }] } };
+  const gLinks = {
+    _WinMain: [{ kind: 'call', target: 'sub_E1', ea: 0xe01, args: { ecx: { k: 'global', sym: 'dword_55E1BC' } } }],
+    sub_NoDecl: [{ kind: 'call', target: 'sub_E2', ea: '0xe02', args: { ecx: { k: 'global', sym: 'dword_DEADBE' } } }],
+  };
+  const analyzeFn = (sym) => (gLinks[sym] ? { links: gLinks[sym] } : null);
+  const r = propagate({
+    carriers: [{ id: 'g01', kind: 'global', sym: 'dword_55E1BC', type: 'T0*', witness: ['0x4baa3a'] }],
+    types,
+    analyzeFn,
+    globals: new Map([['dword_55E1BC', 'T0']]),
+    extraCallers: ['_WinMain', 'sub_NoDecl'],
+  });
+  assert.equal(r.inferred.get('sub_E1')?.type, 'T0', '声明过的全局 ⇒ 被调方根类型 = 该类型（**从根正向**的第一步）');
+  assert.equal(r.inferred.has('sub_E2'), false, '没声明的全局 ⇒ **不传播**（⛔ 不猜）');
+  assert.equal(r.inferred.has('_WinMain'), false, '全局扫描种子自己**没有**类（它只是入口），不许被记成 T0');
+  // ★ 反向：不给 `extraCallers` ⇒ 没有根约定、又不在调用图上的入口**根本扫不到**（这正是"倒着爬"的成因）
+  const rNo = propagate({ carriers: [{ id: 'g01', kind: 'global', sym: 'dword_55E1BC', type: 'T0*' }], types, analyzeFn, globals: new Map([['dword_55E1BC', 'T0']]) });
+  assert.equal(rNo.inferred.has('sub_E1'), false, '没有根锚定扫描 ⇒ 入口的调用点扫不到（数字变小，不是报错）');
+  // ★ 被调方必须真的收 `this`：`__cdecl` 函数里的 ecx 是残留值 ⇒ 记上去就是**假断言 + 假冲突**
+  //   实测形态：`sub_40A160`(`__cdecl`) 同时被推出 T_77960 与 T0。
+  const rCdecl = propagate({
+    carriers: [{ id: 'g01', kind: 'global', sym: 'dword_55E1BC', type: 'T0*' }],
+    types, analyzeFn, globals: new Map([['dword_55E1BC', 'T0']]), extraCallers: ['_WinMain'],
+    acceptTarget: (sym) => sym !== 'sub_E1',
+  });
+  assert.equal(rCdecl.inferred.has('sub_E1'), false, 'acceptTarget 说它不收 this ⇒ 不许给它记类型');
+
+  // ── ③ G13 的三条硬要求：符号真实存在 · witness 必须是**写**那个全局的 store · 类型已声明
+  const LS = [
+    '.text:0040E000 sub_40E000 proc near',
+    '.text:0040E000 mov     edx, ds:dword_ABCDEF',
+    '.text:0040E006 mov     ds:dword_ABCDEF, eax',
+    '.text:0040E00C mov     eax, [edx+5D818h]',
+    '.text:0040E012 retn',
+    '.text:0040E012 sub_40E000 endp',
+  ];
+  const RS = new Map([['sub_40E000', 'ecx']]);
+  const mkG = (g) => {
+    const m = base([{ off: '0x5d818', width: 4 }]);
+    m.carriers[0].fn = 'sub_40E000';
+    m.carriers = [m.carriers[0], g];
+    return m;
+  };
+  const runG = (g) => checkClaims(mkG(g), { lines: LS, baseDir: '.', observed: OBS, roots: RS });
+  const okG = runG({ id: 'g02', kind: 'global', sym: 'dword_ABCDEF', type: 'T0*', witness: ['0x40e006'] });
+  assert.deepEqual(okG.findings, [], `合法全局载体不该红：${JSON.stringify(okG.findings)}`);
+  assert.equal(okG.globalCarriers.length, 1, '合法的全局载体要进报告');
+
+  const readOnly = runG({ id: 'g02', kind: 'global', sym: 'dword_ABCDEF', type: 'T0*', witness: ['0x40e000'] });
+  assert.ok(readOnly.findings.some((f) => f.where.startsWith('G13') && f.why.includes('没有一条是')),
+    `witness 是**读**（0x40e000）⇒ 红：${JSON.stringify(readOnly.findings)}`);
+  const noWit = runG({ id: 'g02', kind: 'global', sym: 'dword_ABCDEF', type: 'T0*' });
+  assert.ok(noWit.findings.some((f) => f.where.startsWith('G13') && f.why.includes('witness')), '缺 witness ⇒ 红');
+  const ghostEa = runG({ id: 'g02', kind: 'global', sym: 'dword_ABCDEF', type: 'T0*', witness: ['0x409999'] });
+  assert.ok(ghostEa.findings.some((f) => f.where.startsWith('G13')), 'witness EA 在语料里不存在 ⇒ 红（别拿编的地址凑数）');
+  const badType = runG({ id: 'g02', kind: 'global', sym: 'dword_ABCDEF', type: 'TNOPE*', witness: ['0x40e006'] });
+  assert.ok(badType.findings.some((f) => f.where.startsWith('G13') && f.why.includes('未声明')), '类型未声明 ⇒ 红');
+  // 同一个全局两种类型 ⇒ 红（否则后面"从根传播"会随声明顺序漂）
+  const dup = runG({ id: 'g02', kind: 'global', sym: 'dword_ABCDEF', type: 'T0*', witness: ['0x40e006'] });
+  const dupModel = mkG({ id: 'g02', kind: 'global', sym: 'dword_ABCDEF', type: 'T0*', witness: ['0x40e006'] });
+  dupModel.types.TX = { size: 8, complete: false, members: [{ off: '0x0', width: 4 }] };
+  dupModel.carriers.push({ id: 'g03', kind: 'global', sym: 'dword_ABCDEF', type: 'TX*', witness: ['0x40e006'] });
+  const dupRep = checkClaims(dupModel, { lines: LS, baseDir: '.', observed: OBS, roots: RS });
+  assert.ok(dupRep.findings.some((f) => f.where.startsWith('G13') && f.why.includes('又声明成')), '同一全局两种类型 ⇒ 红');
+  assert.equal(dup.findings.length, 0, '单条声明仍应绿（上面那组是控制变量）');
+});
+
+
+test('★⑱ 适配器类型（adapter:true）：**同偏移不同类 = 基类相容**，不是冲突（`this->+0x4` 转发器那一族）', async () => {
+  // 实测出处：`sub_4034C0`/`D0`/`E0` 都做 `mov ecx,[ecx+4]` 之后转发（`0x4034c3`/`0x4034d3`/`0x4034e3`），
+  // 其中 `sub_4034E0` 是 `mov eax,[ecx]; mov eax,[eax+8]; jmp eax` = **虚调用**。
+  // 它们被 `T0` 与内嵌子对象 `T_1ee8`/`T_4ed10`/`T_a609c` 四种类当 this 调用。
+  // ★ 真相是**通用基类 `BaseObject`**：`sub_4034a0`（RTTI 名 `??_7BaseObject@@6B@`）在 `0x4034a2` 写 vtable、
+  //   在 `0x4034a8` 写 `[this+4] = offset dword_55BF70`（全局输出对象的地址），而它有 **26 个类的构造器**调用
+  //   （含 `sub_415640`=Command）⇒ 子类在**偏移 0** 处就是 `BaseObject`，`this` 不需调整 ⇒ 天然相容。
+  // 本用例用合成名字 `T_ptr4` 表达同一个形状（`adapter:true` + 只有 `+0x4 : ptr→未知`）；
+  // ⛔ 若不给这个显式标记，调用点对账会记成 4 处"不一致"。
+  const { auditCalls } = await import('../lib/shape-calls.mjs');
+  const { propagate } = await import('../lib/shape-propagate.mjs');
+
+  const types = {
+    T0: { size: null, complete: false, members: [{ off: '0x10', width: 4 }] },
+    TA: { size: null, complete: false, members: [{ off: '0x10', width: 4 }] },
+    T_ptr4: { size: null, complete: false, adapter: true, members: [{ off: '0x4', width: 4, kind: 'ptr', type: null }] },
+  };
+  // ① 调用点对账：T0 调一个声明成 T_ptr4 的被调方 ⇒ 判"适配器相容"，⛔ 不是 mismatch
+  const LC = [
+    '.text:0040F000 sub_40F000 proc near',
+    '.text:0040F000 call    sub_40F100',
+    '.text:0040F005 retn',
+    '.text:0040F005 sub_40F000 endp',
+    '.text:0040F100 sub_40F100 proc near',
+    '.text:0040F100 mov     ecx, [ecx+4]',
+    '.text:0040F106 retn',
+    '.text:0040F106 sub_40F100 endp',
+  ];
+  const models = [{ file: 'm.json', model: { carriers: [
+    { id: 'a', kind: 'arg', fn: 'sub_40F000', reg: 'ecx', type: 'T0*' },
+    { id: 'b', kind: 'arg', fn: 'sub_40F100', reg: 'ecx', type: 'T_ptr4*' },
+  ] } }];
+  const r = auditCalls({
+    lines: LC, fns: ['sub_40F000'], models, types,
+    selfTypeOf: (fn) => (fn === 'sub_40F000' ? 'T0' : null),
+    roots: new Map([['sub_40F000', 'ecx'], ['sub_40F100', 'ecx']]),
+  });
+  const ecxRow = r.rows.find((x) => x.reg === 'ecx');
+  assert.equal(ecxRow?.verdict, 'adapter', `必须判"适配器相容"：${JSON.stringify(r.rows)}`);
+
+  // ② 反向：被调方**不是**适配器 ⇒ 仍然是不一致（⛔ 适配器这一档不许糊掉真不一致）
+  const nonAdapter = [{ file: 'm.json', model: { carriers: [
+    { id: 'a', kind: 'arg', fn: 'sub_40F000', reg: 'ecx', type: 'T0*' },
+    { id: 'b', kind: 'arg', fn: 'sub_40F100', reg: 'ecx', type: 'TA*' },
+  ] } }];
+  const r2 = auditCalls({
+    lines: LC, fns: ['sub_40F000'], models: nonAdapter, types,
+    selfTypeOf: () => 'T0',
+    roots: new Map([['sub_40F000', 'ecx'], ['sub_40F100', 'ecx']]),
+  });
+  assert.equal(r2.rows.find((x) => x.reg === 'ecx')?.verdict, 'mismatch', '非适配器仍要报不一致');
+
+  // ③ 传播：被调方**已有声明**时，推断出的另一类只记 note，⛔ 不记冲突
+  const gLinks = {
+    sub_C1: [{ kind: 'call', target: 'sub_A1', ea: 0xf01, args: { ecx: { k: 'this' } } }],
+    sub_C2: [{ kind: 'call', target: 'sub_A1', ea: 0xf02, args: { ecx: { k: 'this' } } }],
+  };
+  const pr = propagate({
+    carriers: [
+      { id: 'a', kind: 'arg', fn: 'sub_C1', reg: 'ecx', type: 'T0*' },
+      { id: 'b', kind: 'arg', fn: 'sub_C2', reg: 'ecx', type: 'TA*' },
+      { id: 'c', kind: 'arg', fn: 'sub_A1', reg: 'ecx', type: 'T_ptr4*' },
+    ],
+    types,
+    analyzeFn: (sym) => (gLinks[sym] ? { links: gLinks[sym] } : null),
+  });
+  assert.equal(pr.conflicts.length, 0, `声明过的被调方不许记冲突：${JSON.stringify(pr.conflicts)}`);
+  assert.ok(pr.declaredMismatch.length >= 1, '要单列"推断与声明不一致"（让步但不静默）');
+  assert.equal(pr.declaredMismatch[0].declared, 'T_ptr4');
+
+  // ④ G 侧：适配器类型的三条硬要求（给 size / 声明 complete / 空适配器 都红）
+  const mkA = (t) => {
+    const m = base([{ off: '0x5d818', width: 4 }]);
+    m.carriers[0].fn = 'sub_401000';
+    m.types.T_ok = t;
+    return m;
+  };
+  const withSize = checkClaims(mkA({ size: 8, complete: false, adapter: true, members: [{ off: '0x4', width: 4 }] }),
+    { lines: L, baseDir: '.', observed: OBS, roots: ROOTS });
+  assert.ok(withSize.findings.some((f) => f.where.startsWith('适配器') && f.why.includes('size')), '适配器给 size ⇒ 红');
+  const withComplete = checkClaims(mkA({ size: null, complete: true, adapter: true, members: [{ off: '0x4', width: 4 }] }),
+    { lines: L, baseDir: '.', observed: OBS, roots: ROOTS });
+  assert.ok(withComplete.findings.some((f) => f.where.startsWith('适配器') && f.why.includes('complete')), '适配器声明 complete ⇒ 红');
+  const empty = checkClaims(mkA({ size: null, complete: false, adapter: true, members: [] }),
+    { lines: L, baseDir: '.', observed: OBS, roots: ROOTS });
+  assert.ok(empty.findings.some((f) => f.where.startsWith('适配器') && f.why.includes('至少')), '空适配器 ⇒ 红');
 });

@@ -780,9 +780,23 @@ const MUTATIONS = [
     what: '★ "跨两级以上**不判**"被拆掉 ⇒ 三跳链被拿 `path[0]`（第一跳）去硬判 = **认错层**（早先那个假解释的来源）',
   },
   {
+    file: 'tools/lib/shape-propagate.mjs',
+    from: "    if (c.kind === 'arg' && c.fn && c.reg === 'ecx') {",
+    to: '    if (c.fn && c.reg) {',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ local 载体被当成"函数的根类型"种子 ⇒ 类型从"某个寄存器"污染成"这个类是 X"，假冲突与错声明一起出现（★⑮ 当场红）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: "      if (d.kind === 'ptr-unknown' && m.kind === 'ptr' && m.type)",
+    to: '      if (false)',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 争议台账不再检查"过期"（声明已经回答了争议却留着旧账）⇒ 争议越积越多、没人知道哪条已被解决（★⑯ 当场红）',
+  },
+  {
     file: 'tools/lib/shape-calls.mjs',
-    from: "        if (ct && calleeType) verdict = ct === calleeType ? 'same' : 'mismatch';",
-    to: "        if (ct && calleeType) verdict = 'same';",
+    from: "        if (ct && calleeType) verdict = ct === calleeType ? 'same' : (calleeIsAdapter ? 'adapter' : 'mismatch');",
+    to: '        if (ct && calleeType) verdict = \'same\';',
     guard: 'tools/test/shape-claims-guards.test.mjs',
     what: '★ 调用链对账不再区分"不一致"（两侧类型不同也判 same）⇒ 跨函数的类型冲突永远发现不了（★⑭ 当场红）',
   },
@@ -813,6 +827,42 @@ const MUTATIONS = [
     to: '    if (false) {',
     guard: 'tools/test/shape-claims-guards.test.mjs',
     what: '★ 局部载体不再拒绝"活窗口里被 call 打断的 caller-saved 寄存器" ⇒ 值可能已被抹掉的断言照样被接受（**假绿**）',
+  },
+  // ── shape 域（第五组）：**全局载体（G13）与"从根正向传播"** —— 根对象不是参数，只能从数据段进来 ──
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '        if (storeRe.test(text)) stores.push({ ea, text });',
+    to: '        if (true) stores.push({ ea, text });',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ G13 不再要求 witness 是**写**该全局的 store ⇒"这个全局装的是 X 指针"退化成"随便给个 EA 就算数"（根对象那种断言的唯一机械证据没了）',
+  },
+  {
+    file: 'tools/lib/shape-propagate.mjs',
+    from: "      else if (arg.k === 'global') t = GLOB.get(arg.sym) ?? null;",
+    to: "      else if (arg.k === 'global') t = null;",
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 传播里"全局槽里装的是什么类"这条规则被拆掉 ⇒ 从根正向的传播整类失效（`_WinMain`/WndProc 那一整片入口永远进不了图，只能继续从 op handler 倒着爬）',
+  },
+  {
+    file: 'tools/lib/shape-access.mjs',
+    from: "  if (segm && !segm[2].includes('[')) return { t: 'glob'",
+    to: '  if (false) return { t: \'glob\'',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ `mov ecx, ds:<全局>` 不再被认成"全局里装着的东西" ⇒ 调用点上"ecx 来自根对象"整类退回 `unknown`（数字变小，不是报错）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '    if (t.adapter !== true) continue;',
+    to: '    if (true) continue;',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 适配器类型不再受三条硬要求约束（不许 size / 不许 complete / 至少一个成员）⇒ "部分布局"被说成完整对象，且"同偏移不同类 = 相容"这条事实失去落点',
+  },
+  {
+    file: 'tools/lib/shape-calls.mjs',
+    from: "        const calleeIsAdapter = calleeType ? types?.[calleeType]?.adapter === true : false;",
+    to: '        const calleeIsAdapter = false;',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ 调用点对账不再认"适配器相容" ⇒ 适配器被四个类调用就报 4 处**假不一致**（或反过来，有人用它糊掉真不一致）',
   },
 ];
 

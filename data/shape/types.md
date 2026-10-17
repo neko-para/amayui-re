@@ -4,7 +4,7 @@
 > 字段、义务、守卫、诚实项的真源是 `pnpm tools shape describe`。
 
 `types.json` 是**全仓唯一**的类型成员表：每个类型按 id 共享一份，成员 = 偏移 + 跨度（或元素类型 + 条数）。
-族文件（如 `numeric-handlers.json`）**只放载体**、一律 `typesFrom: "types.json"` 引用本文件 ——
+载体文件（`carriers.json`，**唯一一个**）**只放载体**、`typesFrom: "types.json"` 引用本文件 ——
 ⛔ 类型不许写进族文件（那会逼别的族文件去引用那一个族）。
 
 ## 非显然口径（踩过的坑都在这里）
@@ -53,7 +53,7 @@
 ```bash
 pnpm tools shape describe                              # 分节 / 义务 / 守卫 的真源（先看这个）
 pnpm tools shape claims data/shape/types.json          # 类型真源自校验（无载体时 G6 会说"无绝对锚"）
-pnpm tools shape claims data/shape/numeric-handlers.json   # 真正有判据的那一遍：载体 × 本类型表
+pnpm tools shape claims data/shape/carriers.json    # 真正有判据的那一遍：载体 × 本类型表
 pnpm tools shape census                                # 全表普查：每个偏移被谁碰 / 索引簇 / 各层级的站点数
 pnpm tools shape bodies                                # handler 体骨架（族边界的依据）
 pnpm tools mutate check --match shape                  # 守卫自检（两道守卫 + G7/G8/G9 + 守恒③④ + 路径/政策）

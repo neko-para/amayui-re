@@ -31,10 +31,17 @@ const REG_NAME = new Set(['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp'
  * ⛔ 裸寄存器 / `[...]` / `dword ptr [...]` 都是**间接**。
  */
 function isDirectCallee(tgt) {
-  const s = (tgt ?? '').trim();
-  if (!s || s.startsWith('[') || /\bptr\b/i.test(s) || /\s/.test(s)) return false;
+  // ★ 两次实测踩到的假阳：① `jmp short loc_XXXXXX`（函数内标签 = 直接跳转）
+  //   ② MSVC 装饰名 `?foo@@YAXXZ`（首字符不是字母）。⇒ 先剥限定词，再分三类放行。
+  let s = (tgt ?? '').trim();
+  if (!s || s.startsWith('[') || /\bptr\b/i.test(s)) return false;
+  s = s.replace(/^(short|near|far)\s+/i, '').trim();
+  if (!s || /\s/.test(s)) return false;
   if (REG_NAME.has(s.toLowerCase())) return false;
-  return /^(sub_[0-9A-F]{6}|_*[A-Za-z][\w@?$.]*)$/.test(s);
+  if (/^(loc|def)_[0-9A-F]{6}$/i.test(s)) return true;              // 函数内标签
+  if (/^sub_[0-9A-F]{6}$/i.test(s)) return true;                    // 已识别的函数
+  if (/^\?*[_@$A-Za-z?][\w@?$.]*$/.test(s)) return true;            // 符号名（含 `??_U@…` 这类装饰名）
+  return false;
 }
 
 /** 某函数的闭合度记账（`sites` 传 `analyzeLines` 的结果） */
@@ -142,6 +149,11 @@ export function renderCoverage(cov, hex = (n) => `0x${n.toString(16)}`) {
   if (cov.escapes.dsSymbols.length) L.push(`  数据段符号：${cov.escapes.dsSymbols.map((c) => `${hex(c.ea)} ${c.obj}`).join(' ')}`);
   if (cov.escapes.floatMem.length) L.push(`  ⚠ x87/SSE 内存操作数（**模型之外**）：${cov.escapes.floatMem.slice(0, 6).map((c) => hex(c.ea)).join(' ')}`);
   if (cov.escapes.stringOps.length) L.push(`  ⚠ 字符串指令（不经寄存器模型）：${cov.escapes.stringOps.slice(0, 6).map((c) => hex(c.ea)).join(' ')}`);
+  if (cov.tierCompare) {
+    const { conservative: c1, calibrated: c2 } = cov.tierCompare;
+    L.push(`  未解析基址：保守档 ${c1} · 校准档 ${c2}`
+      + (c2 < c1 ? `　⇒ 其中 ${c1 - c2} 处只是\"call 杀了 caller-saved\"，不是模型缺口（--calibrated 看另一档）` : ''));
+  }
   if (cov.caveat) L.push(`  ${cov.caveat}`);
   return L.join('\n');
 }

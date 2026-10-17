@@ -170,6 +170,7 @@ export function matchesWindowGlobal(w, s) {
 
 export function checkClaims(model0, { lines = loadListing(), baseDir = process.cwd(), observed = null, roots = null, resolve = null } = {}) {
   const findings = [];
+  const disputes = [];   // G12：合法争议（会被报告单列）
   const notes = [];
   const red = (where, why) => findings.push({ where, why });
 
@@ -187,7 +188,9 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
 
   // ── 语料侧的两个 oracle
   const occurrences = new Map();
-  for (const m of lines.join('\n').matchAll(/\b([0-9A-F]{4,8})h\b/gi)) {
+  // ★ 1~8 位（不是 4~8）：短位移 5F4h / 65Ch / 44h 也是被引用地，
+  //   写成 {4,8} 会让所有小于 0x1000 的末尾地址都变成假零引用（实测 112704 次不可见）
+  for (const m of lines.join('\n').matchAll(/\b([0-9A-F]{1,8})h\b/gi)) {
     const v = Number.parseInt(m[1], 16);
     occurrences.set(v, (occurrences.get(v) ?? 0) + 1);
   }
@@ -407,7 +410,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       const leaf = w.kind === 'array'
         ? membersOf(types[w.m.type]).find((m) => (off - w.from) >= m.offN && (m.ext == null ? (off - w.from) < m.offN + 1 : (off - w.from) < m.offN + m.ext))
         : w.m;
-      if (leaf && leaf.width != null && s.width !== 'unknown' && s.width !== leaf.width) {
+      if (leaf && leaf.width != null && s.width !== 'unknown' && s.width > leaf.width) {   // ★ 只禁"更宽"，窄访问合法
         badN += 1;
         red(`G10 ${c.id} @${hex(s.ea)}`, `宽度 ${s.width} != ${ltid} 成员 ${hex(leaf.offN)} 声明 ${leaf.width}`);
         continue;
@@ -427,6 +430,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
 
   for (const c of M.carriers ?? []) {
     if (c.kind === 'local') continue;   // 局部载体在 G10 预扫里处理（它的槽是 (寄存器, 活窗口)，不是对象根）
+    if (c.kind === 'global') continue;  // 全局载体在 G13 里处理（它没有 `fn`：声明的是"全局槽里装什么"，不是某个函数的 this）
     const tid = c.type.replace(/\*|\[\]$/, '');
     const t = types[tid];
     if (!t) { red(`载体 ${c.id}`, `类型 ${c.type} 未定义`); continue; }
@@ -500,7 +504,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
         leaf = em;
         if (s.indexSym && et?.size != null && s.stride !== et.size) { red(`G3 ${c.id} @${hex(s.ea)}`, `数组形态步长 ${s.stride} != size(${host.type})=${et.size}`); continue; }
       }
-      if (leaf.width != null && s.width !== 'unknown' && s.width !== leaf.width) { red(`G2 ${c.id} @${hex(s.ea)}`, `宽度 ${s.width} != 成员声明 ${leaf.width}`); continue; }
+      if (leaf.width != null && s.access !== 'a' && s.width !== 'unknown' && s.width > leaf.width) { red(`G2 ${c.id} @${hex(s.ea)}`, `宽度 ${s.width} != 成员声明 ${leaf.width}`); continue; }
       explained.push({ ea: s.ea, abs: s.absDisp, member: host, leaf, delta: w.delta, viaView: w.delta !== 0 });
     }
 
@@ -510,12 +514,22 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
     //     （实测 2 跳只有 8 处站点；纯靠局部载体要 75 条声明 ⇒ 只在"更深"时付这个代价）。
     //   ⇒ 于是这里没有链遍历、没有下钻政策开关：**跨两级以上一律单列**（带 EA + 路径），不判。
     //   ★ 踩过（修好之前）：三跳链只带"最后一跳的偏移" ⇒ 宿主被拿去对 obj0 的成员表 = 认错层（会假解释）。
+    // ★ 只取址（lea）的站点**不进 G5'**：它算地址、不解引用（真解引用另有非 lea 站点）。
+    //   实测踩过：整数游标（T_a609c+0x2c24）被当指针，4 条 G5' 假红，逼人把它声明成 ptr（假绿）。
+    const leaPointee = sites.filter((s) => s.access === 'a' && (s.pointeePath?.length ?? 0) >= 1);
+    if (leaPointee.length) {
+      notes.push(`G5' ${c.id}: ${leaPointee.length} 处**只取址**的二级站点（值被用于地址算术，未解引用）⇒ 不要求宿主声明 ptr`
+        + `（${leaPointee.slice(0, 3).map((s) => hex(s.ea)).join(' ')}）`);
+    }
     const pointee = sites.filter((s) => (s.pointeePath?.length ?? 0) >= 1 && typeof s.pointeeOff === 'number');
     let pointeeOk = 0; let pointeeOpaque = 0; let pointeeBad = 0; let pointeeMulti = 0;
     const opaqueEAs = [];
     const multiHopSites = [];
     for (const s of pointee) {
       const path = s.pointeePath;
+      // ★ **只取址（lea）** 的二级站点：值被用于地址算术，不是解引用 ⇒ 记**解释**档
+      //   （真正的解引用一定另有非 lea 站点；实测踩过：整数游标被当指针时 4 条 G5' 假红）
+      if (s.access === 'a') { pointeeOk += 1; continue; }
       if (path.length + 1 > 2) { pointeeMulti += 1; multiHopSites.push(s); continue; }   // 跨两级以上：不判
       const hop = path[0];
       if (!derefHosts.has(tid)) derefHosts.set(tid, new Set());
@@ -538,7 +552,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
         else residue.push({ ea: s.ea, abs: s.pointeeOff, kind: 'pointee', why: `二级偏移 ${hex(s.pointeeOff)} 不是 ${host.type} 的成员` });
         continue;
       }
-      if (inner.width != null && s.width !== 'unknown' && s.width !== inner.width) { pointeeBad += 1; red(`G5' ${c.id} @${hex(s.ea)}`, `二级宽度 ${s.width} != ${host.type} 成员 ${hex(inner.offN)} 声明 ${inner.width}`); continue; }
+      if (inner.width != null && s.width !== 'unknown' && s.width > inner.width) { pointeeBad += 1; red(`G5' ${c.id} @${hex(s.ea)}`, `二级宽度 ${s.width} != ${host.type} 成员 ${hex(inner.offN)} 声明 ${inner.width}`); continue; }   // ★ 只禁更宽
       if (tu.size != null && s.pointeeOff + (s.width === 'unknown' ? 1 : s.width) > tu.size) { pointeeBad += 1; red(`G5' ${c.id} @${hex(s.ea)}`, `二级偏移 ${hex(s.pointeeOff)}+${s.width} 超出 ${host.type}.size ${tu.size}`); continue; }
       pointeeOk += 1;
       explainedPointee.push({ ea: s.ea, level: 2, path, off: s.pointeeOff, type: host.type, member: inner.offN });
@@ -638,9 +652,103 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       const et = types[m.type];
       if (et?.size == null) { notes.push(`G4 ${tid}+${hex(m.offN)}: 元素 size 未知 ⇒ 边界判不了`); continue; }
       const end = m.offN + et.size * m.count;
-      if (refs(end) === 0) red(`G4 ${tid}+${hex(m.offN)}`, `数组末尾 ${hex(end)} 在语料里零引用 ⇒ count=${m.count} 无依据`);
+      if (refs(end) === 0) {
+        // ★ 奇数跨度（u16×17=0x22 / u16×289=0x242）的末尾按定义不是 4 对齐 ⇒ 编译器不会算出它 ⇒ 零引用是必然，不是"条数无依据"
+        if (end % 4 !== 0) notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾 ${hex(end)} 不对齐 4 且零引用 ⇒ 编译器按定义不会算出它（边界靠常量+写循环证明，⛔ 不是"通过"）`);
+        else red(`G4 ${tid}+${hex(m.offN)}`, `数组末尾 ${hex(end)} 在语料里零引用 ⇒ count=${m.count} 无依据`);
+      }
       else notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾 ${hex(end)} 有 ${refs(end)} 处引用 ⇒ count=${m.count} 站得住`);
     }
+  }
+
+  // ── G12 争议台账（**拒绝声明也要留下可检查的争议**）
+  {
+    const KINDS = new Set(['ptr-unknown', 'size-unknown', 'ownership-unknown']);
+    for (const [i, d] of (M.disputes ?? []).entries()) {
+      const where = `G12 disputes[${i}]`;
+      const t2 = types[d.container];
+      if (!t2) { red(where, `容器 ${d.container} 未声明`); continue; }
+      const m = membersOf(t2).find((x) => x.offN === num(d.off));
+      if (!m) { red(where, `${d.container}+${d.off} 不是已声明成员 ⇒ 争议没有落点（先声明宽度，再记争议）`); continue; }
+      if (!Array.isArray(d.evidence) || d.evidence.length === 0) { red(where, `缺 witness EA（${d.container}+${d.off}）`); continue; }
+      if (!KINDS.has(d.kind)) { red(where, `kind ${d.kind} 不在闭集合 [${[...KINDS].join(' / ')}]`); continue; }
+      // ④ 不许过期
+      if (d.kind === 'ptr-unknown' && m.kind === 'ptr' && m.type) { red(where, `${d.container}+${d.off} 已声明成 ptr→${m.type} ⇒ 争议已解决，删掉这条`); continue; }
+      if (d.kind === 'size-unknown' && m.count != null) { red(where, `${d.container}+${d.off} 已声明 count=${m.count} ⇒ 争议已解决，删掉这条`); continue; }
+      disputes.push({ container: d.container, off: d.off, kind: d.kind, why: d.why ?? '', evidence: d.evidence });
+    }
+  }
+
+  // ── G13 全局载体（"这个数据段符号里装的是某个类型的指针"）
+  //   ★ 为什么需要：**根对象不是参数** —— Engine（IDA 类名 `Command`）是 `_WinMain@16` 里
+  //     `operator new(0xAABC8)`（`0x4baa11`）→ `call sub_415640` 构造（`0x4baa2e`）→
+  //     `mov ds:dword_55E1BC, eax`（`0x4baa3a`）存进全局的。没有这一类载体，
+  //     "从根正向传播"一步都走不了（只能继续从 op handler 倒着爬）。
+  //   三条硬要求（缺一条这条声明就是**编出来的**）：
+  //     ① 符号必须在语料里出现过（要能读到它的指令行）；
+  //     ② `witness` 必须**至少有一条 EA 是写这个符号的 store**（`mov ds:<sym>, …`）——
+  //        这是"它里面确实是这个指针"的唯一机械证据；对不上的 EA 单独报（stale，⛔ 不许掺进来凑数）；
+  //     ③ `type` 必须已声明，且同一个符号不许两种类型。
+  const globalCarriers = [];
+  {
+    const gcs = (M.carriers ?? []).filter((c) => c.kind === 'global');
+    if (gcs.length) {
+      let eaText = null;   // ★ 惰性建：只有真的声明了全局载体才扫这一遍全语料
+      const lineOf = (ea) => {
+        if (!eaText) {
+          eaText = new Map();
+          for (const ln of lines) {
+            const m = /^[A-Za-z_.][\w.]*:([0-9A-F]{8})\s+(.*)$/.exec(ln);
+            if (m) eaText.set(Number.parseInt(m[1], 16), m[2]);
+          }
+        }
+        return eaText.get(ea) ?? null;
+      };
+      const seen = new Map();
+      for (const c of gcs) {
+        const where = `G13 ${c.id}`;
+        if (!c.sym || typeof c.sym !== 'string') { red(where, '缺 `sym`（全局符号名）'); continue; }
+        const tid = String(c.type ?? '').replace(/\*|\[\]$/, '');
+        if (!types[tid]) { red(where, `类型 ${c.type} 未声明`); continue; }
+        if (seen.has(c.sym) && seen.get(c.sym) !== tid) { red(where, `全局 ${c.sym} 已声明成 ${seen.get(c.sym)}，这里又声明成 ${tid}`); continue; }
+        seen.set(c.sym, tid);
+        const w = Array.isArray(c.witness) ? c.witness : [];
+        if (!w.length) { red(where, `缺 witness EA（全局 ${c.sym}）—— "它里面装的是 ${tid} 指针"至少要有一条 store 证据`); continue; }
+        const esc = c.sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const storeRe = new RegExp(`^[a-z]+\\s+(?:.*\\b)?ds:${esc}\\s*,`, 'i');
+        const stores = [];
+        const stale = [];
+        for (const e of w) {
+          const ea = num(e);
+          const text = lineOf(ea);
+          if (text == null) { stale.push(`${e}(语料里没有这条 EA)`); continue; }
+          if (storeRe.test(text)) stores.push({ ea, text });
+          else stale.push(`${e}(${text.trim().slice(0, 40)})`);
+        }
+        if (!stores.length) { red(where, `witness 里没有一条是**写** ds:${c.sym} 的指令 ⇒ 证明不了这个全局装的是 ${tid}（对不上的：${stale.slice(0, 3).join(' · ')}）`); continue; }
+        if (stale.length) notes.push(`G13 ${c.id}: ${stale.length} 条 witness 不是 ds:${c.sym} 的 store（${stale.slice(0, 2).join(' · ')}）—— 别的用途另记，别混进 witness`);
+        globalCarriers.push({ id: c.id, sym: c.sym, type: tid, stores: stores.length });
+      }
+    }
+  }
+
+  // ── 适配器类型（`adapter:true`）：声明的是**布局约束**（"调用方在 `+K` 上有这个成员"），
+  //   不是"我是这个类"。★ 为什么必须显式标记：它是"不同调用方类在同一偏移上**相容**"这条事实的唯一落点 ——
+  //   实测 `sub_4034C0`/`D0`/`E0`（`this->+0x4` 的转发器，其中 `sub_4034E0` 还是虚调用）被 `T0` 与它的
+  //   内嵌子对象 `T_1ee8`/`T_4ed10`/`T_a609c` 四种类当 this 调用；不标记的话调用点对账会记成 4 处不一致。
+  //   两条硬要求：① 不许给 `size` / `complete`（那会把"部分布局"说成"完整对象"）；
+  //              ② 至少一个成员（空适配器什么也没约束 ⇒ 空话声明）。
+  const adapterTypes = [];
+  for (const [tid, t] of Object.entries(types)) {
+    if (t.adapter !== true) continue;
+    if (t.size != null) red(`适配器 ${tid}`, '`adapter:true` 的类型不许给 `size`（它声明的是**部分布局**，不是完整对象）');
+    if (t.complete === true) red(`适配器 ${tid}`, '`adapter:true` 的类型不许声明 `complete`（它只约束被用到的那些偏移）');
+    if (!(t.members ?? []).length) { red(`适配器 ${tid}`, '`adapter:true` 的类型至少要有一个成员（空适配器没有约束任何东西）'); continue; }
+    adapterTypes.push({ tid, members: (t.members ?? []).length });
+  }
+  if (adapterTypes.length) {
+    notes.push(`适配器类型 ${adapterTypes.map((a) => `${a.tid}(${a.members} 个成员)`).join(' · ')}`
+      + '：不同调用方类在这些偏移上**相容**（调用点对账记 🔗 一档，⛔ 不是"不一致"）');
   }
 
   // ── G6 未观察成员（观察集优先；没有观察集就退成字面量下界）
@@ -675,7 +783,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
   cons.unfalsifiable = unfalsifiable.length;
   cons.viaView = cons.obj0ExplainedViaView;
   cons.ambiguous = ambiguous.length;
-  return { findings, notes, perCarrier, cons, unfalsifiable, declaredViews, ambiguous, localCarriers: localReport, localResidues };
+  return { findings, notes, perCarrier, cons, unfalsifiable, declaredViews, ambiguous, localCarriers: localReport, localResidues, disputes, globalCarriers };
 }
 
 /** 渲染报告（终端用；测试断言 findings / cons 即可） */
@@ -733,6 +841,14 @@ export function renderReport(rep, { title = 'claims-check' } = {}) {
   if (rep.localCarriers?.length) {
     L.push('## 局部类型载体（寄存器 → 类型的**断言**；span 必须等于 `regions` 的活窗口 [from..liveTo]）');
     for (const l of rep.localCarriers) L.push(`  · ${l.id}  ${l.fn}·${l.reg} → ${l.type}*  活窗口 [${hex(l.from)}..${hex(l.to)}] 类别 ${l.cat}：站点 ${l.sites}（解释 ${l.ok} · 残差 ${l.bad}）`);
+  }
+  if (rep.globalCarriers?.length) {
+    L.push('## 全局载体（数据段符号 → 类型；**根对象**只能这么声明 —— 它不是任何函数的参数）');
+    for (const g of rep.globalCarriers) L.push(`  · ${g.id}  ds:${g.sym} → ${g.type}*（store 证据 ${g.stores} 条）`);
+  }
+  if (rep.disputes?.length) {
+    L.push('## 争议台账（**已知有争议、但下不了结论** —— 这些地方判据覆盖不到，⛔ 不能读成"已解决"）');
+    for (const d of rep.disputes) L.push(`  · ${d.container}+${d.off} [${d.kind}] ${d.why}（${d.evidence.slice(0, 3).join(' ')}）`);
   }
   if (rep.unfalsifiable?.length) {
     L.push(`## 空话声明（**没有任何用法约束它** ⇒ ⛔ **不算通过**；不是红：类型/视图是共享的，别的族文件可能才用它）：${rep.unfalsifiable.length} 条`);

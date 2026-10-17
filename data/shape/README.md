@@ -11,7 +11,7 @@
 | 落点 | 是什么 | 谁写 |
 |---|---|---|
 | `types.json` | **类型真源**：每个类型**按 id 共享一份**成员表（少数定义、多数载体） | 只有**一处**：加成员就是改这一份 |
-| `<族>-handlers.json` | **族文件**：只放 `carriers`（机器槽 → 类型），一律 `typesFrom: "types.json"` | 一个族一份；⛔ **不写 types** |
+| `carriers.json` | **载体真源（唯一一个）**：只放 `carriers`（机器槽 → 类型），`typesFrom: "types.json"` | ⛔ **不写 types**；话题不是存储轴（见 `carriers.md`） |
 
 ★ **为什么类型不放在族文件里**：类型是**中心化**数据。把它写进某个族文件，会让**其它族文件**被迫
 `typesFrom` 引用那一个族（"数值族的文件成了全仓的类型真源"）—— 组织上完全说不通，而且改一处类型要动
@@ -32,7 +32,7 @@
 ```bash
 pnpm tools shape describe                       # 分节 / 义务 / 两道守卫 / 诚实项（schema 真源）
 pnpm tools shape claims data/shape/types.json   # 类型真源自校验（G1/G4/G6/G8）
-pnpm tools shape claims data/shape/numeric-handlers.json   # 族文件：载体 × 类型 ⇒ 解释 / 残差 / 守恒①②③
+pnpm tools shape claims data/shape/carriers.json    # 载体 × 类型 ⇒ 解释 / 残差 / 守恒①②③④ + 闭合度
 pnpm tools shape access  sub_42C5E0             # 某个函数的逐 site 访问记录（EA 锚）
 pnpm tools shape census                         # ★ 全表普查（有 handler 的 opcode）：偏移聚类 / 索引簇 / 未解析报数
 pnpm tools shape bodies                         # ★ handler 体骨架：记录槽写法 + 调用序列 ⇒ 按骨架分组（族边界的依据）

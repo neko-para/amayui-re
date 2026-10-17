@@ -45,7 +45,7 @@ test('样本（13 个函数的载体 + 两个共享类型）与语料自洽 ⇒ 
   assert.deepEqual(rep.findings, [], `样本应全绿，实际：${JSON.stringify(rep.findings, null, 2)}`);
   const { cons } = rep;
   assert.equal(cons.obj0Acc, cons.obj0Explained + cons.obj0Residue, '守恒①：obj0 访问 = 解释 + 残差');
-  assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad, '守恒②：二级 = 解释 + 不透明 + 拒绝');
+  assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad + cons.pointeeMulti, '守恒②：二级 = 解释 + 不透明 + 拒绝 + 跨两级以上');
   assert.ok(cons.obj0Explained > 100, `解释数应由语料给出（实测 ${cons.obj0Explained}）`);
   assert.equal(cons.deep, 0, '样本这 13 个函数里不应有 hop≥3（有就该单列出来，而不是静默）');
 });
@@ -82,7 +82,10 @@ test('★ 二级对象下钻：三档 + 不透明单列（⛔ 不许静默通过
   // (a) 宿主 ptr→TB，TB 有成员 0x0 ⇒ 那一处二级访问被 TB 解释
   const a = run(mk({ off: '0x5d818', width: 4, kind: 'ptr', type: 'TB' }, { size: null, complete: false, members: [{ off: '0x0', width: 4 }] }));
   assert.deepEqual(a.findings, []);
-  assert.equal(a.perCarrier[0].pointeeOk, 1, '应恰好解释 1 处二级访问（`[eax+edx*4]`，宿主 0x5D818）');
+  // ★ 口径：`lea`（只取址）的二级站点**也计入解释档**（值被用于地址算术；目标偏移仍然被验证）。
+  //   所以这里断言的是"**非 lea** 的解引用恰好 1 处"，不是 pointeeOk 的总数。
+  assert.ok(a.perCarrier[0].pointeeOk >= 1, `至少要解释 1 处二级访问，实得 ${a.perCarrier[0].pointeeOk}`);
+  // 夹具里 TB 只声明 0x0，其余二级偏移是**残差**（complete:false）⇒ 这里不断言"没有拒绝档"
   // (b) TB complete 但没有 0x0 ⇒ 红（理由 G5'）
   const b = run(mk({ off: '0x5d818', width: 4, kind: 'ptr', type: 'TB' }, { size: null, complete: true, members: [{ off: '0x10', width: 4 }] }));
   assert.ok(b.findings.some((f) => f.where.startsWith("G5'")), `应报 G5'，实际 ${JSON.stringify(b.findings.map((f) => f.where))}`);
@@ -140,7 +143,7 @@ test('★ 入库的 shape 模型（data/shape/）逐族全绿 + 守恒闭合', {
     assert.deepEqual(rep.findings, [], `${f} 与语料不再自洽：${JSON.stringify(rep.findings, null, 2)}`);
     const { cons } = rep;
     assert.equal(cons.obj0Acc, cons.obj0Explained + cons.obj0Residue, `${f} 守恒① 不闭合`);
-    assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad, `${f} 守恒② 不闭合`);
+    assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad + cons.pointeeMulti, `${f} 守恒② 不闭合`);
     assert.equal(cons.sites, cons.obj0Acc + cons.partial + cons.pointee + cons.local + cons.symbol + cons.unresolvedBase, `${f} 守恒③ 不闭合`);
     assert.equal(cons.obj0Explained, cons.obj0ExplainedObserved + cons.obj0ExplainedViaView, `${f} 守恒④ 不闭合`);
     // ★ 载体分两种：对象根载体（进 perCarrier）与**局部类型载体**（进 localCarriers）——

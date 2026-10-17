@@ -1,0 +1,669 @@
+{
+  "schema": "amayui.claims/1",
+  "typesFrom": "types.json",
+  "carriers": [
+    {
+      "id": "g01",
+      "kind": "global",
+      "sym": "dword_55E1BC",
+      "type": "T0*",
+      "witness": [
+        "0x4baa3a"
+      ]
+    },
+    {
+      "id": "c20",
+      "kind": "arg",
+      "fn": "sub_401410",
+      "reg": "ecx",
+      "type": "T_a609c_3028*"
+    },
+    {
+      "id": "c14",
+      "kind": "arg",
+      "fn": "sub_403EF0",
+      "reg": "ecx",
+      "type": "T_55d8*"
+    },
+    {
+      "id": "c73",
+      "kind": "arg",
+      "fn": "sub_40BEB0",
+      "reg": "ecx",
+      "type": "T_1ee8*"
+    },
+    {
+      "id": "c42",
+      "kind": "arg",
+      "fn": "sub_40BF20",
+      "reg": "ecx",
+      "type": "T_1ee8*"
+    },
+    {
+      "id": "c33",
+      "kind": "arg",
+      "fn": "sub_40C780",
+      "reg": "ecx",
+      "type": "T_77960*"
+    },
+    {
+      "id": "c07",
+      "kind": "arg",
+      "fn": "sub_40DF10",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "c04",
+      "kind": "arg",
+      "fn": "sub_40EA00",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "c03",
+      "kind": "arg",
+      "fn": "sub_40ED40",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "c06",
+      "kind": "arg",
+      "fn": "sub_40F750",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "c08",
+      "kind": "arg",
+      "fn": "sub_40FB60",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f01",
+      "kind": "arg",
+      "fn": "sub_41A820",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f04",
+      "kind": "arg",
+      "fn": "sub_41A9B0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f10",
+      "kind": "arg",
+      "fn": "sub_41AB80",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "c01",
+      "kind": "arg",
+      "fn": "sub_41BF50",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "c05",
+      "kind": "arg",
+      "fn": "sub_41C300",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f02",
+      "kind": "arg",
+      "fn": "sub_41C6A0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f03",
+      "kind": "arg",
+      "fn": "sub_41C770",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f05",
+      "kind": "arg",
+      "fn": "sub_41C7C0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f06",
+      "kind": "arg",
+      "fn": "sub_41C8D0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f07",
+      "kind": "arg",
+      "fn": "sub_41C900",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f11",
+      "kind": "arg",
+      "fn": "sub_4203D0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f12",
+      "kind": "arg",
+      "fn": "sub_420560",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "l01",
+      "kind": "local",
+      "fn": "sub_421450",
+      "reg": "edi",
+      "span": [
+        "0x421544",
+        "0x4215ca"
+      ],
+      "type": "T_5c73c_0*"
+    },
+    {
+      "id": "l02",
+      "kind": "local",
+      "fn": "sub_421690",
+      "reg": "edi",
+      "span": [
+        "0x421784",
+        "0x42180a"
+      ],
+      "type": "T_5c73c_0*"
+    },
+    {
+      "id": "c83",
+      "kind": "arg",
+      "fn": "sub_428990",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "f08",
+      "kind": "arg",
+      "fn": "sub_428A60",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "f09",
+      "kind": "arg",
+      "fn": "sub_429460",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "l03",
+      "kind": "local",
+      "fn": "sub_429460",
+      "reg": "esi",
+      "span": [
+        "0x429604",
+        "0x42981e"
+      ],
+      "type": "T0*"
+    },
+    {
+      "id": "c02",
+      "kind": "arg",
+      "fn": "sub_42B4B0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "c09",
+      "kind": "arg",
+      "fn": "sub_42BA00",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n01",
+      "kind": "arg",
+      "fn": "sub_42C5E0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n02",
+      "kind": "arg",
+      "fn": "sub_42C620",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n03",
+      "kind": "arg",
+      "fn": "sub_42C660",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n04",
+      "kind": "arg",
+      "fn": "sub_42C6A0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n05",
+      "kind": "arg",
+      "fn": "sub_42C6E0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n06",
+      "kind": "arg",
+      "fn": "sub_42C720",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n07",
+      "kind": "arg",
+      "fn": "sub_42C750",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n08",
+      "kind": "arg",
+      "fn": "sub_42C790",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n09",
+      "kind": "arg",
+      "fn": "sub_42C7D0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n10",
+      "kind": "arg",
+      "fn": "sub_42C820",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n11",
+      "kind": "arg",
+      "fn": "sub_42C870",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n12",
+      "kind": "arg",
+      "fn": "sub_42C8C0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n13",
+      "kind": "arg",
+      "fn": "sub_42C910",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n14",
+      "kind": "arg",
+      "fn": "sub_42C960",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n15",
+      "kind": "arg",
+      "fn": "sub_42C9B0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n16",
+      "kind": "arg",
+      "fn": "sub_42CA00",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n17",
+      "kind": "arg",
+      "fn": "sub_42CA50",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n18",
+      "kind": "arg",
+      "fn": "sub_42CEC0",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "n19",
+      "kind": "arg",
+      "fn": "sub_430A50",
+      "reg": "ecx",
+      "type": "T0*"
+    },
+    {
+      "id": "c41",
+      "kind": "arg",
+      "fn": "sub_437440",
+      "reg": "ecx",
+      "type": "T_511c*"
+    },
+    {
+      "id": "c74",
+      "kind": "arg",
+      "fn": "sub_43E9F0",
+      "reg": "ecx",
+      "type": "T_1ee8*"
+    },
+    {
+      "id": "c65",
+      "kind": "arg",
+      "fn": "sub_44A9A0",
+      "reg": "ecx",
+      "type": "T_1ee8*"
+    },
+    {
+      "id": "c21",
+      "kind": "arg",
+      "fn": "sub_454960",
+      "reg": "ecx",
+      "type": "T_a609c*"
+    },
+    {
+      "id": "c10",
+      "kind": "arg",
+      "fn": "sub_454FA0",
+      "reg": "ecx",
+      "type": "T_a609c*"
+    },
+    {
+      "id": "c30",
+      "kind": "arg",
+      "fn": "sub_455420",
+      "reg": "ecx",
+      "type": "T_a609c*"
+    },
+    {
+      "id": "c13",
+      "kind": "arg",
+      "fn": "sub_455560",
+      "reg": "ecx",
+      "type": "T_a609c*"
+    },
+    {
+      "id": "c12",
+      "kind": "arg",
+      "fn": "sub_4559C0",
+      "reg": "ecx",
+      "type": "T_a609c*"
+    },
+    {
+      "id": "c11",
+      "kind": "arg",
+      "fn": "sub_455C60",
+      "reg": "ecx",
+      "type": "T_a609c*"
+    },
+    {
+      "id": "c52",
+      "kind": "arg",
+      "fn": "sub_455D20",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c54",
+      "kind": "arg",
+      "fn": "sub_456C90",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c82",
+      "kind": "arg",
+      "fn": "sub_456DF0",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c84",
+      "kind": "arg",
+      "fn": "sub_4581F0",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c85",
+      "kind": "arg",
+      "fn": "sub_4587D0",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c55",
+      "kind": "arg",
+      "fn": "sub_459A20",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c80",
+      "kind": "arg",
+      "fn": "sub_459C50",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c50",
+      "kind": "arg",
+      "fn": "sub_459F40",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c51",
+      "kind": "arg",
+      "fn": "sub_45A6E0",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c32",
+      "kind": "arg",
+      "fn": "sub_45D240",
+      "reg": "ecx",
+      "type": "T_5d860*"
+    },
+    {
+      "id": "c53",
+      "kind": "arg",
+      "fn": "sub_45EBE0",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c15",
+      "kind": "arg",
+      "fn": "sub_465390",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c81",
+      "kind": "arg",
+      "fn": "sub_4745A0",
+      "reg": "ecx",
+      "type": "T_14d30*"
+    },
+    {
+      "id": "c71",
+      "kind": "arg",
+      "fn": "sub_477130",
+      "reg": "ecx",
+      "type": "T_408*"
+    },
+    {
+      "id": "c70",
+      "kind": "arg",
+      "fn": "sub_477220",
+      "reg": "ecx",
+      "type": "T_408*"
+    },
+    {
+      "id": "c16",
+      "kind": "arg",
+      "fn": "sub_4774F0",
+      "reg": "ecx",
+      "type": "T_408*"
+    },
+    {
+      "id": "c72",
+      "kind": "arg",
+      "fn": "sub_477C30",
+      "reg": "ecx",
+      "type": "T_408*"
+    },
+    {
+      "id": "c40",
+      "kind": "arg",
+      "fn": "sub_478090",
+      "reg": "ecx",
+      "type": "T_408*"
+    },
+    {
+      "id": "c60",
+      "kind": "arg",
+      "fn": "sub_499BC0",
+      "reg": "ecx",
+      "type": "T_4ed10*"
+    },
+    {
+      "id": "c63",
+      "kind": "arg",
+      "fn": "sub_49A300",
+      "reg": "ecx",
+      "type": "T_4ed10*"
+    },
+    {
+      "id": "c66",
+      "kind": "local",
+      "fn": "sub_49A300",
+      "reg": "esi",
+      "span": [
+        "0x49a308",
+        "0x49a62e"
+      ],
+      "type": "T_4ed10_460*"
+    },
+    {
+      "id": "c61",
+      "kind": "arg",
+      "fn": "sub_49A690",
+      "reg": "ecx",
+      "type": "T_4ed10*"
+    },
+    {
+      "id": "c64",
+      "kind": "arg",
+      "fn": "sub_49E980",
+      "reg": "ecx",
+      "type": "T_4ed10*"
+    },
+    {
+      "id": "c62",
+      "kind": "arg",
+      "fn": "sub_4AA180",
+      "reg": "ecx",
+      "type": "T_4ed10*"
+    },
+    {
+      "id": "c31",
+      "kind": "arg",
+      "fn": "sub_4AB7A0",
+      "reg": "ecx",
+      "type": "T_4ed10*"
+    },
+    {
+      "id": "c22",
+      "kind": "arg",
+      "fn": "sub_4B51E0",
+      "reg": "ecx",
+      "type": "T_143bc*"
+    },
+    {
+      "id": "c23",
+      "kind": "arg",
+      "fn": "sub_4B8530",
+      "reg": "ecx",
+      "type": "T_1ee8*"
+    },
+    {
+      "id": "c86",
+      "kind": "arg",
+      "fn": "sub_4034C0",
+      "reg": "ecx",
+      "type": "T_BaseObject*"
+    },
+    {
+      "id": "c87",
+      "kind": "arg",
+      "fn": "sub_4034D0",
+      "reg": "ecx",
+      "type": "T_BaseObject*"
+    },
+    {
+      "id": "c88",
+      "kind": "arg",
+      "fn": "sub_4034E0",
+      "reg": "ecx",
+      "type": "T_BaseObject*"
+    },
+    {
+      "id": "c89",
+      "kind": "arg",
+      "fn": "sub_438CC0",
+      "reg": "ecx",
+      "type": "T_RemoteDebug*"
+    },
+    {
+      "id": "c90",
+      "kind": "arg",
+      "fn": "sub_497620",
+      "reg": "ecx",
+      "type": "T_RemoteDebug*"
+    },
+    {
+      "id": "c91",
+      "kind": "arg",
+      "fn": "sub_4976A0",
+      "reg": "ecx",
+      "type": "T_RemoteDebug*"
+    }
+  ],
+  "disputes": []
+}

@@ -147,6 +147,7 @@ function constOf(v) { const x = asAff(v); return x && x.k === 0 ? x.b : null; }
 function foldNote(v) {
   if (isUnk(v)) return '?';
   if (v.t === 'this') return 'obj';
+  if (v.t === 'glob') return `ds:${v.sym}`;   // ★ 全局里装着的东西（`glob` 的语义见 `evalOperand`）
   if (v.t === 'addr') return `&(${objName(v.obj, v.off)}${v.terms.length ? '+idx' : ''})`;
   if (v.t === 'load') return v.sym;
   if (v.t === 'val') return v.sym ? `${v.k}*${v.sym}${v.b ? `+0x${(v.b >>> 0).toString(16)}` : ''}` : `0x${(v.b >>> 0).toString(16)}`;
@@ -251,6 +252,9 @@ function vkey(v) {
   if (!v || v.t === 'unk') return 'unk';
   if (v.t === 'this') return 'this';
   if (v.t === 'flag') return 'flag';
+  // ★ 符号必须进 key：否则两个不同的全局（`ds:dword_A` / `ds:dword_B`）在汇合点被当成同一个值，
+  //   `mergeState` 会**静默保留**其中一支（实测形态：`var = cond ? ds:X : ds:Y`）。
+  if (v.t === 'glob') return `glob:${v.seg ?? 'ds'}:${v.sym}`;
   if (v.t === 'addr') return `addr:${v.obj}:${v.off}:${(v.path ?? []).join(',')}:${(v.terms ?? []).map((t) => `${t.sym}*${t.k}*${t.scale}`).join(',')}`;
   if (v.t === 'load') return `load:${v.obj}:${v.off}:${(v.path ?? []).join(',')}`;
   if (v.t === 'val') return `val:${v.sym ?? ''}:${v.k}:${v.b}`;
@@ -432,6 +436,7 @@ function linkOf(fr, body, ea, line, rawLine) {
   let cls = 'none';
   let detail = null;
   if (v.t === 'this') cls = 'same';
+  else if (v.t === 'glob') { cls = 'global'; detail = `ds:${v.sym}`; }
   else if (v.t === 'addr' && v.obj === 'this') { cls = 'embed'; detail = `this+0x${v.off.toString(16)}`; }
   else if (v.t === 'load' && v.obj === 'this') { cls = 'memberptr'; detail = `*(this+0x${v.off.toString(16)})`; }
   else if (v.t === 'val') cls = 'other-value';
@@ -442,6 +447,7 @@ function linkOf(fr, body, ea, line, rawLine) {
     const x = fr.get(reg);
     if (!x || x.t === 'unk' || x.t === 'flag') return { k: 'unknown' };
     if (x.t === 'this') return { k: 'this' };
+    if (x.t === 'glob') return { k: 'global', sym: x.sym, seg: x.seg ?? 'ds' };
     if (x.t === 'addr') return { k: 'interior', obj: x.obj, off: x.off, path: x.path ?? [] };
     if (x.t === 'load') return { k: 'member', obj: x.obj, off: x.off, path: x.path ?? [] };
     if (x.t === 'val') return { k: 'val', sym: x.sym ?? null };
@@ -619,6 +625,14 @@ function evalOperand(fr, raw) {
   m = /^(-?\d+)$/.exec(s);
   if (m) return aff(0, Number(m[1]));
   if (/^offset\s+/i.test(s)) return UNK; // 立即数地址：不是"碰了某个偏移"
+  // ★ **数据段符号**（`mov ecx, ds:dword_55E1BC`）：值是"某个全局槽里装着的东西" ——
+  //   既不是常量、也不是 obj0 的成员。**旧写法落到 UNK** ⇒「调用点上这个寄存器来自全局」整类消失
+  //   （实测：全库 7212 个调用点里 ecx 解不出类型的有 4256 个，其中最大一撮就是这个形态）。
+  //   而 `dword_55E1BC` 正是 Command（= Engine）的**唯一存放点**（WinMain 里 `operator new` → ctor → store，
+  //   `0x4baa11` / `0x4baa2e` / `0x4baa3a`）⇒ 少了这一类，"从根正向传播"一步都走不了。
+  //   ⛔ 带方括号的（`ds:8[ecx*8]`，位移写在段前缀里）**不是**符号，仍交给 `parseMem`。
+  const segm = SEGSYM.exec(s);
+  if (segm && !segm[2].includes('[')) return { t: 'glob', seg: segm[1].toLowerCase(), sym: segm[2].trim() };
   const mem = parseMem(s);
   if (mem && mem.stack) {
     // ★ 栈槽**只**在"存过"的时候有值；没存过 ⇒ UNK（⛔ 不许猜成"某个对象"）

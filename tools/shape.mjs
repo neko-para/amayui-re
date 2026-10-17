@@ -28,6 +28,7 @@ import { deriveRegions, insnsOf } from './lib/shape-regions.mjs';
 import { checkRow, describeEa, loadRaw } from './lib/shape-verify.mjs';
 import { coverageOf, renderCoverage } from './lib/shape-coverage.mjs';
 import { auditCalls, renderCalls } from './lib/shape-calls.mjs';
+import { propagate, nextCandidates } from './lib/shape-propagate.mjs';
 import { fileURLToPath } from 'node:url';
 
 /** 本仓根（本域要拿语料分派表 ⇒ 与 `lib/opcodes.mjs` 的口径一致；不 import `cli.mjs`，免得转出循环依赖） */
@@ -52,6 +53,7 @@ export const OPERATIONS = [
   { name: 'census', argv: ['--census'], mutates: false, summary: '★ **全表普查**：每个**有 handler 的 opcode**（判据 = 语料分派表）的站点分类 / `obj0` 偏移聚类 / 索引簇 / 未解析三类报数（`--match <sym>` 收窄 · `--json` 全量）' },
   { name: 'bodies', argv: ['--bodies'], mutates: false, summary: '★ **handler 体骨架普查**：记录槽写法（哪个立即数写进哪个位移）+ 调用序列（每个 callee 的实参立即数）⇒ 按骨架分组（`--match` · `--json`）—— 这是 A1–A6 的**可算版**' },
   { name: 'claims', argv: ['--claims'], mutates: false, summary: '★ **功能②**：校验 claims 文件（守卫 / G1..G6 / J3 / 双守恒）；`--sample` 用内置样本' },
+  { name: 'propagate', argv: ['--propagate'], mutates: false, summary: '★ **类型传播（全图 BFS）**：从已声明载体沿调用图推导每个函数根寄存器是什么类 ⇒ 批次顺序 + "类判定"的**唯一机械依据**（⛔ 不按偏移命中率猜类）' },
   { name: 'calls', argv: ['--calls'], mutates: false, summary: '★ 调用点类型对账（跨函数）：调用方实参来源 → 被调方的载体声明 ⇒ 一致 / 不一致 / 单侧缺声明（不拿同偏移顶替类型；栈上传参本版不覆盖）' },
   { name: 'coverage', argv: ['--coverage'], mutates: false, summary: '★ **闭合度**：指令级记账 —— 未归类行 / 间接调用 / 间接跳转 / 抛异常 / x87·SSE 内存操作数 / 基址未解析 ⇒ 判 `L0 形状闭合`（**回答"这个函数分析完了吗"**；`--all [--limit N]`）' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：claims 分节 / 义务 / 两道守卫 / 诚实项（schema 的真源）' },
@@ -81,6 +83,11 @@ export function describeText() {
                **可证伪性**（零观察 / 多余的视图单列），语义**不由本层背书**
              ★ \`type\` 在成员上有**两个意思**，按 \`kind\` 分岔：\`kind:"ptr"\` 时是**被指向的类型**（不该配 \`count\`）；
                否则是**数组元素类型**（必须配 \`count\`——写 \`null\` 就得配 \`sweep\`）
+             ★ \`adapter:true\`：这个类型是**布局约束**（"调用方在 +K 上有这个成员"），不是"我是这个类" ——
+               用于 \`this->成员\` 的转发器（实测 \`sub_4034C0\`/\`D0\`/\`E0\` 都做 \`mov ecx,[ecx+4]\` 之后转发，
+               其中 \`sub_4034E0\` 是 \`mov eax,[ecx]; mov eax,[eax+8]; jmp eax\` = **虚调用**），
+               被 \`T0\` 与内嵌子对象 \`T_1ee8\`/\`T_4ed10\`/\`T_a609c\` 四种类当 this 调用。
+               硬要求：⛔ 不许 \`size\` · ⛔ 不许 \`complete\` · 至少一个成员；调用点对账记 🔗 一档（⛔ 不是"不一致"）。
              ★ 类型**集中在自己的文件里**（本仓落点 data/shape/types.json）—— 族文件只放**载体**，
                一律 typesFrom 引用它；⛔ 不许把类型写进某个族文件（那会逼别的族文件去引用它）
   carriers   机器槽 → 类型：kind ∈ arg{fn,reg|off} / local{fn,off} / global{sym}
@@ -115,7 +122,24 @@ export function describeText() {
      ★ 没有这一条时，这几类会**从访问总数里静默消失**（数字变小，不报错）
      ★ 未解析**按载体**报数并给样例 EA（按基址寄存器分组）；⛔ 那不是"已通过"，是"形状层表达不了"
   守恒④（**解释分档**：解释 = **观测档** + **视图推测档**）—— 分不开就审不出"哪条结论是猜的"
-
+  G13 **全局载体**（\`{kind:"global", sym, type, witness}\`）= "这个数据段符号里装的是 T 的指针"。
+     ★ 为什么必须有：**根对象不是参数** —— Engine（IDA 类名 \`Command\`）由 \`_WinMain@16\` 里
+       \`push 0AABC8h\` + \`operator new\`(0x4baa11) → \`call sub_415640\`(0x4baa2e) → \`mov ds:dword_55E1BC, eax\`(0x4baa3a)
+       构造之后才进全局。没有这一类，从根**正向**传播一步都走不了（只能从 op handler 倒着爬）。
+     三条硬要求：① \`sym\` 在语料里真实出现；② \`witness\` 里**至少一条 EA 是写该符号的 store**（\`mov ds:sym, …\`）
+     —— 这是"它装的确实是那个指针"的唯一机械证据（对不上的 EA 单列，⛔ 不许凑数）；③ \`type\` 已声明，
+     且同一个符号不许两种类型（否则下游传播会随声明顺序漂）。
+     ★ 传播（--propagate）：调用点上 \`ecx\` 的来源是 \`k:'global'\` 且该符号有声明 ⇒ 被调方根类型 = 该类型；
+       没声明的全局**不传播**；被调方**必须真的收 this**（\`__cdecl\` 里的 ecx 是残留值 ⇒ 记上去是假断言 / 假冲突）。
+     ★ **同偏移不同类 = 基类相容，不是冲突**：\`sub_4034C0\`/\`sub_4034D0\`/\`sub_4034E0\` 是 \`this->+0x4\` 的**转发器**
+       （0x4034c3 \`mov ecx,[ecx+4]\` + \`jmp sub_497620\`；0x4034e6 \`mov eax,[ecx]; mov eax,[eax+8]; jmp eax\` = **虚调用**），
+       被 4 个类当 this 调用（T0 与其内嵌子对象 T_1ee8/T_4ed10/T_a609c）—— 真相是**通用基类 \`BaseObject\`**
+       （RTTI 名 \`??_7BaseObject@@6B@\`）：构造器 \`sub_4034a0\` 在 0x4034a2 写 vtable、在 0x4034a8 写
+       \`[this+4] = offset dword_55BF70\`（**全局输出对象**的地址），而它有 26 个调用方（全是各类的构造器，
+       含 0x415640 的 \`sub_415640\`=Command）⇒ 子类在**偏移 0** 处就是 \`BaseObject\`，\`this\` 无需调整。
+       ⇒ 声明成 \`T_BaseObject\`（\`adapter:true\` = 基类前缀：\`+0x0\` vtable · \`+0x4\` ptr→\`T_RemoteDebug\`）。
+       ★ 传播规则因此是 **"声明 > 推断"**：被调方已有载体时，推断出的另一类只记 note（"调用方类是它的子类"），
+       ⛔ 不记冲突；冲突只发生在**两侧都是推断**时。
 两道守卫
   词汇  出现 ${VOCAB.join(' / ')} ⇒ 红（那是 B 层：data/ledger/，走 AGENTS §6 准入门）
   冗余  字段名出现 ${REDUNDANT.join(' / ')} ⇒ 红（这些都能从 EA + 语料机械读出）
@@ -154,12 +178,12 @@ function observedSet(lines) {
   return set;
 }
 
-function runAccess(sym) {
+function runAccess(sym, opts = {}) {
   const lines = loadListing();
   const roots = objRootRegs();
   const sp = functionSpans(lines).find((s) => s.sym === sym);
   if (!sp) { process.stderr.write(`找不到函数 ${sym}\n`); return 2; }
-  const { sites } = analyzeLines(lines, sp.from, sp.to, roots.get(sym) ?? null, {});
+  const { sites } = analyzeLines(lines, sp.from, sp.to, roots.get(sym) ?? null, opts);
   process.stdout.write(`# ${sym}（行 ${sp.from + 1}-${sp.to + 1}）  对象根寄存器=${roots.get(sym) ?? '（.c 约定里没有）'}  访问 ${sites.length} 处\n`);
   for (const s of sites) {
     process.stdout.write(`  ${hex(s.ea)}  ${String(s.mn).padEnd(6)} ${s.access} w=${String(s.width).padEnd(7)} base=${String(s.baseKind).padEnd(10)}`
@@ -270,6 +294,12 @@ function runCoverage(args) {
     if (!sp) { process.stderr.write(`找不到函数 ${sym}\n`); continue; }
     const { sites } = analyzeLines(lines, sp.from, sp.to, roots.get(sym) ?? null, {});
     const cov = coverageOf(lines, sym, sp, roots.get(sym) ?? null, sites);
+    // ★ 两档对照：把"保守档杀 call 后的 caller-saved"与"真的解不出"分开（§9 口径）
+    {
+      const cal = analyzeLines(lines, sp.from, sp.to, roots.get(sym) ?? null, { killCallerSavedOnCall: false });
+      const covCal = coverageOf(lines, sym, sp, roots.get(sym) ?? null, cal.sites);
+      cov.tierCompare = { conservative: cov.siteStates.unresolvedBase, calibrated: covCal.siteStates.unresolvedBase };
+    }
     if (cov.closed) closed += 1;
     else {
       unclosed += 1;
@@ -308,6 +338,115 @@ function runCalls(args) {
   return r.rows.some((x) => x.verdict === 'mismatch') ? 1 : 0;
 }
 
+/** ★ 全图类型传播：谁是什么类、下一批是谁 */
+function runPropagate(args) {
+  const lines = loadListing();
+  const spanOf = new Map(functionSpans(lines).map((s) => [s.sym, s]));
+  const roots = objRootRegs();
+  const dir = 'data/shape';
+  let types = {};
+  const carriers = [];
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
+    const m = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    if (m.types) { types = m.types; continue; }
+    for (const c of m.carriers ?? []) carriers.push(c);
+  }
+  const cache = new Map();
+  const analyzeFn = (sym) => {
+    if (cache.has(sym)) return cache.get(sym);
+    const sp = spanOf.get(sym);
+    const r = sp ? analyzeLines(lines, sp.from, sp.to, roots.get(sym) ?? null, {}) : null;
+    cache.set(sym, r);
+    return r;
+  };
+  // ★ **全局根**（`kind:"global"`）：根对象（Command / Engine）不是任何函数的参数 ——
+  //   `_WinMain@16` 里 `operator new(0xAABC8)` → `call sub_415640` → `mov ds:dword_55E1BC, eax`（0x4baa11/2e/3a）。
+  //   ⇒ "体内碰过这个全局"的函数是唯一能定出 `this=Command` 的入口；它们是文本级定位（机械），
+  //     类型判定仍旧只交给 `propagate` 里那一条 `global` 规则（⛔ 这里不判类）。
+  const globals = new Map();
+  for (const c of carriers) if (c.kind === 'global' && c.sym && c.type) globals.set(c.sym, c.type.replace(/\*$/, ''));
+  const extraCallers = [];
+  if (globals.size) {
+    const esc = [...globals.keys()].map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const symRe = new RegExp(`ds:(?:${esc.join('|')})\\b`, 'i');
+    const spans = [...spanOf.values()].sort((a, b) => a.from - b.from);
+    const seen = new Set();
+    let si = 0;
+    for (let i = 0; i < lines.length && si < spans.length; i += 1) {
+      while (si < spans.length && spans[si].to < i) si += 1;
+      if (si >= spans.length) break;
+      if (i < spans[si].from) continue;
+      if (symRe.test(lines[i]) && !seen.has(spans[si].sym)) { seen.add(spans[si].sym); extraCallers.push(spans[si].sym); }
+    }
+  }
+  const { inferred, linksSeen, conflicts, declaredMismatch } = propagate({
+    carriers, types, analyzeFn, globals, extraCallers,
+    // ★ 只往"根寄存器就是 ecx"的被调方传播：`__cdecl` 函数里的 ecx 是残留值，不是 this
+    acceptTarget: (sym) => roots.get(sym) === 'ecx',
+  });
+  const next = nextCandidates({ inferred, carriers });
+  if (args.includes('--json')) {
+    process.stdout.write(`${JSON.stringify({ inferred: Object.fromEntries(inferred), next, linksSeen, conflicts, declaredMismatch }, null, 2)}\n`);
+    return conflicts.length ? 1 : 0;
+  }
+  const byType = new Map();
+  for (const [fn, v] of inferred) {
+    if (!byType.has(v.type)) byType.set(v.type, []);
+    byType.get(v.type).push(fn);
+  }
+  process.stdout.write(`# 类型传播（全图 BFS）：${inferred.size} 个函数的根类型可推导 · 扫过 ${linksSeen} 个调用点\n`);
+  if (globals.size) {
+    process.stdout.write(`  全局根 ${globals.size} 个（${[...globals].map(([s, t]) => `${s}: ${t}*`).join(' · ')}）`
+      + ` ⇒ 根锚定扫描种子 ${extraCallers.length} 个函数${extraCallers.length ? `（${extraCallers.slice(0, 6).join(' ')}${extraCallers.length > 6 ? ' …' : ''}）` : ''}\n`);
+  }
+  for (const [ty, fns] of [...byType].sort((a, b) => b[1].length - a[1].length)) {
+    process.stdout.write(`  ${ty}: ${fns.length} 个函数${fns.length <= 8 ? '  ' + fns.join(' ') : '  ' + fns.slice(0, 8).join(' ') + ' …'}\n`);
+  }
+  process.stdout.write(`\n★ 下一批候选（已被传播确定类型、尚无载体）：${next.length} 个\n`);
+  for (const n of next.slice(0, args.includes('--all') ? next.length : 24)) {
+    process.stdout.write(`  ${n.fn} → ${n.type}（${n.hops} 跳，来自 ${n.via}）\n`);
+  }
+  if (conflicts.length) {
+    // ★ **按被调方分组报**：一个函数被推出两种类，只有两类解释 ——
+    //   ① 它是**通用/转发助手**（`sub_4034C0`：`mov ecx,[ecx+4]; jmp sub_497620`，任何类的 `+4` 都能喂它）
+    //      ⇒ 结论是"**不许给它声明载体**"，不是"某处声明错了"；
+    //   ② 真的有一处声明错（那要具体到 EA 才能判）。
+    //   只按单条 EA 平铺会让人以为有 84 处错误；按目标分组才能看出是 5 个通用助手。
+    const byTarget = new Map();
+    for (const c of conflicts) {
+      const g = byTarget.get(c.target) ?? { classes: new Set(), sites: [] };
+      g.classes.add(c.had); g.classes.add(c.now); g.sites.push(c);
+      byTarget.set(c.target, g);
+    }
+    process.stdout.write(`\n⚠ ${conflicts.length} 处**传播冲突**，分布在 ${byTarget.size} 个被调方上`
+      + `（同一函数被推出两种类，且它**没有**载体声明 ⇒ 要么某处声明错，要么它是适配器/基类，该给它一条声明）：\n`);
+    const ranked = [...byTarget].sort((a, b) => b[1].sites.length - a[1].sites.length);
+    for (const [target, g] of ranked.slice(0, 12)) {
+      process.stdout.write(`  ${target}：${g.classes.size} 种类 [${[...g.classes].join(' / ')}]，${g.sites.length} 处`
+        + `　例：${g.sites.slice(0, 3).map((c) => `${c.from}@0x${c.ea.toString(16)}`).join(' ')}\n`);
+    }
+    if (ranked.length > 12) process.stdout.write(`  …（另有 ${ranked.length - 12} 个被调方；--json 看全量）\n`);
+  }
+  if (declaredMismatch?.length) {
+    // ★ **声明 > 推断**：被调方已有载体，推断出的另一类不算冲突 —— 它是"这个被调方不是调用方那一类的实例方法"，
+    //   最典型的是 `this->成员` 的转发器（`mov ecx,[ecx+4]; jmp …`，甚至是虚调用）。
+    //   ⛔ 这里不红、也不许悄悄吞掉：逐被调方点名，让人看见"有多少调用方类在这一偏移上相容"。
+    const byT = new Map();
+    for (const d of declaredMismatch) {
+      const g = byT.get(d.target) ?? { declared: d.declared, implied: new Set(), sites: [] };
+      g.implied.add(d.implied); g.sites.push(d);
+      byT.set(d.target, g);
+    }
+    process.stdout.write(`\n· ${declaredMismatch.length} 处"推断与**已声明载体**不一致"，分布在 ${byT.size} 个被调方上`
+      + `（⇒ 声明优先，不是冲突；这些被调方是**适配器/基类**，调用方类在它的偏移上相容）：\n`);
+    for (const [target, g] of [...byT].sort((a, b) => b[1].sites.length - a[1].sites.length).slice(0, 8)) {
+      process.stdout.write(`  ${target}：声明 ${g.declared} ← 被这些类当 ${[...g.implied].join(' / ')} 调用（${g.sites.length} 处）\n`);
+    }
+  }
+  // ★ 传播冲突是**诊断**（同一被调方收到两种类 ⇒ 通用函数 / 某处声明错），不是验收判据：默认 exit 0
+  return args.includes('--strict') && conflicts.length ? 1 : 0;
+}
+
 function runClaims(target) {
   const lines = loadListing();
   let model;
@@ -328,7 +467,7 @@ function runClaims(target) {
   {
     const spanOf = new Map(functionSpans(lines).map((s) => [s.sym, s]));
     const roots = objRootRegs();
-    const fns = [...new Set((model.carriers ?? []).map((c) => c.fn))];
+    const fns = [...new Set((model.carriers ?? []).filter((c) => c.kind !== 'global').map((c) => c.fn))];
     const bad = [];
     let closedN = 0;
     for (const fn of fns) {
@@ -350,7 +489,7 @@ export async function main(argv = process.argv.slice(2)) {
   const [flag, ...rest] = argv;
   const pos = rest.filter((a) => !a.startsWith('--'));
   switch (flag) {
-    case '--access': return runAccess(pos[0]);
+    case '--access': return runAccess(pos[0], argv.includes('--calibrated') ? { killCallerSavedOnCall: false } : {});
     case '--verify': {
       const ea = Number.parseInt(pos[0] ?? '', 16);
       const raw = loadRaw();
@@ -363,6 +502,7 @@ export async function main(argv = process.argv.slice(2)) {
     case '--census': return runCensus(argv);
     case '--coverage': return runCoverage(argv);
     case '--calls': return runCalls(argv);
+    case '--propagate': return runPropagate(argv);
     case '--bodies': return runBodies(argv);
     case '--claims': return runClaims(pos[0]);
     case '--describe': process.stdout.write(describeText()); return 0;
