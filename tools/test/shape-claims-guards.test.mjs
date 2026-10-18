@@ -1241,3 +1241,53 @@ test('★㉚ G15 翻红：索引访问落在**标量**成员上 ⇒ 红；落在
   assert.ok(g15.some((n) => n.includes('count:1')), `count:1 要单列 note：${JSON.stringify(g15)}`);
   assert.ok(g15.some((n) => n.includes('**数组**')), `真数组要记「形态已被数组承住」：${JSON.stringify(g15)}`);
 });
+
+
+test('★㉛ G4 查的是**绝对地址**：内嵌子对象的数组末尾必须换算到绝对偏移（否则假红「末尾 0x4 零引用」）', () => {
+  // 父类型 T0 在 0x1000 内嵌 TX{size:0x20}；TX 里 off 0 放 T_el32×8（相对末尾 0x20 = 绝对 0x1020）。
+  // 语料里**只让绝对 0x1020 出现**、从不出现字面量 0x20 ⇒ 用相对偏移查引用会判「无依据」（假红）。
+  const L20 = [
+    '.text:00402000 sub_402000 proc near',
+    '.text:00402000 mov     esi, ecx',
+    '.text:00402002 mov     eax, [esi+1020h]',   // 绝对末尾（TX 的数组正好填满 TX）
+    '.text:00402008 retn',
+    '.text:00402008 sub_402000 endp',
+  ];
+  const TX = { size: 0x20, complete: false, members: [{ off: '0x0', type: 'T_el32', count: 8 }] };
+  const m0 = base([{ off: '0x1000', type: 'TX', count: 1 }], { TX, T_el32: { size: 4, complete: false, members: [{ off: '0x0', width: 4 }] } });
+  const m = { ...m0, carriers: [{ id: 'g31', kind: 'arg', fn: 'sub_402000', reg: 'ecx', type: 'T0*' }] };
+  const rep = checkClaims(m, { lines: L20, baseDir: '.', observed: new Set([0x1020]), roots: new Map([['sub_402000', 'ecx']]) });
+  assert.deepEqual(rep.findings, [], `G4 不该判红（绝对末尾 0x1020 有引用）：${JSON.stringify(rep.findings)}`);
+  assert.ok(rep.notes.some((n) => n.startsWith('G4') && n.includes('0x1020') && n.includes('（绝对）')),
+    `应当用绝对地址报「站得住」：${JSON.stringify(rep.notes.filter((n) => n.startsWith('G4')))})`);
+});
+
+test('★㉜ G17 axis 标注：stride 有已声明数组背书 ⇒ 不红；无背书 / why 太短 ⇒ 红', () => {
+  const L = [
+    '.text:00402500 sub_402500 proc near',
+    '.text:00402500 mov     esi, ecx',
+    '.text:00402502 mov     eax, [esi+1000h]',
+    '.text:00402508 retn',
+    '.text:00402508 sub_402500 endp',
+  ];
+  const mk = (axis) => {
+    const m0 = base([
+      { off: '0x1000', type: 'T_el32', count: 30 },          // 元素 4 字节的数组 => 给 stride 4 背书
+      { off: '0x2000', width: 4, axis },
+    ], { T_el32: { size: 4, complete: false, members: [{ off: '0x0', width: 4 }] } });
+    return { ...m0, carriers: [{ id: 'g32', kind: 'arg', fn: 'sub_402500', reg: 'ecx', type: 'T0*' }] };
+  };
+  const run1 = (m) => checkClaims(m, { lines: L, baseDir: ".", observed: new Set([0x1000, 0x1078]), roots: new Map([["sub_402500", "ecx"]]) });
+
+  // ① 合法：stride 4 有 T_el32 背书
+  const ok = run1(mk({ stride: 4, index: 'var', why: '0x402502 取值当元素序号（游标）' }));
+  assert.ok(!ok.findings.some((f) => f.where.startsWith('G17')), `合法 axis 不该红：${JSON.stringify(ok.findings)}`);
+
+  // ② 非法：stride 8 没有任何数组元素大小等于它
+  const bad = run1(mk({ stride: 8, index: 'var', why: '0x402502 取值当元素序号（游标）' }));
+  assert.ok(bad.findings.some((f) => f.where.startsWith('G17')), `无背书的 stride 必须红：${JSON.stringify(bad.findings)}`);
+
+  // ③ 非法：why 太短（空话）
+  const vac = run1(mk({ stride: 4, index: 'var', why: '游标' }));
+  assert.ok(vac.findings.some((f) => f.where.startsWith('G17')), `why 太短必须红：${JSON.stringify(vac.findings)}`);
+});

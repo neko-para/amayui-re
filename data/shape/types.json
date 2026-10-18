@@ -107,7 +107,13 @@
         },
         {
           "off": "0x5d7e8",
-          "width": 4
+          "width": 4,
+          "note": "六个缓冲条数的第 1 格（axis.stride = 120 = size(T1)）",
+          "axis": {
+            "stride": 120,
+            "index": "var",
+            "why": "0x41513F..0x415189 把 0xAAB2C 起的 6 个 dword 依次复制到这 6 格 ⇒ 它们按 T1 的元素大小（120 字节）推进"
+          }
         },
         {
           "off": "0x5d7ec",
@@ -133,7 +139,18 @@
           "off": "0x5d800",
           "width": 4,
           "kind": "ptr",
-          "type": "T2"
+          "type": "T2",
+          "note": "5D800 块 = **6 格 × 8 字节**（0x5D800..0x5D830），⛔ 不是 12 格到 0x5D860。格内 +0 = 翻转槽 0 游标、+4 = 翻转槽 1 游标。四条判据：① 步长 8 的绝对站点只出现 +0 侧，恰好 6 格（0x5D800/08/10/18/20/28），0x5D830 起已是另一只数组；② 0x41513F 起的初始化每轮复现 6 组（基址 0x5D830+8k ↔ 游标 0x5D800+8k）；③ 0x40FF50 的析构循环 2 轮 × 展开 6 次、基址每轮 +4 ⇒ 0x5D830+4i+8k 的 12 个 dword 各释放一次、0x5D800+4i+8k 的 24 个 dword 各清零一次；④ 0x41AAD9..0x41AB66 逐格把 +0 与 +4 互换（memflip 换槽）⇒ 这一侧只把已观察的 +0 写成独立成员；+4 侧（0x5D804..0x5D82C）本模型里零站点，故不声明"
+        },
+        {
+          "off": "0x5d804",
+          "width": 4,
+          "note": "游标块翻转槽 1 的第 1 格（axis.stride = 120 = size(T1)）",
+          "axis": {
+            "stride": 120,
+            "index": "var",
+            "why": "与 0x5D800 配对的翻转槽 1（0x5D800+8j+4i），游标以 T1 元素（120 字节）为步长（0x41AAD9..0x41AB66 换槽）"
+          }
         },
         {
           "off": "0x5d808",
@@ -142,10 +159,20 @@
           "type": "T2"
         },
         {
+          "off": "0x5d80c",
+          "width": 4,
+          "note": "游标块 `0x5D800` 的**翻转槽 1**（`0x5D800+4i+8k`，i=1）：换槽 `0x41AAD9..0x41AB66` 只换前 6 格；析构只释放后 6 格、这 6 格只清零。★ 声明它是因为补上了 `sub_41AA50` 的载体（否则这 6 个槽的 24 处访问无处归属）"
+        },
+        {
           "off": "0x5d810",
           "width": 4,
           "kind": "ptr",
           "type": "T_5d810"
+        },
+        {
+          "off": "0x5d814",
+          "width": 4,
+          "note": "游标块 `0x5D800` 的**翻转槽 1**（`0x5D800+4i+8k`，i=1）：换槽 `0x41AAD9..0x41AB66` 只换前 6 格；析构只释放后 6 格、这 6 格只清零。★ 声明它是因为补上了 `sub_41AA50` 的载体（否则这 6 个槽的 24 处访问无处归属）"
         },
         {
           "off": "0x5d818",
@@ -154,10 +181,20 @@
           "type": "T2"
         },
         {
+          "off": "0x5d81c",
+          "width": 4,
+          "note": "游标块 `0x5D800` 的**翻转槽 1**（`0x5D800+4i+8k`，i=1）：换槽 `0x41AAD9..0x41AB66` 只换前 6 格；析构只释放后 6 格、这 6 格只清零。★ 声明它是因为补上了 `sub_41AA50` 的载体（否则这 6 个槽的 24 处访问无处归属）"
+        },
+        {
           "off": "0x5d820",
           "width": 4,
           "kind": "ptr",
           "type": "T2"
+        },
+        {
+          "off": "0x5d824",
+          "width": 4,
+          "note": "游标块 `0x5D800` 的**翻转槽 1**（`0x5D800+4i+8k`，i=1）：换槽 `0x41AAD9..0x41AB66` 只换前 6 格；析构只释放后 6 格、这 6 格只清零。★ 声明它是因为补上了 `sub_41AA50` 的载体（否则这 6 个槽的 24 处访问无处归属）"
         },
         {
           "off": "0x5d828",
@@ -167,32 +204,42 @@
           "note": "0x410a87/0x410ee0 拿它的值当填充目标，0x418b59 以它为基址；它与 0x5d800/0x5d808/0x5d810/0x5d818/0x5d820 是同一组（组内跨度 8），前面 0x5d7e8..0x5d7fc 是与之并行的条数。★ 这格原先被 T1 的 views（索引差 -1）当成 T1+0xc，而两者的语义相反（这里是缓冲基址，0xc 是条数）"
         },
         {
-          "off": "0x5d830",
+          "off": "0x5d82c",
           "width": 4,
-          "kind": "ptr",
-          "type": null,
-          "note": "0x40ff40 只取它的地址，0x40ff50 拿取回的值为释放目标再写 0；同一段里 [esi-0x30]/[esi-0x28]/[esi-0x20]/[esi-0x18] 与 [esi]/[esi+8]/[esi+0x10]/[esi+0x18] 成对清零 ⇒ 与 0x5d800 同一张跨度 8 的表。★ 不声明它，0x40ff40 会由 T1 的 views 当成 T1+0x14（同上：视图盖住了不该盖的字节）"
+          "note": "游标块翻转槽 1 的第 6 格（axis.stride = 120 = size(T1)）",
+          "axis": {
+            "stride": 120,
+            "index": "var",
+            "why": "游标块翻转槽 1 的第 6 格（0x5D800+8j+4i，i=5），同样以 T1 元素为步长"
+          }
+        },
+        {
+          "off": "0x5d830",
+          "type": "T_ptr4",
+          "note": "5D830 块 = **12 个 4 字节指针槽**（0x5D830..0x5D860），与 5D800 块「6 格 × 2 翻转槽」配对（配对公式 0x5D830+4i+8k ↔ 0x5D800+4i+8k，见 0x5D800 那条）。count=12 的独立证据：0x40FF50 的析构循环 2 轮 × 展开 6 次、基址每轮 +4 ⇒ 这 12 个 dword **逐个**被释放（不是一次整块释放）；末尾 0x5D860 是下一个已声明成员且被引用。★ 本条取代原「单槽 ptr」",
+          "count": 12
         },
         {
           "off": "0x5d860",
-          "type": "T_5d860",
-          "count": 1
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素步长 8（0x40FE16 `mov ebx,[ecx+esi*8+4]`、0x40FE4D `sar edx,3`）；三指针算术 0x40FDFB `sub eax,[edi+5D860h]`；分配器槽 +0xC 取址于 0x45D274 `lea eax,[esi+0Ch]`（该处 this 由 0x42B10F `lea ecx,[esi+5D860h]` 传入）；清零 0x413CC4..0x413CE7 / 0x415744..0x415750；★ 该槽原声明为 T_5d860(size 16)"
         },
         {
           "off": "0x5d870",
-          "width": 4
-        },
-        {
-          "off": "0x5d874",
-          "width": 4
-        },
-        {
-          "off": "0x5d878",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素步长 8（0x40FEA9 `mov ebx,[edx+eax*8+4]`、0x40FEFF `sub ecx,[edi+5D870h]`）；分配器槽 +0xC 取址于 0x45D29D `lea edx,[esi+0Ch]`（this 由 0x42C4F2 `lea ecx,[esi+5D870h]` 传入）；清零 0x413C9B..0x413CBE；★ 元素里 +0x4 是一个**独立的** std::vector 指针（0x40FEC3 `lea eax,[ebx+0Ch]` + 0x40FECD `add esi,1Ch`）⇒ 容器套容器"
         },
         {
           "off": "0x5d880",
-          "width": 4
+          "width": 4,
+          "axis": {
+            "stride": 120,
+            "index": "var",
+            "why": "0x40F3A3..0x40F3B1：mov eax,[esi+5D880h] → shl edx,4 → sub edx,eax → [esi+edx*8+5D8BCh]，15×8 = 0x78 = 120 ⇒ 这个槽是游标，步长 = size(T1)"
+          },
+          "note": "游标槽（axis 标注的第一个实例）：值是 `T1[i]` 的元素序号，按 `axis.stride = 120 = size(T1)` 索引到 `T1[i] + 0x28`。★ 不靠折叠链推理：`*8` 是强度削减 `15·idx` 的产物，折叠层会把它读成 8（见 S2ag）"
         },
         {
           "off": "0x5d884",
@@ -214,7 +261,13 @@
           "off": "0x5d894",
           "type": "T1",
           "count": 40,
-          "note": "views（索引差 -1）已撤：G9 一直判它零观察，而它把 0x5d81c..0x5d894 认成 T1 的元素 —— 实测 0x5d828/0x5d830 是**缓冲基址**（值被当填充目标/释放目标），与视图给出的 T1+0xc/+0x14（条数）语义相反。要表达那一段请用 0x5d7e8..0x5d830 这一串（12 格、组内跨度 8），别用视图"
+          "note": "40 格 T1 表（0x5D894..0x5EB54，末尾 0x5EB54 是下一个已声明成员）。★ 0x41A958 的地址 0x5D81C 是「同一个数组、索引差 −1」的另一种原点，用 views 声明（判定器只做算术自洽 + 可证伪性）。⛔ 不能改声明成 0x5D800 块的成员：那会把 0x5D81C 解释成游标槽（假解释），并且 0x5D800 块若做成 8 字节元素数组，本站点步长 0x78 ≠ 8 会直接触发 G3",
+          "views": [
+            {
+              "elementDelta": -1,
+              "label": "0x41A958：同一个 T1 数组、索引差 −1（0x41A94A 先递减再乘元素跨度 0x78）⇒ 地址 0x5D894 − 0x78 = 0x5D81C；计数读到 0 时那是一次真实的 −1 号越界读，⛔ 不是 T_Command 的新成员"
+            }
+          ]
         },
         {
           "off": "0x5eb54",
@@ -408,15 +461,9 @@
         },
         {
           "off": "0x69250",
-          "width": 4
-        },
-        {
-          "off": "0x69254",
-          "width": 4
-        },
-        {
-          "off": "0x69258",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素步长 0x10（0x42EC7B `sar eax,4`、0x42ED46 `add dword ptr [esi+69254h],10h`）；分配器槽 +0xC 取址于 0x42ECCF（`lea ecx,[esi+6925Ch]` 当分配器实参）；三指针算术 0x42ECEF `sub eax,edx`；容量 0x42ECFD `sar ecx,4`；最大长度 0x42ECF4 `cmp eax,0FFFFFFEh`；清零 0x413C3C..0x413C5F"
         },
         {
           "off": "0x69260",
@@ -589,20 +636,15 @@
         },
         {
           "off": "0x77960",
-          "type": "T_77960",
-          "count": 1
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素步长 4（0x414FC3 `lea ecx,[eax+esi*4]`、0x414FE8 `sar eax,2`、0x41503B `add dword ptr [ebx+77964h],4`）；三指针同族三格都被读（+0 0x414FB7 / +4 0x414FBD / +8 0x414FD6 `cmp eax,ecx`）；分配器槽 +0xC 取址于 0x414FC8 与 0x41502F（`lea eax/edx,[ebx+7796Ch]` 当分配器实参）；最大长度 0x414FEB `cmp eax,3FFFFFFEh`；★ 该槽原声明为 T_77960(size 16)"
         },
         {
           "off": "0x77970",
-          "width": 4
-        },
-        {
-          "off": "0x77974",
-          "width": 4
-        },
-        {
-          "off": "0x77978",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素步长 0x1C（0x413B71 `add edi,1Ch`，元素析构 sub_40CAD0）；分配器槽 +0xC 取址于 0x413B64（`lea eax,[esi+7797Ch]` 当元素析构的分配器实参）；清零 0x413B8C..0x413B98"
         },
         {
           "off": "0x77980",
@@ -1067,32 +1109,20 @@
           "note": "读出来后当基址用；目标类型未判"
         },
         {
+          "off": "0xaaa10",
+          "width": 4,
+          "note": "值读出后当某个调用的 this 传入（0x414E86）；本模型里零解引用 ⇒ 只声明宽度（与 0xaaa14 同口径：不当基址用就不写 kind）"
+        },
+        {
           "off": "0xaaa14",
           "width": 4,
           "note": "读出来后当某个调用的 this；本模型里零解引用 ⇒ 只声明宽度（不写 kind:ptr）"
         },
         {
           "off": "0xaaa18",
-          "type": "T_el8",
-          "count": 2,
-          "note": "2 个单字节槽"
-        },
-        {
-          "off": "0xaaa20",
-          "width": 4,
-          "note": "只观察到取址；宽度按 4 字节槽推断，长度未观察"
-        },
-        {
-          "off": "0xaab20",
-          "width": 4
-        },
-        {
-          "off": "0xaab24",
-          "width": 4
-        },
-        {
-          "off": "0xaab28",
-          "width": 4
+          "type": "T_inihdr",
+          "count": 1,
+          "note": "初始化文件头（内嵌 0x12C 字节子对象，见 T_inihdr）"
         },
         {
           "off": "0xaab44",
@@ -1279,15 +1309,15 @@
           "off": "0x70",
           "width": 4,
           "kind": "ptr",
-          "type": "T_vec16",
-          "note": "原为 ptr/type:null。0x40eba2 读出后以它为基址取 +0x0/+0x4/+0x8，0x40ec31 起逐个清零后整块释放 ⇒ 目标是 16 字节容器"
+          "type": "T_stdvector",
+          "note": "原为 ptr/type:null。0x40eba2 读出后以它为基址取 +0x0/+0x4/+0x8，0x40ec31 起逐个清零后整块释放 ⇒ 目标是 16 字节容器；原名 T_vec16（按字节数命名），与 T_stdvector 同形 ⇒ 统一"
         },
         {
           "off": "0x74",
           "width": 4,
           "kind": "ptr",
-          "type": "T_vec16",
-          "note": "0x40f644 按 16 字节分配、0x40f65a 起清三个双字；0x40ec47 读出后以它为基址取 +0x0/+0x4，0x40eca2 取 +0xc 的地址 ⇒ 与 0x70 同一容器类型"
+          "type": "T_stdvector",
+          "note": "0x40f644 按 16 字节分配、0x40f65a 起清三个双字；0x40ec47 读出后以它为基址取 +0x0/+0x4，0x40eca2 取 +0xc 的地址 ⇒ 与 0x70 同一容器类型；原名 T_vec16（按字节数命名），与 T_stdvector 同形 ⇒ 统一"
         }
       ]
     },
@@ -1789,29 +1819,15 @@
         },
         {
           "off": "0xd24",
-          "width": 4
-        },
-        {
-          "off": "0xd28",
-          "width": 4
-        },
-        {
-          "off": "0xd2c",
-          "width": 4,
-          "note": "0x465019 写 dword"
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素步长 0x48（0x45E51D `add edi,48h`）；分配器槽 +0xC 取址于 0x45E510（`lea eax,[esi+0D30h]` 当元素析构的分配器实参）；三指针算术 0x464CD8 `sub ecx,[ebx+0D24h]` 后 `imul 38E38E39h` / `sar edx,4` 得当元素个数；清零 0x46500D..0x465019"
         },
         {
           "off": "0xd34",
-          "width": 4
-        },
-        {
-          "off": "0xd38",
-          "width": 4
-        },
-        {
-          "off": "0xd3c",
-          "width": 4,
-          "note": "0x46502f 写 dword"
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "清零 0x465023..0x46502F；析构 0x45E4C7..0x45E4EA（删缓冲 + 清三格，元素平凡⇒无元素析构循环）；与 +0xD24 的偏移差恰 0x10 ⇒ size 16；元素步长未观察"
         },
         {
           "off": "0xd44",
@@ -1868,18 +1884,9 @@
         },
         {
           "off": "0x18dc8",
-          "kind": "ptr",
-          "note": "值被解引用：与 +0x18dcc 成对作 begin/end（0x4329ec `sub ecx,[esi+18dc8h]`），0x432a30 取值后 `lea ecx,[eax+edx*4]`；元素步长 0x1c ⇒ 是容器头，具体头类型未判",
-          "width": 4
-        },
-        {
-          "off": "0x18dcc",
-          "width": 4
-        },
-        {
-          "off": "0x18dd0",
-          "width": 4,
-          "note": "0x465054 写 dword"
+          "note": "T_Font 的字体条目表（向量头 0x18dc8..0x18dd8，size 0x10；元素 0x1C 字节、元素 +0x0 是 std::string → +0x10 是 _Mysize）。★ 布局判定用**用法**、不靠布局推测，逐条见 .tmp/shape/batch-21/18dc8/report.md：① 元素基址 = +0（0x432a30 `mov eax,[esi+18DC8h]` + 0x432a36 `lea ecx,[eax+edx*4]`，edx = 7·索引；0x473900 同形）；② +4 减 +0 被除 0x1C 得元素个数（0x4329e6/0x4329ec + `imul 92492493h`/`sar edx,4`）；③ +8 是容量末端（0x432860 `cmp ecx,[esi+8]` 判满、0x432600 `mov ecx,[esi+8]` 减 +0 除 0x1C 得旧容量、0x432720 同）；④ 分配器槽 = +0xC：本对象方法里三次 `lea [esi+0Ch]` 被当分配器实参（0x432802 / 0x4328ad / 0x4328d6，另 0x4323c0 `lea ebx,[ecx+0Ch]`、0x432434 `add ecx,0Ch`）；⑤ 无 _Myproxy 痕迹（本对象析构器 sub_45DDB0 只碰 +0/+4/+8/+0xC：+0 当元素区间首与 operator delete 目标、+0xC 当分配器取址，且只清 +0/+4/+8 三格；容器首地址全语料只被 0x465048 / 0x45E43A 两处清零）⇒ **不是 T_stdvector_proxy**；⑥ 与已判 T_stdvector 的 T_Font+0x30F2C **共用同一个析构器 sub_45DDB0**（SEH 0x515435 与 0x515451 都 `jmp sub_45DDB0`）⇒ 同类型。元素类型未判（本批只判容器布局）。",
+          "type": "T_stdvector",
+          "count": 1
         },
         {
           "off": "0x18ddc",
@@ -1994,16 +2001,9 @@
         },
         {
           "off": "0x30f2c",
-          "width": 4
-        },
-        {
-          "off": "0x30f30",
-          "width": 4
-        },
-        {
-          "off": "0x30f34",
-          "width": 4,
-          "note": "0x46507d 写 dword"
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素步长 0x1C（0x45E351 `add edi,1Ch`；独立析构器 sub_45DDB0 同形：0x45DDCC `add esi,1Ch`、0x45DDC2 `lea eax,[ebx+0Ch]` 分配器）；分配器槽 +0xC 取址于 0x45E344；清零 0x465071..0x46507D"
         },
         {
           "off": "0x30f3c",
@@ -2046,20 +2046,9 @@
         },
         {
           "off": "0x313c0",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_313c0"
-        },
-        {
-          "off": "0x313c4",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_313c0"
-        },
-        {
-          "off": "0x313c8",
-          "width": 4,
-          "note": "0x465093 写 dword"
+          "type": "T_stdvector_T313c0",
+          "count": 1,
+          "note": "元素步长 0x20（0x45E2FD `add edi,20h`；独立析构器 sub_45D8F0：0x45D90C `add esi,20h`、0x45D902 `lea eax,[ebx+0Ch]` 分配器；0x20 == sizeof(T_313c0)）；分配器槽 +0xC 取址于 0x45E2F0；清零 0x465087..0x465093"
         },
         {
           "off": "0x313d0",
@@ -2199,33 +2188,15 @@
         },
         {
           "off": "0x3559c",
-          "width": 4,
-          "note": "0x46509d 写 dword；与 +0x355a0/+0x355a4 同组"
-        },
-        {
-          "off": "0x355a0",
-          "width": 4,
-          "note": "0x4650a3 写 dword"
-        },
-        {
-          "off": "0x355a4",
-          "width": 4,
-          "note": "0x4650a9 写 dword"
+          "note": "元素步长 2（0x45FD63 `sar eax,1` + 0x45FD77 `movzx ecx,word ptr [ecx+esi*2]`）；三指针算术 0x45FD61 `sub eax,ecx`（+0x4 减 +0x0）；清零 0x46509D..0x4650A9；析构器 sub_43A590 只清三格、不取 +0xC 的地址（元素平凡）",
+          "type": "T_stdvector",
+          "count": 1
         },
         {
           "off": "0x355ac",
-          "width": 4,
-          "note": "取址后当内嵌子对象传参（3 个载体）；目标类型未判 ⇒ 不标 ptr"
-        },
-        {
-          "off": "0x355bc",
-          "width": 4,
-          "note": "与 +0x355ac 同属一个内嵌对象：使用长度（推断）"
-        },
-        {
-          "off": "0x355c0",
-          "width": 4,
-          "note": "与 +0x355ac 同属一个内嵌对象：容量（推断）"
+          "type": "T_stdstring24",
+          "count": 1,
+          "note": "内嵌 std::string（+0 缓冲指针 · +0x10 长度 · +0x14 容量，SSO 阈值 0x10）；原先把 0x355ac/0x355bc/0x355c0 当成三个独立标量"
         },
         {
           "off": "0x355c8",
@@ -2332,9 +2303,9 @@
         },
         {
           "off": "0x3964c",
-          "type": "T_vec16",
+          "type": "T_stdvector",
           "count": 1,
-          "note": "内嵌子对象，不是标量：0x41811d/0x418137 取它的地址当 this 传给 0x40e660/0x414940，而 0x40e660 读 +0x0/+0x4 并把 +0xc 传给元素析构 0x40cad0 ⇒ 与 T1+0x70/+0x74 同类型；跨度 0x3964c..0x3965c 恰好等于下一个已声明成员 0x3965c"
+          "note": "元素步长 0x1C（0x45E21D `add edi,1Ch`，元素析构 sub_40CAD0）；分配器槽 +0xC 取址于 0x45E210（`lea eax,[esi+39658h]`）；清零 0x4650E4..0x4650F0；★ 该槽原声明为 T_vec16(size 16)，本批改为同形布局类型（成员逐条相同、size 相同）"
         },
         {
           "off": "0x3965c",
@@ -2440,7 +2411,8 @@
         },
         {
           "off": "0x1214",
-          "width": 4
+          "width": 4,
+          "note": "★ 同一个字段的**另一套原点**：`T_Command+0x161C`（`T_Input` 内嵌在 `T_Command+0x408`，`0x408+0x1214 = 0x161C`）。语料里两种写法都有（`[esi+161Ch]` 12 处、`[esi+1214h]` 若干），所以两条声明互相注记、都保留 —— 这是**表达选择**，不是重复声明（★ G1 已证明这一点：把 0x161C 声明成 T_Command 的成员会与内嵌的 T_Input(+0x408, 跨度 0x1AE0) **重叠** ⇒ 它是 T_Input 内部的字段，不能另立一条）"
         },
         {
           "off": "0x1218",
@@ -3764,56 +3736,6 @@
         }
       ]
     },
-    "T_5d860": {
-      "size": 16,
-      "complete": false,
-      "members": [
-        {
-          "off": "0x0",
-          "width": 4,
-          "kind": "ptr",
-          "type": null
-        },
-        {
-          "off": "0x4",
-          "width": 4
-        },
-        {
-          "off": "0x8",
-          "width": 4
-        },
-        {
-          "off": "0xc",
-          "width": 4,
-          "note": "分配器槽：与 T_77960 同一模板的另一实例（元素步长 8 而非 4）"
-        }
-      ]
-    },
-    "T_77960": {
-      "size": 16,
-      "complete": false,
-      "members": [
-        {
-          "off": "0x0",
-          "width": 4,
-          "kind": "ptr",
-          "type": null
-        },
-        {
-          "off": "0x4",
-          "width": 4
-        },
-        {
-          "off": "0x8",
-          "width": 4
-        },
-        {
-          "off": "0xc",
-          "width": 4,
-          "note": "分配器槽：只被取址后当分配器实参（+0x0/0x4/0x8 是 first/last/end，size:16 由它补满）"
-        }
-      ]
-    },
     "T_Data": {
       "size": 1212,
       "complete": false,
@@ -4981,29 +4903,15 @@
         },
         {
           "off": "0x18",
-          "width": 4,
-          "kind": "ptr",
-          "note": "原只声明宽度。0x438435 读出后以它为基址、按 0x1c 的元素跨度取字段（0x438444 处比较元素 +0x14）⇒ 是基址，不是标量。目标类型判不出"
-        },
-        {
-          "off": "0x1c",
-          "width": 4
-        },
-        {
-          "off": "0x20",
-          "width": 4
+          "note": "元素跨度 0x1C（0x40E95E `add esi,1Ch`，元素析构 sub_40CAD0）；分配器槽 +0xC 取址于 0x40E954（`lea eax,[edi+24h]`）；删缓冲 0x40E96C；清零 0x40E976..0x40E97C；与 +0x28 的同形实例出自同一个析构器｜该槽原有 note：原只声明宽度。0x438435 读出后以它为基址、按 0x1c 的元素跨度取字段（0x438444 处比较元素 +0x14）⇒ 是基址，不是标量。目标类型判不出",
+          "type": "T_stdvector",
+          "count": 1
         },
         {
           "off": "0x28",
-          "width": 4
-        },
-        {
-          "off": "0x2c",
-          "width": 4
-        },
-        {
-          "off": "0x30",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "清零 0x40E936..0x40E93C；删缓冲 0x40E92E（元素平凡 ⇒ 无元素析构循环）；与 +0x18 的偏移差 0x10 ⇒ size 16；元素跨度未观察（T_Hashtable_READTEXTDB_FILEFLAG+0x28 的另一处用法给出 0xC，见该类型原有 note）"
         },
         {
           "off": "0x38",
@@ -5148,27 +5056,15 @@
         },
         {
           "off": "0x18",
-          "width": 4
-        },
-        {
-          "off": "0x1c",
-          "width": 4
-        },
-        {
-          "off": "0x20",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素跨度 0x1C（0x40E95E `add esi,1Ch`，元素析构 sub_40CAD0）；分配器槽 +0xC 取址于 0x40E954（`lea eax,[edi+24h]`）；删缓冲 0x40E96C；清零 0x40E976..0x40E97C；与 +0x28 的同形实例出自同一个析构器"
         },
         {
           "off": "0x28",
-          "width": 4
-        },
-        {
-          "off": "0x2c",
-          "width": 4
-        },
-        {
-          "off": "0x30",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "清零 0x40E936..0x40E93C；删缓冲 0x40E92E（元素平凡 ⇒ 无元素析构循环）；与 +0x18 的偏移差 0x10 ⇒ size 16；元素跨度未观察（T_Hashtable_READTEXTDB_FILEFLAG+0x28 的另一处用法给出 0xC，见该类型原有 note）"
         },
         {
           "off": "0x38",
@@ -5297,29 +5193,15 @@
         },
         {
           "off": "0x18",
-          "width": 4
-        },
-        {
-          "off": "0x1c",
-          "width": 4
-        },
-        {
-          "off": "0x20",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素跨度 0x1C（0x40E95E `add esi,1Ch`，元素析构 sub_40CAD0）；分配器槽 +0xC 取址于 0x40E954（`lea eax,[edi+24h]`）；删缓冲 0x40E96C；清零 0x40E976..0x40E97C；与 +0x28 的同形实例出自同一个析构器"
         },
         {
           "off": "0x28",
-          "width": 4,
-          "kind": "ptr",
-          "note": "原只声明宽度。0x48ed04 读出后以它为基址、按 0xc 的元素跨度取字段（+0x4/+0x8）⇒ 是基址。目标类型判不出"
-        },
-        {
-          "off": "0x2c",
-          "width": 4
-        },
-        {
-          "off": "0x30",
-          "width": 4
+          "note": "清零 0x40E936..0x40E93C；删缓冲 0x40E92E（元素平凡 ⇒ 无元素析构循环）；与 +0x18 的偏移差 0x10 ⇒ size 16；元素跨度未观察（T_Hashtable_READTEXTDB_FILEFLAG+0x28 的另一处用法给出 0xC，见该类型原有 note）｜该槽原有 note：原只声明宽度。0x48ed04 读出后以它为基址、按 0xc 的元素跨度取字段（+0x4/+0x8）⇒ 是基址。目标类型判不出",
+          "type": "T_stdvector",
+          "count": 1
         },
         {
           "off": "0x38",
@@ -5412,29 +5294,15 @@
         },
         {
           "off": "0x18",
-          "width": 4,
-          "kind": "ptr",
-          "type": null
-        },
-        {
-          "off": "0x1c",
-          "width": 4
-        },
-        {
-          "off": "0x20",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "元素跨度 0x1C（0x40E95E `add esi,1Ch`，元素析构 sub_40CAD0）；分配器槽 +0xC 取址于 0x40E954（`lea eax,[edi+24h]`）；删缓冲 0x40E96C；清零 0x40E976..0x40E97C；与 +0x28 的同形实例出自同一个析构器"
         },
         {
           "off": "0x28",
-          "width": 4
-        },
-        {
-          "off": "0x2c",
-          "width": 4
-        },
-        {
-          "off": "0x30",
-          "width": 4
+          "type": "T_stdvector",
+          "count": 1,
+          "note": "清零 0x40E936..0x40E93C；删缓冲 0x40E92E（元素平凡 ⇒ 无元素析构循环）；与 +0x18 的偏移差 0x10 ⇒ size 16；元素跨度未观察（T_Hashtable_READTEXTDB_FILEFLAG+0x28 的另一处用法给出 0xC，见该类型原有 note）"
         },
         {
           "off": "0x38",
@@ -5613,35 +5481,6 @@
           "width": 4
         }
       ]
-    },
-    "T_vec16": {
-      "size": 16,
-      "complete": false,
-      "members": [
-        {
-          "off": "0x0",
-          "width": 4,
-          "kind": "ptr",
-          "type": null,
-          "note": "首双字被当基址按元素跨度索引（0x40ebc8 的元素跨度 8、0x48ed0d 的元素跨度 0xc）；元素类型判不出"
-        },
-        {
-          "off": "0x4",
-          "width": 4,
-          "note": "与 0x0 成对当区间末端（0x40ec58 相减后定位数；0x41810b 作为区间末端传给 0x40e660）"
-        },
-        {
-          "off": "0x8",
-          "width": 4,
-          "note": "只被清零（0x40ec33 0x40ed0a）；0x4650f0 另有 1 处真访问 = 容器 +8"
-        },
-        {
-          "off": "0xc",
-          "width": 4,
-          "note": "只有取址（0x40eca2）并作为上下文传给元素析构 0x40cad0；跨度至少 4 字节、语义判不出"
-        }
-      ],
-      "note": "16 字节容器：0x40f602 与 0x40f644 都按 16 字节分配、清 3 个双字后整块释放；T_Font+0x3964c 那处空档恰好也是 0x10 字节（0x3964c..0x3965c）⇒ 三处判成同一类型"
     },
     "T_ptr4": {
       "size": 4,
@@ -5880,7 +5719,7 @@
           "note": "_Mysize：插入时 +1 并与常量比（0x40B728..0x40B74C）；构造器清零 0x4AAFDB"
         }
       ],
-      "note": "x86 MSVC `std::map<int, T_Scene_460>` 的**对象头布局**（名字按结点 size 0x2F8 编，不承担语义）：`this` 就是 map 自己（Scene+0x408），+0x4 = _Myhead（header 结点，指向 T_treenode_760）· +0x8 = _Mysize。★ size 16 的证据两条：①五个实例在 Scene 里的偏移差恰是 0x10（0x408/0x418/0x428/0x438/0x448，同一个构造器里连续五个 try 块）；②_Buynode 把 `this+0xD` 当分配器实参取址（0x40C97C `add edi,0Dh`）⇒ 对象至少 14 字节。+0x0 与 +0xC 全语料**未观察**（ctor 不写 +0x0，成员函数只读 +0x4/+0x8）⇒ 不声明（洞）。"
+      "note": "x86 MSVC `std::map<int, T_Scene_460>` 的**对象头布局**（名字按结点 size 0x2F8 编，不承担语义）：`this` 就是 map 自己（Scene+0x408），+0x4 = _Myhead（header 结点，指向 T_treenode_760）· +0x8 = _Mysize。★ size 16 的证据两条：①五个实例在 Scene 里的偏移差恰是 0x10（0x408/0x418/0x428/0x438/0x448，同一个构造器里连续五个 try 块）；②_Buynode 把 `this+0xD` 当分配器实参取址（0x40C97C `add edi,0Dh`）⇒ 对象至少 14 字节。+0x0 与 +0xC 全语料**未观察**（ctor 不写 +0x0，成员函数只读 +0x4/+0x8）⇒ 不声明（洞）。 ｜ base 的证据是**构造器自己算出来的**：`0x4AAFC7 lea edi,[esi+408h]`（esi = Scene）之后紧跟 `0x4AAFDB mov [edi+8],ebx`（_Mysize = 0）与 `0x4AAFEE mov [edi+4],eax`（_Myhead = 新结点，随即 `[eax]=eax` 自链）⇒ 这个对象的 `this` 就是 Scene+0x408，+4/+8 是它的**成员**，不是 base。 ｜ +0 全语料未观察（**布局推断，⛔ 不当已判**：VS2010 开 `_ITERATOR_DEBUG_LEVEL` 时 `_Container_base` 首成员是 `_Container_proxy* _Myproxy`（4 字节），`_Myhead` 因此落在 +4、`_Mysize` 落在 +8；实例间距 0x10 ⇒ size 16，已用 12 字节之外还有 4 字节未观察）。 ｜ 外部佐证（网络检索）：① MSVC 的 `std::map` = 红黑 `_Tree`，含 header 结点 `_Myhead` + `_Mysize`、结点 `_Left/_Parent/_Right` + color/isnil（Raymond Chen《Inside STL: The map, set, multimap, and multiset》, 2023-08-07；RE4B 附录 Listing 3.124 直接 dump 了一份 MSVC 2012 的 std::map：Myhead / Mysize=17 / Left / Parent）；② `_Container_base12` 内是 `_Container_proxy* _Myproxy`，`_ITERATOR_DEBUG_LEVEL=0` 时容器基类退化为空的 `_Container_base0`（microsoft/STL 文档「Iterator Debugging and Safety」；SO「MSVC std::_Container_base12 has wrong data in _Myproxy」）⇒ 本仓观测到的 `_Myhead@+4 / _Mysize@+8` 与「开了调试迭代器 ⇒ `_Myproxy` 占 +0」一致（x86 上 4 字节）。 ｜ 权威源码佐证（microsoft/STL 检出于 `.tmp/refs/microsoft-STL`，用 `git cat-file -p HEAD:stl/inc/xmemory|xtree` 读）：`xmemory` 第 1195 行 `struct _Container_base0 { … }`（**空**基类，`_ITERATOR_DEBUG_LEVEL=0` 时使用）；第 1220 行 `struct _Container_base12 {`、第 1247 行 `_Container_proxy* _Myproxy = nullptr;`（非空基类，x86 4 字节）；`xtree` 第 432 行 `class _Tree_val : public _Container_base {`、第 792–793 行 `_Nodeptr _Myhead; size_type _Mysize;`（这两个是 `_Tree_val` **自己的**头两个成员）⇒ **`_Myhead` 的偏移 = sizeof(_Container_base)**。本仓实测 `_Myhead@+4`/`_Mysize@+8` ⇒ 该二进制的 `_Container_base` 占 4 字节 ⇒ 它是**非空**的那一版（调试迭代器模式），`+0` 就是 `_Myproxy`。（VS2010 的同类叫 `_Container_base12`，机制相同。）"
     },
     "T_stdmap_n116": {
       "size": 16,
@@ -5899,7 +5738,7 @@
           "note": "_Mysize（构造器清零 0x4AB022）"
         }
       ],
-      "note": "同 T_stdmap_n760 的布局，结点换 T_treenode_116（Scene+0x418；结点分配 0x74 见 0x4AA4BD；_Mysize 判据在 0x4A81E3..0x4A8205）。"
+      "note": "同 T_stdmap_n760 的布局，结点换 T_treenode_116（Scene+0x418；结点分配 0x74 见 0x4AA4BD；_Mysize 判据在 0x4A81E3..0x4A8205）。 ｜ base 的证据是**构造器自己算出来的**：`0x4AAFC7 lea edi,[esi+408h]`（esi = Scene）之后紧跟 `0x4AAFDB mov [edi+8],ebx`（_Mysize = 0）与 `0x4AAFEE mov [edi+4],eax`（_Myhead = 新结点，随即 `[eax]=eax` 自链）⇒ 这个对象的 `this` 就是 Scene+0x408，+4/+8 是它的**成员**，不是 base。 ｜ +0 全语料未观察（**布局推断，⛔ 不当已判**：VS2010 开 `_ITERATOR_DEBUG_LEVEL` 时 `_Container_base` 首成员是 `_Container_proxy* _Myproxy`（4 字节），`_Myhead` 因此落在 +4、`_Mysize` 落在 +8；实例间距 0x10 ⇒ size 16，已用 12 字节之外还有 4 字节未观察）。 ｜ 外部佐证（网络检索）：① MSVC 的 `std::map` = 红黑 `_Tree`，含 header 结点 `_Myhead` + `_Mysize`、结点 `_Left/_Parent/_Right` + color/isnil（Raymond Chen《Inside STL: The map, set, multimap, and multiset》, 2023-08-07；RE4B 附录 Listing 3.124 直接 dump 了一份 MSVC 2012 的 std::map：Myhead / Mysize=17 / Left / Parent）；② `_Container_base12` 内是 `_Container_proxy* _Myproxy`，`_ITERATOR_DEBUG_LEVEL=0` 时容器基类退化为空的 `_Container_base0`（microsoft/STL 文档「Iterator Debugging and Safety」；SO「MSVC std::_Container_base12 has wrong data in _Myproxy」）⇒ 本仓观测到的 `_Myhead@+4 / _Mysize@+8` 与「开了调试迭代器 ⇒ `_Myproxy` 占 +0」一致（x86 上 4 字节）。 ｜ 权威源码佐证（microsoft/STL 检出于 `.tmp/refs/microsoft-STL`，用 `git cat-file -p HEAD:stl/inc/xmemory|xtree` 读）：`xmemory` 第 1195 行 `struct _Container_base0 { … }`（**空**基类，`_ITERATOR_DEBUG_LEVEL=0` 时使用）；第 1220 行 `struct _Container_base12 {`、第 1247 行 `_Container_proxy* _Myproxy = nullptr;`（非空基类，x86 4 字节）；`xtree` 第 432 行 `class _Tree_val : public _Container_base {`、第 792–793 行 `_Nodeptr _Myhead; size_type _Mysize;`（这两个是 `_Tree_val` **自己的**头两个成员）⇒ **`_Myhead` 的偏移 = sizeof(_Container_base)**。本仓实测 `_Myhead@+4`/`_Mysize@+8` ⇒ 该二进制的 `_Container_base` 占 4 字节 ⇒ 它是**非空**的那一版（调试迭代器模式），`+0` 就是 `_Myproxy`。（VS2010 的同类叫 `_Container_base12`，机制相同。）"
     },
     "T_stdmap_n80": {
       "size": 16,
@@ -5918,7 +5757,7 @@
           "note": "_Mysize（构造器清零 0x4AB091 附近）"
         }
       ],
-      "note": "同 T_stdmap_n760 的布局，结点复用**既有** T_Scene_42c（Scene+0x428；结点分配 0x50 见 0x40CA1D）。★ 为什么指向 T_Scene_42c 而不是新开一个结点类型：既有模型已经把 `T_Scene+0x42c` 声明成 `kind:ptr → T_Scene_42c`，那 5 个成员（+0x0/+0x4/+0x8/+0x4C/+0x4D）**就是**本实例的结点形态；复用它可以让既有下钻结果逐条不变（只改成「经 +0x4 跳一次」）。"
+      "note": "同 T_stdmap_n760 的布局，结点复用**既有** T_Scene_42c（Scene+0x428；结点分配 0x50 见 0x40CA1D）。★ 为什么指向 T_Scene_42c 而不是新开一个结点类型：既有模型已经把 `T_Scene+0x42c` 声明成 `kind:ptr → T_Scene_42c`，那 5 个成员（+0x0/+0x4/+0x8/+0x4C/+0x4D）**就是**本实例的结点形态；复用它可以让既有下钻结果逐条不变（只改成「经 +0x4 跳一次」）。 ｜ base 的证据是**构造器自己算出来的**：`0x4AAFC7 lea edi,[esi+408h]`（esi = Scene）之后紧跟 `0x4AAFDB mov [edi+8],ebx`（_Mysize = 0）与 `0x4AAFEE mov [edi+4],eax`（_Myhead = 新结点，随即 `[eax]=eax` 自链）⇒ 这个对象的 `this` 就是 Scene+0x408，+4/+8 是它的**成员**，不是 base。 ｜ +0 全语料未观察（**布局推断，⛔ 不当已判**：VS2010 开 `_ITERATOR_DEBUG_LEVEL` 时 `_Container_base` 首成员是 `_Container_proxy* _Myproxy`（4 字节），`_Myhead` 因此落在 +4、`_Mysize` 落在 +8；实例间距 0x10 ⇒ size 16，已用 12 字节之外还有 4 字节未观察）。 ｜ 外部佐证（网络检索）：① MSVC 的 `std::map` = 红黑 `_Tree`，含 header 结点 `_Myhead` + `_Mysize`、结点 `_Left/_Parent/_Right` + color/isnil（Raymond Chen《Inside STL: The map, set, multimap, and multiset》, 2023-08-07；RE4B 附录 Listing 3.124 直接 dump 了一份 MSVC 2012 的 std::map：Myhead / Mysize=17 / Left / Parent）；② `_Container_base12` 内是 `_Container_proxy* _Myproxy`，`_ITERATOR_DEBUG_LEVEL=0` 时容器基类退化为空的 `_Container_base0`（microsoft/STL 文档「Iterator Debugging and Safety」；SO「MSVC std::_Container_base12 has wrong data in _Myproxy」）⇒ 本仓观测到的 `_Myhead@+4 / _Mysize@+8` 与「开了调试迭代器 ⇒ `_Myproxy` 占 +0」一致（x86 上 4 字节）。 ｜ 权威源码佐证（microsoft/STL 检出于 `.tmp/refs/microsoft-STL`，用 `git cat-file -p HEAD:stl/inc/xmemory|xtree` 读）：`xmemory` 第 1195 行 `struct _Container_base0 { … }`（**空**基类，`_ITERATOR_DEBUG_LEVEL=0` 时使用）；第 1220 行 `struct _Container_base12 {`、第 1247 行 `_Container_proxy* _Myproxy = nullptr;`（非空基类，x86 4 字节）；`xtree` 第 432 行 `class _Tree_val : public _Container_base {`、第 792–793 行 `_Nodeptr _Myhead; size_type _Mysize;`（这两个是 `_Tree_val` **自己的**头两个成员）⇒ **`_Myhead` 的偏移 = sizeof(_Container_base)**。本仓实测 `_Myhead@+4`/`_Mysize@+8` ⇒ 该二进制的 `_Container_base` 占 4 字节 ⇒ 它是**非空**的那一版（调试迭代器模式），`+0` 就是 `_Myproxy`。（VS2010 的同类叫 `_Container_base12`，机制相同。）"
     },
     "T_stdmap_n592": {
       "size": 16,
@@ -5937,7 +5776,222 @@
           "note": "_Mysize（构造器清零 0x4AB0A7 / 0x4AB0F1）"
         }
       ],
-      "note": "同 T_stdmap_n760 的布局，结点 T_treenode_592（Scene+0x448 与 Scene+0x438 两个实例**同一个**实例化；结点分配 0x250 见 0x4AA59D，两处 header 初始化见 0x4AB0CE / 0x4AB118）。"
+      "note": "同 T_stdmap_n760 的布局，结点 T_treenode_592（Scene+0x448 与 Scene+0x438 两个实例**同一个**实例化；结点分配 0x250 见 0x4AA59D，两处 header 初始化见 0x4AB0CE / 0x4AB118）。 ｜ base 的证据是**构造器自己算出来的**：`0x4AAFC7 lea edi,[esi+408h]`（esi = Scene）之后紧跟 `0x4AAFDB mov [edi+8],ebx`（_Mysize = 0）与 `0x4AAFEE mov [edi+4],eax`（_Myhead = 新结点，随即 `[eax]=eax` 自链）⇒ 这个对象的 `this` 就是 Scene+0x408，+4/+8 是它的**成员**，不是 base。 ｜ +0 全语料未观察（**布局推断，⛔ 不当已判**：VS2010 开 `_ITERATOR_DEBUG_LEVEL` 时 `_Container_base` 首成员是 `_Container_proxy* _Myproxy`（4 字节），`_Myhead` 因此落在 +4、`_Mysize` 落在 +8；实例间距 0x10 ⇒ size 16，已用 12 字节之外还有 4 字节未观察）。 ｜ 外部佐证（网络检索）：① MSVC 的 `std::map` = 红黑 `_Tree`，含 header 结点 `_Myhead` + `_Mysize`、结点 `_Left/_Parent/_Right` + color/isnil（Raymond Chen《Inside STL: The map, set, multimap, and multiset》, 2023-08-07；RE4B 附录 Listing 3.124 直接 dump 了一份 MSVC 2012 的 std::map：Myhead / Mysize=17 / Left / Parent）；② `_Container_base12` 内是 `_Container_proxy* _Myproxy`，`_ITERATOR_DEBUG_LEVEL=0` 时容器基类退化为空的 `_Container_base0`（microsoft/STL 文档「Iterator Debugging and Safety」；SO「MSVC std::_Container_base12 has wrong data in _Myproxy」）⇒ 本仓观测到的 `_Myhead@+4 / _Mysize@+8` 与「开了调试迭代器 ⇒ `_Myproxy` 占 +0」一致（x86 上 4 字节）。 ｜ 权威源码佐证（microsoft/STL 检出于 `.tmp/refs/microsoft-STL`，用 `git cat-file -p HEAD:stl/inc/xmemory|xtree` 读）：`xmemory` 第 1195 行 `struct _Container_base0 { … }`（**空**基类，`_ITERATOR_DEBUG_LEVEL=0` 时使用）；第 1220 行 `struct _Container_base12 {`、第 1247 行 `_Container_proxy* _Myproxy = nullptr;`（非空基类，x86 4 字节）；`xtree` 第 432 行 `class _Tree_val : public _Container_base {`、第 792–793 行 `_Nodeptr _Myhead; size_type _Mysize;`（这两个是 `_Tree_val` **自己的**头两个成员）⇒ **`_Myhead` 的偏移 = sizeof(_Container_base)**。本仓实测 `_Myhead@+4`/`_Mysize@+8` ⇒ 该二进制的 `_Container_base` 占 4 字节 ⇒ 它是**非空**的那一版（调试迭代器模式），`+0` 就是 `_Myproxy`。（VS2010 的同类叫 `_Container_base12`，机制相同。）"
+    },
+    "T_stdstring24": {
+      "size": 24,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "缓冲首字节指针（SSO 时指向自身 +0x10，实测 `[+0x0]` + `[+0x10]` 的 assign 三连）"
+        },
+        {
+          "off": "0x10",
+          "width": 4,
+          "note": "使用长度（推断：与 +0x0 一起出现、被当长度参与拷贝）"
+        },
+        {
+          "off": "0x14",
+          "width": 4,
+          "note": "容量；`cmp [..+0x14],10h` 是 SSO 阈值判断，析构写回 0xF ⇒ 0xF 是\"内联容量\""
+        }
+      ],
+      "note": "x86 MSVC `std::string` 的**具体布局**（内嵌用的带 size 版）。★ 末尾 0x355c4 零引用是因为它后面还有别的成员（0x355c8），不是 size 不对 ｜ 权威源码佐证（microsoft/STL，检出于 `.tmp/refs/microsoft-STL`，用 `git cat-file -p HEAD:stl/inc/xstring` 读）：第 490 行 `union _Bxty { // storage for small buffer or pointer to larger one`（16 字节 SSO 缓冲 / 指针）、第 513 行 `_Bxty _Bx;`、第 517 行 `size_type _Mysize = 0;`、第 518 行 `size_type _Myres = 0;`⇒ **成员序与偏移 = +0 `_Bx`(16) / +0x10 `_Mysize` / +0x14 `_Myres`，总 0x18**；`std::string` **不派生自 `_Container_base`**（没有 `_Myproxy`）⇒ 这个 size 与调试迭代器开关**无关**，是 ABI 事实。",
+      "std": "msvc-x86/VS2010 std::string（16B SSO 缓冲 + 4 长度 + 4 容量）"
+    },
+    "T_stdlist": {
+      "size": 12,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Myhead：header 结点的双向链表哨兵（构造时 `[p]=p` 自链 + `_Mysize=0`）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "_Mysize"
+        }
+      ],
+      "note": "x86 MSVC `std::list<T>` 的容器头（成员 `_Myhead/_Mysize`，前面 4 字节是 `_Container_proxy* _Myproxy`）。⛔ 没有 `std` 标记：size 依赖 `_ITERATOR_DEBUG_LEVEL`。权威源码佐证：`git cat-file -p HEAD:stl/inc/list` 第 341 行 `class _List_val : public _Container_base {`、第 583–584 行 `_Nodeptr _Myhead; size_type _Mysize;` ⇒ 与 `_Tree_val` 同构：`_Myhead` 的偏移 = `sizeof(_Container_base)`（调试迭代器 4 / 否则 0）。本仓实测：`MFStream+0x60` 与 `+0x6C` 两处（`sub_47AD40` 两段 `lea edi,[esi+60h]`/`+6Ch` + `operator new(0x20)` + `mov [eax],eax` / `mov [edi+4],edi` 双指针自链），且 `0x47B0D8`/`0x47B38A` 两处 `_Xlength_error(\"list<T> too long\")` 落在这两个实例的方法里 ⇒ **`_Myhead@+4` / `_Mysize@+8`（同样是调试迭代器版）、size 12**。"
+    },
+    "T_stdvector_proxy": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Myfirst（本仓 19 例实测 `_Myfirst@+4`，即同样多 4 字节 `_Myproxy`）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Mylast"
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Myend"
+        }
+      ],
+      "note": "x86 MSVC std::vector<T> 容器头的**带 _Myproxy 版**（size 0x10：+0 _Myproxy · +4 _Myfirst · +8 _Mylast · +0xC _Myend）。与 T_stdvector（+0 _Myfirst 的无代理版）二选一，逐例取证。x86 MSVC `std::vector<T>` 的容器头。★ size 取 16 是**本仓 19 例的实测**（相邻实例偏移差 0x10），⛔ 不是 ABI 固定值。布局有**两种**（这是本批 19 例里 17 例有 `lea [this+0xC]`、2 例没有的原因）：`git cat-file -p HEAD:stl/inc/vector` 第 391 行 `class _Vector_val : public _Container_base {`、第 437–439 行 `pointer _Myfirst; pointer _Mylast; pointer _Myend;`⇒ **空基类版 = 0xC**（3 指针）、**非空基类版 = 0x10**（多 4 字节 `_Myproxy`）。⛔ 所以 `T_stdvector` 的 size **不是** ABI 固定值、不能像 `std::string` 那样直接写死 —— 每一例都要证据（本仓判据：相邻两实例偏移差 0x10 ⇒ 16；或 `lea [this+0xC]` 被当分配器实参 ⇒ 16）。 ｜ 命名口径：`T_stdvector` = **16 字节·无 `_Myproxy`**（`+0 _Myfirst / +4 _Mylast / +8 _Myend / +0xC _Al`，分配器被物化）；`T_stdvector_proxy` = **16 字节·带 `_Myproxy`**（`+0 _Myproxy / +4 _Myfirst / +8 _Mylast / +0xC _Myend`）；`T_stdvector12` = **12 字节**（无 `_Myproxy` 且分配器 EBO，只有三个指针）。"
+    },
+    "T_stdvector": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "元素缓冲首地址：值被当元素基址索引（如 `[eax+esi*4]`/`[ecx+esi*2]`），不是标量"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "note": "元素缓冲末端：与 +0x0 的差值被除元素步长得当元素个数"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "容量末端：与 +0x4 是否相等决定要不要扩容（== 时走 _Reallocate）"
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "note": "空分配器槽：只有取址（`lea reg,[this+0xC]` 当分配器实参），从未按值读写 ⇒ 内容未观察"
+        }
+      ],
+      "note": "x86 MSVC std::vector<T> 的**同形布局头**（不是语义名）：+0x0 _Myfirst · +0x4 _Mylast · +0x8 _Myend · +0xC 空分配器槽。复用判据（同形布局复用的先例见 T_Hashtable_layout / T_stdstring）：本批 12 个内嵌实例的四个 dword 位置、清零/赋值序列、`[this+0xC]` 分配器取址位置逐一相同 ⇒ 同一份布局；元素类型逐实例不同 ⇒ 不写进本类型（写进 batch-19 报告的实例表）。size:16 由两条独立证据定：①`lea reg,[reg+0xC]` 被当分配器实参（每例的 EA 见报告）；②相邻两个实例的偏移差恰是 0x10（同一构造器里相邻 try 块，见 T_Font+0xD24/+0xD34、T_Command+0x5D860/+0x5D870）。；第 13 个内嵌实例：T_Font+0x18DC8（size 0x10、元素 0x1C、分配器槽 +0xC 取址于 0x45E413/0x432802/0x4328AD/0x4328D6，析构器 sub_45DDB0；与 T_Font+0x30F2C 共用同一析构器）—— 见 .tmp/shape/batch-21/18dc8/report.md。★ 该实例的 `{type,count:1}` 声明会被 G4 判红（一过尾 0x18dd8 全语料零引用），落盘形态见该报告 §4。 ｜ 命名口径：`T_stdvector` = **16 字节·无 `_Myproxy`**（`+0 _Myfirst / +4 _Mylast / +8 _Myend / +0xC _Al`，分配器被物化）；`T_stdvector_proxy` = **16 字节·带 `_Myproxy`**（`+0 _Myproxy / +4 _Myfirst / +8 _Mylast / +0xC _Myend`）；`T_stdvector12` = **12 字节**（无 `_Myproxy` 且分配器 EBO，只有三个指针）。"
+    },
+    "T_stdvector_T313c0": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_313c0",
+          "note": "元素缓冲首地址（_Myfirst）；0x45E2F6 起以它为元素基址、步长 0x20"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "note": "元素缓冲末端（_Mylast）：0x45E2EB/0x45E303 与 +0x0 成对当区间末端；指向同一 T_313c0 数组（不另标 ptr：本模型载体集里没有以它为基址的解引用，标了就是空话声明）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "容量末端（_Myend）：只被清零（0x465093 / 0x45E323）"
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "note": "空分配器槽：只有取址（0x45E2F0 `lea eax,[esi+313CCh]` 当元素析构的分配器实参；独立析构器 sub_45D8F0 的 0x45D902 `lea eax,[ebx+0Ch]`）"
+        }
+      ],
+      "note": "与 T_stdvector 逐条同形（size 16 / +0x0 _Myfirst / +0x4 _Mylast / +0x8 _Myend / +0xC 空分配器槽）的唯一区别：**元素类型已判** = T_313c0。判据：该容器在 T_Font+0x313C0，元素析构循环步长 0x20（0x45E2FD `add edi,20h`；独立析构器 sub_45D8F0 的 0x45D90C `add esi,20h`），而 sizeof(T_313c0)=0x20 —— 步长 == 元素类型 size（G3 的自洽条件）。★ 为什么另开一个名字而不是给 T_stdvector 的 +0x0 写 type：布局类型是共享的，元素类型逐实例不同；写死一处就会污染其余 11 例。"
+    },
+    "T_stdmap": {
+      "size": 8,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "红黑树 header 结点：该值被解引用后按 [p+0]/[p+4]/[p+8]（_Left/_Parent/_Right）与 [p+0x10]（结点里的 value）访问"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "note": "元素计数 _Mysize：inc/dec 与常量 cmp 成对"
+        }
+      ],
+      "note": "x86 MSVC std::map<K,V>（_Tree）的**同形布局头**：+0x0 _Myhead（红黑树 header 结点指针）· +0x4 _Mysize（元素计数）。★ 本批**零实例**：判据（见 batch-19 报告 §4）在整个 .lst 上一处都没命中 —— 不是'猜不出'，是'扫过了没有'。判据留在这里给下一批用。"
+    },
+    "T_stdvector12": {
+      "size": 12,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Myfirst（元素数组首址）"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "note": "_Mylast"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "_Myend"
+        }
+      ],
+      "note": "x86 MSVC `std::vector<T>` 的 **12 字节**版（无 `_Myproxy` 且分配器被 EBO）。⛔ 本仓**还没有实例**用它 —— 某处若出现\"元素基址在 +0、`[+4]-[+0]` 与 `[+8]-[+0]` 除以步长成对、且 `+0xC` 不被当分配器实参\"再用它。命名口径：`T_stdvector` = **16 字节·无 `_Myproxy`**（`+0 _Myfirst / +4 _Mylast / +8 _Myend / +0xC _Al`，分配器被物化）；`T_stdvector_proxy` = **16 字节·带 `_Myproxy`**（`+0 _Myproxy / +4 _Myfirst / +8 _Mylast / +0xC _Myend`）；`T_stdvector12` = **12 字节**（无 `_Myproxy` 且分配器 EBO，只有三个指针）。"
+    },
+    "T_inihdr": {
+      "size": 300,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "type": "T_el8",
+          "count": 4,
+          "note": "初始化文件头的**魔数** 4 字节：0x414B49/0x414B5D/0x414B71/0x414B85 四处按「4 字节比较」读它（四种取值走不同分支）"
+        },
+        {
+          "off": "0x4",
+          "type": "T_el8",
+          "count": 4,
+          "note": "版本串 4 字节槽：0x414BE4 取址、0x414BF0..0x414BFE 逐字节与 0x5D6E0 比较（比较窗 3 字节）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "只观察到取址；宽度按 4 字节槽推断，长度未观察"
+        },
+        {
+          "off": "0x108",
+          "width": 4
+        },
+        {
+          "off": "0x10c",
+          "width": 4
+        },
+        {
+          "off": "0x110",
+          "width": 4
+        },
+        {
+          "off": "0x114",
+          "type": "T_el32",
+          "count": 6,
+          "note": "6 个缓冲条数：0x41513F..0x415189 依次复制到 0x5D7E8/0x5D7EC/0x5D7F0/0x5D7F4/0x5D7F8/0x5D7FC（顺序一一对应）"
+        }
+      ],
+      "note": "初始化文件头的内嵌子对象（0xAAA18..0xAAB44 = 0x12C 字节）：+0 魔数、+4 版本串、+0x114 六个缓冲条数。★ 原先在 `T_Command` 里是 6 条平铺成员；改成子对象后**绝对末尾** 0xAAA1C / 0xAAA20 仍被引用（2 / 19 次）——G4 用 `ABS` 换算绝对地址后才判得出这一点（S2ad）。"
     }
   }
 }

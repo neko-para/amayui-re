@@ -412,6 +412,7 @@ function siteOf(fr, mn, operands, idx, ea, line, rawLine) {
   } else {
     const sh = shapeOf(fr, mem);
     const baseV = mem.base ? fr.get(mem.base) : UNK;
+    // ★ S2e：基址是**全局符号**（`mov eax, ds:dword_55E1BC` 之后 `[eax+K]`）时，把符号记进站点，
     const path = sh.basePath ?? [];
     Object.assign(row, {
       baseReg: mem.base ?? null,
@@ -423,10 +424,24 @@ function siteOf(fr, mn, operands, idx, ea, line, rawLine) {
       // ★ 二级对象用（判定器"下钻"要的）：**路径**（几跳、每跳哪个成员偏移）+ 最后一跳对象内的偏移 + 寻址 scale
       pointeePath: path,                                        // [] = obj0 相对；[A] = 二级；[A,B] = 三级
       pointeeHost: path.length === 1 ? path[0] : null,           // 旧字段（**只对一跳**有意义）——保留兼容
-      pointeeOff: path.length ? sh.off : null,
+      // ★ 负的 pointee 偏移 = **分配的头部**，不是"缺一条成员"（折叠层也没算错：地址确实是 `p−K`）：
+      //   MSVC `new[]` 在元素数组前面塞一个**个数 cookie**（写端 `mov [p],n` + `add p,4`，读端用 `[p-4]`），
+      //   于是 `[base-4]` 指的是"分配块头"而不是宿主对象的成员 ⇒ 置 null 并打 `neg-off` 标记，走"判不了"档。
+      //   合成复现见 `.tmp/shape/probe-negative-pointee.mjs`（5 行就重现）；守卫 `tools/test/shape-access.test.mjs`。
+      pointeeOff: path.length ? (typeof sh.off === 'number' && sh.off < 0 ? null : sh.off) : null,
       // ★ 相对**基址那个对象**的偏移：路径解不出时 `pointeeOff` 是 null，但"这个访问打在基址对象的哪个偏移上"总是知道的
+      globSym: baseV && baseV.t === 'glob' ? baseV.sym : null,
       baseOff: sh.off,
-      memScale: mem.indices.length ? mem.indices[0].scale : 1,
+      // ★ S2af：**强度削减的乘数链**。`[base + reg*S]` 里的 `reg` 往往不是原始下标，而是 `m·idx`
+      //   （`mov edx,eax; shl edx,4; sub edx,eax` ⇒ 15·idx）。寄存器抽象值里已经有乘数 `k`（`v.t === 'val'`）
+      //   ⇒ 有效步长 = S × k。⛔ 拿裸 `S` 去比元素大小会**双向出错**：既报假冲突（8 vs 0x1C），
+      //   也漏掉真匹配（0x78 === size(T1)）。
+      memScale: (() => {
+        if (!mem.indices.length) return 1;
+        const ixv = fr.get(mem.indices[0].reg);
+        const m = ixv && ixv.t === 'val' && typeof ixv.k === 'number' && ixv.k > 1 ? ixv.k : null;
+        return m ? mem.indices[0].scale * m : mem.indices[0].scale;
+      })(),
       baseHop: path.length,                                      // 对象层级 = baseHop + 1（精确值）
       fold: mem.indices.map((x) => `[${x.reg}*${x.scale}]=${foldNote(fr.get(x.reg))}`).join(' ') || null,
     });
@@ -618,7 +633,25 @@ function step(fr, mn, o, ctx) {
     case 'jmp':
       fr.clobberCall();
       return;
-    default:
+    // ★ 串指令会推进 `esi`/`edi`（`movs*` 两者；`stos*` 只 `edi`）。⛔ `clobberCall()` 不够：
+    //   `esi`/`edi` 是**粘性寄存器**，不清就会让 `rep movsd` 之后 `[esi+disp]` 仍被当成对象相对位移 = 假解释。
+    //   语料 5 处抽样：`rep` 之后代码都用别的寄存器或栈，没有一处仍把 `esi/edi` 当对象基址。
+    case 'movs':
+    case 'movsb':
+    case 'movsw':
+    case 'movsd':
+    case 'rep':
+    case 'repe':
+    case 'repne':
+      fr.clobberCall();
+      for (const rg of ['esi', 'edi', 'ecx', 'eax']) fr.set(rg, UNK);
+      return;
+    case 'stos':
+    case 'stosb':
+    case 'stosw':
+    case 'stosd':
+      fr.clobberCall();
+      fr.set('edi', UNK);
       return;
   }
 }

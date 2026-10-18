@@ -53,7 +53,7 @@
       "kind": "arg",
       "fn": "sub_40C780",
       "reg": "ecx",
-      "type": "T_77960*",
+      "type": "T_stdvector*",
       "witness": [
         "0x41512d"
       ]
@@ -626,7 +626,7 @@
       "kind": "arg",
       "fn": "sub_45D240",
       "reg": "ecx",
-      "type": "T_5d860*",
+      "type": "T_stdvector*",
       "witness": [
         "0x42b11b",
         "0x42b10f"
@@ -2315,6 +2315,19 @@
         "0x4ad9d7",
         "0x4ac3dd"
       ]
+    },
+    {
+      "id": "c42b",
+      "kind": "arg",
+      "fn": "sub_41AA50",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "indirectOnly": true,
+      "witness": [
+        "0x41aadf",
+        "0x416114"
+      ],
+      "note": "换槽/初始化那两个游标块（0x5D800 起 6 格 × 2 翻转槽）的函数：`0x41AADF mov esi, ecx` = 对象根，函数体 0x41AA50..0x41AB77 访问 0x5D800+4i+8k 共 24 处。★ `indirectOnly`：全语料**没有** `call sub_41AA50`（0 处），它只以地址形式出现在 `0x416114 mov [esi+0A5250h], offset sub_41AA50`（T_Command 的处理器槽）⇒ 只能经分派调用"
     }
   ],
   "disputes": [

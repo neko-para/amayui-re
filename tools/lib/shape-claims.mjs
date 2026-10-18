@@ -348,7 +348,12 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
         if (!Number.isInteger(d) || d === 0) { red(`G9 ${label}`, `views[].elementDelta 必须是**非零整数**（收到 ${JSON.stringify(v.elementDelta)}）`); continue; }
         // 视图是不是"多余"的：它的字节范围已被 delta 0（或另一个视图）完全覆盖 ⇒ 空话声明（单列，不算通过）
         const from = m.offN + stride * d; const to = from + elemSize;
-        const coveredByZero = d > 0 && m.count != null && to <= m.offN + stride * m.count;
+        // ★ S2x③：**"多余"只在视图窗口与数组元素边界对齐时成立**。
+        //   视图表达的是"这段字节是同一个数组、索引差 k"——若 `stride*d` 不是 `elemSize` 的整数倍，
+        //   它把字节重新**分组**了（错位的另一种读法），数组自己的元素边界并不能覆盖它 ⇒ 不是多余。
+        //   原先只判"范围被数组罩住"就把错位视图判成多余（实测把必需视图当成噪声）。
+        const aligned = (stride * d) % elemSize === 0;
+        const coveredByZero = d > 0 && m.count != null && to <= m.offN + stride * m.count && aligned;
         declaredViews.push({ tid, label: v.label ?? null, off: m.offN, delta: d, from, to, redundant: coveredByZero });
       }
     }
@@ -358,6 +363,27 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       if (ms[i].offN < prev.offN + prev.ext) red(`G1 ${tid}`, `成员 ${hex(ms[i].offN)} 与 ${hex(prev.offN)}(+${prev.ext}) 重叠`);
     }
     if (t.size != null) for (const m of ms) if (m.ext != null && m.offN + m.ext > t.size) red(`G1 ${tid}`, `成员 ${hex(m.offN)}+${m.ext} 超出 size ${t.size}`);
+  }
+  // ── G17 **`axis` 标注**（`{stride, index, why}` = "这个成员的索引语义已判定"）：
+  //   它不是"能从 EA 机械读出的事实"（那是 A 层禁的），而是**判断**：哪一个寄存器是游标、步长多少。
+  //   工具侧的价值：见到它就不必去猜折叠链（`lea` 的索引项在 132 处语料里会丢，见 S2ag）。
+  //   但它必须是**可证伪**的：`axis.stride` 得有一个**已声明的数组**给它背书（同一个容器类型里，
+  //   存在数组成员且其元素大小 == stride）—— 否则这条标注只是"我说是就是"。
+  for (const [tid, ty] of Object.entries(types)) {
+    const arrays = membersOf(ty).map((mm) => ({ mm, es: ((mm.type && types[mm.type]?.size) ?? null) })).filter((x) => x.es != null && (x.mm.count == null || num(x.mm.count) > 1));
+    for (const mm of membersOf(ty)) {
+      const ax = mm.axis;
+      if (ax == null) continue;
+      const label = `${tid}+${hex(mm.offN)}`;
+      if (typeof ax !== 'object' || Array.isArray(ax)) { red(`G17 ${label}`, 'axis 必须是对象 `{stride, index, why}`'); continue; }
+      const st = num(ax.stride);
+      if (!Number.isInteger(st) || st <= 0) red(`G17 ${label}`, `axis.stride 必须是正整数（收到 ${JSON.stringify(ax.stride)}）`);
+      if (typeof ax.index !== 'string' || !ax.index) red(`G17 ${label}`, 'axis.index 必须写明索引身份（例如 "var"/"i"/"arg0"）');
+      if (typeof ax.why !== 'string' || ax.why.length < 8) red(`G17 ${label}`, 'axis.why 必须写清判据（EA + 指令形态），少于 8 字符视为空话');
+      if (Number.isInteger(st) && st > 0 && !arrays.some((x) => x.es === st)) {
+        red(`G17 ${label}`, `axis.stride=${st} 在本类型的已声明数组里**没有元素大小等于它的**（候选：${arrays.map((x) => `${hex(x.mm.offN)}=${x.es}`).join(' ') || '无'}）⇒ 这条标注没有可证伪的支撑`);
+      }
+    }
   }
   if (spanUnknown.length) notes.push(`G8：元素 size 未知的成员 ⇒ 跨度算不出，宿主匹配按 **1 字节** 槽处理（静默退化的入口，⛔ 不是"通过"）：${spanUnknown.join(' · ')}`);
   if (countUnknown.length) notes.push(`G8：**条数未观察**的成员（\`count:null\` + \`sweep\`）⇒ 边界 / 与相邻成员的重叠判不了，但形态（步长 + 索引身份）是声明了的：${countUnknown.join(' · ')}`);
@@ -491,6 +517,31 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
     //      也不算二级对象、也不算 deep，从所有桶里掉出去。⇒ 单列成独立一桶，⛔ 不许静默。
     const symbolSites = sites.filter((s) => s.baseKind === 'absolute');
     const unresolvedSites = sites.filter((s) => s.problems.includes('base'));
+    // ★ S2e：其中"基址是**已声明的全局符号**"的那部分单独计数（它们与 obj0 同一偏移空间，
+    //   但要有 `kind:"global"` 的事实声明才敢换算；现在只**报数**，不静默吞掉）。
+    // ★ S2e：把"基址是**已声明的全局符号**"的站点，按该全局载体声明的类型去对成员表。
+    //   ⛔ 只对 `kind:"global"` 且给了 `type` 的符号这么做；没声明的一律不猜。
+    const globTypeOf = new Map();
+    for (const cc of M.carriers ?? []) {
+      if (cc.kind !== 'global' || !cc.sym || !cc.type) continue;
+      globTypeOf.set(cc.sym, String(cc.type).replace(/\*$/, ''));
+    }
+    const globBaseSites = unresolvedSites.filter((s) => s.globSym);
+    if (globBaseSites.length) {
+      let explained = 0; let residue = 0; let unknownSym = 0;
+      const residues = [];
+      for (const s of globBaseSites) {
+        const gt = globTypeOf.get(s.globSym);
+        if (!gt || !types[gt]) { unknownSym += 1; continue; }
+        const mem = membersOfId(gt).find((mm) => mm.offN === s.absDisp && (mm.ext == null ? true : true));
+        if (mem) explained += 1;
+        else { residue += 1; residues.push(`${s.globSym}+${hex(s.absDisp ?? 0)}@${hex(s.ea)}`); }
+      }
+      const bySym = new Map();
+      for (const s of globBaseSites) bySym.set(s.globSym, (bySym.get(s.globSym) ?? 0) + 1);
+      notes.push(`★ 基址是**已声明全局符号**的站点 ${globBaseSites.length} 处（${[...bySym].map(([k, v]) => `${k}×${v}`).join(' ')}）⇒ 按该全局声明类型的成员表判：解释 ${explained} · 缺成员 ${residue} · 全局未声明 ${unknownSym}`);
+      if (residues.length) notes.push(`  G5-glob 缺成员（该全局类型的成员表里没有这些偏移）：${residues.slice(0, 8).join(' ')}`);
+    }
     const indexBadSites = sites.filter((s) => s.problems.includes('index'));
     const widthBadSites = sites.filter((s) => s.problems.includes('width'));
     const ms = membersOf(t);
@@ -598,31 +649,37 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
     //     ⇒ offsetUnusable()='index-unresolved' ⇒ 进「位移不可用」桶，**不比对成员、不产生残差/红**。
     //     于是「1024 项分派表被写成 544 条离散内联槽」在所有义务下都沉默。本条把它变成逐条可见。
     //   ★ 不判红的原因：当前 100+ 处命中、多数是还没建完的类型表；先可见、后翻红（否则真问题被噪声埋）。
+    // ── G15 **索引访问落在哪个成员上**：收成一个分类器（原先 5 个桶的判定散在循环体里、24 处引用）
+    //   verdict：array（真数组，`count>1`/`count:null` 且元素大小==步长）/ countOne（`count:1` 容器）
+    //            / strideMismatch（元素大小≠步长）/ scalar（标量 ⇒ 红）/ undeclared（该偏移还没声明）
+    const classifyIndexSite = (s) => {
+      if (s.obj !== 'Engine' || s.absDisp === null) return null;
+      const cands = wins.filter((w) => matchesWindow(w, s));
+      if (!cands.length) return { verdict: 'undeclared' };
+      if (s.absDisp === 0) return null;              // 位移 0 + 未解析索引 ⇒ 基址多半不是 obj0，判不了
+      const arr = cands.filter((w) => w.kind === 'array' && (w.m.count == null || num(w.m.count) > 1)
+        // 元素大小只在**站点落在元素边界**上时才比（落在元素内部时步长属元素里的嵌套数组）
+        && (w.elemSize == null || s.memScale == null || w.elemSize === s.memScale
+          || ((s.absDisp - w.from) % w.elemSize !== 0)));
+      if (arr.length) return { verdict: 'array' };
+      const c1 = cands.find((w) => w.kind === 'array');
+      if (c1 && num(c1.m.count) === 1) return { verdict: 'countOne', off: c1.m.offN };
+      if (c1) return { verdict: 'strideMismatch', off: c1.m.offN, elemSize: c1.elemSize, stride: s.memScale };
+      return { verdict: 'scalar' };
+    };
     let indexOverArray = 0;
     const indexOverScalarEAs = [];
     const indexOverCountOne = [];
     const indexOnUndeclared = [];
     const indexStrideMismatch = [];
     for (const s of indexBadSites) {
-      if (s.obj !== 'Engine' || s.absDisp === null) continue;
-      const cands = wins.filter((w) => matchesWindow(w, s));
-      // ★ 未声明偏移的索引站点**不许静默跳过**（原先 `continue` ⇒ 全模型没有"还有多少索引没建表"的数字）：
-      //   单列一档（note，带 EA），它回答的是「这张表还没建」，而不是「建了但类型不对」。
-      if (!cands.length) { indexOnUndeclared.push({ ea: s.ea, abs: s.absDisp }); continue; }
-      if (s.absDisp === 0) continue;                      // 位移 0 + 未解析索引 ⇒ 基址多半不是 obj0，判不了
-      // ★ **翻红后的口径**（S2r 的计划落地）：只有"真的被数组承住"才算过 —— 两道假绿通道堵掉：
-      //   ① `count:1` 的窗口是**内嵌子对象**，不是数组（实测它能同样消掉 108 处索引点名）；
-      //   ② 数组的元素大小必须等于**观测步长**（`memScale`），否则"承住"是假的。
-      const arr = cands.filter((w) => w.kind === 'array' && (w.m.count == null || num(w.m.count) > 1)
-        // ★ 元素大小必须等于观测步长 —— **但只在站点落在元素边界上时**：落在元素内部（`elemOff != 0`）时，
-        //   那个步长属于元素里的**嵌套数组**，与元素大小无关（实测直接比会产生 23 条假红，如 `T_Sys3Draw+0x2074`）。
-        && (w.elemSize == null || s.memScale == null || w.elemSize === s.memScale
-          || ((s.absDisp - w.from) % w.elemSize !== 0)));
-      if (arr.length) { indexOverArray += 1; continue; }
-      const c1 = cands.find((w) => w.kind === 'array');   // 只剩 count:1 的容器窗口（或元素大小不符的数组）
-      if (c1 && num(c1.m.count) === 1) { indexOverCountOne.push({ ea: s.ea, off: c1.m.offN }); continue; }
-      if (c1) { indexStrideMismatch.push({ ea: s.ea, off: c1.m.offN, elemSize: c1.elemSize, stride: s.memScale }); continue; }
-      indexOverScalarEAs.push({ ea: s.ea, why: '落在标量成员上' });
+      const r = classifyIndexSite(s);
+      if (!r) continue;
+      if (r.verdict === 'array') indexOverArray += 1;
+      else if (r.verdict === 'undeclared') indexOnUndeclared.push({ ea: s.ea, abs: s.absDisp });
+      else if (r.verdict === 'countOne') indexOverCountOne.push({ ea: s.ea, off: r.off });
+      else if (r.verdict === 'strideMismatch') indexStrideMismatch.push({ ea: s.ea, off: r.off, elemSize: r.elemSize, stride: r.stride });
+      else indexOverScalarEAs.push({ ea: s.ea, why: '落在标量成员上' });
     }
     if (indexOverArray) notes.push(`G15 ${c.id}: ${indexOverArray} 处索引访问落在**数组**成员上（索引本身不可判，但形态已被数组承住；⛔ 不算通过）`);
     // ★ **翻红**：索引访问落在非数组（标量 / `count:1` 容器）成员上 ⇒ 红。
@@ -658,12 +715,14 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       notes.push(`G5' ${c.id}: ${leaPointee.length} 处**只取址**的二级站点（值被用于地址算术，未解引用）⇒ 不要求宿主声明 ptr`
         + `（${leaPointee.slice(0, 3).map((s) => hex(s.ea)).join(' ')}）`);
     }
-    const pointee = sites.filter((s) => (s.pointeePath?.length ?? 0) >= 1 && typeof s.pointeeOff === 'number');
+    // ★ 带路径但 `pointeeOff === null` 的站点（access 层判为"折叠错"）**也要进这一桶**：否则它们会从守恒③ 的等式里静默消失（实测差 8）。加上 null 的站点进 pointee 桶，循环里走"判不了"档。
+    const pointee = sites.filter((s) => (s.pointeePath?.length ?? 0) >= 1);
     let pointeeOk = 0; let pointeeOpaque = 0; let pointeeBad = 0; let pointeeMulti = 0; let pointeeAmbiguous = 0;
     const opaqueEAs = [];
     const ambiguousEAs = [];
     const multiHopSites = [];
     for (const s of pointee) {
+      if (typeof s.pointeeOff !== 'number') { pointeeBad += 1; notes.push(`G5' ${c.id} @${hex(s.ea)}: 带二级路径但没有可用的二级偏移（负位移 ⇒ 多半是 \`new[]\` 的个数 cookie / 分配块头，不是宿主成员）⇒ **判不了**`); continue; }
       const path = s.pointeePath;
       // ★ **只取址（lea）** 的二级站点：值被用于地址算术，不是解引用 ⇒ 记**解释**档
       //   （真正的解引用一定另有非 lea 站点；实测踩过：整数游标被当指针时 4 条 G5' 假红）
@@ -674,6 +733,8 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       if (s.problems?.includes('index') || (s.indexSym && !/^[A-Za-z_]\w*$/.test(String(s.indexSym)))) { pointeeAmbiguous += 1; ambiguousEAs.push(s.ea); continue; }
       if (path.length + 1 > 2) { pointeeMulti += 1; multiHopSites.push(s); continue; }   // 跨两级以上：不判
       const hop = path[0];
+      // ★ 负的二级偏移（`[base-K]`，MSVC `new[]` 个数 cookie）在 `shape-access` 层已折成 `null`，
+      //   由下面「没有可用二级偏移」那一档统一处置 —— 这里不再留第二套措辞（死分支已删）。
       if (!derefHosts.has(tid)) derefHosts.set(tid, new Set());
       derefHosts.get(tid).add(hop);
       // ★ 宿主查找分两步（**数组元素内部**的宿主是一等情形，不是 fallback）：
@@ -690,8 +751,25 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
         //   到元素/子对象类型里再找一层；命中标量就返回它。
         //   实测：`T_Command+0x4f11c` = `T_Scene+0x40c`、`T_Command+0x59380` = `T_Scene+0xa670`
         //   （后者还要再穿过 `T_Scene+0xa5d8 = T2[1000]` 才落到 `T2+0x0`）。
-        const resolveDeep = (h, typeId, depth = 0) => {
-          if (depth > 3) return null;
+        // 模型的实际容器嵌套深度（obj0 起、按 `{type}` 递归；带环保护）
+    const MAX_CONTAINER_DEPTH = (() => {
+      let max = 0;
+      const seen = new Set();
+      const walk = (id0, d) => {
+        if (d > max) max = d;
+        const key = `${id0}:${d}`;
+        if (d > 12 || seen.has(key)) return;
+        seen.add(key);
+        for (const mm of membersOfId(id0)) if (mm.type) walk(mm.type, d + 1);
+      };
+      walk(tid, 0);
+      return max;
+    })();
+    const resolveDeep = (h, typeId, depth = 0) => {
+          // ★ 深度上限不再写死 3：由**模型的实际嵌套深度**算出（obj0 起按容器成员递归取最大值）。
+          //   写死 3 是拍出来的魔法数 —— 模型嵌套到 4 层时它会把第 4 层静默当成"判不了"，
+          //   而模型明明已经把那条路径声明出来了。
+          if (depth > MAX_CONTAINER_DEPTH) return null;
           for (const m of membersOfId(typeId)) {
             const et = m.type ? types[m.type] : null;
             if (m.kind === 'ptr') continue;      // ⛔ 指针成员不是容器：宿主就是它自己（下面走精确匹配）
@@ -874,7 +952,32 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       const et = types[m.type];
       if (et?.size == null) { notes.push(`G4 ${tid}+${hex(m.offN)}: 元素 size 未知 ⇒ 边界判不了`); continue; }
       const end = m.offN + et.size * m.count;
-      if (refs(end) === 0) {
+      // ★ `count === 1` = **内嵌子对象**（不是数组）：它的跨度由**元素类型的 size** 定，而"一过尾地址"(end)
+      //   按定义**不会被编译器算出来**（其后要么是下一个成员、要么是填充）⇒ 用"末尾有没有被引用"来验它是错的判据。
+      //   实测 `T_Font+0x18dc8`：end = 0x18dd8 全语料 **0** 处，而隔壁 0x18ddc 有 29 处。
+      //   ⇒ 记 note（边界由元素类型定，不是由父级观测）；⛔ 不是"末尾有引用"那一档。
+      if (m.count === 1) {
+        notes.push(`G4 ${tid}+${hex(m.offN)}: count=1 = **内嵌子对象**（${m.type}，size ${hex(et.size)}）⇒ 跨度由元素类型定；一过尾地址 ${hex(end)} 按定义不会被算出，零引用是必然（⛔ 不是"末尾有引用"那一档）`);
+        continue;
+      }
+      // ★ **标准库布局**（类型上带 `std` 标记）：`std::string` 这类 size 由 ABI 钉死（x86 MSVC = 0x18：
+      //   16 字节 SSO 缓冲 + 4 长度 + 4 容量），它不是"观测出来的"，也不该靠"末尾被引用"来证明 ——
+      //   它末尾之后是别的成员或填充，零引用是必然 ⇒ 记 note。
+      //   ⛔ 只对**ABI 定死**的布局开这一档：`std::vector` 不行（3 指针 + 分配器是否 EBO ⇒ 12 或 16，仍要观测）。
+      if (et && et.std != null) {
+        notes.push(`G4 ${tid}+${hex(m.offN)}: 元素类型 ${m.type} 是**标准库布局**（${et.std}，size ${hex(et.size)} 由 ABI 定死、不是观测）⇒ 末尾 ${hex(end)} 零引用是必然（⛔ 不是"末尾有引用"那一档）`);
+        continue;
+      }
+      // ★ S2ad：`end` 是**类型内相对偏移**，而语料里的引用是**绝对地址** —— 内嵌子对象上必须换算，
+      //   否则会出现 `G4 T_inihdr+0x0: 末尾 0x4 零引用` 这种**假红**（实测绝对末尾 0xAAA1C 被引用 2 次、
+      //   0xAAA20 被引用 19 次）。obj0 是全局单例时 `ABS` 有值 ⇒ 用它；否则退回相对偏移（note 说明是下界）。
+      const absBase = ABS.get(`${tid}:${m.offN}`);
+      const endAbs = absBase != null ? absBase + et.size * m.count : null;
+      const refsOfEnd = endAbs != null ? refs(endAbs) : refs(end);
+      if (endAbs == null && refs(end) === 0) {
+        notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾按**相对偏移** ${hex(end)} 查引用（该成员的绝对基址不可得 ⇒ 这是下界判断，⛔ 不是"末尾没被引用"）`);
+      }
+      if (refsOfEnd === 0) {
         // ★ 第三档：**数组正好填满对象**（末尾 == 容器 size）。这时"末地址零引用"是**必然** ——
         //   它已经在对象之外，编译器不会把它的绝对地址算出来。边界由 `size` 定界，而 `size` 是另一条
         //   独立声明（G1 又禁止任何成员越过 size）⇒ 这条约束**照样可证伪**：
@@ -888,7 +991,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
         if (end % 4 !== 0) notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾 ${hex(end)} 不对齐 4 且零引用 ⇒ 编译器按定义不会算出它（边界靠常量+写循环证明，⛔ 不是"通过"）`);
         else red(`G4 ${tid}+${hex(m.offN)}`, `数组末尾 ${hex(end)} 在语料里零引用 ⇒ count=${m.count} 无依据`);
       }
-      else notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾 ${hex(end)} 有 ${refs(end)} 处引用 ⇒ count=${m.count} 站得住`);
+      else notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾 ${hex(endAbs ?? end)}${endAbs != null ? '（绝对）' : '（相对下界）'} 有 ${refsOfEnd} 处引用 ⇒ count=${m.count} 站得住`);
     }
   }
 

@@ -887,8 +887,8 @@ const MUTATIONS = [
   },
   {
     file: 'tools/lib/shape-claims.mjs',
-    from: '      if (!cands.length) { indexOnUndeclared.push({ ea: s.ea, abs: s.absDisp }); continue; }',
-    to: '      if (true) continue;',
+    from: '    const classifyIndexSite = (s) => {',
+    to: '    const classifyIndexSite = (s) => { return null;',
     guard: 'tools/test/shape-claims-guards.test.mjs',
     what: '★ G15 整条失效 ⇒ 索引访问落在非数组成员上不再被点名（“1024 项分派表被写成 544 条离散槽”这类矛盾重新变回沉默）',
   },
@@ -968,6 +968,41 @@ const MUTATIONS = [
     to: '            if (false) continue;      // 变异：指针成员被当容器',
     guard: 'tools/test/shape-claims-guards.test.mjs',
     what: '★ 指针成员被当成容器 ⇒ 宿主偏移正好等于某个 `ptr` 成员时会被解进它的**目标类型**（实测 `T_Sys3Draw+0x1fb0 → T_Scene` 会凭空多 17 处残差）',
+  },
+  {
+    file: 'tools/lib/shape-access.mjs',
+    from: "      pointeeOff: path.length ? (typeof sh.off === 'number' && sh.off < 0 ? null : sh.off) : null,",
+    to: '      pointeeOff: path.length ? sh.off : null,',
+    guard: 'tools/test/shape-access.test.mjs',
+    what: '★ 折叠层的负位移又被写进 pointeeOff ⇒ 判定器把它记成「某类型缺 0x-4 这个成员」的假缺口（实测 T_5d8bc+0x-4 / 0x40EA97）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '      const endAbs = absBase != null ? absBase + et.size * m.count : null;',
+    to: '      const endAbs = null;',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ G4 退回用**类型相对偏移**查引用 ⇒ 内嵌子对象的数组末尾一律假红（实测 T_inihdr+0x0 报「末尾 0x4 零引用」，而绝对 0xAAA1C 有 2 处引用）',
+  },
+  {
+    file: 'tools/lib/shape-access.mjs',
+    from: '        return m ? mem.indices[0].scale * m : mem.indices[0].scale;',
+    to: '        return mem.indices[0].scale;',
+    guard: 'tools/test/shape-access.test.mjs',
+    what: '★ 强度削减的乘数链被丢掉 ⇒ memScale 回退成裸 scale（实测 0x40F3B1 会报 8 而非 0x78，与 size 比对时双向出错）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '      if (Number.isInteger(st) && st > 0 && !arrays.some((x) => x.es === st)) {',
+    to: '      if (false) {',
+    guard: 'tools/test/shape-claims-guards.test.mjs',
+    what: '★ G17 不再要求 axis.stride 有已声明数组背书 ⇒ 任何“我说这个游标步长是 N”都能通过（标注退化成口号）',
+  },
+  {
+    file: 'tools/lib/shape-access.mjs',
+    from: "      for (const rg of ['esi', 'edi', 'ecx', 'eax']) fr.set(rg, UNK);",
+    to: '      // 变异：串指令不再失效寄存器',
+    guard: 'tools/test/shape-access.test.mjs',
+    what: '★ 串指令（rep movs*/stos*）不再让 esi/edi 失效 ⇒ rep 之后 [esi+disp] 被当成对象相对位移 = 假解释（实测 795 处）',
   },
 ];
 
