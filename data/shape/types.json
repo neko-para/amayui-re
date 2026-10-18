@@ -850,8 +850,9 @@
         },
         {
           "off": "0x77bec",
-          "width": 4,
-          "note": "表起点；条数有独立证据，但末尾地址在语料里零引用 ⇒ 按 G4 只声明首槽（report §4.2）"
+          "note": "512 个 dword：构造函数的初始化写循环直接观察（0x415dca lea edi,[esi+77BECh] + mov ecx,200h + rep stosd）；末尾零引用是必然",
+          "type": "T_el32",
+          "count": 512
         },
         {
           "off": "0x78bec",
@@ -2801,43 +2802,9 @@
         },
         {
           "off": "0x4bc",
-          "width": 4
-        },
-        {
-          "off": "0x4c0",
-          "width": 4
-        },
-        {
-          "off": "0x4c4",
-          "width": 4
-        },
-        {
-          "off": "0x4c8",
-          "width": 4
-        },
-        {
-          "off": "0x4cc",
-          "width": 4
-        },
-        {
-          "off": "0x4d0",
-          "width": 4
-        },
-        {
-          "off": "0x4d4",
-          "width": 4
-        },
-        {
-          "off": "0x4d8",
-          "width": 4
-        },
-        {
-          "off": "0x4dc",
-          "width": 4
-        },
-        {
-          "off": "0x4e0",
-          "width": 4
+          "type": "T_el32",
+          "count": 10,
+          "note": "4 字节元素 ×10：索引用 0..9（0x4b50db cmp edi,0Ah / jge）；条数有界 ⇒ 有限数组"
         }
       ],
       "note": "RTTI ??_7SE@@6B@（vtable 写入 0x4b4e93）"
@@ -3595,7 +3562,9 @@
         },
         {
           "off": "0xc610",
-          "width": 4
+          "width": 4,
+          "kind": "ptr",
+          "type": null
         },
         {
           "off": "0xc614",
@@ -3669,43 +3638,9 @@
         },
         {
           "off": "0xda04",
-          "width": 4
-        },
-        {
-          "off": "0xda08",
-          "width": 4
-        },
-        {
-          "off": "0xda0c",
-          "width": 4
-        },
-        {
-          "off": "0xda10",
-          "width": 4
-        },
-        {
-          "off": "0xda14",
-          "width": 4
-        },
-        {
-          "off": "0xda18",
-          "width": 4
-        },
-        {
-          "off": "0xda1c",
-          "width": 4
-        },
-        {
-          "off": "0xda20",
-          "width": 4
-        },
-        {
-          "off": "0xda24",
-          "width": 4
-        },
-        {
-          "off": "0xda28",
-          "width": 4
+          "type": "T_el32",
+          "count": 10,
+          "note": "4 字节元素 ×10：末尾 0xda2c == size（G4 第三档）；索引来自参数（无循环界）"
         }
       ],
       "note": "RTTI ??_7Scene@@6B@（vtable 写入 0x4aafcd）"
@@ -4519,51 +4454,27 @@
         },
         {
           "off": "0x418",
-          "width": 4
-        },
-        {
-          "off": "0x41c",
-          "width": 4
-        },
-        {
-          "off": "0x420",
-          "width": 4
+          "count": 3,
+          "note": "4 字节元素 ×3：四张并行表（0x418/0x460/0x46c/0x478）共用索引 ebx；+0x478 末尾 0x484 == size ⇒ G4 第三档",
+          "type": "T_el32"
         },
         {
           "off": "0x460",
-          "width": 4
-        },
-        {
-          "off": "0x464",
-          "width": 4
-        },
-        {
-          "off": "0x468",
-          "width": 4
+          "count": 3,
+          "note": "4 字节元素 ×3：四张并行表（0x418/0x460/0x46c/0x478）共用索引 ebx；+0x478 末尾 0x484 == size ⇒ G4 第三档",
+          "type": "T_el32"
         },
         {
           "off": "0x46c",
-          "width": 4
-        },
-        {
-          "off": "0x470",
-          "width": 4
-        },
-        {
-          "off": "0x474",
-          "width": 4
+          "type": "T_el32",
+          "count": 3,
+          "note": "4 字节元素 ×3：四张并行表（0x418/0x460/0x46c/0x478）共用索引 ebx；+0x478 末尾 0x484 == size ⇒ G4 第三档"
         },
         {
           "off": "0x478",
-          "width": 4
-        },
-        {
-          "off": "0x47c",
-          "width": 4
-        },
-        {
-          "off": "0x480",
-          "width": 4
+          "count": 3,
+          "note": "4 字节元素 ×3：四张并行表（0x418/0x460/0x46c/0x478）共用索引 ebx；+0x478 末尾 0x484 == size ⇒ G4 第三档",
+          "type": "T_el32"
         }
       ],
       "note": "RTTI ??_7Voice@@6B@（vtable 写入 0x4bb733）"

@@ -177,7 +177,11 @@ function shapeOf(fr, mem) {
   }
   const bv = fr.get(mem.base);
   if (bv && bv.t === 'this') { out.obj = 'this'; out.off = 0; out.basePath = []; }
-  else if (bv && bv.t === 'addr') { out.obj = bv.obj; out.off = bv.off; out.terms.push(...bv.terms); out.basePath = bv.path ?? []; }
+  else if (bv && bv.t === 'addr') {
+    out.obj = bv.obj; out.off = bv.off; out.terms.push(...bv.terms); out.basePath = bv.path ?? [];
+    // ★ 位移本身不可用（寄存器装的是"基址 + 未知项"）⇒ 下游照样是"位移不可用"，不许报成 `obj0+disp`
+    if (bv.unusable) out.problems.push('index');
+  }
   else if (bv && bv.t === 'load') { out.obj = objName(bv.obj, bv.off); out.off = 0; out.basePath = bv.path ?? []; }
   else { out.problems.push('base'); }
   for (const { reg, scale } of mem.indices) {
@@ -255,7 +259,8 @@ function vkey(v) {
   // ★ 符号必须进 key：否则两个不同的全局（`ds:dword_A` / `ds:dword_B`）在汇合点被当成同一个值，
   //   `mergeState` 会**静默保留**其中一支（实测形态：`var = cond ? ds:X : ds:Y`）。
   if (v.t === 'glob') return `glob:${v.seg ?? 'ds'}:${v.sym}`;
-  if (v.t === 'addr') return `addr:${v.obj}:${v.off}:${(v.path ?? []).join(',')}:${(v.terms ?? []).map((t) => `${t.sym}*${t.k}*${t.scale}`).join(',')}`;
+  // ★ `unusable` 必须进 key：否则"`this` + 未知项"与"`this` + 0"在汇合点被当成同一个值 ⇒ 假观察复活。
+  if (v.t === 'addr') return `addr:${v.obj}:${v.off}:${v.unusable ? 'x' : ''}:${(v.path ?? []).join(',')}:${(v.terms ?? []).map((t) => `${t.sym}*${t.k}*${t.scale}`).join(',')}`;
   if (v.t === 'load') return `load:${v.obj}:${v.off}:${(v.path ?? []).join(',')}`;
   if (v.t === 'val') return `val:${v.sym ?? ''}:${v.k}:${v.b}`;
   return 'unk';
@@ -551,7 +556,17 @@ function step(fr, mn, o, ctx) {
       const mem = parseMem(s);
       if (!mem || mem.stack) { fr.set(dl, UNK); return; }
       const sh = shapeOf(fr, mem);
-      if (sh.obj) { fr.set(dl, { t: 'addr', obj: sh.obj, off: sh.off, terms: sh.terms, path: sh.basePath ?? [] }); return; }
+      // ★ 索引没解出来时的 `lea`（`lea esi,[edi+edx*4]`，`edx` 是跳表算出来的量）**不是** `this+0`：
+      //   它装的是"`this` + 一个未知项"。带上 `unusable` 之后，下游 `[esi+K]` 才会落进
+      //   「位移不可用（索引未解析）」而不是变成 `obj0+K` 的**假观察**（实测 `0x422527` ⇒ `0x4225b5` 起的
+      //   `[esi+4..+0x18]` 曾被记成 obj0 的 5 个"未声明偏移"，而它们的基址其实是 `Engine + (跳表值−序号)*4`）。
+      if (sh.obj) {
+        fr.set(dl, {
+          t: 'addr', obj: sh.obj, off: sh.off, terms: sh.terms, path: sh.basePath ?? [],
+          unusable: sh.problems.length > 0,
+        });
+        return;
+      }
       const n = numOf(fr, mem);
       fr.set(dl, n ?? UNK);
       return;
@@ -575,7 +590,12 @@ function step(fr, mn, o, ctx) {
       if (a.t === 'addr') {
         // `add <指针>, imm` 是常见的取址算术（`add esi, 8`）
         const n = constOf(evalOperand(fr, s));
-        if (n !== null && (mn === 'add' || mn === 'sub')) fr.set(dl, { t: 'addr', obj: a.obj, off: a.off + (mn === 'add' ? n : -n), terms: a.terms });
+        if (n !== null && (mn === 'add' || mn === 'sub')) {
+          fr.set(dl, {
+            t: 'addr', obj: a.obj, off: a.off + (mn === 'add' ? n : -n), terms: a.terms,
+            path: a.path ?? [], unusable: a.unusable,   // ★ 位移不可用的身份随指针算术一起传下去
+          });
+        }
         else fr.set(dl, UNK);
         return;
       }

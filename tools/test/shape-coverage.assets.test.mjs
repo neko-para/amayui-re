@@ -32,3 +32,18 @@ test('access 支持 --calibrated（同一批站点，未解析基址不该更多
   const count = (s) => (s.match(/⚠ base/g) ?? []).length;
   assert.ok(count(cal) <= count(cons), `校准档的 ⚠base 数应 ≤ 保守档：${count(cal)} vs ${count(cons)}`);
 });
+
+test('coverage --json 归档自洽，且"目标未知的间接跳转"不许被静默算成闭合', { skip }, async () => {
+  const out = await capture(['--coverage', 'sub_41BF50', 'sub_42C5E0', '--json']);
+  const a = JSON.parse(out.slice(out.indexOf('{')));
+  assert.equal(a.total, 2, `归档里应有 2 个函数：\n${out.slice(0, 400)}`);
+  for (const f of a.functions) {
+    if (f.closed) assert.deepEqual(f.reasons, [], `${f.sym} 闭合却带原因`);
+    else assert.ok(f.reasons.length > 0, `${f.sym} 未闭合却没有原因（归档会把它读成"能用"）`);
+  }
+  // ★ 这条是"跳表"的代表：`jmp ds:…` 的目标集没导出 ⇒ 必须留在未闭合里（⛔ 不许静默变绿）
+  const j = a.functions.find((f) => f.sym === 'sub_41BF50');
+  assert.ok(j && j.closed === false, `sub_41BF50 有目标未知的间接跳转 ⇒ 必须未闭合：${JSON.stringify(j)}`);
+  assert.ok(j.reasonKinds.includes('indirectJmp'), `原因里要有 indirectJmp：${JSON.stringify(j.reasonKinds)}`);
+  assert.ok(a.byReason.indirectJmp.includes('sub_41BF50'), '归档分组里要能查到它（"下一层能用的清单"就是这样被消费的）');
+});

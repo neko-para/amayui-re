@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { analyzeLines } from '../lib/shape-access.mjs';
+import { offsetUnusable } from '../lib/shape-claims.mjs';
 
 const L = [
   '.text:00402000 sub_402000 proc near',
@@ -112,4 +113,38 @@ test('★access-06 `stos*` 只影响 `edi`，不影响 `esi`', () => {
   const hit = r.sites.find((s) => s.ea === 0x402804);
   assert.ok(hit, '站点要在');
   assert.equal(hit.absDisp, 0x600, `stos 不推进 esi ⇒ [esi+600h] 仍应是对象相对位移：${hit.absDisp}`);
+});
+
+test('★access-07 索引解不出的 `lea` ⇒ 目标寄存器是"`this`+未知项"：下游 `[reg+K]` 进「位移不可用」，⛔ 不许当 `obj0+K`', () => {
+  const L7 = [
+    '.text:00402A00 sub_402A00 proc near',
+    '.text:00402A00 mov     edi, ecx',
+    '.text:00402A02 call    sub_41BF50',   // 返回值 ⇒ edx 的来源是"调用返回值"（解不出）
+    '.text:00402A08 mov     edx, eax',
+    '.text:00402A0B lea     esi, [edi+edx*4]',   // 现场形态（0x422527：跳表算出的基址）
+    '.text:00402A0E mov     eax, [esi+0Ch]',     // 下游：曾被记成 obj0+0xc
+    '.text:00402A11 add     eax, [esi+4]',       // 同族：曾被记成 obj0+0x4
+    '.text:00402A14 retn',
+    '.text:00402A14 sub_402A00 endp',
+  ];
+  const r = analyzeLines(L7, 0, L7.length - 1, 'ecx', {});
+  for (const ea of [0x402a0e, 0x402a11]) {
+    const hit = r.sites.find((s) => s.ea === ea);
+    assert.ok(hit, `站点 0x${ea.toString(16)} 要在`);
+    assert.equal(offsetUnusable(hit), 'index-unresolved',
+      `0x${ea.toString(16)} 的位移少了索引那一项 ⇒ 只能进「位移不可用」（实测 abs=${hit.absDisp?.toString(16)} problems=${JSON.stringify(hit.problems)}）`);
+  }
+  // 对照：`mov esi, ecx` 之后同样形态**必须**仍是普通 obj0 偏移（⛔ 别把"位移不可用"做成整类误杀）
+  const L8 = [
+    '.text:00402B00 sub_402B00 proc near',
+    '.text:00402B00 mov     esi, ecx',
+    '.text:00402B02 mov     eax, [esi+0Ch]',
+    '.text:00402B05 retn',
+    '.text:00402B05 sub_402B00 endp',
+  ];
+  const r8 = analyzeLines(L8, 0, L8.length - 1, 'ecx', {});
+  const hit8 = r8.sites.find((s) => s.ea === 0x402b02);
+  assert.ok(hit8, '对照站点要在');
+  assert.equal(offsetUnusable(hit8), null, '`esi` 就是 `this` 时不带未知项 ⇒ 仍是可用偏移');
+  assert.equal(hit8.absDisp, 0xc);
 });

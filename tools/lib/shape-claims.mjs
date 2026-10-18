@@ -168,6 +168,47 @@ export function matchesWindowGlobal(w, s) {
   return w.delta === 0 && s.absDisp === w.m.offN && !s.indexSym;                  // 元素 0 的裸位移
 }
 
+/**
+ * **初始化写循环**：`lea edi,[<reg>+OFFh]` →（`xor eax,eax` 之类）→ `mov ecx, N` → `rep stosd` ⇒ `OFF → {N…}`。
+ *
+ * ★ 为什么这条证据比"数组末尾被引用"**更强**（因此 G4 该认它）：
+ *   写循环**直接观察了元素个数**（`ecx` 是立即数、`stosd` 每次 4 字节），而"末尾被引用"只是**间接**旁证。
+ *   实测 `T_Command+0x77bec`：构造函数里 `0x415dca lea edi,[esi+77BECh]` + `mov ecx,200h` + `rep stosd`
+ *   ⇒ 512 个 dword；而末尾 `0x783ec` 在语料里零引用（当时只能"按 G4 只声明首槽"，于是索引访问被判成假红）。
+ *
+ * ★ 状态机：只认**连续**的 `lea edi → mov ecx,N → rep stosd`（中间允许 `xor eax,eax` / `mov eax,…`），
+ *   别的指令打断 —— 否则会把两段无关代码拼成一个"条数"。
+ */
+export function initStompCounts(lines) {
+  const out = new Map();
+  let off = null;
+  let count = null;
+  /** 去掉 `段:EA ` 前缀与行尾注释后的指令文本 */
+  const body = (ln) => {
+    const m = /^[A-Za-z_.][\w.]*:[0-9A-F]{8}\s+([^;]*)/i.exec(ln.trim());
+    return m ? m[1].trim().toLowerCase() : null;
+  };
+  for (const raw of lines ?? []) {
+    const t = body(raw);
+    if (t == null) continue;
+    const lea = /^lea\s+edi,\s*\[\w+\+([0-9a-f]+)h\]$/.exec(t);
+    if (lea) { off = Number.parseInt(lea[1], 16); count = null; continue; }
+    if (off != null && count == null) {
+      const ecx = /^mov\s+ecx,\s*([0-9a-f]+)h$/.exec(t);
+      if (ecx) { count = Number.parseInt(ecx[1], 16); continue; }
+      if (/^xor\s+eax,\s*eax$/.test(t) || /^mov\s+eax,/.test(t)) continue;
+      off = null; continue;
+    }
+    if (off != null && count != null && /^rep\s+stosd$/.test(t)) {
+      if (!out.has(off)) out.set(off, new Set());
+      out.get(off).add(count);
+      off = null; count = null; continue;
+    }
+    off = null; count = null;
+  }
+  return out;
+}
+
 export function checkClaims(model0, { lines = loadListing(), baseDir = process.cwd(), observed = null, roots = null, resolve = null } = {}) {
   const findings = [];
   const disputes = [];   // G12：合法争议（会被报告单列）
@@ -943,6 +984,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
   }
 
   // ── G4 数组边界（末尾地址必须在语料里被引用）
+  const initStomps = initStompCounts(lines);   // 扫一遍：OFF → 写循环次数（⛔ 每个成员各扫一遍会是 O(成员×语料)）
   for (const [tid, t] of Object.entries(types)) {
     for (const m of membersOf(t)) {
       if (m.type == null || m.count == null) {
@@ -985,6 +1027,14 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
         //   ★ 为什么不是"放行"：只有**紧贴 size** 才成立（`end === size` 是等式，不是不等式）。
         if (t.size != null && end === t.size) {
           notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾 ${hex(end)} == 容器 size ⇒ 数组正好填满对象（末地址在对象之外，零引用是必然；边界由 size 定界，⛔ 不是"末尾有引用"那一档）`);
+          continue;
+        }
+        // ★ 新增档：条数由**初始化写循环**直接观察（`lea edi,[obj+off]` + `mov ecx,N` + `rep stosd`）。
+        //   比"末尾被引用"更强的证据 ⇒ 末尾零引用是必然（写循环只写这么多格，编译器不会再算一过尾地址）。
+        //   可证伪：把 count 改掉 ⇒ 这里对不上 ⇒ 立刻回落到红。
+        const stomped = initStomps.get(m.offN);
+        if (stomped && stomped.has(m.count)) {
+          notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾零引用，但条数 ${m.count} 由**初始化写循环**直接观察（${hex(m.offN)} 处 \`lea edi,[…+${hex(m.offN)}h]\` + \`mov ecx,${m.count}\` + \`rep stosd\`）⇒ 边界由写循环定界（⛔ 不是"末尾有引用"那一档）`);
           continue;
         }
         // ★ 奇数跨度（u16×17=0x22 / u16×289=0x242）的末尾按定义不是 4 对齐 ⇒ 编译器不会算出它 ⇒ 零引用是必然，不是"条数无依据"

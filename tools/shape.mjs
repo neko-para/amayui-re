@@ -22,11 +22,11 @@ import process from 'node:process';
 
 import { analyzeLines, functionSpans, loadListing, objRootRegs } from './lib/shape-access.mjs';
 import { censusBodies, renderBodies } from './lib/shape-bodies.mjs';
-import { censusHandlers, renderCensus } from './lib/shape-census.mjs';
+import { censusHandlers, obj0Debt, renderCensus, renderDebt } from './lib/shape-census.mjs';
 import { checkClaims, DRILL_MAX_LEVEL, objectLevel, renderReport, sampleModel, VOCAB, REDUNDANT } from './lib/shape-claims.mjs';
 import { deriveRegions, insnsOf } from './lib/shape-regions.mjs';
 import { checkRow, describeEa, loadRaw } from './lib/shape-verify.mjs';
-import { coverageOf, renderCoverage } from './lib/shape-coverage.mjs';
+import { coverageArchive, coverageOf, renderCoverage } from './lib/shape-coverage.mjs';
 import { auditCalls, renderCalls } from './lib/shape-calls.mjs';
 import { propagate, nextCandidates } from './lib/shape-propagate.mjs';
 import { fileURLToPath } from 'node:url';
@@ -50,7 +50,7 @@ export const OPERATIONS = [
   { name: 'verify', argv: ['--verify'], mutates: false, summary: '★ **独立复核器**：按 witness EA 回语料重解（verified / drifted / unverifiable；证明 vs 推断按字段）' },
   { name: 'regions', argv: ['--regions'], mutates: false, summary: '★ **功能①**：机械导出某函数某寄存器的拆分范围（段落 / 类别 / 段首形态 / 是否被 call 打断）' },
   { name: 'depth', argv: ['--depth'], mutates: false, summary: '**对象层级分布**（level 1 / 2 / 3+）：`[<sym>]`；用来现跑"下钻上限冻结在层级 2"这个判决（层级 ≥3 单列，不静默丢）' },
-  { name: 'census', argv: ['--census'], mutates: false, summary: '★ **全表普查**：每个**有 handler 的 opcode**（判据 = 语料分派表）的站点分类 / `obj0` 偏移聚类 / 索引簇 / 未解析三类报数（`--match <sym>` 收窄 · `--json` 全量）' },
+  { name: 'census', argv: ['--census'], mutates: false, summary: '★ **全表普查**：每个**有 handler 的 opcode**（判据 = 语料分派表）的站点分类 / `obj0` 偏移聚类 / 索引簇 / 未解析三类报数（`--match <sym>` 收窄 · `--json` 全量 · **`--debt` 覆盖率欠账**：观察到的 obj0 偏移 − 某类型的成员表 ⇒ 已声明 / `count:null` 窗口内（判不了）/ **未声明（清单）**）' },
   { name: 'bodies', argv: ['--bodies'], mutates: false, summary: '★ **handler 体骨架普查**：记录槽写法（哪个立即数写进哪个位移）+ 调用序列（每个 callee 的实参立即数）⇒ 按骨架分组（`--match` · `--json`）—— 这是 A1–A6 的**可算版**' },
   { name: 'claims', argv: ['--claims'], mutates: false, summary: '★ **功能②**：校验 claims 文件（守卫 / G1..G14 / J3 / 四守恒）；`--sample` 用内置样本；`--by-type` 加一节**残差按类型聚合**（"下一批该补哪个类型的成员表"的机械依据）' },
   { name: 'propagate', argv: ['--propagate'], mutates: false, summary: '★ **类型传播（全图 BFS）**：从已声明载体沿调用图推导每个函数根寄存器是什么类 ⇒ 批次顺序 + "类判定"的**唯一机械依据**（⛔ 不按偏移命中率猜类）' },
@@ -265,6 +265,15 @@ function runCensus(args) {
   const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? (args[i + 1] ?? null) : null; };
   const lines = loadListing();
   const r = censusHandlers({ lines, repoRoot: REPO_ROOT, match: opt('--match') });
+  // ★ `--debt`：把"观察到的 obj0 偏移"与一个已声明类型做差 ⇒ 三档（已声明 / count:null 窗口内 / 未声明）。
+  //   这一步**不读第二遍语料**（复用上面的普查结果），所以它与 `claims` 的守恒③ 是同一份偏移。
+  if (args.includes('--debt')) {
+    const file = opt('--debt-from') ?? path.join(REPO_ROOT, 'data', 'shape', 'types.json');
+    const types = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const d = obj0Debt(r.obj0Offsets, types, opt('--debt-root') ?? 'T_Command');
+    process.stdout.write(args.includes('--json') ? `${JSON.stringify(d, null, 2)}\n` : renderDebt(d));
+    return 0;
+  }
   process.stdout.write(args.includes('--json') ? `${JSON.stringify(r, null, 2)}\n` : renderCensus(r));
   return r.problems.length ? 1 : 0;
 }
@@ -293,9 +302,9 @@ function runCoverage(args) {
   const targets = all
     ? functionSpans(lines).map((s) => s.sym)
     : args.filter((a) => /^sub_[0-9A-F]{6}$/i.test(a));
-  if (!targets.length) { process.stderr.write('用法：shape coverage <sub_XXXXXX>… | --all [--limit N]\n'); return 2; }
-  let closed = 0; let unclosed = 0;
-  const tally = new Map();
+  if (!targets.length) { process.stderr.write('用法：shape coverage <sub_XXXXXX>… | --all [--limit N] [--json]\n'); return 2; }
+  const wantJson = args.includes('--json');
+  const covs = [];
   for (const sym of targets.slice(0, all ? limit : targets.length)) {
     const sp = spanOf.get(sym);
     if (!sp) { process.stderr.write(`找不到函数 ${sym}\n`); continue; }
@@ -307,18 +316,17 @@ function runCoverage(args) {
       const covCal = coverageOf(lines, sym, sp, roots.get(sym) ?? null, cal.sites);
       cov.tierCompare = { conservative: cov.siteStates.unresolvedBase, calibrated: covCal.siteStates.unresolvedBase };
     }
-    if (cov.closed) closed += 1;
-    else {
-      unclosed += 1;
-      for (const r of cov.reasons) {
-        const k = r.replace(/^\d+ /, '').replace(/：.*$/, '');
-        tally.set(k, (tally.get(k) ?? 0) + 1);
-      }
-    }
-    process.stdout.write(renderCoverage(cov) + '\n\n');
+    covs.push(cov);
+    if (!wantJson) process.stdout.write(renderCoverage(cov) + '\n\n');
   }
-  process.stdout.write(`## 合计：L0 闭合 ${closed} · 未闭合 ${unclosed}\n`);
-  for (const [k, v] of [...tally].sort((a, b) => b[1] - a[1])) process.stdout.write(`  ${v} 个函数：${k}\n`);
+  // ★ `--json` = **归档**（"下一层能用的函数清单"）：未闭合按原因分组，键是闭集合 `REASON_KINDS`。
+  const archive = coverageArchive(covs);
+  if (wantJson) { process.stdout.write(`${JSON.stringify(archive, null, 2)}\n`); return 0; }
+  process.stdout.write(`## 合计：L0 闭合 ${archive.closed} · 未闭合 ${archive.unclosed}（共 ${archive.total} 个函数）\n`);
+  for (const [k, v] of Object.entries(archive.counts.byReason).filter(([, n]) => n).sort((a, b) => b[1] - a[1])) {
+    process.stdout.write(`  ${v} 个函数：${k}\n`);
+  }
+  process.stdout.write('  ⛔ 一个函数可能有多个原因 ⇒ 按原因计与按函数计**不是同一个口径**，不许相加\n');
   return 0;
 }
 

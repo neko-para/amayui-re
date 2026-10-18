@@ -2328,6 +2328,3251 @@
         "0x416114"
       ],
       "note": "换槽/初始化那两个游标块（0x5D800 起 6 格 × 2 翻转槽）的函数：`0x41AADF mov esi, ecx` = 对象根，函数体 0x41AA50..0x41AB77 访问 0x5D800+4i+8k 共 24 处。★ `indirectOnly`：全语料**没有** `call sub_41AA50`（0 处），它只以地址形式出现在 `0x416114 mov [esi+0A5250h], offset sub_41AA50`（T_Command 的处理器槽）⇒ 只能经分派调用"
+    },
+    {
+      "id": "s1k-01",
+      "kind": "arg",
+      "fn": "sub_47E690",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x40c7a5"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40C780@0x40c7a5 (this)）"
+    },
+    {
+      "id": "s1k-02",
+      "kind": "arg",
+      "fn": "sub_4BBA90",
+      "reg": "ecx",
+      "type": "T_Voice*",
+      "witness": [
+        "0x40e1eb"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40DF10@0x40e1eb (interior)）"
+    },
+    {
+      "id": "s1k-03",
+      "kind": "arg",
+      "fn": "sub_4056F0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x40e26d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40DF10@0x40e26d (this)）"
+    },
+    {
+      "id": "s1k-04",
+      "kind": "arg",
+      "fn": "sub_4B8660",
+      "reg": "ecx",
+      "type": "T_SysCursor*",
+      "witness": [
+        "0x40e2f8"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40DF10@0x40e2f8 (interior)）"
+    },
+    {
+      "id": "s1k-05",
+      "kind": "arg",
+      "fn": "sub_455620",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x455c9a"
+      ],
+      "note": "传播推断（1 跳，来自 sub_455C60@0x455c9a (this)）"
+    },
+    {
+      "id": "s1k-06",
+      "kind": "arg",
+      "fn": "sub_4590C0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x459e6d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_459C50@0x459e6d (this)）"
+    },
+    {
+      "id": "s1k-07",
+      "kind": "arg",
+      "fn": "sub_42AA30",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x45d265"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45D240@0x45d265 (this)）"
+    },
+    {
+      "id": "s1k-08",
+      "kind": "arg",
+      "fn": "sub_45DA10",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x45ec00"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45EBE0@0x45ec00 (interior)）"
+    },
+    {
+      "id": "s1k-09",
+      "kind": "arg",
+      "fn": "sub_45E730",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x45ec0d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45EBE0@0x45ec0d (interior)）"
+    },
+    {
+      "id": "s1k-10",
+      "kind": "arg",
+      "fn": "sub_45D1B0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x45ec49"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45EBE0@0x45ec49 (interior)）"
+    },
+    {
+      "id": "s1k-11",
+      "kind": "arg",
+      "fn": "sub_4323F0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x46544a"
+      ],
+      "note": "传播推断（1 跳，来自 sub_465390@0x46544a (interior)）"
+    },
+    {
+      "id": "s1k-12",
+      "kind": "arg",
+      "fn": "sub_4327A0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x465457"
+      ],
+      "note": "传播推断（1 跳，来自 sub_465390@0x465457 (interior)）"
+    },
+    {
+      "id": "s1k-13",
+      "kind": "arg",
+      "fn": "sub_432860",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x46549d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_465390@0x46549d (interior)）"
+    },
+    {
+      "id": "s1k-14",
+      "kind": "arg",
+      "fn": "sub_40BF80",
+      "reg": "ecx",
+      "type": "T_stdmap_n760*",
+      "witness": [
+        "0x4ab7b4"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4AB7A0@0x4ab7b4 (interior)）"
+    },
+    {
+      "id": "s1k-15",
+      "kind": "arg",
+      "fn": "sub_40BFE0",
+      "reg": "ecx",
+      "type": "T_stdmap_n80*",
+      "witness": [
+        "0x4ab8fd"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4AB7A0@0x4ab8fd (interior)）"
+    },
+    {
+      "id": "s1k-16",
+      "kind": "arg",
+      "fn": "sub_4A9D10",
+      "reg": "ecx",
+      "type": "T_stdmap_n592*",
+      "witness": [
+        "0x4ab908"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4AB7A0@0x4ab908 (interior)）"
+    },
+    {
+      "id": "s1k-17",
+      "kind": "arg",
+      "fn": "sub_4B7D60",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x415692"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x415692 (interior)）"
+    },
+    {
+      "id": "s1k-18",
+      "kind": "arg",
+      "fn": "sub_4B4E60",
+      "reg": "ecx",
+      "type": "T_SE*",
+      "witness": [
+        "0x4156f0"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x4156f0 (interior)）"
+    },
+    {
+      "id": "s1k-19",
+      "kind": "arg",
+      "fn": "sub_4BB700",
+      "reg": "ecx",
+      "type": "T_Voice*",
+      "witness": [
+        "0x4156ff"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x4156ff (interior)）"
+    },
+    {
+      "id": "s1k-20",
+      "kind": "arg",
+      "fn": "sub_497810",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x41572c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x41572c (interior)）"
+    },
+    {
+      "id": "s1k-21",
+      "kind": "arg",
+      "fn": "sub_454A20",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x4158ff"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x4158ff (interior)）"
+    },
+    {
+      "id": "s1k-22",
+      "kind": "arg",
+      "fn": "sub_4B88C0",
+      "reg": "ecx",
+      "type": "T_SysCursor*",
+      "witness": [
+        "0x41590e"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x41590e (interior)）"
+    },
+    {
+      "id": "s1k-23",
+      "kind": "arg",
+      "fn": "sub_491880",
+      "reg": "ecx",
+      "type": "T_Reg*",
+      "witness": [
+        "0x41591d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x41591d (interior)）"
+    },
+    {
+      "id": "s1k-24",
+      "kind": "arg",
+      "fn": "sub_489970",
+      "reg": "ecx",
+      "type": "T_Music*",
+      "witness": [
+        "0x41592c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x41592c (interior)）"
+    },
+    {
+      "id": "s1k-25",
+      "kind": "arg",
+      "fn": "sub_405640",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x415bfe"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415640@0x415bfe (this)）"
+    },
+    {
+      "id": "s1k-26",
+      "kind": "arg",
+      "fn": "sub_498390",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x447885"
+      ],
+      "note": "传播推断（1 跳，来自 sub_447810@0x447885 (member)）"
+    },
+    {
+      "id": "s1k-27",
+      "kind": "arg",
+      "fn": "sub_4A6D60",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x447bda"
+      ],
+      "note": "传播推断（1 跳，来自 sub_447810@0x447bda (member)）"
+    },
+    {
+      "id": "s1k-28",
+      "kind": "arg",
+      "fn": "sub_446EC0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x447f5a"
+      ],
+      "note": "传播推断（1 跳，来自 sub_447810@0x447f5a (this)）"
+    },
+    {
+      "id": "s1k-29",
+      "kind": "arg",
+      "fn": "sub_4A9BB0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4482a7"
+      ],
+      "note": "传播推断（1 跳，来自 sub_447810@0x4482a7 (member)）"
+    },
+    {
+      "id": "s1k-30",
+      "kind": "arg",
+      "fn": "sub_499220",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x4482b2"
+      ],
+      "note": "传播推断（1 跳，来自 sub_447810@0x4482b2 (member)）"
+    },
+    {
+      "id": "s1k-31",
+      "kind": "arg",
+      "fn": "sub_446C20",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x448d2d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_447810@0x448d2d (this)）"
+    },
+    {
+      "id": "s1k-32",
+      "kind": "arg",
+      "fn": "sub_43D870",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4490e8"
+      ],
+      "note": "传播推断（1 跳，来自 sub_447810@0x4490e8 (this)）"
+    },
+    {
+      "id": "s1k-33",
+      "kind": "arg",
+      "fn": "sub_4469A0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x44a10c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_447810@0x44a10c (this)）"
+    },
+    {
+      "id": "s1k-34",
+      "kind": "arg",
+      "fn": "sub_4A7190",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x44207e"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x44207e (member)）"
+    },
+    {
+      "id": "s1k-35",
+      "kind": "arg",
+      "fn": "sub_452330",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x442c2d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x442c2d (this)）"
+    },
+    {
+      "id": "s1k-36",
+      "kind": "arg",
+      "fn": "sub_4A6D00",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x442caf"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x442caf (member)）"
+    },
+    {
+      "id": "s1k-37",
+      "kind": "arg",
+      "fn": "sub_43E950",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x442dc8"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x442dc8 (this)）"
+    },
+    {
+      "id": "s1k-38",
+      "kind": "arg",
+      "fn": "sub_43B5A0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x442e77"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x442e77 (this)）"
+    },
+    {
+      "id": "s1k-39",
+      "kind": "arg",
+      "fn": "sub_43E260",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x442ffc"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x442ffc (this)）"
+    },
+    {
+      "id": "s1k-40",
+      "kind": "arg",
+      "fn": "sub_450F20",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x443267"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x443267 (this)）"
+    },
+    {
+      "id": "s1k-41",
+      "kind": "arg",
+      "fn": "sub_450700",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x443427"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x443427 (this)）"
+    },
+    {
+      "id": "s1k-42",
+      "kind": "arg",
+      "fn": "sub_440FD0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4437bf"
+      ],
+      "note": "传播推断（1 跳，来自 sub_441E10@0x4437bf (this)）"
+    },
+    {
+      "id": "s1k-43",
+      "kind": "arg",
+      "fn": "sub_43D500",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x445185"
+      ],
+      "note": "传播推断（1 跳，来自 sub_444350@0x445185 (this)）"
+    },
+    {
+      "id": "s1k-44",
+      "kind": "arg",
+      "fn": "sub_4034F0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x412467"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x412467 (this)）"
+    },
+    {
+      "id": "s1k-45",
+      "kind": "arg",
+      "fn": "sub_4B5230",
+      "reg": "ecx",
+      "type": "T_SE*",
+      "witness": [
+        "0x4124bc"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x4124bc (interior)）"
+    },
+    {
+      "id": "s1k-46",
+      "kind": "arg",
+      "fn": "sub_4BBAB0",
+      "reg": "ecx",
+      "type": "T_Voice*",
+      "witness": [
+        "0x4124c8"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x4124c8 (interior)）"
+    },
+    {
+      "id": "s1k-47",
+      "kind": "arg",
+      "fn": "sub_407120",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4124d3"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x4124d3 (this)）"
+    },
+    {
+      "id": "s1k-48",
+      "kind": "arg",
+      "fn": "sub_4A4C70",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4126fa"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x4126fa (interior)）"
+    },
+    {
+      "id": "s1k-50",
+      "kind": "arg",
+      "fn": "sub_404C20",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x4127f7"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x4127f7 (interior)）"
+    },
+    {
+      "id": "s1k-51",
+      "kind": "arg",
+      "fn": "sub_411560",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x412807"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x412807 (this)）"
+    },
+    {
+      "id": "s1k-52",
+      "kind": "arg",
+      "fn": "sub_404CB0",
+      "reg": "ecx",
+      "type": "T_Voice*",
+      "witness": [
+        "0x412957"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x412957 (interior)）"
+    },
+    {
+      "id": "s1k-53",
+      "kind": "arg",
+      "fn": "sub_489D10",
+      "reg": "ecx",
+      "type": "T_Music*",
+      "witness": [
+        "0x4129ae"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x4129ae (interior)）"
+    },
+    {
+      "id": "s1k-54",
+      "kind": "arg",
+      "fn": "sub_489E50",
+      "reg": "ecx",
+      "type": "T_Music*",
+      "witness": [
+        "0x4129db"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x4129db (interior)）"
+    },
+    {
+      "id": "s1k-55",
+      "kind": "arg",
+      "fn": "sub_4051E0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x412a84"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x412a84 (this)）"
+    },
+    {
+      "id": "s1k-56",
+      "kind": "arg",
+      "fn": "sub_40FC90",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x412b0d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x412b0d (this)）"
+    },
+    {
+      "id": "s1k-57",
+      "kind": "arg",
+      "fn": "sub_407E20",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x413221"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x413221 (interior)）"
+    },
+    {
+      "id": "s1k-58",
+      "kind": "arg",
+      "fn": "sub_407EA0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x413341"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x413341 (interior)）"
+    },
+    {
+      "id": "s1k-59",
+      "kind": "arg",
+      "fn": "sub_408F10",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x413399"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x413399 (this)）"
+    },
+    {
+      "id": "s1k-60",
+      "kind": "arg",
+      "fn": "sub_409700",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x41351c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x41351c (this)）"
+    },
+    {
+      "id": "s1k-61",
+      "kind": "arg",
+      "fn": "sub_4098E0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x41353b"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x41353b (this)）"
+    },
+    {
+      "id": "s1k-62",
+      "kind": "arg",
+      "fn": "sub_418E30",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x413547"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x413547 (this)）"
+    },
+    {
+      "id": "s1k-63",
+      "kind": "arg",
+      "fn": "sub_43E680",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x413f8d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x413f8d (interior)）"
+    },
+    {
+      "id": "s1k-64",
+      "kind": "arg",
+      "fn": "sub_43ACA0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x413f98"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x413f98 (interior)）"
+    },
+    {
+      "id": "s1k-65",
+      "kind": "arg",
+      "fn": "sub_405210",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x413fc1"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x413fc1 (this)）"
+    },
+    {
+      "id": "s1k-66",
+      "kind": "arg",
+      "fn": "sub_49EEE0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x413fcc"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x413fcc (interior)）"
+    },
+    {
+      "id": "s1k-67",
+      "kind": "arg",
+      "fn": "sub_4A4DC0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x413fe0"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x413fe0 (interior)）"
+    },
+    {
+      "id": "s1k-68",
+      "kind": "arg",
+      "fn": "sub_49FCA0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x413ff4"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x413ff4 (interior)）"
+    },
+    {
+      "id": "s1k-69",
+      "kind": "arg",
+      "fn": "sub_498350",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x414007"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414007 (interior)）"
+    },
+    {
+      "id": "s1k-70",
+      "kind": "arg",
+      "fn": "sub_405580",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x41403e"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x41403e (this)）"
+    },
+    {
+      "id": "s1k-71",
+      "kind": "arg",
+      "fn": "sub_43E8C0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4142cf"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x4142cf (interior)）"
+    },
+    {
+      "id": "s1k-72",
+      "kind": "arg",
+      "fn": "sub_450B50",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x414301"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414301 (interior)）"
+    },
+    {
+      "id": "s1k-73",
+      "kind": "arg",
+      "fn": "sub_4065F0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x414319"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414319 (this)）"
+    },
+    {
+      "id": "s1k-74",
+      "kind": "arg",
+      "fn": "sub_440DD0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4143be"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x4143be (interior)）"
+    },
+    {
+      "id": "s1k-75",
+      "kind": "arg",
+      "fn": "sub_407ED0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4143fa"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x4143fa (interior)）"
+    },
+    {
+      "id": "s1k-76",
+      "kind": "arg",
+      "fn": "sub_498720",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x4144eb"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x4144eb (interior)）"
+    },
+    {
+      "id": "s1k-77",
+      "kind": "arg",
+      "fn": "sub_49EF20",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4144f6"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x4144f6 (interior)）"
+    },
+    {
+      "id": "s1k-78",
+      "kind": "arg",
+      "fn": "sub_4A1D50",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x41450d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x41450d (interior)）"
+    },
+    {
+      "id": "s1k-79",
+      "kind": "arg",
+      "fn": "sub_404C70",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x414608"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414608 (interior)）"
+    },
+    {
+      "id": "s1k-80",
+      "kind": "arg",
+      "fn": "sub_408440",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x414617"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414617 (this)）"
+    },
+    {
+      "id": "s1k-81",
+      "kind": "arg",
+      "fn": "sub_404C40",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x414647"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414647 (interior)）"
+    },
+    {
+      "id": "s1k-82",
+      "kind": "arg",
+      "fn": "sub_4A5470",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x414659"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414659 (interior)）"
+    },
+    {
+      "id": "s1k-83",
+      "kind": "arg",
+      "fn": "sub_4B4910",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x414678"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414678 (interior)）"
+    },
+    {
+      "id": "s1k-84",
+      "kind": "arg",
+      "fn": "sub_4A8720",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x41468b"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x41468b (interior)）"
+    },
+    {
+      "id": "s1k-85",
+      "kind": "arg",
+      "fn": "sub_4052B0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4146ba"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x4146ba (this)）"
+    },
+    {
+      "id": "s1k-86",
+      "kind": "arg",
+      "fn": "sub_43B520",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x414784"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414784 (interior)）"
+    },
+    {
+      "id": "s1k-87",
+      "kind": "arg",
+      "fn": "sub_405460",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x41484a"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x41484a (this)）"
+    },
+    {
+      "id": "s1k-88",
+      "kind": "arg",
+      "fn": "sub_4055F0",
+      "reg": "ecx",
+      "type": "T_5c73c_0*",
+      "witness": [
+        "0x414856"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414856 (member)）"
+    },
+    {
+      "id": "s1k-89",
+      "kind": "arg",
+      "fn": "sub_405410",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x414867"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x414867 (this)）"
+    },
+    {
+      "id": "s1k-90",
+      "kind": "arg",
+      "fn": "sub_486970",
+      "reg": "ecx",
+      "type": "T_5c73c_0*",
+      "witness": [
+        "0x41488a"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x41488a (member)）"
+    },
+    {
+      "id": "s1k-91",
+      "kind": "arg",
+      "fn": "sub_40DE80",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4148af"
+      ],
+      "note": "传播推断（1 跳，来自 sub_413DD0@0x4148af (interior)）"
+    },
+    {
+      "id": "s1k-92",
+      "kind": "arg",
+      "fn": "sub_455320",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x4179eb"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x4179eb (interior)）"
+    },
+    {
+      "id": "s1k-93",
+      "kind": "arg",
+      "fn": "sub_4155B0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x417b1b"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417b1b (interior)）"
+    },
+    {
+      "id": "s1k-94",
+      "kind": "arg",
+      "fn": "sub_406C70",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x417c2f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417c2f (this)）"
+    },
+    {
+      "id": "s1k-95",
+      "kind": "arg",
+      "fn": "sub_406CE0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x417c3f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417c3f (this)）"
+    },
+    {
+      "id": "s1k-96",
+      "kind": "arg",
+      "fn": "sub_489B40",
+      "reg": "ecx",
+      "type": "T_Music*",
+      "witness": [
+        "0x417c71"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417c71 (interior)）"
+    },
+    {
+      "id": "s1k-97",
+      "kind": "arg",
+      "fn": "sub_409290",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x417d84"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417d84 (this)）"
+    },
+    {
+      "id": "s1k-98",
+      "kind": "arg",
+      "fn": "sub_408260",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x417dbc"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417dbc (this)）"
+    },
+    {
+      "id": "s1k-99",
+      "kind": "arg",
+      "fn": "sub_4082A0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x417df4"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417df4 (this)）"
+    },
+    {
+      "id": "s1k-100",
+      "kind": "arg",
+      "fn": "sub_4071D0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x417e30"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417e30 (this)）"
+    },
+    {
+      "id": "s1k-101",
+      "kind": "arg",
+      "fn": "sub_405530",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x417f62"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x417f62 (this)）"
+    },
+    {
+      "id": "s1k-102",
+      "kind": "arg",
+      "fn": "sub_40CB00",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x41809e"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x41809e (interior)）"
+    },
+    {
+      "id": "s1k-103",
+      "kind": "arg",
+      "fn": "sub_407B20",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4181a0"
+      ],
+      "note": "传播推断（1 跳，来自 sub_417800@0x4181a0 (this)）"
+    },
+    {
+      "id": "s1k-104",
+      "kind": "arg",
+      "fn": "sub_4A7170",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4058a4"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4057B0@0x4058a4 (interior)）"
+    },
+    {
+      "id": "s1k-105",
+      "kind": "arg",
+      "fn": "sub_497F50",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x4058c7"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4057B0@0x4058c7 (interior)）"
+    },
+    {
+      "id": "s1k-106",
+      "kind": "arg",
+      "fn": "sub_4A50C0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x40590e"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4057B0@0x40590e (interior)）"
+    },
+    {
+      "id": "s1k-107",
+      "kind": "arg",
+      "fn": "sub_497F90",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x405948"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4057B0@0x405948 (interior)）"
+    },
+    {
+      "id": "s1k-108",
+      "kind": "arg",
+      "fn": "sub_440C90",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x405c9f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4057B0@0x405c9f (interior)）"
+    },
+    {
+      "id": "s1k-109",
+      "kind": "arg",
+      "fn": "sub_405330",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x405d38"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4057B0@0x405d38 (this)）"
+    },
+    {
+      "id": "s1k-110",
+      "kind": "arg",
+      "fn": "sub_4B7B70",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x405fb0"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4057B0@0x405fb0 (interior)）"
+    },
+    {
+      "id": "s1k-111",
+      "kind": "arg",
+      "fn": "sub_403D70",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x411bf1"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x411bf1 (interior)）"
+    },
+    {
+      "id": "s1k-112",
+      "kind": "arg",
+      "fn": "sub_4083B0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x411c04"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x411c04 (this)）"
+    },
+    {
+      "id": "s1k-113",
+      "kind": "arg",
+      "fn": "sub_4051A0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x411c25"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x411c25 (this)）"
+    },
+    {
+      "id": "s1k-114",
+      "kind": "arg",
+      "fn": "sub_4053C0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x411c2c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x411c2c (this)）"
+    },
+    {
+      "id": "s1k-115",
+      "kind": "arg",
+      "fn": "sub_459770",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x411e22"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x411e22 (interior)）"
+    },
+    {
+      "id": "s1k-116",
+      "kind": "arg",
+      "fn": "sub_405360",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x411eac"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x411eac (this)）"
+    },
+    {
+      "id": "s1k-117",
+      "kind": "arg",
+      "fn": "sub_404D10",
+      "reg": "ecx",
+      "type": "T_Voice*",
+      "witness": [
+        "0x4120fd"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x4120fd (interior)）"
+    },
+    {
+      "id": "s1k-118",
+      "kind": "arg",
+      "fn": "sub_404D50",
+      "reg": "ecx",
+      "type": "T_Voice*",
+      "witness": [
+        "0x41210c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x41210c (interior)）"
+    },
+    {
+      "id": "s1k-119",
+      "kind": "arg",
+      "fn": "sub_407F20",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x412156"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x412156 (interior)）"
+    },
+    {
+      "id": "s1k-120",
+      "kind": "arg",
+      "fn": "sub_404DE0",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x412235"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411BC0@0x412235 (interior)）"
+    },
+    {
+      "id": "s1k-121",
+      "kind": "arg",
+      "fn": "sub_4B7730",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x4b5b7d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B5B50@0x4b5b7d (this)）"
+    },
+    {
+      "id": "s1k-122",
+      "kind": "arg",
+      "fn": "sub_40C880",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x4154e1"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415460@0x4154e1 (interior)）"
+    },
+    {
+      "id": "s1k-123",
+      "kind": "arg",
+      "fn": "sub_4149D0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x4154ec"
+      ],
+      "note": "传播推断（1 跳，来自 sub_415460@0x4154ec (interior)）"
+    },
+    {
+      "id": "s1k-124",
+      "kind": "arg",
+      "fn": "sub_476E40",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x478061"
+      ],
+      "note": "传播推断（1 跳，来自 sub_478050@0x478061 (this)）"
+    },
+    {
+      "id": "s1k-125",
+      "kind": "arg",
+      "fn": "sub_4770A0",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x4780db"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4780D0@0x4780db (this)）"
+    },
+    {
+      "id": "s1k-126",
+      "kind": "arg",
+      "fn": "sub_477150",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x4780e3"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4780D0@0x4780e3 (this)）"
+    },
+    {
+      "id": "s1k-127",
+      "kind": "arg",
+      "fn": "sub_4772E0",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x4780ed"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4780D0@0x4780ed (this)）"
+    },
+    {
+      "id": "s1k-128",
+      "kind": "arg",
+      "fn": "sub_477C50",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x4780f5"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4780D0@0x4780f5 (this)）"
+    },
+    {
+      "id": "s1k-129",
+      "kind": "arg",
+      "fn": "sub_4382A0",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x43835e"
+      ],
+      "note": "传播推断（1 跳，来自 sub_438320@0x43835e (this)）"
+    },
+    {
+      "id": "s1k-130",
+      "kind": "arg",
+      "fn": "sub_415530",
+      "reg": "ecx",
+      "type": "T_Hashtable_int*",
+      "witness": [
+        "0x438a53"
+      ],
+      "note": "传播推断（1 跳，来自 sub_438940@0x438a53 (interior)）"
+    },
+    {
+      "id": "s1k-131",
+      "kind": "arg",
+      "fn": "sub_434D00",
+      "reg": "ecx",
+      "type": "T_Hashtable_int*",
+      "witness": [
+        "0x438a85"
+      ],
+      "note": "传播推断（1 跳，来自 sub_438940@0x438a85 (interior)）"
+    },
+    {
+      "id": "s1k-132",
+      "kind": "arg",
+      "fn": "sub_438650",
+      "reg": "ecx",
+      "type": "T_Hashtable_string*",
+      "witness": [
+        "0x43878c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_438750@0x43878c (interior)）"
+    },
+    {
+      "id": "s1k-133",
+      "kind": "arg",
+      "fn": "sub_40E8F0",
+      "reg": "ecx",
+      "type": "T_Hashtable_int*",
+      "witness": [
+        "0x43879b"
+      ],
+      "note": "传播推断（1 跳，来自 sub_438750@0x43879b (interior)）"
+    },
+    {
+      "id": "s1k-134",
+      "kind": "arg",
+      "fn": "sub_428F10",
+      "reg": "ecx",
+      "type": "T_Hashtable_string*",
+      "witness": [
+        "0x429428"
+      ],
+      "note": "传播推断（1 跳，来自 sub_429390@0x429428 (interior)）"
+    },
+    {
+      "id": "s1k-135",
+      "kind": "arg",
+      "fn": "sub_4B6210",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x4b68c6"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B68A0@0x4b68c6 (this)）"
+    },
+    {
+      "id": "s1k-136",
+      "kind": "arg",
+      "fn": "sub_4B6350",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x4b6999"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B6940@0x4b6999 (this)）"
+    },
+    {
+      "id": "s1k-137",
+      "kind": "arg",
+      "fn": "sub_4B7790",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x4b6a16"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B69B0@0x4b6a16 (this)）"
+    },
+    {
+      "id": "s1k-138",
+      "kind": "arg",
+      "fn": "sub_49ED60",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x445e03"
+      ],
+      "note": "传播推断（1 跳，来自 sub_445D70@0x445e03 (member)）"
+    },
+    {
+      "id": "s1k-139",
+      "kind": "arg",
+      "fn": "sub_43B1A0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x445e1c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_445D70@0x445e1c (this)）"
+    },
+    {
+      "id": "s1k-140",
+      "kind": "arg",
+      "fn": "sub_45BC70",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x46025c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45FF00@0x46025c (interior)）"
+    },
+    {
+      "id": "s1k-141",
+      "kind": "arg",
+      "fn": "sub_46F190",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x460921"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45FF00@0x460921 (interior)）"
+    },
+    {
+      "id": "s1k-142",
+      "kind": "arg",
+      "fn": "sub_474440",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x460f6f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45FF00@0x460f6f (interior)）"
+    },
+    {
+      "id": "s1k-143",
+      "kind": "arg",
+      "fn": "sub_4185F0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x461778"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45FF00@0x461778 (interior)）"
+    },
+    {
+      "id": "s1k-146",
+      "kind": "arg",
+      "fn": "sub_455000",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x41058e"
+      ],
+      "note": "传播推断（1 跳，来自 sub_410160@0x41058e (interior)）"
+    },
+    {
+      "id": "s1k-147",
+      "kind": "arg",
+      "fn": "sub_4A3800",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4113ed"
+      ],
+      "note": "传播推断（1 跳，来自 sub_410160@0x4113ed (interior)）"
+    },
+    {
+      "id": "s1k-148",
+      "kind": "arg",
+      "fn": "sub_459330",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x462b3d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_462040@0x462b3d (this)）"
+    },
+    {
+      "id": "s1k-149",
+      "kind": "arg",
+      "fn": "sub_457800",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x463111"
+      ],
+      "note": "传播推断（1 跳，来自 sub_462040@0x463111 (this)）"
+    },
+    {
+      "id": "s1k-150",
+      "kind": "arg",
+      "fn": "sub_404EE0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x473717"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4734F0@0x473717 (this)）"
+    },
+    {
+      "id": "s1k-151",
+      "kind": "arg",
+      "fn": "sub_46CEA0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x473d5c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4734F0@0x473d5c (this)）"
+    },
+    {
+      "id": "s1k-152",
+      "kind": "arg",
+      "fn": "sub_46D9F0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x473eda"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4734F0@0x473eda (this)）"
+    },
+    {
+      "id": "s1k-153",
+      "kind": "arg",
+      "fn": "sub_40C120",
+      "reg": "ecx",
+      "type": "T_stdstring*",
+      "witness": [
+        "0x40c255"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40C210@0x40c255 (this)）"
+    },
+    {
+      "id": "s1k-154",
+      "kind": "arg",
+      "fn": "sub_40B510",
+      "reg": "ecx",
+      "type": "T_stdstring*",
+      "witness": [
+        "0x40c298"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40C210@0x40c298 (this)）"
+    },
+    {
+      "id": "s1k-155",
+      "kind": "arg",
+      "fn": "sub_48EE60",
+      "reg": "ecx",
+      "type": "T_Hashtable_READTEXTDB_FILEFLAG*",
+      "witness": [
+        "0x48f050"
+      ],
+      "note": "传播推断（1 跳，来自 sub_48F000@0x48f050 (interior)）"
+    },
+    {
+      "id": "s1k-156",
+      "kind": "arg",
+      "fn": "sub_48F480",
+      "reg": "ecx",
+      "type": "T_Hashtable_READTEXTDB_FILEFLAG*",
+      "witness": [
+        "0x48f628"
+      ],
+      "note": "传播推断（1 跳，来自 sub_48F560@0x48f628 (interior)）"
+    },
+    {
+      "id": "s1k-157",
+      "kind": "arg",
+      "fn": "sub_48F880",
+      "reg": "ecx",
+      "type": "T_Hashtable_READTEXTDB_FILEFLAG*",
+      "witness": [
+        "0x48fb31"
+      ],
+      "note": "传播推断（1 跳，来自 sub_48FAF0@0x48fb31 (interior)）"
+    },
+    {
+      "id": "s1k-158",
+      "kind": "arg",
+      "fn": "sub_48F950",
+      "reg": "ecx",
+      "type": "T_Hashtable_READTEXTDB_FILEFLAG*",
+      "witness": [
+        "0x48fb89"
+      ],
+      "note": "传播推断（1 跳，来自 sub_48FAF0@0x48fb89 (interior)）"
+    },
+    {
+      "id": "s1k-159",
+      "kind": "arg",
+      "fn": "sub_48F9D0",
+      "reg": "ecx",
+      "type": "T_Hashtable_READTEXTDB_FILEFLAG*",
+      "witness": [
+        "0x48fe71"
+      ],
+      "note": "传播推断（1 跳，来自 sub_48FCE0@0x48fe71 (interior)）"
+    },
+    {
+      "id": "s1k-160",
+      "kind": "arg",
+      "fn": "sub_48FBB0",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x48fffd"
+      ],
+      "note": "传播推断（1 跳，来自 sub_48FFB0@0x48fffd (this)）"
+    },
+    {
+      "id": "s1k-161",
+      "kind": "arg",
+      "fn": "sub_4A6E70",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b1033"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B06D0@0x4b1033 (global)）"
+    },
+    {
+      "id": "s1k-162",
+      "kind": "arg",
+      "fn": "sub_46D780",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x47271d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_471DF0@0x47271d (this)）"
+    },
+    {
+      "id": "s1k-163",
+      "kind": "arg",
+      "fn": "sub_46D4E0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x472b9b"
+      ],
+      "note": "传播推断（1 跳，来自 sub_471DF0@0x472b9b (this)）"
+    },
+    {
+      "id": "s1k-164",
+      "kind": "arg",
+      "fn": "sub_46CFD0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x473372"
+      ],
+      "note": "传播推断（1 跳，来自 sub_471DF0@0x473372 (this)）"
+    },
+    {
+      "id": "s1k-165",
+      "kind": "arg",
+      "fn": "sub_43AE30",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x40675f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_406730@0x40675f (interior)）"
+    },
+    {
+      "id": "s1k-166",
+      "kind": "arg",
+      "fn": "sub_440A20",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x406805"
+      ],
+      "note": "传播推断（1 跳，来自 sub_406730@0x406805 (interior)）"
+    },
+    {
+      "id": "s1k-167",
+      "kind": "arg",
+      "fn": "sub_498BC0",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x498eca"
+      ],
+      "note": "传播推断（1 跳，来自 sub_498CC0@0x498eca (this)）"
+    },
+    {
+      "id": "s1k-168",
+      "kind": "arg",
+      "fn": "sub_497EE0",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x49904b"
+      ],
+      "note": "传播推断（1 跳，来自 sub_498CC0@0x49904b (this)）"
+    },
+    {
+      "id": "s1k-169",
+      "kind": "arg",
+      "fn": "sub_498B60",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x4991bf"
+      ],
+      "note": "传播推断（1 跳，来自 sub_498CC0@0x4991bf (this)）"
+    },
+    {
+      "id": "s1k-170",
+      "kind": "arg",
+      "fn": "sub_45D9A0",
+      "reg": "ecx",
+      "type": "T_stdvector_T313c0*",
+      "witness": [
+        "0x45f74d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_45F6C0@0x45f74d (interior)）"
+    },
+    {
+      "id": "s1k-172",
+      "kind": "arg",
+      "fn": "sub_409D40",
+      "reg": "ecx",
+      "type": "T_Stack_int*",
+      "witness": [
+        "0x4116f2"
+      ],
+      "note": "传播推断（1 跳，来自 sub_411590@0x4116f2 (interior)）"
+    },
+    {
+      "id": "s1k-173",
+      "kind": "arg",
+      "fn": "sub_4B86B0",
+      "reg": "ecx",
+      "type": "T_SysCursor*",
+      "witness": [
+        "0x406294"
+      ],
+      "note": "传播推断（1 跳，来自 sub_406220@0x406294 (interior)）"
+    },
+    {
+      "id": "s1k-174",
+      "kind": "arg",
+      "fn": "sub_4A0430",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a5622"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4A54A0@0x4a5622 (this)）"
+    },
+    {
+      "id": "s1k-175",
+      "kind": "arg",
+      "fn": "sub_43B9D0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x43c10d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_43BF20@0x43c10d (this)）"
+    },
+    {
+      "id": "s1k-176",
+      "kind": "arg",
+      "fn": "sub_404F80",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x40949c"
+      ],
+      "note": "传播推断（1 跳，来自 sub_409400@0x40949c (interior)）"
+    },
+    {
+      "id": "s1k-177",
+      "kind": "arg",
+      "fn": "sub_4A1E90",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b40bd"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B4040@0x4b40bd (this)）"
+    },
+    {
+      "id": "s1k-179",
+      "kind": "arg",
+      "fn": "sub_4AF560",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b42cc"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B4040@0x4b42cc (this)）"
+    },
+    {
+      "id": "s1k-180",
+      "kind": "arg",
+      "fn": "sub_4AF1C0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b4330"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B4040@0x4b4330 (this)）"
+    },
+    {
+      "id": "s1k-181",
+      "kind": "arg",
+      "fn": "sub_4B4020",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b438e"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B4040@0x4b438e (this)）"
+    },
+    {
+      "id": "s1k-182",
+      "kind": "arg",
+      "fn": "sub_4AAD40",
+      "reg": "ecx",
+      "type": "T_stdmap_n760*",
+      "witness": [
+        "0x4b439d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B4040@0x4b439d (interior)）"
+    },
+    {
+      "id": "s1k-183",
+      "kind": "arg",
+      "fn": "sub_4A9BE0",
+      "reg": "ecx",
+      "type": "T_stdmap_n116*",
+      "witness": [
+        "0x4b443f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B4040@0x4b443f (interior)）"
+    },
+    {
+      "id": "s1k-184",
+      "kind": "arg",
+      "fn": "sub_455DB0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x4569d8"
+      ],
+      "note": "传播推断（1 跳，来自 sub_456820@0x4569d8 (this)）"
+    },
+    {
+      "id": "s1k-185",
+      "kind": "arg",
+      "fn": "sub_455E00",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x456b60"
+      ],
+      "note": "传播推断（1 跳，来自 sub_456820@0x456b60 (this)）"
+    },
+    {
+      "id": "s1k-186",
+      "kind": "arg",
+      "fn": "sub_4A2BA0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a6f72"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4A6EE0@0x4a6f72 (this)）"
+    },
+    {
+      "id": "s1k-187",
+      "kind": "arg",
+      "fn": "sub_4A2C10",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a7006"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4A6EE0@0x4a7006 (this)）"
+    },
+    {
+      "id": "s1k-188",
+      "kind": "arg",
+      "fn": "sub_456F40",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x458bb1"
+      ],
+      "note": "传播推断（1 跳，来自 sub_458AD0@0x458bb1 (this)）"
+    },
+    {
+      "id": "s1k-189",
+      "kind": "arg",
+      "fn": "sub_4B8680",
+      "reg": "ecx",
+      "type": "T_SysCursor*",
+      "witness": [
+        "0x406079"
+      ],
+      "note": "传播推断（1 跳，来自 sub_406050@0x406079 (interior)）"
+    },
+    {
+      "id": "s1k-190",
+      "kind": "arg",
+      "fn": "sub_499BA0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a3219"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4A2D50@0x4a3219 (this)）"
+    },
+    {
+      "id": "s1k-191",
+      "kind": "arg",
+      "fn": "sub_43B260",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4406c3"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4404B0@0x4406c3 (this)）"
+    },
+    {
+      "id": "s1k-192",
+      "kind": "arg",
+      "fn": "sub_43B070",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x44072d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4404B0@0x44072d (this)）"
+    },
+    {
+      "id": "s1k-193",
+      "kind": "arg",
+      "fn": "sub_43DBA0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4409cf"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4404B0@0x4409cf (this)）"
+    },
+    {
+      "id": "s1k-194",
+      "kind": "arg",
+      "fn": "sub_43B0E0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x43c7aa"
+      ],
+      "note": "传播推断（1 跳，来自 sub_43C4D0@0x43c7aa (this)）"
+    },
+    {
+      "id": "s1k-195",
+      "kind": "arg",
+      "fn": "sub_405730",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x414ec6"
+      ],
+      "note": "传播推断（1 跳，来自 sub_414AC0@0x414ec6 (this)）"
+    },
+    {
+      "id": "s1k-196",
+      "kind": "arg",
+      "fn": "sub_43A4C0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x414fac"
+      ],
+      "note": "传播推断（1 跳，来自 sub_414AC0@0x414fac (interior)）"
+    },
+    {
+      "id": "s1k-197",
+      "kind": "arg",
+      "fn": "sub_414940",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x415092"
+      ],
+      "note": "传播推断（1 跳，来自 sub_414AC0@0x415092 (interior)）"
+    },
+    {
+      "id": "s1k-198",
+      "kind": "arg",
+      "fn": "sub_455750",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x415433"
+      ],
+      "note": "传播推断（1 跳，来自 sub_414AC0@0x415433 (interior)）"
+    },
+    {
+      "id": "s1k-199",
+      "kind": "arg",
+      "fn": "sub_489AF0",
+      "reg": "ecx",
+      "type": "T_Music*",
+      "witness": [
+        "0x41007a"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40FDE0@0x41007a (interior)）"
+    },
+    {
+      "id": "s1k-200",
+      "kind": "arg",
+      "fn": "sub_40A280",
+      "reg": "ecx",
+      "type": "T_stdmap_n760*",
+      "witness": [
+        "0x40b89f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40B720@0x40b89f (this)）"
+    },
+    {
+      "id": "s1k-201",
+      "kind": "arg",
+      "fn": "sub_40C3F0",
+      "reg": "ecx",
+      "type": "T_stdmap_n80*",
+      "witness": [
+        "0x40dcae"
+      ],
+      "note": "传播推断（1 跳，来自 sub_40DC30@0x40dcae (this)）"
+    },
+    {
+      "id": "s1k-202",
+      "kind": "arg",
+      "fn": "sub_4A9810",
+      "reg": "ecx",
+      "type": "T_stdmap_n116*",
+      "witness": [
+        "0x4aae94"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4AAE10@0x4aae94 (this)）"
+    },
+    {
+      "id": "s1k-203",
+      "kind": "arg",
+      "fn": "sub_4A6E00",
+      "reg": "ecx",
+      "type": "T_stdmap_n592*",
+      "witness": [
+        "0x4a858f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4A8410@0x4a858f (this)）"
+    },
+    {
+      "id": "s1k-204",
+      "kind": "arg",
+      "fn": "sub_4A9970",
+      "reg": "ecx",
+      "type": "T_stdmap_n592*",
+      "witness": [
+        "0x4aaf59"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4AAEC0@0x4aaf59 (this)）"
+    },
+    {
+      "id": "s1k-205",
+      "kind": "arg",
+      "fn": "sub_409A40",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x438c83"
+      ],
+      "note": "传播推断（1 跳，来自 sub_438C50@0x438c83 (global)）"
+    },
+    {
+      "id": "s1k-207",
+      "kind": "arg",
+      "fn": "sub_4065A0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b9154"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B9090@0x4b9154 (global)）"
+    },
+    {
+      "id": "s1k-208",
+      "kind": "arg",
+      "fn": "sub_408620",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b92c2"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B9240@0x4b92c2 (global)）"
+    },
+    {
+      "id": "s1k-209",
+      "kind": "arg",
+      "fn": "sub_4B8DF0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b9390"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b9390 (global)）"
+    },
+    {
+      "id": "s1k-210",
+      "kind": "arg",
+      "fn": "sub_408790",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b93b3"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b93b3 (global)）"
+    },
+    {
+      "id": "s1k-211",
+      "kind": "arg",
+      "fn": "sub_476760",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b940b"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b940b (global)）"
+    },
+    {
+      "id": "s1k-212",
+      "kind": "arg",
+      "fn": "sub_476850",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b9583"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b9583 (global)）"
+    },
+    {
+      "id": "s1k-213",
+      "kind": "arg",
+      "fn": "sub_40AAE0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b9632"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b9632 (global)）"
+    },
+    {
+      "id": "s1k-214",
+      "kind": "arg",
+      "fn": "sub_4761B0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b963d"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b963d (global)）"
+    },
+    {
+      "id": "s1k-215",
+      "kind": "arg",
+      "fn": "sub_40B3B0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b965f"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b965f (global)）"
+    },
+    {
+      "id": "s1k-216",
+      "kind": "arg",
+      "fn": "sub_4066C0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b972b"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b972b (global)）"
+    },
+    {
+      "id": "s1k-217",
+      "kind": "arg",
+      "fn": "sub_4B8D50",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b9c04"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b9c04 (global)）"
+    },
+    {
+      "id": "s1k-218",
+      "kind": "arg",
+      "fn": "sub_4B8DC0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b9d35"
+      ],
+      "note": "传播推断（1 跳，来自 sub_4B92F0@0x4b9d35 (global)）"
+    },
+    {
+      "id": "s1k-219",
+      "kind": "arg",
+      "fn": "sub_4B8D00",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bab15"
+      ],
+      "note": "传播推断（1 跳，来自 _WinMain@16@0x4bab15 (global)）"
+    },
+    {
+      "id": "s1k-220",
+      "kind": "arg",
+      "fn": "sub_418940",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bab89"
+      ],
+      "note": "传播推断（1 跳，来自 _WinMain@16@0x4bab89 (global)）"
+    },
+    {
+      "id": "s1k-221",
+      "kind": "arg",
+      "fn": "sub_476190",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bacfe"
+      ],
+      "note": "传播推断（1 跳，来自 _WinMain@16@0x4bacfe (global)）"
+    },
+    {
+      "id": "s1k-222",
+      "kind": "arg",
+      "fn": "sub_40AEE0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bad1c"
+      ],
+      "note": "传播推断（1 跳，来自 _WinMain@16@0x4bad1c (global)）"
+    },
+    {
+      "id": "s1k-223",
+      "kind": "arg",
+      "fn": "sub_4084E0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bafd3"
+      ],
+      "note": "传播推断（1 跳，来自 _WinMain@16@0x4bafd3 (global)）"
+    },
+    {
+      "id": "s1k-224",
+      "kind": "arg",
+      "fn": "sub_4350B0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bb1a5"
+      ],
+      "note": "传播推断（1 跳，来自 _WinMain@16@0x4bb1a5 (global)）"
+    },
+    {
+      "id": "s1k-225",
+      "kind": "arg",
+      "fn": "sub_45DED0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x45e77c"
+      ],
+      "note": "传播推断（2 跳，来自 sub_45E730@0x45e77c (this)）"
+    },
+    {
+      "id": "s1k-226",
+      "kind": "arg",
+      "fn": "sub_432720",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x4327f4"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4327A0@0x4327f4 (this)）"
+    },
+    {
+      "id": "s1k-227",
+      "kind": "arg",
+      "fn": "sub_44A7F0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4b7d89"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4B7D60@0x4b7d89 (this)）"
+    },
+    {
+      "id": "s1k-228",
+      "kind": "arg",
+      "fn": "sub_498AA0",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x499224"
+      ],
+      "note": "传播推断（2 跳，来自 sub_499220@0x499224 (this)）"
+    },
+    {
+      "id": "s1k-229",
+      "kind": "arg",
+      "fn": "sub_43E550",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x45250e"
+      ],
+      "note": "传播推断（2 跳，来自 sub_452330@0x45250e (this)）"
+    },
+    {
+      "id": "s1k-230",
+      "kind": "arg",
+      "fn": "sub_44FB10",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x452560"
+      ],
+      "note": "传播推断（2 跳，来自 sub_452330@0x452560 (this)）"
+    },
+    {
+      "id": "s1k-231",
+      "kind": "arg",
+      "fn": "sub_44FD60",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x452580"
+      ],
+      "note": "传播推断（2 跳，来自 sub_452330@0x452580 (this)）"
+    },
+    {
+      "id": "s1k-232",
+      "kind": "arg",
+      "fn": "sub_43E620",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4525a8"
+      ],
+      "note": "传播推断（2 跳，来自 sub_452330@0x4525a8 (this)）"
+    },
+    {
+      "id": "s1k-233",
+      "kind": "arg",
+      "fn": "sub_44BED0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x45113c"
+      ],
+      "note": "传播推断（2 跳，来自 sub_450F20@0x45113c (this)）"
+    },
+    {
+      "id": "s1k-234",
+      "kind": "arg",
+      "fn": "sub_44BC10",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4511a1"
+      ],
+      "note": "传播推断（2 跳，来自 sub_450F20@0x4511a1 (this)）"
+    },
+    {
+      "id": "s1k-235",
+      "kind": "arg",
+      "fn": "sub_44B8B0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4511eb"
+      ],
+      "note": "传播推断（2 跳，来自 sub_450F20@0x4511eb (this)）"
+    },
+    {
+      "id": "s1k-236",
+      "kind": "arg",
+      "fn": "sub_44BA60",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x451216"
+      ],
+      "note": "传播推断（2 跳，来自 sub_450F20@0x451216 (this)）"
+    },
+    {
+      "id": "s1k-237",
+      "kind": "arg",
+      "fn": "sub_44B6E0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x451241"
+      ],
+      "note": "传播推断（2 跳，来自 sub_450F20@0x451241 (this)）"
+    },
+    {
+      "id": "s1k-238",
+      "kind": "arg",
+      "fn": "sub_4B5020",
+      "reg": "ecx",
+      "type": "T_SE*",
+      "witness": [
+        "0x4b5284"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4B5230@0x4b5284 (this)）"
+    },
+    {
+      "id": "s1k-239",
+      "kind": "arg",
+      "fn": "sub_4A1AF0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x40be46"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40BE10@0x40be46 (this)）"
+    },
+    {
+      "id": "s1k-240",
+      "kind": "arg",
+      "fn": "sub_489C00",
+      "reg": "ecx",
+      "type": "T_Music*",
+      "witness": [
+        "0x489ed9"
+      ],
+      "note": "传播推断（2 跳，来自 sub_489E50@0x489ed9 (this)）"
+    },
+    {
+      "id": "s1k-241",
+      "kind": "arg",
+      "fn": "sub_489B50",
+      "reg": "ecx",
+      "type": "T_Music*",
+      "witness": [
+        "0x489efb"
+      ],
+      "note": "传播推断（2 跳，来自 sub_489E50@0x489efb (this)）"
+    },
+    {
+      "id": "s1k-242",
+      "kind": "arg",
+      "fn": "sub_409E10",
+      "reg": "ecx",
+      "type": "T_Queue_int*",
+      "witness": [
+        "0x40fca5"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40FC90@0x40fca5 (interior)）"
+    },
+    {
+      "id": "s1k-243",
+      "kind": "arg",
+      "fn": "sub_43B5F0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x43e83a"
+      ],
+      "note": "传播推断（2 跳，来自 sub_43E680@0x43e83a (this)）"
+    },
+    {
+      "id": "s1k-244",
+      "kind": "arg",
+      "fn": "sub_44A3B0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x450b53"
+      ],
+      "note": "传播推断（2 跳，来自 sub_450B50@0x450b53 (this)）"
+    },
+    {
+      "id": "s1k-245",
+      "kind": "arg",
+      "fn": "sub_44A630",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x450b60"
+      ],
+      "note": "传播推断（2 跳，来自 sub_450B50@0x450b60 (this)）"
+    },
+    {
+      "id": "s1k-246",
+      "kind": "arg",
+      "fn": "sub_49A180",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a1d72"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4A1D50@0x4a1d72 (this)）"
+    },
+    {
+      "id": "s1k-247",
+      "kind": "arg",
+      "fn": "sub_49FB60",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a548e"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4A5470@0x4a548e (this)）"
+    },
+    {
+      "id": "s1k-248",
+      "kind": "arg",
+      "fn": "sub_4863C0",
+      "reg": "ecx",
+      "type": "T_5c73c_0*",
+      "witness": [
+        "0x405607"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4055F0@0x405607 (this)）"
+    },
+    {
+      "id": "s1k-249",
+      "kind": "arg",
+      "fn": "sub_4A1F00",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x40dead"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40DE80@0x40dead (this)）"
+    },
+    {
+      "id": "s1k-250",
+      "kind": "arg",
+      "fn": "sub_489B80",
+      "reg": "ecx",
+      "type": "T_Music*",
+      "witness": [
+        "0x4092a9"
+      ],
+      "note": "传播推断（2 跳，来自 sub_409290@0x4092a9 (interior)）"
+    },
+    {
+      "id": "s1k-251",
+      "kind": "arg",
+      "fn": "sub_4B79A0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4b7c6a"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4B7B70@0x4b7c6a (this)）"
+    },
+    {
+      "id": "s1k-252",
+      "kind": "arg",
+      "fn": "sub_40E660",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x414a0f"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4149D0@0x414a0f (this)）"
+    },
+    {
+      "id": "s1k-253",
+      "kind": "arg",
+      "fn": "sub_4138F0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x414a24"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4149D0@0x414a24 (this)）"
+    },
+    {
+      "id": "s1k-254",
+      "kind": "arg",
+      "fn": "sub_434910",
+      "reg": "ecx",
+      "type": "T_Hashtable_int*",
+      "witness": [
+        "0x434dec"
+      ],
+      "note": "传播推断（2 跳，来自 sub_434D00@0x434dec (this)）"
+    },
+    {
+      "id": "s1k-255",
+      "kind": "arg",
+      "fn": "sub_475450",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x46f1f6"
+      ],
+      "note": "传播推断（2 跳，来自 sub_46F190@0x46f1f6 (this)）"
+    },
+    {
+      "id": "s1k-256",
+      "kind": "arg",
+      "fn": "sub_46DED0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x46f2bf"
+      ],
+      "note": "传播推断（2 跳，来自 sub_46F190@0x46f2bf (this)）"
+    },
+    {
+      "id": "s1k-257",
+      "kind": "arg",
+      "fn": "sub_457940",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x47448d"
+      ],
+      "note": "传播推断（2 跳，来自 sub_474440@0x47448d (this)）"
+    },
+    {
+      "id": "s1k-258",
+      "kind": "arg",
+      "fn": "sub_4757F0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x4744b3"
+      ],
+      "note": "传播推断（2 跳，来自 sub_474440@0x4744b3 (this)）"
+    },
+    {
+      "id": "s1k-259",
+      "kind": "arg",
+      "fn": "sub_49E9D0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a381a"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4A3800@0x4a381a (this)）"
+    },
+    {
+      "id": "s1k-260",
+      "kind": "arg",
+      "fn": "sub_40B420",
+      "reg": "ecx",
+      "type": "T_stdstring*",
+      "witness": [
+        "0x40c155"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40C120@0x40c155 (this)）"
+    },
+    {
+      "id": "s1k-261",
+      "kind": "arg",
+      "fn": "sub_48F3B0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x48f901"
+      ],
+      "note": "传播推断（2 跳，来自 sub_48F880@0x48f901 (interior)）"
+    },
+    {
+      "id": "s1k-262",
+      "kind": "arg",
+      "fn": "sub_48F680",
+      "reg": "ecx",
+      "type": "T_Hashtable_READTEXTDB_FILEFLAG*",
+      "witness": [
+        "0x48fadc"
+      ],
+      "note": "传播推断（2 跳，来自 sub_48F9D0@0x48fadc (this)）"
+    },
+    {
+      "id": "s1k-263",
+      "kind": "arg",
+      "fn": "sub_43C380",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x440a6d"
+      ],
+      "note": "传播推断（2 跳，来自 sub_440A20@0x440a6d (this)）"
+    },
+    {
+      "id": "s1k-264",
+      "kind": "arg",
+      "fn": "sub_43AEB0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x440b95"
+      ],
+      "note": "传播推断（2 跳，来自 sub_440A20@0x440b95 (this)）"
+    },
+    {
+      "id": "s1k-265",
+      "kind": "arg",
+      "fn": "sub_43C470",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x440bbc"
+      ],
+      "note": "传播推断（2 跳，来自 sub_440A20@0x440bbc (this)）"
+    },
+    {
+      "id": "s1k-266",
+      "kind": "arg",
+      "fn": "sub_4983E0",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x498c7c"
+      ],
+      "note": "传播推断（2 跳，来自 sub_498BC0@0x498c7c (this)）"
+    },
+    {
+      "id": "s1k-267",
+      "kind": "arg",
+      "fn": "sub_49E700",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4af65d"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4AF560@0x4af65d (this)）"
+    },
+    {
+      "id": "s1k-268",
+      "kind": "arg",
+      "fn": "sub_4A2050",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4af27d"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4AF1C0@0x4af27d (this)）"
+    },
+    {
+      "id": "s1k-269",
+      "kind": "arg",
+      "fn": "sub_4AEEA0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b4029"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4B4020@0x4b4029 (this)）"
+    },
+    {
+      "id": "s1k-270",
+      "kind": "arg",
+      "fn": "sub_4A95D0",
+      "reg": "ecx",
+      "type": "T_stdmap_n760*",
+      "witness": [
+        "0x4aadd9"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4AAD40@0x4aadd9 (this)）"
+    },
+    {
+      "id": "s1k-271",
+      "kind": "arg",
+      "fn": "sub_40BD30",
+      "reg": "ecx",
+      "type": "T_stdmap_n80*",
+      "witness": [
+        "0x40c52e"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40C3F0@0x40c52e (this)）"
+    },
+    {
+      "id": "s1k-272",
+      "kind": "arg",
+      "fn": "sub_4A9730",
+      "reg": "ecx",
+      "type": "T_stdmap_n116*",
+      "witness": [
+        "0x4a994e"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4A9810@0x4a994e (this)）"
+    },
+    {
+      "id": "s1k-273",
+      "kind": "arg",
+      "fn": "sub_4A9AD0",
+      "reg": "ecx",
+      "type": "T_stdmap_n592*",
+      "witness": [
+        "0x4a9ab4"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4A9970@0x4a9ab4 (this)）"
+    },
+    {
+      "id": "s1k-274",
+      "kind": "arg",
+      "fn": "sub_4B4B90",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x408981"
+      ],
+      "note": "传播推断（2 跳，来自 sub_408790@0x408981 (interior)）"
+    },
+    {
+      "id": "s1k-275",
+      "kind": "arg",
+      "fn": "sub_498930",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x4767ee"
+      ],
+      "note": "传播推断（2 跳，来自 sub_476760@0x4767ee (interior)）"
+    },
+    {
+      "id": "s1k-276",
+      "kind": "arg",
+      "fn": "sub_4761D0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4768b3"
+      ],
+      "note": "传播推断（2 跳，来自 sub_476850@0x4768b3 (this)）"
+    },
+    {
+      "id": "s1k-277",
+      "kind": "arg",
+      "fn": "sub_408A40",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x40ab3d"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40AAE0@0x40ab3d (this)）"
+    },
+    {
+      "id": "s1k-278",
+      "kind": "arg",
+      "fn": "sub_404B20",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x40abda"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40AAE0@0x40abda (interior)）"
+    },
+    {
+      "id": "s1k-279",
+      "kind": "arg",
+      "fn": "sub_404BF0",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x40ac1e"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40AAE0@0x40ac1e (interior)）"
+    },
+    {
+      "id": "s1k-280",
+      "kind": "arg",
+      "fn": "sub_404A70",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x40b111"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40AEE0@0x40b111 (interior)）"
+    },
+    {
+      "id": "s1k-281",
+      "kind": "arg",
+      "fn": "sub_404B50",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x40b22f"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40AEE0@0x40b22f (interior)）"
+    },
+    {
+      "id": "s1k-282",
+      "kind": "arg",
+      "fn": "sub_455170",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x40b23a"
+      ],
+      "note": "传播推断（2 跳，来自 sub_40AEE0@0x40b23a (interior)）"
+    },
+    {
+      "id": "s1k-283",
+      "kind": "arg",
+      "fn": "sub_4556E0",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x4085f7"
+      ],
+      "note": "传播推断（2 跳，来自 sub_4084E0@0x4085f7 (interior)）"
+    },
+    {
+      "id": "s1k-285",
+      "kind": "arg",
+      "fn": "sub_432480",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x434a5a"
+      ],
+      "note": "传播推断（3 跳，来自 sub_434910@0x434a5a (interior)）"
+    },
+    {
+      "id": "s1k-286",
+      "kind": "arg",
+      "fn": "sub_4299A0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x434a66"
+      ],
+      "note": "传播推断（3 跳，来自 sub_434910@0x434a66 (interior)）"
+    },
+    {
+      "id": "s1k-287",
+      "kind": "arg",
+      "fn": "sub_455E40",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x47554b"
+      ],
+      "note": "传播推断（3 跳，来自 sub_475450@0x47554b (this)）"
+    },
+    {
+      "id": "s1k-288",
+      "kind": "arg",
+      "fn": "sub_48F330",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x48f41d"
+      ],
+      "note": "传播推断（3 跳，来自 sub_48F3B0@0x48f41d (this)）"
+    },
+    {
+      "id": "s1k-289",
+      "kind": "arg",
+      "fn": "sub_48F1D0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x48f7f0"
+      ],
+      "note": "传播推断（3 跳，来自 sub_48F680@0x48f7f0 (interior)）"
+    },
+    {
+      "id": "s1k-290",
+      "kind": "arg",
+      "fn": "sub_4A5260",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b4bba"
+      ],
+      "note": "传播推断（3 跳，来自 sub_4B4B90@0x4b4bba (this)）"
+    },
+    {
+      "id": "s1k-291",
+      "kind": "arg",
+      "fn": "sub_40E520",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x432503"
+      ],
+      "note": "传播推断（4 跳，来自 sub_432480@0x432503 (this)）"
+    },
+    {
+      "id": "s1k-292",
+      "kind": "arg",
+      "fn": "sub_40B4B0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x4325d6"
+      ],
+      "note": "传播推断（4 跳，来自 sub_432480@0x4325d6 (this)）"
+    },
+    {
+      "id": "s1k-293",
+      "kind": "arg",
+      "fn": "sub_42AE40",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x4325eb"
+      ],
+      "note": "传播推断（4 跳，来自 sub_432480@0x4325eb (this)）"
+    },
+    {
+      "id": "s1k-294",
+      "kind": "arg",
+      "fn": "sub_4284D0",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x429a9e"
+      ],
+      "note": "传播推断（4 跳，来自 sub_4299A0@0x429a9e (this)）"
+    },
+    {
+      "id": "s1k-295",
+      "kind": "arg",
+      "fn": "sub_48ED70",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x48f301"
+      ],
+      "note": "传播推断（4 跳，来自 sub_48F1D0@0x48f301 (this)）"
+    },
+    {
+      "id": "s1k-296",
+      "kind": "arg",
+      "fn": "sub_48F080",
+      "reg": "ecx",
+      "type": "T_stdvector*",
+      "witness": [
+        "0x48f316"
+      ],
+      "note": "传播推断（4 跳，来自 sub_48F1D0@0x48f316 (this)）"
+    },
+    {
+      "id": "s1k-49",
+      "kind": "arg",
+      "fn": "sub_40BE10",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4127cd"
+      ],
+      "note": "传播推断（1 跳，来自 sub_412290@0x4127cd (this)）"
+    },
+    {
+      "id": "s1k-145",
+      "kind": "arg",
+      "fn": "sub_4B5090",
+      "reg": "ecx",
+      "type": "T_SE*",
+      "witness": [
+        "0x410568"
+      ],
+      "note": "传播推断"
+    },
+    {
+      "id": "s1k-171",
+      "kind": "arg",
+      "fn": "sub_4BB840",
+      "reg": "ecx",
+      "type": "T_Voice*",
+      "witness": [
+        "0x411604"
+      ],
+      "note": "传播推断"
+    },
+    {
+      "id": "s1k-144",
+      "kind": "arg",
+      "fn": "sub_4A1A60",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x410257"
+      ],
+      "note": "传播推断"
+    },
+    {
+      "id": "s1k-178",
+      "kind": "arg",
+      "fn": "sub_4B0360",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b425a"
+      ],
+      "note": "传播推断"
+    },
+    {
+      "id": "s1k-206",
+      "kind": "arg",
+      "fn": "sub_40A4C0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x438d77"
+      ],
+      "note": "传播推断"
     }
   ],
   "disputes": [

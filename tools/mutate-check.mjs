@@ -802,6 +802,27 @@ const MUTATIONS = [
   },
   {
     file: 'tools/lib/shape-coverage.mjs',
+    from: "  if (escapes.indirectJmp.length) reasonKinds.push({ kind: 'indirectJmp', count: escapes.indirectJmp.length, text: `${escapes.indirectJmp.length} 处**间接跳转**（目标未知）` });",
+    to: '  if (false) reasonKinds.push({ kind: \'indirectJmp\', count: escapes.indirectJmp.length, text: \'x\' });',
+    guard: 'tools/test/shape-coverage.assets.test.mjs',
+    what: '★ "目标未知的间接跳转"不再算未闭合原因 ⇒ 跳表函数被判成 **L0 闭合**（"这个函数分析完了吗"当场变假，归档会把它列进"下一层能用"）',
+  },
+  {
+    file: 'tools/lib/shape-claims.mjs',
+    from: '    if (off != null && count != null && /^rep\\s+stosd$/.test(t)) {',
+    to: '    if (false) {',
+    guard: 'tools/test/shape-claims-g4-init.test.mjs',
+    what: '★ "初始化写循环"这条证据被拆掉 ⇒ `T_Command+0x77bec`（构造函数 `mov ecx,200h`+`rep stosd`）只能退回"只声明首槽"，索引访问随即变成假红；而 G4 的"条数有直接观察"这一档也就名存实亡',
+  },
+  {
+    file: 'tools/lib/shape-coverage.mjs',
+    from: '    if (PAD_LEA.test(r.body)) { kinds.pureReg += 1; continue; }',
+    to: '    if (false) { kinds.pureReg += 1; continue; }',
+    guard: 'tools/test/shape-coverage.test.mjs',
+    what: '★ MSVC 的 6 字节对齐填充（`lea r,[r+0]`）又被算成"有内存操作数却没站点" ⇒ 一批函数永远闭不上（实测全表 147 个"未归类行"全是它 = 假红）',
+  },
+  {
+    file: 'tools/lib/shape-coverage.mjs',
     from: '  if (REG_NAME.has(s.toLowerCase())) return false;',
     to: '  return true;',
     guard: 'tools/test/shape-claims-guards.test.mjs',
@@ -820,6 +841,20 @@ const MUTATIONS = [
     to: '        if (false) fr.set(slotKey(dm), evalOperand(fr, s));',
     guard: 'tools/test/shape-claims-guards.test.mjs',
     what: '★ 栈槽的值传播被拆掉 ⇒ 对象根溢出/读回后身份断掉，catch 块里的访问全成"未解析基址"（实测：sub_429460 的 8 处）',
+  },
+  {
+    file: 'tools/lib/shape-census.mjs',
+    from: '    if (scalar.has(o.abs) || finite.some(([a, b]) => o.abs >= a && o.abs < b)) out.declared.push(o);',
+    to: '    if (scalar.has(o.abs) || finite.some(([a, b]) => o.abs >= a && o.abs <= b)) out.declared.push(o);',
+    guard: 'tools/test/shape-census-debt.test.mjs',
+    what: '★ 欠账窗口改成**闭区间** ⇒ 窗口末尾的下一格被当成"已声明"（真欠账被吞掉一格，"还要补什么"的清单少报）',
+  },
+  {
+    file: 'tools/lib/shape-access.mjs',
+    from: '          unusable: sh.problems.length > 0,',
+    to: '          unusable: false,',
+    guard: 'tools/test/shape-access.test.mjs',
+    what: '★ 索引解不出的 `lea` 目标寄存器又被当成 `this+0` ⇒ 下游 `[reg+K]` 变成 `obj0+K` 的**假偏移**（实测 0x422527 ⇒ 0x4225b5 起：5 个偏移 / 32 处站点被当成"未声明成员"，而基址其实是 `Engine + (跳表值−序号)*4`）',
   },
   {
     file: 'tools/lib/shape-claims.mjs',

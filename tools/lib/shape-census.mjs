@@ -161,6 +161,70 @@ export function censusHandlers({ lines, repoRoot, match = null }) {
   };
 }
 
+/**
+ * **`obj0` 覆盖欠账**：把"普查观察到的 obj0 偏移"与一个**已声明类型**的成员表做差。
+ *
+ * 三档（⛔ 不许把后两档合成"已覆盖"）：
+ * * `declared` —— 命中成员本身，或落在**有限**数组窗口内（缺的是语义，不是覆盖）；
+ * * `openWindow` —— 落在 `count: null` 成员的窗口里：**形态说得出来、边界说不出来**（无界窗口 ⇒ 不许算"已声明"）；
+ * * `undeclared` —— 两样都不沾 ⇒ **下一轮该补的清单**（按站点数降序）。
+ *
+ * ★ 纯算术：输入是 `censusHandlers().obj0Offsets` 与 `types.json` 的内容，**不读语料**。
+ *   所以这条"覆盖率"读数可以反复跑，且与 `claims` 的守恒③共用同一套偏移（不会两边差数）。
+ */
+export function obj0Debt(offsets, types, rootType = 'T_Command') {
+  const T = types?.types?.[rootType];
+  if (!T) throw new Error(`types 里没有类型 ${rootType}（⛔ 类型名写错会让整份"欠账"变成空表 = 假绿）`);
+  const scalar = new Set();
+  const finite = [];
+  const open = [];
+  for (const m of T.members ?? []) {
+    const off = Number.parseInt(String(m.off), 16);
+    if (m.width) { scalar.add(off); finite.push([off, off + m.width]); continue; }
+    if (m.type && m.count != null) {
+      const size = types.types[m.type]?.size ?? null;
+      if (size == null) scalar.add(off); else finite.push([off, off + size * m.count]);
+      continue;
+    }
+    if (m.count === null) { scalar.add(off); open.push(off); continue; }
+    scalar.add(off);
+  }
+  const out = { rootType, declared: [], openWindow: [], undeclared: [] };
+  for (const o of offsets) {
+    if (scalar.has(o.abs) || finite.some(([a, b]) => o.abs >= a && o.abs < b)) out.declared.push(o);
+    else if (open.some((a) => o.abs >= a)) out.openWindow.push(o);
+    else out.undeclared.push(o);
+  }
+  const sum = (xs) => xs.reduce((a, x) => a + x.sites, 0);
+  out.counts = {
+    declared: out.declared.length, declaredSites: sum(out.declared),
+    openWindow: out.openWindow.length, openWindowSites: sum(out.openWindow),
+    undeclared: out.undeclared.length, undeclaredSites: sum(out.undeclared),
+    total: offsets.length,
+  };
+  out.openBases = open.sort((a, b) => a - b);
+  out.undeclared.sort((a, b) => b.sites - a.sites);
+  return out;
+}
+
+/** 欠账报告的终端渲染（`undeclared` 是清单本体：按站点数降序，带 witness EA） */
+export function renderDebt(d) {
+  const L = [];
+  const c = d.counts;
+  L.push(`# obj0 覆盖欠账（类型 \`${d.rootType}\` · 普查观察到 ${c.total} 个 obj0 偏移）`);
+  L.push(`已声明 / 有限数组窗口内  ${String(c.declared).padStart(4)} 个偏移 · ${String(c.declaredSites).padStart(5)} 处站点`);
+  L.push(`落在 \`count:null\` 窗口里  ${String(c.openWindow).padStart(4)} 个偏移 · ${String(c.openWindowSites).padStart(5)} 处站点　⭐ **形态可说、边界不可说**（⛔ 不是"已声明"）`);
+  L.push(`**未声明**　　　　　　　 ${String(c.undeclared).padStart(4)} 个偏移 · ${String(c.undeclaredSites).padStart(5)} 处站点　⇒ 下一轮该补的清单`);
+  if (d.openBases.length) L.push(`  \`count:null\` 成员的基点：${d.openBases.map(hex).join(' ')}`);
+  for (const o of d.undeclared.slice(0, 40)) {
+    L.push(`  ${pad(hex(o.abs), 10)} ${String(o.sites).padStart(5)} 处 / ${String(o.handlers).padStart(4)} handler　例：${(o.sampleEAs ?? []).slice(0, 3).map(hex).join(' ')}`);
+  }
+  if (d.undeclared.length > 40) L.push(`  …（另有 ${d.undeclared.length - 40} 个；用 --json 取全量）`);
+  L.push('★ 三档**逐条**读：`undeclared` 才是欠账；`openWindow` 是诚实的"判不了"（口径见 `shape-census.md` §6）；');
+  L.push('  ⛔ 不许为了把 `undeclared` 清零而编成员 —— 先分清"观察到了"还是"助手把位移算错了"（实测：`lea` 索引未解出那类）。');
+  return `${L.join('\n')}\n`;
+}
+
 /** 终端渲染（数字都能追到 EA / 符号清单；⛔ 不许"大约/大概"） */
 export function renderCensus(r, { topOffsets = 12, topIndexed = 8 } = {}) {
   const L = [];

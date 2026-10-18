@@ -27,6 +27,13 @@ const FP_MN = /^(fld|fst|fstp|fild|fist|fistp|fadd|fsub|fmul|fdiv|fcom|fcomp|fuc
 /** 寄存器名（`call eax` 是**间接**调用，不是"调用名叫 eax"） */
 const REG_NAME = new Set(['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp', 'ax', 'bx', 'cx', 'dx', 'al', 'ah', 'bl', 'bh', 'cl', 'ch', 'dl', 'dh']);
 /**
+ * `lea r,[r+0]` = MSVC 的 6 字节对齐**填充**，**不是**内存访问。
+ * ★ 判定层（`shape-access.mjs` 的 `siteOf`）早已按同一口径剔除它；本层若仍把它算成"有内存操作数却没站点"，
+ *   就会产出**假红**：实测 `sub_402330` 的唯一"未归类行"就是 `0x40235d lea ecx,[ecx+0]`
+ *   ⇒ 该函数永远闭不上，而真正的原因只有两个间接调用。全表 147 个带"未归类行"的函数里有一部分就是它。
+ */
+const PAD_LEA = /^lea\s+([a-z][a-z0-9]*)\s*,\s*\[\s*\1\s*\+\s*0h?\s*\]$/i;
+/**
  * 直接调用目标：`sub_XXXXXX` 或**符号名**（可带多个下划线前缀与 @N 后缀，如 `__CxxThrowException@8`）。
  * ⛔ 裸寄存器 / `[...]` / `dword ptr [...]` 都是**间接**。
  */
@@ -81,6 +88,7 @@ export function coverageOf(lines, sym, span, rootReg, sites) {
       } else if (indirect) escapes.indirectJmp.push({ ea: r.ea, text: r.body });
     }
     if (STRING_MN.test(r.text)) { kinds.stringOp += 1; escapes.stringOps.push({ ea: r.ea, text: r.body }); continue; }
+    if (PAD_LEA.test(r.body)) { kinds.pureReg += 1; continue; }   // 对齐填充：不碰内存，⛔ 不许记成"未归类行"
     if (FP_MN.test(r.mn) && hasMem) { kinds.float += 1; escapes.floatMem.push({ ea: r.ea, text: r.body }); continue; }
     const own = siteAt.get(r.ea);
     if (own && own.length) {
@@ -112,20 +120,56 @@ export function coverageOf(lines, sym, span, rootReg, sites) {
     else if (s.absDisp === null && !(s.pointeePath?.length)) siteStates.noLiteral += 1;
   }
 
-  const reasons = [];
-  if (escapes.unparsed.length) reasons.push(`${escapes.unparsed.length} 行有内存操作数但没站点（非栈）`);
-  if (escapes.indirectCall.length) reasons.push(`${escapes.indirectCall.length} 处**间接调用**（目标未知 ⇒ 副作用无界）`);
-  if (escapes.indirectJmp.length) reasons.push(`${escapes.indirectJmp.length} 处**间接跳转**（目标未知）`);
-  if (siteStates.unresolvedBase) reasons.push(`${siteStates.unresolvedBase} 个站点**基址未解析**`);
+  // ★ 未闭合原因**结构化**（`kind` 是闭集合，供归档/分组用；`text` 给人看）。
+  //   早先只有给人看的字符串，归档要靠 `replace(/^\d+ /,'')` 反向解析 —— 那样的"分组键"是**猜**出来的。
+  const reasonKinds = [];
+  if (escapes.unparsed.length) reasonKinds.push({ kind: 'unparsedLine', count: escapes.unparsed.length, text: `${escapes.unparsed.length} 行有内存操作数但没站点（非栈）` });
+  if (escapes.indirectCall.length) reasonKinds.push({ kind: 'indirectCall', count: escapes.indirectCall.length, text: `${escapes.indirectCall.length} 处**间接调用**（目标未知 ⇒ 副作用无界）` });
+  if (escapes.indirectJmp.length) reasonKinds.push({ kind: 'indirectJmp', count: escapes.indirectJmp.length, text: `${escapes.indirectJmp.length} 处**间接跳转**（目标未知）` });
+  if (siteStates.unresolvedBase) reasonKinds.push({ kind: 'unresolvedBase', count: siteStates.unresolvedBase, text: `${siteStates.unresolvedBase} 个站点**基址未解析**` });
+  const reasons = reasonKinds.map((r) => r.text);
 
   return {
     sym, rootReg, insns: rows.length, kinds, escapes, sites: sites.length, siteStates,
     closed: reasons.length === 0,
     reasons,
+    reasonKinds,
     // ★ 明确不自称的东西：调用改了 obj0 什么（L2 归台账）
     caveat: escapes.directCalls.length
       ? `${escapes.directCalls.length} 个直接调用的**效果**不在本层（L1 只点名、不判定）`
       : null,
+  };
+}
+
+/** `L0` 的未闭合原因闭集合（归档/分组的**唯一**键来源） */
+export const REASON_KINDS = ['unparsedLine', 'indirectCall', 'indirectJmp', 'unresolvedBase'];
+
+/**
+ * **未闭合归档**：把一批 `coverageOf()` 的结果按原因分组 ⇒ "下一层能用的函数清单"。
+ *
+ * 口径：
+ * * `closed` 的函数只进 `functions`，不进任何分组（⛔ 不制造"零原因"的分组）；
+ * * 一个函数可能**同时**有多个原因 ⇒ 它出现在多个分组里；`counts.byReason` **按原因计**，
+ *   与 `unclosed`（按函数计）**不是同一个口径**，两个数都会报出来（不许相加）。
+ */
+export function coverageArchive(covs) {
+  const groups = Object.fromEntries(REASON_KINDS.map((k) => [k, []]));
+  const functions = covs.map((c) => ({ sym: c.sym, closed: !!c.closed, reasons: c.reasons ?? [], reasonKinds: (c.reasonKinds ?? []).map((r) => r.kind), sites: c.sites ?? 0 }));
+  let closed = 0;
+  let unclosed = 0;
+  for (const c of covs) {
+    if (c.closed) { closed += 1; continue; }
+    unclosed += 1;
+    for (const r of c.reasonKinds ?? []) {
+      if (!groups[r.kind]) throw new Error(`未知的未闭合原因 kind：${r.kind}（闭集合见 REASON_KINDS）`);
+      groups[r.kind].push(c.sym);
+    }
+  }
+  return {
+    total: covs.length, closed, unclosed,
+    counts: { byReason: Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, v.length])) },
+    byReason: groups,
+    functions,
   };
 }
 
@@ -144,6 +188,10 @@ export function renderCoverage(cov, hex = (n) => `0x${n.toString(16)}`) {
   }
   if (cov.escapes.indirectCall.length) {
     L.push(`  ⚠ 间接调用：${cov.escapes.indirectCall.map((c) => `${hex(c.ea)} \`${c.text}\``).join(' · ')}`);
+  }
+  if (cov.escapes.unparsed.length) {
+    // ★ 未归类行**必须逐条点名 EA**：否则"147 个函数有未归类行"只能当口号，没法回语料查它是不是解析器缺口。
+    L.push(`  ⚠ 未归类行（有内存操作数但没站点、且不是栈）：${cov.escapes.unparsed.slice(0, 8).map((c) => `${hex(c.ea)} \`${c.text}\``).join(' · ')}${cov.escapes.unparsed.length > 8 ? ' …' : ''}`);
   }
   if (cov.escapes.throw.length) L.push(`  抛出：${cov.escapes.throw.map((c) => hex(c.ea)).join(' ')}`);
   if (cov.escapes.dsSymbols.length) L.push(`  数据段符号：${cov.escapes.dsSymbols.map((c) => `${hex(c.ea)} ${c.obj}`).join(' ')}`);
