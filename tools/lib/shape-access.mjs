@@ -385,6 +385,14 @@ function makeEpiloguePop(lines, to) {
 function siteOf(fr, mn, operands, idx, ea, line, rawLine) {
   const raw = operands[idx];
   const mem = parseMem(raw);
+  // ★ `lea r,[r+0]` **不是访问**：同寄存器、位移 0、无索引 —— MSVC 用它当 6 字节对齐填充
+  //   （实测 `0x46547A lea ebx,[ebx+0]` 被记成 `obj0+0x0` 的访问 ⇒ `T_Font+0x0` 4 处假残差）。
+  //   `lea r,[r+K]`（K≠0）仍要算"取址"（那是内嵌子对象的基址），`lea r,[s+0]`（换寄存器）也不算填充。
+  if (mn === 'lea' && mem && !mem.stack && mem.base
+      && mem.indices.length === 0 && mem.disp === 0) {
+    const dst = (operands[0] ?? '').trim().toLowerCase();
+    if (dst && dst === mem.base) return null;
+  }
   const seg = SEGSYM.exec(raw.replace(/^(byte|word|dword|qword|xmmword|tbyte)\s+ptr\s+/i, '').trim());
   if (!mem && !seg) return null;
   if (mem && mem.stack) return null; // 栈槽不是本单的对象形状

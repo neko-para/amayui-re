@@ -6,7 +6,7 @@
       "id": "g01",
       "kind": "global",
       "sym": "dword_55E1BC",
-      "type": "T0*",
+      "type": "T_Command*",
       "witness": [
         "0x4baa3a"
       ]
@@ -16,154 +16,197 @@
       "kind": "arg",
       "fn": "sub_401410",
       "reg": "ecx",
-      "type": "T_a609c_3028*"
+      "type": "T_FileDB_3028*"
     },
     {
       "id": "c14",
       "kind": "arg",
       "fn": "sub_403EF0",
       "reg": "ecx",
-      "type": "T_55d8*"
+      "type": "T_CBunki*",
+      "witness": [
+        "0x403f88"
+      ]
     },
     {
       "id": "c73",
       "kind": "arg",
       "fn": "sub_40BEB0",
       "reg": "ecx",
-      "type": "T_1ee8*"
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x40bf2b"
+      ]
     },
     {
       "id": "c42",
       "kind": "arg",
       "fn": "sub_40BF20",
       "reg": "ecx",
-      "type": "T_1ee8*"
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x410c7e"
+      ]
     },
     {
       "id": "c33",
       "kind": "arg",
       "fn": "sub_40C780",
       "reg": "ecx",
-      "type": "T_77960*"
+      "type": "T_77960*",
+      "witness": [
+        "0x41512d"
+      ]
     },
     {
       "id": "c07",
       "kind": "arg",
       "fn": "sub_40DF10",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x415df1"
+      ]
     },
     {
       "id": "c04",
       "kind": "arg",
       "fn": "sub_40EA00",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x40edd9"
+      ]
     },
     {
       "id": "c03",
       "kind": "arg",
       "fn": "sub_40ED40",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x40f78b"
+      ]
     },
     {
       "id": "c06",
       "kind": "arg",
       "fn": "sub_40F750",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x4105b1"
+      ]
     },
     {
       "id": "c08",
       "kind": "arg",
       "fn": "sub_40FB60",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x40fcb5"
+      ]
     },
     {
       "id": "f01",
       "kind": "arg",
       "fn": "sub_41A820",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "f04",
       "kind": "arg",
       "fn": "sub_41A9B0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "f10",
       "kind": "arg",
       "fn": "sub_41AB80",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "c01",
       "kind": "arg",
       "fn": "sub_41BF50",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x41c6ff"
+      ]
     },
     {
       "id": "c05",
       "kind": "arg",
       "fn": "sub_41C300",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x422ff5"
+      ]
     },
     {
       "id": "f02",
       "kind": "arg",
       "fn": "sub_41C6A0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "f03",
       "kind": "arg",
       "fn": "sub_41C770",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "f05",
       "kind": "arg",
       "fn": "sub_41C7C0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "f06",
       "kind": "arg",
       "fn": "sub_41C8D0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "f07",
       "kind": "arg",
       "fn": "sub_41C900",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "f11",
       "kind": "arg",
       "fn": "sub_4203D0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "f12",
       "kind": "arg",
       "fn": "sub_420560",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "l01",
@@ -192,21 +235,28 @@
       "kind": "arg",
       "fn": "sub_428990",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x432924"
+      ]
     },
     {
       "id": "f08",
       "kind": "arg",
       "fn": "sub_428A60",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x405a7d"
+      ]
     },
     {
       "id": "f09",
       "kind": "arg",
       "fn": "sub_429460",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "l03",
@@ -217,357 +267,470 @@
         "0x429604",
         "0x42981e"
       ],
-      "type": "T0*"
+      "type": "T_Command*"
     },
     {
       "id": "c02",
       "kind": "arg",
       "fn": "sub_42B4B0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x42c5ba"
+      ]
     },
     {
       "id": "c09",
       "kind": "arg",
       "fn": "sub_42BA00",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "witness": [
+        "0x42cefe"
+      ]
     },
     {
       "id": "n01",
       "kind": "arg",
       "fn": "sub_42C5E0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n02",
       "kind": "arg",
       "fn": "sub_42C620",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n03",
       "kind": "arg",
       "fn": "sub_42C660",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n04",
       "kind": "arg",
       "fn": "sub_42C6A0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n05",
       "kind": "arg",
       "fn": "sub_42C6E0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n06",
       "kind": "arg",
       "fn": "sub_42C720",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n07",
       "kind": "arg",
       "fn": "sub_42C750",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n08",
       "kind": "arg",
       "fn": "sub_42C790",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n09",
       "kind": "arg",
       "fn": "sub_42C7D0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n10",
       "kind": "arg",
       "fn": "sub_42C820",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n11",
       "kind": "arg",
       "fn": "sub_42C870",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n12",
       "kind": "arg",
       "fn": "sub_42C8C0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n13",
       "kind": "arg",
       "fn": "sub_42C910",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n14",
       "kind": "arg",
       "fn": "sub_42C960",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n15",
       "kind": "arg",
       "fn": "sub_42C9B0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n16",
       "kind": "arg",
       "fn": "sub_42CA00",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n17",
       "kind": "arg",
       "fn": "sub_42CA50",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n18",
       "kind": "arg",
       "fn": "sub_42CEC0",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "n19",
       "kind": "arg",
       "fn": "sub_430A50",
       "reg": "ecx",
-      "type": "T0*"
+      "type": "T_Command*",
+      "indirectOnly": true
     },
     {
       "id": "c41",
       "kind": "arg",
       "fn": "sub_437440",
       "reg": "ecx",
-      "type": "T_511c*"
+      "type": "T_Data*",
+      "witness": [
+        "0x43891b"
+      ]
     },
     {
       "id": "c74",
       "kind": "arg",
       "fn": "sub_43E9F0",
       "reg": "ecx",
-      "type": "T_1ee8*"
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x40bf3b"
+      ]
     },
     {
       "id": "c65",
       "kind": "arg",
       "fn": "sub_44A9A0",
       "reg": "ecx",
-      "type": "T_1ee8*"
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x40e112"
+      ]
     },
     {
       "id": "c21",
       "kind": "arg",
       "fn": "sub_454960",
       "reg": "ecx",
-      "type": "T_a609c*"
+      "type": "T_FileDB*",
+      "witness": [
+        "0x455acb"
+      ]
     },
     {
       "id": "c10",
       "kind": "arg",
       "fn": "sub_454FA0",
       "reg": "ecx",
-      "type": "T_a609c*"
+      "type": "T_FileDB*",
+      "witness": [
+        "0x45533e"
+      ]
     },
     {
       "id": "c30",
       "kind": "arg",
       "fn": "sub_455420",
       "reg": "ecx",
-      "type": "T_a609c*"
+      "type": "T_FileDB*",
+      "witness": [
+        "0x455ae4"
+      ]
     },
     {
       "id": "c13",
       "kind": "arg",
       "fn": "sub_455560",
       "reg": "ecx",
-      "type": "T_a609c*"
+      "type": "T_FileDB*",
+      "witness": [
+        "0x40846c"
+      ]
     },
     {
       "id": "c12",
       "kind": "arg",
       "fn": "sub_4559C0",
       "reg": "ecx",
-      "type": "T_a609c*"
+      "type": "T_FileDB*",
+      "witness": [
+        "0x408462"
+      ]
     },
     {
       "id": "c11",
       "kind": "arg",
       "fn": "sub_455C60",
       "reg": "ecx",
-      "type": "T_a609c*"
+      "type": "T_FileDB*",
+      "witness": [
+        "0x40848d"
+      ]
     },
     {
       "id": "c52",
       "kind": "arg",
       "fn": "sub_455D20",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x46562b"
+      ]
     },
     {
       "id": "c54",
       "kind": "arg",
       "fn": "sub_456C90",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x459f9f"
+      ]
     },
     {
       "id": "c82",
       "kind": "arg",
       "fn": "sub_456DF0",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x4582b6"
+      ]
     },
     {
       "id": "c84",
       "kind": "arg",
       "fn": "sub_4581F0",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x458a98"
+      ]
     },
     {
       "id": "c85",
       "kind": "arg",
       "fn": "sub_4587D0",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x458a87"
+      ]
     },
     {
       "id": "c55",
       "kind": "arg",
       "fn": "sub_459A20",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x41862f"
+      ]
     },
     {
       "id": "c80",
       "kind": "arg",
       "fn": "sub_459C50",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x41864c"
+      ]
     },
     {
       "id": "c50",
       "kind": "arg",
       "fn": "sub_459F40",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x4155c7"
+      ]
     },
     {
       "id": "c51",
       "kind": "arg",
       "fn": "sub_45A6E0",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x4187a3"
+      ]
     },
     {
       "id": "c32",
       "kind": "arg",
       "fn": "sub_45D240",
       "reg": "ecx",
-      "type": "T_5d860*"
+      "type": "T_5d860*",
+      "witness": [
+        "0x42b11b",
+        "0x42b10f"
+      ]
     },
     {
       "id": "c53",
       "kind": "arg",
       "fn": "sub_45EBE0",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x465638"
+      ]
     },
     {
       "id": "c15",
       "kind": "arg",
       "fn": "sub_465390",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x40e143"
+      ]
     },
     {
       "id": "c81",
       "kind": "arg",
       "fn": "sub_4745A0",
       "reg": "ecx",
-      "type": "T_14d30*"
+      "type": "T_Font*",
+      "witness": [
+        "0x45a571"
+      ]
     },
     {
       "id": "c71",
       "kind": "arg",
       "fn": "sub_477130",
       "reg": "ecx",
-      "type": "T_408*"
+      "type": "T_Input*",
+      "witness": [
+        "0x47809b"
+      ]
     },
     {
       "id": "c70",
       "kind": "arg",
       "fn": "sub_477220",
       "reg": "ecx",
-      "type": "T_408*"
+      "type": "T_Input*",
+      "witness": [
+        "0x4053e7"
+      ]
     },
     {
       "id": "c16",
       "kind": "arg",
       "fn": "sub_4774F0",
       "reg": "ecx",
-      "type": "T_408*"
+      "type": "T_Input*",
+      "witness": [
+        "0x4780ab"
+      ]
     },
     {
       "id": "c72",
       "kind": "arg",
       "fn": "sub_477C30",
       "reg": "ecx",
-      "type": "T_408*"
+      "type": "T_Input*",
+      "witness": [
+        "0x4780b3"
+      ]
     },
     {
       "id": "c40",
       "kind": "arg",
       "fn": "sub_478090",
       "reg": "ecx",
-      "type": "T_408*"
+      "type": "T_Input*",
+      "witness": [
+        "0x4053d5"
+      ]
     },
     {
       "id": "c60",
       "kind": "arg",
       "fn": "sub_499BC0",
       "reg": "ecx",
-      "type": "T_4ed10*"
+      "type": "T_Scene*",
+      "witness": [
+        "0x40e0df"
+      ]
     },
     {
       "id": "c63",
       "kind": "arg",
       "fn": "sub_49A300",
       "reg": "ecx",
-      "type": "T_4ed10*"
+      "type": "T_Scene*",
+      "witness": [
+        "0x49a69a"
+      ]
     },
     {
       "id": "c66",
@@ -578,92 +741,1593 @@
         "0x49a308",
         "0x49a62e"
       ],
-      "type": "T_4ed10_460*"
+      "type": "T_Scene_460*"
     },
     {
       "id": "c61",
       "kind": "arg",
       "fn": "sub_49A690",
       "reg": "ecx",
-      "type": "T_4ed10*"
+      "type": "T_Scene*",
+      "witness": [
+        "0x40e0e6"
+      ]
     },
     {
       "id": "c64",
       "kind": "arg",
       "fn": "sub_49E980",
       "reg": "ecx",
-      "type": "T_4ed10*"
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a8acc"
+      ]
     },
     {
       "id": "c62",
       "kind": "arg",
       "fn": "sub_4AA180",
       "reg": "ecx",
-      "type": "T_4ed10*"
+      "type": "T_Scene*",
+      "witness": [
+        "0x40e0f4"
+      ]
     },
     {
       "id": "c31",
       "kind": "arg",
       "fn": "sub_4AB7A0",
       "reg": "ecx",
-      "type": "T_4ed10*"
+      "type": "T_Scene*",
+      "witness": [
+        "0x40e0ed"
+      ]
     },
     {
       "id": "c22",
       "kind": "arg",
       "fn": "sub_4B51E0",
       "reg": "ecx",
-      "type": "T_143bc*"
+      "type": "T_SE*",
+      "witness": [
+        "0x40e1e0"
+      ]
     },
     {
       "id": "c23",
       "kind": "arg",
       "fn": "sub_4B8530",
       "reg": "ecx",
-      "type": "T_1ee8*"
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x40e0ff"
+      ]
     },
     {
       "id": "c86",
       "kind": "arg",
       "fn": "sub_4034C0",
       "reg": "ecx",
-      "type": "T_BaseObject*"
+      "type": "T_BaseObject*",
+      "witness": [
+        "0x40423c"
+      ]
     },
     {
       "id": "c87",
       "kind": "arg",
       "fn": "sub_4034D0",
       "reg": "ecx",
-      "type": "T_BaseObject*"
+      "type": "T_BaseObject*",
+      "witness": [
+        "0x41d770"
+      ]
     },
     {
       "id": "c88",
       "kind": "arg",
       "fn": "sub_4034E0",
       "reg": "ecx",
-      "type": "T_BaseObject*"
+      "type": "T_BaseObject*",
+      "witness": [
+        "0x40ef2a"
+      ]
     },
     {
       "id": "c89",
       "kind": "arg",
       "fn": "sub_438CC0",
       "reg": "ecx",
-      "type": "T_RemoteDebug*"
+      "type": "T_RemoteDebug*",
+      "witness": [
+        "0x497643"
+      ]
     },
     {
       "id": "c90",
       "kind": "arg",
       "fn": "sub_497620",
       "reg": "ecx",
-      "type": "T_RemoteDebug*"
+      "type": "T_RemoteDebug*",
+      "witness": [
+        "0x438d0c"
+      ]
     },
     {
       "id": "c91",
       "kind": "arg",
       "fn": "sub_4976A0",
       "reg": "ecx",
-      "type": "T_RemoteDebug*"
+      "type": "T_RemoteDebug*",
+      "indirectOnly": true
+    },
+    {
+      "id": "c92",
+      "kind": "arg",
+      "fn": "sub_415640",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4baa2e"
+      ]
+    },
+    {
+      "id": "c93",
+      "kind": "arg",
+      "fn": "sub_4034A0",
+      "reg": "ecx",
+      "type": "T_BaseObject*",
+      "witness": [
+        "0x403f6a"
+      ]
+    },
+    {
+      "id": "c94",
+      "kind": "arg",
+      "fn": "sub_447810",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4130ba"
+      ]
+    },
+    {
+      "id": "c95",
+      "kind": "arg",
+      "fn": "sub_441E10",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x412e60"
+      ]
+    },
+    {
+      "id": "c96",
+      "kind": "arg",
+      "fn": "sub_444350",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x412f90"
+      ]
+    },
+    {
+      "id": "c97",
+      "kind": "arg",
+      "fn": "sub_412290",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bb517"
+      ]
+    },
+    {
+      "id": "c99",
+      "kind": "arg",
+      "fn": "sub_49AA30",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4a1ee8"
+      ]
+    },
+    {
+      "id": "c100",
+      "kind": "arg",
+      "fn": "sub_49CC10",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4af61c"
+      ]
+    },
+    {
+      "id": "c101",
+      "kind": "arg",
+      "fn": "sub_413DD0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x426412"
+      ]
+    },
+    {
+      "id": "c102",
+      "kind": "arg",
+      "fn": "sub_4A07F0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b0438"
+      ]
+    },
+    {
+      "id": "c103",
+      "kind": "arg",
+      "fn": "sub_417800",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bb40d"
+      ]
+    },
+    {
+      "id": "c104",
+      "kind": "arg",
+      "fn": "sub_4057B0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b95ff"
+      ]
+    },
+    {
+      "id": "c105",
+      "kind": "arg",
+      "fn": "sub_447330",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4131f0"
+      ]
+    },
+    {
+      "id": "c106",
+      "kind": "arg",
+      "fn": "sub_411BC0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x413498"
+      ]
+    },
+    {
+      "id": "c107",
+      "kind": "arg",
+      "fn": "sub_469260",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x41562e"
+      ]
+    },
+    {
+      "id": "c108",
+      "kind": "arg",
+      "fn": "sub_45BE20",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x46cc25"
+      ]
+    },
+    {
+      "id": "c109",
+      "kind": "arg",
+      "fn": "sub_45B2B0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x45be46"
+      ]
+    },
+    {
+      "id": "b10c01",
+      "kind": "arg",
+      "fn": "sub_477DD0",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x415683"
+      ]
+    },
+    {
+      "id": "b10c02",
+      "kind": "arg",
+      "fn": "sub_4388C0",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x4156b4"
+      ]
+    },
+    {
+      "id": "b10c03",
+      "kind": "arg",
+      "fn": "sub_4B5B50",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x4156a5"
+      ]
+    },
+    {
+      "id": "b10c04",
+      "kind": "arg",
+      "fn": "sub_415460",
+      "reg": "ecx",
+      "type": "T_Hashtable_int*",
+      "witness": [
+        "0x4157f6"
+      ]
+    },
+    {
+      "id": "b10c05",
+      "kind": "arg",
+      "fn": "sub_4387F0",
+      "reg": "ecx",
+      "type": "T_Hashtable_string*",
+      "witness": [
+        "0x438910"
+      ]
+    },
+    {
+      "id": "b10c06",
+      "kind": "arg",
+      "fn": "sub_476AA0",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x477e3e"
+      ]
+    },
+    {
+      "id": "b10c07",
+      "kind": "arg",
+      "fn": "sub_477050",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x478026"
+      ]
+    },
+    {
+      "id": "b10c08",
+      "kind": "arg",
+      "fn": "sub_477080",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x4b92b7"
+      ]
+    },
+    {
+      "id": "b10c09",
+      "kind": "arg",
+      "fn": "sub_477100",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x42efbb"
+      ]
+    },
+    {
+      "id": "b10c10",
+      "kind": "arg",
+      "fn": "sub_4771D0",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x405f9d"
+      ]
+    },
+    {
+      "id": "b10c11",
+      "kind": "arg",
+      "fn": "sub_477280",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x41192a"
+      ]
+    },
+    {
+      "id": "b10c12",
+      "kind": "arg",
+      "fn": "sub_477470",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x431b83"
+      ]
+    },
+    {
+      "id": "b10c13",
+      "kind": "arg",
+      "fn": "sub_4777B0",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x431ae1"
+      ]
+    },
+    {
+      "id": "b10c14",
+      "kind": "arg",
+      "fn": "sub_477980",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x431bd5"
+      ]
+    },
+    {
+      "id": "b10c15",
+      "kind": "arg",
+      "fn": "sub_477C80",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x432035"
+      ]
+    },
+    {
+      "id": "b10c16",
+      "kind": "arg",
+      "fn": "sub_477FF0",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x478106"
+      ]
+    },
+    {
+      "id": "b10c17",
+      "kind": "arg",
+      "fn": "sub_478050",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x406cae"
+      ]
+    },
+    {
+      "id": "b10c18",
+      "kind": "arg",
+      "fn": "sub_4780D0",
+      "reg": "ecx",
+      "type": "T_Input*",
+      "witness": [
+        "0x409513"
+      ]
+    },
+    {
+      "id": "b10c19",
+      "kind": "arg",
+      "fn": "sub_4380F0",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x40fa15"
+      ]
+    },
+    {
+      "id": "b10c20",
+      "kind": "arg",
+      "fn": "sub_438120",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x4389a3"
+      ]
+    },
+    {
+      "id": "b10c21",
+      "kind": "arg",
+      "fn": "sub_438320",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x40ac84"
+      ]
+    },
+    {
+      "id": "b10c22",
+      "kind": "arg",
+      "fn": "sub_438940",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x40b03a"
+      ]
+    },
+    {
+      "id": "b10c23",
+      "kind": "arg",
+      "fn": "sub_437480",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x40da7a"
+      ]
+    },
+    {
+      "id": "b10c24",
+      "kind": "arg",
+      "fn": "sub_437980",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x438a00"
+      ]
+    },
+    {
+      "id": "b10c25",
+      "kind": "arg",
+      "fn": "sub_438750",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x4387c6"
+      ]
+    },
+    {
+      "id": "b10c26",
+      "kind": "arg",
+      "fn": "sub_429390",
+      "reg": "ecx",
+      "type": "T_Data*",
+      "witness": [
+        "0x433a9d"
+      ]
+    },
+    {
+      "id": "b10c27",
+      "kind": "arg",
+      "fn": "sub_4B5C50",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x406d2b"
+      ]
+    },
+    {
+      "id": "b10c28",
+      "kind": "arg",
+      "fn": "sub_4B5CF0",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x406d86"
+      ]
+    },
+    {
+      "id": "b10c29",
+      "kind": "arg",
+      "fn": "sub_4B60C0",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x40e187"
+      ]
+    },
+    {
+      "id": "b10c30",
+      "kind": "arg",
+      "fn": "sub_4B6550",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x4b69ef"
+      ]
+    },
+    {
+      "id": "b10c31",
+      "kind": "arg",
+      "fn": "sub_4B68A0",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x4093ec"
+      ]
+    },
+    {
+      "id": "b10c32",
+      "kind": "arg",
+      "fn": "sub_4B68E0",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x408288"
+      ]
+    },
+    {
+      "id": "b10c33",
+      "kind": "arg",
+      "fn": "sub_4B6940",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x426908"
+      ]
+    },
+    {
+      "id": "b10c34",
+      "kind": "arg",
+      "fn": "sub_4B69B0",
+      "reg": "ecx",
+      "type": "T_Sound*",
+      "witness": [
+        "0x4b6a36"
+      ]
+    },
+    {
+      "id": "c110",
+      "kind": "arg",
+      "fn": "sub_4034B0",
+      "reg": "ecx",
+      "type": "T_BaseObject*",
+      "witness": [
+        "0x403606"
+      ]
+    },
+    {
+      "id": "c125",
+      "kind": "arg",
+      "fn": "sub_4BB810",
+      "reg": "ecx",
+      "type": "T_408_trio*",
+      "witness": [
+        "0x40a900"
+      ]
+    },
+    {
+      "id": "c111",
+      "kind": "arg",
+      "fn": "sub_445D70",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x41da94"
+      ]
+    },
+    {
+      "id": "c112",
+      "kind": "arg",
+      "fn": "sub_45FF00",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x46947d"
+      ]
+    },
+    {
+      "id": "c113",
+      "kind": "arg",
+      "fn": "sub_410160",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x42d6e5"
+      ]
+    },
+    {
+      "id": "c114",
+      "kind": "arg",
+      "fn": "sub_462040",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x46608d"
+      ]
+    },
+    {
+      "id": "c115",
+      "kind": "arg",
+      "fn": "sub_4734F0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x4568a8"
+      ]
+    },
+    {
+      "id": "c116",
+      "kind": "arg",
+      "fn": "sub_40C210",
+      "reg": "ecx",
+      "type": "T_stdstring*",
+      "witness": [
+        "0x40db3d"
+      ]
+    },
+    {
+      "id": "b12c01",
+      "kind": "arg",
+      "fn": "sub_403AE0",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x403ff6"
+      ]
+    },
+    {
+      "id": "b12c02",
+      "kind": "arg",
+      "fn": "sub_403BD0",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x4204a0"
+      ]
+    },
+    {
+      "id": "b12c03",
+      "kind": "arg",
+      "fn": "sub_403C50",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x404061"
+      ]
+    },
+    {
+      "id": "b12c04",
+      "kind": "arg",
+      "fn": "sub_403D10",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x42099a"
+      ]
+    },
+    {
+      "id": "b12c05",
+      "kind": "arg",
+      "fn": "sub_403DD0",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x40971e"
+      ]
+    },
+    {
+      "id": "b12c06",
+      "kind": "arg",
+      "fn": "sub_403E70",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x40990d"
+      ]
+    },
+    {
+      "id": "b12c07",
+      "kind": "arg",
+      "fn": "sub_403F20",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x409729"
+      ]
+    },
+    {
+      "id": "b12c08",
+      "kind": "arg",
+      "fn": "sub_403F40",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x4156c3"
+      ]
+    },
+    {
+      "id": "b12c09",
+      "kind": "arg",
+      "fn": "sub_403FF0",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "indirectOnly": true
+    },
+    {
+      "id": "b12c10",
+      "kind": "arg",
+      "fn": "sub_404020",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x4207a3"
+      ]
+    },
+    {
+      "id": "b12c11",
+      "kind": "arg",
+      "fn": "sub_4040A0",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x420533"
+      ]
+    },
+    {
+      "id": "b12c12",
+      "kind": "arg",
+      "fn": "sub_404120",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x409740"
+      ]
+    },
+    {
+      "id": "b12c13",
+      "kind": "arg",
+      "fn": "sub_404E00",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x411b2b"
+      ]
+    },
+    {
+      "id": "b12c14",
+      "kind": "arg",
+      "fn": "sub_404E20",
+      "reg": "ecx",
+      "type": "T_CBunki*",
+      "witness": [
+        "0x414584"
+      ]
+    },
+    {
+      "id": "b12c15",
+      "kind": "arg",
+      "fn": "sub_476040",
+      "reg": "ecx",
+      "type": "T_Hook*",
+      "witness": [
+        "0x4156e1"
+      ]
+    },
+    {
+      "id": "b12c16",
+      "kind": "arg",
+      "fn": "sub_4760D0",
+      "reg": "ecx",
+      "type": "T_Hook*",
+      "witness": [
+        "0x476136"
+      ]
+    },
+    {
+      "id": "b12c17",
+      "kind": "arg",
+      "fn": "sub_476100",
+      "reg": "ecx",
+      "type": "T_Hook*",
+      "witness": [
+        "0x476166"
+      ]
+    },
+    {
+      "id": "b12c18",
+      "kind": "arg",
+      "fn": "sub_476160",
+      "reg": "ecx",
+      "type": "T_Hook*",
+      "indirectOnly": true
+    },
+    {
+      "id": "b12c19",
+      "kind": "arg",
+      "fn": "sub_48E870",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x412004"
+      ]
+    },
+    {
+      "id": "b12c20",
+      "kind": "arg",
+      "fn": "sub_48EB30",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x41202e"
+      ]
+    },
+    {
+      "id": "b12c21",
+      "kind": "arg",
+      "fn": "sub_48EB60",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x40adb4"
+      ]
+    },
+    {
+      "id": "b12c22",
+      "kind": "arg",
+      "fn": "sub_48F000",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x41b289"
+      ]
+    },
+    {
+      "id": "b12c23",
+      "kind": "arg",
+      "fn": "sub_48F560",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x48f656"
+      ]
+    },
+    {
+      "id": "b12c24",
+      "kind": "arg",
+      "fn": "sub_48F650",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "indirectOnly": true
+    },
+    {
+      "id": "b12c25",
+      "kind": "arg",
+      "fn": "sub_48FAF0",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x41571d"
+      ]
+    },
+    {
+      "id": "b12c26",
+      "kind": "arg",
+      "fn": "sub_48FCE0",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x40b370"
+      ]
+    },
+    {
+      "id": "b12c27",
+      "kind": "arg",
+      "fn": "sub_48FFB0",
+      "reg": "ecx",
+      "type": "T_ReadTextDB*",
+      "witness": [
+        "0x41ee14"
+      ]
+    },
+    {
+      "id": "c117",
+      "kind": "arg",
+      "fn": "sub_429020",
+      "reg": "ecx",
+      "type": "T_Hashtable_layout*",
+      "witness": [
+        "0x434d34"
+      ]
+    },
+    {
+      "id": "b14-01",
+      "kind": "arg",
+      "fn": "sub_4B06D0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b40c4",
+        "0x4b4054"
+      ]
+    },
+    {
+      "id": "b14-02",
+      "kind": "arg",
+      "fn": "sub_471DF0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x474589",
+        "0x474453"
+      ]
+    },
+    {
+      "id": "b14-03",
+      "kind": "arg",
+      "fn": "sub_406730",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x417c1b",
+        "0x41782e"
+      ]
+    },
+    {
+      "id": "b14-05",
+      "kind": "arg",
+      "fn": "sub_4A3980",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x44797e",
+        "0x447976"
+      ]
+    },
+    {
+      "id": "b14-06",
+      "kind": "arg",
+      "fn": "sub_45A940",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x412b63",
+        "0x412b5d"
+      ]
+    },
+    {
+      "id": "b14-08",
+      "kind": "arg",
+      "fn": "sub_498CC0",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x406ada",
+        "0x406ad8"
+      ]
+    },
+    {
+      "id": "b14-09",
+      "kind": "arg",
+      "fn": "sub_49BCC0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4aefd8",
+        "0x4aeeb4"
+      ]
+    },
+    {
+      "id": "b14-10",
+      "kind": "arg",
+      "fn": "sub_44A9C0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x45104e",
+        "0x450f41"
+      ]
+    },
+    {
+      "id": "b14-11",
+      "kind": "arg",
+      "fn": "sub_497880",
+      "reg": "ecx",
+      "type": "T_Renderer*",
+      "witness": [
+        "0x414104",
+        "0x4140fe"
+      ]
+    },
+    {
+      "id": "b14-12",
+      "kind": "arg",
+      "fn": "sub_4AAF90",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x41573b",
+        "0x415735"
+      ]
+    },
+    {
+      "id": "b14-16",
+      "kind": "arg",
+      "fn": "sub_45F6C0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x4180e4",
+        "0x4180de",
+        "0x41782e"
+      ]
+    },
+    {
+      "id": "b14-17",
+      "kind": "arg",
+      "fn": "sub_49DD70",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4ab192",
+        "0x4aafb8"
+      ]
+    },
+    {
+      "id": "b14-19",
+      "kind": "arg",
+      "fn": "sub_46E3E0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x46f1c6",
+        "0x46f1a3"
+      ]
+    },
+    {
+      "id": "b14-20",
+      "kind": "arg",
+      "fn": "sub_411590",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x412b20",
+        "0x4122c1"
+      ]
+    },
+    {
+      "id": "b14-21",
+      "kind": "arg",
+      "fn": "sub_406220",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x413e84",
+        "0x413dfb"
+      ]
+    },
+    {
+      "id": "b14-22",
+      "kind": "arg",
+      "fn": "sub_4A54A0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4523af",
+        "0x4523a4"
+      ]
+    },
+    {
+      "id": "b14-24",
+      "kind": "arg",
+      "fn": "sub_43BF20",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x408a14",
+        "0x408a0e",
+        "0x42e2e8",
+        "0x42e2e2"
+      ]
+    },
+    {
+      "id": "b14-25",
+      "kind": "arg",
+      "fn": "sub_409400",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x413428",
+        "0x4122c1"
+      ]
+    },
+    {
+      "id": "b14-27",
+      "kind": "arg",
+      "fn": "sub_4B4040",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x447bf0",
+        "0x447bea"
+      ]
+    },
+    {
+      "id": "b14-28",
+      "kind": "arg",
+      "fn": "sub_411900",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4133ac",
+        "0x4122c1"
+      ]
+    },
+    {
+      "id": "b14-29",
+      "kind": "arg",
+      "fn": "sub_456820",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x460fed",
+        "0x460feb",
+        "0x461e88",
+        "0x461e86"
+      ]
+    },
+    {
+      "id": "b14-30",
+      "kind": "arg",
+      "fn": "sub_49DFD0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x447be5",
+        "0x447bdf"
+      ]
+    },
+    {
+      "id": "b14-31",
+      "kind": "arg",
+      "fn": "sub_49E170",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x44829c",
+        "0x448296"
+      ]
+    },
+    {
+      "id": "b14-32",
+      "kind": "arg",
+      "fn": "sub_49EF60",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b4ddc",
+        "0x4b4b97"
+      ]
+    },
+    {
+      "id": "b14-34",
+      "kind": "arg",
+      "fn": "sub_4A6EE0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x406b37",
+        "0x406b31"
+      ]
+    },
+    {
+      "id": "b14-35",
+      "kind": "arg",
+      "fn": "sub_458AD0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x459e66",
+        "0x459c7c"
+      ]
+    },
+    {
+      "id": "b14-37",
+      "kind": "arg",
+      "fn": "sub_406050",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x413e64",
+        "0x413dfb"
+      ]
+    },
+    {
+      "id": "b14-38",
+      "kind": "arg",
+      "fn": "sub_454D30",
+      "reg": "ecx",
+      "type": "T_FileDB*",
+      "witness": [
+        "0x414e60",
+        "0x414e53"
+      ]
+    },
+    {
+      "id": "b14-39",
+      "kind": "arg",
+      "fn": "sub_45F1B0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x410387",
+        "0x410381"
+      ]
+    },
+    {
+      "id": "b14-40",
+      "kind": "arg",
+      "fn": "sub_465840",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x41806e",
+        "0x418058"
+      ]
+    },
+    {
+      "id": "b14x-t1",
+      "kind": "arg",
+      "fn": "sub_4A2D50",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x448291",
+        "0x448289"
+      ]
+    },
+    {
+      "id": "b14x-t2",
+      "kind": "arg",
+      "fn": "sub_4A7210",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x408480",
+        "0x40847a"
+      ]
+    },
+    {
+      "id": "b14x-t3",
+      "kind": "arg",
+      "fn": "sub_49FCD0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x4b43f4",
+        "0x4b4054"
+      ]
+    },
+    {
+      "id": "b14x-t4",
+      "kind": "arg",
+      "fn": "sub_4A7DA0",
+      "reg": "ecx",
+      "type": "T_Scene*",
+      "witness": [
+        "0x414692",
+        "0x414670"
+      ]
+    },
+    {
+      "id": "b14x-t5",
+      "kind": "arg",
+      "fn": "sub_4328F0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x4332bb",
+        "0x4332b5",
+        "0x4601fd",
+        "0x4601fb"
+      ]
+    },
+    {
+      "id": "b14x-t6",
+      "kind": "arg",
+      "fn": "sub_4404B0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x4142c4",
+        "0x4142be"
+      ]
+    },
+    {
+      "id": "b14x-t7",
+      "kind": "arg",
+      "fn": "sub_43C4D0",
+      "reg": "ecx",
+      "type": "T_Sys3Draw*",
+      "witness": [
+        "0x407f01",
+        "0x407ed1"
+      ]
+    },
+    {
+      "id": "b14x-t8",
+      "kind": "arg",
+      "fn": "sub_464FD0",
+      "reg": "ecx",
+      "type": "T_Font*",
+      "witness": [
+        "0x41570e",
+        "0x415708"
+      ]
+    },
+    {
+      "id": "b14x-g1",
+      "kind": "arg",
+      "fn": "sub_414AC0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4bab26",
+        "0x4bab20"
+      ]
+    },
+    {
+      "id": "b14x-g2",
+      "kind": "arg",
+      "fn": "sub_40FDE0",
+      "reg": "ecx",
+      "type": "T_Command*",
+      "witness": [
+        "0x4b9648",
+        "0x4b9637"
+      ]
+    },
+    {
+      "id": "b20-m1",
+      "kind": "arg",
+      "fn": "sub_40C910",
+      "reg": "ecx",
+      "type": "T_stdmap_n760*",
+      "witness": [
+        "0x4aaac3",
+        "0x4a9ef6"
+      ]
+    },
+    {
+      "id": "b20-m2",
+      "kind": "arg",
+      "fn": "sub_40B720",
+      "reg": "ecx",
+      "type": "T_stdmap_n760*",
+      "witness": [
+        "0x40c37c",
+        "0x4a95ee"
+      ]
+    },
+    {
+      "id": "b20-m3",
+      "kind": "arg",
+      "fn": "sub_40C310",
+      "reg": "ecx",
+      "type": "T_stdmap_n760*",
+      "witness": [
+        "0x4aaad2",
+        "0x4a9ef6"
+      ]
+    },
+    {
+      "id": "b20-m4",
+      "kind": "arg",
+      "fn": "sub_459EA0",
+      "reg": "ecx",
+      "type": "T_stdmap_n760*",
+      "witness": [
+        "0x4aaa7a",
+        "0x4a9ef6"
+      ]
+    },
+    {
+      "id": "b20-m5",
+      "kind": "arg",
+      "fn": "sub_40C9F0",
+      "reg": "ecx",
+      "type": "T_stdmap_n80*",
+      "witness": [
+        "0x4aabda",
+        "0x4ab497"
+      ]
+    },
+    {
+      "id": "b20-m6",
+      "kind": "arg",
+      "fn": "sub_40B930",
+      "reg": "ecx",
+      "type": "T_stdmap_n80*",
+      "witness": [
+        "0x40bd96",
+        "0x40c40e"
+      ]
+    },
+    {
+      "id": "b20-m7",
+      "kind": "arg",
+      "fn": "sub_40DC30",
+      "reg": "ecx",
+      "type": "T_stdmap_n80*",
+      "witness": [
+        "0x4ab4a0",
+        "0x4ab497"
+      ]
+    },
+    {
+      "id": "b20-m8",
+      "kind": "arg",
+      "fn": "sub_4AA490",
+      "reg": "ecx",
+      "type": "T_stdmap_n116*",
+      "witness": [
+        "0x4aab57",
+        "0x4ade0e"
+      ]
+    },
+    {
+      "id": "b20-m9",
+      "kind": "arg",
+      "fn": "sub_4A81E0",
+      "reg": "ecx",
+      "type": "T_stdmap_n116*",
+      "witness": [
+        "0x4a9796",
+        "0x4a982e"
+      ]
+    },
+    {
+      "id": "b20-m10",
+      "kind": "arg",
+      "fn": "sub_4AAE10",
+      "reg": "ecx",
+      "type": "T_stdmap_n116*",
+      "witness": [
+        "0x4ade14",
+        "0x4ade0e"
+      ]
+    },
+    {
+      "id": "b20-m11",
+      "kind": "arg",
+      "fn": "sub_4AA570",
+      "reg": "ecx",
+      "type": "T_stdmap_n592*",
+      "witness": [
+        "0x4aac73",
+        "0x4ad9d7"
+      ]
+    },
+    {
+      "id": "b20-m12",
+      "kind": "arg",
+      "fn": "sub_4A8410",
+      "reg": "ecx",
+      "type": "T_stdmap_n592*",
+      "witness": [
+        "0x4a998e",
+        "0x4a99e6"
+      ]
+    },
+    {
+      "id": "b20-m13",
+      "kind": "arg",
+      "fn": "sub_4AAEC0",
+      "reg": "ecx",
+      "type": "T_stdmap_n592*",
+      "witness": [
+        "0x4ad9dd",
+        "0x4ad9d7",
+        "0x4ac3dd"
+      ]
     }
   ],
-  "disputes": []
+  "disputes": [
+    {
+      "container": "T_Font",
+      "off": "0x8",
+      "kind": "size-unknown",
+      "why": "0x8 起的区间被两种互斥读法覆盖：① 字符缓冲（0x432963 _sprintf_s，BufferCount=0x400 ⇒ 0x8..0x408）；② 指针表（0x455fde/0x45605a/0x4568ff/0x4569a0 用 [esi+idx*4+3C4h] 读元素并解引用，基址 0x3c4 落在 ① 之内）。两者不能同真；语料里 0x3c4 只有读、零写。",
+      "evidence": [
+        "0x432963",
+        "0x4568ff",
+        "0x4569a0"
+      ]
+    }
+  ]
 }

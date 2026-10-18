@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { checkClaims } from '../lib/shape-claims.mjs';
+import { checkClaims, renderByType } from '../lib/shape-claims.mjs';
 import { deriveRegions } from '../lib/shape-regions.mjs';
 
 /** 合成一份最小 `.lst`：与真语料的文法一致（`段:EA 助记符 操作数`） */
@@ -851,4 +851,393 @@ test('★⑱ 适配器类型（adapter:true）：**同偏移不同类 = 基类�
   const empty = checkClaims(mkA({ size: null, complete: false, adapter: true, members: [] }),
     { lines: L, baseDir: '.', observed: OBS, roots: ROOTS });
   assert.ok(empty.findings.some((f) => f.where.startsWith('适配器') && f.why.includes('至少')), '空适配器 ⇒ 红');
+});
+
+test('★⑲ 内嵌子对象的第一双字是 **vtable**：`lea ecx,[esi+K]` → `mov eax,[ecx]` → `call [eax+槽]` 不算"成员是指针"', async () => {
+  // 实测出处：`sub_412290` 的 `0x412c77 mov eax,[ecx]` + `0x412c79 mov eax,[eax+0Ch]` + `0x412c7c call eax`，
+  // 其中 `ecx` 来自 `lea ecx,[esi+1EE8h]`（`T_Command+0x1ee8` 是内嵌 `Sys3Draw`）。
+  // ⇒ 解引用的是**子对象的 vtable**，不是"0x1ee8 这个成员是对象指针"。⛔ 若判红，就会逼人把内嵌子对象
+  //   改声明成 `kind:"ptr"`（那就把"就地构造的子对象"说成"指针"了 —— 假声明换假绿）。
+  const L = [
+    '.text:0040F200 sub_40F200 proc near',
+    '.text:0040F200 mov     esi, ecx',
+    '.text:0040F202 lea     ecx, [esi+1000h]',   // 内嵌子对象的地址
+    '.text:0040F206 mov     eax, [ecx]',          // 它的 vtable
+    '.text:0040F208 mov     eax, [eax+0Ch]',      // vtable 槽
+    '.text:0040F20B call    eax',
+    '.text:0040F20D retn',
+    '.text:0040F20D sub_40F200 endp',
+  ];
+  const R = new Map([['sub_40F200', 'ecx']]);
+  const mk = (mem) => {
+    const m = base([mem]);
+    m.types.TB = { size: null, complete: false, members: [{ off: '0x0', width: 4, kind: 'ptr', type: null }] };
+    m.types.T0.members = [mem];
+    m.carriers = [{ id: 'e01', kind: 'arg', fn: 'sub_40F200', reg: 'ecx', type: 'T0*' }];
+    return m;
+  };
+  const emb = checkClaims(mk({ off: '0x1000', type: 'TB', count: 1 }), { lines: L, baseDir: '.', observed: OBS, roots: R });
+  assert.deepEqual(emb.findings, [], `内嵌子对象的 vtable 虚调用不该红：${JSON.stringify(emb.findings)}`);
+  assert.ok(emb.perCarrier[0].pointeeOpaque >= 1, '必须记成**不透明**（不可判），⛔ 不许算成"解释"');
+  assert.ok(emb.notes.some((n) => n.includes('内嵌子对象') && n.includes('vtable')), '要留一条 note 说明为什么');
+
+  // 反向：同一个偏移声明成**标量**（没有 type）⇒ 仍是 G5' 红（"标量不许再被解引用"）
+  const scalar = checkClaims(mk({ off: '0x1000', width: 4 }), { lines: L, baseDir: '.', observed: OBS, roots: R });
+  assert.ok(scalar.findings.some((f) => f.where.startsWith("G5'")), `标量被解引用必须红：${JSON.stringify(scalar.findings)}`);
+});
+
+test('★⑳ 父构造器**内联**写内嵌子对象的字段：归属给子对象、站点仍要解释（⛔ 不许记残差、也不许 G1 重叠）', () => {
+  // 实测：`T_Command+0x152a0` 落在 `T_Font`(0x14d30, size 0x3967c) 跨度内；`0x68ea8`/`0x796e4` 落在
+  // `Stack<int>`/`Queue<int>` 里。归属只能给子对象（否则 G1 重叠），但**访问**是 obj0 相对的 ⇒ 判据要去
+  // 子对象的成员表里找（否则把"已解释"说成"没解释"）。
+  const L2 = [
+    '.text:0040F300 sub_40F300 proc near',
+    '.text:0040F300 lea     ecx, [ecx+1000h]',   // 内嵌子对象的基址（元素 0 的偏移 0 ⇒ 由成员本身解释）
+    '.text:0040F306 mov     eax, [ecx+4]',        // 子对象 +0x4 的字段
+    '.text:0040F309 mov     eax, [ecx+18h]',      // 子对象 +0x18（跨度内但没有声明）⇒ 残差（要说清"落在子对象里"）
+    '.text:0040F30C mov     eax, 1020h',          // 数组末尾的引用（G4 的 oracle，否则 count=1 会被判"无依据"）
+    '.text:0040F30F retn',
+    '.text:0040F30F sub_40F300 endp',
+  ];
+  const m = base([]);
+  m.types.TB = { size: 32, complete: false, members: [{ off: '0x4', width: 4 }] };
+  m.types.T0.members = [{ off: '0x1000', type: 'TB', count: 1 }];
+  m.carriers = [{ id: 'e02', kind: 'arg', fn: 'sub_40F300', reg: 'ecx', type: 'T0*' }];
+  const rep = checkClaims(m, { lines: L2, baseDir: '.', observed: OBS, roots: new Map([['sub_40F300', 'ecx']]) });
+  assert.deepEqual(rep.findings, [], `不该有红：${JSON.stringify(rep.findings)}`);
+  const p0 = rep.perCarrier[0];
+  assert.equal(p0.residue.length, 1, `只有 0x1018 该进残差：${JSON.stringify(p0.residue)}`);
+  assert.ok(p0.residue[0].why.includes('TB'), `残差要点名**子对象类型**（否则看不出该去补谁）：${p0.residue[0].why}`);
+  assert.ok(p0.explained.filter((e) => e.viaEmbedded).length >= 1, '子对象 +0x4 的字段要标成 viaEmbedded');
+});
+
+test('★㉑ `[ecx+eax]` 两个寄存器都是 load 出来的值 ⇒ **基址/索引分不清**（不可判，⛔ 不许逼人把游标写成 ptr）', () => {
+  // 实测：`sub_447810` 的 `0x448069 cmp byte ptr [ecx+eax], 0`，其中 `ecx=[esi+0x204c]`、`eax=[esi+0x2030]`。
+  // 判定器把 ecx 当基址 ⇒ 要求 `0x204c` 声明成 `kind:"ptr"`。但 0x204c 其实是**整数游标**（0x2030 才是图基址）。
+  // ⛔ 反事实实测：把 0x204c 写成 ptr，12 条红全消 —— 那正是既往记录过的"假绿"。
+  const L3 = [
+    '.text:0040F400 sub_40F400 proc near',
+    '.text:0040F400 mov     esi, ecx',
+    '.text:0040F402 mov     ecx, [esi+204Ch]',
+    '.text:0040F406 mov     eax, [esi+2030h]',
+    '.text:0040F40C cmp     byte ptr [ecx+eax], 0',
+    '.text:0040F40F retn',
+    '.text:0040F40F sub_40F400 endp',
+  ];
+  const m = base([]);
+  m.types.T0.members = [{ off: '0x2030', width: 4, kind: 'ptr', type: null }, { off: '0x204c', width: 4 }];
+  m.carriers = [{ id: 'e03', kind: 'arg', fn: 'sub_40F400', reg: 'ecx', type: 'T0*' }];
+  const rep = checkClaims(m, { lines: L3, baseDir: '.', observed: OBS, roots: new Map([['sub_40F400', 'ecx']]) });
+  assert.deepEqual(rep.findings, [], `不该有红：${JSON.stringify(rep.findings)}`);
+  assert.ok((rep.cons.pointeeAmbiguous ?? 0) >= 1, `必须进"基址/索引分不清"这一档：${JSON.stringify(rep.cons)}`);
+  assert.equal(rep.cons.pointee, rep.cons.pointeeOk + rep.cons.pointeeOpaque + rep.cons.pointeeBad + rep.cons.pointeeMulti + rep.cons.pointeeAmbiguous, '守恒② 必须仍然成立');
+});
+
+test('★㉒ G15：**索引访问落在非数组成员上**必须逐条可见（⛔ 不算通过），落在数组上则记为「形态已承住」', () => {
+  // 实测出处：op handler 分派读 `0x412843 mov edx,[esi+eax*4+0A509Ch]` 在 `shape access` 里是 `abs=0xa509c ⚠ index`
+  // ⇒ `offsetUnusable()='index-unresolved'` ⇒ 进「位移不可用」桶，**不比对成员、不产生残差/红**；
+  // 于是「1024 项分派表被写成 544 条离散内联槽」在所有义务下都沉默。G15 把它变成逐条可见。
+  const L4 = [
+    '.text:0040F500 sub_40F500 proc near',
+    '.text:0040F500 mov     esi, ecx',
+    '.text:0040F502 mov     eax, [esi+1000h]',        // 成员 0x1000（内联）的普通读
+    '.text:0040F508 call    sub_999999',              // 抹掉 eax ⇒ 下面的索引不可解析
+    '.text:0040F50D mov     eax, [esi+eax*4+1000h]',  // ⚠ index 落在**非数组**成员上 ⇒ G15 点名
+    '.text:0040F514 call    sub_999999',
+    '.text:0040F519 mov     eax, [esi+eax*4+2000h]',  // ⚠ index 落在**数组**成员上 ⇒ 「形态已承住」
+    '.text:0040F520 mov     eax, 2080h',              // 数组末尾的引用（G4 的 oracle）
+    '.text:0040F525 retn',
+    '.text:0040F525 sub_40F500 endp',
+  ];
+  const m = base([]);
+  m.types.T0.members = [{ off: '0x1000', width: 4 }, { off: '0x2000', type: 'TB', count: 16 }];
+  m.types.TB = { size: 4, complete: false, members: [{ off: '0x0', width: 4 }] };
+  m.carriers = [{ id: 'e04', kind: 'arg', fn: 'sub_40F500', reg: 'ecx', type: 'T0*' }];
+  const rep = checkClaims(m, { lines: L4, baseDir: '.', observed: OBS, roots: new Map([['sub_40F500', 'ecx']]) });
+  // ★ G15 已翻红（S2r 的计划落地）：标量成员上的索引访问现在是**红**
+  const g15 = rep.notes.filter((n) => n.startsWith('G15'));
+  assert.ok(rep.findings.some((f) => f.where.startsWith('G15') && f.where.includes('0x40f50d')), `标量成员上的索引访问必须判红：${JSON.stringify(rep.findings)}`);
+  assert.ok(g15.some((n) => n.includes('承住')), `数组那处要说明形态已承住：${JSON.stringify(g15)}`);
+});
+
+
+test('★㉓ 有 `count` 的数组：窗口要覆盖**整条数组**，元素内偏移要**取模**（否则第 k>0 个元素全进残差）', () => {
+  // 实测代价：`Command+0xa509c` 的 1024 项分派表数组化之后，构造器**逐槽**写 544 条
+  // （`mov [esi+0A50A0h], offset sub_418E60` …）从"解释"变"残差"（c92：解释 879→336、残差 11→554）。
+  // 两个 bug 叠在一起：① 窗口只有 `elemSize` 字节（`to = off + elemSize`，不管 count 多大）；
+  // ② 元素内偏移用 `absDisp - from`（第 k 个元素算成 `k*stride`，只有 k=0 能对上）。
+  const L5 = [
+    '.text:0040F600 sub_40F600 proc near',
+    '.text:0040F600 mov     esi, ecx',
+    '.text:0040F602 mov     eax, [esi+1000h]',   // 第 0 个元素
+    '.text:0040F608 mov     eax, [esi+1004h]',   // 第 1 个元素（旧算法在这里进残差）
+    '.text:0040F60E mov     eax, [esi+100Ch]',   // 第 3 个元素
+    '.text:0040F614 mov     eax, [esi+1010h]',   // 刚好越过数组末尾（4×4）⇒ 必须进残差
+    '.text:0040F61A retn',
+    '.text:0040F61A sub_40F600 endp',
+  ];
+  const m = base([]);
+  m.types.TB = { size: 4, complete: false, members: [{ off: '0x0', width: 4 }] };
+  m.types.T0.members = [{ off: '0x1000', type: 'TB', count: 4 }];
+  m.carriers = [{ id: 'e05', kind: 'arg', fn: 'sub_40F600', reg: 'ecx', type: 'T0*' }];
+  const rep = checkClaims(m, { lines: L5, baseDir: '.', observed: OBS, roots: new Map([['sub_40F600', 'ecx']]) });
+  const p0 = rep.perCarrier[0];
+  assert.equal(p0.explained.length, 3, `第 0/1/3 个元素都要被解释：${JSON.stringify(p0.explained.map((e) => e.abs))}`);
+  assert.equal(p0.residue.length, 1, `越过末尾的那处必须进残差：${JSON.stringify(p0.residue)}`);
+  assert.ok(String(p0.residue[0].abs).includes('0x1010') || p0.residue[0].abs === 0x1010, '残差应当是 0x1010');
+});
+
+test('★㉔ G4 第三档：数组**正好填满对象**（末尾 == size）是边界证据；把 count 改大一格就必须红', () => {
+  // 实测出处：`T_FileDB+0x3c48` 是 256 格指针表（索引 = 顶字节 `sar edi,18h`，`[esi+edi*4+3C48h]`），
+  // 0x3c48 + 0x400 = 0x4048 == `T_FileDB.size` ⇒ 末地址**在对象之外**，语料里零引用是必然。
+  // 旧 G4 只认"末地址被引用"⇒ 这条诚实的数组声明被判红，只能退化成单槽 + 一条 note（S2m）。
+  const L6 = [
+    '.text:0040F700 sub_40F700 proc near',
+    '.text:0040F700 mov     esi, ecx',
+    '.text:0040F702 mov     eax, [esi+1000h]',   // 第 0 格（数组内）
+    '.text:0040F708 mov     eax, [esi+10FCh]',   // 最后一格（0x1000+4*63）
+    '.text:0040F70E retn',
+    '.text:0040F70E sub_40F700 endp',
+  ];
+  const mk = (size, count) => {
+    const m = base([]);
+    m.types.TB = { size: 4, complete: false, members: [{ off: '0x0', width: 4 }] };
+    m.types.T0 = { size, complete: false, members: [{ off: '0x1000', type: 'TB', count }] };
+    m.carriers = [{ id: 'e06', kind: 'arg', fn: 'sub_40F700', reg: 'ecx', type: 'T0*' }];
+    return checkClaims(m, { lines: L6, baseDir: '.', observed: OBS, roots: new Map([['sub_40F700', 'ecx']]) });
+  };
+  // ① 末尾 0x1100 == size ⇒ 不红，且要**明说**是"填满对象"这一档（不是"末尾有引用"）
+  const flush = mk(0x1100, 64);
+  assert.deepEqual(flush.findings, [], `末尾==size 不该红：${JSON.stringify(flush.findings)}`);
+  const note = flush.notes.find((n) => n.startsWith('G4') && n.includes('容器 size'));
+  assert.ok(note, `必须留一条"末尾 == 容器 size"的 note：${JSON.stringify(flush.notes.filter((n) => n.startsWith('G4')))}`);
+  assert.ok(!flush.notes.some((n) => n.startsWith('G4') && n.includes('站得住')), '不许把它说成"末尾有引用"那一档');
+  // ② size 大 4 ⇒ 末尾不再贴边、也没有引用 ⇒ 必须红（这就是这条档位的可证伪性）
+  const gap = mk(0x1104, 64);
+  assert.ok(gap.findings.some((f) => f.where.startsWith('G4') && f.why.includes('零引用')), `末尾不贴 size 就要红：${JSON.stringify(gap.findings)}`);
+  // ③ count 改大 ⇒ 越过 size ⇒ G1 红（"贴边"不能靠把数组写大来伪造）
+  const over = mk(0x1100, 65);
+  assert.ok(over.findings.some((f) => f.where.startsWith('G1') && f.why.includes('超出 size')), `越过 size 必须被 G1 抓住：${JSON.stringify(over.findings)}`);
+});
+
+test('★㉕ G14 命名棘轮：`T_<Name>` 声称 RTTI 名就必须把名字绑到**写 vtable 的那条指令**上', () => {
+  // 实测出处：类型 id 从 `T0`/`T_a609c` 改成 `T_Command`/`T_FileDB` 之后，"名字"成了结论却没人守 ——
+  // 一立规矩就抓到 `T_RemoteDebug` 的 note 指向 0x497570（函数起始行），真正的写入是 0x4975A3。
+  const L7 = [
+    '.text:00401000 sub_401000 proc near',
+    '.text:00401000 mov     esi, ecx',
+    '.text:00401002 mov     dword ptr [esi], offset ??_7Foo@@6B@ ; const Foo::`vftable\'',
+    '.text:00401008 retn',
+    '.text:00401008 sub_401000 endp',
+  ];
+  const mk = (types) => {
+    const m = base([]);
+    m.types = { T0: { size: null, complete: false, members: [] }, ...types };
+    m.carriers = [{ id: 'e07', kind: 'arg', fn: 'sub_401000', reg: 'ecx', type: 'T0*' }];
+    return checkClaims(m, { lines: L7, baseDir: '.', observed: OBS, roots: new Map([['sub_401000', 'ecx']]) });
+  };
+  const ok = mk({ T_Foo: { size: 8, complete: false, members: [], note: 'RTTI ??_7Foo@@6B@（vtable 写入 0x401002）' } });
+  assert.ok(!ok.findings.some((f) => f.where.startsWith('G14')), `名字绑对了不该红：${JSON.stringify(ok.findings)}`);
+  assert.ok(ok.notes.some((n) => n.startsWith('G14') && n.includes('已绑到 vtable 写入点')), '要把"已绑"数出来');
+
+  // ① note 的 EA 指到函数起始（不是那次 store）⇒ 红
+  const stale = mk({ T_Foo: { size: 8, complete: false, members: [], note: 'RTTI ??_7Foo@@6B@（ctor 0x401000）' } });
+  assert.ok(stale.findings.some((f) => f.where.startsWith('G14') && f.why.includes('写 vtable 的那条指令')), `过期 EA 必须红：${JSON.stringify(stale.findings)}`);
+
+  // ② 完全没有 note ⇒ 红（名字是空话）
+  const bare = mk({ T_Foo: { size: 8, complete: false, members: [] } });
+  assert.ok(bare.findings.some((f) => f.where.startsWith('G14') && f.why.includes('没有把名字绑到')), `无 note 必须红：${JSON.stringify(bare.findings)}`);
+
+  // ③ note 绑了别的类名 ⇒ 红（名字对不上）
+  const wrong = mk({ T_Foo: { size: 8, complete: false, members: [], note: 'RTTI ??_7Bar@@6B@（vtable 写入 0x401002）' } });
+  assert.ok(wrong.findings.some((f) => f.where.startsWith('G14') && f.why.includes('对不上')), `绑错名字必须红：${JSON.stringify(wrong.findings)}`);
+
+  // ④ 结构名（语料里没有 `??_7Baz_10@@`）不要求 RTTI 证据
+  const structural = mk({ T_Baz_10: { size: 8, complete: false, members: [] } });
+  assert.ok(!structural.findings.some((f) => f.where.startsWith('G14')), `结构名不该被要求 RTTI 证据：${JSON.stringify(structural.findings)}`);
+});
+
+test('★㉖ `--by-type`：残差按**残差行自带的宿主类型**聚合（⛔ 不许靠"当前处理到哪个载体"、⛔ 不许混进未解析基址）', () => {
+  // 踩过：聚合脚本用 `^c\d+` 认 claims 的块头，而 carriers.json 的 id 还有 `b10cNN`/`b12cNN`（按批发的）⇒
+  // 那些块被漏掉、残差记到**上一个**载体名下（实测把 T_Input 8/8 与 T_Sound 4/5 算成 T_Font，
+  // T_CBunki 7/14 与 T_ReadTextDB 1/4 整块没被派出去）。判据：类型必须从残差行自己取。
+  const L8 = [
+    '.text:00401000 sub_401000 proc near',
+    '.text:00401000 mov     esi, ecx',
+    '.text:00401002 mov     eax, [esi+5D818h]',   // ← T0 的成员（已声明）
+    '.text:00401008 mov     edi, [esi+5D880h]',   // ← T0 残差（未声明）
+    '.text:0040100E mov     eax, [ebx+4]',        // ← ebx 未定义 ⇒ 未解析基址（⛔ 不许算进 --by-type）
+    '.text:00401014 retn',
+    '.text:00401014 sub_401000 endp',
+  ];
+  const m = base([]);
+  m.types.T0.members = [{ off: '0x5d818', width: 4 }];
+  m.types.TOther = { size: 8, complete: false, members: [] };
+  m.carriers = [{ id: 'b10c01', kind: 'arg', fn: 'sub_401000', reg: 'ecx', type: 'T0*' }];
+  const rep = checkClaims(m, { lines: L8, baseDir: '.', observed: OBS, roots: new Map([['sub_401000', 'ecx']]) });
+  const text = renderByType(rep).join('\n');
+  assert.ok(/T0\s+1 个偏移 \/ *1 次访问/.test(text), `T0 应当有 1 个偏移/1 次访问（0x5d880）：\n${text}`);
+  assert.ok(!text.split('\n').some((l) => /^\s{2}T/.test(l) && l.includes('未解析')), '未解析基址是另一个桶，不许出现在聚合行里');
+  assert.ok(text.includes('0x5d880'), `热点要报出具体偏移：\n${text}`);
+  // 载体 id 是 `b10c01`（不是 `cNN`）也要能归到 T0 —— 这正是踩过的那个 bug
+  assert.ok(!/TOther/.test(text), `不许凭空造出别的类型：\n${text}`);
+
+  // ★ 第二跳：`[this+0x5d818] → 指针 → [eax+0x10]`，0x10 不在 TB 的成员表里
+  //   ⇒ 残差属于 **TB**（被访问的那个类型），⛔ 不许算到发起访问的 T0 头上（否则会把 TB+0x10 写进 T0）。
+  const L9 = [
+    '.text:00401100 sub_401100 proc near',
+    '.text:00401100 mov     esi, ecx',
+    '.text:00401102 mov     eax, [esi+5D818h]',
+    '.text:00401108 mov     edi, [eax+10h]',
+    '.text:0040110E retn',
+    '.text:0040110E sub_401100 endp',
+  ];
+  const m2 = base([]);
+  m2.types.T0.members = [{ off: '0x5d818', width: 4, kind: 'ptr', type: 'TB' }];
+  m2.types.TB = { size: 8, complete: false, members: [{ off: '0x0', width: 4 }] };
+  m2.carriers = [{ id: 'b12c01', kind: 'arg', fn: 'sub_401100', reg: 'ecx', type: 'T0*' }];
+  const rep2 = checkClaims(m2, { lines: L9, baseDir: '.', observed: OBS, roots: new Map([['sub_401100', 'ecx']]) });
+  const text2 = renderByType(rep2).join('\n');
+  assert.ok(/TB\s+1 个偏移 \/ *1 次访问/.test(text2), `第二跳的残差要记到 **TB**：\n${text2}`);
+  assert.ok(!/T0\s+1 个偏移/.test(text2), `不许把 TB+0x10 记到 T0 头上：\n${text2}`);
+});
+
+test('★㉗ G3 比的是**最内层那个数组**的元素大小：`count:1` 内嵌子对象里的索引访问不是"步长 vs 子对象 size"', () => {
+  // 实测出处：`0x4116ba mov eax,[esi+eax*4+5D04h]` —— `0x5d04` 落在 `T_Command+0x55d8` 那块
+  // `T_CBunki(count:1)` 的跨度里，元素内偏移 `0x72c`，而 `T_CBunki+0x72c` 本身是 `T_el32×100`。
+  // 旧 G3 拿"步长 4"去比 `size(T_CBunki)=29928` ⇒ 假红，而且那条 `continue` 把站点从守恒① 里弄丢了。
+  const L10 = [
+    '.text:00401300 sub_401300 proc near',
+    '.text:00401300 mov     esi, ecx',
+    '.text:00401302 mov     edi, [esi+300h]',          // 让索引有身份（否则站点进"索引未解析"桶，判不到 G3）
+    '.text:00401308 mov     eax, [esi+edi*4+1010h]',   // ← 落在内嵌子对象跨度里（+0x10），内层是 T_el32 数组
+    '.text:0040130E mov     eax, [esi+edi*4+2000h]',   // ← 真正的数组：元素 TC(0x18)，步长 4 ⇒ G3 红
+    '.text:00401314 mov     eax, 10A0h',               // G4 的 oracle：TB 数组末尾（0x1000+0xa0）
+    '.text:0040131A mov     eax, 2060h',               // G4 的 oracle：TC 数组末尾（0x2000+4*0x18）
+    '.text:00401320 mov     eax, 90h',                 // G4 的 oracle：TB+0x10 那条 T_el32 数组的末尾
+    '.text:00401326 retn',
+    '.text:00401326 sub_401300 endp',
+  ];
+  const m = base([]);
+  m.types.TC = { size: 0x18, complete: false, members: [{ off: '0x0', width: 1 }] };
+  m.types.TB = { size: 0xa0, complete: false, members: [{ off: '0x0', width: 1 }, { off: '0x10', type: 'T_el32', count: 32 }] };
+  m.types.T_el32 = { size: 4, complete: false, members: [{ off: '0x0', width: 4 }] };
+  m.types.T0.members = [
+    { off: '0x300', width: 4 },
+    { off: '0x1000', type: 'TB', count: 1 },                              // 内嵌子对象（count:1 ⇒ **不是数组**）
+    { off: '0x2000', type: 'TC', count: 4 },                              // 真数组：步长必须 == 0x18
+  ];
+  m.carriers = [{ id: 'e08', kind: 'arg', fn: 'sub_401300', reg: 'ecx', type: 'T0*' }];
+  const rep = checkClaims(m, { lines: L10, baseDir: '.', observed: OBS, roots: new Map([['sub_401300', 'ecx']]) });
+  const g3 = rep.findings.filter((f) => f.where.startsWith('G3'));
+  assert.equal(g3.length, 1, `只该有"真数组步长不对"那一条 G3 红：${JSON.stringify(rep.findings)}`);
+  assert.ok(g3[0].where.includes('0x40130e'), `红的是 0x40130e（真数组那处）：${g3[0].where}`);
+  assert.ok(rep.perCarrier[0].explained.some((e) => e.ea === 0x401302), `内嵌子对象里的索引访问要被解释：${JSON.stringify(rep.perCarrier[0].explained.map((e) => e.ea))}`);
+  // ★ 守恒① 必须仍然成立（旧写法里 G3 的 `continue` 会把站点从等式里丢掉）
+  assert.equal(rep.cons.obj0Acc, rep.cons.obj0Explained + rep.cons.obj0Residue, '守恒① 必须在有条目被判红时仍成立');
+});
+
+test('★㉘ `lea r,[r+0]` 不是访问（MSVC 的对齐填充）；`lea r,[r+K]` 仍是取址', () => {
+  // 实测出处：`0x46547A lea ebx,[ebx+0]`（6 字节对齐填充）被记成 `obj0+0x0` 的访问
+  // ⇒ `T_Font+0x0` 4 处假残差，逼人给它写一条 `{off:"0x0",width:4}` 的假成员。
+  const L11 = [
+    '.text:00401400 sub_401400 proc near',
+    '.text:00401400 mov     esi, ecx',
+    '.text:00401401 mov     ebx, esi',         // ebx 也就是 this ⇒ `lea ebx,[ebx+0]` 才会被折成 obj0+0x0
+    '.text:00401402 lea     ebx, [ebx+0]',     // 填充：不算访问
+    '.text:00401405 lea     ecx, [esi+10h]',   // 取址：要算（内嵌子对象基址 = +0x10）
+    '.text:00401408 mov     eax, [esi+10h]',
+    '.text:0040140E retn',
+    '.text:0040140E sub_401400 endp',
+  ];
+  const m = base([]);
+  m.types.T0.members = [{ off: '0x10', width: 4 }];
+  m.carriers = [{ id: 'e09', kind: 'arg', fn: 'sub_401400', reg: 'ecx', type: 'T0*' }];
+  const rep = checkClaims(m, { lines: L11, baseDir: '.', observed: OBS, roots: new Map([['sub_401400', 'ecx']]) });
+  const p0 = rep.perCarrier[0];
+  assert.deepEqual(rep.findings, [], `不该有红：${JSON.stringify(rep.findings)}`);
+  assert.ok(!p0.residue.some((r) => r.abs === 0), `填充不该产生 0x0 的残差：${JSON.stringify(p0.residue)}`);
+  assert.ok(p0.explained.some((e) => e.abs === 0x10), `+0x10 的取址与读都要被解释：${JSON.stringify(p0.explained.map((e) => e.abs))}`);
+  // 取址那条要保留（access='a'）—— 否则内嵌子对象基址信息全丢
+  assert.ok(p0.explained.filter((e) => e.abs === 0x10).length >= 2, `lea 与 mov 各算一处：${p0.explained.length}`);
+});
+
+test('★㉙ G16 载体证据棘轮：witness 必须有一条真的落在 `call <fn>` 上；`indirectOnly` 要能被反证', () => {
+  // 实测背景：174 条 `arg` 载体原先**一条 witness 都没有**（`witness` 只有 global 载体在用）。
+  // 补齐后又抓到 4 条坏 witness（其中两条是 `lea ebx,[ebx+0]` 这种对齐填充 —— 拿它当证据等于没证据）。
+  const L12 = [
+    '.text:00401500 sub_401500 proc near',
+    '.text:00401500 mov     esi, ecx',
+    '.text:00401502 mov     eax, [esi+8]',
+    '.text:00401508 retn',
+    '.text:00401508 sub_401500 endp',
+    '.text:00401600 sub_401600 proc near',
+    '.text:00401600 mov     esi, ecx',
+    '.text:00401602 lea     ecx, [esi+10h]',   // 来路：obj0+0x10 的内嵌子对象
+    '.text:00401605 call    sub_401500',       // ← 调用点（witness 的主证据）
+    '.text:0040160A lea     ebx, [ebx+0]',     // ← 对齐填充，⛔ 不许当 witness
+    '.text:0040160D retn',
+    '.text:0040160D sub_401600 endp',
+  ];
+  const mk = (carrier) => {
+    const m = base([]);
+    m.types.T0.members = [{ off: '0x8', width: 4 }, { off: '0x10', width: 4 }];
+    m.carriers = [carrier];
+    return checkClaims(m, { lines: L12, baseDir: '.', observed: OBS, roots: new Map([['sub_401500', 'ecx'], ['sub_401600', 'ecx']]) });
+  };
+  const c = (extra) => ({ id: 'e10', kind: 'arg', fn: 'sub_401500', reg: 'ecx', type: 'T0*', ...extra });
+
+  // ① 调用点 + 来路 ⇒ 绿
+  const ok = mk(c({ witness: ['0x401605', '0x401602'] }));
+  assert.ok(!ok.findings.some((f) => f.where.startsWith('G16')), `合法的两条 witness 不该红：${JSON.stringify(ok.findings)}`);
+  // ② 只有来路、没有调用点 ⇒ 红（证明不了"真的被这样调用过"）
+  const onlySrc = mk(c({ witness: ['0x401602'] }));
+  assert.ok(onlySrc.findings.some((f) => f.where.startsWith('G16') && f.why.includes('调用点')), `只有来路必须红：${JSON.stringify(onlySrc.findings)}`);
+  // ③ 拿填充当 witness ⇒ 红
+  const filler = mk(c({ witness: ['0x401605', '0x40160a'] }));
+  assert.ok(filler.findings.some((f) => f.where.startsWith('G16') && f.why.includes('也不含 ecx 来路')), `填充不能当证据：${JSON.stringify(filler.findings)}`);
+  // ④ 没有 witness 也没声明 indirectOnly ⇒ note（backlog），⛔ 不是红
+  const gap = mk(c({}));
+  assert.ok(!gap.findings.some((f) => f.where.startsWith('G16')), `缺 witness 先记 note：${JSON.stringify(gap.findings)}`);
+  assert.ok(gap.notes.some((n) => n.startsWith('G16') && n.includes('还没有 witness')), '要把它记进 backlog');
+  // ⑤ indirectOnly 的可反证性：真的有调用点时必须红
+  const lie = mk(c({ indirectOnly: true }));
+  assert.ok(lie.findings.some((f) => f.where.startsWith('G16') && f.why.includes('indirectOnly')), `宣称没有直接调用点但其实有 ⇒ 必须红：${JSON.stringify(lie.findings)}`);
+  // ⑥ 真的没有直接调用点 ⇒ indirectOnly 通过
+  const real = mk({ id: 'e11', kind: 'arg', fn: 'sub_401600', reg: 'ecx', type: 'T0*', indirectOnly: true });
+  assert.ok(!real.findings.some((f) => f.where.startsWith('G16')), `确无直接调用点时 indirectOnly 该通过：${JSON.stringify(real.findings)}`);
+});
+
+test('★㉚ G15 翻红：索引访问落在**标量**成员上 ⇒ 红；落在 `count:1` 容器 / 真数组上 ⇒ note（⛔ 不算通过）', () => {
+  const L13 = [
+    '.text:00401700 sub_401700 proc near',
+    '.text:00401700 mov     esi, ecx',
+    '.text:00401702 mov     eax, [esi+300h]',
+    '.text:00401704 call    sub_999999',   // 抹掉 eax ⇒ 索引不可解析（G15 只看这一类站点）
+    '.text:00401708 mov     eax, [esi+eax*4+1000h]',   // 标量成员 + 索引 ⇒ 红
+    '.text:0040170E mov     eax, [esi+eax*4+1800h]',   // count:1 容器 ⇒ note（判不了）
+    '.text:00401714 mov     eax, [esi+eax*4+2000h]',   // 真数组（元素 4 字节 == 步长 4）⇒ note「数组承住」
+    '.text:0040171C mov     eax, [esi+eax*8+2400h]',   // 元素 4 字节 vs 步长 8 ⇒ 步长不符 ⇒ 红
+    '.text:00401722 mov     eax, 2060h',
+    '.text:00401728 mov     eax, 2440h',
+    '.text:00401720 retn',
+    '.text:00401720 sub_401700 endp',
+  ];
+  const m = base([]);
+  m.types.T_el32 = { size: 4, complete: false, members: [{ off: '0x0', width: 4 }] };
+  m.types.TB = { size: 8, complete: false, members: [{ off: '0x0', width: 4 }] };
+  m.types.T0.members = [
+    { off: '0x300', width: 4 },
+    { off: '0x1000', width: 4 },
+    { off: '0x1800', type: 'TB', count: 1 },
+    { off: '0x2000', type: 'T_el32', count: 0x18 },
+    { off: '0x2400', type: 'T_el32', count: 0x10 },
+  ];
+  m.carriers = [{ id: 'e12', kind: 'arg', fn: 'sub_401700', reg: 'ecx', type: 'T0*' }];
+  const rep = checkClaims(m, { lines: L13, baseDir: '.', observed: OBS, roots: new Map([['sub_401700', 'ecx']]) });
+  assert.ok(rep.findings.some((f) => f.where.startsWith('G15') && f.where.includes('0x401708')), `标量 + 索引必须红：${JSON.stringify(rep.findings)}`);
+  assert.ok(!rep.findings.some((f) => f.where.includes('0x40170e')), `count:1 容器不该判红：${JSON.stringify(rep.findings)}`);
+  const g15 = rep.notes.filter((n) => n.startsWith('G15'));
+  assert.ok(g15.some((n) => n.includes('count:1')), `count:1 要单列 note：${JSON.stringify(g15)}`);
+  assert.ok(g15.some((n) => n.includes('**数组**')), `真数组要记「形态已被数组承住」：${JSON.stringify(g15)}`);
 });

@@ -54,8 +54,8 @@ test('★ 改坏一处 ⇒ 红，而且**红的理由要对**', { skip }, () => 
   const CASES = [
     { name: 'T1.size 120 → 124（步长义务）', want: 'G3', make: (m) => { m.types.T1.size = 124; } },
     { name: 'T1 删掉成员 0x60（数组元素内偏移无处安放）', want: 'G2', make: (m) => { m.types.T1.members = m.types.T1.members.filter((x) => x.off !== '0x60'); } },
-    { name: 'T0 数组成员 count 40 → 20（末尾零引用）', want: 'G4', make: (m) => { m.types.T0.members.find((x) => x.count).count = 20; } },
-    { name: 'T0 数组成员挪到 0x5D880（与标量重叠）', want: 'G1', make: (m) => { m.types.T0.members.find((x) => x.count).off = '0x5d880'; } },
+    { name: 'T0 数组成员 count 40 → 20（末尾零引用）', want: 'G4', make: (m) => { m.types.T_Command.members.find((x) => x.count).count = 20; } },
+    { name: 'T0 数组成员挪到 0x5D880（与标量重叠）', want: 'G1', make: (m) => { m.types.T_Command.members.find((x) => x.count).off = '0x5d880'; } },
     { name: 'T1.size 缩到 0x40（成员越界）', want: 'G1', make: (m) => { m.types.T1.size = 64; } },
     { name: '某个载体类型改成 T1*（几何不符）', want: 'G2', make: (m) => { carrierOf(m, 'c01').type = 'T1*'; } },
     { name: '声明里塞业务词 argc（词汇守卫）', want: '守卫·词汇', make: (m) => { carrierOf(m, 'c01').argc = 3; } },
@@ -74,8 +74,8 @@ test('★ 改坏一处 ⇒ 红，而且**红的理由要对**', { skip }, () => 
 test('★ 二级对象下钻：三档 + 不透明单列（⛔ 不许静默通过）', { skip }, () => {
   const mk = (t0mem, tb) => {
     const m = clone();
-    m.carriers = [{ id: 'p01', kind: 'arg', fn: 'sub_42AEA0', reg: 'ecx', type: 'T0*' }];
-    m.types.T0.members = [...m.types.T0.members, t0mem];
+    m.carriers = [{ id: 'p01', kind: 'arg', fn: 'sub_42AEA0', reg: 'ecx', type: 'T_Command*' }];
+    m.types.T_Command.members = [...m.types.T_Command.members, t0mem];
     if (tb) m.types.TB = tb;
     return m;
   };
@@ -101,7 +101,7 @@ test('★ 二级对象下钻：三档 + 不透明单列（⛔ 不许静默通过
 
 test('★ 层级 ≥3 的访问必须被**单列报出**（上限冻结在层级 2，但不许静默丢）', { skip }, () => {
   const m = clone();
-  m.carriers = [{ id: 'h01', kind: 'arg', fn: 'sub_409F90', reg: 'ecx', type: 'T0*' }];
+  m.carriers = [{ id: 'h01', kind: 'arg', fn: 'sub_409F90', reg: 'ecx', type: 'T_Command*' }];
   const rep = run(m);
   assert.ok(rep.cons.deep >= 1, `sub_409F90 里有层级 ≥3 的访问，必须计入"超出解析深度"（实测 ${rep.cons.deep}）`);
   assert.equal(rep.perCarrier[0].deep, rep.cons.deep);
@@ -112,7 +112,7 @@ test('★ 层级 ≥3 的访问必须被**单列报出**（上限冻结在层级
 test('★ 第二批函数（6 个）：残差如实报出 · 带修饰符的调用约定不被漏（回归钉）', { skip }, () => {
   const m = clone();
   m.carriers = ['sub_40FB60', 'sub_411900', 'sub_412290', 'sub_418E80', 'sub_418EB0', 'sub_418ED0']
-    .map((fn, i) => ({ id: `b0${i + 1}`, kind: 'arg', fn, reg: 'ecx', type: 'T0*' }));
+    .map((fn, i) => ({ id: `b0${i + 1}`, kind: 'arg', fn, reg: 'ecx', type: 'T_Command*' }));
   const rep = run(m);
   assert.deepEqual(rep.findings, [], '这一批只该有残差，不该有红');
   assert.equal(rep.perCarrier.length, 6);

@@ -4,177 +4,106 @@
     "isGlobal": true
   },
   "types": {
-    "T0": {
+    "T_Command": {
       "size": 699336,
       "complete": false,
       "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
         {
           "off": "0x8",
           "width": 4
         },
         {
           "off": "0x408",
-          "type": "T_408",
+          "type": "T_Input",
           "count": 1
-        },
-        {
-          "off": "0x161c",
-          "width": 4
-        },
-        {
-          "off": "0x1e70",
-          "width": 4
         },
         {
           "off": "0x1ee8",
-          "type": "T_1ee8",
+          "type": "T_Sys3Draw",
           "count": 1
         },
         {
-          "off": "0x3064",
-          "width": 4
-        },
-        {
-          "off": "0x3068",
-          "width": 4
-        },
-        {
-          "off": "0x306c",
-          "width": 4
-        },
-        {
-          "off": "0x3070",
-          "width": 4
-        },
-        {
-          "off": "0x3088",
-          "width": 4
-        },
-        {
-          "off": "0x308c",
-          "width": 4
-        },
-        {
-          "off": "0x3090",
-          "width": 4
-        },
-        {
-          "off": "0x3094",
-          "width": 4
-        },
-        {
-          "off": "0x30ac",
-          "width": 4
-        },
-        {
-          "off": "0x30b0",
-          "width": 4
-        },
-        {
-          "off": "0x30b4",
-          "width": 4
-        },
-        {
-          "off": "0x30b8",
-          "width": 4
-        },
-        {
-          "off": "0x3e78",
-          "width": 4
-        },
-        {
-          "off": "0x3e7c",
-          "width": 4
-        },
-        {
-          "off": "0x3e80",
-          "width": 4
-        },
-        {
-          "off": "0x3e84",
-          "width": 4
-        },
-        {
-          "off": "0x3ee8",
-          "width": 4
-        },
-        {
-          "off": "0x3eec",
-          "width": 4
-        },
-        {
-          "off": "0x3ef0",
-          "width": 4
-        },
-        {
-          "off": "0x3ef4",
-          "width": 4
+          "off": "0x48e8",
+          "type": "T_Sound",
+          "count": 1
         },
         {
           "off": "0x511c",
-          "width": 4
+          "type": "T_Data",
+          "count": 1
         },
         {
           "off": "0x55d8",
-          "type": "T_55d8",
+          "type": "T_CBunki",
           "count": 1
         },
         {
           "off": "0xcac0",
-          "type": "T_55d8",
+          "type": "T_CBunki",
           "count": 1
         },
         {
-          "off": "0x14d0c",
-          "width": 4
+          "off": "0x13fa8",
+          "type": "T_Hook",
+          "count": 1
         },
         {
-          "off": "0x14d10",
-          "width": 4
+          "off": "0x143bc",
+          "type": "T_SE",
+          "count": 1
         },
         {
-          "off": "0x14d14",
-          "width": 4
-        },
-        {
-          "off": "0x14d18",
-          "width": 4
-        },
-        {
-          "off": "0x14d1c",
-          "width": 4
-        },
-        {
-          "off": "0x14d20",
-          "width": 4
+          "off": "0x148a0",
+          "type": "T_Voice",
+          "count": 1
         },
         {
           "off": "0x14d30",
-          "type": "T_14d30",
+          "type": "T_Font",
           "count": 1
         },
         {
-          "off": "0x152a0",
-          "width": 4
+          "off": "0x4e3ac",
+          "type": "T_ReadTextDB",
+          "count": 1
         },
         {
-          "off": "0x460ec",
-          "width": 4
+          "off": "0x4e824",
+          "type": "T_Renderer",
+          "count": 1
         },
         {
           "off": "0x4ed10",
-          "type": "T_4ed10",
+          "type": "T_Scene",
           "count": 1
-        },
-        {
-          "off": "0x5a37c",
-          "width": 4
         },
         {
           "off": "0x5c73c",
           "width": 4,
           "kind": "ptr",
           "type": "T_5c73c_0"
+        },
+        {
+          "off": "0x5c740",
+          "type": "T_fnptr4",
+          "count": 1000
+        },
+        {
+          "off": "0x5d6e0",
+          "type": "T_el8",
+          "count": 4,
+          "note": "紧随 0x5c740 那张 1000 项函数指针槽表之后 ⇒ 独立的新成员（4 个单字节槽）；不是那张表的元素"
+        },
+        {
+          "off": "0x5d6e8",
+          "width": 4,
+          "note": "唯一见证是取址"
         },
         {
           "off": "0x5d7e8",
@@ -231,9 +160,35 @@
           "type": "T2"
         },
         {
+          "off": "0x5d828",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "0x410a87/0x410ee0 拿它的值当填充目标，0x418b59 以它为基址；它与 0x5d800/0x5d808/0x5d810/0x5d818/0x5d820 是同一组（组内跨度 8），前面 0x5d7e8..0x5d7fc 是与之并行的条数。★ 这格原先被 T1 的 views（索引差 -1）当成 T1+0xc，而两者的语义相反（这里是缓冲基址，0xc 是条数）"
+        },
+        {
+          "off": "0x5d830",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "0x40ff40 只取它的地址，0x40ff50 拿取回的值为释放目标再写 0；同一段里 [esi-0x30]/[esi-0x28]/[esi-0x20]/[esi-0x18] 与 [esi]/[esi+8]/[esi+0x10]/[esi+0x18] 成对清零 ⇒ 与 0x5d800 同一张跨度 8 的表。★ 不声明它，0x40ff40 会由 T1 的 views 当成 T1+0x14（同上：视图盖住了不该盖的字节）"
+        },
+        {
           "off": "0x5d860",
           "type": "T_5d860",
           "count": 1
+        },
+        {
+          "off": "0x5d870",
+          "width": 4
+        },
+        {
+          "off": "0x5d874",
+          "width": 4
+        },
+        {
+          "off": "0x5d878",
+          "width": 4
         },
         {
           "off": "0x5d880",
@@ -259,20 +214,24 @@
           "off": "0x5d894",
           "type": "T1",
           "count": 40,
-          "views": [
-            {
-              "elementDelta": -1,
-              "label": "同一记录数组、索引差 −1（同一个字节族的另一种原点写法）"
-            }
-          ]
+          "note": "views（索引差 -1）已撤：G9 一直判它零观察，而它把 0x5d81c..0x5d894 认成 T1 的元素 —— 实测 0x5d828/0x5d830 是**缓冲基址**（值被当填充目标/释放目标），与视图给出的 T1+0xc/+0x14（条数）语义相反。要表达那一段请用 0x5d7e8..0x5d830 这一串（12 格、组内跨度 8），别用视图"
         },
         {
           "off": "0x5eb54",
           "width": 4
         },
         {
+          "off": "0x5eb58",
+          "width": 4
+        },
+        {
           "off": "0x5eb5c",
           "width": 4
+        },
+        {
+          "off": "0x5eb60",
+          "width": 4,
+          "note": "位掩码标量（同一槽既被写常量也被位测试）"
         },
         {
           "off": "0x5eb64",
@@ -303,6 +262,14 @@
           "width": 4
         },
         {
+          "off": "0x5ec80",
+          "width": 4
+        },
+        {
+          "off": "0x5ec84",
+          "width": 4
+        },
+        {
           "off": "0x5ec88",
           "width": 4
         },
@@ -315,8 +282,98 @@
           "width": 4
         },
         {
+          "off": "0x5ec94",
+          "width": 4
+        },
+        {
           "off": "0x5ec98",
           "width": 4
+        },
+        {
+          "off": "0x5ec9c",
+          "width": 4
+        },
+        {
+          "off": "0x5eca0",
+          "width": 4
+        },
+        {
+          "off": "0x5eca4",
+          "width": 4
+        },
+        {
+          "off": "0x5eca8",
+          "width": 4
+        },
+        {
+          "off": "0x5ecac",
+          "width": 4
+        },
+        {
+          "off": "0x5ecb0",
+          "width": 4
+        },
+        {
+          "off": "0x5ecb4",
+          "width": 4
+        },
+        {
+          "off": "0x5ecb8",
+          "width": 4
+        },
+        {
+          "off": "0x5ecbc",
+          "width": 4
+        },
+        {
+          "off": "0x5ecc0",
+          "width": 4
+        },
+        {
+          "off": "0x5ecc4",
+          "width": 4
+        },
+        {
+          "off": "0x5ecc8",
+          "width": 4
+        },
+        {
+          "off": "0x5eccc",
+          "width": 4
+        },
+        {
+          "off": "0x5ecd0",
+          "width": 4
+        },
+        {
+          "off": "0x5ecd4",
+          "width": 4
+        },
+        {
+          "off": "0x5ecd8",
+          "width": 4
+        },
+        {
+          "off": "0x5ecdc",
+          "width": 4
+        },
+        {
+          "off": "0x5ece0",
+          "width": 4
+        },
+        {
+          "off": "0x5ece4",
+          "width": 4
+        },
+        {
+          "off": "0x5ece8",
+          "width": 4
+        },
+        {
+          "off": "0x5ecec",
+          "type": "T_el8",
+          "count": 280,
+          "note": "块起点；跨度正好接到下一个已声明成员（见 evidence.txt）"
         },
         {
           "off": "0x5ee04",
@@ -328,14 +385,9 @@
           }
         },
         {
-          "off": "0x68eb0",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_68eb0"
-        },
-        {
-          "off": "0x68eb4",
-          "width": 4
+          "off": "0x68ea4",
+          "type": "T_Stack_int",
+          "count": 1
         },
         {
           "off": "0x68eb8",
@@ -344,6 +396,11 @@
         {
           "off": "0x68ebc",
           "width": 4
+        },
+        {
+          "off": "0x68ec0",
+          "type": "T_FadeTimer",
+          "count": 32
         },
         {
           "off": "0x6924c",
@@ -355,6 +412,10 @@
         },
         {
           "off": "0x69254",
+          "width": 4
+        },
+        {
+          "off": "0x69258",
           "width": 4
         },
         {
@@ -382,6 +443,11 @@
           "width": 4
         },
         {
+          "off": "0x6927c",
+          "type": "T_Hashtable_int",
+          "count": 1
+        },
+        {
           "off": "0x692cc",
           "width": 4
         },
@@ -390,11 +456,87 @@
           "width": 4
         },
         {
+          "off": "0x692e0",
+          "width": 4,
+          "note": "计数器（同一槽自增后写回）"
+        },
+        {
+          "off": "0x692e4",
+          "width": 4,
+          "note": "除数（被当作另一槽的模）"
+        },
+        {
+          "off": "0x692ec",
+          "type": "T_el32",
+          "count": 4,
+          "note": "四长结构（外部 API 按指针写入 16 字节）"
+        },
+        {
+          "off": "0x692fc",
+          "width": 4
+        },
+        {
+          "off": "0x69300",
+          "width": 4
+        },
+        {
+          "off": "0x69304",
+          "width": 4
+        },
+        {
+          "off": "0x69308",
+          "width": 4
+        },
+        {
+          "off": "0x6930c",
+          "width": 4
+        },
+        {
+          "off": "0x69310",
+          "width": 4
+        },
+        {
+          "off": "0x69314",
+          "width": 4
+        },
+        {
+          "off": "0x69318",
+          "width": 4
+        },
+        {
+          "off": "0x6931c",
+          "width": 4
+        },
+        {
+          "off": "0x69320",
+          "width": 4
+        },
+        {
+          "off": "0x69324",
+          "width": 4
+        },
+        {
+          "off": "0x69328",
+          "width": 4
+        },
+        {
+          "off": "0x6932c",
+          "width": 4
+        },
+        {
           "off": "0x69330",
           "width": 4
         },
         {
           "off": "0x77618",
+          "width": 4
+        },
+        {
+          "off": "0x777fc",
+          "width": 4
+        },
+        {
+          "off": "0x77800",
           "width": 4
         },
         {
@@ -408,6 +550,26 @@
         {
           "off": "0x7780c",
           "width": 4
+        },
+        {
+          "off": "0x77810",
+          "type": "T_el32",
+          "count": null,
+          "sweep": {
+            "stride": 4,
+            "index": "*(Engine+0x5d880)"
+          },
+          "note": "同一把索引扫的第二张 4 字节表；条数未观察"
+        },
+        {
+          "off": "0x778b0",
+          "type": "T_el32",
+          "count": null,
+          "sweep": {
+            "stride": 4,
+            "index": "*(Engine+0x5d880)"
+          },
+          "note": "与 0x77810 相差 0xA0（40 个 dword）的并行表；条数未观察"
         },
         {
           "off": "0x77950",
@@ -431,7 +593,23 @@
           "count": 1
         },
         {
+          "off": "0x77970",
+          "width": 4
+        },
+        {
+          "off": "0x77974",
+          "width": 4
+        },
+        {
+          "off": "0x77978",
+          "width": 4
+        },
+        {
           "off": "0x77980",
+          "width": 4
+        },
+        {
+          "off": "0x77984",
           "width": 4
         },
         {
@@ -563,6 +741,18 @@
           "width": 4
         },
         {
+          "off": "0x77a08",
+          "width": 4
+        },
+        {
+          "off": "0x77a0c",
+          "width": 4
+        },
+        {
+          "off": "0x77a10",
+          "width": 4
+        },
+        {
           "off": "0x77a14",
           "width": 4
         },
@@ -603,7 +793,78 @@
           "width": 4
         },
         {
+          "off": "0x77a3c",
+          "type": "T_Queue_CACHE_ALPHADATA",
+          "count": 1
+        },
+        {
           "off": "0x77a58",
+          "width": 4
+        },
+        {
+          "off": "0x77a5c",
+          "type": "T_fnptr4",
+          "count": 100
+        },
+        {
+          "off": "0x77bec",
+          "width": 4,
+          "note": "表起点；条数有独立证据，但末尾地址在语料里零引用 ⇒ 按 G4 只声明首槽（report §4.2）"
+        },
+        {
+          "off": "0x78bec",
+          "width": 4,
+          "note": "块起点（整块被清零）；块内的下一个成员见 0x78bf4"
+        },
+        {
+          "off": "0x78bf4",
+          "width": 4,
+          "note": "块内字符缓冲起点；长度有独立证据，但末尾零引用 ⇒ 只声明首槽（report §4.2）"
+        },
+        {
+          "off": "0x7914c",
+          "width": 4
+        },
+        {
+          "off": "0x79150",
+          "width": 4
+        },
+        {
+          "off": "0x79154",
+          "width": 4
+        },
+        {
+          "off": "0x79158",
+          "width": 4
+        },
+        {
+          "off": "0x7915c",
+          "type": "T_fnptr4",
+          "count": 41
+        },
+        {
+          "off": "0x79200",
+          "type": "T_fnptr4",
+          "count": 246
+        },
+        {
+          "off": "0x795d8",
+          "width": 4,
+          "note": "表起点；条数有独立证据，但末尾零引用 ⇒ 只声明首槽（report §4.2）"
+        },
+        {
+          "off": "0x79680",
+          "width": 4
+        },
+        {
+          "off": "0x796a0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "链表头指针：写入新分配节点的地址，随后以该值为基址访问；目标类型未判"
+        },
+        {
+          "off": "0x796a4",
           "width": 4
         },
         {
@@ -611,26 +872,109 @@
           "width": 4
         },
         {
-          "off": "0x796e0",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T2"
+          "off": "0x796c0",
+          "width": 1
         },
         {
-          "off": "0x796e4",
+          "off": "0x796d0",
           "width": 4
         },
         {
-          "off": "0x796e8",
+          "off": "0x796d4",
           "width": 4
         },
         {
-          "off": "0x796f4",
-          "width": 4
+          "off": "0x796dc",
+          "type": "T_Queue_int",
+          "count": 1
         },
         {
           "off": "0x796f8",
           "width": 4
+        },
+        {
+          "off": "0x796fc",
+          "width": 4,
+          "note": "块起点：头 + n×记录（n 是运行期值）⇒ 只声明首槽"
+        },
+        {
+          "off": "0x79704",
+          "width": 4,
+          "note": "块内单槽"
+        },
+        {
+          "off": "0x79708",
+          "width": 4,
+          "note": "块起点；条数有独立证据，但末尾零引用 ⇒ 只声明首槽（report §4.2）"
+        },
+        {
+          "off": "0x7e960",
+          "width": 4,
+          "note": "块起点：头 + n×记录 ⇒ 只声明首槽"
+        },
+        {
+          "off": "0x7e968",
+          "width": 4,
+          "note": "块内单槽"
+        },
+        {
+          "off": "0x7e96c",
+          "type": "T_el32",
+          "count": 10,
+          "note": "10 个 4 字节槽；末尾地址在语料里被引用 ⇒ count 站得住"
+        },
+        {
+          "off": "0x7e994",
+          "width": 4,
+          "note": "12 字节步进的 100 条记录之首；末尾零引用 ⇒ 只声明首槽（report §4.2）"
+        },
+        {
+          "off": "0x892a4",
+          "width": 4,
+          "note": "块起点：头 + n×记录 ⇒ 只声明首槽"
+        },
+        {
+          "off": "0x892ac",
+          "width": 4,
+          "note": "块内单槽"
+        },
+        {
+          "off": "0x892b0",
+          "type": "T_el32",
+          "count": 10,
+          "note": "10 个 4 字节槽；末尾地址在语料里被引用"
+        },
+        {
+          "off": "0x93aa8",
+          "width": 4,
+          "note": "块起点：头 + n×记录 ⇒ 只声明首槽"
+        },
+        {
+          "off": "0x93ab0",
+          "width": 4,
+          "note": "块内单槽"
+        },
+        {
+          "off": "0x93ab4",
+          "type": "T_el32",
+          "count": 10,
+          "note": "10 个 4 字节槽；末尾地址在语料里被引用"
+        },
+        {
+          "off": "0x93adc",
+          "type": "T_rec12",
+          "count": 100,
+          "note": "12 字节步进 × 100 条；末尾地址在语料里被引用 ⇒ count 站得住"
+        },
+        {
+          "off": "0x93f8c",
+          "width": 4,
+          "note": "20 字节步进 × 1000 条之首；元素内部只观察到 +0/+4 ⇒ 不建元素类型，只声明首槽"
+        },
+        {
+          "off": "0x93f90",
+          "width": 4,
+          "note": "同址 +4"
         },
         {
           "off": "0xa30cc",
@@ -642,6 +986,15 @@
         },
         {
           "off": "0xa30d4",
+          "width": 4
+        },
+        {
+          "off": "0xa30d8",
+          "type": "T_el32",
+          "count": 1024
+        },
+        {
+          "off": "0xa40d8",
           "width": 4
         },
         {
@@ -657,19 +1010,42 @@
           "width": 4
         },
         {
-          "off": "0xa537c",
+          "off": "0xa5090",
           "width": 4
         },
         {
+          "off": "0xa5094",
+          "width": 4
+        },
+        {
+          "off": "0xa5098",
+          "width": 4,
+          "note": "0/1 标量；不是 0xa509c 那张表的第 0 项（没有任何一处把它当代码地址用）"
+        },
+        {
+          "off": "0xa509c",
+          "type": "T_fnptr4",
+          "count": 1024
+        },
+        {
           "off": "0xa609c",
-          "type": "T_a609c",
+          "type": "T_FileDB",
+          "count": 1
+        },
+        {
+          "off": "0xaa0e4",
+          "type": "T_SysCursor",
           "count": 1
         },
         {
           "off": "0xaa514",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_aa514"
+          "type": "T_Reg",
+          "count": 1
+        },
+        {
+          "off": "0xaa5d8",
+          "type": "T_Music",
+          "count": 1
         },
         {
           "off": "0xaa9e4",
@@ -684,12 +1060,52 @@
           "width": 4
         },
         {
+          "off": "0xaaa0c",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "读出来后当基址用；目标类型未判"
+        },
+        {
+          "off": "0xaaa14",
+          "width": 4,
+          "note": "读出来后当某个调用的 this；本模型里零解引用 ⇒ 只声明宽度（不写 kind:ptr）"
+        },
+        {
+          "off": "0xaaa18",
+          "type": "T_el8",
+          "count": 2,
+          "note": "2 个单字节槽"
+        },
+        {
+          "off": "0xaaa20",
+          "width": 4,
+          "note": "只观察到取址；宽度按 4 字节槽推断，长度未观察"
+        },
+        {
+          "off": "0xaab20",
+          "width": 4
+        },
+        {
+          "off": "0xaab24",
+          "width": 4
+        },
+        {
+          "off": "0xaab28",
+          "width": 4
+        },
+        {
           "off": "0xaab44",
           "width": 4
         },
         {
           "off": "0xaab48",
           "width": 4
+        },
+        {
+          "off": "0xaab4c",
+          "width": 4,
+          "note": "计数器（读-改-写同一槽）"
         },
         {
           "off": "0xaab50",
@@ -700,14 +1116,30 @@
           "width": 4
         },
         {
+          "off": "0xaab58",
+          "type": "T_el32",
+          "count": 4,
+          "note": "16 字节结构体按值传参（4 个 4 字节槽）"
+        },
+        {
+          "off": "0xaab68",
+          "width": 4
+        },
+        {
           "off": "0xaab6c",
           "width": 4
         },
         {
           "off": "0xaab70",
           "width": 4
+        },
+        {
+          "off": "0xaab74",
+          "type": "T_Queue_int",
+          "count": 3
         }
-      ]
+      ],
+      "note": "RTTI ??_7Command@@6B@（vtable 写入 0x41567d）；这 26 条是宿主重复成员：前 20 条落在 T_Sys3Draw（+0x1ee8, size 0x2a00）跨度内、后 6 条落在 T_Queue_CACHE_ALPHADATA（+0x77a3c, size 0x1c）跨度内。不删 ⇒ G1 判重叠（这不是新判断，是 size 闭合的必然结果）。前 20 条在现行 data/shape/types.json 里已被删掉；后 6 条还没有。"
     },
     "T1": {
       "size": 120,
@@ -722,6 +1154,36 @@
           "width": 4,
           "kind": "ptr",
           "type": null
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "条数（不是指针）：0x40f2be 读出后决定 0x20 那份缓冲的分配长度；0x40f48a/0x40f4c0 是同一循环的上界"
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "note": "条数：0x40f2fd 读出后决定 0x24 的分配长度；0x40f4d8 读出后决定 0x24 的填充长度"
+        },
+        {
+          "off": "0x10",
+          "width": 4,
+          "note": "条数：0x40f33e 读出后决定 0x28 的分配长度（0x28 的元素跨度另有声明）"
+        },
+        {
+          "off": "0x14",
+          "width": 4,
+          "note": "条数：0x40f3c5 决定 0x2c 的分配长度；0x40f50d 决定 0x2c 的填充长度"
+        },
+        {
+          "off": "0x18",
+          "width": 4,
+          "note": "条数：0x40f404 决定 0x30 的分配长度；0x40f538 决定 0x30 的填充长度"
+        },
+        {
+          "off": "0x1c",
+          "width": 4,
+          "note": "条数：0x40f443 决定 0x34 的分配长度；0x40f563 决定 0x34 的填充长度"
         },
         {
           "off": "0x20",
@@ -754,6 +1216,13 @@
           "type": "T2"
         },
         {
+          "off": "0x34",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T2",
+          "note": "与 0x20/0x24/0x2c/0x30 同形：0x40f572 拿它的值当填充目标，0x41b94c 以它为基址按 4 字节索引读，0x40eafd 整块释放 ⇒ 是基址"
+        },
+        {
           "off": "0x38",
           "width": 4
         },
@@ -762,12 +1231,27 @@
           "width": 4
         },
         {
+          "off": "0x40",
+          "width": 4,
+          "note": "只被当实参传出（0x407075 0x41b249 0x41f22e 共 11 处），无一处以它为基址 ⇒ 不标 ptr；与 0x44 成对（0x44 是数据指针）"
+        },
+        {
           "off": "0x44",
           "width": 4
         },
         {
+          "off": "0x48",
+          "width": 4,
+          "note": "3 处站点全是写（0x40f08f 0x40f1d2 0x40f1fa），全语料无读 ⇒ 只声明宽度"
+        },
+        {
           "off": "0x4c",
           "width": 4
+        },
+        {
+          "off": "0x50",
+          "width": 4,
+          "note": "唯一 1 处站点是写（0x40f0ce）⇒ 只声明宽度"
         },
         {
           "off": "0x54",
@@ -786,10 +1270,24 @@
           "width": 4
         },
         {
+          "off": "0x64",
+          "type": "T_ptr4",
+          "count": 3,
+          "note": "3 个堆块基址、步长 4：0x40eb82 给出条数并以 0x40eb9c 递进，0x40f5c1/0x40f5ec 以 4 字节步长索引且上界同值 ⇒ 3"
+        },
+        {
           "off": "0x70",
           "width": 4,
           "kind": "ptr",
-          "type": null
+          "type": "T_vec16",
+          "note": "原为 ptr/type:null。0x40eba2 读出后以它为基址取 +0x0/+0x4/+0x8，0x40ec31 起逐个清零后整块释放 ⇒ 目标是 16 字节容器"
+        },
+        {
+          "off": "0x74",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_vec16",
+          "note": "0x40f644 按 16 字节分配、0x40f65a 起清三个双字；0x40ec47 读出后以它为基址取 +0x0/+0x4，0x40eca2 取 +0xc 的地址 ⇒ 与 0x70 同一容器类型"
         }
       ]
     },
@@ -803,31 +1301,50 @@
         }
       ]
     },
-    "T_aa514": {
-      "size": null,
+    "T_Reg": {
+      "size": 196,
       "complete": false,
       "members": [
         {
+          "width": 4,
+          "off": "0x0"
+        },
+        {
           "off": "0x4",
-          "width": 4
+          "type": "T_Hashtable_int",
+          "count": 1
         },
         {
-          "off": "0x8",
-          "width": 4
+          "type": "T_Hashtable_string",
+          "count": 1,
+          "off": "0x54"
         },
         {
-          "off": "0xc",
-          "width": 4
+          "width": 4,
+          "off": "0xa4"
         },
         {
-          "off": "0x14",
-          "width": 4
+          "width": 4,
+          "off": "0xa8"
         },
         {
-          "off": "0x1c",
-          "width": 4
+          "width": 4,
+          "off": "0xac"
+        },
+        {
+          "width": 4,
+          "off": "0xb4"
+        },
+        {
+          "width": 4,
+          "off": "0xb8"
+        },
+        {
+          "width": 4,
+          "off": "0xbc"
         }
-      ]
+      ],
+      "note": "RTTI ??_7Reg@@6B@（vtable 写入 0x4918bb）；RTTI ??_7Reg@@6B@（vtable 写入 0x4918bb）。batch-15 成员表：9 条。★ 0x4 / 0x54 是**就地构造的内嵌子对象**（构造器在本对象基址 +0x4 / +0x54 处先后构造 Hashtable<int> 与 Hashtable<std::string>，两个子对象各自在自身上写自己的 vtable；接续点 0x54 / 0xa4 与两条成员偏移逐字相接），不是标量、也不是指针。★ 原 0x8 / 0xc / 0x14 / 0x1c 四条被移除：它们逐字等于 0x4 那个 Hashtable<int> 的成员偏移（0x4+0x4 / 0x4+0x8 / 0x4+0x10 / 0x4+0x18），属把子对象字段记在宿主名下。最大直接观测偏移 0xbc（→ 下界 0xc0；析构链另指向 0xc4，见 report.md §1）。"
     },
     "T_68eb0": {
       "size": null,
@@ -854,6 +1371,31 @@
         {
           "off": "0x30",
           "width": 4
+        },
+        {
+          "off": "0x434",
+          "width": 4,
+          "note": "0x412c18 读出后只压进调用（0x412c3e 起），无基址用法 ⇒ 只声明宽度"
+        },
+        {
+          "off": "0x438",
+          "width": 4,
+          "note": "0x412c04 读出后只压进调用（0x412c47），无基址用法 ⇒ 只声明宽度"
+        },
+        {
+          "off": "0x440",
+          "width": 4,
+          "note": "0x413f1d 读出后只作实参，无基址用法 ⇒ 只声明宽度"
+        },
+        {
+          "off": "0x444",
+          "width": 4,
+          "note": "0x413f23 读出后只作实参，无基址用法 ⇒ 只声明宽度"
+        },
+        {
+          "off": "0x458",
+          "width": 4,
+          "note": "0x413f2c 读出后只作实参，无基址用法 ⇒ 只声明宽度"
         }
       ]
     },
@@ -885,23 +1427,35 @@
         }
       ]
     },
-    "T_a609c": {
-      "size": null,
+    "T_FileDB": {
+      "size": 16456,
       "complete": false,
       "members": [
+        {
+          "off": "0x408",
+          "width": 4
+        },
         {
           "off": "0x40c",
           "width": 4
         },
         {
           "off": "0x410",
-          "width": 4
+          "width": 4,
+          "kind": "ptr",
+          "type": null
         },
         {
           "off": "0x414",
           "width": 4,
           "kind": "ptr",
-          "type": "T_a609c_elem"
+          "type": "T_FileDB_elem"
+        },
+        {
+          "off": "0x418",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
         },
         {
           "off": "0x41c",
@@ -910,8 +1464,12 @@
           "type": null
         },
         {
+          "off": "0x420",
+          "width": 4
+        },
+        {
           "off": "0x424",
-          "type": "T_a609c_424",
+          "type": "T_FileDB_424",
           "count": 256
         },
         {
@@ -919,8 +1477,14 @@
           "width": 4
         },
         {
+          "off": "0x2c28",
+          "type": "T_el32",
+          "count": 256
+        },
+        {
           "off": "0x3028",
-          "width": 4
+          "type": "T_el32",
+          "count": 256
         },
         {
           "off": "0x3428",
@@ -931,26 +1495,57 @@
           "width": 4
         },
         {
+          "off": "0x3430",
+          "width": 4
+        },
+        {
+          "off": "0x3434",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
           "off": "0x3438",
           "width": 4,
           "kind": "ptr",
           "type": null
         },
         {
+          "off": "0x343c",
+          "width": 4
+        },
+        {
+          "off": "0x3440",
+          "type": "T_el32",
+          "count": 256
+        },
+        {
+          "off": "0x3840",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
           "off": "0x3844",
+          "type": "T_el32",
+          "count": 256
+        },
+        {
+          "off": "0x3c44",
           "width": 4,
           "kind": "ptr",
           "type": null
         },
         {
           "off": "0x3c48",
-          "width": 4,
-          "kind": "ptr",
-          "type": null
+          "type": "T_el32",
+          "count": 256,
+          "note": "索引 = 顶字节（0x404A88 `sar edi,18h`，与 0x3844 那格同一把索引、同一步长 4）；0x3c48+0x400 == size ⇒ G4 走\"数组正好填满对象\"档。⚠ 元素实际被当指针用（0x404AC0 `mov ecx,[esi+edi*4+3C48h]` → 0x404ACA `mov [ecx+ebx*4],eax`）⇒ 元素类型待裁决（T_el32 只声明 4 字节标量布局，未声明解引用关系）"
         }
-      ]
+      ],
+      "note": "RTTI ??_7FileDB@@6B@（vtable 写入 0x454a64）"
     },
-    "T_a609c_elem": {
+    "T_FileDB_elem": {
       "size": 80,
       "complete": false,
       "members": [
@@ -968,10 +1563,20 @@
         }
       ]
     },
-    "T_14d30": {
-      "size": null,
+    "T_Font": {
+      "size": 235132,
       "complete": false,
       "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "note": "0x465007 把对象首双字写成 RTTI 名 ⇒ vtable 槽；只写不读（本模型里没有被当基址解析的站点），故不标 kind:ptr。★ 与 T_Command+0x0 同形（那里也是 vtable）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "★ 跨度有争议（见 disputes 的 size-unknown）：0x432963 `lea edi,[esi+8]` 后作 _sprintf_s 的 Buffer（BufferCount=0x400）⇒ 该区间是 ≥0x400 的字符缓冲；但 0x455fde / 0x45605a / 0x4568ff / 0x4569a0 又按 `[esi+idx*4+3C4h]` 把它当**指针表**读并解引用 ⇒ 两种读法在字节上重叠。语料里 0x3c4 只有读、零写。所以这里只声明**被直接观测的 4 字节**，跨度留给争议"
+        },
         {
           "off": "0x408",
           "width": 4,
@@ -980,7 +1585,9 @@
         },
         {
           "off": "0x40c",
-          "width": 4
+          "width": 4,
+          "kind": "ptr",
+          "type": null
         },
         {
           "off": "0x410",
@@ -990,63 +1597,9 @@
         },
         {
           "off": "0x414",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x418",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x41c",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x420",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x424",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x428",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x42c",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x430",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x434",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
-        },
-        {
-          "off": "0x438",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_414"
+          "type": "T_Font_414elem",
+          "count": 10,
+          "note": "数组成员：10 个 4 字节指针槽（0x414..0x438，末尾 0x43c 是另一个成员）。count=10 的独立证据：构造器 0x4651c9..0x4651ff 连续清 10 个 dword；sub_465390 逐槽展开读 0x414..0x438 十次并写 10 个平行 dword 0xd44..0xd68"
         },
         {
           "off": "0x43c",
@@ -1065,12 +1618,22 @@
           "width": 4
         },
         {
+          "off": "0x450",
+          "width": 4,
+          "note": "4 字节句柄值：0x465120 写 0；0x456a52 / 0x456b2e 读出后作第 1 实参传给 SetTextColor / TextOutA（值不被当基址）"
+        },
+        {
           "off": "0x454",
           "width": 4
         },
         {
           "off": "0x490",
           "width": 4
+        },
+        {
+          "off": "0x494",
+          "width": 4,
+          "note": "4 字节读（0x456861 读出后作实参传给 sub_4734F0 / sub_46E3E0）；无解引用 ⇒ 不是指针"
         },
         {
           "off": "0x4cc",
@@ -1125,6 +1688,11 @@
           "width": 4
         },
         {
+          "off": "0x548",
+          "width": 4,
+          "note": "5 个载体一致，全为读，无解引用"
+        },
+        {
           "off": "0x54c",
           "width": 4
         },
@@ -1145,12 +1713,37 @@
           "width": 4
         },
         {
+          "off": "0x560",
+          "width": 4,
+          "note": "全为读；参与有符号比较与乘法"
+        },
+        {
           "off": "0x564",
           "width": 4
         },
         {
+          "off": "0x568",
+          "width": 4,
+          "note": "19 读 / 2 写；按有符号整数参与浮点运算"
+        },
+        {
+          "off": "0x56c",
+          "width": 4,
+          "note": "23 读 / 2 写；按有符号整数参与浮点运算"
+        },
+        {
           "off": "0x570",
           "width": 4
+        },
+        {
+          "off": "0x574",
+          "width": 4,
+          "note": "值只参与地址算术与有符号比较 ⇒ 是索引，不是指针；不标 kind"
+        },
+        {
+          "off": "0x57c",
+          "width": 4,
+          "note": "0x417b6e 写入的是紧邻那次调用的返回值；无基址用法 ⇒ 只声明宽度"
         },
         {
           "off": "0x580",
@@ -1203,12 +1796,22 @@
           "width": 4
         },
         {
+          "off": "0xd2c",
+          "width": 4,
+          "note": "0x465019 写 dword"
+        },
+        {
           "off": "0xd34",
           "width": 4
         },
         {
           "off": "0xd38",
           "width": 4
+        },
+        {
+          "off": "0xd3c",
+          "width": 4,
+          "note": "0x46502f 写 dword"
         },
         {
           "off": "0xd44",
@@ -1255,16 +1858,28 @@
           "width": 4
         },
         {
+          "off": "0xdc4",
+          "width": 16384,
+          "note": "0x4000 字节缓冲：0x465220 取址作 _memset 的目的地（Size=0x4000）；跨度末尾 == 已声明的 +0x4dc4（0x465210 写）"
+        },
+        {
           "off": "0x4dc4",
           "width": 4
         },
         {
           "off": "0x18dc8",
+          "kind": "ptr",
+          "note": "值被解引用：与 +0x18dcc 成对作 begin/end（0x4329ec `sub ecx,[esi+18dc8h]`），0x432a30 取值后 `lea ecx,[eax+edx*4]`；元素步长 0x1c ⇒ 是容器头，具体头类型未判",
           "width": 4
         },
         {
           "off": "0x18dcc",
           "width": 4
+        },
+        {
+          "off": "0x18dd0",
+          "width": 4,
+          "note": "0x465054 写 dword"
         },
         {
           "off": "0x18ddc",
@@ -1283,6 +1898,11 @@
           "width": 4
         },
         {
+          "off": "0x18e58",
+          "width": 4,
+          "note": "4 字节读写（0x432992 写、0x472391 / 0x46e845 读）"
+        },
+        {
           "off": "0x18e5c",
           "width": 4
         },
@@ -1297,6 +1917,11 @@
         {
           "off": "0x18e90",
           "width": 4
+        },
+        {
+          "off": "0x18e94",
+          "width": 4,
+          "note": "夹在 0x18e90 / 0x18e98 之间的洞，1 读 1 写"
         },
         {
           "off": "0x18e98",
@@ -1323,11 +1948,100 @@
           "width": 4
         },
         {
+          "off": "0x18ed8",
+          "width": 4,
+          "note": "取址当内嵌子对象基址；子对象跨度未判 ⇒ 宽度只覆盖被观察的 4 字节"
+        },
+        {
+          "off": "0x18ee0",
+          "width": 4,
+          "note": "被当循环上界"
+        },
+        {
+          "off": "0x18ef0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "值被当基址（元素内 +0x10 处解引用）；元素跨度两处算术不一致 ⇒ 目标类型未判"
+        },
+        {
+          "off": "0x18f00",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "值被当基址（元素内 +0x0 处解引用）；目标类型未判"
+        },
+        {
+          "off": "0x18f28",
+          "type": "T_el32",
+          "count": 4096,
+          "views": [
+            {
+              "elementDelta": 1
+            }
+          ],
+          "note": "宽 4、步长 4；索引取自 +0x1cf28；相邻元素（+0x18f2c）由 views 表达；元素是堆缓冲指针（推断）"
+        },
+        {
+          "off": "0x1cf28",
+          "width": 4
+        },
+        {
+          "off": "0x1cf2c",
+          "type": "T_1cf2c_elem",
+          "count": 4096,
+          "note": "索引取自 +0x1cf28；元素跨 0x14；4096 条正好填到 +0x30f2c"
+        },
+        {
           "off": "0x30f2c",
           "width": 4
         },
         {
           "off": "0x30f30",
+          "width": 4
+        },
+        {
+          "off": "0x30f34",
+          "width": 4,
+          "note": "0x46507d 写 dword"
+        },
+        {
+          "off": "0x30f3c",
+          "width": 128,
+          "note": "0x80 字节字符缓冲：0x465232 取址作 _strcpy_s 的目的地（SizeInBytes=0x80）；其后的 0x30fbc / 0x3103c / 0x310bc / 0x3113c / 0x311bc / 0x3123c 是同长度、步长 0x80 的连续缓冲（0x465248 / 0x46525e / 0x465274 / 0x46528a / 0x4652a3 / 0x4652b9）"
+        },
+        {
+          "off": "0x30fbc",
+          "width": 128,
+          "note": "同组 0x80 字节字符缓冲（0x465248）"
+        },
+        {
+          "off": "0x3103c",
+          "width": 128,
+          "note": "同组（0x46525e）"
+        },
+        {
+          "off": "0x310bc",
+          "width": 128,
+          "note": "同组（0x465274）"
+        },
+        {
+          "off": "0x3113c",
+          "width": 128,
+          "note": "同组（0x46528a）"
+        },
+        {
+          "off": "0x311bc",
+          "width": 128,
+          "note": "同组（0x4652a3）"
+        },
+        {
+          "off": "0x3123c",
+          "width": 128,
+          "note": "同组（0x4652b9）；末地址 0x312bc 在语料里零引用 ⇒ 用内联宽度而不是元素计数（跨度同为 0x80）"
+        },
+        {
+          "off": "0x313bc",
           "width": 4
         },
         {
@@ -1341,6 +2055,11 @@
           "width": 4,
           "kind": "ptr",
           "type": "T_313c0"
+        },
+        {
+          "off": "0x313c8",
+          "width": 4,
+          "note": "0x465093 写 dword"
         },
         {
           "off": "0x313d0",
@@ -1443,6 +2162,21 @@
           "width": 4
         },
         {
+          "off": "0x31484",
+          "width": 128,
+          "note": "0x80 字节字符缓冲（0x465306 取址作 _strcpy_s 目的地，SizeInBytes=0x80）；末尾正好接 +0x31504"
+        },
+        {
+          "off": "0x31504",
+          "width": 128,
+          "note": "0x80 字节字符缓冲（0x465358 取址作 _strcpy_s 目的地，SizeInBytes=0x80）"
+        },
+        {
+          "off": "0x35584",
+          "width": 4,
+          "note": "4 个载体；被当二值开关读"
+        },
+        {
           "off": "0x35588",
           "width": 4
         },
@@ -1457,6 +2191,41 @@
         {
           "off": "0x35594",
           "width": 4
+        },
+        {
+          "off": "0x35598",
+          "width": 4,
+          "note": "3 写 5 读；只被当布尔开关读写"
+        },
+        {
+          "off": "0x3559c",
+          "width": 4,
+          "note": "0x46509d 写 dword；与 +0x355a0/+0x355a4 同组"
+        },
+        {
+          "off": "0x355a0",
+          "width": 4,
+          "note": "0x4650a3 写 dword"
+        },
+        {
+          "off": "0x355a4",
+          "width": 4,
+          "note": "0x4650a9 写 dword"
+        },
+        {
+          "off": "0x355ac",
+          "width": 4,
+          "note": "取址后当内嵌子对象传参（3 个载体）；目标类型未判 ⇒ 不标 ptr"
+        },
+        {
+          "off": "0x355bc",
+          "width": 4,
+          "note": "与 +0x355ac 同属一个内嵌对象：使用长度（推断）"
+        },
+        {
+          "off": "0x355c0",
+          "width": 4,
+          "note": "与 +0x355ac 同属一个内嵌对象：容量（推断）"
         },
         {
           "off": "0x355c8",
@@ -1491,6 +2260,11 @@
           "width": 4
         },
         {
+          "off": "0x355e8",
+          "width": 4,
+          "note": "只判空、无解引用 ⇒ 不标 ptr"
+        },
+        {
           "off": "0x355ec",
           "width": 4
         },
@@ -1519,6 +2293,28 @@
           "width": 4
         },
         {
+          "off": "0x35618",
+          "type": "T_el32",
+          "count": 4096,
+          "views": [
+            {
+              "elementDelta": 1
+            }
+          ],
+          "note": "宽 4、步长 4；索引取自 +0x1cf28；相邻元素（+0x3561c）由 views 表达；元素值是缓冲长度"
+        },
+        {
+          "off": "0x39618",
+          "note": "内嵌子对象（不是标量）：0x4650ce 取址后经 eax 写 +0x4/+0x14/+0x18（0x4650dd/0x4650d7/0x4650d4）；析构以它为 this（0x515489 / 0x515944 `add ecx,39618h` → sub_459690；0x45e24e 内联同一段）⇒ 有独立生命期。+0x0 由 0x417ab9 写立即数 1",
+          "type": "T_39618",
+          "count": 1
+        },
+        {
+          "off": "0x39638",
+          "width": 4,
+          "note": "0x417aae 清零、0x417ac9 写入外部资源句柄（同一次调用的返回值）；无基址用法 ⇒ 只声明宽度"
+        },
+        {
           "off": "0x3963c",
           "width": 4
         },
@@ -1535,25 +2331,119 @@
           "width": 4
         },
         {
+          "off": "0x3964c",
+          "type": "T_vec16",
+          "count": 1,
+          "note": "内嵌子对象，不是标量：0x41811d/0x418137 取它的地址当 this 传给 0x40e660/0x414940，而 0x40e660 读 +0x0/+0x4 并把 +0xc 传给元素析构 0x40cad0 ⇒ 与 T1+0x70/+0x74 同类型；跨度 0x3964c..0x3965c 恰好等于下一个已声明成员 0x3965c"
+        },
+        {
           "off": "0x3965c",
           "width": 4
         },
         {
           "off": "0x39660",
           "width": 4
+        },
+        {
+          "off": "0x39664",
+          "width": 4,
+          "note": "宽度取 4：0x46518e 是 4 字节写；此前的 `test byte ptr …,1` 是同一槽的低字节读（1 ≤ 4 相容）"
+        },
+        {
+          "off": "0x39668",
+          "width": 4,
+          "note": "与 0x39668..0x3967c 连片，末尾等于对象 size"
+        },
+        {
+          "off": "0x3966c",
+          "width": 4,
+          "note": "同上"
+        },
+        {
+          "off": "0x39670",
+          "width": 4,
+          "note": "同上"
+        },
+        {
+          "off": "0x39674",
+          "width": 4,
+          "note": "同上"
+        },
+        {
+          "off": "0x39678",
+          "width": 4,
+          "note": "同上；有符号（与零比较后判小）"
         }
-      ]
+      ],
+      "note": "RTTI ??_7Font@@6B@（vtable 写入 0x465007）"
     },
-    "T_408": {
-      "size": null,
+    "T_Input": {
+      "size": 6880,
       "complete": false,
       "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x408",
+          "width": 4
+        },
         {
           "off": "0x40c",
           "width": 4
         },
         {
+          "off": "0x410",
+          "width": 4
+        },
+        {
+          "off": "0x414",
+          "width": 4
+        },
+        {
+          "off": "0x418",
+          "width": 4
+        },
+        {
+          "off": "0x41c",
+          "width": 4
+        },
+        {
+          "off": "0x420",
+          "width": 4
+        },
+        {
+          "off": "0x424",
+          "width": 4
+        },
+        {
+          "off": "0x428",
+          "width": 4
+        },
+        {
+          "off": "0x490",
+          "width": 4,
+          "note": "一个 0x840 字节置零块的块首（块末 0xcd0 无已声明成员）；元素粒度未观察 ⇒ 只声明首槽"
+        },
+        {
+          "off": "0x1190",
+          "width": 4
+        },
+        {
+          "off": "0x1194",
+          "type": "T_el32",
+          "count": 32,
+          "note": "dword 数组；前一 dword 是同一块里的条数字段，块长 0x84 = 4 + 32*4，末尾正好接已声明的 +0x1214"
+        },
+        {
           "off": "0x1214",
+          "width": 4
+        },
+        {
+          "off": "0x1218",
           "width": 4
         },
         {
@@ -1561,23 +2451,133 @@
           "width": 4
         },
         {
+          "off": "0x1220",
+          "type": "T_el32",
+          "count": 16
+        },
+        {
+          "off": "0x1260",
+          "type": "T_el32",
+          "count": 256
+        },
+        {
+          "off": "0x1660",
+          "note": "0x400 字节置零块（0x477e27 push 400h + 0x477e2c lea ecx,[esi+1660h] + 0x477e34 _memset，Val=0）⇒ 256 个 dword；块末 0x1a60 正好是已声明的下一个成员。元素是标量（0x477116 读出后直接作 vKey 传 GetAsyncKeyState）",
+          "type": "T_el32",
+          "count": 256
+        },
+        {
           "off": "0x1a60",
           "width": 4
         },
         {
+          "off": "0x1a64",
+          "width": 4
+        },
+        {
+          "off": "0x1a68",
+          "width": 4
+        },
+        {
+          "off": "0x1a6c",
+          "width": 4
+        },
+        {
+          "off": "0x1a70",
+          "width": 4
+        },
+        {
           "off": "0x1a74",
-          "width": 1
+          "width": 4
+        },
+        {
+          "off": "0x1a78",
+          "width": 4
+        },
+        {
+          "off": "0x1a7c",
+          "width": 4
+        },
+        {
+          "off": "0x1a80",
+          "width": 4
+        },
+        {
+          "off": "0x1a88",
+          "width": 4,
+          "note": "一个 0x30 字节置零块的块首（块末正好是已声明的 +0x1ab8）；其后的 +0x1a8c/+0x1a90/+0x1a98/+0x1a9a 是块内字段"
+        },
+        {
+          "off": "0x1a8c",
+          "width": 4
+        },
+        {
+          "off": "0x1a90",
+          "width": 4
+        },
+        {
+          "off": "0x1a98",
+          "width": 2,
+          "note": "只有 2 字节被读（符号扩展读数）"
+        },
+        {
+          "off": "0x1a9a",
+          "width": 2,
+          "note": "只有 2 字节被读（符号扩展读数）"
         },
         {
           "off": "0x1ab8",
           "width": 4
+        },
+        {
+          "off": "0x1abc",
+          "width": 4
+        },
+        {
+          "off": "0x1ac0",
+          "width": 4
+        },
+        {
+          "off": "0x1ac4",
+          "width": 4
+        },
+        {
+          "off": "0x1ac8",
+          "width": 4
+        },
+        {
+          "off": "0x1acc",
+          "width": 4
+        },
+        {
+          "off": "0x1ad0",
+          "width": 4
+        },
+        {
+          "off": "0x1ad4",
+          "width": 4
+        },
+        {
+          "off": "0x1ad8",
+          "width": 4
         }
-      ]
+      ],
+      "note": "RTTI ??_7Input@@6B@（vtable 写入 0x477e16）；size 0x1ae0 = 与下一个内嵌子对象（T_Sys3Draw@T_Command+0x1ee8）的偏移差 ⇒ **上界**（成员最远到 0x1ad8，还剩 4 字节未观察）"
     },
     "T_414": {
       "size": null,
       "complete": false,
       "members": [
+        {
+          "off": "0x74",
+          "width": 4,
+          "note": "4 字节写（0x4658c3 `fst dword ptr [eax+74h]`，eax 取自 T_Font+0x414/+0x418/…/+0x438 这 12 个槽）"
+        },
+        {
+          "off": "0x78",
+          "width": 4,
+          "note": "4 字节写（0x4658ca `fst dword ptr [eax+78h]`）"
+        },
         {
           "off": "0xc8",
           "width": 4
@@ -1588,13 +2588,41 @@
         }
       ]
     },
-    "T_55d8": {
+    "T_CBunki": {
       "size": 29928,
       "complete": false,
       "members": [
         {
+          "off": "0x0",
+          "width": 4
+        },
+        {
           "off": "0x408",
           "width": 4
+        },
+        {
+          "off": "0x40c",
+          "type": "T_el32",
+          "count": 100,
+          "note": "与 +0x408 计数器同索引的并行 dword 数组；末尾正好接 +0x59c"
+        },
+        {
+          "off": "0x59c",
+          "type": "T_el32",
+          "count": 100,
+          "note": "与 +0x408 计数器同索引的并行 dword 数组；末尾正好接 +0x72c"
+        },
+        {
+          "off": "0x72c",
+          "type": "T_el32",
+          "count": 100,
+          "note": "与 +0x408 计数器同索引的并行 dword 数组；末尾正好接 +0x8bc"
+        },
+        {
+          "off": "0x8bc",
+          "type": "T_CBunki_8bc",
+          "count": 100,
+          "note": "每元素 0x10 字节的记录数组；末尾正好接已声明的 +0xefc"
         },
         {
           "off": "0xefc",
@@ -1603,6 +2631,17 @@
         {
           "off": "0xf00",
           "width": 4
+        },
+        {
+          "off": "0x7304",
+          "type": "T_el32",
+          "count": 100,
+          "note": "与 +0x408 计数器同索引的并行 dword 数组；末尾正好接 +0x7494"
+        },
+        {
+          "off": "0x7494",
+          "width": 4,
+          "note": "标量槽；由追加点写入一个参数值"
         },
         {
           "off": "0x7498",
@@ -1615,6 +2654,11 @@
         {
           "off": "0x74a0",
           "width": 4
+        },
+        {
+          "off": "0x74a4",
+          "width": 4,
+          "note": "标量槽；取值为 0/1 的一次性闩（另有清零点）"
         },
         {
           "off": "0x74a8",
@@ -1635,10 +2679,43 @@
         {
           "off": "0x74b8",
           "width": 4
+        },
+        {
+          "off": "0x74bc",
+          "width": 4
+        },
+        {
+          "off": "0x74c0",
+          "width": 4
+        },
+        {
+          "off": "0x74c4",
+          "width": 4
+        },
+        {
+          "off": "0x74c8",
+          "width": 4
+        },
+        {
+          "off": "0x74cc",
+          "width": 4
+        },
+        {
+          "off": "0x74d0",
+          "width": 16
+        },
+        {
+          "off": "0x74e0",
+          "width": 4
+        },
+        {
+          "off": "0x74e4",
+          "width": 4
         }
-      ]
+      ],
+      "note": "RTTI ??_7CBunki@@6B@（vtable 写入 0x403f76）"
     },
-    "T_a609c_424": {
+    "T_FileDB_424": {
       "size": 40,
       "complete": false,
       "members": [
@@ -1657,13 +2734,40 @@
         {
           "off": "0xc",
           "width": 4
+        },
+        {
+          "off": "0x10",
+          "type": "T_FileDB_424_10",
+          "count": 1
         }
       ]
     },
-    "T_143bc": {
-      "size": null,
+    "T_SE": {
+      "size": 1252,
       "complete": false,
       "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x408",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x40c",
+          "width": 4
+        },
+        {
+          "off": "0x410",
+          "width": 4
+        },
+        {
+          "off": "0x414",
+          "width": 4
+        },
         {
           "off": "0x418",
           "width": 4
@@ -1705,12 +2809,68 @@
           "width": 4
         },
         {
+          "off": "0x440",
+          "type": "T2",
+          "count": 10
+        },
+        {
+          "off": "0x468",
+          "type": "T2",
+          "count": 10
+        },
+        {
+          "off": "0x490",
+          "type": "T2",
+          "count": 10
+        },
+        {
           "off": "0x4b8",
           "width": 4
+        },
+        {
+          "off": "0x4bc",
+          "width": 4
+        },
+        {
+          "off": "0x4c0",
+          "width": 4
+        },
+        {
+          "off": "0x4c4",
+          "width": 4
+        },
+        {
+          "off": "0x4c8",
+          "width": 4
+        },
+        {
+          "off": "0x4cc",
+          "width": 4
+        },
+        {
+          "off": "0x4d0",
+          "width": 4
+        },
+        {
+          "off": "0x4d4",
+          "width": 4
+        },
+        {
+          "off": "0x4d8",
+          "width": 4
+        },
+        {
+          "off": "0x4dc",
+          "width": 4
+        },
+        {
+          "off": "0x4e0",
+          "width": 4
         }
-      ]
+      ],
+      "note": "RTTI ??_7SE@@6B@（vtable 写入 0x4b4e93）"
     },
-    "T_a609c_3028": {
+    "T_FileDB_3028": {
       "size": null,
       "complete": false,
       "members": [
@@ -1748,17 +2908,118 @@
         }
       ]
     },
-    "T_1ee8": {
-      "size": null,
+    "T_Sys3Draw": {
+      "size": 10752,
       "complete": false,
       "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
         {
           "off": "0x8",
           "width": 1024
         },
         {
+          "off": "0x408",
+          "width": 4,
+          "kind": "ptr",
+          "note": "值被解引用（0x440503 读 → 0x440509 以之为基址读 [eax] 后 call edx = 虚调用）；目标类型未判"
+        },
+        {
+          "off": "0x40c",
+          "type": "T_ptr4",
+          "count": 100,
+          "note": "按**面号**索引的指针表（原先把其中的第 2 / 第 30 项当成两个离散标量 0x414 / 0x484）：0x43c512 `cmp dword ptr [esi+edi*4+40Ch],0` 空指针检查、0x43c0db 与 0x43c2fb 与 0x43c70a 读元素、0x43c77b 写元素；元素被解引用（0x43c0db `mov edx,[eax]` → `mov edx,[edx+64h]` → call = 虚调用）。条数 100 的依据：0x43c544 `cmp edi,64h` + 0x43c547 `jl` ⇒ 面号必须 <100；末尾 0x40c+400=0x59c 在语料里被引用 35 处（G4 站得住）"
+        },
+        {
+          "off": "0x600",
+          "width": 4,
+          "note": "13 处全为 4 字节写（写被调方返回码：0x43c0fe 0x440512 0x440580 0x440635 0x44066d 0x440799 0x440874 0x4408a4 0x4408d4 0x43c5f7 0x43c626 0x43c679 0x43c71c）"
+        },
+        {
+          "off": "0x608",
+          "width": 1,
+          "note": "字节移位计数（0x43c288 movzx → cl 后参与 shl）；与 +0x609/+0x60a 同组"
+        },
+        {
+          "off": "0x609",
+          "width": 1,
+          "note": "字节移位计数（0x43c264 movzx → cl）"
+        },
+        {
+          "off": "0x60a",
+          "width": 1,
+          "note": "字节移位计数（0x43c276 movzx → cl）"
+        },
+        {
+          "off": "0x610",
+          "width": 1,
+          "note": "字节移位计数（0x43c27f movzx → cl）；与 +0x611/+0x612 同组"
+        },
+        {
+          "off": "0x611",
+          "width": 1,
+          "note": "字节移位计数（0x43c245 movzx → cl）"
+        },
+        {
+          "off": "0x612",
+          "width": 1,
+          "note": "字节移位计数（0x43c26d movzx → cl）"
+        },
+        {
+          "off": "0x614",
+          "width": 4,
+          "note": "位掩码（0x43c24c 4 字节读后 and）"
+        },
+        {
+          "off": "0x618",
+          "width": 4,
+          "note": "位掩码（0x43c254 and；0x4406ff / 0x4407c4 4 字节读作实参）"
+        },
+        {
+          "off": "0x61c",
+          "width": 4,
+          "note": "位掩码（0x43c25c and）"
+        },
+        {
+          "off": "0x620",
+          "width": 4
+        },
+        {
+          "off": "0x640",
+          "width": 4
+        },
+        {
+          "off": "0xfac",
+          "width": 4
+        },
+        {
+          "off": "0xfb4",
+          "width": 4
+        },
+        {
+          "off": "0xfb8",
+          "width": 4
+        },
+        {
+          "off": "0xfbc",
+          "width": 4
+        },
+        {
+          "off": "0xfc4",
+          "width": 4
+        },
+        {
+          "off": "0xfcc",
+          "width": 4,
+          "note": "4 字节读写（0x4067bd 写、0x440914 读出后写回 +0x1f7c）"
+        },
+        {
           "off": "0xfd8",
-          "type": "T_1ee8_fd8elem",
+          "type": "T_Sys3Draw_fd8elem",
           "count": null,
           "sweep": {
             "stride": 4,
@@ -1766,13 +3027,274 @@
           }
         },
         {
+          "off": "0x1168",
+          "type": "T_1168elem",
+          "count": 100,
+          "note": "按**面号**索引的记录数组（元素跨 0x24 = 9 个 dword，无洞）：0x43bfba `lea ecx,[ebx+ebx*8]` → `mov eax,[esi+ecx*4+1168h]`（= 0x1168 + 0x24·面号）、0x43c55c/0x43c562 同形；同一个面号也索引 0x40c 那张表。条数 100 由布局夹死：0x1168+0x24·100 = 0x1f78 = 已声明且被访问的成员（0x43c13f / 0x44055b）⇒ 原来散落在 0x117c/0x1180/0x1184/0x1188（元素 0）、0x11a0/0x11a4/0x11a8/0x11ac（元素 1）、0x11c4/0x11c8/0x11cc/0x11d0（元素 2）的 12 条内联槽就是这张表的元素字段"
+        },
+        {
+          "off": "0x1f78",
+          "width": 4
+        },
+        {
+          "off": "0x1f7c",
+          "width": 4
+        },
+        {
+          "off": "0x1f80",
+          "width": 4,
+          "note": "4 字节写（0x440906 写 1、0x440920 写 0）"
+        },
+        {
+          "off": "0x1f84",
+          "width": 4
+        },
+        {
+          "off": "0x1f88",
+          "width": 4
+        },
+        {
+          "off": "0x1f8c",
+          "width": 4,
+          "note": "4 字节写（0x440936 写 1）"
+        },
+        {
+          "off": "0x1f90",
+          "width": 4
+        },
+        {
+          "off": "0x1f94",
+          "width": 4
+        },
+        {
+          "off": "0x1f98",
+          "width": 4
+        },
+        {
+          "off": "0x1f9c",
+          "width": 4
+        },
+        {
           "off": "0x1fac",
           "width": 4,
           "kind": "ptr",
-          "type": "T_4ed10"
+          "type": "T_Renderer"
         },
         {
           "off": "0x1fb0",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_Scene"
+        },
+        {
+          "off": "0x1fb8",
+          "width": 4
+        },
+        {
+          "off": "0x1fbc",
+          "width": 4
+        },
+        {
+          "off": "0x1fc0",
+          "width": 4
+        },
+        {
+          "off": "0x1fc4",
+          "width": 4
+        },
+        {
+          "off": "0x1fc8",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x1fcc",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x1fd0",
+          "width": 4
+        },
+        {
+          "off": "0x1fd4",
+          "width": 4
+        },
+        {
+          "off": "0x1fd8",
+          "width": 4
+        },
+        {
+          "off": "0x1fdc",
+          "width": 4
+        },
+        {
+          "off": "0x1fe0",
+          "width": 4
+        },
+        {
+          "off": "0x1fe4",
+          "width": 4
+        },
+        {
+          "off": "0x1fe8",
+          "width": 4
+        },
+        {
+          "off": "0x1fec",
+          "width": 4
+        },
+        {
+          "off": "0x1ff0",
+          "width": 4,
+          "note": "16 字节按值记录的 dword[0]（同组 0x1ff4/0x1ff8/0x1ffc；整块搬栈的 EA 见 evidence.txt）"
+        },
+        {
+          "off": "0x1ff4",
+          "width": 4,
+          "note": "同组 dword[1]"
+        },
+        {
+          "off": "0x1ff8",
+          "width": 4,
+          "note": "同组 dword[2]；另有直接的读-改-写"
+        },
+        {
+          "off": "0x1ffc",
+          "width": 4,
+          "note": "同组 dword[3]"
+        },
+        {
+          "off": "0x2000",
+          "width": 4
+        },
+        {
+          "off": "0x2004",
+          "width": 4
+        },
+        {
+          "off": "0x2008",
+          "width": 4
+        },
+        {
+          "off": "0x200c",
+          "width": 4
+        },
+        {
+          "off": "0x2010",
+          "width": 4
+        },
+        {
+          "off": "0x2014",
+          "width": 4
+        },
+        {
+          "off": "0x2018",
+          "width": 4
+        },
+        {
+          "off": "0x201c",
+          "width": 4
+        },
+        {
+          "off": "0x2020",
+          "width": 4
+        },
+        {
+          "off": "0x2024",
+          "width": 4
+        },
+        {
+          "off": "0x2028",
+          "width": 4
+        },
+        {
+          "off": "0x202c",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2030",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2034",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2038",
+          "width": 4
+        },
+        {
+          "off": "0x203c",
+          "width": 4
+        },
+        {
+          "off": "0x2040",
+          "width": 4
+        },
+        {
+          "off": "0x2044",
+          "width": 4
+        },
+        {
+          "off": "0x2048",
+          "width": 4
+        },
+        {
+          "off": "0x204c",
+          "width": 4
+        },
+        {
+          "off": "0x2050",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2054",
+          "width": 4,
+          "note": "读-改-写累加器（宽度观测 4；无解引用 ⇒ 不是指针）"
+        },
+        {
+          "off": "0x2058",
+          "width": 4,
+          "note": "读-改-写累加器（无解引用 ⇒ 不是指针）"
+        },
+        {
+          "off": "0x205c",
+          "width": 4,
+          "note": "状态量：多路分派 + 被写入固定值（无解引用 ⇒ 不是指针）"
+        },
+        {
+          "off": "0x2060",
+          "width": 4
+        },
+        {
+          "off": "0x2064",
+          "width": 4
+        },
+        {
+          "off": "0x2068",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x206c",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2070",
           "width": 4,
           "kind": "ptr",
           "type": null
@@ -1798,8 +3320,41 @@
           "width": 4,
           "kind": "ptr",
           "type": null
+        },
+        {
+          "off": "0x29dc",
+          "width": 4
+        },
+        {
+          "off": "0x29e4",
+          "width": 4
+        },
+        {
+          "off": "0x29e8",
+          "width": 4
+        },
+        {
+          "off": "0x29ec",
+          "width": 4
+        },
+        {
+          "off": "0x29f0",
+          "width": 4
+        },
+        {
+          "off": "0x29f4",
+          "width": 4
+        },
+        {
+          "off": "0x29f8",
+          "width": 4
+        },
+        {
+          "off": "0x29fc",
+          "width": 4
         }
-      ]
+      ],
+      "note": "RTTI ??_7Sys3Draw@@6B@（vtable 写入 0x4b7d93）；size 0x2a00 = 与下一个内嵌子对象（T_Sound@T_Command+0x48e8）的偏移差 ⇒ **上界**（成员最远到 0x29f4，还剩 8 字节未观察）；RTTI ??_7Sys3Draw@@6B@（vtable 写入 0x4b7d93）；size 0x2a00 = 夹逼**闭合**，不是上界：成员 +0x29f8/+0x29fc（witness 0x4b7b8e/0x4b7b94，同一函数 0x4b7b78 里 esi=this）给出下界 0x2a00，父构造器在 +0x48e8 构造 T_Sound（0x41569f）给出同值上界；size 0x2a00 = 夹逼**闭合**：自身成员到 +0x29fc，且下一个内嵌子对象（T_Sound@T_Command+0x48e8）就在其后"
     },
     "T_rec12": {
       "size": 12,
@@ -1819,15 +3374,49 @@
         }
       ]
     },
-    "T_4ed10": {
-      "size": null,
+    "T_Scene": {
+      "size": 55852,
       "complete": false,
       "members": [
         {
-          "off": "0x42c",
-          "width": 4,
-          "kind": "ptr",
-          "type": "T_4ed10_42c"
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "type": "T_el8",
+          "count": 1024,
+          "note": "0x8..0x407：错误信息字符缓冲（首地址被反复取址后当 sprintf_s 的 Buffer，BufferCount 一律 400h）；末尾 0x408 == 下一个已声明成员 ⇒ count 有两条独立依据"
+        },
+        {
+          "off": "0x408",
+          "note": "内嵌 std::map<int, T_Scene_460>（结点 size 0x2F8）；ctor 0x4AB002 附近，_Myhead 在自身 +0x4 = 宿主 +0x40C，_Mysize 在 +0x8 = +0x410",
+          "type": "T_stdmap_n760",
+          "count": 1
+        },
+        {
+          "off": "0x418",
+          "note": "内嵌 std::map（结点 size 0x74，pair 0x64 = int + 96 字节值）；ctor 0x4AB049",
+          "type": "T_stdmap_n116",
+          "count": 1
+        },
+        {
+          "off": "0x428",
+          "note": "内嵌 std::map（结点 size 0x50，pair 0x40 = int + 60 字节值，值 +0x0/+0x4 是两个 COM 接口指针，析构器 0x4AB4BA 逐个 Release）；ctor 0x4AB08A",
+          "type": "T_stdmap_n80",
+          "count": 1
+        },
+        {
+          "off": "0x438",
+          "note": "内嵌 std::map（结点 size 0x250，pair 0x240 = int + 572 字节值）；ctor 0x4AB0CE",
+          "type": "T_stdmap_n592",
+          "count": 1
+        },
+        {
+          "off": "0x448",
+          "note": "与 +0x438 **同一个** map 实例化（同结点 size、同 _Color 偏移）；ctor 0x4AB118。原 +0x450 那条『标量』就是本 map 的 _Mysize",
+          "type": "T_stdmap_n592",
+          "count": 1
         },
         {
           "off": "0x458",
@@ -1839,27 +3428,119 @@
         },
         {
           "off": "0x460",
-          "type": "T_4ed10_460",
+          "type": "T_Scene_460",
           "count": 1
         },
         {
+          "off": "0x744",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
           "off": "0x748",
-          "type": "T_4ed10_elem14",
+          "type": "T_Scene_elem14",
           "count": 1000
         },
         {
           "off": "0x5568",
-          "type": "T_4ed10_elem14",
+          "type": "T_Scene_elem14",
           "count": 1000
+        },
+        {
+          "off": "0xa3c8",
+          "type": "T_mat44",
+          "count": 2,
+          "note": "两个 4x4 单位矩阵：连续两次 fldz→12×0 / fld1→对角 4×1，各写满 16 个 dword；末尾 0xa448 == 下一个成员"
+        },
+        {
+          "off": "0xa448",
+          "type": "T_mat44",
+          "count": 6,
+          "note": "6 个 4x4 矩阵：三对 rep movsd(ecx=10h) 源/宿 + 三处 D3DXMatrixMultiply 按值传参；末尾 0xa5c8 == 下一个成员"
+        },
+        {
+          "off": "0xa5c8",
+          "width": 4,
+          "note": "与 0xa5cc 成对交换的 dword 槽（一侧清零）"
+        },
+        {
+          "off": "0xa5cc",
+          "width": 4,
+          "note": "与 0xa5c8 成对交换的 dword 槽（一侧清零）"
+        },
+        {
+          "off": "0xa5d0",
+          "width": 4,
+          "note": "嵌套深度计数器（inc/dec + cmp 1 + test）"
+        },
+        {
+          "off": "0xa5d4",
+          "kind": "ptr",
+          "note": "值被解引用（0x4a30cb 读 → 0x4a30d1 以之为基址读 [eax]）；目标类型未判",
+          "width": 4
         },
         {
           "off": "0xa5d8",
           "type": "T2",
-          "count": null,
-          "sweep": {
-            "stride": 4,
-            "index": "arg_0"
-          }
+          "count": 1000
+        },
+        {
+          "off": "0xb578",
+          "width": 4
+        },
+        {
+          "off": "0xb57c",
+          "width": 4
+        },
+        {
+          "off": "0xb580",
+          "width": 4
+        },
+        {
+          "off": "0xb584",
+          "kind": "ptr",
+          "note": "值被解引用（0x4a7e56 读 → 0x4a7e5c 比较 [eax+43Ch]）；目标类型未判",
+          "width": 4
+        },
+        {
+          "off": "0xb588",
+          "width": 4,
+          "note": "步长/长度：被当 _memcpy 的 Size 且逐轮加到源指针上"
+        },
+        {
+          "off": "0xb58c",
+          "width": 4
+        },
+        {
+          "off": "0xb590",
+          "width": 4
+        },
+        {
+          "off": "0xb594",
+          "width": 4
+        },
+        {
+          "off": "0xb598",
+          "width": 4
+        },
+        {
+          "off": "0xb59c",
+          "width": 4
+        },
+        {
+          "off": "0xb5a0",
+          "width": 4
+        },
+        {
+          "off": "0xb5a4",
+          "width": 4,
+          "note": "有符号整数；全语料无索引形态 ⇒ 不是数组基址（判据见 report.md §3.1）"
+        },
+        {
+          "off": "0xb5a8",
+          "width": 4,
+          "note": "有符号整数，与 0xb5a4 成对相减"
         },
         {
           "off": "0xb5ac",
@@ -1867,6 +3548,10 @@
         },
         {
           "off": "0xb5b0",
+          "width": 4
+        },
+        {
+          "off": "0xb5b4",
           "width": 4
         },
         {
@@ -1882,17 +3567,178 @@
           "width": 4
         },
         {
+          "off": "0xb5c4",
+          "width": 4
+        },
+        {
+          "off": "0xb5c8",
+          "type": "T_mat44",
+          "count": 1,
+          "note": "一个 4x4 单位矩阵（fldz→12×0 / fld1→对角 4×1，写满 +0x00..+0x3C）；末尾 0xb608 被 3 处 lea 引用"
+        },
+        {
+          "off": "0xb648",
+          "width": 4
+        },
+        {
+          "off": "0xb64c",
+          "width": 4
+        },
+        {
+          "off": "0xb650",
+          "kind": "ptr",
+          "note": "值被解引用（0x49fec3 读 → 0x49fec9 读 [ecx+430h]）；目标类型未判",
+          "width": 4
+        },
+        {
+          "off": "0xb654",
+          "width": 4,
+          "note": "标量/标志：全语料几乎只参与比较，无解引用 ⇒ 不是指针"
+        },
+        {
+          "off": "0xb658",
+          "width": 4,
+          "note": "被 cmp 与 0 比较的 dword 标量"
+        },
+        {
+          "off": "0xb65c",
+          "width": 4
+        },
+        {
+          "off": "0xb660",
+          "width": 4
+        },
+        {
+          "off": "0xb668",
+          "width": 4
+        },
+        {
+          "off": "0xb66c",
+          "width": 4
+        },
+        {
           "off": "0xb670",
           "type": "T2",
-          "count": null,
-          "sweep": {
-            "stride": 4,
-            "index": "arg_0"
-          }
+          "count": 1000
+        },
+        {
+          "off": "0xc610",
+          "width": 4
+        },
+        {
+          "off": "0xc614",
+          "type": "T2",
+          "count": 1000
+        },
+        {
+          "off": "0xd5b4",
+          "width": 4
+        },
+        {
+          "off": "0xd5b8",
+          "width": 4
+        },
+        {
+          "off": "0xd5bc",
+          "width": 4
+        },
+        {
+          "off": "0xd5c0",
+          "width": 4
+        },
+        {
+          "off": "0xd5c4",
+          "width": 4
+        },
+        {
+          "off": "0xd5c8",
+          "width": 4
+        },
+        {
+          "off": "0xd5cc",
+          "width": 4
+        },
+        {
+          "off": "0xd5d0",
+          "width": 4
+        },
+        {
+          "off": "0xd5d4",
+          "width": 4
+        },
+        {
+          "off": "0xd5d8",
+          "width": 4
+        },
+        {
+          "off": "0xd9ec",
+          "width": 4
+        },
+        {
+          "off": "0xd9f0",
+          "width": 4
+        },
+        {
+          "off": "0xd9f4",
+          "width": 4,
+          "note": "写多读少的 dword"
+        },
+        {
+          "off": "0xd9f8",
+          "width": 4
+        },
+        {
+          "off": "0xd9fc",
+          "width": 4
+        },
+        {
+          "off": "0xda00",
+          "width": 4
+        },
+        {
+          "off": "0xda04",
+          "width": 4
+        },
+        {
+          "off": "0xda08",
+          "width": 4
+        },
+        {
+          "off": "0xda0c",
+          "width": 4
+        },
+        {
+          "off": "0xda10",
+          "width": 4
+        },
+        {
+          "off": "0xda14",
+          "width": 4
+        },
+        {
+          "off": "0xda18",
+          "width": 4
+        },
+        {
+          "off": "0xda1c",
+          "width": 4
+        },
+        {
+          "off": "0xda20",
+          "width": 4
+        },
+        {
+          "off": "0xda24",
+          "width": 4
+        },
+        {
+          "off": "0xda28",
+          "width": 4
         }
-      ]
+      ],
+      "note": "RTTI ??_7Scene@@6B@（vtable 写入 0x4aafcd）"
     },
-    "T_4ed10_42c": {
+    "T_Scene_42c": {
       "size": null,
       "complete": false,
       "members": [
@@ -1907,6 +3753,10 @@
         {
           "off": "0x8",
           "width": 4
+        },
+        {
+          "off": "0x4c",
+          "width": 1
         },
         {
           "off": "0x4d",
@@ -1931,6 +3781,11 @@
         {
           "off": "0x8",
           "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "note": "分配器槽：与 T_77960 同一模板的另一实例（元素步长 8 而非 4）"
         }
       ]
     },
@@ -1951,13 +3806,29 @@
         {
           "off": "0x8",
           "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "note": "分配器槽：只被取址后当分配器实参（+0x0/0x4/0x8 是 first/last/end，size:16 由它补满）"
         }
       ]
     },
-    "T_511c": {
-      "size": null,
+    "T_Data": {
+      "size": 1212,
       "complete": false,
       "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x8",
+          "type": "T_el8",
+          "count": 1024
+        },
         {
           "off": "0x408",
           "width": 4
@@ -1971,6 +3842,16 @@
           "width": 4
         },
         {
+          "off": "0x414",
+          "type": "T_Hashtable_int",
+          "count": 1
+        },
+        {
+          "off": "0x464",
+          "type": "T_Hashtable_string",
+          "count": 1
+        },
+        {
           "off": "0x4b4",
           "width": 4
         },
@@ -1978,9 +3859,10 @@
           "off": "0x4b8",
           "width": 4
         }
-      ]
+      ],
+      "note": "RTTI ??_7Data@@6B@（vtable 写入 0x4388fb）"
     },
-    "T_4ed10_elem14": {
+    "T_Scene_elem14": {
       "size": 20,
       "complete": false,
       "members": [
@@ -1998,8 +3880,8 @@
         }
       ]
     },
-    "T_4ed10_460": {
-      "size": null,
+    "T_Scene_460": {
+      "size": 740,
       "complete": false,
       "members": [
         {
@@ -2326,9 +4208,10 @@
           "off": "0x2e0",
           "width": 4
         }
-      ]
+      ],
+      "note": "size 0x2e4 = 夹逼**闭合**：自身成员 +0x2e0 被读（0x4af0c0；同一函数 0x4af01f 读宿主 +0x744，ebx=T_Scene）== 宿主 T_Scene 的 ctor 写的 +0x744（0x4ab12d）"
     },
-    "T_1ee8_fd8elem": {
+    "T_Sys3Draw_fd8elem": {
       "size": 4,
       "complete": false,
       "members": [
@@ -2409,7 +4292,8 @@
           "kind": "ptr",
           "type": "T_RemoteDebug"
         }
-      ]
+      ],
+      "note": "RTTI ??_7BaseObject@@6B@（vtable 写入 0x4034a2）"
     },
     "T_RemoteDebug": {
       "size": 1064,
@@ -2438,7 +4322,1622 @@
           "width": 4
         }
       ],
-      "note": "RTTI: ??_7RemoteDebug@@6B@ (ctor 0x497570 / dtor 0x4975d0 / _atexit 0x51c14f)"
+      "note": "RTTI ??_7RemoteDebug@@6B@（vtable 写入 0x4975a3；ctor 0x497570 · dtor 另写 0x4975f6 · _atexit 0x51c14f）"
+    },
+    "T_Stack_int": {
+      "size": 20,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_68eb0"
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7?$Stack@H@@（就地构造；vtable 写入见 T_Command+0x68ea4）"
+    },
+    "T_Queue_CACHE_ALPHADATA": {
+      "size": 28,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_Queue_CACHE_ALPHADATA_elem"
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7?$Queue@UCACHE_ALPHADATA@@（就地构造；vtable 写入见 T_Command+0x77a3c）；RTTI ??_7?$Queue@UCACHE_ALPHADATA@@（就地构造；vtable 写入见 T_Command+0x77a3c）。batch-15 成员表：7 条，0x0..0x18 无洞。最大观测偏移 0x18（→ 下界 0x1c，与三个同模板兄弟实例的 size 28 一致）。"
+    },
+    "T_Queue_int": {
+      "size": 28,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T2"
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7?$Queue@H@@6B@（构造器 sub_407C50；分配 new(0x1c) 见 0x4221b4）"
+    },
+    "T_fnptr4": {
+      "size": 4,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        }
+      ],
+      "note": "结构性元素类型：4 字节值（元素语义未定）；+0x0 声明成 4 字节内联值 ⇒ 元素内偏移 0 的访问能被解释"
+    },
+    "T_Sound": {
+      "size": 2100,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x8",
+          "type": "T_el8",
+          "count": 1024
+        },
+        {
+          "off": "0x408",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x40c",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x410",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x414",
+          "width": 4
+        },
+        {
+          "off": "0x418",
+          "width": 4
+        },
+        {
+          "off": "0x41c",
+          "width": 4
+        },
+        {
+          "off": "0x420",
+          "width": 4
+        },
+        {
+          "off": "0x424",
+          "type": "T_el32",
+          "count": 61,
+          "note": "dword 句柄槽数组；末尾正好接已声明的 +0x518"
+        },
+        {
+          "off": "0x518",
+          "width": 4
+        },
+        {
+          "off": "0x51c",
+          "type": "T_el32",
+          "count": 15
+        },
+        {
+          "off": "0x558",
+          "width": 4
+        },
+        {
+          "off": "0x560",
+          "width": 4
+        },
+        {
+          "off": "0x564",
+          "type": "T_el32",
+          "count": 15
+        },
+        {
+          "off": "0x5a0",
+          "type": "T_el32",
+          "count": 15
+        },
+        {
+          "off": "0x5dc",
+          "type": "T_el32",
+          "count": 15
+        },
+        {
+          "off": "0x618",
+          "type": "T_el32",
+          "count": 15
+        },
+        {
+          "off": "0x654",
+          "type": "T_el32",
+          "count": null,
+          "sweep": {
+            "stride": 4,
+            "index": "loop-esi"
+          }
+        },
+        {
+          "off": "0x690",
+          "type": "T_Sound_690",
+          "count": 15,
+          "note": "每元素 0x18 字节；末尾正好接 +0x7f8"
+        },
+        {
+          "off": "0x7f8",
+          "type": "T_el32",
+          "count": 15,
+          "note": "dword 数组；末尾 == 类型 size 0x834"
+        }
+      ],
+      "note": "RTTI ??_7Sound@@6B@（vtable 写入 0x4b5b8d）"
+    },
+    "T_Hook": {
+      "size": 1044,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x408",
+          "width": 4
+        },
+        {
+          "off": "0x40c",
+          "width": 4
+        },
+        {
+          "off": "0x410",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7Hook@@6B@（vtable 写入 0x476073）"
+    },
+    "T_Voice": {
+      "size": 1156,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x408",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x40c",
+          "width": 4
+        },
+        {
+          "off": "0x410",
+          "width": 4
+        },
+        {
+          "off": "0x414",
+          "width": 4
+        },
+        {
+          "off": "0x418",
+          "width": 4
+        },
+        {
+          "off": "0x41c",
+          "width": 4
+        },
+        {
+          "off": "0x420",
+          "width": 4
+        },
+        {
+          "off": "0x460",
+          "width": 4
+        },
+        {
+          "off": "0x464",
+          "width": 4
+        },
+        {
+          "off": "0x468",
+          "width": 4
+        },
+        {
+          "off": "0x46c",
+          "width": 4
+        },
+        {
+          "off": "0x470",
+          "width": 4
+        },
+        {
+          "off": "0x474",
+          "width": 4
+        },
+        {
+          "off": "0x478",
+          "width": 4
+        },
+        {
+          "off": "0x47c",
+          "width": 4
+        },
+        {
+          "off": "0x480",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7Voice@@6B@（vtable 写入 0x4bb733）"
+    },
+    "T_ReadTextDB": {
+      "size": 1144,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "type": "T_el8",
+          "count": 1024,
+          "note": "1024 字节字符缓冲；末尾正好接已声明的 +0x408"
+        },
+        {
+          "off": "0x408",
+          "type": "T_Hashtable_READTEXTDB_FILEFLAG",
+          "count": 1
+        },
+        {
+          "off": "0x458",
+          "type": "T_Queue_READTEXTDB_BUFFER",
+          "count": 1
+        },
+        {
+          "off": "0x474",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7ReadTextDB@@6B@（vtable 写入 0x48fb2b）"
+    },
+    "T_Renderer": {
+      "size": 1260,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "type": "T_el8",
+          "count": 1024
+        },
+        {
+          "off": "0x408",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x40c",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x410",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x414",
+          "width": 4
+        },
+        {
+          "off": "0x418",
+          "width": 4
+        },
+        {
+          "off": "0x41c",
+          "width": 4
+        },
+        {
+          "off": "0x420",
+          "width": 4
+        },
+        {
+          "off": "0x424",
+          "width": 4
+        },
+        {
+          "off": "0x42c",
+          "width": 4
+        },
+        {
+          "off": "0x430",
+          "width": 4
+        },
+        {
+          "off": "0x434",
+          "width": 4
+        },
+        {
+          "off": "0x438",
+          "width": 4
+        },
+        {
+          "off": "0x43c",
+          "width": 4
+        },
+        {
+          "off": "0x440",
+          "width": 4
+        },
+        {
+          "off": "0x448",
+          "width": 4
+        },
+        {
+          "off": "0x44c",
+          "width": 4
+        },
+        {
+          "off": "0x450",
+          "width": 4
+        },
+        {
+          "off": "0x454",
+          "width": 4
+        },
+        {
+          "off": "0x458",
+          "width": 4
+        },
+        {
+          "off": "0x45c",
+          "width": 4
+        },
+        {
+          "off": "0x460",
+          "width": 4
+        },
+        {
+          "off": "0x464",
+          "width": 4
+        },
+        {
+          "off": "0x468",
+          "width": 4
+        },
+        {
+          "off": "0x46c",
+          "width": 4
+        },
+        {
+          "off": "0x470",
+          "width": 4
+        },
+        {
+          "off": "0x474",
+          "width": 4
+        },
+        {
+          "off": "0x478",
+          "width": 4
+        },
+        {
+          "off": "0x47c",
+          "width": 4
+        },
+        {
+          "off": "0x480",
+          "width": 4
+        },
+        {
+          "off": "0x484",
+          "width": 4
+        },
+        {
+          "off": "0x488",
+          "width": 4
+        },
+        {
+          "off": "0x48c",
+          "width": 4
+        },
+        {
+          "off": "0x490",
+          "width": 4
+        },
+        {
+          "off": "0x494",
+          "width": 4
+        },
+        {
+          "off": "0x498",
+          "width": 4
+        },
+        {
+          "off": "0x49c",
+          "width": 4
+        },
+        {
+          "off": "0x4a0",
+          "type": "T_el32",
+          "count": 16
+        },
+        {
+          "off": "0x4e0",
+          "width": 4,
+          "note": "按单精度浮点读"
+        },
+        {
+          "off": "0x4e4",
+          "width": 4,
+          "note": "按单精度浮点读"
+        },
+        {
+          "off": "0x4e8",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7Renderer@@6B@（vtable 写入 0x497843）；RTTI ??_7Renderer@@6B@（vtable 写入 0x497843）。batch-15 成员表：42 条（40 标量 + 2 个数组）；洞 0x4 / 0x428 / 0x444 未观察不写。最大观测偏移 0x4e8（→ 下界 0x4ec）。"
+    },
+    "T_FadeTimer": {
+      "size": 28,
+      "complete": false,
+      "members": [],
+      "note": "RTTI ??_7FadeTimer@@6B@（vtable 写入 0x453a24）"
+    },
+    "T_SysCursor": {
+      "size": 1072,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x408",
+          "width": 4
+        },
+        {
+          "off": "0x40c",
+          "width": 4
+        },
+        {
+          "off": "0x410",
+          "type": "T_Queue_CACHE_SYSTEMCURSOR",
+          "count": 1
+        },
+        {
+          "off": "0x42c",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7SysCursor@@6B@（vtable 写入 0x4b88f4）"
+    },
+    "T_Music": {
+      "size": null,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x408",
+          "width": 4
+        },
+        {
+          "off": "0x40c",
+          "width": 4
+        },
+        {
+          "off": "0x410",
+          "width": 4
+        },
+        {
+          "off": "0x414",
+          "width": 4
+        },
+        {
+          "off": "0x418",
+          "width": 4
+        },
+        {
+          "off": "0x41c",
+          "width": 4
+        },
+        {
+          "off": "0x420",
+          "width": 4
+        },
+        {
+          "off": "0x424",
+          "width": 4
+        },
+        {
+          "off": "0x428",
+          "type": "T_Music_ptelem",
+          "count": 3
+        },
+        {
+          "off": "0x434",
+          "type": "T_Music_ptelem",
+          "count": 3
+        }
+      ],
+      "note": "RTTI ??_7Music@@6B@（vtable 写入 0x4899a9）；RTTI ??_7Music@@6B@（vtable 写入 0x4899a9）。batch-15 成员表：11 条（9 标量 + 2 个 3 条指针数组）；0x408..0x440 无洞。最大观测偏移 0x43c（数组末尾 0x440） ⇒ 下界 0x440。"
+    },
+    "T_Hashtable_int": {
+      "size": 80,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4,
+          "kind": "ptr",
+          "note": "原只声明宽度。0x438435 读出后以它为基址、按 0x1c 的元素跨度取字段（0x438444 处比较元素 +0x14）⇒ 是基址，不是标量。目标类型判不出"
+        },
+        {
+          "off": "0x1c",
+          "width": 4
+        },
+        {
+          "off": "0x20",
+          "width": 4
+        },
+        {
+          "off": "0x28",
+          "width": 4
+        },
+        {
+          "off": "0x2c",
+          "width": 4
+        },
+        {
+          "off": "0x30",
+          "width": 4
+        },
+        {
+          "off": "0x38",
+          "width": 4
+        },
+        {
+          "off": "0x3c",
+          "width": 4
+        },
+        {
+          "off": "0x40",
+          "width": 4
+        },
+        {
+          "off": "0x44",
+          "width": 4
+        },
+        {
+          "off": "0x48",
+          "width": 4
+        },
+        {
+          "off": "0x4c",
+          "width": 4
+        }
+      ],
+      "note": "RTTI ??_7?$Hashtable@H@@6B@"
+    },
+    "T_DrawEffect": {
+      "adapter": true,
+      "complete": false,
+      "size": null,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x1fac",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_Renderer"
+        },
+        {
+          "off": "0x1fb0",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_Scene"
+        },
+        {
+          "off": "0x1fc8",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x1fcc",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x202c",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2030",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2034",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2050",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2068",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x206c",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x2070",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        }
+      ],
+      "note": "RTTI ??_7DrawEffect@@6B@（vtable 写入 0x44a823 / 析构器 0x44a8bb）；基类前缀在 +0x0：构造器 sub_44A7F0 在 0x44a819 先调 Draw 构造器 sub_43AA80、随后在 [esi] 写自己的 vtable，而 sub_4B7D60 在 0x4b7d89 调它之后又在**同一 [esi]** 覆盖成 ??_7Sys3Draw@@6B@"
+    },
+    "T_FileDB_424_10": {
+      "size": 24,
+      "complete": false,
+      "members": [],
+      "note": "内嵌子对象：`InitializeCriticalSection`（0x454ac3）/ `DeleteCriticalSection`（0x4553e8）的实参；24 字节 = 元素步长 0x28（0x454ac9）− 内偏移 0x10。没有 RTTI 名，故用宿主+偏移命名；内部结构未观察 ⇒ 不声明成员。"
+    },
+    "T_Hashtable_string": {
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4
+        },
+        {
+          "off": "0x1c",
+          "width": 4
+        },
+        {
+          "off": "0x20",
+          "width": 4
+        },
+        {
+          "off": "0x28",
+          "width": 4
+        },
+        {
+          "off": "0x2c",
+          "width": 4
+        },
+        {
+          "off": "0x30",
+          "width": 4
+        },
+        {
+          "off": "0x38",
+          "width": 4
+        },
+        {
+          "off": "0x3c",
+          "width": 4
+        },
+        {
+          "off": "0x40",
+          "width": 4
+        },
+        {
+          "off": "0x44",
+          "width": 4
+        },
+        {
+          "off": "0x48",
+          "width": 4
+        },
+        {
+          "off": "0x4c",
+          "width": 4
+        }
+      ],
+      "size": 80,
+      "size_note": "0x464→0x4b4 相邻 K 差 0x50 ⇒ size 定下来"
+    },
+    "T_Queue_CACHE_SYSTEMCURSOR": {
+      "size": 28,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4
+        }
+      ]
+    },
+    "T_408_trio": {
+      "adapter": true,
+      "members": [
+        {
+          "off": "0x408",
+          "width": 4
+        },
+        {
+          "off": "0x40c",
+          "width": 4
+        },
+        {
+          "off": "0x410",
+          "width": 4
+        }
+      ]
+    },
+    "T_stdstring": {
+      "size": null,
+      "complete": false,
+      "adapter": true,
+      "note": "MSVC std::string 布局（x86）：+0x0 缓冲指针（或 16 字节 SSO）、+0x10 _Mysize、+0x14 _Myres；非多态 ⇒ 无 RTTI 名",
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        }
+      ]
+    },
+    "T_Hashtable_READTEXTDB_FILEFLAG": {
+      "size": 80,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4
+        },
+        {
+          "off": "0x1c",
+          "width": 4
+        },
+        {
+          "off": "0x20",
+          "width": 4
+        },
+        {
+          "off": "0x28",
+          "width": 4,
+          "kind": "ptr",
+          "note": "原只声明宽度。0x48ed04 读出后以它为基址、按 0xc 的元素跨度取字段（+0x4/+0x8）⇒ 是基址。目标类型判不出"
+        },
+        {
+          "off": "0x2c",
+          "width": 4
+        },
+        {
+          "off": "0x30",
+          "width": 4
+        },
+        {
+          "off": "0x38",
+          "width": 4
+        },
+        {
+          "off": "0x3c",
+          "width": 4
+        },
+        {
+          "off": "0x40",
+          "width": 4
+        },
+        {
+          "off": "0x44",
+          "width": 4
+        },
+        {
+          "off": "0x48",
+          "width": 4
+        },
+        {
+          "off": "0x4c",
+          "width": 4
+        }
+      ]
+    },
+    "T_Queue_READTEXTDB_BUFFER": {
+      "size": 28,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "note": "原只声明宽度。0x48ffce 读出后以它为基址、按 0xc 的元素跨度取字段（+0x0/+0x4/+0x8）⇒ 是基址。目标类型判不出"
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4
+        }
+      ]
+    },
+    "T_Hashtable_layout": {
+      "size": null,
+      "complete": false,
+      "adapter": true,
+      "note": "模板实例的**同形布局**（ICF 折叠）：Hashtable<int> 与 Hashtable<READTEXTDB_FILEFLAG> 的成员逐条同形、size 都是 0x50 ⇒ 同一份代码被两个实例共用",
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        },
+        {
+          "off": "0x1c",
+          "width": 4
+        },
+        {
+          "off": "0x20",
+          "width": 4
+        },
+        {
+          "off": "0x28",
+          "width": 4
+        },
+        {
+          "off": "0x2c",
+          "width": 4
+        },
+        {
+          "off": "0x30",
+          "width": 4
+        },
+        {
+          "off": "0x38",
+          "width": 4
+        },
+        {
+          "off": "0x3c",
+          "width": 4
+        },
+        {
+          "off": "0x40",
+          "width": 4
+        },
+        {
+          "off": "0x44",
+          "width": 4
+        },
+        {
+          "off": "0x48",
+          "width": 4
+        },
+        {
+          "off": "0x4c",
+          "width": 4
+        }
+      ]
+    },
+    "T_1cf2c_elem": {
+      "size": 20,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x12",
+          "width": 2
+        }
+      ],
+      "note": "元素的观测：+0x0/+0x4/+0x8/+0xc 各 4 字节、+0x12 是 2 字节（+0x12+2 = 步长 0x14）；+0x10 零访问 ⇒ 不写"
+    },
+    "T_CBunki_8bc": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        }
+      ]
+    },
+    "T_Sound_690": {
+      "size": 24,
+      "complete": false,
+      "members": []
+    },
+    "T_Music_ptelem": {
+      "size": 4,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null
+        }
+      ],
+      "note": "batch-15 新增：T_Music+0x428 与 T_Music+0x434 两个数组共用的元素类型（元素 = 一个对象指针；两处的用法都是取 [elem] 的 vtable 再按槽调用）。"
+    },
+    "T_Queue_CACHE_ALPHADATA_elem": {
+      "size": 8,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        }
+      ],
+      "note": "batch-15 新增：T_Queue_CACHE_ALPHADATA+0x4 数组的元素类型（8 字节，两个 dword；读出时两个值被原样搬到调用方的 8 字节缓冲里，未见当基址用）。"
+    },
+    "T_mat44": {
+      "size": 64,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4
+        },
+        {
+          "off": "0x4",
+          "width": 4
+        },
+        {
+          "off": "0x8",
+          "width": 4
+        },
+        {
+          "off": "0xc",
+          "width": 4
+        },
+        {
+          "off": "0x10",
+          "width": 4
+        },
+        {
+          "off": "0x14",
+          "width": 4
+        },
+        {
+          "off": "0x18",
+          "width": 4
+        },
+        {
+          "off": "0x1c",
+          "width": 4
+        },
+        {
+          "off": "0x20",
+          "width": 4
+        },
+        {
+          "off": "0x24",
+          "width": 4
+        },
+        {
+          "off": "0x28",
+          "width": 4
+        },
+        {
+          "off": "0x2c",
+          "width": 4
+        },
+        {
+          "off": "0x30",
+          "width": 4
+        },
+        {
+          "off": "0x34",
+          "width": 4
+        },
+        {
+          "off": "0x38",
+          "width": 4
+        },
+        {
+          "off": "0x3c",
+          "width": 4
+        }
+      ]
+    },
+    "T_vec16": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "首双字被当基址按元素跨度索引（0x40ebc8 的元素跨度 8、0x48ed0d 的元素跨度 0xc）；元素类型判不出"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "note": "与 0x0 成对当区间末端（0x40ec58 相减后定位数；0x41810b 作为区间末端传给 0x40e660）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "只被清零（0x40ec33 0x40ed0a）；0x4650f0 另有 1 处真访问 = 容器 +8"
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "note": "只有取址（0x40eca2）并作为上下文传给元素析构 0x40cad0；跨度至少 4 字节、语义判不出"
+        }
+      ],
+      "note": "16 字节容器：0x40f602 与 0x40f644 都按 16 字节分配、清 3 个双字后整块释放；T_Font+0x3964c 那处空档恰好也是 0x10 字节（0x3964c..0x3965c）⇒ 三处判成同一类型"
+    },
+    "T_ptr4": {
+      "size": 4,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "元素是堆块基址：0x40eb87 读出后整块释放，0x40f5ec 拿它当填充目标"
+        }
+      ],
+      "note": "4 字节指针表元素（本批只用于 T1+0x64 那 3 条表）"
+    },
+    "T_1168elem": {
+      "size": 36,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "note": "4 字节（0x43c562 读；0x4406f3 写元素 0 的 +0x0）"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "note": "4 字节（0x43c574 读；0x440708 写）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "4 字节（0x440717 写立即数）"
+        },
+        {
+          "off": "0xc",
+          "width": 4,
+          "note": "4 字节（0x43c220 读）"
+        },
+        {
+          "off": "0x10",
+          "width": 4,
+          "note": "4 字节（0x43c1be 读）"
+        },
+        {
+          "off": "0x14",
+          "width": 4,
+          "note": "4 字节（0x440721 写；0x4409d6 读）"
+        },
+        {
+          "off": "0x18",
+          "width": 4,
+          "note": "4 字节（0x440727 写；0x4409dc 读）"
+        },
+        {
+          "off": "0x1c",
+          "width": 4,
+          "note": "4 字节（0x4406f9 写；0x4409e4 读）"
+        },
+        {
+          "off": "0x20",
+          "width": 4,
+          "note": "4 字节（0x44070e 写；0x4409ed 读）"
+        }
+      ],
+      "note": "T_Sys3Draw+0x1168 那张表的元素类型（跨 0x24 = 9 个 dword，无洞）。步长来自 0x43bfba `lea ecx,[ebx+ebx*8]` + `[esi+ecx*4+1168h]`（= 0x1168 + 0x24·面号）；9 个字段各自被观测到（元素 0 / 1 / 2 / 30 各有站点落进来）"
+    },
+    "T_39618": {
+      "size": 32,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "note": "0x417ab9 写立即数 1（dword 宽）"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "note": "并集槽：0x4650dd 写 1 字节、0x4596c6 / 0x45e260 按 4 字节读出后作释放实参（1 ≤ 4 相容）"
+        },
+        {
+          "off": "0x14",
+          "width": 4,
+          "note": "4 字节计数：0x4650d7 写 0、0x4596db / 0x45e273 写 0"
+        },
+        {
+          "off": "0x18",
+          "width": 4,
+          "note": "4 字节容量：0x4650d4 写初值；0x4596c0 `cmp dword ptr [esi+18h],10h` 判容量阈值、0x4596d4 / 0x45e26c 写 0Fh"
+        }
+      ],
+      "note": "T_Font+0x39618 处的内嵌子对象（0x515489 / 0x515944 的 SEH 清理以 this+39618 调 sub_459690 ⇒ 独立生命期的成员；0x45e24e 又内联了同一段清理）。size 只能夹逼：下界 0x1c（最远观察字段 +0x18 的 dword 末尾），上界 0x20（T_Font 下一个已声明成员 0x39638 = +0x20）⇒ 取上界（+0x1c..+0x20 未观察）"
+    },
+    "T_Font_414elem": {
+      "size": 4,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_414",
+          "note": "槽里的值被当对象基址解引用（0x45be3f 与 0x45be5b 两处，另见 0x45be6e/0x45bece）；指向类型沿用既有 T_414"
+        }
+      ]
+    },
+    "T_treenode_760": {
+      "size": 760,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Left（0x40C955 写 [esi]=this->_Myhead；0x4A8120 的旋转里 [edx+8] 被当子结点再解引用）"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Parent（0x40C95D；header 的 +0x4 是 root，空树时自链）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Right（0x40C963；header 的 +0x8 是 rightmost）"
+        },
+        {
+          "off": "0x2f4",
+          "width": 1,
+          "note": "_Color（1=黑）：0x40B748 的 `cmp byte ptr [ecx+2F4h], 0` = 重平衡里的 `父为红?` 判据；0x40B916 收尾把 root 写 1"
+        },
+        {
+          "off": "0x2f5",
+          "width": 1,
+          "note": "_Isnil：header 结点上写 1（0x4AB00C），插入循环用它当终止判据（0x4A81E0 系列 `cmp [reg+2F5h],0`）"
+        }
+      ],
+      "note": "红黑树结点（map@Scene+0x408 那个实例化，分配 size 0x2F8 见 0x40C93D）。布局：+0x0/_Myhead 同址的左/父/右三指针（_Buynode0 里三条写入都以 this->_Myhead 为初值，0x40C955..0x40C963）· +0xC 起是 `pair<const int, T_Scene_460>`（拷贝构造调用点 0x40C980）· +0x2F4 _Color / +0x2F5 _Isnil（**同一条 2 字节写入** `mov [esi+2F4h], bx` 0x40C966 ⇒ 两个字节就是一个结构体里的相邻位）. +0xC..+0x2F3 的 pair 区域**故意不声明**（值类型已判 = T_Scene_460，但 pair 的内部形态属于另一层）。左/父/右三个指针**不写 type**（真值是自引用本类型；本层只做一跳，写成 null 以免递归——它们进不透明桶，不判红）。"
+    },
+    "T_treenode_116": {
+      "size": 116,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Left"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Parent"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Right"
+        },
+        {
+          "off": "0x70",
+          "width": 1,
+          "note": "_Color：0x4A8276/0x4A827A 等重平衡写 1"
+        },
+        {
+          "off": "0x71",
+          "width": 1,
+          "note": "_Isnil：header 写 1（0x4AB050）；`cmp [reg+71h],0` 是遍历终止判据（sub_4AAE10 的 `*(v4+113)==0`）"
+        }
+      ],
+      "note": "红黑树结点（map@Scene+0x418 那个实例化，分配 size 0x74 见 0x4AA4BD）。同形：+0x0/+0x4/+0x8 三指针 · +0xC 起 `pair<const int, 96 字节值>`（pair 0x64）· +0x70 _Color / +0x71 _Isnil（2 字节写入 0x4AA4E3）。"
+    },
+    "T_treenode_592": {
+      "size": 592,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x0",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Left"
+        },
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Parent"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "kind": "ptr",
+          "type": null,
+          "note": "_Right"
+        },
+        {
+          "off": "0x24c",
+          "width": 1,
+          "note": "_Color"
+        },
+        {
+          "off": "0x24d",
+          "width": 1,
+          "note": "_Isnil：header 写 1（0x4AB0D8 / 0x4AB122）；`cmp [reg+24Dh],0`（sub_4AAEC0 的 `*(v4+589)==0`）"
+        }
+      ],
+      "note": "红黑树结点（map@Scene+0x438 与 +0x448 两个实例共用的那个实例化，分配 size 0x250 见 0x4AA59D）。同形：+0x0/+0x4/+0x8 三指针 · +0xC 起 `pair<const int, 572 字节值>`（pair 0x240）· +0x24C _Color / +0x24D _Isnil（2 字节写入 0x4AA5C6）。"
+    },
+    "T_stdmap_n760": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_treenode_760",
+          "note": "_Myhead：header 结点。比较点 0x4AAA85（`cmp edx,[esi+40Ch]` = 迭代器 == header）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "_Mysize：插入时 +1 并与常量比（0x40B728..0x40B74C）；构造器清零 0x4AAFDB"
+        }
+      ],
+      "note": "x86 MSVC `std::map<int, T_Scene_460>` 的**对象头布局**（名字按结点 size 0x2F8 编，不承担语义）：`this` 就是 map 自己（Scene+0x408），+0x4 = _Myhead（header 结点，指向 T_treenode_760）· +0x8 = _Mysize。★ size 16 的证据两条：①五个实例在 Scene 里的偏移差恰是 0x10（0x408/0x418/0x428/0x438/0x448，同一个构造器里连续五个 try 块）；②_Buynode 把 `this+0xD` 当分配器实参取址（0x40C97C `add edi,0Dh`）⇒ 对象至少 14 字节。+0x0 与 +0xC 全语料**未观察**（ctor 不写 +0x0，成员函数只读 +0x4/+0x8）⇒ 不声明（洞）。"
+    },
+    "T_stdmap_n116": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_treenode_116",
+          "note": "_Myhead（header）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "_Mysize（构造器清零 0x4AB022）"
+        }
+      ],
+      "note": "同 T_stdmap_n760 的布局，结点换 T_treenode_116（Scene+0x418；结点分配 0x74 见 0x4AA4BD；_Mysize 判据在 0x4A81E3..0x4A8205）。"
+    },
+    "T_stdmap_n80": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_Scene_42c",
+          "note": "_Myhead（header）；0x4AB480 `mov edi,[eax]` = header->_Left 当迭代起点"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "_Mysize（构造器清零 0x4AB091 附近）"
+        }
+      ],
+      "note": "同 T_stdmap_n760 的布局，结点复用**既有** T_Scene_42c（Scene+0x428；结点分配 0x50 见 0x40CA1D）。★ 为什么指向 T_Scene_42c 而不是新开一个结点类型：既有模型已经把 `T_Scene+0x42c` 声明成 `kind:ptr → T_Scene_42c`，那 5 个成员（+0x0/+0x4/+0x8/+0x4C/+0x4D）**就是**本实例的结点形态；复用它可以让既有下钻结果逐条不变（只改成「经 +0x4 跳一次」）。"
+    },
+    "T_stdmap_n592": {
+      "size": 16,
+      "complete": false,
+      "members": [
+        {
+          "off": "0x4",
+          "width": 4,
+          "kind": "ptr",
+          "type": "T_treenode_592",
+          "note": "_Myhead（header）"
+        },
+        {
+          "off": "0x8",
+          "width": 4,
+          "note": "_Mysize（构造器清零 0x4AB0A7 / 0x4AB0F1）"
+        }
+      ],
+      "note": "同 T_stdmap_n760 的布局，结点 T_treenode_592（Scene+0x448 与 Scene+0x438 两个实例**同一个**实例化；结点分配 0x250 见 0x4AA59D，两处 header 初始化见 0x4AB0CE / 0x4AB118）。"
     }
   }
 }

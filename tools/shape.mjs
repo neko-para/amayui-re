@@ -52,7 +52,7 @@ export const OPERATIONS = [
   { name: 'depth', argv: ['--depth'], mutates: false, summary: '**对象层级分布**（level 1 / 2 / 3+）：`[<sym>]`；用来现跑"下钻上限冻结在层级 2"这个判决（层级 ≥3 单列，不静默丢）' },
   { name: 'census', argv: ['--census'], mutates: false, summary: '★ **全表普查**：每个**有 handler 的 opcode**（判据 = 语料分派表）的站点分类 / `obj0` 偏移聚类 / 索引簇 / 未解析三类报数（`--match <sym>` 收窄 · `--json` 全量）' },
   { name: 'bodies', argv: ['--bodies'], mutates: false, summary: '★ **handler 体骨架普查**：记录槽写法（哪个立即数写进哪个位移）+ 调用序列（每个 callee 的实参立即数）⇒ 按骨架分组（`--match` · `--json`）—— 这是 A1–A6 的**可算版**' },
-  { name: 'claims', argv: ['--claims'], mutates: false, summary: '★ **功能②**：校验 claims 文件（守卫 / G1..G6 / J3 / 双守恒）；`--sample` 用内置样本' },
+  { name: 'claims', argv: ['--claims'], mutates: false, summary: '★ **功能②**：校验 claims 文件（守卫 / G1..G14 / J3 / 四守恒）；`--sample` 用内置样本；`--by-type` 加一节**残差按类型聚合**（"下一批该补哪个类型的成员表"的机械依据）' },
   { name: 'propagate', argv: ['--propagate'], mutates: false, summary: '★ **类型传播（全图 BFS）**：从已声明载体沿调用图推导每个函数根寄存器是什么类 ⇒ 批次顺序 + "类判定"的**唯一机械依据**（⛔ 不按偏移命中率猜类）' },
   { name: 'calls', argv: ['--calls'], mutates: false, summary: '★ 调用点类型对账（跨函数）：调用方实参来源 → 被调方的载体声明 ⇒ 一致 / 不一致 / 单侧缺声明（不拿同偏移顶替类型；栈上传参本版不覆盖）' },
   { name: 'coverage', argv: ['--coverage'], mutates: false, summary: '★ **闭合度**：指令级记账 —— 未归类行 / 间接调用 / 间接跳转 / 抛异常 / x87·SSE 内存操作数 / 基址未解析 ⇒ 判 `L0 形状闭合`（**回答"这个函数分析完了吗"**；`--all [--limit N]`）' },
@@ -83,7 +83,10 @@ export function describeText() {
                **可证伪性**（零观察 / 多余的视图单列），语义**不由本层背书**
              ★ \`type\` 在成员上有**两个意思**，按 \`kind\` 分岔：\`kind:"ptr"\` 时是**被指向的类型**（不该配 \`count\`）；
                否则是**数组元素类型**（必须配 \`count\`——写 \`null\` 就得配 \`sweep\`）
-             ★ \`adapter:true\`：这个类型是**布局约束**（"调用方在 +K 上有这个成员"），不是"我是这个类" ——
+             ★ **RTTI 基类数组 \`??_R2<Class>@@8\` 是"有没有中间基类"的判据**：第一个 dword 是条目数，其后每项指向一个
+   \`RTTIBaseClassDescriptor\`。实测 \`SE\`/\`Voice\` 都是 **2**（自己 + \`BaseObject\`）而 \`Sound\` 是 **3**（含 \`SoundError\`）
+   ⇒ 中间基类**会**出现在数组里；这条把 sub_4BB810 判成"布局适配器"（T_408_trio，adapter:true），而不是硬记成某一类。
+★ \`adapter:true\`：这个类型是**布局约束**（"调用方在 +K 上有这个成员"），不是"我是这个类" ——
                用于 \`this->成员\` 的转发器（实测 \`sub_4034C0\`/\`D0\`/\`E0\` 都做 \`mov ecx,[ecx+4]\` 之后转发，
                其中 \`sub_4034E0\` 是 \`mov eax,[ecx]; mov eax,[eax+8]; jmp eax\` = **虚调用**），
                被 \`T0\` 与内嵌子对象 \`T_1ee8\`/\`T_4ed10\`/\`T_a609c\` 四种类当 this 调用。
@@ -121,6 +124,10 @@ export function describeText() {
      **二级对象内嵌派生** + **数据段符号** + **未解析基址**）
      ★ 没有这一条时，这几类会**从访问总数里静默消失**（数字变小，不报错）
      ★ 未解析**按载体**报数并给样例 EA（按基址寄存器分组）；⛔ 那不是"已通过"，是"形状层表达不了"
+     ★ **基址/索引分不清**（\`[ecx+eax]\` 两个寄存器都是"从内存读出来的值"）⇒ 谁是指针、谁是游标**判不了**，
+       单列一档（⛔ 不算通过）。实测 \`sub_447810\` 的 \`0x448069 cmp byte ptr [ecx+eax], 0\`：
+       \`ecx=[esi+0x204c]\`、\`eax=[esi+0x2030]\` ⇒ 0x2030 才是图基址、0x204c 是整数游标；
+       ⛔ 反事实：把 0x204c 写成 \`kind:"ptr"\` 会让 12 条红全消 —— 那是**假绿**。
   守恒④（**解释分档**：解释 = **观测档** + **视图推测档**）—— 分不开就审不出"哪条结论是猜的"
   G13 **全局载体**（\`{kind:"global", sym, type, witness}\`）= "这个数据段符号里装的是 T 的指针"。
      ★ 为什么必须有：**根对象不是参数** —— Engine（IDA 类名 \`Command\`）由 \`_WinMain@16\` 里
@@ -447,7 +454,7 @@ function runPropagate(args) {
   return args.includes('--strict') && conflicts.length ? 1 : 0;
 }
 
-function runClaims(target) {
+function runClaims(target, opts = {}) {
   const lines = loadListing();
   let model;
   let baseDir = process.cwd();
@@ -462,7 +469,7 @@ function runClaims(target) {
     title = `claims-check：${path.basename(file)}`;
   }
   const rep = checkClaims(model, { lines, baseDir, observed: observedSet(lines) });
-  process.stdout.write(renderReport(rep, { title }));
+  process.stdout.write(renderReport(rep, { title, byType: opts.byType === true }));
   // ★ **闭合度**：站点全绿 ≠ 函数分析完了 —— 载体函数逐个给 L0 判据，未闭合的点名原因
   {
     const spanOf = new Map(functionSpans(lines).map((s) => [s.sym, s]));
@@ -504,7 +511,7 @@ export async function main(argv = process.argv.slice(2)) {
     case '--calls': return runCalls(argv);
     case '--propagate': return runPropagate(argv);
     case '--bodies': return runBodies(argv);
-    case '--claims': return runClaims(pos[0]);
+    case '--claims': return runClaims(pos[0], { byType: argv.includes('--by-type') });
     case '--describe': process.stdout.write(describeText()); return 0;
     default:
       process.stderr.write(`未知参数：${argv.join(' ')}\n可用：--access <sym> · --verify <EA> · --regions <sym> [reg] · --depth [sym] · --census [--match <sym>] [--json] · --claims <file>|--sample · --describe\n`);

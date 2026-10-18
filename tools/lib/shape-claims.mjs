@@ -196,6 +196,36 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
   }
   const refs = (abs) => occurrences.get(abs) ?? 0;
   const spans = functionSpans(lines);
+  /** EA → 指令文本（惰性建；多个守卫共用，别各扫一遍） */
+  let eaTextAll = null;
+  const eaTextOf = (ea) => {
+    if (!eaTextAll) {
+      eaTextAll = new Map();
+      for (const ln of lines) {
+        const m = /^[A-Za-z_.][\w.]*:([0-9A-F]{8})\s+(.*)$/.exec(ln);
+        if (m) eaTextAll.set(Number.parseInt(m[1], 16), m[2]);
+      }
+    }
+    return eaTextAll.get(ea) ?? null;
+  };
+  /** 符号 → 指令跨度（含结束地址；G16 要判"这条 EA 在不在函数自己的体里"） */
+  const spanBySym = new Map();
+  for (const s of spans) {
+    const next = spans.find((x) => x.from > s.from);
+    spanBySym.set(s.sym, { from: s.from, to: s.to ?? (next ? next.from - 1 : lines.length - 1), ea: s.ea, ...s });
+  }
+  /** 这条 EA 是否在某个函数的**指令体**里（G16 判「入口约定」用；按符号惰性建集合） */
+  const eaInBody = (sp, ea) => {
+    if (!sp._eas) {
+      const s2 = new Set();
+      for (let i = sp.from; i <= sp.to && i < lines.length; i += 1) {
+        const m = /^[A-Za-z_.][\w.]*:([0-9A-F]{8})\s/.exec(lines[i]);
+        if (m) s2.add(Number.parseInt(m[1], 16));
+      }
+      sp._eas = s2;
+    }
+    return sp._eas.has(ea);
+  };
   const rootsMap = roots ?? objRootRegs();
   /** 观察集（形状层）：能解折叠形态 ⇒ G6 的正确判据；**必须显式传入**（本模块不写缓存文件） */
   const OBS = observed;
@@ -249,8 +279,14 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
         out.push({ m, delta: 0, from: m.offN, to: m.offN + (m.ext ?? 1), kind: 'inline', sweep: null, stride: null, elemSize: null });
         continue;
       }
+      // ★ count 已知 ⇒ 窗口覆盖**整条数组**（elemSize*count），不是只覆盖第 1 个元素；
+      //   count:null（sweep）⇒ 保持「单元素窗口 + 索引身份」的判法（无界窗口不能靠范围兜）。
+      // ★ 只对 delta 0（数组本体）加宽；视图窗口保持单元素 —— 视图是「同一数组的另一种读法」，
+      //   加宽会让相邻视图互相「观察」到对方的站点，把「零观察」判据搅乱（实测 ★⑥ 会红）。
+      const countWide = (m.count != null && Number.isFinite(num(m.count))) ? num(m.count) * elemSize : elemSize;
       for (const d of [0, ...(m.views ?? []).map((v) => num(v.elementDelta))]) {
-        out.push({ m, delta: d, from: m.offN + stride * d, to: m.offN + stride * d + elemSize, kind: 'array', sweep: sweepOf(m), stride, elemSize });
+        const width = d === 0 ? countWide : elemSize;   // 视图窗口保持单元素（见上）
+        out.push({ m, delta: d, from: m.offN + stride * d, to: m.offN + stride * d + width, kind: 'array', sweep: sweepOf(m), stride, elemSize });
       }
     }
     return out;
@@ -351,7 +387,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
   const candidateWindows = new Set();
   const cons = {
     sites: 0, obj0Acc: 0, obj0Explained: 0, obj0ExplainedObserved: 0, obj0ExplainedViaView: 0, obj0Residue: 0, partial: 0, partialTakeAddr: 0, partialIndexUnresolved: 0,
-    pointee: 0, pointeeOk: 0, pointeeOpaque: 0, pointeeBad: 0, pointeeMulti: 0, deep: 0,
+    pointee: 0, pointeeOk: 0, pointeeOpaque: 0, pointeeBad: 0, pointeeMulti: 0, pointeeAmbiguous: 0, deep: 0,
     symbol: 0, unresolvedBase: 0, unresolvedIndex: 0, widthUnknown: 0, local: 0, localOk: 0, localResidue: 0,
   };
   // ── G10 **局部类型载体**（"这个寄存器在这一段里装的是某个类型的对象"）
@@ -484,6 +520,22 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
     for (const s of obj0) {
       const cands = wins.filter((w) => matchesWindow(w, s));
       if (!cands.length) {
+        // ★ **父访问落在内嵌子对象的跨度里**（MSVC 会把子对象的初始化/字段访问内联到父的构造器里）：
+        //   这个字节区间按 G1 的**归属**是子对象的 —— 所以判据去子对象的成员表里找，而不是记残差。
+        //   实测来源：`T_Command+0x152a0` 在 `T_Font`（0x14d30, size 0x3967c）跨度内；`0x68ea8`/`0x796e4`
+        //   同理落在 `Stack<int>` / `Queue<int>` 里。⛔ 归错就 G1 重叠，记残差就把"已解释"说成"没解释"。
+        const embHost = membersOfId(tid).find((m) => m.type && m.count === 1 && m.ext != null
+          && s.absDisp >= m.offN && s.absDisp < m.offN + m.ext);
+        if (embHost) {
+          const rel = s.absDisp - embHost.offN;
+          const eb = membersOfId(embHost.type).find((m) => rel >= m.offN && (m.ext == null ? rel < m.offN + 1 : rel < m.offN + m.ext));
+          if (eb && (eb.width == null || s.access === 'a' || s.width === 'unknown' || s.width <= eb.width)) {
+            explained.push({ ea: s.ea, abs: s.absDisp, member: eb, leaf: eb, delta: 0, viaView: false, viaEmbedded: embHost.type });
+            continue;
+          }
+          residue.push({ ea: s.ea, abs: s.absDisp, kind: 'obj0', why: `落在内嵌子对象 ${embHost.type}+${hex(rel)} 里，但那里没有已声明成员` });
+          continue;
+        }
         if (t.complete) red(`G2 ${c.id} @${hex(s.ea)}`, `访问 ${hex(s.absDisp)} 不落在 ${c.type} 的任何已声明成员上（且该类型声明为 complete）`);
         else residue.push({ ea: s.ea, abs: s.absDisp, kind: 'obj0', why: `访问 ${hex(s.absDisp)} 不落在 ${c.type} 的任何已声明成员上` });
         continue;
@@ -492,22 +544,107 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       for (const cw of cands) candidateWindows.add(`${tid}|${cw.m.offN}|${cw.delta}`);
       const host = w.m;
       let leaf = host;
+      let viaEmbedded = host.count === 1 && host.type ? host.type : null;   // 内嵌子对象的字段（父载体上的站点）
       if (w.kind === 'array') {              // ★ 数组（含视图窗口）：还要落到**元素类型的成员**上
         const et = types[host.type];
-        const elemOff = s.absDisp - w.from;
-        const em = membersOf(et).find((m) => elemOff >= m.offN && (m.ext == null ? elemOff < m.offN + 1 : elemOff < m.offN + m.ext));
-        if (!em) {
-          if (et?.complete) red(`G2 ${c.id} @${hex(s.ea)}`, `元素内偏移 ${hex(elemOff)} 不是 ${host.type} 的成员（${host.type} 声明为 complete）`);
-          else residue.push({ ea: s.ea, abs: s.absDisp, kind: 'obj0', why: `元素内偏移 ${hex(elemOff)} 不是 ${host.type} 的成员` });
-          continue;
+        const elemOffRaw = s.absDisp - w.from;
+        // ★ 未带索引 ⇒ 这个站点可能是"第 k 个元素的第 0 个字段"；只有取模才落在元素的成员上。
+        //   （带索引时差值本身就是元素内偏移：索引已经记在 indexSym/stride 里。）
+        const elemOff = (!s.indexSym && typeof et?.size === 'number' && et.size > 0)
+          ? (elemOffRaw % et.size)
+          : elemOffRaw;
+        // ★ **元素 0 的偏移 0 = 这个数组/内嵌对象自己的起点**：`lea ecx,[esi+K]`（内嵌子对象的基址）
+        //   与"表第 0 槽"都落在这里 ⇒ 由**成员本身**解释，不去找"元素内的成员"。
+        //   实测：`T_Command` 的 20 个内嵌子对象都是 `count:1`，子对象类型多数还没有成员 ⇒
+        //   不做这一条，每一条 `lea ecx,[esi+K]` 都会变成"元素内偏移 0x0 不是成员"的残差（纯噪声）。
+        if (elemOff === 0) { leaf = host; }
+        else {
+          const em = membersOf(et).find((m) => elemOff >= m.offN && (m.ext == null ? elemOff < m.offN + 1 : elemOff < m.offN + m.ext));
+          if (!em) {
+            if (et?.complete) red(`G2 ${c.id} @${hex(s.ea)}`, `元素内偏移 ${hex(elemOff)} 不是 ${host.type} 的成员（${host.type} 声明为 complete）`);
+            else residue.push({ ea: s.ea, abs: s.absDisp, kind: 'obj0', why: `元素内偏移 ${hex(elemOff)} 不是 ${host.type} 的成员` });
+            continue;
+          }
+          leaf = em;
         }
-        leaf = em;
-        if (s.indexSym && et?.size != null && s.stride !== et.size) { red(`G3 ${c.id} @${hex(s.ea)}`, `数组形态步长 ${s.stride} != size(${host.type})=${et.size}`); continue; }
+        // ★ G3 比的是**最内层那个数组的元素大小**（放在 `elemOff === 0/≠0` 两个分支**之外**：
+        //   踩过 —— 只写在"元素内偏移≠0"那支里，`[esi+edi*4+2000h]`（第 0 个元素 + 真数组）就永远不校验）。
+        //   · 站点落在**内嵌子对象**跨度里（`count:1`）时，`stride` 与"子对象自己的 size"无关 ——
+        //     实测 `0x4116ba mov eax,[esi+eax*4+5D04h]`：`0x5d04` 落在 `T_Command+0x55d8` 那块
+        //     `T_CBunki(count:1)` 的跨度里，元素内偏移 `0x72c`，而 `T_CBunki+0x72c` 本身是
+        //     `T_el32×100` ⇒ 步长 4 该跟 `T_el32.size` 比，不是跟 `T_CBunki.size`(29928) 比。
+        //   · `leaf` 自己是数组时，用 `leaf.type` 的元素大小。
+        {
+          const innerArray = leaf && leaf !== host && leaf.count != null && leaf.type ? (types[leaf.type]?.size ?? null) : null;
+          const hostIsArray = host.count == null || host.count > 1;
+          const strideUnit = innerArray ?? (hostIsArray ? (et?.size ?? null) : null);
+          if (s.indexSym && strideUnit != null && s.stride !== strideUnit) {
+            red(`G3 ${c.id} @${hex(s.ea)}`, `数组形态步长 ${s.stride} != 元素大小 ${strideUnit}${leaf !== host ? `（${host.type}+${hex(leaf.offN)}）` : `（size(${host.type})）`}`);
+            residue.push({ ea: s.ea, abs: s.absDisp, kind: 'obj0', why: '数组步长与元素大小不匹配（见 G3）' });
+            continue;
+          }
+        }
       }
-      if (leaf.width != null && s.access !== 'a' && s.width !== 'unknown' && s.width > leaf.width) { red(`G2 ${c.id} @${hex(s.ea)}`, `宽度 ${s.width} != 成员声明 ${leaf.width}`); continue; }
-      explained.push({ ea: s.ea, abs: s.absDisp, member: host, leaf, delta: w.delta, viaView: w.delta !== 0 });
+      if (leaf.width != null && s.access !== 'a' && s.width !== 'unknown' && s.width > leaf.width) {
+        red(`G2 ${c.id} @${hex(s.ea)}`, `宽度 ${s.width} != 成员声明 ${leaf.width}`);
+        residue.push({ ea: s.ea, abs: s.absDisp, kind: 'obj0', why: `宽度 ${s.width} 超过成员声明的 ${leaf.width}（见 G2）` });
+        continue;
+      }
+      explained.push({ ea: s.ea, abs: s.absDisp, member: host, leaf, delta: w.delta, viaView: w.delta !== 0, viaEmbedded });
     }
 
+    // ── G15 **索引访问落在已声明成员上 ⇒ 那个成员必须是数组**（note 级，⛔ 不算通过；S2r 计划翻红）
+    //   ★ 为什么需要：mov eax,[esi+eax*4+0A509Ch]（op handler 分派读）在 shape access 里是 abs=0xa509c ⚠ index
+    //     ⇒ offsetUnusable()='index-unresolved' ⇒ 进「位移不可用」桶，**不比对成员、不产生残差/红**。
+    //     于是「1024 项分派表被写成 544 条离散内联槽」在所有义务下都沉默。本条把它变成逐条可见。
+    //   ★ 不判红的原因：当前 100+ 处命中、多数是还没建完的类型表；先可见、后翻红（否则真问题被噪声埋）。
+    let indexOverArray = 0;
+    const indexOverScalarEAs = [];
+    const indexOverCountOne = [];
+    const indexOnUndeclared = [];
+    const indexStrideMismatch = [];
+    for (const s of indexBadSites) {
+      if (s.obj !== 'Engine' || s.absDisp === null) continue;
+      const cands = wins.filter((w) => matchesWindow(w, s));
+      // ★ 未声明偏移的索引站点**不许静默跳过**（原先 `continue` ⇒ 全模型没有"还有多少索引没建表"的数字）：
+      //   单列一档（note，带 EA），它回答的是「这张表还没建」，而不是「建了但类型不对」。
+      if (!cands.length) { indexOnUndeclared.push({ ea: s.ea, abs: s.absDisp }); continue; }
+      if (s.absDisp === 0) continue;                      // 位移 0 + 未解析索引 ⇒ 基址多半不是 obj0，判不了
+      // ★ **翻红后的口径**（S2r 的计划落地）：只有"真的被数组承住"才算过 —— 两道假绿通道堵掉：
+      //   ① `count:1` 的窗口是**内嵌子对象**，不是数组（实测它能同样消掉 108 处索引点名）；
+      //   ② 数组的元素大小必须等于**观测步长**（`memScale`），否则"承住"是假的。
+      const arr = cands.filter((w) => w.kind === 'array' && (w.m.count == null || num(w.m.count) > 1)
+        // ★ 元素大小必须等于观测步长 —— **但只在站点落在元素边界上时**：落在元素内部（`elemOff != 0`）时，
+        //   那个步长属于元素里的**嵌套数组**，与元素大小无关（实测直接比会产生 23 条假红，如 `T_Sys3Draw+0x2074`）。
+        && (w.elemSize == null || s.memScale == null || w.elemSize === s.memScale
+          || ((s.absDisp - w.from) % w.elemSize !== 0)));
+      if (arr.length) { indexOverArray += 1; continue; }
+      const c1 = cands.find((w) => w.kind === 'array');   // 只剩 count:1 的容器窗口（或元素大小不符的数组）
+      if (c1 && num(c1.m.count) === 1) { indexOverCountOne.push({ ea: s.ea, off: c1.m.offN }); continue; }
+      if (c1) { indexStrideMismatch.push({ ea: s.ea, off: c1.m.offN, elemSize: c1.elemSize, stride: s.memScale }); continue; }
+      indexOverScalarEAs.push({ ea: s.ea, why: '落在标量成员上' });
+    }
+    if (indexOverArray) notes.push(`G15 ${c.id}: ${indexOverArray} 处索引访问落在**数组**成员上（索引本身不可判，但形态已被数组承住；⛔ 不算通过）`);
+    // ★ **翻红**：索引访问落在非数组（标量 / `count:1` 容器）成员上 ⇒ 红。
+    //   判据能红是因为两道假绿通道已经堵掉（`count:1` 不算数组、元素大小必须等于观测步长）。
+    if (indexOverScalarEAs.length) {
+      for (const x of indexOverScalarEAs.slice(0, 20)) red(`G15 ${c.id} @${hex(x.ea)}`, `索引访问落在非数组成员上（${x.why}）⇒ 该成员应声明成数组（count 或 count:null+sweep，元素大小 == 观测步长）`);
+      if (indexOverScalarEAs.length > 20) notes.push(`G15 ${c.id}: 另有 ${indexOverScalarEAs.length - 20} 处同类（只报了前 20 条 EA）`);
+    }
+    // ★ `count:1` 的容器**不是数组**（实测它能同样消掉 108 处索引点名 ⇒ 那是假绿通道）——
+    //   但"索引落在子对象跨度里"本身**判不了**（索引可能属于子对象内部），所以记 note 并给数，⛔ 不算通过。
+    if (indexOverCountOne.length) {
+    if (indexStrideMismatch.length) {
+      const rows = indexStrideMismatch.slice(0, 4).map((x) => `${hex(x.off)}(元素 ${x.elemSize} vs 步长 ${x.stride})`).join(' ');
+      notes.push(`G15 ${c.id}: ⚠ ${indexStrideMismatch.length} 处索引访问的元素大小与观测步长不符（${rows}…）—— 要么元素类型写错、要么步长属于元素里的**嵌套数组**（后者要带元素内偏移才判得出，暂记 note）`);
+    }
+    if (indexOnUndeclared.length) {
+      const u = [...new Set(indexOnUndeclared.map((x) => hex(x.abs)))].slice(0, 6).join(' ');
+      notes.push(`G15 ${c.id}: ${indexOnUndeclared.length} 处索引访问落在**未声明**的偏移上（${u}…）—— 那是"这张表还没建"，不是"建了但类型不对"（⛔ 不算通过）；EA：${indexOnUndeclared.slice(0, 4).map((x) => hex(x.ea)).join(' ')}`);
+    }
+      const offs = [...new Set(indexOverCountOne.map((x) => hex(x.off)))].join(' ');
+      notes.push(`G15 ${c.id}: ⚠ ${indexOverCountOne.length} 处索引访问落在 count:1 的**容器**（${offs}）跨度里 —— 容器不是数组，索引属于子对象内部还是外层**判不了**（⛔ 不算通过）；EA：${indexOverCountOne.slice(0, 6).map((x) => hex(x.ea)).join(' ')}`);
+    }
     // ── G5/G5'：**一跳**的二级对象三档（解释 / 不透明 / 拒绝）
     //   ★ 为什么不再遍历多跳（结构上的简化，2026-10）：深度不是"校验"该管的东西。
     //     一跳能**推导**（1 条声明覆盖 N 处：实测 10 条 → 125 处），两跳以上请用**局部类型载体**断言
@@ -522,23 +659,106 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
         + `（${leaPointee.slice(0, 3).map((s) => hex(s.ea)).join(' ')}）`);
     }
     const pointee = sites.filter((s) => (s.pointeePath?.length ?? 0) >= 1 && typeof s.pointeeOff === 'number');
-    let pointeeOk = 0; let pointeeOpaque = 0; let pointeeBad = 0; let pointeeMulti = 0;
+    let pointeeOk = 0; let pointeeOpaque = 0; let pointeeBad = 0; let pointeeMulti = 0; let pointeeAmbiguous = 0;
     const opaqueEAs = [];
+    const ambiguousEAs = [];
     const multiHopSites = [];
     for (const s of pointee) {
       const path = s.pointeePath;
       // ★ **只取址（lea）** 的二级站点：值被用于地址算术，不是解引用 ⇒ 记**解释**档
       //   （真正的解引用一定另有非 lea 站点；实测踩过：整数游标被当指针时 4 条 G5' 假红）
       if (s.access === 'a') { pointeeOk += 1; continue; }
+      // ★ **基址 / 索引分不清**：`[ecx+eax]` 两个寄存器都是"从内存读出来的值"（实测 `ecx=[esi+0x204c]`、
+      //   `eax=[esi+0x2030]`）⇒ 谁是对象基址、谁是索引，**判不了**。
+      //   ⛔ 不许因此把 `0x204c` 声明成 `kind:"ptr"`（反事实实测：那样 12 条红全消 = 假绿）。
+      if (s.problems?.includes('index') || (s.indexSym && !/^[A-Za-z_]\w*$/.test(String(s.indexSym)))) { pointeeAmbiguous += 1; ambiguousEAs.push(s.ea); continue; }
       if (path.length + 1 > 2) { pointeeMulti += 1; multiHopSites.push(s); continue; }   // 跨两级以上：不判
       const hop = path[0];
       if (!derefHosts.has(tid)) derefHosts.set(tid, new Set());
       derefHosts.get(tid).add(hop);
-      const host = ms.find((m) => m.offN === hop);
+      // ★ 宿主查找分两步（**数组元素内部**的宿主是一等情形，不是 fallback）：
+      //   ① 精确 `off` 相等 —— 宿主是这条载体类型自己的成员；
+      //   ② 否则看它是否落在**数组成员的元素内部**（实测 `T_Command+0x5d908` = `T1[40]` 元素内 `+0x74`，
+      //      `T_Scene+0xa670` = `T2[1000]` 元素内 `+0x98`）⇒ 宿主是**元素类型里的那个成员**。
+      //   ⛔ 两条都不中 ⇒ 残差（"未声明为成员"），**不许**退回"把数组成员自己当宿主"：
+      //      试过那版，数组第 0 个元素的 `+0x0` 会被当宿主 ⇒ 17 条假红（`宿主 0x5d894 被当指针用…没有 kind:"ptr"`）。
+      let host = null;
+      let hostElemType = null;      // 宿主来自数组元素 / 内嵌子对象时，记下容器类型（vtable 判据与措辞要用）
+      {
+        // ★ **宿主可能藏在容器里**（数组元素内 / 内嵌子对象内，甚至容器套容器）。统一成一条递归解析：
+        //   在 `tid` 的成员里找覆盖 `hop` 的**容器成员**（`type` + 元素 size）⇒ 换算成容器内偏移 `rel`，
+        //   到元素/子对象类型里再找一层；命中标量就返回它。
+        //   实测：`T_Command+0x4f11c` = `T_Scene+0x40c`、`T_Command+0x59380` = `T_Scene+0xa670`
+        //   （后者还要再穿过 `T_Scene+0xa5d8 = T2[1000]` 才落到 `T2+0x0`）。
+        const resolveDeep = (h, typeId, depth = 0) => {
+          if (depth > 3) return null;
+          for (const m of membersOfId(typeId)) {
+            const et = m.type ? types[m.type] : null;
+            if (m.kind === 'ptr') continue;      // ⛔ 指针成员不是容器：宿主就是它自己（下面走精确匹配）
+            if (!et?.size || m.count === 0) continue;
+            const count = m.count != null ? num(m.count) : 1;      // count:null（sweep）按单元素窗口判
+            const span = et.size * count;
+            if (h < m.offN || h >= m.offN + span) continue;
+            const rel = (h - m.offN) % et.size;
+            const inner = membersOf(et).find((x) => rel >= x.offN && (x.ext == null ? rel < x.offN + 1 : rel < x.offN + x.ext));
+            if (!inner) return { host: null, hostType: m.type, rel, containerOff: m.offN };
+            const innerIsContainer = inner.type != null && types[inner.type]?.size != null && inner.kind !== 'ptr';
+            if (innerIsContainer && depth < 3) {
+              const deeper = resolveDeep(rel + 0, m.type, depth + 1);
+              // `rel` 已在元素内 ⇒ 用"元素内偏移 - 容器成员起点 + 容器成员起点"换算成容器类型内的偏移
+              const deeper2 = deeper ?? resolveDeep(inner.offN + (rel - inner.offN), m.type, depth + 1);
+              if (deeper2?.host) return deeper2;
+            }
+            return { host: inner, hostType: m.type, rel, containerOff: m.offN };
+          }
+          return null;
+        };
+        const deep = resolveDeep(hop, tid, 0);
+        if (deep && deep.host) { host = deep.host; hostElemType = deep.hostType; }
+        else if (deep && !deep.host) {
+          pointeeBad += 1;
+          residue.push({ ea: s.ea, abs: hop, kind: 'pointee', why: `二级对象宿主落在 ${deep.hostType} 的容器（+${hex(deep.containerOff)}）内偏移 ${hex(deep.rel)}，但那里没有已声明成员` });
+          continue;
+        }
+      }
+      if (!host) host = ms.find((m) => m.offN === hop) ?? null;
+      // ★ **数组元素的第一双字 = 元素类型的 vtable**：与"内嵌子对象的第一双字"同一条判据
+      //   （`mov eax,[…]` → `mov ecx,[eax]` → `call [ecx+槽]` 是**虚调用**）。
+      //   实测来源：`T1[40]` 的元素 `+0x0`、`T2[1000]` 的元素 `+0x0`、`T_Scene+0xa5d8`（= `T2[0]` 的 `+0x0`）。
+      // ★ G7 的 `derefHosts` 原先只按**载体类型 + 绝对偏移**建键 ⇒ 元素类型（`*_elem`）里的指针槽永远算
+      //   "零解引用" = 空话声明（假阴）。宿主来自元素/子对象时，按**元素类型 + 元素内偏移**也记一笔。
+      if (host && hostElemType) {
+        if (!derefHosts.has(hostElemType)) derefHosts.set(hostElemType, new Set());
+        derefHosts.get(hostElemType).add(host.offN);
+      }
+      if (host && hostElemType && host.offN === 0 && host.kind !== 'ptr') {
+        pointeeOpaque += 1;
+        opaqueEAs.push(s.ea);
+        notes.push(`G5' ${c.id} @${hex(s.ea)}: 宿主 ${hex(hop)} 落在数组元素（${hostElemType}）的 **+0x0** ⇒ 解引用的是元素的 **vtable**（虚调用），不是"成员是指针"（不可判，⛔ 不算通过）`);
+        continue;
+      }
+      // ★ 元素内**非 0 偏移**的标量被当基址用：记**残差**（不是红）——
+      //   这是"元素类型的成员表还缺一条 kind:'ptr'"的缺口，不是这条载体声明错；
+      //   判红的条件仍是"宿主是本类型自己的成员且没声明 ptr"（下面那条）。
+      if (host && hostElemType && host.kind !== 'ptr') {
+        pointeeBad += 1;
+        residue.push({ ea: s.ea, abs: hop, kind: 'pointee', why: `${hostElemType}+${hex(host.offN)} 的值被当基址用，但元素类型里那条成员没声明 kind:"ptr"` });
+        continue;
+      }
       if (!host) {
         pointeeBad += 1;
         if (t.complete) red(`G5 ${c.id} @${hex(s.ea)}`, `二级对象的宿主 ${hex(hop)} 不是 ${c.type} 的成员`);
         else residue.push({ ea: s.ea, abs: hop, kind: 'pointee', why: `二级对象宿主 ${hex(hop)} 未声明为成员` });
+        continue;
+      }
+      // ★ **内嵌子对象的第一双字 = 它的 vtable**：`lea ecx,[esi+K]` → `mov eax,[ecx]` → `mov eax,[eax+槽]` → `call eax`
+      //   是**虚调用**（实测 `sub_412290` 的 `0x412c77`/`0x412c79`：`[this+0x1ee8]` 是内嵌 `Sys3Draw` 的 vtable）。
+      //   ⇒ 宿主是**内嵌成员**（`type` + `count:1` + 非 ptr）时，解引用的是**它的 vtable**，不是"这个成员是对象指针"。
+      //   ⛔ 不判红，也**不算解释**：进 `pointeeOpaque`（不可判）+ note。
+      if (host.kind !== 'ptr' && host.type && host.count === 1) {
+        pointeeOpaque += 1;
+        opaqueEAs.push(s.ea);
+        notes.push(`G5' ${c.id} @${hex(s.ea)}: 宿主 ${hex(host.offN)} 是**内嵌子对象**（${host.type}）⇒ 解引用的是它的 **vtable**（虚调用），不是"成员是指针"（不可判，⛔ 不算通过）`);
         continue;
       }
       if (host.kind !== 'ptr') { pointeeBad += 1; red(`G5' ${c.id} @${hex(s.ea)}`, `宿主 ${hex(host.offN)} 被当指针用（读它的值再以之为基址），但成员声明里没有 kind:"ptr"`); continue; }
@@ -569,15 +789,17 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
     cons.partial += unusableSites.length;
     cons.partialTakeAddr += partial.length;
     cons.partialIndexUnresolved += indexUnusable.length;
-    cons.pointee += pointeeOk + pointeeBad + pointeeOpaque + pointeeMulti;
+    cons.pointee += pointeeOk + pointeeBad + pointeeOpaque + pointeeMulti + pointeeAmbiguous;
     cons.pointeeOk += pointeeOk;
     cons.pointeeOpaque += pointeeOpaque;
     cons.pointeeBad += pointeeBad;
     cons.pointeeMulti += pointeeMulti;
+    cons.pointeeAmbiguous += pointeeAmbiguous;
     cons.deep += multiHopSites.length;
     cons.symbol += symbolSites.length;
     cons.unresolvedBase += unresolvedSites.length;
     cons.unresolvedIndex += indexBadSites.length;
+  cons.indexOverScalar = (cons.indexOverScalar ?? 0) + indexOverScalarEAs.length;
     cons.widthUnknown += widthBadSites.length;
     // 未解析按**基址寄存器**分组（§7：报数要报到能处置的粒度，⛔ 不许只给个数字）
     const byReg = new Map();
@@ -586,10 +808,10 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       c, explained, residue, total: obj0.length,
       viaView: explained.filter((e) => e.viaView).length,
       viaViewEAs: explained.filter((e) => e.viaView).map((e) => ({ ea: e.ea, abs: e.abs, member: e.member.offN, delta: e.delta })),
-      pointee: pointeeOk + pointeeBad + pointeeOpaque + pointeeMulti, pointeeOk, pointeeOpaque, pointeeMulti,
+      pointee: pointeeOk + pointeeBad + pointeeOpaque + pointeeMulti + pointeeAmbiguous, pointeeOk, pointeeOpaque, pointeeMulti, pointeeAmbiguous,
       multiHopEAs: multiHopSites.map((s) => s.ea),
       multiHopPaths: multiHopSites.map((s) => (s.pointeePath ?? []).map((h) => "+" + hex(h)).join(" -> ")),
-      deep: pointeeMulti, deepEAs: multiHopSites.map((s) => s.ea), opaqueEAs,
+      deep: pointeeMulti, deepEAs: multiHopSites.map((s) => s.ea), opaqueEAs, ambiguousEAs,
       partial: partial.length, partialEAs: partial.map((s) => s.ea),
       indexUnusable: indexUnusable.length, indexUnusableEAs: indexUnusable.map((s) => s.ea),
       sites: rawSites.length,
@@ -653,6 +875,15 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       if (et?.size == null) { notes.push(`G4 ${tid}+${hex(m.offN)}: 元素 size 未知 ⇒ 边界判不了`); continue; }
       const end = m.offN + et.size * m.count;
       if (refs(end) === 0) {
+        // ★ 第三档：**数组正好填满对象**（末尾 == 容器 size）。这时"末地址零引用"是**必然** ——
+        //   它已经在对象之外，编译器不会把它的绝对地址算出来。边界由 `size` 定界，而 `size` 是另一条
+        //   独立声明（G1 又禁止任何成员越过 size）⇒ 这条约束**照样可证伪**：
+        //   把 count 改大/改小 ⇒ 末尾不再等于 size ⇒ 立刻回落到红。
+        //   ★ 为什么不是"放行"：只有**紧贴 size** 才成立（`end === size` 是等式，不是不等式）。
+        if (t.size != null && end === t.size) {
+          notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾 ${hex(end)} == 容器 size ⇒ 数组正好填满对象（末地址在对象之外，零引用是必然；边界由 size 定界，⛔ 不是"末尾有引用"那一档）`);
+          continue;
+        }
         // ★ 奇数跨度（u16×17=0x22 / u16×289=0x242）的末尾按定义不是 4 对齐 ⇒ 编译器不会算出它 ⇒ 零引用是必然，不是"条数无依据"
         if (end % 4 !== 0) notes.push(`G4 ${tid}+${hex(m.offN)}: 末尾 ${hex(end)} 不对齐 4 且零引用 ⇒ 编译器按定义不会算出它（边界靠常量+写循环证明，⛔ 不是"通过"）`);
         else red(`G4 ${tid}+${hex(m.offN)}`, `数组末尾 ${hex(end)} 在语料里零引用 ⇒ count=${m.count} 无依据`);
@@ -732,6 +963,116 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
     }
   }
 
+  // ── G14 **命名棘轮**：`T_<Name>` 这个 id 本身是一条**可证伪的断言**（"我就是 <Name> 那个类"）
+  //   ★ 为什么必须立：类型 id 从 `T0`/`T_a609c` 改成 `T_Command`/`T_FileDB` 之后，"名字"就成了结论，
+  //     可它原先**没有任何守卫** —— 写错一个字母、换一次导出、note 过期，名字都会悄悄变成假话，
+  //     而 G1..G13 一条都不会响（实测抓到 `T_RemoteDebug` 的 note 指向 0x497570 = **函数起始行**，
+  //     真正的 vtable 写入是 0x4975A3）。
+  //   判据（机械）：
+  //     ① 把 `T_` 之后那段（如 `Scene`）拿去语料找 `??_7Scene@@6B@`：
+  //        找不到 ⇒ 这是**结构名**（`T_Queue_int` / `T_Scene_460` / `T_FileDB_3028`），不要求 RTTI 证据；
+  //        找得到 ⇒ 这是**RTTI 声明** ⇒ 必须有一条 `note` 把名字绑到那次 vtable 写入上；
+  //     ② note 里的 `??_7<Name>@@` 必须与 id 对得上（⛔ 不许 `T_Scene` 绑 `??_7Font@@`）；
+  //     ③ note 里**至少一个** EA 落在**写 vtable 的那条指令**上（该行要逐字含 `offset ??_7<Name>@@`）。
+  //        ★ 为什么是"至少一个"而不是"第一个"：note 里常同时给 ctor / dtor / `_atexit` 的 EA，
+  //          要求第一个会逼人把有用的地址删掉。
+  const g14 = { bound: [], structural: 0 };
+  {
+    const rttiNames = new Set();
+    for (const ln of lines) for (const m of ln.matchAll(/\?\?_7(\w+)@@6B@/g)) rttiNames.add(m[1]);
+    if (rttiNames.size) {
+      let eaText = null;
+      const lineOf = (ea) => {
+        if (!eaText) {
+          eaText = new Map();
+          for (const ln of lines) {
+            const m = /^[A-Za-z_.][\w.]*:([0-9A-F]{8})\s+(.*)$/.exec(ln);
+            if (m) eaText.set(Number.parseInt(m[1], 16), m[2]);
+          }
+        }
+        return eaText.get(ea) ?? null;
+      };
+      for (const [tid, t] of Object.entries(types)) {
+        if (!/^T_[A-Z]/.test(tid)) continue;              // `T1`/`T2` 这类无名占位不冒充 RTTI
+        const name = tid.slice(2);
+        if (!rttiNames.has(name)) { g14.structural += 1; continue; }
+        const note = String(t.note ?? '');
+        const m = /\?\?_7(\w+)@@/.exec(note);
+        if (!m) { red(`G14 ${tid}`, `id 声称是 RTTI 类 \`${name}\`（语料里有 \`??_7${name}@@6B@\`），但 note 没有把名字绑到那次 vtable 写入上 ⇒ 名字是空话`); continue; }
+        if (m[1] !== name) { red(`G14 ${tid}`, `note 绑的是 \`??_7${m[1]}@@\`，与 id 的 \`${name}\` 对不上`); continue; }
+        const eas = [...note.matchAll(/0x([0-9a-f]{6,8})/gi)].map((x) => Number.parseInt(x[1], 16));
+        if (!eas.length) { red(`G14 ${tid}`, 'note 里没有 vtable 写入的 EA'); continue; }
+        const hit = eas.filter((ea) => { const tx = lineOf(ea); return tx != null && tx.includes(`offset ??_7${name}@@`); });
+        if (!hit.length) {
+          red(`G14 ${tid}`, `note 里的 EA（${eas.slice(0, 3).map(hex).join(' ')}）没有一条落在**写 vtable 的那条指令**上（要求该行逐字含 \`offset ??_7${name}@@\`）`);
+          continue;
+        }
+        g14.bound.push({ tid, name, hit: hit.length });
+      }
+      if (g14.bound.length) notes.push(`G14 命名棘轮：${g14.bound.length} 个 RTTI 类名已绑到 vtable 写入点（另有 ${g14.structural} 个结构名不要求 RTTI 证据）`);
+    }
+  }
+
+  // ── G16 **载体证据棘轮**：`kind:"arg"` 载体的 `witness` 必须**解析得动**
+  //   ★ 为什么需要：载体是模型的地基（"`F` 的 `ecx` 装着 `T_X*`"），可它原先**完全免检** ——
+  //     实测 174 条 arg 载体**一条 witness 都没有**；`witness` 这个字段此前只有 `kind:"global"` 在用（G13）。
+  //   判据（机械、可证伪）：
+  //     ① 有 witness ⇒ 每个 EA 在语料里必须是 **`call <该函数>` 这一行**（换一次导出/写错函数名 ⇒ 当场红）；
+  //     ② 声明了 `indirectOnly:true`（"只经分派表/vtable 调用，没有直接调用点"）⇒ 语料里**必须真的没有**
+  //        `call <该函数>`（反向可证伪：有就直接红 —— 这比"随便少写一条 witness"强得多）；
+  //     ③ 既没有 witness 又没声明 `indirectOnly` ⇒ **note**（记 backlog），⛔ 不算通过。
+  //        ★ 为什么先记 note：现有 35 条的历史欠账不该让本轮所有批次的红灯亮起来；清完再翻红。
+  const g16 = { ok: 0, gap: [], indirect: 0 };
+  {
+    const argc = (M.carriers ?? []).filter((c) => c.kind === 'arg' && c.fn);
+    if (argc.length) {
+      const want = new Set(argc.map((c) => c.fn));
+      const callEas = new Map();   // fn → Set(EA)：语料里 `call <fn>` 的位置
+      for (const ln of lines) {
+        const m = /^[A-Za-z_.][\w.]*:([0-9A-F]{8})\s+call\s+(sub_[0-9A-F]{6})\b/.exec(ln);
+        if (!m || !want.has(m[2])) continue;
+        if (!callEas.has(m[2])) callEas.set(m[2], new Set());
+        callEas.get(m[2]).add(Number.parseInt(m[1], 16));
+      }
+      for (const c of argc) {
+        const where = `G16 ${c.id}`;
+        const calls = callEas.get(c.fn) ?? new Set();
+        const sp = spanBySym.get(c.fn) ?? null;
+        const w = Array.isArray(c.witness) ? c.witness : [];
+        if (c.indirectOnly === true) {
+          if (calls.size) { red(where, `声明了 indirectOnly（"没有直接调用点"），但语料里有 ${calls.size} 处 \`call ${c.fn}\`（如 ${[...calls].slice(0, 2).map(hex).join(' ')}）`); continue; }
+          g16.indirect += 1;
+          continue;
+        }
+        if (!w.length) { g16.gap.push(c.id); continue; }
+        // ★ 两类**合法** witness（都可机械复核）：
+        //   ① 调用点：那一行逐字是 `call <fn>`（证明"某个调用方把对象指针塞进 ecx"）；
+        //   ② 来路/约定：该行**出现 ecx**（实测形状 `mov ebx, ecx` / `lea ecx,[esi+14D30h]` ——
+        //      前者证明"这个寄存器就是对象根"，后者证明"传进去的是 obj0+K 的内嵌子对象"）。
+        //   ⛔ 其它位置一律红（那正是"随便挑个 EA 凑数"的样子）。
+        //   ★ 硬要求：**至少一条是调用点** —— 只有"来路"证据证明不了"这个函数真的被这样调用过"。
+        const cls = w.map((e) => {
+          const ea = num(e);
+          if (calls.has(ea)) return { ea, kind: 'call' };
+          const line = eaTextOf(ea);
+          if (line && /\becx\b/i.test(line)) return { ea, kind: 'src', line };
+          return { ea, kind: 'other', line };
+        });
+        for (const x of cls) {
+          if (x.kind === 'other') red(where, `witness ${hex(x.ea)} 既不是 \`call ${c.fn}\`、也不含 ecx 来路（该行：${(x.line ?? '（语料里没有这条 EA）').trim().slice(0, 50)}）`);
+        }
+        if (!cls.some((x) => x.kind === 'call')) {
+          red(where, `witness 里没有一条落在**调用点**上（只有入口约定证据）⇒ 证明不了"哪个调用方把 ${c.type} 塞进 ecx"${calls.size ? `（语料里该函数有 ${calls.size} 处调用点，如 ${[...calls].slice(0, 2).map(hex).join(' ')}）` : ''}`);
+          continue;
+        }
+        if (cls.every((x) => x.kind !== 'other')) g16.ok += 1;
+      }
+      notes.push(`G16 载体证据：${g16.ok} 条 arg 载体的 witness 落在 \`call\` 调用点上`
+        + (g16.indirect ? ` · ${g16.indirect} 条声明了 indirectOnly（语料里确无直接调用点）` : '')
+        + (g16.gap.length ? ` · **${g16.gap.length} 条还没有 witness**（⛔ 不算通过，清完再翻红）：${g16.gap.slice(0, 12).join(' ')}` : ''));
+    }
+  }
+
   // ── 适配器类型（`adapter:true`）：声明的是**布局约束**（"调用方在 `+K` 上有这个成员"），
   //   不是"我是这个类"。★ 为什么必须显式标记：它是"不同调用方类在同一偏移上**相容**"这条事实的唯一落点 ——
   //   实测 `sub_4034C0`/`D0`/`E0`（`this->+0x4` 的转发器，其中 `sub_4034E0` 还是虚调用）被 `T0` 与它的
@@ -771,7 +1112,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
   }
 
   if (cons.obj0Acc !== cons.obj0Explained + cons.obj0Residue) red('守恒①', `${cons.obj0Acc} != ${cons.obj0Explained}+${cons.obj0Residue}`);
-  if (cons.pointee !== cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad + cons.pointeeMulti) red('守恒②', `${cons.pointee} != ${cons.pointeeOk}+${cons.pointeeOpaque}+${cons.pointeeBad}+${cons.pointeeMulti}（跨两级以上）`);
+  if (cons.pointee !== cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad + cons.pointeeMulti + cons.pointeeAmbiguous) red('守恒②', `${cons.pointee} != ${cons.pointeeOk}+${cons.pointeeOpaque}+${cons.pointeeBad}+${cons.pointeeMulti}（跨两级以上）+${cons.pointeeAmbiguous}（基址/索引分不清）`);
   // ★ 守恒③：**站点按基址分桶**（六类互斥且穷尽）—— 漏掉任何一类，等式立刻差数（这是"静默变小"的哨兵）
   const bucketSum = cons.obj0Acc + cons.partial + cons.pointee + cons.local + cons.symbol + cons.unresolvedBase;
   if (cons.sites !== bucketSum) red('守恒③', `${cons.sites} != obj0 ${cons.obj0Acc} + 位移不可用 ${cons.partial} + 二级对象（含多跳）${cons.pointee} + 局部载体 ${cons.local} + 数据段符号 ${cons.symbol} + 未解析基址 ${cons.unresolvedBase}`);
@@ -787,13 +1128,13 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
 }
 
 /** 渲染报告（终端用；测试断言 findings / cons 即可） */
-export function renderReport(rep, { title = 'claims-check' } = {}) {
+export function renderReport(rep, { title = 'claims-check', byType = false } = {}) {
   const L = [`# ${title}`, `  类型声明 / 载体 / 角色：见模型文件；本报告只给**判定**与**残差**`, ''];
   L.push('## 逐载体');
   for (const p of rep.perCarrier) {
     const { c, explained, residue, total, pointee, pointeeOk, pointeeOpaque, deep, opaqueEAs, partial, indexUnusable } = p;
     L.push(`  ${pad(c.id, 12)} ${pad(c.fn, 12)} ${c.reg}→${pad(c.type, 6)} 访问 ${total} 处：解释 ${explained.length} · 残差 ${residue.length}`
-      + `｜二级 ${pointee}（解释 ${pointeeOk} · 不透明 ${pointeeOpaque}）`
+      + `｜二级 ${pointee}（解释 ${pointeeOk} · 不透明 ${pointeeOpaque}${p.pointeeAmbiguous ? ` · 基址/索引分不清 ${p.pointeeAmbiguous}` : ''}）`
       + (deep ? `｜**超出解析深度 ${deep} 处**` : '')
       + (opaqueEAs.length ? `｜不透明 EA：${opaqueEAs.slice(0, 3).map(hex).join(' ')}` : '')
       + (partial || indexUnusable ? `｜位移不可用 ${partial + indexUnusable} 处（lea 取址 ${partial} · 索引未解析 ${indexUnusable}）` : ''));
@@ -814,11 +1155,11 @@ export function renderReport(rep, { title = 'claims-check' } = {}) {
   L.push('', '## 提示（不算红）');
   for (const n of rep.notes) L.push(`  · ${n}`);
   const c1 = rep.cons.obj0Acc === rep.cons.obj0Explained + rep.cons.obj0Residue ? '✅' : '❌';
-  const c2 = rep.cons.pointee === rep.cons.pointeeOk + rep.cons.pointeeOpaque + rep.cons.pointeeBad + rep.cons.pointeeMulti ? '✅' : '❌';
+  const c2 = rep.cons.pointee === rep.cons.pointeeOk + rep.cons.pointeeOpaque + rep.cons.pointeeBad + rep.cons.pointeeMulti + (rep.cons.pointeeAmbiguous ?? 0) ? '✅' : '❌';
   const sum = rep.cons.obj0Acc + rep.cons.partial + rep.cons.pointee + rep.cons.local + rep.cons.symbol + rep.cons.unresolvedBase;
   const c3 = rep.cons.sites === sum ? '✅' : '❌';
   L.push('', `## 守恒①（obj0 相对访问）：${rep.cons.obj0Acc} = 解释 ${rep.cons.obj0Explained} + 残差 ${rep.cons.obj0Residue}  ${c1}`);
-  L.push(`## 守恒②（二级对象）：${rep.cons.pointee} = 目标类型解释 ${rep.cons.pointeeOk} + 不透明 ${rep.cons.pointeeOpaque} + 拒绝/未声明 ${rep.cons.pointeeBad} + **跨两级以上（未判）${rep.cons.pointeeMulti}**  ${c2}`);
+  L.push(`## 守恒②（二级对象）：${rep.cons.pointee} = 目标类型解释 ${rep.cons.pointeeOk} + 不透明 ${rep.cons.pointeeOpaque} + 拒绝/未声明 ${rep.cons.pointeeBad} + **跨两级以上（未判）${rep.cons.pointeeMulti}** + **基址/索引分不清（未判）${rep.cons.pointeeAmbiguous ?? 0}**  ${c2}`);
   L.push(`## 守恒③（站点按基址分桶）：${rep.cons.sites} = obj0 相对 ${rep.cons.obj0Acc} + 位移不可用 ${rep.cons.partial}`
     + `（lea 取址 ${rep.cons.partialTakeAddr} · 索引未解析 ${rep.cons.partialIndexUnresolved}）`
     + ` + 二级对象（含多跳）${rep.cons.pointee} + **局部载体 ${rep.cons.local}**（解释 ${rep.cons.localOk} · 残差 ${rep.cons.localResidue}）`
@@ -855,5 +1196,49 @@ export function renderReport(rep, { title = 'claims-check' } = {}) {
     for (const u of rep.unfalsifiable) L.push(`  · ${u.type}+${hex(u.off)}${u.delta !== undefined ? `（视图 索引差 ${u.delta}）` : ''} → ${u.why}`);
   }
   L.push('', rep.findings.length ? `❌ ${rep.findings.length} 条红：\n  - ${rep.findings.map((x) => `${x.where}：${x.why}`).join('\n  - ')}` : '✅ 全部义务通过（守卫 / G1..G9 / J3 / 守恒①②③④）');
+  if (byType) L.push('', ...renderByType(rep));
   return `${L.join('\n')}\n`;
+}
+
+/**
+ * **残差按类型聚合**（`--by-type`）—— "下一批该补哪个类型的成员表"的机械依据。
+ *
+ * ★ 三条口径（都是踩出来的）：
+ *   ① **类型从残差行自己取**，不从"当前处理到哪个载体"的状态取 —— `carriers.json` 的 id 不只有 `cNN`，
+ *      还有按批发的 `b10cNN`/`b12cNN`；用 `^c\d+` 认块头会把那些块漏掉、把它们的残差记到上一个载体名下
+ *      （实测把 `T_Input` 8/8 与 `T_Sound` 4/5 算成了 `T_Font`，`T_CBunki` 7/14 与 `T_ReadTextDB` 1/4 整块没被派出去）。
+ *   ② **宿主可能是第二跳的类型**：`[this+K] → 指针 → [eax+M]` 的残差落在 `T_Input`/`T_Sound`，
+ *      而不是发起访问的 `T_Font` ⇒ 要按**被访问的那个类型**去做，否则会把 `T_Input+0x490` 写进 `T_Font`（假声明）。
+ *   ③ 只统计 `⚪ 不落在…` 这一类残差；`位移不可用` / `未解析基址` / `数据段符号` 各是别的桶，⛔ 不许混进来。
+ */
+export function renderByType(rep) {
+  const agg = new Map();   // type -> off -> {n, who:Set}
+  const bump = (ty, off, who) => {
+    if (!agg.has(ty)) agg.set(ty, new Map());
+    const inner = agg.get(ty);
+    const e = inner.get(off) ?? { n: 0, who: new Set() };
+    e.n += 1; e.who.add(who);
+    inner.set(off, e);
+  };
+  for (const p of rep.perCarrier ?? []) {
+    const carrierType = String(p.c?.type ?? '?').replace(/\*$/, '');
+    for (const r of p.residue ?? []) {
+      const w = String(r.why ?? '');
+      // `… 不是 T_X 的成员` / `落在内嵌子对象 T_X+0x… 里` ⇒ 宿主就是 T_X；否则算这个载体的类型
+      const m = /不是\s+(\w+)\s+的成员/.exec(w) ?? /落在内嵌子对象\s+(\w+)\+/.exec(w);
+      bump(m ? m[1] : carrierType, r.abs ?? 0, p.c?.id ?? '?');
+    }
+  }
+  if (!agg.size) return ['## 残差按类型（`--by-type`）：0 处（没有 `⚪ 不落在…` 这一类残差）'];
+  const rows = [...agg.entries()].map(([ty, inner]) => ({ ty, offsets: inner.size, n: [...inner.values()].reduce((s, v) => s + v.n, 0), inner }))
+    .sort((a, b) => b.n - a.n);
+  const out = [`## 残差按类型（\`--by-type\`：**下一批该补哪个类型的成员表**；⛔ 不含位移不可用 / 未解析基址 / 数据段符号 —— `
+    + `含 obj0 残差与**二级对象**残差，两者都表示"该类型的成员表缺这个偏移"）：${rows.reduce((s, r) => s + r.n, 0)} 处 / ${rows.length} 个类型`];
+  for (const r of rows) {
+    const hot = [...r.inner.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 6)
+      .map(([off, e]) => `${hex(off)}(${e.n})`).join(' ');
+    out.push(`  ${pad(r.ty, 30)} ${String(r.offsets).padStart(3)} 个偏移 / ${String(r.n).padStart(4)} 次访问　热点 ${hot}`);
+  }
+  out.push('  ★ 判活按**被访问的那个类型**去做（第二跳的宿主）：`[this+K] → 指针 → [eax+M]` 的残差属于 `M` 的类型。');
+  return out;
 }
