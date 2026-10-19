@@ -150,6 +150,9 @@ pnpm tools requirements serve   # 项目工作台（需求 + AGE 脚本），项
 pnpm --filter @amayui/workbench verify # 工作台门禁：typecheck + build + smoke
 pnpm tools disasm verify        # 反汇编语料保真断言（逐行反解回字节必须与源逐字节相同）
 pnpm tools shape claims --sample # ★ 对象 shape：claims 校验（访问记录 / 段落导出 / 独立复核见 `pnpm tools shape describe`）
+pnpm tools spec validate        # ★ spec 层：不变量（规范自包含 / 章节规则与 bindings·audit 一一对应 / 试点未登记义务 = 0）
+pnpm tools spec report          # ★ 审计账：effect 覆盖 / 内部省略 / 残差（不给百分数；范围闭合 ≠ 解释正确）
+pnpm tools spec effects --pilot # ★ 从语料机械枚举 effect（覆盖判定输入；不是“整条指令”）
 pnpm tools old-repo inventory   # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm test                       # ★ 测试（默认只跑 @env pure；分级见下）
 pnpm test:list                  # 看分级集合与每个文件的声明（先看这个）
@@ -284,7 +287,7 @@ pnpm typecheck                  # ★ `tsc --noEmit`，**三个工程**（`packa
 
 ## 11. 项目本体：交付物是 spec，不是 emulator
 
-* 主交付物是 **spec（引擎规范）**；**emulator 是示范与测试项目**（cleanroom rewrite，类比 Wine —— 但这里的界面是**未文档化**的私有语义 ⇒ 理解是唯一路径）。
+* 主交付物是 **spec（引擎规范）**（落点 `data/spec/`，工具 `pnpm tools spec`）；**emulator 是示范与测试项目**（cleanroom rewrite，类比 Wine —— 但这里的界面是**未文档化**的私有语义 ⇒ 理解是唯一路径）。
   ⇒ ⛔ **emulator 不许当 spec 的真源**；spec 也不许依赖 emulator 的实现细节（shape 已按此守：`⛔ 不读 apps/emulator`）。
 * **两层本体，之间只走指针**：偏移 / 布局 / 宽度 / 数组 / 池基点 / 步长 = **机器本体（shape，实现细节）**；
   实体 / 状态 / 操作 / 规则 = **领域本体（spec）**。两者之间只允许 `storage` 这类**指针**，⛔ 不许把布局内联进 spec。

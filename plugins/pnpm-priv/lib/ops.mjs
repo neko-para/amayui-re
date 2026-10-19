@@ -28,6 +28,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+/**
+ * 路径语义按**输入形态**选：盘符路径（`E:/…` / `E:\…`）用 `path.win32`，其余用平台默认。
+ * 理由同 `plugins/deploy/lib/ops.mjs`：POSIX 上 `path.isAbsolute('E:/x')` 为 false，
+ * 会让"仓库根校验"整条分支走不到（平台相关的假红），而它测的其实是同一套逻辑。
+ */
+const WIN_PATH_RE = /^[A-Za-z]:[\\/]/;
+const pathImpl = (...values) =>
+  values.some((v) => typeof v === 'string' && WIN_PATH_RE.test(v)) ? path.win32 : path;
+
 /** 允许宿主执行的 pnpm **动词**（白名单；不给任意脚本） */
 export const ALLOWED_VERBS = ['install', 'add', 'remove'];
 
@@ -91,10 +100,11 @@ const SPEC_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@[~^]?[0-9]
 
 /** 这个路径是不是"某个允许的根之内"（按**路径段**比较，不是字符串前缀） */
 export function insideAnyRoot(target, roots) {
-  const t = path.resolve(target);
+  const P = pathImpl(target, ...roots);
+  const t = P.resolve(target);
   return roots.some((r) => {
-    const rel = path.relative(path.resolve(r), t);
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    const rel = P.relative(P.resolve(r), t);
+    return rel === '' || (!rel.startsWith('..') && !P.isAbsolute(rel));
   });
 }
 
@@ -110,25 +120,26 @@ export function planOp(op, args = {}, env = {}) {
   const problems = [];
   const io = env.io ?? realIo;
   const raw = args ?? {};
+  const P = pathImpl(raw.repoRoot, ...(env.allowedRoots ?? DEFAULT_ALLOWED_ROOTS));
   const spec = OPS[op];
   if (!spec) return { problems: [`不认识的 op：${JSON.stringify(op)}（只有：${OP_NAMES.join(' / ')}）`] };
 
   // ── ① 仓库根：**必须**显式给出、必须是目录、必须落在允许的根内
-  const repoRoot = typeof raw.repoRoot === 'string' && raw.repoRoot.trim() !== '' ? path.resolve(raw.repoRoot) : null;
+  const repoRoot = typeof raw.repoRoot === 'string' && raw.repoRoot.trim() !== '' ? P.resolve(raw.repoRoot) : null;
   if (!repoRoot) {
     return { problems: ['repoRoot 必须是非空绝对路径 —— 本插件**只**在明确的仓库根里动作（不接相对路径、不接"当前目录"）'] };
   }
-  if (!path.isAbsolute(raw.repoRoot)) {
+  if (!P.isAbsolute(raw.repoRoot)) {
     return { problems: [`repoRoot 必须是绝对路径（实际 ${JSON.stringify(raw.repoRoot)}）—— 相对路径不足以谈"允许的根"`] };
   }
-  const roots = (env.allowedRoots ?? DEFAULT_ALLOWED_ROOTS).map((r) => path.resolve(r));
+  const roots = (env.allowedRoots ?? DEFAULT_ALLOWED_ROOTS).map((r) => P.resolve(r));
   if (roots.length > 0 && !insideAnyRoot(repoRoot, roots)) {
     return { problems: [`repoRoot 不在允许的根内：${repoRoot}（允许：${roots.join(' / ')}）—— 要装别处就改插件配置的 allowedRoots`] };
   }
   // ★ "这个目录是不是一个仓库"：必须同时有 package.json 与 pnpm-workspace.yaml
   //   （只用 package.json 会把任意 npm 包目录也放进来；`pnpm install` 在这里会改别处）
   for (const f of ['package.json', 'pnpm-workspace.yaml']) {
-    if (!io.exists(path.join(repoRoot, f))) problems.push(`repoRoot 里没有 ${f}：${repoRoot}（本插件只在 pnpm workspace 根里动作）`);
+    if (!io.exists(P.join(repoRoot, f))) problems.push(`repoRoot 里没有 ${f}：${repoRoot}（本插件只在 pnpm workspace 根里动作）`);
   }
   if (problems.length) return { problems };
 

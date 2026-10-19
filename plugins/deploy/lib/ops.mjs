@@ -24,6 +24,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+/**
+ * 路径语义按**输入形态**选：盘符路径（`E:\…`）用 `path.win32`，其余用平台默认。
+ * ★ 为什么不能只用平台默认：测试与真实用法都可能是"Windows 盘符路径跑在 POSIX 上"
+ *   （macOS 兼容性验证 / 跨平台夹具）；`path.isAbsolute('E:\\x')` 在 POSIX 上是 false，
+ *   于是整条校验分支走不到 —— 那是**平台相关的假红/假绿**，不是被测逻辑的错。
+ */
+const WIN_PATH_RE = /^[A-Za-z]:[\\/]/;
+const pathImpl = (...values) =>
+  values.some((v) => typeof v === 'string' && WIN_PATH_RE.test(v)) ? path.win32 : path;
+
 /** 默认允许写入的根（相对 `repoRoot`；用户可在插件配置里覆盖成工作区外的目录） */
 export const DEFAULT_ALLOWED_ROOTS = ['dist'];
 
@@ -87,19 +97,20 @@ const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** 这个路径是不是"某个允许的根之内"（**按路径段比较**，不是字符串前缀 —— `/dist-other` 不算 `/dist` 之内） */
 export function insideAnyRoot(target, roots) {
-  const t = path.resolve(target);
+  const P = pathImpl(target, ...roots);
+  const t = P.resolve(target);
   return roots.some((r) => {
-    const rel = path.relative(path.resolve(r), t);
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    const rel = P.relative(P.resolve(r), t);
+    return rel === '' || (!rel.startsWith('..') && !P.isAbsolute(rel));
   });
 }
 
 /** 根目录本身 / 盘符根 / 用户主目录：`--out` 指到这些地方一律拒（一次误操作代价太大） */
-function dangerousOut(target) {
-  const t = path.resolve(target);
-  if (t === path.parse(t).root) return `落点是盘符根：${t}`;
+function dangerousOut(target, P = pathImpl(target)) {
+  const t = P.resolve(target);
+  if (t === P.parse(t).root) return `落点是盘符根：${t}`;
   const home = process.env.USERPROFILE ?? process.env.HOME;
-  if (home && path.resolve(home) === t) return `落点是用户主目录：${t}`;
+  if (home && pathImpl(home, target).resolve(home) === t) return `落点是用户主目录：${t}`;
   return null;
 }
 
@@ -114,8 +125,9 @@ function dangerousOut(target) {
 export function planOp(op, args = {}, env = {}) {
   const problems = [];
   const io = env.io ?? realIo;
-  const repoRoot = path.resolve(env.repoRoot ?? '.');
-  const roots = (env.allowedRoots ?? DEFAULT_ALLOWED_ROOTS).map((r) => path.resolve(repoRoot, r));
+  const P = pathImpl(env.repoRoot, ...(env.allowedRoots ?? DEFAULT_ALLOWED_ROOTS));
+  const repoRoot = P.resolve(env.repoRoot ?? '.');
+  const roots = (env.allowedRoots ?? DEFAULT_ALLOWED_ROOTS).map((r) => P.resolve(repoRoot, r));
   const raw = args ?? {};
   const OPS_KNOWN = OPS[op];
   if (!OPS_KNOWN) {
@@ -129,31 +141,31 @@ export function planOp(op, args = {}, env = {}) {
       problems.push('out 必须是非空绝对路径');
       return null;
     }
-    if (!path.isAbsolute(value)) {
+    if (!P.isAbsolute(value)) {
       problems.push(`out 必须是绝对路径（实际 ${JSON.stringify(value)}）—— 相对路径不足以谈"允许的根"`);
       return null;
     }
-    const bad = dangerousOut(value);
+    const bad = dangerousOut(value, P);
     if (bad) problems.push(bad);
     if (!insideAnyRoot(value, roots)) {
-      problems.push(`out 不在允许的根内：${path.resolve(value)}（允许：${roots.join(' / ')}）—— 要写到别处就改插件配置的 allowedRoots`);
+      problems.push(`out 不在允许的根内：${P.resolve(value)}（允许：${roots.join(' / ')}）—— 要写到别处就改插件配置的 allowedRoots`);
       return null;
     }
     if ((mustExist || mustBeDir) && !io.exists(value)) problems.push(`out 不存在：${value}`);
     else if (mustBeDir && !io.isDir(value)) problems.push(`out 不是目录：${value}`);
-    return path.resolve(value);
+    return P.resolve(value);
   };
 
   if (op === 'status') return { problems, plan: { op, kind: 'status', write: false } };
 
   if (op === 'probe-link' || op === 'probe-write') {
     const dir = raw.dir;
-    if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
+    if (typeof dir !== 'string' || !P.isAbsolute(dir)) {
       problems.push(`${op} 需要 dir（非空绝对路径）：硬链接/临时件要落在与目标**同一卷**的目录里`);
       return { problems };
     }
     if (op === 'probe-write' && !io.isDir(dir)) problems.push(`dir 不是目录：${dir}`);
-    return { problems, plan: { op, kind: OPS[op].kind, write: false, dir: path.resolve(dir) } };
+    return { problems, plan: { op, kind: OPS[op].kind, write: false, dir: P.resolve(dir) } };
   }
 
   if (op === 'relabel-medium') {
@@ -167,16 +179,16 @@ export function planOp(op, args = {}, env = {}) {
     const argv = [...OPS[op].cli];
     if (out) argv.push('--out', out);
     if (raw.baked !== undefined) {
-      if (typeof raw.baked !== 'string' || !path.isAbsolute(raw.baked) || !io.isDir(raw.baked)) problems.push(`baked 必须是一个存在的绝对目录：${JSON.stringify(raw.baked)}`);
-      else argv.push('--baked', path.resolve(raw.baked));
+      if (typeof raw.baked !== 'string' || !P.isAbsolute(raw.baked) || !io.isDir(raw.baked)) problems.push(`baked 必须是一个存在的绝对目录：${JSON.stringify(raw.baked)}`);
+      else argv.push('--baked', P.resolve(raw.baked));
     }
     if (raw.alf !== undefined) {
       if (!ALF_MODES.includes(raw.alf)) problems.push(`alf 只能是 ${ALF_MODES.join(' / ')}`);
       else argv.push('--alf', raw.alf);
     }
     if (raw.leCmd !== undefined) {
-      if (typeof raw.leCmd !== 'string' || !path.isAbsolute(raw.leCmd) || !io.exists(raw.leCmd)) problems.push(`leCmd 必须是一个存在的绝对文件：${JSON.stringify(raw.leCmd)}`);
-      else argv.push('--le-cmd', path.resolve(raw.leCmd));
+      if (typeof raw.leCmd !== 'string' || !P.isAbsolute(raw.leCmd) || !io.exists(raw.leCmd)) problems.push(`leCmd 必须是一个存在的绝对文件：${JSON.stringify(raw.leCmd)}`);
+      else argv.push('--le-cmd', P.resolve(raw.leCmd));
     }
     if (raw.leProfile !== undefined) {
       if (typeof raw.leProfile !== 'string' || !GUID_RE.test(raw.leProfile)) problems.push(`leProfile 必须是 GUID 形态：${JSON.stringify(raw.leProfile)}`);

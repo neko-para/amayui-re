@@ -75,7 +75,13 @@ corpus/disasm/
 IDA 输出**不具可复现性** ⇒ 整体作为只读资源保存。
 **锚点锚二进制里的 EA**；语料只提供 `EA → 当前这份导出里的行号` 映射。
 换一次反汇编**只重建映射，不改任何锚**（这条正是旧仓 `raw N` 行号锚全废的教训）。
-★ **对象 shape（"哪个 EA 以什么形状碰了哪个偏移"）**的做法与判据见 `shape-census.md`
+★ **引擎 spec（领域本体：实体 / 状态 / 操作 / 规则）** 的落点是 `../../data/spec/`（工具 `pnpm tools spec`）：
+规范正文是 `data/spec/chapters/*.md`（可分发的自包含 Markdown）；机器绑定与范围审计是内部文件；
+可分发正文就是 `data/spec/chapters/*.md`（**不打包成单文件**；不含复核材料）。
+ASM / ALF / AGF 三种二进制协议由 `data/spec/` 定义；`packages/age-format` 是现有实现（待核验），不是规范来源。
+它只经 `storage` / EA 指针引用本文件的语料事实，⛔ 不在这里写语义，也⛔ 不在 spec 正文里内联布局。
+
+★ **对象 shape（"哪个 EA 以什么形状碰了哪个偏移"）** 的做法与判据见 `shape-census.md`
 （承重件是**独立复核器**：按 witness EA 回语料重解，给 verified / drifted / unverifiable）；
 落点是 `pnpm tools shape`（`access` / `verify` / `regions` / `claims` / `describe`，**只读、不写任何文件**）。
 

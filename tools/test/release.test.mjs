@@ -404,8 +404,9 @@ test('install：落盘途中出错也**不留半棵树**（外层薄壳兜住意
     const ctx = ctxOf(f);
     const good = installPlan(ctx, collectChanged(ctx));
     const buf = Buffer.from('x');
-    // 造一个"写不下去"的覆盖件（Windows 文件名里 `?` 非法）
-    const bad = { ...good, overlays: [...good.overlays, { path: 'x?.BIN', kind: 'bin', buf, sha256: sha256buf(buf), source: '测试' }] };
+    // 造一个"写不下去"的覆盖件：NUL 在**所有平台**的路径里都非法
+    //   （原先用 `x?.BIN`：Windows 非法、POSIX 却是合法文件名 ⇒ 在 macOS 上这条测试恒红）
+    const bad = { ...good, overlays: [...good.overlays, { path: 'x\u0000.BIN', kind: 'bin', buf, sha256: sha256buf(buf), source: '测试' }] };
     const res = writeInstall(ctx, bad);
     assert.equal(res.ok, false, '写不下去必须报失败');
     assert.ok(res.problems.some((p) => /落盘过程中出错/.test(p)), res.problems.join('; '));

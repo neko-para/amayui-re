@@ -18,8 +18,17 @@ import { canSymlink, linkKind, findAmayuiLinks } from '../lib/probe.mjs';
 
 const REPO = 'E:/Projects/amayui-re';
 
-/** 假 io：让判据与机器无关（真 fs 会让"这个目录存不存在"取决于跑测试的机器） */
-const fakeIo = (present) => ({ exists: (p) => present.includes(path.resolve(p)), isDir: () => true });
+/**
+ * 假 io：让判据与机器无关（真 fs 会让"这个目录存不存在"取决于跑测试的机器）。
+ * ★ 路径归一要和被测实现**同一套语义**：盘符路径用 `path.win32`，否则 POSIX 上
+ *   `path.resolve('E:/x')` 会把盘符当相对段，`present` 永远对不上（实测 7 条假红）。
+ */
+const WIN_PATH_RE = /^[A-Za-z]:[\\/]/;
+const resolvePath = (p) => (WIN_PATH_RE.test(p) ? path.win32 : path).resolve(p);
+const fakeIo = (present) => {
+  const set = new Set(present.map(resolvePath));
+  return { exists: (p) => set.has(resolvePath(p)), isDir: () => true };
+};
 const WS = [path.join(REPO, 'package.json'), path.join(REPO, 'pnpm-workspace.yaml')];
 
 test('★ `repoRoot` 的校验：相对路径 / 缺失 / 不是 workspace 根 ⇒ 一律拒', () => {

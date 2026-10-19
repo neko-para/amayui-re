@@ -46,6 +46,6 @@
 | 定位 | 某 EA 在哪、谁调它、这个全局谁写 | `pnpm tools disasm-at` · `disasm-fn`（只读） |
 | 格式 | 容器/脚本字节结构、能否原样重打包 | `packages/age-format` · 指令表 |
 | 机器本体（shape） | 这个 offset 属谁、多宽、是否数组、函数分析完没有 | `data/shape/types.json` · `carriers.json` |
-| 领域本体（spec） | 引擎有什么实体/操作/规则、边界请求是什么 | 待落点（方法单见需求树） |
+| 领域本体（spec） | 引擎有什么实体/操作/规则、边界请求是什么 | `data/spec/`（`pnpm tools spec`；方法单见需求树） |
 | 记录（台账） | 结论有没有证人、锚还活着吗 | `data/ledger/` |
 | 待办 / 进度 | 还要做什么、这单能不能关 | `data/requirements/` |

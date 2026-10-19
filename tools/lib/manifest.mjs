@@ -121,7 +121,7 @@ export const OPERATIONS = [
 export const CHECK_TITLES = new Map([
   [1, 'schema：必填齐全 / 枚举合法 / id 全局唯一'],
   [2, '自洽：external-only/deferred ⇔ dest=null；lfs/git ⇔ dest 非空'],
-  [3, '存在性：dest 与 origin 都能在盘上找到（staging / machine-local 只 warning；目录型 dest 必须非空）'],
+  [3, '存在性：dest 与 origin 都能在盘上找到（staging / machine-local / **external-only·deferred 的外部来源** 只 warning；入库件的 origin 缺失仍硬红；目录型 dest 必须非空）'],
   [4, '校验和纪律：入库件不写 sha256；不入库的文件件必须写且与盘上一致（machine-local 例外）；目录型 dest 的副本必须与来源逐字节相同'],
   [5, '忽略一致性：external-only 且 dest 在仓内 ⇒ 必须被 .gitignore 命中'],
   [6, 'LFS 一致性：storage=lfs ⇒ dest 下**每个已跟踪文件**（含目录型 dest 里的载荷，不靠 origin 枚举）filter = lfs；未跟踪的不算'],
@@ -396,6 +396,12 @@ export function validateManifest(manifest, opts = {}) {
           } else if (isMachineLocal(o)) {
             warns += 1;
             details.push(`warn: ${e.id}: origin 是本机现场产物（disposition=machine-local），本机缺件不算红 → ${o.root}:${o.path}`);
+          } else if (NOT_CARRYING.has(e.storage)) {
+            // ★ external-only / deferred 是"留在仓库外、只登记"的来源：本机没有它**不等于**清单坏了
+            //   （旧仓/安装树是平台相关的外部状态；与台账里 `reference` 锚"取不到 ⇒ warning"同一口径）。
+            //   ⛔ 入库件（lfs/git）不在此列：它们的来源必须可再取，缺件仍是硬红。
+            warns += 1;
+            details.push(`warn: ${e.id}: origin 是外部来源（storage=${e.storage}），本机不在场不算红（不可校验 ≠ 失效） → ${o.root}:${o.path}`);
           } else {
             details.push(`${e.id}: origin 在盘上不存在 → ${o.root}:${o.path}`);
           }
@@ -405,7 +411,7 @@ export function validateManifest(manifest, opts = {}) {
     const hard = details.filter((d) => !d.startsWith('warn:'));
     add(3,
       hard.length ? 'fail' : warns ? 'warn' : 'pass',
-      hard.length ? `${hard.length} 处缺失` : warns ? `${warns} 处允许的暂缺（staging / machine-local，逐条列出）` : '全部存在', details);
+      hard.length ? `${hard.length} 处缺失` : warns ? `${warns} 处允许的暂缺（staging / machine-local / external-only·deferred 外部来源，逐条列出）` : '全部存在', details);
   }
 
   // (4) 校验和纪律 ───────────────────────────────────────────
@@ -675,7 +681,9 @@ export function describe() {
           '`origin[].disposition="machine-local"` = 这条 origin 是**本机现场产物**（上游 `.gitignore` 忽略的目录 / 本机跑工具产出的件）' +
           '⇒ #3 缺件只 warn（**仍逐条报数**）、#4 既不要求 pin 也不比对。★ 两条约束：**入库件不许标它**（"这份入库件从哪来"必须可再取）、' +
           '**它与 `sha256` 不许共存**（本机产物不可跨机器校验；要留字节就写进 docs 或入库件）。' +
-          '未声明这一档的 origin 依旧：缺件硬红、哈希不符硬红、缺 pin 硬红。',
+          '★ 另有**外部来源**一档：`storage=external-only/deferred` 的条目，其外部 origin 缺件 ⇒ #3 只 warn' +
+          '（本机不可校验 ≠ 清单坏了；旧仓/安装树是平台相关状态）。入库件（lfs/git）的 origin 缺件仍硬红。' +
+          '哈希不符、缺 pin 仍硬红（machine-local 除外）。',
       },
       selfContained:
         '入库的 `kind=fixture`（固化资源：没有加工链）**允许 origin 缺席** —— 它的"来源"就是入库的那一份本身；' +

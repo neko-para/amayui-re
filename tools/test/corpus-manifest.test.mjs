@@ -143,14 +143,28 @@ test('#3 存在性：dest 不在盘上 → 红', () => {
   assert.ok(failIds(check(root, [e])).includes(3));
 });
 
-test('#3 存在性：origin 缺失 → 红；root=staging 缺失 → 只 warning', () => {
+test('#3 存在性：external-only / deferred / staging 的外部来源缺失 → 只 warning', () => {
   const root = makeRepo();
-  const bad = check(root, [validEntry({ origin: [{ root: 'oldRepo', path: 'sub/nope.c', sha256: HEX64 }] })]);
-  assert.ok(failIds(bad).includes(3));
+  for (const storage of ['external-only', 'deferred', 'staging']) {
+    const entry = storage === 'staging'
+      ? validEntry({ origin: [{ root: 'staging', path: 'not-here.c', sha256: HEX64 }] })
+      : validEntry({ storage, origin: [{ root: 'oldRepo', path: 'sub/nope.c', sha256: HEX64 }] });
+    const rep = check(root, [entry]);
+    assert.deepEqual(failIds(rep), [], `${storage} 缺件不该硬红：${JSON.stringify(rep.checks.find((c) => c.id === 3).details)}`);
+    assert.ok(rep.checks.some((c) => c.id === 3 && c.status === 'warn'), `${storage} 必须留下 warning（不许静默）`);
+  }
+});
 
-  const okStaging = check(root, [validEntry({ origin: [{ root: 'staging', path: 'not-here.c', sha256: HEX64 }] })]);
-  assert.deepEqual(failIds(okStaging), []);
-  assert.ok(okStaging.checks.some((c) => c.status === 'warn'));
+test('#3 存在性：**入库件**（lfs / git）的 origin 缺失仍是硬红（来源必须可再取）', () => {
+  const root = makeRepo();
+  for (const storage of ['lfs', 'git']) {
+    const e = validEntry({
+      storage,
+      dest: 'corpus/payload.bin',
+      origin: [{ root: 'oldRepo', path: 'sub/nope.c', sha256: HEX64 }],
+    });
+    assert.ok(failIds(check(root, [e])).includes(3), `${storage} 的来源缺失必须硬红`);
+  }
 });
 
 test('#4 校验和：不入库的文件 origin 缺 sha256 → 红', () => {
@@ -362,7 +376,14 @@ test('端到端：写入非法状态会被拒绝（清单不是"写什么是什�
 function withStaleRed() {
   const root = makeRepo();
   const tmp = path.join(root, 'assets.json');
-  const stale = validEntry({ id: 'x/stale', origin: [{ root: 'oldRepo', path: 'sub/nope.c', sha256: HEX64 }] });
+  // ★ 用**入库件缺 dest**（本机没 smudge / 没同步）当"这台机器本来就有的红灯"：
+  //   external-only 的来源缺件现在只是 warning（不再是 hard），拿它当 stale red 会让本组用例失去前提。
+  const stale = validEntry({
+    id: 'x/stale',
+    storage: 'lfs',
+    dest: 'corpus/absent-stale.bin',
+    origin: [{ root: 'oldRepo', path: 'sub/x.c', sha256: HEX64 }],
+  });
   fs.writeFileSync(tmp, canonicalStringify(makeManifest(root, [stale])));
   return { root, tmp, manifest: loadManifest(tmp) };
 }
@@ -375,7 +396,7 @@ test('★ 写入口：这台机器本来就有的红灯**不挡**写入（闸门
   assert.equal(res.ok, true, `与本条目无关的红灯不许掐死写入：${res.reason}`);
   const text = fs.readFileSync(tmp, 'utf8');
   assert.match(text, /x\/fresh/, '新条目要真的落盘');
-  assert.match(text, /sub\/nope\.c/, '那条机器本地的红灯要**原样留着**（不是被吞掉、也不是被"修好"）');
+  assert.match(text, /absent-stale\.bin/, '那条机器本地的红灯要**原样留着**（不是被吞掉、也不是被"修好"）');
 });
 
 test('★ 写入口：**新写入**引出来的失败照样挡（dest 不在盘上 ⇒ 拒 + 一个字节都不留）', () => {
@@ -391,15 +412,15 @@ test('★ 写入口：**新写入**引出来的失败照样挡（dest 不在盘�
 test('★ 写入口：比较粒度必须是**明细集合** —— 失败"条数"没变但换了项，也要挡（只比计数会假绿）', () => {
   const { root, tmp, manifest } = withStaleRed();
   // 候选：原来那处缺失变成"在盘上"（该失败消失），同时新条目引入**另一处**缺失 ⇒ #3 的计数**还是 1**
-  const fixed = validEntry({ id: 'x/now-present', origin: [{ root: 'oldRepo', path: 'sub/x.c', sha256: HEX64 }] });
-  const bad = validEntry({ id: 'x/other-missing', origin: [{ root: 'oldRepo', path: 'sub/nope2.c', sha256: HEX64 }] });
+  const fixed = validEntry({ id: 'x/now-present', storage: 'lfs', dest: 'corpus/payload.bin', origin: [{ root: 'oldRepo', path: 'sub/x.c', sha256: HEX64 }] });
+  const bad = validEntry({ id: 'x/other-missing', storage: 'lfs', dest: 'corpus/other-absent.bin', origin: [{ root: 'oldRepo', path: 'sub/x.c', sha256: HEX64 }] });
   const candidate = { ...manifest, entries: [fixed, bad] };
   const beforeRep = validateManifest(manifest, WRITE_OPTS(root));
   const afterRep = validateManifest(candidate, WRITE_OPTS(root));
   assert.equal(afterRep.failures, beforeRep.failures, '前置：两次的**失败条数**必须相同，否则这条守卫测不到粒度');
   const res = saveManifest(candidate, tmp, WRITE_OPTS(root));
   assert.equal(res.ok, false, '换了一个失败项也算新增失败；只比计数会在这里假绿');
-  assert.match(res.reason, /nope2\.c/, `理由要点到那个**新**失败项，实际：${res.reason}`);
+  assert.match(res.reason, /other-absent\.bin/, `理由要点到那个**新**失败项，实际：${res.reason}`);
 });
 
 // ─────────────────────────────────────────── origin 的 machine-local 档

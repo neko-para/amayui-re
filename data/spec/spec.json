@@ -1,0 +1,12 @@
+{
+  "schema": 3,
+  "title": "天結いキャッスルマイスター 引擎规范",
+  "chapters": [
+    { "id": "overview", "file": "chapters/00-overview.md", "title": "总览与约定" },
+    { "id": "format", "file": "chapters/10-format.md", "title": "脚本与执行" },
+    { "id": "alf", "file": "chapters/20-alf.md", "title": "ALF 归档" },
+    { "id": "agf", "file": "chapters/30-agf.md", "title": "AGF 图像" },
+    { "id": "pools", "file": "chapters/40-pools.md", "title": "数据池" },
+    { "id": "engine-state", "file": "chapters/50-engine-state.md", "title": "引擎级状态" }
+  ]
+}

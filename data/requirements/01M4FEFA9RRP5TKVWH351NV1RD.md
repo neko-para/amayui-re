@@ -49,6 +49,7 @@
 `pnpm tools corpus validate` 在**两台机器上**都能给出"可解释的红/绿"：
 本机允许"参考仓/安装树不在场"的 warning，但**不允许**出现"sha256 与盘上不符"这类**机器相关**的红。
 
-★ 现状（2026-10-09 实测）：`samples-asm` 那一类**已达成**（第 3 行那类红消失）；仍未达成的是第 2/3 条
-那两类（`agerc-modified-install` 的 sha256 不符、`raw-parts`/`DESIGN.md`/`AGE.EXE__dumped.EXE` 缺件）——
-而它们的收口方式本来就该是"改 `storage` / 去掉 `sha256` / 标 `deferred`"，不是"让盘上对上"。
+★ 现状（2026-10-19 复核）：`samples-asm` 与 `agerc-modified-install` 的 sha 类红都已消失；
+`reference/design-discussion` 这类**外部来源缺件**已按"`storage=external-only/deferred` ⇒ #3 只 warning"落地
+（`corpus validate` 在本机 exit 0，允许的暂缺逐条报数）—— 这是本条"收口判据"要求的那一半。
+仍未裁决的是第 2/3 条里"这些外部来源要不要改 `deferred` / 去掉 pin"：本机能解释地绿，但来源本身仍不可再校验。

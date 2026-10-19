@@ -51,7 +51,10 @@ test('★ 插件能被宿主加载：defineTool 吃下 spec、apply 注册出 `d
     assert.ok(fs.existsSync(path.join(REPO_ROOT, auditFile)), '审计文件必须真的写出来了');
 
     // 校验不通过时：一个字都不做（并且如实记账）
-    const bad = await tool.execute({ op: 'install-tree', out: 'C:\\Windows' }, {});
+    // ★ 越界要按**本机路径语义**选输入：Windows 盘符路径在 POSIX 上不是绝对路径，
+    //   会先被"必须是绝对路径"拦下，测不到"不在允许的根内"这一条。
+    const outside = process.platform === 'win32' ? 'C:\\Windows' : path.join(REPO_ROOT, '..', 'outside-root');
+    const bad = await tool.execute({ op: 'install-tree', out: outside }, {});
     assert.equal(bad.ok, false);
     assert.match(bad.summary, /不在允许的根内/);
     // ★ 被拒的那次**也**留了痕（append-only：拒绝同样是事实）⇒ 断言两行都在

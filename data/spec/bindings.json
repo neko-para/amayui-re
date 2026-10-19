@@ -1,0 +1,496 @@
+{
+  "schema": 3,
+  "bindings": [
+    {
+      "rule": "SPC-POOL-GLOBAL-VALUE-FAMILIES",
+      "sites": [
+        {
+          "ea": "0x42af2d",
+          "what": "取址 case 3：全局整型池 base + idx*4"
+        },
+        {
+          "ea": "0x42af89",
+          "what": "取址 case 4：全局浮点池 base + idx*4"
+        },
+        {
+          "ea": "0x42afd7",
+          "what": "取址 case 5：全局字符串池 base + idx*28"
+        },
+        {
+          "ea": "0x41bfdb",
+          "what": "读（整型）case 3：取格后 DEC"
+        },
+        {
+          "ea": "0x41c0c0",
+          "what": "读（整型）case 4：浮点格按截断转 int"
+        },
+        {
+          "ea": "0x41c0d7",
+          "what": "读（整型）case 5：字符串记录 → 文本 → atoi"
+        },
+        {
+          "ea": "0x41c38b",
+          "what": "读（浮点）case 3：取格后 DEC 再转浮点"
+        },
+        {
+          "ea": "0x41c471",
+          "what": "读（浮点）case 4：浮点格原样"
+        },
+        {
+          "ea": "0x41c483",
+          "what": "读（浮点）case 5：字符串记录 → 文本 → atof"
+        },
+        {
+          "ea": "0x42b526",
+          "what": "写（整型）case 3：ENC 后写回全局整型池"
+        },
+        {
+          "ea": "0x42b56c",
+          "what": "写（整型）case 4：写浮点格"
+        },
+        {
+          "ea": "0x42ba76",
+          "what": "写（浮点）case 3：截断为 int 后 ENC 再写"
+        },
+        {
+          "ea": "0x42bac0",
+          "what": "写（浮点）case 4：写浮点格"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.base.int",
+        "layout:GLOBAL_SLOTS.base.float",
+        "layout:GLOBAL_SLOTS.base.string"
+      ],
+      "evidence": [
+        "KN:01M48EHKDD0W1X442T287G0W4D",
+        "guard:tools/test/emulator-model.test.mjs#★ global 池基址/计数槽必须与语料里 type 3/4 的取址一致",
+        "KN:01M4BB1GJG393S1W4J7W0S3P3T"
+      ]
+    },
+    {
+      "rule": "SPC-POOL-GLOBAL-REF-FAMILIES",
+      "sites": [
+        {
+          "ea": "0x42af1d",
+          "what": "取址 case 6：读格作为地址"
+        },
+        {
+          "ea": "0x42af79",
+          "what": "取址 case 7：读格作为地址"
+        },
+        {
+          "ea": "0x42aff0",
+          "what": "取址 case 8：读格作为地址"
+        },
+        {
+          "ea": "0x41bfa9",
+          "what": "读（整型）case 6：解引用后 DEC"
+        },
+        {
+          "ea": "0x41c166",
+          "what": "读（整型）case 7：解引用后取浮点并截断"
+        },
+        {
+          "ea": "0x41c359",
+          "what": "读（浮点）case 6：解引用后 DEC 再转浮点"
+        },
+        {
+          "ea": "0x41c519",
+          "what": "读（浮点）case 7：解引用后取浮点"
+        },
+        {
+          "ea": "0x42b58e",
+          "what": "写（整型）case 6：把 ENC 值写进解引用目标"
+        },
+        {
+          "ea": "0x42b5db",
+          "what": "写（整型）case 7：把浮点写进解引用目标"
+        },
+        {
+          "ea": "0x42bae2",
+          "what": "写（浮点）case 6：截断后 ENC 写进解引用目标"
+        },
+        {
+          "ea": "0x42bb35",
+          "what": "写（浮点）case 7：浮点写进解引用目标"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.base.intRef",
+        "layout:GLOBAL_SLOTS.base.floatRef",
+        "layout:GLOBAL_SLOTS.base.stringRef"
+      ],
+      "evidence": [
+        "KN:01M48EHKDD0W1X442T287G0W4D",
+        "KN:01M4BB1GJG393S1W4J7W0S3P3T",
+        "guard:tools/test/emulator-model.test.mjs#★ global 池基址/计数槽必须与语料里 type 3/4 的取址一致"
+      ]
+    },
+    {
+      "rule": "SPC-POOL-LOCAL-FAMILIES",
+      "sites": [
+        {
+          "ea": "0x40f4a0",
+          "what": "装载器用编码后的零填局部整型池"
+        },
+        {
+          "ea": "0x41c00b",
+          "what": "读（整型）case 9：取格后 DEC"
+        },
+        {
+          "ea": "0x41c049",
+          "what": "读（整型）case 12：解引用后 DEC（格本身不解码）"
+        },
+        {
+          "ea": "0x41c104",
+          "what": "读（整型）case 10：浮点格截断"
+        },
+        {
+          "ea": "0x41c12b",
+          "what": "读（整型）case 11：字符串记录 → 文本 → atoi"
+        },
+        {
+          "ea": "0x41c17f",
+          "what": "读（整型）case 13：解引用后浮点截断"
+        },
+        {
+          "ea": "0x41c3bb",
+          "what": "读（浮点）case 9：取格后 DEC 再转浮点"
+        },
+        {
+          "ea": "0x41c3f9",
+          "what": "读（浮点）case 12：解引用后 DEC 再转浮点"
+        },
+        {
+          "ea": "0x41c4b6",
+          "what": "读（浮点）case 10：当前帧浮点池"
+        },
+        {
+          "ea": "0x41c4d8",
+          "what": "读（浮点）case 11：字符串记录 → 文本 → atof"
+        },
+        {
+          "ea": "0x41c52d",
+          "what": "读（浮点）case 13：解引用后取浮点"
+        },
+        {
+          "ea": "0x42af3d",
+          "what": "取址 case 12：当前帧指针池"
+        },
+        {
+          "ea": "0x42af5b",
+          "what": "取址 case 9：当前帧整型池"
+        },
+        {
+          "ea": "0x42af99",
+          "what": "取址 case 13：当前帧浮点指针池"
+        },
+        {
+          "ea": "0x42afb7",
+          "what": "取址 case 10：当前帧浮点池"
+        },
+        {
+          "ea": "0x42b000",
+          "what": "取址 case 11：当前帧字符串池"
+        },
+        {
+          "ea": "0x42b027",
+          "what": "取址 case 14：当前帧字符串指针池"
+        },
+        {
+          "ea": "0x42b604",
+          "what": "写（整型）case 9：ENC 后写格"
+        },
+        {
+          "ea": "0x42b658",
+          "what": "写（整型）case 10：写浮点格"
+        },
+        {
+          "ea": "0x42b68a",
+          "what": "写（整型）case 12：ENC 后写解引用目标"
+        },
+        {
+          "ea": "0x42bb5e",
+          "what": "写（浮点）case 9：截断后 ENC 写格"
+        },
+        {
+          "ea": "0x42bbb7",
+          "what": "写（浮点）case 10：写浮点格"
+        },
+        {
+          "ea": "0x42bbe9",
+          "what": "写（浮点）case 12：截断后 ENC 写解引用目标"
+        },
+        {
+          "ea": "0x42bc4a",
+          "what": "写（浮点）case 13：写解引用目标"
+        }
+      ],
+      "functions": [
+        "sub_40ED40",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42AEA0",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:LOCAL_POOL_SLOTS",
+        "layout:FRAME_LAYOUT.base"
+      ],
+      "evidence": [
+        "KN:01M48GZ0WM6H1R1J4M767A5M14",
+        "KN:01M48GXNNP4J7C077778025G20",
+        "KN:01M48FX5AK365J325E223P5E1N",
+        "KN:01M48H1AME2C1X486Y7S4G4W49",
+        "guard:tools/test/emulator-model.test.mjs#local 池的 slot 几何"
+      ]
+    },
+    {
+      "rule": "SPC-VALUE-INT-ENCODED",
+      "sites": [
+        {
+          "ea": "0x40d500",
+          "what": "DEC 的指令序列（取 key → rol → xor → ror）"
+        },
+        {
+          "ea": "0x4103b2",
+          "what": "ENC 的指令序列（ror → xor → rol）"
+        },
+        {
+          "ea": "0x41bfa9",
+          "what": "读（整型）case 6：解引用后 DEC"
+        },
+        {
+          "ea": "0x41bfdb",
+          "what": "读（整型）case 3：取格后 DEC"
+        },
+        {
+          "ea": "0x41c00b",
+          "what": "读（整型）case 9：取格后 DEC"
+        },
+        {
+          "ea": "0x41c049",
+          "what": "读（整型）case 12：解引用后 DEC"
+        },
+        {
+          "ea": "0x41c359",
+          "what": "读（浮点）case 6：解引用后 DEC 再转浮点"
+        },
+        {
+          "ea": "0x41c38b",
+          "what": "读（浮点）case 3：取格后 DEC 再转浮点"
+        },
+        {
+          "ea": "0x41c3bb",
+          "what": "读（浮点）case 9：取格后 DEC 再转浮点"
+        },
+        {
+          "ea": "0x41c3f9",
+          "what": "读（浮点）case 12：解引用后 DEC 再转浮点"
+        },
+        {
+          "ea": "0x42b526",
+          "what": "写（整型）case 3：ENC 后写格"
+        },
+        {
+          "ea": "0x42b58e",
+          "what": "写（整型）case 6：ENC 后写解引用目标"
+        },
+        {
+          "ea": "0x42b604",
+          "what": "写（整型）case 9：ENC 后写格"
+        },
+        {
+          "ea": "0x42b68a",
+          "what": "写（整型）case 12：ENC 后写解引用目标"
+        },
+        {
+          "ea": "0x42ba76",
+          "what": "写（浮点）case 3：截断为 int 后 ENC 再写"
+        },
+        {
+          "ea": "0x42bae2",
+          "what": "写（浮点）case 6：截断后 ENC 写进解引用目标"
+        },
+        {
+          "ea": "0x42bb5e",
+          "what": "写（浮点）case 9：截断后 ENC 写格"
+        },
+        {
+          "ea": "0x42bbe9",
+          "what": "写（浮点）case 12：截断后 ENC 写解引用目标"
+        }
+      ],
+      "functions": [
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.base.int",
+        "layout:LOCAL_POOL_SLOTS"
+      ],
+      "evidence": [
+        "KN:01M48F4HYZ070F651D3Z7N4N4R",
+        "KN:01M4NEXJV8687M1B4N6C2R1Q5G",
+        "KN:01M48FX5AK365J325E223P5E1N",
+        "guard:tools/test/engine-value-codec.test.mjs#语料里 DEC 的指令序列"
+      ]
+    },
+    {
+      "rule": "SPC-POOL-STRING-SSO",
+      "sites": [
+        {
+          "ea": "0x42afd7",
+          "what": "取址 case 5：全局字符串池 base + idx*元素宽度"
+        },
+        {
+          "ea": "0x42b000",
+          "what": "取址 case 11：局部字符串池 base + idx*元素宽度"
+        },
+        {
+          "ea": "0x41c0d7",
+          "what": "读（整型）case 5：按长度/内联标志取文本 → atoi"
+        },
+        {
+          "ea": "0x41c12b",
+          "what": "读（整型）case 11：按长度/内联标志取文本 → atoi"
+        },
+        {
+          "ea": "0x41c483",
+          "what": "读（浮点）case 5：同一记录形态 → atof"
+        },
+        {
+          "ea": "0x41c4d8",
+          "what": "读（浮点）case 11：同一记录形态 → atof"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.base.string",
+        "layout:LOCAL_POOL_SLOTS"
+      ],
+      "evidence": [
+        "KN:01M48GZ0WM6H1R1J4M767A5M14",
+        "guard:tools/test/emulator-model.test.mjs#local 池的 slot 几何"
+      ]
+    },
+    {
+      "rule": "SPC-OPERAND-UNSUPPORTED-THROW",
+      "sites": [
+        {
+          "ea": "0x41c218",
+          "what": "读（整型）default：type 8 与域外类型抛异常"
+        },
+        {
+          "ea": "0x41c5c1",
+          "what": "读（浮点）default：type 8 与域外类型抛异常"
+        },
+        {
+          "ea": "0x42b830",
+          "what": "写（整型）default：type 5/8/11 与域外类型抛异常"
+        },
+        {
+          "ea": "0x42bd9e",
+          "what": "写（浮点）default：type 5/8/11 与域外类型抛异常"
+        },
+        {
+          "ea": "0x42b141",
+          "what": "取址 default：类型域之外抛异常"
+        }
+      ],
+      "functions": [
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00",
+        "sub_42AEA0"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M48EHKDD0W1X442T287G0W4D",
+        "guard:tools/test/engine-operand-types.test.mjs#★ 三条原语的跳转表 case 数互不相等"
+      ]
+    },
+    {
+      "rule": "SPC-POOL-CAPACITY-AND-UB",
+      "sites": [
+        {
+          "ea": "0x40f2e9",
+          "what": "装载器：局部池分配后写基址"
+        },
+        {
+          "ea": "0x4151fd",
+          "what": "全局池的分配调用（VirtualAlloc）"
+        },
+        {
+          "ea": "0x415387",
+          "what": "全局整型池的初值填充：逐格写编码后的零"
+        }
+      ],
+      "functions": [
+        "sub_40ED40",
+        "sub_414AC0"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.base",
+        "layout:LOCAL_POOL_SLOTS",
+        "layout:GLOBAL_SLOTS.base.int"
+      ],
+      "evidence": [
+        "KN:01M48HCSEE0Y5Y1Y0F174Y461F",
+        "KN:01M48GXNQB74492562580B472Z",
+        "KN:01M4NEZZRE732Q5N0D4874693E"
+      ]
+    },
+    {
+      "rule": "SPC-ENGINE-SCALAR-ARRAYS",
+      "sites": [
+        {
+          "ea": "0x421e50",
+          "what": "opcode 0x107 的 handler 入口"
+        },
+        {
+          "ea": "0x422070",
+          "what": "opcode 0x10b 的 handler 入口"
+        },
+        {
+          "ea": "0x426b60",
+          "what": "opcode 0x30a 的 handler 入口"
+        }
+      ],
+      "functions": [
+        "sub_421E50",
+        "sub_422070",
+        "sub_426B60"
+      ],
+      "storage": [
+        "layout:ENGINE_SCALAR_ARRAYS"
+      ],
+      "evidence": [
+        "KN:01M4E50S9J1X717X4G5R696A0G"
+      ]
+    }
+  ]
+}

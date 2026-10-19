@@ -1,0 +1,879 @@
+{
+  "schema": 3,
+  "pilot": {
+    "name": "operand-access-effects",
+    "question": "五个操作数原语（取址 / 读整型 / 读浮点 / 写整型 / 写浮点）对每个 operand type 做了什么？池的族、值域与编解码边界在哪里？",
+    "source": "五个操作数原语（sub_42AEA0 / sub_41BF50 / sub_41C300 / sub_42B4B0 / sub_42BA00）跳转表的每个 case 入口 + 每个 default 块；块入口是站点，effect 由 x86-effects 从 .lst 机械枚举。",
+    "sites": [
+      {
+        "ea": "0x42af2d",
+        "note": "address case 3"
+      },
+      {
+        "ea": "0x42af89",
+        "note": "address case 4"
+      },
+      {
+        "ea": "0x42afd7",
+        "note": "address case 5"
+      },
+      {
+        "ea": "0x42af1d",
+        "note": "address case 6"
+      },
+      {
+        "ea": "0x42af79",
+        "note": "address case 7"
+      },
+      {
+        "ea": "0x42aff0",
+        "note": "address case 8"
+      },
+      {
+        "ea": "0x42af5b",
+        "note": "address case 9"
+      },
+      {
+        "ea": "0x42afb7",
+        "note": "address case 10"
+      },
+      {
+        "ea": "0x42b000",
+        "note": "address case 11"
+      },
+      {
+        "ea": "0x42af3d",
+        "note": "address case 12"
+      },
+      {
+        "ea": "0x42af99",
+        "note": "address case 13"
+      },
+      {
+        "ea": "0x42b027",
+        "note": "address case 14"
+      },
+      {
+        "ea": "0x41bfa0",
+        "note": "read-int case 0"
+      },
+      {
+        "ea": "0x41c089",
+        "note": "read-int case 1"
+      },
+      {
+        "ea": "0x41c097",
+        "note": "read-int case 2"
+      },
+      {
+        "ea": "0x41bfdb",
+        "note": "read-int case 3"
+      },
+      {
+        "ea": "0x41c0c0",
+        "note": "read-int case 4"
+      },
+      {
+        "ea": "0x41c0d7",
+        "note": "read-int case 5"
+      },
+      {
+        "ea": "0x41bfa9",
+        "note": "read-int case 6"
+      },
+      {
+        "ea": "0x41c166",
+        "note": "read-int case 7"
+      },
+      {
+        "ea": "0x41c00b",
+        "note": "read-int case 9"
+      },
+      {
+        "ea": "0x41c104",
+        "note": "read-int case 10"
+      },
+      {
+        "ea": "0x41c12b",
+        "note": "read-int case 11"
+      },
+      {
+        "ea": "0x41c049",
+        "note": "read-int case 12"
+      },
+      {
+        "ea": "0x41c17f",
+        "note": "read-int case 13"
+      },
+      {
+        "ea": "0x41c350",
+        "note": "read-float case 0"
+      },
+      {
+        "ea": "0x41c439",
+        "note": "read-float case 1"
+      },
+      {
+        "ea": "0x41c442",
+        "note": "read-float case 2"
+      },
+      {
+        "ea": "0x41c38b",
+        "note": "read-float case 3"
+      },
+      {
+        "ea": "0x41c471",
+        "note": "read-float case 4"
+      },
+      {
+        "ea": "0x41c483",
+        "note": "read-float case 5"
+      },
+      {
+        "ea": "0x41c359",
+        "note": "read-float case 6"
+      },
+      {
+        "ea": "0x41c519",
+        "note": "read-float case 7"
+      },
+      {
+        "ea": "0x41c3bb",
+        "note": "read-float case 9"
+      },
+      {
+        "ea": "0x41c4b6",
+        "note": "read-float case 10"
+      },
+      {
+        "ea": "0x41c4d8",
+        "note": "read-float case 11"
+      },
+      {
+        "ea": "0x41c3f9",
+        "note": "read-float case 12"
+      },
+      {
+        "ea": "0x41c52d",
+        "note": "read-float case 13"
+      },
+      {
+        "ea": "0x42b526",
+        "note": "write-int case 3"
+      },
+      {
+        "ea": "0x42b56c",
+        "note": "write-int case 4"
+      },
+      {
+        "ea": "0x42b58e",
+        "note": "write-int case 6"
+      },
+      {
+        "ea": "0x42b5db",
+        "note": "write-int case 7"
+      },
+      {
+        "ea": "0x42b604",
+        "note": "write-int case 9"
+      },
+      {
+        "ea": "0x42b658",
+        "note": "write-int case 10"
+      },
+      {
+        "ea": "0x42b68a",
+        "note": "write-int case 12"
+      },
+      {
+        "ea": "0x42ba76",
+        "note": "write-float case 3"
+      },
+      {
+        "ea": "0x42bac0",
+        "note": "write-float case 4"
+      },
+      {
+        "ea": "0x42bae2",
+        "note": "write-float case 6"
+      },
+      {
+        "ea": "0x42bb35",
+        "note": "write-float case 7"
+      },
+      {
+        "ea": "0x42bb5e",
+        "note": "write-float case 9"
+      },
+      {
+        "ea": "0x42bbb7",
+        "note": "write-float case 10"
+      },
+      {
+        "ea": "0x42bbe9",
+        "note": "write-float case 12"
+      },
+      {
+        "ea": "0x42bc4a",
+        "note": "write-float case 13"
+      },
+      {
+        "ea": "0x42b141",
+        "note": "address default"
+      },
+      {
+        "ea": "0x41c218",
+        "note": "read-int default (case 8)"
+      },
+      {
+        "ea": "0x41c5c1",
+        "note": "read-float default (case 8)"
+      },
+      {
+        "ea": "0x42b830",
+        "note": "write-int default (cases 5/8/11)"
+      },
+      {
+        "ea": "0x42bd9e",
+        "note": "write-float default (cases 5/8/11)"
+      }
+    ],
+    "internal": [
+      {
+        "kind": "reg",
+        "why": "寄存器搬移/读写是 primitive 的实现内部步骤；外部可观察的是返回值与内存结果"
+      },
+      {
+        "kind": "stack",
+        "why": "栈帧建立/拆除是调用约定，不是 primitive 的领域行为"
+      },
+      {
+        "kind": "control",
+        "why": "块内跳转/返回由指令流处理；primitive 的合同是返回值与内存效果"
+      }
+    ],
+    "residuals": [
+      {
+        "id": "RES-OPERAND-IMMEDIATE-FORMS",
+        "blocks": [
+          "0x41bfa0",
+          "0x41c089",
+          "0x41c097",
+          "0x41c350",
+          "0x41c439",
+          "0x41c442"
+        ],
+        "why": "type 0/1/2（立即数/浮点立即数/镜像内联串）的读语义尚未成篇",
+        "next": "各自写一条最小合同（值原样 / IEEE754 位模式 / 缓冲区内偏移），再判定它们算不算池"
+      }
+    ],
+    "outOfScope": [
+      {
+        "what": "operand type 0x8003 / 0x8005 / 0x8009 / 0x800B（容器句柄）",
+        "why": "它们在 switch 之前由独立的比较分支处理（懒分配 / 登记），不是跳转表 case；本轮的候选域只覆盖跳转表里的类型",
+        "chapter": "containers"
+      },
+      {
+        "what": "每个原语 switch 域之外的类型（例如写原语的 13/14、读原语的 14）",
+        "why": "它们与 default 走同一条 throw 路径，不逐个类型枚举；『域外一律抛』写在 SPC-OPERAND-UNSUPPORTED-THROW 的条件里",
+        "chapter": "pools"
+      },
+      {
+        "what": "操作数原语之外的引擎路径（脚本装载、帧生命周期、opcode handler、平台边界）",
+        "why": "本轮验收域只回答『操作数怎么落到池/值上』；其余章节只立骨架与残差，不并入试点闭合",
+        "chapter": "format"
+      }
+    ]
+  },
+  "chapters": [
+    {
+      "id": "overview",
+      "status": "partial",
+      "residual": []
+    },
+    {
+      "id": "format",
+      "status": "partial",
+      "residual": [
+        {
+          "what": "帧记录的生命周期（装载重建什么、保留什么）尚未整理成领域合同",
+          "next": "把已 accepted 的帧字段/生命周期观察收成『帧』章节的首批合同，并给每条挂 EA 与守卫"
+        },
+        {
+          "what": "位置表（0x71 / call-script / call 的三张表）的领域角色尚未成篇",
+          "next": "先回答『位置』在不同 opcode 里是不是同一个量，再写合同"
+        },
+        {
+          "what": "脚本头 13 个 u32 字段的用途（计数 / 子表偏移 / 装载器元数据）尚未逐条对上引擎加载器",
+          "next": "在加载器里找每个字段的读取点与消费点，登记 EA 后把字段用途升为已核验"
+        },
+        {
+          "what": "指令表 574 条的 argc 尚未逐条对引擎解码 / 长度推进核验",
+          "next": "找真正解码脚本的循环（opcode 读取 + 长度推进），把 argc 与逐条 opcode 关联；未核验的条目保持待核验"
+        },
+        {
+          "what": "头部 table_1/2/3 三张子表的元素结构与用途尚未成篇",
+          "next": "先从加载器与位置表消费点取证元素形状，再决定它们是协议的一部分还是装载器内部索引"
+        },
+        {
+          "what": "协议描述的最初来源是现有实现（仿照第三方库），不是引擎解码代码",
+          "next": "逐条把协议声明绑定到解码 EA / 守卫；完成前整章保持 unverified"
+        }
+      ]
+    },
+    {
+      "id": "alf",
+      "status": "partial",
+      "residual": [
+        {
+          "what": "ALF 加装档（AC 签名）的段起点与引擎读取分支尚未逐条核对",
+          "next": "在加载器里找 AC 分支的段起点计算，登记 EA 后升级"
+        },
+        {
+          "what": "S5 / UTF-16LE 索引没有语料样本",
+          "next": "找 S5 索引或引擎 S5 分支；没有样本就保持待核验"
+        },
+        {
+          "what": "ALF 的 LZSS 参数（最短匹配 / 拷贝循环）尚未与引擎解压函数对上",
+          "next": "定位引擎 ALF 解压函数，逐参对账"
+        },
+        {
+          "what": "TOC 的 file_index 语义未查明",
+          "next": "在引擎里找消费点；找不到就只保真搬运、不解释"
+        }
+      ]
+    },
+    {
+      "id": "agf",
+      "status": "partial",
+      "residual": [
+        {
+          "what": "AGF 24 字节头 / meta / body 字段尚未逐条对引擎读取指令",
+          "next": "从 sub_43E9F0 起的 AGF 读取段逐字段找读取点，登记 EA"
+        },
+        {
+          "what": "AGF 的 LZSS 参数与 ACIF alpha 的引擎实现尚未逐条对上",
+          "next": "定位解压与 alpha 读取函数，逐参对账"
+        },
+        {
+          "what": "宽高 / bpp / 调色板 / 行序的引擎像素读取路径未逐项核验",
+          "next": "从 blit/像素读取点反向核验，或把实现口径降为待核验"
+        }
+      ]
+    },
+    {
+      "id": "pools",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "what": "池容量的取值与来源没有最终口径（装载期分配，运行期状态）",
+          "next": "把装载器的六次分配（读计数 → 分配 → 写基址）收成一条可复核合同；容量数值不进 spec"
+        },
+        {
+          "what": "memflip 的触发与时机未取证",
+          "next": "先取证『谁在什么条件下交换两组缓冲』，再决定它是不是 spec 的可观察行为"
+        },
+        {
+          "what": "立即数 / 浮点立即数 / 镜像内联串（type 0/1/2）的读语义还没成篇",
+          "next": "先各自写一条最小合同（值原样 / IEEE754 位模式 / 缓冲区内偏移），再判定它们算不算池"
+        },
+        {
+          "what": "key 的生命周期（何时写、何时可读）只有唯一写入点与来源，尚未整理成合同",
+          "next": "把 key 的来源与写入时机收成一条『运行期状态』合同，并说明它为什么不能是常量"
+        }
+      ]
+    },
+    {
+      "id": "engine-state",
+      "status": "partial",
+      "residual": [
+        {
+          "what": "引擎标量与『帧内字段』的边界只在少数几条上有判据",
+          "next": "把已 accepted 的帧字段观察整理成『Engine 级 vs 帧内』的判据表"
+        },
+        {
+          "what": "键槽表越界口径不一致（静默跳过 vs 抛）",
+          "next": "按 handler 逐条取证越界行为，再决定是否写成同一族合同"
+        }
+      ]
+    }
+  ],
+  "planned": [
+    {
+      "id": "containers",
+      "title": "容器句柄：懒分配 / 登记 / 元素寻址",
+      "status": "none",
+      "residual": [
+        {
+          "what": "容器句柄的全部语义（元素类型、生命周期、失败路径）尚未处理",
+          "next": "先取证『首次访问时分配并登记到哪个槽』，再按容器种类分条写合同"
+        }
+      ]
+    },
+    {
+      "id": "objects",
+      "title": "对象模型：根对象 / 基类 / 类型身份",
+      "status": "none",
+      "residual": [
+        {
+          "what": "shape 层已有类型与载体，但领域合同（对象是什么、谁拥有谁）还没写",
+          "next": "先选一个对象（如根对象）写『构造 + 生命周期 + 可观察身份』三条合同"
+        }
+      ]
+    },
+    {
+      "id": "input",
+      "title": "输入：键鼠 / 手柄 / 事件",
+      "status": "none",
+      "residual": [
+        {
+          "what": "整章尚未处理",
+          "next": "先从脚本里找到消费输入的 opcode，再反推事件形态与时机"
+        }
+      ]
+    },
+    {
+      "id": "presentation",
+      "title": "表现边界：帧提交 / 图像 / 音频请求",
+      "status": "none",
+      "residual": [
+        {
+          "what": "整章尚未处理；平台细节按项目口径不进 spec",
+          "next": "先列『可观察的边界请求』清单，再逐条写合同并把逐位表现登记为 discards"
+        }
+      ]
+    },
+    {
+      "id": "files",
+      "title": "文件与脚本装载：容器 / 索引 / 编码",
+      "status": "none",
+      "residual": [
+        {
+          "what": "整章尚未处理（格式层已有包，引擎侧的打开/缓存/失败路径未成篇）",
+          "next": "先写『按文件 id 打开脚本』一条合同，绑定到装载器与文件层"
+        }
+      ]
+    },
+    {
+      "id": "save",
+      "title": "存档：写入 / 恢复 / 归属",
+      "status": "none",
+      "residual": [
+        {
+          "what": "整章尚未处理（已知部分观察散在需求树里，未收成合同）",
+          "next": "先把『写哪些区域』与『恢复时重建/保留』分开取证"
+        }
+      ]
+    },
+    {
+      "id": "config",
+      "title": "配置：键 / 存在性 / 默认值",
+      "status": "none",
+      "residual": [
+        {
+          "what": "配置键的口径（取操作数的值还是序号/表下标）曾有分歧",
+          "next": "按最新复核结论写『键从哪来』一条合同，并保留分歧记录指针"
+        }
+      ]
+    },
+    {
+      "id": "timing",
+      "title": "时间：时钟 / 帧率 / 等待",
+      "status": "none",
+      "residual": [
+        {
+          "what": "整章尚未处理",
+          "next": "先找到读时钟与等待的边界调用，再判断哪些时序需要写进 spec"
+        }
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "id": "SPC-POOL-GLOBAL-VALUE-FAMILIES",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42af2d",
+            "0x42af89",
+            "0x42afd7",
+            "0x41bfdb",
+            "0x41c0c0",
+            "0x41c0d7",
+            "0x41c38b",
+            "0x41c471",
+            "0x41c483",
+            "0x42b526",
+            "0x42b56c",
+            "0x42ba76",
+            "0x42bac0"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "addr",
+            "convert",
+            "arith"
+          ]
+        },
+        {
+          "blocks": [
+            "0x42af2d",
+            "0x42af89",
+            "0x42afd7",
+            "0x41bfdb",
+            "0x41c0c0",
+            "0x41c0d7",
+            "0x41c38b",
+            "0x41c471",
+            "0x41c483",
+            "0x42b526",
+            "0x42b56c",
+            "0x42ba76",
+            "0x42bac0"
+          ],
+          "kinds": [
+            "call"
+          ],
+          "targets": [
+            "__ftol2_sse"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-POOL-MEMFLIP",
+          "kind": "unknown",
+          "what": "六个全局池各有一份成对的『另一半』缓冲，配置开关会交换它们；交换在什么条件下、什么时机发生没有取证",
+          "next": "取证交换的触发条件与调用点，再决定它是不是 spec 的可观察行为"
+        },
+        {
+          "id": "RES-POOL-GLOBAL-CAPACITY",
+          "kind": "unknown",
+          "what": "全局池容量（每族的格数）的来源与取值没有最终口径；容量字段与另一处计数曾出现『同字段两种记法』",
+          "next": "把装载器『读计数 → 分配 → 写基址』收成可复核合同；容量数值只作为运行期状态"
+        }
+      ],
+      "falsifiers": [
+        "若某个脚本用 type 3 读出未经 DEC 的位模式、或 type 5 的格子不是按元素宽度步进而行为自洽 ⇒ 本条错（语料/运行观察可反驳）"
+      ]
+    },
+    {
+      "id": "SPC-POOL-GLOBAL-REF-FAMILIES",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42af1d",
+            "0x42af79",
+            "0x42aff0",
+            "0x41bfa9",
+            "0x41c166",
+            "0x41c359",
+            "0x41c519",
+            "0x42b58e",
+            "0x42b5db",
+            "0x42bae2",
+            "0x42bb35"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "addr",
+            "convert",
+            "arith"
+          ]
+        },
+        {
+          "blocks": [
+            "0x42af1d",
+            "0x42af79",
+            "0x42aff0",
+            "0x41bfa9",
+            "0x41c166",
+            "0x41c359",
+            "0x41c519",
+            "0x42b58e",
+            "0x42b5db",
+            "0x42bae2",
+            "0x42bb35"
+          ],
+          "kinds": [
+            "call"
+          ],
+          "targets": [
+            "__ftol2_sse"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-REF-TARGET-LIFETIME",
+          "kind": "unknown",
+          "what": "引用目标何时被创建/失效没有取证；spec 目前只描述『读/写会解引用』，不描述目标的有效性",
+          "next": "取证引用族格子的写入者（谁把地址放进池里）与失效点"
+        }
+      ],
+      "falsifiers": [
+        "若某处 type 6/7/8 的格子被直接当值使用（不解引用）且脚本行为自洽 ⇒ 本条错（语料可逐字反驳）"
+      ]
+    },
+    {
+      "id": "SPC-POOL-LOCAL-FAMILIES",
+      "status": "reviewed",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42af5b",
+            "0x42afb7",
+            "0x42b000",
+            "0x42af3d",
+            "0x42af99",
+            "0x42b027",
+            "0x41c00b",
+            "0x41c104",
+            "0x41c12b",
+            "0x41c049",
+            "0x41c17f",
+            "0x41c3bb",
+            "0x41c4b6",
+            "0x41c4d8",
+            "0x41c3f9",
+            "0x41c52d",
+            "0x42b604",
+            "0x42b658",
+            "0x42b68a",
+            "0x42bb5e",
+            "0x42bbb7",
+            "0x42bbe9",
+            "0x42bc4a"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "addr",
+            "convert",
+            "arith"
+          ]
+        },
+        {
+          "blocks": [
+            "0x42af5b",
+            "0x42afb7",
+            "0x42b000",
+            "0x42af3d",
+            "0x42af99",
+            "0x42b027",
+            "0x41c00b",
+            "0x41c104",
+            "0x41c12b",
+            "0x41c049",
+            "0x41c17f",
+            "0x41c3bb",
+            "0x41c4b6",
+            "0x41c4d8",
+            "0x41c3f9",
+            "0x41c52d",
+            "0x42b604",
+            "0x42b658",
+            "0x42b68a",
+            "0x42bb5e",
+            "0x42bbb7",
+            "0x42bbe9",
+            "0x42bc4a"
+          ],
+          "kinds": [
+            "call"
+          ],
+          "targets": [
+            "__ftol2_sse"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-LOCAL-POOL-CAPACITY",
+          "kind": "unknown",
+          "what": "每个局部池的容量由装载期的计数决定；spec 不把任何容量写成常量",
+          "next": "把『读计数 → 分配 → 写基址』与计数槽的配对收成合同（当前证据已足够，待整理）"
+        }
+      ],
+      "falsifiers": [
+        "若装载器把某一族的初值填成裸 0 而读取仍得当值、或指针格被 DEC ⇒ 本条错（语料逐字可反驳）"
+      ]
+    },
+    {
+      "id": "SPC-VALUE-INT-ENCODED",
+      "status": "reviewed",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x41bfdb",
+            "0x41bfa9",
+            "0x41c00b",
+            "0x41c049",
+            "0x41c38b",
+            "0x41c359",
+            "0x41c3bb",
+            "0x41c3f9",
+            "0x42b526",
+            "0x42b58e",
+            "0x42b604",
+            "0x42b68a",
+            "0x42ba76",
+            "0x42bae2",
+            "0x42bb5e",
+            "0x42bbe9"
+          ],
+          "kinds": [
+            "arith"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-CODEC-KEY-LIFECYCLE",
+          "kind": "unknown",
+          "what": "key 的写入时机与生命周期只有『唯一写入点 + 随机来源』，尚未整理成一条运行期状态合同",
+          "next": "写『key 何时可用』合同，并说明为什么实现不能提供默认 key"
+        }
+      ],
+      "falsifiers": [
+        "若某个 int case 的 DEC/ENC 序列与公式不同（旋转量 / key 来源不同），或 key 有默认常量 ⇒ 本条错（语料与守卫可反驳）"
+      ]
+    },
+    {
+      "id": "SPC-POOL-STRING-SSO",
+      "status": "reviewed",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42afd7",
+            "0x42b000",
+            "0x41c0d7",
+            "0x41c12b",
+            "0x41c483",
+            "0x41c4d8"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "addr",
+            "convert",
+            "arith"
+          ]
+        },
+        {
+          "blocks": [
+            "0x42afd7",
+            "0x42b000",
+            "0x41c0d7",
+            "0x41c12b",
+            "0x41c483",
+            "0x41c4d8"
+          ],
+          "kinds": [
+            "call"
+          ],
+          "targets": [
+            "_atoi",
+            "_atof"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-STRING-OPAQUE-WRITE",
+          "kind": "unknown",
+          "what": "字符串写入（set-string 一类 opcode）在记录里怎么分配、怎么处理超长串，还没成篇",
+          "next": "先取证字符串写入路径（分配 + 拷贝 + 长度更新），再写合同"
+        }
+      ],
+      "falsifiers": [
+        "若长度/容量超过内联阈值的串读回的是内联字节、或整型读不是 atoi、浮点读不是 atof ⇒ 本条错（游戏数据/语料可反驳）"
+      ]
+    },
+    {
+      "id": "SPC-OPERAND-UNSUPPORTED-THROW",
+      "status": "reviewed",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42b141",
+            "0x41c218",
+            "0x41c5c1",
+            "0x42b830",
+            "0x42bd9e"
+          ],
+          "kinds": [
+            "mem-read",
+            "arith",
+            "addr",
+            "mem-write"
+          ]
+        },
+        {
+          "blocks": [
+            "0x42b141",
+            "0x41c218",
+            "0x41c5c1",
+            "0x42b830",
+            "0x42bd9e"
+          ],
+          "kinds": [
+            "call"
+          ],
+          "targets": [
+            "__CxxThrowException@8"
+          ]
+        }
+      ],
+      "residual": [],
+      "falsifiers": [
+        "若某条脚本用 type 8 读成功、或用 type 5/8/11 写成功而没有异常 ⇒ 本条错（运行观察可反驳）"
+      ]
+    },
+    {
+      "id": "SPC-POOL-CAPACITY-AND-UB",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-CAPACITY-VALUES",
+          "kind": "unknown",
+          "what": "各池容量的具体取值与两处计数记法的关系没有统一口径",
+          "next": "按装载器的分配式复算每个池的容量，并与已知计数槽对账；对不上就保留为残差"
+        }
+      ],
+      "falsifiers": [
+        "若某个池在取址时做了上界检查（clamp / 抛）⇒ 本条错（语料可反驳）"
+      ]
+    },
+    {
+      "id": "SPC-ENGINE-SCALAR-ARRAYS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCALAR-ARRAY-SEMANTICS",
+          "kind": "unknown",
+          "what": "三张表各自的领域用途（键槽 / 另一张表 / 8 格表）尚未成篇",
+          "next": "先从脚本用法取证每张表装什么，再写合同；越界口径已可逐字复核"
+        }
+      ],
+      "falsifiers": [
+        "若三条 opcode 的越界行为相同（都抛或都静默跳过）⇒ 本条错（语料逐字可反驳）"
+      ]
+    }
+  ],
+  "gaps": []
+}

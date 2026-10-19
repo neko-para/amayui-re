@@ -64,6 +64,7 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `ui-bake.mjs` | `ui-bake` | ★ **UI 图片烘焙链**：原始 ALF → 改图配方（`tools/ui-bake/recipes/*.json`）→ 生效版 PNG / 注回 AGF；判据是**逐像素相同**（见 `pnpm tools ui-bake describe` 与 `tools/ui-bake.md`） |
 | `release.mjs` | `release` | ★ **发行打包**：把「当前所有变更过的资源」（patch 的键 + ui-bake 的配方集 + AGERC/字体）算成**测试安装树**（ALF 硬链接）或**发给玩家的 zip**（见 `pnpm tools release describe` 与 `tools/release.md`） |
 | `old-repo-inventory.mjs` | `old-repo` | **只读旧仓**：重新实测 → `docs/00-origin/old-repo-inventory.md`；重建翻译参考快照 → `docs/01-translation/ref/`（资产散件 + `archive.zip`） |
+| `spec.mjs` | `spec` | ★ **引擎 + 二进制协议 spec**：Markdown 章节（可分发，不打包单文件）+ 协议数据 + manifest + 内部绑定/审计；effect 级覆盖校验、派生审计账 |
 | `test/*.test.mjs` | —— | 基建契约测试（`node --test`） |
 
 ★ **每个自有的结构化数据文件都有一份同名说明书**（`assets.json` → `assets.md`、`samples.json` → `samples.md`）：
@@ -102,6 +103,11 @@ pnpm tools disasm-fn globals --who dword_559A68         # 反向：谁碰这个�
 pnpm tools disasm-fn catalog --write        # 派生快照 → .cache/disasm/<module>.catalog.txt
 pnpm tools old-repo inventory               # 重测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm tools old-repo translate-ref           # 翻译参考快照对账（dry-run；--write 重建 assets/ + archive.zip）
+pnpm tools spec validate                    # ★ spec 层：不变量（自包含 / 章节规则与 bindings/audit 一一对应）
+pnpm tools spec report                      # ★ 审计账：effect 覆盖 / 内部省略 / 残差 / 未登记（不给百分数）
+pnpm tools spec effects --pilot             # ★ 从语料机械枚举试点块的 effect（覆盖判定的输入）
+pnpm tools spec chapters                    # 章节骨架 + 每章规则与残差
+pnpm tools spec show <id|前缀>               # 一条规则：正文 + 证据有效状态（内部视图）
 pnpm tools release plan install             # ★ 发行打包：测试安装树的计划（不落盘）
 pnpm tools release install --write          # 同步出测试安装树 → dist/install/（ALF 硬链接，其余复制）
 pnpm tools release install --write --le-cmd "<LEProc.exe>" [--le-profile <guid>] [--relabel-medium]
