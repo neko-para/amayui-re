@@ -21,25 +21,17 @@ import { loadManifest } from '../lib/manifest.mjs';
 const TABLE_PATH = path.join(REPO_ROOT, 'data/spec/format/opcode-table.json');
 const u32 = (buf, off) => (off + 4 <= buf.length ? buf.readUInt32LE(off) : null);
 
-/** 收集脚本：安装根目录的 *.BIN + `_extracted` 下的 *.BIN（后者缺席就跳过） */
+/**
+ * 收集脚本：**只收安装根目录的 `*.BIN`**。
+ * ⛔ 不收 `_extracted/`：那是历史汉化版本在旧仓里留下的临时解压（overlay 产物），
+ * 不是安装数据；把它算进语料会让结构断言量到另一份文件（见 `docs/01-translation/patch-design.md`）。
+ */
 function collectScripts(root) {
   const top = [];
-  const nested = [];
   for (const name of fs.readdirSync(root)) {
     if (/\.bin$/i.test(name)) top.push(path.join(root, name));
   }
-  const ext = path.join(root, '_extracted');
-  if (fs.existsSync(ext)) {
-    const walk = (dir) => {
-      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-        const p = path.join(dir, ent.name);
-        if (ent.isDirectory()) walk(p);
-        else if (/\.bin$/i.test(ent.name)) nested.push(p);
-      }
-    };
-    walk(ext);
-  }
-  return { top, nested };
+  return top;
 }
 
 test('★ 语料侧：签名 / 头长 / 表偏移 / opcode 域 / 表区不越界', async (t) => {
@@ -56,9 +48,9 @@ test('★ 语料侧：签名 / 头长 / 表偏移 / opcode 域 / 表区不越界
     table.set(row.opcode, row.argc);
   }
 
-  const { top, nested } = collectScripts(gameInstall);
-  const all = [...top, ...nested];
-  assert.ok(all.length >= 400, `脚本数太少（${all.length}）—— 语料没到位？`);
+  const all = collectScripts(gameInstall);
+  // 下限只防"目录空了 / 指错根"；真实安装的顶层 `.BIN` 是三位数（本机 105），不写死具体数
+  assert.ok(all.length >= 50, `脚本数太少（${all.length}）—— 安装根不对，或顶层没有散装脚本？`);
 
   let scripts = 0;
   let sys3 = 0;
@@ -98,8 +90,8 @@ test('★ 语料侧：签名 / 头长 / 表偏移 / opcode 域 / 表区不越界
     if (!contiguous) tableBroken += 1;
     const tableBytes = off1 * 4;
     if (tableBytes > body.length) tableBroken += 1;
-    // gameInstall 顶层：第 3 组正好结束于 body 末尾（`_extracted` 是另一份语料，不参与）
-    if (top.includes(file) && off3 * 4 + len3 * 4 !== body.length) table3EndMismatchTop += 1;
+    // 安装根顶层：第 3 组正好结束于 body 末尾
+    if (off3 * 4 + len3 * 4 !== body.length) table3EndMismatchTop += 1;
 
     // 直线解码：按 4 + 8×argc 推进；opcode 不在表里 / 越过表区起点就停（走进数据区是预期的）
     let ip = 0;
@@ -114,12 +106,12 @@ test('★ 语料侧：签名 / 头长 / 表偏移 / opcode 域 / 表区不越界
     }
   }
 
-  assert.ok(scripts >= 400, `脚本太少（${scripts}）`);
+  assert.ok(scripts >= 50, `脚本太少（${scripts}）`);
   assert.equal(sys3, 0, '本作语料不应出现 SYS3 签名');
   assert.equal(headerWrong, 0, `头布局断言失败 ${headerWrong} 个（期望 4B 签名 + 4B 版本串 + 6×u32 + 子头，头长 0x3C）`);
   assert.equal(tableBroken, 0, `表偏移断言失败 ${tableBroken} 个（三组 (len,off) 必须首尾相接且落在 body 内）`);
   assert.equal(tableOverrun, 0, `直线解码越过表区起点 ${tableOverrun} 个（代码区应在表区之前）`);
-  assert.equal(table3EndMismatchTop, 0, `gameInstall 顶层：第 3 张表结束 != body 末尾 ${table3EndMismatchTop} 个`);
+  assert.equal(table3EndMismatchTop, 0, `第 3 张表结束 != body 末尾 ${table3EndMismatchTop} 个`);
 
   // 分派器的 opcode 域：清单里 0x411A5D 必须是符号检查（js），0x411A5F 必须与 400h 比较
   const lst = path.join(REPO_ROOT, 'corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst');
@@ -135,5 +127,5 @@ test('★ 语料侧：签名 / 头长 / 表偏移 / opcode 域 / 表区不越界
     t.diagnostic('反汇编语料缺席：跳过 opcode 域常量的核对');
   }
   // 已知 2 个脚本会走进数据；不把"走进数据"当失败，但要可见
-  t.diagnostic(`脚本 ${scripts} · 表尾不匹配(_extracted 不计) ${table3EndMismatchTop} · 停在未知 opcode ${unknownOpcode} · 越过 body ${overflow}`);
+  t.diagnostic(`脚本 ${scripts} · 表尾不匹配 ${table3EndMismatchTop} · 停在未知 opcode ${unknownOpcode} · 越过 body ${overflow}`);
 });

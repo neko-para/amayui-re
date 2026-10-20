@@ -23,7 +23,7 @@
   绘制项被 0x1f7 区间拆离后由 0x1fb 重画；6 次"未初始化浮点读"全部进诊断（显式 zero 策略，不是静默补 0）。
 - **spec**：`60-ops.md` 的数值 / 纹理 / 场景 / 等待与输入 / 影片规则；`70-vm.md` 的迭代 / 门 / 状态位 / 时钟 / 计时窗。
 - **守卫**：`emulator-new-logo.assets.test.mjs`（assets）· `emulator-new-ops` / `emulator-new-texture` / `emulator-new-scene`（pure）。
-- **已知不绿（与本单无关）**：`pnpm test:assets` 仍有先前就红的 8 条（shape 5 / spec-isa 1 / corpus 2），本单的 assets 用例通过。
+- **已知不绿（与本单无关）**：`pnpm test:assets` 仍有先前就红的 3 条本机环境项（spec-isa 1 / corpus 2；shape 的 5 条见 `REQ-01M5CBD13M3XQYKTA2YFA82YJC` 已收口），本单的 assets 用例通过。
 
 ## 非目标
 

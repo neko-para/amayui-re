@@ -45,7 +45,7 @@ test('样本（13 个函数的载体 + 两个共享类型）与语料自洽 ⇒ 
   assert.deepEqual(rep.findings, [], `样本应全绿，实际：${JSON.stringify(rep.findings, null, 2)}`);
   const { cons } = rep;
   assert.equal(cons.obj0Acc, cons.obj0Explained + cons.obj0Residue, '守恒①：obj0 访问 = 解释 + 残差');
-  assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad + cons.pointeeMulti, '守恒②：二级 = 解释 + 不透明 + 拒绝 + 跨两级以上');
+  assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad + cons.pointeeMulti + cons.pointeeAmbiguous, '守恒②：二级 = 解释 + 不透明 + 拒绝 + 跨两级以上 + 基址/索引分不清');
   assert.ok(cons.obj0Explained > 100, `解释数应由语料给出（实测 ${cons.obj0Explained}）`);
   assert.equal(cons.deep, 0, '样本这 13 个函数里不应有 hop≥3（有就该单列出来，而不是静默）');
 });
@@ -54,8 +54,8 @@ test('★ 改坏一处 ⇒ 红，而且**红的理由要对**', { skip }, () => 
   const CASES = [
     { name: 'T1.size 120 → 124（步长义务）', want: 'G3', make: (m) => { m.types.T1.size = 124; } },
     { name: 'T1 删掉成员 0x60（数组元素内偏移无处安放）', want: 'G2', make: (m) => { m.types.T1.members = m.types.T1.members.filter((x) => x.off !== '0x60'); } },
-    { name: 'T0 数组成员 count 40 → 20（末尾零引用）', want: 'G4', make: (m) => { m.types.T_Command.members.find((x) => x.count).count = 20; } },
-    { name: 'T0 数组成员挪到 0x5D880（与标量重叠）', want: 'G1', make: (m) => { m.types.T_Command.members.find((x) => x.count).off = '0x5d880'; } },
+    { name: 'T0 数组成员 count 40 → 20（末尾零引用）', want: 'G4', make: (m) => { m.types.T0.members.find((x) => x.count).count = 20; } },
+    { name: 'T0 数组成员挪到 0x5D880（与标量重叠）', want: 'G1', make: (m) => { m.types.T0.members.find((x) => x.count).off = '0x5d880'; } },
     { name: 'T1.size 缩到 0x40（成员越界）', want: 'G1', make: (m) => { m.types.T1.size = 64; } },
     { name: '某个载体类型改成 T1*（几何不符）', want: 'G2', make: (m) => { carrierOf(m, 'c01').type = 'T1*'; } },
     { name: '声明里塞业务词 argc（词汇守卫）', want: '守卫·词汇', make: (m) => { carrierOf(m, 'c01').argc = 3; } },
@@ -72,36 +72,38 @@ test('★ 改坏一处 ⇒ 红，而且**红的理由要对**', { skip }, () => 
 });
 
 test('★ 二级对象下钻：三档 + 不透明单列（⛔ 不许静默通过）', { skip }, () => {
+  // ★ 夹具函数的选择口径：二级解引用的偏移必须是**常量**（`[p+18h]`），⛔ 不能用 `[p+idx*4]`。
+  //   后者（如 `sub_42AEA0`）的索引是运行期算出来的 ⇒ 落在 pointee 里的**哪个成员判不了**，
+  //   判定器会（正确地）归进"基址/索引分不清"档 ⇒ 四档夹具就永远碰不到 G5'。
+  //   `sub_403200`：`0x403208 mov eax,[eax+18h]`（base 是 `[ecx+0]` 读出的指针）⇒ 正好一处常量二级访问。
   const mk = (t0mem, tb) => {
     const m = clone();
-    m.carriers = [{ id: 'p01', kind: 'arg', fn: 'sub_42AEA0', reg: 'ecx', type: 'T_Command*' }];
-    m.types.T_Command.members = [...m.types.T_Command.members, t0mem];
+    m.carriers = [{ id: 'p01', kind: 'arg', fn: 'sub_403200', reg: 'ecx', type: 'T0*' }];
+    m.types.T0.members = [...m.types.T0.members, t0mem];
     if (tb) m.types.TB = tb;
     return m;
   };
-  // (a) 宿主 ptr→TB，TB 有成员 0x0 ⇒ 那一处二级访问被 TB 解释
-  const a = run(mk({ off: '0x5d818', width: 4, kind: 'ptr', type: 'TB' }, { size: null, complete: false, members: [{ off: '0x0', width: 4 }] }));
+  // (a) 宿主 ptr→TB，TB 有成员 0x18 ⇒ 那一处二级访问被 TB 解释
+  const a = run(mk({ off: '0x0', width: 4, kind: 'ptr', type: 'TB' }, { size: null, complete: false, members: [{ off: '0x18', width: 4 }] }));
   assert.deepEqual(a.findings, []);
-  // ★ 口径：`lea`（只取址）的二级站点**也计入解释档**（值被用于地址算术；目标偏移仍然被验证）。
-  //   所以这里断言的是"**非 lea** 的解引用恰好 1 处"，不是 pointeeOk 的总数。
   assert.ok(a.perCarrier[0].pointeeOk >= 1, `至少要解释 1 处二级访问，实得 ${a.perCarrier[0].pointeeOk}`);
-  // 夹具里 TB 只声明 0x0，其余二级偏移是**残差**（complete:false）⇒ 这里不断言"没有拒绝档"
-  // (b) TB complete 但没有 0x0 ⇒ 红（理由 G5'）
-  const b = run(mk({ off: '0x5d818', width: 4, kind: 'ptr', type: 'TB' }, { size: null, complete: true, members: [{ off: '0x10', width: 4 }] }));
+  // 夹具里 TB 只声明 0x18，其余二级偏移是**残差**（complete:false）⇒ 这里不断言"没有拒绝档"
+  // (b) TB complete 但没有 0x18 ⇒ 红（理由 G5'）
+  const b = run(mk({ off: '0x0', width: 4, kind: 'ptr', type: 'TB' }, { size: null, complete: true, members: [{ off: '0x0', width: 4 }] }));
   assert.ok(b.findings.some((f) => f.where.startsWith("G5'")), `应报 G5'，实际 ${JSON.stringify(b.findings.map((f) => f.where))}`);
   // (c) 宿主没声明 kind:ptr（却是指针用法）⇒ 红
-  const c = run(mk({ off: '0x5d818', width: 4 }, null));
+  const c = run(mk({ off: '0x0', width: 4 }, null));
   assert.ok(c.findings.some((f) => f.where.startsWith("G5'") && f.why.includes('kind:"ptr"')), '应因"没声明 ptr"红');
   // (d) 宿主是 ptr 但目标类型 null ⇒ 绿，且**必须**出现在不透明桶里
-  const d = run(mk({ off: '0x5d818', width: 4, kind: 'ptr' }, null));
+  const d = run(mk({ off: '0x0', width: 4, kind: 'ptr' }, null));
   assert.deepEqual(d.findings, []);
   assert.equal(d.perCarrier[0].pointeeOpaque, 1, '不透明必须单列（不是通过）');
-  assert.ok(d.perCarrier[0].opaqueEAs.includes(0x42af25), '不透明的 EA 要打得出来');
+  assert.ok(d.perCarrier[0].opaqueEAs.includes(0x403208), '不透明的 EA 要打得出来');
 });
 
 test('★ 层级 ≥3 的访问必须被**单列报出**（上限冻结在层级 2，但不许静默丢）', { skip }, () => {
   const m = clone();
-  m.carriers = [{ id: 'h01', kind: 'arg', fn: 'sub_409F90', reg: 'ecx', type: 'T_Command*' }];
+  m.carriers = [{ id: 'h01', kind: 'arg', fn: 'sub_409F90', reg: 'ecx', type: 'T0*' }];
   const rep = run(m);
   assert.ok(rep.cons.deep >= 1, `sub_409F90 里有层级 ≥3 的访问，必须计入"超出解析深度"（实测 ${rep.cons.deep}）`);
   assert.equal(rep.perCarrier[0].deep, rep.cons.deep);
@@ -112,7 +114,7 @@ test('★ 层级 ≥3 的访问必须被**单列报出**（上限冻结在层级
 test('★ 第二批函数（6 个）：残差如实报出 · 带修饰符的调用约定不被漏（回归钉）', { skip }, () => {
   const m = clone();
   m.carriers = ['sub_40FB60', 'sub_411900', 'sub_412290', 'sub_418E80', 'sub_418EB0', 'sub_418ED0']
-    .map((fn, i) => ({ id: `b0${i + 1}`, kind: 'arg', fn, reg: 'ecx', type: 'T_Command*' }));
+    .map((fn, i) => ({ id: `b0${i + 1}`, kind: 'arg', fn, reg: 'ecx', type: 'T0*' }));
   const rep = run(m);
   assert.deepEqual(rep.findings, [], '这一批只该有残差，不该有红');
   assert.equal(rep.perCarrier.length, 6);
@@ -143,15 +145,18 @@ test('★ 入库的 shape 模型（data/shape/）逐族全绿 + 守恒闭合', {
     assert.deepEqual(rep.findings, [], `${f} 与语料不再自洽：${JSON.stringify(rep.findings, null, 2)}`);
     const { cons } = rep;
     assert.equal(cons.obj0Acc, cons.obj0Explained + cons.obj0Residue, `${f} 守恒① 不闭合`);
-    assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad + cons.pointeeMulti, `${f} 守恒② 不闭合`);
+    assert.equal(cons.pointee, cons.pointeeOk + cons.pointeeOpaque + cons.pointeeBad + cons.pointeeMulti + cons.pointeeAmbiguous, `${f} 守恒② 不闭合`);
     assert.equal(cons.sites, cons.obj0Acc + cons.partial + cons.pointee + cons.local + cons.symbol + cons.unresolvedBase, `${f} 守恒③ 不闭合`);
     assert.equal(cons.obj0Explained, cons.obj0ExplainedObserved + cons.obj0ExplainedViaView, `${f} 守恒④ 不闭合`);
-    // ★ 载体分两种：对象根载体（进 perCarrier）与**局部类型载体**（进 localCarriers）——
-    //   两者都必须逐个被检查到（漏一个就是静默丢）。
-    const rootCarriers = model.carriers.filter((x) => x.kind !== 'local');
+    // ★ 载体分三种：对象根载体（进 perCarrier）· **局部类型载体**（进 localCarriers）·
+    //   **全局载体**（进 globalCarriers，声明的是"某个全局槽里装什么"，没有 `fn`）——
+    //   三者都必须逐个被检查到（漏一个就是静默丢）。
+    const rootCarriers = model.carriers.filter((x) => x.kind !== 'local' && x.kind !== 'global');
     const localCarriers = model.carriers.filter((x) => x.kind === 'local');
+    const globalCarriers = model.carriers.filter((x) => x.kind === 'global');
     assert.equal(rep.perCarrier.length, rootCarriers.length, `${f} 有对象根载体没被检查到（静默漏）`);
     assert.equal((rep.localCarriers ?? []).length, localCarriers.length, `${f} 有局部载体没被检查到（静默漏）`);
+    assert.equal((rep.globalCarriers ?? []).length, globalCarriers.length, `${f} 有全局载体没被检查到（静默漏）`);
     assert.ok(cons.sites > 0, `${f} 一个站点都没检查到（载体全废 ⇒ 假绿）`);
     for (const v of rep.declaredViews) {
       const k = `${v.tid}|${v.off}|${v.delta}`;

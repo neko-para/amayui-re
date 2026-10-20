@@ -37,12 +37,11 @@ pnpm tools spec validate         # #1–#13
 pnpm tools requirements validate # 5/5
 ```
 
-语料档：`pnpm test:assets`（需要游戏安装 / 反汇编语料）。★ 本机这份仍有**先前就红**的 8 条（shape 5 / spec-isa 1 / corpus 2），与本轮无关；`emulator-new` 的两条 assets 用例通过。
+语料档：`pnpm test:assets`（需要游戏安装 / 反汇编语料）。★ 本机仍有**先前就红**的 2 条环境项（corpus 2）—— 与本轮无关；`emulator-new` 的两条 assets 用例通过（shape 的 5 条已收口：`REQ-01M5CBD13M3XQYKTA2YFA82YJC`）。
 
 ## 已知红 / 已知限制（别追错方向）
 
-- **`pnpm test:assets` 不是全绿**：shape 的 5 条（二级对象下钻 / 层级 ≥3 / 入库模型守恒 / 回归钉 / 改坏一处）、
-  spec-isa 的脚本数（本机只有散装 105 支，缺 `_extracted`）、corpus 的两条本机写入口——都是先前状态，本轮未动 `data/shape` / `corpus`。
+- **`pnpm test:assets` 不是全绿**（2 条，都是**本机环境**，不是产品缺陷）：corpus 的两条本机写入口（临时清单按入库的 Windows 盘符根解析）——先前状态。shape 与 spec-isa 档已全绿。
 - **`0x20F play-movie` 已实现但 LOGO 运行停在它前面**（停止条件 = "停在它前面"）。⛔ 不要顺手把 stop-at 去掉：
   `0x1fa` 会清共享对象槽，而**引用计数没有建模** —— 先补引用计数再执行 play-movie 之后的序列。
 - `CORE-OPS` 的其余 opcode 仍是缺口（"执行到第几条 / 停在哪"由棘轮与 `--json` 回答）；且**引擎缺省 handler（抛异常）**与**spec 还没写**当前只区分出后者（缺口报 `unimplemented`）。

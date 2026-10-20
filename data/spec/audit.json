@@ -997,12 +997,6 @@
       "covers": [],
       "residual": [
         {
-          "id": "RES-ISA-TABLES-EXTRACTED",
-          "kind": "unknown",
-          "what": "_extracted 语料的表 3 之后多出一截未解释字节（与 gameInstall 不是同一份文件）",
-          "next": "确认 _extracted 的产出者/版本；那截尾巴是产出者加的，还是另一种布局"
-        },
-        {
           "id": "RES-ISA-TABLES-SEMANTICS",
           "kind": "unknown",
           "what": "三张表各自的内容语义不在本机制",
