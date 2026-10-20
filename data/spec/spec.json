@@ -7,6 +7,8 @@
     { "id": "alf", "file": "chapters/20-alf.md", "title": "ALF 归档" },
     { "id": "agf", "file": "chapters/30-agf.md", "title": "AGF 图像" },
     { "id": "pools", "file": "chapters/40-pools.md", "title": "数据池" },
-    { "id": "engine-state", "file": "chapters/50-engine-state.md", "title": "引擎级状态" }
+    { "id": "engine-state", "file": "chapters/50-engine-state.md", "title": "引擎级状态" },
+    { "id": "ops", "file": "chapters/60-ops.md", "title": "指令语义" },
+    { "id": "vm", "file": "chapters/70-vm.md", "title": "执行与时间" }
   ]
 }

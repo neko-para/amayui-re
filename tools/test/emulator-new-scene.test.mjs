@@ -1,0 +1,232 @@
+/** @env pure @kind contract @why 场景族 / 等待门 / 计时窗的引擎数据写错了（窗字段 / 颜色归一化 / 门判据），而执行器仍然跑得下去 */
+/**
+ * tools/test/emulator-new-scene.test.mjs —— 场景族（0x202/0x203/0x320/0x322/0x323）+ 等待门（0x21c / 0x101）的守卫
+ *
+ * 覆盖 `data/spec/chapters/60-ops.md` 的场景族与等待/输入，以及 `70-vm.md` 的门与计时窗。
+ * 用合成脚本字节，不依赖游戏安装。
+ *
+ * ★ 判据为什么是这些：
+ *   - 颜色归一化（透明度 >255 / <0、颜色 <0）写错不会报错，只会颜色不对；
+ *   - `0x202` 有"已存在"门、`0x323` **没有**（真实不对称）—— 抹平它就会让"给不存在的条目排窗"变成另一种行为；
+ *   - 窗收尾不对称：网格清"有窗"位、绘制项**不清**；
+ *   - 等待门是"场景还有动画"，不是"表里还有未到期的窗"；门关着时时钟才前进。
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { loadOpcodeTable } from '../../apps/emulator-new/src/spec.ts';
+import { Machine } from '../../apps/emulator-new/src/machine.ts';
+import { decodeInt, encodeInt } from '../../apps/emulator-new/src/values.ts';
+
+const table = loadOpcodeTable();
+const KEY = 0x1234abcd;
+
+function f32bits(v) {
+  const b = new DataView(new ArrayBuffer(4));
+  b.setFloat32(0, v, true);
+  return b.getUint32(0, true);
+}
+
+function script(instrs) {
+  const words = [];
+  for (const [opcode, ops] of instrs) {
+    words.push(opcode);
+    for (const [type, raw] of ops) words.push(type, raw);
+  }
+  const buf = Buffer.alloc(words.length * 4);
+  words.forEach((w, i) => buf.writeUInt32LE(w >>> 0, i * 4));
+  return buf;
+}
+
+function machineFor(instrs, extra = {}) {
+  return new Machine({ body: script(instrs), table, key: KEY, ...extra });
+}
+
+function item(over = {}) {
+  return {
+    flags: 1, textureId: 0, left: 0, top: 0, right: 0, bottom: 0, aux: [0, 0, 0],
+    start: 0, delay: 0, duration: 0, colorFrom: -1, colorTo: -1, unknown: new Map(), ...over,
+  };
+}
+
+function mesh(over = {}) {
+  return {
+    flags: 1, count: 0, op10: 0, weights: [], colors: [], scale: [0, 0, 0], uv: [0, 0],
+    start: 0, delay: 0, duration: 0, colorFrom: -1, colorTo: -1, unknown: new Map(), ...over,
+  };
+}
+
+test('★ 0x202：只有绘制项**已存在**才排窗；颜色 = 不透明黑 | RGB', () => {
+  const m = machineFor([[0x202, [[0, 5], [0, 300], [0, 300], [0, 255], [0, 0xffffff]]]]);
+  m.scene.drawItems.set(5, item());
+  m.run();
+  const it = m.scene.drawItems.get(5);
+  assert.equal(it.flags & 2, 2, '有窗位');
+  assert.deepEqual([it.delay, it.duration], [300, 300]);
+  assert.equal(it.colorTo >>> 0, 0xffffffff);
+  assert.equal(it.start, 0, '起点 0 = 未盖章');
+  assert.equal(m.scene.dirty, 1);
+});
+
+test('★ 0x202：绘制项**不存在** ⇒ 建默认项，但一个窗字段都不写（"静默"只对颜色成立）', () => {
+  const m = machineFor([[0x202, [[0, 9], [0, 300], [0, 300], [0, 255], [0, 0]]]]);
+  m.run();
+  const it = m.scene.drawItems.get(9);
+  assert.ok(it, '默认记录被建出来了');
+  assert.equal(it.flags & 2, 0, '没有窗位');
+});
+
+test('★ 0x203：直接改起色、不排窗；透明度 >255 夹到 255', () => {
+  const m = machineFor([[0x203, [[0, 5], [0, 0], [0, 999], [0, 0x010203]]]]);
+  m.scene.drawItems.set(5, item({ colorFrom: -1 }));
+  m.run();
+  const it = m.scene.drawItems.get(5);
+  assert.equal(it.colorFrom >>> 0, 0xff010203);
+  assert.equal(it.flags & 2, 0, '不排窗');
+});
+
+test('★ 0x203：透明度 <0 ⇒ 取现有颜色的高字节；颜色 <0 ⇒ 取现有颜色', () => {
+  const m = machineFor([[0x203, [[0, 5], [0, 0], [0, -1], [0, -1]]]]);
+  m.scene.drawItems.set(5, item({ colorFrom: 0x11223344 }));
+  m.run();
+  assert.equal(m.scene.drawItems.get(5).colorFrom >>> 0, 0x11223344);
+});
+
+test('★ 0x320：顶点数 ≤ 0 ⇒ 写错误文本、不建网格', () => {
+  const m = machineFor([[0x320, [
+    [0, 2], [0, 0], [0, 0], [0, 0], [3, 0], [3, 4], [0, 0], [0, 0], [0, 0], [0, 0],
+  ]]]);
+  m.run();
+  assert.equal(m.scene.meshes.size, 0);
+  assert.match(m.scene.errorBuffer, /0/);
+});
+
+test('★ 0x320：4 个顶点 ⇒ 三个缓冲、顶点数、op10、第 2/3/4 与 7/8 个操作数都落状态', () => {
+  const m = machineFor([[0x320, [
+    [0, 2], [1, f32bits(1)], [1, f32bits(2)], [1, f32bits(3)],
+    [3, 100], [3, 104], [1, f32bits(4)], [1, f32bits(5)],
+    [0, 4], [0, 7],
+  ]]]);
+  for (let i = 0; i < 4; i += 1) {
+    m.globalInt.set(100 + i, encodeInt(0x11 + i, KEY));
+    m.globalInt.set(104 + i, encodeInt(0x223344 + i, KEY));
+  }
+  m.run();
+  const me = m.scene.meshes.get(2);
+  assert.ok(me);
+  assert.equal(me.flags & 1, 1, '已存在位');
+  assert.equal(me.count, 4);
+  assert.equal(me.op10, 7);
+  assert.deepEqual(me.scale, [1, 2, 3]);
+  assert.deepEqual(me.uv, [4, 5]);
+  assert.deepEqual(me.weights, [1, 1, 1, 1]);
+  assert.deepEqual(me.colors, [
+    ((0x11 << 24) | 0x223344) >>> 0,
+    ((0x12 << 24) | 0x223345) >>> 0,
+    ((0x13 << 24) | 0x223346) >>> 0,
+    ((0x14 << 24) | 0x223347) >>> 0,
+  ]);
+  assert.equal(m.scene.dirty, 1);
+});
+
+test('★ 0x322：起色 + 按起色烘顶点色（t=0）', () => {
+  const m = machineFor([[0x322, [[0, 2], [0, 0], [0, 255], [0, 0x336699]]]]);
+  m.scene.meshes.set(2, mesh({ count: 3, colors: [0, 0, 0] }));
+  m.run();
+  const me = m.scene.meshes.get(2);
+  assert.equal(me.colorFrom >>> 0, 0xff336699);
+  assert.deepEqual(me.colors, [0xff336699, 0xff336699, 0xff336699]);
+});
+
+test('★ 0x323：没有"已存在"门（给不存在的网格排窗也照排）', () => {
+  const m = machineFor([[0x323, [[0, 77], [0, 4500], [0, 500], [0, 255], [0, 0]]]]);
+  m.run();
+  const me = m.scene.meshes.get(77);
+  assert.ok(me, '默认网格被建出来了');
+  assert.equal(me.flags & 2, 2, '有窗位（无条件置）');
+  assert.deepEqual([me.delay, me.duration], [4500, 500]);
+  assert.equal(me.colorTo >>> 0, 0xff000000);
+});
+
+test('★ 窗收尾不对称：网格清"有窗"位、绘制项不清', () => {
+  const m = machineFor([], { tickMs: 16 });
+  m.scene.now = 0;
+  m.scene.drawItems.set(1, item({ flags: 3, delay: 0, duration: 100, colorFrom: 0xff000000, colorTo: 0xff00ff00 }));
+  m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 100, colorFrom: 0xff000000, colorTo: 0xff00ff00 }));
+  // 第一帧盖章，再走到窗结束
+  for (let i = 0; i < 20; i += 1) {
+    m.stepScene();
+    m.tick();
+  }
+  const it = m.scene.drawItems.get(1);
+  const me = m.scene.meshes.get(1);
+  assert.equal(it.flags & 2, 2, '绘制项的"有窗"位**保留**');
+  assert.equal(me.flags & 2, 0, '网格的"有窗"位被清');
+  assert.equal(it.colorFrom >>> 0, 0xff00ff00, '起色 = 终色');
+  assert.equal(it.colorTo, -1);
+});
+
+test('★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行', () => {
+  const m = machineFor([
+    [0x21c, []],
+    [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
+  ], { tickMs: 16 });
+  // 场景里有一个 100ms 的窗（起点未盖章）
+  m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 100, colorFrom: 0, colorTo: 0xffffffff }));
+  const r = m.run();
+  assert.equal(r.steps, 2, 'wait 之后的那条指令被执行了');
+  assert.equal(m.flags, 0, '等待位已清');
+  assert.ok(m.ticks >= 7, `门关着的迭代次数（实际 ${m.ticks}）`);
+  assert.ok(m.now > 100, `虚拟时钟走过了窗长（实际 ${m.now}ms）`);
+});
+
+test('★ 0x21c 等待门：场景没有动画 ⇒ 下一个迭代就放行（不空转）', () => {
+  const m = machineFor([
+    [0x21c, []],
+    [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
+  ]);
+  const r = m.run();
+  assert.equal(r.steps, 2);
+  assert.equal(m.ticks, 0, '没有动画就不该 tick');
+});
+
+test('★ 0x101 采样并丢弃：清状态位、输入字归零、两个标量 1/0、外部请求记一条', () => {
+  const m = machineFor([[0x101, []]]);
+  m.inputWord = 0xdeadbeef;
+  m.run();
+  assert.equal(m.flags & 0x08000000, 0);
+  assert.equal(m.inputWord, 0);
+  assert.equal(m.scalars.get('pollInput.a'), 1);
+  assert.equal(m.scalars.get('pollInput.b'), 0);
+  assert.deepEqual(m.effects.map((e) => e.kind), ['input.poll']);
+});
+
+test('★ 0x20f 播影片：建对象、置影片位与"有活动对象"、发出播放请求（不等待）', () => {
+  const m = machineFor([[0x20f, [[0, 21063], [0, 42], [0, 131076]]]]);
+  m.scene.textureObjects.set(42, { kind: 'normal', width: 1280, height: 720 });
+  const r = m.run({ maxSteps: 1 });
+  assert.equal(r.steps, 1);
+  const obj = m.scene.objectSlots.get(42);
+  assert.equal(obj.kind, 'movie');
+  assert.equal(obj.resourceId, 21063);
+  assert.equal(obj.opt, 131076);
+  assert.equal(obj.started, true);
+  assert.equal(m.flags & 0x2000, 0x2000, '影片位被置起（门随后会关）');
+  assert.equal(m.scene.hasObjects, 1);
+  assert.deepEqual(m.effects.map((e) => e.kind), ['audio.movie.play']);
+});
+
+test('★ 0x20f 的绑定门：槽上没有纹理绑定 ⇒ 响亮失败（引擎抛"显示消息"）', () => {
+  const m = machineFor([[0x20f, [[0, 21063], [0, 42], [0, 131076]]]]);
+  assert.throws(() => m.run({ maxSteps: 1 }), /movie-binding-missing:42/);
+});
+
+test('★ 0x20f 同槽已有对象 ⇒ 不重建（只改配置与启动）', () => {
+  const m = machineFor([[0x20f, [[0, 21063], [0, 42], [0, 1]]]]);
+  m.scene.textureObjects.set(42, { kind: 'normal', width: 1, height: 1 });
+  m.scene.objectSlots.set(42, { kind: 'movie', slot: 42, resourceId: 1, opt: 0, started: false });
+  m.run({ maxSteps: 1 });
+  const obj = m.scene.objectSlots.get(42);
+  assert.equal(obj.resourceId, 21063);
+  assert.equal(obj.started, true);
+});

@@ -8,6 +8,8 @@
 4. [`30-agf.md`](30-agf.md) —— AGF 图像（ACGF 容器 / meta / body / ACIF / 像素）
 5. [`40-pools.md`](40-pools.md) —— **数据池**（global/local 池、访问原语、类型标签、值编码、字符串、容量）
 6. [`50-engine-state.md`](50-engine-state.md) —— 引擎级状态（按索引表）
+7. [`60-ops.md`](60-ops.md) —— 指令语义（逐 opcode：读哪些操作数、改哪些引擎数据）
+8. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
 
 `40-pools.md` 是**一个完整主题**：池的族、下标、访问、值表示与容量都在这一章。
 

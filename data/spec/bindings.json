@@ -1561,6 +1561,905 @@
       "evidence": [
         "guard:tools/test/spec-pool.assets.test.mjs#★ 浮点跨族"
       ]
+    },
+    {
+      "rule": "CORE-OPS-NUMERIC-ADD",
+      "sites": [
+        {
+          "ea": "0x42c5f1",
+          "what": "opcode 0x50 的 handler：长度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x42c600",
+          "what": "第 3 个操作数 → 读整型（先读）"
+        },
+        {
+          "ea": "0x42c60b",
+          "what": "第 2 个操作数 → 读整型（后读）"
+        },
+        {
+          "ea": "0x42c610",
+          "what": "两值相加"
+        },
+        {
+          "ea": "0x42c617",
+          "what": "和 → 写整型（第 1 个操作数）"
+        }
+      ],
+      "functions": [
+        "sub_42C5E0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-ops.test.mjs#★ 0x50 整数加"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-NUMERIC-SUB",
+      "sites": [
+        {
+          "ea": "0x42c631",
+          "what": "opcode 0x51 的 handler：长度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x42c640",
+          "what": "第 3 个操作数 → 读整型（先读）"
+        },
+        {
+          "ea": "0x42c64b",
+          "what": "第 2 个操作数 → 读整型（后读）"
+        },
+        {
+          "ea": "0x42c650",
+          "what": "第 2 个减第 3 个"
+        },
+        {
+          "ea": "0x42c657",
+          "what": "差 → 写整型（第 1 个操作数）"
+        }
+      ],
+      "functions": [
+        "sub_42C620"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-ops.test.mjs#★ 0x51 整数减"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-NUMERIC-FLOAT-MOV",
+      "sites": [
+        {
+          "ea": "0x430c40",
+          "what": "opcode 0x2d5 的 handler：长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x430c4f",
+          "what": "第 2 个操作数 → 读浮点"
+        },
+        {
+          "ea": "0x430c5c",
+          "what": "值 → 写浮点（第 1 个操作数）"
+        }
+      ],
+      "functions": [
+        "sub_430C30"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-ops.test.mjs#★ 0x2d5 浮点搬运"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-DETACH",
+      "sites": [
+        {
+          "ea": "0x422bc0",
+          "what": "handler 起点；0x422bd0 写记录+0x60=5；0x422bdf readInt(2)；0x422be6 cmp count,1"
+        },
+        {
+          "ea": "0x422c0f",
+          "what": "count<=1：sub_4AB950(Scene,key) 单键删除"
+        },
+        {
+          "ea": "0x422bfa",
+          "what": "count>1：sub_4ABB60(Scene,key,count) 区间版本（仅 C 侧）"
+        },
+        {
+          "ea": "0x4ab950",
+          "what": "单键：+0x408/+0x428/+0x438/+0x448 四张 map 按键删除；+0x418 不动"
+        },
+        {
+          "ea": "0x4ab988",
+          "what": "删除命中后 Scene[0xB5AC]=1"
+        },
+        {
+          "ea": "0x4abb60",
+          "what": "区间：lower_bound(key) 与 lower_bound(key+count)，擦 [key,key+count)（C 侧）"
+        }
+      ],
+      "functions": [
+        "sub_422BC0",
+        "sub_4AB950",
+        "sub_4ABB60",
+        "sub_459EA0",
+        "sub_4A8AF0"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1f7 拆离：count ≤ 1 是单键；删到东西才置脏"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-CREATE",
+      "sites": [
+        {
+          "ea": "0x422c20",
+          "what": "handler 起点；0x422c31 写记录+0x60=9"
+        },
+        {
+          "ea": "0x422c40",
+          "what": "readInt(1)=id；0x422c47 查 Engine[0x5C740+4*id]"
+        },
+        {
+          "ea": "0x422c52",
+          "what": "释放引擎级每 id 对象：sub_488FB0 + 虚表[0](obj,1) + 槽置 0（0x422c6a）"
+        },
+        {
+          "ea": "0x422c79",
+          "what": "readInt(4)=kind；0x422c8d readInt(3)=h；0x422c97 readInt(2)=w"
+        },
+        {
+          "ea": "0x422ca3",
+          "what": "sub_4A2C10(Scene, id, w, h, kind)"
+        },
+        {
+          "ea": "0x4a2c47",
+          "what": "记录 +0x748+20*id 的 +0x00 = -1；0x4a2c4e +0x10 = 1"
+        },
+        {
+          "ea": "0x4a2c55",
+          "what": "旧包装 Scene[0xA5D8+4*id] 虚析构 + 置 0（0x4a2c68）"
+        },
+        {
+          "ea": "0x4a2c73",
+          "what": "kind==3 → 0x460 DividedTexture（0x43A5C0）；否则 0x450 NormalTexture（0x48AB20）"
+        },
+        {
+          "ea": "0x4a2c9e",
+          "what": "新对象写回 Scene[0xA5D8+4*id] 后调其虚表[3](w,h,kind)（外部请求）"
+        }
+      ],
+      "functions": [
+        "sub_422C20",
+        "sub_4A2C10",
+        "sub_488FB0",
+        "sub_43A5C0",
+        "sub_48AB20",
+        "sub_49F770",
+        "sub_4034C0"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount",
+        "shape:T_Scene_elem14"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1f8 创建纹理：记录 = 无来源文件 / 空白创建 1；种类 3 ⇒ 分割纹理"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-SET",
+      "sites": [
+        {
+          "ea": "0x422cb0",
+          "what": "handler 起点；0x422cc8 写记录+0x60=7"
+        },
+        {
+          "ea": "0x422cd7",
+          "what": "readInt(2)=id；0x422cde 查 Engine[0x5C740+4*id]；0x422d01 槽置 0"
+        },
+        {
+          "ea": "0x422d10",
+          "what": "readInt(1)=fileId"
+        },
+        {
+          "ea": "0x422d29",
+          "what": "sub_4559C0(Engine+0xA609C,[0x5EB54],fileId,&size)：打开（外部；非法号抛 0x10007）"
+        },
+        {
+          "ea": "0x422d38",
+          "what": "sub_455560：锁该文件号（失败抛 0x10001）"
+        },
+        {
+          "ea": "0x422d44",
+          "what": "readInt(3)；0x422d52..0x422d70 颜色归一化"
+        },
+        {
+          "ea": "0x422d7b",
+          "what": "readInt(2) 再读一次 id"
+        },
+        {
+          "ea": "0x422d8c",
+          "what": "sub_4A3800(Scene, fileId, handle, id, color, 0)"
+        },
+        {
+          "ea": "0x4a382d",
+          "what": "成功：记录 +0x00=fileId；0x4a384b +0x04=color；0x4a3858 +0x10=0"
+        },
+        {
+          "ea": "0x4a386e",
+          "what": "失败：记录 +0x00=-1，返回 0"
+        },
+        {
+          "ea": "0x422d94",
+          "what": "结果!=1 → 0x422da0 关闭文件、0x422dbe 格式化失败串、0x422de5 抛 ShowMessage(0x10007)"
+        }
+      ],
+      "functions": [
+        "sub_422CB0",
+        "sub_4559C0",
+        "sub_455560",
+        "sub_455C60",
+        "sub_454FA0",
+        "sub_4A3800",
+        "sub_49E9D0"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount",
+        "shape:T_Scene_elem14"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1f9 设置纹理：记录 = 文件号 / 归一化颜色键 / 空白创建 0；槽上有普通纹理"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-RELEASE",
+      "sites": [
+        {
+          "ea": "0x422e00",
+          "what": "handler 起点；0x422e11 写记录+0x60=3"
+        },
+        {
+          "ea": "0x422e20",
+          "what": "readInt(1)=id；0x422e27 查 Engine[0x5C740+4*id]；0x422e4a 槽置 0"
+        },
+        {
+          "ea": "0x422e59",
+          "what": "readInt(1) 再读一次 id"
+        },
+        {
+          "ea": "0x422e65",
+          "what": "sub_49E980(Scene, id)"
+        },
+        {
+          "ea": "0x49e98a",
+          "what": "守卫 Scene[0xB670+4*id]!=0 ⇒ 直接返回（唯一读点；全语料无写点）"
+        },
+        {
+          "ea": "0x49e997",
+          "what": "记录 +0x00 = -1"
+        },
+        {
+          "ea": "0x49e9a2",
+          "what": "包装 Scene[0xA5D8+4*id] 虚析构 + 置 0（0x49e9b5）"
+        }
+      ],
+      "functions": [
+        "sub_422E00",
+        "sub_49E980"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount",
+        "shape:T_Scene_elem14"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1fa 释放纹理：来源文件 → 无、槽清空，但**空白创建标记不动**"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-DRAW",
+      "sites": [
+        {
+          "ea": "0x422e70",
+          "what": "handler 起点；0x422e91 写记录+0x60=17（0x11）"
+        },
+        {
+          "ea": "0x422ea0",
+          "what": "readInt(6)；0x422eab readInt(4)；相加得 yBottom"
+        },
+        {
+          "ea": "0x422eb7",
+          "what": "readInt(5)；0x422ec2 readInt(3)；相加得 xRight"
+        },
+        {
+          "ea": "0x422ece",
+          "what": "readInt(4)=yTop；0x422ed8 readInt(3)=xLeft"
+        },
+        {
+          "ea": "0x422ee2",
+          "what": "SetRect(rc, xLeft, yTop, xRight, yBottom)"
+        },
+        {
+          "ea": "0x422ef1",
+          "what": "readInt(7) 后 fild → float；0x422f09 同样处理 readInt(8)"
+        },
+        {
+          "ea": "0x422f51",
+          "what": "readInt(1)=key；0x422f47 readInt(2)=texId"
+        },
+        {
+          "ea": "0x422f5d",
+          "what": "sub_4ACE50(Scene, key, texId, l, t, r, b, fx, fy, 0.0)"
+        },
+        {
+          "ea": "0x4ace6f",
+          "what": "绘制项 +0x00 |= 1；0x4ace87 +0x04 = texId"
+        },
+        {
+          "ea": "0x4ace96",
+          "what": "绘制项 +0x08/+0x0C/+0x10/+0x14 = l,t,r,b"
+        },
+        {
+          "ea": "0x4acec0",
+          "what": "绘制项 +0x24=fx、+0x28=fy、+0x2c=0.0"
+        },
+        {
+          "ea": "0x4acecf",
+          "what": "Scene[0xB5AC]=1"
+        }
+      ],
+      "functions": [
+        "sub_422E70",
+        "sub_4ACE50",
+        "sub_4AAA50",
+        "sub_4AAD40",
+        "sub_49A300"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount",
+        "shape:T_Scene_460"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1fb 绘制纹理：矩形存**四条边**（右 = x+宽、下 = y+高），不是宽高"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-202",
+      "sites": [
+        {
+          "ea": "0x4231f0",
+          "what": "handler：读第 4/5 个操作数并做透明度/颜色兜底，再读第 3/2/1 个"
+        },
+        {
+          "ea": "0x4ad0c0",
+          "what": "排窗：bit0（已存在）门 → 置有窗标志、清起点、写延迟/持续时间/终色、置脏与动画标志"
+        },
+        {
+          "ea": "0x4aaa50",
+          "what": "按编号取记录；取不到就用默认记录插入（先于 bit0 门发生）"
+        },
+        {
+          "ea": "0x49a300",
+          "what": "默认记录：标志字写 0（bit0=0）、窗字段清零"
+        },
+        {
+          "ea": "0x49ac4b",
+          "what": "消费端：起点为 0 时盖当前场景时钟（懒盖章）"
+        },
+        {
+          "ea": "0x49ac89",
+          "what": "消费端：读持续时间(+0x4C) 与延迟(+0x38)，算收尾/插值分支"
+        },
+        {
+          "ea": "0x49ac94",
+          "what": "消费端：按 起色(+0x60)→终色(+0x64) 逐字节线性插值，分母是持续时间"
+        },
+        {
+          "ea": "0x49ad6d",
+          "what": "消费端收尾：延迟/持续时间清 0、终色拷进起色、终色写 0FFFFFFFFh"
+        },
+        {
+          "ea": "0x407e20",
+          "what": "场景动画标志（0xB5B4）读取：主循环用它决定等待是否结束"
+        }
+      ],
+      "functions": [
+        "sub_4231F0",
+        "sub_4AD0C0",
+        "sub_4AAA50",
+        "sub_49A300",
+        "sub_49AA30"
+      ],
+      "storage": [
+        "shape:T_Scene_460"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x202：只有绘制项**已存在**才排窗；颜色 = 不透明黑 | RGB"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-203",
+      "sites": [
+        {
+          "ea": "0x4232c0",
+          "what": "handler：透明度兜底同 0x202，读第 2/1 个操作数后调用设色"
+        },
+        {
+          "ea": "0x4acf60",
+          "what": "设色：第 2 个操作数写 +0x30、颜色写 +0x60，置脏；不置有窗标志"
+        },
+        {
+          "ea": "0x4aaa50",
+          "what": "按编号取记录；取不到就建默认记录（无 bit0 门）"
+        }
+      ],
+      "functions": [
+        "sub_4232C0",
+        "sub_4ACF60",
+        "sub_4AAA50"
+      ],
+      "storage": [
+        "shape:T_Scene_460"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x203：直接改起色、不排窗；透明度 >255 夹到 255"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-320",
+      "sites": [
+        {
+          "ea": "0x432150",
+          "what": "handler：顶点数(9) → 取址(5,6) → 读浮(7,8) → 循环 → 读(10,4,3,2,1)"
+        },
+        {
+          "ea": "0x432182",
+          "what": "顶点数 ≤ 0 的错误路径（格式化文本 + 错误通道），不建网格"
+        },
+        {
+          "ea": "0x4adfe0",
+          "what": "建/换网格：释放旧缓冲 → 建三个缓冲并拷入 → 置已存在 → 写顶点数与第 10 个操作数 → 重烘颜色 → 置脏"
+        },
+        {
+          "ea": "0x4a2280",
+          "what": "顶点缓冲构建（返回成功才写记录字段）"
+        },
+        {
+          "ea": "0x4aab80",
+          "what": "按编号取网格记录；取不到就建默认记录"
+        },
+        {
+          "ea": "0x49c9d0",
+          "what": "网格默认记录：全 0，[7]/[8]/[13]/[14] 为 -1"
+        }
+      ],
+      "functions": [
+        "sub_432150",
+        "sub_4ADFE0",
+        "sub_4A2280",
+        "sub_4AAB80"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x320：4 个顶点 ⇒ 三个缓冲、顶点数、op10、第 2/3/4 与 7/8 个操作数都落状态"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-322",
+      "sites": [
+        {
+          "ea": "0x426c20",
+          "what": "handler：透明度兜底同 0x202，读第 2/1 个操作数后调用设色"
+        },
+        {
+          "ea": "0x4ae2c0",
+          "what": "设色：第 2 个操作数写记录[9]、颜色写记录[13]，再烘顶点色、置脏；不置有窗标志"
+        },
+        {
+          "ea": "0x4a2050",
+          "what": "把 起色(记录[13])→终色(记录[14]) 按系数 t 逐字节混合后写进顶点缓冲；t=0 即纯起色"
+        }
+      ],
+      "functions": [
+        "sub_426C20",
+        "sub_4AE2C0",
+        "sub_4A2050"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x322：起色 + 按起色烘顶点色（t=0）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-323",
+      "sites": [
+        {
+          "ea": "0x426cf0",
+          "what": "handler：读第 4/5 个操作数做透明度/颜色兜底，再读第 3/2/1 个"
+        },
+        {
+          "ea": "0x4ae330",
+          "what": "排窗：无条件置有窗标志、窗已跑时间清 0、写延迟(记录[11])/持续时间(记录[12])/终色(记录[14])，置脏"
+        },
+        {
+          "ea": "0x4aab80",
+          "what": "按编号取网格记录；取不到就建默认记录（故不存在时仍照常排窗）"
+        },
+        {
+          "ea": "0x4af1c0",
+          "what": "消费端（★ 只读到 C 视图，窗口分支未拿 .lst 逐字核验）：起点懒盖、t=(now-起点-延迟)/持续时间、调混合、收尾清窗并置场景动画标志"
+        }
+      ],
+      "functions": [
+        "sub_426CF0",
+        "sub_4AE330",
+        "sub_4AAB80",
+        "sub_4AF1C0",
+        "sub_4A2050"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x323：没有\"已存在\"门（给不存在的网格排窗也照排）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-WAIT",
+      "sites": [
+        {
+          "ea": "0x41a260",
+          "what": "handler 入口（sub_41A260）"
+        },
+        {
+          "ea": "0x41a26d",
+          "what": "帧记录推进格数 ← 1"
+        },
+        {
+          "ea": "0x41a278",
+          "what": "状态字 |= 0x400（等待位）"
+        },
+        {
+          "ea": "0x413210",
+          "what": "等待位服务分支入口（test 0x400）"
+        },
+        {
+          "ea": "0x413232",
+          "what": "窗结束 ⇒ 清 0x400 + Sleep(0)（门开）"
+        },
+        {
+          "ea": "0x412e70",
+          "what": "窗未结束 ⇒ Sleep(0) 回迭代头，不清 0x400（门关）"
+        },
+        {
+          "ea": "0x41330b",
+          "what": "点击跳过路径：清输入位与 0x400，取消场景与全部对象"
+        }
+      ],
+      "functions": [
+        "sub_41A260",
+        "sub_412290",
+        "sub_407E20"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-POLL-INPUT",
+      "sites": [
+        {
+          "ea": "0x419cd1",
+          "what": "帧记录推进格数 ← 1"
+        },
+        {
+          "ea": "0x419ce9",
+          "what": "sub_478090(Engine+0x408, &Engine+0xAAB48) 采样输入"
+        },
+        {
+          "ea": "0x419cee",
+          "what": "状态字 &= 0xF7FFFFFF（清一位）"
+        },
+        {
+          "ea": "0x419cf8",
+          "what": "输入字 Engine+0xAAB48 ← 0"
+        },
+        {
+          "ea": "0x419cff",
+          "what": "Engine+0x777FC ← 1"
+        },
+        {
+          "ea": "0x419d09",
+          "what": "Engine+0x77808 ← 0"
+        }
+      ],
+      "functions": [
+        "sub_419CC0",
+        "sub_478090"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x101 采样并丢弃：清状态位、输入字归零、两个标量 1/0、外部请求记一条"
+      ]
+    },
+    {
+      "rule": "CORE-VM-LOOP",
+      "sites": [
+        {
+          "ea": "0x4123f0",
+          "what": "迭代头：迭代计数 & 回泵掩码 ⇒ 回消息泵"
+        },
+        {
+          "ea": "0x4123fc",
+          "what": "掩码在 Engine+0x5EB60（启动时写 4），计数在 Engine+0xAAB4C"
+        },
+        {
+          "ea": "0x412496",
+          "what": "每迭代一次 timeGetTime，结果存 var_76C"
+        },
+        {
+          "ea": "0x41346d",
+          "what": "派发后回到迭代头（唯一的指令出口）"
+        }
+      ],
+      "functions": [
+        "sub_412290"
+      ],
+      "storage": [
+        "layout:FRAME_ENGINE_SCALARS.cur"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
+      ]
+    },
+    {
+      "rule": "CORE-VM-GATE",
+      "sites": [
+        {
+          "ea": "0x41280c",
+          "what": "eax = [Engine+0xAAB44]"
+        },
+        {
+          "ea": "0x412814",
+          "what": "cmp eax,0 / jnz → 去服务状态位（不执行指令）"
+        },
+        {
+          "ea": "0x412851",
+          "what": "状态字非 0 后的第一位判据（等消息位 → WaitMessage）"
+        }
+      ],
+      "functions": [
+        "sub_412290"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：场景没有动画 ⇒ 下一个迭代就放行（不空转）"
+      ]
+    },
+    {
+      "rule": "CORE-VM-STATE",
+      "sites": [
+        {
+          "ea": "0x412851",
+          "what": "位服务链起点（优先级顺序 = 出现顺序）"
+        },
+        {
+          "ea": "0x412e70",
+          "what": "服务完一位后 Sleep(0) 回迭代头"
+        },
+        {
+          "ea": "0x412fe0",
+          "what": "0x200 位服务分支（timer 对象 + 睡眠粒度差异的例子）"
+        }
+      ],
+      "functions": [
+        "sub_412290"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
+      ]
+    },
+    {
+      "rule": "CORE-TIMING-CLOCK",
+      "sites": [
+        {
+          "ea": "0x412496",
+          "what": "本迭代的 now = timeGetTime()"
+        },
+        {
+          "ea": "0x41278d",
+          "what": "场景 prev ← cur"
+        },
+        {
+          "ea": "0x41279f",
+          "what": "场景 cur ← now"
+        },
+        {
+          "ea": "0x41a0c3",
+          "what": "另一条路径同样把 timeGetTime 写进 Engine+0x5A2B4"
+        },
+        {
+          "ea": "0x41a2db",
+          "what": "同上（0x5A2B4 ← timeGetTime，0x5A2B8 ← 旧值）"
+        }
+      ],
+      "functions": [
+        "sub_412290",
+        "sub_41A090",
+        "sub_41A2C0"
+      ],
+      "storage": [
+        "layout:FRAME_ENGINE_SCALARS.cur"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
+      ]
+    },
+    {
+      "rule": "CORE-TIMING-WINDOW",
+      "sites": [
+        {
+          "ea": "0x407e20",
+          "what": "谓词入口：读场景+0xB5BC（窗长）"
+        },
+        {
+          "ea": "0x407e4b",
+          "what": "start + dur 与场景时钟比较（unsigned，ja 到期）"
+        },
+        {
+          "ea": "0x407e6e",
+          "what": "到期：清 start / dur"
+        },
+        {
+          "ea": "0x407e97",
+          "what": "返回场景+0xB5B4（忙闩）"
+        },
+        {
+          "ea": "0x407eb5",
+          "what": "取消路径：清 start/dur + 置取消标记"
+        }
+      ],
+      "functions": [
+        "sub_407E20",
+        "sub_407EA0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 窗收尾不对称：网格清\"有窗\"位、绘制项不清"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-MOVIE",
+      "sites": [
+        {
+          "ea": "0x4237e7",
+          "what": "帧记录推进格数 ← 7"
+        },
+        {
+          "ea": "0x4237f2",
+          "what": "读操作数 2（对象表槽号）→ 表项 [Engine+4*slot+0x5C740]"
+        },
+        {
+          "ea": "0x423838",
+          "what": "槽为空 ⇒ operator new(0x480) + sub_489040 构造后写入该槽"
+        },
+        {
+          "ea": "0x423845",
+          "what": "读操作数 1（资源 id）"
+        },
+        {
+          "ea": "0x42386a",
+          "what": "sub_488DC0(对象, Engine+0x4EC34, HWND, 资源名) ⇒ 0 则抛 ShowMessage 异常"
+        },
+        {
+          "ea": "0x4238bb",
+          "what": "再读操作数 1；sub_489230(对象, Engine+0xA609C, id, 表项) 配置"
+        },
+        {
+          "ea": "0x4238d8",
+          "what": "读操作数 3（选项字）"
+        },
+        {
+          "ea": "0x4238e6",
+          "what": "sub_4054D0 选项→音轨类别；sub_405460 类别是否启用 → 写对象+1144"
+        },
+        {
+          "ea": "0x423914",
+          "what": "主音量 [Engine+0x4E40] × sub_408350(类别音量) / 10000 → sub_4885A0 写对象+1140"
+        },
+        {
+          "ea": "0x423951",
+          "what": "sub_4883A0(对象, 选项字) 启动播放"
+        },
+        {
+          "ea": "0x423956",
+          "what": "状态字 |= 0x2000（影片位）"
+        },
+        {
+          "ea": "0x423960",
+          "what": "Engine+0xA5084 ← 1（有活动对象）"
+        },
+        {
+          "ea": "0x4883e6",
+          "what": "sub_4883A0 内：对象+0x448 ← 选项字；+0x468 ← 1；+0x444 ← 选项&1；[+0x434]+0x42C ← 1"
+        }
+      ],
+      "functions": [
+        "sub_4237B0",
+        "sub_41BF50",
+        "sub_4883A0",
+        "sub_4885A0",
+        "sub_4879E0",
+        "sub_4054D0",
+        "sub_405460",
+        "sub_408350",
+        "sub_488DC0",
+        "sub_489230"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x20f 播影片：建对象、置影片位与\"有活动对象\"、发出播放请求（不等待）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-NOOP-COMMENT",
+      "sites": [
+        {
+          "ea": "0x4191b0",
+          "what": "opcode 0x1a7 的 handler 入口"
+        },
+        {
+          "ea": "0x4191bd",
+          "what": "操作数个数槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x4191c8",
+          "what": "直接返回（不读操作数）"
+        }
+      ],
+      "functions": [
+        "sub_4191B0"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "KN:01M4FF1C5V4D5H4V254X6Q416Y",
+        "guard:tools/test/emulator-new-noop.test.mjs#★ 0x1a7 不读操作数"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-NOOP-DEV",
+      "sites": [
+        {
+          "ea": "0x419690",
+          "what": "opcode 0x1a8 的 handler 入口"
+        },
+        {
+          "ea": "0x41969d",
+          "what": "操作数个数槽写 1（argc 0）"
+        },
+        {
+          "ea": "0x4196a8",
+          "what": "直接返回"
+        }
+      ],
+      "functions": [
+        "sub_419690"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "KN:01M4FF1CAH54674B1R13246H7N",
+        "guard:tools/test/emulator-new-noop.test.mjs#★ 0x1a8"
+      ]
     }
   ]
 }

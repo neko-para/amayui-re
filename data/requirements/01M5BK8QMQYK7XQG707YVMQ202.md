@@ -9,17 +9,23 @@
 
 ## 一句话
 
-core spec 的首批两个机制（`CORE-ISA` / `CORE-POOL`）已落盘并有语料级守卫；`apps/emulator-new` 能只读 `data/spec` 解到第一个未实现 opcode。
+core spec 的 `CORE-ISA` / `CORE-POOL` 已落盘并有语料级守卫；`apps/emulator-new`（只读 `data/spec`）现在走**真实入口**：安装目录 → `SYS4INI.BIN`（ALF 索引）→ 统一文件 id → 根脚本 **id 0**（`SYSTEM4.BIN`），并按 spec 执行。`LOGO.BIN` 仍可执行到 `0x20F play-movie` 前（46 条 / 314 格 / 5024ms），但它只是 `--root-id` 的诊断路径，**不再是启动入口**。
 **本单是交接快照**：状态以各子单 / `pnpm tools requirements plan` 为准；这里只记"换会话 / 换设备必须知道的事"。
 
 ## 已完成（凭据 = 守卫 / 文件）
 
 - **机制地图**：`data/spec/core/README.md` —— 14 个机制 + `CORE-VM` 五子机制（§2.2）+ `CORE-FS` / `CORE-BOOT` 显式延后（§1.1）。
-- **CORE-ISA**：`data/spec/chapters/10-format.md` 9 条规则；`tools/test/spec-isa.assets.test.mjs`（真实脚本 564 个，0 失败）。
-- **CORE-POOL**：`40-pools.md` / `50-engine-state.md`；草稿 19 条全部有归宿（12 条新规则 + 7 条既有规则）。守卫 `tools/test/spec-pool.assets.test.mjs`。
-- **spec↔EA 映射**：`data/spec/bindings.json` / `audit.json`（规则数见 `pnpm tools spec report`；每条带站点 EA / 函数 / storage / 证据）。
-- **参考实现**：`apps/emulator-new/`（只读 `data/spec`，无构建）；守卫 `tools/test/emulator-new-isolation.test.mjs` + `emulator-new-decode.test.mjs`。
-- **文档整理**：`data/spec/{README,chapters/README,spec}.md` 的失效指针与口径矛盾已修；`apps/emulator/README.md` 标"已废弃，仅架构参考"。
+- **CORE-ISA**：`data/spec/chapters/10-format.md` 9 条规则；`tools/test/spec-isa.assets.test.mjs`。
+- **CORE-POOL**：`40-pools.md` / `50-engine-state.md`；19 条全部有归宿。守卫 `tools/test/spec-pool.assets.test.mjs`。
+- **CORE-OPS**：`60-ops.md` —— 数值 3 条、纹理 5 条、场景/颜色 5 条、等待与输入 2 条、影片 1 条；`bindings.json` 有 EA 站点。
+- **CORE-VM / CORE-TIMING**：`70-vm.md` —— 一次迭代 / 门 / 状态位 / 时钟 / 计时窗 5 条。
+- **真实入口**：`src/lzss.ts` / `src/alf.ts` / `src/host.ts` —— ALF 索引（S4IC，8 归档 / 21109 条目）、
+  4 KiB 环形窗口 LZSS（绝对写位置）、统一文件 id == TOC 条目下标、**松散文件优先**、归档按 `(offset,length)` 切片。
+  根脚本 id 0 = `SYSTEM4.BIN`；当前启动执行 `0x1a7` / `0x1a8` 后停在 `0x2f6`。
+- **参考实现**：`apps/emulator-new/`（只读 `data/spec`，无构建，已进 `pnpm typecheck`）。守卫：
+  `emulator-new-isolation` · `emulator-new-decode` · `emulator-new-ops` · `emulator-new-texture` · `emulator-new-scene` · `emulator-new-alf` · `emulator-new-noop`（pure），
+  以及 `emulator-new-boot.assets`（启动棘轮 / 取件顺序）与 `emulator-new-logo.assets`（LOGO 前沿棘轮）两条 assets。
+- **spec↔EA 映射**：`data/spec/bindings.json` / `audit.json`（规则数见 `pnpm tools spec report`）。
 
 ## 换机器先跑这四条
 
@@ -30,19 +36,26 @@ pnpm tools spec validate         # #1–#13
 pnpm tools requirements validate # 5/5
 ```
 
-语料档：`pnpm test:assets`（需要游戏安装 / 反汇编语料）。
+语料档：`pnpm test:assets`（需要游戏安装 / 反汇编语料）。★ 本机这份仍有**先前就红**的 8 条（shape 5 / spec-isa 1 / corpus 2），与本轮无关；`emulator-new` 的两条 assets 用例通过。
 
 ## 已知红 / 已知限制（别追错方向）
 
-- **shape 的 5 条 assets 测试是先前就红的**（二级对象下钻 / 层级 ≥3 / 入库模型守恒 / 回归钉 / 改坏一处）；`data/shape`、`corpus`、`tools/lib` 未被本轮改动。
-- `.tmp/spec-draft/**` **不入库**：ISA / POOL 的原始扫描、报告、feedback 只在本机；内容已并入 `data/spec`，但统计类结论不可从仓库复现（正文已删掉这类数字）。
-- `CORE-OPS` 未成篇 ⇒ `emulator-new` 的 handler 表为空，缺口停在第 0 条（设计使然，不是 bug）。
+- **`pnpm test:assets` 不是全绿**：shape 的 5 条（二级对象下钻 / 层级 ≥3 / 入库模型守恒 / 回归钉 / 改坏一处）、
+  spec-isa 的脚本数（本机只有散装 105 支，缺 `_extracted`）、corpus 的两条本机写入口——都是先前状态，本轮未动 `data/shape` / `corpus`。
+- **`0x20F play-movie` 已实现但 LOGO 运行停在它前面**（停止条件 = "停在它前面"）。⛔ 不要顺手把 stop-at 去掉：
+  `0x1fa` 会清共享对象槽，而**引用计数没有建模** —— 先补引用计数再执行 play-movie 之后的序列。
+- `CORE-OPS` 的其余 opcode 仍是缺口；缺口"执行到第几条 / 停在哪"由 LOGO 前沿棘轮与 `--json` 回答，不写死在本文。
+- 未实现 opcode 的语义分两档：**引擎缺省 handler（抛异常）** 与 **spec 还没写**；当前实现只区分出后者（缺口报 `unimplemented`）。
+- 浮点池"未写槽"的初值规范不说：参考实现要跑真实脚本必须显式 `--uninitialized-float zero`，每次读进 `diagnostics`。
+- **`CORE-FS` / `CORE-BOOT` 的 spec 规则还没成篇**：入口实现与守卫先落（`REQ-01M5C0G36…`），把"松散优先 / 根脚本 id 0"
+  写成带锚的合同是后续单。⛔ 别把"实现里有"当成"规范里有"。
+- 只读 `SYS4INI.BIN` 一份索引：`APPEND*.AAI` 的叠加索引未实现（当前启动不需要；需要时另开单）。
 - 7 条既有规则仍用 `SPC-*` id（并号是机械改名，见治理二批）。
 
 ## 未提交（★ 换设备的前提）
 
 **工作树包含全部改动，未 `git add` / `commit`。** 另一台设备要看到这些，必须先由用户提交并推送。
-未入库但仍在本机的草稿：`.tmp/spec-draft/{core-isa,core-pool,core-vm-scan,tidy}/`。
+未入库但仍在本机的草稿：`.tmp/spec-draft/{core-isa,core-pool,core-vm-scan,tidy}/`（历史）与 `ops-texture` / `ops-scene` / `ops-timing`（本轮）。
 
 ## 待裁决（已登记，未定）
 
@@ -51,11 +64,12 @@ pnpm tools requirements validate # 5/5
 
 ## 下一步（建议顺序）
 
-1. `CORE-OPS` 先做一小族（控制流 + 纯数值），让 `emulator-new` 能执行一段真实脚本前缀。
-2. `CORE-VM`（按 `core/README.md` §2.2 五子机制）与 `CORE-FRAME`。
-3. `CORE-BOOT` / `CORE-FS`（解除 §1.1 的显式延后）。
-4. 治理二批（并号迁移、planned 对齐、路径标记）。
-5. `TABLE-RECON`（argc 对账）需要独立守卫；其余残差见 `audit.json`。
+1. **SYSTEM4 启动前段**：从 `0x2f6` 继续（台账已有 `0x2f6` / `0x149` / `0x21b` / `0x88` / `0x1ca` / `0x252` / `0x324` / `0x32f` / `0x70` … 的 accepted 观察），把启动棘轮往后推。
+2. `CORE-FS` / `CORE-BOOT` 成篇：松散优先、根脚本 id 0、索引/归档失败路径写成带锚的合同（解除 §1.1 的显式延后）。
+3. `0x20F` 之后的执行路径：引用计数（`0x1fa` 清共享对象槽）+ `0x2 exit`（帧返回/中止）+ `CORE-FRAME` 成篇。
+4. 把 `60-ops.md` / `70-vm.md` 的规则从 `draft` 推到 `reviewed`（补 accepted 台账锚；assets 守卫不算 reviewed 的强证据）。
+5. 治理二批（并号迁移、planned 对齐、路径标记）。
+6. `TABLE-RECON`（argc 对账）需要独立守卫；其余残差见 `audit.json`。
 
 ## 新会话从这读
 

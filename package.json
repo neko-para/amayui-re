@@ -17,8 +17,9 @@
     "test:list": "node tools/test-run.mjs --list",
     "tools": "node tools/cli.mjs",
     "emulator": "node apps/emulator/frontends/headless/main.ts",
+    "emulator-new": "node apps/emulator-new/src/main.ts",
     "test:mutation": "node tools/mutate-check.mjs",
-    "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit"
+    "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

@@ -38,13 +38,19 @@ test('★ 只读 data/spec：src 里不许出现 age-format / shape / ledger / c
   assert.deepEqual(bad, [], `越界引用：\n  - ${bad.join('\n  - ')}`);
 });
 
-test('★ 文件系统入口受限：spec.ts（读规范）与 main.ts（读输入脚本）之外不许碰 node:fs', () => {
+test('★ 文件系统入口受限：spec.ts（读规范）与 host.ts（读安装目录）之外不许碰 node:fs', () => {
   const users = sources().filter((x) => /from 'node:fs'/.test(x.text)).map((x) => x.name).sort();
-  assert.deepEqual(users, ['main.ts', 'spec.ts'], `碰 node:fs 的文件应只有 spec.ts / main.ts，实际 ${users.join(', ') || '(无)'}`);
+  assert.deepEqual(users, ['host.ts', 'spec.ts'],
+    `碰 node:fs 的文件应只有 spec.ts（规范）/ host.ts（安装目录），实际 ${users.join(', ') || '(无)'}`);
+
   const spec = sources().find((x) => x.name === 'spec.ts');
   assert.match(spec.text, /'data',\s*'spec'/, 'spec.ts 的落点常量必须拼出 data/spec');
   assert.match(spec.text, /opcode-table\.json/, 'spec.ts 必须只从规范表读');
+
+  const host = sources().find((x) => x.name === 'host.ts');
+  assert.match(host.text, /SYS4INI\.BIN/, 'host.ts 必须从安装目录的 SYS4INI.BIN 索引入口读');
+  assert.doesNotMatch(host.text, /data\/spec/, 'host.ts 不许读规范（那是 spec.ts 的职责）');
+
   const main = sources().find((x) => x.name === 'main.ts');
-  const reads = [...main.text.matchAll(/readFileSync\(([^)]*)\)/g)].map((m) => m[1].trim());
-  assert.ok(reads.length > 0 && reads.every((a) => /\bfile\b/.test(a)), 'main.ts 只许读 --script 传入的输入文件（readFileSync(file)）');
+  assert.doesNotMatch(main.text, /from 'node:fs'/, 'main.ts 不许自己碰文件系统（走 host.ts）');
 });

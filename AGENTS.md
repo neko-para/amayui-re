@@ -43,8 +43,9 @@
 
 ## 3. 语言与代码口径
 
-* **TypeScript 只出现在两类落点**：① **自带工具链的 app** —— `apps/emulator` 与
-  `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）；② **`packages/age-format`**
+* **TypeScript 只出现在两类落点**：① **自带工具链的 app** —— `apps/emulator`、`apps/emulator-new`
+  （只读 `data/spec` 的参考实现，无构建）与 `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）；
+  ② **`packages/age-format`**
   （源码是 `.mts` 的**一份真源**，见下 —— 它**没有**自己的工具链，只靠根上的 `tsc --noEmit` 检查）。
   仓库内**其余一切 JS 一律 `.mjs`**。★ 新增一个带工具链的 app 就写在这里。
   ★ **`apps/emulator` 现在也没有构建步骤**：它的 `.ts`（`src/model/*.ts`）由 **Node v24 原生 type stripping** 直接跑，
@@ -73,9 +74,11 @@
   ★ Windows 上那个链接**必须是真符号链接**（`lstat.isSymbolicLink === true`）：Node **拒绝为 `node_modules`
   下的文件剥类型**（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`）⇒ 跨包 `.mts` 只在真符号链接下走得通。
   无提权时 pnpm 会**静默降级成 junction**（装完不报错、链接形态却是错的）⇒ 提权安装见 `plugins/pnpm-priv`。
-* ★ **类型检查用 `noEmit`，覆盖三个工程**：`pnpm typecheck`
-  （= `tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit`）。
-  ★ **为什么是三个而不是两个**：`apps/emulator` 自己分成"核心"与"前端"两份 tsconfig ——
+* ★ **类型检查用 `noEmit`，覆盖四个工程**：`pnpm typecheck`
+  （= `tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit`）。
+  ★ **第四个是 `apps/emulator-new`**：它是**工具侧**的参考实现（从命令行读脚本、用 `Buffer` 装 body），
+  所以 `types: ["node"]`；它没有"核心 / 前端"那个分层守卫，那份守卫仍只属于 `apps/emulator`。
+  ★ **为什么 `apps/emulator` 是三个工程而不是两个**：`apps/emulator` 自己分成"核心"与"前端"两份 tsconfig ——
   核心那份是 `"types": []`（**守卫本身**），而前端（`apps/emulator/frontends/**`）的**全部职责**
   就是"把 `node:fs` 接上核心定义的接口" ⇒ 它必须有 `"types": ["node"]`。
   两者不能共用一份：要么核心的守卫失效，要么前端写不了 `node:fs`。
@@ -159,7 +162,7 @@ pnpm test:list                  # 看分级集合与每个文件的声明（先�
 pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
 pnpm test:mutation              # ★ **守卫自检**：改坏一处关键常量 ⇒ 确认对应守卫**当场红**（红得有意义）
-pnpm typecheck                  # ★ `tsc --noEmit`，**三个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端）；不产出 ⇒ 仍无构建步骤
+pnpm typecheck                  # ★ `tsc --noEmit`，**四个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端 + `apps/emulator-new`）；不产出 ⇒ 仍无构建步骤
 ```
 
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`

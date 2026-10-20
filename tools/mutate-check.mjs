@@ -1158,6 +1158,47 @@ const MUTATIONS = [
     guard: 'tools/test/spec.test.mjs',
     what: '★ 审计缺口可以空着 residual ⇒ "未成篇"重新变成一句空话（没有具体义务、没有下一步）',
   },
+  // ── emulator-new：整数减的**方向**（`第 2 个 − 第 3 个`）──
+  //   ★ 写反不会报错、只会静默算错，所以必须有一条守卫专门钉这个方向。
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  writeInt(m, ops, 1, second - third);',
+    to: '  writeInt(m, ops, 1, third - second); // 变异：减法方向写反',
+    guard: 'tools/test/emulator-new-ops.test.mjs',
+    what: '★ 0x51 的减法方向写反 ⇒ 10−3 变成 3−10（一切"看起来正常"，只有引擎数据错）',
+  },
+  // ── emulator-new：绘制项的矩形存"四条边"而不是宽高 ──
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  item.right = right;',
+    to: '  item.right = rightBase; // 变异：右边界退回"宽"',
+    guard: 'tools/test/emulator-new-texture.test.mjs',
+    what: '★ 0x1fb 把右边界存成"宽" ⇒ 矩形宽了 x 那么多（画得出来、位置错，且不报错）',
+  },
+  // ── emulator-new：0x202 的"已存在"门 ──
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  if ((item.flags & 1) !== 0) {',
+    to: '  if (true) { // 变异：去掉"已存在"门',
+    guard: 'tools/test/emulator-new-scene.test.mjs',
+    what: '★ 0x202 去掉"已存在"门 ⇒ 给不存在的绘制项也排窗（与 0x323 的差异被抹平）',
+  },
+  // ── emulator-new：取件顺序（松散优先）──
+  {
+    file: 'apps/emulator-new/src/host.ts',
+    from: '    if (loose) {',
+    to: '    if (false) { // 变异：丢掉"松散文件优先"',
+    guard: 'tools/test/emulator-new-alf.test.mjs',
+    what: '★ 丢掉松散优先 ⇒ 安装目录里被补丁覆盖过的脚本会被静默换成归档里的旧版（启动链量到另一份文件）',
+  },
+  // ── emulator-new：统一文件 id == TOC 条目下标 ──
+  {
+    file: 'apps/emulator-new/src/host.ts',
+    from: '    return this.index.files[id];',
+    to: '    return this.index.files[id + 1] ?? this.index.files[id]; // 变异：id 偏一位',
+    guard: 'tools/test/emulator-new-alf.test.mjs',
+    what: '★ 统一文件 id 偏一位 ⇒ 根脚本取到 BGM 而不是 SYSTEM4.BIN（名字看起来仍是合法条目）',
+  },
 ];
 
 /**

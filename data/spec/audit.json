@@ -396,6 +396,16 @@
           "next": "按 handler 逐条取证越界行为，再决定是否写成同一族合同"
         }
       ]
+    },
+    {
+      "id": "ops",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "vm",
+      "status": "bootstrap",
+      "residual": []
     }
   ],
   "planned": [
@@ -1207,6 +1217,331 @@
         }
       ],
       "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-NUMERIC-ADD",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-NUMERIC-SUB",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-NUMERIC-FLOAT-MOV",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TEXTURE-DETACH",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-TEX-DETACH-RANGE",
+          "kind": "unknown",
+          "what": "区间删除（个数 > 1）的逐字体只在伪码层读过；四张表内嵌对象的释放顺序未逐字核",
+          "next": "按区间版本的函数体逐字读一遍（删除循环 + 对象释放），登记 EA"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TEXTURE-CREATE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-TEX-CREATE-FAIL",
+          "kind": "unknown",
+          "what": "底层创建失败的写错误串/上报路径只在伪码层读过；返回值的消费点未核",
+          "next": "逐字核失败分支与返回值消费点"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TEXTURE-SET",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-TEX-SET-ARCHIVE",
+          "kind": "unknown",
+          "what": "档案打开/加锁失败的异常码与路径只在伪码层读过；失败分支的逐字体未核",
+          "next": "逐字核 0x4559C0/0x455560 的失败分支与抛点"
+        },
+        {
+          "id": "RES-TEX-BLANK-READER",
+          "kind": "unknown",
+          "what": "纹理记录的\"空白创建\"标记没有找到读者",
+          "next": "全语料搜该格的读取点；找不到就只保真写、不解释"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TEXTURE-RELEASE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-TEX-GUARD-WRITER",
+          "kind": "unknown",
+          "what": "释放守卫表全语料只有一处读、没有写点（观察上恒 0）",
+          "next": "确认它是构建裁剪还是别处间接写入；没有写点就把\"恒 0\"写进条件"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TEXTURE-DRAW",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-TEX-DRAW-FLOATS",
+          "kind": "unknown",
+          "what": "第 7/8 个操作数写进绘制项的两个浮点位，域语义未定（不是\"目标 x/y\"的直接证据）",
+          "next": "找这两个位的读者（渲染/动画），再决定规范里怎么称呼"
+        },
+        {
+          "id": "RES-TEX-DRAW-KEY",
+          "kind": "unknown",
+          "what": "绘制键（第 1 个操作数）的领域语义未定：只知道它与 detach 的键同一空间",
+          "next": "从绘制项表的其它写入者/读者反推键的身份"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE-202",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-202-ANIM",
+          "kind": "unknown",
+          "what": "\"场景有动画\"标记的消费端（等待门）已取证，但 0x202 置它之后是否还有别的读者未查",
+          "next": "枚举该标记的读取点"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE-203",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-UNKNOWN30",
+          "kind": "unknown",
+          "what": "第 2 个操作数写进的那个整数位没有读者",
+          "next": "全语料搜该位的读取点；找不到就只保真写"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE-320",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-320-BUFFERS",
+          "kind": "unknown",
+          "what": "三个顶点缓冲的字节布局与设备接口未逐条取证；第 2/3/4 个操作数作为浮点参与建缓冲的用法只有伪码层证据",
+          "next": "逐字核缓冲创建函数与参数消费点"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE-322",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-322-UNKNOWN9",
+          "kind": "unknown",
+          "what": "第 2 个操作数写进的那个整数位没有读者",
+          "next": "同 0x203：搜读取点"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE-323",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-323-CONSUME",
+          "kind": "unknown",
+          "what": "网格渐变窗的消费端只读到伪码层（渲染函数的窗口分支未逐字核）",
+          "next": "逐字核渲染侧的窗口推进分支"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-WAIT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-WAIT-SKIP",
+          "kind": "unknown",
+          "what": "点击跳过路径（配置键 + 输入位）未建模；本版只规定\"场景不再有动画\"这一条放行条件",
+          "next": "先取证跳过键与配置键的语义，再决定它算不算 core"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-POLL-INPUT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POLL-SAMPLE",
+          "kind": "unknown",
+          "what": "输入采样本身（采样源、事件形态）不在本版；只规定\"采样后丢弃\"",
+          "next": "输入模块成篇时再补采样语义"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-VM-LOOP",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-VM-PUMP",
+          "kind": "unknown",
+          "what": "回消息的协议与节流参数（掩码）属于宿主，本版只登记存在",
+          "next": "宿主边界成篇时再补"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-VM-GATE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-VM-STATE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-VM-OTHER-BITS",
+          "kind": "unknown",
+          "what": "等待位之外的位（影片位等）只登记存在，服务分支未成篇",
+          "next": "随影片/输入模块逐位写"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-TIMING-CLOCK",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-CLOCK-WRAP",
+          "kind": "unknown",
+          "what": "32 位回绕在真实运行里的表现没有观测样本",
+          "next": "构造跨回绕的观察或登记为不适用"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-TIMING-WINDOW",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-WINDOW-LENGTH",
+          "kind": "unknown",
+          "what": "另一条\"全局窗长\"机制（场景级窗）没有找到非零写入点；本版只规定逐条目的窗",
+          "next": "确认那条机制是否死代码；若是，登记为舍弃"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-MOVIE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-MOVIE-VOLUME",
+          "kind": "unknown",
+          "what": "音轨类别、主音量/类别音量的配置来源与合成公式属于外部配置，本版只登记\"对象音量被配置\"",
+          "next": "配置模块成篇后再补"
+        },
+        {
+          "id": "RES-MOVIE-GATE",
+          "kind": "unknown",
+          "what": "影片位的服务分支（轮询、播完判据、销毁）未成篇；本版只规定\"置位并阻塞\"",
+          "next": "逐字核影片位分支后补 CORE-VM-STATE 的一条"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-NOOP-COMMENT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "若 0x1a7 对不支持的载荷类型抛错，或改了任一池/标量 ⇒ 本条错"
+      ]
+    },
+    {
+      "id": "CORE-OPS-NOOP-DEV",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "若 0x1a8 改了任一引擎状态 ⇒ 本条错"
+      ]
     }
   ],
   "gaps": []
