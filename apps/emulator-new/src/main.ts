@@ -12,9 +12,7 @@
  * `--decode`：只解码走查（不执行），用于检验 CORE-ISA 的结构规则。
  * ★ `--key` 是整型编码的运行期 key（规范：不是常量、不许有默认值）⇒ 执行模式必须显式给。
  */
-import path from 'node:path';
-
-import { Install, readConfigFile, readFile, writeConfigFile } from './host.ts';
+import { Install, defaultConfigPath, ensureConfigDir, readConfigFile, readFile, writeConfigFile } from './host.ts';
 import { startupReport } from './boot.ts';
 import type { ConfigSummary, StartupReport } from './boot.ts';
 import { loadConfigKeys, loadOpcodeTable } from './spec.ts';
@@ -211,7 +209,9 @@ export function analyzeInstall(
   const script = install.readById(rootId);
   const store = new ConfigStore(loadConfigKeys());
   store.applyDefaults(install.index.configDefaults);
-  const configPath = io.config ?? path.join(dir, 'SYS4REG.INI');
+  const configPath = io.config
+    ?? defaultConfigPath(dir, store.getString('set:RegFilePath'), store.getInt('set:UseAppDataFolder') !== 0);
+  ensureConfigDir(configPath);
   let source: 'defaults' | 'file' = 'defaults';
   const raw = readConfigFile(configPath);
   if (raw) {

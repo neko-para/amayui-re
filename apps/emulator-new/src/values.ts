@@ -197,7 +197,7 @@ function readFloatCell(m: Machine, map: Map<number, number>, index: number): num
 export function readText(m: Machine, ops: Operand[], k: number): string {
   const op = operandAt(ops, k);
   if (op.type === 5) return m.globalString.get(op.raw) ?? '';
-  return unsupported('read-text', op);
+  throw new Error(`text-unsupported-operand-type:0x${op.type.toString(16)}`);
 }
 
 /** 写文本：只支持 type 5（全局字符串池）；其余类型响亮失败 */
@@ -207,5 +207,5 @@ export function writeText(m: Machine, ops: Operand[], k: number, value: string):
     m.globalString.set(op.raw, value);
     return;
   }
-  unsupported('write-text', op);
+  throw new Error(`text-unsupported-operand-type:0x${op.type.toString(16)}`);
 }

@@ -97,9 +97,12 @@ test('★ 玩家文件缺失 ⇒ 默认；--init-config 写出的文件可重放
 });
 
 test('★ 启动阶段：display-config 已部分建模', { skip }, () => {
-  const r = analyzeInstall(installDir, 0, { decodeOnly: true }, {});
+  // 显式给一个不存在的玩家文件：不依赖安装根里是否恰好有一份 SYS4REG.INI
+  const missing = path.join(TEMP, 'ABSENT.INI');
+  const r = analyzeInstall(installDir, 0, { decodeOnly: true }, { config: missing });
   assert.ok(r.config, 'install 报告必须带配置摘要');
-  assert.equal(r.config.source, 'defaults', '安装根没有 SYS4REG.INI ⇒ 默认');
+  assert.equal(r.config.source, 'defaults');
+  assert.equal(r.config.path, missing);
   const stage = r.startup.stages.find((x) => x.id === 'display-config');
   assert.equal(stage.disposition, 'partial');
   assert.equal(r.startup.config.path, r.config.path);

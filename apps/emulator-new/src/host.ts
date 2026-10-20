@@ -8,6 +8,7 @@
  * ★ 玩家配置只写**调用方显式给出的路径**（`--init-config`）；装载不写安装目录。
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { parseAlfIndex } from './alf.ts';
@@ -141,6 +142,32 @@ export function readConfigFile(file: string): Buffer | null {
     return fs.readFileSync(file);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/** 玩家配置根：`USEAPPDATAFOLDER` 为真 ⇒ 用户配置目录；否则安装目录 */
+function configBase(installDir: string, useAppData: boolean): string {
+  if (!useAppData) return installDir;
+  return process.env.APPDATA ?? process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config');
+}
+
+/** 引擎的默认玩家文件路径：配置根 + `REGFILEPATH` + 文件名（`55-config.md`） */
+export function defaultConfigPath(installDir: string, regFilePath: string, useAppData: boolean): string {
+  return path.join(configBase(installDir, useAppData), regFilePath, 'SYS4REG.INI');
+}
+
+/**
+ * 读之前按需创建配置目录（引擎 `sub_4900F0` 的行为）。
+ * ★ 只读场景下目录建不出来（沙箱 / 只读盘 / EPERM）不是错误：文件读不到 ⇒ 默认值。
+ *   写场景（`writeConfigFile`）仍然硬失败。
+ */
+export function ensureConfigDir(file: string): void {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EPERM' || code === 'EACCES' || code === 'EROFS' || code === 'ENOENT') return;
     throw err;
   }
 }

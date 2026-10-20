@@ -38,7 +38,7 @@ export interface DefaultKeyRow {
   internal: string | null;
   kind: ConfigValueKind;
   /** 复合 / 归一化处理 */
-  special?: 'saveVersionSplit' | 'bool' | 'ignore';
+  special?: 'saveVersionSplit' | 'bool' | 'ignore' | 'noSetMusic' | 'enableAntiFont' | 'int64';
   /** 派生写（同一次解析里再写一个键） */
   extra?: { internal: string; from: 'value' | 'value-1'; if?: 'value!=0' }[];
 }

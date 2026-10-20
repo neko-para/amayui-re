@@ -1578,8 +1578,8 @@
         {
           "id": "RES-CONFIG-PLAYER-HOST",
           "kind": "unknown",
-          "what": "名字里带 REGKEY / VERREGPOS 的键在宿主侧还有注册表来源（64 位值截 32 位、版本文件派生 GameVersion）；这些不属于文本文件，未写成合同",
-          "next": "把注册表读取点与截断行为登记为宿主边界条目，再决定是否进 spec"
+          "what": "REGKEY 的 64→32 截断已按低 32 位实现；VERREGPOS 由注册表版本文件派生 GameVersion 的路径仍未写成合同",
+          "next": "把注册表版本读取点登记为宿主边界条目，再决定是否进 spec"
         },
         {
           "id": "RES-CONFIG-PLAYER-QUOTED-SEP",

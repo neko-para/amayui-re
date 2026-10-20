@@ -79,7 +79,7 @@ test('★ 取件：根脚本松散优先（12012）覆盖归档条目（11992）
 });
 
 test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，停在启动前段第一个未实现 opcode 前', { skip }, () => {
-  const result = analyzeInstall(installDir, 0, { key: KEY });
+  const result = analyzeInstall(installDir, 0, { key: KEY }, { config: path.join(REPO_ROOT, '.tmp', 'boot-config-missing.ini') });
   assert.equal(result.source.kind, 'install');
   assert.equal(result.source.id, 0);
   assert.equal(result.source.name, 'SYSTEM4.BIN');
@@ -90,7 +90,7 @@ test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，停在启动前
   assert.deepEqual(result.startup?.stages.map((s) => s.id), BOOT_STAGES.map((s) => s.id));
   assert.equal(result.startup?.counts['not-modeled'], 0, '配置补上后不应再有完全未建模的阶段');
   assert.equal(result.config?.source, 'defaults', '安装根没有 SYS4REG.INI ⇒ 发行默认');
-  assert.equal(result.config?.path, path.join(installDir, 'SYS4REG.INI'));
+  assert.equal(result.config?.path, path.join(REPO_ROOT, '.tmp', 'boot-config-missing.ini'));
 
   assert.equal(result.mode, 'run');
   assert.equal(result.steps, 2, '当前启动前段：只执行掉 0x1a7 / 0x1a8（实现新 opcode 时抬高）');

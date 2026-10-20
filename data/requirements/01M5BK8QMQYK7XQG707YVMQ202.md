@@ -9,7 +9,7 @@
 
 ## 一句话
 
-core spec 的 `CORE-ISA` / `CORE-POOL` 已落盘并有语料级守卫；`apps/emulator-new`（只读 `data/spec`）现在走**真实入口**：安装目录 → `SYS4INI.BIN`（ALF 索引）→ 统一文件 id → 根脚本 **id 0**（`SYSTEM4.BIN`），并按 spec 执行。`LOGO.BIN` 仍可执行到 `0x20F play-movie` 前（46 条 / 314 格 / 5024ms），但它只是 `--root-id` 的诊断路径，**不再是启动入口**。
+core spec 的 `CORE-ISA` / `CORE-POOL` / `CORE-CONFIG` 已落盘并有语料级 / pure 守卫；`apps/emulator-new`（只读 `data/spec`）现在走**真实入口**：安装目录 → `SYS4INI.BIN`（ALF 索引）→ 统一文件 id → 根脚本 **id 0**（`SYSTEM4.BIN`），并按 spec 执行。`LOGO.BIN` 仍可执行到 `0x20F play-movie` 前（46 条 / 314 格 / 5024ms），但它只是 `--root-id` 的诊断路径，**不再是启动入口**。
 **本单是交接快照**：状态以各子单 / `pnpm tools requirements plan` 为准；这里只记"换会话 / 换设备必须知道的事"。
 
 ## 已完成（凭据 = 守卫 / 文件）
@@ -19,15 +19,15 @@ core spec 的 `CORE-ISA` / `CORE-POOL` 已落盘并有语料级守卫；`apps/em
 - **CORE-POOL**：`40-pools.md` / `50-engine-state.md`；19 条全部有归宿。守卫 `tools/test/spec-pool.assets.test.mjs`。
 - **CORE-OPS**：`60-ops.md` —— 数值 3 条、纹理 5 条、场景/颜色 5 条、等待与输入 2 条、影片 1 条；`bindings.json` 有 EA 站点。
 - **CORE-CONFIG**：`55-config.md` 5 条（库 / 默认表 / 玩家文件 / 保存 / 脚本访问）+ `format/config-keys.json`；
-  emulator-new 读索引 51 条默认 + 可选 `SYS4REG.INI`，`--init-config` 生成默认文件；守卫 `emulator-new-config{,.assets}`。
+  emulator-new 读索引 51 条默认 + 可选 `SYS4REG.INI`（`--config`；缺省按 `USEAPPDATAFOLDER` + `REGFILEPATH` 拼），`--init-config` 生成默认文件；守卫 `emulator-new-config{,.assets}`。
 - **CORE-VM / CORE-TIMING**：`70-vm.md` —— 一次迭代 / 门 / 状态位 / 时钟 / 计时窗 5 条。
 - **真实入口**：`src/lzss.ts` / `src/alf.ts` / `src/host.ts` —— ALF 索引（S4IC，8 归档 / 21109 条目）、
   4 KiB 环形窗口 LZSS（绝对写位置）、统一文件 id == TOC 条目下标、**松散文件优先**、归档按 `(offset,length)` 切片。
   根脚本 id 0 = `SYSTEM4.BIN`；当前启动执行 `0x1a7` / `0x1a8` 后停在 `0x2f6`。
-- **启动阶段记账**：`src/boot.ts` 把 `_WinMain@16` → 主循环之间的 12 个阶段逐条登记（2 建模 / 2 部分 / 1 未建模 / 7 宿主）；配置是唯一完全未建模项（load-int / load-string 会用到），文本与 `--json` 都输出。
+- **启动阶段记账**：`src/boot.ts` 把 `_WinMain@16` → 主循环之间的 12 个阶段逐条登记（2 建模 / 3 部分 / 0 未建模 / 7 宿主）；配置只到 partial（库已建立，显示副作用未建模），文本与 `--json` 都输出。
 - **参考实现**：`apps/emulator-new/`（只读 `data/spec`，无构建，已进 `pnpm typecheck`）。守卫：
   `emulator-new-isolation` · `emulator-new-decode` · `emulator-new-ops` · `emulator-new-texture` · `emulator-new-scene` · `emulator-new-alf` · `emulator-new-noop`（pure），
-  以及 `emulator-new-boot.assets`（启动棘轮 / 取件顺序）与 `emulator-new-logo.assets`（LOGO 前沿棘轮）两条 assets。
+  以及 `emulator-new-boot.assets`（启动棘轮 / 取件顺序）、`emulator-new-config.assets`（配置默认 / 覆盖 / 生成）与 `emulator-new-logo.assets`（LOGO 前沿棘轮）三条 assets。
 - **spec↔EA 映射**：`data/spec/bindings.json` / `audit.json`（规则数见 `pnpm tools spec report`）。
 
 ## 换机器先跑这四条
@@ -49,13 +49,13 @@ pnpm tools requirements validate # 5/5
 - 浮点池"未写槽"的初值规范不说：参考实现要跑真实脚本必须显式 `--uninitialized-float zero`，每次读进 `diagnostics`。
 - **`CORE-FS` / `CORE-BOOT` 的 spec 规则还没成篇**：入口实现与守卫先落（`REQ-01M5C0G36…`），把"松散优先 / 根脚本 id 0"
   写成带锚的合同是后续单。⛔ 别把"实现里有"当成"规范里有"。
-- 只读 `SYS4INI.BIN` 一份索引：`APPEND*.AAI` 的叠加索引未实现；配置脚本访问只支持 type 3 / 5（引用族 6 / 8 / 12 / 14 响亮失败，等 `CORE-POOL`）。
+- 只读 `SYS4INI.BIN` 一份索引：`APPEND*.AAI` 的叠加索引未实现；配置脚本访问只支持 type 3 / 5（引用族响亮失败，等 `CORE-POOL`）；ALF 尾部严格解析、`REGKEY` 按低 32 位。
 - 7 条既有规则仍用 `SPC-*` id（并号是机械改名，见治理二批）。
 
 ## 未提交（★ 换设备的前提）
 
 **工作树包含全部改动，未 `git add` / `commit`。** 另一台设备要看到这些，必须先由用户提交并推送。
-未入库但仍在本机的草稿：`.tmp/spec-draft/{core-isa,core-pool,core-vm-scan,tidy}/`（历史）与 `ops-texture` / `ops-scene` / `ops-timing`（本轮）。
+未入库但仍在本机的草稿：`.tmp/spec-draft/{core-isa,core-pool,core-vm-scan,tidy}/` 与 `ops-texture` / `ops-scene` / `ops-timing`（历史批次）。
 
 ## 待裁决（已登记，未定）
 

@@ -91,39 +91,41 @@ export function parseAlfIndex(buf: Buffer): AlfIndex {
   // ── 尾部：发行默认配置（`55-config.md`）──
   // ★ 两个计数数组不属于配置；引擎只把它们读进别处，这里只跳过。
   // ★ 两个长度标记都只做“非零”判断；配置串前面的 953 不是循环上界。
-  const readI32 = (): number => {
-    const off = take(4);
-    return toc.readInt32LE(off);
-  };
-  const skipCounted = (): void => {
-    const n = readI32();
-    if (n > 0) take(n * 4);
-  };
-  const readCString = (what: string): string => {
-    const end = toc.indexOf(0, at);
-    if (end < 0) throw new Error(`alf-tail-truncated:${what}@${at}`);
-    const s = toc.toString(S4.encoding, at, end);
-    at = end + 1;
-    return s;
-  };
+  // ★ 目录区之后一个字节都没有 ⇒ 没有尾部（AAI 等）；只要开始读尾部，越界一律
+  //   `alf-tail-truncated:<偏移>`，⛔ 不把截断当成“没有默认表”。
   const configDefaults: { key: string; value: string }[] = [];
-  if (at + 4 <= toc.length) {
+  if (at < toc.length) {
+    const tailTake = (n: number): number => {
+      if (n < 0 || at + n > toc.length) throw new Error(`alf-tail-truncated:${at}`);
+      const off = at;
+      at += n;
+      return off;
+    };
+    const readI32 = (): number => toc.readInt32LE(tailTake(4));
+    const skipCounted = (): void => {
+      const n = readI32();
+      if (n > 0) tailTake(n * 4);
+    };
+    const readCString = (what: string): string => {
+      const end = toc.indexOf(0, at);
+      if (end < 0) throw new Error(`alf-tail-truncated:${what}@${at}`);
+      const s = toc.toString(S4.encoding, at, end);
+      at = end + 1;
+      return s;
+    };
     const len1 = readI32();
     if (len1 > 0) {
       skipCounted(); // 第一个计数数组（与配置无关）
       skipCounted(); // 第二个计数数组（与配置无关）
     }
-    if (at + 4 <= toc.length) {
-      const len2 = readI32();
-      if (len2 > 0) {
-        const count = take(4);
-        const n = toc.readInt32LE(count);
-        if (n < 0 || n > toc.length) throw new Error(`alf-tail-bad-count:${n}`);
-        for (let i = 0; i < n; i += 1) {
-          const key = readCString('key');
-          const value = readCString('value');
-          configDefaults.push({ key, value });
-        }
+    const len2 = readI32();
+    if (len2 > 0) {
+      const n = readI32();
+      if (n < 0) throw new Error(`alf-tail-truncated:${at}`);
+      for (let i = 0; i < n; i += 1) {
+        const key = readCString('key');
+        const value = readCString('value');
+        configDefaults.push({ key, value });
       }
     }
   }

@@ -18,10 +18,14 @@ export interface ConfigStats {
   lists: number;
 }
 
-/** C `atoi` 的前缀语义：跳前导空白、可选符号、连续十进制数字；无数字 ⇒ 0 */
+/** C `atoi` 的前缀语义：跳前导空白（isspace：0x09–0x0D / 0x20）、可选符号、连续十进制数字；无数字 ⇒ 0 */
 export function atoiPrefix(s: string): number {
   let i = 0;
-  while (i < s.length && s.charCodeAt(i) <= 0x20) i += 1;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c !== 0x20 && (c < 0x09 || c > 0x0d)) break;
+    i += 1;
+  }
   let sign = 1;
   if (s[i] === '+' || s[i] === '-') {
     if (s[i] === '-') sign = -1;
@@ -37,6 +41,31 @@ export function atoiPrefix(s: string): number {
     i += 1;
   }
   return any ? sign * n : 0;
+}
+
+/** `_atoi64` 的十进制前缀，再按引擎的 32 位槽截断（REGKEY 只存低 32 位） */
+function atoi64Low32(s: string): number {
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c !== 0x20 && (c < 0x09 || c > 0x0d)) break;
+    i += 1;
+  }
+  let sign = 1n;
+  if (s[i] === '+' || s[i] === '-') {
+    if (s[i] === '-') sign = -1n;
+    i += 1;
+  }
+  let n = 0n;
+  let any = false;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c < 0x30 || c > 0x39) break;
+    n = n * 10n + BigInt(c - 0x30);
+    any = true;
+    i += 1;
+  }
+  return Number((any ? sign * n : 0n) & 0xffffffffn) | 0;
 }
 
 /**
@@ -64,20 +93,37 @@ export function parseIni(buf: Buffer): Map<string, string> {
   const text = buf.toString('latin1');
   const out = new Map<string, string>();
   let section = '';
-  for (const raw of text.split('\n')) {
-    if (raw === '') continue; // EOF 后的空段 / 空行：不产生可匹配条目
+  const consume = (raw: string): void => {
     if (raw.startsWith('[')) {
       const close = raw.indexOf(']');
       section = trimField(close < 0 ? raw.slice(1) : raw.slice(1, close));
-      continue;
+      return;
     }
     const eq = raw.indexOf('=');
     if (eq < 0) {
       out.set(`${section}\\`, '');
-      continue;
+      return;
     }
     out.set(`${section}\\${trimField(raw.slice(0, eq))}`, trimField(raw.slice(eq + 1)));
+  };
+  // 引擎的行缓冲是 256 字节：按 LF 切；一行到 255 字节仍没有 LF 就先交出一条
+  // （不是错误，后续字节继续按下一行解析）。文件末尾的单个 LF 不产生额外空行；
+  // **中间**的空行是一条“没有 = 的行” ⇒ 登记成空键/空值（不是注释）。
+  let line = '';
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === '\n') {
+      consume(line);
+      line = '';
+      continue;
+    }
+    line += ch;
+    if (line.length === 255) {
+      consume(line);
+      line = '';
+    }
   }
+  if (line.length > 0) consume(line);
   return out;
 }
 
@@ -158,6 +204,10 @@ export class ConfigStore {
         this.setInt('set:SaveVersion2', v % 100);
         continue;
       }
+      if (row.special === 'int64') {
+        this.setInt(internal, atoi64Low32(raw));
+        continue;
+      }
       if (row.kind === 'list') {
         this.appendList(internal, raw);
         continue;
@@ -168,7 +218,7 @@ export class ConfigStore {
       }
       let v = atoiPrefix(raw);
       if (row.special === 'bool') v = v !== 0 ? 1 : 0;
-      if (row.indexKey.toUpperCase() === 'ENABLEANTIFONT' && opts.antifontUnavailable) v = 0;
+      if (row.indexKey.toUpperCase() === 'ENABLEANTIFONT' && opts.antifontUnavailable && v === 1) v = 0;
       this.setInt(internal, v);
       for (const extra of row.extra ?? []) {
         if (extra.if === 'value!=0' && v === 0) continue;
