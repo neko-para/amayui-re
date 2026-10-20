@@ -1041,10 +1041,10 @@ const MUTATIONS = [
   },
   {
     file: 'data/spec/chapters/10-format.md',
-    from: '### 核验状态（部分待核验）',
-    to: '### 核验状态（全部已核验）',
+    from: '### 核验状态\n',
+    to: '### 核验状态（全部已核验）\n',
     guard: 'tools/test/spec-format-table.test.mjs',
-    what: '★ 协议章把「部分待核验」抹成「全部已核验」 ⇒ 读者会把未核验的格式当已证实结论',
+    what: '★ 协议章声称「全部已核验」 ⇒ 读者会把未核验的格式当已证实结论',
   },
   {
     file: 'tools/lib/spec-effects.mjs',

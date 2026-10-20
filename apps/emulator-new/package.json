@@ -1,0 +1,10 @@
+{
+  "name": "@amayui/emulator-new",
+  "private": true,
+  "type": "module",
+  "description": "只读 data/spec 的参考实现（无渲染 / 音频 / 输入）。不复制 apps/emulator 的代码。",
+  "scripts": {
+    "run": "node src/main.ts",
+    "decode": "node src/main.ts --decode"
+  }
+}

@@ -305,19 +305,19 @@
         },
         {
           "what": "脚本头 13 个 u32 字段的用途（计数 / 子表偏移 / 装载器元数据）尚未逐条对上引擎加载器",
-          "next": "在加载器里找每个字段的读取点与消费点，登记 EA 后把字段用途升为已核验"
+          "next": "读取点已对上（6 + 1 + 6）；继续找每个字段的消费点，登记 EA 后把字段用途升为已核验"
         },
         {
-          "what": "指令表 574 条的 argc 尚未逐条对引擎解码 / 长度推进核验",
-          "next": "找真正解码脚本的循环（opcode 读取 + 长度推进），把 argc 与逐条 opcode 关联；未核验的条目保持待核验"
+          "what": "30 条 opcode 没有处理器（落缺省），6 条 argc 无法从处理器常数核（终止型 / 换 body / 分支相关）",
+          "next": "按处理器行为逐条定：终止型与换 body 的 ip 语义；缺省处理器覆盖的 30 条是否与'不支持'等价"
         },
         {
           "what": "头部 table_1/2/3 三张子表的元素结构与用途尚未成篇",
           "next": "先从加载器与位置表消费点取证元素形状，再决定它们是协议的一部分还是装载器内部索引"
         },
         {
-          "what": "协议描述的最初来源是现有实现（仿照第三方库），不是引擎解码代码",
-          "next": "逐条把协议声明绑定到解码 EA / 守卫；完成前整章保持 unverified"
+          "what": "SYS3 头布局无样本；代码之后的数据区（停点之后）用途未明；CGVIEWER / CTINIT 在 exit 之后还有可解的尾巴",
+          "next": "找 SYS3 样本或从分支代码推布局；对那两个脚本用可达性重算代码边界，再判尾巴是数据还是死代码"
         }
       ]
     },
@@ -374,8 +374,8 @@
           "next": "先取证『谁在什么条件下交换两组缓冲』，再决定它是不是 spec 的可观察行为"
         },
         {
-          "what": "立即数 / 浮点立即数 / 镜像内联串（type 0/1/2）的读语义还没成篇",
-          "next": "先各自写一条最小合同（值原样 / IEEE754 位模式 / 缓冲区内偏移），再判定它们算不算池"
+          "what": "容器对象的第三字、元素增删、注册表消费者、哪些 opcode 用句柄；以及『读 = 第一个元素』是否等价于『当前元素』",
+          "next": "枚举登记表的读取者与调用者；容器机制负责剩余语义（见 CORE-POOL-HANDLE-INT 的残差）"
         },
         {
           "what": "key 的生命周期（何时写、何时可读）只有唯一写入点与来源，尚未整理成合同",
@@ -858,21 +858,355 @@
       ]
     },
     {
-      "id": "SPC-ENGINE-SCALAR-ARRAYS",
+      "id": "CORE-ISA-HEADER-MAGIC",
       "status": "draft",
       "disposition": "handled",
       "covers": [],
       "residual": [
         {
-          "id": "RES-SCALAR-ARRAY-SEMANTICS",
+          "id": "RES-ISA-MAGIC-SYS3",
           "kind": "unknown",
-          "what": "三张表各自的领域用途（键槽 / 另一张表 / 8 格表）尚未成篇",
-          "next": "先从脚本用法取证每张表装什么，再写合同；越界口径已可逐字复核"
+          "what": "SYS3 分支的头布局未解（本作语料 0 样本）",
+          "next": "造一个 SYS3 样本，或在调试器里把期望签名改成 SYS3 再喂 SYS4，观察它读几个字节"
         }
       ],
-      "falsifiers": [
-        "若三条 opcode 的越界行为相同（都抛或都静默跳过）⇒ 本条错（语料逐字可反驳）"
-      ]
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-ISA-HEADER-FIXED32",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ISA-FIXED-VERSION",
+          "kind": "unknown",
+          "what": "版本串除\"布局阈值\"外是否还有别的消费点未查明",
+          "next": "在语料里搜所有引用该版本串字段的站点"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-ISA-HEADER-SUBHEADER",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ISA-SUBHEADER-THRESHOLD",
+          "kind": "unknown",
+          "what": "阈值 \"080 \" 对应哪个 AGE 版本、SYS3 是否也用它，未查明",
+          "next": "按 SYS3 残差一并取证"
+        },
+        {
+          "id": "RES-ISA-SUBHEADER-VARIANT",
+          "kind": "unknown",
+          "what": "子头长度不是 28 的样本没有",
+          "next": "在语料里找子头长度 ≠ 28 的文件，或造一份"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-ISA-OPERAND-COUNT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ISA-ARGC-6",
+          "kind": "unknown",
+          "what": "6 条 opcode（0x001/0x002/0x004/0x009/0x07c/0x0ae）的 argc 无法用处理函数常数核",
+          "next": "0x004 用\"它读了几个操作数\"定下界；0x07c/0x0ae 用控制流定；终止型三条用退出语义定"
+        },
+        {
+          "id": "RES-ISA-ARGC-STALE",
+          "kind": "unknown",
+          "what": "若某处理函数不写长度槽而继续执行，是否会读到上一条的残留值：语料未观察到",
+          "next": "静态列出\"不写该槽且不抛/不换 body\"的处理函数"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-ISA-INSTRUCTION-ENCODING",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ISA-ENCODING-BAD",
+          "kind": "unknown",
+          "what": "没有\"半条指令 / 非 4 对齐\"的坏数据样本",
+          "next": "造一份坏数据，看引擎在哪一步报错"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-ISA-OPCODE-DOMAIN",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ISA-DOMAIN-EXC",
+          "kind": "unknown",
+          "what": "缺省处理器的异常类型与被谁捕获属于 CORE-VM",
+          "next": "在 CORE-VM 的\"退出与中止\"里回答；本机制只到\"抛\""
+        },
+        {
+          "id": "RES-ISA-DOMAIN-30",
+          "kind": "unknown",
+          "what": "30 条\"有编码、无处理函数\"的表项来源不明",
+          "next": "确认它们是别的 AGE 版本的条目还是本作保留未实现；前者应删或标未规定"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-ISA-BODY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ISA-BODY-READLEN",
+          "kind": "unknown",
+          "what": "装载器请求的读长度比 body 实际可用字节多 4（ReadFile 读到 EOF 即止）",
+          "next": "确认这是不是 SYS3（无子头）分支共用的旧算术残留"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-ISA-TABLE-POINTERS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ISA-TABLES-EXTRACTED",
+          "kind": "unknown",
+          "what": "_extracted 语料的表 3 之后多出一截未解释字节（与 gameInstall 不是同一份文件）",
+          "next": "确认 _extracted 的产出者/版本；那截尾巴是产出者加的，还是另一种布局"
+        },
+        {
+          "id": "RES-ISA-TABLES-SEMANTICS",
+          "kind": "unknown",
+          "what": "三张表各自的内容语义不在本机制",
+          "next": "若要解释，交给一个独立机制；不要顺手写进 ISA"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-ISA-EXEC-END",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ISA-END-CF",
+          "kind": "unknown",
+          "what": "控制转移的完整集合未闭集化（本机制只用它做分类）",
+          "next": "交给 CORE-VM，按 opcode 逐条回答\"是否改 ip、改成什么\""
+        },
+        {
+          "id": "RES-ISA-END-2",
+          "kind": "unknown",
+          "what": "CGVIEWER / CTINIT 在 exit 之后还有可解的尾巴（CGVIEWER 12 条、CTINIT 1 条）；它们是不可达代码还是数据未定",
+          "next": "用可达性（从 ip=0 做控制流遍历）而不是直线解码重算代码边界；若仍停在 exit，再判尾巴是数据还是死代码"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-TAG-IMMEDIATE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-TAG2-BASE",
+          "kind": "unknown",
+          "what": "内联字符串的基址槽（脚本缓冲基址）在跨帧时是否重定位，没有单独立条",
+          "next": "在 CORE-FRAME 的帧装载路径里找该槽的写入点，再决定要不要在池章写一句“随帧变化”"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-HANDLE-INT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-CONTAINER-MODEL",
+          "kind": "unknown",
+          "what": "容器对象第三字的用途、元素增删语义、注册表的消费者、以及哪些 opcode 用这些句柄，全部未取证",
+          "next": "先枚举登记表的读取者，再看调用者用 0x8003 做什么；容器机制负责剩下的"
+        },
+        {
+          "id": "RES-POOL-HANDLE-READ",
+          "kind": "unknown",
+          "what": "读只返回“第一个元素”是否等价于“当前元素”，取决于容器有没有游标——没有证据",
+          "next": "找容器的游标字段 / 迭代接口；找不到就保持“只登记第一个元素”"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-HANDLE-STRING",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-STRING-HANDLE-TEXT",
+          "kind": "unknown",
+          "what": "容器指针的十进制文本宽度与“文本被外部改写后句柄失效”是否可观察，未取证",
+          "next": "找改写该槽的其它路径（字符串写 opcode），做一次对照"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-STRING-WRITE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-STRING-WRITE-CALLERS",
+          "kind": "unknown",
+          "what": "哪些 opcode 用这条记录级写入路径写玩家可见的字符串，未取证",
+          "next": "把该写入原语的调用方枚举出来（53 个），按 opcode 归类；本批只确认「记录级路径存在」"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-INDEX-UNCHECKED",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-OOB-OBSERVED",
+          "kind": "unknown",
+          "what": "没有任何一次真机观测到越界（带壳不可 trace）",
+          "next": "不复刻越界；若要提高置信度，只能从游戏数据侧找「下标是否总在计数内」的统计证据"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-SCALAR-ARRAY-107",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-SCALAR-107-MEANING",
+          "kind": "unknown",
+          "what": "这张 32 格表装什么（旧注释叫它“键槽表”）未取证",
+          "next": "从脚本用法反推（哪类 opcode 读这张表），再决定它属 CORE-OPS 的哪一族"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-SCALAR-ARRAY-10B",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-SCALAR-10B-INDEX",
+          "kind": "unknown",
+          "what": "“索引不检查”是引擎事实，但“意图如此”无法判定；引擎不检查 ⇒ 越界未定义",
+          "next": "找脚本里 0x10b 的索引来源，看它是否总有界（若总有界，正文可加一句“数据侧看起来总在界内”作为观察）"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-SCALAR-ARRAY-30A",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-SCALAR-30A-MEANING",
+          "kind": "unknown",
+          "what": "这张 8 格表装什么未取证（旧注释按异常文本叫它“设键”）",
+          "next": "从消费方反推；找不到就只保留“写表”这一条"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-SCALAR-FRAME-FLAG",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-FRAME-060",
+          "kind": "unknown",
+          "what": "这个帧字段是不是“本指令的操作数记录数”、谁会读它，未取证（属 CORE-VM）",
+          "next": "找该字段的读取者（取指 / 推进循环），确认后决定它归 CORE-VM 还是留在这里"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-PRIMITIVE-ENTRY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-ARG4",
+          "kind": "unknown",
+          "what": "取址函数在 .lst 侧比 C 侧多一个栈槽（第三个实参），没有任何路径读它",
+          "next": "查所有调用点，确认它是“永不使用”还是“某些调用点传了却没被读”"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-TAG-DISPATCH",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-DISPATCH-BOUNDS",
+          "kind": "unknown",
+          "what": ">0x8003 那一层只逐字验证了 0x8005/9/B 三个减法分支；是否还有别的特殊标签以别的形态被接受，没有做全语料普查",
+          "next": "对五个函数做一次“所有立即数与比较”的机械枚举，确认没有第三层分派"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-POOL-FLOAT-VALUE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-POOL-FLT-ROUND",
+          "kind": "unknown",
+          "what": "截断的边界（负数、恰好整数、超大值）没有独立用例",
+          "next": "写一条守卫用例覆盖负值与边界，再决定要不要在正文写“向零”以外的细节"
+        }
+      ],
+      "falsifiers": []
     }
   ],
   "gaps": []

@@ -25,7 +25,7 @@ description: 在本仓推进《天結いキャッスルマイスター》引擎*
 pnpm tools opcodes report                    # 旧表 ↔ 本仓派生表对账
 pnpm tools disasm-fn summary                  # 语料目录一览：函数 / 数据 item / 诚实项
 pnpm tools disasm-at stats                   # 语料段/EA 范围（要先有语料）
-# ★ 已知缺口：**没有** "opcode → handler EA" 的工具动作（见 §3）—— 先按 §3 处理，别自己拍
+pnpm tools opcodes handlers                  # opcode → handler EA（表基址 + 赋值行 + 走缺省的 opcode）
 
 # ② 取证（**下一层**，可 subagent 扇出）—— 拿到"取证包"（§2.1）
 #    交 `amayui-re-engine`：`pnpm tools disasm-fn show sub_XXXXXX` → C 体 + .lst 窗口 + 参数/全局/调用关系
@@ -92,7 +92,7 @@ Hex-Rays 编的名字当证据 · 顺手去改别的文件。
 | 环节 | 今天能不能做 | 依据 / 正确动作 |
 |---|---|---|
 | 「实现指令 NN」（A 类） | ✅ 能 | 批 R1 就是这么干的（纯数值族 39 条：模型 + 守卫 + 台账） |
-| `opcode → handler EA` 的**机械查询** | ❌ **没有工具动作** | 544 条的静态提取只活在守卫 `tools/test/disasm.test.mjs` 里；`engine/handlers.mts` 只有 **39** 条 ⇒ **这是已登记的缺口**（见下） |
+| `opcode → handler EA` 的**机械查询** | ✅ 能 | `pnpm tools opcodes handlers`（表基址 + 赋值行 + 走缺省的 opcode；`--opcode` 查单条）。★ 缺口在**实现侧**：`packages/age-format/src/engine/handlers.mts` 只登记了一部分（现查）——别把"实现里没有"当成"引擎里没有" |
 | 「行为不符」的复现（B 类） | ❌ 不能 | **无头核心未落地** ⇒ 没有可观测实例。正确动作：把它变成"**让观测成为可能**"的需求单，别自己造一个假观测面 |
 | 观测面本身（跑得起来的无头实例） | ⛔ 未落地 | 需求单 `REQ-01M47SGXYWPQ1KWET2J49TJQST`（M4-1 无头核心）；它的判据是"无头实例可跑 + T0 档全绿" |
 

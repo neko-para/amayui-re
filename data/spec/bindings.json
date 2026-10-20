@@ -465,19 +465,851 @@
       ]
     },
     {
-      "rule": "SPC-ENGINE-SCALAR-ARRAYS",
+      "rule": "CORE-ISA-HEADER-MAGIC",
+      "sites": [
+        {
+          "ea": "0x40ee77",
+          "what": "ReadFile：读 32 字节固定区（签名 4 + 版本 4 + 6 个 u32）"
+        },
+        {
+          "ea": "0x40ee8b",
+          "what": "strncmp(2)：引擎配置前缀 vs 全局 \"S4\"，决定期望 SYS4 还是 SYS3"
+        },
+        {
+          "ea": "0x40ee97",
+          "what": "期望值 = \"SYS4\" 分支"
+        },
+        {
+          "ea": "0x40eea4",
+          "what": "期望值 = \"SYS3\" 分支"
+        },
+        {
+          "ea": "0x40eec4",
+          "what": "strncmp(4)：期望签名 vs 文件前 4 字节"
+        },
+        {
+          "ea": "0x40eece",
+          "what": "签名比较结果分支：相等 ⇒ 继续装载（jz），不等 ⇒ 文件非法路径"
+        },
+        {
+          "ea": "0x40ef06",
+          "what": "\"BINファイルが不正です\" 消息格式化"
+        }
+      ],
+      "functions": [
+        "sub_40ED40"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-ISA-HEADER-FIXED32",
+      "sites": [
+        {
+          "ea": "0x40ee77",
+          "what": "32 字节一次读入"
+        },
+        {
+          "ea": "0x40f228",
+          "what": "计数 #1 → 帧记录 +0x08"
+        },
+        {
+          "ea": "0x40f242",
+          "what": "计数 #2 → 帧记录 +0x0C"
+        },
+        {
+          "ea": "0x40f25c",
+          "what": "计数 #3 → 帧记录 +0x10"
+        },
+        {
+          "ea": "0x40f276",
+          "what": "计数 #4 → 帧记录 +0x14"
+        },
+        {
+          "ea": "0x40f290",
+          "what": "计数 #5 → 帧记录 +0x18"
+        },
+        {
+          "ea": "0x40f2aa",
+          "what": "计数 #6 → 帧记录 +0x1C"
+        },
+        {
+          "ea": "0x40f2e9",
+          "what": "计数 #1 被用来分配 local 池（4×(n+1)）"
+        }
+      ],
+      "functions": [
+        "sub_40ED40"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.count0"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-ISA-HEADER-SUBHEADER",
+      "sites": [
+        {
+          "ea": "0x40efda",
+          "what": "strncmp(4)：文件版本串 vs \"080 \"（小于 ⇒ 无子头）"
+        },
+        {
+          "ea": "0x40f008",
+          "what": "ReadFile：读 4 字节 = 子头长度"
+        },
+        {
+          "ea": "0x40f02a",
+          "what": "ReadFile：读 (子头长度−4) 字节"
+        },
+        {
+          "ea": "0x40f037",
+          "what": "剩余字节数 += 4 − 子头长度"
+        },
+        {
+          "ea": "0x40f050",
+          "what": "第 1 组长度 → 帧记录 +0x40"
+        },
+        {
+          "ea": "0x40f076",
+          "what": "第 1 组指针 → 帧记录 +0x44"
+        },
+        {
+          "ea": "0x40f08f",
+          "what": "第 2 组长度 → 帧记录 +0x48"
+        },
+        {
+          "ea": "0x40f0b5",
+          "what": "第 2 组指针 → 帧记录 +0x4C"
+        },
+        {
+          "ea": "0x40f0ce",
+          "what": "第 3 组长度 → 帧记录 +0x50"
+        },
+        {
+          "ea": "0x40f0f4",
+          "what": "第 3 组指针 → 帧记录 +0x54"
+        },
+        {
+          "ea": "0x40f19d",
+          "what": "老布局分支：三组长度/指针全置 0"
+        }
+      ],
+      "functions": [
+        "sub_40ED40"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.triples"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-ISA-OPERAND-COUNT",
+      "sites": [
+        {
+          "ea": "0x411900",
+          "what": "分派函数起点 sub_411900"
+        },
+        {
+          "ea": "0x411a59",
+          "what": "opcode = u32[ip]"
+        },
+        {
+          "ea": "0x411a7e",
+          "what": "读帧记录 +0x60（操作数个数）"
+        },
+        {
+          "ea": "0x411a88",
+          "what": "edx += edx（×2）"
+        },
+        {
+          "ea": "0x411a8a",
+          "what": "edx += edx（×4）"
+        },
+        {
+          "ea": "0x411a8c",
+          "what": "ip += 4 × 操作数个数（= 4 + 8×argc）"
+        },
+        {
+          "ea": "0x418e8d",
+          "what": "某处理函数写 1（⇒ argc 0）"
+        },
+        {
+          "ea": "0x418ebd",
+          "what": "某处理函数写 9（⇒ argc 4）"
+        },
+        {
+          "ea": "0x41c6b6",
+          "what": "某处理函数写 3（⇒ argc 1）"
+        },
+        {
+          "ea": "0x41d2a4",
+          "what": "某处理函数写 5（⇒ argc 2）"
+        },
+        {
+          "ea": "0x40f6ee",
+          "what": "装载时把操作数个数置 0"
+        }
+      ],
+      "functions": [
+        "sub_411900",
+        "sub_40ED40"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.operands",
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-ISA-INSTRUCTION-ENCODING",
+      "sites": [
+        {
+          "ea": "0x411a59",
+          "what": "取 32 位小端 opcode"
+        },
+        {
+          "ea": "0x411a66",
+          "what": "用 opcode 索引处理函数表（引擎对象 +0xA509C）"
+        },
+        {
+          "ea": "0x411a6f",
+          "what": "调用处理函数"
+        }
+      ],
+      "functions": [
+        "sub_411900"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-ISA-OPCODE-DOMAIN",
+      "sites": [
+        {
+          "ea": "0x415df6",
+          "what": "处理函数表基址（lea edi,[esi+0A509Ch]）"
+        },
+        {
+          "ea": "0x415dfc",
+          "what": "项数 0x400"
+        },
+        {
+          "ea": "0x415e01",
+          "what": "缺省处理函数 = sub_418E30"
+        },
+        {
+          "ea": "0x415e06",
+          "what": "rep stosd 填满 1024 项"
+        },
+        {
+          "ea": "0x415e08",
+          "what": "第一项显式覆盖（opcode 0x001）"
+        },
+        {
+          "ea": "0x411a5d",
+          "what": "opcode 负值 ⇒ 缺省"
+        },
+        {
+          "ea": "0x411a64",
+          "what": "opcode > 0x3FF ⇒ 缺省"
+        },
+        {
+          "ea": "0x418e30",
+          "what": "缺省处理函数起点（__noreturn）"
+        },
+        {
+          "ea": "0x418e36",
+          "what": "消息串 asc_51FB60（\"このコマンドはサポートされていません．\"）"
+        },
+        {
+          "ea": "0x418e4f",
+          "what": "抛出"
+        }
+      ],
+      "functions": [
+        "sub_418E30"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-ISA-BODY",
+      "sites": [
+        {
+          "ea": "0x40f687",
+          "what": "读长度 = 文件大小 − 0x20（var_168 + -0x20）"
+        },
+        {
+          "ea": "0x40f6ad",
+          "what": "ReadFile：剩余字节整体读进帧缓冲"
+        },
+        {
+          "ea": "0x40f6db",
+          "what": "ip ← 帧缓冲起点（+0x5D898 ← +0x5D894）"
+        },
+        {
+          "ea": "0x40f6ee",
+          "what": "操作数个数 ← 0"
+        }
+      ],
+      "functions": [
+        "sub_40ED40"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.strBase",
+        "layout:FRAME_LAYOUT.off.operands"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-ISA-TABLE-POINTERS",
+      "sites": [
+        {
+          "ea": "0x40f067",
+          "what": "取帧缓冲起点（+0x5D894）"
+        },
+        {
+          "ea": "0x40f073",
+          "what": "指针 = 帧缓冲起点 + 4×偏移"
+        },
+        {
+          "ea": "0x40f076",
+          "what": "写第 1 组指针"
+        },
+        {
+          "ea": "0x40f0ac",
+          "what": "取帧缓冲起点（第 2 组）"
+        },
+        {
+          "ea": "0x40f0b2",
+          "what": "指针 = 帧缓冲起点 + 4×偏移（第 2 组）"
+        },
+        {
+          "ea": "0x40f0eb",
+          "what": "第 3 组：缓冲起点 + 4×偏移"
+        },
+        {
+          "ea": "0x40f0f4",
+          "what": "写第 3 组指针"
+        }
+      ],
+      "functions": [
+        "sub_40ED40"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.off.triples"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-ISA-EXEC-END",
+      "sites": [
+        {
+          "ea": "0x40f687",
+          "what": "body 读长度按文件大小算，不保存代码长度"
+        },
+        {
+          "ea": "0x40f6ad",
+          "what": "body 整体读入"
+        },
+        {
+          "ea": "0x411a8c",
+          "what": "ip 无条件前进（没有越界比较）"
+        },
+        {
+          "ea": "0x41a820",
+          "what": "返回/终止型处理函数（调用栈空时抛）"
+        },
+        {
+          "ea": "0x41a9b0",
+          "what": "返回型处理函数：直接改 ip"
+        },
+        {
+          "ea": "0x428a60",
+          "what": "终止型处理函数起点"
+        },
+        {
+          "ea": "0x428d9c",
+          "what": "终止型处理函数的抛出点"
+        },
+        {
+          "ea": "0x41c795",
+          "what": "换 body 型：在指令里再次调用装载器 sub_40ED40"
+        }
+      ],
+      "functions": [
+        "sub_40ED40",
+        "sub_411900",
+        "sub_41A820",
+        "sub_41A9B0",
+        "sub_428A60",
+        "sub_41C770"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-TAG-IMMEDIATE",
+      "sites": [
+        {
+          "ea": "0x41bfa0",
+          "what": "读整 case 0：raw 原样作整数"
+        },
+        {
+          "ea": "0x41c089",
+          "what": "读整 case 1：raw 的 32 位浮点截断为整数"
+        },
+        {
+          "ea": "0x41c097",
+          "what": "读整 case 2：脚本缓冲 + 4*raw 的文本 → atoi"
+        },
+        {
+          "ea": "0x41c350",
+          "what": "读浮 case 0：raw 作有符号整数 → double"
+        },
+        {
+          "ea": "0x41c439",
+          "what": "读浮 case 1：raw 的 32 位浮点原样"
+        },
+        {
+          "ea": "0x41c442",
+          "what": "读浮 case 2：脚本缓冲 + 4*raw 的文本 → atof"
+        },
+        {
+          "ea": "0x42af0a",
+          "what": "取址：0/1/2 减 3 后无符号越界 → default（抛）"
+        },
+        {
+          "ea": "0x42b513",
+          "what": "写整：同上"
+        },
+        {
+          "ea": "0x42ba63",
+          "what": "写浮：同上"
+        }
+      ],
+      "functions": [
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42AEA0",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.base"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 读原语"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-HANDLE-INT",
+      "sites": [
+        {
+          "ea": "0x42b045",
+          "what": "取址 0x8003：整型槽 → DEC → 容器指针"
+        },
+        {
+          "ea": "0x42b08c",
+          "what": "取址 0x8003：槽为 0 时分配 0x10 字节容器（3 个 dword 清零）"
+        },
+        {
+          "ea": "0x42b0f8",
+          "what": "取址 0x8003：ENC(新容器) 写回整型池槽"
+        },
+        {
+          "ea": "0x42b11b",
+          "what": "取址 0x8003：把槽号登记进 Engine+0x5D860 的注册表"
+        },
+        {
+          "ea": "0x42b26e",
+          "what": "取址 0x8009：同一形态，池 = 帧 +0x20（局部整型池）"
+        },
+        {
+          "ea": "0x42b2f1",
+          "what": "取址 0x8009：ENC 用同一个 key"
+        },
+        {
+          "ea": "0x41c1a6",
+          "what": "读整 0x8003：DEC 槽 → 容器；元素数 = ([+4]-[+0])/4"
+        },
+        {
+          "ea": "0x41c2b1",
+          "what": "读数：容器为空（或槽为 0）→ 返回 0"
+        },
+        {
+          "ea": "0x41c241",
+          "what": "读整 0x8009：局部整型池同一形态"
+        },
+        {
+          "ea": "0x41c54f",
+          "what": "读浮 0x8003：同一形态"
+        },
+        {
+          "ea": "0x41c5ea",
+          "what": "读浮 0x8009：局部整型池同一形态"
+        },
+        {
+          "ea": "0x41c65a",
+          "what": "读浮：容器为空 → 返回 0.0"
+        },
+        {
+          "ea": "0x42b6e6",
+          "what": "写整 0x8003：DEC 槽 → 容器指针（槽为 0 也走懒分配）"
+        },
+        {
+          "ea": "0x42b789",
+          "what": "写整 0x8003：元素数为 0 → 追加；非 0 → 覆写第一个元素"
+        },
+        {
+          "ea": "0x42b7f7",
+          "what": "写整 0x8003：覆写路径（取容器起点后写入）"
+        },
+        {
+          "ea": "0x42b80a",
+          "what": "写整 0x8003：空容器下标检查失败 → std::_Xout_of_range"
+        },
+        {
+          "ea": "0x42b859",
+          "what": "写整 0x8009：局部整型池同一形态"
+        },
+        {
+          "ea": "0x42bc81",
+          "what": "写浮 0x8003：同一形态"
+        },
+        {
+          "ea": "0x42bdc7",
+          "what": "写浮 0x8009：局部整型池同一形态"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.base.int",
+        "layout:LOCAL_POOL_SLOTS"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 句柄分支"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-HANDLE-STRING",
+      "sites": [
+        {
+          "ea": "0x42b37b",
+          "what": "取址 0x8005：全局字符串池记录；+0x10（长度）为 0 才懒分配"
+        },
+        {
+          "ea": "0x42b3cc",
+          "what": "取址 0x8005：十进制化缓冲 0x100 字节"
+        },
+        {
+          "ea": "0x42b3df",
+          "what": "取址 0x8005：把新容器指针写成十进制文本"
+        },
+        {
+          "ea": "0x42b41a",
+          "what": "取址 0x8005：文本写进字符串记录（走记录级 assign）"
+        },
+        {
+          "ea": "0x42b44c",
+          "what": "取址 0x8005：记录 +0x14 与 0x10 决定文本在内联区还是堆上"
+        },
+        {
+          "ea": "0x42b455",
+          "what": "取址 0x8005：文本 → atoi，得到的整数就是那个地址"
+        },
+        {
+          "ea": "0x42b170",
+          "what": "取址 0x800B：同一形态，池 = 帧 +0x28（局部字符串池）"
+        },
+        {
+          "ea": "0x41c210",
+          "what": "读整 >0x8003：不认 0x8005 → default 抛"
+        },
+        {
+          "ea": "0x41c5b9",
+          "what": "读浮 >0x8003：同上"
+        },
+        {
+          "ea": "0x42b828",
+          "what": "写整 >0x8003：同上"
+        },
+        {
+          "ea": "0x42bd96",
+          "what": "写浮 >0x8003：同上"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.base.string",
+        "layout:LOCAL_POOL_SLOTS"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 句柄分支"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-STRING-WRITE",
+      "sites": [
+        {
+          "ea": "0x40c210",
+          "what": "记录级 assign（记录, 源, 长度）入口"
+        },
+        {
+          "ea": "0x40c21e",
+          "what": "assign：读记录 +0x14 容量"
+        },
+        {
+          "ea": "0x40c221",
+          "what": "assign：容量与 0x10 比较（内联阈值）"
+        },
+        {
+          "ea": "0x40c23b",
+          "what": "assign：记录 +0x10 是长度"
+        },
+        {
+          "ea": "0x40c255",
+          "what": "assign：源落在目标缓冲内 ⇒ 走 sub_40C120（重叠路径）"
+        },
+        {
+          "ea": "0x40c26c",
+          "what": "assign：内联分支的重叠路径"
+        },
+        {
+          "ea": "0x42b41a",
+          "what": "唯一已取证的调用点：容器句柄把指针文本写进记录"
+        }
+      ],
+      "functions": [
+        "sub_40C210",
+        "sub_40C120",
+        "sub_40B510"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.base.string",
+        "layout:LOCAL_POOL_SLOTS"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 字符串写入原语"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-INDEX-UNCHECKED",
+      "sites": [
+        {
+          "ea": "0x42aea0",
+          "what": "取址函数体：不含任何池计数槽引用"
+        },
+        {
+          "ea": "0x41bf50",
+          "what": "读整函数体：同上"
+        },
+        {
+          "ea": "0x41c300",
+          "what": "读浮函数体：同上"
+        },
+        {
+          "ea": "0x42b4b0",
+          "what": "写整函数体：同上"
+        },
+        {
+          "ea": "0x42ba00",
+          "what": "写浮函数体：同上"
+        },
+        {
+          "ea": "0x42af35",
+          "what": "取址 case 3：base + idx*4 直接算地址（无比较）"
+        },
+        {
+          "ea": "0x41bfe3",
+          "what": "读整 case 3：base + idx*4 直接取格"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.count",
+        "layout:LOCAL_POOL_SLOTS"
+      ],
+      "evidence": [
+        "KN:01M48HCSEE0Y5Y1Y0F174Y461F",
+        "KN:01M4NEZZRE732Q5N0D4874693E"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-SCALAR-ARRAY-107",
       "sites": [
         {
           "ea": "0x421e50",
           "what": "opcode 0x107 的 handler 入口"
         },
         {
+          "ea": "0x421e61",
+          "what": "先把 帧+0x60 写成 5"
+        },
+        {
+          "ea": "0x421e70",
+          "what": "第二个操作数 → 读整（值）"
+        },
+        {
+          "ea": "0x421e7b",
+          "what": "第一个操作数 → 读整（索引）"
+        },
+        {
+          "ea": "0x421e80",
+          "what": "索引与 0x1F 比较"
+        },
+        {
+          "ea": "0x421e85",
+          "what": "表基址 +0x89C，索引合格才写（不合格静默跳过）"
+        }
+      ],
+      "functions": [
+        "sub_421E50"
+      ],
+      "storage": [
+        "layout:ENGINE_SCALAR_ARRAYS",
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "KN:01M4E50S9J1X717X4G5R696A0G"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-SCALAR-ARRAY-10B",
+      "sites": [
+        {
           "ea": "0x422070",
           "what": "opcode 0x10b 的 handler 入口"
         },
         {
+          "ea": "0x422081",
+          "what": "先把 帧+0x60 写成 5"
+        },
+        {
+          "ea": "0x422090",
+          "what": "第二个操作数 → 读整（索引）"
+        },
+        {
+          "ea": "0x42209b",
+          "what": "第一个操作数 → 读整（值）"
+        },
+        {
+          "ea": "0x4220a0",
+          "what": "被检查的是值（≤0x1F），索引不检查"
+        },
+        {
+          "ea": "0x4220a5",
+          "what": "表基址 +0x159C，索引直接参与寻址"
+        }
+      ],
+      "functions": [
+        "sub_422070"
+      ],
+      "storage": [
+        "layout:ENGINE_SCALAR_ARRAYS",
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "KN:01M4E50S9J1X717X4G5R696A0G"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-SCALAR-ARRAY-30A",
+      "sites": [
+        {
           "ea": "0x426b60",
           "what": "opcode 0x30a 的 handler 入口"
+        },
+        {
+          "ea": "0x426b77",
+          "what": "先把 帧+0x60 写成 5"
+        },
+        {
+          "ea": "0x426b82",
+          "what": "第二个操作数 → 读整（索引）"
+        },
+        {
+          "ea": "0x426b91",
+          "what": "第一个操作数 → 读整（值）"
+        },
+        {
+          "ea": "0x426b99",
+          "what": "值 > 0x1F → 跳到抛"
+        },
+        {
+          "ea": "0x426b9e",
+          "what": "索引 > 7 → 跳到抛"
+        },
+        {
+          "ea": "0x426ba0",
+          "what": "表基址 +0x1EC4（8 格）"
+        },
+        {
+          "ea": "0x426bba",
+          "what": "抛 Command_ShowMessage_Exception，异常码 0x10005"
+        }
+      ],
+      "functions": [
+        "sub_426B60"
+      ],
+      "storage": [
+        "layout:ENGINE_SCALAR_ARRAYS",
+        "layout:FRAME_LAYOUT.off.operandCount"
+      ],
+      "evidence": [
+        "KN:01M4E50S9J1X717X4G5R696A0G"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-SCALAR-FRAME-FLAG",
+      "sites": [
+        {
+          "ea": "0x421e61",
+          "what": "0x107：帧 +0x60 ← 5"
+        },
+        {
+          "ea": "0x422081",
+          "what": "0x10b：帧 +0x60 ← 5"
+        },
+        {
+          "ea": "0x426b77",
+          "what": "0x30a：帧 +0x60 ← 5"
         }
       ],
       "functions": [
@@ -486,10 +1318,248 @@
         "sub_426B60"
       ],
       "storage": [
-        "layout:ENGINE_SCALAR_ARRAYS"
+        "layout:FRAME_LAYOUT.off.operandCount"
       ],
       "evidence": [
         "KN:01M4E50S9J1X717X4G5R696A0G"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-PRIMITIVE-ENTRY",
+      "sites": [
+        {
+          "ea": "0x42aea0",
+          "what": "取址原语入口（thiscall；第二个实参 = 操作数序号，1 基）"
+        },
+        {
+          "ea": "0x41bf50",
+          "what": "读整型原语入口（同上）"
+        },
+        {
+          "ea": "0x41c300",
+          "what": "读浮点原语入口（同上；返回 double）"
+        },
+        {
+          "ea": "0x42b4b0",
+          "what": "写整型原语入口（第三个实参 = 要写的 32 位值）"
+        },
+        {
+          "ea": "0x42ba00",
+          "what": "写浮点原语入口（第三个实参 = 32 位浮点）"
+        },
+        {
+          "ea": "0x42aed3",
+          "what": "操作数记录 8 字节一个：地址 = 基址 + 8*序号"
+        },
+        {
+          "ea": "0x42aee7",
+          "what": "基址 = 帧记录 +0x04（帧步长 120 = 15*8）"
+        },
+        {
+          "ea": "0x42aef5",
+          "what": "类型标签在 [操作数地址-4]，raw 在 [操作数地址]"
+        },
+        {
+          "ea": "0x42aef0",
+          "what": "取址：把当前操作数地址写进 dword_55D528"
+        },
+        {
+          "ea": "0x41bf76",
+          "what": "读整：把当前操作数地址写进 dword_55D0F0"
+        },
+        {
+          "ea": "0x41c326",
+          "what": "读浮：把当前操作数地址写进 dword_55D0F4"
+        },
+        {
+          "ea": "0x42b4f9",
+          "what": "写整：把当前操作数地址写进 dword_55D534"
+        },
+        {
+          "ea": "0x42ba49",
+          "what": "写浮：把当前操作数地址写进 dword_55D540"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:FRAME_LAYOUT.base",
+        "layout:FRAME_LAYOUT.off.operands",
+        "layout:LOCAL_POOL_SLOTS"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 五原语入口"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-TAG-DISPATCH",
+      "sites": [
+        {
+          "ea": "0x42aef8",
+          "what": "取址：先与 0x8003 比较（相等 / 大于 / 小于三分）"
+        },
+        {
+          "ea": "0x42af0a",
+          "what": "取址：小于 0x8003 的类型减 3 后查 12 项跳转表（3..14）"
+        },
+        {
+          "ea": "0x42af0d",
+          "what": "取址：上界 0x0B（12 项）"
+        },
+        {
+          "ea": "0x42af16",
+          "what": "取址：跳转表 jpt_42AF16"
+        },
+        {
+          "ea": "0x42b127",
+          "what": "取址 >0x8003：0x8005 分支"
+        },
+        {
+          "ea": "0x42b133",
+          "what": "取址 >0x8003：0x8009 分支"
+        },
+        {
+          "ea": "0x42b13c",
+          "what": "取址 >0x8003：0x800B 分支"
+        },
+        {
+          "ea": "0x42b141",
+          "what": "取址 default（含 0/1/2 与其它域外值）→ 抛 Command_Type_Exception"
+        },
+        {
+          "ea": "0x41bf7e",
+          "what": "读整：先与 0x8003 比较"
+        },
+        {
+          "ea": "0x41bf90",
+          "what": "读整：<0x8003 时上界 0x0D（14 项，0..13 直接查表）"
+        },
+        {
+          "ea": "0x41bf93",
+          "what": "读整：越界 → default"
+        },
+        {
+          "ea": "0x41c210",
+          "what": "读整 >0x8003：只认 0x8009，其余落 default"
+        },
+        {
+          "ea": "0x41c218",
+          "what": "读整 default（含 case 8）→ 抛"
+        },
+        {
+          "ea": "0x41c32e",
+          "what": "读浮：先与 0x8003 比较"
+        },
+        {
+          "ea": "0x41c340",
+          "what": "读浮：上界 0x0D（14 项）"
+        },
+        {
+          "ea": "0x41c5b9",
+          "what": "读浮 >0x8003：只认 0x8009"
+        },
+        {
+          "ea": "0x41c5c1",
+          "what": "读浮 default（含 case 8）→ 抛"
+        },
+        {
+          "ea": "0x42b501",
+          "what": "写整：先与 0x8003 比较"
+        },
+        {
+          "ea": "0x42b513",
+          "what": "写整：减 3 后查 10 项跳转表（3..12）"
+        },
+        {
+          "ea": "0x42b516",
+          "what": "写整：上界 9"
+        },
+        {
+          "ea": "0x42b828",
+          "what": "写整 >0x8003：只认 0x8009"
+        },
+        {
+          "ea": "0x42b830",
+          "what": "写整 default（case 5/8/11 与域外）→ 抛"
+        },
+        {
+          "ea": "0x42ba51",
+          "what": "写浮：先与 0x8003 比较"
+        },
+        {
+          "ea": "0x42ba63",
+          "what": "写浮：减 3 后查 11 项跳转表（3..13）"
+        },
+        {
+          "ea": "0x42ba66",
+          "what": "写浮：上界 0x0A"
+        },
+        {
+          "ea": "0x42bd96",
+          "what": "写浮 >0x8003：只认 0x8009"
+        },
+        {
+          "ea": "0x42bd9e",
+          "what": "写浮 default（case 5/8/11 与域外）→ 抛"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 五原语入口"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-FLOAT-VALUE",
+      "sites": [
+        {
+          "ea": "0x41c471",
+          "what": "读浮 case 4：32 位浮点原样"
+        },
+        {
+          "ea": "0x41c0c0",
+          "what": "读整 case 4：32 位浮点 → 截断为整数"
+        },
+        {
+          "ea": "0x41c3b1",
+          "what": "读浮 case 3：DEC 后 fild（有符号整数 → double）"
+        },
+        {
+          "ea": "0x42ba76",
+          "what": "写浮 case 3：浮点 → 截断为整数 → ENC"
+        },
+        {
+          "ea": "0x42b56c",
+          "what": "写整 case 4：整数 → 浮点 → 写浮点池"
+        },
+        {
+          "ea": "0x42bac0",
+          "what": "写浮 case 4：浮点原样写浮点池"
+        }
+      ],
+      "functions": [
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "layout:GLOBAL_SLOTS.base.float",
+        "layout:LOCAL_POOL_SLOTS"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 浮点跨族"
       ]
     }
   ]

@@ -6,6 +6,7 @@
 > 脚本二进制协议（脚本头 / 指令编码 / 操作数编码 / 指令表）由**本规范**定义；
 > `packages/age-format` 是现有实现（仿照第三方库写成），**不是规范来源**；协议的待核验状态见
 > [`chapters/10-format.md`](chapters/10-format.md)。
+> **机制地图**（core 切成哪些机制、每机制凭什么算完、文件与 id 怎么放）是 [`core/README.md`](core/README.md) —— 组织真源。
 
 ## 1. 规范正文 vs 复核数据
 
@@ -64,8 +65,8 @@ pnpm tools spec describe      # 字段 / 枚举 / 不变量 / 操作 / 诚实项
 
 * **规范内容** → 改 `chapters/*.md`；新增章节时在 `spec.json` 的 `chapters[]` 与 `audit.json` 的
   `chapters[]` 各加一条（`id` 对齐）。
-* **规则** → 在章节里加 `### 标题` + `<!-- rule: ID -->` + 正文；并在 `bindings.json` 与 `audit.json`
-  的 `rules[]` 各加同一条 `id`（跨文件不变量会检查）。
+* **规则** → 在章节里加 `### 标题` + `<!-- rule: ID -->` + 正文；并在 `bindings.json` 的 `bindings[]`
+  （字段 `rule`）与 `audit.json` 的 `rules[]`（字段 `id`）各加同一条规则（跨文件不变量会检查）。
 * **还没有规范内容的义务** → 放 `audit.json` 的 `gaps[]`，**不要**写成规则。
 * **机器绑定 / 证据** → 只改 `bindings.json`；证据按 `KN:<ULID>` / `guard:<path>#<用例>` 引用。
 * **分发**：直接分发 `chapters/*.md`（阅读顺序见 [`chapters/README.md`](chapters/README.md)）；**不生成单文件**，也没有生成物要维护。

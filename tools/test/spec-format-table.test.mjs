@@ -29,12 +29,15 @@ test('★ 规范指令表形态：数组 / opcode 唯一 / argc 是非负整数 
   }
 });
 
-test('★ 协议章指向规范表，并明确标出「待核验」', () => {
+test('★ 协议章指向规范表，且不把未完全核验的部分说成已核验', () => {
   const doc = fs.readFileSync(path.join(REPO_ROOT, 'data/spec/chapters/10-format.md'), 'utf8');
   assert.ok(doc.includes('opcode-table.json'), '格式章必须指向规范指令表');
-  assert.ok(doc.includes('### 核验状态（部分待核验）'), '格式章必须把核验状态钉成 partial');
-  assert.ok(doc.includes('待核验'), '格式章必须明确标出待核验');
-  assert.ok(doc.includes('不是从 `age-format` 复制来的第二份真源'), '格式章必须声明规范表的所有权');
+  assert.ok(doc.includes('### 核验状态'), '格式章必须有核验状态小节');
+  assert.ok(doc.includes('实现副本') || doc.includes('不是本规范的来源'), '格式章必须声明规范表的所有权');
+  const rows = [...doc.matchAll(/^\| .+? \| \*\*(已核验|部分|观察值|待核验)\*\* \|/gm)].map((m) => m[1]);
+  assert.ok(rows.length >= 4, `核验状态表至少要有 4 行，实际 ${rows.length}`);
+  assert.ok(rows.some((s) => s !== '已核验'), '协议章必须保留至少一处"未完全核验"的状态');
+  assert.ok(!doc.includes('全部已核验'), '协议章不许声称全部已核验');
 });
 
 test('★ 表说明也标出待核验，且不把实现当 canonical', () => {
