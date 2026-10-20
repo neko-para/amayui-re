@@ -1,4 +1,4 @@
-# spec 内容批次：按章节骨架逐章拆可判定子单（优先已有 accepted 证据的章）
+# spec 内容批次：按机制逐批拆可判定子单（组织真源 = core/README）
 
 - id: REQ-01M59B6Y8VGCZJN79XVQGHB390
 - type: req
@@ -8,16 +8,22 @@
 
 ## 背景
 
-`data/spec/engine.json` 已立**章节骨架**（哪些章、每章到哪一步，一律 `pnpm tools spec chapters` 现查），其中只有 pools / operands / values 三章有成篇合同；
-其余章（execution / containers / engine-state / objects / input / presentation / files / save / config / timing）只有问题与残差。
+原先按"章节骨架"拆内容批次；组织轴已改为**机制**（`data/spec/core/README.md` 是组织真源）。
+本单保留为**内容批次的伞**：每一批按一个机制拆可判定的子单。
+
+## 现状
+
+* 首批已收口：`core spec · 机制地图与首批机制`（`REQ-01M5AJWPM…`，5/5 子单 done）。
+  含 `CORE-ISA` 9 条、`CORE-POOL` 19 条（12 新 + 7 既有）、`apps/emulator-new` 骨架与守卫。
+* 本单**不再**按旧章节名拆：`chapters/README.md` 的 6 章只是当前落点，不是分区。
 
 ## 判据
 
-* 每一章拆一张**可判定**子单：先写该章要回答的问题与"候选义务"从哪来，再写合同与守卫。
-* 每张子单收口时必须能回答：这一章处理了哪些机器行为、哪些仍未处理（残差带下一步问题）。
-* 不要求一次补完：优先补**已有 accepted 证据**能支撑的章（execution / config / objects），没有证据的章先做取证单。
+* 每个机制拆一张可判定子单：先写闭集与要回答的问题，再写条目与 spec↔EA 映射。
+* 每张子单收口时能回答：处理了哪些机器行为、哪些仍未处理（残差带 next）。
+* 优先补已有 accepted 证据的机制；没有证据的先做取证单。
 
 ## 非目标
 
-* 不引入"整引擎覆盖率"目标；每章只对其声明的候选域负责。
-* 不把 `docs/` 里的长调查复制进 spec；需要时只留指针。
+* 不引入"整引擎覆盖率"目标；每个机制只对其闭集负责。
+* 不把 `docs/` 的长调查复制进 spec；需要时只留指针。
