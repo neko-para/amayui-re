@@ -88,7 +88,9 @@ test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，停在启动前
   assert.equal(result.decoded, 545, '松散 SYSTEM4.BIN 的指令数（结构基准）');
   // 启动阶段记账必须随报告一起出来（跳过不许静默）
   assert.deepEqual(result.startup?.stages.map((s) => s.id), BOOT_STAGES.map((s) => s.id));
-  assert.equal(result.startup?.counts['not-modeled'], 1, '当前唯一"完全未建模"的阶段是配置');
+  assert.equal(result.startup?.counts['not-modeled'], 0, '配置补上后不应再有完全未建模的阶段');
+  assert.equal(result.config?.source, 'defaults', '安装根没有 SYS4REG.INI ⇒ 发行默认');
+  assert.equal(result.config?.path, path.join(installDir, 'SYS4REG.INI'));
 
   assert.equal(result.mode, 'run');
   assert.equal(result.steps, 2, '当前启动前段：只执行掉 0x1a7 / 0x1a8（实现新 opcode 时抬高）');

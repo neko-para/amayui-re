@@ -18,6 +18,8 @@ core spec 的 `CORE-ISA` / `CORE-POOL` 已落盘并有语料级守卫；`apps/em
 - **CORE-ISA**：`data/spec/chapters/10-format.md` 9 条规则；`tools/test/spec-isa.assets.test.mjs`。
 - **CORE-POOL**：`40-pools.md` / `50-engine-state.md`；19 条全部有归宿。守卫 `tools/test/spec-pool.assets.test.mjs`。
 - **CORE-OPS**：`60-ops.md` —— 数值 3 条、纹理 5 条、场景/颜色 5 条、等待与输入 2 条、影片 1 条；`bindings.json` 有 EA 站点。
+- **CORE-CONFIG**：`55-config.md` 5 条（库 / 默认表 / 玩家文件 / 保存 / 脚本访问）+ `format/config-keys.json`；
+  emulator-new 读索引 51 条默认 + 可选 `SYS4REG.INI`，`--init-config` 生成默认文件；守卫 `emulator-new-config{,.assets}`。
 - **CORE-VM / CORE-TIMING**：`70-vm.md` —— 一次迭代 / 门 / 状态位 / 时钟 / 计时窗 5 条。
 - **真实入口**：`src/lzss.ts` / `src/alf.ts` / `src/host.ts` —— ALF 索引（S4IC，8 归档 / 21109 条目）、
   4 KiB 环形窗口 LZSS（绝对写位置）、统一文件 id == TOC 条目下标、**松散文件优先**、归档按 `(offset,length)` 切片。
@@ -37,18 +39,17 @@ pnpm tools spec validate         # #1–#13
 pnpm tools requirements validate # 5/5
 ```
 
-语料档：`pnpm test:assets`（需要游戏安装 / 反汇编语料）。★ 本机仍有**先前就红**的 2 条环境项（corpus 2）—— 与本轮无关；`emulator-new` 的两条 assets 用例通过（shape 的 5 条已收口：`REQ-01M5CBD13M3XQYKTA2YFA82YJC`）。
+语料档：`pnpm test:assets`（需要游戏安装 / 反汇编语料）。★ 本机仍有**先前就红**的 2 条环境项（corpus 2）—— 与本轮无关；`emulator-new` 的三条 assets 用例通过（shape 的 5 条已收口：`REQ-01M5CBD13M3XQYKTA2YFA82YJC`）。
 
 ## 已知红 / 已知限制（别追错方向）
 
 - **`pnpm test:assets` 不是全绿**（2 条，都是**本机环境**，不是产品缺陷）：corpus 的两条本机写入口（临时清单按入库的 Windows 盘符根解析）——先前状态。shape 与 spec-isa 档已全绿。
-- **`0x20F play-movie` 已实现但 LOGO 运行停在它前面**（停止条件 = "停在它前面"）。⛔ 不要顺手把 stop-at 去掉：
-  `0x1fa` 会清共享对象槽，而**引用计数没有建模** —— 先补引用计数再执行 play-movie 之后的序列。
+- **`0x20F play-movie` 已实现但 LOGO 运行停在它前面**（停止条件 = "停在它前面"）；`0x1fa` 清共享对象槽而**引用计数未建模** ⇒ 先补引用计数再去掉 stop-at。
 - `CORE-OPS` 的其余 opcode 仍是缺口（"执行到第几条 / 停在哪"由棘轮与 `--json` 回答）；且**引擎缺省 handler（抛异常）**与**spec 还没写**当前只区分出后者（缺口报 `unimplemented`）。
 - 浮点池"未写槽"的初值规范不说：参考实现要跑真实脚本必须显式 `--uninitialized-float zero`，每次读进 `diagnostics`。
 - **`CORE-FS` / `CORE-BOOT` 的 spec 规则还没成篇**：入口实现与守卫先落（`REQ-01M5C0G36…`），把"松散优先 / 根脚本 id 0"
   写成带锚的合同是后续单。⛔ 别把"实现里有"当成"规范里有"。
-- 只读 `SYS4INI.BIN` 一份索引：`APPEND*.AAI` 的叠加索引未实现（当前启动不需要；需要时另开单）。
+- 只读 `SYS4INI.BIN` 一份索引：`APPEND*.AAI` 的叠加索引未实现；配置脚本访问只支持 type 3 / 5（引用族 6 / 8 / 12 / 14 响亮失败，等 `CORE-POOL`）。
 - 7 条既有规则仍用 `SPC-*` id（并号是机械改名，见治理二批）。
 
 ## 未提交（★ 换设备的前提）
@@ -63,7 +64,7 @@ pnpm tools requirements validate # 5/5
 
 ## 下一步（建议顺序）
 
-1. **SYSTEM4 启动前段**：从 `0x2f6` 继续（台账已有 `0x2f6` / `0x149` / `0x21b` / `0x88` / `0x1ca` / `0x252` / `0x324` / `0x32f` / `0x70` … 的 accepted 观察），把启动棘轮往后推；**先补配置服务**（`0x1a2` / `0x1a3` / `0x1a9` / `0x1aa` 依赖它）。
+1. **SYSTEM4 启动前段**：从 `0x2f6` 继续（台账已有 `0x2f6` / `0x149` / `0x21b` / `0x88` / `0x1ca` / `0x252` / `0x324` / `0x32f` / `0x70` … 的 accepted 观察），把启动棘轮往后推；配置服务已补（`CORE-CONFIG`）。
 2. `CORE-FS` / `CORE-BOOT` 成篇：松散优先、根脚本 id 0、索引/归档失败路径、宿主启动阶段的边界写成带锚的合同（解除 §1.1 的显式延后）。
 3. `0x20F` 之后的执行路径：引用计数（`0x1fa` 清共享对象槽）+ `0x2 exit`（帧返回/中止）+ `CORE-FRAME` 成篇。
 4. 把 `60-ops.md` / `70-vm.md` 的规则从 `draft` 推到 `reviewed`（补 accepted 台账锚；assets 守卫不算 reviewed 的强证据）。

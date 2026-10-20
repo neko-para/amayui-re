@@ -8,6 +8,7 @@
  * ★ 本文件不碰文件系统。
  */
 import type { OpcodeRow } from './spec.ts';
+import type { ConfigStore } from './config.ts';
 import { HANDLERS } from './handlers.ts';
 
 export interface Operand {
@@ -155,6 +156,8 @@ export interface MachineOptions {
   tickMs?: number;
   /** 未写过的浮点槽的读法：`throw`（缺省）或 `zero`（显式选择 + 记诊断） */
   uninitializedFloat?: 'throw' | 'zero';
+  /** 配置库（`55-config.md`）；缺省 = 未建立（配置 opcode 会响亮失败） */
+  config?: ConfigStore;
 }
 
 export class Machine {
@@ -166,6 +169,8 @@ export class Machine {
   readonly tickMs: number;
   /** 未写过的浮点槽策略 */
   readonly uninitializedFloat: 'throw' | 'zero';
+  /** 配置库（缺省 undefined：配置 opcode 响亮失败，而不是静默 0） */
+  readonly config: ConfigStore | undefined;
 
   /** 引擎级状态选择字：整字为 0 才执行指令（CORE-VM-GATE） */
   flags = 0;
@@ -192,6 +197,8 @@ export class Machine {
   globalInt = new Map<number, number>();
   /** 全局浮点池：裸 32 位位模式 */
   globalFloat = new Map<number, number>();
+  /** 全局字符串池（字节串，latin1；`55-config.md` 的脚本访问只用到 type 5） */
+  globalString = new Map<number, string>();
   /** 场景状态（纹理 / 绘制项 / 计时窗） */
   scene: SceneState = {
     dirty: 0,
@@ -220,6 +227,7 @@ export class Machine {
     this.key = opts.key;
     this.tickMs = opts.tickMs ?? 16;
     this.uninitializedFloat = opts.uninitializedFloat ?? 'throw';
+    this.config = opts.config;
   }
 
   /**

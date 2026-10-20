@@ -5,7 +5,7 @@
  */
 import type { DrawItem, Machine, Mesh, MovieObject, Operand } from './machine.ts';
 import { MOVIE_BIT, WAIT_BIT } from './machine.ts';
-import { readAddress, readFloat, readInt, readIntAt, writeFloat, writeInt } from './values.ts';
+import { readAddress, readFloat, readInt, readIntAt, readText, writeFloat, writeInt, writeText } from './values.ts';
 
 export type { Machine, Operand };
 
@@ -315,6 +315,52 @@ function movie20f(m: Machine, ops: Operand[]): void {
   m.scene.hasObjects = 1;
 }
 
+/* ──────────────────────────── 配置访问（55-config.md） ──────────────────────────── */
+
+/** 配置键 = 类型码 + 8 位十六进制下标；本层只支持全局值族（type 3 / 5） */
+function configKey(op: Operand, code: 3 | 5): string {
+  const want = code === 3 ? 3 : 5;
+  if (op.type !== want) {
+    throw new Error(`config-key-unsupported-type:${code}:0x${op.type.toString(16)}`);
+  }
+  return String.fromCharCode(code) + op.raw.toString(16).padStart(8, '0');
+}
+
+function requireConfig(m: Machine) {
+  if (!m.config) throw new Error('config-not-initialized');
+  return m.config;
+}
+
+/** 0x1a3 load-int：查整数键；未命中 ⇒ 0；**无条件**写回第 1 个操作数 */
+function loadInt1a3(m: Machine, ops: Operand[]): void {
+  const key = configKey(operandAt(ops, 1), 3);
+  writeInt(m, ops, 1, requireConfig(m).getInt(key));
+}
+
+/** 0x1a2 save-int：把第 1 个操作数的整数值写进整数键 */
+function saveInt1a2(m: Machine, ops: Operand[]): void {
+  const key = configKey(operandAt(ops, 1), 3);
+  requireConfig(m).setInt(key, readInt(m, ops, 1));
+}
+
+/** 0x1aa load-string：查字符串键；未命中 ⇒ 空串；写回第 1 个操作数 */
+function loadString1aa(m: Machine, ops: Operand[]): void {
+  const key = configKey(operandAt(ops, 1), 5);
+  writeText(m, ops, 1, requireConfig(m).getString(key));
+}
+
+/** 0x1a9 save-string：把第 1 个操作数的文本写进字符串键 */
+function saveString1a9(m: Machine, ops: Operand[]): void {
+  const key = configKey(operandAt(ops, 1), 5);
+  requireConfig(m).setString(key, readText(m, ops, 1));
+}
+
+function operandAt(ops: Operand[], k: number): Operand {
+  const op = ops[k - 1];
+  if (!op) throw new Error(`operand-out-of-range:${k}/${ops.length}`);
+  return op;
+}
+
 export const HANDLERS = new Map<number, (m: Machine, ops: Operand[]) => void>([
   [0x1a7, noop],
   [0x1a8, noop],
@@ -334,6 +380,10 @@ export const HANDLERS = new Map<number, (m: Machine, ops: Operand[]) => void>([
   [0x101, pollInput101],
   [0x21c, (m) => wait21c(m)],
   [0x20f, movie20f],
+  [0x1a2, saveInt1a2],
+  [0x1a3, loadInt1a3],
+  [0x1a9, saveString1a9],
+  [0x1aa, loadString1aa],
 ]);
 
 export function unimplemented(opcode: number): never {

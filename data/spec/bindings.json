@@ -2460,6 +2460,126 @@
         "KN:01M4FF1CAH54674B1R13246H7N",
         "guard:tools/test/emulator-new-noop.test.mjs#★ 0x1a8"
       ]
+    },
+    {
+      "rule": "CORE-CONFIG-STORE",
+      "functions": [
+        "sub_428E00",
+        "sub_434D00",
+        "sub_428F10"
+      ],
+      "sites": [
+        {
+          "ea": "0x428e00",
+          "what": "配置库按键取槽（字节精确匹配）"
+        },
+        {
+          "ea": "0x434d00",
+          "what": "配置库写整数键"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-config.test.mjs#★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败"
+      ]
+    },
+    {
+      "rule": "CORE-CONFIG-DEFAULTS",
+      "functions": [
+        "sub_414AC0",
+        "sub_494220"
+      ],
+      "sites": [
+        {
+          "ea": "0x414ac0",
+          "what": "索引尾部默认表的定位与装载"
+        },
+        {
+          "ea": "0x494220",
+          "what": "默认键词表匹配与值转换"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-config.test.mjs#★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败"
+      ]
+    },
+    {
+      "rule": "CORE-CONFIG-PLAYER",
+      "functions": [
+        "sub_492CB0",
+        "sub_4963E0",
+        "sub_4900F0"
+      ],
+      "sites": [
+        {
+          "ea": "0x4900f0",
+          "what": "玩家配置文件路径解析与目录创建"
+        },
+        {
+          "ea": "0x4963e0",
+          "what": "分段文本逐行解析"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-config.test.mjs#★ INI：段与键字节精确、缺键保留默认、重复键最后一次"
+      ]
+    },
+    {
+      "rule": "CORE-CONFIG-PERSIST",
+      "functions": [
+        "sub_490590",
+        "sub_495AD0"
+      ],
+      "sites": [
+        {
+          "ea": "0x454770",
+          "what": "保存时以覆盖方式打开文件"
+        },
+        {
+          "ea": "0x495eb1",
+          "what": "行结束符 CR LF"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-config.test.mjs#★ 保存：四段 CRLF 与条件键；重解析 round-trip"
+      ]
+    },
+    {
+      "rule": "CORE-CONFIG-SCRIPT",
+      "functions": [
+        "sub_42DF40",
+        "sub_434F60",
+        "sub_434FE0",
+        "sub_433A70",
+        "sub_418A30"
+      ],
+      "sites": [
+        {
+          "ea": "0x418a30",
+          "what": "操作数 → 配置键的表下标"
+        },
+        {
+          "ea": "0x42df40",
+          "what": "load-int"
+        },
+        {
+          "ea": "0x434f60",
+          "what": "save-int"
+        },
+        {
+          "ea": "0x433a70",
+          "what": "load-string"
+        },
+        {
+          "ea": "0x434fe0",
+          "what": "save-string"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-config.test.mjs#★ 脚本配置四条：load-int 未命中写 0、save/load 往返、字符串空串",
+        "KN:01M4N2977Y223S634A3D6P6T7P",
+        "KN:01M4FF3TC2336V6F6D7P2G547F",
+        "KN:01M4FF3T780K3Z7M3Z541W0K2V"
+      ]
     }
   ]
 }

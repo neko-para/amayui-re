@@ -1191,13 +1191,42 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-alf.test.mjs',
     what: '★ 丢掉松散优先 ⇒ 安装目录里被补丁覆盖过的脚本会被静默换成归档里的旧版（启动链量到另一份文件）',
   },
-  // ── emulator-new：启动阶段的处置（配置未建模不许被标成已建模）──
+  // ── emulator-new：启动阶段的处置（配置只到 partial，不许被标成 modeled）──
   {
     file: 'apps/emulator-new/src/boot.ts',
-    from: "    disposition: 'not-modeled',",
-    to: "    disposition: 'modeled', // 变异：把未建模的配置标成已建模",
+    from: "    disposition: 'partial',\n    why: '配置库已建立",
+    to: "    disposition: 'modeled', // 变异：把只到 partial 的配置标成已建模\n    why: '配置库已建立",
     guard: 'tools/test/emulator-new-boot-catalog.test.mjs',
-    what: '★ 把"配置未建模"标成 modeled ⇒ 跳过记录消失，脚本读配置时会被当成"配过了"',
+    what: '★ 把"配置只到 partial"标成 modeled ⇒ 未建模的显示副作用被藏起来，脚本读配置时会被当成"配过了"',
+  },
+  // ── emulator-new：配置默认表的版本拆分 / 键分隔 / 行尾 / 布尔归一 ──
+  {
+    file: 'apps/emulator-new/src/config.ts',
+    from: 'this.setInt(\'set:SaveVersion1\', Math.trunc(v / 100));',
+    to: 'this.setInt(\'set:SaveVersion1\', Math.trunc(v / 10)); // 变异：版本除数写错',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ SAVEVERSION 的主版本除数 100 → 10 ⇒ 320 被拆成 32/20，版本号看起来仍"有值"',
+  },
+  {
+    file: 'apps/emulator-new/src/config.ts',
+    from: "    out.set(`${section}\\\\${trimField(raw.slice(0, eq))}`, trimField(raw.slice(eq + 1)));",
+    to: "    out.set(`${section}:${trimField(raw.slice(0, eq))}`, trimField(raw.slice(eq + 1))); // 变异：段键分隔符写错",
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ 玩家文件的段/键分隔符 `\\\\` → `:` ⇒ 所有覆盖都查不到，默认值原样留下（静默失效）',
+  },
+  {
+    file: 'apps/emulator-new/src/config.ts',
+    from: "        parts.push(`[${section}]\\r\\n`);",
+    to: "        parts.push(`[${section}]\\n`); // 变异：行尾只用 LF",
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ 保存的段头行尾 CRLF → LF ⇒ 写出的玩家文件是混合行尾（引擎按 LF 读，但真机工具会看作一行）',
+  },
+  {
+    file: 'apps/emulator-new/src/config.ts',
+    from: "      if (row.special === 'bool') v = v !== 0 ? 1 : 0;",
+    to: "      if (row.special === 'bool') v = v; // 变异：布尔不归一",
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ FORCESCREEN 不归一（写原值 7 而不是 1）⇒ 消费方按 0/1 判断时把"开"读成未知',
   },
   // ── emulator-new：统一文件 id == TOC 条目下标 ──
   {

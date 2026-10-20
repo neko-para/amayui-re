@@ -8,6 +8,7 @@
     { "id": "agf", "file": "chapters/30-agf.md", "title": "AGF 图像" },
     { "id": "pools", "file": "chapters/40-pools.md", "title": "数据池" },
     { "id": "engine-state", "file": "chapters/50-engine-state.md", "title": "引擎级状态" },
+    { "id": "config", "file": "chapters/55-config.md", "title": "配置" },
     { "id": "ops", "file": "chapters/60-ops.md", "title": "指令语义" },
     { "id": "vm", "file": "chapters/70-vm.md", "title": "执行与时间" }
   ]

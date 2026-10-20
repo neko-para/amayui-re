@@ -85,8 +85,8 @@ export const BOOT_STAGES: BootStage[] = [
   {
     id: 'display-config',
     what: '读显示与运行配置（display:ScreenMode / set:RegRootPath / set:ClickOnUp …）',
-    disposition: 'not-modeled',
-    why: '配置服务尚未建模；脚本随后用 load-int / load-string 读它（0x1a2 / 0x1a3 / 0x1a9 / 0x1aa）',
+    disposition: 'partial',
+    why: '配置库已建立（索引默认表 → 玩家文件覆盖）；显示/窗口的宿主副作用未建模',
     anchor: '0x4bb0dd',
   },
   {
@@ -112,13 +112,22 @@ export const BOOT_STAGES: BootStage[] = [
   },
 ];
 
+export interface ConfigSummary {
+  path: string;
+  source: 'defaults' | 'file';
+  ints: number;
+  strings: number;
+  lists: number;
+}
+
 export interface StartupReport {
   stages: BootStage[];
   counts: Record<BootDisposition, number>;
+  config?: ConfigSummary;
 }
 
-export function startupReport(): StartupReport {
+export function startupReport(opts: { config?: ConfigSummary } = {}): StartupReport {
   const counts: Record<BootDisposition, number> = { modeled: 0, partial: 0, 'host-only': 0, 'not-modeled': 0 };
   for (const s of BOOT_STAGES) counts[s.disposition] += 1;
-  return { stages: BOOT_STAGES.map((s) => ({ ...s })), counts };
+  return { stages: BOOT_STAGES.map((s) => ({ ...s })), counts, ...(opts.config ? { config: opts.config } : {}) };
 }

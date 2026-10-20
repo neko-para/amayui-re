@@ -189,3 +189,23 @@ function readFloatCell(m: Machine, map: Map<number, number>, index: number): num
   }
   return f32(bits);
 }
+
+/**
+ * 读文本：`55-config.md` 的脚本访问只用到全局字符串池（type 5）。
+ * ★ 其余类型（含 type 11 局部字符串、type 2 内联字符串）尚未建模 ⇒ 响亮失败，不补空串。
+ */
+export function readText(m: Machine, ops: Operand[], k: number): string {
+  const op = operandAt(ops, k);
+  if (op.type === 5) return m.globalString.get(op.raw) ?? '';
+  return unsupported('read-text', op);
+}
+
+/** 写文本：只支持 type 5（全局字符串池）；其余类型响亮失败 */
+export function writeText(m: Machine, ops: Operand[], k: number, value: string): void {
+  const op = operandAt(ops, k);
+  if (op.type === 5) {
+    m.globalString.set(op.raw, value);
+    return;
+  }
+  unsupported('write-text', op);
+}

@@ -17,7 +17,10 @@
   —— 这两点是"能把真实 21109 条目的索引解出来"的实现判据（见 `tools/test/emulator-new-alf.test.mjs` 与 boot assets 守卫）。
 
 - **启动不是只有脚本**：`src/boot.ts` 把 `_WinMain@16` → 主循环之间的阶段逐条登记（`modeled` / `partial` / `host-only` / `not-modeled`）；
-  `--install` 的文本与 `--json` 都输出这份清单。⛔ 跳过的阶段（窗口 / 自更新 / 定时器…）不许静默消失；配置目前是**唯一完全未建模**项。
+  `--install` 的文本与 `--json` 都输出这份清单。⛔ 跳过的阶段（窗口 / 自更新 / 定时器…）不许静默消失；配置只到 **partial**（库已建立，显示设备副作用未建模）。
+- **配置**（`55-config.md`）：索引尾部的发行默认表 → 可选 `SYS4REG.INI` 覆盖 → 配置库；
+  `--config <file>` 指定玩家文件，`--init-config` 把当前配置写成默认文件（不写安装目录）。
+  脚本的 `0x1a2` / `0x1a3` / `0x1a9` / `0x1aa` 只支持全局值族（type 3 / 5）；引用族先响亮失败。
 - 没有渲染 / 音频 / 输入；外部请求只记进 `m.effects`（`data/spec/core/README.md` §1 裁决）。
 - **未实现即停**（不 no-op）：缺口带 `{指令序号, 偏移, opcode, argc}`，停在它**前面**，可以当门禁用。
 - `handler` 表只包含 `data/spec` 里**已成篇**的 opcode；解不出的操作数类型 / 未取证的值一律**响亮失败**。
@@ -29,6 +32,9 @@
 ```bash
 # 真实入口：安装目录 → 索引 → 根脚本 id 0（--key 是整型编码的运行期 key，必须显式给）
 node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd
+
+# 配置：读显式玩家文件；缺失 ⇒ 发行默认。生成一份默认文件（要求 --config）
+node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd --config /tmp/SYS4REG.INI --init-config
 
 # 换一个统一文件 id（例：0x5262 = LOGO.BIN）做诊断
 node apps/emulator-new/src/main.ts --install "<安装目录>" --root-id 0x5262 --key 0x1234abcd
@@ -51,7 +57,7 @@ node apps/emulator-new/src/main.ts --script <file> --key 0x1234abcd --json
 
 ## 3. 本目录的硬口径
 
-- 只读 `data/spec`：碰文件系统的只有 `src/spec.ts`（读规范表）与 `src/host.ts`（读安装目录 / 索引 / 归档 / 松散文件）；
+- 只读 `data/spec`：碰文件系统的只有 `src/spec.ts`（读规范表 + 配置键词表）与 `src/host.ts`（读安装目录 / 索引 / 归档 / 松散文件；玩家配置只写显式路径）；
   `alf.ts` / `lzss.ts` / `machine.ts` / `values.ts` / `handlers.ts` / `main.ts` **零 fs**（隔离守卫会红）。
 - TypeScript 只写**可擦除语法**（类型标注 / `interface` / `type` / `import type`），由 Node 原生剥壳直接跑，**没有构建步骤**。
 - 缺口不是失败：它是"spec 还缺哪一条 opcode 的语义"的机器清单；`--strict` 时才用退出码 1。

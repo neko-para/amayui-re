@@ -20,6 +20,8 @@ export interface AlfIndex {
   packedLength: number;
   archives: string[];
   files: AlfFile[];
+  /** 索引尾部携带的**发行默认配置**（`55-config.md`）；没有尾部 ⇒ 空数组 */
+  configDefaults: { key: string; value: string }[];
 }
 
 const S4 = {
@@ -85,5 +87,46 @@ export function parseAlfIndex(buf: Buffer): AlfIndex {
       length: toc.readUInt32LE(off + S4.nameLength + 12),
     });
   }
-  return { signature, sectionPos, originalLength, packedLength, archives, files };
+
+  // ── 尾部：发行默认配置（`55-config.md`）──
+  // ★ 两个计数数组不属于配置；引擎只把它们读进别处，这里只跳过。
+  // ★ 两个长度标记都只做“非零”判断；配置串前面的 953 不是循环上界。
+  const readI32 = (): number => {
+    const off = take(4);
+    return toc.readInt32LE(off);
+  };
+  const skipCounted = (): void => {
+    const n = readI32();
+    if (n > 0) take(n * 4);
+  };
+  const readCString = (what: string): string => {
+    const end = toc.indexOf(0, at);
+    if (end < 0) throw new Error(`alf-tail-truncated:${what}@${at}`);
+    const s = toc.toString(S4.encoding, at, end);
+    at = end + 1;
+    return s;
+  };
+  const configDefaults: { key: string; value: string }[] = [];
+  if (at + 4 <= toc.length) {
+    const len1 = readI32();
+    if (len1 > 0) {
+      skipCounted(); // 第一个计数数组（与配置无关）
+      skipCounted(); // 第二个计数数组（与配置无关）
+    }
+    if (at + 4 <= toc.length) {
+      const len2 = readI32();
+      if (len2 > 0) {
+        const count = take(4);
+        const n = toc.readInt32LE(count);
+        if (n < 0 || n > toc.length) throw new Error(`alf-tail-bad-count:${n}`);
+        for (let i = 0; i < n; i += 1) {
+          const key = readCString('key');
+          const value = readCString('value');
+          configDefaults.push({ key, value });
+        }
+      }
+    }
+  }
+
+  return { signature, sectionPos, originalLength, packedLength, archives, files, configDefaults };
 }

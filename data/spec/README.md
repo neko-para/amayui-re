@@ -17,6 +17,7 @@
 | [`bindings.json`](bindings.json) | **机器绑定**：站点 EA / 函数 / `storage` 指针 / 证据 | 否（内部复核） |
 | [`audit.json`](audit.json) | **范围审计**：试点块 / effect 归属（规则选择器 + 内部省略 + 残差）/ 成熟度 / 缺口 / 可证伪预言 | 否（内部复核） |
 | [`format/opcode-table.json`](format/opcode-table.json) | **本规范的指令表**（当前待核验；不是实现副本） | **是**（伴随数据） |
+| [`format/config-keys.json`](format/config-keys.json) | **配置键词表**（默认表 / 玩家文件 / 保存三套映射；见同目录 `.md`） | **是**（伴随数据） |
 | [`format/verification.md`](format/verification.md) | **协议核验台账**（EA / 台账 / 守卫；内部） | 否（内部复核） |
 | [`format/alf-agf-verification.md`](format/alf-agf-verification.md) | **ALF / AGF 核验台账**（EA / 台账 / 守卫；内部） | 否（内部复核） |
 

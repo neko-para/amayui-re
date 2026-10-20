@@ -12,10 +12,13 @@
  * `--decode`：只解码走查（不执行），用于检验 CORE-ISA 的结构规则。
  * ★ `--key` 是整型编码的运行期 key（规范：不是常量、不许有默认值）⇒ 执行模式必须显式给。
  */
-import { Install, readFile } from './host.ts';
+import path from 'node:path';
+
+import { Install, readConfigFile, readFile, writeConfigFile } from './host.ts';
 import { startupReport } from './boot.ts';
-import type { StartupReport } from './boot.ts';
-import { loadOpcodeTable } from './spec.ts';
+import type { ConfigSummary, StartupReport } from './boot.ts';
+import { loadConfigKeys, loadOpcodeTable } from './spec.ts';
+import { ConfigStore, parseIni } from './config.ts';
 import { codeLimit, parseHeader, walk } from './decode.ts';
 import type { Gap } from './decode.ts';
 import { HANDLERS } from './handlers.ts';
@@ -44,6 +47,8 @@ export interface ScriptReport {
   diagnostics?: Diagnostic[];
   /** 仅安装入口：从 WinMain 到主循环的启动阶段记账 */
   startup?: StartupReport;
+  /** 仅安装入口：配置库摘要 */
+  config?: ConfigSummary;
 }
 
 interface Args {
@@ -57,6 +62,8 @@ interface Args {
   stopAt: number | null;
   tickMs: number;
   uninitializedFloat: 'throw' | 'zero';
+  config: string | null;
+  initConfig: boolean;
 }
 
 interface RunOpts {
@@ -67,6 +74,7 @@ interface RunOpts {
   maxTicks?: number;
   tickMs?: number;
   uninitializedFloat?: 'throw' | 'zero';
+  config?: ConfigStore;
 }
 
 function parseU32(text: string, what: string): number {
@@ -78,7 +86,7 @@ function parseU32(text: string, what: string): number {
 function parseArgs(argv: string[]): Args {
   const out: Args = {
     install: null, script: null, rootId: 0, decodeOnly: false, json: false, strict: false,
-    key: null, stopAt: null, tickMs: 16, uninitializedFloat: 'throw',
+    key: null, stopAt: null, tickMs: 16, uninitializedFloat: 'throw', config: null, initConfig: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -91,6 +99,8 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--key') out.key = parseU32(argv[++i] ?? '', '--key');
     else if (a === '--stop-at') out.stopAt = parseU32(argv[++i] ?? '', '--stop-at');
     else if (a === '--tick-ms') out.tickMs = parseU32(argv[++i] ?? '', '--tick-ms');
+    else if (a === '--config') out.config = argv[++i] ?? null;
+    else if (a === '--init-config') out.initConfig = true;
     else if (a === '--uninitialized-float') {
       const v = argv[++i];
       if (v !== 'throw' && v !== 'zero') throw new Error('--uninitialized-float 只能是 throw / zero');
@@ -98,6 +108,7 @@ function parseArgs(argv: string[]): Args {
     } else throw new Error(`unknown argument: ${a}`);
   }
   if (out.install && out.script) throw new Error('--install 与 --script 只能给一个');
+  if (out.initConfig && !out.config) throw new Error('--init-config 需要同时给 --config <file>（不写安装目录）');
   return out;
 }
 
@@ -163,7 +174,7 @@ export function analyzeBytes(buf: Buffer, opts: RunOpts = {}): ScriptReport {
   }
 
   const machine = new Machine({
-    body, table, key: opts.key, tickMs: opts.tickMs, uninitializedFloat: opts.uninitializedFloat,
+    body, table, key: opts.key, tickMs: opts.tickMs, uninitializedFloat: opts.uninitializedFloat, config: opts.config,
   });
   const r = machine.run({ stopAtOpcode: opts.stopAtOpcode, maxSteps: opts.maxSteps, maxTicks: opts.maxTicks });
   return {
@@ -190,10 +201,26 @@ export function analyze(file: string, opts: RunOpts = {}): ScriptReport & { sour
 }
 
 /** 真实入口：安装目录 → 索引 → 统一文件 id → 松散文件 / 归档切片 */
-export function analyzeInstall(dir: string, rootId: number, opts: RunOpts = {}): ScriptReport & { source: Record<string, unknown> } {
+export function analyzeInstall(
+  dir: string,
+  rootId: number,
+  opts: RunOpts = {},
+  io: { config?: string | null; initConfig?: boolean } = {},
+): ScriptReport & { source: Record<string, unknown> } {
   const install = Install.open(dir);
   const script = install.readById(rootId);
-  const result = analyzeBytes(script.bytes, opts);
+  const store = new ConfigStore(loadConfigKeys());
+  store.applyDefaults(install.index.configDefaults);
+  const configPath = io.config ?? path.join(dir, 'SYS4REG.INI');
+  let source: 'defaults' | 'file' = 'defaults';
+  const raw = readConfigFile(configPath);
+  if (raw) {
+    store.applyIni(parseIni(raw));
+    source = 'file';
+  }
+  if (io.initConfig) writeConfigFile(configPath, store.serializeIni());
+  const config: ConfigSummary = { path: configPath, source, ...store.stats() };
+  const result = analyzeBytes(script.bytes, { ...opts, config: store });
   return {
     source: {
       kind: 'install',
@@ -209,7 +236,8 @@ export function analyzeInstall(dir: string, rootId: number, opts: RunOpts = {}):
       actualLength: script.bytes.length,
       archive: script.archive,
     },
-    startup: startupReport(),
+    config,
+    startup: startupReport({ config }),
     ...result,
   };
 }
@@ -217,7 +245,7 @@ export function analyzeInstall(dir: string, rootId: number, opts: RunOpts = {}):
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const usage = [
-    '用法：node apps/emulator-new/src/main.ts --install <dir> --key <u32> [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--json] [--strict]',
+    '用法：node apps/emulator-new/src/main.ts --install <dir> --key <u32> [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--config <SYS4REG.INI>] [--init-config] [--json] [--strict]',
     '      node apps/emulator-new/src/main.ts --script <file> --key <u32> [--stop-at <opcode>] [--json] [--strict]',
     '      node apps/emulator-new/src/main.ts --install <dir> --decode [--json]',
   ].join('\n');
@@ -233,7 +261,7 @@ function main() {
     uninitializedFloat: args.uninitializedFloat,
   };
   const result = args.install
-    ? analyzeInstall(args.install, args.rootId, opts)
+    ? analyzeInstall(args.install, args.rootId, opts, { config: args.config, initConfig: args.initConfig })
     : analyze(args.script as string, opts);
 
   if (args.json) {
@@ -256,6 +284,9 @@ function main() {
         if (stage.disposition === 'modeled') continue;
         console.log(`  ${stage.disposition.padEnd(11)} ${stage.id}：${stage.what}（${stage.why}）`);
       }
+    }
+    if (result.config) {
+      console.log(`配置        ${result.config.path} · 来源 ${result.config.source} · ${result.config.ints} 整数 / ${result.config.strings} 字符串 / ${result.config.lists} 列表`);
     }
     if (result.mode === 'decode') {
       console.log(`解码        ${result.decoded} 条 · 停因 ${result.stop}`);

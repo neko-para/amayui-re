@@ -4,7 +4,8 @@
  * 真实入口：索引 `SYS4INI.BIN`（ALF 索引）→ 统一文件 id == TOC 条目下标 → 根脚本 id 0。
  * 取脚本的顺序（本机安装的实测）：**松散文件优先**（安装根下的同名 `.BIN`），否则按 TOC 的
  * `(archive, offset, length)` 从 `DATA*.ALF` 切片。
- * ★ 只读：不写安装目录；载荷按需切片（归档有 GB 级，⛔ 不整份读）。
+ * ★ 安装目录只读；载荷按需切片（归档有 GB 级，⛔ 不整份读）。
+ * ★ 玩家配置只写**调用方显式给出的路径**（`--init-config`）；装载不写安装目录。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -132,4 +133,20 @@ export class Install {
 /** 读一份调试用的脚本文件（`--script`；不是游戏安装的取件路径） */
 export function readFile(file: string): Buffer {
   return fs.readFileSync(file);
+}
+
+/** 读玩家配置文件；不存在返回 null（“全部用发行默认”是正常状态） */
+export function readConfigFile(file: string): Buffer | null {
+  try {
+    return fs.readFileSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/** 写玩家配置文件（只有显式 `--init-config` / 保存才调用） */
+export function writeConfigFile(file: string, data: Buffer): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, data);
 }

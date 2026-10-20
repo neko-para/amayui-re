@@ -832,6 +832,11 @@ export function describe() {
         what: '**本规范的指令表**：当前内容来自现有实现，协议部分标为待核验；不是 `age-format` 的 canonical 副本。',
         fields: ['opcode', 'argc', 'name', 'aliases'],
       },
+      configKeys: {
+        file: 'data/spec/format/config-keys.json',
+        what: '**配置键词表**：发行默认表键 → 内部键 / 类型；玩家文件的段·键 → 内部键 / 类型；保存时的段·键顺序与条件。它是引擎内建的固定词表，不是游戏数据。',
+        fields: ['defaults[]（indexKey/internal/kind/special?/extra?）', 'ini[]（section/key/internal/kind）', 'persist[]（section/key/internal/kind/if?）'],
+      },
     },
     pilot: {
       meaning: '本轮验收域（在 audit.json 里）：**试点块**（块入口 EA）+ 机械枚举的 **effect** + 归属（规则 covers / internal / residuals）。schema 不预设 effect 的语义；effect 由 `x86-effects` 从语料现算。',

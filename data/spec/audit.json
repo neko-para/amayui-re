@@ -406,6 +406,24 @@
       "id": "vm",
       "status": "bootstrap",
       "residual": []
+    },
+    {
+      "id": "config",
+      "status": "partial",
+      "residual": [
+        {
+          "what": "玩家文件的行内空白 / 注释 / 代码页没有逐字节取证；当前合同只覆盖段头、键值对、CR LF 与字节精确匹配",
+          "next": "用一份合成 INI 走引擎的逐行解析器，登记空白与注释的 EA 后再补合同"
+        },
+        {
+          "what": "保存的触发时点（设置提交 / 退出 / 其它）没有确定",
+          "next": "找 vtable 上 Reg::Save 的动态调用点，确认它是否只在设置提交路径上"
+        },
+        {
+          "what": "条件写出的键集合没有逐条枚举",
+          "next": "从保存函数的分支逐条登记：哪些键只在相关开关为真时写出"
+        }
+      ]
     }
   ],
   "planned": [
@@ -472,17 +490,6 @@
         {
           "what": "整章尚未处理（已知部分观察散在需求树里，未收成合同）",
           "next": "先把『写哪些区域』与『恢复时重建/保留』分开取证"
-        }
-      ]
-    },
-    {
-      "id": "config",
-      "title": "配置：键 / 存在性 / 默认值",
-      "status": "none",
-      "residual": [
-        {
-          "what": "配置键的口径（取操作数的值还是序号/表下标）曾有分歧",
-          "next": "按最新复核结论写『键从哪来』一条合同，并保留分歧记录指针"
         }
       ]
     },
@@ -1535,6 +1542,77 @@
       "residual": [],
       "falsifiers": [
         "若 0x1a8 改了任一引擎状态 ⇒ 本条错"
+      ]
+    },
+    {
+      "id": "CORE-CONFIG-STORE",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-CONFIG-STORE-LIST",
+          "kind": "unknown",
+          "what": "列表键（字体校验 / 对齐字符）的消费点与容量没有逐条取证；当前只规定“追加 + 读缺失为空”",
+          "next": "找列表容器的读取者（字体校验路径），登记 EA 后再补消费合同"
+        }
+      ]
+    },
+    {
+      "id": "CORE-CONFIG-DEFAULTS",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-CONFIG-DEFAULTS-ARRAYS",
+          "kind": "unknown",
+          "what": "尾部前置的两个计数数组被引擎读进别处，用途未查明；默认表的第二个长度标记只做非零校验，其数值含义未验证",
+          "next": "读两个数组的消费点（Engine+0xAAA10/0xAAA14）；用另一份索引样本验证长度标记是否参与边界"
+        }
+      ]
+    },
+    {
+      "id": "CORE-CONFIG-PLAYER",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-CONFIG-PLAYER-HOST",
+          "kind": "unknown",
+          "what": "名字里带 REGKEY / VERREGPOS 的键在宿主侧还有注册表来源（64 位值截 32 位、版本文件派生 GameVersion）；这些不属于文本文件，未写成合同",
+          "next": "把注册表读取点与截断行为登记为宿主边界条目，再决定是否进 spec"
+        },
+        {
+          "id": "RES-CONFIG-PLAYER-QUOTED-SEP",
+          "kind": "unknown",
+          "what": "引号 / 括号内的分隔符是否屏蔽（影响 key=\"a=b\" 这类行）未逐字复刻；合同只写“第一个 = 处切开”",
+          "next": "用带引号/括号的合成行对引擎切分器做一次对照，再决定是否补成合同"
+        }
+      ]
+    },
+    {
+      "id": "CORE-CONFIG-PERSIST",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-CONFIG-PERSIST-TRIGGER",
+          "kind": "unknown",
+          "what": "保存由哪个宿主路径触发（设置提交 / 退出 / 其它）没有静态调用点，未确定",
+          "next": "扫 vtable+40 的动态使用点或做一次运行期观察"
+        }
+      ]
+    },
+    {
+      "id": "CORE-CONFIG-SCRIPT",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-CONFIG-SCRIPT-POINTER",
+          "kind": "unknown",
+          "what": "引用族（类型 6/8/12/14）的“取表下标”只到“解引用后的池下标”这一层；引用池的初始化/生命周期未在本章展开",
+          "next": "按 CORE-POOL 的引用族条目补引用池合同，再回填本条的成立条件"
+        }
       ]
     }
   ],

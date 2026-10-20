@@ -1,0 +1,1115 @@
+{
+  "defaults": [
+    {
+      "indexKey": "REGROOTPATH",
+      "internal": "set:RegRootPath",
+      "kind": "string"
+    },
+    {
+      "indexKey": "REGSUBKEY",
+      "internal": "set:RegSubKey",
+      "kind": "string"
+    },
+    {
+      "indexKey": "VERREGPOS",
+      "internal": "set:VerRegPos",
+      "kind": "string"
+    },
+    {
+      "indexKey": "GAMEVERSION",
+      "internal": "set:GameVersion",
+      "kind": "string"
+    },
+    {
+      "indexKey": "SAVEPATH",
+      "internal": "set:SavePath",
+      "kind": "string"
+    },
+    {
+      "indexKey": "REGFILEPATH",
+      "internal": "set:RegFilePath",
+      "kind": "string"
+    },
+    {
+      "indexKey": "COPYRIGHT",
+      "internal": "set:Copyright",
+      "kind": "string"
+    },
+    {
+      "indexKey": "CHECKVOLUME",
+      "internal": "set:CheckVolume",
+      "kind": "string"
+    },
+    {
+      "indexKey": "CHECKFILENAME",
+      "internal": "set:CheckFileName",
+      "kind": "string"
+    },
+    {
+      "indexKey": "CDLABEL",
+      "internal": "set:CDLabel",
+      "kind": "string"
+    },
+    {
+      "indexKey": "FONT",
+      "internal": "message:Font",
+      "kind": "string"
+    },
+    {
+      "indexKey": "SCREENX",
+      "internal": "set:WinX",
+      "kind": "int"
+    },
+    {
+      "indexKey": "SCREENY",
+      "internal": "set:WinY",
+      "kind": "int"
+    },
+    {
+      "indexKey": "FULLSCREENBIT",
+      "internal": "display:FullScreenBit",
+      "kind": "int"
+    },
+    {
+      "indexKey": "ANTIFONTVERSION",
+      "internal": "set:AntiFontVersion",
+      "kind": "int"
+    },
+    {
+      "indexKey": "SCREENWARNING",
+      "internal": "set:ScreenWarning",
+      "kind": "int"
+    },
+    {
+      "indexKey": "BITWARNING",
+      "internal": "set:BitWarning",
+      "kind": "int"
+    },
+    {
+      "indexKey": "NOSETMUSIC",
+      "internal": "set:NoSetMusic",
+      "kind": "int",
+      "special": "noSetMusic",
+      "extra": [
+        {
+          "internal": "sound:Music",
+          "from": "value-1",
+          "if": "value!=0"
+        }
+      ]
+    },
+    {
+      "indexKey": "NOSAVEDAT",
+      "internal": "set:NoSaveDat",
+      "kind": "int"
+    },
+    {
+      "indexKey": "MENU_SAVE",
+      "internal": "set:Menu_Save",
+      "kind": "int"
+    },
+    {
+      "indexKey": "MENU_MESSPEED",
+      "internal": "set:Menu_MesSpeed",
+      "kind": "int"
+    },
+    {
+      "indexKey": "MENU_MESWINA",
+      "internal": "set:Menu_MesWinA",
+      "kind": "int"
+    },
+    {
+      "indexKey": "MENU_RCLICK",
+      "internal": "set:Menu_RClick",
+      "kind": "int"
+    },
+    {
+      "indexKey": "MENU_USEANTIFONT",
+      "internal": "set:Menu_UseAntiFont",
+      "kind": "int"
+    },
+    {
+      "indexKey": "MENU_MESSAGE",
+      "internal": "set:Menu_Message",
+      "kind": "int"
+    },
+    {
+      "indexKey": "MENU_SOUNDONOFF",
+      "internal": "set:Menu_SoundONOFF",
+      "kind": "int"
+    },
+    {
+      "indexKey": "ENABLEMEMFLIP",
+      "internal": "set:EnableMemFlip",
+      "kind": "int"
+    },
+    {
+      "indexKey": "CLICKONUP",
+      "internal": "set:ClickOnUp",
+      "kind": "int"
+    },
+    {
+      "indexKey": "ALWAYSBACKUPSURFACE",
+      "internal": "set:AlwaysBackupSurface",
+      "kind": "int"
+    },
+    {
+      "indexKey": "NOCHANGECLIPONBACKUP",
+      "internal": "set:NoChangeClipOnBackup",
+      "kind": "int"
+    },
+    {
+      "indexKey": "CANCELMESSKIPONCLICK",
+      "internal": "set:CancelMesSkipOnClick",
+      "kind": "int"
+    },
+    {
+      "indexKey": "CONTROLDISIBLECURSOR",
+      "internal": "set:ControlDisibleCursor",
+      "kind": "int"
+    },
+    {
+      "indexKey": "COEXISTMESSKIP",
+      "internal": "set:CoexistMesSkip",
+      "kind": "int"
+    },
+    {
+      "indexKey": "REDRAWTEXTONKEY",
+      "internal": "set:ReDrawTextOnKey",
+      "kind": "int"
+    },
+    {
+      "indexKey": "AUTOLINEFEED",
+      "internal": "set:AutoLineFeed",
+      "kind": "int"
+    },
+    {
+      "indexKey": "USEAPPDATAFOLDER",
+      "internal": "set:UseAppDataFolder",
+      "kind": "int"
+    },
+    {
+      "indexKey": "KEEPMUSICVOLUME",
+      "internal": "set:KeepMusicVolume",
+      "kind": "int"
+    },
+    {
+      "indexKey": "TRANSFERMUSICVOLUME",
+      "internal": "set:TransferMusicVolume",
+      "kind": "int"
+    },
+    {
+      "indexKey": "ENABLEANTIFONT",
+      "internal": "set:EnableAntiFont",
+      "kind": "int",
+      "special": "enableAntiFont",
+      "extra": [
+        {
+          "internal": "set:Menu_UseAntiFont",
+          "from": "value"
+        }
+      ]
+    },
+    {
+      "indexKey": "SAVEVERSION",
+      "internal": "set:SaveVersion1",
+      "kind": "int",
+      "special": "saveVersionSplit"
+    },
+    {
+      "indexKey": "RCVERSION",
+      "internal": "set:RCVersion",
+      "kind": "int"
+    },
+    {
+      "indexKey": "REGKEY",
+      "internal": "set:RegKey",
+      "kind": "int",
+      "special": "int64"
+    },
+    {
+      "indexKey": "TEXWIDTH",
+      "internal": "set:TexWidth",
+      "kind": "int"
+    },
+    {
+      "indexKey": "TEXHEIGHT",
+      "internal": "set:TexHeight",
+      "kind": "int"
+    },
+    {
+      "indexKey": "CREATEOBJECT",
+      "internal": "set:CreateObject",
+      "kind": "int"
+    },
+    {
+      "indexKey": "DRAWMODE",
+      "internal": "set:DrawMode",
+      "kind": "int"
+    },
+    {
+      "indexKey": "DependMovieSound",
+      "internal": "set:DependMovieSound",
+      "kind": "int"
+    },
+    {
+      "indexKey": "WHEELKEYUP",
+      "internal": "set:WheelKeyUp",
+      "kind": "int",
+      "extra": [
+        {
+          "internal": "message:WheelKeyUpOnTW",
+          "from": "value"
+        }
+      ]
+    },
+    {
+      "indexKey": "WHEELKEYDOWN",
+      "internal": "set:WheelKeyDown",
+      "kind": "int",
+      "extra": [
+        {
+          "internal": "message:WheelKeyDownOnTW",
+          "from": "value"
+        }
+      ]
+    },
+    {
+      "indexKey": "HWHEELKEYUP",
+      "internal": "set:HWheelKeyUp",
+      "kind": "int"
+    },
+    {
+      "indexKey": "HWHEELKEYDOWN",
+      "internal": "set:HWheelKeyDown",
+      "kind": "int"
+    },
+    {
+      "indexKey": "FORCESCREEN",
+      "internal": "display:ForceScreen",
+      "kind": "int",
+      "special": "bool"
+    },
+    {
+      "indexKey": "OUTERFRAMEMODE",
+      "internal": null,
+      "kind": "ignore",
+      "special": "ignore"
+    },
+    {
+      "indexKey": "AUTOFREETEX",
+      "internal": "set:AutoFreeTex",
+      "kind": "int"
+    },
+    {
+      "indexKey": "VIRTUALFULLSCREEN",
+      "internal": "display:VirtualFullScreen",
+      "kind": "int"
+    },
+    {
+      "indexKey": "ASPECTMODE",
+      "internal": "display:AspectMode",
+      "kind": "int"
+    },
+    {
+      "indexKey": "FULLSCREENWIDTH",
+      "internal": "display:FullScreenWidth",
+      "kind": "int"
+    },
+    {
+      "indexKey": "FULLSCREENHEIGHT",
+      "internal": "display:FullScreenHeight",
+      "kind": "int"
+    },
+    {
+      "indexKey": "BLANKEXTENTMODE",
+      "internal": "set:BlankExtentMode",
+      "kind": "int"
+    },
+    {
+      "indexKey": "USEPROPORTIONALFONT",
+      "internal": "set:UseProportionalFont",
+      "kind": "int"
+    },
+    {
+      "indexKey": "VALIDFONTCHECKER",
+      "internal": "list:ValidFontChecker",
+      "kind": "list"
+    },
+    {
+      "indexKey": "RUBYSHIFTMODE",
+      "internal": "message:RubyShiftMode",
+      "kind": "int"
+    },
+    {
+      "indexKey": "SAVEWINPOS",
+      "internal": "set:SaveWinPos",
+      "kind": "int"
+    },
+    {
+      "indexKey": "JUSTIFYCHAR",
+      "internal": "list:JustifyChar",
+      "kind": "list"
+    }
+  ],
+  "ini": [
+    {
+      "section": "display",
+      "key": "UseDirectDrawEmuration",
+      "internal": "display:UseDirectDrawEmuration",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "UseWideSurface",
+      "internal": "display:UseWideSurface",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "UseIVideoWindow",
+      "internal": "display:UseIVideoWindow",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "DeviceType",
+      "internal": "display:DeviceType",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "VertexProcessing",
+      "internal": "display:VertexProcessing",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "PresentInterval",
+      "internal": "display:PresentInterval",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "TextureBit",
+      "internal": "display:TextureBit",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "PixelShader",
+      "internal": "display:PixelShader",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "ForceScreen",
+      "internal": "display:ForceScreen",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "VirtualFullScreen",
+      "internal": "display:VirtualFullScreen",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "VirtualFullScreenType",
+      "internal": "display:VirtualFullScreenType",
+      "kind": "int",
+      "if": "display:VirtualFullScreen"
+    },
+    {
+      "section": "display",
+      "key": "AspectMode",
+      "internal": "display:AspectMode",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "FullScreenWidth",
+      "internal": "display:FullScreenWidth",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "FullScreenHeight",
+      "internal": "display:FullScreenHeight",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "LimitAero",
+      "internal": "display:LimitAero",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "MultiSample",
+      "internal": "display:MultiSample",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "ScreenMode",
+      "internal": "display:ScreenMode",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "FullScreenBit",
+      "internal": "display:FullScreenBit",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Sound",
+      "internal": "sound:Sound",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Music",
+      "internal": "sound:Music",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "SE",
+      "internal": "sound:SE",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Voice",
+      "internal": "sound:Voice",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Movie",
+      "internal": "sound:Movie",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "UseDirectSound",
+      "internal": "sound:UseDirectSound",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "UseDirectSoundEmuration",
+      "internal": "sound:UseDirectSoundEmuration",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "DirectSoundCooperativeLevel",
+      "internal": "sound:DirectSoundCooperativeLevel",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "MusicFadeOnVoicePlaying",
+      "internal": "sound:MusicFadeOnVoicePlaying",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "MusicFadeOnVoicePlayingVolume",
+      "internal": "sound:MusicFadeOnVoicePlayingVolume",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "Font",
+      "internal": "message:Font",
+      "kind": "string"
+    },
+    {
+      "section": "message",
+      "key": "RMouseEvent",
+      "internal": "message:RMouseEvent",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "MessageSpeed",
+      "internal": "message:MessageSpeed",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "MessageFade",
+      "internal": "message:MessageFade",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "MesWinAlpha",
+      "internal": "message:MesWinAlpha",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "UseAntiFont",
+      "internal": "message:UseAntiFont",
+      "kind": "int",
+      "if": "set:EnableAntiFont"
+    },
+    {
+      "section": "message",
+      "key": "AntiFontLevel",
+      "internal": "message:AntiFontLevel",
+      "kind": "int",
+      "if": "set:EnableAntiFont"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessageTime0",
+      "internal": "message:AutoMessageTime0",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessageTime1",
+      "internal": "message:AutoMessageTime1",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessagePitch0",
+      "internal": "message:AutoMessagePitch0",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessagePitch1",
+      "internal": "message:AutoMessagePitch1",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessageOption",
+      "internal": "message:AutoMessageOption",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "ReadTextSkip",
+      "internal": "message:ReadTextSkip",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AdvanceMesOnWheel",
+      "internal": "message:AdvanceMesOnWheel",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "RubyShiftMode",
+      "internal": "message:RubyShiftMode",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "SaveBMPPath",
+      "internal": "system:SaveBMPPath",
+      "kind": "string"
+    },
+    {
+      "section": "system",
+      "key": "OutErrorLog",
+      "internal": "system:OutErrorLog",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "UseMMX",
+      "internal": "system:UseMMX",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "LimitJoy",
+      "internal": "system:LimitJoy",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "LimitTouch",
+      "internal": "system:LimitTouch",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "EffectSkipOnClick",
+      "internal": "system:EffectSkipOnClick",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "Debug",
+      "internal": "debug:DebugFlag",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutLabel",
+      "internal": "debug:DebugOutLabel",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutVar",
+      "internal": "debug:DebugOutVar",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugRemote",
+      "internal": "debug:DebugRemote",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugEnableOnDeactive",
+      "internal": "debug:DebugEnableOnDeactive",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "FunclstPath",
+      "internal": "debug:FunclstPath",
+      "kind": "string"
+    },
+    {
+      "section": "debug",
+      "key": "DebugComputerName",
+      "internal": "debug:DebugComputerName",
+      "kind": "string"
+    },
+    {
+      "section": "sound",
+      "key": "Volume0",
+      "internal": "sound:Volume0",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume1",
+      "internal": "sound:Volume1",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume2",
+      "internal": "sound:Volume2",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume3",
+      "internal": "sound:Volume3",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume4",
+      "internal": "sound:Volume4",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag0",
+      "internal": "debug:DebugOutFlag0",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag1",
+      "internal": "debug:DebugOutFlag1",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag2",
+      "internal": "debug:DebugOutFlag2",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag3",
+      "internal": "debug:DebugOutFlag3",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag4",
+      "internal": "debug:DebugOutFlag4",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag5",
+      "internal": "debug:DebugOutFlag5",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag6",
+      "internal": "debug:DebugOutFlag6",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag7",
+      "internal": "debug:DebugOutFlag7",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag8",
+      "internal": "debug:DebugOutFlag8",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag9",
+      "internal": "debug:DebugOutFlag9",
+      "kind": "int"
+    },
+    {
+      "section": "debug",
+      "key": "DebugOutFlag10",
+      "internal": "debug:DebugOutFlag10",
+      "kind": "int"
+    }
+  ],
+  "persist": [
+    {
+      "section": "display",
+      "key": "UseDirectDrawEmuration",
+      "internal": "display:UseDirectDrawEmuration",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "UseWideSurface",
+      "internal": "display:UseWideSurface",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "ScreenMode",
+      "internal": "display:ScreenMode",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "FullScreenBit",
+      "internal": "display:FullScreenBit",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "UseIVideoWindow",
+      "internal": "display:UseIVideoWindow",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "DeviceType",
+      "internal": "display:DeviceType",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "VertexProcessing",
+      "internal": "display:VertexProcessing",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "PresentInterval",
+      "internal": "display:PresentInterval",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "TextureBit",
+      "internal": "display:TextureBit",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "PixelShader",
+      "internal": "display:PixelShader",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "ForceScreen",
+      "internal": "display:ForceScreen",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "VirtualFullScreen",
+      "internal": "display:VirtualFullScreen",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "AspectMode",
+      "internal": "display:AspectMode",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "FullScreenWidth",
+      "internal": "display:FullScreenWidth",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "FullScreenHeight",
+      "internal": "display:FullScreenHeight",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "LimitAero",
+      "internal": "display:LimitAero",
+      "kind": "int"
+    },
+    {
+      "section": "display",
+      "key": "VirtualFullScreenType",
+      "internal": "display:VirtualFullScreenType",
+      "kind": "int",
+      "if": "display:VirtualFullScreen"
+    },
+    {
+      "section": "display",
+      "key": "MultiSample",
+      "internal": "display:MultiSample",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Sound",
+      "internal": "sound:Sound",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Music",
+      "internal": "sound:Music",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "SE",
+      "internal": "sound:SE",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Voice",
+      "internal": "sound:Voice",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Movie",
+      "internal": "sound:Movie",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "UseDirectSound",
+      "internal": "sound:UseDirectSound",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "UseDirectSoundEmuration",
+      "internal": "sound:UseDirectSoundEmuration",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "DirectSoundCooperativeLevel",
+      "internal": "sound:DirectSoundCooperativeLevel",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume0",
+      "internal": "sound:Volume0",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume1",
+      "internal": "sound:Volume1",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume2",
+      "internal": "sound:Volume2",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume3",
+      "internal": "sound:Volume3",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "Volume4",
+      "internal": "sound:Volume4",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "MusicFadeOnVoicePlaying",
+      "internal": "sound:MusicFadeOnVoicePlaying",
+      "kind": "int"
+    },
+    {
+      "section": "sound",
+      "key": "MusicFadeOnVoicePlayingVolume",
+      "internal": "sound:MusicFadeOnVoicePlayingVolume",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "Font",
+      "internal": "message:Font",
+      "kind": "string"
+    },
+    {
+      "section": "message",
+      "key": "RMouseEvent",
+      "internal": "message:RMouseEvent",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "MessageSpeed",
+      "internal": "message:MessageSpeed",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "MessageFade",
+      "internal": "message:MessageFade",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "MesWinAlpha",
+      "internal": "message:MesWinAlpha",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "UseAntiFont",
+      "internal": "message:UseAntiFont",
+      "kind": "int",
+      "if": "set:EnableAntiFont"
+    },
+    {
+      "section": "message",
+      "key": "AntiFontLevel",
+      "internal": "message:AntiFontLevel",
+      "kind": "int",
+      "if": "set:EnableAntiFont"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessageTime0",
+      "internal": "message:AutoMessageTime0",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessageTime1",
+      "internal": "message:AutoMessageTime1",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessagePitch0",
+      "internal": "message:AutoMessagePitch0",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessagePitch1",
+      "internal": "message:AutoMessagePitch1",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AutoMessageOption",
+      "internal": "message:AutoMessageOption",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "ReadTextSkip",
+      "internal": "message:ReadTextSkip",
+      "kind": "int"
+    },
+    {
+      "section": "message",
+      "key": "AdvanceMesOnWheel",
+      "internal": "message:AdvanceMesOnWheel",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "SaveBMPPath",
+      "internal": "system:SaveBMPPath",
+      "kind": "string"
+    },
+    {
+      "section": "system",
+      "key": "UseMMX",
+      "internal": "system:UseMMX",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "EffectSkipOnClick",
+      "internal": "system:EffectSkipOnClick",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "OutErrorLog",
+      "internal": "system:OutErrorLog",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "LimitJoy",
+      "internal": "system:LimitJoy",
+      "kind": "int"
+    },
+    {
+      "section": "system",
+      "key": "LimitTouch",
+      "internal": "system:LimitTouch",
+      "kind": "int"
+    }
+  ]
+}

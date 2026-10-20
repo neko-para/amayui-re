@@ -8,8 +8,9 @@
 4. [`30-agf.md`](30-agf.md) —— AGF 图像（ACGF 容器 / meta / body / ACIF / 像素）
 5. [`40-pools.md`](40-pools.md) —— **数据池**（global/local 池、访问原语、类型标签、值编码、字符串、容量）
 6. [`50-engine-state.md`](50-engine-state.md) —— 引擎级状态（按索引表）
-7. [`60-ops.md`](60-ops.md) —— 指令语义（逐 opcode：读哪些操作数、改哪些引擎数据）
-8. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
+7. [`55-config.md`](55-config.md) —— 配置（库 / 发行默认表 / 玩家文件 / 保存 / 脚本访问）
+8. [`60-ops.md`](60-ops.md) —— 指令语义（逐 opcode：读哪些操作数、改哪些引擎数据）
+9. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
 
 `40-pools.md` 是**一个完整主题**：池的族、下标、访问、值表示与容量都在这一章。
 
@@ -17,6 +18,6 @@
 本版尚未成篇的主题不在本目录（本目录只含已写成的章节）。
 
 ★ 脚本的字节布局、指令表与 `type` / `raw` 编码由**本规范**定义（协议自持）：表是本规范自带的
-`format/opcode-table.json`（分发时的伴随数据）；
+`format/opcode-table.json` 与 `format/config-keys.json`（分发时的伴随数据）；
 `age-format` 包里的 `instruction-set.json` 是**实现副本**，与本规范不一致时以本规范为准
 （协议部分当前**待核验**，见 [`10-format.md`](10-format.md)）。
