@@ -13,6 +13,8 @@
  * ★ `--key` 是整型编码的运行期 key（规范：不是常量、不许有默认值）⇒ 执行模式必须显式给。
  */
 import { Install, readFile } from './host.ts';
+import { startupReport } from './boot.ts';
+import type { StartupReport } from './boot.ts';
 import { loadOpcodeTable } from './spec.ts';
 import { codeLimit, parseHeader, walk } from './decode.ts';
 import type { Gap } from './decode.ts';
@@ -40,6 +42,8 @@ export interface ScriptReport {
   stopText?: string;
   executed?: number;
   diagnostics?: Diagnostic[];
+  /** 仅安装入口：从 WinMain 到主循环的启动阶段记账 */
+  startup?: StartupReport;
 }
 
 interface Args {
@@ -205,6 +209,7 @@ export function analyzeInstall(dir: string, rootId: number, opts: RunOpts = {}):
       actualLength: script.bytes.length,
       archive: script.archive,
     },
+    startup: startupReport(),
     ...result,
   };
 }
@@ -244,6 +249,14 @@ function main() {
     }
     console.log(`头          ${result.signature} ${result.version.trim()} · 头长 ${result.headerLength} · 表 ${result.tables.length} 组`);
     console.log(`body        ${result.bodyLength} 字节 · 代码区上限 ${result.codeLimit}`);
+    if (result.startup) {
+      const c = result.startup.counts;
+      console.log(`启动阶段    ${c.modeled} 建模 · ${c.partial} 部分 · ${c['not-modeled']} 未建模 · ${c['host-only']} 宿主`);
+      for (const stage of result.startup.stages) {
+        if (stage.disposition === 'modeled') continue;
+        console.log(`  ${stage.disposition.padEnd(11)} ${stage.id}：${stage.what}（${stage.why}）`);
+      }
+    }
     if (result.mode === 'decode') {
       console.log(`解码        ${result.decoded} 条 · 停因 ${result.stop}`);
     } else if ('stopText' in result) {

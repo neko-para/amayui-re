@@ -24,6 +24,7 @@ import { loadManifest } from '../lib/manifest.mjs';
 import { rootFromManifest } from '../lib/patch.mjs';
 import { Install } from '../../apps/emulator-new/src/host.ts';
 import { analyzeInstall } from '../../apps/emulator-new/src/main.ts';
+import { BOOT_STAGES } from '../../apps/emulator-new/src/boot.ts';
 
 const KEY = 0x1234abcd;
 
@@ -85,6 +86,9 @@ test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，停在启动前
   assert.equal(result.source.side, 'loose');
   assert.equal(result.source.indexEntries, 21109);
   assert.equal(result.decoded, 545, '松散 SYSTEM4.BIN 的指令数（结构基准）');
+  // 启动阶段记账必须随报告一起出来（跳过不许静默）
+  assert.deepEqual(result.startup?.stages.map((s) => s.id), BOOT_STAGES.map((s) => s.id));
+  assert.equal(result.startup?.counts['not-modeled'], 1, '当前唯一"完全未建模"的阶段是配置');
 
   assert.equal(result.mode, 'run');
   assert.equal(result.steps, 2, '当前启动前段：只执行掉 0x1a7 / 0x1a8（实现新 opcode 时抬高）');

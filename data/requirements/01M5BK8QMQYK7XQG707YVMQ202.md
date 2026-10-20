@@ -22,6 +22,7 @@ core spec 的 `CORE-ISA` / `CORE-POOL` 已落盘并有语料级守卫；`apps/em
 - **真实入口**：`src/lzss.ts` / `src/alf.ts` / `src/host.ts` —— ALF 索引（S4IC，8 归档 / 21109 条目）、
   4 KiB 环形窗口 LZSS（绝对写位置）、统一文件 id == TOC 条目下标、**松散文件优先**、归档按 `(offset,length)` 切片。
   根脚本 id 0 = `SYSTEM4.BIN`；当前启动执行 `0x1a7` / `0x1a8` 后停在 `0x2f6`。
+- **启动阶段记账**：`src/boot.ts` 把 `_WinMain@16` → 主循环之间的 12 个阶段逐条登记（2 建模 / 2 部分 / 1 未建模 / 7 宿主）；配置是唯一完全未建模项（load-int / load-string 会用到），文本与 `--json` 都输出。
 - **参考实现**：`apps/emulator-new/`（只读 `data/spec`，无构建，已进 `pnpm typecheck`）。守卫：
   `emulator-new-isolation` · `emulator-new-decode` · `emulator-new-ops` · `emulator-new-texture` · `emulator-new-scene` · `emulator-new-alf` · `emulator-new-noop`（pure），
   以及 `emulator-new-boot.assets`（启动棘轮 / 取件顺序）与 `emulator-new-logo.assets`（LOGO 前沿棘轮）两条 assets。
@@ -44,8 +45,7 @@ pnpm tools requirements validate # 5/5
   spec-isa 的脚本数（本机只有散装 105 支，缺 `_extracted`）、corpus 的两条本机写入口——都是先前状态，本轮未动 `data/shape` / `corpus`。
 - **`0x20F play-movie` 已实现但 LOGO 运行停在它前面**（停止条件 = "停在它前面"）。⛔ 不要顺手把 stop-at 去掉：
   `0x1fa` 会清共享对象槽，而**引用计数没有建模** —— 先补引用计数再执行 play-movie 之后的序列。
-- `CORE-OPS` 的其余 opcode 仍是缺口；缺口"执行到第几条 / 停在哪"由 LOGO 前沿棘轮与 `--json` 回答，不写死在本文。
-- 未实现 opcode 的语义分两档：**引擎缺省 handler（抛异常）** 与 **spec 还没写**；当前实现只区分出后者（缺口报 `unimplemented`）。
+- `CORE-OPS` 的其余 opcode 仍是缺口（"执行到第几条 / 停在哪"由棘轮与 `--json` 回答）；且**引擎缺省 handler（抛异常）**与**spec 还没写**当前只区分出后者（缺口报 `unimplemented`）。
 - 浮点池"未写槽"的初值规范不说：参考实现要跑真实脚本必须显式 `--uninitialized-float zero`，每次读进 `diagnostics`。
 - **`CORE-FS` / `CORE-BOOT` 的 spec 规则还没成篇**：入口实现与守卫先落（`REQ-01M5C0G36…`），把"松散优先 / 根脚本 id 0"
   写成带锚的合同是后续单。⛔ 别把"实现里有"当成"规范里有"。
@@ -64,8 +64,8 @@ pnpm tools requirements validate # 5/5
 
 ## 下一步（建议顺序）
 
-1. **SYSTEM4 启动前段**：从 `0x2f6` 继续（台账已有 `0x2f6` / `0x149` / `0x21b` / `0x88` / `0x1ca` / `0x252` / `0x324` / `0x32f` / `0x70` … 的 accepted 观察），把启动棘轮往后推。
-2. `CORE-FS` / `CORE-BOOT` 成篇：松散优先、根脚本 id 0、索引/归档失败路径写成带锚的合同（解除 §1.1 的显式延后）。
+1. **SYSTEM4 启动前段**：从 `0x2f6` 继续（台账已有 `0x2f6` / `0x149` / `0x21b` / `0x88` / `0x1ca` / `0x252` / `0x324` / `0x32f` / `0x70` … 的 accepted 观察），把启动棘轮往后推；**先补配置服务**（`0x1a2` / `0x1a3` / `0x1a9` / `0x1aa` 依赖它）。
+2. `CORE-FS` / `CORE-BOOT` 成篇：松散优先、根脚本 id 0、索引/归档失败路径、宿主启动阶段的边界写成带锚的合同（解除 §1.1 的显式延后）。
 3. `0x20F` 之后的执行路径：引用计数（`0x1fa` 清共享对象槽）+ `0x2 exit`（帧返回/中止）+ `CORE-FRAME` 成篇。
 4. 把 `60-ops.md` / `70-vm.md` 的规则从 `draft` 推到 `reviewed`（补 accepted 台账锚；assets 守卫不算 reviewed 的强证据）。
 5. 治理二批（并号迁移、planned 对齐、路径标记）。

@@ -1191,6 +1191,14 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-alf.test.mjs',
     what: '★ 丢掉松散优先 ⇒ 安装目录里被补丁覆盖过的脚本会被静默换成归档里的旧版（启动链量到另一份文件）',
   },
+  // ── emulator-new：启动阶段的处置（配置未建模不许被标成已建模）──
+  {
+    file: 'apps/emulator-new/src/boot.ts',
+    from: "    disposition: 'not-modeled',",
+    to: "    disposition: 'modeled', // 变异：把未建模的配置标成已建模",
+    guard: 'tools/test/emulator-new-boot-catalog.test.mjs',
+    what: '★ 把"配置未建模"标成 modeled ⇒ 跳过记录消失，脚本读配置时会被当成"配过了"',
+  },
   // ── emulator-new：统一文件 id == TOC 条目下标 ──
   {
     file: 'apps/emulator-new/src/host.ts',
