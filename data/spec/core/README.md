@@ -149,6 +149,18 @@
 
 ## 9. 怎么查 / 怎么改
 
+### 机器细节去哪查（★ 正文**不写**"见内部绑定"）
+
+规范正文是**可分发**的：机器细节（偏移 / 布局 / 容量 / 编号偏移）在正文里一律写"属机器细节，本规范不规定"。
+⛔ 不写"见内部绑定" —— 那对读者是**悬空指针**（`bindings.json` 不随规范分发，读者无从解析）。
+
+查法（内部复核材料）：
+
+- 一条规则的站点 / 函数 / storage 指针 / 证据 / 残差：`pnpm tools spec show <规则 id>`
+- 反查某个 EA 被哪些规则引用：`pnpm tools spec at --ea <EA>`
+- storage 指针指向的机器常量：`packages/age-format/src/engine/layout.mts` 的对应导出（如 `FRAME_LAYOUT` / `FRAME_ENGINE_SCALARS`）
+
+
 ```bash
 pnpm tools spec validate      # 不变量（正文自包含 / 跨文件一一对应）
 pnpm tools spec report        # 覆盖 / 内部省略 / 残差

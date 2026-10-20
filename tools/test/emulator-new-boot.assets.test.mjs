@@ -93,11 +93,11 @@ test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，停在启动前
   assert.equal(result.config?.path, path.join(REPO_ROOT, '.tmp', 'boot-config-missing.ini'));
 
   assert.equal(result.mode, 'run');
-  assert.equal(result.steps, 2, '当前启动前段：只执行掉 0x1a7 / 0x1a8（实现新 opcode 时抬高）');
+  assert.equal(result.steps, 85, '当前启动前段：… / 0x3 call-script → LOADCONFIG.BIN 内执行到 0x192');
   assert.equal(result.stop, 'unimplemented');
-  assert.equal(result.gap?.opcode, 0x2f6, '当前缺口 opcode（实现启动前段时往后走）');
-  assert.equal(result.gap?.index, 2);
-  assert.equal(result.gap?.offset, 16, '0x1a7 长 12、0x1a8 长 4');
+  assert.equal(result.gap?.opcode, 0x192, '★ 缺口：子脚本 LOADCONFIG.BIN 偏移 192 的 0x192（argc 2）');
+  assert.equal(result.gap?.index, 85, '已执行 85 条');
+  assert.equal(result.gap?.offset, 192, '子脚本内的偏移');
 });
 
 test('★ 同一入口按 id 取 LOGO.BIN：50 条指令（id 映射不是巧合）', { skip }, () => {
@@ -108,3 +108,17 @@ test('★ 同一入口按 id 取 LOGO.BIN：50 条指令（id 映射不是巧合
   assert.equal(result.decoded, 50);
   assert.equal(result.stop, 'code-region-end');
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+

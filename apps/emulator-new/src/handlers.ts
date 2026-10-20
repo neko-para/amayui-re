@@ -3,7 +3,7 @@
  * ★ 未实现的 opcode **不在表里**（不是 no-op）：`Machine.run` 会在它前面报缺口。
  * ★ 本文件不碰文件系统；外部请求只进 `m.effects`（规范不规定外部效果）。
  */
-import type { DrawItem, Machine, Mesh, MovieObject, Operand } from './machine.ts';
+import type { DrawItem, ListRecord, Machine, Mesh, MovieObject, Operand, VoiceGroup } from './machine.ts';
 import { MOVIE_BIT, WAIT_BIT } from './machine.ts';
 import { readAddress, readFloat, readInt, readIntAt, readText, writeFloat, writeInt, writeText } from './values.ts';
 
@@ -277,6 +277,473 @@ function scene320(m: Machine, ops: Operand[]): void {
   m.scene.dirty = 1;
 }
 
+/* ──────────────────────────── 帧与调用 ──────────────────────────── */
+
+/**
+ * 0x8f 同脚本调用（CORE-FRAME-CALL）。
+ *
+ * 逐字（`sub_420560`）：压返回点 `(PC − 基址) >> 2 + 3` 进本帧返回栈、SP+1；读第 1 个操作数：
+ * 等于 −1 ⇒ SP−1（撤销压栈）、**不跳**（长度槽仍是 3 ⇒ 分派器照常推进）；
+ * 否则 `PC ← 基址 + 4 × 操作数`、长度槽 ← 0（分派器不再推进）。
+ * ★ `+3` 就是"这条指令之后的那条"的位置（`1 + 2×argc`，`0x8f` 的 argc 恒 1）。
+ */
+function call8f(m: Machine, ops: Operand[]): void {
+  const target = readInt(m, ops, 1);
+  if (target === -1) return; // 哨兵：不压、不跳、照常推进
+  m.frame.retStack.push(m.ip / 4 + 1 + 2 * ops.length);
+  m.ip = 4 * target;
+  m.operandCount = 0;
+}
+
+/**
+ * 0x5 同脚本返回（CORE-FRAME-RET）。
+ *
+ * 逐字（`sub_41A9B0`）：长度槽 ← 1、本帧返回栈 SP−1、弹出位置；
+ * 位置 = −1 ⇒ **不跳**（长度槽留 1 ⇒ 分派器只前进 4 字节）；
+ * 否则 `PC ← 基址 + 4 × 位置`、长度槽 ← 0；随后它还会从**另一个引擎级栈**弹一个值写进一个引擎级槽
+ * （用途未定）—— 本层不建模，只记一条诊断（⛔ 不猜）。
+ * ★ 空栈时的引擎后续没有观察 ⇒ 本实现**响亮失败**，不静默退出。
+ */
+function ret05(m: Machine): void {
+  const pos = m.frame.retStack.pop();
+  if (pos === undefined) throw new Error('ret-with-empty-stack');
+  if (pos === -1) return; // 哨兵：不跳，长度槽留 1 ⇒ 前进 4 字节
+  m.ip = 4 * pos;
+  m.operandCount = 0;
+  m.diagnostics.push({ kind: 'engine-return-pop-unmodeled' });
+}
+
+/* ---------------------------- 引擎级标量（薄写） ---------------------------- */
+
+/** 状态选择字的第 27 位（0x88 的「为 0」支清它；置它的是另一条指令） */
+const STATE_BIT_27 = 0x08000000;
+
+/** 0x149：把第 1 个操作数原样写进一个固定格（CORE-OPS-SCALAR-THIN） */
+function thin149(m: Machine, ops: Operand[]): void {
+  m.scalars.set('Engine.d97058', readInt(m, ops, 1));
+}
+
+/** 0x21b：同族，但把值**归一成 0 / 1**（0 ⇒ 0，任何非 0 ⇒ 1） */
+function thin21b(m: Machine, ops: Operand[]): void {
+  m.scalars.set('Engine.d166965', readInt(m, ops, 1) !== 0 ? 1 : 0);
+}
+
+/** 0x252：同族，另一个固定格 */
+function thin252(m: Machine, ops: Operand[]): void {
+  m.scalars.set('Engine.d92323', readInt(m, ops, 1));
+}
+
+/**
+ * 0x88 成对写（CORE-OPS-SCALAR-PAIR-88）：同一个值写两个格；非 0 ⇒ 第三格写常量 1；
+ * 为 0 ⇒ 清状态选择字的第 27 位（读-改-写，其它位不动）。
+ */
+function pair88(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1);
+  m.scalars.set('Engine.d1415', value);
+  m.scalars.set('Engine.d97050', value);
+  if (value !== 0) {
+    m.scalars.set('Engine.d122368', 1);
+  } else {
+    m.flags &= ~STATE_BIT_27;
+  }
+}
+
+/* ---------------------------- 转发型指令 ---------------------------- */
+
+/**
+ * 0x1ca：把操作数交给**消息子系统**的「读文本跳过」入口（CORE-OPS-FORWARD-MESSAGE）。
+ * 逐字：`(*((vtable+12)))(&Engine+0xAA514, "message:ReadTextSkip", op1)` —— 返回值交分派器（被丢弃）。
+ * ★ 子系统的内部状态没有任何观察 ⇒ 本层只记请求 + 一条"未建模"标记；
+ *   ⛔ 不假造它改了什么（真有人读那块状态时会**响亮失败**，不会静默读到 0）。
+ */
+function message1ca(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1);
+  m.effects.push({ kind: 'message.request', detail: { entry: 'ReadTextSkip', value } });
+  m.diagnostics.push({ kind: 'message-subsystem-unmodeled' });
+}
+
+/**
+ * 0x324：**没有操作数**。它把引擎里某个字段存着的对象交给一个入口（CORE-OPS-FORWARD-FIELD）。
+ * 逐字：`mov ecx,[ecx+5B320h]` + `jmp sub_453530`（尾跳；那个 thunk 自己又是一条 `jmp`）。
+ * ★ 入口之后做什么没有观察 ⇒ 只记请求 + 一条"未建模"标记。
+ */
+function field324(m: Machine): void {
+  m.effects.push({ kind: 'engine.request', detail: { callee: 'sub_453530', holder: 'Engine.d93384' } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_453530' });
+}
+
+/**
+ * 0x32f：把一个索交给容器入口（CORE-OPS-FORWARD-CONTAINER）。
+ * 逐字：`sub_49A150(Engine+0x4ED10, op1)` —— callee 里**已知的数据效果**是按 op1 清一格
+ * （`[ecx+edx*4+0D5B4h] = 0`，绝对落点 = `Engine+0x5C2C4` 起）；随后还会走一次 `vtable+0xD4`
+ * 通知（内部行为未建模）。
+ */
+function container32f(m: Machine, ops: Operand[]): void {
+  const slot = readInt(m, ops, 1);
+  m.scalars.set(`Engine.d94385+${slot}`, 0);
+  m.effects.push({ kind: 'container.request', detail: { callee: 'sub_49A150', holder: 'Engine.d95428', slot } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_49A150' });
+}
+
+/**
+ * 0x70 设置一个列表项（CORE-OPS-LIST-SET）。
+ *
+ * 逐字（`sub_41ED20` → `sub_45D660(this = Engine+0x14D30, a2..a6, 0)`）：
+ * 读序是 **op5 → op4 → op3 → op2 → op1**（倒序），另有一个写死的第 6 实参 0；组号为 0 时换成
+ * 引擎里的默认组（默认组是谁未定）。写进该组记录的四对字段：
+ * 三对 ← (op2, op3)，一对 ← (op4, op5)；并把该组标记为"已登记"。
+ * 之后的列表登记与绘制请求（`sub_45D240` / `sub_43C8D0` / `sub_43B070`，以及浮点路径）**未建模**。
+ */
+function listSet70(m: Machine, ops: Operand[]): void {
+  const slot = readInt(m, ops, 1);
+  if (slot === 0) {
+    // 引擎：组号 0 ⇒ 换成引擎里的默认组（哪个组未定）⇒ 本层不猜，留诊断
+    m.diagnostics.push({ kind: 'ui-default-slot-unmodeled' });
+    return;
+  }
+  const a3 = readInt(m, ops, 2);
+  const a4 = readInt(m, ops, 3);
+  const a5 = readInt(m, ops, 4);
+  const a6 = readInt(m, ops, 5);
+  const rec = listRecordOf(m, slot);
+  rec.f0c = a5;
+  rec.f10 = a6;
+  rec.f14 = a3;
+  rec.f18 = a4;
+  rec.f24 = a3;
+  rec.f28 = a4;
+  rec.f7c = a3;
+  rec.f80 = a4;
+  rec.registered = 1;
+  m.effects.push({ kind: 'ui.list.request', detail: { slot, a3, a4, a5, a6 } });
+  m.diagnostics.push({ kind: 'ui-list-internals-unmodeled' });
+}
+
+/** 按组号取记录（缺则建，字段全 0：引擎构造时把这张表清过） */
+function listRecordOf(m: Machine, slot: number): ListRecord {
+  const found = m.ui.records.get(slot);
+  if (found) return found;
+  const created: ListRecord = {
+    f0c: 0, f10: 0, f14: 0, f18: 0, f1c: 0, f20: 0, f24: 0, f28: 0, f64: 0, f68: 0, f6c: 0, f114: 0, f118: 0, f120: 0, f124: 0, f7c: 0, f80: 0, registered: 0,
+  };
+  m.ui.records.set(slot, created);
+  return created;
+}
+
+/**
+ * 0x71 文本转发（CORE-OPS-TEXT-REQUEST）。
+ *
+ * 逐字（`sub_41ED80`，argc 1）：
+ * ① 把本条指令的**位置**（`(PC − 代码区基址) >> 2`）写进当前帧的一个字段（`帧+0x6C`，用途未定）；
+ * ② `sub_45EC60(Engine+0x14D30, op1, Engine[97055])` —— 第 3 个实参是**引擎槽**，不是操作数；
+ * ③ 两处整块拷贝（`0x4B0` 字节 / `20000` 字节）、一次 `sub_48FFB0`、一次 `vtable+4` 调用
+ *    （入口键 `message:ReadTextSkip`），以及一次**有条件**的状态位写 —— 这些**都不在本版范围**。
+ * ★ 状态位那一条尤其不许"顺手置上"：条件未取证（见 `REQ-01M5CWFZV…`），置错会让门立刻关上。
+ */
+function text71(m: Machine, ops: Operand[]): void {
+  const slot = readInt(m, ops, 1);
+  m.frame.position = m.ip / 4;
+  m.effects.push({
+    kind: 'text.request',
+    detail: { slot, engineSlot: 'Engine.d97055', engineSlotModeled: false },
+  });
+  m.diagnostics.push({ kind: 'text-subsystem-unmodeled' });
+}
+
+/**
+ * 0x73 子系统转发（CORE-OPS-SUBSYSTEM-SET73，argc 10 —— 前段最长的一条）。
+ *
+ * 逐字（`sub_41F250`）：
+ * ① **先读第 10 个操作数**，写进一个固定格：值为 0 时写成 **1**（`sub_453AD0` 的 `a2 ?: 1`）；
+ * ② 再**倒序**读第 9…1 个操作数，交给子系统（`sub_456430(Engine+0x14D30, op1..op9)`）；
+ * ③ 由引擎级 16 位槽 `Engine[166964]` 决定是否再发一次 `vtable+4` 请求（实参 0x21 / 2×op7 / op8 / 2）。
+ *    ★ 那个槽的当前值未建模（本层没人写它）⇒ 请求照发、但记 `gateModeled: false`，不假装知道门的状态。
+ */
+function forward73(m: Machine, ops: Operand[]): void {
+  const op10 = readInt(m, ops, 10);
+  m.scalars.set('Engine.d107528', op10 === 0 ? 1 : op10);
+  const args: number[] = [];
+  for (const k of [9, 8, 7, 6, 5, 4, 3, 2, 1]) args.push(readInt(m, ops, k));
+  args.reverse();
+  m.effects.push({ kind: 'subsystem.request', detail: { callee: 'sub_456430', args } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_456430' });
+  const gate = m.scalars.get('Engine.d166964') ?? 0;
+  if (gate === 0) {
+    m.effects.push({
+      kind: 'vtable.request',
+      detail: { callee: 'vtable+4', message: 0x21, a: 2 * args[6], b: args[7], c: 2, gateSlot: 'Engine.d166964', gateModeled: false },
+    });
+  }
+}
+
+/**
+ * 0x78 / 0x2db：把第 1 个操作数写进**子对象的一个固定字段**，然后**尾跳**进子系统
+ * （CORE-OPS-SUBSYSTEM-SET-TAIL）。
+ *
+ * 逐字：两条同形 —— `0x78` 写 `Engine+0x14D30+0x55C`；`0x2db` 写同一个子对象的 `+0x313D0`；
+ * 然后 `jmp sub_459F40`（尾跳：子系统的返回值直接回给分派器）。
+ * ★ 字段的领域用途未定；子系统内部行为未建模（只记请求）。
+ */
+function setFieldTail(m: Machine, ops: Operand[], field: string): void {
+  m.scalars.set(field, readInt(m, ops, 1));
+  m.effects.push({ kind: 'subsystem.request', detail: { callee: 'sub_459F40', field } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_459F40' });
+}
+
+/** 0x78：写子对象 +0x55C 后尾跳 */
+function field78(m: Machine, ops: Operand[]): void {
+  setFieldTail(m, ops, 'Engine.d21683');
+}
+
+/** 0x2db：写同一子对象 +0x313D0 后尾跳（与 0x78 同形，只差落点） */
+function field2db(m: Machine, ops: Operand[]): void {
+  setFieldTail(m, ops, 'Engine.d71760');
+}
+
+/**
+ * 0x79 / 0x1c1：把两个操作数写进**列表项记录**的一对字段（CORE-OPS-LIST-PAIR）。
+ *
+ * 逐字：两条同形，argc 3 —— 读序 **op3 → op2 → op1**；op1 是组号（0 ⇒ 换成引擎里的默认组），
+ * 记录 = `[子对象 + 4×组号 + 0x414]`；`0x79` 写 `+0x1C ← op2` / `+0x20 ← op3`；
+ * `0x1c1` 写 `+0x24 ← op2` / `+0x28 ← op3`。两条都不产生脚本可观察的返回值。
+ */
+function listPair(m: Machine, ops: Operand[], first: 'f1c' | 'f24'): void {
+  const third = readInt(m, ops, 3);
+  const second = readInt(m, ops, 2);
+  const slot = readInt(m, ops, 1);
+  if (slot === 0) {
+    m.diagnostics.push({ kind: 'ui-default-slot-unmodeled' });
+    return;
+  }
+  const rec = listRecordOf(m, slot);
+  if (first === 'f1c') {
+    rec.f1c = second;
+    rec.f20 = third;
+  } else {
+    rec.f24 = second;
+    rec.f28 = third;
+  }
+}
+
+/** 0x79：写 +0x1C / +0x20（转发 sub_4563A0） */
+function pair79(m: Machine, ops: Operand[]): void {
+  listPair(m, ops, 'f1c');
+}
+
+/** 0x1c1：写 +0x24 / +0x28（转发 sub_4563D0，与 0x79 同形、只差落点） */
+function pair1c1(m: Machine, ops: Operand[]): void {
+  listPair(m, ops, 'f24');
+}
+
+/**
+ * 0x212 / 0x213 / 0x25d：写**已存在的**列表项记录的字段（CORE-OPS-LIST-FIELD）。
+ *
+ * 逐字：三条都按第 1 个操作数索引记录表（`[Engine + 4×组号 + 0x15144]`），
+ * 记录为空 ⇒ **什么都不做（不创建记录）**；
+ * `0x212`（argc 2）写 `+0x64 ← op2`；`0x213`（argc 3）写 `+0x68 ← op2` / `+0x6C ← op3`；
+ * `0x25d`（argc 3，读序 op3→op2→op1）写 `+0x114 ← op2` / `+0x118 ← op3`。
+ */
+function listField212(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 2);
+  const slot = readInt(m, ops, 1);
+  const rec = m.ui.records.get(slot);
+  if (!rec) return;
+  rec.f64 = value;
+}
+
+function listPair213(m: Machine, ops: Operand[]): void {
+  const third = readInt(m, ops, 3);
+  const second = readInt(m, ops, 2);
+  const rec = m.ui.records.get(readInt(m, ops, 1));
+  if (!rec) return;
+  rec.f68 = second;
+  rec.f6c = third;
+}
+
+function listPair25d(m: Machine, ops: Operand[]): void {
+  const third = readInt(m, ops, 3);
+  const second = readInt(m, ops, 2);
+  const rec = m.ui.records.get(readInt(m, ops, 1));
+  if (!rec) return;
+  rec.f114 = second;
+  rec.f118 = third;
+}
+
+/**
+ * 0x303：把一对值写进**已存在的**列表项记录（CORE-OPS-LIST-PAIR2，argc 3）。
+ * 逐字：读序 op3 → op2 → op1；记录 = [子对象 + 4×组号 + 0x414]；写 +0x120 ← op2、+0x124 ← op3。
+ * ★ 与 0x212/0x213/0x25d **不同**：这一条**不检查记录是否为空**（记录为空时引擎会解引用空指针）
+ *   ⇒ 本层对缺失记录响亮失败，不静默跳过。
+ */
+function pair303(m: Machine, ops: Operand[]): void {
+  const third = readInt(m, ops, 3);
+  const second = readInt(m, ops, 2);
+  const slot = readInt(m, ops, 1);
+  if (slot === 0) {
+    m.diagnostics.push({ kind: 'ui-default-slot-unmodeled' });
+    return;
+  }
+  const rec = m.ui.records.get(slot);
+  if (!rec) throw new Error(`list-record-missing:${slot}`);
+  rec.f120 = second;
+  rec.f124 = third;
+}
+
+/**
+ * 0xa0 条件跳转（CORE-FRAME-JUMP-A0）。
+ *
+ * 逐字（sub_4209B0，argc 3）：读 op1 作条件；非 0 ⇒ 读 op2 作目标，等于 0 ⇒ 读 op3 作目标；
+ * 目标为 −1（全 1 位模式）⇒ 不跳（长度槽留着 ⇒ 分派器照常推进）；否则
+ * PC ← 代码区起点 + 4 × 目标、长度槽清 0（不自动推进）。
+ * ★ 只读"该走的那一支"的那个操作数 —— 另一支的操作数不被读。
+ */
+function jumpA0(m: Machine, ops: Operand[]): void {
+  const condition = readInt(m, ops, 1);
+  const target = condition !== 0 ? readInt(m, ops, 2) : readInt(m, ops, 3);
+  if (target === -1) return;
+  m.ip = 4 * target;
+  m.operandCount = 0;
+}
+
+/**
+ * 0x3 换脚本（CORE-FRAME-CALL-SCRIPT）：操作数是**统一文件 id**；把父脚本挂起（body / ip / 帧 / 长度槽），
+ * 装入子脚本并从 dword 0 开始；子帧的局部池**新分配**（不继承父池）。
+ * ★ 引擎先写长度槽 3 再查深度（≥39 层报「階層が深すぎます」）；装载失败 ⇒ 整个执行中止（本层响亮失败）。
+ */
+function callScript3(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1);
+  if (!m.loadScript) throw new Error('call-script-loader-missing');
+  if (m.frames.length >= 39) throw new Error('call-script-too-deep');
+  const child = m.loadScript(id);
+  if (!child) throw new Error('call-script-load-failed:' + id);
+  m.pushScriptFrame(2 * ops.length + 1);
+  m.body = child;
+  m.ip = 0;
+  m.frame = m.freshFrame();
+  m.operandCount = 0;
+}
+
+/**
+ * 0x2 结束当前脚本（CORE-FRAME-EXIT）：帧号 ≥ 0 ⇒ 回父脚本；根帧 ⇒ 整个执行结束。
+ * ★ 它**不写 ip**：父帧 ip 仍是调用点，靠父帧自己的长度槽推 12 字节到"下一条"（引擎的算术结果）。
+ */
+function exit2(m: Machine): void {
+  if (m.frames.length === 0) {
+    m.halted = true;
+    return;
+  }
+  m.restoreScriptFrame();
+}
+
+/**
+ * 0x9 全局重置并重装根脚本（CORE-FRAME-EXIT-SCRIPT）：丢全部帧、以统一文件 id 0 重装进 0 号帧。
+ * ★ 它**不是返回**：调用者永远不会拿回控制权（本层用"重置后从根脚本 dword 0 继续"表达）。
+ */
+function exitScript9(m: Machine): void {
+  if (!m.loadScript) throw new Error('call-script-loader-missing');
+  const root = m.loadScript(0);
+  if (!root) throw new Error('call-script-load-failed:0');
+  m.frames.length = 0;
+  m.body = root;
+  m.ip = 0;
+  m.frame = m.freshFrame();
+  m.operandCount = 0;
+}
+/**
+ * 0x55 整数搬运（CORE-OPS-NUMERIC-MOV-INT）：把第 2 个操作数按整型读出，按整型写进第 1 个。
+ * 逐字：`sub_42C720` —— 先读 op2（`sub_41BF50`），再 `sub_42B4B0(this, 1, 值)` 写回 op1；第 1 个只写不读。
+ */
+function move55(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 2);
+  writeInt(m, ops, 1, value);
+}
+/* ---------------------------- Voice 族 ---------------------------- */
+
+/** 组号 → 声音通道号的固定偏移（`0x2f6` 的机器细节，见绑定） */
+const VOICE_CHANNEL_BASE = 12;
+/** 组数：引擎里是 3 格、步长 4 的数组（组号越界会踩相邻数组 ⇒ 本层对越界响亮失败） */
+const VOICE_GROUP_COUNT = 3;
+/** 声音后端的通道数（0..14） */
+const VOICE_BUFFER_COUNT = 15;
+
+/** 按组号取记录；缺则建（字段全 0，与引擎构造函数一致） */
+function voiceGroupOf(m: Machine, group: number): VoiceGroup {
+  const found = m.voice.groups.get(group);
+  if (found) return found;
+  const created: VoiceGroup = { subsystem: [0, 0, 0, 0], engine: [0, 0, 0, 0] };
+  m.voice.groups.set(group, created);
+  return created;
+}
+
+/**
+ * 0x2f8 设置一个语音组的音量（CORE-OPS-VOICE-VOLUME）。
+ *
+ * 逐字（`sub_4268D0` → `sub_4B6940`）：**先读第 2 个操作数（音量）、再读第 1 个（组号）**；
+ * 通道号 = 组号 + 固定偏移；通道号 ≥ 15 ⇒ 写错误文本 + 记日志、**不改任何状态**；
+ * 否则音量**夹到 [-10000, 10000]** 后写进该通道的音量格，并向声音后端发出设置请求。
+ */
+function setVolume2f8(m: Machine, ops: Operand[]): void {
+  const volume = readInt(m, ops, 2);
+  const group = readInt(m, ops, 1);
+  const channel = group + VOICE_CHANNEL_BASE;
+  if (channel >= VOICE_BUFFER_COUNT) {
+    // 引擎：越界只写错误文本 + 打日志，**不动音量格**（`sub_4B6940` 的 else 支）
+    m.sound.errorBuffer = '関数：dsSetVolume エラー：不正なSound番号です';
+    return;
+  }
+  const clamped = volume < -10000 ? -10000 : volume > 10000 ? 10000 : volume;
+  // 音量格**先写**（`this[a2+375] = v5` 在调用后端之前）⇒ 与后端在不在无关
+  m.sound.volumes.set(channel, clamped);
+  if (m.sound.backend === 'present') {
+    m.effects.push({ kind: 'audio.volume.request', detail: { channel, volume: clamped } });
+  }
+}
+
+/**
+ * 0x2f6 停掉一个语音组，并重算「是否还有语音在播」（CORE-OPS-VOICE-STOP）。
+ *
+ * 逐字次序（`sub_426820` / `sub_4BB9F0` / `sub_404CB0`）：
+ * ① 读组号：引擎拿它索引**步长 4、3 格**的数组，且**不检查上界** ⇒ 越界会踩相邻数组（未定义）；
+ *    本层对 0..2 之外响亮失败（⛔ 不静默收下）。
+ * ② 停止该组：释放「组号 + 固定偏移」那条声音通道上的缓冲对象（没有对象 ⇒ 什么都不发），
+ *    再清语音对象里的 4 格 —— ★ 这两步都只在**声音后端存在**时发生（`Voice+0x408` 那道门）。
+ * ③ 清引擎级的 4 格（无条件：与后端在不在无关）。
+ * ④ 重算「是否还有语音在播」并**无条件**写进那个共享标志：逐组看它第 4 格的**低 2 位**，
+ *    等于 3 的组跳过；其余组问「这条声音通道还在播吗」，第一个在播 ⇒ 1；三组都不在播 ⇒ 0。
+ *    后端不存在 ⇒ 一次都不问、直接 0。
+ */
+function stopVoice2f6(m: Machine, ops: Operand[]): void {
+  const group = readInt(m, ops, 1);
+  if (group < 0 || group >= VOICE_GROUP_COUNT) {
+    throw new Error(`voice-group-out-of-domain:${group}`);
+  }
+  const channel = group + VOICE_CHANNEL_BASE;
+  const backend = m.sound.backend === 'present';
+  // ② 停止 + 清语音对象里的 4 格（门 = 后端存在；释放请求另有一道门 = 该通道有对象）
+  if (backend) {
+    if (m.sound.buffers.delete(channel)) {
+      m.effects.push({ kind: 'audio.release.request', detail: { channel } });
+    }
+    voiceGroupOf(m, group).subsystem = [0, 0, 0, 0];
+  }
+  // ③
+  voiceGroupOf(m, group).engine = [0, 0, 0, 0];
+  // ④
+  let stillPlaying = 0;
+  if (backend) {
+    for (let index = 0; index < VOICE_GROUP_COUNT; index += 1) {
+      if ((voiceGroupOf(m, index).subsystem[3] & 3) === 3) continue;
+      const probe = index + VOICE_CHANNEL_BASE;
+      m.effects.push({ kind: 'audio.playing.query', detail: { channel: probe } });
+      if ((m.sound.buffers.get(probe)?.playing ?? 0) !== 0) {
+        stillPlaying = 1;
+        break;
+      }
+    }
+  }
+  m.scalars.set('voice.stillPlaying', stillPlaying);
+}
+
 /* ──────────────────────────── 等待 / 输入 ──────────────────────────── */
 
 /** 0x21c wait：置等待位（阻塞在门里，不在 handler 内）（CORE-OPS-WAIT） */
@@ -367,6 +834,33 @@ export const HANDLERS = new Map<number, (m: Machine, ops: Operand[]) => void>([
   [0x50, add50],
   [0x51, sub51],
   [0x2d5, floatMov2d5],
+  [0x8f, call8f],
+  [0x1ca, message1ca],
+  [0x70, listSet70],
+  [0x71, text71],
+  [0x73, forward73],
+  [0x78, field78],
+  [0x79, pair79],
+  [0x1c1, pair1c1],
+  [0x212, listField212],
+  [0x213, listPair213],
+  [0x25d, listPair25d],
+  [0x303, pair303],
+  [0x2db, field2db],
+  [0x324, field324],
+  [0x32f, container32f],
+  [0x3, callScript3],
+  [0x2, exit2],
+  [0x9, exitScript9],
+  [0xa0, jumpA0],
+  [0x55, move55],
+  [0x149, thin149],
+  [0x21b, thin21b],
+  [0x252, thin252],
+  [0x88, pair88],
+  [0x5, ret05],
+  [0x2f6, stopVoice2f6],
+  [0x2f8, setVolume2f8],
   [0x1f7, detach1f7],
   [0x1f8, create1f8],
   [0x1f9, set1f9],
@@ -389,3 +883,4 @@ export const HANDLERS = new Map<number, (m: Machine, ops: Operand[]) => void>([
 export function unimplemented(opcode: number): never {
   throw new Error(`unimplemented opcode 0x${opcode.toString(16)}`);
 }
+

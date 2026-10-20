@@ -1236,6 +1236,30 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-alf.test.mjs',
     what: '★ 统一文件 id 偏一位 ⇒ 根脚本取到 BGM 而不是 SYSTEM4.BIN（名字看起来仍是合法条目）',
   },
+  // ── emulator-new：`0x8f call` 的操作数是**位置**（dword 序号）而不是字节偏移 ──
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  m.ip = 4 * target;',
+    to: '  m.ip = target; // 变异：把位置当字节偏移',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '★ 把"位置 × 4"写成"位置就是字节" ⇒ 调用跳到别处（脚本照跑、不报错，只是走错分支）',
+  },
+  // ── emulator-new：`0x2f8` 的音量夹取（饱和，不是回绕） ──
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  const clamped = volume < -10000 ? -10000 : volume > 10000 ? 10000 : volume;',
+    to: '  const clamped = volume; // 变异：去掉夹取',
+    guard: 'tools/test/emulator-new-voice.test.mjs',
+    what: '★ 去掉音量夹取 ⇒ 大音量原样写进音量格（引擎是饱和到 ±10000）',
+  },
+  // ── emulator-new：`0x2f6` 的通道号 = 组号 + 固定偏移 ──
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  const channel = group + VOICE_CHANNEL_BASE;',
+    to: '  const channel = group; // 变异：丢掉通道偏移',
+    guard: 'tools/test/emulator-new-voice.test.mjs',
+    what: '★ 丢掉「组号 + 12」的通道偏移 ⇒ 释放请求与"在播"查询都落到另一条通道上（标志算反而不报错）',
+  },
 ];
 
 /**

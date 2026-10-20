@@ -322,6 +322,24 @@
       ]
     },
     {
+      "id": "frame",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "id": "RES-FRAME-ENGINE-STACK",
+          "kind": "unknown",
+          "what": "返回时从「另一个引擎级栈」弹出的那个值写进哪个槽、给谁用，没有观察",
+          "next": "在返回路径的读者侧找那个槽的消费点；找不到就保持未定"
+        },
+        {
+          "id": "RES-FRAME-OVERFLOW",
+          "kind": "unknown",
+          "what": "返回栈满 / 栈空时的引擎行为（栈顶指针越界）没有观察",
+          "next": "构造超过容量的嵌套调用脚本，观察引擎是抛、是覆盖、还是越界写"
+        }
+      ]
+    },
+    {
       "id": "alf",
       "status": "partial",
       "residual": [
@@ -1614,6 +1632,346 @@
           "next": "按 CORE-POOL 的引用族条目补引用池合同，再回填本条的成立条件"
         }
       ]
+    },
+    {
+      "id": "CORE-OPS-VOICE-STOP",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-VOICE-SLOTS",
+          "kind": "unknown",
+          "what": "0x2f6 重置的 8 格（该组约 10 格）中多数格的领域用途未定；已知只有第 4 格低 2 位 = 完成/跳过位",
+          "next": "按偏移扫全 .lst 找其余格的读者；找不到就保持未定，不猜名字"
+        },
+        {
+          "id": "RES-OPS-VOICE-RELEASE",
+          "kind": "unknown",
+          "what": "释放时那次虚调用（SoundBuffer::vfn0(obj,1)）到底释放了什么，目标解不出",
+          "next": "取 SoundBuffer 的函数指针表或真机 trace"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-CALL",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FRAME-CALL-OVERFLOW",
+          "kind": "unknown",
+          "what": "返回栈满时的行为未观察",
+          "next": "见 RES-FRAME-OVERFLOW"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-RET",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FRAME-RET-ENGINE-STACK",
+          "kind": "unknown",
+          "what": "返回路径上「另一个引擎级栈」的弹出未建模",
+          "next": "见 RES-FRAME-ENGINE-STACK"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-VOICE-VOLUME",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-VOICE-VOLUME-BACKEND",
+          "kind": "unknown",
+          "what": "向后端设置音量那一步（sub_4B6350）具体做了什么（缓冲音量 / 音量衰减曲线）未建模",
+          "next": "需要 DirectSound 层的观测或真机 trace；在那之前只记 audio.volume.request"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCALAR-THIN",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SCALAR-THIN-ROLE",
+          "kind": "unknown",
+          "what": "三条各自那个固定格的领域角色未定（布局层只有稳定身份与写入形态）",
+          "next": "按偏移扫全 .lst 找这三个格的读者；找不到就保持未定，不猜名字"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCALAR-PAIR-88",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SCALAR-PAIR-BIT27",
+          "kind": "unknown",
+          "what": "状态选择字第 27 位的含义、以及「被清之后放行什么」未定（置位那条指令本身也是有条件的，条件未取证）",
+          "next": "查该位的服务分支（门打开时谁处理它）+ 置位那条指令的门判据"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FORWARD-MESSAGE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-FORWARD-MESSAGE",
+          "kind": "unknown",
+          "what": "消息子系统的内部状态（是否有「跳过」标志、在什么条件下影响后续读文本）没有观察",
+          "next": "取证该对象的 vtable+12 入口与它的状态读者；找到后再写一条消息子系统的合同"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FORWARD-FIELD",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-FORWARD-FIELD",
+          "kind": "unknown",
+          "what": "入口（sub_453530 → thunk → sub_453150）之后做了什么没有观察；接收者是什么对象也未定",
+          "next": "追 thunk 的真目标 sub_453150 的体与它的字段写"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FORWARD-CONTAINER",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-FORWARD-CONTAINER",
+          "kind": "unknown",
+          "what": "容器属主那次 vtable+0xD4 通知的行为未建模；容器与那一格的身份（领域角色）未定",
+          "next": "取容器类型与 vtable+0xD4 的目标；再决定要不要把容器建成对象"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-LIST-SET",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-LIST-INTERNALS",
+          "kind": "unknown",
+          "what": "列表登记（sub_45D240）与两条绘制调用（sub_43C8D0 / sub_43B070，及浮点模式分支）的内部行为未建模；记录里派生出来的两个长度槽也没建模",
+          "next": "先取证列表对象的元素布局与那两个派生槽的读者，再决定要不要把列表建成对象"
+        },
+        {
+          "id": "RES-OPS-LIST-DEFAULT-SLOT",
+          "kind": "unknown",
+          "what": "组号为 0 时引擎用的\"默认组\"是哪一个，没有观察",
+          "next": "找写默认组字段（容器 +0x4CC）的指令或启动阶段，再决定默认值"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TEXT-REQUEST",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-TEXT-BLOCKS",
+          "kind": "unknown",
+          "what": "两处整块拷贝（0x4B0 / 20000 字节）、sub_48FFB0、vtable+4 的「读文本跳过」调用都未建模",
+          "next": "按目标地址扫读者，确认这些块是不是脚本可读的；是则建成缓冲对象"
+        },
+        {
+          "id": "RES-OPS-TEXT-GATE-BIT",
+          "kind": "unknown",
+          "what": "那次状态位写（置第 27 位）的条件未取证：本版不写它，因此「本条之后门是否关上」不回答",
+          "next": "查该写点的门（`0x41EE89 test` / `0x41EE8B jz` 读的是什么）—— 与 bug 单 REQ-01M5CWFZV… 同一件事"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SUBSYSTEM-SET73",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-73-SUBSYSTEM",
+          "kind": "unknown",
+          "what": "sub_456430 拿到 9 个操作数后做什么未建模；那个固定格（Engine.d107528）的读者未定",
+          "next": "按偏移扫该格与子系统的读者，再决定要不要建对象"
+        },
+        {
+          "id": "RES-OPS-73-GATE",
+          "kind": "unknown",
+          "what": "第二次请求的门槽（Engine.d166964）由谁写、启动时是什么值，没有观察",
+          "next": "找该槽的写入点；找到后把门建成显式状态"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SUBSYSTEM-SET-TAIL",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SET-TAIL-FIELDS",
+          "kind": "unknown",
+          "what": "两个字段（子对象 +0x55C / +0x313D0）的领域角色未定；sub_459F40 的内部行为未建模",
+          "next": "按偏移扫那两个字段的读者与 sub_459F40 的写点"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-LIST-PAIR",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-LIST-PAIR-FIELDS",
+          "kind": "unknown",
+          "what": "记录 +0x1C/+0x20 与 +0x24/+0x28 的领域角色未定（+0x24/+0x28 也会被 0x70 写）",
+          "next": "按偏移扫这两对字段的读者；若与 0x70 的写语义冲突，先开冲突单"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-LIST-FIELD",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-LIST-FIELD-ROLE",
+          "kind": "unknown",
+          "what": "记录 +0x64/+0x68/+0x6C/+0x114/+0x118 的领域角色未定",
+          "next": "按偏移扫读者；若与 0x70/0x79 的写语义交叠，先开冲突单"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-LIST-PAIR2",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-LIST-PAIR2-ROLE",
+          "kind": "unknown",
+          "what": "记录 +0x120/+0x124 的领域角色未定",
+          "next": "按偏移扫读者"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-JUMP-A0",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-CALL-SCRIPT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FRAME-CS-RETURN-SLOT",
+          "kind": "unknown",
+          "what": "父帧那格（+0x5C）在整份二进制里**没有读点**（10 处全是写）⇒ 它的用途未定；不许拿它算返回",
+          "next": "继续找读点；找不到就保持未定"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-EXIT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FRAME-EXIT-SAVE",
+          "kind": "unknown",
+          "what": "父帧号为 −10/−11 的两条分支是存档/载入专用语义，不是脚本语义（本版不写）",
+          "next": "归入 `FMT-SAVE` 章"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-EXIT-SCRIPT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FRAME-EXIT-SCRIPT-REACH",
+          "kind": "unknown",
+          "what": "0x9 的领域名与真实可达性未定（它出现在各脚本共有的前导块，不能据此断言\"末尾结束\"）",
+          "next": "查前导块的上下文与调用者；找到能到达它的路径再定名"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-NUMERIC-MOV-INT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-FRAME-STACK",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FRAME-STACK-REUSE",
+          "kind": "unknown",
+          "what": "帧槽的复用与释放时机（释放后是否复用同一槽、sub_40EA00 的释放条件）未完全取证",
+          "next": "查 sub_40EA00 的调用点与释放后的帧号写回"
+        }
+      ],
+      "falsifiers": []
     }
   ],
   "gaps": []

@@ -73,6 +73,8 @@ interface RunOpts {
   tickMs?: number;
   uninitializedFloat?: 'throw' | 'zero';
   config?: ConfigStore;
+  /** 换脚本装载器（真实入口才有；`--script` 调试口没有） */
+  loadScript?: (id: number) => Buffer | null;
 }
 
 function parseU32(text: string, what: string): number {
@@ -172,7 +174,7 @@ export function analyzeBytes(buf: Buffer, opts: RunOpts = {}): ScriptReport {
   }
 
   const machine = new Machine({
-    body, table, key: opts.key, tickMs: opts.tickMs, uninitializedFloat: opts.uninitializedFloat, config: opts.config,
+    body, table, key: opts.key, tickMs: opts.tickMs, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
   });
   const r = machine.run({ stopAtOpcode: opts.stopAtOpcode, maxSteps: opts.maxSteps, maxTicks: opts.maxTicks });
   return {
@@ -220,7 +222,16 @@ export function analyzeInstall(
   }
   if (io.initConfig) writeConfigFile(configPath, store.serializeIni());
   const config: ConfigSummary = { path: configPath, source, ...store.stats() };
-  const result = analyzeBytes(script.bytes, { ...opts, config: store });
+  const result = analyzeBytes(script.bytes, {
+    ...opts,
+    config: store,
+    loadScript: (id) => {
+      const f = install.readById(id);
+      if (!f) return null;
+      const h = parseHeader(f.bytes);
+      return f.bytes.subarray(h.headerLength);
+    },
+  });
   return {
     source: {
       kind: 'install',

@@ -97,11 +97,11 @@ test('★ 派发推进：长度 = 2·argc+1 ⇒ 两条指令后 ip = 4+24 + 4+16
 });
 
 test('★ 未实现的 opcode 不执行：ip 不动、steps 不涨（缺口停在它前面）', () => {
-  // 0x2（exit）尚未成篇；用它当"缺口"样本（换成已实现的 opcode 会让这条守卫失去意义）
-  const m = machineFor([[0x2, []]]);
+  // 用一个**仍然未实现**的 opcode 当缺口样本（0x2 已实现；换成已实现的会让这条守卫失去意义）
+  const m = machineFor([[0x1f4, [[0, 1], [0, 2]]]]);
   const r = m.run();
   assert.equal(r.stop.kind, 'unimplemented');
-  assert.equal(r.stop.opcode, 0x2);
+  assert.equal(r.stop.opcode, 0x1f4);
   assert.equal(r.steps, 0);
   assert.equal(r.ip, 0);
 });
@@ -137,4 +137,10 @@ test('★ 读整型从浮点族也走同一条截断（25.9 → 25）', () => {
   ]);
   m.run();
   assert.equal(decodeInt(m.frame.localInt.get(0), KEY), 26, '25.9 截断成 25，再 +1（读整型从浮点族）');
+});
+test('★ 0x55 整数搬运：第 2 个操作数写进第 1 个（13 不是 26、不是位模式）', () => {
+  const m = machineFor([[0x55, [[9, 0], [0, 13]]]]);
+  m.run();
+  assert.equal(decodeInt(m.frame.localInt.get(0), KEY), 13);
+  assert.equal(m.frame.localInt.get(0), encodeInt(13, KEY), '池里必须是编码后的位模式');
 });

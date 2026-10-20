@@ -21,6 +21,13 @@ export interface Frame {
   localInt: Map<number, number>;
   /** 局部浮点池：裸 32 位位模式（规范不保证初值） */
   localFloat: Map<number, number>;
+  /**
+   * 本帧的**返回栈**（位置 = 同脚本内 dword 序号；见 CORE-FRAME-CALL / CORE-FRAME-RET）。
+   * ★ 每帧一份：换帧就换成另一条栈（引擎给每帧各留一段固定容量，容量属机器细节）。
+   */
+  retStack: number[];
+  /** 帧记录里的"本条指令的位置"（帧+0x6C；写入者是 0x71，读者未定） */
+  position: number;
 }
 
 /** 纹理记录：来源文件（-1 = 无）、颜色键、空白创建标记（见 CORE-OPS-TEXTURE-*） */
@@ -78,6 +85,59 @@ export interface Mesh {
   unknown: Map<number, number>;
 }
 
+/**
+ * 语音组（见 CORE-OPS-VOICE-STOP）：`0x2f6` 按组号重置的那些字段。
+ * ★ 引擎里这些是**每组 4 字节步长的数组**（`0x2f6` 只清其中 8 格：语音对象内 6 格 + 引擎级 2 格 +
+ *   另两格在语音对象里但由别的写入点维护）。字段的**领域用途多数未定** ⇒ 不命名、不解释；
+ *   唯一已定的是 `subsystem[3]` 的低 2 位 = 重算「是否还有语音在播」时的**跳过判据**（等于 3 的组被跳过）。
+ */
+export interface VoiceGroup {
+  /** 语音对象里的 4 个字段 */
+  subsystem: [number, number, number, number];
+  /** 引擎级的 2 个字段 + 语音对象里的 2 个字段（`0x2f6` 清的那 4 格） */
+  engine: [number, number, number, number];
+}
+
+/**
+ * UI 列表项记录（见 CORE-OPS-LIST-SET）：`0x70` 按组号写入的那 8 个字段。
+ * ★ 字段的领域用途未定（布局层只有"记录 + 偏移"）；这里只按机器身份存值，不命名、不解释。
+ */
+export interface ListRecord {
+  /** 记录 +0x0C */
+  f0c: number;
+  /** 记录 +0x10 */
+  f10: number;
+  /** 记录 +0x14 */
+  f14: number;
+  /** 记录 +0x18 */
+  f18: number;
+  /** 记录 +0x1C */
+  f1c: number;
+  /** 记录 +0x20 */
+  f20: number;
+  /** 记录 +0x24 */
+  f24: number;
+  /** 记录 +0x28 */
+  f28: number;
+  /** 记录 +0x7C */
+  f7c: number;
+  /** 记录 +0x80 */
+  f80: number;
+  /** 记录 +0x64 */
+  f64: number;
+  /** 记录 +0x68 / +0x6C */
+  f68: number;
+  f6c: number;
+  /** 记录 +0x114 / +0x118 */
+  f114: number;
+  f118: number;
+  /** 记录 +0x120 / +0x124 */
+  f120: number;
+  f124: number;
+  /** 该组是否被登记进列表（`0x70` 置 1） */
+  registered: number;
+}
+
 /** 影片对象（见 CORE-OPS-MOVIE）：只保留可观察的引擎数据 */
 export interface MovieObject {
   kind: 'movie';
@@ -121,6 +181,15 @@ export interface SceneState {
   windowBusy: number;
 }
 
+/** 挂起的父脚本（call-script 的栈帧）：body / ip / 帧记录 / 该帧自己的长度槽 */
+export interface ScriptFrame {
+  body: Buffer;
+  ip: number;
+  frame: Frame;
+  /** 父帧在调用点的长度槽（call-script 恒为 2·argc+1 = 3） */
+  length: number;
+}
+
 /** 外部请求留痕：规范不规定外部效果，但参考实现要把"发出过什么请求"记下来 */
 export interface EffectRecord {
   kind: string;
@@ -158,10 +227,12 @@ export interface MachineOptions {
   uninitializedFloat?: 'throw' | 'zero';
   /** 配置库（`55-config.md`）；缺省 = 未建立（配置 opcode 会响亮失败） */
   config?: ConfigStore;
+  /** 换脚本装载器（真实入口由安装目录提供；`--script` 调试口没有它） */
+  loadScript?: (id: number) => Buffer | null;
 }
 
 export class Machine {
-  readonly body: Buffer;
+  body: Buffer;
   readonly table: Map<number, OpcodeRow>;
   readonly key: number;
   readonly handlers: Map<number, Handler> = HANDLERS;
@@ -171,6 +242,10 @@ export class Machine {
   readonly uninitializedFloat: 'throw' | 'zero';
   /** 配置库（缺省 undefined：配置 opcode 响亮失败，而不是静默 0） */
   readonly config: ConfigStore | undefined;
+  /** 换脚本用的装载器（统一文件 id → body）：缺省 = 不支持 call-script（响亮失败） */
+  readonly loadScript: ((id: number) => Buffer | null) | undefined;
+  /** 挂起的父脚本栈（call-script 进入时压、exit 回父时弹） */
+  frames: ScriptFrame[] = [];
 
   /** 引擎级状态选择字：整字为 0 才执行指令（CORE-VM-GATE） */
   flags = 0;
@@ -192,7 +267,7 @@ export class Machine {
   operandCount = 0;
   halted = false;
 
-  frame: Frame = { localInt: new Map(), localFloat: new Map() };
+  frame: Frame = { localInt: new Map(), localFloat: new Map(), retStack: [], position: 0 };
   /** 全局整型池：编码后的位模式 */
   globalInt = new Map<number, number>();
   /** 全局浮点池：裸 32 位位模式 */
@@ -218,9 +293,28 @@ export class Machine {
     windowCancel: 0,
     windowBusy: 0,
   };
+  /**
+   * 声音对象（引擎里是一个子对象；语音对象在它 `+0x408` 存着指向它的指针）。
+   * ★ `backend` 是**显式状态**，不是常量：后端不存在时引擎不清语音对象里的 4 格、不发任何
+   *   播放查询、也不设置音量（各处都有一道门），标志直接 0。参考实现建模为 `present`
+   *   （真实机器上后端存在），但分支必须可被守卫选中。
+   * ★ `buffers` = 15 个通道（0..14）：`playing` 是引擎从缓冲对象读的那一位；
+   *   本层没有任何指令会把它置 1 ⇒ "全不在播"是**可断言的前提**，不是猜的常量。
+   * ★ `volumes` = 每通道的音量格（`0x2f8` 写入，夹在 ±10000）。
+   */
+  sound: {
+    backend: 'present' | 'absent';
+    buffers: Map<number, { playing: number }>;
+    volumes: Map<number, number>;
+    /** 声音对象的错误文本缓冲（非法通道号等失败路径写它） */
+    errorBuffer: string;
+  } = { backend: 'present', buffers: new Map(), volumes: new Map(), errorBuffer: '' };
+  /** UI 列表（见 CORE-OPS-LIST-SET）：按组号索引的记录 */
+  ui: { records: Map<number, ListRecord> } = { records: new Map() };
+  /** 语音对象：三个组的按组索引状态（`0x2f6` 重置其中 8 格） */
+  voice: { groups: Map<number, VoiceGroup> } = { groups: new Map() };
   /** 发给外部模块的请求（按发生顺序） */
   effects: EffectRecord[] = [];
-
   constructor(opts: MachineOptions) {
     this.body = opts.body;
     this.table = opts.table;
@@ -228,6 +322,7 @@ export class Machine {
     this.tickMs = opts.tickMs ?? 16;
     this.uninitializedFloat = opts.uninitializedFloat ?? 'throw';
     this.config = opts.config;
+    this.loadScript = opts.loadScript;
   }
 
   /**
@@ -300,6 +395,26 @@ export class Machine {
         mesh.flags &= ~2;
       }
     }
+  }
+
+  /** 空白帧（新脚本用）：池与返回栈都重新建 */
+  freshFrame(): Frame {
+    return { localInt: new Map(), localFloat: new Map(), retStack: [], position: 0 };
+  }
+
+  /** 压一层父脚本（call-script 进入前调用） */
+  pushScriptFrame(length: number): void {
+    this.frames.push({ body: this.body, ip: this.ip, frame: this.frame, length });
+  }
+
+  /** 回父脚本：恢复 body / ip / 帧，并把「操作数个数」槽设成父帧自己的长度（引擎的算术） */
+  restoreScriptFrame(): void {
+    const parent = this.frames.pop();
+    if (!parent) return;
+    this.body = parent.body;
+    this.ip = parent.ip;
+    this.frame = parent.frame;
+    this.operandCount = parent.length;
   }
 
   /** 读当前指令（不执行）。越界 / 未知 opcode 返回 null 并附停因。 */
