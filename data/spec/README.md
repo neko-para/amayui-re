@@ -16,7 +16,7 @@
 | [`chapters/*.md`](chapters/) | **规范正文**：自包含的领域合同、定义、状态对应、条件（阅读顺序见 [`chapters/README.md`](chapters/README.md)） | **是** |
 | [`bindings.json`](bindings.json) | **机器绑定**：站点 EA / 函数 / `storage` 指针 / 证据 | 否（内部复核） |
 | [`audit.json`](audit.json) | **范围审计**：试点块 / effect 归属（规则选择器 + 内部省略 + 残差）/ 成熟度 / 缺口 / 可证伪预言 | 否（内部复核） |
-| [`format/opcode-table.json`](format/opcode-table.json) | **本规范的指令表**（当前待核验；不是实现副本） | **是**（伴随数据） |
+| [`format/opcode-table.json`](format/opcode-table.json) | **本规范的指令表**（本规范自己的数据；内容当前来自实现、整表待核验；不是 `age-format` 的 canonical 副本） | **是**（伴随数据） |
 | [`format/config-keys.json`](format/config-keys.json) | **配置键词表**（默认表 / 玩家文件 / 保存三套映射；见同目录 `.md`） | **是**（伴随数据） |
 | [`format/verification.md`](format/verification.md) | **协议核验台账**（EA / 台账 / 守卫；内部） | 否（内部复核） |
 | [`format/alf-agf-verification.md`](format/alf-agf-verification.md) | **ALF / AGF 核验台账**（EA / 台账 / 守卫；内部） | 否（内部复核） |
@@ -39,6 +39,10 @@
   正文只写领域行为。校验器的「自包含」不变量会红。
 - 章里没有规则的纯定义/术语是正常的（例如「执行模型」）；`audit.chapters[].status` 区分
   `none` / `partial` / `bootstrap`。
+- **协议描述章暂不挂规则**：`20-alf` / `30-agf` 目前是**协议描述**——它们没有 `<!-- rule -->`、不进入规则计量与 `bindings`；
+  其核验状态与证据在 [`format/alf-agf-verification.md`](format/alf-agf-verification.md)。
+  ★ 这是**显式决定**（不是遗漏）：把两章拆成 `FMT-ALF-*` / `FMT-AGF-*` 规则是另一批工作，已登记在需求树；在那之前，
+  规则计量不覆盖这两章（规则数以 `pnpm tools spec chapters` 现查）—— 读正文时要按状态词判断证据档位。
 
 ## 2.1 覆盖是 effect 级，不是"整条指令"
 
@@ -70,11 +74,11 @@ pnpm tools spec describe      # 字段 / 枚举 / 不变量 / 操作 / 诚实项
   （字段 `rule`）与 `audit.json` 的 `rules[]`（字段 `id`）各加同一条规则（跨文件不变量会检查）。
 * **还没有规范内容的义务** → 放 `audit.json` 的 `gaps[]`，**不要**写成规则。
 * **机器绑定 / 证据** → 只改 `bindings.json`；证据按 `KN:<ULID>` / `guard:<path>#<用例>` 引用。
-* **分发**：直接分发 `chapters/*.md`（阅读顺序见 [`chapters/README.md`](chapters/README.md)）；**不生成单文件**，也没有生成物要维护。
+* **分发**：分发集 = `chapters/*.md`（阅读顺序见 [`chapters/README.md`](chapters/README.md)）+ `format/opcode-table.json` + `format/config-keys.json`（正文明确依赖的伴随数据）；**不生成单文件**，也没有生成物要维护。
 
 ## 5. 本层**不**提供什么（诚实边界）
 
 * 不证明合同与原引擎等价；也不消除"多路推导共同误解"。
 * 试点块是**声明**的；effect 由语料机械枚举，但枚举器有边界（见 `x86-effects` 文件头），不证明域外没有同类义务。
 * `discarded` / `unknown` 不并进"已解释"；计数不是正确性证据。
-* 表现层逐位一致（像素 / 混音）不在 spec：按项目口径进 `discards`。
+* 表现层逐位一致（像素 / 混音）不在 spec：按项目口径进 `audit.json` 里 `disposition=discarded` 的规则（带 `reason` / `range` / `impact`）；若还没有这样的条目，那是欠账，不要读成"已经登记过"。

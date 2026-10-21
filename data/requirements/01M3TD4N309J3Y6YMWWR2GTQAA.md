@@ -7,7 +7,7 @@
 - order: 120
 
 ## 前置
-**K1 + M4-1（无头核心）** —— ★ 不是整个 M4。
+**无**（原前置 K1 / M4-1 都已 drop：知识线按 `AGENTS.md` §6 常态化，旧无头核心计划由 `apps/emulator-new` 取代）。本单只剩台账锚补证两件。
 
 实测口径：79 条 `modeled-verified` 的守卫文件**全部**落在 T0/T1 档（T2 全仓只有 `e4-gamestart-shot.test.ts`，
 不进 `all`/`verify`）⇒ 复核**不需要真窗口、不需要原生输入、不需要真游戏安装**，只要无头核心 + fixture 驱动。

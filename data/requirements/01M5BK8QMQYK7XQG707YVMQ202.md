@@ -11,14 +11,14 @@
 
 core spec 的 `CORE-ISA` / `CORE-POOL` / `CORE-CONFIG` / `CORE-FRAME` 已落盘并有语料级 / pure 守卫；`apps/emulator-new`（只读 `data/spec`）走**真实入口**：安装目录 → `SYS4INI.BIN`（ALF 索引）→ 统一文件 id → 根脚本 **id 0**（`SYSTEM4.BIN`），并按 spec 执行。
 **本单是交接快照**：状态以各子单 / `pnpm tools requirements plan` 为准；这里只记"换会话 / 换设备必须知道的事"。
-★ **目标状态（2026-10-21）**：从 id 0 跑到 LOGO `0x20F` **仍未达成** —— 停在子脚本 `LOADCONFIG.BIN` 偏移 192（`0x192`，大函数，未取证到可实现粒度）；**本轮没有推进前沿**，做的是 spec 质量治理。剩余路径见 `REQ-01M5CYFJY8P1PQ0AANGE87K1VJ`。
+★ **目标状态**：从 id 0 跑到 LOGO `0x20F` **仍未达成** —— 实测停在子脚本 `INITCONFIG0.BIN` 偏移 192 的 `0x192 set-string`（`INITCONFIG0` #12；旧文写的 LOADCONFIG 是错的）。前沿之后的路径由本单跟踪；旧「60→LOGO 剩余路径」单已 drop（spike 结论已落成 `CORE-OPS-FRAME-*` 规则）。
 
-## 本轮（2026-10-21）spec 治理（前沿未动）
+## 上一轮（2026-10-21）spec 治理（前沿未动；第三轮见 `REQ-01M5ED1Z9W1V190WYF6T6M4FX1`）
 
 - **storage 指针全部改挂 shape**：`bindings.json` 里 `shape:` 89 处 / `layout:` 0 处；解析器**删掉了 `layout:` 分支**（不是计数棘轮，是结构性拒绝），守卫 `tools/test/spec.test.mjs#storage 指针只认 shape：bindings 里 0 处 layout:` + 变异条目。收口单 `REQ-01M5D2Q214Y8949Q0PBP236K29`（done）。
 - **两轮只读审稿**（60+45 条）逐条处置，清单与状态在 `docs/02-engine/spec-audit-2026-10.md` §八 / §九；可文本裁决的已改，12 条缺证据的转 `REQ-01M5D4NNZWAJVJFAHXQ9C5Z6GE` 并进 `audit.json` 残差。
 - 关键修正：`0x3` **先**写父帧长度槽 = 3 **再**查深度；`0x2` 释放有条件（父帧号 + 1 == 当前帧号）；type 8 读 / 写全抛；读浮池内 32 位 / 返回 64 位；配置键 9 字节、命名键与脚本键**两张表**；ALF / AGF **同一个 LZSS**；ALF 头 268（300 属另一加载器）。
-- 门禁：`spec validate` 13/13 · `pnpm test` **569/569** · `ledger` 8/8 · `requirements` 5/5 · `typecheck` 绿。
+- 门禁（第三轮复核后）：`spec validate` 13/13 · `pnpm test` **594/594** · `ledger` 8/8 · `requirements` 5/5 · `typecheck` 绿。
 
 ## 已完成（凭据 = 守卫 / 文件）
 
@@ -26,7 +26,7 @@ core spec 的 `CORE-ISA` / `CORE-POOL` / `CORE-CONFIG` / `CORE-FRAME` 已落盘�
 - **CORE-ISA**：`10-format.md` 9 条；守卫 `spec-isa.assets`。
 - **CORE-POOL**：`40-pools.md` / `50-engine-state.md`；19 条全部有归宿；守卫 `spec-pool.assets`。
 - **CORE-OPS**：`60-ops.md` —— 数值 / 纹理 / 场景颜色 / 语音 / 引擎级标量 / 转发型 / 列表项 / 文本 / 子系统转发 / 字段对 / 条件跳转 / 多脚本（`0x3`/`0x2`/`0x9`）/ 等待输入 / 影片 / 空操作；守卫 `emulator-new-voice` + `emulator-new-scalars-thin`。
-- **CORE-FRAME**：`15-frame.md` —— 帧栈（容量 40、父帧链、条件释放）+ `0x8f call` / `0x5 ret`（位置 = 同脚本 dword 序号、每帧返回栈、−1 哨兵）；守卫 `emulator-new-frame`。
+- **CORE-FRAME**：`15-frame.md` —— 帧栈（容量 40、父帧链、条件释放）+ `0x8f call` / `0x5 ret`（位置 = 同脚本 dword 序号、每帧返回栈、−1 哨兵）；守卫 `emulator-new-frame`。★ 守卫全落在 LIFO 子集内、与引擎「40 槽 + 帧号」不等价：`REQ-01M5D251ZJTZA4S6SX170RAXD2`。
 - **CORE-CONFIG**：`55-config.md` 5 条 + `format/config-keys.json`；emulator-new 读索引 51 条默认 + 可选 `SYS4REG.INI`，`--init-config` 生成默认文件；守卫 `emulator-new-config{,.assets}`。
 - **CORE-VM / CORE-TIMING**：`70-vm.md` —— 互斥分支链 / 门 / 状态位 / 时钟 / 计时窗 5 条。
 - **真实入口**：`src/lzss.ts` / `src/alf.ts` / `src/host.ts` —— ALF 索引（S4IC，8 归档 / 21109 条目）、4 KiB 环形窗口 LZSS、统一文件 id == TOC 条目下标、松散文件优先、按 `(offset,length)` 切片。
@@ -54,7 +54,7 @@ pnpm tools requirements validate # 5/5
 
 ## 入库状态（★ 换设备的前提）
 
-**工作树有未提交改动**（2026-10-21 的 spec 治理；按长期纪律不 `git add` / `commit`）。HEAD = `689d487 feat: review`（2026-10-21）⇒ 另一台设备 `git pull` 只看到**提交时**的内容；本轮的 spec 改动在**工作树里**，换设备前要么提交（由你决定），要么先导出 diff。
+**工作树有未提交改动**（2026-10-21 的 spec 治理 + 第三轮复核；按长期纪律不 `git add` / `commit`）。提交时机由你决定；换设备前要么提交，要么先导出 diff。
 2026-10-21 本机复跑：`pnpm test` 569/569、`spec validate` 13/13、`ledger validate` 8/8、`requirements validate` 5/5、`typecheck` 绿。只在本地的是 `.tmp/`（草稿与诊断脚本，可重建）。
 
 ## 待裁决（已登记，未定）
@@ -64,12 +64,12 @@ pnpm tools requirements validate # 5/5
 
 ## 下一步（建议顺序）
 
-1. 从**子脚本 `LOADCONFIG.BIN` 偏移 192 的 `0x192`**（argc 2）继续。★ `0x55` 已落（`CORE-OPS-NUMERIC-MOV-INT`）。三条控制流规则在 `15-frame.md`，台账 accepted = `KN-01M5CZSPC45T6K524Z616R6S3B`。
+1. 实现 **`0x192 set-string`**（`INITCONFIG0` #12：op1 type 5 全局串 #3003、op2 type 2 内联串「メイリオ」）。★ `0x55` 已落（`CORE-OPS-NUMERIC-MOV-INT`）；type 2 读法与三条控制流规则都有台账，见 `data/ledger/`。
 2. `REQ-01M5D4NNZ…`：12 条缺证据的合同缺口（容器下标 / 字段身份 / 默认组 / 颜色 / 边界算术…）逐条取证。
 3. `CORE-FS` / `CORE-BOOT` 成篇（`REQ-01M5CWFJTK…`）：取件 5 条 + BOOT 只写有强锚的 5 条。
 4. 把 `60-ops.md` / `70-vm.md` / `15-frame.md` 的规则从 `draft` 推到 `reviewed`（要 accepted 台账锚或 `@env pure` 守卫）。
 5. 治理二批（并号迁移、planned 对齐、路径标记、`CORE-POOL-SCALAR-*` 前缀改名）。
-6. `TABLE-RECON`（argc 对账）需要独立守卫；其余残差见 `audit.json`。
+6. opcode 表对账（`hasHandler` + argc vs 长度槽）已开单 `REQ-01M5ED2AD7SKV077BRVRGNE3R7`；其余残差见 `audit.json`。
 
 ## 新会话从这读
 

@@ -2,8 +2,9 @@
 
 - id: REQ-01M48ZGEJ2S8TDVC1DAY4MM0KQ
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M47SGXYWPQ1KWET2J49TJQST
+- dropped_reason: 对象是 apps/emulator 的 src/model 状态分区与快照接缝；该实现已废弃，快照/恢复不再是交付物。
 - tags: [emulator]
 
 ## 范围

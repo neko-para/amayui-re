@@ -2,8 +2,9 @@
 
 - id: REQ-01M5CYFJY8P1PQ0AANGE87K1VJ
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M4B248NB8FWDN61E2NMK8N6V
+- dropped_reason: 本单结论已写进正文（0x3 / 0x2 / 0x9 逐字 + 返回点算术）；剩余启动链路径由交接单 REQ-01M5BK8QMQYK7XQG707YVMQ202 与 emulator-new 前沿单跟踪，不再单独保留。
 - tags: [emulator, boot]
 
 ## 一句话

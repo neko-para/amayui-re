@@ -36,7 +36,7 @@ pnpm tools spec describe                 # 字段 / 枚举 / 不变量 / 操作�
 
 1. 加规则时在 `rules[]` 加同一条 `id`：`status/draft|reviewed`、`disposition`、`covers`（选择器）、`residual`、`falsifiers`。
    还没有规范条目、但已经识别出来的义务 ⇒ 在 `pilot.residuals` 里加带 `next` 的选择器；
-   还没写的章节 ⇒ 放进 `planned[]`（不要塞进 manifest）。
+   还没成篇的域 ⇒ 放进 `planned[]`（不要塞进 manifest；可以是 `partial`：规则已落在某章、但该域还没有独立章节）。
 2. `disposition=replaced` 要写 `replacement`（preserves/discards/chosen/scope）；`omitted` 要写 `omission`；
    `discarded` 要写 `discard`（reason/range/impact）。判据见 `pnpm tools spec describe`。
 3. **未登记义务 = 0**：新增试点块 / 改变 effect 枚举口径后，跑 `pnpm tools spec report`；

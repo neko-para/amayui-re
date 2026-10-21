@@ -2,9 +2,10 @@
 
 - id: REQ-01M3TCXAQ0BZEJ1MMM0N9ZMB8Y
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 80
+- done_reason: 技能与插件都已按新结构重建：.agents/skills/ 下 7 个技能（固定路径、DSH 自动发现）；plugins/ 下 3 个插件（deploy / pnpm-priv / wait-subagent），插件测试进 pnpm test。旧仓其余技能按「需要文件还是需要 DSH 运行时」判据不再逐个重建。
 
 ## 范围
 agent 基建按新结构重建：**技能**（路径固定）与 **DSH 插件**（位置自由、环境级注册）。

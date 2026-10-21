@@ -22,5 +22,5 @@ pnpm tools spec validate                 # 章节文件存在 / 规则标记 / �
 2. 调整顺序：只改 `chapters[]` 的顺序（渲染按它排序；`audit.chapters[]` 只按 `id` 对应，**顺序不参与展示**）。
 3. 规则：在章节里加 `### 标题` + `<!-- rule: ID -->` + 正文，并在 `bindings.json` 的 `bindings[]`
    （字段 `rule`）与 `audit.json` 的 `rules[]`（字段 `id`）各登记同一条规则。
-4. 未写的章节：不要放进 manifest；放 `audit.json` 的 `planned[]`。
+4. 未成篇的域：不要放进 manifest；放 `audit.json` 的 `planned[]`（可以是 `partial` —— 它的规则可能已落在某章，但该域还没有独立章节）。
 5. 改完跑 `pnpm tools spec validate`。

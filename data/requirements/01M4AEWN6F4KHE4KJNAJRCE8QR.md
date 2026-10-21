@@ -2,8 +2,9 @@
 
 - id: REQ-01M4AEWN6F4KHE4KJNAJRCE8QR
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TCB0S0BTW41KW0JBJMWHHH
+- dropped_reason: 能力普查是「读旧实现」路线；现行路线是 spec 驱动（40 / 50 / 60 / 70 章），候选清单不再是工作项。
 - tags: [emulator]
 
 ## 范围

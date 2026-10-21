@@ -2,8 +2,9 @@
 
 - id: REQ-01M4AGPP1T9A60HQYW3GX9W592
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M47SGXYWPQ1KWET2J49TJQST
+- dropped_reason: 启动链重写针对旧实现 apps/emulator；emulator-new 已按 spec 走真实入口，整条链由交接单与后续前沿单跟踪。
 
 ## 这一单要什么
 

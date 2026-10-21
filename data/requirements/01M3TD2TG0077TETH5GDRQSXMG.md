@@ -2,9 +2,10 @@
 
 - id: REQ-01M3TD2TG0077TETH5GDRQSXMG
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 110
+- dropped_reason: 知识线已按 AGENTS §6（2026-10 变更）常态化：结论逐条按准入登记进 data/ledger，不再走「批量清理旧仓 → 候选分级清单」这条路线。
 
 ## 前置（人裁决，不是别的节点）
 知识线是否启动由用户口径决定（当前未启动）。

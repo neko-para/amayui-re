@@ -2,9 +2,11 @@
 
 - id: REQ-01M480JQMWJF82GGBTTERMZFNC
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 55
+- verify: tools/test/ledger.test.mjs#★ #7 分类轴：`system` 值追不到词表 ⇒ 红（= 待裁决，不许静默放过）
+- done_reason: 分类轴机制已落：system 字段 + 域词汇表 + 别名/拆分/待定域三条判据；守卫在 tools/test/ledger.test.mjs（另有「改名/归并靠 aliases 仍可解析」「拆分必须走追加更正」两条）。词表值本身按口径不填。
 - tags: [ledger knowledge]
 
 ## 背景（为什么是单独一张单）

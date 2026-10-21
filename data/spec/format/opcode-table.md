@@ -6,14 +6,19 @@
 ## 这个文件是什么
 
 **脚本二进制协议的指令表**（本规范自己的数据，不是 `age-format` 的 canonical 副本）。
-每条 `{opcode, argc, name, aliases}`：
+每条 `{opcode, argc, name, aliases, hasHandler}`：
 
 - `argc` **决定指令边界**：一条指令 = `4 + 8×argc` 字节。★ 引擎**不查这张表**：处理函数各自把 `2×argc+1` 写进长度槽，分派器按它推进；本表的 `argc` 是这些行为的**静态投影**，不是运行期数据；
 - `name` / `aliases` 只用于文本表示与重汇编查找，不改变字节语义；
 - 空 `name` 表示未命名 opcode（反汇编器用规范名 `iXXX`）。
+- `hasHandler` **必须是布尔**：`true` = 该 opcode 在分派表里有非缺省处理函数；`false` = 有编码但落缺省（执行到它即抛异常、不推进）。
+  ★ `name` 为空**不是**判据 —— 表里大多数条目没有名字；判「有没有处理函数」只认这一列。
 
 ★ **当前状态：待核验（unverified）**。表的内容最初来自 `age-format` 的现有实现（它仿照第三方库写成），
-尚未逐条对引擎解码代码 / 长度字核验。规范正文（`chapters/10-format.md`）已把这个状态写进「核验状态」。
+尚未逐条对引擎解码代码 / 长度字核验。
+★ 上面"`argc` 是处理函数写长度槽这一行为的静态投影"说的是**语义**（表与运行期的关系）；
+它不改变本表的**来源**仍是实现的副本 —— 所以整表按 `unverified` 处理。
+规范正文（`chapters/10-format.md` 的「核验状态」）与本文件用**同一句**表述；改一处必须改另一处。
 
 ★ **依赖方向**：本文件是规范数据；`packages/age-format/src/asm/instruction-set.json` 是实现副本。
 实现与本表不一致时以本表为准（但先要完成核验；未核验前不要拿它当"已证实"）。
@@ -31,7 +36,8 @@ node -e "import('./data/spec/format/opcode-table.json', { with: { type: 'json' }
 ## 怎么改
 
 1. 先核验：在引擎里找到该 opcode 的**解码 / 长度推进 / handler**，把 `argc` 与语义关联登记到审计。
-2. 改本表（规范数据）：只改已核验的条目；未核验的条目保持现状并继续标 `待核验`。
+2. 改本表（规范数据）：只改已核验的条目；未核验的条目保持现状。
+   本表**没有逐条状态字段**：核验结论（EA / 台账 / 守卫）记在 [`verification.md`](verification.md)，全表状态只写在前一节那一句里。
 3. 同步实现副本：`packages/age-format/src/asm/instruction-set.json`（实现侧；可另跑其测试）。
 4. 跑 `pnpm test` + `pnpm tools spec validate`。
 

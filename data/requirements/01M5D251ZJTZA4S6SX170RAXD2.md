@@ -3,7 +3,7 @@
 - id: REQ-01M5D251ZJTZA4S6SX170RAXD2
 - type: bug
 - status: open
-- parent: REQ-01M4B248NB8FWDN61E2NMK8N6V
+- parent: REQ-01M3TCB0S0BTW41KW0JBJMWHHH
 - repro: apps/emulator-new/src/machine.ts#frames.pop()
 - severity: S2
 - tags: [emulator, frame, escape]

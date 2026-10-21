@@ -4,7 +4,7 @@
 
 1. [`00-overview.md`](00-overview.md) —— 总览与约定（范围 / 术语 / 与现有实现的关系）
 2. [`10-format.md`](10-format.md) —— 脚本与执行（脚本头 / 指令编码 / 操作数编码 / 帧）
-3. [`15-frame.md`](15-frame.md) —— 帧与调用（帧栈 / 换脚本 / 返回 / 重置）
+3. [`15-frame.md`](15-frame.md) —— 帧与调用（帧栈：帧记录 / 当前帧 / 父帧链 / 分配与释放；逐条控制转移见「指令语义」）
 4. [`20-alf.md`](20-alf.md) —— ALF 归档（索引头 / 段 / LZSS / TOC / 载荷）
 5. [`30-agf.md`](30-agf.md) —— AGF 图像（ACGF 容器 / meta / body / ACIF / 像素）
 6. [`40-pools.md`](40-pools.md) —— **数据池**（global/local 池、访问原语、类型标签、值编码、字符串、容量）

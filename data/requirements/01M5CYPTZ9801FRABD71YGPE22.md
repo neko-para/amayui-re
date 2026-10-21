@@ -2,8 +2,9 @@
 
 - id: REQ-01M5CYPTZ9801FRABD71YGPE22
 - type: spike
-- status: open
+- status: dropped
 - parent: REQ-01M5CYFJY8P1PQ0AANGE87K1VJ
+- dropped_reason: spike 的问题已由 spec 第三轮回答：0x3 / 0x2 / 0x9 的逐字行为已写进 data/spec/chapters/60-ops.md 的 CORE-OPS-FRAME-* 规则（EA 锚在 bindings.json），本设问不再需要独立跟踪。
 - tags: [emulator, boot, control-flow]
 
 ## 一句话

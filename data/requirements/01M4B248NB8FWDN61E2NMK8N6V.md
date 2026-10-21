@@ -2,8 +2,9 @@
 
 - id: REQ-01M4B248NB8FWDN61E2NMK8N6V
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
+- dropped_reason: 对象是旧实现 apps/emulator 的启动前段；emulator-new 走真实入口（SYSTEM4 → … → INITCONFIG0）已取代这条路线，「推过 SYSTEM4 前段」不再是有意义的工作项。
 
 ## ★★ 当前实测（本轮：14291 → 24278 → **85994 步**；两次大跳）
 

@@ -2,9 +2,10 @@
 
 - id: REQ-01M47T0D3C3S6EDTAPMG347DY3
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M47SGXYWPQ1KWET2J49TJQST
 - order: 611
+- dropped_reason: 要拆的是旧仓 app/amayui-emulator/test 下的跨域守卫；新仓 tools/test 已有自己的分级（@env/@kind）与组织守卫，旧仓那 10 个不迁入。
 - tags: [emulator ledger]
 
 ## 范围

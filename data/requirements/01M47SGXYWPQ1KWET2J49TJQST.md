@@ -2,9 +2,10 @@
 
 - id: REQ-01M47SGXYWPQ1KWET2J49TJQST
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TCSNH00RVXCPZGM1J6EXRC
 - order: 61
+- dropped_reason: M4-1 是「把旧仓无头核心按新结构重写」的计划；旧实现已废弃，apps/emulator-new（只读 data/spec）取代了它，该计划不再成立。
 - tags: [emulator]
 
 ## 范围

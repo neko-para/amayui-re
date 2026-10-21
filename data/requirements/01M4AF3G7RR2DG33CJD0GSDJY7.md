@@ -2,8 +2,9 @@
 
 - id: REQ-01M4AF3G7RR2DG33CJD0GSDJY7
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M4AEWN6F4KHE4KJNAJRCE8QR
+- dropped_reason: 「定位主循环」已由 spec「执行与时间」CORE-VM-LOOP（步骤 / 门 / 时钟 / 计时窗）完成，该前置不再需要。
 - tags: [emulator]
 
 ## 范围

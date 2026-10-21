@@ -832,7 +832,7 @@ export function describe() {
       format: {
         file: 'data/spec/format/opcode-table.json',
         what: '**本规范的指令表**：当前内容来自现有实现，协议部分标为待核验；不是 `age-format` 的 canonical 副本。',
-        fields: ['opcode', 'argc', 'name', 'aliases'],
+        fields: ['opcode', 'argc', 'name', 'aliases', 'hasHandler'],
       },
       configKeys: {
         file: 'data/spec/format/config-keys.json',
@@ -857,7 +857,7 @@ export function describe() {
         ['rule', '✅', '规则 id', '与章节里的 <!-- rule: ID --> 一一对应'],
         ['sites', '{ea,what}[]', '机器站点（EA 是唯一合法的机器锚；what 只给人看）'],
         ['functions', 'sub_XXXXXX[]', '整个函数作为绑定范围'],
-        ['storage', 'shape:<类型> / shape:<类型>@0x<成员起点> / layout:<token>[]', '机器本体指针：状态属于哪个 shape 类型 / 哪个成员（`layout:` 是待迁出的历史形态，不进分发产物）'],
+        ['storage', 'shape:<类型> / shape:<类型>@0x<成员起点>[]', '机器本体指针：状态属于哪个 shape 类型 / 哪个成员（只认 shape；`layout:` 形式已结构性拒绝，见不变量 6）'],
         ['evidence', 'KN:<ULID> / guard:<path>#<用例>[]', '可再校验观察（台账记录 / 可执行守卫用例）'],
       ],
       auditFields: [
@@ -891,7 +891,7 @@ export function describe() {
       [3, '试点域：块入口 ea 唯一、internal/residual/outOfScope 有理由；effect 由语料机械枚举'],
       [4, '规则形态：每个 <!-- rule: ID --> 在 ### 小节里、有标题与正文；id 唯一'],
       [5, '处理状态：handled 有机器绑定；replaced 声明 preserves/discards/chosen；omitted 有依据；discarded 不冒充解释；unhandled 有残差'],
-      [6, '绑定：EA/函数符号形态合法；storage 指针能在 layout.mts / types.json 里解析到'],
+      [6, '绑定：EA/函数符号形态合法；storage 指针能在 shape（types.json 的类型与成员起点）里解析到'],
       [7, '证据：每条证据都解析得到；reviewed 要求全部证据 strong、至少一条 accepted 台账或 @env pure 守卫、且必须给 falsifiers'],
       [8, '自包含：规范正文不含汇编引用 / 台账 id / 守卫 / 本仓路径（复核信息只许进 bindings / audit）'],
       [9, '试点闭合（effect 级）：每个 effect 被规则 covers / pilot.internal / pilot.residuals 归属；未登记义务 = 0（assets 档现算）'],

@@ -2,10 +2,11 @@
 
 - id: REQ-01M4N29TY834174TVCMCSNV4WX
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M4B248NB8FWDN61E2NMK8N6V
 - repro: tools/test/emulator-engine-scalars.test.mjs#★ 配置的整型两条：**本层把键取成操作数的值**
 - severity: S2
+- dropped_reason: 缺陷对象 apps/emulator/src/vm/ops.ts 已废弃；apps/emulator-new 的 configKey 直接取操作数序号（type 3/5），不存在「取操作数的值」的口径 ⇒ 分歧在新实现里不存在。
 - tags: [engine emulator vm]
 
 ## 缺陷（可观测分歧）

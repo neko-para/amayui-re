@@ -2,9 +2,10 @@
 
 - id: REQ-01M54KEF7X560CMPMGABG2W3CW
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M52F3ASMGWQXX64JSA18MP2N
 - order: 52
+- done_reason: 33 个子单全部收口（plan 显示 [33/33]）；载体与类型表由 shape 工具链按批合并，闭合度判据落在各子单。
 - tags: [engine shape]
 
 ## 目标

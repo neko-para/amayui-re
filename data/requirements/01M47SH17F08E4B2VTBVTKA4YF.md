@@ -2,9 +2,10 @@
 
 - id: REQ-01M47SH17F08E4B2VTBVTKA4YF
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TCSNH00RVXCPZGM1J6EXRC
 - order: 62
+- dropped_reason: 表现层（Pixi / electron / web / host-input）不迁入：emulator-new 是只读参考实现，没有渲染交付物。
 - tags: [emulator]
 
 ## 范围

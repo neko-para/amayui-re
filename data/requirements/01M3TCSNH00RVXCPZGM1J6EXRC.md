@@ -2,9 +2,10 @@
 
 - id: REQ-01M3TCSNH00RVXCPZGM1J6EXRC
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 60
+- dropped_reason: 批 M4 的交付物（apps/emulator + packages/host-input 重写）已被 apps/emulator-new 路线取代；旧实现只作架构参考。
 
 ## 范围
 `apps/emulator` + `packages/host-input`：按新结构重写，把旧仓寄生在测试下的 10 个跨域守卫拆回各域。

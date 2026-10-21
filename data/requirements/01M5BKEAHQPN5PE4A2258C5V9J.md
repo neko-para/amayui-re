@@ -2,9 +2,10 @@
 
 - id: REQ-01M5BKEAHQPN5PE4A2258C5V9J
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M5851Z51V1MTSWH414M7WN5Q
 - order: 50
+- dropped_reason: 这是 core spec 首批落地后的方法对账快照；其中的缺口（falsifiers / selector 指标 / per-mechanism 报告）已转由 spec 治理批次（REQ-01M5AKDR… / REQ-01M5AM4M5… / REQ-01M5D1G31…）与第三轮复核跟踪，本快照不再单独维护。
 - tags: [engine spec method]
 
 ## 目的
