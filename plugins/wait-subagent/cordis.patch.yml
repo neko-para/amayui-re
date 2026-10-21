@@ -1,0 +1,9 @@
+# plugins/wait-subagent 的 bundle patch —— 本插件作为 profile 的**一个 patch 层**被组合进来。
+#
+# 形态与其他 bundle 一致（见 `@deepseek-ai/dsh-base` 的 `cordis.patch.yml`）：
+# 一次 `insert`，一条 loader entry；`name` 是**包名**，DSH 按它 import 本包的主入口（`index.mjs`）。
+#
+# 本插件没有配置面（工具名固定为 `wait_subagent`）；注册即可用。
+- insert:
+    - id: amayui-wait-subagent
+      name: '@amayui/dsh-plugin-wait-subagent'

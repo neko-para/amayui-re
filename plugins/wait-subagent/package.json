@@ -1,0 +1,26 @@
+{
+  "name": "@amayui/dsh-plugin-wait-subagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "事件驱动的 wait_subagent 工具：等子代理结束，并在用户插话 / turn 取消时立刻返回——不再用 sleep 猜时长",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none test/*.test.mjs"
+  }
+}
