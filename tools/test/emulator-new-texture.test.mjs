@@ -2,7 +2,7 @@
 /**
  * tools/test/emulator-new-texture.test.mjs —— 纹理族（0x1f7..0x1fb）的守卫
  *
- * 覆盖 `data/spec/chapters/60-ops.md` 的纹理族 5 条规则。用合成脚本字节，不依赖游戏安装。
+ * 覆盖 `data/spec/chapters/60-ops-texture.md` 的纹理族 5 条规则。用合成脚本字节，不依赖游戏安装。
  *
  * ★ 判据为什么是这些：
  *   - `0x1f9` 的颜色键归一化（负数 ⇒ 0、否则补不透明黑）写错不会报错，只会颜色不对；

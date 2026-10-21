@@ -42,7 +42,7 @@
 pnpm tools requirements plan            # ★ 进度视图（按父子树打印 + 聚合状态）
 pnpm tools requirements list            # 一览（type / status / 严重度 / 父 / 子树活节点数）
 pnpm tools requirements show <引用>      # 一个节点：字段 + 子树 + 正文
-pnpm tools requirements validate        # 5 条不变量（红 = 退出码 1）
+pnpm tools requirements validate        # 全部不变量（红 = 退出码 1；条数与措辞见 describe）
 pnpm tools requirements describe        # ★ 字段 / 不变量 / 预算 / 命令（本文件不含这些）
 ```
 
@@ -90,3 +90,26 @@ pnpm tools requirements set <前缀> --status done --done-reason "文档类：�
 预算是给"**还要人读它才能推进**"的待办表设的，已收口的节点不在待办里。
 否则树会因为"做过的事变多"而爆预算，逼人删掉**已经交付的**记录 —— 那是把台账当垃圾桶用。
 判据一句话：**"这个节点还需要有人去读它才能推进吗？"** 不需要 ⇒ 不占预算。
+
+## 7. 引用的路径怎么标（`repo:` / `old:`）
+
+正文里引用**路径**时，前缀不是装饰，是校验器唯一的判据：
+
+* `repo:<相对仓库根的路径>` —— **本仓**路径。`validate` 会检查它存在（`*` / `?` 这类 glob 至少命中一个）。
+  ⇒ 不写绝对路径、不用 `..` 越出仓库根；路径用反引号包起来，后面不要紧跟标点。
+* `old:<路径>` —— **旧仓**（`E:\Games\Eushully\天結`）里的路径：**只做标记、不校验存在性**
+  （那些文件本来就不该出现在本仓）。
+
+例：`repo:data/spec/chapters/10-format.md`、`old:scripts/amayui/whatever.txt`。
+★ "引用本仓文件却写成裸路径"（如 `chapters/…`）会让守卫**看不见它** —— 这正是这条约定要解决的事：
+有了前缀，路径写错的单子会当场红，而不是等下一次有人去引用时才发现文件不在那儿。
+不变量本身的措辞由 `pnpm tools requirements describe` 给出；本文件只写"怎么写"。
+
+## 8. 开单 / 收口的口径：写"文件:行 + 现查命令"，不写"当前状态"
+
+* 判据 / 背景里引用事实，写成**能当场复核**的形式：`文件:行`（或 `文件`）+ **现查命令**。
+* ⛔ 不写"某某现在是 X"这类**状态断言** —— 它会在下一次干活时变错，而读者分不出自己读到的是不是旧事实。
+* 进度 / 计数一律写**怎么查**（`pnpm tools requirements plan`、`pnpm tools spec report` …），不写具体数字。
+* 已经漂掉的旧单**不整批重写**：只在被引用 / 被改到时顺手订正。
+  已漂实例：`REQ-01M5BK8Q…` 的 594 / 569（行数断言）、`REQ-01M5CWFJ…:50` 的"条目 56"（计数断言）——
+  这里只是举例，**不是清单**；别把它们当基准读。

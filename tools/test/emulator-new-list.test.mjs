@@ -1,6 +1,6 @@
 /** @env pure @kind contract @why 0x70 的字段配对写反 / 写错组 / 忘了登记标记都不会报错，只会让列表项拿到另一对数 */
 /**
- * tools/test/emulator-new-list.test.mjs —— 列表项（`60-ops.md` 的 CORE-OPS-LIST-SET）守卫
+ * tools/test/emulator-new-list.test.mjs —— 列表项（`60-ops-list.md` 的 CORE-OPS-LIST-SET）守卫
  *
  * ★ 判据：三对字段 ← (op2, op3)、一对 ← (op4, op5)、登记标记 = 1、别的组不动；
  *   组号 0 是"用默认组"（未定）⇒ 必须留诊断而不是写第 0 组。

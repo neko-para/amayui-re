@@ -2,7 +2,7 @@
 /**
  * tools/test/emulator-new-ops.test.mjs —— `apps/emulator-new` 的数值族守卫
  *
- * 覆盖 `data/spec/chapters/60-ops.md` 的三条规则（0x50 / 0x51 / 0x2d5）与 `40-pools.md` 的
+ * 覆盖 `data/spec/chapters/60-ops-numeric.md` 的三条规则（0x50 / 0x51 / 0x2d5）与 `40-pools.md` 的
  * 整型编解码 / 操作数原语 / 派发推进。用**合成脚本字节**，不依赖游戏安装。
  *
  * ★ 判据为什么是这些：

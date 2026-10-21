@@ -1,6 +1,6 @@
 /** @env pure @kind contract @why 0x2f6 的组号映射 / 清零范围 / 后端门 / "是否还有语音在播"的跳过判据写错都不会报错，只会静默留下另一组的状态或算反标志 */
 /**
- * tools/test/emulator-new-voice.test.mjs —— Voice 族（`60-ops.md` 的 CORE-OPS-VOICE-STOP）守卫
+ * tools/test/emulator-new-voice.test.mjs —— Voice 族（`60-ops-voice.md` 的 CORE-OPS-VOICE-STOP）守卫
  *
  * ★ 判据为什么是这些（每条都能被"写错"弄红）：
  *   - **清零范围**：8 格（语音对象内 4 格 + 引擎级 4 格）漏两格、或清错组，都不会报错 ⇒ 先把三组都填成非 0，

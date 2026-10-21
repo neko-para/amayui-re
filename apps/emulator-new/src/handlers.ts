@@ -1,5 +1,5 @@
 /**
- * opcode → 实现。★ 每条都对应 `data/spec/chapters/60-ops.md` 里的一条规则。
+ * opcode → 实现。★ 每条都对应 `data/spec/chapters/60-ops-*.md` 里的一条规则。
  * ★ 未实现的 opcode **不在表里**（不是 no-op）：`Machine.run` 会在它前面报缺口。
  * ★ 本文件不碰文件系统；外部请求只进 `m.effects`（规范不规定外部效果）。
  */
@@ -437,7 +437,7 @@ function listRecordOf(m: Machine, slot: number): ListRecord {
 }
 
 /**
- * 0x71 文本转发（CORE-OPS-TEXT-REQUEST）。
+ * 0x71 文本转发（CORE-OPS-LIST-TEXT-REQUEST）。
  *
  * 逐字（`sub_41ED80`，argc 1）：
  * ① 把本条指令的**位置**（`(PC − 代码区基址) >> 2`）写进当前帧的一个字段（`帧+0x6C`，用途未定）；
@@ -457,7 +457,7 @@ function text71(m: Machine, ops: Operand[]): void {
 }
 
 /**
- * 0x73 子系统转发（CORE-OPS-SUBSYSTEM-SET73，argc 10 —— 前段最长的一条）。
+ * 0x73 子系统转发（CORE-OPS-LIST-SUBSYSTEM-SET73，argc 10 —— 前段最长的一条）。
  *
  * 逐字（`sub_41F250`）：
  * ① **先读第 10 个操作数**，写进一个固定格：值为 0 时写成 **1**（`sub_453AD0` 的 `a2 ?: 1`）；
@@ -484,7 +484,7 @@ function forward73(m: Machine, ops: Operand[]): void {
 
 /**
  * 0x78 / 0x2db：把第 1 个操作数写进**子对象的一个固定字段**，然后**尾跳**进子系统
- * （CORE-OPS-SUBSYSTEM-SET-TAIL）。
+ * （CORE-OPS-LIST-SUBSYSTEM-SET-TAIL）。
  *
  * 逐字：两条同形 —— `0x78` 写 `Engine+0x14D30+0x55C`；`0x2db` 写同一个子对象的 `+0x313D0`；
  * 然后 `jmp sub_459F40`（尾跳：子系统的返回值直接回给分派器）。
@@ -782,7 +782,7 @@ function wait21c(m: Machine): void {
   m.flags |= WAIT_BIT;
 }
 
-/** 0x101 poll-input：采样并丢弃（CORE-OPS-POLL-INPUT） */
+/** 0x101 poll-input：采样并丢弃（CORE-OPS-WAIT-POLL-INPUT） */
 function pollInput101(m: Machine): void {
   m.effects.push({ kind: 'input.poll', detail: {} });
   m.flags &= ~0x08000000;
@@ -876,7 +876,7 @@ function saveString1a9(m: Machine, ops: Operand[]): void {
 }
 
 /**
- * 0x192 set-string（CORE-OPS-STRING-SET）：把**第 2 个操作数**的文本写进**第 1 个操作数**的串池格。
+ * 0x192 set-string（CORE-OPS-TEXT-SET）：把**第 2 个操作数**的文本写进**第 1 个操作数**的串池格。
  * ★ 源侧既可以是串池（type 5）、也可以是**内联字符串**（type 2，偏移见 `values.ts` 的 `inlineStringAt`）；
  *   落点按 op1 的 type 分派（本层只建模 type 5 全局串池；其余响亮失败）。
  * ★ 它是启动链里出现最多的一条（取证见台账 `01M4FECQ…` 的同类记录：`sub_433660`，argc 2）。

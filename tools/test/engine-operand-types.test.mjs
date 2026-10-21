@@ -3,18 +3,22 @@
  * tools/test/engine-operand-types.test.mjs —— **操作数类型分派的机械普查**（迭代点 ②：零引擎语义）
  *
  * ## 为什么这一条不需要"引擎语义"
- * 引擎里有两条**取操作数**的原语，各自用一张 `switch` 按 **operand type** 分派。这两个 switch 在语料里
+ * 引擎里有**五种**访问原语，各自用一张 `switch` 按 **operand type** 分派。这些 switch 在语料里
  * 都是 IDA 导出的跳转表 —— **case 数、每个 case 的目标、哪个 case 是 default** 全部是**纯文本可枚举**的。
  * 所以"类型表覆盖得对不对"可以**机械判**，不需要相信任何旧仓结论：
  *
  * | 原语 | EA | 跳转表 | case 数 | 缺席（走 default）|
  * |---|---|---|---|---|
  * | **取址**（算操作数地址） | `0x42AEA0` | `jpt_42AF16` | 12 | 见 `default` 注释点名的 case |
- * | **读值**（按已算地址取值） | `0x41BF50` | `jpt_41BF99` | 14 | **case 8**（`ja def_41BF99 ; jumptable … default case, case 8`）|
- * | float 取址 | `0x42B4B0` | `jpt_42B51F` | 10 | **cases 5, 8, 11** |
+ * | **读整型**（按已算地址读值） | `0x41BF50` | `jpt_41BF99` | 14 | **case 8**（`ja def_41BF99 ; jumptable … default case, case 8`）|
+ * | **读浮点** | `0x41C300` | `jpt_41C345` | 14 | 见 `default` 注释点名的 case |
+ * | **写整型**（按已算地址写值） | `0x42B4B0` | `jpt_42B51F` | 10 | **cases 5, 8, 11** |
+ * | **写浮点** | `0x42BA00` | `jpt_42BA6B` | 11 | 见 `default` 注释点名的 case |
  *
- * ★ 三张表的 case 数**互不相等**（12 / 14 / 10）⇒ 引擎对操作数类型的支持集**按用途分三套**，
+ * ★ 五张表的 case 数**并非同一张表**（12 / 14 / 14 / 10 / 11）⇒ 引擎对操作数类型的支持集**按用途分套**，
  *   拿"一张表"代表全部是错的（这正是本轮要机械钉住的东西）。
+ * ★ `0x42B4B0` 的旧名「float 取址」是**命名错**（逐字是**写值**：`retn 8`、第 2 实参当写入值、`[eax-4]` 取 tag）；
+ *   浮点写是兄弟 `0x42BA00`。名字改正、数字不动 —— 台账 `KN-01M4GX1QZ36T011C117S472Z18` 已订正。
  *
  * ## 这条守卫红得有意义吗
  * 红 = ① 提取判据失效（语料形态变了），或 ② `packages/age-format` 的类型表与引擎 case 集**真的不一致**。
@@ -39,11 +43,13 @@ const listing = (() => {
 })();
 const skip = listing ? false : '语料未解压（先 `pnpm tools disasm build`）';
 
-/** 三条原语（EA 取自语料，两份镜像在这些 EA 上抽样一致） */
+/** 五条原语（EA 取自语料，两份镜像在这些 EA 上抽样一致） */
 const PRIMITIVES = [
   { ea: 0x42aea0, kind: '取址', expectCases: 12 },
-  { ea: 0x41bf50, kind: '读值', expectCases: 14 },
-  { ea: 0x42b4b0, kind: 'float 取址', expectCases: 10 },
+  { ea: 0x41bf50, kind: '读整型', expectCases: 14 },
+  { ea: 0x41c300, kind: '读浮点', expectCases: 14 },
+  { ea: 0x42b4b0, kind: '写整型', expectCases: 10 },
+  { ea: 0x42ba00, kind: '写浮点', expectCases: 11 },
 ];
 
 /** 从跳转点往前的小窗口里读出"入口比较 / 索引起点 / 哪些 case 走 default"（语料注释是 IDA 写的，纯文本） */
@@ -78,6 +84,23 @@ function entryFacts(lines, jumpLine1) {
 test('★ 三条原语的跳转表 case 数互不相等（支持集按用途分三套，不是一张表）', { skip }, () => {
   const idx = buildIndex(listing);
   const all = fs.readFileSync(listing, 'utf8').split('\n');
+  // ★ 这条用例名是老台账锚（`KN-01M48EHK…` / `KN-01M4GX1Q…`）指向的**原文**，故保留原名与原断言；
+  //   五张表的完整覆盖在下面一条（改名会让那两条 accepted 记录立刻变 stale）。
+  const three = PRIMITIVES.filter((p) => [0x42aea0, 0x41bf50, 0x42b4b0].includes(p.ea));
+  const seen = [];
+  for (const p of three) {
+    const tables = switchTables(listing, idx, p.ea, { fileLines: all });
+    assert.equal(tables.length, 1, `${p.kind} 原语 0x${p.ea.toString(16)} 应恰好有一条跳转表，实际 ${tables.length}`);
+    const t = tables[0];
+    assert.equal(t.cases, p.expectCases, `${p.kind} 原语 0x${p.ea.toString(16)} 的 case 数变了：${t.cases} ≠ ${p.expectCases}`);
+    seen.push(t.cases);
+  }
+  assert.equal(new Set(seen).size, 3, `三张表的 case 数必须互不相等（实测 12/14/10），实际 ${seen.join('/')}`);
+});
+
+test('★ 五条原语的跳转表 case 数（12/14/14/10/11）⇒ 支持集按用途分套，不是一张表', { skip }, () => {
+  const idx = buildIndex(listing);
+  const all = fs.readFileSync(listing, 'utf8').split('\n');
   const seen = [];
   for (const p of PRIMITIVES) {
     const tables = switchTables(listing, idx, p.ea, { fileLines: all });
@@ -86,7 +109,8 @@ test('★ 三条原语的跳转表 case 数互不相等（支持集按用途分�
     assert.equal(t.cases, p.expectCases, `${p.kind} 原语 0x${p.ea.toString(16)} 的 case 数变了：${t.cases} ≠ ${p.expectCases}`);
     seen.push(t.cases);
   }
-  assert.equal(new Set(seen).size, 3, `三张表的 case 数必须互不相等（实测 12/14/10），实际 ${seen.join('/')}`);
+  assert.deepEqual([...seen].sort((a, b) => a - b), [10, 11, 12, 14, 14], `五张表的 case 数变了，实际 ${seen.join('/')}`);
+  assert.ok(new Set(seen).size > 1, '五张表若 case 数全相同，"一张表代表全部"就会变成巧合而非判据');
 });
 
 test('★ 读值原语的**缺席者**：case 8 走 default（= 抛异常），与取址原语的 case 集不同', { skip }, () => {

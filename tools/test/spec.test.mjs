@@ -349,6 +349,7 @@ test('★ 派生报告不输出百分数（范围闭合 ≠ 解释正确）', ()
   const text = reportText(model, { file: 'x', derived, weak });
   assert.ok(!text.includes('%'), '报告里不许出现百分数');
   assert.ok(text.includes('未登记'));
+  assert.ok(/未成篇 opcode \d+（gaps 覆盖 \d+；已写成 \d+）/.test(text), '报告必须打印未成篇 opcode / gaps 覆盖 / 已写成 三项计数');
   assert.ok(text.includes('诚实项'));
 });
 
@@ -357,7 +358,12 @@ test('★ 真源：data/spec/{spec,bindings,audit}.json + chapters/*.md 过全�
   const { problems, derived } = validate(bundle, { ledger });
   assert.deepEqual(problems, [], `${bundle.files.spec} / ${bundle.files.bindings} / ${bundle.files.audit} 有不变量失败`);
   assert.deepEqual(derived.unregistered, [], '试点域里存在未登记义务');
-  assert.equal(derived.gaps, 0, '立即数形态现在登记在 pilot.residuals，不是 gaps');
+  assert.ok(derived.gaps > 0, '未成篇的 opcode 族/段必须登记在 audit.gaps[]（"缺口 0"是假象）');
+  assert.ok(derived.opcodes?.ok, '指令表在场时应当能算出未成篇 opcode');
+  assert.equal(derived.opcodes.total, 544, 'hasHandler 的 opcode 数（指令表口径）');
+  assert.equal(derived.opcodes.total, derived.opcodes.written + derived.opcodes.unwritten, 'hasHandler = 已写 + 未成篇');
+  assert.equal(derived.opcodes.unwritten, derived.opcodes.gapsCovered, '未成篇 opcode 必须被 gaps 精确覆盖');
+  assert.ok(derived.residualKinds.unhandled >= derived.gaps, 'gaps 里的 kind=unhandled 必须计入残差（否则 unhandled=0 是假象）');
   assert.ok(derived.effects > 0, '语料在场时应当现算 effect');
   assert.equal(derived.unregistered.length, 0, 'effect 必须全部归属');
   assert.ok(derived.covered > 0 && derived.residualEffects > 0);
@@ -420,6 +426,19 @@ test('★ 审计缺口：只进 audit；缺 note / residual / 章节 ⇒ #13 红
   const badChapter = clone();
   badChapter.gaps = [{ id: 'GAP-T', chapter: 'nope', title: 't', note: 'n', residual: [{ id: 'RG', kind: 'unknown', what: 'w', next: 'n' }] }];
   assert.ok(checksOf(badChapter).has(13), '缺口不能指向不存在的章节');
+  const badOp = clone();
+  badOp.gaps = [{ id: 'GAP-T', chapter: 'c1', title: 't', note: 'n', ops: ['52'], residual: [{ id: 'RG', kind: 'unknown', what: 'w', next: 'n' }] }];
+  assert.ok(checksOf(badOp).has(13), 'ops 每项必须是 `0x…` 形态');
+  const dupOp = clone();
+  dupOp.gaps = [
+    { id: 'GAP-A', chapter: 'c1', title: 't', note: 'n', ops: ['0x52'], residual: [{ id: 'RG1', kind: 'unknown', what: 'w', next: 'n' }] },
+    { id: 'GAP-B', chapter: 'c1', title: 't', note: 'n', ops: ['0x52'], residual: [{ id: 'RG2', kind: 'unknown', what: 'w', next: 'n' }] },
+  ];
+  assert.ok(checksOf(dupOp).has(13), '同一 opcode 不许出现在两个 gap 里');
+  const plannedGap = clone();
+  plannedGap.planned = [{ id: 'p1', title: 't', status: 'none', residual: [] }];
+  plannedGap.gaps = [{ id: 'GAP-P', chapter: 'p1', title: 't', note: 'n', residual: [{ id: 'RG', kind: 'unknown', what: 'w', next: 'n' }] }];
+  assert.ok(!checksOf(plannedGap).has(13), 'gap 的 chapter 可以指向 planned 章节（未成篇族的落点）');
 });
 
 test('★ 自描述：不变量 / 处理状态 / 残差类别 / 操作都在，且不说覆盖率', () => {

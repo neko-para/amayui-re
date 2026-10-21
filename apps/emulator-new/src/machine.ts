@@ -3,7 +3,7 @@
  * ★ 规则只来自 `data/spec`：
  *   - 切分与推进：`chapters/10-format.md` 的「切分与操作数个数」「opcode 域与缺省处理器」「执行如何结束」；
  *   - 操作数：`chapters/40-pools.md` 的五种访问原语；
- *   - 单条指令：`chapters/60-ops.md`。
+ *   - 单条指令：`chapters/60-ops-*.md`。
  * ★ 没有实现的 opcode **不执行**、不 no-op：报缺口并停在它前面（缺口是 spec 的机器清单）。
  * ★ 本文件不碰文件系统。
  */
@@ -165,7 +165,7 @@ export interface Diagnostic {
   index?: number;
 }
 
-/** 场景：纹理 / 绘制项 / 计时窗（见 60-ops.md 纹理族、70-vm.md 计时窗） */
+/** 场景：纹理 / 绘制项 / 计时窗（见 60-ops-texture.md 纹理族、70-vm.md 计时窗） */
 export interface SceneState {
   /** 脏标记（有东西被改过 ⇒ 1） */
   dirty: number;

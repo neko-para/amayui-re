@@ -4,8 +4,9 @@
 > 规范正文是**可分发的 Markdown**；机器绑定与范围审计是内部复核数据，**不进入分发产物**。
 > 字段 / 枚举 / 不变量 / 操作**只有一份真源**：`pnpm tools spec describe`（机器可读加 `--json`）。
 > 脚本二进制协议（脚本头 / 指令编码 / 操作数编码 / 指令表）由**本规范**定义；
-> `packages/age-format` 是现有实现（仿照第三方库写成），**不是规范来源**；协议的待核验状态见
-> [`chapters/10-format.md`](chapters/10-format.md)。
+> `packages/age-format` 是现有实现（仿照第三方库写成），**不是规范来源**；它的
+> `instruction-set.json` 是实现副本，可能与规范漂——与规范不一致时以规范为准；协议的待核验状态见
+> [`chapters/10-format.md`](chapters/10-format.md)。（这层关系只写在这里；可分发正文只声明"协议自持"。）
 > **机制地图**（core 切成哪些机制、每机制凭什么算完、文件与 id 怎么放）是 [`core/README.md`](core/README.md) —— 组织真源。
 
 ## 1. 规范正文 vs 复核数据
@@ -15,7 +16,7 @@
 | [`spec.json`](spec.json) | **manifest**：标题 + 章节顺序（id / file / title） | 否（只有顺序元数据） |
 | [`chapters/*.md`](chapters/) | **规范正文**：自包含的领域合同、定义、状态对应、条件（阅读顺序见 [`chapters/README.md`](chapters/README.md)） | **是** |
 | [`bindings.json`](bindings.json) | **机器绑定**：站点 EA / 函数 / `storage` 指针 / 证据 | 否（内部复核） |
-| [`audit.json`](audit.json) | **范围审计**：试点块 / effect 归属（规则选择器 + 内部省略 + 残差）/ 成熟度 / 缺口 / 可证伪预言 | 否（内部复核） |
+| [`audit.json`](audit.json) | **范围审计**：试点块 / effect 归属（规则选择器 + 内部省略 + 残差）/ 成熟度 / **未成篇义务（`gaps[]`，唯一落点）** / 可证伪预言 | 否（内部复核） |
 | [`format/opcode-table.json`](format/opcode-table.json) | **本规范的指令表**（本规范自己的数据；内容当前来自实现、整表待核验；不是 `age-format` 的 canonical 副本） | **是**（伴随数据） |
 | [`format/config-keys.json`](format/config-keys.json) | **配置键词表**（默认表 / 玩家文件 / 保存三套映射；见同目录 `.md`） | **是**（伴随数据） |
 | [`format/verification.md`](format/verification.md) | **协议核验台账**（EA / 台账 / 守卫；内部） | 否（内部复核） |
@@ -45,20 +46,21 @@
 
 ## 2.1 覆盖是 effect 级，不是"整条指令"
 
-- `audit.pilot.sites` 只声明**块入口**（机器块），不是引擎抽象；
-- effect 由 `tools/lib/x86-effects.mjs` 从 `.lst` **机械枚举**，带 block / site / op / kind；
-- 规则的 `covers` 是**选择器**（`{blocks?, kinds?, ops?, targets?}`），所以同一条指令可以只覆盖一部分 effect；
-  调用只记 `call` + 实际符号（`target`），不把 `_atoi` 改名成 `parse-int`；
-- `pilot.internal` 逐类给出内部省略的理由（寄存器 / 栈 / 控制流），`pilot.residuals` 是带 `next` 的显式残差；
+- 试点块只声明**块入口**（机器块），不是引擎抽象；
+- effect 由 `tools/lib/x86-effects.mjs` 从 `.lst` **机械枚举**，带块入口 / 站点指令 / opcode / 类别；
+- 规则的覆盖声明是**选择器**（按块 / 类别 / opcode / 调用目标筛），所以同一条指令可以只覆盖一部分 effect；
+  调用只记"调用" + 实际符号名，不把 `_atoi` 改名成 `parse-int`；
+- 内部省略逐类给理由（寄存器 / 栈 / 控制流），残差带**下一步问题**；
 - 每个 effect 必须落在 covered / internal / residual 之一；未登记 = 0（assets 档现算）。
 
-换一个试点只换 `pilot.sites` 与 effect 枚举口径（枚举器在 `tools/lib/x86-effects.mjs`，不在通用 schema 里）。
+字段名 / 选择器的键 / 枚举值只看 `pnpm tools spec describe`；换一个试点只换试点块与 effect 枚举口径
+（枚举器在 `tools/lib/x86-effects.mjs`，不在通用 schema 里）。
 
 ## 3. 怎么查
 
 ```bash
 pnpm tools spec validate      # 不变量（含自包含 / 跨文件一一对应）
-pnpm tools spec report        # 审计：effect 覆盖 / 内部省略 / 残差 / 未登记
+pnpm tools spec report        # 审计：effect 覆盖 / 内部省略 / 残差 / 未登记 / **未成篇 opcode 计数**
 pnpm tools spec effects --pilot # 从语料机械枚举试点块的 effect（--json 给机器读）
 pnpm tools spec chapters      # 章节骨架 + 每章规则与残差
 pnpm tools spec show <id|前缀> # 一条规则：正文 + 证据有效状态（内部视图）
@@ -67,12 +69,14 @@ pnpm tools spec describe      # 字段 / 枚举 / 不变量 / 操作 / 诚实项
 
 ## 4. 怎么改
 
-* **规范内容** → 改 `chapters/*.md`；新增章节时在 `spec.json` 的 `chapters[]` 与 `audit.json` 的
-  `chapters[]` 各加一条（`id` 对齐）。
-* **规则** → 在章节里加 `### 标题` + `<!-- rule: ID -->` + 正文；并在 `bindings.json` 的 `bindings[]`
-  （字段 `rule`）与 `audit.json` 的 `rules[]`（字段 `id`）各加同一条规则（跨文件不变量会检查）。
-* **还没有规范内容的义务** → 放 `audit.json` 的 `gaps[]`，**不要**写成规则。
-* **机器绑定 / 证据** → 只改 `bindings.json`；证据按 `KN:<ULID>` / `guard:<path>#<用例>` 引用。
+* **规范内容** → 改 `chapters/*.md`；新增章节时在 `spec.json` 与 `audit.json` 里各登记同一条章节
+  （**键名 / 枚举 / 必填条件见 `pnpm tools spec describe`** —— 本文件不复述 schema）。
+* **规则** → 在章节里加 `### 标题` + `<!-- rule: ID -->` + 正文；并在 `bindings.json` 与 `audit.json`
+  里各加同一条规则（跨文件不变量会检查；字段同样只看 `describe`）。
+* **还没有规范内容的义务** → 登记进 `audit.json` 的 **`gaps[]`**（这是**唯一落点**；一条 = 一个未成篇的
+  opcode 族/段，或一类按结构位置排除的机器分支）。`ops` 由指令表机械派生、守卫断言它与「已写」精确划分；
+  字段 / 形状 / 派生口径只看 `pnpm tools spec describe`，**不要**写成规则。
+* **机器绑定 / 证据** → 只改 `bindings.json`；证据引用的形态见 `pnpm tools spec describe`。
 * **分发**：分发集 = `chapters/*.md`（阅读顺序见 [`chapters/README.md`](chapters/README.md)）+ `format/opcode-table.json` + `format/config-keys.json`（正文明确依赖的伴随数据）；**不生成单文件**，也没有生成物要维护。
 
 ## 5. 本层**不**提供什么（诚实边界）
@@ -80,4 +84,4 @@ pnpm tools spec describe      # 字段 / 枚举 / 不变量 / 操作 / 诚实项
 * 不证明合同与原引擎等价；也不消除"多路推导共同误解"。
 * 试点块是**声明**的；effect 由语料机械枚举，但枚举器有边界（见 `x86-effects` 文件头），不证明域外没有同类义务。
 * `discarded` / `unknown` 不并进"已解释"；计数不是正确性证据。
-* 表现层逐位一致（像素 / 混音）不在 spec：按项目口径进 `audit.json` 里 `disposition=discarded` 的规则（带 `reason` / `range` / `impact`）；若还没有这样的条目，那是欠账，不要读成"已经登记过"。
+* 表现层逐位一致（像素 / 混音）不在 spec：按项目口径登记为 `audit.json` 里的"明确舍弃"规则（理据 / 范围 / 影响都要写实，字段见 `pnpm tools spec describe`）；若还没有这样的条目，那是欠账，不要读成"已经登记过"。

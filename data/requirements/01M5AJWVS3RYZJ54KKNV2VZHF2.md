@@ -11,7 +11,7 @@
 ## 目标
 
 把"脚本字节 → 指令"做成可独立实现的规范：脚本头、`argc` 边界、`type`/`raw`、指令表。
-迁移自 `data/spec/chapters/10-format.md`（内容只搬，不重写；补映射与 marks）。
+迁移自 `repo:data/spec/chapters/10-format.md`（内容只搬，不重写；补映射与 marks）。
 
 ## 判据
 

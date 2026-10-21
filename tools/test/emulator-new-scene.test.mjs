@@ -2,7 +2,7 @@
 /**
  * tools/test/emulator-new-scene.test.mjs —— 场景族（0x202/0x203/0x320/0x322/0x323）+ 等待门（0x21c / 0x101）的守卫
  *
- * 覆盖 `data/spec/chapters/60-ops.md` 的场景族与等待/输入，以及 `70-vm.md` 的门与计时窗。
+ * 覆盖 `data/spec/chapters/60-ops-scene.md` 的场景族与 `60-ops-wait.md` 的等待/输入，以及 `70-vm.md` 的门与计时窗。
  * 用合成脚本字节，不依赖游戏安装。
  *
  * ★ 判据为什么是这些：

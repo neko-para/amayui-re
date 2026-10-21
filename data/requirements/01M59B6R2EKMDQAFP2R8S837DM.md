@@ -19,7 +19,7 @@
 3. 守卫有判别力：每个不变量都有一条负例样本会红；`tools/mutate-check.mjs` 里有会红的变异（`--list` 现查）。
 4. 首批正文覆盖：global 值族 / 引用族、local 六族、整型编解码、字符串 SSO、不支持类型抛异常、容量与越界口径；每条都有状态对应 + 证据（`KN:` / `guard:`）+ 残差。
 5. effect 级账：`pilot.internal` 的寄存器 / 栈 / 控制流省略逐类给理由；`pilot.residuals` 覆盖 type 0/1/2 的读语义；报告不给百分数。
-6. 规范正文**自包含**：`chapters/*.md` 不出现汇编引用 / 台账 id / 守卫 / 本仓路径；复核信息只进 `bindings.json` / `audit.json`，不进入分发正文。
+6. 规范正文**自包含**：`repo:data/spec/chapters/*.md` 不出现汇编引用 / 台账 id / 守卫 / 本仓路径；复核信息只进 `bindings.json` / `audit.json`，不进入分发正文。
 
 ## 非目标（另单跟踪）
 
@@ -29,4 +29,4 @@
 
 ## 怎么查
 
-`pnpm tools spec validate` · `report` · `effects` · `chapters` · `show <id>` · `describe`；落点 `data/spec/`（manifest + `chapters/*.md` + 内部 bindings/audit；不打包单文件）。
+`pnpm tools spec validate` · `report` · `effects` · `chapters` · `show <id>` · `describe`；落点 `data/spec/`（manifest + `repo:data/spec/chapters/*.md` + 内部 bindings/audit；不打包单文件）。

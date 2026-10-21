@@ -209,6 +209,54 @@ test('#5 一屏预算：单节点超行数 / **活节点**超上限 → 红；�
   assert.deepEqual(ids(validateAll(mixed)), [], '收口节点不参与计数 ⇒ 再加一个 doing 仍绿');
 });
 
+test('#6 路径前缀：`repo:` 指向不存在的路径 → 红；`old:` 只标记、不校验', () => {
+  const root = N();
+  const k = (body) => N({ fields: { parent: root.fields.id }, body });
+  const missing = `data/spec/chapters/absent-${Math.random().toString(36).slice(2)}.md`;
+
+  // ① 本仓真实路径（含 glob）⇒ 绿
+  assert.deepEqual(
+    ids(validateAll([root, k('## 判据\n\n见 `repo:data/spec/chapters/README.md`。')], { repoRoot: REPO_ROOT })),
+    [],
+    '`repo:` 指向真实存在的文件必须绿',
+  );
+  assert.deepEqual(
+    ids(validateAll([root, k('## 判据\n\n见 `repo:data/spec/chapters/*.md`。')], { repoRoot: REPO_ROOT })),
+    [],
+    '`repo:` 的 glob 有命中必须绿（章节文件是 glob 的宿主）',
+  );
+
+  // ② 本仓不存在路径 ⇒ 红，且要点名（不存在的名字运行时随机，避免"这句话本身就在文件里"）
+  const red = validateAll([root, k(`## 判据\n\n见 \`repo:${missing}\`。`)], { repoRoot: REPO_ROOT });
+  assert.ok(ids(red).includes(6), `\`repo:\` 指向不存在的路径必须红，实际：${JSON.stringify(red.checks[5])}`);
+  assert.ok(red.checks[5].problems.some((p) => p.includes(missing)), '红的时候必须点名那条路径');
+  assert.ok(
+    ids(validateAll([root, k('## 判据\n\n见 `repo:data/spec/chapters/没有这个目录/*.md`。')], { repoRoot: REPO_ROOT })).includes(6),
+    '`repo:` 的 glob 一个都没命中也要红',
+  );
+
+  // ③ 旧仓路径**不校验存在性**（本仓不该有那些文件）；本仓路径必须是相对的、不许越界
+  assert.deepEqual(
+    ids(validateAll([root, k('## 判据\n\n旧仓 `old:scripts/amayui/whatever.txt` 未迁移。')], { repoRoot: REPO_ROOT })),
+    [],
+    '`old:` 是旧仓引用：不存在也不许红（只做标记）',
+  );
+  assert.ok(
+    ids(validateAll([root, k('## 判据\n\n见 `repo:../outside.md`。')], { repoRoot: REPO_ROOT })).includes(6),
+    '`repo:` 不许用 `..` 越出仓库根',
+  );
+  assert.ok(
+    ids(validateAll([root, k('## 判据\n\n见 `repo:E:\\Projects\\amayui-re\\package.json`。')], { repoRoot: REPO_ROOT })).includes(6),
+    '`repo:` 必须写仓库相对路径（绝对路径要红）',
+  );
+  // ④ 正文里讨论前缀本身（`repo:` 后面没有路径）不算引用 —— 否则"说明约定"这件事本身就会红
+  assert.deepEqual(
+    ids(validateAll([root, k('## 判据\n\n本仓路径写 `repo:` 前缀，旧仓路径写 `old:` 前缀。')], { repoRoot: REPO_ROOT })),
+    [],
+    '空引用（只提前缀）不该红',
+  );
+});
+
 test('★ schema 覆盖计划要求的那几个字段，且 `blocked_by` 的正例成立（依赖指向真实节点）', () => {
   for (const k of ['type', 'status', 'parent', 'blocked_by', 'verify']) {
     assert.ok(KEY_ORDER.includes(k), `KEY_ORDER 必须有 ${k}`);

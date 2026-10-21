@@ -535,17 +535,20 @@ test('★ 下标不过编码：`base + idx*4` 的偏移与 idx 线性（把 idx 
   assert.equal(lp.read(9, 7), 99, '按**原下标**读得到；下标若被编码过就读不到');
 });
 
-test('★ 操作数寻址：每个操作数 8 字节，且 opcode 在 `[第一操作数 − 4]`（★ 这是**布局**算术，不在模拟器里）', () => {
+test('★ 操作数寻址：每个操作数 8 字节；type 在 `[操作数 − 4]`、opcode 在 `[第一操作数 − 8]`（★ 这是**布局**算术，不在模拟器里）', () => {
   // 原语由布局层自己算地址 —— 模拟器不提供这种算术（它按语义槽位建模，不按字节地址）
   const frameBaseOf = (cur) => FRAME.base + FRAME.stride * cur;
-  const operandAt = (cur, index) => frameBaseOf(cur) + FRAME.off.operands + 8 * index;
-  const a0 = operandAt(0, 0);
-  const a1 = operandAt(0, 1);
-  const a2 = operandAt(0, 2);
-  assert.equal(a1 - a0, 8, '操作数步长必须是 8 字节');
-  assert.equal(a2 - a1, 8);
-  // opcode 在 a0 − 4 ⇒ 它与操作数基址槽正好相邻
-  assert.equal(a0 - 4, FRAME.base + FRAME.off.operands - 4, 'opcode 位置 = 第一操作数 − 4');
+  // ★ 序号**从 1 起**（引擎原语 `addr = PC + 8×序号`，得到该操作数的 raw 格）
+  const operandRawAt = (cur, index) => frameBaseOf(cur) + FRAME.off.operands + 8 * index;
+  const a1 = operandRawAt(0, 1);
+  const a2 = operandRawAt(0, 2);
+  const a3 = operandRawAt(0, 3);
+  assert.equal(a2 - a1, 8, '操作数步长必须是 8 字节');
+  assert.equal(a3 - a2, 8);
+  // type 在 raw − 4（第一个操作数 = PC+4）；opcode 在 PC = 第一操作数 − 8
+  const pc = frameBaseOf(0) + FRAME.off.operands;
+  assert.equal(a1 - 4, pc + 4, '第一个操作数的 type = PC + 4');
+  assert.equal(a1 - 8, pc, 'opcode 在 PC（= 第一操作数 − 8）');
   // 帧基址：第 cur 帧
   assert.equal(frameBaseOf(0), FRAME.base);
   assert.equal(frameBaseOf(1) - frameBaseOf(0), FRAME.stride);

@@ -207,12 +207,27 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-string.test.mjs',
     what: '内联字符串少了 `^0xFF` ⇒ 字体名一类文本整体变成乱码（落点照样写成功，只有内容是错的）',
   },
+  // ── 机制归属（★ planned 的 mechanism 丢了，机制表 ↔ 需求树的守卫应当红）──
+  {
+    file: 'data/spec/audit.json',
+    from: '      "status": "none",\n      "mechanism": "CORE-OBJECTS",',
+    to: '      "status": "none",',
+    guard: 'tools/test/spec-mechanisms.test.mjs',
+    what: 'planned 的 `objects` 丢了 `mechanism` ⇒ 机制 ↔ planned ↔ 需求树的对齐不再可判（守卫必须点名）',
+  },
+  // ── 操作数类型表（★ 取址原语的 case 7 若没有标签，解码器遇到它就是抛/错位）──
+  {
+    file: 'packages/age-format/src/asm/types.mts',
+    from: '    case 7: return \'global-float-ptr\';',
+    to: '    case 7: throw new Error(\'mutated: no label\');',
+    guard: 'tools/test/engine-operand-types.test.mjs',
+    what: '取址原语的 case 7 没有标签 ⇒ `getTypeLabel(7)` 抛，而引擎的 12 个 case 里有 7（解码器会把合法操作数解成错误）',
+  },
   // ── `0x192` 的注册（★ 没有 handler 会变成"未实现"停点 ⇒ 启动链停在一个误以为的缺口上）──
   {
     file: 'apps/emulator-new/src/handlers.ts',
     from: '  [0x1a9, saveString1a9],\n  [0x192, setString192],',
-    to: '  [0x1a9, saveString1a9],',
-    guard: 'tools/test/emulator-new-string.test.mjs',
+    to: '  [0x1a9, saveString1a9],',    guard: 'tools/test/emulator-new-string.test.mjs',
     what: '`0x192` 没注册 ⇒ 内联串写不进串池（启动链把它当成"未实现"停点，而缺口报告看起来合法）',
   },
   // ── 数组连写 / 跳转 / 比较（★ `INITCONFIG4` 那一簇：错一处都让后面的循环次数/落点静默错）
@@ -794,6 +809,14 @@ const MUTATIONS = [
     to: '  if (false) {',
     guard: 'tools/test/requirements-add-lands.test.mjs',
     what: '被写后守卫拒回时不再拒绝（继续按"已落盘"打印计划）⇒ stdout 报成功而盘上什么都没有',
+  },
+  // ── 需求台账：正文里的 `repo:` 路径引用必须真的存在（★ 塌了 ⇒ 路径前缀只剩"写着好看"）──
+  {
+    file: 'tools/lib/requirements.mjs',
+    from: 'const PATH_REF_RE = /\\b(repo|old):([^\\s`]+)/g;',
+    to: 'const PATH_REF_RE = /\\b(old):([^\\s`]+)/g;',
+    guard: 'tools/test/requirements.test.mjs',
+    what: '`repo:` 不再被识别成路径引用 ⇒ 指向不存在的本仓路径照样通过（前缀退化成"写着好看"，而树上没有任何提示）',
   },
   // ── 发布链：AGF 缺省来源必须还是"入库件"（★ 别退回"每次重烧"）──
   {
@@ -1406,6 +1429,14 @@ const MUTATIONS = [
     to: '    // 变异：缺口可以不点名义务',
     guard: 'tools/test/spec.test.mjs',
     what: '★ 审计缺口可以空着 residual ⇒ "未成篇"重新变成一句空话（没有具体义务、没有下一步）',
+  },
+  // ── 未成篇 opcode 的落点：`hasHandler = 已写（规则标题）+ gaps.ops`（★ 漏列一个 ⇒ 义务重新"无人认领"）──
+  {
+    file: 'data/spec/audit.json',
+    from: '        "0x1",\n        "0x4",',
+    to: '        "0x4",',
+    guard: 'tools/test/spec-gaps.test.mjs',
+    what: '★ 未成篇 opcode 段漏列 `0x1`（有处理函数、但没有任何规则标题覆盖）⇒ 精确划分不成立；报告仍打印一个"自洽"的数字',
   },
   // ── emulator-new：整数减的**方向**（`第 2 个 − 第 3 个`）──
   //   ★ 写反不会报错、只会静默算错，所以必须有一条守卫专门钉这个方向。

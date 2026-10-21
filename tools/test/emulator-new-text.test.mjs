@@ -1,6 +1,6 @@
 /** @env pure @kind contract @why 0x71 的"位置写帧字段"漏写 / 写错（写下一条、写成字节偏移）都不会报错，只会让帧里那格静默错掉 */
 /**
- * tools/test/emulator-new-text.test.mjs —— 文本请求（`60-ops.md` 的 CORE-OPS-TEXT-REQUEST）守卫
+ * tools/test/emulator-new-text.test.mjs —— 文本请求（`60-ops-list.md` 的 CORE-OPS-LIST-TEXT-REQUEST）守卫
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

@@ -15,7 +15,7 @@
 
 * 首批已收口：`core spec · 机制地图与首批机制`（`REQ-01M5AJWPM…`，5/5 子单 done）。
   含 `CORE-ISA` 9 条、`CORE-POOL` 19 条（12 新 + 7 既有）、`apps/emulator-new` 骨架与守卫。
-* 本单**不再**按旧章节名拆：`chapters/README.md` 的 6 章只是当前落点，不是分区。
+* 本单**不再**按旧章节名拆：`repo:data/spec/chapters/README.md` 的 6 章只是当前落点，不是分区。
 
 ## 判据
 

@@ -1,6 +1,6 @@
 /** @env pure @kind contract @why 把"转发型指令"实现成空操作（或漏掉请求）不会报错：请求消失了、日志看起来一切正常 */
 /**
- * tools/test/emulator-new-forward.test.mjs —— 转发型指令（`60-ops.md` 的 CORE-OPS-FORWARD-MESSAGE）守卫
+ * tools/test/emulator-new-forward.test.mjs —— 转发型指令（`60-ops-forward.md` 的 CORE-OPS-FORWARD-MESSAGE）守卫
  *
  * ★ 判据为什么是这些：
  *   - **请求必须发生**：`0x1ca` 不是空操作 —— 漏发请求不报错，只是子系统永远收不到"跳过"；

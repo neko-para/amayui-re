@@ -1,6 +1,6 @@
 /** @env pure @kind contract @why 0x73 的"0 换成 1"与读序写错都不报错；门槽被当成操作数也只在日志里看出一支请求的实参不对 */
 /**
- * tools/test/emulator-new-subsys.test.mjs —— 子系统转发（`60-ops.md` 的 CORE-OPS-SUBSYSTEM-SET73）守卫
+ * tools/test/emulator-new-subsys.test.mjs —— 子系统转发（`60-ops-list.md` 的 CORE-OPS-LIST-SUBSYSTEM-SET73）守卫
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

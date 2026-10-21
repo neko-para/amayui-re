@@ -23,6 +23,8 @@
  * 台账是**结论的真源**；本文件是那些结论的**可执行形式**（守卫直接拿它回语料复核）。
  */
 
+import { CODEC } from '../asm/value-codec.mts';
+
 /** `Engine` 对象的全局池族槽位（绝对值 = `Engine 基址 + 偏移`） */
 export const GLOBAL_SLOTS = {
   base: {
@@ -73,7 +75,12 @@ export const FRAME_LAYOUT = {
   off: {
     /** `0x5D894` —— **脚本缓冲基址**（`GlobalAlloc` 那块；三组 (len,ptr) 的偏移也由它加出来） */
     strBase: 0x0,
-    /** `0x5D898` —— `ip` / 操作数基址（操作数每个 8 字节、opcode 在 `[第一操作数−4]`） */
+    /**
+     * `0x5D898` —— **PC（当前指令的 opcode 地址）**，也是操作数寻址的基点。
+     * ★ 访问原语按**从 1 起**的序号算 `地址 = PC + 8×序号`，得到该操作数的 **raw** 格；
+     *   `type` 在 `[地址−4]`（第一个操作数的 type = `PC+4`），opcode 在 `PC`。
+     *   （`0x42AEF5 mov ecx,[eax-4]` 取的是 **type**，不是 opcode —— 旧注释在这里差一格。）
+     */
     operands: 0x4,
     /** `0x5D89C` —— 第 1 个 local 计数槽（6 个连续 dword，见 `LOCAL_POOL_SLOTS`） */
     count0: 0x8,
@@ -251,10 +258,10 @@ export const EVIDENCE = {
       '不是靠"分配顺序"猜。逐字行号见 `LOCAL_POOL_SLOTS` 的头注（三次订正的经过也写在那里）',
   },
   intPoolBase: { at: '.text:0042AF2F..0042AF35', insns: ['mov edx,[esi+5D800h]', 'lea eax,[edx+ecx*4]'], note: 'operand type 3 的取址：base + idx*4（下标不过编码）' },
-  /** ★ int 族的 `key` 在 `Engine+0x5EC8C`（运行期赋值，从不出现在立即数里） */
-  codecKey: { at: '.text:00417359', insns: ['mov [esi+5EC8Ch], edx'], note: '全清单唯一的写点' },
-  /** ★ `enc_zero` 在 `Engine+0x5EC90` = `ENC(key,0)` ⇒ **非 0** */
-  encZero: { at: '.text:00415990', insns: ['mov [esi+5EC90h], eax'], note: 'eax = rol(key,21) = ENC(key,0)' },
+  /** ★ int 族的 `key` 在 `Engine+0x5EC8C`（运行期赋值，从不出现在立即数里）；槽身份取自 `CODEC.keyField` */
+  codecKey: { ...CODEC.keyField, at: '.text:00417359', insns: ['mov [esi+5EC8Ch], edx'], note: '全清单唯一的写点' },
+  /** ★ `enc_zero` 在 `Engine+0x5EC90` = `ENC(key,0)` ⇒ **非 0**；槽身份取自 `CODEC.encZeroField` */
+  encZero: { ...CODEC.encZeroField, at: '.text:00415990', insns: ['mov [esi+5EC90h], eax'], note: 'eax = rol(key,21) = ENC(key,0)' },
 };
 
 /**

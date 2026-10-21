@@ -2,50 +2,22 @@
 
 - id: REQ-01M5F9C7RHFDAK1P8D552VD17C
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M5D1G31PN9EGANRVAR753BPC
+- verify: tools/test/spec.test.mjs#★ 真源：data/spec/{spec,bindings,audit}.json + chapters/*.md 过全部不变量，且试点未登记 = 0
 - tags: [spec, ops, array]
 
-## 一句话
+## 结果（2026-10-21）
 
-`0x61 lookup-array` / `0x12c lookup-array-2d` / `0x64 copy-local-array` 是启动链 `INITCONFIG4` 与 `CHECKCONFIG` 前后的关键指令，spec 里都没有条目；而它们依赖的**地址算术口径**（地址 = 池基址 + 元素宽度×下标；字符串 28 字节）也只在 `55-config.md` 的键换算里出现过一次。本单把这一族写成规则。
+* `repo:data/spec/chapters/40-pools.md` 新增「数组地址算术」（`CORE-POOL-ADDRESS-ARITH`）：地址 = 池基址 + 元素宽度 × 下标（数值 / 指针 4、字符串 28）；指针槽不编解码；**只规定关系、不规定地址数值**；越界 / 未对齐是未定义行为（⛔ 不 clamp / 不补 0）；与配置章的键换算共用。
+* `repo:data/spec/chapters/60-ops-array.md` 新增三条：`CORE-OPS-ARRAY-LOOKUP`（`0x61`）/ `CORE-OPS-ARRAY-LOOKUP-2D`（`0x12c`，下标 = 行 × 行宽 + 列）/ `CORE-OPS-ARRAY-COPY`（`0x64`，块首 = 代码区起点 + 4×raw，首 u32 = 个数，从 +4 起逐格编码）。
+* 三条都写"不检查越界"；`bindings` / `audit` 同批，章首计数 48→53 opcode（与 #1 同批）。
 
-## 证据（已存在）
+## 边界
 
-- **`0x61` / `0x12c`**：共用写入器 `sub_418CC0`，按**落点类型标签**分派（逐字）：
-  6/7/12/13 ⇒ `base + 4×idx`；8/14 ⇒ `base + 28×idx`；其余（值族 9/10/11 等）⇒ 抛类型异常。
-  `0x12c` 的下标 = `op3 × op4 + op5`（乘在前、加在后）。
-- **`0x64`**：handler `sub_42CBE0` —— `dest = 取址(op1)`；块首 = 代码区起点 + 4×raw，首 u32 = 元素个数，
-  数据从 +4 起；逐格 `ENC(源 dword)`（**无条件**编码）；个数为 0 ⇒ 什么都不做。
-- 越界：台账 `01M4ASXQ587J7G7E6E5R3R2Y2K` ⑤ —— `0x61`/`0x12c`/`0x64` **都不检查越界**（`sub_418CC0` 直接算地址写槽）。
-- 参考实现：`apps/emulator-new/src/{address,values,handlers}.ts`；守卫 `tools/test/emulator-new-pointer.test.mjs`（9 条）；
-  变异 5 条（步长 4 / 漏乘元素宽度 / 解引用用槽下标 / 配置键按下标 / 0x64 块偏移漏 4×），各 1/1 红。
+* 证据：`0x61`/`0x12c` 用 accepted 台账 `KN:01M4G4N4W34T040X434N7M4M43` + pointer 守卫；`0x64` 只有 pure 守卫（单里原引的 `01M4ASXQ…` 已 retracted）。
+* 单里说"`55-config` 明写地址数值不规定"这句**现在不在**原文：现文是"键下标只在地址落在该族全局池内时有定义"。本条按 `00-overview` + `55-config` + 新 40-pools 规则三处口径写，已订正。
 
-## 要做什么
+## 怎么查
 
-1. `40-pools` 增「数组地址算术」一条：地址 = 池基址 + 元素宽度×下标；元素宽度（数值/指针 4、字符串 28）；
-   指针槽不编解码；**地址数值本身不规范**（只规定关系）。★ 与 `55-config.md` 的键换算共用这一条。
-2. `60-ops` 加三条：`CORE-OPS-ARRAY-LOOKUP`（`0x61`）/ `CORE-OPS-ARRAY-LOOKUP-2D`（`0x12c`）/ `CORE-OPS-ARRAY-COPY`（`0x64`）。
-3. `bindings`：`sub_418CC0` 的六个 case + `sub_42CBE0` 的块读/逐格写；`audit`：`handled` + 残差（越界写会踩相邻池 / 块数据是同脚本的 coder 数据）。
-4. 章首 50 → **53 个 opcode**（若 `0x6c`/`0x2d8` 单先落地则从 48 起算：48 + 2 + 3）。
-
-## 判据
-
-- `pnpm tools spec validate` 13/13；每条有 `binding.evidence`；
-- 守卫会红（见上，已存在）。
-
-## ★ 一并补的一条：地址**数值**不规定
-
-用户问到"模拟器的地址值是特殊的还是随意的"，查规范现状：
-
-- **关系有依据**：`40-pools.md` 的「下标不做上界检查」（`CORE-POOL-INDEX-UNCHECKED`）写的是
-  "地址由'基址 + 下标 × 元素宽'直接算出"；字符串记录步长 28 也在同章。
-- **数值"不规定"只有一处依据**：`55-config.md` 的「脚本访问」明写"地址的数值本身不规定，只用地址差"
-  —— 但那是**配置键换算**那一节的局部口径，`40-pools` 里**没有**总的"地址数值不规定"。
-  ⇒ 只读 `40-pools` 的实现者可能误以为基址是语义的一部分（本仓 `apps/emulator-new/src/address.ts` 只能在文件头
-  自己声明"合成地址是实现选择"）。
-
-本单因此要补：**地址只规定关系（基址 + 元素宽×下标；差值与键的换算；取址/解引用往返），不规定数值**；
-具体基址 / 窗口 / 池的先后顺序是**实现选择**，且**不得让绝对地址变得可观察**（比较无关指针、把地址当整数打印属机器相关；
-局部池指针换算出的配置键按规范本身就是机器相关的地址序号）。同时写清"越界 / 未对齐是 UB"，
-实现可以记诊断或响亮失败，⛔ 不许 clamp / 补 0。
+`pnpm tools spec show CORE-POOL-ADDRESS-ARITH` · `pnpm tools spec validate`。

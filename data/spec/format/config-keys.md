@@ -18,7 +18,7 @@
 
 - `internal` 是配置库里的规范键；`defaults` / `ini` 两套输入都归一到它。
 - `kind: "list"` 的键只追加，不能按元素覆盖。
-- `special: "saveVersionSplit"` 的 `internal` 只作占位；实际写两个键（主 / 次版本）。
+- `special: "saveVersionSplit"` 的 `internal` 只作占位；实际写两个键：主版本 = `set:SaveVersion1`、次版本 = `set:SaveVersion2`。后者在 `defaults[]` / `persist[]` 里没有独立条目（它由引擎的存档版本检查读取，不是单独一条默认表键）。
 - `special: "ignore"` 的键在词表里但**不产生任何键**（接受即忽略），不是拼写错误。
 - `defaults[].extra` 是**派生写**：`from: "value"` 表示取该条目转换后的最终值（含平台条件改写后的值），`from: "value-1"` 表示取该值减 1；`extra[].if` 是派生条件，按转换后的值判断（`value!=0` ⇒ 值为 0 时不派生）。
 - `ini[].if` 是**条件读取**：它指向一个内部整数键；该键为 0 时整条不读（不是读成 0）。

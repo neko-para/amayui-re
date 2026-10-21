@@ -86,6 +86,58 @@ export const budgeted = (nodes) => nodes.filter((n) => BUDGET_COUNTS.includes(n.
 export const BUDGET_TEXT = (b = BUDGET) =>
   `一屏预算：单节点 ≤ ${b.maxLinesPerNode} 行；**活节点**（${b.counts.join('/')}）≤ ${b.maxNodes}`;
 
+/**
+ * 不变量 #6 的标题 —— 与 `BUDGET_TEXT` 同理：`validateAll` 与 `describe` 共用同一份措辞，
+ * 所以"守卫说的"与"文档说的"不可能漂（`data/requirements/README.md` 只写"怎么写"，不复述这条）。
+ */
+export const REPO_REF_TEXT =
+  '路径前缀：正文里的 `repo:<相对路径>` 必须存在（相对仓库根；glob 至少要命中一个）；`old:<路径>` 是旧仓引用，只标记、不校验';
+
+/**
+ * 正文里的路径引用：`repo:<本仓相对路径>` / `old:<旧仓路径>`。
+ * ★ 只校验 `repo:` —— 旧仓（`E:\\Games\\Eushully\\天結`）的文件本仓不该有，校验存在性没有意义。
+ */
+const PATH_REF_RE = /\b(repo|old):([^\s`]+)/g;
+/** 路径后面紧跟的标点不属于路径（`` `repo:data/spec/README.md`。 `` 里的句号） */
+const TRAILING_PUNCT_RE = /[，。、；：！？（）【】「」『』《》…,;:!?]+$/u;
+
+/**
+ * 扫一个节点正文里的路径引用（不变量 #6 的唯一实现）。
+ * ★ 空引用（正文里在讨论前缀本身，写成 `` `repo:` `` / `` `old:` ``）不算引用 —— 否则"说明约定"这件事本身就会红。
+ */
+function pathRefProblems(node, repoRoot) {
+  const bad = [];
+  for (const m of String(node.body ?? '').matchAll(PATH_REF_RE)) {
+    const kind = m[1];
+    const rel = m[2].replace(TRAILING_PUNCT_RE, '');
+    if (rel === '') continue;
+    if (kind === 'old') continue; // 旧仓路径：只做标记，不校验存在性
+    if (path.isAbsolute(rel) || /^[A-Za-z]:/.test(rel)) {
+      bad.push(`${node.name}: \`repo:\` 必须写**仓库相对路径**（实际是绝对路径）→ ${rel}`);
+      continue;
+    }
+    if (!repoRoot) continue; // 没给仓库根：只能查形态，存在性无从而知
+    const abs = path.resolve(repoRoot, rel.split('/').join(path.sep));
+    const inside = path.relative(repoRoot, abs);
+    if (inside.startsWith('..') || path.isAbsolute(inside)) {
+      bad.push(`${node.name}: \`repo:\` 路径越出仓库根 → ${rel}`);
+      continue;
+    }
+    if (/[*?[\]]/.test(rel)) {
+      let hits = [];
+      try {
+        hits = fs.globSync(rel, { cwd: repoRoot });
+      } catch {
+        hits = [];
+      }
+      if (hits.length === 0) bad.push(`${node.name}: \`repo:\` 的 glob 一个文件都没命中 → ${rel}`);
+      continue;
+    }
+    if (!fs.existsSync(abs)) bad.push(`${node.name}: \`repo:\` 指向的路径不存在 → ${rel}`);
+  }
+  return bad;
+}
+
 /** 参数区的键序（写盘时固定，diff 干净）；不在表里的键 = 未知字段 ⇒ 报错，绝不静默忽略 */
 export const KEY_ORDER = [
   'id',
@@ -796,6 +848,13 @@ export function validateAll(nodes, opts = {}) {
     add(5, BUDGET_TEXT(budget), bad);
   }
 
+  // 6 路径前缀（`repo:` 是本仓路径，必须存在；`old:` 是旧仓引用，只标记）
+  {
+    const bad = [];
+    for (const n of nodes) bad.push(...pathRefProblems(n, opts.repoRoot ?? null));
+    add(6, REPO_REF_TEXT, bad);
+  }
+
   const failures = checks.filter((c) => c.problems.length > 0).length;
   return { checks, failures, tree };
 }
@@ -847,6 +906,7 @@ export function describe() {
       { id: 3, text: '状态自洽：需求 done 看 verify（能力在不在）/ 缺陷 done 看 verify 或 repro（分歧还在不在）；blocked 有前置、dropped 有理由' },
       { id: 4, text: '父不先于子收口：父 done ⇒ 子树里不许还有 open/doing/blocked' },
       { id: 5, text: BUDGET_TEXT() },
+      { id: 6, text: REPO_REF_TEXT },
     ].map((x) => ({ ...x, enforcedBy: '本工具的 validate（`pnpm tools requirements validate`）' })),
     operations: OPERATIONS,
     writePath:

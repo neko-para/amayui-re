@@ -2,33 +2,25 @@
 
 - id: REQ-01M5F8JEP92ZREWR31SRMMV0B0
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M5D1G31PN9EGANRVAR753BPC
+- verify: tools/test/spec.test.mjs#★ 真源：data/spec/{spec,bindings,audit}.json + chapters/*.md 过全部不变量，且试点未登记 = 0
 - tags: [spec, ops, array]
 
-## 一句话
+## 结果（2026-10-21）
 
-`0x6c fill-zero` / `0x2d8 set-array-to` 是启动链 `INITCONFIG4` 的前两条，但 spec 里没有条目（`60-ops` 的 48 个 opcode 不含它们）。两条同族、只差"填什么值"，适合写成一族两条规则。
+`repo:data/spec/chapters/60-ops-array.md` 新增「数组填充」两条：
 
-## 证据（已存在）
+* `CORE-OPS-ARRAY-FILL-ZERO`（`0x6c`）：目标地址 + 个数；连写 count 个 dword，值是 `ENC(0)`（不是字面 0）；count ≤ 0 不写；越界不检查。
+* `CORE-OPS-ARRAY-SET-TO`（`0x2d8`）：同上，值是 `ENC(操作数 2 的值)`（不是原值）。
 
-- 台账 `01M4ASXQ587J7G7E6E5R3R2Y2K` ①：`0x6c` 的逐字 —— **填的不是 0**，每个 dword 填 `Engine+0x5EC90`（= `ENC(key,0)`）；
-  `op1` 是**目标地址**（取址原语）、`op2` 是个数（**≤ 0 什么都不做**）。
-- `0x2d8`：同样的"地址 + 个数"，值 = `ENC(key, op2)`（`ENC` 的式子见「数据池」的编码）。
-- 参考实现：旧 `apps/emulator/src/vm/ops.ts` 的 `opFillZero` / `opSetArrayTo`；
-  新 `apps/emulator-new/src/handlers.ts` 的 `fillZero6c` / `setArrayTo2d8`。
-- 守卫：`tools/test/emulator-new-array-fill.test.mjs` 的 `★★ \`0x6c fill-zero\`` / `★★ \`0x2d8 set-array-to\``；
-  变异 3 条（填字面 0 / `<=` 多写一格 / 0x2d8 填原值），各自 1/1 红。
+配套：`bindings.json` 各一条（站点回 `.lst` 核为指令行首）、`audit.rules` 各一条（draft / handled / 残差 + falsifier）、章首计数 42→47 条规则 / 48→53 opcode。
 
-## 要做什么
+## 边界
 
-1. `60-ops` 加一族两条：`CORE-OPS-ARRAY-FILL-ZERO`（`0x6c`）/ `CORE-OPS-ARRAY-SET-TO`（`0x2d8`）。
-   正文只写：地址寻址（池 + 槽号）、连写 `count` 个 dword、值的口径（`ENC(key,0)` / `ENC(key,op2)`）、`count ≤ 0` 不做、越界不检查（引擎不检查）。
-2. `bindings`：站点 = 两个 handler 的循环/编码/地址读取；`evidence` = 上面台账 + 新守卫。
-3. `audit`：`handled` + 残差（越界写会踩相邻数组 ⇒ 行为未取证；浮点池按裸位模式解释）。
-4. 章首 48 → 50 个 opcode（42 → 44 条规则）。
+* 证据只用 `guard:`（`tools/test/emulator-new-array-fill.test.mjs` 的两条 ★★ 用例）；单里原引的台账 `01M4ASXQ…` 已 retracted，**没有**照抄。
+* `0x2d8` 没有单独 count≤0 用例；该口径由 handler 的 `jle` + `0x6c` 同构守卫旁证，已在残差写明。
 
-## 判据
+## 怎么查
 
-- `pnpm tools spec validate` 13/13；新条目有 `binding.evidence`；
-- 守卫会红（见上）。
+`pnpm tools spec show CORE-OPS-ARRAY-FILL-ZERO` · `pnpm tools spec validate`。

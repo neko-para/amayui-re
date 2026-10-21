@@ -2,41 +2,30 @@
 
 - id: REQ-01M5AM4M5A5TV4APMPN0QWEA96
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M5851Z51V1MTSWH414M7WN5Q
 - order: 66
+- done_reason: 8 条逐条处置：1/2/3/7 已改（守卫扩到五原语 + 变异实测 1/1、PC/type 注释订正、CODEC 去重、shape 位测试边界入文档）；5 已移进 gaps；4/6 的裁决写进 core/README（旧草稿不回填 covers；语料型机制靠 accepted 台账升 reviewed，assets 守卫不单独撑档）；8 原已满足
 - tags: [engine spec infra]
 
-## 背景
+## 结果（2026-10-21/22）
 
-`CORE-ISA` / `CORE-POOL` / `CORE-VM` 三个取证子代理各自交了 `feedback.md`（每条附可执行反例）。
-这里收**基建 / 口径**问题；规范内容问题已直接修（见 `10-format.md` 与 `core/README.md`）。
+| # | 处置 |
+|---|---|
+| 1 守卫误标 + 覆盖不足 | `repo:tools/test/engine-operand-types.test.mjs` 扩到**五条原语**（12/14/14/10/11）并把 `0x42B4B0` 从「float 取址」改为「写整型」（数字不动）；`SPC-OPERAND-UNSUPPORTED-THROW` 的证据改挂五原语用例 + `spec-pool.assets` 的"五原语入口"用例 + accepted 台账；变异清单加一条（取址 case 7 去标签 ⇒ 守卫红，已实测 1/1）。 |
+| 2 `off.operands` 注释 | 改为「`0x5D898` = PC（当前 opcode 地址）；操作数按 1 起的序号算 `地址 = PC + 8×序号`（raw 格），type 在 `[地址−4]`、opcode 在 `PC`」；`emulator-model` 的对应断言与用例名同批订正。 |
+| 3 编码零的指针 | `layout.mts` 的 `EVIDENCE.codecKey` / `encZero` 改为引用 `CODEC.keyField` / `CODEC.encZeroField`（不再裸地址）。★ 原判据「`layout:CODEC.*` 能解析」**已不可能满足**：`resolveStorage` 结构性拒绝所有 `layout:`；本条的实质（去重）已落地。 |
+| 4 草稿模板 `covers` | **裁决：旧草稿不回填**（`.tmp/spec-draft/*` 是过程材料、不入库；规则已合并且 `covers` 由 audit 单独维护）。口径写进 `repo:data/spec/core/README.md` §6：`covers` 只约束新草稿。 |
+| 5 `pilot.outOfScope` 的句柄分支 | 已移进 `gaps`：`GAP-CONTAINERS-HANDLE-BRANCHES`（chapter `containers`，note「句柄分支不是跳转表 case」，residual `unhandled` + next）；`outOfScope` 只剩真正"域外"的两条。 |
+| 6 `reviewed` 与语料型机制 | **裁决：不改校验器**。语料型机制升 `reviewed` 的路径是补一条 **accepted 台账**（锚 EA），`@env assets` 守卫只作附加证据、不单独撑档（默认门禁不跑）。口径写进 `repo:data/spec/core/README.md` §3.1。 |
+| 7 `shape access` 漏寄存器位测试 | 在 `repo:docs/02-engine/shape-census.md` §3.1 写明覆盖边界：位测试只认内存位，寄存器快照上的位判据不计入；并给实测例子（4 处内存位测试 vs 约 20 处寄存器判据 / 19 位）。 |
+| 8 `draft:` 占位口径 | 已满足（`core/README` §6 原文），未动。 |
 
-## 清单
+## 边界
 
-1. **守卫误标 + 覆盖不足**：`tools/test/engine-operand-types.test.mjs` 只钉 5 张分派表里的 3 张，
-   且把 `sub_42B4B0` 叫 "float 取址"（实为**写整**）；`bindings` 拿它当"五原语支持集"的证据。
-   → 扩到 5 项（12/14/14/10/11）+ 中性命名；或把规则证据缩到它真覆盖的 3 张表。
-2. **layout 注释差一个字段**：`FRAME_LAYOUT.off.operands` 写"opcode 在 [第一操作数−4]"，
-   实为 **type**；按它写解码器会整体错 4 字节。
-3. **编码 key / 编码零没有诚实的 `storage` 指针**：只在 `layout.mts` 的 `EVIDENCE` 里；
-   `layout:EVIDENCE.codecKey` 能过校验但语义是滥用。→ 加 `CODEC` 常量，`EVIDENCE` 引用它。
-4. **草稿模板与 audit 字段形状不一致**：`sites`（站点列表）≠ `covers`（effect 选择器）。
-   → 已在 `data/spec/core/README.md` §6 要求草稿带 `covers`；本条只剩"旧草稿补齐"。
-5. **`pilot.outOfScope` 的语义**：用"switch 之前的独立分支"排除了 4 个句柄分支，
-   于是"未登记 0"只对声明的 58 块成立。→ 这种"按结构位置排除"应进 `gaps`（未归属），不要放 `outOfScope`。
-6. **`reviewed` 与语料型机制冲突**：`reviewed` 要求至少一条 `@env pure` 守卫，
-   但本机制的判据必须读语料（相关守卫都是 `@env assets`）⇒ 语料型机制永远升不到 reviewed。
-   → 需要裁决：允许 assets 守卫算强证据（附 tier 说明），或加一档状态。
-7. **`shape access` 漏寄存器快照位测试**：主循环状态字只报 32 行 / 4 处内存位测试，
-   而 20 处判据在寄存器快照上（覆盖 19 位）⇒ 只按它会 23 位读成 3 位。
-8. **`spec validate` 只认 `KN:` / `guard:`**：草稿阶段拿不到 → 已定口径"草稿可用 `draft:` 占位、合并前换掉"，
-   写进 `core/README.md` §6；不需要改校验器。
+* 第 1 条的变异只证"类型表缺标签会被抓到"，不证"五张表的语义都正确"。
+* 第 3 条没有新增 `layout:` 可解析性（也不该有）；`CODEC` 是唯一真源。
 
-## 判据
+## 怎么查
 
-* 1 扩到 5 张表后，改坏任意一张表的 case 都会让守卫红（变异条目为证）。
-* 2 注释与实测一致（`[第一操作数−4]` = type）。
-* 3 `layout:CODEC.*` 能解析，且 `EVIDENCE` 里不再有裸地址常量。
-* 6 裁决落到文档（`core/README.md` 或 `AGENTS.md`），并有一条守卫或明确的"不改，理由"。
-* 7 要么补工具（寄存器快照的位测试），要么在 shape 文档里标明"位测试不在覆盖内"。
+`node --test --test-isolation=none tools/test/engine-operand-types.test.mjs` · `node tools/mutate-check.mjs --match engine-operand-types` · `pnpm tools spec report`（gaps）。

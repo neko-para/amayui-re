@@ -2,32 +2,28 @@
 
 - id: REQ-01M5AKDRRHKWEXQV1M7KTBG2KE
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M5851Z51V1MTSWH414M7WN5Q
 - order: 65
+- verify: tools/test/spec-mechanisms.test.mjs#★ 机制表是闭集：planned[].mechanism 只能是表里的 id 或 core-out
 - tags: [engine spec docs infra]
 
-## 背景
+## 六条各自的处置（2026-10-21/22）
 
-一批（`REQ-01M5AJWYV…`）已修掉 doc 层失效指针。以下属于**基建 / 口径**，转二批：
+| # | 处置 | 怎么验 |
+|---|---|---|
+| 1 planned ↔ 机制对齐 | **已落地**：`audit.planned[]` 每项加 `mechanism` 字段（`containers→CORE-POOL`、`objects→CORE-OBJECTS`、`save→FMT-SAVE`、`input`/`presentation→core-out`、`ops-unwritten→CORE-OPS`）；`spec.mjs` 的 describe/validate 同步；新增 `repo:tools/test/spec-mechanisms.test.mjs` 守"闭集 / 每项有归属 / 每个机制至少一条需求单在跟踪"。 | `node --test --test-isolation=none tools/test/spec-mechanisms.test.mjs`；变异：删掉 `objects` 的 mechanism ⇒ 守卫红（`--match spec-mechanisms` 实测 1/1）。 |
+| 2 键名复述 | **已完成（选 a）**：`repo:data/spec/README.md` 与 `audit.md` 不再枚举 `bindings[]` / `rules[]` / `gaps[]` / `pilot.sites` / `covers` / `disposition=…`，一律"字段见 `pnpm tools spec describe`"。 | `node --test --test-isolation=none tools/test/json-docs.test.mjs` · `pnpm tools spec validate` |
+| 3 路径前缀 | **已完成**：`repo:data/requirements/README.md` §7 写清 `repo:` / `old:`；`validateAll` 新增不变量 #6（`repo:` 必须存在、支持 glob；`old:` 只标记）；describe 同源。 | `pnpm tools requirements validate`（#6）；`repo:tools/test/requirements.test.mjs` 的 #6 用例；变异 `--match requirements.test.mjs` 实测会红。 |
+| 4 开单口径 | **已完成**：本目录 §8 写"文件:行 + 现查命令"，不写"当前状态"式断言；已漂实例只在被引用时订正。 | `repo:data/requirements/README.md` §8 |
+| 5 分发边界 | **已满足**：`repo:data/spec/chapters/README.md` 无 core/README 指针与仓内路径；"机制地图是否进分发清单"是产品取舍，等用户裁决。 | `rg -e core/README -e data/spec/ data/spec/chapters/` |
+| 6 机制表机器形态 | **明确暂缓**：§2 仍是散文表（只把 `planned[].mechanism` 做成了机器字段）；等工具真要读 `dependsOn` 时再落 JSON。 | — |
 
-1. **planned ↔ 机制对齐（数据层）**：`data/spec/audit.json` 的 `planned[]` 还是旧域 id（8 个），
-   与 `data/spec/core/README.md` §2.1 的映射尚未落到 JSON。等 `data/spec/chapters/core/` 落地时同批改
-   `planned[]` 与 `outOfScope[].chapter`，并加不变量"每个机制都有需求子单"。
-2. **键名复述**：文档仍在复述 `bindings[].rule` 等键名，与 `AGENTS.md` §10「JSON 不复述 schema」冲突且无守卫
-   （漂移实例：草案里曾写 `audit.residual`，该键不存在）。→ 二选一：改成"字段见 `pnpm tools spec describe`"，
-   或加一条一致性守卫；⛔ 不许两处都写又不钉。
-3. **需求树路径写法**：需求单大量引用 `scripts/…` / `app/amayui-emulator` / `install/` 等**旧仓**路径，
-   也有本仓 `chapters/…`（应为 `data/spec/chapters/…`），且没有"旧仓 / 本仓"标记 ⇒ 无法机械判定。
-   → 约定前缀（`old:` / `repo:`）+ 只校验 `repo:` 的守卫（本仓路径必须存在）。
-4. **需求单前提会漂**：开单时写"文件:行 + 现查命令"，不写"当前状态"式断言（一批里就有一条按不存在的前提写的）。
-5. **分发边界**：`chapters/README.md` 是分发物；已删掉指向 `data/spec/core/README.md` 与仓内路径的句子。
-   若以后要分发机制地图，先把它纳入 `spec.json` 的分发清单 —— 这是产品取舍，等用户裁决。
-6. **机制表的机器形态（暂缓）**：机制表现在是散文表（无机制 / dependsOn 的机器字段）。
-   先简单处理：等工具真的需要读它（例如按机制生成报告）时再落 JSON，届时同批落 `planned[]` 映射。
+## 边界
 
-## 判据
+* 第 1 条的"每个机制有需求子单"是**存在性**判据（需求单可以仍 open），不是"机制已做完"。
+* 第 2 条选 (a) 删第二份 schema，没有新增字段一致性守卫 —— 因为"文档里出现某字段名"的守卫会随措辞变红，收益低。
 
-* 1 落地后 `spec validate` 仍绿；`planned[]` 每个元素都能在机制表找到归属（`input` / `presentation` 明确标 core 外）。
-* 2 二选一执行完，并有一条守卫（或明确记录"不改，理由 X"）。
-* 3 守卫能区分 `repo:`（本仓路径必须存在）与旧仓引用（不校验存在性）；现有可疑引用有清单可查。
+## 怎么查
+
+`pnpm tools spec describe` · `pnpm tools spec report` · `pnpm tools requirements validate`。

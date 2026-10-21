@@ -472,8 +472,9 @@
       ],
       "storage": [],
       "evidence": [
-        "KN:01M48EHKDD0W1X442T287G0W4D",
-        "guard:tools/test/engine-operand-types.test.mjs#★ 三条原语的跳转表 case 数互不相等"
+        "KN:01M4GX1QZ36T011C117S472Z18",
+        "guard:tools/test/engine-operand-types.test.mjs#★ 五条原语的跳转表 case 数（12/14/14/10/11）⇒ 支持集按用途分套，不是一张表",
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 五原语入口：五个函数起点 + 表规模 12/14/14/10/11 + 类型在 [地址−4]"
       ]
     },
     {
@@ -1347,16 +1348,20 @@
           "what": "第一个操作数 → 读整（值）"
         },
         {
+          "ea": "0x426b96",
+          "what": "值上界是字面立即数（cmp eax,1Fh）：不是掩码 / 位宽 / 表规模"
+        },
+        {
           "ea": "0x426b99",
           "what": "值 > 0x1F → 跳到抛"
         },
         {
           "ea": "0x426b9e",
-          "what": "索引 > 7 → 跳到抛"
+          "what": "索引 > 7 → 跳到抛（与值上界是两条独立判据）"
         },
         {
           "ea": "0x426ba0",
-          "what": "表基址 +0x1EC4（8 格）"
+          "what": "表基址 +0x1EC4（8 格；全语料只出现这一次 ⇒ 零读者）"
         },
         {
           "ea": "0x426bba",
@@ -1371,7 +1376,8 @@
         "shape:T1@0x60"
       ],
       "evidence": [
-        "KN:01M4E50S9J1X717X4G5R696A0G"
+        "KN:01M4E50S9J1X717X4G5R696A0G",
+        "KN:01M5FK4MCV7G2G1N1B5W4K4Z19"
       ]
     },
     {
@@ -1975,7 +1981,7 @@
         },
         {
           "ea": "0x4ace6f",
-          "what": "绘制项 +0x00 |= 1；0x4ace87 +0x04 = texId"
+          "what": "绘制项 +0x00 |= 1（bit 0 =「有效」= 0x202 门读的「已存在」位）；0x4ace87 +0x04 = texId"
         },
         {
           "ea": "0x4ace96",
@@ -2002,7 +2008,8 @@
         "shape:T_Scene_460"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1fb 绘制纹理：矩形存**四条边**（右 = x+宽、下 = y+高），不是宽高"
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1fb 绘制纹理：矩形存**四条边**（右 = x+宽、下 = y+高），不是宽高",
+        "KN:01M5FK4FKN4A6C1D6E5G0P4T3C"
       ]
     },
     {
@@ -2043,6 +2050,18 @@
         {
           "ea": "0x4ad0c0",
           "what": "排窗：bit0（已存在）门 → 置有窗标志、清起点、写延迟/持续时间/终色、置脏与动画标志"
+        },
+        {
+          "ea": "0x4ad0df",
+          "what": "门：test byte ptr [eax],1 —— 读的就是 0x1fb 置的 bit 0（同一位）"
+        },
+        {
+          "ea": "0x4ad0e2",
+          "what": "bit 0 = 0 ⇒ 一个窗字段都不写（jz 到 loc_4AD15F）"
+        },
+        {
+          "ea": "0x4ad0f3",
+          "what": "「有窗」位置 1（bit 1，与 bit 0 是两位）"
         }
       ],
       "functions": [
@@ -2056,7 +2075,8 @@
         "shape:T_Scene_460"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x202：只有绘制项**已存在**才排窗；颜色 = 不透明黑 | RGB"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x202：只有绘制项**已存在**才排窗；颜色 = 不透明黑 | RGB",
+        "KN:01M5FK4FKN4A6C1D6E5G0P4T3C"
       ]
     },
     {
@@ -2249,7 +2269,7 @@
         },
         {
           "ea": "0x41a278",
-          "what": "状态字 |= 0x400（等待位）"
+          "what": "状态字 |= 0x400（等待位 = 第 10 位；≠ 0x71 的第 27 位）"
         }
       ],
       "functions": [
@@ -2261,11 +2281,12 @@
         "shape:T1@0x60"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行",
+        "KN:01M5FK4FKN4A6C1D6E5G0P4T3C"
       ]
     },
     {
-      "rule": "CORE-OPS-POLL-INPUT",
+      "rule": "CORE-OPS-WAIT-POLL-INPUT",
       "sites": [
         {
           "ea": "0x419cd1",
@@ -2649,12 +2670,33 @@
         {
           "ea": "0x49439e",
           "what": "同一条匹配路径的下一个键：比较 \"REGSUBKEY\""
+        },
+        {
+          "ea": "0x414e6b",
+          "what": "标记 1 只判符号：cmp [esi],0 / jle ⇒ ≤0 时跳过 4 字节（数值不当长度）"
+        },
+        {
+          "ea": "0x414eae",
+          "what": "标记 2 只判符号：cmp [esi],0 / jle ⇒ ≤0 时没有默认表"
+        },
+        {
+          "ea": "0x414ec6",
+          "what": "真正的默认表解析入口（越过标记 2 之后调用）"
+        },
+        {
+          "ea": "0x414ed3",
+          "what": "条目数 N = 标记 2 之后的独立 32 位字（与标记 2 的值无关）"
+        },
+        {
+          "ea": "0x48a0da",
+          "what": "计数数组首字 = 元素数（add esi,4 后按元素数循环）"
         }
       ],
       "evidence": [
         "guard:tools/test/emulator-new-config.test.mjs#★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败",
         "guard:tools/test/emulator-new-config.test.mjs#★★ 两个输入通道的大小写口径不同",
-        "KN:01M5FCC79Q1P0H3A6151730S5D"
+        "KN:01M5FCC79Q1P0H3A6151730S5D",
+        "KN:01M5FK4HYM3K7G4Q6Y2K18287E"
       ],
       "storage": []
     },
@@ -3083,7 +3125,8 @@
         "shape:T_Command@0x5ec68"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scalars-thin.test.mjs#★ 0x88"
+        "guard:tools/test/emulator-new-scalars-thin.test.mjs#★ 0x88",
+        "KN:01M4GYTBDW7S344D4F032M650J"
       ]
     },
     {
@@ -3111,11 +3154,23 @@
         },
         {
           "ea": "0x42026a",
-          "what": "vtable+12 入口"
+          "what": "接口槽 +0xC =「设置一个命名键」入口（同槽对照 0x406DB9）"
+        },
+        {
+          "ea": "0x42026d",
+          "what": "键名 message:ReadTextSkip（静态串；与 0x71 读的是同一个键）"
         },
         {
           "ea": "0x420274",
-          "what": "调用（入口键 + 操作数）"
+          "what": "调用（入口槽 + 键名 + 操作数的值）"
+        },
+        {
+          "ea": "0x406db9",
+          "what": "同槽 +0xC 的对照调用点：键 sound:Sound ← 0（判「这个槽是写入口」）"
+        },
+        {
+          "ea": "0x41ee28",
+          "what": "0x71 读同一个键（走槽 +4）：证明本条写的是引擎数据"
         }
       ],
       "functions": [
@@ -3123,7 +3178,8 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-forward.test.mjs#★ 0x1ca"
+        "guard:tools/test/emulator-new-forward.test.mjs#★ 0x1ca",
+        "KN:01M5FK286R1Y38006M710J2Q61"
       ]
     },
     {
@@ -3143,16 +3199,34 @@
         },
         {
           "ea": "0x41a48e",
-          "what": "尾跳进入口 sub_453530（thunk）"
+          "what": "尾跳进入口 sub_453530（thunk → sub_453150）"
+        },
+        {
+          "ea": "0x453160",
+          "what": "复位：释放接收者持有的第 1 个对象（+0x408）"
+        },
+        {
+          "ea": "0x453178",
+          "what": "复位：释放第 2 个对象（+0x40C）"
+        },
+        {
+          "ea": "0x453190",
+          "what": "复位：释放第 3 个对象（+0x410）"
+        },
+        {
+          "ea": "0x45319e",
+          "what": "复位：清接收者自己的一个标记（+0x4E0 ← 0）"
         }
       ],
       "functions": [
         "sub_41A470",
-        "sub_453530"
+        "sub_453530",
+        "sub_453150"
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-forward.test.mjs#★ 0x324"
+        "guard:tools/test/emulator-new-forward.test.mjs#★ 0x324",
+        "KN:01M4E5TJ6T763G5Q0B3J4K7919"
       ]
     },
     {
@@ -3172,7 +3246,7 @@
         },
         {
           "ea": "0x4272db",
-          "what": "交给容器入口 sub_49A150（容器 = Engine+0x4ED10；callee 里按索引清一格 + vtable+0xD4 通知）"
+          "what": "交给容器自己的入口 sub_49A150（容器 = Engine+0x4ED10；按索引清一格 + vtable+0xD4 通知）"
         }
       ],
       "functions": [
@@ -3182,6 +3256,43 @@
       "storage": [],
       "evidence": [
         "guard:tools/test/emulator-new-forward.test.mjs#★ 0x32f"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-LIST-DEFAULT-GROUP",
+      "sites": [
+        {
+          "ea": "0x41622c",
+          "what": "分派表项：0xA529C − 0xA509C = 0x200 = 128×4 ⇒ opcode 0x80 的 handler sub_41F690"
+        },
+        {
+          "ea": "0x41f6a0",
+          "what": "长度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x41f6af",
+          "what": "读第 1 个操作数（读整型，原样）"
+        },
+        {
+          "ea": "0x41f6b4",
+          "what": "默认组选择子 ← 第 1 个操作数（Engine+0x151FC = 子系统 +0x4CC）"
+        },
+        {
+          "ea": "0x465632",
+          "what": "构造初值：默认组 ← 1（sub_465390，this = Engine+0x14D30）"
+        },
+        {
+          "ea": "0x45d672",
+          "what": "读者：组号 0 ⇒ 用这个选择子（0x70 的 callee；0x79 / 0x1c1 / 0x303 / 0x73 同形）"
+        }
+      ],
+      "functions": [
+        "sub_41F690",
+        "sub_465390"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M5FK1VTW2K6N0J4Z5W6E3837"
       ]
     },
     {
@@ -3209,7 +3320,7 @@
         },
         {
           "ea": "0x45d672",
-          "what": "组号 0 ⇒ 用引擎里的默认组"
+          "what": "组号 0 ⇒ 用引擎里的默认组（初值 1，由 0x80 改写；见 CORE-OPS-LIST-DEFAULT-GROUP）"
         },
         {
           "ea": "0x45d67d",
@@ -3233,7 +3344,7 @@
         },
         {
           "ea": "0x45d6b3",
-          "what": "记录 +0x24 / +0x28 ← (第 2 个, 第 3 个)"
+          "what": "记录 +0x24 / +0x28 ← (第 2 个, 第 3 个)；★ 这一对与 0x1c1 写的对是**同一对字段**（四对里唯一的重叠）"
         },
         {
           "ea": "0x45d793",
@@ -3251,7 +3362,7 @@
       ]
     },
     {
-      "rule": "CORE-OPS-TEXT-REQUEST",
+      "rule": "CORE-OPS-LIST-TEXT-REQUEST",
       "sites": [
         {
           "ea": "0x41ed80",
@@ -3271,7 +3382,7 @@
         },
         {
           "ea": "0x41edda",
-          "what": "写当前帧的那一格（帧+0x6C）"
+          "what": "写当前帧的「文本请求位置」格（0x5D8EC = 记录基址 0x5D894 + 0x58；与 0x3 的 +0x5C 相邻但不同格）"
         },
         {
           "ea": "0x41edfc",
@@ -3283,11 +3394,15 @@
         },
         {
           "ea": "0x41ee28",
-          "what": "入口键 message:ReadTextSkip（未建模）"
+          "what": "入口键 message:ReadTextSkip（未建模；与 0x1ca 写的是同一个键）"
+        },
+        {
+          "ea": "0x41ee84",
+          "what": "条件：sub_48F000 的返回值"
         },
         {
           "ea": "0x41ee8d",
-          "what": "★ 有条件的状态位写（条件未取证，本版不写）"
+          "what": "★ 条件 = sub_48F000 返回非 0 ⇒ 置状态字第 27 位（条件已取证）"
         }
       ],
       "functions": [
@@ -3296,11 +3411,12 @@
       "storage": [],
       "evidence": [
         "guard:tools/test/emulator-new-text.test.mjs#★ 0x71",
-        "KN:01M5CXWSZS4A453V05042Y6V0X"
+        "KN:01M5CXWSZS4A453V05042Y6V0X",
+        "KN:01M5FK4CYD6H4N1X614C0G6B0W"
       ]
     },
     {
-      "rule": "CORE-OPS-SUBSYSTEM-SET73",
+      "rule": "CORE-OPS-LIST-SUBSYSTEM-SET73",
       "sites": [
         {
           "ea": "0x41f250",
@@ -3316,15 +3432,31 @@
         },
         {
           "ea": "0x41f2e0",
-          "what": "再把第 1..9 个交给子系统 sub_456430"
+          "what": "再把第 1..9 个交给 sub_456430（写进该组记录的十格）"
+        },
+        {
+          "ea": "0x45643d",
+          "what": "组号：arg_0 = 第 1 个操作数，为 0 ⇒ 用默认组（[ecx+4CCh]）"
+        },
+        {
+          "ea": "0x45646c",
+          "what": "取记录指针（无空检查）"
+        },
+        {
+          "ea": "0x456479",
+          "what": "记录 +0x3C 起（十格的起点）"
+        },
+        {
+          "ea": "0x456491",
+          "what": "rep movsd 写十格：op4/op5/op6/(op5+op7)/(op6+op8)/op2/op3/1/op9/op9"
         },
         {
           "ea": "0x41f2e5",
-          "what": "第二次请求的门：引擎级 16 位槽 == 0"
+          "what": "第二次请求的门：引擎级标量（Engine+0xA30D0）== 0；初值 0（Engine 初始化写入）"
         },
         {
           "ea": "0x41f319",
-          "what": "vtable+4 请求（消息号 0x21，两个操作数派生实参）"
+          "what": "vtable+4 请求（消息号 0x21，实参 2×op7 / op8 / 2）"
         }
       ],
       "functions": [
@@ -3335,11 +3467,12 @@
       "storage": [],
       "evidence": [
         "guard:tools/test/emulator-new-subsys.test.mjs#★ 0x73",
-        "KN:01M5CY07GE4W3N2S463M7V3W55"
+        "KN:01M5CY07GE4W3N2S463M7V3W55",
+        "KN:01M5FK3XR81S6Q4D201V0G4B2Z"
       ]
     },
     {
-      "rule": "CORE-OPS-SUBSYSTEM-SET-TAIL",
+      "rule": "CORE-OPS-LIST-SUBSYSTEM-SET-TAIL",
       "sites": [
         {
           "ea": "0x41f450",
@@ -3372,6 +3505,26 @@
         {
           "ea": "0x42652f",
           "what": "0x2db 尾跳 sub_459F40"
+        },
+        {
+          "ea": "0x465611",
+          "what": "0x78 那格的初值 = 1（同一构造函数）"
+        },
+        {
+          "ea": "0x465617",
+          "what": "0x2db 那格的初值 = 0（同一构造函数）"
+        },
+        {
+          "ea": "0x459fa4",
+          "what": "0x2db 那格在尾跳目标体内被直接读（cmp ...,0）"
+        },
+        {
+          "ea": "0x456279",
+          "what": "0x78 那格由同一子系统的另一个入口读"
+        },
+        {
+          "ea": "0x45aebf",
+          "what": "0x78 那格由同一子系统的另一个入口读（cmp ...,0）"
         }
       ],
       "functions": [
@@ -3414,7 +3567,7 @@
         },
         {
           "ea": "0x4563bd",
-          "what": "0x79 的记录落点 +0x1C ← 第 2 个"
+          "what": "0x79 的记录落点 +0x1C ← 第 2 个（与 0x70 的任何一对都不同）"
         },
         {
           "ea": "0x4563c0",
@@ -3422,7 +3575,7 @@
         },
         {
           "ea": "0x4563ed",
-          "what": "0x1c1 的记录落点 +0x24 ← 第 2 个"
+          "what": "0x1c1 的记录落点 +0x24 ← 第 2 个；★ 与 0x70 写入次序的第四对是**同一对字段**（唯一重叠）"
         },
         {
           "ea": "0x4563f0",
@@ -3501,7 +3654,7 @@
         },
         {
           "ea": "0x45661d",
-          "what": "记录 +0x120 ← 第 2 个操作数"
+          "what": "记录 +0x120 ← 第 2 个操作数（★ 与 0x70 / 0x79 / 0x1c1 的对都不同）"
         },
         {
           "ea": "0x456623",
@@ -3514,7 +3667,8 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-list.test.mjs#★ 0x303"
+        "guard:tools/test/emulator-new-list.test.mjs#★ 0x303",
+        "KN:01M5CY9J4S541T144Q3Q2W6F5H"
       ]
     },
     {
@@ -3586,7 +3740,7 @@
         },
         {
           "ea": "0x41c724",
-          "what": "写父帧的那一格（返回点 = 调用点，不是 +3）"
+          "what": "写父帧的「调用点位置」格（返回点 = 调用点，不是 +3；0x5D8F0 = 记录基址 0x5D894 + 0x5C，与 0x71 的 +0x58 相邻但不同格）"
         },
         {
           "ea": "0x41c73d",
@@ -3608,7 +3762,8 @@
       "storage": [],
       "evidence": [
         "guard:tools/test/emulator-new-frame.test.mjs#★ 0x3 / 0x2 多脚本",
-        "KN:01M5CZSPC45T6K524Z616R6S3B"
+        "KN:01M5CZSPC45T6K524Z616R6S3B",
+        "KN:01M5FK4CYD6H4N1X614C0G6B0W"
       ]
     },
     {
@@ -3723,7 +3878,7 @@
         },
         {
           "ea": "0x41c7f2",
-          "what": "前置：密钥格非 0 + 两格密钥的循环移位自洽检查"
+          "what": "前置：密钥格非 0 + 编码零点（由密钥派生）与密钥的循环移位自洽检查"
         },
         {
           "ea": "0x41c81f",
@@ -4208,11 +4363,11 @@
       ]
     },
     {
-      "rule": "CORE-OPS-STRING-SET",
+      "rule": "CORE-OPS-TEXT-SET",
       "sites": [
         {
           "ea": "0x433698",
-          "what": "文本读原语的操作数序号 = 2（源）"
+          "what": "0x192 的源侧取文本路径：操作数序号 = 2（不是五个访问原语之一）"
         },
         {
           "ea": "0x43369d",
@@ -4277,6 +4432,1412 @@
         "KN:01M4G4N4NZ0C036Y6F3F002B3K",
         "guard:tools/test/emulator-new-string.test.mjs#★ type 2（内联字符串）",
         "guard:tools/test/emulator-new-string.test.mjs#★★ `0x192 set-string`"
+      ]
+    },
+    {
+      "rule": "CORE-POOL-ADDRESS-ARITH",
+      "sites": [
+        {
+          "ea": "0x42af35",
+          "what": "取址 case 3：全局整型池 基址 + 下标×4"
+        },
+        {
+          "ea": "0x42af91",
+          "what": "取址 case 4：全局浮点池 基址 + 下标×4"
+        },
+        {
+          "ea": "0x42af71",
+          "what": "取址 case 9：局部整型池 基址 + 下标×4"
+        },
+        {
+          "ea": "0x42afcf",
+          "what": "取址 case 10：局部浮点池 基址 + 下标×4"
+        },
+        {
+          "ea": "0x42afe8",
+          "what": "取址 case 5：全局字符串池 基址 + 下标×28"
+        },
+        {
+          "ea": "0x42b01f",
+          "what": "取址 case 11：局部字符串池 基址 + 下标×28"
+        },
+        {
+          "ea": "0x418d0d",
+          "what": "写指针槽 case 6/7：基址 + 下标×4"
+        },
+        {
+          "ea": "0x418d9a",
+          "what": "写指针槽 case 8/14：基址 + 下标×28"
+        },
+        {
+          "ea": "0x418aac",
+          "what": "配置键：地址减全局整型池基址"
+        },
+        {
+          "ea": "0x418ab3",
+          "what": "配置键：差 ÷ 4（整型元素宽度）"
+        },
+        {
+          "ea": "0x418b64",
+          "what": "配置键：地址减全局字符串池基址"
+        },
+        {
+          "ea": "0x418b73",
+          "what": "配置键：差 ÷ 28（乘魔数后右移）"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_418CC0",
+        "sub_418A30",
+        "sub_418AE0"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d800",
+        "shape:T_Command@0x5d808",
+        "shape:T_Command@0x5d810",
+        "shape:T_Command@0x5d818",
+        "shape:T_Command@0x5d820",
+        "shape:T_Command@0x5d828",
+        "shape:T1@0x20",
+        "shape:T1@0x24",
+        "shape:T1@0x28",
+        "shape:T1@0x2c",
+        "shape:T1@0x30",
+        "shape:T1@0x34"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-pointer.test.mjs#★★ 配置键：指针族的键下标 = `(地址 − 全局池起点) / 元素宽度`（不是指针槽下标）",
+        "guard:tools/test/emulator-new-pointer.test.mjs#★ 指针解引用：写整型走过指针写到目标格（编码在目标上），读回同值",
+        "guard:tools/test/emulator-new-pointer.test.mjs#★ 未映射 / 未对齐的指针 ⇒ 响亮失败（不许补 0）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ARRAY-FILL-ZERO",
+      "sites": [
+        {
+          "ea": "0x42ce90",
+          "what": "取址第 1 个操作数（目标地址）"
+        },
+        {
+          "ea": "0x42ce9b",
+          "what": "读第 2 个操作数（个数）"
+        },
+        {
+          "ea": "0x42cea2",
+          "what": "个数 ≤ 0 ⇒ 循环不进入"
+        },
+        {
+          "ea": "0x42cea4",
+          "what": "取编码后的零这个常量"
+        },
+        {
+          "ea": "0x42ceaa",
+          "what": "每个 dword 写该常量"
+        },
+        {
+          "ea": "0x42ceac",
+          "what": "地址前进 4"
+        },
+        {
+          "ea": "0x42ceb0",
+          "what": "个数减到 0 前循环回边"
+        }
+      ],
+      "functions": [
+        "sub_42CE70"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-array-fill.test.mjs#★★ `0x6c fill-zero`：从地址起填 count 个 dword，填的是 **ENC(key,0)**（不是字面 0），邻居不动",
+        "guard:tools/test/emulator-new-array-fill.test.mjs#★ `0x6c`：count ≤ 0 ⇒ 一格都不写（引擎的循环不进入）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ARRAY-SET-TO",
+      "sites": [
+        {
+          "ea": "0x430d16",
+          "what": "取址第 1 个操作数（目标地址）"
+        },
+        {
+          "ea": "0x430d21",
+          "what": "读第 2 个操作数（要填的值）"
+        },
+        {
+          "ea": "0x430d35",
+          "what": "编码第一步：循环右移 7"
+        },
+        {
+          "ea": "0x430d38",
+          "what": "编码第二步：与 key 异或"
+        },
+        {
+          "ea": "0x430d3b",
+          "what": "编码第三步：循环左移 21"
+        },
+        {
+          "ea": "0x430d45",
+          "what": "读第 3 个操作数（个数）"
+        },
+        {
+          "ea": "0x430d4c",
+          "what": "个数 ≤ 0 ⇒ 一格都不写"
+        },
+        {
+          "ea": "0x430d53",
+          "what": "连写 count 个 dword（rep stosd）"
+        }
+      ],
+      "functions": [
+        "sub_430CF0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-array-fill.test.mjs#★★ `0x2d8 set-array-to`：填 **ENC(key, op2)**（不是 op2 原值）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ARRAY-LOOKUP",
+      "sites": [
+        {
+          "ea": "0x42cb00",
+          "what": "handler 入口"
+        },
+        {
+          "ea": "0x42cb12",
+          "what": "长度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x42cb26",
+          "what": "读第 3 个操作数（下标）"
+        },
+        {
+          "ea": "0x42cb32",
+          "what": "取址第 2 个操作数（数组基址）"
+        },
+        {
+          "ea": "0x42cb3c",
+          "what": "把算出的地址写进第 1 个操作数的指针槽"
+        },
+        {
+          "ea": "0x418cff",
+          "what": "落点族 6：基址 + 下标×4"
+        },
+        {
+          "ea": "0x418d41",
+          "what": "落点族 7：基址 + 下标×4"
+        },
+        {
+          "ea": "0x418d19",
+          "what": "落点族 12：基址 + 下标×4"
+        },
+        {
+          "ea": "0x418d5b",
+          "what": "落点族 13：基址 + 下标×4"
+        },
+        {
+          "ea": "0x418d83",
+          "what": "落点族 8：基址 + 下标×28"
+        },
+        {
+          "ea": "0x418da6",
+          "what": "落点族 14：基址 + 下标×28"
+        },
+        {
+          "ea": "0x418dd7",
+          "what": "落点是值族 ⇒ 类型异常"
+        }
+      ],
+      "functions": [
+        "sub_42CB00",
+        "sub_418CC0"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M4G4N4W34T040X434N7M4M43",
+        "guard:tools/test/emulator-new-pointer.test.mjs#★★ `0x61`：local ptr ← 取址(全局 int 第 10 格) + 4×3（地址写进**指针槽本身**）",
+        "guard:tools/test/emulator-new-pointer.test.mjs#★★ `0x61`：字符串指针（type 14）的步长是 **28**（不是 4）",
+        "guard:tools/test/emulator-new-pointer.test.mjs#★★ `0x61`：落点是**值族**（如 type 9）⇒ 抛类型异常（引擎 default 分支）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ARRAY-LOOKUP-2D",
+      "sites": [
+        {
+          "ea": "0x42efe8",
+          "what": "长度槽写 0xB（argc 5）"
+        },
+        {
+          "ea": "0x42effd",
+          "what": "读第 4 个操作数（行宽）"
+        },
+        {
+          "ea": "0x42f008",
+          "what": "读第 3 个操作数（行下标）"
+        },
+        {
+          "ea": "0x42f00d",
+          "what": "行宽 × 行下标"
+        },
+        {
+          "ea": "0x42f018",
+          "what": "读第 5 个操作数（列下标）"
+        },
+        {
+          "ea": "0x42f01d",
+          "what": "加列下标（先乘后加）"
+        },
+        {
+          "ea": "0x42f024",
+          "what": "取址第 2 个操作数（数组基址）"
+        },
+        {
+          "ea": "0x42f02e",
+          "what": "把算出的地址写进第 1 个操作数的指针槽"
+        },
+        {
+          "ea": "0x418cff",
+          "what": "落点族 6/7/12/13 的步长 4"
+        },
+        {
+          "ea": "0x418d83",
+          "what": "落点族 8/14 的步长 28"
+        },
+        {
+          "ea": "0x418dd7",
+          "what": "落点是值族 ⇒ 类型异常"
+        }
+      ],
+      "functions": [
+        "sub_42EFD0",
+        "sub_418CC0"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M4G4N4W34T040X434N7M4M43",
+        "guard:tools/test/emulator-new-pointer.test.mjs#★ `0x12c lookup-array-2d`：下标 = 行 × 行宽 + 列（乘在前、加在后）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ARRAY-COPY",
+      "sites": [
+        {
+          "ea": "0x42cbf8",
+          "what": "长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x42cc07",
+          "what": "取址第 1 个操作数（目标地址）"
+        },
+        {
+          "ea": "0x42cc12",
+          "what": "读第 2 个操作数（块编号）"
+        },
+        {
+          "ea": "0x42cc24",
+          "what": "取代码区起点"
+        },
+        {
+          "ea": "0x42cc2b",
+          "what": "块首 = 代码区起点 + 4×块编号；数据从块首 +4 起"
+        },
+        {
+          "ea": "0x42cc4c",
+          "what": "块首第一个 32 位字 = 元素个数"
+        },
+        {
+          "ea": "0x42cc51",
+          "what": "个数 ≤ 0 ⇒ 一格都不写"
+        },
+        {
+          "ea": "0x42cc60",
+          "what": "逐格读源 dword"
+        },
+        {
+          "ea": "0x42cc72",
+          "what": "编码第一步：循环右移 7"
+        },
+        {
+          "ea": "0x42cc75",
+          "what": "编码第二步：与 key 异或"
+        },
+        {
+          "ea": "0x42cc78",
+          "what": "编码第三步：循环左移 21"
+        },
+        {
+          "ea": "0x42cc81",
+          "what": "写目标格"
+        }
+      ],
+      "functions": [
+        "sub_42CBE0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-pointer.test.mjs#★★ `0x64 copy-local-array`：把脚本体里那块整数逐格 `ENC` 后写到 op1 的地址"
+      ]
+    },
+    {
+      "rule": "CORE-FS-ID-ZONES",
+      "sites": [
+        {
+          "ea": "0x4559ed",
+          "what": "判 id 的高 8 位是否为 0（普通区 / 扩展档区分叉）"
+        },
+        {
+          "ea": "0x4559f3",
+          "what": "高 8 位为 0 ⇒ 走普通区"
+        },
+        {
+          "ea": "0x455afc",
+          "what": "普通区上界 = 索引登记的条目数"
+        },
+        {
+          "ea": "0x455b02",
+          "what": "大于等于条目数 ⇒ 文件号非法"
+        },
+        {
+          "ea": "0x455b08",
+          "what": "普通区分支里的负值防御检查"
+        }
+      ],
+      "functions": [
+        "sub_4559C0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-alf.test.mjs#★ 取件：id == 条目下标；**松散文件优先**；没有松散文件才从归档切片",
+        "KN:01M4G2PWWX42632M444C451H0W"
+      ]
+    },
+    {
+      "rule": "CORE-FS-LOOSE-FIRST",
+      "sites": [
+        {
+          "ea": "0x455b10",
+          "what": "文件表基址（条目登记名）"
+        },
+        {
+          "ea": "0x455b31",
+          "what": "按条目名直接打开松散文件"
+        },
+        {
+          "ea": "0x455b40",
+          "what": "打开成功 ⇒ 走松散分支"
+        },
+        {
+          "ea": "0x455c0b",
+          "what": "长度 = 文件实际字节数"
+        }
+      ],
+      "functions": [
+        "sub_4559C0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-alf.test.mjs#★ 取件：id == 条目下标；**松散文件优先**；没有松散文件才从归档切片",
+        "KN:01M4B2MMD06E726Z5E0E787W7Y"
+      ]
+    },
+    {
+      "rule": "CORE-FS-ARCHIVE-FALLBACK",
+      "sites": [
+        {
+          "ea": "0x455b4c",
+          "what": "条目归档号 == 无 ⇒ 不回退"
+        },
+        {
+          "ea": "0x455b53",
+          "what": "归档数为 0 ⇒ 不回退"
+        },
+        {
+          "ea": "0x455b7c",
+          "what": "打开条目登记的归档"
+        },
+        {
+          "ea": "0x455bee",
+          "what": "读位置 ← 条目登记偏移"
+        },
+        {
+          "ea": "0x455c04",
+          "what": "长度 ← 条目登记长度"
+        }
+      ],
+      "functions": [
+        "sub_4559C0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-alf.test.mjs#★ 取件：id == 条目下标；**松散文件优先**；没有松散文件才从归档切片",
+        "guard:tools/test/emulator-new-boot.assets.test.mjs#★ 取件：根脚本松散优先（12012）覆盖归档条目（11992）；LOGO.BIN 从归档切片"
+      ]
+    },
+    {
+      "rule": "CORE-FS-FETCH-FAIL",
+      "sites": [
+        {
+          "ea": "0x455c38",
+          "what": "文件号非法：消息文本"
+        },
+        {
+          "ea": "0x455b9d",
+          "what": "打不开：消息文本（带宿主错误码）"
+        },
+        {
+          "ea": "0x455a10",
+          "what": "扩展档未装载：消息文本"
+        },
+        {
+          "ea": "0x455a87",
+          "what": "扩展档内取件失败：消息文本"
+        },
+        {
+          "ea": "0x455c49",
+          "what": "格式化消息后转到统一中断路径"
+        },
+        {
+          "ea": "0x455bd9",
+          "what": "打不开 ⇒ 中断（抛）"
+        },
+        {
+          "ea": "0x455a4c",
+          "what": "扩展档未装载 ⇒ 中断（抛）"
+        },
+        {
+          "ea": "0x455ac3",
+          "what": "扩展档内失败 ⇒ 中断（抛）"
+        }
+      ],
+      "functions": [
+        "sub_4559C0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-alf.test.mjs#★ 取件：id == 条目下标；**松散文件优先**；没有松散文件才从归档切片",
+        "KN:01M4G2PWWX42632M444C451H0W"
+      ]
+    },
+    {
+      "rule": "CORE-FS-INDEX-LOAD-FAIL",
+      "sites": [
+        {
+          "ea": "0x414b49",
+          "what": "签名族一（S3IN）比较"
+        },
+        {
+          "ea": "0x414b5d",
+          "what": "签名族二（S4IN）比较"
+        },
+        {
+          "ea": "0x414b71",
+          "what": "签名族三（S3IC）比较"
+        },
+        {
+          "ea": "0x414b85",
+          "what": "签名族四（S4IC）比较"
+        },
+        {
+          "ea": "0x414b96",
+          "what": "四族都不匹配 ⇒「索引损坏」文本"
+        },
+        {
+          "ea": "0x414bcb",
+          "what": "失败返回 0"
+        },
+        {
+          "ea": "0x414bd2",
+          "what": "成功置 1"
+        },
+        {
+          "ea": "0x414ccb",
+          "what": "读索引体"
+        },
+        {
+          "ea": "0x414cdb",
+          "what": "读失败 ⇒「读取失败」文本"
+        },
+        {
+          "ea": "0x414d7a",
+          "what": "内存不足 ⇒「内存不足」文本"
+        }
+      ],
+      "functions": [
+        "sub_414AC0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-alf.test.mjs#★ ALF 索引：非 S4 签名 / 段长不一致 / 越界都要响亮失败",
+        "guard:tools/test/emulator-new-boot.assets.test.mjs#★ 索引：SYS4INI.BIN → 8 个归档 / 21109 条目；id 0 = SYSTEM4.BIN，id 0x5262 = LOGO.BIN"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-ENTRY",
+      "sites": [
+        {
+          "ea": "0x4bb517",
+          "what": "调用主循环（启动阶段的终点）"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-boot.assets.test.mjs#★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，**到达 LOGO.BIN 入口**后停在影片门"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-INDEX-FIRST",
+      "sites": [
+        {
+          "ea": "0x4bab1a",
+          "what": "先试 S4 族初始化文件名"
+        },
+        {
+          "ea": "0x4bab26",
+          "what": "装载 S4 族索引"
+        },
+        {
+          "ea": "0x4bab2f",
+          "what": "不成再试 S3 族初始化文件名"
+        },
+        {
+          "ea": "0x4bab3b",
+          "what": "装载 S3 族索引"
+        }
+      ],
+      "functions": [
+        "sub_414AC0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-alf.test.mjs#★ ALF 索引：S4IC → 段 → TOC（归档名 + 文件表）",
+        "guard:tools/test/emulator-new-boot.assets.test.mjs#★ 索引：SYS4INI.BIN → 8 个归档 / 21109 条目；id 0 = SYSTEM4.BIN，id 0x5262 = LOGO.BIN"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-INDEX-FAIL",
+      "sites": [
+        {
+          "ea": "0x4bab44",
+          "what": "消息类型"
+        },
+        {
+          "ea": "0x4bab4b",
+          "what": "固定文本"
+        },
+        {
+          "ea": "0x4bab51",
+          "what": "显示请求"
+        },
+        {
+          "ea": "0x4bab57",
+          "what": "清理后跳尾声"
+        },
+        {
+          "ea": "0x4bab7e",
+          "what": "跳到函数尾声"
+        },
+        {
+          "ea": "0x4bb5f6",
+          "what": "统一返回 0"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-alf.test.mjs#★ ALF 索引：非 S4 签名 / 段长不一致 / 越界都要响亮失败",
+        "guard:tools/test/emulator-new-boot.assets.test.mjs#★ 索引：SYS4INI.BIN → 8 个归档 / 21109 条目；id 0 = SYSTEM4.BIN，id 0x5262 = LOGO.BIN"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-ROOT-SCRIPT",
+      "sites": [
+        {
+          "ea": "0x4bb4be",
+          "what": "文件 id 实参 = 0"
+        },
+        {
+          "ea": "0x4bb4c5",
+          "what": "把服务窗口交给装载器"
+        },
+        {
+          "ea": "0x4bb4cc",
+          "what": "调用根脚本装载器"
+        },
+        {
+          "ea": "0x4bb4d1",
+          "what": "返回值与 1 比较"
+        }
+      ],
+      "functions": [
+        "sub_40ED40"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M4G2PWWX42632M444C451H0W",
+        "guard:tools/test/emulator-new-boot.assets.test.mjs#★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，**到达 LOGO.BIN 入口**后停在影片门"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-ABORT-SHAPE",
+      "sites": [
+        {
+          "ea": "0x4bb096",
+          "what": "脚本失败与闸门失败的汇合点"
+        },
+        {
+          "ea": "0x4bb0a8",
+          "what": "统一收尾（不再执行后续阶段）"
+        },
+        {
+          "ea": "0x4bab7e",
+          "what": "索引失败跳到同一尾声"
+        },
+        {
+          "ea": "0x4bb5f6",
+          "what": "统一返回 0"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-alf.test.mjs#★ ALF 索引：非 S4 签名 / 段长不一致 / 越界都要响亮失败",
+        "KN:01M4G2PWWX42632M444C451H0W"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-NUMERIC-ARITH",
+      "sites": [
+        {
+          "ea": "0x42c671",
+          "what": "0x52 长度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x42c680",
+          "what": "0x52 读第 3 个操作数（先读）"
+        },
+        {
+          "ea": "0x42c68b",
+          "what": "0x52 读第 2 个操作数（后读）"
+        },
+        {
+          "ea": "0x42c690",
+          "what": "0x52 两值相乘（32 位截断）"
+        },
+        {
+          "ea": "0x42c698",
+          "what": "0x52 积 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42c6d1",
+          "what": "0x53 `idiv`：第 2 个 ÷ 第 3 个（有符号）"
+        },
+        {
+          "ea": "0x42c6d8",
+          "what": "0x53 商（eax）→ 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42c711",
+          "what": "0x54 `idiv` 之后取余（edx）"
+        },
+        {
+          "ea": "0x42c718",
+          "what": "0x54 余数（edx）→ 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42c780",
+          "what": "0x56 按 32 位按位与"
+        },
+        {
+          "ea": "0x42c787",
+          "what": "0x56 与值 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42c7c0",
+          "what": "0x57 按 32 位按位或"
+        },
+        {
+          "ea": "0x42c7c7",
+          "what": "0x57 或值 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42c802",
+          "what": "0x58 `sar eax, cl`（算术右移；位数来自第 3 个，硬件掩码到低 5 位）"
+        },
+        {
+          "ea": "0x42c809",
+          "what": "0x58 结果 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42c852",
+          "what": "0x59 `shl eax, cl`（左移；位数同上）"
+        },
+        {
+          "ea": "0x42c859",
+          "what": "0x59 结果 → 写第 1 个操作数"
+        }
+      ],
+      "functions": [
+        "sub_42C660",
+        "sub_42C6A0",
+        "sub_42C6E0",
+        "sub_42C750",
+        "sub_42C790",
+        "sub_42C7D0",
+        "sub_42C820"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M48HEYYZ484T6S1K4S700G30"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-NUMERIC-COMPARE",
+      "sites": [
+        {
+          "ea": "0x42c8a2",
+          "what": "0x5a `cmp eax, edi`：第 2 个 对 第 3 个"
+        },
+        {
+          "ea": "0x42c8a4",
+          "what": "0x5a `setz`（相等 ⇒ 1）"
+        },
+        {
+          "ea": "0x42c8ac",
+          "what": "0x5a 结果 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42c8f4",
+          "what": "0x5b `setnz`（不等 ⇒ 1）"
+        },
+        {
+          "ea": "0x42c944",
+          "what": "0x5c `setl`（有符号 <）"
+        },
+        {
+          "ea": "0x42c994",
+          "what": "0x5d `setle`（有符号 ≤）"
+        },
+        {
+          "ea": "0x42c9e4",
+          "what": "0x5e `setnle`（有符号 >）"
+        },
+        {
+          "ea": "0x42ca34",
+          "what": "0x5f `setnl`（有符号 ≥）"
+        },
+        {
+          "ea": "0x42ca3c",
+          "what": "0x5f 结果 → 写第 1 个操作数"
+        }
+      ],
+      "functions": [
+        "sub_42C870",
+        "sub_42C8C0",
+        "sub_42C910",
+        "sub_42C960",
+        "sub_42C9B0",
+        "sub_42CA00"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M48HEYYZ484T6S1K4S700G30",
+        "guard:tools/test/emulator-new-prologue.test.mjs#5f gre"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-BIT-SET-RESET",
+      "sites": [
+        {
+          "ea": "0x42f8c1",
+          "what": "0x135 长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x42f8d0",
+          "what": "0x135 读第 2 个操作数（位号，先读）"
+        },
+        {
+          "ea": "0x42f8d7",
+          "what": "0x135 位号与 31 的**无符号**比较"
+        },
+        {
+          "ea": "0x42f8da",
+          "what": "0x135 越界 ⇒ 跳错误路径（目标既不读也不写）"
+        },
+        {
+          "ea": "0x42f8e0",
+          "what": "0x135 读第 1 个操作数（目标，读-改-写）"
+        },
+        {
+          "ea": "0x42f8ec",
+          "what": "0x135 `shl`：1 << 位号"
+        },
+        {
+          "ea": "0x42f8f0",
+          "what": "0x135 `or`（置位）"
+        },
+        {
+          "ea": "0x42f8f5",
+          "what": "0x135 结果 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42f916",
+          "what": "0x135 越界：错误文本 → 错误通道（不抛）"
+        },
+        {
+          "ea": "0x42f947",
+          "what": "0x136 位号与 31 的无符号比较"
+        },
+        {
+          "ea": "0x42f950",
+          "what": "0x136 读第 1 个操作数（目标）"
+        },
+        {
+          "ea": "0x42f960",
+          "what": "0x136 `not`（清位用的掩码）"
+        },
+        {
+          "ea": "0x42f962",
+          "what": "0x136 `and`（清位）"
+        },
+        {
+          "ea": "0x42f967",
+          "what": "0x136 结果 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42f988",
+          "what": "0x136 越界：错误文本 → 错误通道"
+        }
+      ],
+      "functions": [
+        "sub_42F8B0",
+        "sub_42F920"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M48HEYYZ484T6S1K4S700G30",
+        "guard:tools/test/emulator-new-prologue.test.mjs#置位 / 清位 / 查位（位号在 op3）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-BIT-TEST",
+      "sites": [
+        {
+          "ea": "0x42fb51",
+          "what": "长度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x42fb60",
+          "what": "读第 3 个操作数（位号，先读）"
+        },
+        {
+          "ea": "0x42fb67",
+          "what": "位号与 31 的无符号比较"
+        },
+        {
+          "ea": "0x42fb6a",
+          "what": "越界 ⇒ 跳错误路径（第 1 个不写）"
+        },
+        {
+          "ea": "0x42fb70",
+          "what": "读第 2 个操作数（源）"
+        },
+        {
+          "ea": "0x42fb80",
+          "what": "`and`：取源的第 n 位"
+        },
+        {
+          "ea": "0x42fb82",
+          "what": "归一成 0 / 1（neg / sbb / neg）"
+        },
+        {
+          "ea": "0x42fb8b",
+          "what": "结果 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x42fbac",
+          "what": "越界：错误文本 → 错误通道"
+        }
+      ],
+      "functions": [
+        "sub_42FB40"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M48HEYYZ484T6S1K4S700G30",
+        "guard:tools/test/emulator-new-prologue.test.mjs#置位 / 清位 / 查位（位号在 op3）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCALAR-THIN-PROLOGUE",
+      "sites": [
+        {
+          "ea": "0x421cc5",
+          "what": "0xfe 读第 1 个操作数"
+        },
+        {
+          "ea": "0x421cca",
+          "what": "0xfe 值与 31 的无符号比较"
+        },
+        {
+          "ea": "0x421ccf",
+          "what": "0xfe 值 → 写固定格（≤ 31 才写）"
+        },
+        {
+          "ea": "0x421cda",
+          "what": "0xfe 越界：抛显示消息型异常"
+        },
+        {
+          "ea": "0x42213f",
+          "what": "0x10f 读第 1 个操作数"
+        },
+        {
+          "ea": "0x422144",
+          "what": "0x10f 值 → 写固定格"
+        },
+        {
+          "ea": "0x4252fa",
+          "what": "0x248 读第 1 个操作数"
+        },
+        {
+          "ea": "0x4252ff",
+          "what": "0x248 值 → 写**进程级**全局"
+        },
+        {
+          "ea": "0x42610f",
+          "what": "0x261 读第 1 个操作数"
+        },
+        {
+          "ea": "0x426114",
+          "what": "0x261 值 → 写五格连续段的最低一格"
+        },
+        {
+          "ea": "0x41fc0f",
+          "what": "0x8b 读第 1 个操作数"
+        },
+        {
+          "ea": "0x41fc14",
+          "what": "0x8b 值 → 写字体对象的一格"
+        }
+      ],
+      "functions": [
+        "sub_421CA0",
+        "sub_422120",
+        "sub_4252E0",
+        "sub_4260F0",
+        "sub_41FBF0"
+      ],
+      "storage": [
+        "shape:T_Command@0x77804",
+        "shape:T_Font@0x564"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-prologue.test.mjs#值 > 0x1f ⇒ 抛",
+        "guard:tools/test/emulator-engine-scalars.test.mjs#前段那批"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCALAR-PAIR-PROLOGUE",
+      "sites": [
+        {
+          "ea": "0x41fe71",
+          "what": "0x1a4 长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x41fe80",
+          "what": "0x1a4 读第 2 个操作数（先读）"
+        },
+        {
+          "ea": "0x41fe8b",
+          "what": "0x1a4 读第 1 个操作数"
+        },
+        {
+          "ea": "0x41fe90",
+          "what": "0x1a4 第 2 个 → 写字体对象的那一格"
+        },
+        {
+          "ea": "0x41fe97",
+          "what": "0x1a4 第 1 个 → 写紧邻的那一格"
+        },
+        {
+          "ea": "0x426096",
+          "what": "0x260 长度槽写 9（argc 4）"
+        },
+        {
+          "ea": "0x4260a5",
+          "what": "0x260 读第 4 个操作数（先读）"
+        },
+        {
+          "ea": "0x4260b0",
+          "what": "0x260 读第 3 个操作数"
+        },
+        {
+          "ea": "0x4260bb",
+          "what": "0x260 读第 2 个操作数"
+        },
+        {
+          "ea": "0x4260c7",
+          "what": "0x260 读第 1 个操作数（最后读）"
+        },
+        {
+          "ea": "0x4260cf",
+          "what": "0x260 第 4 个 → 写最高格"
+        },
+        {
+          "ea": "0x4260d6",
+          "what": "0x260 第 3 个 → 写第三格"
+        },
+        {
+          "ea": "0x4260dc",
+          "what": "0x260 第 1 个 → 写最低格"
+        },
+        {
+          "ea": "0x4260e2",
+          "what": "0x260 第 2 个 → 写第二格"
+        }
+      ],
+      "functions": [
+        "sub_41FE60",
+        "sub_426080"
+      ],
+      "storage": [
+        "shape:T_Font@0x568",
+        "shape:T_Font@0x56c"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-prologue.test.mjs#成对写",
+        "guard:tools/test/emulator-new-prologue.test.mjs#四格 / 一格的消息子系统标量"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCALAR-VARIANT-PROLOGUE",
+      "sites": [
+        {
+          "ea": "0x41f3b3",
+          "what": "0x76 读第 1 个操作数"
+        },
+        {
+          "ea": "0x41f3c1",
+          "what": "0x76 低 24 位字节倒序（第一步：低字节左移 8）"
+        },
+        {
+          "ea": "0x41f3d5",
+          "what": "0x76 倒序结果 → 写字体对象的一格"
+        },
+        {
+          "ea": "0x41f3db",
+          "what": "0x76 `call` 字体重建入口（会返回）"
+        },
+        {
+          "ea": "0x41f413",
+          "what": "0x77 读第 1 个操作数"
+        },
+        {
+          "ea": "0x41f435",
+          "what": "0x77 倒序结果 → 写另一格"
+        },
+        {
+          "ea": "0x41f43b",
+          "what": "0x77 `call` 字体重建入口"
+        },
+        {
+          "ea": "0x426221",
+          "what": "0x2bd 读第 1 个操作数"
+        },
+        {
+          "ea": "0x42622a",
+          "what": "0x2bd 非 0 支：常量 700"
+        },
+        {
+          "ea": "0x42622f",
+          "what": "0x2bd 非 0 支：写第一格"
+        },
+        {
+          "ea": "0x426235",
+          "what": "0x2bd 非 0 支：写第二格"
+        },
+        {
+          "ea": "0x42623e",
+          "what": "0x2bd `jmp` 字体重建入口（尾跳，不返回）"
+        },
+        {
+          "ea": "0x426245",
+          "what": "0x2bd 为 0 支：两格都写 0"
+        }
+      ],
+      "functions": [
+        "sub_41F390",
+        "sub_41F3F0",
+        "sub_426200"
+      ],
+      "storage": [
+        "shape:T_Font@0x550",
+        "shape:T_Font@0x554",
+        "shape:T_Font@0x4e0",
+        "shape:T_Font@0x35594"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-prologue.test.mjs#（不是原值），落点各自一格"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCALAR-TABLE-10C",
+      "sites": [
+        {
+          "ea": "0x4220c7",
+          "what": "长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x4220d6",
+          "what": "读第 2 个操作数（索引，先读）"
+        },
+        {
+          "ea": "0x4220e1",
+          "what": "读第 1 个操作数（值）"
+        },
+        {
+          "ea": "0x4220e6",
+          "what": "值与 31 的无符号比较"
+        },
+        {
+          "ea": "0x4220eb",
+          "what": "索引 → 在表里取一格（得第二级下标）"
+        },
+        {
+          "ea": "0x4220f3",
+          "what": "值 → 写另一段数组的「第二级下标」那一格"
+        },
+        {
+          "ea": "0x4220ff",
+          "what": "值越界：抛显示消息型异常"
+        }
+      ],
+      "functions": [
+        "sub_4220B0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-prologue.test.mjs#值 > 0x1f ⇒ 抛；否则只记录"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FORWARD-PROLOGUE",
+      "sites": [
+        {
+          "ea": "0x426b3f",
+          "what": "0x308 读第 1 个操作数"
+        },
+        {
+          "ea": "0x426b44",
+          "what": "0x308 读引擎级槽（窗口类句柄）"
+        },
+        {
+          "ea": "0x426b52",
+          "what": "0x308 连同操作数交给宿主接口封装对象的入口"
+        },
+        {
+          "ea": "0x41f36f",
+          "what": "0x75 读第 1 个操作数"
+        },
+        {
+          "ea": "0x41f37b",
+          "what": "0x75 交给字体对象的「设置字高」入口"
+        },
+        {
+          "ea": "0x4185fb",
+          "what": "0x75 的 callee：尺寸字段 ← 操作数"
+        },
+        {
+          "ea": "0x418611",
+          "what": "0x75 的 callee：两份字体描述的高度 ← 操作数的相反数"
+        },
+        {
+          "ea": "0x41865e",
+          "what": "0x75 的 callee：另一支按操作数派生宽度"
+        },
+        {
+          "ea": "0x41fdef",
+          "what": "0x197 读第 1 个操作数"
+        },
+        {
+          "ea": "0x41fdfb",
+          "what": "0x197 交给字体对象的另一个入口"
+        },
+        {
+          "ea": "0x418680",
+          "what": "0x197 的 callee 入口"
+        },
+        {
+          "ea": "0x4332af",
+          "what": "0x1a5 读第 1 个操作数（**按文本读**）"
+        },
+        {
+          "ea": "0x4332bb",
+          "what": "0x1a5 交给字体对象的「设置字符串」入口"
+        },
+        {
+          "ea": "0x4328f0",
+          "what": "0x1a5 的 callee 入口（按文本收）"
+        },
+        {
+          "ea": "0x4332ef",
+          "what": "0x2fe 读第 1 个操作数（按文本读）"
+        },
+        {
+          "ea": "0x4332fb",
+          "what": "0x2fe 交给**另一个**字符串入口"
+        },
+        {
+          "ea": "0x432dd0",
+          "what": "0x2fe 的 callee 入口"
+        }
+      ],
+      "functions": [
+        "sub_426B20",
+        "sub_41F350",
+        "sub_41FDD0",
+        "sub_433290",
+        "sub_4332D0"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M4E5TZHT442X4F1Z6Z5F0A7Y"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-EVENT-143",
+      "sites": [
+        {
+          "ea": "0x41a017",
+          "what": "推进格数 ← 1（argc 0）"
+        },
+        {
+          "ea": "0x41a01e",
+          "what": "「正在刷新」标记 ← 1"
+        },
+        {
+          "ea": "0x41a030",
+          "what": "登记表逐格：非 0 才送"
+        },
+        {
+          "ea": "0x41a03d",
+          "what": "向事件容器送固定常量"
+        },
+        {
+          "ea": "0x41a058",
+          "what": "「正在刷新」标记 ← 0"
+        },
+        {
+          "ea": "0x41a063",
+          "what": "推进格数 ← 0"
+        },
+        {
+          "ea": "0x41a077",
+          "what": "本帧指令指针 += 4（本条自己推进）"
+        },
+        {
+          "ea": "0x41a08b",
+          "what": "尾跳事件队列处理入口"
+        },
+        {
+          "ea": "0x40fb66",
+          "what": "入口：泵已占用 / 刷新中 ⇒ 直接返回"
+        },
+        {
+          "ea": "0x40fb7f",
+          "what": "入口：队列头 == 尾（空）⇒ 直接返回"
+        },
+        {
+          "ea": "0x40fc8b",
+          "what": "入口的早退出口：不改控制流、直接返回"
+        }
+      ],
+      "functions": [
+        "sub_41A000",
+        "sub_40FB60"
+      ],
+      "storage": [
+        "shape:T_Command@0x796f8"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-prologue.test.mjs#事件刷新：长度槽清 0"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SAVE-VERSION-AE",
+      "sites": [
+        {
+          "ea": "0x419300",
+          "what": "推进格数 ← 1（argc 0）"
+        },
+        {
+          "ea": "0x41930b",
+          "what": "读引擎级标志"
+        },
+        {
+          "ea": "0x419312",
+          "what": "标志 = 0 ⇒ 跳到早退"
+        },
+        {
+          "ea": "0x419684",
+          "what": "早退出口：直接返回（什么都不做）"
+        },
+        {
+          "ea": "0x419323",
+          "what": "非 0 支：读命名键 set:SaveVersion1"
+        },
+        {
+          "ea": "0x41933b",
+          "what": "非 0 支：读命名键 set:SaveVersion2"
+        },
+        {
+          "ea": "0x41934a",
+          "what": "非 0 支：按两个键的值分支（含改帧号 / 改指令指针）"
+        }
+      ],
+      "functions": [
+        "sub_4192F0"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d890"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-prologue.test.mjs#存档版本检查"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SHOW-LOGO-130",
+      "sites": [
+        {
+          "ea": "0x42f7ad",
+          "what": "推进格数写 3（argc 1）"
+        },
+        {
+          "ea": "0x42f7b8",
+          "what": "读引擎级 show-logo 标志"
+        },
+        {
+          "ea": "0x42f7c1",
+          "what": "标志 → 写第 1 个操作数"
+        },
+        {
+          "ea": "0x415ae0",
+          "what": "初始化：标志 ← 1"
+        },
+        {
+          "ea": "0x428a75",
+          "what": "复位例程：标志 ← 0"
+        }
+      ],
+      "functions": [
+        "sub_42F7A0"
+      ],
+      "storage": [
+        "shape:T_Command@0x5eb5c"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-prologue.test.mjs#show-logo 标志：初始化置 1"
       ]
     }
   ]

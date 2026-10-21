@@ -11,7 +11,7 @@
 ## 目标
 
 池族 / 槽 / 五种访问原语 / 类型标签支持集 / 值编解码 / 容量与越界 / 字符串记录。
-迁移自 `data/spec/chapters/40-pools.md`（`50-engine-state.md` 的唯一规则归 `CORE-OPS`，不归本机制）。
+迁移自 `repo:data/spec/chapters/40-pools.md`（`repo:data/spec/chapters/50-engine-state.md` 的唯一规则归 `CORE-OPS`，不归本机制）。
 
 ## 判据
 

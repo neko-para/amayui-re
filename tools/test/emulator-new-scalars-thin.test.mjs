@@ -1,6 +1,6 @@
 /** @env pure @kind contract @why 0x149/0x21b/0x252/0x88 的写槽、0/1 归一与分支写错都不会报错，只会让引擎里那几格的值静默错掉 */
 /**
- * tools/test/emulator-new-scalars-thin.test.mjs —— 引擎级标量薄写（`60-ops.md` 的 CORE-OPS-SCALAR-THIN / PAIR-88）守卫
+ * tools/test/emulator-new-scalars-thin.test.mjs —— 引擎级标量薄写（`60-ops-scalar.md` 的 CORE-OPS-SCALAR-THIN / PAIR-88）守卫
  *
  * ★ 判据为什么是这些（每条都能被"写错"弄红）：
  *   - **写的是哪个格**：槽名与知识层（`ENGINE_SCALAR_WRITES`）里的稳定身份一致；

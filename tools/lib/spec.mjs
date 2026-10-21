@@ -52,6 +52,18 @@ export const CHAPTER_STATUSES = ['none', 'partial', 'bootstrap'];
 export const EVIDENCE_PREFIXES = ['KN:', 'guard:'];
 
 /**
+ * 本规范的指令表（`format/opcode-table.json`）：`hasHandler: true` 的条目 = **应当有成篇语义**的闭集。
+ * ★ 没有 handler 的条目执行即落缺省，不是"待写语义"的义务；所以未成篇的分母只取 `hasHandler`。
+ */
+export const OPCODE_TABLE_FILE = 'data/spec/format/opcode-table.json';
+/** 未成篇 opcode 的分段粒度：一段 = 一个 0x100 区间（**机械**区间分组，不声称族身份）。 */
+export const GAP_OPCODE_BLOCK = 0x100;
+/** `audit.gaps[].ops` 的单项形态（opcode 的十六进制字面量） */
+const OPCODE_TEXT_RE = /^0x[0-9a-fA-F]+$/;
+const opcodeHex = (n) => `0x${n.toString(16)}`;
+const hex4 = (n) => n.toString(16).toUpperCase().padStart(4, '0');
+
+/**
  * **规范正文里不许出现的复核/实现信息**（分发的产物必须自包含、不引用汇编与本仓材料）。
  * ★ 只禁"机器层引用"；opcode 号（`0x107`）与类型标签（`0x8003`）是引擎语义，允许。
  */
@@ -136,6 +148,115 @@ export function parseChapterRules(chapter) {
     out.push({ id: m[1], title: h[1].trim(), chapter: chapter.id, text: body });
   }
   return out;
+}
+
+/**
+ * 读指令表（`data/spec/format/opcode-table.json`）。
+ * ★ 表是数组；为兼容"按 opcode 编号做键"的写法，对象形态也接受。
+ * @returns {{ok: boolean, why?: string, entries: object[], withHandler: object[]}}
+ */
+export function loadOpcodeTable({ repoRoot = REPO_ROOT } = {}) {
+  const file = path.join(repoRoot, OPCODE_TABLE_FILE);
+  if (!fs.existsSync(file)) return { ok: false, why: `${OPCODE_TABLE_FILE} 不在场`, entries: [], withHandler: [] };
+  const raw = readJson(file);
+  const entries = Array.isArray(raw) ? raw : Object.values(raw ?? {});
+  return { ok: true, entries, withHandler: entries.filter((e) => e?.hasHandler === true) };
+}
+
+/**
+ * **已写 opcode**：规则 `###` **标题**里的 `0x…` 数字（跨全部章节）。
+ * ★ 只认标题 —— 正文里的消息号 / 位号 / 绝对地址不是 opcode；按正文推断会把它们算进来。
+ * ★ 标题里也可能出现 operand type 标签（如 `0x8003`）；调用方拿它与 `hasHandler` 求交即可。
+ */
+export function titledOpcodes(chapters) {
+  const out = new Set();
+  for (const c of chapters ?? []) {
+    for (const r of parseChapterRules(c)) {
+      for (const m of String(r.title ?? '').matchAll(/0x[0-9a-fA-F]+/g)) out.add(Number.parseInt(m[0], 16));
+    }
+  }
+  return out;
+}
+
+/**
+ * 未成篇 opcode 的**机械账**：`hasHandler` = 已写（规则标题）+ gaps（`ops`）。
+ * ★ 报告与派生只认这一份账；⛔ 不给百分数（范围闭合 ≠ 解释正确）。
+ * ★ `consistent` 为 false 时不抛异常 —— 由报告标 ⚠、由守卫 `tools/test/spec-gaps.test.mjs` 变红。
+ */
+export function opcodeAccounting(model, { repoRoot = REPO_ROOT } = {}) {
+  const table = loadOpcodeTable({ repoRoot });
+  if (!table.ok) return { ok: false, why: table.why };
+  const handler = new Set(table.withHandler.map((e) => e.opcode));
+  const written = titledOpcodes(model.chapters);
+  /** opcode → 声明它的 gap id（数组；长度 > 1 就是重复） */
+  const owners = new Map();
+  for (const g of model.gaps ?? []) {
+    for (const op of g.ops ?? []) {
+      if (typeof op !== 'string' || !OPCODE_TEXT_RE.test(op)) continue;
+      const n = Number.parseInt(op.slice(2), 16);
+      if (!owners.has(n)) owners.set(n, []);
+      owners.get(n).push(g.id);
+    }
+  }
+  const overlap = [...handler].filter((n) => written.has(n) && owners.has(n));
+  const outsideTable = [...owners.keys()].filter((n) => !handler.has(n));
+  const duplicates = [...owners].filter(([, ids]) => ids.length > 1).map(([n]) => opcodeHex(n));
+  const writtenCount = [...handler].filter((n) => written.has(n)).length;
+  const gapsCovered = [...handler].filter((n) => owners.has(n)).length;
+  const unwritten = handler.size - writtenCount;
+  return {
+    ok: true,
+    total: handler.size,
+    written: writtenCount,
+    gapsCovered,
+    unwritten,
+    overlap: overlap.map(opcodeHex),
+    outsideTable: outsideTable.map(opcodeHex),
+    duplicates,
+    consistent: unwritten === gapsCovered && overlap.length === 0 && outsideTable.length === 0 && duplicates.length === 0,
+  };
+}
+
+/**
+ * **机械派生**"未成篇 opcode 族/段"的 gaps（⛔ 不手写）：
+ * `hasHandler` 减去**规则标题里出现的 opcode**，再按 {@link GAP_OPCODE_BLOCK} 分段。
+ * ★ 只派生 opcode 级的 gap；非 opcode 级的 gap（如容器句柄分支）不在这里，也**不带 `ops`**。
+ * ★ 分段边界是算术（0x100 区间），不是声称的族身份 —— `note` 里写明这一点。
+ */
+export function deriveOpcodeGaps(chapters, { repoRoot = REPO_ROOT } = {}) {
+  const table = loadOpcodeTable({ repoRoot });
+  if (!table.ok) return { ok: false, why: table.why, gaps: [] };
+  const handler = [...new Set(table.withHandler.map((e) => e.opcode))].sort((a, b) => a - b);
+  const written = titledOpcodes(chapters);
+  const unwritten = handler.filter((n) => !written.has(n));
+  const blocks = new Map();
+  for (const n of unwritten) {
+    const start = Math.floor(n / GAP_OPCODE_BLOCK) * GAP_OPCODE_BLOCK;
+    if (!blocks.has(start)) blocks.set(start, []);
+    blocks.get(start).push(n);
+  }
+  const gaps = [...blocks.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([start, ops]) => {
+      const end = start + GAP_OPCODE_BLOCK - 1;
+      const id = `GAP-OPS-${hex4(start)}-${hex4(end)}`;
+      return {
+        id,
+        chapter: 'ops-unwritten',
+        title: `opcode 0x${hex4(start)}–0x${hex4(end)} 段：尚无规范条目`,
+        note: `本段 ${ops.length} 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。`,
+        ops: ops.map(opcodeHex),
+        residual: [
+          {
+            id: `RES-${id}`,
+            kind: 'unhandled',
+            what: `本段 ${ops.length} 个有处理函数的 opcode 尚未成篇（\`ops\` 列出全部）`,
+            next: '按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出',
+          },
+        ],
+      };
+    });
+  return { ok: true, gaps, total: handler.length, written: handler.filter((n) => written.has(n)).length, unwritten: unwritten.length };
 }
 
 /** 三份数据 + 章节 → 校验/渲染用的模型（缺项用空值兜底；缺项本身由 `crossFileProblems` 报） */
@@ -238,10 +359,13 @@ export function crossFileProblems(spec, bindings, audit, chapters) {
   }
 
   if (!audit?.pilot || typeof audit.pilot !== 'object') out.push('audit.json 缺 pilot（验收域）');
+  // ★ gap 的 `chapter` 可以指向**已写章节**，也可以指向 `planned`（未成篇章节）：后者正是
+  //   "整族尚未成篇"的落点（如 `ops-unwritten` / `containers`）。
+  const allChapters = new Set([...specChapters, ...plannedIds]);
   const gapIds = arr(audit?.gaps).map((g) => g?.id);
   if (new Set(gapIds).size !== gapIds.length) out.push('audit.json 的 gap id 有重复');
   for (const g of arr(audit?.gaps)) {
-    if (!specChapters.includes(g?.chapter)) out.push(`gap ${g?.id} 指向不存在的章节：${g?.chapter}`);
+    if (!allChapters.has(g?.chapter)) out.push(`gap ${g?.id} 指向不存在的章节（已写或 planned）：${g?.chapter}`);
     if (ruleSet.has(g?.id)) out.push(`gap ${g?.id} 与规则 id 冲突`);
   }
   return out;
@@ -375,8 +499,11 @@ export function validate(input, { ledger, repoRoot = REPO_ROOT, effects = null }
     if (!isNonEmptyString(c.id) || !isNonEmptyString(c.title)) chap.push(`planned 章节缺 id/title：${JSON.stringify(c)}`);
     if (!CHAPTER_STATUSES.includes(c.status)) chap.push(`planned 章节 ${c.id} 的 status 非法：${c.status}`);
     if (!Array.isArray(c.residual)) chap.push(`planned 章节 ${c.id} 的 residual 必须是数组`);
+    // ★ 机制归属是机器字段：`core-out` 表示 core 外（不实现、不记录），否则必须是一个机制 id
+    //   （机制 id 的闭集在 `data/spec/core/README.md` §2 的表里；一致性由 `tools/test/spec-mechanisms.test.mjs` 守）。
+    if (c.mechanism !== undefined && !isNonEmptyString(c.mechanism)) chap.push(`planned 章节 ${c.id} 的 mechanism 必须是非空字符串`);
   }
-  checks.push({ id: 2, text: '章节：已写章节 id/title/file/status/residual 齐备；planned 章节 id/title/status/residual 齐备', problems: chap });
+  checks.push({ id: 2, text: '章节：已写章节 id/title/file/status/residual 齐备；planned 章节 id/title/status/residual 齐备（mechanism 可选，写了须非空）', problems: chap });
   for (const p of chap) add(2, 'chapters', p);
 
   // ── 2. 试点域（候选是**块入口 EA**；effect 由语料机械枚举，schema 不预设语义）
@@ -550,15 +677,33 @@ export function validate(input, { ledger, repoRoot = REPO_ROOT, effects = null }
   // ── 3b. 审计缺口：尚无规范条目的义务（只存在于 audit，不进规范正文）
   const gapProblems = [];
   const gapIds = new Set();
+  /** opcode（数字）→ 声明它的 gap id：同一 opcode 出现在两个 gap 里会让"精确划分"不成立 */
+  const gapOpOwners = new Map();
   for (const g of spec?.gaps ?? []) {
     const at = `gap:${g.id ?? '(缺 id)'}`;
     if (!isNonEmptyString(g.id)) { gapProblems.push('缺口缺 id'); continue; }
     if (gapIds.has(g.id)) gapProblems.push(`缺口 id 重复：${g.id}`);
     gapIds.add(g.id);
-    if (!chapterIds.has(g.chapter)) gapProblems.push(`${at} 指向不存在的章节：${g.chapter}`);
+    if (!allChapterIds.has(g.chapter)) gapProblems.push(`${at} 指向不存在的章节（已写或 planned）：${g.chapter}`);
     if (!isNonEmptyString(g.title)) gapProblems.push(`${at} 缺 title`);
     if (!isNonEmptyString(g.note)) gapProblems.push(`${at} 缺 note（为什么尚未成篇）`);
     if (!isNonEmptyArray(g.residual)) gapProblems.push(`${at} 缺 residual（缺口必须点名具体义务）`);
+    // `ops` 可选：opcode 级的 gap 用它列出覆盖的 opcode；非 opcode 级的 gap（如容器句柄分支）不填。
+    if (g.ops !== undefined) {
+      if (!Array.isArray(g.ops)) gapProblems.push(`${at} 的 ops 必须是数组`);
+      else {
+        for (const [i, op] of g.ops.entries()) {
+          if (typeof op !== 'string' || !OPCODE_TEXT_RE.test(op)) {
+            gapProblems.push(`${at} 的 ops[${i}] 形态非法（要 \`0x…\` 十六进制串）：${JSON.stringify(op)}`);
+            continue;
+          }
+          const n = Number.parseInt(op.slice(2), 16);
+          if (gapOpOwners.has(n)) {
+            gapProblems.push(`opcode ${op} 同时出现在两个 gap 里：${gapOpOwners.get(n)} / ${g.id}`);
+          } else gapOpOwners.set(n, g.id);
+        }
+      }
+    }
     for (const [i, r] of (g.residual ?? []).entries()) checkResidual(r, `${at} 的 residual[${i}]`, gapProblems);
     for (const x of g.sites ?? []) {
       if (!EA_RE.test(x?.ea ?? '')) gapProblems.push(`${at} 的 site EA 形态非法：${x?.ea}`);
@@ -682,18 +827,19 @@ export function validate(input, { ledger, repoRoot = REPO_ROOT, effects = null }
   checks.push({ id: 12, text: '跨文件：spec / bindings / audit 按 rule id 与 chapter id 一一对应（无孤儿、无缺项、无重复）', problems: cross });
   for (const p of cross) add(12, 'files', p);
 
-  checks.push({ id: 13, text: '审计缺口：id/chapter/title/note/residual 齐备，站点/函数/指针/证据可解析（缺口只进 audit，不进规范正文）', problems: gapProblems });
+  checks.push({ id: 13, text: '审计缺口：id/chapter（已写或 planned）/title/note/residual 齐备；ops 每项是 0x… 且同一 opcode 不出现在两个 gap；站点/函数/指针/证据可解析（缺口只进 audit，不进规范正文）', problems: gapProblems });
   for (const p of gapProblems) add(13, 'audit.gaps', p);
 
-  const derived = derive(spec, { coverage });
+  const derived = derive(spec, { coverage, repoRoot });
   return { checks, problems, derived, weak, coverage };
 }
 
 /**
  * 从条目**派生**处理账（不落盘；报告就是它的人读投影）。
  * ★ effect 级覆盖由 `coverage` 传入（assets 档现算）；纯文本档没有它，就只报结构计数。
+ * ★ `opcodes` 是"未成篇 opcode"的机械账（`hasHandler` = 已写 + gaps），报告与守卫共用它。
  */
-export function derive(spec, { coverage = null } = {}) {
+export function derive(spec, { coverage = null, repoRoot = REPO_ROOT } = {}) {
   const dispositions = Object.fromEntries(DISPOSITIONS.map((d) => [d, 0]));
   const statuses = Object.fromEntries(ENTRY_STATUSES.map((s) => [s, 0]));
   const residualKinds = Object.fromEntries(RESIDUAL_KINDS.map((k) => [k, 0]));
@@ -711,6 +857,8 @@ export function derive(spec, { coverage = null } = {}) {
     for (const r of e.residual ?? []) residualKinds[r.kind] = (residualKinds[r.kind] ?? 0) + 1;
   }
   for (const g of spec.gaps ?? []) for (const r of g.residual ?? []) residualKinds[r.kind] = (residualKinds[r.kind] ?? 0) + 1;
+  // ★ gaps 的 `kind=unhandled` 必须计入残差：否则"未成篇数百条"会读成 unhandled=0（假象）。
+  const opcodes = opcodeAccounting(spec, { repoRoot });
   const chapters = Object.fromEntries(CHAPTER_STATUSES.map((s) => [s, 0]));
   for (const c of spec.chapters ?? []) chapters[c.status] = (chapters[c.status] ?? 0) + 1;
   for (const c of spec.planned ?? []) chapters[c.status] = (chapters[c.status] ?? 0) + 1;
@@ -727,6 +875,7 @@ export function derive(spec, { coverage = null } = {}) {
     residualKinds,
     chapters,
     gaps: (spec.gaps ?? []).length,
+    opcodes,
     totals: { entries: spec.entries?.length ?? 0, sites, functions, storage, evidence },
   };
 }
@@ -744,6 +893,16 @@ export function reportText(spec, { file = SPEC_FILE, derived = derive(spec), wea
   L.push(`条目      ${d.totals.entries}（${DISPOSITIONS.map((x) => `${x}=${d.dispositions[x]}`).join(' · ')}；` +
     `${ENTRY_STATUSES.map((x) => `${x}=${d.statuses[x]}`).join(' · ')}）`);
   L.push(`审计缺口  ${d.gaps} 个（尚无规范条目的义务；只进审计，不进正文）`);
+  if (d.opcodes?.ok) {
+    L.push(
+      `未成篇 opcode ${d.opcodes.unwritten}（gaps 覆盖 ${d.opcodes.gapsCovered}；已写成 ${d.opcodes.written}）` +
+        (d.opcodes.consistent
+          ? ''
+          : ` ⚠ 与 gaps 不一致（重叠 ${d.opcodes.overlap.length} · 表外 ${d.opcodes.outsideTable.length} · 重复 ${d.opcodes.duplicates.length}）`),
+    );
+  } else {
+    L.push('未成篇 opcode （指令表不在场，不现算）');
+  }
   L.push('');
   L.push(`试点块    ${d.pilotSites} 个块入口；effect ${d.effects ?? '（语料不在场，不现算）'}`);
   if (d.effects !== null) {
@@ -796,7 +955,12 @@ export function chaptersText(spec) {
     if (gaps.length) L.push(`  缺口  ${gaps.map((g) => `${g.id}（${g.title}）`).join(' · ')}`);
     for (const r of c.residual) L.push(`  残差  ${r.next}`);
   }
-  for (const c of spec.planned ?? []) L.push(`[${c.status}] ${c.id} —— ${c.title}  (未成篇)`);
+  for (const c of spec.planned ?? []) {
+    L.push(`[${c.status}] ${c.id} —— ${c.title}  (未成篇)`);
+    // ★ gaps 的 chapter 可以是 planned 章节（"整族尚未成篇"的落点），这里也要看得见。
+    const gaps = (spec.gaps ?? []).filter((g) => g.chapter === c.id);
+    if (gaps.length) L.push(`  缺口  ${gaps.map((g) => `${g.id}（${g.title}）`).join(' · ')}`);
+  }
   return `${L.join('\n')}\n`;
 }
 
@@ -827,7 +991,7 @@ export function describe() {
       audit: {
         file: AUDIT_FILE,
         what: '**范围审计**（内部）：试点块 / effect 归属（规则 covers + internal + residuals）/ 章节成熟度 / 处理状态 / 缺口 / 可证伪预言。不进入分发产物。',
-        fields: ['schema', 'pilot（sites/internal/residuals/outOfScope）', 'chapters[]（id/status/residual）', 'planned[]（id/title/status/residual）', 'rules[]（见下 auditFields）', 'gaps[]'],
+        fields: ['schema', 'pilot（sites/internal/residuals/outOfScope）', 'chapters[]（id/status/residual）', 'planned[]（id/title/status/mechanism?/residual）', 'rules[]（见下 auditFields）', 'gaps[]（见下 gap）'],
       },
       format: {
         file: 'data/spec/format/opcode-table.json',
@@ -846,6 +1010,20 @@ export function describe() {
       siteFields: ['ea', 'note?'],
       internalFields: ['kind', 'why'],
       residualFields: ['id', 'blocks?', 'kinds?', 'ops?', 'targets?', 'why', 'next'],
+    },
+    gap: {
+      meaning:
+        '**尚无规范条目的义务**（`audit.gaps[]`，内部复核数据，⛔ 不进规范正文）：一条 gap = 一个未成篇的 opcode 族/段，或一类按结构位置排除的机器分支。' +
+        '它是"未成篇义务"的**唯一落点** —— 不要写进 `pilot.residuals`，也不要只留在章级/planned 残差里。',
+      fields: ['id', 'chapter（已写章节或 planned 章节）', 'title', 'note（为什么尚未成篇）', 'ops?（`0x…`[]：该 gap 覆盖的 opcode；非 opcode 级的 gap 不填）', 'residual[]', 'sites? / functions? / storage? / evidence?（可选，形态同规则绑定）'],
+      residualFields: ['id', 'kind', 'what', 'next'],
+      invariants: [
+        '`ops` 每项必须是 `/^0x[0-9a-fA-F]+$/` 的字符串',
+        '同一 opcode 不许出现在两个 gap 里',
+        '`ops` 覆盖的 opcode 与"已写"（规则 `###` 标题里的 opcode）必须精确划分指令表的 `hasHandler` 集合 —— 守卫 `tools/test/spec-gaps.test.mjs`',
+      ],
+      derivation:
+        '`ops` 由 `format/opcode-table.json` 的 `hasHandler` 减去规则标题里的 opcode **机械派生**（`deriveOpcodeGaps`），⛔ 不手写；分段是 0x100 区间的算术分组，不声称族身份。',
     },
     rule: {
       specFields: [
@@ -887,7 +1065,7 @@ export function describe() {
     },
     invariants: [
       [1, '形态：schema=3 / manifest 顶层字段 / 章节与规则非空'],
-      [2, '章节：已写章节 id/title/file/status/residual 齐备；planned 章节 id/title/status/residual 齐备'],
+      [2, '章节：已写章节 id/title/file/status/residual 齐备；planned 章节 id/title/status/residual 齐备（mechanism 可选，写了须非空）'],
       [3, '试点域：块入口 ea 唯一、internal/residual/outOfScope 有理由；effect 由语料机械枚举'],
       [4, '规则形态：每个 <!-- rule: ID --> 在 ### 小节里、有标题与正文；id 唯一'],
       [5, '处理状态：handled 有机器绑定；replaced 声明 preserves/discards/chosen；omitted 有依据；discarded 不冒充解释；unhandled 有残差'],
@@ -898,7 +1076,7 @@ export function describe() {
       [10, '范围：域外项必须显式（what + why），不许用沉默代替排除'],
       [11, '章节状态与规则一致：bootstrap ⇒ 至少一条规则；none ⇒ 不允许挂规则'],
       [12, '跨文件：章节规则 / bindings / audit 按 rule id 一一对应；章节文件与 audit chapters 一一对应'],
-      [13, '审计缺口：id/chapter/title/note/residual 齐备，站点/函数/指针/证据可解析（缺口只进 audit，不进规范正文）'],
+      [13, '审计缺口：id/chapter（已写或 planned）/title/note/residual 齐备；`ops` 每项是 `0x…`、同一 opcode 不在两个 gap；站点/函数/指针/证据可解析'],
     ],
     operations: [
       ['validate', '跑全部不变量（红 = 退出码 1；条数以 describe 为准）'],
@@ -940,6 +1118,13 @@ export function describeText(d = describe()) {
   L.push(`  块字段：${d.pilot.siteFields.join(' · ')}`);
   L.push(`  internal 字段：${d.pilot.internalFields.join(' · ')}`);
   L.push(`  residual 字段：${d.pilot.residualFields.join(' · ')}`);
+  L.push('');
+  L.push('## 审计缺口（audit.gaps[]：未成篇义务的唯一落点）');
+  L.push(`${d.gap.meaning}`);
+  L.push(`  字段：${d.gap.fields.join(' · ')}`);
+  L.push(`  residual 字段：${d.gap.residualFields.join(' · ')}`);
+  for (const x of d.gap.invariants) L.push(`  * ${x}`);
+  L.push(`  派生：${d.gap.derivation}`);
   L.push('');
   L.push('## 规则在 Markdown 里的形态');
   for (const [name, req, type, why] of d.rule.specFields) L.push(`* \`${name}\` ${req} ${type} —— ${why}`);

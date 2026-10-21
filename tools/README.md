@@ -81,7 +81,7 @@ pnpm tools corpus set <id> '<patch-json>' --write   # 改条目（写前内存�
 pnpm tools fixtures list                    # 存档样本：槽 / 定位 / 每个文件是否与记录的 instant 一致
 pnpm tools requirements plan                # ★ 进度视图：按父子树打印 + 聚合状态（唯一的进度真源）
 pnpm tools requirements serve               # 本地网页（需求 + AGE 脚本）：http://127.0.0.1:7788/
-pnpm tools requirements validate             # 需求台账的 5 条不变量（红 = 退出码 1）
+pnpm tools requirements validate             # 需求台账的全部不变量（红 = 退出码 1；条数 / 措辞见 describe）
 pnpm tools fixtures restore-mtime --write   # 刚 clone：把 mtime 按记录的 instant 拨回去（跨时区也对）
 pnpm tools disasm verify                     # 语料保真断言（原件在就按原件；不在就由 zip 反解 + 清单 sha256 自证）
 pnpm tools patch describe                    # ★ 翻译 patch：字段 / 不变量 / 操作（schema 的唯一真源）

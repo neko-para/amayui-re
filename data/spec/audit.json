@@ -269,18 +269,13 @@
     ],
     "outOfScope": [
       {
-        "what": "operand type 0x8003 / 0x8005 / 0x8009 / 0x800B（容器句柄）",
-        "why": "它们在 switch 之前由独立的比较分支处理（懒分配 / 登记），不是跳转表 case；本轮的候选域只覆盖跳转表里的类型",
-        "chapter": "containers"
-      },
-      {
         "what": "每个原语 switch 域之外的类型（例如写原语的 13/14、读原语的 14）",
         "why": "它们与 default 走同一条 throw 路径，不逐个类型枚举；『域外一律抛』写在 SPC-OPERAND-UNSUPPORTED-THROW 的条件里",
         "chapter": "pools"
       },
       {
         "what": "操作数原语之外的引擎路径（脚本装载、帧生命周期、opcode handler、平台边界）",
-        "why": "本轮验收域只回答『操作数怎么落到池/值上』；其余章节只立骨架与残差，不并入试点闭合",
+        "why": "本轮验收域只回答『操作数怎么落到池/值上』；其余章节已有部分成篇的规则（各指令族章 / 「启动入口」/「文件与脚本装载」/「配置」），但它们的 effect 不并入本轮试点的闭合",
         "chapter": "format"
       }
     ]
@@ -292,28 +287,58 @@
       "residual": []
     },
     {
+      "id": "boot",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "id": "RES-BOOT-GATE",
+          "kind": "unknown",
+          "what": "启动在索引之后、脚本装载之前、脚本装载之后各做一次同一形状的判定；判定为真 ⇒ 走中止出口。判定内容（读哪些引擎状态、被调的判定函数在判什么）未查明，故本章不写成规则",
+          "next": "读那次判定调用的函数体，定它读的字段与为真的条件，再决定是否升成 CORE-BOOT 规则"
+        },
+        {
+          "id": "RES-BOOT-NORETURN",
+          "kind": "unknown",
+          "what": "主循环是否返回未定：调用点之后存在可达的清理块，而「不返回」只是反编译侧的推导；两种读法都未被证伪",
+          "next": "读主循环的全部出口（含异常展开与分块出口），或从宿主侧的退出消息取证它怎么离开主循环"
+        },
+        {
+          "id": "RES-BOOT-TIMER-CB",
+          "kind": "unknown",
+          "what": "进入主循环之前引擎向宿主请求一个周期性定时器（周期 10000 毫秒、标识 2、带回调）；宿主如何投递与回调做什么未取证，故本版不写成规则",
+          "next": "找到该回调并定它是否改引擎状态（或明确「不碰引擎」），再决定登记为规则还是宿主域外"
+        },
+        {
+          "id": "RES-BOOT-HOST-PHASES",
+          "kind": "unknown",
+          "what": "宿主阶段 —— 进程单实例判定 / 平台组件初始化 / 窗口类注册 / 命令行解析 / 自更新 / 窗口创建 / 显示配置的宿主副作用 —— 不在本章：它们没有引擎侧可观察行为",
+          "next": "宿主边界成篇时按「请求 + 参数 + 时序」登记；在那之前本章只覆盖引擎拿到控制权之后的行为"
+        }
+      ]
+    },
+    {
       "id": "format",
       "status": "partial",
       "residual": [
         {
-          "what": "帧记录的生命周期（装载重建什么、保留什么）尚未整理成领域合同",
-          "next": "把已 accepted 的帧字段/生命周期观察收成『帧』章节的首批合同，并给每条挂 EA 与守卫"
+          "what": "帧记录各字段在四种转移（换脚本 / 装载帧 / 换帧 / 结束当前脚本）下是**重建**还是**保留**，只对已成篇的字段有判据（代码区、指令指针、父帧号、返回栈、长度槽、位置）；其余字段（两条按帧辅助数组、局部池的保留边界）未逐条成篇",
+          "next": "按四种转移各列一张字段表，逐字段标注『重建 / 保留 / 未取证』；只登记已 accepted 的项，不再一次写成整章"
         },
         {
-          "what": "位置表（0x71 / call-script / call 的三张表）的领域角色尚未成篇",
-          "next": "先回答『位置』在不同 opcode 里是不是同一个量，再写合同"
+          "what": "三张**位置表**（`0x71` / call-script / call 各自涉及的那张）的**内容语义与消费者**尚未成篇；『位置』作为单位与基（代码区起点 + 4 × 位置）已在「帧与调用」统一，不再重复取证",
+          "next": "逐表取证：三张表各自存的是位置还是别的量、谁读它们；与 `0x71` 的位置字段、`0x3` 的父帧位置字段对账"
         },
         {
           "what": "脚本头 13 个 u32 字段的用途（计数 / 子表偏移 / 装载器元数据）尚未逐条对上引擎加载器",
-          "next": "读取点已对上（6 + 1 + 6）；继续找每个字段的消费点，登记 EA 后把字段用途升为已核验"
+          "next": "读取点已对上（6 + 1 + 6）；继续找每个字段的消费点，逐项登记 EA 后再把字段用途升为已核验"
         },
         {
           "what": "30 条 opcode 没有处理器（落缺省），6 条 argc 无法从处理器常数核（终止型 / 换 body / 分支相关）",
           "next": "按处理器行为逐条定：终止型与换 body 的 ip 语义；缺省处理器覆盖的 30 条是否与'不支持'等价"
         },
         {
-          "what": "头部 table_1/2/3 三张子表的元素结构与用途尚未成篇",
-          "next": "先从加载器与位置表消费点取证元素形状，再决定它们是协议的一部分还是装载器内部索引"
+          "what": "三张子表（table_1/2/3）**各自服务哪些 opcode** 尚未逐条枚举：已知 0x71 / 0x03 / 0x8f 三类各用一张，通用 label 表不存在；元素结构（偏移 = body 内 32 位字下标、长度 = 32 位字个数）已在「脚本与执行」的「三张子表的偏移」规定",
+          "next": "逐类枚举三张表的读者（哪些 opcode 用 table_1/2/3），再决定它们是协议的一部分还是装载器内部索引"
         },
         {
           "what": "SYS3 头布局无样本；代码之后的数据区（停点之后）用途未明；CGVIEWER / CTINIT 在 exit 之后还有可解的尾巴",
@@ -343,6 +368,36 @@
       "id": "alf",
       "status": "partial",
       "residual": []
+    },
+    {
+      "id": "fs",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "id": "RES-FS-CH-SEARCH-PATH",
+          "kind": "unknown",
+          "what": "松散文件的搜索根（安装目录 / 可执行目录 / 其它）与查找顺序未逐条取证；本章只规定「按条目登记名直接打开」",
+          "next": "用同一名字在多个候选根各放一份内容不同的文件，观察取到哪一份"
+        },
+        {
+          "id": "RES-FS-CH-MULTI-INDEX",
+          "kind": "unknown",
+          "what": "多份初始化文件（本体 + 加装档）的叠加顺序、同名条目优先规则与追加索引的覆盖语义不在本章；本章只规定单份索引的装载失败判据",
+          "next": "取证多份索引的装载顺序与同名条目优先规则，再决定它是本章的规则还是 ALF 章的规则"
+        },
+        {
+          "id": "RES-FS-CH-FETCH-OBJECT",
+          "kind": "unknown",
+          "what": "取件返回的「读对象」（缓存 / 引用计数 / 句柄何时关闭）未成篇；本章只规定内容与长度",
+          "next": "读取出件之后被调用的登记与读取函数，定同一 id 两次取件的可观察差异"
+        },
+        {
+          "id": "RES-FS-CH-TABLES",
+          "kind": "unknown",
+          "what": "索引给出的三张表（条目数 / 归档名表 / 文件表）在机器本体里还没有登记类型，本章只按行为引用它们（绑定里没有 storage 指针）",
+          "next": "用 shape 登记这三张表的类型与成员起点，再把指针补进机器绑定"
+        }
+      ]
     },
     {
       "id": "agf",
@@ -380,10 +435,6 @@
         {
           "what": "键槽表越界口径不一致（静默跳过 vs 抛）",
           "next": "按 handler 逐条取证越界行为，再决定是否写成同一族合同"
-        },
-        {
-          "what": "0x30a 的值上界 31 的来源未解释（表只有 8 格）；31 是否另有领域含义未取证",
-          "next": "在 handler 里找这个比较常数的来源（是否与别的表 / 位宽共用）"
         }
       ]
     },
@@ -410,58 +461,70 @@
         {
           "what": "条件写出的键集合没有逐条枚举",
           "next": "从保存函数的分支逐条登记：哪些键只在相关开关为真时写出"
-        },
-        {
-          "id": "RES-CONFIG-MARKERS",
-          "kind": "unknown",
-          "what": "发行默认表的三段「标记 / 长度」（目录后第一个 32 位标记、第二个标记、以及数组区）各自的边界与归属未取证",
-          "next": "把装载器的读取序列逐条列出（读几个字节、写到哪），再画一张字段表；确认第二个标记是存在标记还是长度"
         }
       ]
     },
     {
-      "id": "ops",
+      "id": "ops-numeric",
       "status": "bootstrap",
       "residual": [
         {
-          "what": "转发型条目的子系统内部行为未建模（列表登记 / 绘制请求 / 文本与容器入口）：只写了『发了请求』与引擎数据效果",
-          "next": "按条目逐个找请求入口，登记请求参数与时序；内部状态仍不进 spec"
-        },
-        {
-          "what": "状态选择位的位号与位语义只在少数条目上有判据；清零路径（谁清哪一位）多数未定",
-          "next": "从位服务分支反查每个位的消费者与置位者，逐位登记后再写『等待位』之外的位语义"
-        },
-        {
-          "what": "若干条目里的『本版不规定』（例如清了位之后放行什么、列表登记之后做什么）尚未在条目残差里逐条登记",
-          "next": "把每个『本版不规定』改成条目残差条目（带 next），而不是只写在正文里"
-        },
-        {
-          "what": "颜色口径没有数值定义：0x1f9 的『不透明黑』、0x202 的『颜色的高字节』都不足以让实现写出唯一颜色值",
-          "next": "取证颜色值的位段（alpha 在哪 8 位、『不透明』对应哪个值）后再补合同"
-        },
-        {
-          "what": "列表项记录的「字段对」身份没有登记：0x70 写的三对与 0x79 / 0x1c1 / 0x303 写的对是否重叠未取证",
-          "next": "用 shape 成员起点把每条指令写的字段对登记到 storage，再判断重叠"
-        },
-        {
-          "what": "默认组是谁（组号 0 要替换成哪个组）没有观察；正文只写「本版不写」",
-          "next": "从组号 0 的分支读出被替换的组号，或用一条只写 0 号组的脚本观察落点"
-        },
-        {
-          "what": "转发型条目的「子对象 / 字段 / 入口名」没有身份：正文写「某个固定字段」「某个入口」，实现者无法定位",
-          "next": "给每条转发补 storage 指针（子对象类型 + 成员起点）与入口的稳定标识（消息号 / vtable 槽）"
-        },
-        {
-          "what": "「有效」位与「已存在」位是否是同一位未取证：0x1fb 写「有效」、0x202 的门读「已存在」",
-          "next": "在 shape 的位声明或写入点确认两者掩码相同/不同，再统一命名"
-        },
-        {
           "id": "RES-OPS-UNWRITTEN",
           "kind": "unhandled",
-          "what": "除本章 48 个 opcode、以及「引擎级状态」「配置」各条点名的 opcode 之外，指令表里仍有处理函数的 opcode 尚未成篇；本章只断言章首清单内的族",
-          "next": "按族继续补条目（每个未成篇 opcode 至少给「未规定 + 残差」），不要用沉默代替排除"
+          "what": "已成篇的 opcode = 各指令族章章首列出的 89 个（`60-ops-*` 每章的规则数与 opcode 数）+「引擎级状态」点名的 3 个 +「配置」的「脚本访问」的 4 个 = 96；指令表里 hasHandler 共 544 个，其余 448 个尚未成篇。未成篇的清单不在这里重复：它逐条列在 `audit.gaps[].ops`（与本章这条残差相加正好是 hasHandler，不重不漏）",
+          "next": "本组各章未成篇的 opcode 见 audit.gaps（由 REQ-01M5FBD4X8044SB7QJ0QZ45D44 接管；`pnpm tools spec report` 的「未成篇 opcode」一行与 gaps 覆盖数必须相等）"
         }
       ]
+    },
+    {
+      "id": "ops-array",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-text",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-frame",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-texture",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-scene",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-voice",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-list",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-forward",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-scalar",
+      "status": "bootstrap",
+      "residual": []
+    },
+    {
+      "id": "ops-wait",
+      "status": "bootstrap",
+      "residual": []
     },
     {
       "id": "vm",
@@ -474,6 +537,7 @@
       "id": "containers",
       "title": "容器句柄：懒分配 / 登记 / 元素寻址",
       "status": "partial",
+      "mechanism": "CORE-POOL",
       "residual": [
         {
           "what": "容器句柄的类型标签与读写落点已写（`CORE-POOL-HANDLE-INT` / `CORE-POOL-HANDLE-STRING`）；元素类型、生命周期、失败路径仍未处理",
@@ -485,6 +549,7 @@
       "id": "objects",
       "title": "对象模型：根对象 / 基类 / 类型身份",
       "status": "none",
+      "mechanism": "CORE-OBJECTS",
       "residual": [
         {
           "what": "shape 层已有类型与载体，但领域合同（对象是什么、谁拥有谁）还没写",
@@ -496,6 +561,7 @@
       "id": "input",
       "title": "输入：键鼠 / 手柄 / 事件",
       "status": "none",
+      "mechanism": "core-out",
       "residual": [
         {
           "what": "整章尚未处理",
@@ -507,6 +573,7 @@
       "id": "presentation",
       "title": "表现边界：帧提交 / 图像 / 音频请求",
       "status": "none",
+      "mechanism": "core-out",
       "residual": [
         {
           "what": "整章尚未处理；平台细节按项目口径不进 spec",
@@ -515,26 +582,23 @@
       ]
     },
     {
-      "id": "files",
-      "title": "文件与脚本装载：容器 / 索引 / 编码",
-      "status": "none",
-      "residual": [
-        {
-          "what": "整章尚未处理（格式层已有包，引擎侧的打开/缓存/失败路径未成篇）",
-          "next": "先写『按文件 id 打开脚本』一条合同，绑定到装载器与文件层"
-        }
-      ]
-    },
-    {
       "id": "save",
       "title": "存档：写入 / 恢复 / 归属",
       "status": "none",
+      "mechanism": "FMT-SAVE",
       "residual": [
         {
           "what": "整章尚未处理（已知部分观察散在需求树里，未收成合同）",
           "next": "先把『写哪些区域』与『恢复时重建/保留』分开取证"
         }
       ]
+    },
+    {
+      "id": "ops-unwritten",
+      "title": "尚未成篇的指令族",
+      "status": "none",
+      "mechanism": "CORE-OPS",
+      "residual": []
     }
   ],
   "rules": [
@@ -1171,8 +1235,8 @@
         {
           "id": "RES-POOL-SCALAR-30A-MEANING",
           "kind": "unknown",
-          "what": "这张 8 格表装什么未取证（旧注释按异常文本叫它“设键”）",
-          "next": "从消费方反推；找不到就只保留“写表”这一条"
+          "what": "这张 8 格表装什么未取证：全语料 `1EC4h` 只出现 1 次（就是这条写）⇒ **零读者**。旧注释按异常文本叫它“设键”，那不是证据",
+          "next": "从消费方反推；找不到就只保留“写表”这一条（表义永不确定时保持未定，不要替它编用途）"
         }
       ],
       "falsifiers": []
@@ -1312,8 +1376,14 @@
         {
           "id": "RES-TEX-SET-EXC-PROP",
           "kind": "unknown",
-          "what": "「显示消息异常」抛出后的主循环处置（显示消息、按用户选择重试 / 跳过 / 结束，以及跳过时按长度槽推进）没有在「执行与时间」成篇；本条只定义异常与「已写状态不回滚」",
+          "what": "「显示消息型异常」抛出后的主循环处置（显示消息、按用户选择重试 / 跳过 / 结束，以及跳过时按长度槽推进）没有在「执行与时间」成篇；本条只定义异常与「已写状态不回滚」",
           "next": "在「执行与时间」补 VM-EXC：主循环的 catch 表与三条返回值分支"
+        },
+        {
+          "id": "RES-TEX-COLOR-SENTINEL",
+          "kind": "unknown",
+          "what": "颜色键里的「不透明黑」具体数值与颜色字段的位段未取证：正文只规定归一化的形态（负数 ⇒ 0；非负 ⇒ 不透明黑与操作数按位或），写进纹理记录的颜色键因此不唯一",
+          "next": "取证颜色字段的位段与「不透明黑」的数值，补成唯一合同（当前 handled 只是局部合同）"
         }
       ],
       "falsifiers": []
@@ -1365,6 +1435,12 @@
           "kind": "unknown",
           "what": "\"场景有动画\"标记的消费端（等待门）已取证，但 0x202 置它之后是否还有别的读者未查",
           "next": "枚举该标记的读取点"
+        },
+        {
+          "id": "RES-SCENE-202-COLOR",
+          "kind": "unknown",
+          "what": "写出的**终色**依赖「现有颜色」的哨兵数值与 alpha 位段（透明度 < 0 ⇒ 取现有颜色的透明度；颜色 < 0 ⇒ 取现有颜色）；本版只规定归一化形态，终色不唯一",
+          "next": "取证 alpha 位段与「无颜色」哨兵数值，补成唯一合同（当前 handled 只是局部合同）"
         }
       ],
       "falsifiers": []
@@ -1380,6 +1456,12 @@
           "kind": "unknown",
           "what": "第 2 个操作数写进的那个整数位没有读者",
           "next": "全语料搜该位的读取点；找不到就只保真写"
+        },
+        {
+          "id": "RES-SCENE-203-COLOR",
+          "kind": "unknown",
+          "what": "写进「当前颜色」的值依赖「现有颜色」的哨兵数值与 alpha 位段（透明度 < 0 / 颜色 < 0 两支）；本版只规定归一化形态，写出的颜色不唯一",
+          "next": "取证「无颜色」哨兵的数值与颜色字段的 alpha 位段，补成唯一合同（当前 handled 只是局部合同）"
         }
       ],
       "falsifiers": []
@@ -1390,6 +1472,12 @@
       "disposition": "handled",
       "covers": [],
       "residual": [
+        {
+          "id": "RES-SCENE-320-NO-COLOR",
+          "kind": "unknown",
+          "what": "「该网格已有当前颜色（不是无颜色）」这一分支依赖「无颜色」哨兵的数值；哨兵未取证，因此该分支何时成立本版不规定",
+          "next": "取证「无颜色」哨兵的数值，再把分支写成无条件合同（当前 handled 只覆盖“颜色写入后重烘”这一可观察部分）"
+        },
         {
           "id": "RES-SCENE-320-BUFFERS",
           "kind": "unknown",
@@ -1410,6 +1498,12 @@
           "kind": "unknown",
           "what": "第 2 个操作数写进的那个整数位没有读者",
           "next": "同 0x203：搜读取点"
+        },
+        {
+          "id": "RES-SCENE-322-COLOR",
+          "kind": "unknown",
+          "what": "写进「当前颜色」并烘进顶点色缓冲的值依赖「现有颜色」的哨兵数值与 alpha 位段；本版只规定归一化形态，写出的颜色不唯一",
+          "next": "取证「无颜色」哨兵的数值与颜色字段的 alpha 位段，补成唯一合同（当前 handled 只是局部合同）"
         }
       ],
       "falsifiers": []
@@ -1419,7 +1513,14 @@
       "status": "draft",
       "disposition": "handled",
       "covers": [],
-      "residual": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-323-COLOR",
+          "kind": "unknown",
+          "what": "写出的**终色**依赖「现有颜色」的哨兵数值与 alpha 位段；本版只规定归一化形态，终色不唯一",
+          "next": "取证「无颜色」哨兵的数值与颜色字段的 alpha 位段，补成唯一合同（当前 handled 只是局部合同）"
+        }
+      ],
       "falsifiers": []
     },
     {
@@ -1444,9 +1545,9 @@
       "falsifiers": []
     },
     {
-      "id": "CORE-OPS-POLL-INPUT",
+      "id": "CORE-OPS-WAIT-POLL-INPUT",
       "status": "draft",
-      "disposition": "handled",
+      "disposition": "unhandled",
       "covers": [],
       "residual": [
         {
@@ -1464,7 +1565,7 @@
         {
           "id": "RES-POLL-CLEARED-BIT",
           "kind": "unknown",
-          "what": "`0x101` 清的是状态选择字里的哪一位未取证（正文只写「一个位」）；该位与等待位 / 影片位 / 0x88 的第 27 位是否同一族也未定",
+          "what": "`0x101` 清的是状态选择字里的哪一位未取证（正文只写「一个位」）；该位与等待位 / 影片位 / `0x88`（清）与 `0x71`（置）的第 27 位是否同一族也未定",
           "next": "在 0x101 的处理函数里读出那一位的位号，再与其它指令的置位点对账"
         }
       ],
@@ -1486,7 +1587,7 @@
           "id": "RES-VM-PAUSE",
           "kind": "unknown",
           "what": "「暂停」的进入 / 离开：置起与清除是两条无操作数指令（指令表槽 0x1F4 / 0x1F5），带一个嵌套计数；标志为 0 时置 1 并重盖引擎时钟，非 0 时只加计数，清除只在计数减到 0 时发生。本版只按效果建模「暂停」，未规定它对应哪两条脚本指令、嵌套 / 重入算什么",
-          "next": "把这两条无操作数指令收进「指令语义」章（含嵌套计数与时钟重盖），再把 70-vm 的「暂停」指向那两条条目"
+          "next": "把这两条无操作数指令收进「帧类指令」或「等待、输入、影片与空操作」的现有一族（含嵌套计数与时钟重盖），再把「执行与时间」的「暂停」指向那两条条目"
         },
         {
           "id": "RES-VM-AUDIO-RECEIVERS",
@@ -1497,7 +1598,7 @@
         {
           "id": "RES-VM-EXC-PROPAGATION",
           "kind": "unknown",
-          "what": "处理器抛出的异常由主循环捕获：退出异常 ⇒ 结束执行；显示消息异常 ⇒ 显示消息后按返回值分支（重试出错指令 / 跳过该指令 / 结束）；类型异常另有一支。这三支的逐条合同（返回值、重试与跳过的推进量、已写状态是否保留）本版尚未成篇",
+          "what": "处理器抛出的异常由主循环捕获：退出型异常 ⇒ 结束执行；显示消息型异常 ⇒ 显示消息后按返回值分支（重试出错指令 / 跳过该指令 / 结束）；类型异常另有一支。这三支的逐条合同（返回值、重试与跳过的推进量、已写状态是否保留）本版尚未成篇",
           "next": "按 catch 表逐支写「哪类异常 → 什么处置 → 指令指针怎样推进」，再决定要不要单列 CORE-VM-EXC"
         }
       ],
@@ -1549,7 +1650,7 @@
     },
     {
       "id": "CORE-TIMING-WINDOW",
-      "status": "reviewed",
+      "status": "draft",
       "disposition": "handled",
       "covers": [],
       "residual": [
@@ -1592,7 +1693,7 @@
           "id": "RES-MOVIE-VOLUME",
           "kind": "unknown",
           "what": "音轨类别、主音量/类别音量的配置来源与合成公式属于外部配置，本版只登记\"对象音量被配置\"",
-          "next": "配置模块成篇后再补"
+          "next": "在「配置」的玩家文件 / 保存两节与伴随词表里找音量类键；词表里没有就明确音量由外部模块的配置提供，并写影响（本版不规定合成公式）"
         },
         {
           "id": "RES-MOVIE-GATE",
@@ -1650,8 +1751,8 @@
         {
           "id": "RES-CONFIG-DEFAULTS-ARRAYS",
           "kind": "unknown",
-          "what": "尾部前置的两个计数数组被引擎读进别处，用途未查明；默认表的第二个长度标记只做非零校验，其数值含义未验证",
-          "next": "读两个数组的消费点（Engine+0xAAA10/0xAAA14）；用另一份索引样本验证长度标记是否参与边界"
+          "what": "两个计数数组被读进的引擎槽（Engine+0xAAA10 / Engine+0xAAA14）的身份与消费者未查明。★ 标记本身的问法已关闭：两个标记都只判 `>0` 存在、数值不参与，N 是第二个标记之后的独立 32 位字（见 KN:01M5FK4HYM3K7G4Q6Y2K18287E）",
+          "next": "在 .lst 里找这两个引擎槽的读取点；找到后把它们的用途写进「容量与分配」或另立一节"
         },
         {
           "id": "RES-CONFIG-ANTIFONT-HOST",
@@ -1715,6 +1816,12 @@
             "sub_418A30",
             "sub_418AE0"
           ]
+        },
+        {
+          "id": "RES-CONFIG-SCRIPT-NAMED-WRITE",
+          "kind": "unknown",
+          "what": "脚本有一个专用写入口（`0x1ca`）可以设置**运行期命名键**（`message:ReadTextSkip`）；这些值是否写进玩家文件、是否在下次启动可见，本版不规定。正文原来的「脚本读不到命名键 / 脚本写入不持久化」两句是绝对说法，已收窄为「脚本键（9 字节键）不落盘」+「命名键写入的持久性未定」",
+          "next": "做一次最小观察：脚本执行 `0x1ca` 写该键 → 触发保存 → 检查玩家文件是否含 `ReadTextSkip`，再重启读回；按结果把正文的「本版不规定」替换成合同或继续留在残差"
         }
       ]
     },
@@ -1780,6 +1887,12 @@
           "kind": "unknown",
           "what": "向后端设置音量那一步（sub_4B6350）具体做了什么（缓冲音量 / 音量衰减曲线）未建模",
           "next": "需要 DirectSound 层的观测或真机 trace；在那之前只记 audio.volume.request"
+        },
+        {
+          "id": "RES-OPS-VOICE-VOLUME-NEGATIVE",
+          "kind": "unknown",
+          "what": "负组号没有判据：正文只规定 0..2 有效、≥3 拒绝，负值既不在拒绝段也不在有效段（本版按未规定处理，不替引擎补判据）",
+          "next": "构造一个组号 < 0 的合成脚本，观察引擎是拒绝、越过 0..2 直接取通道，还是越界写"
         }
       ],
       "falsifiers": []
@@ -1808,8 +1921,8 @@
         {
           "id": "RES-OPS-SCALAR-PAIR-BIT27",
           "kind": "unknown",
-          "what": "状态选择字第 27 位的含义、以及「被清之后放行什么」未定（置位那条指令本身也是有条件的，条件未取证）",
-          "next": "查该位的服务分支（门打开时谁处理它）+ 置位那条指令的门判据"
+          "what": "状态选择字第 27 位的**领域含义**、以及「被清之后放行什么」未定。★ `0x71` 的置位条件已取证（`sub_48F000` 返回非 0，见 KN:01M5FK4FKN4A6C1D6E5G0P4T3C）；第 27 位不是等待位（等待位是第 10 位）",
+          "next": "查该位的服务分支（门打开时谁处理它）"
         }
       ],
       "falsifiers": []
@@ -1823,8 +1936,14 @@
         {
           "id": "RES-OPS-FORWARD-MESSAGE",
           "kind": "unknown",
-          "what": "消息子系统的内部状态（是否有「跳过」标志、在什么条件下影响后续读文本）没有观察",
-          "next": "取证该对象的 vtable+12 入口与它的状态读者；找到后再写一条消息子系统的合同"
+          "what": "命名键存储的内部没有观察：槽 `+0xC` 是「写一个命名键」这件事由同槽的对照调用形态判定（不是逐字读到 vtable 目标）；存储的类型、其它入口、键不存在时的行为也未知。`0x71` 读到非 0 之后文本侧的具体行为同样不在本版",
+          "next": "找该存储的 vtable / 接口表目标，逐字确认 `+0xC` 的实现体；再定 `0x71` 的文本侧分支"
+        },
+        {
+          "id": "RES-OPS-FORWARD-MESSAGE-IMPL",
+          "kind": "unknown",
+          "what": "参考实现与守卫仍按旧口径「引擎数据不变」写 0x1ca（它没有命名键存储）⇒ 本条新写出的「设命名键」语义尚未落进实现；守卫只断言池 / 帧 / 标量 / 状态字不动，因此它**不**证伪本条的写语义",
+          "next": "把命名键存储加进参考实现，并把守卫改成「写后 0x71 分支变化」的用例；在那之前本条保持 draft"
         }
       ],
       "falsifiers": []
@@ -1838,8 +1957,14 @@
         {
           "id": "RES-OPS-FORWARD-FIELD",
           "kind": "unknown",
-          "what": "入口（sub_453530 → thunk → sub_453150）之后做了什么没有观察；接收者是什么对象也未定",
-          "next": "追 thunk 的真目标 sub_453150 的体与它的字段写"
+          "what": "接收者是什么对象 / 谁把它放进那个引擎字段，未定（该字段在语料里只有读、没有写点）。入口本身已能定性为**复位**：释放接收者持有的三个对象、清三处引用、清一个标记",
+          "next": "找 `Engine+0x5B320` 那个字段的写入点（可能是外部模块或整块结构拷贝），再决定接收者的类型名"
+        },
+        {
+          "id": "RES-OPS-FORWARD-FIELD-IMPL",
+          "kind": "unknown",
+          "what": "参考实现只发了「一次请求」、没有接收者对象 ⇒ 本条新写出的复位（释放三个对象）尚未落进实现；守卫断言的是「请求发生、数据不变」，它不证伪复位（复位改的是接收者自己的对象）",
+          "next": "把接收者对象与它的三个持有对象加进参考实现，再补一条「复位后三处引用为空」的守卫"
         }
       ],
       "falsifiers": []
@@ -1860,6 +1985,21 @@
       "falsifiers": []
     },
     {
+      "id": "CORE-OPS-LIST-DEFAULT-GROUP",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-LIST-DEFAULT-SLOT",
+          "kind": "unknown",
+          "what": "默认组选择子的**初值（1）与运行期写入点（`0x80`）已定**（见 KN:01M5FK1VTW2K6N0J4Z5W6E3837）；仍未定的是 `0x80` 的**领域名**（「设默认组」是工作名），以及子系统被重建时把它复位成 1 的完整触发链（构造点已知：`0x40E143` / `0x417BC2` 调用 `sub_465390`）",
+          "next": "找 `0x80` 在真实脚本里的典型用法与该选择子的其它读者，给它一个领域名；再列子系统的重建调用链"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
       "id": "CORE-OPS-LIST-SET",
       "status": "draft",
       "disposition": "handled",
@@ -1868,20 +2008,14 @@
         {
           "id": "RES-OPS-LIST-INTERNALS",
           "kind": "unknown",
-          "what": "列表登记（sub_45D240）与两条绘制调用（sub_43C8D0 / sub_43B070，及浮点模式分支）的内部行为未建模；记录里派生出来的两个长度槽也没建模",
+          "what": "列表登记（sub_45D240）与两条绘制调用（sub_43C8D0 / sub_43B070，及浮点模式分支）的内部行为未建模；记录里派生出来的两个长度槽也没建模。★ 字段对身份已定：四对里只有第四对与 `0x1c1` 共享（见 KN:01M5CXQF663A653R6V4E2R5617 / KN:01M5CY9J4S541T144Q3Q2W6F5H）",
           "next": "先取证列表对象的元素布局与那两个派生槽的读者，再决定要不要把列表建成对象"
-        },
-        {
-          "id": "RES-OPS-LIST-DEFAULT-SLOT",
-          "kind": "unknown",
-          "what": "组号为 0 时引擎用的\"默认组\"是哪一个，没有观察",
-          "next": "找写默认组字段（容器 +0x4CC）的指令或启动阶段，再决定默认值"
         }
       ],
       "falsifiers": []
     },
     {
-      "id": "CORE-OPS-TEXT-REQUEST",
+      "id": "CORE-OPS-LIST-TEXT-REQUEST",
       "status": "draft",
       "disposition": "handled",
       "covers": [],
@@ -1895,14 +2029,14 @@
         {
           "id": "RES-OPS-TEXT-GATE-BIT",
           "kind": "unknown",
-          "what": "那次状态位写（置第 27 位）的条件未取证：本版不写它，因此「本条之后门是否关上」不回答",
-          "next": "查该写点的门（`0x41EE89 test` / `0x41EE8B jz` 读的是什么）—— 与 bug 单 REQ-01M5CWFZV… 同一件事"
+          "what": "状态位写（**置第 27 位**）的**触发条件已取证**：文本子系统的一次调用（`sub_48F000`）返回非 0 ⇒ 置位；正文已写位号与条件。仍未定的是该位的**领域含义**与被清之后放行什么（见 CORE-OPS-SCALAR-PAIR-88 的残差）",
+          "next": "查该位的服务分支：门打开时谁处理第 27 位"
         }
       ],
       "falsifiers": []
     },
     {
-      "id": "CORE-OPS-SUBSYSTEM-SET73",
+      "id": "CORE-OPS-LIST-SUBSYSTEM-SET73",
       "status": "draft",
       "disposition": "handled",
       "covers": [],
@@ -1910,20 +2044,20 @@
         {
           "id": "RES-OPS-73-SUBSYSTEM",
           "kind": "unknown",
-          "what": "sub_456430 拿到 9 个操作数后做什么未建模；那个固定格（Engine.d107528）的读者未定",
-          "next": "按偏移扫该格与子系统的读者，再决定要不要建对象"
+          "what": "`sub_456430` 写进记录 `+0x3C..+0x60` 那十格的**领域角色**未定（写什么、按什么公式已经取证，见 KN:01M5FK3XR81S6Q4D201V0G4B2Z）；那个固定格（Engine.d107528）的读者也未定",
+          "next": "按偏移扫那十格与该固定格的读者，再决定要不要把记录建成对象"
         },
         {
           "id": "RES-OPS-73-GATE",
           "kind": "unknown",
-          "what": "第二次请求的门槽（Engine.d166964）由谁写、启动时是什么值，没有观察",
-          "next": "找该槽的写入点；找到后把门建成显式状态"
+          "what": "第二次请求的门槽（Engine+0xA30D0）**初值 = 0 已定**（Engine 初始化写入），但它的运行期写入点有多处（未逐个定名）；它与 `0x70` 浮点分岔用的那个开关是不是同一个字段，属机器侧判断（两边读的都是这个引擎级字段）",
+          "next": "把该槽的写入点逐个定名，再决定门要不要建成显式状态"
         }
       ],
       "falsifiers": []
     },
     {
-      "id": "CORE-OPS-SUBSYSTEM-SET-TAIL",
+      "id": "CORE-OPS-LIST-SUBSYSTEM-SET-TAIL",
       "status": "draft",
       "disposition": "handled",
       "covers": [],
@@ -1931,8 +2065,8 @@
         {
           "id": "RES-OPS-SET-TAIL-FIELDS",
           "kind": "unknown",
-          "what": "两个字段（子对象 +0x55C / +0x313D0）的领域角色未定；sub_459F40 的内部行为未建模",
-          "next": "按偏移扫那两个字段的读者与 sub_459F40 的写点"
+          "what": "两个字段（子系统 +0x55C / +0x313D0）的**领域角色**未定；已知它们的初值（1 / 0）与读者位置（前者由同一子系统的其它入口读，后者在尾跳目标体内直接读），`sub_459F40` 的其余内部行为仍未建模",
+          "next": "按偏移扫那两个字段的读者与 sub_459F40 的其它写点，给两格一个领域名"
         }
       ],
       "falsifiers": []
@@ -1946,7 +2080,7 @@
         {
           "id": "RES-OPS-LIST-PAIR-FIELDS",
           "kind": "unknown",
-          "what": "记录 +0x1C/+0x20 与 +0x24/+0x28 的领域角色未定（+0x24/+0x28 也会被 0x70 写）",
+          "what": "两对字段的**身份已定**（`0x79` 写 `+0x1C/+0x20`、`0x1c1` 写 `+0x24/+0x28`，后者与 `0x70` 写入次序的第四对是同一对），但**领域角色**仍未定",
           "next": "按偏移扫这两对字段的读者；若与 0x70 的写语义冲突，先开冲突单"
         }
       ],
@@ -1976,7 +2110,7 @@
         {
           "id": "RES-OPS-LIST-PAIR2-ROLE",
           "kind": "unknown",
-          "what": "记录 +0x120/+0x124 的领域角色未定",
+          "what": "记录 +0x120/+0x124 的**领域角色**未定；身份已定（与 `0x70` / `0x79` / `0x1c1` 的对都不同）",
           "next": "按偏移扫读者"
         }
       ],
@@ -2035,8 +2169,8 @@
         {
           "id": "RES-FRAME-EXIT-SCRIPT-RESET",
           "kind": "unknown",
-          "what": "0x9 复位引擎级状态时调用的各子系统复位入口（除已取证的 40 帧槽 / 三全局池 / 帧号 / 状态选择字之外）没有逐项建模；另：字符串池的清空没有逐条机器站点（整型 / 浮点池有），这一项按未取证处理",
-          "next": "把处理器里的直接调用逐个归属到子系统，再决定哪些属于其它章的合同"
+          "what": "0x9 复位引擎级状态时调用的各子系统复位入口（除已取证的 40 帧槽 / 三个值族全局池 / 帧号 / 状态选择字之外）没有逐项建模；另：字符串池的清空没有逐条机器站点（整型 / 浮点池有），且**三个引用族全局池是否复位未取证** —— 这两项都按未规定处理",
+          "next": "把处理器里的直接调用逐个归属到子系统（含引用族池的复位点），再决定哪些属于其它章的合同"
         }
       ],
       "falsifiers": []
@@ -2088,6 +2222,12 @@
           "kind": "unknown",
           "what": "装载前置里那条宿主回调是什么、什么时候返回非 0，没有取证（正文只写成『宿主回调没有请求中止』）",
           "next": "找这个函数指针的写入点，看它被谁注册（调试器 / 演示模式 / 中止标志），再用一次注入观察返回值非 0 的效果"
+        },
+        {
+          "id": "RES-FRAME-LOAD-INTERNAL-PRE",
+          "kind": "unknown",
+          "what": "装载前置里另有两项**实现内部不变量**：解码密钥非 0、编码零点 = `ENC(key, 0)` 与它满足的循环移位自洽关系。正文已把它们移出（只保留可观察的宿主回调）：它们要么在正常启动后恒真、要么是纯内部断言，没有可观察的注入观察",
+          "next": "用一次合成注入（把密钥置 0 / 把零点写坏）看装载是否真的抛退出型异常；观察不到差别就把这两项判为恒真，并从任何合同里删掉"
         },
         {
           "id": "RES-FRAME-LOAD-NEGATIVE",
@@ -2145,8 +2285,8 @@
         {
           "id": "RES-ALF-SIN-DEST",
           "kind": "unknown",
-          "what": "`S?IN` / `S?IC` 初始化文件加载器（300 字节头、四个签名）不是 ALF，本版没有归宿；正文只写「另立协议」",
-          "next": "在 CORE-FS / CORE-BOOT 成篇时写它的头部与四签名，或明确本版不做并写影响"
+          "what": "`S?IN` / `S?IC` 初始化文件加载器（300 字节头、四个签名）不是 ALF，本版没有归宿；正文把它指向「文件与脚本装载」的索引装载",
+          "next": "在「文件与脚本装载」补这一族（300 字节头 + 四个签名）的归属：该章的「索引装载」已规定「签名按四族依次比较」，但四族与文件名的对应仍未写；补不上就明确它归另立的加载器，并写影响"
         },
         {
           "id": "RES-ALF-S5",
@@ -2203,6 +2343,12 @@
           "kind": "unknown",
           "what": "多份索引（本体 + 加装档）的叠加顺序、文件搜索路径、`APPEND*.AAI` 的覆盖规则都不在本版",
           "next": "取证多份 AAI 的装载顺序与同名条目优先规则，再补合同"
+        },
+        {
+          "id": "RES-ALF-FILE-INDEX",
+          "kind": "unknown",
+          "what": "文件记录的 `file_index`（记录里的四个 u32 之一）的用途未查明；正文只保真搬运，不解释",
+          "next": "在引擎里找该字段的读取点（是否为归档内序号 / 校验 / 未用）；找不到就保持 unknown"
         }
       ],
       "falsifiers": [
@@ -2287,7 +2433,7 @@
       ]
     },
     {
-      "id": "CORE-OPS-STRING-SET",
+      "id": "CORE-OPS-TEXT-SET",
       "status": "draft",
       "disposition": "handled",
       "covers": [],
@@ -2295,19 +2441,19 @@
         {
           "id": "RES-STRING-SET-LOCAL",
           "kind": "unknown",
-          "what": "落点类型 11（当前帧的局部字符串池）与两个高位标签（`0x8005` / `0x800B`）的写入行为只有逐字，本层与参考实现都只建模了全局池（type 5）",
+          "what": "落点类型 11（当前帧的局部字符串池）与两个容器句柄（`0x8005` / `0x800B`）的写入行为没有逐条取证；正文因此只规定落点类型 5，其余落点写「本版不规定」",
           "next": "先取证局部字符串池的分配点（每帧一份？容量从哪来？），再决定是否把 type 11 写进合同"
         },
         {
           "id": "RES-STRING-SET-PTR",
           "kind": "unknown",
-          "what": "落点类型 8 / 14 的两条『按指针取记录』路径，那两张表的领域角色没有取证",
+          "what": "落点类型 8 / 14 的两条『按指针取记录』路径，那两张表的领域角色没有取证；正文因此把它们写成「本版不规定」",
           "next": "找这两张表的写入者（谁往里放指针），确认它们是字符串池的另一种视图还是独立的表"
         },
         {
           "id": "RES-STRING-SET-NUMTEXT",
           "kind": "unknown",
-          "what": "数值型源 → 文本的**格式**只知是十进制，符号 / 宽度 / 浮点格式没有逐字确认",
+          "what": "数值型源 → 文本的格式只知是十进制：符号 / 宽度 / 浮点格式没有逐字确认，正文因此写「本版不规定」（负数 / 大数 / 浮点源的输出字节都未观察）",
           "next": "用负数、大数、浮点三种源构造一次 set-string，观察落点字符串的字节"
         }
       ],
@@ -2315,7 +2461,1046 @@
         "若把内联文本按未取反的字节解析也能得到正确的字体名 ⇒ 本条与「数据池」的取反口径至少有一处错",
         "若类型 5 的落点不是『按记录写字节与长度』（例如只写指针）⇒ 本条错"
       ]
+    },
+    {
+      "id": "CORE-POOL-ADDRESS-ARITH",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ARRAY-ADDR-OOB",
+          "kind": "unknown",
+          "what": "越界 / 未对齐的具体后果（抛、访问违例、还是静默踩到相邻池）没有真机观察；本条只把它们定为未定义行为",
+          "next": "构造一次越界下标与一次未对齐地址，记录引擎是抛、是访问违例、还是静默写到相邻区域"
+        },
+        {
+          "id": "RES-ARRAY-ADDR-LAYOUT",
+          "kind": "unknown",
+          "what": "各池基址与池在地址空间里的先后顺序没有登记；它是实现选择，但会改变配置键换算出的地址序号",
+          "next": "把装载期六次分配的基址与顺序收成一条可复核的布局观察（只作复核材料，不进正文）"
+        }
+      ],
+      "falsifiers": [
+        "同一族内下标 0 与 1 的两个地址之差必须等于该族元素宽度（4 或 28）；若配置键换算给出不同宽度 ⇒ 两处口径不一致"
+      ]
+    },
+    {
+      "id": "CORE-OPS-ARRAY-FILL-ZERO",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ARRAY-FILL-ZERO-OOB",
+          "kind": "unknown",
+          "what": "个数大于目标数组容量时会连续踩到相邻槽 / 相邻池；引擎不检查，踩到什么没有取证",
+          "next": "构造 count 超过目标数组的脚本，观察相邻池的槽是否被改写、以及是否抛异常"
+        },
+        {
+          "id": "RES-ARRAY-FILL-ZERO-FLOAT",
+          "kind": "unknown",
+          "what": "目标落在浮点池时写入的是编码后的零位模式；浮点族按裸位模式解释，读出来的数值没有取证",
+          "next": "用浮点族作目标跑一次，记录按浮点读原语读出的数值"
+        }
+      ],
+      "falsifiers": [
+        "count = 0 时目标地址与相邻格逐位不变；若有一格变化 ⇒ 本条错"
+      ]
+    },
+    {
+      "id": "CORE-OPS-ARRAY-SET-TO",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ARRAY-SET-TO-OOB",
+          "kind": "unknown",
+          "what": "个数大于目标数组容量时的越界写会踩到相邻槽 / 相邻池；引擎不检查，后果未取证",
+          "next": "构造 count 超过目标数组的脚本，观察相邻槽与相邻池是否被改写"
+        },
+        {
+          "id": "RES-ARRAY-SET-TO-FLOAT",
+          "kind": "unknown",
+          "what": "目标落在浮点池时写入的是编码后的位模式（不是浮点数值）；该位模式按浮点解释的结果未取证",
+          "next": "用浮点族作目标跑一次，比对写入位模式与读浮结果"
+        }
+      ],
+      "falsifiers": [
+        "写入后按读整型读回必须等于第 2 个操作数的值；若读回的是别的数 ⇒ 少做或多做了一次编码"
+      ]
+    },
+    {
+      "id": "CORE-OPS-ARRAY-LOOKUP",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ARRAY-LOOKUP-OOB",
+          "kind": "unknown",
+          "what": "下标越界时算出的地址可能落进另一个池；写进指针槽后，后续解引用读到的是别处的数据（引擎不检查）",
+          "next": "构造一个越界下标，观察落点槽里的地址落在哪个池，以及后续解引用读到什么"
+        },
+        {
+          "id": "RES-ARRAY-LOOKUP-UNALIGNED",
+          "kind": "unknown",
+          "what": "操作数 2 给出的基址未对齐、或字符串步长 28 的地址不落在记录边界上时的后果没有观察",
+          "next": "构造未对齐基址的脚本，记录引擎是抛、访问违例、还是静默写槽"
+        }
+      ],
+      "falsifiers": [
+        "同一基址与下标下，把落点标签从 6 换成 8，地址差必须从 4×下标变成 28×下标；若不变 ⇒ 步长来源写错"
+      ]
+    },
+    {
+      "id": "CORE-OPS-ARRAY-LOOKUP-2D",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ARRAY-LOOKUP-2D-ROW",
+          "kind": "unknown",
+          "what": "行宽的领域含义（是否等于数组第二维）没有定义；本条只把它当有符号整型操作数",
+          "next": "从使用该指令的脚本反查行宽的来源，确认它是数组维度还是布局常量"
+        },
+        {
+          "id": "RES-ARRAY-LOOKUP-2D-OOB",
+          "kind": "unknown",
+          "what": "负下标与越界下标同样不检查，算出的地址可能落进别的池；后果未取证",
+          "next": "用一组负下标与一组越界下标各跑一次，观察落点槽里的地址"
+        }
+      ],
+      "falsifiers": [
+        "行下标 2、行宽 10、列下标 3 必须等同于下标 23；若等同于 26 ⇒ 先加后乘，次序写错"
+      ]
+    },
+    {
+      "id": "CORE-OPS-ARRAY-COPY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ARRAY-COPY-OOB",
+          "kind": "unknown",
+          "what": "块编号越界、或个数大于目标容量时的读写都不检查；会读进代码区之外、或写进相邻池",
+          "next": "构造一个块编号越过代码区末尾的脚本，记录读到什么、是否访问违例"
+        },
+        {
+          "id": "RES-ARRAY-COPY-BLOCK",
+          "kind": "unknown",
+          "what": "块里的 dword 是同一脚本数据区里的 coder 数据，不是运行时数组；除\"首 u32 个数 + 数据\"之外是否还有别的头未取证",
+          "next": "从编译器生成端统计块的形态，确认块头只有一个个数"
+        },
+        {
+          "id": "RES-ARRAY-COPY-OVERLAP",
+          "kind": "unknown",
+          "what": "目标地址与源块重叠时的结果未取证（逐格读—写前进，重叠时后写的目标格可能盖住还没读的源格）",
+          "next": "构造目标落在源块内部的重叠用例，比对复制结果与不重叠时的差"
+        },
+        {
+          "id": "RES-ARRAY-COPY-FLOAT",
+          "kind": "unknown",
+          "what": "目标落在浮点池时逐格写的是编码后的位模式；该位模式按浮点解释的结果未取证",
+          "next": "用浮点族作目标复制一小块，记录读浮结果"
+        }
+      ],
+      "falsifiers": [
+        "把块首的个数改成 0 后目标格逐位不变；若变了 ⇒ 个数读取位置（块首 +0 还是 +4）写错"
+      ]
+    },
+    {
+      "id": "CORE-FS-ID-ZONES",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-EXT-LOAD",
+          "kind": "unknown",
+          "what": "扩展档的装载来源与时机未取证：谁把档号填进可用的档表、何时触发装载、装载失败怎么表现；本规则只规定 id 怎么被解释",
+          "next": "读扩展档内寻址的入口与档表的写入点，定「装载由谁触发、失败走哪条路径」，再决定扩展档是否单列一条规则"
+        }
+      ]
+    },
+    {
+      "id": "CORE-FS-LOOSE-FIRST",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-LOOSE-NAME",
+          "kind": "unknown",
+          "what": "松散文件按条目登记名定位；名字的码页、大小写与相对哪根目录未取证，本规则只规定「按名直接打开」",
+          "next": "用含非 ASCII 与大小写差异条目名的合成索引跑打开路径，记录哪些名字能命中"
+        },
+        {
+          "id": "RES-FS-FETCH-CACHE",
+          "kind": "unknown",
+          "what": "取件之后的动作（内容是否被缓存 / 登记 / 计数、同一 id 连续两次取件的可观察差异）未取证；本规则只规定每次取件的来源与长度",
+          "next": "读取件之后被调用的登记与读取函数，定重复取件的副作用"
+        }
+      ]
+    },
+    {
+      "id": "CORE-FS-ARCHIVE-FALLBACK",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-ARCHIVE-PAYLOAD",
+          "kind": "unknown",
+          "what": "归档载荷是否可能逐条目压缩没有取证；本规则只规定「定位 + 按登记长度读」这一形状（载荷原样存放的协议口径见 ALF 章）",
+          "next": "找一份条目登记长度与解压后长度不一致的归档样本，观察取件时是否解压"
+        }
+      ]
+    },
+    {
+      "id": "CORE-FS-FETCH-FAIL",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-FAIL-BRANCHES",
+          "kind": "unknown",
+          "what": "三类失败的消息文本与上下文已登记形状，但「哪些失败带消息、哪些只中断」的完整对应没有逐支取证",
+          "next": "对取件函数的每条 throw 支登记「消息 + 是否带宿主错误码 + 中断点」，再核一遍是否存在静默返回空的分支"
+        }
+      ]
+    },
+    {
+      "id": "CORE-FS-INDEX-LOAD-FAIL",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-S3-FAMILY",
+          "kind": "unknown",
+          "what": "四族签名里 S3 族没有样本；S3 族索引的目录布局与 S4 族是否一致未取证，本规则只规定「四族依次比较、全不匹配即损坏」",
+          "next": "找一份 S3 族初始化文件样本，或从装载器对 S3 分支的读取序列推布局"
+        }
+      ]
+    },
+    {
+      "id": "CORE-BOOT-ENTRY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-ENTRY-ARGS",
+          "kind": "unknown",
+          "what": "入口接收的宿主参数（实例 / 命令行 / 显示方式）里哪些被引擎读取、读来做什么，没有逐项取证；本规则只规定「有一个入口、它返回一个整数」",
+          "next": "按入口的参数逐个找读取点，区分「引擎自己用」与「只转交宿主」"
+        }
+      ]
+    },
+    {
+      "id": "CORE-BOOT-INDEX-FIRST",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-FIRST-FILE",
+          "kind": "unknown",
+          "what": "「索引是启动的第一个文件动作」缺锚：更早的宿主阶段是否碰文件未取证",
+          "next": "对入口之前的宿主阶段做文件访问观察（或用断点记录打开点），确认索引之前没有引擎侧文件动作"
+        }
+      ]
+    },
+    {
+      "id": "CORE-BOOT-INDEX-FAIL",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-INDEX-TAIL",
+          "kind": "unknown",
+          "what": "显示文本之后引擎是否还有别的收尾动作（清理哪些对象）未逐项取证；本规则只规定「显示一条内建文本 + 不再前进」",
+          "next": "读索引失败分支到函数尾声之间的清理序列，确认没有「重试另一种索引」或「降级继续」"
+        },
+        {
+          "id": "RES-BOOT-INDEX-EVIDENCE",
+          "kind": "unknown",
+          "what": "本条没有「两种族都失败」的直接可执行观察：现有证据只到「索引格式失败要响亮」这一档，故保持 draft",
+          "next": "造一个两种初始化文件都缺失的安装，观察显示请求与启动结束，再把该观察登记为证据"
+        }
+      ]
+    },
+    {
+      "id": "CORE-BOOT-ROOT-SCRIPT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-ROOT-ID",
+          "kind": "unknown",
+          "what": "「根脚本 = 统一 id 0」依赖统一 id 的领域口径，而该口径目前只有弱证据（台账记录仍是 proposed）；本规则保持 draft",
+          "next": "把「按 id 取脚本、不按名字」登记成一条 accepted 观察，再升档"
+        }
+      ]
+    },
+    {
+      "id": "CORE-BOOT-ABORT-SHAPE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-ABORT-SIDE",
+          "kind": "unknown",
+          "what": "中止时「哪些路径带消息、哪些不带」已按观察分开，但消息之外是否还有别的可观察副作用（例如写到宿主日志）未取证",
+          "next": "逐条走三个中止汇合点，登记每条路径的外部请求（消息 / 日志 / 其它）"
+        },
+        {
+          "id": "RES-BOOT-ABORT-EVIDENCE",
+          "kind": "unknown",
+          "what": "没有直接覆盖「所有失败共享同一出口 / 没有部分成功」的可执行观察；现有证据只支持「失败不静默」，故保持 draft",
+          "next": "为索引失败、脚本失败、闸门失败各造一个观察，确认三者返回值相同且都不进主循环"
+        }
+      ]
+    },
+    {
+      "id": "CORE-OPS-NUMERIC-ARITH",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-NUMERIC-ARITH-EXC",
+          "kind": "unknown",
+          "what": "除法 / 取余的失败路径（除数为 0、被除数为最小负数 / 除数为 −1）没有观察：引擎不检查，执行随处理器异常中止；\"中止之后宿主看到什么\"不在本版。乘 / 除 / 取余与两条移位都没有守卫覆盖",
+          "next": "为 0x52 / 0x53 / 0x54 / 0x58 / 0x59 各补一条守卫（含负除数、负移位位数、32 位截断），除零路径留待真机观测"
+        }
+      ],
+      "falsifiers": [
+        "`0x58` 传（−8, 1）必须得 −4：若得 2147483644，则是逻辑右移（写错）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-NUMERIC-COMPARE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-NUMERIC-COMPARE-GUARD",
+          "kind": "unknown",
+          "what": "只有 0x5f 与 0x56 有可执行观察；0x5a..0x5e 的方向与有符号性只有 handler 逐字，没有守卫",
+          "next": "补 0x5a..0x5e 的守卫（每条的镜像与负值各一例），把\"方向写反\"钉成红灯"
+        }
+      ],
+      "falsifiers": [
+        "`0x5f` 传（−1, 0）必须得 0：若得 1，则是无符号比较（写错）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-BIT-SET-RESET",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-BIT-SET-RESET-ERRCH",
+          "kind": "unknown",
+          "what": "越界只写错误通道（不抛、不写操作数）：错误通道的消费者与文本去向属平台 / 机器细节，本版不规定；0x136 的越界路径没有守卫（0x135 有）",
+          "next": "补 0x136 的越界用例（预置非 0 目标、位号 32 / −1），断言目标原样不动"
+        }
+      ],
+      "falsifiers": [
+        "`0x136` 传（−1, 0x20）：目标必须仍是 −1（写成 0 或写成 ~0 都是错）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-BIT-TEST",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-BIT-TEST-NOWRITE",
+          "kind": "unknown",
+          "what": "「越界不写第 1 个操作数」在现有守卫里与「写 0」不可区分：用例的目标格初值就是 0",
+          "next": "把越界用例的目标格预置成非 0（−1），重跑后即可把\"不写\"与\"写 0\"钉开"
+        }
+      ],
+      "falsifiers": [
+        "目标格预置为 −1 后传位号 0x20：若结果变成 0，则「越界不写」写错"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCALAR-THIN-PROLOGUE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SCALAR-THIN-PROLOGUE-ROLE",
+          "kind": "unknown",
+          "what": "五个格的领域身份未定（0xfe 的 31 上界、0x248 的进程级全局、0x261 那格的读者都没有观察）；0x10f / 0x248 / 0x8b 没有守卫",
+          "next": "按各自落点的读写点扫全语料找读者；找不到就保持\"格的身份未定\"，不猜名字"
+        }
+      ],
+      "falsifiers": [
+        "`0xfe` 传 32：必须抛出且那一格保持原值（写成 31、或把 32 写进去，都是错）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCALAR-PAIR-PROLOGUE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SCALAR-PAIR-PROLOGUE-ROLE",
+          "kind": "unknown",
+          "what": "0x260 的四格与 0x261 那一格在地址上连续，但\"它们是不是同一条记录的字段\"没有观察；两处的读者都未取证",
+          "next": "找这五格的读者，确认是否被同一段逻辑按整体读；若是，再决定要不要合并成一条记录级合同"
+        }
+      ],
+      "falsifiers": [
+        "`0x260` 传（1,2,3,4）：四格必须从低到高是 1,2,3,4（倒序即错）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCALAR-VARIANT-PROLOGUE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SCALAR-VARIANT-REBUILD",
+          "kind": "unknown",
+          "what": "重建入口的内部（重建它持有的字体、二次写这些格）本版不建模；0x2bd 没有守卫（700 / 0 二选一 + 尾跳只有 handler 逐字）",
+          "next": "为 0x2bd 补守卫（非 0 ⇒ 两格都是 700、0 ⇒ 两格都是 0，且不再返回分派器）"
+        }
+      ],
+      "falsifiers": [
+        "`0x76` 传 0x123456：那格必须是 0x563412（写成 0x123456 即错）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCALAR-TABLE-10C",
+      "status": "draft",
+      "disposition": "unhandled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SCALAR-TABLE-10C-TARGET",
+          "kind": "unknown",
+          "what": "目标表与目标数组的领域身份未取证（表里那格给出的是什么量纲的下标、那段数组各记什么）。参考实现把落点当\"未取证\"只留痕、不写 ⇒ 本条写出的写语义尚未落进实现，守卫也不证伪它",
+          "next": "找两张表的写入者与那段数组的读者（谁填表、谁读数组），确认二级下标的值域后再定合同"
+        }
+      ],
+      "falsifiers": [
+        "`0x10c` 传（索引 0，值 32）：必须抛且一格都不写（负值同理）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-FORWARD-PROLOGUE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-FORWARD-PROLOGUE-ENTRY",
+          "kind": "unknown",
+          "what": "0x1a5 / 0x2fe 的两个字符串入口内部各自写哪些格未取证（本版只登记\"不是同一个入口\"）；0x75 / 0x197 的两处派生算式只有 handler 逐字，没有守卫；0x308 的引擎数据效果只有一条 proposed 台账记录",
+          "next": "先给 0x75 / 0x197 造守卫（尺寸 ← 操作数、高度 ← 相反数、宽度两种算式各一例），再按入口反查两个字符串入口的写点"
+        }
+      ],
+      "falsifiers": [
+        "`0x308` 传 op1 = 3：宿主接口封装对象那个字段必须变成 3（不写 = 写错）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-EVENT-143",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-EVENT-143-QUEUE",
+          "kind": "unknown",
+          "what": "那 255 格登记表与事件容器的领域身份未定；队列非空那一支（取一件事件 → 换帧 / 跳转 / 改推进格数）本版不规定",
+          "next": "从事件容器的写入点反查事件种类与它们各自要求的控制流，再决定是否单独成条"
+        }
+      ],
+      "falsifiers": [
+        "队列空时执行 `0x143` 之后指令指针必须只 +4（+8 说明分派器又加了一次）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SAVE-VERSION-AE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SAVE-VERSION-AE-REPAIR",
+          "kind": "unknown",
+          "what": "标志 ≠ 0 的版本判定 / 修复路径（两个版本键的取值语义、分支里的换帧与指令指针改写）本版不规定；标志的领域身份（谁在什么条件下置 1）也未取证",
+          "next": "找该标志的写入点与两个版本键的其它读者，把修复路径拆成可判的分支后再补条"
+        }
+      ],
+      "falsifiers": [
+        "标志 = 0 时执行 `0xae`：不应发生任何命名键查询（发生即早退判据写错）"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SHOW-LOGO-130",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-SHOW-LOGO-130-CONSUMER",
+          "kind": "unknown",
+          "what": "标志的消费者（哪一段启动流程据此决定是否显示 LOGO）不在本版；清 0 例程的调用者与调用条件也未取证",
+          "next": "找除本条之外的读取点与清 0 例程的调用链，确认\"显示 LOGO\"的分支位置"
+        }
+      ],
+      "falsifiers": [
+        "未清 0 时执行 `0x130`：第 1 个操作数必须是 1（得 0 说明方向或初值写错）"
+      ]
     }
   ],
-  "gaps": []
+  "gaps": [
+    {
+      "id": "GAP-OPS-0000-00FF",
+      "chapter": "ops-unwritten",
+      "title": "opcode 0x0000–0x00FF 段的未成篇项",
+      "note": "本段 140 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "ops": [
+        "0x1",
+        "0x4",
+        "0x7",
+        "0xa",
+        "0xb",
+        "0xc",
+        "0xd",
+        "0xe",
+        "0xf",
+        "0x10",
+        "0x11",
+        "0x12",
+        "0x13",
+        "0x14",
+        "0x15",
+        "0x16",
+        "0x17",
+        "0x1e",
+        "0x1f",
+        "0x20",
+        "0x21",
+        "0x22",
+        "0x23",
+        "0x24",
+        "0x25",
+        "0x26",
+        "0x27",
+        "0x28",
+        "0x2a",
+        "0x2b",
+        "0x2c",
+        "0x2d",
+        "0x2e",
+        "0x2f",
+        "0x30",
+        "0x31",
+        "0x32",
+        "0x33",
+        "0x34",
+        "0x35",
+        "0x36",
+        "0x37",
+        "0x38",
+        "0x60",
+        "0x62",
+        "0x63",
+        "0x65",
+        "0x66",
+        "0x67",
+        "0x68",
+        "0x69",
+        "0x6a",
+        "0x6b",
+        "0x6d",
+        "0x6e",
+        "0x6f",
+        "0x72",
+        "0x74",
+        "0x7a",
+        "0x7b",
+        "0x7c",
+        "0x7d",
+        "0x7e",
+        "0x7f",
+        "0x81",
+        "0x82",
+        "0x83",
+        "0x84",
+        "0x85",
+        "0x86",
+        "0x87",
+        "0x89",
+        "0x8a",
+        "0x8c",
+        "0x8d",
+        "0x8e",
+        "0x90",
+        "0x91",
+        "0x92",
+        "0x93",
+        "0x94",
+        "0x95",
+        "0x96",
+        "0x97",
+        "0xa1",
+        "0xa2",
+        "0xa3",
+        "0xaa",
+        "0xab",
+        "0xac",
+        "0xad",
+        "0xaf",
+        "0xb0",
+        "0xb1",
+        "0xb2",
+        "0xb3",
+        "0xb4",
+        "0xb5",
+        "0xb6",
+        "0xb7",
+        "0xb8",
+        "0xb9",
+        "0xba",
+        "0xbb",
+        "0xbc",
+        "0xbd",
+        "0xbe",
+        "0xbf",
+        "0xc0",
+        "0xc1",
+        "0xc2",
+        "0xc3",
+        "0xc4",
+        "0xc5",
+        "0xc6",
+        "0xc7",
+        "0xc8",
+        "0xc9",
+        "0xca",
+        "0xcb",
+        "0xcc",
+        "0xcd",
+        "0xce",
+        "0xcf",
+        "0xd0",
+        "0xd1",
+        "0xd2",
+        "0xd3",
+        "0xd4",
+        "0xd5",
+        "0xd6",
+        "0xd7",
+        "0xd8",
+        "0xd9",
+        "0xda",
+        "0xfa",
+        "0xfb",
+        "0xfc",
+        "0xfd",
+        "0xff"
+      ],
+      "residual": [
+        {
+          "id": "RES-GAP-OPS-0000-00FF",
+          "kind": "unhandled",
+          "what": "本段 140 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
+        }
+      ]
+    },
+    {
+      "id": "GAP-OPS-0100-01FF",
+      "chapter": "ops-unwritten",
+      "title": "opcode 0x0100–0x01FF 段的未成篇项",
+      "note": "本段 107 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。★ 同段的 0x1a2 / 0x1a3 / 0x1a9 / 0x1aa 已由「配置」的「脚本访问」写成合同，不在本 gap 里。",
+      "ops": [
+        "0x100",
+        "0x102",
+        "0x103",
+        "0x104",
+        "0x105",
+        "0x106",
+        "0x108",
+        "0x109",
+        "0x10a",
+        "0x10d",
+        "0x10e",
+        "0x12d",
+        "0x12e",
+        "0x12f",
+        "0x131",
+        "0x132",
+        "0x133",
+        "0x134",
+        "0x137",
+        "0x138",
+        "0x139",
+        "0x13a",
+        "0x13b",
+        "0x13c",
+        "0x13d",
+        "0x13e",
+        "0x140",
+        "0x141",
+        "0x142",
+        "0x144",
+        "0x145",
+        "0x146",
+        "0x147",
+        "0x148",
+        "0x14a",
+        "0x14b",
+        "0x14c",
+        "0x14d",
+        "0x190",
+        "0x191",
+        "0x193",
+        "0x194",
+        "0x195",
+        "0x196",
+        "0x198",
+        "0x199",
+        "0x19a",
+        "0x19b",
+        "0x19c",
+        "0x19d",
+        "0x19e",
+        "0x19f",
+        "0x1a0",
+        "0x1a1",
+        "0x1a6",
+        "0x1ab",
+        "0x1ac",
+        "0x1ad",
+        "0x1ae",
+        "0x1af",
+        "0x1b0",
+        "0x1b1",
+        "0x1b2",
+        "0x1b3",
+        "0x1b4",
+        "0x1b5",
+        "0x1b6",
+        "0x1b7",
+        "0x1b8",
+        "0x1b9",
+        "0x1ba",
+        "0x1bb",
+        "0x1bc",
+        "0x1bd",
+        "0x1be",
+        "0x1bf",
+        "0x1c0",
+        "0x1c2",
+        "0x1c3",
+        "0x1c4",
+        "0x1c5",
+        "0x1c6",
+        "0x1c7",
+        "0x1c8",
+        "0x1c9",
+        "0x1cb",
+        "0x1cc",
+        "0x1cd",
+        "0x1ce",
+        "0x1cf",
+        "0x1d0",
+        "0x1d1",
+        "0x1d2",
+        "0x1d3",
+        "0x1d4",
+        "0x1d5",
+        "0x1d6",
+        "0x1d7",
+        "0x1d8",
+        "0x1d9",
+        "0x1f4",
+        "0x1f5",
+        "0x1f6",
+        "0x1fc",
+        "0x1fd",
+        "0x1fe",
+        "0x1ff"
+      ],
+      "residual": [
+        {
+          "id": "RES-GAP-OPS-0100-01FF",
+          "kind": "unhandled",
+          "what": "本段 107 个有处理函数的 opcode 尚未成篇（`ops` 列出全部；0x1a2 / 0x1a3 / 0x1a9 / 0x1aa 已由「配置」的「脚本访问」成篇，不在本段清单里）",
+          "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
+        }
+      ]
+    },
+    {
+      "id": "GAP-OPS-0200-02FF",
+      "chapter": "ops-unwritten",
+      "title": "opcode 0x0200–0x02FF 段的未成篇项",
+      "note": "本段 147 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "ops": [
+        "0x200",
+        "0x201",
+        "0x204",
+        "0x205",
+        "0x206",
+        "0x207",
+        "0x208",
+        "0x209",
+        "0x20a",
+        "0x20b",
+        "0x20c",
+        "0x20d",
+        "0x20e",
+        "0x210",
+        "0x211",
+        "0x214",
+        "0x215",
+        "0x216",
+        "0x217",
+        "0x218",
+        "0x219",
+        "0x21a",
+        "0x21d",
+        "0x21e",
+        "0x21f",
+        "0x220",
+        "0x221",
+        "0x222",
+        "0x223",
+        "0x224",
+        "0x225",
+        "0x226",
+        "0x227",
+        "0x228",
+        "0x229",
+        "0x22a",
+        "0x22b",
+        "0x22c",
+        "0x22d",
+        "0x22e",
+        "0x22f",
+        "0x230",
+        "0x231",
+        "0x232",
+        "0x233",
+        "0x234",
+        "0x235",
+        "0x236",
+        "0x237",
+        "0x238",
+        "0x239",
+        "0x23a",
+        "0x23b",
+        "0x23c",
+        "0x23d",
+        "0x23e",
+        "0x23f",
+        "0x240",
+        "0x241",
+        "0x242",
+        "0x243",
+        "0x244",
+        "0x245",
+        "0x246",
+        "0x247",
+        "0x249",
+        "0x24a",
+        "0x24b",
+        "0x24c",
+        "0x24d",
+        "0x24e",
+        "0x24f",
+        "0x250",
+        "0x251",
+        "0x253",
+        "0x254",
+        "0x255",
+        "0x256",
+        "0x257",
+        "0x258",
+        "0x259",
+        "0x25a",
+        "0x25b",
+        "0x25c",
+        "0x25e",
+        "0x25f",
+        "0x2bc",
+        "0x2be",
+        "0x2bf",
+        "0x2c0",
+        "0x2c1",
+        "0x2c2",
+        "0x2c3",
+        "0x2c4",
+        "0x2c5",
+        "0x2c6",
+        "0x2c7",
+        "0x2c8",
+        "0x2c9",
+        "0x2ca",
+        "0x2cb",
+        "0x2cc",
+        "0x2cd",
+        "0x2ce",
+        "0x2cf",
+        "0x2d0",
+        "0x2d1",
+        "0x2d2",
+        "0x2d3",
+        "0x2d4",
+        "0x2d6",
+        "0x2d7",
+        "0x2d9",
+        "0x2da",
+        "0x2dc",
+        "0x2dd",
+        "0x2de",
+        "0x2df",
+        "0x2e0",
+        "0x2e1",
+        "0x2e2",
+        "0x2e3",
+        "0x2e4",
+        "0x2e5",
+        "0x2e6",
+        "0x2e7",
+        "0x2e8",
+        "0x2e9",
+        "0x2ea",
+        "0x2eb",
+        "0x2ec",
+        "0x2ed",
+        "0x2ee",
+        "0x2ef",
+        "0x2f0",
+        "0x2f1",
+        "0x2f2",
+        "0x2f3",
+        "0x2f4",
+        "0x2f5",
+        "0x2f7",
+        "0x2f9",
+        "0x2fa",
+        "0x2fb",
+        "0x2fc",
+        "0x2fd",
+        "0x2ff"
+      ],
+      "residual": [
+        {
+          "id": "RES-GAP-OPS-0200-02FF",
+          "kind": "unhandled",
+          "what": "本段 147 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
+        }
+      ]
+    },
+    {
+      "id": "GAP-OPS-0300-03FF",
+      "chapter": "ops-unwritten",
+      "title": "opcode 0x0300–0x03FF 段的未成篇项",
+      "note": "本段 54 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "ops": [
+        "0x300",
+        "0x301",
+        "0x302",
+        "0x304",
+        "0x305",
+        "0x306",
+        "0x307",
+        "0x309",
+        "0x321",
+        "0x325",
+        "0x326",
+        "0x327",
+        "0x328",
+        "0x329",
+        "0x32a",
+        "0x32b",
+        "0x32c",
+        "0x32d",
+        "0x32e",
+        "0x330",
+        "0x331",
+        "0x332",
+        "0x333",
+        "0x334",
+        "0x335",
+        "0x336",
+        "0x337",
+        "0x338",
+        "0x339",
+        "0x33a",
+        "0x33b",
+        "0x33c",
+        "0x33d",
+        "0x33e",
+        "0x33f",
+        "0x340",
+        "0x341",
+        "0x342",
+        "0x343",
+        "0x344",
+        "0x345",
+        "0x346",
+        "0x347",
+        "0x348",
+        "0x349",
+        "0x34a",
+        "0x34b",
+        "0x34c",
+        "0x34d",
+        "0x34e",
+        "0x34f",
+        "0x350",
+        "0x351",
+        "0x352"
+      ],
+      "residual": [
+        {
+          "id": "RES-GAP-OPS-0300-03FF",
+          "kind": "unhandled",
+          "what": "本段 54 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
+        }
+      ]
+    },
+    {
+      "id": "GAP-CONTAINERS-HANDLE-BRANCHES",
+      "chapter": "containers",
+      "title": "容器句柄的四个类型标签分支：0x8003 / 0x8005 / 0x8009 / 0x800B",
+      "note": "它们在操作数原语的 switch 之前由独立的比较分支处理（懒分配 / 登记），句柄分支不是跳转表 case；本轮的候选域只覆盖跳转表里的类型 ⇒ 这 4 个分支不在试点块里。★ 懒分配 / 登记 / 元素读写已在「数据池」的「容器句柄：类型标签 0x8003 / 0x8009」与「字符串容器句柄：类型标签 0x8005 / 0x800B」成篇；本 gap 只覆盖仍未成篇的三件事：元素类型、容器对象的生命周期、失败路径。",
+      "residual": [
+        {
+          "id": "RES-GAP-CONTAINERS-HANDLE-BRANCHES",
+          "kind": "unhandled",
+          "what": "容器句柄的 4 个类型标签分支（0x8003 / 0x8005 / 0x8009 / 0x800B）还有三件事没有成篇合同：元素类型、容器对象的生命周期、失败路径（懒分配 / 登记 / 元素读写已由「数据池」两条规则成篇）",
+          "next": "先取证「首次访问时分配并登记到哪个槽」，再按容器种类（整型 / 字符串）分条写合同（元素类型、生命周期、失败路径）"
+        }
+      ]
+    }
+  ]
 }

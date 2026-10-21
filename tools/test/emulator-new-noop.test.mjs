@@ -2,7 +2,7 @@
 /**
  * tools/test/emulator-new-noop.test.mjs —— 空操作（0x1a7 / 0x1a8）的守卫
  *
- * 覆盖 `data/spec/chapters/60-ops.md` 的「空操作」：两条都**不读操作数**、不写任何引擎状态，
+ * 覆盖 `data/spec/chapters/60-ops-wait.md` 的「空操作」：两条都**不读操作数**、不写任何引擎状态，
  * 只让分派器按 `2·argc+1` 推进。
  *
  * ★ 判据为什么是这些：
