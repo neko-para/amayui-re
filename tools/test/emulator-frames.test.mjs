@@ -68,12 +68,19 @@ function machineStub() {
       this.cur = slot;
       return f;
     },
-    popFrame() {
+    returnToCaller() {
+      // ★ 与 `Machine.returnToCaller` **同形**：父帧号 / 条件释放 / 向下跳过空槽
+      //   （⛔ 不是 `cur -= 1`：换帧切出来的返回可以跨槽）
       const f = this.slots[this.cur];
-      if (!f) throw new Error('没有活动帧：popFrame 没有可弹出的帧');
-      this.slots[this.cur] = null;
-      this.cur -= 1;
-      return f;
+      if (!f) throw new Error('没有活动帧：returnToCaller 没有可返回的帧');
+      const parent = f.caller;
+      if (parent < 0) throw new Error('returnToCaller：当前帧没有调用者');
+      if (parent + 1 === this.cur) this.slots[this.cur] = null;
+      let next = parent;
+      while (next >= 0 && !this.slots[next]) next -= 1;
+      if (next < 0) throw new Error('returnToCaller：从父帧号往下全是空槽');
+      this.cur = next;
+      return this.slots[next];
     },
   };
   return m;
@@ -181,15 +188,15 @@ test('★ `call` / `ret` 是**同帧**，`call-script` / `exit` 才是**跨帧**
   assert.equal(f.caller, -1, '顶层帧的 caller 是 −1（`exit` 据此判定程序退出）');
   assert.throws(() => HANDLERS[0x02](ctxOf(m, [], 0x02)), /顶层脚本 exit/, '顶层 exit = 程序退出信号，不是 no-op');
 
-  // ★★ `exit`（非顶层）走 `Machine.popFrame()`：弹掉的是**槽 `cur`**、`cur` 减一，
-  //    ⛔ 不许再有人裸改 `slots`（那会让 `popFrame` 变成零调用点的死方法 —— 本仓上一版就是这样）。
+  // ★★ `exit`（非顶层）走 `Machine.returnToCaller()`：父帧号 / **条件释放** / 向下跳过空槽，
+  //    ⛔ 不许再有人裸改 `slots`，也⛔ 不许写成 `cur -= 1`（换帧切出来的返回可以跨槽）。
   const m2 = machineStub();
   const child = m2.pushFrame('CHILD.BIN', 0);
   assert.equal(m2.cur, 1, 'pushFrame 落在**下一个槽**（`slots[++cur]`）');
   assert.equal(child.cur, 1, '记录知道自己是第几号槽');
   HANDLERS[0x02](ctxOf(m2, [], 0x02));
-  assert.equal(m2.cur, 0, '★ 非顶层 exit 必须把 cur 退回去');
-  assert.equal(m2.slots[1], null, '★ 退掉的那一槽必须被显式清空（不是留下一条过期记录）');
+  assert.equal(m2.cur, 0, '★ 非顶层 exit 必须把 cur 退回调用者');
+  assert.equal(m2.slots[1], null, '★ 父帧号 + 1 == 当前帧号 ⇒ 那一槽被释放（不是留下一条过期记录）');
   assert.equal(m2.frame.scriptName, 'STUB.BIN', '活动帧回到调用者');
 });
 
@@ -293,4 +300,81 @@ test('★★ 帧快照带 `cur` 与**整条 slots（含空槽）**，且 JSON �
   const text = JSON.stringify(snap);
   assert.equal(JSON.stringify(JSON.parse(text)), text, '★ JSON 往返必须逐字节相同');
   assert.deepEqual(JSON.parse(text).slots, snap.slots, '往返后逐槽相同');
+});
+
+// ─────────────────────────────────────────────── ★★ 换帧（`0x8 call-frame`；2026-10）
+//
+// 逐字（锚 = EA，`sub_41C900`）：`0x41C916` 调用者长度槽写 3 · `0x41C92B` 存旧 cur ·
+// `0x41C940` `cur = op1` · `0x41C946` 判目标帧代码区起点（为 0 ⇒ `0x41C955` 报
+// 「この階層にはファイルが読み込まれていません．Depth=%d」· `0x41C982` 恢复 cur）·
+// `0x41C996` 目标帧父帧号 ← 旧 cur · `0x41C9B3` 目标帧 ip ← 代码区起点 · `0x41C9C6` 长度槽清 0。
+
+test('★★ `0x8 call-frame`：切到**已装载**帧并从它的开头执行（父帧号 ← 调用者、返回栈不清）', () => {
+  const m = realMachine();
+  const root = m.pushFrame('ROOT.BIN', -1, [1, 0, 0, 0, 0, 0]);
+  const loaded = m.loadFrameAt(5, synthScript('CHILD.BIN', DRAWTIP_COUNTS));
+  assert.equal(loaded.caller, 0, '★ 装载时父帧号 ← 装载时正在执行的帧号（逐字：装载器取 `0x6` 存下的旧 cur）');
+
+  // 这一帧"上次"的残留：换帧必须把 ip 拨回 0、把父帧号改写成调用者，但**不许**清返回栈
+  loaded.ip = 7;
+  loaded.caller = 77;
+  loaded.pushReturn(3);
+  root.ip = 2;
+
+  HANDLERS[0x08](ctxOf(m, [imm(5)], 0x08));
+
+  assert.equal(m.cur, 5, '★ 当前帧号 ← 目标帧号');
+  assert.equal(m.frame, loaded, '活动帧就是槽 5 上那一份');
+  assert.equal(loaded.caller, 0, '★ 父帧号 ← 调用者帧号');
+  assert.equal(loaded.ip, 0, '★ 指令指针 ← 它的代码区起点（从第一条重新执行）');
+  assert.deepEqual(loaded.returnStack, [3], '★★ 换帧**只改三格**：返回栈不清（再切回来仍是上次的样子）');
+  assert.equal(root.ip, 2, '调用者的 ip **不动**（推进由分派器做：`step()` 的 +1 等价于引擎的长度槽 3）');
+  assert.equal(m.slots[0], root, '调用者的记录仍在槽 0');
+});
+
+test('★★ `0x8 call-frame`：目标帧未装载 ⇒ 报错，且**当前帧号恢复成调用者**', () => {
+  const m = realMachine();
+  const root = m.pushFrame('ROOT.BIN', -1, [1, 0, 0, 0, 0, 0]);
+  m.pushFrame('OTHER.BIN', 0);
+  m.returnToCaller();
+  assert.equal(m.cur, 0);
+  assert.equal(m.slots[2] ?? null, null, '槽 2 是空槽（从未装载）');
+
+  assert.throws(
+    () => HANDLERS[0x08](ctxOf(m, [imm(2)], 0x08)),
+    /この階層にはファイルが読み込まれていません．Depth=2/,
+    '★ 报错文本照抄引擎（含目标帧号）',
+  );
+  assert.equal(m.cur, 0, '★ 报错路径：当前帧号恢复成调用者（⛔ 不许留在目标槽）');
+  assert.equal(m.frame, root, '活动帧还是调用者');
+});
+
+test('★★ 切帧之后的返回**跨槽**：`0x2` 回到调用者，且**不释放**不相邻的目标帧', () => {
+  const m = realMachine();
+  const root = m.pushFrame('ROOT.BIN', -1, [1, 0, 0, 0, 0, 0]);
+  const far = m.loadFrameAt(5, synthScript('FAR.BIN', DRAWTIP_COUNTS));
+
+  HANDLERS[0x08](ctxOf(m, [imm(5)], 0x08));
+  assert.equal(m.cur, 5);
+  HANDLERS[0x02](ctxOf(m, [], 0x02));
+
+  assert.equal(m.cur, 0, '★ 回到**父帧号**（不是 `cur - 1` = 4 —— 那槽可能是空的 / 是别的脚本）');
+  assert.equal(m.frame, root, '活动帧是调用者');
+  assert.equal(m.slots[5], far, '★ 父帧号 + 1 != 当前帧号 ⇒ 目标帧**不被释放**，它仍然装载着');
+});
+
+test('★ 返回时父帧是空槽 ⇒ 帧号**递减扫描**跳过空槽（引擎的向下扫描）', () => {
+  const m = realMachine();
+  const root = m.pushFrame('ROOT.BIN', -1, [1, 0, 0, 0, 0, 0]);
+  const far = m.loadFrameAt(5, synthScript('FAR.BIN', DRAWTIP_COUNTS));
+  HANDLERS[0x08](ctxOf(m, [imm(5)], 0x08));
+  // 人为造出"父帧号指向空槽"的形态（引擎里由装载 / 切帧组合产生）：3 号槽没有脚本
+  far.caller = 3;
+  assert.equal(m.slots[3] ?? null, null, '3 号槽是空槽');
+  assert.equal(m.slots[2] ?? null, null, '2 号槽是空槽');
+
+  HANDLERS[0x02](ctxOf(m, [], 0x02));
+
+  assert.equal(m.cur, 0, '★ 3、2、1 都空 ⇒ 落在 0 号槽（根脚本）');
+  assert.equal(m.frame, root);
 });

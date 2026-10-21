@@ -219,10 +219,13 @@ const opExit: Handler = (ctx) => {
     ctx.machine.diag.stopReason = 'exit';
     throw new ExitScript();
   }
-  // ★ 弹帧走 `Machine.popFrame()`（`slots[cur--] = null`）—— ⛔ 不许再在这里裸改 `Machine` 的槽数组：
-  //   那样"帧怎么弹"就有两处口径，而 `popFrame` 会变成**零调用点**的死方法（本仓上一版就是这样）。
-  ctx.machine.popFrame();
-  ctx.machine.effect('system', 'script.exit', 'modeled', { script: f.scriptName, returnedTo: f.caller });
+  // ★ 回到调用者走 `Machine.returnToCaller()`（父帧号 / 条件释放 / 向下跳过空槽）——
+  //   ⛔ 不许再在这里裸改 `Machine` 的槽数组：那样"帧怎么弹"就有两处口径。
+  //   ⛔ 也**不许**写成 `cur -= 1`：`0x8 换帧` 切出来的返回可以**跨槽**（从 0 切到 5 再 exit 要回 0，不是 4）。
+  const back = ctx.machine.returnToCaller();
+  ctx.machine.effect('system', 'script.exit', 'modeled', {
+    script: f.scriptName, caller: f.caller, returnedTo: back.scriptName, cur: ctx.machine.cur,
+  });
 };
 
 /** 顶层 `exit` 的信号（**不是错误**：主循环会把它翻译成停止原因 `exit`） */
@@ -1277,6 +1280,31 @@ const opLoadFrame: Handler = (ctx) => {
   });
 };
 
+/**
+ * `0x8 call-frame`（handler `sub_41C900`，argc 1）：**换帧** —— 切到按操作数指定的**已装载**帧，
+ * 并从那一帧的**开头**执行（结构性 opcode）。
+ *
+ * ★ 逐字（锚 = EA）：调用者长度槽写 3 → `0x41C92B` 存旧 cur → `0x41C940` `cur = 目标槽` →
+ *   `0x41C946` 判目标帧代码区起点（为 0 ⇒ `0x41C955` 报「この階層にはファイルが読み込まれていません．Depth=%d」
+ *   并 `0x41C982` 恢复 cur）→ `0x41C996` 目标帧父帧号 ← 旧 cur → `0x41C9B3` 目标帧 ip ← 代码区起点 →
+ *   `0x41C9C6` 长度槽清 0。
+ * ★ **只改三格**（父帧号 / ip / 长度槽）：目标帧的**返回栈不清、局部池不动** —— 再次切回同一帧时
+ *   返回栈是上次留下的样子（这是引擎语义，⛔ 别"顺手清一下"）。
+ * ★ 调用者的 ip **不动**（仍停在 `0x8` 上）：本层靠 `step()` 的"handler 没改 ip ⇒ +1"把调用者推进到下一条
+ *   —— 等价于引擎"调用者长度槽 3、回到调用者时再加 3 个 dword"。
+ */
+const opCallFrame: Handler = (ctx) => {
+  const slot = num(ctx, 0);
+  const from = ctx.frame;
+  const target = ctx.machine.callFrameAt(slot);
+  ctx.machine.effect('system', 'script.call-frame', 'modeled', {
+    opcode: '0x8', slot,
+    from: from.scriptName, fromCur: from.cur, fromIp: from.ip,
+    to: target.scriptName, parent: target.caller,
+    note: '★ 换帧**只**改目标帧的父帧号 / 指令指针 / 长度槽；返回栈与局部池不动',
+  });
+};
+
 /** 生成"响亮失败"的 handler：错误信息里必须写明**缺哪条取证**，不许只说不支持 */
 const unverifiedValueProducer = (e: (typeof VALUE_PRODUCING_UNVERIFIED)[number]): Handler => (ctx) => {
   throw new Error(
@@ -1298,6 +1326,7 @@ function prologueHandlers(): Record<number, Handler> {
     ...out,
     0x149: opScalar149, 0x21b: opScalar21b, 0x252: opScalar252,
     0x6: opLoadFrame,
+    0x8: opCallFrame,
     0x76: opScalar76, 0x77: opScalar77, 0x1a4: opScalar1a4, 0x2ee: opScalar2ee, 0xfe: opScalarFe, 0x10f: opScalar10f, 0x25b: opSetMessage25b, 0x248: opScalar248, 0x10c: opSetKeyMulti,
     0x110: opUnsupported110, 0x111: opUnsupported111, 0x112: opUnsupported112,
   0x107: scalarArrayHandler(ENGINE_SCALAR_ARRAYS[0]),

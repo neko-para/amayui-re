@@ -385,13 +385,65 @@ export class Machine {
     return f;
   }
 
-  /** 弹掉当前帧（`exit` 的正面支：`slots[cur--] = null`）；没有活动帧 ⇒ 抛（"没有帧"不是"回到顶层"） */
-  popFrame(): ScriptFrame {
+  /**
+   * ★ **`0x2 exit` 的正面支：回到调用者帧**（逐字 `sub_41A820` 一族 + `0x2` 的取证明细）。
+   *
+   * 引擎的三步（⛔ 不是"`slots[cur--] = null`"）：
+   * 1. 当前帧号 ← 记录里的**父帧号**（不是"当前槽 − 1"——`0x8 换帧` 切出来的返回可以**跨槽**）；
+   * 2. **有条件释放**：只有「父帧号 + 1 == 当前帧号」才释放当前槽；否则只切帧号，
+   *    目标帧**仍留在它那个槽上**（`0x8` 切进来的已装载帧就是这样）；
+   * 3. 从父帧号起**向下（帧号递减）跳过空槽**，直到落在一个非空槽上；降到 0 以下仍是空 ⇒ 错误。
+   *
+   * ★ 为什么不是 `cur -= 1`：`0x8` 可以把当前帧切到任意已装载槽（例如从 0 切到 5），
+   *   `cur -= 1` 会回到 4 —— 那一槽可能是空的、也可能装着别的脚本。
+   *
+   * @returns 恢复执行的那一帧（= `slots[cur]`）
+   */
+  returnToCaller(): ScriptFrame {
     const f = this.slots[this.cur];
-    if (!f) throw new Error('没有活动帧：popFrame 没有可弹出的帧');
-    this.slots[this.cur] = null;
-    this.cur -= 1;
-    return f;
+    if (!f) throw new Error('没有活动帧：returnToCaller 没有可返回的帧');
+    const parent = f.caller;
+    if (parent < 0) throw new Error('returnToCaller：当前帧没有调用者（顶层 exit 由调用点处理）');
+    if (parent + 1 === this.cur) this.slots[this.cur] = null;
+    let next = parent;
+    while (next >= 0 && !this.slots[next]) next -= 1;
+    if (next < 0) throw new Error('returnToCaller：从父帧号往下全是空槽（引擎在帧号降到 0 以下时抛）');
+    this.cur = next;
+    return this.slots[next] as ScriptFrame;
+  }
+
+  /**
+   * ★★ **换帧** —— `0x8 call-frame` 的核心：切到**已装载**的某一槽，并从那一帧的**开头**执行。
+   *
+   * 逐字（锚 = EA，`sub_41C900`）：调用者长度槽写 3 → `0x41C92B` 存旧 cur → `0x41C931` 读操作数 →
+   * `0x41C940` `cur = 目标槽` → `0x41C946` 判目标帧的代码区起点（为 0 ⇒ 报错并 `0x41C982` 恢复 cur）→
+   * `0x41C996` 目标帧父帧号 ← 旧 cur → `0x41C9B3` 目标帧指令指针 ← 它的代码区起点 → `0x41C9C6` 长度槽清 0。
+   *
+   * ★ **只改三格**：父帧号 / 指令指针 / 长度槽。目标帧的返回栈、局部池、代码区**都不动**
+   *   （所以同一帧被切进来两次时，返回栈是**累积**的 —— 这是引擎的语义，不是本层的选择）。
+   * ★ 本模型没有"长度槽"：长度槽清 0 = 本帧不自动推进；`step()` 只在 `handler` 没改 `ip` 时 +1，
+   *   而这里把目标帧 `ip` 置 0 ⇒ 下一条就是它的第一条。
+   *
+   * @param slot 目标槽号（必须是**已经装载**的那一槽）
+   */
+  callFrameAt(slot: number): ScriptFrame {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= FRAME_SLOT_COUNT) {
+      throw new Error(`call-frame 的目标帧号 ${slot} 不在 0..${FRAME_SLOT_COUNT - 1} 之内 —— ` +
+        '引擎在 `0x8` 里**不做**范围检查（越界取记录），本层把越界当响亮失败');
+    }
+    const target = this.slots[slot] ?? null;
+    if (!target) {
+      throw new Error(`call-frame：槽 ${slot} 上没有装载脚本 —— 引擎抛「この階層にはファイルが読み込まれていません．Depth=${slot}」`);
+    }
+    target.caller = this.cur;
+    target.ip = 0;
+    this.cur = slot;
+    return target;
+  }
+
+  /** 弹掉当前帧（引擎 `0x2` 的条件释放；`returnToCaller` 的薄包装，留给"只要弹"的调用点） */
+  popFrame(): ScriptFrame {
+    return this.returnToCaller();
   }
 
   /**
@@ -420,7 +472,12 @@ export class Machine {
     if (!Number.isInteger(slot) || slot < 0 || slot >= FRAME_SLOT_COUNT) {
       throw new Error(`load-frame 的槽号 ${slot} 不在 0..${FRAME_SLOT_COUNT - 1} 之内 —— 这不是脚本的问题，是调用点算错了`);
     }
-    const f = new ScriptFrame(script.name, slot, this.instance.env.codecKey, -1, this.space, localCountList(script.header));
+    // ★ **父帧号 ← 装载时正在执行的帧号**（逐字：装载器取的是 `0x6` 刚存下的旧 `cur`
+    //   ⇒ `0x40EE05 mov [esi+edx*8+5D8CCh], eax`，eax = `[esi+5D884h]`）。
+    //   ⚠ 这条**不影响**"装完恢复旧 cur"：装载器只读那个暂存格，不改 `cur`。
+    //   ★ 它之后会被 `0x8 换帧` 改写成"最后切进来的那一帧"，所以"谁装的"只在
+    //     "对已装载帧直接执行返回"的路径上可观察。
+    const f = new ScriptFrame(script.name, slot, this.instance.env.codecKey, this.cur, this.space, localCountList(script.header));
     // ★ 槽是**一整条**数组（空槽是 `null`）：`slots[26]` 有记录时 8..25 显式是空槽，不是"洞"
     //   （洞在 JSON 往返里会变成 `null`，"快照逐字节相同"那条判据就说不清了）
     while (this.slots.length <= slot) this.slots.push(null);

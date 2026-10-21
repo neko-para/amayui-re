@@ -93,11 +93,11 @@ test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，停在启动前
   assert.equal(result.config?.path, path.join(REPO_ROOT, '.tmp', 'boot-config-missing.ini'));
 
   assert.equal(result.mode, 'run');
-  assert.equal(result.steps, 85, '当前启动前段：… / 0x3 call-script → LOADCONFIG.BIN 内执行到 0x192');
+  assert.equal(result.steps, 140, '当前启动前段：SYSTEM4 → INITCONFIG → INITCONFIG0/2/3/4（`0x6c`/`0x2d8`/`0x8c`/`0x5c` 已实现，前沿推进到 `0x61 lookup-array`）');
   assert.equal(result.stop, 'unimplemented');
-  assert.equal(result.gap?.opcode, 0x192, '★ 缺口：子脚本 LOADCONFIG.BIN 偏移 192 的 0x192（argc 2）');
-  assert.equal(result.gap?.index, 85, '已执行 85 条');
-  assert.equal(result.gap?.offset, 192, '子脚本内的偏移');
+  assert.equal(result.gap?.opcode, 0x61, '★ 缺口：子脚本 INITCONFIG4.BIN 偏移 164 的 `0x61 lookup-array`（argc 3，落点是**指针**操作数）');
+  assert.equal(result.gap?.index, 140, '已执行 140 条');
+  assert.equal(result.gap?.offset, 164, '子脚本内的偏移');
 });
 
 test('★ 同一入口按 id 取 LOGO.BIN：50 条指令（id 映射不是巧合）', { skip }, () => {

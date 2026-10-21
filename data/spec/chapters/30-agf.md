@@ -6,6 +6,8 @@ AGF 是 AGE 的图像容器（当前语料全部是 `ACGF` 变体）：一个 24
 
 ### 容器头
 
+<!-- rule: FMT-AGF-HEADER -->
+
 ```text
 [0,4)     "ACGF"
 [4,8)     version（1 / 2）
@@ -19,6 +21,10 @@ AGF 是 AGE 的图像容器（当前语料全部是 `ACGF` 变体）：一个 24
 - 头 24 字节，全部小端。
 - 本版覆盖 version 为 `2` 的文件（语料全部是 version 2）；引擎也接受 version `1`，但语料没有 version 1 样本。version 不在 `{1,2}` 或 `unknown0` 非 0 时，引擎按“不是图像文件”拒绝。
 - 引擎**不按 4 字节签名匹配** `ACGF`：它只把前两字节为 `BM` 的文件分流到 BMP 读取路径，其余文件按上面的 version / `unknown0` 判定后进入 AGF 路径。本版只覆盖 `ACGF` 签名；其它签名在语料里没有样本。
+### meta / body 段
+
+<!-- rule: FMT-AGF-BODY -->
+
 - `meta` 段长度由 `metaPackedSize` 给出；`metaUnpackedSize == metaPackedSize` 时原样存放，否则按 AGF 的 LZSS 解压。
 - `meta` 段之后是 12 字节 body 头：
 
@@ -33,6 +39,8 @@ AGF 是 AGE 的图像容器（当前语料全部是 `ACGF` 变体）：一个 24
 
 ### AGF 的 LZSS
 
+<!-- rule: FMT-AGF-LZSS -->
+
 AGF 的 meta / body 与 ALF 的目录区、ACIF 的 alpha 用**同一个**解压例程、**同一组参数**（窗口 4096、写位置从 4078 开始、最短 3、最长 18、flag 低位先、位置 12 位）；参数只写在「ALF 归档」的「ALF 的 LZSS」，本节不重复。
 
 ★ 与 ALF **不同**的只是容器：AGF 的 meta 直接解到图像对象里（不校验长度），body 解到按 `bodyUnpackedSize` 分配的缓冲；ALF 的压缩块在 268 字节头之后。⇒ "参数相同"不等于"装载路径可以互借"。
@@ -40,6 +48,8 @@ AGF 的 meta / body 与 ALF 的目录区、ACIF 的 alpha 用**同一个**解压
 本版只规定读取侧：两个长度相等即原样，否则 LZSS。写侧如何选择压缩或原样不在本版。
 
 ### ACIF / alpha（version 2）
+
+<!-- rule: FMT-AGF-ACIF -->
 
 version 2 的文件在 body 数据之后**紧接**（中间没有填充）一段 `ACIF`；缺这段或它的头不合法时读取失败。version 1 的文件不读 alpha。
 
@@ -61,6 +71,8 @@ version 2 的文件在 body 数据之后**紧接**（中间没有填充）一段
 - **引擎不校验 alpha 的字节数**：使用端按"宽 × 高"逐行拷贝 ⇒ alpha 偏短是越界读（未定义行为）。实现必须把它记为诊断，不得静默补 0。
 
 ### 像素排布
+
+<!-- rule: FMT-AGF-PIXELS -->
 
 meta 里的宽、高与 bpp：
 

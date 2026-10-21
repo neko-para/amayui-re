@@ -17,6 +17,7 @@ import path from 'node:path';
 
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { loadManifest } from '../lib/manifest.mjs';
+import { extractHandlers, listingPath } from '../lib/opcodes.mjs';
 
 const TABLE_PATH = path.join(REPO_ROOT, 'data/spec/format/opcode-table.json');
 const u32 = (buf, off) => (off + 4 <= buf.length ? buf.readUInt32LE(off) : null);
@@ -128,4 +129,62 @@ test('★ 语料侧：签名 / 头长 / 表偏移 / opcode 域 / 表区不越界
   }
   // 已知 2 个脚本会走进数据；不把"走进数据"当失败，但要可见
   t.diagnostic(`脚本 ${scripts} · 表尾不匹配 ${table3EndMismatchTop} · 停在未知 opcode ${unknownOpcode} · 越过 body ${overflow}`);
+});
+
+
+/**
+ * 指令表对账（`REQ-01M5ED2AD7SKV077BRVRVGNE3R7`）：
+ * ① `hasHandler` 必须与语料分派表的**赋值行**逐条一致 —— 否则分发物判不出"哪 30 条执行即抛"；
+ * ② 每个 handler 里能**直接读出**的长度槽立即数（`mov dword ptr [esi+ecx*8+5D8F4h], imm`）必须等于 `2×argc+1`。
+ * ★ ②只覆盖"恰好写一条立即数"的 handler（约 446 / 544）；其余 handler 走间接写入或多次写入，
+ *   不在这一条守卫的范围（它们由各自的 opcode 规则覆盖）。
+ */
+test('★ 指令表对账：hasHandler 与语料分派表一致；能直接读出的长度槽 = 2×argc+1', (t) => {
+  const lst = listingPath(REPO_ROOT);
+  if (!lst) {
+    t.skip('反汇编语料不在场（corpus/disasm/files/*.lst）');
+    return;
+  }
+  const text = fs.readFileSync(lst, 'utf8');
+  const { byOpcode, problems } = extractHandlers(text);
+  assert.deepEqual(problems, [], '分派表提取本身有异常（同一 opcode 两条 handler / 偏移对不上）');
+
+  const rows = JSON.parse(fs.readFileSync(TABLE_PATH, 'utf8'));
+  const wrongHas = rows.filter((r) => r.hasHandler !== byOpcode.has(r.opcode));
+  assert.deepEqual(wrongHas.map((r) => r.opcode), [],
+    'hasHandler 与语料分派表不一致（true = 有非缺省处理函数）');
+  assert.equal(rows.filter((r) => r.hasHandler).length, byOpcode.size,
+    '有处理函数的条目数必须等于语料里的赋值行数');
+  assert.equal(rows.filter((r) => !r.hasHandler).length, rows.length - byOpcode.size,
+    '缺省条目数 = 表大小 − 赋值行数');
+
+  // 每个函数区间内"恰好一条"直接写长度槽的立即数
+  const wrote = new Map();
+  let current = null;
+  for (const line of text.split('\n')) {
+    const proc = /^\s*[\w.]+:([0-9A-Fa-f]{8})\s+(\S+)\s+proc near/.exec(line);
+    if (proc) { current = proc[2]; continue; }
+    const m = /mov\s+dword ptr \[esi\+ecx\*8\+5D8F4h\],\s*([0-9A-Fa-fx]+h?)\b/.exec(line);
+    if (!m || !current) continue;
+    const raw = m[1];
+    const value = raw.endsWith('h') ? Number.parseInt(raw.slice(0, -1), 16) : Number.parseInt(raw, 10);
+    if (!wrote.has(current)) wrote.set(current, []);
+    wrote.get(current).push(value);
+  }
+  const direct = [];
+  const mismatched = [];
+  for (const [opcode, handler] of byOpcode) {
+    const values = wrote.get(handler);
+    if (!values || values.length !== 1) continue;
+    const row = rows.find((r) => r.opcode === opcode);
+    if (!row) continue;
+    direct.push(opcode);
+    if (values[0] !== 2 * row.argc + 1) {
+      mismatched.push(`0x${opcode.toString(16)}: argc=${row.argc} 期望 ${2 * row.argc + 1}，handler 写 ${values[0]}`);
+    }
+  }
+  // 防"守卫静默缩小"：直接可读的 handler 必须占多数（实测 446 / 544）
+  assert.ok(direct.length >= 400, `直接可读的长度槽 handler 太少（${direct.length}）—— 提取口径漂了？`);
+  assert.deepEqual(mismatched, [], 'handler 写的长度槽与指令表的 argc 不一致');
+  t.diagnostic(`对账：${rows.length} 条表项 · ${byOpcode.size} 条有 handler · ${rows.length - byOpcode.size} 条缺省 · ${direct.length} 条直接长度槽全一致`);
 });

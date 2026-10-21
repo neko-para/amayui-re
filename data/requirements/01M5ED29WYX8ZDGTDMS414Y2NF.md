@@ -2,25 +2,40 @@
 
 - id: REQ-01M5ED29WYX8ZDGTDMS414Y2NF
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M5D1G31PN9EGANRVAR753BPC
+- verify: tools/test/spec.test.mjs#★ 真源：data/spec/{spec,bindings,audit}.json + chapters/*.md 过全部不变量，且试点未登记 = 0
 - tags: [spec, format]
 
-## 一句话
+## 做了什么
 
-`20-alf` / `30-agf` 目前是"协议描述章"：正文有可执行命题，但**没有 `<!-- rule -->`、没有 bindings / audit 条目**，因此不进入证据计量（`pnpm tools spec chapters` 显示 partial 但零规则）。本轮只在 `data/spec/README.md` §2 显式记录这个决定，不在本轮补规则。
+**先守卫、后条目**（因为 `spec validate` #4 要求每条规则有 `binding.evidence`，而两章原先两者都没有）：
 
-## 要做什么
+1. **新守卫（`@env assets`，读安装目录）**
+   - `tools/test/spec-alf.assets.test.mjs`：5 份真实 `*.AAI`（当前全是 `S4AC`）——头 268 / 四签名 / AC 的 12 字节块与 280 起点 /
+     TOC 记录宽度（归档 256 · 文件 80）与四个 u32 字段 / 归档名存在且 `offset+length` 落在数据体内；
+     外加合成流 LZSS 单测（环内下标 0..4095、重叠匹配、长度 = 低 4 位 + 3）。
+   - `tools/test/spec-agf.assets.test.mjs`：8 份真实 `*.AGF`（version 2）——24 字节头 / 12 字节 body 头 /
+     **v2 的 ACIF 紧接 body** / ACIF 宽高 = meta 宽高 / alpha 字节数 = 宽×高 / 行不填充（`bpp×w/8`）/ 8bpp 的 1024 字节调色板槽。
+   - 共享的 LZSS 解压放在 `tools/test/spec-lzss.mjs`（纯函数）。
+2. **变异条目 3 条**：flag 极性反 / 头长 268→300 / 头长 24→32 ⇒ 对应守卫全部当场红（已逐条实测）。
+3. **条目化**：`20-alf` 4 条（`FMT-ALF-{HEADER,ADDON,LZSS,TOC}`）、`30-agf` 5 条（`FMT-AGF-{HEADER,BODY,LZSS,ACIF,PIXELS}`）；
+   每条 `draft` + `handled` + 机器站点（EA 从 `format/alf-agf-verification.md` 搬）+ `guard:` 证据；
+   章级残差按归属移进规则（S5 / S?IN / file_index / 码页 / 多索引 / 窗末 18 字节 / 非 ACGF / v1 / 写侧 / 0 宽高）。
+4. `data/spec/README.md` §2 的"协议描述章暂不挂规则"豁免句已删除。
 
-1. 把两章拆成规则：`FMT-ALF-*`（头 / 加装档 / TOC / LZSS / 取文件路径）、`FMT-AGF-*`（头 / meta / body / ACIF / 像素），每条一个 `###` + `<!-- rule -->`。
-2. 每条在 `bindings.json` 挂 EA（本轮 `format/alf-agf-verification.md` 已有逐条 EA，直接搬）、在 `audit.json` 给 status / disposition / residual。
-3. 状态词统一：正文用 `已核验 / 部分 / 未取证 / 无样本 / 不属于 ALF|AGF`，与 `format/alf-agf-verification.md` 的口径表一一对应（该表已在本轮建立）。
+## 守卫抓到的 spec 歧义（已修）
 
-## 判据
+原稿只写 "flag 字节管 8 个单位，低位先"，**没写极性**。用真实 `*.AAI` 反解：把 1 当匹配会把归档名解成 0；
+⇒ 正文补 "flag 位为 1 ⇒ 字面量、为 0 ⇒ 匹配"，并写明"反过来解会把归档名解成 0"这条反证。
 
-- `pnpm tools spec chapters` 里两章不再是"零规则"；每条规则的证据可解析。
-- 不得把 `data/spec/README.md` §2 的"协议描述不挂规则"留成永久豁免（拆完就删那句）。
+## 判据（已满足）
 
-## 不做
+- `pnpm tools spec chapters`：alf 4 条 / agf 5 条；`pnpm tools spec validate` 13/13
+- `pnpm test` 594/594；`pnpm test:assets` 见本轮记录（新守卫绿；仍只剩 2 条已知 mac 路径项）
+- `node tools/mutate-check.mjs --match "flag 极性" | "头长 300" | "头长 32"`：各 1/1 变红
 
-- 不重写正文内容（本轮已按 `.lst` 修过一轮）；只做"条目化 + 挂证据"。
+## 遗留（不在本单）
+
+- 写侧（压得小才压 / 相等即原样）与多份索引叠加仍不规定（规则残差里各有一条）。
+- `S5` / `S?IN` / 非 ACGF 签名 / version 1 仍无样本。

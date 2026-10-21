@@ -4,8 +4,8 @@
  * ★ 本文件不碰文件系统；外部请求只进 `m.effects`（规范不规定外部效果）。
  */
 import type { DrawItem, ListRecord, Machine, Mesh, MovieObject, Operand, VoiceGroup } from './machine.ts';
-import { MOVIE_BIT, WAIT_BIT } from './machine.ts';
-import { readAddress, readFloat, readInt, readIntAt, readText, writeFloat, writeInt, writeText } from './values.ts';
+import { FRAME_SLOT_COUNT, MOVIE_BIT, WAIT_BIT } from './machine.ts';
+import { encodeInt, readAddress, readFloat, readInt, readIntAt, readText, writeBitsAt, writeFloat, writeInt, writeText } from './values.ts';
 
 export type { Machine, Operand };
 
@@ -157,8 +157,7 @@ function drawItemOf(m: Machine, id: number): DrawItem {
 
 function defaultMesh(): Mesh {
   return {
-    flags: 0, count: 0, op10: 0, weights: [], colors: [],
-    scale: [0, 0, 0], uv: [0, 0],
+    flags: 0, count: 0, op10: 0, copies: [[], []], colors: [], vbo: [],
     start: 0, delay: 0, duration: 0, colorFrom: -1, colorTo: -1, unknown: new Map(),
   };
 }
@@ -250,29 +249,33 @@ function scene320(m: Machine, ops: Operand[]): void {
   }
   const a5 = readAddress(m, ops, 5);
   const a6 = readAddress(m, ops, 6);
-  const f7 = readFloat(m, ops, 7);
-  const f8 = readFloat(m, ops, 8);
-  const weights: number[] = [];
+  const a7 = readAddress(m, ops, 7);
+  const a8 = readAddress(m, ops, 8);
+  // 第三段：逐元素合成（解码后的低 8 位 << 24 | 解码后的低 24 位）
   const colors: number[] = [];
   for (let i = 0; i < count; i += 1) {
-    weights.push(1);
-    const a = readIntAt(m, a5, i);
-    const b = readIntAt(m, a6, i);
-    colors.push((((a << 24) | (b & 0xffffff)) >>> 0));
+    const hi = readIntAt(m, a5, i);
+    const lo = readIntAt(m, a6, i);
+    colors.push(((((hi & 0xff) << 24) | (lo & 0xffffff)) >>> 0));
   }
   const op10 = readInt(m, ops, 10);
-  const f4 = readFloat(m, ops, 4);
-  const f3 = readFloat(m, ops, 3);
-  const f2 = readFloat(m, ops, 2);
+  const a4 = readAddress(m, ops, 4);
+  const a3 = readAddress(m, ops, 3);
+  const a2 = readAddress(m, ops, 2);
   const id = readInt(m, ops, 1);
+  // 前两段：逐字原样拷贝
+  const copies: [number[], number[]] = [[], []];
+  for (let i = 0; i < count; i += 1) {
+    copies[0].push(readIntAt(m, a2, i));
+    copies[1].push(readIntAt(m, a3, i));
+  }
   const mesh = meshOf(m, id);
   mesh.flags |= 1;
   mesh.count = count;
   mesh.op10 = op10;
-  mesh.weights = weights;
+  mesh.copies = copies;
   mesh.colors = colors;
-  mesh.scale = [f2, f3, f4];
-  mesh.uv = [f7, f8];
+  mesh.vbo = [a4, a7, a8];
   if (mesh.colorFrom !== -1) mesh.colors = colors.map(() => mesh.colorFrom >>> 0);
   m.scene.dirty = 1;
 }
@@ -606,33 +609,55 @@ function jumpA0(m: Machine, ops: Operand[]): void {
 }
 
 /**
- * 0x3 换脚本（CORE-FRAME-CALL-SCRIPT）：操作数是**统一文件 id**；把父脚本挂起（body / ip / 帧 / 长度槽），
- * 装入子脚本并从 dword 0 开始；子帧的局部池**新分配**（不继承父池）。
- * ★ 引擎先写长度槽 3 再查深度（≥39 层报「階層が深すぎます」）；装载失败 ⇒ 整个执行中止（本层响亮失败）。
+ * 0x3 换脚本（CORE-FRAME-CALL-SCRIPT）：操作数是**统一文件 id**；在「当前帧号 + 1」那个槽上建子帧
+ * 并切过去，从子脚本 dword 0 开始；子帧的局部池**新分配**（不继承父池）。
+ * ★ 深度按**槽号**判（`cur + 1 >= 40` 才超限）；装载失败 ⇒ 整个执行中止（本层响亮失败）。
  */
 function callScript3(m: Machine, ops: Operand[]): void {
   const id = readInt(m, ops, 1);
   if (!m.loadScript) throw new Error('call-script-loader-missing');
-  if (m.frames.length >= 39) throw new Error('call-script-too-deep');
   const child = m.loadScript(id);
   if (!child) throw new Error('call-script-load-failed:' + id);
-  m.pushScriptFrame(2 * ops.length + 1);
-  m.body = child;
-  m.ip = 0;
-  m.frame = m.freshFrame();
-  m.operandCount = 0;
+  m.enterScript(child);
 }
 
 /**
- * 0x2 结束当前脚本（CORE-FRAME-EXIT）：帧号 ≥ 0 ⇒ 回父脚本；根帧 ⇒ 整个执行结束。
- * ★ 它**不写 ip**：父帧 ip 仍是调用点，靠父帧自己的长度槽推 12 字节到"下一条"（引擎的算术结果）。
+ * 0x2 结束当前脚本（CORE-FRAME-EXIT）：有父帧 ⇒ 回到**父帧号**那一帧；根帧 ⇒ 整个执行结束。
+ * ★ 它**不写 ip**：父帧 ip 仍停在调用点，靠父帧自己的长度槽推进到"下一条"（引擎的算术结果）。
+ * ★ 释放是**有条件**的（只有「父号 + 1 == 当前号」才清槽）：`0x8 换帧` 切出来的返回可以跨槽。
  */
 function exit2(m: Machine): void {
-  if (m.frames.length === 0) {
-    m.halted = true;
-    return;
+  if (!m.returnToCaller()) m.halted = true;
+}
+
+/**
+ * 0x6 装载帧（CORE-OPS-FRAME-LOAD-FRAME）：操作数 1 = 统一文件 id、操作数 2 = 目标帧号。
+ * 把脚本装进**目标槽**，**当前帧号一动都不动**、也不开始执行它；目标槽原有帧被替换。
+ * ★ 帧深上限按**帧号**判（≥ 40 ⇒ 报错，文本照抄引擎那句日文）。
+ * ★ 装载失败 ⇒ 当前帧号已恢复，整个执行中止（本层响亮失败）。
+ */
+function loadFrame6(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1);
+  const slot = readInt(m, ops, 2);
+  if (!m.loadScript) throw new Error('load-frame-loader-missing');
+  // ★ 引擎的装载前置里有一条"解码密钥可用"：本层的 key 是宿主给的显式参数（`--script` 调试口可以给 0）
+  //   ⇒ 给 0 时记一笔、继续走（⛔ 照抄成抛会让调试口停在"我的占位值不合法"上 —— 那是模型的问题，不是脚本的问题）
+  if (m.key === 0) m.diagnostics.push({ kind: 'codec-key-placeholder:load-frame' });
+  if (slot >= FRAME_SLOT_COUNT) {
+    throw new Error(`load-frame：目标帧深 ${slot} ≥ ${FRAME_SLOT_COUNT} —— 引擎抛「ファイルの階層が深すぎます．最大は%dです．」`);
   }
-  m.restoreScriptFrame();
+  const body = m.loadScript(id);
+  if (!body) throw new Error('load-frame-load-failed:' + id);
+  m.loadFrameAt(slot, body);
+}
+
+/**
+ * 0x8 换帧（CORE-OPS-FRAME-CALL-FRAME）：操作数 = 目标帧号（必须是**已装载**的那一槽）。
+ * 切当前帧过去、从那一帧的开头执行；父帧号 ← 调用者。目标帧未装载 ⇒ 报错（文本照抄引擎）。
+ */
+function callFrame8(m: Machine, ops: Operand[]): void {
+  const slot = readInt(m, ops, 1);
+  m.callFrameAt(slot);
 }
 
 /**
@@ -643,11 +668,14 @@ function exitScript9(m: Machine): void {
   if (!m.loadScript) throw new Error('call-script-loader-missing');
   const root = m.loadScript(0);
   if (!root) throw new Error('call-script-load-failed:0');
-  m.frames.length = 0;
-  m.body = root;
-  m.ip = 0;
-  m.frame = m.freshFrame();
+  m.slots = [{ body: root, ip: 0, frame: m.freshFrame(), parent: -1, length: 0 }];
+  m.cur = 0;
   m.operandCount = 0;
+  // 复位：状态选择字归 0；三个全局池清回初值（整型池 decode 后为 0、浮点池 0、字符串池空）
+  m.flags = 0;
+  m.globalInt.clear();
+  m.globalFloat.clear();
+  m.globalString.clear();
 }
 /**
  * 0x55 整数搬运（CORE-OPS-NUMERIC-MOV-INT）：把第 2 个操作数按整型读出，按整型写进第 1 个。
@@ -822,6 +850,69 @@ function saveString1a9(m: Machine, ops: Operand[]): void {
   requireConfig(m).setString(key, readText(m, ops, 1));
 }
 
+/**
+ * 0x192 set-string（CORE-OPS-STRING-SET）：把**第 2 个操作数**的文本写进**第 1 个操作数**的串池格。
+ * ★ 源侧既可以是串池（type 5）、也可以是**内联字符串**（type 2，偏移见 `values.ts` 的 `inlineStringAt`）；
+ *   落点按 op1 的 type 分派（本层只建模 type 5 全局串池；其余响亮失败）。
+ * ★ 它是启动链里出现最多的一条（取证见台账 `01M4FECQ…` 的同类记录：`sub_433660`，argc 2）。
+ */
+function setString192(m: Machine, ops: Operand[]): void {
+  const text = readText(m, ops, 2);
+  writeText(m, ops, 1, text);
+  m.effects.push({
+    kind: 'string.set',
+    detail: { opcode: '0x192', text, target: ops[0].raw, targetType: ops[0].type, sourceType: ops[1].type },
+  });
+}
+
+/**
+ * 0x6c fill-zero（数组填充族）：从 op1 的**地址**起，把 op2 个 dword 填成 **`ENC(key, 0)`**。
+ * ★ 助记名骗人：填的**不是字面 0** —— 整型族里存的是编码后的位模式，DEC 之后才是 0；
+ *   浮点族里存的是那个 dword 的**裸 32 位**（读的时候按 float32 解释）。
+ * ★ op2 ≤ 0 ⇒ 一格都不写（引擎的循环不进入）。
+ */
+function fillZero6c(m: Machine, ops: Operand[]): void {
+  const addr = readAddress(m, ops, 1);
+  const count = readInt(m, ops, 2);
+  const bits = encodeInt(0, m.key) >>> 0;
+  if (count > 0) for (let i = 0; i < count; i += 1) writeBitsAt(m, addr, i, bits);
+  m.effects.push({
+    kind: 'array.fill',
+    detail: { opcode: '0x6c', pool: addr.pool, from: addr.index, count: Math.max(0, count), bits: `0x${bits.toString(16)}` },
+  });
+}
+
+/**
+ * 0x2d8 set-array-to（数组填充族）：从 op1 的**地址**起，把 op3 个 dword 填成 **`ENC(key, op2)`**。
+ * ★ 与 `0x6c` 的差别只有"填什么值"：`0x6c` 的值恒为 `ENC(key,0)`。
+ */
+function setArrayTo2d8(m: Machine, ops: Operand[]): void {
+  const addr = readAddress(m, ops, 1);
+  const value = readInt(m, ops, 2);
+  const count = readInt(m, ops, 3);
+  const bits = encodeInt(value, m.key) >>> 0;
+  if (count > 0) for (let i = 0; i < count; i += 1) writeBitsAt(m, addr, i, bits);
+  m.effects.push({
+    kind: 'array.fill',
+    detail: { opcode: '0x2d8', pool: addr.pool, from: addr.index, count: Math.max(0, count), value, bits: `0x${bits.toString(16)}` },
+  });
+}
+
+/** 0x8c jmp：op1 是**位置**（代码字下标）；−1（哨兵）⇒ 落下；否则 ip ← 4×位置、长度槽清 0。 */
+function jump8c(m: Machine, ops: Operand[]): void {
+  const target = readInt(m, ops, 1);
+  if (target === -1) return; // 哨兵 = "没有目标" ⇒ 本条原地落下（不写长度槽）
+  m.ip = 4 * target;
+  m.operandCount = 0;
+}
+
+/** 0x5c lt：op1 ← (int32(op2) < int32(op3)) ? 1 : 0（有符号比较，结果按整型写回）。 */
+function lt5c(m: Machine, ops: Operand[]): void {
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  writeInt(m, ops, 1, a < b ? 1 : 0);
+}
+
 function operandAt(ops: Operand[], k: number): Operand {
   const op = ops[k - 1];
   if (!op) throw new Error(`operand-out-of-range:${k}/${ops.length}`);
@@ -851,6 +942,8 @@ export const HANDLERS = new Map<number, (m: Machine, ops: Operand[]) => void>([
   [0x32f, container32f],
   [0x3, callScript3],
   [0x2, exit2],
+  [0x6, loadFrame6],
+  [0x8, callFrame8],
   [0x9, exitScript9],
   [0xa0, jumpA0],
   [0x55, move55],
@@ -877,6 +970,11 @@ export const HANDLERS = new Map<number, (m: Machine, ops: Operand[]) => void>([
   [0x1a2, saveInt1a2],
   [0x1a3, loadInt1a3],
   [0x1a9, saveString1a9],
+  [0x192, setString192],
+  [0x6c, fillZero6c],
+  [0x8c, jump8c],
+  [0x5c, lt5c],
+  [0x2d8, setArrayTo2d8],
   [0x1aa, loadString1aa],
 ]);
 

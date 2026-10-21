@@ -107,11 +107,11 @@ test('★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：�
   assert.deepEqual([item.left, item.top, item.right, item.bottom], [0, 0, 1280, 720]);
   assert.equal(m.scene.dirty, 1);
 
-  // ⑥ 外部请求与"未解释之处"都要可见：6 次未初始化浮点读（17/21/25 各两次）
+  // ⑥ 外部请求可见；`0x320` 的 4 / 7 / 8 是**按地址读**（不是浮点读）⇒ 不再产生未初始化浮点诊断
   assert.deepEqual(m.effects.map((e) => e.kind),
     ['texture.load.request', 'texture.load.request', 'input.poll', 'texture.create.request']);
-  assert.deepEqual(m.diagnostics.map((d) => d.index), [21, 25, 17, 21, 25, 17],
-    '★ 浮点池的未写槽按"显式 zero 策略"读成 0，且每一次都留了诊断');
+  assert.deepEqual(m.diagnostics.filter((d) => d.kind === 'uninitialized-float'), [],
+    '★ 0x320 的 4/7/8 按地址读（裸 32 位），不再走读浮点原语');
 
   // ⑦ 停在 play-movie 前面（不是猜着往下跑、也不是 no-op）
   assert.equal(r.stop.kind, 'stop-opcode', `停因必须是命中停止条件：${JSON.stringify(r.stop)}`);

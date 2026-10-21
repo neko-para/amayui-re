@@ -125,7 +125,133 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-frames.test.mjs',
     what: '`loadFrameAt` 顺手改 `cur`（= 把"装完恢复旧 cur"实现成"切过去就不回来了"）⇒ 槽语义与"cur 不变"那条判据必须当场红',
   },
-  // ── 越界口径：`0x107` 是"静默跳过"、`0x30a` 是"抛"（★ 统一它们会把"引擎会崩"与"无事发生"变成同一种表现）──
+  // ── `0x8 call-frame` 的**三格写入**（★★ 换帧是本轮新成篇的规则，判据必须会红）──
+  //   ① 父帧号不写 ⇒ 目标帧结束后回到"当初装载它的那一帧"而不是调用者。
+  //      表现：单层看起来正常，只有"装载者 ≠ 切帧者"时才错位 —— 所以判据里把两处分开了。
+  {
+    file: 'apps/emulator/src/vm/machine.ts',
+    from: '    target.caller = this.cur;',
+    to: '    void 0;',
+    guard: 'tools/test/emulator-frames.test.mjs',
+    what: '`callFrameAt` 不写父帧号（换帧把"最后切进来的那一帧"丢了）⇒ 目标帧结束后回到错的帧，而单层用例看起来一切正常',
+  },
+  //   ② 条件释放改成无条件 ⇒ `0x8` 切出来的（不相邻）目标帧被误释放，再切回去会"没有装载脚本"。
+  {
+    file: 'apps/emulator/src/vm/machine.ts',
+    from: '    if (parent + 1 === this.cur) this.slots[this.cur] = null;',
+    to: '    this.slots[this.cur] = null;',
+    guard: 'tools/test/emulator-frames.test.mjs',
+    what: '`returnToCaller` 丢掉"父帧号 + 1 == 当前帧号"这个条件 ⇒ 换帧切出来的已装载帧被误释放（跨槽返回必须留住它）',
+  },
+  // ── `apps/emulator-new` 的帧模型：**40 槽 + cur**（★★ 这一批判据的意义就是"栈实现会露馅"）──
+  //   ① 把"回到父帧号 + 向下跳过空槽"退化成 `cur -= 1` ⇒ 跨槽返回落到相邻槽（相邻用例仍然绿）。
+  {
+    file: 'apps/emulator-new/src/machine.ts',
+    from: '    let next = parent;\n    while (next >= 0 && !this.slots[next]) next -= 1;\n    if (next < 0) throw new Error(\'exit：从父帧号往下全是空槽（引擎在帧号降到 0 以下时抛）\');',
+    to: '    const next = this.cur - 1;',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '`0x2` 退化成"弹栈顶"（`cur -= 1`）：相邻调用仍绿，跨槽返回（父号 0、当前号 3）落到 2 ⇒ 栈模型的逃逸当场暴露',
+  },
+  //   ② 条件释放改成无条件 ⇒ `0x8` 切出来的目标帧被误释放。
+  {
+    file: 'apps/emulator-new/src/machine.ts',
+    from: '    if (parent + 1 === this.cur) this.slots[this.cur] = null;',
+    to: '    this.slots[this.cur] = null;',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '`returnToCaller`（emulator-new）丢掉"父帧号 + 1 == 当前帧号"条件 ⇒ 换帧切出来的已装载帧被误释放',
+  },
+  //   ③ 换帧不写父帧号 ⇒ 目标帧结束后回到"当初装载它的那一帧"（装载者 ≠ 切帧者时才错）。
+  {
+    file: 'apps/emulator-new/src/machine.ts',
+    from: '    target.parent = this.cur;',
+    to: '    void 0;',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '`callFrameAt`（emulator-new）不写父帧号 ⇒ "装载者 ≠ 切帧者"时目标帧回到错的那一帧（单层看起来正常）',
+  },
+  //   ④ 换帧不拨回指令指针 ⇒ 目标帧从"上次停的地方"继续（不是从它的开头）。
+  {
+    file: 'apps/emulator-new/src/machine.ts',
+    from: '    target.ip = 0;',
+    to: '    void 0;',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '`callFrameAt`（emulator-new）不把目标帧 ip 拨回 0 ⇒ 换帧从"上次停的地方"继续执行（不是它开头）',
+  },
+  //   ⑤ 装帧顺手改 cur ⇒ "往槽 op2 写记录、装完不动当前帧"当场不成立。
+  {
+    file: 'apps/emulator-new/src/machine.ts',
+    from: '    while (this.slots.length <= slot) this.slots.push(null);\n    this.slots[slot] = rec;',
+    to: '    while (this.slots.length <= slot) this.slots.push(null);\n    this.slots[slot] = rec;\n    this.cur = slot;',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '`loadFrameAt`（emulator-new）顺手改 `cur` ⇒ 装载帧把当前帧也切走了（"cur 不动"那条判据必须红）',
+  },
+  //   ⑥ 深度按"已占用的槽数"判（而不是**帧号**）⇒ 预装到 39 号槽后再换脚本会被放过。
+  {
+    file: 'apps/emulator-new/src/machine.ts',
+    from: '    if (slot >= FRAME_SLOT_COUNT) {\n      throw new Error(`call-script 深度超限',
+    to: '    if (this.slots.filter(Boolean).length >= FRAME_SLOT_COUNT) {\n      throw new Error(`call-script 深度超限',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '`enterScript` 把深度判据换成"已占用槽数 ≥ 40" ⇒ 帧号越界被放过（这正是"帧号是数"那条判据）',
+  },
+  // ── `0x192 set-string` 的源侧（★ type 2 内联字符串：偏移 / 取反任一处错都只写错字节，不抛）──
+  {
+    file: 'apps/emulator-new/src/values.ts',
+    from: '  const off = 4 * raw;',
+    to: '  const off = raw;',
+    guard: 'tools/test/emulator-new-string.test.mjs',
+    what: '内联字符串的偏移漏掉 `4×`（写成 `raw`）⇒ 从指令流中间开始解，解出一串乱码/读到末尾才抛',
+  },
+  {
+    file: 'apps/emulator-new/src/values.ts',
+    from: '    const c = body[p] ^ 0xff;',
+    to: '    const c = body[p];',
+    guard: 'tools/test/emulator-new-string.test.mjs',
+    what: '内联字符串少了 `^0xFF` ⇒ 字体名一类文本整体变成乱码（落点照样写成功，只有内容是错的）',
+  },
+  // ── `0x192` 的注册（★ 没有 handler 会变成"未实现"停点 ⇒ 启动链停在一个误以为的缺口上）──
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  [0x1a9, saveString1a9],\n  [0x192, setString192],',
+    to: '  [0x1a9, saveString1a9],',
+    guard: 'tools/test/emulator-new-string.test.mjs',
+    what: '`0x192` 没注册 ⇒ 内联串写不进串池（启动链把它当成"未实现"停点，而缺口报告看起来合法）',
+  },
+  // ── 数组连写 / 跳转 / 比较（★ `INITCONFIG4` 那一簇：错一处都让后面的循环次数/落点静默错）
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  const bits = encodeInt(0, m.key) >>> 0;',
+    to: '  const bits = 0;',
+    guard: 'tools/test/emulator-new-array-fill.test.mjs',
+    what: '`0x6c fill-zero` 真填字面 0 ⇒ 整型池里存的不是 `ENC(key,0)`，读回来是 0 但位模式已错（后续按位拷贝的路径全偏）',
+  },
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  if (count > 0) for (let i = 0; i < count; i += 1) writeBitsAt(m, addr, i, bits);\n  m.effects.push({\n    kind: \'array.fill\',\n    detail: { opcode: \'0x6c\'',
+    to: '  if (count > 0) for (let i = 0; i <= count; i += 1) writeBitsAt(m, addr, i, bits);\n  m.effects.push({\n    kind: \'array.fill\',\n    detail: { opcode: \'0x6c\'',
+    guard: 'tools/test/emulator-new-array-fill.test.mjs',
+    what: '`0x6c` 的循环写成 `<=` ⇒ 多写一格（把相邻格覆盖掉，而"填了 N 格"看起来没问题）',
+  },
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  const bits = encodeInt(value, m.key) >>> 0;',
+    to: '  const bits = value >>> 0;',
+    guard: 'tools/test/emulator-new-array-fill.test.mjs',
+    what: '`0x2d8 set-array-to` 填 op2 原值（不编码）⇒ 读回来是 `DEC(原值)`，通常是一个巨大的错数',
+  },
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  if (target === -1) return; // 哨兵 = "没有目标" ⇒ 本条原地落下（不写长度槽）',
+    to: '  if (false) return;',
+    guard: 'tools/test/emulator-new-array-fill.test.mjs',
+    what: '`0x8c jmp` 不认 −1 哨兵 ⇒ `ip = 4×(−1) = −4`（下一次解码落在脚本外）',
+  },
+  {
+    file: 'apps/emulator-new/src/handlers.ts',
+    from: '  writeInt(m, ops, 1, a < b ? 1 : 0);',
+    to: '  writeInt(m, ops, 1, b < a ? 1 : 0);',
+    guard: 'tools/test/emulator-new-array-fill.test.mjs',
+    what: '`0x5c lt` 的比较方向写反 ⇒ 循环条件永远相反（跑完/跑飞，都不报错）',
+  },
+  // ── 越界口径：`0x107` 是"静默跳过"、`0x30a` 是"抛" （★ 统一它们会把"引擎会崩"与"无事发生"变成同一种表现）──
   {
     file: 'apps/emulator/src/vm/ops.ts',
     from: "      if (spec.outOfRange === 'skip') {",
@@ -1266,6 +1392,44 @@ const MUTATIONS = [
     to: '  const channel = group; // 变异：丢掉通道偏移',
     guard: 'tools/test/emulator-new-voice.test.mjs',
     what: '★ 丢掉「组号 + 12」的通道偏移 ⇒ 释放请求与"在播"查询都落到另一条通道上（标志算反而不报错）',
+  },
+  // ── emulator-new：窗到期时绘制项是否清"有窗"位（★ 引擎与网格一样清；不清 ⇒ 场景永远"有动画"）──
+  {
+    file: 'apps/emulator-new/src/machine.ts',
+    from: '        item.flags &= ~2;',
+    to: '        // 变异：绘制项收尾不清"有窗"位',
+    guard: 'tools/test/emulator-new-scene.test.mjs',
+    what: '★ 绘制项到期不清位 ⇒ 场景永远"有动画"、等待门永远不打开（执行看起来只是"卡住"，不报错）',
+  },
+  // ── ALF / AGF：协议守卫本身必须真的"咬住"真实语料（改错常量 ⇒ 当场红）──
+  {
+    file: 'tools/test/spec-lzss.mjs',
+    from: '    if (flags & mask) {',
+    to: '    if (!(flags & mask)) { // 变异：flag 极性反了',
+    guard: 'tools/test/spec-alf.assets.test.mjs',
+    what: '★ flag 极性反过来 ⇒ 真实 *.AAI 解出的 TOC 全成 0（归档名、条目数全崩）——这正是本轮由守卫发现的 spec 歧义',
+  },
+  {
+    file: 'tools/test/spec-alf.assets.test.mjs',
+    from: 'const HEADER_BYTES = 268;',
+    to: 'const HEADER_BYTES = 300; // 变异：把 268 当 300',
+    guard: 'tools/test/spec-alf.assets.test.mjs',
+    what: '★ 头长 300 ⇒ AC 的 12 字节块读错位置，真实索引解不出来；证明"268"是承重断言',
+  },
+  {
+    file: 'tools/test/spec-agf.assets.test.mjs',
+    from: 'const metaStart = 24;',
+    to: 'const metaStart = 32; // 变异：头长改成 32',
+    guard: 'tools/test/spec-agf.assets.test.mjs',
+    what: '★ 头长 32 ⇒ meta 起错、body 头与 ACIF 全错位；证明"24 字节头"是承重断言',
+  },
+  // ── 规范指令表：`hasHandler` 与语料分派表的对应（★ 改一格 ⇒ 分发物判错"哪 30 条执行即抛"）──
+  {
+    file: 'data/spec/format/opcode-table.json',
+    from: '{"opcode": 1, "argc": 0, "name": "abort", "aliases": [], "hasHandler": true}',
+    to: '{"opcode": 1, "argc": 0, "name": "abort", "aliases": [], "hasHandler": false}',
+    guard: 'tools/test/spec-isa.assets.test.mjs',
+    what: '★ `hasHandler` 与语料分派表脱节 ⇒ 分发物把"有处理函数"的 opcode 判成"落缺省即抛"（表本身仍然格式合法）',
   },
 ];
 

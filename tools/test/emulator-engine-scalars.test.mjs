@@ -52,12 +52,18 @@ function machineStub() {
       this.cur = slot;
       return f;
     },
-    popFrame() {
+    returnToCaller() {
+      // ★ 与 `Machine.returnToCaller` **同形**：父帧号 / 条件释放 / 向下跳过空槽
       const f = this.slots[this.cur];
-      if (!f) throw new Error('没有活动帧：popFrame 没有可弹出的帧');
-      this.slots[this.cur] = null;
-      this.cur -= 1;
-      return f;
+      if (!f) throw new Error('没有活动帧：returnToCaller 没有可返回的帧');
+      const parent = f.caller;
+      if (parent < 0) throw new Error('returnToCaller：当前帧没有调用者');
+      if (parent + 1 === this.cur) this.slots[this.cur] = null;
+      let next = parent;
+      while (next >= 0 && !this.slots[next]) next -= 1;
+      if (next < 0) throw new Error('returnToCaller：从父帧号往下全是空槽');
+      this.cur = next;
+      return this.slots[next];
     },
   };
 }

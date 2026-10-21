@@ -336,84 +336,18 @@
           "kind": "unknown",
           "what": "返回栈满 / 栈空时的引擎行为（栈顶指针越界）没有观察",
           "next": "构造超过容量的嵌套调用脚本，观察引擎是抛、是覆盖、还是越界写"
-        },
-        {
-          "id": "RES-FRAME-LOAD-FRAME",
-          "kind": "unhandled",
-          "what": "0x6（装载帧）：读两个操作数（目标帧槽、脚本 id），把脚本装进按槽号指定的帧，执行仍留在当前帧；目标槽 ≥ 40 或脚本装载失败时的处置未取证。★ 该条目的 argc=2（布局 20 字节）与处理函数写的长度槽 3（推进 12 字节）不一致，未定是异常编码还是表项错",
-          "next": "在调试器里单步 0x6：观察长度槽来源、目标槽越界与装载失败分支；据此决定 argc=1 还是 2"
-        },
-        {
-          "id": "RES-FRAME-CALL-FRAME",
-          "kind": "unhandled",
-          "what": "0x8（换帧）：切当前帧到按操作数指定的已装载帧（父帧号 ← 调用者、指令指针 ← 该帧代码区起点、长度槽初值）；目标帧未装载 / 槽号越界的处置未取证",
-          "next": "先造「装载后换帧」的两步脚本，单步观察切帧的三处写入；再补越界分支"
         }
       ]
     },
     {
       "id": "alf",
       "status": "partial",
-      "residual": [
-        {
-          "what": "S5 / UTF-16LE 索引没有语料样本",
-          "next": "找 S5 索引或引擎 S5 分支；没有样本就保持待核验"
-        },
-        {
-          "id": "RES-ALF-WINDOW18",
-          "kind": "unknown",
-          "what": "LZSS 窗口末尾 18 字节（4078..4095）在对象构造时未初始化；合法流若在写满该段前引用它，输出依赖分配残留",
-          "next": "对语料里的压缩流统计「写位置环回前是否出现位置 ≥ 4078 的匹配」；并确认分配器是否恰好清零"
-        },
-        {
-          "id": "RES-ALF-SIN-DEST",
-          "kind": "unknown",
-          "what": "`S?IN` / `S?IC` 初始化文件加载器（300 字节头、四个签名）不是 ALF，本版没有归宿；正文只写「另立协议」",
-          "next": "在 CORE-FS / CORE-BOOT 成篇时写它的头部与四签名，或明确本版不做并写影响"
-        },
-        {
-          "id": "RES-ALF-MULTI-INDEX",
-          "kind": "unknown",
-          "what": "多份索引（本体 + 加装档）的叠加顺序、文件搜索路径、`APPEND*.AAI` 的覆盖规则都不在本版",
-          "next": "取证多份 AAI 的装载顺序与同名条目优先规则，再补合同"
-        },
-        {
-          "id": "RES-ALF-CODEPAGE",
-          "kind": "unknown",
-          "what": "ALF 归档里文件名的码页没有取证：正文只规定「字节串」，非 ASCII 文件名按什么码页解释、比较时是否折叠大小写都不在本版",
-          "next": "用一份含 CP932 文件名的合成索引跑打开路径，确认码页与比较方式"
-        }
-      ]
+      "residual": []
     },
     {
       "id": "agf",
       "status": "partial",
-      "residual": [
-        {
-          "id": "RES-AGF-WRITE-SIDE",
-          "kind": "unknown",
-          "what": "写侧的「压得小才压 / 相等即原样」选择不在本版；正文只规定读取侧的两分支",
-          "next": "若要做 AGF 重打包，另立数据生产规范，并逐件取证压缩/原样的选择与相等时的取舍"
-        },
-        {
-          "id": "RES-AGF-V1-SAMPLE",
-          "kind": "unknown",
-          "what": "version 1 的 AGF 没有样本；引擎对 version 1 跳过 ACIF（不读 alpha），但未在真实文件上观察",
-          "next": "找或造一个 version 1 的 AGF，确认它没有 ACIF 时能读、且像素路径与 version 2 相同"
-        },
-        {
-          "id": "RES-AGF-OTHER-SIG",
-          "kind": "unknown",
-          "what": "非 `ACGF` 签名没有样本；引擎不比较 4 字节签名，只排除 `BM` 开头、再用 version / unknown0 判定",
-          "next": "找非 ACGF 的 AGF（或造一份），确认它是否被当作 AGF 接受；在此之前本版只覆盖 ACGF"
-        },
-        {
-          "id": "RES-AGF-ZERO-SIZE",
-          "kind": "unknown",
-          "what": "宽或高为 0 的 AGF 如何被拒 / 处理未取证：正文只写「本版不规定」",
-          "next": "造一份 0 宽或 0 高的 AGF，观察读取分支与返回码"
-        }
-      ]
+      "residual": []
     },
     {
       "id": "pools",
@@ -524,7 +458,7 @@
         {
           "id": "RES-OPS-UNWRITTEN",
           "kind": "unhandled",
-          "what": "除本章 45 个 opcode、以及「引擎级状态」「配置」各条点名的 opcode 之外，指令表里仍有处理函数的 opcode 尚未成篇；本章只断言章首清单内的族",
+          "what": "除本章 48 个 opcode、以及「引擎级状态」「配置」各条点名的 opcode 之外，指令表里仍有处理函数的 opcode 尚未成篇；本章只断言章首清单内的族",
           "next": "按族继续补条目（每个未成篇 opcode 至少给「未规定 + 残差」），不要用沉默代替排除"
         }
       ]
@@ -1615,7 +1549,7 @@
     },
     {
       "id": "CORE-TIMING-WINDOW",
-      "status": "draft",
+      "status": "reviewed",
       "disposition": "handled",
       "covers": [],
       "residual": [
@@ -1624,12 +1558,6 @@
           "kind": "unknown",
           "what": "等待谓词（sub_407E20）除返回「有动画」外还懒盖章 / 到期一条**场景级**窗（场景 +0xB5B8 起点 / +0xB5BC 持续时间），并在标记为 0 时清 +0xB5C0 的 0x10000 位。这条窗由谁排、是否影响放行，未取证",
           "next": "找 +0xB5B8 / +0xB5BC 的写入点（哪条指令排这条场景级窗），再判它属于等待语义还是另一机制"
-        },
-        {
-          "id": "RES-VM-WINDOW-GUARD-STALE",
-          "kind": "unknown",
-          "what": "正文按 .lst 写成「绘制项与网格到期都清有窗位」，但 `tools/test/emulator-new-scene.test.mjs` 的「窗收尾不对称」用例与 `apps/emulator-new/src/machine.ts` 仍按「绘制项不清」实现。守卫现在是反证据，已从本规则 evidence 摘除；实现待对齐",
-          "next": "把模拟器与守卫改成「都清」，再把该用例重新挂回 evidence（那时可升回 reviewed）"
         },
         {
           "id": "RES-VM-SCENE-SWITCHES",
@@ -1650,7 +1578,9 @@
           "next": "找 +0x2D0 bit0 的写入点，确认它是否等价于「该项不参与场景动画」"
         }
       ],
-      "falsifiers": []
+      "falsifiers": [
+        "若绘制项或网格任一方在窗到期后仍保留\"有窗\"位 ⇒ 违反本条"
+      ]
     },
     {
       "id": "CORE-OPS-MOVIE",
@@ -2106,6 +2036,72 @@
       "falsifiers": []
     },
     {
+      "id": "CORE-OPS-FRAME-CALL-FRAME",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FRAME-CALL-FRAME-MIRROR",
+          "kind": "unknown",
+          "what": "切帧还把当前帧号写进一个引擎级镜像格；那个格子的读者没有取证",
+          "next": "在语料里找这一格的读取点（是否为存档 / 调试面板 / 别的模块的快照），再决定它进不进 spec"
+        },
+        {
+          "id": "RES-FRAME-CALL-FRAME-RANGE",
+          "kind": "unknown",
+          "what": "目标帧号 ≥ 40 时引擎不设范围检查（直接按帧号取记录），其后果没有观察",
+          "next": "构造越界帧号的合成脚本观察；在此之前本版只规定 0..39"
+        },
+        {
+          "id": "RES-FRAME-CALL-FRAME-STACK",
+          "kind": "unknown",
+          "what": "切帧不清目标帧的返回栈（已写成合同），但『同一帧被切进来两次、返回栈累积』的后果只有逐字，没有脚本 / 真机观察",
+          "next": "造一个脚本：帧内 call → 切出去 → 再切回来 → ret，观察引擎落点是否用旧返回点"
+        }
+      ],
+      "falsifiers": [
+        "若切帧之后目标帧的返回栈被清空 ⇒ 本条错（正文写明『不清』）",
+        "若目标帧结束后回到的是装载它的那一帧而不是调用者 ⇒ 本条错"
+      ]
+    },
+    {
+      "id": "CORE-OPS-FRAME-LOAD-FRAME",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FRAME-LOAD-AUX-ARRAYS",
+          "kind": "unknown",
+          "what": "装载时被清成 −1 的两条按帧辅助数组（每条 40 格）的领域角色没有观察",
+          "next": "找这两条数组的读者（按帧号索引的任何写入/读取点），确定它们是位置表还是别的东西；找不到就保持未定"
+        },
+        {
+          "id": "RES-FRAME-LOAD-CALLBACK",
+          "kind": "unknown",
+          "what": "装载前置里那条宿主回调是什么、什么时候返回非 0，没有取证（正文只写成『宿主回调没有请求中止』）",
+          "next": "找这个函数指针的写入点，看它被谁注册（调试器 / 演示模式 / 中止标志），再用一次注入观察返回值非 0 的效果"
+        },
+        {
+          "id": "RES-FRAME-LOAD-NEGATIVE",
+          "kind": "unknown",
+          "what": "负帧号没有判据：深度检查是有符号比较，负值会通过并直接拿去索引帧记录",
+          "next": "构造一个 target < 0 的合成脚本，看引擎是越界写、还是后面才炸；在此之前本版只规定 0..39"
+        },
+        {
+          "id": "RES-FRAME-LOAD-ERROR-CONTROL",
+          "kind": "unknown",
+          "what": "深度报错之后当前帧号停在目标槽（那条路径不恢复），谁接住这个异常、引擎怎样继续没有取证",
+          "next": "在主循环的异常处理点取证：显示消息之后是退出、还是继续用那个坏掉的当前帧号"
+        }
+      ],
+      "falsifiers": [
+        "若某份脚本用 0x6 装完之后，正在执行那一帧的指令指针 / 局部池 / 返回栈出现可观察变化 ⇒ 本条错",
+        "若装载一个已占用的槽时引擎报错而不是替换 ⇒ 本条错"
+      ]
+    },
+    {
       "id": "CORE-OPS-NUMERIC-MOV-INT",
       "status": "draft",
       "disposition": "handled",
@@ -2133,6 +2129,186 @@
         }
       ],
       "falsifiers": []
+    },
+    {
+      "id": "FMT-ALF-HEADER",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ALF-SIN-DEST",
+          "kind": "unknown",
+          "what": "`S?IN` / `S?IC` 初始化文件加载器（300 字节头、四个签名）不是 ALF，本版没有归宿；正文只写「另立协议」",
+          "next": "在 CORE-FS / CORE-BOOT 成篇时写它的头部与四签名，或明确本版不做并写影响"
+        },
+        {
+          "id": "RES-ALF-S5",
+          "kind": "unknown",
+          "what": "S5 / UTF-16LE 索引（头 540）只有实现，语料无样本",
+          "next": "找 S5 索引或引擎分支；在那之前本版只覆盖 S4 族"
+        }
+      ],
+      "falsifiers": [
+        "真实 *.AAI 的头不是 268 字节 / 签名不是四选一 ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "FMT-ALF-ADDON",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "AC 索引的 12 字节块或 280 起点与语料不符 ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "FMT-ALF-LZSS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ALF-WINDOW18",
+          "kind": "unknown",
+          "what": "LZSS 窗口末尾 18 字节（4078..4095）在对象构造时未初始化；合法流若在写满该段前引用它，输出依赖分配残留",
+          "next": "对语料里的压缩流统计「写位置环回前是否出现位置 ≥ 4078 的匹配」；并确认分配器是否恰好清零"
+        }
+      ],
+      "falsifiers": [
+        "真实压缩流在\"flag=1 为字面量\"下解不出 TOC ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "FMT-ALF-TOC",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ALF-CODEPAGE",
+          "kind": "unknown",
+          "what": "ALF 归档里文件名的码页没有取证：正文只规定「字节串」，非 ASCII 文件名按什么码页解释、比较时是否折叠大小写都不在本版",
+          "next": "用一份含 CP932 文件名的合成索引跑打开路径，确认码页与比较方式"
+        },
+        {
+          "id": "RES-ALF-MULTI-INDEX",
+          "kind": "unknown",
+          "what": "多份索引（本体 + 加装档）的叠加顺序、文件搜索路径、`APPEND*.AAI` 的覆盖规则都不在本版",
+          "next": "取证多份 AAI 的装载顺序与同名条目优先规则，再补合同"
+        }
+      ],
+      "falsifiers": [
+        "真实 TOC 的记录宽度或四个 u32 字段与语料不符 ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "FMT-AGF-HEADER",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-AGF-OTHER-SIG",
+          "kind": "unknown",
+          "what": "非 `ACGF` 签名没有样本；引擎不比较 4 字节签名，只排除 `BM` 开头、再用 version / unknown0 判定",
+          "next": "找非 ACGF 的 AGF（或造一份），确认它是否被当作 AGF 接受；在此之前本版只覆盖 ACGF"
+        },
+        {
+          "id": "RES-AGF-V1-SAMPLE",
+          "kind": "unknown",
+          "what": "version 1 的 AGF 没有样本；引擎对 version 1 跳过 ACIF（不读 alpha），但未在真实文件上观察",
+          "next": "找或造一个 version 1 的 AGF，确认它没有 ACIF 时能读、且像素路径与 version 2 相同"
+        }
+      ],
+      "falsifiers": [
+        "真实 AGF 的 24 字节头 / version / unknown0 与语料不符 ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "FMT-AGF-BODY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-AGF-WRITE-SIDE",
+          "kind": "unknown",
+          "what": "写侧的「压得小才压 / 相等即原样」选择不在本版；正文只规定读取侧的两分支",
+          "next": "若要做 AGF 重打包，另立数据生产规范，并逐件取证压缩/原样的选择与相等时的取舍"
+        }
+      ],
+      "falsifiers": [
+        "真实 AGF 的 meta 长度或 12 字节 body 头与语料不符 ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "FMT-AGF-LZSS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "meta/body/alpha 三段中任一段不能用同一例程同一参数解出 ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "FMT-AGF-ACIF",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "v2 文件 body 之后不是 ACIF / 宽高不符 ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "FMT-AGF-PIXELS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-AGF-ZERO-SIZE",
+          "kind": "unknown",
+          "what": "宽或高为 0 的 AGF 如何被拒 / 处理未取证：正文只写「本版不规定」",
+          "next": "造一份 0 宽或 0 高的 AGF，观察读取分支与返回码"
+        }
+      ],
+      "falsifiers": [
+        "真实 AGF 的宽高 / bpp / 调色板 / 行宽与语料不符 ⇒ 违反本条"
+      ]
+    },
+    {
+      "id": "CORE-OPS-STRING-SET",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-STRING-SET-LOCAL",
+          "kind": "unknown",
+          "what": "落点类型 11（当前帧的局部字符串池）与两个高位标签（`0x8005` / `0x800B`）的写入行为只有逐字，本层与参考实现都只建模了全局池（type 5）",
+          "next": "先取证局部字符串池的分配点（每帧一份？容量从哪来？），再决定是否把 type 11 写进合同"
+        },
+        {
+          "id": "RES-STRING-SET-PTR",
+          "kind": "unknown",
+          "what": "落点类型 8 / 14 的两条『按指针取记录』路径，那两张表的领域角色没有取证",
+          "next": "找这两张表的写入者（谁往里放指针），确认它们是字符串池的另一种视图还是独立的表"
+        },
+        {
+          "id": "RES-STRING-SET-NUMTEXT",
+          "kind": "unknown",
+          "what": "数值型源 → 文本的**格式**只知是十进制，符号 / 宽度 / 浮点格式没有逐字确认",
+          "next": "用负数、大数、浮点三种源构造一次 set-string，观察落点字符串的字节"
+        }
+      ],
+      "falsifiers": [
+        "若把内联文本按未取反的字节解析也能得到正确的字体名 ⇒ 本条与「数据池」的取反口径至少有一处错",
+        "若类型 5 的落点不是『按记录写字节与长度』（例如只写指针）⇒ 本条错"
+      ]
     }
   ],
   "gaps": []

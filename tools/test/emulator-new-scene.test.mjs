@@ -8,7 +8,7 @@
  * ★ 判据为什么是这些：
  *   - 颜色归一化（透明度 >255 / <0、颜色 <0）写错不会报错，只会颜色不对；
  *   - `0x202` 有"已存在"门、`0x323` **没有**（真实不对称）—— 抹平它就会让"给不存在的条目排窗"变成另一种行为；
- *   - 窗收尾不对称：网格清"有窗"位、绘制项**不清**；
+ *   - 窗收尾对称：绘制项与网格**都清**"有窗"位；
  *   - 等待门是"场景还有动画"，不是"表里还有未到期的窗"；门关着时时钟才前进。
  */
 import { test } from 'node:test';
@@ -51,7 +51,7 @@ function item(over = {}) {
 
 function mesh(over = {}) {
   return {
-    flags: 1, count: 0, op10: 0, weights: [], colors: [], scale: [0, 0, 0], uv: [0, 0],
+    flags: 1, count: 0, op10: 0, copies: [[], []], colors: [], vbo: [],
     start: 0, delay: 0, duration: 0, colorFrom: -1, colorTo: -1, unknown: new Map(), ...over,
   };
 }
@@ -101,15 +101,18 @@ test('★ 0x320：顶点数 ≤ 0 ⇒ 写错误文本、不建网格', () => {
   assert.match(m.scene.errorBuffer, /0/);
 });
 
-test('★ 0x320：4 个顶点 ⇒ 三个缓冲、顶点数、op10、第 2/3/4 与 7/8 个操作数都落状态', () => {
+test('★ 0x320：2..8 全按地址读 ⇒ 前两段原样拷贝、第三段合成、4/7/8 交给顶点缓冲对象', () => {
+  // 操作数形状照真实 LOGO：2/3/4/7/8 是浮点池（type 4），5/6 是整型池（type 3）
   const m = machineFor([[0x320, [
-    [0, 2], [1, f32bits(1)], [1, f32bits(2)], [1, f32bits(3)],
-    [3, 100], [3, 104], [1, f32bits(4)], [1, f32bits(5)],
+    [0, 2], [4, 9], [4, 13], [4, 17],
+    [3, 160], [3, 170], [4, 21], [4, 25],
     [0, 4], [0, 7],
   ]]]);
   for (let i = 0; i < 4; i += 1) {
-    m.globalInt.set(100 + i, encodeInt(0x11 + i, KEY));
-    m.globalInt.set(104 + i, encodeInt(0x223344 + i, KEY));
+    m.globalFloat.set(9 + i, 0x1000 + i);   // 第 1 段：32 位位模式，逐字原样
+    m.globalFloat.set(13 + i, 0x2000 + i);  // 第 2 段
+    m.globalInt.set(160 + i, encodeInt(0x11223311 + i, KEY));
+    m.globalInt.set(170 + i, encodeInt(0x44556622 + i, KEY));
   }
   m.run();
   const me = m.scene.meshes.get(2);
@@ -117,14 +120,20 @@ test('★ 0x320：4 个顶点 ⇒ 三个缓冲、顶点数、op10、第 2/3/4 �
   assert.equal(me.flags & 1, 1, '已存在位');
   assert.equal(me.count, 4);
   assert.equal(me.op10, 7);
-  assert.deepEqual(me.scale, [1, 2, 3]);
-  assert.deepEqual(me.uv, [4, 5]);
-  assert.deepEqual(me.weights, [1, 1, 1, 1]);
+  assert.deepEqual(me.copies, [
+    [0x1000, 0x1001, 0x1002, 0x1003],
+    [0x2000, 0x2001, 0x2002, 0x2003],
+  ]);
   assert.deepEqual(me.colors, [
-    ((0x11 << 24) | 0x223344) >>> 0,
-    ((0x12 << 24) | 0x223345) >>> 0,
-    ((0x13 << 24) | 0x223346) >>> 0,
-    ((0x14 << 24) | 0x223347) >>> 0,
+    ((0x11 << 24) | 0x556622) >>> 0,
+    ((0x12 << 24) | 0x556623) >>> 0,
+    ((0x13 << 24) | 0x556624) >>> 0,
+    ((0x14 << 24) | 0x556625) >>> 0,
+  ]);
+  assert.deepEqual(me.vbo, [
+    { pool: 'globalFloat', index: 17 },
+    { pool: 'globalFloat', index: 21 },
+    { pool: 'globalFloat', index: 25 },
   ]);
   assert.equal(m.scene.dirty, 1);
 });
@@ -148,7 +157,7 @@ test('★ 0x323：没有"已存在"门（给不存在的网格排窗也照排）
   assert.equal(me.colorTo >>> 0, 0xff000000);
 });
 
-test('★ 窗收尾不对称：网格清"有窗"位、绘制项不清', () => {
+test('★ 窗收尾：绘制项与网格都清"有窗"位', () => {
   const m = machineFor([], { tickMs: 16 });
   m.scene.now = 0;
   m.scene.drawItems.set(1, item({ flags: 3, delay: 0, duration: 100, colorFrom: 0xff000000, colorTo: 0xff00ff00 }));
@@ -160,7 +169,7 @@ test('★ 窗收尾不对称：网格清"有窗"位、绘制项不清', () => {
   }
   const it = m.scene.drawItems.get(1);
   const me = m.scene.meshes.get(1);
-  assert.equal(it.flags & 2, 2, '绘制项的"有窗"位**保留**');
+  assert.equal(it.flags & 2, 0, '绘制项的"有窗"位被清');
   assert.equal(me.flags & 2, 0, '网格的"有窗"位被清');
   assert.equal(it.colorFrom >>> 0, 0xff00ff00, '起色 = 终色');
   assert.equal(it.colorTo, -1);

@@ -65,18 +65,24 @@ export interface DrawItem {
   unknown: Map<number, number>;
 }
 
+/** 缓冲地址（0x320 的第 4 / 7 / 8 个操作数；只记录，装配属外部模块） */
+export interface BufferAddress {
+  pool: 'globalInt' | 'localInt' | 'globalFloat' | 'localFloat';
+  index: number;
+}
+
 /** 网格（见 CORE-OPS-SCENE-320/322/323）：三个缓冲在本层只保留可观察的部分 */
 export interface Mesh {
   /** 位 0 = 已存在；位 1 = 有颜色渐变窗 */
   flags: number;
   count: number;
   op10: number;
-  /** 第 1 个缓冲（逐顶点 1.0）与第 3 个缓冲（逐顶点颜色） */
-  weights: number[];
+  /** 前两个逐顶点缓冲：第 2 / 3 个操作数地址处 n 个 32 位字的原样拷贝 */
+  copies: [number[], number[]];
+  /** 第三个逐顶点缓冲（逐顶点颜色） */
   colors: number[];
-  /** 第 2/3/4 与第 7/8 个操作数（浮点） */
-  scale: [number, number, number];
-  uv: [number, number];
+  /** 交给顶点缓冲对象装配的三个数组地址（第 4 / 7 / 8 个操作数；内容属外部模块） */
+  vbo: BufferAddress[];
   start: number;
   delay: number;
   duration: number;
@@ -181,14 +187,25 @@ export interface SceneState {
   windowBusy: number;
 }
 
-/** 挂起的父脚本（call-script 的栈帧）：body / ip / 帧记录 / 该帧自己的长度槽 */
+/**
+ * **一帧的引擎态记录**（帧区里的一格）：body / ip / 局部帧 / 父帧号 / 该帧自己的长度槽。
+ *
+ * ★ 帧区不是栈：引擎是**定长 40 槽、按帧号索引**的数组 + 一个"当前帧号"（`cur`）。
+ *   栈（只动末端）表达不了 `0x6 装载帧`（往任意槽写、`cur` 不动）与 `0x8 换帧`（切到任意已装载槽），
+ *   也表达不了"父帧号 ≠ 当前号 − 1"的返回（`0x2` 要回到**父帧号**，且只在相邻时才释放）。
+ */
 export interface ScriptFrame {
   body: Buffer;
   ip: number;
   frame: Frame;
-  /** 父帧在调用点的长度槽（call-script 恒为 2·argc+1 = 3） */
+  /** 父帧号（引擎记录里的 caller 格）：−1 = 无父帧（根帧） */
+  parent: number;
+  /** 该帧自己的「操作数个数」槽（引擎记录里的那一格）：该帧恢复执行时按它推进 */
   length: number;
 }
+
+/** 帧区容量：引擎是 **40 槽**（上限按**帧号**判，不按"已占用了几个槽"） */
+export const FRAME_SLOT_COUNT = 40;
 
 /** 外部请求留痕：规范不规定外部效果，但参考实现要把"发出过什么请求"记下来 */
 export interface EffectRecord {
@@ -232,7 +249,6 @@ export interface MachineOptions {
 }
 
 export class Machine {
-  body: Buffer;
   readonly table: Map<number, OpcodeRow>;
   readonly key: number;
   readonly handlers: Map<number, Handler> = HANDLERS;
@@ -244,8 +260,14 @@ export class Machine {
   readonly config: ConfigStore | undefined;
   /** 换脚本用的装载器（统一文件 id → body）：缺省 = 不支持 call-script（响亮失败） */
   readonly loadScript: ((id: number) => Buffer | null) | undefined;
-  /** 挂起的父脚本栈（call-script 进入时压、exit 回父时弹） */
-  frames: ScriptFrame[] = [];
+  /**
+   * ★★ **帧区**：定长 40 槽、按**帧号**索引；空槽是显式 `null`（不是"洞"）。
+   * 帧**不是栈**：`0x6` 往任意槽写记录而 `cur` 不动、`0x8` 切到任意已装载槽、
+   * `0x2` 回到**父帧号**（且只在「父号 + 1 == 当前号」时释放那一槽）。
+   */
+  slots: (ScriptFrame | null)[] = [];
+  /** 当前帧号（引擎 `Engine[0x5D880]`）；根帧占 0 号槽 */
+  cur = 0;
 
   /** 引擎级状态选择字：整字为 0 才执行指令（CORE-VM-GATE） */
   flags = 0;
@@ -260,14 +282,10 @@ export class Machine {
   /** 语义未定、但**确实**被写的引擎级标量（键是实现侧标签，不是引擎字段名） */
   scalars = new Map<string, number>();
 
-  ip = 0;
   /** 已执行的指令条数（不是 ip / 4：控制流可以往回跳） */
   steps = 0;
-  /** 「操作数个数」槽：分派器在每条 handler 前写成 2·argc+1，执行完按它推进 */
-  operandCount = 0;
   halted = false;
 
-  frame: Frame = { localInt: new Map(), localFloat: new Map(), retStack: [], position: 0 };
   /** 全局整型池：编码后的位模式 */
   globalInt = new Map<number, number>();
   /** 全局浮点池：裸 32 位位模式 */
@@ -315,14 +333,42 @@ export class Machine {
   voice: { groups: Map<number, VoiceGroup> } = { groups: new Map() };
   /** 发给外部模块的请求（按发生顺序） */
   effects: EffectRecord[] = [];
+
+  // ── 当前帧的访问（⛔ 单一真源：都是槽 `cur` 上那份记录，不另存副本） ─────────────
+
+  /** 当前帧记录（槽 `cur`）；空槽 ⇒ 响亮失败（"没有帧"不是"帧是空的"） */
+  private get rec(): ScriptFrame {
+    const f = this.slots[this.cur];
+    if (!f) throw new Error(`没有活动帧：槽 ${this.cur} 是空的`);
+    return f;
+  }
+
+  /** 当前脚本 body */
+  get body(): Buffer { return this.rec.body; }
+  set body(v: Buffer) { this.rec.body = v; }
+
+  /** 当前指令字节偏移 */
+  get ip(): number { return this.rec.ip; }
+  set ip(v: number) { this.rec.ip = v; }
+
+  /** 当前帧的局部池 / 返回栈 */
+  get frame(): Frame { return this.rec.frame; }
+  set frame(v: Frame) { this.rec.frame = v; }
+
+  /** 「操作数个数」槽（**当前帧**那一格）：分派器在每条 handler 前写 2·argc+1，执行完按它推进 */
+  get operandCount(): number { return this.rec.length; }
+  set operandCount(v: number) { this.rec.length = v; }
+
   constructor(opts: MachineOptions) {
-    this.body = opts.body;
     this.table = opts.table;
     this.key = opts.key;
     this.tickMs = opts.tickMs ?? 16;
     this.uninitializedFloat = opts.uninitializedFloat ?? 'throw';
     this.config = opts.config;
     this.loadScript = opts.loadScript;
+    // 根脚本落在 **0 号槽**（引擎：根帧的父帧号是 −1，当前帧号从 0 起）
+    this.slots = [{ body: opts.body, ip: 0, frame: this.freshFrame(), parent: -1, length: 0 }];
+    this.cur = 0;
   }
 
   /**
@@ -353,14 +399,15 @@ export class Machine {
 
   /**
    * 场景帧步：清"有动画"标志，再逐项推进颜色渐变窗（单位毫秒；起点 0 = 未盖章）。
-   * ★ 收尾不对称：网格清"有窗"位，绘制项**不清**（真实差异，见 CORE-TIMING-WINDOW）。
+   * 到期 ⇒ 延迟 / 持续时间清 0、当前颜色 ← 终色、终色 ← 无颜色，并清"有窗"位；
+   * 绘制项与网格**都如此**（见 CORE-TIMING-WINDOW）。
    */
   stepScene(): void {
     this.scene.animating = 0;
     const now = this.scene.now;
     for (const item of this.scene.drawItems.values()) {
       if ((item.flags & 2) === 0) continue;
-      // 已经收尾过（窗长 0、终色已清）⇒ 不再进入：绘制项收尾**不清**"有窗"位（真实不对称）
+      // 持续时间 ≤ 0（从未排窗，或已到期）⇒ 这一趟不推进
       if (item.duration <= 0) continue;
       if (item.start === 0) item.start = now;
       if (item.duration > 0 && now < item.start + item.delay + item.duration) {
@@ -374,7 +421,7 @@ export class Machine {
         item.duration = 0;
         item.colorFrom = item.colorTo;
         item.colorTo = -1;
-        // 绘制项收尾**不清**位 1（与网格不对称）
+        item.flags &= ~2;
       }
     }
     for (const mesh of this.scene.meshes.values()) {
@@ -402,19 +449,81 @@ export class Machine {
     return { localInt: new Map(), localFloat: new Map(), retStack: [], position: 0 };
   }
 
-  /** 压一层父脚本（call-script 进入前调用） */
-  pushScriptFrame(length: number): void {
-    this.frames.push({ body: this.body, ip: this.ip, frame: this.frame, length });
+  /**
+   * `0x3 换脚本`：在「当前帧号 + 1」那个槽上建子帧并切过去（引擎的"深度 +1"）。
+   * ★ 父帧记录**保持原样**（ip 停在调用点、长度槽已由分派器写成 3），所以子脚本结束时
+   *   回到父帧、由父帧自己的长度槽推进到"下一条"。
+   * ★ 深度按**槽号**判：`cur + 1 >= 40` 才是超限（⛔ 不是按"数组里已有几帧"）。
+   */
+  enterScript(body: Buffer): ScriptFrame {
+    const slot = this.cur + 1;
+    if (slot >= FRAME_SLOT_COUNT) {
+      throw new Error(`call-script 深度超限：目标帧号 ${slot} ≥ ${FRAME_SLOT_COUNT}（引擎抛「階層が深すぎます」）`);
+    }
+    const rec: ScriptFrame = { body, ip: 0, frame: this.freshFrame(), parent: this.cur, length: 0 };
+    this.slots[slot] = rec;
+    this.cur = slot;
+    return rec;
   }
 
-  /** 回父脚本：恢复 body / ip / 帧，并把「操作数个数」槽设成父帧自己的长度（引擎的算术） */
-  restoreScriptFrame(): void {
-    const parent = this.frames.pop();
-    if (!parent) return;
-    this.body = parent.body;
-    this.ip = parent.ip;
-    this.frame = parent.frame;
-    this.operandCount = parent.length;
+  /**
+   * `0x2 结束当前脚本`的正面支：回到**父帧号**那一帧。
+   *
+   * 引擎的三步（⛔ 不是"弹栈顶"）：
+   * 1. 当前帧号 ← 记录里的**父帧号**；
+   * 2. **有条件释放**：只有「父帧号 + 1 == 当前帧号」才把当前槽清空；否则只切号，
+   *    目标帧仍留在它那个槽上（`0x8 换帧` 切进来的已装载帧就是这样）；
+   * 3. 从父帧号起**向下（帧号递减）跳过空槽**，直到落在非空槽上；降到 0 以下 ⇒ 错误。
+   *
+   * @returns `true` = 回到父帧（`operandCount` 已设成父帧自己的长度槽）；
+   *          `false` = 没有父帧（根帧）⇒ 整个执行结束
+   */
+  returnToCaller(): boolean {
+    const f = this.rec;
+    const parent = f.parent;
+    if (parent < 0) return false;
+    if (parent + 1 === this.cur) this.slots[this.cur] = null;
+    let next = parent;
+    while (next >= 0 && !this.slots[next]) next -= 1;
+    if (next < 0) throw new Error('exit：从父帧号往下全是空槽（引擎在帧号降到 0 以下时抛）');
+    this.cur = next;
+    this.operandCount = this.slots[next]!.length;
+    return true;
+  }
+
+  /**
+   * `0x6 装载帧`：把 body 装进**指定槽**，**不动当前帧号**（引擎"临时切 cur、装完恢复"的净效果）。
+   * ★ 记录里的父帧号 ← 装载时正在执行的帧号（引擎逐字取 `0x6` 存下的旧 cur）。
+   */
+  loadFrameAt(slot: number, body: Buffer): ScriptFrame {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= FRAME_SLOT_COUNT) {
+      throw new Error(`load-frame 的槽号 ${slot} 不在 0..${FRAME_SLOT_COUNT - 1} 之内`);
+    }
+    const rec: ScriptFrame = { body, ip: 0, frame: this.freshFrame(), parent: this.cur, length: 0 };
+    while (this.slots.length <= slot) this.slots.push(null);
+    this.slots[slot] = rec;
+    return rec;
+  }
+
+  /**
+   * `0x8 换帧`：切到**已装载**的某一槽，并从那一帧的**开头**执行。
+   * ★ **只改三格**：父帧号 ← 调用者、ip ← 0、长度槽 ← 0；返回栈 / 局部池 / body **都不动**
+   *   （所以同一帧被切进来两次时，返回栈是累积的 —— 引擎语义）。
+   * ★ 调用者的 ip 不动：它仍停在 `0x8` 上，回来时由它自己的长度槽推进。
+   */
+  callFrameAt(slot: number): ScriptFrame {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= FRAME_SLOT_COUNT) {
+      throw new Error(`call-frame 的目标帧号 ${slot} 不在 0..${FRAME_SLOT_COUNT - 1} 之内（引擎不做范围检查）`);
+    }
+    const target = this.slots[slot] ?? null;
+    if (!target) {
+      throw new Error(`call-frame：槽 ${slot} 上没有装载脚本（引擎抛「この階層にはファイルが読み込まれていません．Depth=${slot}」）`);
+    }
+    target.parent = this.cur;
+    target.ip = 0;
+    this.cur = slot;
+    this.operandCount = 0;
+    return target;
   }
 
   /** 读当前指令（不执行）。越界 / 未知 opcode 返回 null 并附停因。 */

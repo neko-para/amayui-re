@@ -116,8 +116,12 @@ test('★ 0x3 / 0x2 多脚本', () => {
   const r = m.run();
   assert.equal(r.steps, 3, '根@0 → 子@0 → 根@12：三条（多推一次会变 4）');
   assert.equal(r.stop.kind, 'truncated', '根@12 那条执行完就该到底（说明返回点确实是 12）');
-  assert.equal(m.frames.length, 0, '子帧已弹回');
-  assert.equal(m.frames.length, 0);
+  assert.equal(m.cur, 0, '回到根帧（0 号槽）');
+  assert.equal(m.slots[1], null, '子帧槽已释放（显式空槽，不是"洞"）');
+  // ★ 槽复用：下一次换脚本仍落在 1 号槽（帧号 = 父号 + 1，与"曾经占过几个槽"无关）
+  m.enterScript(script([[NOP, []]]));
+  assert.equal(m.cur, 1, '★ 复用 1 号槽（不是"新开一个 2 号"）');
+  assert.equal(m.slots[0]?.body, root, '根帧记录不动');
 });
 
 test('★ 0x3 局部池隔离：子脚本写自己的槽 0 = 7，父脚本读同号槽必须读到自己的 1', () => {
@@ -133,21 +137,117 @@ test('★ 0x3 局部池隔离：子脚本写自己的槽 0 = 7，父脚本读同
   const m = new Machine({ body: root, table, key: KEY, loadScript: (id) => (id === 1 ? child : null) });
   m.run();
   assert.equal(decodeInt(m.frame.localInt.get(1), KEY), 1, '父池的槽 0 必须还是 1（写 7 说明池被共享）');
-  assert.equal(m.frames.length, 0);
+  assert.equal(m.cur, 0, '回到根帧');
+  assert.equal(m.slots[1], null, '子帧槽已释放');
 });
 
-test('★ 0x9 全局重置：丢全部帧并以 id 0 重装根脚本（不是返回父帧、不是 halt）', () => {
+test('★ 0x9 全局重置：丢全部帧、清空三个全局池、状态选择字归 0，并以 id 0 重装根脚本', () => {
   const child = script([[0x9, []]]);
   const root = script([[0x3, [[0, 1]]], [0x1a8, []], [0x1a8, []]]);
   const m = new Machine({ body: root, table, key: KEY, loadScript: (id) => (id === 0 ? root : id === 1 ? child : null) });
+  m.globalInt.set(3, 12345);
+  m.globalFloat.set(4, 0x3f800000);
+  m.globalString.set(5, 'x');
   const r = m.run({ maxSteps: 4 });
-  assert.equal(m.frames.length, 0, '0x9 之后不许还挂着帧');
+  assert.equal(m.cur, 0, '0x9 之后当前帧号回 0（根帧）');
+  assert.equal(m.slots.filter(Boolean).length, 1, '0x9 之后只留 0 号槽那一帧（其余全释放）');
   assert.equal(m.ip === 0 || r.stop.kind === 'step-limit', true, '根脚本从头开始（不是 12、不是 halted）');
   assert.equal(m.halted, false);
+  assert.equal(m.globalInt.size, 0, '整型池清回初值（decode 后为 0）');
+  assert.equal(m.globalFloat.size, 0, '浮点池清 0');
+  assert.equal(m.globalString.size, 0, '字符串池清空');
 });
 
-test('★ 0x3 深度上限：40 层时报错（F≥39 就报「階層が深すぎます」）', () => {
+test('★ 0x3 深度上限：按**帧号**判 —— 当前帧号 39 时再换脚本就报错', () => {
   const self = script([[0x3, [[0, 1]]]]);
   const m = new Machine({ body: self, table, key: KEY, loadScript: () => self });
-  assert.throws(() => m.run({ maxSteps: 50 }), /call-script-too-deep/);
+  assert.throws(() => m.run({ maxSteps: 50 }), /深度超限/);
+});
+
+// ─────────────────────────────────────── ★★ 帧 = 40 槽 + `cur`（不是 LIFO 栈；2026-10）
+//
+// 逐字（锚 = EA）：`0x2` 的正面支是"当前帧号 ← **父帧号**" + **有条件释放**（父号 + 1 == 当前号）
+// + 从父号起**向下跳过空槽**；`0x6` 往**任意槽**写记录而 `cur` 不动；`0x8` 切到**任意已装载槽**。
+// 栈（只动末端、`cur -= 1`）在这些情形下**看起来也正常**，所以下面每条都构造"父帧号 ≠ 栈顶下一格"。
+
+test('★★ 跨槽返回：父帧号 ≠ 当前帧号 − 1 ⇒ `0x2` 回到**父帧号**，且**不释放**目标帧', () => {
+  const childBody = script([[0x2, []]]);
+  const rootBody = script([[NOP, []]]);
+  const m = new Machine({ body: rootBody, table, key: KEY });
+  const rec = m.loadFrameAt(3, childBody);
+  m.callFrameAt(3); // 父帧号 ← 0（调用者），当前帧号 ← 3
+  assert.equal(rec.parent, 0, '换帧把父帧号写成调用者');
+  assert.equal(m.cur, 3);
+
+  const ok = m.returnToCaller();
+
+  assert.equal(ok, true, '有父帧 ⇒ 不是"整个执行结束"');
+  assert.equal(m.cur, 0, '★ 回到**父帧号 0**（`cur -= 1` 会回到 2 —— 那一槽可能空着/装着别的脚本）');
+  assert.equal(m.slots[3], rec, '★★ 父号 + 1 ≠ 当前号 ⇒ 目标帧**不许**被释放（它还装载着）');
+});
+
+test('★★ `0x6` 装载帧：记录落在**指定槽**、当前帧号**一动都不动**', () => {
+  const loaded = script([[NOP, []]]);
+  const root = script([[0x6, [[0, 1], [0, 4]]], [NOP, []]]);
+  const m = new Machine({ body: root, table, key: KEY, loadScript: (id) => (id === 1 ? loaded : null) });
+  m.run({ maxSteps: 1 });
+
+  assert.equal(m.cur, 0, '★★ 装载前后当前帧号相同（改了就是"顺手把当前帧换掉"）');
+  assert.equal(m.slots[4]?.body, loaded, '★ 记录真的在槽 4 上（不是"活动链末端"）');
+  assert.equal(m.slots[4]?.parent, 0, '父帧号 ← 装载时正在执行的帧号');
+  assert.equal(m.slots[4]?.ip, 0, '新记录从它的开头开始');
+  assert.equal(m.ip, 20, '`0x6` 照常推进（长度槽 5 ⇒ 4×5 = 20 字节）');
+});
+
+test('★★ `0x8` 换帧 + `0x2` 跨槽返回：切到已装载帧、从它开头执行、回来时**不释放**它', () => {
+  const target = script([[0x2, []]]);
+  const root = script([[0x8, [[0, 5]]], [NOP, []]]);
+  const m = new Machine({ body: root, table, key: KEY });
+  const rec = m.loadFrameAt(5, target);
+  rec.frame.retStack.push(9); // 目标帧"上次"留下的返回点：换帧不清
+  rec.ip = 8;                 // 上次停在哪：换帧必须把它拨回 0
+
+  const r = m.run();
+
+  assert.equal(r.steps, 3, '0x8 → 目标帧的 0x2 → 根@12 的 NOP（多一步说明返回点错位）');
+  assert.equal(m.cur, 0, '★ 回到调用者（父帧号 0）');
+  assert.equal(m.slots[5], rec, '★ 不相邻 ⇒ 目标帧仍装载着（再切回去还在）');
+  assert.deepEqual(rec.frame.retStack, [9], '★★ 换帧**不清**目标帧的返回栈');
+  assert.equal(rec.parent, 0, '目标帧的父帧号 ← 调用者');
+  assert.equal(rec.ip, 0, '★ 换帧把目标帧的指令指针拨回它的开头（预置 8）');
+});
+
+test('★★ `0x8` 目标帧未装载 ⇒ 报错（文本含帧号），且当前帧不变', () => {
+  const m = new Machine({ body: script([[0x8, [[0, 7]]]]), table, key: KEY });
+  assert.throws(
+    () => m.run(),
+    /この階層にはファイルが読み込まれていません．Depth=7/,
+    '★ 报错文本照抄引擎（并带上目标帧号）',
+  );
+  assert.equal(m.cur, 0, '★ 报错后当前帧号仍是调用者');
+});
+
+test('★★ 深度上限按**帧号**判：先装到 39 号槽再切过去 ⇒ 再换脚本就报错（不是按"已有几帧"）', () => {
+  const self = script([[0x3, [[0, 1]]]]);
+  const m = new Machine({ body: self, table, key: KEY, loadScript: () => self });
+  m.loadFrameAt(39, self);
+  m.callFrameAt(39);
+  assert.equal(m.slots.filter(Boolean).length, 2, '槽数组里只有 2 个非空槽（按"已有几帧"判会放过）');
+  assert.equal(m.cur, 39);
+  assert.throws(() => m.run({ maxSteps: 5 }), /深度超限/, '★ 当前帧号 39 ⇒ 再换脚本超限');
+});
+
+test('★★ `0x8` 的父帧号 ← **切进来的那一帧**（不是"当初装载它的那一帧"）', () => {
+  const target = script([[0x2, []]]);
+  const child = script([[0x8, [[0, 4]]], [0x2, []]]); // 槽 1：切到槽 4，再结束自己
+  const root = script([[0x3, [[0, 1]]], [NOP, []]]);
+  const m = new Machine({ body: root, table, key: KEY, loadScript: (id) => (id === 1 ? child : null) });
+  const rec = m.loadFrameAt(4, target); // 装载者是槽 0
+  assert.equal(rec.parent, 0, '装载时父帧号 ← 装载者');
+
+  m.run();
+
+  assert.equal(rec.parent, 1, '★ 父帧号 ← **切帧者**（槽 1），不是装载者（槽 0）');
+  assert.equal(m.cur, 0, '槽 4 的 0x2 回槽 1，槽 1 的 0x2 回槽 0');
+  assert.equal(m.steps, 5, '0x3 → 槽1 的 0x8 → 槽4 的 0x2 → 槽1 的 0x2 → 根@12 的 NOP');
 });

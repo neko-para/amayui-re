@@ -39,10 +39,9 @@
   正文只写领域行为。校验器的「自包含」不变量会红。
 - 章里没有规则的纯定义/术语是正常的（例如「执行模型」）；`audit.chapters[].status` 区分
   `none` / `partial` / `bootstrap`。
-- **协议描述章暂不挂规则**：`20-alf` / `30-agf` 目前是**协议描述**——它们没有 `<!-- rule -->`、不进入规则计量与 `bindings`；
-  其核验状态与证据在 [`format/alf-agf-verification.md`](format/alf-agf-verification.md)。
-  ★ 这是**显式决定**（不是遗漏）：把两章拆成 `FMT-ALF-*` / `FMT-AGF-*` 规则是另一批工作，已登记在需求树；在那之前，
-  规则计量不覆盖这两章（规则数以 `pnpm tools spec chapters` 现查）—— 读正文时要按状态词判断证据档位。
+- **协议章也有规则**：`20-alf` / `30-agf` 的合同已拆成 `FMT-ALF-*` / `FMT-AGF-*` 规则（每条挂机器站点与
+  `guard:` 证据）；核验状态的逐条记录在 [`format/alf-agf-verification.md`](format/alf-agf-verification.md)。
+  规则数以 `pnpm tools spec chapters` 现查。
 
 ## 2.1 覆盖是 effect 级，不是"整条指令"
 

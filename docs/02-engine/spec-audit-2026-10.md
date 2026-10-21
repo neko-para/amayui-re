@@ -343,7 +343,7 @@
 
 - **0x320 的 2..8 个操作数全按取址读** —— 旧正文写"2/3/4/7/8 是浮点标量"，与 `.lst` 相反。
 - **窗的收尾**：到期时绘制项与网格**都清**"有窗"位；"绘制项不清"是实现的说法（`0x49BC99→0x49BCA6`、`0x4AF3C9`）。
-- **`0x6` 是装载帧、`0x8` 才是换帧**（`0x41c854` / `0x41c940`）；且 `0x6` 的 `argc=2` 与处理函数写的长度槽 3 不一致（未定是异常编码还是表项错）。
+- **`0x6` 是装载帧、`0x8` 才是换帧**（`0x41c854` / `0x41c940`）。★ 复核“`0x6` 的 argc=2 与长度槽 3 不一致”是**误判**：`sub_41C7C0`（0x6）写的是 **5**（= 2×2+1），写 3 的是 argc=1 那一族 —— 已由 `REQ-01M5ED2AD7SKV077BRVRGNE3R7` 的对账守卫覆盖（446/544 条 handler 直接长度槽全一致）。★ 2026-10-21 追加更正：`0x8` 的 handler 是 **`sub_41C900`**（表项 `0x0A50BC` ⇒ opcode 8），**不是** `sub_41C8D0`（表项 `0x0A50B8` ⇒ **0x7**，体是"写长度槽 3 后调 `sub_40EA00(this, op1)`"= 卸载指定帧）—— 见 §十三。
 - **等待位的放行不止"场景不再有动画"**：`0x41322A` 还有另一路判定（身份未取证）。
 - **AGF v2 的 ACIF 紧接 body、必需**（无 2048 搜索）；调色板条目数 `2^bpp`、行不填充、bottom-up。
 - **ALF 加装档**：`[268,280)` 是 12 字节压缩块，压缩数据从 280 起（旧文"段起点仍是 268"对 AC 为假）。
@@ -362,3 +362,133 @@
 - 复核记录与逐条裁决在 `.tmp/spec-review-3/`（本地临时区、可重建；**不入库**）。
 - 本轮的门禁：`spec validate` 13/13 · `pnpm test` 594/594 · `typecheck` 四工程绿。
 - 需求单：`REQ-01M5ED1Z9W1V190WYF6T6M4FX1`（本轮收口）。
+
+---
+
+## 十一、ALF / AGF 条目化（2026-10-21，先守卫后规则）
+
+**为什么先写守卫**：`spec validate` 的 #4 要求每条规则都有 `binding.evidence`；ALF / AGF 原先没有 accepted 台账、也没有守卫。
+所以顺序是：**先让协议断言在真实语料上可红**，再把正文拆成规则。
+
+### 新增的守卫（assets 档，读安装目录）
+
+- `tools/test/spec-alf.assets.test.mjs`：5 份真实 `*.AAI`（当前全是 `S4AC`）——头 268 / 四签名 / AC 的 12 字节块与 280 起点 /
+  TOC 记录宽度（归档 256 · 文件 80）与四个 u32 字段 / 归档与 offset+length 落在文件内；外加一条合成流的 LZSS 单测（环内下标、重叠匹配、长度 = 低 4 位 + 3）。
+- `tools/test/spec-agf.assets.test.mjs`：8 份真实 `*.AGF`（version 2）——24 字节头 / 12 字节 body 头 / **v2 的 ACIF 紧接 body** /
+  ACIF 宽高与 meta 相同 / alpha 字节数 = 宽×高 / 行不填充（`bpp×w/8`）/ 8bpp 的 1024 字节调色板槽。
+- 三份断言都由 `tools/mutate-check.mjs` 的变异条目证明会红（flag 极性 / 268 / 24）。
+
+### 守卫抓到的 spec 歧义（已改正文）
+
+**flag 字节的极性**原稿只写"低位先"，没说是"1 = 字面量"还是"1 = 匹配"。用真实 `*.AAI` 反解：
+把 1 当匹配会把归档名解成 0；1 = 字面量才解出 `APPEND01.ALF` 这类名字。⇒ 20-alf 补上极性并写明反证依据。
+
+### 条目化结果
+
+- `20-alf`：`FMT-ALF-{HEADER,ADDON,LZSS,TOC}`（4 条）。
+- `30-agf`：`FMT-AGF-{HEADER,BODY,LZSS,ACIF,PIXELS}`（5 条）。
+- 每条 `status=draft` + `disposition=handled` + 机器站点（EA 从 `format/alf-agf-verification.md` 搬）+ `guard:` 证据；
+  章级残差按归属移进规则（S5 / S?IN / file_index / 码页 / 多索引 / 窗末 18 字节 / 非 ACGF 签名 / v1 / 写侧 / 0 宽高）。
+- `data/spec/README.md` §2 的"协议描述章暂不挂规则"豁免句已删除（拆完即删，符合当时的自述）。
+
+---
+
+## 十二、`0x6` / `0x8` 的「不规定」措辞更正（2026-10-21）
+
+**问题**：`15-frame` 章首长期写「本版不规定：装载帧 `0x6` / 换帧 `0x8`」。这句给人的印象是"引擎对它们没有确定行为，实现可自选"，
+与事实相反。
+
+**来历**（可追到 commit）：
+
+1. `15-frame` 是 `689d487 feat: review`（2026-10-21 00:43）**新建**的；章首从"本章只规定同脚本控制转移"这一**章范围决定**出发，
+   写了「本章仍不管：换帧（按槽号在已有帧之间切换，`0x6` 那一族）」。当时的归属还是错的：`0x6` 不是换帧。
+2. 该判断**没有绑定任何观察**。同期 `REQ-01M4E4Q11P12MD0PJJDFZPZ5H0`（done）已把 `0x6` 的槽语义写进旧参考实现
+   （`sub_41C7C0`：保存 cur → cur = op2 → 在槽上建记录 → 恢复 cur），并有守卫
+   `tools/test/emulator-frames.test.mjs#★★ 0x6 load-frame 的槽语义…`。
+3. 第三轮复核（F25/F58）纠正了归属（`0x6` 装载帧 / `0x8` 换帧），但**沿用了"不规定"的措辞**；
+   而 `audit` 里那两条残差的 `kind` 一直是 **`unhandled`（未处理）** —— 正文与数据自相矛盾。
+
+**更正**：正文改为「尚未成篇（未处理，**不是**有意不规定）」；`0x9` 的「其余复位入口本版不规定」同批改为「尚未逐项建模」。
+`RES-FRAME-LOAD-FRAME` / `RES-FRAME-CALL-FRAME` 的 `what/next` 更新为"旧实现已建模 / `0x8` 未实现 + 先取证"，
+并删掉其中一条**已证伪**的断言（"`0x6` 的 argc=2 与长度槽 3 不一致"：0x6 写 5，写 3 的是 0x8）。
+
+**后续**：写规则本身开成 `REQ-01M5F2VHAGZWB4CKS2X9AGDATN`（父单 = spec 组织）。本处只改措辞与残差，不新增规则。
+★ 2026-10-21 当日已做完：见 §十三。
+
+---
+
+## 十三、`0x6` / `0x8` 成篇 + 一处 handler 归属更正（2026-10-21）
+
+### 成篇
+
+- `60-ops` 增两条规则：`CORE-OPS-FRAME-LOAD-FRAME`（`0x6` 装载帧）/ `CORE-OPS-FRAME-CALL-FRAME`（`0x8` 换帧）。
+  章首从 **45 → 47 个 opcode**、**39 → 41 条规则**；`15-frame` 的「尚未成篇」句改成指向这两条。
+- 正文只写领域行为（目标槽 / 父帧号 / 指令指针 / 长度槽 / 失败分支），EA 全在 `bindings`（`0x6` 19 处站点、`0x8` 11 处）。
+- `audit`：两条章级 `unhandled` 残差删除；改为两条规则自身的残差（辅助数组角色 / 宿主回调 / 负帧号 / 深度报错后的控制流 /
+  引擎级镜像格 / 帧号 ≥ 40 / 同帧多次切入的返回栈累积）。`RES-OPS-UNWRITTEN` 的 45 → 47。
+
+### ★ handler 归属更正：`0x8` 不是 `sub_41C8D0`
+
+判据是**分派表的表项偏移**（`opcode = (表项偏移 − 0xA509C)/4`）：
+
+| 表项 | 赋值行 | opcode | 函数 |
+|---|---|---|---|
+| `0x0A50B4` | `mov dword ptr [esi+0A50B4h], offset sub_41C7C0` | **6** | 装载帧（长度槽 **5** = 2×2+1） |
+| `0x0A50B8` | `mov dword ptr [esi+0A50B8h], offset sub_41C8D0` | **7** | 体只写长度槽 3 → 调 `sub_40EA00(this, op1)`（卸载指定帧） |
+| `0x0A50BC` | `mov dword ptr [esi+0A50BCh], offset sub_41C900` | **8** | 换帧（本文的主角） |
+
+⇒ **"长度槽写 3" 不能用来认归属**：`0x7` 与 `0x8` 都写 3（argc 1）。上一轮把 `sub_41C8D0` 记成 `0x8`，
+正是拿长度槽当判据的结果；`0x6` 的长度槽 5 只是**推翻**了"0x6 写 3"那条，并没有指出 0x8 是谁。
+
+已在本处、`REQ-01M5ED2AD7SKV077BRVRGNE3R7` 与 `REQ-01M5F2VHAGZWB4CKS2X9AGDATN` 的正文里更正；
+台账 `KN-01M5F56MPF2S5R1M4Q1V6E7M4T` 把"逐字 + 更正"一并记下（accepted，guard 锚）。
+
+### 参考实现（`apps/emulator`）与守卫
+
+- `Machine.callFrameAt` / `opCallFrame`（`0x8`）：`cur ← 目标槽`、目标帧**父帧号 ← 调用者**、目标帧**ip ← 0**、
+  目标帧未装载 ⇒ 响亮失败（文本照抄引擎）；**只改三格**（返回栈 / 局部池 / 代码区不动）。
+- `Machine.returnToCaller`（`0x2` 的正面支）取代 `popFrame` 的 `slots[cur--] = null`：**父帧号 / 条件释放 / 向下跳过空槽** ——
+  `0x8` 切出来的返回**可以跨槽**（从 0 切到 5 再 exit 要回 0，不是 4）。
+- `loadFrameAt` 的父帧号从 `-1` 改成"**装载时正在执行的帧号**"（引擎逐字取 `0x6` 存下的旧 cur）；
+  这条不影响"装完恢复旧 cur"，它只在"对已装载帧直接执行返回"的路径上可观察。
+- 守卫：`tools/test/emulator-frames.test.mjs` 新增 4 条（切帧三格 / 未装载恢复 / 跨槽返回不释放 / 向下跳过空槽）。
+- 变异：`mutate-check` 新增 2 条 —— ① `callFrameAt` 不写父帧号（1/1 红）② `returnToCaller` 丢掉"父帧号 + 1 == 当前帧号"（1/1 红）。
+
+### 门禁
+
+`pnpm tools spec validate` 13/13 · `pnpm test` 纯档全绿 · `pnpm tools requirements validate` 5/5 ·
+`pnpm tools ledger validate` 8/8 · `typecheck` 四工程绿。
+
+### 仍欠
+
+见两条规则的 `audit.residual`：`0x6` 的辅助数组角色 / 宿主回调 / 负帧号 / 深度报错后的控制流；
+`0x8` 的引擎级镜像格读者 / 帧号 ≥ 40 的后果 / 同帧多次切入的返回栈累积。
+
+---
+
+## 十四、参考实现（`apps/emulator-new`）的帧模型对齐（2026-10-21）
+
+**问题**：`emulator-new` 的帧模型是 **LIFO 栈**（`frames: ScriptFrame[]` + `pushScriptFrame/pop`），
+**根本没有"帧号"**：`0x3` 用"栈深"当深度、`0x2` 弹栈顶、`0x9` 清空栈。已有守卫全落在 LIFO 子集内
+⇒ 绿是逃逸（缺陷单 `REQ-01M5D251ZJTZA4S6SX170RAXD2`）。
+
+**改法**（与 `CORE-FRAME-STACK` / `CORE-OPS-FRAME-*` 对齐）：
+
+- `frames` → **`slots: (ScriptFrame|null)[]` + `cur`**（根帧占 0 号槽；空槽是显式 `null`）。
+  `body` / `ip` / `frame` / `operandCount` 变成**槽 `cur` 那条记录的访问器** —— 单一真源，不再有"副本 + 同步"。
+- `ScriptFrame` = `{ body, ip, frame, parent, length }`：`parent` = 父帧号；`length` = **该帧自己**的长度槽
+  （分派器写 `2·argc+1`、控制转移清 0 都落在当前帧那一格上）。
+- `enterScript`（`0x3`）：`cur + 1` 号槽建子帧；**深度按槽号判**（`slot ≥ 40`）。
+- `returnToCaller`（`0x2`）：当前帧号 ← **父帧号** + **有条件释放**（父号 + 1 == 当前号）+ **向下跳过空槽**。
+- `loadFrameAt`（`0x6`）：任意槽写记录、**`cur` 不动**、父帧号 ← 装载者。
+- `callFrameAt`（`0x8`）：切到已装载槽、父帧号 ← **切帧者**、`ip ← 0`、长度槽 ← 0；未装载 ⇒ 报错（文本含帧号）。
+- `0x9`：释放全部帧，只留 0 号槽的根帧。
+
+**守卫（会红的判据）** —— `tools/test/emulator-new-frame.test.mjs` 新增 6 条：
+跨槽返回（父号 0 / 当前号 3）· 深度按帧号 · `0x6` 记录落在指定槽且 `cur` 不动（含槽复用）· `0x8` 切帧 + 跨槽返回 ·
+父帧号 ← 切帧者（装载者 ≠ 切帧者）· `0x8` 未装载 ⇒ 报错且当前帧不变。
+变异 6 条（`tools/mutate-check.mjs`，`--match` 各 **1/1 红**）：`0x2` 退化成 `cur -= 1` · 无条件释放 ·
+不写父帧号 · 不拨回 `ip` · 装载顺手改 `cur` · 深度改按"已占用槽数"。
+
+**边界**：两条新规则的 `bindings.evidence` 各自多挂一条 `emulator-new` 的守卫（"spec 驱动实现"的观察）；
+引擎级事实仍以 `KN-01M5F56MPF2S5R1M4Q1V6E7M4T`（`0x8`）与既有 `0x6` 台账为准 —— 实现不是 spec 的真源。

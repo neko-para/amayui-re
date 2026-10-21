@@ -2159,7 +2159,7 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x320：4 个顶点 ⇒ 三个缓冲、顶点数、op10、第 2/3/4 与 7/8 个操作数都落状态"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x320：2..8 全按地址读 ⇒ 前两段原样拷贝、第三段合成、4/7/8 交给顶点缓冲对象"
       ]
     },
     {
@@ -2445,7 +2445,7 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 窗收尾不对称：网格清\"有窗\"位、绘制项不清"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 窗收尾：绘制项与网格都清\"有窗\"位"
       ]
     },
     {
@@ -3698,6 +3698,157 @@
       ]
     },
     {
+      "rule": "CORE-OPS-FRAME-LOAD-FRAME",
+      "sites": [
+        {
+          "ea": "0x41c7d6",
+          "what": "长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x41c7e1",
+          "what": "前置：宿主回调非空则调用，结果非 0 ⇒ 退出型异常"
+        },
+        {
+          "ea": "0x41c7f2",
+          "what": "前置：密钥格非 0 + 两格密钥的循环移位自洽检查"
+        },
+        {
+          "ea": "0x41c81f",
+          "what": "前置不成立 ⇒ 抛退出型异常（什么都不装）"
+        },
+        {
+          "ea": "0x41c838",
+          "what": "读第 1 个操作数（统一文件 id）"
+        },
+        {
+          "ea": "0x41c843",
+          "what": "读第 2 个操作数（目标帧号）"
+        },
+        {
+          "ea": "0x41c84e",
+          "what": "保存当前帧号"
+        },
+        {
+          "ea": "0x41c854",
+          "what": "当前帧号 ← 目标帧号"
+        },
+        {
+          "ea": "0x41c85a",
+          "what": "深度检查：目标帧号 ≥ 40 ⇒ 报错（有符号比较；负值不被拦）"
+        },
+        {
+          "ea": "0x41c861",
+          "what": "报错文本「ファイルの階層が深すぎます．最大は%dです．」，%d = 40"
+        },
+        {
+          "ea": "0x41c89a",
+          "what": "在目标槽上建帧记录（装载器调用）"
+        },
+        {
+          "ea": "0x41c8a6",
+          "what": "当前帧号恢复成装载前的值"
+        },
+        {
+          "ea": "0x41c8b1",
+          "what": "装载失败 ⇒ 抛退出型异常"
+        },
+        {
+          "ea": "0x40edd9",
+          "what": "装载器：先释放目标槽原有内容"
+        },
+        {
+          "ea": "0x40edeb",
+          "what": "新记录写统一文件 id"
+        },
+        {
+          "ea": "0x40ee05",
+          "what": "新记录写父帧号 ← 装载时正在执行的帧号"
+        },
+        {
+          "ea": "0x40ee12",
+          "what": "新记录返回栈清空"
+        },
+        {
+          "ea": "0x40ee26",
+          "what": "两条按帧辅助数组清 −1（角色未定）"
+        },
+        {
+          "ea": "0x40ee57",
+          "what": "新记录写代码区（分配缓冲）"
+        }
+      ],
+      "functions": [
+        "sub_41C7C0",
+        "sub_40ED40",
+        "sub_40EA00"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M4GZSAD4643F4M6K1V075M4D",
+        "KN:01M4E548CH4C0G45171Z564G7K",
+        "guard:tools/test/emulator-frames.test.mjs#★★ `0x6 load-frame` 的槽语义",
+        "guard:tools/test/emulator-new-frame.test.mjs#★★ `0x6` 装载帧"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FRAME-CALL-FRAME",
+      "sites": [
+        {
+          "ea": "0x41c916",
+          "what": "调用者长度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x41c92b",
+          "what": "保存调用者帧号"
+        },
+        {
+          "ea": "0x41c931",
+          "what": "读第 1 个操作数（目标帧号）"
+        },
+        {
+          "ea": "0x41c940",
+          "what": "当前帧号 ← 目标帧号"
+        },
+        {
+          "ea": "0x41c946",
+          "what": "已装载判据：目标帧的代码区起点非 0"
+        },
+        {
+          "ea": "0x41c94d",
+          "what": "当前帧号写进一个引擎级镜像格（读者未取证）"
+        },
+        {
+          "ea": "0x41c955",
+          "what": "报错文本「この階層にはファイルが読み込まれていません．Depth=%d」"
+        },
+        {
+          "ea": "0x41c982",
+          "what": "报错路径：当前帧号恢复成调用者"
+        },
+        {
+          "ea": "0x41c996",
+          "what": "目标帧父帧号 ← 调用者帧号"
+        },
+        {
+          "ea": "0x41c9b3",
+          "what": "目标帧指令指针 ← 目标帧代码区起点"
+        },
+        {
+          "ea": "0x41c9c6",
+          "what": "目标帧长度槽 ← 0（分派器不自动推进）"
+        }
+      ],
+      "functions": [
+        "sub_41C900"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M5F56MPF2S5R1M4Q1V6E7M4T",
+        "guard:tools/test/emulator-frames.test.mjs#★★ `0x8 call-frame`",
+        "guard:tools/test/emulator-new-frame.test.mjs#★★ `0x8` 换帧 + `0x2` 跨槽返回"
+      ]
+    },
+    {
       "rule": "CORE-OPS-NUMERIC-MOV-INT",
       "sites": [
         {
@@ -3790,6 +3941,329 @@
       ],
       "evidence": [
         "guard:tools/test/emulator-new-frame.test.mjs#★ 0x3 深度上限"
+      ]
+    },
+    {
+      "rule": "FMT-ALF-HEADER",
+      "sites": [
+        {
+          "ea": "0x401084",
+          "what": "memset(obj+0Ch,0,10Ch)：索引头清零"
+        },
+        {
+          "ea": "0x40116a",
+          "what": "ReadFile(...,10Ch)：读 268 字节定长头"
+        },
+        {
+          "ea": "0x401180",
+          "what": "比较四个签名（S3AI/S4AI）"
+        },
+        {
+          "ea": "0x401198",
+          "what": "比较四个签名（S3AC/S4AC）"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-alf.assets.test.mjs#★ 真实 *.AAI：头 268 / 四签名 / AC 的 12 字节块与 280 起点 / TOC 记录宽度与字段"
+      ]
+    },
+    {
+      "rule": "FMT-ALF-ADDON",
+      "sites": [
+        {
+          "ea": "0x4011fd",
+          "what": "置 AC 标志（签名以 AC 结尾）"
+        },
+        {
+          "ea": "0x401201",
+          "what": "push 0Ch：读 12 字节压缩信息块"
+        },
+        {
+          "ea": "0x40126c",
+          "what": "用解压结果替换 TOC"
+        },
+        {
+          "ea": "0x401280",
+          "what": "非 AC：从 280 起裸读（AI 族不走这块）"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-alf.assets.test.mjs#★ 真实 *.AAI：头 268 / 四签名 / AC 的 12 字节块与 280 起点 / TOC 记录宽度与字段"
+      ]
+    },
+    {
+      "rule": "FMT-ALF-LZSS",
+      "sites": [
+        {
+          "ea": "0x436ace",
+          "what": "写位置初值 4078"
+        },
+        {
+          "ea": "0x436b1a",
+          "what": "位置掩码 0FFFh"
+        },
+        {
+          "ea": "0x436b3c",
+          "what": "and eax,0Fh：长度低 4 位"
+        },
+        {
+          "ea": "0x436b42",
+          "what": "长度 +2，循环含等号 ⇒ +3"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-alf.assets.test.mjs#★ LZSS：位置是 12 位环内下标（0..4095）、长度 = 低 4 位 + 3、可重叠匹配"
+      ]
+    },
+    {
+      "rule": "FMT-ALF-TOC",
+      "sites": [
+        {
+          "ea": "0x4012e2",
+          "what": "archive_count 左移 8 ⇒ 归档记录 256 字节"
+        },
+        {
+          "ea": "0x401326",
+          "what": "file_count × 80：文件记录 80 字节"
+        },
+        {
+          "ea": "0x40146c",
+          "what": "文件记录 +0x40：archive_index"
+        },
+        {
+          "ea": "0x4014ab",
+          "what": "文件记录 +0x48：offset"
+        },
+        {
+          "ea": "0x4014c1",
+          "what": "文件记录 +0x4C：length"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-alf.assets.test.mjs#★ 真实 *.AAI：头 268 / 四签名 / AC 的 12 字节块与 280 起点 / TOC 记录宽度与字段"
+      ]
+    },
+    {
+      "rule": "FMT-AGF-HEADER",
+      "sites": [
+        {
+          "ea": "0x43eb11",
+          "what": "前两字节 BM ⇒ 分流到 BMP；其余进 AGF"
+        },
+        {
+          "ea": "0x43ed43",
+          "what": "读 version（1/2）"
+        },
+        {
+          "ea": "0x43ed58",
+          "what": "读 unknown0（必须为 0）"
+        },
+        {
+          "ea": "0x43fef7",
+          "what": "不合法 ⇒ 拒绝"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段"
+      ]
+    },
+    {
+      "rule": "FMT-AGF-BODY",
+      "sites": [
+        {
+          "ea": "0x43ed68",
+          "what": "读 12 字节 meta 头 / 长度"
+        },
+        {
+          "ea": "0x43ee77",
+          "what": "读 12 字节 body 头"
+        },
+        {
+          "ea": "0x43eee2",
+          "what": "body 按 bodyUnpackedSize 分配"
+        },
+        {
+          "ea": "0x43ef5c",
+          "what": "body 解压"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段"
+      ]
+    },
+    {
+      "rule": "FMT-AGF-LZSS",
+      "sites": [
+        {
+          "ea": "0x43ee46",
+          "what": "meta 解压调用同一例程"
+        },
+        {
+          "ea": "0x43ef5c",
+          "what": "body 解压调用同一例程"
+        },
+        {
+          "ea": "0x4017b1",
+          "what": "ACIF alpha 解压调用同一例程"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段",
+        "guard:tools/test/spec-alf.assets.test.mjs#★ LZSS：位置是 12 位环内下标（0..4095）、长度 = 低 4 位 + 3、可重叠匹配"
+      ]
+    },
+    {
+      "rule": "FMT-AGF-ACIF",
+      "sites": [
+        {
+          "ea": "0x43efda",
+          "what": "v2 才读 ACIF"
+        },
+        {
+          "ea": "0x401620",
+          "what": "读 24 字节 ACIF 头"
+        },
+        {
+          "ea": "0x401655",
+          "what": "magic \"ACIF\""
+        },
+        {
+          "ea": "0x401668",
+          "what": "ACIF width 与 meta 比较"
+        },
+        {
+          "ea": "0x4016f6",
+          "what": "12 字节 alpha 长度块"
+        },
+        {
+          "ea": "0x4017ac",
+          "what": "alpha 解压"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段"
+      ]
+    },
+    {
+      "rule": "FMT-AGF-PIXELS",
+      "sites": [
+        {
+          "ea": "0x4396ce",
+          "what": "读 bpp（meta+30）"
+        },
+        {
+          "ea": "0x43945f",
+          "what": "调色板槽（meta+56，1024 字节）"
+        },
+        {
+          "ea": "0x439433",
+          "what": "按 2^bpp 取调色板项"
+        },
+        {
+          "ea": "0x439632",
+          "what": "行序：bottom-up"
+        },
+        {
+          "ea": "0x43a116",
+          "what": "24bpp：BGR 三字节"
+        },
+        {
+          "ea": "0x43a2c6",
+          "what": "32bpp：BGRA 四字节"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-STRING-SET",
+      "sites": [
+        {
+          "ea": "0x433698",
+          "what": "文本读原语的操作数序号 = 2（源）"
+        },
+        {
+          "ea": "0x43369d",
+          "what": "长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x4336ab",
+          "what": "读源（文本原语；数值型在这里被格式化成十进制文本）"
+        },
+        {
+          "ea": "0x4336b8",
+          "what": "写回的操作数序号 = 1（落点）"
+        },
+        {
+          "ea": "0x4336bc",
+          "what": "按落点类型标签分派并写入"
+        },
+        {
+          "ea": "0x4333c9",
+          "what": "类型 5 ⇒ 全局字符串池基址"
+        },
+        {
+          "ea": "0x4333b0",
+          "what": "类型 8 ⇒ 一条全局指针表（按指针取记录）"
+        },
+        {
+          "ea": "0x433396",
+          "what": "类型 11 ⇒ 当前帧的局部字符串池基址"
+        },
+        {
+          "ea": "0x4333e6",
+          "what": "类型 14 ⇒ 一条按帧的指针表（按指针取记录）"
+        },
+        {
+          "ea": "0x4333f5",
+          "what": "高位标签 0x8005 的变体分支"
+        },
+        {
+          "ea": "0x433401",
+          "what": "高位标签 0x800B 的变体分支"
+        },
+        {
+          "ea": "0x43341e",
+          "what": "其余类型 ⇒ 构造类型异常"
+        },
+        {
+          "ea": "0x433430",
+          "what": "抛类型异常"
+        },
+        {
+          "ea": "0x43362f",
+          "what": "公共写入路径：按字符串记录写字节与长度"
+        }
+      ],
+      "functions": [
+        "sub_433660",
+        "sub_433310",
+        "sub_42A420"
+      ],
+      "storage": [],
+      "evidence": [
+        "KN:01M4G4N4NZ0C036Y6F3F002B3K",
+        "guard:tools/test/emulator-new-string.test.mjs#★ type 2（内联字符串）",
+        "guard:tools/test/emulator-new-string.test.mjs#★★ `0x192 set-string`"
       ]
     }
   ]
