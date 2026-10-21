@@ -48,7 +48,7 @@
 
 ★ 「迁移自」是**内容来源**，不是"一章只归一个机制"：`10-format` 的内容分到 ISA / VM / FRAME 三处。
 
-★ **像素排布 / 纹理上传 / 混音 / 输入事件**归各自模块（core 外）。`FMT-AGF` 只到"段表 + 尺寸 + 像素起点"。
+★ **像素排布**写在 `30-agf`（属于 FMT-AGF 的合同）；**纹理上传 / 混音 / 输入事件**归各自模块（core 外）。`FMT-AGF` 到"段表 + 尺寸 + 像素排布"为止，不到平台上传。
 
 ### 2.1 与 `audit.planned[]` 的对齐
 
@@ -56,17 +56,15 @@
 
 | planned | 机制 |
 |---|---|
-| `containers` | `CORE-CONTAINERS` |
+| `containers` | `CORE-POOL` 的容器句柄两条（**部分**已成篇） |
 | `objects` | `CORE-OBJECTS` |
 | `files` | `CORE-FS` + `CORE-BOOT` |
 | `save` | `FMT-SAVE` |
-| `config` | `CORE-CONFIG` |
-| `timing` | `CORE-TIMING` |
 | `input` | **core 外**（不实现、不记录） |
 | `presentation` | **core 外**（不实现、不记录） |
 
-★ 机制表是组织真源，`planned[]` 只是 `audit` 数据的一个视图。等 `data/spec/chapters/core/` 落地后，
-把 `planned[]` 的 id 改成机制 id（同批改 `outOfScope[].chapter`），并让不变量检查"每个机制都有需求子单"。
+★ `config` / `timing` 两行已删除：它们**已成篇**（`55-config` / `70-vm`），不在 `planned[]` 里。
+★ 机制表是组织真源，`planned[]` 只是 `audit` 数据的一个视图；**改一边必须改另一边**。
 
 ### 2.2 `CORE-VM` 的子机制（先扫后拆的结果）
 
@@ -89,10 +87,13 @@
 
 ## 3. 组织规则
 
-1. **机制 = 有闭集 + 有契约的单位**；一个机制一个目录：`data/spec/chapters/core/<机制小写>/`。
+1. **机制 = 有闭集 + 有契约的单位**；规则**平铺落在章文件**里（`data/spec/chapters/<章>.md`），
+   机制只体现在**规则 id 前缀**上；⛔ 不为机制建目录（阅读顺序由 `spec.json` 的 `chapters[]` 决定）。
 2. **规则 id 带机制前缀**：`CORE-ISA-*` / `CORE-VM-*` / `CORE-FRAME-*` / `CORE-POOL-*` / `CORE-CONTAINERS-*` /
    `CORE-OBJECTS-*` / `CORE-OPS-*` / `CORE-CONFIG-*` / `CORE-TIMING-*` / `CORE-BOOT-*` / `CORE-FS-*` /
    `FMT-ALF-*` / `FMT-AGF-*` / `FMT-SAVE-*`。
+   ★ `SPC-*`（`SPC-POOL-*` / `SPC-OPERAND-*` / `SPC-VALUE-*`）是**试点期的历史前缀**，仍合法、不再新增；
+   新规则按机制前缀命名。
 3. **函数 ↔ 机制多对多**：⛔ 不做"一个函数属于一个机制"的分区；大函数内部可以驱动多个机制。
 4. **覆盖 = marks + 去重**：mark 记"这条陈述处理了哪些指令的哪些效果"（局部 / 绝对两种）；
    多条陈述可共同解释同一义务；同一义务**只能计一次**。
@@ -115,7 +116,7 @@
 ## 5. spec ↔ EA 映射（每条条目必须有）
 
 * 每条条目在 `bindings.json` 里有机器映射（**字段名见 `pnpm tools spec describe`，本文不复述 schema**）：
-  站点 EA / 函数符号 / `storage` 指针（`layout:` / `shape:`）/ 证据（`KN:` / `guard:`）；
+  站点 EA / 函数符号 / `storage` 指针（`shape:`）/ 证据（`KN:` / `guard:`）；
 * EA、函数符号、偏移**只进** `bindings` / `audit`，⛔ 不进正文（自包含不变量会红）；
 * 映射完整性：闭集元素 ↔ 站点；还没映射上的写进**条目自己的残差**（`audit.rules[].residual` / `pilot.residuals`），带下一步问题。
 
@@ -158,7 +159,8 @@
 
 - 一条规则的站点 / 函数 / storage 指针 / 证据 / 残差：`pnpm tools spec show <规则 id>`
 - 反查某个 EA 被哪些规则引用：`pnpm tools spec at --ea <EA>`
-- storage 指针指向的机器常量：`packages/age-format/src/engine/layout.mts` 的对应导出（如 `FRAME_LAYOUT` / `FRAME_ENGINE_SCALARS`）
+- storage 指针指向的机器本体：`data/shape/types.json` 的类型与成员（`pnpm tools shape describe` 看 schema）；
+  指针里的 `@0x…` 是该类型成员表里的**成员起点**（`shape:T1@0x60` = 第一条帧记录的 `+0x60` 那一格）
 
 
 ```bash
@@ -171,5 +173,5 @@ pnpm tools requirements plan  # 还要做什么、到哪一步
 ```
 
 * 改机制表 ⇒ 改本文件 + 在需求树开 / 关对应单；
-* 改条目 ⇒ 改 `data/spec/chapters/core/<机制>/`（正文）+ `bindings.json` / `audit.json`（映射）；
+* 改条目 ⇒ 改它所在的 `data/spec/chapters/<章>.md`（正文）+ `bindings.json` / `audit.json`（映射）；
 * 改判定口径 ⇒ 先改技能 `amayui-spec`，再回改这里（技能是口径真源，本文件是落点）。

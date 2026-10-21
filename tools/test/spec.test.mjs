@@ -11,12 +11,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   derive,
   describe,
   loadLedger,
   loadSpec,
   reportText,
+  resolveStorage,
   validate,
 } from '../lib/spec.mjs';
 import { computeEffectCoverage } from '../lib/spec-effects.mjs';
@@ -243,13 +245,29 @@ test('★ 判别力：残差 omitted 的自由文本 / discarded 缺 reason+rang
   assert.ok(checksOf(dis).has(4), '残差 discarded 必须给 reason + range');
 });
 
-test('★ 判别力：storage 指针落空 ⇒ #6 红；正文写布局不算（必须走指针）', () => {
-  const s = clone();
-  s.entries[0].binding.storage = ['layout:NOPE.NOPE'];
-  assert.ok(checksOf(s).has(6));
+test('★ 判别力：storage 指针落空 ⇒ #6 红；成员指针必须落在 shape 的成员起点上', () => {
+  const bad = clone();
+  bad.entries[0].binding.storage = ['shape:T_Command@0x9'];
+  assert.ok(checksOf(bad).has(6), 'shape 成员起点不存在 ⇒ #6 红');
+
+  const unknownType = clone();
+  unknownType.entries[0].binding.storage = ['shape:NOPE'];
+  assert.ok(checksOf(unknownType).has(6), '类型不存在 ⇒ #6 红');
+
+  const layoutRef = clone();
+  layoutRef.entries[0].binding.storage = ['layout:GLOBAL_SLOTS.base.int'];
+  assert.ok(checksOf(layoutRef).has(6), '`layout:` 不再被接受：机器本体只由 shape 提供');
+
   const ok = clone();
-  ok.entries[0].binding.storage = ['layout:GLOBAL_SLOTS.base.int'];
-  assert.ok(!checksOf(ok).has(6), '真实存在的 layout token 必须解析得到');
+  ok.entries[0].binding.storage = ['shape:T1@0x60'];
+  assert.ok(!checksOf(ok).has(6), '真实存在的 shape 成员必须解析得到');
+});
+
+test('storage 指针只认 shape：bindings 里 0 处 layout:', () => {
+  const bindings = JSON.parse(readFileSync(new URL('../../data/spec/bindings.json', import.meta.url), 'utf8'));
+  const refs = bindings.bindings.flatMap((b) => b.storage ?? []).filter((s) => s.startsWith('layout:'));
+  assert.deepEqual(refs, [], '`layout:` 指针会让规范重新依赖 age-format；机器本体只由 shape 提供');
+  assert.equal(resolveStorage('layout:FRAME_LAYOUT.base').ok, false, '解析器也不接受 `layout:`');
 });
 
 test('★ 判别力：证据失效 / 用例不存在 / reviewed 只有弱证据 ⇒ #7 红', () => {

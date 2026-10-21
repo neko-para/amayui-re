@@ -30,7 +30,6 @@ import path from 'node:path';
 import { REPO_ROOT } from './paths.mjs';
 import { project, readRecords, testNames } from './ledger.mjs';
 import { pickListing } from './disasm.mjs';
-import * as LAYOUT from '@amayui/age-format/src/engine/layout.mts';
 import { computeEffectCoverage, derivePilotEffects, selectorMatches } from './spec-effects.mjs';
 
 /** 规范真源：manifest + 章节 Markdown + 两份内部数据 + 生成物 */
@@ -72,8 +71,13 @@ export const REVIEW_INFO_PATTERNS = [
 
 const EA_RE = /^0x[0-9a-f]+$/i;
 const FN_RE = /^sub_[0-9A-F]{6}$/;
-const LAYOUT_REF_RE = /^layout:([A-Za-z_][A-Za-z0-9_.]*)$/;
-const SHAPE_REF_RE = /^shape:([A-Za-z_][A-Za-z0-9_.]*)$/;
+/**
+ * `shape:` 指针的两种形态：
+ * * `shape:<类型>` —— 状态存在于该类型的实例里（类型身份）；
+ * * `shape:<类型>@0x<off>` —— 状态就是该类型成员表里**起点为 off 的那个成员**（成员身份）。
+ * ★ 成员形态必须是**声明过的起点**，不许"落在某个数组里面"：那样指针会把数组当成单格。
+ */
+const SHAPE_REF_RE = /^shape:([A-Za-z_][A-Za-z0-9_]*)(?:@(0x[0-9a-fA-F]+))?$/;
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 /** 规则标记：`<!-- rule: SPC-... -->`（Markdown 注释，分发时剥离） */
 const RULE_MARKER = /<!--\s*rule:\s*([A-Za-z0-9_-]+)\s*-->/;
@@ -301,27 +305,30 @@ function relativePath(p) {
   return p.split('\\').join('/');
 }
 
-/** 布局 / shape 指针是否真的存在（★ 布局侧**真的 import**，不是文本搜） */
+/**
+ * `storage` 指针是否真的存在（机器本体只认 shape）。
+ * ★ 读 `data/shape/types.json`：类型身份 + **成员身份**（`@0x<off>` 必须恰是某个成员的声明起点）。
+ * ⛔ 不再接受 `layout:` —— 那会让规范的可复核材料吊在历史知识产物（age-format）上；
+ *   结构上拒绝 > 计数棘轮：新规则根本挂不回来。
+ */
 export function resolveStorage(ref) {
-  if (ref.startsWith('layout:')) {
-    const token = ref.slice('layout:'.length);
-    let cur = LAYOUT;
-    for (const seg of token.split('.')) {
-      if (cur === null || cur === undefined || !(seg in Object(cur))) return { ok: false, why: `layout 里找不到 ${token}` };
-      cur = cur[seg];
-    }
-    if (cur === undefined || cur === null) return { ok: false, why: `layout 里 ${token} 是空值` };
-    return { ok: true, kind: 'layout', token, value: cur };
-  }
+  const parsed = SHAPE_REF_RE.exec(ref);
+  if (!parsed) return { ok: false, why: `storage 指针只认 shape:<类型> 或 shape:<类型>@0x<成员起点>：${ref}` };
+  const [, typeId, offText] = parsed;
   const shapeRef = path.join(REPO_ROOT, 'data/shape/types.json');
-  const token = ref.slice('shape:'.length);
   if (!fs.existsSync(shapeRef)) return { ok: false, why: 'types.json 不在场' };
-  const types = JSON.parse(fs.readFileSync(shapeRef, 'utf8'));
-  // `types.json` 的 `types` 是 **id → 类型** 的映射（不是数组）；两种形态都接受，避免把结构写死。
-  const ids = Array.isArray(types.types) ? new Set(types.types.map((t) => t.id)) : new Set(Object.keys(types.types ?? {}));
-  return ids.has(token)
-    ? { ok: true, kind: 'shape', token }
-    : { ok: false, why: `types.json 里找不到类型 ${token}` };
+  const raw = JSON.parse(fs.readFileSync(shapeRef, 'utf8')).types ?? {};
+  // `types` 在 `types.json` 里是 **id → 类型** 的映射（不是数组）；两种形态都接受，避免把结构写死。
+  const byId = Array.isArray(raw) ? new Map(raw.map((t) => [t.id, t])) : new Map(Object.entries(raw));
+  const type = byId.get(typeId);
+  if (!type) return { ok: false, why: `types.json 里找不到类型 ${typeId}` };
+  if (offText === undefined) return { ok: true, kind: 'shape', token: typeId, type };
+  const off = Number.parseInt(offText, 16);
+  const member = (type.members ?? []).find((m) => Number.parseInt(m.off, 16) === off);
+  if (!member) {
+    return { ok: false, why: `${typeId} 的成员表里没有起点为 ${offText} 的成员（先补 shape 成员，再挂指针）` };
+  }
+  return { ok: true, kind: 'shape', token: `${typeId}@${offText}`, type, member };
 }
 
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim() !== '';
@@ -559,7 +566,6 @@ export function validate(input, { ledger, repoRoot = REPO_ROOT, effects = null }
     }
     for (const f of g.functions ?? []) if (!FN_RE.test(f)) gapProblems.push(`${at} 的函数符号形态非法：${f}`);
     for (const ref of g.storage ?? []) {
-      if (!LAYOUT_REF_RE.test(ref) && !SHAPE_REF_RE.test(ref)) { gapProblems.push(`${at} 的 storage 指针形态非法：${ref}`); continue; }
       const rr = resolveStorage(ref);
       if (!rr.ok) gapProblems.push(`${at} 的 storage 指针落空：${rr.why}`);
     }
@@ -587,15 +593,11 @@ export function validate(input, { ledger, repoRoot = REPO_ROOT, effects = null }
     }
     for (const f of e.binding?.functions ?? []) if (!FN_RE.test(f)) bind.push(`${at} 的函数符号形态非法：${f}`);
     for (const ref of e.binding?.storage ?? []) {
-      if (!LAYOUT_REF_RE.test(ref) && !SHAPE_REF_RE.test(ref)) {
-        bind.push(`${at} 的 storage 指针形态非法（layout:<token> / shape:<type>）：${ref}`);
-        continue;
-      }
       const r = resolveStorage(ref);
       if (!r.ok) bind.push(`${at} 的 storage 指针落空：${r.why}`);
     }
   }
-  checks.push({ id: 6, text: '绑定：EA/函数符号形态合法；storage 指针能在 layout.mts / types.json 里解析到', problems: bind });
+  checks.push({ id: 6, text: '绑定：EA/函数符号形态合法；storage 指针能在 shape（types.json 的类型与成员起点）里解析到', problems: bind });
   for (const p of bind) add(6, 'entries', p);
 
   // ── 5. 证据
@@ -855,7 +857,7 @@ export function describe() {
         ['rule', '✅', '规则 id', '与章节里的 <!-- rule: ID --> 一一对应'],
         ['sites', '{ea,what}[]', '机器站点（EA 是唯一合法的机器锚；what 只给人看）'],
         ['functions', 'sub_XXXXXX[]', '整个函数作为绑定范围'],
-        ['storage', 'layout:<token> / shape:<type>[]', '机器布局 / 类型指针（只供复核，不进分发产物）'],
+        ['storage', 'shape:<类型> / shape:<类型>@0x<成员起点> / layout:<token>[]', '机器本体指针：状态属于哪个 shape 类型 / 哪个成员（`layout:` 是待迁出的历史形态，不进分发产物）'],
         ['evidence', 'KN:<ULID> / guard:<path>#<用例>[]', '可再校验观察（台账记录 / 可执行守卫用例）'],
       ],
       auditFields: [

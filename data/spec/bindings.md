@@ -6,7 +6,7 @@
 ## 这个文件是什么
 
 **机器绑定**（规范的出处）：每条规则一行，`rule` 关联章节 Markdown 里的 `<!-- rule: ID -->`。
-包含 `sites[]`（EA 是唯一合法的机器锚）、`functions[]`、`storage[]`（`layout:` / `shape:` 指针）、
+包含 `sites[]`（EA 是唯一合法的机器锚）、`functions[]`、`storage[]`（`shape:` 指针）、
 `evidence[]`（`KN:` 台账记录 / `guard:` 可执行守卫用例）。
 
 它回答"这条规范凭什么"，⛔ 不是规范本身；布局只经 `storage` 指针引用。
@@ -24,6 +24,7 @@ pnpm tools spec validate                 # storage 指针可解析、证据可�
 
 1. 加/改绑定：只动 `bindings.json` 对应 `rule` 的那一行；`rule` 必须存在于某个章节的规则标记里。
 2. `sites[].ea` 必须是语料里的指令行首；`functions` 必须是 `sub_XXXXXX` 形态；
-   `storage` 只认 `layout:<token>` 与 `shape:<type>`（会真的解析到 `layout.mts` / `types.json`）。
+   `storage` 只认 `shape:<类型>` 与 `shape:<类型>@0x<成员起点>`（会真的解析到 `data/shape/types.json`）；
+   ⛔ 不再接受 `layout:<token>`（age-format 是历史知识产物，机器本体只由 shape 提供）。
 3. 证据按 id / 用例名引用；换一条证据就重跑 `validate`（`reviewed` 会因证据变弱而红）。
 4. 改完跑 `pnpm tools spec validate`。

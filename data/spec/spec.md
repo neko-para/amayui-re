@@ -19,7 +19,7 @@ pnpm tools spec validate                 # 章节文件存在 / 规则标记 / �
 
 1. 新增章节：把 Markdown 放进 `chapters/`，在 `chapters[]` 加 `{id, file, title}`，
    并在 `audit.json` 的 `chapters[]` 加同一条 `id`。
-2. 调整顺序：只改 `chapters[]` 的顺序（正文与审计都按这个顺序展示）。
+2. 调整顺序：只改 `chapters[]` 的顺序（渲染按它排序；`audit.chapters[]` 只按 `id` 对应，**顺序不参与展示**）。
 3. 规则：在章节里加 `### 标题` + `<!-- rule: ID -->` + 正文，并在 `bindings.json` 的 `bindings[]`
    （字段 `rule`）与 `audit.json` 的 `rules[]`（字段 `id`）各登记同一条规则。
 4. 未写的章节：不要放进 manifest；放 `audit.json` 的 `planned[]`。

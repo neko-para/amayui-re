@@ -1062,6 +1062,13 @@ const MUTATIONS = [
   },
   {
     file: 'tools/lib/spec.mjs',
+    from: '  if (!member) {',
+    to: '  if (false) { // 变异：成员起点不再校验',
+    guard: 'tools/test/spec.test.mjs',
+    what: '★ `shape:<类型>@0x<偏移>` 不再校验"该偏移恰是成员起点" ⇒ 指针可以指向不存在的槽，而 #6 仍绿',
+  },
+  {
+    file: 'tools/lib/spec.mjs',
     from: '          else if (scopeTokens.size > 0 && !scopeTokens.has(tok)) {',
     to: '          else if (false) {',
     guard: 'tools/test/spec.test.mjs',

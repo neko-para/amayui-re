@@ -4,13 +4,14 @@
 
 1. [`00-overview.md`](00-overview.md) —— 总览与约定（范围 / 术语 / 与现有实现的关系）
 2. [`10-format.md`](10-format.md) —— 脚本与执行（脚本头 / 指令编码 / 操作数编码 / 帧）
-3. [`20-alf.md`](20-alf.md) —— ALF 归档（索引头 / 段 / LZSS / TOC / 载荷）
-4. [`30-agf.md`](30-agf.md) —— AGF 图像（ACGF 容器 / meta / body / ACIF / 像素）
-5. [`40-pools.md`](40-pools.md) —— **数据池**（global/local 池、访问原语、类型标签、值编码、字符串、容量）
-6. [`50-engine-state.md`](50-engine-state.md) —— 引擎级状态（按索引表）
-7. [`55-config.md`](55-config.md) —— 配置（库 / 发行默认表 / 玩家文件 / 保存 / 脚本访问）
-8. [`60-ops.md`](60-ops.md) —— 指令语义（逐 opcode：读哪些操作数、改哪些引擎数据）
-9. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
+3. [`15-frame.md`](15-frame.md) —— 帧与调用（帧栈 / 换脚本 / 返回 / 重置）
+4. [`20-alf.md`](20-alf.md) —— ALF 归档（索引头 / 段 / LZSS / TOC / 载荷）
+5. [`30-agf.md`](30-agf.md) —— AGF 图像（ACGF 容器 / meta / body / ACIF / 像素）
+6. [`40-pools.md`](40-pools.md) —— **数据池**（global/local 池、访问原语、类型标签、值编码、字符串、容量）
+7. [`50-engine-state.md`](50-engine-state.md) —— 引擎级状态（按索引表）
+8. [`55-config.md`](55-config.md) —— 配置（库 / 发行默认表 / 玩家文件 / 保存 / 脚本访问；键表见伴随数据 `format/config-keys.json`）
+9. [`60-ops.md`](60-ops.md) —— 指令语义（逐 opcode：读哪些操作数、改哪些引擎数据）
+10. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
 
 `40-pools.md` 是**一个完整主题**：池的族、下标、访问、值表示与容量都在这一章。
 

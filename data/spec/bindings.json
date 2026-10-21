@@ -65,9 +65,9 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.base.int",
-        "layout:GLOBAL_SLOTS.base.float",
-        "layout:GLOBAL_SLOTS.base.string"
+        "shape:T_Command@0x5d800",
+        "shape:T_Command@0x5d808",
+        "shape:T_Command@0x5d810"
       ],
       "evidence": [
         "KN:01M48EHKDD0W1X442T287G0W4D",
@@ -131,9 +131,9 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.base.intRef",
-        "layout:GLOBAL_SLOTS.base.floatRef",
-        "layout:GLOBAL_SLOTS.base.stringRef"
+        "shape:T_Command@0x5d818",
+        "shape:T_Command@0x5d820",
+        "shape:T_Command@0x5d828"
       ],
       "evidence": [
         "KN:01M48EHKDD0W1X442T287G0W4D",
@@ -250,8 +250,9 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:LOCAL_POOL_SLOTS",
-        "layout:FRAME_LAYOUT.base"
+        "shape:T1@0x8",
+        "shape:T1@0x20",
+        "shape:T_Command@0x5d894"
       ],
       "evidence": [
         "KN:01M48GZ0WM6H1R1J4M767A5M14",
@@ -344,8 +345,9 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.base.int",
-        "layout:LOCAL_POOL_SLOTS"
+        "shape:T_Command@0x5d800",
+        "shape:T1@0x8",
+        "shape:T1@0x20"
       ],
       "evidence": [
         "KN:01M48F4HYZ070F651D3Z7N4N4R",
@@ -388,8 +390,9 @@
         "sub_41C300"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.base.string",
-        "layout:LOCAL_POOL_SLOTS"
+        "shape:T_Command@0x5d810",
+        "shape:T1@0x8",
+        "shape:T1@0x20"
       ],
       "evidence": [
         "KN:01M48GZ0WM6H1R1J4M767A5M14",
@@ -454,9 +457,10 @@
         "sub_414AC0"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.base",
-        "layout:LOCAL_POOL_SLOTS",
-        "layout:GLOBAL_SLOTS.base.int"
+        "shape:T_Command@0x5d894",
+        "shape:T1@0x8",
+        "shape:T1@0x20",
+        "shape:T_Command@0x5d800"
       ],
       "evidence": [
         "KN:01M48HCSEE0Y5Y1Y0F174Y461F",
@@ -544,7 +548,7 @@
         "sub_40ED40"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.count0"
+        "shape:T1@0x8"
       ],
       "evidence": [
         "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
@@ -602,7 +606,12 @@
         "sub_40ED40"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.triples"
+        "shape:T1@0x40",
+        "shape:T1@0x44",
+        "shape:T1@0x48",
+        "shape:T1@0x4c",
+        "shape:T1@0x50",
+        "shape:T1@0x54"
       ],
       "evidence": [
         "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
@@ -661,8 +670,8 @@
         "sub_40ED40"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operands",
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T1@0x4",
+        "shape:T1@0x60"
       ],
       "evidence": [
         "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
@@ -768,8 +777,8 @@
         "sub_40ED40"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.strBase",
-        "layout:FRAME_LAYOUT.off.operands"
+        "shape:T1@0x0",
+        "shape:T1@0x4"
       ],
       "evidence": [
         "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
@@ -811,7 +820,12 @@
         "sub_40ED40"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.triples"
+        "shape:T1@0x40",
+        "shape:T1@0x44",
+        "shape:T1@0x48",
+        "shape:T1@0x4c",
+        "shape:T1@0x50",
+        "shape:T1@0x54"
       ],
       "evidence": [
         "guard:tools/test/spec-isa.assets.test.mjs#★ 语料侧"
@@ -914,7 +928,7 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.base"
+        "shape:T_Command@0x5d894"
       ],
       "evidence": [
         "guard:tools/test/spec-pool.assets.test.mjs#★ 读原语"
@@ -1008,8 +1022,9 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.base.int",
-        "layout:LOCAL_POOL_SLOTS"
+        "shape:T_Command@0x5d800",
+        "shape:T1@0x8",
+        "shape:T1@0x20"
       ],
       "evidence": [
         "guard:tools/test/spec-pool.assets.test.mjs#★ 句柄分支"
@@ -1071,8 +1086,9 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.base.string",
-        "layout:LOCAL_POOL_SLOTS"
+        "shape:T_Command@0x5d810",
+        "shape:T1@0x8",
+        "shape:T1@0x20"
       ],
       "evidence": [
         "guard:tools/test/spec-pool.assets.test.mjs#★ 句柄分支"
@@ -1116,8 +1132,9 @@
         "sub_40B510"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.base.string",
-        "layout:LOCAL_POOL_SLOTS"
+        "shape:T_Command@0x5d810",
+        "shape:T1@0x8",
+        "shape:T1@0x20"
       ],
       "evidence": [
         "guard:tools/test/spec-pool.assets.test.mjs#★ 字符串写入原语"
@@ -1163,8 +1180,9 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.count",
-        "layout:LOCAL_POOL_SLOTS"
+        "shape:T_Command@0x5d7e8",
+        "shape:T1@0x8",
+        "shape:T1@0x20"
       ],
       "evidence": [
         "KN:01M48HCSEE0Y5Y1Y0F174Y461F",
@@ -1203,8 +1221,8 @@
         "sub_421E50"
       ],
       "storage": [
-        "layout:ENGINE_SCALAR_ARRAYS",
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T_Input@0x494",
+        "shape:T1@0x60"
       ],
       "evidence": [
         "KN:01M4E50S9J1X717X4G5R696A0G"
@@ -1242,8 +1260,8 @@
         "sub_422070"
       ],
       "storage": [
-        "layout:ENGINE_SCALAR_ARRAYS",
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T_Input@0x1194",
+        "shape:T1@0x60"
       ],
       "evidence": [
         "KN:01M4E50S9J1X717X4G5R696A0G"
@@ -1289,8 +1307,8 @@
         "sub_426B60"
       ],
       "storage": [
-        "layout:ENGINE_SCALAR_ARRAYS",
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T_Input@0x1abc",
+        "shape:T1@0x60"
       ],
       "evidence": [
         "KN:01M4E50S9J1X717X4G5R696A0G"
@@ -1318,7 +1336,7 @@
         "sub_426B60"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T1@0x60"
       ],
       "evidence": [
         "KN:01M4E50S9J1X717X4G5R696A0G"
@@ -1388,9 +1406,10 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.base",
-        "layout:FRAME_LAYOUT.off.operands",
-        "layout:LOCAL_POOL_SLOTS"
+        "shape:T_Command@0x5d894",
+        "shape:T1@0x4",
+        "shape:T1@0x8",
+        "shape:T1@0x20"
       ],
       "evidence": [
         "guard:tools/test/spec-pool.assets.test.mjs#★ 五原语入口"
@@ -1555,8 +1574,9 @@
         "sub_42BA00"
       ],
       "storage": [
-        "layout:GLOBAL_SLOTS.base.float",
-        "layout:LOCAL_POOL_SLOTS"
+        "shape:T_Command@0x5d808",
+        "shape:T1@0x8",
+        "shape:T1@0x20"
       ],
       "evidence": [
         "guard:tools/test/spec-pool.assets.test.mjs#★ 浮点跨族"
@@ -1686,7 +1706,7 @@
         "sub_4A8AF0"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T1@0x60"
       ],
       "evidence": [
         "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1f7 拆离：count ≤ 1 是单键；删到东西才置脏"
@@ -1742,7 +1762,7 @@
         "sub_4034C0"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount",
+        "shape:T1@0x60",
         "shape:T_Scene_elem14"
       ],
       "evidence": [
@@ -1807,7 +1827,7 @@
         "sub_49E9D0"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount",
+        "shape:T1@0x60",
         "shape:T_Scene_elem14"
       ],
       "evidence": [
@@ -1851,7 +1871,7 @@
         "sub_49E980"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount",
+        "shape:T1@0x60",
         "shape:T_Scene_elem14"
       ],
       "evidence": [
@@ -1918,7 +1938,7 @@
         "sub_49A300"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount",
+        "shape:T1@0x60",
         "shape:T_Scene_460"
       ],
       "evidence": [
@@ -2142,7 +2162,7 @@
         "sub_407E20"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T1@0x60"
       ],
       "evidence": [
         "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
@@ -2209,7 +2229,7 @@
         "sub_412290"
       ],
       "storage": [
-        "layout:FRAME_ENGINE_SCALARS.cur"
+        "shape:T_Command@0x5d880"
       ],
       "evidence": [
         "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
@@ -2293,7 +2313,7 @@
         "sub_41A2C0"
       ],
       "storage": [
-        "layout:FRAME_ENGINE_SCALARS.cur"
+        "shape:T_Command@0x5d880"
       ],
       "evidence": [
         "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
@@ -2401,7 +2421,7 @@
         "sub_489230"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T1@0x60"
       ],
       "evidence": [
         "guard:tools/test/emulator-new-scene.test.mjs#★ 0x20f 播影片：建对象、置影片位与\"有活动对象\"、发出播放请求（不等待）"
@@ -2427,7 +2447,7 @@
         "sub_4191B0"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T1@0x60"
       ],
       "evidence": [
         "KN:01M4FF1C5V4D5H4V254X6Q416Y",
@@ -2454,7 +2474,7 @@
         "sub_419690"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.off.operandCount"
+        "shape:T1@0x60"
       ],
       "evidence": [
         "KN:01M4FF1CAH54674B1R13246H7N",
@@ -2480,7 +2500,8 @@
       ],
       "evidence": [
         "guard:tools/test/emulator-new-config.test.mjs#★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败"
-      ]
+      ],
+      "storage": []
     },
     {
       "rule": "CORE-CONFIG-DEFAULTS",
@@ -2500,7 +2521,8 @@
       ],
       "evidence": [
         "guard:tools/test/emulator-new-config.test.mjs#★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败"
-      ]
+      ],
+      "storage": []
     },
     {
       "rule": "CORE-CONFIG-PLAYER",
@@ -2521,7 +2543,8 @@
       ],
       "evidence": [
         "guard:tools/test/emulator-new-config.test.mjs#★ INI：段与键字节精确、缺键保留默认、重复键最后一次"
-      ]
+      ],
+      "storage": []
     },
     {
       "rule": "CORE-CONFIG-PERSIST",
@@ -2541,7 +2564,8 @@
       ],
       "evidence": [
         "guard:tools/test/emulator-new-config.test.mjs#★ 保存：四段 CRLF 与条件键；重解析 round-trip"
-      ]
+      ],
+      "storage": []
     },
     {
       "rule": "CORE-CONFIG-SCRIPT",
@@ -2579,7 +2603,8 @@
         "KN:01M4N2977Y223S634A3D6P6T7P",
         "KN:01M4FF3TC2336V6F6D7P2G547F",
         "KN:01M4FF3T780K3Z7M3Z541W0K2V"
-      ]
+      ],
+      "storage": []
     },
     {
       "rule": "CORE-OPS-VOICE-STOP",
@@ -2858,7 +2883,9 @@
         "sub_425AB0"
       ],
       "storage": [
-        "layout:ENGINE_SCALAR_WRITES"
+        "shape:T_Command@0x5ec88",
+        "shape:T_Command@0xa30d4",
+        "shape:T_Scene@0xb57c"
       ],
       "evidence": [
         "guard:tools/test/emulator-new-scalars-thin.test.mjs#★ 0x149 / 0x21b / 0x252"
@@ -2896,8 +2923,10 @@
         "sub_41FAB0"
       ],
       "storage": [
-        "layout:ENGINE_SCALAR_WRITES",
-        "layout:ENGINE_SCALAR_BITS"
+        "shape:T_Command@0x77800",
+        "shape:T_Command@0xaab44",
+        "shape:T_Input@0x1214",
+        "shape:T_Command@0x5ec68"
       ],
       "evidence": [
         "guard:tools/test/emulator-new-scalars-thin.test.mjs#★ 0x88"
@@ -3547,9 +3576,8 @@
         "sub_40ED40"
       ],
       "storage": [
-        "layout:FRAME_LAYOUT.base",
-        "layout:FRAME_LAYOUT.count",
-        "layout:FRAME_ENGINE_SCALARS.cur"
+        "shape:T_Command@0x5d894",
+        "shape:T_Command@0x5d880"
       ],
       "evidence": [
         "guard:tools/test/emulator-new-frame.test.mjs#★ 0x3 深度上限"
