@@ -2641,10 +2641,20 @@
         {
           "ea": "0x495494",
           "what": "默认表收尾：菜单保存开关与版本修补值"
+        },
+        {
+          "ea": "0x4942fd",
+          "what": "索引默认表的键名匹配用 __stricmp（大小写不敏感）：比较 \"REGROOTPATH\""
+        },
+        {
+          "ea": "0x49439e",
+          "what": "同一条匹配路径的下一个键：比较 \"REGSUBKEY\""
         }
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-config.test.mjs#★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败"
+        "guard:tools/test/emulator-new-config.test.mjs#★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败",
+        "guard:tools/test/emulator-new-config.test.mjs#★★ 两个输入通道的大小写口径不同",
+        "KN:01M5FCC79Q1P0H3A6151730S5D"
       ],
       "storage": []
     },
@@ -2673,7 +2683,9 @@
         }
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-config.test.mjs#★ INI：段与键字节精确、缺键保留默认、重复键最后一次"
+        "guard:tools/test/emulator-new-config.test.mjs#★ INI：段与键字节精确、缺键保留默认、重复键最后一次",
+        "guard:tools/test/emulator-new-config.test.mjs#★★ 两个输入通道的大小写口径不同",
+        "KN:01M5FCC79Q1P0H3A6151730S5D"
       ],
       "storage": []
     },
@@ -2743,7 +2755,8 @@
         "guard:tools/test/emulator-new-config.test.mjs#★ 脚本配置四条：load-int 未命中写 0、save/load 往返、字符串空串",
         "KN:01M4N2977Y223S634A3D6P6T7P",
         "KN:01M4FF3TC2336V6F6D7P2G547F",
-        "KN:01M4FF3T780K3Z7M3Z541W0K2V"
+        "KN:01M4FF3T780K3Z7M3Z541W0K2V",
+        "KN:01M5FCC7X50D477W403G3Y2H71"
       ],
       "storage": []
     },

@@ -14,6 +14,7 @@ import { defaultConfigPath } from '../../apps/emulator-new/src/host.ts';
 import { loadConfigKeys } from '../../apps/emulator-new/src/spec.ts';
 import { decodeInt, encodeInt, readText, writeText } from '../../apps/emulator-new/src/values.ts';
 import { Machine } from '../../apps/emulator-new/src/machine.ts';
+import { slotAddress } from '../../apps/emulator-new/src/address.ts';
 import { HANDLERS } from '../../apps/emulator-new/src/handlers.ts';
 
 function store() {
@@ -175,10 +176,13 @@ test('★ 脚本配置四条：load-int 未命中写 0、save/load 往返、字�
   assert.equal(m.globalString.get(9), '', '未命中字符串 ⇒ 空串');
 });
 
-test('★ 脚本配置：指针族操作数当前响亮失败（不是静默 0）', () => {
+test('★ 脚本配置：指针族的键由**地址换算**；地址没写过（0）⇒ 响亮失败，不许当成"键下标 0"', () => {
   const m = machine(store());
-  assert.throws(() => HANDLERS.get(0x1a3)(m, [op(12, 0)]), /config-key-unsupported-type/);
-  assert.throws(() => HANDLERS.get(0x1aa)(m, [op(14, 0)]), /config-key-unsupported-type/);
+  // 指针槽没写过 ⇒ 地址 0 ⇒ 不落在任何池窗口（整数侧）/ 低于该族全局池起点（字符串侧）
+  assert.throws(() => HANDLERS.get(0x1a3)(m, [op(12, 0)]), /不落在任何池窗口|未定义行为|低于该族全局池起点/);
+  assert.throws(() => HANDLERS.get(0x1aa)(m, [op(14, 0)]), /不落在任何池窗口|未定义行为|低于该族全局池起点/);
+  // 真正不支持的类型仍然抛「操作数类型异常」（不是静默跳过）
+  assert.throws(() => HANDLERS.get(0x1a3)(m, [op(9, 0)]), /config-key-unsupported-type/);
 });
 
 test('文本原语：只支持 type 5，其余类型响亮失败（不补空串）', () => {
@@ -216,4 +220,42 @@ test('atoiPrefix：C atoi 前缀语义', () => {
   // 只有 C isspace（0x09–0x0D / 0x20）算前导空白；其它控制字节直接让 atoi 失败 ⇒ 0
   assert.equal(atoiPrefix('\t-7'), -7);
   assert.equal(atoiPrefix('\x01 42'), 0);
+});
+
+test('★★ 两个输入通道的大小写口径不同：索引默认表**折叠**大小写；玩家文件**字节精确**', () => {
+  // ① 索引默认表侧：键名折叠大小写（引擎用 `__stricmp` 比，见 `.lst:004942FD/0049439E`）
+  const s = store();
+  s.applyDefaults([{ key: 'screenx', value: '1024' }]);
+  assert.equal(s.getInt('set:WinX'), 1024, '默认表的小写键名也要命中（折叠大小写）');
+
+  // ② 玩家文件侧：段名/键名按字节精确，大小写不同 ⇒ 忽略（不是"宽容入库"）
+  const exact = store();
+  exact.applyIni(new Map([['display\\UseDirectDrawEmuration', '1']]));
+  assert.equal(exact.getInt('display:UseDirectDrawEmuration'), 1, '字节一致 ⇒ 命中');
+
+  const wrong = store();
+  wrong.applyIni(new Map([['Display\\usedirectdrawemuration', '1']]));
+  assert.equal(wrong.getInt('display:UseDirectDrawEmuration'), 0, '★ 大小写不同 ⇒ 不命中');
+});
+
+test('★★ 配置键：指针**不落在该族全局池** ⇒ UB（响亮失败），⛔ 不许算出一个"取决于布局的键"', () => {
+  const s = store();
+  const m = machine(s);
+  const KEY = 0;
+
+  // 指向**局部** int 池第 3 格（type 12 槽里的地址）
+  m.frame.localPtr.set(0, slotAddress(9, 3, m.cur));
+  assert.throws(() => HANDLERS.get(0x1a2)(m, [op(12, 0)]), /未定义行为/,
+    '局部池地址 ⇒ 键没有定义（引擎只做减法/除法）');
+
+  // 指向全局**浮点**池（键族是整型 ⇒ 池不匹配）
+  m.frame.localPtr.set(1, slotAddress(4, 2));
+  assert.throws(() => HANDLERS.get(0x1a3)(m, [op(12, 1)]), /未定义行为/,
+    '族不匹配（整型键 + 浮点池）同样是 UB');
+
+  // 指向全局 int 池 ⇒ 有定义，键 = 该池的槽下标
+  m.frame.localPtr.set(2, slotAddress(3, 5));
+  m.globalInt.set(5, encodeInt(7, KEY));
+  HANDLERS.get(0x1a2)(m, [op(12, 2)]);
+  assert.ok(s.ints.has('\u0003' + '00000005'), '全局池指针 ⇒ 键下标 = 池下标');
 });

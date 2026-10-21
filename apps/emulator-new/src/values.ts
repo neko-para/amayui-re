@@ -5,6 +5,8 @@
  * ★ 本文件不碰文件系统、不认识脚本头。
  */
 import type { Machine, Operand } from './machine.ts';
+import { arrayStrideFor, isPointerTag, poolBase, resolveAddress, slotAddress } from './address.ts';
+import type { PoolTag, Resolved } from './address.ts';
 
 const u32 = (x: number): number => x >>> 0;
 
@@ -75,6 +77,9 @@ export function readInt(m: Machine, ops: Operand[], k: number): number {
       return decodeInt(m.frame.localInt.get(op.raw) ?? encodeInt(0, m.key), m.key);
     case 10:
       return truncToInt(readFloatCell(m, m.frame.localFloat, op.raw));
+    // 指针族（6/7/12/13）：解引用一次，解码发生在**目标格**上（指针槽本身不编解码）
+    case 6: case 7: case 12: case 13:
+      return decodeInt(rawBitsAt(m, deref(m, op)), m.key);
     default:
       return unsupported('read-int', op);
   }
@@ -149,6 +154,8 @@ export function readFloat(m: Machine, ops: Operand[], k: number): number {
       return decodeInt(m.frame.localInt.get(op.raw) ?? encodeInt(0, m.key), m.key);
     case 10:
       return readFloatCell(m, m.frame.localFloat, op.raw);
+    case 6: case 7: case 12: case 13:
+      return f32(rawBitsAt(m, deref(m, op)));
     default:
       return unsupported('read-float', op);
   }
@@ -170,6 +177,10 @@ export function writeInt(m: Machine, ops: Operand[], k: number, value: number): 
     case 10:
       m.frame.localFloat.set(op.raw, bitsOfF32(Math.fround(value)));
       return;
+    // 指针族（6/7/12）：写原语要**解引用**，编码发生在目标格上
+    case 6: case 7: case 12:
+      writeRawBitsAt(m, deref(m, op), encodeInt(value | 0, m.key));
+      return;
     default:
       unsupported('write-int', op);
   }
@@ -190,6 +201,10 @@ export function writeFloat(m: Machine, ops: Operand[], k: number, value: number)
       return;
     case 10:
       m.frame.localFloat.set(op.raw, bitsOfF32(Math.fround(value)));
+      return;
+    // 指针族（6/7/12/13）：解引用后写；13 可写浮（写整型不支持 13，见支持集合）
+    case 6: case 7: case 12: case 13:
+      writeRawBitsAt(m, deref(m, op), bitsOfF32(Math.fround(value)));
       return;
     default:
       unsupported('write-float', op);
@@ -219,6 +234,101 @@ function readFloatCell(m: Machine, map: Map<number, number>, index: number): num
  * 还用到 **type 2（内联字符串）**（启动链里 5 处，见 `INITCONFIG0.BIN`）。
  * ★ 其余类型（type 11 局部字符串、type 8/14 指针族）尚未建模 ⇒ 响亮失败，不补空串。
  */
+/**
+ * 指针族的槽（类型 6/7/8 全局、12/13/14 局部）：槽里装的是**地址**，不编解码。
+ * ★ 指针槽本身**不参与编解码**（`40-pools.md`）：写进去什么位模式，读出来就是什么。
+ */
+function pointerPool(m: Machine, tag: PoolTag): Map<number, number> {
+  switch (tag) {
+    case 6: return m.globalIntRef;
+    case 7: return m.globalFloatRef;
+    case 8: return m.globalStringRef;
+    case 12: return m.frame.localPtr;
+    case 13: return m.frame.localFloatPtr;
+    case 14: return m.frame.localStringPtr;
+    default: throw new Error(`不是指针族：0x${tag.toString(16)}`);
+  }
+}
+
+/** 指针槽里的地址（未写过 ⇒ 0；引擎的池是 VirtualAlloc 出来的零页） */
+export function pointerSlotAddress(m: Machine, tag: PoolTag, index: number): number {
+  return pointerPool(m, tag).get(index) ?? 0;
+}
+
+/**
+ * 取址原语（**数值地址**）：`40-pools.md` 的「取址」。
+ * * 值族（3/4/5/9/10/11）⇒ 那一格（字符串为那条记录）的地址；
+ * * 引用 / 指针族（6/7/8/12/13/14）⇒ **槽里装的地址**（指针槽不解引用）。
+ */
+export function addressOfOperand(m: Machine, ops: Operand[], k: number): number {
+  const op = operandAt(ops, k);
+  if (isPointerTag(op.type)) return pointerSlotAddress(m, op.type as PoolTag, op.raw);
+  switch (op.type) {
+    case 3: case 4: case 5:
+      return slotAddress(op.type as PoolTag, op.raw);
+    case 9: case 10: case 11:
+      return slotAddress(op.type as PoolTag, op.raw, m.cur);
+    default:
+      return unsupported('address', op);
+  }
+}
+
+/** 地址处的裸 32 位（整型池 = 编码后的位模式；浮点池 = 浮点位模式；指针池 = 地址本身） */
+function rawBitsAt(m: Machine, r: Resolved): number {
+  switch (r.tag) {
+    case 3: return (m.globalInt.get(r.index) ?? encodeInt(0, m.key)) >>> 0;
+    case 9: return (m.frame.localInt.get(r.index) ?? encodeInt(0, m.key)) >>> 0;
+    case 4: return (m.globalFloat.get(r.index) ?? 0) >>> 0;
+    case 10: return (m.frame.localFloat.get(r.index) ?? 0) >>> 0;
+    case 6: return (m.globalIntRef.get(r.index) ?? 0) >>> 0;
+    case 7: return (m.globalFloatRef.get(r.index) ?? 0) >>> 0;
+    case 8: return (m.globalStringRef.get(r.index) ?? 0) >>> 0;
+    case 12: return (m.frame.localPtr.get(r.index) ?? 0) >>> 0;
+    case 13: return (m.frame.localFloatPtr.get(r.index) ?? 0) >>> 0;
+    case 14: return (m.frame.localStringPtr.get(r.index) ?? 0) >>> 0;
+    default:
+      throw new Error(`地址 0x${slotAddress(r.tag, r.index, r.frameSlot).toString(16)} 指向字符串记录（池 0x${r.tag.toString(16)}）—— 按 4 字节格读写没有定义`);
+  }
+}
+
+function writeRawBitsAt(m: Machine, r: Resolved, bits: number): void {
+  const v = bits >>> 0;
+  switch (r.tag) {
+    case 3: m.globalInt.set(r.index, v); return;
+    case 9: m.frame.localInt.set(r.index, v); return;
+    case 4: m.globalFloat.set(r.index, v); return;
+    case 10: m.frame.localFloat.set(r.index, v); return;
+    case 6: m.globalIntRef.set(r.index, v); return;
+    case 7: m.globalFloatRef.set(r.index, v); return;
+    case 8: m.globalStringRef.set(r.index, v); return;
+    case 12: m.frame.localPtr.set(r.index, v); return;
+    case 13: m.frame.localFloatPtr.set(r.index, v); return;
+    case 14: m.frame.localStringPtr.set(r.index, v); return;
+    default:
+      throw new Error(`不能用 4 字节格写字符串记录（池 0x${r.tag.toString(16)}）`);
+  }
+}
+
+/** 往一个**数值地址**写一个裸 32 位（`0x64` 的逐格写；地址必须先能解析到某个池窗口） */
+export function writeBitsToAddress(m: Machine, addr: number, bits: number): void {
+  writeRawBitsAt(m, resolveAddress(addr), bits);
+}
+
+/** 写一个指针槽（`0x61` / `0x12c` 的落点）：只接受引用 / 指针族，写**地址本身** */
+export function writePointerSlot(m: Machine, ops: Operand[], k: number, addr: number): void {
+  const op = operandAt(ops, k);
+  if (!isPointerTag(op.type)) {
+    throw new Error(`写指针槽只接受引用 / 指针族（6/7/8/12/13/14），实际 type 0x${op.type.toString(16)} —— 引擎抛「操作数类型异常」`);
+  }
+  pointerPool(m, op.type as PoolTag).set(op.raw, addr >>> 0);
+}
+
+/** 指针解引用的落点（读 / 写原语用） */
+function deref(m: Machine, op: Operand): Resolved {
+  const addr = pointerSlotAddress(m, op.type as PoolTag, op.raw);
+  return resolveAddress(addr);
+}
+
 export function readText(m: Machine, ops: Operand[], k: number): string {
   const op = operandAt(ops, k);
   if (op.type === 5) return m.globalString.get(op.raw) ?? '';

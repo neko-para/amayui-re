@@ -21,6 +21,12 @@ export interface Frame {
   localInt: Map<number, number>;
   /** 局部浮点池：裸 32 位位模式（规范不保证初值） */
   localFloat: Map<number, number>;
+  /** 局部指针池（type 12）：槽里装**地址**，不编解码 */
+  localPtr: Map<number, number>;
+  /** 局部浮点指针池（type 13）：槽里装**地址** */
+  localFloatPtr: Map<number, number>;
+  /** 局部字符串指针池（type 14）：槽里装**地址** */
+  localStringPtr: Map<number, number>;
   /**
    * 本帧的**返回栈**（位置 = 同脚本内 dword 序号；见 CORE-FRAME-CALL / CORE-FRAME-RET）。
    * ★ 每帧一份：换帧就换成另一条栈（引擎给每帧各留一段固定容量，容量属机器细节）。
@@ -195,6 +201,8 @@ export interface SceneState {
  *   也表达不了"父帧号 ≠ 当前号 − 1"的返回（`0x2` 要回到**父帧号**，且只在相邻时才释放）。
  */
 export interface ScriptFrame {
+  /** 统一文件 id（装载时记下；0x3 / 0x6 的实参）。根帧缺省不着录 */
+  id?: number;
   body: Buffer;
   ip: number;
   frame: Frame;
@@ -220,7 +228,9 @@ export type Stop =
   | { kind: 'unknown-opcode'; index: number; offset: number; opcode: number }
   | { kind: 'truncated'; index: number; offset: number }
   | { kind: 'step-limit'; index: number }
-  | { kind: 'tick-limit'; index: number };
+  | { kind: 'tick-limit'; index: number }
+  /** 门位上有一个本版**不服务**的位（例：影片位 0x2000）—— 这是"停在这里"，不是异常 */
+  | { kind: 'gate'; index: number; bit: number };
 
 export interface RunResult {
   steps: number;
@@ -246,6 +256,12 @@ export interface MachineOptions {
   config?: ConfigStore;
   /** 换脚本装载器（真实入口由安装目录提供；`--script` 调试口没有它） */
   loadScript?: (id: number) => Buffer | null;
+  /**
+   * **宿主字体名表**（`0x2de` 的输入）：由宿主提供，**不是**引擎状态。
+   * ★ 缺省 `[]` = "宿主没有提供任何字体名" ⇒ 查表一律未命中 ⇒ 走引擎自己的回退分支
+   *   （`CHECKCONFIG` 把找不到的字体名换成回退名）。⛔ 本仓**不伪造**系统字体枚举。
+   */
+  fontNames?: string[];
 }
 
 export class Machine {
@@ -260,6 +276,15 @@ export class Machine {
   readonly config: ConfigStore | undefined;
   /** 换脚本用的装载器（统一文件 id → body）：缺省 = 不支持 call-script（响亮失败） */
   readonly loadScript: ((id: number) => Buffer | null) | undefined;
+  /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 查表未命中 ⇒ 引擎走回退分支） */
+  readonly fontNames: string[];
+  /**
+   * **show-logo 标志**（引擎 `Engine+0x5EB5C`）：初始化置 **1**（逐字 `0x415AE0 mov [esi+5EB5Ch], 1`）。
+   * `0x130` 读它；`0x9` 的复位会清 0（**本层未建模**，见 `0x9` 条目与残差）。
+   * ★ 单独成字段而不是塞进 `scalars`：`scalars` 的语义是"被 opcode 写过的格"，种一个初值会污染
+   *   "这条指令不改任何标量"那类判据（`emulator-new-forward.test.mjs` 等）。
+   */
+  showLogo = 1;
   /**
    * ★★ **帧区**：定长 40 槽、按**帧号**索引；空槽是显式 `null`（不是"洞"）。
    * 帧**不是栈**：`0x6` 往任意槽写记录而 `cur` 不动、`0x8` 切到任意已装载槽、
@@ -268,6 +293,11 @@ export class Machine {
   slots: (ScriptFrame | null)[] = [];
   /** 当前帧号（引擎 `Engine[0x5D880]`）；根帧占 0 号槽 */
   cur = 0;
+  /**
+   * **进入过的脚本 id**（`0x3 call-script` 装进来的、`0x8 call-frame` 切进去的）。
+   * ★ 只是记账，不参与执行；用途：让"启动链到达了哪个脚本"成为**可断言**的事实（不用靠 step 数猜）。
+   */
+  enteredIds: number[] = [];
 
   /** 引擎级状态选择字：整字为 0 才执行指令（CORE-VM-GATE） */
   flags = 0;
@@ -292,6 +322,12 @@ export class Machine {
   globalFloat = new Map<number, number>();
   /** 全局字符串池（字节串，latin1；`55-config.md` 的脚本访问只用到 type 5） */
   globalString = new Map<number, string>();
+  /** 全局整型引用池（type 6）：槽里装**地址** */
+  globalIntRef = new Map<number, number>();
+  /** 全局浮点引用池（type 7）：槽里装**地址** */
+  globalFloatRef = new Map<number, number>();
+  /** 全局字符串引用池（type 8）：槽里装**地址** */
+  globalStringRef = new Map<number, number>();
   /** 场景状态（纹理 / 绘制项 / 计时窗） */
   scene: SceneState = {
     dirty: 0,
@@ -366,6 +402,7 @@ export class Machine {
     this.uninitializedFloat = opts.uninitializedFloat ?? 'throw';
     this.config = opts.config;
     this.loadScript = opts.loadScript;
+    this.fontNames = [...(opts.fontNames ?? [])];
     // 根脚本落在 **0 号槽**（引擎：根帧的父帧号是 −1，当前帧号从 0 起）
     this.slots = [{ body: opts.body, ip: 0, frame: this.freshFrame(), parent: -1, length: 0 }];
     this.cur = 0;
@@ -376,17 +413,19 @@ export class Machine {
    * ★ 本版只有"等待位"：场景动画还在跑 ⇒ 推进时钟（`scene` 的窗在 `stepScene` 里推进），
    *   否则清位、下次迭代继续执行指令。
    */
-  private serviceFlags(): void {
+  private serviceFlags(): Stop | null {
     if ((this.flags & WAIT_BIT) !== 0) {
       this.stepScene();
       if (this.scene.animating === 0) {
         this.flags &= ~WAIT_BIT;
-        return;
+        return null;
       }
       this.tick();
-      return;
+      return null;
     }
-    throw new Error(`unimplemented-gate-bit:0x${this.flags.toString(16)}`);
+    // 其余门位（例如 LOGO.BIN 一进门就置的影片位 0x2000）本版不服务 ⇒ **停下来**并报告，
+    // 而不是抛异常：它是"这里没有建模"，不是"执行出错"（与 opcode 缺口同一口径）。
+    return { kind: 'gate', index: this.steps, bit: this.flags };
   }
 
   /** 虚拟时钟前进一格，并把场景时钟推到新读数（引擎每迭代读一次毫秒时钟） */
@@ -446,7 +485,11 @@ export class Machine {
 
   /** 空白帧（新脚本用）：池与返回栈都重新建 */
   freshFrame(): Frame {
-    return { localInt: new Map(), localFloat: new Map(), retStack: [], position: 0 };
+    return {
+      localInt: new Map(), localFloat: new Map(),
+      localPtr: new Map(), localFloatPtr: new Map(), localStringPtr: new Map(),
+      retStack: [], position: 0,
+    };
   }
 
   /**
@@ -455,12 +498,13 @@ export class Machine {
    *   回到父帧、由父帧自己的长度槽推进到"下一条"。
    * ★ 深度按**槽号**判：`cur + 1 >= 40` 才是超限（⛔ 不是按"数组里已有几帧"）。
    */
-  enterScript(body: Buffer): ScriptFrame {
+  enterScript(body: Buffer, id?: number): ScriptFrame {
     const slot = this.cur + 1;
     if (slot >= FRAME_SLOT_COUNT) {
       throw new Error(`call-script 深度超限：目标帧号 ${slot} ≥ ${FRAME_SLOT_COUNT}（引擎抛「階層が深すぎます」）`);
     }
-    const rec: ScriptFrame = { body, ip: 0, frame: this.freshFrame(), parent: this.cur, length: 0 };
+    const rec: ScriptFrame = { id, body, ip: 0, frame: this.freshFrame(), parent: this.cur, length: 0 };
+    if (id !== undefined) this.enteredIds.push(id);
     this.slots[slot] = rec;
     this.cur = slot;
     return rec;
@@ -495,11 +539,11 @@ export class Machine {
    * `0x6 装载帧`：把 body 装进**指定槽**，**不动当前帧号**（引擎"临时切 cur、装完恢复"的净效果）。
    * ★ 记录里的父帧号 ← 装载时正在执行的帧号（引擎逐字取 `0x6` 存下的旧 cur）。
    */
-  loadFrameAt(slot: number, body: Buffer): ScriptFrame {
+  loadFrameAt(slot: number, body: Buffer, id?: number): ScriptFrame {
     if (!Number.isInteger(slot) || slot < 0 || slot >= FRAME_SLOT_COUNT) {
       throw new Error(`load-frame 的槽号 ${slot} 不在 0..${FRAME_SLOT_COUNT - 1} 之内`);
     }
-    const rec: ScriptFrame = { body, ip: 0, frame: this.freshFrame(), parent: this.cur, length: 0 };
+    const rec: ScriptFrame = { id, body, ip: 0, frame: this.freshFrame(), parent: this.cur, length: 0 };
     while (this.slots.length <= slot) this.slots.push(null);
     this.slots[slot] = rec;
     return rec;
@@ -523,6 +567,7 @@ export class Machine {
     target.ip = 0;
     this.cur = slot;
     this.operandCount = 0;
+    if (target.id !== undefined) this.enteredIds.push(target.id);
     return target;
   }
 
@@ -558,7 +603,8 @@ export class Machine {
       if (this.ticks >= maxTicks) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'tick-limit', index: this.steps } };
       // 门（CORE-VM-GATE）：状态字非 0 ⇒ 本迭代只服务一个位，不执行指令
       if (this.flags !== 0) {
-        this.serviceFlags();
+        const gate = this.serviceFlags();
+        if (gate) return { steps: this.steps, index: this.steps, ip: this.ip, stop: gate };
         continue;
       }
       const at = this.ip;

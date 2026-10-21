@@ -77,10 +77,13 @@ test('★ 0x88 非 0 支：两个格都写 op1，第三格写常量 1，状态�
 });
 
 test('★ 0x88 为 0 支：两个格写 0，只清状态字第 27 位，不写第三格', () => {
-  // ① 门关着时这条指令**根本不执行**（run 在 flags≠0 时只服务状态位）⇒ 这本身是证据
+  // ① 门关着时这条指令**根本不执行**（run 在 flags≠0 时只服务状态位）⇒ 这本身是证据。
+  //    ★ 门位不服务时 run 现在**返回 Stop**（`kind:'gate'`）而不是抛：那是"这里没建模"，不是执行出错。
   const gated = machineFor([[0x88, [[0, 0]]]]);
   gated.flags = 0x08000000 | 0x00000200;
-  assert.throws(() => gated.run(), /unimplemented-gate-bit/, '门非 0 时不许执行指令');
+  const stop = gated.run().stop;
+  assert.equal(stop.kind, 'gate', '门非 0 时不许执行指令');
+  assert.equal(stop.kind === 'gate' ? stop.bit : 0, 0x08000000 | 0x00000200, '报告里带上未服务的门位');
 
   // ② 直接调 handler 才测得准「为 0」支
   const direct = machineFor([]);

@@ -78,7 +78,7 @@ test('★ 取件：根脚本松散优先（12012）覆盖归档条目（11992）
     'f17364da0ffbca38aedee4a3b46db15945a7cf864e3b7773a422d24fa6b9ba9b');
 });
 
-test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，停在启动前段第一个未实现 opcode 前', { skip }, () => {
+test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，**到达 LOGO.BIN 入口**后停在影片门', { skip }, () => {
   const result = analyzeInstall(installDir, 0, { key: KEY }, { config: path.join(REPO_ROOT, '.tmp', 'boot-config-missing.ini') });
   assert.equal(result.source.kind, 'install');
   assert.equal(result.source.id, 0);
@@ -93,11 +93,11 @@ test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，停在启动前
   assert.equal(result.config?.path, path.join(REPO_ROOT, '.tmp', 'boot-config-missing.ini'));
 
   assert.equal(result.mode, 'run');
-  assert.equal(result.steps, 140, '当前启动前段：SYSTEM4 → INITCONFIG → INITCONFIG0/2/3/4（`0x6c`/`0x2d8`/`0x8c`/`0x5c` 已实现，前沿推进到 `0x61 lookup-array`）');
-  assert.equal(result.stop, 'unimplemented');
-  assert.equal(result.gap?.opcode, 0x61, '★ 缺口：子脚本 INITCONFIG4.BIN 偏移 164 的 `0x61 lookup-array`（argc 3，落点是**指针**操作数）');
-  assert.equal(result.gap?.index, 140, '已执行 140 条');
-  assert.equal(result.gap?.offset, 164, '子脚本内的偏移');
+  assert.equal(result.steps, 96196, '★ 启动链到达 LOGO.BIN 入口（SYSTEM4 → … → INIT2 → CHECKCONFIG → 各 INIT → 回到 SYSTEM4 → 0x3 LOGO.BIN），随后 LOGO 自己置影片位');
+  assert.equal(result.stop, 'gate', '停在**门位**（影片 0x2000）—— 这不是 opcode 缺口，也不是异常');
+  assert.equal(result.gap, null, '已无 opcode 缺口');
+  assert.ok((result.entered ?? []).includes(0x5262), '★★ 进入过 LOGO.BIN（统一文件 id 0x5262）—— 这就是"到达 LOGO 入口"的判据');
+  assert.equal((result.entered ?? []).at(-1), 0x5262, '最后进入的脚本就是 LOGO.BIN');
 });
 
 test('★ 同一入口按 id 取 LOGO.BIN：50 条指令（id 映射不是巧合）', { skip }, () => {

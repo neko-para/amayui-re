@@ -6,6 +6,9 @@
 import type { DrawItem, ListRecord, Machine, Mesh, MovieObject, Operand, VoiceGroup } from './machine.ts';
 import { FRAME_SLOT_COUNT, MOVIE_BIT, WAIT_BIT } from './machine.ts';
 import { encodeInt, readAddress, readFloat, readInt, readIntAt, readText, writeBitsAt, writeFloat, writeInt, writeText } from './values.ts';
+import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
+import { arrayStrideFor, resolveAddress } from './address.ts';
+import type { PoolTag } from './address.ts';
 
 export type { Machine, Operand };
 
@@ -618,7 +621,7 @@ function callScript3(m: Machine, ops: Operand[]): void {
   if (!m.loadScript) throw new Error('call-script-loader-missing');
   const child = m.loadScript(id);
   if (!child) throw new Error('call-script-load-failed:' + id);
-  m.enterScript(child);
+  m.enterScript(child, id);
 }
 
 /**
@@ -648,7 +651,7 @@ function loadFrame6(m: Machine, ops: Operand[]): void {
   }
   const body = m.loadScript(id);
   if (!body) throw new Error('load-frame-load-failed:' + id);
-  m.loadFrameAt(slot, body);
+  m.loadFrameAt(slot, body, id);
 }
 
 /**
@@ -813,12 +816,34 @@ function movie20f(m: Machine, ops: Operand[]): void {
 /* ──────────────────────────── 配置访问（55-config.md） ──────────────────────────── */
 
 /** 配置键 = 类型码 + 8 位十六进制下标；本层只支持全局值族（type 3 / 5） */
-function configKey(op: Operand, code: 3 | 5): string {
-  const want = code === 3 ? 3 : 5;
-  if (op.type !== want) {
+/**
+ * 配置键：`类型码 + 8 位十六进制下标`（`55-config.md` 的「脚本访问」）。
+ * ★ 下标怎么来分两类：
+ *   - 值族（3 / 5）⇒ 操作数自带的池下标；
+ *   - 引用 / 指针族（6 / 12 走整型族；8 / 14 走字符串族）⇒ **取槽里的地址**，
+ *     减去**该族全局池起点**再除以元素宽度（4 / 28）。键里没有池标识 ⇒
+ *     "全局值池第 i 槽"与"指向它的指针"生成同一个键（这是规范明写的可观察耦合）。
+ */
+function configKey(m: Machine, op: Operand, code: 3 | 5): string {
+  if (op.type === code) return String.fromCharCode(code) + op.raw.toString(16).padStart(8, '0');
+  const family: number[] = code === 3 ? [6, 12] : [8, 14];
+  if (!family.includes(op.type)) {
     throw new Error(`config-key-unsupported-type:${code}:0x${op.type.toString(16)}`);
   }
-  return String.fromCharCode(code) + op.raw.toString(16).padStart(8, '0');
+  const addr = pointerSlotAddress(m, op.type as PoolTag, op.raw);
+  // ★ 只有"地址落在该族**全局**池内"时键下标才有定义（= 该全局池的槽下标）。
+  //   其它情形（局部池、浮点池、窗口外）在规范里是 **UB**（55-config 的「脚本访问」）：
+  //   引擎只做 (地址 − 全局池起点)/元素宽、没有范围检查 ⇒ 那里得到的是"取决于分配布局的数"。
+  //   本层对 UB 一律**响亮失败**（⛔ 不拿它去命中一个有定义的键）。
+  const wantTag: PoolTag = code === 3 ? 3 : 5;
+  const r = resolveAddress(addr);
+  if (r.tag !== wantTag) {
+    throw new Error(
+      `config-key：引用地址 0x${addr.toString(16)} 落在池 0x${r.tag.toString(16)}，` +
+      `不是该族全局池 0x${wantTag.toString(16)} ⇒ 未定义行为（55-config 的「脚本访问」）`,
+    );
+  }
+  return String.fromCharCode(code) + r.index.toString(16).padStart(8, '0');
 }
 
 function requireConfig(m: Machine) {
@@ -828,25 +853,25 @@ function requireConfig(m: Machine) {
 
 /** 0x1a3 load-int：查整数键；未命中 ⇒ 0；**无条件**写回第 1 个操作数 */
 function loadInt1a3(m: Machine, ops: Operand[]): void {
-  const key = configKey(operandAt(ops, 1), 3);
+  const key = configKey(m, operandAt(ops, 1), 3);
   writeInt(m, ops, 1, requireConfig(m).getInt(key));
 }
 
 /** 0x1a2 save-int：把第 1 个操作数的整数值写进整数键 */
 function saveInt1a2(m: Machine, ops: Operand[]): void {
-  const key = configKey(operandAt(ops, 1), 3);
+  const key = configKey(m, operandAt(ops, 1), 3);
   requireConfig(m).setInt(key, readInt(m, ops, 1));
 }
 
 /** 0x1aa load-string：查字符串键；未命中 ⇒ 空串；写回第 1 个操作数 */
 function loadString1aa(m: Machine, ops: Operand[]): void {
-  const key = configKey(operandAt(ops, 1), 5);
+  const key = configKey(m, operandAt(ops, 1), 5);
   writeText(m, ops, 1, requireConfig(m).getString(key));
 }
 
 /** 0x1a9 save-string：把第 1 个操作数的文本写进字符串键 */
 function saveString1a9(m: Machine, ops: Operand[]): void {
-  const key = configKey(operandAt(ops, 1), 5);
+  const key = configKey(m, operandAt(ops, 1), 5);
   requireConfig(m).setString(key, readText(m, ops, 1));
 }
 
@@ -913,6 +938,396 @@ function lt5c(m: Machine, ops: Operand[]): void {
   writeInt(m, ops, 1, a < b ? 1 : 0);
 }
 
+/**
+ * 0x61 lookup-array：`op1`（引用 / 指针族）← `取址(op2) + 元素宽度 × 读整(op3)`。
+ *
+ * 逐字（`sub_418CC0`，`0x61` 与 `0x12c` 共用这个写入器）：按 **op1 的类型标签**分派 case：
+ * 6/7/12/13 ⇒ `base + 4×idx`；8/14 ⇒ `base + 28×idx`；其余（值族 9/10/11 等）⇒ 抛类型异常。
+ * ★ 写进去的是**地址本身**（不是那一格的值），且指针槽不参与编解码。
+ * ★ 越界**不检查**（引擎直接算地址）；地址落在窗口外 / 没对齐时，**解引用**那一步才响亮失败。
+ */
+function lookupArray61(m: Machine, ops: Operand[]): void {
+  const dest = ops[0];
+  const stride = arrayStrideFor(dest.type);
+  const base = addressOfOperand(m, ops, 2);
+  const index = readInt(m, ops, 3) | 0;
+  const addr = (base + stride * index) >>> 0;
+  writePointerSlot(m, ops, 1, addr);
+  m.effects.push({
+    kind: 'array.lookup',
+    detail: { opcode: '0x61', pool: `0x${dest.type.toString(16)}`, from: base, index, stride, address: addr },
+  });
+}
+
+/** 0x12c lookup-array-2d：下标 = `读整(op3) × 读整(op4) + 读整(op5)`（乘在前、加在后），其余同 0x61 */
+function lookupArray2d12c(m: Machine, ops: Operand[]): void {
+  const dest = ops[0];
+  const stride = arrayStrideFor(dest.type);
+  const base = addressOfOperand(m, ops, 2);
+  const index = ((readInt(m, ops, 3) | 0) * (readInt(m, ops, 4) | 0) + (readInt(m, ops, 5) | 0)) | 0;
+  const addr = (base + stride * index) >>> 0;
+  writePointerSlot(m, ops, 1, addr);
+  m.effects.push({
+    kind: 'array.lookup',
+    detail: { opcode: '0x12c', pool: `0x${dest.type.toString(16)}`, from: base, index, stride, address: addr },
+  });
+}
+
+/** `0x64` 一次最多拷多少格（元素个数来自**脚本字节**，坏 raw 不许把内存吃光） */
+const COPY_ARRAY_MAX = 1 << 20;
+
+/**
+ * 0x64 copy-local-array：把脚本里一块**解码后的整数**逐格编码后写进 op1 的地址。
+ * 逐字（`sub_42CBE0`）：`dest = 取址(op1)`；块首 = `代码区起点 + 4×raw`，首 u32 = 元素个数，数据从 +4 起；
+ * 逐格写 `ENC(源 dword)`（**无条件**编码，不按目标池分派）。
+ * ★ `body` 已经切掉头 ⇒ 脚本内偏移 = `4 × raw`（与内联字符串同一个算式）。
+ * ★ 个数为 0 ⇒ 什么都不做（引擎的 `if (count > 0)`）；越出脚本 ⇒ 响亮失败。
+ */
+function copyLocalArray64(m: Machine, ops: Operand[]): void {
+  const dest = addressOfOperand(m, ops, 1);
+  const raw = readInt(m, ops, 2) >>> 0;
+  const off = 4 * raw;
+  if (off + 4 > m.body.length) {
+    throw new Error(`copy-local-array 的块首越出脚本：raw=${raw} ⇒ body 偏移 ${off}（body ${m.body.length} B）`);
+  }
+  const count = m.body.readUInt32LE(off) >>> 0;
+  if (count === 0) {
+    m.effects.push({ kind: 'array.copy', detail: { opcode: '0x64', raw, count: 0, note: '空块 ⇒ 引擎什么都不做' } });
+    return;
+  }
+  if (count > COPY_ARRAY_MAX) {
+    throw new Error(`copy-local-array 的块声明了 ${count} 个元素（> ${COPY_ARRAY_MAX}）—— raw=${raw} 口径错了？`);
+  }
+  if (off + 4 + 4 * count > m.body.length) {
+    throw new Error(`copy-local-array 的块越出脚本：${count} 格从 body ${off + 4} 起（body ${m.body.length} B）`);
+  }
+  for (let i = 0; i < count; i += 1) {
+    const src = m.body.readUInt32LE(off + 4 + 4 * i) >>> 0;
+    writeBitsToAddress(m, (dest + 4 * i) >>> 0, encodeInt(src | 0, m.key));
+  }
+  m.effects.push({ kind: 'array.copy', detail: { opcode: '0x64', dest: `0x${dest.toString(16)}`, raw, count } });
+}
+
+/**
+ * 0x2de 字体名查表：在**宿主字体名表**里线性查第 2 个操作数的文本 ⇒ 0 基下标 / 未命中 **−1**，写回第 1 个。
+ * 逐字（`sub_430DF0`，台账 `01M4B4HE3Z6T6K7M114D0V5J2T`）：
+ * 文本原语读 op2 → `sub_428990` 线性查表 → `sub_42B4B0(this,1,结果)` 写回。
+ * 判定规则：**长度相等 + 逐字节相等**（`memcmp` 且先比 size）；键首字节 `'@'` 时**跳过它**再比；无副作用。
+ * ★ 宿主表是**外部输入**（`Machine.fontNames`）；空表 ⇒ 一律未命中（引擎会走回退分支）。
+ */
+function fontIndex2de(m: Machine, ops: Operand[]): void {
+  const raw = readText(m, ops, 2);
+  const key = raw.startsWith('@') ? raw.slice(1) : raw;
+  let hit = -1;
+  for (let i = 0; i < m.fontNames.length; i += 1) {
+    const cand = m.fontNames[i]!;
+    if (cand.length === key.length && cand === key) { hit = i; break; }
+  }
+  writeInt(m, ops, 1, hit);
+  m.effects.push({
+    kind: 'font.lookup',
+    detail: { opcode: '0x2de', key, table: m.fontNames.length, hit },
+  });
+}
+
+/** 0x56 and：op1 ← op2 & op3（按 u32 位与） */
+function and56(m: Machine, ops: Operand[]): void {
+  writeInt(m, ops, 1, ((readInt(m, ops, 2) & readInt(m, ops, 3)) >>> 0) | 0);
+}
+
+/** 0x5f gre：op1 ← (int32(op2) >= int32(op3)) ? 1 : 0（有符号） */
+function gre5f(m: Machine, ops: Operand[]): void {
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  writeInt(m, ops, 1, a >= b ? 1 : 0);
+}
+
+/** 24 位内倒字节序（0x76/0x77 的形态；像 BGR↔RGB，⛔ 不是原值） */
+function bswap24(v: number): number {
+  const x = v >>> 0;
+  return (((x & 0xff) << 16) | (x & 0xff00) | ((x >>> 16) & 0xff)) >>> 0;
+}
+
+/** 0x76：`Engine.d21664 ← bswap24(op1)`，随后转发进子系统（未建模，记 `call-target-unmodeled`） */
+function bswap76(m: Machine, ops: Operand[]): void {
+  const value = bswap24(readInt(m, ops, 1));
+  m.scalars.set('Engine.d21664', value);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x76', slot: 'Engine.d21664', form: 'bswap24(op1)', value } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_459F40' });
+}
+
+/** 0x77：与 0x76 同形，只差落点（`Engine.d21665`） */
+function bswap77(m: Machine, ops: Operand[]): void {
+  const value = bswap24(readInt(m, ops, 1));
+  m.scalars.set('Engine.d21665', value);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x77', slot: 'Engine.d21665', form: 'bswap24(op1)', value } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_459F40' });
+}
+
+/** 0x1a4：成对写 —— `Engine.d21671 ← op2`、`Engine.d21670 ← op1`（读/写都是先 op2 后 op1） */
+function pair1a4(m: Machine, ops: Operand[]): void {
+  const op2 = readInt(m, ops, 2);
+  const op1 = readInt(m, ops, 1);
+  m.scalars.set('Engine.d21671', op2);
+  m.scalars.set('Engine.d21670', op1);
+  m.effects.push({ kind: 'engine.scalar.pair', detail: { opcode: '0x1a4', a: 'Engine.d21670', b: 'Engine.d21671' } });
+}
+
+/**
+ * 0x2ee：`Engine.d80106 ← op1`，随后经 `Engine+0xAA514` 对象的 `vtable+12` 转发
+ * （静态串 `message:MessageFade`，并把 **op1 再读一次**作为实参）—— 转发未建模，记诊断。
+ */
+function message2ee(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1);
+  m.scalars.set('Engine.d80106', value);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x2ee', slot: 'Engine.d80106', form: 'op1', value } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:message:MessageFade' });
+}
+
+/** 薄标量写的公共体：写一个具名格并留痕 */
+function scalarWrite(m: Machine, opcode: string, slot: string, value: number): void {
+  m.scalars.set(slot, value >>> 0);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode, slot, value } });
+}
+
+/** 0xfe：`Engine.d517 ← op1`；引擎自带范围检查（值 > 0x1f ⇒ 抛） */
+function thinFe(m: Machine, ops: Operand[]): void {
+  const v = readInt(m, ops, 1);
+  if (v > 0x1f) throw new Error(`opcode 0xfe 的操作数 ${v} 超出引擎的范围检查（> 0x1f）—— 引擎这里抛异常`);
+  scalarWrite(m, '0xfe', 'Engine.d517', v);
+}
+
+/** 0x10f：`Engine.d122369 ← op1` */
+function thin10f(m: Machine, ops: Operand[]): void {
+  scalarWrite(m, '0x10f', 'Engine.d122369', readInt(m, ops, 1));
+}
+
+/** 0x248：`Engine.d55052 ← op1` */
+function thin248(m: Machine, ops: Operand[]): void {
+  scalarWrite(m, '0x248', 'Engine.d55052', readInt(m, ops, 1));
+}
+
+/**
+ * 0x25b：`Engine.d92379 ← 2`（常量）、`Engine.d92381 ← op1`；**条件**转发 `sub_408440(this, op1)`
+ * （逐字 `if (!this[167990]) sub_408440(...)`）—— 转发未建模，记诊断；条件成立与否取决于 `Engine.d167990`（未取证来源，缺省 0 ⇒ 成立）。
+ */
+function message25b(m: Machine, ops: Operand[]): void {
+  const v = readInt(m, ops, 1);
+  scalarWrite(m, '0x25b', 'Engine.d92379', 2);
+  scalarWrite(m, '0x25b', 'Engine.d92381', v);
+  if ((m.scalars.get('Engine.d167990') ?? 0) === 0) m.diagnostics.push({ kind: 'call-target-unmodeled:sub_408440' });
+}
+
+/** 标量数组：`Engine.<base>+索引 ← 值`；越界口径照抄知识层（skip / throw） */
+function scalarArray(m: Machine, opcode: string, base: string, index: number, value: number,
+  maxIndex: number, outOfRange: 'skip' | 'throw', maxValue?: number): void {
+  const bad = index > maxIndex || (maxValue !== undefined && value > maxValue);
+  if (bad) {
+    if (outOfRange === 'skip') {
+      m.diagnostics.push({ kind: `scalar-array-skip:${opcode}` });
+      return;
+    }
+    throw new Error(`opcode ${opcode} 越界：索引 ${index}（上界 0x${maxIndex.toString(16)}）${maxValue !== undefined ? ` / 值 ${value}（上界 0x${maxValue.toString(16)}）` : ''} —— 引擎这里抛异常`);
+  }
+  scalarWrite(m, opcode, `${base}+${index}`, value);
+}
+
+/** 0x107：`Engine.d551+op1 ← op2`（下标 > 0x1f ⇒ 引擎静默跳过） */
+function array107(m: Machine, ops: Operand[]): void {
+  scalarArray(m, '0x107', 'Engine.d551', readInt(m, ops, 1), readInt(m, ops, 2), 0x1f, 'skip');
+}
+
+/** 0x10b：`Engine.d1383+op2 ← op1`（下标由 **op2** 给出；越界静默跳过） */
+function array10b(m: Machine, ops: Operand[]): void {
+  scalarArray(m, '0x10b', 'Engine.d1383', readInt(m, ops, 2), readInt(m, ops, 1), 0x1f, 'skip');
+}
+
+/** 0x30a：`Engine.d1969+op2 ← op1`（8 格；**索引与值都检查**，越界抛） */
+function array30a(m: Machine, ops: Operand[]): void {
+  scalarArray(m, '0x30a', 'Engine.d1969', readInt(m, ops, 2), readInt(m, ops, 1), 0x7, 'throw', 0x1f);
+}
+
+/**
+ * 0x10c：带范围检查的**间接**引擎态写 —— `value = op1`、`slot = op2`；`value > 0x1f ⇒ 抛`。
+ * 写目标是 `Engine[1434 + Engine[1690 + op2]]`：**索引表内容未取证**（台账 `01M4E510JP06185M2S58313T12`）
+ * ⇒ 只记 `logged-only`，⛔ 不猜它是 0。
+ */
+function keyMulti10c(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1);
+  const slotIndex = readInt(m, ops, 2);
+  if (value > 0x1f) throw new Error(`0x10c 的操作数 ${value} 超出引擎的范围检查（> 0x1f）—— 引擎这里抛 aSetkeymulti 异常`);
+  m.effects.push({
+    kind: 'engine.indirect-write',
+    detail: { opcode: '0x10c', slotIndex, value, note: '写目标 = Engine[1434 + Engine[1690+op2]]，索引表未取证 ⇒ 只记录' },
+  });
+}
+
+/** 0x308：转发 `sub_407B20(dword_55E1BC, Engine[96981], op1)` —— 被调方未建模（只记一条 `engine.forward`） */
+function forward308(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1);
+  m.effects.push({ kind: 'engine.forward', detail: { opcode: '0x308', callee: 'sub_407B20', args: ['dword_55E1BC', 'Engine.d96981', value] } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_407B20' });
+}
+
+/** 0x135 bit-set：`op1 ← op1 | (1 << op2)`；位号 > 0x1f ⇒ 引擎打错误串后**继续**、不写 op1 */
+function bitSet135(m: Machine, ops: Operand[]): void {
+  const bit = readInt(m, ops, 2);
+  if (bit > 0x1f) { m.diagnostics.push({ kind: 'bit-index-oob:0x135' }); return; }
+  writeInt(m, ops, 1, ((readInt(m, ops, 1) | (1 << bit)) >>> 0) | 0);
+}
+
+/** 0x136 bit-reset：`op1 ← op1 & ~(1 << op2)`（位号越界口径同 0x135） */
+function bitReset136(m: Machine, ops: Operand[]): void {
+  const bit = readInt(m, ops, 2);
+  if (bit > 0x1f) { m.diagnostics.push({ kind: 'bit-index-oob:0x136' }); return; }
+  writeInt(m, ops, 1, (readInt(m, ops, 1) & ~(1 << bit)) | 0);
+}
+
+/** 0x13f check-bit：**位号在 op3** —— `op1 ← ((1 << op3) & op2) != 0 ? 1 : 0`；越界写 0 并记一笔 */
+function checkBit13f(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 2);
+  const bit = readInt(m, ops, 3);
+  if (bit > 0x1f) { m.diagnostics.push({ kind: 'bit-index-oob:0x13f' }); writeInt(m, ops, 1, 0); return; }
+  writeInt(m, ops, 1, ((1 << bit) & value) !== 0 ? 1 : 0);
+}
+
+/* —— 数值双目：比较/乘除/位（与 0x50/0x51 同族；旧实现 `binInt`/`cmpInt` 的同形落地） —— */
+
+const binInt = (m: Machine, ops: Operand[], f: (a: number, b: number) => number): void => {
+  writeInt(m, ops, 1, f(readInt(m, ops, 2), readInt(m, ops, 3)) | 0);
+};
+const cmpInt = (m: Machine, ops: Operand[], f: (a: number, b: number) => boolean): void => {
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  writeInt(m, ops, 1, f(a, b) ? 1 : 0);
+};
+
+function mul52(m: Machine, ops: Operand[]): void { binInt(m, ops, (a, b) => Math.imul(a | 0, b | 0)); }
+function div53(m: Machine, ops: Operand[]): void {
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  if (b === 0) throw new Error('div: 除数为 0（引擎在这一点上会抛）');
+  writeInt(m, ops, 1, Math.trunc(a / b) | 0);
+}
+function mod54(m: Machine, ops: Operand[]): void {
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  if (b === 0) throw new Error('mod: 除数为 0（引擎在这一点上会抛）');
+  writeInt(m, ops, 1, (a % b) | 0);
+}
+function or57(m: Machine, ops: Operand[]): void { binInt(m, ops, (a, b) => (a | b) >>> 0); }
+function sar58(m: Machine, ops: Operand[]): void { binInt(m, ops, (a, b) => (a | 0) >> (b & 31)); }
+function shl59(m: Machine, ops: Operand[]): void { binInt(m, ops, (a, b) => (a << (b & 31)) >>> 0); }
+function eq5a(m: Machine, ops: Operand[]): void { cmpInt(m, ops, (a, b) => a === b); }
+function ne5b(m: Machine, ops: Operand[]): void { cmpInt(m, ops, (a, b) => a !== b); }
+function lte5d(m: Machine, ops: Operand[]): void { cmpInt(m, ops, (a, b) => a <= b); }
+function gr5e(m: Machine, ops: Operand[]): void { cmpInt(m, ops, (a, b) => a > b); }
+
+/**
+ * 0x143（`sub_41A000`，argc 0）：把"待处理事件"走一遍，再交回主循环。
+ *
+ * 逐字：长度槽 1 → 扫 `Engine+0xA90C8` 起 0x100 格（非 0 ⇒ `sub_40FC90(this, i<<24)`）→ 清 `Engine[0x796F8]` →
+ * 长度槽 0 → **ip += 4** → 尾调 `sub_40FB60(&ip)`。
+ *
+ * ★ `sub_40FB60` 是**事件队列的弹出**：队列空且 `[68EB8]==0` ⇒ 直接 `retn`（不改 cur / ip，逐字 `loc_40FC8B`）；
+ *   队列非空则可能改 cur / ip（甚至 `cur = 0x25` 那条装载路径）。本层**没有事件生产者**（通道表与队列从未被写）
+ *   ⇒ 走"空队列"分支，并把两条未建模项记进诊断（⛔ 不是静默）。
+ */
+function eventFlush143(m: Machine): void {
+  m.effects.push({
+    kind: 'engine.event-flush',
+    detail: { opcode: '0x143', channels: 'unmodeled(empty)', queue: 'unmodeled(empty)' },
+  });
+  m.diagnostics.push({ kind: 'event-queue-unmodeled:0x143' });
+  m.operandCount = 0;
+  m.ip += 4; // 引擎自己加的那 4 字节（队列空 ⇒ 尾调不改 cur/ip）
+}
+
+/** 0x75：转发 `sub_4185F0(Engine+0x14D30, op1)`（字体/文本子系统；被调方未建模，只记一条 `engine.forward`） */
+function forward75(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1);
+  m.effects.push({ kind: 'engine.forward', detail: { opcode: '0x75', callee: 'sub_4185F0', holder: 'Engine.d21324', arg: value } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_4185F0' });
+}
+
+/**
+ * 0x1a5 set-font：`sub_4328F0(Engine+0x14D30, 文本(op1))`（文本原语 `sub_41B640`）—— 字体/文本子系统，未建模。
+ * ★ 它与 `0x2de` 的那张"字体名表"是否同一张表**未取证**（若是，`0x2de` 的宿主表就该由这些 set-font 填充）⇒ 只记转发 + 诊断。
+ */
+function setFont1a5(m: Machine, ops: Operand[]): void {
+  const name = readText(m, ops, 1);
+  m.effects.push({ kind: 'engine.forward', detail: { opcode: '0x1a5', callee: 'sub_4328F0', holder: 'Engine.d21324', name } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_4328F0' });
+}
+
+/**
+ * 0x2bd：`v = 读整(op1)` ⇒ 子系统两格写 `v ? 0x2BC : 0`；`v != 0` 时再**尾跳** `sub_459F40(Engine+0x14D30)`（未建模）。
+ * 落点 = 子系统 `+0x35594` / `+0x4E0`（绝对 `Engine[75953]` / `Engine[21636]`）。
+ */
+function toggle2bd(m: Machine, ops: Operand[]): void {
+  const v = readInt(m, ops, 1);
+  const value = v !== 0 ? 0x2bc : 0;
+  scalarWrite(m, '0x2bd', 'Engine.d75953', value);
+  scalarWrite(m, '0x2bd', 'Engine.d21636', value);
+  if (v !== 0) m.diagnostics.push({ kind: 'call-target-unmodeled:sub_459F40' });
+}
+
+/** 0x2fe：转发 `sub_432DD0(Engine+0x14D30, 文本(op1))`（文本原语；被调方未建模） */
+function forward2fe(m: Machine, ops: Operand[]): void {
+  const name = readText(m, ops, 1);
+  m.effects.push({ kind: 'engine.forward', detail: { opcode: '0x2fe', callee: 'sub_432DD0', holder: 'Engine.d21324', name } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_432DD0' });
+}
+
+/** 0x197：转发 `sub_418680(Engine+0x14D30, 读整(op1))`（被调方未建模） */
+function forward197(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1);
+  m.effects.push({ kind: 'engine.forward', detail: { opcode: '0x197', callee: 'sub_418680', holder: 'Engine.d21324', arg: value } });
+  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_418680' });
+}
+
+/** 0x8b：`Engine.d21669 ← 读整(op1)`（`[esi+15294h]`） */
+function thin8b(m: Machine, ops: Operand[]): void {
+  scalarWrite(m, '0x8b', 'Engine.d21669', readInt(m, ops, 1));
+}
+
+/**
+ * 0x260：四个操作数写消息子系统的四格（读序 **op4 → op3 → op2 → op1**，写序 op4/op3/op2/op1 交错）：
+ * `Engine.d80102 ← op1`、`d80103 ← op2`、`d80104 ← op3`、`d80105 ← op4`（`[esi+4E398h..4E3A4h]`）。
+ */
+function quad260(m: Machine, ops: Operand[]): void {
+  const op4 = readInt(m, ops, 4);
+  const op3 = readInt(m, ops, 3);
+  const op2 = readInt(m, ops, 2);
+  const op1 = readInt(m, ops, 1);
+  scalarWrite(m, '0x260', 'Engine.d80102', op1);
+  scalarWrite(m, '0x260', 'Engine.d80103', op2);
+  scalarWrite(m, '0x260', 'Engine.d80104', op3);
+  scalarWrite(m, '0x260', 'Engine.d80105', op4);
+}
+
+/** 0x261：`Engine.d80101 ← 读整(op1)`（`[esi+4E394h]`） */
+function thin261(m: Machine, ops: Operand[]): void {
+  scalarWrite(m, '0x261', 'Engine.d80101', readInt(m, ops, 1));
+}
+
+/**
+ * 0xae（argc 0）：**存档版本检查**。逐字开头：长度槽 1 → `if (Engine[0x5D890] == 0) return;`（`loc_419684` 是 `pop esi; retn`）。
+ * 本模型从不写 `Engine[0x5D890]`（引擎级标量，从未被建模的写入者赋值）⇒ 恒走**早退**分支（= 不做任何事）。
+ * ★ 另一支（读 `set:SaveVersion1/2`、修存档槽）**未建模** ⇒ 若它被置非 0，本层**响亮失败**（⛔ 不猜）。
+ */
+function saveVersionAe(m: Machine): void {
+  if ((m.scalars.get('Engine.d95780') ?? 0) !== 0) {
+    throw new Error('0xae：Engine[0x5D890] != 0 ⇒ 进入"存档版本修复"分支（未建模）');
+  }
+  m.diagnostics.push({ kind: 'save-version-check-skipped:0xae' });
+}
+
+/** 0x130 load-show-logo：`op1 ← Engine[0x5EB5C]`（引擎初始化置 1，见 `Machine` 构造函数；0x9 的复位会清它） */
+function loadShowLogo130(m: Machine, ops: Operand[]): void {
+  writeInt(m, ops, 1, m.showLogo);
+}
+
 function operandAt(ops: Operand[], k: number): Operand {
   const op = ops[k - 1];
   if (!op) throw new Error(`operand-out-of-range:${k}/${ops.length}`);
@@ -974,6 +1389,49 @@ export const HANDLERS = new Map<number, (m: Machine, ops: Operand[]) => void>([
   [0x6c, fillZero6c],
   [0x8c, jump8c],
   [0x5c, lt5c],
+  [0x56, and56],
+  [0x5f, gre5f],
+  [0x2de, fontIndex2de],
+  [0x76, bswap76],
+  [0x77, bswap77],
+  [0x1a4, pair1a4],
+  [0x2ee, message2ee],
+  [0xfe, thinFe],
+  [0x10f, thin10f],
+  [0x248, thin248],
+  [0x25b, message25b],
+  [0x107, array107],
+  [0x10b, array10b],
+  [0x30a, array30a],
+  [0x10c, keyMulti10c],
+  [0x308, forward308],
+  [0x135, bitSet135],
+  [0x136, bitReset136],
+  [0x13f, checkBit13f],
+  [0x143, eventFlush143],
+  [0x75, forward75],
+  [0x1a5, setFont1a5],
+  [0x2bd, toggle2bd],
+  [0x2fe, forward2fe],
+  [0x197, forward197],
+  [0x8b, thin8b],
+  [0x260, quad260],
+  [0x261, thin261],
+  [0xae, saveVersionAe],
+  [0x130, loadShowLogo130],
+  [0x52, mul52],
+  [0x53, div53],
+  [0x54, mod54],
+  [0x57, or57],
+  [0x58, sar58],
+  [0x59, shl59],
+  [0x5a, eq5a],
+  [0x5b, ne5b],
+  [0x5d, lte5d],
+  [0x5e, gr5e],
+  [0x61, lookupArray61],
+  [0x12c, lookupArray2d12c],
+  [0x64, copyLocalArray64],
   [0x2d8, setArrayTo2d8],
   [0x1aa, loadString1aa],
 ]);

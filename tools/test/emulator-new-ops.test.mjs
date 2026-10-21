@@ -106,9 +106,13 @@ test('★ 未实现的 opcode 不执行：ip 不动、steps 不涨（缺口停�
   assert.equal(r.ip, 0);
 });
 
-test('★ 不支持的操作数类型响亮失败（不补值）：读整型遇到指针族 0xc', () => {
-  const m = machineFor([[0x2d5, [[GLOBAL_FLOAT, 5], [0xc, 0]]]]);
-  assert.throws(() => m.run(), /read-float:unsupported-operand-type:0xc/);
+test('★ 不支持的操作数类型响亮失败（不补值）：读浮点遇到字符串引用 0x8', () => {
+  // ★ 指针族（0xc 等）**已实现**（解引用）；这里守的是"支持集合之外"的类型仍然抛。
+  const m = machineFor([[0x2d5, [[GLOBAL_FLOAT, 5], [0x8, 0]]]]);
+  assert.throws(() => m.run(), /read-float:unsupported-operand-type:0x8/);
+  // 指针族的解引用失败是**另一类**响亮失败（地址未映射），不是静默 0
+  const p = machineFor([[0x2d5, [[GLOBAL_FLOAT, 5], [0xc, 0]]]]);
+  assert.throws(() => p.run(), /不落在任何池窗口/);
 });
 
 test('★ 未写过的浮点槽不许当 0：读浮点失败（规范只说"不保证初值"）', () => {

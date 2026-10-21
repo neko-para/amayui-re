@@ -43,6 +43,8 @@ export interface ScriptReport {
   stopText?: string;
   executed?: number;
   diagnostics?: Diagnostic[];
+  /** 进入过的脚本 id（`0x3` / `0x8` 的实参；证明"启动链走到了哪个脚本"） */
+  entered?: number[];
   /** 仅安装入口：从 WinMain 到主循环的启动阶段记账 */
   startup?: StartupReport;
   /** 仅安装入口：配置库摘要 */
@@ -75,6 +77,8 @@ interface RunOpts {
   config?: ConfigStore;
   /** 换脚本装载器（真实入口才有；`--script` 调试口没有） */
   loadScript?: (id: number) => Buffer | null;
+  /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 未命中 ⇒ 引擎回退分支） */
+  fontNames?: string[];
 }
 
 function parseU32(text: string, what: string): number {
@@ -128,6 +132,8 @@ function describeStop(stop: Stop): string {
       return `步数上限（第 ${stop.index} 步）`;
     case 'tick-limit':
       return `时钟上限（第 ${stop.index} 步）`;
+    case 'gate':
+      return `门位未服务：0x${stop.bit.toString(16)}（第 ${stop.index} 条）`;
   }
 }
 
@@ -175,6 +181,7 @@ export function analyzeBytes(buf: Buffer, opts: RunOpts = {}): ScriptReport {
 
   const machine = new Machine({
     body, table, key: opts.key, tickMs: opts.tickMs, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
+    fontNames: opts.fontNames,
   });
   const r = machine.run({ stopAtOpcode: opts.stopAtOpcode, maxSteps: opts.maxSteps, maxTicks: opts.maxTicks });
   return {
@@ -188,6 +195,7 @@ export function analyzeBytes(buf: Buffer, opts: RunOpts = {}): ScriptReport {
     stopText: describeStop(r.stop),
     executed: r.ip,
     diagnostics: machine.diagnostics,
+    entered: [...machine.enteredIds],
     gap:
       r.stop.kind === 'unimplemented'
         ? { index: r.stop.index, offset: r.stop.offset, opcode: r.stop.opcode, argc: r.stop.argc, reason: 'unimplemented' }
