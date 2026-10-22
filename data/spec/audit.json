@@ -530,6 +530,37 @@
       "id": "vm",
       "status": "bootstrap",
       "residual": []
+    },
+    {
+      "id": "boot-window",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "what": "单实例信号 / 辅助宿主模块 / COM / 命令行 / 自更新不在本章",
+          "next": "这些启动前段各按「请求 + 参数 + 时序」单独立条"
+        },
+        {
+          "id": "RES-BOOT-ORDER-CLOSURE",
+          "what": "启动期请求表是从入口到主循环的代码路径上枚举的，不证明闭集外没有延迟到首次迭代才发的请求",
+          "next": "把入口的每个直接 / 间接调用点按「是否向平台发请求」过一遍，并说明被排除的调用点"
+        },
+        {
+          "id": "RES-BOOT-VERSION-RESOURCE",
+          "what": "启动期读取版本资源（FileVersion）的两次请求不在本章",
+          "next": "按「请求 + 参数 + 时序」单独立条"
+        }
+      ]
+    },
+    {
+      "id": "ops-render",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "id": "RES-RENDER-EVIDENCE",
+          "what": "三条规则的证据目前只有站点形状守卫（不是语义证据，且 assets 档默认不跑）；因此不能升 reviewed",
+          "next": "每组规则补一条 accepted 台账观察或 @env pure 守卫"
+        }
+      ]
     }
   ],
   "planned": [
@@ -572,12 +603,12 @@
     {
       "id": "presentation",
       "title": "表现边界：帧提交 / 图像 / 音频请求",
-      "status": "none",
+      "status": "partial",
       "mechanism": "core-out",
       "residual": [
         {
-          "what": "整章尚未处理；平台细节按项目口径不进 spec",
-          "next": "先列『可观察的边界请求』清单，再逐条写合同并把逐位表现登记为 discards"
+          "what": "请求边界已成篇（06-window / 60-ops-render）；逐位表现（像素 / 混音）、输入事件形态、音频请求仍未成篇",
+          "next": "把像素 / 混音按项目口径登记为 discards；输入与音频各按边界单独立章"
         }
       ]
     },
@@ -2973,6 +3004,354 @@
       "falsifiers": [
         "未清 0 时执行 `0x130`：第 1 个操作数必须是 1（得 0 说明方向或初值写错）"
       ]
+    },
+    {
+      "id": "CORE-BOOT-WINDOW-CLASS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-CLASS-STYLE",
+          "kind": "unknown",
+          "what": "类风格 0x40 在平台侧选中的具体行为没有取证；正文只登记数值",
+          "next": "真机对比该位取 0 / 取 0x40 时的重绘行为（若可观测）"
+        },
+        {
+          "id": "RES-BOOT-CLASS-ICON-FALLBACK",
+          "kind": "unknown",
+          "what": "图标资源缺失时平台返回空句柄，引擎不检查；此后窗口图标处于未规定状态",
+          "next": "真机替换 / 删除图标资源后观测窗口图标"
+        },
+        {
+          "id": "RES-BOOT-CLASS-MODULE",
+          "kind": "unknown",
+          "what": "辅助宿主模块的装载判据与失败文本不在本章；本章只用到它给出的实例",
+          "next": "把辅助模块的装载 / 失败分支作为「启动前段」单独立条"
+        },
+        {
+          "id": "RES-BOOT-RESOURCE-INSTANCE",
+          "kind": "unknown",
+          "what": "辅助宿主模块给出的资源实例（图标 / 菜单）来源与装载失败处置未取证；本版只把它当作外部输入句柄",
+          "next": "把辅助模块的装载 / 三个导出作为「启动前段」单独立条"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-BOOT-WINDOW-CREATE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-WINDOW-TITLE",
+          "kind": "unknown",
+          "what": "建窗当时标题缓冲的实际内容未证实；标题键不在发行默认表 / 玩家文件词表里",
+          "next": "真机观测启动时窗口标题；或找出建窗之前对该缓冲的写入点"
+        },
+        {
+          "id": "RES-BOOT-WINDOW-CLIENT-VS-SCREEN",
+          "kind": "unknown",
+          "what": "set:WinX / set:WinY 在别处又被当作屏幕尺寸的默认值使用；本版不合并两种用法",
+          "next": "核对分辨率变更路径里同一对字段的语义"
+        },
+        {
+          "id": "RES-BOOT-WINDOW-STYLE",
+          "kind": "unknown",
+          "what": "两个风格字的位含义本版只登记数值，不解释",
+          "next": "真机对比风格字改动后的窗口外观（能否拖边缩放、是否有最大化按钮）"
+        },
+        {
+          "id": "RES-BOOT-WINDOW-AERO",
+          "kind": "unknown",
+          "what": "建窗后还有一个限制窗口装饰的请求，由配置的两位与虚拟全屏键共同决定；辅助对象语义未取证",
+          "next": "读该辅助对象的实现，确认它对应哪一类平台请求"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-BOOT-WINDOW-ATTACH",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-ATTACH-IME",
+          "kind": "unknown",
+          "what": "解绑之后引擎是否在别处重新绑定输入法（例如脚本要求输入时）本版不规定",
+          "next": "在输入相关路径里找 ImmAssociateContext / 输入法窗口的其它调用点"
+        },
+        {
+          "id": "RES-BOOT-ATTACH-MENU-CATEGORY",
+          "kind": "unknown",
+          "what": "辅助入口「操作菜单」的类别号语义（启动期只观察到 0 与 1、2 三类）本版不规定",
+          "next": "核对菜单切换 / 重建时各个类别号的用法"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-BOOT-GRAPHICS-INIT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-GFX-PARAMS",
+          "kind": "unknown",
+          "what": "设备参数与显示配置键的逐位映射只到「参数来自哪些键」这一层；确切顺序与取值本版不规定",
+          "next": "按设备创建调用的实参栈逐个对齐，写成一张「键 → 参数」表"
+        },
+        {
+          "id": "RES-BOOT-GFX-EX",
+          "kind": "unknown",
+          "what": "另一条 Direct3D 9 Ex 创建路径存在于语料另一个模块，它不在本启动阶段被调用",
+          "next": "确认该模块的调用者与用途（影片 / 截图 / 另一渲染后端）"
+        },
+        {
+          "id": "RES-BOOT-GFX-DEVICE-LOST",
+          "kind": "unknown",
+          "what": "设备丢失后的重建请求本版不规定（属运行期）",
+          "next": "在运行期找到设备丢失 / Reset 的调用点并成篇"
+        },
+        {
+          "id": "RES-BOOT-GFX-TEXT",
+          "kind": "unknown",
+          "what": "错误文本的类别划分（哪一步用哪条文本）没有逐条取证",
+          "next": "按错误通道的调用点枚举文本"
+        },
+        {
+          "id": "RES-BOOT-GFX-FULLSCREEN-COMBO",
+          "kind": "unknown",
+          "what": "窗口态 / 占满屏态与是否全屏呈现的完整组合表本版不规定；只规定两者不是同一个量",
+          "next": "按设备创建调用点的实参枚举组合"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-BOOT-EVENT-LOOP",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-WNDPROC-CLOSURE",
+          "kind": "unknown",
+          "what": "窗口过程处理的全部消息类别没有逐条登记；本版只列与生命周期、定时器、尺寸计算、输入转发、绘制有关的那几类",
+          "next": "按消息号枚举窗口过程的 switch，逐类给出「转发给谁 / 是否改引擎数据」"
+        },
+        {
+          "id": "RES-BOOT-TIMER-PURPOSE",
+          "kind": "unknown",
+          "what": "标识 2 的定时器为什么是 10 秒、除刷新空闲抑制 + 补发激活消息之外还有没有别的消费者，未取证",
+          "next": "查该定时器标识的其它读取点"
+        },
+        {
+          "id": "RES-BOOT-PUMP-SECOND-PATH",
+          "kind": "unknown",
+          "what": "泵的第二处（睡眠 + 窥视）的睡眠时长来源本版不规定（可能与帧率 / 等待门有关）",
+          "next": "把该睡眠点与等待门的规则对齐"
+        },
+        {
+          "id": "RES-BOOT-CLOSE-CLEANUP",
+          "kind": "unknown",
+          "what": "窗口过程在关闭消息里做的引擎收尾没有逐项取证；本版只规定它发生在杀掉周期定时器与销毁窗口之前",
+          "next": "按关闭分支的调用点枚举保存 / 释放操作"
+        },
+        {
+          "id": "RES-BOOT-TIMER-CONDITION",
+          "kind": "unknown",
+          "what": "周期定时器到期时检查的「另一个引擎级格」的身份本版不规定（「状态选择字里的一个位」有 shape:T_Command@0xaab44 绑定）",
+          "next": "补另一个格的位号 / 身份"
+        },
+        {
+          "id": "RES-BOOT-LOOP-RETURN",
+          "kind": "unknown",
+          "what": "除「取到退出消息 → 抛异常」外的结束路径没有取证；本版不规定主循环是否还有别的 ret",
+          "next": "枚举主循环的全部返回点 / 异常展开点"
+        },
+        {
+          "id": "RES-BOOT-EXIT-CLEANUP",
+          "kind": "unknown",
+          "what": "退出异常被兜住后的清理项与顺序只到「释放引擎对象 → 释放单实例信号 → 睡眠 → 清指针 → COM 反初始化 → 释放运行时库 → 辅助模块析构」这一串观察；各项语义未逐条取证",
+          "next": "按清理调用点逐项成条"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-RENDER-TARGET-20D",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-RENDER-TARGET-PLATFORM",
+          "kind": "unknown",
+          "what": "平台侧是否真的切换了目标、后缓冲是否真的可见不在本版；本版只规定请求、参数与目标字段的写入",
+          "next": "在表现层观察 SetRenderTarget / Reset 的返回与画面变化（人工目检档）"
+        },
+        {
+          "id": "RES-RENDER-TARGET-FIELD",
+          "kind": "unknown",
+          "what": "「当前渲染目标」格的领域用途（谁读它、读取后怎样分支）未逐条取证",
+          "next": "枚举该格的读取点，确认它是否参与渲染路径的决策"
+        },
+        {
+          "id": "RES-RENDER-TARGET-TEXT",
+          "kind": "unknown",
+          "what": "三条失败路径的错误文本带平台返回码的转写；文本内容本版不规定",
+          "next": "按错误通道的调用点枚举文本"
+        },
+        {
+          "id": "RES-RENDER-TARGET-INIT",
+          "kind": "unknown",
+          "what": "场景建立路径与目标格初值的写入点不在本版",
+          "next": "把场景建立作为表现层 / 场景族条目成篇"
+        },
+        {
+          "id": "RES-RENDER-TARGET-SURFACE",
+          "kind": "unknown",
+          "what": "取渲染表面时两个附加实参都传 0，它们的语义本版不规定",
+          "next": "按表面请求的实参表核这两个常量"
+        },
+        {
+          "id": "RES-RENDER-TARGET-ORDER",
+          "kind": "unknown",
+          "what": "渲染目标切换与帧提交 / 呈现的先后关系没有取证；本版只规定目标切换本身",
+          "next": "定位主循环的 present 点，给出相对顺序"
+        },
+        {
+          "id": "RES-RENDER-TARGET-BOUNDS",
+          "kind": "unknown",
+          "what": "编号 ≥ 1000 的创建写到纹理槽表之后，属未定义行为；本版只说明「不是合法对象」，不规定越界写的后果",
+          "next": "按纹理族的编号上限与槽表容量取证"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-RENDER-BLEND-33F",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-RENDER-BLEND-OPERAND1",
+          "kind": "unknown",
+          "what": "第 1 个操作数同时被当作「混合模式」写入与「绘制项查找键」使用；两个角色是否同一领域概念本版不规定",
+          "next": "找效应对象两个格的读者，确认模式值是否与绘制项键同一空间"
+        },
+        {
+          "id": "RES-RENDER-BLEND-OBJECT",
+          "kind": "unknown",
+          "what": "效应对象的构造与生命周期不在本章；本条只规定两个格的写入与回退读取",
+          "next": "把效应对象的构造 / 释放作为表现层条目单独立条"
+        },
+        {
+          "id": "RES-RENDER-BLEND-PIXEL",
+          "kind": "unknown",
+          "what": "模式与颜色如何参与像素混合属表现层，本版不规定",
+          "next": "逐位表现按项目口径进 discards"
+        },
+        {
+          "id": "RES-RENDER-BLEND-INIT",
+          "kind": "unknown",
+          "what": "效应对象初值由场景建立路径写入，该路径本版不规定",
+          "next": "同 RES-RENDER-TARGET-INIT"
+        },
+        {
+          "id": "RES-RENDER-BLEND-NOCREATE",
+          "kind": "unknown",
+          "what": "查找路径在未命中时返回 -1，不进入建默认项分支（已逐字核）",
+          "next": "无（已决）；若要升 reviewed 需补 accepted 观察或 @env pure 守卫"
+        },
+        {
+          "id": "RES-RENDER-BLEND-HIGHBITS",
+          "kind": "unknown",
+          "what": "透明度覆盖颜色值高 8 位，颜色值的高位因此不参与结果；这一位段口径本版只记形态",
+          "next": "按颜色字段的位段取证补成唯一公式"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-RENDER-TEXT-204",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-RENDER-TEXT-ENCODING",
+          "kind": "unknown",
+          "what": "文本的字节编码 / 字形选择 / 字体与颜色来源在本条只到「来自字体对象的当前状态」",
+          "next": "把字体对象的当前状态与文本编码作为字体族条目成篇"
+        },
+        {
+          "id": "RES-RENDER-TEXT-SURFACE",
+          "kind": "unknown",
+          "what": "纹理表面上的字形像素、混合结果不在本版",
+          "next": "像素级表现按项目口径进 discards"
+        },
+        {
+          "id": "RES-RENDER-TEXT-FONT-STATE",
+          "kind": "unknown",
+          "what": "字体对象当前的字体 / 颜色两个成员已由机器绑定定位，但它们的领域名与维护指令本版不规定",
+          "next": "核成员表的语义与写入点"
+        },
+        {
+          "id": "RES-RENDER-TEXT-FONT-SWITCHES",
+          "kind": "unknown",
+          "what": "字体对象里被写的两个内部布尔开关的身份与取值本版不规定",
+          "next": "枚举这两格的读写点，确认它们只服务字形缓存"
+        },
+        {
+          "id": "RES-RENDER-TEXT-SPECIAL",
+          "kind": "unknown",
+          "what": "特殊字形路径（先解锁、再重新加锁）的触发条件本版不规定",
+          "next": "读该分支的判据并写成条件或残差"
+        },
+        {
+          "id": "RES-RENDER-TEXT-FONT-SELECT",
+          "kind": "unknown",
+          "what": "SelectObject 是否发生的判据是字体对象的一个渲染状态格等于 2（判据已逐字核）；该格的领域身份本版不规定",
+          "next": "命名该格并交叉引用字体族"
+        },
+        {
+          "id": "RES-RENDER-TEXT-DRAW-PATH",
+          "kind": "unknown",
+          "what": "两条绘制入口由字体对象的另一个内部选择格二选一；该格的身份与两条入口的差异本版不规定",
+          "next": "分别读两条入口的差异，确认它们是否只是「带额外实参」"
+        },
+        {
+          "id": "RES-RENDER-TEXT-LOCK",
+          "kind": "unknown",
+          "what": "表面加锁 / 取尺寸失败时的行为本版不规定",
+          "next": "读加锁 / 取尺寸的失败分支"
+        },
+        {
+          "id": "RES-RENDER-TEXT-COLOR",
+          "kind": "unknown",
+          "what": "颜色值到达两条绘制入口，但六实参入口不读它；只有七实参入口消费颜色。两条入口的差异本版不规定",
+          "next": "读两条入口的实参消费"
+        },
+        {
+          "id": "RES-RENDER-TEXT-PATH-A",
+          "kind": "unknown",
+          "what": "七实参入口（带额外实参的那条）的内部加锁 / 写入顺序没有逐字核；SPECIAL 只覆盖已核的六实参入口",
+          "next": "读该入口的完整实现"
+        },
+        {
+          "id": "RES-RENDER-TEXT-PRESENT",
+          "kind": "unknown",
+          "what": "加锁 / 写入与帧提交 / 呈现的先后关系没有取证",
+          "next": "定位主循环的 present 点，给出相对顺序"
+        }
+      ],
+      "falsifiers": []
     }
   ],
   "gaps": [
@@ -3259,11 +3638,10 @@
       "id": "GAP-OPS-0200-02FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0200–0x02FF 段的未成篇项",
-      "note": "本段 147 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 145 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x200",
         "0x201",
-        "0x204",
         "0x205",
         "0x206",
         "0x207",
@@ -3272,7 +3650,6 @@
         "0x20a",
         "0x20b",
         "0x20c",
-        "0x20d",
         "0x20e",
         "0x210",
         "0x211",
@@ -3413,7 +3790,7 @@
         {
           "id": "RES-GAP-OPS-0200-02FF",
           "kind": "unhandled",
-          "what": "本段 147 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "what": "本段 145 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
           "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
         }
       ]
@@ -3422,7 +3799,7 @@
       "id": "GAP-OPS-0300-03FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0300–0x03FF 段的未成篇项",
-      "note": "本段 54 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 53 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x300",
         "0x301",
@@ -3458,7 +3835,6 @@
         "0x33c",
         "0x33d",
         "0x33e",
-        "0x33f",
         "0x340",
         "0x341",
         "0x342",
@@ -3483,7 +3859,7 @@
         {
           "id": "RES-GAP-OPS-0300-03FF",
           "kind": "unhandled",
-          "what": "本段 54 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "what": "本段 53 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
           "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
         }
       ]

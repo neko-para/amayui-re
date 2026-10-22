@@ -518,3 +518,57 @@
 - S1-⑤ 约 **489 个**有 handler 的 opcode 未成篇，却只记在章级残差；`report` 仍打 `unhandled=0` / 缺口 0，
   且三处文档对"义务该落哪里"说法不一 → 单 `REQ-01M5FBD4X8044SB7QJ0QZ45D44`
 - S2/S3 其余 34 条（同章两口径、状态词与断言强度不匹配、正文机器细节等）→ 单 `REQ-01M5FBD5DWWJEH48Q4T5NZAN2Q`（正文指向 [spec-review-4.md](spec-review-4.md)）
+
+## 十六、启动窗口 / 渲染请求边界成篇 + emulator-new 平台化（2026-10-22）
+
+**范围**：新增 `06-window`（`boot-window`，5 条 `CORE-BOOT-*`）与 `60-ops-render`（`ops-render`，3 条 `CORE-OPS-RENDER-*`）；
+同批修改 `00-overview` / `chapters/README` / `core/README` / `spec.json` / `bindings.json` / `audit.json`，
+并把 `apps/emulator-new` 拆成平台无关核心 + Node 平台层、补全 async/await 链路。
+
+**独立复审**（只读 `data/spec/`；由 subagent 执行）第一轮结论：机械不变量全绿，但 8 条规则**不能**只凭分发正文唯一实现；
+S1 共 11 条（`05-boot` 的定时器 / 主循环出口 / 消息泵归属 / 中止形状与 06 冲突；窗口类的实例来源写错；
+`set:WinPosLeft/Top` 不在配置词表；`0x33f` 的「不建默认项」与场景族共用口径冲突；`0x20d` 的 1000 阈值与纹理族
+「不做范围检查」冲突；`0x204` 的「字体子系统」无定义、两个布尔开关无身份；以及若干 06 内部范围矛盾）。
+
+处置（均已落盘）：
+
+- `05-boot`：把「gate / 定时器不规定」收窄成「gate 不在本章；窗口 / 图形 / 消息泵 / 定时器见 06」；
+  主循环出口改为指向 06；中止形状改成「同一出口，带不带消息不是出口的区分」；补「索引先于窗口创建」。
+- `70-vm`：保留节流与迭代顺序，把泵的请求序列（窥视 / 取一条 / 翻译 / 派发 / 退出消息）指向 06，删掉「不规定消息协议」。
+- `06-window`：窗口类实例改为**入口参数的进程实例**（资源实例仍来自辅助模块）；补资源实例 / `set:WinPosLeft/Top` / 关闭收尾 / 定时器条件 / 全屏组合的残差；
+  `display:ScreenMode` 缺键按配置库读 0；泵的第二条路径写明回到「取一条 → 翻译 → 派发」；
+  章首不再声称「窗口过程的每条消息都不在本章」，改成「只规定少数生命周期 / 定时器 / 输入转发 / 绘制类别」。
+- `60-ops-render`：0x20d 的 1000 明确为**本条分支阈值**、不是纹理族的范围检查；0x33f 明确「不建默认绘制项」是场景族共用口径的例外；
+  0x204 改成「一次同步绘制（内部含多条平台请求）」并给出顺序，去掉无定义的「字体子系统」与错误的 `0x76/0x77` 交叉引用，
+  补特殊字形路径 / 两个内部开关 / 字体状态身份的残差；三条规则都在正文补残差节。
+- 绑定：0x20d 只留目标格 + 纹理槽；0x33f 去掉一级指针的 storage；补 `cbSize` / 客户区读取 / 标题上限 / `SetThreadExecutionState` 站点。
+
+**门禁**：`pnpm tools spec validate` 13/13 + 语料侧站点对账全绿；`pnpm test` 651/651；
+新增 `tools/test/spec-window-render-sites.assets.test.mjs`（站点 EA 必须在 `.lst` 指令行首，含判别力用例）在 assets 档通过；
+`node tools/mutate-check.mjs --match spec-window` 与 `--match emulator-new` 均按预期变红。
+
+**第二轮复核**（同一 subagent，只看修复点）：S1 #1–#6、#10、#11 已解；#7 收窄为「整数运行期命名键、缺键读 0、词表欠账进残差」；
+#8/#9 不再冒充已定义，降为 `RES-RENDER-TEXT-FONT-STATE` / `FONT-SWITCHES` 残差。新增的 0x204 两个选择格与加锁失败也各有一条残差
+（`FONT-SELECT` / `DRAW-PATH` / `LOCK`）；`display:ScreenMode` 缺键按配置库读 0，不再留一条与 `55-config` 冲突的残差。
+仍未闭合（不藏）：窗口过程逐条消息、设备参数逐位映射、效应对象 / 字体对象成员身份、0x204 两条绘制入口的差异、平台受理结果与像素 / 混音；
+`presentation` 仍不是闭环机制（只到请求边界）。
+
+**第三轮（最终）**：`55-config.md:17` 的「类型由固定词表决定」已限定为词表内键、运行期词表外键见 `:27`；
+复审确认「WinPos / ScreenMode / 0x204」三点内部一致，**无剩余 S1 阻塞**（在本次新增两章与相关改动的范围内）。
+
+**窗口研究 subagent 的合并复核**（2026-10-22，同一批产物）：确认 `.tmp/spec-draft/window/` 五个文件在崩溃前均已写完（无截断），
+并指出合并稿两处 S1：① `06-window` 把「主循环不返回」写成绝对结论（只证了 WM_QUIT → 异常这一条路径）；
+② `05-boot` 写「失败从不通过返回值报告」，与单实例拒绝路径的 −1 冲突。已改为「已证路径 / 其余本版不规定」，
+并补 `RES-BOOT-LOOP-RETURN` / `RES-BOOT-EXIT-CLEANUP` / `RES-BOOT-ABORT-RETURN` / `RES-BOOT-ORDER-CLOSURE`；
+删掉未证实的 `DDRAW.DLL`/协作层与纯布局的 `cbSize=0x30`；把类失败对比收窄为「与索引失败的区别」；
+泵的第二处改为回到**窥视**而不是「取一条」；`RES-BOOT-TIMER-CONDITION` 收窄为「另一个格」。窗口类实例的错误
+（草稿原写辅助模块实例）已按 `0x4BA8C1 → 0x4BA963` 更正为进程实例，草稿同步自纠。
+
+**渲染研究 subagent 的合并复核**（2026-10-22，同一批产物）：确认 `impl-notes.md` / `links.json` 在崩溃前已完整，`entries.md`
+的三条规则正文完整但缺每条的残差节，`README.md` / `feedback.md` 在崩溃时尚未写出（本轮补在 `.tmp/`，未改 `data/spec`）。
+合并稿被指出两处 S1：① 0x204 状态表的请求顺序把「取度量 → 可能选字体」写反（`.lst` 是 SelectObject 先于 GetTextMetrics）；
+② 「编号 ≥1000 会创建合法纹理对象」与纹理族「不做范围检查」冲突——实际是越界写（槽 1000 正好落到目标格）。
+已改顺序、把越界写写成显式未定义行为并补 `RES-RENDER-TARGET-BOUNDS`；另补颜色实参不对称、字体选择判据（格 == 2）、
+字体成员定位、七实参入口未逐字核、加锁 / 写入与 present 的时序、透明度覆盖颜色高 8 位等残差；
+`RES-RENDER-BLEND-NOCREATE` 改为「已逐字核：未命中返回 −1，不进建默认项分支」。三条规则仍是 `draft`：
+证据目前只有站点形状守卫（assets 档、非语义证据），要升 `reviewed` 需补 accepted 台账观察或 `@env pure` 守卫。

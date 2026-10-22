@@ -13,6 +13,11 @@
       "title": "启动入口：入口 → 初始化 → 主循环"
     },
     {
+      "id": "boot-window",
+      "file": "chapters/06-window.md",
+      "title": "启动期的平台请求：窗口、图形设备与事件入口"
+    },
+    {
       "id": "format",
       "file": "chapters/10-format.md",
       "title": "脚本与执行"
@@ -81,6 +86,11 @@
       "id": "ops-scene",
       "file": "chapters/60-ops-scene.md",
       "title": "场景 / 颜色族"
+    },
+    {
+      "id": "ops-render",
+      "file": "chapters/60-ops-render.md",
+      "title": "渲染请求边界：渲染目标、场景混合与离屏文字"
     },
     {
       "id": "ops-voice",

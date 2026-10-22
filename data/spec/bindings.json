@@ -5839,6 +5839,675 @@
       "evidence": [
         "guard:tools/test/emulator-new-prologue.test.mjs#show-logo 标志：初始化置 1"
       ]
+    },
+    {
+      "rule": "CORE-BOOT-WINDOW-CLASS",
+      "sites": [
+        {
+          "ea": "0x4ba963",
+          "what": "类实例 ← 入口参数的进程实例（esi 自 0x4ba8c1 起未改）"
+        },
+        {
+          "ea": "0x4ba969",
+          "what": "类名 ← 固定串 \"ARCGameEngine\""
+        },
+        {
+          "ea": "0x4ba973",
+          "what": "窗口过程 ← 引擎唯一事件入口"
+        },
+        {
+          "ea": "0x4ba97d",
+          "what": "类风格 ← 0x40"
+        },
+        {
+          "ea": "0x4ba9a8",
+          "what": "大图标 ← LoadIconA(辅助模块的资源实例, \"IDI_ICON1\")"
+        },
+        {
+          "ea": "0x4ba9c1",
+          "what": "小图标 ← 同一图标资源"
+        },
+        {
+          "ea": "0x4ba9cf",
+          "what": "光标 ← LoadCursorA(0, 0x7F00)"
+        },
+        {
+          "ea": "0x4ba9db",
+          "what": "菜单名 ← 0"
+        },
+        {
+          "ea": "0x4ba9e1",
+          "what": "类附加 ← 0"
+        },
+        {
+          "ea": "0x4ba9e7",
+          "what": "窗口附加 ← 0"
+        },
+        {
+          "ea": "0x4ba9ef",
+          "what": "背景刷 ← GetStockObject(4)"
+        },
+        {
+          "ea": "0x4baa02",
+          "what": "RegisterClassExA(&wc)"
+        },
+        {
+          "ea": "0x4baa0b",
+          "what": "返回 0 ⇒ 跳共享出口（无消息）"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-WINDOW-CREATE",
+      "sites": [
+        {
+          "ea": "0x4bb082",
+          "what": "入口调用建窗子过程（窗口创建在子过程内完成）"
+        },
+        {
+          "ea": "0x4ba3a4",
+          "what": "标题串 ← sprintf(\"%s\", 引擎标题缓冲)"
+        },
+        {
+          "ea": "0x4ba43a",
+          "what": "读配置 display:ForceScreen 并判 ==1"
+        },
+        {
+          "ea": "0x4ba455",
+          "what": "ForceScreen==1 时把 display:ScreenMode 写成 1"
+        },
+        {
+          "ea": "0x4ba476",
+          "what": "读 display:ScreenMode ⇒ 形态字"
+        },
+        {
+          "ea": "0x4ba4bb",
+          "what": "读 display:VirtualFullScreen"
+        },
+        {
+          "ea": "0x4ba4de",
+          "what": "查询外框尺寸（左/右边框）"
+        },
+        {
+          "ea": "0x4ba4f1",
+          "what": "查询外框尺寸（上/下边框）"
+        },
+        {
+          "ea": "0x4ba4f9",
+          "what": "查询外框尺寸（菜单高）"
+        },
+        {
+          "ea": "0x4ba4ff",
+          "what": "查询外框尺寸（标题高）"
+        },
+        {
+          "ea": "0x4ba577",
+          "what": "占满屏态：查询屏幕高"
+        },
+        {
+          "ea": "0x4ba57d",
+          "what": "占满屏态：查询屏幕宽"
+        },
+        {
+          "ea": "0x4ba519",
+          "what": "窗口态风格字 0x90CB0000"
+        },
+        {
+          "ea": "0x4ba523",
+          "what": "LoadMenuA(辅助模块实例, 110)"
+        },
+        {
+          "ea": "0x4ba544",
+          "what": "读 set:SaveWinPos"
+        },
+        {
+          "ea": "0x4ba56d",
+          "what": "读 set:WinPosTop ⇒ Y"
+        },
+        {
+          "ea": "0x4ba668",
+          "what": "读 set:WinPosLeft ⇒ X"
+        },
+        {
+          "ea": "0x4ba581",
+          "what": "占满屏态风格字 0x90000000"
+        },
+        {
+          "ea": "0x4ba5cf",
+          "what": "CreateWindowExA(...)"
+        },
+        {
+          "ea": "0x4ba5ae",
+          "what": "扩展风格字按形态算出（窗口态 0 / 占满屏态 8）"
+        },
+        {
+          "ea": "0x4ba688",
+          "what": "ShowWindow(hWnd, 入口 nCmdShow)"
+        },
+        {
+          "ea": "0x4ba68f",
+          "what": "UpdateWindow(hWnd)"
+        },
+        {
+          "ea": "0x4bb092",
+          "what": "建窗返回空 ⇒ 引擎对象析构后走共享出口"
+        },
+        {
+          "ea": "0x405769",
+          "what": "set:WinX ⇒ 引擎级客户区宽（索引默认表装载时写入）"
+        },
+        {
+          "ea": "0x405785",
+          "what": "set:WinY ⇒ 引擎级客户区高"
+        },
+        {
+          "ea": "0x4ba4e6",
+          "what": "读引擎级客户区宽（set:WinX 在索引装载时写入）"
+        },
+        {
+          "ea": "0x4ba4ee",
+          "what": "客户区宽 + 2×边框 = 窗口宽"
+        },
+        {
+          "ea": "0x4ba39e",
+          "what": "标题缓冲上限 0x100 字节"
+        }
+      ],
+      "functions": [
+        "sub_4BA310"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-WINDOW-ATTACH",
+      "sites": [
+        {
+          "ea": "0x4bb0c4",
+          "what": "ImmAssociateContext(hWnd, 0)"
+        },
+        {
+          "ea": "0x4bb10a",
+          "what": "窗口句柄写进引擎级服务窗口槽"
+        },
+        {
+          "ea": "0x4bb0dd",
+          "what": "判据：display:ScreenMode 非 0"
+        },
+        {
+          "ea": "0x4bb0ed",
+          "what": "GetMenu(hWnd)"
+        },
+        {
+          "ea": "0x4bb0f7",
+          "what": "辅助「操作菜单」(类别 1, hWnd, 菜单, 0)"
+        },
+        {
+          "ea": "0x4bb0fe",
+          "what": "DrawMenuBar(hWnd)"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-GRAPHICS-INIT",
+      "sites": [
+        {
+          "ea": "0x4bb40d",
+          "what": "引擎初始化入口（建窗之后、根脚本之前调用）"
+        },
+        {
+          "ea": "0x406730",
+          "what": "图形后端选择：set:CreateObject 最低位分流"
+        },
+        {
+          "ea": "0x406736",
+          "what": "旧式绘制路线：装载/建立绘制对象（失败写错误文本并返回 0）"
+        },
+        {
+          "ea": "0x498d0f",
+          "what": "Direct3DCreate9(32)"
+        },
+        {
+          "ea": "0x498d44",
+          "what": "GetAdapterDisplayMode(0)（虚表入口）"
+        },
+        {
+          "ea": "0x498d6e",
+          "what": "取得显示模式后读取设备 / 呈现相关配置（呈现参数构造起点）"
+        },
+        {
+          "ea": "0x498bc0",
+          "what": "设备创建前的分辨率/格式校验入口"
+        },
+        {
+          "ea": "0x4bb41a",
+          "what": "图形/引擎初始化返回 0 ⇒ 释放引擎对象并走共享出口"
+        }
+      ],
+      "functions": [
+        "sub_406730",
+        "sub_498CC0",
+        "sub_417800"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-EVENT-LOOP",
+      "sites": [
+        {
+          "ea": "0x4ba973",
+          "what": "注册窗口类时指定的唯一事件入口（窗口过程）"
+        },
+        {
+          "ea": "0x412372",
+          "what": "泵：PeekMessage(不移除)"
+        },
+        {
+          "ea": "0x412391",
+          "what": "泵：GetMessage(阻塞取一条)"
+        },
+        {
+          "ea": "0x4123c4",
+          "what": "GetMessage 返回 0 ⇒ 抛退出异常"
+        },
+        {
+          "ea": "0x4123d0",
+          "what": "TranslateMessage"
+        },
+        {
+          "ea": "0x4123dd",
+          "what": "DispatchMessage"
+        },
+        {
+          "ea": "0x4133fb",
+          "what": "泵第二处：Sleep 后 PeekMessage"
+        },
+        {
+          "ea": "0x41340c",
+          "what": "泵第二处：PeekMessage（有消息 ⇒ 回派发）"
+        },
+        {
+          "ea": "0x4b9689",
+          "what": "窗口过程：销毁消息 ⇒ 隐藏窗口"
+        },
+        {
+          "ea": "0x4b9691",
+          "what": "窗口过程：销毁消息 ⇒ PostQuitMessage(0)"
+        },
+        {
+          "ea": "0x4b9674",
+          "what": "窗口过程：关闭消息 ⇒ KillTimer(标识 2)"
+        },
+        {
+          "ea": "0x4b967b",
+          "what": "窗口过程：关闭消息 ⇒ DestroyWindow"
+        },
+        {
+          "ea": "0x4b9bbb",
+          "what": "窗口过程：鼠标移动 ⇒ SetTimer(标识 1, 100ms)"
+        },
+        {
+          "ea": "0x4b9bd0",
+          "what": "窗口过程：光标离开/按键 ⇒ KillTimer(标识 1)"
+        },
+        {
+          "ea": "0x4b9a17",
+          "what": "窗口过程：定时器 2 ⇒ 向自己投递 WM_ACTIVATEAPP"
+        },
+        {
+          "ea": "0x4bb50b",
+          "what": "主循环之前：SetTimer(标识 2, 10000ms, 无回调)"
+        },
+        {
+          "ea": "0x4bb517",
+          "what": "调用主循环"
+        },
+        {
+          "ea": "0x4b99dc",
+          "what": "周期定时器到期：SetThreadExecutionState(3) 的实参 3"
+        },
+        {
+          "ea": "0x4b99de",
+          "what": "周期定时器到期：调用 SetThreadExecutionState"
+        }
+      ],
+      "functions": [
+        "sub_4B92F0",
+        "sub_412290"
+      ],
+      "storage": [
+        "shape:T_Command@0xaab44"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RENDER-TARGET-20D",
+      "sites": [
+        {
+          "ea": "0x423770",
+          "what": "handler 入口（长度槽 ← 3）"
+        },
+        {
+          "ea": "0x42378f",
+          "what": "读第 1 个操作数（整型），读一次"
+        },
+        {
+          "ea": "0x42379b",
+          "what": "交给场景的『切换渲染目标』入口（接收者 = 场景）"
+        },
+        {
+          "ea": "0x4a50d7",
+          "what": "按无符号与 999 比较：大于 999 走后缓冲支"
+        },
+        {
+          "ea": "0x4a50e3",
+          "what": "纹理槽是否为空（空 ⇒ 错误通道）"
+        },
+        {
+          "ea": "0x4a50fc",
+          "what": "错误文本『纹理尚未创建』的格式化"
+        },
+        {
+          "ea": "0x4a5107",
+          "what": "错误通道上报（纹理未创建支）"
+        },
+        {
+          "ea": "0x4a5128",
+          "what": "纹理对象的只读询问（虚表入口）"
+        },
+        {
+          "ea": "0x4a5136",
+          "what": "从该询问的结果上取渲染表面（两个常量 0 作附加参数）"
+        },
+        {
+          "ea": "0x4a5148",
+          "what": "错误文本『渲染表面获取失败』"
+        },
+        {
+          "ea": "0x4a515e",
+          "what": "设备侧『设置渲染目标』请求（索引 0 + 表面）"
+        },
+        {
+          "ea": "0x4a5170",
+          "what": "错误文本『渲染目标设置失败』"
+        },
+        {
+          "ea": "0x4a51b7",
+          "what": "成功：当前渲染目标 ← 操作数"
+        },
+        {
+          "ea": "0x4a51df",
+          "what": "后缓冲支：取平台后缓冲（3 个常量 0 + 输出）"
+        },
+        {
+          "ea": "0x4a51f1",
+          "what": "错误文本『后缓冲获取失败』"
+        },
+        {
+          "ea": "0x4a521b",
+          "what": "后缓冲支：把后缓冲设为渲染目标"
+        },
+        {
+          "ea": "0x4a522d",
+          "what": "错误文本『渲染目标复位失败』"
+        },
+        {
+          "ea": "0x4a5247",
+          "what": "成功：当前渲染目标 ← 后缓冲哨兵（-1）"
+        },
+        {
+          "ea": "0x4ab1e1",
+          "what": "场景建立时：当前渲染目标 ← 后缓冲哨兵（初值）"
+        }
+      ],
+      "functions": [
+        "sub_423770",
+        "sub_4A50C0"
+      ],
+      "storage": [
+        "shape:T_Scene@0xb578",
+        "shape:T_Scene@0xa5d8"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RENDER-BLEND-33F",
+      "sites": [
+        {
+          "ea": "0x427a90",
+          "what": "handler 入口（长度槽 ← 7）"
+        },
+        {
+          "ea": "0x427ab1",
+          "what": "读第 2 个操作数（透明度）"
+        },
+        {
+          "ea": "0x427abc",
+          "what": "读第 3 个操作数（颜色）"
+        },
+        {
+          "ea": "0x427ac3",
+          "what": "透明度 > 255 ⇒ 255"
+        },
+        {
+          "ea": "0x427ada",
+          "what": "透明度 < 0 ⇒ 读第 1 个操作数（回退查表的键）"
+        },
+        {
+          "ea": "0x427ae6",
+          "what": "按第 1 个操作数查绘制项的当前颜色"
+        },
+        {
+          "ea": "0x427af8",
+          "what": "颜色 < 0 ⇒ 再读第 1 个操作数"
+        },
+        {
+          "ea": "0x427b04",
+          "what": "按第 1 个操作数取整条当前颜色"
+        },
+        {
+          "ea": "0x427b0f",
+          "what": "读第 1 个操作数（模式值）"
+        },
+        {
+          "ea": "0x427b1c",
+          "what": "合成：透明位置换进颜色的高位区（位段属机器细节）"
+        },
+        {
+          "ea": "0x427b1f",
+          "what": "模式格 ← 第 1 个操作数（原样）"
+        },
+        {
+          "ea": "0x427b48",
+          "what": "混合颜色格 ← 合成结果"
+        },
+        {
+          "ea": "0x4530e7",
+          "what": "效应对象构造器写自己的 vftable（对象身份锚）"
+        },
+        {
+          "ea": "0x453120",
+          "what": "效应对象初值：模式格 ← 0"
+        },
+        {
+          "ea": "0x453126",
+          "what": "效应对象初值：颜色格 ← -1（无颜色哨兵）"
+        },
+        {
+          "ea": "0x453636",
+          "what": "渲染路径读模式格（消费端分支点）"
+        },
+        {
+          "ea": "0x45372c",
+          "what": "渲染路径读颜色格并交给效应对象的子对象"
+        }
+      ],
+      "functions": [
+        "sub_427A90",
+        "sub_4ADD60",
+        "sub_4530B0",
+        "sub_4535F0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RENDER-TEXT-204",
+      "sites": [
+        {
+          "ea": "0x423390",
+          "what": "handler 入口（长度槽 ← 9）"
+        },
+        {
+          "ea": "0x4233af",
+          "what": "读第 3 个操作数（整型，纵坐标）"
+        },
+        {
+          "ea": "0x4233b9",
+          "what": "读第 2 个操作数（整型，横坐标）"
+        },
+        {
+          "ea": "0x4233c3",
+          "what": "读第 4 个操作数（按文本读）"
+        },
+        {
+          "ea": "0x4233cd",
+          "what": "读第 1 个操作数（整型，纹理槽号）"
+        },
+        {
+          "ea": "0x4233d9",
+          "what": "交给字体对象的『把文本画进纹理』入口"
+        },
+        {
+          "ea": "0x456731",
+          "what": "入口条件 1：纹理槽为空 ⇒ 整条跳过"
+        },
+        {
+          "ea": "0x45674d",
+          "what": "入口条件 2：纹理对象的只读询问返回 0 ⇒ 整条跳过"
+        },
+        {
+          "ea": "0x456757",
+          "what": "入口条件 3：文本首字节为 0 ⇒ 整条跳过"
+        },
+        {
+          "ea": "0x456770",
+          "what": "字体对象的一个布尔开关 ← 0"
+        },
+        {
+          "ea": "0x456787",
+          "what": "按渲染状态格决定是否把当前字体选进绘制表面（平台请求）"
+        },
+        {
+          "ea": "0x456798",
+          "what": "取文本度量（平台请求，只读；用于纵向对位）"
+        },
+        {
+          "ea": "0x4567d5",
+          "what": "绘制入口 A（多带一个引擎侧参数）"
+        },
+        {
+          "ea": "0x4567fe",
+          "what": "绘制入口 B"
+        },
+        {
+          "ea": "0x46f31b",
+          "what": "取该纹理的尺寸 / 描述（平台请求）"
+        },
+        {
+          "ea": "0x46f342",
+          "what": "加锁该纹理的表面"
+        },
+        {
+          "ea": "0x46f5bc",
+          "what": "取字形位图长度（平台请求，只读）"
+        },
+        {
+          "ea": "0x46f5c3",
+          "what": "字形位图长度格 ← 请求结果"
+        },
+        {
+          "ea": "0x46f5d5",
+          "what": "暂存缓冲 1 重建（释放旧、按长度新建）"
+        },
+        {
+          "ea": "0x46f5e9",
+          "what": "暂存缓冲 2 重建"
+        },
+        {
+          "ea": "0x46f60b",
+          "what": "取字形位图本体（平台请求）"
+        },
+        {
+          "ea": "0x46f7bd",
+          "what": "把字形位图写进已加锁的表面"
+        },
+        {
+          "ea": "0x46f88b",
+          "what": "特殊字形路径：先解锁"
+        },
+        {
+          "ea": "0x46f92c",
+          "what": "特殊字形路径：再重新加锁"
+        },
+        {
+          "ea": "0x46fa41",
+          "what": "解锁该纹理的表面"
+        },
+        {
+          "ea": "0x46f434",
+          "what": "字体对象开关 ← 0（临时字体清理支）"
+        },
+        {
+          "ea": "0x46f468",
+          "what": "字体对象开关 ← 1（临时字体已建支）"
+        }
+      ],
+      "functions": [
+        "sub_423390",
+        "sub_456710",
+        "sub_46F2D0",
+        "sub_46D9F0"
+      ],
+      "storage": [
+        "shape:T_Command@0x14d30",
+        "shape:T_Font@0x410",
+        "shape:T_Font@0x454",
+        "shape:T_Font@0x4d4",
+        "shape:T_Font@0x580",
+        "shape:T_Font@0x584",
+        "shape:T_Font@0x588",
+        "shape:T_Font@0x3147c",
+        "shape:T_Font@0x35598",
+        "shape:T_Scene@0xa5d8",
+        "shape:T_Font@0x40c",
+        "shape:T_Font@0x43c",
+        "shape:T_Font@0x55c"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
+      ]
     }
   ]
 }
