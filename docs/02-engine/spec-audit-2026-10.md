@@ -572,3 +572,65 @@ S1 共 11 条（`05-boot` 的定时器 / 主循环出口 / 消息泵归属 / 中
 字体成员定位、七实参入口未逐字核、加锁 / 写入与 present 的时序、透明度覆盖颜色高 8 位等残差；
 `RES-RENDER-BLEND-NOCREATE` 改为「已逐字核：未命中返回 −1，不进建默认项分支」。三条规则仍是 `draft`：
 证据目前只有站点形状守卫（assets 档、非语义证据），要升 `reviewed` 需补 accepted 台账观察或 `@env pure` 守卫。
+
+## 十七、窗口建窗算术 / 0x204 字体对象澄清 + Electron/Pixi 落地（2026-10-22）
+
+**范围**：`06-window` 的建窗宽高 / 窗口附加次序 / 菜单实参；`60-ops-render` 的
+`CORE-OPS-RENDER-TEXT-204`（字体对象 / 主副色 / 绘制模式 / 对位 / 加锁失败 / Shift-JIS / 特殊字形）；
+`60-ops-list` 的 `0x78` / `0x2db` 接收者与字段；`60-ops-scalar` 的 `0x76` / `0x77` 颜色表述；
+`bindings.json` / `audit.json`；以及 `apps/emulator-new` 的 Electron 窗口壳 + Pixi 渲染进程。
+
+**取证**（由两个独立 subagent 只读取证；锚只锚 EA）：
+
+- 建窗：`0x4BA4DC`–`0x4BA517` 逐字证明**宽 = 客户区宽 + 2 × 边框宽**、
+  **高 = 客户区高 + 2 × 边框高 + 标题高 + 菜单高**；边框宽 / 高各只查一次（单边厚度、对称假设）；
+  无 `AdjustWindowRect*`；客户区尺寸在索引装载时抄进引擎缓存（`0x405769` / `0x405785`，调用点 `0x414EC6`），
+  建窗读缓存（`0x4BA4E6` / `0x4BA50E`）；0 原样、无兜底；640 / 480 只是构造期初值（`0x415ABD` / `0x415AC7`）。
+- 附加：`0x4BB0C4` 解绑 IME → `0x4BB0ED` `GetMenu` → `0x4BB0F7` 辅助入口 `(1, hWnd, hMenu, 0)` →
+  `0x4BB0FE` `DrawMenuBar` → `0x4BB10A` 写服务窗口槽；启动期**没有** `SetMenu`（菜单是建窗实参，
+  `0x4BA523` → `0x4BA5A2`）。
+- 0x204：handler `sub_423390`（`0x423390`）→ 请求本体 `sub_456710`（`0x456710`）；
+  字体对象是引擎级单例（`Engine+0x14D30`，构造 `0x415708/0x41570E`）；字体 = 一份 LOGFONT 描述 + 物化 HFONT；
+  主色 / 副色 = `Font+0x550/+0x554`（`0x41F3D5` / `0x41F435`，默认 `0x4655FB` / `0x465605`）；
+  绘制模式 = `Font+0x55C`（`0x41F476`，默认 1 / `0x465611`）；对位模式 = `Font+0x313D0`（`0x426526`，默认 0 / `0x465617`）；
+  三入口条件在 `0x456731/0x45674d/0x456757`；清开关 `0x456766`；`==2` 才 SelectObject `0x456770`；
+  `GetTextMetrics` `0x456798`；对位修正 `0x45679E`；模式分派 `0x4567b9/0x4567fe`；
+  加锁失败写 `LockTexture エラー`（`0x46F342`）；特殊字形 `0xF042/0xF043`（`0x46F869`）→ 解锁 `0x46F88B` → 矩形 → 重锁 `0x46F92C`；
+  文本是 Shift-JIS（`0x46F3D4` / `0x46F4CD` / `0x8140`）。
+- 交叉修正：`0x78` 写的是字体对象 `+0x55C`（绘制模式）、`0x2db` 写 `+0x313D0`（对位模式），
+  不是「列表 / 消息子系统」；`0x76/0x77` 是主色 / 副色。
+
+**spec 变更**：
+
+- `06-window`：建窗公式拆成「四类量 + 两个公式」；补「客户区尺寸来自索引装载缓存 / 0 无兜底 / 640·480 只是构造期初值」；
+  窗口附加次序改为「解绑 IME →（仅窗口态）取菜单 → 辅助入口 `(1, 窗口, 菜单, 0)` → 重画菜单栏 → 记录服务窗口」；
+  明写启动期无 `SetMenu`；`RES-BOOT-WINDOW-CLIENT-VS-SCREEN` 改成「重设窗口路径读同一对缓存；改键后是否重新抄入未定」。
+- `60-ops-render`：0x204 字体 / 颜色 / 绘制模式 / 对位 / 特殊字形 / 加锁失败全部事实化；
+  编码明确 Shift-JIS；推进量不再写成「每字 = 自身量度」，新增 `RES-RENDER-TEXT-ADVANCE`；
+  收口 `FONT-SELECT` / `DRAW-PATH` / `FONT-STATE` / `FONT-SWITCHES` / `LOCK`（部分）、`SPECIAL`（部分）、`COLOR`；
+  新增 `FONT-SELECT-WHY` / `FONT-FALLBACK` / `FONT-SHARED-METRICS` / `FONT-INSTANCE` / `GLYPH-RASTER` /
+  `SURFACE-FORMAT` / `PUA` / `ADVANCE` / `PRESENT`。
+- `60-ops-list` / `60-ops-scalar`：接收者改为字体对象，字段改为绘制模式 / 对位模式 / 主色 / 副色。
+- `bindings` / `audit`：修 `0x4ba577/7d` 屏幕宽高互换、`0x4ba4de/f1` 边框宽高、`0x456770` 清开关错标；
+  补 26 个 site EA 与 `T_Font` / `T_Renderer` / `T_Command` 指针。
+
+**独立复审**（只读，两轮）：
+
+- 第一轮：S1 3 条（推进量写成无条件；正文「一份」与 PUA 残差「数份」自相矛盾；bindings 错锚 `T_Font@0x35594`）+
+  S2 6 条（标题高方向；「改键只影响重设窗口」无证据；SetMenu 排他措辞漏第三处；加锁错列为入口条件；槽号越界口径丢失；正文出现 `LOGFONT`）。
+- 处置：S1 3 条全关（推进量降为残差、PUA 降为「是否另有第二份未定」、删错锚）；S2 6 条全关；
+  复审新指出 `60-ops-list` 把「对位 == 1」的判据归给重建入口（实际在 0x204 请求本体）——已改成「用于选择字体度量」+ 指向离屏文字条；
+  另收 5 条 S3（bindings 加法次序 / Markdown 字段名 / 未定义「入口乙」 / 状态指针 / 重设路径站点）。
+- **结论**：S1 / S2 均关闭，**可接受为 draft**（⛔ 不是「与真机等价」；像素 / 字形栅格化 / 16·32 位表面 / PUA 仍为残差）。
+
+**实现**（`apps/emulator-new`，spec 的消费者）：`src/core/window.ts` + `src/core/render.ts` 平台无关；
+`src/platform/electron/**` 为 Electron 主进程 / preload / Pixi renderer（renderer 走 `vite build`，其余由 Node 剥壳直接跑）。
+窗口部分显式 ignored 22 条（菜单内容 / IME / 图标 / 光标 / 类与窗口风格位 / 外框尺寸求和 / 输入转发 / 旧式绘制路线等），
+在 UI diagnostics 与 `session.ignored` 两处可见。`0x20d` / `0x33f` / `0x204` 走真实 handler；
+`--demo` / `--smoke` 用真实 handler 驱动 `0x1f8 → 0x204 → 0x1fb → 0x33f → 0x20d`，截图文字可见。
+真实安装入口 `--install /Users/nekosu/Documents/Projects/amayui-cn/raw --key 0` 已跑到根脚本 `SYSTEM4.BIN`
+（96196 步 / 314 tick，停在未服务门位 `0x2000`）。
+
+**门禁**：`pnpm tools spec validate` 13/13 + 站点对账绿；`pnpm test` 703/703；`pnpm typecheck` 六工程绿；
+`pnpm test:assets` 仅两条既有 `corpus-cli-write` 的 Windows 路径环境失败（与本轮无关）；
+`electron --no-sandbox apps/emulator-new --smoke` EXIT=0；新增变异 5 条（窗口风格 / 定时器 / 边框 ×2 / 0x20d 阈值 / 0x204 清开关）全部按预期红。

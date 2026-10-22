@@ -33,6 +33,18 @@ export function encodeLatin1(text: string): Uint8Array {
   return out;
 }
 
+/** CP932（Windows 日文 ANSI）解码器；只用于**显示**（引擎字符串仍是字节串）。 */
+const CP932 = new TextDecoder('shift_jis');
+
+/**
+ * 把核心的 latin1 字节串按 **CP932** 解成 Unicode，**只用于诊断 / 日志显示**。
+ * ★ 不要用它做查表 / 比较：引擎的字体名、路径等按字节比较（`0x2de` 的 `memcmp`）。
+ * ★ 非法字节序列由 `TextDecoder` 替换；显示层不抛。
+ */
+export function decodeCp932(text: string): string {
+  return CP932.decode(encodeLatin1(text));
+}
+
 /** 小端 u32 读（越界 ⇒ 抛，不补 0） */
 export function readU32LE(bytes: Uint8Array, offset: number): number {
   if (!Number.isInteger(offset) || offset < 0 || offset + 4 > bytes.length) {

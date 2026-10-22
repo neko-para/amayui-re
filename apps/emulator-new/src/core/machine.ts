@@ -13,6 +13,8 @@ import { readU32LE } from './bytes.ts';
 import type { OpcodeRow } from './spec.ts';
 import type { ConfigStore } from './config.ts';
 import { HANDLERS } from './handlers.ts';
+import { initialRenderState } from './render.ts';
+import type { RenderHost, RenderState } from './render.ts';
 
 export interface Operand {
   type: number;
@@ -224,6 +226,44 @@ export interface EffectRecord {
   detail: Record<string, unknown>;
 }
 
+/**
+ * 效果的**归属**（只用于输出分级，不改变效果本身）：
+ * - `internal`：引擎数据已被建模的写（`string.set` / `array.*` / `engine.scalar.*`）——CLI 已经"处理"了，不是待办；
+ * - `external`：真正交给平台 / 外部模块的请求（音频、纹理、输入、宿主字体表）；
+ * - `unmodeled`：请求目标尚未建模（`engine.forward` / `subsystem.request` / `vtable.request` …）。
+ * ★ `--trace` 默认只打印 `external + unmodeled`；`--trace-all` 才包含 `internal`。
+ */
+export type EffectScope = 'internal' | 'external' | 'unmodeled';
+
+const INTERNAL_EFFECT_KINDS = new Set([
+  'string.set',
+  'array.fill',
+  'array.lookup',
+  'array.copy',
+  'engine.scalar.write',
+  'engine.scalar.pair',
+  'engine.indirect-write',
+]);
+
+const UNMODELED_EFFECT_KINDS = new Set([
+  'engine.request',
+  'engine.forward',
+  'engine.event-flush',
+  'subsystem.request',
+  'vtable.request',
+  'container.request',
+  'ui.list.request',
+  'text.request',
+  'message.request',
+]);
+
+/** 一个效果 kind 的归属（未知 kind 按外部请求处理，宁可多打印也不静默）。 */
+export function effectScope(kind: string): EffectScope {
+  if (INTERNAL_EFFECT_KINDS.has(kind)) return 'internal';
+  if (UNMODELED_EFFECT_KINDS.has(kind) || kind.endsWith('-unmodeled')) return 'unmodeled';
+  return 'external';
+}
+
 export type Stop =
   | { kind: 'exit' }
   | { kind: 'stop-opcode'; index: number; offset: number; opcode: number }
@@ -257,6 +297,13 @@ export interface MachineOptions {
   key: number;
   /** 虚拟时钟步长（毫秒）：**仿真参数**，不是引擎常量（引擎没有固定帧率） */
   tickMs?: number;
+  /**
+   * **宿主毫秒时钟**（可选）：给了就覆盖虚拟步长 —— `tick()` 读它而不是 `now += tickMs`。
+   * ★ 规范说时间从宿主来（`CORE-TIMING-CLOCK`）；headless 的虚拟步长是**显式仿真参数**，
+   *   窗口前端应传真实时钟，否则 5 秒的渐变会在约 1 秒墙钟内被快进完。
+   * ★ 返回值应是单调递增的毫秒（整数或小数都可；本层原样使用）。
+   */
+  clock?: () => number;
   /** 未写过的浮点槽的读法：`throw`（缺省）或 `zero`（显式选择 + 记诊断） */
   uninitializedFloat?: 'throw' | 'zero';
   /** 配置库（`55-config.md`）；缺省 = 未建立（配置 opcode 会响亮失败） */
@@ -269,6 +316,20 @@ export interface MachineOptions {
    *   （`CHECKCONFIG` 把找不到的字体名换成回退名）。⛔ 本仓**不伪造**系统字体枚举。
    */
   fontNames?: string[];
+  /**
+   * **渲染宿主**（`60-ops-render.md` 的平台边界）：`0x20d` / `0x204` 的外部请求走它。
+   * ★ 缺省 = **没有渲染宿主**：取不到表面 / 设不了目标 ⇒ `0x20d` 走错误通道（⛔ 不假装成功），
+   *   `0x204` 的入口条件 ② 因此不成立（什么都不做），并记一条 `render-host-missing` 诊断。
+   * ★ 平台实现（Electron / Pixi）与 CLI 的 `HeadlessRenderHost` 都满足 `RenderHost`。
+   */
+  renderHost?: RenderHost;
+  /**
+   * **迭代头的平台泵点**（`70-vm.md` 的 `CORE-VM-LOOP`：每次迭代先在迭代头按节流决定是否泵一次宿主消息）。
+   * ★ `run` 的每一轮在**读时钟 / 过门之前**调它一次（泵完仍继续本迭代的其余步骤）。
+   *   Electron 主循环把 `WindowSession.pump()` 接在这里，窗口 close / timer 消息才能在脚本执行期间派发。
+   * ★ 缺省 `undefined` ⇒ **一次都不调**（不进微任务、不改既有行为）。
+   */
+  onIteration?: () => void | Promise<void>;
 }
 
 export class Machine {
@@ -277,6 +338,8 @@ export class Machine {
   readonly handlers: Map<number, Handler> = HANDLERS;
   /** 虚拟时钟步长（毫秒；仿真参数） */
   readonly tickMs: number;
+  /** 宿主毫秒时钟（缺省 undefined ⇒ 用 `now += tickMs` 的虚拟时钟） */
+  readonly clock: (() => number) | undefined;
   /** 未写过的浮点槽策略 */
   readonly uninitializedFloat: 'throw' | 'zero';
   /** 配置库（缺省 undefined：配置 opcode 响亮失败，而不是静默 0） */
@@ -285,6 +348,17 @@ export class Machine {
   readonly loadScript: ((id: number) => Promise<Uint8Array | null>) | undefined;
   /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 查表未命中 ⇒ 引擎走回退分支） */
   readonly fontNames: string[];
+  /** 渲染宿主（缺省 `undefined` = 没有后端；见 `MachineOptions.renderHost`） */
+  readonly renderHost: RenderHost | undefined;
+  /** 迭代头的平台泵点（缺省 `undefined` = 不泵；见 `MachineOptions.onIteration`） */
+  readonly onIteration: (() => void | Promise<void>) | undefined;
+  /**
+   * **渲染状态**（`60-ops-render.md`）：当前渲染目标、场景混合的两个格、字体对象。
+   * ★ spec 说当前目标是"场景记录里的一个整数字段"、混合的两个格在"场景持有的效应对象"上；
+   *   本层把它们收在 `render` 这**一处**（单一真源，⛔ 不往 `scene` 里再复制一份）。
+   * ★ 初值见 `initialRenderState()`（目标 = 后缓冲哨兵、模式 = 0、颜色 = 无颜色）。
+   */
+  render: RenderState = initialRenderState();
   /**
    * **show-logo 标志**（引擎 `Engine+0x5EB5C`）：初始化置 **1**（逐字 `0x415AE0 mov [esi+5EB5Ch], 1`）。
    * `0x130` 读它；`0x9` 的复位会清 0（**本层未建模**，见 `0x9` 条目与残差）。
@@ -406,10 +480,13 @@ export class Machine {
     this.table = opts.table;
     this.key = opts.key;
     this.tickMs = opts.tickMs ?? 16;
+    this.clock = opts.clock;
     this.uninitializedFloat = opts.uninitializedFloat ?? 'throw';
     this.config = opts.config;
     this.loadScript = opts.loadScript;
     this.fontNames = [...(opts.fontNames ?? [])];
+    this.renderHost = opts.renderHost;
+    this.onIteration = opts.onIteration;
     // 根脚本落在 **0 号槽**（引擎：根帧的父帧号是 −1，当前帧号从 0 起）
     this.slots = [{ body: opts.body, ip: 0, frame: this.freshFrame(), parent: -1, length: 0 }];
     this.cur = 0;
@@ -437,7 +514,9 @@ export class Machine {
 
   /** 虚拟时钟前进一格，并把场景时钟推到新读数（引擎每迭代读一次毫秒时钟） */
   tick(): void {
-    this.now += this.tickMs;
+    // ★ 宿主时钟优先：窗口前端传真实毫秒时钟；headless 不传 ⇒ 虚拟步长（显式仿真参数）。
+    //   不在这里做"至少走 tickMs"的夹取：宿主时钟慢/快都应如实反映；仿真侧要固定步长就显式传 tickMs。
+    this.now = this.clock ? this.clock() : this.now + this.tickMs;
     this.ticks += 1;
     this.scene.prev = this.scene.now;
     this.scene.now = this.now;
@@ -601,11 +680,18 @@ export class Machine {
    * 跑到：显式停止条件 / 退出 / 缺口 / 步数上限。
    * ★ 缺口：没有 handler 的 opcode **不执行**，`ip` 停在它前面（由调用方决定是红还是记缺口）。
    * ★ `async`：处理器可以等待 IO（换脚本 / 装载帧）；分派循环 `await` 它，异常变成同一个 rejection。
+   * ★ 每次迭代头先调一次注入的 `onIteration`（平台消息泵；缺省不调、连一次 `await` 都不多付）。
    */
   async run(opts: { stopAtOpcode?: number; maxSteps?: number; maxTicks?: number } = {}): Promise<RunResult> {
     const maxSteps = opts.maxSteps ?? 10_000_000;
-    const maxTicks = opts.maxTicks ?? 10_000_000;
+    // ★ 虚拟时钟用迭代数兜底（防死循环）；**宿主时钟**下迭代数与墙钟不成比例
+    //   （5 秒的渐变可能跑出上千万次门迭代）⇒ 不把迭代数当时间上限，
+    //   由窗口关闭 / 平台自己的超时来停止。CLI 不传 clock ⇒ 仍是 10M 的安全阀。
+    const maxTicks = opts.maxTicks ?? (this.clock ? Number.POSITIVE_INFINITY : 10_000_000);
     for (;;) {
+      // 迭代头（CORE-VM-LOOP）：先泵一次宿主消息（节流由平台 / 注入方决定），再读时钟、过门。
+      // ★ 泵完仍继续本迭代的其余步骤；缺省不泵（连一次 `await` 都不多付）。
+      if (this.onIteration) await this.onIteration();
       if (this.halted) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'exit' } };
       if (this.steps >= maxSteps) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'step-limit', index: this.steps } };
       if (this.ticks >= maxTicks) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'tick-limit', index: this.steps } };

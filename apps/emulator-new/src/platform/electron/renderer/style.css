@@ -1,0 +1,228 @@
+/*
+ * apps/emulator-new/src/platform/electron/renderer/style.css
+ *
+ * ★ 只服务 diagnostics 面板与画布容器；没有主题系统。字体统一使用 Amayui CN（更纱黑体 cnjp）。
+ * ★ 面板用 `position: fixed` + 半透明底：它叠在渲染输出上，**不改画布尺寸**
+ *   （画布尺寸是 `init` 给的客户区像素，⛔ 不要用面板撑开 body 再让 canvas 跟着变）。
+ */
+
+:root {
+  color-scheme: dark;
+  --panel-bg: rgba(12, 14, 18, 0.82);
+  --panel-border: #3a4454;
+  --panel-fg: #d7dee8;
+  --panel-dim: #8d9aab;
+  --accent-warn: #f0b45c;
+  --accent-bad: #ef7d7d;
+  --accent-ok: #7fc8a9;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  color: var(--panel-fg);
+  font-family: 'Amayui CN', ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* 画布容器：铺满窗口；Pixi 的 canvas 在它里面居中（1:1 像素，不拉伸） */
+#stage-host {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
+#stage-host canvas {
+  display: block;
+  /* 画布是客户区像素的 1:1 呈现；窗口 / 占满屏的形态由窗口本身决定（见 diagnostics） */
+  outline: 1px solid rgba(120, 140, 170, 0.35);
+}
+
+/* diagnostics 面板 */
+.diagnostics {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  width: min(460px, 46vw);
+  max-height: calc(100% - 16px);
+  overflow: auto;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  backdrop-filter: blur(4px);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+
+.diagnostics.is-collapsed {
+  width: auto;
+  max-height: none;
+  overflow: hidden;
+}
+
+.diagnostics__header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--panel-border);
+  position: sticky;
+  top: 0;
+  background: var(--panel-bg);
+}
+
+.diagnostics__summary {
+  flex: 1;
+  color: var(--panel-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diagnostics__toggle {
+  flex: none;
+  background: transparent;
+  color: var(--panel-fg);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.diagnostics__toggle:hover {
+  border-color: var(--panel-dim);
+}
+
+.diagnostics__body {
+  padding: 6px 8px 8px;
+}
+
+.diagnostics.is-collapsed .diagnostics__body {
+  display: none;
+}
+
+.diagnostics section + section {
+  margin-top: 8px;
+}
+
+.diagnostics h2 {
+  margin: 0 0 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--panel-dim);
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.diagnostics ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.diagnostics li {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diagnostics .kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 8px;
+  row-gap: 1px;
+  margin: 0;
+}
+
+.diagnostics .kv dt {
+  color: var(--panel-dim);
+  white-space: nowrap;
+}
+
+.diagnostics .kv dd {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diagnostics .tag {
+  display: inline-block;
+  padding: 0 4px;
+  margin-right: 4px;
+  border-radius: 3px;
+  border: 1px solid var(--panel-border);
+  font-size: 10px;
+}
+
+.diagnostics .tag--warn {
+  color: var(--accent-warn);
+  border-color: rgba(240, 180, 92, 0.5);
+}
+
+.diagnostics .tag--bad {
+  color: var(--accent-bad);
+  border-color: rgba(239, 125, 125, 0.5);
+}
+
+.diagnostics .tag--ok {
+  color: var(--accent-ok);
+  border-color: rgba(127, 200, 169, 0.5);
+}
+
+.diagnostics .muted {
+  color: var(--panel-dim);
+}
+
+.diagnostics table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11px;
+}
+
+.diagnostics th,
+.diagnostics td {
+  text-align: left;
+  padding: 1px 4px;
+  border-bottom: 1px solid rgba(58, 68, 84, 0.5);
+  vertical-align: top;
+}
+
+.diagnostics th {
+  color: var(--panel-dim);
+  font-weight: 500;
+}
+
+/* 致命错误遮罩 */
+.fatal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  padding: 24px;
+  background: rgba(20, 6, 6, 0.94);
+  color: #f2dcdc;
+  overflow: auto;
+}
+
+.fatal h1 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.fatal__text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--accent-bad);
+}
+
+.fatal__hint {
+  max-width: 70ch;
+  color: #c9b8b8;
+}

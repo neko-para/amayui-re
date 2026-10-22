@@ -5,13 +5,15 @@
  * ★ 取件类（`0x3` / `0x6` / `0x9`）是 `async`：核心的 IO 全部经注入的 `Machine.loadScript`
  *   回调 + `await`，所以同一份处理器在 Node / 浏览器里都能跑。
  */
-import { readU32LE } from './bytes.ts';
+import { decodeCp932, readU32LE } from './bytes.ts';
 import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, VoiceGroup } from './machine.ts';
 import { FRAME_SLOT_COUNT, MOVIE_BIT, WAIT_BIT } from './machine.ts';
 import { encodeInt, readAddress, readFloat, readInt, readIntAt, readText, writeBitsAt, writeFloat, writeInt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
 import { arrayStrideFor, resolveAddress } from './address.ts';
 import type { PoolTag } from './address.ts';
+import { NO_COLOR, RENDER_TARGET_BACK_BUFFER } from './render.ts';
+import type { RenderHost } from './render.ts';
 
 export type { Machine, Operand };
 
@@ -286,6 +288,209 @@ function scene320(m: Machine, ops: Operand[]): void {
   m.scene.dirty = 1;
 }
 
+/* ──────────────────────────── 渲染请求边界（60-ops-render.md） ──────────────────────────── */
+
+/**
+ * `0x20d` 的**分支阈值**：槽号 < 1000 ⇒ 纹理槽；≥ 1000（按无符号比较）⇒ 后缓冲。
+ * ★ 它只是本条的分支阈值，**不是**纹理族的范围检查（纹理族对编号不做范围检查）。
+ */
+const RENDER_TARGET_SLOT_LIMIT = 1000;
+
+/**
+ * 取渲染宿主；没有注入 ⇒ `null`，并记一条 `render-host-missing` 诊断。
+ * ★ ⛔ 不假装有后端：没有宿主时 `0x20d` 的取表面 / 设目标一律按失败处理（写错误通道），
+ *   `0x204` 的入口条件 ② 因此不成立（什么都不做）。
+ */
+function renderHostOf(m: Machine): RenderHost | null {
+  if (m.renderHost) return m.renderHost;
+  if (!m.diagnostics.some((d) => d.kind === 'render-host-missing')) {
+    m.diagnostics.push({ kind: 'render-host-missing' });
+  }
+  return null;
+}
+
+/**
+ * 0x20d 设置渲染目标（CORE-OPS-RENDER-TARGET-20D）。
+ *
+ * 读**一个**操作数（纹理槽号），按整数读、按**无符号**比较：
+ * - < 1000 ⇒ 该槽的纹理：槽里没有对象 ⇒ 错误通道（**不问宿主**）；取表面 / 设目标失败 ⇒ 错误通道；
+ *   成功 ⇒ 当前目标 = 槽号。
+ * - ≥ 1000（含负数）⇒ 后缓冲：取后缓冲 + 设目标；成功 ⇒ 当前目标 = 「后缓冲」哨兵。
+ * ★ 所有失败都发生在**写当前目标之前**（失败时该格保持原值）。
+ * ★ 成功路径的次序是合同：先取表面 → 再设目标 → **再归还表面** → 最后写当前目标。
+ * ★ 本条不建纹理、不改纹理槽 / 绘制项 / 脏标记；错误文本内容本版不规定（`RES-RENDER-TARGET-TEXT`）。
+ */
+async function renderTarget20d(m: Machine, ops: Operand[]): Promise<void> {
+  const slot = readInt(m, ops, 1);
+  // ★ 无符号比较：负数落在「后缓冲」那一支（不是"槽号越界"，那是合法的复位入口）
+  if ((slot >>> 0) < RENDER_TARGET_SLOT_LIMIT) {
+    if (!m.scene.textureObjects.has(slot)) {
+      m.scene.errorBuffer = `テクスチャ${slot}は作成されていません．`;
+      return;
+    }
+    const host = renderHostOf(m);
+    if (host === null) {
+      m.scene.errorBuffer = `テクスチャ${slot}のレンダリングサーフェスを取得できません．`;
+      return;
+    }
+    const surface = await host.getRenderSurface(slot);
+    if (surface === null) {
+      m.scene.errorBuffer = `テクスチャ${slot}のレンダリングサーフェスを取得できません．`;
+      return;
+    }
+    const ok = await host.setRenderTarget(surface);
+    await host.releaseSurface(surface); // 成功 / 失败路径都归还，且在写当前目标之前
+    if (!ok) {
+      m.scene.errorBuffer = `テクスチャ${slot}をレンダリングターゲットに設定できません．`;
+      return;
+    }
+    m.render.target = slot;
+    return;
+  }
+  const host = renderHostOf(m);
+  if (host === null) {
+    m.scene.errorBuffer = 'バックバッファを取得できません．';
+    return;
+  }
+  const surface = await host.getBackBuffer();
+  if (surface === null) {
+    m.scene.errorBuffer = 'バックバッファを取得できません．';
+    return;
+  }
+  const ok = await host.setRenderTarget(surface);
+  await host.releaseSurface(surface);
+  if (!ok) {
+    m.scene.errorBuffer = 'バックバッファをレンダリングターゲットに設定できません．';
+    return;
+  }
+  m.render.target = RENDER_TARGET_BACK_BUFFER;
+}
+
+/**
+ * 0x33f 设置场景混合（CORE-OPS-RENDER-BLEND-33F）。
+ *
+ * 读序是 **2 → 3 →（按需）1 →（按需）1 → 1**：前两个总先读；第 1 个只在
+ * 「透明度 < 0」/「颜色 < 0」两种回退时被读，最后写模式时再读一次。
+ * - 归一化：透明度 > 255 ⇒ 255；< 0 ⇒ 编号 1 指向的**绘制项**当前颜色的透明度；
+ *   颜色 < 0 ⇒ 该绘制项的当前颜色。该绘制项**不存在 ⇒ 无颜色哨兵**，⛔ 本条**不建**默认绘制项。
+ * - 合成：颜色低 24 位 = 颜色（归一化后），高 8 位 = 透明度。
+ * - 写两个格：模式 ← 第 1 个操作数**原样**（不归一、不夹取、不查表）；颜色 ← 合成结果。
+ * ★ **不发外部请求**（⛔ 不调 RenderHost）、**不置脏标记 / animating**。
+ * ★ 与场景 / 颜色族的共用口径的两处差别（spec 明写）：回退来源是绘制项（不是本条上次写的值），
+ *   且不建默认绘制项。
+ */
+function blend33f(m: Machine, ops: Operand[]): void {
+  let alpha = readInt(m, ops, 2);
+  const color = readInt(m, ops, 3);
+  /**
+   * 回退来源：编号 1 指向的绘制项的当前颜色。
+   * ★ 每次回退各自读一次第 1 个操作数（读序合同里是"（按需）1 →（按需）1"）；
+   *   绘制项不存在 ⇒ 无颜色哨兵（⛔ 不建记录）。
+   */
+  const fallback = (): number => m.scene.drawItems.get(readInt(m, ops, 1))?.colorFrom ?? NO_COLOR;
+  if (alpha > 255) alpha = 255;
+  else if (alpha < 0) alpha = fallback() >>> 24;
+  const c = color < 0 ? fallback() : color;
+  const mode = readInt(m, ops, 1);
+  m.render.blendMode = mode;
+  m.render.blendColor = (((c & 0xffffff) | (alpha << 24)) >>> 0);
+}
+
+/**
+ * `0x204` 第 4 个操作数按**文本**读：类型 5 的字节串、类型 2 的内联文本（先逐字节取反再解码）、
+ * **数值型 ⇒ 十进制文本**。
+ *
+ * ★ spec 只给形态，**符号 / 宽度 / 浮点格式本版不规定**（`RES-RENDER-TEXT-ENCODING`）
+ *   ⇒ 本层的选择（⛔ 不是取证过的格式）：
+ *   - 整数族（0 / 3 / 6 / 9 / 12）：有符号 32 位十进制，负数带 `-`；
+ *   - 浮点（1 / 4 / 7 / 10 / 13）：JS 的最短往返十进制（`String(v)` ⇒ `1.5`、`1e+21`），
+ *     ⛔ 不是 `%f` 定宽格式；
+ *   - 其余（8 / 11 / 14 与容器句柄）：本层没有文本读法 ⇒ **响亮失败**（⛔ 不补空串）。
+ * ★ 这条"数值 → 十进制文本"口径与 `0x192` 的源侧是同一条，但本层只在 `0x204` 用它
+ *   （`values.ts` 的 `readText` 不在本次改动范围）。
+ */
+function readText204(m: Machine, ops: Operand[], k: number): string {
+  const op = ops[k - 1];
+  if (!op) throw new Error(`operand-out-of-range:${k}/${ops.length}`);
+  if (op.type === 5 || op.type === 2) return readText(m, ops, k);
+  switch (op.type) {
+    case 0: case 3: case 6: case 9: case 12:
+      return String(readInt(m, ops, k));
+    case 1: case 4: case 7: case 10: case 13:
+      return String(readFloat(m, ops, k));
+    default:
+      throw new Error(`text-unsupported-operand-type:0x${op.type.toString(16)}`);
+  }
+}
+
+/**
+ * 0x204 离屏文字（CORE-OPS-RENDER-TEXT-204）。
+ *
+ * 读序 **3 → 2 → 4 → 1**（第 4 个按文本读，**先于**第 1 个）。
+ * 三条入口条件都在**发请求之前**判，任一不满足 ⇒ 什么都不做（不发请求、不改引擎数据、不报错）：
+ *   ① 槽里有纹理对象；② 该对象的一次只读询问返回非空（与 `0x20d` 取表面是**同一个询问**）；
+ *   ③ 文本非空（判**首字节**）。
+ * 请求：`host.drawText({ textureId, x, y, text, font, size, weight, color, shadowColor, drawMode, alignMode })`
+ * —— 除坐标 / 文本之外全部来自**字体对象状态**，⛔ 不是操作数；一次同步绘制。
+ * ★ 失败通道：`drawText` 返回 `false` = 加锁 / 取矩形失败（`0x46F342 call sub_4A3890` 的 LockTexture）。
+ *   那时写错误通道（文本内容本版不规定）、**不**重建字形暂存区。
+ *   ⚠ spec 正文说本条"没有引擎自己上报的失败分支"已被这条证据推翻 ⇒ **待 spec 修订**（本层不改 spec）。
+ * ★ 本条不改纹理槽 / 绘制项 / 脏标记 / 池 / 帧 / 列表；字体对象的内部缓存与两个开关会被写
+ *   （spec 的「引擎数据」：字形暂存区复用 + 两个布尔开关），本层只建模能确定的部分。
+ */
+async function drawText204(m: Machine, ops: Operand[]): Promise<void> {
+  const y = readInt(m, ops, 3);
+  const x = readInt(m, ops, 2);
+  const text = readText204(m, ops, 4);
+  const textureId = readInt(m, ops, 1);
+  // 入口条件 ①：槽里有纹理对象（核心自己的表，不问宿主）
+  if (!m.scene.textureObjects.has(textureId)) return;
+  // 入口条件 ③：文本非空 —— 判首字节（⛔ 不是"去掉空白后为空"）。
+  // ★ spec 没有规定三条条件的先后；本层把两条**本地**条件放在宿主询问之前，
+  //   这样"没有对象 / 空文本"连一次外部询问都不会发生（严格满足"什么都不做"）。
+  if (text.length === 0 || text.charCodeAt(0) === 0) return;
+  // 入口条件 ②：只读询问（与 0x20d 取表面同一个询问）；取到 / 取不到都不建目标
+  const host = renderHostOf(m);
+  if (host === null) return;
+  const surface = await host.getRenderSurface(textureId);
+  if (surface === null) return;
+  // ★ spec 说条件 ② 是**只读询问**、没规定要不要归还表面 ⇒ 本层不归还
+  //   （`0x20d` 的"取到就归还"是那条自己的合同；本条只在询问，不持有引用）。
+  const fontObject = m.render.fontObject;
+  // 请求第 1 步：把一个内部布尔开关清 0（⛔ 不许在入口条件之前清）
+  fontObject.switches[0] = 0;
+  // 请求第 2–4 步（按 `renderState === 2` 选字体、取文本度量、两条绘制入口之一、
+  // 加锁 / 逐字取字形写入 / 解锁）都在平台的 `drawText` 里：本层接口只表达
+  // "把这段文本画进这个槽、用这套字体状态"。
+  // ★ 字体 / 字号 / 字重 / 主色 / 副色 / 绘制模式 / 对位模式全部取自字体对象状态：
+  //   face name（0x1a5 → Font+0x4EC）、size（0x75 → Font+0x313D4）、weight（0x2BD → 700/0）、
+  //   color（Font+0x550，默认 0xFFFFFF）、shadowColor（Font+0x554）、drawMode（Font+0x55C）、
+  //   alignMode（Font+0x313D0）。
+  const drawn = await host.drawText({
+    textureId,
+    x,
+    y,
+    text,
+    font: fontObject.font,
+    size: fontObject.size,
+    weight: fontObject.weight,
+    color: fontObject.color,
+    shadowColor: fontObject.shadowColor,
+    drawMode: fontObject.drawMode,
+    alignMode: fontObject.alignMode,
+  });
+  if (!drawn) {
+    // 平台侧加锁 / 取矩形失败（`0x46F342` 的 LockTexture 失败）：写错误通道，⛔ 不重建字形暂存区。
+    // ★ 文本内容本版不规定（`RES-RENDER-TARGET-TEXT` 的同一条口径），但必须非空、不得静默。
+    m.scene.errorBuffer = 'LockTexture エラー';
+    return;
+  }
+  // 引擎数据：字形暂存区被复用（布局属机器细节 ⇒ 只记"重建过"，不建假缓冲）
+  fontObject.glyphCacheRebuilds += 1;
+  // 第二个内部布尔开关的写入值本版不规定 ⇒ ⛔ 不猜，记一条诊断
+  m.diagnostics.push({ kind: 'render-text-font-switch-unmodeled' });
+}
+
 /* ──────────────────────────── 帧与调用 ──────────────────────────── */
 
 /**
@@ -486,27 +691,35 @@ function forward73(m: Machine, ops: Operand[]): void {
 }
 
 /**
- * 0x78 / 0x2db：把第 1 个操作数写进**子对象的一个固定字段**，然后**尾跳**进子系统
+ * 0x78 / 0x2db：把第 1 个操作数写进**字体对象的一个固定字段**，然后**尾跳**进字体重建入口
  * （CORE-OPS-LIST-SUBSYSTEM-SET-TAIL）。
  *
- * 逐字：两条同形 —— `0x78` 写 `Engine+0x14D30+0x55C`；`0x2db` 写同一个子对象的 `+0x313D0`；
- * 然后 `jmp sub_459F40`（尾跳：子系统的返回值直接回给分派器）。
- * ★ 字段的领域用途未定；子系统内部行为未建模（只记请求）。
+ * 逐字：两条同形 —— `0x78` 写 `Engine+0x14D30+0x55C`（绘制模式）；`0x2db` 写同一个字体对象的
+ * `+0x313D0`（对位模式）；然后 `jmp sub_459F40`（尾跳：重建入口的返回值直接回给分派器）。
+ * ★ 字段的领域用途已定（见 `60-ops-render.md` 的 0x204）；重建入口的其余内部行为未建模。
  */
-function setFieldTail(m: Machine, ops: Operand[], field: string): void {
-  m.scalars.set(field, readInt(m, ops, 1));
+function setFieldTail(m: Machine, ops: Operand[], field: string, apply: (value: number) => void): void {
+  const value = readInt(m, ops, 1);
+  m.scalars.set(field, value);
+  // 字体对象的两个格：0x78 写绘制模式、0x2db 写对位模式（证据：0x41F476 / 0x426526）。
+  apply(value);
   m.effects.push({ kind: 'subsystem.request', detail: { callee: 'sub_459F40', field } });
   m.diagnostics.push({ kind: 'call-target-unmodeled:sub_459F40' });
 }
 
-/** 0x78：写子对象 +0x55C 后尾跳 */
+/** 0x78：写字体对象的绘制模式 +0x55C 后尾跳 */
 function field78(m: Machine, ops: Operand[]): void {
-  setFieldTail(m, ops, 'Engine.d21683');
+  setFieldTail(m, ops, 'Engine.d21683', (value) => {
+    m.render.fontObject.drawMode = value;
+    m.render.fontObject.drawPath = value;
+  });
 }
 
-/** 0x2db：写同一子对象 +0x313D0 后尾跳（与 0x78 同形，只差落点） */
+/** 0x2db：写字体对象的对位模式 +0x313D0 后尾跳（与 0x78 同形，只差落点） */
 function field2db(m: Machine, ops: Operand[]): void {
-  setFieldTail(m, ops, 'Engine.d71760');
+  setFieldTail(m, ops, 'Engine.d71760', (value) => {
+    m.render.fontObject.alignMode = value;
+  });
 }
 
 /**
@@ -1027,9 +1240,11 @@ function fontIndex2de(m: Machine, ops: Operand[]): void {
     if (cand.length === key.length && cand === key) { hit = i; break; }
   }
   writeInt(m, ops, 1, hit);
+  // 显示用：真实脚本的 key 是 CP932 字节串；合成测试可能直接给 Unicode（>0xFF）⇒ 原样保留。
+  const keyText = [...key].some((c) => (c.codePointAt(0) ?? 0) > 0xff) ? key : decodeCp932(key);
   m.effects.push({
     kind: 'font.lookup',
-    detail: { opcode: '0x2de', key, table: m.fontNames.length, hit },
+    detail: { opcode: '0x2de', key, keyText, table: m.fontNames.length, hit },
   });
 }
 
@@ -1055,6 +1270,8 @@ function bswap24(v: number): number {
 function bswap76(m: Machine, ops: Operand[]): void {
   const value = bswap24(readInt(m, ops, 1));
   m.scalars.set('Engine.d21664', value);
+  // 字体对象的**主色**（`Font+0x550`；0x76 的落点）。证据：0x41F3D5。
+  m.render.fontObject.color = value;
   m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x76', slot: 'Engine.d21664', form: 'bswap24(op1)', value } });
   m.diagnostics.push({ kind: 'call-target-unmodeled:sub_459F40' });
 }
@@ -1063,6 +1280,8 @@ function bswap76(m: Machine, ops: Operand[]): void {
 function bswap77(m: Machine, ops: Operand[]): void {
   const value = bswap24(readInt(m, ops, 1));
   m.scalars.set('Engine.d21665', value);
+  // 字体对象的**副色**（`Font+0x554`；0x77 的落点）。证据：0x41F435。
+  m.render.fontObject.shadowColor = value;
   m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x77', slot: 'Engine.d21665', form: 'bswap24(op1)', value } });
   m.diagnostics.push({ kind: 'call-target-unmodeled:sub_459F40' });
 }
@@ -1249,6 +1468,8 @@ function eventFlush143(m: Machine): void {
 /** 0x75：转发 `sub_4185F0(Engine+0x14D30, op1)`（字体/文本子系统；被调方未建模，只记一条 `engine.forward`） */
 function forward75(m: Machine, ops: Operand[]): void {
   const value = readInt(m, ops, 1);
+  // 字体对象的**字号**（`Font+0x313D4`；0x75 的实参）。证据：0x418611。
+  m.render.fontObject.size = value;
   m.effects.push({ kind: 'engine.forward', detail: { opcode: '0x75', callee: 'sub_4185F0', holder: 'Engine.d21324', arg: value } });
   m.diagnostics.push({ kind: 'call-target-unmodeled:sub_4185F0' });
 }
@@ -1259,19 +1480,23 @@ function forward75(m: Machine, ops: Operand[]): void {
  */
 function setFont1a5(m: Machine, ops: Operand[]): void {
   const name = readText(m, ops, 1);
+  // 字体对象的**字面名**（`Font+0x4EC`；0x1a5 的实参）。证据：0x4329AF。
+  m.render.fontObject.font = name;
   m.effects.push({ kind: 'engine.forward', detail: { opcode: '0x1a5', callee: 'sub_4328F0', holder: 'Engine.d21324', name } });
   m.diagnostics.push({ kind: 'call-target-unmodeled:sub_4328F0' });
 }
 
 /**
- * 0x2bd：`v = 读整(op1)` ⇒ 子系统两格写 `v ? 0x2BC : 0`；`v != 0` 时再**尾跳** `sub_459F40(Engine+0x14D30)`（未建模）。
- * 落点 = 子系统 `+0x35594` / `+0x4E0`（绝对 `Engine[75953]` / `Engine[21636]`）。
+ * 0x2bd：`v = 读整(op1)` ⇒ 字体对象两格写 `v ? 0x2BC : 0`；`v != 0` 时再**尾跳** `sub_459F40(Engine+0x14D30)`（未建模）。
+ * 落点 = 字体对象 `+0x35594` / `+0x4E0`（绝对 `Engine[75953]` / `Engine[21636]`）。
  */
 function toggle2bd(m: Machine, ops: Operand[]): void {
   const v = readInt(m, ops, 1);
   const value = v !== 0 ? 0x2bc : 0;
   scalarWrite(m, '0x2bd', 'Engine.d75953', value);
   scalarWrite(m, '0x2bd', 'Engine.d21636', value);
+  // 字体对象的**字重**（`Font+0x4E0/+0x35594`）：非 0 ⇒ 700、0 ⇒ 0。证据：0x42622F/0x426232。
+  m.render.fontObject.weight = value;
   if (v !== 0) m.diagnostics.push({ kind: 'call-target-unmodeled:sub_459F40' });
 }
 
@@ -1382,6 +1607,9 @@ export const HANDLERS = new Map<number, Handler>([
   [0x320, scene320],
   [0x322, scene322],
   [0x323, scene323],
+  [0x20d, renderTarget20d],
+  [0x33f, blend33f],
+  [0x204, drawText204],
   [0x101, pollInput101],
   [0x21c, (m) => wait21c(m)],
   [0x20f, movie20f],

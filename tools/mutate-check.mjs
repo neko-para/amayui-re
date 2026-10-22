@@ -1590,6 +1590,71 @@ const MUTATIONS = [
     guard: 'tools/test/spec-isa.assets.test.mjs',
     what: '★ `hasHandler` 与语料分派表脱节 ⇒ 分发物把"有处理函数"的 opcode 判成"落缺省即抛"（表本身仍然格式合法）',
   },
+  // ── emulator-new：窗口态风格字（★ 换成占满屏值 ⇒ 窗口态被当成全屏）──
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: 'export const WINDOWED_STYLE = 0x90cb0000;',
+    to: 'export const WINDOWED_STYLE = 0x90000000; // 变异：窗口态用占满屏风格',
+    guard: 'tools/test/emulator-new-window.test.mjs',
+    what: '★ 窗口态风格字换成占满屏值 ⇒ 建窗参数把窗口态当全屏（外观/形态判据错而测试仍能跑）',
+  },
+  // ── emulator-new：周期定时器周期（★ 10000 → 1000 ⇒ 引擎常量被改小）──
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: 'export const PERIODIC_TIMER_PERIOD_MS = 10000;',
+    to: 'export const PERIODIC_TIMER_PERIOD_MS = 1000; // 变异：周期缩小 10 倍',
+    guard: 'tools/test/emulator-new-window.test.mjs',
+    what: '★ 周期定时器 10000 → 1000 ⇒ 空闲抑制/激活补发频率变成 10 倍（引擎常量被当成仿真参数）',
+  },
+  // ── emulator-new：窗口宽 = 客户区 + 2×边框宽（★ 少乘 2 ⇒ 窗口比客户区还窄）──
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: '    const width = clientWidth + 2 * frame.frameWidth;',
+    to: '    const width = clientWidth + frame.frameWidth; // 变异：边框只加一边',
+    guard: 'tools/test/emulator-new-window.test.mjs',
+    what: '★ 边框只加一边 ⇒ 窗口宽少 2×frameWidth（客户区被裁；引擎是“单边厚度 ×2”的对称假设）',
+  },
+  // ── emulator-new：0x20d 的 1000 阈值（★ 1000 → 1024 ⇒ 负数的无符号分支错）──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: 'const RENDER_TARGET_SLOT_LIMIT = 1000;',
+    to: 'const RENDER_TARGET_SLOT_LIMIT = 1024; // 变异：阈值改成 1024',
+    guard: 'tools/test/emulator-new-render.test.mjs',
+    what: '★ 0x20d 的阈值 1000 → 1024 ⇒ 1000..1023 的纹理槽被当成后缓冲（负数的无符号分支也会变）',
+  },
+  // ── emulator-new：0x204 的“清开关”必须在入口条件之后（★ 提前清 ⇒ 条件不满足也改状态）──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  fontObject.switches[0] = 0;',
+    to: '  fontObject.switches[0] = 1; // 变异：清成 1（不是 0）',
+    guard: 'tools/test/emulator-new-render.test.mjs',
+    what: '★ 请求第 1 步“清 0”被改成写 1 ⇒ 字体对象的共享开关状态错，而错误分支仍可能被当成成功',
+  },
+  // ── emulator-new：宿主时钟（★ 忽略 clock ⇒ 5 秒渐变被虚拟步长快进）──
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '    this.now = this.clock ? this.clock() : this.now + this.tickMs;',
+    to: '    this.now = this.now + this.tickMs; // 变异：忽略宿主时钟',
+    guard: 'tools/test/emulator-new-scene.test.mjs',
+    what: '★ 忽略 `MachineOptions.clock` ⇒ 窗口前端也按虚拟 tickMs 快进（渐变/等待不再按墙钟走）',
+  },
+  // ── emulator-new：CP932 显示/路径解码（★ 不解码 ⇒ 乱码目录 / 乱码字体名）──
+  {
+    file: 'apps/emulator-new/src/core/bytes.ts',
+    from: '  return CP932.decode(encodeLatin1(text));',
+    to: '  return text; // 变异：不按 CP932 解码',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ 引擎字节串不按 CP932 解码 ⇒ macOS 上出现 `Eushully\\<乱码>` 目录，trace 里的字体名也仍是乱码',
+  },
+  // ── emulator-new：效果分级（★ 内部记账被当外部请求 ⇒ --trace 刷屏）──
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: "  if (INTERNAL_EFFECT_KINDS.has(kind)) return 'internal';",
+    to: "  if (false) return 'internal'; // 变异：内部记账不再分级",
+    guard: 'tools/test/emulator-new-render.test.mjs',
+    what: '★ `string.set` / `array.lookup` 等内部记账不再归 internal ⇒ `--trace` 把已闭环的写入当外部副作用打印（刷屏且误导）',
+  },
+
 ];
 
 /**

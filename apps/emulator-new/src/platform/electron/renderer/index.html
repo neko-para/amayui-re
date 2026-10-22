@@ -1,0 +1,48 @@
+<!doctype html>
+<!--
+  apps/emulator-new/src/platform/electron/renderer/index.html
+
+  ★ 这是 **renderer 进程**的页面：preload 通过 `contextBridge` 注入 `window.amayui`（见 `../protocol.ts`），
+    本页面只消费线协议 —— ⛔ 不认识 Node / 主进程内部结构。
+  ★ `./renderer.ts` 由 Vite 转译 + 打包；`type="module"` 是 Vite 的入口约定（也保证 `import` 走 ESM）。
+  ★ `./style.css` 用相对路径引用：`base: './'` 下产物里的资源路径同样是相对的（file:// 能装）。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>amayui emulator — renderer</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <!-- 全屏画布容器：Pixi 的 canvas 由 renderer.ts 挂进来（init 的 width/height = 它的显示尺寸） -->
+    <div id="stage-host" aria-label="模拟器渲染输出"></div>
+
+    <!--
+      diagnostics 面板：**纯 DOM**，不经过 Pixi。
+      ★ 目的是把"我们忽略 / 没建模 / 没取证"的东西显式给人看 —— ⛔ 不要让它变成一块好看的假仪表盘：
+        每一条都必须对应一个真实的实现缺口（纹理像素未解码 / 字体对象未建模 / 混合映射未取证…）。
+      ★ 内容由 renderer.ts 填（`textContent`，不拼 innerHTML —— status / ignored 是外部文本）。
+    -->
+    <aside id="diagnostics" class="diagnostics" aria-label="渲染诊断">
+      <header class="diagnostics__header">
+        <strong>diagnostics</strong>
+        <span id="diagnostics-summary" class="diagnostics__summary"></span>
+        <button id="diagnostics-toggle" class="diagnostics__toggle" type="button">折叠</button>
+      </header>
+      <div id="diagnostics-body" class="diagnostics__body"></div>
+    </aside>
+
+    <!-- 致命错误（Pixi / WebGL 初始化失败）：全屏遮罩，同时 window.amayui 不会被 ready -->
+    <div id="fatal" class="fatal" hidden>
+      <h1>渲染进程初始化失败</h1>
+      <p id="fatal-text" class="fatal__text"></p>
+      <p class="fatal__hint">
+        这条失败**不会**让主进程收到 <code>ready</code>：核心的图形设备初始化应当据此走失败分支，
+        ⛔ 不应当把"没有渲染器"当成"渲染成功"。
+      </p>
+    </div>
+
+    <script type="module" src="./renderer.ts"></script>
+  </body>
+</html>

@@ -45,6 +45,10 @@ const byName = (name) => {
 
 test('★ 只读 data/spec：src 里不许出现 age-format / shape / ledger / corpus / 旧模拟器', () => {
   const bad = [];
+  // ★ 唯一例外：renderer 把**分发字体**（Amayui CN）作为 Vite asset 引入。
+  //   字体是产品资源，不是分析语料；除此之外 corpus 仍然不许进 src。
+  const FONT_IMPORT = /^\s*import .*corpus\/assets\/fonts\/Amayui-CN_cnjp(?:-Bold)?\.ttf\?url';?\s*$/;
+  const FONT_HOST = 'platform/electron/renderer/renderer.ts';
   for (const { name, text } of sources()) {
     for (const [re, what] of [
       [/@amayui\/age-format/, 'age-format 包'],
@@ -53,7 +57,12 @@ test('★ 只读 data/spec：src 里不许出现 age-format / shape / ledger / c
       [/\bcorpus\//, 'corpus 语料'],
       [/\bapps\/emulator\//, '旧模拟器路径'],
     ]) {
-      if (re.test(text)) bad.push(`${name}：${what}`);
+      if (!re.test(text)) continue;
+      if (what === 'corpus 语料' && name === FONT_HOST) {
+        const corpusLines = text.split('\n').filter((line) => /\bcorpus\//.test(line));
+        if (corpusLines.every((line) => FONT_IMPORT.test(line))) continue;
+      }
+      bad.push(`${name}：${what}`);
     }
   }
   assert.deepEqual(bad, [], `越界引用：\n  - ${bad.join('\n  - ')}`);
@@ -63,12 +72,17 @@ test('★ 平台边界：只有 platform/** 允许 import node:*（核心的守�
   const users = sources()
     .filter((x) => /from 'node:/.test(x.text))
     .map((x) => x.name);
-  assert.deepEqual(users, ['platform/node/host.ts', 'platform/node/spec.ts'],
-    `import node:* 的文件只应落在平台层，实际 ${users.join(', ') || '(无)'}`);
+  const badNode = users.filter((name) => name !== 'platform/node/host.ts'
+    && name !== 'platform/node/spec.ts'
+    && !name.startsWith('platform/electron/'));
+  assert.deepEqual(badNode, [],
+    `import node:* 的文件只应落在平台层（platform/node/** 或 platform/electron/**），实际 ${users.join(', ') || '(无)'}`);
 
   for (const { name, text } of sources()) {
     if (!name.startsWith('core/')) continue;
     assert.doesNotMatch(text, /from '\.\.\/platform\//, `${name} 不许反向依赖平台层（分层方向是 platform → core）`);
+    // 核心也不许直接认识 Electron / Pixi：渲染是注入的 RenderHost，窗口是注入的 WindowHost。
+    assert.doesNotMatch(text, /from '(electron|pixi\.js)'/, `${name} 不许 import Electron / Pixi（核心必须平台无关）`);
   }
 
   const main = byName('main.ts');

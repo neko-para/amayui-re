@@ -239,3 +239,26 @@ test('★ 0x20f 同槽已有对象 ⇒ 不重建（只改配置与启动）', as
   assert.equal(obj.resourceId, 21063);
   assert.equal(obj.started, true);
 });
+
+test('★ 宿主时钟：给了 clock 时 `tick()` 读宿主读数，而不是 `now += tickMs`', () => {
+  let now = 1000;
+  const m = machineFor([], { clock: () => now });
+  now = 1250;
+  m.tick();
+  assert.equal(m.now, 1250, 'now 必须等于宿主读数');
+  assert.equal(m.scene.now, 1250);
+  assert.equal(m.ticks, 1);
+});
+
+test('★ 宿主时钟 + 等待门：时钟按宿主读数推进，窗到期才放行', async () => {
+  let now = 0;
+  const m = machineFor([
+    [0x21c, []],
+    [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
+  ], { clock: () => now, onIteration: () => { now += 16; } });
+  m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 100, colorFrom: 0, colorTo: 0xffffffff }));
+  const r = await m.run();
+  assert.equal(r.steps, 2);
+  assert.ok(m.now >= 112, `宿主时钟走过了窗长（实际 ${m.now}ms）`);
+  assert.ok(m.ticks >= 7, `门关着的迭代次数（实际 ${m.ticks}）`);
+});

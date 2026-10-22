@@ -11,6 +11,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { decodeCp932 } from '../../core/bytes.ts';
+
 import type { Host } from '../../core/install.ts';
 
 /** `Buffer`（Node 的 `Uint8Array` 子类）→ 纯 `Uint8Array` 视图（零拷贝） */
@@ -32,6 +34,16 @@ export const nodeHost: Host = {
 
   dirname(file: string): string {
     return path.dirname(file);
+  },
+
+  /**
+   * 引擎路径字节串 → 宿主路径。
+   * ★ 先按 CP932 解码（`RegFilePath` / ALF 名字是 ANSI 字节），再把 `\` 换成宿主分隔符：
+   *   POSIX 的 `path.join` **不认** `\`，不换会造出 `Eushully\天結…` 这种单层目录名。
+   * ★ 不在解码前替换：Shift-JIS 的 trail byte 可以是 0x5C，先替换会把一个双字节字符切坏。
+   */
+  pathFromEngine(text: string): string {
+    return decodeCp932(text).replace(/\\/g, path.sep);
   },
 
   async readBytes(file: string): Promise<Uint8Array> {

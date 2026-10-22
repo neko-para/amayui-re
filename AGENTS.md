@@ -74,11 +74,12 @@
   ★ Windows 上那个链接**必须是真符号链接**（`lstat.isSymbolicLink === true`）：Node **拒绝为 `node_modules`
   下的文件剥类型**（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`）⇒ 跨包 `.mts` 只在真符号链接下走得通。
   无提权时 pnpm 会**静默降级成 junction**（装完不报错、链接形态却是错的）⇒ 提权安装见 `plugins/pnpm-priv`。
-* ★ **类型检查用 `noEmit`，覆盖五个工程**：`pnpm typecheck`
-  （= `tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.core.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit`）。
-  ★ **后两个是 `apps/emulator-new`**：它与 `apps/emulator` 同形分成"核心 / 平台"两份 tsconfig ——
+* ★ **类型检查用 `noEmit`，覆盖六个工程**：`pnpm typecheck`
+  （= `tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.core.json --noEmit && tsc -p apps/emulator-new/tsconfig.renderer.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit`）。
+  ★ **后三个是 `apps/emulator-new`**：核心 / 渲染进程 / 整个 app 分成三份 tsconfig ——
   `tsconfig.core.json`（`include` 只有 `src/core/**`）是 `"types": []` 的**守卫本身**；
-  `tsconfig.json` 覆盖整个 app（核心 + `src/platform/node/**` + `src/main.ts`）所以是 `"types": ["node"]`。
+  `tsconfig.renderer.json` 是 Electron 渲染进程（`types: []` + `lib: DOM`，不认识 Node）；
+  `tsconfig.json` 覆盖核心 + `src/platform/node/**` + `src/platform/electron/**` + `src/main.ts`，所以是 `"types": ["node"]`。
   ★ 它的核心只收**纯数据 + `Host` 接口**（指令表 / 配置键词表由平台层从 `data/spec` 读入；文件系统 / 路径 /
   环境变量全走 `Host`，IO **全部是 `Promise`**）⇒ 核心能整份跑在浏览器 / worker 里，`data/spec` 只有平台层认识。
   ★ **为什么 `apps/emulator` 要两份 tsconfig（核心 / 前端）**：`apps/emulator` 自己分成"核心"与"前端"两份 tsconfig ——
@@ -88,7 +89,10 @@
   （与 `packages/age-format` 的分工同形：那份给工具侧 `@types/node`，模拟器核心给 `types: []`。）
   ★ 前端工程 `include` 只有 `frontends/**`，但通过 import 会把 `src/**` 一起拉进来检查 —— 这是**有意的**：
   "核心 + 前端"合起来必须自洽；核心的守卫不受影响（`tsconfig.json` 仍只带 `src/**` 且 `types: []`）。
-  `.ts`/`.mts` 仍然由 **Node 原生 type stripping** 直接跑 ⇒ **没有构建步骤**，`tsc` 的唯一职责是"把类型写错变成红灯"。
+  `.ts`/`.mts` 仍然由 **Node 原生 type stripping** 直接跑 ⇒ **main / preload / core 没有构建步骤**，`tsc` 的唯一职责是"把类型写错变成红灯"。
+  ★ **唯一例外是 Electron renderer**：Chromium 不跑 TypeScript，Pixi 是浏览器 ESM ⇒ `apps/emulator-new` 的
+  `src/platform/electron/renderer/**` 由 `vite build` 产出 `dist/renderer/**`（生成物、已 gitignore）；
+  这**不**改变 core / Node 平台 / main / preload 的"无构建"口径。
   `erasableSyntaxOnly` 把"Node 剥壳不支持的语法"（`enum`/`namespace`/参数属性/装饰器）提前变成类型错误。
   ★ **模拟器的工程会把 `age-format` 的源码一起拉进来**（它 `import` 它）—— 这是**有意的**：
   一条命令就能看见"消费方 + 被消费方的类型是否自洽"，不需要给 `age-format` 做 `composite` 工程引用
@@ -165,7 +169,7 @@ pnpm test:list                  # 看分级集合与每个文件的声明（先�
 pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
 pnpm test:mutation              # ★ **守卫自检**：改坏一处关键常量 ⇒ 确认对应守卫**当场红**（红得有意义）
-pnpm typecheck                  # ★ `tsc --noEmit`，**五个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端 + `apps/emulator-new` 核心 + `apps/emulator-new` 整个 app）；不产出 ⇒ 仍无构建步骤
+pnpm typecheck                  # ★ `tsc --noEmit`，**六个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端 + `apps/emulator-new` 核心 + `apps/emulator-new` 渲染进程 + `apps/emulator-new` 整个 app）；不产出 ⇒ main / preload / core 仍无构建步骤
 ```
 
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`

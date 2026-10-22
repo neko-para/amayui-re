@@ -14,6 +14,9 @@
  * ★ 核心是平台无关的（`core/runner.ts`）；本文件只是它 + Node 的 `Host` + `data/spec` 的装配点。
  */
 import { analyze, analyzeInstall } from '../../core/runner.ts';
+import type { Machine } from '../../core/machine.ts';
+import { effectScope } from '../../core/machine.ts';
+import { decodeCp932 } from '../../core/bytes.ts';
 import type { CoreEnv, RunOpts } from '../../core/runner.ts';
 import { loadConfigKeys, loadOpcodeTable } from './spec.ts';
 import { nodeHost } from './host.ts';
@@ -28,6 +31,16 @@ interface Args {
   key: number | null;
   stopAt: number | null;
   tickMs: number;
+  /** 用宿主毫秒时钟（等待门按墙钟走）而不是虚拟 tickMs；缺省 false */
+  realTime: boolean;
+  /** 流式打印效果 / 诊断（stderr；stdout 仍只有最终报告） */
+  trace: boolean;
+  /** `--trace` 默认只打 external + unmodeled；`--trace-all` 也打 internal 记账 */
+  traceAll: boolean;
+  /** 每 N 步打印一次进度（stderr；0 = 关闭） */
+  progress: number;
+  /** 报告里带全量效果明细（`--json` 用；可能上千条） */
+  effects: boolean;
   uninitializedFloat: 'throw' | 'zero';
   config: string | null;
   initConfig: boolean;
@@ -39,10 +52,18 @@ function parseU32(text: string, what: string): number {
   return v >>> 0;
 }
 
+const USAGE = [
+  '用法：node apps/emulator-new/src/main.ts --install <dir> --key <u32> [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--real-time] [--trace|--trace-all] [--progress N] [--effects] [--config <SYS4REG.INI>] [--init-config] [--json] [--strict]',
+  '      node apps/emulator-new/src/main.ts --script <file> --key <u32> [--stop-at <opcode>] [--json] [--strict]',
+  '      node apps/emulator-new/src/main.ts --install <dir> --decode [--json]',
+  '      node apps/emulator-new/src/main.ts --help',
+].join('\n');
+
 function parseArgs(argv: string[]): Args {
   const out: Args = {
     install: null, script: null, rootId: 0, decodeOnly: false, json: false, strict: false,
-    key: null, stopAt: null, tickMs: 16, uninitializedFloat: 'throw', config: null, initConfig: false,
+    key: null, stopAt: null, tickMs: 16, realTime: false, trace: false, traceAll: false, progress: 0, effects: false,
+    uninitializedFloat: 'throw', config: null, initConfig: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -55,6 +76,11 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--key') out.key = parseU32(argv[++i] ?? '', '--key');
     else if (a === '--stop-at') out.stopAt = parseU32(argv[++i] ?? '', '--stop-at');
     else if (a === '--tick-ms') out.tickMs = parseU32(argv[++i] ?? '', '--tick-ms');
+    else if (a === '--real-time') out.realTime = true;
+    else if (a === '--trace') out.trace = true;
+    else if (a === '--trace-all') { out.trace = true; out.traceAll = true; }
+    else if (a === '--effects') out.effects = true;
+    else if (a === '--progress') out.progress = parseU32(argv[++i] ?? '', '--progress');
     else if (a === '--config') out.config = argv[++i] ?? null;
     else if (a === '--init-config') out.initConfig = true;
     else if (a === '--uninitialized-float') {
@@ -75,14 +101,39 @@ async function buildEnv(): Promise<CoreEnv> {
 
 /** 跑一次 CLI；返回进程退出码（0 = 成功 / 1 = `--strict` 下的缺口 / 2 = 用法错误） */
 export async function main(argv: string[]): Promise<number> {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(USAGE);
+    return 0;
+  }
   const args = parseArgs(argv);
-  const usage = [
-    '用法：node apps/emulator-new/src/main.ts --install <dir> --key <u32> [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--config <SYS4REG.INI>] [--init-config] [--json] [--strict]',
-    '      node apps/emulator-new/src/main.ts --script <file> --key <u32> [--stop-at <opcode>] [--json] [--strict]',
-    '      node apps/emulator-new/src/main.ts --install <dir> --decode [--json]',
-  ].join('\n');
+  const cliClockOrigin = Date.now();
+  /** `--real-time` / `--trace` / `--progress` 时捕获 Machine */
+  let cliMachine: Machine | null = null;
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
+  let effectCursor = 0;
+  let printedEffectCount = 0;
+  let diagnosticCursor = 0;
+  let nextProgress = args.progress;
+  const wantsHook = args.realTime || args.trace || args.progress > 0;
+  /** trace 只做显示转码：字体名 / 文本按 CP932 解；⛔ 不改变 effect 的原始 detail。 */
+  const printableEffect = (effect: { kind: string; detail: Record<string, unknown> }): Record<string, unknown> => {
+    const detail: Record<string, unknown> = { ...effect.detail };
+    for (const field of ['key', 'name', 'text']) {
+      const value = detail[field];
+      if (typeof value === 'string') {
+        const preDecoded = detail[`${field}Text`];
+        if (typeof preDecoded === 'string') {
+          detail[field] = preDecoded;
+          delete detail[`${field}Text`];
+        } else {
+          detail[field] = decodeCp932(value);
+        }
+      }
+    }
+    return detail;
+  };
   if (!args.install && !args.script) {
-    console.error(usage);
+    console.error(USAGE);
     return 2;
   }
   const opts: RunOpts = {
@@ -90,6 +141,37 @@ export async function main(argv: string[]): Promise<number> {
     key: args.key ?? undefined,
     stopAtOpcode: args.stopAt ?? undefined,
     tickMs: args.tickMs,
+    // ★ 宿主时钟（可选）：等待门 / 渐变按墙钟走；缺省虚拟 tickMs（无头快跑）。
+    ...(args.realTime ? { clock: () => Date.now() - cliClockOrigin } : {}),
+    // ★ 流式 / 进度 / 墙钟都需要捕获 Machine；`onIteration` 在门之前，效果与诊断已经入账。
+    ...(wantsHook ? {
+      onMachine: (machine: Machine) => { cliMachine = machine; },
+      onIteration: async () => {
+        const m = cliMachine;
+        if (m === null) return;
+        if (args.trace) {
+          while (effectCursor < m.effects.length) {
+            const effect = m.effects[effectCursor];
+            effectCursor += 1;
+            if (args.traceAll || effectScope(effect.kind) !== 'internal') {
+              printedEffectCount += 1;
+              console.error(`[effect ${printedEffectCount}] ${effect.kind} ${JSON.stringify(printableEffect(effect))}`);
+            }
+          }
+          while (diagnosticCursor < m.diagnostics.length) {
+            const diag = m.diagnostics[diagnosticCursor];
+            diagnosticCursor += 1;
+            console.error(`[diagnostic] ${diag.kind}${diag.index === undefined ? '' : ` @ ${diag.index}`}`);
+          }
+        }
+        if (args.progress > 0 && m.steps >= nextProgress) {
+          console.error(`[progress] step=${m.steps} ip=0x${m.ip.toString(16)} now=${m.now}ms ticks=${m.ticks}`);
+          while (nextProgress <= m.steps) nextProgress += args.progress;
+        }
+        if (args.realTime && (m.flags & 0x400) !== 0) await sleep(4);
+      },
+    } : {}),
+    includeEffects: args.effects || args.trace,
     uninitializedFloat: args.uninitializedFloat,
   };
   const env = await buildEnv();
@@ -125,7 +207,22 @@ export async function main(argv: string[]): Promise<number> {
       console.log(`解码        ${result.decoded} 条 · 停因 ${result.stop}`);
     } else if ('stopText' in result) {
       console.log(`执行        ${result.steps} 条 · 停因 ${result.stopText}`);
-      console.log(`时钟        ${result.ticks} 格 · ${result.atMs}ms · 诊断 ${result.diagnostics?.length ?? 0} 条`);
+      console.log(`时钟        ${result.ticks} 格 · ${result.atMs}ms · 诊断 ${result.diagnostics?.length ?? 0} 条（--trace 看明细）`);
+      if (result.effectCounts) {
+        const entries = Object.entries(result.effectCounts).sort((a, b) => b[1] - a[1]);
+        const total = entries.reduce((n, [, c]) => n + c, 0);
+        const top = entries.slice(0, 8).map(([kind, count]) => `${kind} ${count}`).join(' · ');
+        console.log(`效果/请求   ${total} 条 · ${entries.length} 类${top ? `：${top}${entries.length > 8 ? ' · …' : ''}` : ''}`);
+      }
+      if (result.internalEffectCounts) {
+        const entries = Object.entries(result.internalEffectCounts).sort((a, b) => b[1] - a[1]);
+        const total = entries.reduce((n, [, c]) => n + c, 0);
+        if (total > 0) {
+          const top = entries.slice(0, 5).map(([kind, count]) => `${kind} ${count}`).join(' · ');
+          console.log(`内部记账    ${total} 条（--trace-all 才逐条打印）：${top}${entries.length > 5 ? ' · …' : ''}`);
+        }
+      }
+      if (result.sceneError) console.log(`场景错误    ${result.sceneError}`);
     } else {
       console.log(`执行        未启动（缺 --key）· 缺口 ${result.gap ? `opcode 0x${result.gap.opcode.toString(16)}` : '无'}`);
     }

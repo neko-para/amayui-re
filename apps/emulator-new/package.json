@@ -2,9 +2,21 @@
   "name": "@amayui/emulator-new",
   "private": true,
   "type": "module",
-  "description": "只读 data/spec 的参考实现（无渲染 / 音频 / 输入）。不复制 apps/emulator 的代码。",
+  "description": "只读 data/spec 的参考实现（核心平台无关；Node CLI + Electron 窗口壳 / Pixi 渲染；不含音频与输入转发）。不复制 apps/emulator 的代码。",
+  "main": "src/platform/electron/main.ts",
   "scripts": {
     "run": "node src/main.ts",
-    "decode": "node src/main.ts --decode"
+    "decode": "node src/main.ts --decode",
+    "build:renderer": "vite build",
+    "electron": "vite build && electron .",
+    "electron:demo": "vite build && electron . --demo",
+    "electron:smoke": "vite build && electron . --smoke"
+  },
+  "dependencies": {
+    "pixi.js": "^8.22.0"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "vite": "^8.3.2"
   }
 }

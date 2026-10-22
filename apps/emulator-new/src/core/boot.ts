@@ -45,7 +45,7 @@ export const BOOT_STAGES: BootStage[] = [
     id: 'window-class',
     what: '注册窗口类（RegisterClassExA）',
     disposition: 'host-only',
-    why: '规范已写请求边界（06-window）；本实现是 headless，没有窗口宿主，也不注册窗口类',
+    why: '规范已写请求边界（06-window）；CLI 入口是 headless，没有窗口宿主，也不注册窗口类（Electron 前端见 platform/electron）',
     anchor: '0x4baa02',
   },
   {
@@ -80,14 +80,14 @@ export const BOOT_STAGES: BootStage[] = [
     id: 'window-create',
     what: '创建窗口（CreateWindowExA / ShowWindow / 菜单 / IME）',
     disposition: 'host-only',
-    why: '规范已写请求边界（06-window）；本实现没有窗口宿主，不建窗口',
+    why: '规范已写请求边界（06-window）；CLI 入口没有窗口宿主，不建窗口（Electron 前端见 platform/electron）',
     anchor: '0x4bb082',
   },
   {
     id: 'renderer-init',
     what: '图形设备初始化（Direct3D9 / 旧式绘制二选一）',
     disposition: 'host-only',
-    why: '规范已写请求边界（06-window）；本实现不建图形设备，外部请求只记 effects',
+    why: '规范已写请求边界（06-window）；CLI 入口不建图形设备，外部请求只记 effects（Electron/Pixi 见 platform/electron）',
     anchor: '0x4bb40d',
   },
   {
@@ -108,14 +108,14 @@ export const BOOT_STAGES: BootStage[] = [
     id: 'timer',
     what: 'SetTimer(hWnd, 2, 10000, …)',
     disposition: 'host-only',
-    why: '规范已写定时器请求（06-window）；本层用虚拟时钟（步长是仿真参数，不是引擎常量）',
+    why: '规范已写定时器请求（06-window）；CLI 用虚拟时钟（步长是仿真参数，不是引擎常量；Electron 前端用真实 setInterval）',
     anchor: '0x4bb50b',
   },
   {
     id: 'main-loop',
     what: '主循环 sub_412290',
     disposition: 'partial',
-    why: '执行 / 门 / 时钟已建模；消息泵与影片位服务未建模',
+    why: '执行 / 门 / 时钟已建模；消息泵已由 Electron 前端接在迭代头（WindowSession.pump），影片位服务未建模',
     anchor: '0x4bb517',
   },
 ];

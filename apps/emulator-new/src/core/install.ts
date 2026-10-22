@@ -35,6 +35,14 @@ export interface Host {
   isFile(file: string): Promise<boolean>;
   ensureReadDir(dir: string): Promise<void>;
   writeBytes(file: string, data: Uint8Array): Promise<void>;
+  /**
+   * **引擎路径字节串 → 宿主路径**。
+   * ★ 输入是核心的 latin1 字节串（`55-config` / ALF 名字的口径）：游戏的路径值是
+   *   **CP932 / ANSI 字节**，不是 Unicode。平台必须按本地代码页解码，并把 `\\` 规范成
+   *   宿主分隔符（POSIX 上 `\\` 不是分隔符，直接拼会造出一个名字里带反斜杠的目录）。
+   * ★ 只用于**引擎给的路径值**（`REGFILEPATH` / ALF 条目名）；调用方给的普通路径不要过它。
+   */
+  pathFromEngine(text: string): string;
   /** 环境变量；没有 ⇒ `null`（不折叠大小写，平台决定） */
   env(name: string): string | null;
   /** 用户主目录（配置根的兜底） */
@@ -93,8 +101,9 @@ export class Install {
 
   /** 松散文件是否存在（只按裸文件名） */
   private async loosePath(name: string): Promise<string | null> {
-    if (!isBareName(name)) return null;
-    const p = this.host.join(this.dir, name);
+    const hostName = this.host.pathFromEngine(name);
+    if (!isBareName(hostName)) return null;
+    const p = this.host.join(this.dir, hostName);
     return (await this.host.isFile(p)) ? p : null;
   }
 
@@ -106,12 +115,13 @@ export class Install {
 
   private async readArchiveSlice(entry: AlfFile): Promise<Uint8Array> {
     const archive = this.index.archives[entry.archiveIndex];
-    if (!archive || !isBareName(archive)) {
+    const hostArchive = archive === undefined ? null : this.host.pathFromEngine(archive);
+    if (hostArchive === null || !isBareName(hostArchive)) {
       throw new Error(`alf-bad-archive:${entry.archiveIndex}/${entry.name}`);
     }
     // 空条目：不碰归档文件（引擎也不读）；否则按 (offset, length) 精确切片
     if (entry.length === 0) return new Uint8Array(0);
-    const file = this.host.join(this.dir, archive);
+    const file = this.host.join(this.dir, hostArchive);
     return this.host.readSlice(file, entry.offset, entry.length);
   }
 
@@ -166,7 +176,7 @@ function configBase(host: Host, installDir: string, useAppData: boolean): string
 
 /** 引擎的默认玩家文件路径：配置根 + `REGFILEPATH` + 文件名（`55-config.md`） */
 export function defaultConfigPath(host: Host, installDir: string, regFilePath: string, useAppData: boolean): string {
-  return host.join(configBase(host, installDir, useAppData), regFilePath, 'SYS4REG.INI');
+  return host.join(configBase(host, installDir, useAppData), host.pathFromEngine(regFilePath), 'SYS4REG.INI');
 }
 
 /**

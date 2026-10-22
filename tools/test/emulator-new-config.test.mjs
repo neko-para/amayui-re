@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 
 import { ConfigStore, atoiPrefix, parseIni } from '../../apps/emulator-new/src/core/config.ts';
+import { decodeCp932 } from '../../apps/emulator-new/src/core/bytes.ts';
 import { defaultConfigPath } from '../../apps/emulator-new/src/core/install.ts';
 import { nodeHost } from '../../apps/emulator-new/src/platform/node/host.ts';
 import { loadConfigKeys } from '../../apps/emulator-new/src/platform/node/spec.ts';
@@ -207,12 +208,35 @@ test('配置路径：USEAPPDATAFOLDER 选根，REGFILEPATH 拼相对目录', asy
   const old = process.env.APPDATA;
   process.env.APPDATA = '/tmp/appdata-for-test';
   try {
-    assert.equal(defaultConfigPath(nodeHost, '/game', 'Eushully\\Game', true), path.join('/tmp/appdata-for-test', 'Eushully\\Game', 'SYS4REG.INI'));
-    assert.equal(defaultConfigPath(nodeHost, '/game', 'Eushully\\Game', false), path.join('/game', 'Eushully\\Game', 'SYS4REG.INI'));
+    assert.equal(defaultConfigPath(nodeHost, '/game', 'Eushully\\Game', true), path.join('/tmp/appdata-for-test', 'Eushully', 'Game', 'SYS4REG.INI'));
+    assert.equal(defaultConfigPath(nodeHost, '/game', 'Eushully\\Game', false), path.join('/game', 'Eushully', 'Game', 'SYS4REG.INI'));
   } finally {
     if (old === undefined) delete process.env.APPDATA;
     else process.env.APPDATA = old;
   }
+});
+
+test('★ 引擎路径字节串：CP932 解码 + 反斜杠规范成宿主分隔符（不再是乱码目录）', async () => {
+  // 原始字节 = CP932 的 `Eushully\天結いキャッスルマイスター`；核心口径是 latin1 字节串。
+  const raw = Buffer.from('45757368756c6c795c93568c8b82a2834c838383628358838b837d83438358835e815b', 'hex');
+  const enginePath = raw.toString('latin1');
+  const decoded = '天結いキャッスルマイスター';
+  assert.equal(nodeHost.pathFromEngine(enginePath), path.join('Eushully', decoded));
+  const old = process.env.APPDATA;
+  process.env.APPDATA = '/tmp/appdata-for-test';
+  try {
+    assert.equal(
+      defaultConfigPath(nodeHost, '/game', enginePath, true),
+      path.join('/tmp/appdata-for-test', 'Eushully', decoded, 'SYS4REG.INI'),
+    );
+  } finally {
+    if (old === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = old;
+  }
+  // 断言没有把 CP932 的 trail byte 0x5C 当分隔符切坏（解码后再替换）
+  assert.equal(nodeHost.pathFromEngine(enginePath).includes('\\'), false);
+  // 显示层：同一套 CP932 字节串 → `メイリオ`（font.lookup 的 keyText 用）
+  assert.equal(decodeCp932('\x83\x81\x83C\x83\x8a\x83I'), 'メイリオ');
 });
 
 test('atoiPrefix：C atoi 前缀语义', async () => {

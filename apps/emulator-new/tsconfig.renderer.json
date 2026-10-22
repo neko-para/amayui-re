@@ -1,0 +1,42 @@
+{
+  // apps/emulator-new/tsconfig.renderer.json —— **渲染进程（Electron renderer / Pixi）**的类型工程
+  //
+  // ★ 为什么要第三份 tsconfig：渲染进程与核心 / Node 平台层的**宿主环境不是同一个**。
+  //   - `tsconfig.core.json`：`types: []` + `lib: WebWorker`（核心不许碰 Node，也不该认识 DOM）；
+  //   - `tsconfig.json`：`types: ["node"]` + `lib: WebWorker`（平台层接 `node:fs`）；
+  //   - 本文件：`types: []`（**没有** Node）+ `lib: DOM`（渲染进程在浏览器环境里跑，需要 `document` / `window`）。
+  //   ⇒ ⛔ 不要 `types: ["node"]`：渲染进程没有 `node:fs` / `process`，给了类型就能写出运行期炸掉的代码。
+  //   ⛔ 也不要把本工程并回 `tsconfig.json`：那份的 `lib` 是 `WebWorker`（没有 `document`），
+  //   并且 Node 类型会放行 `Buffer` 之类的 Node 全局。
+  //
+  // ★ `include` 只有 renderer 目录：`renderer.ts` 通过 `import type … from '../protocol.ts'` 把
+  //   **线协议**拉进检查范围（协议本身是纯类型、零 Node / 零 DOM 依赖，两边都该能检查它）。
+  //   `allowImportingTsExtensions` 让这条带 `.ts` 的 import 合法；`verbatimModuleSyntax` 保证
+  //   `import type` 在产物里被整条擦掉（协议没有运行期代码，不该被打进 bundle）。
+  //
+  // ★ `erasableSyntaxOnly` 与核心同口径：写 enum / namespace / 参数属性会当场红 —— 渲染进程由
+  //   Vite（esbuild）转译，保持"只写可擦除语法"这条仓库纪律不需要额外心智。
+  //
+  // ★ `noEmit`：本工程只做类型检查；产物由 `vite build` 产出（见 `vite.config.ts`）。
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "types": [],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/platform/electron/renderer/**/*.ts"]
+}

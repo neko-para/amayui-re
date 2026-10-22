@@ -30,5 +30,12 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts"]
+  // ★ `exclude` 里的渲染进程（`src/platform/electron/renderer/**`）是**另一个宿主环境**：
+  //   它要 `lib: DOM`、要不到 `node:*`（也没有 `node:fs` 可接），所以有自己的工程
+  //   `tsconfig.renderer.json`（`types: []` + `lib: DOM`，`pnpm typecheck` 的第六个工程）。
+  //   ⛔ 不能把这三份合成一份：本工程是 `lib: WebWorker`（没有 `document`）+ `types: ["node"]`，
+  //   让渲染进程落进来就会用 Node 的类型放行 `Buffer` / `node:fs`，也会因为缺 DOM 而全红。
+  //   （与"核心 / 平台"分成两份 tsconfig 是同一个理由，见 `tsconfig.core.json` 的文件头。）
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/platform/electron/renderer/**"]
 }
