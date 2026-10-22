@@ -8,3 +8,9 @@ declare module '*.ttf?url' {
   const src: string;
   export default src;
 }
+
+/** 影片解码器（pl_mpeg 包装）的 WASM 资产；用 `?url` 让 Vite 复制到 dist。 */
+declare module '*.wasm?url' {
+  const src: string;
+  export default src;
+}

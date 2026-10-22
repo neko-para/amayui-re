@@ -16,6 +16,7 @@ import { generateIntKey } from './values.ts';
 import { HANDLERS } from './handlers.ts';
 import { initialRenderState } from './render.ts';
 import type { RenderHost, RenderState, TextureKind } from './render.ts';
+import type { MovieHandle, MovieHost } from './movie.ts';
 
 export interface Operand {
   type: number;
@@ -193,6 +194,13 @@ export interface MovieObject {
   resourceId: number;
   opt: number;
   started: boolean;
+  /** 平台侧句柄；不在核心解释其形状 */
+  handle: MovieHandle | null;
+  /** 选项字第 0 位：播完回到开头，不销毁 */
+  loop: boolean;
+  /** 最近一次后端报告的当前位置 / 停止位置（秒） */
+  currentTime: number;
+  stopTime: number;
 }
 
 /** 诊断：实现必须记账的"不可解释之处"（⛔ 不许静默补值） */
@@ -361,6 +369,8 @@ export interface MachineOptions {
    * ★ 平台实现（Electron / Pixi）与 CLI 的 `HeadlessRenderHost` 都满足 `RenderHost`。
    */
   renderHost?: RenderHost;
+  /** 影片播放的平台边界（`0x20f` / 影片对象表服务）；缺省 = 没有后端 ⇒ 影片位一直挡住门 */
+  movieHost?: MovieHost;
   /**
    * **迭代头的平台泵点**（`70-vm.md` 的 `CORE-VM-LOOP`：每次迭代先在迭代头按节流决定是否泵一次宿主消息）。
    * ★ `run` 的每一轮在**读时钟 / 过门之前**调它一次（泵完仍继续本迭代的其余步骤）。
@@ -390,6 +400,8 @@ export class Machine {
   readonly fontNames: string[];
   /** 渲染宿主（缺省 `undefined` = 没有后端；见 `MachineOptions.renderHost`） */
   readonly renderHost: RenderHost | undefined;
+  /** 影片播放后端（缺省 `undefined` = 没有后端；见 `MachineOptions.movieHost`） */
+  readonly movieHost: MovieHost | undefined;
   /** 迭代头的平台泵点（缺省 `undefined` = 不泵；见 `MachineOptions.onIteration`） */
   readonly onIteration: (() => void | Promise<void>) | undefined;
   /**
@@ -537,6 +549,7 @@ export class Machine {
     this.loadImage = opts.loadImage;
     this.fontNames = [...(opts.fontNames ?? [])];
     this.renderHost = opts.renderHost;
+    this.movieHost = opts.movieHost;
     this.onIteration = opts.onIteration;
     // 根脚本落在 **0 号槽**（引擎：根帧的父帧号是 −1，当前帧号从 0 起）
     this.slots = [{ body: opts.body, ip: 0, frame: this.freshFrame(), parent: -1, length: 0 }];
@@ -550,7 +563,6 @@ export class Machine {
    */
   private serviceFlags(): Stop | null {
     if ((this.flags & WAIT_BIT) !== 0) {
-      this.stepScene();
       if (this.scene.animating === 0) {
         this.flags &= ~WAIT_BIT;
         return null;
@@ -558,8 +570,19 @@ export class Machine {
       this.tick();
       return null;
     }
-    // 其余门位（例如 LOGO.BIN 一进门就置的影片位 0x2000）本版不服务 ⇒ **停下来**并报告，
-    // 而不是抛异常：它是"这里没有建模"，不是"执行出错"（与 opcode 缺口同一口径）。
+    if ((this.flags & MOVIE_BIT) !== 0) {
+      // 没有影片后端：这是本实现的“未建模”边界，保留原来的门停因，不空转。
+      if (this.movieHost === undefined) return { kind: 'gate', index: this.steps, bit: this.flags };
+      // 影片位服务（CORE-VM-MOVIE）：只做“清位 → 对象表还有影片就再置 → 让门继续关着”
+      this.flags &= ~MOVIE_BIT;
+      if (this.hasMovieSlots()) {
+        this.flags |= MOVIE_BIT;
+        // 服务一位也算一次迭代：推进仿真时钟，避免无影片后端时纯空转（不是引擎常量）
+        this.tick();
+      }
+      return null;
+    }
+    // 其余门位本版不服务 ⇒ **停下来**并报告：它是"这里没有建模"，不是"执行出错"
     return { kind: 'gate', index: this.steps, bit: this.flags };
   }
 
@@ -571,6 +594,59 @@ export class Machine {
     this.ticks += 1;
     this.scene.prev = this.scene.now;
     this.scene.now = this.now;
+  }
+
+  /**
+   * 门之前的影片对象表服务（CORE-VM-MOVIE）。
+   * ★ 只在“有活动对象”标记为 1 时扫描；该标记是本条自己的闸，不是影片位。
+   * ★ 没有影片后端时保留对象并继续置“有活动对象”：门会一直关着（未建模，不伪造播完）。
+   */
+  serviceMovies(): void {
+    if (this.scene.hasObjects === 0) return;
+    const host = this.movieHost;
+    let any = 0;
+    for (const [slot, value] of [...this.scene.objectSlots]) {
+      const obj = value as MovieObject;
+      if (obj.kind !== 'movie') continue;
+      if (!obj.started) continue;
+      any = 1;
+      const state = obj.handle !== null ? host?.poll(obj.handle) ?? null : null;
+      if (state !== null) {
+        obj.currentTime = state.currentTime;
+        obj.stopTime = state.stopTime;
+      }
+      const done = state !== null && state.stopTime > 0 && state.currentTime >= state.stopTime;
+      if (!done) continue;
+      if (obj.loop) {
+        if (obj.handle !== null) {
+          host?.rewind(obj.handle);
+          host?.play(obj.handle);
+        }
+        obj.currentTime = 0;
+        this.flags |= MOVIE_BIT;
+        continue;
+      }
+      if (obj.handle !== null) {
+        if ((obj.opt & 3) !== 2) host?.fillTexture(slot);
+        host?.close(obj.handle);
+      }
+      this.scene.objectSlots.delete(slot);
+      any = 0;
+      for (const rest of this.scene.objectSlots.values()) {
+        const r = rest as MovieObject;
+        if (r.kind === 'movie' && r.started) any = 1;
+      }
+    }
+    this.scene.hasObjects = any;
+  }
+
+  /** 对象表里是否还有非空影片槽（影片位服务用） */
+  private hasMovieSlots(): boolean {
+    for (const value of this.scene.objectSlots.values()) {
+      const obj = value as MovieObject;
+      if (obj.kind === 'movie' && obj.started) return true;
+    }
+    return false;
   }
 
   /**
@@ -752,6 +828,8 @@ export class Machine {
       // 迭代头（CORE-VM-LOOP）：先泵一次宿主消息（节流由平台 / 注入方决定），再读时钟、过门。
       // ★ 泵完仍继续本迭代的其余步骤；缺省不泵（连一次 `await` 都不多付）。
       if (this.onIteration) await this.onIteration();
+      this.stepScene();
+      this.serviceMovies();
       if (this.halted) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'exit' } };
       if (this.steps >= maxSteps) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'step-limit', index: this.steps } };
       if (this.ticks >= maxTicks) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'tick-limit', index: this.steps } };

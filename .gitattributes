@@ -24,6 +24,7 @@
 *.idb  filter=lfs diff=lfs merge=lfs -text
 *.cur  filter=lfs diff=lfs merge=lfs -text
 *.ico  filter=lfs diff=lfs merge=lfs -text
+*.wasm filter=lfs diff=lfs merge=lfs -text
 
 # —— 明确不是文本、但也**不进 LFS** 的：任何 eol 转换都会毁掉它 ————————
 # （本轮没有这类在库文件；留规则是为了让后来者不必再想一遍。）

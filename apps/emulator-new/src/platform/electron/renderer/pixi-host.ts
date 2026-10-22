@@ -136,6 +136,7 @@ export const BLEND_MODE_MAP: readonly { mode: number; pixi: BLEND_MODES; evidenc
 
 /** diagnostics 面板固定显示的"我们没做 / 没建模 / 没取证"清单（⛔ 不许悄悄省略） */
 export const DISCLOSURES: readonly string[] = [
+  '影片：pl_mpeg WASM 解码 MPEG-1/PS，仅视频（音频忽略）；不重编码 / 不做音频同步；帧尺寸来自码流，成品像素由 pl_mpeg 决定',
   '全屏语义未实现：screenMode=0 被平台降级为 set:WinX×set:WinY 的普通窗口（不做分辨率切换 / 缩放）；这是模拟器决策，不是 spec 结论',
   '网格渲染仅支持“4 顶点、四色一致”的全屏四边形（LOGO 版权页）；逐顶点布局 / topology / draw order 未取证，其它网格跳过并诊断',
   '纹理加载：AGF 解码 + uploadTexture 已实现；BMP 分支未成篇，颜色键的 16 位通道装配未取证，空白纹理的初始像素未定义',
@@ -485,6 +486,8 @@ export class PixiRenderHost {
   private frameTextures: Texture[] = [];
 
   private readonly slots = new Map<number, TextureSlot>();
+  /** 影片帧槽：场景重建时把这些槽的像素放在网格之后（否则 LOGO 收尾的黑网格会盖住影片） */
+  private readonly movieSlots = new Set<number>();
   /** 表面表：`surfaceId → textureId`（`0` 是后缓冲，不在这张表里） */
   private readonly surfaces = new Map<number, number>();
   private nextSurfaceId = 1;
@@ -643,8 +646,13 @@ export class PixiRenderHost {
     kind: 'normal' | 'divided';
     rgba: Uint8Array;
     color: number;
+    /** 影片帧：不写诊断日志（每帧一条会刷屏） */
+    quiet?: boolean;
+    /** 影片帧：保留 movieSlots 标记，让本次重建把影片放在网格之后 */
+    movie?: boolean;
   }): boolean {
     const { textureId, width, height, kind, rgba, color } = params;
+    if (!params.movie) this.movieSlots.delete(textureId);
     if (width <= 0 || height <= 0) {
       this.note(`uploadTexture(${textureId})：尺寸 ${width}×${height} 无效 ⇒ 上传失败`);
       return false;
@@ -676,7 +684,7 @@ export class PixiRenderHost {
     try {
       const rt = this.ensureTexture(slot);
       const pixels = new Uint8Array(rgba); // 不把核心里可复用的缓冲交给平台
-      applyColorKey(pixels, color);
+      if (color >= 0) applyColorKey(pixels, color);
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
@@ -695,13 +703,32 @@ export class PixiRenderHost {
       }
       slot.hasContent = true;
       slot.writeCount += 1;
-      this.note(`uploadTexture(${textureId})：${width}×${height}，颜色键 #${(color & 0xffffff).toString(16).padStart(6, '0')}`);
+      if (!params.quiet) this.note(`uploadTexture(${textureId})：${width}×${height}，颜色键 #${(color & 0xffffff).toString(16).padStart(6, '0')}`);
       this.rebuildSceneFromLastSnapshot();
       return true;
     } catch (error) {
       this.note(`uploadTexture(${textureId}) 失败：${messageOf(error)}`);
       return false;
     }
+  }
+
+  /** 影片帧上传：不应用颜色键、不每帧写诊断；随后由影片 host 调 `presentNow()` */
+  uploadMovieFrame(params: { textureId: number; width: number; height: number; rgba: Uint8Array }): boolean {
+    // ★ 必须先标记再上传：`uploadTexture` 内部会重建场景；若等它返回再标记，重建出的场景
+    //   仍把影片画在黑网格下面 ⇒ 每次上传后的第一次 present 都会黑一帧（正是闪烁的来源）。
+    this.movieSlots.add(params.textureId);
+    const ok = this.uploadTexture({ ...params, kind: 'normal', color: -1, quiet: true, movie: true });
+    if (!ok) this.movieSlots.delete(params.textureId);
+    return ok;
+  }
+
+  /** 影片 host 的同步呈现入口（`present` 是 private；视频帧不能每帧等 async 协议） */
+  movieNote(text: string): void {
+    this.note(text);
+  }
+
+  presentNow(): void {
+    this.present();
   }
 
   /** `0x1fa`：释放平台纹理（幂等） */
@@ -1046,6 +1073,7 @@ export class PixiRenderHost {
   }
 
   private dropSlot(id: number): void {
+    this.movieSlots.delete(id);
     const slot = this.slots.get(id);
     if (!slot) return;
     if (slot.surfaceId !== null) {
@@ -1172,6 +1200,16 @@ export class PixiRenderHost {
       graphics.poly([xs[1]!, ys[1]!, xs[3]!, ys[3]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
       this.addBuilt(graphics);
       stats.meshQuads += 1;
+    }
+
+    // 影片帧：放在网格之后覆盖（LOGO 收尾的黑色网格属于场景，不应盖住影片）。
+    // ★ 这是本实现的呈现顺序选择；引擎的影片/场景次序未成篇（RES-MOVIE-DRAW-ORDER）。
+    for (const textureId of this.movieSlots) {
+      const slot = this.slots.get(textureId);
+      if (!slot || !slot.rt || !slot.hasContent) continue;
+      const sprite = new Sprite(slot.rt as Texture);
+      this.addBuilt(sprite);
+      stats.sprites += 1;
     }
 
     // ★ 场景是每帧重建的，同一条警告会重复几十次 ⇒ 按 kind 记住"上次发出的文本"，

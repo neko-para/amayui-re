@@ -2621,6 +2621,18 @@
         {
           "ea": "0x4883e6",
           "what": "sub_4883A0 内：对象+0x448 ← 选项字；+0x468 ← 1；+0x444 ← 选项&1；[+0x434]+0x42C ← 1"
+        },
+        {
+          "ea": "0x4238d3",
+          "what": "按统一 id 打开并配置播放后端"
+        },
+        {
+          "ea": "0x4238b5",
+          "what": "绑定为空 ⇒ 抛显示消息型异常"
+        },
+        {
+          "ea": "0x4892ff",
+          "what": "把纹理槽对象的表面交给影片 renderer"
         }
       ],
       "functions": [
@@ -2640,6 +2652,108 @@
       ],
       "evidence": [
         "guard:tools/test/emulator-new-scene.test.mjs#★ 0x20f 播影片：建对象、置影片位与\"有活动对象\"、发出播放请求（不等待）"
+      ]
+    },
+    {
+      "rule": "CORE-VM-MOVIE",
+      "sites": [
+        {
+          "ea": "0x41252f",
+          "what": "门前的“有活动对象”闸"
+        },
+        {
+          "ea": "0x4125a1",
+          "what": "清“有活动对象”"
+        },
+        {
+          "ea": "0x4125cc",
+          "what": "逐已启动影片槽重置“有活动对象”"
+        },
+        {
+          "ea": "0x412620",
+          "what": "读取新帧标志"
+        },
+        {
+          "ea": "0x412654",
+          "what": "查询 renderer 忙"
+        },
+        {
+          "ea": "0x41266e",
+          "what": "读 CurrentPosition"
+        },
+        {
+          "ea": "0x412680",
+          "what": "读 StopTime"
+        },
+        {
+          "ea": "0x412696",
+          "what": "StopTime <= CurrentPosition 判据"
+        },
+        {
+          "ea": "0x4126a4",
+          "what": "循环位分支"
+        },
+        {
+          "ea": "0x4126c8",
+          "what": "循环重启 Run"
+        },
+        {
+          "ea": "0x4126d3",
+          "what": "正常收尾入口"
+        },
+        {
+          "ea": "0x4126df",
+          "what": "读选项字"
+        },
+        {
+          "ea": "0x4126fa",
+          "what": "FillTexture 调用"
+        },
+        {
+          "ea": "0x412720",
+          "what": "对象析构"
+        },
+        {
+          "ea": "0x412728",
+          "what": "对象槽置空"
+        },
+        {
+          "ea": "0x488fb0",
+          "what": "收尾：Stop / 关闭 / 释放"
+        },
+        {
+          "ea": "0x412cbd",
+          "what": "清影片位"
+        },
+        {
+          "ea": "0x412d15",
+          "what": "扫描 1000 个对象槽"
+        },
+        {
+          "ea": "0x412d32",
+          "what": "仍有已启动影片对象 ⇒ 再置影片位"
+        },
+        {
+          "ea": "0x412d3b",
+          "what": "Sleep(0)"
+        },
+        {
+          "ea": "0x4883e6",
+          "what": "启动标记 +0x468 ← 1（“已启动”判据）"
+        }
+      ],
+      "functions": [
+        "sub_412290",
+        "sub_488FB0",
+        "sub_4883A0",
+        "sub_408130",
+        "sub_4080B0",
+        "sub_4A4C70"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-movie.test.mjs#★ 播完（option 506：不循环、不填纹理）：清对象槽、关闭后端、不填纹理、不释放纹理",
+        "guard:tools/test/emulator-new-movie.test.mjs#★ 循环位：播完回到开头并保留对象 / 槽；不清位"
       ]
     },
     {

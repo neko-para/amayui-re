@@ -27,6 +27,8 @@
   `60-ops-render.md` 的 `0x20d` / `0x33f` / `0x204` 接到 Electron + Pixi：窗口、画布、渲染目标、离屏文字
   与 **AGF 纹理加载 / 上传**（`core/agf.ts` + `uploadTexture`）是真的；
   音频、输入转发仍是显式未建模（UI 的 diagnostics 面板逐条列出）；BMP 分支仍响亮失败。
+  ★ **影片**：`0x20f` 已接到 **pl_mpeg WASM**（MPEG-1 / MPEG-PS，只视频；音频忽略），按门前的影片对象表服务推进；
+  解码帧上传到同槽纹理并同步 `presentNow()`。
   ★ **全屏语义不支持**（显式决策）：`screenMode=0` 被降级成 `set:WinX` × `set:WinY` 的普通窗口，
   不做显示器分辨率切换、不做全屏缩放；spec 仍按 `06-window` 记录引擎的原始请求。
   ★ **网格渲染是窄实现**：只画“4 顶点、四色一致”的全屏四边形（LOGO 版权页），

@@ -19,6 +19,7 @@ import { Install, defaultConfigPath, ensureConfigDir, readConfigFile, readFile, 
 import type { Host } from './install.ts';
 import type { ConfigKeySchema, OpcodeRow } from './spec.ts';
 import type { RenderHost } from './render.ts';
+import type { MovieHost } from './movie.ts';
 
 /** 一份脚本的"结构 + 执行"报告（decode / run / 缺 key 三种形态共用；可选字段由 mode 决定） */
 export interface ScriptReport {
@@ -69,6 +70,8 @@ export interface CoreEnv {
    *   （`0x20d` 走错误通道，`0x204` 的入口条件 ② 不成立）。
    */
   renderHost?: RenderHost;
+  /** 影片播放后端（`0x20f`）；缺省 = 没有后端 ⇒ 影片位保持门关闭 */
+  movieHost?: MovieHost;
 }
 
 export interface RunOpts {
@@ -92,6 +95,8 @@ export interface RunOpts {
   fontNames?: string[];
   /** 渲染宿主；给了就覆盖 `CoreEnv.renderHost`（缺省沿用 env 的那一个） */
   renderHost?: RenderHost;
+  /** 影片后端；给了就覆盖 `CoreEnv.movieHost`（缺省沿用 env 的那一个） */
+  movieHost?: MovieHost;
   /**
    * **迭代头的平台泵点**（`70-vm.md` 的 `CORE-VM-LOOP`）：每次迭代在门之前调一次。
    * ★ 平台入口把窗口 / timer 消息泵接在这里（`WindowSession.pump()`）；缺省 `undefined` = 不泵。
@@ -190,7 +195,7 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
   const machine = new Machine({
     body, table: env.table, key, tickMs: opts.tickMs, clock: opts.clock, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
     loadImage: opts.loadImage,
-    fontNames: opts.fontNames, renderHost: opts.renderHost ?? env.renderHost, onIteration: opts.onIteration,
+    fontNames: opts.fontNames, renderHost: opts.renderHost ?? env.renderHost, movieHost: opts.movieHost ?? env.movieHost, onIteration: opts.onIteration,
   });
   // 根脚本已在 0 号槽 ⇒ 平台在这里建周期定时器（`onMachine` 的注释见 `RunOpts`）
   await opts.onMachine?.(machine, { config: opts.config });

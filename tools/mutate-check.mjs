@@ -1511,6 +1511,21 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-presentation.test.mjs',
     what: '★ 占满屏请求不再降级 ⇒ 窗口仍是 1728×1117、画面按 1280×720 贴左上角（正是这次要修的症状）',
   },
+  // ── emulator-new：影片循环位 ──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  obj.loop = (option & 1) !== 0;',
+    to: '  obj.loop = false; // 变异：忽略循环位',
+    guard: 'tools/test/emulator-new-movie.test.mjs',
+    what: '★ 0x20f 忽略循环位 ⇒ 循环影片播完就被销毁',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '      if (obj.loop) {',
+    to: '      if (false) { // 变异：循环分支不执行',
+    guard: 'tools/test/emulator-new-movie.test.mjs',
+    what: '★ 影片对象表服务不处理循环 ⇒ 循环影片被当成正常收尾',
+  },
   // ── emulator-new：颜色窗把插值写回当前颜色（指数衰减）──
   {
     file: 'apps/emulator-new/src/core/machine.ts',

@@ -1102,7 +1102,10 @@ function movie20f(m: Machine, ops: Operand[]): void {
   const slot = readInt(m, ops, 2);
   let obj = m.scene.objectSlots.get(slot) as MovieObject | undefined;
   if (!obj || obj.kind !== 'movie') {
-    obj = { kind: 'movie', slot, resourceId: 0, opt: 0, started: false };
+    obj = {
+      kind: 'movie', slot, resourceId: 0, opt: 0, started: false,
+      handle: null, loop: false, currentTime: 0, stopTime: 0,
+    };
     m.scene.objectSlots.set(slot, obj);
   }
   obj.resourceId = readInt(m, ops, 1);
@@ -1113,7 +1116,15 @@ function movie20f(m: Machine, ops: Operand[]): void {
     // 引擎：该槽没有纹理绑定 ⇒ 抛"显示消息"异常（本层用响亮失败表示）
     throw new Error(`movie-binding-missing:${slot}`);
   }
-  obj.opt = readInt(m, ops, 3);
+  const option = readInt(m, ops, 3);
+  if (m.movieHost) {
+    const handle = m.movieHost.open({ slot, resourceId: obj.resourceId, option });
+    if (handle === null) throw new Error(`movie-open-failed:${obj.resourceId}`);
+    obj.handle = handle;
+    m.movieHost.play(handle);
+  }
+  obj.opt = option;
+  obj.loop = (option & 1) !== 0;
   obj.started = true;
   m.flags |= MOVIE_BIT;
   m.scene.hasObjects = 1;
