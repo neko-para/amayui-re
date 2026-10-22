@@ -62,13 +62,36 @@ export interface DrawTextRequest {
   alignMode: number;
 }
 
+/** 纹理对象的种类（`0x1f8` 的第 4 个操作数：3 ⇒ 分割，其它 ⇒ 普通） */
+export type TextureKind = 'normal' | 'divided';
+
+/** `0x1f8` 的创建请求（尺寸是操作数给的，像素不上传） */
+export interface TextureCreateRequest {
+  textureId: number;
+  width: number;
+  height: number;
+  kind: TextureKind;
+}
+
+/** `0x1f9` 的上传请求：解码后的 top-down RGBA8 + 归一化颜色键 */
+export interface TextureUploadRequest {
+  textureId: number;
+  width: number;
+  height: number;
+  kind: TextureKind;
+  rgba: Uint8Array;
+  /** `0xFF000000 | RGB`；0 = 黑色键。平台在写入表面时把命中像素整条清 0 */
+  color: number;
+}
+
 /**
  * 渲染宿主：平台侧要实现的那一组方法（Electron / Pixi 与测试用 fake 都按这个映射）。
  *
  * ★ 全部是 `Promise`：核心的 IO / 外部请求一律可等待（核心能跑在浏览器 / worker 里）。
  * ★ 本层的**失败判据只有"null / false"**，没有异常通道：
  *   - `getRenderSurface` / `getBackBuffer` 取不到 ⇒ `null`；
- *   - `setRenderTarget` 失败 ⇒ `false`。
+ *   - `setRenderTarget` 失败 ⇒ `false`；
+ *   - `createTexture` / `uploadTexture` 失败 ⇒ `false`。
  *   抛异常只表示"平台实现坏了"，不表示"引擎上报了失败"（`0x20d` 的失败路径写错误通道，不抛）。
  */
 export interface RenderHost {
@@ -94,6 +117,22 @@ export interface RenderHost {
    * `0x20d` 的归还发生在写当前渲染目标**之前**（次序是合同）。
    */
   releaseSurface(surface: SurfaceHandle): Promise<void>;
+
+  /**
+   * `0x1f8`：创建 / 重置一张空白纹理（**不上传像素**）。
+   * `false` = 平台创建失败；调用方把失败写错误通道，对象仍留在槽里。
+   */
+  createTexture(request: TextureCreateRequest): Promise<boolean>;
+
+  /**
+   * `0x1f9`：把解码后的 RGBA 上传到该纹理槽（**同步请求**；返回前完成）。
+   * `false` = 上传失败；调用方按显示消息型异常处理。
+   * ★ 颜色键的像素清零由平台实现（见请求字段）；核心只搬运归一化后的键。
+   */
+  uploadTexture(request: TextureUploadRequest): Promise<boolean>;
+
+  /** `0x1fa`：释放该纹理槽的平台纹理（幂等；空槽也要能调用）。 */
+  releaseTexture(textureId: number): Promise<void>;
 
   /**
    * 把一段文本画进某个纹理槽的纹理（`0x204` 的唯一一次绘制请求）。
@@ -226,6 +265,9 @@ export type HeadlessRenderRequest =
   | { kind: 'get-back-buffer'; ok: boolean }
   | { kind: 'set-render-target'; surface: SurfaceHandle; ok: boolean }
   | { kind: 'release-surface'; surface: SurfaceHandle }
+  | { kind: 'create-texture'; request: TextureCreateRequest; ok: boolean }
+  | { kind: 'upload-texture'; request: TextureUploadRequest; ok: boolean }
+  | { kind: 'release-texture'; textureId: number }
   | { kind: 'draw-text'; request: DrawTextRequest };
 
 export interface HeadlessRenderOptions {
@@ -240,6 +282,10 @@ export interface HeadlessRenderOptions {
   backBuffer?: boolean;
   /** `setRenderTarget` 会成功吗（缺省 `true`） */
   setRenderTargetSucceeds?: boolean;
+  /** `createTexture` 会成功吗（缺省 `true`） */
+  createTextureSucceeds?: boolean;
+  /** `uploadTexture` 会成功吗（缺省 `true`） */
+  uploadTextureSucceeds?: boolean;
   /**
    * `drawText` 返回 true 还是 false（缺省 `true`）。
    * ★ 只影响**返回值**（失败路径记账用），⛔ 不产生像素、不模拟加锁。
@@ -265,12 +311,16 @@ export class HeadlessRenderHost implements RenderHost {
   readonly hasSurface: (textureId: number) => boolean;
   readonly backBuffer: boolean;
   setRenderTargetSucceeds: boolean;
+  createTextureSucceeds: boolean;
+  uploadTextureSucceeds: boolean;
   drawTextSucceeds: boolean;
 
   constructor(options: HeadlessRenderOptions = {}) {
     this.hasSurface = options.hasSurface ?? (() => true);
     this.backBuffer = options.backBuffer ?? true;
     this.setRenderTargetSucceeds = options.setRenderTargetSucceeds ?? true;
+    this.createTextureSucceeds = options.createTextureSucceeds ?? true;
+    this.uploadTextureSucceeds = options.uploadTextureSucceeds ?? true;
     this.drawTextSucceeds = options.drawTextSucceeds ?? true;
   }
 
@@ -293,6 +343,22 @@ export class HeadlessRenderHost implements RenderHost {
 
   async releaseSurface(surface: SurfaceHandle): Promise<void> {
     this.requests.push({ kind: 'release-surface', surface });
+  }
+
+  async createTexture(request: TextureCreateRequest): Promise<boolean> {
+    // ★ 只记账：不建 GPU 纹理、不分配像素
+    this.requests.push({ kind: 'create-texture', request: { ...request }, ok: this.createTextureSucceeds });
+    return this.createTextureSucceeds;
+  }
+
+  async uploadTexture(request: TextureUploadRequest): Promise<boolean> {
+    // ★ 只记账：像素留在请求里，headless 不解释、不上传
+    this.requests.push({ kind: 'upload-texture', request: { ...request }, ok: this.uploadTextureSucceeds });
+    return this.uploadTextureSucceeds;
+  }
+
+  async releaseTexture(textureId: number): Promise<void> {
+    this.requests.push({ kind: 'release-texture', textureId });
   }
 
   async drawText(request: DrawTextRequest): Promise<boolean> {

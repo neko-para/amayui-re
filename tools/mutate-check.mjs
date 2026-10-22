@@ -1465,6 +1465,67 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-texture.test.mjs',
     what: '★ 0x1fb 把右边界存成"宽" ⇒ 矩形宽了 x 那么多（画得出来、位置错，且不报错）',
   },
+  // ── emulator-new：AGF 的行宽 / 行序 / 调色板通道 ──
+  {
+    file: 'apps/emulator-new/src/core/agf.ts',
+    from: '  return 4 * Math.ceil((bpp * width) / 32);',
+    to: '  return (bpp * width) / 8; // 变异：去掉 32 位行对齐',
+    guard: 'tools/test/emulator-new-agf.test.mjs',
+    what: '★ AGF 行宽退回"不填充" ⇒ 8bpp 1026 宽按 1026 取行，所有像素错位',
+  },
+  {
+    file: 'apps/emulator-new/src/core/agf.ts',
+    from: '    const srcRow = (height - 1 - y) * stride;',
+    to: '    const srcRow = y * stride; // 变异：不再翻转 bottom-up',
+    guard: 'tools/test/emulator-new-agf.test.mjs',
+    what: '★ AGF 不翻转 bottom-up ⇒ 图像上下颠倒（尺寸仍对、不报错）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/agf.ts',
+    from: '        rgba[d] = palette[p + 2]!;',
+    to: '        rgba[d] = palette[p]!; // 变异：调色板 R/B 互换',
+    guard: 'tools/test/emulator-new-agf.test.mjs',
+    what: '★ 8bpp 调色板 R/B 互换 ⇒ 红蓝通道错（像素数量对、颜色不对）',
+  },
+  // ── emulator-new：纹理尺寸必须来自解码图像，不是 0×0 ──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "  m.scene.textureObjects.set(id, { kind: 'normal', width: image.width, height: image.height });",
+    to: "  m.scene.textureObjects.set(id, { kind: 'normal', width: 0, height: 0 }); // 变异：尺寸写 0",
+    guard: 'tools/test/emulator-new-texture.test.mjs',
+    what: '★ 0x1f9 的纹理尺寸写 0 ⇒ 对象"存在"但取不到表面，绘制全落占位块',
+  },
+  // ── emulator-new：0x1f8 只写来源 / 空白位，颜色键不能清 ──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "  m.scene.textures.set(id, { file: -1, color: previous?.color ?? 0, blank: 1 });",
+    to: "  m.scene.textures.set(id, { file: -1, color: 0, blank: 1 }); // 变异：把颜色键清零",
+    guard: 'tools/test/emulator-new-texture.test.mjs',
+    what: '★ 0x1f8 把旧颜色键清零 ⇒ 新建纹理后颜色键静默丢失（现有测试都用新槽抓不到）',
+  },
+  // ── emulator-new：全屏降级（模拟器明确不支持全屏）──
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/presentation.ts',
+    from: '  if (Number(params.exStyle) === 0) return params;',
+    to: '  if (true) return params; // 变异：不再识别占满屏',
+    guard: 'tools/test/emulator-new-presentation.test.mjs',
+    what: '★ 占满屏请求不再降级 ⇒ 窗口仍是 1728×1117、画面按 1280×720 贴左上角（正是这次要修的症状）',
+  },
+  // ── emulator-new：颜色窗把插值写回当前颜色（指数衰减）──
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '          item.colorNow = blendColor(item.colorFrom, item.colorTo, t);',
+    to: '          item.colorFrom = blendColor(item.colorFrom, item.colorTo, t); // 变异：写回当前颜色',
+    guard: 'tools/test/emulator-new-scene.test.mjs',
+    what: '★ 绘制项把插值写回 colorFrom ⇒ 半程值变成指数衰减，且当前颜色被污染（正是版权页提前结束的原因）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '        if (mesh.colorNow !== -1) mesh.colors = mesh.colors.map(() => mesh.colorNow >>> 0);\n        this.scene.animating = 1;',
+    to: '        this.scene.animating = 1; // 变异：不重烘网格顶点色',
+    guard: 'tools/test/emulator-new-scene.test.mjs',
+    what: '★ 窗推进不重烘网格顶点色 ⇒ 网格仍画 0x322 的起色，渐变不可见',
+  },
   // ── emulator-new：0x202 的"已存在"门 ──
   {
     file: 'apps/emulator-new/src/core/handlers.ts',

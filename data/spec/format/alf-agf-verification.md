@@ -37,10 +37,11 @@
 | id | 声明 | 状态 | 关联 | 未完成 |
 |---|---|---|---|---|
 | `FMT-AGF-READ-PATH` | AGF 读取 / 解码路径（入口 + 头 / 段 / ACIF / 像素） | **verified** | 引擎图像读取段 `sub_43E9F0` 起；头 / 段 / ACIF / 像素的读取点见下面四行 | — |
-| `FMT-AGF-HEADER` | `ACGF` 24 字节头（version 1/2、unknown0=0）/ meta / body 段 | **verified** | `.text:0043EB11`（BM 分流）、`0043ED43` / `0043ED58`（version / unknown0）、`0043ED68`–`0043ED8C`（12 字节 meta 块）、`0043EE77`–`0043EED9`（12 字节 body 块）、`0043FEF7`（拒绝） | — |
+| `FMT-AGF-HEADER` | 头 24 字节（头 4 字节不参与判定，常见 `ACGF`；version 1/2、unknown0=0）/ meta / body 段 | **verified** | `.text:0043EB11`（BM 分流）、`0043ED43` / `0043ED58`（version / unknown0）、`0043ED68`–`0043ED8C`（12 字节 meta 块）、`0043EE77`–`0043EED9`（12 字节 body 块）、`0043FEF7`（拒绝） | — |
+| `FMT-AGF-V1` | version 1 不读 ACIF；头 4 字节不参与判定 | **partial** | 真实样本 `SO006.AGF`（头 4 字节为 0、无 ACIF）；引擎 version 读取分支 `0x43ED43`（1/2 都接受） | 该样本是 8bpp；v1 的 24 / 32bpp 像素路径没有单独样本 |
 | `FMT-AGF-LZSS` | 与 ALF **同一例程、同一参数**（`sub_436A80`） | **verified** | meta：`.text:0043EE46`；body：`.text:0043EF5C`（缓冲分配 `.text:0043EEE2`）；alpha：`.text:004017B1` | — |
 | `FMT-AGF-ACIF` | version 2 的 body 之后**紧接** `ACIF`（缺则读取失败）；24 字节头 + 12 字节长度块 + alpha；只校验宽高、不校验 alpha 字节数 | **verified** | `.text:0043EFDA`（仅 v2）、`.text:00401620`（读 24 字节）、`00401655`（magic）、`00401668` / `00401675`（宽高）、`004016F6`（12 字节块）、`0040179A` / `0040179E`（按 +12 分配）、`004017AC`（解压）；失败路径 `0043F048` → `0043F0A2` → `00440488` | — |
-| `FMT-AGF-PIXELS` | 宽高 @ meta+20/+24 / bpp（16 位，本版只取 8/24/32）@ meta+30 / 调色板槽 meta+56（1024 字节，`2^bpp` 项）/ 行不填充（`bpp*w/8`）/ bottom-up / BGR(A) | **verified** | `.text:004396CE`（bpp）、`0043945F` / `00439433`（调色板）、`00439632` / `004396F6`（bottom-up）、`0043A116`（24bpp）、`0043A2C6`（32bpp） | — |
+| `FMT-AGF-PIXELS` | 宽高 @ meta+20/+24 / bpp（16 位，本版只取 8/24/32）@ meta+30 / 调色板槽 meta+56（1024 字节，8bpp 256 项）/ 行按 32 位（4 字节）对齐 / bottom-up / BGR(A) | **partial** | `.text:004396CE`（bpp）、`0043945F` / `00439433`（调色板）、`00439632` / `004396F6`（bottom-up）、`0043A116`（24bpp）、`0043A2C6`（32bpp）、`0048B090`（上传器按 32 位对齐行宽） | 24bpp 的非 4 倍数宽度无样本，行尾填充是按 8bpp 1026 宽（body = 1028×height）外推 |
 
 ## 怎么用
 

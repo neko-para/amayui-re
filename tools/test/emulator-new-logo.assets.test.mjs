@@ -68,7 +68,12 @@ test('★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：�
   const body = buf.subarray(header.headerLength);
   assert.equal(body.length, 1448, 'LOGO.BIN 的 body 字节数');
 
-  const m = new Machine({ body, table: await loadOpcodeTable(), key: KEY, uninitializedFloat: 'zero' });
+  const install = await Install.open(nodeHost, installDir);
+  const m = new Machine({
+    body, table: await loadOpcodeTable(), key: KEY, uninitializedFloat: 'zero',
+    // 真实纹理文件（统一文件 id → 整份 AGF），不是合成图
+    loadImage: async (id) => (await install.readById(id)).bytes,
+  });
   const r = await m.run({ stopAtOpcode: 0x20f });
 
   // ① 真的在执行：前 46 条已经执行掉（play-movie 本身**没有**执行 —— 停止条件是"停在它前面"）
@@ -87,10 +92,14 @@ test('★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：�
   assert.ok(mesh2 && mesh3, '两个网格都建出来了');
   assert.equal(mesh2.count, 4, '顶点数来自第 9 个操作数（4）');
   assert.equal(mesh2.op10, 0, '第 10 个操作数写进网格记录');
-  assert.deepEqual(mesh2.colors, [0xff000000, 0xff000000, 0xff000000, 0xff000000],
-    '★ 0x322 按起色烘顶点色（4 个顶点）');
+  assert.deepEqual(mesh2.colors, [0, 0, 0, 0],
+    '★ 窗到期后网格顶点色被重烘成终色（不是停在 0x322 的起色）');
   assert.equal(mesh2.colorFrom >>> 0, 0, '★ 0x323 的窗收尾：起色 = 终色（终色是 0）');
+  assert.equal(mesh2.colorNow >>> 0, 0, '派生色 = 当前色（到期）');
   assert.equal(mesh3.colorFrom >>> 0, 0xff000000, '第二个网格的起色来自最后一次 0x322');
+  assert.equal(mesh3.colorNow >>> 0, 0xff000000, '第二个网格的派生色 = 终色');
+  assert.deepEqual(mesh3.colors, [0xff000000, 0xff000000, 0xff000000, 0xff000000],
+    '第二个网格到期后顶点色也重烘');
   assert.equal(mesh3.flags & 2, 0, '网格的窗收尾时清"有窗"位');
 
   // ④ 纹理族：42 被 0x1f8 重建为空白纹理（覆盖掉原来的文件号），43 被 0x1fa 释放

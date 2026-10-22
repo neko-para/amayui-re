@@ -45,14 +45,14 @@ function machineFor(instrs, extra = {}) {
 function item(over = {}) {
   return {
     flags: 1, textureId: 0, left: 0, top: 0, right: 0, bottom: 0, aux: [0, 0, 0],
-    start: 0, delay: 0, duration: 0, colorFrom: -1, colorTo: -1, unknown: new Map(), ...over,
+    start: 0, delay: 0, duration: 0, colorFrom: -1, colorNow: -1, colorTo: -1, unknown: new Map(), ...over,
   };
 }
 
 function mesh(over = {}) {
   return {
     flags: 1, count: 0, op10: 0, copies: [[], []], colors: [], vbo: [],
-    start: 0, delay: 0, duration: 0, colorFrom: -1, colorTo: -1, unknown: new Map(), ...over,
+    start: 0, delay: 0, duration: 0, colorFrom: -1, colorNow: -1, colorTo: -1, unknown: new Map(), ...over,
   };
 }
 
@@ -173,6 +173,23 @@ test('★ 窗收尾：绘制项与网格都清"有窗"位', async () => {
   assert.equal(me.flags & 2, 0, '网格的"有窗"位被清');
   assert.equal(it.colorFrom >>> 0, 0xff00ff00, '起色 = 终色');
   assert.equal(it.colorTo, -1);
+});
+
+test('★ 窗进行中：插值写派生色 / 顶点缓冲，不写回当前颜色；半程是线性的', () => {
+  const m = machineFor([], { tickMs: 16 });
+  m.scene.now = 1;
+  m.scene.drawItems.set(1, item({ flags: 3, delay: 0, duration: 500, colorFrom: 0xff000000, colorTo: 0 }));
+  m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 500, colorFrom: 0xff000000, colorTo: 0, colors: [0xff000000] }));
+  m.stepScene(); // 在非 0 时刻盖章（start = 1；0 是“未盖章”哨兵）
+  m.scene.now = 251;
+  m.stepScene();
+  const it = m.scene.drawItems.get(1);
+  const me = m.scene.meshes.get(1);
+  assert.equal(it.colorFrom >>> 0, 0xff000000, '当前颜色在窗进行中保持原值');
+  assert.equal(me.colorFrom >>> 0, 0xff000000, '网格当前颜色也保持原值');
+  assert.equal(it.colorNow >>> 0, 0x80000000, '绘制项的派生色 = 半程线性值（不是指数衰减）');
+  assert.equal(me.colorNow >>> 0, 0x80000000, '网格的派生色 = 半程线性值');
+  assert.deepEqual(me.colors, [0x80000000], '网格顶点缓冲每步重烘');
 });
 
 test('★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行', async () => {

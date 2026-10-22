@@ -24,8 +24,14 @@
   脚本的 `0x1a2` / `0x1a3` / `0x1a9` / `0x1aa` 只支持全局值族（type 3 / 5）；引用族先响亮失败。
 - **CLI 入口**没有渲染 / 音频 / 输入；外部请求只记进 `m.effects`（`data/spec/core/README.md` §1 裁决）。
   **Electron 前端**（`src/platform/electron/**`）把 `06-window.md` 的窗口 / 图形设备 / 事件入口与
-  `60-ops-render.md` 的 `0x20d` / `0x33f` / `0x204` 接到 Electron + Pixi：窗口、画布、渲染目标与离屏文字是真的；
-  音频、输入转发、纹理像素解码仍是显式未建模（UI 的 diagnostics 面板逐条列出）。
+  `60-ops-render.md` 的 `0x20d` / `0x33f` / `0x204` 接到 Electron + Pixi：窗口、画布、渲染目标、离屏文字
+  与 **AGF 纹理加载 / 上传**（`core/agf.ts` + `uploadTexture`）是真的；
+  音频、输入转发仍是显式未建模（UI 的 diagnostics 面板逐条列出）；BMP 分支仍响亮失败。
+  ★ **全屏语义不支持**（显式决策）：`screenMode=0` 被降级成 `set:WinX` × `set:WinY` 的普通窗口，
+  不做显示器分辨率切换、不做全屏缩放；spec 仍按 `06-window` 记录引擎的原始请求。
+  ★ **网格渲染是窄实现**：只画“4 顶点、四色一致”的全屏四边形（LOGO 版权页），
+  逐顶点布局 / topology / draw order 尚未取证；其它网格跳过并在 diagnostics 记数。
+  颜色窗的渲染色落点已按 `70-vm` 改成“插值写渲染色 / 顶点缓冲，不写回当前颜色”。
   ★ **core 整份跑在 renderer**：`renderer/session.ts` 直接调用 `analyzeInstall` / `bootWindow` / `Machine`；
   main 只保留 BrowserWindow、文件系统 / 规范表读取、IPC 与进程生命周期。桥接协议见 `platform/electron/protocol.ts`。
 - **未实现即停**（不 no-op）：缺口带 `{指令序号, 偏移, opcode, argc}`，停在它**前面**，可以当门禁用。
@@ -88,7 +94,7 @@ node apps/emulator-new/src/main.ts --install "<安装目录>" --json --effects
 `--key 0` 不是合法值（会破坏 `ENC(0) ≠ 0` 与引擎的非 0 前置），入口直接拒绝。
 
 默认是**静默执行**：运行中不打印，结束后一次性输出报告；需要中间输出就用 `--progress` / `--trace`。
-`--trace` 默认只打 **external + unmodeled**（音频 / 纹理 / 输入 / 未建模调用）；`string.set`、`array.lookup`、`engine.scalar.*` 这类**已建模的内部记账**只在 `--trace-all` 里出现。
+`--trace` 默认只打 **external + unmodeled**（音频 / 纹理加载请求 / 输入 / 未建模调用）；`string.set`、`array.lookup`、`engine.scalar.*` 这类**已建模的内部记账**只在 `--trace-all` 里出现。
 
 ### Electron 窗口（Pixi 渲染）
 

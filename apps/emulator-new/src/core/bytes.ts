@@ -45,6 +45,14 @@ export function decodeCp932(text: string): string {
   return CP932.decode(encodeLatin1(text));
 }
 
+/** 小端 u16 读（越界 ⇒ 抛，不补 0） */
+export function readU16LE(bytes: Uint8Array, offset: number): number {
+  if (!Number.isInteger(offset) || offset < 0 || offset + 2 > bytes.length) {
+    throw new Error(`read-u16-out-of-range:${offset}/${bytes.length}`);
+  }
+  return bytes[offset]! | (bytes[offset + 1]! << 8);
+}
+
 /** 小端 u32 读（越界 ⇒ 抛，不补 0） */
 export function readU32LE(bytes: Uint8Array, offset: number): number {
   if (!Number.isInteger(offset) || offset < 0 || offset + 4 > bytes.length) {

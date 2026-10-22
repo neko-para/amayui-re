@@ -4,8 +4,8 @@
  * 职责：把 `RenderCall` 翻译成 Pixi 操作，并把 `SceneSnapshot` 画出来。
  * ★ 2026-10 之后 core 就在同一个 renderer 里：本文件**不再经过 IPC**，由 `session.ts` 的
  *   `LocalRenderHost` 直接调用 `execute` / `applyScene` / `canvasSize`。
- * ★ 仍然 ⛔ 不 import 核心（`src/core/**`）、⛔ 不 import `node:*`：它只消费 `../protocol.ts`
- *   的可序列化视图，core 的 `RenderHost` 适配在 `session.ts` 里，不在这里。
+ * ★ 只 import **纯核心**的 `applyColorKey`（无 Node / DOM）；⛔ 不 import `node:*`，也不反向 import
+ *   `session.ts`。core 的 `RenderHost` 适配在 `session.ts` 里，不在这里。
  * ★ 快照里的 `width/height/left/top/right/bottom` 都是**客户区像素**，画布按 `init` 的尺寸、
  *   1:1 坐标绘制；Retina 由 Pixi 的 `resolution` 处理（画布的 CSS 尺寸仍是客户区像素）。
  *
@@ -46,17 +46,17 @@
  * 6. `RES-RENDER-BLEND-PIXEL`（spec 未定）：`0x33f` 的模式格是**原样写入的整数**，spec 明说
  *    "读取方怎样分支属外部模块" ⇒ 下面的 `BLEND_MODE_MAP` 是**映射表**，除 0 = normal 是任务约定外
  *    全部未取证。未知值 ⇒ normal + 一条日志（⛔ 不猜）。
- * 7. `present` 渲染到纹理目标时用 `clear: true`（任务指定）：Pixi 用**背景色**清屏。
- *    清屏色应当是背景色还是透明，本实现没有证据 ⇒ diagnostics 里标出来。
- * 8. 场景里的纹理槽**没有任何像素解码**（spec 的 `RES-RENDER-TEXT-SURFACE` / 纹理族都不给像素）：
- *    来自文件（`blank = 0`）的槽一律画**占位块**（带纹理号 / 尺寸），`blank = 1` 的空白纹理
- *    画半透明占位块。只有 `drawText` 真正画过、或被 `present` 当目标写过的槽才显示 `Sprite`。
- * 9. 绘制项矩形与纹理尺寸不一致时，**按 1:1 贴左上角、不缩放**（拉伸是否会篡改像素未取证），
- *    只记一条计数 + 日志。
+ * 7. `present` 渲染到纹理目标时：空白槽（`hasContent = false`）用 `clear: true`；已有文件像素 /
+ *    离屏文字的槽用 `clear: false`，否则会把它们擦掉。呈现与目标的次序本版未取证 ⇒ diagnostics 标出。
+ * 8. 文件纹理由 core 的 AGF 解码 + `uploadTexture` 上传；占位块只在槽没有可画内容时出现。
+ *    空白创建（`0x1f8`）的初始像素未定义，本实现不保证清零。
+ * 9. `0x1fb` 的四条边是**来源矩形**、两个浮点是**目标位置**；来源矩形越出纹理时只记计数，
+ *    Pixi 按 frame 裁掉，不缩放（拉伸是否会篡改像素未取证）。
  */
 
-import { Application, Container, Graphics, RenderTexture, Sprite, Text } from 'pixi.js';
+import { Application, Container, Graphics, Rectangle, RenderTexture, Sprite, Text, Texture } from 'pixi.js';
 import type { BLEND_MODES } from 'pixi.js';
+import { applyColorKey } from '../../../core/agf.ts';
 import type {
   DrawItemSnapshot,
   RendererInit,
@@ -136,7 +136,9 @@ export const BLEND_MODE_MAP: readonly { mode: number; pixi: BLEND_MODES; evidenc
 
 /** diagnostics 面板固定显示的"我们没做 / 没建模 / 没取证"清单（⛔ 不许悄悄省略） */
 export const DISCLOSURES: readonly string[] = [
-  '纹理像素未解码：本层没有图像解码，来自文件（blank = 0）的纹理槽一律只画占位块（spec 的 RES-RENDER-TEXT-SURFACE 不规定像素）',
+  '全屏语义未实现：screenMode=0 被平台降级为 set:WinX×set:WinY 的普通窗口（不做分辨率切换 / 缩放）；这是模拟器决策，不是 spec 结论',
+  '网格渲染仅支持“4 顶点、四色一致”的全屏四边形（LOGO 版权页）；逐顶点布局 / topology / draw order 未取证，其它网格跳过并诊断',
+  '纹理加载：AGF 解码 + uploadTexture 已实现；BMP 分支未成篇，颜色键的 16 位通道装配未取证，空白纹理的初始像素未定义',
   '字体对象部分建模：size 24 / 主色 0xFFFFFF / 副色 0 / 绘制模式 1 来自 Font::init 的逐字证据（0x4654C3 / 0x4655FB / 0x465605 / 0x465611）；face name（0x1a5 → Font+0x4EC）只记录',
   '★ 产品选择：所有文字统一映射到 Amayui CN（更纱黑体 cnjp 变体，随仓字体资产 Amayui-CN_cnjp*.ttf）；引擎 face name 不参与字体选择',
   '字形像素未取证：字形栅格化 / 抗锯齿 / 阴影形状与引擎逐像素不一致（⛔ 不声称等价）',
@@ -144,7 +146,7 @@ export const DISCLOSURES: readonly string[] = [
   '字体色 = 24 位 RGB（COLORREF 口径，已证：0x76 / 0x77 写 Font+0x550 / +0x554 只取低 24 位）⇒ 字永远不透明；绘制项 / 场景混合色才是 ARGB',
   '纵向对位：alignMode != 0 时引擎会做 y 修正，修正量未取证 ⇒ 本实现不改 y（未实现，不是"等价"）',
   '混合模式映射未取证：只有 0 = normal 是本实现约定，1/2/3 = add/multiply/screen 是猜测（RES-RENDER-BLEND-PIXEL）',
-  '渲染到纹理目标时的清屏色 = init 的背景色（Pixi 的 clear 语义；应当是背景还是透明未取证）',
+  '渲染到纹理目标时：空白目标用背景色 clear；已有文件像素 / 离屏文字的目标不清屏（呈现与目标的次序未取证）',
 ];
 
 /* ─────────────────────────────── 纯函数（可单测） ─────────────────────────────── */
@@ -316,7 +318,7 @@ export function drawPassesOf(
   }
 }
 
-/** 这张纹理槽当前有没有**真的像素**（本层只认"我们写过的"）：见文件头 ⑦ */
+/** 这张纹理槽当前有没有**可画的像素**（上传 / 写字 / 被当目标写过；`0x1f8` 重置为 false） */
 export interface TextureSlot {
   snapshot: TextureSnapshot;
   rt: RenderTexture | null;
@@ -327,6 +329,8 @@ export interface TextureSlot {
   /** 被 `present` 当纹理目标写过的次数 */
   renderTargetWrites: number;
   writeCount: number;
+  /** 有没有真实内容（文件上传 / 离屏文字 / 目标渲染）；false ⇒ 画占位块 */
+  hasContent: boolean;
   lastDraw: LastDrawState | null;
 }
 
@@ -403,6 +407,10 @@ export interface SceneBuildStats {
   zeroArea: number;
   /** 实际画出的占位标签数 */
   labels: number;
+  /** 快照里的网格数 / 画出的 4 顶点四边形数 / 因布局未知跳过的网格数 */
+  meshes: number;
+  meshQuads: number;
+  meshSkipped: number;
 }
 
 /** diagnostics 面板要的全部数字（**纯数据**；DOM 由 `renderer.ts` 画） */
@@ -447,7 +455,7 @@ export interface TextureSlotView {
   writeCount: number;
   drawCount: number;
   renderTargetWrites: number;
-  /** 有没有像素：本层只认 `drawText` / `present` 写过的（文件来源一律没有解码） */
+  /** 有没有可画内容：真实上传 / `drawText` / `present` 目标写过；占位块不算 */
   hasPixels: boolean;
 }
 
@@ -473,6 +481,8 @@ export class PixiRenderHost {
   private readonly sceneRoot = new Container();
   /** 场景里由本类创建的节点（销毁时按 Text / 其它分别处理，⛔ 不要一把 `destroy({texture:true})`） */
   private built: Container[] = [];
+  /** 子矩形 Sprite 用的临时 Texture（只包 frame，不拥有 source）；重建场景时逐个销毁 */
+  private frameTextures: Texture[] = [];
 
   private readonly slots = new Map<number, TextureSlot>();
   /** 表面表：`surfaceId → textureId`（`0` 是后缓冲，不在这张表里） */
@@ -586,6 +596,125 @@ export class PixiRenderHost {
     this.sceneStats = this.buildScene(scene);
   }
 
+  /**
+   * `0x1f8`：创建 / 重置一张空白纹理。
+   * ★ 不写像素；`hasContent` 清 false（即使同 id 同尺寸也要重置，否则旧图会留下来）。
+   */
+  createTexture(params: { textureId: number; width: number; height: number; kind: 'normal' | 'divided' }): boolean {
+    const { textureId, width, height, kind } = params;
+    if (width <= 0 || height <= 0) {
+      this.note(`createTexture(${textureId})：尺寸 ${width}×${height} 无效 ⇒ 创建失败`);
+      return false;
+    }
+    let slot = this.slots.get(textureId);
+    if (slot) {
+      this.dropSlot(textureId);
+      slot = undefined;
+    }
+    slot = {
+      snapshot: { id: textureId, kind, width, height, file: -1, blank: 1 },
+      rt: null,
+      surfaceId: null,
+      drawCount: 0,
+      renderTargetWrites: 0,
+      writeCount: 0,
+      hasContent: false,
+      lastDraw: null,
+    };
+    this.slots.set(textureId, slot);
+    try {
+      this.ensureTexture(slot);
+      this.note(`createTexture(${textureId})：${kind} ${width}×${height}（空白；像素未定义）`);
+      return true;
+    } catch (error) {
+      this.note(`createTexture(${textureId}) 失败：${messageOf(error)}`);
+      return false;
+    }
+  }
+
+  /**
+   * `0x1f9`：把 RGBA 上传到该槽（top-down，长度 = w×h×4）。
+   * ★ 颜色键命中像素整条清 0；临时 `Texture` / `Sprite` 只用于 blit，随后销毁。
+   */
+  uploadTexture(params: {
+    textureId: number;
+    width: number;
+    height: number;
+    kind: 'normal' | 'divided';
+    rgba: Uint8Array;
+    color: number;
+  }): boolean {
+    const { textureId, width, height, kind, rgba, color } = params;
+    if (width <= 0 || height <= 0) {
+      this.note(`uploadTexture(${textureId})：尺寸 ${width}×${height} 无效 ⇒ 上传失败`);
+      return false;
+    }
+    if (rgba.length !== width * height * 4) {
+      this.note(`uploadTexture(${textureId})：RGBA 长度 ${rgba.length} ≠ ${width}×${height}×4 ⇒ 上传失败`);
+      return false;
+    }
+    let slot = this.slots.get(textureId);
+    if (!slot) {
+      slot = {
+        snapshot: { id: textureId, kind, width, height, file: -1, blank: 0 },
+        rt: null,
+        surfaceId: null,
+        drawCount: 0,
+        renderTargetWrites: 0,
+        writeCount: 0,
+        hasContent: false,
+        lastDraw: null,
+      };
+      this.slots.set(textureId, slot);
+    } else {
+      slot.snapshot = { ...slot.snapshot, kind, width, height, blank: 0 };
+      slot.drawCount = 0;
+      slot.renderTargetWrites = 0;
+      slot.writeCount = 0;
+      slot.lastDraw = null;
+    }
+    try {
+      const rt = this.ensureTexture(slot);
+      const pixels = new Uint8Array(rgba); // 不把核心里可复用的缓冲交给平台
+      applyColorKey(pixels, color);
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (ctx === null) throw new Error('2d context unavailable');
+      const image = ctx.createImageData(width, height);
+      image.data.set(pixels);
+      ctx.putImageData(image, 0, 0);
+      const texture = Texture.from(canvas);
+      const sprite = new Sprite(texture);
+      try {
+        this.app.renderer.render({ container: sprite, target: rt, clear: true });
+      } finally {
+        sprite.destroy();
+        texture.destroy(true);
+      }
+      slot.hasContent = true;
+      slot.writeCount += 1;
+      this.note(`uploadTexture(${textureId})：${width}×${height}，颜色键 #${(color & 0xffffff).toString(16).padStart(6, '0')}`);
+      this.rebuildSceneFromLastSnapshot();
+      return true;
+    } catch (error) {
+      this.note(`uploadTexture(${textureId}) 失败：${messageOf(error)}`);
+      return false;
+    }
+  }
+
+  /** `0x1fa`：释放平台纹理（幂等） */
+  releaseTexture(textureId: number): void {
+    if (!this.slots.has(textureId)) {
+      this.note(`releaseTexture(${textureId})：槽不存在 ⇒ 幂等忽略`);
+      return;
+    }
+    this.dropSlot(textureId);
+    this.note(`releaseTexture(${textureId})：已销毁平台纹理`);
+    this.rebuildSceneFromLastSnapshot();
+  }
+
   /** diagnostics 面板的数据源（每次调用后重新取；纯数据） */
   diagnostics(): HostDiagnostics {
     const textures: TextureSlotView[] = [...this.slots.values()]
@@ -601,7 +730,7 @@ export class PixiRenderHost {
         writeCount: slot.writeCount,
         drawCount: slot.drawCount,
         renderTargetWrites: slot.renderTargetWrites,
-        hasPixels: slot.writeCount > 0,
+        hasPixels: slot.hasContent,
       }));
 
     const currentKind: 'backbuffer' | 'texture' = this.currentTarget < 0 ? 'backbuffer' : 'texture';
@@ -817,6 +946,7 @@ export class PixiRenderHost {
 
     slot.drawCount += 1;
     slot.writeCount += 1;
+    slot.hasContent = true;
     slot.lastDraw = {
       textureId: params.textureId,
       x: params.x,
@@ -895,6 +1025,7 @@ export class PixiRenderHost {
           drawCount: 0,
           renderTargetWrites: 0,
           writeCount: 0,
+          hasContent: false,
           lastDraw: null,
         });
         continue;
@@ -904,6 +1035,7 @@ export class PixiRenderHost {
       if (resized && existing.rt) {
         existing.rt.destroy(true);
         existing.rt = null;
+        existing.hasContent = false;
         this.note(`纹理槽 ${texture.id} 尺寸变化（${texture.width}×${texture.height}）⇒ 重建 RenderTexture（已画内容丢失）`);
       }
     }
@@ -953,6 +1085,9 @@ export class PixiRenderHost {
       sizeMismatch: 0,
       zeroArea: 0,
       labels: 0,
+      meshes: scene.meshes.length,
+      meshQuads: 0,
+      meshSkipped: 0,
     };
 
     for (const item of scene.drawItems) {
@@ -974,10 +1109,30 @@ export class PixiRenderHost {
       const slot = this.slots.get(item.textureId);
       if (!slot) stats.missingSlots += 1;
 
-      if (slot && slot.rt && slot.writeCount > 0) {
-        const sprite = new Sprite(slot.rt);
-        sprite.position.set(item.left, item.top);
-        if (slot.rt.width !== width || slot.rt.height !== height) stats.sizeMismatch += 1;
+      if (slot && slot.rt && slot.hasContent) {
+        // `0x1fb` 的四条边是**来源矩形**，第 7/8 个操作数是**目标位置**。
+        // 全图时不建 frame；子矩形按 RenderTexture 的物理/逻辑比例换算。
+        let texture = slot.rt as Texture;
+        if (item.left !== 0 || item.top !== 0
+          || width !== slot.rt.width || height !== slot.rt.height) {
+          const u = slot.rt.source.width / Math.max(1, slot.rt.width);
+          const v = slot.rt.source.height / Math.max(1, slot.rt.height);
+          texture = new Texture({
+            source: slot.rt.source,
+            frame: new Rectangle(item.left * u, item.top * v, width * u, height * v),
+          });
+          this.frameTextures.push(texture);
+        }
+        const sprite = new Sprite(texture);
+        sprite.position.set(item.aux[0], item.aux[1]);
+        if (item.color >= 0) {
+          const color = argbOf(item.color);
+          sprite.tint = color.rgb;
+          sprite.alpha = color.alpha;
+        }
+        if (item.left < 0 || item.top < 0 || item.right > slot.rt.width || item.bottom > slot.rt.height) {
+          stats.sizeMismatch += 1;
+        }
         this.addBuilt(sprite);
         stats.sprites += 1;
         continue;
@@ -985,10 +1140,38 @@ export class PixiRenderHost {
 
       const canLabel = stats.labels < MAX_PLACEHOLDER_LABELS && width >= 96 && height >= 24;
       const node = this.buildPlaceholder(item, slot, width, height, canLabel);
-      node.position.set(item.left, item.top);
+      node.position.set(item.aux[0], item.aux[1]);
       this.addBuilt(node);
       stats.placeholders += 1;
       if (canLabel) stats.labels += 1;
+    }
+
+    // 网格：目前只实现 LOGO 的 4 顶点全屏四边形（`copies[0]/[1]` 是 x/y，按 triangle strip 画）。
+    // ⛔ 逐顶点布局 / topology / draw order 还没有 spec 证据；其它形状一律计为 unsupported，不猜。
+    for (const mesh of scene.meshes) {
+      if ((mesh.flags & 1) === 0) continue;
+      if (mesh.count !== 4 || mesh.copies[0].length < 4 || mesh.copies[1].length < 4) {
+        stats.meshSkipped += 1;
+        continue;
+      }
+      const color = mesh.color >= 0 ? mesh.color : (mesh.colors[0] ?? -1);
+      if (color < 0 || mesh.colors.some((value) => value !== color)) {
+        stats.meshSkipped += 1;
+        continue;
+      }
+      const xs = mesh.copies[0].slice(0, 4).map(f32FromBits);
+      const ys = mesh.copies[1].slice(0, 4).map(f32FromBits);
+      if (![...xs, ...ys].every(Number.isFinite)) {
+        stats.meshSkipped += 1;
+        continue;
+      }
+      const argb = argbOf(color);
+      const graphics = new Graphics();
+      // LOGO 的 copies 是 strip 顺序：0-1-2 与 1-3-2 两个三角形。
+      graphics.poly([xs[0]!, ys[0]!, xs[1]!, ys[1]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
+      graphics.poly([xs[1]!, ys[1]!, xs[3]!, ys[3]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
+      this.addBuilt(graphics);
+      stats.meshQuads += 1;
     }
 
     // ★ 场景是每帧重建的，同一条警告会重复几十次 ⇒ 按 kind 记住"上次发出的文本"，
@@ -996,7 +1179,7 @@ export class PixiRenderHost {
     this.sceneNote(
       'size-mismatch',
       stats.sizeMismatch > 0
-        ? `场景：${stats.sizeMismatch} 条绘制项的矩形 ≠ 纹理尺寸 ⇒ 按 1:1 贴左上角、不缩放（是否该拉伸未取证）`
+        ? `场景：${stats.sizeMismatch} 条绘制项的来源矩形越出纹理尺寸 ⇒ 按记录值裁剪 / 不缩放（是否该拉伸未取证）`
         : null,
     );
     this.sceneNote(
@@ -1010,6 +1193,16 @@ export class PixiRenderHost {
       stats.selfTargetSkips > 0
         ? `场景：${stats.selfTargetSkips} 条绘制项引用当前渲染目标（槽 ${scene.target}）⇒ 跳过（防自引用重影）`
         : null,
+    );
+    this.sceneNote(
+      'mesh-unsupported',
+      stats.meshSkipped > 0
+        ? `场景：${stats.meshSkipped} 个网格不是“4 顶点、四色一致”的 LOGO 形状 ⇒ 未画（逐顶点布局 / topology 未取证）`
+        : null,
+    );
+    this.sceneNote(
+      'mesh-quads',
+      stats.meshQuads > 0 ? `场景：画出 ${stats.meshQuads} 个网格四边形（4 顶点 / 单色）` : null,
     );
     return stats;
   }
@@ -1052,7 +1245,7 @@ export class PixiRenderHost {
       const detail = slot
         ? slot.snapshot.blank !== 0
           ? `blank #${item.textureId} ${width}×${height}`
-          : `占位 #${item.textureId} ${width}×${height}（像素未解码）`
+          : `占位 #${item.textureId} ${width}×${height}（无可画内容）`
         : `无纹理槽 #${item.textureId} ${width}×${height}`;
       const label = new Text({
         text: detail,
@@ -1099,6 +1292,8 @@ export class PixiRenderHost {
   private clearBuilt(): void {
     for (const node of this.built) destroyDisplay(node);
     this.built = [];
+    for (const texture of this.frameTextures) texture.destroy(false);
+    this.frameTextures = [];
     this.sceneRoot.removeChildren();
   }
 
@@ -1132,9 +1327,11 @@ export class PixiRenderHost {
       const slot = this.slots.get(scene.target);
       if (slot) {
         const rt = this.ensureTexture(slot);
-        this.app.renderer.render({ container: this.sceneRoot, target: rt, clear: true });
+        // 已有文件像素 / 离屏文字时不清屏，否则会把它们擦掉（呈现与目标的次序本版未取证）
+        this.app.renderer.render({ container: this.sceneRoot, target: rt, clear: !slot.hasContent });
         slot.renderTargetWrites += 1;
         slot.writeCount += 1;
+        slot.hasContent = true;
         this.presentCount += 1;
         this.lastPresent = { kind: 'texture', textureId: scene.target, fellBackToBackBuffer: false };
         return;
@@ -1173,4 +1370,15 @@ function destroyDisplay(node: Container): void {
 
 function assertNever(call: never): never {
   throw new Error(`未处理的 RenderCall：${JSON.stringify(call)}`);
+}
+
+/** 网格 copies 里的 32 位字按 float32 解释（LOGO 的 x / y 是 float 位模式） */
+function f32FromBits(word: number): number {
+  const view = new DataView(new ArrayBuffer(4));
+  view.setUint32(0, word >>> 0, true);
+  return view.getFloat32(0, true);
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

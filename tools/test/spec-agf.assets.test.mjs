@@ -5,7 +5,7 @@
  * 把 `data/spec/chapters/30-agf.md` 的断言落到安装目录里的真实 `*.AGF` 上：
  * ① 24 字节头（`ACGF` / version / unknown0=0 / meta 长度对）；② meta 之后的 12 字节 body 头；
  * ③ version 2 的 body 之后**紧接** `ACIF`（24 字节头 + 12 字节长度块），宽高与 meta 相同；
- * ④ 像素字段（meta+20/+24 宽高、meta+30 bpp、meta+56 调色板槽、行不填充）。
+ * ④ 像素字段（meta+20/+24 宽高、meta+30 bpp、meta+56 调色板槽、行宽按 32 位对齐）。
  *
  * ★ 不证明"与引擎等价"：只证明"按本章的字节结构，真实语料能逐条解释通"。
  */
@@ -69,10 +69,10 @@ test('★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 b
     assert.ok(bodyStart + bodyPacked <= bytes.length, `${name}: body 越出文件`);
     const body = section(bytes.subarray(bodyStart, bodyStart + bodyPacked), bodyUnpacked, bodyPacked, 'body', name);
     assert.equal(body.length, bodyUnpacked, `${name}: body 长度与头不符`);
-    // 行不填充：stride = bpp * width / 8，body 至少容纳 height 行
-    const stride = (bpp * width) / 8;
+    // 行按 32 位（4 字节）对齐：stride = 4 * ceil(bpp * width / 32)，body 必须正好容纳 height 行
+    const stride = 4 * Math.ceil((bpp * width) / 32);
     assert.equal(stride, Math.floor(stride), `${name}: 行宽不是整字节`);
-    assert.ok(body.length >= stride * height, `${name}: body 容不下 ${height} 行 × ${stride} 字节`);
+    assert.equal(body.length, stride * height, `${name}: body 长度 ${body.length} ≠ stride ${stride} × height ${height}`);
     if (bpp === 8) {
       assert.ok(meta.length >= 56 + 1024, `${name}: 8bpp 但 meta 没有 56+1024 的调色板槽`);
     }

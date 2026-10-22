@@ -1860,7 +1860,7 @@
         },
         {
           "ea": "0x422d44",
-          "what": "readInt(3)；0x422d52..0x422d70 颜色归一化"
+          "what": "readInt(3)；0x422d52..0x422d70：负数清 0，否则 `or 0xFF000000`（键的低 24 位 = 操作数 & 0xFFFFFF）"
         },
         {
           "ea": "0x422d7b",
@@ -1897,7 +1897,73 @@
         "shape:T_Scene_elem14"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1f9 设置纹理：记录 = 文件号 / 归一化颜色键 / 空白创建 0；槽上有普通纹理"
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1f9 设置纹理：记录 / 解码尺寸 / 上传请求都来自同一张图"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-LOAD",
+      "sites": [
+        {
+          "ea": "0x422d29",
+          "what": "sub_4559C0(Engine+0xA609C,[0x5EB54],fileId,&size)：按统一文件 id 打开"
+        },
+        {
+          "ea": "0x422d38",
+          "what": "sub_455560：每 id 加锁 + 定位 0"
+        },
+        {
+          "ea": "0x422d8c",
+          "what": "sub_4A3800(Scene,fileId,handle,id,color,0)"
+        },
+        {
+          "ea": "0x49e9d0",
+          "what": "装载器：清纹理槽 → 读文件头 → AGF / BMP 分派"
+        },
+        {
+          "ea": "0x49ea7a",
+          "what": "cmp word[esi+4],4D42h ⇒ BM 走 BMP 分支"
+        },
+        {
+          "ea": "0x49ecff",
+          "what": "从文件加载时恒新建 NormalTexture（不是 Divided）"
+        },
+        {
+          "ea": "0x49ed33",
+          "what": "上传入口 vtable[7]（sub_48B090）"
+        },
+        {
+          "ea": "0x48b0ac",
+          "what": "上传尺寸来自图像头 +0x1C / +0x18（高 / 宽）"
+        },
+        {
+          "ea": "0x48b3bb",
+          "what": "颜色键命中：cmp → 0x48B3BF xor eax,eax（整条清 0）"
+        },
+        {
+          "ea": "0x48c188",
+          "what": "UnlockRect；0x48C191 返回成功"
+        },
+        {
+          "ea": "0x4a386e",
+          "what": "装载失败：记录来源文件 = -1"
+        }
+      ],
+      "functions": [
+        "sub_422CB0",
+        "sub_4559C0",
+        "sub_455560",
+        "sub_4A3800",
+        "sub_49E9D0",
+        "sub_48B090"
+      ],
+      "storage": [
+        "shape:T1@0x60",
+        "shape:T_Scene_elem14"
+      ],
+      "evidence": [
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1f9 设置纹理：记录 / 解码尺寸 / 上传请求都来自同一张图",
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1f9 上传失败：槽里留下新对象、记录来源 = 无、颜色 / 空白位保持",
+        "guard:tools/test/emulator-new-agf.test.mjs#★ 8bpp：bottom-up / 调色板 / ACIF alpha 都按规范解成 top-down RGBA"
       ]
     },
     {
@@ -2008,7 +2074,7 @@
         "shape:T_Scene_460"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1fb 绘制纹理：矩形存**四条边**（右 = x+宽、下 = y+高），不是宽高",
+        "guard:tools/test/emulator-new-texture.test.mjs#★ 0x1fb 绘制纹理：四条边是 left/top/宽/高算出的边，两个浮点是另外两个位",
         "KN:01M5FK4FKN4A6C1D6E5G0P4T3C"
       ]
     },
@@ -2458,15 +2524,35 @@
         {
           "ea": "0x407eb5",
           "what": "取消路径：清 start/dur + 置取消标记"
+        },
+        {
+          "ea": "0x49ac94",
+          "what": "绘制项窗推进：按 t 混合后写绘制用格（不写回 +0x60 的当前色；格的身份未定）"
+        },
+        {
+          "ea": "0x49ad6d",
+          "what": "绘制项窗到期：当前色 ← 终色，终色 ← -1"
+        },
+        {
+          "ea": "0x4a2050",
+          "what": "按 t 把起色→终色混合后写顶点缓冲"
+        },
+        {
+          "ea": "0x4af1c0",
+          "what": "每帧算 t 调混合；到期分支才把终色写回当前色并重烘"
         }
       ],
       "functions": [
         "sub_407E20",
-        "sub_407EA0"
+        "sub_407EA0",
+        "sub_49A300",
+        "sub_4A2050",
+        "sub_4AF1C0"
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 窗收尾：绘制项与网格都清\"有窗\"位"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 窗收尾：绘制项与网格都清\"有窗\"位",
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 窗进行中：插值写派生色 / 顶点缓冲，不写回当前颜色；半程是线性的"
       ]
     },
     {
@@ -4224,7 +4310,7 @@
       "sites": [
         {
           "ea": "0x43eb11",
-          "what": "前两字节 BM ⇒ 分流到 BMP；其余进 AGF"
+          "what": "前两字节 BM ⇒ 分流到 BMP；其余进 AGF（**不比较** ACGF 四字节签名）"
         },
         {
           "ea": "0x43ed43",
@@ -4242,7 +4328,8 @@
       "functions": [],
       "storage": [],
       "evidence": [
-        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段"
+        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段",
+        "guard:tools/test/emulator-new-logo.assets.test.mjs#★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：第 46 条前）"
       ]
     },
     {
@@ -4354,12 +4441,17 @@
         {
           "ea": "0x43a2c6",
           "what": "32bpp：BGRA 四字节"
+        },
+        {
+          "ea": "0x48b090",
+          "what": "上传器：按 32 位对齐行宽（bpp×width 向上取整到 4 字节）"
         }
       ],
       "functions": [],
       "storage": [],
       "evidence": [
-        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段"
+        "guard:tools/test/spec-agf.assets.test.mjs#★ 真实 *.AGF：头 24 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段",
+        "guard:tools/test/emulator-new-agf.test.mjs#★ 8bpp：bottom-up / 调色板 / ACIF alpha 都按规范解成 top-down RGBA"
       ]
     },
     {

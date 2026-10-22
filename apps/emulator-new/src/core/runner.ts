@@ -86,6 +86,8 @@ export interface RunOpts {
   config?: ConfigStore;
   /** 换脚本装载器（真实入口才有；`--script` 调试口没有） */
   loadScript?: (id: number) => Promise<Uint8Array | null>;
+  /** 纹理文件装载器（真实入口才有；`0x1f9` 用） */
+  loadImage?: (id: number) => Promise<Uint8Array | null>;
   /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 未命中 ⇒ 引擎回退分支） */
   fontNames?: string[];
   /** 渲染宿主；给了就覆盖 `CoreEnv.renderHost`（缺省沿用 env 的那一个） */
@@ -187,6 +189,7 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
   const key = opts.key ?? generateIntKey();
   const machine = new Machine({
     body, table: env.table, key, tickMs: opts.tickMs, clock: opts.clock, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
+    loadImage: opts.loadImage,
     fontNames: opts.fontNames, renderHost: opts.renderHost ?? env.renderHost, onIteration: opts.onIteration,
   });
   // 根脚本已在 0 号槽 ⇒ 平台在这里建周期定时器（`onMachine` 的注释见 `RunOpts`）
@@ -263,6 +266,8 @@ export async function analyzeInstall(
       const f = await install.readById(id);
       return f.bytes.subarray(parseHeader(f.bytes).headerLength);
     },
+    // 纹理是整份文件（AGF），⛔ 不剥脚本头
+    loadImage: async (id) => (await install.readById(id)).bytes,
   });
   return {
     source: {

@@ -42,13 +42,13 @@ export interface RendererBootInfo extends RendererInit {
   ignored: string[];
 }
 
-/** 一份纹理槽的可序列化快照（像素不在核心里，见 `60-ops-texture.md`） */
+/** 一份纹理槽的可序列化快照（像素走 `uploadTexture` 请求，不每帧复制进快照） */
 export interface TextureSnapshot {
   id: number;
   kind: 'normal' | 'divided';
   width: number;
   height: number;
-  /** 来源文件号（-1 = 无来源；本层没有图像解码，见 `RES-RENDER-TEXT-SURFACE`） */
+  /** 来源文件号（-1 = 无来源；解码后的像素由平台持有） */
   file: number;
   /** 1 = 空白创建（`0x1f8`） */
   blank: number;
@@ -60,14 +60,28 @@ export interface DrawItemSnapshot {
   /** 位 0 = 有效；位 1 = 有颜色渐变窗 */
   flags: number;
   textureId: number;
+  /** `0x1fb` 的第 3..6 个操作数算出的四条边（角色本版未定；平台按实现使用） */
   left: number;
   top: number;
   right: number;
   bottom: number;
-  /** 当前颜色（ARGB；-1 = 无颜色） */
+  /** 这一步用于绘制的颜色（派生色，ARGB；-1 = 无颜色） */
   color: number;
-  /** 两个辅助浮点（`0x1fb` 的第 7 / 8 个操作数） */
+  /** 两个辅助浮点（`0x1fb` 的第 7 / 8 个操作数；角色本版未定） */
   aux: [number, number, number];
+}
+
+/** 一个网格的可序列化快照（`0x320` / `0x322` / `0x323`；逐顶点布局属外部模块） */
+export interface MeshSnapshot {
+  key: number;
+  flags: number;
+  count: number;
+  /** 前两个逐顶点缓冲的原样拷贝（LOGO 的 4 顶点全屏四边形里是 x / y 两组） */
+  copies: [number[], number[]];
+  /** 逐顶点颜色（`0x322` 与计时窗重烘后的值） */
+  colors: number[];
+  /** 这一步用于绘制的颜色（派生色，ARGB；-1 = 无颜色） */
+  color: number;
 }
 
 /** 场景快照：renderer 内部的 core → Pixi 视图（不是规范状态） */
@@ -77,6 +91,7 @@ export interface SceneSnapshot {
   height: number;
   textures: TextureSnapshot[];
   drawItems: DrawItemSnapshot[];
+  meshes: MeshSnapshot[];
   /** 场景混合（`0x33f` 的两个格；模式原样，颜色高 8 位 = 透明度） */
   blend: { mode: number; color: number };
   /** 当前渲染目标：纹理槽号，或 -1 = 后缓冲 */

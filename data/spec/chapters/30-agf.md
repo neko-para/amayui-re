@@ -1,6 +1,6 @@
 ## AGF 图像
 
-AGF 是 AGE 的图像容器（本作样本全部是 `ACGF` 变体）：一个 24 字节头 + 可压缩的 meta 段 + 可压缩的 body 段；version 2 的文件在 body 段之后紧跟一段 `ACIF` alpha 段。**段** = 容器中由长度界定的连续字节区（ALF 的 TOC 也是段）。
+AGF 是 AGE 的图像容器（本作样本大多以 `ACGF` 开头；头 4 字节不参与判定）：一个 24 字节头 + 可压缩的 meta 段 + 可压缩的 body 段；version 2 的文件在 body 段之后紧跟一段 `ACIF` alpha 段。**段** = 容器中由长度界定的连续字节区（ALF 的 TOC 也是段）。
 
 本版把 AGF 作为**协议**描述（协议自持）。字段级核验结果见文末状态表。
 
@@ -9,7 +9,7 @@ AGF 是 AGE 的图像容器（本作样本全部是 `ACGF` 变体）：一个 24
 <!-- rule: FMT-AGF-HEADER -->
 
 ```text
-[0,4)     "ACGF"
+[0,4)     头 4 字节（**不参与判定**；常见 `ACGF`，真实 v1 样本里是 0）
 [4,8)     version（1 / 2）
 [8,12)    unknown0（必须为 0）
 [12,16)   metaUnpackedSize
@@ -19,8 +19,8 @@ AGF 是 AGE 的图像容器（本作样本全部是 `ACGF` 变体）：一个 24
 ```
 
 - 头 24 字节，全部小端。
-- 本版覆盖 version 为 `2` 的文件（本作样本全部是 version 2）；引擎也接受 version `1`，但本作样本里没有 version 1。version 不在 `{1,2}` 或 `unknown0` 非 0 时，引擎按“不是图像文件”拒绝。
-- 引擎**不按 4 字节签名匹配** `ACGF`：它只把前两字节为 `BM` 的文件分流到 BMP 读取路径，其余文件按上面的 version / `unknown0` 判定后进入 AGF 路径。本版只覆盖 `ACGF` 签名；其它签名在本作样本里没有。
+- 本版覆盖 version `1` / `2`：v2 在 body 之后有 `ACIF`；v1 没有。version 不在 `{1,2}` 或 `unknown0` 非 0 时，引擎按“不是图像文件”拒绝。
+- 引擎**不按 4 字节签名匹配** `ACGF`：它只把前两字节为 `BM` 的文件分流到 BMP 读取路径，其余文件按上面的 version / `unknown0` 判定后进入 AGF 路径。★ 只要前两字节不是 `BM`，头 4 字节就不参与 AGF 判定；真实样本里就有前 4 字节为 0 的 v1 文件。
 ### meta / body 段
 
 <!-- rule: FMT-AGF-BODY -->
@@ -35,7 +35,7 @@ AGF 是 AGE 的图像容器（本作样本全部是 `ACGF` 变体）：一个 24
 ```
 
 - body 数据同样：相等即原样，否则 LZSS 解压。
-- body 数据先按 `bodyPackedSize` 读入，解压目标是按 **`bodyUnpackedSize`** 分配的缓冲。解压例程只以“压缩数据读完”为终点，不检查实际写出的字节数：写出多于 `bodyUnpackedSize` 即越界（未定义行为）；写出少于它时，缓冲尾部保持分配时未清零的内容。实现必须把长度不符记为诊断，不得静默截断或补 0。
+- body 数据先按 `bodyPackedSize` 读入，解压目标是按 **`bodyUnpackedSize`** 分配的缓冲。解压例程只以“压缩数据读完”为终点，不检查实际写出的字节数：写出多于 `bodyUnpackedSize` ⇒ **越界写**（未定义行为，须诊断）；写出少于它 ⇒ 缓冲尾部未初始化。使用端还要求 **`bodyUnpackedSize == stride × height`**；不相等按坏件诊断（引擎读取路径是否也做这一步未逐字取证，见残差）。
 
 ### AGF 的 LZSS
 
@@ -81,21 +81,22 @@ meta 里的宽、高与 bpp：
 
 像素：
 
-- 8bpp：调色板索引。调色板是 meta 内从 `+56` 起的一个 **1024 字节槽**（256 项 × 4 字节，每项前 3 字节按 B、G、R 解释），初值全 0，meta 覆盖该槽；引擎按 `2^bpp` 项取用（8bpp ⇒ 256 项）。
+- 8bpp：调色板索引。调色板是 meta 内从 `+56` 起的一个 **1024 字节槽**（256 项 × 4 字节，每项前 3 字节按 B、G、R 解释），初值全 0，meta 覆盖该槽；8bpp 按 256 项取用（24 / 32bpp 不使用调色板）。
 - 24bpp：BGR 三字节；
 - 32bpp：BGRA 四字节（alpha 可被 ACIF 覆盖）；
-- body 的行**不填充**：每行字节 = `bpp × width / 8`（8bpp：`width`；24bpp：`3 × width`；32bpp：`4 × width`）；
-- 盘上是 **bottom-up**：解码到 top-down 时要反转行序；通道序为 BGR(A)。
+- body 的每一行按 **32 位（4 字节）对齐**：`stride = 4 × ceil(bpp × width / 32)`。8bpp 的 1026 宽 ⇒ 每行 1028 字节；24bpp 同式（宽度不是 4 的倍数时也要补）；32bpp 天然对齐。
+- `bodyUnpackedSize` 必须等于 `stride × height`（短于它或长于它都按坏件处理；不得静默补 0 或截断）；
+- 盘上是 **bottom-up**：解码到 top-down 时要反转行序；盘上通道序为 BGR(A)。**本规范规定解码输出为 top-down RGBA8**：按通道名把盘上的 B/G/R(A) 写进输出的 R/G/B(A) 位。
 
 ### 核验状态
 
 | 部分 | 状态 | 待核验什么 |
 |---|---|---|
-| `ACGF` 头 / 版本 / meta 与 body 段长度 | **已核验** | — |
+| 头 24 字节 / 版本 / meta 与 body 段长度（头 4 字节不参与判定） | **已核验** | — |
 | meta / body 的 LZSS | **已核验** | 与 ALF 同一例程（参数见「ALF 归档」） |
 | `ACIF` alpha（version 2） | **已核验** | — |
-| 宽高 / bpp / 调色板 / 行序 / 通道 | **已核验** | — |
-| version 1 的 AGF | **无样本** | 找一个 version 1 的文件，确认它在没有 ACIF 时能读 |
+| 宽高 / bpp / 调色板 / 行宽（32 位对齐） / 行序 / 通道 | **部分** | 8bpp 1026 宽与 24bpp 1280 宽有样本；24bpp 的非 4 倍数宽度没有样本（见残差） |
+| version 1 的 AGF | **部分** | 真实样本存在（头 4 字节为 0、无 ACIF）且按本规范可解；引擎侧 v1 读取路径未单独取证。该样本是 8bpp；v1 的 24 / 32bpp 像素路径没有单独样本；BMP 分支仍无规范 |
 
 ### 与 ALF / ASM 的边界
 

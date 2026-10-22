@@ -63,7 +63,7 @@ function machineFor(instrs, opts = {}) {
 function drawItem(colorFrom) {
   return {
     flags: 1, textureId: 1, left: 0, top: 0, right: 0, bottom: 0, aux: [0, 0, 0],
-    start: 0, delay: 0, duration: 0, colorFrom, colorTo: -1, unknown: new Map(),
+    start: 0, delay: 0, duration: 0, colorFrom, colorNow: colorFrom, colorTo: -1, unknown: new Map(),
   };
 }
 

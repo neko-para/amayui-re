@@ -38,7 +38,7 @@ import type {
   WindowHandle,
   WindowMessage,
 } from '../../../core/window.ts';
-import type { DrawTextRequest, RenderHost, SurfaceHandle } from '../../../core/render.ts';
+import type { DrawTextRequest, RenderHost, SurfaceHandle, TextureCreateRequest, TextureUploadRequest } from '../../../core/render.ts';
 import type { Host } from '../../../core/install.ts';
 import type {
   AmayuiBridge,
@@ -49,9 +49,12 @@ import type {
   SurfaceRef,
   TextureSnapshot,
   DrawItemSnapshot,
+  MeshSnapshot,
   RenderCall,
 } from '../protocol.ts';
 import { dirnamePath, joinPath, pathFromEngine } from './paths.ts';
+import { applyPresentationPolicy } from './presentation.ts';
+import type { PresentationPolicy } from './presentation.ts';
 import type { PixiRenderHost } from './pixi-host.ts';
 
 const QUIT = Symbol('quit-message');
@@ -134,13 +137,15 @@ class BridgeHost implements Host {
 class BridgeBootHost implements BootHost {
   private readonly bridge: AmayuiBridge;
   private readonly pixi: PixiRenderHost;
+  private readonly presentation: PresentationPolicy;
   private readonly queue: QueueEntry[] = [];
   private readonly timers = new Map<number, ReturnType<typeof setInterval>>();
   private foreground = false;
 
-  constructor(bridge: AmayuiBridge, pixi: PixiRenderHost) {
+  constructor(bridge: AmayuiBridge, pixi: PixiRenderHost, presentation: PresentationPolicy) {
     this.bridge = bridge;
     this.pixi = pixi;
+    this.presentation = presentation;
     bridge.onWindowMessage((message) => {
       if (message.kind === 'activate') this.foreground = message.active;
       this.queue.push(message);
@@ -162,7 +167,7 @@ class BridgeBootHost implements BootHost {
   }
 
   async createWindow(params: WindowCreateParams): Promise<WindowHandle | null> {
-    return await this.bridge.invoke('boot.createWindow', params) as WindowHandle | null;
+    return await this.bridge.invoke('boot.createWindow', applyPresentationPolicy(params, this.presentation)) as WindowHandle | null;
   }
 
   showWindow(window: WindowHandle, showMode: number): void {
@@ -279,8 +284,9 @@ class BridgeBootHost implements BootHost {
         params: {
           width,
           height,
-          screenMode: params.screenMode,
-          fullscreenPresent: params.fullscreenPresent,
+          // 模拟器不支持全屏：诊断按实际窗口报告，避免“窗口 1280×720、标签却写全屏”
+          screenMode: this.presentation.ignoreFullscreen ? 1 : params.screenMode,
+          fullscreenPresent: this.presentation.ignoreFullscreen ? false : params.fullscreenPresent,
           background: 0,
         },
       });
@@ -288,7 +294,7 @@ class BridgeBootHost implements BootHost {
       this.log('error', `Pixi init 失败：${messageOf(error)}`);
       return null;
     }
-    this.log('info', `createDevice → Pixi ${width}x${height}（screenMode ${params.screenMode}）`);
+    this.log('info', `createDevice → Pixi ${width}x${height}（${this.presentation.ignoreFullscreen ? '全屏已忽略 ⇒ 窗口态' : `screenMode ${params.screenMode}`}）`);
     return 1;
   }
 
@@ -404,6 +410,32 @@ class LocalRenderHost implements RenderHost {
     }
   }
 
+  async createTexture(request: TextureCreateRequest): Promise<boolean> {
+    try {
+      return this.pixi.createTexture(request);
+    } catch (error) {
+      this.log('error', `createTexture(${request.textureId}) 失败：${messageOf(error)}`);
+      return false;
+    }
+  }
+
+  async uploadTexture(request: TextureUploadRequest): Promise<boolean> {
+    try {
+      return this.pixi.uploadTexture(request);
+    } catch (error) {
+      this.log('error', `uploadTexture(${request.textureId}) 失败：${messageOf(error)}`);
+      return false;
+    }
+  }
+
+  async releaseTexture(textureId: number): Promise<void> {
+    try {
+      this.pixi.releaseTexture(textureId);
+    } catch (error) {
+      this.log('error', `releaseTexture(${textureId}) 失败：${messageOf(error)}`);
+    }
+  }
+
   async drawText(request: DrawTextRequest): Promise<boolean> {
     this.sceneBeforeTexture(request.textureId);
     try {
@@ -479,8 +511,19 @@ class LocalRenderHost implements RenderHost {
         top: item.top,
         right: item.right,
         bottom: item.bottom,
-        color: item.colorFrom,
+        color: item.colorNow,
         aux: [item.aux[0], item.aux[1], item.aux[2]],
+      });
+    }
+    const meshes: MeshSnapshot[] = [];
+    for (const [key, mesh] of machine.scene.meshes) {
+      meshes.push({
+        key,
+        flags: mesh.flags,
+        count: mesh.count,
+        copies: [[...mesh.copies[0]], [...mesh.copies[1]]],
+        colors: [...mesh.colors],
+        color: mesh.colorNow,
       });
     }
     return {
@@ -488,6 +531,7 @@ class LocalRenderHost implements RenderHost {
       height,
       textures,
       drawItems,
+      meshes,
       blend: { mode: machine.render.blendMode, color: machine.render.blendColor },
       target: machine.render.target,
     };
@@ -542,7 +586,10 @@ async function driveDemoScene(machine: Machine): Promise<void> {
 
 /* ──────────────────────────── 启动入口 ──────────────────────────── */
 
-function bootInfoOf(session: Awaited<ReturnType<typeof bootWindow>>): {
+function bootInfoOf(
+  session: Awaited<ReturnType<typeof bootWindow>>,
+  presentation: PresentationPolicy,
+): {
   width: number;
   height: number;
   screenMode: number;
@@ -551,14 +598,21 @@ function bootInfoOf(session: Awaited<ReturnType<typeof bootWindow>>): {
   title: string;
   ignored: string[];
 } {
+  const ignoredFullscreen = presentation.ignoreFullscreen && session.screenMode === 0;
   return {
     width: Math.max(1, Math.round(window.innerWidth)),
     height: Math.max(1, Math.round(window.innerHeight)),
-    screenMode: session.screenMode,
-    fullscreenPresent: session.screenMode === 0,
+    // 模拟器把占满屏降级成窗口：诊断也按窗口态报告，避免显示“全屏”却实际是 1280×720 窗口
+    screenMode: ignoredFullscreen ? 1 : session.screenMode,
+    fullscreenPresent: ignoredFullscreen ? false : session.screenMode === 0,
     background: 0,
     title: WINDOW_TITLE,
-    ignored: session.ignored.map((item) => `${item.rule} / ${item.what}`),
+    ignored: [
+      ...(ignoredFullscreen
+        ? [`fullscreen-ignored: 模拟器不支持全屏，按 ${presentation.width}×${presentation.height} 窗口运行`]
+        : []),
+      ...session.ignored.map((item) => `${item.rule} / ${item.what}`),
+    ],
   };
 }
 
@@ -570,7 +624,12 @@ async function bootSession(config: ConfigStore, bridge: AmayuiBridge, pixi: Pixi
   session: Awaited<ReturnType<typeof bootWindow>>;
   bootHost: BridgeBootHost;
 }> {
-  const bootHost = new BridgeBootHost(bridge, pixi);
+  const presentation: PresentationPolicy = {
+    ignoreFullscreen: true,
+    width: Math.max(1, config.getInt('set:WinX')),
+    height: Math.max(1, config.getInt('set:WinY')),
+  };
+  const bootHost = new BridgeBootHost(bridge, pixi, presentation);
   const session = await bootWindow({
     host: bootHost,
     config,
@@ -587,7 +646,7 @@ async function bootSession(config: ConfigStore, bridge: AmayuiBridge, pixi: Pixi
         + `错误通道=${session.errors.length > 0 ? session.errors.join(' / ') : '空'}`,
     );
   }
-  const boot = bootInfoOf(session);
+  const boot = bootInfoOf(session, presentation);
   bridge.report({ kind: 'boot', info: boot });
   hooks.boot(boot);
   return { session, bootHost };

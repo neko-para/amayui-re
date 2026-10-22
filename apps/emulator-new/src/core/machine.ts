@@ -15,7 +15,7 @@ import type { ConfigStore } from './config.ts';
 import { generateIntKey } from './values.ts';
 import { HANDLERS } from './handlers.ts';
 import { initialRenderState } from './render.ts';
-import type { RenderHost, RenderState } from './render.ts';
+import type { RenderHost, RenderState, TextureKind } from './render.ts';
 
 export interface Operand {
   type: number;
@@ -49,9 +49,9 @@ export interface TextureRecord {
   blank: number;
 }
 
-/** 纹理槽里的对象：只有"哪种纹理"是规范可观察的（内部资源属外部模块） */
+/** 纹理槽里的对象：种类 / 逻辑尺寸 / 外部表面（像素由平台持有） */
 export interface TextureObject {
-  kind: 'normal' | 'divided';
+  kind: TextureKind;
   width: number;
   height: number;
 }
@@ -72,6 +72,8 @@ export interface DrawItem {
   delay: number;
   duration: number;
   colorFrom: number;
+  /** 这一步用于绘制的颜色（派生色）；窗进行中由插值写入，⛔ 不写回 colorFrom */
+  colorNow: number;
   colorTo: number;
   /** 操作数里"读者未找到"的槽（按操作数序号记，只为不丢数据） */
   unknown: Map<number, number>;
@@ -99,6 +101,8 @@ export interface Mesh {
   delay: number;
   duration: number;
   colorFrom: number;
+  /** 这一步用于绘制的颜色（派生色）；窗进行中由插值写入，⛔ 不写回 colorFrom */
+  colorNow: number;
   colorTo: number;
   unknown: Map<number, number>;
 }
@@ -340,6 +344,11 @@ export interface MachineOptions {
   /** 换脚本装载器（真实入口由安装目录提供；`--script` 调试口没有它） */
   loadScript?: (id: number) => Promise<Uint8Array | null>;
   /**
+   * **纹理文件装载器**：统一文件 id → 整份文件字节（`0x1f9` 用；⛔ 不剥脚本头）。
+   * ★ 缺省 `undefined` = 没有文件来源：`0x1f9` 响亮失败，不伪造成功记录。
+   */
+  loadImage?: (id: number) => Promise<Uint8Array | null>;
+  /**
    * **宿主字体名表**（`0x2de` 的输入）：由宿主提供，**不是**引擎状态。
    * ★ 缺省 `[]` = "宿主没有提供任何字体名" ⇒ 查表一律未命中 ⇒ 走引擎自己的回退分支
    *   （`CHECKCONFIG` 把找不到的字体名换成回退名）。⛔ 本仓**不伪造**系统字体枚举。
@@ -375,6 +384,8 @@ export class Machine {
   readonly config: ConfigStore | undefined;
   /** 换脚本用的装载器（统一文件 id → body）：缺省 = 不支持 call-script（响亮失败） */
   readonly loadScript: ((id: number) => Promise<Uint8Array | null>) | undefined;
+  /** 纹理文件装载器（统一文件 id → 整份字节）：缺省 = `0x1f9` 响亮失败 */
+  readonly loadImage: ((id: number) => Promise<Uint8Array | null>) | undefined;
   /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 查表未命中 ⇒ 引擎走回退分支） */
   readonly fontNames: string[];
   /** 渲染宿主（缺省 `undefined` = 没有后端；见 `MachineOptions.renderHost`） */
@@ -523,6 +534,7 @@ export class Machine {
     // ★ 只有给了配置库（安装入口）才播种；--script / 单元测试没有 config ⇒ 保持未建模。
     if (opts.config) this.scalars.set('Engine.d166964', opts.config.getInt('set:DrawMode'));
     this.loadScript = opts.loadScript;
+    this.loadImage = opts.loadImage;
     this.fontNames = [...(opts.fontNames ?? [])];
     this.renderHost = opts.renderHost;
     this.onIteration = opts.onIteration;
@@ -563,6 +575,7 @@ export class Machine {
 
   /**
    * 场景帧步：清"有动画"标志，再逐项推进颜色渐变窗（单位毫秒；起点 0 = 未盖章）。
+   * 窗进行中：插值写 **colorNow（派生色）/ 网格顶点缓冲**，⛔ 不写回 colorFrom；
    * 到期 ⇒ 延迟 / 持续时间清 0、当前颜色 ← 终色、终色 ← 无颜色，并清"有窗"位；
    * 绘制项与网格**都如此**（见 CORE-TIMING-WINDOW）。
    */
@@ -574,16 +587,19 @@ export class Machine {
       // 持续时间 ≤ 0（从未排窗，或已到期）⇒ 这一趟不推进
       if (item.duration <= 0) continue;
       if (item.start === 0) item.start = now;
-      if (item.duration > 0 && now < item.start + item.delay + item.duration) {
+      if (item.duration > 0 && now <= item.start + item.delay + item.duration) {
         if (now > item.start + item.delay) {
           const t = (now - item.start - item.delay) / item.duration;
-          item.colorFrom = blendColor(item.colorFrom, item.colorTo, t);
+          item.colorNow = blendColor(item.colorFrom, item.colorTo, t);
+        } else {
+          item.colorNow = item.colorFrom;
         }
         this.scene.animating = 1;
       } else {
         item.delay = 0;
         item.duration = 0;
         item.colorFrom = item.colorTo;
+        item.colorNow = item.colorFrom;
         item.colorTo = -1;
         item.flags &= ~2;
       }
@@ -592,16 +608,21 @@ export class Machine {
       if ((mesh.flags & 2) === 0) continue;
       if (mesh.duration <= 0) continue;
       if (mesh.start === 0) mesh.start = now;
-      if (mesh.duration > 0 && now < mesh.start + mesh.delay + mesh.duration) {
+      if (mesh.duration > 0 && now <= mesh.start + mesh.delay + mesh.duration) {
         if (now > mesh.start + mesh.delay) {
           const t = (now - mesh.start - mesh.delay) / mesh.duration;
-          mesh.colorFrom = blendColor(mesh.colorFrom, mesh.colorTo, t);
+          mesh.colorNow = blendColor(mesh.colorFrom, mesh.colorTo, t);
+        } else {
+          mesh.colorNow = mesh.colorFrom;
         }
+        if (mesh.colorNow !== -1) mesh.colors = mesh.colors.map(() => mesh.colorNow >>> 0);
         this.scene.animating = 1;
       } else {
         mesh.delay = 0;
         mesh.duration = 0;
         mesh.colorFrom = mesh.colorTo;
+        mesh.colorNow = mesh.colorFrom;
+        if (mesh.colorNow !== -1) mesh.colors = mesh.colors.map(() => mesh.colorNow >>> 0);
         mesh.colorTo = -1;
         mesh.flags &= ~2;
       }

@@ -1363,10 +1363,16 @@
       "covers": [],
       "residual": [
         {
-          "id": "RES-TEX-DETACH-RANGE",
+          "id": "RES-TEX-DETACH-TABLES",
           "kind": "unknown",
-          "what": "区间删除（个数 > 1）的逐字体只在伪码层读过；四张表内嵌对象的释放顺序未逐字核",
-          "next": "按区间版本的函数体逐字读一遍（删除循环 + 对象释放），登记 EA"
+          "what": "三张辅助表的领域身份未定；只知道四张表共用绘制键，另有一张同键空间的表不被本条碰",
+          "next": "逐表找写入者与读者，给三张辅助表定领域名；未定前正文只描述“四张表 / 另一张不动”"
+        },
+        {
+          "id": "RES-TEX-DETACH-RESOURCES",
+          "kind": "unknown",
+          "what": "单键与区间两条路径都释放条目内嵌对象 / 缓冲（释放已确认）；区间路径的释放顺序未逐字核",
+          "next": "逐字读区间删除路径的析构顺序，登记 EA"
         }
       ],
       "falsifiers": []
@@ -1378,10 +1384,28 @@
       "covers": [],
       "residual": [
         {
-          "id": "RES-TEX-CREATE-FAIL",
+          "id": "RES-TEX-CREATE-BLANK-PIXELS",
           "kind": "unknown",
-          "what": "底层创建失败的写错误串/上报路径只在伪码层读过；返回值的消费点未核",
-          "next": "逐字核失败分支与返回值消费点"
+          "what": "空白创建只分配表面，不 Lock / 不 memset / 不清屏；初始像素内容未定义（本版明确不保证为 0）",
+          "next": "若要规定初始像素，先在真机上观察同一槽在创建后、首次绘制前的表面内容"
+        },
+        {
+          "id": "RES-TEX-CREATE-INVALID",
+          "kind": "unknown",
+          "what": "底层创建失败后对象仍留在槽里，但尺寸 / 可用性未定义；后续取表面是否必然失败、错误文本是什么，本版不规定",
+          "next": "造一个非法尺寸 / 设备失败样本，观察槽对象的尺寸询问与取表面分支"
+        },
+        {
+          "id": "RES-TEX-CREATE-KIND-PARAMS",
+          "kind": "unknown",
+          "what": "种类 1 / 2 / 其它还会改变底层创建请求的 Usage / Pool / Format（与 display:TextureBit 的 16/32 位耦合）；本条只规定类选择与尺寸",
+          "next": "逐分支读创建请求参数，决定哪些属于平台边界合同、哪些进 discards"
+        },
+        {
+          "id": "RES-TEX-CREATE-DIVIDED",
+          "kind": "unknown",
+          "what": "分割纹理的领域行为（按 tile 切分、尺寸查询、绘制时是否按子矩形）未成篇；本条只规定“种类 3 ⇒ 分割纹理”",
+          "next": "读 DividedTexture 的创建/绘制路径，给对象契约或明确舍弃"
         }
       ],
       "falsifiers": []
@@ -1392,12 +1416,6 @@
       "disposition": "handled",
       "covers": [],
       "residual": [
-        {
-          "id": "RES-TEX-SET-ARCHIVE",
-          "kind": "unknown",
-          "what": "档案打开/加锁失败的异常码与路径只在伪码层读过；失败分支的逐字体未核",
-          "next": "逐字核 0x4559C0/0x455560 的失败分支与抛点"
-        },
         {
           "id": "RES-TEX-BLANK-READER",
           "kind": "unknown",
@@ -1411,13 +1429,60 @@
           "next": "在「执行与时间」补 VM-EXC：主循环的 catch 表与三条返回值分支"
         },
         {
-          "id": "RES-TEX-COLOR-SENTINEL",
+          "id": "RES-TEX-SET-OPERAND-EXC",
           "kind": "unknown",
-          "what": "颜色键里的「不透明黑」具体数值与颜色字段的位段未取证：正文只规定归一化的形态（负数 ⇒ 0；非负 ⇒ 不透明黑与操作数按位或），写进纹理记录的颜色键因此不唯一",
-          "next": "取证颜色字段的位段与「不透明黑」的数值，补成唯一合同（当前 handled 只是局部合同）"
+          "what": "操作数 3 读取抛类型异常时，已经打开 / 加锁的文件是否关闭 / 解锁，未逐字取证",
+          "next": "读操作数读取的异常路径与 RAII/清理点，再决定是否写进正文"
+        },
+        {
+          "id": "RES-TEX-RECORD-READERS",
+          "kind": "unknown",
+          "what": "纹理记录的来源文件 / 颜色键除了被写之外，还有哪些读者；`source=-1` 与 `blank` / 颜色键的组合没有规则解释",
+          "next": "枚举三格的读取点；找不到读者就只保真写，并保留组合未解释的残差"
         }
       ],
       "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TEXTURE-LOAD",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-TEX-LOAD-BMP",
+          "kind": "unknown",
+          "what": "文件头 `BM` 走 BMP 分支；BMP 的像素布局与解码结果未成篇（本作样本里没有 BMP 文件）",
+          "next": "找到或造一份 BMP，按同一条请求合同补 BMP 的像素布局；在此之前实现必须响亮失败"
+        },
+        {
+          "id": "RES-TEX-LOAD-READ-FAIL",
+          "kind": "unknown",
+          "what": "引擎的装载器在清纹理槽之后才读文件头 / 解压；正文把“读整份字节失败”的槽状态写成“本版不规定”，没有断言空槽还是旧对象",
+          "next": "读装载器的读头 / 解压失败分支，确认失败时旧纹理槽是否已被清；必要时拆成第四种失败态"
+        },
+        {
+          "id": "RES-TEX-LOAD-KEY16",
+          "kind": "unknown",
+          "what": "16 位表面下颜色键的通道装配（5-6-5 还是其它位段）未逐字取证；32 位与调色板路径已定",
+          "next": "逐字读 16bpp 的键转换与逐像素比较，补成唯一公式，或把 16bpp 标为不规定"
+        },
+        {
+          "id": "RES-TEX-LOAD-FORMAT",
+          "kind": "unknown",
+          "what": "表面格式取自显示配置的纹理位深（16 / 32），其它值使上传失败；配置键的取值集合与失败文本本版不规定",
+          "next": "核该配置键的取值来源与非法值分支，再决定是否写进正文"
+        },
+        {
+          "id": "RES-TEX-LOAD-KEY-PIXEL",
+          "kind": "unknown",
+          "what": "颜色键命中源像素后的目标位模式（透明黑 / alpha=0 / 量化顺序）只在 32 位与调色板路径上逐字核过；本版只把它写成“上传请求的一部分”，不规定位模式",
+          "next": "补 16bpp 与 24bpp 的键比较 / 写入点，再决定是否升成唯一像素公式"
+        }
+      ],
+      "falsifiers": [
+        "真实 AGF 解码后的宽高 / 通道 / alpha / 上传请求的键参数与本条不符 ⇒ 违反本条"
+      ]
     },
     {
       "id": "CORE-OPS-TEXTURE-RELEASE",
@@ -1430,6 +1495,12 @@
           "kind": "unknown",
           "what": "释放守卫表全语料只有一处读、没有写点（观察上恒 0）",
           "next": "确认它是构建裁剪还是别处间接写入；没有写点就把\"恒 0\"写进条件"
+        },
+        {
+          "id": "RES-TEX-RELEASE-TARGET",
+          "kind": "unknown",
+          "what": "释放纹理不复位当前渲染目标；目标可能悬空指向已释放的槽",
+          "next": "读当前目标格与渲染路径，确认悬空目标的后果（报错 / 黑屏 / 未定义）"
         }
       ],
       "falsifiers": []
@@ -1441,16 +1512,40 @@
       "covers": [],
       "residual": [
         {
-          "id": "RES-TEX-DRAW-FLOATS",
-          "kind": "unknown",
-          "what": "第 7/8 个操作数写进绘制项的两个浮点位，域语义未定（不是\"目标 x/y\"的直接证据）",
-          "next": "找这两个位的读者（渲染/动画），再决定规范里怎么称呼"
-        },
-        {
           "id": "RES-TEX-DRAW-KEY",
           "kind": "unknown",
           "what": "绘制键（第 1 个操作数）的领域语义未定：只知道它与 detach 的键同一空间",
           "next": "从绘制项表的其它写入者/读者反推键的身份"
+        },
+        {
+          "id": "RES-TEX-DRAW-CONSUMER",
+          "kind": "unknown",
+          "what": "绘制项的消费者（何时遍历、按 bit0 过滤、纹理缺失 / 越界时上报错误并跳过、变换矩阵如何参与）没有成篇；本章只规定写入",
+          "next": "把 sub_4AEEA0 → sub_4A2D50 → 绘制入口的路径写成表现边界规则"
+        },
+        {
+          "id": "RES-TEX-DRAW-FLOATS",
+          "kind": "unknown",
+          "what": "第 7/8 个操作数写进绘制项的两个浮点位；它们与四条边的角色（来源矩形 / 目标位置）没有消费者证据，正文只写“两个浮点位”",
+          "next": "读绘制入口对四个边与两个浮点的组合，确认角色后再命名"
+        },
+        {
+          "id": "RES-TEX-DRAW-DEFAULT",
+          "kind": "unknown",
+          "what": "绘制键不存在时新建的默认项，其“其余字段”初值没有成篇；0x202 / 0x33f 会读当前颜色，首次绘制还会派生“这一步画什么颜色”",
+          "next": "读默认记录构造点，列出字段初值；未定前正文明确“其余字段初值不规定”"
+        },
+        {
+          "id": "RES-TEX-DRAW-OOB",
+          "kind": "unknown",
+          "what": "绘制项引用的纹理 id 为负或 ≥1000 时，消费路径的检查与后果未成篇；本条自身不检查",
+          "next": "读消费路径的槽号检查 / 错误文本，补成表现边界规则"
+        },
+        {
+          "id": "RES-TEX-DRAW-SCALE",
+          "kind": "unknown",
+          "what": "四条边与纹理尺寸不一致时是否缩放 / 裁剪，本版不规定；实现侧的“按记录值取子矩形、不缩放”只是观察，不是 spec 结论",
+          "next": "读绘制入口对四条边与变换矩阵的组合，确认缩放来源"
         }
       ],
       "falsifiers": []
@@ -1700,18 +1795,31 @@
         {
           "id": "RES-VM-WINDOW-EDGES",
           "kind": "unknown",
-          "what": "窗的边界值仍未取证：进度 > 1（是否 clamp）、起点 0 既是「未盖章」又与真实时刻 0 撞车。★「持续时间 ≤ 0 不推进」已由 .lst 关闭（0x49AC8E / 0x4AF22E 在除法前整段跳过）",
-          "next": "用合成值跑三组边界，记录比较与插值的实际结果"
+          "what": "窗的边界值仍未取证：进度 > 1（是否 clamp）、起点 0 既是「未盖章」又与真实时刻 0 撞车；「持续时间 ≤ 0」由 .lst 0x49AC8E / 0x4AF22E（除法前整段跳过）读为不推进/不执行到期分支，但那一步是否清有窗位本版不规定；「现在 = 起点+延迟+持续时间」按 32 位无符号视为窗内（相等时进度 1）是正文选择；负延迟的盖章步进度也未取证",
+          "next": "用合成值跑 duration=0 / now=end / now=end+1 / 回绕 / 负延迟五组，记录比较、插值与清位结果"
         },
         {
           "id": "RES-VM-WINDOW-MASK-BIT",
           "kind": "unknown",
           "what": "绘制项记录 +0x2D0 的 bit0 是一个引擎级屏蔽标记：置起时这一趟不置「有动画」（0x49BB64 判位 → 0x49BB73 被跳过），并参与 var_180 的初始化（0x49AC5F–0x49AC83）。该位由谁置、领域含义是什么，未取证",
           "next": "找 +0x2D0 bit0 的写入点，确认它是否等价于「该项不参与场景动画」"
+        },
+        {
+          "id": "RES-WINDOW-WRITE-TARGET",
+          "kind": "unknown",
+          "what": "「窗进行中写派生色 / 顶点缓冲、不写回当前颜色」：网格侧的落点（0x4A2050 / 0x4AF1C0）已读；绘制项侧只读到 0x49AC94 按 t 混合后写一个**绘制用格**，该格的身份 / 布局未定（到期分支 0x49AD6D 才写当前色）",
+          "next": "分别补：①绘制用格的 shape / 读写点与 accepted 台账（锚 0x49AC94）；②网格每步重烘的完整调用链"
+        },
+        {
+          "id": "RES-WINDOW-NO-COLOR",
+          "kind": "unknown",
+          "what": "网格的窗推进时，派生色落在「无颜色」哨兵上是否还要重烘顶点缓冲未取证；「无颜色」的具体数值本身也未定 ⇒ 正文把这一分支写成“本版不规定”，实现按自己的哨兵值跳过重烘只是实现选择",
+          "next": "用 0x320 建一个当前颜色为「无颜色」的网格，再排 0x323，观察顶点缓冲是否被写；另找「无颜色」的实际数值"
         }
       ],
       "falsifiers": [
-        "若绘制项或网格任一方在窗到期后仍保留\"有窗\"位 ⇒ 违反本条"
+        "若正常到期（持续时间 > 0）后仍保留\"有窗\"位 ⇒ 违反本条",
+        "若窗进行中把插值结果写回当前颜色（而不是派生色 / 顶点缓冲）⇒ 违反本条"
       ]
     },
     {
@@ -2393,16 +2501,16 @@
       "covers": [],
       "residual": [
         {
-          "id": "RES-AGF-OTHER-SIG",
+          "id": "RES-AGF-BMP",
           "kind": "unknown",
-          "what": "非 `ACGF` 签名没有样本；引擎不比较 4 字节签名，只排除 `BM` 开头、再用 version / unknown0 判定",
-          "next": "找非 ACGF 的 AGF（或造一份），确认它是否被当作 AGF 接受；在此之前本版只覆盖 ACGF"
+          "what": "前两字节 `BM` 的文件走 BMP 分支，但 BMP 的像素布局不在本版；本作样本里没有 BMP",
+          "next": "找到或造一份 BMP，按同一套请求合同补 BMP 的像素布局；在此之前实现必须响亮失败"
         },
         {
-          "id": "RES-AGF-V1-SAMPLE",
+          "id": "RES-AGF-V1-PIXELS",
           "kind": "unknown",
-          "what": "version 1 的 AGF 没有样本；引擎对 version 1 跳过 ACIF（不读 alpha），但未在真实文件上观察",
-          "next": "找或造一个 version 1 的 AGF，确认它没有 ACIF 时能读、且像素路径与 version 2 相同"
+          "what": "真实 v1 样本（头 4 字节为 0、无 ACIF）已能读，但它是 8bpp；v1 的 24 / 32bpp 像素路径没有单独样本",
+          "next": "找或造 v1 的 24 / 32bpp AGF，确认无 ACIF 时 alpha / 通道与 v2 相同"
         }
       ],
       "falsifiers": [
@@ -2420,6 +2528,12 @@
           "kind": "unknown",
           "what": "写侧的「压得小才压 / 相等即原样」选择不在本版；正文只规定读取侧的两分支",
           "next": "若要做 AGF 重打包，另立数据生产规范，并逐件取证压缩/原样的选择与相等时的取舍"
+        },
+        {
+          "id": "RES-AGF-BODY-LENGTH",
+          "kind": "unknown",
+          "what": "解压例程本身不检查写出字节数；正文要求使用端按 `bodyUnpackedSize == stride×height` 检查，但引擎读取路径是否也检查未逐字核",
+          "next": "读 body 解压后的长度校验点（若有），确认“短 / 长都诊断”是引擎行为还是实现选择"
         }
       ],
       "falsifiers": [
@@ -2457,6 +2571,18 @@
           "kind": "unknown",
           "what": "宽或高为 0 的 AGF 如何被拒 / 处理未取证：正文只写「本版不规定」",
           "next": "造一份 0 宽或 0 高的 AGF，观察读取分支与返回码"
+        },
+        {
+          "id": "RES-AGF-STRIDE-24",
+          "kind": "unknown",
+          "what": "32 位行对齐已由 8bpp 1026 宽的真实样本（body = 1028×height）与上传器证实；24bpp 宽度不是 4 的倍数时没有样本，公式是按同一 32 位对齐外推",
+          "next": "找或造一份 24bpp、宽不是 4 倍数的 AGF，确认行尾填充字节数"
+        },
+        {
+          "id": "RES-AGF-CHANNEL-ORDER",
+          "kind": "unknown",
+          "what": "正文把“解码输出 top-down RGBA8”写成规范接口；引擎内部实际按 BGR(A) 读取 / 上传的写入点没有单独登记，参考实现只与 8 份真实 AGF 逐字节对比过",
+          "next": "登记 24 / 32bpp 的通道读取点 EA，或把这句明确标成“本规范的输出接口”而不是引擎内部格式"
         }
       ],
       "falsifiers": [

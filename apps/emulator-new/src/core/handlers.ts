@@ -6,7 +6,7 @@
  *   回调 + `await`，所以同一份处理器在 Node / 浏览器里都能跑。
  */
 import { decodeCp932, readU32LE } from './bytes.ts';
-import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, VoiceGroup } from './machine.ts';
+import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, TextureObject, VoiceGroup } from './machine.ts';
 import { FRAME_SLOT_COUNT, MOVIE_BIT, WAIT_BIT } from './machine.ts';
 import { encodeInt, readAddress, readFloat, readInt, readIntAt, readText, writeBitsAt, writeFloat, writeInt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
@@ -14,8 +14,13 @@ import { arrayStrideFor, resolveAddress } from './address.ts';
 import type { PoolTag } from './address.ts';
 import { NO_COLOR, RENDER_TARGET_BACK_BUFFER } from './render.ts';
 import type { RenderHost } from './render.ts';
+import { AgfError, decodeAgf } from './agf.ts';
 
 export type { Machine, Operand };
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /* ──────────────────────────── 空操作 ──────────────────────────── */
 
@@ -73,36 +78,107 @@ function detach1f7(m: Machine, ops: Operand[]): void {
   if (removed > 0) m.scene.dirty = 1;
 }
 
-/** 0x1f8 创建：读 1=id、4=种类、3=高、2=宽、1=id（CORE-OPS-TEXTURE-CREATE） */
-function create1f8(m: Machine, ops: Operand[]): void {
+/** 0x1f8 创建：读 1=id、4=种类、3=高、2=宽（CORE-OPS-TEXTURE-CREATE） */
+async function create1f8(m: Machine, ops: Operand[]): Promise<void> {
   const id = readInt(m, ops, 1);
   clearObjectSlot(m, id);
-  const kind = readInt(m, ops, 4);
+  const kindRaw = readInt(m, ops, 4);
   const height = readInt(m, ops, 3);
   const width = readInt(m, ops, 2);
-  readInt(m, ops, 1); // 建纹理时再读一次 id
-  m.scene.textures.set(id, { file: -1, color: 0, blank: 1 });
-  m.scene.textureObjects.set(id, { kind: kind === 3 ? 'divided' : 'normal', width, height });
-  m.effects.push({ kind: 'texture.create.request', detail: { id, width, height, kind } });
-  // 规范：底层创建失败只写错误缓冲、不抛；headless 没有后端 ⇒ 视为已受理
+  readInt(m, ops, 1); // 同一编号再读一次（引擎在建纹理时再问 id）
+  const kind = kindRaw === 3 ? 'divided' : 'normal';
+  const previous = m.scene.textures.get(id);
+  // ★ 只写来源与空白位；颜色键 / 释放守卫 / 其余字段保持原值
+  m.scene.textures.set(id, { file: -1, color: previous?.color ?? 0, blank: 1 });
+  const object: TextureObject = { kind, width: 0, height: 0 };
+  m.scene.textureObjects.set(id, object);
+  m.effects.push({ kind: 'texture.create.request', detail: { id, width, height, kind: kindRaw } });
+  if (m.renderHost === undefined) {
+    // 无后端：只做引擎数据；⛔ 不声称平台创建成功
+    object.width = width;
+    object.height = height;
+    return;
+  }
+  const ok = await m.renderHost.createTexture({ textureId: id, width, height, kind });
+  if (ok) {
+    object.width = width;
+    object.height = height;
+    return;
+  }
+  // 失败：对象仍留在槽里，但尺寸 / 可用性未定义（本层记 0×0 + 诊断）
+  m.scene.errorBuffer = 'テクスチャ作成に失敗';
+  m.diagnostics.push({ kind: 'texture-create-failed', index: id });
 }
 
-/** 0x1f9 设置：读 2=id、1=文件号、3=颜色键、2=id（CORE-OPS-TEXTURE-SET） */
-function set1f9(m: Machine, ops: Operand[]): void {
+/** 0x1f9 设置：读 2=id、1=文件号、3=颜色键（CORE-OPS-TEXTURE-SET / -LOAD） */
+async function set1f9(m: Machine, ops: Operand[]): Promise<void> {
   const id = readInt(m, ops, 2);
   clearObjectSlot(m, id);
   const fileId = readInt(m, ops, 1);
+  const previous = m.scene.textures.get(id);
+  if (m.loadImage === undefined) {
+    m.diagnostics.push({ kind: 'texture-image-loader-missing', index: id });
+    throw new Error(`texture-image-loader-missing:${fileId}`);
+  }
+
+  // 打开 / 加锁失败发生在清纹理槽之前 ⇒ 记录与旧对象都保持原值
+  let bytes: Uint8Array | null;
+  try {
+    bytes = await m.loadImage(fileId);
+  } catch (error) {
+    m.diagnostics.push({ kind: 'texture-file-open-failed', index: fileId });
+    throw new Error(`画像ファイル ${fileId} の読み込みに失敗しました: ${messageOf(error)}`);
+  }
+  if (bytes === null) {
+    m.diagnostics.push({ kind: 'texture-file-missing', index: fileId });
+    throw new Error(`画像ファイル ${fileId} の読み込みに失敗しました`);
+  }
+
+  // 引擎在打开 / 加锁之后才读颜色键与第二次 id
   const rawColor = readInt(m, ops, 3);
   const color = rawColor < 0 ? 0 : (0xff000000 | (rawColor & 0xffffff)) >>> 0;
   readInt(m, ops, 2); // 加载时再读一次 id
-  // 外部：按文件号打开 / 解码 / 上传。headless 没有档案后端 ⇒ 视为已受理（成功路径）。
-  m.effects.push({ kind: 'texture.load.request', detail: { id, fileId, color } });
+
+  // 解码期失败：旧纹理对象已在解码前清掉，槽为空；记录来源 = 无
+  m.scene.textureObjects.delete(id);
+  let image: ReturnType<typeof decodeAgf>;
+  try {
+    image = decodeAgf(bytes);
+  } catch (error) {
+    m.scene.textures.set(id, { file: -1, color: previous?.color ?? 0, blank: previous?.blank ?? 0 });
+    const code = error instanceof AgfError ? error.code : 'agf-decode-failed';
+    m.diagnostics.push({ kind: `texture-${code}`, index: fileId });
+    throw new Error(`画像ファイル ${fileId} の読み込みに失敗しました: ${messageOf(error)}`);
+  }
+
+  m.scene.textureObjects.set(id, { kind: 'normal', width: image.width, height: image.height });
+  m.effects.push({
+    kind: 'texture.load.request',
+    detail: { id, fileId, color, width: image.width, height: image.height },
+  });
+
+  if (m.renderHost !== undefined) {
+    const ok = await m.renderHost.uploadTexture({
+      textureId: id,
+      width: image.width,
+      height: image.height,
+      kind: 'normal',
+      rgba: image.rgba,
+      color,
+    });
+    if (!ok) {
+      // 上传失败：槽里留下已创建的普通纹理对象；记录来源 = 无
+      m.scene.textures.set(id, { file: -1, color: previous?.color ?? 0, blank: previous?.blank ?? 0 });
+      m.diagnostics.push({ kind: 'texture-upload-failed', index: id });
+      throw new Error(`画像ファイル ${fileId} の読み込みに失敗しました: upload`);
+    }
+  }
+
   m.scene.textures.set(id, { file: fileId, color, blank: 0 });
-  m.scene.textureObjects.set(id, { kind: 'normal', width: 0, height: 0 });
 }
 
 /** 0x1fa 释放：读 op1 两次（CORE-OPS-TEXTURE-RELEASE） */
-function release1fa(m: Machine, ops: Operand[]): void {
+async function release1fa(m: Machine, ops: Operand[]): Promise<void> {
   const id = readInt(m, ops, 1);
   clearObjectSlot(m, id);
   readInt(m, ops, 1);
@@ -110,13 +186,14 @@ function release1fa(m: Machine, ops: Operand[]): void {
   const rec = m.scene.textures.get(id);
   m.scene.textures.set(id, { file: -1, color: rec?.color ?? 0, blank: rec?.blank ?? 0 });
   m.scene.textureObjects.delete(id);
+  if (m.renderHost !== undefined) await m.renderHost.releaseTexture(id);
 }
 
 /** 默认绘制项：规范只说"建一个默认项"，字段全 0 */
 function defaultItem(): DrawItem {
   return {
     flags: 0, textureId: 0, left: 0, top: 0, right: 0, bottom: 0, aux: [0, 0, 0],
-    start: 0, delay: 0, duration: 0, colorFrom: -1, colorTo: -1, unknown: new Map(),
+    start: 0, delay: 0, duration: 0, colorFrom: -1, colorNow: -1, colorTo: -1, unknown: new Map(),
   };
 }
 
@@ -166,7 +243,7 @@ function drawItemOf(m: Machine, id: number): DrawItem {
 function defaultMesh(): Mesh {
   return {
     flags: 0, count: 0, op10: 0, copies: [[], []], colors: [], vbo: [],
-    start: 0, delay: 0, duration: 0, colorFrom: -1, colorTo: -1, unknown: new Map(),
+    start: 0, delay: 0, duration: 0, colorFrom: -1, colorNow: -1, colorTo: -1, unknown: new Map(),
   };
 }
 
@@ -196,6 +273,7 @@ function scene202(m: Machine, ops: Operand[]): void {
     item.delay = delay;
     item.duration = duration;
     item.colorTo = value;
+    item.colorNow = item.colorFrom;
     m.scene.dirty = 1;
     m.scene.animating = 1;
   }
@@ -212,6 +290,7 @@ function scene203(m: Machine, ops: Operand[]): void {
   const item = drawItemOf(m, readInt(m, ops, 1));
   item.unknown.set(2, unknown);
   item.colorFrom = value;
+  item.colorNow = value;
   m.scene.dirty = 1;
 }
 
@@ -226,6 +305,7 @@ function scene322(m: Machine, ops: Operand[]): void {
   const mesh = meshOf(m, readInt(m, ops, 1));
   mesh.unknown.set(2, unknown);
   mesh.colorFrom = value;
+  mesh.colorNow = value;
   mesh.colors = mesh.colors.map(() => value >>> 0);
   m.scene.dirty = 1;
 }
@@ -245,6 +325,7 @@ function scene323(m: Machine, ops: Operand[]): void {
   mesh.delay = delay;
   mesh.duration = duration;
   mesh.colorTo = value;
+  mesh.colorNow = mesh.colorFrom;
   m.scene.dirty = 1;
 }
 
@@ -284,7 +365,10 @@ function scene320(m: Machine, ops: Operand[]): void {
   mesh.copies = copies;
   mesh.colors = colors;
   mesh.vbo = [a4, a7, a8];
-  if (mesh.colorFrom !== -1) mesh.colors = colors.map(() => mesh.colorFrom >>> 0);
+  if (mesh.colorFrom !== -1) {
+    mesh.colors = colors.map(() => mesh.colorFrom >>> 0);
+    mesh.colorNow = mesh.colorFrom;
+  }
   m.scene.dirty = 1;
 }
 

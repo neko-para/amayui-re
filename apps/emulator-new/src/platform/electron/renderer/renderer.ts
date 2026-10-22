@@ -202,8 +202,8 @@ function renderDiagnostics(): void {
         kv([
           ['客户区', `${s.width}×${s.height}（绘制坐标 = 客户区像素，1:1）`],
           ['目标', s.target < 0 ? '后缓冲（-1）' : `纹理槽 ${s.target}`],
-          ['纹理槽 / 绘制项', `${s.textures} 槽；${s.activeItems}/${s.drawItems} 条有效绘制项`],
-          ['画成什么', `Sprite ${s.sprites}；占位块 ${s.placeholders}（其中标签 ${s.labels}）`],
+          ['纹理槽 / 绘制项 / 网格', `${s.textures} 槽；${s.activeItems}/${s.drawItems} 条有效绘制项；${s.meshes} 个网格`],
+          ['画成什么', `Sprite ${s.sprites}；占位块 ${s.placeholders}（其中标签 ${s.labels}）；网格四边形 ${s.meshQuads}（跳过 ${s.meshSkipped}）`],
           [
             '跳过 / 异常',
             `自引用 ${s.selfTargetSkips}；零面积 ${s.zeroArea}；缺纹理槽 ${s.missingSlots}；矩形与纹理尺寸不符 ${s.sizeMismatch}`,
@@ -236,7 +236,7 @@ function renderDiagnostics(): void {
             texture.blank !== 0
               ? `blank（0x1f8）`
               : texture.file >= 0
-                ? `file ${texture.file}（未解码）`
+                ? `file ${texture.file}`
                 : '无来源',
           ),
         );
