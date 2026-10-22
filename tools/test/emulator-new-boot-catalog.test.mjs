@@ -14,9 +14,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { BOOT_DISPOSITIONS, BOOT_STAGES, startupReport } from '../../apps/emulator-new/src/boot.ts';
+import { BOOT_DISPOSITIONS, BOOT_STAGES, startupReport } from '../../apps/emulator-new/src/core/boot.ts';
 
-test('★ 启动阶段：id 唯一、处置合法、理由非空、EA 可溯源', () => {
+test('★ 启动阶段：id 唯一、处置合法、理由非空、EA 可溯源', async () => {
   assert.ok(BOOT_STAGES.length >= 10, `阶段数（实际 ${BOOT_STAGES.length}）`);
   const ids = new Set();
   for (const s of BOOT_STAGES) {
@@ -29,7 +29,7 @@ test('★ 启动阶段：id 唯一、处置合法、理由非空、EA 可溯源'
   }
 });
 
-test('★ 关键阶段的处置：入口/根脚本 = modeled；窗口/定时器 = 宿主；配置 = 部分；引擎/主循环 = 部分', () => {
+test('★ 关键阶段的处置：入口/根脚本 = modeled；窗口/定时器 = 宿主；配置 = 部分；引擎/主循环 = 部分', async () => {
   const byId = new Map(BOOT_STAGES.map((s) => [s.id, s]));
   assert.equal(byId.get('index-open')?.disposition, 'modeled');
   assert.equal(byId.get('script-load')?.disposition, 'modeled');
@@ -43,7 +43,7 @@ test('★ 关键阶段的处置：入口/根脚本 = modeled；窗口/定时器 
     '配置库已建立（默认表 + 玩家文件）；标成 modeled 会藏起未建模的显示副作用');
 });
 
-test('★ 汇总：counts 与阶段一一对应（不手写数字）', () => {
+test('★ 汇总：counts 与阶段一一对应（不手写数字）', async () => {
   const r = startupReport();
   assert.equal(r.stages.length, BOOT_STAGES.length);
   const total = Object.values(r.counts).reduce((a, b) => a + b, 0);

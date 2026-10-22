@@ -74,11 +74,14 @@
   ★ Windows 上那个链接**必须是真符号链接**（`lstat.isSymbolicLink === true`）：Node **拒绝为 `node_modules`
   下的文件剥类型**（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`）⇒ 跨包 `.mts` 只在真符号链接下走得通。
   无提权时 pnpm 会**静默降级成 junction**（装完不报错、链接形态却是错的）⇒ 提权安装见 `plugins/pnpm-priv`。
-* ★ **类型检查用 `noEmit`，覆盖四个工程**：`pnpm typecheck`
-  （= `tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit`）。
-  ★ **第四个是 `apps/emulator-new`**：它是**工具侧**的参考实现（从命令行读脚本、用 `Buffer` 装 body），
-  所以 `types: ["node"]`；它没有"核心 / 前端"那个分层守卫，那份守卫仍只属于 `apps/emulator`。
-  ★ **为什么 `apps/emulator` 是三个工程而不是两个**：`apps/emulator` 自己分成"核心"与"前端"两份 tsconfig ——
+* ★ **类型检查用 `noEmit`，覆盖五个工程**：`pnpm typecheck`
+  （= `tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.core.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit`）。
+  ★ **后两个是 `apps/emulator-new`**：它与 `apps/emulator` 同形分成"核心 / 平台"两份 tsconfig ——
+  `tsconfig.core.json`（`include` 只有 `src/core/**`）是 `"types": []` 的**守卫本身**；
+  `tsconfig.json` 覆盖整个 app（核心 + `src/platform/node/**` + `src/main.ts`）所以是 `"types": ["node"]`。
+  ★ 它的核心只收**纯数据 + `Host` 接口**（指令表 / 配置键词表由平台层从 `data/spec` 读入；文件系统 / 路径 /
+  环境变量全走 `Host`，IO **全部是 `Promise`**）⇒ 核心能整份跑在浏览器 / worker 里，`data/spec` 只有平台层认识。
+  ★ **为什么 `apps/emulator` 要两份 tsconfig（核心 / 前端）**：`apps/emulator` 自己分成"核心"与"前端"两份 tsconfig ——
   核心那份是 `"types": []`（**守卫本身**），而前端（`apps/emulator/frontends/**`）的**全部职责**
   就是"把 `node:fs` 接上核心定义的接口" ⇒ 它必须有 `"types": ["node"]`。
   两者不能共用一份：要么核心的守卫失效，要么前端写不了 `node:fs`。
@@ -162,7 +165,7 @@ pnpm test:list                  # 看分级集合与每个文件的声明（先�
 pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
 pnpm test:mutation              # ★ **守卫自检**：改坏一处关键常量 ⇒ 确认对应守卫**当场红**（红得有意义）
-pnpm typecheck                  # ★ `tsc --noEmit`，**四个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端 + `apps/emulator-new`）；不产出 ⇒ 仍无构建步骤
+pnpm typecheck                  # ★ `tsc --noEmit`，**五个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端 + `apps/emulator-new` 核心 + `apps/emulator-new` 整个 app）；不产出 ⇒ 仍无构建步骤
 ```
 
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`

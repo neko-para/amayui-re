@@ -9,16 +9,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 
-import { ConfigStore, atoiPrefix, parseIni } from '../../apps/emulator-new/src/config.ts';
-import { defaultConfigPath } from '../../apps/emulator-new/src/host.ts';
-import { loadConfigKeys } from '../../apps/emulator-new/src/spec.ts';
-import { decodeInt, encodeInt, readText, writeText } from '../../apps/emulator-new/src/values.ts';
-import { Machine } from '../../apps/emulator-new/src/machine.ts';
-import { slotAddress } from '../../apps/emulator-new/src/address.ts';
-import { HANDLERS } from '../../apps/emulator-new/src/handlers.ts';
+import { ConfigStore, atoiPrefix, parseIni } from '../../apps/emulator-new/src/core/config.ts';
+import { defaultConfigPath } from '../../apps/emulator-new/src/core/install.ts';
+import { nodeHost } from '../../apps/emulator-new/src/platform/node/host.ts';
+import { loadConfigKeys } from '../../apps/emulator-new/src/platform/node/spec.ts';
+import { decodeInt, encodeInt, readText, writeText } from '../../apps/emulator-new/src/core/values.ts';
+import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { slotAddress } from '../../apps/emulator-new/src/core/address.ts';
+import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
+
+/** 键词表是只读的规范数据：读一次，多个 store 共用（`ConfigStore` 不改 schema） */
+const CONFIG_KEYS = await loadConfigKeys();
 
 function store() {
-  return new ConfigStore(loadConfigKeys());
+  return new ConfigStore(CONFIG_KEYS);
 }
 
 function machine(s) {
@@ -29,7 +33,7 @@ function op(type, raw) {
   return { type, raw };
 }
 
-test('★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败', () => {
+test('★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮失败', async () => {
   const s = store();
   const font = Buffer.from([0x82, 0x6c, 0x20, 0x96, 0xbe, 0x92, 0xa9]).toString('latin1');
   s.applyDefaults([
@@ -80,10 +84,10 @@ test('★ 默认表：整数/字符串/列表/SAVEVERSION 拆分/未知键响亮
   anti.applyDefaults([{ key: 'ENABLEANTIFONT', value: '2' }], { antifontUnavailable: true });
   assert.equal(anti.getInt('set:EnableAntiFont'), 2, '只有值 1 才做平台清零');
 
-  assert.throws(() => new ConfigStore(loadConfigKeys()).applyDefaults([{ key: 'NO_SUCH_KEY', value: '1' }]), /config-unknown-key/);
+  assert.throws(() => new ConfigStore(CONFIG_KEYS).applyDefaults([{ key: 'NO_SUCH_KEY', value: '1' }]), /config-unknown-key/);
 });
 
-test('★ INI：段与键字节精确、缺键保留默认、重复键最后一次', () => {
+test('★ INI：段与键字节精确、缺键保留默认、重复键最后一次', async () => {
   const s = store();
   s.applyDefaults([
     { key: 'SCREENX', value: '1280' },
@@ -107,7 +111,7 @@ test('★ INI：段与键字节精确、缺键保留默认、重复键最后一�
   assert.equal(parseIni(Buffer.from('[display]\r\nScreenMode=2\r\n', 'latin1')).size, 1, '末尾 LF 不产生幻影空行');
 });
 
-test('★ 保存：四段 CRLF 与条件键；重解析 round-trip', () => {
+test('★ 保存：四段 CRLF 与条件键；重解析 round-trip', async () => {
   const s = store();
   s.applyDefaults([{ key: 'FULLSCREENBIT', value: '32' }]);
   s.setInt('display:ScreenMode', 2);
@@ -115,7 +119,7 @@ test('★ 保存：四段 CRLF 与条件键；重解析 round-trip', () => {
   s.setInt('display:VirtualFullScreenType', 3);
   s.setInt('set:EnableAntiFont', 0);
   s.setInt('message:UseAntiFont', 1);
-  const text = s.serializeIni().toString('latin1');
+  const text = Buffer.from(s.serializeIni()).toString('latin1');
   assert.ok(text.startsWith('[display]\r\n'), '第一段必须是 display，行尾 CRLF');
   const order = ['[display]', '[sound]', '[message]', '[system]'].map((x) => text.indexOf(x));
   assert.deepEqual(order, [...order].sort((a, b) => a - b), '段顺序固定');
@@ -132,7 +136,7 @@ test('★ 保存：四段 CRLF 与条件键；重解析 round-trip', () => {
   open.setInt('set:EnableAntiFont', 1);
   open.setInt('message:UseAntiFont', 1);
   open.setInt('message:AntiFontLevel', 2);
-  const openText = open.serializeIni().toString('latin1');
+  const openText = Buffer.from(open.serializeIni()).toString('latin1');
   assert.match(openText, /^VirtualFullScreenType=3\r$/m, 'VirtualFullScreen≠0 ⇒ 写出 VirtualFullScreenType');
   assert.match(openText, /^UseAntiFont=1\r$/m, 'EnableAntiFont≠0 ⇒ 写出 UseAntiFont');
   assert.match(openText, /^AntiFontLevel=2\r$/m, 'EnableAntiFont≠0 ⇒ 写出 AntiFontLevel');
@@ -145,7 +149,7 @@ test('★ 保存：四段 CRLF 与条件键；重解析 round-trip', () => {
   assert.equal(again.getInt('system:UseMMX'), 0);
 });
 
-test('★ 脚本配置四条：load-int 未命中写 0、save/load 往返、字符串空串', () => {
+test('★ 脚本配置四条：load-int 未命中写 0、save/load 往返、字符串空串', async () => {
   const s = store();
   const m = machine(s);
   const slot = op(3, 7);
@@ -176,7 +180,7 @@ test('★ 脚本配置四条：load-int 未命中写 0、save/load 往返、字�
   assert.equal(m.globalString.get(9), '', '未命中字符串 ⇒ 空串');
 });
 
-test('★ 脚本配置：指针族的键由**地址换算**；地址没写过（0）⇒ 响亮失败，不许当成"键下标 0"', () => {
+test('★ 脚本配置：指针族的键由**地址换算**；地址没写过（0）⇒ 响亮失败，不许当成"键下标 0"', async () => {
   const m = machine(store());
   // 指针槽没写过 ⇒ 地址 0 ⇒ 不落在任何池窗口（整数侧）/ 低于该族全局池起点（字符串侧）
   assert.throws(() => HANDLERS.get(0x1a3)(m, [op(12, 0)]), /不落在任何池窗口|未定义行为|低于该族全局池起点/);
@@ -185,7 +189,7 @@ test('★ 脚本配置：指针族的键由**地址换算**；地址没写过（
   assert.throws(() => HANDLERS.get(0x1a3)(m, [op(9, 0)]), /config-key-unsupported-type/);
 });
 
-test('文本原语：只支持 type 5，其余类型响亮失败（不补空串）', () => {
+test('文本原语：只支持 type 5，其余类型响亮失败（不补空串）', async () => {
   const m = machine(store());
   assert.equal(readText(m, [op(5, 3)], 1), '');
   writeText(m, [op(5, 3)], 1, 'x');
@@ -194,24 +198,24 @@ test('文本原语：只支持 type 5，其余类型响亮失败（不补空串�
   assert.throws(() => writeText(m, [op(11, 3)], 1, 'x'), /text-unsupported-operand-type:0xb/);
 });
 
-test('脚本配置：配置库缺席 ⇒ config-not-initialized（不静默 0）', () => {
+test('脚本配置：配置库缺席 ⇒ config-not-initialized（不静默 0）', async () => {
   const m = new Machine({ body: Buffer.alloc(4), table: new Map(), key: 0 });
   assert.throws(() => HANDLERS.get(0x1a3)(m, [op(3, 7)]), /config-not-initialized/);
 });
 
-test('配置路径：USEAPPDATAFOLDER 选根，REGFILEPATH 拼相对目录', () => {
+test('配置路径：USEAPPDATAFOLDER 选根，REGFILEPATH 拼相对目录', async () => {
   const old = process.env.APPDATA;
   process.env.APPDATA = '/tmp/appdata-for-test';
   try {
-    assert.equal(defaultConfigPath('/game', 'Eushully\\Game', true), path.join('/tmp/appdata-for-test', 'Eushully\\Game', 'SYS4REG.INI'));
-    assert.equal(defaultConfigPath('/game', 'Eushully\\Game', false), path.join('/game', 'Eushully\\Game', 'SYS4REG.INI'));
+    assert.equal(defaultConfigPath(nodeHost, '/game', 'Eushully\\Game', true), path.join('/tmp/appdata-for-test', 'Eushully\\Game', 'SYS4REG.INI'));
+    assert.equal(defaultConfigPath(nodeHost, '/game', 'Eushully\\Game', false), path.join('/game', 'Eushully\\Game', 'SYS4REG.INI'));
   } finally {
     if (old === undefined) delete process.env.APPDATA;
     else process.env.APPDATA = old;
   }
 });
 
-test('atoiPrefix：C atoi 前缀语义', () => {
+test('atoiPrefix：C atoi 前缀语义', async () => {
   assert.equal(atoiPrefix('   -12abc'), -12);
   assert.equal(atoiPrefix('+7'), 7);
   assert.equal(atoiPrefix('abc'), 0);
@@ -222,7 +226,7 @@ test('atoiPrefix：C atoi 前缀语义', () => {
   assert.equal(atoiPrefix('\x01 42'), 0);
 });
 
-test('★★ 两个输入通道的大小写口径不同：索引默认表**折叠**大小写；玩家文件**字节精确**', () => {
+test('★★ 两个输入通道的大小写口径不同：索引默认表**折叠**大小写；玩家文件**字节精确**', async () => {
   // ① 索引默认表侧：键名折叠大小写（引擎用 `__stricmp` 比，见 `.lst:004942FD/0049439E`）
   const s = store();
   s.applyDefaults([{ key: 'screenx', value: '1024' }]);
@@ -238,7 +242,7 @@ test('★★ 两个输入通道的大小写口径不同：索引默认表**折�
   assert.equal(wrong.getInt('display:UseDirectDrawEmuration'), 0, '★ 大小写不同 ⇒ 不命中');
 });
 
-test('★★ 配置键：指针**不落在该族全局池** ⇒ UB（响亮失败），⛔ 不许算出一个"取决于布局的键"', () => {
+test('★★ 配置键：指针**不落在该族全局池** ⇒ UB（响亮失败），⛔ 不许算出一个"取决于布局的键"', async () => {
   const s = store();
   const m = machine(s);
   const KEY = 0;

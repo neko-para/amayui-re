@@ -4,6 +4,7 @@
  *   类型标签的支持集合按「支持集合与不支持的组合」；越界/未取证一律响亮失败。
  * ★ 本文件不碰文件系统、不认识脚本头。
  */
+import { decodeLatin1 } from './bytes.ts';
 import type { Machine, Operand } from './machine.ts';
 import { arrayStrideFor, isPointerTag, poolBase, resolveAddress, slotAddress } from './address.ts';
 import type { PoolTag, Resolved } from './address.ts';
@@ -346,7 +347,7 @@ export function readText(m: Machine, ops: Operand[], k: number): string {
  * - 逐字节 `^0xFF`，解出 0 即止（原始字节是 `0xFF`）；
  * - 越界 / 无终止符 ⇒ 响亮失败（⛔ 不许一路读到末尾 —— 地址算错时最容易这样）。
  */
-function inlineStringAt(body: Buffer, raw: number): string {
+function inlineStringAt(body: Uint8Array, raw: number): string {
   const off = 4 * raw;
   if (off >= body.length) {
     throw new Error(`内联字符串的偏移越出脚本体：raw=${raw} ⇒ off=${off}（body ${body.length} B）`);
@@ -354,7 +355,7 @@ function inlineStringAt(body: Buffer, raw: number): string {
   const out: number[] = [];
   for (let p = off; p < body.length; p += 1) {
     const c = body[p] ^ 0xff;
-    if (c === 0) return Buffer.from(out).toString('latin1');
+    if (c === 0) return decodeLatin1(Uint8Array.from(out));
     out.push(c);
     if (out.length > 0x10000) throw new Error(`内联字符串没有终止符（>65536 B，raw=${raw}）—— 偏移口径错了？`);
   }

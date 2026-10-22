@@ -14,11 +14,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadOpcodeTable } from '../../apps/emulator-new/src/spec.ts';
-import { Machine } from '../../apps/emulator-new/src/machine.ts';
-import { decodeInt, encodeInt } from '../../apps/emulator-new/src/values.ts';
+import { loadOpcodeTable } from '../../apps/emulator-new/src/platform/node/spec.ts';
+import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { decodeInt, encodeInt } from '../../apps/emulator-new/src/core/values.ts';
 
-const table = loadOpcodeTable();
+const table = await loadOpcodeTable();
 const KEY = 0x1234abcd;
 
 function f32bits(v) {
@@ -56,10 +56,10 @@ function mesh(over = {}) {
   };
 }
 
-test('★ 0x202：只有绘制项**已存在**才排窗；颜色 = 不透明黑 | RGB', () => {
+test('★ 0x202：只有绘制项**已存在**才排窗；颜色 = 不透明黑 | RGB', async () => {
   const m = machineFor([[0x202, [[0, 5], [0, 300], [0, 300], [0, 255], [0, 0xffffff]]]]);
   m.scene.drawItems.set(5, item());
-  m.run();
+  await m.run();
   const it = m.scene.drawItems.get(5);
   assert.equal(it.flags & 2, 2, '有窗位');
   assert.deepEqual([it.delay, it.duration], [300, 300]);
@@ -68,40 +68,40 @@ test('★ 0x202：只有绘制项**已存在**才排窗；颜色 = 不透明黑 
   assert.equal(m.scene.dirty, 1);
 });
 
-test('★ 0x202：绘制项**不存在** ⇒ 建默认项，但一个窗字段都不写（"静默"只对颜色成立）', () => {
+test('★ 0x202：绘制项**不存在** ⇒ 建默认项，但一个窗字段都不写（"静默"只对颜色成立）', async () => {
   const m = machineFor([[0x202, [[0, 9], [0, 300], [0, 300], [0, 255], [0, 0]]]]);
-  m.run();
+  await m.run();
   const it = m.scene.drawItems.get(9);
   assert.ok(it, '默认记录被建出来了');
   assert.equal(it.flags & 2, 0, '没有窗位');
 });
 
-test('★ 0x203：直接改起色、不排窗；透明度 >255 夹到 255', () => {
+test('★ 0x203：直接改起色、不排窗；透明度 >255 夹到 255', async () => {
   const m = machineFor([[0x203, [[0, 5], [0, 0], [0, 999], [0, 0x010203]]]]);
   m.scene.drawItems.set(5, item({ colorFrom: -1 }));
-  m.run();
+  await m.run();
   const it = m.scene.drawItems.get(5);
   assert.equal(it.colorFrom >>> 0, 0xff010203);
   assert.equal(it.flags & 2, 0, '不排窗');
 });
 
-test('★ 0x203：透明度 <0 ⇒ 取现有颜色的高字节；颜色 <0 ⇒ 取现有颜色', () => {
+test('★ 0x203：透明度 <0 ⇒ 取现有颜色的高字节；颜色 <0 ⇒ 取现有颜色', async () => {
   const m = machineFor([[0x203, [[0, 5], [0, 0], [0, -1], [0, -1]]]]);
   m.scene.drawItems.set(5, item({ colorFrom: 0x11223344 }));
-  m.run();
+  await m.run();
   assert.equal(m.scene.drawItems.get(5).colorFrom >>> 0, 0x11223344);
 });
 
-test('★ 0x320：顶点数 ≤ 0 ⇒ 写错误文本、不建网格', () => {
+test('★ 0x320：顶点数 ≤ 0 ⇒ 写错误文本、不建网格', async () => {
   const m = machineFor([[0x320, [
     [0, 2], [0, 0], [0, 0], [0, 0], [3, 0], [3, 4], [0, 0], [0, 0], [0, 0], [0, 0],
   ]]]);
-  m.run();
+  await m.run();
   assert.equal(m.scene.meshes.size, 0);
   assert.match(m.scene.errorBuffer, /0/);
 });
 
-test('★ 0x320：2..8 全按地址读 ⇒ 前两段原样拷贝、第三段合成、4/7/8 交给顶点缓冲对象', () => {
+test('★ 0x320：2..8 全按地址读 ⇒ 前两段原样拷贝、第三段合成、4/7/8 交给顶点缓冲对象', async () => {
   // 操作数形状照真实 LOGO：2/3/4/7/8 是浮点池（type 4），5/6 是整型池（type 3）
   const m = machineFor([[0x320, [
     [0, 2], [4, 9], [4, 13], [4, 17],
@@ -114,7 +114,7 @@ test('★ 0x320：2..8 全按地址读 ⇒ 前两段原样拷贝、第三段合�
     m.globalInt.set(160 + i, encodeInt(0x11223311 + i, KEY));
     m.globalInt.set(170 + i, encodeInt(0x44556622 + i, KEY));
   }
-  m.run();
+  await m.run();
   const me = m.scene.meshes.get(2);
   assert.ok(me);
   assert.equal(me.flags & 1, 1, '已存在位');
@@ -138,18 +138,18 @@ test('★ 0x320：2..8 全按地址读 ⇒ 前两段原样拷贝、第三段合�
   assert.equal(m.scene.dirty, 1);
 });
 
-test('★ 0x322：起色 + 按起色烘顶点色（t=0）', () => {
+test('★ 0x322：起色 + 按起色烘顶点色（t=0）', async () => {
   const m = machineFor([[0x322, [[0, 2], [0, 0], [0, 255], [0, 0x336699]]]]);
   m.scene.meshes.set(2, mesh({ count: 3, colors: [0, 0, 0] }));
-  m.run();
+  await m.run();
   const me = m.scene.meshes.get(2);
   assert.equal(me.colorFrom >>> 0, 0xff336699);
   assert.deepEqual(me.colors, [0xff336699, 0xff336699, 0xff336699]);
 });
 
-test('★ 0x323：没有"已存在"门（给不存在的网格排窗也照排）', () => {
+test('★ 0x323：没有"已存在"门（给不存在的网格排窗也照排）', async () => {
   const m = machineFor([[0x323, [[0, 77], [0, 4500], [0, 500], [0, 255], [0, 0]]]]);
-  m.run();
+  await m.run();
   const me = m.scene.meshes.get(77);
   assert.ok(me, '默认网格被建出来了');
   assert.equal(me.flags & 2, 2, '有窗位（无条件置）');
@@ -157,7 +157,7 @@ test('★ 0x323：没有"已存在"门（给不存在的网格排窗也照排）
   assert.equal(me.colorTo >>> 0, 0xff000000);
 });
 
-test('★ 窗收尾：绘制项与网格都清"有窗"位', () => {
+test('★ 窗收尾：绘制项与网格都清"有窗"位', async () => {
   const m = machineFor([], { tickMs: 16 });
   m.scene.now = 0;
   m.scene.drawItems.set(1, item({ flags: 3, delay: 0, duration: 100, colorFrom: 0xff000000, colorTo: 0xff00ff00 }));
@@ -175,34 +175,34 @@ test('★ 窗收尾：绘制项与网格都清"有窗"位', () => {
   assert.equal(it.colorTo, -1);
 });
 
-test('★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行', () => {
+test('★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行', async () => {
   const m = machineFor([
     [0x21c, []],
     [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
   ], { tickMs: 16 });
   // 场景里有一个 100ms 的窗（起点未盖章）
   m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 100, colorFrom: 0, colorTo: 0xffffffff }));
-  const r = m.run();
+  const r = await m.run();
   assert.equal(r.steps, 2, 'wait 之后的那条指令被执行了');
   assert.equal(m.flags, 0, '等待位已清');
   assert.ok(m.ticks >= 7, `门关着的迭代次数（实际 ${m.ticks}）`);
   assert.ok(m.now > 100, `虚拟时钟走过了窗长（实际 ${m.now}ms）`);
 });
 
-test('★ 0x21c 等待门：场景没有动画 ⇒ 下一个迭代就放行（不空转）', () => {
+test('★ 0x21c 等待门：场景没有动画 ⇒ 下一个迭代就放行（不空转）', async () => {
   const m = machineFor([
     [0x21c, []],
     [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
   ]);
-  const r = m.run();
+  const r = await m.run();
   assert.equal(r.steps, 2);
   assert.equal(m.ticks, 0, '没有动画就不该 tick');
 });
 
-test('★ 0x101 采样并丢弃：清状态位、输入字归零、两个标量 1/0、外部请求记一条', () => {
+test('★ 0x101 采样并丢弃：清状态位、输入字归零、两个标量 1/0、外部请求记一条', async () => {
   const m = machineFor([[0x101, []]]);
   m.inputWord = 0xdeadbeef;
-  m.run();
+  await m.run();
   assert.equal(m.flags & 0x08000000, 0);
   assert.equal(m.inputWord, 0);
   assert.equal(m.scalars.get('pollInput.a'), 1);
@@ -210,10 +210,10 @@ test('★ 0x101 采样并丢弃：清状态位、输入字归零、两个标量 
   assert.deepEqual(m.effects.map((e) => e.kind), ['input.poll']);
 });
 
-test('★ 0x20f 播影片：建对象、置影片位与"有活动对象"、发出播放请求（不等待）', () => {
+test('★ 0x20f 播影片：建对象、置影片位与"有活动对象"、发出播放请求（不等待）', async () => {
   const m = machineFor([[0x20f, [[0, 21063], [0, 42], [0, 131076]]]]);
   m.scene.textureObjects.set(42, { kind: 'normal', width: 1280, height: 720 });
-  const r = m.run({ maxSteps: 1 });
+  const r = await m.run({ maxSteps: 1 });
   assert.equal(r.steps, 1);
   const obj = m.scene.objectSlots.get(42);
   assert.equal(obj.kind, 'movie');
@@ -225,16 +225,16 @@ test('★ 0x20f 播影片：建对象、置影片位与"有活动对象"、发�
   assert.deepEqual(m.effects.map((e) => e.kind), ['audio.movie.play']);
 });
 
-test('★ 0x20f 的绑定门：槽上没有纹理绑定 ⇒ 响亮失败（引擎抛"显示消息"）', () => {
+test('★ 0x20f 的绑定门：槽上没有纹理绑定 ⇒ 响亮失败（引擎抛"显示消息"）', async () => {
   const m = machineFor([[0x20f, [[0, 21063], [0, 42], [0, 131076]]]]);
-  assert.throws(() => m.run({ maxSteps: 1 }), /movie-binding-missing:42/);
+  await assert.rejects(m.run({ maxSteps: 1 }), /movie-binding-missing:42/);
 });
 
-test('★ 0x20f 同槽已有对象 ⇒ 不重建（只改配置与启动）', () => {
+test('★ 0x20f 同槽已有对象 ⇒ 不重建（只改配置与启动）', async () => {
   const m = machineFor([[0x20f, [[0, 21063], [0, 42], [0, 1]]]]);
   m.scene.textureObjects.set(42, { kind: 'normal', width: 1, height: 1 });
   m.scene.objectSlots.set(42, { kind: 'movie', slot: 42, resourceId: 1, opt: 0, started: false });
-  m.run({ maxSteps: 1 });
+  await m.run({ maxSteps: 1 });
   const obj = m.scene.objectSlots.get(42);
   assert.equal(obj.resourceId, 21063);
   assert.equal(obj.started, true);

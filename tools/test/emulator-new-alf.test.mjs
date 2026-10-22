@@ -2,7 +2,7 @@
 /**
  * tools/test/emulator-new-alf.test.mjs —— ALF 驱动（FMT-ALF）的 pure 守卫
  *
- * 用**合成字节**验证 [lzss.ts] / [alf.ts] / [host.ts]：
+ * 用**合成字节**验证 [core/lzss.ts] / [core/alf.ts] / [core/install.ts]：
  * 1. LZSS：字面量与"匹配"两种单位；匹配的位置是环形窗口的**绝对写位置**；
  * 2. ALF 索引：S4 头 → 段（12 字节头 + 压缩数据）→ TOC（归档表 + 文件表）；
  * 3. 取件：统一文件 id == TOC 条目下标；**松散文件优先**，否则按 (archive, offset, length) 切片。
@@ -14,10 +14,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { decompressLzss } from '../../apps/emulator-new/src/lzss.ts';
-import { parseAlfIndex } from '../../apps/emulator-new/src/alf.ts';
-import { Install } from '../../apps/emulator-new/src/host.ts';
+import { decompressLzss } from '../../apps/emulator-new/src/core/lzss.ts';
+import { parseAlfIndex } from '../../apps/emulator-new/src/core/alf.ts';
+import { Install } from '../../apps/emulator-new/src/core/install.ts';
+import { nodeHost } from '../../apps/emulator-new/src/platform/node/host.ts';
 import { REPO_ROOT } from '../lib/paths.mjs';
+
+/** 核心层输出的是纯 `Uint8Array`（不是 `Buffer`）⇒ 断言前显式转成字节串 */
+const latin1 = (bytes) => Buffer.from(bytes).toString('latin1');
 
 const TEMP = path.join(REPO_ROOT, '.tmp', 'emulator-new-alf-test');
 
@@ -61,18 +65,18 @@ function buildIndex() {
 /** 构造 DATA1.ALF 的载荷：前 6 字节给 SYSTEM4.BIN，后 2 字节给 OTHER.BIN */
 const ARCHIVE_PAYLOAD = Buffer.from('AAAAAABB', 'latin1');
 
-test('★ LZSS：字面量 + 匹配（位置是环形窗口的绝对写位置）', () => {
+test('★ LZSS：字面量 + 匹配（位置是环形窗口的绝对写位置）', async () => {
   // 3 个字面量 A B C，然后一个匹配（pos = 0x0FEE, len = 3）⇒ 再吐 A B C
   const packed = Buffer.from([0x07, 0x41, 0x42, 0x43, 0xee, 0xf0]);
   const out = decompressLzss(packed, 6);
-  assert.equal(out.toString('latin1'), 'ABCABC');
+  assert.equal(latin1(out), 'ABCABC');
 });
 
-test('★ LZSS：截断的压缩流要响亮失败（不许静默返回短缓冲）', () => {
+test('★ LZSS：截断的压缩流要响亮失败（不许静默返回短缓冲）', async () => {
   assert.throws(() => decompressLzss(Buffer.from([0x01]), 8), /lzss-truncated/);
 });
 
-test('★ ALF 索引：S4IC → 段 → TOC（归档名 + 文件表）', () => {
+test('★ ALF 索引：S4IC → 段 → TOC（归档名 + 文件表）', async () => {
   const index = parseAlfIndex(buildIndex());
   assert.equal(index.signature, 'S4IC');
   assert.equal(index.sectionPos, 300);
@@ -82,7 +86,7 @@ test('★ ALF 索引：S4IC → 段 → TOC（归档名 + 文件表）', () => {
   assert.deepEqual(index.files[1], { name: 'OTHER.BIN', archiveIndex: 0, fileIndex: 0, offset: 6, length: 2 });
 });
 
-test('★ ALF 索引：非 S4 签名 / 段长不一致 / 越界都要响亮失败', () => {
+test('★ ALF 索引：非 S4 签名 / 段长不一致 / 越界都要响亮失败', async () => {
   const bad = buildIndex();
   bad.write('S5IC', 0, 'latin1');
   assert.throws(() => parseAlfIndex(bad), /alf-unsupported-signature/);
@@ -95,35 +99,35 @@ test('★ ALF 索引：非 S4 签名 / 段长不一致 / 越界都要响亮失�
   assert.throws(() => parseAlfIndex(short), /alf-(section|packed)-past-eof/);
 });
 
-test('★ 取件：id == 条目下标；**松散文件优先**；没有松散文件才从归档切片', () => {
+test('★ 取件：id == 条目下标；**松散文件优先**；没有松散文件才从归档切片', async () => {
   fs.rmSync(TEMP, { recursive: true, force: true });
   fs.mkdirSync(TEMP, { recursive: true });
   fs.writeFileSync(path.join(TEMP, 'SYS4INI.BIN'), buildIndex());
   fs.writeFileSync(path.join(TEMP, 'DATA1.ALF'), ARCHIVE_PAYLOAD);
   fs.writeFileSync(path.join(TEMP, 'SYSTEM4.BIN'), 'LOOSE4');
 
-  const install = Install.open(TEMP);
+  const install = await Install.open(nodeHost, TEMP);
   assert.equal(install.entryCount, 2);
   assert.equal(install.entry(0).name, 'SYSTEM4.BIN');
 
-  const loose = install.readById(0);
+  const loose = await install.readById(0);
   assert.equal(loose.side, 'loose');
   assert.equal(loose.name, 'SYSTEM4.BIN');
-  assert.equal(loose.bytes.toString('latin1'), 'LOOSE4');
+  assert.equal(latin1(loose.bytes), 'LOOSE4');
   assert.equal(loose.entryLength, 6, 'TOC 登记的长度仍然报出来（与实际字节数不同）');
 
-  const archived = install.readById(1);
+  const archived = await install.readById(1);
   assert.equal(archived.side, 'archive');
-  assert.equal(archived.bytes.toString('latin1'), 'BB');
+  assert.equal(latin1(archived.bytes), 'BB');
   assert.equal(archived.archive, 'DATA1.ALF');
 
-  const onlyArchive = install.readArchiveById(0);
-  assert.equal(onlyArchive.bytes.toString('latin1'), 'AAAAAA');
+  const onlyArchive = await install.readArchiveById(0);
+  assert.equal(latin1(onlyArchive.bytes), 'AAAAAA');
 
-  assert.equal(install.locate('SYSTEM4.BIN'), 'loose');
-  assert.equal(install.locate('OTHER.BIN'), 'archive');
-  assert.equal(install.locate('NOPE.BIN'), 'missing');
+  assert.equal(await install.locate('SYSTEM4.BIN'), 'loose');
+  assert.equal(await install.locate('OTHER.BIN'), 'archive');
+  assert.equal(await install.locate('NOPE.BIN'), 'missing');
 
-  assert.throws(() => install.readById(9), /script-id-out-of-range/);
+  await assert.rejects(install.readById(9), /script-id-out-of-range/);
   fs.rmSync(TEMP, { recursive: true, force: true });
 });

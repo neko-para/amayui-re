@@ -2,8 +2,11 @@
  * opcode → 实现。★ 每条都对应 `data/spec/chapters/60-ops-*.md` 里的一条规则。
  * ★ 未实现的 opcode **不在表里**（不是 no-op）：`Machine.run` 会在它前面报缺口。
  * ★ 本文件不碰文件系统；外部请求只进 `m.effects`（规范不规定外部效果）。
+ * ★ 取件类（`0x3` / `0x6` / `0x9`）是 `async`：核心的 IO 全部经注入的 `Machine.loadScript`
+ *   回调 + `await`，所以同一份处理器在 Node / 浏览器里都能跑。
  */
-import type { DrawItem, ListRecord, Machine, Mesh, MovieObject, Operand, VoiceGroup } from './machine.ts';
+import { readU32LE } from './bytes.ts';
+import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, VoiceGroup } from './machine.ts';
 import { FRAME_SLOT_COUNT, MOVIE_BIT, WAIT_BIT } from './machine.ts';
 import { encodeInt, readAddress, readFloat, readInt, readIntAt, readText, writeBitsAt, writeFloat, writeInt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
@@ -616,10 +619,10 @@ function jumpA0(m: Machine, ops: Operand[]): void {
  * 并切过去，从子脚本 dword 0 开始；子帧的局部池**新分配**（不继承父池）。
  * ★ 深度按**槽号**判（`cur + 1 >= 40` 才超限）；装载失败 ⇒ 整个执行中止（本层响亮失败）。
  */
-function callScript3(m: Machine, ops: Operand[]): void {
+async function callScript3(m: Machine, ops: Operand[]): Promise<void> {
   const id = readInt(m, ops, 1);
   if (!m.loadScript) throw new Error('call-script-loader-missing');
-  const child = m.loadScript(id);
+  const child = await m.loadScript(id);
   if (!child) throw new Error('call-script-load-failed:' + id);
   m.enterScript(child, id);
 }
@@ -639,7 +642,7 @@ function exit2(m: Machine): void {
  * ★ 帧深上限按**帧号**判（≥ 40 ⇒ 报错，文本照抄引擎那句日文）。
  * ★ 装载失败 ⇒ 当前帧号已恢复，整个执行中止（本层响亮失败）。
  */
-function loadFrame6(m: Machine, ops: Operand[]): void {
+async function loadFrame6(m: Machine, ops: Operand[]): Promise<void> {
   const id = readInt(m, ops, 1);
   const slot = readInt(m, ops, 2);
   if (!m.loadScript) throw new Error('load-frame-loader-missing');
@@ -649,7 +652,7 @@ function loadFrame6(m: Machine, ops: Operand[]): void {
   if (slot >= FRAME_SLOT_COUNT) {
     throw new Error(`load-frame：目标帧深 ${slot} ≥ ${FRAME_SLOT_COUNT} —— 引擎抛「ファイルの階層が深すぎます．最大は%dです．」`);
   }
-  const body = m.loadScript(id);
+  const body = await m.loadScript(id);
   if (!body) throw new Error('load-frame-load-failed:' + id);
   m.loadFrameAt(slot, body, id);
 }
@@ -667,9 +670,9 @@ function callFrame8(m: Machine, ops: Operand[]): void {
  * 0x9 全局重置并重装根脚本（CORE-FRAME-EXIT-SCRIPT）：丢全部帧、以统一文件 id 0 重装进 0 号帧。
  * ★ 它**不是返回**：调用者永远不会拿回控制权（本层用"重置后从根脚本 dword 0 继续"表达）。
  */
-function exitScript9(m: Machine): void {
+async function exitScript9(m: Machine): Promise<void> {
   if (!m.loadScript) throw new Error('call-script-loader-missing');
-  const root = m.loadScript(0);
+  const root = await m.loadScript(0);
   if (!root) throw new Error('call-script-load-failed:0');
   m.slots = [{ body: root, ip: 0, frame: m.freshFrame(), parent: -1, length: 0 }];
   m.cur = 0;
@@ -990,7 +993,7 @@ function copyLocalArray64(m: Machine, ops: Operand[]): void {
   if (off + 4 > m.body.length) {
     throw new Error(`copy-local-array 的块首越出脚本：raw=${raw} ⇒ body 偏移 ${off}（body ${m.body.length} B）`);
   }
-  const count = m.body.readUInt32LE(off) >>> 0;
+  const count = readU32LE(m.body, off) >>> 0;
   if (count === 0) {
     m.effects.push({ kind: 'array.copy', detail: { opcode: '0x64', raw, count: 0, note: '空块 ⇒ 引擎什么都不做' } });
     return;
@@ -1002,7 +1005,7 @@ function copyLocalArray64(m: Machine, ops: Operand[]): void {
     throw new Error(`copy-local-array 的块越出脚本：${count} 格从 body ${off + 4} 起（body ${m.body.length} B）`);
   }
   for (let i = 0; i < count; i += 1) {
-    const src = m.body.readUInt32LE(off + 4 + 4 * i) >>> 0;
+    const src = readU32LE(m.body, off + 4 + 4 * i) >>> 0;
     writeBitsToAddress(m, (dest + 4 * i) >>> 0, encodeInt(src | 0, m.key));
   }
   m.effects.push({ kind: 'array.copy', detail: { opcode: '0x64', dest: `0x${dest.toString(16)}`, raw, count } });
@@ -1334,7 +1337,7 @@ function operandAt(ops: Operand[], k: number): Operand {
   return op;
 }
 
-export const HANDLERS = new Map<number, (m: Machine, ops: Operand[]) => void>([
+export const HANDLERS = new Map<number, Handler>([
   [0x1a7, noop],
   [0x1a8, noop],
   [0x50, add50],

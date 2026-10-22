@@ -3,6 +3,7 @@
  * ★ 纯函数：吃索引文件的字节，产出"归档列表 + 文件表"；不碰文件系统、不读载荷。
  * ★ 只实现 S4 族（S3IC / S4IC / S3AC / S4AC）—— 本作语料只有 S4；S5 缺样本，遇到就响亮失败。
  */
+import { decodeLatin1, indexOfByte, readI32LE, readU32LE } from './bytes.ts';
 import { decompressLzss } from './lzss.ts';
 
 export interface AlfFile {
@@ -31,28 +32,27 @@ const S4 = {
   archiveEntry: 256,
   nameLength: 64,
   fileRecord: 80,
-  encoding: 'latin1' as const,
 };
 
 /** 读定长字段里的 NUL 结尾字符串（字段尾部可能是未初始化字节，⛔ 不许"拼名字+补零"重写） */
-function readField(buf: Buffer, off: number, size: number): string {
-  const end = buf.indexOf(0, off);
+function readField(buf: Uint8Array, off: number, size: number): string {
+  const end = indexOfByte(buf, 0, off);
   const stop = end === -1 || end > off + size ? off + size : end;
-  return buf.toString(S4.encoding, off, stop);
+  return decodeLatin1(buf, off, stop);
 }
 
-export function parseAlfIndex(buf: Buffer): AlfIndex {
+export function parseAlfIndex(buf: Uint8Array): AlfIndex {
   if (buf.length < 4) throw new Error('alf-too-small');
-  const signature = buf.toString('latin1', 0, 4);
+  const signature = decodeLatin1(buf, 0, 4);
   if (!/^S[34](IC|AC)$/.test(signature)) {
     throw new Error(`alf-unsupported-signature:${signature}（本实现只覆盖 S4 族；S5 缺样本）`);
   }
   const appended = signature.endsWith('AC');
   const sectionPos = appended ? S4.appendSection : S4.section;
   if (sectionPos + 12 > buf.length) throw new Error(`alf-section-past-eof:${sectionPos}`);
-  const originalLength = buf.readUInt32LE(sectionPos);
-  const originalLength2 = buf.readUInt32LE(sectionPos + 4);
-  const packedLength = buf.readUInt32LE(sectionPos + 8);
+  const originalLength = readU32LE(buf, sectionPos);
+  const originalLength2 = readU32LE(buf, sectionPos + 4);
+  const packedLength = readU32LE(buf, sectionPos + 8);
   if (originalLength !== originalLength2) {
     throw new Error(`alf-section-length-mismatch:${originalLength}/${originalLength2}`);
   }
@@ -69,22 +69,22 @@ export function parseAlfIndex(buf: Buffer): AlfIndex {
     at += n;
     return v;
   };
-  const archiveCount = toc.readUInt32LE(take(4));
+  const archiveCount = readU32LE(toc, take(4));
   const archives: string[] = [];
   for (let i = 0; i < archiveCount; i += 1) {
     const off = take(S4.archiveEntry);
     archives.push(readField(toc, off, S4.archiveEntry));
   }
-  const fileCount = toc.readUInt32LE(take(4));
+  const fileCount = readU32LE(toc, take(4));
   const files: AlfFile[] = [];
   for (let i = 0; i < fileCount; i += 1) {
     const off = take(S4.fileRecord);
     files.push({
       name: readField(toc, off, S4.nameLength),
-      archiveIndex: toc.readUInt32LE(off + S4.nameLength),
-      fileIndex: toc.readUInt32LE(off + S4.nameLength + 4),
-      offset: toc.readUInt32LE(off + S4.nameLength + 8),
-      length: toc.readUInt32LE(off + S4.nameLength + 12),
+      archiveIndex: readU32LE(toc, off + S4.nameLength),
+      fileIndex: readU32LE(toc, off + S4.nameLength + 4),
+      offset: readU32LE(toc, off + S4.nameLength + 8),
+      length: readU32LE(toc, off + S4.nameLength + 12),
     });
   }
 
@@ -101,15 +101,15 @@ export function parseAlfIndex(buf: Buffer): AlfIndex {
       at += n;
       return off;
     };
-    const readI32 = (): number => toc.readInt32LE(tailTake(4));
+    const readI32 = (): number => readI32LE(toc, tailTake(4));
     const skipCounted = (): void => {
       const n = readI32();
       if (n > 0) tailTake(n * 4);
     };
     const readCString = (what: string): string => {
-      const end = toc.indexOf(0, at);
+      const end = indexOfByte(toc, 0, at);
       if (end < 0) throw new Error(`alf-tail-truncated:${what}@${at}`);
-      const s = toc.toString(S4.encoding, at, end);
+      const s = decodeLatin1(toc, at, end);
       at = end + 1;
       return s;
     };

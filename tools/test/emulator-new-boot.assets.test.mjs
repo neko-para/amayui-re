@@ -22,9 +22,11 @@ import path from 'node:path';
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { loadManifest } from '../lib/manifest.mjs';
 import { rootFromManifest } from '../lib/patch.mjs';
-import { Install } from '../../apps/emulator-new/src/host.ts';
-import { analyzeInstall } from '../../apps/emulator-new/src/main.ts';
-import { BOOT_STAGES } from '../../apps/emulator-new/src/boot.ts';
+import { Install } from '../../apps/emulator-new/src/core/install.ts';
+import { analyzeInstall } from '../../apps/emulator-new/src/core/runner.ts';
+import { BOOT_STAGES } from '../../apps/emulator-new/src/core/boot.ts';
+import { nodeHost } from '../../apps/emulator-new/src/platform/node/host.ts';
+import { loadConfigKeys, loadOpcodeTable } from '../../apps/emulator-new/src/platform/node/spec.ts';
 
 const KEY = 0x1234abcd;
 
@@ -39,8 +41,11 @@ const skip = installDir && fs.existsSync(path.join(installDir, 'SYS4INI.BIN'))
   ? false
   : '游戏安装不在场（corpus/assets.json 的 roots.gameInstall 下没有 SYS4INI.BIN）';
 
-test('★ 索引：SYS4INI.BIN → 8 个归档 / 21109 条目；id 0 = SYSTEM4.BIN，id 0x5262 = LOGO.BIN', { skip }, () => {
-  const install = Install.open(installDir);
+/** 核心要的纯数据：平台接口 + 规范表（核心自己不读 data/spec） */
+const env = { host: nodeHost, table: await loadOpcodeTable(), configKeys: await loadConfigKeys() };
+
+test('★ 索引：SYS4INI.BIN → 8 个归档 / 21109 条目；id 0 = SYSTEM4.BIN，id 0x5262 = LOGO.BIN', { skip }, async () => {
+  const install = await Install.open(nodeHost, installDir);
   assert.equal(install.index.signature, 'S4IC');
   assert.equal(install.index.archives.length, 8);
   assert.deepEqual(install.index.archives.slice(0, 2), ['DATA1.ALF', 'DATA2.ALF']);
@@ -55,22 +60,22 @@ test('★ 索引：SYS4INI.BIN → 8 个归档 / 21109 条目；id 0 = SYSTEM4.B
   assert.equal(install.entry(0x51dc).name, 'INITCONFIG.BIN');
 });
 
-test('★ 取件：根脚本松散优先（12012）覆盖归档条目（11992）；LOGO.BIN 从归档切片', { skip }, () => {
-  const install = Install.open(installDir);
+test('★ 取件：根脚本松散优先（12012）覆盖归档条目（11992）；LOGO.BIN 从归档切片', { skip }, async () => {
+  const install = await Install.open(nodeHost, installDir);
 
-  const loose = install.readById(0);
+  const loose = await install.readById(0);
   assert.equal(loose.side, 'loose', '这台安装的根脚本必须命中松散文件（否则启动链量的是另一份没人跑的文件）');
   assert.equal(loose.entryLength, 11992, 'TOC 登记的长度');
   assert.equal(loose.bytes.length, 12012, '松散文件的真实字节数');
 
-  const archived = install.readArchiveById(0);
+  const archived = await install.readArchiveById(0);
   assert.equal(archived.side, 'archive');
   assert.equal(archived.bytes.length, 11992);
-  assert.equal(archived.bytes.toString('latin1', 0, 4), 'SYS4');
-  assert.notEqual(archived.bytes.toString('base64'), loose.bytes.subarray(0, archived.bytes.length).toString('base64'),
+  assert.equal(Buffer.from(archived.bytes).toString('latin1', 0, 4), 'SYS4');
+  assert.notEqual(Buffer.from(archived.bytes).toString('base64'), Buffer.from(loose.bytes.subarray(0, archived.bytes.length)).toString('base64'),
     '松散文件与归档条目必须是两份不同的内容（否则"松散优先"无从验证）');
 
-  const logo = install.readById(0x5262);
+  const logo = await install.readById(0x5262);
   assert.equal(logo.side, 'archive');
   assert.equal(logo.name, 'LOGO.BIN');
   assert.equal(logo.entryLength, 1508);
@@ -78,8 +83,8 @@ test('★ 取件：根脚本松散优先（12012）覆盖归档条目（11992）
     'f17364da0ffbca38aedee4a3b46db15945a7cf864e3b7773a422d24fa6b9ba9b');
 });
 
-test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，**到达 LOGO.BIN 入口**后停在影片门', { skip }, () => {
-  const result = analyzeInstall(installDir, 0, { key: KEY }, { config: path.join(REPO_ROOT, '.tmp', 'boot-config-missing.ini') });
+test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，**到达 LOGO.BIN 入口**后停在影片门', { skip }, async () => {
+  const result = await analyzeInstall(env, installDir, 0, { key: KEY }, { config: path.join(REPO_ROOT, '.tmp', 'boot-config-missing.ini') });
   assert.equal(result.source.kind, 'install');
   assert.equal(result.source.id, 0);
   assert.equal(result.source.name, 'SYSTEM4.BIN');
@@ -100,8 +105,8 @@ test('★ 启动棘轮：以 id 0（SYSTEM4.BIN）为根执行，**到达 LOGO.B
   assert.equal((result.entered ?? []).at(-1), 0x5262, '最后进入的脚本就是 LOGO.BIN');
 });
 
-test('★ 同一入口按 id 取 LOGO.BIN：50 条指令（id 映射不是巧合）', { skip }, () => {
-  const result = analyzeInstall(installDir, 0x5262, { decodeOnly: true });
+test('★ 同一入口按 id 取 LOGO.BIN：50 条指令（id 映射不是巧合）', { skip }, async () => {
+  const result = await analyzeInstall(env, installDir, 0x5262, { decodeOnly: true });
   assert.equal(result.source.id, 0x5262);
   assert.equal(result.source.name, 'LOGO.BIN');
   assert.equal(result.source.entryLength, 1508);

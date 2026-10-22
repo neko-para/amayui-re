@@ -16,10 +16,11 @@ import path from 'node:path';
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { loadManifest } from '../lib/manifest.mjs';
 import { rootFromManifest } from '../lib/patch.mjs';
-import { Install, readConfigFile, writeConfigFile } from '../../apps/emulator-new/src/host.ts';
-import { ConfigStore, parseIni } from '../../apps/emulator-new/src/config.ts';
-import { loadConfigKeys } from '../../apps/emulator-new/src/spec.ts';
-import { analyzeInstall } from '../../apps/emulator-new/src/main.ts';
+import { Install, readConfigFile, writeConfigFile } from '../../apps/emulator-new/src/core/install.ts';
+import { ConfigStore, parseIni } from '../../apps/emulator-new/src/core/config.ts';
+import { loadConfigKeys, loadOpcodeTable } from '../../apps/emulator-new/src/platform/node/spec.ts';
+import { nodeHost } from '../../apps/emulator-new/src/platform/node/host.ts';
+import { analyzeInstall } from '../../apps/emulator-new/src/core/runner.ts';
 
 const manifest = loadManifest();
 let installDir = null;
@@ -34,15 +35,19 @@ const skip = installDir && fs.existsSync(path.join(installDir, 'SYS4INI.BIN'))
 
 const TEMP = path.join(REPO_ROOT, '.tmp', 'emulator-new-config-assets');
 
+/** 规范表只读一次（核心要的是纯数据）；`env` 是核心的装配输入 */
+const KEYS = await loadConfigKeys();
+const env = { host: nodeHost, table: await loadOpcodeTable(), configKeys: KEYS };
+
 test('★ 真实索引：51 条发行默认（SCREENX/SCREENY/FONT/SAVEVERSION）', { skip }, async () => {
-  const install = Install.open(installDir);
+  const install = await Install.open(nodeHost, installDir);
   assert.equal(install.index.configDefaults.length, 51, 'SYS4INI.BIN 尾部应有 51 对默认值');
   const keys = install.index.configDefaults.map((x) => x.key);
   for (const k of ['SCREENX', 'SCREENY', 'FONT', 'SAVEVERSION', 'SAVEPATH', 'REGFILEPATH']) {
     assert.ok(keys.includes(k), `发行默认缺 ${k}`);
   }
 
-  const s = new ConfigStore(loadConfigKeys());
+  const s = new ConfigStore(KEYS);
   s.applyDefaults(install.index.configDefaults);
   assert.equal(s.getInt('set:WinX'), 1280);
   assert.equal(s.getInt('set:WinY'), 720);
@@ -56,50 +61,50 @@ test('★ 真实索引：51 条发行默认（SCREENX/SCREENY/FONT/SAVEVERSION�
   if (aai) {
     const buf = fs.readFileSync(path.join(installDir, aai));
     // 直接复用纯解析器：AAI 的 AC 段起点不同，但尾部为空
-    const { parseAlfIndex } = await import('../../apps/emulator-new/src/alf.ts');
+    const { parseAlfIndex } = await import('../../apps/emulator-new/src/core/alf.ts');
     assert.deepEqual(parseAlfIndex(buf).configDefaults, []);
   }
 });
 
-test('★ 玩家文件缺失 ⇒ 默认；--init-config 写出的文件可重放', { skip }, () => {
+test('★ 玩家文件缺失 ⇒ 默认；--init-config 写出的文件可重放', { skip }, async () => {
   fs.rmSync(TEMP, { recursive: true, force: true });
   fs.mkdirSync(TEMP, { recursive: true });
   const file = path.join(TEMP, 'SYS4REG.INI');
-  assert.equal(readConfigFile(file), null, '文件不存在是正常状态');
+  assert.equal(await readConfigFile(nodeHost, file), null, '文件不存在是正常状态');
 
-  const install = Install.open(installDir);
-  const s = new ConfigStore(loadConfigKeys());
+  const install = await Install.open(nodeHost, installDir);
+  const s = new ConfigStore(KEYS);
   s.applyDefaults(install.index.configDefaults);
   assert.equal(s.getInt('display:ScreenMode'), 0);
 
-  const before = analyzeInstall(installDir, 0, { decodeOnly: true }, { config: file });
+  const before = await analyzeInstall(env, installDir, 0, { decodeOnly: true }, { config: file });
   assert.equal(before.config.source, 'defaults');
 
   // CLI 的 --init-config 路径：显式路径 + 写默认文件
   const initFile = path.join(TEMP, 'INIT.INI');
-  const init = analyzeInstall(installDir, 0, { decodeOnly: true }, { config: initFile, initConfig: true });
+  const init = await analyzeInstall(env, installDir, 0, { decodeOnly: true }, { config: initFile, initConfig: true });
   assert.equal(init.config.path, initFile);
   assert.ok(fs.existsSync(initFile), '--init-config 必须落盘');
   assert.ok(fs.readFileSync(initFile, 'latin1').startsWith('[display]\r\n'));
 
-  writeConfigFile(file, s.serializeIni());
+  await writeConfigFile(nodeHost, file, s.serializeIni());
   const text = fs.readFileSync(file, 'latin1');
   assert.ok(text.startsWith('[display]\r\n'), '默认文件以 display 段开头、CRLF');
-  const again = new ConfigStore(loadConfigKeys());
+  const again = new ConfigStore(KEYS);
   again.applyDefaults(install.index.configDefaults);
   again.applyIni(parseIni(fs.readFileSync(file)));
   assert.equal(again.getInt('set:WinX'), 1280);
   assert.equal(again.getInt('display:ScreenMode'), 0);
 
-  const after = analyzeInstall(installDir, 0, { decodeOnly: true }, { config: file });
+  const after = await analyzeInstall(env, installDir, 0, { decodeOnly: true }, { config: file });
   assert.equal(after.config.source, 'file');
   assert.ok(after.config.ints >= s.stats().ints, '玩家文件写入后条目只会变多');
 });
 
-test('★ 启动阶段：display-config 已部分建模', { skip }, () => {
+test('★ 启动阶段：display-config 已部分建模', { skip }, async () => {
   // 显式给一个不存在的玩家文件：不依赖安装根里是否恰好有一份 SYS4REG.INI
   const missing = path.join(TEMP, 'ABSENT.INI');
-  const r = analyzeInstall(installDir, 0, { decodeOnly: true }, { config: missing });
+  const r = await analyzeInstall(env, installDir, 0, { decodeOnly: true }, { config: missing });
   assert.ok(r.config, 'install 报告必须带配置摘要');
   assert.equal(r.config.source, 'defaults');
   assert.equal(r.config.path, missing);

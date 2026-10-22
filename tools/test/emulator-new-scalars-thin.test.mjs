@@ -14,11 +14,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { loadOpcodeTable } from '../../apps/emulator-new/src/spec.ts';
-import { Machine } from '../../apps/emulator-new/src/machine.ts';
+import { loadOpcodeTable } from '../../apps/emulator-new/src/platform/node/spec.ts';
+import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
 import { REPO_ROOT } from '../lib/paths.mjs';
 
-const table = loadOpcodeTable();
+const table = await loadOpcodeTable();
 const KEY = 0x1234abcd;
 
 /** 把 [opcode, [[type, raw], ...]] 拼成一段 body（不含头） */
@@ -37,26 +37,26 @@ function machineFor(instrs) {
   return new Machine({ body: script(instrs), table, key: KEY });
 }
 
-test('★ 0x149 / 0x21b / 0x252：各写自己的那个格（0x21b 归一到 0/1）', () => {
+test('★ 0x149 / 0x21b / 0x252：各写自己的那个格（0x21b 归一到 0/1）', async () => {
   const m = machineFor([
     [0x149, [[0, 1000]]],
     [0x252, [[0, 3]]],
   ]);
-  m.run();
+  await m.run();
   assert.equal(m.scalars.get('Engine.d97058'), 1000, '0x149 原样写');
   assert.equal(m.scalars.get('Engine.d92323'), 3, '0x252 原样写');
 
   for (const [input, want] of [[5, 1], [0, 0], [-3, 1], [0x7fffffff, 1]]) {
     const b = machineFor([[0x21b, [[0, input]]]]);
-    b.run();
+    await b.run();
     assert.equal(b.scalars.get('Engine.d166965'), want, `0x21b 输入 ${input} ⇒ ${want}`);
   }
 });
 
-test('★ 三条的槽名必须是知识层里的稳定身份（写错槽名在这条会红）', () => {
+test('★ 三条的槽名必须是知识层里的稳定身份（写错槽名在这条会红）', async () => {
   const layout = fs.readFileSync(path.join(REPO_ROOT, 'packages/age-format/src/engine/layout.mts'), 'utf8');
   const m = machineFor([[0x149, [[0, 1]]], [0x21b, [[0, 1]]], [0x252, [[0, 1]]]]);
-  m.run();
+  await m.run();
   for (const name of m.scalars.keys()) {
     assert.match(name, /^Engine\.d\d+$/, `槽名形态不对：${name}`);
     assert.ok(layout.includes(`'${name}'`), `知识层没有这个稳定身份：${name}`);
@@ -64,7 +64,7 @@ test('★ 三条的槽名必须是知识层里的稳定身份（写错槽名在�
   assert.deepEqual([...m.scalars.keys()].sort(), ['Engine.d166965', 'Engine.d92323', 'Engine.d97058']);
 });
 
-test('★ 0x88 非 0 支：两个格都写 op1，第三格写常量 1，状态字不动', () => {
+test('★ 0x88 非 0 支：两个格都写 op1，第三格写常量 1，状态字不动', async () => {
   // 门非 0 时 run 不执行指令 ⇒ 直接调 handler；先把第 27 位置起，验证"非 0 支不许碰它"
   const m = machineFor([]);
   m.flags = 0x08000000;
@@ -76,12 +76,12 @@ test('★ 0x88 非 0 支：两个格都写 op1，第三格写常量 1，状态�
   assert.equal(m.flags, 0x08000000, '非 0 支不许碰状态选择字');
 });
 
-test('★ 0x88 为 0 支：两个格写 0，只清状态字第 27 位，不写第三格', () => {
+test('★ 0x88 为 0 支：两个格写 0，只清状态字第 27 位，不写第三格', async () => {
   // ① 门关着时这条指令**根本不执行**（run 在 flags≠0 时只服务状态位）⇒ 这本身是证据。
   //    ★ 门位不服务时 run 现在**返回 Stop**（`kind:'gate'`）而不是抛：那是"这里没建模"，不是执行出错。
   const gated = machineFor([[0x88, [[0, 0]]]]);
   gated.flags = 0x08000000 | 0x00000200;
-  const stop = gated.run().stop;
+  const stop = (await gated.run()).stop;
   assert.equal(stop.kind, 'gate', '门非 0 时不许执行指令');
   assert.equal(stop.kind === 'gate' ? stop.bit : 0, 0x08000000 | 0x00000200, '报告里带上未服务的门位');
 

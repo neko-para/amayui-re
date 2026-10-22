@@ -1,14 +1,18 @@
 {
-  // apps/emulator-new/tsconfig.json —— **只做类型检查，不产出**（`noEmit`）
+  // apps/emulator-new/tsconfig.json —— **整个 app（核心 + 平台）**的类型工程，只做类型检查（`noEmit`）
   //
-  // ★ 为什么 `types: ["node"]`（与 `apps/emulator` 核心相反）：本 app 是**工具侧**的参考实现 ——
-  //   它要从命令行读脚本（`node:fs`）、用 `Buffer` 装 body。核心的分层守卫（`types: []`）属于
-  //   `apps/emulator`；这里的目标是"实现与 `data/spec` 的类型自洽"。
+  // ★ 为什么 `types: ["node"]`：本工程覆盖**平台层**（`src/platform/node/**`）与 CLI（`src/main.ts`）——
+  //   它们的职责就是"把 `node:fs` / `process` 接上核心定义的 `Host` 接口"。
+  //   核心自身的守卫在 `tsconfig.core.json`（`types: []`），两个工程缺一不可：
+  //   只有这份 ⇒ 核心可以偷偷用 `Buffer`；只有那份 ⇒ 平台层写不了 `node:fs`。
+  //   （与 `apps/emulator` 的"核心 / 前端"两工程是同一个形状、同一个理由。）
+  // ★ `lib` 里的 `WebWorker`：核心的可达闭包也在这份工程里，它用的 WHATWG 类型（`TextDecoder`…）
+  //   只存在于宿主库（`DOM` 会放行 `document` / `window`，方向错了）。
   // ★ `erasableSyntaxOnly`：代码由 Node 原生剥壳直接跑，`enum` / `namespace` / 参数属性 / 装饰器会运行期炸。
   // ★ 仍然**没有构建步骤**：`tsc` 只把"类型写错"变成红灯。
   "compilerOptions": {
     "target": "ES2023",
-    "lib": ["ES2023"],
+    "lib": ["ES2023", "WebWorker"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
 

@@ -17,9 +17,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Machine } from '../../apps/emulator-new/src/machine.ts';
-import { HANDLERS } from '../../apps/emulator-new/src/handlers.ts';
-import { encodeInt, readInt } from '../../apps/emulator-new/src/values.ts';
+import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
+import { encodeInt, readInt } from '../../apps/emulator-new/src/core/values.ts';
 
 const KEY = 0x1234abcd;
 const op = (type, raw) => ({ type, raw });
@@ -30,7 +30,7 @@ function machine(opts = {}) {
 
 const call = (m, opcode, ops) => HANDLERS.get(opcode)(m, ops);
 
-test('★★ `0x2de` 字体名查表：0 基下标 / 未命中 −1 / `@` 前缀跳过 / **长度不等不算命中**', () => {
+test('★★ `0x2de` 字体名查表：0 基下标 / 未命中 −1 / `@` 前缀跳过 / **长度不等不算命中**', async () => {
   const m = machine({ fontNames: ['MS Gothic', 'メイリオ'] });
   call(m, 0x2de, [op(9, 0), op(5, 3003)]); // 空串 ⇒ 未命中
   assert.equal(readInt(m, [op(9, 0)], 1), -1, '空串在表里 ⇒ −1');
@@ -48,14 +48,14 @@ test('★★ `0x2de` 字体名查表：0 基下标 / 未命中 −1 / `@` 前缀
   assert.equal(readInt(m, [op(9, 0)], 1), -1, '★★ 长度不等 ⇒ 不命中（前缀匹配会得到 0）');
 });
 
-test('★ `0x2de`：宿主表为空 ⇒ 一律未命中（就是引擎的回退分支，不是"抛"）', () => {
+test('★ `0x2de`：宿主表为空 ⇒ 一律未命中（就是引擎的回退分支，不是"抛"）', async () => {
   const m = machine({ fontNames: [] });
   m.globalString.set(1, 'whatever');
   call(m, 0x2de, [op(9, 0), op(5, 1)]);
   assert.equal(readInt(m, [op(9, 0)], 1), -1);
 });
 
-test('★ `0x56 and` / `0x5f gre`：按 u32 位与 / **有符号** >=，结果 0/1', () => {
+test('★ `0x56 and` / `0x5f gre`：按 u32 位与 / **有符号** >=，结果 0/1', async () => {
   const m = machine();
   call(m, 0x56, [op(9, 0), op(0, 0b1100), op(0, 0b1010)]);
   assert.equal(readInt(m, [op(9, 0)], 1), 0b1000);
@@ -65,7 +65,7 @@ test('★ `0x56 and` / `0x5f gre`：按 u32 位与 / **有符号** >=，结果 0
   assert.equal(readInt(m, [op(9, 1)], 1), 1, '相等 ⇒ 1（`gre` 不是 `gr`）');
 });
 
-test('★ `0x76`/`0x77`：写的是 `bswap24(op1)`（不是原值），落点各自一格', () => {
+test('★ `0x76`/`0x77`：写的是 `bswap24(op1)`（不是原值），落点各自一格', async () => {
   const m = machine();
   call(m, 0x76, [op(0, 0x123456)]);
   assert.equal(m.scalars.get('Engine.d21664'), 0x563412);
@@ -73,21 +73,21 @@ test('★ `0x76`/`0x77`：写的是 `bswap24(op1)`（不是原值），落点各
   assert.equal(m.scalars.get('Engine.d21665'), 0xefcdab);
 });
 
-test('★ `0x1a4` 成对写：op1 → d21670、op2 → d21671（⛔ 不换位）', () => {
+test('★ `0x1a4` 成对写：op1 → d21670、op2 → d21671（⛔ 不换位）', async () => {
   const m = machine();
   call(m, 0x1a4, [op(0, 7), op(0, 9)]);
   assert.equal(m.scalars.get('Engine.d21670'), 7);
   assert.equal(m.scalars.get('Engine.d21671'), 9);
 });
 
-test('★ `0xfe`：值 > 0x1f ⇒ 抛（引擎自己的范围检查）；否则写 `Engine.d517`', () => {
+test('★ `0xfe`：值 > 0x1f ⇒ 抛（引擎自己的范围检查）；否则写 `Engine.d517`', async () => {
   const m = machine();
   call(m, 0xfe, [op(0, 0x1f)]);
   assert.equal(m.scalars.get('Engine.d517'), 0x1f);
   assert.throws(() => call(m, 0xfe, [op(0, 0x20)]), /超出引擎的范围检查/);
 });
 
-test('★ `0x107` / `0x10b` / `0x30a`：索引操作数的位置各不相同，越界口径 skip / throw 照抄', () => {
+test('★ `0x107` / `0x10b` / `0x30a`：索引操作数的位置各不相同，越界口径 skip / throw 照抄', async () => {
   const m = machine();
   call(m, 0x107, [op(0, 3), op(0, 11)]); // 0x107：索引 = op1
   assert.equal(m.scalars.get('Engine.d551+3'), 11);
@@ -102,7 +102,7 @@ test('★ `0x107` / `0x10b` / `0x30a`：索引操作数的位置各不相同，�
   assert.throws(() => call(m, 0x30a, [op(0, 0x20), op(0, 1)]), /越界/);
 });
 
-test('★ `0x10c`：值 > 0x1f ⇒ 抛；否则只记录（索引表未取证，⛔ 不猜它是 0）', () => {
+test('★ `0x10c`：值 > 0x1f ⇒ 抛；否则只记录（索引表未取证，⛔ 不猜它是 0）', async () => {
   const m = machine();
   call(m, 0x10c, [op(0, 3), op(0, 2)]);
   assert.equal(m.effects.at(-1)?.kind, 'engine.indirect-write');
@@ -110,7 +110,7 @@ test('★ `0x10c`：值 > 0x1f ⇒ 抛；否则只记录（索引表未取证，
   assert.throws(() => call(m, 0x10c, [op(0, 0x20), op(0, 1)]), /0x1f/);
 });
 
-test('★ `0x135`/`0x136`/`0x13f`：置位 / 清位 / 查位（位号在 op3）', () => {
+test('★ `0x135`/`0x136`/`0x13f`：置位 / 清位 / 查位（位号在 op3）', async () => {
   const m = machine();
   m.frame.localInt.set(0, encodeInt(0, KEY));
   call(m, 0x135, [op(9, 0), op(0, 3)]);
@@ -130,7 +130,7 @@ test('★ `0x135`/`0x136`/`0x13f`：置位 / 清位 / 查位（位号在 op3）'
   assert.equal(readInt(m, [op(9, 4)], 1), 0);
 });
 
-test('★ `0x143` 事件刷新：长度槽清 0、ip += 4（队列空 ⇒ 尾调不改变控制流），并记诊断', () => {
+test('★ `0x143` 事件刷新：长度槽清 0、ip += 4（队列空 ⇒ 尾调不改变控制流），并记诊断', async () => {
   const m = machine();
   m.ip = 100;
   call(m, 0x143, []);
@@ -139,7 +139,7 @@ test('★ `0x143` 事件刷新：长度槽清 0、ip += 4（队列空 ⇒ 尾调
   assert.ok(m.diagnostics.some((d) => d.kind === 'event-queue-unmodeled:0x143'));
 });
 
-test('★ `0xae` 存档版本检查：`Engine.d95780 == 0` ⇒ 早退（什么都不做）；非 0 ⇒ 响亮失败', () => {
+test('★ `0xae` 存档版本检查：`Engine.d95780 == 0` ⇒ 早退（什么都不做）；非 0 ⇒ 响亮失败', async () => {
   const m = machine();
   call(m, 0xae, []);
   assert.equal(m.effects.length, 0, '早退分支不写任何东西');
@@ -147,7 +147,7 @@ test('★ `0xae` 存档版本检查：`Engine.d95780 == 0` ⇒ 早退（什么�
   assert.throws(() => call(m, 0xae, []), /未建模/);
 });
 
-test('★★ `0x130` show-logo 标志：初始化置 1（⇒ 启动链会走到 LOGO 的 call-script）；被清后读 0', () => {
+test('★★ `0x130` show-logo 标志：初始化置 1（⇒ 启动链会走到 LOGO 的 call-script）；被清后读 0', async () => {
   const m = machine();
   call(m, 0x130, [op(9, 0)]);
   assert.equal(readInt(m, [op(9, 0)], 1), 1, '★ 引擎初始化 `[0x5EB5C] = 1` ⇒ LOGO 分支成立');
@@ -156,7 +156,7 @@ test('★★ `0x130` show-logo 标志：初始化置 1（⇒ 启动链会走到 
   assert.equal(readInt(m, [op(9, 0)], 1), 0);
 });
 
-test('★ `0x260` / `0x261`：四格 / 一格的消息子系统标量（op1..op4 的落点不许错位）', () => {
+test('★ `0x260` / `0x261`：四格 / 一格的消息子系统标量（op1..op4 的落点不许错位）', async () => {
   const m = machine();
   call(m, 0x260, [op(0, 1), op(0, 2), op(0, 3), op(0, 4)]);
   assert.equal(m.scalars.get('Engine.d80102'), 1);
@@ -167,7 +167,7 @@ test('★ `0x260` / `0x261`：四格 / 一格的消息子系统标量（op1..op4
   assert.equal(m.scalars.get('Engine.d80101'), 9);
 });
 
-test('★★ `enteredIds`：`0x3 call-script` 与 `0x8 call-frame` 进入的脚本 id 被记下（"到达 LOGO"可机械断言）', () => {
+test('★★ `enteredIds`：`0x3 call-script` 与 `0x8 call-frame` 进入的脚本 id 被记下（"到达 LOGO"可机械断言）', async () => {
   const m = machine();
   m.enterScript(Buffer.alloc(4), 0x51dc); // INITCONFIG.BIN
   assert.deepEqual(m.enteredIds, [0x51dc]);

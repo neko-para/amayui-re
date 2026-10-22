@@ -12,12 +12,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Machine } from '../../apps/emulator-new/src/machine.ts';
-import { HANDLERS } from '../../apps/emulator-new/src/handlers.ts';
-import { decodeInt, encodeInt, readInt, writeInt } from '../../apps/emulator-new/src/values.ts';
-import { poolBase, slotAddress } from '../../apps/emulator-new/src/address.ts';
-import { ConfigStore } from '../../apps/emulator-new/src/config.ts';
-import { loadConfigKeys } from '../../apps/emulator-new/src/spec.ts';
+import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
+import { decodeInt, encodeInt, readInt, writeInt } from '../../apps/emulator-new/src/core/values.ts';
+import { poolBase, slotAddress } from '../../apps/emulator-new/src/core/address.ts';
+import { ConfigStore } from '../../apps/emulator-new/src/core/config.ts';
+import { loadConfigKeys } from '../../apps/emulator-new/src/platform/node/spec.ts';
 
 const KEY = 0x1234abcd;
 const op = (type, raw) => ({ type, raw });
@@ -26,7 +26,7 @@ function machine(body = Buffer.alloc(4), config) {
   return new Machine({ body, table: new Map(), key: KEY, ...(config ? { config } : {}) });
 }
 
-test('★★ `0x61`：local ptr ← 取址(全局 int 第 10 格) + 4×3（地址写进**指针槽本身**）', () => {
+test('★★ `0x61`：local ptr ← 取址(全局 int 第 10 格) + 4×3（地址写进**指针槽本身**）', async () => {
   const m = machine();
   HANDLERS.get(0x61)(m, [op(12, 0), op(3, 10), op(0, 3)]);
 
@@ -39,24 +39,24 @@ test('★★ `0x61`：local ptr ← 取址(全局 int 第 10 格) + 4×3（地�
   assert.equal(readInt(m, [op(12, 0)], 1), 42, '★ 指针读 = 解引用后解码');
 });
 
-test('★★ `0x61`：字符串指针（type 14）的步长是 **28**（不是 4）', () => {
+test('★★ `0x61`：字符串指针（type 14）的步长是 **28**（不是 4）', async () => {
   const m = machine();
   HANDLERS.get(0x61)(m, [op(14, 0), op(3, 2), op(0, 5)]);
   const base = slotAddress(3, 2);
   assert.equal(m.frame.localStringPtr.get(0), base + 28 * 5, '★ 28×5（用 4 会得到另一条记录的地址）');
 });
 
-test('★★ `0x61`：落点是**值族**（如 type 9）⇒ 抛类型异常（引擎 default 分支）', () => {
+test('★★ `0x61`：落点是**值族**（如 type 9）⇒ 抛类型异常（引擎 default 分支）', async () => {
   const m = machine();
   assert.throws(() => HANDLERS.get(0x61)(m, [op(9, 0), op(3, 2), op(0, 1)]), /落点必须是引用 \/ 指针族/);
 });
 
-test('★ 写指针槽只接受引用 / 指针族 ⇒ 直接写值族是响亮失败', () => {
+test('★ 写指针槽只接受引用 / 指针族 ⇒ 直接写值族是响亮失败', async () => {
   const m = machine();
   assert.throws(() => HANDLERS.get(0x61)(m, [op(3, 0), op(3, 2), op(0, 1)]), /落点必须是引用 \/ 指针族/);
 });
 
-test('★ 指针解引用：写整型走过指针写到目标格（编码在目标上），读回同值', () => {
+test('★ 指针解引用：写整型走过指针写到目标格（编码在目标上），读回同值', async () => {
   const m = machine();
   m.frame.localPtr.set(1, slotAddress(3, 7));
   writeInt(m, [op(12, 1)], 1, 99);
@@ -67,7 +67,7 @@ test('★ 指针解引用：写整型走过指针写到目标格（编码在目�
   assert.equal(readInt(m, [op(12, 1)], 1), 5);
 });
 
-test('★ 未映射 / 未对齐的指针 ⇒ 响亮失败（不许补 0）', () => {
+test('★ 未映射 / 未对齐的指针 ⇒ 响亮失败（不许补 0）', async () => {
   const zero = machine();
   zero.frame.localPtr.set(0, 0);
   assert.throws(() => readInt(zero, [op(12, 0)], 1), /不落在任何池窗口/);
@@ -77,8 +77,8 @@ test('★ 未映射 / 未对齐的指针 ⇒ 响亮失败（不许补 0）', () 
   assert.throws(() => readInt(mis, [op(12, 0)], 1), /没对齐到元素边界/);
 });
 
-test('★★ 配置键：指针族的键下标 = `(地址 − 全局池起点) / 元素宽度`（不是指针槽下标）', () => {
-  const s = new ConfigStore(loadConfigKeys());
+test('★★ 配置键：指针族的键下标 = `(地址 − 全局池起点) / 元素宽度`（不是指针槽下标）', async () => {
+  const s = new ConfigStore(await loadConfigKeys());
   const m = machine(Buffer.alloc(4), s);
   m.frame.localPtr.set(0, slotAddress(3, 10));
   m.globalInt.set(10, encodeInt(42, KEY));
@@ -90,7 +90,7 @@ test('★★ 配置键：指针族的键下标 = `(地址 − 全局池起点) /
   assert.equal(s.ints.get(key), 42, '值是**解引用**出来的整数');
 });
 
-test('★★ `0x64 copy-local-array`：把脚本体里那块整数逐格 `ENC` 后写到 op1 的地址', () => {
+test('★★ `0x64 copy-local-array`：把脚本体里那块整数逐格 `ENC` 后写到 op1 的地址', async () => {
   // body: [raw=1 ⇒ 块在 4 字节处] 块首 = 2 个元素，随后是 7 / 9
   const body = Buffer.alloc(4 + 4 + 8);
   body.writeUInt32LE(2, 4);
@@ -109,7 +109,7 @@ test('★★ `0x64 copy-local-array`：把脚本体里那块整数逐格 `ENC` �
   assert.equal(m2.frame.localInt.size, 0, 'count = 0 ⇒ 不写');
 });
 
-test('★ `0x12c lookup-array-2d`：下标 = 行 × 行宽 + 列（乘在前、加在后）', () => {
+test('★ `0x12c lookup-array-2d`：下标 = 行 × 行宽 + 列（乘在前、加在后）', async () => {
   const m = machine();
   HANDLERS.get(0x12c)(m, [op(12, 0), op(3, 0), op(0, 3), op(0, 10), op(0, 4)]);
   assert.equal(m.frame.localPtr.get(0), poolBase(3) + 4 * (3 * 10 + 4), '3×10 + 4 = 34');

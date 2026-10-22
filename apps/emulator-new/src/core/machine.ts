@@ -5,8 +5,11 @@
  *   - 操作数：`chapters/40-pools.md` 的五种访问原语；
  *   - 单条指令：`chapters/60-ops-*.md`。
  * ★ 没有实现的 opcode **不执行**、不 no-op：报缺口并停在它前面（缺口是 spec 的机器清单）。
- * ★ 本文件不碰文件系统。
+ * ★ 本文件不碰文件系统、不碰 Node：脚本是 `Uint8Array`，取件由注入的 `loadScript` 回调完成。
+ * ★ 需要 IO 的部分（`0x3` / `0x6` / `0x9` 的换脚本）是 `await` 的：`run` 返回 `Promise`，
+ *   处理器返回 `void | Promise<void>` —— 核心因此能整份跑在浏览器 / worker 里。
  */
+import { readU32LE } from './bytes.ts';
 import type { OpcodeRow } from './spec.ts';
 import type { ConfigStore } from './config.ts';
 import { HANDLERS } from './handlers.ts';
@@ -203,7 +206,7 @@ export interface SceneState {
 export interface ScriptFrame {
   /** 统一文件 id（装载时记下；0x3 / 0x6 的实参）。根帧缺省不着录 */
   id?: number;
-  body: Buffer;
+  body: Uint8Array;
   ip: number;
   frame: Frame;
   /** 父帧号（引擎记录里的 caller 格）：−1 = 无父帧（根帧） */
@@ -239,11 +242,15 @@ export interface RunResult {
   stop: Stop;
 }
 
-export type Handler = (m: Machine, ops: Operand[]) => void;
+/**
+ * 指令处理器：同步实现返回 `void`；需要取件的（`0x3` / `0x6` / `0x9`）返回 `Promise<void>`。
+ * ★ 分派器**总是** `await` 它 ⇒ 同步处理器不会多付一次微任务。
+ */
+export type Handler = (m: Machine, ops: Operand[]) => void | Promise<void>;
 
 export interface MachineOptions {
   /** 脚本 body（头部之后的全部字节；指令流从第 0 字节开始） */
-  body: Buffer;
+  body: Uint8Array;
   /** 指令表（决定 argc） */
   table: Map<number, OpcodeRow>;
   /** 整型编码的 key：运行期状态，必须显式给（不许有默认值） */
@@ -255,7 +262,7 @@ export interface MachineOptions {
   /** 配置库（`55-config.md`）；缺省 = 未建立（配置 opcode 会响亮失败） */
   config?: ConfigStore;
   /** 换脚本装载器（真实入口由安装目录提供；`--script` 调试口没有它） */
-  loadScript?: (id: number) => Buffer | null;
+  loadScript?: (id: number) => Promise<Uint8Array | null>;
   /**
    * **宿主字体名表**（`0x2de` 的输入）：由宿主提供，**不是**引擎状态。
    * ★ 缺省 `[]` = "宿主没有提供任何字体名" ⇒ 查表一律未命中 ⇒ 走引擎自己的回退分支
@@ -275,7 +282,7 @@ export class Machine {
   /** 配置库（缺省 undefined：配置 opcode 响亮失败，而不是静默 0） */
   readonly config: ConfigStore | undefined;
   /** 换脚本用的装载器（统一文件 id → body）：缺省 = 不支持 call-script（响亮失败） */
-  readonly loadScript: ((id: number) => Buffer | null) | undefined;
+  readonly loadScript: ((id: number) => Promise<Uint8Array | null>) | undefined;
   /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 查表未命中 ⇒ 引擎走回退分支） */
   readonly fontNames: string[];
   /**
@@ -380,8 +387,8 @@ export class Machine {
   }
 
   /** 当前脚本 body */
-  get body(): Buffer { return this.rec.body; }
-  set body(v: Buffer) { this.rec.body = v; }
+  get body(): Uint8Array { return this.rec.body; }
+  set body(v: Uint8Array) { this.rec.body = v; }
 
   /** 当前指令字节偏移 */
   get ip(): number { return this.rec.ip; }
@@ -498,7 +505,7 @@ export class Machine {
    *   回到父帧、由父帧自己的长度槽推进到"下一条"。
    * ★ 深度按**槽号**判：`cur + 1 >= 40` 才是超限（⛔ 不是按"数组里已有几帧"）。
    */
-  enterScript(body: Buffer, id?: number): ScriptFrame {
+  enterScript(body: Uint8Array, id?: number): ScriptFrame {
     const slot = this.cur + 1;
     if (slot >= FRAME_SLOT_COUNT) {
       throw new Error(`call-script 深度超限：目标帧号 ${slot} ≥ ${FRAME_SLOT_COUNT}（引擎抛「階層が深すぎます」）`);
@@ -539,7 +546,7 @@ export class Machine {
    * `0x6 装载帧`：把 body 装进**指定槽**，**不动当前帧号**（引擎"临时切 cur、装完恢复"的净效果）。
    * ★ 记录里的父帧号 ← 装载时正在执行的帧号（引擎逐字取 `0x6` 存下的旧 cur）。
    */
-  loadFrameAt(slot: number, body: Buffer, id?: number): ScriptFrame {
+  loadFrameAt(slot: number, body: Uint8Array, id?: number): ScriptFrame {
     if (!Number.isInteger(slot) || slot < 0 || slot >= FRAME_SLOT_COUNT) {
       throw new Error(`load-frame 的槽号 ${slot} 不在 0..${FRAME_SLOT_COUNT - 1} 之内`);
     }
@@ -576,7 +583,7 @@ export class Machine {
     if (ip < 0 || ip + 4 > this.body.length) {
       return { stop: { kind: 'truncated', index: this.steps, offset: ip } };
     }
-    const opcode = this.body.readUInt32LE(ip);
+    const opcode = readU32LE(this.body, ip);
     const row = this.table.get(opcode);
     if (!row) return { stop: { kind: 'unknown-opcode', index: this.steps, offset: ip, opcode } };
     const len = 4 + 8 * row.argc;
@@ -585,7 +592,7 @@ export class Machine {
     }
     const ops: Operand[] = [];
     for (let k = 0; k < row.argc; k += 1) {
-      ops.push({ type: this.body.readUInt32LE(ip + 4 + 8 * k), raw: this.body.readUInt32LE(ip + 8 + 8 * k) });
+      ops.push({ type: readU32LE(this.body, ip + 4 + 8 * k), raw: readU32LE(this.body, ip + 8 + 8 * k) });
     }
     return { opcode, row, argc: row.argc, ops };
   }
@@ -593,8 +600,9 @@ export class Machine {
   /**
    * 跑到：显式停止条件 / 退出 / 缺口 / 步数上限。
    * ★ 缺口：没有 handler 的 opcode **不执行**，`ip` 停在它前面（由调用方决定是红还是记缺口）。
+   * ★ `async`：处理器可以等待 IO（换脚本 / 装载帧）；分派循环 `await` 它，异常变成同一个 rejection。
    */
-  run(opts: { stopAtOpcode?: number; maxSteps?: number; maxTicks?: number } = {}): RunResult {
+  async run(opts: { stopAtOpcode?: number; maxSteps?: number; maxTicks?: number } = {}): Promise<RunResult> {
     const maxSteps = opts.maxSteps ?? 10_000_000;
     const maxTicks = opts.maxTicks ?? 10_000_000;
     for (;;) {
@@ -622,7 +630,7 @@ export class Machine {
       }
       // 分派器协议：handler 之前在「操作数个数」槽写 2·argc+1；handler 可以清零（控制转移）
       this.operandCount = 2 * dec.argc + 1;
-      handler(this, dec.ops);
+      await handler(this, dec.ops);
       this.ip += 4 * this.operandCount;
       this.steps += 1;
     }

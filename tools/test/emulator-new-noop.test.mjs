@@ -12,10 +12,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadOpcodeTable } from '../../apps/emulator-new/src/spec.ts';
-import { Machine } from '../../apps/emulator-new/src/machine.ts';
+import { loadOpcodeTable } from '../../apps/emulator-new/src/platform/node/spec.ts';
+import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
 
-const table = loadOpcodeTable();
+const table = await loadOpcodeTable();
 const KEY = 0x1234abcd;
 
 function script(instrs) {
@@ -29,9 +29,9 @@ function script(instrs) {
   return buf;
 }
 
-test('★ 0x1a7 不读操作数：载荷类型不受支持也不抛，长度 = 4 + 8×1 = 12', () => {
+test('★ 0x1a7 不读操作数：载荷类型不受支持也不抛，长度 = 4 + 8×1 = 12', async () => {
   const m = new Machine({ body: script([[0x1a7, [[0x6, 0xdead]]]]), table, key: KEY });
-  const r = m.run();
+  const r = await m.run();
   assert.equal(r.steps, 1);
   assert.equal(r.ip, 12);
   assert.equal(r.stop.kind, 'truncated');
@@ -42,9 +42,9 @@ test('★ 0x1a7 不读操作数：载荷类型不受支持也不抛，长度 = 4
   assert.equal(m.globalFloat.size, 0);
 });
 
-test('★ 0x1a8：长度 = 4（argc 0），同样不写任何状态', () => {
+test('★ 0x1a8：长度 = 4（argc 0），同样不写任何状态', async () => {
   const m = new Machine({ body: script([[0x1a8, []]]), table, key: KEY });
-  const r = m.run();
+  const r = await m.run();
   assert.equal(r.steps, 1);
   assert.equal(r.ip, 4);
   assert.equal(m.scene.dirty, 0);

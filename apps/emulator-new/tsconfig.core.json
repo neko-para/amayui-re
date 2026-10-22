@@ -1,0 +1,44 @@
+{
+  // apps/emulator-new/tsconfig.core.json —— **核心层不许碰 Node** 的守卫工程
+  //
+  // ★ 与 `apps/emulator/tsconfig.json` 同一个形状、同一个理由：核心将来要跑在**浏览器 / worker** 里，
+  //   而 `node:fs` 没有 polyfill 可打；`Buffer` 也只是 Node 的 `Uint8Array` 子类，靠它会在浏览器里当场炸。
+  //   ⇒ 用类型系统守（`"types": []`），不用"扫源码的测试"（只认字面量，认不出间接 import 与别名）。
+  //
+  // ★ 判据（实测，见报告）：往 `core/**` 的可达闭包里加一行 `Buffer.alloc(1)` ⇒
+  //   `Cannot find name 'Buffer'`；加 `import fs from 'node:fs'` ⇒ `Cannot find module 'node:fs'`。
+  //   两条都当场红；删掉 ⇒ 绿。
+  //
+  // ★ 为什么 `lib` 里有 `WebWorker`：WHATWG 通用类型（`TextDecoder` / `TextEncoder` / `URL` /
+  //   `AbortController` / `structuredClone`…）只在宿主库里，而核心要同时能在 Node 与浏览器里跑。
+  //   `lib: DOM` 会连 `document` / `window` 一起放行（错的方向）；`WebWorker` 是"没有 DOM 的 WHATWG 环境"那一份。
+  //   ⚠️ 已知代价（照 `apps/emulator` 的口径）：它也会放行 worker 专属的 `self` / `postMessage`。
+  //
+  // ★ `include` 只有 `core/**`：平台层（`platform/node/**`）与 CLI（`main.ts`）**不在**本工程里 ——
+  //   它们正是"允许用 Node"的那一层（见 `tsconfig.json`）。两个工程缺一不可：
+  //   只有 `tsconfig.json` ⇒ 核心的守卫失效；只有本工程 ⇒ 平台层写不了 `node:fs`。
+  //
+  // ★ 仍然**没有构建步骤**：`tsc` 只把"类型写错"变成红灯；`.ts` 由 Node 原生剥壳直接跑。
+  //   核心不 import JSON 模块（规范数据由平台读成纯数据传进来）⇒ 不需要 `resolveJsonModule`。
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "WebWorker"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "types": [],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/core/**/*.ts"]
+}

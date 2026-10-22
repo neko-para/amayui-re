@@ -5,6 +5,7 @@
  *   经 `spec.ts` 读入后注入（`ConfigKeySchema`）—— 本文件不抄第二份键表。
  * ★ 值的字符串是**字节串**（latin1 一字节一字符）：CP932 值在往返中不会被转码。
  */
+import { decodeLatin1, encodeLatin1 } from './bytes.ts';
 import type { ConfigKeySchema, DefaultKeyRow, IniKeyRow, PersistKeyRow } from './spec.ts';
 
 export interface ConfigPair {
@@ -89,8 +90,8 @@ function trimField(s: string): string {
  * - 其余行按第一个 `=` 切；没有 `=` 的行登记成空键/空值（不是注释）。
  * - 重复键：最后一次覆盖。
  */
-export function parseIni(buf: Buffer): Map<string, string> {
-  const text = buf.toString('latin1');
+export function parseIni(buf: Uint8Array): Map<string, string> {
+  const text = decodeLatin1(buf);
   const out = new Map<string, string>();
   let section = '';
   const consume = (raw: string): void => {
@@ -252,7 +253,7 @@ export class ConfigStore {
   }
 
   /** 保存：按 `persist` 的固定段/键顺序写出；缺失值按 0 / 空串。 */
-  serializeIni(): Buffer {
+  serializeIni(): Uint8Array {
     const parts: string[] = [];
     let section = '';
     for (const row of this.schema.persist) {
@@ -264,6 +265,6 @@ export class ConfigStore {
       const value = row.kind === 'string' ? this.getString(row.internal) : String(this.getInt(row.internal));
       parts.push(`${row.key}=${value}\r\n`);
     }
-    return Buffer.from(parts.join(''), 'latin1');
+    return encodeLatin1(parts.join(''));
   }
 }

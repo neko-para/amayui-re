@@ -1,15 +1,10 @@
 /**
- * spec 的唯一读取点。
- * ★ 本文件是 `apps/emulator-new/src/` 里**唯一**碰文件系统的模块（守卫会检查）。
- * ★ 只读 `data/spec/`；不读 shape / ledger / corpus / age-format。
+ * spec 数据的**形状** + 纯构造器（核心层）。
+ * ★ 本文件**不读文件**：`data/spec/**` 由平台层读成纯数据再传进来（`platform/node/spec.ts`）。
+ *   核心因此不认识路径、不认识 `data/spec`、也不认识 `node:fs` —— 浏览器里同样能建表。
+ * ★ 只接受规范自带的伴随数据（`format/opcode-table.json` / `format/config-keys.json`）；
+ *   不读 shape / ledger / corpus / age-format。
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
-export const SPEC_DIR = path.join(REPO_ROOT, 'data', 'spec');
 
 export interface OpcodeRow {
   opcode: number;
@@ -18,10 +13,11 @@ export interface OpcodeRow {
   aliases?: string[];
 }
 
-/** 指令表：`data/spec/format/opcode-table.json`（规范自带的伴随数据） */
-export function loadOpcodeTable(): Map<number, OpcodeRow> {
-  const file = path.join(SPEC_DIR, 'format', 'opcode-table.json');
-  const rows = JSON.parse(fs.readFileSync(file, 'utf8')) as OpcodeRow[];
+/**
+ * 建指令表：`data/spec/format/opcode-table.json` 解出来的行（平台层负责 `JSON.parse`）。
+ * ★ 后出现的同 opcode 行覆盖先出现的（与旧实现一致：直接 `Map.set`）。
+ */
+export function buildOpcodeTable(rows: readonly OpcodeRow[]): Map<number, OpcodeRow> {
   const table = new Map<number, OpcodeRow>();
   for (const row of rows) table.set(row.opcode, row);
   return table;
@@ -67,8 +63,13 @@ export interface ConfigKeySchema {
   persist: PersistKeyRow[];
 }
 
-/** 配置键词表：`data/spec/format/config-keys.json`（规范自带的伴随数据） */
-export function loadConfigKeys(): ConfigKeySchema {
-  const file = path.join(SPEC_DIR, 'format', 'config-keys.json');
-  return JSON.parse(fs.readFileSync(file, 'utf8')) as ConfigKeySchema;
+/**
+ * 配置键词表（`data/spec/format/config-keys.json` 解出来的纯数据）。
+ * ★ 只做形状断言，不复制第二份键表 —— 词表本体仍然只有规范里那一份。
+ */
+export function buildConfigKeys(raw: ConfigKeySchema): ConfigKeySchema {
+  for (const field of ['defaults', 'ini', 'persist'] as const) {
+    if (!Array.isArray(raw[field])) throw new Error(`config-keys-malformed:${field}`);
+  }
+  return raw;
 }

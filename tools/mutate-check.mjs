@@ -146,7 +146,7 @@ const MUTATIONS = [
   // ── `apps/emulator-new` 的帧模型：**40 槽 + cur**（★★ 这一批判据的意义就是"栈实现会露馅"）──
   //   ① 把"回到父帧号 + 向下跳过空槽"退化成 `cur -= 1` ⇒ 跨槽返回落到相邻槽（相邻用例仍然绿）。
   {
-    file: 'apps/emulator-new/src/machine.ts',
+    file: 'apps/emulator-new/src/core/machine.ts',
     from: '    let next = parent;\n    while (next >= 0 && !this.slots[next]) next -= 1;\n    if (next < 0) throw new Error(\'exit：从父帧号往下全是空槽（引擎在帧号降到 0 以下时抛）\');',
     to: '    const next = this.cur - 1;',
     guard: 'tools/test/emulator-new-frame.test.mjs',
@@ -154,7 +154,7 @@ const MUTATIONS = [
   },
   //   ② 条件释放改成无条件 ⇒ `0x8` 切出来的目标帧被误释放。
   {
-    file: 'apps/emulator-new/src/machine.ts',
+    file: 'apps/emulator-new/src/core/machine.ts',
     from: '    if (parent + 1 === this.cur) this.slots[this.cur] = null;',
     to: '    this.slots[this.cur] = null;',
     guard: 'tools/test/emulator-new-frame.test.mjs',
@@ -162,7 +162,7 @@ const MUTATIONS = [
   },
   //   ③ 换帧不写父帧号 ⇒ 目标帧结束后回到"当初装载它的那一帧"（装载者 ≠ 切帧者时才错）。
   {
-    file: 'apps/emulator-new/src/machine.ts',
+    file: 'apps/emulator-new/src/core/machine.ts',
     from: '    target.parent = this.cur;',
     to: '    void 0;',
     guard: 'tools/test/emulator-new-frame.test.mjs',
@@ -170,7 +170,7 @@ const MUTATIONS = [
   },
   //   ④ 换帧不拨回指令指针 ⇒ 目标帧从"上次停的地方"继续（不是从它的开头）。
   {
-    file: 'apps/emulator-new/src/machine.ts',
+    file: 'apps/emulator-new/src/core/machine.ts',
     from: '    target.ip = 0;',
     to: '    void 0;',
     guard: 'tools/test/emulator-new-frame.test.mjs',
@@ -178,7 +178,7 @@ const MUTATIONS = [
   },
   //   ⑤ 装帧顺手改 cur ⇒ "往槽 op2 写记录、装完不动当前帧"当场不成立。
   {
-    file: 'apps/emulator-new/src/machine.ts',
+    file: 'apps/emulator-new/src/core/machine.ts',
     from: '    while (this.slots.length <= slot) this.slots.push(null);\n    this.slots[slot] = rec;',
     to: '    while (this.slots.length <= slot) this.slots.push(null);\n    this.slots[slot] = rec;\n    this.cur = slot;',
     guard: 'tools/test/emulator-new-frame.test.mjs',
@@ -186,7 +186,7 @@ const MUTATIONS = [
   },
   //   ⑥ 深度按"已占用的槽数"判（而不是**帧号**）⇒ 预装到 39 号槽后再换脚本会被放过。
   {
-    file: 'apps/emulator-new/src/machine.ts',
+    file: 'apps/emulator-new/src/core/machine.ts',
     from: '    if (slot >= FRAME_SLOT_COUNT) {\n      throw new Error(`call-script 深度超限',
     to: '    if (this.slots.filter(Boolean).length >= FRAME_SLOT_COUNT) {\n      throw new Error(`call-script 深度超限',
     guard: 'tools/test/emulator-new-frame.test.mjs',
@@ -194,14 +194,14 @@ const MUTATIONS = [
   },
   // ── `0x192 set-string` 的源侧（★ type 2 内联字符串：偏移 / 取反任一处错都只写错字节，不抛）──
   {
-    file: 'apps/emulator-new/src/values.ts',
+    file: 'apps/emulator-new/src/core/values.ts',
     from: '  const off = 4 * raw;',
     to: '  const off = raw;',
     guard: 'tools/test/emulator-new-string.test.mjs',
     what: '内联字符串的偏移漏掉 `4×`（写成 `raw`）⇒ 从指令流中间开始解，解出一串乱码/读到末尾才抛',
   },
   {
-    file: 'apps/emulator-new/src/values.ts',
+    file: 'apps/emulator-new/src/core/values.ts',
     from: '    const c = body[p] ^ 0xff;',
     to: '    const c = body[p];',
     guard: 'tools/test/emulator-new-string.test.mjs',
@@ -225,42 +225,42 @@ const MUTATIONS = [
   },
   // ── `0x192` 的注册（★ 没有 handler 会变成"未实现"停点 ⇒ 启动链停在一个误以为的缺口上）──
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  [0x1a9, saveString1a9],\n  [0x192, setString192],',
     to: '  [0x1a9, saveString1a9],',    guard: 'tools/test/emulator-new-string.test.mjs',
     what: '`0x192` 没注册 ⇒ 内联串写不进串池（启动链把它当成"未实现"停点，而缺口报告看起来合法）',
   },
   // ── 数组连写 / 跳转 / 比较（★ `INITCONFIG4` 那一簇：错一处都让后面的循环次数/落点静默错）
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  const bits = encodeInt(0, m.key) >>> 0;',
     to: '  const bits = 0;',
     guard: 'tools/test/emulator-new-array-fill.test.mjs',
     what: '`0x6c fill-zero` 真填字面 0 ⇒ 整型池里存的不是 `ENC(key,0)`，读回来是 0 但位模式已错（后续按位拷贝的路径全偏）',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  if (count > 0) for (let i = 0; i < count; i += 1) writeBitsAt(m, addr, i, bits);\n  m.effects.push({\n    kind: \'array.fill\',\n    detail: { opcode: \'0x6c\'',
     to: '  if (count > 0) for (let i = 0; i <= count; i += 1) writeBitsAt(m, addr, i, bits);\n  m.effects.push({\n    kind: \'array.fill\',\n    detail: { opcode: \'0x6c\'',
     guard: 'tools/test/emulator-new-array-fill.test.mjs',
     what: '`0x6c` 的循环写成 `<=` ⇒ 多写一格（把相邻格覆盖掉，而"填了 N 格"看起来没问题）',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  const bits = encodeInt(value, m.key) >>> 0;',
     to: '  const bits = value >>> 0;',
     guard: 'tools/test/emulator-new-array-fill.test.mjs',
     what: '`0x2d8 set-array-to` 填 op2 原值（不编码）⇒ 读回来是 `DEC(原值)`，通常是一个巨大的错数',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  if (target === -1) return; // 哨兵 = "没有目标" ⇒ 本条原地落下（不写长度槽）',
     to: '  if (false) return;',
     guard: 'tools/test/emulator-new-array-fill.test.mjs',
     what: '`0x8c jmp` 不认 −1 哨兵 ⇒ `ip = 4×(−1) = −4`（下一次解码落在脚本外）',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  writeInt(m, ops, 1, a < b ? 1 : 0);',
     to: '  writeInt(m, ops, 1, b < a ? 1 : 0);',
     guard: 'tools/test/emulator-new-array-fill.test.mjs',
@@ -268,35 +268,37 @@ const MUTATIONS = [
   },
   // ── 指针 / 地址空间（★ `0x61` 的判据：步长、合成基址、解引用、配置键换算）
   {
-    file: 'apps/emulator-new/src/address.ts',
+    file: 'apps/emulator-new/src/core/address.ts',
     from: '    case 6: case 7: case 12: case 13: return 4;\n    case 8: case 14: return 28;',
     to: '    case 6: case 7: case 12: case 13: return 4;\n    case 8: case 14: return 4;',
     guard: 'tools/test/emulator-new-pointer.test.mjs',
     what: '字符串引用/指针的数组步长写成 4（应为 28）⇒ 每条字符串指针都指到另一条记录中间',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  const base = addressOfOperand(m, ops, 2);\n  const index = readInt(m, ops, 3) | 0;\n  const addr = (base + stride * index) >>> 0;',
     to: '  const base = addressOfOperand(m, ops, 2);\n  const index = readInt(m, ops, 3) | 0;\n  const addr = (base + index) >>> 0;',
     guard: 'tools/test/emulator-new-pointer.test.mjs',
     what: '`0x61` 的地址算术漏掉元素宽度（`base + index`）⇒ 下标被当成字节数，写到第 N/4 格',
   },
   {
-    file: 'apps/emulator-new/src/values.ts',
+    file: 'apps/emulator-new/src/core/values.ts',
     from: '  const addr = pointerSlotAddress(m, op.type as PoolTag, op.raw);\n  return resolveAddress(addr);',
     to: '  const addr = op.raw;\n  return resolveAddress(addr);',
     guard: 'tools/test/emulator-new-pointer.test.mjs',
     what: '指针解引用把"槽里的地址"当成"槽下标"（`op.raw`）⇒ 读到地址 0/1/2 那一带（未映射或别的池）',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
-    from: '  const off = addr - base;',
-    to: '  const off = op.raw * elem;',
+    // ★ 唯一化：`configKey` 里"值族直接拼下标"那条也是同一个 `return` 形状，所以改的是**指针族**那条的
+    //   最终下标来源（`r.index` = 地址换算的结果）；把它换成操作数自带的槽下标 ⇒ 键落到另一格。
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  return String.fromCharCode(code) + r.index.toString(16).padStart(8, \'0\');',
+    to: '  return String.fromCharCode(code) + op.raw.toString(16).padStart(8, \'0\'); // 变异：键下标用指针槽下标',
     guard: 'tools/test/emulator-new-pointer.test.mjs',
     what: '配置键对指针族按"槽下标"算（而不是地址换算）⇒ `save-int` 写进另一个键，读回时静默得到 0',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  const off = 4 * raw;',
     to: '  const off = raw;',
     guard: 'tools/test/emulator-new-pointer.test.mjs',
@@ -304,56 +306,56 @@ const MUTATIONS = [
   },
   // ── 启动链前段（通往 LOGO.BIN 入口的那一簇）
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '    if (cand.length === key.length && cand === key) { hit = i; break; }',
     to: '    if (cand.startsWith(key)) { hit = i; break; }',
     guard: 'tools/test/emulator-new-prologue.test.mjs',
     what: '`0x2de` 的查表把"长度相等 + 逐字节相等"改成前缀匹配 ⇒ 配置的短名会命中（"MS" 命中 "MS Gothic"），回退分支不再触发',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: "  const key = raw.startsWith('@') ? raw.slice(1) : raw;",
     to: '  const key = raw;',
     guard: 'tools/test/emulator-new-prologue.test.mjs',
     what: '`0x2de` 不跳过键首的 `@` ⇒ 带 `@` 的字体名全部"未命中"（走回退分支，静默换字体）',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  return (((x & 0xff) << 16) | (x & 0xff00) | ((x >>> 16) & 0xff)) >>> 0;',
     to: '  return x >>> 0;',
     guard: 'tools/test/emulator-new-prologue.test.mjs',
     what: '`0x76/0x77` 写成原值（不倒 24 位内的字节序）⇒ 颜色/索引值静默错通道',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  if (v > 0x1f) throw new Error(`opcode 0xfe 的操作数',
     to: '  if (false) throw new Error(`opcode 0xfe 的操作数',
     guard: 'tools/test/emulator-new-prologue.test.mjs',
     what: '`0xfe` 去掉引擎自己的范围检查（>0x1f）⇒ 越界值被静默写进标量，而不是按引擎抛',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: "  scalarArray(m, '0x107', 'Engine.d551', readInt(m, ops, 1), readInt(m, ops, 2), 0x1f, 'skip');",
     to: "  scalarArray(m, '0x107', 'Engine.d551', readInt(m, ops, 2), readInt(m, ops, 1), 0x1f, 'skip');",
     guard: 'tools/test/emulator-new-prologue.test.mjs',
     what: '`0x107` 把索引与值两个操作数对调 ⇒ 写进另一格、值也错（表看起来仍被写）',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  m.ip += 4; // 引擎自己加的那 4 字节（队列空 ⇒ 尾调不改 cur/ip）',
     to: '  m.ip += 0; // 错误：不推进',
     guard: 'tools/test/emulator-new-prologue.test.mjs',
     what: '`0x143` 不推进 ip（引擎在体内 `add [ip],4`）⇒ 下一条又执行自己（死循环），而长度槽已是 0',
   },
   {
-    file: 'apps/emulator-new/src/machine.ts',
+    file: 'apps/emulator-new/src/core/machine.ts',
     from: '    if (target.id !== undefined) this.enteredIds.push(target.id);',
     to: '    void 0;',
     guard: 'tools/test/emulator-new-prologue.test.mjs',
     what: '换帧进入的脚本不记账 ⇒ "到达 LOGO.BIN"这条断言失去依据（启动链看起来正常）',
   },
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: "  if ((m.scalars.get('Engine.d95780') ?? 0) !== 0) {",
     to: '  if (false) {',
     guard: 'tools/test/emulator-new-prologue.test.mjs',
@@ -361,14 +363,14 @@ const MUTATIONS = [
   },
   // ── 两个输入通道的大小写口径（★ 默认表折叠 / 玩家文件字节精确）
   {
-    file: 'apps/emulator-new/src/config.ts',
+    file: 'apps/emulator-new/src/core/config.ts',
     from: '      const row = this.defaultByKey.get(p.key.toUpperCase());',
     to: '      const row = this.defaultByKey.get(p.key);',
     guard: 'tools/test/emulator-new-config.test.mjs',
     what: '默认表键名不折叠大小写 ⇒ 索引里的小写键名静默落空（默认值不生效，而"读到一个 0"看起来正常）',
   },
   {
-    file: 'apps/emulator-new/src/config.ts',
+    file: 'apps/emulator-new/src/core/config.ts',
     from: '      const got = map.get(`${row.section}\\\\${row.key}`);',
     to: '      const got = map.get(`${row.section}\\\\${row.key}`.toLowerCase());',
     guard: 'tools/test/emulator-new-config.test.mjs',
@@ -376,7 +378,7 @@ const MUTATIONS = [
   },
   // ── 配置键的 UB 判据（★ 规范明确：引用不在该族全局池 ⇒ 键没有定义）
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  if (r.tag !== wantTag) {',
     to: '  if (false) {',
     guard: 'tools/test/emulator-new-config.test.mjs',
@@ -1430,6 +1432,14 @@ const MUTATIONS = [
     guard: 'tools/test/spec.test.mjs',
     what: '★ 审计缺口可以空着 residual ⇒ "未成篇"重新变成一句空话（没有具体义务、没有下一步）',
   },
+  // ── 新章节的站点锚：窗口类注册的 EA 偏移一格 ⇒ 锚落到指令中间（规范正文仍"看起来有出处"）──
+  {
+    file: 'data/spec/bindings.json',
+    from: '          "ea": "0x4baa02",',
+    to: '          "ea": "0x4baa03",',
+    guard: 'tools/test/spec-window-render-sites.assets.test.mjs',
+    what: '★ 窗口类注册的站点 EA 偏移一格 ⇒ 机器绑定指到指令中间（正文自包含、校验器也不会替读者核这一条）',
+  },
   // ── 未成篇 opcode 的落点：`hasHandler = 已写（规则标题）+ gaps.ops`（★ 漏列一个 ⇒ 义务重新"无人认领"）──
   {
     file: 'data/spec/audit.json',
@@ -1441,7 +1451,7 @@ const MUTATIONS = [
   // ── emulator-new：整数减的**方向**（`第 2 个 − 第 3 个`）──
   //   ★ 写反不会报错、只会静默算错，所以必须有一条守卫专门钉这个方向。
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  writeInt(m, ops, 1, second - third);',
     to: '  writeInt(m, ops, 1, third - second); // 变异：减法方向写反',
     guard: 'tools/test/emulator-new-ops.test.mjs',
@@ -1449,7 +1459,7 @@ const MUTATIONS = [
   },
   // ── emulator-new：绘制项的矩形存"四条边"而不是宽高 ──
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  item.right = right;',
     to: '  item.right = rightBase; // 变异：右边界退回"宽"',
     guard: 'tools/test/emulator-new-texture.test.mjs',
@@ -1457,7 +1467,7 @@ const MUTATIONS = [
   },
   // ── emulator-new：0x202 的"已存在"门 ──
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  if ((item.flags & 1) !== 0) {',
     to: '  if (true) { // 变异：去掉"已存在"门',
     guard: 'tools/test/emulator-new-scene.test.mjs',
@@ -1465,7 +1475,7 @@ const MUTATIONS = [
   },
   // ── emulator-new：取件顺序（松散优先）──
   {
-    file: 'apps/emulator-new/src/host.ts',
+    file: 'apps/emulator-new/src/core/install.ts',
     from: '    if (loose) {',
     to: '    if (false) { // 变异：丢掉"松散文件优先"',
     guard: 'tools/test/emulator-new-alf.test.mjs',
@@ -1473,7 +1483,7 @@ const MUTATIONS = [
   },
   // ── emulator-new：启动阶段的处置（配置只到 partial，不许被标成 modeled）──
   {
-    file: 'apps/emulator-new/src/boot.ts',
+    file: 'apps/emulator-new/src/core/boot.ts',
     from: "    disposition: 'partial',\n    why: '配置库已建立",
     to: "    disposition: 'modeled', // 变异：把只到 partial 的配置标成已建模\n    why: '配置库已建立",
     guard: 'tools/test/emulator-new-boot-catalog.test.mjs',
@@ -1481,28 +1491,28 @@ const MUTATIONS = [
   },
   // ── emulator-new：配置默认表的版本拆分 / 键分隔 / 行尾 / 布尔归一 ──
   {
-    file: 'apps/emulator-new/src/config.ts',
+    file: 'apps/emulator-new/src/core/config.ts',
     from: 'this.setInt(\'set:SaveVersion1\', Math.trunc(v / 100));',
     to: 'this.setInt(\'set:SaveVersion1\', Math.trunc(v / 10)); // 变异：版本除数写错',
     guard: 'tools/test/emulator-new-config.test.mjs',
     what: '★ SAVEVERSION 的主版本除数 100 → 10 ⇒ 320 被拆成 32/20，版本号看起来仍"有值"',
   },
   {
-    file: 'apps/emulator-new/src/config.ts',
+    file: 'apps/emulator-new/src/core/config.ts',
     from: "    out.set(`${section}\\\\${trimField(raw.slice(0, eq))}`, trimField(raw.slice(eq + 1)));",
     to: "    out.set(`${section}:${trimField(raw.slice(0, eq))}`, trimField(raw.slice(eq + 1))); // 变异：段键分隔符写错",
     guard: 'tools/test/emulator-new-config.test.mjs',
     what: '★ 玩家文件的段/键分隔符 `\\\\` → `:` ⇒ 所有覆盖都查不到，默认值原样留下（静默失效）',
   },
   {
-    file: 'apps/emulator-new/src/config.ts',
+    file: 'apps/emulator-new/src/core/config.ts',
     from: "        parts.push(`[${section}]\\r\\n`);",
     to: "        parts.push(`[${section}]\\n`); // 变异：行尾只用 LF",
     guard: 'tools/test/emulator-new-config.test.mjs',
     what: '★ 保存的段头行尾 CRLF → LF ⇒ 写出的玩家文件是混合行尾（引擎按 LF 读，但真机工具会看作一行）',
   },
   {
-    file: 'apps/emulator-new/src/config.ts',
+    file: 'apps/emulator-new/src/core/config.ts',
     from: "      if (row.special === 'bool') v = v !== 0 ? 1 : 0;",
     to: "      if (row.special === 'bool') v = v; // 变异：布尔不归一",
     guard: 'tools/test/emulator-new-config.test.mjs',
@@ -1510,7 +1520,7 @@ const MUTATIONS = [
   },
   // ── emulator-new：统一文件 id == TOC 条目下标 ──
   {
-    file: 'apps/emulator-new/src/host.ts',
+    file: 'apps/emulator-new/src/core/install.ts',
     from: '    return this.index.files[id];',
     to: '    return this.index.files[id + 1] ?? this.index.files[id]; // 变异：id 偏一位',
     guard: 'tools/test/emulator-new-alf.test.mjs',
@@ -1518,15 +1528,16 @@ const MUTATIONS = [
   },
   // ── emulator-new：`0x8f call` 的操作数是**位置**（dword 序号）而不是字节偏移 ──
   {
-    file: 'apps/emulator-new/src/handlers.ts',
-    from: '  m.ip = 4 * target;',
-    to: '  m.ip = target; // 变异：把位置当字节偏移',
+    // ★ 唯一化：`m.ip = 4 * target;` 在 0x8f / 0xa0 / 0x8c 各有一处；带上前一行（压返回点）才只命中 0x8f。
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.frame.retStack.push(m.ip / 4 + 1 + 2 * ops.length);\n  m.ip = 4 * target;',
+    to: '  m.frame.retStack.push(m.ip / 4 + 1 + 2 * ops.length);\n  m.ip = target; // 变异：把位置当字节偏移',
     guard: 'tools/test/emulator-new-frame.test.mjs',
     what: '★ 把"位置 × 4"写成"位置就是字节" ⇒ 调用跳到别处（脚本照跑、不报错，只是走错分支）',
   },
   // ── emulator-new：`0x2f8` 的音量夹取（饱和，不是回绕） ──
   {
-    file: 'apps/emulator-new/src/handlers.ts',
+    file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  const clamped = volume < -10000 ? -10000 : volume > 10000 ? 10000 : volume;',
     to: '  const clamped = volume; // 变异：去掉夹取',
     guard: 'tools/test/emulator-new-voice.test.mjs',
@@ -1534,15 +1545,16 @@ const MUTATIONS = [
   },
   // ── emulator-new：`0x2f6` 的通道号 = 组号 + 固定偏移 ──
   {
-    file: 'apps/emulator-new/src/handlers.ts',
-    from: '  const channel = group + VOICE_CHANNEL_BASE;',
-    to: '  const channel = group; // 变异：丢掉通道偏移',
+    // ★ 唯一化：`0x2f8` 也有一行同样的通道号；带上下一条（后端门）才只命中 `0x2f6`。
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  const channel = group + VOICE_CHANNEL_BASE;\n  const backend = m.sound.backend === \'present\';',
+    to: '  const channel = group; // 变异：丢掉通道偏移\n  const backend = m.sound.backend === \'present\';',
     guard: 'tools/test/emulator-new-voice.test.mjs',
     what: '★ 丢掉「组号 + 12」的通道偏移 ⇒ 释放请求与"在播"查询都落到另一条通道上（标志算反而不报错）',
   },
   // ── emulator-new：窗到期时绘制项是否清"有窗"位（★ 引擎与网格一样清；不清 ⇒ 场景永远"有动画"）──
   {
-    file: 'apps/emulator-new/src/machine.ts',
+    file: 'apps/emulator-new/src/core/machine.ts',
     from: '        item.flags &= ~2;',
     to: '        // 变异：绘制项收尾不清"有窗"位',
     guard: 'tools/test/emulator-new-scene.test.mjs',

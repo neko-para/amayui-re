@@ -24,11 +24,12 @@ import path from 'node:path';
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { loadManifest } from '../lib/manifest.mjs';
 import { rootFromManifest } from '../lib/patch.mjs';
-import { Install } from '../../apps/emulator-new/src/host.ts';
-import { loadOpcodeTable } from '../../apps/emulator-new/src/spec.ts';
-import { parseHeader } from '../../apps/emulator-new/src/decode.ts';
-import { Machine } from '../../apps/emulator-new/src/machine.ts';
-import { decodeInt } from '../../apps/emulator-new/src/values.ts';
+import { Install } from '../../apps/emulator-new/src/core/install.ts';
+import { nodeHost } from '../../apps/emulator-new/src/platform/node/host.ts';
+import { loadOpcodeTable } from '../../apps/emulator-new/src/platform/node/spec.ts';
+import { parseHeader } from '../../apps/emulator-new/src/core/decode.ts';
+import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { decodeInt } from '../../apps/emulator-new/src/core/values.ts';
 
 const KEY = 0x1234abcd;
 const LOGO_ID = 0x5262;
@@ -44,10 +45,10 @@ const skip = installDir && fs.existsSync(path.join(installDir, 'SYS4INI.BIN'))
   ? false
   : '游戏安装不在场（corpus/assets.json 的 roots.gameInstall 下没有 SYS4INI.BIN）';
 
-function logoBytes() {
+async function logoBytes() {
   // ★ 走**同一条真实入口**：索引 → 统一文件 id → 松散优先/归档切片
-  const install = Install.open(installDir);
-  const script = install.readById(LOGO_ID);
+  const install = await Install.open(nodeHost, installDir);
+  const script = await install.readById(LOGO_ID);
   assert.equal(script.name.toUpperCase(), 'LOGO.BIN', `条目 ${LOGO_ID} 必须是 LOGO.BIN`);
   assert.equal(script.side, 'archive', '这台安装里 LOGO.BIN 没有松散文件 ⇒ 必须从归档切片');
   assert.equal(script.entryLength, 1508, 'TOC 登记的 LOGO.BIN 长度');
@@ -55,8 +56,8 @@ function logoBytes() {
   return script.bytes;
 }
 
-test('★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：第 46 条前）', { skip }, () => {
-  const bytes = logoBytes();
+test('★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：第 46 条前）', { skip }, async () => {
+  const bytes = await logoBytes();
   assert.equal(bytes.length, 1508, 'LOGO.BIN 的字节数');
   assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),
     'f17364da0ffbca38aedee4a3b46db15945a7cf864e3b7773a422d24fa6b9ba9b', 'LOGO.BIN 的 sha256');
@@ -67,8 +68,8 @@ test('★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：�
   const body = buf.subarray(header.headerLength);
   assert.equal(body.length, 1448, 'LOGO.BIN 的 body 字节数');
 
-  const m = new Machine({ body, table: loadOpcodeTable(), key: KEY, uninitializedFloat: 'zero' });
-  const r = m.run({ stopAtOpcode: 0x20f });
+  const m = new Machine({ body, table: await loadOpcodeTable(), key: KEY, uninitializedFloat: 'zero' });
+  const r = await m.run({ stopAtOpcode: 0x20f });
 
   // ① 真的在执行：前 46 条已经执行掉（play-movie 本身**没有**执行 —— 停止条件是"停在它前面"）
   assert.equal(r.steps, 46, '当前前沿：执行掉 46 条（实现新一族时抬高）');

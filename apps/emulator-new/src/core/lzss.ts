@@ -1,18 +1,20 @@
 /**
  * ALF 目录区的 LZSS 解压（`data/spec/chapters/20-alf.md` 的「ALF 的 LZSS」）。
- * ★ 纯函数：不碰文件系统；输入是压缩字节 + 解压后长度。
+ * ★ 纯函数：不碰文件系统、不碰 Node（`Uint8Array` 进 / 出，浏览器里同一份实现）。
  * ★ 位置是 4 KiB 环形窗口内的**绝对写位置**（12 位），不是"距离"；长度 = (hi & 0x0F) + 3。
  * ★ 窗口初值 0（与真实 SYS4INI.BIN 的目录区一致；判据 = 解出的 TOC 条目数与名字）。
  */
+import { allocBytes } from './bytes.ts';
+
 const WINDOW = 4096;
 const RING_MASK = WINDOW - 1;
 
-export function decompressLzss(packed: Buffer, outLength: number): Buffer {
+export function decompressLzss(packed: Uint8Array, outLength: number): Uint8Array {
   if (!Number.isInteger(outLength) || outLength < 0) throw new Error(`lzss-bad-out-length:${outLength}`);
-  const ring = Buffer.alloc(WINDOW);
+  const ring = allocBytes(WINDOW);
   // 引擎的环形窗口写指针起点（与真实语料一致；不是算法的自由选择）
   let r = 0xfee;
-  const out = Buffer.alloc(outLength);
+  const out = allocBytes(outLength);
   let o = 0;
   let p = 0;
   const need = (n: number): void => {

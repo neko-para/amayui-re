@@ -14,11 +14,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ConfigStore } from '../../apps/emulator-new/src/config.ts';
-import { loadConfigKeys } from '../../apps/emulator-new/src/spec.ts';
-import { Machine } from '../../apps/emulator-new/src/machine.ts';
-import { HANDLERS } from '../../apps/emulator-new/src/handlers.ts';
-import { readText } from '../../apps/emulator-new/src/values.ts';
+import { ConfigStore } from '../../apps/emulator-new/src/core/config.ts';
+import { loadConfigKeys } from '../../apps/emulator-new/src/platform/node/spec.ts';
+import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
+import { readText } from '../../apps/emulator-new/src/core/values.ts';
 
 const KEY = 0x1234abcd;
 const op = (type, raw) => ({ type, raw });
@@ -36,7 +36,7 @@ function machine(body = Buffer.alloc(4), config) {
   return new Machine({ body, table: new Map(), key: KEY, ...(config ? { config } : {}) });
 }
 
-test('★ type 2（内联字符串）：body 偏移 = 4×raw、逐字节 ^0xFF、到 0 止', () => {
+test('★ type 2（内联字符串）：body 偏移 = 4×raw、逐字节 ^0xFF、到 0 止', async () => {
   const m = machine(inlineBody(3, 'AB'));
   assert.equal(readText(m, [op(2, 3)], 1), 'AB', 'raw=3 ⇒ body 偏移 12（写成 3 会从别处读）');
   assert.equal(readText(machine(inlineBody(0, 'x')), [op(2, 0)], 1), 'x', 'raw=0 ⇒ 偏移 0');
@@ -53,7 +53,7 @@ test('★ type 2（内联字符串）：body 偏移 = 4×raw、逐字节 ^0xFF�
   );
 });
 
-test('★★ `0x192 set-string`：内联串（op2 type 2）→ 全局串池（op1 type 5）', () => {
+test('★★ `0x192 set-string`：内联串（op2 type 2）→ 全局串池（op1 type 5）', async () => {
   const m = machine(inlineBody(3, 'AB'));
   HANDLERS.get(0x192)(m, [op(5, 3003), op(2, 3)]);
   assert.equal(m.globalString.get(3003), 'AB', '★ 内联串必须被解出来再写进 op1 指的那一格');
@@ -66,7 +66,7 @@ test('★★ `0x192 set-string`：内联串（op2 type 2）→ 全局串池（op
   assert.equal(m.globalString.get(3005), 'xyz', '串池 → 串池的搬运');
 });
 
-test('★ `0x192`：落点不是 type 5 ⇒ 响亮失败（不静默写错池）', () => {
+test('★ `0x192`：落点不是 type 5 ⇒ 响亮失败（不静默写错池）', async () => {
   const m = machine(inlineBody(3, 'AB'));
   assert.throws(
     () => HANDLERS.get(0x192)(m, [op(3, 7), op(2, 3)]),
@@ -75,8 +75,8 @@ test('★ `0x192`：落点不是 type 5 ⇒ 响亮失败（不静默写错池）
   );
 });
 
-test('★★ 内联串 → `0x192` → `0x1a9` → `0x1aa` 往返：配置里存的必须是解出来的那个串', () => {
-  const s = new ConfigStore(loadConfigKeys());
+test('★★ 内联串 → `0x192` → `0x1a9` → `0x1aa` 往返：配置里存的必须是解出来的那个串', async () => {
+  const s = new ConfigStore(await loadConfigKeys());
   const m = machine(inlineBody(3, 'AB'), s);
   HANDLERS.get(0x192)(m, [op(5, 3003), op(2, 3)]);
   HANDLERS.get(0x1a9)(m, [op(5, 3003)]);

@@ -8,7 +8,8 @@
  * ★ `anchor` 是 `_WinMain@16` 里该阶段的**指令起点 EA**（只做溯源；不参与任何状态，也不进数据模型）。
  *   证据窗口：`pnpm tools disasm-at at --ea <anchor>`。
  * ★ 本目录是 spec 的消费者：这里的"跳过"不是规范，是本实现的**保真欠账清单**；规范侧见
- *   `data/spec/core/README.md` §1.1 的 `CORE-BOOT` / `CORE-FS`（显式延后）。
+ *   `06-window.md`（启动期平台请求：窗口类 / 窗口 / 图形设备 / 消息泵 / 定时器）与
+ *   `data/spec/core/README.md` §1.1 的 `CORE-BOOT` / `CORE-FS`（其余仍显式延后）。
  */
 
 export type BootDisposition = 'modeled' | 'partial' | 'host-only' | 'not-modeled';
@@ -44,7 +45,7 @@ export const BOOT_STAGES: BootStage[] = [
     id: 'window-class',
     what: '注册窗口类（RegisterClassExA）',
     disposition: 'host-only',
-    why: '窗口属于表现层；core 的边界之外',
+    why: '规范已写请求边界（06-window）；本实现是 headless，没有窗口宿主，也不注册窗口类',
     anchor: '0x4baa02',
   },
   {
@@ -79,8 +80,15 @@ export const BOOT_STAGES: BootStage[] = [
     id: 'window-create',
     what: '创建窗口（CreateWindowExA / ShowWindow / 菜单 / IME）',
     disposition: 'host-only',
-    why: '表现层；不改变脚本可观察的引擎数据',
+    why: '规范已写请求边界（06-window）；本实现没有窗口宿主，不建窗口',
     anchor: '0x4bb082',
+  },
+  {
+    id: 'renderer-init',
+    what: '图形设备初始化（Direct3D9 / 旧式绘制二选一）',
+    disposition: 'host-only',
+    why: '规范已写请求边界（06-window）；本实现不建图形设备，外部请求只记 effects',
+    anchor: '0x4bb40d',
   },
   {
     id: 'display-config',
@@ -100,7 +108,7 @@ export const BOOT_STAGES: BootStage[] = [
     id: 'timer',
     what: 'SetTimer(hWnd, 2, 10000, …)',
     disposition: 'host-only',
-    why: '宿主定时器；本层用虚拟时钟（步长是仿真参数，不是引擎常量）',
+    why: '规范已写定时器请求（06-window）；本层用虚拟时钟（步长是仿真参数，不是引擎常量）',
     anchor: '0x4bb50b',
   },
   {

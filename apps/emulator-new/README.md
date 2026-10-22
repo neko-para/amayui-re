@@ -16,7 +16,7 @@
 - ALF 目录区：4 KiB 环形窗口 LZSS；**匹配的位置是窗口内的绝对写位置**（不是距离），窗口初值 0、写指针起点 `0xFEE`
   —— 这两点是"能把真实 21109 条目的索引解出来"的实现判据（见 `tools/test/emulator-new-alf.test.mjs` 与 boot assets 守卫）。
 
-- **启动不是只有脚本**：`src/boot.ts` 把 `_WinMain@16` → 主循环之间的阶段逐条登记（`modeled` / `partial` / `host-only` / `not-modeled`）；
+- **启动不是只有脚本**：`src/core/boot.ts` 把 `_WinMain@16` → 主循环之间的阶段逐条登记（`modeled` / `partial` / `host-only` / `not-modeled`）；
   `--install` 的文本与 `--json` 都输出这份清单。⛔ 跳过的阶段（窗口 / 自更新 / 定时器…）不许静默消失；配置只到 **partial**（库已建立，显示设备副作用未建模）。
 - **配置**（`55-config.md`）：索引尾部的发行默认表 → 可选 `SYS4REG.INI` 覆盖 → 配置库；
   `--config <file>` 指定玩家文件；缺省路径 = 配置根（`USEAPPDATAFOLDER`：用户配置目录 / 安装目录）+ `REGFILEPATH` + 文件名。
@@ -58,8 +58,22 @@ node apps/emulator-new/src/main.ts --script <file> --key 0x1234abcd --json
 
 ## 3. 本目录的硬口径
 
-- 只读 `data/spec`：碰文件系统的只有 `src/spec.ts`（读规范表 + 配置键词表）与 `src/host.ts`（读安装目录 / 索引 / 归档 / 松散文件；玩家配置只写显式路径）；
-  `alf.ts` / `lzss.ts` / `machine.ts` / `values.ts` / `handlers.ts` / `main.ts` **零 fs**（隔离守卫会红）。
+- **分层：核心 / 平台**。`src/core/**` 是平台无关的核心（ALF / LZSS / 解码 / 配置库 / 地址空间 / 值原语 / 执行器 /
+  处理器 / 启动记账 / 取件 / 分析入口），`src/platform/node/**` 是 Node 实现（`node:fs` / `node:path` /
+  `process.env`），`src/main.ts` 只接 argv 与退出码。⛔ 核心不 import 任何 `node:*`。
+- **核心的守卫是类型工程** `tsconfig.core.json`：`"types": []` ⇒ 在 `src/core/**` 写 `Buffer.alloc(1)` 或
+  `import fs from 'node:fs'` 当场编译失败（`pnpm typecheck` 的五个工程之一）。
+  `tsconfig.json` 覆盖整个 app（核心 + 平台）所以是 `types: ["node"]`。
+- **IO 全异步**：`Host`（核心定义的平台接口）的**取件 / 写盘**全是 `Promise`（`join` / `dirname` / `env` / `homeDir` 是纯同步）；`Install.open` / `readById` / `readConfigFile` /
+  `loadOpcodeTable` / `loadConfigKeys` / `analyzeBytes` / `analyzeInstall` / `Machine.run` 都返回 `Promise`，
+  处理器类型是 `void | Promise<void>`，分派循环 `await` 它。⇒ 同一份核心可以在浏览器 / worker 里跑。
+- **规范数据由平台读成纯数据**：`platform/node/spec.ts` 读 `data/spec/format/*.json`，
+  核心只收 `Map` / 词表对象（`CoreEnv`）—— ⛔ 核心不认识 `data/spec` 的路径。
+- 字节是 `Uint8Array`（不是 `Buffer`）；latin1 的"一字节一字符"口径由 `core/bytes.ts` 显式实现
+  （⛔ 不用 `TextDecoder('latin1')`：那是 windows-1252 的别名，会改 0x80–0x9F）。
+- 只读 `data/spec`：真正 import `node:fs` 的只有 `platform/node/host.ts`（读安装目录 / 索引 / 归档 / 松散文件；
+  玩家配置只写显式路径）；`platform/node/spec.ts` 经同一个 `Host` 读规范表 + 配置键词表；
+  `core/**` 与 `main.ts` **零 fs**（隔离守卫会红）。
 - TypeScript 只写**可擦除语法**（类型标注 / `interface` / `type` / `import type`），由 Node 原生剥壳直接跑，**没有构建步骤**。
 - 缺口不是失败：它是"spec 还缺哪一条 opcode 的语义"的机器清单；`--strict` 时才用退出码 1。
 - 前沿（"执行到哪一条 / 停在哪"）由 `tools/test/emulator-new-logo.assets.test.mjs` 的**棘轮**钉住：只许往前走。
