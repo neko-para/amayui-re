@@ -26,6 +26,8 @@
   **Electron 前端**（`src/platform/electron/**`）把 `06-window.md` 的窗口 / 图形设备 / 事件入口与
   `60-ops-render.md` 的 `0x20d` / `0x33f` / `0x204` 接到 Electron + Pixi：窗口、画布、渲染目标与离屏文字是真的；
   音频、输入转发、纹理像素解码仍是显式未建模（UI 的 diagnostics 面板逐条列出）。
+  ★ **core 整份跑在 renderer**：`renderer/session.ts` 直接调用 `analyzeInstall` / `bootWindow` / `Machine`；
+  main 只保留 BrowserWindow、文件系统 / 规范表读取、IPC 与进程生命周期。桥接协议见 `platform/electron/protocol.ts`。
 - **未实现即停**（不 no-op）：缺口带 `{指令序号, 偏移, opcode, argc}`，停在它**前面**，可以当门禁用。
 - `handler` 表只包含 `data/spec` 里**已成篇**的 opcode；解不出的操作数类型 / 未取证的值一律**响亮失败**。
 - 整型编码的 key、虚拟时钟步长、未初始化浮点的读法都是**显式参数**：⛔ 没有"悄悄用 0"的默认路径。
@@ -85,6 +87,7 @@ pnpm --filter @amayui/emulator-new build:renderer
 
 # 非游戏的可视化自检：真窗口 + Pixi，用真实 core handlers 驱动
 # 0x1f8 / 0x204 / 0x1fb / 0x33f / 0x20d（不读游戏安装）
+# 同时会打开一个独立的只读 debug 窗口（diagnostics 投影）
 pnpm --filter @amayui/emulator-new exec electron . --demo
 
 # 同上 + 截图到 .tmp/emulator-new-electron-smoke.png 后退出（自动化用）
@@ -95,8 +98,20 @@ pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>" --
 ```
 
 ★ 受限沙箱里 Electron 需要 `--no-sandbox`（放在 `electron .` 与 app 路径之间）；正常桌面不要加。
-★ main / preload 由 Electron 的 Node 直接跑 `.ts`（Node 24 类型剥壳），**只有 renderer 走 `vite build`**。
+★ main / preload 由 Electron 的 Node 直接跑 `.ts`（Node 24 类型剥壳）；renderer 走 `vite build`，
+  并且 **core 的 `.ts` 也由这次构建一起打进 renderer bundle**（不是 main 的运行时）。
   `dist/renderer/**` 是生成物（已 gitignore）。
+★ **两个窗口**：
+  - **game 窗口**：只承载目标 canvas；core / VM / 场景 / Pixi 都在这个 renderer 里；
+  - **debug 窗口**：先建、默认可见，加载同一个 renderer bundle 的 `?debug=1` 分支，只读显示
+    `HostDiagnostics` / boot / status / log 投影。
+  core 的 `createWindow` 调整的是 game 窗口；debug 窗口不跑 core、不回写状态。
+★ **窗口顺序**：game renderer 自己需要一个 BrowserWindow 才能跑 ⇒ main 先建隐藏的 game bootstrap 窗口；
+  core 的 `createWindow` 再按配置调整同一个窗口并 `show()`。见 `window-host.ts` 头注释。
+★ **桥**：renderer 的 `Host` 走 `host.*`（文件 / 环境）、`BootHost` 走 `boot.*`（窗口 / 显示器）；
+  core 的 `MessageHost` 保持同步，main 把 close / focus 事件推进 renderer 的本地队列。
+  game renderer 的低频 diagnostics 投影走 `renderer:event` → main → `debug:event`（约 100ms 节流）。
+  ⛔ main 不 import `core/**`（隔离守卫会红）；debug 窗口不能修改 core 状态。
 ★ `--demo` / `--smoke` 是**非游戏**自检：它们不证明与真机等价，只证明窗口 + Pixi + spec handler 这条链路能跑。
 ★ **时钟**：CLI 用虚拟 `tickMs`（显式仿真参数，适合无头快跑）；Electron 的 `--install` 传宿主毫秒时钟
 （`MachineOptions.clock`），所以渐变 / 等待按**墙钟**走 —— 5 秒的版权渐变不会被虚拟步长快进成 1 秒。
@@ -107,13 +122,15 @@ pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>" --
 ## 3. 本目录的硬口径
 
 - **分层：核心 / 平台**。`src/core/**` 是平台无关的核心（ALF / LZSS / 解码 / 配置库 / 地址空间 / 值原语 / 执行器 /
-  处理器 / 启动记账 / 取件 / 分析入口 / **窗口与渲染请求边界**），`src/platform/node/**` 是 Node 实现
-  （`node:fs` / `node:path` / `process.env`），`src/platform/electron/**` 是窗口壳（main / preload / Pixi renderer），
-  `src/main.ts` 只接 CLI argv 与退出码。⛔ 核心不 import 任何 `node:*` / `electron` / `pixi.js`。
+  处理器 / 启动记账 / 取件 / 分析入口 / **窗口与渲染请求边界**）；`src/platform/node/**` 是 Node 实现
+  （`node:fs` / `node:path` / `process.env`）；`src/platform/electron/**` 是 Electron 壳：
+  main 只做窗口 / IPC / 生命周期，renderer 里的 `session.ts` 才是 core 的宿主；`src/main.ts` 只接 CLI argv 与退出码。
+  ⛔ 核心不 import 任何 `node:*` / `electron` / `pixi.js`。
 - **核心的守卫是类型工程** `tsconfig.core.json`：`"types": []` ⇒ 在 `src/core/**` 写 `Buffer.alloc(1)` 或
   `import fs from 'node:fs'` 当场编译失败（`pnpm typecheck` 的六个工程之一）。
   `tsconfig.json` 覆盖核心 + Node 平台 + Electron main / preload，所以是 `types: ["node"]`；
-  `tsconfig.renderer.json` 是渲染进程（`types: []` + `lib: DOM`），**不能**并进前者（它会放行 Node 全局）。
+  `tsconfig.renderer.json` 是渲染进程（`types: []` + `lib: DOM`）；它通过 import 把 core 的可达闭包一起检查
+  （core 仍然不能碰 Node / DOM 专属 API），**不能**并进前者（它会放行 Node 全局）。
 - **IO 全异步**：`Host`（核心定义的平台接口）的**取件 / 写盘**全是 `Promise`（`join` / `dirname` / `env` / `homeDir` 是纯同步）；`Install.open` / `readById` / `readConfigFile` /
   `loadOpcodeTable` / `loadConfigKeys` / `analyzeBytes` / `analyzeInstall` / `Machine.run` 都返回 `Promise`，
   处理器类型是 `void | Promise<void>`，分派循环 `await` 它。⇒ 同一份核心可以在浏览器 / worker 里跑。
@@ -122,10 +139,11 @@ pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>" --
 - 字节是 `Uint8Array`（不是 `Buffer`）；latin1 的"一字节一字符"口径由 `core/bytes.ts` 显式实现
   （⛔ 不用 `TextDecoder('latin1')`：那是 windows-1252 的别名，会改 0x80–0x9F）。
 - 只读 `data/spec`：真正 import `node:fs` 的只有 `platform/node/host.ts`（读安装目录 / 索引 / 归档 / 松散文件；
-  玩家配置只写显式路径）与 `platform/electron/**`（窗口 / 渲染主进程）；`platform/node/spec.ts` 经同一个 `Host`
-  读规范表 + 配置键词表；`core/**` 与 `main.ts` **零 fs**（隔离守卫会红）。
+  玩家配置只写显式路径）、`platform/node/spec.ts`（读规范表）与 `platform/electron/**`（启动窗口 / 生成物）；
+  `core/**` 与 `main.ts` **零 fs**（隔离守卫会红）。renderer 的 `Host` 实现只发 `host.*` RPC，不碰 Node。
 - TypeScript 只写**可擦除语法**（类型标注 / `interface` / `type` / `import type`），由 Node 原生剥壳直接跑；
-  **只有 renderer 有构建步骤**（`vite build`，Pixi 的 ESM 与 DOM 代码），main / preload / core 都没有构建步骤。
+  **只有 renderer 有构建步骤**（`vite build`：Pixi 的 ESM、DOM 代码，以及一并打进去的 core）。main / preload /
+  CLI 都没有构建步骤；core 的源码仍是平台无关的一份。
 - 缺口不是失败：它是"spec 还缺哪一条 opcode 的语义"的机器清单；`--strict` 时才用退出码 1。
 - 前沿（"执行到哪一条 / 停在哪"）由 `tools/test/emulator-new-logo.assets.test.mjs` 的**棘轮**钉住：只许往前走。
 - 浮点池的"未写槽"规范不说初值：默认**响亮失败**；要跑真实脚本必须显式选 `--uninitialized-float zero`，

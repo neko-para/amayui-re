@@ -5,9 +5,11 @@
  *   平台侧要做的事全在 `BootHost`（`WindowHost & MessageHost & GraphicsHost`）里：
  *   核心只**发请求、收句柄 / 结果**；请求参数是**领域字段**（`clientWidth` / `style` / `menuResourceId`…），
  *   ⛔ 核心不认识任何 Win32 结构体 / 消息号 / D3D 结构体。
- * ★ 同步 / 异步的分界：`WindowHost` / `MessageHost` 是**同步**（建窗、收发消息、定时器都是即时的平台调用）；
- *   `GraphicsHost` 全是 `Promise` —— 设备创建要等平台的图形后端真的就绪（Electron 侧要等 renderer 的
- *   Pixi / WebGL 初始化）才知道成功与否；同步返回假句柄会让 `CORE-BOOT-GRAPHICS-INIT` 的
+ * ★ 同步 / 异步的分界：`WindowHost` 的**结果型**请求（查尺寸 / 建窗 / 取菜单）允许 `MaybePromise`
+ *   （Electron 的 renderer 桥是异步的；单元测试 fake 仍可同步返回）；`MessageHost` 的泵接口保持同步
+ *   （renderer 侧用本地队列）。`GraphicsHost` 全是 `Promise` —— 设备创建要等平台的图形后端真的就绪
+ *   （Electron 侧现在由 renderer 自己的 Pixi 立即回答；CLI 仍是 headless）。
+ *   同步返回假句柄会让 `CORE-BOOT-GRAPHICS-INIT` 的
  *   "失败 ⇒ 写错误通道 + 结束启动（不建主循环 / 不装载根脚本）"退化成事后补救。
  *   ⇒ `bootWindow` / `runStartup` / 图形阶段是 `async`，按 spec 次序 `await` 每一步。
  *
@@ -121,6 +123,15 @@ export const GRAPHICS_INIT_ERROR_TEXT = 'graphics-init-failed';
  * ⛔ 不比较、不运算、不解释（唯一例外是"是不是 null"）。
  */
 export type PlatformHandle = number;
+
+/**
+ * 平台调用的同步 / 异步分界：核心本身不关心宿主是同步返回还是 Promise。
+ * ★ 结果型请求（查尺寸 / 建窗 / 取菜单）允许 `Promise`：Electron 的 renderer 桥是异步的；
+ *   单元测试里的 fake 仍可直接返回同步值（`await` 对两者都成立）。
+ * ★ ⛔ 不要把它套到 `MessageHost` 的 `peekMessage` / `getMessage` 上：消息泵在每条指令前都要问，
+ *   renderer 侧用本地队列保持同步；异步只能用于启动期的一次性请求。
+ */
+export type MaybePromise<T> = T | Promise<T>;
 export type WindowClassHandle = PlatformHandle;
 export type WindowHandle = PlatformHandle;
 export type D3d9Handle = PlatformHandle;
@@ -238,13 +249,13 @@ export type PostableWindowMessage = 'activate-app';
  */
 export interface WindowHost {
   /** 查询窗口外框四类尺寸（窗口态建窗前显式调用） */
-  frameMetrics(): FrameMetrics;
+  frameMetrics(): MaybePromise<FrameMetrics>;
   /** 查询屏幕宽 / 高（占满屏态建窗前显式调用） */
-  screenSize(): ScreenSize;
+  screenSize(): MaybePromise<ScreenSize>;
   /** 注册窗口类；`null` = 注册失败（引擎看到的返回 0） */
-  registerWindowClass(params: WindowClassParams): WindowClassHandle | null;
+  registerWindowClass(params: WindowClassParams): MaybePromise<WindowClassHandle | null>;
   /** 建顶层窗口；`null` = 建窗失败（句柄为空） */
-  createWindow(params: WindowCreateParams): WindowHandle | null;
+  createWindow(params: WindowCreateParams): MaybePromise<WindowHandle | null>;
   /** `ShowWindow(window, showMode)`：显示方式**原样转发**入口参数，返回值不检查 */
   showWindow(window: WindowHandle, showMode: number): void;
   /** `UpdateWindow(window)`：返回值不检查 */
@@ -255,7 +266,7 @@ export interface WindowHost {
    * `GetMenu(window)`：取该窗口的菜单句柄（一次**显式**请求；窗口态装菜单前才调）。
    * ★ 引擎不检查空句柄：拿不到就原样把空值转给辅助入口（平台行为，不是引擎分支）。
    */
-  getMenu(window: WindowHandle): PlatformHandle | null;
+  getMenu(window: WindowHandle): MaybePromise<PlatformHandle | null>;
   /**
    * 辅助宿主模块的「操作菜单」入口（`dword_55E1B8`）的启动期调用：
    * `(类别号 1, hWnd, hMenu, 0)` —— 四个实参都是引擎原样转发的值。
@@ -574,9 +585,9 @@ export class WindowSession {
    */
   async runStartup(): Promise<void> {
     this.declareIgnored();
-    if (!this.registerWindowClass()) return;
-    if (!this.createWindow()) return;
-    this.attachWindow();
+    if (!(await this.registerWindowClass())) return;
+    if (!(await this.createWindow())) return;
+    await this.attachWindow();
     if (!(await this.initGraphics())) return;
     // 事件入口规则：启动期在**设备初始化之后、根脚本之前**直接请求过一次空闲抑制。
     this.record(RULE_EVENT_LOOP, 'set-thread-execution-state', {
@@ -588,7 +599,7 @@ export class WindowSession {
 
   /* ── 1. 窗口类注册（CORE-BOOT-WINDOW-CLASS） ─────────────────────────────── */
 
-  private registerWindowClass(): boolean {
+  private async registerWindowClass(): Promise<boolean> {
     this.record(RULE_WINDOW_CLASS, 'register-window-class', {
       className: WINDOW_CLASS_NAME,
       classStyle: WINDOW_CLASS_STYLE,
@@ -601,7 +612,7 @@ export class WindowSession {
       classExtra: WINDOW_CLASS_EXTRA,
       windowExtra: WINDOW_WINDOW_EXTRA,
     });
-    const cls = this.host.registerWindowClass({
+    const cls = await this.host.registerWindowClass({
       className: WINDOW_CLASS_NAME,
       classStyle: WINDOW_CLASS_STYLE,
       instance: this.entry.instance,
@@ -624,7 +635,7 @@ export class WindowSession {
 
   /* ── 2. 窗口创建（CORE-BOOT-WINDOW-CREATE） ──────────────────────────────── */
 
-  private createWindow(): boolean {
+  private async createWindow(): Promise<boolean> {
     // 形态判据：S = display:ScreenMode（缺键 ⇒ getInt 的 0）；ForceScreen 恰为 1 ⇒ S := 1 且先写回配置。
     let screenMode = this.config.getInt('display:ScreenMode');
     if (this.config.getInt('display:ForceScreen') === 1) {
@@ -636,13 +647,13 @@ export class WindowSession {
 
     let params: WindowCreateParams;
     if (screenMode !== 0) {
-      params = this.windowedCreateParams();
+      params = await this.windowedCreateParams();
     } else {
-      params = this.fullscreenCreateParams();
+      params = await this.fullscreenCreateParams();
     }
 
     this.record(RULE_WINDOW_CREATE, 'create-window', { ...params });
-    const window = this.host.createWindow(params);
+    const window = await this.host.createWindow(params);
     if (window === null) {
       // 共享出口：先释放引擎对象由调用方负责；本层不显示消息、不继续
       this.fail(RULE_WINDOW_CREATE, 'window-create-failed', null, null);
@@ -663,11 +674,11 @@ export class WindowSession {
    * ★ 这两个键在**索引装载时**就被引擎抄进缓存，建窗读的是缓存：**不判 0、没有兜底**
    *   ⇒ 值为 0 就原样建 0 客户区的窗口（由宿主决定怎么处理），⛔ 核心不编默认分辨率。
    */
-  private windowedCreateParams(): WindowCreateParams {
+  private async windowedCreateParams(): Promise<WindowCreateParams> {
     const clientWidth = this.config.getInt('set:WinX');
     const clientHeight = this.config.getInt('set:WinY');
     this.record(RULE_WINDOW_CREATE, 'measure-window-frame', {});
-    const frame = this.host.frameMetrics();
+    const frame = await this.host.frameMetrics();
     // ★ 引擎**纯手算**（⛔ 没有 AdjustWindowRect）：四类量都是"单边厚度"，
     //   宽 = 客户区宽 + 2 × 边框宽；高 = 客户区高 + 2 × 边框高 + 标题高 + 菜单高。
     const width = clientWidth + 2 * frame.frameWidth;
@@ -696,9 +707,9 @@ export class WindowSession {
   }
 
   /** 占满屏态：屏幕尺寸、`(0,0)`、另一套风格字、无菜单 */
-  private fullscreenCreateParams(): WindowCreateParams {
+  private async fullscreenCreateParams(): Promise<WindowCreateParams> {
     this.record(RULE_WINDOW_CREATE, 'measure-screen', {});
-    const screen = this.host.screenSize();
+    const screen = await this.host.screenSize();
     this.screenWidth = screen.width;
     this.screenHeight = screen.height;
     return {
@@ -727,7 +738,7 @@ export class WindowSession {
    * → `DrawMenuBar` → **最后**写服务窗口槽。
    * ★ 启动期**没有 `SetMenu`**：菜单是建窗时 `hMenu` 实参装上去的（`menuResourceId` 已表达）。
    */
-  private attachWindow(): void {
+  private async attachWindow(): Promise<void> {
     const window = this.window as WindowHandle;
     // 1. 显式解绑输入法（第二参数 0）；返回值不检查
     this.record(RULE_WINDOW_ATTACH, 'associate-input-context', { context: null });
@@ -736,7 +747,7 @@ export class WindowSession {
     //    占满屏态没有菜单 ⇒ 这三步都不做。
     if (this.screenMode !== 0) {
       this.record(RULE_WINDOW_ATTACH, 'get-menu', { window });
-      const menu = this.host.getMenu(window);
+      const menu = await this.host.getMenu(window);
       const params: OperateMenuParams = {
         category: MENU_CATEGORY_INSTALL,
         window,

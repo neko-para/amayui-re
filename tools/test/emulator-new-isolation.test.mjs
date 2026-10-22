@@ -90,6 +90,22 @@ test('★ 平台边界：只有 platform/** 允许 import node:*（核心的守�
   assert.match(main.text, /from '\.\/platform\/node\/cli\.ts'/, 'main.ts 只做入口：接 CLI 的 argv / 退出码');
 });
 
+test('★ 架构：core 在 renderer；main / window-host 不许 import core', () => {
+  const main = byName('platform/electron/main.ts');
+  assert.doesNotMatch(main.text, /from '\.\.\/\.\.\/core\//,
+    'main 只负责窗口 / IPC / 生命周期；core 必须跑在 renderer（见 platform/electron/renderer/session.ts）');
+
+  const windowHost = byName('platform/electron/window-host.ts');
+  assert.doesNotMatch(windowHost.text, /from '\.\.\/\.\.\/core\//,
+    'window-host 只转 boot.* 的领域参数，不许把 core 的 Machine / BootHost 拉回 main');
+
+  const session = byName('platform/electron/renderer/session.ts');
+  assert.match(session.text, /from '\.\.\/\.\.\/\.\.\/core\/runner\.ts'/,
+    'renderer 的 core 会话必须真的调用 analyzeInstall');
+  assert.match(session.text, /from '\.\.\/\.\.\/\.\.\/core\/window\.ts'/,
+    'renderer 的 core 会话必须真的调用 bootWindow');
+});
+
 test('★ 落点：规范由 platform/node/spec.ts 读；安装目录由 core/install.ts 走 Host 取件', () => {
   const spec = byName('platform/node/spec.ts');
   assert.match(spec.text, /'data', 'spec'/, '平台层 spec 的落点常量必须拼出 data/spec');

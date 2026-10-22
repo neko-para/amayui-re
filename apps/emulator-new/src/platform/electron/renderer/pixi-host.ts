@@ -1,10 +1,11 @@
 /**
  * `apps/emulator-new/src/platform/electron/renderer/pixi-host.ts` —— **渲染进程**的 Pixi 后端。
  *
- * 职责：把主进程发来的 `RenderCall` 翻译成 Pixi 操作，并把 `scene` / `status` 快照画出来。
- * ★ 只消费 `../protocol.ts` 的线协议；⛔ 不 import 核心（`src/core/**`）、⛔ 不 import `node:*`、
- *   ⛔ 不认识 Electron 的 `ipcMain` / 主进程结构。核心的 `RenderHost` 接口在这里**没有**出现：
- *   跨进程之后，主进程才是 `RenderHost` 的实现者，本文件只是它的远端执行器。
+ * 职责：把 `RenderCall` 翻译成 Pixi 操作，并把 `SceneSnapshot` 画出来。
+ * ★ 2026-10 之后 core 就在同一个 renderer 里：本文件**不再经过 IPC**，由 `session.ts` 的
+ *   `LocalRenderHost` 直接调用 `execute` / `applyScene` / `canvasSize`。
+ * ★ 仍然 ⛔ 不 import 核心（`src/core/**`）、⛔ 不 import `node:*`：它只消费 `../protocol.ts`
+ *   的可序列化视图，core 的 `RenderHost` 适配在 `session.ts` 里，不在这里。
  * ★ 快照里的 `width/height/left/top/right/bottom` 都是**客户区像素**，画布按 `init` 的尺寸、
  *   1:1 坐标绘制；Retina 由 Pixi 的 `resolution` 处理（画布的 CSS 尺寸仍是客户区像素）。
  *
@@ -452,7 +453,7 @@ export interface TextureSlotView {
 
 /** 初始化 / 日志的注入点（renderer.ts 把 `window.amayui.log` 接进来） */
 export interface PixiRenderHostOptions {
-  /** 写主进程日志（`window.amayui.log`）；⛔ 业务日志不走 `console` */
+  /** 写日志（`session.ts` 把它转成 `bridge.report`）；⛔ 业务日志不走 `console` */
   log?: (text: string) => void;
   /** 初始画布尺寸（`ready` 回报用；随后 `init` 会覆盖） */
   initialWidth?: number;
@@ -529,6 +530,11 @@ export class PixiRenderHost {
     return host;
   }
 
+  /** 当前画布像素尺寸（core 场景快照的客户区尺寸；init 之后 = 客户区） */
+  canvasSize(): { width: number; height: number } {
+    return { width: Math.round(this.app.renderer.width), height: Math.round(this.app.renderer.height) };
+  }
+
   /** `ready` 的回报体（Pixi / WebGL 已初始化） */
   readyInfo(): RendererReady {
     return {
@@ -543,7 +549,7 @@ export class PixiRenderHost {
 
   /**
    * 执行一次 `RenderCall`。
-   * @returns 回给主进程的 `result`（`undefined` = 只回 `ok: true`）
+   * @returns 调用的结果（`undefined` = 只表示成功）
    * @throws Error ⇒ 调用方回 `{ ok: false, error }`（平台失败，不是引擎错误）
    */
   async execute(call: RenderCall): Promise<unknown> {

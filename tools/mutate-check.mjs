@@ -1655,6 +1655,23 @@ const MUTATIONS = [
     what: '★ `string.set` / `array.lookup` 等内部记账不再归 internal ⇒ `--trace` 把已闭环的写入当外部副作用打印（刷屏且误导）',
   },
 
+  // ── emulator-new：renderer 的 Host 路径（★ 不换分隔符 ⇒ macOS 上把 `\` 当地名字符）──
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/paths.ts',
+    from: '  return decodeCp932(text).replace(/\\\\/g, sep);',
+    to: '  return decodeCp932(text); // 变异：不把引擎反斜杠换成宿主分隔符',
+    guard: 'tools/test/emulator-new-renderer-path.test.mjs',
+    what: '★ renderer 的 `pathFromEngine` 不换分隔符 ⇒ POSIX 上 `Eushully\\天結…` 变成一个带反斜杠的单层目录（配置路径分叉）',
+  },
+  // ── emulator-new：架构（★ core 搬回 main ⇒ renderer 只剩画布，逐指令 IPC 又会回来）──
+  {
+    file: 'apps/emulator-new/src/platform/electron/main.ts',
+    from: 'import { ElectronWindowHost } ' + 'fr' + "om './window-host.ts';",
+    to: 'import { Machine } ' + 'fr' + "om '../../core/machine.ts'; // 变异：main 重新 import core\nimport { ElectronWindowHost } " + "fr" + "om './window-host.ts';",
+    guard: 'tools/test/emulator-new-isolation.test.mjs',
+    what: '★ main 重新 import core ⇒ 架构守卫必须红（core 必须留在 renderer，main 只做窗口 / IPC / 生命周期）',
+  },
+
 ];
 
 /**

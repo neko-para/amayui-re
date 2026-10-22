@@ -1,33 +1,25 @@
 /**
  * `apps/emulator-new/src/platform/electron/renderer/renderer.ts` —— 渲染进程的入口。
  *
- * 职责（只有三件）：
+ * 职责：
  *  1. 等 Pixi / WebGL 就绪 → 调 `window.amayui.ready(...)`（失败则**不** ready，见协议）；
- *  2. 把主进程发来的 `RenderCall` 交给 `PixiRenderHost` 执行并 `reply`；
- *  3. 把 `PushMessage`（`scene` / `status` / `boot`）画出来，并把"忽略 / 未建模 / 未取证"显式
- *     写进右上角的 diagnostics 面板。
+ *  2. 接 main 的 `start`，把 core 会话（`./session.ts`）跑起来；
+ *  3. game 模式只留 canvas；diagnostics / boot / "忽略 / 未建模 / 未取证"投影给独立 debug 窗口
+ *     （同一个 bundle 的 `?debug=1` 分支，只读）。
  *
- * ★ `window.amayui` 由 **preload** 注入（`contextBridge`）。本文件 ⛔ 不 import Node / Electron /
- *   核心（`src/core/**`）：它只认 `../protocol.ts` 的线协议。
- * ★ 调用可能**比 Pixi 初始化更早**到达（主进程不该这么干，但协议没有禁止）⇒ 这里先注册 handler、
- *   把 call / push 排队，`ready` 之后再按序放行（⛔ 不丢消息、也不假装它没发生）。
- * ★ 没有 preload（例如直接用浏览器打开 `dist/renderer/index.html` 做手工验证）时，装一个**最小
- *   mock**：它按协议发一遍 init / boot / scene / getRenderSurface / drawText / present，
- *   面板上明写「mock，不是引擎观测」。
+ * ★ 2026-10 重构后，**core 在这个进程里**：`session.ts` 直接 import `core/**`，
+ *   文件 / 窗口请求走 `window.amayui.invoke`，渲染直接调本地 `PixiRenderHost`。
+ *   本文件只做 DOM / 诊断 / 启动接线。
+ * ★ `window.amayui` 由 preload 注入。没有 preload（浏览器手工打开 `dist/renderer/index.html`）时
+ *   装一个最小 mock：它只发 demo 启动指令，不是引擎观测。
  */
 
-import type {
-  AmayuiBridge,
-  PushMessage,
-  RenderCall,
-  RendererInit,
-  RenderResult,
-  SceneSnapshot,
-  SurfaceRef,
-} from '../protocol.ts';
+import type { AmayuiBridge, DebugEvent, RendererBootInfo, StartJob } from '../protocol.ts';
 import regularFontUrl from '../../../../../../corpus/assets/fonts/Amayui-CN_cnjp.ttf?url';
 import boldFontUrl from '../../../../../../corpus/assets/fonts/Amayui-CN_cnjp-Bold.ttf?url';
 import { DISCLOSURES, GAME_FONT_FAMILY, PixiRenderHost } from './pixi-host.ts';
+import type { HostDiagnostics } from './pixi-host.ts';
+import { runStartJob } from './session.ts';
 
 /* ─────────────────────────────── DOM ─────────────────────────────── */
 
@@ -92,12 +84,16 @@ function fmtColor(color: number): string {
 
 let host: PixiRenderHost | null = null;
 let bridge: AmayuiBridge;
-let bootInfo: (RendererInit & { title: string; ignored: string[] }) | null = null;
+let bootInfo: RendererBootInfo | null = null;
 let lastStatus: { level: 'info' | 'warn' | 'error'; text: string } | null = null;
 let statusCount = 0;
-/** Pixi 就绪前到达的调用 / 推送（按到达顺序排队） */
-const pendingCalls: RenderCall[] = [];
-const pendingPushes: PushMessage[] = [];
+/** debug 窗口：最近一次从 main 收到的 game renderer 诊断投影 */
+let lastDiagnostics: HostDiagnostics | null = null;
+let debugMode = false;
+let lastDiagnosticsSentAt = 0;
+const debugLogs: string[] = [];
+/** Pixi 就绪前到达的 start（main 不该这么干，但协议不禁止） */
+let pendingJob: StartJob | null = null;
 
 let diagnosticsBody: HTMLElement | null = null;
 let diagnosticsSummary: HTMLElement | null = null;
@@ -106,20 +102,36 @@ let fatalBox: HTMLElement | null = null;
 let fatalText: HTMLElement | null = null;
 let diagnosticsQueued = false;
 
-/** 每次调用 / 推送后刷新面板（rAF 合并；面板很便宜，但没必要一帧刷多次） */
+/**
+ * 每帧合并一次：
+ * - game 窗口：不画 DOM（面板隐藏），每 100ms 把 `HostDiagnostics` 投影发给 main；
+ * - debug 窗口：画收到的投影（只读）。
+ */
 function scheduleDiagnostics(): void {
   if (diagnosticsQueued) return;
   diagnosticsQueued = true;
   requestAnimationFrame(() => {
     diagnosticsQueued = false;
-    renderDiagnostics();
+    if (debugMode) {
+      renderDiagnostics();
+      return;
+    }
+    if (!host) return;
+    const now = Date.now();
+    if (now - lastDiagnosticsSentAt < 100) return;
+    lastDiagnosticsSentAt = now;
+    bridge.report({ kind: 'diagnostics', data: host.diagnostics() });
   });
 }
 
 function renderDiagnostics(): void {
-  if (!host || !diagnosticsBody) return;
-  const d = host.diagnostics();
+  if (!diagnosticsBody) return;
+  const d = lastDiagnostics ?? host?.diagnostics() ?? null;
   const body = diagnosticsBody;
+  if (d === null) {
+    body.replaceChildren(textEl('p', 'muted', '等待 game renderer 的第一份诊断投影…'));
+    return;
+  }
   body.replaceChildren();
 
   const modeShort = d.init ? (d.init.screenMode === 0 ? '占满屏' : '窗口') : '未 init';
@@ -165,7 +177,7 @@ function renderDiagnostics(): void {
       `boot.ignored（${ignored.length} 条）`,
       ignored.length > 0
         ? list(ignored)
-        : textEl('p', 'muted', bootInfo ? '（主进程声明没有忽略项）' : '主进程还没推 boot'),
+        : textEl('p', 'muted', bootInfo ? '（core 声明没有忽略项）' : 'core 还没完成 boot'),
     ),
   );
 
@@ -287,6 +299,10 @@ function renderDiagnostics(): void {
   if (d.notes.length > 0) {
     body.appendChild(section('最近日志', list(d.notes.slice(-12).reverse())));
   }
+
+  if (debugLogs.length > 0) {
+    body.appendChild(section('debug 事件日志', list(debugLogs.slice(-12).reverse())));
+  }
 }
 
 function showFatal(message: string): void {
@@ -295,57 +311,21 @@ function showFatal(message: string): void {
   fatalBox.hidden = false;
 }
 
-/* ─────────────────────────────── 线协议 ─────────────────────────────── */
+/* ─────────────────────────────── 启动接线 ─────────────────────────────── */
 
-function replySafely(result: RenderResult): void {
-  try {
-    bridge.reply(result);
-  } catch (error) {
-    // 回执本身失败没法再回执：只写控制台（不是业务结论）
-    console.error('[amayui renderer] reply 失败', error);
-  }
-}
-
-async function handleCall(call: RenderCall): Promise<void> {
+/** main 的 start：Pixi 还没建好就先存着，建好后立刻跑。 */
+function startJob(job: StartJob): void {
   if (!host) {
-    pendingCalls.push(call);
+    pendingJob = job;
     return;
   }
-  try {
-    const result = await host.execute(call);
-    if (result === undefined) replySafely({ id: call.id, ok: true });
-    else replySafely({ id: call.id, ok: true, result });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    replySafely({ id: call.id, ok: false, error: message });
-    try {
-      bridge.log(`[${call.method}#${call.id}] 平台失败：${message}`);
-    } catch {
-      /* 日志通道也失败就算了（不要因为日志炸掉渲染） */
-    }
-  }
-  scheduleDiagnostics();
-}
-
-function handlePush(message: PushMessage): void {
-  if (!host) {
-    pendingPushes.push(message);
-    return;
-  }
-  switch (message.kind) {
-    case 'scene':
-      host.applyScene(message.scene);
-      break;
-    case 'status':
-      lastStatus = { level: message.level, text: message.text };
-      statusCount += 1;
-      break;
-    case 'boot':
-      bootInfo = message.info;
-      document.title = `${message.info.title} — amayui renderer`;
-      break;
-  }
-  scheduleDiagnostics();
+  void runStartJob(job, bridge, host, {
+    boot(info) {
+      bootInfo = info;
+      document.title = `${info.title} — amayui renderer`;
+      scheduleDiagnostics();
+    },
+  });
 }
 
 /* ─────────────────────────────── 启动 ─────────────────────────────── */
@@ -363,14 +343,12 @@ async function loadGameFont(): Promise<boolean> {
     ];
     for (const face of faces) document.fonts.add(face);
     await Promise.all(faces.map((face) => face.load()));
-    bridge.log(
-      `Amayui CN 已加载（Regular + Bold，document.fonts.check=${document.fonts.check('24px "' + GAME_FONT_FAMILY + '"')}）`,
-    );
+    bridge.report({ kind: 'log', level: 'info', text: `Amayui CN 已加载（Regular + Bold，document.fonts.check=${document.fonts.check('24px "' + GAME_FONT_FAMILY + '"')}）` });
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     try {
-      bridge.log(`Amayui CN 字体加载失败 ⇒ 文字会退回 sans-serif（${message}）`);
+      bridge.report({ kind: 'log', level: 'warn', text: `Amayui CN 字体加载失败 ⇒ 文字会退回 sans-serif（${message}）` });
     } catch {
       /* ignore */
     }
@@ -386,25 +364,18 @@ async function main(): Promise<void> {
   fatalText = mustGetById('fatal-text');
   const hostElement = mustGetById('stage-host');
 
-  const toggle = mustGetById('diagnostics-toggle');
-  toggle.addEventListener('click', () => {
-    if (!diagnosticsRoot) return;
-    const collapsed = diagnosticsRoot.classList.toggle('is-collapsed');
-    toggle.textContent = collapsed ? '展开' : '折叠';
-  });
+  // ★ 主窗口只留 canvas：diagnostics 面板搬到独立的 debug 窗口（`?debug=1`）。
+  diagnosticsRoot.hidden = true;
 
-  // ① 先拿 bridge（没有 preload 就装 mock），再把 handler 挂上：早到的调用只会排队，不会丢。
+  // ① 先拿 bridge（没有 preload 就装 mock），再挂 start handler；早到的 start 会排队。
   bridge = 'amayui' in window ? window.amayui : createMockBridge();
-  bridge.onCall((call) => {
-    void handleCall(call);
-  });
-  bridge.onPush(handlePush);
+  bridge.onStart(startJob);
 
   // ② 先加载统一字体，再建 Pixi（Pixi 的 Text 会缓存首次量字时的字体度量）。
   const fontLoaded = await loadGameFont();
   if (!fontLoaded) {
     try {
-      bridge.log('Amayui CN 未加载：所有文字会使用 sans-serif 兜底（这不是规格行为）');
+      bridge.report({ kind: 'log', level: 'warn', text: 'Amayui CN 未加载：所有文字会使用 sans-serif 兜底（这不是规格行为）' });
     } catch {
       /* ignore */
     }
@@ -415,7 +386,7 @@ async function main(): Promise<void> {
     host = await PixiRenderHost.create(hostElement, {
       log: (text) => {
         try {
-          bridge.log(text);
+          bridge.report({ kind: 'log', level: 'info', text });
         } catch {
           /* 同上：日志不能影响渲染 */
         }
@@ -425,180 +396,138 @@ async function main(): Promise<void> {
     const message = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error);
     showFatal(`Pixi / WebGL 初始化失败：\n${message}`);
     try {
-      bridge.log(`Pixi 初始化失败（不会 ready）：${message}`);
+      bridge.report({ kind: 'log', level: 'error', text: `Pixi 初始化失败（不会 ready）：${message}` });
     } catch {
       /* ignore */
     }
     return;
   }
 
-  // ④ 放行排队中的消息（顺序 = 到达顺序）
-  for (const call of pendingCalls.splice(0)) void handleCall(call);
-  for (const message of pendingPushes.splice(0)) handlePush(message);
+  // ④ 放行排队中的 start（顺序 = 到达顺序）
+  if (pendingJob !== null) {
+    const job = pendingJob;
+    pendingJob = null;
+    startJob(job);
+  }
   scheduleDiagnostics();
 
   // ⑤ 就绪回报：只调一次
   bridge.ready(host.readyInfo());
+  scheduleDiagnostics();
+  // game 窗口不画 diagnostics；低频把投影送给 debug 窗口（100ms 节流在 scheduleDiagnostics 里）。
+  setInterval(() => scheduleDiagnostics(), 200);
+}
+
+/* ═══════════════════════════ debug 窗口（只读诊断） ═══════════════════════════ */
+
+function setupDebugDom(): void {
+  diagnosticsRoot = mustGetById('diagnostics');
+  diagnosticsBody = mustGetById('diagnostics-body');
+  diagnosticsSummary = mustGetById('diagnostics-summary');
+  fatalBox = mustGetById('fatal');
+  fatalText = mustGetById('fatal-text');
+  diagnosticsRoot.hidden = false;
+  const stage = document.getElementById('stage-host');
+  if (stage !== null) stage.hidden = true;
+  document.body.dataset.debug = '1';
+  document.title = 'amayui debug — 只读诊断';
+
+  const toggle = mustGetById('diagnostics-toggle');
+  toggle.addEventListener('click', () => {
+    if (!diagnosticsRoot) return;
+    const collapsed = diagnosticsRoot.classList.toggle('is-collapsed');
+    toggle.textContent = collapsed ? '展开' : '折叠';
+  });
+}
+
+function handleDebugEvent(event: DebugEvent): void {
+  switch (event.kind) {
+    case 'diagnostics':
+      lastDiagnostics = event.data as HostDiagnostics;
+      break;
+    case 'boot':
+      bootInfo = event.info;
+      document.title = `amayui debug — ${event.info.title}`;
+      break;
+    case 'status':
+      lastStatus = { level: event.level, text: event.text };
+      statusCount += 1;
+      break;
+    case 'log':
+      debugLogs.push(`[${event.level}] ${event.text}`);
+      if (debugLogs.length > 100) debugLogs.shift();
+      break;
+  }
+  scheduleDiagnostics();
+}
+
+async function debugMain(): Promise<void> {
+  debugMode = true;
+  setupDebugDom();
+  bridge = 'amayui' in window ? window.amayui : createMockBridge();
+  bridge.onDebug(handleDebugEvent);
+  renderDiagnostics();
   requestAnimationFrame(() => renderDiagnostics());
 }
 
-void main();
+const isDebugWindow = new URLSearchParams(window.location.search).has('debug');
+if (isDebugWindow) void debugMain();
+else void main();
 
 /* ═══════════════════════════ 手工验证用的 mock（⛔ 不是引擎观测） ═══════════════════════════ */
 
 /**
- * 没有 `window.amayui` 时装一个**最小 mock**：它扮演主进程，按协议发一遍
- * `init → boot → scene → getRenderSurface → drawText → present`。
- *
- * ★ 用途只有"手工看一眼渲染进程能不能跑"：`vite build` 之后用浏览器打开
- *   `dist/renderer/index.html`（或 `pnpm --filter @amayui/emulator-new exec vite --config vite.config.ts`
- *   的 dev server），面板与画面都该出来。
- * ★ 场景里的数字是**编的**（纹理 8642 / 槽 9 根本不存在），⛔ 不许拿它当"引擎行为"的证据，
- *   也不许把它的输出写进 spec / 台账。面板顶部的 status 会明写这一点。
+ * 没有 `window.amayui` 时（浏览器里直接打开 `dist/renderer/index.html`）用的最小 bridge。
+ * ★ 它只发一条 **demo** 启动指令，让 core 的真实 handlers + Pixi 走一遍；
+ *   没有文件系统、没有安装目录，数字全部是 demo 合成配置。
+ * ★ ⛔ 不许把它的输出当引擎观测 / spec 结论。
  */
 function createMockBridge(): AmayuiBridge {
-  const callHandlers: ((call: RenderCall) => void)[] = [];
-  const pushHandlers: ((message: PushMessage) => void)[] = [];
-  const waiting = new Map<number, (result: RenderResult) => void>();
-  let nextId = 1;
+  const startHandlers: ((job: StartJob) => void)[] = [];
   let started = false;
-
-  const emitPush = (message: PushMessage): void => {
-    for (const handler of pushHandlers) handler(message);
+  const job: StartJob = {
+    mode: 'demo',
+    configKeys: { defaults: [], ini: [], persist: [] },
+    platform: { sep: '/', homeDir: '', env: { APPDATA: null, XDG_CONFIG_HOME: null } },
+    smoke: false,
   };
 
-  const invoke = (call: CallWithoutId): Promise<RenderResult> =>
-    new Promise((resolve) => {
-      const id = nextId;
-      nextId += 1;
-      waiting.set(id, resolve);
-      const full = { ...call, id } as unknown as RenderCall;
-      for (const handler of callHandlers) handler(full);
-    });
-
-  const bridge: AmayuiBridge = {
+  return {
     ready: () => {
       if (started) return;
       started = true;
-      window.setTimeout(() => {
-        void runMockScript(invoke, emitPush);
-      }, 0);
+      queueMicrotask(() => {
+        for (const handler of startHandlers) handler(job);
+      });
     },
-    onCall: (handler) => {
-      callHandlers.push(handler);
+    onStart: (handler) => {
+      startHandlers.push(handler);
+      if (started) queueMicrotask(() => handler(job));
     },
-    onPush: (handler) => {
-      pushHandlers.push(handler);
+    onWindowMessage: () => {
+      /* mock 没有窗口消息 */
     },
-    reply: (result) => {
-      const resolve = waiting.get(result.id);
-      if (!resolve) return;
-      waiting.delete(result.id);
-      resolve(result);
+    onDebug: () => {
+      /* mock 没有 game renderer 的诊断投影 */
     },
-    log: (text) => {
-      console.info('[amayui mock]', text);
+    invoke: async (method) => {
+      switch (method) {
+        case 'boot.frameMetrics':
+          return { frameWidth: 0, frameHeight: 0, captionHeight: 0, menuHeight: 0 };
+        case 'boot.screenSize':
+          return { width: window.innerWidth, height: window.innerHeight };
+        case 'boot.registerWindowClass':
+        case 'boot.createWindow':
+          return 1;
+        case 'boot.getMenu':
+          return null;
+        default:
+          return undefined;
+      }
+    },
+    report: (event) => {
+      if (event.kind === 'log') console.info('[amayui mock]', event.text);
+      else if (event.kind === 'done' && !event.ok) console.error('[amayui mock]', event.error);
     },
   };
-  return bridge;
-}
-
-/** `RenderCall` 去掉 `id` 后的**分配式**联合（`Omit<union>` 会把成员压扁，拿不到 method↔params 的对应） */
-type CallWithoutId = RenderCall extends infer C ? (C extends RenderCall ? Omit<C, 'id'> : never) : never;
-
-/** mock 的脚本（见 `createMockBridge` 的说明：⛔ 这是编的数据） */
-async function runMockScript(
-  invoke: (call: CallWithoutId) => Promise<RenderResult>,
-  emitPush: (message: PushMessage) => void,
-): Promise<void> {
-  const init: RendererInit = {
-    width: 960,
-    height: 540,
-    screenMode: 1,
-    fullscreenPresent: false,
-    background: 0x0e1116,
-  };
-
-  await invoke({ method: 'init', params: init });
-  emitPush({
-    kind: 'boot',
-    info: {
-      ...init,
-      title: 'AMAYUI RENDERER（mock 手工验证）',
-      ignored: [
-        '（mock）真实 boot.ignored 由主进程按 core/window.ts 的 ignored 推来：顶部菜单 / IME / 图标 / 风格位…',
-        '（mock）这里没有安装目录，也没有执行任何脚本 —— 画面上的每个数字都是编的',
-      ],
-    },
-  });
-  emitPush({
-    kind: 'status',
-    level: 'warn',
-    text: '（mock）这是浏览器里的 mock 场景，不是从安装目录读出的引擎状态；⛔ 不要当观测证据',
-  });
-
-  const scene: SceneSnapshot = {
-    width: 960,
-    height: 540,
-    textures: [
-      { id: 0, kind: 'normal', width: 360, height: 180, file: 8642, blank: 0 },
-      { id: 1, kind: 'normal', width: 200, height: 120, file: -1, blank: 1 },
-      { id: 2, kind: 'divided', width: 64, height: 64, file: 17, blank: 0 },
-    ],
-    drawItems: [
-      { key: 1, flags: 1, textureId: 0, left: 60, top: 60, right: 420, bottom: 240, color: 0xffffffff, aux: [0, 0, 0] },
-      { key: 2, flags: 1, textureId: 1, left: 500, top: 60, right: 700, bottom: 180, color: 0xff66ccff, aux: [0, 0, 0] },
-      // 故意引用一个不存在的槽：验证"无纹理槽"占位块
-      { key: 3, flags: 1, textureId: 9, left: 500, top: 220, right: 700, bottom: 320, color: -1, aux: [0, 0, 0] },
-      // flags 位 0 = 0 ⇒ 无效绘制项，不该出现在画面上
-      { key: 4, flags: 0, textureId: 2, left: 60, top: 300, right: 124, bottom: 364, color: -1, aux: [0, 0, 0] },
-    ],
-    blend: { mode: 0, color: -1 },
-    target: -1,
-  };
-
-  emitPush({ kind: 'scene', scene });
-  await invoke({ method: 'present', params: {} });
-
-  // 往槽 0 画一段 Shift-JIS 文本（'こんにちは' 的字节序列），再把场景推一次让 Sprite 用上新像素。
-  // ★ 这里只给协议现有字段 ⇒ 走 `Font::init` 的默认值：字号 24、主色白、副色黑（都是 24 位 RGB）、
-  //   绘制模式 1（右下阴影）。想手工验证其它分支就显式给 `size` / `drawMode` / `shadowColor` / `weight`。
-  const surface = await invoke({ method: 'getRenderSurface', params: { textureId: 0 } });
-  if (surface.ok) {
-    const ref = surface.result as SurfaceRef;
-    await invoke({
-      method: 'drawText',
-      params: {
-        textureId: 0,
-        x: 16,
-        y: 16,
-        // こんにちは（cp932 字节；核心给的是 latin1 字节串，每个 charCode 0..255）
-        text: '\x82\xb1\x82\xf1\x82\xc9\x82\xbf\x82\xcd',
-        font: null,
-        color: null,
-      },
-    });
-    emitPush({ kind: 'scene', scene });
-    await invoke({ method: 'present', params: {} });
-
-    // 演示"目标是纹理"：把槽 1 设为目标 → present 渲染进它的 RenderTexture（画布保持上一帧）
-    const surface1 = await invoke({ method: 'getRenderSurface', params: { textureId: 1 } });
-    if (surface1.ok) {
-      const ref1 = surface1.result as SurfaceRef;
-      await invoke({ method: 'setRenderTarget', params: { surfaceId: ref1.surfaceId } });
-      emitPush({ kind: 'scene', scene: { ...scene, target: 1 } });
-      await invoke({ method: 'present', params: {} });
-      await invoke({ method: 'releaseSurface', params: { surfaceId: ref1.surfaceId } });
-      await invoke({ method: 'setRenderTarget', params: { surfaceId: 0 } });
-      emitPush({ kind: 'scene', scene });
-      await invoke({ method: 'present', params: {} });
-    }
-    await invoke({ method: 'releaseSurface', params: { surfaceId: ref.surfaceId } });
-  }
-
-  emitPush({
-    kind: 'status',
-    level: 'info',
-    text: '（mock）协议调用走完：init / boot / scene / getRenderSurface / drawText / setRenderTarget / releaseSurface / present',
-  });
 }

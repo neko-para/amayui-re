@@ -44,7 +44,7 @@
 ## 3. 语言与代码口径
 
 * **TypeScript 只出现在两类落点**：① **自带工具链的 app** —— `apps/emulator`、`apps/emulator-new`
-  （只读 `data/spec` 的参考实现，无构建）与 `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）；
+  （只读 `data/spec` 的参考实现；Node 侧无构建，renderer 走 `vite build`）与 `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）；
   ② **`packages/age-format`**
   （源码是 `.mts` 的**一份真源**，见下 —— 它**没有**自己的工具链，只靠根上的 `tsc --noEmit` 检查）。
   仓库内**其余一切 JS 一律 `.mjs`**。★ 新增一个带工具链的 app 就写在这里。
@@ -89,10 +89,13 @@
   （与 `packages/age-format` 的分工同形：那份给工具侧 `@types/node`，模拟器核心给 `types: []`。）
   ★ 前端工程 `include` 只有 `frontends/**`，但通过 import 会把 `src/**` 一起拉进来检查 —— 这是**有意的**：
   "核心 + 前端"合起来必须自洽；核心的守卫不受影响（`tsconfig.json` 仍只带 `src/**` 且 `types: []`）。
-  `.ts`/`.mts` 仍然由 **Node 原生 type stripping** 直接跑 ⇒ **main / preload / core 没有构建步骤**，`tsc` 的唯一职责是"把类型写错变成红灯"。
-  ★ **唯一例外是 Electron renderer**：Chromium 不跑 TypeScript，Pixi 是浏览器 ESM ⇒ `apps/emulator-new` 的
-  `src/platform/electron/renderer/**` 由 `vite build` 产出 `dist/renderer/**`（生成物、已 gitignore）；
-  这**不**改变 core / Node 平台 / main / preload 的"无构建"口径。
+  `.ts`/`.mts` 仍然由 **Node 原生 type stripping** 直接跑 ⇒ **Node 侧的 main / preload / CLI 没有构建步骤**，
+  `tsc` 的唯一职责是"把类型写错变成红灯"。
+  ★ **核心的落点是 Electron renderer**（2026-10 架构调整）：`src/core/**` 的源码仍然无独立构建，
+  但它作为 renderer 的依赖由 `vite build` 一起打包；main / preload 不再运行 core。
+  ★ **唯一需要构建的入口是 Electron renderer**：Chromium 不跑 TypeScript，Pixi 是浏览器 ESM ⇒ `apps/emulator-new` 的
+  `src/platform/electron/renderer/**`（含它 import 的 core）由 `vite build` 产出 `dist/renderer/**`（生成物、已 gitignore）；
+  Node 平台 / CLI 的"无构建"口径不变。
   `erasableSyntaxOnly` 把"Node 剥壳不支持的语法"（`enum`/`namespace`/参数属性/装饰器）提前变成类型错误。
   ★ **模拟器的工程会把 `age-format` 的源码一起拉进来**（它 `import` 它）—— 这是**有意的**：
   一条命令就能看见"消费方 + 被消费方的类型是否自洽"，不需要给 `age-format` 做 `composite` 工程引用
@@ -169,7 +172,7 @@ pnpm test:list                  # 看分级集合与每个文件的声明（先�
 pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
 pnpm test:mutation              # ★ **守卫自检**：改坏一处关键常量 ⇒ 确认对应守卫**当场红**（红得有意义）
-pnpm typecheck                  # ★ `tsc --noEmit`，**六个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端 + `apps/emulator-new` 核心 + `apps/emulator-new` 渲染进程 + `apps/emulator-new` 整个 app）；不产出 ⇒ main / preload / core 仍无构建步骤
+pnpm typecheck                  # ★ `tsc --noEmit`，**六个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端 + `apps/emulator-new` 核心 + `apps/emulator-new` 渲染进程 + `apps/emulator-new` 整个 app）；不产出 ⇒ Node 侧 main / preload / CLI 仍无构建步骤（core 随 renderer 一起打包）
 ```
 
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`

@@ -2,8 +2,8 @@
  * apps/emulator-new/src/platform/electron/renderer/style.css
  *
  * ★ 只服务 diagnostics 面板与画布容器；没有主题系统。字体统一使用 Amayui CN（更纱黑体 cnjp）。
- * ★ 面板用 `position: fixed` + 半透明底：它叠在渲染输出上，**不改画布尺寸**
- *   （画布尺寸是 `init` 给的客户区像素，⛔ 不要用面板撑开 body 再让 canvas 跟着变）。
+ * ★ game 窗口：面板 `hidden`，只留 canvas。
+ * ★ debug 窗口（`?debug=1`）：隐藏 `#stage-host`，面板改为普通文档流（见文件末尾覆盖）。
  */
 
 :root {
@@ -225,4 +225,22 @@ body {
 .fatal__hint {
   max-width: 70ch;
   color: #c9b8b8;
+}
+
+/* ── debug 窗口（?debug=1）：只读诊断面板；game 窗口不显示它 ── */
+body[data-debug='1'] {
+  overflow: auto;
+  background: #0b0f14;
+}
+
+body[data-debug='1'] #stage-host {
+  display: none;
+}
+
+body[data-debug='1'] .diagnostics {
+  position: static;
+  width: auto;
+  max-height: none;
+  margin: 8px;
+  backdrop-filter: none;
 }

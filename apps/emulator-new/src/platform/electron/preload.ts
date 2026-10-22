@@ -1,50 +1,47 @@
 /**
- * Electron **preload**：把主进程 ↔ 渲染进程的**线协议**（`protocol.ts` 的 `AmayuiBridge`）
- * 用 `contextBridge` 暴露成渲染进程里的 `window.amayui`。
+ * Electron **preload**：把 `protocol.ts` 的 `AmayuiBridge` 用 `contextBridge` 暴露成
+ * renderer 里的 `window.amayui`。
  *
- * ★ 本文件**只做转发**：不认识业务、不解释场景快照、不做渲染。渲染进程的 `PixiRenderHost`
- *   调 `ready` / `onCall` / `reply` / `onPush` / `log`，主进程的 `ElectronRenderHost` 处理另一头。
- * ★ `contextIsolation: true` + `nodeIntegration: false`：渲染进程拿不到 `require` / `ipcRenderer`，
- *   只有 `window.amayui` 这一组函数（参数与返回值都必须是可结构化克隆的纯数据 —— 协议里没有平台对象）。
- * ★ 频道名是**字面量**，与 `render-host.ts` 的 `CHANNEL_*` 常量必须一致。
- *   ⛔ 本文件不能 import 那份常量：那会把主进程的 `ipcMain` 拉进渲染进程的 preload。
- * ★ 为什么 preload 是 `.ts` 而不用构建：Electron 45 的 Node 24 直接跑 `.ts`（类型剥壳）。
- *   静态 `import` 只保留在**运行期**需要的那一条（`electron`）；协议类型用 `import type`（整条擦掉）。
+ * ★ 只做转发：不认识 core、不认识游戏语义、不做渲染。core 已经在 renderer 里，
+ *   所以跨线的是「host / boot 请求 + 窗口消息 + 事件」，不是逐次绘制调用。
+ * ★ `contextIsolation: true` + `nodeIntegration: false`：renderer 拿不到 `require` / `ipcRenderer`。
+ * ★ 频道名是字面量；main 侧 `window-host.ts` 用同一组字符串。
+ * ★ preload 是 `.ts`，由 Electron 45 的 Node 24 直接剥类型；静态 import 只保留运行期需要的
+ *   `electron`，其余全是 `import type`。
  */
 import { contextBridge, ipcRenderer } from 'electron';
 
-import type { AmayuiBridge, PushMessage, RenderCall, RenderResult, RendererReady } from './protocol.ts';
+import type { AmayuiBridge, DebugEvent, RendererEvent, RendererReady, StartJob, WindowMessage } from './protocol.ts';
 
-const CHANNEL_RENDER_READY = 'renderer:ready';
-const CHANNEL_RENDER_CALL = 'render:call';
-const CHANNEL_RENDER_RESULT = 'render:result';
-const CHANNEL_RENDER_PUSH = 'render:push';
-const CHANNEL_RENDERER_LOG = 'renderer:log';
+const CHANNEL_BRIDGE_INVOKE = 'bridge:invoke';
+const CHANNEL_BRIDGE_START = 'bridge:start';
+const CHANNEL_BRIDGE_WINDOW = 'bridge:window';
+const CHANNEL_RENDERER_EVENT = 'renderer:event';
+const CHANNEL_DEBUG_EVENT = 'debug:event';
 
 const bridge: AmayuiBridge = {
-  /** 渲染进程初始化完成（Pixi / WebGL 就绪）后调一次 */
   ready(info: RendererReady): void {
-    ipcRenderer.send(CHANNEL_RENDER_READY, info);
+    ipcRenderer.send(CHANNEL_RENDERER_EVENT, { kind: 'ready', info } satisfies RendererEvent);
   },
 
-  /** 主进程发来的调用（渲染进程的回执走 `reply`） */
-  onCall(handler: (call: RenderCall) => void): void {
-    ipcRenderer.on(CHANNEL_RENDER_CALL, (_event, call: RenderCall) => { handler(call); });
+  onStart(handler: (job: StartJob) => void): void {
+    ipcRenderer.on(CHANNEL_BRIDGE_START, (_event, job: StartJob) => { handler(job); });
   },
 
-  /** 回复一次调用（`id` 必须原样回传；`ok: false` 只表示平台实现失败） */
-  reply(result: RenderResult): void {
-    ipcRenderer.send(CHANNEL_RENDER_RESULT, result);
+  onWindowMessage(handler: (message: WindowMessage) => void): void {
+    ipcRenderer.on(CHANNEL_BRIDGE_WINDOW, (_event, message: WindowMessage) => { handler(message); });
   },
 
-  /** 主进程推来的状态（场景快照 / 状态文本 / 启动信息；不需要回执） */
-  onPush(handler: (message: PushMessage) => void): void {
-    ipcRenderer.on(CHANNEL_RENDER_PUSH, (_event, message: PushMessage) => { handler(message); });
+  invoke(method, params): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL_BRIDGE_INVOKE, method, params) as Promise<unknown>;
   },
 
-  /** 日志（写到主进程 stdout；⛔ 不往渲染进程控制台写业务结论） */
-  log(text: string): void {
-    ipcRenderer.send(CHANNEL_RENDERER_LOG, text);
+  report(event: RendererEvent): void {
+    ipcRenderer.send(CHANNEL_RENDERER_EVENT, event);
+  },
+
+  onDebug(handler: (event: DebugEvent) => void): void {
+    ipcRenderer.on(CHANNEL_DEBUG_EVENT, (_event, payload: DebugEvent) => { handler(payload); });
   },
 };
 

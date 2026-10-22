@@ -1,15 +1,19 @@
 /**
- * Electron 主进程 ↔ 渲染进程（Pixi）之间的**线协议**。
+ * Electron **主进程 ↔ 渲染进程**之间的桥接协议。
  *
- * ★ 本文件只有类型（`interface` / `type` / `export type`），没有运行期代码，也没有 Node / DOM import：
- *   主进程、preload、renderer 三边共用同一份契约，避免各写一套字符串。
- * ★ 分工：
- *   - 主进程的 `ElectronRenderHost` 实现核心的 `RenderHost`，把每次请求翻译成 `RenderCall`；
- *   - preload 只做 `contextBridge` 转发，不认识业务；
- *   - renderer 的 `PixiRenderHost` 执行 `RenderCall` 并 `reply`。
- * ★ 平台对象（`RenderTexture` / 后缓冲）**不能跨进程**：跨线的是数字 `surfaceId`；
- *   主进程把 `surfaceId` 包成核心的 `SurfaceHandle`（不透明），核心原样传回。
+ * ★ 架构（2026-10 重构后）：**core 整份跑在 renderer 里**。
+ *   - renderer：安装取件（经 `Host` 桥）、配置、启动顺序、VM、场景、Pixi 呈现；
+ *   - main：只保留 Electron 窗口壳、文件系统 / 规范表读取、进程生命周期。
+ *   因此跨线的不再是"每个绘制调用"，而是"文件 / 窗口请求 + 事件"。
+ *
+ * ★ 本文件只有类型（`interface` / `type` / `export type`），没有运行期代码；
+ *   main / preload / renderer 三边共用同一份契约。平台对象（RenderTexture / BrowserWindow）
+ *   一律不跨线：跨线的只有数字句柄与可结构化克隆的纯数据。
  */
+import type { ConfigKeySchema, OpcodeRow } from '../../core/spec.ts';
+import type { WindowMessage } from '../../core/window.ts';
+
+export type { WindowMessage };
 
 /** 渲染进程启动后回给主进程的“我准备好了”（Pixi / WebGL 已初始化） */
 export interface RendererReady {
@@ -30,6 +34,12 @@ export interface RendererInit {
   fullscreenPresent: boolean;
   /** 背景色（ARGB 的 0xRRGGBB；窗口背景刷是黑色） */
   background: number;
+}
+
+/** 启动信息（diagnostics 用；不是规范结论） */
+export interface RendererBootInfo extends RendererInit {
+  title: string;
+  ignored: string[];
 }
 
 /** 一份纹理槽的可序列化快照（像素不在核心里，见 `60-ops-texture.md`） */
@@ -60,7 +70,7 @@ export interface DrawItemSnapshot {
   aux: [number, number, number];
 }
 
-/** 场景快照：主进程在每个渲染节拍推给 renderer（不是规范状态，只是可序列化视图） */
+/** 场景快照：renderer 内部的 core → Pixi 视图（不是规范状态） */
 export interface SceneSnapshot {
   /** 客户区尺寸（像素；窗口态 = set:WinX/Y，占满屏 = 屏幕） */
   width: number;
@@ -69,11 +79,107 @@ export interface SceneSnapshot {
   drawItems: DrawItemSnapshot[];
   /** 场景混合（`0x33f` 的两个格；模式原样，颜色高 8 位 = 透明度） */
   blend: { mode: number; color: number };
-  /** 当前渲染目标：纹理槽号，或 -1 = 后缓冲（与核心 `RENDER_TARGET_BACK_BUFFER` 一致） */
+  /** 当前渲染目标：纹理槽号，或 -1 = 后缓冲 */
   target: number;
 }
 
-/** 主进程 → renderer 的一次调用（`id` 由主进程递增；renderer 原样回传） */
+/** 平台路径 / 环境（renderer 里 `Host` 的同步部分用；异步 IO 走 `invoke`） */
+export interface PlatformInfo {
+  /** 宿主路径分隔符（POSIX `/`；Windows `\`） */
+  sep: string;
+  homeDir: string;
+  /** 只传核心可能问的变量；缺省 = null（与 `Host.env` 同口径） */
+  env: { APPDATA: string | null; XDG_CONFIG_HOME: string | null };
+}
+
+/** 一次 `--install` 的启动参数（main 读 spec 后发给 renderer） */
+export interface InstallJob {
+  mode: 'install';
+  installDir: string;
+  rootId: number;
+  key: number;
+  configPath: string | null;
+  /** `data/spec/format/opcode-table.json` 的行（纯数据） */
+  opcodes: OpcodeRow[];
+  configKeys: ConfigKeySchema;
+  platform: PlatformInfo;
+}
+
+/** 一次 `--demo` / `--smoke` 的启动参数（不读游戏安装） */
+export interface DemoJob {
+  mode: 'demo';
+  configKeys: ConfigKeySchema;
+  platform: PlatformInfo;
+  smoke: boolean;
+}
+
+export type StartJob = InstallJob | DemoJob;
+
+/** renderer → main 的事件（`ready` / 日志 / 启动信息 / 完成） */
+export type RendererEvent =
+  | { kind: 'ready'; info: RendererReady }
+  | { kind: 'log'; level: 'info' | 'warn' | 'error'; text: string }
+  | { kind: 'boot'; info: RendererBootInfo }
+  | { kind: 'status'; level: 'info' | 'warn' | 'error'; text: string }
+  | { kind: 'demo-ready' }
+  | { kind: 'diagnostics'; data: unknown }
+  | { kind: 'done'; ok: boolean; report?: unknown; error?: string };
+
+/** game renderer → main → **debug window** 的只读事件（诊断 / 启动信息 / 日志） */
+export type DebugEvent =
+  | { kind: 'diagnostics'; data: unknown }
+  | { kind: 'boot'; info: RendererBootInfo }
+  | { kind: 'status'; level: 'info' | 'warn' | 'error'; text: string }
+  | { kind: 'log'; level: 'info' | 'warn' | 'error'; text: string };
+
+/** renderer → main 的同步请求方法（全部由 `Host` / `BootHost` 桥接层调用） */
+export type BridgeMethod =
+  // 文件系统（Host 的异步部分；join / dirname / env / homeDir 在 renderer 本地）
+  | 'host.readBytes'
+  | 'host.readBytesMaybe'
+  | 'host.readSlice'
+  | 'host.readText'
+  | 'host.isFile'
+  | 'host.ensureReadDir'
+  | 'host.writeBytes'
+  // 窗口 / 图形启动（main 侧的 BrowserWindow 与显示器信息）
+  | 'boot.frameMetrics'
+  | 'boot.screenSize'
+  | 'boot.registerWindowClass'
+  | 'boot.createWindow'
+  | 'boot.showWindow'
+  | 'boot.updateWindow'
+  | 'boot.associateInputContext'
+  | 'boot.getMenu'
+  | 'boot.operateMenu'
+  | 'boot.drawMenuBar'
+  | 'boot.isForegroundWindow'
+  | 'boot.hideWindow'
+  | 'boot.destroyWindow'
+  | 'boot.postQuitMessage'
+  | 'boot.postWindowMessage'
+  | 'boot.setThreadExecutionState'
+  | 'boot.allowClose';
+
+/** preload 暴露给 renderer 的 API（`window.amayui`） */
+export interface AmayuiBridge {
+  /** renderer 初始化完成（Pixi ready）后调用一次 */
+  ready(info: RendererReady): void;
+  /** main 的启动指令（在 ready 之后到达；handler 必须在调用 ready 前注册） */
+  onStart(handler: (job: StartJob) => void): void;
+  /** main 转来的窗口消息（close / activate / …） */
+  onWindowMessage(handler: (message: WindowMessage) => void): void;
+  /** 一次 host / boot 请求（异步；失败 ⇒ reject） */
+  invoke(method: BridgeMethod, params: unknown): Promise<unknown>;
+  /** 日志 / 状态 / 启动信息 / 完成事件 */
+  report(event: RendererEvent): void;
+  /** 只在 debug window 里用：接收 game renderer 的只读诊断投影 */
+  onDebug(handler: (event: DebugEvent) => void): void;
+}
+
+/* ──────────────────────────── 旧的手工 mock 协议（只给 PixiRenderHost.execute） ──────────────────────────── */
+
+/** 主进程 → renderer 的一次渲染调用（现在只用于无 preload 的手工 mock；正式路径在 renderer 内部直调） */
 export type RenderCall =
   | { id: number; method: 'init'; params: RendererInit }
   | { id: number; method: 'getRenderSurface'; params: { textureId: number } }
@@ -106,7 +212,7 @@ export type RenderCall =
   }
   | { id: number; method: 'present'; params: Record<string, never> };
 
-/** renderer → 主进程的结果（`ok: false` 只表示平台实现失败，不是引擎错误） */
+/** renderer → 主进程的结果（旧 mock 路径用；正式路径不经过 IPC） */
 export interface RenderResult {
   id: number;
   ok: boolean;
@@ -114,30 +220,10 @@ export interface RenderResult {
   error?: string;
 }
 
-/** 跨线的表面标识：renderer 分配、主进程只转发 */
+/** 跨线的表面标识：renderer 分配、旧 mock 路径只转发 */
 export interface SurfaceRef {
   surfaceId: number;
   kind: 'texture' | 'backbuffer';
-}
-
-/** 主进程推给 renderer 的状态（不需要回执） */
-export type PushMessage =
-  | { kind: 'scene'; scene: SceneSnapshot }
-  | { kind: 'status'; level: 'info' | 'warn' | 'error'; text: string }
-  | { kind: 'boot'; info: RendererInit & { title: string; ignored: string[] } };
-
-/** preload 暴露给 renderer 的 API（`window.amayui`） */
-export interface AmayuiBridge {
-  /** renderer 初始化完成（Pixi ready）后调用一次 */
-  ready(info: RendererReady): void;
-  /** 主进程发来的调用 */
-  onCall(handler: (call: RenderCall) => void): void;
-  /** 回复一次调用 */
-  reply(result: RenderResult): void;
-  /** 主进程推来的状态 */
-  onPush(handler: (message: PushMessage) => void): void;
-  /** 日志（写到主进程 stdout；⛔ 不往 renderer 控制台写业务结论） */
-  log(text: string): void;
 }
 
 declare global {
