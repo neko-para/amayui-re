@@ -561,6 +561,48 @@
           "next": "每组规则补一条 accepted 台账观察或 @env pure 守卫"
         }
       ]
+    },
+    {
+      "id": "ops-save",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "what": "存档槽的完整格式（头 / 参数块 / 变换负载）尚未成篇",
+          "next": "与 FMT-SAVE 草稿一起合并，先打开负载编码"
+        },
+        {
+          "what": "槽状态码 0/1/2 的完整判据与覆写确认只在脚本侧观察",
+          "next": "用一份真实存档跑通读 / 写 / 覆盖三条路径"
+        }
+      ]
+    },
+    {
+      "id": "objects",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "what": "退出时 1000 个槽里的对象由谁销毁未取证",
+          "next": "读 _WinMain 退出路径的清理调用，确认是否先扫表"
+        },
+        {
+          "what": "主循环删除策略字段（对象 +0x43C）的写入点 / 语义未取证",
+          "next": "枚举该字段的写点与读点"
+        }
+      ]
+    },
+    {
+      "id": "save",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "what": "块 3 / 4 / 5 的元素宽度与编码、尾段起点仍未取证；负载前缀（到字符串段）已闭合。",
+          "next": "按 6 个计数逐块解析元素宽度，再定位尾段。"
+        },
+        {
+          "what": "SAVE.DAT 系统容器的三段负载与版本门未成篇",
+          "next": "单独取证系统容器"
+        }
+      ]
     }
   ],
   "planned": [
@@ -571,20 +613,8 @@
       "mechanism": "CORE-POOL",
       "residual": [
         {
-          "what": "容器句柄的类型标签与读写落点已写（`CORE-POOL-HANDLE-INT` / `CORE-POOL-HANDLE-STRING`）；元素类型、生命周期、失败路径仍未处理",
-          "next": "先取证『首次访问时分配并登记到哪个槽』，再按容器种类分条写合同"
-        }
-      ]
-    },
-    {
-      "id": "objects",
-      "title": "对象模型：根对象 / 基类 / 类型身份",
-      "status": "none",
-      "mechanism": "CORE-OBJECTS",
-      "residual": [
-        {
-          "what": "shape 层已有类型与载体，但领域合同（对象是什么、谁拥有谁）还没写",
-          "next": "先选一个对象（如根对象）写『构造 + 生命周期 + 可观察身份』三条合同"
+          "what": "四条容器合同已成篇；字符串容器元素语义（text-system）、帧重装时局部容器生命周期、sub_42BF60 / sub_433310 两份同形分支仍未处理",
+          "next": "先归 text-system 批次处理字符串元素；再逐站点比对两份同形分支并补生命周期合同"
         }
       ]
     },
@@ -609,18 +639,6 @@
         {
           "what": "请求边界已成篇（06-window / 60-ops-render）；逐位表现（像素 / 混音）、输入事件形态、音频请求仍未成篇",
           "next": "把像素 / 混音按项目口径登记为 discards；输入与音频各按边界单独立章"
-        }
-      ]
-    },
-    {
-      "id": "save",
-      "title": "存档：写入 / 恢复 / 归属",
-      "status": "none",
-      "mechanism": "FMT-SAVE",
-      "residual": [
-        {
-          "what": "整章尚未处理（已知部分观察散在需求树里，未收成合同）",
-          "next": "先把『写哪些区域』与『恢复时重建/保留』分开取证"
         }
       ]
     },
@@ -1532,8 +1550,8 @@
         {
           "id": "RES-TEX-DRAW-DEFAULT",
           "kind": "unknown",
-          "what": "绘制键不存在时新建的默认项，其“其余字段”初值没有成篇；0x202 / 0x33f 会读当前颜色，首次绘制还会派生“这一步画什么颜色”",
-          "next": "读默认记录构造点，列出字段初值；未定前正文明确“其余字段初值不规定”"
+          "what": "绘制键不存在时新建的默认项复用场景默认记录构造；其余字段初值见「场景对象」的默认记录，不再单列。",
+          "next": "若绘制项有专属字段（不属场景记录），另立一条。"
         },
         {
           "id": "RES-TEX-DRAW-OOB",
@@ -3544,16 +3562,1892 @@
         }
       ],
       "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-JUMP-8C",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x4203d0"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith",
+            "addr"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-JMP8C-RANGE",
+          "kind": "unknown",
+          "what": "位置越界（负值 / 超出代码区）没有任何检查，后果未观察。",
+          "next": "在发行脚本里统计 `0x8c` 的目标分布（是否恒落在代码区内），再决定它是\"合同的一部分\"还是\"未定义行为\"。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-POOL-LEA-63",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42cba0"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-LEA-CONTAINER-HANDLE",
+          "kind": "unknown",
+          "what": "第 2 个操作数是**容器句柄**（0x8005 / 0x8009 / 0x800B）时，取址原语返回什么、能不能被存进引用槽，都没有观察。",
+          "next": "在语料里找 `0x63` 的源侧出现容器句柄的站点；找不到就明确写\"不支持\"。"
+        },
+        {
+          "id": "RES-LEA-ALIAS-LIFETIME",
+          "kind": "unknown",
+          "what": "引用槽里存的是地址；池 / 容器重建（容量变化、容器元素重分配）之后它是否还有效，本版不规定。",
+          "next": "取证池扩容 / 容器重建是否搬移槽地址（看「数据池」的容量与分配）。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-RANDOM-60",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42ca50"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith",
+            "addr"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-RANDOM-COUNTER",
+          "kind": "unknown",
+          "what": "那个 0..12 的计数器给谁用、为什么在随机指令里递增，没有观察。",
+          "next": "查它的读者（写入点就在本条；找读取点即知语义）。"
+        },
+        {
+          "id": "RES-RANDOM-GLOBALS",
+          "kind": "unknown",
+          "what": "随机数与范围被存进两个进程级全局。",
+          "next": "确认它们只用于调试 / 诊断，还是被别的子系统读；若是后者，本条需要补一条状态对应。"
+        },
+        {
+          "id": "RES-RANDOM-INTMIN",
+          "kind": "unknown",
+          "what": "除数为 `INT_MIN` 的行为没有观察（被除数非负时不会命中 `INT_MIN / −1` 溢出）。",
+          "next": "在发行脚本里确认范围是否可能为负 / 极大。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-PARAM-74-7F",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x41f320",
+            "0x42d1f0"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-PARAM-21668-INIT",
+          "kind": "unknown",
+          "what": "参数格的初值没有观察。",
+          "next": "在引擎初始化里找那一格的写点（若从不写，则\"初值\"是分配残留 —— 那就要在正文里写\"不规定\"）。"
+        },
+        {
+          "id": "RES-PARAM-21668-SCOPE",
+          "kind": "unknown",
+          "what": "那一格是**引擎级**（不随帧）还是进程级，本版只观察到\"不随当前帧变\"。",
+          "next": "重建引擎对象后读它的值，确认是否复位。"
+        },
+        {
+          "id": "RES-PARAM-CONSUMER",
+          "kind": "unknown",
+          "what": "参数格的文本显示消费路径（自动推进时长）尚未成篇；正文只登记了“已观察的消费方”。",
+          "next": "把文本显示路径的自动推进时长写成条目（或在 text-system 批次里登记），再回填本条交叉引用。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SLEEP-C8",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x4218d0"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith",
+            "addr"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-SLEEP-BIT0",
+          "kind": "unknown",
+          "what": "第 0 位的服务分支（计时器到期怎么清位、放行什么）没有取证。",
+          "next": "在门的分派里定位第 0 位的服务分支，并把它与计时器对象对上 —— 那条分支成篇后，本条要补一句\"何时放行\"的交叉引用。"
+        },
+        {
+          "id": "RES-SLEEP-TIMER-UNIT",
+          "kind": "unknown",
+          "what": "计时器对象的时长单位（毫秒？）与它自己的比较方式没有逐条取证。",
+          "next": "读计时器对象的服务分支（与「场景计时窗」共用同一套毫秒口径的可能性很高，但**未证**）。"
+        },
+        {
+          "id": "RES-SLEEP-GUARD-IDENTITY",
+          "kind": "unknown",
+          "what": "前置里那个宿主入口、解码密钥 / 编码零点两个不变量的身份与判据本版不规定（它们由宿主库解析或属机器细节）。",
+          "next": "确认宿主入口的语义是否\"询问宿主是否处于某种诊断状态\"，再决定要不要把这条前置升成一条共用规则（`0x6` / `0x0a` / `0x0c8` 三条同形）；解码密钥 / 编码零点若要在正文成篇，先给可核验的 EA 观察。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-STATUS-CLEAR-D9",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x419970"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "arith"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-CLEAR-D9-BIT12",
+          "kind": "unknown",
+          "what": "第 12 位由谁置、服务分支做什么，没有取证。",
+          "next": "在门的分派里找置第 12 位的指令，两边对上后本条补\"何时被置\"的交叉引用。"
+        },
+        {
+          "id": "RES-CLEAR-D9-OBJECT",
+          "kind": "unknown",
+          "what": "第 2 步判据里那一格指向什么对象（哪个子系统存在时才有第二个字），没有观察。",
+          "next": "查那一格的写入点（谁登记它）。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TABLE-RESET-A1",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x433a40"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-TABLE-IDENTITY",
+          "kind": "unknown",
+          "what": "这张表的领域身份（为什么是\"菜单\"？谁读它？）没有取证 —— 本版只写\"文本键 → 整数\"这张表本身。",
+          "next": "找 `0x0a3` 之外的读者（`sub_434D00` 有 12 个调用方，逐个认）。"
+        },
+        {
+          "id": "RES-TABLE-SIZE",
+          "kind": "unknown",
+          "what": "表的尺寸 / 装载上限 / 初始状态由什么决定没有观察（正文已把它们归为实现细节）。",
+          "next": "查表建立点（重置入口之外的其它调用方）与尺寸常量的出处，再决定是否升成合同。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TABLE-BIND-A2",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x434f10"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith",
+            "addr"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-TABLE-GROW",
+          "kind": "unknown",
+          "what": "表满 / 计数超过装载上限后的行为（是否扩容、新尺寸、是否重排）没有取证；正文已写\"本版不规定\"。",
+          "next": "在语料里构造\"新增超过上限\"的站点（或读扩容入口）后补一条；在那之前不许把\"扩容后仍可查到\"当合同。"
+        },
+        {
+          "id": "RES-TABLE-KEY-TEXT",
+          "kind": "unknown",
+          "what": "数值 / 内联文本 / 字符串记录三种键的**字节形态**没有逐类取证（本条只规定\"按文本读\"，具体文本化口径引「设置一个字符串」）。",
+          "next": "给三类各找一处 `0xa2` 站点，比对键字节。"
+        },
+        {
+          "id": "RES-TABLE-LIFETIME",
+          "kind": "unknown",
+          "what": "表在脚本切换 / 引擎重建时是否清空（`0xa1` 之外还有没有别的清空点），没有观察。",
+          "next": "查 `sub_415530` 的其余 5 个调用方。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TABLE-DISPATCH-A3",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x429830"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith",
+            "addr"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-DISPATCH-DEFAULT-READ",
+          "kind": "unknown",
+          "what": "命中时**不读**第 2 个操作数是本条的合同；但“判据先于读”只有一条站点（命中分支根本不碰那个操作数）。",
+          "next": "用一条\"默认位置类型非法、但键命中\"的脚本做守卫用例，把这条钉住。"
+        },
+        {
+          "id": "RES-DISPATCH-VALUE-RANGE",
+          "kind": "unknown",
+          "what": "登记值越界（负数 / 超出代码区）没有观察。",
+          "next": "统计发行脚本里 `0xa2` 登记的值分布。"
+        },
+        {
+          "id": "RES-DISPATCH-ORDER",
+          "kind": "unknown",
+          "what": "命中时\"读键 → 查表 → 写指令指针 → 清推进格数\"的次序没有逐条核验到\"清格数在写指针之后\"。",
+          "next": "读 `.lst` 的两支收尾（本条已给两支的站点）。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-CLOCK-D0",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42e910"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-CLOCK-D0-ORDER",
+          "kind": "unknown",
+          "what": "本条读数是否与迭代头读数是同一次、以及两者的先后没有逐条取证。",
+          "next": "读主循环迭代头（时间交付）与门后派发的相对位置，再决定正文该写\"复用同一次\"还是\"另读一次\"。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-ABORT-01",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x418e60"
+          ],
+          "kinds": [
+            "mem-write",
+            "call",
+            "addr"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-ABORT-CODE1",
+          "kind": "unknown",
+          "what": "异常码 1 与码 0 / 2 在宿主侧有没有不同处置（例如\"中止\"vs\"正常退出\"），本版不规定。",
+          "next": "读主循环的捕获点（异常通道章）后补一句。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-LOCAL-SET-7B",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x41f530"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-LOCAL-TARGETS-CONSUMER",
+          "kind": "unknown",
+          "what": "「进入本地块」那条指令（**不在本段**）怎么选主 / 副、−1 表示什么。",
+          "next": "把那条指令的读取点（副目标只在它的一个分支里用）对上后，本条补一句\"−1 = 没有目标\"的交叉引用。"
+        },
+        {
+          "id": "RES-LOCAL-TARGETS-INIT",
+          "kind": "unknown",
+          "what": "两格的初值由谁写（帧装载路径里有一处把两个按帧数组清成 −1，但**没有逐个对上**这两格）。",
+          "next": "在帧装载路径里对上偏移。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FRAME-LOCAL-RET-7C",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x41ab80"
+          ],
+          "kinds": [
+            "mem-read",
+            "mem-write",
+            "call",
+            "arith",
+            "addr"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-LOCAL-RET-SLOTS",
+          "kind": "unknown",
+          "what": "返回时清掉的两对\"值 / −1\"是什么（错误码？异常对象？）没有取证。",
+          "next": "查这四格的读者（写入点就在本条；读取点在别处）。"
+        },
+        {
+          "id": "RES-LOCAL-RET-PENDING",
+          "kind": "unknown",
+          "what": "\"待处理\"标记与那个\"相差 1 才调用\"的例程没有取证。",
+          "next": "读那条例程；它若与消息队列有关，本条要写\"与消息队列的关系本版不规定\"。"
+        },
+        {
+          "id": "RES-LOCAL-RET-BIT26",
+          "kind": "unknown",
+          "what": "返回后保留的第 26 位由谁服务、什么时候清，没有取证。",
+          "next": "在门的分派里找第 26 位（与「进入本地块」写下的 `0x6000000` 对读）。"
+        },
+        {
+          "id": "RES-LOCAL-RET-DEPTH",
+          "kind": "unknown",
+          "what": "深度字段的领域含义（脚本调用深度？）没有取证。",
+          "next": "把\"进入本地块\"写深度的那一格与帧装载的深度对上。"
+        },
+        {
+          "id": "RES-LOCAL-RET-ENTRY",
+          "kind": "unknown",
+          "what": "0x7c 的三个输入（存档字 / 存档位置 / 深度）由「进入本地块」指令写下；该指令尚未成篇。",
+          "next": "把进入本地块（0x7a）成篇，至少写明它写这三格；在那之前 0x7c 不能单独由规范实现。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-RUN-BRACKET",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1f4",
+            "0x1f5"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-BRACKET-STAMPS",
+          "kind": "unknown",
+          "what": "两个时间戳格写入后无人读取；本版只登记写入。",
+          "next": "扩到整份语料再查一次读者；仍无读者就登记为「写后不用」，并在模拟器里做成纯写入（⛔ 不许拿它驱动等待）。"
+        },
+        {
+          "id": "RES-OPS-BRACKET-QUEUE",
+          "kind": "unknown",
+          "what": "队列命令的两种分支（正数层 / 负数恢复）与「重置引擎级标志字」的完整合同未取证；本条只登记「最多取一条 + 切当前层 + 重置标志字」。",
+          "next": "读队列泵的两个分支入口，按「换层后谁接着执行」补一条 `CORE-VM-*` 条目。"
+        },
+        {
+          "id": "RES-VM-PUMP-TARGET",
+          "kind": "unknown",
+          "what": "队列泵把「当前帧」与「引擎级标志字」改成什么值、与 0x143 的三个泵标记（区间忙 / 正在刷新 / 队列占用）如何配合，本版未取证。",
+          "next": "读队列泵的两个分支与 0x143 的读点，把三个标记与泵的写值逐条登记。"
+        },
+        {
+          "id": "RES-OPS-BRACKET-STAMP-PAIR",
+          "kind": "unknown",
+          "what": "本帧的两个时间戳格与场景的两个时间戳是否独立、是否同一对，本版未取证。",
+          "next": "读 0x1f4 的写入槽与场景计时窗的读写槽，确认两对时间戳的地址 / 层级。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE-TRANSFORM",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1fd",
+            "0x1ff",
+            "0x1fe"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-SCENE-TRANSFORM-COMPOSE",
+          "kind": "unknown",
+          "what": "三个矩阵在元素内如何**组合**成最终世界矩阵（顺序、是否互相覆盖、父对象）未取证 —— 本条只规定「写进哪个格」。",
+          "next": "读场景提交路径里对这三个矩阵的消费者，再决定要不要单开一条「变换组合」。"
+        },
+        {
+          "id": "RES-OPS-SCENE-TRANSFORM-DEFAULT",
+          "kind": "unknown",
+          "what": "默认记录的六个 4×4 矩阵初值已由默认记录构造路径观察为单位阵；其中两个（非缩放 / 平移 / 旋转 / 0x220 第四个平移）的生产者未取证。",
+          "next": "枚举剩余两个矩阵格的写点，按「哪个指令写哪个矩阵」归档。"
+        },
+        {
+          "id": "RES-SCENE3D-MATRIX-REST",
+          "kind": "unknown",
+          "what": "默认记录的六个矩阵里，只有缩放 / 平移 / 旋转三个有本条的生产者；其余两个（旋转与缩放之外的）矩阵由谁写未取证。",
+          "next": "枚举记录矩阵格的写点，按「哪个指令写哪个矩阵」归档。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE-CLEAR",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1f6"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-SCENE-CLEAR-ORDER",
+          "kind": "unknown",
+          "what": "对象表只回收结点、网格表逐值释放；清理顺序与失败后果未取证。",
+          "next": "逐站点核对四张表的清理方式与顺序。"
+        },
+        {
+          "id": "RES-SCENE3D-CLEAR-SCOPE",
+          "kind": "unknown",
+          "what": "清理入口清四张表 + 四个标记，但不『有动画』；对象表只回收结点、网格表逐值释放；顺序与失败后果未取证。",
+          "next": "逐站点核对四张表的清理方式与『有动画』标记的读者。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-STATUS-WORD",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1cf",
+            "0x1bf"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-STATUS-WORD-ROLE",
+          "kind": "unknown",
+          "what": "状态字与相邻格的**领域角色**未定 —— 它们的读者分布在显示与音频的路径上，本轮不据接口名猜用途。",
+          "next": "逐个读者定域；属 text / audio 的部分交给对应轮次，本条只保留「覆盖写 / 见位清整字 / 相邻格置 1」三条数据效果。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-STATUS-CELL-READ",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1cc"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-STATUS-CELL-ROLE",
+          "kind": "unknown",
+          "what": "该格的领域角色未定。",
+          "next": "列出它的写者（`0x19c` 一带）与读者，按写入值集合（0/1）猜不出用途 ⇒ 必须按读者定域。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-MODE-BIT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x19b",
+            "0x19c",
+            "0x1c7"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-MODE-BIT-ROLE",
+          "kind": "unknown",
+          "what": "第 27 / 29 位与 A / B / D / C / E / F 六格的领域角色未定。",
+          "next": "按读者定域（其中一批读者落在显示路径上，属 text 轮次的交叠区；本轮只保留置 / 清 / 读的数据效果）。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FLAG-CELLS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x19a",
+            "0x1b6",
+            "0x1b7"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-FLAG-CELLS-ROLE",
+          "kind": "unknown",
+          "what": "格 X / 格 Y 的领域角色未定。",
+          "next": "把 X / Y 的写者找齐（X 的写者不在本段），按写入的数集合定域。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-POOL-MEMCPY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1b0"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-MEMCPY-OVERLAP",
+          "kind": "unknown",
+          "what": "源与目标区间重叠时是「按字节正向复制」还是「按块复制」（结果不同）未取证。",
+          "next": "用同一字符串池槽的自重叠样本（目标 = 源 + 1 字）对比结果。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SAVE-READ",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1a0"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-SAVE-READ-FIELDS",
+          "kind": "unknown",
+          "what": "七个整数的含义（版本、时间、章节索引…）未定。",
+          "next": "用 `fixtures` 的四个存档样本做差分，得到七格与样本字段的对应。"
+        },
+        {
+          "id": "RES-OPS-SAVE-READ-BADFILE",
+          "kind": "unknown",
+          "what": "内容不符时引擎是否已部分改动引擎状态（那七个格之外的）未取证。",
+          "next": "用一个截断样本对比读前后。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SAVE-WRITE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x19e",
+            "0x1a1"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-SAVE-WRITE-RECODE",
+          "kind": "unknown",
+          "what": "写盘是否**就地解码**过全局整型池（因此需要重编码来补偿）未取证 —— 若写盘不解码，这一步会把整池再编码一次。 **可证伪的预言**：写同一个槽之后立刻读同一个全局整型操作数；若读到的值变了，说明重编码是补偿（写盘确实就地解码过）；若不变，说明本条对池是「纯多写一遍」（无害但徒劳）。",
+          "next": "写同一个槽后立刻读同一个全局整型操作数：值变了说明写盘就地解码过、重编码是补偿；值不变说明这一步是纯多写。"
+        },
+        {
+          "id": "RES-OPS-SAVE-WRITE-DIALOG",
+          "kind": "unknown",
+          "what": "确认对话框的按钮语义（哪个返回值算「同意」）与取消后的文件状态未逐字取证。",
+          "next": "读确认入口的返回值调用点。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SAVE-FILES",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1ab",
+            "0x1ac",
+            "0x1ae",
+            "0x1af"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-SAVE-FILES-STH",
+          "kind": "unknown",
+          "what": "`.STH` 的文件格式、以及它为什么把失败码 `2` 排在 `.DAT` 的 `1` 之前，未定（属 `FMT-SAVE`）。",
+          "next": "用 `fixtures` 的样本对 `.DAT` / `.STH` 成对差分，并把「两份文件的状态互相覆盖」写成存档族的合同。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-LAYER-CELL",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1ad"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-LAYER-CELL-ROLE",
+          "kind": "unknown",
+          "what": "该格的读者把它当索引 / 编号用（与场景或绘制状态相邻），领域角色未定。",
+          "next": "把读者逐个列出，确认它是「上一层」还是「本条的来源层」。"
+        },
+        {
+          "id": "RES-LAYER-FRAME-REL",
+          "kind": "unknown",
+          "what": "「当前层号」与「当前帧号」是否同一个数、层记录与帧记录是否同一结构，本版未取证。",
+          "next": "读 0x1ad 写入的槽与帧切换路径读的槽，确认两者关系；若同一，正文改成「当前帧号」。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-RNG-ENABLE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x1ce"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-OPS-RNG-ENABLE-EVENT",
+          "kind": "unknown",
+          "what": "停用时那条事件记录的载荷与用途未取证（它投给事件容器，不是投给发生器）。",
+          "next": "读事件容器的消费者，确认那条记录是「乱数关闭通知」还是别的。"
+        },
+        {
+          "id": "RES-OPS-RNG-ENABLE-SEED",
+          "kind": "unknown",
+          "what": "发生器本身（种子怎么用、周期）不在本条；若后续需要逐位一致，另开 `CORE-OPS-RNG-GEN`。",
+          "next": "读发生器入口的种子用法与周期；需要逐位一致时另开 `CORE-OPS-RNG-GEN` 并给可核验观测。"
+        },
+        {
+          "id": "RES-RNG-BIT30-GATE",
+          "kind": "unknown",
+          "what": "已逐字核：第 30 位与门读的状态选择字是同一格；服务分支存在（0x412B32）但**不清位** ⇒ 启用后门持续关着，直到停用支或外部清位写点（后者可达性未取证）。",
+          "next": "读 0x412B32 支的载荷 / 消费者 / 为什么不清位，再决定正文要不要写「何时放行」。"
+        },
+        {
+          "id": "RES-RNG-ENABLE-MODE-BIT",
+          "kind": "unknown",
+          "what": "停用分支的「模式位」身份未取证；停用时「已启用 / 种子」两格是否清也未取证。",
+          "next": "读 0x1ce 停用分支的条件槽与清格写点，确认模式位与两格的命运。"
+        },
+        {
+          "id": "RES-RNG-BIT30-BRANCH",
+          "kind": "unknown",
+          "what": "第 30 位服务分支体（0x412B39–0x412B76）投事件、递增 [692E0] mod [692E4] 的语义与消费者未取证。",
+          "next": "读该分支调用的 sub_453AF0 与事件容器消费者，确认它与乱数状态的关系。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FLOAT-ABS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "ops": [
+            "0x191"
+          ]
+        }
+      ],
+      "residual": [],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-SET-VEC1",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x423b20",
+            "0x4acf20"
+          ],
+          "kinds": [
+            "call",
+            "mem-write"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-VEC1-IDENTITY",
+          "kind": "unknown",
+          "what": "第一三元向量的领域身份（位置 / 偏移 / 其它）未取证；本版只规定「读写一组三个浮点」。",
+          "next": "枚举该组格的其它读点（矩阵构造、求交、投影），确认它是否就是位置。"
+        },
+        {
+          "id": "RES-SCENE3D-VEC1-MATRIX",
+          "kind": "unknown",
+          "what": "第一三元向量与 `0x220` 写的**本地矩阵平移**是否同一状态的两份表示未取证。",
+          "next": "找把三个浮点烘进本地矩阵的站点，比较两条指令的写入是否互相覆盖。"
+        },
+        {
+          "id": "RES-SCENE3D-DIRTY-CONSUMERS",
+          "kind": "unknown",
+          "what": "场景脏标记的消费端没有逐点枚举。",
+          "next": "枚举脏标记的读取点，确认它在哪一步触发重绘。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-SET-VEC2",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x423ba0",
+            "0x4acee0"
+          ],
+          "kinds": [
+            "call",
+            "mem-write"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-VEC2-IDENTITY",
+          "kind": "unknown",
+          "what": "第二三元向量的领域身份（朝向 / 缩放 / 其它）未取证。",
+          "next": "枚举该组格的读点（旋转矩阵、包围盒、投影），确认它是否就是朝向。"
+        },
+        {
+          "id": "RES-SCENE3D-VEC2-REL",
+          "kind": "unknown",
+          "what": "第一、第二三元向量是否在语义上成对（位置 + 朝向）未取证。",
+          "next": "找同时读两组格的函数，看它们是否一起进同一个变换。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-GET-VEC1",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x4303c0",
+            "0x4adcf0"
+          ],
+          "kinds": [
+            "call",
+            "mem-read"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-GETVEC-MISSING",
+          "kind": "unknown",
+          "what": "记录不存在时写 0 是「值 0」还是「无值」的哨兵未定；本版只规定写出 0。",
+          "next": "找脚本侧对 0 的分支用法，确认 0 是否被当「无值」。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-GET-VEC2",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x430450",
+            "0x4adc80"
+          ],
+          "kinds": [
+            "call",
+            "mem-read"
+          ]
+        }
+      ],
+      "residual": [],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-SET-TRANSFORM",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x423de0",
+            "0x4ad3c0"
+          ],
+          "kinds": [
+            "call",
+            "mem-write",
+            "convert"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-XFORM-INTFIELDS",
+          "kind": "unknown",
+          "what": "两个整数格（以及与它们相邻的「清 0 格」「写 1 格」）的领域身份未定 （可能是混合模式 / 层号 / 纹理号 / 标志组）。",
+          "next": "枚举这四个格的读点，按读者分支还原名字。"
+        },
+        {
+          "id": "RES-SCENE3D-XFORM-DIRTY2",
+          "kind": "unknown",
+          "what": "本条同时置「脏」与「有动画」；「有动画」的消费端与另一条 `0x202` 置的是否同一位未逐字核对。",
+          "next": "核两位的写点集合。"
+        },
+        {
+          "id": "RES-SCENE3D-XFORM-MATRIX",
+          "kind": "unknown",
+          "what": "本地矩阵的其余分量（旋转 / 缩放）由哪些指令写，本版不规定。",
+          "next": "枚举写本地矩阵的站点，按「平移 / 旋转 / 缩放」三组归档。"
+        },
+        {
+          "id": "RES-SCENE3D-SHARED-CELLS",
+          "kind": "unknown",
+          "what": "四个整数格与 0x202 的窗起点、三个变换指令的配置位同格；这些共享格的完整读者集合未取证。",
+          "next": "枚举四个格的读点，按「窗 / 配置位 / 本条」归档。"
+        },
+        {
+          "id": "RES-SCENE-BIT1-DUAL-ROLE",
+          "kind": "unknown",
+          "what": "首字第 1 位同时是 0x202 的「有窗」与 0x220 的「已配置」；0x220 置位 1 后是否真的让窗推进/重绘没有取证。",
+          "next": "构造「只跑 0x220 / 再跑 0x202」的脚本，观察窗推进与颜色变化。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-GET-LOCAL-TRANS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x430650",
+            "0x4aa060"
+          ],
+          "kinds": [
+            "call",
+            "mem-read",
+            "convert"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-GETTRANS-DECOMPOSE",
+          "kind": "unknown",
+          "what": "分解出的另外两组分量（旋转 / 缩放）在本条里被丢弃；它们是否可被其它脚本指令读出，本版不规定。",
+          "next": "找读同一矩阵的其它入口。"
+        },
+        {
+          "id": "RES-SCENE3D-GETTRANS-FAIL",
+          "kind": "unknown",
+          "what": "分解失败的**实际可触发条件**没有构造出来（正常写入的矩阵应当总能分解）。",
+          "next": "按矩阵写点造一个退化矩阵，验证失败分支是否可达；不可达则把该分支降为「未规定」。"
+        },
+        {
+          "id": "RES-SCENE3D-DECOMPOSE-FAIL",
+          "kind": "unknown",
+          "what": "矩阵分解失败的条件未取证；正文只登记「失败会上报」，没有可构造的判据。",
+          "next": "读分解入口的返回值分支，找可构造的失败输入（奇异矩阵 / 非仿射）。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-RECORD-LOOKUP",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x423ca0",
+            "0x423d40",
+            "0x4243f0",
+            "0x424510",
+            "0x4245b0",
+            "0x424630",
+            "0x424900"
+          ],
+          "kinds": [
+            "call"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-FAMILY-FIELDS",
+          "kind": "unknown",
+          "what": "十条各自的字段组与领域身份**均未成篇**；本版只合同「取记录纪律」。",
+          "next": "按 handler 尾段的字段偏移逐条写成小条目（每条只写「写哪几个字段 + 是否置脏」），再决定能否按「同字段」合并。"
+        },
+        {
+          "id": "RES-SCENE3D-FAMILY-DIRTY",
+          "kind": "unknown",
+          "what": "十条是否都置场景脏标记没有逐条核完（部分尾段未取证）。",
+          "next": "逐条读尾段，把「置脏 / 置动画」两种写点分开登记。"
+        },
+        {
+          "id": "RES-SCENE3D-BIT0-PRODUCER",
+          "kind": "unknown",
+          "what": "记录首字第 0 位只观察到 0x1fb 置 1；是否存在其它置 1 生产者未穷尽。",
+          "next": "全语料搜对记录首字的 or/test 写点，确认位 0 的唯一生产者。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE-TABLE-FLAGS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x425d20",
+            "0x41a3a0"
+          ],
+          "kinds": [
+            "mem-write",
+            "control"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-SCENE-TABLE-IDENTITY",
+          "kind": "unknown",
+          "what": "两张 1000 项表与两个标志的**领域身份**未定 （绘制项开关 / 命中开关 / 前后景两层，都是候选）。",
+          "next": "枚举读这两格的渲染 / 碰撞路径，按读者命名。"
+        },
+        {
+          "id": "RES-SCENE-TABLE-RANGE",
+          "kind": "unknown",
+          "what": "`0x258` 越界写的后果（是否踩到相邻成员）本版不规定。",
+          "next": "读表在场景对象里的相邻成员，判断越界影响面。"
+        },
+        {
+          "id": "RES-SCENE-TABLE-CLEAR-SCOPE",
+          "kind": "unknown",
+          "what": "`0x259` 是否也清每项第一个格没有逐字核对（本版只合同「标志两格」）。",
+          "next": "逐字核清表循环的存储宽度。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-TEXTURE-SIZE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x4302e0",
+            "0x49ed60"
+          ],
+          "kinds": [
+            "call",
+            "mem-read",
+            "control"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-TEXTURE-SIZE-BOUND",
+          "kind": "unknown",
+          "what": "上限的**数值来源**（常量 / 表容量）与越界后的槽访问是否也发生，本版不规定。",
+          "next": "核上限常量与纹理槽表的分配点，确认二者一致。"
+        },
+        {
+          "id": "RES-TEXTURE-SIZE-EMPTY",
+          "kind": "unknown",
+          "what": "空槽写 0 与「0×0 纹理」在脚本侧是否可区分未取证。",
+          "next": "找脚本侧对 0 的分支用法。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-FILLTEXTURE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x423690",
+            "0x4a4c70"
+          ],
+          "kinds": [
+            "call",
+            "mem-write",
+            "convert",
+            "arith"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-FILLTEXTURE-PIXEL",
+          "kind": "unknown",
+          "what": "像素混合、通道顺序、alpha 用法属表现层；本版只规定「请求了什么」。",
+          "next": "按项目口径进 discards（逐位表现不进正文）。"
+        },
+        {
+          "id": "RES-FILLTEXTURE-ALPHA",
+          "kind": "unknown",
+          "what": "透明度为负时传下去的实际值没有观察；本版只规定「不做下夹」。",
+          "next": "构造负透明度，看填充入口的返回值 / 输出。"
+        },
+        {
+          "id": "RES-FILLTEXTURE-COLOR",
+          "kind": "unknown",
+          "what": "颜色最高字节被强制置 1 的**设计用途**未取证（填充入口在 alpha≥0 时用 alpha<<24 覆盖它，16bpp 不用它）。",
+          "next": "查两条像素路径之外是否有消费者读这个 1；没有就登记为写后不用。"
+        },
+        {
+          "id": "RES-FILLTEXTURE-MARKER",
+          "kind": "unknown",
+          "what": "「内容非文件装载」标志格在全语料没有读点；编号越界时这次写落在哪里（第二张表的 +0x10 / 表前）属 UB，下游后果未取证。",
+          "next": "枚举该记录表 +0x10 的读点（含间接基址）与越界写下游；没有读者就只登记 UB。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCALAR-FLOAT-ARITH",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x430a50",
+            "0x430ab0",
+            "0x430b70"
+          ],
+          "kinds": [
+            "arith",
+            "call"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-FLOAT-ARITH-ROUND",
+          "kind": "unknown",
+          "what": "中间精度（x87 80 位 / SSE 64 位）与最终写回的单精度舍入**跨平台是否一致**未核； 本版只规定「算术结果」，不保证逐位一致。",
+          "next": "按 x87 控制字与编译选项取证，必要时把「逐位一致」进 discards。"
+        },
+        {
+          "id": "RES-FLOAT-ARITH-INT",
+          "kind": "unknown",
+          "what": "整数型操作数转浮点时的**大整数精度**没有单独取证（口径见「数据池」）。",
+          "next": "用 2^31−1 / 2^53 附近的整数测写回值。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-CG-SET",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x426420"
+          ],
+          "kinds": [
+            "call",
+            "mem-write",
+            "control"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-CG-SET-FIELDS",
+          "kind": "unknown",
+          "what": "七个整数格的身份（图像编号 / 帧 / 层 / 时间参数等）未定；本版只规定「写进去了」。",
+          "next": "枚举该记录的读点（CG 显示路径），按读者分支命名。"
+        },
+        {
+          "id": "RES-CG-SET-BOUND",
+          "kind": "unknown",
+          "what": "上限的数值与记录区的容量是否一致未核。",
+          "next": "核常量与记录区分配大小。"
+        },
+        {
+          "id": "RES-CG-SET-RECORD-INIT",
+          "kind": "unknown",
+          "what": "记录不存在时是否先建、默认值是什么，本版不规定（本条未观察到建记录）。",
+          "next": "读写侧的取记录路径。"
+        },
+        {
+          "id": "RES-CG-LIMIT",
+          "kind": "unknown",
+          "what": "CG 编号的上限取值未取证；正文只写「大于上限上报」，没有数字就无法唯一实现。",
+          "next": "读 0x2da 的上限比较站点（handler 0x426420）与配置 / 表容量，确定上限来源。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OBJECTS-ROOT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OBJ-SHUTDOWN",
+          "kind": "unknown",
+          "what": "根析构器（`sub_413970`）体内**没有**槽表基址的引用 ⇒ \"退出时 1000 个槽里的对象由谁销毁\"没有取证（可能由主循环清理，也可能随进程回收）。",
+          "next": "在 `_WinMain@16` 的退出路径上逐个看清理调用，确认是否先扫表；若没有，就把\"退出不逐槽销毁\" 明确登记成合同（不是沉默）。"
+        },
+        {
+          "id": "RES-OBJ-ROOT-SIZE",
+          "kind": "unknown",
+          "what": "分配大小 0xAABC8 与 `T_Command.size` 相等，但\"这是构造器可写的上界\" 还是\"分配器对齐后的块\"没有区分。",
+          "next": "找构造器写入的最大偏移，与 0xAABC8 比；差值为 0 才能说\"正好\"。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OBJECTS-BASE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OBJ-OUTPUT-OBJECT",
+          "kind": "unknown",
+          "what": "输出对象的行为表有 3 项（销毁 + 两个输出方法）， 但\"哪一项对应哪一种输出\"、\"三项分别写哪里\"没有取证；本版只声明\"它们落到输出对象\"。",
+          "next": "读 `sub_438D40` / `sub_438D00` 的调用链，确认三项的外部请求形态，再决定要不要拆成边界章条目。"
+        },
+        {
+          "id": "RES-OBJ-BASE-SCOPE",
+          "kind": "unknown",
+          "what": "本条的\"两个指针前缀\"只对**调用基类构造器的 26 个类**成立； 语料里另有 270 张行为表的类（`Debug` / `NormalTexture` / `Movie` / `Reg`…）不在观察里 —— 它们是否共享同一前缀、是否也由本对象模型管理，没有建模。",
+          "next": "取一张非 `BaseObject` 类（如 `NormalTexture`）的构造器，看它写不写 `+4`、它的对象会不会进槽表； 若会，另立条目（不要把它塞进本条）。"
+        },
+        {
+          "id": "RES-OBJ-BASE-DATA-SITES",
+          "kind": "unknown",
+          "what": "类行为表 / 输出对象的**数据段**观察（表项内容、静态存储）没有进 `bindings.sites` —— 现行校验器只收指令行首；本条的机器绑定因此只覆盖写入点。",
+          "next": "若要绑定数据段，先裁决 spec 校验器是否接受 `.data/.seg002` 站点；在那之前数据段观察只作内部复核材料。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OBJECTS-TYPE-IDENTITY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OBJ-RTTI-INLINE",
+          "kind": "unknown",
+          "what": "结论\"引擎不做运行期类型检验\"的依据是 \"全语料只有 2 处 CRT RTTI 入口，且都在 Live2D\"。**未排除**手工内联的 `type_info` 比较 （取 `??_R0` 地址后自己比字符串/指针）。",
+          "next": "看 0x47d780..0x47df80 那 8 个 lambda 类型描述符 被取址后拿去做什么；若只是 std 内部，补一条 falsifier 把这条升成\"不矛盾\"档。"
+        },
+        {
+          "id": "RES-OBJ-VTABLE-SCOPE",
+          "kind": "unknown",
+          "what": "本条的\"行为表只有销毁一项\"只对**逐张核过**的四张表成立 （根 / 基类 / Scene / 槽对象）；语料普查 270 张 `??_7*@@6B@` 里 179 张 1 项， 其余是多项（`Sys3Draw` ×22 / `DrawEffect` ×22 / `NormalTexture` ×14…）。 ⛔ 不许把\"只有一项\"推广成\"所有引擎类\" —— 那条会被 `Sys3Draw` 当场证伪。",
+          "next": "把\"槽里只可能出现 1 项表的类\"写成 `CORE-OPS` 的条件（创建点只有 5 处，都是同一类）， 并核对别的创建路径是否可能塞进多项表类的对象。"
+        },
+        {
+          "id": "RES-OBJ-CLASS-NAMES",
+          "kind": "unknown",
+          "what": "RTTI 名字（`??_7*`、`??_R2*`）是**元数据**，不是运行期状态； 但\"删掉/伪造 RTTI 会不会改变引擎行为\"没有实测。",
+          "next": "这是可证伪实验（改一个类的 RTTI 名字看行为）， 在真机或第二实现上做；在那之前本条只到\"不矛盾\"。"
+        },
+        {
+          "id": "RES-OBJ-TYPE-DATA-SITES",
+          "kind": "unknown",
+          "what": "行为表（vtable）的数据段观察没有进 `bindings.sites` —— 现行校验器只收指令行首；本条的身份判据只有指令侧写入点。",
+          "next": "同 `RES-OBJ-BASE-DATA-SITES`：先裁决校验器是否接受数据段站点。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OBJECTS-SLOT-TABLE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OBJ-SLOT-INDEX-AUTHORITY",
+          "kind": "unknown",
+          "what": "**哪些**指令、用**第几个**操作数给槽号，属 `CORE-OPS`； 本条只说\"指令给号\"。",
+          "next": "在 `CORE-OPS` 的纹理 / 影片族逐条绑定操作数位置，并把\"槽号命名空间\" 写成那条指令的条件。"
+        },
+        {
+          "id": "RES-OBJ-OUT-OF-RANGE",
+          "kind": "unknown",
+          "what": "越界结论只来自\"消费点没有比较 3E8h\"这一机械判据， **没有任何真机越界观测**（同池口径）。",
+          "next": "与 `CORE-POOL` 的越界条目一起做一次负向观测； 在那之前本条按\"未定义行为\"写，不写成\"会读到什么\"。"
+        },
+        {
+          "id": "RES-OBJ-ELEMENT-TYPE",
+          "kind": "unknown",
+          "what": "元素宽 4 已确证；但 shape 里元素类型 id 叫 `T_fnptr4`， 而本批观察到的写入都是对象引用（经行为表调用 / 销毁）。语义上本条按\"对象引用\"写； id 名与语义不符，见 `feedback.md` §1。",
+          "next": "统一 id 名，或给表单元类型加 note 说明\"4 字节值，语义未定\"。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OBJECTS-SLOT-LIFECYCLE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OBJ-REMOVE-POLICY",
+          "kind": "unknown",
+          "what": "主循环\"销毁并清槽\"的判据落在对象的一个 32 位字段上 （与数据段两个字面值比较；紧邻的字符串是 `ForceRemove` / `NoRemove` / `Delete`）。 字段的语义、谁写它、何时写，都没有取证。",
+          "next": "找该字段（对象 +0x43C）的写入点并映射到 opcode； 在拿到写入点之前，本条只写\"存在一个判定\"，⛔ 不写成\"按删除策略\"。"
+        },
+        {
+          "id": "RES-OBJ-DOUBLE-CLEAR",
+          "kind": "unknown",
+          "what": "0x422e4a 所在路径先由 `sub_49E980`（场景侧释放）清过一次， 再由本条路径清一次；两条路径是否可能都执行没有取证。",
+          "next": "读 `sub_49E980` 的释放与槽表的交互， 确认\"谁清哪张表\"，再决定要不要把\"双清是幂等的\"写成条件。"
+        },
+        {
+          "id": "RES-OBJ-SECOND-TABLE",
+          "kind": "unknown",
+          "what": "场景子对象里还有两张 1000 项指针表（`shape:T_Scene@0xa5d8` / `@0xb670`），与根级槽表**同一编号空间**；它们与根级表的关系（谁清、谁要求对方非空）未建模。",
+          "next": "在纹理族里取证\"创建纹理时同时写哪张表\"，把关系写成 `CORE-OPS` 的条件，而不是塞进本条。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "FMT-SAVE-SLOT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SAVE-SLOT-RANGE",
+          "kind": "unknown",
+          "what": "槽号的合法范围、负槽号、超过两位的行为。",
+          "next": "在真机存档目录上试写 0/99/100/−1，观察是否生成/覆盖了哪个文件；或找 UI 侧的槽号来源。**本版不规定**。"
+        },
+        {
+          "id": "RES-SAVE-SLOT-DIR",
+          "kind": "unknown",
+          "what": "存档目录的取值与搜索顺序（属 `CORE-FS` 未覆盖项）。",
+          "next": "跟 `sub_408A40` 的返回值来源（配置键 / 宿主目录）。"
+        },
+        {
+          "id": "RES-SAVE-SLOT-HALF",
+          "kind": "unknown",
+          "what": "删除/复制部分失败后留下\"半个槽\"（只有 `.DAT` 或只有 `.STH`）的用户可见后果；引擎不做事务。",
+          "next": "需要真机或对失败注入的观察。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "FMT-SAVE-HEADER",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SAVE-MAGIC-FAMILY",
+          "kind": "unknown",
+          "what": "2 字符族标识从哪来（初始化文件 / 配置）。",
+          "next": "跟 `0x4ba354` 处把 4 字节版本串写进引擎的调用者。"
+        },
+        {
+          "id": "RES-SAVE-HEADER-VERSION-STRING",
+          "kind": "unknown",
+          "what": "`+4` 版本串的来源与语义（构建号？）。",
+          "next": "同上；它只被**写入**，读侧不比较。"
+        },
+        {
+          "id": "RES-SAVE-HEADER-RESERVED",
+          "kind": "unknown",
+          "what": "`+244…+259` 的 16 字节是否永远为 0。",
+          "next": "解码器可用后跨版本对拍（本轮不可判）。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "FMT-SAVE-ENVELOPE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SAVE-READ-FAIL-CONTINUE",
+          "kind": "unknown",
+          "what": "负载读取/版本/校验失败时引擎**报告错误但不中止**， 调用方随后仍按（已处理的）缓冲继续应用。**本版按未定义行为处置**：实现必须响亮失败，⛔ 不许照抄\"继续\"。",
+          "next": "构造截断文件观察真机行为；在此之前不许把它写成\"语义\"。"
+        },
+        {
+          "id": "RES-SAVE-VERSION2-MEANING",
+          "kind": "unknown",
+          "what": "版本 2 除了参与相等比较外，是否影响块布局（版本 1 == 1 的容器里它明显影响，见残差）。",
+          "next": "比较“版本1=2”与“版本1=1”的样本，看块布局是否随版本2变化。"
+        },
+        {
+          "id": "RES-SAVE-TRAILER",
+          "kind": "unknown",
+          "what": "尾段（写 `0x457ce0` / 读 `0x45f1b0`）属于哪个子系统、存的是什么。",
+          "next": "读 `sub_457CE0` / `sub_45F1B0` 的记录类型；若确认是文本/日志，按本轮口径只登记归属。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "FMT-SAVE-BODY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SAVE-POOLFAMILIES",
+          "kind": "unknown",
+          "what": "6 个块计数各自对应哪个池（只确证整型 / 浮点 / 字符串三块，以及\"两块只在版本 2 ≥ 20 时出现\"）。",
+          "next": "解码器可用后按值域与长度对拍。"
+        },
+        {
+          "id": "RES-SAVE-LOCAL-POOLS",
+          "kind": "unknown",
+          "what": "**局部池的值是否持久化**。写侧暂存区的帧记录里只看到位置/返回栈下标； 完整读取变体会重装脚本（局部池因此被重置）。",
+          "next": "解码器可用后在块里找局部池的落点；找不到就明确判\"不持久化\"。"
+        },
+        {
+          "id": "RES-SAVE-FRAME-COUNT",
+          "kind": "unknown",
+          "what": "帧记录数按“当前帧下标 + 1”写入；写侧循环上界与该 +1 的对应关系仍未取证。",
+          "next": "构造当前帧为 0 / 1 / 2 的存档，核对记录条数与计数偏移。"
+        },
+        {
+          "id": "RES-SAVE-SYSTEM-CONTAINER",
+          "kind": "unknown",
+          "what": "版本 1 == 1 的**系统容器**（`SAVE.DAT` + `SAVE.BAK` + `RT.DAT`）用的是同一个头， 但负载是 1–3 段、且按版本切开（`v1>2 || v1==2&&v2>=10` 一档、`v1>3 || v1==3&&v2>=10` 再一档）。",
+          "next": "分析 `0x40aae0` / `0x40aee0` / `0x438320` / `0x438940` 的三段负载。"
+        },
+        {
+          "id": "RES-SAVE-FRAMEREC",
+          "kind": "unknown",
+          "what": "每帧记录 rec[0] / rec[1] 的语义、以及块 3..5 与尾段内部仍未取证。",
+          "next": "读 rec[0] / rec[1] 的写点与块 3..5 的消费方。"
+        },
+        {
+          "id": "RES-SAVE-TRAILING-TREE",
+          "kind": "unknown",
+          "what": "负载里有一张\"740 字节记录 + 键\"的表（按红黑树顺序遍历写出）， 属哪个子系统未取证（疑为文本/日志；本轮排除其内部语义）。",
+          "next": "按 `sub_40CD10` 的写出循环回溯记录来源。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "FMT-SAVE-RESTORE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SAVE-FRAME-WINDOW",
+          "kind": "unknown",
+          "what": "当前帧之后的帧（更深/更浅）在恢复时保留还是丢弃；本轮只确证\"按存档的当前帧号重建\"。",
+          "next": "构造更深 / 更浅帧各一份存档，恢复后观察那些帧是保留还是丢弃。"
+        },
+        {
+          "id": "RES-SAVE-EXIT-NEG",
+          "kind": "unknown",
+          "what": "`0x2 exit` 的 −10 / −11 父帧号分支与恢复的衔接（引用 `15-frame` 的残差，不在本条展开）。",
+          "next": "读 `0x2` 的 −10 / −11 父帧号分支与恢复入口的衔接点。"
+        },
+        {
+          "id": "RES-SAVE-TRAILSECTION-APPLY",
+          "kind": "unknown",
+          "what": "完整变体对尾段的应用内容（子系统语义）。",
+          "next": "读尾段读取入口，确认它作用到哪个子系统、是否改变引擎状态。"
+        },
+        {
+          "id": "RES-SAVE-POSITION-WRITE-SIDE",
+          "kind": "unknown",
+          "what": "写入侧\"位置 → 下标\"的查找只在表里做线性比较；对不在表里的位置存 −1 —— 该分支的可观察后果（例如从一条非指令边界恢复）未取证。",
+          "next": "构造一个不在位置表里的恢复位置，观察位置槽的值与后续行为。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-CONTAINERS-HANDLE-TAGS",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-CORE-CONTAINERS-DUP-ACCESSORS",
+          "kind": "unknown",
+          "what": "同样的四个分支还出现在 sub_42BF60（取址副本，0x42bfb8）与 sub_433310（字符串赋值，0x433310）；它们与五个原语是否逐字同语义只抽查了分派，没有逐站点比对",
+          "next": "对两个函数逐站点比对：容器创建 / 登记 / 元素读写是否与五个原语一致；不一致就分条"
+        },
+        {
+          "id": "RES-CORE-CONTAINERS-CONSUMERS",
+          "kind": "unknown",
+          "what": "哪些 opcode / 脚本用这四个标签、容器里装什么",
+          "next": "扫脚本足迹的 (type, raw) 集合后按调用点归属；这是程序（游戏数据），不是引擎合同"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-CONTAINERS-LAZY-ALLOC",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x42b045",
+            "0x42b26e",
+            "0x42b37b",
+            "0x42b170",
+            "0x42b6e6",
+            "0x42b859",
+            "0x42bc81",
+            "0x42bdc7"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-CORE-CONTAINERS-REGISTRY-READERS",
+          "kind": "unknown",
+          "what": "登记表除拆卸路径外还有没有读者；访问原语只写不读已确认（访问原语读的是登记表对象指针，不是表内容）",
+          "next": "全语料按 5D860h / 5D870h / 5D904h / 5D908h 的读点普查；已知读点 = 拆卸 + 装载器（建表）+ 访问原语（取表对象后写入）"
+        },
+        {
+          "id": "RES-CORE-CONTAINERS-LOCAL-LIFECYCLE",
+          "kind": "unknown",
+          "what": "帧重装时局部容器 / 登记表是否整体重建、旧槽值是否被重置",
+          "next": "读帧装载器 sub_40ED40 与释放器 sub_40EA00 的容器路径，写成 POOL/FRAME 的合同"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-CONTAINERS-FAILURE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-CORE-CONTAINERS-ALLOC-FAIL",
+          "kind": "unknown",
+          "what": "分配器能否返回空：代码有 null 检查，但调用的是抛异常版 operator new",
+          "next": "以编译器运行库配置 / 真机观测定案；在那之前只写“防御分支”，不声称可观察"
+        },
+        {
+          "id": "RES-CORE-CONTAINERS-REF-UNCHECKED",
+          "kind": "unknown",
+          "what": "槽里放进非容器整数 / 非数字文本后当句柄使用的真机行为",
+          "next": "设计一个最小脚本程序做差分观测；在那之前只写“未定义行为”"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-CONTAINERS-ELEMENT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [
+        {
+          "blocks": [
+            "0x41c1a6",
+            "0x41c241",
+            "0x41c54f",
+            "0x41c5ea"
+          ]
+        }
+      ],
+      "residual": [
+        {
+          "id": "RES-CORE-CONTAINERS-ELEMENT-INDEX",
+          "kind": "unknown",
+          "what": "有没有一条按任意下标访问容器元素的入口；五个原语没有元素下标参数，写路径的 out_of_range 检查不可达",
+          "next": "从 0x32f 与转发族反查；找不到就保持“只有第 0 个元素”"
+        },
+        {
+          "id": "RES-CORE-CONTAINERS-STRING-ELEM",
+          "kind": "unknown",
+          "what": "字符串容器元素的完整语义（28 字节记录；只有字符串赋值路径写它，该路径也会创建 / 登记容器）",
+          "next": "归 text-system；本稿只保留“元素类型 + 步长 + 五原语不寻址”三句，并逐条比对 sub_433310 的创建语义是否与取址一致"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-21D",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-21D-AUX",
+          "kind": "unknown",
+          "what": "两张辅助表的分工、本条复制的是哪一张，未取证。",
+          "next": "枚举两张辅助表记录的读点"
+        },
+        {
+          "id": "RES-SCENE3D-21D-VB",
+          "kind": "unknown",
+          "what": "副本的新顶点缓冲的装配输入（用副本记录的三段数组还是源缓冲数据）、顶点色来源（源烘焙色还是按副本当前色重烘）、以及是否要求与源缓冲逐位相同，均未取证。",
+          "next": "对比两缓冲的装配输入参数与顶点色来源，确认新缓冲内容的唯一来源。"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-21E",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-21E-ROLE",
+          "kind": "unknown",
+          "what": "本条两格与这套缩放的领域身份（本地 / 外部 / 附加变换）未取证",
+          "next": "枚举四套「两格 + 矩阵」的读点，看它们是否按同一顺序合成"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-21F",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-21F-ROLE",
+          "kind": "unknown",
+          "what": "本条轴角与 `0x1fe` 的轴角谁是本地、谁是外部，未取证",
+          "next": "找同时读两套轴角的合成点"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-230",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-230-GROUP",
+          "kind": "unknown",
+          "what": "附加组（`0x231`..`0x235`）的领域身份与用途未取证",
+          "next": "读位 2 的分支与这六格的读点"
+        },
+        {
+          "id": "RES-SCENE3D-230-CLEARCELLS",
+          "kind": "unknown",
+          "what": "三个清格不被复位是否为有意，未取证",
+          "next": "确认清格是否被 setter 之外的写点写"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-231",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-231-ROLE",
+          "kind": "unknown",
+          "what": "三个整数的领域身份（索引 / 材质 / 开关组合）未取证",
+          "next": "读这三格的消费者"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-233",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-233-ROLE",
+          "kind": "unknown",
+          "what": "附加组缩放与 `0x21e` 那套缩放的用途分工未取证",
+          "next": "找把两套缩放读进同一变换的站点"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-234",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-234-ROLE",
+          "kind": "unknown",
+          "what": "三个浮点的领域身份（位置 / 方向 / 颜色系数）未取证",
+          "next": "读这三个格是否进矩阵构造或插值"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-235",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-235-ROLE",
+          "kind": "unknown",
+          "what": "这套平移与 `0x1ff` / `0x220` 的平移如何合成未取证",
+          "next": "找读三套平移的消费者"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-239",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-239-CROSS",
+          "kind": "unknown",
+          "what": "为什么一条指令同时置「已配置」位又改附加组三格未取证",
+          "next": "看位 1 与位 2 的分支是否在同一条更新路径上合并"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-242",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE3D-242-SECOND",
+          "kind": "unknown",
+          "what": "第二张表的领域分工与本条为何要同步两处未取证",
+          "next": "枚举第二张表记录的读点，确认两处是否总同值"
+        },
+        {
+          "id": "RES-SCENE3D-242-ROLE",
+          "kind": "unknown",
+          "what": "这个整数的领域身份（对象种类 / 绘制顺序 / 材质编号）未取证",
+          "next": "读该格的分支消费者"
+        }
+      ],
+      "falsifiers": []
+    },
+    {
+      "id": "FMT-SAVE-CODEC",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SAVE-CODEC-TAIL",
+          "kind": "unknown",
+          "what": "主体尾段（740 / N / 741 字记录）的内部字段与主体尾部约 80 KB 零区的用途未取证。",
+          "next": "对尾段记录逐字段比对写侧与读侧访问，确认 80 KB 零区是否属版本 1 = 3 的定长副块。"
+        },
+        {
+          "id": "RES-SAVE-CODEC-REC259",
+          "kind": "unknown",
+          "what": "写侧有一条“最后一帧 rec[259] 置 −1”的规则，但样本 SAVE76 最后一帧是 206；哪个条件决定该写未取证。",
+          "next": "构造最后一帧有/无父调用位置的两种存档，观察 rec[259] 的写值。"
+        },
+        {
+          "id": "RES-SAVE-CODEC-BLOCK-SEM",
+          "kind": "unknown",
+          "what": "块 3 / 4 / 5 的元素语义与块 1 / 4 在版本 2 < 20 时是否占位未取证。",
+          "next": "用版本 2 < 20 的样本对照块计数与偏移；再读块 3/4/5 的消费方。"
+        }
+      ],
+      "falsifiers": []
     }
   ],
   "gaps": [
     {
       "id": "GAP-OPS-0000-00FF",
       "chapter": "ops-unwritten",
-      "title": "opcode 0x0000–0x00FF 段的未成篇项",
-      "note": "本段 140 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "title": "opcode 0x0000–0x00FF 段：尚无规范条目",
+      "note": "本段 126 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
-        "0x1",
         "0x4",
         "0x7",
         "0xa",
@@ -3596,9 +5490,7 @@
         "0x36",
         "0x37",
         "0x38",
-        "0x60",
         "0x62",
-        "0x63",
         "0x65",
         "0x66",
         "0x67",
@@ -3610,13 +5502,9 @@
         "0x6e",
         "0x6f",
         "0x72",
-        "0x74",
         "0x7a",
-        "0x7b",
-        "0x7c",
         "0x7d",
         "0x7e",
-        "0x7f",
         "0x81",
         "0x82",
         "0x83",
@@ -3626,7 +5514,6 @@
         "0x87",
         "0x89",
         "0x8a",
-        "0x8c",
         "0x8d",
         "0x8e",
         "0x90",
@@ -3637,9 +5524,6 @@
         "0x95",
         "0x96",
         "0x97",
-        "0xa1",
-        "0xa2",
-        "0xa3",
         "0xaa",
         "0xab",
         "0xac",
@@ -3669,7 +5553,6 @@
         "0xc5",
         "0xc6",
         "0xc7",
-        "0xc8",
         "0xc9",
         "0xca",
         "0xcb",
@@ -3677,7 +5560,6 @@
         "0xcd",
         "0xce",
         "0xcf",
-        "0xd0",
         "0xd1",
         "0xd2",
         "0xd3",
@@ -3686,7 +5568,6 @@
         "0xd6",
         "0xd7",
         "0xd8",
-        "0xd9",
         "0xda",
         "0xfa",
         "0xfb",
@@ -3698,7 +5579,7 @@
         {
           "id": "RES-GAP-OPS-0000-00FF",
           "kind": "unhandled",
-          "what": "本段 140 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "what": "本段 126 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
           "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
         }
       ]
@@ -3706,8 +5587,8 @@
     {
       "id": "GAP-OPS-0100-01FF",
       "chapter": "ops-unwritten",
-      "title": "opcode 0x0100–0x01FF 段的未成篇项",
-      "note": "本段 107 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。★ 同段的 0x1a2 / 0x1a3 / 0x1a9 / 0x1aa 已由「配置」的「脚本访问」写成合同，不在本 gap 里。",
+      "title": "opcode 0x0100–0x01FF 段：尚无规范条目",
+      "note": "本段 81 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x100",
         "0x102",
@@ -3748,35 +5629,20 @@
         "0x14c",
         "0x14d",
         "0x190",
-        "0x191",
         "0x193",
         "0x194",
         "0x195",
         "0x196",
         "0x198",
         "0x199",
-        "0x19a",
-        "0x19b",
-        "0x19c",
         "0x19d",
-        "0x19e",
         "0x19f",
-        "0x1a0",
-        "0x1a1",
         "0x1a6",
-        "0x1ab",
-        "0x1ac",
-        "0x1ad",
-        "0x1ae",
-        "0x1af",
-        "0x1b0",
         "0x1b1",
         "0x1b2",
         "0x1b3",
         "0x1b4",
         "0x1b5",
-        "0x1b6",
-        "0x1b7",
         "0x1b8",
         "0x1b9",
         "0x1ba",
@@ -3784,21 +5650,16 @@
         "0x1bc",
         "0x1bd",
         "0x1be",
-        "0x1bf",
         "0x1c0",
         "0x1c2",
         "0x1c3",
         "0x1c4",
         "0x1c5",
         "0x1c6",
-        "0x1c7",
         "0x1c8",
         "0x1c9",
         "0x1cb",
-        "0x1cc",
         "0x1cd",
-        "0x1ce",
-        "0x1cf",
         "0x1d0",
         "0x1d1",
         "0x1d2",
@@ -3809,19 +5670,13 @@
         "0x1d7",
         "0x1d8",
         "0x1d9",
-        "0x1f4",
-        "0x1f5",
-        "0x1f6",
-        "0x1fc",
-        "0x1fd",
-        "0x1fe",
-        "0x1ff"
+        "0x1fc"
       ],
       "residual": [
         {
           "id": "RES-GAP-OPS-0100-01FF",
           "kind": "unhandled",
-          "what": "本段 107 个有处理函数的 opcode 尚未成篇（`ops` 列出全部；0x1a2 / 0x1a3 / 0x1a9 / 0x1aa 已由「配置」的「脚本访问」成篇，不在本段清单里）",
+          "what": "本段 81 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
           "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
         }
       ]
@@ -3829,18 +5684,16 @@
     {
       "id": "GAP-OPS-0200-02FF",
       "chapter": "ops-unwritten",
-      "title": "opcode 0x0200–0x02FF 段的未成篇项",
-      "note": "本段 145 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "title": "opcode 0x0200–0x02FF 段：尚无规范条目",
+      "note": "本段 121 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x200",
         "0x201",
         "0x205",
         "0x206",
         "0x207",
-        "0x208",
         "0x209",
         "0x20a",
-        "0x20b",
         "0x20c",
         "0x20e",
         "0x210",
@@ -3848,14 +5701,6 @@
         "0x214",
         "0x215",
         "0x216",
-        "0x217",
-        "0x218",
-        "0x219",
-        "0x21a",
-        "0x21d",
-        "0x21e",
-        "0x21f",
-        "0x220",
         "0x221",
         "0x222",
         "0x223",
@@ -3863,7 +5708,6 @@
         "0x225",
         "0x226",
         "0x227",
-        "0x228",
         "0x229",
         "0x22a",
         "0x22b",
@@ -3871,16 +5715,10 @@
         "0x22d",
         "0x22e",
         "0x22f",
-        "0x230",
-        "0x231",
         "0x232",
-        "0x233",
-        "0x234",
-        "0x235",
         "0x236",
         "0x237",
         "0x238",
-        "0x239",
         "0x23a",
         "0x23b",
         "0x23c",
@@ -3889,7 +5727,6 @@
         "0x23f",
         "0x240",
         "0x241",
-        "0x242",
         "0x243",
         "0x244",
         "0x245",
@@ -3909,8 +5746,6 @@
         "0x255",
         "0x256",
         "0x257",
-        "0x258",
-        "0x259",
         "0x25a",
         "0x25b",
         "0x25c",
@@ -3935,15 +5770,11 @@
         "0x2cd",
         "0x2ce",
         "0x2cf",
-        "0x2d0",
-        "0x2d1",
         "0x2d2",
-        "0x2d3",
         "0x2d4",
         "0x2d6",
         "0x2d7",
         "0x2d9",
-        "0x2da",
         "0x2dc",
         "0x2dd",
         "0x2de",
@@ -3982,7 +5813,7 @@
         {
           "id": "RES-GAP-OPS-0200-02FF",
           "kind": "unhandled",
-          "what": "本段 145 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "what": "本段 121 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
           "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
         }
       ]
@@ -3990,7 +5821,7 @@
     {
       "id": "GAP-OPS-0300-03FF",
       "chapter": "ops-unwritten",
-      "title": "opcode 0x0300–0x03FF 段的未成篇项",
+      "title": "opcode 0x0300–0x03FF 段：尚无规范条目",
       "note": "本段 53 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x300",
@@ -4060,7 +5891,7 @@
       "id": "GAP-CONTAINERS-HANDLE-BRANCHES",
       "chapter": "containers",
       "title": "容器句柄的四个类型标签分支：0x8003 / 0x8005 / 0x8009 / 0x800B",
-      "note": "它们在操作数原语的 switch 之前由独立的比较分支处理（懒分配 / 登记），句柄分支不是跳转表 case；本轮的候选域只覆盖跳转表里的类型 ⇒ 这 4 个分支不在试点块里。★ 懒分配 / 登记 / 元素读写已在「数据池」的「容器句柄：类型标签 0x8003 / 0x8009」与「字符串容器句柄：类型标签 0x8005 / 0x800B」成篇；本 gap 只覆盖仍未成篇的三件事：元素类型、容器对象的生命周期、失败路径。",
+      "note": "四个类型标签的分派 / 懒分配 / 元素 / 失败路径已成篇（CORE-CONTAINERS-*）；本 gap 只跟踪字符串容器元素 / 生命周期 / 重复访问器等未闭合义务。句柄分支不是跳转表 case。",
       "residual": [
         {
           "id": "RES-GAP-CONTAINERS-HANDLE-BRANCHES",

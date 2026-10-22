@@ -8,7 +8,7 @@
 import { decodeCp932, readU32LE } from './bytes.ts';
 import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, TextureObject, VoiceGroup } from './machine.ts';
 import { FRAME_SLOT_COUNT, MOVIE_BIT, WAIT_BIT } from './machine.ts';
-import { encodeInt, readAddress, readFloat, readInt, readIntAt, readText, writeBitsAt, writeFloat, writeInt, writeText } from './values.ts';
+import { encodeInt, readAddress, readFloat, readInt, readIntAt, readRawAt, readText, writeBitsAt, writeFloat, writeInt, writeRawAt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
 import { arrayStrideFor, resolveAddress } from './address.ts';
 import type { PoolTag } from './address.ts';
@@ -189,11 +189,22 @@ async function release1fa(m: Machine, ops: Operand[]): Promise<void> {
   if (m.renderHost !== undefined) await m.renderHost.releaseTexture(id);
 }
 
-/** 默认绘制项：规范只说"建一个默认项"，字段全 0 */
+/** 4×4 单位矩阵（列主序，与 D3D 一致）。 */
+function identity4(): number[] {
+  const m = new Array(16).fill(0);
+  m[0] = m[5] = m[10] = m[15] = 1;
+  return m;
+}
+
+/** 默认绘制项：规范只说“建一个默认项”，字段全 0；六个矩阵默认单位阵。 */
 function defaultItem(): DrawItem {
   return {
     flags: 0, textureId: 0, left: 0, top: 0, right: 0, bottom: 0, aux: [0, 0, 0],
     start: 0, delay: 0, duration: 0, colorFrom: -1, colorNow: -1, colorTo: -1, unknown: new Map(),
+    vec1: [0, 0, 0], vec2: [0, 0, 0],
+    matrices: Array.from({ length: 6 }, () => identity4()),
+    config: 0, g0: 0, g1: 0, g2: 0,
+    fields: new Map(), extraMatrices: new Map(),
   };
 }
 
@@ -1248,6 +1259,611 @@ function jump8c(m: Machine, ops: Operand[]): void {
   m.operandCount = 0;
 }
 
+/**
+ * 0x63 lea：把**第 2 个操作数的地址**原样写进**第 1 个操作数的引用槽**（CORE-OPS-POOL-LEA-63）。
+ * ★ 不编码：写的是地址本身；第 1 个必须是引用族，否则 `writePointerSlot` 抛类型异常。
+ */
+function lea63(m: Machine, ops: Operand[]): void {
+  const addr = addressOfOperand(m, ops, 2);
+  writePointerSlot(m, ops, 1, addr);
+  m.effects.push({
+    kind: 'array.lookup',
+    detail: { opcode: '0x63', pool: `0x${ops[0].type.toString(16)}`, address: addr },
+  });
+}
+
+/**
+ * 0x60 取随机数（CORE-OPS-RANDOM-60）：计数器 +1（超过 12 归 0）→ 取一次宿主随机数 → 读范围。
+ * 范围 = 0 ⇒ 先把落点写 0，再抛显示消息型异常；否则落点 ← 随机数（有符号）对范围取余。
+ */
+function random60(m: Machine, ops: Operand[]): void {
+  const range = readInt(m, ops, 2) | 0;
+  m.randomCounter = (m.randomCounter + 1) % 13;
+  const bits = Math.floor((m.random() % 1) * 0x100000000) >>> 0;
+  if (range === 0) {
+    writeInt(m, ops, 1, 0);
+    throw new Error('random: 范围 0 —— 引擎抛显示消息型异常（落点已写 0）');
+  }
+  const value = ((bits | 0) % range) | 0;
+  writeInt(m, ops, 1, value);
+  m.effects.push({
+    kind: 'engine.scalar.write',
+    detail: { opcode: '0x60', slot: 'randomCounter', counter: m.randomCounter, value },
+  });
+}
+
+/** 0x74：读整型(第 1 个) → 引擎级参数格（不归一、不夹取）。 */
+function param74(m: Machine, ops: Operand[]): void {
+  m.paramCell = readInt(m, ops, 1);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x74', slot: 'paramCell', value: m.paramCell } });
+}
+
+/** 0x7f：引擎级参数格 → 写整型(第 1 个)；未写过 ⇒ 响亮失败（规范说初值未观察，不伪造 0）。 */
+function param7f(m: Machine, ops: Operand[]): void {
+  if (m.paramCell === null) throw new Error('param-cell-uninitialized: 0x7f 先于 0x74');
+  writeInt(m, ops, 1, m.paramCell);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x7f', slot: 'paramCell', value: m.paramCell } });
+}
+
+/** 0xd0：自己读一次宿主毫秒时钟 → 写整型(第 1 个)（不复用主循环缓存的那次读数）。 */
+function clockD0(m: Machine, ops: Operand[]): void {
+  const now = Math.trunc(m.clock ? m.clock() : m.now) | 0;
+  writeInt(m, ops, 1, now);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0xd0', slot: 'clock', value: now } });
+}
+
+/** 命名表的键按**文本**读：字符串族走 `readText`；整型族按十进制文本（规范口径）。 */
+function readKeyText(m: Machine, ops: Operand[], k: number): string {
+  const op = ops[k - 1];
+  if (op.type === 3 || op.type === 9) return String(readInt(m, ops, k));
+  return readText(m, ops, k);
+}
+
+/** 0xa1：按 4095 个槽重置命名表（计数 0、键清空）。本层用 Map ⇒ 直接 clear。 */
+function tableResetA1(m: Machine): void {
+  m.namedTable.clear();
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0xa1', slot: 'namedTable', size: 4095 } });
+}
+
+/** 0xa2：读值(第 2 个) → 读键(第 1 个，按文本) → 写入命名表（覆盖不增计数）。 */
+function tableBindA2(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 2);
+  const key = readKeyText(m, ops, 1);
+  m.namedTable.set(key, value);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0xa2', slot: 'namedTable', key, value } });
+}
+
+/** 0xa3：按键查命名表；命中 ⇒ ip ← 4×登记值；未命中才读第 2 个（默认位置）。两支都清推进格数。 */
+function tableDispatchA3(m: Machine, ops: Operand[]): void {
+  const key = readKeyText(m, ops, 1);
+  const target = m.namedTable.has(key) ? m.namedTable.get(key)! : readInt(m, ops, 2);
+  m.ip = 4 * target;
+  m.operandCount = 0;
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0xa3', slot: 'namedTable', key, target } });
+}
+
+/** 0x191 浮点绝对值：op1（写浮点）← |读浮点(op2)|。 */
+function floatAbs191(m: Machine, ops: Operand[]): void {
+  writeFloat(m, ops, 1, Math.abs(readFloat(m, ops, 2)));
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x191', slot: 'float-abs' } });
+}
+
+/** 0x2d0 浮点加：op1 ← 读浮点(op2) + 读浮点(op3)。 */
+function floatAdd2d0(m: Machine, ops: Operand[]): void {
+  writeFloat(m, ops, 1, readFloat(m, ops, 2) + readFloat(m, ops, 3));
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x2d0', slot: 'float-add' } });
+}
+
+/** 0x2d1 浮点减：op1 ← 读浮点(op2) − 读浮点(op3)。 */
+function floatSub2d1(m: Machine, ops: Operand[]): void {
+  writeFloat(m, ops, 1, readFloat(m, ops, 2) - readFloat(m, ops, 3));
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x2d1', slot: 'float-sub' } });
+}
+
+/** 0x2d3 浮点除：op1 ← 读浮点(op2) ÷ 读浮点(op3)。 */
+function floatDiv2d3(m: Machine, ops: Operand[]): void {
+  writeFloat(m, ops, 1, readFloat(m, ops, 2) / readFloat(m, ops, 3));
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x2d3', slot: 'float-div' } });
+}
+
+/** 0x1fd 缩放：op2..4 ÷ 100 写缩放矩阵（矩阵 0）。 */
+function sceneScale1fd(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const x = readFloat(m, ops, 2) / 100;
+  const y = readFloat(m, ops, 3) / 100;
+  const z = readFloat(m, ops, 4) / 100;
+  const item = drawItemOf(m, id);
+  const mat = identity4();
+  mat[0] = x; mat[5] = y; mat[10] = z;
+  item.matrices[0] = mat;
+  item.config = 1;
+  m.scene.dirty = 1;
+}
+
+/** 0x1ff 平移：op2..4 原值写平移矩阵（矩阵 4）。 */
+function sceneTranslate1ff(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const x = readFloat(m, ops, 2);
+  const y = readFloat(m, ops, 3);
+  const z = readFloat(m, ops, 4);
+  const item = drawItemOf(m, id);
+  const mat = identity4();
+  mat[12] = x; mat[13] = y; mat[14] = z;
+  item.matrices[4] = mat;
+  item.config = 1;
+  m.scene.dirty = 1;
+}
+
+/** 0x1fe 旋转：op2..4 轴、op5 角度（度），写旋转矩阵（矩阵 2）并另存轴 / 角。 */
+function sceneRotate1fe(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const ax = readFloat(m, ops, 2);
+  const ay = readFloat(m, ops, 3);
+  const az = readFloat(m, ops, 4);
+  const deg = readFloat(m, ops, 5);
+  const len = Math.hypot(ax, ay, az) || 1;
+  const x = ax / len, y = ay / len, z = az / len;
+  const rad = (deg * Math.PI) / 180;
+  const c = Math.cos(rad), s = Math.sin(rad), t = 1 - c;
+  const mat = identity4();
+  mat[0] = t * x * x + c; mat[1] = t * x * y + s * z; mat[2] = t * x * z - s * y;
+  mat[4] = t * x * y - s * z; mat[5] = t * y * y + c; mat[6] = t * y * z + s * x;
+  mat[8] = t * x * z + s * y; mat[9] = t * y * z - s * x; mat[10] = t * z * z + c;
+  const item = drawItemOf(m, id);
+  item.matrices[2] = mat;
+  item.vec2 = [ax, ay, az];
+  item.config = 1;
+  m.scene.dirty = 1;
+}
+
+/** 0x220：先建默认记录；位 0 为 0 ⇒ 只留记录；否则 G0..G3 + 第四个平移矩阵 + 脏 / 动画。 */
+function sceneSetTransform220(m: Machine, ops: Operand[]): void {
+  const fz = readFloat(m, ops, 6);
+  const fy = readFloat(m, ops, 5);
+  const fx = readFloat(m, ops, 4);
+  const op3 = readInt(m, ops, 3) | 0;
+  const op2 = readInt(m, ops, 2) | 0;
+  const id = readInt(m, ops, 1) | 0;
+  const item = drawItemOf(m, id);
+  if ((item.flags & 1) === 0) return;
+  item.flags |= 2;
+  item.g0 = 0;
+  item.g1 = op2;
+  item.g2 = op3;
+  item.config = 1;
+  const mat = identity4();
+  mat[12] = fx; mat[13] = fy; mat[14] = fz;
+  item.matrices[5] = mat;
+  m.scene.dirty = 1;
+  m.scene.animating = 1;
+}
+
+/** 0x228：查记录（不建）；读平移矩阵（矩阵 4）的平移分量，状态 0 成功 / 1 失败。 */
+function sceneGetLocalTrans228(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 2) | 0;
+  const item = m.scene.drawItems.get(id);
+  if (!item) {
+    writeInt(m, ops, 1, 1);
+    return;
+  }
+  const mat = item.matrices[4];
+  writeFloat(m, ops, 3, mat[12]);
+  writeFloat(m, ops, 4, mat[13]);
+  writeFloat(m, ops, 5, mat[14]);
+  writeInt(m, ops, 1, 0);
+}
+
+/** 场景 setter 的字段格：偏移只来自 bindings，正文不写。 */
+function setField(item: DrawItem, offset: number, value: number): void {
+  item.fields.set(offset, value);
+}
+
+function scaleMatrix(x: number, y: number, z: number): number[] {
+  const m = identity4();
+  m[0] = x; m[5] = y; m[10] = z;
+  return m;
+}
+
+function translateMatrix(x: number, y: number, z: number): number[] {
+  const m = identity4();
+  m[12] = x; m[13] = y; m[14] = z;
+  return m;
+}
+
+function rotateMatrix(ax: number, ay: number, az: number, deg: number): number[] {
+  const len = Math.hypot(ax, ay, az) || 1;
+  const x = ax / len, y = ay / len, z = az / len;
+  const rad = (deg * Math.PI) / 180;
+  const c = Math.cos(rad), s = Math.sin(rad), t = 1 - c;
+  const m = identity4();
+  m[0] = t * x * x + c; m[1] = t * x * y + s * z; m[2] = t * x * z - s * y;
+  m[4] = t * x * y - s * z; m[5] = t * y * y + c; m[6] = t * y * z + s * x;
+  m[8] = t * x * z + s * y; m[9] = t * y * z - s * x; m[10] = t * z * z + c;
+  return m;
+}
+
+/** 0x21e：带位 0 门的一对整数 + 缩放矩阵。 */
+function setter21e(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  const x = readFloat(m, ops, 4) / 100;
+  const y = readFloat(m, ops, 5) / 100;
+  const z = readFloat(m, ops, 6) / 100;
+  const item = drawItemOf(m, id);
+  if ((item.flags & 1) === 0) return;
+  item.flags |= 2;
+  item.config = 1;
+  setField(item, 0x34, 0);
+  setField(item, 0x3c, a);
+  setField(item, 0x50, b);
+  item.extraMatrices.set(0xac, scaleMatrix(x, y, z));
+  m.scene.dirty = 1;
+  m.scene.animating = 1;
+}
+
+/** 0x21f：带位 0 门的一对整数 + 轴角 + 旋转矩阵。 */
+function setter21f(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  const ax = readFloat(m, ops, 4);
+  const ay = readFloat(m, ops, 5);
+  const az = readFloat(m, ops, 6);
+  const deg = readFloat(m, ops, 7);
+  const item = drawItemOf(m, id);
+  if ((item.flags & 1) === 0) return;
+  item.flags |= 2;
+  item.config = 1;
+  setField(item, 0x34, 0);
+  setField(item, 0x40, a);
+  setField(item, 0x54, b);
+  setField(item, 0x1f8, ax);
+  setField(item, 0x1fc, ay);
+  setField(item, 0x200, az);
+  setField(item, 0x208, deg);
+  item.extraMatrices.set(0x12c, rotateMatrix(ax, ay, az, deg));
+  m.scene.dirty = 1;
+  m.scene.animating = 1;
+}
+
+/** 0x230：清附加组开关位与六个共用格；不标脏。 */
+function setter230(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const item = drawItemOf(m, id);
+  item.flags &= ~4;
+  for (const off of [0x21c, 0x220, 0x224, 0x228, 0x22c, 0x230]) setField(item, off, 0);
+}
+
+/** 0x231：置附加组开关位 + 三个整数 + 清格；标脏。 */
+function setter231(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  const c = readInt(m, ops, 4) | 0;
+  const item = drawItemOf(m, id);
+  item.flags |= 4;
+  setField(item, 0x21c, 0);
+  setField(item, 0x230, a);
+  setField(item, 0x238, b);
+  setField(item, 0x23c, c);
+  m.scene.dirty = 1;
+}
+
+/** 0x233：置附加开关位 + 值格 + 缩放矩阵；标脏。 */
+function setter233(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const a = readInt(m, ops, 2) | 0;
+  const x = readFloat(m, ops, 3) / 100;
+  const y = readFloat(m, ops, 4) / 100;
+  const z = readFloat(m, ops, 5) / 100;
+  const item = drawItemOf(m, id);
+  item.flags |= 4;
+  setField(item, 0x210, 0);
+  setField(item, 0x224, a);
+  item.extraMatrices.set(0x250, scaleMatrix(x, y, z));
+  m.scene.dirty = 1;
+}
+
+/** 0x234：置附加开关位 + 值格 + 三个浮点格；标脏。 */
+function setter234(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const a = readInt(m, ops, 2) | 0;
+  const x = readFloat(m, ops, 3);
+  const y = readFloat(m, ops, 4);
+  const z = readFloat(m, ops, 5);
+  const item = drawItemOf(m, id);
+  item.flags |= 4;
+  setField(item, 0x214, 0);
+  setField(item, 0x228, a);
+  setField(item, 0x244, x);
+  setField(item, 0x248, y);
+  setField(item, 0x24c, z);
+  m.scene.dirty = 1;
+}
+
+/** 0x235：置附加开关位 + 值格 + 平移矩阵；标脏。 */
+function setter235(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const a = readInt(m, ops, 2) | 0;
+  const x = readFloat(m, ops, 3);
+  const y = readFloat(m, ops, 4);
+  const z = readFloat(m, ops, 5);
+  const item = drawItemOf(m, id);
+  item.flags |= 4;
+  setField(item, 0x218, 0);
+  setField(item, 0x22c, a);
+  item.extraMatrices.set(0x290, translateMatrix(x, y, z));
+  m.scene.dirty = 1;
+}
+
+/** 0x239：带位 0 门的一对整数 + 附加组三个整数；标脏 + 动画。 */
+function setter239(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const a = readInt(m, ops, 2) | 0;
+  const b = readInt(m, ops, 3) | 0;
+  const c = readInt(m, ops, 4) | 0;
+  const d = readInt(m, ops, 5) | 0;
+  const e = readInt(m, ops, 6) | 0;
+  const item = drawItemOf(m, id);
+  if ((item.flags & 1) === 0) return;
+  item.flags |= 2;
+  setField(item, 0x34, 0);
+  setField(item, 0x48, a);
+  setField(item, 0x5c, b);
+  setField(item, 0x238, c);
+  setField(item, 0x23c, d);
+  setField(item, 0x234, e);
+  m.scene.dirty = 1;
+  m.scene.animating = 1;
+}
+
+/** 0x217 / 0x219 写三元向量：读序 2→3→4→1；缺记录先建默认记录。 */
+function sceneVecSet(m: Machine, ops: Operand[], which: 'vec1' | 'vec2'): void {
+  const z = readFloat(m, ops, 4);
+  const y = readFloat(m, ops, 3);
+  const x = readFloat(m, ops, 2);
+  const id = readInt(m, ops, 1) | 0;
+  const item = drawItemOf(m, id);
+  item[which] = [x, y, z];
+  m.scene.dirty = 1;
+  m.effects.push({ kind: 'scene.vec.write', detail: { opcode: which === 'vec1' ? '0x217' : '0x219', id } });
+}
+
+/** 0x218 / 0x21a 读三元向量：查不到写 0，且**不建记录**。 */
+function sceneVecGet(m: Machine, ops: Operand[], which: 'vec1' | 'vec2'): void {
+  const id = readInt(m, ops, 1) | 0;
+  const item = m.scene.drawItems.get(id);
+  const v = item?.[which] ?? [0, 0, 0];
+  writeFloat(m, ops, 2, v[0]);
+  writeFloat(m, ops, 3, v[1]);
+  writeFloat(m, ops, 4, v[2]);
+}
+
+/** 0x258：按编号写两张 1000 项表的两个位（掩码只取低两位；越界是 UB ⇒ 抛）。 */
+function sceneTableFlags258(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const mask = readInt(m, ops, 2) | 0;
+  if (id < 0 || id >= 1000) throw new Error(`0x258 编号 ${id} 越界（两张表各 1000 项）`);
+  m.scene.flagTableA[id] = mask & 1;
+  m.scene.flagTableB[id] = (mask >>> 1) & 1;
+  m.effects.push({ kind: 'scene.table.flags', detail: { opcode: '0x258', id, bits: mask & 3 } });
+}
+
+/** 0x259：两张 1000 项表的这些标志全清 0。 */
+function sceneTableFlags259(m: Machine): void {
+  m.scene.flagTableA.fill(0);
+  m.scene.flagTableB.fill(0);
+  m.effects.push({ kind: 'scene.table.flags', detail: { opcode: '0x259', id: 'all', bits: 0 } });
+}
+
+/** 0x2da：CG 编号 > 999 ⇒ 错误通道且一个字段都不写；否则存七个整数格。 */
+function cgSet2da(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const vals: number[] = [];
+  for (let k = 2; k <= 8; k += 1) vals.push(readInt(m, ops, k) | 0);
+  if (id > 999) {
+    m.diagnostics.push({ kind: 'cg-id-out-of-range', index: id });
+    return;
+  }
+  if (id < 0) throw new Error(`0x2da 的 CG 编号 ${id} 为负（未定义行为）`);
+  m.scene.cgRecords.set(id, vals);
+  m.effects.push({ kind: 'scene.cg.write', detail: { opcode: '0x2da', id } });
+}
+
+/** 0x1f6：清场景的记录 / 网格 / 辅助表；脏标记清 0，动画标记不动。 */
+function sceneClear1f6(m: Machine): void {
+  m.scene.drawItems.clear();
+  m.scene.meshes.clear();
+  for (const t of m.scene.auxTables) t.clear();
+  m.scene.dirty = 0;
+  m.scene.hasObjects = 0;
+  m.effects.push({ kind: 'scene.clear', detail: { opcode: '0x1f6' } });
+}
+
+/** 0x208 查询纹理尺寸：编号 > 999 ⇒ 错误通道 + 两个输出 0；槽空 ⇒ 0/0；有对象 ⇒ 逻辑宽高。 */
+function textureSize208(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  if (id > 999) {
+    writeInt(m, ops, 2, 0);
+    writeInt(m, ops, 3, 0);
+    m.diagnostics.push({ kind: 'texture-id-out-of-range', index: id });
+    return;
+  }
+  const obj = m.scene.textureObjects.get(id);
+  writeInt(m, ops, 2, obj?.width ?? 0);
+  writeInt(m, ops, 3, obj?.height ?? 0);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x208', id, width: obj?.width ?? 0, height: obj?.height ?? 0 } });
+}
+
+/** 0x1b0 memcpy：取址(op1) → 取址(op2)，把源处 4×n 字节原样复制到目标处。 */
+function memcpy1b0(m: Machine, ops: Operand[]): void {
+  const src = addressOfOperand(m, ops, 1);
+  const dst = addressOfOperand(m, ops, 2);
+  const n = readInt(m, ops, 3) | 0;
+  if (n > 0) for (let i = 0; i < n; i += 1) writeRawAt(m, dst, i, readRawAt(m, src, i));
+  m.effects.push({ kind: 'array.copy', detail: { opcode: '0x1b0', from: src, to: dst, words: Math.max(0, n) } });
+}
+
+/** 0x1cf：读整型(op1) 原样覆盖状态字。 */
+function statusWrite1cf(m: Machine, ops: Operand[]): void {
+  m.statusWord = readInt(m, ops, 1) | 0;
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1cf', slot: 'statusWord', value: m.statusWord } });
+}
+
+/** 0x1bf：第 16 位为 1 ⇒ 整字清 0；随后第 0 位为 0 ⇒ 相邻格写 1。 */
+function statusConsume1bf(m: Machine): void {
+  if ((m.statusWord & 0x10000) !== 0) m.statusWord = 0;
+  if ((m.statusWord & 1) === 0) m.statusNeighbor = 1;
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1bf', slot: 'statusWord', value: m.statusWord } });
+}
+
+/** 0x1cc：状态格原值写进 op1（不归一）。 */
+function statusCellRead1cc(m: Machine, ops: Operand[]): void {
+  writeInt(m, ops, 1, m.statusCell | 0);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1cc', slot: 'statusCell', value: m.statusCell } });
+}
+
+/** 0x19a：格 X 的原值写进 op1。 */
+function flagReadX19a(m: Machine, ops: Operand[]): void {
+  writeInt(m, ops, 1, m.flagX | 0);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x19a', slot: 'flagX', value: m.flagX } });
+}
+
+/** 0x1b6：格 Y 归一成 0/1 后写进 op1。 */
+function flagReadY1b6(m: Machine, ops: Operand[]): void {
+  const v = m.flagY !== 0 ? 1 : 0;
+  writeInt(m, ops, 1, v);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1b6', slot: 'flagY', value: v } });
+}
+
+/** 0x1b7：op1 归一成 0/1 后写进格 Y。 */
+function flagWriteY1b7(m: Machine, ops: Operand[]): void {
+  m.flagY = readInt(m, ops, 1) !== 0 ? 1 : 0;
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1b7', slot: 'flagY', value: m.flagY } });
+}
+
+/** 0x01：不写推进格数，直接走退出通道（码 1）。 */
+function abort01(m: Machine): void {
+  m.exitCode = 1;
+  m.halted = true;
+}
+
+/** 0x0d9：清状态选择字第 12 位；若 d9Cell 非 0，再清 d9Word 的第 12 位。 */
+function statusClearD9(m: Machine): void {
+  m.flags &= ~(1 << 12);
+  if (m.d9Cell !== 0) m.d9Word &= ~(1 << 12);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x0d9', bit12: 0 } });
+}
+
+/** 0x7b：读两个整数 → 本帧的主 / 副进入目标（位置，不是字节地址）。 */
+function localEnterTargets7b(m: Machine, ops: Operand[]): void {
+  m.operandCount = 5;
+  m.frame.localMain = readInt(m, ops, 1) | 0;
+  m.frame.localSub = readInt(m, ops, 2) | 0;
+}
+
+/** 0x7c：身份 / 深度判据；成功则整字覆盖状态选择字、清存档字、跳回存档位置。 */
+function localRet7c(m: Machine): void {
+  if ((m.localSaveWord & (1 << 25)) === 0) {
+    m.operandCount = 1;
+    throw new Error('display-message: 不在本地块里');
+  }
+  if (m.frame.localDepth !== m.localSaveDepth) {
+    throw new Error(`display-message: 本地块深度不符（${m.frame.localDepth} != ${m.localSaveDepth}）`);
+  }
+  m.ip = 4 * m.localSavePos;
+  m.operandCount = 0;
+  m.flags = m.localSaveWord & ~(1 << 25);
+  m.localSaveWord = 0;
+  m.localCellA = 0;
+  m.localCellB = 0;
+  m.localCellC = 0;
+  m.localCellD = 0;
+  if (m.localPending !== 0) m.localPending = 0;
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x7c', slot: 'localReturn' } });
+}
+
+/** 0x1f4 / 0x1f5：执行区间进入 / 离开；本实现没有待处理队列，泵在空队列上是空操作。 */
+function runBracket1f4(m: Machine): void {
+  m.operandCount = 1;
+  if (m.bracketBusy === 0) {
+    m.bracketBusy = 1;
+    m.bracketPrev = m.bracketNow;
+    m.bracketNow = m.now;
+  } else {
+    m.bracketDepth += 1;
+  }
+}
+
+function runBracket1f5(m: Machine): void {
+  m.operandCount = 1;
+  if (m.bracketDepth > 0) {
+    m.bracketDepth -= 1;
+    return;
+  }
+  if (m.bracketBusy === 0) return;
+  m.bracketBusy = 0;
+  // 队列占用为 0 ⇒ 泵；本实现没有队列，泵是空操作。
+}
+
+/** 0x1ad：把当前层号写进引擎格（复位值 −1）。 */
+function layerCell1ad(m: Machine): void {
+  m.layerCell = m.currentLayer;
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1ad', slot: 'layerCell', value: m.layerCell } });
+}
+
+/** 0x1ce：非 0 启用（置第 30 位 + 播种）；0 且位已置 ⇒ 清位。 */
+function rngEnable1ce(m: Machine, ops: Operand[]): void {
+  const v = readInt(m, ops, 1) | 0;
+  if (v !== 0) {
+    m.rngSwitch = v;
+    m.flags |= 1 << 30;
+    m.rngEnabled = 1;
+    m.rngSeed = m.now;
+  } else if ((m.flags & (1 << 30)) !== 0) {
+    m.flags &= ~(1 << 30);
+    m.rngEnabled = 0;
+  }
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1ce', enabled: m.rngEnabled } });
+}
+
+/** 0x19b：清第 27 位；再依次 D / A / B ← 0（顺序是合同）。 */
+function modeClear19b(m: Machine): void {
+  m.flags &= ~(1 << 27);
+  m.modeD = 0;
+  m.modeA = 0;
+  m.modeB = 0;
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x19b', bit27: 0 } });
+}
+
+/** 0x19c：按 C / E / F 的条件置位；C 支置 D，E 支不碰 D，F 支什么都不改。 */
+function modeConditional19c(m: Machine): void {
+  m.modeA = 1;
+  m.modeB = 0;
+  if (m.modeC !== 0) {
+    m.modeD = 1;
+  } else if (m.modeE !== 0) {
+    // ★ E 支不碰 D
+  } else if (m.modeF !== 0) {
+    return;
+  } else {
+    m.modeD = 0;
+    m.flags &= ~(1 << 27);
+    return;
+  }
+  m.flags |= 1 << 27;
+  m.modeG = 1;
+  if ((m.flags & (1 << 29)) !== 0) m.flags &= ~(1 << 29);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x19c', bit27: 1 } });
+}
+
+/** 0x1c7 读第 27 位：op1（写整型）← (状态选择字的第 27 位) ? 1 : 0。 */
+function readModeBit1c7(m: Machine, ops: Operand[]): void {
+  writeInt(m, ops, 1, (m.flags >>> 27) & 1);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1c7', slot: 'mode-bit-27', value: (m.flags >>> 27) & 1 } });
+}
+
 /** 0x5c lt：op1 ← (int32(op2) < int32(op3)) ? 1 : 0（有符号比较，结果按整型写回）。 */
 function lt5c(m: Machine, ops: Operand[]): void {
   const a = readInt(m, ops, 2) | 0;
@@ -1767,6 +2383,58 @@ export const HANDLERS = new Map<number, Handler>([
   [0x64, copyLocalArray64],
   [0x2d8, setArrayTo2d8],
   [0x1aa, loadString1aa],
+  [0x63, lea63],
+  [0x60, random60],
+  [0x74, param74],
+  [0x7f, param7f],
+  [0xd0, clockD0],
+  [0xa1, tableResetA1],
+  [0xa2, tableBindA2],
+  [0xa3, tableDispatchA3],
+  [0x191, floatAbs191],
+  [0x2d0, floatAdd2d0],
+  [0x2d1, floatSub2d1],
+  [0x2d3, floatDiv2d3],
+  [0x1c7, readModeBit1c7],
+  [0x1b0, memcpy1b0],
+  [0x208, textureSize208],
+  [0x1cf, statusWrite1cf],
+  [0x1bf, (m) => statusConsume1bf(m)],
+  [0x1cc, statusCellRead1cc],
+  [0x19a, flagReadX19a],
+  [0x1b6, flagReadY1b6],
+  [0x1b7, flagWriteY1b7],
+  [0x258, sceneTableFlags258],
+  [0x259, (m) => sceneTableFlags259(m)],
+  [0x2da, cgSet2da],
+  [0x1f6, (m) => sceneClear1f6(m)],
+  [0x19b, (m) => modeClear19b(m)],
+  [0x19c, (m) => modeConditional19c(m)],
+  [0x217, (m, o) => sceneVecSet(m, o, 'vec1')],
+  [0x219, (m, o) => sceneVecSet(m, o, 'vec2')],
+  [0x218, (m, o) => sceneVecGet(m, o, 'vec1')],
+  [0x21a, (m, o) => sceneVecGet(m, o, 'vec2')],
+  [0x1fd, sceneScale1fd],
+  [0x1ff, sceneTranslate1ff],
+  [0x1fe, sceneRotate1fe],
+  [0x220, sceneSetTransform220],
+  [0x228, sceneGetLocalTrans228],
+  [0x01, (m) => abort01(m)],
+  [0x0d9, (m) => statusClearD9(m)],
+  [0x1f4, (m) => runBracket1f4(m)],
+  [0x1f5, (m) => runBracket1f5(m)],
+  [0x1ad, (m) => layerCell1ad(m)],
+  [0x1ce, rngEnable1ce],
+  [0x7b, localEnterTargets7b],
+  [0x7c, (m) => localRet7c(m)],
+  [0x21e, setter21e],
+  [0x21f, setter21f],
+  [0x230, setter230],
+  [0x231, setter231],
+  [0x233, setter233],
+  [0x234, setter234],
+  [0x235, setter235],
+  [0x239, setter239],
 ]);
 
 export function unimplemented(opcode: number): never {

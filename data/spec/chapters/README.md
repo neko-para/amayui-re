@@ -11,21 +11,24 @@
 7. [`25-fs.md`](25-fs.md) —— 文件与脚本装载（取件 / 索引）
 8. [`30-agf.md`](30-agf.md) —— AGF 图像（ACGF 容器 / meta / body / ACIF / 像素）
 9. [`40-pools.md`](40-pools.md) —— **数据池**（global/local 池、访问原语、类型标签、值编码、字符串、容量）
-10. [`50-engine-state.md`](50-engine-state.md) —— 引擎级状态（按索引表）
-11. [`55-config.md`](55-config.md) —— 配置（库 / 发行默认表 / 玩家文件 / 保存 / 脚本访问；键表见伴随数据 `format/config-keys.json`）
-12. [`60-ops-numeric.md`](60-ops-numeric.md) —— 数值运算、比较与位操作
-13. [`60-ops-array.md`](60-ops-array.md) —— 数组填充与寻址
-14. [`60-ops-text.md`](60-ops-text.md) —— 字符串
-15. [`60-ops-frame.md`](60-ops-frame.md) —— 帧类指令
-16. [`60-ops-texture.md`](60-ops-texture.md) —— 纹理族
-17. [`60-ops-scene.md`](60-ops-scene.md) —— 场景 / 颜色族
-18. [`60-ops-render.md`](60-ops-render.md) —— 渲染请求边界（渲染目标 / 场景混合 / 离屏文字）
-19. [`60-ops-voice.md`](60-ops-voice.md) —— 语音族
-20. [`60-ops-list.md`](60-ops-list.md) —— 列表项与子系统写入
-21. [`60-ops-forward.md`](60-ops-forward.md) —— 转发型指令
-22. [`60-ops-scalar.md`](60-ops-scalar.md) —— 引擎级标量与事件
-23. [`60-ops-wait.md`](60-ops-wait.md) —— 等待、输入、影片与空操作
-24. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
+10. [`45-objects.md`](45-objects.md) —— 对象模型（根对象 / 类行为表 / 类型身份 / 对象槽表）
+11. [`50-engine-state.md`](50-engine-state.md) —— 引擎级状态（按索引表）
+12. [`55-config.md`](55-config.md) —— 配置（库 / 发行默认表 / 玩家文件 / 保存 / 脚本访问；键表见伴随数据 `format/config-keys.json`）
+13. [`60-ops-numeric.md`](60-ops-numeric.md) —— 数值运算、比较与位操作
+14. [`60-ops-array.md`](60-ops-array.md) —— 数组填充与寻址
+15. [`60-ops-text.md`](60-ops-text.md) —— 字符串
+16. [`60-ops-frame.md`](60-ops-frame.md) —— 帧类指令
+17. [`60-ops-texture.md`](60-ops-texture.md) —— 纹理族
+18. [`60-ops-scene.md`](60-ops-scene.md) —— 场景 / 颜色族
+19. [`60-ops-render.md`](60-ops-render.md) —— 渲染请求边界（渲染目标 / 场景混合 / 离屏文字）
+20. [`60-ops-voice.md`](60-ops-voice.md) —— 语音族
+21. [`60-ops-list.md`](60-ops-list.md) —— 列表项与子系统写入
+22. [`60-ops-save.md`](60-ops-save.md) —— 存档槽的读写与文件级操作
+23. [`65-save.md`](65-save.md) —— 存档（槽身份 / 文件头 / 负载信封 / 持久化归属 / 恢复）
+24. [`60-ops-forward.md`](60-ops-forward.md) —— 转发型指令
+25. [`60-ops-scalar.md`](60-ops-scalar.md) —— 引擎级标量与事件
+26. [`60-ops-wait.md`](60-ops-wait.md) —— 等待、输入、影片与空操作
+27. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
 
 `40-pools.md` 是**一个完整主题**：池的族、下标、访问、值表示与容量都在这一章。
 

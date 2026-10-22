@@ -97,11 +97,11 @@ test('★ 派发推进：长度 = 2·argc+1 ⇒ 两条指令后 ip = 4+24 + 4+16
 });
 
 test('★ 未实现的 opcode 不执行：ip 不动、steps 不涨（缺口停在它前面）', async () => {
-  // 用一个**仍然未实现**的 opcode 当缺口样本（0x2 已实现；换成已实现的会让这条守卫失去意义）
-  const m = machineFor([[0x1f4, [[0, 1], [0, 2]]]]);
+  // 用一个**仍然未实现**的 opcode 当缺口样本（换成已实现的会让这条守卫失去意义）
+  const m = machineFor([[0x21d, [[0, 1], [0, 2]]]]);
   const r = await m.run();
   assert.equal(r.stop.kind, 'unimplemented');
-  assert.equal(r.stop.opcode, 0x1f4);
+  assert.equal(r.stop.opcode, 0x21d);
   assert.equal(r.steps, 0);
   assert.equal(r.ip, 0);
 });

@@ -41,6 +41,11 @@ export interface Frame {
   retStack: number[];
   /** 帧记录里的"本条指令的位置"（帧+0x6C；写入者是 0x71，读者未定） */
   position: number;
+  /** 0x7b 登记的两个本地块进入目标（位置，不是字节地址）。 */
+  localMain?: number;
+  localSub?: number;
+  /** 进入本地块时记下的深度（0x7c 的深度判据）。 */
+  localDepth?: number;
 }
 
 /** 纹理记录：来源文件（-1 = 无）、颜色键、空白创建标记（见 CORE-OPS-TEXTURE-*） */
@@ -78,6 +83,20 @@ export interface DrawItem {
   colorTo: number;
   /** 操作数里"读者未找到"的槽（按操作数序号记，只为不丢数据） */
   unknown: Map<number, number>;
+  /** 0x217 / 0x219 的两组三元向量；默认 0。 */
+  vec1: [number, number, number];
+  vec2: [number, number, number];
+  /** 六个 4×4 矩阵（列主序，与 D3D 一致）：0 缩放、2 旋转、4 平移、5 第四个平移。 */
+  matrices: number[][];
+  /** 0x19c / 0x220 的「已配置」格（G3）；0x220 还写 G0/G1/G2。 */
+  config: number;
+  g0: number;
+  g1: number;
+  g2: number;
+  /** 场景 setter 的按字段偏移写入的整数 / 浮点格（偏移由 bindings 提供，正文不写）。 */
+  fields: Map<number, number>;
+  /** 场景 setter 的按字段偏移写入的矩阵（与 matrices[6] 分开，避免与 1fd/1fe/1ff/220 混用）。 */
+  extraMatrices: Map<number, number[]>;
 }
 
 /** 缓冲地址（0x320 的第 4 / 7 / 8 个操作数；只记录，装配属外部模块） */
@@ -222,6 +241,11 @@ export interface SceneState {
   animating: number;
   /** 三张辅助键表：规范只要求"按键删除"，内容语义不在本版 */
   auxTables: [Map<number, unknown>, Map<number, unknown>, Map<number, unknown>];
+  /** `0x258` / `0x259` 的两张 1000 项标志表（每项两个位）。 */
+  flagTableA: number[];
+  flagTableB: number[];
+  /** `0x2da` 的 CG 参数记录：编号 → 七个整数格。 */
+  cgRecords: Map<number, number[]>;
   /** 引擎级每 id 对象槽（纹理三条会清它；影片写它） */
   objectSlots: Map<number, unknown>;
   /** 场景错误缓冲（失败路径写文本；外部呈现不读） */
@@ -372,6 +396,11 @@ export interface MachineOptions {
   /** 影片播放的平台边界（`0x20f` / 影片对象表服务）；缺省 = 没有后端 ⇒ 影片位一直挡住门 */
   movieHost?: MovieHost;
   /**
+   * **宿主随机源**（`0x60` 的输入）：返回 `[0,1)` 的浮点数（本层换算成 u32）。
+   * ★ 缺省 = `Math.random`；规范只规定"取一次、再用余数"，序列属宿主实现。
+   */
+  random?: () => number;
+  /**
    * **迭代头的平台泵点**（`70-vm.md` 的 `CORE-VM-LOOP`：每次迭代先在迭代头按节流决定是否泵一次宿主消息）。
    * ★ `run` 的每一轮在**读时钟 / 过门之前**调它一次（泵完仍继续本迭代的其余步骤）。
    *   Electron 主循环把 `WindowSession.pump()` 接在这里，窗口 close / timer 消息才能在脚本执行期间派发。
@@ -402,8 +431,72 @@ export class Machine {
   readonly renderHost: RenderHost | undefined;
   /** 影片播放后端（缺省 `undefined` = 没有后端；见 `MachineOptions.movieHost`） */
   readonly movieHost: MovieHost | undefined;
+  /** 宿主随机源（`0x60`；缺省 `Math.random`，见 `MachineOptions.random`） */
+  readonly random: () => number;
   /** 迭代头的平台泵点（缺省 `undefined` = 不泵；见 `MachineOptions.onIteration`） */
   readonly onIteration: (() => void | Promise<void>) | undefined;
+  /**
+   * `0x60` 的引擎级计数器：每执行一次 +1，超过 12 归 0（`0..12`）。
+   * ★ 身份未取证（读者未知）⇒ 只按规范记状态，不进 `scalars`（那是"被 opcode 写过的格"的通用桶）。
+   */
+  randomCounter = 0;
+  /**
+   * `0x74` / `0x7f` 共用的引擎级参数格；`null` = 还没有被 `0x74` 写过。
+   * ★ 规范说初值未观察；本层用 `null` 让"先读后写"响亮失败，而不是伪造 0。
+   */
+  paramCell: number | null = null;
+  /**
+   * 0x1cf / 0x1bf 的**引擎级状态字**；0x1bf 还可能写 `statusNeighbor`（相邻格）。
+   * ★ 它与状态选择字（门字）**不是**同一个字（见 70-vm 的术语段）。
+   */
+  statusWord = 0;
+  /** 0x1bf 的“相邻格”；领域身份未取证。 */
+  statusNeighbor = 0;
+  /** 0x1cc 读的**状态格**（C）；由别的路径写。 */
+  statusCell = 0;
+  /** 0x19a 读的**格 X**（原值，不归一）。 */
+  flagX = 0;
+  /** 0x1b6 / 0x1b7 读写的**格 Y**（归一成 0 / 1）。 */
+  flagY = 0;
+  /** 0x0d9 的“一格非 0 时清另一个字第 12 位”；两个字的身份未取证。 */
+  d9Cell = 0;
+  d9Word = 0;
+  /** 0x1f4 / 0x1f5 的执行区间状态（区间忙 / 嵌套计数 / 两个时间戳）。 */
+  bracketBusy = 0;
+  bracketDepth = 0;
+  bracketNow = 0;
+  bracketPrev = 0;
+  /** 队列占用标记；本实现还没有待处理命令队列，泵在空队列上是空操作。 */
+  queuePressure = 0;
+  /** 0x1ad：当前层号与它落进的引擎格（复位值 −1）。 */
+  currentLayer = 0;
+  layerCell = -1;
+  /** 0x1ce：乱数启用开关 / 启用状态 / 种子。 */
+  rngSwitch = 0;
+  rngEnabled = 0;
+  rngSeed = 0;
+  /** 0x7c 的存档字 / 存档位置 / 深度 / 四格 / 待处理标记（进入本地块的那条指令写下）。 */
+  localSaveWord = 0;
+  localSavePos = 0;
+  localSaveDepth = 0;
+  localCellA = 0;
+  localCellB = 0;
+  localCellC = 0;
+  localCellD = 0;
+  localPending = 0;
+  /** 0x19b / 0x19c 的七个引擎格 A/B/C/D/E/F/G（见 60-ops-scalar 的 MODE-BIT）。 */
+  modeA = 0;
+  modeB = 0;
+  modeC = 0;
+  modeD = 0;
+  modeE = 0;
+  modeF = 0;
+  modeG = 0;
+  /**
+   * `0xa1` / `0xa2` / `0xa3` 的**命名表**（文本键 → 整数）。
+   * ★ 规范只规定"按键可查 / 覆盖 / 重置"；哈希与探测属实现结构 ⇒ 本层用 `Map`。
+   */
+  namedTable = new Map<string, number>();
   /**
    * **渲染状态**（`60-ops-render.md`）：当前渲染目标、场景混合的两个格、字体对象。
    * ★ spec 说当前目标是"场景记录里的一个整数字段"、混合的两个格在"场景持有的效应对象"上；
@@ -448,6 +541,8 @@ export class Machine {
   /** 已执行的指令条数（不是 ip / 4：控制流可以往回跳） */
   steps = 0;
   halted = false;
+  /** 0x01 / 0x0c8 的退出码；`halted` 为 true 时它才有效。 */
+  exitCode = 0;
 
   /** 全局整型池：编码后的位模式 */
   globalInt = new Map<number, number>();
@@ -470,6 +565,9 @@ export class Machine {
     meshes: new Map(),
     animating: 0,
     auxTables: [new Map(), new Map(), new Map()],
+    flagTableA: new Array(1000).fill(0),
+    flagTableB: new Array(1000).fill(0),
+    cgRecords: new Map(),
     objectSlots: new Map(),
     errorBuffer: '',
     hasObjects: 0,
@@ -550,6 +648,7 @@ export class Machine {
     this.fontNames = [...(opts.fontNames ?? [])];
     this.renderHost = opts.renderHost;
     this.movieHost = opts.movieHost;
+    this.random = opts.random ?? Math.random;
     this.onIteration = opts.onIteration;
     // 根脚本落在 **0 号槽**（引擎：根帧的父帧号是 −1，当前帧号从 0 起）
     this.slots = [{ body: opts.body, ip: 0, frame: this.freshFrame(), parent: -1, length: 0 }];

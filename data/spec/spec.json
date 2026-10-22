@@ -48,6 +48,11 @@
       "title": "数据池"
     },
     {
+      "id": "objects",
+      "file": "chapters/45-objects.md",
+      "title": "对象模型：根对象 / 类行为表 / 类型身份 / 对象槽表"
+    },
+    {
       "id": "engine-state",
       "file": "chapters/50-engine-state.md",
       "title": "引擎级状态"
@@ -101,6 +106,16 @@
       "id": "ops-list",
       "file": "chapters/60-ops-list.md",
       "title": "列表项与子系统写入"
+    },
+    {
+      "id": "ops-save",
+      "file": "chapters/60-ops-save.md",
+      "title": "存档槽的读写与文件级操作"
+    },
+    {
+      "id": "save",
+      "file": "chapters/65-save.md",
+      "title": "存档：写入 / 恢复 / 归属"
     },
     {
       "id": "ops-forward",

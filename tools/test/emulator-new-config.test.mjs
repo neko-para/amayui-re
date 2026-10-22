@@ -233,8 +233,10 @@ test('★ 引擎路径字节串：CP932 解码 + 反斜杠规范成宿主分隔�
     if (old === undefined) delete process.env.APPDATA;
     else process.env.APPDATA = old;
   }
-  // 断言没有把 CP932 的 trail byte 0x5C 当分隔符切坏（解码后再替换）
-  assert.equal(nodeHost.pathFromEngine(enginePath).includes('\\'), false);
+  // 断言没有把 CP932 的 trail byte 0x5C 当分隔符切坏（解码后再替换）：
+  // ★ 不能断言结果里没有 `\` —— Windows 的 path.sep 就是 `\`，那是**规范化后的宿主分隔符**。
+  //   真正的不变量是"路径只分成 Eushully / 天結… 两段"（trail byte 被当分隔符会多切一段）。
+  assert.equal(nodeHost.pathFromEngine(enginePath).split(path.sep).length, 2);
   // 显示层：同一套 CP932 字节串 → `メイリオ`（font.lookup 的 keyText 用）
   assert.equal(decodeCp932('\x83\x81\x83C\x83\x8a\x83I'), 'メイリオ');
 });

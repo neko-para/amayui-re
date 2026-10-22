@@ -95,14 +95,14 @@ test('★ 嵌套调用：返回栈后进先出（返回点 3 / 6 依次弹出）
   assert.deepEqual(m.frame.retStack, [3, 6], '后进');
 });
 test('★ 0xa0 条件跳转：非 0 走 op2、为 0 走 op3、目标 −1 不跳', async () => {
-  // 布局：a0(cond=1,op2=5,op3=6) @0（长 28）→ 位置 7 = 字节 28 … 用简单布局：目标 2 = 字节 8
-  const m = machineFor([[0xa0, [[0, 1], [0, 2], [0, 3]]], [0x1a8, []], [0x1a8, []], [0x1a8, []]]);
-  await m.run();
-  assert.equal(m.ip, 8, '条件非 0 ⇒ 用第 2 个操作数（2 ⇒ 字节 8）');
+  // 布局：a0 长 7 字（0..6），NOP 在字 7/8/9；目标 7 = 字节 28、8 = 字节 32
+  const m = machineFor([[0xa0, [[0, 1], [0, 7], [0, 8]]], [0x1a8, []], [0x1a8, []], [0x1a8, []]]);
+  await m.run({ stopAtOpcode: 0x1a8 });
+  assert.equal(m.ip, 28, '条件非 0 ⇒ 用第 2 个操作数（7 ⇒ 字节 28）');
 
-  const zero = machineFor([[0xa0, [[0, 0], [0, 2], [0, 3]]], [0x1a8, []], [0x1a8, []], [0x1a8, []]]);
-  await zero.run();
-  assert.equal(zero.ip, 12, '条件为 0 ⇒ 用第 3 个操作数（3 ⇒ 字节 12）');
+  const zero = machineFor([[0xa0, [[0, 0], [0, 7], [0, 8]]], [0x1a8, []], [0x1a8, []], [0x1a8, []]]);
+  await zero.run({ stopAtOpcode: 0x1a8 });
+  assert.equal(zero.ip, 32, '条件为 0 ⇒ 用第 3 个操作数（8 ⇒ 字节 32）');
 
   const sentinel = machineFor([[0xa0, [[0, 1], [0, 0xffffffff], [0, 3]]]]);
   const r = await sentinel.run();

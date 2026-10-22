@@ -157,6 +157,45 @@ export function writeBitsAt(m: Machine, addr: Address, wordOffset: number, bits:
   else m.frame.localFloat.set(index, v);
 }
 
+/** 从**数值地址**读第 `wordOffset` 个 dword 的裸位模式（memcpy 用；字符串记录不可按字拷 ⇒ 抛）。 */
+export function readRawAt(m: Machine, addr: number, wordOffset: number): number {
+  const r = resolveAddress(addr);
+  const i = r.index + wordOffset;
+  switch (r.tag) {
+    case 3: return (m.globalInt.get(i) ?? 0) >>> 0;
+    case 9: return (m.frame.localInt.get(i) ?? 0) >>> 0;
+    case 4: return (m.globalFloat.get(i) ?? 0) >>> 0;
+    case 10: return (m.frame.localFloat.get(i) ?? 0) >>> 0;
+    case 6: return (m.globalIntRef.get(i) ?? 0) >>> 0;
+    case 7: return (m.globalFloatRef.get(i) ?? 0) >>> 0;
+    case 8: return (m.globalStringRef.get(i) ?? 0) >>> 0;
+    case 12: return (m.frame.localPtr.get(i) ?? 0) >>> 0;
+    case 13: return (m.frame.localFloatPtr.get(i) ?? 0) >>> 0;
+    case 14: return (m.frame.localStringPtr.get(i) ?? 0) >>> 0;
+    default: throw new Error(`地址 0x${addr.toString(16)} 指向字符串记录，不能按 4 字节字读`);
+  }
+}
+
+/** 往**数值地址**写第 `wordOffset` 个 dword 的裸位模式（与 {@link readRawAt} 对称）。 */
+export function writeRawAt(m: Machine, addr: number, wordOffset: number, bits: number): void {
+  const r = resolveAddress(addr);
+  const i = r.index + wordOffset;
+  const v = bits >>> 0;
+  switch (r.tag) {
+    case 3: m.globalInt.set(i, v); return;
+    case 9: m.frame.localInt.set(i, v); return;
+    case 4: m.globalFloat.set(i, v); return;
+    case 10: m.frame.localFloat.set(i, v); return;
+    case 6: m.globalIntRef.set(i, v); return;
+    case 7: m.globalFloatRef.set(i, v); return;
+    case 8: m.globalStringRef.set(i, v); return;
+    case 12: m.frame.localPtr.set(i, v); return;
+    case 13: m.frame.localFloatPtr.set(i, v); return;
+    case 14: m.frame.localStringPtr.set(i, v); return;
+    default: throw new Error(`地址 0x${addr.toString(16)} 指向字符串记录，不能按 4 字节字写`);
+  }
+}
+
 export function readFloat(m: Machine, ops: Operand[], k: number): number {
   const op = operandAt(ops, k);
   switch (op.type) {

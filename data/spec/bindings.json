@@ -6861,6 +6861,3572 @@
       "evidence": [
         "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
       ]
+    },
+    {
+      "rule": "CORE-OPS-FRAME-JUMP-8C",
+      "sites": [
+        {
+          "ea": "0x4203d0",
+          "what": "0x8c handler 起点"
+        },
+        {
+          "ea": "0x4203e0",
+          "what": "推进格数 ← 3（先于读操作数）"
+        },
+        {
+          "ea": "0x4203ef",
+          "what": "读第 1 个操作数（判 −1 哨兵）"
+        },
+        {
+          "ea": "0x4203f7",
+          "what": "等于 −1 ⇒ 不跳"
+        },
+        {
+          "ea": "0x4203fd",
+          "what": "再读第 1 个操作数（取位置）"
+        },
+        {
+          "ea": "0x420426",
+          "what": "指令指针 ← 代码区起点 + 4 × 位置"
+        },
+        {
+          "ea": "0x42043a",
+          "what": "推进格数 ← 0"
+        }
+      ],
+      "functions": [
+        "sub_4203D0"
+      ],
+      "storage": [
+        "shape:T1@0x0",
+        "shape:T1@0x4",
+        "shape:T1@0x60"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-POOL-LEA-63",
+      "sites": [
+        {
+          "ea": "0x42cba0",
+          "what": "0x63 handler 起点"
+        },
+        {
+          "ea": "0x42cbb3",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x42cbc6",
+          "what": "取址（第 2 个操作数）"
+        },
+        {
+          "ea": "0x42cbd0",
+          "what": "写第 1 个操作数的引用槽 ← 该地址"
+        },
+        {
+          "ea": "0x418bce",
+          "what": "引用族写槽的落点（写原值，无编码）"
+        },
+        {
+          "ea": "0x418c6a",
+          "what": "非引用族 ⇒ 类型异常"
+        }
+      ],
+      "functions": [
+        "sub_42CBA0",
+        "sub_42AEA0",
+        "sub_418B90"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d818"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RANDOM-60",
+      "sites": [
+        {
+          "ea": "0x42ca50",
+          "what": "0x60 handler 起点"
+        },
+        {
+          "ea": "0x42ca66",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x42ca71",
+          "what": "计数器 +1"
+        },
+        {
+          "ea": "0x42ca77",
+          "what": "计数器与 12 比较"
+        },
+        {
+          "ea": "0x42ca80",
+          "what": "计数器清 0"
+        },
+        {
+          "ea": "0x42ca8a",
+          "what": "取宿主随机数"
+        },
+        {
+          "ea": "0x42ca98",
+          "what": "读第 2 个操作数（范围）"
+        },
+        {
+          "ea": "0x42caae",
+          "what": "范围为 0 ⇒ 写第 1 个操作数 ← 0"
+        },
+        {
+          "ea": "0x42cad7",
+          "what": "抛显示消息型异常"
+        },
+        {
+          "ea": "0x42cae8",
+          "what": "取余数"
+        },
+        {
+          "ea": "0x42caef",
+          "what": "写第 1 个操作数 ← 余数"
+        }
+      ],
+      "functions": [
+        "sub_42CA50"
+      ],
+      "storage": [
+        "shape:T_Command@0x69330",
+        "shape:T1@0x60"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-PARAM-74-7F",
+      "sites": [
+        {
+          "ea": "0x41f320",
+          "what": "0x74 handler 起点"
+        },
+        {
+          "ea": "0x41f330",
+          "what": "0x74 推进格数 ← 3"
+        },
+        {
+          "ea": "0x41f33f",
+          "what": "0x74 读整型(第 1 个)"
+        },
+        {
+          "ea": "0x41f344",
+          "what": "0x74 参数格 ← 值"
+        },
+        {
+          "ea": "0x42d1f0",
+          "what": "0x7f handler 起点"
+        },
+        {
+          "ea": "0x42d1fd",
+          "what": "0x7f 推进格数 ← 3"
+        },
+        {
+          "ea": "0x42d208",
+          "what": "0x7f 读参数格"
+        },
+        {
+          "ea": "0x42d211",
+          "what": "0x7f 写整型(第 1 个, 参数格)"
+        },
+        {
+          "ea": "0x41f580",
+          "what": "参数格的消费方（文本显示路径的自动推进；范围外，只作定位）"
+        }
+      ],
+      "functions": [
+        "sub_41F320",
+        "sub_42D1F0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SLEEP-C8",
+      "sites": [
+        {
+          "ea": "0x4218d0",
+          "what": "0xc8 handler 起点"
+        },
+        {
+          "ea": "0x4218e4",
+          "what": "推进格数 ← 3"
+        },
+        {
+          "ea": "0x4218ef",
+          "what": "读宿主入口指针"
+        },
+        {
+          "ea": "0x4218f9",
+          "what": "调用宿主入口（非 0 ⇒ 抛）"
+        },
+        {
+          "ea": "0x4218ff",
+          "what": "解码密钥格 = 0 ⇒ 抛"
+        },
+        {
+          "ea": "0x42191f",
+          "what": "零点左移 11 位与密钥比较"
+        },
+        {
+          "ea": "0x42192c",
+          "what": "抛退出型异常（码 0）"
+        },
+        {
+          "ea": "0x421941",
+          "what": "测状态选择字第 27 位（跳过支）"
+        },
+        {
+          "ea": "0x421951",
+          "what": "读整型(第 1 个)"
+        },
+        {
+          "ea": "0x421957",
+          "what": "与 10 比较（n ≥ 10 走计时器）"
+        },
+        {
+          "ea": "0x42195c",
+          "what": "宿主睡眠（短睡眠支，处理器内阻塞）"
+        },
+        {
+          "ea": "0x421967",
+          "what": "置状态选择字第 0 位"
+        },
+        {
+          "ea": "0x421974",
+          "what": "计时器 ← 时长"
+        }
+      ],
+      "functions": [
+        "sub_4218D0"
+      ],
+      "storage": [
+        "shape:T_Command@0xaab44",
+        "shape:T_Command@0x5ec8c",
+        "shape:T_Command@0x5ec90",
+        "shape:T_Command@0x5ec98"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-STATUS-CLEAR-D9",
+      "sites": [
+        {
+          "ea": "0x419970",
+          "what": "0xd9 handler 起点"
+        },
+        {
+          "ea": "0x41997d",
+          "what": "推进格数 ← 1"
+        },
+        {
+          "ea": "0x41998d",
+          "what": "状态选择字第 12 位 ← 0（掩码 0xFFFFEFFF）"
+        },
+        {
+          "ea": "0x41999c",
+          "what": "某一格非 0 ⇒ 另一个引擎级字第 12 位 ← 0"
+        }
+      ],
+      "functions": [
+        "sub_419970"
+      ],
+      "storage": [
+        "shape:T_Command@0xaab44"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TABLE-RESET-A1",
+      "sites": [
+        {
+          "ea": "0x433a40",
+          "what": "0xa1 handler 起点"
+        },
+        {
+          "ea": "0x433a4d",
+          "what": "推进格数 ← 1"
+        },
+        {
+          "ea": "0x433a58",
+          "what": "尺寸实参 = 4095"
+        },
+        {
+          "ea": "0x433a5d",
+          "what": "表基址 = 引擎 + 表偏移"
+        },
+        {
+          "ea": "0x415550",
+          "what": "尺寸 ← 4095（同一个值也写进上限格）"
+        },
+        {
+          "ea": "0x415580",
+          "what": "逐槽清键"
+        },
+        {
+          "ea": "0x415596",
+          "what": "计数 ← 0"
+        }
+      ],
+      "functions": [
+        "sub_433A40",
+        "sub_415530"
+      ],
+      "storage": [
+        "shape:T_Hashtable_int@0x8",
+        "shape:T_Hashtable_int@0x4",
+        "shape:T_Hashtable_int@0x18"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TABLE-BIND-A2",
+      "sites": [
+        {
+          "ea": "0x434f10",
+          "what": "0xa2 handler 起点"
+        },
+        {
+          "ea": "0x434f24",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x434f33",
+          "what": "读整型(第 2 个) = 值"
+        },
+        {
+          "ea": "0x434f43",
+          "what": "第 1 个操作数按文本读"
+        },
+        {
+          "ea": "0x434f4f",
+          "what": "调插入入口"
+        },
+        {
+          "ea": "0x434d2b",
+          "what": "键的哈希对尺寸取模"
+        },
+        {
+          "ea": "0x434d34",
+          "what": "按键查"
+        },
+        {
+          "ea": "0x434d45",
+          "what": "命中 ⇒ 改写值"
+        },
+        {
+          "ea": "0x434d76",
+          "what": "未命中 ⇒ 向后探测第一个空槽"
+        },
+        {
+          "ea": "0x434db4",
+          "what": "写入值"
+        },
+        {
+          "ea": "0x434dd7",
+          "what": "写入键"
+        },
+        {
+          "ea": "0x429020",
+          "what": "按键查（完整文本相等 + 线性探测）"
+        }
+      ],
+      "functions": [
+        "sub_434F10",
+        "sub_434D00",
+        "sub_429020",
+        "sub_41B640"
+      ],
+      "storage": [
+        "shape:T_Hashtable_int@0x4",
+        "shape:T_Hashtable_int@0x8",
+        "shape:T_Hashtable_int@0x18",
+        "shape:T_Hashtable_int@0x28"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TABLE-DISPATCH-A3",
+      "sites": [
+        {
+          "ea": "0x429830",
+          "what": "0xa3 handler 起点"
+        },
+        {
+          "ea": "0x429840",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x42984f",
+          "what": "第 1 个操作数按文本读"
+        },
+        {
+          "ea": "0x42985b",
+          "what": "按键查表"
+        },
+        {
+          "ea": "0x429862",
+          "what": "命中 / 未命中分叉"
+        },
+        {
+          "ea": "0x429891",
+          "what": "命中 ⇒ 指令指针 ← 代码区起点 + 4 × 登记值"
+        },
+        {
+          "ea": "0x4298cd",
+          "what": "未命中 ⇒ 读第 2 个操作数并写指令指针"
+        },
+        {
+          "ea": "0x4298a5",
+          "what": "命中支推进格数 ← 0"
+        },
+        {
+          "ea": "0x4298e0",
+          "what": "未命中支推进格数 ← 0"
+        },
+        {
+          "ea": "0x428e00",
+          "what": "按键查（完整文本相等 + 线性探测）"
+        }
+      ],
+      "functions": [
+        "sub_429830",
+        "sub_428E00",
+        "sub_41B640"
+      ],
+      "storage": [
+        "shape:T_Hashtable_int@0x8",
+        "shape:T_Hashtable_int@0x18",
+        "shape:T_Hashtable_int@0x28",
+        "shape:T1@0x0",
+        "shape:T1@0x4",
+        "shape:T1@0x60"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-CLOCK-D0",
+      "sites": [
+        {
+          "ea": "0x42e910",
+          "what": "0xd0 handler 起点"
+        },
+        {
+          "ea": "0x42e920",
+          "what": "推进格数 ← 3"
+        },
+        {
+          "ea": "0x42e92b",
+          "what": "读宿主系统毫秒时钟"
+        },
+        {
+          "ea": "0x42e936",
+          "what": "写整型(第 1 个)"
+        }
+      ],
+      "functions": [
+        "sub_42E910"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ABORT-01",
+      "sites": [
+        {
+          "ea": "0x418e60",
+          "what": "0x01 handler 起点"
+        },
+        {
+          "ea": "0x418e64",
+          "what": "异常类型 = 退出型"
+        },
+        {
+          "ea": "0x418e6d",
+          "what": "异常码 ← 1"
+        },
+        {
+          "ea": "0x418e74",
+          "what": "抛出"
+        }
+      ],
+      "functions": [
+        "sub_418E60"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FRAME-LOCAL-SET-7B",
+      "sites": [
+        {
+          "ea": "0x41f530",
+          "what": "0x7b handler 起点"
+        },
+        {
+          "ea": "0x41f540",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x41f54f",
+          "what": "读整型(第 1 个)"
+        },
+        {
+          "ea": "0x41f55e",
+          "what": "写主进入目标格（按当前帧索引）"
+        },
+        {
+          "ea": "0x41f565",
+          "what": "读整型(第 2 个)"
+        },
+        {
+          "ea": "0x41f570",
+          "what": "写副进入目标格（按当前帧索引）"
+        }
+      ],
+      "functions": [
+        "sub_41F530"
+      ],
+      "storage": [
+        "shape:T_Command@0x77810",
+        "shape:T_Command@0x778b0"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FRAME-LOCAL-RET-7C",
+      "sites": [
+        {
+          "ea": "0x41ab80",
+          "what": "0x7c handler 起点（不写推进格数）"
+        },
+        {
+          "ea": "0x41ab96",
+          "what": "测存档字第 25 位"
+        },
+        {
+          "ea": "0x41aba2",
+          "what": "第 25 位 = 0 ⇒ 推进格数 ← 1"
+        },
+        {
+          "ea": "0x41abc6",
+          "what": "抛显示消息型异常（不在本地块里）"
+        },
+        {
+          "ea": "0x41abd4",
+          "what": "深度比较（本帧字段 vs 引擎保存值）"
+        },
+        {
+          "ea": "0x41ac34",
+          "what": "深度不等 ⇒ 抛显示消息型异常（不写推进格数）"
+        },
+        {
+          "ea": "0x41ac45",
+          "what": "指令指针 ← 代码区起点 + 4 × 存档位置"
+        },
+        {
+          "ea": "0x41ac5d",
+          "what": "推进格数 ← 0"
+        },
+        {
+          "ea": "0x41ac6a",
+          "what": "状态选择字 ← 存档字 & ~第 25 位"
+        },
+        {
+          "ea": "0x41ac76",
+          "what": "存档字 ← 0"
+        },
+        {
+          "ea": "0x41ac7f",
+          "what": "清第 1 对格（值 / −1）"
+        },
+        {
+          "ea": "0x41ac85",
+          "what": "清第 1 对格（值 / −1）"
+        },
+        {
+          "ea": "0x41ac8b",
+          "what": "清第 2 对格（值 / −1）"
+        },
+        {
+          "ea": "0x41ac91",
+          "what": "清第 2 对格（值 / −1）"
+        },
+        {
+          "ea": "0x41ac97",
+          "what": "待处理标记 + 两游标相差 1 的条件调用"
+        }
+      ],
+      "functions": [
+        "sub_41AB80"
+      ],
+      "storage": [
+        "shape:T_Command@0x77950",
+        "shape:T_Command@0x77954",
+        "shape:T_Command@0x69278",
+        "shape:T_Command@0xaab44",
+        "shape:T1@0x4",
+        "shape:T1@0x60"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RUN-BRACKET",
+      "sites": [
+        {
+          "ea": "0x41a0a5",
+          "what": "0x1f4 当前层推进格数 ← 1（argc 0）"
+        },
+        {
+          "ea": "0x41a0ac",
+          "what": "0x1f4 判区间忙标记"
+        },
+        {
+          "ea": "0x41a0b5",
+          "what": "0x1f4 忙时段内：嵌套计数 +1"
+        },
+        {
+          "ea": "0x41a0bd",
+          "what": "0x1f4 置区间忙"
+        },
+        {
+          "ea": "0x41a0c3",
+          "what": "0x1f4 读宿主毫秒时钟"
+        },
+        {
+          "ea": "0x41a0c9",
+          "what": "0x1f4 「上一步」← 原「现在」"
+        },
+        {
+          "ea": "0x41a0d5",
+          "what": "0x1f4 「现在」← 本次读数"
+        },
+        {
+          "ea": "0x41a0ed",
+          "what": "0x1f5 当前层推进格数 ← 1"
+        },
+        {
+          "ea": "0x41a0f8",
+          "what": "0x1f5 取嵌套计数"
+        },
+        {
+          "ea": "0x41a102",
+          "what": "0x1f5 计数 > 0 ⇒ 计数 −1 并返回"
+        },
+        {
+          "ea": "0x41a10a",
+          "what": "0x1f5 计数为 0 时判区间忙"
+        },
+        {
+          "ea": "0x41a113",
+          "what": "0x1f5 判队列占用标记"
+        },
+        {
+          "ea": "0x41a11a",
+          "what": "0x1f5 清区间忙"
+        },
+        {
+          "ea": "0x41a126",
+          "what": "0x1f5 尾跳队列泵"
+        },
+        {
+          "ea": "0x40fb66",
+          "what": "泵入口：区间忙 ⇒ 直接返回"
+        },
+        {
+          "ea": "0x40fb7f",
+          "what": "泵入口：队列头 ≥ 尾（空）⇒ 直接返回"
+        },
+        {
+          "ea": "0x40fbc3",
+          "what": "泵：置队列占用标记"
+        }
+      ],
+      "functions": [
+        "sub_41A090",
+        "sub_41A0E0",
+        "sub_40FB60"
+      ],
+      "storage": [
+        "shape:T_Command@0x68eb8",
+        "shape:T_Command@0x68ebc",
+        "shape:T_Command@0x796f8",
+        "shape:T1@0x60"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-TRANSFORM",
+      "sites": [
+        {
+          "ea": "0x422fe6",
+          "what": "0x1fd 推进格数 ← 9（argc 4）"
+        },
+        {
+          "ea": "0x422ff5",
+          "what": "0x1fd 读第 2 个操作数（浮点）"
+        },
+        {
+          "ea": "0x422ffa",
+          "what": "0x1fd ÷ 比例常量（→ 百分数）"
+        },
+        {
+          "ea": "0x423007",
+          "what": "0x1fd 读第 3 个操作数"
+        },
+        {
+          "ea": "0x423019",
+          "what": "0x1fd 读第 4 个操作数"
+        },
+        {
+          "ea": "0x423040",
+          "what": "0x1fd 读对象键（第 1 个，整型）"
+        },
+        {
+          "ea": "0x423048",
+          "what": "0x1fd 取场景对象表"
+        },
+        {
+          "ea": "0x42304e",
+          "what": "0x1fd 写缩放矩阵（按需建立对象）"
+        },
+        {
+          "ea": "0x423106",
+          "what": "0x1ff 推进格数 ← 9"
+        },
+        {
+          "ea": "0x423115",
+          "what": "0x1ff 读第 2 个操作数（浮点，不换算）"
+        },
+        {
+          "ea": "0x42312d",
+          "what": "0x1ff 读第 4 个操作数"
+        },
+        {
+          "ea": "0x423156",
+          "what": "0x1ff 取场景对象表"
+        },
+        {
+          "ea": "0x42315c",
+          "what": "0x1ff 写平移矩阵"
+        },
+        {
+          "ea": "0x423076",
+          "what": "0x1fe 推进格数 ← 11（argc 5）"
+        },
+        {
+          "ea": "0x423085",
+          "what": "0x1fe 读第 2 个 = 轴 x"
+        },
+        {
+          "ea": "0x423091",
+          "what": "0x1fe 读第 3 个 = 轴 y"
+        },
+        {
+          "ea": "0x42309d",
+          "what": "0x1fe 读第 4 个 = 轴 z"
+        },
+        {
+          "ea": "0x4230a9",
+          "what": "0x1fe 读第 5 个 = 角度（度）"
+        },
+        {
+          "ea": "0x4230df",
+          "what": "0x1fe 写旋转矩阵（轴 + 角度）"
+        },
+        {
+          "ea": "0x4ac5f0",
+          "what": "缩放矩阵落点（元素 + 矩阵格）"
+        },
+        {
+          "ea": "0x4ac750",
+          "what": "平移矩阵落点"
+        },
+        {
+          "ea": "0x4ac660",
+          "what": "旋转矩阵落点 + 轴/角度另存两处"
+        },
+        {
+          "ea": "0x4aaa50",
+          "what": "对象键查找：缺失即建立默认元素"
+        }
+      ],
+      "functions": [
+        "sub_422FD0",
+        "sub_4230F0",
+        "sub_423060",
+        "sub_4AAA50",
+        "sub_4AC5F0",
+        "sub_4AC750",
+        "sub_4AC660"
+      ],
+      "storage": [
+        "shape:T_Scene_460@0x68",
+        "shape:T_Scene_460@0x1ec",
+        "shape:T_Scene_460@0x1f0",
+        "shape:T_Scene_460@0x1f4",
+        "shape:T_Scene_460@0x204",
+        "shape:T_Scene@0x408",
+        "shape:T_Command@0x4ed10"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-CLEAR",
+      "sites": [
+        {
+          "ea": "0x41a13d",
+          "what": "0x1f6 推进格数 ← 1（argc 0）"
+        },
+        {
+          "ea": "0x41a148",
+          "what": "0x1f6 取场景对象表"
+        },
+        {
+          "ea": "0x41a14e",
+          "what": "0x1f6 尾跳清理入口"
+        },
+        {
+          "ea": "0x4ab7b4",
+          "what": "清理入口：清表结构"
+        },
+        {
+          "ea": "0x4ab7bf",
+          "what": "清理入口：取表头（空表 ⇒ 直接返回）"
+        },
+        {
+          "ea": "0x4ab7fb",
+          "what": "清理入口：清四张表 + 零四个标记；对象记录表只回收结点"
+        }
+      ],
+      "functions": [
+        "sub_41A130",
+        "sub_4AB7A0"
+      ],
+      "storage": [
+        "shape:T_Scene@0x408",
+        "shape:T_Command@0x4ed10"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-STATUS-WORD",
+      "sites": [
+        {
+          "ea": "0x4213d0",
+          "what": "0x1cf 推进格数 ← 3（argc 1）"
+        },
+        {
+          "ea": "0x4213df",
+          "what": "0x1cf 读第 1 个操作数（整型）"
+        },
+        {
+          "ea": "0x4213e4",
+          "what": "0x1cf 状态字 ← 操作数（原样覆盖）"
+        },
+        {
+          "ea": "0x419852",
+          "what": "0x1bf 推进格数 ← 1（argc 0）"
+        },
+        {
+          "ea": "0x419859",
+          "what": "0x1bf 判状态字第 16 位"
+        },
+        {
+          "ea": "0x419865",
+          "what": "0x1bf 第 16 位为 1 ⇒ 状态字整字清 0"
+        },
+        {
+          "ea": "0x41986f",
+          "what": "0x1bf 判状态字第 0 位（在清整字之后）"
+        },
+        {
+          "ea": "0x419877",
+          "what": "0x1bf 第 0 位为 0 ⇒ 相邻格 ← 1"
+        }
+      ],
+      "functions": [
+        "sub_4213C0",
+        "sub_419840"
+      ],
+      "storage": [
+        "shape:T_Command@0x77a20",
+        "shape:T_Command@0x77a1c"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-STATUS-CELL-READ",
+      "sites": [
+        {
+          "ea": "0x42d41d",
+          "what": "0x1cc 推进格数 ← 3（argc 1）"
+        },
+        {
+          "ea": "0x42d428",
+          "what": "0x1cc 取引擎状态格的值"
+        },
+        {
+          "ea": "0x42d431",
+          "what": "0x1cc 写第 1 个操作数（写整型原语）"
+        }
+      ],
+      "functions": [
+        "sub_42D410"
+      ],
+      "storage": [
+        "shape:T_Command@0x7795c"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-MODE-BIT",
+      "sites": [
+        {
+          "ea": "0x4190ed",
+          "what": "0x19b 推进格数 ← 1（argc 0）"
+        },
+        {
+          "ea": "0x4190f8",
+          "what": "0x19b 第 27 位清 0（掩码清，其它位保留）"
+        },
+        {
+          "ea": "0x419104",
+          "what": "0x19b 格 D ← 0"
+        },
+        {
+          "ea": "0x41910a",
+          "what": "0x19b 格 A ← 0"
+        },
+        {
+          "ea": "0x419110",
+          "what": "0x19b 格 B ← 0"
+        },
+        {
+          "ea": "0x419133",
+          "what": "0x19c 推进格数 ← 1"
+        },
+        {
+          "ea": "0x41913c",
+          "what": "0x19c 格 A ← 1"
+        },
+        {
+          "ea": "0x419142",
+          "what": "0x19c 格 B ← 0"
+        },
+        {
+          "ea": "0x419149",
+          "what": "0x19c 判格 C"
+        },
+        {
+          "ea": "0x419151",
+          "what": "0x19c 判格 E（C = 0 之内；E ≠ 0 ⇒ 直接置位且不动格 D）"
+        },
+        {
+          "ea": "0x419159",
+          "what": "0x19c 判格 F（F ≠ 0 ⇒ 本条结束，位不动）"
+        },
+        {
+          "ea": "0x419161",
+          "what": "0x19c 三格皆 0 支：格 D ← 0"
+        },
+        {
+          "ea": "0x419167",
+          "what": "0x19c 三格皆 0 支：第 27 位清 0"
+        },
+        {
+          "ea": "0x419172",
+          "what": "0x19c C ≠ 0 支：格 D ← 1"
+        },
+        {
+          "ea": "0x419178",
+          "what": "0x19c 第 27 位置 1"
+        },
+        {
+          "ea": "0x419188",
+          "what": "0x19c 另一格 ← 1"
+        },
+        {
+          "ea": "0x419195",
+          "what": "0x19c 第 29 位为 1 时清 0"
+        },
+        {
+          "ea": "0x42d39d",
+          "what": "0x1c7 推进格数 ← 3（argc 1）"
+        },
+        {
+          "ea": "0x42d3a8",
+          "what": "0x1c7 判第 27 位"
+        },
+        {
+          "ea": "0x42d3b8",
+          "what": "0x1c7 位在 ⇒ 写 1"
+        },
+        {
+          "ea": "0x42d3c2",
+          "what": "0x1c7 位不在 ⇒ 写 0"
+        }
+      ],
+      "functions": [
+        "sub_4190E0",
+        "sub_419120",
+        "sub_42D390"
+      ],
+      "storage": [
+        "shape:T_Command@0xaab44",
+        "shape:T_Command@0x5ec6c",
+        "shape:T_Command@0x77808",
+        "shape:T_Command@0x5ec68",
+        "shape:T_Command@0x796ac",
+        "shape:T_Command@0x7795c",
+        "shape:T_Command@0x77800"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FLAG-CELLS",
+      "sites": [
+        {
+          "ea": "0x42d29d",
+          "what": "0x19a 推进格数 ← 3（argc 1）"
+        },
+        {
+          "ea": "0x42d2a8",
+          "what": "0x19a 取格 X 原值"
+        },
+        {
+          "ea": "0x42d2b1",
+          "what": "0x19a 写第 1 个操作数（不归一）"
+        },
+        {
+          "ea": "0x42d2cf",
+          "what": "0x1b6 推进格数 ← 3"
+        },
+        {
+          "ea": "0x42d2da",
+          "what": "0x1b6 判格 Y 是否为 0"
+        },
+        {
+          "ea": "0x42d2e0",
+          "what": "0x1b6 归一成 0 / 1"
+        },
+        {
+          "ea": "0x42d2e6",
+          "what": "0x1b6 写第 1 个操作数"
+        },
+        {
+          "ea": "0x41ff30",
+          "what": "0x1b7 推进格数 ← 3"
+        },
+        {
+          "ea": "0x41ff3f",
+          "what": "0x1b7 读第 1 个操作数（整型）"
+        },
+        {
+          "ea": "0x41ff4a",
+          "what": "0x1b7 格 Y ← 归一后的 0 / 1"
+        }
+      ],
+      "functions": [
+        "sub_42D290",
+        "sub_42D2C0",
+        "sub_41FF20"
+      ],
+      "storage": [
+        "shape:T_Command@0x5ec68",
+        "shape:T_Command@0x5ec70"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-POOL-MEMCPY",
+      "sites": [
+        {
+          "ea": "0x42d160",
+          "what": "0x1b0 推进格数 ← 7（argc 3）"
+        },
+        {
+          "ea": "0x42d16f",
+          "what": "0x1b0 读第 3 个操作数（整型）"
+        },
+        {
+          "ea": "0x42d174",
+          "what": "0x1b0 长度 ×2"
+        },
+        {
+          "ea": "0x42d178",
+          "what": "0x1b0 长度 ×2（合计 ×4 = 32 位字）"
+        },
+        {
+          "ea": "0x42d17d",
+          "what": "0x1b0 取第 1 个操作数的地址（源）"
+        },
+        {
+          "ea": "0x42d187",
+          "what": "0x1b0 取第 2 个操作数的地址（目标）"
+        },
+        {
+          "ea": "0x42d18d",
+          "what": "0x1b0 复制 4 × n 字节"
+        }
+      ],
+      "functions": [
+        "sub_42D150",
+        "sub_42AEA0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SAVE-READ",
+      "sites": [
+        {
+          "ea": "0x42dc9f",
+          "what": "0x1a0 推进格数 ← 0x13 = 19（argc 9）"
+        },
+        {
+          "ea": "0x42dcc3",
+          "what": "0x1a0 拼存档文件名（SAVE%2.2d.DAT）"
+        },
+        {
+          "ea": "0x42dcf5",
+          "what": "0x1a0 只读打开"
+        },
+        {
+          "ea": "0x42dd08",
+          "what": "0x1a0 打不开 ⇒ 第 1 个操作数 ← 1"
+        },
+        {
+          "ea": "0x42dd39",
+          "what": "0x1a0 按存档格式读"
+        },
+        {
+          "ea": "0x42dd53",
+          "what": "0x1a0 七个字段 → 第 3..9 个操作数（第一格）"
+        },
+        {
+          "ea": "0x42dda8",
+          "what": "0x1a0 七个字段 → 第 3..9 个操作数（最后一格 = 第 9 个）"
+        },
+        {
+          "ea": "0x42ddc9",
+          "what": "0x1a0 三条路径都关闭文件"
+        }
+      ],
+      "functions": [
+        "sub_42DC70",
+        "sub_438120"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SAVE-WRITE",
+      "sites": [
+        {
+          "ea": "0x42d9b0",
+          "what": "0x19e 推进格数 ← 5（argc 2）"
+        },
+        {
+          "ea": "0x42da0c",
+          "what": "0x19e 试读目标（判是否需要确认）"
+        },
+        {
+          "ea": "0x42da31",
+          "what": "0x19e 读回不成功时弹确认；用户拒绝 ⇒ 第 1 个操作数 ← 1"
+        },
+        {
+          "ea": "0x42da88",
+          "what": "0x19e 以写方式打开"
+        },
+        {
+          "ea": "0x42dadb",
+          "what": "0x19e 写盘；第 1 个操作数 ← 写入返回值"
+        },
+        {
+          "ea": "0x42de05",
+          "what": "0x1a1 推进格数 ← 5（argc 2）"
+        },
+        {
+          "ea": "0x42de68",
+          "what": "0x1a1 以写方式打开"
+        },
+        {
+          "ea": "0x42dec2",
+          "what": "0x1a1 写盘（无确认）"
+        },
+        {
+          "ea": "0x42dece",
+          "what": "0x1a1 取全局整型池计数格"
+        },
+        {
+          "ea": "0x42df01",
+          "what": "0x1a1 逐槽重新编码（第一步）"
+        },
+        {
+          "ea": "0x42df0a",
+          "what": "0x1a1 逐槽重新编码（第二步）"
+        }
+      ],
+      "functions": [
+        "sub_42D980",
+        "sub_42DDE0",
+        "sub_40CD10",
+        "sub_410160"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d7e8",
+        "shape:T_Command@0x5d800"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SAVE-FILES",
+      "sites": [
+        {
+          "ea": "0x42dff0",
+          "what": "0x1ab 推进格数 ← 5（argc 2）"
+        },
+        {
+          "ea": "0x42e03c",
+          "what": "0x1ab 删 .DAT"
+        },
+        {
+          "ea": "0x42e076",
+          "what": "0x1ab 删 .STH（失败把结果改成 2）"
+        },
+        {
+          "ea": "0x42e086",
+          "what": "0x1ab 第 1 个操作数 ← 0 / 1 / 2"
+        },
+        {
+          "ea": "0x42e0d0",
+          "what": "0x1ac 推进格数 ← 7（argc 3）"
+        },
+        {
+          "ea": "0x42e14e",
+          "what": "0x1ac 拷 .DAT（源 = 第 2 个，目标 = 第 3 个）"
+        },
+        {
+          "ea": "0x42e1bb",
+          "what": "0x1ac 拷 .STH（失败把结果改成 2）"
+        },
+        {
+          "ea": "0x42e1cb",
+          "what": "0x1ac 第 1 个操作数 ← 0 / 1 / 2"
+        },
+        {
+          "ea": "0x42e21f",
+          "what": "0x1ae 推进格数 ← 7"
+        },
+        {
+          "ea": "0x42e275",
+          "what": "0x1ae 建立 .STH 并写"
+        },
+        {
+          "ea": "0x42e288",
+          "what": "0x1ae 第 1 个操作数 ← 0 / 2"
+        },
+        {
+          "ea": "0x42e34f",
+          "what": "0x1af 推进格数 ← 7"
+        },
+        {
+          "ea": "0x42e3a5",
+          "what": "0x1af 只读打开 .STH"
+        },
+        {
+          "ea": "0x42e3b8",
+          "what": "0x1af 第 1 个操作数 ← 0 / 2"
+        }
+      ],
+      "functions": [
+        "sub_42DFC0",
+        "sub_42E0A0",
+        "sub_42E1F0",
+        "sub_42E320"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-LAYER-CELL",
+      "sites": [
+        {
+          "ea": "0x4196fd",
+          "what": "0x1ad 推进格数 ← 1（argc 0）"
+        },
+        {
+          "ea": "0x41970e",
+          "what": "0x1ad 引擎格 ← 当前层号"
+        },
+        {
+          "ea": "0x40df4a",
+          "what": "复位路径：该格 ← −1（初值可区分）"
+        }
+      ],
+      "functions": [
+        "sub_4196F0",
+        "sub_40DF10"
+      ],
+      "storage": [
+        "shape:T_Command@0xa30cc",
+        "shape:T_Command@0x5d880"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RNG-ENABLE",
+      "sites": [
+        {
+          "ea": "0x420290",
+          "what": "0x1ce 推进格数 ← 3（argc 1）"
+        },
+        {
+          "ea": "0x42029f",
+          "what": "0x1ce 读第 1 个操作数（整型）"
+        },
+        {
+          "ea": "0x4202a8",
+          "what": "0x1ce 开关格 ← 操作数"
+        },
+        {
+          "ea": "0x4202ae",
+          "what": "0x1ce 第二遍读第 1 个操作数（判开关）"
+        },
+        {
+          "ea": "0x4202b7",
+          "what": "0x1ce 取引擎级标志字"
+        },
+        {
+          "ea": "0x4202c4",
+          "what": "0x1ce 停用支：判模式位（决定是否投递事件）"
+        },
+        {
+          "ea": "0x4202dc",
+          "what": "0x1ce 停用支：向事件容器投递"
+        },
+        {
+          "ea": "0x4202e1",
+          "what": "0x1ce 停用支：清第 30 位"
+        },
+        {
+          "ea": "0x4202ed",
+          "what": "0x1ce 启用支：置第 30 位"
+        },
+        {
+          "ea": "0x4202f7",
+          "what": "0x1ce 启用支：子系统格 ← 0"
+        },
+        {
+          "ea": "0x420308",
+          "what": "0x1ce 启用支：尾跳播种入口（种子 = 宿主毫秒时钟）"
+        }
+      ],
+      "functions": [
+        "sub_420280",
+        "sub_453A90"
+      ],
+      "storage": [
+        "shape:T_Command@0x692e0",
+        "shape:T_Command@0x69268",
+        "shape:T_Command@0x69270",
+        "shape:T_Command@0xaab44"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FLOAT-ABS",
+      "sites": [
+        {
+          "ea": "0x42ced4",
+          "what": "0x191 推进格数 ← 5（argc 2）"
+        },
+        {
+          "ea": "0x42cee3",
+          "what": "0x191 读第 2 个操作数（浮点）"
+        },
+        {
+          "ea": "0x42ceef",
+          "what": "0x191 取绝对值（浮点）"
+        },
+        {
+          "ea": "0x42cefe",
+          "what": "0x191 写第 1 个操作数（写浮点原语）"
+        }
+      ],
+      "functions": [
+        "sub_42CEC0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-SET-VEC1",
+      "sites": [
+        {
+          "ea": "0x423b20",
+          "what": "handler 起点（opcode 0x217，argc=4）"
+        },
+        {
+          "ea": "0x423b45",
+          "what": "readFloat(2)"
+        },
+        {
+          "ea": "0x423b51",
+          "what": "readFloat(3)"
+        },
+        {
+          "ea": "0x423b5d",
+          "what": "readFloat(4)"
+        },
+        {
+          "ea": "0x423b7f",
+          "what": "readInt(1)（最后一个读）"
+        },
+        {
+          "ea": "0x423b8b",
+          "what": "call 场景辅助：写第一组三个浮点格 + 置场景脏"
+        },
+        {
+          "ea": "0x4acf20",
+          "what": "辅助起点：写记录 +6/+7/+8 并置 this[11627]=1（C 侧；逐字待补）"
+        }
+      ],
+      "functions": [
+        "sub_423B20",
+        "sub_4ACF20",
+        "sub_4AAA50",
+        "sub_4AAD40"
+      ],
+      "storage": [
+        "shape:T_Scene@0x408",
+        "shape:T_Scene_460@0x18"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-SET-VEC2",
+      "sites": [
+        {
+          "ea": "0x423ba0",
+          "what": "handler 起点（opcode 0x219，argc=4）"
+        },
+        {
+          "ea": "0x423bc5",
+          "what": "readFloat(2)"
+        },
+        {
+          "ea": "0x423bd1",
+          "what": "readFloat(3)"
+        },
+        {
+          "ea": "0x423bdd",
+          "what": "readFloat(4)"
+        },
+        {
+          "ea": "0x423bff",
+          "what": "readInt(1)"
+        },
+        {
+          "ea": "0x423c0b",
+          "what": "call 场景辅助：写第二组三个浮点格 + 置场景脏"
+        },
+        {
+          "ea": "0x4acee0",
+          "what": "辅助起点：写记录 +9/+10/+11 并置 this[11627]=1（C 侧）"
+        }
+      ],
+      "functions": [
+        "sub_423BA0",
+        "sub_4ACEE0",
+        "sub_4AAA50",
+        "sub_4AAD40"
+      ],
+      "storage": [
+        "shape:T_Scene@0x408",
+        "shape:T_Scene_460@0x24"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-GET-VEC1",
+      "sites": [
+        {
+          "ea": "0x4303c0",
+          "what": "handler 起点（opcode 0x218，argc=4）"
+        },
+        {
+          "ea": "0x4303ef",
+          "what": "readInt(1)"
+        },
+        {
+          "ea": "0x4303ff",
+          "what": "call 场景辅助：按编号取第一组三个浮点（查不到写 0，不建记录）"
+        },
+        {
+          "ea": "0x43040f",
+          "what": "writeFloat(2)"
+        },
+        {
+          "ea": "0x43041f",
+          "what": "writeFloat(3)"
+        },
+        {
+          "ea": "0x43042f",
+          "what": "writeFloat(4)"
+        },
+        {
+          "ea": "0x4adcf0",
+          "what": "辅助起点：查表 → 记录 +6/+7/+8，缺失时三个 0"
+        }
+      ],
+      "functions": [
+        "sub_4303C0",
+        "sub_4ADCF0",
+        "sub_459EA0",
+        "sub_4AAD40",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "shape:T_Scene@0x408",
+        "shape:T_Scene_460@0x18"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-GET-VEC2",
+      "sites": [
+        {
+          "ea": "0x430450",
+          "what": "handler 起点（opcode 0x21a，argc=4）"
+        },
+        {
+          "ea": "0x43047f",
+          "what": "readInt(1)"
+        },
+        {
+          "ea": "0x43048f",
+          "what": "call 场景辅助：按编号取第二组三个浮点"
+        },
+        {
+          "ea": "0x43049f",
+          "what": "writeFloat(2)"
+        },
+        {
+          "ea": "0x4304af",
+          "what": "writeFloat(3)"
+        },
+        {
+          "ea": "0x4304bf",
+          "what": "writeFloat(4)"
+        },
+        {
+          "ea": "0x4adc80",
+          "what": "辅助起点：查表 → 记录 +9/+10/+11，缺失时三个 0"
+        }
+      ],
+      "functions": [
+        "sub_430450",
+        "sub_4ADC80",
+        "sub_459EA0",
+        "sub_4AAD40",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "shape:T_Scene@0x408",
+        "shape:T_Scene_460@0x24"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-SET-TRANSFORM",
+      "sites": [
+        {
+          "ea": "0x423de0",
+          "what": "handler 起点（opcode 0x220，argc=6）"
+        },
+        {
+          "ea": "0x423e05",
+          "what": "readFloat(4)"
+        },
+        {
+          "ea": "0x423e11",
+          "what": "readFloat(5)"
+        },
+        {
+          "ea": "0x423e1d",
+          "what": "readFloat(6)"
+        },
+        {
+          "ea": "0x423e40",
+          "what": "readInt(3)"
+        },
+        {
+          "ea": "0x423e4a",
+          "what": "readInt(2)"
+        },
+        {
+          "ea": "0x423e54",
+          "what": "readInt(1)"
+        },
+        {
+          "ea": "0x423e60",
+          "what": "call 场景辅助：位 0 门 → 置位 1 / 清一格 / 写两个整数格 / 写矩阵平移 / 置脏"
+        },
+        {
+          "ea": "0x4ad3c0",
+          "what": "辅助起点：门判据 test [record],1；写 +68/+88/+104、D3DXMatrixTranslation(+428)"
+        }
+      ],
+      "functions": [
+        "sub_423DE0",
+        "sub_4AD3C0",
+        "sub_4AAA50",
+        "sub_4AAD40"
+      ],
+      "storage": [
+        "shape:T_Scene@0x408",
+        "shape:T_Scene_460@0x44",
+        "shape:T_Scene_460@0x58",
+        "shape:T_Scene_460@0x68"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-GET-LOCAL-TRANS",
+      "sites": [
+        {
+          "ea": "0x430650",
+          "what": "handler 起点（opcode 0x228，argc=5）：readInt(2) → 辅助 → writeFloat(3/4/5) → writeInt(1) 最后写"
+        },
+        {
+          "ea": "0x4aa060",
+          "what": "辅助起点：查表 → D3DXMatrixDecompose；失败走错误通道并返回 0"
+        }
+      ],
+      "functions": [
+        "sub_430650",
+        "sub_4AA060",
+        "sub_42BA00",
+        "sub_42B4B0"
+      ],
+      "storage": [
+        "shape:T_Scene@0x408",
+        "shape:T_Scene_460"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-RECORD-LOOKUP",
+      "sites": [
+        {
+          "ea": "0x423ca0",
+          "what": "0x21e handler → sub_4AD170"
+        },
+        {
+          "ea": "0x423d40",
+          "what": "0x21f handler → sub_4AD250（旋转轴 + 角）"
+        },
+        {
+          "ea": "0x4243f0",
+          "what": "0x231 handler → sub_4AD690"
+        },
+        {
+          "ea": "0x424510",
+          "what": "0x233 handler → sub_4AD7B0"
+        },
+        {
+          "ea": "0x4245b0",
+          "what": "0x234 handler → sub_4AD850"
+        },
+        {
+          "ea": "0x424630",
+          "what": "0x235 handler → sub_4AD900"
+        },
+        {
+          "ea": "0x424900",
+          "what": "0x239 handler → sub_4AD4A0"
+        },
+        {
+          "ea": "0x4aaa50",
+          "what": "共享：按编号取记录，查不到先插默认记录（现有规则已登记）"
+        },
+        {
+          "ea": "0x4aad40",
+          "what": "共享：按编号查记录"
+        }
+      ],
+      "functions": [
+        "sub_423CA0",
+        "sub_423D40",
+        "sub_4243F0",
+        "sub_424510",
+        "sub_4245B0",
+        "sub_424630",
+        "sub_424900",
+        "sub_4AAA50",
+        "sub_4AAD40"
+      ],
+      "storage": [
+        "shape:T_Scene@0x408",
+        "shape:T_Scene_460"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-TABLE-FLAGS",
+      "sites": [
+        {
+          "ea": "0x425d20",
+          "what": "0x258 handler 起点（argc=2）"
+        },
+        {
+          "ea": "0x425d41",
+          "what": "readInt(2)（位掩码）"
+        },
+        {
+          "ea": "0x425d50",
+          "what": "readInt(1)（编号）"
+        },
+        {
+          "ea": "0x425d66",
+          "what": "写两张表的 +0x8 格（位 0）"
+        },
+        {
+          "ea": "0x425d8f",
+          "what": "写两张表的 +0xc 格（位 1）"
+        },
+        {
+          "ea": "0x41a3a0",
+          "what": "0x259 handler 起点（argc=0）；1000 项循环清 +0x8/+0xc"
+        },
+        {
+          "ea": "0x41a3d0",
+          "what": "清表循环体：两张表各两个格 ← 0"
+        }
+      ],
+      "functions": [
+        "sub_425D20",
+        "sub_41A3A0",
+        "sub_41BF50"
+      ],
+      "storage": [
+        "shape:T_Scene@0x748",
+        "shape:T_Scene@0x5568",
+        "shape:T_Scene_elem14@0x8",
+        "shape:T_Scene_elem14@0xc"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-SIZE",
+      "sites": [
+        {
+          "ea": "0x4302e0",
+          "what": "handler 起点（opcode 0x208，argc=3）"
+        },
+        {
+          "ea": "0x43030d",
+          "what": "readInt(1)"
+        },
+        {
+          "ea": "0x430319",
+          "what": "call sub_49ED60：编号 > 999 ⇒ 错误通道 + 0/0；空槽 ⇒ 0/0"
+        },
+        {
+          "ea": "0x430326",
+          "what": "writeInt(2)"
+        },
+        {
+          "ea": "0x430333",
+          "what": "writeInt(3)"
+        },
+        {
+          "ea": "0x49ed60",
+          "what": "辅助起点：GetTextureSize（错误文本在 0x49ed…）"
+        }
+      ],
+      "functions": [
+        "sub_4302E0",
+        "sub_49ED60",
+        "sub_4034C0",
+        "sub_42B4B0"
+      ],
+      "storage": [
+        "shape:T_Scene@0xa5d8"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FILLTEXTURE",
+      "sites": [
+        {
+          "ea": "0x423690",
+          "what": "handler 起点（opcode 0x20b，argc=7）"
+        },
+        {
+          "ea": "0x4236c0",
+          "what": "readInt(2..5)（x/y/宽/高）"
+        },
+        {
+          "ea": "0x4236f6",
+          "what": "readInt(6)（透明度）→ 夹到 255"
+        },
+        {
+          "ea": "0x42370e",
+          "what": "readInt(7)（颜色）→ 打包（最高字节写 1）"
+        },
+        {
+          "ea": "0x423740",
+          "what": "readInt(1)（纹理编号）"
+        },
+        {
+          "ea": "0x42374c",
+          "what": "call sub_4A4C70（置项标志 → 编号检查 → 夹矩形 → 填充入口）"
+        },
+        {
+          "ea": "0x4a4c70",
+          "what": "辅助起点：写 this[5*id+470]=1；越界/空槽/锁失败三处错误通道"
+        }
+      ],
+      "functions": [
+        "sub_423690",
+        "sub_4A4C70",
+        "sub_4034C0",
+        "sub_49F770"
+      ],
+      "storage": [
+        "shape:T_Scene@0xa5d8",
+        "shape:T_Scene@0x748"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCALAR-FLOAT-ARITH",
+      "sites": [
+        {
+          "ea": "0x430a50",
+          "what": "0x2d0 add：readFloat(3)→readFloat(2)→fadd→writeFloat(1)"
+        },
+        {
+          "ea": "0x430ab0",
+          "what": "0x2d1 sub：readFloat(2)→readFloat(3)→fsubr→writeFloat(1)"
+        },
+        {
+          "ea": "0x430b70",
+          "what": "0x2d3 div：readFloat(2)→readFloat(3)→fdivr→writeFloat(1)"
+        }
+      ],
+      "functions": [
+        "sub_430A50",
+        "sub_430AB0",
+        "sub_430B70",
+        "sub_41C300",
+        "sub_42BA00"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-CG-SET",
+      "sites": [
+        {
+          "ea": "0x426420",
+          "what": "handler 起点（opcode 0x2da，argc=8）：读 8 个整数；编号越界只上报不写"
+        },
+        {
+          "ea": "0x4264d4",
+          "what": "编号越界：错误文本「CGNumberの引数が不正です．」"
+        }
+      ],
+      "functions": [
+        "sub_426420",
+        "sub_41BF50",
+        "sub_4034D0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OBJECTS-ROOT",
+      "sites": [
+        {
+          "ea": "0x4baa11",
+          "what": "根对象的分配大小 0xAABC8（唯一创建点的 operator new 实参）"
+        },
+        {
+          "ea": "0x4baa16",
+          "what": "operator new：为根对象取存储"
+        },
+        {
+          "ea": "0x4baa2c",
+          "what": "把新存储交给构造器（ecx）"
+        },
+        {
+          "ea": "0x4baa2e",
+          "what": "根对象构造器 sub_415640（_WinMain@16 内唯一调用点）"
+        },
+        {
+          "ea": "0x4baa3a",
+          "what": "根对象发布到进程级全局槽 ds:dword_55E1BC"
+        },
+        {
+          "ea": "0x41566d",
+          "what": "根构造器先构造基类前缀"
+        },
+        {
+          "ea": "0x41567d",
+          "what": "根构造器把类行为表写成自己的（Command）"
+        },
+        {
+          "ea": "0x415677",
+          "what": "子对象 1 就地构造：根+0x408"
+        },
+        {
+          "ea": "0x415683",
+          "what": "子对象 1 的构造器调用"
+        },
+        {
+          "ea": "0x41568c",
+          "what": "子对象 2 就地构造：根+0x1ee8"
+        },
+        {
+          "ea": "0x415692",
+          "what": "子对象 2 的构造器调用"
+        },
+        {
+          "ea": "0x41569f",
+          "what": "子对象 3 就地构造：根+0x48e8"
+        },
+        {
+          "ea": "0x4156a5",
+          "what": "子对象 3 的构造器调用"
+        },
+        {
+          "ea": "0x4156ae",
+          "what": "子对象 4 就地构造：根+0x511c"
+        },
+        {
+          "ea": "0x4156b4",
+          "what": "子对象 4 的构造器调用"
+        },
+        {
+          "ea": "0x4bb517",
+          "what": "根对象驱动主循环（sub_412290）"
+        },
+        {
+          "ea": "0x4bb526",
+          "what": "销毁前的空指针检查"
+        },
+        {
+          "ea": "0x4bb52c",
+          "what": "删除标志 1"
+        },
+        {
+          "ea": "0x4bb530",
+          "what": "经类行为表删除根对象"
+        },
+        {
+          "ea": "0x4bb54a",
+          "what": "销毁后清空进程级全局槽"
+        }
+      ],
+      "functions": [
+        "sub_415640"
+      ],
+      "storage": [
+        "shape:T_Command@0x0",
+        "shape:T_Command@0x408",
+        "shape:T_Command@0x1ee8",
+        "shape:T_Command@0x48e8",
+        "shape:T_Command@0x511c"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-objects-sites.assets.test.mjs#★ CORE-OBJECTS 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OBJECTS-BASE",
+      "sites": [
+        {
+          "ea": "0x4034a2",
+          "what": "基类构造器写基类行为表"
+        },
+        {
+          "ea": "0x4034a8",
+          "what": "每个对象 +0x4 写入一个进程级对象的地址（不是每实例新建）"
+        },
+        {
+          "ea": "0x51c140",
+          "what": "静态初始化取该进程级对象的地址"
+        },
+        {
+          "ea": "0x51c145",
+          "what": "进程级对象的构造器（RemoteDebug）"
+        },
+        {
+          "ea": "0x51c14a",
+          "what": "把进程级对象的销毁例程交给 _atexit"
+        },
+        {
+          "ea": "0x51c14f",
+          "what": "_atexit 调用"
+        },
+        {
+          "ea": "0x4975a3",
+          "what": "进程级对象的类行为表写入"
+        },
+        {
+          "ea": "0x4034c3",
+          "what": "基类操作 1：取 +0x4 的进程级对象"
+        },
+        {
+          "ea": "0x4034c7",
+          "what": "基类操作 1 转发（追加文本）"
+        },
+        {
+          "ea": "0x4034d3",
+          "what": "基类操作 2：同样取 +0x4 的对象"
+        },
+        {
+          "ea": "0x4034d7",
+          "what": "基类操作 2 转发（格式化追加）"
+        },
+        {
+          "ea": "0x4034e3",
+          "what": "基类操作 3：取 +0x4 的对象"
+        },
+        {
+          "ea": "0x4034e8",
+          "what": "基类操作 3：取该对象类行为表第 3 项"
+        },
+        {
+          "ea": "0x4034ec",
+          "what": "基类操作 3：间接调用"
+        }
+      ],
+      "functions": [
+        "sub_4034A0",
+        "sub_4034C0",
+        "sub_4034D0",
+        "sub_4034E0",
+        "sub_497570"
+      ],
+      "storage": [
+        "shape:T_BaseObject@0x0",
+        "shape:T_BaseObject@0x4"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-objects-sites.assets.test.mjs#★ CORE-OBJECTS 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OBJECTS-TYPE-IDENTITY",
+      "sites": [
+        {
+          "ea": "0x4034a2",
+          "what": "基类构造器写基类行为表（所有子类共用）"
+        },
+        {
+          "ea": "0x41567d",
+          "what": "子类构造器覆盖为自己的行为表（Command）"
+        },
+        {
+          "ea": "0x4aafbd",
+          "what": "子类构造器先调基类构造器（Scene）"
+        },
+        {
+          "ea": "0x4aafcd",
+          "what": "再覆盖为自己的行为表（Scene）"
+        },
+        {
+          "ea": "0x488ccb",
+          "what": "另一子类的行为表写入（CMovieToTexture）"
+        },
+        {
+          "ea": "0x48907d",
+          "what": "该子类构造器中的同一写入"
+        },
+        {
+          "ea": "0x489200",
+          "what": "槽对象的删除式析构（行为表第 1 项：析构 + 按标志 operator delete）"
+        },
+        {
+          "ea": "0x422c62",
+          "what": "取对象 +0x0 的行为表"
+        },
+        {
+          "ea": "0x422c68",
+          "what": "经行为表间接调用（销毁）"
+        },
+        {
+          "ea": "0x4c87ef",
+          "what": "全语料唯一一处运行期 typeid（Live2D 模块）"
+        },
+        {
+          "ea": "0x4c8815",
+          "what": "全语料唯一一处运行期 dynamic_cast（Live2D 模块）"
+        }
+      ],
+      "functions": [
+        "sub_4034A0",
+        "sub_415640",
+        "sub_4AAF90",
+        "sub_489040"
+      ],
+      "storage": [
+        "shape:T_BaseObject@0x0"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-objects-sites.assets.test.mjs#★ CORE-OBJECTS 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OBJECTS-SLOT-TABLE",
+      "sites": [
+        {
+          "ea": "0x415c8f",
+          "what": "清零用的值（0）"
+        },
+        {
+          "ea": "0x415c91",
+          "what": "表基址（根 + 0x5C740）"
+        },
+        {
+          "ea": "0x415c97",
+          "what": "表项数 0x3E8 = 1000"
+        },
+        {
+          "ea": "0x415c9c",
+          "what": "rep stosd：构造期把 1000 个 4 字节表项全部清零"
+        },
+        {
+          "ea": "0x405223",
+          "what": "整表扫描的迭代上限 1000"
+        },
+        {
+          "ea": "0x405230",
+          "what": "整表扫描：逐个读表项"
+        },
+        {
+          "ea": "0x405294",
+          "what": "整表扫描：步长 4 字节"
+        },
+        {
+          "ea": "0x405297",
+          "what": "整表扫描：递减计数"
+        },
+        {
+          "ea": "0x412550",
+          "what": "主循环整表扫描：下标上界 1000"
+        },
+        {
+          "ea": "0x412558",
+          "what": "主循环整表扫描：读表项"
+        },
+        {
+          "ea": "0x413367",
+          "what": "主循环整表扫描：下标从 0 起"
+        },
+        {
+          "ea": "0x41336f",
+          "what": "主循环整表扫描：下标上界 1000"
+        },
+        {
+          "ea": "0x41337b",
+          "what": "主循环整表扫描：读表项"
+        },
+        {
+          "ea": "0x413390",
+          "what": "主循环整表扫描：下一个表项"
+        },
+        {
+          "ea": "0x4237fb",
+          "what": "由指令给出的槽号（影片类指令）"
+        },
+        {
+          "ea": "0x4237fd",
+          "what": "直接用槽号寻址：无上界检查"
+        },
+        {
+          "ea": "0x422c45",
+          "what": "由指令给出的槽号（纹理类指令）"
+        },
+        {
+          "ea": "0x422c47",
+          "what": "直接用槽号寻址：无上界检查"
+        }
+      ],
+      "functions": [
+        "sub_415640",
+        "sub_405210",
+        "sub_412290",
+        "sub_4237B0",
+        "sub_422C20"
+      ],
+      "storage": [
+        "shape:T_Command@0x5c740"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-objects-sites.assets.test.mjs#★ CORE-OBJECTS 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OBJECTS-SLOT-LIFECYCLE",
+      "sites": [
+        {
+          "ea": "0x4237fd",
+          "what": "空洞检查：表项为 0 表示该槽没有对象"
+        },
+        {
+          "ea": "0x42380b",
+          "what": "对象分配大小 0x480"
+        },
+        {
+          "ea": "0x423828",
+          "what": "对象构造器"
+        },
+        {
+          "ea": "0x423838",
+          "what": "把新对象写进槽（空 → 占用）"
+        },
+        {
+          "ea": "0x422c47",
+          "what": "占用槽：读出现有对象"
+        },
+        {
+          "ea": "0x422c52",
+          "what": "占用槽：先对该对象做一次清理调用"
+        },
+        {
+          "ea": "0x422c62",
+          "what": "取对象行为表"
+        },
+        {
+          "ea": "0x422c66",
+          "what": "删除标志 1"
+        },
+        {
+          "ea": "0x422c68",
+          "what": "经行为表销毁对象"
+        },
+        {
+          "ea": "0x422c6a",
+          "what": "销毁后把槽清 0（占用 → 空）"
+        },
+        {
+          "ea": "0x422e4a",
+          "what": "释放路径上的同一清 0"
+        },
+        {
+          "ea": "0x4239ca",
+          "what": "重建路径上的同一清 0"
+        },
+        {
+          "ea": "0x4126ff",
+          "what": "主循环扫描：占用检查"
+        },
+        {
+          "ea": "0x412726",
+          "what": "主循环扫描：经行为表销毁"
+        },
+        {
+          "ea": "0x412728",
+          "what": "主循环扫描：销毁后清 0"
+        },
+        {
+          "ea": "0x41337b",
+          "what": "主循环扫描：占用槽的逐对象更新"
+        },
+        {
+          "ea": "0x41338b",
+          "what": "逐对象更新调用"
+        },
+        {
+          "ea": "0x4a6eaf",
+          "what": "共享释放例程：读表项"
+        },
+        {
+          "ea": "0x4a6eb6",
+          "what": "共享释放例程：占用检查"
+        },
+        {
+          "ea": "0x4a6ec0",
+          "what": "共享释放例程：经行为表销毁"
+        },
+        {
+          "ea": "0x4a6ec2",
+          "what": "共享释放例程：销毁后清 0"
+        }
+      ],
+      "functions": [
+        "sub_4237B0",
+        "sub_422C20",
+        "sub_422CB0",
+        "sub_422E00",
+        "sub_412290",
+        "sub_4A6E70"
+      ],
+      "storage": [
+        "shape:T_Command@0x5c740"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-objects-sites.assets.test.mjs#★ CORE-OBJECTS 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "FMT-SAVE-SLOT",
+      "sites": [
+        {
+          "ea": "0x42d9d4",
+          "what": "0x19e：把槽号格式化成 %s\\SAVE%2.2d.DAT"
+        },
+        {
+          "ea": "0x42d9be",
+          "what": "0x19e：槽号读入后直接进格式化（之前无比较/上界检查）"
+        },
+        {
+          "ea": "0x42e056",
+          "what": "0x1ac：缩略图文件名 %s\\SAVE%2.2d.STH"
+        },
+        {
+          "ea": "0x42e168",
+          "what": "0x1ac：源槽 .STH 名"
+        },
+        {
+          "ea": "0x42e243",
+          "what": "0x1ae：写缩略图的文件名"
+        },
+        {
+          "ea": "0x42e373",
+          "what": "0x1af：读缩略图的文件名"
+        },
+        {
+          "ea": "0x42dfc0",
+          "what": "0x1ab：删除一个槽的两个文件（先 .DAT 后 .STH）"
+        },
+        {
+          "ea": "0x42e0a0",
+          "what": "0x1ac：复制一个槽的两个文件（先 .DAT 后 .STH）"
+        },
+        {
+          "ea": "0x42d580",
+          "what": "0xaa：按名字保存（不经过槽号）"
+        },
+        {
+          "ea": "0x40da91",
+          "what": "写主数据成功后调用系统数据保存（临时文件 → 替换 → 备份）"
+        }
+      ],
+      "functions": [
+        "sub_42D980",
+        "sub_42DB10",
+        "sub_42DC70",
+        "sub_42DDE0",
+        "sub_42DFC0",
+        "sub_42E0A0",
+        "sub_42E1F0",
+        "sub_42E320",
+        "sub_40CD10"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-save-sites.assets.test.mjs#★ FMT-SAVE 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "FMT-SAVE-HEADER",
+      "sites": [
+        {
+          "ea": "0x437786",
+          "what": "魔数（44533453h，按族标识 −0x100 选择另一族）"
+        },
+        {
+          "ea": "0x4377a4",
+          "what": "头 +4 ← 引擎版本串首 4 字节"
+        },
+        {
+          "ea": "0x4377aa",
+          "what": "头 +8 ← 标题串（上限 232 字节）"
+        },
+        {
+          "ea": "0x4377b6",
+          "what": "头 +264 ← 本地时间 8×u16"
+        },
+        {
+          "ea": "0x4377e5",
+          "what": "头 +240 ← 未变换负载字节数"
+        },
+        {
+          "ea": "0x43780f",
+          "what": "头 +280 ← 游戏时间（秒）"
+        },
+        {
+          "ea": "0x4377ea",
+          "what": "头 +284 ← 格式版本 1"
+        },
+        {
+          "ea": "0x43781b",
+          "what": "头 +288 ← 格式版本 2"
+        },
+        {
+          "ea": "0x43816a",
+          "what": "读头：ReadFile 292 字节"
+        },
+        {
+          "ea": "0x438179",
+          "what": "读头：必须恰好 292 字节"
+        },
+        {
+          "ea": "0x4381a5",
+          "what": "读头：按族标识选期望魔数"
+        },
+        {
+          "ea": "0x4381cd",
+          "what": "读头：魔数比较"
+        },
+        {
+          "ea": "0x4381e0",
+          "what": "读头：标题串比较"
+        }
+      ],
+      "functions": [
+        "sub_437480",
+        "sub_438120"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d6e0"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-save-sites.assets.test.mjs#★ FMT-SAVE 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "FMT-SAVE-ENVELOPE",
+      "sites": [
+        {
+          "ea": "0x4378ad",
+          "what": "写 20 字节参数块（字数 / 两校验 / 种子 / 键）"
+        },
+        {
+          "ea": "0x4378d9",
+          "what": "写变换后的负载"
+        },
+        {
+          "ea": "0x437ac4",
+          "what": "版本门：两版本相等，或（文件1==2 且 期望1==2）"
+        },
+        {
+          "ea": "0x437af0",
+          "what": "版本门通过后把文件版本回写进文件子系统状态（+0x4B4 / +0x4B8）"
+        },
+        {
+          "ea": "0x437b11",
+          "what": "读 20 字节参数块并核对字节数"
+        },
+        {
+          "ea": "0x437c6c",
+          "what": "第一层校验和比较（覆盖变换后的负载）"
+        },
+        {
+          "ea": "0x437e19",
+          "what": "第二层校验和比较（内层）"
+        },
+        {
+          "ea": "0x437d1f",
+          "what": "解密入口"
+        }
+      ],
+      "functions": [
+        "sub_437480",
+        "sub_437980"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-save-sites.assets.test.mjs#★ FMT-SAVE 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "FMT-SAVE-BODY",
+      "sites": [
+        {
+          "ea": "0x40d9b8",
+          "what": "写侧整型解码：rol 11"
+        },
+        {
+          "ea": "0x40d9bb",
+          "what": "写侧整型解码：xor 编码键"
+        },
+        {
+          "ea": "0x40d9be",
+          "what": "写侧整型解码：ror 25"
+        },
+        {
+          "ea": "0x40d9cd",
+          "what": "写侧整型循环上界 = 保存的整型计数"
+        },
+        {
+          "ea": "0x42dbef",
+          "what": "读侧整型编码循环上界 = 池容量 + 1"
+        },
+        {
+          "ea": "0x42dc21",
+          "what": "读侧整型编码：ror 7"
+        },
+        {
+          "ea": "0x42dc24",
+          "what": "读侧整型编码：xor 编码键"
+        },
+        {
+          "ea": "0x42dc2a",
+          "what": "读侧整型编码：rol 21"
+        }
+      ],
+      "functions": [
+        "sub_40CD10",
+        "sub_410160",
+        "sub_42DB10",
+        "sub_42DDE0"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d7e8",
+        "shape:T_Command@0x5ec8c"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-save-sites.assets.test.mjs#★ FMT-SAVE 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "FMT-SAVE-RESTORE",
+      "sites": [
+        {
+          "ea": "0x419300",
+          "what": "0xae：入口先把自己的长度槽写成 1"
+        },
+        {
+          "ea": "0x419323",
+          "what": "0xae：读配置版本 1"
+        },
+        {
+          "ea": "0x41933b",
+          "what": "0xae：读配置版本 2"
+        },
+        {
+          "ea": "0x419381",
+          "what": "位置还原：表 2 指针取自帧记录"
+        },
+        {
+          "ea": "0x419393",
+          "what": "位置还原：写操作数基址（PC）= 基址 + 4×表2[下标]"
+        },
+        {
+          "ea": "0x4193a6",
+          "what": "位置还原：长度槽 ← 3（换脚本指令）"
+        },
+        {
+          "ea": "0x4193c8",
+          "what": "位置还原：表 1 指针取自帧记录"
+        },
+        {
+          "ea": "0x4193da",
+          "what": "位置还原：写 PC = 基址 + 4×表1[下标]"
+        },
+        {
+          "ea": "0x4193ed",
+          "what": "位置还原：长度槽 ← 0（不自动推进）"
+        },
+        {
+          "ea": "0x41947c",
+          "what": "版本 1==1 且版本 2==20 分支里的 PC 写入"
+        },
+        {
+          "ea": "0x40f9ef",
+          "what": "返回栈下标约定：表项 + 3 才是返回点（读侧）"
+        },
+        {
+          "ea": "0x40fb2f",
+          "what": "返回栈下标约定：表项 + 3 才是返回点（读侧，第二处）"
+        },
+        {
+          "ea": "0x42dbb5",
+          "what": "普通读取变体：调用点压 0,0（不读尾段、不重建图像）"
+        },
+        {
+          "ea": "0x42de70",
+          "what": "完整读取变体：调用点压 1,1（读尾段、重建图像）"
+        }
+      ],
+      "functions": [
+        "sub_4192F0",
+        "sub_410160",
+        "sub_40F750"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d880"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-save-sites.assets.test.mjs#★ FMT-SAVE 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-CONTAINERS-HANDLE-TAGS",
+      "sites": [
+        {
+          "ea": "0x42aef8",
+          "what": "取址：先与 0x8003 比较（三分：小于 / 等于 / 大于）"
+        },
+        {
+          "ea": "0x42af04",
+          "what": "取址：等于 0x8003 → 0x8003 专支"
+        },
+        {
+          "ea": "0x42b127",
+          "what": "取址 >0x8003：先减 0x8005"
+        },
+        {
+          "ea": "0x42b133",
+          "what": "取址：再减 4（= 0x8009）"
+        },
+        {
+          "ea": "0x42b13c",
+          "what": "取址：再减 2（= 0x800B）"
+        },
+        {
+          "ea": "0x42b141",
+          "what": "取址 default：其余值抛 Command_Type_Exception"
+        },
+        {
+          "ea": "0x42b045",
+          "what": "取址 0x8003 分支（全局整型池）"
+        },
+        {
+          "ea": "0x42b26e",
+          "what": "取址 0x8009 分支（当前帧局部整型池）"
+        },
+        {
+          "ea": "0x42b37b",
+          "what": "取址 0x8005 分支（全局字符串池）"
+        },
+        {
+          "ea": "0x42b170",
+          "what": "取址 0x800B 分支（当前帧局部字符串池）"
+        },
+        {
+          "ea": "0x41bf7e",
+          "what": "读整：先与 0x8003 比较"
+        },
+        {
+          "ea": "0x41bf84",
+          "what": "读整 >0x8003：跳到 0x8009 比较"
+        },
+        {
+          "ea": "0x41bf8a",
+          "what": "读整：等于 0x8003 → 专支"
+        },
+        {
+          "ea": "0x41c210",
+          "what": "读整 >0x8003：只认 0x8009"
+        },
+        {
+          "ea": "0x41c218",
+          "what": "读整 default（含 0x8005 / 0x800B）→ 抛"
+        },
+        {
+          "ea": "0x41c1a6",
+          "what": "读整 0x8003 分支"
+        },
+        {
+          "ea": "0x41c241",
+          "what": "读整 0x8009 分支"
+        },
+        {
+          "ea": "0x41c32e",
+          "what": "读浮：先与 0x8003 比较"
+        },
+        {
+          "ea": "0x41c334",
+          "what": "读浮 >0x8003：跳到 0x8009 比较"
+        },
+        {
+          "ea": "0x41c33a",
+          "what": "读浮：等于 0x8003 → 专支"
+        },
+        {
+          "ea": "0x41c5b9",
+          "what": "读浮 >0x8003：只认 0x8009"
+        },
+        {
+          "ea": "0x41c5c1",
+          "what": "读浮 default（含 0x8005 / 0x800B）→ 抛"
+        },
+        {
+          "ea": "0x41c54f",
+          "what": "读浮 0x8003 分支"
+        },
+        {
+          "ea": "0x41c5ea",
+          "what": "读浮 0x8009 分支"
+        },
+        {
+          "ea": "0x42b501",
+          "what": "写整：先与 0x8003 比较"
+        },
+        {
+          "ea": "0x42b507",
+          "what": "写整 >0x8003：跳到 0x8009 比较"
+        },
+        {
+          "ea": "0x42b50d",
+          "what": "写整：等于 0x8003 → 专支"
+        },
+        {
+          "ea": "0x42b828",
+          "what": "写整 >0x8003：只认 0x8009"
+        },
+        {
+          "ea": "0x42b830",
+          "what": "写整 default（含 0x8005 / 0x800B）→ 抛"
+        },
+        {
+          "ea": "0x42b6e6",
+          "what": "写整 0x8003 分支"
+        },
+        {
+          "ea": "0x42b859",
+          "what": "写整 0x8009 分支"
+        },
+        {
+          "ea": "0x42ba51",
+          "what": "写浮：先与 0x8003 比较"
+        },
+        {
+          "ea": "0x42ba57",
+          "what": "写浮 >0x8003：跳到 0x8009 比较"
+        },
+        {
+          "ea": "0x42ba5d",
+          "what": "写浮：等于 0x8003 → 专支"
+        },
+        {
+          "ea": "0x42bd96",
+          "what": "写浮 >0x8003：只认 0x8009"
+        },
+        {
+          "ea": "0x42bd9e",
+          "what": "写浮 default（含 0x8005 / 0x800B）→ 抛"
+        },
+        {
+          "ea": "0x42bc81",
+          "what": "写浮 0x8003 分支"
+        },
+        {
+          "ea": "0x42bdc7",
+          "what": "写浮 0x8009 分支"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d800",
+        "shape:T_Command@0x5d810",
+        "shape:T_Command@0x5d860",
+        "shape:T_Command@0x5d870",
+        "shape:T1@0x20",
+        "shape:T1@0x28",
+        "shape:T1@0x70",
+        "shape:T1@0x74"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-pool.assets.test.mjs#★ 句柄分支",
+        "KN:01M4GX1QZ36T011C117S472Z18"
+      ]
+    },
+    {
+      "rule": "CORE-CONTAINERS-LAZY-ALLOC",
+      "sites": [
+        {
+          "ea": "0x42b045",
+          "what": "取址 0x8003：进入句柄分支"
+        },
+        {
+          "ea": "0x42b08c",
+          "what": "0x8003：槽解码为 0 → 分配 0x10 字节"
+        },
+        {
+          "ea": "0x42b0af",
+          "what": "0x8003：分配返回空 → 容器引用置 0"
+        },
+        {
+          "ea": "0x42b0c0",
+          "what": "0x8003：空引用走 ENC(0)"
+        },
+        {
+          "ea": "0x42b0f8",
+          "what": "0x8003：ENC(容器引用) 写回整型池槽"
+        },
+        {
+          "ea": "0x42b11b",
+          "what": "0x8003：登记（引擎级登记表）"
+        },
+        {
+          "ea": "0x42b26e",
+          "what": "取址 0x8009：进入句柄分支"
+        },
+        {
+          "ea": "0x42b2c1",
+          "what": "0x8009：分配 0x10 字节"
+        },
+        {
+          "ea": "0x42b2f1",
+          "what": "0x8009：用同一个编码 key"
+        },
+        {
+          "ea": "0x42b362",
+          "what": "0x8009：取当前帧的登记表"
+        },
+        {
+          "ea": "0x42b36f",
+          "what": "0x8009：登记（当前帧登记表）"
+        },
+        {
+          "ea": "0x42b37b",
+          "what": "取址 0x8005：进入字符串句柄分支"
+        },
+        {
+          "ea": "0x42b391",
+          "what": "0x8005：记录长度 == 0 才创建"
+        },
+        {
+          "ea": "0x42b39c",
+          "what": "0x8005：分配 0x10 字节"
+        },
+        {
+          "ea": "0x42b3df",
+          "what": "0x8005：容器引用转十进制文本"
+        },
+        {
+          "ea": "0x42b41a",
+          "what": "0x8005：记录级文本写入"
+        },
+        {
+          "ea": "0x42b432",
+          "what": "0x8005：取引擎级字符串登记表"
+        },
+        {
+          "ea": "0x42b43f",
+          "what": "0x8005：登记"
+        },
+        {
+          "ea": "0x42b170",
+          "what": "取址 0x800B：进入字符串句柄分支"
+        },
+        {
+          "ea": "0x42b194",
+          "what": "0x800B：记录长度 == 0 才创建"
+        },
+        {
+          "ea": "0x42b19f",
+          "what": "0x800B：分配 0x10 字节"
+        },
+        {
+          "ea": "0x42b1e2",
+          "what": "0x800B：容器引用转十进制文本"
+        },
+        {
+          "ea": "0x42b22b",
+          "what": "0x800B：记录级文本写入"
+        },
+        {
+          "ea": "0x42b24a",
+          "what": "0x800B：取当前帧字符串登记表"
+        },
+        {
+          "ea": "0x42b25e",
+          "what": "0x800B：登记"
+        },
+        {
+          "ea": "0x42b6e6",
+          "what": "写整 0x8003：槽为 0 时也创建"
+        },
+        {
+          "ea": "0x42b769",
+          "what": "写整 0x8003：ENC(容器引用) 写回"
+        },
+        {
+          "ea": "0x42b784",
+          "what": "写整 0x8003：登记"
+        },
+        {
+          "ea": "0x42b859",
+          "what": "写整 0x8009：创建"
+        },
+        {
+          "ea": "0x42b900",
+          "what": "写整 0x8009：写回"
+        },
+        {
+          "ea": "0x42b929",
+          "what": "写整 0x8009：登记"
+        },
+        {
+          "ea": "0x42bc81",
+          "what": "写浮 0x8003：创建"
+        },
+        {
+          "ea": "0x42bd20",
+          "what": "写浮 0x8003：登记"
+        },
+        {
+          "ea": "0x42bdc7",
+          "what": "写浮 0x8009：创建"
+        },
+        {
+          "ea": "0x42beac",
+          "what": "写浮：空容器追加前先 ftol（浮点 → 整数截断）"
+        },
+        {
+          "ea": "0x42bec0",
+          "what": "写浮：截断后的整数再 ENC"
+        },
+        {
+          "ea": "0x42bef1",
+          "what": "写浮：非空覆写前同样 ftol + ENC"
+        },
+        {
+          "ea": "0x42be97",
+          "what": "写浮 0x8009：登记"
+        },
+        {
+          "ea": "0x45d240",
+          "what": "登记表插入原语（8 字节元素）"
+        },
+        {
+          "ea": "0x45d28a",
+          "what": "登记表插入：越界（追加）路径"
+        },
+        {
+          "ea": "0x428520",
+          "what": "登记表追加：从 pair 逐字拷贝 8 字节"
+        },
+        {
+          "ea": "0x42855a",
+          "what": "拷贝第 1 个 dword（池槽号）"
+        },
+        {
+          "ea": "0x428561",
+          "what": "拷贝第 2 个 dword（容器引用）"
+        },
+        {
+          "ea": "0x40f63b",
+          "what": "帧装载：建局部整型登记表容器"
+        },
+        {
+          "ea": "0x40f678",
+          "what": "帧装载：建局部字符串登记表容器"
+        },
+        {
+          "ea": "0x40fe10",
+          "what": "引擎拆卸：整型登记表逐条释放"
+        },
+        {
+          "ea": "0x40fea3",
+          "what": "引擎拆卸：字符串登记表逐条释放"
+        },
+        {
+          "ea": "0x40ec70",
+          "what": "帧拆卸：局部字符串登记表逐条释放"
+        },
+        {
+          "ea": "0x40ed1a",
+          "what": "帧拆卸：登记表指针清零"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00",
+        "sub_45D240",
+        "sub_428520"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d800",
+        "shape:T_Command@0x5d810",
+        "shape:T_Command@0x5d860",
+        "shape:T_Command@0x5d870",
+        "shape:T1@0x20",
+        "shape:T1@0x28",
+        "shape:T1@0x70",
+        "shape:T1@0x74",
+        "shape:T_stdvector@0x0",
+        "shape:T_stdvector@0x4"
+      ],
+      "evidence": [
+        "KN:01M4NEZ2XH7P0H3V5R436P5F5N"
+      ]
+    },
+    {
+      "rule": "CORE-CONTAINERS-FAILURE",
+      "sites": [
+        {
+          "ea": "0x42b141",
+          "what": "取址 default：类型异常（引用已有规则）"
+        },
+        {
+          "ea": "0x41c218",
+          "what": "读整 default"
+        },
+        {
+          "ea": "0x41c5c1",
+          "what": "读浮 default"
+        },
+        {
+          "ea": "0x42b830",
+          "what": "写整 default"
+        },
+        {
+          "ea": "0x42bd9e",
+          "what": "写浮 default"
+        },
+        {
+          "ea": "0x41c1d1",
+          "what": "读整：槽为 0 → 返回 0"
+        },
+        {
+          "ea": "0x41c2b1",
+          "what": "读整：空容器 → 0"
+        },
+        {
+          "ea": "0x41c57a",
+          "what": "读浮：槽为 0 → 0.0"
+        },
+        {
+          "ea": "0x41c65a",
+          "what": "读浮：空容器 → 0.0"
+        },
+        {
+          "ea": "0x41c1d7",
+          "what": "读整：槽解码非 0 → 直接解引用（无校验）"
+        },
+        {
+          "ea": "0x41c580",
+          "what": "读浮：同形（无校验）"
+        },
+        {
+          "ea": "0x42b09f",
+          "what": "取址 0x8003：分配结果与 0 比较"
+        },
+        {
+          "ea": "0x42b0af",
+          "what": "分配为空 → 容器引用 = 0"
+        },
+        {
+          "ea": "0x42b0c0",
+          "what": "空引用走 ENC(0)"
+        },
+        {
+          "ea": "0x42b0f8",
+          "what": "空引用写回槽"
+        },
+        {
+          "ea": "0x42b11b",
+          "what": "空引用仍登记"
+        },
+        {
+          "ea": "0x42b120",
+          "what": "取址返回空引用"
+        },
+        {
+          "ea": "0x42b3b1",
+          "what": "取址 0x8005：分配结果与 0 比较"
+        },
+        {
+          "ea": "0x42b3c1",
+          "what": "分配为空 → 引用 = 0"
+        },
+        {
+          "ea": "0x42b3df",
+          "what": "空引用转文本 “0”"
+        },
+        {
+          "ea": "0x42b41a",
+          "what": "文本 “0” 写入记录"
+        },
+        {
+          "ea": "0x42b43f",
+          "what": "空引用仍登记"
+        },
+        {
+          "ea": "0x42b444",
+          "what": "取址返回空引用"
+        },
+        {
+          "ea": "0x42b789",
+          "what": "写整：创建后读 [容器+4]（空引用即空解引用）"
+        },
+        {
+          "ea": "0x42b44c",
+          "what": "字符串句柄：内联 / 间接判别"
+        },
+        {
+          "ea": "0x42b455",
+          "what": "字符串句柄：文本 → _atoi"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00"
+      ],
+      "storage": [
+        "shape:T_Command@0x5d800",
+        "shape:T_Command@0x5d810",
+        "shape:T1@0x20",
+        "shape:T1@0x28",
+        "shape:T_stdvector@0x0",
+        "shape:T_stdvector@0x4"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-containers-sites.assets.test.mjs#★ CORE-CONTAINERS 规则的站点 EA 都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-CONTAINERS-ELEMENT",
+      "sites": [
+        {
+          "ea": "0x41c1a6",
+          "what": "读整 0x8003：句柄读"
+        },
+        {
+          "ea": "0x41c1d1",
+          "what": "读整：槽解码为 0 → 返回 0 的出口"
+        },
+        {
+          "ea": "0x41c1d7",
+          "what": "读整：取元素区首"
+        },
+        {
+          "ea": "0x41c1d9",
+          "what": "读整：取元素区末"
+        },
+        {
+          "ea": "0x41c1e1",
+          "what": "读整：个数 = (末−首)/4"
+        },
+        {
+          "ea": "0x41c1e9",
+          "what": "读整：取第 0 个元素"
+        },
+        {
+          "ea": "0x41c1f7",
+          "what": "读整：解码第 0 个元素"
+        },
+        {
+          "ea": "0x41c2b1",
+          "what": "读整：空容器 → 0"
+        },
+        {
+          "ea": "0x41c241",
+          "what": "读整 0x8009：同形"
+        },
+        {
+          "ea": "0x41c54f",
+          "what": "读浮 0x8003：句柄读"
+        },
+        {
+          "ea": "0x41c57a",
+          "what": "读浮：槽为 0 → 0.0 的出口"
+        },
+        {
+          "ea": "0x41c580",
+          "what": "读浮：取元素区首"
+        },
+        {
+          "ea": "0x41c582",
+          "what": "读浮：取元素区末"
+        },
+        {
+          "ea": "0x41c58a",
+          "what": "读浮：个数 ÷4"
+        },
+        {
+          "ea": "0x41c592",
+          "what": "读浮：取第 0 个元素"
+        },
+        {
+          "ea": "0x41c5a0",
+          "what": "读浮：解码"
+        },
+        {
+          "ea": "0x41c65a",
+          "what": "读浮：空容器 → 0.0"
+        },
+        {
+          "ea": "0x41c5ea",
+          "what": "读浮 0x8009：同形"
+        },
+        {
+          "ea": "0x42b789",
+          "what": "写整：个数 = (末−首)"
+        },
+        {
+          "ea": "0x42b796",
+          "what": "写整：个数为 0 → 追加"
+        },
+        {
+          "ea": "0x42b7c0",
+          "what": "写整：4 字节插入（追加）"
+        },
+        {
+          "ea": "0x42b7d9",
+          "what": "写整：非空 → 覆写分支"
+        },
+        {
+          "ea": "0x42b801",
+          "what": "写整：out_of_range 检查（不可达）"
+        },
+        {
+          "ea": "0x42b80f",
+          "what": "写整：覆写第 0 个元素"
+        },
+        {
+          "ea": "0x42bd7f",
+          "what": "写浮：个数检查"
+        },
+        {
+          "ea": "0x42bd84",
+          "what": "写浮：out_of_range 检查（不可达）"
+        },
+        {
+          "ea": "0x42bd8c",
+          "what": "写浮：抛 invalid vector<T> subscript（不可达）"
+        },
+        {
+          "ea": "0x40c780",
+          "what": "4 字节容器插入原语"
+        },
+        {
+          "ea": "0x40c799",
+          "what": "4 字节插入：位置 → 下标 ÷4"
+        },
+        {
+          "ea": "0x40c7c0",
+          "what": "4 字节插入：末 += 4"
+        },
+        {
+          "ea": "0x414940",
+          "what": "28 字节容器插入原语"
+        },
+        {
+          "ea": "0x414962",
+          "what": "28 字节插入：位置 → 下标 ÷28"
+        },
+        {
+          "ea": "0x414985",
+          "what": "28 字节插入：7×4 = 28"
+        },
+        {
+          "ea": "0x40fecd",
+          "what": "字符串登记表拆卸：元素步长 0x1C"
+        },
+        {
+          "ea": "0x40eca7",
+          "what": "局部字符串登记表拆卸：逐元素析构"
+        },
+        {
+          "ea": "0x433602",
+          "what": "字符串赋值：个数 ÷28"
+        },
+        {
+          "ea": "0x4335f7",
+          "what": "字符串赋值：文本解析（同族路径）"
+        }
+      ],
+      "functions": [
+        "sub_42AEA0",
+        "sub_41BF50",
+        "sub_41C300",
+        "sub_42B4B0",
+        "sub_42BA00",
+        "sub_40C780",
+        "sub_414940"
+      ],
+      "storage": [
+        "shape:T_stdvector@0x0",
+        "shape:T_stdvector@0x4",
+        "shape:T_stdvector@0x8"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-containers-sites.assets.test.mjs#★ CORE-CONTAINERS 规则的站点 EA 都在 .lst 的指令行首",
+        "guard:tools/test/spec-containers-element.assets.test.mjs#★ 空容器写整型",
+        "KN:01M5JBPQTZ080A4J100K575P1V"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-21D",
+      "sites": [
+        {
+          "ea": "0x423c60",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-21E",
+      "sites": [
+        {
+          "ea": "0x423ca0",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-21F",
+      "sites": [
+        {
+          "ea": "0x423d40",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-230",
+      "sites": [
+        {
+          "ea": "0x4243b0",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-231",
+      "sites": [
+        {
+          "ea": "0x4243f0",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-233",
+      "sites": [
+        {
+          "ea": "0x424510",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-234",
+      "sites": [
+        {
+          "ea": "0x4245b0",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-235",
+      "sites": [
+        {
+          "ea": "0x424630",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-239",
+      "sites": [
+        {
+          "ea": "0x424900",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-242",
+      "sites": [
+        {
+          "ea": "0x4251a0",
+          "what": "handler 起点"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "FMT-SAVE-CODEC",
+      "sites": [
+        {
+          "ea": "0x437480",
+          "what": "写侧入口"
+        },
+        {
+          "ea": "0x437980",
+          "what": "读侧入口"
+        },
+        {
+          "ea": "0x436d00",
+          "what": "反射 CRC-32"
+        },
+        {
+          "ea": "0x436d50",
+          "what": "非反射 CRC-32"
+        },
+        {
+          "ea": "0x436e90",
+          "what": "解密"
+        },
+        {
+          "ea": "0x436a80",
+          "what": "解压 / 信封判据"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-save-codec-sites.assets.test.mjs#★ FMT-SAVE-CODEC 的读写 / 校验 / 变换 / 压缩站点都在 .lst 的指令行首"
+      ]
     }
   ]
 }

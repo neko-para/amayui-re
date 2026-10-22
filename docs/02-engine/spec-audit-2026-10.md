@@ -634,3 +634,170 @@ S1 共 11 条（`05-boot` 的定时器 / 主循环出口 / 消息泵归属 / 中
 **门禁**：`pnpm tools spec validate` 13/13 + 站点对账绿；`pnpm test` 703/703；`pnpm typecheck` 六工程绿；
 `pnpm test:assets` 仅两条既有 `corpus-cli-write` 的 Windows 路径环境失败（与本轮无关）；
 `electron --no-sandbox apps/emulator-new --smoke` EXIT=0；新增变异 5 条（窗口风格 / 定时器 / 边框 ×2 / 0x20d 阈值 / 0x204 清开关）全部按预期红。
+
+## 十八、除 audio / text-system / input 外的未成篇部分：分诊与首批合并（2026-10-23）
+
+**范围**：`CORE-OBJECTS` / `FMT-SAVE` / `CORE-CONTAINERS` 三个未成篇机制 + 0x000–0x3FF 段未成篇
+opcode 的分诊与首批成篇。用户口径：**audio / text-system / input 三个子系统本轮只登记、不深挖**。
+七个只读 subagent 并行：objects / save / containers / ops-000 / ops-100 / ops-200 / fs-boot；
+它们只写 `.tmp/spec-draft/`，合并由外层做。
+
+**分诊输入（机械现算，不入库）**：静态足迹 = 游戏根松散 `.BIN` + `_extracted`，共 **564 支脚本**；
+按用量排序得到 0x000–0x0FF 55 个、0x100–0x1FF 62 个、0x200–0x3FF 94 个“真实脚本在用、spec 未成篇”的 opcode。
+（`.tmp/footprint-full.mjs` / `.tmp/executable.mjs`；可删可重建。）
+
+**已合并（0x000–0x0FF，13 条 / 14 个 opcode）**：`0x01` / `0x60` / `0x63` / `0x74` / `0x7b` / `0x7c` /
+`0x7f` / `0x8c` / `0xa1` / `0xa2` / `0xa3` / `0xc8` / `0xd0` / `0xd9`，落入 `60-ops-frame` / `60-ops-array` /
+`60-ops-numeric` / `60-ops-scalar` / `60-ops-wait` / `60-ops-list` / `70-vm`。
+全部 `draft`；正文自包含；新增 `tools/test/spec-ops-000-sites.assets.test.mjs`（站点 EA 必须在 `.lst` 指令行首，
+附判别力用例）与变异 1 条。`audit.gaps` 由规则标题机械重算：未成篇 445 → **431**。
+
+**已实现（`apps/emulator-new`，8 个 opcode）**：`0x63 lea`（写地址本身、不编码）/ `0x60 random`
+（计数器 0..12、范围 0 先写 0 再抛）/ `0x74`+`0x7f` 参数格（未写先读 ⇒ 响亮失败）/ `0xd0` 时钟 /
+`0xa1`+`0xa2`+`0xa3` 命名表（命中不读默认位置；整型键按十进制文本）。新增
+`tools/test/emulator-new-ops-000.test.mjs`（8 条合同守卫）；可完整执行的脚本 132 → **133**（`STAGEREADY.BIN` 解锁）。
+
+**草稿待合并（未改 `data/spec`）**：
+- `ops-100`：15 条 / 27 个 opcode（`0x1f4`/`0x1f5` 执行区间、`0x1fd`/`0x1ff`/`0x1fe` 场景变换
+  含 ÷100 与 ×π/180、`0x1cf`/`0x1bf` 状态字、`0x1d2` 字体记录、存档族 7 条、`0x1ce` RNG、`0x191` 浮点绝对值）；
+- `ops-200`：15 条 / 28 个 opcode（场景对象 setter 族、两张 1000 项表、纹理尺寸 / 填充、浮点 `+ − ÷`、CG、L2D）；
+- `objects`：CORE-OBJECTS 5 条（根对象 / 基类前缀 / 类型身份 / 1000 槽表 / 槽生命周期；91 站点，
+  `verify-eas.mjs` 机械复核）；
+- `save`：FMT-SAVE 6 条（292 字节头 + 参数块 + 变换负载；整型池落盘明文、编码键不进文件；槽级操作）；
+- `containers`：CORE-CONTAINERS 4 条（四个标签 / 懒分配与登记 / 元素 / 失败路径；**其中 ELEMENT 与一条
+  accepted 台账冲突**：语料显示写空容器走追加、`out_of_range` 不可达 ⇒ 合并前先追加更正记录）；
+- `fs-boot`：CORE-FS / CORE-BOOT 残差收窄（进行中）。
+
+**排除项交接**（排除 ≠ 无效果）：audio（`0xb4`–`0xc7` / `0x2f6`–`0x2ff`，`T_Voice` 字段区已定位）、
+text-system（`0x6e`/`0x6f`/`0x196`/`0x1d2`/`0x20a`，`T_Font` 字段区已定位）、input
+（`0x72`/`0x0fb`/`0x108`/`0x238`/`0x243`/`0x24e`）。各 subagent 的 README §5 已记录已看到的引擎数据效果，
+供后续批次直接接手。
+
+**门禁**：`pnpm tools spec validate` 13/13；`pnpm test` 748/748（LFS filter 在沙箱里需
+`filter.lfs.process=` 绕过，属环境限制）；`pnpm typecheck` 六工程绿；新增变异 2 条
+（gap 漏列 `0x4` / `0x8c` 站点偏移一格）均按预期红。
+
+**独立复审**（只读 `data/spec/`，由另一个 subagent 执行；不复用编辑者）：第一轮 S1 共 **7 条**，全部关闭：
+① `0xc8` 的前置与 `0x6` 口径冲突 ⇒ 只保留“宿主入口返回非 0 ⇒ 退出型异常”，解码密钥 / 编码零点降进残差；
+② `0xd0` 的“再读一次”与 `70-vm` 的“迭代头读一次”冲突 ⇒ 改成“请求一次，是否同一次本版不规定”；
+③ `0xd0` 的落点接受集 ⇒ 改成“按「数据池」写整型接受集”；
+④ `0xc8` 第 27 位跳过支在门模型下不可达 ⇒ 标为防御性分支；`0xd9` 第 12 位清位同理标空转；
+⑤ `0xa2` / `0xa3` 在 `0xa1` 前的表状态未定义 ⇒ 正文写明“本版不规定”，并补 `RES-TABLE-SIZE`；
+⑥ `0x7c` 的输入由未成篇的“进入本地块”写下 ⇒ 正文写明、补 `RES-LOCAL-RET-ENTRY`；
+⑦ `0x63` 的“第 2 个族不限 / 值不变”与容器句柄取址的懒分配冲突 ⇒ 排除容器句柄路径并指向残差。
+S2 的 16 条中，`0x60` 的 `INT_MIN` / 可观察性、`0xa1` 的 4095 与上限三方不一致、`0xa2` 的探测顺序
+“既写又不规定”、`0x7c` 的整字覆盖与失败路径、`0xd9` 的身份未定副作用、`0x74/0x7f` 的悬空消费方
+均已按“删断言 / 降残差 / 改写”处置；其余 S2 / S3（章节归属、导语计数、命名表撞词、推进格数写入时点）
+留作下一批的文字整理，不改变合同。**复审后 `spec validate` 仍 13/13。**
+
+**已知不一致（未处理，显式登记）**：
+1. **已处置**：`KN-01M4GX1SDH4G0J2A5C4Q4M6P0Y` 的“写空容器抛 `invalid vector<T> subscript`”
+   与语料冲突 ⇒ 已追加更正记录 `KN-01M5JB93N20S1M196539647H7H`（`replaces` 旧记录），
+   判据是新守卫 `spec-containers-element.assets.test.mjs`；`ELEMENT` 已按更正后的语义合并；
+2. `spec-pool.assets.test.mjs` 的“句柄分支”守卫只断言 `jg`/`jz` 存在、不断言跳转目标 ⇒ 分支互换仍绿；
+3. `T_Scene_460` 缺 `+0x16C`、`T_Scene_elem14` 缺 `+0x10`、`T_stdvector` 不带元素类型 ⇒
+   若干 `storage` 指针指不到正文声称的成员。
+4. 基线 `pnpm test` 在 Windows 上有一处平台相关的路径断言（`pathFromEngine(...).includes('\\\\')`）
+   已改为按 `path.sep` 分段计数；`corpus-manifest` 的 `git status` 用例在受限沙箱里因 LFS filter
+   起不了 `sh` 而红，属环境限制（用 `GIT_CONFIG_*` 绕过）。
+
+### 第二批：0x100–0x3FF、对象模型、存档、容器（2026-10-23 续）
+
+**范围**：`ops-100` 13 条（跳过 text 邻接的 `FONT-RECORD`）/ `ops-200` 13 条（跳过 L2D 两条）/
+`objects` 5 条 / `save` 5 条（删掉与 `60-ops-save` 重复的 `SLOT-OPS`）/ `containers` 4 条
+（`ELEMENT` 先按台账纪律追加了更正记录 `KN-01M5JB93N20S1M196539647H7H`，`replaces` 旧的
+`invalid vector<T> subscript` 结论；判据是新的 `spec-containers-element.assets.test.mjs`，再合并）。
+新增 `60-ops-save.md`（7 个 opcode）、`45-objects.md`、`65-save.md`；
+`objects` / `save` 从 `planned[]` 移出，`containers` 仍 partial（只余字符串元素 / 生命周期）。
+条目 142 → **182**，未成篇 opcode 431 → **381**，章节 31（已写 27 · 未成篇 4）。
+
+**新增守卫**：`spec-ops-100-200-sites` / `spec-objects-sites` / `spec-save-sites` /
+`spec-containers-sites`（站点 EA 必须在 `.lst` 行首；数据段站点存在即可）＋ 变异 1 条。
+合并后修正：`CORE-OPS-RNG-ENABLE` 的 `storage` 指向不存在的成员被删；`CORE-OPS-SCENE-TRANSFORM`
+的 3 个数据段常量站点被删（校验器只收指令行）；`CORE-OBJECTS-*` 的 7 个数据段站点同样被删（残差登记）。
+
+**第二轮独立复审**（只读 `data/spec`）：S1 共 16 条。已处置：
+- S1-01 层定义 → 0x1f4/1f5 改成“当前帧的推进格数”，层号与帧号关系进残差；
+- S1-02 时间戳对 → 标明“本帧记录里的两格，与场景时间戳不是同一对”＋残差；
+- S1-03 泵的写值 → 改成“不规定”＋残差；
+- S1-04/05 状态字命名 → 在「门」加术语（状态选择字 = 0x88/MODE-BIT 的那个字；状态字 / 状态格是别的格；
+  0x1ce 的标志格未取证）；
+- S1-06 RNG 模式位 → 命名“未命名模式位”＋残差；停用时两格去留写明不规定；
+- S1-07 第 7 格 → 命名为 `G` 并补状态表；
+- S1-11/12 上限 → 删“机器细节”措辞，改成“取值未取证”＋残差；
+- S1-14/15/16 存档重复 / 槽号 / 覆盖表 → 删 `FMT-SAVE-SLOT-OPS`、统一槽号与写侧副作用、
+  `00-overview` 补对象模型 / 存档。
+**第三批取证收口（2026-10-23 续）**：三个只读取证 subagent（scene-model / filltexture / rng-gate）
+补上了上一轮剩下的 4 组 S1：
+
+- **S1-05 RNG 第 30 位**：逐字裁决为**与门字同格**（`引擎对象+0xAAB44`）；门 `0x41280C` 读它、`0x412814`
+  整 32 位比较。第 30 位**有**服务分支（`0x412B32`），但该分支**不清位** ⇒ 启用后门恒关、派发停止，
+  直到停用支或外部清位写点（可达性未取证）。正文改成“状态选择字第 30 位”，`CORE-VM-STATE` 登记该分支
+  不清位；残差改为“分支载荷 / 消费者 / 为何不清位”。
+- **S1-08/09 场景对象模型**：场景对象只有**一张** `std::map<int,T_Scene_460>`（记录 = 元素）；默认记录
+  首字 0（位 0/1 均为 0）、两个三元向量 0、当前/终色 `0xFFFFFFFF`、六个矩阵**单位阵**；位 0 的已观察
+  置 1 者只有 `0x1fb`（已补进「绘制纹理」条），`0x217/219/220` 都不写首字。0x1fd→缩放矩阵、
+  0x1ff→平移矩阵（0x228 分解它）、0x1fe→旋转矩阵、0x220→**第四个**平移矩阵；脏与「有动画」是两个
+  不同的 32 位格。0x1f6 清四张表 + 四个标记、**不**清「有动画」、对象表**不**逐记录释放。
+- **S1-10 分解失败**：失败条件未取证 ⇒ 正文改成“若发生（条件未取证）”，进 `RES-SCENE3D-DECOMPOSE-FAIL`。
+- **S1-13 FILLTEXTURE**：表项就是纹理记录表的 +0x10 格（与 0x1f8 的“空白创建”同格）；颜色公式逐字为
+  `(c & 0x00FFFFFF) | 0xFF000000`（低 24 位不动）；越界写是 UB、标志格无读点；矩形夹到对象的逻辑矩形；
+  0x208 与 0x20b 同界 **999**；加锁失败是唯一填充失败源（收掉旧残差）。
+- **containers ELEMENT**：先追加台账更正 `KN-01M5JBPQTZ080A4J100K575P1V`（`replaces` 旧的
+  `invalid vector<T> subscript` 结论，判据是新守卫 `spec-containers-element.assets.test.mjs`），
+  再合并；`containers` 只剩字符串元素 / 生命周期残差。
+
+**第三轮独立复审**（只读 `data/spec`）：S1 14 条 + 跟报复审 S1 7 条。已处置：
+① 表身份（场景对象 / 绘制项同一张 `T_Scene+0x408` 表，0x1fb 位 0 写同一记录）；
+② 0x220 的位 1 与 G3（`+0x68` 配置格）分开，四格 G0..G3 写明；位 1 与 0x202 的“有窗”是**同一位**，
+   已写明并补 `RES-SCENE-BIT1-DUAL-ROLE`；
+③ 0x1f6 清四张表（对象 / 网格 / 两张辅助表，与 0x1f7 同一组）+ 四个标记、不动两张 1000 项表、
+   对象表不逐记录释放；binding 里“逐条调元素释放入口”的错误已改；
+④ 默认记录六个矩阵单位阵 / 颜色 `0xFFFFFFFF` 与 0x202 默认色统一；0x1fb 的新默认项改为复用同一初值；
+⑤ RNG 第 30 位同门字、服务支不清位、停用支不可达（外部清位是唯一放行）；
+⑥ 65-save 参数块改成 5×32 位槽（第 5 槽低 16 位）、头补 +260 四个保留字节、版本字段/字节单位/脚本身份；
+⑦ 65-save 的校验和 / 加密 / 压缩 / 内层校验头**明确标为不闭合**（`RES-SAVE-ENVELOPE-UNCLOSED`），
+   `00-overview` 也标注“负载信封（不闭合）”；
+⑧ 删正文里的 audit id / `CORE-FS` 悬空指针；
+⑨ 40-pools 删掉“站点（不要进正文）”节；容器“用途未定字段”统一成“容量”；
+⑩ 0x208 / 0x20b 同界 999、FILLTEXTURE 颜色公式与 UB；纹理导语改成“0x1f8 组不查、0x208/0x20b 查 999”。
+
+**第四轮跟报复审**：只判上面 7 条 S1 的当前状态，结论是 **本批复审范围内无 S1**。
+前两处残段已收：0x220 置位 1 后改成“按「场景计时窗」推进（领域后果见残差）”；
+`FMT-SAVE-BODY` 开头与 overview 的持久化归属都标“不闭合”，删掉“属机器本体、本版不复述”，
+并补 `RES-SAVE-BODY-UNCLOSED`。
+
+**FMT-SAVE-CODEC 成篇（2026-10-23 续）**：`65-save.md` 新增 `FMT-SAVE-CODEC`（章节 5 → 6 条规则，
+条目 192 → **193**）：两个 CRC-32（非反射 `0x04C11DB7` / 反射 `0xEDB88320`）、变换公式、
+LZSS 引用「ALF 归档」同一例程、20 字节参数块、内层头、主体前缀布局（v1=2/3 条件基址）、每帧记录。
+`FMT-SAVE-ENVELOPE` / `FMT-SAVE-BODY` / `00-overview` 的“不闭合”已撤；块 1/3/4/5 的元素宽度与尾段
+仍标未取证。独立复审 S1 4 条 → 0（LZSS 参数、压缩判据、块 1 宽度、v1=2 基址、2× 界）。
+
+**场景 10 条 setter 成篇（2026-10-23 续）**：`CORE-OPS-SCENE3D-21D/21E/21F/230/231/233/234/235/239/242`
+已按 EA 取证写成 10 条 draft 并合并进 `60-ops-scene.md`；`CORE-OPS-SCENE3D-RECORD-LOOKUP` 的
+“十条共享前置”改成只覆盖 7 条（21e/21f/231/233/234/235/239），21d/230/242 各自单列。
+条目 182 → **192**；新增守卫 `spec-scene-setters-sites.assets.test.mjs`（10 个 handler 起点）。
+★ 重要更正：0x21d 不是 setter 而是**整份复制**（源编号 op1、目标 op2，三张表逐表复制）；
+0x230/0x242 也不走“取记录再写字段”的共享前置。
+**独立复审**：首轮 4 条 S1（0x21d 缓冲装配输入、21e/21f/239“不排窗”与位 1、
+“已配置”三义、0x230 六格与 0x231 三格对不上）已全部修掉；复审复核结论 **本范围无 S1**。
+S2/S3（10 条状态对应 / covers 为空、默认矩阵数量、位号措辞）留作下一批。
+
+**仍未闭合的非 S1 项（不冒充完成）**：
+- `65-save` 的校验和 / 变换 / 负载块与帧记录字节布局仍未逆出（已显式标“不闭合”）；
+- `ops-unwritten` 仍有 381 个 opcode（其中大量属 audio/text/input 或未用）；`fs-boot` 草稿未合；
+- `+0xAC/+0x12C` 矩阵生产者、0x1fb 的位 0 生产者穷尽性仍是残差。
+`objects` / `save` / 场景章保持 `draft`（没有 accepted 台账 / pure 守卫覆盖整条合同）。
+
+**本轮 emulator-new 落地（2026-10-23 续）**：把已有 spec 合同、但 handler 缺失的 **44 个 opcode** 补上：
+`0x191` 浮点绝对值、`0x2d0/0x2d1/0x2d3` 浮点加减除、`0x1b0` memcpy、`0x208` 纹理尺寸、
+`0x1cf/0x1bf/0x1cc` 状态字 / 相邻格 / 状态格、`0x19a/0x1b6/0x1b7` 格 X / 格 Y、
+`0x1c7/0x19b/0x19c` 第 27 位读 / 清 / 条件置、`0x258/0x259` 两张 1000 项标志表、
+`0x2da` CG 参数、`0x1f6` 场景清空、`0x217/0x218/0x219/0x21a` 两组三元向量、
+`0x1fd/0x1ff/0x1fe/0x220/0x228` 缩放 / 平移 / 旋转 / 第四个平移 / 读平移、`0x01` 退出、`0x0d9` 清第 12 位、
+`0x1f4/0x1f5` 执行区间、`0x1ad` 层号落格、`0x1ce` 乱数启用、`0x7b/0x7c` 本地块进入目标 / 返回、
+场景 setter 8 条（`0x21e/21f/230/231/233/234/235/239`）。
+新增 `tools/test/emulator-new-ops-100-200.test.mjs`（24 条合同守卫）；
+`apps/emulator-new` 的 handler 111 → **155**，可完整执行的脚本 133 → **135**。
+仍未实现（11 个）：`0xc8`、存档 7 条、`0x20b`、`0x21d`（整份复制）、`0x242`（两张表）。
+测试总数 748 → **772**；`emulator-new-ops` 的“未实现 opcode”守卫改用仍缺的 `0x21d`。

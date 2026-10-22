@@ -1443,10 +1443,68 @@ const MUTATIONS = [
   // ── 未成篇 opcode 的落点：`hasHandler = 已写（规则标题）+ gaps.ops`（★ 漏列一个 ⇒ 义务重新"无人认领"）──
   {
     file: 'data/spec/audit.json',
-    from: '        "0x1",\n        "0x4",',
-    to: '        "0x4",',
+    from: '        "0x4",\n        "0x7",',
+    to: '        "0x7",',
     guard: 'tools/test/spec-gaps.test.mjs',
-    what: '★ 未成篇 opcode 段漏列 `0x1`（有处理函数、但没有任何规则标题覆盖）⇒ 精确划分不成立；报告仍打印一个"自洽"的数字',
+    what: '★ 未成篇 opcode 段漏列 `0x4`（有处理函数、但没有任何规则标题覆盖）⇒ 精确划分不成立；报告仍打印一个"自洽"的数字',
+  },
+  // ── 0x000–0x0FF 段新增规则的站点锚：`0x8c` 的 handler 起点偏移一格 ⇒ 锚落到指令中间 ──
+  {
+    file: 'data/spec/bindings.json',
+    from: '          "ea": "0x4203d0",',
+    to: '          "ea": "0x4203d2",',
+    guard: 'tools/test/spec-ops-000-sites.assets.test.mjs',
+    what: '★ `0x8c` 的站点 EA 偏移一格 ⇒ 机器绑定指到指令中间（正文自包含、校验器也不会替读者核这一条）',
+  },
+  // ── 0x100–0x3FF 段新增规则的站点锚：换成一个不存在的 EA ⇒ 锚落空 ──
+  {
+    file: 'data/spec/bindings.json',
+    from: '          "ea": "0x423b20",',
+    to: '          "ea": "0x4f0001",',
+    guard: 'tools/test/spec-ops-100-200-sites.assets.test.mjs',
+    what: '★ `0x217` 的站点 EA 换成一个不存在的地址 ⇒ 机器绑定落空（正文自包含、校验器也不会替读者核这一条）',
+  },
+  {
+    file: 'data/spec/bindings.json',
+    from: '          "ea": "0x4baa11",',
+    to: '          "ea": "0x4f0002",',
+    guard: 'tools/test/spec-objects-sites.assets.test.mjs',
+    what: '★ 根对象的分配站点 EA 换成一个不存在的地址 ⇒ CORE-OBJECTS 的机器绑定落空',
+  },
+  {
+    file: 'data/spec/bindings.json',
+    from: '          "ea": "0x437786",',
+    to: '          "ea": "0x4f0003",',
+    guard: 'tools/test/spec-save-sites.assets.test.mjs',
+    what: '★ 存档头的魔数站点 EA 换成一个不存在的地址 ⇒ FMT-SAVE 的机器绑定落空',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: 'for (const off of [0x21c, 0x220, 0x224, 0x228, 0x22c, 0x230])',
+    to: 'for (const off of [0x21c, 0x220, 0x224, 0x228, 0x22c])',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '★ `0x230` 少清一个共用格 ⇒ 附加组复位不完整，合同守卫必须当场红',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: 'm.frame.localMain = readInt(m, ops, 1) | 0;',
+    to: 'm.frame.localMain = readInt(m, ops, 2) | 0;',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '★ `0x7b` 的主 / 副进入目标读反 ⇒ 两个位置静默互换，只有合同守卫能抓住',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: 'readFloat(m, ops, 2) - readFloat(m, ops, 3)',
+    to: 'readFloat(m, ops, 2) + readFloat(m, ops, 3)',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '★ `0x2d1` 的减改成加 ⇒ 方向错误不会抛，只会静默算错；合同守卫必须当场红',
+  },
+  {
+    file: 'data/spec/bindings.json',
+    from: '          "ea": "0x41c1d1",',
+    to: '          "ea": "0x4f0004",',
+    guard: 'tools/test/spec-containers-sites.assets.test.mjs',
+    what: '★ 空读分支的站点 EA 换成一个不存在的地址 ⇒ CORE-CONTAINERS 的机器绑定落空',
   },
   // ── emulator-new：整数减的**方向**（`第 2 个 − 第 3 个`）──
   //   ★ 写反不会报错、只会静默算错，所以必须有一条守卫专门钉这个方向。
