@@ -12,6 +12,7 @@
 import { readU32LE } from './bytes.ts';
 import type { OpcodeRow } from './spec.ts';
 import type { ConfigStore } from './config.ts';
+import { generateIntKey } from './values.ts';
 import { HANDLERS } from './handlers.ts';
 import { initialRenderState } from './render.ts';
 import type { RenderHost, RenderState } from './render.ts';
@@ -116,8 +117,11 @@ export interface VoiceGroup {
 }
 
 /**
- * UI 列表项记录（见 CORE-OPS-LIST-SET）：`0x70` 按组号写入的那 8 个字段。
+ * UI 列表项记录（见 CORE-OPS-LIST-SET / LIST-SUBSYSTEM-SET73）：
+ * `0x70` / `0x79` / `0x1c1` / `0x303` 与 `0x73` 按组号写入的字段。
  * ★ 字段的领域用途未定（布局层只有"记录 + 偏移"）；这里只按机器身份存值，不命名、不解释。
+ * ★ 引擎在子系统构造时预建组 0..9 的 10 条记录（`LIST_GROUP_COUNT`），`ListRecord` 的零值
+ *   是"预建记录"的初值，不是"缺记录时新建"的兜底。
  */
 export interface ListRecord {
   /** 记录 +0x0C */
@@ -136,6 +140,17 @@ export interface ListRecord {
   f24: number;
   /** 记录 +0x28 */
   f28: number;
+  /** 记录 +0x3C..+0x60（`0x73` 写的连续十格） */
+  f3c: number;
+  f40: number;
+  f44: number;
+  f48: number;
+  f4c: number;
+  f50: number;
+  f54: number;
+  f58: number;
+  f5c: number;
+  f60: number;
   /** 记录 +0x7C */
   f7c: number;
   /** 记录 +0x80 */
@@ -153,6 +168,18 @@ export interface ListRecord {
   f124: number;
   /** 该组是否被登记进列表（`0x70` 置 1） */
   registered: number;
+}
+
+/** UI 列表组域：引擎在子系统构造时预建 10 条记录（组 0..9） */
+export const LIST_GROUP_COUNT = 10;
+
+/** 一条全 0 的列表记录（构造期预建；字段身份见 `ListRecord`） */
+export function emptyListRecord(): ListRecord {
+  return {
+    f0c: 0, f10: 0, f14: 0, f18: 0, f1c: 0, f20: 0, f24: 0, f28: 0,
+    f3c: 0, f40: 0, f44: 0, f48: 0, f4c: 0, f50: 0, f54: 0, f58: 0, f5c: 0, f60: 0,
+    f64: 0, f68: 0, f6c: 0, f114: 0, f118: 0, f120: 0, f124: 0, f7c: 0, f80: 0, registered: 0,
+  };
 }
 
 /** 影片对象（见 CORE-OPS-MOVIE）：只保留可观察的引擎数据 */
@@ -254,7 +281,6 @@ const UNMODELED_EFFECT_KINDS = new Set([
   'container.request',
   'ui.list.request',
   'text.request',
-  'message.request',
 ]);
 
 /** 一个效果 kind 的归属（未知 kind 按外部请求处理，宁可多打印也不静默）。 */
@@ -293,8 +319,11 @@ export interface MachineOptions {
   body: Uint8Array;
   /** 指令表（决定 argc） */
   table: Map<number, OpcodeRow>;
-  /** 整型编码的 key：运行期状态，必须显式给（不许有默认值） */
-  key: number;
+  /**
+   * 整型编码的 key：运行期状态。缺省 = 实现按规范生成一个非 0 值（`generateIntKey`）；
+   * 显式给只用于可复现的测试 / 位模式对照。⛔ 0 不是合法值（会给 `codec-key-placeholder` 诊断）。
+   */
+  key?: number;
   /** 虚拟时钟步长（毫秒）：**仿真参数**，不是引擎常量（引擎没有固定帧率） */
   tickMs?: number;
   /**
@@ -445,7 +474,8 @@ export class Machine {
     errorBuffer: string;
   } = { backend: 'present', buffers: new Map(), volumes: new Map(), errorBuffer: '' };
   /** UI 列表（见 CORE-OPS-LIST-SET）：按组号索引的记录 */
-  ui: { records: Map<number, ListRecord> } = { records: new Map() };
+  /** 列表 / 消息子系统的默认组（`0x80` 写；初值 1，见 60-ops-list） */
+  ui: { records: Map<number, ListRecord>; defaultGroup: number } = { records: new Map(), defaultGroup: 1 };
   /** 语音对象：三个组的按组索引状态（`0x2f6` 重置其中 8 格） */
   voice: { groups: Map<number, VoiceGroup> } = { groups: new Map() };
   /** 发给外部模块的请求（按发生顺序） */
@@ -478,11 +508,20 @@ export class Machine {
 
   constructor(opts: MachineOptions) {
     this.table = opts.table;
-    this.key = opts.key;
+    this.key = opts.key ?? generateIntKey();
     this.tickMs = opts.tickMs ?? 16;
     this.clock = opts.clock;
     this.uninitializedFloat = opts.uninitializedFloat ?? 'throw';
     this.config = opts.config;
+    // key 非 0 是引擎初始化期的不变量；宿主给 0 = 模型处在引擎不可能的状态。
+    // 只在入口记一次（不是每条 0x6 都记；0x6 的内联前置只是同一不变量的一个相遇点）。
+    if (this.key === 0) this.diagnostics.push({ kind: 'codec-key-placeholder' });
+    // 列表子系统构造时预建 10 条记录（组 0..9）；`0x70`/`0x73` 等域内写入不再需要“缺则建”。
+    for (let group = 0; group < LIST_GROUP_COUNT; group += 1) this.ui.records.set(group, emptyListRecord());
+    // `renderer-init` 阶段（06-window / boot）会把配置 `set:DrawMode` 缓存到 `Engine+0xA30D0`
+    // （= dword 166964）。该格同时是 0x73 的“第二请求”门与 0x70 的浮点/绘制分岔门。
+    // ★ 只有给了配置库（安装入口）才播种；--script / 单元测试没有 config ⇒ 保持未建模。
+    if (opts.config) this.scalars.set('Engine.d166964', opts.config.getInt('set:DrawMode'));
     this.loadScript = opts.loadScript;
     this.fontNames = [...(opts.fontNames ?? [])];
     this.renderHost = opts.renderHost;

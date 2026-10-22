@@ -251,3 +251,22 @@ test('★★ `0x8` 的父帧号 ← **切进来的那一帧**（不是"当初装
   assert.equal(m.cur, 0, '槽 4 的 0x2 回槽 1，槽 1 的 0x2 回槽 0');
   assert.equal(m.steps, 5, '0x3 → 槽1 的 0x8 → 槽4 的 0x2 → 槽1 的 0x2 → 根@12 的 NOP');
 });
+
+test('★ key=0：只在 Machine 构造期记一次 codec-key-placeholder（不是每条 0x6 一条）', async () => {
+  const child = script([]);
+  const body = script([[0x6, [[0, 1], [0, 1]]], [0x6, [[0, 1], [0, 2]]]]);
+  const zero = new Machine({ body, table, key: 0, loadScript: async () => child });
+  await zero.run();
+  assert.equal(zero.diagnostics.filter((d) => d.kind === 'codec-key-placeholder').length, 1);
+  assert.equal(zero.diagnostics.filter((d) => d.kind.startsWith('codec-key-placeholder:')).length, 0);
+
+  const nonzero = new Machine({ body, table, key: KEY, loadScript: async () => child });
+  await nonzero.run();
+  assert.equal(nonzero.diagnostics.filter((d) => d.kind.startsWith('codec-key-placeholder')).length, 0);
+});
+
+test('★ 不给 key ⇒ Machine 运行期生成非 0 值（正常入口不需要用户输入 key）', async () => {
+  const m = new Machine({ body: script([]), table });
+  assert.notEqual(m.key, 0, '运行期生成的 key 必须非 0');
+  assert.equal(m.diagnostics.filter((d) => d.kind === 'codec-key-placeholder').length, 0);
+});

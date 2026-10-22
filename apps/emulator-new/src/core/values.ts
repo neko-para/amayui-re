@@ -31,6 +31,23 @@ export function encodeInt(value: number, key: number): number {
   return rol(u32(ror(u32(value), 7) ^ u32(key)), 21);
 }
 
+/**
+ * 运行期整型编码 key：引擎在初始化期生成、保证非 0、每实例一份。
+ * ★ 规范只要求“运行期随机生成一个非 0 值”；这里优先用 Web Crypto，没有则退回 Math.random。
+ * ★ 显式 key 仍可由测试 / `--key` 注入（用于可复现的位模式），但**不是**必需输入。
+ */
+export function generateIntKey(): number {
+  const cryptoObj = globalThis.crypto;
+  if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+    const buf = new Uint32Array(1);
+    do { cryptoObj.getRandomValues(buf); } while (buf[0] === 0);
+    return buf[0] >>> 0;
+  }
+  let v = 0;
+  do { v = (Math.floor(Math.random() * 0x100000000) >>> 0); } while (v === 0);
+  return v;
+}
+
 /** 单精度位模式 → JS 数（读原语返回 64 位浮点，值相同） */
 function f32(bits: number): number {
   const buf = new DataView(new ArrayBuffer(4));

@@ -565,15 +565,16 @@ function pair88(m: Machine, ops: Operand[]): void {
 /* ---------------------------- 转发型指令 ---------------------------- */
 
 /**
- * 0x1ca：把操作数交给**消息子系统**的「读文本跳过」入口（CORE-OPS-FORWARD-MESSAGE）。
+ * 0x1ca：把操作数写进**配置库的命名键** `message:ReadTextSkip`（CORE-OPS-FORWARD-MESSAGE）。
  * 逐字：`(*((vtable+12)))(&Engine+0xAA514, "message:ReadTextSkip", op1)` —— 返回值交分派器（被丢弃）。
- * ★ 子系统的内部状态没有任何观察 ⇒ 本层只记请求 + 一条"未建模"标记；
- *   ⛔ 不假造它改了什么（真有人读那块状态时会**响亮失败**，不会静默读到 0）。
+ * ★ `Engine+0xAA514` 是命名键存储（同一对象的 `+4` 读、`+0xC` 写；`0xae` 读 `set:SaveVersion*` 也走它）；
+ *   键在 `config-keys.json` 的 ini + persist 词表里 ⇒ 这是配置写，不是文本渲染。
+ * ★ 文本侧怎么消费这个键属 `0x71`，本层不碰。
  */
 function message1ca(m: Machine, ops: Operand[]): void {
-  const value = readInt(m, ops, 1);
-  m.effects.push({ kind: 'message.request', detail: { entry: 'ReadTextSkip', value } });
-  m.diagnostics.push({ kind: 'message-subsystem-unmodeled' });
+  // 0x1ca 不是空转发：它写**配置库的命名键** `message:ReadTextSkip`（该键在
+  // config-keys.json 的 ini + persist 词表里）。文本侧怎么用这个键属 0x71，本层不碰。
+  requireConfig(m).setInt('message:ReadTextSkip', readInt(m, ops, 1));
 }
 
 /**
@@ -609,12 +610,7 @@ function container32f(m: Machine, ops: Operand[]): void {
  * 之后的列表登记与绘制请求（`sub_45D240` / `sub_43C8D0` / `sub_43B070`，以及浮点路径）**未建模**。
  */
 function listSet70(m: Machine, ops: Operand[]): void {
-  const slot = readInt(m, ops, 1);
-  if (slot === 0) {
-    // 引擎：组号 0 ⇒ 换成引擎里的默认组（哪个组未定）⇒ 本层不猜，留诊断
-    m.diagnostics.push({ kind: 'ui-default-slot-unmodeled' });
-    return;
-  }
+  const slot = listGroupOf(m, readInt(m, ops, 1));
   const a3 = readInt(m, ops, 2);
   const a4 = readInt(m, ops, 3);
   const a5 = readInt(m, ops, 4);
@@ -633,15 +629,16 @@ function listSet70(m: Machine, ops: Operand[]): void {
   m.diagnostics.push({ kind: 'ui-list-internals-unmodeled' });
 }
 
-/** 按组号取记录（缺则建，字段全 0：引擎构造时把这张表清过） */
+/** 组号 0 = 用默认组（`0x80` 的选择子；初值 1） */
+function listGroupOf(m: Machine, slot: number): number {
+  return slot === 0 ? m.ui.defaultGroup : slot;
+}
+
+/** 按组号取记录；组号域 0..9 由构造期预建，域外是表读越界（响亮失败） */
 function listRecordOf(m: Machine, slot: number): ListRecord {
   const found = m.ui.records.get(slot);
-  if (found) return found;
-  const created: ListRecord = {
-    f0c: 0, f10: 0, f14: 0, f18: 0, f1c: 0, f20: 0, f24: 0, f28: 0, f64: 0, f68: 0, f6c: 0, f114: 0, f118: 0, f120: 0, f124: 0, f7c: 0, f80: 0, registered: 0,
-  };
-  m.ui.records.set(slot, created);
-  return created;
+  if (!found) throw new Error(`list-group-out-of-domain:${slot}`);
+  return found;
 }
 
 /**
@@ -664,28 +661,46 @@ function text71(m: Machine, ops: Operand[]): void {
   m.diagnostics.push({ kind: 'text-subsystem-unmodeled' });
 }
 
+/** 0x80：把操作数原样写进列表 / 消息子系统的默认组选择子（初值 1） */
+function setDefaultGroup80(m: Machine, ops: Operand[]): void {
+  m.ui.defaultGroup = readInt(m, ops, 1);
+}
+
 /**
- * 0x73 子系统转发（CORE-OPS-LIST-SUBSYSTEM-SET73，argc 10 —— 前段最长的一条）。
+ * 0x73 写列表记录十格 + 一个固定格 + 可选第二请求（CORE-OPS-LIST-SUBSYSTEM-SET73，argc 10）。
  *
  * 逐字（`sub_41F250`）：
- * ① **先读第 10 个操作数**，写进一个固定格：值为 0 时写成 **1**（`sub_453AD0` 的 `a2 ?: 1`）；
- * ② 再**倒序**读第 9…1 个操作数，交给子系统（`sub_456430(Engine+0x14D30, op1..op9)`）；
- * ③ 由引擎级 16 位槽 `Engine[166964]` 决定是否再发一次 `vtable+4` 请求（实参 0x21 / 2×op7 / op8 / 2）。
- *    ★ 那个槽的当前值未建模（本层没人写它）⇒ 请求照发、但记 `gateModeled: false`，不假装知道门的状态。
+ * ① **先读第 10 个操作数**，写进固定格 `Engine+0x69220`（dword 107656）：值为 0 时写成 **1**；
+ * ② 再**倒序**读第 9…1 个操作数，`sub_456430` 把它们按固定公式写进该组记录的 `+0x3C..+0x60`
+ *    —— 这是**引擎数据写**，不是转发；
+ * ③ 由引擎级 dword `Engine+0xA30D0`（= `set:DrawMode` 的缓存，初值来自配置）决定是否再发一次
+ *    `vtable+4` 请求（实参 0x21 / 2×op7 / op8 / 2）。给了配置库（安装入口）时该格在构造期播种 ⇒
+ *    `gateModeled: true`；`--script` / 单元测试没有 config ⇒ 未建模，请求照发并标 false。
  */
 function forward73(m: Machine, ops: Operand[]): void {
   const op10 = readInt(m, ops, 10);
-  m.scalars.set('Engine.d107528', op10 === 0 ? 1 : op10);
+  m.scalars.set('Engine.d107656', op10 === 0 ? 1 : op10);
   const args: number[] = [];
   for (const k of [9, 8, 7, 6, 5, 4, 3, 2, 1]) args.push(readInt(m, ops, k));
   args.reverse();
-  m.effects.push({ kind: 'subsystem.request', detail: { callee: 'sub_456430', args } });
-  m.diagnostics.push({ kind: 'call-target-unmodeled:sub_456430' });
+  // 第 2 步不是转发：`sub_456430` 把 op1..op9 按固定公式写进该组记录的十格
+  // （`60-ops-list.md` CORE-OPS-LIST-SUBSYSTEM-SET73；逐字公式见台账 01M5FK3XR…）。
+  const rec = listRecordOf(m, listGroupOf(m, args[0]));
+  rec.f3c = args[3];
+  rec.f40 = args[4];
+  rec.f44 = args[5];
+  rec.f48 = (args[4] + args[6]) | 0;
+  rec.f4c = (args[5] + args[7]) | 0;
+  rec.f50 = args[1];
+  rec.f54 = args[2];
+  rec.f58 = 1;
+  rec.f5c = args[8];
+  rec.f60 = args[8];
   const gate = m.scalars.get('Engine.d166964') ?? 0;
   if (gate === 0) {
     m.effects.push({
       kind: 'vtable.request',
-      detail: { callee: 'vtable+4', message: 0x21, a: 2 * args[6], b: args[7], c: 2, gateSlot: 'Engine.d166964', gateModeled: false },
+      detail: { callee: 'vtable+4', message: 0x21, a: 2 * args[6], b: args[7], c: 2, gateSlot: 'Engine.d166964', gateModeled: m.scalars.has('Engine.d166964') },
     });
   }
 }
@@ -709,7 +724,7 @@ function setFieldTail(m: Machine, ops: Operand[], field: string, apply: (value: 
 
 /** 0x78：写字体对象的绘制模式 +0x55C 后尾跳 */
 function field78(m: Machine, ops: Operand[]): void {
-  setFieldTail(m, ops, 'Engine.d21683', (value) => {
+  setFieldTail(m, ops, 'Engine.d21667', (value) => {
     m.render.fontObject.drawMode = value;
     m.render.fontObject.drawPath = value;
   });
@@ -717,7 +732,7 @@ function field78(m: Machine, ops: Operand[]): void {
 
 /** 0x2db：写字体对象的对位模式 +0x313D0 后尾跳（与 0x78 同形，只差落点） */
 function field2db(m: Machine, ops: Operand[]): void {
-  setFieldTail(m, ops, 'Engine.d71760', (value) => {
+  setFieldTail(m, ops, 'Engine.d71744', (value) => {
     m.render.fontObject.alignMode = value;
   });
 }
@@ -732,11 +747,7 @@ function field2db(m: Machine, ops: Operand[]): void {
 function listPair(m: Machine, ops: Operand[], first: 'f1c' | 'f24'): void {
   const third = readInt(m, ops, 3);
   const second = readInt(m, ops, 2);
-  const slot = readInt(m, ops, 1);
-  if (slot === 0) {
-    m.diagnostics.push({ kind: 'ui-default-slot-unmodeled' });
-    return;
-  }
+  const slot = listGroupOf(m, readInt(m, ops, 1));
   const rec = listRecordOf(m, slot);
   if (first === 'f1c') {
     rec.f1c = second;
@@ -800,11 +811,7 @@ function listPair25d(m: Machine, ops: Operand[]): void {
 function pair303(m: Machine, ops: Operand[]): void {
   const third = readInt(m, ops, 3);
   const second = readInt(m, ops, 2);
-  const slot = readInt(m, ops, 1);
-  if (slot === 0) {
-    m.diagnostics.push({ kind: 'ui-default-slot-unmodeled' });
-    return;
-  }
+  const slot = listGroupOf(m, readInt(m, ops, 1));
   const rec = m.ui.records.get(slot);
   if (!rec) throw new Error(`list-record-missing:${slot}`);
   rec.f120 = second;
@@ -859,9 +866,8 @@ async function loadFrame6(m: Machine, ops: Operand[]): Promise<void> {
   const id = readInt(m, ops, 1);
   const slot = readInt(m, ops, 2);
   if (!m.loadScript) throw new Error('load-frame-loader-missing');
-  // ★ 引擎的装载前置里有一条"解码密钥可用"：本层的 key 是宿主给的显式参数（`--script` 调试口可以给 0）
-  //   ⇒ 给 0 时记一笔、继续走（⛔ 照抄成抛会让调试口停在"我的占位值不合法"上 —— 那是模型的问题，不是脚本的问题）
-  if (m.key === 0) m.diagnostics.push({ kind: 'codec-key-placeholder:load-frame' });
+  // ★ key 非 0 是引擎的全局不变量（40-pools；EA 0x418940 / 0x41C7F2），不是 0x6 的局部前置：
+  //   宿主给 0 的记账在 `Machine` 构造期一次完成，这里不重复记（否则每条 0x6 刷一条）。
   if (slot >= FRAME_SLOT_COUNT) {
     throw new Error(`load-frame：目标帧深 ${slot} ≥ ${FRAME_SLOT_COUNT} —— 引擎抛「ファイルの階層が深すぎます．最大は%dです．」`);
   }
@@ -1574,6 +1580,7 @@ export const HANDLERS = new Map<number, Handler>([
   [0x71, text71],
   [0x73, forward73],
   [0x78, field78],
+  [0x80, setDefaultGroup80],
   [0x79, pair79],
   [0x1c1, pair1c1],
   [0x212, listField212],

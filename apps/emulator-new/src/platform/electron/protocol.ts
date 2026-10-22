@@ -97,7 +97,8 @@ export interface InstallJob {
   mode: 'install';
   installDir: string;
   rootId: number;
-  key: number;
+  /** 可选的显式 codec key（可复现对照）；缺省由 renderer 的 Machine 运行期生成非 0 值 */
+  key?: number;
   configPath: string | null;
   /** `data/spec/format/opcode-table.json` 的行（纯数据） */
   opcodes: OpcodeRow[];

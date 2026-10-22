@@ -2,15 +2,16 @@
  * 平台层（Node）：CLI。只做"参数 → 核心调用 → 文本输出 / 退出码"。
  *
  *   # 真实入口：安装目录 → SYS4INI.BIN（ALF 索引）→ 统一文件 id → 松散文件 / 归档切片
- *   node apps/emulator-new/src/main.ts --install <dir> --key <u32> [--root-id 0] [--stop-at <opcode>]
+ *   node apps/emulator-new/src/main.ts --install <dir> [--key <u32>] [--root-id 0] [--stop-at <opcode>]
  *
  *   # 调试入口：直接给一份脚本文件
- *   node apps/emulator-new/src/main.ts --script <file> --key <u32> [--stop-at <opcode>]
+ *   node apps/emulator-new/src/main.ts --script <file> [--key <u32>] [--stop-at <opcode>]
  *   node apps/emulator-new/src/main.ts --install <dir> --decode [--json]
  *
  * 默认模式：**执行**。遇到没有实现的 opcode 就停在它前面并报缺口（未实现即抛错，不 no-op）。
  * `--decode`：只解码走查（不执行），用于检验 CORE-ISA 的结构规则。
- * ★ `--key` 是整型编码的运行期 key（规范：不是常量、不许有默认值）⇒ 执行模式必须显式给。
+ * ★ `--key` 是整型编码的运行期 key；规范要求实现**运行期生成**一个非 0 值。
+ *   缺省自动生成；给 `--key` 只用于可复现的位模式对照（0 不是合法值）。
  * ★ 核心是平台无关的（`core/runner.ts`）；本文件只是它 + Node 的 `Host` + `data/spec` 的装配点。
  */
 import { analyze, analyzeInstall } from '../../core/runner.ts';
@@ -53,8 +54,8 @@ function parseU32(text: string, what: string): number {
 }
 
 const USAGE = [
-  '用法：node apps/emulator-new/src/main.ts --install <dir> --key <u32> [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--real-time] [--trace|--trace-all] [--progress N] [--effects] [--config <SYS4REG.INI>] [--init-config] [--json] [--strict]',
-  '      node apps/emulator-new/src/main.ts --script <file> --key <u32> [--stop-at <opcode>] [--json] [--strict]',
+  '用法：node apps/emulator-new/src/main.ts --install <dir> [--key <u32>] [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--real-time] [--trace|--trace-all] [--progress N] [--effects] [--config <SYS4REG.INI>] [--init-config] [--json] [--strict]',
+  '      node apps/emulator-new/src/main.ts --script <file> [--key <u32>] [--stop-at <opcode>] [--json] [--strict]',
   '      node apps/emulator-new/src/main.ts --install <dir> --decode [--json]',
   '      node apps/emulator-new/src/main.ts --help',
 ].join('\n');
@@ -73,7 +74,11 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--decode') out.decodeOnly = true;
     else if (a === '--json') out.json = true;
     else if (a === '--strict') out.strict = true;
-    else if (a === '--key') out.key = parseU32(argv[++i] ?? '', '--key');
+    else if (a === '--key') {
+      const key = parseU32(argv[++i] ?? '', '--key');
+      if (key === 0) throw new Error('--key 必须是运行期非 0 值；省略 --key 让实现自动生成');
+      out.key = key;
+    }
     else if (a === '--stop-at') out.stopAt = parseU32(argv[++i] ?? '', '--stop-at');
     else if (a === '--tick-ms') out.tickMs = parseU32(argv[++i] ?? '', '--tick-ms');
     else if (a === '--real-time') out.realTime = true;
@@ -105,7 +110,14 @@ export async function main(argv: string[]): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  const args = parseArgs(argv);
+  let args: Args;
+  try {
+    args = parseArgs(argv);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    console.error(USAGE);
+    return 2;
+  }
   const cliClockOrigin = Date.now();
   /** `--real-time` / `--trace` / `--progress` 时捕获 Machine */
   let cliMachine: Machine | null = null;
@@ -224,7 +236,7 @@ export async function main(argv: string[]): Promise<number> {
       }
       if (result.sceneError) console.log(`场景错误    ${result.sceneError}`);
     } else {
-      console.log(`执行        未启动（缺 --key）· 缺口 ${result.gap ? `opcode 0x${result.gap.opcode.toString(16)}` : '无'}`);
+      console.log(`执行        未启动 · 缺口 ${result.gap ? `opcode 0x${result.gap.opcode.toString(16)}` : '无'}`);
     }
     if (result.gap) {
       console.log(`缺口        ${result.mode === 'decode' ? '解码' : '未实现'} @ 第 ${result.gap.index} 条 · 偏移 ${result.gap.offset} · opcode 0x${result.gap.opcode.toString(16)}${result.gap.argc === null ? '' : ` · argc ${result.gap.argc}`} · ${result.gap.reason}`);
@@ -232,6 +244,6 @@ export async function main(argv: string[]): Promise<number> {
       console.log('缺口        无');
     }
   }
-  if (args.strict && (result.gap || result.stop === 'missing-key')) return 1;
+  if (args.strict && result.gap) return 1;
   return 0;
 }

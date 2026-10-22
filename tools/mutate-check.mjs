@@ -1663,6 +1663,77 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-renderer-path.test.mjs',
     what: '★ renderer 的 `pathFromEngine` 不换分隔符 ⇒ POSIX 上 `Eushully\\天結…` 变成一个带反斜杠的单层目录（配置路径分叉）',
   },
+  // ── emulator-new：运行期 key 生成（★ 缺省 0 ⇒ 引擎非法状态被当默认）──
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '    this.key = opts.key ?? generateIntKey();',
+    to: '    this.key = opts.key ?? 0;',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '未给 key 时默认 0 ⇒ 引擎不可能的状态被当默认（且 ENC(0)=0）',
+  },
+
+  // ── emulator-new：0x73 的 DrawMode 门（★ 不播种 ⇒ 默认 1 也误发第二请求）──
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: "    if (opts.config) this.scalars.set('Engine.d166964', opts.config.getInt('set:DrawMode'));",
+    to: '    // 变异：不播种 DrawMode',
+    guard: 'tools/test/emulator-new-subsys.test.mjs',
+    what: 'renderer-init 不播种 set:DrawMode ⇒ 默认 1 仍按未建模/0 处理，误发 vtable.request',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  if (gate === 0) {',
+    to: '  if (gate !== 0) {',
+    guard: 'tools/test/emulator-new-subsys.test.mjs',
+    what: '0x73 的 0x21 请求条件写反 ⇒ DrawMode=1 反而发请求',
+  },
+
+  // ── emulator-new：key=0 的入口诊断（★ 删掉它 ⇒ 非法引擎状态被静默接受）──
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: "    if (this.key === 0) this.diagnostics.push({ kind: 'codec-key-placeholder' });",
+    to: '    // 变异：不记 key=0',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '宿主给 key=0 被静默接受 ⇒ 一次入口诊断那条判据当场红',
+  },
+
+  // ── emulator-new：UI 列表（0x70/0x73/0x80）与命名键 0x1ca ──
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: 'records: new Map(), defaultGroup: 1 };',
+    to: 'records: new Map(), defaultGroup: 0 };',
+    guard: 'tools/test/emulator-new-list.test.mjs',
+    what: '默认组初值 1 → 0 ⇒ 组号 0 的 0x70/0x79 落到错组（初始状态下 0 与 1 应同组）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  return slot === 0 ? m.ui.defaultGroup : slot;',
+    to: '  return slot;',
+    guard: 'tools/test/emulator-new-list.test.mjs',
+    what: '组号 0 不再替换成默认组 ⇒ 0x70/0x79 写到第 0 组而不是默认组',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  rec.f48 = (args[4] + args[6]) | 0;',
+    to: '  rec.f48 = args[6];',
+    guard: 'tools/test/emulator-new-list.test.mjs',
+    what: '0x73 的 +0x48 漏掉 op5 ⇒ 十格公式错（12 变成 7）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  rec.f58 = 1;',
+    to: '  rec.f58 = 0;',
+    guard: 'tools/test/emulator-new-list.test.mjs',
+    what: '0x73 的 +0x58 常量 1 写成 0 ⇒ 十格公式里唯一常量错',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "  requireConfig(m).setInt('message:ReadTextSkip', readInt(m, ops, 1));",
+    to: "  requireConfig(m).setInt('message:ReadTextSkipX', readInt(m, ops, 1));",
+    guard: 'tools/test/emulator-new-forward.test.mjs',
+    what: '0x1ca 写错命名键 ⇒ 读回/持久化都落到另一个键（看起来只是“没写进去”）',
+  },
+
   // ── emulator-new：架构（★ core 搬回 main ⇒ renderer 只剩画布，逐指令 IPC 又会回来）──
   {
     file: 'apps/emulator-new/src/platform/electron/main.ts',

@@ -30,51 +30,62 @@
   main 只保留 BrowserWindow、文件系统 / 规范表读取、IPC 与进程生命周期。桥接协议见 `platform/electron/protocol.ts`。
 - **未实现即停**（不 no-op）：缺口带 `{指令序号, 偏移, opcode, argc}`，停在它**前面**，可以当门禁用。
 - `handler` 表只包含 `data/spec` 里**已成篇**的 opcode；解不出的操作数类型 / 未取证的值一律**响亮失败**。
-- 整型编码的 key、虚拟时钟步长、未初始化浮点的读法都是**显式参数**：⛔ 没有"悄悄用 0"的默认路径。
+- 整型编码的 key 按规范**运行期生成**；虚拟时钟步长、未初始化浮点的读法是**显式参数**：⛔ 没有"悄悄用 0"的默认路径。
 - `--decode` 是纯解码走查（不解语义），用来检验 `CORE-ISA` 的结构规则够不够实现一个解码器。
 
 ## 2. 怎么跑
 
 ```bash
-# 真实入口：安装目录 → 索引 → 根脚本 id 0（--key 是整型编码的运行期 key，必须显式给）
-node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd
+# 真实入口：安装目录 → 索引 → 根脚本 id 0（key 由实现运行期生成；--key 仅用于复现位模式）
+node apps/emulator-new/src/main.ts --install "<安装目录>"
 
 # 配置：读显式玩家文件；缺失 ⇒ 发行默认。生成一份默认文件（要求 --config）
-node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd --config /tmp/SYS4REG.INI --init-config
+node apps/emulator-new/src/main.ts --install "<安装目录>" --config /tmp/SYS4REG.INI --init-config
 
 # 换一个统一文件 id（例：0x5262 = LOGO.BIN）做诊断
-node apps/emulator-new/src/main.ts --install "<安装目录>" --root-id 0x5262 --key 0x1234abcd
+node apps/emulator-new/src/main.ts --install "<安装目录>" --root-id 0x5262
 
 # 调试口：直接给一份脚本文件（不是启动路径）
-node apps/emulator-new/src/main.ts --script <file> --key 0x1234abcd
+node apps/emulator-new/src/main.ts --script <file>
 
 # 命中停止条件（如 0x20f play-movie）就停下（停止条件是"停在它前面"，不执行它）
-node apps/emulator-new/src/main.ts --script <file> --key 0x1234abcd --stop-at 0x20f
+node apps/emulator-new/src/main.ts --script <file> --stop-at 0x20f
 
 # 仿真参数：时钟步长（毫秒）与未初始化浮点策略（zero ⇒ 读成 0 并记诊断）
-node apps/emulator-new/src/main.ts --script <file> --key 0x1234abcd --tick-ms 16 --uninitialized-float zero
+node apps/emulator-new/src/main.ts --script <file> --tick-ms 16 --uninitialized-float zero
 
 # 墙钟模式：等待门 / 渐变按真实毫秒走（5 秒渐变不会被虚拟步长快进；CLI 会按 4ms 睡）
-node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd --real-time
+node apps/emulator-new/src/main.ts --install "<安装目录>" --real-time
 
 # 只解码（走完代码区），验证头 / 切分 / 表指针
 node apps/emulator-new/src/main.ts --script <file> --decode
 
 # 机器可读（直接 node；`pnpm` 会先打印脚本横幅，会污染 JSON）
-node apps/emulator-new/src/main.ts --script <file> --key 0x1234abcd --json
+node apps/emulator-new/src/main.ts --script <file> --json
 
 # 运行中看进度（stderr；每 N 步一行）
-node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd --progress 10000
+node apps/emulator-new/src/main.ts --install "<安装目录>" --progress 10000
 
 # 流式看**外部 / 未建模**效果与诊断（stderr；stdout 仍只有最终报告）
-node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd --trace
+node apps/emulator-new/src/main.ts --install "<安装目录>" --trace
 
 # 连内部记账（string.set / array.lookup / engine.scalar.*）也逐条打
-node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd --trace-all
+node apps/emulator-new/src/main.ts --install "<安装目录>" --trace-all
 
 # JSON 里带**全量**效果明细（默认只带 effectCounts；可能上千条）
-node apps/emulator-new/src/main.ts --install "<安装目录>" --key 0x1234abcd --json --effects
+node apps/emulator-new/src/main.ts --install "<安装目录>" --json --effects
 ```
+
+### `--key` 是什么
+
+`--key` 不是游戏的安装 / 解密密钥，而是引擎**整型池位模式**的编解码密钥（`40-pools` 的
+`ENC/DEC`）。引擎在构造期用启动时刻的毫秒值播种、`rand` 重抽到**非 0**，每个进程一份，
+之后不再改变；它不是常量，也不由脚本 / 配置 / 用户输入提供。
+
+**正常情况下不需要传 `--key`**：emulator-new 按规范在运行期生成一个非 0 值（`generateIntKey`）。
+对已实现的语义路径，任意非 0 key 的行为等价（编码 / 解码互逆，池里的原值相同）；
+只有要复现某一组**原始池位模式**时，才用 `--key <非0 u32>` 注入显式值。
+`--key 0` 不是合法值（会破坏 `ENC(0) ≠ 0` 与引擎的非 0 前置），入口直接拒绝。
 
 默认是**静默执行**：运行中不打印，结束后一次性输出报告；需要中间输出就用 `--progress` / `--trace`。
 `--trace` 默认只打 **external + unmodeled**（音频 / 纹理 / 输入 / 未建模调用）；`string.set`、`array.lookup`、`engine.scalar.*` 这类**已建模的内部记账**只在 `--trace-all` 里出现。
@@ -94,7 +105,7 @@ pnpm --filter @amayui/emulator-new exec electron . --demo
 pnpm --filter @amayui/emulator-new exec electron . --smoke
 
 # 真实入口：安装目录 → 索引 → 窗口 / 图形设备 → 根脚本
-pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>" --key 0x1234abcd
+pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>"
 ```
 
 ★ 受限沙箱里 Electron 需要 `--no-sandbox`（放在 `electron .` 与 app 路径之间）；正常桌面不要加。

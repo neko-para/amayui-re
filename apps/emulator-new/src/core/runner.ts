@@ -9,6 +9,7 @@
 import { codeLimit, parseHeader, walk } from './decode.ts';
 import type { Gap } from './decode.ts';
 import { ConfigStore, parseIni } from './config.ts';
+import { generateIntKey } from './values.ts';
 import { HANDLERS } from './handlers.ts';
 import { Machine, effectScope } from './machine.ts';
 import type { Diagnostic, EffectRecord, Stop } from './machine.ts';
@@ -182,23 +183,10 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
     };
   }
 
-  if (opts.key === undefined) {
-    // 不执行就不需要 key；但也不许把它当成"执行成功"
-    const firstUnimplemented = walked.instructions.find((x) => !HANDLERS.has(x.opcode)) ?? null;
-    return {
-      ...base,
-      mode: 'run',
-      key: null,
-      steps: 0,
-      stop: 'missing-key',
-      gap: firstUnimplemented
-        ? { index: firstUnimplemented.index, offset: firstUnimplemented.offset, opcode: firstUnimplemented.opcode, argc: firstUnimplemented.argc, reason: 'unimplemented' }
-        : null,
-    };
-  }
-
+  // key 是运行期状态：调用方没给就让实现生成一个非 0 值（规范不允许把 0 当默认）。
+  const key = opts.key ?? generateIntKey();
   const machine = new Machine({
-    body, table: env.table, key: opts.key, tickMs: opts.tickMs, clock: opts.clock, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
+    body, table: env.table, key, tickMs: opts.tickMs, clock: opts.clock, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
     fontNames: opts.fontNames, renderHost: opts.renderHost ?? env.renderHost, onIteration: opts.onIteration,
   });
   // 根脚本已在 0 号槽 ⇒ 平台在这里建周期定时器（`onMachine` 的注释见 `RunOpts`）
@@ -208,7 +196,7 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
   return {
     ...base,
     mode: 'run',
-    key: `0x${opts.key.toString(16)}`,
+    key: `0x${key.toString(16)}`,
     steps: r.steps,
     ticks: machine.ticks,
     atMs: machine.now,

@@ -653,7 +653,7 @@ async function runDemo(job: Extract<StartJob, { mode: 'demo' }>, bridge: AmayuiB
   for (const [key, value] of DEMO_CONFIG) config.setInt(key, value);
   const { session } = await bootSession(config, bridge, pixi, hooks);
   const render = new LocalRenderHost(pixi, bridge);
-  const machine = new Machine({ body: new Uint8Array(0), table: new Map(), key: 0, renderHost: render });
+  const machine = new Machine({ body: new Uint8Array(0), table: new Map(), renderHost: render });
   render.attachMachine(machine);
   await driveDemoScene(machine);
   await render.flush();

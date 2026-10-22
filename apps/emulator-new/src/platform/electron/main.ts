@@ -12,7 +12,7 @@
  *   `boot.createWindow` 不再新建窗口，而是把 bootstrap 窗口调整成配置要求的尺寸 / 形态并显示。
  *
  * ★ 三种模式（都会打开一个**独立只读 debug 窗口**；game 窗口只留 canvas）：
- *   - `--install <dir> --key <u32> [--root-id 0] [--config <file>]`：真实入口；
+ *   - `--install <dir> [--key <u32>] [--root-id 0] [--config <file>]`：真实入口；
  *   - `--demo`：非游戏可视化自检（renderer 里用真实 core handlers 驱动）；
  *   - `--smoke`：同 demo，main 在 `demo-ready` 后截图并退出（同时校验 debug 窗口收到投影）；
  *   什么都不给 ⇒ 说明窗口（不启动 core，也不建 debug 窗口）。
@@ -33,7 +33,7 @@ const SMOKE_TIMEOUT_MS = 60_000;
 
 const USAGE = [
   '用法：',
-  '  electron --no-sandbox apps/emulator-new --install <dir> --key <u32> [--root-id 0] [--config <file>]',
+  '  electron --no-sandbox apps/emulator-new --install <dir> [--key <u32>] [--root-id 0] [--config <file>]',
   '  electron --no-sandbox apps/emulator-new --demo',
   '  electron --no-sandbox apps/emulator-new --smoke',
   '',
@@ -82,7 +82,11 @@ function parseArgs(argv: string[]): Args {
     const arg = argv[i];
     if (!arg.startsWith('-')) continue;
     if (arg === '--install') out.install = argv[++i] ?? null;
-    else if (arg === '--key') out.key = parseU32(argv[++i] ?? '', '--key');
+    else if (arg === '--key') {
+      const key = parseU32(argv[++i] ?? '', '--key');
+      if (key === 0) throw new Error('--key 必须是运行期非 0 值；省略 --key 让实现自动生成');
+      out.key = key;
+    }
     else if (arg === '--root-id') out.rootId = parseU32(argv[++i] ?? '', '--root-id');
     else if (arg === '--config') out.config = argv[++i] ?? null;
     else if (arg === '--demo') out.demo = true;
@@ -147,14 +151,6 @@ async function openWindowHost(): Promise<ElectronWindowHost> {
 async function runInstall(args: Args): Promise<void> {
   const installDir = args.install;
   if (installDir === null) { fail('内部错误：--install 没有值'); return; }
-  if (args.key === null) {
-    console.error('[electron] --install 需要 --key <u32>（整型编码的运行期 key，规范不许有默认值）');
-    console.error(USAGE);
-    cleanup();
-    app.exit(2);
-    return;
-  }
-
   try {
     const host = await openWindowHost();
     const [table, configKeys] = await Promise.all([loadOpcodeTable(), loadConfigKeys()]);
@@ -162,7 +158,7 @@ async function runInstall(args: Args): Promise<void> {
       mode: 'install',
       installDir,
       rootId: args.rootId,
-      key: args.key,
+      key: args.key ?? undefined,
       configPath: args.config,
       opcodes: [...table.values()],
       configKeys,
@@ -338,7 +334,7 @@ function showUsageWindow(): void {
 </style>
 <h1>${WINDOW_TITLE} — 窗口壳已启动，但**没有**跑引擎</h1>
 <p class="lead">这是说明窗口，不是游戏画面。没有收到 <code>--install</code> / <code>--demo</code> / <code>--smoke</code>，所以既没有建窗、也没有初始化图形设备。</p>
-<pre>electron --no-sandbox apps/emulator-new --install &lt;dir&gt; --key &lt;u32&gt; [--config &lt;file&gt;]
+<pre>electron --no-sandbox apps/emulator-new --install &lt;dir&gt; [--key &lt;u32&gt;] [--config &lt;file&gt;]
 electron --no-sandbox apps/emulator-new --demo     # 非游戏的可视化自检（0x1f8 / 0x204 / 0x1fb / 0x33f / 0x20d）
 electron --no-sandbox apps/emulator-new --smoke    # 同一套 + 截图到 .tmp/emulator-new-electron-smoke.png</pre>
 <p class="note">--demo / --smoke 需要先构建渲染进程（<code>vite build</code> ⇒ <code>dist/renderer/index.html</code>）。<br>
