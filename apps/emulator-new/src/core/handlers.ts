@@ -5,14 +5,15 @@
  * ★ 取件类（`0x3` / `0x6` / `0x9`）是 `async`：核心的 IO 全部经注入的 `Machine.loadScript`
  *   回调 + `await`，所以同一份处理器在 Node / 浏览器里都能跑。
  */
-import { decodeCp932, readU32LE } from './bytes.ts';
+import { decodeCp932, readU16LE, readU32LE } from './bytes.ts';
 import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, TextureObject, VoiceGroup } from './machine.ts';
-import { FRAME_SLOT_COUNT, MOVIE_BIT, WAIT_BIT } from './machine.ts';
-import { encodeInt, readAddress, readFloat, readInt, readIntAt, readRawAt, readText, writeBitsAt, writeFloat, writeInt, writeRawAt, writeText } from './values.ts';
+import { FRAME_SLOT_COUNT, MOVIE_BIT, SLEEP_BIT, WAIT_BIT } from './machine.ts';
+import { decodeInt, encodeInt, readAddress, readFloat, readInt, readIntAt, readRawAt, readText, writeBitsAt, writeFloat, writeInt, writeRawAt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
 import { arrayStrideFor, resolveAddress } from './address.ts';
 import type { PoolTag } from './address.ts';
 import { NO_COLOR, RENDER_TARGET_BACK_BUFFER } from './render.ts';
+import { buildSaveFile } from './save-codec.ts';
 import type { RenderHost } from './render.ts';
 import { AgfError, decodeAgf } from './agf.ts';
 
@@ -1597,6 +1598,55 @@ function setter235(m: Machine, ops: Operand[]): void {
   m.scene.dirty = 1;
 }
 
+function cloneDrawItem(src: DrawItem): DrawItem {
+  return {
+    ...src,
+    aux: [...src.aux], vec1: [...src.vec1], vec2: [...src.vec2],
+    matrices: src.matrices.map((m) => [...m]),
+    fields: new Map(src.fields),
+    extraMatrices: new Map([...src.extraMatrices].map(([k, m]) => [k, [...m]])),
+    unknown: new Map(src.unknown),
+  };
+}
+
+/** 0x21d：按源编号在三张表逐表整份复制；三张都无 ⇒ 错误通道且不改。 */
+function copy21d(m: Machine, ops: Operand[]): void {
+  const dst = readInt(m, ops, 2) | 0;
+  const src = readInt(m, ops, 1) | 0;
+  let copied = false;
+  const obj = m.scene.drawItems.get(src);
+  if (obj) {
+    m.scene.drawItems.set(dst, cloneDrawItem(obj));
+    copied = true;
+  }
+  const mesh = m.scene.meshes.get(src);
+  if (mesh) {
+    m.scene.meshes.set(dst, { ...mesh, copies: mesh.copies.map((a) => [...a]) as Mesh['copies'], colors: [...mesh.colors], vbo: [...mesh.vbo], unknown: new Map(mesh.unknown) });
+    copied = true;
+  }
+  for (const table of m.scene.auxTables) {
+    if (table.has(src)) {
+      table.set(dst, table.get(src));
+      copied = true;
+    }
+  }
+  if (!copied) {
+    m.diagnostics.push({ kind: 'scene-copy-source-missing', index: src });
+    return;
+  }
+  m.scene.dirty = 1;
+}
+
+/** 0x242：同一个整数写进对象记录与第二张表（第二张表的身份未取证，先按同编号记录记）。 */
+function setter242(m: Machine, ops: Operand[]): void {
+  const id = readInt(m, ops, 1) | 0;
+  const v = readInt(m, ops, 2) | 0;
+  const item = drawItemOf(m, id);
+  setField(item, 0x2d0, v);
+  m.scene.aux242.set(id, v);
+  // 不标脏、不置位；建默认记录那一步是否间接标脏见正文 / 残差。
+}
+
 /** 0x239：带位 0 门的一对整数 + 附加组三个整数；标脏 + 动画。 */
 function setter239(m: Machine, ops: Operand[]): void {
   const id = readInt(m, ops, 1) | 0;
@@ -1747,6 +1797,216 @@ function flagWriteY1b7(m: Machine, ops: Operand[]): void {
 function abort01(m: Machine): void {
   m.exitCode = 1;
   m.halted = true;
+}
+
+/** 0x1a0：读槽头（292 字节），把 7 个字段写进 op3..9；打不开 1 / 头不合法 2。 */
+async function saveRead1a0(m: Machine, ops: Operand[]): Promise<void> {
+  const host = m.saveHost;
+  if (!host) throw new Error('save-host-missing:0x1a0');
+  const slot = readInt(m, ops, 2) | 0;
+  const bytes = await host.read(host.fileForSlot(slot, 'dat'));
+  if (!bytes) {
+    writeInt(m, ops, 1, 1);
+    return;
+  }
+  const magic = String.fromCharCode(bytes[0] ?? 0, bytes[1] ?? 0, bytes[2] ?? 0, bytes[3] ?? 0);
+  if (bytes.length < 292 || (magic !== 'S4SD' && magic !== 'S3SD')) {
+    writeInt(m, ops, 1, 2);
+    return;
+  }
+  const fields = [
+    readU16LE(bytes, 264), readU16LE(bytes, 266), readU16LE(bytes, 270),
+    readU16LE(bytes, 272), readU16LE(bytes, 274), readU16LE(bytes, 276),
+    readU32LE(bytes, 280) | 0,
+  ];
+  for (let i = 0; i < 7; i += 1) writeInt(m, ops, 3 + i, fields[i]);
+  writeInt(m, ops, 1, 0);
+}
+
+function buildSlotFile(m: Machine): Uint8Array {
+  const frame = m.cur;
+  const records = [];
+  for (let i = 0; i <= frame; i += 1) {
+    const f = m.slots[i];
+    if (!f) {
+      records.push({ status: -1, scriptIndex: -1, ret: [], tableA: -1, tableB: -1 });
+    } else {
+      records.push({
+        status: 0, scriptIndex: f.id ?? -1, ret: [...f.frame.retStack],
+        tableA: f.frame.position ?? -1, tableB: -1,
+      });
+    }
+  }
+  const intCount = m.globalInt.size === 0 ? 0 : Math.max(...m.globalInt.keys()) + 1;
+  const ints: number[] = [];
+  for (let i = 0; i < intCount; i += 1) {
+    const bits = m.globalInt.get(i) ?? encodeInt(0, m.key);
+    ints.push(decodeInt(bits, m.key));
+  }
+  const floatCount = m.globalFloat.size === 0 ? 0 : Math.max(...m.globalFloat.keys()) + 1;
+  const floats: number[] = [];
+  for (let i = 0; i < floatCount; i += 1) floats.push(m.globalFloat.get(i) ?? 0);
+  const strings = [...m.globalString.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+  const seed = (Math.floor(m.random() * 0x7fffffff) >>> 0);
+  const saveKey = ((Math.floor(m.random() * 0x7fff) << 1) | 1) >>> 0;
+  return buildSaveFile({ frame, records, ints, floats, strings, version1: 3, version2: 20 }, m.key, seed, saveKey);
+}
+
+/** 0x1a1：无确认写槽（未压缩负载；块 1/4 写 0；返回 0/1）。 */
+async function saveWrite1a1(m: Machine, ops: Operand[]): Promise<void> {
+  const host = m.saveHost;
+  if (!host) throw new Error('save-host-missing:0x1a1');
+  const slot = readInt(m, ops, 2) | 0;
+  const ok = await host.write(host.fileForSlot(slot, 'dat'), buildSlotFile(m));
+  writeInt(m, ops, 1, ok ? 0 : 1);
+}
+
+/** 0x19e：带覆写确认的写槽；目标存在且头读不回来时问宿主，拒绝 ⇒ 1。 */
+async function saveWrite19e(m: Machine, ops: Operand[]): Promise<void> {
+  const host = m.saveHost;
+  if (!host) throw new Error('save-host-missing:0x19e');
+  const slot = readInt(m, ops, 2) | 0;
+  const existing = await host.read(host.fileForSlot(slot, 'dat'));
+  if (existing) {
+    const magic = String.fromCharCode(existing[0] ?? 0, existing[1] ?? 0, existing[2] ?? 0, existing[3] ?? 0);
+    if (magic !== 'S4SD' && magic !== 'S3SD') {
+      if (!host.confirmOverwrite) throw new Error('save-confirm-missing:0x19e');
+      if (!(await host.confirmOverwrite(slot))) {
+        writeInt(m, ops, 1, 1);
+        return;
+      }
+    }
+  }
+  const ok = await host.write(host.fileForSlot(slot, 'dat'), buildSlotFile(m));
+  writeInt(m, ops, 1, ok ? 0 : 1);
+}
+
+/** 0x1ab：删槽的 .DAT → .STH；状态 0 / 1（第一个失败）/ 2（第二个失败）。 */
+async function saveDelete1ab(m: Machine, ops: Operand[]): Promise<void> {
+  const host = m.saveHost;
+  if (!host) throw new Error('save-host-missing:0x1ab');
+  const slot = readInt(m, ops, 2) | 0;
+  let code = 0;
+  if (!(await host.remove(host.fileForSlot(slot, 'dat')))) code = 1;
+  else if (!(await host.remove(host.fileForSlot(slot, 'sth')))) code = 2;
+  writeInt(m, ops, 1, code);
+}
+
+/** 0x1ac：把源槽的 .DAT → 目标，再 .STH → 目标；状态 0 / 1 / 2。 */
+async function saveCopy1ac(m: Machine, ops: Operand[]): Promise<void> {
+  const host = m.saveHost;
+  if (!host) throw new Error('save-host-missing:0x1ac');
+  const from = readInt(m, ops, 2) | 0;
+  const to = readInt(m, ops, 3) | 0;
+  let code = 0;
+  if (!(await host.copy(host.fileForSlot(from, 'dat'), host.fileForSlot(to, 'dat')))) code = 1;
+  else if (!(await host.copy(host.fileForSlot(from, 'sth'), host.fileForSlot(to, 'sth')))) code = 2;
+  writeInt(m, ops, 1, code);
+}
+
+/** 0x1ae：捕捉纹理 → BMP 字节 → 写槽的 .STH；0 / 2。 */
+async function thumbWrite1ae(m: Machine, ops: Operand[]): Promise<void> {
+  const host = m.saveHost;
+  if (!host) throw new Error('save-host-missing:0x1ae');
+  const slot = readInt(m, ops, 2) | 0;
+  const textureId = readInt(m, ops, 3) | 0;
+  const rh = m.renderHost;
+  if (!rh?.captureTexture) {
+    m.diagnostics.push({ kind: 'render-host-capture-missing', index: textureId });
+    writeInt(m, ops, 1, 2);
+    return;
+  }
+  const bytes = await rh.captureTexture(textureId);
+  if (!bytes) {
+    m.diagnostics.push({ kind: 'texture-capture-failed', index: textureId });
+    writeInt(m, ops, 1, 2);
+    return;
+  }
+  const ok = await host.write(host.fileForSlot(slot, 'sth'), bytes);
+  writeInt(m, ops, 1, ok ? 0 : 2);
+}
+
+/** 0x1af：读槽的 .STH → BMP 字节 → 上传纹理；1 打开失败 / 2 内容或上传失败。 */
+async function thumbRead1af(m: Machine, ops: Operand[]): Promise<void> {
+  const host = m.saveHost;
+  if (!host) throw new Error('save-host-missing:0x1af');
+  const slot = readInt(m, ops, 2) | 0;
+  const textureId = readInt(m, ops, 3) | 0;
+  const bytes = await host.read(host.fileForSlot(slot, 'sth'));
+  if (!bytes) {
+    writeInt(m, ops, 1, 1);
+    return;
+  }
+  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) {
+    writeInt(m, ops, 1, 2);
+    return;
+  }
+  const rh = m.renderHost;
+  if (!rh?.uploadTextureBytes) {
+    m.diagnostics.push({ kind: 'render-host-upload-missing', index: textureId });
+    writeInt(m, ops, 1, 2);
+    return;
+  }
+  const ok = await rh.uploadTextureBytes(textureId, bytes);
+  writeInt(m, ops, 1, ok ? 0 : 2);
+}
+
+/** 0x20b：矩形填充；颜色打包 / alpha 上夹 / 夹到对象逻辑矩形 / 请求渲染宿主。 */
+async function fillTexture20b(m: Machine, ops: Operand[]): Promise<void> {
+  const id = readInt(m, ops, 1) | 0;
+  let x = readInt(m, ops, 2) | 0;
+  let y = readInt(m, ops, 3) | 0;
+  const w = readInt(m, ops, 4) | 0;
+  const h = readInt(m, ops, 5) | 0;
+  let alpha = readInt(m, ops, 6) | 0;
+  const color = readInt(m, ops, 7) | 0;
+  if (alpha > 255) alpha = 255;
+  const packed = ((color & 0xffffff) | 0xff000000) >>> 0;
+
+  const rec = m.scene.textures.get(id) ?? { file: -1, color: 0, blank: 0 };
+  rec.blank = 1;
+  m.scene.textures.set(id, rec);
+
+  if (id > 999) {
+    m.diagnostics.push({ kind: 'texture-id-out-of-range', index: id });
+    return;
+  }
+  const obj = m.scene.textureObjects.get(id);
+  if (!obj) {
+    m.diagnostics.push({ kind: 'texture-missing', index: id });
+    return;
+  }
+  const rawX = x;
+  const rawY = y;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  const right = Math.min(rawX + w, obj.width);
+  const bottom = Math.min(rawY + h, obj.height);
+  if (x >= right || y >= bottom) return;
+  const host = m.renderHost;
+  if (!host?.fillTexture) {
+    m.diagnostics.push({ kind: 'render-host-fill-missing', index: id });
+    return;
+  }
+  const ok = await host.fillTexture({ textureId: id, left: x, top: y, right, bottom, color: packed, alpha });
+  if (!ok) m.diagnostics.push({ kind: 'texture-fill-lock-failed', index: id });
+}
+
+/** 0xc8 sleep：n ≥ 10 置第 0 位 + 定时器；n < 10 在宿主里阻塞。 */
+async function sleepC8(m: Machine, ops: Operand[]): Promise<void> {
+  m.operandCount = 3;
+  if ((m.flags & (1 << 27)) !== 0) return;
+  const n = readInt(m, ops, 1) | 0;
+  if (n >= 10) {
+    m.flags |= SLEEP_BIT;
+    m.sleepTimer = n;
+    m.sleepUntil = m.now + n;
+    m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0xc8', waitMs: n } });
+    return;
+  }
+  if (!m.sleepHost) throw new Error('sleep-host-missing:0xc8');
+  await m.sleepHost(n);
+  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0xc8', sleepMs: n } });
 }
 
 /** 0x0d9：清状态选择字第 12 位；若 d9Cell 非 0，再清 d9Word 的第 12 位。 */
@@ -2435,6 +2695,17 @@ export const HANDLERS = new Map<number, Handler>([
   [0x234, setter234],
   [0x235, setter235],
   [0x239, setter239],
+  [0x242, setter242],
+  [0x21d, copy21d],
+  [0x1ab, saveDelete1ab],
+  [0x1ac, saveCopy1ac],
+  [0x1a0, saveRead1a0],
+  [0xc8, sleepC8],
+  [0x1a1, saveWrite1a1],
+  [0x19e, saveWrite19e],
+  [0x20b, fillTexture20b],
+  [0x1ae, thumbWrite1ae],
+  [0x1af, thumbRead1af],
 ]);
 
 export function unimplemented(opcode: number): never {

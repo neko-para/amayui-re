@@ -8,9 +8,9 @@
     "run": "node src/main.ts",
     "decode": "node src/main.ts --decode",
     "build:renderer": "vite build",
-    "electron": "vite build && electron .",
-    "electron:demo": "vite build && electron . --demo",
-    "electron:smoke": "vite build && electron . --smoke"
+    "electron": "vite build && electron --no-sandbox .",
+    "electron:demo": "vite build && electron --no-sandbox . --demo",
+    "electron:smoke": "vite build && electron --no-sandbox . --smoke"
   },
   "dependencies": {
     "pixi.js": "^8.22.0"

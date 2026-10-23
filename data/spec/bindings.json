@@ -10427,6 +10427,541 @@
       "evidence": [
         "guard:tools/test/spec-save-codec-sites.assets.test.mjs#★ FMT-SAVE-CODEC 的读写 / 校验 / 变换 / 压缩站点都在 .lst 的指令行首"
       ]
+    },
+    {
+      "rule": "CORE-FS-SEARCH-ROOT",
+      "sites": [
+        {
+          "ea": "0x4baa76",
+          "what": "启动参数里找键 \"SP\""
+        },
+        {
+          "ea": "0x4baa86",
+          "what": "SP 命中 ⇒ 取可执行文件所在目录"
+        },
+        {
+          "ea": "0x4baa95",
+          "what": "否则找键 \"PATH=\""
+        },
+        {
+          "ea": "0x4baae3",
+          "what": "设定进程当前目录（SP / PATH= 共用这一个请求点）"
+        },
+        {
+          "ea": "0x455b31",
+          "what": "取件：把条目登记名原样交给打开请求（不拼路径）"
+        },
+        {
+          "ea": "0x45579f",
+          "what": "扩展索引枚举：取当前目录（与松散文件同一个根）"
+        }
+      ],
+      "functions": [
+        "sub_4B8FC0",
+        "sub_401AF0",
+        "sub_401B40",
+        "sub_4559C0",
+        "sub_455750"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-fs-roots-sites.assets.test.mjs#★ CORE-FS 四条规则的站点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-FS-ARCHIVE-ROOT",
+      "sites": [
+        {
+          "ea": "0x4bafd3",
+          "what": "启动期调用盘符判定（索引装载之后、建窗之前）"
+        },
+        {
+          "ea": "0x408543",
+          "what": "读配置 set:CDLabel（卷标）"
+        },
+        {
+          "ea": "0x4085c0",
+          "what": "读配置 set:CheckFileName"
+        },
+        {
+          "ea": "0x4085cf",
+          "what": "读配置 set:CheckVolume"
+        },
+        {
+          "ea": "0x4085d9",
+          "what": "探测盘符（返回盘符号）"
+        },
+        {
+          "ea": "0x4085e1",
+          "what": "判定结果存入引擎级一格"
+        },
+        {
+          "ea": "0x4085f7",
+          "what": "命中且卷标非空 ⇒ 调用归档路径改写"
+        },
+        {
+          "ea": "0x45571b",
+          "what": "格式串 \"%c:\\\\%s\"（盘符 + 归档名）"
+        },
+        {
+          "ea": "0x455723",
+          "what": "把前缀 + 原名写回归档记录"
+        },
+        {
+          "ea": "0x455700",
+          "what": "逐归档循环；已装载标记非 0 的跳过"
+        },
+        {
+          "ea": "0x455b7c",
+          "what": "取件：按改写后的归档路径打开"
+        }
+      ],
+      "functions": [
+        "sub_4084E0",
+        "sub_404820",
+        "sub_4556E0",
+        "sub_4559C0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-fs-roots-sites.assets.test.mjs#★ CORE-FS 四条规则的站点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-FS-INDEX-STACK",
+      "sites": [
+        {
+          "ea": "0x4bab1a",
+          "what": "先试 S4 族文件名"
+        },
+        {
+          "ea": "0x4bab26",
+          "what": "装载 S4 族索引"
+        },
+        {
+          "ea": "0x4bab2f",
+          "what": "S4 返回 0 才试 S3 族文件名"
+        },
+        {
+          "ea": "0x4bab3b",
+          "what": "装载 S3 族索引"
+        },
+        {
+          "ea": "0x415433",
+          "what": "基础索引装载成功后的尾声：调用扩展索引枚举"
+        },
+        {
+          "ea": "0x45580c",
+          "what": "枚举模式 \"*.AAI\""
+        },
+        {
+          "ea": "0x455838",
+          "what": "FindFirstFileA（不递归）"
+        },
+        {
+          "ea": "0x455858",
+          "what": "目录项跳过（属性 & 0x10）"
+        },
+        {
+          "ea": "0x4558e2",
+          "what": "装载一份扩展索引"
+        },
+        {
+          "ea": "0x4558f2",
+          "what": "装载失败文本（报消息，不中止）"
+        },
+        {
+          "ea": "0x45592f",
+          "what": "失败后继续枚举下一个"
+        },
+        {
+          "ea": "0x45593c",
+          "what": "取该扩展索引自带的区号"
+        },
+        {
+          "ea": "0x455948",
+          "what": "按区号登记；同号无条件覆盖"
+        },
+        {
+          "ea": "0x4559ed",
+          "what": "取件时按 id 高 8 位分叉（0 = 基础区）"
+        },
+        {
+          "ea": "0x455a10",
+          "what": "扩展档未装载 ⇒ 失败（不是空内容）"
+        }
+      ],
+      "functions": [
+        "sub_414AC0",
+        "sub_455750",
+        "sub_401080",
+        "sub_401100",
+        "sub_4559C0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-fs-roots-sites.assets.test.mjs#★ CORE-FS 四条规则的站点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-FS-FETCH-HANDLE",
+      "sites": [
+        {
+          "ea": "0x455ae4",
+          "what": "取件末尾：两个来源分支汇合到「登记打开件」"
+        },
+        {
+          "ea": "0x455c1c",
+          "what": "普通区分支：取件后按 id 记账"
+        },
+        {
+          "ea": "0x455acb",
+          "what": "扩展档分支：取件后按 id 记账"
+        },
+        {
+          "ea": "0x45543e",
+          "what": "读打开件表的分配游标"
+        },
+        {
+          "ea": "0x455447",
+          "what": "环形推进（+1 后取模）"
+        },
+        {
+          "ea": "0x455468",
+          "what": "继续找空槽（跳过已占用）"
+        },
+        {
+          "ea": "0x455490",
+          "what": "判断是否找到空槽"
+        },
+        {
+          "ea": "0x4554ab",
+          "what": "表满：关掉刚打开的句柄"
+        },
+        {
+          "ea": "0x4554cb",
+          "what": "表满消息文本（取不到文件 id）"
+        },
+        {
+          "ea": "0x455501",
+          "what": "表满 ⇒ 中断"
+        },
+        {
+          "ea": "0x45550d",
+          "what": "槽.句柄 ← 打开的句柄"
+        },
+        {
+          "ea": "0x45551e",
+          "what": "槽.读位置 ← SetFilePointer 结果"
+        },
+        {
+          "ea": "0x455534",
+          "what": "槽.长度 ← 取件给出的长度"
+        },
+        {
+          "ea": "0x45553b",
+          "what": "返回槽号（打开件标识）"
+        },
+        {
+          "ea": "0x455c7b",
+          "what": "关闭：标识无效（-1 或槽已空）"
+        },
+        {
+          "ea": "0x455c99",
+          "what": "关闭：带脏标记时先走刷新"
+        },
+        {
+          "ea": "0x455ca6",
+          "what": "关闭：CloseHandle"
+        },
+        {
+          "ea": "0x455cac",
+          "what": "关闭：槽标空、读位置清零"
+        }
+      ],
+      "functions": [
+        "sub_4559C0",
+        "sub_455420",
+        "sub_455560",
+        "sub_455C60",
+        "sub_454960",
+        "sub_40ED40"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-fs-roots-sites.assets.test.mjs#★ CORE-FS 四条规则的站点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-LOOP-EXIT",
+      "sites": [
+        {
+          "ea": "0x4123a6",
+          "what": "第一条泵：抛之前清服务窗口槽"
+        },
+        {
+          "ea": "0x4123c4",
+          "what": "第一条泵：取到退出消息 ⇒ 抛退出异常"
+        },
+        {
+          "ea": "0x412881",
+          "what": "第二条泵：抛之前清服务窗口槽"
+        },
+        {
+          "ea": "0x41289f",
+          "what": "第二条泵：取到退出消息 ⇒ 抛退出异常"
+        },
+        {
+          "ea": "0x412491",
+          "what": "未登记配置态的周期提示返回 1 ⇒ 抛退出异常（不清窗口槽）"
+        },
+        {
+          "ea": "0x413551",
+          "what": "catch(退出)：直接进出口段"
+        },
+        {
+          "ea": "0x41389a",
+          "what": "出口段起点"
+        },
+        {
+          "ea": "0x41389c",
+          "what": "撤结构化异常翻译器（恢复默认）"
+        },
+        {
+          "ea": "0x4138a3",
+          "what": "撤内存不足处理器（恢复默认）"
+        },
+        {
+          "ea": "0x4138b7",
+          "what": "服务窗口非空才发关闭消息"
+        },
+        {
+          "ea": "0x4138c2",
+          "what": "同步关闭消息（WM_CLOSE, wParam 1, lParam 0）"
+        },
+        {
+          "ea": "0x4138e3",
+          "what": "主循环唯一的返回（在分块里）"
+        }
+      ],
+      "functions": [
+        "sub_412290"
+      ],
+      "storage": [
+        "shape:T_Command@0x5eb54"
+      ],
+      "evidence": [
+        "guard:tools/test/spec-boot-sites.assets.test.mjs#★ CORE-BOOT 四条规则的站点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-LOOP-EXC",
+      "sites": [
+        {
+          "ea": "0x413568",
+          "what": "catch(需要显示消息)"
+        },
+        {
+          "ea": "0x413583",
+          "what": "请求选择对话框"
+        },
+        {
+          "ea": "0x4135c1",
+          "what": "catch(操作数类型号非法)"
+        },
+        {
+          "ea": "0x41360b",
+          "what": "请求选择对话框"
+        },
+        {
+          "ea": "0x413628",
+          "what": "catch(结构化异常翻译)"
+        },
+        {
+          "ea": "0x413799",
+          "what": "请求选择对话框"
+        },
+        {
+          "ea": "0x4137d6",
+          "what": "catch(内存不足)"
+        },
+        {
+          "ea": "0x413846",
+          "what": "请求选择对话框"
+        },
+        {
+          "ea": "0x41359b",
+          "what": "分流：返回值 == 2 ⇒ 重试"
+        },
+        {
+          "ea": "0x4135b7",
+          "what": "重试：输出调试文本后回循环首"
+        },
+        {
+          "ea": "0x41385e",
+          "what": "分流：返回值 == 4 ⇒ 忽略并前进"
+        },
+        {
+          "ea": "0x41388f",
+          "what": "忽略并前进：按当前指令长度推进执行位置"
+        },
+        {
+          "ea": "0x413895",
+          "what": "回到循环首"
+        }
+      ],
+      "functions": [
+        "sub_412290",
+        "sub_4034F0",
+        "sub_4034C0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-boot-sites.assets.test.mjs#★ CORE-BOOT 四条规则的站点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-EXIT-CLEANUP",
+      "sites": [
+        {
+          "ea": "0x4bb51c",
+          "what": "主循环返回后的保护区起点"
+        },
+        {
+          "ea": "0x4bb530",
+          "what": "第 1 步：引擎对象虚析构"
+        },
+        {
+          "ea": "0x4bb539",
+          "what": "第 2 步：关闭单实例信号"
+        },
+        {
+          "ea": "0x4bb544",
+          "what": "第 3 步：睡眠 500ms"
+        },
+        {
+          "ea": "0x4bb54a",
+          "what": "第 4 步：引擎指针清空"
+        },
+        {
+          "ea": "0x4bb555",
+          "what": "第 5 步：正常调试文本"
+        },
+        {
+          "ea": "0x4bb564",
+          "what": "第 1 步抛异常时的 catch(...)"
+        },
+        {
+          "ea": "0x4bb569",
+          "what": "第 5 步的失败调试文本"
+        },
+        {
+          "ea": "0x4bb58a",
+          "what": "第 6 步：COM 反初始化"
+        },
+        {
+          "ea": "0x4bb595",
+          "what": "第 7 步：释放内核库句柄"
+        },
+        {
+          "ea": "0x4bb5a4",
+          "what": "第 7 步：释放通用控件库句柄"
+        },
+        {
+          "ea": "0x4bb0b1",
+          "what": "第 8 步：销毁启动期「文件查找」局部对象"
+        },
+        {
+          "ea": "0x4bb5f1",
+          "what": "第 9 步：辅助宿主模块包装对象析构"
+        },
+        {
+          "ea": "0x4bb5f6",
+          "what": "第 10 步：返回 0"
+        }
+      ],
+      "functions": [
+        "sub_48E720",
+        "sub_454920"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-boot-sites.assets.test.mjs#★ CORE-BOOT 四条规则的站点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-BOOT-FAIL-RETURN",
+      "sites": [
+        {
+          "ea": "0x4ba8f5",
+          "what": "创建命名单实例信号"
+        },
+        {
+          "ea": "0x4ba901",
+          "what": "句柄为空 ⇒ 拒绝"
+        },
+        {
+          "ea": "0x4ba927",
+          "what": "宿主错误码非 0（已存在）⇒ 拒绝"
+        },
+        {
+          "ea": "0x4ba917",
+          "what": "返回 −1（唯一的非 0 返回）"
+        },
+        {
+          "ea": "0x4bab51",
+          "what": "索引失败：显示一条内建消息"
+        },
+        {
+          "ea": "0x4bab63",
+          "what": "索引失败：销毁命令行解析对象"
+        },
+        {
+          "ea": "0x4bab75",
+          "what": "索引失败：销毁引擎对象"
+        },
+        {
+          "ea": "0x4bab7e",
+          "what": "索引失败：跳到共享出口"
+        },
+        {
+          "ea": "0x4baa0b",
+          "what": "窗口类注册失败：无消息、直接到共享出口"
+        },
+        {
+          "ea": "0x4bb096",
+          "what": "建窗 / 图形 / 根脚本失败共用的「引擎析构」分支"
+        },
+        {
+          "ea": "0x4bb0a6",
+          "what": "引擎对象虚析构调用"
+        },
+        {
+          "ea": "0x4bb41a",
+          "what": "图形初始化失败 ⇒ 走引擎析构分支"
+        },
+        {
+          "ea": "0x4bb4d4",
+          "what": "根脚本返回值 ≠1 ⇒ 走引擎析构分支"
+        },
+        {
+          "ea": "0x4bb4b8",
+          "what": "闸门失败分支（销毁引擎）"
+        },
+        {
+          "ea": "0x4bb4f6",
+          "what": "闸门失败分支（跳过引擎析构）"
+        },
+        {
+          "ea": "0x4bb5f6",
+          "what": "共享出口返回 0"
+        }
+      ],
+      "functions": [],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-boot-sites.assets.test.mjs#★ CORE-BOOT 四条规则的站点都在 .lst 的指令行首"
+      ]
     }
   ]
 }

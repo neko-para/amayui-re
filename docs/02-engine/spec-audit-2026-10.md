@@ -767,6 +767,28 @@ S2 的 16 条中，`0x60` 的 `INT_MIN` / 可观察性、`0xa1` 的 4095 与上�
 `FMT-SAVE-BODY` 开头与 overview 的持久化归属都标“不闭合”，删掉“属机器本体、本版不复述”，
 并补 `RES-SAVE-BODY-UNCLOSED`。
 
+**65-save 块布局收口（2026-10-23 续）**：`FMT-SAVE-CODEC` 的 6 计数 → 块映射、块 2 字符串 arena、
+块 3 浮点池、c5 占位、尾段公式、slack、帧记录 261 字全部按样本复算写成合同；`FMT-SAVE-BODY` 与
+`FMT-SAVE-RESTORE` 的顺序 / 基址 / 表 A 语义同步。复审 S1 8 条 → 复核 **无 S1**。
+仍标未取证：c1/c4 的池身份、尾段 value 字段、计数生产者、v2<20 空洞运行时。
+新增 `core/save-codec.ts` 纯函数（两个 CRC-32、1→2 字变换 / 逆变换、未压缩信封、20 字节参数块）
+与 `emulator-new-save-codec.test.mjs`（标准 CRC 向量、往返、参数块 CRC 覆盖）；测试 777 → **780**。
+下一步是用它写 `0x1a1` 的负载构造器，再接 `SaveHost.write/rename`。
+
+**CORE-BOOT 四条成篇（2026-10-23 续）**：`05-boot.md` 新增 `CORE-BOOT-LOOP-EXIT / LOOP-EXC /
+EXIT-CLEANUP / FAIL-RETURN`（条目 197 → **201**）；同步改 `06-window.md` 的“退出信号 / 销毁”两句：
+异常在**主循环内部**捕获、汇入唯一出口段、主循环**正常返回**、入口随后清理；出口触发不止退出消息。
+新增守卫 `spec-boot-sites.assets.test.mjs`。复审 S1 2 条（未登记提示无定义、唯一返回点与
+`0x2` 冲突）已闭合：未登记提示移出合同并补 `RES-BOOT-EXIT-NAG`；`0x2` 是否走出口段进
+`RES-FRAME-EXIT-BOOT`，06-window 的“是否还有别的 ret”删除；复核“无 S1”。
+
+**CORE-FS 四条成篇（2026-10-23 续）**：`25-fs.md` 新增 `CORE-FS-SEARCH-ROOT / ARCHIVE-ROOT /
+INDEX-STACK / FETCH-HANDLE`（条目 193 → **197**）；章首与 `CORE-FS-LOOSE-FIRST` 的“输出是内容”
+改成“输出是打开件”。新增守卫 `spec-fs-roots-sites.assets.test.mjs`。首轮复审 S1 3 条（搜索根三说、松散优先范围、
+AAI 区号无字段）已收紧：根唯一为当前目录；扩展索引松散优先 / 区号映射显式标“不闭合”并补
+`RES-FS-AAI-KEY`；复核结论“3 条均不再是 S1”。
+0x242（两张表）与 0x21d（三表整份复制）handler 已实现；handler 155 → **157**，测试 772 → **774**。
+
 **FMT-SAVE-CODEC 成篇（2026-10-23 续）**：`65-save.md` 新增 `FMT-SAVE-CODEC`（章节 5 → 6 条规则，
 条目 192 → **193**）：两个 CRC-32（非反射 `0x04C11DB7` / 反射 `0xEDB88320`）、变换公式、
 LZSS 引用「ALF 归档」同一例程、20 字节参数块、内层头、主体前缀布局（v1=2/3 条件基址）、每帧记录。
@@ -789,7 +811,7 @@ S2/S3（10 条状态对应 / covers 为空、默认矩阵数量、位号措辞�
 - `+0xAC/+0x12C` 矩阵生产者、0x1fb 的位 0 生产者穷尽性仍是残差。
 `objects` / `save` / 场景章保持 `draft`（没有 accepted 台账 / pure 守卫覆盖整条合同）。
 
-**本轮 emulator-new 落地（2026-10-23 续）**：把已有 spec 合同、但 handler 缺失的 **44 个 opcode** 补上：
+**本轮 emulator-new 落地（2026-10-23 续）**：把已有 spec 合同、但 handler 缺失的 **49 个 opcode** 补上：
 `0x191` 浮点绝对值、`0x2d0/0x2d1/0x2d3` 浮点加减除、`0x1b0` memcpy、`0x208` 纹理尺寸、
 `0x1cf/0x1bf/0x1cc` 状态字 / 相邻格 / 状态格、`0x19a/0x1b6/0x1b7` 格 X / 格 Y、
 `0x1c7/0x19b/0x19c` 第 27 位读 / 清 / 条件置、`0x258/0x259` 两张 1000 项标志表、
@@ -797,7 +819,15 @@ S2/S3（10 条状态对应 / covers 为空、默认矩阵数量、位号措辞�
 `0x1fd/0x1ff/0x1fe/0x220/0x228` 缩放 / 平移 / 旋转 / 第四个平移 / 读平移、`0x01` 退出、`0x0d9` 清第 12 位、
 `0x1f4/0x1f5` 执行区间、`0x1ad` 层号落格、`0x1ce` 乱数启用、`0x7b/0x7c` 本地块进入目标 / 返回、
 场景 setter 8 条（`0x21e/21f/230/231/233/234/235/239`）。
-新增 `tools/test/emulator-new-ops-100-200.test.mjs`（24 条合同守卫）；
-`apps/emulator-new` 的 handler 111 → **155**，可完整执行的脚本 133 → **135**。
-仍未实现（11 个）：`0xc8`、存档 7 条、`0x20b`、`0x21d`（整份复制）、`0x242`（两张表）。
-测试总数 748 → **772**；`emulator-new-ops` 的“未实现 opcode”守卫改用仍缺的 `0x21d`。
+新增 `tools/test/emulator-new-ops-100-200.test.mjs`（28 条合同守卫）；
+`apps/emulator-new` 的 handler 111 → **164**，可完整执行的脚本 133 → **135**。
+新增 `core/save.ts` 的 `SaveHost` 接口（`fileForSlot / read / write / remove / copy / rename`），
+`platform/node/save-host.ts` 的 Node 实现（`SAVE<至少两位>.DAT/.STH`、临时写法/改名可用），
+并实现 `0x1a0`（读 292 字节头 + 7 字段）、`0x1ab`（删 .DAT→.STH）、`0x1ac`（拷 .DAT→.STH）。
+仍未实现（2 个）：`0x1ae` / `0x1af`（缩略图）。
+`0x20b` 已实现（`RenderHost.fillTexture` 可选方法 + Headless 记账实现；颜色打包 / alpha 上夹 /
+夹到对象逻辑矩形 / 错误通道）。
+`0x19e` / `0x1a1` 已实现（`save-codec` 的 `buildSaveBody` / `buildSaveFile` + `SaveHost.write`；
+`0x19e` 在目标头不可读时走 `confirmOverwrite`）；`0xc8` 已实现（n ≥ 10 置第 0 位 + 定时器；
+n < 10 走注入的 `sleepHost`；`SLEEP_BIT` 服务分支按 `now >= sleepUntil` 清位）。
+测试总数 748 → **785**；`emulator-new-ops` 的“未实现 opcode”守卫改用仍缺的 `0x1ae`。

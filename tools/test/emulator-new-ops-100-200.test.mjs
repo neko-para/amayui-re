@@ -11,16 +11,31 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { HeadlessRenderHost } from '../../apps/emulator-new/src/core/render.ts';
 import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
-import { readInt } from '../../apps/emulator-new/src/core/values.ts';
+import { encodeInt, readInt } from '../../apps/emulator-new/src/core/values.ts';
 
 const KEY = 0x1234abcd;
 const op = (type, raw) => ({ type, raw });
 const f32bits = (v) => new Uint32Array(new Float32Array([v]).buffer)[0] >>> 0;
 const f32 = (bits) => new Float32Array(new Uint32Array([bits >>> 0]).buffer)[0];
 
-function machine() {
-  return new Machine({ body: Buffer.alloc(4), table: new Map(), key: KEY });
+function machine(opts = {}) {
+  return new Machine({ body: Buffer.alloc(4), table: new Map(), key: KEY, ...opts });
+}
+
+function saveHost(overrides = {}) {
+  const calls = [];
+  return {
+    calls,
+    fileForSlot: (slot, kind) => `slot${slot}.${kind}`,
+    read: async (p) => { calls.push(`read:${p}`); return overrides.read?.(p) ?? null; },
+    write: async (p, b) => { calls.push(`write:${p}`); return overrides.write?.(p, b) ?? true; },
+    rename: async (a, b) => { calls.push(`rename:${a}->${b}`); return overrides.rename?.(a, b) ?? true; },
+    remove: async (p) => { calls.push(`remove:${p}`); return overrides.remove?.(p) ?? true; },
+    copy: async (a, b) => { calls.push(`copy:${a}->${b}`); return overrides.copy?.(a, b) ?? true; },
+    ...(overrides.confirmOverwrite ? { confirmOverwrite: (s) => overrides.confirmOverwrite(s) } : {}),
+  };
 }
 
 test('★ `0x191`：op1 ← |读浮点(op2)|（不是原样搬运）', () => {
@@ -417,6 +432,182 @@ test('★ `0x233` / `0x234` / `0x235`：附加组三类写入；`0x239` 带位 0
   g.scene.drawItems.set(7, { flags: 0, config: 0, fields: new Map(), extraMatrices: new Map() });
   HANDLERS.get(0x239)(g, [op(0, 7), op(0, 1), op(0, 2), op(0, 3), op(0, 4), op(0, 5)]);
   assert.equal(g.scene.drawItems.get(7).config, 0, '位 0 = 0 ⇒ 不写字段 / 不写 G3');
+});
+
+test('★ `0xc8`：n < 10 走宿主阻塞；n ≥ 10 置第 0 位 + 定时器；位 27 为 1 ⇒ 跳过', async () => {
+  const slept = [];
+  const m = machine({ sleepHost: async (ms) => { slept.push(ms); } });
+  await HANDLERS.get(0xc8)(m, [op(0, 5)]);
+  assert.deepEqual(slept, [5]);
+  assert.equal(m.flags & 1, 0);
+
+  const long = machine();
+  long.now = 100;
+  await HANDLERS.get(0xc8)(long, [op(0, 10)]);
+  assert.equal(long.flags & 1, 1);
+  assert.equal(long.sleepTimer, 10);
+  assert.equal(long.sleepUntil, 110);
+
+  const skip = machine({ sleepHost: async () => { throw new Error('不应睡'); } });
+  skip.flags = 1 << 27;
+  await HANDLERS.get(0xc8)(skip, [op(0, 5)]);
+});
+
+test('★ `0x19e`：目标不存在 / 头可读 ⇒ 直接写；头不合法 ⇒ 问宿主，拒绝写 1', async () => {
+  let writes = 0;
+  const none = machine({ saveHost: saveHost({ write: async () => { writes += 1; return true; } }) });
+  await HANDLERS.get(0x19e)(none, [op(3, 1), op(0, 3)]);
+  assert.equal(readInt(none, [op(3, 1)], 1), 0);
+  assert.equal(writes, 1);
+
+  const badBytes = Buffer.alloc(292);
+  let confirmed = 0;
+  const deny = machine({ saveHost: saveHost({
+    read: () => badBytes, confirmOverwrite: async () => { confirmed += 1; return false; },
+    write: async () => { writes += 1; return true; },
+  }) });
+  await HANDLERS.get(0x19e)(deny, [op(3, 1), op(0, 3)]);
+  assert.equal(readInt(deny, [op(3, 1)], 1), 1);
+  assert.equal(confirmed, 1);
+  assert.equal(writes, 1, '拒绝 ⇒ 不再写');
+
+  const allow = machine({ saveHost: saveHost({
+    read: () => badBytes, confirmOverwrite: async () => true,
+    write: async () => { writes += 1; return true; },
+  }) });
+  await HANDLERS.get(0x19e)(allow, [op(3, 1), op(0, 3)]);
+  assert.equal(readInt(allow, [op(3, 1)], 1), 0);
+  assert.equal(writes, 2);
+});
+
+test('★ `0x1a1`：无确认写槽；文件头 + 参数块 + 非压缩信封落盘', async () => {
+  let written = null;
+  const host = saveHost({ write: async (_p, bytes) => { written = bytes; return true; } });
+  const m = machine({ saveHost: host });
+  m.slots[0].id = 7;
+  m.globalInt.set(0, encodeInt(5, KEY));
+  m.globalFloat.set(0, f32bits(1.5));
+  m.globalString.set(0, 'AB');
+  await HANDLERS.get(0x1a1)(m, [op(3, 1), op(0, 4)]);
+  assert.equal(readInt(m, [op(3, 1)], 1), 0);
+  assert.ok(written && written.length > 340);
+  assert.equal(new TextDecoder().decode(written.slice(0, 4)), 'S4SD');
+  assert.equal(new DataView(written.buffer).getUint32(284, true), 3);
+  assert.equal(new DataView(written.buffer).getUint32(288, true), 20);
+});
+
+test('★ `0x1a0`：读 292 字节头，7 个字段按序写 op3..9；打不开 1 / 头不合法 2', async () => {
+  const buf = Buffer.alloc(292);
+  buf.write('S4SD', 0, 'latin1');
+  buf.writeUInt16LE(2026, 264); buf.writeUInt16LE(10, 266); buf.writeUInt16LE(23, 270);
+  buf.writeUInt16LE(12, 272); buf.writeUInt16LE(34, 274); buf.writeUInt16LE(56, 276);
+  buf.writeUInt32LE(789, 280);
+  const m = machine({ saveHost: saveHost({ read: () => buf }) });
+  const ops = [op(3, 0), op(0, 5), op(3, 1), op(3, 2), op(3, 3), op(3, 4), op(3, 5), op(3, 6), op(3, 7)];
+  await HANDLERS.get(0x1a0)(m, ops);
+  assert.equal(readInt(m, ops, 1), 0);
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((k) => readInt(m, ops, 2 + k)), [2026, 10, 23, 12, 34, 56, 789]);
+
+  const miss = machine({ saveHost: saveHost({ read: () => null }) });
+  await HANDLERS.get(0x1a0)(miss, [op(3, 0), op(0, 5), op(3, 1), op(3, 2), op(3, 3), op(3, 4), op(3, 5), op(3, 6), op(3, 7)]);
+  assert.equal(readInt(miss, ops, 1), 1);
+
+  const bad = machine({ saveHost: saveHost({ read: () => Buffer.alloc(292) }) });
+  await HANDLERS.get(0x1a0)(bad, [op(3, 0), op(0, 5), op(3, 1), op(3, 2), op(3, 3), op(3, 4), op(3, 5), op(3, 6), op(3, 7)]);
+  assert.equal(readInt(bad, ops, 1), 2);
+});
+
+test('★ `0x1ab` / `0x1ac`：先 .DAT 后 .STH；失败码 1 / 2 不可互换', async () => {
+  const del = machine({ saveHost: saveHost({ remove: (p) => p !== 'slot1.dat' }) });
+  await HANDLERS.get(0x1ab)(del, [op(3, 1), op(0, 1)]);
+  assert.equal(readInt(del, [op(3, 1)], 1), 1, '.DAT 失败 ⇒ 1');
+  assert.deepEqual(del.saveHost.calls, ['remove:slot1.dat'], '.DAT 失败 ⇒ 不再删 .STH');
+
+  const del2 = machine({ saveHost: saveHost({ remove: (p) => p !== 'slot2.sth' }) });
+  await HANDLERS.get(0x1ab)(del2, [op(3, 1), op(0, 2)]);
+  assert.equal(readInt(del2, [op(3, 1)], 1), 2, '.STH 失败 ⇒ 2');
+
+  const copy = machine({ saveHost: saveHost({ copy: (a) => a !== 'slot1.dat' }) });
+  await HANDLERS.get(0x1ac)(copy, [op(3, 1), op(0, 1), op(0, 2)]);
+  assert.equal(readInt(copy, [op(3, 1)], 1), 1);
+  assert.deepEqual(copy.saveHost.calls, ['copy:slot1.dat->slot2.dat']);
+
+  const copy2 = machine({ saveHost: saveHost({ copy: (a) => a !== 'slot1.sth' }) });
+  await HANDLERS.get(0x1ac)(copy2, [op(3, 1), op(0, 1), op(0, 2)]);
+  assert.equal(readInt(copy2, [op(3, 1)], 1), 2);
+});
+
+test('★ `0x21d`：源 → 目标整份复制；三张表都无源 ⇒ 错误通道且不改', () => {
+  const m = machine();
+  HANDLERS.get(0x217)(m, [op(0, 1), op(1, f32bits(1)), op(1, f32bits(2)), op(1, f32bits(3))]);
+  HANDLERS.get(0x21d)(m, [op(0, 1), op(0, 2)]);
+  assert.deepEqual(m.scene.drawItems.get(2).vec1, [1, 2, 3]);
+  assert.notEqual(m.scene.drawItems.get(1), m.scene.drawItems.get(2));
+  assert.equal(m.scene.dirty, 1);
+
+  const before = m.diagnostics.length;
+  HANDLERS.get(0x21d)(m, [op(0, 9), op(0, 10)]);
+  assert.equal(m.scene.drawItems.has(10), false);
+  assert.equal(m.diagnostics.length, before + 1);
+});
+
+test('★ `0x1ae` / `0x1af`：缩略图捕捉 → .STH；读 .STH → 校验 BM → 上传', async () => {
+  const bmp = Buffer.alloc(64); bmp.write('BM', 0, 'latin1');
+  let written = null;
+  const w = machine({
+    renderHost: new HeadlessRenderHost({ captureBytes: bmp }),
+    saveHost: saveHost({ write: async (p, b) => { written = { p, b }; return true; } }),
+  });
+  await HANDLERS.get(0x1ae)(w, [op(3, 1), op(0, 4), op(0, 9)]);
+  assert.equal(readInt(w, [op(3, 1)], 1), 0);
+  assert.equal(written.p, 'slot4.sth');
+  assert.equal(written.b[0], 0x42);
+
+  const rh = new HeadlessRenderHost();
+  const r = machine({ renderHost: rh, saveHost: saveHost({ read: () => bmp }) });
+  await HANDLERS.get(0x1af)(r, [op(3, 1), op(0, 4), op(0, 9)]);
+  assert.equal(readInt(r, [op(3, 1)], 1), 0);
+  assert.equal(rh.requests.some((x) => x.kind === 'upload-texture-bytes'), true);
+
+  const miss = machine({ renderHost: rh, saveHost: saveHost({ read: () => null }) });
+  await HANDLERS.get(0x1af)(miss, [op(3, 1), op(0, 4), op(0, 9)]);
+  assert.equal(readInt(miss, [op(3, 1)], 1), 1);
+
+  const bad = machine({ renderHost: rh, saveHost: saveHost({ read: () => Buffer.alloc(64) }) });
+  await HANDLERS.get(0x1af)(bad, [op(3, 1), op(0, 4), op(0, 9)]);
+  assert.equal(readInt(bad, [op(3, 1)], 1), 2);
+});
+
+test('★ `0x20b`：颜色打包 / alpha 上夹 / 夹到对象逻辑矩形 / 走 RenderHost.fillTexture', async () => {
+  const host = new HeadlessRenderHost();
+  const m = machine({ renderHost: host });
+  m.scene.textureObjects.set(3, { kind: 'normal', width: 320, height: 180 });
+  await HANDLERS.get(0x20b)(m, [
+    op(0, 3), op(0, -10), op(0, -5), op(0, 100), op(0, 100), op(0, 300), op(0, 0x112233),
+  ]);
+  const req = host.requests.find((r) => r.kind === 'fill-texture');
+  assert.ok(req);
+  assert.deepEqual(
+    [req.request.left, req.request.top, req.request.right, req.request.bottom],
+    [0, 0, 90, 95],
+  );
+  assert.equal(req.request.color, 0xff112233);
+  assert.equal(req.request.alpha, 255);
+  assert.equal(m.scene.textures.get(3).blank, 1);
+
+  const empty = new HeadlessRenderHost();
+  const n = machine({ renderHost: empty });
+  n.scene.textureObjects.set(4, { kind: 'normal', width: 10, height: 10 });
+  await HANDLERS.get(0x20b)(n, [op(0, 4), op(0, 20), op(0, 20), op(0, 5), op(0, 5), op(0, 0), op(0, 0)]);
+  assert.equal(empty.requests.some((r) => r.kind === 'fill-texture'), false, '空矩形不调 fill');
+});
+
+test('★ `0x242`：同一个整数写进两张表；不标脏', () => {
+  const m = machine();
+  HANDLERS.get(0x242)(m, [op(0, 9), op(0, 77)]);
+  assert.equal(m.scene.drawItems.get(9).fields.get(0x2d0), 77);
+  assert.equal(m.scene.aux242.get(9), 77);
+  assert.equal(m.scene.dirty, 0);
 });
 
 test('★ `0x1c7`：只读状态选择字第 27 位，并归一成 0 / 1', () => {

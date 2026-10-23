@@ -72,8 +72,7 @@ test('★ 平台边界：只有 platform/** 允许 import node:*（核心的守�
   const users = sources()
     .filter((x) => /from 'node:/.test(x.text))
     .map((x) => x.name);
-  const badNode = users.filter((name) => name !== 'platform/node/host.ts'
-    && name !== 'platform/node/spec.ts'
+  const badNode = users.filter((name) => !name.startsWith('platform/node/')
     && !name.startsWith('platform/electron/'));
   assert.deepEqual(badNode, [],
     `import node:* 的文件只应落在平台层（platform/node/** 或 platform/electron/**），实际 ${users.join(', ') || '(无)'}`);

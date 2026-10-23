@@ -22,21 +22,22 @@
   `spec validate` 13/13；新增 `tools/test/spec-ops-000-sites.assets.test.mjs`。
 - **0x000–0x0FF 实现**：`0x63` / `0x60` / `0x74` / `0x7f` / `0xd0` / `0xa1` / `0xa2` / `0xa3`
   已在 `apps/emulator-new` 落地（`0x8c` 原本就有），新增 `tools/test/emulator-new-ops-000.test.mjs`。
-- **草稿待合并**：
-  - `.tmp/spec-draft/ops-100/`：15 条 / 27 个 opcode（执行区间、场景变换、状态字、存档族、RNG…）；
-  - `.tmp/spec-draft/ops-200/`：15 条 / 28 个 opcode（场景 setter 族、纹理、浮点算术、CG、L2D…）；
-  - `.tmp/spec-draft/objects/`：CORE-OBJECTS 5 条 —— **已合并**为 `45-objects.md`；
-  - `.tmp/spec-draft/save/`：FMT-SAVE 5 条 —— **已合并**为 `65-save.md`（与 `60-ops-save` 重复的
-    `SLOT-OPS` 已删）；
-  - `.tmp/spec-draft/containers/`：CORE-CONTAINERS 4 条 —— **全部已合并**进 `40-pools.md`
-    （`ELEMENT` 先按台账纪律追加更正 `KN-01M5JBPQTZ080A4J100K575P1V` 再合并）；
-  - `.tmp/spec-draft/fs-boot/`：CORE-FS / CORE-BOOT 残差（未合并）。
+- **草稿已全部合并**：`ops-100/200`、`objects`、`save`、`containers`、`fs-boot` 均已成篇。
 - **第二批合并**（2026-10-23 续）：`ops-100` 13 条 / `ops-200` 13 条（L2D 与 text 邻接各留残差）、
   `objects` 5 条、`save` 5 条、`containers` 4 条；新增 `45-objects` / `60-ops-save` / `65-save` 三章。
   条目 142 → 182，未成篇 opcode 431 → 381。
-- **第三批取证收口**：三个只读取证 subagent 补上了第二批剩下的 S1：
-  RNG 第 30 位与门同格且服务分支不清位；场景对象只有一张 map、默认记录初值、位 0 生产者；
-  FILLTEXTURE 的表项 / 颜色公式 / UB；containers ELEMENT 的台账更正。
+- **65-save 块布局收口**：6 计数→块、字符串 arena、块 3 浮点池、尾段 / slack / 帧记录 261 字已成篇；
+  复审 S1 8 条清零。仍标未取证：c1/c4 池身份、尾段 value、计数生产者、v2<20 空洞。
+  新增 `save-codec` 纯函数（CRC / 变换 / 未压缩信封 / 参数块）与 3 条守卫；
+  `0xc8` sleep 已实现（宿主 sleep + 第 0 位定时器）；
+  `buildSaveBody/buildSaveFile` + `0x1a1/0x19e` 已实现；`0x20b` 已实现（RenderHost.fillTexture）；
+  handler 160 → 164，测试 777 → 785。剩余仅 `0x1ae/0x1af` 缩略图。
+- **CORE-BOOT 四条成篇**：`05-boot` 新增出口 / 异常 / 清理 / 失败返回；条目 197 → 201；
+  `06-window` 的“入口处 catch / 不以返回值结束 / 唯一触发”三句已同步。
+  复审 S1 2 条已闭合（未登记提示移出合同 + RES-BOOT-EXIT-NAG；0x2 走出口段进 RES-FRAME-EXIT-BOOT）。
+- **CORE-FS 四条成篇**：`25-fs` 新增搜索根 / 归档根 / 索引栈 / 取件打开件；
+  条目 193 → 197；章首改成“输出是打开件”。`0x242` / `0x21d` handler 已实现；
+  handler 155 → 157，测试 772 → 774。
 - **FMT-SAVE-CODEC 成篇**：`65-save` 新增校验 / 变换 / LZSS / 主体前缀布局规则；
   条目 192 → 193；复审 S1 4 条全部关闭（复核“无 S1”）。
 - **场景 10 条 setter 成篇**：`0x21d/21e/21f/230/231/233/234/235/239/242` 已合并；
@@ -47,11 +48,12 @@
   **第四轮跟报复审：本批 S1 清零**（0x220 位 1 已指向计时窗；FMT-SAVE-BODY 已标不闭合）。
   剩余为非 S1 缺口：场景 10 条 setter 的字段组、65-save 的字节布局 / 校验和、381 个未成篇 opcode、fs-boot。
   详见 `docs/02-engine/spec-audit-2026-10.md` §18。
-- **emulator-new 落地（2026-10-23 续）**：44 个已有 spec 合同但缺 handler 的 opcode 已实现
+- **emulator-new 落地（2026-10-23 续）**：49 个已有 spec 合同但缺 handler 的 opcode 已实现
   （浮点 4、memcpy、纹理尺寸、状态字 / 相邻格 / 状态格 3、格 X/Y 3、模式位 3、
   1000 项表 2、CG、场景清空、三元向量 4、3D 变换 5、退出 1、清第 12 位 1、
   执行区间 2、层号落格 1、乱数启用 1、本地块进入 / 返回 2、场景 setter 8），
-  新增 `emulator-new-ops-100-200.test.mjs`；handler 111 → 155，可执行脚本 133 → 135。
+  新增 `emulator-new-ops-100-200.test.mjs`；handler 111 → 160，可执行脚本 133 → 135。
+  新增 `SaveHost` 接口、Node 实现与 `0x1a0/0x1ab/0x1ac`；测试 774 → 777。
 - **排除项**（只登记、不写合同）：audio（`0xb4`–`0xc7`、`0x2f6`–`0x2ff`…）、
   text-system（`0x6e`/`0x6f`/`0x196`/`0x1d2`…）、input（`0x72`/`0x0fb`/`0x108`…）。
 

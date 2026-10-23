@@ -73,6 +73,17 @@ export interface TextureCreateRequest {
   kind: TextureKind;
 }
 
+/** `0x20b` 的矩形填充请求（颜色已按 `0xFF000000 | RGB` 打包）。 */
+export interface FillTextureRequest {
+  textureId: number;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  color: number;
+  alpha: number;
+}
+
 /** `0x1f9` 的上传请求：解码后的 top-down RGBA8 + 归一化颜色键 */
 export interface TextureUploadRequest {
   textureId: number;
@@ -130,6 +141,15 @@ export interface RenderHost {
    * ★ 颜色键的像素清零由平台实现（见请求字段）；核心只搬运归一化后的键。
    */
   uploadTexture(request: TextureUploadRequest): Promise<boolean>;
+
+  /** `0x20b` 矩形填充；缺省 = 平台不支持该请求（调用方写错误通道）。 */
+  fillTexture?(request: FillTextureRequest): Promise<boolean>;
+
+  /** `0x1ae` 把纹理当前画面捕捉成文件字节（BMP）；缺省 = 平台不支持。 */
+  captureTexture?(textureId: number): Promise<Uint8Array | null>;
+
+  /** `0x1af` 把文件字节（BMP）上传进纹理槽；缺省 = 平台不支持。 */
+  uploadTextureBytes?(textureId: number, bytes: Uint8Array): Promise<boolean>;
 
   /** `0x1fa`：释放该纹理槽的平台纹理（幂等；空槽也要能调用）。 */
   releaseTexture(textureId: number): Promise<void>;
@@ -268,6 +288,9 @@ export type HeadlessRenderRequest =
   | { kind: 'create-texture'; request: TextureCreateRequest; ok: boolean }
   | { kind: 'upload-texture'; request: TextureUploadRequest; ok: boolean }
   | { kind: 'release-texture'; textureId: number }
+  | { kind: 'fill-texture'; request: FillTextureRequest; ok: boolean }
+  | { kind: 'capture-texture'; textureId: number; ok: boolean }
+  | { kind: 'upload-texture-bytes'; textureId: number; length: number; ok: boolean }
   | { kind: 'draw-text'; request: DrawTextRequest };
 
 export interface HeadlessRenderOptions {
@@ -291,6 +314,8 @@ export interface HeadlessRenderOptions {
    * ★ 只影响**返回值**（失败路径记账用），⛔ 不产生像素、不模拟加锁。
    */
   drawTextSucceeds?: boolean;
+  /** `0x1ae` 的捕捉结果；缺省 = 捕捉不到（null）。 */
+  captureBytes?: Uint8Array;
 }
 
 /**
@@ -314,6 +339,7 @@ export class HeadlessRenderHost implements RenderHost {
   createTextureSucceeds: boolean;
   uploadTextureSucceeds: boolean;
   drawTextSucceeds: boolean;
+  captureBytes: Uint8Array | undefined;
 
   constructor(options: HeadlessRenderOptions = {}) {
     this.hasSurface = options.hasSurface ?? (() => true);
@@ -322,6 +348,7 @@ export class HeadlessRenderHost implements RenderHost {
     this.createTextureSucceeds = options.createTextureSucceeds ?? true;
     this.uploadTextureSucceeds = options.uploadTextureSucceeds ?? true;
     this.drawTextSucceeds = options.drawTextSucceeds ?? true;
+    this.captureBytes = options.captureBytes;
   }
 
   async getRenderSurface(textureId: number): Promise<SurfaceHandle | null> {
@@ -359,6 +386,22 @@ export class HeadlessRenderHost implements RenderHost {
 
   async releaseTexture(textureId: number): Promise<void> {
     this.requests.push({ kind: 'release-texture', textureId });
+  }
+
+  async fillTexture(request: FillTextureRequest): Promise<boolean> {
+    this.requests.push({ kind: 'fill-texture', request: { ...request }, ok: true });
+    return true;
+  }
+
+  async captureTexture(textureId: number): Promise<Uint8Array | null> {
+    const bytes = this.captureBytes ?? null;
+    this.requests.push({ kind: 'capture-texture', textureId, ok: bytes !== null });
+    return bytes;
+  }
+
+  async uploadTextureBytes(textureId: number, bytes: Uint8Array): Promise<boolean> {
+    this.requests.push({ kind: 'upload-texture-bytes', textureId, length: bytes.length, ok: true });
+    return true;
   }
 
   async drawText(request: DrawTextRequest): Promise<boolean> {

@@ -17,6 +17,7 @@ import { HANDLERS } from './handlers.ts';
 import { initialRenderState } from './render.ts';
 import type { RenderHost, RenderState, TextureKind } from './render.ts';
 import type { MovieHandle, MovieHost } from './movie.ts';
+import type { SaveHost } from './save.ts';
 
 export interface Operand {
   type: number;
@@ -246,6 +247,8 @@ export interface SceneState {
   flagTableB: number[];
   /** `0x2da` 的 CG 参数记录：编号 → 七个整数格。 */
   cgRecords: Map<number, number[]>;
+  /** `0x242` 第二张表同编号记录的 +0x1f8 格（表身份未取证，先单列）。 */
+  aux242: Map<number, number>;
   /** 引擎级每 id 对象槽（纹理三条会清它；影片写它） */
   objectSlots: Map<number, unknown>;
   /** 场景错误缓冲（失败路径写文本；外部呈现不读） */
@@ -395,6 +398,10 @@ export interface MachineOptions {
   renderHost?: RenderHost;
   /** 影片播放的平台边界（`0x20f` / 影片对象表服务）；缺省 = 没有后端 ⇒ 影片位一直挡住门 */
   movieHost?: MovieHost;
+  /** 存档文件的平台边界（`0x1ab` / `0x1ac`）；缺省 = 没有后端 ⇒ 两条响亮失败。 */
+  saveHost?: SaveHost;
+  /** 宿主睡眠（`0xc8` 的 n < 10 支）；缺省 ⇒ 该支响亮失败。 */
+  sleepHost?: (ms: number) => Promise<void>;
   /**
    * **宿主随机源**（`0x60` 的输入）：返回 `[0,1)` 的浮点数（本层换算成 u32）。
    * ★ 缺省 = `Math.random`；规范只规定"取一次、再用余数"，序列属宿主实现。
@@ -431,6 +438,13 @@ export class Machine {
   readonly renderHost: RenderHost | undefined;
   /** 影片播放后端（缺省 `undefined` = 没有后端；见 `MachineOptions.movieHost`） */
   readonly movieHost: MovieHost | undefined;
+  /** 存档文件边界（缺省 `undefined`，见 `MachineOptions.saveHost`） */
+  readonly saveHost: SaveHost | undefined;
+  /** 宿主睡眠（缺省 `undefined`，见 `MachineOptions.sleepHost`） */
+  readonly sleepHost: ((ms: number) => Promise<void>) | undefined;
+  /** 0xc8 的长睡眠定时器（毫秒）；`sleepUntil` 是绝对 `now`。 */
+  sleepTimer = 0;
+  sleepUntil = 0;
   /** 宿主随机源（`0x60`；缺省 `Math.random`，见 `MachineOptions.random`） */
   readonly random: () => number;
   /** 迭代头的平台泵点（缺省 `undefined` = 不泵；见 `MachineOptions.onIteration`） */
@@ -568,6 +582,7 @@ export class Machine {
     flagTableA: new Array(1000).fill(0),
     flagTableB: new Array(1000).fill(0),
     cgRecords: new Map(),
+    aux242: new Map(),
     objectSlots: new Map(),
     errorBuffer: '',
     hasObjects: 0,
@@ -648,6 +663,8 @@ export class Machine {
     this.fontNames = [...(opts.fontNames ?? [])];
     this.renderHost = opts.renderHost;
     this.movieHost = opts.movieHost;
+    this.saveHost = opts.saveHost;
+    this.sleepHost = opts.sleepHost;
     this.random = opts.random ?? Math.random;
     this.onIteration = opts.onIteration;
     // 根脚本落在 **0 号槽**（引擎：根帧的父帧号是 −1，当前帧号从 0 起）
@@ -661,6 +678,11 @@ export class Machine {
    *   否则清位、下次迭代继续执行指令。
    */
   private serviceFlags(): Stop | null {
+    if ((this.flags & SLEEP_BIT) !== 0) {
+      if (this.now >= this.sleepUntil) this.flags &= ~SLEEP_BIT;
+      else this.tick();
+      return null;
+    }
     if ((this.flags & WAIT_BIT) !== 0) {
       if (this.scene.animating === 0) {
         this.flags &= ~WAIT_BIT;
@@ -962,6 +984,8 @@ export class Machine {
 
 /** 等待位（CORE-OPS-WAIT / CORE-VM-STATE：本版只规定这一个位的语义） */
 export const WAIT_BIT = 0x400;
+/** 0xc8 的长睡眠位（状态选择字第 0 位）。 */
+export const SLEEP_BIT = 0x1;
 
 /** 影片位（CORE-OPS-MOVIE：置起后门会关；本版不实现它的服务分支） */
 export const MOVIE_BIT = 0x2000;

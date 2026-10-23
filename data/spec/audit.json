@@ -595,8 +595,8 @@
       "status": "bootstrap",
       "residual": [
         {
-          "what": "块 3 / 4 / 5 的元素宽度与编码、尾段起点仍未取证；负载前缀（到字符串段）已闭合。",
-          "next": "按 6 个计数逐块解析元素宽度，再定位尾段。"
+          "what": "尾段 value 字段、6 个计数生产者、v2 < 20 时块 1/4 空洞处理仍未取证；主体前缀与块 0..5 布局已成篇。",
+          "next": "按 FMT-SAVE-CODEC 的偏移逐块复算 v2 < 20 样本，再读尾段 value 的消费方。"
         },
         {
           "what": "SAVE.DAT 系统容器的三段负载与版本门未成篇",
@@ -2355,6 +2355,12 @@
           "kind": "unknown",
           "what": "父帧号为 −10/−11 的两条分支是存档/载入专用语义，不是脚本语义（本版不写）",
           "next": "归入 `FMT-SAVE` 章"
+        },
+        {
+          "id": "RES-FRAME-EXIT-BOOT",
+          "kind": "unknown",
+          "what": "0x2 的根脚本结束是否走主循环的唯一出口段、是否清服务窗口，未取证。",
+          "next": "读 0x2 根帧结束分支与主循环出口段的衔接。"
         }
       ],
       "falsifiers": []
@@ -3358,12 +3364,6 @@
           "kind": "unknown",
           "what": "周期定时器到期时检查的「另一个引擎级格」的身份本版不规定（「状态选择字里的一个位」有 shape:T_Command@0xaab44 绑定）",
           "next": "补另一个格的位号 / 身份"
-        },
-        {
-          "id": "RES-BOOT-LOOP-RETURN",
-          "kind": "unknown",
-          "what": "除「取到退出消息 → 抛异常」外的结束路径没有取证；本版不规定主循环是否还有别的 ret",
-          "next": "枚举主循环的全部返回点 / 异常展开点"
         },
         {
           "id": "RES-BOOT-EXIT-CLEANUP",
@@ -5094,8 +5094,8 @@
         {
           "id": "RES-SAVE-FRAMEREC",
           "kind": "unknown",
-          "what": "每帧记录 rec[0] / rec[1] 的语义、以及块 3..5 与尾段内部仍未取证。",
-          "next": "读 rec[0] / rec[1] 的写点与块 3..5 的消费方。"
+          "what": "rec[259] / rec[260] 的领域身份（表 A / 表 B 各代表什么）未取证；其余逐格已由 FMT-SAVE-CODEC 写成合同。",
+          "next": "读两张位置表的消费方，确认 A/B 的继续 / 返回语义。"
         },
         {
           "id": "RES-SAVE-TRAILING-TREE",
@@ -5420,25 +5420,241 @@
       "covers": [],
       "residual": [
         {
-          "id": "RES-SAVE-CODEC-TAIL",
+          "id": "RES-SAVE-CODEC-VALUES",
           "kind": "unknown",
-          "what": "主体尾段（740 / N / 741 字记录）的内部字段与主体尾部约 80 KB 零区的用途未取证。",
-          "next": "对尾段记录逐字段比对写侧与读侧访问，确认 80 KB 零区是否属版本 1 = 3 的定长副块。"
-        },
-        {
-          "id": "RES-SAVE-CODEC-REC259",
-          "kind": "unknown",
-          "what": "写侧有一条“最后一帧 rec[259] 置 −1”的规则，但样本 SAVE76 最后一帧是 206；哪个条件决定该写未取证。",
-          "next": "构造最后一帧有/无父调用位置的两种存档，观察 rec[259] 的写值。"
-        },
-        {
-          "id": "RES-SAVE-CODEC-BLOCK-SEM",
-          "kind": "unknown",
-          "what": "块 3 / 4 / 5 的元素语义与块 1 / 4 在版本 2 < 20 时是否占位未取证。",
-          "next": "用版本 2 < 20 的样本对照块计数与偏移；再读块 3/4/5 的消费方。"
+          "what": "尾段每条 740 字节 value 的内部字段、6 个计数的生产者、以及 v2 < 20 时块 1/4 空洞的运行时处理未取证。",
+          "next": "读尾段 value 的消费方与计数生产点；构造 v2 < 20 样本核对空洞。"
         }
       ],
       "falsifiers": []
+    },
+    {
+      "id": "CORE-FS-SEARCH-ROOT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-ROOT-CWD-CHANGE",
+          "kind": "unknown",
+          "what": "运行期是否存在间接改变当前目录的动作（平台对话框 / 拖放等）未取证；只证到引擎自己只有一个目录设定点",
+          "next": "对目录设定请求做全语料普查（已知唯一调用点 0x4baae3）+ 真机观测一次打开/保存对话框之后取件是否仍命中同一目录"
+        },
+        {
+          "id": "RES-FS-ROOT-NAME-MATCH",
+          "kind": "unknown",
+          "what": "条目名与真实文件名的匹配完全落在宿主侧（大小写 / 长名 / 路径规范化）；本版不规定应命中哪些名字",
+          "next": "用含非 ASCII 与大小写差异的条目名做合成索引，记录命中集合；若要写成合同，需先决定是否把「安装卷必须大小写不敏感」列为前提"
+        }
+      ],
+      "falsifiers": [
+        "若把同一份条目名放到两个不同目录、引擎能在第一个目录缺失时从第二个目录取到内容 ⇒ 本条「只有一个根、只尝试一次」被证伪",
+        "若给出 /PATH=<目录甲> 且当前目录是乙，取件命中甲 ⇒ 与本条的键优先与设定点冲突，需重读 0x4baa95/0x4baae3"
+      ]
+    },
+    {
+      "id": "CORE-FS-ARCHIVE-ROOT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-ARCHIVE-AAI-PREFIX",
+          "kind": "unknown",
+          "what": "扩展索引（*.AAI）自带的归档表是否也被同样的盘符改写未取证；已知改写例程只对基础索引的归档表跑过一次",
+          "next": "给一份 AAI 装一个归档名，观察取件时的打开路径是否带盘符"
+        },
+        {
+          "id": "RES-FS-ARCHIVE-DRIVE-RULE",
+          "kind": "unknown",
+          "what": "盘符探测的精确规则（卷标比较方式、set:CheckVolume / set:CheckFileName 各自的含义、失败返回什么）未逐条取证",
+          "next": "按探测函数实参逐个对齐两个校验键的用途；并对「卷标为空 / 探测返回负」各造一次观察"
+        }
+      ],
+      "falsifiers": [
+        "若删掉配置里的卷标后归档仍按带盘符的路径打开 ⇒ 本条「命中才改写」被证伪",
+        "若归档记录的路径前缀在同一进程里被改写两次（出现两个盘符前缀）⇒ 与本条「每份只改写一次」冲突"
+      ]
+    },
+    {
+      "id": "CORE-FS-INDEX-STACK",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-INDEX-AAI-ORDER",
+          "kind": "unknown",
+          "what": "宿主目录枚举顺序在不同文件系统 / 拷贝方式下是否稳定未观测；本版把它明确为「不保证」",
+          "next": "同一目录用两种拷贝顺序做对照，记录枚举顺序与同区号覆盖结果"
+        },
+        {
+          "id": "RES-FS-INDEX-AAI-PARTIAL",
+          "kind": "unknown",
+          "what": "一份扩展索引装载到一半失败时是否留下半套表（只证到「失败不中止、继续下一个」）",
+          "next": "用截断的 AAI 观察该区号槽位是否被写成空 / 半套"
+        },
+        {
+          "id": "RES-FS-AAI-KEY",
+          "kind": "unknown",
+          "what": "扩展索引（*.AAI）的格式身份、区号来源与“高 8 位 → 哪份文件”的映射未取证；扩展区取件因此不闭合。",
+          "next": "读 AAI 装载入口与 id 解码，确认区号来自文件头字段还是文件名。"
+        }
+      ],
+      "falsifiers": [
+        "若在 S4 索引成功的同时仍装载 S3 ⇒ 与本条「基础索引恰好一份」冲突",
+        "若两份 AAI 带同一区号时先装载者仍可取件 ⇒ 与本条「后枚举者胜」冲突",
+        "若把一份坏 AAI 放进目录后启动失败 ⇒ 与本条「扩展索引失败不中止」冲突"
+      ]
+    },
+    {
+      "id": "CORE-FS-FETCH-HANDLE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-FS-FETCH-BOOKKEEPING",
+          "kind": "unknown",
+          "what": "按 id 记账格（每次取件写一次，两个数组）的消费者与用途未找到；无证据说明它是缓存",
+          "next": "反查这两个数组的读者；找不到就登记为「写入无消费者」的遗留状态"
+        },
+        {
+          "id": "RES-FS-FETCH-RELEASE",
+          "kind": "unknown",
+          "what": "各调用方的释放纪律（谁保证关闭、异常路径会不会漏关）未普查",
+          "next": "按取件调用点（23 处）逐个登记配对关闭点与异常路径"
+        },
+        {
+          "id": "RES-FS-FETCH-DIRTY",
+          "kind": "unknown",
+          "what": "关闭时槽带脏标记会先走一条刷新路径；该路径写回哪里、何时置脏未取证",
+          "next": "读刷新函数（sub_455620）与置脏点，定它是否与只读取件有关"
+        }
+      ],
+      "falsifiers": [
+        "若同一 id 连续两次取件返回同一个打开件标识（前一件未关）⇒ 与本条冲突",
+        "若取件在关闭前就返回内容字节 ⇒ 与本条「产出是打开件」冲突",
+        "若打开件表在满时复用别的槽而不是失败 ⇒ 与本条冲突"
+      ]
+    },
+    {
+      "id": "CORE-BOOT-LOOP-EXIT",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-EXIT-QUIT-PENDING",
+          "kind": "unknown",
+          "what": "出口段发出关闭消息后窗口销毁会再投递一条退出消息；主循环已返回，之后没有泵会取它",
+          "next": "退出后检查队列（或用消息钩子）确认残留；并找是否存在第二个泵"
+        },
+        {
+          "id": "RES-BOOT-EXIT-NAG",
+          "kind": "unknown",
+          "what": "未登记配置态的周期提示是否属于复制保护、周期初值与重算规则未逐条取证",
+          "next": "按 set:IsReggist 的写入点确认它是否只由启动参数置位；并核 60000ms 阈值与随机重算"
+        }
+      ],
+      "falsifiers": [
+        "若删掉 catch(退出) 后主循环仍能正常收尾 ⇒ 与本条「异常在循环内部被捕获」冲突",
+        "若在窗口已被销毁（服务窗口槽为 0）时仍发出关闭消息 ⇒ 与 0x4138bc 的判空冲突",
+        "若在分块之外还能找到第二个 retn ⇒ 与本条「唯一返回」冲突"
+      ]
+    },
+    {
+      "id": "CORE-BOOT-LOOP-EXC",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-EXC-DIALOG-VALUES",
+          "kind": "unknown",
+          "what": "对话框返回值 1 / 3 / 5 的差别未逐值取证；本版把「非 2 非 4」归为一档",
+          "next": "按对话框实现枚举按钮到返回值的映射"
+        },
+        {
+          "id": "RES-BOOT-EXC-RETRY-SCOPE",
+          "kind": "unknown",
+          "what": "重试时「现场」被丢到什么程度（是否重置当前帧内部的临时池）未取证",
+          "next": "对重试前后各帧字段做差分"
+        },
+        {
+          "id": "RES-BOOT-EXC-TEXT-CONTEXT",
+          "kind": "unknown",
+          "what": "四类文本各带哪些上下文只抽查到类型号非法与结构化异常两类的实参",
+          "next": "按四类的文本格式化调用点逐个登记实参来源"
+        }
+      ],
+      "falsifiers": [
+        "若在类型号非法的对话框里选「重试」后执行位置发生变化 ⇒ 与本条「重试不推进」冲突",
+        "若「忽略并前进」的步长是常量而不是当前帧的指令长度 ⇒ 与本条冲突",
+        "若退出类异常也弹对话框 ⇒ 与本条冲突"
+      ]
+    },
+    {
+      "id": "CORE-BOOT-EXIT-CLEANUP",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-CLEANUP-LOCAL",
+          "kind": "unknown",
+          "what": "第 8 步那个局部对象在启动期的用途未取证：它先确保父目录存在，再以只写方式试写一个临时名文件并立即关闭（看起来像存档/配置目录的可写性探测，但无证据）；文件最终是否留在盘上也没观测",
+          "next": "真机启动后检查该临时名文件是否存在 / 长度；并确认这条路径属于配置/存档机制而不是启动入口"
+        },
+        {
+          "id": "RES-BOOT-CLEANUP-WINDOW",
+          "kind": "unknown",
+          "what": "失败路径上「窗口已建立但不销毁」只有代码形状，没有真机观测",
+          "next": "真机造一次图形初始化失败，观察窗口与进程退出"
+        },
+        {
+          "id": "RES-BOOT-CLEANUP-ORDER-OBS",
+          "kind": "unknown",
+          "what": "顺序按调用序列读出，没有一条「顺序反了会怎样」的可执行观察",
+          "next": "造一个「清理中途挂起」的注入点，观察单实例信号何时变得可用"
+        }
+      ],
+      "falsifiers": [
+        "若在引擎析构之后仍能用引擎指针（第 4 步之前）⇒ 与第 4 步冲突",
+        "若失败路径也做 COM 反初始化 ⇒ 与本条「失败路径不做 5～7」冲突",
+        "若引擎析构抛异常后第 2～4 步仍执行 ⇒ 与本条冲突"
+      ]
+    },
+    {
+      "id": "CORE-BOOT-FAIL-RETURN",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-BOOT-FAIL-GATE-BRANCH",
+          "kind": "unknown",
+          "what": "闸门失败的不同分支里，一处销毁引擎、一处不销毁（是失败点先后不同还是同一源码被拆成两条路径）未逐点取证",
+          "next": "按每个闸门调用点登记「失败后走哪条分支、引擎对象是否存在」"
+        },
+        {
+          "id": "RES-BOOT-FAIL-MSG-SET",
+          "kind": "unknown",
+          "what": "图形失败的具体文本类别（哪一步用哪条文本）未逐条取证",
+          "next": "按错误通道的调用点枚举文本"
+        },
+        {
+          "id": "RES-BOOT-FAIL-RETURN-OBS",
+          "kind": "unknown",
+          "what": "没有真机观测过「重复实例返回 −1」与「索引失败返回 0」的退出码",
+          "next": "真机起两个实例 / 删掉两份初始化文件，各记一次进程退出码"
+        }
+      ],
+      "falsifiers": [
+        "若在索引失败时进程退出码非 0 ⇒ 与本条冲突",
+        "若第二个实例在检查单实例信号之前就打开文件 ⇒ 与本条「不做任何文件访问」冲突",
+        "若窗口类注册失败也显示消息 ⇒ 与本条表格冲突"
+      ]
     }
   ],
   "gaps": [
