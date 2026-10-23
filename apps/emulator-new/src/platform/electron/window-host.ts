@@ -500,7 +500,7 @@ export class ElectronWindowHost {
     win.setBackgroundColor('#000000');
     win.show();
     win.focus();
-    this.log('info', 'showWindow → 显示 bootstrap 窗口');
+    this.log('info', `TRACE window-show ${win.getContentSize().join('x')} t=${Date.now()}`);
   }
 
   private updateWindow(): void {

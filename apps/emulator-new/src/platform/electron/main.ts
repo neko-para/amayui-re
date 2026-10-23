@@ -28,6 +28,8 @@ import { REPO_ROOT, loadConfigKeys, loadOpcodeTable } from '../node/spec.ts';
 
 /** app 根：`apps/emulator-new`（`dist/renderer` 与 preload 都相对它） */
 const APP_ROOT = path.join(REPO_ROOT, 'apps', 'emulator-new');
+/** 持久日志：不依赖终端是否捕获 stdout（Electron 从快捷方式起时也能回看） */
+const LOG_FILE = path.join(REPO_ROOT, '.tmp', 'emulator-new.log');
 const WINDOW_TITLE = 'ARCGameEngine';
 const SMOKE_TIMEOUT_MS = 60_000;
 
@@ -62,6 +64,12 @@ function log(level: LogLevel, text: string): void {
   if (level === 'error') console.error(line);
   else if (level === 'warn') console.warn(line);
   else console.log(line);
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fs.appendFileSync(LOG_FILE, `${line}\n`);
+  } catch {
+    /* 日志失败不能影响启动 */
+  }
 }
 
 function parseU32(text: string, what: string): number {
