@@ -746,6 +746,10 @@ export class PixiRenderHost {
     this.sampleUntil = Date.now() + 3000;
     this.note(`TRACE release-start frame=${this.frameNo} texture=${textureId} t=${Date.now()}`);
     this.dropSlot(textureId);
+    // ★ 不能用**旧快照**重建：核心的 0x1f7 已经删掉绘制项，但 renderer 的上一份快照可能
+    //   还包含它；释放 43 时会把“引用空槽的白色绘制项”画成整屏白色 placeholder。
+    //   先把这份快照里对该纹理的引用一并剥掉，再做重建 / 呈现。
+    this.scrubTextureFromSnapshot(textureId);
     this.note(`releaseTexture(${textureId})：已销毁平台纹理`);
     this.rebuildSceneFromLastSnapshot();
     // ★ 释放纹理后**立刻重画一次**：旧 RT / 子节点已销毁，若等到下一次迭代才 present，
@@ -1102,6 +1106,17 @@ export class PixiRenderHost {
     }
     slot.rt?.destroy(true);
     this.slots.delete(id);
+  }
+
+  /** 从 renderer 的最近快照里删掉一个已释放纹理槽的引用（防止旧快照把空槽画成 placeholder） */
+  private scrubTextureFromSnapshot(textureId: number): void {
+    if (!this.scene) return;
+    const scene = this.scene;
+    this.scene = {
+      ...scene,
+      textures: scene.textures.filter((texture) => texture.id !== textureId),
+      drawItems: scene.drawItems.filter((item) => item.textureId !== textureId),
+    };
   }
 
   /** 用最近一次快照重建场景节点（`drawText` 改了纹理内容之后用；⛔ 不改快照本身） */
