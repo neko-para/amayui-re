@@ -73,6 +73,8 @@ export class ElectronWindowHost {
   private loadFailure: string | null = null;
   /** 用户点关闭时是否拦下来交给 renderer 的窗口过程（demo / smoke 放行） */
   private preventClose = true;
+  /** 关闭请求交给 renderer 后，若主循环已经结束 / 卡住，强制收尾的兜底定时器 */
+  private closeFallback: ReturnType<typeof setTimeout> | null = null;
   private powerSaveBlockerId: number | null = null;
 
   private readonly readyPromise: Promise<RendererReady>;
@@ -187,6 +189,12 @@ export class ElectronWindowHost {
       if (!this.destroyed && this.preventClose) {
         event.preventDefault();
         this.sendWindowMessage({ kind: 'close' });
+        // ★ macOS 的关闭按钮只把窗口藏起来；而这个实现把 close 转给 renderer 的窗口过程，
+        //   由它 hideWindow + postQuitMessage。若 VM 已经结束（例如停在未实现 opcode）或
+        //   renderer 不再泵消息，close 就永远没有消费者，进程会一直存活（Windows 上同样
+        //   可能发生，只是时序不同）。这里给“交给 renderer”一个兜底：超时仍未 done 就
+        //   destroy + quit；正常路径下 done 会先到，dispose() 会清掉定时器。
+        this.scheduleCloseFallback();
         return;
       }
       // demo / smoke / 已经完成销毁：放行；`window-all-closed` 会退出。
@@ -195,6 +203,7 @@ export class ElectronWindowHost {
     win.on('blur', () => { this.sendWindowMessage({ kind: 'activate', active: false }); });
     win.on('closed', () => {
       const wasDestroyed = this.destroyed;
+      this.clearCloseFallback();
       this.destroyed = true;
       this.win = null;
       this.log('info', 'game 窗口已关闭（closed）');
@@ -286,8 +295,26 @@ export class ElectronWindowHost {
     this.preventClose = false;
   }
 
+  private scheduleCloseFallback(): void {
+    if (this.closeFallback !== null) return;
+    this.closeFallback = setTimeout(() => {
+      this.closeFallback = null;
+      if (this.destroyed) return;
+      this.log('warn', '关闭兜底：renderer 未在超时内完成 close（主循环可能已结束）⇒ 强制销毁窗口并退出');
+      this.dispose();
+      app.quit();
+    }, 1500);
+  }
+
+  private clearCloseFallback(): void {
+    if (this.closeFallback === null) return;
+    clearTimeout(this.closeFallback);
+    this.closeFallback = null;
+  }
+
   /** 退出清理（幂等） */
   dispose(): void {
+    this.clearCloseFallback();
     this.destroyed = true;
     ipcMain.removeHandler(CHANNEL_BRIDGE_INVOKE);
     ipcMain.removeListener(CHANNEL_RENDERER_EVENT, this.onEvent);
@@ -500,7 +527,7 @@ export class ElectronWindowHost {
     win.setBackgroundColor('#000000');
     win.show();
     win.focus();
-    this.log('info', `TRACE window-show ${win.getContentSize().join('x')} t=${Date.now()}`);
+    this.log('info', 'showWindow → 显示 bootstrap 窗口');
   }
 
   private updateWindow(): void {

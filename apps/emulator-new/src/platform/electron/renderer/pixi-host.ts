@@ -508,11 +508,6 @@ export class PixiRenderHost {
   private lastDraw: LastDrawState | null = null;
   private lastPresent: LastPresentState | null = null;
   private presentCount = 0;
-  /** 诊断：present 序号 / 上一次周期性 trace 的序号 */
-  private frameNo = 0;
-  private lastTraceFrame = 0;
-  /** 只在这段时间内做 readPixels 取样（避免每帧强制同步 GPU） */
-  private sampleUntil = 0;
   /** 各类场景警告上次发出的文本（同一条不每帧重复写） */
   private readonly lastSceneNotes = new Map<string, string>();
   private readonly notes: string[] = [];
@@ -742,9 +737,6 @@ export class PixiRenderHost {
       this.note(`releaseTexture(${textureId})：槽不存在 ⇒ 幂等忽略`);
       return;
     }
-    // 释放后 3 秒内逐帧取样（版权页结束后的白闪正好落在这个窗口）
-    this.sampleUntil = Date.now() + 3000;
-    this.note(`TRACE release-start frame=${this.frameNo} texture=${textureId} t=${Date.now()}`);
     this.dropSlot(textureId);
     // ★ 不能用**旧快照**重建：核心的 0x1f7 已经删掉绘制项，但 renderer 的上一份快照可能
     //   还包含它；释放 43 时会把“引用空槽的白色绘制项”画成整屏白色 placeholder。
@@ -756,7 +748,6 @@ export class PixiRenderHost {
     //   合成器可能先拿一帧“无内容”的白色后缓冲（版权页结束释放全屏纹理时最容易看到）。
     //   重画的是**当前场景**（已不含被释放的槽），清屏色仍是 renderer 背景。
     this.present();
-    this.note(`TRACE release-end frame=${this.frameNo} texture=${textureId} t=${Date.now()}`);
   }
 
   /** diagnostics 面板的数据源（每次调用后重新取；纯数据） */
@@ -826,8 +817,6 @@ export class PixiRenderHost {
     const background = params.background & 0xffffff;
     this.app.renderer.background.color = background;
     this.initInfo = params;
-    // 启动后 3 秒内取样（覆盖首帧 / 窗口 show 附近的合成）
-    this.sampleUntil = Date.now() + 3000;
     document.body.dataset.screenMode = params.screenMode === 0 ? 'fullscreen' : 'window';
     this.note(
       `init：${width}×${height}，${modeLabelOf(params)}，背景 #${background.toString(16).padStart(6, '0')}` +
@@ -1376,42 +1365,6 @@ export class PixiRenderHost {
    *   见回报 §4）。
    * ★ `sceneRoot` **不在** `app.stage` 里 ⇒ 这里画一次就是一次（⛔ 不会重影）。
    */
-  /**
-   * 诊断：每帧记录一次候选白闪；只在“中心像素近白”或每 120 帧时落日志。
-   * ★ readPixels 会强制同步 GPU，**只用于定位白闪**，不是常态渲染路径。
-   * ★ 坐标是 WebGL 的 bottom-left；中心点取 (w/2, h/2)，对白闪足够。
-   */
-  private traceFrame(kind: 'backbuffer' | 'texture', target: number, clear: boolean): void {
-    this.frameNo += 1;
-    let sample = '';
-    let white = false;
-    if (kind === 'backbuffer' && Date.now() <= this.sampleUntil) {
-      try {
-        const gl = (this.app.renderer as unknown as { gl?: WebGL2RenderingContext }).gl;
-        if (gl) {
-          const px = new Uint8Array(4);
-          gl.readPixels(
-            Math.max(0, Math.floor(this.app.renderer.width / 2)),
-            Math.max(0, Math.floor(this.app.renderer.height / 2)),
-            1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px,
-          );
-          white = px[0]! >= 245 && px[1]! >= 245 && px[2]! >= 245;
-          sample = ` rgba=${px[0]},${px[1]},${px[2]},${px[3]}`;
-        }
-      } catch (error) {
-        sample = ` sample-error=${messageOf(error)}`;
-      }
-    }
-    const due = white || this.frameNo - this.lastTraceFrame >= 120;
-    if (!due) return;
-    this.lastTraceFrame = this.frameNo;
-    this.note(
-      `TRACE frame=${this.frameNo} white=${white ? 'YES' : 'no'} kind=${kind} target=${target}` +
-      ` clear=${clear} built=${this.built.length} canvas=${this.app.renderer.width}x${this.app.renderer.height}` +
-      ` t=${Date.now()}` + sample,
-    );
-  }
-
   private present(): void {
     const scene = this.scene;
     if (!scene) {
@@ -1438,7 +1391,6 @@ export class PixiRenderHost {
         slot.hasContent = true;
         this.presentCount += 1;
         this.lastPresent = { kind: 'texture', textureId: scene.target, fellBackToBackBuffer: false };
-        this.traceFrame('texture', scene.target, !slot.hasContent);
         return;
       }
       this.note(`present：目标纹理槽 ${scene.target} 不在场景里 ⇒ 退回后缓冲（诊断，不是规范结论）`);
@@ -1446,7 +1398,6 @@ export class PixiRenderHost {
 
     this.app.renderer.render({ container: this.sceneRoot, clear: true });
     this.presentCount += 1;
-    this.traceFrame('backbuffer', -1, true);
     this.lastPresent = {
       kind: 'backbuffer',
       textureId: null,
