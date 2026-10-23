@@ -495,6 +495,9 @@ export class ElectronWindowHost {
   private showWindow(): void {
     const win = this.win;
     if (win === null || win.isDestroyed()) return;
+    // ★ 原生窗口底色再钉一次黑：某些 Windows / 显卡组合在 show / 尺寸切换的第一帧
+    //   会先合成窗口底色；不给白底，避免版权页结束后偶发白闪。
+    win.setBackgroundColor('#000000');
     win.show();
     win.focus();
     this.log('info', 'showWindow → 显示 bootstrap 窗口');

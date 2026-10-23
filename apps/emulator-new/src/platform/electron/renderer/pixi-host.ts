@@ -740,6 +740,10 @@ export class PixiRenderHost {
     this.dropSlot(textureId);
     this.note(`releaseTexture(${textureId})：已销毁平台纹理`);
     this.rebuildSceneFromLastSnapshot();
+    // ★ 释放纹理后**立刻重画一次**：旧 RT / 子节点已销毁，若等到下一次迭代才 present，
+    //   合成器可能先拿一帧“无内容”的白色后缓冲（版权页结束释放全屏纹理时最容易看到）。
+    //   重画的是**当前场景**（已不含被释放的槽），清屏色仍是 renderer 背景。
+    this.present();
   }
 
   /** diagnostics 面板的数据源（每次调用后重新取；纯数据） */
