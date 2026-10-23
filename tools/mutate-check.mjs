@@ -416,6 +416,76 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-config.test.mjs',
     what: '玩家文件匹配改成折叠大小写 ⇒ 规范要求的"字节精确"被放宽（错大小写也被入库，而看起来只是"读到了值"）',
   },
+  // ── 玩家文件的字段切分 / 裁剪（★ 逐字节取证：顶层 `=` / 剥引号门槛 / 只剥一层 / 末行丢弃 / 引号屏蔽）──
+  {
+    file: 'apps/emulator-new/src/core/config.ts',
+    from: '  while (a < b && s.charCodeAt(a) <= 0x20) a += 1;',
+    to: '  while (a < b && s.charCodeAt(a) <= 0x1f) a += 1; // 变异：0x20 不再算裁剪边界',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '首端裁剪漏掉 0x20（空格）⇒ `  ScreenMode = …` 的键带着前导空格，永远匹配不到词表（默认值静默留下）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/config.ts',
+    from: '  if (a > 0 && b > 0 && s.charCodeAt(a) === 0x22 && s.charCodeAt(b - 1) === 0x22) {',
+    to: '  if (b > 0 && s.charCodeAt(a) === 0x22 && s.charCodeAt(b - 1) === 0x22) { // 变异：去掉起始下标门槛',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '剥引号不再要求开引号前有被裁掉的字节 ⇒ `Font="A"` 的值从 `"A"` 变成 `A`（引号被静默吃掉）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/config.ts',
+    from: '    return s.slice(a + 1, Math.max(a + 1, b - 1));',
+    to: '    return trimField(s.slice(a + 1, b - 1)); // 变异：剥完再递归裁剪',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ 剥完一层又递归裁剪 ⇒ 引号内的空格被吃掉，由「引号内空格保留」（`"  A  "` ⇒ `A`）当场抓住',
+  },
+  // ── 段头的括号搜索要跳过落在双字节字符内部的命中（★ CP932 后继字节区间 0x40–0x7E 与 `]` 重叠）──
+  {
+    file: 'apps/emulator-new/src/core/config.ts',
+    from: '    if (line.charCodeAt(pos) === 0x5d && !insideDoubleByte(line, pos)) return pos;',
+    to: '    if (line.charCodeAt(pos) === 0x5d) return pos; // 变异：不判双字节边界',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ 段名里双字节字符的第二个字节恰为 0x5D 时被当成结束括号 ⇒ 字符被截掉半个、段名从此匹配不到词表（覆盖静默失效）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/config.ts',
+    from:
+      'function insideDoubleByte(s: string, pos: number): boolean {\n' +
+      '  const cur = s.charCodeAt(pos);\n' +
+      '  if (isCp932LeadByte(cur) && pos + 1 < s.length && isCp932TrailByte(s.charCodeAt(pos + 1))) return true;\n' +
+      '  return pos > 0 && isCp932LeadByte(s.charCodeAt(pos - 1)) && isCp932TrailByte(cur);\n' +
+      '}',
+    to:
+      'function insideDoubleByte(s: string, pos: number): boolean {\n' +
+      '  let inside = false; // 变异：改成从行首配对\n' +
+      '  for (let i = 0; i < pos; ) {\n' +
+      '    if (isCp932LeadByte(s.charCodeAt(i))) { inside = i + 1 === pos; i += 2; } else { inside = false; i += 1; }\n' +
+      '  }\n' +
+      '  return inside;\n' +
+      '}',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ 把「局部判定」换成「从行首配对」⇒ 连续两个前导字节后再跟 `0x5D` 时后者被当成独立的 `]`（段名被提前截断，而单对输入看不出差别）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/config.ts',
+    from: '  for (let pos = line.length - 1; pos >= 0; pos -= 1) {',
+    to: '  for (let pos = 0; pos < line.length; pos += 1) { // 变异：改找第一个 `]`',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '★ 段头取第一个 `]` 而不是最后一个 ⇒ `[a]b]` 的段名从 `a]b` 变成 `a`（后续整段覆盖静默落空）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/config.ts',
+    from: '    if (!lf && chunk.length < LINE_MAX) break; // EOF 前的残行：整行丢弃',
+    to: '    if (false) break; // 变异：EOF 前的残行也收下',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '末行没有 LF 也收 ⇒ 与引擎的读行器相反（残行被当成一行解析，而文件看起来"只是少个换行"）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/config.ts',
+    from: '    if (paren === 0 && quote % 2 === 0 && c === 0x3d) {',
+    to: '    if (paren === 0 && c === 0x3d) { // 变异：引号不再屏蔽分隔符',
+    guard: 'tools/test/emulator-new-config.test.mjs',
+    what: '引号不再屏蔽 `=` ⇒ `"Font=a` 被切成键 `"Font`、值 `a`（引擎把整行当一个键）',
+  },
   // ── 配置键的 UB 判据（★ 规范明确：引用不在该族全局池 ⇒ 键没有定义）
   {
     file: 'apps/emulator-new/src/core/handlers.ts',
@@ -1488,6 +1558,14 @@ const MUTATIONS = [
     guard: 'tools/test/spec-gaps.test.mjs',
     what: '★ 未成篇 opcode 段漏列 `0x4`（有处理函数、但没有任何规则标题覆盖）⇒ 精确划分不成立；报告仍打印一个"自洽"的数字',
   },
+  // ── 章首「本章 N 条规则」与 `<!-- rule:` 标记数同一份账（★ 只改声明、不改标记 ⇒ 章首计数立刻对不上）──
+  {
+    file: 'data/spec/chapters/65-save.md',
+    from: '本章 8 条规则。',
+    to: '本章 7 条规则。',
+    guard: 'tools/test/spec-gaps.test.mjs',
+    what: '★ 章首声明「本章 7 条规则」而文件里仍有 8 个 <!-- rule: --> 标记 ⇒ 章首计数与规则标记不是同一份账（spec-gaps 的章首规则计数必须红）',
+  },
   // ── 0x000–0x0FF 段新增规则的站点锚：`0x8c` 的 handler 起点偏移一格 ⇒ 锚落到指令中间 ──
   {
     file: 'data/spec/bindings.json',
@@ -1538,6 +1616,27 @@ const MUTATIONS = [
     to: 'readFloat(m, ops, 2) + readFloat(m, ops, 3)',
     guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
     what: '★ `0x2d1` 的减改成加 ⇒ 方向错误不会抛，只会静默算错；合同守卫必须当场红',
+  },
+  // ── 0x1a0 的七格映射：真实样本里"星期"（+268）与"日"（+270）不同值 ──
+  //   ★ 把日读成星期不会抛：第 5 个操作数从 23 变成 3，只有拿真实头对值的守卫能抓住。
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '    readU16LE(bytes, 264), readU16LE(bytes, 266), readU16LE(bytes, 270),',
+    to: '    readU16LE(bytes, 264), readU16LE(bytes, 266), readU16LE(bytes, 268),',
+    guard: 'tools/test/emulator-new-save-read-fields.assets.test.mjs',
+    what: '★ `0x1a0` 把星期（+268）当成日读进第 5 个操作数 ⇒ 日期整体错位而不抛，由真实样本头守卫抓住',
+  },
+  // ── 0x1ab / 0x1ac：两个文件都总是尝试（★ 第一个失败就返回 ⇒ 第二个文件不被碰、两个都失败也只报 1）──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from:
+      "  if (!(await host.remove(host.fileForSlot(slot, 'dat')))) code = 1;\n" +
+      "  if (!(await host.remove(host.fileForSlot(slot, 'sth')))) code = 2;",
+    to:
+      "  if (!(await host.remove(host.fileForSlot(slot, 'dat')))) code = 1;\n" +
+      "  else if (!(await host.remove(host.fileForSlot(slot, 'sth')))) code = 2; // 变异：提前返回",
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '★ `0x1ab` 在 .DAT 失败处提前返回（不再删 .STH）⇒ 两个都失败也只报 1；守卫必须抓住「两个都尝试过 / 两个都失败 ⇒ 2」',
   },
   {
     file: 'data/spec/bindings.json',
@@ -1673,8 +1772,8 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator-new/src/core/config.ts',
-    from: "    out.set(`${section}\\\\${trimField(raw.slice(0, eq))}`, trimField(raw.slice(eq + 1)));",
-    to: "    out.set(`${section}:${trimField(raw.slice(0, eq))}`, trimField(raw.slice(eq + 1))); // 变异：段键分隔符写错",
+    from: '    out.set(`${section}\\\\${trimField(topLevelField(raw, 0))}`, trimField(topLevelField(raw, 1)));',
+    to: '    out.set(`${section}:${trimField(topLevelField(raw, 0))}`, trimField(topLevelField(raw, 1))); // 变异：段键分隔符写错',
     guard: 'tools/test/emulator-new-config.test.mjs',
     what: '★ 玩家文件的段/键分隔符 `\\\\` → `:` ⇒ 所有覆盖都查不到，默认值原样留下（静默失效）',
   },
@@ -1925,6 +2024,105 @@ const MUTATIONS = [
     what: '0x100 的“当前位置重派发”写成下一条 ⇒ 多个按键只派发第一个、游标不再逐个前进',
   },
 
+  // ── emulator-new：TITLE 的 `Version` 数字（0x23b CG 数字条）与颜色键 ──
+  {
+    file: 'apps/emulator-new/src/core/agf.ts',
+    from: '    const argb = ((rgba[i + 3]! << 24) | (rgba[i]! << 16) | (rgba[i + 1]! << 8) | rgba[i + 2]!) >>> 0;',
+    to: '    const argb = ((rgba[i]! << 16) | (rgba[i + 1]! << 8) | rgba[i + 2]!) >>> 0;',
+    guard: 'tools/test/emulator-new-agf.test.mjs',
+    what: '颜色键只比 RGB、丢掉 alpha ⇒ TITLE 的 Version 黑色描边被键 0 清成洞（"破裂"的根因）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/cg-digit.ts',
+    from: '  const srcStride = rec.cellWidth + rec.innerGap;',
+    to: '  const srcStride = rec.cellWidth + rec.advanceGap;',
+    guard: 'tools/test/emulator-new-cg-digit.test.mjs',
+    what: '0x23b 的源格子步长用错字段（字距 -3 代替字内空隙 2）⇒ 七位数字全取到相邻格子 / 越界，版本号错字',
+  },
+  {
+    file: 'apps/emulator-new/src/core/cg-digit.ts',
+    from: '      : zeroFill || k === last || remaining !== 0;',
+    to: '      : zeroFill || k === last;',
+    guard: 'tools/test/emulator-new-cg-digit.test.mjs',
+    what: '0x23b 丢掉"剩余值 != 0"判据 ⇒ 右对齐时高位永远补 0（Version 会显示 0.00.0000 而看不出值）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  [0x23b, cgDraw23b],',
+    to: "  [0x23b, unmodeledHandler(0x23b, 'adv-text')],",
+    guard: 'tools/test/emulator-new-title.assets.test.mjs',
+    what: '0x23b 退回未建模 ⇒ TITLE 的 Version 七位数字消失、只剩两个静态小数点（真实启动链守卫必须红）',
+  },
+
+  // ── emulator-new：0x2da / 0x23b / 四张同键表的读序与删除集合 ──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  if (id < 0 || id > 10) {',
+    to: '  if (id < 0 || id > 999) {',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '0x2da 的编号上限写成 999（引擎是 `cmp edi,0Ah; ja`）⇒ 编号 11 = 12 被当成合法并去读其余七个操作数',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  return [m.scene.drawItems, m.scene.meshes, ...m.scene.auxTables];',
+    to: '  return [m.scene.drawItems, m.scene.meshes, m.scene.auxTables[0]];',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '0x1f7 / 0x1f6 / 0x23b 共用的四张同键表少一张（漏掉第二张辅助表）⇒ 删除 / 清空集合不再一致',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  for (const slot of plan) {',
+    to: '  if (plan.length === 0) { readInt(m, ops, 4); readInt(m, ops, 5); }\n  for (const slot of plan) {',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '0x23b 在位数 ≤ 0 时仍读 op4 / op5（引擎只在每个被画出的位的建项分支里读）⇒ 非法操作数会被提前碰到',
+  },
+  // ── `0x1a0` 的失败路径只写状态码 op1（★ 顺手写一格 op3 ⇒ "op3..9 保持原值"那条断言必须红）──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from:
+      "  const bytes = await host.read(host.fileForSlot(slot, 'dat'));\n" +
+      '  if (!bytes) {\n' +
+      '    writeInt(m, ops, 1, 1);\n' +
+      '    return;\n' +
+      '  }',
+    to:
+      "  const bytes = await host.read(host.fileForSlot(slot, 'dat'));\n" +
+      '  if (!bytes) {\n' +
+      '    writeInt(m, ops, 1, 1);\n' +
+      '    writeInt(m, ops, 3, 0);\n' +
+      '    return;\n' +
+      '  }',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '0x1a0 打不开时顺手写一格 op3 ⇒ 失败路径"op3..9 保持原值"的断言必须红（半截字段是静默的）',
+  },
+  // ── 0x1af：`.STH` 的 BMP 判别字节（`bm` 的第二字节 0x4d）──
+  //   ★ 判别写成别的字节后，真机 `.STH`（B=0x4d）会被当成"内容不可解"，而合成数据照样能过 ⇒
+  //     "缩略图读得回来"这件事只有这条断言在守。
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) {',
+    to: '  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x00) {',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '0x1af 的 BMP 判别字节写错（0x4d → 0x00）⇒ 带 "BM" 的文件被判成不可解，状态码从 0 变 2',
+  },
+  // ── 0x1af：真机 `.STH` 的**两段头读满**（★ 去掉长度检查 ⇒ 只剩 40 字节的文件照样进上传请求）──
+  //   ★ 这条守的是**实现现状**（引擎只看 ReadFile 布尔、短读未取证 ⇒ 见 RES-SAVE-STH-SHORTREAD），
+  //     所以它必须钉在实现守卫上，⛔ 不能挪进 `spec-save-sth`（那会把"未取证"伪装成合同）。
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) {',
+    to: '  if (bytes.length < 0 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) { // 变异：不再要求两段头读满',
+    guard: 'tools/test/emulator-new-save-sth.assets.test.mjs',
+    what: '0x1af 不再检查「两段头是否读满」⇒ 只剩 40 字节的真实 `.STH` 被当成可解、进上传请求（实现守卫必须红）',
+  },
+  // ── `.STH` 的**声明长度 = 像素 + 40**（★ 改成 +54 就是"修正"那个写侧缺陷；真实样本守卫必须红）──
+  {
+    file: 'tools/test/spec-save-sth.assets.test.mjs',
+    from: "  assert.equal(h.declaredSize, 40 + pixels, '声明的文件长度 = 像素字节数 + 40（不是 +54）');",
+    to: "  assert.equal(h.declaredSize, 54 + pixels, '声明的文件长度 = 像素字节数 + 54'); // 变异：把 +40 修正成 +54",
+    guard: 'tools/test/spec-save-sth.assets.test.mjs',
+    what: '把 `.STH` 的声明长度"修正"成 54 + 像素 ⇒ 真机四份样本当场对不上（bfSize 是承重字段，不是可自由解释的怪癖）',
+  },
 
 ];
 

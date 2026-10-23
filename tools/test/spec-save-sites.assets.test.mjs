@@ -1,6 +1,6 @@
 /** @env assets @kind gate @why 新增 FMT-SAVE 规则的站点 EA 不在语料行里 / 指到指令中间 ⇒ 机器绑定指错位置 */
 /**
- * tools/test/spec-save-sites.assets.test.mjs —— FMT-SAVE 6 条规则的**站点锚**守卫
+ * tools/test/spec-save-sites.assets.test.mjs —— FMT-SAVE 规则的**站点锚**守卫
  * 判据同 `spec-ops-000-sites`：`.text` 段必须是指令行（函数起点空文本行允许），数据段存在即可。
  */
 import { test } from 'node:test';
@@ -12,7 +12,7 @@ import { REPO_ROOT } from '../lib/paths.mjs';
 
 const LST = path.join(REPO_ROOT, 'corpus', 'disasm', 'files', 'AGE.EXE__dumped.sectfix.EXE.lst');
 const BINDINGS = path.join(REPO_ROOT, 'data', 'spec', 'bindings.json');
-const RULES = ['FMT-SAVE-SLOT', 'FMT-SAVE-HEADER', 'FMT-SAVE-ENVELOPE', 'FMT-SAVE-BODY', 'FMT-SAVE-RESTORE'];
+const RULES = ['FMT-SAVE-SLOT', 'FMT-SAVE-STH', 'FMT-SAVE-HEADER', 'FMT-SAVE-HEADER-FIELDS', 'FMT-SAVE-ENVELOPE', 'FMT-SAVE-BODY', 'FMT-SAVE-RESTORE'];
 
 function lines() {
   const map = new Map();

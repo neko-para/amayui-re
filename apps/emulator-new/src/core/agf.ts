@@ -182,15 +182,26 @@ export function decodeAgf(bytes: Uint8Array): DecodedAgf {
 }
 
 /**
- * 颜色键：把 RGBA 里颜色等于键的像素**整条**写成 0（透明黑）。
- * ★ 引擎在上传期做这件事；`key` 是 `0xFF000000 | RGB`，`0` 表示黑色键。
+ * 颜色键：把 RGBA 里**整条 ARGB 等于键**的像素写成 0（透明黑）。
+ *
+ * ★ 为什么必须比 alpha（本轮缺陷的根因）：引擎在上传期按 **32 位像素值**比较，A 字节参与。
+ *   逐字证据（`sub_48B090`，32bpp 分支 `0x48BEC0` 起）：先由源字节装配
+ *   `(A<<24) | (R<<16) | (G<<8) | B`，再 `cmp ecx, [ebp+var_43C]`（`0x48BF2F`）；
+ *   `var_43C` 是 `0x1f9` 归一化后的键。24bpp 走 `0x48C040`，有 alpha 段时同样读 A；
+ *   8bpp 的调色板在装配时把 A 固定成 0xFF，再与键比较（`0x48B3BB`）——
+ *   所以"键 0"在三条路径上都**不会**命中不透明像素。
+ * ★ 键 0 = **无键**：`0x1f9` 的操作数 < 0 ⇒ 归一化成 0（TITLE 的 `set-texture 5272 4 (local-int 40d)`
+ *   前一条 `sub (local-int 40d) 0 3` 就是负值）。只有非负操作数才归一化成
+ *   `0xFF000000 | (值 & 0xFFFFFF)`；后者才清"不透明黑"。
+ * ★ 装配顺序是 **0xAARRGGBB**（A/R/G/B），⛔ 不要漏掉 A 或把通道顺序换掉：
+ *   漏掉 A 会把 alpha=255 的黑色描边当成键 0 清成洞（正是本轮"破裂"的成因）。
  */
 export function applyColorKey(rgba: Uint8Array, colorKey: number): void {
   if ((rgba.length & 3) !== 0) throw new Error(`rgba-length-not-multiple-of-4:${rgba.length}`);
-  const key = colorKey & 0xffffff;
+  const key = colorKey >>> 0;
   for (let i = 0; i < rgba.length; i += 4) {
-    const rgb = (rgba[i]! << 16) | (rgba[i + 1]! << 8) | rgba[i + 2]!;
-    if (rgb === key) {
+    const argb = ((rgba[i + 3]! << 24) | (rgba[i]! << 16) | (rgba[i + 1]! << 8) | rgba[i + 2]!) >>> 0;
+    if (argb === key) {
       rgba[i] = 0;
       rgba[i + 1] = 0;
       rgba[i + 2] = 0;

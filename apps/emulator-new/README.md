@@ -60,7 +60,8 @@
   不是静默 no-op；白名单外仍按"停在它前面"处理。
 - **未建模子系统（白名单）**：音频输出、ADV 文字显示、Live2D 的内部语义不在本实现，但它们的指令**逐条登记**：
   - 音频（`0xb4` 装载 / `0xb5` 播放 / `0xbf` BGM）：只记 `audio.*` 请求；`0xbf` 仍清状态字第 9 位（spec 的引擎数据效果）。
-  - ADV 文字（`0x23b` 数字绘制 / `0x2c7` SJIS 字符串工具）：记 `unmodeled.subsystem` 请求 + 首次诊断。
+  - ADV 文字（`0x2c7` SJIS 字符串工具）：记 `unmodeled.subsystem` 请求 + 首次诊断。
+    ★ `0x23b`（CG 数字条画数值）**已建模**：TITLE 的 `Version 0.00.0000` 七位数字就是它画的（`core/cg-digit.ts`）。
   - Live2D（`0x341` 模型 / `0x345` 纹理 / `0x34e` 动作 / `0x352` 动作参数）：同上。
   - ⛔ 白名单不是"没有效果"的断言：每条都留 effect、可被 `--trace` / 报告计数；未列入的 `0x12e`（鼠标命中）、
     `0x140`（AGERC 对话框）、`0x23d` / `0x32b`（退出清理）仍然会停下来。
@@ -161,6 +162,9 @@ pnpm --filter @amayui/emulator-new exec electron . --smoke
 
 # 真实入口：安装目录 → 索引 → 窗口 / 图形设备 → 根脚本
 pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>"
+
+# 跳过 LOGO（show-logo 初值置 0）；Electron 与 CLI 同名参数
+pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>" --skip-logo
 ```
 
 ★ 受限沙箱里 Electron 需要 `--no-sandbox`（放在 `electron .` 与 app 路径之间）；正常桌面不要加。

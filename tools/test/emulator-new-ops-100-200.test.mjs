@@ -1,11 +1,14 @@
-/** @env pure @kind contract @why 浮点绝对值 / 四则运算 / 位 27 读回写错方向或漏解码，都不会抛，只会让后续分支静默走错 */
+/** @env pure @kind contract @why 浮点/位运算方向、0x2da 编号上限、0x23b 逐位读序、0x1a0 失败路径只写 op1、四张同键表集合任一写错都不抛，只会静默算错或读错操作数 */
 /**
  * tools/test/emulator-new-ops-100-200.test.mjs —— 0x191 / 0x2d0 / 0x2d1 / 0x2d3 / 0x1c7 的合同守卫。
  *
  * ★ 判据为什么是这些：
  *   - 0x2d1 / 0x2d3 的**方向**（op2 ∘ op3）写反不会报错，只会静默算错；
  *   - 0x191 必须取绝对值，不能只搬运；
- *   - 0x1c7 只读**第 27 位**并归一成 0/1，不能把整字或别的位写出去。
+ *   - 0x1c7 只读**第 27 位**并归一成 0/1，不能把整字或别的位写出去；
+ *   - 0x2da 的编号上限是 **10**（不是 999），且越界时**其余七个操作数一次都不读**；
+ *   - 0x23b 的 op4 / op5 只在**每个被画出的位**上读；位数 ≤ 0 时一次都不读；
+ *   - 0x1f7 / 0x1f6 / 0x23b 删 / 清的是**同一组四张同键表**（对象记录 + 网格 + 两张辅助）。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,6 +25,27 @@ const f32 = (bits) => new Float32Array(new Uint32Array([bits >>> 0]).buffer)[0];
 
 function machine(opts = {}) {
   return new Machine({ body: Buffer.alloc(4), table: new Map(), key: KEY, ...opts });
+}
+
+/**
+ * `0x1f7` / `0x1f6` / `0x23b` 共用的**四张同键表**（对象记录 + 网格 + 两张辅助）。
+ * ★ 守卫按这份清单逐表断言：任何一条指令少删 / 少清一张，都会在对应表上红。
+ */
+function tableEntriesOf(m) {
+  return [
+    ['drawItems', m.scene.drawItems],
+    ['meshes', m.scene.meshes],
+    ...m.scene.auxTables.map((table, i) => [`auxTables[${i}]`, table]),
+  ];
+}
+
+/** 往四张同键表里各放同样的键（绘制项用可辨认的 `textureId`，便于判断"被替换"）。 */
+function fillFourTables(m, keys) {
+  for (const key of keys) {
+    m.scene.drawItems.set(key, { flags: 0, textureId: 0xdead, left: 0, top: 0, right: 0, bottom: 0, aux: [0, 0, 0] });
+    m.scene.meshes.set(key, {});
+    for (const table of m.scene.auxTables) table.set(key, {});
+  }
 }
 
 function saveHost(overrides = {}) {
@@ -136,29 +160,94 @@ test('★ `0x258` / `0x259`：掩码只取低两位，两张表同值；`0x259` 
   assert.equal(m.scene.flagTableB.every((x) => x === 0), true);
 });
 
-test('★ `0x2da`：编号 > 999 ⇒ 错误通道且一个字段都不写；否则七个整数格', () => {
+test('★ `0x2da`：先读编号、上限 10；越界（含负数）⇒ 错误通道且其余七个操作数一次都不读', () => {
   const m = machine();
   HANDLERS.get(0x2da)(m, [op(0, 3), ...Array.from({ length: 7 }, (_, i) => op(0, i + 10))]);
   assert.deepEqual(m.scene.cgRecords.get(3), [10, 11, 12, 13, 14, 15, 16]);
+
+  // 10 是合法上限（引擎 `cmp edi,0Ah; ja`，不是 > 999）
+  HANDLERS.get(0x2da)(m, [op(0, 10), ...Array.from({ length: 7 }, () => op(0, 7))]);
+  assert.deepEqual(m.scene.cgRecords.get(10), Array(7).fill(7));
+
   const before = m.diagnostics.length;
-  HANDLERS.get(0x2da)(m, [op(0, 1000), ...Array.from({ length: 7 }, (_, i) => op(0, i))]);
-  assert.equal(m.scene.cgRecords.has(1000), false);
-  assert.equal(m.diagnostics.length, before + 1);
+  // 非法操作数类型：只要被读就抛 ⇒ 用它证明"越界时其余七个操作数一次都不读"
+  const bad = op(0x63, 0);
+  HANDLERS.get(0x2da)(m, [op(0, 11), bad, bad, bad, bad, bad, bad, bad]);
+  assert.equal(m.scene.cgRecords.has(11), false, '越界不写记录');
+  assert.equal(m.diagnostics.length, before + 1, '越界进错误通道');
+  assert.equal(m.scene.errorBuffer, 'CGNumberの引数が不正です．\r\n', '错误文本与 0x23b 同一条');
+
+  // 负数按越界处理（无符号 ja）：不抛、同一文本
+  HANDLERS.get(0x2da)(m, [op(0, -1), bad, bad, bad, bad, bad, bad, bad]);
+  assert.equal(m.scene.cgRecords.has(-1), false);
+  assert.equal(m.diagnostics.length, before + 2);
+
+  // 合法编号时 op2 确实会被读 ⇒ 非法类型当场抛（证明上面的"不读"不是恒真断言）
+  assert.throws(
+    () => HANDLERS.get(0x2da)(m, [op(0, 0), bad, op(0, 0), op(0, 0), op(0, 0), op(0, 0), op(0, 0), op(0, 0)]),
+    /unsupported-operand-type/,
+  );
 });
 
-test('★ `0x1f6`：清记录 / 网格 / 辅助表与脏标记，但不动“有动画”', () => {
+test('★ `0x1f6`：清**四张**同键表（对象记录 / 网格 / 两张辅助）与脏标记，但不动“有动画”', () => {
   const m = machine();
-  m.scene.drawItems.set(1, {});
-  m.scene.meshes.set(2, {});
-  m.scene.auxTables[0].set(3, {});
+  fillFourTables(m, [1, 2]);
   m.scene.dirty = 1;
   m.scene.animating = 1;
   HANDLERS.get(0x1f6)(m);
-  assert.equal(m.scene.drawItems.size, 0);
-  assert.equal(m.scene.meshes.size, 0);
-  assert.equal(m.scene.auxTables[0].size, 0);
+  assert.equal(tableEntriesOf(m).length, 4, '统一集合是四张表：对象记录 + 网格 + 两张辅助');
+  for (const [name, table] of tableEntriesOf(m)) assert.equal(table.size, 0, `${name} 必须被清空`);
   assert.equal(m.scene.dirty, 0);
   assert.equal(m.scene.animating, 1, '“有动画”不在清空范围');
+});
+
+test('★ `0x23b`：位数 ≤ 0 ⇒ 不读 op4 / op5（非法类型也不会被碰到）、不建项', () => {
+  const m = machine();
+  m.scene.cgRecords.set(5, [1, 100, 200, 12, 15, 2, -3]);
+  m.scene.drawItems.set(300, { flags: 1, textureId: 9, left: 0, top: 0, right: 0, bottom: 0, aux: [0, 0, 0] });
+  m.scene.dirty = 0;
+  const bad = op(0x63, 0);
+  HANDLERS.get(0x23b)(m, [op(0, 300), op(0, 5), op(0, 123), bad, bad, op(0, 0), op(0, 1)]);
+  assert.equal(m.scene.drawItems.get(300)?.textureId, 9, '位数 0 的清理区间为空 ⇒ 旧项不动');
+  assert.equal(m.scene.drawItems.size, 1, '不建项');
+  assert.equal(m.scene.dirty, 0, '没删没建 ⇒ 不置脏');
+
+  // 位数 1 ⇒ 会进建项分支读 op4：非法类型当场抛（证明上面的"不读"不是恒真断言）
+  const one = machine();
+  one.scene.cgRecords.set(5, [1, 100, 200, 12, 15, 2, -3]);
+  assert.throws(
+    () => HANDLERS.get(0x23b)(one, [op(0, 300), op(0, 5), op(0, 123), bad, op(0, 7), op(0, 1), op(0, 0)]),
+    /unsupported-operand-type/,
+  );
+});
+
+test('★ 0x1f7 / 0x1f6 / 0x23b：删 / 清的**表集合相同**（对象记录 + 网格 + 两张辅助）', () => {
+  // ① 0x1f7 区间删除：四张表都删 [100, 102)，102 保留
+  const detach = machine();
+  fillFourTables(detach, [100, 101, 102]);
+  HANDLERS.get(0x1f7)(detach, [op(0, 100), op(0, 2)]);
+  assert.equal(tableEntriesOf(detach).length, 4, '统一集合是四张表：对象记录 + 网格 + 两张辅助');
+  for (const [name, table] of tableEntriesOf(detach)) {
+    assert.equal(table.has(100), false, `0x1f7 必须删 ${name} 的 100`);
+    assert.equal(table.has(101), false, `0x1f7 必须删 ${name} 的 101`);
+    assert.equal(table.has(102), true, `0x1f7 不许删 ${name} 的 102（左闭右开）`);
+  }
+
+  // ② 0x23b 删旧项：同一组四张表都删 [300, 302)，302 保留；
+  //    绘制项会被同键新项覆盖 ⇒ 用新项的 textureId 证明旧项确实被删过。
+  const cg = machine();
+  cg.scene.cgRecords.set(5, [7, 0, 0, 12, 15, 2, -3]);
+  fillFourTables(cg, [300, 301, 302]);
+  HANDLERS.get(0x23b)(cg, [op(0, 300), op(0, 5), op(0, 5), op(0, 0), op(0, 0), op(0, 2), op(0, 0)]);
+  assert.equal(cg.scene.drawItems.get(300)?.textureId, 7, '300 上的旧绘制项被新项替换（说明清理走的是同一张表）');
+  assert.equal(cg.scene.drawItems.has(302), true, '302 在清理区间外');
+  for (const [name, table] of tableEntriesOf(cg)) {
+    if (name === 'drawItems') continue; // 绘制项被新项重新占用，用上面的 textureId 判断
+    assert.equal(table.has(300), false, `0x23b 必须删 ${name} 的 300`);
+    assert.equal(table.has(301), false, `0x23b 必须删 ${name} 的 301`);
+    assert.equal(table.has(302), true, `0x23b 不许删 ${name} 的 302`);
+  }
+  assert.equal(cg.scene.dirty, 1);
 });
 
 test('★ `0x19b` / `0x19c`：位 27 的清 / 条件置，C 支置 D、E 支不碰 D、F 支不动', () => {
@@ -502,6 +591,9 @@ test('★ `0x1a0`：读 292 字节头，7 个字段按序写 op3..9；打不开 
   buf.writeUInt16LE(2026, 264); buf.writeUInt16LE(10, 266); buf.writeUInt16LE(23, 270);
   buf.writeUInt16LE(12, 272); buf.writeUInt16LE(34, 274); buf.writeUInt16LE(56, 276);
   buf.writeUInt32LE(789, 280);
+  // 判别力：星期 / 毫秒 / 两个版本都填成与七个值不撞的数 ⇒ 读错字段会当场对不上。
+  buf.writeUInt16LE(7, 268); buf.writeUInt16LE(999, 278);
+  buf.writeUInt32LE(3, 284); buf.writeUInt32LE(20, 288);
   const m = machine({ saveHost: saveHost({ read: () => buf }) });
   const ops = [op(3, 0), op(0, 5), op(3, 1), op(3, 2), op(3, 3), op(3, 4), op(3, 5), op(3, 6), op(3, 7)];
   await HANDLERS.get(0x1a0)(m, ops);
@@ -509,32 +601,58 @@ test('★ `0x1a0`：读 292 字节头，7 个字段按序写 op3..9；打不开 
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((k) => readInt(m, ops, 2 + k)), [2026, 10, 23, 12, 34, 56, 789]);
 
   const miss = machine({ saveHost: saveHost({ read: () => null }) });
-  await HANDLERS.get(0x1a0)(miss, [op(3, 0), op(0, 5), op(3, 1), op(3, 2), op(3, 3), op(3, 4), op(3, 5), op(3, 6), op(3, 7)]);
+  // ★ 失败路径只写状态码（op1）：op3..9 必须保持原值（不许写半截字段）。
+  const sentinels = [111, 222, 333, 444, 555, 666, 777];
+  const seedFields = (mm) => sentinels.forEach((v, i) => mm.globalInt.set(1 + i, encodeInt(v, KEY)));
+  seedFields(miss);
+  await HANDLERS.get(0x1a0)(miss, ops);
   assert.equal(readInt(miss, ops, 1), 1);
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((k) => readInt(miss, ops, 2 + k)), sentinels, '打不开 ⇒ op3..9 保持原值');
 
   const bad = machine({ saveHost: saveHost({ read: () => Buffer.alloc(292) }) });
-  await HANDLERS.get(0x1a0)(bad, [op(3, 0), op(0, 5), op(3, 1), op(3, 2), op(3, 3), op(3, 4), op(3, 5), op(3, 6), op(3, 7)]);
+  seedFields(bad);
+  await HANDLERS.get(0x1a0)(bad, ops);
   assert.equal(readInt(bad, ops, 1), 2);
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((k) => readInt(bad, ops, 2 + k)), sentinels, '头不合法 ⇒ op3..9 保持原值');
 });
 
-test('★ `0x1ab` / `0x1ac`：先 .DAT 后 .STH；失败码 1 / 2 不可互换', async () => {
+test('★ `0x1ab` / `0x1ac`：先 .DAT 后 .STH，两个都总是尝试；第二个失败覆盖第一个', async () => {
+  // 都成功 ⇒ 0；两个文件都碰过。
+  const ok = machine({ saveHost: saveHost() });
+  await HANDLERS.get(0x1ab)(ok, [op(3, 1), op(0, 1)]);
+  assert.equal(readInt(ok, [op(3, 1)], 1), 0);
+  assert.deepEqual(ok.saveHost.calls, ['remove:slot1.dat', 'remove:slot1.sth']);
+
+  // .DAT 失败、.STH 成功 ⇒ 1；★ 第一个失败也必须继续做第二个。
   const del = machine({ saveHost: saveHost({ remove: (p) => p !== 'slot1.dat' }) });
   await HANDLERS.get(0x1ab)(del, [op(3, 1), op(0, 1)]);
-  assert.equal(readInt(del, [op(3, 1)], 1), 1, '.DAT 失败 ⇒ 1');
-  assert.deepEqual(del.saveHost.calls, ['remove:slot1.dat'], '.DAT 失败 ⇒ 不再删 .STH');
+  assert.equal(readInt(del, [op(3, 1)], 1), 1, '.DAT 失败 + .STH 成功 ⇒ 1');
+  assert.deepEqual(del.saveHost.calls, ['remove:slot1.dat', 'remove:slot1.sth'], '★ .DAT 失败 ⇒ 仍要删 .STH');
+
+  // 两个都失败 ⇒ 2（后一步覆盖前一步），且两个都尝试过。
+  const delBoth = machine({ saveHost: saveHost({ remove: () => false }) });
+  await HANDLERS.get(0x1ab)(delBoth, [op(3, 1), op(0, 1)]);
+  assert.equal(readInt(delBoth, [op(3, 1)], 1), 2, '★ 两个都失败 ⇒ 2（不是 1）');
+  assert.deepEqual(delBoth.saveHost.calls, ['remove:slot1.dat', 'remove:slot1.sth'], '★ 两个都失败 ⇒ 两个都尝试过');
 
   const del2 = machine({ saveHost: saveHost({ remove: (p) => p !== 'slot2.sth' }) });
   await HANDLERS.get(0x1ab)(del2, [op(3, 1), op(0, 2)]);
   assert.equal(readInt(del2, [op(3, 1)], 1), 2, '.STH 失败 ⇒ 2');
 
+  // 0x1ac 同形。
   const copy = machine({ saveHost: saveHost({ copy: (a) => a !== 'slot1.dat' }) });
   await HANDLERS.get(0x1ac)(copy, [op(3, 1), op(0, 1), op(0, 2)]);
   assert.equal(readInt(copy, [op(3, 1)], 1), 1);
-  assert.deepEqual(copy.saveHost.calls, ['copy:slot1.dat->slot2.dat']);
+  assert.deepEqual(copy.saveHost.calls, ['copy:slot1.dat->slot2.dat', 'copy:slot1.sth->slot2.sth']);
+
+  const copyBoth = machine({ saveHost: saveHost({ copy: () => false }) });
+  await HANDLERS.get(0x1ac)(copyBoth, [op(3, 1), op(0, 1), op(0, 2)]);
+  assert.equal(readInt(copyBoth, [op(3, 1)], 1), 2, '两个都失败 ⇒ 2');
+  assert.deepEqual(copyBoth.saveHost.calls, ['copy:slot1.dat->slot2.dat', 'copy:slot1.sth->slot2.sth'], '两个都尝试过');
 
   const copy2 = machine({ saveHost: saveHost({ copy: (a) => a !== 'slot1.sth' }) });
   await HANDLERS.get(0x1ac)(copy2, [op(3, 1), op(0, 1), op(0, 2)]);
-  assert.equal(readInt(copy2, [op(3, 1)], 1), 2);
+  assert.equal(readInt(copy2, [op(3, 1)], 1), 2, '.STH 失败 ⇒ 2');
 });
 
 test('★ `0x21d`：源 → 目标整份复制；三张表都无源 ⇒ 错误通道且不改', () => {

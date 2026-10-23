@@ -9,71 +9,48 @@
 
 ## 一句话
 
-core spec 的 `CORE-ISA` / `CORE-POOL` / `CORE-CONFIG` / `CORE-FRAME` 已落盘并有语料级 / pure 守卫；`apps/emulator-new`（只读 `data/spec`）走**真实入口**：安装目录 → `SYS4INI.BIN`（ALF 索引）→ 统一文件 id → 根脚本 **id 0**（`SYSTEM4.BIN`），并按 spec 执行。
-**本单是交接快照**：状态以各子单 / `pnpm tools requirements plan` 为准；这里只记"换会话 / 换设备必须知道的事"。
-★ **目标状态**：从 id 0 跑到 LOGO `0x20F` **仍未达成** —— 实测停在子脚本 `INITCONFIG0.BIN` 偏移 192 的 `0x192 set-string`（`INITCONFIG0` #12；旧文写的 LOADCONFIG 是错的）。前沿之后的路径由本单跟踪；旧「60→LOGO 剩余路径」单已 drop（spike 结论已落成 `CORE-OPS-FRAME-*` 规则）。
+2026-10-23 交接：`apps/emulator-new` 已从 SYSTEM4 启动链走到 TITLE（id `0x5264`）并进入输入环；TITLE 的 `Version 0.00.0000` 正常；CLI 与 Electron 都支持 `--skip-logo`。**工作树有未提交改动**（长期纪律：不 `git add` / `commit`）。
 
-## 上一轮（2026-10-21）spec 治理（前沿未动；第三轮见 `REQ-01M5ED1Z9W1V190WYF6T6M4FX1`）
+## 本会话已完成（可复核凭据）
 
-- **storage 指针全部改挂 shape**：`bindings.json` 里 `shape:` 89 处 / `layout:` 0 处；解析器**删掉了 `layout:` 分支**（不是计数棘轮，是结构性拒绝），守卫 `tools/test/spec.test.mjs#storage 指针只认 shape：bindings 里 0 处 layout:` + 变异条目。收口单 `REQ-01M5D2Q214Y8949Q0PBP236K29`（done）。
-- **两轮只读审稿**（60+45 条）逐条处置，清单与状态在 `docs/02-engine/spec-audit-2026-10.md` §八 / §九；可文本裁决的已改，12 条缺证据的转 `REQ-01M5D4NNZWAJVJFAHXQ9C5Z6GE` 并进 `audit.json` 残差。
-- 关键修正：`0x3` **先**写父帧长度槽 = 3 **再**查深度；`0x2` 释放有条件（父帧号 + 1 == 当前帧号）；type 8 读 / 写全抛；读浮池内 32 位 / 返回 64 位；配置键 9 字节、命名键与脚本键**两张表**；ALF / AGF **同一个 LZSS**；ALF 头 268（300 属另一加载器）。
-- 门禁（第三轮复核后）：`spec validate` 13/13 · `pnpm test` **594/594** · `ledger` 8/8 · `requirements` 5/5 · `typecheck` 绿。
+- **Electron `--skip-logo`**：`main.ts` / `protocol.ts` / `session.ts` 传 `showLogo:0`；实跑到 TITLE 时日志无 LOGO 影片。
+- **TITLE `Version` 破裂**：根因两条 —— `0x23b` 被误归入 ADV 白名单（实际是 CG 数字条），`0x1f9` 的 `0` 是**无键**且上传按 **32 位 ARGB** 比较。已实现 `core/cg-digit.ts` + `cgDraw23b`、修 `applyColorKey`/renderer；spec 新增 `CORE-OPS-SCENE-CG-NUMBER-23B` 并修正颜色键规则。截图 `.tmp/final-title.png` / `.tmp/fix-ver-big.png`。
+- **残差收口**：`RES-OPS-SAVE-READ-FIELDS`、`RES-OPS-SAVE-FILES-STH`、`RES-CONFIG-FIELD-TRIM`，均含 spec/bindings/fixtures 或 pure 守卫 + mutation。
+- **复审修正**：`0x2da` 上限 10/先判界；`0x23b` 四表清理与 `digits≤0` 读序；`0x1f7/0x1f6` 四表集合；`0x1ab/0x1ac` “两个文件都尝试、后一步覆盖”；`0x1af` 表面 0/1/2 拒绝；配置字段裁剪/段头 DBCS 边界。
+- **绘制顺序**：新增 `CORE-SCENE-DRAW-ORDER`（无命令记录时 key 升序、同键网格先于绘制项）；有命令记录的两档顺序仍为残差。
+- **review 方法**：`amayui-spec` §9.2「缺陷后的 spec 归因」+ `docs/02-engine/spec-audit-2026-10.md` 三案例。
 
-## 已完成（凭据 = 守卫 / 文件）
+- 机制地图仍以 `data/spec/core/README.md` 为准：`CORE-ISA` / `CORE-POOL` / `CORE-CONFIG` / `CORE-FRAME` / `CORE-OPS` 等；本单不复制机制表。
 
-- **机制地图**：`data/spec/core/README.md` —— 14 个机制 + `CORE-VM` 五子机制（§2.2）+ `CORE-FS` / `CORE-BOOT` 显式延后（§1.1）。
-- **CORE-ISA**：`10-format.md` 9 条；守卫 `spec-isa.assets`。
-- **CORE-POOL**：`40-pools.md` / `50-engine-state.md`；19 条全部有归宿；守卫 `spec-pool.assets`。
-- **CORE-OPS**：`60-ops.md` —— 数值 / 纹理 / 场景颜色 / 语音 / 引擎级标量 / 转发型 / 列表项 / 文本 / 子系统转发 / 字段对 / 条件跳转 / 多脚本（`0x3`/`0x2`/`0x9`）/ 等待输入 / 影片 / 空操作；守卫 `emulator-new-voice` + `emulator-new-scalars-thin`。
-- **CORE-FRAME**：`15-frame.md` —— 帧栈（容量 40、父帧链、条件释放）+ `0x8f call` / `0x5 ret`（位置 = 同脚本 dword 序号、每帧返回栈、−1 哨兵）；守卫 `emulator-new-frame`。★ 守卫全落在 LIFO 子集内、与引擎「40 槽 + 帧号」不等价：`REQ-01M5D251ZJTZA4S6SX170RAXD2`。
-- **CORE-CONFIG**：`55-config.md` 5 条 + `format/config-keys.json`；emulator-new 读索引 51 条默认 + 可选 `SYS4REG.INI`，`--init-config` 生成默认文件；守卫 `emulator-new-config{,.assets}`。
-- **CORE-VM / CORE-TIMING**：`70-vm.md` —— 互斥分支链 / 门 / 状态位 / 时钟 / 计时窗 5 条。
-- **真实入口**：`src/lzss.ts` / `src/alf.ts` / `src/host.ts` —— ALF 索引（S4IC，8 归档 / 21109 条目）、4 KiB 环形窗口 LZSS、统一文件 id == TOC 条目下标、松散文件优先、按 `(offset,length)` 切片。
-- **参考实现**：`apps/emulator-new/`（只读 `data/spec`，无构建，已进 `pnpm typecheck`）；守卫 `emulator-new-isolation` · `decode` · `ops` · `sound` · `frame` · `texture` · `scene` · `alf` · `noop`（pure）+ `boot` / `config` / `logo`（assets）。
-- **spec↔EA 映射**：`bindings.json` / `audit.json`（规则 / 章节数用 `pnpm tools spec chapters`）。
-
-## 换机器先跑这四条
+## 当前门禁
 
 ```bash
-pnpm install                     # 仅 workspace 链接；Windows 建符号链接要提权（AGENTS §3）
-pnpm test                        # 纯文本档（当前 569 条）
-pnpm tools spec validate         # #1–#13
-pnpm tools requirements validate # 5/5
+pnpm test                 # 824 pass / 0 fail
+pnpm test:assets          # 157 pass / 0 fail / 26 skip
+pnpm test:mutation        # 265/266 变红；1 条缺 .BIN 语料无法判定
+pnpm tools spec validate  # 13/13 全绿，未登记 0
+pnpm tools requirements validate # 6/6 全绿
+pnpm typecheck            # 六工程全绿
 ```
-语料档：`pnpm test:assets`（需要游戏安装 / 反汇编语料；本机有 2 条**先前就红**的环境项，与本轮无关）。
 
-## 已知红 / 已知限制（别追错方向）
+## 待处理（按优先）
 
-- **`pnpm test:assets` 不是全绿**（2 条本机环境项，与本轮无关）；未取证路径见各规则残差。
-- **启动前段不是直线**：`#5` 是 `0x8f call`（不是"第六个标量写"）；`opcodes-handlers.assets.test.mjs` 的 16 项是**静态点名**，不是执行顺序。
-- **`0x20F play-movie` 已实现但 LOGO 运行停在它前面**；`0x1fa` 清共享对象槽而**引用计数未建模** ⇒ 先补引用计数再去掉 stop-at。
-- **`CORE-FS` / `CORE-BOOT` 的 spec 规则还没成篇**：已开单 `REQ-01M5CWFJTK…`。⛔ 别把"实现里有"当成"规范里有"。
-- **`0x88` 的一条知识层记录与字节不符**（`ENGINE_SCALAR_BITS` 把 `0x71` 记成 `when:'always'`）：bug 单（S3）。
-- 只读 `SYS4INI.BIN` 一份索引：`APPEND*.AAI` 叠加索引未实现；配置脚本访问只支持 type 3 / 5；ALF 尾部严格解析、`REGKEY` 按低 32 位。
-
-## 入库状态（★ 换设备的前提）
-
-**工作树有未提交改动**（2026-10-21 的 spec 治理 + 第三轮复核；按长期纪律不 `git add` / `commit`）。提交时机由你决定；换设备前要么提交，要么先导出 diff。
-2026-10-21 本机复跑：`pnpm test` 569/569、`spec validate` 13/13、`ledger validate` 8/8、`requirements validate` 5/5、`typecheck` 绿。只在本地的是 `.tmp/`（草稿与诊断脚本，可重建）。
-
-## 待裁决（已登记，未定）
-
-- `REQ-01M5AM4M5…`：`reviewed` 要求 `@env pure` 守卫 vs 语料型机制只能挂 assets；机制地图是否进分发清单；`engine-operand-types` 守卫误标；codec 无诚实 storage 指针。
-- `REQ-01M5AKDR…`：`audit.planned[]` 与机制对齐（数据层）/ 键名复述 / 需求树 `old:`·`repo:` 路径标记 / 机制表机器形态暂缓。
-
-## 下一步（建议顺序）
-
-1. 实现 **`0x192 set-string`**（`INITCONFIG0` #12：op1 type 5 全局串 #3003、op2 type 2 内联串「メイリオ」）。★ `0x55` 已落（`CORE-OPS-NUMERIC-MOV-INT`）；type 2 读法与三条控制流规则都有台账，见 `data/ledger/`。
-2. `REQ-01M5D4NNZ…`：12 条缺证据的合同缺口（容器下标 / 字段身份 / 默认组 / 颜色 / 边界算术…）逐条取证。
-3. `CORE-FS` / `CORE-BOOT` 成篇（`REQ-01M5CWFJTK…`）：取件 5 条 + BOOT 只写有强锚的 5 条。
-4. 把 `60-ops.md` / `70-vm.md` / `15-frame.md` 的规则从 `draft` 推到 `reviewed`（要 accepted 台账锚或 `@env pure` 守卫）。
-5. 治理二批（并号迁移、planned 对齐、路径标记、`CORE-POOL-SCALAR-*` 前缀改名）。
-6. opcode 表对账（`hasHandler` + argc vs 长度槽）已开单 `REQ-01M5ED2AD7SKV077BRVRGNE3R7`；其余残差见 `audit.json`。
+1. **约 339 条可静态取证残差**（分诊基线 342；本轮已闭合 3 条，另有复审新增/收窄的残差）（已排除 audio / ADV 文字 / Live2D）。建议顺序：
+   `RES-FS-AAI-KEY` → `RES-ALF-MULTI-INDEX` → `RES-TEX-DRAW-CONSUMER` →
+   `RES-SCENE-DRAW-ORDER-COMMAND` → `RES-FRAME-LOAD-AUX-ARRAYS` →
+   `RES-INPUT-KEYTOTAL-INIT` → `RES-BOOT-GFX-PARAMS` → `RES-POOL-MEMFLIP` →
+   `RES-AGF-CHANNEL-ORDER` → `RES-VM-EXC-PROPAGATION`。
+2. **57 条 blocked**：本机 macOS 无 Windows/Wine，且部分缺样本 / 需人裁决。类型：窗口外观与真机像素、输入物理映射、存档 UB 观测、跨平台浮点/时钟、BMP 低位深/32bpp 读取。
+3. **已知实现/合同缺口（未收口）**：
+   - `RES-SAVE-STH-CAPTURE`：`RenderHost.captureTexture` 仍把整份 BMP 放平台侧；合同要求 core 自建头 + 行翻转 + 通道转换。
+   - `RES-SAVE-STH-SHORTREAD`：短读行为未规定。
+   - `RES-SAVE-STH-SURFACE`：`0x1af` 的 op3 `0/1/2` 拒绝尚未在 handler 实现（spec 已写）；当前实现先读文件再上传。
+   - `0x2da` 编号 10 与 T2[0..6] 重叠未建模（`RES-CG-SET-RECORD-INIT`）。
+   - `RES-SCENE-DRAW-ORDER-COMMAND`：命令记录族未成篇。
+   - audio / ADV 文字 / Live2D 仍按用户要求排除。
 
 ## 新会话从这读
 
-- 技能：`amayui-spec`（判据 + 编辑后必须独立复审）/ `amayui-emulator`（实现闭环）/ `amayui-re-engine`（取证）。
-- 组织真源：`data/spec/core/README.md`；schema：`pnpm tools spec describe`。
+- 技能：`amayui-spec`（§9.1 编辑后独立复审、§9.2 缺陷归因）/ `amayui-emulator` / `amayui-re-engine`。
 - 进度：`pnpm tools requirements plan`；审计：`pnpm tools spec report`。
-- 旧实现：`apps/emulator/**` 已废弃（只读 README 的架构段，不读代码）。
+- 本单只记交接；具体状态以子单与 `pnpm tools requirements plan` 为准。

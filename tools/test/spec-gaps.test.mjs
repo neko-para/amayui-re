@@ -2,12 +2,14 @@
 /**
  * tools/test/spec-gaps.test.mjs —— 「未成篇 opcode 的义务落点」守卫（纯文本）
  *
- * 它守三件事：
+ * 它守四件事：
  * ① **精确划分**：`opcode-table.json` 里 `hasHandler: true` 的每个 opcode，恰好落在
  *    「已写」（规则 `###` 标题里的 `0x…` 数字）或「某个 gap 的 `ops`」之一，不重不漏；
  * ② **落点形态**：gaps 的 `chapter` 存在（已写或 planned）、`ops` 项是 `0x…`、residual 带 `next`；
  *    容器句柄分支（按 switch 结构位置排除的机器分支）已从 `pilot.outOfScope` 移进 gaps；
- * ③ **判别力**：把一条 gap 从内存副本里去掉 / 把一个 opcode 重复登记 / 写坏 `ops` 形态 ⇒ 计算必然报红。
+ * ③ **章首条数**：章首声明「本章 N 条规则」的章节，N 必须等于该文件 `<!-- rule:` 标记数
+ *    （声明与标记是同一份账；没声明的章节不检查）；
+ * ④ **判别力**：把一条 gap 从内存副本里去掉 / 把一个 opcode 重复登记 / 写坏 `ops` 形态 ⇒ 计算必然报红。
  *
  * ★ 本文件**独立读文件**（不调用 `lib/spec.mjs` 的派生账）：否则"派生"与"断言"是同一份假设，
  *   守卫会恒绿。`lib/spec.mjs` 的 `opcodeAccounting` 只用于最后一条"报告计数与这里一致"。
@@ -78,6 +80,26 @@ export function partitionProblems({ handler, titled, audit }) {
   return problems;
 }
 
+/**
+ * 章首声明 vs 规则标记数（纯函数）：返回问题清单（空 = 绿）。
+ * ★ 只检查**有声明**的章节：正文出现「本章 N 条规则」就必须 N == 该文件的 `<!-- rule:` 标记数；
+ *   没声明的章节不检查（不逼所有章节都写声明）。
+ * ★ 声明只有这一种写法；⛔ 不认其它措辞（否则守的是"猜句子"而不是"同一份账"）。
+ */
+export function chapterRuleCountProblems(sections) {
+  const problems = [];
+  for (const s of sections) {
+    const declared = [...String(s.text).matchAll(/本章\s*(\d+)\s*条规则/g)].map((m) => Number(m[1]));
+    if (declared.length === 0) continue;
+    if (new Set(declared).size > 1) problems.push(`${s.id}：章首声明互相矛盾（${declared.join(' / ')} 条规则）`);
+    const marks = [...String(s.text).matchAll(/<!--\s*rule:/g)].length;
+    for (const n of new Set(declared)) {
+      if (n !== marks) problems.push(`${s.id}：章首声明 ${n} 条规则，实际 ${marks} 个 <!-- rule: --> 标记`);
+    }
+  }
+  return problems;
+}
+
 /** 读真源三件套（一次读完，供各用例共用） */
 function loadAll() {
   const handler = handlerOpcodes();
@@ -124,6 +146,41 @@ test('★ 落点形态：chapter 存在（已写或 planned）、ops 是 0x…�
       assert.ok(typeof r.next === 'string' && r.next.trim(), `gap ${g.id} 的残差 ${r.id} 缺 next（残差不是"算了"）`);
     }
   }
+});
+
+test('★ 章首「本章 N 条规则」与规则标记数同一份账', () => {
+  const chapters = readJson('data/spec/spec.json').chapters ?? [];
+  const sections = chapters.map((c) => ({
+    id: c.id,
+    text: readFileSync(path.join(ROOT, 'data', 'spec', c.file), 'utf8'),
+  }));
+  assert.ok(
+    sections.some((s) => /本章\s*\d+\s*条规则/.test(s.text)),
+    '样本前提：至少一章在章首声明了规则条数',
+  );
+  const problems = chapterRuleCountProblems(sections);
+  assert.deepEqual(problems, [], `章首声明与规则标记数不一致：\n  - ${problems.join('\n  - ')}`);
+
+  // 判别力：少一个标记 / 多一个标记 / 两个声明互相矛盾 ⇒ 都必须被点名。
+  assert.deepEqual(
+    chapterRuleCountProblems([{ id: 'x', text: '本章 2 条规则\n<!-- rule: A -->\n' }]),
+    ['x：章首声明 2 条规则，实际 1 个 <!-- rule: --> 标记'],
+  );
+  assert.deepEqual(
+    chapterRuleCountProblems([{ id: 'y', text: '本章 1 条规则\n<!-- rule: A -->\n<!-- rule: B -->\n' }]),
+    ['y：章首声明 1 条规则，实际 2 个 <!-- rule: --> 标记'],
+  );
+  assert.ok(
+    chapterRuleCountProblems([{ id: 'z', text: '本章 1 条规则\n本章 2 条规则\n<!-- rule: A -->\n' }]).some((p) =>
+      p.includes('互相矛盾'),
+    ),
+    '同一章两个声明互相矛盾必须报红',
+  );
+  assert.deepEqual(
+    chapterRuleCountProblems([{ id: 'w', text: '没有声明，只有 <!-- rule: A -->\n' }]),
+    [],
+    '没声明条数的章节不检查（不逼所有章节都写声明）',
+  );
 });
 
 test('★ 容器句柄分支：已从 pilot.outOfScope 移进 gaps（REQ-01M5AM4M5A5TV4APMPN0QWEA96 第 5 条）', () => {

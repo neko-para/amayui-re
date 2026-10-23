@@ -91,7 +91,11 @@ export interface TextureUploadRequest {
   height: number;
   kind: TextureKind;
   rgba: Uint8Array;
-  /** `0xFF000000 | RGB`；0 = 黑色键。平台在写入表面时把命中像素整条清 0 */
+  /**
+   * 归一化颜色键 `0xFF000000 | RGB`；**`0` = 无键**（`0x1f9` 的负数操作数归一化成 0）。
+   * ★ 平台比较的是 **32 位 ARGB 全值**（A 字节参与，见 `applyColorKey` 的引擎证据）：
+   *   键 0 不会命中不透明像素；只有非负操作数（如 0 归一化出的 `0xFF000000`）才清不透明黑。
+   */
   color: number;
 }
 
@@ -145,10 +149,23 @@ export interface RenderHost {
   /** `0x20b` 矩形填充；缺省 = 平台不支持该请求（调用方写错误通道）。 */
   fillTexture?(request: FillTextureRequest): Promise<boolean>;
 
-  /** `0x1ae` 把纹理当前画面捕捉成文件字节（BMP）；缺省 = 平台不支持。 */
+  /**
+   * `0x1ae` 把纹理当前画面捕捉成文件字节（BMP）；缺省 = 平台不支持。
+   *
+   * ⚠ **实现现状，与 `FMT-SAVE-STH` 相反**：合同要求 **core 自己组装 BMP 容器**
+   * （14 字节文件头 + 40 字节信息头 + 按对齐行宽写满的像素块），平台只提供
+   * 「像素 + 行宽 + 通道掩码」；本接口却让平台交出**整份文件字节**。
+   * 分歧登记在 `RES-SAVE-STH-CAPTURE`（what ② / next ②）—— 收口时把容器搬回 core，
+   * 本接口改成返回像素 + 行宽 + 通道掩码、且**不再**返回整份 BMP。
+   */
   captureTexture?(textureId: number): Promise<Uint8Array | null>;
 
-  /** `0x1af` 把文件字节（BMP）上传进纹理槽；缺省 = 平台不支持。 */
+  /**
+   * `0x1af` 把文件字节（BMP）上传进纹理槽；缺省 = 平台不支持。
+   *
+   * ⚠ 同上：合同要求 core 先按 `FMT-SAVE-STH` 解析容器、再把**像素**交给平台；
+   * 本接口接受**整份文件字节**，是**实现现状**（`RES-SAVE-STH-CAPTURE`），不是合同。
+   */
   uploadTextureBytes?(textureId: number, bytes: Uint8Array): Promise<boolean>;
 
   /** `0x1fa`：释放该纹理槽的平台纹理（幂等；空槽也要能调用）。 */

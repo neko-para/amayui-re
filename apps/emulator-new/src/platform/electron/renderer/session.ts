@@ -678,6 +678,7 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
     job.rootId,
     {
       key: job.key,
+      showLogo: job.showLogo,
       clock: () => Date.now() - clockOrigin,
       inputHost,
       sleepHost: async (ms: number) => { await new Promise<void>((resolve) => { setTimeout(resolve, ms); }); },

@@ -6,7 +6,8 @@
  *   ① 行宽按 **32 位（4 字节）对齐**（8bpp 1026 宽 ⇒ 1028 字节/行）；
  *   ② 盘上 bottom-up，解出来是 top-down；
  *   ③ 8bpp 调色板从 meta+56 起、24bpp BGR、32bpp BGRA，ACIF alpha 覆盖；
- *   ④ 颜色键在上传期把命中像素整条清 0。
+ *   ④ 颜色键在上传期把命中像素整条清 0，且比较的是 **32 位 ARGB 全值**（A 参与）；
+ *      `0` 是"无键"（`0x1f9` 的负数操作数归一化成 0），不是黑键。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -103,12 +104,41 @@ test('★ 32bpp：ACIF alpha 覆盖 body 的 alpha', () => {
   assert.deepEqual([...image.rgba], [3, 2, 1, 200, 6, 5, 4, 0]);
 });
 
-test('★ 颜色键：命中 RGB 的像素整条清 0（0 = 黑色键）', () => {
+test('★ 颜色键：键 0 = 无键 ⇒ 不透明黑（alpha=255）不被清掉', () => {
+  // 引擎 sub_48B090 按 32 位像素值比较（32bpp 分支 0x48BF2F；8bpp 的调色板也先补 A=0xFF）。
+  // 旧实现只比 RGB ⇒ 这里会被清成空洞（TITLE 的 Version 描边就是这样"破裂"的）。
   const rgba = Uint8Array.from([0, 0, 0, 255, 255, 0, 0, 255, 1, 2, 3, 4]);
   applyColorKey(rgba, 0);
-  assert.deepEqual([...rgba], [0, 0, 0, 0, 255, 0, 0, 255, 1, 2, 3, 4]);
-  applyColorKey(rgba, 0xffff0000);
-  assert.deepEqual([...rgba], [0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4]);
+  assert.deepEqual([...rgba], [0, 0, 0, 255, 255, 0, 0, 255, 1, 2, 3, 4],
+    '键 0 不能清 alpha=255 的黑色像素（只比 RGB 的实现会红）');
+});
+
+test('★ 颜色键：只有整条 ARGB 相等才清（0xFF000000 = 黑键，清不透明黑）', () => {
+  const rgba = Uint8Array.from([0, 0, 0, 255, 255, 0, 0, 255, 1, 2, 3, 4]);
+  applyColorKey(rgba, 0xff000000);
+  assert.deepEqual([...rgba], [0, 0, 0, 0, 255, 0, 0, 255, 1, 2, 3, 4],
+    '黑键只命中 A=0xFF 的纯黑');
+});
+
+test('★ 颜色键：A 字节参与比较 ⇒ 半透明黑不命中不透明黑键', () => {
+  const rgba = Uint8Array.from([0, 0, 0, 255, 0, 0, 0, 128, 0, 0, 0, 0]);
+  applyColorKey(rgba, 0xff000000);
+  assert.deepEqual([...rgba], [0, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0],
+    'A=128 的黑色与 A=0xFF 的黑键不是同一个 32 位值');
+});
+
+test('★ 颜色键：非对称颜色键按 ARGB 装配比较（R/B 通道不许互换）', () => {
+  const rgba = Uint8Array.from([
+    255, 0, 0, 255,   // 红
+    0, 0, 255, 255,   // 蓝
+    255, 0, 0, 128,   // 半透明红
+  ]);
+  applyColorKey(rgba, 0xffff0000); // 0xFF RR GG BB = 不透明红
+  assert.deepEqual([...rgba], [
+    0, 0, 0, 0,
+    0, 0, 255, 255,
+    255, 0, 0, 128,
+  ], '红键清不透明红；蓝与半透明红保留');
 });
 
 test('★ 坏件：BM / 非法版本 / body 长度不符 / ACIF alpha 短都抛 AgfError', () => {

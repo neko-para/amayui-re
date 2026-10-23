@@ -42,6 +42,38 @@ const skip = installDir && fs.existsSync(path.join(installDir, 'SYS4INI.BIN'))
 
 const env = { host: nodeHost, table: await loadOpcodeTable(), configKeys: await loadConfigKeys() };
 
+/**
+ * TITLE 的 `Version 0.00.0000` = 静态 `Version` 词 + 两个静态小数点（绘制键 118/119）
+ * + **三条 0x23b** 画的 1/2/4 位数字（绘制键 111..117）。
+ * 0x23b 一旦退回"未建模"，这七项就消失、画面只剩 `Version . .` —— 这正是本轮缺陷。
+ */
+function assertVersionDigits(machine, result) {
+  const runs = (result.effects ?? []).filter((e) => e.kind === 'scene.cg.number');
+  assert.deepEqual(runs.map((e) => e.detail.items), [1, 2, 4], 'TITLE 的三条 0x23b 必须各画 1/2/4 位');
+  assert.deepEqual(runs.map((e) => e.detail.id), [0x6f, 0x70, 0x72], '三条 0x23b 的绘制键起点');
+  assert.ok(machine !== null, 'onMachine 必须把实例交出来');
+  const digits = [];
+  for (let key = 0x6f; key <= 0x75; key += 1) {
+    const item = machine.scene.drawItems.get(key);
+    assert.ok(item, `0x23b 必须建出绘制项 0x${key.toString(16)}`);
+    assert.equal(item.flags & 1, 1, '绘制项必须有"有效"位');
+    assert.equal(item.textureId, 4, '数字取自纹理 4（SO004.AGF）');
+    digits.push(item);
+  }
+  // 七位都是补零的 0；源格子来自 0x2da 记录 x0=1356、步长 14。
+  for (const item of digits) {
+    assert.deepEqual([item.left, item.top, item.right, item.bottom], [0x54c, 0x32b, 0x54c + 12, 0x32b + 15],
+      '补零位的源矩形是数字 0 的格子（1356,811,1368,826）');
+  }
+  // 两个小数点是静态绘制项：源矩形 1342,811,12,15 —— 不是数字格子。
+  for (const key of [118, 119]) {
+    const period = machine.scene.drawItems.get(key);
+    assert.ok(period, `静态小数点绘制项 ${key} 必须存在`);
+    assert.deepEqual([period.left, period.top, period.right, period.bottom], [1342, 811, 1354, 826],
+      '76/77 的源矩形是小数点；把 1342 当数字 0 是缺陷的成因之一');
+  }
+}
+
 test('★ TITLE 输入环：真实启动链 → TITLE，键 1 派发回调并 input-idle 收口', { skip }, async () => {
   const inputHost = new ScriptedInputHost(parseInputScript('8000 key 1 down; 8100 key 1 up'));
   const handles = new Set();
@@ -93,11 +125,13 @@ test('★ TITLE 输入环：真实启动链 → TITLE，键 1 派发回调并 in
   const unmodeled = new Set((result.effects ?? [])
     .filter((e) => e.kind === 'unmodeled.subsystem')
     .map((e) => e.detail.opcode));
-  for (const opcode of [0x341, 0x345, 0x34e, 0x352, 0x2c7, 0x23b]) {
+  for (const opcode of [0x341, 0x345, 0x34e, 0x352, 0x2c7]) {
     assert.equal(unmodeled.has(opcode), true, `未建模子系统 opcode 0x${opcode.toString(16)} 必须留下请求记录`);
   }
+  assert.equal(unmodeled.has(0x23b), false, '0x23b（Version 数字）已建模，不许再留成未建模请求');
   assert.equal((result.effects ?? []).some((e) => e.kind === 'audio.wav.load'), true, '音频装载请求必须留下记录');
   assert.equal((result.effects ?? []).some((e) => e.kind === 'audio.bgm.play'), true, 'BGM 请求必须留下记录');
+  assertVersionDigits(machine, result);
 });
 
 
@@ -140,4 +174,5 @@ test('★ --skip-logo：show-logo 初值 0 ⇒ 启动链跳过 LOGO.BIN，直接
   assert.equal((result.entered ?? []).includes(INIT_ID), true, 'show-logo=0 ⇒ 必须走 jcc 的 0 支进入 INIT.BIN');
   assert.equal((result.entered ?? []).includes(TITLE_ID), true, '跳过 LOGO 后仍必须到达 TITLE.BIN');
   assert.equal(result.frame?.name, 'TITLE.BIN', '当前帧仍应解析成 TITLE.BIN');
+  assertVersionDigits(machine, result);
 });

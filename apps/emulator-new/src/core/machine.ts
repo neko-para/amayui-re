@@ -250,8 +250,11 @@ export interface SceneState {
   meshes: Map<number, Mesh>;
   /** "场景还有动画在跑"（等待门看它；见 CORE-TIMING-WINDOW） */
   animating: number;
-  /** 三张辅助键表：规范只要求"按键删除"，内容语义不在本版 */
-  auxTables: [Map<number, unknown>, Map<number, unknown>, Map<number, unknown>];
+  /**
+   * 两张辅助键表（与对象记录表 / 网格表同键空间）：规范只要求"按键删除"，内容语义不在本版。
+   * ★ 引擎同键空间还有第五张表（`+418`），但它**不参与** `0x1f7` / `0x1f6` / `0x23b` 的删除或清空 ⇒ 不建模。
+   */
+  auxTables: [Map<number, unknown>, Map<number, unknown>];
   /** `0x258` / `0x259` 的两张 1000 项标志表（每项两个位）。 */
   flagTableA: number[];
   flagTableB: number[];
@@ -623,7 +626,7 @@ export class Machine {
     drawItems: new Map(),
     meshes: new Map(),
     animating: 0,
-    auxTables: [new Map(), new Map(), new Map()],
+    auxTables: [new Map(), new Map()],
     flagTableA: new Array(1000).fill(0),
     flagTableB: new Array(1000).fill(0),
     cgRecords: new Map(),

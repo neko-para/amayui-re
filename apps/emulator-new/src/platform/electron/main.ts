@@ -35,13 +35,14 @@ const SMOKE_TIMEOUT_MS = 60_000;
 
 const USAGE = [
   '用法：',
-  '  electron --no-sandbox apps/emulator-new --install <dir> [--key <u32>] [--root-id 0] [--config <file>]',
+  '  electron --no-sandbox apps/emulator-new --install <dir> [--key <u32>] [--root-id 0] [--config <file>] [--skip-logo]',
   '  electron --no-sandbox apps/emulator-new --demo',
   '  electron --no-sandbox apps/emulator-new --smoke',
   '',
   '  --install  真实入口（core 在 renderer：索引 → 配置 → 窗口 / 图形设备 → 根脚本 → 主循环）',
   '  --demo     非游戏的可视化自检（真实 core handlers 驱动 0x1f8 / 0x204 / 0x1fb / 0x33f / 0x20d）',
   '  --smoke    同 --demo，截图到 .tmp/emulator-new-electron-smoke.png 后退出（退出码 0 / 1）',
+  '  --skip-logo  仅 --install：show-logo 初值置 0（跳过 LOGO，直接到 INIT / TITLE）',
   '',
   '  --no-sandbox 是 Chromium 的开关（DSH 沙箱里需要），不是本程序定义的。',
 ].join('\n');
@@ -53,6 +54,7 @@ interface Args {
   config: string | null;
   demo: boolean;
   smoke: boolean;
+  skipLogo: boolean;
 }
 
 let activeHost: ElectronWindowHost | null = null;
@@ -85,7 +87,7 @@ function parseU32(text: string, what: string): number {
  *   它在 main 侧没有语义（Electron 本来就用宿主毫秒时钟）。
  */
 function parseArgs(argv: string[]): Args {
-  const out: Args = { install: null, key: null, rootId: 0, config: null, demo: false, smoke: false };
+  const out: Args = { install: null, key: null, rootId: 0, config: null, demo: false, smoke: false, skipLogo: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith('-')) continue;
@@ -99,6 +101,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--config') out.config = argv[++i] ?? null;
     else if (arg === '--demo') out.demo = true;
     else if (arg === '--smoke') out.smoke = true;
+    else if (arg === '--skip-logo') out.skipLogo = true;
     else {
       const name = arg.replace(/^--?/, '').split('=')[0] ?? '';
       if (app.commandLine.hasSwitch(name)) continue;
@@ -106,6 +109,7 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (out.install !== null && (out.demo || out.smoke)) throw new Error('--install 与 --demo / --smoke 只能给一个');
+  if (out.skipLogo && out.install === null) throw new Error('--skip-logo 只用于 --install');
   if (out.demo && out.smoke) throw new Error('--demo 与 --smoke 只能给一个');
   return out;
 }
@@ -167,6 +171,7 @@ async function runInstall(args: Args): Promise<void> {
       installDir,
       rootId: args.rootId,
       key: args.key ?? undefined,
+      showLogo: args.skipLogo ? 0 : undefined,
       configPath: args.config,
       opcodes: [...table.values()],
       configKeys,

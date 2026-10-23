@@ -16,6 +16,7 @@ import { NO_COLOR, RENDER_TARGET_BACK_BUFFER } from './render.ts';
 import { buildSaveFile } from './save-codec.ts';
 import type { RenderHost } from './render.ts';
 import { AgfError, decodeAgf } from './agf.ts';
+import { cgDigitSlots } from './cg-digit.ts';
 
 export type { Machine, Operand };
 
@@ -57,11 +58,20 @@ function clearObjectSlot(m: Machine, id: number): void {
   m.scene.objectSlots.delete(id);
 }
 
+/**
+ * `0x1f7` / `0x1f6` / `0x23b` 共用的**四张同键表**：对象记录表、网格表、两张辅助表。
+ * ★ 引擎同一组：`sub_4ABB60` 删 / `sub_41A130` 清的是 `+408` / `+428` / `+438` / `+448`；
+ *   同键空间的第五张表 `+418` **不在这组里**（三条指令都不碰它）。
+ */
+function sameKeyTables(m: Machine): Map<number, unknown>[] {
+  return [m.scene.drawItems, m.scene.meshes, ...m.scene.auxTables];
+}
+
 /** 0x1f7 拆离：读 op2=个数、op1=键；≤1 删单键，否则删 [键, 键+个数)（CORE-OPS-TEXTURE-DETACH） */
 function detach1f7(m: Machine, ops: Operand[]): void {
   const count = readInt(m, ops, 2);
   const key = readInt(m, ops, 1);
-  const tables: Map<number, unknown>[] = [m.scene.drawItems, ...m.scene.auxTables];
+  const tables = sameKeyTables(m);
   let removed = 0;
   for (const table of tables) {
     if (count <= 1) {
@@ -1722,25 +1732,90 @@ function sceneTableFlags259(m: Machine): void {
   m.effects.push({ kind: 'scene.table.flags', detail: { opcode: '0x259', id: 'all', bits: 0 } });
 }
 
-/** 0x2da：CG 编号 > 999 ⇒ 错误通道且一个字段都不写；否则存七个整数格。 */
+/**
+ * 0x2da：**先读 op1 并判上限**（`0x426447 cmp edi,0Ah; ja`）；越界 ⇒ 错误通道，
+ * 其余七个操作数**一次都不读**；否则存七个整数格。
+ * ★ 引擎是**无符号** `ja`：负数与 >10 走同一条错误路径（同一文本），不是未定义行为。
+ */
 function cgSet2da(m: Machine, ops: Operand[]): void {
   const id = readInt(m, ops, 1) | 0;
-  const vals: number[] = [];
-  for (let k = 2; k <= 8; k += 1) vals.push(readInt(m, ops, k) | 0);
-  if (id > 999) {
+  if (id < 0 || id > 10) {
+    m.scene.errorBuffer = 'CGNumberの引数が不正です．\r\n';
     m.diagnostics.push({ kind: 'cg-id-out-of-range', index: id });
     return;
   }
-  if (id < 0) throw new Error(`0x2da 的 CG 编号 ${id} 为负（未定义行为）`);
+  const vals: number[] = [];
+  for (let k = 2; k <= 8; k += 1) vals.push(readInt(m, ops, k) | 0);
   m.scene.cgRecords.set(id, vals);
   m.effects.push({ kind: 'scene.cg.write', detail: { opcode: '0x2da', id } });
 }
 
-/** 0x1f6：清场景的记录 / 网格 / 辅助表；脏标记清 0，动画标记不动。 */
+/** 删 `[key, key+count)` 的键（`0x23b` 的旧项清理；引擎走 `sub_4ABB60`）。 */
+function deleteKeyRange<T>(table: Map<number, T>, key: number, count: number): number {
+  if (count <= 0) return 0;
+  let removed = 0;
+  for (const k of [...table.keys()]) {
+    if (k >= key && k < key + count) {
+      table.delete(k);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+/**
+ * 0x23b：按 CG 数字条画数值（`sub_424970`，读序 2 → 1 → 3 → 6 → 7 → 6 →（清旧项）→ 每个位 4 → 5）。
+ *
+ * ★ 为什么这条要建模：TITLE 的 `Version 0.00.0000` 的**七位数字**就是三条 `0x23b`
+ *   （`i23b 6f/70/72`，位数 1/2/4）画出来的；`draw-texture 76/77` 只是两个小数点。
+ *   把它留在 ADV 文字白名单里会让版本号只剩两个点（正是本轮缺陷的画面）。
+ * ★ 记录来自 `0x2da`（已建模的七格：[纹理槽,x0,y0,单字宽,字高,字内空隙,字距]）；
+ *   编号 > 0x0a 或记录不存在 / 纹理槽为 0 ⇒ 引擎只写错误缓冲并返回（不读其余操作数、不建项）。
+ * ★ 几何在纯函数 `cgDigitSlots` 里（可单测）；这里只做操作数读取、旧项删除与写场景。
+ * ★ 读序是合同：2 → 1 → 3 → 6 → 7 → 6 →（删四张同键表）→ **每个被画出的位**：4 → 5 → 建项。
+ *   位数 ≤ 0 ⇒ 计划为空 ⇒ op4 / op5 一次都不读（非法类型也不会被碰到）。
+ */
+function cgDraw23b(m: Machine, ops: Operand[]): void {
+  const recordId = readInt(m, ops, 2);
+  const record = recordId >= 0 && recordId <= 0x0a ? m.scene.cgRecords.get(recordId) : undefined;
+  if (record === undefined || (record[0] ?? 0) === 0) {
+    m.scene.errorBuffer = 'CGNumberの引数が不正です．\r\n';
+    m.diagnostics.push({ kind: 'cg-number-invalid', index: recordId });
+    return;
+  }
+  const startId = readInt(m, ops, 1);
+  const value = readInt(m, ops, 3);
+  const digits = readInt(m, ops, 6);
+  const flags = readInt(m, ops, 7);
+  const cleanupLength = readInt(m, ops, 6); // 引擎在这里再读一次位数（读序是合同）
+  // 引擎先删 [id, id+cleanupLength) 的旧条项（sub_4ABB60：对象记录 / 网格 / 两张辅助表），再逐位建项。
+  let removed = 0;
+  for (const table of sameKeyTables(m)) removed += deleteKeyRange(table, startId, cleanupLength);
+  const plan = cgDigitSlots(record, startId, value, digits, flags);
+  // 每个被画出的位各读一次 op4 / op5（与引擎建项分支一致；位数 ≤ 0 ⇒ 循环不执行）。
+  for (const slot of plan) {
+    const x = readInt(m, ops, 4);
+    const y = readInt(m, ops, 5);
+    const draw = defaultItem();
+    draw.flags |= 1;
+    draw.textureId = slot.textureId;
+    draw.left = slot.srcLeft;
+    draw.top = slot.srcTop;
+    draw.right = slot.srcRight;
+    draw.bottom = slot.srcBottom;
+    draw.aux = [Math.fround(slot.dstXOffset + x), Math.fround(y), 0];
+    m.scene.drawItems.set(slot.handle, draw);
+  }
+  if (plan.length > 0 || removed > 0) m.scene.dirty = 1;
+  m.effects.push({
+    kind: 'scene.cg.number',
+    detail: { opcode: '0x23b', id: startId, record: recordId, value, digits, flags, items: plan.length },
+  });
+}
+
+/** 0x1f6：清**四张**同键表（对象记录 / 网格 / 两张辅助）；脏标记清 0，动画标记不动。 */
 function sceneClear1f6(m: Machine): void {
-  m.scene.drawItems.clear();
-  m.scene.meshes.clear();
-  for (const t of m.scene.auxTables) t.clear();
+  for (const table of sameKeyTables(m)) table.clear();
   m.scene.dirty = 0;
   m.scene.hasObjects = 0;
   m.effects.push({ kind: 'scene.clear', detail: { opcode: '0x1f6' } });
@@ -1896,18 +1971,27 @@ async function saveWrite19e(m: Machine, ops: Operand[]): Promise<void> {
   writeInt(m, ops, 1, ok ? 0 : 1);
 }
 
-/** 0x1ab：删槽的 .DAT → .STH；状态 0 / 1（第一个失败）/ 2（第二个失败）。 */
+/**
+ * 0x1ab：删槽的 .DAT → .STH。
+ *
+ * ★ 两个文件**都总是尝试**：第一个失败只把结果置 1、**不返回**；第二个失败再把结果改成 2
+ *   ⇒ 两个都失败报 2（后一步覆盖前一步），只有第一个失败报 1，都成功报 0。
+ */
 async function saveDelete1ab(m: Machine, ops: Operand[]): Promise<void> {
   const host = m.saveHost;
   if (!host) throw new Error('save-host-missing:0x1ab');
   const slot = readInt(m, ops, 2) | 0;
   let code = 0;
   if (!(await host.remove(host.fileForSlot(slot, 'dat')))) code = 1;
-  else if (!(await host.remove(host.fileForSlot(slot, 'sth')))) code = 2;
+  if (!(await host.remove(host.fileForSlot(slot, 'sth')))) code = 2;
   writeInt(m, ops, 1, code);
 }
 
-/** 0x1ac：把源槽的 .DAT → 目标，再 .STH → 目标；状态 0 / 1 / 2。 */
+/**
+ * 0x1ac：把源槽的 .DAT → 目标，再 .STH → 目标。
+ *
+ * ★ 与 `0x1ab` 同形：两个文件都总是尝试，第二个失败覆盖第一个的失败（两个都失败报 2）。
+ */
 async function saveCopy1ac(m: Machine, ops: Operand[]): Promise<void> {
   const host = m.saveHost;
   if (!host) throw new Error('save-host-missing:0x1ac');
@@ -1915,11 +1999,17 @@ async function saveCopy1ac(m: Machine, ops: Operand[]): Promise<void> {
   const to = readInt(m, ops, 3) | 0;
   let code = 0;
   if (!(await host.copy(host.fileForSlot(from, 'dat'), host.fileForSlot(to, 'dat')))) code = 1;
-  else if (!(await host.copy(host.fileForSlot(from, 'sth'), host.fileForSlot(to, 'sth')))) code = 2;
+  if (!(await host.copy(host.fileForSlot(from, 'sth'), host.fileForSlot(to, 'sth')))) code = 2;
   writeInt(m, ops, 1, code);
 }
 
-/** 0x1ae：捕捉纹理 → BMP 字节 → 写槽的 .STH；0 / 2。 */
+/**
+ * 0x1ae：捕捉纹理 → BMP 字节 → 写槽的 .STH；0 / 2。
+ *
+ * ⚠ **实现现状，与 `FMT-SAVE-STH` 相反**：合同要求 core 自己组装 BMP 容器（头 + 对齐行宽的像素块），
+ * 平台只给「像素 + 行宽 + 通道掩码」；这里却向平台要**整份 BMP 字节**再原样写盘。
+ * 分歧登记在 `RES-SAVE-STH-CAPTURE`（本轮不重构）。
+ */
 async function thumbWrite1ae(m: Machine, ops: Operand[]): Promise<void> {
   const host = m.saveHost;
   if (!host) throw new Error('save-host-missing:0x1ae');
@@ -1941,7 +2031,14 @@ async function thumbWrite1ae(m: Machine, ops: Operand[]): Promise<void> {
   writeInt(m, ops, 1, ok ? 0 : 2);
 }
 
-/** 0x1af：读槽的 .STH → BMP 字节 → 上传纹理；1 打开失败 / 2 内容或上传失败。 */
+/**
+ * 0x1af：读槽的 .STH → BMP 字节 → 上传纹理；1 打开失败 / 2 内容或上传失败。
+ *
+ * ⚠ **实现现状，与 `FMT-SAVE-STH` 相反**：合同要求 core 按容器解析、把**像素**交给平台；
+ * 这里把**整份文件字节**原样转给平台（`RES-SAVE-STH-CAPTURE`）。
+ * ★ 「两段头不齐 ⇒ 2」也是实现自己的判别，**不是引擎合同**：引擎对每次读取只看 `ReadFile` 布尔、
+ *   不比较读到的字节数，短读行为本版不规定（`RES-SAVE-STH-SHORTREAD`）。
+ */
 async function thumbRead1af(m: Machine, ops: Operand[]): Promise<void> {
   const host = m.saveHost;
   if (!host) throw new Error('save-host-missing:0x1af');
@@ -2772,12 +2869,13 @@ function textAtoi2ec(m: Machine, ops: Operand[]): void {
  * 只向未建模子系统发请求的 opcode：**不是静默 no-op**——每次执行记一条 `unmodeled.subsystem`
  * 效果（可被 `--trace` / 报告计数），首次出现再记一条诊断。
  *
- * ★ 白名单只含"不改变已规定引擎数据"的两块：ADV 文字（`0x23b` 数字绘制 / `0x2c7` SJIS 字符串工具）
+ * ★ 白名单只含"不改变已规定引擎数据"的两块：ADV 文字（`0x2c7` SJIS 字符串工具）
  *   与 Live2D（`0x34e` 动作装载 / `0x352` 动作参数）。它们不置门位、不改帧 / 返回栈 / 输入字。
+ * ★ `0x23b`（数字绘制）**已建模**：TITLE 的 `Version` 数字经它画（见 `cgDraw23b`），
+ *   不再是未建模请求 —— 把它留在白名单会让版本号只剩两个小数点。
  * ★ 未列入的 gap（`0x12e` / `0x140` / `0x23d` / `0x32b`）仍然"未实现即停"。
  */
 const UNMODELED_SUBSYSTEM = new Map<number, { subsystem: string; why: string }>([
-  [0x23b, { subsystem: 'adv-text', why: '数字字形绘制' }],
   [0x2c7, { subsystem: 'adv-text', why: 'SJIS 字符串工具' }],
   [0x341, { subsystem: 'live2d', why: '模型文件装载' }],
   [0x345, { subsystem: 'live2d', why: '纹理文件装载' }],
@@ -2869,7 +2967,7 @@ export const HANDLERS = new Map<number, Handler>([
   [0x20c, renderFrameStep20c],
   [0x2eb, textGameVersion2eb],
   [0x2ec, textAtoi2ec],
-  [0x23b, unmodeledHandler(0x23b, 'adv-text')],
+  [0x23b, cgDraw23b],
   [0x341, unmodeledHandler(0x341, 'live2d')],
   [0x345, unmodeledHandler(0x345, 'live2d')],
   [0x2c7, unmodeledHandler(0x2c7, 'adv-text')],

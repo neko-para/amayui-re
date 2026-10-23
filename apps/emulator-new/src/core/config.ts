@@ -70,61 +70,151 @@ function atoi64Low32(s: string): number {
 }
 
 /**
- * 一行里的“字段”：去首尾 0x00–0x20 字节，再剥一层成对双引号。
- * ★ 不去 CP932 双字节内部（前导字节 ≥ 0x80，不会被 0x00–0x20 的边界命中）。
+ * 一行里的“字段”：去首尾连续的 0x00–0x20 字节，再剥**一层**成对双引号。
+ * ★ 剥引号有门槛（与引擎逐字节一致）：只有字段**起始下标 > 0**时才剥 ——
+ *   即开引号之前必须至少有一个被裁掉的 0x00–0x20 字节；第 0 字节就是 `"` 时引号原样留下。
+ * ★ 只剥一层：剥完直接返回，不循环（`""A""` ⇒ `"A"`）。
+ * ★ 只按**两个端点**判定，没有“长度 ≥ 2”的前置条件：` "` 这种单字符字段也会被剥成空串
+ *   （引擎的 substr 在 pos == size 时返回空串，不抛）。
+ * ★ 0x21 以上不裁；0x80–0xFF（DBCS 前导/后继字节）也不会被 0x00–0x20 的边界命中。
  */
 function trimField(s: string): string {
   let a = 0;
   let b = s.length;
   while (a < b && s.charCodeAt(a) <= 0x20) a += 1;
   while (b > a && s.charCodeAt(b - 1) <= 0x20) b -= 1;
-  let out = s.slice(a, b);
-  if (out.length >= 2 && out.startsWith('"') && out.endsWith('"')) out = out.slice(1, -1);
-  return out;
+  if (a > 0 && b > 0 && s.charCodeAt(a) === 0x22 && s.charCodeAt(b - 1) === 0x22) {
+    return s.slice(a + 1, Math.max(a + 1, b - 1));
+  }
+  return s.slice(a, b);
+}
+
+/**
+ * 取一行的第 `index` 个**顶层字段**：`0` = 键（`=` 之前）、`1` = 值（第 1 与第 2 个 `=` 之间）。
+ * - `=` 只在「不在双引号之内（`"` 出现偶数次）且括号深度为 0」时才算分隔符；
+ * - 没有该字段的分隔符时：`index` = 0 ⇒ 整行；`index` > 0 ⇒ 空串。
+ * ★ 因此值在**第二个**顶层 `=` 处截断（`k=a=b` ⇒ 值 `a`），不是“第一个 `=` 之后的全部”。
+ * ★ 引擎在这里还做一次多字节边界判定（`_mbbtype`），但它对本函数用到的字节值**恒真**：
+ *   DBCS 的后继字节一律 ≥ 0x40，而这里只关心 `"`(0x22) / `(`(0x28) / `)`(0x29) / `=`(0x3d)。
+ */
+function topLevelField(line: string, index: number): string {
+  const n = line.length;
+  let start = index === 0 ? 0 : -1;
+  let end = n;
+  let seen = 0;
+  let quote = 0;
+  let paren = 0;
+  for (let pos = 0; pos < n; ) {
+    const c = line.charCodeAt(pos);
+    if (c === 0x22) {
+      quote += 1;
+      pos += 1;
+      continue;
+    }
+    if (c === 0x28) {
+      paren += 1;
+      pos += 1;
+      continue;
+    }
+    if (c === 0x29) {
+      paren -= 1;
+      pos += 1;
+      continue;
+    }
+    if (paren === 0 && quote % 2 === 0 && c === 0x3d) {
+      seen += 1;
+      if (seen === index + 1) {
+        end = pos;
+        break;
+      }
+      pos += 1;
+      if (seen === index) start = pos;
+      continue;
+    }
+    pos += 1;
+  }
+  if (start < 0) return '';
+  return line.slice(start, end);
+}
+
+/** 引擎的行缓冲是 256 字节（末字节放 NUL）⇒ 一次最多交出 255 字节 */
+const LINE_MAX = 255;
+
+/**
+ * CP932 的单字节 / 双字节判定。
+ * 前导字节 0x81–0x9F / 0xE0–0xFC；后继字节 0x40–0x7E / 0x80–0xFC。
+ * ★ `[`(0x5B) / `]`(0x5D) 的字节值都落在**后继字节**区间内 ⇒
+ *   某个双字节字符的第二个字节就可能恰好是它们。
+ */
+function isCp932LeadByte(b: number): boolean {
+  return (b >= 0x81 && b <= 0x9f) || (b >= 0xe0 && b <= 0xfc);
+}
+
+function isCp932TrailByte(b: number): boolean {
+  return (b >= 0x40 && b <= 0x7e) || (b >= 0x80 && b <= 0xfc);
+}
+
+/**
+ * 位置 `pos` 是否落在双字节字符内部。
+ * ★ 判据是**局部**的（引擎只比较 `pos` 与相邻字节）：当前字节是前导字节且下一字节是后继字节，
+ *   或当前字节是后继字节且前一字节是前导字节 —— 不按行首重新配对。
+ */
+function insideDoubleByte(s: string, pos: number): boolean {
+  const cur = s.charCodeAt(pos);
+  if (isCp932LeadByte(cur) && pos + 1 < s.length && isCp932TrailByte(s.charCodeAt(pos + 1))) return true;
+  return pos > 0 && isCp932LeadByte(s.charCodeAt(pos - 1)) && isCp932TrailByte(cur);
+}
+
+/**
+ * 段头的结束括号：**最后一个**不落在双字节字符内部的 `]`（没有 ⇒ -1）。
+ * ★ 直接 `lastIndexOf(']')` 会把「双字节字符的第二个字节恰为 0x5D」当成结束括号、截掉半个字符。
+ */
+function findSectionClose(line: string): number {
+  for (let pos = line.length - 1; pos >= 0; pos -= 1) {
+    if (line.charCodeAt(pos) === 0x5d && !insideDoubleByte(line, pos)) return pos;
+  }
+  return -1;
 }
 
 /**
  * 逐行解析玩家文件。返回 `段名\键名 → 值`（**字节精确**，不折叠大小写）。
- * - 只按 LF 分行；行尾 CR 由字段裁剪处理。
- * - 原始首字节 `[` ⇒ 段头；取到随后的 `]` 为止。
- * - 其余行按第一个 `=` 切；没有 `=` 的行登记成空键/空值（不是注释）。
+ * - 只按 LF 分行：读到 LF 即交出一行（LF 留着，随后由字段裁剪去掉）；读满 255 字节未见 LF ⇒
+ *   这 255 字节先作为一行交出，其余字节继续按下一行解析。
+ * - ★ 文件末尾**没有 LF 结尾的残行被丢弃**（引擎的读行器在 EOF 返回失败）。
+ * - 行按 C 字符串度量：行内第一个 0x00 之后不参与解析。
+ * - 原始首字节 `[` ⇒ 段头：取**第一个** `[` 与**最后一个不落在双字节字符内部的** `]` 之间的文本
+ *   为当前段名（不产生条目）。★ 首字节 `[` 之前没有字节 ⇒ 它不可能落在字符内部；
+ *   需要判双字节边界的只有后向的 `]`。
+ * - 其余行按顶层 `=` 切：键 = 第 0 字段、值 = 第 1 字段；两者各自裁剪 + 剥一层引号。
+ * - 没有注释符：`;` / `#` 没有特殊含义；不带 `=` 的非空行 ⇒ 键 = 整行、值 = 空串。
  * - 重复键：最后一次覆盖。
  */
 export function parseIni(buf: Uint8Array): Map<string, string> {
-  const text = decodeLatin1(buf);
   const out = new Map<string, string>();
   let section = '';
-  const consume = (raw: string): void => {
-    if (raw.startsWith('[')) {
-      const close = raw.indexOf(']');
+  let i = 0;
+  while (i < buf.length) {
+    const chunk: number[] = [];
+    let lf = false;
+    while (i < buf.length && chunk.length < LINE_MAX) {
+      const b = buf[i];
+      i += 1;
+      chunk.push(b);
+      if (b === 0x0a) {
+        lf = true;
+        break;
+      }
+    }
+    if (!lf && chunk.length < LINE_MAX) break; // EOF 前的残行：整行丢弃
+    const zero = chunk.indexOf(0);
+    const raw = decodeLatin1(Uint8Array.from(zero < 0 ? chunk : chunk.slice(0, zero)));
+    if (raw.charCodeAt(0) === 0x5b) {
+      const close = findSectionClose(raw);
       section = trimField(close < 0 ? raw.slice(1) : raw.slice(1, close));
-      return;
-    }
-    const eq = raw.indexOf('=');
-    if (eq < 0) {
-      out.set(`${section}\\`, '');
-      return;
-    }
-    out.set(`${section}\\${trimField(raw.slice(0, eq))}`, trimField(raw.slice(eq + 1)));
-  };
-  // 引擎的行缓冲是 256 字节：按 LF 切；一行到 255 字节仍没有 LF 就先交出一条
-  // （不是错误，后续字节继续按下一行解析）。文件末尾的单个 LF 不产生额外空行；
-  // **中间**的空行是一条“没有 = 的行” ⇒ 登记成空键/空值（不是注释）。
-  let line = '';
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (ch === '\n') {
-      consume(line);
-      line = '';
       continue;
     }
-    line += ch;
-    if (line.length === 255) {
-      consume(line);
-      line = '';
-    }
+    out.set(`${section}\\${trimField(topLevelField(raw, 0))}`, trimField(topLevelField(raw, 1)));
   }
-  if (line.length > 0) consume(line);
   return out;
 }
 

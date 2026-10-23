@@ -69,11 +69,13 @@ test('★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：�
   assert.equal(body.length, 1448, 'LOGO.BIN 的 body 字节数');
 
   const install = await Install.open(nodeHost, installDir);
-  const m = new Machine({
-    body, table: await loadOpcodeTable(), key: KEY, uninitializedFloat: 'zero',
+  const table = await loadOpcodeTable();
+  const makeMachine = () => new Machine({
+    body, table, key: KEY, uninitializedFloat: 'zero',
     // 真实纹理文件（统一文件 id → 整份 AGF），不是合成图
     loadImage: async (id) => (await install.readById(id)).bytes,
   });
+  const m = makeMachine();
   const r = await m.run({ stopAtOpcode: 0x20f });
 
   // ① 真的在执行：前 46 条已经执行掉（play-movie 本身**没有**执行 —— 停止条件是"停在它前面"）
@@ -86,9 +88,15 @@ test('★ 前沿棘轮：LOGO.BIN 执行到 `0x20f play-movie` 前（当前：�
   assert.equal(m.flags, 0, '等待位已经被清掉（门开着）');
   assert.equal(m.scene.animating, 0, '场景不再有动画在跑');
 
-  // ③ 场景族：两个网格（0x320 建）+ 颜色窗（0x322/0x323）都落了状态
-  const mesh2 = m.scene.meshes.get(200002);
-  const mesh3 = m.scene.meshes.get(200003);
+  // ③ 场景族：0x1f7（第 41 条，键 200000、个数 4）的删除集合**包含网格表**
+  //    ⇒ 0x320 建在 200002 / 200003 的两个网格也被删掉（与 0x1f6 / 0x23b 同一组四张表）。
+  assert.equal(m.scene.meshes.size, 0, '★ 0x1f7 的区间删除必须含网格表');
+
+  // ③′ 网格 / 颜色窗：另跑一次、停在 0x1f7 **之前**，观察 0x320 建出的记录与 0x322/0x323 的重烘结果
+  const before = makeMachine();
+  await before.run({ stopAtOpcode: 0x1f7 });
+  const mesh2 = before.scene.meshes.get(200002);
+  const mesh3 = before.scene.meshes.get(200003);
   assert.ok(mesh2 && mesh3, '两个网格都建出来了');
   assert.equal(mesh2.count, 4, '顶点数来自第 9 个操作数（4）');
   assert.equal(mesh2.op10, 0, '第 10 个操作数写进网格记录');

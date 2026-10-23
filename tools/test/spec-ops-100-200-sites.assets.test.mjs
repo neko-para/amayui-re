@@ -44,6 +44,7 @@ const RULES = [
   'CORE-OPS-FILLTEXTURE',
   'CORE-OPS-SCALAR-FLOAT-ARITH',
   'CORE-OPS-CG-SET',
+  'CORE-OPS-SCENE-CG-NUMBER-23B',
 ];
 
 /** `.lst` 里“EA → [{段, 该行剩余文本}]” */

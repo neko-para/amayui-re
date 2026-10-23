@@ -694,7 +694,10 @@ export class PixiRenderHost {
     try {
       const rt = this.ensureTexture(slot);
       const pixels = new Uint8Array(rgba); // 不把核心里可复用的缓冲交给平台
-      if (color >= 0) applyColorKey(pixels, color);
+      // ★ `0` 是"无颜色键"哨兵（`0x1f9` 的负数操作数归一化成 0），不是黑键：
+      //   引擎的上传比较含 A 字节（见 `applyColorKey`），键 0 不会命中不透明像素；
+      //   这里显式跳过而不是靠比较兜底，否则日志会把它印成"颜色键 #000000"误导排查。
+      if (color !== 0) applyColorKey(pixels, color);
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
@@ -713,7 +716,11 @@ export class PixiRenderHost {
       }
       slot.hasContent = true;
       slot.writeCount += 1;
-      if (!params.quiet) this.note(`uploadTexture(${textureId})：${width}×${height}，颜色键 #${(color & 0xffffff).toString(16).padStart(6, '0')}`);
+      if (!params.quiet) {
+        this.note(color === 0
+          ? `uploadTexture(${textureId})：${width}×${height}，无颜色键`
+          : `uploadTexture(${textureId})：${width}×${height}，颜色键 #${(color & 0xffffff).toString(16).padStart(6, '0')}（#0 = 无键）`);
+      }
       this.rebuildSceneFromLastSnapshot();
       return true;
     } catch (error) {

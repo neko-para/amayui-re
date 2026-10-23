@@ -112,6 +112,100 @@ test('★ INI：段与键字节精确、缺键保留默认、重复键最后一�
   assert.equal(parseIni(Buffer.from('[display]\r\nScreenMode=2\r\n', 'latin1')).size, 1, '末尾 LF 不产生幻影空行');
 });
 
+test('★★ 段头边界：`]` 落在双字节字符内部不算结束括号；字符字节原样保留', async () => {
+  // CP932：0x81 是前导字节、0x5D 落在后继字节区间（0x40–0x7E）⇒ 这一对是一个双字节字符。
+  // 段名里出现「lead + 0x5D」时，`lastIndexOf(']')` 会把这个 0x5D 当结束括号、把字符截成半个；
+  // 引擎的判据跳过字符内部的命中、继续向前找真 `]`。
+  const decoyLast = parseIni(Buffer.from('[ab]c\x81\x5d\r\nScreenMode=2\r\n', 'latin1'));
+  assert.equal(decoyLast.get('ab\\ScreenMode'), '2', '最后一个 `]` 在字符内部 ⇒ 取前一个真 `]`');
+  assert.equal(decoyLast.has('ab]c\x81\\ScreenMode'), false, '⛔ 不许把双字节字符截掉半个');
+
+  // 段名含「lead + 0x5D」、后面还有真正的 `]` ⇒ 取真 `]`，且字符字节原样留在段名里
+  const both = parseIni(Buffer.from('[ab\x81\x5dcd]\r\nScreenMode=2\r\n', 'latin1'));
+  assert.equal(both.get('ab\x81\x5dcd\\ScreenMode'), '2', '字符内部的 `]` 不参与端点判定，真 `]` 才结束');
+
+  // 只剩字符内部的 `]` ⇒ 与「没有 `]`」同一条分支：段名取到行尾
+  const none = parseIni(Buffer.from('[ab\x81\x5d\r\nScreenMode=2\r\n', 'latin1'));
+  assert.equal(none.get('ab\x81\x5d\\ScreenMode'), '2', '没有落在字符外部的 `]` ⇒ 段名取到行尾');
+
+  // ★ 边界判定是**局部**的（只看命中字节与相邻一字节），不按行首重新配对：
+  // `[0x81 0x81 0x5D` 若按配对读，是「0x81 0x81 一个字符 + 独立的 0x5D」；
+  // 但引擎只看 0x5D 的前一字节 0x81（前导）⇒ 把 0x5D 算在字符内部 ⇒ 它不是结束括号、段名取到行尾。
+  const local = parseIni(Buffer.from('[\x81\x81\x5d\r\nScreenMode=2\r\n', 'latin1'));
+  assert.equal(local.get('\x81\x81\x5d\\ScreenMode'), '2', '局部判据：0x5D 的前一字节是前导 ⇒ 落在字符内部');
+  assert.equal(local.has('\x81\x81\\ScreenMode'), false, '⛔ 不按行首重新配对（配对式会得到段名 `\\x81\\x81`）');
+
+  // 段头取**最后一个** `]`（不是第一个）：`[a]b]` ⇒ 段名 `a]b`
+  const last = parseIni(Buffer.from('[a]b]\r\nScreenMode=2\r\n', 'latin1'));
+  assert.equal(last.get('a]b\\ScreenMode'), '2', '段名 = 第一个 `[` 与最后一个 `]` 之间');
+  assert.equal(last.has('a\\ScreenMode'), false, '⛔ 不是第一个 `]`（那是 `indexOf` 的行为）');
+
+  // `lead + 0x5B` 在**行首**：原始首字节不是 `[` ⇒ 这一行不是段头（按普通条目解析）。
+  // 段头的第一个 `[` 只能是第 0 字节、之前没有字节 ⇒ 它不可能落在双字节字符内部；
+  // 所以只需给后向的 `]` 判双字节边界。
+  const leadFirst = parseIni(Buffer.from('\x81\x5b\r\nScreenMode=2\r\n', 'latin1'));
+  assert.equal(leadFirst.has('\\\x81\x5b'), true, '首字节是前导字节 ⇒ 不是段头');
+  assert.equal(leadFirst.get('\\\x81\x5b'), '', '不带 `=` 的行：整行是键、值空串');
+});
+
+test('★★ 玩家文件字段裁剪：0x00–0x20 闭区间 / 只剥一层引号 / 引号内空格保留 / 无 `=` 行', async () => {
+  // ① 裁剪集合 = 首尾 0x00–0x20 **闭区间**：0x20 要裁；0x21 以上不裁；0x80 以上（DBCS 前导字节）不裁。
+  const pad = parseIni(Buffer.from('[display]\r\n\t\x01ScreenMode\x1f\t = \x1f 2 \t\r\n', 'latin1'));
+  assert.equal(pad.get('display\\ScreenMode'), '2', '首尾 0x00–0x20（含 0x20 / 0x1F / 0x09 / 0x0D）都要裁掉');
+
+  const bang = parseIni(Buffer.from('[display]\r\n!ScreenMode=2\r\n', 'latin1'));
+  assert.equal(bang.has('display\\!ScreenMode'), true, '0x21 不是裁剪边界：`!` 留在键里');
+  assert.equal(bang.has('display\\ScreenMode'), false, '不许把 0x21 也裁掉');
+
+  const high = parseIni(Buffer.from('[display]\r\n\x80ScreenMode=2\r\n', 'latin1'));
+  assert.equal(high.has('display\\\x80ScreenMode'), true, '0x80 以上（DBCS 前导字节）不是裁剪边界');
+
+  // ② 只剥一层成对引号；引号内的空格保留；剥引号要求开引号前有被裁掉的字节（起始下标 > 0）
+  const spaced = store();
+  spaced.applyIni(parseIni(Buffer.from('[message]\r\nFont = "  A  "\r\n', 'latin1')));
+  assert.equal(spaced.getString('message:Font'), '  A  ', '引号内的空格保留（先裁剪、后剥引号）');
+
+  const one = store();
+  one.applyIni(parseIni(Buffer.from('[message]\r\nFont = ""A""\r\n', 'latin1')));
+  assert.equal(one.getString('message:Font'), '"A"', '只剥一层（不循环）');
+
+  const bare = store();
+  bare.applyIni(parseIni(Buffer.from('[message]\r\nFont="A"\r\n', 'latin1')));
+  assert.equal(bare.getString('message:Font'), '"A"', '开引号前没有可裁字节 ⇒ 引号原样留下');
+
+  const gapped = store();
+  gapped.applyIni(parseIni(Buffer.from('[message]\r\nFont= "A" \r\n', 'latin1')));
+  assert.equal(gapped.getString('message:Font'), 'A', '开引号前有空白 ⇒ 剥一层');
+
+  const lone = store();
+  lone.applyIni(parseIni(Buffer.from('[message]\r\nFont= "\r\n', 'latin1')));
+  assert.equal(lone.getString('message:Font'), '', '单字符字段 ` "` 也剥（只按两个端点判，没有长度 ≥ 2 的前置条件）');
+
+  // ③ 顶层 `=` 切分：值在第 2 个顶层 `=` 处截断；引号 / 括号内的 `=` 不是分隔符
+  assert.equal(parseIni(Buffer.from('[message]\r\nFont=a=b\r\n', 'latin1')).get('message\\Font'), 'a', '值 = 第 1 字段（第 2 个顶层 `=` 处截断）');
+  assert.equal(parseIni(Buffer.from('[message]\r\nFont="a=b"\r\n', 'latin1')).get('message\\Font'), '"a=b"', '引号内的 `=` 不是分隔符');
+  assert.equal(parseIni(Buffer.from('[message]\r\nFont=(a=b)\r\n', 'latin1')).get('message\\Font'), '(a=b)', '括号内的 `=` 不是分隔符');
+  assert.equal(parseIni(Buffer.from('[message]\r\n"Font=a\r\n', 'latin1')).get('message\\"Font=a'), '', '引号未配对（`=` 处奇数次）⇒ 该 `=` 不是顶层的 ⇒ 整行是键、值空串');
+
+  // ④ 无 `=` 的行：键 = 整行（裁剪后）、值 = 空串；空行 ⇒ 空键空值；`;` / `#` 不是注释
+  const noEq = parseIni(Buffer.from('[display]\r\nScreenMode\r\n', 'latin1'));
+  assert.equal(noEq.has('display\\ScreenMode'), true, '不带 `=` 的非空行：整行（裁剪后）是键');
+  assert.equal(noEq.get('display\\ScreenMode'), '', '…值是空串');
+  assert.equal(noEq.has('display\\'), false, '…不是“空键”');
+
+  const comment = parseIni(Buffer.from('[message]\r\n; x=1\r\n#y=2\r\n\r\nFont=A\r\n', 'latin1'));
+  assert.equal(comment.get('message\\; x'), '1', '`;` 不是注释符：带 `=` 的注释行是普通条目');
+  assert.equal(comment.get('message\\#y'), '2', '`#` 不是注释符');
+  assert.equal(comment.get('message\\'), '', '空行 ⇒ 空键空值');
+
+  // ⑤ 行读取的两条硬口径：行内 0x00 截断；没有 LF 结尾的末行被丢弃；读满 255 字节先交出一行
+  assert.equal(parseIni(Buffer.from('[display]\r\nScreenMode=2\x00junk=9\r\n', 'latin1')).get('display\\ScreenMode'), '2', '行内 0x00 ⇒ 截断，其后不解析');
+  assert.equal(parseIni(Buffer.from('[display]\r\nScreenMode=2', 'latin1')).size, 0, '没有 LF 结尾的末行被丢弃');
+  const long = parseIni(Buffer.from(`${'A'.repeat(255)}=1\r\n`, 'latin1'));
+  assert.equal(long.has(`\\${'A'.repeat(255)}`), true, '读满 255 字节先交出这一行');
+  assert.equal(long.get('\\'), '1', '剩余字节（含紧随的 `=`）按下一行解析');
+});
+
 test('★ 保存：四段 CRLF 与条件键；重解析 round-trip', async () => {
   const s = store();
   s.applyDefaults([{ key: 'FULLSCREENBIT', value: '32' }]);
