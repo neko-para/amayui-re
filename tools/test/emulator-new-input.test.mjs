@@ -268,3 +268,15 @@ test('★ 鼠标命中查找：0x12e 的部分实现写 -1 + 诊断', async () =
   assert.equal(m.effects.filter((e) => e.kind === 'input.hit-test.unmodeled').length, 1);
   assert.equal(m.diagnostics.filter((d) => d.kind === 'unmodeled-input-hit-test:0x12e').length, 1, '诊断只记首次');
 });
+
+test('★ 异常必须带指令位置：opcode / 偏移 / 操作数', async () => {
+  // 0x192 的落点 type 6（引用族）不在文本写入的支持集里 ⇒ 必然抛；检查包装后的上下文。
+  const m = machineFor([[0x1a8, []], [0x192, [[6, 1], [0, 1]]]]);
+  await assert.rejects(() => m.run(), (error) => {
+    assert.match(error.message, /text-unsupported-operand-type:0x6/);
+    assert.match(error.message, /opcode=0x192/);
+    assert.match(error.message, /offset=4/, '偏移是本条指令在脚本体里的字节位置');
+    assert.match(error.message, /operands=\[0x6:0x1,0x0:0x1\]/);
+    return true;
+  });
+});

@@ -392,6 +392,14 @@ export function readText(m: Machine, ops: Operand[], k: number): string {
   if (op.type === 11) return m.frame.localString.get(op.raw) ?? '';
   // type 2：内联字符串。文件偏移 = headerLen + 4·raw，而 `m.body` **已经切掉头** ⇒ 在 body 里就是 4·raw。
   if (op.type === 2) return inlineStringAt(m.body, op.raw >>> 0);
+  // ★ 文本原语也接受数值族：立即数 / 整型池 / 浮点池都转成十进制文本
+  //   （引擎 `sub_41B640` 的 case 0/1/3/4/9/10；符号 / 宽度 / 浮点格式本版不规定）。
+  if (op.type === 0) return String(op.raw | 0);
+  if (op.type === 1) return String(f32(op.raw));
+  if (op.type === 3) return String(decodeInt(m.globalInt.get(op.raw) ?? encodeInt(0, m.key), m.key));
+  if (op.type === 9) return String(decodeInt(m.frame.localInt.get(op.raw) ?? encodeInt(0, m.key), m.key));
+  if (op.type === 4) return String(f32(readFloatCell(m, m.globalFloat, op.raw)));
+  if (op.type === 10) return String(f32(readFloatCell(m, m.frame.localFloat, op.raw)));
   throw new Error(`text-unsupported-operand-type:0x${op.type.toString(16)}`);
 }
 

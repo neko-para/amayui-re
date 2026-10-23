@@ -1042,7 +1042,21 @@ export class Machine {
       }
       // 分派器协议：handler 之前在「操作数个数」槽写 2·argc+1；handler 可以清零（控制转移）
       this.operandCount = 2 * dec.argc + 1;
-      await handler(this, dec.ops);
+      try {
+        await handler(this, dec.ops);
+      } catch (error) {
+        // ★ 失败必须能定位到"哪一条指令"：日志里只写 text-unsupported-operand-type:0x0 是不够的。
+        const message = error instanceof Error ? error.message : String(error);
+        const script = this.rec.id === undefined ? 'root' : `0x${this.rec.id.toString(16)}`;
+        const operands = dec.ops
+          .map((op) => `0x${op.type.toString(16)}:0x${(op.raw >>> 0).toString(16)}`)
+          .join(',');
+        throw new Error(
+          `${message} [opcode=0x${dec.opcode.toString(16)} argc=${dec.argc} step=${this.steps} `
+          + `offset=${at} ip=0x${this.ip.toString(16)} script=${script} operands=[${operands}]]`,
+          { cause: error },
+        );
+      }
       this.ip += 4 * this.operandCount;
       this.steps += 1;
     }
