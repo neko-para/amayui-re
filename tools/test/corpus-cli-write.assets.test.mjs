@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { DEFAULT_MANIFEST, loadManifest, resolveOrigin } from '../lib/manifest.mjs';
+import { loadManifest, resolveOrigin } from '../lib/manifest.mjs';
 import { REPO_ROOT } from '../lib/paths.mjs';
 import { sha256File } from '../lib/fsx.mjs';
 import { main as corpusMain } from '../corpus.mjs';
@@ -46,7 +46,8 @@ function run(fn) {
  * 并把 `reference/old-agents-md` 的 sha256 抹掉 —— 那正是 `--scan` 要补的东西。
  */
 function scratchManifest({ stripSha = true } = {}) {
-  const m = JSON.parse(fs.readFileSync(DEFAULT_MANIFEST, 'utf8'));
+  // ★ 用 loadManifest()（会合并 assets.local.json 的 roots）：跨平台用例不能假设清单里的 Windows 路径在本机存在。
+  const m = loadManifest();
   const target = m.entries.find((e) => e.id === SCAN_ID);
   assert.ok(target, `真清单里必须有 ${SCAN_ID}（本用例拿它当 --scan 的目标）`);
   const o = target.origin[0];

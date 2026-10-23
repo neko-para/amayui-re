@@ -18,6 +18,8 @@ import { initialRenderState } from './render.ts';
 import type { RenderHost, RenderState, TextureKind } from './render.ts';
 import type { MovieHandle, MovieHost } from './movie.ts';
 import type { SaveHost } from './save.ts';
+import { initialInputState } from './input.ts';
+import type { InputHost, InputState } from './input.ts';
 
 export interface Operand {
   type: number;
@@ -33,6 +35,8 @@ export interface Frame {
   localPtr: Map<number, number>;
   /** 局部浮点指针池（type 13）：槽里装**地址** */
   localFloatPtr: Map<number, number>;
+  /** 局部字符串池（type 11）：槽里装字节串（与 globalString 同口径） */
+  localString: Map<number, string>;
   /** 局部字符串指针池（type 14）：槽里装**地址** */
   localStringPtr: Map<number, number>;
   /**
@@ -47,6 +51,12 @@ export interface Frame {
   localSub?: number;
   /** 进入本地块时记下的深度（0x7c 的深度判据）。 */
   localDepth?: number;
+  /** `0xfb` 在每个帧上登记的「键编号 → 脚本位置」（dword 下标；缺省 = 未登记） */
+  keyJumps: Map<number, number>;
+  /** `0xff` 重置的按键扫描游标（`0x100` 从这里开始找置位） */
+  keyCursor: number;
+  /** `0xff` 写成的按键扫描上限（= 键总数） */
+  keyLimit: number;
 }
 
 /** 纹理记录：来源文件（-1 = 无）、颜色键、空白创建标记（见 CORE-OPS-TEXTURE-*） */
@@ -262,6 +272,13 @@ export interface SceneState {
   windowStart: number;
   windowCancel: number;
   windowBusy: number;
+  /** `0x344` 场景对象记录表的「已存在位 + 第二格」；其它字段本层不建模 */
+  entries: Map<number, { present: number; value: number }>;
+  /** `0x20c` 的「别处驱动」标记 / 两个引擎级时间戳 / 帧标志格（身份见 spec 残差） */
+  frameDriver: number;
+  framePrev: number;
+  frameNow: number;
+  frameFlags: number;
 }
 
 /**
@@ -338,7 +355,9 @@ export type Stop =
   | { kind: 'step-limit'; index: number }
   | { kind: 'tick-limit'; index: number }
   /** 门位上有一个本版**不服务**的位（例：影片位 0x2000）—— 这是"停在这里"，不是异常 */
-  | { kind: 'gate'; index: number; bit: number };
+  | { kind: 'gate'; index: number; bit: number }
+  /** 输入脚本已耗尽且空闲超过预算（CLI 的显式收口；不是引擎停因） */
+  | { kind: 'input-idle'; index: number; now: number };
 
 export interface RunResult {
   steps: number;
@@ -400,6 +419,8 @@ export interface MachineOptions {
   movieHost?: MovieHost;
   /** 存档文件的平台边界（`0x1ab` / `0x1ac`）；缺省 = 没有后端 ⇒ 两条响亮失败。 */
   saveHost?: SaveHost;
+  /** 输入的平台边界（`60-ops-input.md`）；缺省 = 没有设备 ⇒ 输入字 0 / 光标不可用 / 无事件。 */
+  inputHost?: InputHost;
   /** 宿主睡眠（`0xc8` 的 n < 10 支）；缺省 ⇒ 该支响亮失败。 */
   sleepHost?: (ms: number) => Promise<void>;
   /**
@@ -412,8 +433,9 @@ export interface MachineOptions {
    * ★ `run` 的每一轮在**读时钟 / 过门之前**调它一次（泵完仍继续本迭代的其余步骤）。
    *   Electron 主循环把 `WindowSession.pump()` 接在这里，窗口 close / timer 消息才能在脚本执行期间派发。
    * ★ 缺省 `undefined` ⇒ **一次都不调**（不进微任务、不改既有行为）。
+   * ★ 返回一个 `Stop` 会让 `run` 立即以该停因收口（CLI 的 `input-idle` 用它）。
    */
-  onIteration?: () => void | Promise<void>;
+  onIteration?: () => void | Stop | Promise<void | Stop>;
 }
 
 export class Machine {
@@ -440,6 +462,12 @@ export class Machine {
   readonly movieHost: MovieHost | undefined;
   /** 存档文件边界（缺省 `undefined`，见 `MachineOptions.saveHost`） */
   readonly saveHost: SaveHost | undefined;
+  /** 输入的平台边界（缺省 `undefined` = 没有设备；见 `MachineOptions.inputHost`） */
+  readonly inputHost: InputHost | undefined;
+  /** 引擎侧输入状态（输入字 / 键总数 / 模式字 / 鼠标回调登记） */
+  input: InputState = initialInputState();
+  /** 未建模子系统 opcode 的已诊断集合（诊断只在首次出现时记一条） */
+  readonly unmodeledSeen = new Set<number>();
   /** 宿主睡眠（缺省 `undefined`，见 `MachineOptions.sleepHost`） */
   readonly sleepHost: ((ms: number) => Promise<void>) | undefined;
   /** 0xc8 的长睡眠定时器（毫秒）；`sleepUntil` 是绝对 `now`。 */
@@ -448,7 +476,7 @@ export class Machine {
   /** 宿主随机源（`0x60`；缺省 `Math.random`，见 `MachineOptions.random`） */
   readonly random: () => number;
   /** 迭代头的平台泵点（缺省 `undefined` = 不泵；见 `MachineOptions.onIteration`） */
-  readonly onIteration: (() => void | Promise<void>) | undefined;
+  readonly onIteration: (() => void | Stop | Promise<void | Stop>) | undefined;
   /**
    * `0x60` 的引擎级计数器：每执行一次 +1，超过 12 归 0（`0..12`）。
    * ★ 身份未取证（读者未知）⇒ 只按规范记状态，不进 `scalars`（那是"被 opcode 写过的格"的通用桶）。
@@ -592,6 +620,11 @@ export class Machine {
     windowStart: 0,
     windowCancel: 0,
     windowBusy: 0,
+    entries: new Map(),
+    frameDriver: 0,
+    framePrev: 0,
+    frameNow: 0,
+    frameFlags: 0,
   };
   /**
    * 声音对象（引擎里是一个子对象；语音对象在它 `+0x408` 存着指向它的指针）。
@@ -664,6 +697,7 @@ export class Machine {
     this.renderHost = opts.renderHost;
     this.movieHost = opts.movieHost;
     this.saveHost = opts.saveHost;
+    this.inputHost = opts.inputHost;
     this.sleepHost = opts.sleepHost;
     this.random = opts.random ?? Math.random;
     this.onIteration = opts.onIteration;
@@ -707,15 +741,44 @@ export class Machine {
     return { kind: 'gate', index: this.steps, bit: this.flags };
   }
 
+  /**
+   * 时间前进 `ms` 毫秒（`0xc8` 的短睡眠用）：**虚拟时钟**下 `now += ms`，
+   * **宿主时钟**下重新读一次时钟（真实阻塞已由宿主睡眠完成）。
+   * ★ 与 `tick()` 共用同一套场景时钟更新；`ticks` 是"门关着的迭代次数"，睡眠不算一次门迭代。
+   */
+  advance(ms: number): void {
+    this.now = this.clock ? this.clock() : this.now + ms;
+    this.scene.prev = this.scene.now;
+    this.scene.now = this.now;
+  }
+
   /** 虚拟时钟前进一格，并把场景时钟推到新读数（引擎每迭代读一次毫秒时钟） */
   tick(): void {
     // ★ 宿主时钟优先：窗口前端传真实毫秒时钟；headless 不传 ⇒ 虚拟步长（显式仿真参数）。
     //   不在这里做"至少走 tickMs"的夹取：宿主时钟慢/快都应如实反映；仿真侧要固定步长就显式传 tickMs。
-    this.now = this.clock ? this.clock() : this.now + this.tickMs;
+    this.advance(this.tickMs);
     this.ticks += 1;
-    this.scene.prev = this.scene.now;
-    this.scene.now = this.now;
   }
+
+  /**
+   * 当前帧的**调用层数**（根帧 0；每沿 `parent` 走一步 +1）。
+   * ★ `0xcc` 登记时记它、`0xcd` 派发时校验它；本层只要求两处取同一个量。
+   */
+  frameDepth(): number {
+    let depth = 0;
+    let slot = this.cur;
+    let guard = 0;
+    while (slot >= 0) {
+      const rec = this.slots[slot];
+      if (!rec || rec.parent < 0) break;
+      depth += 1;
+      slot = rec.parent;
+      guard += 1;
+      if (guard > FRAME_SLOT_COUNT) throw new Error('frame-depth-cycle');
+    }
+    return depth;
+  }
+
 
   /**
    * 门之前的影片对象表服务（CORE-VM-MOVIE）。
@@ -830,8 +893,9 @@ export class Machine {
   freshFrame(): Frame {
     return {
       localInt: new Map(), localFloat: new Map(),
-      localPtr: new Map(), localFloatPtr: new Map(), localStringPtr: new Map(),
+      localPtr: new Map(), localFloatPtr: new Map(), localString: new Map(), localStringPtr: new Map(),
       retStack: [], position: 0,
+      keyJumps: new Map(), keyCursor: 0, keyLimit: 0,
     };
   }
 
@@ -948,7 +1012,10 @@ export class Machine {
     for (;;) {
       // 迭代头（CORE-VM-LOOP）：先泵一次宿主消息（节流由平台 / 注入方决定），再读时钟、过门。
       // ★ 泵完仍继续本迭代的其余步骤；缺省不泵（连一次 `await` 都不多付）。
-      if (this.onIteration) await this.onIteration();
+      if (this.onIteration) {
+        const stop = await this.onIteration();
+        if (stop) return { steps: this.steps, index: this.steps, ip: this.ip, stop };
+      }
       this.stepScene();
       this.serviceMovies();
       if (this.halted) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'exit' } };

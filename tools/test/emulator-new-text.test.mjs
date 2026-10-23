@@ -1,12 +1,15 @@
 /** @env pure @kind contract @why 0x71 的"位置写帧字段"漏写 / 写错（写下一条、写成字节偏移）都不会报错，只会让帧里那格静默错掉 */
 /**
- * tools/test/emulator-new-text.test.mjs —— 文本请求（`60-ops-list.md` 的 CORE-OPS-LIST-TEXT-REQUEST）守卫
+ * tools/test/emulator-new-text.test.mjs —— 文本请求（`60-ops-list.md` 的 CORE-OPS-LIST-TEXT-REQUEST）+ 字符串指令（`0x192` / `0x2eb` / `0x2ec`）守卫
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { loadOpcodeTable } from '../../apps/emulator-new/src/platform/node/spec.ts';
 import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { ConfigStore } from '../../apps/emulator-new/src/core/config.ts';
+import { decodeInt } from '../../apps/emulator-new/src/core/values.ts';
+import { loadConfigKeys } from '../../apps/emulator-new/src/platform/node/spec.ts';
 
 const table = await loadOpcodeTable();
 const KEY = 0x1234abcd;
@@ -47,4 +50,19 @@ test('★ 0x71 不许顺手置状态位（条件未取证 ⇒ 置错会让门立
   const m = machineFor([[0x71, [[0, 1]]]]);
   await m.run();
   assert.equal(m.flags, 0, '本版不写那次有条件的状态位写；门必须仍然开着');
+});
+
+test('★ 0x2eb 版本字符串与 0x2ec 十进制解析', async () => {
+  const schema = await loadConfigKeys();
+  const config = new ConfigStore(schema);
+  config.setString('set:GameVersion', '1.14');
+  const m = new Machine({
+    body: script([[0x2eb, [[11, 0]]], [0x2ec, [[3, 1], [11, 2]]]]),
+    table, key: KEY, config,
+  });
+  m.frame.localString.set(2, '-42');
+  await m.run();
+  assert.equal(m.frame.localString.get(0), '1.14', '0x2eb：配置版本号写进第 1 个操作数（type 11）');
+  assert.equal(decodeInt(m.globalInt.get(1), KEY), -42, '0x2ec：十进制文本 -42 → 整数');
+  assert.deepEqual(m.effects, [], '两条都不发外部请求');
 });

@@ -20,6 +20,7 @@ import type { Host } from './install.ts';
 import type { ConfigKeySchema, OpcodeRow } from './spec.ts';
 import type { RenderHost } from './render.ts';
 import type { MovieHost } from './movie.ts';
+import type { InputHost } from './input.ts';
 
 /** 一份脚本的"结构 + 执行"报告（decode / run / 缺 key 三种形态共用；可选字段由 mode 决定） */
 export interface ScriptReport {
@@ -55,6 +56,16 @@ export interface ScriptReport {
   startup?: StartupReport;
   /** 仅安装入口：配置库摘要 */
   config?: ConfigSummary;
+  /** 输入侧的可观察记账（CLI 收口 / 守卫用） */
+  input?: {
+    word: number;
+    keyTotal: number;
+    mode: number;
+    samples: number;
+    mouseDispatches: number;
+    keyDispatches: number;
+    unmodeled: string[];
+  };
 }
 
 /** 核心运行期需要的**纯数据** + 平台接口（由平台层装配） */
@@ -72,6 +83,8 @@ export interface CoreEnv {
   renderHost?: RenderHost;
   /** 影片播放后端（`0x20f`）；缺省 = 没有后端 ⇒ 影片位保持门关闭 */
   movieHost?: MovieHost;
+  /** 输入后端（`60-ops-input.md`）；缺省 = 没有设备 */
+  inputHost?: InputHost;
 }
 
 export interface RunOpts {
@@ -97,11 +110,15 @@ export interface RunOpts {
   renderHost?: RenderHost;
   /** 影片后端；给了就覆盖 `CoreEnv.movieHost`（缺省沿用 env 的那一个） */
   movieHost?: MovieHost;
+  /** 输入后端；给了就覆盖 `CoreEnv.inputHost`（缺省沿用 env 的那一个） */
+  inputHost?: InputHost;
+  /** 宿主睡眠（`0xc8` 的短睡眠）；缺省 ⇒ 该支响亮失败 */
+  sleepHost?: (ms: number) => Promise<void>;
   /**
    * **迭代头的平台泵点**（`70-vm.md` 的 `CORE-VM-LOOP`）：每次迭代在门之前调一次。
    * ★ 平台入口把窗口 / timer 消息泵接在这里（`WindowSession.pump()`）；缺省 `undefined` = 不泵。
    */
-  onIteration?: () => void | Promise<void>;
+  onIteration?: () => void | Stop | Promise<void | Stop>;
   /**
    * **根脚本装载之前的平台阶段**（`06-window.md` 的启动顺序：图形设备 → **根脚本** → 周期定时器）。
    *
@@ -161,6 +178,8 @@ function describeStop(stop: Stop): string {
       return `时钟上限（第 ${stop.index} 步）`;
     case 'gate':
       return `门位未服务：0x${stop.bit.toString(16)}（第 ${stop.index} 条）`;
+    case 'input-idle':
+      return `输入脚本已耗尽且空闲 ${stop.now}ms（第 ${stop.index} 步）`;
   }
 }
 
@@ -195,7 +214,7 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
   const machine = new Machine({
     body, table: env.table, key, tickMs: opts.tickMs, clock: opts.clock, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
     loadImage: opts.loadImage,
-    fontNames: opts.fontNames, renderHost: opts.renderHost ?? env.renderHost, movieHost: opts.movieHost ?? env.movieHost, onIteration: opts.onIteration,
+    fontNames: opts.fontNames, renderHost: opts.renderHost ?? env.renderHost, movieHost: opts.movieHost ?? env.movieHost, inputHost: opts.inputHost ?? env.inputHost, sleepHost: opts.sleepHost, onIteration: opts.onIteration,
   });
   // 根脚本已在 0 号槽 ⇒ 平台在这里建周期定时器（`onMachine` 的注释见 `RunOpts`）
   await opts.onMachine?.(machine, { config: opts.config });
@@ -216,6 +235,15 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
     internalEffectCounts: effectScopes.internalEffectCounts,
     ...(opts.includeEffects ? { effects: [...machine.effects] } : {}),
     sceneError: machine.scene.errorBuffer,
+    input: {
+      word: machine.input.word >>> 0,
+      keyTotal: machine.input.keyTotal,
+      mode: machine.input.mode,
+      samples: machine.input.samples,
+      mouseDispatches: machine.input.mouseDispatches,
+      keyDispatches: machine.input.keyDispatches,
+      unmodeled: [...machine.unmodeledSeen].map((op) => `0x${op.toString(16)}`),
+    },
     entered: [...machine.enteredIds],
     gap:
       r.stop.kind === 'unimplemented'

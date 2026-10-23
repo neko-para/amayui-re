@@ -14,11 +14,16 @@
  *   缺省自动生成；给 `--key` 只用于可复现的位模式对照（0 不是合法值）。
  * ★ 核心是平台无关的（`core/runner.ts`）；本文件只是它 + Node 的 `Host` + `data/spec` 的装配点。
  */
+import fs from 'node:fs';
+
 import { analyze, analyzeInstall } from '../../core/runner.ts';
 import type { Machine } from '../../core/machine.ts';
 import { effectScope } from '../../core/machine.ts';
+import type { Stop } from '../../core/machine.ts';
 import { decodeCp932 } from '../../core/bytes.ts';
 import type { CoreEnv, RunOpts } from '../../core/runner.ts';
+import type { MovieHandle, MovieHost } from '../../core/movie.ts';
+import { parseInputScript, ScriptedInputHost } from './input.ts';
 import { loadConfigKeys, loadOpcodeTable } from './spec.ts';
 import { nodeHost } from './host.ts';
 
@@ -45,6 +50,17 @@ interface Args {
   uninitializedFloat: 'throw' | 'zero';
   config: string | null;
   initConfig: boolean;
+  /** 指令式输入脚本文件（`at move/down/up/key`）；与 `--input-script` 二选一 */
+  input: string | null;
+  /** 内联指令式输入脚本（测试 / 短脚本） */
+  inputScript: string | null;
+  /** 输入脚本耗尽后再等多少仿真毫秒才以 `input-idle` 收口（0 = 不收口） */
+  inputIdleMs: number;
+  /** 显式步数 / 时钟上限（无输入脚本时的安全阀） */
+  maxSteps: number | null;
+  maxTicks: number | null;
+  /** 不给 headless 影片后端（保留旧行为：停在影片门） */
+  noMovie: boolean;
 }
 
 function parseU32(text: string, what: string): number {
@@ -54,7 +70,7 @@ function parseU32(text: string, what: string): number {
 }
 
 const USAGE = [
-  '用法：node apps/emulator-new/src/main.ts --install <dir> [--key <u32>] [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--real-time] [--trace|--trace-all] [--progress N] [--effects] [--config <SYS4REG.INI>] [--init-config] [--json] [--strict]',
+  '用法：node apps/emulator-new/src/main.ts --install <dir> [--key <u32>] [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--real-time] [--trace|--trace-all] [--progress N] [--effects] [--config <SYS4REG.INI>] [--init-config] [--input <file> | --input-script <text>] [--input-idle-ms N] [--max-steps N] [--max-ticks N] [--no-movie] [--json] [--strict]',
   '      node apps/emulator-new/src/main.ts --script <file> [--key <u32>] [--stop-at <opcode>] [--json] [--strict]',
   '      node apps/emulator-new/src/main.ts --install <dir> --decode [--json]',
   '      node apps/emulator-new/src/main.ts --help',
@@ -65,6 +81,7 @@ function parseArgs(argv: string[]): Args {
     install: null, script: null, rootId: 0, decodeOnly: false, json: false, strict: false,
     key: null, stopAt: null, tickMs: 16, realTime: false, trace: false, traceAll: false, progress: 0, effects: false,
     uninitializedFloat: 'throw', config: null, initConfig: false,
+    input: null, inputScript: null, inputIdleMs: 500, maxSteps: null, maxTicks: null, noMovie: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -88,6 +105,12 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--progress') out.progress = parseU32(argv[++i] ?? '', '--progress');
     else if (a === '--config') out.config = argv[++i] ?? null;
     else if (a === '--init-config') out.initConfig = true;
+    else if (a === '--input') out.input = argv[++i] ?? null;
+    else if (a === '--input-script') out.inputScript = argv[++i] ?? null;
+    else if (a === '--input-idle-ms') out.inputIdleMs = parseU32(argv[++i] ?? '', '--input-idle-ms');
+    else if (a === '--max-steps') out.maxSteps = parseU32(argv[++i] ?? '', '--max-steps');
+    else if (a === '--max-ticks') out.maxTicks = parseU32(argv[++i] ?? '', '--max-ticks');
+    else if (a === '--no-movie') out.noMovie = true;
     else if (a === '--uninitialized-float') {
       const v = argv[++i];
       if (v !== 'throw' && v !== 'zero') throw new Error('--uninitialized-float 只能是 throw / zero');
@@ -96,6 +119,7 @@ function parseArgs(argv: string[]): Args {
   }
   if (out.install && out.script) throw new Error('--install 与 --script 只能给一个');
   if (out.initConfig && !out.config) throw new Error('--init-config 需要同时给 --config <file>（不写安装目录）');
+  if (out.input && out.inputScript) throw new Error('--input 与 --input-script 只能给一个');
   return out;
 }
 
@@ -122,11 +146,33 @@ export async function main(argv: string[]): Promise<number> {
   /** `--real-time` / `--trace` / `--progress` 时捕获 Machine */
   let cliMachine: Machine | null = null;
   const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
+  /** 第一次真正派发输入回调的仿真时刻（空脚本的 idle 起点） */
+  let inputLoopStartedAt: number | null = null;
   let effectCursor = 0;
   let printedEffectCount = 0;
   let diagnosticCursor = 0;
   let nextProgress = args.progress;
-  const wantsHook = args.realTime || args.trace || args.progress > 0;
+  let wantsHook = args.realTime || args.trace || args.progress > 0;
+  /** 脚本化输入（`--input` / `--input-script`）；没有它 ⇒ 核心看到"没有设备" */
+  let inputHost: ScriptedInputHost | null = null;
+  try {
+    if (args.input) inputHost = new ScriptedInputHost(parseInputScript(fs.readFileSync(args.input, 'utf8')));
+    else if (args.inputScript !== null) inputHost = new ScriptedInputHost(parseInputScript(args.inputScript));
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+  /** CLI 的 headless 影片后端：立即"播完"，让 LOGO 之后能继续走启动链；`--no-movie` 保留旧停因 */
+  wantsHook = wantsHook || inputHost !== null;
+  const movieHandles = new Set<MovieHandle>();
+  const headlessMovieHost: MovieHost = {
+    open: () => { const handle = {}; movieHandles.add(handle); return handle; },
+    play: () => {},
+    poll: () => ({ currentTime: 1, stopTime: 1, ended: true }),
+    rewind: () => {},
+    close: (handle) => { movieHandles.delete(handle); },
+    fillTexture: () => {},
+  };
   /** trace 只做显示转码：字体名 / 文本按 CP932 解；⛔ 不改变 effect 的原始 detail。 */
   const printableEffect = (effect: { kind: string; detail: Record<string, unknown> }): Record<string, unknown> => {
     const detail: Record<string, unknown> = { ...effect.detail };
@@ -155,10 +201,10 @@ export async function main(argv: string[]): Promise<number> {
     tickMs: args.tickMs,
     // ★ 宿主时钟（可选）：等待门 / 渐变按墙钟走；缺省虚拟 tickMs（无头快跑）。
     ...(args.realTime ? { clock: () => Date.now() - cliClockOrigin } : {}),
-    // ★ 流式 / 进度 / 墙钟都需要捕获 Machine；`onIteration` 在门之前，效果与诊断已经入账。
+    // ★ 流式 / 进度 / 墙钟 / 输入都需要捕获 Machine；`onIteration` 在门之前，效果与诊断已经入账。
     ...(wantsHook ? {
       onMachine: (machine: Machine) => { cliMachine = machine; },
-      onIteration: async () => {
+      onIteration: async (): Promise<void | Stop> => {
         const m = cliMachine;
         if (m === null) return;
         if (args.trace) {
@@ -181,10 +227,24 @@ export async function main(argv: string[]): Promise<number> {
           while (nextProgress <= m.steps) nextProgress += args.progress;
         }
         if (args.realTime && (m.flags & 0x400) !== 0) await sleep(4);
+        // ★ 输入脚本耗尽后的显式收口：不是引擎停因，是 CLI 的仿真边界。
+        if (inputHost && (m.input.mouseDispatches > 0 || m.input.keyDispatches > 0)) {
+          if (inputLoopStartedAt === null) inputLoopStartedAt = m.now;
+          const idleFrom = Math.max(inputHost.appliedUntil, inputLoopStartedAt);
+          if (args.inputIdleMs > 0 && inputHost.exhausted && m.now - idleFrom >= args.inputIdleMs) {
+            return { kind: 'input-idle', index: m.steps, now: m.now };
+          }
+        }
       },
     } : {}),
     includeEffects: args.effects || args.trace,
     uninitializedFloat: args.uninitializedFloat,
+    ...(inputHost ? { inputHost } : {}),
+    // ★ 虚拟时钟下不真睡：`0xc8` 自己会把 now 推进 n 毫秒；`--real-time` 才真睡。
+    sleepHost: async (ms: number): Promise<void> => { if (args.realTime) await sleep(ms); },
+    ...(args.noMovie ? {} : { movieHost: headlessMovieHost }),
+    ...(args.maxSteps !== null ? { maxSteps: args.maxSteps } : {}),
+    ...(args.maxTicks !== null ? { maxTicks: args.maxTicks } : {}),
   };
   const env = await buildEnv();
   const result = args.install
@@ -235,6 +295,10 @@ export async function main(argv: string[]): Promise<number> {
         }
       }
       if (result.sceneError) console.log(`场景错误    ${result.sceneError}`);
+      if (result.input) {
+        const unmodeled = result.input.unmodeled.length > 0 ? result.input.unmodeled.join(' ') : '无';
+        console.log(`输入        word=0x${(result.input.word >>> 0).toString(16)} · 键总数 ${result.input.keyTotal} · 模式字 0x${result.input.mode.toString(16)} · 采样 ${result.input.samples} · 鼠标回调 ${result.input.mouseDispatches} · 按键回调 ${result.input.keyDispatches} · 未建模 ${unmodeled}`);
+      }
     } else {
       console.log(`执行        未启动 · 缺口 ${result.gap ? `opcode 0x${result.gap.opcode.toString(16)}` : '无'}`);
     }

@@ -1877,6 +1877,15 @@ const MUTATIONS = [
     what: '★ main 重新 import core ⇒ 架构守卫必须红（core 必须留在 renderer，main 只做窗口 / IPC / 生命周期）',
   },
 
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "  m.frame.retStack.push(m.ip / 4);",
+    to: "  m.frame.retStack.push(m.ip / 4 + 1);",
+    guard: 'tools/test/emulator-new-input.test.mjs',
+    what: '0x100 的“当前位置重派发”写成下一条 ⇒ 多个按键只派发第一个、游标不再逐个前进',
+  },
+
+
 ];
 
 /**

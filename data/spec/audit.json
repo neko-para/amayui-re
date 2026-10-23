@@ -603,6 +603,16 @@
           "next": "单独取证系统容器"
         }
       ]
+    },
+    {
+      "id": "ops-input",
+      "status": "bootstrap",
+      "residual": [
+        {
+          "what": "输入的模块内部（平台采样形态、物理键与输入位号的映射、窗口消息形态）不在本版；引擎侧已写成输入字 / 回调 / 查询 / 模式字。",
+          "next": "真机探针或窗口消息路径取证后，再决定是否补一张「输入位号 ↔ 物理键」词表；在那之前不伪造映射。"
+        }
+      ]
     }
   ],
   "planned": [
@@ -619,14 +629,26 @@
       ]
     },
     {
-      "id": "input",
-      "title": "输入：键鼠 / 手柄 / 事件",
+      "id": "adv-text",
+      "title": "ADV 文字显示：消息窗 / 自动推进 / 排版",
       "status": "none",
       "mechanism": "core-out",
       "residual": [
         {
-          "what": "整章尚未处理",
-          "next": "先从脚本里找到消费输入的 opcode，再反推事件形态与时机"
+          "what": "ADV 正文字形排版、消息窗、自动推进、翻页状态整章未处理；本版只有 0x192 / 0x2eb / 0x2ec / 0x71 等请求侧或字符串侧条目。",
+          "next": "从 TITLE 的 0x2c7 / 0x23b 与消息族入口取证，先定「引擎写出什么请求、改哪些引擎数据」，再决定章边界。"
+        }
+      ]
+    },
+    {
+      "id": "live2d",
+      "title": "Live2D：模型 / 动作 / 渲染接口",
+      "status": "none",
+      "mechanism": "core-out",
+      "residual": [
+        {
+          "what": "Live2D 在本版零覆盖；0x34e / 0x352 的引擎数据效果与失败路径未写成规则。",
+          "next": "按 project-intent 的口径写「接口 + 不变量 + source binding」三件套；先取证动作装载 / 播放的引擎侧状态，不写模型内部。"
         }
       ]
     },
@@ -637,8 +659,8 @@
       "mechanism": "core-out",
       "residual": [
         {
-          "what": "请求边界已成篇（06-window / 60-ops-render）；逐位表现（像素 / 混音）、输入事件形态、音频请求仍未成篇",
-          "next": "把像素 / 混音按项目口径登记为 discards；输入与音频各按边界单独立章"
+          "what": "请求边界已成篇（06-window / 60-ops-render / 60-ops-input / 60-ops-voice）；表现层内部（像素 / 混音 / 音频输出）仍未成篇。",
+          "next": "像素 / 混音按项目口径进 discards；音频输出内部与 ADV/Live2D 内部见各自 planned 条目。"
         }
       ]
     },
@@ -1703,14 +1725,14 @@
     {
       "id": "CORE-OPS-WAIT-POLL-INPUT",
       "status": "draft",
-      "disposition": "unhandled",
+      "disposition": "handled",
       "covers": [],
       "residual": [
         {
           "id": "RES-POLL-SAMPLE",
           "kind": "unknown",
-          "what": "输入采样本身（采样源、事件形态）不在本版；只规定\"采样后丢弃\"",
-          "next": "输入模块成篇时再补采样语义"
+          "what": "采样源 / 事件形态属平台边界；本版已规定引擎侧的输入字与采样请求（见「输入」的 CORE-INPUT-WORD）。",
+          "next": "平台采样契约成篇时再补采样源；不在本条规定宿主如何取键。"
         },
         {
           "id": "RES-POLL-AB-IDENTITY",
@@ -1719,13 +1741,15 @@
           "next": "扫 .lst 找两个落点的读取点，确认是否与别的指令共享，再决定是否命名"
         },
         {
-          "id": "RES-POLL-CLEARED-BIT",
+          "id": "RES-POLL-GATE-REACH",
           "kind": "unknown",
-          "what": "`0x101` 清的是状态选择字里的哪一位未取证（正文只写「一个位」）；该位与等待位 / 影片位 / `0x88`（清）与 `0x71`（置）的第 27 位是否同一族也未定",
-          "next": "在 0x101 的处理函数里读出那一位的位号，再与其它指令的置位点对账"
+          "what": "在“整字为 0 才派发”的门模型下，清第 27 位是防御性分支；第 27 位由谁服务、何时允许派发未取证。",
+          "next": "读主循环的门服务分支，确认第 27 位是否阻断派发。"
         }
       ],
-      "falsifiers": []
+      "falsifiers": [
+        "若第 27 位不是被清的那一位、或清的是等待位 ⇒ 本条错。"
+      ]
     },
     {
       "id": "CORE-VM-LOOP",
@@ -2682,8 +2706,8 @@
         {
           "id": "RES-STRING-SET-LOCAL",
           "kind": "unknown",
-          "what": "落点类型 11（当前帧的局部字符串池）与两个容器句柄（`0x8005` / `0x800B`）的写入行为没有逐条取证；正文因此只规定落点类型 5，其余落点写「本版不规定」",
-          "next": "先取证局部字符串池的分配点（每帧一份？容量从哪来？），再决定是否把 type 11 写进合同"
+          "what": "type 11（当前帧局部字符串池）已由字符串写原语的 case 11 与 TITLE 的 0x2eb 取证并写进合同；容器句柄 0x8005 / 0x800B 仍未规定",
+          "next": "取证两个容器句柄变体的写入路径；type 8 / 14 见另一条残差。"
         },
         {
           "id": "RES-STRING-SET-PTR",
@@ -3088,8 +3112,8 @@
         {
           "id": "RES-OPS-SCALAR-THIN-PROLOGUE-ROLE",
           "kind": "unknown",
-          "what": "五个格的领域身份未定（0xfe 的 31 上界、0x248 的进程级全局、0x261 那格的读者都没有观察）；0x10f / 0x248 / 0x8b 没有守卫",
-          "next": "按各自落点的读写点扫全语料找读者；找不到就保持\"格的身份未定\"，不猜名字"
+          "what": "0xfe 的格已由「输入」的 0x100 扫描上限读点支撑为键总数；0x10f / 0x248 / 0x8b 的域身份仍未定（0x10f / 0x248 / 0x8b 没有守卫）",
+          "next": "按各自落点的读写点扫全语料找读者；找不到就保持\"格的身份未定\"，不猜名字。0xfe 的键总数初值见输入章残差。"
         }
       ],
       "falsifiers": [
@@ -5667,6 +5691,394 @@
         "若第二个实例在检查单实例信号之前就打开文件 ⇒ 与本条「不做任何文件访问」冲突",
         "若窗口类注册失败也显示消息 ⇒ 与本条表格冲突"
       ]
+    },
+    {
+      "id": "CORE-INPUT-WORD",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-INPUT-KEYMAP",
+          "kind": "unknown",
+          "what": "输入位号与物理键 / 手柄编号的映射不在本版；实现只按平台给出的位号工作。",
+          "next": "用真机探针枚举一组物理键 → 输入位号，再决定是否补词表。"
+        },
+        {
+          "id": "RES-INPUT-SAMPLE-SOURCE",
+          "kind": "unknown",
+          "what": "采样源（键盘 / 鼠标 / 手柄各自的贡献与顺序）属平台边界，本版只规定\"采样写输入字\"。",
+          "next": "按输入模块的采样函数逐个读取器取证，或把采样源登记为明确的边界契约。"
+        },
+        {
+          "id": "RES-INPUT-KEYTOTAL-INIT",
+          "kind": "unknown",
+          "what": "键总数格的初值（任何 0xfe 执行之前）未观察；它决定 0x100 的扫描范围。",
+          "next": "在引擎初始化 / 根脚本之前找写点，或用真机探针读一次启动后的值。"
+        },
+        {
+          "id": "RES-INPUT-KEYTOTAL-WRITERS",
+          "kind": "unknown",
+          "what": "除 0xfe 外的键总数写点未枚举；本版只把 0xfe 的写与 0x100 的读对上。",
+          "next": "扫全 handler 找该格的写点；有别的写者就补一条交叉引用。"
+        }
+      ],
+      "falsifiers": [
+        "若某条输入指令读的不是这一个 32 位输入字（例如另有一条私有的键状态格）且行为自洽 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-INPUT-CALLBACK-REGISTER",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-INPUT-REGISTER-DEPTH",
+          "kind": "unknown",
+          "what": "鼠标回调的注册深度为什么必须与派发时深度相等，本版只把它写成合同，不解释用途。",
+          "next": "构造深度不匹配的脚本，观察异常文本与作用域，再决定是否补一条「跨帧回调禁止」的说明。"
+        },
+        {
+          "id": "RES-INPUT-REGISTER-INTERVAL-ZERO",
+          "kind": "unknown",
+          "what": "间隔为 0 被写成 1 是观察；0 是否还有别的含义（例如\"只在按键时派发\"）本版不规定。",
+          "next": "枚举脚本里 0xcc 的间隔实参分布，确认 0 是否作为特殊值出现。"
+        },
+        {
+          "id": "RES-INPUT-DEPTH-DEF",
+          "kind": "unknown",
+          "what": "“当前帧的调用层数”在根帧 / 0x3 子脚本 / 0x8 换帧下如何计算未取证；本条只要求登记与派发取同一个量。",
+          "next": "用一条跨 0x3 / 0x8 的脚本登记并派发，观察深度校验是否通过。"
+        }
+      ],
+      "falsifiers": [
+        "若按键回调表按帧以外的键（例如全局表）索引、或 0xcc 的间隔不是毫秒且行为自洽 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-INPUT-MOUSE-CALLBACK-PUMP",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-INPUT-MOUSE-PUMP-DEPTH",
+          "kind": "unknown",
+          "what": "深度校验的用途与失败后的脚本可见态本版只写到\"抛显示消息型异常\"。",
+          "next": "在 TITLE / 其它脚本里构造跨帧登记，观察异常捕获与后续流程。"
+        },
+        {
+          "id": "RES-INPUT-MOUSE-PUMP-27",
+          "kind": "unknown",
+          "what": "第 27 位为什么能绕过时间闸（\"跳过等待\"与\"立即派发\"的关系）本版只按观察写成条件。",
+          "next": "把第 27 位的置位点与等待服务分支对齐，确认它是否就是\"用户点击跳过\"的同一状态。"
+        },
+        {
+          "id": "RES-INPUT-MOUSE-PUMP-PUSH",
+          "kind": "unknown",
+          "what": "深度校验失败时，返回位置已经压栈；异常展开后这个栈项是否被回收未取证。",
+          "next": "构造深度不匹配并捕获异常，观察随后返回栈长度。"
+        },
+        {
+          "id": "RES-INPUT-MOUSE-PUMP-CALLER",
+          "kind": "unknown",
+          "what": "本函数是否只由 opcode 0xcd 派发调用（opcode 表指向它）；是否还有别的调用者未枚举。",
+          "next": "扫全语料调用点；若还有调用者，补一条“非指令入口”的说明。"
+        }
+      ],
+      "falsifiers": [
+        "若时间闸是 > 而不是 >=、或返回位置是当前指令而不是下一条、或目标 -1 仍会跳转 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-INPUT-KEY-DISPATCH",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-INPUT-KEY-DISPATCH-ORDER",
+          "kind": "unknown",
+          "what": "同一轮里多个键的派发顺序只由\"从游标起第一个置位\"决定；位号大小是否就是优先级，本版不另作断言。",
+          "next": "用两个同时按下的位跑一次，观察脚本收到的顺序。"
+        },
+        {
+          "id": "RES-INPUT-KEY-DISPATCH-UNREG",
+          "kind": "unknown",
+          "what": "未登记的位会让整轮扫描提前结束（不是跳过它继续）；为什么这样设计本版不解释。",
+          "next": "在真机上构造\"低位未登记、高位已登记\"的掩码，确认高位确实不再派发。"
+        },
+        {
+          "id": "RES-INPUT-KEY-DISPATCH-NORET",
+          "kind": "unknown",
+          "what": "回调若以“结束脚本 / 全局重置”而不是返回指令收尾（0x2 / 0x9 / 0x01），压入的返回位置怎么处理未取证。",
+          "next": "构造回调内 0x2 / 0x9 / 0x01 的脚本，观察返回栈与当前帧。"
+        },
+        {
+          "id": "RES-INPUT-KEY-DISPATCH-NEST",
+          "kind": "unknown",
+          "what": "回调内再执行 0x100、以及同一轮多键派发的返回栈增长边界未取证。",
+          "next": "构造嵌套按键回调，观察返回栈深度与终止条件。"
+        },
+        {
+          "id": "RES-INPUT-NOKEY-SLOT",
+          "kind": "unknown",
+          "what": "“没有按键”时使用的表项下标是键总数、还是固定的 32；键总数上界 31 与表宽的关系未逐字取证。",
+          "next": "用键总数 0 / 12 / 31 三组跑 0x100，观察实际取哪一项。"
+        }
+      ],
+      "falsifiers": [
+        "若输入字为 0 时返回位置不是\"下一条\"、或输入字非 0 时不是\"当前指令\"（即不重新派发）⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-INPUT-MOUSE-EVENT",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-INPUT-MOUSE-EVENT-FIELDS",
+          "kind": "unknown",
+          "what": "第 4 / 5 个操作数（事件标志 / 附加量）的位段与语义本版只要求原样传递。",
+          "next": "找窗口过程写事件队列的站点，逐位读出标志位含义。"
+        },
+        {
+          "id": "RES-INPUT-MOUSE-EVENT-QUEUE",
+          "kind": "unknown",
+          "what": "事件队列的容量、丢弃策略与\"没有事件时是否清队列\"属平台边界，本版不规定。",
+          "next": "按输入模块的队列写入点取证；若不可得，明确登记为边界不规定。"
+        },
+        {
+          "id": "RES-INPUT-MOUSE-EVENT-ARG5",
+          "kind": "unknown",
+          "what": "第 5 个操作数在 handler 内没有引用点，语义未定。",
+          "next": "找窗口过程写事件队列的站点，逐字段读出事件记录。"
+        }
+      ],
+      "falsifiers": [
+        "若无事件时坐标被清 0、或有事件时不消费队列 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-INPUT-MOUSE-POS",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-INPUT-POS-MAPPING",
+          "kind": "unknown",
+          "what": "窗口 / 虚拟全屏下的坐标映射公式本版不规定。",
+          "next": "按显示模式的配置分支逐档取证；在此之前实现只接受宿主给的客户区坐标。"
+        }
+      ],
+      "falsifiers": [
+        "若不可用时只写一个操作数、或可用时把哨兵写进去 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-INPUT-MOUSE-BUTTON",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-INPUT-BUTTON-HIGH-BITS",
+          "kind": "unknown",
+          "what": "位 2 以上本版不规定；中键 / 侧键是否也在同一字里未取证。",
+          "next": "用真机按中键 / 侧键，读同一条指令的输出位图。"
+        },
+        {
+          "id": "RES-INPUT-BUTTON-BITORDER",
+          "kind": "unknown",
+          "what": "左右键位序与系统“左右键交换”后的位号未逐位取证；本条只规定“有左右两位、具体位号由平台边界决定”。",
+          "next": "在交换与非交换两种系统设置下各按一次左右键，读回位图。"
+        }
+      ],
+      "falsifiers": [
+        "若设备不可用时保持旧值而不是写 0、或左右键位序固定不随系统交换 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-INPUT-MODE-WORD",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-INPUT-MODE-BITS",
+          "kind": "unknown",
+          "what": "模式字第 0 位以外的位由输入泵读取，语义本版不规定。",
+          "next": "按输入泵的读取点逐位取证。"
+        },
+        {
+          "id": "RES-INPUT-MODE-SKIP",
+          "kind": "unknown",
+          "what": "位 0 = 1 时等待位不做点击跳过，这一条的完整放行路径（采样、输入字位 4、清位、取消场景）本版只写到条件，不写服务细节。",
+          "next": "读等待服务分支的整段，把\"取消场景与全部对象\"写成独立规则后再交叉引用。"
+        }
+      ],
+      "falsifiers": [
+        "若位 0 = 1 仍然允许点击跳过、或位 0 是\"允许\"而不是\"禁止\" ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-AUDIO-WAV",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-AUDIO-WAV-LOAD-FAIL",
+          "kind": "unknown",
+          "what": "装载失败在引擎里抛显示消息型异常；本版不把失败路径写成合同。",
+          "next": "取一条真实坏 WAV 的装载，记录异常码与残留状态，再决定是否补失败合同。"
+        },
+        {
+          "id": "RES-AUDIO-WAV-OUTPUT",
+          "kind": "discarded",
+          "what": "音频输出的采样 / 混音逐位结果不在本版。",
+          "next": "按项目口径登记为表现层 discards。",
+          "reason": "逐位表现（采样 / 混音）不可从语料还原，按项目口径明确舍弃",
+          "range": [
+            "sub_420B00",
+            "sub_420B40",
+            "sub_4B4F60",
+            "sub_4B5020"
+          ],
+          "impact": "实现只记录请求、不产生声音；引擎数据效果不受影响"
+        },
+        {
+          "id": "RES-AUDIO-WAV-RESOURCE",
+          "kind": "unknown",
+          "what": "“资源标识”是统一文件 id、名字还是别的形式未取证。",
+          "next": "读 sub_4B4F60 的取件路径，确认它最终用什么键。"
+        },
+        {
+          "id": "RES-AUDIO-WAV-PARAM-ORDER",
+          "kind": "unknown",
+          "what": "装载请求的实参顺序未逐字取证；正文不写顺序。",
+          "next": "读调用点压栈顺序。"
+        }
+      ],
+      "falsifiers": [
+        "若 0xb4 / 0xb5 改了引擎状态（门位、脚本变量、当前帧）且行为自洽 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-AUDIO-BGM",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-AUDIO-BGM-CONFIG",
+          "kind": "unknown",
+          "what": "两个音乐配置键的读取与音量请求次序本版只登记\"可能发一次音量请求\"，不写成合同。",
+          "next": "读配置分支的完整判据与音量合成公式，再决定是否补一条音量规则。"
+        },
+        {
+          "id": "RES-AUDIO-BGM-BIT9",
+          "kind": "unknown",
+          "what": "第 9 位的写者 / 服务分支 / 领域含义未取证；本条只规定“派发到它且位已置起时清位”。",
+          "next": "找第 9 位的置位点与服务分支。"
+        }
+      ],
+      "falsifiers": [
+        "若第 9 位没有在 BGM 播放时被清、或清的是等待位 / 跳过位 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCENE-ENTRY-344",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-SCENE-ENTRY-FIELDS",
+          "kind": "unknown",
+          "what": "条目的其它字段与\"存在位\"之外的位本版不规定。",
+          "next": "枚举条目的读写点，补成员身份。"
+        },
+        {
+          "id": "RES-SCENE-ENTRY-VALUE",
+          "kind": "unknown",
+          "what": "“第二格”的领域身份与其它场景规则写的是否同一格未取证。",
+          "next": "枚举该记录 +4 的读者与写者。"
+        },
+        {
+          "id": "RES-SCENE-ENTRY-TABLE",
+          "kind": "unknown",
+          "what": "「场景条目表」与场景对象记录表是否同一张、存在位是否与 0x1fb 的有效位同一位，未取证。",
+          "next": "枚举两张表的基址与 0x202/0x1fd 的读点，确认是否同一张。"
+        }
+      ],
+      "falsifiers": [
+        "若 0x344 不置存在位、或写值不按\"2 → 1\"读序 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-RENDER-FRAME-STEP",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-RENDER-STEP-SUBSYSTEM",
+          "kind": "unknown",
+          "what": "sub_4B4040 内部的渲染 / 显示步骤不在本版。",
+          "next": "按渲染请求边界成篇时再补请求参数与时序。"
+        },
+        {
+          "id": "RES-RENDER-STEP-DRIVER",
+          "kind": "unknown",
+          "what": "「别处驱动」标记的身份与写点未取证。",
+          "next": "找该格的写入点，确认它是否表示\"外部已推进过时钟\"。"
+        },
+        {
+          "id": "RES-RENDER-STEP-TIMESTAMPS",
+          "kind": "unknown",
+          "what": "两个引擎级时间戳格的领域身份未取证；只确认它们不是帧记录里 0x1f4 写的那一对。",
+          "next": "枚举两格的读者。"
+        },
+        {
+          "id": "RES-RENDER-STEP-FLAG",
+          "kind": "unknown",
+          "what": "帧标志格的写者与含义未取证；本条只规定清 0。",
+          "next": "找该格的置位点，确认它是否表示“新帧可用”。"
+        }
+      ],
+      "falsifiers": [
+        "若标记非 0 时仍更新时间戳、或渲染请求与清标志不执行 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-TEXT-GAMEVERSION-2EB",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-TEXT-VERSION-MISSING",
+          "kind": "unknown",
+          "what": "配置键缺失时的引擎行为本版写成\"空串 + 诊断\"，这是实现的显式边界，不是已证引擎行为。",
+          "next": "用一份缺该键的配置跑一次，观察落点是否被写、写成什么。"
+        },
+        {
+          "id": "RES-TEXT-VERSION-REFS",
+          "kind": "unknown",
+          "what": "type 8 / 14（引用族）的落点写入路径本版不规定；TITLE 用的是 type 11。",
+          "next": "用一条 type 8 / 14 落点的脚本取证。"
+        }
+      ],
+      "falsifiers": [
+        "若落点不是\"永远第 1 个操作数\"、或写入的是操作数里的值 ⇒ 本条错。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-TEXT-ATOI-2EC",
+      "status": "draft",
+      "disposition": "handled",
+      "residual": [
+        {
+          "id": "RES-TEXT-ATOI-OVERFLOW",
+          "kind": "unknown",
+          "what": "溢出的行为本版不规定。",
+          "next": "用 12 位以上的十进制串跑一次，读回写入值。"
+        }
+      ],
+      "falsifiers": [
+        "若解析认 0x 前缀 / 指数、或写入不经过写整型原语 ⇒ 本条错。"
+      ]
     }
   ],
   "gaps": [
@@ -5674,7 +6086,7 @@
       "id": "GAP-OPS-0000-00FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0000–0x00FF 段：尚无规范条目",
-      "note": "本段 126 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 119 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x4",
         "0x7",
@@ -5761,8 +6173,6 @@
         "0xb1",
         "0xb2",
         "0xb3",
-        "0xb4",
-        "0xb5",
         "0xb6",
         "0xb7",
         "0xb8",
@@ -5772,7 +6182,6 @@
         "0xbc",
         "0xbd",
         "0xbe",
-        "0xbf",
         "0xc0",
         "0xc1",
         "0xc2",
@@ -5784,8 +6193,6 @@
         "0xc9",
         "0xca",
         "0xcb",
-        "0xcc",
-        "0xcd",
         "0xce",
         "0xcf",
         "0xd1",
@@ -5798,10 +6205,8 @@
         "0xd8",
         "0xda",
         "0xfa",
-        "0xfb",
         "0xfc",
-        "0xfd",
-        "0xff"
+        "0xfd"
       ],
       "residual": [
         {
@@ -5816,16 +6221,13 @@
       "id": "GAP-OPS-0100-01FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0100–0x01FF 段：尚无规范条目",
-      "note": "本段 81 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 78 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
-        "0x100",
         "0x102",
         "0x103",
         "0x104",
         "0x105",
         "0x106",
-        "0x108",
-        "0x109",
         "0x10a",
         "0x10d",
         "0x10e",
@@ -5913,7 +6315,7 @@
       "id": "GAP-OPS-0200-02FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0200–0x02FF 段：尚无规范条目",
-      "note": "本段 121 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 116 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x200",
         "0x201",
@@ -5922,7 +6324,6 @@
         "0x207",
         "0x209",
         "0x20a",
-        "0x20c",
         "0x20e",
         "0x210",
         "0x211",
@@ -5965,7 +6366,6 @@
         "0x24b",
         "0x24c",
         "0x24d",
-        "0x24e",
         "0x24f",
         "0x250",
         "0x251",
@@ -6018,8 +6418,6 @@
         "0x2e8",
         "0x2e9",
         "0x2ea",
-        "0x2eb",
-        "0x2ec",
         "0x2ed",
         "0x2ee",
         "0x2ef",
@@ -6033,7 +6431,6 @@
         "0x2f9",
         "0x2fa",
         "0x2fb",
-        "0x2fc",
         "0x2fd",
         "0x2ff"
       ],
@@ -6050,7 +6447,7 @@
       "id": "GAP-OPS-0300-03FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0300–0x03FF 段：尚无规范条目",
-      "note": "本段 53 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 52 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x300",
         "0x301",
@@ -6090,7 +6487,6 @@
         "0x341",
         "0x342",
         "0x343",
-        "0x344",
         "0x345",
         "0x346",
         "0x347",

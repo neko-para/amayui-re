@@ -190,13 +190,15 @@ test('★ 脚本配置：指针族的键由**地址换算**；地址没写过（
   assert.throws(() => HANDLERS.get(0x1a3)(m, [op(9, 0)]), /config-key-unsupported-type/);
 });
 
-test('文本原语：只支持 type 5，其余类型响亮失败（不补空串）', async () => {
+test('文本原语：支持 type 5 / 11，其余类型响亮失败（不补空串）', async () => {
   const m = machine(store());
   assert.equal(readText(m, [op(5, 3)], 1), '');
   writeText(m, [op(5, 3)], 1, 'x');
   assert.equal(m.globalString.get(3), 'x');
+  writeText(m, [op(11, 3)], 1, 'local');
+  assert.equal(readText(m, [op(11, 3)], 1), 'local', 'type 11：当前帧局部字符串池');
+  assert.equal(m.frame.localString.get(3), 'local');
   assert.throws(() => readText(m, [op(6, 3)], 1), /text-unsupported-operand-type:0x6/);
-  assert.throws(() => writeText(m, [op(11, 3)], 1, 'x'), /text-unsupported-operand-type:0xb/);
 });
 
 test('脚本配置：配置库缺席 ⇒ config-not-initialized（不静默 0）', async () => {

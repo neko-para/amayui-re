@@ -389,6 +389,7 @@ function deref(m: Machine, op: Operand): Resolved {
 export function readText(m: Machine, ops: Operand[], k: number): string {
   const op = operandAt(ops, k);
   if (op.type === 5) return m.globalString.get(op.raw) ?? '';
+  if (op.type === 11) return m.frame.localString.get(op.raw) ?? '';
   // type 2：内联字符串。文件偏移 = headerLen + 4·raw，而 `m.body` **已经切掉头** ⇒ 在 body 里就是 4·raw。
   if (op.type === 2) return inlineStringAt(m.body, op.raw >>> 0);
   throw new Error(`text-unsupported-operand-type:0x${op.type.toString(16)}`);
@@ -418,11 +419,15 @@ function inlineStringAt(body: Uint8Array, raw: number): string {
   throw new Error(`内联字符串读到末尾都没有终止符（raw=${raw}，off=${off}）`);
 }
 
-/** 写文本：只支持 type 5（全局字符串池）；其余类型响亮失败 */
+/** 写文本：支持 type 5（全局字符串池）/ 11（当前帧局部字符串池）；其余类型响亮失败 */
 export function writeText(m: Machine, ops: Operand[], k: number, value: string): void {
   const op = operandAt(ops, k);
   if (op.type === 5) {
     m.globalString.set(op.raw, value);
+    return;
+  }
+  if (op.type === 11) {
+    m.frame.localString.set(op.raw, value);
     return;
   }
   throw new Error(`text-unsupported-operand-type:0x${op.type.toString(16)}`);

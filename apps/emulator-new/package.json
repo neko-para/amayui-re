@@ -2,7 +2,7 @@
   "name": "@amayui/emulator-new",
   "private": true,
   "type": "module",
-  "description": "只读 data/spec 的参考实现（核心平台无关；Node CLI + Electron 窗口壳 / Pixi 渲染；不含音频与输入转发）。不复制 apps/emulator 的代码。",
+  "description": "只读 data/spec 的参考实现（核心平台无关；Node CLI + Electron 窗口壳 / Pixi 渲染；CLI 有脚本化输入；音频输出与 ADV/Live2D 内部未建模，输入走平台边界）",
   "main": "src/platform/electron/main.ts",
   "scripts": {
     "run": "node src/main.ts",

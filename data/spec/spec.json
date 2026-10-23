@@ -95,12 +95,12 @@
     {
       "id": "ops-render",
       "file": "chapters/60-ops-render.md",
-      "title": "渲染请求边界：渲染目标、场景混合与离屏文字"
+      "title": "渲染请求边界：渲染目标、场景混合、离屏文字与帧步进"
     },
     {
       "id": "ops-voice",
       "file": "chapters/60-ops-voice.md",
-      "title": "语音族"
+      "title": "音频：语音 / 音效 / BGM"
     },
     {
       "id": "ops-list",
@@ -130,7 +130,12 @@
     {
       "id": "ops-wait",
       "file": "chapters/60-ops-wait.md",
-      "title": "等待、输入、影片与空操作"
+      "title": "等待、影片与空操作"
+    },
+    {
+      "id": "ops-input",
+      "file": "chapters/60-ops-input.md",
+      "title": "输入：键鼠 / 手柄 / 回调"
     },
     {
       "id": "vm",

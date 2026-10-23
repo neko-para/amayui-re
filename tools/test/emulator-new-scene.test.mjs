@@ -279,3 +279,11 @@ test('★ 宿主时钟 + 等待门：时钟按宿主读数推进，窗到期才�
   assert.ok(m.now >= 112, `宿主时钟走过了窗长（实际 ${m.now}ms）`);
   assert.ok(m.ticks >= 7, `门关着的迭代次数（实际 ${m.ticks}）`);
 });
+
+test('★ 0x344 场景条目：置存在位 + 写值 + 标脏', async () => {
+  const m = machineFor([[0x344, [[0, 7], [0, 42]]]]);
+  await m.run();
+  assert.deepEqual(m.scene.entries.get(7), { present: 1, value: 42 }, '记录 7：存在位 1、第二格 42');
+  assert.equal(m.scene.dirty, 1, '场景标脏');
+  assert.equal(m.flags, 0, '不置门位');
+});

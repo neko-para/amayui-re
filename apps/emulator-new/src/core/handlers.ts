@@ -1103,8 +1103,11 @@ function wait21c(m: Machine): void {
 /** 0x101 poll-input：采样并丢弃（CORE-OPS-WAIT-POLL-INPUT） */
 function pollInput101(m: Machine): void {
   m.effects.push({ kind: 'input.poll', detail: {} });
+  // 清状态选择字第 27 位（只清这一位；CORE-OPS-WAIT-POLL-INPUT）
   m.flags &= ~0x08000000;
+  m.input.word = 0;
   m.inputWord = 0;
+  m.input.samples += 1;
   m.scalars.set('pollInput.a', 1);
   m.scalars.set('pollInput.b', 0);
 }
@@ -2006,6 +2009,8 @@ async function sleepC8(m: Machine, ops: Operand[]): Promise<void> {
   }
   if (!m.sleepHost) throw new Error('sleep-host-missing:0xc8');
   await m.sleepHost(n);
+  // ★ 短睡眠必须让时间前进（虚拟时钟 += n / 宿主时钟重读），否则轮询循环会 CPU 全速空转。
+  m.advance(n);
   m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0xc8', sleepMs: n } });
 }
 
@@ -2289,13 +2294,6 @@ function scalarWrite(m: Machine, opcode: string, slot: string, value: number): v
   m.effects.push({ kind: 'engine.scalar.write', detail: { opcode, slot, value } });
 }
 
-/** 0xfe：`Engine.d517 ← op1`；引擎自带范围检查（值 > 0x1f ⇒ 抛） */
-function thinFe(m: Machine, ops: Operand[]): void {
-  const v = readInt(m, ops, 1);
-  if (v > 0x1f) throw new Error(`opcode 0xfe 的操作数 ${v} 超出引擎的范围检查（> 0x1f）—— 引擎这里抛异常`);
-  scalarWrite(m, '0xfe', 'Engine.d517', v);
-}
-
 /** 0x10f：`Engine.d122369 ← op1` */
 function thin10f(m: Machine, ops: Operand[]): void {
   scalarWrite(m, '0x10f', 'Engine.d122369', readInt(m, ops, 1));
@@ -2533,6 +2531,258 @@ function loadShowLogo130(m: Machine, ops: Operand[]): void {
   writeInt(m, ops, 1, m.showLogo);
 }
 
+/* ──────────────────────────── 输入（60-ops-input） ──────────────────────────── */
+
+/**
+ * `0xfe` 键总数（CORE-INPUT-WORD）：无符号比较 > 31 ⇒ 显示消息型异常。
+ * ★ 落点身份（键总数）由 `0x100` 的扫描上限读点支撑；初值本版不规定。
+ */
+function keyTotalFe(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1) >>> 0;
+  if (value > 31) throw new Error(`opcode 0xfe 的操作数 ${value} 超出引擎的范围检查（> 0x1f）—— 引擎这里抛异常`);
+  m.input.keyTotal = value;
+  scalarWrite(m, '0xfe', 'Engine.d517', value);
+  m.effects.push({ kind: 'input.key-total', detail: { value } });
+}
+
+/** `0xff` 采样按键位图（CORE-INPUT-WORD）：清输入字 → 平台采样 → 重置游标与上限 */
+function keySampleFf(m: Machine): void {
+  m.input.word = 0;
+  m.inputWord = 0;
+  if (m.inputHost) {
+    m.input.word = m.inputHost.sampleKeys(m.now) >>> 0;
+    m.inputWord = m.input.word;
+  }
+  m.input.samples += 1;
+  m.frame.keyCursor = 0;
+  m.frame.keyLimit = m.input.keyTotal;
+  m.effects.push({ kind: 'input.sample', detail: { mask: m.input.word, keyTotal: m.input.keyTotal } });
+}
+
+/** `0xfb` 登记按键回调（CORE-INPUT-CALLBACK-REGISTER） */
+function keyRegisterFb(m: Machine, ops: Operand[]): void {
+  const key = readInt(m, ops, 1) >>> 0;
+  if (key > 31) throw new Error('display-message: SetKeyJump の引数が不正です');
+  const target = readInt(m, ops, 2) | 0;
+  m.frame.keyJumps.set(key, target);
+}
+
+/** `0xcc` 登记鼠标回调（CORE-INPUT-CALLBACK-REGISTER）：间隔 / 目标 / 注册层数 / 上次时刻 */
+function mouseCallbackCc(m: Machine, ops: Operand[]): void {
+  const interval = readInt(m, ops, 1) | 0;
+  const target = readInt(m, ops, 2) | 0;
+  m.input.mouse.interval = interval === 0 ? 1 : interval;
+  m.input.mouse.target = target;
+  m.input.mouse.depth = m.frameDepth();
+  m.input.mouse.last = m.now;
+}
+
+/**
+ * `0xcd` 定时派发鼠标回调（CORE-INPUT-MOUSE-CALLBACK-PUMP）：
+ * 时间闸（或第 27 位）→ 压返回位置（当前位置 + 1）→ 目标 -1 撤销 → 深度校验 → 跳到目标、推进格数 0。
+ */
+function mouseCallbackCd(m: Machine): void {
+  m.operandCount = 1;
+  const elapsed = m.now - m.input.mouse.last;
+  const force = (m.flags & (1 << 27)) !== 0;
+  if (elapsed < m.input.mouse.interval && !force) return;
+  m.input.mouse.last = m.now;
+  m.frame.retStack.push(m.ip / 4 + 1);
+  if (m.input.mouse.target === -1) {
+    m.frame.retStack.pop();
+    return;
+  }
+  if (m.frameDepth() !== m.input.mouse.depth) {
+    throw new Error('display-message: Depth が不正です');
+  }
+  m.input.mouseDispatches += 1;
+  m.effects.push({ kind: 'input.mouse.dispatch', detail: { target: m.input.mouse.target } });
+  m.ip = 4 * m.input.mouse.target;
+  m.operandCount = 0;
+}
+
+/**
+ * `0x100` 派发按键回调（CORE-INPUT-KEY-DISPATCH）。
+ * ★ 输入字为 0 ⇒ 走"无按键"表项、返回位置 = 下一条；非 0 ⇒ 压当前位置（有意重派发）、游标前进。
+ */
+function keyDispatch100(m: Machine): void {
+  m.operandCount = 1;
+  const word = m.input.word >>> 0;
+  const limit = m.frame.keyLimit;
+  const table = m.frame.keyJumps;
+  if (word === 0) {
+    const target = table.get(limit);
+    if (target === undefined) return;
+    m.frame.retStack.push(m.ip / 4 + 1);
+    m.input.keyDispatches += 1;
+    m.effects.push({ kind: 'input.key.dispatch', detail: { key: limit, target } });
+    m.ip = 4 * target;
+    m.operandCount = 0;
+    return;
+  }
+  let cursor = m.frame.keyCursor;
+  while (cursor < limit && ((word >>> cursor) & 1) === 0) cursor += 1;
+  if (cursor >= limit) return;
+  m.frame.keyCursor = cursor + 1;
+  const target = table.get(cursor);
+  if (target === undefined) return; // 未登记 ⇒ 放弃本轮剩余置位
+  m.frame.retStack.push(m.ip / 4);
+  m.input.keyDispatches += 1;
+  m.effects.push({ kind: 'input.key.dispatch', detail: { key: cursor, target } });
+  m.ip = 4 * target;
+  m.operandCount = 0;
+}
+
+/**
+ * 0x12e 鼠标命中查找：**显式部分实现**。
+ *
+ * 完整条目表 / 偏移数组的布局还没写成 spec（audit.gaps），所以这里不猜命中，只写 **-1（没有命中）**
+ * 并留一条请求记录 + 首次诊断。目的：鼠标移动不让 TITLE 停在"未实现 opcode"上；
+ * 悬停 / 点击菜单的命中语义仍然缺（见 README 的未建模白名单）。
+ */
+function hitTest12e(m: Machine, ops: Operand[]): void {
+  writeInt(m, ops, 1, -1);
+  m.effects.push({ kind: 'input.hit-test.unmodeled', detail: { opcode: '0x12e' } });
+  if (!m.unmodeledSeen.has(0x12e)) {
+    m.unmodeledSeen.add(0x12e);
+    m.diagnostics.push({ kind: 'unmodeled-input-hit-test:0x12e' });
+  }
+}
+
+/** `0x2fc` 取一条鼠标事件（CORE-INPUT-MOUSE-EVENT）：没有事件时只写结果 0 */
+function mouseEvent2fc(m: Machine, ops: Operand[]): void {
+  const event = m.inputHost?.nextMouseEvent(m.now) ?? null;
+  if (!event) {
+    writeInt(m, ops, 1, 0);
+    m.effects.push({ kind: 'input.mouse.event', detail: { present: false } });
+    return;
+  }
+  writeInt(m, ops, 1, 1);
+  writeInt(m, ops, 2, event.x);
+  writeInt(m, ops, 3, event.y);
+  writeInt(m, ops, 4, event.flags);
+  writeInt(m, ops, 5, event.extra);
+  m.effects.push({ kind: 'input.mouse.event', detail: { present: true, x: event.x, y: event.y, flags: event.flags } });
+}
+
+/** `0x109` 读光标位置（CORE-INPUT-MOUSE-POS）：设备不可用写 (-100000, -100000) */
+function mousePos109(m: Machine, ops: Operand[]): void {
+  const pos = m.inputHost?.cursor(m.now) ?? null;
+  const x = pos ? pos.x : -100000;
+  const y = pos ? pos.y : -100000;
+  writeInt(m, ops, 1, x);
+  writeInt(m, ops, 2, y);
+  m.effects.push({ kind: 'input.cursor', detail: pos ? { x, y } : { available: false } });
+}
+
+/** `0x108` 读鼠标按钮位图（CORE-INPUT-MOUSE-BUTTON）：设备不可用写 0 */
+function mouseButton108(m: Machine, ops: Operand[]): void {
+  const mask = m.inputHost?.buttons(m.now) ?? 0;
+  writeInt(m, ops, 1, mask);
+  m.effects.push({ kind: 'input.buttons', detail: { mask } });
+}
+
+/** `0x24e` 主循环模式字（CORE-INPUT-MODE-WORD）：原样写入；位 0 由等待服务读取 */
+function modeWord24e(m: Machine, ops: Operand[]): void {
+  m.input.mode = readInt(m, ops, 1) | 0;
+}
+
+/* ──────────────────────────── 音频请求边界（60-ops-voice） ──────────────────────────── */
+
+/** `0xb4` 音效装载（CORE-OPS-AUDIO-WAV）：只发请求，不改引擎数据 */
+function audioWavLoadB4(m: Machine, ops: Operand[]): void {
+  const resource = readInt(m, ops, 1);
+  const slot = readInt(m, ops, 2);
+  m.effects.push({ kind: 'audio.wav.load', detail: { resource, slot } });
+}
+
+/** `0xb5` 音效播放（CORE-OPS-AUDIO-WAV）：只发请求，不改引擎数据 */
+function audioWavPlayB5(m: Machine, ops: Operand[]): void {
+  const slot = readInt(m, ops, 1);
+  m.effects.push({ kind: 'audio.wav.play', detail: { slot } });
+}
+
+/** `0xbf` BGM（CORE-OPS-AUDIO-BGM）：清状态字第 9 位 + 发播放请求 */
+function audioBgmBf(m: Machine, ops: Operand[]): void {
+  const resource = readInt(m, ops, 1);
+  m.flags &= ~0x200;
+  m.effects.push({ kind: 'audio.bgm.play', detail: { resource } });
+}
+
+/* ──────────────────────────── 场景 / 渲染 / 文本增补 ──────────────────────────── */
+
+/** `0x344` 场景对象记录：置「已存在」位 + 写第二格 + 标脏（CORE-OPS-SCENE-ENTRY-344） */
+function sceneEntry344(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 2);
+  const id = readInt(m, ops, 1) | 0;
+  m.scene.entries.set(id, { present: 1, value });
+  m.scene.dirty = 1;
+}
+
+/** `0x20c` 帧步进（CORE-OPS-RENDER-FRAME-STEP）：时间戳 + 一次渲染请求 + 清帧标志 */
+function renderFrameStep20c(m: Machine): void {
+  if (m.scene.frameDriver === 0) {
+    m.scene.framePrev = m.scene.frameNow;
+    m.scene.frameNow = m.now;
+  }
+  m.effects.push({ kind: 'render.frame.step', detail: { now: m.now } });
+  m.scene.frameFlags = 0;
+}
+
+/** `0x2eb` 版本字符串（CORE-OPS-TEXT-GAMEVERSION-2EB）：配置 `set:GameVersion` → 第 1 个操作数 */
+function textGameVersion2eb(m: Machine, ops: Operand[]): void {
+  if (!m.config) {
+    m.diagnostics.push({ kind: 'config-missing:set:GameVersion' });
+    writeText(m, ops, 1, '');
+    return;
+  }
+  writeText(m, ops, 1, m.config.getString('set:GameVersion'));
+}
+
+/** C 的 `atoi` 口径：忽略前导空白、可选符号、连续十进制数字；没有数字 ⇒ 0 */
+function atoiC(text: string): number {
+  const match = /^\s*([+-]?)(\d+)/.exec(text);
+  if (!match) return 0;
+  const magnitude = Number.parseInt(match[2], 10);
+  const value = match[1] === '-' ? -magnitude : magnitude;
+  return value | 0;
+}
+
+/** `0x2ec` 十进制文本 → 整数（CORE-OPS-TEXT-ATOI-2EC） */
+function textAtoi2ec(m: Machine, ops: Operand[]): void {
+  const source = readText(m, ops, 2);
+  writeInt(m, ops, 1, atoiC(source));
+}
+
+/* ──────────────────────────── 未建模子系统（显式请求 + 诊断） ──────────────────────────── */
+
+/**
+ * 只向未建模子系统发请求的 opcode：**不是静默 no-op**——每次执行记一条 `unmodeled.subsystem`
+ * 效果（可被 `--trace` / 报告计数），首次出现再记一条诊断。
+ *
+ * ★ 白名单只含"不改变已规定引擎数据"的两块：ADV 文字（`0x23b` 数字绘制 / `0x2c7` SJIS 字符串工具）
+ *   与 Live2D（`0x34e` 动作装载 / `0x352` 动作参数）。它们不置门位、不改帧 / 返回栈 / 输入字。
+ * ★ 未列入的 gap（`0x12e` / `0x140` / `0x23d` / `0x32b`）仍然"未实现即停"。
+ */
+const UNMODELED_SUBSYSTEM = new Map<number, { subsystem: string; why: string }>([
+  [0x23b, { subsystem: 'adv-text', why: '数字字形绘制' }],
+  [0x2c7, { subsystem: 'adv-text', why: 'SJIS 字符串工具' }],
+  [0x341, { subsystem: 'live2d', why: '模型文件装载' }],
+  [0x345, { subsystem: 'live2d', why: '纹理文件装载' }],
+  [0x34e, { subsystem: 'live2d', why: '动作文件装载' }],
+  [0x352, { subsystem: 'live2d', why: '动作 / 参数' }],
+]);
+
+function unmodeledHandler(opcode: number, subsystem: string): Handler {
+  return (m: Machine): void => {
+    m.effects.push({ kind: 'unmodeled.subsystem', detail: { opcode, subsystem } });
+    if (!m.unmodeledSeen.has(opcode)) {
+      m.unmodeledSeen.add(opcode);
+      m.diagnostics.push({ kind: `unmodeled-subsystem:0x${opcode.toString(16)}` });
+    }
+  };
+}
+
 function operandAt(ops: Operand[], k: number): Operand {
   const op = ops[k - 1];
   if (!op) throw new Error(`operand-out-of-range:${k}/${ops.length}`);
@@ -2589,6 +2839,30 @@ export const HANDLERS = new Map<number, Handler>([
   [0x33f, blend33f],
   [0x204, drawText204],
   [0x101, pollInput101],
+  [0xfe, keyTotalFe],
+  [0xff, keySampleFf],
+  [0xfb, keyRegisterFb],
+  [0xcc, mouseCallbackCc],
+  [0xcd, mouseCallbackCd],
+  [0x100, keyDispatch100],
+  [0x12e, hitTest12e],
+  [0x2fc, mouseEvent2fc],
+  [0x109, mousePos109],
+  [0x108, mouseButton108],
+  [0x24e, modeWord24e],
+  [0xb4, audioWavLoadB4],
+  [0xb5, audioWavPlayB5],
+  [0xbf, audioBgmBf],
+  [0x344, sceneEntry344],
+  [0x20c, renderFrameStep20c],
+  [0x2eb, textGameVersion2eb],
+  [0x2ec, textAtoi2ec],
+  [0x23b, unmodeledHandler(0x23b, 'adv-text')],
+  [0x341, unmodeledHandler(0x341, 'live2d')],
+  [0x345, unmodeledHandler(0x345, 'live2d')],
+  [0x2c7, unmodeledHandler(0x2c7, 'adv-text')],
+  [0x34e, unmodeledHandler(0x34e, 'live2d')],
+  [0x352, unmodeledHandler(0x352, 'live2d')],
   [0x21c, (m) => wait21c(m)],
   [0x20f, movie20f],
   [0x1a2, saveInt1a2],
@@ -2605,7 +2879,6 @@ export const HANDLERS = new Map<number, Handler>([
   [0x77, bswap77],
   [0x1a4, pair1a4],
   [0x2ee, message2ee],
-  [0xfe, thinFe],
   [0x10f, thin10f],
   [0x248, thin248],
   [0x25b, message25b],

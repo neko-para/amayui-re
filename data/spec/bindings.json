@@ -2364,7 +2364,7 @@
         },
         {
           "ea": "0x419cee",
-          "what": "状态字 &= 0xF7FFFFFF（清一位）"
+          "what": "状态字 &= 0xF7FFFFFF（清第 27 位）"
         },
         {
           "ea": "0x419cf8",
@@ -2385,7 +2385,8 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x101 采样并丢弃：清状态位、输入字归零、两个标量 1/0、外部请求记一条"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x101 采样并丢弃：清状态位、输入字归零、两个标量 1/0、外部请求记一条",
+        "guard:tools/test/emulator-new-input.test.mjs#★ 0x101 只清第 27 位：其它位保持"
       ]
     },
     {
@@ -10961,6 +10962,507 @@
       "storage": [],
       "evidence": [
         "guard:tools/test/spec-boot-sites.assets.test.mjs#★ CORE-BOOT 四条规则的站点都在 .lst 的指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-INPUT-WORD",
+      "sites": [
+        {
+          "ea": "0x421cca",
+          "what": "键总数与 0x1F 比较"
+        },
+        {
+          "ea": "0x421ccf",
+          "what": "键总数 ← 操作数 1"
+        },
+        {
+          "ea": "0x419ab8",
+          "what": "输入字 ← 0"
+        },
+        {
+          "ea": "0x419abe",
+          "what": "sub_4780D0(&Engine+0x408, &输入字) 采样"
+        },
+        {
+          "ea": "0x419ac9",
+          "what": "当前帧扫描游标 ← 0"
+        },
+        {
+          "ea": "0x419ae0",
+          "what": "当前帧扫描上限 ← 键总数"
+        }
+      ],
+      "functions": [
+        "sub_421CA0",
+        "sub_419A90",
+        "sub_4780D0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-input.test.mjs#★ 输入字与键总数：0xfe / 0xff"
+      ]
+    },
+    {
+      "rule": "CORE-INPUT-CALLBACK-REGISTER",
+      "sites": [
+        {
+          "ea": "0x421bb8",
+          "what": "0x1F 上界比较"
+        },
+        {
+          "ea": "0x421be2",
+          "what": "按键回调表[33*帧+键] ← 脚本位置"
+        },
+        {
+          "ea": "0x421bef",
+          "what": "越界抛显示消息型异常"
+        },
+        {
+          "ea": "0x4219a4",
+          "what": "鼠标回调目标 ← 操作数 2"
+        },
+        {
+          "ea": "0x4219b7",
+          "what": "鼠标回调注册深度 ← 当前帧深度"
+        },
+        {
+          "ea": "0x4219d4",
+          "what": "鼠标回调间隔 / 上次时刻初始化"
+        }
+      ],
+      "functions": [
+        "sub_421B80",
+        "sub_421980",
+        "sub_453A60"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-input.test.mjs#★ 回调登记：0xcc / 0xfb"
+      ]
+    },
+    {
+      "rule": "CORE-INPUT-MOUSE-CALLBACK-PUMP",
+      "sites": [
+        {
+          "ea": "0x41acf1",
+          "what": "timeGetTime"
+        },
+        {
+          "ea": "0x41ad04",
+          "what": "间隔比较"
+        },
+        {
+          "ea": "0x41ad0c",
+          "what": "状态字第 27 位判定"
+        },
+        {
+          "ea": "0x41ad1c",
+          "what": "上次派发时刻 ← 当前时刻"
+        },
+        {
+          "ea": "0x41ad45",
+          "what": "压返回位置（当前指令 + 1）"
+        },
+        {
+          "ea": "0x41ad6b",
+          "what": "目标 = -1 的取消路径"
+        },
+        {
+          "ea": "0x41ada5",
+          "what": "注册深度比较"
+        },
+        {
+          "ea": "0x41ade9",
+          "what": "深度不符抛显示消息型异常"
+        },
+        {
+          "ea": "0x41ae0a",
+          "what": "指令指针 ← 代码区 + 4×目标"
+        },
+        {
+          "ea": "0x41ae26",
+          "what": "推进格数 ← 0"
+        },
+        {
+          "ea": "0x41ace6",
+          "what": "推进格数 ← 1（本指令的处理体自写）"
+        }
+      ],
+      "functions": [
+        "sub_41ACD0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-input.test.mjs#★ 定时派发鼠标回调：0xcd"
+      ]
+    },
+    {
+      "rule": "CORE-INPUT-KEY-DISPATCH",
+      "sites": [
+        {
+          "ea": "0x419b0a",
+          "what": "读输入字"
+        },
+        {
+          "ea": "0x419b17",
+          "what": "输入字为 0 的分支"
+        },
+        {
+          "ea": "0x419bd7",
+          "what": "从游标起找第一个置位"
+        },
+        {
+          "ea": "0x419bea",
+          "what": "找到置位后的游标推进"
+        },
+        {
+          "ea": "0x419c6c",
+          "what": "未登记 / 已登记的目标处理"
+        },
+        {
+          "ea": "0x419c96",
+          "what": "派发时推进格数 ← 0"
+        },
+        {
+          "ea": "0x419b5c",
+          "what": "读键总数作为扫描上限"
+        },
+        {
+          "ea": "0x419b78",
+          "what": "查“无按键”表项是否登记"
+        },
+        {
+          "ea": "0x419bc9",
+          "what": "扫描路径读键总数"
+        }
+      ],
+      "functions": [
+        "sub_419AF0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-input.test.mjs#★ 按键派发：0x100"
+      ]
+    },
+    {
+      "rule": "CORE-INPUT-MOUSE-EVENT",
+      "sites": [
+        {
+          "ea": "0x431bbc",
+          "what": "推进格数 ← 11"
+        },
+        {
+          "ea": "0x431bd5",
+          "what": "sub_477980 取一条鼠标事件"
+        },
+        {
+          "ea": "0x431bda",
+          "what": "有 / 无事件分支"
+        },
+        {
+          "ea": "0x431bde",
+          "what": "无事件 ⇒ 只写结果 0"
+        },
+        {
+          "ea": "0x431bef",
+          "what": "有事件 ⇒ 坐标变换与结果写入"
+        }
+      ],
+      "functions": [
+        "sub_431BA0",
+        "sub_477980"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-input.test.mjs#★ 鼠标事件查询：0x2fc"
+      ]
+    },
+    {
+      "rule": "CORE-INPUT-MOUSE-POS",
+      "sites": [
+        {
+          "ea": "0x42ee48",
+          "what": "(-100000, -100000) 哨兵比较"
+        },
+        {
+          "ea": "0x42ee57",
+          "what": "不可用 ⇒ 两个操作数都写 -100000"
+        },
+        {
+          "ea": "0x42ee86",
+          "what": "可用 ⇒ 坐标映射"
+        }
+      ],
+      "functions": [
+        "sub_42EE10",
+        "sub_4771D0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-input.test.mjs#★ 光标与按钮查询：0x109 / 0x108"
+      ]
+    },
+    {
+      "rule": "CORE-INPUT-MOUSE-BUTTON",
+      "sites": [
+        {
+          "ea": "0x42edd4",
+          "what": "推进格数 ← 3"
+        },
+        {
+          "ea": "0x42ede9",
+          "what": "输出先清 0"
+        },
+        {
+          "ea": "0x42edf0",
+          "what": "sub_477220 采左右键"
+        },
+        {
+          "ea": "0x42edfd",
+          "what": "写第 1 个操作数"
+        }
+      ],
+      "functions": [
+        "sub_42EDC0",
+        "sub_477220"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-input.test.mjs#★ 光标与按钮查询：0x109 / 0x108"
+      ]
+    },
+    {
+      "rule": "CORE-INPUT-MODE-WORD",
+      "sites": [
+        {
+          "ea": "0x4258d0",
+          "what": "推进格数 ← 3"
+        },
+        {
+          "ea": "0x4258e4",
+          "what": "主循环模式字 ← 操作数 1"
+        },
+        {
+          "ea": "0x413266",
+          "what": "等待服务分支读模式字第 0 位"
+        }
+      ],
+      "functions": [
+        "sub_4258C0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-input.test.mjs#★ 主循环模式字：0x24e"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-WAV",
+      "sites": [
+        {
+          "ea": "0x420b10",
+          "what": "0xb4 推进格数 ← 5"
+        },
+        {
+          "ea": "0x420b35",
+          "what": "sub_4B4F60 装载请求"
+        },
+        {
+          "ea": "0x420b52",
+          "what": "0xb5 推进格数 ← 3"
+        },
+        {
+          "ea": "0x420b6d",
+          "what": "sub_4B5020 播放请求"
+        },
+        {
+          "ea": "0x420b1f",
+          "what": "读第 1 个操作数（资源）"
+        },
+        {
+          "ea": "0x420b29",
+          "what": "读第 2 个操作数（槽）"
+        }
+      ],
+      "functions": [
+        "sub_420B00",
+        "sub_420B40",
+        "sub_4B4F60",
+        "sub_4B5020"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-audio.test.mjs#★ 音效装载与播放：0xb4 / 0xb5"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-BGM",
+      "sites": [
+        {
+          "ea": "0x420ce3",
+          "what": "状态字第 9 位测试"
+        },
+        {
+          "ea": "0x420cf7",
+          "what": "状态字第 9 位清 0"
+        },
+        {
+          "ea": "0x420cfd",
+          "what": "音乐淡出收尾请求"
+        },
+        {
+          "ea": "0x420d14",
+          "what": "BGM 播放请求"
+        }
+      ],
+      "functions": [
+        "sub_420CC0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-audio.test.mjs#★ BGM：0xbf 清第 9 位"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-ENTRY-344",
+      "sites": [
+        {
+          "ea": "0x427cc0",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x427ccf",
+          "what": "读第 2 个操作数"
+        },
+        {
+          "ea": "0x427cd9",
+          "what": "读第 1 个操作数"
+        },
+        {
+          "ea": "0x427ce5",
+          "what": "sub_4AFBF0(Scene, 编号, 值)"
+        },
+        {
+          "ea": "0x4afc0f",
+          "what": "记录首字第 0 位置 1"
+        },
+        {
+          "ea": "0x4afc24",
+          "what": "记录第二格 ← 值"
+        },
+        {
+          "ea": "0x4afc28",
+          "what": "场景脏标记 ← 1"
+        }
+      ],
+      "functions": [
+        "sub_427CB0",
+        "sub_4AFBF0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x344 场景条目：置存在位 + 写值 + 标脏"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RENDER-FRAME-STEP",
+      "sites": [
+        {
+          "ea": "0x41a1b0",
+          "what": "推进格数 ← 1"
+        },
+        {
+          "ea": "0x41a1bb",
+          "what": "别处驱动标记比较"
+        },
+        {
+          "ea": "0x41a1ca",
+          "what": "帧上一时刻 ← 帧当前时刻"
+        },
+        {
+          "ea": "0x41a1d6",
+          "what": "帧当前时刻 ← 读数"
+        },
+        {
+          "ea": "0x41a1e2",
+          "what": "sub_4B4040 渲染步进请求"
+        },
+        {
+          "ea": "0x41a1e7",
+          "what": "帧标志字 ← 0"
+        },
+        {
+          "ea": "0x41a1c4",
+          "what": "读一次当前时刻"
+        },
+        {
+          "ea": "0x41a1d0",
+          "what": "引擎上一时刻 ← 引擎当前时刻"
+        }
+      ],
+      "functions": [
+        "sub_41A1A0",
+        "sub_4B4040"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-render.test.mjs#★ 0x20c 帧步进：时间戳 + 清标志"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-GAMEVERSION-2EB",
+      "sites": [
+        {
+          "ea": "0x43486a",
+          "what": "推进格数 ← 3"
+        },
+        {
+          "ea": "0x434884",
+          "what": "读配置 set:GameVersion"
+        },
+        {
+          "ea": "0x4348be",
+          "what": "写第 1 个操作数（字符串）"
+        },
+        {
+          "ea": "0x433310",
+          "what": "字符串写原语（接受 type 5 / 8 / 11 / 14）"
+        },
+        {
+          "ea": "0x433382",
+          "what": "type 11（0x0B）分支判定"
+        }
+      ],
+      "functions": [
+        "sub_434830",
+        "sub_433310"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-text.test.mjs#★ 0x2eb 版本字符串与 0x2ec 十进制解析"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-ATOI-2EC",
+      "sites": [
+        {
+          "ea": "0x431200",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x431215",
+          "what": "atoi(第 2 个操作数)"
+        },
+        {
+          "ea": "0x431222",
+          "what": "写整型第 1 个操作数"
+        }
+      ],
+      "functions": [
+        "sub_4311F0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-text.test.mjs#★ 0x2eb 版本字符串与 0x2ec 十进制解析"
       ]
     }
   ]

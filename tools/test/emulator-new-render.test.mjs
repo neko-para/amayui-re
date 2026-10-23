@@ -1,12 +1,13 @@
 /** @env pure @kind contract @why 渲染请求边界的语义写错了（目标切换的次序 / 失败也写目标 / 混合回退来源 / 离屏文字的三条入口条件与字体来源），而执行器仍然"跑得下去"、请求也照样被记下来 */
 /**
- * tools/test/emulator-new-render.test.mjs —— `data/spec/chapters/60-ops-render.md` 三条的守卫
+ * tools/test/emulator-new-render.test.mjs —— `data/spec/chapters/60-ops-render.md` 四条的守卫
  *
  * 覆盖：
  *   - `0x20d` 渲染目标（纹理槽 / 后缓冲两支；失败路径；**失败不改目标**；取表面 → 设目标 → 归还的次序）；
  *   - `0x33f` 场景混合（读序 2 → 3 →（按需）1 →（按需）1 → 1；绘制项回退；不建默认项；模式不 clamp；
  *     **不发外部请求**、不置脏标记 / animating）；
  *   - `0x204` 离屏文字（三条入口条件；读序 3 → 2 → 4 → 1；数值 → 十进制文本；字体对象的全部状态字段；
+   - `0x20c` 帧步进（别处驱动门 / 两个时间戳 / 清帧标志）；
  *     `drawText` 返回 false（LockTexture 失败）⇒ 错误通道且不重建字形暂存区）。
  *
  * ★ 判据为什么是这些：
@@ -656,4 +657,25 @@ test('★ 效果分级：内部记账 / 外部请求 / 未建模，CLI trace 只
   ]);
   assert.deepEqual(scopes.effectCounts, { 'audio.playing.query': 1, 'engine.forward': 1 });
   assert.deepEqual(scopes.internalEffectCounts, { 'string.set': 1 });
+});
+
+test('★ 0x20c 帧步进：时间戳 + 清标志', async () => {
+  const m = machineFor([[0x20c, []]]);
+  m.now = 123;
+  m.scene.frameFlags = 5;
+  await m.run();
+  assert.equal(m.scene.framePrev, 0, '上一时刻 ← 旧的当前时刻');
+  assert.equal(m.scene.frameNow, 123, '当前时刻 ← 读数');
+  assert.equal(m.scene.frameFlags, 0, '帧标志清 0');
+  assert.deepEqual(m.effects.map((e) => e.kind), ['render.frame.step']);
+
+  const driven = machineFor([[0x20c, []]]);
+  driven.now = 200;
+  driven.scene.frameDriver = 1;
+  driven.scene.framePrev = 11;
+  driven.scene.frameNow = 22;
+  driven.scene.frameFlags = 7;
+  await driven.run();
+  assert.deepEqual([driven.scene.framePrev, driven.scene.frameNow], [11, 22], '别处驱动 ⇒ 不动时间戳');
+  assert.equal(driven.scene.frameFlags, 0, '但清标志照做');
 });

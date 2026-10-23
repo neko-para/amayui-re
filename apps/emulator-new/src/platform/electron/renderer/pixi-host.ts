@@ -548,6 +548,11 @@ export class PixiRenderHost {
     return { width: Math.round(this.app.renderer.width), height: Math.round(this.app.renderer.height) };
   }
 
+  /** 画布元素（输入宿主把它当客户区坐标的参照） */
+  canvasElement(): HTMLCanvasElement {
+    return this.app.canvas;
+  }
+
   /** `ready` 的回报体（Pixi / WebGL 已初始化） */
   readyInfo(): RendererReady {
     return {

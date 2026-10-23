@@ -55,6 +55,7 @@ import type {
 import { dirnamePath, joinPath, pathFromEngine } from './paths.ts';
 import { applyPresentationPolicy } from './presentation.ts';
 import { LocalMovieHost } from './local-movie-host.ts';
+import { DomInputHost } from './input-host.ts';
 import type { PresentationPolicy } from './presentation.ts';
 import type { PixiRenderHost } from './pixi-host.ts';
 
@@ -666,14 +667,19 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
   let machineRef: Machine | null = null;
   let lastYieldAt = 0;
   const clockOrigin = Date.now();
+  const inputHost = new DomInputHost(pixi.canvasElement());
 
-  const report = await analyzeInstall(
+  let report;
+  try {
+    report = await analyzeInstall(
     env,
     job.installDir,
     job.rootId,
     {
       key: job.key,
       clock: () => Date.now() - clockOrigin,
+      inputHost,
+      sleepHost: async (ms: number) => { await new Promise<void>((resolve) => { setTimeout(resolve, ms); }); },
       onBeforeScript: async (ctx) => {
         // 影片后端要按统一 id 取 archive 里的字节；ctx.install 是这一层唯一持有 Install 的地方
         env.movieHost = new LocalMovieHost(pixi, async (id) => (await ctx.install.readById(id)).bytes);
@@ -704,7 +710,10 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
       },
     },
     { config: job.configPath },
-  );
+    );
+  } finally {
+    inputHost.destroy();
+  }
 
   await render.flush();
   bridge.report({ kind: 'done', ok: true, report });

@@ -20,15 +20,16 @@
 16. [`60-ops-frame.md`](60-ops-frame.md) —— 帧类指令
 17. [`60-ops-texture.md`](60-ops-texture.md) —— 纹理族
 18. [`60-ops-scene.md`](60-ops-scene.md) —— 场景 / 颜色族
-19. [`60-ops-render.md`](60-ops-render.md) —— 渲染请求边界（渲染目标 / 场景混合 / 离屏文字）
-20. [`60-ops-voice.md`](60-ops-voice.md) —— 语音族
+19. [`60-ops-render.md`](60-ops-render.md) —— 渲染请求边界（渲染目标 / 场景混合 / 离屏文字 / 帧步进）
+20. [`60-ops-voice.md`](60-ops-voice.md) —— 音频（语音 / 音效 / BGM）
 21. [`60-ops-list.md`](60-ops-list.md) —— 列表项与子系统写入
 22. [`60-ops-save.md`](60-ops-save.md) —— 存档槽的读写与文件级操作
 23. [`65-save.md`](65-save.md) —— 存档（槽身份 / 文件头 / 负载信封 / 持久化归属 / 恢复）
 24. [`60-ops-forward.md`](60-ops-forward.md) —— 转发型指令
 25. [`60-ops-scalar.md`](60-ops-scalar.md) —— 引擎级标量与事件
-26. [`60-ops-wait.md`](60-ops-wait.md) —— 等待、输入、影片与空操作
-27. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
+26. [`60-ops-wait.md`](60-ops-wait.md) —— 等待、影片与空操作
+27. [`60-ops-input.md`](60-ops-input.md) —— 输入（输入字 / 键总数 / 采样 / 回调登记与派发 / 键鼠查询 / 主循环模式字）
+28. [`70-vm.md`](70-vm.md) —— 执行与时间（一次迭代 / 门 / 状态位 / 时钟 / 计时窗）
 
 `40-pools.md` 是**一个完整主题**：池的族、下标、访问、值表示与容量都在这一章。
 

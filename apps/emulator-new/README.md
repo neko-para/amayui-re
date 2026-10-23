@@ -22,11 +22,20 @@
   `--config <file>` 指定玩家文件；缺省路径 = 配置根（`USEAPPDATAFOLDER`：用户配置目录 / 安装目录）+ `REGFILEPATH` + 文件名。
   `--init-config` 把当前配置写成默认文件（必须配 `--config`；不写安装目录）。
   脚本的 `0x1a2` / `0x1a3` / `0x1a9` / `0x1aa` 只支持全局值族（type 3 / 5）；引用族先响亮失败。
-- **CLI 入口**没有渲染 / 音频 / 输入；外部请求只记进 `m.effects`（`data/spec/core/README.md` §1 裁决）。
+- **CLI 入口**：没有渲染 / 音频输出；外部请求只记进 `m.effects`（`data/spec/core/README.md` §1 裁决）。
+  ★ **输入**：`--input` / `--input-script` 提供一个**指令式**的脚本化输入后端（`platform/node/input.ts`），
+  把「at 毫秒 + move / down / up / key」归约成核心的输入字 / 光标 / 按钮 / 鼠标事件；
+  没有 `--input` 时核心看到 `inputHost === undefined`（没有设备：输入字 0、光标不可用、无事件）。
+  `--input-idle-ms`（缺省 500）在脚本耗尽且输入环已启动后以 `input-idle` 收口；`--max-steps` / `--max-ticks` 是安全阀。
+  ★ **Electron 输入**：renderer 的 `DomInputHost` 接鼠标光标 / 左右键 / 鼠标事件；键盘用**调试映射**
+  （`Digit0..9` → 0..9、`KeyA..C` → 10..12，不是引擎真实按键表）。`0x12e` 鼠标命中查找目前只写 -1 +
+  一次诊断（让鼠标移动不阻塞），悬停 / 点击菜单的命中语义仍留 gap。
+  ★ **Electron 短睡眠**：`sleepHost` 真实 `setTimeout(ms)`；`0xc8` 的 `sleep 1` 不再抛 `sleep-host-missing`。
+  ★ **headless 影片**：CLI 缺省注入一个"立即播完"的影片后端，LOGO 之后能继续走启动链；`--no-movie` 保留旧的"停在影片门"行为。
   **Electron 前端**（`src/platform/electron/**`）把 `06-window.md` 的窗口 / 图形设备 / 事件入口与
   `60-ops-render.md` 的 `0x20d` / `0x33f` / `0x204` 接到 Electron + Pixi：窗口、画布、渲染目标、离屏文字
   与 **AGF 纹理加载 / 上传**（`core/agf.ts` + `uploadTexture`）是真的；
-  音频、输入转发仍是显式未建模（UI 的 diagnostics 面板逐条列出）；BMP 分支仍响亮失败。
+  音频输出、ADV / Live2D 内部仍是显式未建模；输入已接 `DomInputHost`（鼠标 + 调试键盘映射；`0x12e` 命中查找仅部分）；BMP 分支仍响亮失败。
   ★ **影片**：`0x20f` 已接到 **pl_mpeg WASM**（MPEG-1 / MPEG-PS，只视频；音频忽略），按门前的影片对象表服务推进；
   解码帧上传到同槽纹理并同步 `presentNow()`。
   ★ **全屏语义不支持**（显式决策）：`screenMode=0` 被降级成 `set:WinX` × `set:WinY` 的普通窗口，
@@ -37,6 +46,16 @@
   ★ **core 整份跑在 renderer**：`renderer/session.ts` 直接调用 `analyzeInstall` / `bootWindow` / `Machine`；
   main 只保留 BrowserWindow、文件系统 / 规范表读取、IPC 与进程生命周期。桥接协议见 `platform/electron/protocol.ts`。
 - **未实现即停**（不 no-op）：缺口带 `{指令序号, 偏移, opcode, argc}`，停在它**前面**，可以当门禁用。
+  ★ **唯一的显式例外**是"未建模子系统的请求边界"（见下节）：白名单里的 opcode 会**记录请求 + 推进**，
+  不是静默 no-op；白名单外仍按"停在它前面"处理。
+- **未建模子系统（白名单）**：音频输出、ADV 文字显示、Live2D 的内部语义不在本实现，但它们的指令**逐条登记**：
+  - 音频（`0xb4` 装载 / `0xb5` 播放 / `0xbf` BGM）：只记 `audio.*` 请求；`0xbf` 仍清状态字第 9 位（spec 的引擎数据效果）。
+  - ADV 文字（`0x23b` 数字绘制 / `0x2c7` SJIS 字符串工具）：记 `unmodeled.subsystem` 请求 + 首次诊断。
+  - Live2D（`0x341` 模型 / `0x345` 纹理 / `0x34e` 动作 / `0x352` 动作参数）：同上。
+  - ⛔ 白名单不是"没有效果"的断言：每条都留 effect、可被 `--trace` / 报告计数；未列入的 `0x12e`（鼠标命中）、
+    `0x140`（AGERC 对话框）、`0x23d` / `0x32b`（退出清理）仍然会停下来。
+  - ⛔ 不许把新 opcode 直接加进白名单来"让它跑"：先看它有没有 spec 规则、是否改门位 / ip / 返回栈 / 输入字；
+    它必须同时满足"只发请求、不改已规定引擎数据"才可进入。
 - `handler` 表只包含 `data/spec` 里**已成篇**的 opcode；解不出的操作数类型 / 未取证的值一律**响亮失败**。
 - 整型编码的 key 按规范**运行期生成**；虚拟时钟步长、未初始化浮点的读法是**显式参数**：⛔ 没有"悄悄用 0"的默认路径。
 - `--decode` 是纯解码走查（不解语义），用来检验 `CORE-ISA` 的结构规则够不够实现一个解码器。
@@ -55,6 +74,18 @@ node apps/emulator-new/src/main.ts --install "<安装目录>" --root-id 0x5262
 
 # 调试口：直接给一份脚本文件（不是启动路径）
 node apps/emulator-new/src/main.ts --script <file>
+
+# 脚本化输入：真实启动链 → TITLE，1000ms 按一下键 1、1100ms 松开；输入耗尽 500ms 后收口
+# 语法：<at_ms> move <x> <y> | down|up <button> | key <0..31> down|up | wheel <delta>
+#   button 是按钮位号（0 = 左、1 = 右）；key 是引擎输入位号（0..31，不是 Windows VK 码）
+node apps/emulator-new/src/main.ts --install "<安装目录>" \
+  --input-script "1000 key 1 down; 1100 key 1 up" --input-idle-ms 500
+
+# 同上，脚本从文件读（一行一条；# 注释）
+node apps/emulator-new/src/main.ts --install "<安装目录>" --input input.txt
+
+# 保留旧行为：不给 headless 影片后端（LOGO 会停在影片门）
+node apps/emulator-new/src/main.ts --install "<安装目录>" --no-movie
 
 # 命中停止条件（如 0x20f play-movie）就停下（停止条件是"停在它前面"，不执行它）
 node apps/emulator-new/src/main.ts --script <file> --stop-at 0x20f
@@ -164,6 +195,9 @@ pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>"
   **只有 renderer 有构建步骤**（`vite build`：Pixi 的 ESM、DOM 代码，以及一并打进去的 core）。main / preload /
   CLI 都没有构建步骤；core 的源码仍是平台无关的一份。
 - 缺口不是失败：它是"spec 还缺哪一条 opcode 的语义"的机器清单；`--strict` 时才用退出码 1。
-- 前沿（"执行到哪一条 / 停在哪"）由 `tools/test/emulator-new-logo.assets.test.mjs` 的**棘轮**钉住：只许往前走。
+- 前沿（"执行到哪一条 / 停在哪"）由两个 assets 守卫钉住：`emulator-new-logo.assets.test.mjs`（LOGO 棘轮）
+  与 `emulator-new-title.assets.test.mjs`（真实启动链到 TITLE、键 1 派发、`input-idle` 收口）。
+- **输入分层**：`core/input.ts` 只是 `InputHost` 接口（平台无关）；CLI 的 `platform/node/input.ts`（指令式脚本）
+  与 Electron 的 `platform/electron/renderer/input-host.ts`（DOM 事件）是两个平台实现。⇒ 核心不知道 `--input` / 文件 / 命令行 / DOM。
 - 浮点池的"未写槽"规范不说初值：默认**响亮失败**；要跑真实脚本必须显式选 `--uninitialized-float zero`，
   且每次读都会进 `diagnostics`（⛔ 不许静默补 0）。
