@@ -88,6 +88,11 @@ export interface MeshSnapshot {
 export interface SceneSnapshot {
   /** 客户区尺寸（像素；窗口态 = set:WinX/Y，占满屏 = 屏幕） */
   width: number;
+  /**
+   * 生成这份场景时**当前帧**的诊断视图（名称 / id / slot / ip）。
+   * ★ 只给 diagnostics 用，⛔ 不参与绘制；名称来自 `Machine.scriptName`（平台注入）。
+   */
+  script: { slot: number; id: number | null; name: string | null; ip: number; parent: number } | null;
   height: number;
   textures: TextureSnapshot[];
   drawItems: DrawItemSnapshot[];

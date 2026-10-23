@@ -52,6 +52,8 @@ export interface ScriptReport {
   sceneError?: string;
   /** 进入过的脚本 id（`0x3` / `0x8` 的实参；证明"启动链走到了哪个脚本"） */
   entered?: number[];
+  /** 收口时的当前帧（debug 窗口 / CLI 用；名称由平台注入的 `scriptName` 解析） */
+  frame?: { slot: number; id: number | null; name: string | null; ip: number; parent: number } | null;
   /** 仅安装入口：从 WinMain 到主循环的启动阶段记账 */
   startup?: StartupReport;
   /** 仅安装入口：配置库摘要 */
@@ -102,6 +104,13 @@ export interface RunOpts {
   config?: ConfigStore;
   /** 换脚本装载器（真实入口才有；`--script` 调试口没有） */
   loadScript?: (id: number) => Promise<Uint8Array | null>;
+  /** 统一文件 id → 名称（诊断用；真实入口由安装索引提供） */
+  scriptName?: (id: number) => string | null;
+  /** 根脚本 id / 名称（诊断用） */
+  rootId?: number;
+  rootName?: string;
+  /** 引擎级 show-logo 标志的初始值（0 = 跳过 LOGO；缺省 = 引擎初始化值 1） */
+  showLogo?: number;
   /** 纹理文件装载器（真实入口才有；`0x1f9` 用） */
   loadImage?: (id: number) => Promise<Uint8Array | null>;
   /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 未命中 ⇒ 引擎回退分支） */
@@ -213,6 +222,7 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
   const key = opts.key ?? generateIntKey();
   const machine = new Machine({
     body, table: env.table, key, tickMs: opts.tickMs, clock: opts.clock, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
+    scriptName: opts.scriptName, rootId: opts.rootId, rootName: opts.rootName, showLogo: opts.showLogo,
     loadImage: opts.loadImage,
     fontNames: opts.fontNames, renderHost: opts.renderHost ?? env.renderHost, movieHost: opts.movieHost ?? env.movieHost, inputHost: opts.inputHost ?? env.inputHost, sleepHost: opts.sleepHost, onIteration: opts.onIteration,
   });
@@ -245,6 +255,7 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
       unmodeled: [...machine.unmodeledSeen].map((op) => `0x${op.toString(16)}`),
     },
     entered: [...machine.enteredIds],
+    frame: machine.currentFrameInfo(),
     gap:
       r.stop.kind === 'unimplemented'
         ? { index: r.stop.index, offset: r.stop.offset, opcode: r.stop.opcode, argc: r.stop.argc, reason: 'unimplemented' }
@@ -254,7 +265,11 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
 
 /** 调试入口：直接读一份脚本文件 */
 export async function analyze(env: CoreEnv, file: string, opts: RunOpts = {}): Promise<ScriptReport & { source: Record<string, unknown> }> {
-  return { source: { kind: 'script', file }, ...(await analyzeBytes(env, await readFile(env.host, file), opts)) };
+  const base = file.split(/[\\/]/).pop() ?? file;
+  return {
+    source: { kind: 'script', file },
+    ...(await analyzeBytes(env, await readFile(env.host, file), { rootName: base, ...opts })),
+  };
 }
 
 /**
@@ -294,6 +309,9 @@ export async function analyzeInstall(
   const result = await analyzeBytes(env, script.bytes, {
     ...opts,
     config: store,
+    rootId: script.id,
+    rootName: script.name,
+    scriptName: (id) => install.index.files[id]?.name ?? null,
     // 取不到 ⇒ readById 自己响亮失败（游标越界 / 归档读不到），⛔ 不在这里静默换成 null
     loadScript: async (id) => {
       const f = await install.readById(id);

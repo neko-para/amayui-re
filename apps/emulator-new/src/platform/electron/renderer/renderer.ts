@@ -135,9 +135,24 @@ function renderDiagnostics(): void {
   body.replaceChildren();
 
   const modeShort = d.init ? (d.init.screenMode === 0 ? '占满屏' : '窗口') : '未 init';
+  const scriptName = d.script?.name ?? (d.script?.id == null ? '（未解析）' : `id 0x${d.script.id.toString(16)}`);
   if (diagnosticsSummary) {
-    diagnosticsSummary.textContent = `${modeShort} · ${d.backend} · ${d.canvas.width}×${d.canvas.height}`;
+    diagnosticsSummary.textContent = `${scriptName} · ${modeShort} · ${d.backend} · ${d.canvas.width}×${d.canvas.height}`;
   }
+
+  body.appendChild(
+    section(
+      '当前脚本 / 帧',
+      d.script
+        ? kv([
+            ['名称', d.script.name ?? '（未解析名称）'],
+            ['统一文件 id', d.script.id === null ? '—' : `0x${d.script.id.toString(16)}（${d.script.id}）`],
+            ['帧槽 / 父帧', `${d.script.slot} / ${d.script.parent < 0 ? '无（根帧）' : d.script.parent}`],
+            ['指令偏移', `0x${d.script.ip.toString(16)}（${d.script.ip}）`],
+          ])
+        : textEl('p', 'muted', '（还没收到当前帧）'),
+    ),
+  );
 
   body.appendChild(
     section(
@@ -204,6 +219,7 @@ function renderDiagnostics(): void {
           ['目标', s.target < 0 ? '后缓冲（-1）' : `纹理槽 ${s.target}`],
           ['纹理槽 / 绘制项 / 网格', `${s.textures} 槽；${s.activeItems}/${s.drawItems} 条有效绘制项；${s.meshes} 个网格`],
           ['画成什么', `Sprite ${s.sprites}；占位块 ${s.placeholders}（其中标签 ${s.labels}）；网格四边形 ${s.meshQuads}（跳过 ${s.meshSkipped}）`],
+          ['绘制顺序', s.order || '（空场景）'],
           [
             '跳过 / 异常',
             `自引用 ${s.selfTargetSkips}；零面积 ${s.zeroArea}；缺纹理槽 ${s.missingSlots}；矩形与纹理尺寸不符 ${s.sizeMismatch}`,

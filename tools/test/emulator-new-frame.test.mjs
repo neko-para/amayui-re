@@ -148,6 +148,7 @@ test('★ 0x9 全局重置：丢全部帧、清空三个全局池、状态选择
   m.globalInt.set(3, 12345);
   m.globalFloat.set(4, 0x3f800000);
   m.globalString.set(5, 'x');
+  m.showLogo = 1;
   const r = await m.run({ maxSteps: 4 });
   assert.equal(m.cur, 0, '0x9 之后当前帧号回 0（根帧）');
   assert.equal(m.slots.filter(Boolean).length, 1, '0x9 之后只留 0 号槽那一帧（其余全释放）');
@@ -156,6 +157,22 @@ test('★ 0x9 全局重置：丢全部帧、清空三个全局池、状态选择
   assert.equal(m.globalInt.size, 0, '整型池清回初值（decode 后为 0）');
   assert.equal(m.globalFloat.size, 0, '浮点池清 0');
   assert.equal(m.globalString.size, 0, '字符串池清空');
+  assert.equal(m.showLogo, 0, 'show-logo 标志被 0x9 的 handler 清 0（0x130 的「被清」路径）');
+});
+
+test('★ 0x9 后重跑根脚本：0x130 必须读到 0（复位路径清 show-logo）', async () => {
+  const before = script([[0x9, []]]);
+  const after = script([[0x130, [[3, 2]]], [0x2, []]]);
+  const m = new Machine({
+    body: before,
+    table,
+    key: KEY,
+    loadScript: async (id) => (id === 0 ? after : null),
+  });
+  m.showLogo = 1;
+  await m.run({ maxSteps: 10 });
+  assert.equal(m.showLogo, 0, '0x9 的复位路径把 show-logo 清 0');
+  assert.equal(decodeInt(m.globalInt.get(2), KEY), 0, '重跑的根脚本执行 0x130 必须读到 0（不是 1）');
 });
 
 test('★ 0x3 深度上限：按**帧号**判 —— 当前帧号 39 时再换脚本就报错', async () => {

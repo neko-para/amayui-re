@@ -57,6 +57,7 @@
 import { Application, Container, Graphics, Rectangle, RenderTexture, Sprite, Text, Texture } from 'pixi.js';
 import type { BLEND_MODES } from 'pixi.js';
 import { applyColorKey } from '../../../core/agf.ts';
+import { orderedDrawables } from './scene-order.ts';
 import type {
   DrawItemSnapshot,
   RendererInit,
@@ -138,7 +139,7 @@ export const BLEND_MODE_MAP: readonly { mode: number; pixi: BLEND_MODES; evidenc
 export const DISCLOSURES: readonly string[] = [
   '影片：pl_mpeg WASM 解码 MPEG-1/PS，仅视频（音频忽略）；不重编码 / 不做音频同步；帧尺寸来自码流，成品像素由 pl_mpeg 决定',
   '全屏语义未实现：screenMode=0 被平台降级为 set:WinX×set:WinY 的普通窗口（不做分辨率切换 / 缩放）；这是模拟器决策，不是 spec 结论',
-  '网格渲染仅支持“4 顶点、四色一致”的全屏四边形（LOGO 版权页）；逐顶点布局 / topology / draw order 未取证，其它网格跳过并诊断',
+  '网格渲染仅支持“4 顶点、四色一致”的全屏四边形（LOGO 版权页 / TITLE 背景）；逐顶点布局 / topology 未取证，其它网格跳过并诊断。绘制顺序是**引擎侧行为**：无命令记录时按 `CORE-SCENE-DRAW-ORDER` 的 key 升序 / 同键网格先于绘制项；有命令记录时的两档顺序尚未成篇（⛔ 不是平台自由选择）',
   '纹理加载：AGF 解码 + uploadTexture 已实现；BMP 分支未成篇，颜色键的 16 位通道装配未取证，空白纹理的初始像素未定义',
   '字体对象部分建模：size 24 / 主色 0xFFFFFF / 副色 0 / 绘制模式 1 来自 Font::init 的逐字证据（0x4654C3 / 0x4655FB / 0x465605 / 0x465611）；face name（0x1a5 → Font+0x4EC）只记录',
   '★ 产品选择：所有文字统一映射到 Amayui CN（更纱黑体 cnjp 变体，随仓字体资产 Amayui-CN_cnjp*.ttf）；引擎 face name 不参与字体选择',
@@ -412,11 +413,15 @@ export interface SceneBuildStats {
   meshes: number;
   meshQuads: number;
   meshSkipped: number;
+  /** 实际绘制顺序（`item#10 → mesh#200000 → …`，最多列 16 项；诊断用） */
+  order: string;
 }
 
 /** diagnostics 面板要的全部数字（**纯数据**；DOM 由 `renderer.ts` 画） */
 export interface HostDiagnostics {
   backend: string;
+  /** 当前帧（名称 / id / slot / ip）；场景还没来时为 null */
+  script: SceneSnapshot['script'];
   resolution: number;
   canvas: { width: number; height: number };
   init: RendererInit | null;
@@ -781,6 +786,7 @@ export class PixiRenderHost {
 
     return {
       backend: this.app.renderer.name,
+      script: this.scene?.script ?? null,
       resolution: this.app.renderer.resolution,
       canvas: { width: Math.round(this.app.renderer.width), height: Math.round(this.app.renderer.height) },
       init: this.initInfo,
@@ -1140,9 +1146,47 @@ export class PixiRenderHost {
       meshes: scene.meshes.length,
       meshQuads: 0,
       meshSkipped: 0,
+      order: '',
     };
 
-    for (const item of scene.drawItems) {
+    // ★ 绘制项与网格按 `CORE-SCENE-DRAW-ORDER`：**key 严格升序**，同键网格先于绘制项（见 `scene-order.ts`）。
+    //   TITLE 的黑色背景网格 key 0 必须落到前景绘制项下面，否则整屏被它盖黑。
+    const ordered = orderedDrawables(scene);
+    stats.order = ordered
+      .slice(0, 16)
+      .map((entry) => `${entry.kind}#${entry.key}`)
+      .join(' → ') + (ordered.length > 16 ? ` → …（共 ${ordered.length}）` : '');
+
+    for (const entry of ordered) {
+      if (entry.kind === 'mesh') {
+        const mesh = entry.mesh;
+        if ((mesh.flags & 1) === 0) continue;
+        if (mesh.count !== 4 || mesh.copies[0].length < 4 || mesh.copies[1].length < 4) {
+          stats.meshSkipped += 1;
+          continue;
+        }
+        const color = mesh.color >= 0 ? mesh.color : (mesh.colors[0] ?? -1);
+        if (color < 0 || mesh.colors.some((value) => value !== color)) {
+          stats.meshSkipped += 1;
+          continue;
+        }
+        const xs = mesh.copies[0].slice(0, 4).map(f32FromBits);
+        const ys = mesh.copies[1].slice(0, 4).map(f32FromBits);
+        if (![...xs, ...ys].every(Number.isFinite)) {
+          stats.meshSkipped += 1;
+          continue;
+        }
+        const argb = argbOf(color);
+        const graphics = new Graphics();
+        // LOGO 的 copies 是 strip 顺序：0-1-2 与 1-3-2 两个三角形。
+        graphics.poly([xs[0]!, ys[0]!, xs[1]!, ys[1]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
+        graphics.poly([xs[1]!, ys[1]!, xs[3]!, ys[3]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
+        this.addBuilt(graphics);
+        stats.meshQuads += 1;
+        continue;
+      }
+
+      const item = entry.item;
       if ((item.flags & 1) === 0) continue;
       stats.activeItems += 1;
 
@@ -1196,34 +1240,6 @@ export class PixiRenderHost {
       this.addBuilt(node);
       stats.placeholders += 1;
       if (canLabel) stats.labels += 1;
-    }
-
-    // 网格：目前只实现 LOGO 的 4 顶点全屏四边形（`copies[0]/[1]` 是 x/y，按 triangle strip 画）。
-    // ⛔ 逐顶点布局 / topology / draw order 还没有 spec 证据；其它形状一律计为 unsupported，不猜。
-    for (const mesh of scene.meshes) {
-      if ((mesh.flags & 1) === 0) continue;
-      if (mesh.count !== 4 || mesh.copies[0].length < 4 || mesh.copies[1].length < 4) {
-        stats.meshSkipped += 1;
-        continue;
-      }
-      const color = mesh.color >= 0 ? mesh.color : (mesh.colors[0] ?? -1);
-      if (color < 0 || mesh.colors.some((value) => value !== color)) {
-        stats.meshSkipped += 1;
-        continue;
-      }
-      const xs = mesh.copies[0].slice(0, 4).map(f32FromBits);
-      const ys = mesh.copies[1].slice(0, 4).map(f32FromBits);
-      if (![...xs, ...ys].every(Number.isFinite)) {
-        stats.meshSkipped += 1;
-        continue;
-      }
-      const argb = argbOf(color);
-      const graphics = new Graphics();
-      // LOGO 的 copies 是 strip 顺序：0-1-2 与 1-3-2 两个三角形。
-      graphics.poly([xs[0]!, ys[0]!, xs[1]!, ys[1]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
-      graphics.poly([xs[1]!, ys[1]!, xs[3]!, ys[3]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
-      this.addBuilt(graphics);
-      stats.meshQuads += 1;
     }
 
     // 影片帧：放在网格之后覆盖（LOGO 收尾的黑色网格属于场景，不应盖住影片）。

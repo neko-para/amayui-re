@@ -61,6 +61,8 @@ interface Args {
   maxTicks: number | null;
   /** 不给 headless 影片后端（保留旧行为：停在影片门） */
   noMovie: boolean;
+  /** 引擎级 show-logo 标志初值置 0（跳过 LOGO；调试 / 测试用） */
+  skipLogo: boolean;
 }
 
 function parseU32(text: string, what: string): number {
@@ -70,18 +72,19 @@ function parseU32(text: string, what: string): number {
 }
 
 const USAGE = [
-  '用法：node apps/emulator-new/src/main.ts --install <dir> [--key <u32>] [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--real-time] [--trace|--trace-all] [--progress N] [--effects] [--config <SYS4REG.INI>] [--init-config] [--input <file> | --input-script <text>] [--input-idle-ms N] [--max-steps N] [--max-ticks N] [--no-movie] [--json] [--strict]',
+  '用法：node apps/emulator-new/src/main.ts --install <dir> [--key <u32>] [--root-id 0] [--stop-at <opcode>] [--tick-ms N] [--uninitialized-float throw|zero] [--real-time] [--trace|--trace-all] [--progress N] [--effects] [--config <SYS4REG.INI>] [--init-config] [--skip-logo] [--input <file> | --input-script <text>] [--input-idle-ms N] [--max-steps N] [--max-ticks N] [--no-movie] [--json] [--strict]',
   '      node apps/emulator-new/src/main.ts --script <file> [--key <u32>] [--stop-at <opcode>] [--json] [--strict]',
   '      node apps/emulator-new/src/main.ts --install <dir> --decode [--json]',
   '      node apps/emulator-new/src/main.ts --help',
 ].join('\n');
 
-function parseArgs(argv: string[]): Args {
+export function parseArgs(argv: string[]): Args {
   const out: Args = {
     install: null, script: null, rootId: 0, decodeOnly: false, json: false, strict: false,
     key: null, stopAt: null, tickMs: 16, realTime: false, trace: false, traceAll: false, progress: 0, effects: false,
     uninitializedFloat: 'throw', config: null, initConfig: false,
     input: null, inputScript: null, inputIdleMs: 500, maxSteps: null, maxTicks: null, noMovie: false,
+    skipLogo: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -111,6 +114,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--max-steps') out.maxSteps = parseU32(argv[++i] ?? '', '--max-steps');
     else if (a === '--max-ticks') out.maxTicks = parseU32(argv[++i] ?? '', '--max-ticks');
     else if (a === '--no-movie') out.noMovie = true;
+    else if (a === '--skip-logo') out.skipLogo = true;
     else if (a === '--uninitialized-float') {
       const v = argv[++i];
       if (v !== 'throw' && v !== 'zero') throw new Error('--uninitialized-float 只能是 throw / zero');
@@ -242,6 +246,7 @@ export async function main(argv: string[]): Promise<number> {
     ...(inputHost ? { inputHost } : {}),
     // ★ 虚拟时钟下不真睡：`0xc8` 自己会把 now 推进 n 毫秒；`--real-time` 才真睡。
     sleepHost: async (ms: number): Promise<void> => { if (args.realTime) await sleep(ms); },
+    ...(args.skipLogo ? { showLogo: 0 } : {}),
     ...(args.noMovie ? {} : { movieHost: headlessMovieHost }),
     ...(args.maxSteps !== null ? { maxSteps: args.maxSteps } : {}),
     ...(args.maxTicks !== null ? { maxTicks: args.maxTicks } : {}),
@@ -295,6 +300,11 @@ export async function main(argv: string[]): Promise<number> {
         }
       }
       if (result.sceneError) console.log(`场景错误    ${result.sceneError}`);
+      if (result.frame) {
+        const frame = result.frame;
+        const name = frame.name ?? (frame.id === null ? '未命名' : `id 0x${frame.id.toString(16)}`);
+        console.log(`当前帧      ${name} · 槽 ${frame.slot} · 父帧 ${frame.parent < 0 ? '无' : frame.parent} · ip 0x${frame.ip.toString(16)}`);
+      }
       if (result.input) {
         const unmodeled = result.input.unmodeled.length > 0 ? result.input.unmodeled.join(' ') : '无';
         console.log(`输入        word=0x${(result.input.word >>> 0).toString(16)} · 键总数 ${result.input.keyTotal} · 模式字 0x${result.input.mode.toString(16)} · 采样 ${result.input.samples} · 鼠标回调 ${result.input.mouseDispatches} · 按键回调 ${result.input.keyDispatches} · 未建模 ${unmodeled}`);

@@ -531,6 +531,7 @@ class LocalRenderHost implements RenderHost {
     return {
       width,
       height,
+      script: machine.currentFrameInfo(),
       textures,
       drawItems,
       meshes,

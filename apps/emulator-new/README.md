@@ -27,11 +27,17 @@
   把「at 毫秒 + move / down / up / key」归约成核心的输入字 / 光标 / 按钮 / 鼠标事件；
   没有 `--input` 时核心看到 `inputHost === undefined`（没有设备：输入字 0、光标不可用、无事件）。
   `--input-idle-ms`（缺省 500）在脚本耗尽且输入环已启动后以 `input-idle` 收口；`--max-steps` / `--max-ticks` 是安全阀。
+  ★ **当前帧**：CLI 报告（`--json` 的 `frame`）与 Electron debug 窗口都会给当前帧的名称 / 统一文件 id /
+  帧槽 / 父帧 / ip；名称由安装索引解析，未解析时退回 id。
   ★ **Electron 输入**：renderer 的 `DomInputHost` 接鼠标光标 / 左右键 / 鼠标事件；键盘用**调试映射**
   （`Digit0..9` → 0..9、`KeyA..C` → 10..12，不是引擎真实按键表）。`0x12e` 鼠标命中查找目前只写 -1 +
   一次诊断（让鼠标移动不阻塞），悬停 / 点击菜单的命中语义仍留 gap。
   ★ **Electron 短睡眠**：`sleepHost` 真实 `setTimeout(ms)`；`0xc8` 的 `sleep 1` 不再抛 `sleep-host-missing`。
   ★ **headless 影片**：CLI 缺省注入一个"立即播完"的影片后端，LOGO 之后能继续走启动链；`--no-movie` 保留旧的"停在影片门"行为。
+  ★ **跳过 LOGO**：`--skip-logo` 把引擎级 show-logo 标志的**初值**置 0（`0x130` 读到 0；这是 CLI
+  的仿真参数，不是新的 spec 语义）。它用于直接调试 TITLE / 后续启动段，避免每次都等 LOGO 影片。
+  ★ 引擎自己的 `0x9`（重置并重装根脚本）在复位例程里把该标志清 0；若回标题 / menu 走 `0x9`，
+  重跑的根脚本会跳过 LOGO（真实输入路径是否触发 `0x9` 尚未 trace）。`--skip-logo` 只是把**冷启动**也置 0。
   **Electron 前端**（`src/platform/electron/**`）把 `06-window.md` 的窗口 / 图形设备 / 事件入口与
   `60-ops-render.md` 的 `0x20d` / `0x33f` / `0x204` 接到 Electron + Pixi：窗口、画布、渲染目标、离屏文字
   与 **AGF 纹理加载 / 上传**（`core/agf.ts` + `uploadTexture`）是真的；
@@ -40,8 +46,12 @@
   解码帧上传到同槽纹理并同步 `presentNow()`。
   ★ **全屏语义不支持**（显式决策）：`screenMode=0` 被降级成 `set:WinX` × `set:WinY` 的普通窗口，
   不做显示器分辨率切换、不做全屏缩放；spec 仍按 `06-window` 记录引擎的原始请求。
-  ★ **网格渲染是窄实现**：只画“4 顶点、四色一致”的全屏四边形（LOGO 版权页），
-  逐顶点布局 / topology / draw order 尚未取证；其它网格跳过并在 diagnostics 记数。
+  ★ **网格渲染是窄实现**：只画“4 顶点、四色一致”的全屏四边形（LOGO 版权页 / TITLE 背景）；
+  逐顶点布局 / topology 尚未取证；其它网格跳过并在 diagnostics 记数。
+  **绘制顺序是引擎侧行为，属于 spec 的范围**（不是平台自由选择）：无场景命令记录时按 `CORE-SCENE-DRAW-ORDER`
+  的**键严格升序**把绘制项与网格放在同一条序列里，**同键时网格先于绘制项**（TITLE 的 key 0 黑色背景因此在
+  key 10/100/… 的前景下面；LOGO 的 200002/200003 网格仍在 200000 影片项之后，影片槽最后另画）。
+  ★ 有场景命令记录时的两档顺序尚未成篇（见 0x20c 残差）；本实现暂不建模命令记录。
   颜色窗的渲染色落点已按 `70-vm` 改成“插值写渲染色 / 顶点缓冲，不写回当前颜色”。
   ★ **core 整份跑在 renderer**：`renderer/session.ts` 直接调用 `analyzeInstall` / `bootWindow` / `Machine`；
   main 只保留 BrowserWindow、文件系统 / 规范表读取、IPC 与进程生命周期。桥接协议见 `platform/electron/protocol.ts`。
@@ -85,6 +95,10 @@ node apps/emulator-new/src/main.ts --install "<安装目录>" \
 
 # 同上，脚本从文件读（一行一条；# 注释）
 node apps/emulator-new/src/main.ts --install "<安装目录>" --input input.txt
+
+# 跳过 LOGO（show-logo 初值置 0），直接调试 TITLE / 后续启动段
+node apps/emulator-new/src/main.ts --install "<安装目录>" --skip-logo \
+  --input-script "1000 key 1 down; 1100 key 1 up"
 
 # 保留旧行为：不给 headless 影片后端（LOGO 会停在影片门）
 node apps/emulator-new/src/main.ts --install "<安装目录>" --no-movie
@@ -156,7 +170,8 @@ pnpm --filter @amayui/emulator-new exec electron . --install "<安装目录>"
 ★ **两个窗口**：
   - **game 窗口**：只承载目标 canvas；core / VM / 场景 / Pixi 都在这个 renderer 里；
   - **debug 窗口**：先建、默认可见，加载同一个 renderer bundle 的 `?debug=1` 分支，只读显示
-    `HostDiagnostics` / boot / status / log 投影。
+    `HostDiagnostics` / boot / status / log 投影；最上面一段是**当前脚本 / 帧**（名称 / 统一文件 id /
+    帧槽 / 父帧 / 指令偏移），名称由安装索引解析。
   core 的 `createWindow` 调整的是 game 窗口；debug 窗口不跑 core、不回写状态。
 ★ **窗口顺序**：game renderer 自己需要一个 BrowserWindow 才能跑 ⇒ main 先建隐藏的 game bootstrap 窗口；
   core 的 `createWindow` 再按配置调整同一个窗口并 `show()`。见 `window-host.ts` 头注释。

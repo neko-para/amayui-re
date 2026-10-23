@@ -2079,6 +2079,56 @@
       ]
     },
     {
+      "rule": "CORE-SCENE-DRAW-ORDER",
+      "sites": [
+        {
+          "ea": "0x4b415f",
+          "what": "收尾扫描：取绘制项表 begin()（键最小）"
+        },
+        {
+          "ea": "0x4b4167",
+          "what": "收尾扫描：取网格表 begin()（键最小）"
+        },
+        {
+          "ea": "0x4b421b",
+          "what": "四表键升序比较；同键按类别平键序"
+        },
+        {
+          "ea": "0x4b425a",
+          "what": "0x448 类条目发射点"
+        },
+        {
+          "ea": "0x4b42cc",
+          "what": "0x438 类条目发射点"
+        },
+        {
+          "ea": "0x4b4330",
+          "what": "网格发射点（同键先于绘制项）"
+        },
+        {
+          "ea": "0x4b438e",
+          "what": "绘制项发射点（同键后于网格）"
+        },
+        {
+          "ea": "0x4b40c4",
+          "what": "先跑命令记录段，再进入全键域收尾扫描"
+        }
+      ],
+      "functions": [
+        "sub_4B4040",
+        "sub_4B06D0",
+        "sub_4AEEA0",
+        "sub_4AF1C0",
+        "sub_4AF560",
+        "sub_4B0360",
+        "sub_4B4020"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/emulator-new-scene-order.test.mjs#★ TITLE 场景：key 0 黑色背景网格先于前景绘制项，key 200000 覆盖层最后"
+      ]
+    },
+    {
       "rule": "CORE-OPS-SCENE-202",
       "sites": [
         {
@@ -4036,6 +4086,10 @@
           "what": "0x9 handler 起点"
         },
         {
+          "ea": "0x428a75",
+          "what": "复位例程：show-logo 标志 ← 0（与 0x130 共用站点）"
+        },
+        {
           "ea": "0x428a80",
           "what": "循环 40 次释放帧槽"
         },
@@ -4060,7 +4114,9 @@
         "sub_428A60",
         "sub_40ED40"
       ],
-      "storage": [],
+      "storage": [
+        "shape:T_Command@0x5eb5c"
+      ],
       "evidence": [
         "guard:tools/test/emulator-new-frame.test.mjs#★ 0x9 全局重置",
         "KN:01M5CZSPC45T6K524Z616R6S3B"
@@ -6034,17 +6090,20 @@
         },
         {
           "ea": "0x428a75",
-          "what": "复位例程：标志 ← 0"
+          "what": "复位例程：标志 ← 0（0x9 与内部复位入口共用）"
         }
       ],
       "functions": [
-        "sub_42F7A0"
+        "sub_42F7A0",
+        "sub_415640",
+        "sub_428A60"
       ],
       "storage": [
         "shape:T_Command@0x5eb5c"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-prologue.test.mjs#show-logo 标志：初始化置 1"
+        "guard:tools/test/emulator-new-prologue.test.mjs#show-logo 标志：初始化置 1",
+        "guard:tools/test/emulator-new-frame.test.mjs#★ 0x9 全局重置"
       ]
     },
     {

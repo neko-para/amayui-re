@@ -29,7 +29,7 @@ export const DOMAIN = {
   id: 'mutate',
   title: '守卫自检（变异测试）：改坏一处关键常量 ⇒ 确认指定守卫**当场红**',
   data: [
-    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.ts`）—— ★ **临时改写后必还原**',
+    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.ts` · `apps/emulator-new/src/**`）—— ★ **临时改写后必还原**',
     '`tools/mutate-check.mjs` 里的**变异清单**（本工具的真源：一处破坏 + 该抓它的守卫）',
   ],
   access: 'r（读原文进内存）→ rw（写入变异）→ **w（还原，且比对全文）**；★ 不写别的文件、不碰旧仓',
@@ -207,11 +207,51 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-string.test.mjs',
     what: '内联字符串少了 `^0xFF` ⇒ 字体名一类文本整体变成乱码（落点照样写成功，只有内容是错的）',
   },
+  // ── TITLE 场景的**合成顺序**（★ 退回"先所有绘制项、再所有网格" ⇒ key 0 黑色背景盖住前景，整屏黑）──
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-order.ts',
+    from: '    if (a.drawable.key !== b.drawable.key) return a.drawable.key < b.drawable.key ? -1 : 1;',
+    to: '    if (a.drawable.key !== b.drawable.key) return a.drawable.kind === \'item\' ? -1 : 1;',
+    guard: 'tools/test/emulator-new-scene-order.test.mjs',
+    what: '两类对象退回"绘制项全部在前、网格全部在后" ⇒ TITLE 的 key 0 黑色背景盖住 key 10 的前景（整屏黑），而 LOGO 的影片覆盖层仍可能正常',
+  },
+  // ── 同键的类别序：网格先于绘制项（★ 反了就变成绘制项压在网格下面）──
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-order.ts',
+    from: "    if (a.drawable.kind !== b.drawable.kind) return a.drawable.kind === 'mesh' ? -1 : 1;",
+    to: "    if (a.drawable.kind !== b.drawable.kind) return a.drawable.kind === 'item' ? -1 : 1;",
+    guard: 'tools/test/emulator-new-scene-order.test.mjs',
+    what: '同键时的类别序写反（绘制项先于网格）⇒ 违反 CORE-SCENE-DRAW-ORDER 的平键序；TITLE/LOGO 没有同键对象，只有合成用例能抓住',
+  },
+  // ── `0x9` 的复位路径必须清 show-logo（★ 只清字段不够，重跑的根脚本 `0x130` 必须读到 0）──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.showLogo = 0;',
+    to: '  m.showLogo = 1;',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '`0x9` 的复位路径不清 show-logo（或写成 1）⇒ 重跑的根脚本仍经 `0x130` 读到 1、再次播放 LOGO；现有 prologue 用例是手写 `m.showLogo=0`，抓不到',
+  },
+  // ── `--skip-logo` 的参数解析（★ 解析坏了 ⇒ 静默回到初值 1）──
+  {
+    file: 'apps/emulator-new/src/platform/node/cli.ts',
+    from: "    else if (a === '--skip-logo') out.skipLogo = true;",
+    to: "    else if (a === '--skip-logo') out.skipLogo = false;",
+    guard: 'tools/test/emulator-new-cli.test.mjs',
+    what: '`--skip-logo` 被解析成 false ⇒ CLI 仍按初值 1 走 LOGO（真实启动链用例直接传 `showLogo:0`，抓不到参数层）',
+  },
+  // ── `--skip-logo` 必须真的把 show-logo 初值传进 Machine（★ 丢了就仍走 LOGO，且只在真实启动链上显形）──
+  {
+    file: 'apps/emulator-new/src/core/runner.ts',
+    from: '    scriptName: opts.scriptName, rootId: opts.rootId, rootName: opts.rootName, showLogo: opts.showLogo,',
+    to: '    scriptName: opts.scriptName, rootId: opts.rootId, rootName: opts.rootName, showLogo: 1,',
+    guard: 'tools/test/emulator-new-title.assets.test.mjs',
+    what: '`showLogo` 被写死 1 ⇒ `--skip-logo` 失效、启动链仍进入 LOGO.BIN（单测 0x130 仍绿，只有真实启动链会红）',
+  },
   // ── 机制归属（★ planned 的 mechanism 丢了，机制表 ↔ 需求树的守卫应当红）──
   {
     file: 'data/spec/audit.json',
-    from: '      "status": "none",\n      "mechanism": "CORE-OBJECTS",',
-    to: '      "status": "none",',
+    from: '      "id": "containers",\n      "title": "容器句柄：懒分配 / 登记 / 元素寻址",\n      "status": "partial",\n      "mechanism": "CORE-POOL",',
+    to: '      "id": "containers",\n      "title": "容器句柄：懒分配 / 登记 / 元素寻址",\n      "status": "partial",',
     guard: 'tools/test/spec-mechanisms.test.mjs',
     what: 'planned 的 `objects` 丢了 `mechanism` ⇒ 机制 ↔ planned ↔ 需求树的对齐不再可判（守卫必须点名）',
   },
@@ -328,7 +368,7 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator-new/src/core/handlers.ts',
-    from: '  if (v > 0x1f) throw new Error(`opcode 0xfe 的操作数',
+    from: '  if (value > 31) throw new Error(`opcode 0xfe 的操作数',
     to: '  if (false) throw new Error(`opcode 0xfe 的操作数',
     guard: 'tools/test/emulator-new-prologue.test.mjs',
     what: '`0xfe` 去掉引擎自己的范围检查（>0x1f）⇒ 越界值被静默写进标量，而不是按引擎抛',
@@ -1767,8 +1807,8 @@ const MUTATIONS = [
   // ── emulator-new：宿主时钟（★ 忽略 clock ⇒ 5 秒渐变被虚拟步长快进）──
   {
     file: 'apps/emulator-new/src/core/machine.ts',
-    from: '    this.now = this.clock ? this.clock() : this.now + this.tickMs;',
-    to: '    this.now = this.now + this.tickMs; // 变异：忽略宿主时钟',
+    from: '    this.now = this.clock ? this.clock() : this.now + ms;',
+    to: '    this.now = this.now + ms; // 变异：忽略宿主时钟',
     guard: 'tools/test/emulator-new-scene.test.mjs',
     what: '★ 忽略 `MachineOptions.clock` ⇒ 窗口前端也按虚拟 tickMs 快进（渐变/等待不再按墙钟走）',
   },

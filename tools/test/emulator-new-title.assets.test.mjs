@@ -26,6 +26,8 @@ import { parseInputScript, ScriptedInputHost } from '../../apps/emulator-new/src
 
 const KEY = 0x1234abcd;
 const TITLE_ID = 0x5264;
+const LOGO_ID = 0x5262;
+const INIT_ID = 0x5263;
 
 const manifest = loadManifest();
 let installDir = null;
@@ -77,6 +79,10 @@ test('★ TITLE 输入环：真实启动链 → TITLE，键 1 派发回调并 in
 
   assert.equal(result.stop, 'input-idle', `必须以 input-idle 收口：${result.stopText}`);
   assert.ok((result.entered ?? []).includes(TITLE_ID), '启动链必须进入 TITLE.BIN');
+  assert.ok((result.entered ?? []).includes(LOGO_ID), '默认链必须进入 LOGO.BIN（否则 skip 用例的“不含 LOGO”是空断言）');
+  assert.ok((result.entered ?? []).includes(INIT_ID), '默认链必须进入 INIT.BIN');
+  assert.equal(result.frame?.id, TITLE_ID, '收口时当前帧必须是 TITLE（debug / CLI 的名称来自这里）');
+  assert.equal(result.frame?.name, 'TITLE.BIN', '当前帧名称必须解析成 TITLE.BIN');
   assert.equal(result.input?.keyTotal, 12, 'SYSTEM4 的 0xfe c 必须把键总数设成 12');
   assert.ok((result.input?.mouseDispatches ?? 0) > 0, '鼠标回调泵必须真的派发过');
   assert.ok((result.input?.keyDispatches ?? 0) > 0, '按键派发必须执行过');
@@ -92,4 +98,46 @@ test('★ TITLE 输入环：真实启动链 → TITLE，键 1 派发回调并 in
   }
   assert.equal((result.effects ?? []).some((e) => e.kind === 'audio.wav.load'), true, '音频装载请求必须留下记录');
   assert.equal((result.effects ?? []).some((e) => e.kind === 'audio.bgm.play'), true, 'BGM 请求必须留下记录');
+});
+
+
+test('★ --skip-logo：show-logo 初值 0 ⇒ 启动链跳过 LOGO.BIN，直接到 TITLE', { skip }, async () => {
+  const inputHost = new ScriptedInputHost(parseInputScript('8000 key 1 down; 8100 key 1 up'));
+  const handles = new Set();
+  const movieHost = {
+    open: () => { const handle = {}; handles.add(handle); return handle; },
+    play: () => {},
+    poll: () => ({ currentTime: 1, stopTime: 1, ended: true }),
+    rewind: () => {},
+    close: (handle) => { handles.delete(handle); },
+    fillTexture: () => {},
+  };
+
+  let machine = null;
+  let titleAt = null;
+  const result = await analyzeInstall(env, installDir, 0, {
+    key: KEY,
+    showLogo: 0,
+    inputHost,
+    movieHost,
+    sleepHost: async () => {},
+    includeEffects: true,
+    maxSteps: 1_000_000,
+    onMachine: (m) => { machine = m; },
+    onIteration: () => {
+      if (machine === null) return undefined;
+      if (!machine.enteredIds.includes(TITLE_ID)) return undefined;
+      if (titleAt === null) titleAt = machine.steps;
+      if (machine.steps > titleAt + 2000) {
+        return { kind: 'input-idle', index: machine.steps, now: machine.now };
+      }
+      return undefined;
+    },
+  }, { config: path.join(REPO_ROOT, '.tmp', 'title-skip-logo.ini') });
+
+  assert.equal(result.stop, 'input-idle', `必须收口：${result.stopText}`);
+  assert.equal((result.entered ?? []).includes(LOGO_ID), false, 'show-logo=0 ⇒ 不许进入 LOGO.BIN');
+  assert.equal((result.entered ?? []).includes(INIT_ID), true, 'show-logo=0 ⇒ 必须走 jcc 的 0 支进入 INIT.BIN');
+  assert.equal((result.entered ?? []).includes(TITLE_ID), true, '跳过 LOGO 后仍必须到达 TITLE.BIN');
+  assert.equal(result.frame?.name, 'TITLE.BIN', '当前帧仍应解析成 TITLE.BIN');
 });

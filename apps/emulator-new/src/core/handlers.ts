@@ -987,12 +987,24 @@ function callFrame8(m: Machine, ops: Operand[]): void {
  */
 async function exitScript9(m: Machine): Promise<void> {
   if (!m.loadScript) throw new Error('call-script-loader-missing');
+  // ★ 引擎在重装根脚本**之前**清 show-logo（`sub_428A60`：0x428A75 写 0，0x428D80 才 reload）。
+  //   两者之间没有读者 ⇒ 先后不可观察；但失败路径上旗标值不同，代码照站点顺序写。
+  m.showLogo = 0;
   const root = await m.loadScript(0);
   if (!root) throw new Error('call-script-load-failed:0');
-  m.slots = [{ body: root, ip: 0, frame: m.freshFrame(), parent: -1, length: 0 }];
+  m.slots = [{
+    id: 0,
+    name: m.scriptName?.(0) ?? m.rootName,
+    body: root,
+    ip: 0,
+    frame: m.freshFrame(),
+    parent: -1,
+    length: 0,
+  }];
   m.cur = 0;
   m.operandCount = 0;
   // 复位：状态选择字归 0；三个全局池清回初值（整型池 decode 后为 0、浮点池 0、字符串池空）
+  // ★ show-logo 标志已在 reload 之前清 0（见 `0x428A75`）：重跑的根脚本经 `0x130` 读到 0。
   m.flags = 0;
   m.globalInt.clear();
   m.globalFloat.clear();
@@ -2526,7 +2538,7 @@ function saveVersionAe(m: Machine): void {
   m.diagnostics.push({ kind: 'save-version-check-skipped:0xae' });
 }
 
-/** 0x130 load-show-logo：`op1 ← Engine[0x5EB5C]`（引擎初始化置 1，见 `Machine` 构造函数；0x9 的复位会清它） */
+/** 0x130 load-show-logo：`op1 ← Engine[0x5EB5C]`（引擎初始化置 1；0x9 handler `sub_428A60` 的 `0x428A75` 清 0） */
 function loadShowLogo130(m: Machine, ops: Operand[]): void {
   writeInt(m, ops, 1, m.showLogo);
 }

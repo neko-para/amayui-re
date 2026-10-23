@@ -291,6 +291,8 @@ export interface SceneState {
 export interface ScriptFrame {
   /** 统一文件 id（装载时记下；0x3 / 0x6 的实参）。根帧缺省不着录 */
   id?: number;
+  /** 统一文件名称（诊断用；由平台注入的 `scriptName` 解析，⛔ 不参与执行） */
+  name?: string;
   body: Uint8Array;
   ip: number;
   frame: Frame;
@@ -398,6 +400,16 @@ export interface MachineOptions {
   /** 换脚本装载器（真实入口由安装目录提供；`--script` 调试口没有它） */
   loadScript?: (id: number) => Promise<Uint8Array | null>;
   /**
+   * **统一文件 id → 名称**（同步、只用于诊断 / debug 窗口）。
+   * ★ 缺省 `undefined` ⇒ 帧只记 id，不记名称；⛔ 名称不参与任何执行分支。
+   */
+  scriptName?: (id: number) => string | null;
+  /** 根脚本的统一文件 id / 名称（诊断用；`--script` 调试口只有名称） */
+  rootId?: number;
+  rootName?: string;
+  /** 引擎级 show-logo 标志的初始值（缺省 = 引擎初始化值 1；0 = 显式跳过 LOGO） */
+  showLogo?: number;
+  /**
    * **纹理文件装载器**：统一文件 id → 整份文件字节（`0x1f9` 用；⛔ 不剥脚本头）。
    * ★ 缺省 `undefined` = 没有文件来源：`0x1f9` 响亮失败，不伪造成功记录。
    */
@@ -452,6 +464,11 @@ export class Machine {
   readonly config: ConfigStore | undefined;
   /** 换脚本用的装载器（统一文件 id → body）：缺省 = 不支持 call-script（响亮失败） */
   readonly loadScript: ((id: number) => Promise<Uint8Array | null>) | undefined;
+  /** 统一文件 id → 名称（诊断用；缺省 = 不解析名称） */
+  readonly scriptName: ((id: number) => string | null) | undefined;
+  /** 根脚本的统一文件 id / 名称（诊断用） */
+  readonly rootId: number | undefined;
+  readonly rootName: string | undefined;
   /** 纹理文件装载器（统一文件 id → 整份字节）：缺省 = `0x1f9` 响亮失败 */
   readonly loadImage: ((id: number) => Promise<Uint8Array | null>) | undefined;
   /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 查表未命中 ⇒ 引擎走回退分支） */
@@ -547,8 +564,8 @@ export class Machine {
    */
   render: RenderState = initialRenderState();
   /**
-   * **show-logo 标志**（引擎 `Engine+0x5EB5C`）：初始化置 **1**（逐字 `0x415AE0 mov [esi+5EB5Ch], 1`）。
-   * `0x130` 读它；`0x9` 的复位会清 0（**本层未建模**，见 `0x9` 条目与残差）。
+   * **show-logo 标志**（引擎 `Engine+0x5EB5C`）：初始化置 **1**（逐字 `0x415ADB mov edx,1` 后 `0x415AE0 mov [esi+5EB5Ch], edx`）。
+   * `0x130` 读它；`0x9` 的复位会清 0（`sub_428A60` 的 `0x428A75`）。
    * ★ 单独成字段而不是塞进 `scalars`：`scalars` 的语义是"被 opcode 写过的格"，种一个初值会污染
    *   "这条指令不改任何标量"那类判据（`emulator-new-forward.test.mjs` 等）。
    */
@@ -675,6 +692,16 @@ export class Machine {
   get operandCount(): number { return this.rec.length; }
   set operandCount(v: number) { this.rec.length = v; }
 
+  /**
+   * 当前帧的诊断视图（debug 窗口 / CLI 用）。
+   * ★ 只读、不抛：槽为空时返回 `null`（诊断面不应该因为一次空槽把渲染进程打挂）。
+   */
+  currentFrameInfo(): { slot: number; id: number | null; name: string | null; ip: number; parent: number } | null {
+    const f = this.slots[this.cur];
+    if (!f) return null;
+    return { slot: this.cur, id: f.id ?? null, name: f.name ?? null, ip: f.ip, parent: f.parent };
+  }
+
   constructor(opts: MachineOptions) {
     this.table = opts.table;
     this.key = opts.key ?? generateIntKey();
@@ -692,6 +719,11 @@ export class Machine {
     // ★ 只有给了配置库（安装入口）才播种；--script / 单元测试没有 config ⇒ 保持未建模。
     if (opts.config) this.scalars.set('Engine.d166964', opts.config.getInt('set:DrawMode'));
     this.loadScript = opts.loadScript;
+    this.scriptName = opts.scriptName;
+    this.rootId = opts.rootId;
+    this.rootName = opts.rootName;
+    // ★ 初值 1 是引擎初始化行为；`opts.showLogo` 是**仿真参数**（CLI `--skip-logo`），不是引擎语义。
+    this.showLogo = opts.showLogo ?? 1;
     this.loadImage = opts.loadImage;
     this.fontNames = [...(opts.fontNames ?? [])];
     this.renderHost = opts.renderHost;
@@ -702,7 +734,15 @@ export class Machine {
     this.random = opts.random ?? Math.random;
     this.onIteration = opts.onIteration;
     // 根脚本落在 **0 号槽**（引擎：根帧的父帧号是 −1，当前帧号从 0 起）
-    this.slots = [{ body: opts.body, ip: 0, frame: this.freshFrame(), parent: -1, length: 0 }];
+    this.slots = [{
+      id: opts.rootId,
+      name: opts.rootName ?? (opts.rootId === undefined ? undefined : this.scriptName?.(opts.rootId) ?? undefined),
+      body: opts.body,
+      ip: 0,
+      frame: this.freshFrame(),
+      parent: -1,
+      length: 0,
+    }];
     this.cur = 0;
   }
 
@@ -910,7 +950,15 @@ export class Machine {
     if (slot >= FRAME_SLOT_COUNT) {
       throw new Error(`call-script 深度超限：目标帧号 ${slot} ≥ ${FRAME_SLOT_COUNT}（引擎抛「階層が深すぎます」）`);
     }
-    const rec: ScriptFrame = { id, body, ip: 0, frame: this.freshFrame(), parent: this.cur, length: 0 };
+    const rec: ScriptFrame = {
+      id,
+      name: id === undefined ? undefined : this.scriptName?.(id) ?? undefined,
+      body,
+      ip: 0,
+      frame: this.freshFrame(),
+      parent: this.cur,
+      length: 0,
+    };
     if (id !== undefined) this.enteredIds.push(id);
     this.slots[slot] = rec;
     this.cur = slot;
@@ -950,7 +998,15 @@ export class Machine {
     if (!Number.isInteger(slot) || slot < 0 || slot >= FRAME_SLOT_COUNT) {
       throw new Error(`load-frame 的槽号 ${slot} 不在 0..${FRAME_SLOT_COUNT - 1} 之内`);
     }
-    const rec: ScriptFrame = { id, body, ip: 0, frame: this.freshFrame(), parent: this.cur, length: 0 };
+    const rec: ScriptFrame = {
+      id,
+      name: id === undefined ? undefined : this.scriptName?.(id) ?? undefined,
+      body,
+      ip: 0,
+      frame: this.freshFrame(),
+      parent: this.cur,
+      length: 0,
+    };
     while (this.slots.length <= slot) this.slots.push(null);
     this.slots[slot] = rec;
     return rec;
