@@ -22,6 +22,8 @@
  * ② **必须落在本仓内**：`cwd` 一律取校验过的仓库根，**不接任意目录**（见 `planOp` 的 `repoRoot` 检查）；
  * ③ **argv 数组不经 shell**：拼不出注入，也给不出新 flag；
  * ④ **写类 op 默认 dry-run**：`install` / `add` / `remove` 必须显式 `write:true`。
+ * ⑤ **没有"执行任意命令"**：`run` 只认 `TASKS` 表里的**任务名**，argv / cwd 全部由那张表拼出
+ *    （见下方 `TASKS` 的注释：为什么"少一个 op"比"多一个通用 exec"值得）。
  *
  * ★ 本文件是**纯逻辑**（不碰 fs、不打印）：路径校验走注入的 `io` ⇒ 单测能覆盖"越界仓库被拒"。
  */
@@ -39,6 +41,62 @@ const pathImpl = (...values) =>
 
 /** 允许宿主执行的 pnpm **动词**（白名单；不给任意脚本） */
 export const ALLOWED_VERBS = ['install', 'add', 'remove'];
+
+/**
+ * 允许宿主执行的**固定任务**：`任务名 → runner / argv / cwd` 全部写死在这里。
+ *
+ * ★ 为什么不是"转发任意命令"：宿主侧 `exec` 等于把 ACL 沙箱整体拆掉（confused deputy）——
+ *   只要模型能让宿主跑一条自选命令，沙箱就白设了。所以这里**只认任务名**：
+ *   argv 从本表拼出，调用方**给不了 flag、给不了 cwd、也给不了命令**。
+ * ★ 为什么这几件必须宿主侧做：它们要么 `spawn` 子进程（`vite build` 在 Windows 上会起一个查真实路径的
+ *   helper ⇒ 实测 `[plugin externalize-deps] Error: spawn EPERM`），要么 `CreateProcess` 一个 GUI（Electron）
+ *   —— 在 Low 完整性的沙箱进程里都会 `EPERM`（见 `AGENTS.md` §5 第四条）。
+ *   宿主进程是正常完整性 ⇒ 这两步在宿主里跑得通。
+ * ★ 每个任务都要 `write:true`：`build-renderer` 写 `dist/`，`electron` / `smoke` **起进程** ——
+ *   两种都有副作用，一律按写类 op 处理（缺省只出计划，什么都不启动）。
+ *
+ * 字段：
+ * - `runner`：`pnpm`（复用 `resolvePnpm`）或 `electron`（从 `app` 的 `node_modules` 里定位，不靠 PATH）；
+ * - `argv`：**写死的**参数数组（不经 shell）；`electron` 任务可再追加 `--install <installDir>`；
+ * - `cwd`：相对 `repoRoot`（**不是**调用方给的）；
+ * - `mode`：`wait`（等它退出、把输出尾部还给模型）或 `detach`（起窗口就返回 pid —— 交互式要用它）；
+ * - `requires`：跑之前必须**已存在**的相对路径（缺了就拒跑，并指向该跑哪个任务）；
+ * - `artifact`：跑完应当**被更新**的相对路径（只看退出码会得到假绿）。
+ */
+export const TASKS = {
+  'build-renderer': {
+    runner: 'pnpm',
+    argv: ['--filter', '@amayui/emulator-new', 'run', 'build:renderer'],
+    cwd: '.',
+    mode: 'wait',
+    timeoutMs: 10 * 60 * 1000,
+    artifact: 'apps/emulator-new/dist/renderer/index.html',
+    summary: '在 `apps/emulator-new` 里跑它自己 `package.json` 的 `build:renderer`（= `vite build`）⇒ `dist/renderer/**`',
+  },
+  smoke: {
+    runner: 'electron',
+    app: 'apps/emulator-new',
+    argv: ['--no-sandbox', 'apps/emulator-new', '--smoke'],
+    cwd: '.',
+    mode: 'wait',
+    timeoutMs: 3 * 60 * 1000,
+    requires: 'apps/emulator-new/dist/renderer/index.html',
+    artifact: '.tmp/emulator-new-electron-smoke.png',
+    summary: '`electron --no-sandbox apps/emulator-new --smoke`：起窗口 → 截图 → 退出（退出码 0/1，不读游戏安装）',
+  },
+  electron: {
+    runner: 'electron',
+    app: 'apps/emulator-new',
+    argv: ['--no-sandbox', 'apps/emulator-new'],
+    cwd: '.',
+    mode: 'detach',
+    requires: 'apps/emulator-new/dist/renderer/index.html',
+    acceptsInstallDir: true,
+    summary: '**起一个窗口就返回**（交互式）：`electron --no-sandbox apps/emulator-new`，给 `installDir` 就变成 `--install <dir>`',
+  },
+};
+
+export const TASK_NAMES = Object.keys(TASKS);
 
 /** 默认允许操作的仓库根（`undefined` ⇒ 用插件自己的上溯两级，见 `index.mjs`） */
 export const DEFAULT_ALLOWED_ROOTS = [];
@@ -86,6 +144,13 @@ export const OPS = {
     write: true,
     verb: 'remove',
     summary: '`pnpm remove <spec>` + 复验链接',
+  },
+  run: {
+    kind: 'task',
+    write: true,
+    summary:
+      '**宿主侧转发**一个固定任务（沙箱里会 `spawn EPERM` 的那几步）：`build-renderer` / `smoke` / `electron`。' +
+      '任务名 → argv / cwd 全部来自 `TASKS` 表，**调用方给不了命令、flag、cwd**；缺 `write:true` 只出计划',
   },
 };
 
@@ -149,7 +214,70 @@ export function planOp(op, args = {}, env = {}) {
     return { problems, plan: { op, kind: 'check-links', write: false, repoRoot, dirs: Array.isArray(raw.dirs) ? raw.dirs.map(String) : undefined } };
   }
 
-  // ── ② 写类 op：必须显式 write:true（"默认 dry-run"这条不变量不许是假的）
+  // ── ② 转发类（run）：任务名是闭集合，argv / cwd 全部来自 `TASKS` 表
+  if (op === 'run') {
+    if (env.allowRun === false) {
+      return { problems: ['部署方在插件配置里把 `run` 转发关掉了（`allowRun: false`）—— 要放行请改 profile 里本插件的 config'] };
+    }
+    const name = typeof raw.task === 'string' ? raw.task.trim() : '';
+    const task = Object.prototype.hasOwnProperty.call(TASKS, name) ? TASKS[name] : null;
+    if (!task) {
+      problems.push(
+        `不认识的 task：${JSON.stringify(raw.task ?? null)}（只有：${TASK_NAMES.join(' / ')}）—— ` +
+          '本插件**没有**"执行任意命令"的口子：任务名 → argv 在 lib/ops.mjs 的 TASKS 表里写死',
+      );
+    }
+
+    // installDir：只有 electron 接受；必须绝对路径、存在、是目录、落在 allowedRoots 内
+    let installDir = null;
+    if (raw.installDir !== undefined && raw.installDir !== null) {
+      if (!task?.acceptsInstallDir) {
+        problems.push(`task=${JSON.stringify(name)} 不接受 installDir（只有 ${TASK_NAMES.filter((t) => TASKS[t].acceptsInstallDir).join(' / ')} 接受）`);
+      } else if (typeof raw.installDir !== 'string' || raw.installDir.trim() === '') {
+        problems.push('installDir 必须是非空字符串（游戏的安装目录）');
+      } else if (!P.isAbsolute(raw.installDir)) {
+        problems.push(`installDir 必须是绝对路径（实际 ${JSON.stringify(raw.installDir)}）`);
+      } else {
+        const dir = P.resolve(raw.installDir);
+        if (roots.length > 0 && !insideAnyRoot(dir, roots)) {
+          problems.push(`installDir 不在允许的根内：${dir}（允许：${roots.join(' / ')}）—— 要指到别处就改插件配置的 allowedRoots`);
+        } else if (!io.isDir(dir)) {
+          problems.push(`installDir 不是一个存在的目录：${dir}`);
+        } else {
+          installDir = dir;
+        }
+      }
+    }
+    if (problems.length) return { problems };
+
+    const cwd = P.resolve(repoRoot, task.cwd);
+    if (!insideAnyRoot(cwd, [repoRoot])) return { problems: [`任务的 cwd 落在 repoRoot 之外：${cwd}（TASKS 表写错了）`] };
+    const argv = [...task.argv, ...(installDir ? ['--install', installDir] : [])];
+    const missing = task.requires && !io.exists(P.resolve(repoRoot, task.requires)) ? [task.requires] : [];
+    return {
+      problems,
+      plan: {
+        op,
+        kind: 'task',
+        write: raw.write === true,
+        task: name,
+        // ★ 这四个字段就是"调用方给不了"的东西：runner / argv / cwd / timeout 全部来自表
+        runner: task.runner,
+        app: task.app ?? null,
+        argv,
+        cwd,
+        mode: task.mode,
+        timeoutMs: task.timeoutMs ?? 30 * 60 * 1000,
+        requires: task.requires ?? null,
+        artifact: task.artifact ?? null,
+        summary: task.summary,
+        repoRoot,
+        missing,
+      },
+    };
+  }
+
+  // ── ③ 写类 pnpm op：必须显式 write:true（"默认 dry-run"这条不变量不许是假的）
   const write = raw.write === true;
   const verb = spec.verb;
   if (raw.verb !== undefined) {

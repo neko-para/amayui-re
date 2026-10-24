@@ -585,6 +585,10 @@ class LocalRenderHost implements RenderHost {
     } catch (error) {
       this.log('error', `releaseTexture(${textureId}) 失败：${messageOf(error)}`);
     }
+    // ★ 释放改了场景 ⇒ 下一次 `syncScene()` **不许**被 16ms 节流掉：帧边界上的下一次迭代
+    //   会推一份**新快照**再 present（0x1fa 之后核心往往紧接着 0x1f8 / 换页）。
+    //   ⛔ 不要在这里直接 present：平台侧手里只有上一份快照，画出来就是"上一页闪一帧"（白闪）。
+    this.lastScenePushAt = 0;
   }
 
   async drawText(request: DrawTextRequest): Promise<boolean> {

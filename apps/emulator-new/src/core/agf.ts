@@ -199,6 +199,17 @@ export function decodeAgf(bytes: Uint8Array): DecodedAgf {
  * ★ 装配顺序是 **0xAARRGGBB**（A/R/G/B），⛔ 不要漏掉 A 或把通道顺序换掉：
  *   漏掉 A 会把 alpha=255 的黑色描边当成键 0 清成洞（正是本轮"破裂"的成因）。
  */
+/**
+ * 这个"颜色键操作数"到底是不是一个键。
+ *
+ * ★ 三个哨兵都**不是键**：`0`（无键）、`-1`（调用方用有符号数表示"无键"，例如影片帧上传）。
+ *   只有**正数**才当键用；否则 `-1` 会被 `>>> 0` 变成 `0xFFFFFFFF`，
+ *   把影片里所有纯白像素（包括 logo 周围的白底）都清成透明 —— 表现为白闪 / logo 边缘黑噪点。
+ */
+export function hasColorKey(color: number): boolean {
+  return color > 0;
+}
+
 export function applyColorKey(rgba: Uint8Array, colorKey: number): void {
   if ((rgba.length & 3) !== 0) throw new Error(`rgba-length-not-multiple-of-4:${rgba.length}`);
   const key = colorKey >>> 0;

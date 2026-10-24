@@ -49,6 +49,34 @@ export function orderedDrawables(scene: SceneSnapshot): SceneDrawable[] {
   return entries.map((entry) => entry.drawable);
 }
 
+/* ──────────────────────────── 快照的剥离（释放纹理后用） ──────────────────────────── */
+
+/**
+ * 从一份场景快照里剥掉某个**纹理 id** 的全部引用（`0x1fa` 释放纹理之后用）。
+ *
+ * ★ 只删 `textures` 与 `drawItems`：网格**不引用纹理**（只有顶点色）⇒ 一律保留。
+ *   所以剥完之后的快照仍会画出"那一页的底色网格"—— 这在**帧边界**呈现是对的
+ *   （下一帧本来就要重新扫描），在**中途**呈现就是错的：引擎不会在 `0x1fa` 那一刻呈现。
+ * ⇒ **本函数是纯函数，它不决定什么时候呈现**；"不中途呈现"是 `pixi-host.present` 的纪律
+ *   （见 `releaseTexture` 的注释）。守卫用例把"网格保留"这条钉住，防止有人以为剥完就干净了。
+ *
+ * ★ 为什么不在核心侧删绘制项：`0x1fa` **不删**绘制项（`60-ops-texture.md`），那是 `0x1f7` 的事；
+ *   这里剥的是**渲染进程手里那份已过期的快照**（核心已经前进了，快照还没换）。
+ */
+export function scrubSceneTexture(scene: SceneSnapshot, textureId: number): SceneSnapshot {
+  return {
+    ...scene,
+    textures: scene.textures.filter((texture) => texture.id !== textureId),
+    drawItems: scene.drawItems.filter((item) => item.textureId !== textureId),
+  };
+}
+
+/** 这份快照里还有没有引用该纹理 id 的绘制项（诊断用：影片覆盖层 / 释放后自检） */
+export function snapshotReferencesTexture(scene: SceneSnapshot, textureId: number): boolean {
+  return scene.textures.some((texture) => texture.id === textureId)
+    || scene.drawItems.some((item) => item.textureId === textureId);
+}
+
 /* ──────────────────────────── 命令档的规划（S0 / S1：只规划，不画） ──────────────────────────── */
 
 /**

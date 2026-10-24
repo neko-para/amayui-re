@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { orderedDrawables } from '../../apps/emulator-new/src/platform/electron/renderer/scene-order.ts';
+import { orderedDrawables, scrubSceneTexture, snapshotReferencesTexture } from '../../apps/emulator-new/src/platform/electron/renderer/scene-order.ts';
 
 const item = (key) => ({ key });
 const mesh = (key) => ({ key });
@@ -59,4 +59,43 @@ test('同 key：网格先于绘制项，且各自保持表内顺序', () => {
   };
   const out = orderedDrawables(scene).map((entry) => `${entry.kind}#${entry.key}`);
   assert.deepEqual(out, ['mesh#7', 'mesh#7', 'item#7', 'item#7']);
+});
+
+/*
+ * ── 释放纹理后的快照剥离（`0x1fa` → `pixi-host.releaseTexture`） ──
+ * ★ 这条守卫红意味着：`scrubSceneTexture` 的**范围**被改了。它钉住的事实是
+ *   **剥完 ≠ 快照变新了** —— 网格不引用纹理，所以剥完之后快照仍能画出"上一页的底色"。
+ *   这正是两次"白闪修复"没生效的原因（36f9444 在中途 present、2f0f362 只剥一个 id）：
+ *   版权页是"白底网格 + 前景纹理"，剥掉前景纹理之后剩下的就是**整屏白**。
+ * ⇒ 结论（也是本用例的判据）：剥离只能喂给**帧边界**上的呈现，⛔ 不能拿它去中途 present。
+ */
+test('★ 剥离只删该 id 的纹理与绘制项引用；网格仍留下（剥完不是"新快照"）', () => {
+  const scene = {
+    width: 1280,
+    height: 720,
+    textures: [{ id: 42 }, { id: 43 }],
+    drawItems: [item(200000), item(300000)],
+    meshes: [mesh(200002), mesh(200003)],
+  };
+  scene.drawItems[0].textureId = 42;
+  scene.drawItems[1].textureId = 9;
+
+  const scrubbed = scrubSceneTexture(scene, 42);
+  assert.deepEqual(scrubbed.textures.map((t) => t.id), [43], '只删被释放的那个纹理槽');
+  assert.deepEqual(scrubbed.drawItems.map((i) => i.key), [300000], '只删引用该 id 的绘制项');
+  assert.deepEqual(scrubbed.meshes.map((m) => m.key), [200002, 200003],
+    '网格不看纹理 ⇒ 全部留下（于是"上一页的底色"仍会被画出来）');
+  assert.equal(scrubbed.width, 1280, '其余字段原样带过（纯函数，不改快照的其它部分）');
+  assert.equal(scrubSceneTexture(scene, 42) !== scrubbed, true, '每次返回新对象（不改入参）');
+  assert.deepEqual(scene.textures.map((t) => t.id), [42, 43], '入参不被修改');
+});
+
+test('★ 快照引用自检：纹理表命中也算"被引用"（影片覆盖层诊断用）', () => {
+  const scene = {
+    textures: [{ id: 42 }],
+    drawItems: [{ key: 1, textureId: 9 }],
+  };
+  assert.equal(snapshotReferencesTexture(scene, 42), true);
+  assert.equal(snapshotReferencesTexture(scene, 9), true);
+  assert.equal(snapshotReferencesTexture(scene, 7), false);
 });

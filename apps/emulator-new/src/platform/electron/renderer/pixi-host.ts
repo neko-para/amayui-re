@@ -59,8 +59,13 @@
 
 import { Application, Container, Graphics, Rectangle, RenderTexture, Sprite, Text, Texture } from 'pixi.js';
 import type { BLEND_MODES } from 'pixi.js';
-import { applyColorKey } from '../../../core/agf.ts';
-import { orderedDrawables, planCommandPassForScene } from './scene-order.ts';
+import { applyColorKey, hasColorKey } from '../../../core/agf.ts';
+import {
+  orderedDrawables,
+  planCommandPassForScene,
+  scrubSceneTexture,
+  snapshotReferencesTexture,
+} from './scene-order.ts';
 import { drawFailedReport, planDraw } from './scene-draw-plan.ts';
 import type { DrawPlanNote, DrawPlanSlot } from './scene-draw-plan.ts';
 import type {
@@ -383,12 +388,25 @@ export interface LastDrawState {
   note: string | null;
 }
 
+/**
+ * 一次 `present` 的**触发点**（诊断用）。
+ * ★ 引擎每个逻辑帧只呈现一次；本实现只有两处允许呈现：
+ *   - `frame`：主循环推完一份**新快照**之后的呈现（`renderer.ts` → 协议 `present`）；
+ *   - `movie`：影片帧上传后立刻呈现（`0x20f` 的影片必须按墙钟出图，等不了下一次迭代）。
+ * ⛔ 中途操作（释放纹理 / 上传纹理 / 写字）**不许**呈现：那时手里的快照可能已经是**上一帧**的
+ *   内容（核心早前进了），画出来就是"旧页面闪一帧"—— 白闪的来源就是这一类。
+ *   `release` 仍然列在这里只为**诊断**（`releaseTexture` 现在不呈现，出现 `release` 说明有人又加回去了）。
+ */
+export type PresentTrigger = 'frame' | 'movie' | 'release';
+
 /** 一次 `present` 的去向（诊断用） */
 export interface LastPresentState {
   kind: 'backbuffer' | 'texture';
   textureId: number | null;
   /** 目标纹理槽不在场景里时的降级标记 */
   fellBackToBackBuffer: boolean;
+  /** 谁触发的这一次呈现 */
+  trigger: PresentTrigger;
 }
 
 /** 场景构建的计数（诊断用：数字对不上时能一眼看出"有东西没画"） */
@@ -413,6 +431,16 @@ export interface SceneBuildStats {
   clippedEmpty: number;
   /** 绘制入口失败（纹理不可用 / 建 frame 抛异常）⇒ 上报 + 跳过 */
   drawFailed: number;
+  /**
+   * **空白槽**（`0x1f8` 建好但一次都没写过像素）被绘制项引用 ⇒ 平台侧**不画**、只记数。
+   * ★ 这是**平台**的选择，不是 spec 结论（spec 说"槽里有对象就照画，像素未定义属平台"）；
+   *   理由：未写过的 `RenderTexture` 在 WebGL 下内容未定义（后端给的是零初始化 / 驱动给的空表面），
+   *   画出去等于把"没有前景"变成"有前景但内容随机" ⇒ 前景层时有时无（一帧白底就是这么来的）。
+   * ★ 与"空槽"（`missingTextures`，槽里根本没对象）是两条不同的跳过。
+   */
+  blankSlots: number;
+  /** 影片覆盖层画了、但当前快照里**没有**任何引用该槽的条目（渲染侧状态 ≠ 快照）⇒ 只记数 */
+  movieOverlayUnreferenced: number;
   /** 附加组「跨步进 ⇒ 场景标脏」的次数（本层没有回写路径，只记数与诊断） */
   dirtyRequests: number;
   /** 源矩形窗口「到期 ⇒ 写回四条边」的次数（4.1；本层没有回写路径，只记数与诊断） */
@@ -575,6 +603,12 @@ export class PixiRenderHost {
     });
     const host = new PixiRenderHost(app, options);
     hostElement.appendChild(app.canvas);
+    // ★ **在窗口 show 之前**先把画布清成背景色。顺序（`.tmp/emulator-new.log` 实测）：
+    //   renderer ready → main `createWindow` → `boot.showWindow` → 然后才是 `init`（0x1f5 的
+    //   createDevice）。也就是说窗口**先可见**、画布**后**才有第一笔 ⇒ 在那一小段里画布是
+    //   "没画过的 WebGL 画布"，合成本身没有内容可拿（Windows / 某些显卡组合上表现为整屏白闪一次）。
+    //   这里先画一帧（= init 选项里的背景 0x000000 / alpha 1），之后 show 出来的就是定义好的黑。
+    app.renderer.render({ container: EMPTY_CONTAINER, clear: true });
     return host;
   }
 
@@ -724,10 +758,10 @@ export class PixiRenderHost {
     try {
       const rt = this.ensureTexture(slot);
       const pixels = new Uint8Array(rgba); // 不把核心里可复用的缓冲交给平台
-      // ★ `0` 是"无颜色键"哨兵（`0x1f9` 的负数操作数归一化成 0），不是黑键：
-      //   引擎的上传比较含 A 字节（见 `applyColorKey`），键 0 不会命中不透明像素；
-      //   这里显式跳过而不是靠比较兜底，否则日志会把它印成"颜色键 #000000"误导排查。
-      if (color !== 0) applyColorKey(pixels, color);
+      // ★ 只有**正数**是颜色键：`0`（无键）与 `-1`（调用方用有符号数表示无键，例如影片帧）
+      //   都**不是**键。⛔ 别写成 `color !== 0`：`-1 >>> 0 = 0xFFFFFFFF`，会把影片里的纯白
+      //   像素（包括 logo 周围的白底）全部清成透明 ⇒ 白闪 / logo 边缘黑噪点。
+      if (hasColorKey(color)) applyColorKey(pixels, color);
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
@@ -775,7 +809,7 @@ export class PixiRenderHost {
   }
 
   presentNow(): void {
-    this.present();
+    this.present('movie');
   }
 
   /** `0x1fa`：释放平台纹理（幂等） */
@@ -791,10 +825,17 @@ export class PixiRenderHost {
     this.scrubTextureFromSnapshot(textureId);
     this.note(`releaseTexture(${textureId})：已销毁平台纹理`);
     this.rebuildSceneFromLastSnapshot();
-    // ★ 释放纹理后**立刻重画一次**：旧 RT / 子节点已销毁，若等到下一次迭代才 present，
-    //   合成器可能先拿一帧“无内容”的白色后缓冲（版权页结束释放全屏纹理时最容易看到）。
-    //   重画的是**当前场景**（已不含被释放的槽），清屏色仍是 renderer 背景。
-    this.present();
+    // ★ **这里不呈现**（2026-10 修正）。两次历史修复都在这个函数里加东西：
+    //   36f9444 加了"立刻 present"、2f0f362 加了 scrub —— 白闪仍在，因为两者的前提是错的：
+    //   0x1fa 执行的那一刻，核心**已经前进**了（可能是 LOAD_FRAME / 换页的中途），而 renderer 手里
+    //   只有**上一份**快照。剥掉被释放的那个 id 并不能让快照变新 —— 剩下的条目（尤其是网格：
+    //   它们不引用纹理）照样把"上一页"画出来。在版权页（白底网格 + 前景纹理）上就是**整屏白**闪一帧。
+    //   ⇒ 呈现只发生在**帧边界**（主循环推完新快照之后）：那时画的是引擎此刻的状态。
+    //   合成器那一边不需要担心"白后缓冲"：布局/窗口底色的每一步都钉了黑（window-host 的
+    //   setBackgroundColor + renderer 的 background），而主循环最多 16ms 就会再画一帧。
+    this.note(
+      `releaseTexture(${textureId})：本帧不呈现（呈现只在帧边界 ⇒ 下一次 syncScene 推新快照后再画）`,
+    );
   }
 
   /** diagnostics 面板的数据源（每次调用后重新取；纯数据） */
@@ -1162,12 +1203,9 @@ export class PixiRenderHost {
   /** 从 renderer 的最近快照里删掉一个已释放纹理槽的引用（防止旧快照把空槽画成 placeholder） */
   private scrubTextureFromSnapshot(textureId: number): void {
     if (!this.scene) return;
-    const scene = this.scene;
-    this.scene = {
-      ...scene,
-      textures: scene.textures.filter((texture) => texture.id !== textureId),
-      drawItems: scene.drawItems.filter((item) => item.textureId !== textureId),
-    };
+    // ★ 纯函数在 `scene-order.ts`（守卫 `emulator-new-scene-order.test.mjs` 钉住"网格保留"这条：
+    //   剥完**不等于**快照变新了 —— 所以调用方不许拿它去中途呈现）。
+    this.scene = scrubSceneTexture(this.scene, textureId);
   }
 
   /** 用最近一次快照重建场景节点（`drawText` 改了纹理内容之后用；⛔ 不改快照本身） */
@@ -1197,6 +1235,8 @@ export class PixiRenderHost {
       consumedSkips: 0,
       clippedEmpty: 0,
       drawFailed: 0,
+      blankSlots: 0,
+      movieOverlayUnreferenced: 0,
       dirtyRequests: 0,
       rectWriteBacks: 0,
       meshes: scene.meshes.length,
@@ -1310,6 +1350,15 @@ export class PixiRenderHost {
           drawFailedReport(args.textureId, '平台侧没有该纹理槽').text);
         continue;
       }
+      // ★ 空白槽（`0x1f8` 建好、一次都没写过）⇒ **不画**（平台侧选择，不是 spec 结论）。
+      //   未写过的 `RenderTexture` 像素未定义：WebGL 零初始化时是透明黑，可驱动/后端也可能给别的
+      //   东西；画出去就等于"前景层的内容随机"。而这类槽在真实运行里几乎总是**影片槽的第一帧之前**
+      //   （`createTexture(42)` → `movie(slot 42)：首帧` 之间隔着一次 WASM / 归档读取）。
+      //   ⛔ 与 `missing-texture`（槽里没有对象）分开记：这里对象在、只是还没像素。
+      if (!slot.hasContent) {
+        stats.blankSlots += 1;
+        continue;
+      }
       try {
         // 全图时不建 frame；子矩形按 RenderTexture 的物理 / 逻辑比例换算（裁剪后的矩形来自规划器）。
         const rt = slot.rt ?? this.ensureTexture(slot);
@@ -1345,9 +1394,13 @@ export class PixiRenderHost {
 
     // 影片帧：放在网格之后覆盖（LOGO 收尾的黑色网格属于场景，不应盖住影片）。
     // ★ 这是本实现的呈现顺序选择；引擎的影片/场景次序未成篇（RES-MOVIE-DRAW-ORDER）。
+    // ★ `movieSlots` 是**渲染侧**状态（不是快照）：影片结束后核心可能还没释放该槽，而场景已经换到
+    //   下一页 ⇒ 这一层会把**上一帧的影片画面**压在整屏上。加一条诊断把这种情形点名（⛔ 不擅自不画：
+    //   有些影片本来就不在绘制项表里，直接跳过会黑屏）。
     for (const textureId of this.movieSlots) {
       const slot = this.slots.get(textureId);
       if (!slot || !slot.rt || !slot.hasContent) continue;
+      if (!snapshotReferencesTexture(scene, textureId)) stats.movieOverlayUnreferenced += 1;
       const sprite = new Sprite(slot.rt as Texture);
       this.addBuilt(sprite);
       stats.sprites += 1;
@@ -1385,6 +1438,19 @@ export class PixiRenderHost {
     this.sceneNote(
       'draw-plan-gaps',
       planNotes.size > 0 ? `场景：绘制项消费的未建模 / 未取证档：${[...planNotes].join('、')}` : null,
+    );
+    this.sceneNote(
+      'blank-slot-skipped',
+      stats.blankSlots > 0
+        ? `场景：${stats.blankSlots} 条绘制项引用的槽还没有任何像素（空白创建 / 影片首帧未到）⇒ 平台不画（像素未定义）`
+        : null,
+    );
+    this.sceneNote(
+      'movie-overlay-unreferenced',
+      stats.movieOverlayUnreferenced > 0
+        ? `场景：影片覆盖层画了 ${stats.movieOverlayUnreferenced} 个槽，但当前快照里没有条目引用它们`
+          + '（渲染侧状态 ≠ 快照：可能是影片帧刚上传、快照还没换；也可能是影片结束后上一页画面仍压在整屏上）'
+        : null,
     );
     this.sceneNote(
       'dirty-requests',
@@ -1466,7 +1532,7 @@ export class PixiRenderHost {
    *   见回报 §4）。
    * ★ `sceneRoot` **不在** `app.stage` 里 ⇒ 这里画一次就是一次（⛔ 不会重影）。
    */
-  private present(): void {
+  private present(trigger: PresentTrigger = 'frame'): void {
     const scene = this.scene;
     if (!scene) {
       this.note('present：还没有收到任何场景快照 ⇒ 无事可做');
@@ -1491,7 +1557,7 @@ export class PixiRenderHost {
         slot.writeCount += 1;
         slot.hasContent = true;
         this.presentCount += 1;
-        this.lastPresent = { kind: 'texture', textureId: scene.target, fellBackToBackBuffer: false };
+        this.lastPresent = { kind: 'texture', textureId: scene.target, fellBackToBackBuffer: false, trigger };
         return;
       }
       this.note(`present：目标纹理槽 ${scene.target} 不在场景里 ⇒ 退回后缓冲（诊断，不是规范结论）`);
@@ -1503,6 +1569,7 @@ export class PixiRenderHost {
       kind: 'backbuffer',
       textureId: null,
       fellBackToBackBuffer: scene.target >= 0,
+      trigger,
     };
   }
 }

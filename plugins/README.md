@@ -17,6 +17,9 @@ DSH 插件的源码放这里。**位置是自由的** —— 与技能不同，�
   `node_modules/@amayui/<包>` ⇒ 那条路**只在真符号链接下走得通**（实测：symbolic link 成功 / junction 报错）；
   Windows 上建真符号链接要 `SeCreateSymbolicLinkPrivilege`，沙箱里拿不到 ⇒ pnpm **静默降级成 junction**。
   判据不是"pnpm 退出 0"，而是 `pnpm_priv op=check-links` 里**"不是真符号链接"为 0**。
+  ★ 它还有一个 `run` op：**只认固定任务名**（`build-renderer` / `smoke` / `electron`），把"沙箱里
+  `spawn EPERM`"的那几步（`vite build` / Electron GUI）搬回宿主。**不是**通用 exec ——
+  任务名 → argv / cwd 全部写死在插件里，见它自己的 README §3.1。
 * **`wait-subagent`**（`plugins/wait-subagent/`）—— **会话内**的 `wait_subagent` 工具：订阅运行中的
   subagent 生命周期与 agent inbox 事件，等到子代理结束、用户插话 / turn 取消就立刻返回。
   ★ 它不要宿主特权，但**仍然必须是插件**：要拿 `exec.agent` 的 scope context 与正在运行的事件流，

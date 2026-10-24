@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { AgfError, agfStride, applyColorKey, decodeAgf } from '../../apps/emulator-new/src/core/agf.ts';
+import { AgfError, agfStride, applyColorKey, decodeAgf, hasColorKey } from '../../apps/emulator-new/src/core/agf.ts';
 
 function buildAgf({ width, height, bpp, body, alpha, version = 2, palette = null }) {
   const stride = agfStride(width, bpp);
@@ -157,4 +157,12 @@ test('★ 坏件：BM / 非法版本 / body 长度不符 / ACIF alpha 短都抛 
     alpha: Buffer.alloc(1),
   });
   assert.throws(() => decodeAgf(shortAlpha), (e) => e instanceof AgfError && e.code === 'agf-alpha-size');
+});
+
+test('★ 颜色键哨兵：只有正数才是键（0 / -1 都不是）—— 影片帧传 -1，⛔ 不能当成 0xFFFFFFFF 白键', () => {
+  assert.equal(hasColorKey(0), false, '0 = 无键');
+  assert.equal(hasColorKey(-1), false, '-1 = 调用方的无键哨兵（影片帧）');
+  assert.equal(hasColorKey(0x00ffffff), true, '黑色键（无 alpha）也是键');
+  assert.equal(hasColorKey(0xff000000), true, '不透明黑键');
+  assert.equal(hasColorKey(0xffffffff), true, '真正的白色键（无符号）');
 });

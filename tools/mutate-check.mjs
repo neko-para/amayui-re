@@ -2621,6 +2621,13 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-save-codec.test.mjs',
     what: '计数槽 c1 写成 0 ⇒ 读侧看不到浮点块长度（文件自相矛盾）',
   },
+  {
+    file: 'apps/emulator-new/src/core/agf.ts',
+    from: '  return color > 0;',
+    to: '  return color !== 0; // 变异：-1 也被当成键（白键）',
+    guard: 'tools/test/emulator-new-agf.test.mjs',
+    what: '颜色键哨兵判据从"正数"退化成"非 0" ⇒ 影片帧的 -1 被当成 0xFFFFFFFF 白键（白闪 / logo 边缘黑噪点）',
+  },
 
 ];
 

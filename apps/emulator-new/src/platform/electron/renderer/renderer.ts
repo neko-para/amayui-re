@@ -176,7 +176,7 @@ function renderDiagnostics(): void {
             d.lastPresent
               ? `；最近 → ${
                   d.lastPresent.kind === 'texture' ? `纹理槽 ${d.lastPresent.textureId}` : '后缓冲'
-                }${d.lastPresent.fellBackToBackBuffer ? '（目标槽缺失，已降级）' : ''}`
+                }（触发点 ${d.lastPresent.trigger}）${d.lastPresent.fellBackToBackBuffer ? '（目标槽缺失，已降级）' : ''}`
               : ''
           }`,
         ],
@@ -225,6 +225,10 @@ function renderDiagnostics(): void {
             `空槽 ${s.missingTextures}（上报）；无目标 ${s.noTarget}（上报）；绘制失败 ${s.drawFailed}（上报）；`
               + `本轮已消费 ${s.consumedSkips}（静默）；夹空 ${s.clippedEmpty}（静默、不上报）；标脏请求 ${s.dirtyRequests}；`
               + `源矩形窗口到期回写请求 ${s.rectWriteBacks}`,
+          ],
+          [
+            '平台侧不画（⛔ 不是 spec 结论）',
+            `空白槽（一次都没写过像素）${s.blankSlots}；影片覆盖层但快照里没有引用 ${s.movieOverlayUnreferenced}`,
           ],
           [
             '场景混合',
