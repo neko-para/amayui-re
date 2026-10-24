@@ -9,6 +9,9 @@ import {
   buildUncompressedEnvelope,
   crc32NonReflected,
   crc32Reflected,
+  parseSaveBody,
+  parseSaveEnvelope,
+  SaveFormatError,
   transformWords,
   untransformWords,
 } from '../../apps/emulator-new/src/core/save-codec.ts';
@@ -168,4 +171,66 @@ test('★ buildSaveBody / buildSaveFile：帧记录、尾段、头 +240 与信�
   const plain = new Uint8Array(untransformWords(new Uint32Array(cipher.buffer, cipher.byteOffset, cipher.byteLength / 4), 0x01020304, 0x2f).buffer);
   assert.equal(new DataView(plain.buffer).getUint32(0, true), body.length + 12);
   assert.deepEqual([...plain.slice(12)], [...body]);
+});
+
+test('★ parseSaveEnvelope：buildSaveFile 往返；body 与 buildSaveBody 逐字节相同', () => {
+  const snapshot = {
+    frame: 0,
+    records: [{ parent: -1, scriptIndex: 0, ret: [], tableA: -1, tableB: -1 }],
+    ints: [1, -2, 300],
+    floats: [0, 0x3f800000],
+    strings: ['abc', ''],
+    version1: 3,
+    version2: 20,
+    textureRecords: [{ file: 7, color: 0x123456, flag0: 1, flag1: 0, blank: 0 }],
+  };
+  const intKey = 0x2468ace;
+  const file = buildSaveFile(snapshot, intKey, 0x11223344, 0x1235);
+  const parsed = parseSaveEnvelope(file);
+  assert.equal(parsed.version1, 3);
+  assert.equal(parsed.version2, 20);
+  assert.deepEqual(parsed.body, buildSaveBody(snapshot, intKey));
+});
+
+test('★ parseSaveEnvelope：坏魔数 / 短文件 / CRC 被改都按 code 拒绝', () => {
+  const snapshot = { frame: 0, records: [{ parent: -1, scriptIndex: 0, ret: [], tableA: -1, tableB: -1 }], ints: [], floats: [], strings: [], version1: 3, version2: 20 };
+  const file = buildSaveFile(snapshot, 1, 0x11223344, 0x1235);
+  const badMagic = file.slice();
+  badMagic[0] = 0x58;
+  assert.throws(() => parseSaveEnvelope(badMagic), (e) => e instanceof SaveFormatError && e.code === 'save-magic');
+  assert.throws(() => parseSaveEnvelope(file.slice(0, 100)), (e) => e instanceof SaveFormatError && e.code === 'save-short');
+  const badCrc = file.slice();
+  badCrc[296] ^= 0xff;
+  assert.throws(() => parseSaveEnvelope(badCrc), (e) => e instanceof SaveFormatError && e.code === 'save-crc1');
+});
+
+test('★ parseSaveBody：帧记录 / 纹理记录 / 三池往返；v1≠3 时没有纹理表', () => {
+  const snapshot = {
+    frame: 2,
+    records: [
+      { parent: -1, scriptIndex: 0, ret: [], tableA: -1, tableB: -1 },
+      { parent: 0, scriptIndex: 11, ret: [3, 9], tableA: 4, tableB: -1 },
+      { parent: 1, scriptIndex: 12, ret: [], tableA: -1, tableB: 7 },
+    ],
+    ints: [1, -2, 300],
+    floats: [0, 0x3f800000],
+    strings: ['abc', '', 'x'],
+    version1: 3,
+    version2: 20,
+    textureRecords: [{ file: 7, color: 0x123456, flag0: 1, flag1: 0, blank: 0 }],
+  };
+  const intKey = 0x2468ace;
+  const body = buildSaveBody(snapshot, intKey);
+  const parsed = parseSaveBody(body, 3, intKey);
+  assert.equal(parsed.frame, 2);
+  assert.deepEqual(parsed.records, snapshot.records);
+  assert.deepEqual(parsed.ints, snapshot.ints);
+  assert.deepEqual(parsed.floats, snapshot.floats);
+  assert.deepEqual(parsed.strings, snapshot.strings);
+  assert.deepEqual(parsed.textureRecords[0], snapshot.textureRecords[0]);
+  assert.equal(parsed.textureRecords.length, 1000);
+
+  const v2 = { ...snapshot, version1: 2 };
+  const parsed2 = parseSaveBody(buildSaveBody(v2, intKey), 2, intKey);
+  assert.deepEqual(parsed2.textureRecords, [], 'v1≠3 没有 20000 B 纹理表');
 });

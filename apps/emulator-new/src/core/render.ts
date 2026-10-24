@@ -13,6 +13,19 @@
  *   只按契约回答"能 / 不能"并把收到的请求记账。
  */
 
+import type { BmpSurface } from './bmp.ts';
+
+/**
+ * 一次捕捉请求的结果：平台交出**原始表面像素**（+ 宽高 / 行宽 / 每像素字节数 / 通道掩码），
+ * 容器（两段头 + 行宽对齐 + 自下而上 + 通道重排）由 core 的 `bmp.ts` 组。
+ *
+ * ★ 这是 `FMT-SAVE-STH` 的平台边界：缩略图**不是**平台交回的一整份文件字节 ——
+ *   合同要求引擎按格式写 / 读，平台只提供「某张表面的像素 + 行宽 + 通道掩码」。
+ * ★ 形状与 `bmp.ts` 的 `BmpSurface` 是同一个（别名，不是第二份定义）：
+ *   平台实现只 import 这一个名字，核心的编码器只认 `BmpSurface`。
+ */
+export type SurfacePixels = BmpSurface;
+
 /**
  * 平台渲染表面的**不透明句柄**：核心只把它原样传递（不解引用、不比较、不序列化）。
  * ★ 平台实现（Electron / Pixi）自己决定它装什么（`RenderTexture` / 原生 surface 指针…），
@@ -154,6 +167,8 @@ export interface RenderHost {
    * `0x1f9`：把解码后的 RGBA 上传到该纹理槽（**同步请求**；返回前完成）。
    * `false` = 上传失败；调用方按显示消息型异常处理。
    * ★ 颜色键的像素清零由平台实现（见请求字段）；核心只搬运归一化后的键。
+   * ★ `0x1af`（读 `.STH`）也走这个口：core 先按 `FMT-SAVE-STH` 解析容器，再把**像素**交上来
+   *   （⛔ 不为读档再造一个"整份文件字节"的上传口）。
    */
   uploadTexture(request: TextureUploadRequest): Promise<boolean>;
 
@@ -172,23 +187,13 @@ export interface RenderHost {
   fillTexture?(request: FillTextureRequest): Promise<boolean>;
 
   /**
-   * `0x1ae` 把纹理当前画面捕捉成文件字节（BMP）；缺省 = 平台不支持。
+   * `0x1ae` 把纹理当前画面捕捉成**表面像素**（`FMT-SAVE-STH`）；缺省 = 平台不支持。
    *
-   * ⚠ **实现现状，与 `FMT-SAVE-STH` 相反**：合同要求 **core 自己组装 BMP 容器**
-   * （14 字节文件头 + 40 字节信息头 + 按对齐行宽写满的像素块），平台只提供
-   * 「像素 + 行宽 + 通道掩码」；本接口却让平台交出**整份文件字节**。
-   * 分歧登记在 `RES-SAVE-STH-CAPTURE`（what ② / next ②）—— 收口时把容器搬回 core，
-   * 本接口改成返回像素 + 行宽 + 通道掩码、且**不再**返回整份 BMP。
+   * ★ 平台只给「像素 + 宽高 + 行宽 + 每像素字节数 + 通道掩码」（`SurfacePixels`）：
+   *   两段头 / 行宽对齐 / 自下而上 / 蓝绿红重排都是**引擎**（core 的 `bmp.ts`）做的。
+   *   `null` = 捕捉不到（调用方以状态 2 结束，且槽里已有一个 0 字节文件）。
    */
-  captureTexture?(textureId: number): Promise<Uint8Array | null>;
-
-  /**
-   * `0x1af` 把文件字节（BMP）上传进纹理槽；缺省 = 平台不支持。
-   *
-   * ⚠ 同上：合同要求 core 先按 `FMT-SAVE-STH` 解析容器、再把**像素**交给平台；
-   * 本接口接受**整份文件字节**，是**实现现状**（`RES-SAVE-STH-CAPTURE`），不是合同。
-   */
-  uploadTextureBytes?(textureId: number, bytes: Uint8Array): Promise<boolean>;
+  captureTexture?(textureId: number): Promise<SurfacePixels | null>;
 
   /** `0x1fa`：释放该纹理槽的平台纹理（幂等；空槽也要能调用）。 */
   releaseTexture(textureId: number): Promise<void>;
@@ -330,8 +335,7 @@ export type HeadlessRenderRequest =
   | { kind: 'upload-texture'; request: TextureUploadRequest; ok: boolean }
   | { kind: 'release-texture'; textureId: number }
   | { kind: 'fill-texture'; request: FillTextureRequest; ok: boolean }
-  | { kind: 'capture-texture'; textureId: number; ok: boolean }
-  | { kind: 'upload-texture-bytes'; textureId: number; length: number; ok: boolean }
+  | { kind: 'capture-texture'; textureId: number; surface: SurfacePixels | null; ok: boolean }
   | { kind: 'draw-text'; request: DrawTextRequest };
 
 export interface HeadlessRenderOptions {
@@ -362,8 +366,8 @@ export interface HeadlessRenderOptions {
    * ★ 只影响**返回值**（失败路径记账用），⛔ 不产生像素、不模拟加锁。
    */
   drawTextSucceeds?: boolean;
-  /** `0x1ae` 的捕捉结果；缺省 = 捕捉不到（null）。 */
-  captureBytes?: Uint8Array;
+  /** `0x1ae` 的捕捉结果（表面像素）；缺省 = 捕捉不到（null）。 */
+  captureSurface?: SurfacePixels;
 }
 
 /**
@@ -388,7 +392,7 @@ export class HeadlessRenderHost implements RenderHost {
   replaceTextureSucceeds: boolean;
   uploadTextureSucceeds: boolean;
   drawTextSucceeds: boolean;
-  captureBytes: Uint8Array | undefined;
+  captureSurface: SurfacePixels | undefined;
   /**
    * `0x223` 的格式比较：**只有构造时给了 `textureFormatMatches` 才存在**。
    * ★ 缺省（`undefined`）= 这个宿主不声称知道"表面格式与当前显示格式是否相符"。
@@ -403,7 +407,7 @@ export class HeadlessRenderHost implements RenderHost {
     this.replaceTextureSucceeds = options.replaceTextureSucceeds ?? true;
     this.uploadTextureSucceeds = options.uploadTextureSucceeds ?? true;
     this.drawTextSucceeds = options.drawTextSucceeds ?? true;
-    this.captureBytes = options.captureBytes;
+    this.captureSurface = options.captureSurface;
     const matches = options.textureFormatMatches;
     if (matches !== undefined) {
       this.textureFormatMatches = async (textureId: number): Promise<boolean> => {
@@ -462,15 +466,11 @@ export class HeadlessRenderHost implements RenderHost {
     return true;
   }
 
-  async captureTexture(textureId: number): Promise<Uint8Array | null> {
-    const bytes = this.captureBytes ?? null;
-    this.requests.push({ kind: 'capture-texture', textureId, ok: bytes !== null });
-    return bytes;
-  }
-
-  async uploadTextureBytes(textureId: number, bytes: Uint8Array): Promise<boolean> {
-    this.requests.push({ kind: 'upload-texture-bytes', textureId, length: bytes.length, ok: true });
-    return true;
+  async captureTexture(textureId: number): Promise<SurfacePixels | null> {
+    // ★ 只记账：headless 没有后端，交回的是构造时给的**表面像素**（不是 BMP 字节）
+    const surface = this.captureSurface ?? null;
+    this.requests.push({ kind: 'capture-texture', textureId, surface, ok: surface !== null });
+    return surface;
   }
 
   async drawText(request: DrawTextRequest): Promise<boolean> {

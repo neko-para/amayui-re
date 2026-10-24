@@ -1413,3 +1413,331 @@ n < 10 走注入的 `sleepHost`；`SLEEP_BIT` 服务分支按 `now >= sleepUntil
 **账**：`unknown` 441 → **430**；`discarded` 2 → **11**（残差总记录仍 441；UB 是“标记”不是删除）。
 
 **门禁**：`pnpm test` **1024/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **338/338** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十三、第二十六批：四条代码确定残差 · STH-CAPTURE（2026-10-24）
+
+**范围**：四条“代码确定、只缺观测”残差 + `RES-SAVE-STH-CAPTURE`。证据在 `.tmp/spec-draft/batch26/{codeonly,sth}/`。
+
+**关闭四条**：
+- **帧重入返回栈**：`0x8` 只写目标帧三格（父帧号 / PC / 长度槽），不动返回栈；计数只由装载（清目标帧）、构造 / `0x9`（清 40 格）清，`0x2` 与释放**不清**；返回点表全语料零清零点 ⇒ 重入未释放槽会复用旧返回点；计数 0 时读相邻数组 = UB。正文补条件。
+- **异常重试换帧**：重试只写日志 + 跳入口，不动帧 / PC；但 `0x3` / `0x6` **先换帧后装载**，打开失败抛**类别 7（可重试 / 忽略）**且**不恢复当前帧**；头坏 / 返回 0 才走退出型。**修正正文 4 处**（原“已恢复 / 不重试 / 三支”与代码相反）；深度失败是类别 1，只能终止。
+- **窗口清理**：`DestroyWindow` 全语料唯一在 WndProc 关闭分支；图形初始化失败路径不销毁窗口、直接返回 0。正文已写，关闭。
+- **启动失败返回**：返回值只有两个写点 —— 重复实例 `−1`、其余一切 `0`（含索引失败）；进程退出码属宿主 CRT。正文已写，关闭。
+
+**STH-CAPTURE**：
+- 生效实现 = `set:DrawMode` 缓存，缺省 **0**、发行配置未覆盖 ⇒ **屏幕捕捉、恒 24 位**；纹理捕捉仅 `DrawMode == 1`。
+- 屏幕路径把第 3 操作数当**表面选择**：0 / 1 / 2 被拒（不读文件内容、写错误通道、状态 2）⇒ 本作合同。
+- 纹理路径的 32 位布局**代码已定、零样本**：源带 alpha ⇒ 32 位，B/G/R/A、alpha 按位宽左移、行宽 32 位对齐、声明长度 = 行宽×高+40、自下而上。
+- `RES-SAVE-STH-CAPTURE` 关闭；新 `RES-SAVE-STH-CAPTURE-32BIT-SAMPLE`。
+- **实现边界**（core 组装 / 解析 BMP，平台只给像素 + 行宽 + 掩码）另开实现单，不在只读批内。
+
+**诚实项**：残差 `unknown` 430 → **426**。`0x2` 的 −10 支、`0x5` 引擎级栈、`sub_410160` / `sub_4192F0` 的 6 个当前帧写点仍只登记未逐条读。
+
+**门禁**：`pnpm test` **1024/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **338/338** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十四、第二十七批：S2a-1 命令档纯执行层（2026-10-24）
+
+**范围**：把命令档从“只规划”推进到“有可执行的纯 op 序列”（S2a-1，仍不画像素）。
+
+**代码**：
+- `scene-command-plan.ts`：`covered` / `below-range` 阶段新增 `entries: {key, table:'auxA'|'mesh'|'items'}[]`（`tableKeys` 保留且恒等于 entries 键序）；below-range 只含键 < 本段起点；同键序 **辅助表 A → 网格 → 绘制项**。
+- 新增 `scene-command-exec.ts`（纯函数）：`ExecOp` 闭集合 = `target / clear / emit / copy / composite / present(占位)`；按种类闸门：
+  - 种类 1：仅首帧，A 清 → below-range → covered → copy A→own；
+  - 种类 0 / 2：A、B 各 target+clear+below+covered → composite(A,B)→own；
+  - 种类 3：A clear+covered → composite(A)→own；
+  - **默认 `enabled=false` ⇒ 0 op**（产品零回退）；`deviceReady` 只作用种类 1 的 below-range。
+- 守卫 `emulator-new-scene-command-exec` 9 条（默认关闸 / 空表、种类 0 清序与 composite 最后、种类 1 copy 方向与首帧门、设备就绪门、同键平键序、种类 3 无 below、种类 2 跳段、越界条目丢弃、对齐缺口）。
+- 变异 +3（总闸默认开、copy 方向反、clear 目标错），均按预期红。
+
+**未做**：`pixi-host` 真实执行（画布 36/37、clear/emit/copy/composite、present 次序）、遮罩 / strokes / 进度、核心盖章写回。
+
+**诚实项**：残差 `unknown` **426**。S2 仍是“结构可断言、像素未验证”。
+
+**门禁**：`pnpm test` **1033/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **341/341** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十五、第二十八批：S2a-2 命令档执行接进 present（2026-10-24）
+
+**范围**：把 `scene-command-exec` 的 op 接进 `pixi-host.present()`，默认关闸（产品零回退）。
+
+**实现**：
+- `PixiRenderHost`：独立画布表 36/37（**不进 `slots` / `reconcileTextures`**）、`emitEntries(entries,target)`、`pendingExec`；`present(trigger='frame')` 里先执行 op、再渲染收尾扫描；`present('movie')` 不承载命令档（注释说明）。
+- `commandExecKinds?: number[]`（缺省 `[]`）⇒ `enabled=false` ⇒ 零 op / 零宿主调用；`renderer.ts` 不传。
+- `runCommandOps(ops, host)` 可注入纯函数 + `CommandCanvasHost` 假实现；op 执行：target→clear 成对、emit 到画布、copy A→own、composite 先 A 后 B。
+- 诊断：`scene-command-pass-executed` / `commandPassOps` / `commandPassCanvasDraws`；旧 `-render-unmodeled` 保留但文案改为“可按种类开闸 / 仍缺 copy·composite”。
+- DISCLOSURES / README / 注释同步：不再是“只规划、不执行”，而是“可开闸执行、缺省关”。
+
+**守卫**：`emulator-new-scene-command-run` 6 条（关闸零 op/零调用、种类闸门、种类 0 全序 + clear 成对、copy 方向、composite 源 `[A,B]`、skipExtraTransform 透传、present 不派发）；变异 +3（空闸门放行、copy 反向、composite 反序）。
+
+**未做**：consumed 跳过 / 核心盖章 / 真实 clearTable（S2a-3）；种类 1 遮罩、种类 2 strokes、效果技法；像素等价未验证。
+
+**门禁**：`pnpm test` **1039/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **344/344** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十六、第二十九批：S2a-3 核心写回（盖章 / 收尾清表）（2026-10-24）
+
+**范围**：命令档的两项核心写回 —— 时间戳盖章、渲染步收尾清表 / 强制完成。
+
+**代码**：
+- `Machine.stampCommands()`：只把 `timestamp === 0` 的命令记录写成本帧场景时刻；返回盖章条数。⛔ 不重写已有时间戳。
+- `Machine.finishRenderStep()`：本帧 `animating === 0` ⇒ 清整张命令表；随后 `forcedComplete = 0`；返回是否清表。
+- `SceneState.forcedComplete` 新格（初值 0）。
+- `session.ts`：`syncScene` 在 `snapshot` 之前盖章；`onIteration` 改成 `await render.present()` 后调 `finishRenderStep()`。
+- 守卫 +2（盖章只盖 0 / 重写回首帧；有动画不清表 / 无动画清表 / 强制完成清 0）；变异 +2（每帧都盖、不管动画都清）。
+
+**未做**：consumed（位 16）写回仍是键级近似；`advanceCommands`（种类 0/2 进度与 `forcedComplete` 写者）未接；真实 `clearTable` 已接但仅清表，不含命令推进。
+
+**诚实项**：残差 `unknown` **426**。`present('movie')` 不承载命令档；像素等价未验证。
+
+**门禁**：`pnpm test` **1041/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **346/346** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十七、第三十批：S2b 进度与退路合成（2026-10-24）
+
+**范围**：种类 0 / 3 的**进度**投影与退路合成的 alpha；仍不接核心 `advanceCommands` / `forcedComplete` 写者。
+
+**代码**：
+- `commandExecCommandsOf` 新增 `progress`：种类 0 未开始（`now <= ts+delay`）⇒ 0、到期 / `duration<=0` ⇒ 1；种类 3 **不夹取**（未开始也可为负，按同一公式外推），只有到期 ⇒ 1；两者进行中都线性。
+- `CommandExecCommand` 加 `progress`；`composite` op 加 `progress` + `path:'fallback'`；`runCommandOps` 把它传给宿主。
+- `pixi-host.compositeCommandSurface`：两源时第一块不透明、第二块 `alpha = clamp(progress,0,1)`；单源不透明。
+- 守卫 +2（进度透传 / 三段边界）；变异 +2（进度恒 1、进行中也算 1）。
+
+**未做**：核心 `advanceCommands`（种类 0 到期清 duration / 置 animating）、`forcedComplete` 写者；种类 1 的 copy 已由 S2a-2 接、但影片 RT 争用未验；遮罩 / strokes / 效果技法仍未。
+
+**诚实项**：残差 `unknown` **426**。像素等价未验证；退路合成只保证"先 A 后 B、第二笔按进度 alpha"，⛔ 不声称与 Fade 技法等价。
+
+**门禁**：`pnpm test` **1043/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **348/348** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十八、第三十批：S2b-2 命令推进与强制完成（2026-10-24）
+
+**范围**：核心 `advanceCommands`（种类 0 / 3 的 `animating` / `duration`；种类 2 `mode < 0` 的 `forcedComplete`），并把 `forcedComplete` 投影进快照 / 进度。
+
+**代码**：
+- `Machine.advanceCommands()`：种类 0 未开始 ⇒ `animating=1`；到期 / `duration<=0` ⇒ 清 `duration`；进行中 ⇒ `animating=1`。种类 3 同公式但**不夹取**（未开始也算进行中）。种类 2 且 `mode < 0` ⇒ `forcedComplete=1`。
+- `session.snapshot` 的 `forcedComplete` 改为 `machine.scene.forcedComplete`；`syncScene` 在盖章后调 `advanceCommands`。
+- `commandExecCommandsOf` 的 `progress`：`forcedComplete === 1` 一律 1。
+- 守卫 +2（种类 0/3 三段 / 种类 2 强制完成）；变异 +2（到期不清 duration、不置强制完成）。
+
+**未做**：种类 1 尾段的 `duration` 推进（影片结束信号）；真实 `advanceCommands` 与呈现的时序（每帧调用一次，已按快照前）。
+
+**诚实项**：残差 `unknown` **426**。像素等价未验证。
+
+**门禁**：`pnpm test` **1046/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **351/351** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十九、第三十批：S2c 种类 2 抹除笔（2026-10-24）
+
+**范围**：种类 2 的 `strokes` 从规划结构接到执行层与 Pixi 落笔。
+
+**代码**：
+- `scene-command-exec`：`ExecOp` 加 `strokes`；种类 2 的合成阶段有笔 ⇒ 产 `strokes`（不再用 `composite` 冒充图案）；空数组仍走 `composite` 兜底。
+- `CommandCanvasHost.strokes` + `runCommandOps` 派发。
+- `pixi-host.drawCommandStrokes`：按笔序逐笔从画布 A/B 取子矩形、`Texture` frame + `Sprite` 位置 = 矩形左上角、`render` 到 own；空矩形跳过。
+- 守卫 +1（有笔时产 strokes、A→B 保序）；变异 +1（有笔仍 composite）。
+
+**未做**：种类 1 的遮罩（`rect` / `flag` 协议投影 + 均匀系数）；效果技法；落点 offset ≠ 0 / 视野偏移仍是残差。
+
+**诚实项**：残差 `unknown` **426**。像素等价未验证；strokes 只保证"从哪块画布搬哪个矩形、按序"，不声称与引擎逐像素一致。
+
+**门禁**：`pnpm test` **1047/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **352/352** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十、第三十批：S2c-2 种类 1 遮罩（2026-10-24）
+
+**范围**：种类 1 的 `rect` / `flag` 协议投影与 `mask` op；均匀系数最小模型。
+
+**代码**：
+- `protocol.SceneCommandSnapshot` 加可选 `rect` / `flag`；`session.commandSnapshotOf` 投影。
+- `commandExecCommandsOf` 投影 `rect` / `flag`；`CommandExecCommand` 加这两格。
+- `ExecOp.mask`：种类 1 首帧 `copy` 后接 mask、非首帧只有 mask；记录新增 `mask` 系数（写表时 `flag=1 ⇒ 0`、否则 `255`），`coeff = mask===255 ? 254/255 : 0`；诊断 `scene-command-mask-uniform`。
+- `CommandCanvasHost.mask` + `pixi-host.drawCommandMask`：取画布 A 的 rect 子矩形、`sprite.alpha = coeff` 画到 own。
+- 守卫 +1（首帧 copy→mask、非首帧只 mask、`flag=1` coeff=254/255）；变异 +1（不产 mask）。
+
+**未做 / 未定**：`flag` 两时刻互补的时序（写表 / 影片结束）没有状态建模，系数只在 0 / 254/255 两档；逐像素遮罩未建模；效果技法缺接口。
+
+**诚实项**：残差 `unknown` **426**。像素等价未验证。
+
+**门禁**：`pnpm test` **1048/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **353/353** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十一、第三十批：S2c-3 影片结束补遮罩（2026-10-24）
+
+**范围**：种类 1 的影片结束时刻：补遮罩反值、置动画、清 duration。
+
+**代码**：`Machine.advanceCommands()` 对种类 1：
+- 若 `duration > 0` 且 `objectSlots` 里没有该 `textureId` 的对象（影片结束）⇒ `mask = 255 − mask`、`duration = 0`、`animating = 1`；
+- 对象还在 ⇒ 不动；第二次调用不再翻（duration 已 0）。
+- 守卫 +1；变异 +1（影片结束不补遮罩）。
+
+**诚实项**：残差 `unknown` **426**。用“对象槽空”当影片结束信号是当前模型的最小判据；真实影片结束事件若与槽释放不同步，需再收窄。像素等价未验证。
+
+**门禁**：`pnpm test` **1049/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **355/355** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十二、第三十批：S2d 效果技法只记账（2026-10-24）
+
+**范围**：种类 0 / 3 走退路合成时显式记 `scene-command-effect-unmodeled`，⛔ 不假装效果技法已实现。
+
+**代码**：
+- `CommandExecDiagnosticKind` 加 `scene-command-effect-unmodeled`。
+- `planTwoCanvas`（种类 0）与 `planSingleCanvas`（种类 3）各记一次（同命令去重）。
+- 种类 2 有笔走 strokes，不记这条。
+- 守卫 +1（种类 0 必记、种类 2 不记）；变异 +1（种类 0 不记）。
+- 修正旧守卫“种类 3 没有可记缺口”为“只记 effect-unmodeled”。
+
+**未做**：效果技法本身（缺 `RenderHost` 效果接口 / 设备状态）；像素等价未验证。
+
+**门禁**：`pnpm test` **1050/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **356/356** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十三、第三十批：缩略图 STH 的 BMP 容器搬回 core（2026-10-24）
+
+**范围**：实现单 `缩略图 STH：BMP 容器搬回 core` —— 容器组装 / 解析归 core，平台只给像素。
+
+**代码**：
+- 新增 `core/bmp.ts`（纯核心）：`encodeBmp24` / `decodeBmp` / `bmpBitDepth` / `bmpRowStride` / `BmpError`。写侧 24 位、声明长度 `行宽×高+40`、行宽 32 位对齐、填充 0、自下而上、BGR；读侧 24 位、零读者（不读 `biSizeImage` / 声明长度 / 压缩 / 平面数）；1/4/8/32 位明确抛 `bmp-bitdepth-unmodeled`。
+- `core/render.ts`：`SurfacePixels = BmpSurface`；`captureTexture?(id): Promise<SurfacePixels|null>`；删 `uploadTextureBytes`；Headless 改 `captureSurface`。
+- `handlers.ts`：
+  - `0x1ae`：先 `host.write(path, 空字节)` 截断建文件 → `captureTexture` → `encodeBmp24` → 再写；失败留 0 字节 / 半截、不补写；建立失败状态 2。
+  - `0x1af`：先判 op3 有符号 ∈ {0,1,2} ⇒ 错误通道 + 状态 2、**不读文件**；否则读 → `decodeBmp` → `uploadTexture(RGBA8)`。
+- 测试：新增 `emulator-new-bmp` 6 条；`ops-100-200` 拆 4 条；`save-sth.assets` 改 3 条（真样本上传 320×180、40 字节 ⇒ 状态 2、真样本 decode→encode 逐字节可逆）。
+- 变异：两条旧点从 handlers 迁到 `bmp.ts`，另加 `+40→+54`、行序翻转两条。
+
+**未做**：平台 `LocalRenderHost` / `PixiRenderHost` 本就没有这两个方法（保持缺省）；32 位写、1/4/8/32 位读展开仍不建模（`RES-SAVE-STH-DECODE` 继续）。
+
+**门禁**：`pnpm test` **1060/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **358/358** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十四、第三十批：0x3 / 0x6 装载失败状态（2026-10-24）
+
+**范围**：spec 已改的“打开失败 ⇒ 当前帧停在目标槽、类别 7（可重试 / 忽略）”在 emulator 落地。
+
+**代码**：
+- `core/machine.ts`：新增 `FrameLoadError`（`category` 7 / 1）；分派器包装异常时保留 `category`；修掉失败后取 `this.rec` / `this.ip` 会把**原始错误盖成“没有活动帧”**的二次故障。
+- `0x6`：先 `m.cur = slot` 再 `loadScript`；打开失败抛类别 7、当前帧**停在目标槽**；成功 / 头坏路径恢复 `caller` 再 `loadFrameAt`；深度失败类别 1。
+- `0x3`：先 `m.cur = caller + 1` 再 `loadScript`；打开失败类别 7、停在子槽；成功恢复再 `enterScript`。
+- 守卫 +2（0x6 失败状态 / 类别、0x3 失败状态）；变异 +2（不切帧、类别 7→1）。
+
+**未做**：运行器没有对话框 / 重试循环 ⇒ **只保留 `category` 供上层选择**，不自动重试；“头坏 / 返回 0”与“打开失败”仍共用 `loadScript → null`，无法在 core 区分（头坏应恢复并退出）。这是下一步。
+
+**门禁**：`pnpm test` **1062/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **360/360** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十五、第三十批：存档读侧信封解析（2026-10-24）
+
+**范围**：读侧第一段 —— 292 头 + 20 参数块 + 变换信封的纯函数解析；**尚未接进 `0x1a1`**。
+
+**代码**：
+- `core/save-codec.ts` 新增 `parseSaveEnvelope` / `SaveFormatError` / `ParsedSaveEnvelope`：
+  - 头：长度 ≥ 312、魔数 `S4SD` / `S3SD`、标题 `AMAYUI`；
+  - 参数块：字数非 0 且偶数、密文长度、两个 CRC、逆变换（偶键 / 余数非 0 ⇒ `save-transform`）；
+  - 信封前缀三字必须相等且等于字数 × 4、≥ 12；返回未变换 body。
+- 守卫 +2（`buildSaveFile` 往返 body 逐字节相同；坏魔数 / 短文件 / CRC 被改按 code 拒绝）；变异 +1（不校验魔数）。
+- 诚实项：`0x1a1` 仍只做头长度 / 魔数检查 + `save-restore-unmodeled`；解析器尚未接入（接入要先定义 parse 失败时不写 op1 的诊断口径）。
+
+**门禁**：`pnpm test` **1064/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **360/360** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十六、第三十批：存档读侧负载结构解析（2026-10-24）
+
+**范围**：`parseSaveBody` —— 六池计数 + 帧记录 + 纹理记录表的**结构**解析；仍不应用。
+
+**代码**：
+- `parseSaveBody(body, version1, intKey)`：
+  - `frame`（0..39）；v1=3 才有 20000 B 纹理记录表（1000×20 B）；
+  - 帧记录：`parent` / `scriptIndex` / `ret`（≤256）/ `tableA` / `tableB`；
+  - 六池计数；整型池 `decodeInt`、浮点池 raw、字符串池按 `c2` 个 NUL 结尾串；
+  - 引用三池只按计数跳过。
+- 守卫 +1（帧记录 / 纹理记录 / 三池往返；v1≠3 无纹理表）；变异 +1（不认 v1=3 的 20000 B）。
+- 诚实项：`0x1a1` 尚未接入 `parseSaveEnvelope` / `parseSaveBody`；还原 / 整池重编码仍未做。
+
+**门禁**：`pnpm test` **1065/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **357/357** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十七、第三十批：0x1a1 接入读侧解析（2026-10-24）
+
+**范围**：`0x1a1` 读完整文件时调用 `parseSaveEnvelope` + `parseSaveBody`。
+
+**行为**：
+- `length >= 312` ⇒ 解析；成功记 `save-1a1-parsed`，随后仍记 `save-restore-unmodeled` / `save-recode-unmodeled`（不应用状态）。
+- 解析失败 ⇒ 记 `save-1a1-parse-<code>`（如 `save-crc1`）、**不写 op1**、**不记还原**。
+- 292 字节旧夹具保持原路径（只头检查）。
+- 守卫 +1（完整文件解析成功 / 坏 CRC 点名且不写 op1、不记还原）；变异 +1（失败也继续还原）。
+
+**未做**：帧 / 池的应用、整池重编码；`0x1a0` 的完整解析尚未复用。
+
+**门禁**：`pnpm test` **1066/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **358/358** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十八、第三十批：0x1a1 应用三池（2026-10-24）
+
+**范围**：读档应用的第一段 —— 六个全局池清零 + 整型 / 浮点 / 字符串三池前缀写入 + 整型重编码。
+
+**代码**：
+- `Machine.applyGlobalPools`：清 `int/float/string` 与三张引用池；按序写 `encodeInt(ints[i])`、raw floats、strings；返回条数。
+- `0x1a1` 解析成功后调用；诊断改 `save-1a1-pools-applied`，仍保留 `save-restore-unmodeled`（帧 / 引用池未还原）。
+- 守卫更新：完整存档后**未存档的 op1 格被清 0**（证明六池清零）；坏 CRC 仍不写 op1、不记还原。
+- 变异 +1（还原前不清整型池）。
+
+**未做**：帧记录重建 / 脚本重载 / 执行位置还原 / 引用池内容 / 整池重编码。
+
+**门禁**：`pnpm test` **1066/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **359/359** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 五十九、第三十批：0x1a1 帧记录重建（2026-10-24）
+
+**范围**：读档应用第二段 —— 按帧记录重建 0..current 的帧槽。
+
+**代码**：
+- `Machine.restoreFrames(records, current)`：
+  - 需要 `loadScript`（缺省返回 false，调用方保留未建模诊断）；
+  - 清 40 槽；每帧 `scriptIndex >= 0` 时重新装载脚本体、建 `freshFrame`、写 `parent` / `ret` / `tables`；
+  - 执行位置：`tableB` 优先（`position × 4 + 12`），否则 `tableA`（`× 4`），否则 0；
+  - 设 `cur = current`、`operandCount = 0`。
+- `0x1a1` 解析 + 三池之后调用；成功记 `save-1a1-frames-restored`，且**不再**记 `save-restore-unmodeled`。
+- 守卫 +1（cur / parent / ret / tableB 优先 / 诊断）；变异 +1（忽略 tableB 优先级）。
+
+**未做**：引用池内容、局部池（按 spec 不持久化，由 freshFrame 重建）、尾段 / 图像对象重建、整池重编码；`0x1a0` 尚未复用。
+
+**门禁**：`pnpm test` **1067/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **360/360** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 六十、第三十批：整池重编码落地（2026-10-24）
+
+**范围**：`applyGlobalPools` 已把从文件解出的整型值按**当前 key** 重编码；去掉 `save-recode-unmodeled`。
+
+**代码**：
+- `0x1a1` 不再记 `save-recode-unmodeled`（三池已重编码）。
+- 守卫：完整存档后 `decodeInt(m.globalInt.get(0), KEY) === 7`（证明按当前 key 编码）；不再要求 recode 诊断。
+- 变异 +1（还原整型池不重编码）。
+
+**诚实项**：引用池内容仍未解析；尾段 / 图像对象重建、`0x1a0` 复用仍未做。
+
+**门禁**：`pnpm test` **1067/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **360/360** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 六十一、第三十批：命令档开闸入口（URL）（2026-10-24）
+
+**范围**：给 S2 像素验证一个**手动开闸**入口：`?commandExecKinds=0,1,2`。
+
+**代码**：
+- `parseCommandExecKinds(raw)`：只收 0..3、去重、未知 / 非整数丢弃；空 ⇒ `[]`（产品零回退）。
+- `renderer.ts` 从 `window.location.search` 读 `commandExecKinds`，传给 `PixiRenderHost.create`。
+- 守卫 +1（空 / 合法 / 未知 / 负 / 小数 / 去重）；变异 +1（不过滤）。
+
+**未做**：真正的像素截图夹具；开闸后仍只保证结构 / 次序，不声称像素等价。
+
+**门禁**：`pnpm test` **1068/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **361/361** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 六十二、第三十批：renderer 重建 + Electron smoke（2026-10-24）
+
+**范围**：验证 S2 / 存档改动没有破坏 renderer 构建与 Electron 启动。
+
+**结果**：
+- `pnpm_priv run build-renderer`：退出 0，`dist/renderer/index.html` 更新（754 modules）。
+- `pnpm_priv run smoke`：退出 0，`backend=webgl 1280×721`、字体加载成功、`--smoke OK`，截图 `.tmp/emulator-new-electron-smoke.png`（1920×1080，21454 B）。
+- 截图内容：左上标题 `天結いキャッスルマイスター / Amayui CN`，其余黑底；与 demo 场景（1 纹理 / 1 绘制项 / 目标 −1）一致。
+
+**未做**：开闸 `?commandExecKinds=...` 的像素对照（要真实安装目录 + 人工观察）；效果技法 / 像素等价仍未验证。
+
+**门禁**：`pnpm test` **1068/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **361/361** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 六十三、第三十批：Electron 启动参数 `--command-exec-kinds`（2026-10-24）
+
+**范围**：把 S2 开闸从“浏览器 URL”接到 Electron 启动参数。
+
+**代码**：
+- `main.ts`：`Args.commandExecKinds`，解析 `--command-exec-kinds 0,1,2`（只留 0..3）；传给 `openWindowHost`。
+- `window-host.ts`：`ElectronWindowHostOptions.commandExecKinds` ⇒ game renderer URL 拼 `?commandExecKinds=0,1,2`。
+- renderer 已有 `parseCommandExecKinds` 读取该查询串。
+- 帮助文本加一行。
+
+**实证**：`build-renderer` 退出 0；`smoke` 退出 0（无参数时 URL 不拼查询串，行为与之前一致）。
+
+**未做**：用带参数的真实安装跑 LOGO / TITLE 的像素对照（需要人工看窗口）。
+
+**门禁**：`pnpm test` **1068/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **361/361** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。

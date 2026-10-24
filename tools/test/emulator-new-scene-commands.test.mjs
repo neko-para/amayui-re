@@ -1,4 +1,4 @@
-/** @env pure @kind contract @why 命令记录的各格映射错（矩形少加宽高 / 变体对调 / 时间戳不清 0）、种类 0 请求失败却跳过写表、种类 1 槽空却照写、命令档被假装执行 —— 都只会让绘制顺序与动画门静默偏掉 */
+/** @env pure @kind contract @why 命令记录的各格映射错（矩形少加宽高 / 变体对调 / 时间戳不清 0）、种类 0 请求失败却跳过写表、种类 1 槽空却照写、命令档在关闸时偷偷执行 —— 都只会让绘制顺序与动画门静默偏掉 */
 /**
  * tools/test/emulator-new-scene-commands.test.mjs —— **场景命令记录族（写侧）** + 命令档诊断 + 负键口径
  *
@@ -21,8 +21,9 @@
  *   - 种类 1 的「有动画」漏置（或给 0/2/3 也置）：等待门的行为跟着变；
  *   - handler 里顺手发绘制请求：命令被立即画一次（两档顺序无从谈起）；
  *   - 负键一律跳过：**只放一条负键绘制项**时它永远不出现（spec 的纠错点）。
- * ★ 命令档（有命令记录时的第一档）**只规划、不执行**：这里只守"它没有被假装执行"
- *   （两条诊断各报一次：`scene-command-pass-planned` + `scene-command-pass-render-unmodeled`）。
+ * ★ 命令档（有命令记录时的第一档）**可按种类开闸执行**（缺省关闸 ⇒ 零 op）：这里只守"诊断如实记账"
+ *   （`scene-command-pass-planned` + `scene-command-pass-render-unmodeled` 各报一次；执行统计是
+ *   `pixi-host` 的 `scene-command-pass-executed`，pure 档看不到）。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -563,7 +564,7 @@ test('★ 只有种类 1 置「有动画」；种类 0 / 2 / 3 不置', async ()
 
 /* ──────────────────────────── 命令档的诊断（S0/S1：只规划、不执行） ──────────────────────────── */
 
-test('★ 命令表非空 ⇒ 诊断出现一次：先「已规划」再「仍未执行 / 未画」', async () => {
+test('★ 命令表非空 ⇒ 诊断出现一次：先「已规划」再「仍缺 copy / composite（可按种类开闸）」', async () => {
   const m = machineFor([command250(10, 1)]);
   await m.run();
   const notes = new SceneOrderNotes();
@@ -573,7 +574,7 @@ test('★ 命令表非空 ⇒ 诊断出现一次：先「已规划」再「仍�
   assert.equal(first.length, 2, '两条诊断：planned + render-unmodeled');
   assert.ok(first[0].startsWith(SCENE_COMMAND_PASS_PLANNED), '第 1 条要报"命令数 / 阶段数 / 覆盖键数"');
   assert.match(first[0], /命令 1 条 \/ 阶段 2 段 \/ 覆盖键 \d+ 个/, '摘要必须带三个数');
-  assert.ok(first[1].startsWith(SCENE_COMMAND_PASS_RENDER_UNMODELED), '第 2 条显式记账"仍未真的画"');
+  assert.ok(first[1].startsWith(SCENE_COMMAND_PASS_RENDER_UNMODELED), '第 2 条显式记账"仍缺 copy / composite（⛔ 不说成像素对了）"');
   assert.deepEqual(notes.next(sceneOf(m)), [], '同一条诊断只报一次（不是每帧一条）');
 });
 
@@ -598,4 +599,90 @@ test('★ 负键绘制项与正键条目混排时不改平键序：负键最前�
     shape({ drawItems: [item(3), item(-1), item(3)], meshes: [mesh(3), mesh(-2)] }),
     ['item#-1', 'mesh#3', 'item#3', 'item#3'],
   );
+});
+
+test('★ 命令时间戳盖章：只盖 timestamp === 0 的记录，重写后再次为 0 才重新盖', () => {
+  const m = machineFor([]);
+  m.scene.now = 1234;
+  m.scene.commands.set(5, { kind: 0, timestamp: 0 });
+  m.scene.commands.set(7, { kind: 1, timestamp: 99 });
+  assert.equal(m.stampCommands(), 1);
+  assert.equal(m.scene.commands.get(5).timestamp, 1234);
+  assert.equal(m.scene.commands.get(7).timestamp, 99, '已有时间戳不许重盖');
+  assert.equal(m.stampCommands(), 0, '第二帧不再盖章');
+  m.scene.commands.set(5, { kind: 0, timestamp: 0 });
+  assert.equal(m.stampCommands(), 1, '重写同键 ⇒ 回到首帧');
+});
+
+test('★ 渲染步收尾：有动画 = 0 ⇒ 清整表；有动画 = 1 ⇒ 保留；强制完成总是清 0', () => {
+  const m = machineFor([]);
+  m.scene.commands.set(1, { kind: 0, timestamp: 1 });
+  m.scene.commands.set(2, { kind: 0, timestamp: 1 });
+  m.scene.animating = 1;
+  m.scene.forcedComplete = 1;
+  assert.equal(m.finishRenderStep(), false);
+  assert.equal(m.scene.commands.size, 2, '有动画时不许清表');
+  assert.equal(m.scene.forcedComplete, 0);
+  m.scene.animating = 0;
+  m.scene.forcedComplete = 1;
+  assert.equal(m.finishRenderStep(), true);
+  assert.equal(m.scene.commands.size, 0);
+  assert.equal(m.scene.forcedComplete, 0);
+});
+
+test('★ advanceCommands：种类 0 未开始/进行中置动画，到期清 duration；种类 3 未开始也算进行中', () => {
+  const m = machineFor([]);
+  m.scene.now = 1000;
+  m.scene.commands.set(1, { kind: 0, timestamp: 900, delay: 200, duration: 500, mode: 0 });
+  m.advanceCommands();
+  assert.equal(m.scene.animating, 1, '未开始（now <= ts+delay）也要置动画');
+  assert.equal(m.scene.commands.get(1).duration, 500, '未开始不清 duration');
+  m.scene.animating = 0;
+  m.scene.now = 1200;
+  m.advanceCommands();
+  assert.equal(m.scene.animating, 1, '进行中置动画');
+  m.scene.animating = 0;
+  m.scene.now = 1600;
+  m.advanceCommands();
+  assert.equal(m.scene.commands.get(1).duration, 0, '到期清 duration');
+  assert.equal(m.scene.animating, 0, '到期不再置动画');
+
+  const k3 = machineFor([]);
+  k3.scene.now = 1000;
+  k3.scene.commands.set(2, { kind: 3, timestamp: 900, delay: 200, duration: 500, mode: 0 });
+  k3.advanceCommands();
+  assert.equal(k3.scene.animating, 1, '种类 3 未开始也算进行中（进度可为负）');
+  assert.equal(k3.scene.commands.get(2).duration, 500);
+});
+
+test('★ advanceCommands：种类 2 且 mode < 0 置「强制完成」；其余种类不置', () => {
+  const m = machineFor([]);
+  m.scene.commands.set(1, { kind: 2, timestamp: 1, delay: 0, duration: 10, mode: -1 });
+  m.advanceCommands();
+  assert.equal(m.scene.forcedComplete, 1);
+  const ok = machineFor([]);
+  ok.scene.commands.set(1, { kind: 2, timestamp: 1, delay: 0, duration: 10, mode: 0 });
+  ok.advanceCommands();
+  assert.equal(ok.scene.forcedComplete, 0);
+});
+
+test('★ 种类 1 影片结束：对象槽空且 duration>0 ⇒ 遮罩补反值、置动画、清 duration（只一次）', () => {
+  const m = machineFor([]);
+  m.scene.commands.set(1, { kind: 1, timestamp: 1, delay: 0, duration: 10, textureId: 5, mask: 255, mode: 0 });
+  m.advanceCommands();
+  const rec = m.scene.commands.get(1);
+  assert.equal(rec.mask, 0, '255 → 0（补反值）');
+  assert.equal(rec.duration, 0, '到期清 duration');
+  assert.equal(m.scene.animating, 1, '影片结束这一帧仍置动画');
+  m.scene.animating = 0;
+  m.advanceCommands();
+  assert.equal(rec.mask, 0, '第二次不再翻');
+  assert.equal(m.scene.animating, 0);
+
+  const alive = machineFor([]);
+  alive.scene.commands.set(1, { kind: 1, timestamp: 1, delay: 0, duration: 10, textureId: 5, mask: 255, mode: 0 });
+  alive.scene.objectSlots.set(5, { kind: 'movie' });
+  alive.advanceCommands();
+  assert.equal(alive.scene.commands.get(1).mask, 255, '影片对象还在 ⇒ 不补反值');
+  assert.equal(alive.scene.commands.get(1).duration, 10);
 });

@@ -161,6 +161,9 @@ function commandSnapshotOf(commandKey: number, record: SceneCommandRecord): Scen
     mode: record.mode,
     split: record.split,
     ownerKey: record.ownerKey,
+    rect: { ...record.rect },
+    flag: record.flag,
+    mask: record.mask,
   };
 }
 
@@ -454,9 +457,9 @@ class LocalRenderHost implements RenderHost {
   private readonly surfaceIds = new WeakMap<object, SurfaceRef>();
   /**
    * 命令档的诊断记录器（**只报一次**）。
-   * ★ 命令表非空 ⇒ 引擎有"命令档 + 收尾扫描"两档；本实现**只规划命令档、不执行它** ⇒
+   * ★ 命令表非空 ⇒ 引擎有"命令档 + 收尾扫描"两档；本实现**规划命令档**，执行由 `pixi-host` 按 `commandExecKinds` 开闸（缺省关）⇒
    *   诊断分两条显式记账：`scene-command-pass-planned`（规划了什么）与
-   *   `scene-command-pass-render-unmodeled`（**仍未真的画**，⛔ 不假装）。
+   *   `scene-command-pass-render-unmodeled`（关闸时仍未真的画，⛔ 不假装）。
    *   规划器是纯函数（`scene-command-plan.ts`），执行 / 像素操作仍未建模。
    */
   private readonly orderNotes = new SceneOrderNotes();
@@ -497,6 +500,9 @@ class LocalRenderHost implements RenderHost {
     const now = Date.now();
     if (!force && now - this.lastScenePushAt < 16) return false;
     this.lastScenePushAt = now;
+    // ★ 命令档的时间戳盖章在**快照之前**（引擎在渲染步首次遍历时盖）；只盖 timestamp === 0 的记录。
+    machine.stampCommands();
+    machine.advanceCommands();
     const scene = this.snapshot(machine);
     this.pixi.applyScene(scene);
     for (const texture of scene.textures) {
@@ -720,7 +726,7 @@ class LocalRenderHost implements RenderHost {
       animating: machine.scene.animating,
       // ★ 核心**没有**「强制完成」这一格（写者：场景推进 / 种类 2 的类型 < 0，都未建模）
       //   ⇒ 显式投影 0，并在规划器里记缺口；⛔ 这个 0 不是引擎初值。
-      forcedComplete: 0,
+      forcedComplete: machine.scene.forcedComplete,
       // ★ 渲染器能力档未建模：`display:PixelShader` 是**版本号**（如 3），版本 → 档（0/1/2）的
       //   映射未取证 ⇒ `null`（规划器按 ≥2 跑 + `scene-command-tier-unmodeled`）。
       shaderTier: null,
@@ -997,7 +1003,9 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
         const session = windowSession;
         if (session === null) return;
         session.pump();
-        if (render.syncScene()) void render.present();
+        if (render.syncScene()) await render.present();
+        // ★ 渲染步收尾：本帧无动画 ⇒ 清命令表；随后清「强制完成」。必须在 present 之后。
+        if (machineRef !== null) machineRef.finishRenderStep();
         if (machineRef !== null && (machineRef.flags & WAIT_BIT) !== 0) {
           await new Promise<void>((resolve) => { setTimeout(resolve, 4); });
           lastYieldAt = Date.now();

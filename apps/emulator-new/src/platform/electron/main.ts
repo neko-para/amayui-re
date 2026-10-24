@@ -43,6 +43,7 @@ const USAGE = [
   '  --demo     非游戏的可视化自检（真实 core handlers 驱动 0x1f8 / 0x204 / 0x1fb / 0x33f / 0x20d）',
   '  --smoke    同 --demo，截图到 .tmp/emulator-new-electron-smoke.png 后退出（退出码 0 / 1）',
   '  --skip-logo  仅 --install：show-logo 初值置 0（跳过 LOGO，直接到 INIT / TITLE）',
+  '  --command-exec-kinds 0,1,2  手动开闸命令档（默认关；仅用于像素对照）',
   '',
   '  --no-sandbox 是 Chromium 的开关（DSH 沙箱里需要），不是本程序定义的。',
 ].join('\n');
@@ -55,6 +56,7 @@ interface Args {
   demo: boolean;
   smoke: boolean;
   skipLogo: boolean;
+  commandExecKinds: number[];
 }
 
 let activeHost: ElectronWindowHost | null = null;
@@ -87,7 +89,7 @@ function parseU32(text: string, what: string): number {
  *   它在 main 侧没有语义（Electron 本来就用宿主毫秒时钟）。
  */
 function parseArgs(argv: string[]): Args {
-  const out: Args = { install: null, key: null, rootId: 0, config: null, demo: false, smoke: false, skipLogo: false };
+  const out: Args = { install: null, key: null, rootId: 0, config: null, demo: false, smoke: false, skipLogo: false, commandExecKinds: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith('-')) continue;
@@ -102,6 +104,10 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--demo') out.demo = true;
     else if (arg === '--smoke') out.smoke = true;
     else if (arg === '--skip-logo') out.skipLogo = true;
+    else if (arg === '--command-exec-kinds') {
+      const raw = argv[++i] ?? '';
+      out.commandExecKinds = raw.split(',').map((part) => Number(part.trim())).filter((value) => Number.isInteger(value) && value >= 0 && value <= 3);
+    }
     else {
       const name = arg.replace(/^--?/, '').split('=')[0] ?? '';
       if (app.commandLine.hasSwitch(name)) continue;
@@ -151,8 +157,8 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
 
 /* ──────────────────────────── 启动装配 ──────────────────────────── */
 
-async function openWindowHost(): Promise<ElectronWindowHost> {
-  const host = new ElectronWindowHost({ appRoot: APP_ROOT, log });
+async function openWindowHost(commandExecKinds: number[]): Promise<ElectronWindowHost> {
+  const host = new ElectronWindowHost({ appRoot: APP_ROOT, log, commandExecKinds });
   activeHost = host;
   await host.open();
   const ready = await host.waitForReady();
@@ -164,7 +170,7 @@ async function runInstall(args: Args): Promise<void> {
   const installDir = args.install;
   if (installDir === null) { fail('内部错误：--install 没有值'); return; }
   try {
-    const host = await openWindowHost();
+    const host = await openWindowHost(args.commandExecKinds);
     const [table, configKeys] = await Promise.all([loadOpcodeTable(), loadConfigKeys()]);
     const job: InstallJob = {
       mode: 'install',
@@ -193,7 +199,7 @@ async function runInstall(args: Args): Promise<void> {
 
 async function runDemo(args: Args): Promise<void> {
   try {
-    const host = await openWindowHost();
+    const host = await openWindowHost(args.commandExecKinds);
     const configKeys = await loadConfigKeys();
     const job: DemoJob = {
       mode: 'demo',

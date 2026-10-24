@@ -20,6 +20,7 @@ import boldFontUrl from '../../../../../../corpus/assets/fonts/Amayui-CN_cnjp-Bo
 import { DISCLOSURES, GAME_FONT_FAMILY, PixiRenderHost } from './pixi-host.ts';
 import type { HostDiagnostics } from './pixi-host.ts';
 import { runStartJob } from './session.ts';
+import { parseCommandExecKinds } from './scene-order.ts';
 
 /* ─────────────────────────────── DOM ─────────────────────────────── */
 
@@ -404,8 +405,10 @@ async function main(): Promise<void> {
   }
 
   // ③ 建 Pixi。失败 ⇒ 不 ready（协议：失败时 renderer 不 ready）+ 全屏错误。
+  const commandExecKinds = parseCommandExecKinds(new URLSearchParams(window.location.search).get('commandExecKinds'));
   try {
     host = await PixiRenderHost.create(hostElement, {
+      commandExecKinds,
       log: (text) => {
         try {
           bridge.report({ kind: 'log', level: 'info', text });

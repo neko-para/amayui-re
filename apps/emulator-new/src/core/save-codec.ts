@@ -5,7 +5,7 @@
  * ★ 只实现“可写回”的第一段：未压缩信封（解压后 == 压缩后）。压缩 / 解压是下一步。
  */
 
-import { encodeInt } from './values.ts';
+import { decodeInt, encodeInt } from './values.ts';
 
 const u32 = (x: number): number => x >>> 0;
 
@@ -258,4 +258,173 @@ export function buildParams(cipher: Uint8Array, seed: number, key: number): Uint
   view.setUint32(12, seed >>> 0, true);
   view.setUint16(16, (key & 0xffff) >>> 0, true);
   return out;
+}
+
+
+/* ─────────────────────────────── 读侧：头 + 信封 ─────────────────────────────── */
+
+export type SaveFormatErrorCode =
+  | 'save-short'
+  | 'save-magic'
+  | 'save-title'
+  | 'save-params'
+  | 'save-cipher-length'
+  | 'save-crc1'
+  | 'save-crc2'
+  | 'save-transform'
+  | 'save-envelope-prefix';
+
+export class SaveFormatError extends Error {
+  readonly code: SaveFormatErrorCode;
+  constructor(code: SaveFormatErrorCode, detail = '') {
+    super(detail === '' ? code : code + ':' + detail);
+    this.name = 'SaveFormatError';
+    this.code = code;
+  }
+}
+
+export interface ParsedSaveEnvelope {
+  version1: number;
+  version2: number;
+  /** 头 +240 声明的**未变换**负载字节数（不参与边界判断，只回给调用方） */
+  declaredBodyBytes: number;
+  /** 未变换的负载本体（不含 12 字节信封前缀） */
+  body: Uint8Array;
+}
+
+const u16 = (x: number): number => x & 0xffff;
+const readU32At = (bytes: Uint8Array, off: number): number =>
+  (bytes[off]! | (bytes[off + 1]! << 8) | (bytes[off + 2]! << 16) | (bytes[off + 3]! << 24)) >>> 0;
+
+/**
+ * 读侧第一段：292 字节头 + 20 字节参数块 + 变换信封。
+ * ★ 顺序按 FMT-SAVE-ENVELOPE：头校验 → 参数块长度 → 两个校验和 → 逆变换 → 三个长度前缀。
+ * ★ 只返回 body，不解释六个池 / 帧记录（那是 RESTORE 的下一步）。
+ */
+export function parseSaveEnvelope(bytes: Uint8Array): ParsedSaveEnvelope {
+  if (bytes.length < 312) throw new SaveFormatError('save-short');
+  const magic = String.fromCharCode(bytes[0]!, bytes[1]!, bytes[2]!, bytes[3]!);
+  if (magic !== 'S4SD' && magic !== 'S3SD') throw new SaveFormatError('save-magic');
+  const title = String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!, bytes[12]!, bytes[13]!);
+  if (title !== 'AMAYUI') throw new SaveFormatError('save-title');
+  const version1 = readU32At(bytes, 284);
+  const version2 = readU32At(bytes, 288);
+  const declaredBodyBytes = readU32At(bytes, 240);
+  const words = readU32At(bytes, 292);
+  const crc1 = readU32At(bytes, 296);
+  const crc2 = readU32At(bytes, 300);
+  const seed = readU32At(bytes, 304);
+  const key = u16(bytes[308]! | (bytes[309]! << 8));
+  if (words === 0 || words % 2 !== 0) throw new SaveFormatError('save-params');
+  const cipherBytes = words * 4;
+  if (bytes.length < 312 + cipherBytes) throw new SaveFormatError('save-cipher-length');
+  const cipher = bytes.subarray(312, 312 + cipherBytes);
+  if (crc32NonReflected(cipher) !== crc1) throw new SaveFormatError('save-crc1');
+  if (crc32Reflected(cipher) !== crc2) throw new SaveFormatError('save-crc2');
+  let plain: Uint32Array;
+  try {
+    plain = untransformWords(new Uint32Array(cipher.buffer, cipher.byteOffset, cipher.byteLength / 4), seed, key);
+  } catch (error) {
+    throw new SaveFormatError('save-transform', error instanceof Error ? error.message : String(error));
+  }
+  if (plain.length < 3) throw new SaveFormatError('save-envelope-prefix');
+  const total = plain[0]!;
+  if (plain[1] !== total || plain[2] !== total) throw new SaveFormatError('save-envelope-prefix');
+  const plainBytes = new Uint8Array(plain.buffer);
+  if (total !== plainBytes.length || total < 12) throw new SaveFormatError('save-envelope-prefix');
+  return { version1, version2, declaredBodyBytes, body: plainBytes.subarray(12) };
+}
+
+
+/* ─────────────────────────────── 读侧：负载主体 ─────────────────────────────── */
+
+export interface ParsedSaveBody {
+  frame: number;
+  records: SaveFrameRecord[];
+  ints: number[];
+  floats: number[];
+  strings: string[];
+  textureRecords: SaveTextureRecord[];
+}
+
+const readU32 = (bytes: Uint8Array, off: number): number =>
+  (bytes[off]! | (bytes[off + 1]! << 8) | (bytes[off + 2]! << 16) | (bytes[off + 3]! << 24)) >>> 0;
+
+/**
+ * 读侧第二段：负载主体的**结构**（六池计数 + 帧记录 + 纹理记录表）。
+ * ★ 只解析，不应用（帧 / 池的还原仍属 RESTORE）；引用三池（c3/c4/c5）只按计数跳过。
+ * ★ 版本 1 = 3 才有 20000 B 纹理记录表；其它版本整块不存在。
+ */
+export function parseSaveBody(body: Uint8Array, version1: number, intKey: number): ParsedSaveBody {
+  if (body.length < 4) throw new SaveFormatError('save-short', 'body');
+  const frame = readU32(body, 0) | 0;
+  if (frame < 0 || frame > 39) throw new SaveFormatError('save-params', 'frame=' + frame);
+  const textureBytes = version1 === 3 ? 20000 : 0;
+  const textureBase = 1252;
+  const recBase = textureBase + textureBytes;
+  const recCount = frame + 1;
+  const countBase = recBase + 1044 * recCount;
+  const blocksBase = countBase + 24;
+  if (body.length < blocksBase) throw new SaveFormatError('save-short', 'records');
+
+  const textureRecords: SaveTextureRecord[] = [];
+  if (version1 === 3) {
+    for (let i = 0; i < 1000; i += 1) {
+      const off = textureBase + 20 * i;
+      textureRecords.push({
+        file: readU32(body, off) | 0,
+        color: readU32(body, off + 4) | 0,
+        flag0: readU32(body, off + 8) | 0,
+        flag1: readU32(body, off + 12) | 0,
+        blank: readU32(body, off + 16) | 0,
+      });
+    }
+  }
+
+  const records: SaveFrameRecord[] = [];
+  for (let f = 0; f < recCount; f += 1) {
+    const off = recBase + 1044 * f;
+    const n = Math.min(readU32(body, off + 8) | 0, 256);
+    if (n < 0) throw new SaveFormatError('save-params', 'ret=' + n);
+    const ret: number[] = [];
+    for (let i = 0; i < n; i += 1) ret.push(readU32(body, off + 12 + 4 * i) | 0);
+    records.push({
+      parent: readU32(body, off) | 0,
+      scriptIndex: readU32(body, off + 4) | 0,
+      ret,
+      tableA: readU32(body, off + 1036) | 0,
+      tableB: readU32(body, off + 1040) | 0,
+    });
+  }
+
+  const c0 = readU32(body, countBase) | 0;
+  const c1 = readU32(body, countBase + 4) | 0;
+  const c2 = readU32(body, countBase + 8) | 0;
+  const c3 = readU32(body, countBase + 12) | 0;
+  const c4 = readU32(body, countBase + 16) | 0;
+  const c5 = readU32(body, countBase + 20) | 0;
+  if (c0 < 0 || c1 < 0 || c2 < 0 || c3 < 0 || c4 < 0 || c5 < 0) throw new SaveFormatError('save-params', 'counts');
+  let p = blocksBase;
+  if (body.length < p + 4 * c0 + 4 * c1 + 4 + 4 * c3 + 4 * c4 + 4 * c5) throw new SaveFormatError('save-short', 'blocks');
+  const ints: number[] = [];
+  for (let i = 0; i < c0; i += 1) { ints.push(decodeInt(readU32(body, p), intKey)); p += 4; }
+  const floats: number[] = [];
+  for (let i = 0; i < c1; i += 1) { floats.push(readU32(body, p)); p += 4; }
+  const capWords = readU32(body, p) | 0; p += 4;
+  if (capWords < 0 || body.length < p + 4 * capWords) throw new SaveFormatError('save-short', 'strings');
+  const arena = body.subarray(p, p + 4 * capWords);
+  p += 4 * capWords;
+  const strings: string[] = [];
+  let start = 0;
+  for (let i = 0; i < arena.length && strings.length < c2; i += 1) {
+    if (arena[i] !== 0) continue;
+    let s = '';
+    for (let j = start; j < i; j += 1) s += String.fromCharCode(arena[j]!);
+    strings.push(s);
+    start = i + 1;
+  }
+  // 引用三池只按计数跳过（本实现不解释内容）
+  p += 4 * (c3 + c4 + c5);
+  if (p > body.length) throw new SaveFormatError('save-short', 'tail');
+  return { frame, records, ints, floats, strings, textureRecords };
 }

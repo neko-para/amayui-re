@@ -9,18 +9,22 @@
  *   的哨兵 ⇒ **网格 / 辅助表 B / 辅助表 A** 的负键条目按哨兵处理（不参与）；**绘制项是最后一个候选，
  *   它的键不做符号检查** ⇒ 负键绘制项**仍会被发出**（按 key 升序，因此排在最前）。
  *   ⛔ 不许把「负键不参与」写成不区分表的通则。
- * ★ **命令档（有命令记录时的第一档）已进入"只规划、不执行"**：`scene-command-plan.ts` 是纯规划器，
- *   本文件把场景快照投影成它的输入并输出两条诊断（`scene-command-pass-planned` /
- *   `scene-command-pass-render-unmodeled`）；⛔ 阶段一个都没发，"画"仍只由收尾扫描做。
+ * ★ **命令档（有命令记录时的第一档）现在是"规划 + 可按种类开闸执行"**：`scene-command-plan.ts`
+ *   是纯规划器，`scene-command-exec.ts` 产出 op 序列并由 `pixi-host.present()` 在**收尾扫描之前**
+ *   派发（⛔ 缺省关闸 ⇒ 零 op ⇒ 产品画面与"只规划"逐字节一致）。本文件负责三件事：
+ *   投影（`commandPlanInput` / `commandExecCommandsOf`）、种类闸门（`gateCommandPlanByKinds`）、
+ *   诊断（`scene-command-pass-planned` / `scene-command-pass-executed` / `…-render-unmodeled`）。
+ *   ⛔ 仍然不许把"规划出来了"说成"已经画对了"：copy / composite 只有结构，像素与进度未建模。
  *
  * ★ 观察到：TITLE 用 key **0** 的全屏黑色网格当背景、key 10/100/… 的绘制项当前景、
  *   key **200000** 的透明网格当覆盖层；LOGO 用 key 200002/200003 的网格与 key 200000 的影片项。
  *   按 key 升序既让 TITLE 的黑色背景落到最下面，也保持 LOGO 的影片覆盖层在最后。
  * ★ 相同 key 时**网格先于绘制项**（网格先发出，绘制项压在上面）；同类内部保持表内顺序。
  */
-import type { DrawItemSnapshot, MeshSnapshot, SceneSnapshot } from '../protocol.ts';
+import type { DrawItemSnapshot, MeshSnapshot, SceneCommandSnapshot, SceneSnapshot } from '../protocol.ts';
 import { planSceneCommandPass } from './scene-command-plan.ts';
-import type { CommandPlanInput, SceneCommandPlan } from './scene-command-plan.ts';
+import type { CommandPlanInput, PlannedCommand, SceneCommandPlan } from './scene-command-plan.ts';
+import type { CommandExecCommand } from './scene-command-exec.ts';
 import type { WipeRect } from './wipe-pattern.ts';
 
 export type SceneDrawable =
@@ -86,8 +90,15 @@ export function snapshotReferencesTexture(scene: SceneSnapshot, textureId: numbe
  */
 export const SCENE_COMMAND_PASS_PLANNED = 'scene-command-pass-planned';
 
-/** 诊断 kind：命令档**仍未执行 / 未画**（⛔ 不假装；平台侧像素操作仍是残差） */
+/** 诊断 kind：命令档**仍未建模的部分**（copy / composite 只有结构；像素 / 进度 / 遮罩仍是残差） */
 export const SCENE_COMMAND_PASS_RENDER_UNMODELED = 'scene-command-pass-render-unmodeled';
+
+/**
+ * 诊断 kind：命令档**已执行**（本帧真的按 op 序列派发过；`commandExecKinds` 开闸时才可能出现）。
+ * ★ 与 `SCENE_COMMAND_PASS_PLANNED` 的分工：那条说"算了什么"，这条说"真的发了几笔"。
+ * ★ 缺省关闸 ⇒ 这条**不会出现**（零 op ⇒ 没有可报的执行）。
+ */
+export const SCENE_COMMAND_PASS_EXECUTED = 'scene-command-pass-executed';
 
 /**
  * 把场景快照投影成规划器的输入（**唯一**一份投影；⛔ 别在调用方各自拼）。
@@ -138,12 +149,72 @@ export function planCommandPassForScene(scene: SceneSnapshot): SceneCommandPlan 
   return planSceneCommandPass(commandPlanInput(scene));
 }
 
+/* ──────────────────────────── 命令档的执行侧投影 / 种类闸门（S2a-2） ──────────────────────────── */
+
+/**
+ * 命令快照 → 执行计划器的 `kind` / `range` 输入（**唯一**一份投影；⛔ 别在调用方各自拼）。
+ *
+ * ★ 规划器只保留派生出来的阶段（不保留 `kind` / `range`）⇒ 执行器要求再给一份，按 `commandKey` 对齐。
+ * ★ 只投影这三样：执行器**不猜**别的格（进度 / 持续时间属 S2b 的 `advanceCommands`）。
+ * ★ ⛔ 不许在这里补默认值：`kind` 不认识的命令由执行器记 `scene-command-exec-kind-unknown`。
+ */
+export function commandExecCommandsOf(scene: SceneSnapshot): CommandExecCommand[] {
+  return scene.commands.map((command) => ({
+    commandKey: command.commandKey,
+    kind: command.kind,
+    rangeA: { start: command.rangeA.start, count: command.rangeA.count },
+    rangeB: { start: command.rangeB.start, count: command.rangeB.count },
+    progress: commandProgress(command, scene.clock, scene.forcedComplete === 1),
+    rect: command.rect,
+    flag: command.flag,
+    mask: command.mask,
+  }));
+}
+
+/**
+ * 种类 0 / 3 的进度。
+ * ★ 两者的边界口径**不同**：
+ *   - 种类 0：未开始（now <= ts+delay）⇒ 0；到期 / duration<=0 ⇒ 1；否则线性。
+ *   - 种类 3：**不夹取**——已过为负时按同一公式外推（会得到起值之外的值）；只有到期 ⇒ 1。
+ */
+function commandProgress(command: SceneCommandSnapshot, now: number, forcedComplete: boolean): number {
+  if (forcedComplete) return 1;
+  const start = command.timestamp + command.delay;
+  if (command.kind === 3) {
+    if (command.timestamp === 0) return 0;
+    if (command.duration <= 0 || now >= start + command.duration) return 1;
+    return (now - start) / command.duration;
+  }
+  if (command.timestamp === 0 || now <= start) return 0;
+  if (command.duration <= 0 || now >= start + command.duration) return 1;
+  return (now - start) / command.duration;
+}
+
+/**
+ * **按种类开闸**（`PixiRenderHostOptions.commandExecKinds` 的实现）：不在列表里的命令**不产 op**。
+ *
+ * ★ 闸门必须在**执行计划之前**：先过滤 `plan.commands`，再让执行器产 op —— 这样"未启用的种类"
+ *   连 op / 诊断都不会出现（⛔ 不是"产了不执行"，那会让画布与收尾扫描各画一次 ⇒ 静默丢画 / 重影）。
+ * ★ 空列表 ⇒ `commands` 清空（产品零回退）；`consumedKeys` / `stamps` 原样保留 —— 本层不动它们
+ *   （consumed 跳过与 core 盖章是 S2a-3 的写回）。
+ * ★ 纯函数：`plan` 只读，返回新对象。
+ */
+export function gateCommandPlanByKinds(
+  plan: SceneCommandPlan,
+  kinds: readonly number[],
+): SceneCommandPlan {
+  if (kinds.length === 0) return { ...plan, commands: [] };
+  const enabled = new Set(kinds);
+  return { ...plan, commands: plan.commands.filter((command) => enabled.has(command.kind)) };
+}
+
 /**
  * 命令档的诊断记录器（**每种只报一次**）。
  *
- * ★ 它**调用规划器**（纯函数）来算诊断内容，但 ⛔ **不执行命令档**：规划出来的阶段一个都没发；
- *   本实现仍在收尾扫描里按 `orderedDrawables` 画 —— 这就是 `scene-command-pass-render-unmodeled`
- *   显式记账的那条差异（⛔ 不许把"有阶段列表"说成"已经画过了"）。
+ * ★ 它**调用规划器**（纯函数）来算诊断内容，⛔ 不执行命令档：执行点在 `pixi-host.present()`
+ *   （那里才知道 `commandExecKinds` 开没开闸），执行统计由 `pixi-host` 报
+ *   `scene-command-pass-executed`。这里只报"规划了什么 + 哪些部分仍未建模"。
+ * ★ 收尾扫描（`orderedDrawables`）仍是**唯一**的"画"来源（S2a-2 不接 consumed 跳过）。
  */
 export class SceneOrderNotes {
   private readonly reported = new Set<string>();
@@ -166,10 +237,26 @@ export class SceneOrderNotes {
     if (!this.reported.has(SCENE_COMMAND_PASS_RENDER_UNMODELED)) {
       this.reported.add(SCENE_COMMAND_PASS_RENDER_UNMODELED);
       out.push(
-        `${SCENE_COMMAND_PASS_RENDER_UNMODELED}：命令档只做了规划（未执行、未发任何阶段请求）`
-          + ' ⇒ 本帧仍按收尾扫描画（⛔ 不假装画过命令档）',
+        `${SCENE_COMMAND_PASS_RENDER_UNMODELED}：命令档**可按种类开闸执行**（缺省关闸 ⇒ 本帧零 op）`
+          + '；copy / composite 只有结构（进度恒 1 / 不透明），遮罩 · 抹除笔 · 效果技法仍未建模',
       );
     }
     return out;
   }
+}
+
+/**
+ * 手动开闸用：URL 查询串 `?commandExecKinds=0,1,2` → 种类列表。
+ * ★ 只接受 0..3 的十进制整数；未知项丢弃（⛔ 不猜、不把整串当数字）；
+ *   空 / 缺省 ⇒ []（产品零回退）。
+ */
+export function parseCommandExecKinds(raw: string | null): number[] {
+  if (raw === null || raw.trim() === '') return [];
+  const out: number[] = [];
+  for (const part of raw.split(',')) {
+    const value = Number(part.trim());
+    if (!Number.isInteger(value) || value < 0 || value > 3) continue;
+    if (!out.includes(value)) out.push(value);
+  }
+  return out;
 }

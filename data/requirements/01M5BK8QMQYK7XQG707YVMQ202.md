@@ -9,40 +9,41 @@
 
 ## 一句话
 
-2026-10-24 交接（第二十四次）：`apps/emulator-new` 已从 SYSTEM4 启动链走到 TITLE（id `0x5264`）并进入输入环；CLI 与 Electron 都支持 `--skip-logo`。**工作树有未提交改动**（长期纪律：不 `git add` / `commit`）。
+2026-10-24 交接（第二十五次）：`apps/emulator-new` 已从 SYSTEM4 启动链走到 TITLE（`0x5264`）并进入输入环；`--skip-logo` 可用。**工作树有未提交改动**（长期纪律：不 `git add` / `commit`）。
 
-## 最近修的两个显示 bug（等实机复测）
+## 最近完成
 
-- **影片 logo 黑噪点**：`uploadTexture` 把 `color: -1`（无键哨兵）当成 `0xFFFFFFFF` 白键 ⇒ 影片白底 / logo 边缘被清成透明。修：`hasColorKey(color) = color > 0`。
-- **启动 ~1s 白闪**：① 窗口先 show、画布后才有第一笔（`create` 先清一帧）；② 释放纹理时用旧快照中途 present（`releaseTexture` 不再 present，改在下一帧边界推新快照；`present` 加 `trigger`）。另加空白槽不画 / 影片覆盖层诊断。
-- **`plugins/pnpm-priv`** 新增宿主侧转发 `op=run`：`build-renderer` / `smoke` / `electron`（argv/cwd 写死、`write:true`、`installDir` 校验、`allowRun` 总闸）。宿主插件不热重载 ⇒ 重装 + 重启 DSH。
+### 显示 bug（等实机复测）
+- **影片 logo 黑噪点**：`uploadTexture` 把 `color: -1` 当 `0xFFFFFFFF` 白键 ⇒ 白底/边缘透明。修：`hasColorKey(color)=color>0`。
+- **启动 ~1s 白闪**：① `create` 先清一帧；② `releaseTexture` 不再中途 present，改下一帧边界推新快照；`present` 加 `trigger` 诊断；空白槽不画。
+- **`plugins/pnpm-priv`** 新增宿主侧 `op=run`：`build-renderer` / `smoke` / `electron`（argv/cwd 写死、`write:true`、`installDir` 校验、`allowRun` 总闸）。宿主插件不热重载 ⇒ 重装 + 重启 DSH。
 
-## 残差批次（第三批到第十七批，均已收口）
+### 残差 / spec
+- 第三批到第二十六批已收口，审计见 `docs/02-engine/spec-audit-2026-10.md` §20–§44。
+- 第二十六批：关闭四条“代码确定、只缺观测”残差（帧栈 / 异常重试 / 窗口清理 / 退出码）与 `RES-SAVE-STH-CAPTURE`；修正 `0x3` / `0x6` 装载失败与重试合同（打开失败 = 类别 7、当前帧停在目标槽；头坏 = 退出）；STH 生效实现 = 屏幕捕捉、恒 24 位。
+- “真机/采样”29 条已分诊：真 UB 标 `discarded`（建议显式报错），子头变体关闭，像素叠放合并，样本/代码确定项改写为条件合同，输入平台项延后。
+- `unknown` 残差 **426**；`discarded` 11。
 
-明细见 `docs/02-engine/spec-audit-2026-10.md` §20–§42。第十七批：负模数（向零截断余数、负模数 ≡ 绝对值）、按住游标（按帧槽号、释放/重载不复位、第一次 `0x104` 必定义 0）、网格混合档（网格**会**设混合；档 0 = alpha 对）。实现：`Machine.holdCursorBySlot` + 溢出分支 + 守卫 4 条；`RES-SCENE-BLEND-TIER-VALUES` 新开。
-
-第十八批：平键序独立复核 —— 四表身份与顺序原文错位；正确序 **辅助表 A → 辅助表 B → 网格 → 绘制项**；`mergeTableKeys` 修正 + typed 守卫。
-
-第十九批：辅助表 A = **Live2D 模型条目表**（按用户要求排除、不展开）；辅助表 B = 3D 网格模型条目表；`0x344` 写 A 而不是绘制项表。
-
-第二十批：辅助表 B 的七矩阵槽收口 —— 合成后只乘世界阶段，三对基/目标槽 + 时间窗，窗内插值/到期折叠；`+0x1FC` 是累积旋转矩阵。
-
-第二十一批：「区间之下」= 给低档不透明离屏画布垫底；纹理 `[20,30)` = 文本层画布带（层号 0..9 自建 20+i）。两条残差关闭，各劈一条后续。
-
-第二十二批：关闭三条零读者/已定残差（表语义、空白标记、0x30a 小表）；纠正 v1=3 的 20,000 B = **纹理记录表**，读侧依赖、不能写 0。
-
-第二十三批：纹理记录表字段逐格定死（5×u32：文件号 / 颜色键 / 重建门 / 零读者标志 / 空白标记）；纠正主体 `+12`/`+52` 副块“可写 0、读侧不得依赖”。
-
-第二十四批：纹理记录表**写侧**落地（`textureRecords` + 1000×20 B，v1=2 不写）；`0x19e` 真路径携带纹理记录 + `flagTableA/B`；4 条 pure 守卫 + 2 条变异。
-
-第二十五批：「真机/采样」29 条分诊 —— 真 UB 9 条标 `discarded`（建议显式报错）、子头变体关闭、像素叠放合并、样本/代码确定项改写为条件合同、输入平台项延后。`unknown` 441→430。
+### S2（命令档真实绘制）
+- **S2a-1 完成**：`scene-command-plan` 阶段带表身份 `entries {key,table}`；新增 `scene-command-exec.ts` 纯执行层（默认 `enabled=false` 零 op）；9 条 pure 守卫 + 3 条变异。
+- **S2a-2 完成**：`pixi-host` 独立画布 36/37、`emitEntries`、`present(frame)` 先执行 op 再收尾扫描；`commandExecKinds` 缺省空 ⇒ 产品零回退；6 条 pure 守卫 + 3 条变异。
+- **S2a-3 完成**：`Machine.stampCommands()` 与 `finishRenderStep()`，session 在快照前盖章、present 后收尾；守卫 +2、变异 +2。
+- **S2b-2 完成**：`advanceCommands`（种类 0/3 的 animating/duration、种类 2 mode<0 的 forcedComplete）+ 进度读 forcedComplete；守卫 +2、变异 +2。
+- **S2c 完成（结构）**：种类 2 strokes 接到执行层与 Pixi；种类 1 遮罩（rect/flag/mask 投影 + 均匀 alpha；影片结束补反值已接，判据=对象槽空）。
+- **S2d 记账**：种类 0/3 走退路时记 `scene-command-effect-unmodeled`；效果技法本身未实现。
+- **STH 边界完成**：`core/bmp.ts` 组装 / 解析 BMP，平台只给 `SurfacePixels`；`0x1ae` 先截断建空文件，`0x1af` 先拒 0/1/2；真样本 decode→encode 逐字节可逆。
+- **0x3/0x6 状态**：打开失败当前帧停在目标槽 / 子槽、抛类别 7；深度类别 1；运行器不自动重试。
+- **S2 开闸入口**：`?commandExecKinds=0,1,2` 经 `parseCommandExecKinds` 传给 `PixiRenderHost`；默认零回退。
+- **构建 / smoke**：`pnpm_priv run build-renderer` + `smoke` 均退出 0；截图 `.tmp/emulator-new-electron-smoke.png` 与 demo 场景一致。
+- **Electron 开闸参数**：`--command-exec-kinds 0,1,2` ⇒ window-host 拼 renderer URL 查询串；无参数行为不变。
+- **存档读侧信封 + 负载结构 + 应用**：`0x1a1` 解析、三池清零 / 按当前 key 重编码、按帧记录重建帧槽（loadScript + tableB/tableA 位置）；解析失败不写 op1。核心 advanceCommands / forcedComplete 已接；效果技法未做。
 
 ## 当前门禁
 
 ```bash
-pnpm test                 # 1024 pass / 0 fail
-pnpm test:assets          # 203 pass / 0 fail / 1 skip
-pnpm test:mutation        # 338/338 按预期变红
+pnpm test                 # 1068 pass / 0 fail
+pnpm test:assets          # 204 pass / 0 fail / 1 skip
+pnpm test:mutation        # 361/361 按预期变红
 pnpm tools spec validate  # 13/13 全绿，未登记 0
 pnpm tools requirements validate # 6/6 全绿
 pnpm typecheck            # 六工程全绿
@@ -50,17 +51,19 @@ pnpm typecheck            # 六工程全绿
 
 ## 待处理（按优先）
 
-1. **真实绘制 S2+**：离屏画布 36/37 的建 / 切、表面拷贝、逐像素遮罩、`strokes` 送 pixi、效果技法、进度插值、`clearTable` 真实清表。
-2. **保存读侧**：`0x1a1` 的负载还原 / 整池重编码；`rec[259]/[260]` 已能写。
-3. **`createDevice` 忽略 `backBufferWidth/Height`**；`shaderTier` 映射未取证。
-4. **尾扫链优先级 / 平键序命名**：batch17 发现 `448>438>428(网格)>408(绘制项)` 与正文“网格→辅助B→辅助A→绘制项”的名字可能不符，属 `CORE-SCENE-DRAW-ORDER`，需独立复核。
-5. 剩余静态项：`RES-SAVE-TRAILER-FIELDS` · `RES-SAVE-STH-SHORTREAD` · `RES-SAVE-SLOT-SPACE` · `RES-SCENE-BLEND-TIER-VALUES` · `RES-SCENE-COMMAND-KIND0-ALPHA` / `-WIPE-BOUNDARY` / `-EFFECT-EQUIVALENCE` · `RES-SCENE-DISPLAY-FIT-SCALE-DIRECTION` · `RES-BOOT-GFX-LOGSINK-PATH-DATA` / `-SINK2` · `RES-TEX-...-OOB` / `-SELFTARGET` / `-BELOW-RANGE`。真源 `pnpm tools spec report`（unknown≈443）。
-6. 需要真机 / 真样本：负键绘制项、同键叠放、键总数启动值、32bpp AGF、遮罩极性、自引用/越界、种类 0 合成 alpha、缩放方向、STH 短读。
-7. audio / text-system / Live2D 仍按用户要求排除。
+1. **保存读侧**：`0x1a1` 还原 / 整池重编码；`RES-SAVE-PREAMBLE-BLOCKS` / `RESTORE-PREFREE`。
+2. **S2c**：种类 1 遮罩 + 种类 2 strokes；S2d 效果技法。
+3. **S2c**：种类 1 遮罩 + 种类 2 strokes 落笔；S2d：效果技法（暂无接口）+ 真实 `clearTable`。
+4. **核心写回**：盖章 / 位 16 / 强制完成 / 有动画 / 清表（现全无写者）。
+5. **保存读侧**：`0x1a1` 还原 / 整池重编码；v1=3 纹理记录表读侧；STH 边界（core 组装 BMP）。
+6. **0x3/0x6 装载失败语义落地**（spec 已改，emulator 未改）：新单 `0x3/0x6 装载失败与重试语义落地`。
+7. **STH 边界改造**：新单 `缩略图 STH：BMP 容器搬回 core（实现边界）`。
+8. 其它剩余：`RES-SAVE-PREAMBLE-BLOCKS` / `RESTORE-PREFREE`、辅助表 B 领域字段、真实绘制像素采样。
+9. audio / text-system / Live2D 仍按用户要求排除。
 
 ## 新会话从这读
 
-- 技能：`amayui-spec`（§9.1 编辑后独立复审）/ `amayui-emulator` / `amayui-re-engine`。
-- 进度：`pnpm tools requirements plan`；审计：`pnpm tools spec report`；本批：`docs/02-engine/spec-audit-2026-10.md` §34。
+- 技能：`amayui-spec` / `amayui-emulator` / `amayui-re-engine`。
+- 进度：`pnpm tools requirements plan`；审计：`pnpm tools spec report`；本批：`docs/02-engine/spec-audit-2026-10.md` §44。
+- S2 设计：`.tmp/spec-draft/batch26/s2/{slice-plan.md,impl-notes.md}`。
 - 机制地图以 `data/spec/core/README.md` 为准：`CORE-ISA` / `CORE-POOL` / `CORE-CONFIG` / `CORE-FRAME` / `CORE-OPS` 等。
-- 本单只记交接；具体状态以子单与 `pnpm tools requirements plan` 为准。

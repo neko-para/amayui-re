@@ -54,11 +54,11 @@
   ★ **负键口径按表分**：网格（以及快照里没有的辅助表 A / B）的负键不参与（收尾扫描用 0 作哨兵），
   **绘制项不做符号检查** —— 负键绘制项仍会被发出，按 key 升序排在最前。⛔ 不要写成"负键一律不参与"。
   ★ **场景命令记录族的写侧已建模**（`0x223` / `0x24d` / `0x24f` / `0x250` / `0x251` 写 `scene.commands`，
-  同键替换、置脏、只有种类 1 置「有动画」）；**命令档已进入「只规划、不执行」**：
+  同键替换、置脏、只有种类 1 置「有动画」）；**命令档已进入“可开闸执行”**：
   `renderer/scene-command-plan.ts` 是纯规划器（命令键升序 / 时间戳盖章 / 三表合并序 / 按种类的阶段列表 /
   区间之下 / `clearTable`），`snapshot()` 把命令记录投影进 `SceneSnapshot.commands`；诊断是
-  `scene-command-pass-planned`（命令数 / 阶段数 / 覆盖键数）与 `scene-command-pass-render-unmodeled`
-  —— **阶段一个都没发、画面仍来自收尾扫描**，⛔ 不假装执行了命令档，⛔ 也不把「收尾扫描」当成等价物。
+  `scene-command-pass-planned`（命令数 / 阶段数 / 覆盖键数）与 `scene-command-pass-executed` / `-render-unmodeled`
+  —— `scene-command-exec.ts` 产出 target/clear/emit/copy/composite op，`PixiRenderHostOptions.commandExecKinds` 缺省空 ⇒ **产品仍只走收尾扫描**；开闸后才在 present 里执行命令档，⛔ 不把「收尾扫描」当成等价物。
   颜色窗的渲染色落点已按 `70-vm` 改成“插值写渲染色 / 顶点缓冲，不写回当前颜色”。
   ★ **core 整份跑在 renderer**：`renderer/session.ts` 直接调用 `analyzeInstall` / `bootWindow` / `Machine`；
   main 只保留 BrowserWindow、文件系统 / 规范表读取、IPC 与进程生命周期。桥接协议见 `platform/electron/protocol.ts`。

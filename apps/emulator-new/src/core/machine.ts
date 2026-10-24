@@ -12,7 +12,7 @@
 import { readU32LE } from './bytes.ts';
 import type { OpcodeRow } from './spec.ts';
 import type { ConfigStore } from './config.ts';
-import { generateIntKey } from './values.ts';
+import { encodeInt, generateIntKey } from './values.ts';
 import { HANDLERS } from './handlers.ts';
 import { initialRenderState } from './render.ts';
 import type { RenderHost, RenderState, TextureKind } from './render.ts';
@@ -259,6 +259,8 @@ export interface SceneCommandRecord {
    *   ⛔ 别因为"字段名不同"就以为是两条独立的格。
    */
   flag: number;
+  /** 种类 1：**当前遮罩系数**（0 / 255；写表时按 flag 填，影片结束补反值） */
+  mask: number;
   /**
    * 种类 2：**类型 / 模式**格（操作数 7；与种类 1 的 `flag` 同格）。
    * ★ 合法域 = **闭区间 [0, 11]（含负数拒绝）**：`< 0` 与 `> 11` 走**同一个**错误支（「タイプが不正です」，
@@ -382,6 +384,20 @@ export interface MovieObject {
   stopTime: number;
 }
 
+/**
+ * 装载帧 / 换脚本的异常类别（CORE-BOOT-LOOP-EXC 的显示消息型 / 退出型）：
+ * category 7 = 显示消息型（可重试 / 忽略）；category 1 = 退出型（只能终止）。
+ * 只有“打开失败”这一档可重试；头坏 / 返回 0 仍是退出型。
+ */
+export class FrameLoadError extends Error {
+  readonly category: number;
+  constructor(category: number, message: string) {
+    super(message);
+    this.name = 'FrameLoadError';
+    this.category = category;
+  }
+}
+
 /** 诊断：实现必须记账的"不可解释之处"（⛔ 不许静默补值） */
 export interface Diagnostic {
   kind: string;
@@ -400,6 +416,11 @@ export interface SceneState {
   /** "场景还有动画在跑"（等待门看它；见 CORE-TIMING-WINDOW） */
   animating: number;
   /**
+   * **强制完成**档：种类 2 的 mode < 0 等路径置 1；渲染步收尾清 0。
+   * ★ 命令档的进度判据读它（到期 / 强制完成 ⇒ 进度 1）；它不是脚本可写格。
+   */
+  forcedComplete: number;
+  /**
    * 两张辅助键表（与对象记录表 / 网格表同键空间）：规范只要求"按键删除"，内容语义不在本版。
    * ★ 引擎同键空间还有第五张表（命令表，按**命令键**索引）：它**不参与** `0x1f7` / `0x1f6` / `0x23b`
    *   的删除或清空 ⇒ 不在这组里；它的写侧见 `commands`（`CORE-OPS-SCENE-COMMAND-RECORDS`）。
@@ -408,9 +429,8 @@ export interface SceneState {
   /**
    * **场景命令表**：命令键 → 一条命令记录（`0x223` / `0x24d` / `0x24f` / `0x250` / `0x251` 写）。
    * ★ 同键是**替换**（写前先删旧记录），⛔ 不是追加。
-   * ★ 命令**不立即画**：本层只做写侧；命令档的**规划**已在 renderer 侧（`renderer/scene-command-plan.ts`，
-   *   S0/S1：只规划、不执行），执行 / 像素操作仍未建模（见 `renderer/scene-order.ts` 的
-   *   `scene-command-pass-render-unmodeled` 诊断）。
+   * ★ 命令**不立即画**：本层只做写侧；命令档的**规划**在 renderer 侧（`scene-command-plan.ts`），
+   *   **执行**由 `scene-command-exec.ts` 的 op 承担（`commandExecKinds` 缺省关闸 ⇒ 产品只走收尾扫描）。
    * ★ `0x1f6` 只清四张表 ⇒ **不清**本表（spec 未规定清它，见残差）。
    */
   commands: Map<number, SceneCommandRecord>;
@@ -927,6 +947,7 @@ export class Machine {
     drawItems: new Map(),
     meshes: new Map(),
     animating: 0,
+    forcedComplete: 0,
     auxTables: [new Map(), new Map()],
     commands: new Map(),
     flagTableA: new Array(1000).fill(0),
@@ -1119,6 +1140,128 @@ export class Machine {
     //   不在这里做"至少走 tickMs"的夹取：宿主时钟慢/快都应如实反映；仿真侧要固定步长就显式传 tickMs。
     this.advance(this.tickMs);
     this.ticks += 1;
+  }
+
+  /**
+   * 命令档的**时间戳盖章**（渲染步首次遍历到命令记录时）：
+   * 只把 timestamp 仍为 0 的记录写成本帧场景时刻；返回盖章条数。
+   * ⛔ 不重写已有时间戳（"第一帧"判据靠它，每帧都盖会让首帧门永远开着）。
+   */
+  stampCommands(): number {
+    let n = 0;
+    for (const record of this.scene.commands.values()) {
+      if (record.timestamp !== 0) continue;
+      record.timestamp = this.scene.now;
+      n += 1;
+    }
+    return n;
+  }
+
+  /**
+   * 渲染步**收尾**（在 present 之后调用）：本帧「有动画」为 0 ⇒ 清空整张命令表；
+   * 随后把「强制完成」清 0。返回是否清了表。
+   * ⛔ 不许在命令档执行前调用（否则多帧命令只活一帧）。
+   */
+  finishRenderStep(): boolean {
+    const cleared = this.scene.animating === 0 && this.scene.commands.size > 0;
+    if (this.scene.animating === 0) this.scene.commands.clear();
+    this.scene.forcedComplete = 0;
+    return cleared;
+  }
+
+  /**
+   * 存档应用的第二段：按帧记录重建 0..current 的帧槽（脚本体按 scriptIndex 重新装载）。
+   * ★ 局部池由 freshFrame 重建；ret 直接写回；ip 用表下标算（tableB 优先、+12 字节；否则 tableA）。
+   * ★ 返回 false = 没有 loadScript（调用方保留“未还原”诊断）。
+   */
+  async restoreFrames(
+    records: readonly { parent: number; scriptIndex: number; ret: readonly number[]; tableA: number; tableB: number }[],
+    current: number,
+  ): Promise<boolean> {
+    const loader = this.loadScript;
+    if (!loader) return false;
+    if (current < 0 || current >= FRAME_SLOT_COUNT) throw new Error('restore-frames: current=' + current);
+    for (let i = 0; i < FRAME_SLOT_COUNT; i += 1) this.slots[i] = null;
+    for (let f = 0; f < records.length; f += 1) {
+      const rec = records[f]!;
+      if (rec.scriptIndex < 0) continue;
+      const body = await loader(rec.scriptIndex);
+      if (!body) throw new Error('restore-frames: script ' + rec.scriptIndex + ' not found');
+      const tables = this.scriptTables?.(rec.scriptIndex) ?? null;
+      let ip = 0;
+      if (rec.tableB >= 0 && tables?.call?.[rec.tableB] !== undefined) ip = tables.call[rec.tableB]! * 4 + 12;
+      else if (rec.tableA >= 0 && tables?.msg?.[rec.tableA] !== undefined) ip = tables.msg[rec.tableA]! * 4;
+      const frame = this.freshFrame(rec.scriptIndex);
+      for (const value of rec.ret) frame.retStack.push(value);
+      this.slots[f] = {
+        id: rec.scriptIndex,
+        body,
+        ip,
+        frame,
+        parent: rec.parent,
+        length: 0,
+        tables,
+      };
+    }
+    this.cur = current;
+    this.operandCount = 0;
+    return true;
+  }
+
+  /**
+   * 存档应用的第一段：清空六个全局池，再写整型 / 浮点 / 字符串三池；
+   * 引用三池（c3/c4/c5）本版没有解析内容 ⇒ **只清空**（与 spec 的“清零再写前缀”一致）。
+   * ★ 整型池全体重新编码（文件里是解码后的值）；返回写入条数。
+   */
+  applyGlobalPools(pools: { ints: readonly number[]; floats: readonly number[]; strings: readonly string[] }): { ints: number; floats: number; strings: number } {
+    const bank = this.bankOf(this.globalFlip);
+    bank.int.clear();
+    bank.float.clear();
+    bank.string.clear();
+    bank.intRef.clear();
+    bank.floatRef.clear();
+    bank.stringRef.clear();
+    for (let i = 0; i < pools.ints.length; i += 1) bank.int.set(i, encodeInt(pools.ints[i]! | 0, this.key));
+    for (let i = 0; i < pools.floats.length; i += 1) bank.float.set(i, pools.floats[i]! >>> 0);
+    for (let i = 0; i < pools.strings.length; i += 1) bank.string.set(i, pools.strings[i]!);
+    return { ints: pools.ints.length, floats: pools.floats.length, strings: pools.strings.length };
+  }
+
+  /**
+   * 命令档的**推进**（渲染步里、命令遍历前后由实现选点；本实现放在快照前）：
+   * - 种类 0：未开始 ⇒ 置「有动画」；到期 / duration ≤ 0 ⇒ 清 duration；进行中 ⇒ 置「有动画」。
+   * - 种类 3：同公式但**不夹取**（未开始也算进行中，进度可为负）；到期 ⇒ 清 duration。
+   * - 种类 2 且 mode < 0 ⇒ 置「强制完成」（每帧都会置，收尾统一清 0）。
+   * ⛔ 不写进度格（进度由渲染侧按 timestamp / delay / duration / now 派生）。
+   */
+  advanceCommands(): void {
+    const now = this.scene.now;
+    for (const record of this.scene.commands.values()) {
+      if (record.kind === 2 && record.mode < 0) {
+        this.scene.forcedComplete = 1;
+        continue;
+      }
+      if (record.kind === 1) {
+        // 影片结束（对象槽已空）且 duration 仍非 0 ⇒ 补一次遮罩反值 + 置动画 + 清 duration。
+        if (record.duration > 0 && !this.scene.objectSlots.has(record.textureId)) {
+          record.mask = 255 - record.mask;
+          record.duration = 0;
+          this.scene.animating = 1;
+        }
+        continue;
+      }
+      if (record.kind !== 0 && record.kind !== 3) continue;
+      const start = record.timestamp + record.delay;
+      if (record.kind === 0 && now <= start) {
+        this.scene.animating = 1;
+        continue;
+      }
+      if (record.duration <= 0 || now >= start + record.duration) {
+        record.duration = 0;
+        continue;
+      }
+      this.scene.animating = 1;
+    }
   }
 
   /**
@@ -1438,15 +1581,18 @@ export class Machine {
       } catch (error) {
         // ★ 失败必须能定位到"哪一条指令"：日志里只写 text-unsupported-operand-type:0x0 是不够的。
         const message = error instanceof Error ? error.message : String(error);
-        const script = this.rec.id === undefined ? 'root' : `0x${this.rec.id.toString(16)}`;
+        const active = this.slots[this.cur];
+        const script = active?.id === undefined ? 'root' : `0x${active.id.toString(16)}`;
         const operands = dec.ops
           .map((op) => `0x${op.type.toString(16)}:0x${(op.raw >>> 0).toString(16)}`)
           .join(',');
-        throw new Error(
+        const wrapped = new Error(
           `${message} [opcode=0x${dec.opcode.toString(16)} argc=${dec.argc} step=${this.steps} `
-          + `offset=${at} ip=0x${this.ip.toString(16)} script=${script} operands=[${operands}]]`,
+          + `offset=${at} ip=0x${(active?.ip ?? 0).toString(16)} script=${script} operands=[${operands}]]`,
           { cause: error },
         );
+        if (error instanceof FrameLoadError) Object.assign(wrapped, { category: error.category });
+        throw wrapped;
       }
       this.ip += 4 * this.operandCount;
       this.steps += 1;

@@ -61,14 +61,29 @@ import { Application, Container, Graphics, Rectangle, RenderTexture, Sprite, Tex
 import type { BLEND_MODES } from 'pixi.js';
 import { applyColorKey, hasColorKey } from '../../../core/agf.ts';
 import {
+  SCENE_COMMAND_PASS_EXECUTED,
+  commandExecCommandsOf,
+  gateCommandPlanByKinds,
   orderedDrawables,
   planCommandPassForScene,
   scrubSceneTexture,
   snapshotReferencesTexture,
 } from './scene-order.ts';
+import { CANVAS_A, CANVAS_B } from './scene-command-plan.ts';
+import type { CommandPlanEntry } from './scene-command-plan.ts';
+import { planCommandExecution, runCommandOps } from './scene-command-exec.ts';
+import type {
+  CommandCanvasHost,
+  CommandExecDiagnostic,
+  ExecOp,
+  ExecTarget,
+} from './scene-command-exec.ts';
 import { drawFailedReport, planDraw } from './scene-draw-plan.ts';
+import type { WipeStroke } from './wipe-pattern.ts';
 import type { DrawPlanNote, DrawPlanSlot } from './scene-draw-plan.ts';
 import type {
+  DrawItemSnapshot,
+  MeshSnapshot,
   RendererInit,
   RendererReady,
   RenderCall,
@@ -138,7 +153,7 @@ export const BLEND_MODE_MAP: readonly { mode: number; pixi: BLEND_MODES; evidenc
 export const DISCLOSURES: readonly string[] = [
   '影片：pl_mpeg WASM 解码 MPEG-1/PS，仅视频（音频忽略）；不重编码 / 不做音频同步；帧尺寸来自码流，成品像素由 pl_mpeg 决定',
   '全屏语义未实现：screenMode=0 被平台降级为 set:WinX×set:WinY 的普通窗口（不做分辨率切换 / 缩放）；这是模拟器决策，不是 spec 结论',
-  '网格渲染仅支持“4 顶点、四色一致”的全屏四边形（LOGO 版权页 / TITLE 背景）；逐顶点布局 / topology 未取证，其它网格跳过并诊断。绘制顺序是**引擎侧行为**：无命令记录时按 `CORE-SCENE-DRAW-ORDER` 的 key 升序 / 同键网格先于绘制项；负键口径按表分（网格 / 辅助表的负键不参与，**绘制项不做符号检查**）。**命令档（有命令记录时的第一档）只规划、不执行**：`renderer/scene-command-plan.ts` 是纯规划器（命令键升序 / 时间戳盖章 / 三表合并序 / 按种类的阶段 / 区间之下 / clearTable），诊断是 `scene-command-pass-planned` 与 `scene-command-pass-render-unmodeled` —— 阶段一个都没发，画面仍来自收尾扫描（⛔ 不假装执行了命令档）',
+  '网格渲染仅支持“4 顶点、四色一致”的全屏四边形（LOGO 版权页 / TITLE 背景）；逐顶点布局 / topology 未取证，其它网格跳过并诊断。绘制顺序是**引擎侧行为**：无命令记录时按 `CORE-SCENE-DRAW-ORDER` 的 key 升序 / 同键网格先于绘制项；负键口径按表分（网格 / 辅助表的负键不参与，**绘制项不做符号检查**）。**命令档（有命令记录时的第一档）可按种类开闸执行**：`renderer/scene-command-plan.ts` 是纯规划器，`renderer/scene-command-exec.ts` 产出 op 序列、`present()` 在**收尾扫描之前**派发；闸门是 `PixiRenderHostOptions.commandExecKinds`，**缺省空 ⇒ 零 op（产品画面与只规划时逐字节一致）**。copy / composite 只做结构（进度恒 1 / 不透明），遮罩 · 抹除笔 · 效果技法仍未建模 ⇒ 诊断是 `scene-command-pass-planned` / `scene-command-pass-executed` / `scene-command-pass-render-unmodeled`（⛔ 不把"开闸了"说成"像素对了"）',
   '纹理加载：AGF 解码 + uploadTexture 已实现；BMP 分支未成篇，颜色键的 16 位通道装配未取证，空白纹理的初始像素未定义',
   '字体对象部分建模：size 24 / 主色 0xFFFFFF / 副色 0 / 绘制模式 1 来自 Font::init 的逐字证据（0x4654C3 / 0x4655FB / 0x465605 / 0x465611）；face name（0x1a5 → Font+0x4EC）只记录',
   '★ 产品选择：所有文字统一映射到 Amayui CN（更纱黑体 cnjp 变体，随仓字体资产 Amayui-CN_cnjp*.ttf）；引擎 face name 不参与字体选择',
@@ -452,12 +467,20 @@ export interface SceneBuildStats {
   /** 实际绘制顺序（`item#10 → mesh#200000 → …`，最多列 16 项；诊断用） */
   order: string;
   /**
-   * 命令档**规划**统计（本实现只规划、不执行：阶段一个都没发，画面仍由收尾扫描产生）。
-   * ★ 命令数 / 阶段数 / 本帧被记成「本轮已消费」的键数 —— 与诊断 `scene-command-pass-planned` 同源。
+   * 命令档**规划**统计（命令数 / 阶段数 / 本帧被记成「本轮已消费」的键数）。
+   * ★ "规划了多少"在这里；"真的执行了几笔"看 `commandPassOps` / `commandPassCanvasDraws`
+   *   （执行点在 `present`，缺省关闸 ⇒ 两者恒 0）。
    */
   commandPassCommands: number;
   commandPassPhases: number;
   commandPassConsumedKeys: number;
+  /**
+   * 命令档本帧**已执行**的 op 数（`runCommandOps` 派发到宿主的次数）。
+   * ★ 缺省关闸 ⇒ 恒 0；★ 执行点在 `present()`（⛔ 不在 `buildScene`：一帧可能重建多次）。
+   */
+  commandPassOps: number;
+  /** 其中发进命令画布（36 / 37）的绘制次数（`emit` op 数；⛔ 不是条目数） */
+  commandPassCanvasDraws: number;
 }
 
 /** diagnostics 面板要的全部数字（**纯数据**；DOM 由 `renderer.ts` 画） */
@@ -521,6 +544,81 @@ export interface PixiRenderHostOptions {
   /** 初始画布尺寸（`ready` 回报用；随后 `init` 会覆盖） */
   initialWidth?: number;
   initialHeight?: number;
+  /**
+   * **命令档开闸**：哪些命令种类（0 纹理覆盖 / 1 影片覆盖 / 2 抹除 / 3 模糊转场）真的执行。
+   * ★ **缺省 / 空数组 ⇒ 零 op、零宿主调用**（产品零回退：画面仍只来自收尾扫描）。
+   * ★ 只有显式列出的种类才产 op；不在列表里的命令连 op 与诊断都不发
+   *   （`scene-order.ts` 的 `gateCommandPlanByKinds`）。
+   * ★ 本轮只有结构：copy / composite 的目标与次序对，像素 / 进度 / 遮罩仍是残差。
+   */
+  commandExecKinds?: number[];
+}
+
+/* ─────────────────────────── 命令档执行 / 发射的内部形状 ─────────────────────────── */
+
+/**
+ * 一次**发射**的去向（收尾扫描与命令档**共用** `emitEntries`）。
+ * ★ `id` 是 `planDraw` 的"当前渲染目标"输入：收尾扫描 = `scene.target`；命令档 = 画布 36 / 37。
+ * ★ `skipExtraTransform`：命令档用命令自己的 6.1 标志；收尾扫描**恒 `false`**（它没有命令记录）。
+ */
+interface EmitTarget {
+  id: number;
+  present: boolean;
+  skipExtraTransform: boolean;
+}
+
+/** `emitEntries` 的计数（收尾扫描合并进 `SceneBuildStats`；命令档只进诊断） */
+interface EmitStats {
+  activeItems: number;
+  sprites: number;
+  meshQuads: number;
+  meshSkipped: number;
+  missingTextures: number;
+  noTarget: number;
+  consumedSkips: number;
+  clippedEmpty: number;
+  drawFailed: number;
+  blankSlots: number;
+  dirtyRequests: number;
+  rectWriteBacks: number;
+  /** 辅助表 A 的条目：快照里没有这张表 ⇒ 未建模、不画（⛔ 不拿占位块顶缺） */
+  auxUnmodeled: number;
+  /** 规划器给了 `{key, table}` 但快照里没有对应 drawable ⇒ 记数跳过（⛔ 不建占位物） */
+  missingEntries: number;
+}
+
+/** `emitEntries` 的结果：节点**不挂任何地方**（由调用方决定场景根 / 临时容器） */
+interface EmitEntriesResult {
+  nodes: Container[];
+  /** 子矩形 Sprite 的临时 `Texture`（调用方负责销毁：收尾扫描 = `clearBuilt`，命令档 = 用完即毁） */
+  frameTextures: Texture[];
+  stats: EmitStats;
+  notes: DrawPlanNote[];
+}
+
+/**
+ * 一次 build 的发射上下文：`{key, table}` → 真正要画的 drawable（同键多条按 `orderedDrawables` 的次序）。
+ * ★ 一帧可能多次 `buildScene`（上传纹理 / 写字 / 释放都会触发）⇒ 每次重建都整份换掉。
+ */
+interface SceneEmitContext {
+  scene: SceneSnapshot;
+  planSlots: Map<number, DrawPlanSlot>;
+  hasTarget: boolean;
+  meshes: Map<number, MeshSnapshot[]>;
+  items: Map<number, DrawItemSnapshot[]>;
+}
+
+/**
+ * 最近一次 `buildScene` 算出的命令档执行计划（★ **执行点在 `present`**：`buildScene` 一帧可跑多次，
+ * 在那里执行会把画布叠画 / 把进度按重建次数推进）。
+ */
+interface PendingCommandExec {
+  ops: ExecOp[];
+  /** `own`（命令自己的纹理）的解析表：`commandKey → textureId`（来自**同一次** build 的快照） */
+  ownTextureByKey: Map<number, number>;
+  /** 同一份计划只执行一次（一帧里 `present` 可能被影片帧再调一次） */
+  executed: boolean;
+  diagnostics: CommandExecDiagnostic[];
 }
 
 /** 场景根**不挂到 `app.stage`**：避免它被 Pixi 自己的 ticker 再画一遍（重影） */
@@ -560,6 +658,21 @@ export class PixiRenderHost {
   private initInfo: RendererInit | null = null;
   private scene: SceneSnapshot | null = null;
   private sceneStats: SceneBuildStats | null = null;
+  /**
+   * 命令档开闸的种类（缺省空 ⇒ 零 op）。
+   * ★ 只做**种类级**闸门：未列出的命令连 op / 诊断都不产（见 `gateCommandPlanByKinds`）。
+   */
+  private readonly commandExecKinds: readonly number[];
+  /**
+   * 命令档的两块**离屏画布**（`36` = A / `37` = B）。
+   * ★ **⛔ 不进 `slots`**：它们不是引擎的纹理槽（不参与 `reconcileTextures` / `dropSlot` /
+   *   快照 / 绘制项解析），只是命令档内部的渲染目标。尺寸 = `canvasSize()`。
+   */
+  private readonly commandCanvases = new Map<number, RenderTexture>();
+  /** 最近一次 build 的发射上下文（命令档在 `present` 时还要用它建节点） */
+  private emitContext: SceneEmitContext | null = null;
+  /** 最近一次 build 的命令档执行计划；**执行在 `present`**（见 `runPendingCommandExec`） */
+  private pendingExec: PendingCommandExec | null = null;
   private blendState: HostDiagnostics['blend'] = null;
   private lastDraw: LastDrawState | null = null;
   private lastPresent: LastPresentState | null = null;
@@ -578,6 +691,7 @@ export class PixiRenderHost {
     this.app = app;
     this.logSink = options.log ?? (() => {});
     this.errorSink = options.error ?? this.logSink;
+    this.commandExecKinds = [...(options.commandExecKinds ?? [])];
     this.sceneRoot.label = 'amayui-scene-root';
   }
 
@@ -1218,9 +1332,25 @@ export class PixiRenderHost {
   private buildScene(scene: SceneSnapshot): SceneBuildStats {
     this.applyBlend(scene.blend);
 
-    // ★ 命令档：**只规划、不执行**（S0/S1）。这里用规划结果做统计与诊断；⛔ 一个阶段都不发，
-    //   下面的绘制仍然只来自收尾扫描 —— 所以 renderer 的诊断里有 `scene-command-pass-render-unmodeled`。
+    // ★ 命令档：**规划 + 按种类闸门产 op**（S2a-2）。⛔ 执行**不在这里**：
+    //   `buildScene` 一帧可能跑多次（`uploadTexture` / `drawText` / `releaseTexture` 都会重建），
+    //   在这里执行会把画布叠画、把进度按重建次数推进。执行点在 `present()`（`runPendingCommandExec`），
+    //   `pendingExec` 按**最近一次** build 的那一份缓存。
     const commandPass = planCommandPassForScene(scene);
+    const gatedPlan = gateCommandPlanByKinds(commandPass, this.commandExecKinds);
+    const commandExec = planCommandExecution({
+      plan: gatedPlan,
+      commands: commandExecCommandsOf(scene),
+      // ★ 总闸：`commandExecKinds` 缺省 / 空 ⇒ `enabled = false` ⇒ **零 op、零诊断**（产品零回退）
+      enabled: this.commandExecKinds.length > 0,
+    });
+    this.pendingExec = {
+      ops: commandExec.ops,
+      // `own` = 命令自己的纹理（种类 1 是影片纹理）⇒ 按同一次 build 的快照解析
+      ownTextureByKey: new Map(scene.commands.map((command) => [command.commandKey, command.textureId])),
+      executed: false,
+      diagnostics: commandExec.diagnostics,
+    };
 
     const stats: SceneBuildStats = {
       width: scene.width,
@@ -1246,6 +1376,9 @@ export class PixiRenderHost {
       commandPassCommands: commandPass.commands.length,
       commandPassPhases: commandPass.commands.reduce((sum, command) => sum + command.phases.length, 0),
       commandPassConsumedKeys: commandPass.consumedKeys.length,
+      // ★ 执行统计在 `present()` 里填（这里恒 0：本帧还没执行）
+      commandPassOps: 0,
+      commandPassCanvasDraws: 0,
     };
 
     // 纹理槽解析（`CORE-OPS-TEXTURE-DRAW-CONSUMER` 第 3 条）：**快照里没有这个编号 ⇒ 空槽**。
@@ -1268,129 +1401,29 @@ export class PixiRenderHost {
       .map((entry) => `${entry.kind}#${entry.key}`)
       .join(' → ') + (ordered.length > 16 ? ` → …（共 ${ordered.length}）` : '');
 
-    for (const entry of ordered) {
-      if (entry.kind === 'mesh') {
-        const mesh = entry.mesh;
-        if ((mesh.flags & 1) === 0) continue;
-        if (mesh.count !== 4 || mesh.copies[0].length < 4 || mesh.copies[1].length < 4) {
-          stats.meshSkipped += 1;
-          continue;
-        }
-        const color = mesh.color >= 0 ? mesh.color : (mesh.colors[0] ?? -1);
-        if (color < 0 || mesh.colors.some((value) => value !== color)) {
-          stats.meshSkipped += 1;
-          continue;
-        }
-        const xs = mesh.copies[0].slice(0, 4).map(f32FromBits);
-        const ys = mesh.copies[1].slice(0, 4).map(f32FromBits);
-        if (![...xs, ...ys].every(Number.isFinite)) {
-          stats.meshSkipped += 1;
-          continue;
-        }
-        const argb = argbOf(color);
-        const graphics = new Graphics();
-        // LOGO 的 copies 是 strip 顺序：0-1-2 与 1-3-2 两个三角形。
-        graphics.poly([xs[0]!, ys[0]!, xs[1]!, ys[1]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
-        graphics.poly([xs[1]!, ys[1]!, xs[3]!, ys[3]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
-        this.addBuilt(graphics);
-        stats.meshQuads += 1;
-        continue;
-      }
-
-      const item = entry.item;
-      // ★ 每个条目**只由规划器**决定"发不发请求、实参是什么"（`scene-draw-plan.ts`）。
-      //   ⛔ 这里不再有"空槽画占位块"、"零面积"、"自引用跳过"这些实现自造的规则。
-      const plan = planDraw({
-        item,
-        resolveSlot: (textureId) => planSlots.get(textureId) ?? null,
-        target: { id: scene.target, present: hasTarget },
-        view: scene.view,
-        now: scene.clock,
-        // 场景自身记录（6.1）：核心侧已建模键区间 / 平移；派生矩阵未建模（`matrix: null`）
-        selfTransform: scene.selfRecord,
-        // 收尾扫描**总是**不跳过额外变换（命令档执行未建模 ⇒ 现在没有传 true 的调用方）
-        skipExtraTransform: false,
-      });
-      for (const note of plan.notes) planNotes.add(note);
-      if (plan.markDirty) stats.dirtyRequests += 1;
-      if (plan.rectWriteBack !== null) stats.rectWriteBacks += 1;
-      if ((item.flags & 1) !== 0) stats.activeItems += 1;
-
-      if (plan.skip !== null) {
-        switch (plan.skip) {
-          case 'no-valid':
-            // 静默：不画、不报错
-            break;
-          case 'consumed':
-            stats.consumedSkips += 1;
-            break;
-          case 'missing-texture':
-            stats.missingTextures += 1;
-            if (plan.report) this.errorNote('missing-texture', plan.report.textureId, plan.report.text);
-            break;
-          case 'no-target':
-            stats.noTarget += 1;
-            if (plan.report) this.errorNote('no-target', plan.report.textureId, plan.report.text);
-            break;
-          case 'empty-clip':
-            // 夹空是**静默**的：不上报、不建占位物
-            stats.clippedEmpty += 1;
-            break;
-        }
-        continue;
-      }
-
-      const args = plan.draw;
-      if (args === null) continue; // 规划器的约定：skip === null ⇒ draw 非 null（防御）
-      const slot = this.slots.get(args.textureId);
-      if (!slot) {
-        // 快照里有纹理对象、平台侧却没有这个槽：按「绘制失败」上报并跳过（⛔ 不建占位物）
-        stats.drawFailed += 1;
-        this.errorNote('draw-failed', args.textureId,
-          drawFailedReport(args.textureId, '平台侧没有该纹理槽').text);
-        continue;
-      }
-      // ★ 空白槽（`0x1f8` 建好、一次都没写过）⇒ **不画**（平台侧选择，不是 spec 结论）。
-      //   未写过的 `RenderTexture` 像素未定义：WebGL 零初始化时是透明黑，可驱动/后端也可能给别的
-      //   东西；画出去就等于"前景层的内容随机"。而这类槽在真实运行里几乎总是**影片槽的第一帧之前**
-      //   （`createTexture(42)` → `movie(slot 42)：首帧` 之间隔着一次 WASM / 归档读取）。
-      //   ⛔ 与 `missing-texture`（槽里没有对象）分开记：这里对象在、只是还没像素。
-      if (!slot.hasContent) {
-        stats.blankSlots += 1;
-        continue;
-      }
-      try {
-        // 全图时不建 frame；子矩形按 RenderTexture 的物理 / 逻辑比例换算（裁剪后的矩形来自规划器）。
-        const rt = slot.rt ?? this.ensureTexture(slot);
-        let texture = rt as Texture;
-        const frameWidth = args.rect.right - args.rect.left;
-        const frameHeight = args.rect.bottom - args.rect.top;
-        if (args.rect.left !== 0 || args.rect.top !== 0
-          || frameWidth !== rt.width || frameHeight !== rt.height) {
-          const u = rt.source.width / Math.max(1, rt.width);
-          const v = rt.source.height / Math.max(1, rt.height);
-          texture = new Texture({
-            source: rt.source,
-            frame: new Rectangle(args.rect.left * u, args.rect.top * v, frameWidth * u, frameHeight * v),
-          });
-          this.frameTextures.push(texture);
-        }
-        const sprite = new Sprite(texture);
-        // 位置 = 裁剪补偿 / 档位缩放取整 / 场景偏移之后的三个浮点格（第三格不参与显示）
-        sprite.position.set(args.position[0], args.position[1]);
-        // 本步颜色是**一个** 32 位值（含透明度）；默认不透明白
-        const color = argbOf(args.color);
-        sprite.tint = color.rgb;
-        sprite.alpha = color.alpha;
-        // ★ 本步变换（`args.transform`）**没有在这里应用**：Pixi 的 Sprite 用位置实参定位，
-        //   而"绘制入口怎么解释矩阵"属平台（见 DISCLOSURES）；⛔ 不要拿它再算一遍位置（会双重变换）。
-        this.addBuilt(sprite);
-        stats.sprites += 1;
-      } catch (error) {
-        stats.drawFailed += 1;
-        this.errorNote('draw-failed', args.textureId, drawFailedReport(args.textureId, messageOf(error)).text);
-      }
+    // ★ 收尾扫描与命令档**共用**一份 `{key, table}` 索引：同键多条按 `orderedDrawables` 的次先进先出。
+    const meshByKey = new Map<number, MeshSnapshot[]>();
+    const itemByKey = new Map<number, DrawItemSnapshot[]>();
+    for (const drawable of ordered) {
+      if (drawable.kind === 'mesh') appendTo(meshByKey, drawable.key, drawable.mesh);
+      else appendTo(itemByKey, drawable.key, drawable.item);
     }
+    this.emitContext = { scene, planSlots, hasTarget, meshes: meshByKey, items: itemByKey };
+
+    // ★ 收尾扫描：发**全部**条目（★ S2a-2 **不接** consumed 跳过 —— 那是 S2a-3 的写回）。
+    //   命令档共用同一个 `emitEntries`，但目标 / 跳过额外变换由各自的 `EmitTarget` 决定：
+    //   收尾扫描恒 `skipExtraTransform: false`（它没有命令记录）。
+    const emitted = this.emitEntries(
+      ordered.map((drawable) => ({
+        key: drawable.key,
+        table: drawable.kind === 'mesh' ? 'mesh' : 'items',
+      })),
+      { id: scene.target, present: hasTarget, skipExtraTransform: false },
+    );
+    addEmitStats(stats, emitted.stats);
+    for (const note of emitted.notes) planNotes.add(note);
+    for (const node of emitted.nodes) this.addBuilt(node);
+    this.frameTextures.push(...emitted.frameTextures);
 
     // 影片帧：放在网格之后覆盖（LOGO 收尾的黑色网格属于场景，不应盖住影片）。
     // ★ 这是本实现的呈现顺序选择；引擎的影片/场景次序未成篇（RES-MOVIE-DRAW-ORDER）。
@@ -1432,7 +1465,15 @@ export class PixiRenderHost {
       'scene-command-pass',
       commandPass.commands.length > 0
         ? `场景：命令档规划 ${commandPass.commands.length} 条 / ${stats.commandPassPhases} 阶段 / 覆盖键 `
-          + `${stats.commandPassConsumedKeys} 个（本实现只规划、不执行 ⇒ 画面仍来自收尾扫描）`
+          + `${stats.commandPassConsumedKeys} 个（开闸种类：`
+          + `${this.commandExecKinds.length > 0 ? this.commandExecKinds.join('、') : '无 ⇒ 本帧零 op'}）`
+        : null,
+    );
+    this.sceneNote(
+      'scene-command-exec-gaps',
+      commandExec.diagnostics.length > 0
+        ? `场景：命令档执行计划的未建模 / 未对齐档：`
+          + `${[...new Set(commandExec.diagnostics.map((entry) => entry.kind))].join('、')}`
         : null,
     );
     this.sceneNote(
@@ -1475,6 +1516,186 @@ export class PixiRenderHost {
       stats.meshQuads > 0 ? `场景：画出 ${stats.meshQuads} 个网格四边形（4 顶点 / 单色）` : null,
     );
     return stats;
+  }
+
+  /* ─────────────────────────── 发射（收尾扫描 / 命令档共用） ─────────────────────────── */
+
+  /**
+   * 把一批 `{key, table}` 条目建成节点（**只发指定条目**；⛔ 不挂场景根 —— 去处由调用方决定）。
+   *
+   * ★ 这是原来 `buildScene` 里那段发射循环的**唯一**实现：收尾扫描发全部条目、命令档只发
+   *   `ExecOp.emit` 指定的那些 ⇒ 两条路的 `planDraw` 判据 / 空槽 / 夹空 / 失败上报全部同一份。
+   * ★ 同键多条（辅助表 A / 网格 / 绘制项）按 `{table, key}` 取第 n 个 drawable（n = 本条在**这次调用**里
+   *   第几次出现该 `{table, key}`）⇒ 两次 `emitEntries` 互不消耗（命令档可以发同一键到两块画布）。
+   * ★ `target.id` 是 `planDraw` 的"当前渲染目标"：命令档用画布 36 / 37（引擎里它们就是渲染目标），
+   *   收尾扫描用 `scene.target`；`target.skipExtraTransform` 同理（命令档 = 命令自己的 6.1 标志）。
+   */
+  private emitEntries(entries: readonly CommandPlanEntry[], target: EmitTarget): EmitEntriesResult {
+    const result: EmitEntriesResult = {
+      nodes: [],
+      frameTextures: [],
+      stats: emptyEmitStats(),
+      notes: [],
+    };
+    const context = this.emitContext;
+    if (context === null) return result;
+
+    const used = new Map<string, number>();
+    for (const entry of entries) {
+      if (entry.table === 'auxA') {
+        // 快照里没有辅助表 A（`commandPlanInput` 恒 `null`）⇒ 未建模，⛔ 不拿占位块顶缺
+        result.stats.auxUnmodeled += 1;
+        continue;
+      }
+      const id = `${entry.table}:${entry.key}`;
+      const at = used.get(id) ?? 0;
+      used.set(id, at + 1);
+      if (entry.table === 'mesh') {
+        const mesh = context.meshes.get(entry.key)?.[at];
+        if (mesh === undefined) {
+          result.stats.missingEntries += 1;
+          continue;
+        }
+        this.emitMesh(mesh, result);
+      } else {
+        const item = context.items.get(entry.key)?.[at];
+        if (item === undefined) {
+          result.stats.missingEntries += 1;
+          continue;
+        }
+        this.emitItem(item, target, context, result);
+      }
+    }
+    return result;
+  }
+
+  /** 网格 → 一个 4 顶点单色四边形（LOGO / TITLE 背景）；布局不认识的网格记数跳过 */
+  private emitMesh(mesh: MeshSnapshot, result: EmitEntriesResult): void {
+    if ((mesh.flags & 1) === 0) return;
+    if (mesh.count !== 4 || mesh.copies[0].length < 4 || mesh.copies[1].length < 4) {
+      result.stats.meshSkipped += 1;
+      return;
+    }
+    const color = mesh.color >= 0 ? mesh.color : (mesh.colors[0] ?? -1);
+    if (color < 0 || mesh.colors.some((value) => value !== color)) {
+      result.stats.meshSkipped += 1;
+      return;
+    }
+    const xs = mesh.copies[0].slice(0, 4).map(f32FromBits);
+    const ys = mesh.copies[1].slice(0, 4).map(f32FromBits);
+    if (![...xs, ...ys].every(Number.isFinite)) {
+      result.stats.meshSkipped += 1;
+      return;
+    }
+    const argb = argbOf(color);
+    const graphics = new Graphics();
+    // LOGO 的 copies 是 strip 顺序：0-1-2 与 1-3-2 两个三角形。
+    graphics.poly([xs[0]!, ys[0]!, xs[1]!, ys[1]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
+    graphics.poly([xs[1]!, ys[1]!, xs[3]!, ys[3]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
+    result.nodes.push(graphics);
+    result.stats.meshQuads += 1;
+  }
+
+  /** 绘制项 → 一个 Sprite（或一次跳过 / 一次上报）；⛔ 不建占位块 */
+  private emitItem(
+    item: DrawItemSnapshot,
+    target: EmitTarget,
+    context: SceneEmitContext,
+    result: EmitEntriesResult,
+  ): void {
+    const stats = result.stats;
+    // ★ 每个条目**只由规划器**决定"发不发请求、实参是什么"（`scene-draw-plan.ts`）。
+    //   ⛔ 这里不再有"空槽画占位块"、"零面积"、"自引用跳过"这些实现自造的规则。
+    const plan = planDraw({
+      item,
+      resolveSlot: (textureId) => context.planSlots.get(textureId) ?? null,
+      target: { id: target.id, present: target.present },
+      view: context.scene.view,
+      now: context.scene.clock,
+      // 场景自身记录（6.1）：核心侧已建模键区间 / 平移；派生矩阵未建模（`matrix: null`）
+      selfTransform: context.scene.selfRecord,
+      // ★ 命令档带命令自己的标志；收尾扫描恒 false（它没有命令记录）
+      skipExtraTransform: target.skipExtraTransform,
+    });
+    for (const note of plan.notes) if (!result.notes.includes(note)) result.notes.push(note);
+    if (plan.markDirty) stats.dirtyRequests += 1;
+    if (plan.rectWriteBack !== null) stats.rectWriteBacks += 1;
+    if ((item.flags & 1) !== 0) stats.activeItems += 1;
+
+    if (plan.skip !== null) {
+      switch (plan.skip) {
+        case 'no-valid':
+          // 静默：不画、不报错
+          break;
+        case 'consumed':
+          stats.consumedSkips += 1;
+          break;
+        case 'missing-texture':
+          stats.missingTextures += 1;
+          if (plan.report) this.errorNote('missing-texture', plan.report.textureId, plan.report.text);
+          break;
+        case 'no-target':
+          stats.noTarget += 1;
+          if (plan.report) this.errorNote('no-target', plan.report.textureId, plan.report.text);
+          break;
+        case 'empty-clip':
+          // 夹空是**静默**的：不上报、不建占位物
+          stats.clippedEmpty += 1;
+          break;
+      }
+      return;
+    }
+
+    const args = plan.draw;
+    if (args === null) return; // 规划器的约定：skip === null ⇒ draw 非 null（防御）
+    const slot = this.slots.get(args.textureId);
+    if (!slot) {
+      // 快照里有纹理对象、平台侧却没有这个槽：按「绘制失败」上报并跳过（⛔ 不建占位物）
+      stats.drawFailed += 1;
+      this.errorNote('draw-failed', args.textureId,
+        drawFailedReport(args.textureId, '平台侧没有该纹理槽').text);
+      return;
+    }
+    // ★ 空白槽（`0x1f8` 建好、一次都没写过）⇒ **不画**（平台侧选择，不是 spec 结论）。
+    //   未写过的 `RenderTexture` 像素未定义：WebGL 零初始化时是透明黑，可驱动/后端也可能给别的
+    //   东西；画出去就等于"前景层的内容随机"。而这类槽在真实运行里几乎总是**影片槽的第一帧之前**
+    //   （`createTexture(42)` → `movie(slot 42)：首帧` 之间隔着一次 WASM / 归档读取）。
+    //   ⛔ 与 `missing-texture`（槽里没有对象）分开记：这里对象在、只是还没像素。
+    if (!slot.hasContent) {
+      stats.blankSlots += 1;
+      return;
+    }
+    try {
+      // 全图时不建 frame；子矩形按 RenderTexture 的物理 / 逻辑比例换算（裁剪后的矩形来自规划器）。
+      const rt = slot.rt ?? this.ensureTexture(slot);
+      let texture = rt as Texture;
+      const frameWidth = args.rect.right - args.rect.left;
+      const frameHeight = args.rect.bottom - args.rect.top;
+      if (args.rect.left !== 0 || args.rect.top !== 0
+        || frameWidth !== rt.width || frameHeight !== rt.height) {
+        const u = rt.source.width / Math.max(1, rt.width);
+        const v = rt.source.height / Math.max(1, rt.height);
+        texture = new Texture({
+          source: rt.source,
+          frame: new Rectangle(args.rect.left * u, args.rect.top * v, frameWidth * u, frameHeight * v),
+        });
+        result.frameTextures.push(texture);
+      }
+      const sprite = new Sprite(texture);
+      // 位置 = 裁剪补偿 / 档位缩放取整 / 场景偏移之后的三个浮点格（第三格不参与显示）
+      sprite.position.set(args.position[0], args.position[1]);
+      // 本步颜色是**一个** 32 位值（含透明度）；默认不透明白
+      const color = argbOf(args.color);
+      sprite.tint = color.rgb;
+      sprite.alpha = color.alpha;
+      // ★ 本步变换（`args.transform`）**没有在这里应用**：Pixi 的 Sprite 用位置实参定位，
+      //   而"绘制入口怎么解释矩阵"属平台（见 DISCLOSURES）；⛔ 不要拿它再算一遍位置（会双重变换）。
+      result.nodes.push(sprite);
+      stats.sprites += 1;
+    } catch (error) {
+      stats.drawFailed += 1;
+      this.errorNote('draw-failed', args.textureId, drawFailedReport(args.textureId, messageOf(error)).text);
+    }
   }
 
   /** 同一条场景警告**只在内容变化时**记一次（`null` = 这一类已经没有了，下次再出现会重新记） */
@@ -1521,6 +1742,286 @@ export class PixiRenderHost {
     this.sceneRoot.removeChildren();
   }
 
+  /* ─────────────────────────── 命令档的执行（S2a-2：结构 / 次序） ─────────────────────────── */
+
+  /**
+   * 执行**最近一次 build** 缓存的命令档 op 序列（⛔ 只在 `present` 里跑，⛔ 不在 `buildScene` 里）。
+   *
+   * ★ 次序：**先**命令档（切画布 → 清 → 发条目 → 拷 / 合成到命令自己的纹理），**再**收尾扫描
+   *   （`present` 剩下的那段）—— 与 spec 的"命令档是第一档"一致。
+   * ★ 缺省关闸 ⇒ `pending.ops` 为空 ⇒ `runCommandOps` **一次宿主调用都没有** ⇒ 产品零回退。
+   * ★ 同一份 build 的计划只执行**一次**：影片帧的中途呈现（`present('movie')`）不承载命令档
+   *   （命令档属帧边界），`executed` 挡住重复执行 —— 否则画布会被叠画 / 进度按呈现次数推进。
+   * ★ 执行失败（宿主里任何一步抛）⇒ 记诊断后继续：⛔ 不让命令档把整帧搞崩（它还是残差路径）。
+   */
+  private runPendingCommandExec(trigger: PresentTrigger): void {
+    const pending = this.pendingExec;
+    if (pending === null || pending.executed) return;
+    if (trigger !== 'frame') return;
+    pending.executed = true;
+    let result: ReturnType<typeof runCommandOps>;
+    try {
+      result = runCommandOps(pending.ops, this.commandHost());
+    } catch (error) {
+      this.note(`命令档执行失败（本帧跳过命令档，收尾扫描照旧）：${messageOf(error)}`);
+      return;
+    }
+    const stats = this.sceneStats;
+    if (stats !== null) {
+      stats.commandPassOps = result.ops;
+      stats.commandPassCanvasDraws = result.canvasDraws;
+    }
+    if (pending.ops.length === 0) return;
+    const gaps = [...new Set(pending.diagnostics.map((entry) => entry.kind))];
+    this.sceneNote(
+      SCENE_COMMAND_PASS_EXECUTED,
+      `${SCENE_COMMAND_PASS_EXECUTED}：命令档执行 ${result.ops} 个 op`
+        + `（画布绘制 ${result.canvasDraws} 次 / ${result.canvasEntries} 条条目`
+        + `${result.skipped > 0 ? ` / 未执行 ${result.skipped} 个` : ''}）`
+        + `${gaps.length > 0 ? ` · 缺口 ${gaps.join('、')}` : ''}`
+        + ' ⇒ copy / composite 只有结构（进度恒 1 / 不透明），像素未建模',
+    );
+  }
+
+  /** 命令档的执行宿主：把 `ExecOp` 翻成 Pixi 动作（**像素级选择集中在这里**，守卫测不到） */
+  private commandHost(): CommandCanvasHost {
+    return {
+      selectTarget: () => {
+        // ★ 只做结构标记：⛔ 不改 `this.currentTarget`（那是 `0x20d` 的历史状态）；
+        //   每个 op 自带目标，宿主按它解析 RT。
+      },
+      clearCanvas: (target, commandKey) => {
+        this.clearCommandTarget(target, commandKey);
+      },
+      emitEntries: (target, entries, skipExtraTransform, commandKey) => {
+        this.renderCommandEntries(target, entries, skipExtraTransform, commandKey);
+      },
+      copySurface: (from, to, commandKey) => {
+        this.copyCommandSurface(from, to, commandKey);
+      },
+      composite: (sources, into, progress, commandKey) => {
+        this.compositeCommandSurface(sources, into, progress, commandKey);
+      },
+      strokes: (strokes, into, commandKey) => {
+        this.drawCommandStrokes(strokes, into, commandKey);
+      },
+      mask: (from, into, rect, coeff, commandKey) => {
+        this.drawCommandMask(from, into, rect, coeff, commandKey);
+      },
+    };
+  }
+
+  /**
+   * 命令档的离屏画布（`36` = A / `37` = B）。
+   * ★ 尺寸 = `canvasSize()`（**逻辑**像素）、`resolution` 与 `ensureTexture` 同口径 ⇒ 与纹理槽的
+   *   `RenderTexture` 规则一致（R3：写错表现为画布内容整体缩小，像素级、守卫抓不到）。
+   * ★ **⛔ 不进 `slots`**：不参与 `reconcileTextures` / `dropSlot` / 快照 / 绘制项解析。
+   */
+  private ensureCommandCanvas(id: number): RenderTexture {
+    const { width, height } = this.canvasSize();
+    const resolution = this.app.renderer.resolution;
+    const existing = this.commandCanvases.get(id);
+    if (existing !== undefined) {
+      // `rt.width` 是**逻辑**宽度（source.width / resolution）⇒ 与 `canvasSize()` 可直接比
+      if (existing.width === width && existing.height === height && existing.source.resolution === resolution) {
+        return existing;
+      }
+      existing.destroy(true);
+      this.commandCanvases.delete(id);
+    }
+    const rt = RenderTexture.create({
+      width: Math.max(1, width),
+      height: Math.max(1, height),
+      resolution,
+      antialias: false,
+    });
+    this.commandCanvases.set(id, rt);
+    return rt;
+  }
+
+  /** 命令档的 op 目标 → `{ id, rt }`；`own` = 命令自己的纹理（不在快照里 ⇒ `null` + 诊断） */
+  private resolveCommandTarget(
+    target: ExecTarget,
+    commandKey: number,
+  ): { id: number; rt: RenderTexture } | null {
+    if (target === 'canvasA') return { id: CANVAS_A, rt: this.ensureCommandCanvas(CANVAS_A) };
+    if (target === 'canvasB') return { id: CANVAS_B, rt: this.ensureCommandCanvas(CANVAS_B) };
+    const textureId = this.pendingExec?.ownTextureByKey.get(commandKey);
+    if (textureId === undefined) {
+      this.note(`命令档：命令 ${commandKey} 没有自己的纹理编号 ⇒ ${target} 目标解析不了（op 跳过）`);
+      return null;
+    }
+    const slot = this.slots.get(textureId);
+    if (!slot) {
+      this.note(`命令档：命令 ${commandKey} 的纹理槽 ${textureId} 不在场景里 ⇒ ${target} 目标解析不了（op 跳过）`);
+      return null;
+    }
+    return { id: textureId, rt: this.ensureTexture(slot) };
+  }
+
+  /** 清一块命令画布（用前先清；只清像素，不建节点） */
+  private clearCommandTarget(target: ExecTarget, commandKey: number): void {
+    if (target === 'own') return; // 计划器不给 `own` 产 clear；出现也不清（会把命令自己的纹理擦掉）
+    const resolved = this.resolveCommandTarget(target, commandKey);
+    if (resolved === null) return;
+    this.app.renderer.render({ container: EMPTY_CONTAINER, target: resolved.rt, clear: true });
+  }
+
+  /** 把 op 的条目发进命令画布（建节点 → 临时容器 → 一次 render；用完即毁） */
+  private renderCommandEntries(
+    target: ExecTarget,
+    entries: readonly CommandPlanEntry[],
+    skipExtraTransform: boolean,
+    commandKey: number,
+  ): void {
+    const resolved = this.resolveCommandTarget(target, commandKey);
+    if (resolved === null) return;
+    const emitted = this.emitEntries(entries, {
+      id: resolved.id,
+      // 画布恒在（平台刚建）⇒ 目标判据恒满足；`own` 的槽存在性已在上一步查过
+      present: true,
+      skipExtraTransform,
+    });
+    if (emitted.nodes.length === 0) {
+      for (const texture of emitted.frameTextures) texture.destroy(false);
+      return;
+    }
+    // ★ **独立**容器（⛔ 不挂 `sceneRoot`）：场景混合 / tint 不许串进命令档
+    const container = new Container();
+    try {
+      for (const node of emitted.nodes) container.addChild(node);
+      this.app.renderer.render({ container, target: resolved.rt, clear: false });
+    } finally {
+      container.removeChildren();
+      for (const node of emitted.nodes) destroyDisplay(node);
+      for (const texture of emitted.frameTextures) texture.destroy(false);
+    }
+  }
+
+  /** 整幅表面拷贝（种类 1 首帧：画布 A → 命令自己的纹理；⛔ 方向不可反） */
+  private copyCommandSurface(from: ExecTarget, to: ExecTarget, commandKey: number): void {
+    const source = this.resolveCommandTarget(from, commandKey);
+    const destination = this.resolveCommandTarget(to, commandKey);
+    if (source === null || destination === null) return;
+    const sprite = new Sprite(source.rt);
+    try {
+      // 整幅：位置 0,0、不缩放；`clear:false` 叠在目标已有内容上（S2b 的实现口径）
+      this.app.renderer.render({ container: sprite, target: destination.rt, clear: false });
+    } finally {
+      sprite.destroy();
+    }
+    this.markCommandTargetWritten(to, commandKey);
+  }
+
+  /**
+   * 合成（种类 0 / 2 = 两块画布、种类 3 = 一块）。
+   * ★ 次序 = `sources` 的给定次序（**先 A 后 B**），一笔一次 render、`clear:false`；
+   *   进度暂用 **1 / 不透明**（S2b 才接 `progress`）—— 本轮只保证"谁先谁后"。
+   */
+  /**
+   * 种类 1 的遮罩混合（最小模型 = 均匀系数；逐像素遮罩未建模）。
+   * 源 = 画布 A 的 rect 子矩形，目标 = own，alpha = coeff（0..1）。
+   */
+  private drawCommandMask(
+    from: ExecTarget,
+    into: ExecTarget,
+    rect: { left: number; top: number; right: number; bottom: number },
+    coeff: number,
+    commandKey: number,
+  ): void {
+    const destination = this.resolveCommandTarget(into, commandKey);
+    const source = this.resolveCommandTarget(from, commandKey);
+    if (destination === null || source === null) return;
+    if (rect.right <= rect.left || rect.bottom <= rect.top) return;
+    const u = source.rt.source.width / Math.max(1, source.rt.width);
+    const v = source.rt.source.height / Math.max(1, source.rt.height);
+    const texture = new Texture({
+      source: source.rt.source,
+      frame: new Rectangle(rect.left * u, rect.top * v, (rect.right - rect.left) * u, (rect.bottom - rect.top) * v),
+    });
+    const sprite = new Sprite(texture);
+    sprite.position.set(rect.left, rect.top);
+    sprite.alpha = Math.max(0, Math.min(1, coeff));
+    try {
+      this.app.renderer.render({ container: sprite, target: destination.rt, clear: false });
+    } finally {
+      sprite.destroy();
+      texture.destroy(true);
+    }
+    this.markCommandTargetWritten(into, commandKey);
+  }
+
+  /**
+   * 种类 2 的抹除笔：按 strokes 顺序逐笔把源画布的子矩形搬到 own（落点 = 矩形左上角）。
+   * ★ 只做 offset 0 档；空矩形不画（入口性质）；像素 / 采样等价未验证。
+   */
+  private drawCommandStrokes(strokes: readonly WipeStroke[], into: ExecTarget, commandKey: number): void {
+    const destination = this.resolveCommandTarget(into, commandKey);
+    if (destination === null) return;
+    for (const stroke of strokes) {
+      const source = this.resolveCommandTarget(stroke.canvas === 'A' ? 'canvasA' : 'canvasB', commandKey);
+      if (source === null) continue;
+      const { left, top, right, bottom } = stroke.rect;
+      if (right <= left || bottom <= top) continue;
+      const u = source.rt.source.width / Math.max(1, source.rt.width);
+      const v = source.rt.source.height / Math.max(1, source.rt.height);
+      const texture = new Texture({
+        source: source.rt.source,
+        frame: new Rectangle(left * u, top * v, (right - left) * u, (bottom - top) * v),
+      });
+      const sprite = new Sprite(texture);
+      sprite.position.set(left, top);
+      try {
+        this.app.renderer.render({ container: sprite, target: destination.rt, clear: false });
+      } finally {
+        sprite.destroy();
+        texture.destroy(true);
+      }
+    }
+    this.markCommandTargetWritten(into, commandKey);
+  }
+
+  private compositeCommandSurface(
+    sources: readonly ExecTarget[],
+    into: ExecTarget,
+    progress: number,
+    commandKey: number,
+  ): void {
+    const destination = this.resolveCommandTarget(into, commandKey);
+    if (destination === null) return;
+    for (let i = 0; i < sources.length; i += 1) {
+      const target = sources[i]!;
+      const source = this.resolveCommandTarget(target, commandKey);
+      if (source === null) continue;
+      const sprite = new Sprite(source.rt);
+      // 退路合成：第一块不透明；第二块按进度 alpha（0..1）；单源不透明。
+      if (sources.length === 2 && i === 1) sprite.alpha = Math.max(0, Math.min(1, progress));
+      try {
+        this.app.renderer.render({ container: sprite, target: destination.rt, clear: false });
+      } finally {
+        sprite.destroy();
+      }
+    }
+    this.markCommandTargetWritten(into, commandKey);
+  }
+
+  /**
+   * 记一次"命令档往自己的纹理写过像素"。
+   * ★ 只影响**呈现**（`present` 的 clear）与诊断数字；⛔ 不改快照。
+   * ★ 空白槽的 `hasContent` 因此变 true ⇒ `emitItem` 的"空白槽不画"判据不再成立
+   *   （这是 S2b 要细化的语义，本轮只记账）。
+   */
+  private markCommandTargetWritten(target: ExecTarget, commandKey: number): void {
+    if (target !== 'own') return;
+    const textureId = this.pendingExec?.ownTextureByKey.get(commandKey);
+    if (textureId === undefined) return;
+    const slot = this.slots.get(textureId);
+    if (!slot) return;
+    slot.hasContent = true;
+    slot.renderTargetWrites += 1;
+    slot.writeCount += 1;
+  }
+
   /* ─────────────────────────── 呈现 ─────────────────────────── */
 
   /**
@@ -1531,6 +2032,8 @@ export class PixiRenderHost {
    *   一次完整描述，`setRenderTarget` 是 `0x20d` 的历史状态。两者不一致时记一条日志（协议缺口，
    *   见回报 §4）。
    * ★ `sceneRoot` **不在** `app.stage` 里 ⇒ 这里画一次就是一次（⛔ 不会重影）。
+   * ★ **次序**：命令档（`runPendingCommandExec`）→ 收尾扫描（下面的 `sceneRoot` render）。
+   *   闸门关着时前半段一次宿主调用都没有 ⇒ 与"只规划"时逐字节一致。
    */
   private present(trigger: PresentTrigger = 'frame'): void {
     const scene = this.scene;
@@ -1538,6 +2041,9 @@ export class PixiRenderHost {
       this.note('present：还没有收到任何场景快照 ⇒ 无事可做');
       return;
     }
+
+    // ★ 命令档**先**跑：它画进两块离屏画布 / 命令自己的纹理；收尾扫描**后**跑，画进 `scene.target`。
+    this.runPendingCommandExec(trigger);
 
     const platformTarget = this.currentTarget;
     if (platformTarget !== scene.target) {
@@ -1595,6 +2101,49 @@ function destroyDisplay(node: Container): void {
 
 function assertNever(call: never): never {
   throw new Error(`未处理的 RenderCall：${JSON.stringify(call)}`);
+}
+
+/** 一次发射的计数（全 0；`emitEntries` 每次新建一份，⛔ 不共享） */
+function emptyEmitStats(): EmitStats {
+  return {
+    activeItems: 0,
+    sprites: 0,
+    meshQuads: 0,
+    meshSkipped: 0,
+    missingTextures: 0,
+    noTarget: 0,
+    consumedSkips: 0,
+    clippedEmpty: 0,
+    drawFailed: 0,
+    blankSlots: 0,
+    dirtyRequests: 0,
+    rectWriteBacks: 0,
+    auxUnmodeled: 0,
+    missingEntries: 0,
+  };
+}
+
+/** 把一次发射的计数并进场景统计（收尾扫描那一路；命令档那一路只进诊断） */
+function addEmitStats(into: SceneBuildStats, from: EmitStats): void {
+  into.activeItems += from.activeItems;
+  into.sprites += from.sprites;
+  into.meshQuads += from.meshQuads;
+  into.meshSkipped += from.meshSkipped;
+  into.missingTextures += from.missingTextures;
+  into.noTarget += from.noTarget;
+  into.consumedSkips += from.consumedSkips;
+  into.clippedEmpty += from.clippedEmpty;
+  into.drawFailed += from.drawFailed;
+  into.blankSlots += from.blankSlots;
+  into.dirtyRequests += from.dirtyRequests;
+  into.rectWriteBacks += from.rectWriteBacks;
+}
+
+/** 往 `Map<K, V[]>` 的数组尾追加（保持表内次序；同键多条目靠它保序） */
+function appendTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list === undefined) map.set(key, [value]);
+  else list.push(value);
 }
 
 /** 网格 copies 里的 32 位字按 float32 解释（LOGO 的 x / y 是 float 位模式） */

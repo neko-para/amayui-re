@@ -253,6 +253,12 @@ export interface SceneCommandSnapshot {
   mode: number;
   /** 种类 2：**分割幅**（"图案被分成几道"；错误支记 1）；其它种类 = 默认 0 */
   split: number;
+  /** 种类 1：**遮罩矩形**（核心记录已有；其它种类不给） */
+  rect?: { left: number; top: number; right: number; bottom: number };
+  /** 种类 1：**遮罩标志**（0 / 1；两时刻互补，语义见残差） */
+  flag?: number;
+  /** 种类 1：**当前遮罩系数**（0 / 255；写表时按 flag 填，影片结束补反值） */
+  mask?: number;
   /** **命令键在记录里的那份副本**（种类 2 用它去绘制项表找同键绘制项 ⇒ 抹除矩形） */
   ownerKey: number;
 }

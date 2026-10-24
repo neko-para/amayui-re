@@ -56,6 +56,8 @@ export interface ElectronWindowHostOptions {
   appRoot: string;
   preloadPath?: string;
   log?: LogFn;
+  /** 手动开闸的命令种类（拼进 renderer URL 的 `?commandExecKinds=`；缺省不拼） */
+  commandExecKinds?: number[];
 }
 
 /**
@@ -66,6 +68,7 @@ export class ElectronWindowHost {
   private readonly appRoot: string;
   private readonly preloadPath: string;
   private readonly log: LogFn;
+  private readonly rendererQuery: string;
   private win: BrowserWindow | null = null;
   /** 独立 debug 窗口（只读诊断投影；不跑 core） */
   private debugWin: BrowserWindow | null = null;
@@ -98,6 +101,9 @@ export class ElectronWindowHost {
   constructor(options: ElectronWindowHostOptions) {
     this.appRoot = options.appRoot;
     this.preloadPath = options.preloadPath ?? path.join(options.appRoot, 'src', 'platform', 'electron', 'preload.ts');
+    this.rendererQuery = options.commandExecKinds && options.commandExecKinds.length > 0
+      ? '?commandExecKinds=' + options.commandExecKinds.join(',')
+      : '';
     this.log = options.log ?? ((level, text) => {
       if (level === 'error') console.error(text);
       else if (level === 'warn') console.warn(text);
@@ -223,7 +229,7 @@ export class ElectronWindowHost {
     });
 
     try {
-      await win.loadURL(pathToFileURL(htmlPath).toString());
+      await win.loadURL(pathToFileURL(htmlPath).toString() + this.rendererQuery);
     } catch (err) {
       this.loadFailure = `load-rejected:${err instanceof Error ? err.message : String(err)}`;
       throw new Error(this.loadFailure);

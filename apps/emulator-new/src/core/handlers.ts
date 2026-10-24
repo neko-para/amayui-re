@@ -7,16 +7,18 @@
  */
 import { decodeCp932, readU16LE, readU32LE } from './bytes.ts';
 import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, SceneCommandRecord, TextureObject, VoiceGroup } from './machine.ts';
+import { FrameLoadError } from './machine.ts';
 import { FRAME_SLOT_COUNT, MOVIE_BIT, SLEEP_BIT, WAIT_BIT, indexInTable } from './machine.ts';
 import { decodeInt, encodeInt, readAddress, readFloat, readInt, readIntAt, readRawAt, readText, writeBitsAt, writeFloat, writeInt, writeRawAt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
 import { arrayStrideFor, resolveAddress } from './address.ts';
 import type { PoolTag } from './address.ts';
 import { NO_COLOR, RENDER_TARGET_BACK_BUFFER } from './render.ts';
-import { buildSaveFile } from './save-codec.ts';
+import { buildSaveFile, parseSaveBody, parseSaveEnvelope, SaveFormatError } from './save-codec.ts';
 import type { SaveTextureRecord } from './save-codec.ts';
 import type { RenderHost } from './render.ts';
 import { AgfError, decodeAgf } from './agf.ts';
+import { BmpError, decodeBmp, encodeBmp24 } from './bmp.ts';
 import { cgDigitSlots } from './cg-digit.ts';
 
 export type { Machine, Operand };
@@ -437,6 +439,7 @@ function defaultCommandRecord(kind: number, variant: number): SceneCommandRecord
     delay: 0,
     duration: 0,
     flag: 0,
+    mask: 0,
     mode: 0,
     split: 0,
     rampLength: [0, 0],
@@ -594,6 +597,8 @@ function sceneCommand24d(m: Machine, ops: Operand[]): void {
   record.rangeCount = rangeCount;
   record.rect = { left, top, right: left + width, bottom: top + height };
   record.flag = flag;
+  // 写表时的遮罩：flag=1 ⇒ 0，其它 ⇒ 255（影片结束补反值，本层未建模）。
+  record.mask = flag === 1 ? 0 : 255;
   record.delay = delay;
   record.duration = duration;
   record.raw = commandOperands(m, ops);
@@ -1281,8 +1286,18 @@ function jumpA0(m: Machine, ops: Operand[]): void {
 async function callScript3(m: Machine, ops: Operand[]): Promise<void> {
   const id = readInt(m, ops, 1);
   if (!m.loadScript) throw new Error('call-script-loader-missing');
-  const child = await m.loadScript(id);
-  if (!child) throw new Error('call-script-load-failed:' + id);
+  const caller = m.cur;
+  const childSlot = caller + 1;
+  // 引擎先换到子槽再装载：打开失败时当前帧停在这个（还空着的）子槽，类别 7。
+  m.cur = childSlot;
+  let child: Uint8Array | null;
+  try {
+    child = await m.loadScript(id);
+  } catch (error) {
+    throw new FrameLoadError(7, 'call-script-open-failed:' + id + ':' + (error instanceof Error ? error.message : String(error)));
+  }
+  if (!child) throw new FrameLoadError(7, 'call-script-open-failed:' + id);
+  m.cur = caller;
   m.enterScript(child, id);
 }
 
@@ -1308,10 +1323,20 @@ async function loadFrame6(m: Machine, ops: Operand[]): Promise<void> {
   // ★ key 非 0 是引擎的全局不变量（40-pools；EA 0x418940 / 0x41C7F2），不是 0x6 的局部前置：
   //   宿主给 0 的记账在 `Machine` 构造期一次完成，这里不重复记（否则每条 0x6 刷一条）。
   if (slot >= FRAME_SLOT_COUNT) {
-    throw new Error(`load-frame：目标帧深 ${slot} ≥ ${FRAME_SLOT_COUNT} —— 引擎抛「ファイルの階層が深すぎます．最大は%dです．」`);
+    throw new FrameLoadError(1, `load-frame：目标帧深 ${slot} ≥ ${FRAME_SLOT_COUNT} —— 引擎抛「ファイルの階層が深すぎます．最大は%dです．」`);
   }
-  const body = await m.loadScript(id);
-  if (!body) throw new Error('load-frame-load-failed:' + id);
+  // ★ 引擎先切到目标槽再装载：打开失败时当前帧**停在目标槽**（可重试 / 忽略，类别 7）。
+  const caller = m.cur;
+  m.cur = slot;
+  let body: Uint8Array | null;
+  try {
+    body = await m.loadScript(id);
+  } catch (error) {
+    throw new FrameLoadError(7, 'load-frame-open-failed:' + id + ':' + (error instanceof Error ? error.message : String(error)));
+  }
+  if (!body) throw new FrameLoadError(7, 'load-frame-open-failed:' + id);
+  // 成功 / 头坏路径：当前帧恢复成装载前的值；头坏仍由调用方按退出型处理（本层不区分）。
+  m.cur = caller;
   m.loadFrameAt(slot, body, id);
 }
 
@@ -2408,8 +2433,27 @@ async function saveRead1a1(m: Machine, ops: Operand[]): Promise<void> {
     m.diagnostics.push({ kind: 'save-1a1-header-invalid', index: slot });
     return;
   }
-  m.diagnostics.push({ kind: 'save-restore-unmodeled', index: slot });
-  m.diagnostics.push({ kind: 'save-recode-unmodeled', index: slot });
+  let framesRestored = false;
+  // 完整文件（≥ 312 B）⇒ 读侧第一段：头 + 参数块 + 信封 + 负载结构。
+  // ★ 解析失败**不写**第 1 个操作数（与“头坏”同口径：不造 0x1a1 的返回值合同）。
+  if (bytes.length >= 312) {
+    try {
+      const envelope = parseSaveEnvelope(bytes);
+      const parsed = parseSaveBody(envelope.body, envelope.version1, m.key);
+      // 应用第一段：六个全局池清零 + 三池前缀；帧 / 引用池仍不还原。
+      m.applyGlobalPools({ ints: parsed.ints, floats: parsed.floats, strings: parsed.strings });
+      m.diagnostics.push({ kind: 'save-1a1-pools-applied', index: slot });
+      if (m.loadScript) {
+        framesRestored = await m.restoreFrames(parsed.records, parsed.frame);
+        if (framesRestored) m.diagnostics.push({ kind: 'save-1a1-frames-restored', index: slot });
+      }
+    } catch (error) {
+      const code = error instanceof SaveFormatError ? error.code : 'save-parse-failed';
+      m.diagnostics.push({ kind: 'save-1a1-parse-' + code, index: slot });
+      return;
+    }
+  }
+  if (!framesRestored) m.diagnostics.push({ kind: 'save-restore-unmodeled', index: slot });
 }
 
 /** 0x19e：带覆写确认的写槽；目标存在且头读不回来时问宿主，拒绝 ⇒ 1。 */
@@ -2465,62 +2509,120 @@ async function saveCopy1ac(m: Machine, ops: Operand[]): Promise<void> {
 }
 
 /**
- * 0x1ae：捕捉纹理 → BMP 字节 → 写槽的 .STH；0 / 2。
+ * 0x1ae：捕捉表面 → core 组 24 位 BMP → 写槽的 .STH；0 / 2。
  *
- * ⚠ **实现现状，与 `FMT-SAVE-STH` 相反**：合同要求 core 自己组装 BMP 容器（头 + 对齐行宽的像素块），
- * 平台只给「像素 + 行宽 + 通道掩码」；这里却向平台要**整份 BMP 字节**再原样写盘。
- * 分歧登记在 `RES-SAVE-STH-CAPTURE`（本轮不重构）。
+ * ★ 顺序是**合同**（`CORE-OPS-SAVE-FILES` / `FMT-SAVE-STH`）：
+ *   ① 先以**截断**方式建立文件（引擎的 `CreateFileA`，disposition = 2）——
+ *      所以捕捉失败时槽里留下的是**一个 0 字节的 `.STH`**，不是"没有文件"；
+ *   ② 向平台要**表面像素**（`SurfacePixels`：像素 + 宽高 + 行宽 + 每像素字节数 + 通道掩码），
+ *      容器（两段头 + 行宽对齐 + 自下而上 + 蓝绿红）由 core 的 `bmp.ts` 组；
+ *   ③ 再写内容。
+ * ⛔ 失败**不补写**（不写占位字节 / 不删那个空文件）：空 / 半截文件正是引擎在失败槽里的样子。
+ * ⛔ 不要为了少一次平台写请求把 ①③ 合并：建立与写内容是两件事。
+ * ★ 写侧头里的宽高取自**被捕捉对象**；本层拿捕捉结果报的 `width` / `height` 当它
+ *   （平台是被问"这张表面"的，尺寸应当一致）—— ⛔ 不做裁剪 / 缩放。
  */
 async function thumbWrite1ae(m: Machine, ops: Operand[]): Promise<void> {
   const host = m.saveHost;
   if (!host) throw new Error('save-host-missing:0x1ae');
   const slot = readInt(m, ops, 2) | 0;
   const textureId = readInt(m, ops, 3) | 0;
+  const path = host.fileForSlot(slot, 'sth');
+
+  // ① 截断建立空文件（失败 ⇒ 2，后面的捕捉与写内容都不做）
+  if (!(await host.write(path, new Uint8Array(0)))) {
+    m.diagnostics.push({ kind: 'thumb-file-create-failed', index: slot });
+    writeInt(m, ops, 1, 2);
+    return;
+  }
+
   const rh = m.renderHost;
   if (!rh?.captureTexture) {
     m.diagnostics.push({ kind: 'render-host-capture-missing', index: textureId });
     writeInt(m, ops, 1, 2);
     return;
   }
-  const bytes = await rh.captureTexture(textureId);
-  if (!bytes) {
+  // ② 平台只给像素；容器在本层组
+  const surface = await rh.captureTexture(textureId);
+  if (!surface) {
     m.diagnostics.push({ kind: 'texture-capture-failed', index: textureId });
     writeInt(m, ops, 1, 2);
     return;
   }
-  const ok = await host.write(host.fileForSlot(slot, 'sth'), bytes);
+  let bmp: Uint8Array;
+  try {
+    bmp = encodeBmp24(surface);
+  } catch (error) {
+    const code = error instanceof BmpError ? error.code : 'unknown';
+    m.diagnostics.push({ kind: `thumb-encode-${code}`, index: textureId });
+    writeInt(m, ops, 1, 2);
+    return;
+  }
+
+  // ③ 写内容（文件已存在 ⇒ 这次失败留下的是空 / 半截文件，不补写）
+  const ok = await host.write(path, bmp);
   writeInt(m, ops, 1, ok ? 0 : 2);
 }
 
 /**
- * 0x1af：读槽的 .STH → BMP 字节 → 上传纹理；1 打开失败 / 2 内容或上传失败。
+ * 0x1af：读槽的 .STH → core 解 BMP → 上传纹理；1 打开失败 / 2 内容或上传失败。
  *
- * ⚠ **实现现状，与 `FMT-SAVE-STH` 相反**：合同要求 core 按容器解析、把**像素**交给平台；
- * 这里把**整份文件字节**原样转给平台（`RES-SAVE-STH-CAPTURE`）。
- * ★ 「两段头不齐 ⇒ 2」也是实现自己的判别，**不是引擎合同**：引擎对每次读取只看 `ReadFile` 布尔、
- *   不比较读到的字节数，短读行为本版不规定（`RES-SAVE-STH-SHORTREAD`）。
+ * ★ 判定顺序（`FMT-SAVE-STH` 的「条件」+ 本作生效的**屏幕捕捉**实现）：
+ *   ① 第 3 个操作数是**表面选择**，`0 / 1 / 2` 被拒 —— 被拒时**不读文件内容**、写错误通道、
+ *      以状态 2 结束。其余值继续（负数按位模式不等于这三个值 ⇒ 落在接受侧）。
+ *   ② 打开文件失败是**另一个状态**（1）。
+ *   ③ 容器由 core 解析（`bmp.ts`）：位深不在建模集合（本版只有 24）⇒ 状态 2 + 点名 `unmodeled` 的诊断
+ *      —— 这是**本版的实现缺口**（引擎对 1/4/8 是能读的），⛔ 不是合同。
+ *   ④ 像素经**已有**的 `uploadTexture`（RGBA8）交给平台；⛔ 不为读档再造一个"整份文件字节"的口。
  */
 async function thumbRead1af(m: Machine, ops: Operand[]): Promise<void> {
   const host = m.saveHost;
   if (!host) throw new Error('save-host-missing:0x1af');
   const slot = readInt(m, ops, 2) | 0;
-  const textureId = readInt(m, ops, 3) | 0;
+  const target = readInt(m, ops, 3) | 0;
+
+  // ① 表面选择：0 / 1 / 2 被拒（有符号读出的 0/1/2 与无符号位模式相同，负数两边都不等）
+  if (target === 0 || target === 1 || target === 2) {
+    // ⚠ 文案**未取证**（只证到"写错误通道"这一层）⇒ 占位，⛔ 不要当引擎文案去翻译。
+    m.scene.errorBuffer = 'サーフェスの指定が不正です';
+    m.diagnostics.push({ kind: 'surface-selection-invalid', index: target });
+    writeInt(m, ops, 1, 2);
+    return;
+  }
+
   const bytes = await host.read(host.fileForSlot(slot, 'sth'));
   if (!bytes) {
     writeInt(m, ops, 1, 1);
     return;
   }
-  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) {
+
+  let image;
+  try {
+    image = decodeBmp(bytes);
+  } catch (error) {
+    // BmpError 的 code 已经点名（bmp-header-short / bmp-not-bm / bmp-bitdepth-unmodeled / bmp-short-read）
+    const code = error instanceof BmpError ? error.code : 'bmp-decode-failed';
+    m.diagnostics.push({ kind: code, index: slot });
     writeInt(m, ops, 1, 2);
     return;
   }
-  const rh = m.renderHost;
-  if (!rh?.uploadTextureBytes) {
-    m.diagnostics.push({ kind: 'render-host-upload-missing', index: textureId });
-    writeInt(m, ops, 1, 2);
+
+  m.scene.textureObjects.set(target, { kind: 'normal', width: image.width, height: image.height });
+  if (m.renderHost === undefined) {
+    // 无后端：只做引擎数据（与 0x1f9 同一口径）
+    writeInt(m, ops, 1, 0);
     return;
   }
-  const ok = await rh.uploadTextureBytes(textureId, bytes);
+  const ok = await m.renderHost.uploadTexture({
+    textureId: target,
+    width: image.width,
+    height: image.height,
+    kind: 'normal',
+    rgba: image.rgba,
+    // 读档路径没有颜色键这一步 ⇒ 0（`TextureUploadRequest.color` 的"无键"哨兵）
+    color: 0,
+  });
+  if (!ok) m.diagnostics.push({ kind: 'texture-upload-failed', index: target });
   writeInt(m, ops, 1, ok ? 0 : 2);
 }
 

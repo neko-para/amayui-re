@@ -10,8 +10,10 @@
  * ★ **纯函数、无 Pixi、无 DOM**：所以它能用 `@env pure` 的守卫直接跑
  *   （`tools/test/emulator-new-scene-command-plan.test.mjs`）。⛔ 不要 import `pixi.js` / `document` / `node:*`。
  * ★ **本文件只规划、不画**（S0 / S1）：阶段是"引擎会发什么请求"的**结构**，不是像素。
- *   平台侧仍未执行命令档 ⇒ `scene-order.ts` 的 `scene-command-pass-render-unmodeled` 显式记账，
+ *   平台侧可按种类**开闸执行**（`PixiRenderHostOptions.commandExecKinds`，缺省空 ⇒ 零 op）；未开闸时仍由 `scene-command-pass-render-unmodeled` 显式记账，
  *   ⛔ 不许把"有阶段列表"说成"已经画过了"。
+ * ★ **阶段条目带表身份**（`covered` / `below-range` 的 `entries`）：执行层的 op 序列由
+ *   `scene-command-exec.ts` 从本文件的阶段派生；`tableKeys` 是旧形状，保留兼容（`keysOf(entries)`）。
  *
  * ════════════════ 按 spec 的哪几条写 ════════════════
  *
@@ -21,7 +23,7 @@
  *    用**覆盖区间起点**与**场景自身键窗**算「跳过额外变换」→ 按种类分派。
  *    ★ 盖章写进输出 `stamps`（规划器不改输入，也不改 core 状态）。
  * 3. **空表无动作**：命令表为空 ⇒ 一个请求都不发、一个格都不写 ⇒ 输出全空（含诊断）。
- * 4. **三表合并序**：命令档只覆盖**网格 → 辅助表 A → 绘制项**，按键严格升序、同键按这个平键序；
+ * 4. **三表合并序**：命令档只覆盖**辅助表 A → 网格 → 绘制项**，按键严格升序、同键按这个平键序；
  *    **辅助表 B 不参与**（它永远落到收尾扫描）⇒ 输入里根本没有辅助表 B。
  *    ★ 负键口径按表分：网格 / 辅助表 A 的负键按哨兵**不参与**；绘制项**不做符号检查**。
  * 5. **区间之下**（不是种类 1 独有）：
@@ -48,7 +50,7 @@
  * ════════════════ 明确不在这层的东西（⛔ 不假装） ════════════════
  *
  * - **像素操作**：离屏画布的建 / 切目标 / 表面拷贝 / 逐像素遮罩 / 效果技法 —— 一律没有执行；
- *   阶段只写"发到哪个目标、用哪一段区间"，平台侧仍然是未建模（见 `scene-command-pass-render-unmodeled`）。
+ *   阶段只写"发到哪个目标、用哪一段区间"；平台侧执行由 `scene-command-exec.ts` 的 op 序列承担（默认关闸，见 `commandExecKinds`）。
  * - **种类 2 的笔只算不画**：`composite.strokes` 是"引擎会把哪些矩形从哪块画布搬走"的**结构**；
  *   ⛔ 平台侧一个都没画（`pixi-host.ts` 不读 `strokes`），也⛔ 别把"有笔"说成"抹除过"。
  *   落点（视野偏移）/ 两块画布的内容 / 混合档与颜色仍不在本层。
@@ -164,17 +166,26 @@ export interface CommandPlanPhase {
   /** 用哪一段区间：`A` / `B`（种类 0 / 2）/ `single`（种类 1 / 3）；合成 · 拷贝 · 遮罩混合 = `null` */
   segment: 'A' | 'B' | 'single' | null;
   /**
-   * 这一趟要发出的**表键**（三表合并序：网格 → 辅助表 A → 绘制项；同键按这个平键序）。
+   * 这一趟要发出的**表键**（三表合并序：辅助表 A → 网格 → 绘制项；同键按这个平键序）。
    * ★ 同键的多条目会出现多次（一个条目一个键）—— 执行层才能区分它们。
+   * ★ 这是**旧形状**，保留兼容（`keysOf(entries)`）；⛔ 只靠它区分不出"这一条来自哪张表"，
+   *   执行层用 {@link entries}。
    */
   tableKeys: number[];
+  /**
+   * 这一趟的条目（与 {@link tableKeys} **一一对应、同序**，多了"来自哪张表"）。
+   * ★ 只有 `covered` / `below-range` 两阶段有这一格（其余阶段的 `tableKeys` 恒为空或不发射）。
+   * ★ `below-range` 只含**本段起点之前**的键；同键序 = 平键序 **辅助表 A → 网格 → 绘制项**。
+   * ★ 这是"该画哪些条目"的**结构**，⛔ 不是"已经画过了"（执行由 `scene-command-exec.ts` 的 op 承担，默认关闸）。
+   */
+  entries?: CommandPlanEntry[];
   /** 这一趟是否把这些键记成「本轮已消费」 */
   consumed: boolean;
   /** 这一趟是否**真的发出**绘制请求（种类 1 的只标记支 = `false`） */
   draw: boolean;
   /**
    * **种类 2 的抹除笔**（只有 `composite` 阶段有；按绘制顺序：一族恰好 2 笔、条带族每带 2 笔）。
-   * ★ 这是"引擎会发什么请求"的**结构**，⛔ 不是"已经画过了"（平台侧仍未执行命令档）。
+   * ★ 这是"引擎会发什么请求"的**结构**，⛔ 不是"已经画过了"（执行由 `scene-command-exec.ts` 的 op 承担，默认关闸）。
    * ★ 三态：`undefined` = 这一帧**算不出来**（没有同键绘制项的矩形 ⇒ 已记
    *   `scene-command-wipe-rect-unmodeled`）；`[]` = **算过但一笔都不发**（持续时间 0 / 分割幅 0 /
    *   类型 < 0 / 类型 > 11，各带自己的诊断）；非空 = 本帧要画的笔。
@@ -403,16 +414,17 @@ function planBlurPhases(
   consumed: Set<number>,
 ): CommandPlanPhase[] {
   const phases: CommandPlanPhase[] = [];
-  const covered = coveredKeys(merged, command.rangeA);
+  const covered = coveredEntries(merged, command.rangeA);
   phases.push({
     stage: 'covered',
     target: CANVAS_A,
     segment: 'single',
-    tableKeys: covered,
+    tableKeys: keysOf(covered),
+    entries: covered,
     consumed: true,
     draw: true,
   });
-  for (const key of covered) consumed.add(key);
+  for (const entry of covered) consumed.add(entry.key);
   // 合成：离屏画布 → 命令自己的纹理（效果技法 / 退路都在这段内部；本层不选路径）
   phases.push({ stage: 'composite', target: 'own', segment: null, tableKeys: [], consumed: false, draw: true });
   return phases;
@@ -433,16 +445,17 @@ function planMovieOverlayPhases(
   belowRangeAllowed: boolean,
 ): CommandPlanPhase[] {
   const phases: CommandPlanPhase[] = [];
-  const covered = coveredKeys(merged, command.rangeA);
+  const covered = coveredEntries(merged, command.rangeA);
   if (firstFrame) {
     if (belowRangeAllowed) {
       // 区间之下只在首帧、且能力档 < 2；单段 ⇒ 没有"另一段"可跳过
-      const below = belowRangeKeys(merged, command.rangeA.start, null, consumed);
+      const below = belowRangeEntries(merged, command.rangeA.start, null, consumed);
       phases.push({
         stage: 'below-range',
         target: CANVAS_A,
         segment: 'single',
-        tableKeys: below,
+        tableKeys: keysOf(below),
+        entries: below,
         consumed: false,
         draw: true,
       });
@@ -451,11 +464,12 @@ function planMovieOverlayPhases(
       stage: 'covered',
       target: CANVAS_A,
       segment: 'single',
-      tableKeys: covered,
+      tableKeys: keysOf(covered),
+      entries: covered,
       consumed: true,
       draw: true,
     });
-    for (const key of covered) consumed.add(key);
+    for (const entry of covered) consumed.add(entry.key);
     // 整幅表面拷贝：**离屏画布 → 影片纹理**（⛔ 方向不是"用某编号画影片纹理"）
     phases.push({ stage: 'copy', target: 'movie', segment: null, tableKeys: [], consumed: false, draw: true });
   } else {
@@ -464,11 +478,11 @@ function planMovieOverlayPhases(
       stage: 'mark',
       target: 'none',
       segment: 'single',
-      tableKeys: covered,
+      tableKeys: keysOf(covered),
       consumed: true,
       draw: false,
     });
-    for (const key of covered) consumed.add(key);
+    for (const entry of covered) consumed.add(entry.key);
   }
   // 尾段：每帧一次（遮罩混合；源 = 离屏画布、目标 = 命令自己的影片纹理）
   phases.push({ stage: 'mask-blend', target: 'movie', segment: null, tableKeys: [], consumed: false, draw: true });
@@ -488,26 +502,28 @@ function addCanvasPhases(
 ): void {
   if (belowRangeAllowed) {
     // 区间之下：键 < 本段起点、门 = 未消费、**跳过落在另一段里的条目**；不置已消费
-    const below = belowRangeKeys(merged, range.start, other, consumed);
+    const below = belowRangeEntries(merged, range.start, other, consumed);
     phases.push({
       stage: 'below-range',
       target: canvas,
       segment,
-      tableKeys: below,
+      tableKeys: keysOf(below),
+      entries: below,
       consumed: false,
       draw: true,
     });
   }
-  const covered = coveredKeys(merged, range);
+  const covered = coveredEntries(merged, range);
   phases.push({
     stage: 'covered',
     target: canvas,
     segment,
-    tableKeys: covered,
+    tableKeys: keysOf(covered),
+    entries: covered,
     consumed: true,
     draw: true,
   });
-  for (const key of covered) consumed.add(key);
+  for (const entry of covered) consumed.add(entry.key);
 }
 
 /* ─────────────────────────── 种类 2 的抹除笔（算矩形，不落笔） ─────────────────────────── */
@@ -558,17 +574,41 @@ function planWipeStrokes(
 
 /* ─────────────────────────────── 三表合并序 / 区间筛选 ─────────────────────────────── */
 
-/** 表身份（只用于同键平键序：0 = 网格、1 = 辅助表 A、2 = 绘制项） */
+/**
+ * 表身份（只用于同键平键序：0 = 辅助表 A、1 = 网格、2 = 绘制项）。
+ * ★ 这个秩**就是**引擎比较链的次序：辅助表 A → 网格 → 绘制项。
+ */
 type CommandTableId = 0 | 1 | 2;
 
-/** 合并序里的一项（保留"来自哪张表"只是为了同键平键序；输出只用 `key`） */
+/** 阶段条目里的**表名**（与合并序的表秩一一对应：`auxA` = 0、`mesh` = 1、`items` = 2） */
+export type CommandEntryTable = 'auxA' | 'mesh' | 'items';
+
+/**
+ * 一个阶段条目：**三表合并序里的一个条目**（键 + 它来自哪张表）。
+ * ★ 同键可以有多条（辅助表 A / 网格 / 绘制项各一条），次序 = 平键序
+ *   **辅助表 A → 网格 → 绘制项**。执行层靠 `table` 挑发射路径（网格 / 绘制项 / 辅助表 A）。
+ * ★ 这是"结构"，⛔ 不是"已经画过"。
+ */
+export interface CommandPlanEntry {
+  key: number;
+  table: CommandEntryTable;
+}
+
+/** 表秩 → 表名（一处映射；⛔ 别在两个地方各写一份） */
+const TABLE_NAME: { readonly [K in CommandTableId]: CommandEntryTable } = {
+  0: 'auxA',
+  1: 'mesh',
+  2: 'items',
+};
+
+/** 合并序里的一项（保留"来自哪张表"既为了同键平键序，也为了阶段条目带出表身份） */
 interface MergedKey {
   key: number;
   table: CommandTableId;
 }
 
 /**
- * 三表合并序：**键严格升序**；同键**网格 → 辅助表 A → 绘制项**。
+ * 三表合并序：**键严格升序**；同键**辅助表 A → 网格 → 绘制项**。
  * ★ 负键口径按表分：网格 / 辅助表 A 的负键**不参与**；绘制项**不做符号检查**。
  * ★ 同表内保持输入的相对次序（`Array.prototype.sort` 稳定）。
  */
@@ -597,32 +637,40 @@ export function mergeTableKeys(tables: CommandTableKeys): MergedKey[] {
   return entries;
 }
 
-/** 覆盖区间 `[start, start + count)`：三表合并序里的键（含同键的多个条目） */
-function coveredKeys(merged: readonly MergedKey[], range: { start: number; count: number }): number[] {
-  const out: number[] = [];
+/** 阶段条目的键序列（`tableKeys` 的唯一来源 ⇒ 两个形状不可能漂） */
+function keysOf(entries: readonly CommandPlanEntry[]): number[] {
+  return entries.map((entry) => entry.key);
+}
+
+/** 覆盖区间 `[start, start + count)`：三表合并序里的条目（含同键的多个条目） */
+function coveredEntries(merged: readonly MergedKey[], range: { start: number; count: number }): CommandPlanEntry[] {
+  const out: CommandPlanEntry[] = [];
   for (const entry of merged) {
-    if (entry.key >= range.start && entry.key < range.start + range.count) out.push(entry.key);
+    if (entry.key >= range.start && entry.key < range.start + range.count) {
+      out.push({ key: entry.key, table: TABLE_NAME[entry.table] });
+    }
   }
   return out;
 }
 
 /**
- * 区间之下：键**小于**本段起点、**未消费**、且**不在另一段区间里**的条目键（三表合并序）。
+ * 区间之下：键**小于**本段起点、**未消费**、且**不在另一段区间里**的条目（三表合并序）。
  * ★ `other === null` ⇒ 单段命令，没有"另一段"可跳过。
  * ★ 门里的「有效」这一位不在键集合里 ⇒ 本层只能施加「未消费」；⛔ 不声称这里判过有效位。
+ * ★ **本段起点之前**这条判据就是 `entry.key >= start ⇒ break`（merged 升序），⛔ 不要改成"过滤"两趟。
  */
-function belowRangeKeys(
+function belowRangeEntries(
   merged: readonly MergedKey[],
   start: number,
   other: { start: number; count: number } | null,
   consumed: ReadonlySet<number>,
-): number[] {
-  const out: number[] = [];
+): CommandPlanEntry[] {
+  const out: CommandPlanEntry[] = [];
   for (const entry of merged) {
     if (entry.key >= start) break; // merged 升序 ⇒ 后面的都 ≥ start
     if (consumed.has(entry.key)) continue;
     if (other !== null && entry.key >= other.start && entry.key < other.start + other.count) continue;
-    out.push(entry.key);
+    out.push({ key: entry.key, table: TABLE_NAME[entry.table] });
   }
   return out;
 }

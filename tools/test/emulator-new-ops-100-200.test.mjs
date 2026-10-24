@@ -1,4 +1,4 @@
-/** @env pure @kind contract @why 浮点/位运算方向、0x2da 编号上限、0x23b 逐位读序、0x1a0 失败路径只写 op1、四张同键表集合任一写错都不抛，只会静默算错或读错操作数 */
+/** @env pure @kind contract @why 浮点/位运算方向、0x2da 编号上限、0x23b 逐位读序、0x1a0 失败路径只写 op1、0x1ae 先建空文件再写 core 组的 BMP、0x1af 表面选择 0/1/2 被拒不读文件、四张同键表集合任一写错都不抛，只会静默算错或读错操作数 */
 /**
  * tools/test/emulator-new-ops-100-200.test.mjs —— 0x191 / 0x2d0 / 0x2d1 / 0x2d3 / 0x1c7 的合同守卫。
  *
@@ -780,31 +780,147 @@ test('★ `0x21d`：源 → 目标整份复制；三张表都无源 ⇒ 错误�
   assert.equal(m.diagnostics.length, before + 1);
 });
 
-test('★ `0x1ae` / `0x1af`：缩略图捕捉 → .STH；读 .STH → 校验 BM → 上传', async () => {
-  const bmp = Buffer.alloc(64); bmp.write('BM', 0, 'latin1');
-  let written = null;
-  const w = machine({
-    renderHost: new HeadlessRenderHost({ captureBytes: bmp }),
-    saveHost: saveHost({ write: async (p, b) => { written = { p, b }; return true; } }),
+/** 小端读（`encodeBmp24` 交回的是 `Uint8Array`，没有 Buffer 的 `readUInt32LE`）。 */
+const u16le = (b, o) => b[o] | (b[o + 1] << 8);
+const u32le = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+
+/**
+ * 一块**合成表面**（`SurfacePixels`）：2 × 2、每像素 3 字节、掩码取 `R=0xFF` 口径 ⇒
+ * 源像素字节序是 **R,G,B**。上排 = 红 / 绿，下排 = 蓝 / 白 —— 便于断言"自下而上"。
+ */
+function surface2x2() {
+  return {
+    pixels: new Uint8Array([
+      255, 0, 0, 0, 255, 0, // 上排：红 / 绿
+      0, 0, 255, 255, 255, 255, // 下排：蓝 / 白
+    ]),
+    width: 2,
+    height: 2,
+    stride: 6,
+    bytesPerPixel: 3,
+    masks: { r: 0xff, g: 0xff00, b: 0xff0000 },
+  };
+}
+
+test('★ `0x1ae`：先截断建空文件 → 再写 core 组装的 24 位 BMP（头字段 / 自下而上）', async () => {
+  const writes = [];
+  const m = machine({
+    renderHost: new HeadlessRenderHost({ captureSurface: surface2x2() }),
+    saveHost: saveHost({ write: async (p, b) => { writes.push({ p, bytes: b }); return true; } }),
   });
-  await HANDLERS.get(0x1ae)(w, [op(3, 1), op(0, 4), op(0, 9)]);
-  assert.equal(readInt(w, [op(3, 1)], 1), 0);
-  assert.equal(written.p, 'slot4.sth');
-  assert.equal(written.b[0], 0x42);
+  await HANDLERS.get(0x1ae)(m, [op(3, 1), op(0, 4), op(0, 9)]);
+  assert.equal(readInt(m, [op(3, 1)], 1), 0);
+
+  // ★ 合同：引擎先以截断方式建立文件，再写内容（⛔ 不合并成一次写）
+  assert.equal(writes.length, 2, '先建空文件、后写内容');
+  assert.equal(writes[0].p, 'slot4.sth');
+  assert.equal(writes[0].bytes.length, 0, '★ 第一次写 = 一个 0 字节文件（截断建立）');
+
+  const bmp = writes[1].bytes;
+  assert.equal(writes[1].p, 'slot4.sth');
+  assert.equal(bmp[0], 0x42, 'B');
+  assert.equal(bmp[1], 0x4d, 'M');
+  // 行宽 = ceil(24 × 2 / 32) × 4 = 8；像素块 = 8 × 2 = 16
+  assert.equal(u32le(bmp, 2), 16 + 40, '★ 声明长度 = 行宽 × 高 + 40（不是 +54）');
+  assert.equal(u32le(bmp, 10), 54, '像素起点 = 两段头长');
+  assert.equal(u32le(bmp, 14), 40, 'biSize');
+  assert.equal(u32le(bmp, 18), 2, '宽');
+  assert.equal(u32le(bmp, 22), 2, '高（正数 ⇒ 自下而上）');
+  assert.equal(u16le(bmp, 26), 1, '平面数');
+  assert.equal(u16le(bmp, 28), 24, '位深 = 24');
+  assert.equal(bmp.length, 54 + 16, '真实长度 = 54 + 像素字节数');
+
+  // ★ 自下而上：文件第一行 = 源的**最后**一行（蓝 / 白），每像素 蓝、绿、红
+  assert.deepEqual([...bmp.subarray(54, 60)], [255, 0, 0, 255, 255, 255], '文件首行 = 源末行（蓝 / 白），BGR 顺序');
+  assert.deepEqual([...bmp.subarray(62, 68)], [0, 0, 255, 0, 255, 0], '文件第二行 = 源首行（红 / 绿）');
+  assert.deepEqual([...bmp.subarray(60, 62)], [0, 0], '行末填充字节为 0');
+});
+
+test('★ `0x1ae`：捕捉失败 ⇒ 槽里留一个 0 字节文件、状态 2、不补写', async () => {
+  const writes = [];
+  const m = machine({
+    renderHost: new HeadlessRenderHost(), // 缺省不提供 captureSurface ⇒ 捕捉不到
+    saveHost: saveHost({ write: async (p, b) => { writes.push({ p, bytes: b }); return true; } }),
+  });
+  await HANDLERS.get(0x1ae)(m, [op(3, 1), op(0, 4), op(0, 9)]);
+  assert.equal(readInt(m, [op(3, 1)], 1), 2);
+  assert.equal(writes.length, 1, '★ 只发生"建空文件"这一次写（⛔ 不补写占位字节）');
+  assert.equal(writes[0].bytes.length, 0);
+});
+
+test('★ `0x1af`：core 解 24 位 BMP → 一次 uploadTexture（RGBA8），状态 0', async () => {
+  const writes = [];
+  const writer = machine({
+    renderHost: new HeadlessRenderHost({ captureSurface: surface2x2() }),
+    saveHost: saveHost({ write: async (p, b) => { writes.push({ p, bytes: b }); return true; } }),
+  });
+  await HANDLERS.get(0x1ae)(writer, [op(3, 1), op(0, 4), op(0, 9)]);
+  const bmp = writes[1].bytes;
 
   const rh = new HeadlessRenderHost();
   const r = machine({ renderHost: rh, saveHost: saveHost({ read: () => bmp }) });
   await HANDLERS.get(0x1af)(r, [op(3, 1), op(0, 4), op(0, 9)]);
   assert.equal(readInt(r, [op(3, 1)], 1), 0);
-  assert.equal(rh.requests.some((x) => x.kind === 'upload-texture-bytes'), true);
+  const upload = rh.requests.find((x) => x.kind === 'upload-texture');
+  assert.ok(upload, '★ 读侧走已有 uploadTexture（⛔ 不是"整份文件字节"的口）');
+  assert.equal(upload.request.textureId, 9);
+  assert.equal(upload.request.width, 2);
+  assert.equal(upload.request.height, 2);
+  assert.equal(upload.request.rgba.length, 2 * 2 * 4, '像素是 RGBA8');
+  assert.deepEqual([...upload.request.rgba.subarray(0, 4)], [255, 0, 0, 255], '左上像素 = 源首行首列（红）');
+  assert.equal(r.scene.textureObjects.get(9).width, 2, '读入的缩略图重新建立第 3 个操作数指定的对象');
 
   const miss = machine({ renderHost: rh, saveHost: saveHost({ read: () => null }) });
   await HANDLERS.get(0x1af)(miss, [op(3, 1), op(0, 4), op(0, 9)]);
-  assert.equal(readInt(miss, [op(3, 1)], 1), 1);
+  assert.equal(readInt(miss, [op(3, 1)], 1), 1, '打开失败 = 状态 1（与内容失败分开）');
 
   const bad = machine({ renderHost: rh, saveHost: saveHost({ read: () => Buffer.alloc(64) }) });
   await HANDLERS.get(0x1af)(bad, [op(3, 1), op(0, 4), op(0, 9)]);
-  assert.equal(readInt(bad, [op(3, 1)], 1), 2);
+  assert.equal(readInt(bad, [op(3, 1)], 1), 2, '不是 BM ⇒ 状态 2');
+});
+
+test('★ `0x1af`：第 3 个操作数 0 / 1 / 2 被拒 ⇒ 状态 2、不读文件内容、写错误通道', async () => {
+  for (const target of [0, 1, 2]) {
+    const rh = new HeadlessRenderHost();
+    const reads = [];
+    const m = machine({
+      renderHost: rh,
+      saveHost: saveHost({ read: () => { reads.push(1); return null; } }),
+    });
+    await HANDLERS.get(0x1af)(m, [op(3, 1), op(0, 4), op(0, target)]);
+    assert.equal(readInt(m, [op(3, 1)], 1), 2, `op3=${target} ⇒ 状态 2`);
+    assert.equal(reads.length, 0, `★ op3=${target} ⇒ 一次文件读都不发生（被拒发生在读内容之前）`);
+    assert.equal(rh.requests.length, 0, `op3=${target} ⇒ 不发起上传`);
+    assert.equal(m.scene.errorBuffer, 'サーフェスの指定が不正です', '写错误通道（⚠ 文案未取证，占位）');
+    assert.ok(m.diagnostics.some((d) => d.kind === 'surface-selection-invalid'));
+  }
+  // 负数 / 其它值落在接受侧：3 与 -1 都继续（-1 按位模式不等于 0/1/2）
+  for (const target of [3, -1]) {
+    const m = machine({
+      renderHost: new HeadlessRenderHost(),
+      saveHost: saveHost({ read: () => null }),
+    });
+    await HANDLERS.get(0x1af)(m, [op(3, 1), op(0, 4), op(0, target)]);
+    assert.equal(readInt(m, [op(3, 1)], 1), 1, `op3=${target} ⇒ 继续到"打开文件"（这里没有文件 ⇒ 1）`);
+  }
+});
+
+test('★ `0x1af`：位深 8 位 ⇒ 状态 2 + `bmp-bitdepth-unmodeled` 诊断、不上传（实现缺口，≠ 合同）', async () => {
+  const writes = [];
+  const writer = machine({
+    renderHost: new HeadlessRenderHost({ captureSurface: surface2x2() }),
+    saveHost: saveHost({ write: async (p, b) => { writes.push({ p, bytes: b }); return true; } }),
+  });
+  await HANDLERS.get(0x1ae)(writer, [op(3, 1), op(0, 4), op(0, 9)]);
+  const bmp = Uint8Array.from(writes[1].bytes);
+  bmp[28] = 8; bmp[29] = 0; // biBitCount ← 8
+
+  const rh = new HeadlessRenderHost();
+  const m = machine({ renderHost: rh, saveHost: saveHost({ read: () => bmp }) });
+  await HANDLERS.get(0x1af)(m, [op(3, 1), op(0, 4), op(0, 9)]);
+  assert.equal(readInt(m, [op(3, 1)], 1), 2);
+  assert.ok(m.diagnostics.some((d) => d.kind === 'bmp-bitdepth-unmodeled'), '★ 诊断必须点名 unmodeled');
+  assert.equal(rh.requests.some((x) => x.kind === 'upload-texture'), false);
 });
 
 test('★ `0x20b`：颜色打包 / alpha 上夹 / 夹到对象逻辑矩形 / 走 RenderHost.fillTexture', async () => {

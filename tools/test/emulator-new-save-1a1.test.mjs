@@ -17,7 +17,8 @@ import assert from 'node:assert/strict';
 
 import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
 import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
-import { encodeInt, readInt } from '../../apps/emulator-new/src/core/values.ts';
+import { decodeInt, encodeInt, readInt } from '../../apps/emulator-new/src/core/values.ts';
+import { buildSaveFile } from '../../apps/emulator-new/src/core/save-codec.ts';
 
 const KEY = 0x1234abcd;
 const op = (type, raw) => ({ type, raw });
@@ -79,7 +80,7 @@ test('★ `0x1a1`：文件存在且头合法 ⇒ 成功路径**不写** op1（�
   assert.deepEqual(host.calls, ['read:slot5.dat'], '★ 只读打开；不许写 / 截断该槽文件');
   const kinds = m.diagnostics.map((d) => d.kind);
   assert.ok(kinds.includes('save-restore-unmodeled'), '★ 负载还原（帧 / 池 / 局部）本层未建模 ⇒ 必须留痕');
-  assert.ok(kinds.includes('save-recode-unmodeled'), '★ 整池重编码本层未建模（core 无现成入口）⇒ 必须留痕');
+  assert.ok(!kinds.includes('save-recode-unmodeled'), '三池已重编码 ⇒ 不再记未建模');
   assert.ok(!kinds.includes('save-1a1-header-invalid'), '头合法 ⇒ 不许报头不合法');
 });
 
@@ -102,4 +103,58 @@ test('★ `0x1a1`：头不合法（长度不足 / 魔数不对）⇒ 记 save-1a
     assert.ok(kinds.includes('save-1a1-header-invalid'), `${label} ⇒ 记 save-1a1-header-invalid`);
     assert.ok(!kinds.includes('save-restore-unmodeled'), `${label} ⇒ 读失败，不许记"还原未建模"`);
   }
+});
+
+test('★ 0x1a1：完整文件 ⇒ 解析成功 + 仍记 restore-unmodeled；坏 CRC ⇒ 解析诊断且不写 op1、不记 restore', async () => {
+  const snapshot = { frame: 0, records: [{ parent: -1, scriptIndex: 0, ret: [], tableA: -1, tableB: -1 }], ints: [7, -9], floats: [0x3f800000], strings: ['ok'], version1: 3, version2: 20 };
+  const full = buildSaveFile(snapshot, KEY, 0x11223344, 0x1235);
+  const host = saveHost({ read: () => full });
+  const m = machine({ saveHost: host });
+  const ops = [op(3, 4), op(0, 5)];
+  seedOp1(m, ops, SENTINEL);
+  await HANDLERS.get(0x1a1)(m, ops);
+  assert.equal(readInt(m, ops, 1), 0, '还原先清六池 ⇒ 未存档的 op1 格被清 0');
+  assert.equal(decodeInt(m.globalInt.get(0), KEY), 7, '整型池已按新 key 重编码');
+  const kinds = m.diagnostics.map((d) => d.kind);
+  assert.ok(kinds.includes('save-1a1-pools-applied'), '完整文件必须应用三池');
+  assert.ok(kinds.includes('save-restore-unmodeled'), '帧仍未应用');
+
+  const bad = full.slice(); bad[296] ^= 0xff;
+  const h2 = saveHost({ read: () => bad });
+  const m2 = machine({ saveHost: h2 });
+  const ops2 = [op(3, 4), op(0, 5)];
+  seedOp1(m2, ops2, SENTINEL);
+  await HANDLERS.get(0x1a1)(m2, ops2);
+  assert.equal(readInt(m2, ops2, 1), SENTINEL, '解析失败也不写 op1');
+  const kinds2 = m2.diagnostics.map((d) => d.kind);
+  assert.ok(kinds2.includes('save-1a1-parse-save-crc1'), 'CRC 错误必须点名');
+  assert.ok(!kinds2.includes('save-restore-unmodeled'), '解析失败不许假装进入还原');
+});
+
+test('★ 0x1a1：有 loadScript ⇒ 按帧记录重建（cur / ip / parent / ret / 表）', async () => {
+  const snapshot = {
+    frame: 1,
+    records: [
+      { parent: -1, scriptIndex: 0, ret: [], tableA: -1, tableB: -1 },
+      { parent: 0, scriptIndex: 7, ret: [4, 9], tableA: 0, tableB: 1 },
+    ],
+    ints: [], floats: [], strings: [], version1: 3, version2: 20,
+  };
+  const file = buildSaveFile(snapshot, KEY, 0x11223344, 0x1235);
+  const host = saveHost({ read: () => file });
+  const tables = (id) => (id === 7 ? { msg: [3], call: [0, 5], sub: null } : null);
+  const m = machine({
+    saveHost: host,
+    loadScript: async () => new Uint8Array(64),
+    scriptTables: tables,
+  });
+  const ops = [op(3, 4), op(0, 5)];
+  await HANDLERS.get(0x1a1)(m, ops);
+  assert.equal(m.cur, 1, '当前帧 = 存档当前帧');
+  assert.equal(m.slots[1].parent, 0);
+  assert.deepEqual(m.slots[1].frame.retStack, [4, 9]);
+  assert.equal(m.slots[1].ip, 5 * 4 + 12, 'tableB 优先并推进 3 字');
+  const kinds = m.diagnostics.map((d) => d.kind);
+  assert.ok(kinds.includes('save-1a1-frames-restored'));
+  assert.ok(!kinds.includes('save-restore-unmodeled'), '帧已还原 ⇒ 不再记未建模');
 });

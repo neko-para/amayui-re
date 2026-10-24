@@ -287,3 +287,31 @@ test('★ 不给 key ⇒ Machine 运行期生成非 0 值（正常入口不需�
   assert.notEqual(m.key, 0, '运行期生成的 key 必须非 0');
   assert.equal(m.diagnostics.filter((d) => d.kind === 'codec-key-placeholder').length, 0);
 });
+
+test('★ 0x6 打开失败：当前帧停在目标槽、抛类别 7（可重试）；深度失败是类别 1', async () => {
+  const root = script([[0x6, [[0, 1], [0, 4]]], [NOP, []]]);
+  const m = new Machine({ body: root, table, key: KEY, loadScript: async () => null });
+  await assert.rejects(m.run(), (error) => {
+    assert.equal(error.category ?? error.cause?.category, 7, '打开失败属于显示消息型（可重试 / 忽略）');
+    return true;
+  });
+  assert.equal(m.cur, 4, '打开失败时当前帧停在目标槽（⛔ 不是恢复成调用者）');
+  assert.equal(m.slots[4] ?? null, null, '装载失败不建记录');
+
+  const deep = script([[0x6, [[0, 1], [0, 40]]], [NOP, []]]);
+  const d = new Machine({ body: deep, table, key: KEY, loadScript: async () => script([[NOP, []]]) });
+  await assert.rejects(d.run(), (error) => {
+    assert.equal(error.category ?? error.cause?.category, 1, '深度失败是退出型，只能终止');
+    return true;
+  });
+});
+
+test('★ 0x3 打开失败：当前帧停在子槽、抛类别 7', async () => {
+  const root = script([[0x3, [[0, 1]]], [NOP, []]]);
+  const m = new Machine({ body: root, table, key: KEY, loadScript: async () => null });
+  await assert.rejects(m.run(), (error) => {
+    assert.equal(error.category ?? error.cause?.category, 7);
+    return true;
+  });
+  assert.equal(m.cur, 1, '打开失败时当前帧停在子槽（不是父帧）');
+});

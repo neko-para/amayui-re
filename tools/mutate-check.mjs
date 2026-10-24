@@ -2099,25 +2099,41 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
     what: '0x1a0 打不开时顺手写一格 op3 ⇒ 失败路径"op3..9 保持原值"的断言必须红（半截字段是静默的）',
   },
-  // ── 0x1af：`.STH` 的 BMP 判别字节（`bm` 的第二字节 0x4d）──
+  // ── 0x1af 读侧的 BMP 判别（★ 容器解析已搬回 core：判据在 `core/bmp.ts` 的 `isBmp`）──
   //   ★ 判别写成别的字节后，真机 `.STH`（B=0x4d）会被当成"内容不可解"，而合成数据照样能过 ⇒
   //     "缩略图读得回来"这件事只有这条断言在守。
   {
-    file: 'apps/emulator-new/src/core/handlers.ts',
-    from: '  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) {',
-    to: '  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x00) {',
-    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    file: 'apps/emulator-new/src/core/bmp.ts',
+    from: '  return bytes[0] === 0x42 && bytes[1] === 0x4d;',
+    to: '  return bytes[0] === 0x42 && bytes[1] === 0x00; // 变异：判别字节写错',
+    guard: 'tools/test/emulator-new-bmp.test.mjs',
     what: '0x1af 的 BMP 判别字节写错（0x4d → 0x00）⇒ 带 "BM" 的文件被判成不可解，状态码从 0 变 2',
   },
-  // ── 0x1af：真机 `.STH` 的**两段头读满**（★ 去掉长度检查 ⇒ 只剩 40 字节的文件照样进上传请求）──
+  // ── 0x1af：`.STH` 的**两段头读满**（★ 去掉长度检查 ⇒ 只剩 40 字节的文件走进位深 / 像素判据）──
   //   ★ 这条守的是**实现现状**（引擎只看 ReadFile 布尔、短读未取证 ⇒ 见 RES-SAVE-STH-SHORTREAD），
-  //     所以它必须钉在实现守卫上，⛔ 不能挪进 `spec-save-sth`（那会把"未取证"伪装成合同）。
+  //     所以它必须钉在实现守卫上（断言错误 code = bmp-header-short），⛔ 不能挪进 `spec-save-sth`。
   {
-    file: 'apps/emulator-new/src/core/handlers.ts',
-    from: '  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) {',
-    to: '  if (bytes.length < 0 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) { // 变异：不再要求两段头读满',
-    guard: 'tools/test/emulator-new-save-sth.assets.test.mjs',
-    what: '0x1af 不再检查「两段头是否读满」⇒ 只剩 40 字节的真实 `.STH` 被当成可解、进上传请求（实现守卫必须红）',
+    file: 'apps/emulator-new/src/core/bmp.ts',
+    from: '  if (bytes.length < HEADER_SIZE) {',
+    to: '  if (bytes.length < 0) { // 变异：不再要求两段头读满',
+    guard: 'tools/test/emulator-new-bmp.test.mjs',
+    what: '0x1af 不再检查「两段头是否读满」⇒ 只剩 40 字节的 `.STH` 不再报 bmp-header-short（实现守卫必须红）',
+  },
+  // ── 写侧的**声明长度 = 行宽 × 高 + 40**（★ 改成 +54 就是"修正"那个写侧缺陷）──
+  {
+    file: 'apps/emulator-new/src/core/bmp.ts',
+    from: '  writeU32LE(out, 2, pixelBytes + 40); // ★ 声明长度（刻意比实际短 14；见函数注释）',
+    to: '  writeU32LE(out, 2, pixelBytes + 54); // 变异：把 +40 修正成 +54',
+    guard: 'tools/test/emulator-new-bmp.test.mjs',
+    what: '把 `.STH` 的声明长度"修正"成 54 + 像素 ⇒ `0x1ae` 写出的头不再是引擎的字节（容器守卫必须红）',
+  },
+  // ── 写侧的**行序自下而上**（★ 写成 `row` ⇒ 图上下颠倒，但文件仍然"能解"）──
+  {
+    file: 'apps/emulator-new/src/core/bmp.ts',
+    from: '    let dst = HEADER_SIZE + (height - 1 - row) * rowStride;',
+    to: '    let dst = HEADER_SIZE + row * rowStride; // 变异：行序写反',
+    guard: 'tools/test/emulator-new-bmp.test.mjs',
+    what: '`0x1ae` 写出时不再翻转行序（`height-1-row` → `row`）⇒ 缩略图上下颠倒而状态码仍是 0（行序守卫必须红）',
   },
   // ── `.STH` 的**声明长度 = 像素 + 40**（★ 改成 +54 就是"修正"那个写侧缺陷；真实样本守卫必须红）──
   {
@@ -2577,13 +2593,6 @@ const MUTATIONS = [
     what: '两笔的落笔顺序/画布颠倒 ⇒ 先 B 后 A（与"先 A 后 B"相反）',
   },
   // ── 第十一批：0x1a1 读回方向 ──
-  {
-    file: 'apps/emulator-new/src/core/handlers.ts',
-    from: "  m.diagnostics.push({ kind: 'save-restore-unmodeled', index: slot });",
-    to: "  writeInt(m, ops, 1, 0); // 变异：成功路径也写 op1\n  m.diagnostics.push({ kind: 'save-restore-unmodeled', index: slot });",
-    guard: 'tools/test/emulator-new-save-1a1.test.mjs',
-    what: '0x1a1 成功路径写第 1 操作数 ⇒ 与"成功不写、只有打不开写 1"相反',
-  },
   // ── 第十二批：抹除笔接线 ──
   {
     file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
@@ -2602,39 +2611,54 @@ const MUTATIONS = [
   // ── 第十四批：存档块布局 ──
   {
     file: 'apps/emulator-new/src/core/save-codec.ts',
-    from: '  const block1 = 4 * c1;',
-    to: '  const block1 = 0; // 变异：浮点块长度 0',
+    from: "  if (magic !== 'S4SD' && magic !== 'S3SD') throw new SaveFormatError('save-magic');",
+    to: '  // 变异：不校验魔数',
     guard: 'tools/test/emulator-new-save-codec.test.mjs',
-    what: '浮点块长度写成 0 ⇒ 浮点内容被写到错误位置 / 丢掉（块 1 布局崩）',
+    what: '读侧不校验魔数 ⇒ 任意文件都能进负载解析（把别的游戏存档当本作）',
   },
   {
     file: 'apps/emulator-new/src/core/save-codec.ts',
-    from: '  const writesFloatContent = s.version1 !== 2 && s.version2 >= 20;',
-    to: '  const writesFloatContent = true; // 变异：无视版本门',
+    from: '  const textureBytes = version1 === 3 ? 20000 : 0;',
+    to: '  const textureBytes = 0; // 变异：v1=3 也不认 20000 B 纹理表',
     guard: 'tools/test/emulator-new-save-codec.test.mjs',
-    what: '浮点内容不再受 v1/v2 门控 ⇒ v2<20 或 v1=2 的容器也写出浮点（洞不存在）',
+    what: '读侧不认 v1=3 的 20000 B 纹理表 ⇒ 帧记录整体前移 20000 B（记录的 parent 读成纹理数据）',
   },
   {
-    file: 'apps/emulator-new/src/core/save-codec.ts',
-    from: '  writeU32(view, countBase + 4, c1);',
-    to: '  writeU32(view, countBase + 4, 0); // 变异：c1 计数写 0',
-    guard: 'tools/test/emulator-new-save-codec.test.mjs',
-    what: '计数槽 c1 写成 0 ⇒ 读侧看不到浮点块长度（文件自相矛盾）',
-  },
-  {
-    file: 'apps/emulator-new/src/core/agf.ts',
-    from: '  return color > 0;',
-    to: '  return color !== 0; // 变异：-1 也被当成键（白键）',
-    guard: 'tools/test/emulator-new-agf.test.mjs',
-    what: '颜色键哨兵判据从"正数"退化成"非 0" ⇒ 影片帧的 -1 被当成 0xFFFFFFFF 白键（白闪 / logo 边缘黑噪点）',
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "      m.diagnostics.push({ kind: 'save-1a1-parse-' + code, index: slot });\n      return;",
+    to: "      m.diagnostics.push({ kind: 'save-1a1-parse-' + code, index: slot }); // 变异：失败也继续还原",
+    guard: 'tools/test/emulator-new-save-1a1.test.mjs',
+    what: '0x1a1 解析失败后仍进“还原未建模”支 ⇒ 坏档被当成读成功（不写 op1 但假装恢复）',
   },
   {
     file: 'apps/emulator-new/src/core/machine.ts',
-    from: '  return entries.indexOf(position);',
-    to: '  return entries[0] === undefined ? -1 : position - entries[0]; // 变异：把下标当"位置减表首项"',
-    guard: 'tools/test/emulator-new-save-tables.test.mjs',
-    what: '位置表下标从"线性查找"退化成"位置减表首项" ⇒ 紧凑合成表能过、真实脚本全 −1（rec[259]/[260] 丢位置）',
+    from: '    bank.int.clear();',
+    to: '    // 变异：不清整型池',
+    guard: 'tools/test/emulator-new-save-1a1.test.mjs',
+    what: '还原前不清整型池 ⇒ 文件里没有的槽保留旧值（存档污染当前状态）',
   },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '      if (rec.tableB >= 0 && tables?.call?.[rec.tableB] !== undefined) ip = tables.call[rec.tableB]! * 4 + 12;',
+    to: '      if (false) ip = 0; // 变异：忽略 tableB 优先级',
+    guard: 'tools/test/emulator-new-save-1a1.test.mjs',
+    what: '还原执行位置不优先 tableB ⇒ 换脚本位置不 +12 / 落回 tableA（恢复后重跑调用）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '    for (let i = 0; i < pools.ints.length; i += 1) bank.int.set(i, encodeInt(pools.ints[i]! | 0, this.key));',
+    to: '    for (let i = 0; i < pools.ints.length; i += 1) bank.int.set(i, pools.ints[i]! | 0); // 变异：不重编码',
+    guard: 'tools/test/emulator-new-save-1a1.test.mjs',
+    what: '还原整型池不按当前 key 重编码 ⇒ 脚本读到错值（存档来自别的 key）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-order.ts',
+    from: '    if (!Number.isInteger(value) || value < 0 || value > 3) continue;',
+    to: '    // 变异：不过滤种类',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: 'URL 开闸不过滤种类 ⇒ 任意数字 / 负数被当成命令种类（未定义行为被静默放行）',
+  },
+
   {
     file: 'apps/emulator-new/src/core/handlers.ts',
     from: '  if (m.hold.contextKey !== index) m.holdCursorBySlot[m.cur] = 0;',
@@ -2669,6 +2693,146 @@ const MUTATIONS = [
     to: '      flag0: m.scene.flagTableB[id] ?? 0, // 变异：门与零读者标志互换\n      flag1: m.scene.flagTableA[id] ?? 0,',
     guard: 'tools/test/emulator-new-save-textures.test.mjs',
     what: '纹理记录表的恢复门与零读者标志互换 ⇒ 恢复按错的那一格开门（纹理重建判据反了）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: '  if (input.enabled !== true) return { ops: [], diagnostics: [] };',
+    to: '  if (input.enabled === false) return { ops: [], diagnostics: [] }; // 变异：默认变开启',
+    guard: 'tools/test/emulator-new-scene-command-exec.test.mjs',
+    what: '执行器总闸默认开启 ⇒ 未接线的产品路径也会产 op（零回退破坏）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: "  ops.push({ kind: 'copy', from: 'canvasA', to: 'own', commandKey: planned.commandKey });",
+    to: "  ops.push({ kind: 'copy', from: 'own', to: 'canvasA', commandKey: planned.commandKey }); // 变异：方向反",
+    guard: 'tools/test/emulator-new-scene-command-exec.test.mjs',
+    what: '种类 1 的表面拷贝方向反了 ⇒ 把命令纹理拷回画布（spec 明禁的方向）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: "  ops.push({ kind: 'clear', target: canvas, commandKey });",
+    to: "  ops.push({ kind: 'clear', target: 'own', commandKey }); // 变异：清错目标",
+    guard: 'tools/test/emulator-new-scene-command-exec.test.mjs',
+    what: '画布用前清错目标 ⇒ 画布没清、命令自己的纹理反被清（残留 / 同帧两次）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-order.ts',
+    from: '  if (kinds.length === 0) return { ...plan, commands: [] };',
+    to: '  if (kinds.length === 0) return plan; // 变异：空闸门放行',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '种类闸门为空时仍放行命令 ⇒ 产品默认路径产 op（零回退破坏）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: "  ops.push({ kind: 'copy', from: 'canvasA', to: 'own', commandKey: planned.commandKey });",
+    to: "  ops.push({ kind: 'copy', from: 'own', to: 'canvasA', commandKey: planned.commandKey }); // 变异：方向反",
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '种类 1 copy 方向反了 ⇒ 命令纹理拷回画布（spec 明禁）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: "    sources: ['canvasA', 'canvasB'],",
+    to: "    sources: ['canvasB', 'canvasA'], // 变异：合成顺序反",
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '双画布合成顺序反了 ⇒ B 盖 A（与"先 A 后 B"相反）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '      if (record.timestamp !== 0) continue;',
+    to: '      if (false) continue; // 变异：每帧都盖',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '时间戳每帧都盖 ⇒ 命令永远停在"第一帧"（多帧动画不推进）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '    if (this.scene.animating === 0) this.scene.commands.clear();',
+    to: '    this.scene.commands.clear(); // 变异：不管有动画都清',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '收尾不看有动画就清命令表 ⇒ 多帧命令只活一帧',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: '    progress: source.progress,',
+    to: '    progress: 1, // 变异：退路合成恒不透明',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '种类 0 退路合成进度恒 1 ⇒ 第二块画布不按进度淡入（直接显示终态）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-order.ts',
+    from: '  return (now - start) / command.duration;',
+    to: '  return 1; // 变异：进行中也当到期',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '进行中的进度直接算 1 ⇒ 所有淡入在第一帧就完成',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-order.ts',
+    from: '  if (command.kind === 3) {',
+    to: '  if (false) { // 变异：种类 3 也走种类 0 的夹取',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '种类 3 的进度被当成种类 0（未开始夹成 0）⇒ 模糊转场在延迟内不按负进度外推',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: "        record.duration = 0;\n        continue;",
+    to: "        continue; // 变异：到期不清 duration",
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '到期不清 duration ⇒ 进度判据永远停在"进行中"（动画不结束）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: "      if (record.kind === 2 && record.mode < 0) {\n        this.scene.forcedComplete = 1;",
+    to: "      if (false) {\n        this.scene.forcedComplete = 1; // 变异：不置强制完成",
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '种类 2 的 mode<0 不置强制完成 ⇒ 错误记录的唯一可见后果消失',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: '  if (planned.kind === KIND_WIPE && strokes.length > 0) {',
+    to: '  if (false) { // 变异：有笔也不用，退回 composite',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '种类 2 有抹除笔时仍用 composite ⇒ 图案被"整块合成"冒充（笔序 / 分区消失）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: '  if (source.rect !== undefined) {',
+    to: '  if (false) { // 变异：种类 1 不做遮罩',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '种类 1 不产 mask op ⇒ 影片遮罩混合消失（每帧只剩首帧 copy）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: '    const coeff = mask === 255 ? 254 / 255 : 0;',
+    to: '    const coeff = mask === 0 ? 254 / 255 : 0; // 变异：遮罩系数取反',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '遮罩系数取反 ⇒ 该显示的一帧透明、该透的一帧显示',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '        if (record.duration > 0 && !this.scene.objectSlots.has(record.textureId)) {',
+    to: '        if (false) { // 变异：影片结束不补遮罩',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '影片结束不补遮罩反值 ⇒ 遮罩停在写表值（该透的帧仍显示）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-exec.ts',
+    from: "  if (planned.kind === KIND_TEXTURE_OVERLAY) note('scene-command-effect-unmodeled', planned.commandKey);",
+    to: '  // 变异：不记效果未建模',
+    guard: 'tools/test/emulator-new-scene-command-run.test.mjs',
+    what: '种类 0 走退路却不记 effect-unmodeled ⇒ 缺口静默（看起来像已经支持效果技法）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.cur = slot;\n  let body: Uint8Array | null;',
+    to: '  m.cur = caller;\n  let body: Uint8Array | null; // 变异：打开失败不切帧',
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '0x6 打开失败不切到目标槽 ⇒ 重试落在调用者帧（与 spec 相反）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "  if (!body) throw new FrameLoadError(7, 'load-frame-open-failed:' + id);",
+    to: "  if (!body) throw new FrameLoadError(1, 'load-frame-open-failed:' + id); // 变异：当成退出型",
+    guard: 'tools/test/emulator-new-frame.test.mjs',
+    what: '0x6 打开失败抛退出型 ⇒ 可重试路径消失（只能终止）',
   },
 
 ];
