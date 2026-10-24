@@ -82,13 +82,35 @@ export function buildUncompressedEnvelope(body: Uint8Array, seed: number, key: n
   return new Uint8Array(transformWords(words, seed, key).buffer);
 }
 
-/** 20 字节参数块：密文字数 / crc1 / crc2 / seed / key(低 16 位，奇数)。 */
+/** 一条**帧记录**里本层会写的四样（`FMT-SAVE-CODEC`；每条 261 个 32 位字，其余格本层不写） */
 export interface SaveFrameRecord {
-  status: number;
+  /** `rec[0]` = **父帧号**（根帧 −1；⛔ 不是状态码） */
+  parent: number;
+  /** `rec[1]` = 脚本文件索引（脚本身份；没有 id ⇒ −1） */
   scriptIndex: number;
+  /** `rec[2]` = 返回点条数 N，`rec[3 .. 3+N)` = N 个返回点位置下标（−1 = 无） */
   ret: number[];
+  /** `rec[259]` = 位置 1 在**表 1**（消息显示 `0x71`）里的下标；−1 = 该项不存在 */
   tableA: number;
+  /** `rec[260]` = 位置 2 在**表 2**（换脚本 `0x03`）里的下标；−1 = 该项不存在（当前帧强制 −1） */
   tableB: number;
+}
+
+/**
+ * **纹理记录表**的一项（`FMT-SAVE-CODEC` 的 `+1252` 副块；每项 20 B = 5 个 u32）。
+ *
+ * ★ 逐格身份（顺序即落盘顺序）：`file` = 来源文件号、`color` = 颜色键、
+ *   `flag0` = **恢复重建门**（读侧严格 `== 1` 才重建；⛔ 不是任意非 0）、
+ *   `flag1` = 零读者标志（写侧照抄、本作没有读者）、`blank` = 空白创建标记。
+ * ★ 写侧是**整段复制场景的备份表**（`0x258` / `0x259` 写的两张 1000 项表 + 纹理记录），
+ *   ⛔ 不是"按需挑几条"。
+ */
+export interface SaveTextureRecord {
+  file: number;
+  color: number;
+  flag0: number;
+  flag1: number;
+  blank: number;
 }
 
 export interface SaveSnapshot {
@@ -99,6 +121,13 @@ export interface SaveSnapshot {
   strings: string[];
   version1: number;
   version2: number;
+  /**
+   * v1 = 3 的 **20000 B 纹理记录表**（1000 项，`+1252` 起；`FMT-SAVE-CODEC`）。
+   * ★ 缺省 / 少于 1000 项 ⇒ 缺的位置**留 0**：那等于"门 = 0 ⇒ 一条纹理都不重建"，
+   *   是**合法**文件（不是"没写这块"）—— 20000 B 始终存在，位置也不因此移动。
+   * ★ `version1 !== 3` 时**整块不写**（也没有这 20000 B）。
+   */
+  textureRecords?: SaveTextureRecord[];
 }
 
 const writeU32 = (view: DataView, off: number, v: number): void => view.setUint32(off, v >>> 0, true);
@@ -113,6 +142,8 @@ const writeU32 = (view: DataView, off: number, v: number): void => view.setUint3
  * ★ 浮点族两块（c1 / c4）的**内容**只在版本 2 ≥ 20 时写；`版本 1 = 2` 的容器**无论版本 2**
  *   都不写这两块内容（`FMT-SAVE-CODEC` 的两条门控）。计数与洞始终存在 ⇒
  *   "非 0 计数 + 未写空洞"是**合法**文件。
+ * ★ `版本 1 = 3` 时 `+1252` 起还有 **20000 B 纹理记录表**（1000 × 20 B，五项见 `SaveTextureRecord`）；
+ *   其它版本没有这 20000 B。**别的块偏移只由这一条决定**，记录内容不改变布局。
  */
 export function buildSaveBody(s: SaveSnapshot, intKey: number): Uint8Array {
   const c0 = s.ints.length;
@@ -129,7 +160,11 @@ export function buildSaveBody(s: SaveSnapshot, intKey: number): Uint8Array {
     arena[ap++] = 0;
   }
   const capWords = Math.ceil(arena.length / 4);
-  const recBase = 1252 + (s.version1 === 3 ? 20000 : 0);
+  // ★ v1=3 的 20000 B = **纹理记录表**（1000 × 20 B）：五项 = 来源文件号 / 颜色键 /
+  //   恢复重建门 / 零读者标志 / 空白标记（`FMT-SAVE-CODEC`）。v1 ≠ 3 时整块不存在。
+  const textureBase = 1252;
+  const textureBytes = s.version1 === 3 ? 20000 : 0;
+  const recBase = textureBase + textureBytes;
   const recCount = s.frame + 1;
   const countBase = recBase + 1044 * recCount;
   const blocksBase = countBase + 24;
@@ -147,11 +182,25 @@ export function buildSaveBody(s: SaveSnapshot, intKey: number): Uint8Array {
   const out = new Uint8Array(total);
   const view = new DataView(out.buffer);
   writeU32(view, 0, s.frame);
+  // 纹理记录表：`version1 == 3` 才存在；缺的位置留 0（= 门 0，一条都不重建），长度不变。
+  if (s.version1 === 3) {
+    const textureRecords = s.textureRecords ?? [];
+    const n = Math.min(textureRecords.length, 1000);
+    for (let i = 0; i < n; i += 1) {
+      const rec = textureRecords[i]!;
+      const off = textureBase + 20 * i;
+      writeU32(view, off, rec.file);
+      writeU32(view, off + 4, rec.color);
+      writeU32(view, off + 8, rec.flag0);
+      writeU32(view, off + 12, rec.flag1);
+      writeU32(view, off + 16, rec.blank);
+    }
+  }
   for (let f = 0; f <= s.frame; f += 1) {
     const rec = s.records[f];
     if (!rec) continue;
     const off = recBase + 1044 * f;
-    writeU32(view, off, rec.status);
+    writeU32(view, off, rec.parent);
     writeU32(view, off + 4, rec.scriptIndex);
     writeU32(view, off + 8, rec.ret.length);
     for (let i = 0; i < rec.ret.length && i < 256; i += 1) writeU32(view, off + 12 + 4 * i, rec.ret[i]!);

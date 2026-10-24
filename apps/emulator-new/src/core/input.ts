@@ -46,7 +46,8 @@ export interface MouseCallbackState {
  * **按住派发族**（`0x102` / `0x103` / `0x104` / `0x105`）的引擎级状态。
  * ★ 三格初值都是**合同值**（不是兜底）：`mask = 0`、`modulus = 0`、`contextKey = −1`
  *   （启动路径与 `0xfc` 都写它们）。⚠ 与 `keyTotal` 不同：那一格引擎**不建立**初值（UB）。
- * ★ 按住**游标**不在这里：它是**按帧**的（见 `Frame.holdCursor`）。
+ * ★ 按住**游标**不在 `HoldState` 里，也**不是**按 `Frame` 对象的：它按**帧槽号**存在
+ *   `Machine.holdCursorBySlot`（帧释放 / 重载不复位）。`HoldState` 只放引擎级那三格 + 计数。
  */
 export interface HoldState {
   /** `0x105` ← ；`0x104` 用第 i 位（i = 键编号，与输入字同一套编号）决定返回点与是否夹上限。初值 0 */

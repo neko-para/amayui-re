@@ -68,13 +68,6 @@ export interface Frame {
    * ⛔ 不与 `keyJumps` 合表：两张表互不可见（`0x104` 不命中 `0xfb` 登记的目标）。
    */
   holdSlots: Map<number, number>;
-  /**
-   * **按住游标**（`0x103` 清当前帧 / 上下文闸清当前帧 / `0x104` 每条出口推进）。
-   * ★ 引擎**不建立**这一格的初值（帧装载 / 释放都不写它）⇒ 本层用 `null` 表示"还没有定义值"，
-   *   ⛔ **不填 0**（0 是合法槽号，用 0 兜底会把 UB 说成合同）。`0x104` 的上下文闸在第一次调用时
-   *   就会定义它（`contextKey` 初值 −1 ≠ 任何编号）；读到 `null` 是 UB，推进处**响亮失败**。
-   */
-  holdCursor: number | null;
 }
 
 /** 纹理记录：来源文件（-1 = 无）、颜色键、空白创建标记（见 CORE-OPS-TEXTURE-*） */
@@ -467,6 +460,34 @@ export interface SceneState {
 }
 
 /**
+ * 一份脚本的三张**位置表**（`65-save` 的 `FMT-SAVE-CODEC`；按脚本头的**声明顺序**：表 1 / 表 2 / 表 3）。
+ * ★ 每张表是**表项数组**：`entries[k]` = 第 k 条该类指令的**位置**（`(PC − 代码基址) >> 2`，dword 下标），
+ *   严格升序（装载期从表体一次性读出，见 `runner.ts` 的 `tablesFromHeader`）。
+ * ★ 表 1 服务消息显示（`0x71`）、表 2 服务换脚本（`0x03`）、表 3 服务子调用（`0x8f` 的返回点）。
+ * ★ 缺表（头里不足三组 `(条数, 偏移)`）⇒ 该项是 `null`：⛔ 不补一个空数组冒充"有表但没命中"。
+ */
+export interface ScriptTables {
+  /** 表 1：消息显示 `0x71` 的位置表（`rec[259]` 的下标 = 位置在这张表里的元素下标） */
+  msg: number[] | null;
+  /** 表 2：换脚本 `0x03` 的位置表（`rec[260]` 的下标就从它来） */
+  call: number[] | null;
+  /** 表 3：子调用 `0x8f` 的返回点位置表（返回栈下标从它来；本层只记表、不产生返回栈下标） */
+  sub: number[] | null;
+}
+
+/**
+ * 位置 → 表内**下标**：在 `entries` 里**线性查找**该位置；命中返回元素下标，否则 **−1**。
+ * ★ 表项严格升序，但**下标不是"位置 − 起点"**：表里只收该类 opcode 的位置，中间隔着别的指令
+ *   ⇒ 唯一的正确算法是找元素（引擎 `sub_48E870` 也是逐个比较：EA `0x48E8A9` `cmp [ebx+eax*4],edx`）。
+ * ★ `−1` 是引擎「没有这一项」的哨兵（`rec[259]` / `rec[260]` 的约定）；⛔ 不返回 `null` / `undefined`。
+ * ★ 没有表（`null` / 缺项）与位置不在表里**同义**：−1（未命中），不区分。
+ */
+export function indexInTable(position: number, entries: number[] | null | undefined): number {
+  if (!entries) return -1;
+  return entries.indexOf(position);
+}
+
+/**
  * **一帧的引擎态记录**（帧区里的一格）：body / ip / 局部帧 / 父帧号 / 该帧自己的长度槽。
  *
  * ★ 帧区不是栈：引擎是**定长 40 槽、按帧号索引**的数组 + 一个"当前帧号"（`cur`）。
@@ -485,6 +506,12 @@ export interface ScriptFrame {
   parent: number;
   /** 该帧自己的「操作数个数」槽（引擎记录里的那一格）：该帧恢复执行时按它推进 */
   length: number;
+  /**
+   * **这一帧所属脚本的三张位置表**（`65-save` 的 `FMT-SAVE-CODEC`；装载期由脚本来源查得）。
+   * ★ 存档的 `rec[259]` / `rec[260]` 是**表内下标**，写存档时要由这组表把位置反查成下标。
+   * ★ `null` = 这个脚本没有可用的表（`--script` 调试口、没有 `scriptTables` 的宿主）⇒ 两个下标都是 −1。
+   */
+  tables: ScriptTables | null;
 }
 
 /** 帧区容量：引擎是 **40 槽**（上限按**帧号**判，不按"已占用了几个槽"） */
@@ -606,6 +633,18 @@ export interface MachineOptions {
   /** 根脚本的统一文件 id / 名称（诊断用；`--script` 调试口只有名称） */
   rootId?: number;
   rootName?: string;
+  /**
+   * **根脚本的三张位置表**（`65-save` 的 `FMT-SAVE-CODEC`）：根帧在构造期就写上。
+   * ★ 缺省 `undefined` / `null` ⇒ 根帧没有表 ⇒ 存档里根帧的 `rec[259]` / `rec[260]` 都是 −1。
+   */
+  rootTables?: ScriptTables | null;
+  /**
+   * **换脚本 / 装载帧时的表查询**（按统一文件 id）：`enterScript` / `loadFrameAt` 建帧时同步查一次。
+   * ★ **同步**是有意的：调用方必须在 `loadScript(id)` 解析出来的那一刻把表登记好（`runner.ts` 的
+   *   `loadScript` 回调就是这么做的），⛔ 不许在 core 里再异步读一次头。
+   * ★ 缺省 `undefined` ⇒ 子帧没有表 ⇒ 存档里它的两个下标都是 −1（⛔ 不拿根脚本的表顶替）。
+   */
+  scriptTables?: (id: number) => ScriptTables | null;
   /** 引擎级 show-logo 标志的初始值（缺省 = 引擎初始化值 1；0 = 显式跳过 LOGO） */
   showLogo?: number;
   /**
@@ -668,6 +707,13 @@ export class Machine {
   /** 根脚本的统一文件 id / 名称（诊断用） */
   readonly rootId: number | undefined;
   readonly rootName: string | undefined;
+  /**
+   * 根脚本的三张位置表（`MachineOptions.rootTables`）。
+   * ★ `0x9` 重装根脚本时会在 **handlers** 里重建 0 号帧 ⇒ 那一处也从这格取表。
+   */
+  readonly rootTables: ScriptTables | null;
+  /** 换脚本 / 装载帧时的表查询（`MachineOptions.scriptTables`；缺省 = 子帧没有表） */
+  readonly scriptTables: ((id: number) => ScriptTables | null) | undefined;
   /** 纹理文件装载器（统一文件 id → 整份字节）：缺省 = `0x1f9` 响亮失败 */
   readonly loadImage: ((id: number) => Promise<Uint8Array | null>) | undefined;
   /** 宿主字体名表（`0x2de` 的输入；缺省空表 ⇒ 查表未命中 ⇒ 引擎走回退分支） */
@@ -684,9 +730,20 @@ export class Machine {
   input: InputState = initialInputState();
   /**
    * 按住派发族的**引擎级**状态（掩码 / 模数 / 上下文编号；`0x102` 的表不在这里 —— 它按帧）。
-   * ★ 与 `input` 分开：这三格**不按帧**，而 `Frame.holdCursor` 按帧；混在一处会让"帧释放不清掩码"变错。
+   * ★ 与 `input` 分开：这三格**不按帧**，而按住游标按**帧槽号**（`holdCursorBySlot`）；混在一处会让
+   *   "帧释放不清掩码"或"帧重载不复位游标"变错。
    */
   hold: HoldState = initialHoldState();
+  /**
+   * **按住游标**（`0x103` 清当前帧 / 上下文闸清当前帧 / `0x104` 每条出口推进）。
+   * ★ 按**帧槽号**存（引擎级数组 + 当前帧号索引），⛔ **不是**挂在 `Frame` 对象上：
+   *   帧释放 / 重载**不复位**它（`freshFrame()` 不碰这个数组）⇒ 重载后读到的是**陈旧但已定义**的值。
+   * ★ 引擎**不建立**这一格的初值（启动链的 memset 没覆盖到游标数组）⇒ 本层用 `null` 表示"这个槽还没被
+   *   定义过"，⛔ **不填 0**（0 是合法槽号，用 0 兜底会把 UB 说成合同）。但上下文闸的静态格初值是
+   *   **−1**（≠ 任何编号）⇒ 进程里第一次 `0x104` 必然把当前帧槽的游标写成 0；`null` 只在
+   *   "该槽从没被 `0x104` 写过 + 编号 == 静态格"的残值路径上可达 ⇒ 读到 `null` 仍**响亮失败**。
+   */
+  holdCursorBySlot: (number | null)[] = new Array<number | null>(FRAME_SLOT_COUNT).fill(null);
   /** 未建模子系统 opcode 的已诊断集合（诊断只在首次出现时记一条） */
   readonly unmodeledSeen = new Set<number>();
   /** 宿主睡眠（缺省 `undefined`，见 `MachineOptions.sleepHost`） */
@@ -983,6 +1040,8 @@ export class Machine {
     this.scriptName = opts.scriptName;
     this.rootId = opts.rootId;
     this.rootName = opts.rootName;
+    this.rootTables = opts.rootTables ?? null;
+    this.scriptTables = opts.scriptTables;
     // ★ 初值 1 是引擎初始化行为；`opts.showLogo` 是**仿真参数**（CLI `--skip-logo`），不是引擎语义。
     this.showLogo = opts.showLogo ?? 1;
     this.loadImage = opts.loadImage;
@@ -1003,6 +1062,7 @@ export class Machine {
       frame: this.freshFrame(opts.rootId),
       parent: -1,
       length: 0,
+      tables: this.rootTables,
     }];
     this.cur = 0;
   }
@@ -1204,8 +1264,9 @@ export class Machine {
       //   ⛔ 不许把它留成 `undefined`：那样 `0x7c` 的成功路径永远不可达（必然抛「深度不符」）。
       localDepth: id ?? -1,
       keyJumps: new Map(), keyCursor: 0, keyLimit: 0,
-      // ★ 按住派发表随帧一起重建（帧释放 / 重载 = 表清空）；游标**不建立初值**（`null`，见 `Frame`）。
-      holdSlots: new Map(), holdCursor: null,
+      // ★ 按住派发表随帧一起重建（帧释放 / 重载 = 表清空）；游标**不建立初值**，
+      //   且它按**帧槽号**存在 `Machine.holdCursorBySlot` 上 ⇒ 这里**不碰**它（⛔ 别把游标搬回 Frame）。
+      holdSlots: new Map(),
     };
   }
 
@@ -1228,6 +1289,8 @@ export class Machine {
       frame: this.freshFrame(id),
       parent: this.cur,
       length: 0,
+      // ★ 表跟着**脚本**走：装载器在解析出这份 body 时已经把该 id 的表登记好（见 `MachineOptions.scriptTables`）。
+      tables: id === undefined ? null : this.scriptTables?.(id) ?? null,
     };
     if (id !== undefined) this.enteredIds.push(id);
     this.slots[slot] = rec;
@@ -1276,6 +1339,8 @@ export class Machine {
       frame: this.freshFrame(id),
       parent: this.cur,
       length: 0,
+      // ★ 与 `enterScript` 同一口径：表按**被装载脚本**的 id 同步查（⛔ 不沿用调用者的表）。
+      tables: id === undefined ? null : this.scriptTables?.(id) ?? null,
     };
     while (this.slots.length <= slot) this.slots.push(null);
     this.slots[slot] = rec;

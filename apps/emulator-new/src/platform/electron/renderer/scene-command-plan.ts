@@ -572,19 +572,24 @@ interface MergedKey {
  * ★ 负键口径按表分：网格 / 辅助表 A 的负键**不参与**；绘制项**不做符号检查**。
  * ★ 同表内保持输入的相对次序（`Array.prototype.sort` 稳定）。
  */
-function mergeTableKeys(tables: CommandTableKeys): MergedKey[] {
+/** 合并序的 table 秩：**辅助表 A → 网格 → 绘制项**（辅助表 B 不参与命令档）。 */
+const MERGE_AUX_A = 0;
+const MERGE_MESH = 1;
+const MERGE_ITEMS = 2;
+
+export function mergeTableKeys(tables: CommandTableKeys): MergedKey[] {
   const entries: MergedKey[] = [];
-  for (const key of tables.meshes) {
-    if (key < 0) continue;
-    entries.push({ key, table: KIND_TEXTURE_OVERLAY });
-  }
   if (tables.auxA !== null) {
     for (const key of tables.auxA) {
       if (key < 0) continue;
-      entries.push({ key, table: 1 });
+      entries.push({ key, table: MERGE_AUX_A });
     }
   }
-  for (const key of tables.items) entries.push({ key, table: 2 });
+  for (const key of tables.meshes) {
+    if (key < 0) continue;
+    entries.push({ key, table: MERGE_MESH });
+  }
+  for (const key of tables.items) entries.push({ key, table: MERGE_ITEMS });
   entries.sort((a, b) => {
     if (a.key !== b.key) return a.key < b.key ? -1 : 1;
     return a.table - b.table;

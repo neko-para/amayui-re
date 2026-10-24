@@ -7,13 +7,14 @@
  */
 import { decodeCp932, readU16LE, readU32LE } from './bytes.ts';
 import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, SceneCommandRecord, TextureObject, VoiceGroup } from './machine.ts';
-import { FRAME_SLOT_COUNT, MOVIE_BIT, SLEEP_BIT, WAIT_BIT } from './machine.ts';
+import { FRAME_SLOT_COUNT, MOVIE_BIT, SLEEP_BIT, WAIT_BIT, indexInTable } from './machine.ts';
 import { decodeInt, encodeInt, readAddress, readFloat, readInt, readIntAt, readRawAt, readText, writeBitsAt, writeFloat, writeInt, writeRawAt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
 import { arrayStrideFor, resolveAddress } from './address.ts';
 import type { PoolTag } from './address.ts';
 import { NO_COLOR, RENDER_TARGET_BACK_BUFFER } from './render.ts';
 import { buildSaveFile } from './save-codec.ts';
+import type { SaveTextureRecord } from './save-codec.ts';
 import type { RenderHost } from './render.ts';
 import { AgfError, decodeAgf } from './agf.ts';
 import { cgDigitSlots } from './cg-digit.ts';
@@ -1342,6 +1343,8 @@ async function exitScript9(m: Machine): Promise<void> {
     frame: m.freshFrame(0),
     parent: -1,
     length: 0,
+    // ★ 重装的是**根脚本** ⇒ 表仍是 `rootTables`（`0x9` 的 id 恒 0，但表来源不是 `scriptTables(0)`）。
+    tables: m.rootTables,
   }];
   m.cur = 0;
   m.operandCount = 0;
@@ -2304,17 +2307,41 @@ async function saveRead1a0(m: Machine, ops: Operand[]): Promise<void> {
   writeInt(m, ops, 1, 0);
 }
 
+/**
+ * 把**当前帧区**写成槽文件（`65-save` 的 `FMT-SAVE-CODEC`；`0x19e` 的写侧）。
+ *
+ * ★ 每帧记录 261 个 32 位字里本层写的四样：
+ *   - `rec[0]` = **父帧号**（根帧 −1，子帧 = 建立它时的帧号）—— ⛔ 不是状态码；
+ *   - `rec[1]` = 脚本文件索引（无 id ⇒ −1）；`rec[2]` / `rec[3..]` = 返回点条数与返回点；
+ *   - `rec[259]` = 本帧位置在**表 1**（消息显示 `0x71`）里的**元素下标**；
+ *   - `rec[260]` = 本帧位置在**表 2**（换脚本 `0x03`）里的**元素下标**；★ **当前帧强制 −1**。
+ * ★ 两个下标都由 `indexInTable` 算：**在表项数组里线性查找该位置**（命中 = 下标，未命中 / 没有表 ⇒ −1）。
+ *   ⛔ 不是"位置 − 起点"：表里只收该类 opcode 的位置，相邻表项之间隔着别的指令。
+ * ★ 两者**不互斥**：同一条记录可以两个都有（同一个位置恰好同时出现在两张表里）。
+ * ★ 空槽（帧区中间的空洞）也照写一条记录：父帧号 / 脚本索引 / 两个下标全是 −1（没有帧可查）。
+ *
+ * ★ **纹理记录表**（`+1252` 的 20000 B，`FMT-SAVE-CODEC`）**整段复制场景的备份表**：
+ *   按编号 0..999 逐项填 `file` / `color` / 恢复重建门（表 A）/ 零读者标志（表 B）/ `blank`。
+ *   - 门与零读者标志来自 `0x258` / `0x259` 写的那两张 1000 项表（`m.scene.flagTableA/B`）；
+ *   - 其余三格来自纹理记录（`m.scene.textures`）；**没有记录**的编号 ⇒ 三格 0（表是清零初值，
+ *     ⛔ 不写 −1：`file` 的 −1 是"有记录但无来源"，与"从没建过记录"不是同一状态）。
+ *   ⛔ 不能写 0 了事：门全 0 ⇒ 恢复时一条纹理都不重建。
+ */
 function buildSlotFile(m: Machine): Uint8Array {
   const frame = m.cur;
   const records = [];
   for (let i = 0; i <= frame; i += 1) {
     const f = m.slots[i];
     if (!f) {
-      records.push({ status: -1, scriptIndex: -1, ret: [], tableA: -1, tableB: -1 });
+      records.push({ parent: -1, scriptIndex: -1, ret: [], tableA: -1, tableB: -1 });
     } else {
+      const position = f.frame.position;
       records.push({
-        status: 0, scriptIndex: f.id ?? -1, ret: [...f.frame.retStack],
-        tableA: f.frame.position ?? -1, tableB: -1,
+        parent: f.parent,
+        scriptIndex: f.id ?? -1,
+        ret: [...f.frame.retStack],
+        tableA: indexInTable(position, f.tables?.msg),
+        tableB: i === frame ? -1 : indexInTable(position, f.tables?.call),
       });
     }
   }
@@ -2328,9 +2355,26 @@ function buildSlotFile(m: Machine): Uint8Array {
   const floats: number[] = [];
   for (let i = 0; i < floatCount; i += 1) floats.push(m.globalFloat.get(i) ?? 0);
   const strings = [...m.globalString.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+  // 纹理记录表：1000 项按编号整段复制（缺失 = 三格 0；两张标志表各自一格）。
+  const textureRecords: SaveTextureRecord[] = [];
+  for (let id = 0; id < 1000; id += 1) {
+    const rec = m.scene.textures.get(id);
+    textureRecords.push({
+      file: rec?.file ?? 0,
+      color: rec?.color ?? 0,
+      flag0: m.scene.flagTableA[id] ?? 0,
+      flag1: m.scene.flagTableB[id] ?? 0,
+      blank: rec?.blank ?? 0,
+    });
+  }
   const seed = (Math.floor(m.random() * 0x7fffffff) >>> 0);
   const saveKey = ((Math.floor(m.random() * 0x7fff) << 1) | 1) >>> 0;
-  return buildSaveFile({ frame, records, ints, floats, strings, version1: 3, version2: 20 }, m.key, seed, saveKey);
+  return buildSaveFile(
+    { frame, records, ints, floats, strings, version1: 3, version2: 20, textureRecords },
+    m.key,
+    seed,
+    saveKey,
+  );
 }
 
 /**
@@ -3254,14 +3298,15 @@ function holdSlot102(m: Machine, ops: Operand[]): void {
 /**
  * `0x103` 设置按住游标模数（CORE-INPUT-103-MODULUS）。
  * ★ 模数是**引擎级**一格（所有帧共用）：原样写、**不做任何范围检查**（0 / 负数照写、不抛）。
- * ★ 按住游标是**按帧**的 ⇒ 只清**当前帧**的游标，其它帧保持原值。
+ * ★ 按住游标按**帧槽号**存（引擎级数组 + 当前帧号索引，`Machine.holdCursorBySlot`）⇒ 只清**当前帧槽**的
+ *   游标；其它槽（含已释放 / 待重载的帧号）保持原值 —— 帧释放 / 重载也不复位。
  * ★ 模数 0 的后果是**延迟**的：本条不拦，下一次 `0x104` 的游标推进才会响亮失败。
  */
 function holdModulus103(m: Machine, ops: Operand[]): void {
   m.operandCount = 2 * 1 + 1; // 推进格数 3
   const modulus = readInt(m, ops, 1) | 0;
   m.hold.modulus = modulus;
-  m.frame.holdCursor = 0;
+  m.holdCursorBySlot[m.cur] = 0;
   // 0 是脚本自己制造的 UB，不是"设置失败"：只留诊断，下一次派发才响。
   if (modulus === 0) m.diagnostics.push({ kind: 'hold-modulus-zero:0x103' });
   m.effects.push({ kind: 'input.hold.modulus', detail: { modulus } });
@@ -3280,9 +3325,13 @@ function holdMask105(m: Machine, ops: Operand[]): void {
 
 /**
  * 按住游标推进：`(游标 + 1) mod 模数`。**三条出口都要走这里**（跳 / 不跳、登记 / 未登记）。
+ * ★ 游标按**帧槽号**读写（`holdCursorBySlot[m.cur]`）：帧重载不换槽 ⇒ 从原值继续。
  * ★ `modulus === 0` ⇒ 目标机上是整数除零（UB）。本仓口径：**显式响亮失败**，
  *   ⛔ 不按 0 / 不按 1 / 不用默认模数兜底（那会把 UB 伪装成合同）。
- * ★ 游标未被定义（引擎不建立初值）⇒ 同样是 UB，也响亮失败（⛔ 不把 `null` 当 0）。
+ * ★ 游标未被定义（引擎不建立初值；只有"槽从没被 `0x104` 写过 + 编号 == 静态格"的残值路径可达）
+ *   ⇒ 同样是 UB，也响亮失败（⛔ 不把 `null` 当 0）。
+ * ★ 取余**保持 JS 的 `%`**：它与目标机 `idiv` 同语义（向零截断、余数符号随被除数），
+ *   ⛔ 不要改成"数学取模再调整到 `[0, |m|)`"（那样负模数会给出不同槽号序列）。
  */
 function advanceHoldCursor(m: Machine): void {
   const modulus = m.hold.modulus | 0;
@@ -3290,12 +3339,18 @@ function advanceHoldCursor(m: Machine): void {
     m.diagnostics.push({ kind: 'hold-cursor-divide-by-zero:0x104' });
     throw new Error('input-hold: modulus is 0（0x104 的游标推进是整数除零；先执行 0x103 设一个非 0 模数）');
   }
-  const cursor = m.frame.holdCursor;
+  const cursor = m.holdCursorBySlot[m.cur];
   if (cursor === null) {
     m.diagnostics.push({ kind: 'hold-cursor-uninitialized' });
     throw new Error('input-hold: hold cursor is uninitialized（引擎不建立这一格的初值）');
   }
-  m.frame.holdCursor = (cursor + 1) % modulus;
+  // ★ 商溢出：`游标 = INT_MAX` ⇒ 目标机的 `cursor + 1` 先在 32 位里回绕成 INT_MIN，
+  //   再 `idiv -1` ⇒ 商 2147483648 装不进 32 位 ⇒ 结构化异常。⛔ 不许让 JS 算出 2147483648（那是错的合同）。
+  if (cursor === 0x7fffffff && modulus === -1) {
+    m.diagnostics.push({ kind: 'hold-cursor-divide-overflow' });
+    throw new Error('input-hold: cursor + 1 divided by -1 overflows int32（0x104 的游标推进是商溢出；游标保持原值）');
+  }
+  m.holdCursorBySlot[m.cur] = (cursor + 1) % modulus;
 }
 
 /**
@@ -3327,8 +3382,9 @@ function holdDispatch104(m: Machine): void {
   const found = key >= 0;
   const index = found ? key : readKeyTotal(m); // 无按键 ⇒ 编号 = 键总数
 
-  // ② 上下文闸：编号变了 ⇒ 只清**当前帧**的游标；然后把编号写进引擎级格。
-  if (m.hold.contextKey !== index) m.frame.holdCursor = 0;
+  // ② 上下文闸：编号变了 ⇒ 只清**当前帧槽**的游标；然后把编号写进引擎级格。
+  //    ★ 静态格初值 −1（≠ 任何编号）⇒ 进程里第一次走本条必然把当前槽的游标定义成 0。
+  if (m.hold.contextKey !== index) m.holdCursorBySlot[m.cur] = 0;
   m.hold.contextKey = index;
 
   // ③ 返回点：掩码只在"找到键"时判；夹上限在**查表之前**，且未登记时也**不回滚**。
@@ -3336,10 +3392,11 @@ function holdDispatch104(m: Machine): void {
   if (masked) m.frame.keyLimit = key;
   m.frame.retStack.push(masked ? here : here + 1);
 
-  // ④ 查表：槽号 = 当前游标；缺格与写进去的 −1 都算"未登记"。
-  const cursor = m.frame.holdCursor;
+  // ④ 查表：槽号 = 当前游标（按**帧槽号**读，帧重载不换槽 ⇒ 从原值继续）；缺格与写进去的 −1 都算"未登记"。
+  const cursor = m.holdCursorBySlot[m.cur];
   if (cursor === null) {
-    // UB：上下文闸在第一次调用时必然定义它（contextKey 初值 −1 ≠ 任何编号）⇒ 走到这里是实现错。
+    // UB：上下文闸在第一次调用时必然定义它（contextKey 初值 −1 ≠ 任何编号）⇒ 走到这里是实现错
+    //   （或"该槽从没被写过 + 编号 == 静态格"的残值路径）。
     m.frame.retStack.pop();
     m.diagnostics.push({ kind: 'hold-cursor-uninitialized' });
     throw new Error('input-hold: hold cursor is uninitialized（引擎不建立这一格的初值）');
@@ -3457,7 +3514,7 @@ function audioBgmBf(m: Machine, ops: Operand[]): void {
 
 /* ──────────────────────────── 场景 / 渲染 / 文本增补 ──────────────────────────── */
 
-/** `0x344` 场景对象记录：置「已存在」位 + 写第二格 + 标脏（CORE-OPS-SCENE-ENTRY-344） */
+/** `0x344` 辅助表 A（Live2D 模型条目表，按用户要求不展开）:置「已存在」位 + 写第二格 + 标脏（CORE-OPS-SCENE-ENTRY-344）；本实现只把条目当不透明桶保存。 */
 function sceneEntry344(m: Machine, ops: Operand[]): void {
   const value = readInt(m, ops, 2);
   const id = readInt(m, ops, 1) | 0;

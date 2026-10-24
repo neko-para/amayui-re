@@ -4,7 +4,7 @@
  *
  * 判据来自 `data/spec/chapters/60-ops-scene.md`：
  *   - `CORE-SCENE-DRAW-ORDER`：命令键升序、每条命令的前置（时间戳盖章 / 跳过额外变换）、
- *     三表合并序（网格 → 辅助表 A → 绘制项；辅助表 B 不参与）、「区间之下」的三种类口径、
+ *     三表合并序（辅助表 A → 网格 → 绘制项；辅助表 B 不参与）、「区间之下」的三种类口径、
  *     「本轮已消费」、种类 1 的第一帧门、种类 2 的中止、命令表生命周期（无动画 ⇒ 整表清空）；
  *   - `CORE-OPS-SCENE-COMMAND-RECORDS`：四种命令的阶段结构；种类 2 的**抹除矩形来自同键绘制项**
  *     （缺矩形 ⇒ 缺口、不产笔）、`经过时间 = 场景时刻 − (时间戳 + 延迟)`、12 种图案的笔。<br>
@@ -28,6 +28,7 @@ import assert from 'node:assert/strict';
 import {
   CANVAS_A,
   CANVAS_B,
+  mergeTableKeys,
   planSceneCommandPass,
 } from '../../apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts';
 import { wipePattern } from '../../apps/emulator-new/src/platform/electron/renderer/wipe-pattern.ts';
@@ -244,7 +245,7 @@ test('★ consumed 标记：覆盖区间置位、区间之下不置；consumedKe
   }));
   const covered = phasesOf(plan, 'covered')[0];
   assert.deepEqual(covered.tableKeys, [10, 10, 11, 12],
-    '同键多条目各算一次，且同键平键序 = 网格 → 辅助表 A → 绘制项');
+    '同键多条目各算一次（平键序的单键输出看不出 A/网格，见下一条 typed 用例）');
   assert.equal(covered.consumed, true);
   assert.deepEqual(plan.consumedKeys, [10, 11, 12], '升序去重（第 16 位是"条目作废"，不是"键作废"）');
 });
@@ -418,4 +419,11 @@ test('★ 种类 2：类型 = 12 ⇒ scene-command-wipe-mode-out-of-range 且不
   assert.deepEqual(negative.diagnostics, [],
     '类型 < 0（分割幅 < 1 那条错误记录）是**正常**产物 ⇒ 不是未定档，不记诊断');
   assert.deepEqual(compositeOf(negative).strokes, [], '但它同样一笔都不画');
+});
+
+test('★ 三表合并序：同键时辅助表 A 在网格之前（typed 表秩 0/1/2）—— 引擎比较链是 A→网格→绘制项', () => {
+  const entries = mergeTableKeys({ auxA: [5], meshes: [5], items: [5] });
+  assert.deepEqual(entries.map((entry) => [entry.key, entry.table]), [[5, 0], [5, 1], [5, 2]]);
+  const mixed = mergeTableKeys({ auxA: [5], meshes: [5, 9], items: [5, 7] });
+  assert.deepEqual(mixed.map((entry) => entry.key), [5, 5, 5, 7, 9]);
 });

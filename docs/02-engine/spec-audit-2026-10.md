@@ -1239,3 +1239,177 @@ n < 10 走注入的 `sleepHost`；`SLEEP_BIT` 服务分支按 `now >= sleepUntil
 **诚实项**：残差 `unknown` **446**。真实绘制 S2+、保存读侧 / `rec[259]` 表下标、`createDevice` backBuffer 仍未做；静态可取证项已基本收口，剩下多为真机 / 数据 / 渲染实现。
 
 **门禁**：`pnpm test` **998/0** · `pnpm test:assets` **201/0（1 skip）** · `pnpm test:mutation` **331/331** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十三、第十六批：帧位置表 · 渲染步外的混合写者（2026-10-24）
+
+**范围**：`RES-SAVE-FRAMEREC`（表 1/2 的填充者）与 `RES-SCENE-COMMAND-BLEND-INTERFRAME`（渲染步之外的前置混合写者）。证据在 `.tmp/spec-draft/batch16/{framerec,blend}/`。
+
+**闭合 / 纠错**：
+- **三张位置表不是运行时扫描建的**：它们是**脚本文件头自带的反查表**（`[u32 n][3×(条数, 偏移)]`），装载器在装载期一次性抄进代码缓冲尾部；三张表连续、严格升序。表 1 指向消息显示 `0x71`、表 2 指向换脚本 `0x03`、表 3（返回点）指向子调用 `0x8f`。
+- **`rec[0]` 是父帧号**（帧 0 为 −1，其后为压栈前的帧号；原文"状态码"错）。`rec[259]` / `rec[260]` 是**表 1 / 表 2 的下标**（位置 − 表起点），两者**不互斥**；当前帧 `rec[260]` 强制 −1。`0xAE` 的 +3 = 表 2 项所指换脚本指令的长度。
+- 键窗有场景侧读者（半开区间门控）；场景自身记录逐字段就地读写、无整体读者。
+- **混合前置写者关闭**：命令档前 0 写 —— 渲染步之内/之外都成立；CG / 图像全屏支路只写中立对，文字 / 影片无混合写点，Live2D 的写点被状态块原样还原且只在命令档之后。`BLEND-INTERFRAME` 关闭；新 `RES-SCENE-BLEND-MESH-TIER`（网格条目的档实参可能顶掉"网格不设混合"的口径）。
+
+**实现**：`apps/emulator-new` 已建帧位置表：表体从 body 按头里的 `(条数, 表区偏移)` 读出为**位置数组**，`rec[259]/[260]` 用**线性查找**取下标（不是"位置减表起点"）；`rec[0]` 写父帧号；真实脚本 `$1$SC0330.BIN` 的 assets 守卫 2/2 通过（msg 339 / call 19 / sub 719，表项非连续）。
+
+**诚实项**：残差 `unknown` **445**。父帧 PC 的恢复路径、`0xAE` 触发时机、老格式下表 3 未初始化仍是开放项。
+
+**门禁**：`pnpm test` **1015/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **333/333** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十四、第十七批：负模数 / 按住游标初值 · 网格混合档（2026-10-24）
+
+**范围**：`RES-INPUT-103-NEGATIVE-MODULUS`、`RES-INPUT-104-CURSOR-INIT`、`RES-SCENE-BLEND-MESH-TIER`。证据在 `.tmp/spec-draft/batch17/{input,meshblend}/`。
+
+**闭合 / 纠错**：
+- **负模数**：三条出口逐字 `inc; cdq; idiv; mov [..],edx`，存回前无修正 ⇒ 取余 = **向零截断余数**、符号随被除数；有定义时游标非负 ⇒ **负模数 ≡ 绝对值**（`−7` ≡ `7`、`−1` ⇒ 槽号恒 0）。`模数=0` 除零；`游标=INT_MAX ∧ 模数=−1` 商溢出。`RES-INPUT-103` 关闭。
+- **按住游标初值**：启动链 memset 停在模数格之前，游标数组没人清；但上下文闸静态格初值 −1 ⇒ **进程里第一次 `0x104` 必然把当前槽写成 0**；残值只在"该槽从没被写过 + 编号 == 静态格"可达。游标按**帧槽号**存，**帧释放 / 重载不复位**（陈旧但是定义值）。`RES-INPUT-104` 关闭。
+- **网格混合档**：`sub_4AEEA0` 是**绘制项**发射器（`scenario+0x408`，第 12 格 = 混合档，写者 `0x203`），网格发射器是 `sub_4AF1C0`（`scenario+0x428`，第 9 格 = 混合档，写者 `0x322`）。网格**总会**写"混合开"再按档写因子；**档 0 ⇒ 源透明度 / 一减源透明度** ⇒ "网格条目不设混合"是错的。`RES-SCENE-BLEND-MESH-TIER` 换成 `RES-SCENE-BLEND-TIER-VALUES`（脚本实参分布 / 档 2 守卫）。
+
+**实现**：按住游标从 `Frame` 挪到 `Machine.holdCursorBySlot`（按槽号、释放/重载不碰）；`0x103` / `0x104` / 推进改三处；`INT_MAX ∧ −1` 商溢出响亮失败；负模数保持 JS `%`（≡ `idiv`）。守卫 +4；变异 +2。
+
+**诚实项**：残差 `unknown` **443**。另案（未改）：尾扫链优先级与正文"平键序 网格→辅助B→辅助A→绘制项"的名字可能不符，属 `CORE-SCENE-DRAW-ORDER`，待独立复核。
+
+**门禁**：`pnpm test` **1019/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **335/335** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十五、第十八批：平键序独立复核（合同级纠错，2026-10-24）
+
+**范围**：`CORE-SCENE-DRAW-ORDER` 的四张同键表身份与平键序。证据在 `.tmp/spec-draft/batch18/draworder/`（三链互证：Scene 构造尺寸 / 写侧偏移 / 四个发射函数回查）。
+
+**纠错**：
+- 四张表的**正确对应**：`+0x448` = 辅助表 A、`+0x438` = 辅助表 B、`+0x428` = 网格、`+0x408` = 绘制项（步长 572 / 572 / 60 / 740 B）。
+- **平键序真值 = 辅助表 A → 辅助表 B → 网格 → 绘制项**。原文“网格 → 辅助 B → 辅助 A → 绘制项”把**前三个名字整体错位一格**（链上第一名被叫成网格，实为辅助 A；第三名才是网格）。
+- 命令档覆盖三表仍是“辅助表 A + 网格 + 绘制项”（辅助表 B 不参与）；同键序也按上面的 A → 网格 → 绘制项。
+- `bindings.json` 的 10 个 `what` 同步改名（辅助 A / 网格互换）；`RES-SCENE-DRAW-AUX-SEMANTICS` 的“排在网格与绘制项之间”改为“都在网格之前”。
+
+**实现**：`scene-command-plan.ts` 的 `mergeTableKeys` 原来把网格排在辅助表 A 前（复用 `KIND_TEXTURE_OVERLAY`），已改为独立的 `MERGE_AUX_A=0 / MERGE_MESH=1 / MERGE_ITEMS=2` 并把函数导出；新增 typed 守卫（同键 `[A, 网格, 绘制项]`）；变异 +1。
+
+**诚实项**：残差 `unknown` **443**（辅助表 A/B 的领域语义仍 unknown；同键叠放仍需真机采样）。`bindings` 的 10 个 `what` 只改标签，不改 EA。
+
+**门禁**：`pnpm test` **1020/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **336/336** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十六、第十九批：辅助表 A/B 身份（A = Live2D，排除）（2026-10-24）
+
+**范围**：`RES-SCENE-DRAW-AUX-SEMANTICS`。证据在 `.tmp/spec-draft/batch19/aux/`。
+
+**结论**：
+- **辅助表 A（`+0x448`）= Live2D 模型条目表**：记录 `+4` 索引 `scene+0xDA04` 模型池、发射器 `sub_4B0360` → `sub_4783D0` 调 `live2d::MotionQueueManager::startMotion/updateParam`、自装正交投影并整套还原。⇒ 按用户要求**排除**，内部语义不展开。
+- **辅助表 B（`+0x438`）= 3D 网格模型条目表**（`DrawModel`）：572 B 记录，`+0x00` 有效 / 时间窗 / 已消费位，`+4` 模型号，`+0x14` 混合档，`+0x18/0x1C/0x30` 窗，`+0x44/0x48` 两色，矩阵槽 `+0x50…+0x1FC`；`0x333` / `0x338` 写。领域名进正文，字段级布局只作证据。
+- **`0x344` 写的是辅助表 A（`+0x448`）**，不是绘制项表（`+0x408`）：置存在位 + 写第二格 + 标脏。正文 `CORE-OPS-SCENE-ENTRY-344` 的“是否同表”⚠ 收口为**不同表**。
+- 平键序是**固定测序**，不由条目内容派生；B/网格/绘制项共用状态预设，A 自装自还、与其余三支状态解耦。
+
+**实现**：`0x344` 的注释改为“辅助表 A（Live2D，按用户要求不展开）；本实现只当不透明桶保存”，行为不变。`scene-order` 的 `auxA=null` 仍是“不建模 A”的显式选择。
+
+**诚实项**：残差 `unknown` **443**。`RES-SCENE-DRAW-AUX-B-FIELDS`（B 的矩阵槽读出点）新开；A 的条目语义按排除规则不追。
+
+**门禁**：`pnpm test` **1020/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **336/336** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十七、第二十批：辅助表 B（3D 网格模型）矩阵槽（2026-10-24）
+
+**范围**：`RES-SCENE-DRAW-AUX-B-FIELDS`。证据在 `.tmp/spec-draft/batch20/auxb/`。
+
+**结论（关闭）**：辅助表 B 的七个矩阵槽全部有读出点，读出集中在表 B 发射器调用的同一个合成函数：
+`temp = T(−p) · M(累积旋转) · M(基1) · M(基2) · M(基3) · T(+p)`（`p` = 位置三元），再乘进**世界阶段**；视图 / 投影不在这里。
+- 三对"基槽 / 目标槽" + 三个时间窗：缩放 / 旋转 / 平移各一对；窗内**缩放/平移逐元素插值、旋转按轴角插值后重建**，到期折叠到目标值。
+- `0x333` 只写窗 / 颜色（零矩阵槽）；`0x338` 写缩放目标槽并开"是否应用摆放"开关；`0x335/0x336/0x337` 即时写三张基槽；`0x339/0x33a` 写渐变目标槽；`0x33e` 把累积旋转矩阵自乘到最后一格；`0x334` 复位四张矩阵并清开关。
+- **`+0x1FC` 是矩阵（累积旋转）**，不是尺寸/标志（`+0x1F4/+0x1F8` 才是按字节测的标志）。
+- 更正 batch19：`+0x1FC` 写者是 `0x33e`（`0x33d` 是相机/投影）；`+0x110/+0x190` 写者是 B 侧 `0x339/0x33a`。
+
+**正文**：只加 3 句领域话（模型实例 / 摆放可即时或时间窗渐变 / 只乘进世界阶段 + 一个开关），不写偏移与矩阵。
+
+**实现**：不建模（core 没有 3D 路径，`auxTables` 是不透明桶）；建议后续把 `0x330–0x33e` 注册成最小写者，避免脚本 `unimplemented` 停机。
+
+**诚实项**：残差 `unknown` **442**。`T(−p)X T(+p)` 的意图、三对槽的领域命名、`+0x1F4/+0x1F8` 位语义仍未知。
+
+**门禁**：`pnpm test` **1020/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **336/336** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十八、第二十一批：「区间之下」的目的 · 文本层画布带（2026-10-24）
+
+**范围**：`RES-SCENE-COMMAND-BELOW-RANGE-ROLE`、`RES-TEX-DRAW-CONSUMER-BELOW-RANGE`。证据在 `.tmp/spec-draft/batch21/{below,texband}/`。
+
+**闭合 / 定名**：
+- **「区间之下」的目的是给离屏画布垫底**：命令档每次用画布前先清空；**低档（默认路径）画布是不透明画布**、高档带透明度；画布随后整幅使用（种类 1 = 整幅表面拷贝，种类 0/2 = 两块画布整幅合成）。低档下未画区域是不透明底色、会盖住底下内容 ⇒ 必须把本段起点之前的条目垫进画布；高档未画区透明、让出底下内容 ⇒ 不需要。同帧两次发射是后果不是目的；不置已消费正是为保住收尾扫描那一次。门是**能力档代理**，不是画布格式本身。
+  - `RES-SCENE-COMMAND-BELOW-RANGE-ROLE` 关闭；新 `RES-SCENE-COMMAND-BELOW-RANGE-OMITTED-KIND3`（种类 3 同样低档不透明画布却无这一趟，两种解释未分）。
+- **纹理编号 `[20, 30)` = 文本层画布带**：文本子系统按文本层号 i 自建编号 `20 + i` 的离屏画布，层槽 10 格 ⇒ 20..29；内容 CPU 写入后以同号入队绘制项。画布按适配比**预缩放**，消费端位置乘同一比 + 半上取整、纹理目标上用逆缩放矩阵抵回。旧"有界负结论"错在只扫了 `push 14h..1Dh`，抓不到 `lea reg,[reg+14h]`；"无常量创建点"仍成立。常量自建编号是 **31 / 32 / 36 / 37 / 38**（不止 36/37/38）。
+  - `RES-TEX-DRAW-CONSUMER-BELOW-RANGE` 关闭；新 `RES-TEX-LAYER-CANVAS-COLLIDE`（脚本同号撞车）。
+
+**实现**：逻辑不变；`SCREEN_BAND_*` 判据保留，注释改为"文本层画布带"。
+
+**诚实项**：残差 `unknown` **442**。种类 3 的区间起点分布、撞号运行期覆盖、适配比方向（既有残差）仍未知。
+
+**门禁**：`pnpm test` **1020/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **336/336** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十九、第二十二批：零读者关闭 · v1=3 纹理记录表（2026-10-24）
+
+**范围**：三条静态残差 + 一处正文纠错。证据在 `.tmp/spec-draft/batch22/zero/`。
+
+**关闭**：
+- `RES-ISA-TABLES-SEMANTICS`：表 1 → `0x71`、表 2 → `0x03`、表 3 → `0x8f` 已由 batch16 定全；写点（装载器）与读点（帧记录 / 位置写者 / 0xAE / 恢复 / 返回点）逐个复核，`next` 已由 `65-save` 的每帧记录段吸收。
+- `RES-TEX-BLANK-READER`：纹理记录 `+0x10` 的"空白创建"标记 **8 个写点、0 个读点**（四种寻址形态穷举；存档回灌只读 `+0x00/+0x04/+0x08`）。
+- `RES-POOL-SCALAR-30A-MEANING`：`0x30a` 的表 **1 个写点、0 个读点**（`+0x1EC0..+0x1EE7` 全语料唯一偏移 `1EC4h`，重叠半字读 0 次）⇒ 领域名不可定不影响合同。
+
+**正文纠错（重要）**：`65-save.md` 负载 `+1252` 的 20,000 字节（v1=3）不是"内容不规定、可写 0"，而是**纹理记录表（1000 × 20 B）**：写侧从场景备份表整段复制，读侧整段拷回并据此重建纹理对象（其中一个字段为 1 才重建）。⛔ 写 0 ⇒ 恢复时一条纹理都不重建。原表里的"可写 0，读侧不得依赖"已删。
+
+**台账**：
+- 删除上述三条残差；新增 `RES-SAVE-TEXREC-FIELDS`（记录 `+0x08/+0x0C` 语义未命名）。
+- 给 `FMT-SAVE-CODEC` 补三个内容层锚：`0x40D6B2`（表 2 查找）、`0x40D730`（表 1）、`0x40F9E0`（表 3 +3）。
+- `save-codec.ts` 注释：v1=3 的 20k 暂时留 0 是**未建模**，接读侧前必须补（⛔ 不把 0 当合同）。
+
+**诚实项**：残差 `unknown` **440**。记录 `+0x08/+0x0C` 未命名；`0x1f9` 失败路径是否写标记未证；三张表反向完备性未做。
+
+**门禁**：`pnpm test` **1020/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **336/336** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十、第二十三批：纹理记录表字段 · 起始副块纠错（2026-10-24）
+
+**范围**：`RES-SAVE-TEXREC-FIELDS` 与相邻正文。证据在 `.tmp/spec-draft/batch23/texrec/`。
+
+**关闭 / 定名**：
+- v1=3 的 20,000 B = **1000 × 20 B，每项 5 个 32 位格**：来源文件号 / 颜色键 / **恢复重建门** / 零读者标志 / 空白标记。
+  - 写侧从场景备份表整段 `memcpy`（不解释字段）；备份表是主表在每条 `0x71` 的快照 ⇒ 存档与活表**差一拍**。
+  - 读侧整段拷回 → 逐项门「重建门 = 1 且来源文件号 ≥ 0」→ 打开 → 唯一重建入口 `sub_4A3800`；成功清空白标记，失败写 −1 + 错误通道并继续下一项。
+  - **写 0 ⇒ 一条都不重建**（门严格 == 1）；若两个配置键第 1 位都开，前置会先释放全部 1000 槽。
+  - `+0x08/+0x0C` 的唯一写者是 `0x258`、全清是 `0x259` ⇒ `CORE-OPS-SCENE-TABLE-FLAGS` 的“两张平行 1000 项表”**就是纹理记录表 + 快照**。
+- **起始副块纠错**：主体 `+12`（40 B）不“可写 0 / 读侧不得依赖”（读侧会原值回填）；`+52`（1200 B）是 **100 × 12 字节记录表**、读侧逐项重建；两者语义仍不解释。正文改为“内容本版不解释；读侧会读，⛔ 不可写 0”。
+
+**台账**：
+- `RES-SAVE-TEXREC-FIELDS` 关闭；新增 `RES-SAVE-PREAMBLE-BLOCKS`（三个定长副块内容）与 `RES-SAVE-RESTORE-PREFREE`（两个配置键不在 config-keys、默认未核）。
+- 未实现 20k 写侧（`buildSaveBody` 仍留 0，注释已标“未建模”）；接读侧前必须补。
+
+**诚实项**：残差 `unknown` **441**。`+0x08/+0x0C` 领域名、`0x216` 用途、v1≠3 读侧自洽性仍未知。
+
+**门禁**：`pnpm test` **1020/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **336/336** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十一、第二十四批：纹理记录表写侧落地（2026-10-24）
+
+**范围**：把 v1=3 的 20,000 B 纹理记录表**写侧**落进 `apps/emulator-new`。
+
+**代码**：
+- `SaveSnapshot` 新增 `textureRecords?`（`file / color / flag0=恢复重建门 / flag1=零读者标志 / blank`）。
+- `buildSaveBody`：仅 `version1 === 3` 时在 `+1252` 写 1000 × 20 B（五格按序小端）；缺项留 0；`v1 !== 3` 不写、`recBase` 仍 1252；不移动任何其它块。
+- `buildSlotFile`：id 0..999 从 `scene.textures` 取 `file/color/blank`、从 `flagTableA/B` 取 `flag0/flag1`；无记录三格 0（⛔ 不写 −1）。
+- 新增 `emulator-new-save-textures`（4 条 pure）：五格逐项落盘 / 只改这 20000 B / v1=2 无该块 / `0x19e` 真路径携带纹理记录与标志表。
+- 变异 +2（项步长 20→5、恢复门与零读者标志互换），均按预期红。
+
+**未做（读侧）**：恢复时整段拷回纹理记录、按「门 == 1 且文件号 ≥ 0」重建纹理对象 / 清空白标记；`0x258` 两张表“同值位对”与现模型 A=bit0/B=bit1 的偏差未改。
+
+**诚实项**：残差 `unknown` **441**。`RES-SAVE-PREAMBLE-BLOCKS` / `RESTORE-PREFREE` / 保存读侧仍开。
+
+**门禁**：`pnpm test` **1024/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **338/338** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 四十二、第二十五批：「真机/采样」29 条分诊（2026-10-24）
+
+**范围**：把之前笼统标成“需要真机 / 采样”的 29 条重新分诊，并按“引擎是否定义”改写记录。
+
+**处置**：
+- **真 UB（8 条）+ 极端数据（时钟回绕 1 条）→ `discarded`**：越界读 / 写（池、数组、对象、容器句柄）、未初始化格（键总数、STH 短读头）、类型混淆、平台返回值；标记 `【真 UB】`，写 `reason / impact / range`，`next` 统一为“实现建议显式报错，不复刻宿主内存布局”。
+- **`RES-ISA-SUBHEADER-VARIANT` 关闭**：`10-format.md` 已把“短于 28 缺的整数为 0、长于 28 多余字节不参与解释”写成合同；样本缺失不是 spec 义务。
+- **像素叠放两条合并**：`RES-SCENE-DRAW-NEGATIVE-KEY` + `RES-SCENE-DRAW-ORDER-SAMPLE` → 一条 `RES-SCENE-DRAW-STACK-SAMPLE`（引擎发射次序已定；只剩平台合成后的截图）。
+- **样本缺失（9 条）改写**：SYS3 / 坏编码 / ALF S5 / AGF BMP / AGF v1 像素 / AGF 24bpp 行对齐 / S3 族 / BMP 低位深 / STH 解码 —— 统一改成“引擎分支按代码定义；样本只影响发行数据覆盖，不阻塞 spec”，`next` 改为“静态读分支写成条件合同”。
+- **代码确定、只缺观测（4 条）改写**：帧切回返回栈、异常重试换帧、窗口清理、退出码 —— `next` 改为“静态读分支或一次定向实验，不需要真机”。
+- **输入平台边界（3 条）保留并标注**：采样源 / 等待跳过 → “输入系统批次处理”。
+- **`RES-SAVE-STH-CAPTURE` 保留**：这是配置后端 + emulator 实现偏差，不是真机 UB。
+
+**spec 建议**：`CORE-BOOT-LOOP-EXC` 增加一句“对语言层未定义输入本版不规定可观察值；实现建议显式报错（诊断通道），⛔ 不复刻宿主内存布局”。
+
+**账**：`unknown` 441 → **430**；`discarded` 2 → **11**（残差总记录仍 441；UB 是“标记”不是删除）。
+
+**门禁**：`pnpm test` **1024/0** · `pnpm test:assets` **203/0（1 skip）** · `pnpm test:mutation` **338/338** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。

@@ -2628,6 +2628,48 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-agf.test.mjs',
     what: '颜色键哨兵判据从"正数"退化成"非 0" ⇒ 影片帧的 -1 被当成 0xFFFFFFFF 白键（白闪 / logo 边缘黑噪点）',
   },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '  return entries.indexOf(position);',
+    to: '  return entries[0] === undefined ? -1 : position - entries[0]; // 变异：把下标当"位置减表首项"',
+    guard: 'tools/test/emulator-new-save-tables.test.mjs',
+    what: '位置表下标从"线性查找"退化成"位置减表首项" ⇒ 紧凑合成表能过、真实脚本全 −1（rec[259]/[260] 丢位置）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  if (m.hold.contextKey !== index) m.holdCursorBySlot[m.cur] = 0;',
+    to: '  m.holdCursorBySlot[m.cur] = 0; // 变异：无条件清',
+    guard: 'tools/test/emulator-new-input-hold.test.mjs',
+    what: '上下文闸无条件清当前槽游标 ⇒ 帧释放/重载后的定义值被抹掉（残值路径变错）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.holdCursorBySlot[m.cur] = (cursor + 1) % modulus;',
+    to: '  m.holdCursorBySlot[m.cur] = (((cursor + 1) % modulus) + modulus) % modulus; // 变异：数学取模',
+    guard: 'tools/test/emulator-new-input-hold.test.mjs',
+    what: '负模数改成数学取模 ⇒ 与 idiv 的余数符号相反（−7 的序列变错）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
+    from: 'const MERGE_AUX_A = 0;',
+    to: 'const MERGE_AUX_A = 2; // 变异：辅助表 A 排到绘制项之后',
+    guard: 'tools/test/emulator-new-scene-command-plan.test.mjs',
+    what: '合并序把辅助表 A 排到网格/绘制项之后 ⇒ 同键辅助表 A 被画晚（引擎比较链是 A→网格→绘制项）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/save-codec.ts',
+    from: '      const off = textureBase + 20 * i;',
+    to: '      const off = textureBase + 5 * i; // 变异：项步长写成 5',
+    guard: 'tools/test/emulator-new-save-textures.test.mjs',
+    what: '纹理记录表项步长 20→5 ⇒ 只有第 0 项对、其后全部错位（恢复只看第 0 项）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '      flag0: m.scene.flagTableA[id] ?? 0,\n      flag1: m.scene.flagTableB[id] ?? 0,',
+    to: '      flag0: m.scene.flagTableB[id] ?? 0, // 变异：门与零读者标志互换\n      flag1: m.scene.flagTableA[id] ?? 0,',
+    guard: 'tools/test/emulator-new-save-textures.test.mjs',
+    what: '纹理记录表的恢复门与零读者标志互换 ⇒ 恢复按错的那一格开门（纹理重建判据反了）',
+  },
 
 ];
 

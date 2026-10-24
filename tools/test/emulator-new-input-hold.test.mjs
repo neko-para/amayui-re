@@ -4,10 +4,12 @@
  *
  * 覆盖：
  * - `CORE-INPUT-102-SLOT`：0x102 键 0..31 / 槽 0..9 两个独立上界、越界一槽不写、三元组覆盖、目标 −1
- * - `CORE-INPUT-103-MODULUS`：0x103 模数原样（含 0）、只清**当前帧**游标
+ * - `CORE-INPUT-103-MODULUS`：0x103 模数原样（含 0）、只清**当前帧槽**游标（负模数 ≡ 绝对值）
  * - `CORE-INPUT-105-MASK`：0x105 掩码全 1 照写、不碰输入字
  * - `CORE-OPS-INPUT-104`：反向取最高位 / 上限 0 走无按键编号 / 掩码命中 ⇒ 返回点=自身 + 夹上限（不撤销）/
- *   未登记 ⇒ 撤销 + 推进 1 / 每条出口推进游标 / 模数 0 响亮失败 / 两张表互不可见
+ *   未登记 ⇒ 撤销 + 推进 1 / 每条出口推进游标 / 模数 0 响亮失败 / 两张表互不可见 /
+ *   **游标按帧槽号存**（帧释放 / 重载不复位）· 第一次调用由上下文闸定义成 0 ·
+ *   负模数 ≡ 绝对值 · 游标 INT_MAX ∧ 模数 −1 的商溢出响亮失败
  * - `CORE-INPUT-RESET-FC`：0xfc 清**两张表**（所有帧）+ 模数归 0 + 掩码/游标/上限/输入字不变
  */
 import { test } from 'node:test';
@@ -42,9 +44,12 @@ function script(instrs) {
   return buf;
 }
 
-/** 按住游标：`null` = 引擎不建立初值（⛔ 不是 0） */
+/**
+ * 按住游标：按**帧槽号**存在 `Machine.holdCursorBySlot`（⛔ 不是 `Frame` 上的格）；
+ * `null` = 引擎不建立初值（⛔ 不是 0）。
+ */
 function cursorOf(m, slot = m.cur) {
-  return m.slots[slot].frame.holdCursor;
+  return m.holdCursorBySlot[slot];
 }
 
 test('★ 0x102：键 31 / 槽 9 是上界、越界一槽不写、三元组覆盖、键编号与键总数无关', () => {
@@ -83,17 +88,17 @@ test('★ 0x102：键 31 / 槽 9 是上界、越界一槽不写、三元组覆�
   assert.equal(m.frame.holdSlots.get(20 * 10), 4, '键总数 2 + 键 20 ⇒ 不抛、照写');
 });
 
-test('★ 0x103：模数原样（含 0）、只清当前帧游标', () => {
+test('★ 0x103：模数原样（含 0）、只清当前帧槽游标', () => {
   const setModulus = HANDLERS.get(0x103);
   const m = blank();
   m.hold.mask = 0b1011;
   m.frame.keyLimit = 6;
   m.frame.holdSlots.set(70, 3);
 
-  m.frame.holdCursor = 5;
+  m.holdCursorBySlot[0] = 5;
   setModulus(m, ops(7));
   assert.equal(m.hold.modulus, 7, '模数原样写入');
-  assert.equal(cursorOf(m), 0, '当前帧游标 ← 0');
+  assert.equal(cursorOf(m), 0, '当前帧槽游标 ← 0');
   assert.equal(m.operandCount, 3, '推进格数 = 3（= 2 × 1 + 1）');
   assert.equal(m.hold.mask, 0b1011, '不改掩码');
   assert.equal(m.frame.keyLimit, 6, '不改按键扫描上限');
@@ -104,15 +109,16 @@ test('★ 0x103：模数原样（含 0）、只清当前帧游标', () => {
   assert.equal(m.hold.modulus, 0, '模数 0 原样写入（本条不拦）');
   assert.equal(m.diagnostics.some((d) => d.kind === 'hold-modulus-zero:0x103'), true, '0 留诊断');
 
-  // 只清**当前帧**：切到帧 B（游标 5）后设置模数，帧 A 的游标必须保持原值。
-  m.frame.holdCursor = 3; // 帧 A（槽 0）
+  // 只清**当前帧槽**：切到帧 B（槽 1，游标 5）后设置模数，槽 0 的游标必须保持原值。
+  m.holdCursorBySlot[0] = 3; // 帧 A（槽 0）
   const b = m.loadFrameAt(1, EMPTY);
-  b.frame.holdCursor = 5;
+  m.holdCursorBySlot[1] = 5; // 帧 B（槽 1；就是上面 `b` 那个帧对象）
   m.callFrameAt(1);
   setModulus(m, ops(11));
   assert.equal(m.hold.modulus, 11, '模数是引擎级的（所有帧共用一格）');
   assert.equal(cursorOf(m), 0, '帧 B 的游标被清 0');
-  assert.equal(cursorOf(m, 0), 3, '帧 A 的游标保持原值（只清当前帧）');
+  assert.equal(cursorOf(m, 0), 3, '帧 A 的游标保持原值（只清当前帧槽）');
+  assert.equal(b.frame, m.frame, '确认清的是槽 1 那个帧对象的游标格（槽号索引）');
 });
 
 test('★ 0x105：掩码全 1 照写、不改输入字', () => {
@@ -275,6 +281,126 @@ test('★ 0x104：游标每出口推进、模数 0 响亮失败、两张表互�
   assert.deepEqual(cancel.frame.retStack, [], '撤销返回点');
 });
 
+test('★ 0x104：游标按帧槽号存 —— 帧释放 / 重载后从原值继续（不是 null、不是 0）', () => {
+  const dispatch = HANDLERS.get(0x104);
+  const m = blank();
+  m.hold.modulus = 7;
+  m.input.keyTotal = 0;
+  m.input.keyTotalEstablished = true;
+  m.frame.keyLimit = 0;
+  m.input.word = 0;
+  dispatch(m, []); // 第一次：上下文闸把槽 0 定义成 0，随后推进 → 1
+  dispatch(m, []); // 编号不变 ⇒ 不重置，1 → 2
+  assert.equal(cursorOf(m), 2, '先推进到非 0');
+
+  // (a) 重载同一槽（换成新 Frame 对象）⇒ 游标不复位（陈旧但是定义值）。
+  const oldFrame = m.frame;
+  const reloaded = m.loadFrameAt(0, EMPTY);
+  assert.notEqual(reloaded.frame, oldFrame, '重载确实换了 Frame 对象');
+  assert.equal(cursorOf(m), 2, '帧重载不复位游标');
+  reloaded.frame.keyLimit = 0;
+  dispatch(m, []);
+  assert.equal(cursorOf(m), 3, '重载后从原值 2 继续 → 3（不是 null、不是 0）');
+
+  // (b) 子帧槽被释放（结束当前脚本）后再装回同一槽 ⇒ 游标仍是旧值。
+  m.enterScript(EMPTY); // 槽 1
+  assert.equal(m.cur, 1);
+  assert.equal(cursorOf(m), null, '槽 1 从没被 0x104 写过');
+  m.hold.contextKey = -1; // 让上下文闸先把槽 1 定义成 0
+  m.input.word = 0;
+  m.input.keyTotal = 0;
+  m.frame.keyLimit = 0;
+  dispatch(m, []); // 槽 1：0 → 1
+  dispatch(m, []); // 1 → 2
+  assert.equal(cursorOf(m), 2);
+  m.returnToCaller();
+  assert.equal(m.slots[1], null, '槽 1 已被释放');
+  assert.equal(cursorOf(m, 1), 2, '释放不清游标');
+  m.loadFrameAt(1, EMPTY);
+  m.callFrameAt(1);
+  m.input.word = 0;
+  m.input.keyTotal = 0;
+  m.frame.keyLimit = 0;
+  dispatch(m, []); // 编号仍是 0（== contextKey）⇒ 闸不动作，2 → 3
+  assert.equal(cursorOf(m), 3, '重装同一槽后从原值继续（按槽号，不是按帧对象）');
+});
+
+test('★ 0x104：第一次调用（contextKey 初值 −1）⇒ 当前槽游标定义为 0，不报 UB', () => {
+  const dispatch = HANDLERS.get(0x104);
+  const m = blank();
+  assert.equal(m.hold.contextKey, -1, '模拟"进程里第一次"');
+  assert.equal(cursorOf(m), null, '引擎不建立游标初值');
+  m.hold.modulus = 10;
+  m.input.keyTotal = 7;
+  m.input.keyTotalEstablished = true;
+  m.frame.keyLimit = 0; // 不扫描 ⇒ 编号 = 键总数 7
+  m.frame.holdSlots.set(7 * 10 + 0, 4); // 只登记在槽 0 ⇒ 第一次必须命中
+  assert.doesNotThrow(() => dispatch(m, []), '第一次 0x104 不得因"游标未定义"抛');
+  const dispatched = m.effects.filter((e) => e.kind === 'input.hold.dispatch');
+  assert.equal(dispatched.length, 1, '命中槽 0');
+  assert.equal(dispatched[0].detail.slot, 0, '上下文闸把当前槽的游标定义成 0');
+  assert.equal(m.ip, 16, '跳过到目标 4');
+  assert.equal(cursorOf(m), 1, '出口推进 0 → 1');
+  assert.equal(m.diagnostics.some((d) => d.kind === 'hold-cursor-uninitialized'), false, '不记 UB 诊断');
+
+  // 残值路径：编号 == 静态格 ⇒ 上下文闸不动作 ⇒ 该槽仍是 null ⇒ 响亮失败（⛔ 不是 0）。
+  const residual = blank();
+  residual.hold.modulus = 10;
+  residual.hold.contextKey = 7;
+  residual.input.keyTotal = 7;
+  residual.input.keyTotalEstablished = true;
+  residual.frame.keyLimit = 0;
+  assert.throws(() => dispatch(residual, []), /uninitialized/, '残值路径仍响亮失败');
+});
+
+test('★ 0x104：负模数 ≡ 绝对值（模数 −7 的槽号序列与 7 相同）', () => {
+  const dispatch = HANDLERS.get(0x104);
+
+  /** 模数给定时连续 7 次派发命中的槽号序列（键总数 0 ⇒ 编号恒 0，7 个槽全登记） */
+  function slotsFor(modulus) {
+    const m = blank();
+    m.hold.modulus = modulus;
+    m.input.keyTotal = 0;
+    m.input.keyTotalEstablished = true;
+    m.frame.keyLimit = 0;
+    m.input.word = 0;
+    for (let slot = 0; slot < 7; slot += 1) m.frame.holdSlots.set(slot, 100 + slot);
+    const seen = [];
+    for (let i = 0; i < 7; i += 1) {
+      dispatch(m, []);
+      const last = m.effects.filter((e) => e.kind === 'input.hold.dispatch').at(-1);
+      seen.push(last.detail.slot);
+    }
+    return { seen, cursor: cursorOf(m) };
+  }
+
+  const positive = slotsFor(7);
+  const negative = slotsFor(-7);
+  assert.deepEqual(negative.seen, positive.seen, '−7 与 7 的槽号序列逐点相同（JS % 与 idiv 同语义）');
+  assert.deepEqual(positive.seen, [0, 1, 2, 3, 4, 5, 6], '槽号 0..6 各一次');
+  assert.equal(positive.cursor, 0, '7 次推进回到 0');
+  assert.equal(negative.cursor, 0, '−7 也回到 0');
+});
+
+test('★ 0x104：游标 = 0x7fffffff ∧ 模数 = −1 ⇒ 商溢出响亮失败（hold-cursor-divide-overflow）', () => {
+  const dispatch = HANDLERS.get(0x104);
+  const m = blank();
+  m.hold.modulus = -1;
+  m.hold.contextKey = 0; // 不让上下文闸清掉注入的游标
+  m.input.keyTotal = 0;
+  m.input.keyTotalEstablished = true;
+  m.frame.keyLimit = 0;
+  m.input.word = 0;
+  m.holdCursorBySlot[m.cur] = 0x7fffffff;
+  assert.throws(() => dispatch(m, []), /overflows int32/, 'INT_MAX + 1 再 idiv −1 必须响亮失败');
+  assert.equal(
+    m.diagnostics.some((d) => d.kind === 'hold-cursor-divide-overflow'),
+    true,
+    '诊断名 = hold-cursor-divide-overflow',
+  );
+  assert.equal(m.holdCursorBySlot[m.cur], 0x7fffffff, '⛔ 不许算出 2147483648，也不许静默写成 0');
+});
+
 test('★ 0xfc：清两张表（所有帧）+ 模数 0 + 掩码/游标/上限/输入字不变', () => {
   const reset = HANDLERS.get(0xfc);
   const m = blank();
@@ -283,13 +409,13 @@ test('★ 0xfc：清两张表（所有帧）+ 模数 0 + 掩码/游标/上限/�
   m.frame.keyJumps.set(4, 7);
   m.frame.holdSlots.set(70, 3);
   m.frame.keyLimit = 8;
-  m.frame.holdCursor = 3;
+  m.holdCursorBySlot[0] = 3;
   m.input.word = 0x10;
 
   const other = m.loadFrameAt(1, EMPTY);
   other.frame.keyJumps.set(5, 9);
   other.frame.holdSlots.set(50, 4);
-  other.frame.holdCursor = 2;
+  m.holdCursorBySlot[1] = 2;
 
   reset(m, []);
   assert.equal(m.operandCount, 1, '推进格数 = 1');

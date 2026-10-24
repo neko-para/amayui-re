@@ -8,11 +8,12 @@
  */
 import { codeLimit, parseHeader, walk } from './decode.ts';
 import type { Gap } from './decode.ts';
+import { readU32LE } from './bytes.ts';
 import { ConfigStore, parseIni } from './config.ts';
 import { generateIntKey } from './values.ts';
 import { HANDLERS } from './handlers.ts';
 import { Machine, effectScope } from './machine.ts';
-import type { Diagnostic, EffectRecord, Stop } from './machine.ts';
+import type { Diagnostic, EffectRecord, ScriptTables, Stop } from './machine.ts';
 import { startupReport } from './boot.ts';
 import type { ConfigSummary, StartupReport } from './boot.ts';
 import { Install, defaultConfigPath, ensureConfigDir, readConfigFile, readFile, writeConfigFile } from './install.ts';
@@ -109,6 +110,18 @@ export interface RunOpts {
   /** 根脚本 id / 名称（诊断用） */
   rootId?: number;
   rootName?: string;
+  /**
+   * **根脚本的三张位置表**（`65-save` 的 `FMT-SAVE-CODEC`）。
+   * ★ 缺省 = 按 `analyzeBytes` 收到的这份字节自己的头 + body 派生（它**就是**根脚本）。
+   *   显式给 `null` = 声明"根帧没有表"（存档里根帧两个下标都写 −1）。
+   */
+  rootTables?: ScriptTables | null;
+  /**
+   * **换脚本 / 装载帧时的表查询**（同步）：真实入口在这里查"登记表"，
+   * 登记发生在 `loadScript(id)` 解析出来的那一刻（见 `analyzeInstall`）。
+   * ★ 缺省 ⇒ 子帧没有表（两个下标都 −1，⛔ 不拿根脚本的表顶替）。
+   */
+  scriptTables?: (id: number) => ScriptTables | null;
   /** 引擎级 show-logo 标志的初始值（0 = 跳过 LOGO；缺省 = 引擎初始化值 1） */
   showLogo?: number;
   /** 纹理文件装载器（真实入口才有；`0x1f9` 用） */
@@ -169,6 +182,30 @@ export function countEffectsByScope(effects: readonly EffectRecord[]): {
   return { effectCounts, internalEffectCounts };
 }
 
+/**
+ * 脚本头里的 `tables`（三组 `{len, off}`）+ **body** → **三张位置表**（`65-save` 的 `FMT-SAVE-CODEC`）。
+ *
+ * ★ **顺序就是头的声明顺序**：第 1 / 2 / 3 组 = 表 1（消息显示 `0x71`）/ 表 2（换脚本 `0x03`）/
+ *   表 3（子调用 `0x8f` 的返回点）。⛔ 不按"哪个 opcode 多"或按大小重排。
+ * ★ `off` = **表体在 body 里的 dword 下标**、`len` = **表项数**（不是位置的区间！）⇒ 表项是
+ *   `body[off*4 .. (off+len)*4)` 的 `len` 个 u32，每项是"第 k 条该类指令的位置"，严格升序。
+ * ★ 组数不足 3 ⇒ 缺的那张是 `null`（**没有表** ≠ 空表：没有表 ⇒ 存档里的下标一律 −1）。
+ * ★ 表体越出 body ⇒ `readU32LE` 响亮失败（⛔ 不截断成半张表）。
+ */
+export function tablesFromHeader(
+  header: { tables: readonly { len: number; off: number }[] },
+  body: Uint8Array,
+): ScriptTables {
+  const at = (index: number): number[] | null => {
+    const entry = header.tables[index];
+    if (!entry) return null;
+    const entries: number[] = [];
+    for (let k = 0; k < entry.len; k += 1) entries.push(readU32LE(body, (entry.off + k) * 4));
+    return entries;
+  };
+  return { msg: at(0), call: at(1), sub: at(2) };
+}
+
 function describeStop(stop: Stop): string {
   switch (stop.kind) {
     case 'exit':
@@ -223,6 +260,9 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
   const machine = new Machine({
     body, table: env.table, key, tickMs: opts.tickMs, clock: opts.clock, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
     scriptName: opts.scriptName, rootId: opts.rootId, rootName: opts.rootName, showLogo: opts.showLogo,
+    // ★ 根脚本的表：`analyzeBytes` 收到的那份字节**就是**根脚本 ⇒ 缺省按它自己的头 + body 派生。
+    rootTables: opts.rootTables !== undefined ? opts.rootTables : tablesFromHeader(header, body),
+    scriptTables: opts.scriptTables,
     loadImage: opts.loadImage,
     fontNames: opts.fontNames, renderHost: opts.renderHost ?? env.renderHost, movieHost: opts.movieHost ?? env.movieHost, inputHost: opts.inputHost ?? env.inputHost, sleepHost: opts.sleepHost, onIteration: opts.onIteration,
   });
@@ -306,16 +346,32 @@ export async function analyzeInstall(
   // ② 根脚本（图形设备之后、周期定时器之前的那个阶段）
   const script = await install.readById(rootId);
   const config: ConfigSummary = { path: configPath, source, ...store.stats() };
+  /**
+   * **统一文件 id → 该脚本的三张位置表**（`65-save` 的 `FMT-SAVE-CODEC`）。
+   * ★ 登记时机就在 `loadScript` 解析出 body 的那一刻：`enterScript` / `loadFrameAt` 建帧时**同步**查
+   *   （它们不 await ⇒ 回调必须先填好这张表）。
+   */
+  const scriptTables = new Map<number, ScriptTables>();
+  // ★ 表体在 **body** 里（不在头里）⇒ 先把根脚本的头 / body 拆开，两边各用一次。
+  const rootHeader = parseHeader(script.bytes);
+  const rootBody = script.bytes.subarray(rootHeader.headerLength);
   const result = await analyzeBytes(env, script.bytes, {
     ...opts,
     config: store,
     rootId: script.id,
     rootName: script.name,
     scriptName: (id) => install.index.files[id]?.name ?? null,
+    // 根脚本的表：`analyzeBytes` 收到的那份字节**就是**根脚本 ⇒ 缺省按它自己的头 + body 派生。
+    rootTables: opts.rootTables !== undefined ? opts.rootTables : tablesFromHeader(rootHeader, rootBody),
+    scriptTables: (id) => scriptTables.get(id) ?? null,
     // 取不到 ⇒ readById 自己响亮失败（游标越界 / 归档读不到），⛔ 不在这里静默换成 null
     loadScript: async (id) => {
       const f = await install.readById(id);
-      return f.bytes.subarray(parseHeader(f.bytes).headerLength);
+      const header = parseHeader(f.bytes);
+      const body = f.bytes.subarray(header.headerLength);
+      // ★ 表跟着 body 走：建帧时 `enterScript` / `loadFrameAt` 要**同步**查它 ⇒ 先登记再返回。
+      scriptTables.set(id, tablesFromHeader(header, body));
+      return body;
     },
     // 纹理是整份文件（AGF），⛔ 不剥脚本头
     loadImage: async (id) => (await install.readById(id)).bytes,

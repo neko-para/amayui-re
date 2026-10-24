@@ -30,11 +30,16 @@ const layout = (snap) => {
 
 const words = (dv, base, n) => Array.from({ length: n }, (_, i) => dv.getUint32(base + 4 * i, true));
 
+/**
+ * 两帧记录（`FMT-SAVE-CODEC`）：`rec[0]` = **父帧号**（根 −1、子 = 父帧号），
+ * 不是旧合同里的"状态码"；`tableA` / `tableB` 是表 1 / 表 2 的**下标**（这里只验字节落点，取值由
+ * `emulator-new-save-tables.test.mjs` 从真实帧区算出来）。
+ */
 const snapshot = (over = {}) => ({
   frame: 1,
   records: [
-    { status: -1, scriptIndex: 1, ret: [], tableA: -1, tableB: -1 },
-    { status: 3, scriptIndex: 2, ret: [7], tableA: 9, tableB: -1 },
+    { parent: -1, scriptIndex: 1, ret: [], tableA: -1, tableB: -1 },
+    { parent: 0, scriptIndex: 2, ret: [7], tableA: 9, tableB: -1 },
   ],
   ints: [10, -2],
   floats: [0x3f800000, 0x40000000],
@@ -146,11 +151,13 @@ test('★ buildSaveBody / buildSaveFile：帧记录、尾段、头 +240 与信�
   const body = buildSaveBody(snap, key);
   const dv = new DataView(body.buffer);
   assert.equal(dv.getUint32(0, true), 1, '主体 +0 = 当前帧');
+  assert.equal(dv.getUint32(recBase, true), 0xffffffff, '帧记录[0].父帧号 = −1（根帧）');
+  assert.equal(dv.getUint32(recBase + 1044, true), 0, '帧记录[1].父帧号 = 0（父帧号，不是状态码）');
   assert.equal(dv.getUint32(recBase + 1044 + 4, true), 2, '帧记录[1].脚本文件索引');
   assert.equal(dv.getUint32(recBase + 1044 + 8, true), 1, '帧记录[1].返回点数');
   assert.equal(dv.getUint32(recBase + 1044 + 12, true), 7, '帧记录[1].返回点');
-  assert.equal(dv.getUint32(recBase + 1044 + 1036, true), 9, '帧记录 +1036 表 A');
-  assert.equal(dv.getUint32(recBase + 1044 + 1040, true), 0xffffffff, '帧记录 +1040 表 B');
+  assert.equal(dv.getUint32(recBase + 1044 + 1036, true), 9, '帧记录 +1036 = 表 1 下标');
+  assert.equal(dv.getUint32(recBase + 1044 + 1040, true), 0xffffffff, '帧记录 +1040 = 表 2 下标（−1）');
 
   const file = buildSaveFile(snap, key, 0x01020304, 0x2f);
   assert.equal(new TextDecoder().decode(file.slice(0, 4)), 'S4SD');
