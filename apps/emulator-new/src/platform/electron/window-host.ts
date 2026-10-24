@@ -637,13 +637,9 @@ export class ElectronWindowHost {
   }
 
   private updateWindow(): void {
-    const win = this.win;
-    if (win === null || win.isDestroyed()) return;
-    try {
-      win.webContents.invalidate();
-    } catch (err) {
-      this.log('warn', `updateWindow → invalidate 失败：${err instanceof Error ? err.message : String(err)}`);
-    }
+    // ★ 旧模拟器没有 UpdateWindow 对应的强制整窗重绘。
+    //   webContents.invalidate() 会在 core 启动那一下触发一次额外重绘（白帧嫌疑）。
+    this.log('info', 'updateWindow → 已忽略（旧模拟器无此重绘）');
   }
 
   private associateInputContext(): void {
@@ -685,8 +681,7 @@ export class ElectronWindowHost {
   }
 
   private setThreadExecutionState(): void {
-    if (this.powerSaveBlockerId !== null) return;
-    this.powerSaveBlockerId = powerSaveBlocker.start('prevent-display-sleep');
-    this.log('info', "setThreadExecutionState → powerSaveBlocker.start('prevent-display-sleep')");
+    // 取证：旧模拟器没有 powerSaveBlocker；先禁用，排除它在 core 启动那一下的系统副作用。
+    this.log('info', 'setThreadExecutionState → 已忽略（旧模拟器无 powerSaveBlocker）');
   }
 }

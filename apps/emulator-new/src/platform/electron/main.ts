@@ -236,7 +236,7 @@ async function runDemo(args: Args): Promise<void> {
       const win = host.browserWindow();
       if (win === null || win.isDestroyed()) throw new Error('没有窗口可截屏');
       const gamePanelHidden = await win.webContents.executeJavaScript(
-        'document.getElementById("diagnostics")?.hidden === true',
+        'document.getElementById("diagnostics") === null || document.getElementById("diagnostics").hidden === true',
       ) as boolean;
       if (!gamePanelHidden) throw new Error('game 窗口仍然显示 diagnostics 面板（应只有 canvas）');
       const image = await win.webContents.capturePage();

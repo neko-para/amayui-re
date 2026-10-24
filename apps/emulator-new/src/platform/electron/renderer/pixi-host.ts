@@ -683,6 +683,11 @@ export class PixiRenderHost {
   // ★ 取证窗口要覆盖 INITCONFIG4（本机可到 ~96k 步 / 数十秒）⇒ 120s，而不是 10s。
   private flashProbeUntil = performance.now() + 120000;
   private flashProbeHits = 0;
+  /** 取证开关：所有 present 只提交纯灰背景，绕过场景/纹理/命令。 */
+  private readonly forceGrayPresent = false;
+  /** 取证：手工创建的静态黑 canvas；不经过 Pixi/WebGL。 */
+  private manualCanvas: HTMLCanvasElement | null = null;
+  private manualCtx: CanvasRenderingContext2D | null = null;
   /** 取证：进入 movie 之前保存每一帧缩略图。 */
   private captureAllFrames = false;
   private captureAllIndex = 0;
@@ -726,21 +731,25 @@ export class PixiRenderHost {
       //   会让 init 的 1280x720 resize 变成一次可见后重分配。
       width: options.initialWidth ?? 1280,
       height: options.initialHeight ?? 720,
-      background: 0x000000,
+      background: 0x0a0d16,
       backgroundAlpha: 1,
-      antialias: false,
+      antialias: true,
       // Retina 由 Pixi 处理；画布的 CSS 尺寸 = init 的客户区像素（autoDensity）
       resolution: Math.max(1, globalThis.devicePixelRatio || 1),
       autoDensity: true,
-      autoStart: false,
-      preference: ['webgl'],
+      // ★ 旧模拟器口径：Pixi ticker 每 rAF 自己 render(stage)，画布永远有定义内容。
+      // ★ 旧版不显式指定 backend / autoStart，用 Pixi 默认（ticker + WebGL）。
       // ★ 跳过 present 时要保留上一帧：否则后缓冲被清空，合成器可能合到白色（版权页白闪）。
+      // ★ 旧版默认 false：ticker 每帧重绘，不需要保留后缓冲。
       preserveDrawingBuffer: false,
     });
     const host = new PixiRenderHost(app, options);
     // ★ 单 canvas：WebGL canvas 直接可见（旧模拟器口径），不做 2D blit。
     //   双 canvas + 每帧 drawImage 是额外的一次 surface 更新，正是要排除的差异。
     hostElement.appendChild(app.canvas);
+    // ★ 单 canvas + ticker：sceneRoot 直接挂在 stage 上，由 Pixi 每 rAF 渲染。
+    app.stage.addChild(host.sceneRoot);
+    (app.canvas as HTMLCanvasElement).style.visibility = 'visible';
     // ★ 画布自身也钉黑：WebGL 上下文是 alpha 的，合成器在“无新帧/清空”时
     //   透出的是画布 CSS 背景；不设就会透到页面/窗口的默认白。
     (app.canvas as HTMLCanvasElement).style.backgroundColor = '#000000';
@@ -2192,6 +2201,12 @@ export class PixiRenderHost {
   }
 
   private present(trigger: PresentTrigger = 'frame'): void {
+    if (this.forceGrayPresent) {
+      // 取证：present 完全空操作，不调用任何 render。
+      this.presentCount += 1;
+      this.lastPresent = { kind: 'backbuffer', textureId: null, fellBackToBackBuffer: false, trigger };
+      return;
+    }
     const scene = this.scene;
     if (!scene) {
       this.note('present：还没有收到任何场景快照 ⇒ 无事可做');

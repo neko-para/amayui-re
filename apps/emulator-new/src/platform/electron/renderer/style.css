@@ -42,7 +42,6 @@ body {
 #stage-host canvas {
   display: block;
   /* 画布是客户区像素的 1:1 呈现；窗口 / 占满屏的形态由窗口本身决定（见 diagnostics） */
-  outline: 1px solid rgba(120, 140, 170, 0.35);
 }
 
 /* diagnostics 面板 */

@@ -379,15 +379,19 @@ async function loadGameFont(): Promise<boolean> {
 }
 
 async function main(): Promise<void> {
-  diagnosticsRoot = mustGetById('diagnostics');
-  diagnosticsBody = mustGetById('diagnostics-body');
-  diagnosticsSummary = mustGetById('diagnostics-summary');
-  fatalBox = mustGetById('fatal');
-  fatalText = mustGetById('fatal-text');
-  const hostElement = mustGetById('stage-host');
+  // ★ diagnostics 面板已从游戏页面删除；这里用游离节点兜底，debug 代码不再依赖 DOM。
+  diagnosticsRoot = document.getElementById('diagnostics') ?? document.createElement('aside');
+  diagnosticsBody = document.getElementById('diagnostics-body') ?? document.createElement('div');
+  diagnosticsSummary = document.getElementById('diagnostics-summary') ?? document.createElement('span');
+  // ★ 游戏页面不再有 fatal/diagnostics 节点；用游离节点兜底，避免启动即抛。
+  fatalBox = document.getElementById('fatal') ?? document.createElement('div');
+  fatalText = document.getElementById('fatal-text') ?? document.createElement('p');
+  // ★ 旧模拟器：canvas 直接挂到 body，没有 #stage-host 包裹层。
+  const hostElement = document.body;
 
   // ★ 主窗口只留 canvas：diagnostics 面板搬到独立的 debug 窗口（`?debug=1`）。
   diagnosticsRoot.hidden = true;
+
 
   // ① 先拿 bridge（没有 preload 就装 mock），再挂 start handler；早到的 start 会排队。
   bridge = 'amayui' in window ? window.amayui : createMockBridge();
@@ -438,6 +442,7 @@ async function main(): Promise<void> {
     return;
   }
 
+
   // ④ 放行排队中的 start（顺序 = 到达顺序）
   if (pendingJob !== null) {
     const job = pendingJob;
@@ -449,8 +454,7 @@ async function main(): Promise<void> {
   // ⑤ 就绪回报：只调一次
   bridge.ready(host.readyInfo());
   scheduleDiagnostics();
-  // game 窗口不画 diagnostics；低频把投影送给 debug 窗口（100ms 节流在 scheduleDiagnostics 里）。
-  setInterval(() => scheduleDiagnostics(), 200);
+  // ★ 旧模拟器没有游戏窗口的周期 diagnostics IPC；debug 窗口已禁用，这里不再起 200ms 定时器。
 }
 
 /* ═══════════════════════════ debug 窗口（只读诊断） ═══════════════════════════ */

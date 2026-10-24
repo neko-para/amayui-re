@@ -746,9 +746,12 @@ class LocalRenderHost implements RenderHost {
 
   /** 非帧边界：重复提交上一份已提交场景（不重建），避免合成器合到空缓冲。 */
   presentLast(): void {
-    // ★ 可见层是 2D canvas：跳过 present 时它自然保持上一帧，
-    //   再提交 sceneRoot 只会把可能被中间态改坏的场景画出来。
-    void this.lastHoldPresentAt;
+    // ★ 单 canvas：没有 2D 层替我们保持画面。VM 连续执行/非帧边界时必须
+    //   重新提交上一份已提交场景，否则不透明 WebGL 后缓冲可能被合成器当成未定义内容。
+    const now = Date.now();
+    if (now - this.lastHoldPresentAt < 16) return;
+    this.lastHoldPresentAt = now;
+    this.pixi.presentLast();
   }
 
   /** 收尾：强制推一次最新场景并 present（避免停在旧快照上，见白屏问题） */

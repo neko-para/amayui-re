@@ -16,34 +16,10 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <!-- 全屏画布容器：Pixi 的 canvas 由 renderer.ts 挂进来（init 的 width/height = 它的显示尺寸） -->
-    <div id="stage-host" aria-label="模拟器渲染输出"></div>
 
-    <!--
-      diagnostics 面板：**纯 DOM**，不经过 Pixi。
-      ★ 它只属于**独立 debug 窗口**（`index.html?debug=1`）；game 窗口会把它 `hidden`，
-        保证 game 窗口里只有 canvas。
-      ★ 内容是 game renderer 发来的只读投影（`debug:event`）；debug 窗口不跑 core。
-      ★ 每一条都必须对应一个真实的实现缺口（BMP 分支未成篇 / 字体对象未建模 / 混合映射未取证…）。
-    -->
-    <aside id="diagnostics" class="diagnostics" aria-label="渲染诊断" hidden>
-      <header class="diagnostics__header">
-        <strong>diagnostics</strong>
-        <span id="diagnostics-summary" class="diagnostics__summary"></span>
-        <button id="diagnostics-toggle" class="diagnostics__toggle" type="button">折叠</button>
-      </header>
-      <div id="diagnostics-body" class="diagnostics__body"></div>
-    </aside>
 
-    <!-- 致命错误（Pixi / WebGL 初始化失败）：全屏遮罩，同时 window.amayui 不会被 ready -->
-    <div id="fatal" class="fatal" hidden>
-      <h1>渲染进程初始化失败</h1>
-      <p id="fatal-text" class="fatal__text"></p>
-      <p class="fatal__hint">
-        这条失败**不会**让 main 收到 <code>ready</code>：core 的图形设备初始化应当据此走失败分支，
-        ⛔ 不应当把"没有渲染器"当成"渲染成功"。
-      </p>
-    </div>
+
+
 
     <script type="module" src="./renderer.ts"></script>
   </body>
