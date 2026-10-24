@@ -128,6 +128,7 @@ test('★ 按键派发：0x100', async () => {
 
   const noKey = machineFor(body);
   noKey.input.keyTotal = 2;
+  noKey.input.keyTotalEstablished = true; // 这里模拟"0xfe 已写过"，否则读到的是 UB 兜底（会记诊断）
   noKey.frame.keyLimit = 2;
   noKey.frame.keyJumps.set(2, 2);
   noKey.input.word = 0;
@@ -138,6 +139,7 @@ test('★ 按键派发：0x100', async () => {
   // 两个键都指向 ret：0x100 压"当前位置"、返回后重新派发，直到游标走完
   const multi = machineFor(body);
   multi.input.keyTotal = 2;
+  multi.input.keyTotalEstablished = true;
   multi.frame.keyLimit = 2;
   multi.frame.keyJumps.set(0, 2);
   multi.frame.keyJumps.set(1, 2);
@@ -149,6 +151,7 @@ test('★ 按键派发：0x100', async () => {
 
   const unregistered = machineFor(body);
   unregistered.input.keyTotal = 2;
+  unregistered.input.keyTotalEstablished = true;
   unregistered.frame.keyLimit = 2;
   unregistered.input.word = 0b10;
   await unregistered.run();

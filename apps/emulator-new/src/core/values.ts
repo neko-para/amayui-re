@@ -161,14 +161,15 @@ export function writeBitsAt(m: Machine, addr: Address, wordOffset: number, bits:
 export function readRawAt(m: Machine, addr: number, wordOffset: number): number {
   const r = resolveAddress(addr);
   const i = r.index + wordOffset;
+  // ★ 值的落点是**地址解析出的那一组缓冲**（不是"当前选择"）：翻页前取到的地址在翻页后仍指向原组。
   switch (r.tag) {
-    case 3: return (m.globalInt.get(i) ?? 0) >>> 0;
+    case 3: return (m.intPoolAt(r.bank).get(i) ?? 0) >>> 0;
     case 9: return (m.frame.localInt.get(i) ?? 0) >>> 0;
-    case 4: return (m.globalFloat.get(i) ?? 0) >>> 0;
+    case 4: return (m.floatPoolAt(r.bank).get(i) ?? 0) >>> 0;
     case 10: return (m.frame.localFloat.get(i) ?? 0) >>> 0;
-    case 6: return (m.globalIntRef.get(i) ?? 0) >>> 0;
-    case 7: return (m.globalFloatRef.get(i) ?? 0) >>> 0;
-    case 8: return (m.globalStringRef.get(i) ?? 0) >>> 0;
+    case 6: return (m.intRefPoolAt(r.bank).get(i) ?? 0) >>> 0;
+    case 7: return (m.floatRefPoolAt(r.bank).get(i) ?? 0) >>> 0;
+    case 8: return (m.stringRefPoolAt(r.bank).get(i) ?? 0) >>> 0;
     case 12: return (m.frame.localPtr.get(i) ?? 0) >>> 0;
     case 13: return (m.frame.localFloatPtr.get(i) ?? 0) >>> 0;
     case 14: return (m.frame.localStringPtr.get(i) ?? 0) >>> 0;
@@ -182,13 +183,13 @@ export function writeRawAt(m: Machine, addr: number, wordOffset: number, bits: n
   const i = r.index + wordOffset;
   const v = bits >>> 0;
   switch (r.tag) {
-    case 3: m.globalInt.set(i, v); return;
+    case 3: m.intPoolAt(r.bank).set(i, v); return;
     case 9: m.frame.localInt.set(i, v); return;
-    case 4: m.globalFloat.set(i, v); return;
+    case 4: m.floatPoolAt(r.bank).set(i, v); return;
     case 10: m.frame.localFloat.set(i, v); return;
-    case 6: m.globalIntRef.set(i, v); return;
-    case 7: m.globalFloatRef.set(i, v); return;
-    case 8: m.globalStringRef.set(i, v); return;
+    case 6: m.intRefPoolAt(r.bank).set(i, v); return;
+    case 7: m.floatRefPoolAt(r.bank).set(i, v); return;
+    case 8: m.stringRefPoolAt(r.bank).set(i, v); return;
     case 12: m.frame.localPtr.set(i, v); return;
     case 13: m.frame.localFloatPtr.set(i, v); return;
     case 14: m.frame.localStringPtr.set(i, v); return;
@@ -322,7 +323,8 @@ export function addressOfOperand(m: Machine, ops: Operand[], k: number): number 
   if (isPointerTag(op.type)) return pointerSlotAddress(m, op.type as PoolTag, op.raw);
   switch (op.type) {
     case 3: case 4: case 5:
-      return slotAddress(op.type as PoolTag, op.raw);
+      // ★ 全局族的取址落在**当前选中的那一组**缓冲上（SPC-POOL-MEMFLIP：翻页只换选择）
+      return slotAddress(op.type as PoolTag, op.raw, 0, m.globalFlip);
     case 9: case 10: case 11:
       return slotAddress(op.type as PoolTag, op.raw, m.cur);
     default:
@@ -332,32 +334,33 @@ export function addressOfOperand(m: Machine, ops: Operand[], k: number): number 
 
 /** 地址处的裸 32 位（整型池 = 编码后的位模式；浮点池 = 浮点位模式；指针池 = 地址本身） */
 function rawBitsAt(m: Machine, r: Resolved): number {
+  // ★ 全局族按**地址所属的那一组**缓冲取池（翻页前存下的地址仍指向原组）
   switch (r.tag) {
-    case 3: return (m.globalInt.get(r.index) ?? encodeInt(0, m.key)) >>> 0;
+    case 3: return (m.intPoolAt(r.bank).get(r.index) ?? encodeInt(0, m.key)) >>> 0;
     case 9: return (m.frame.localInt.get(r.index) ?? encodeInt(0, m.key)) >>> 0;
-    case 4: return (m.globalFloat.get(r.index) ?? 0) >>> 0;
+    case 4: return (m.floatPoolAt(r.bank).get(r.index) ?? 0) >>> 0;
     case 10: return (m.frame.localFloat.get(r.index) ?? 0) >>> 0;
-    case 6: return (m.globalIntRef.get(r.index) ?? 0) >>> 0;
-    case 7: return (m.globalFloatRef.get(r.index) ?? 0) >>> 0;
-    case 8: return (m.globalStringRef.get(r.index) ?? 0) >>> 0;
+    case 6: return (m.intRefPoolAt(r.bank).get(r.index) ?? 0) >>> 0;
+    case 7: return (m.floatRefPoolAt(r.bank).get(r.index) ?? 0) >>> 0;
+    case 8: return (m.stringRefPoolAt(r.bank).get(r.index) ?? 0) >>> 0;
     case 12: return (m.frame.localPtr.get(r.index) ?? 0) >>> 0;
     case 13: return (m.frame.localFloatPtr.get(r.index) ?? 0) >>> 0;
     case 14: return (m.frame.localStringPtr.get(r.index) ?? 0) >>> 0;
     default:
-      throw new Error(`地址 0x${slotAddress(r.tag, r.index, r.frameSlot).toString(16)} 指向字符串记录（池 0x${r.tag.toString(16)}）—— 按 4 字节格读写没有定义`);
+      throw new Error(`地址 0x${slotAddress(r.tag, r.index, r.frameSlot, r.bank).toString(16)} 指向字符串记录（池 0x${r.tag.toString(16)}）—— 按 4 字节格读写没有定义`);
   }
 }
 
 function writeRawBitsAt(m: Machine, r: Resolved, bits: number): void {
   const v = bits >>> 0;
   switch (r.tag) {
-    case 3: m.globalInt.set(r.index, v); return;
+    case 3: m.intPoolAt(r.bank).set(r.index, v); return;
     case 9: m.frame.localInt.set(r.index, v); return;
-    case 4: m.globalFloat.set(r.index, v); return;
+    case 4: m.floatPoolAt(r.bank).set(r.index, v); return;
     case 10: m.frame.localFloat.set(r.index, v); return;
-    case 6: m.globalIntRef.set(r.index, v); return;
-    case 7: m.globalFloatRef.set(r.index, v); return;
-    case 8: m.globalStringRef.set(r.index, v); return;
+    case 6: m.intRefPoolAt(r.bank).set(r.index, v); return;
+    case 7: m.floatRefPoolAt(r.bank).set(r.index, v); return;
+    case 8: m.stringRefPoolAt(r.bank).set(r.index, v); return;
     case 12: m.frame.localPtr.set(r.index, v); return;
     case 13: m.frame.localFloatPtr.set(r.index, v); return;
     case 14: m.frame.localStringPtr.set(r.index, v); return;

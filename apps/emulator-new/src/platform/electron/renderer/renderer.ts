@@ -218,11 +218,13 @@ function renderDiagnostics(): void {
           ['客户区', `${s.width}×${s.height}（绘制坐标 = 客户区像素，1:1）`],
           ['目标', s.target < 0 ? '后缓冲（-1）' : `纹理槽 ${s.target}`],
           ['纹理槽 / 绘制项 / 网格', `${s.textures} 槽；${s.activeItems}/${s.drawItems} 条有效绘制项；${s.meshes} 个网格`],
-          ['画成什么', `Sprite ${s.sprites}；占位块 ${s.placeholders}（其中标签 ${s.labels}）；网格四边形 ${s.meshQuads}（跳过 ${s.meshSkipped}）`],
+          ['画成什么', `Sprite ${s.sprites}；网格四边形 ${s.meshQuads}（跳过 ${s.meshSkipped}）`],
           ['绘制顺序', s.order || '（空场景）'],
           [
-            '跳过 / 异常',
-            `自引用 ${s.selfTargetSkips}；零面积 ${s.zeroArea}；缺纹理槽 ${s.missingSlots}；矩形与纹理尺寸不符 ${s.sizeMismatch}`,
+            '跳过 / 上报（CORE-OPS-TEXTURE-DRAW-CONSUMER）',
+            `空槽 ${s.missingTextures}（上报）；无目标 ${s.noTarget}（上报）；绘制失败 ${s.drawFailed}（上报）；`
+              + `本轮已消费 ${s.consumedSkips}（静默）；夹空 ${s.clippedEmpty}（静默、不上报）；标脏请求 ${s.dirtyRequests}；`
+              + `源矩形窗口到期回写请求 ${s.rectWriteBacks}`,
           ],
           [
             '场景混合',
@@ -259,7 +261,7 @@ function renderDiagnostics(): void {
         row.appendChild(textEl('td', undefined, texture.hasSurface ? '有' : '—'));
         row.appendChild(textEl('td', undefined, `t${texture.renderTargetWrites} / d${texture.drawCount}`));
         row.appendChild(
-          textEl('td', 'muted', texture.hasPixels ? '已写入' : texture.blank !== 0 ? '空白' : '占位'),
+          textEl('td', 'muted', texture.hasPixels ? '已写入' : texture.blank !== 0 ? '空白（像素未定义）' : '未写入'),
         );
         table.appendChild(row);
       }
@@ -405,6 +407,14 @@ async function main(): Promise<void> {
           bridge.report({ kind: 'log', level: 'info', text });
         } catch {
           /* 同上：日志不能影响渲染 */
+        }
+      },
+      // 错误通道（空纹理槽 / 无渲染目标 / 绘制失败）：与普通日志分开，日志里按 error 级筛得出来
+      error: (text) => {
+        try {
+          bridge.report({ kind: 'log', level: 'error', text });
+        } catch {
+          /* 同上 */
         }
       },
     });

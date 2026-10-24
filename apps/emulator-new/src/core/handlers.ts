@@ -6,7 +6,7 @@
  *   回调 + `await`，所以同一份处理器在 Node / 浏览器里都能跑。
  */
 import { decodeCp932, readU16LE, readU32LE } from './bytes.ts';
-import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, TextureObject, VoiceGroup } from './machine.ts';
+import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, SceneCommandRecord, TextureObject, VoiceGroup } from './machine.ts';
 import { FRAME_SLOT_COUNT, MOVIE_BIT, SLEEP_BIT, WAIT_BIT } from './machine.ts';
 import { decodeInt, encodeInt, readAddress, readFloat, readInt, readIntAt, readRawAt, readText, writeBitsAt, writeFloat, writeInt, writeRawAt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
@@ -216,6 +216,7 @@ function defaultItem(): DrawItem {
     matrices: Array.from({ length: 6 }, () => identity4()),
     config: 0, g0: 0, g1: 0, g2: 0,
     fields: new Map(), extraMatrices: new Map(),
+    sourceWindow: null,
   };
 }
 
@@ -392,6 +393,337 @@ function scene320(m: Machine, ops: Operand[]): void {
     mesh.colorNow = mesh.colorFrom;
   }
   m.scene.dirty = 1;
+}
+
+/* ──────────────────────────── 场景命令记录族（60-ops-scene.md 的 CORE-OPS-SCENE-COMMAND-RECORDS） ──────────────────────────── */
+
+/**
+ * 写侧的五条（`0x223` / `0x24d` / `0x24f` / `0x250` / `0x251`）只写**场景命令表**。
+ *
+ * ★ **命令不立即画**：这几条 handler ⛔ 不发任何绘制请求；绘制由渲染步的命令档执行
+ *   （本层**未建模**命令档，见 `renderer/scene-order.ts`）。
+ *   **唯一的例外**是写表**之前**的那一次建 / 换纹理请求（`0x223` / `0x24f` / `0x250` / `0x251`
+ *   —— 种类 2 的抹除结果落在命令自己的纹理上，所以它也发这一次请求）。
+ * ★ **同键是替换**：写前先删该键的旧记录（⛔ 不是追加两条）。
+ * ★ **置脏**由 `writeCommandRecord` 统一做；`0x24d` 另外置场景「有动画」（两个不同的格）。
+ * ★ **读序**：证据里这五条的**操作数读序**是倒序（种类 0 / 1 / 3；种类 1 还重复读若干次）。
+ *   可观察差异只有"读到非法类型时最先抛哪一个" ⇒ 本层按参数顺序读，**不把读序写成合同**
+ *   （⛔ 不声称已对齐证据）。
+ */
+
+/** 诊断去重：同类**且同编号**只记一条（命令族可能每帧都被写，别让诊断刷满） */
+function noteOnce(m: Machine, kind: string, index?: number): void {
+  if (m.diagnostics.some((d) => d.kind === kind && d.index === index)) return;
+  m.diagnostics.push(index === undefined ? { kind } : { kind, index });
+}
+
+/**
+ * 默认命令记录：首格 = 种类、变体格 = 变体、时间戳 = 0；其余格保持默认
+ * （spec：「记录里没有被本条写到的格保持默认值」）。
+ */
+function defaultCommandRecord(kind: number, variant: number): SceneCommandRecord {
+  return {
+    kind,
+    variant,
+    timestamp: 0,
+    textureId: 0,
+    ownerKey: 0,
+    rangeStart: 0,
+    rangeCount: 0,
+    segmentA: [0, 0],
+    segmentB: [0, 0],
+    rect: { left: 0, top: 0, right: 0, bottom: 0 },
+    delay: 0,
+    duration: 0,
+    flag: 0,
+    mode: 0,
+    split: 0,
+    rampLength: [0, 0],
+    rampAngle: [0, 0],
+    rampCenterU: [0, 0],
+    rampCenterV: [0, 0],
+    raw: [],
+  };
+}
+
+/** 同键**先删旧记录再写**（替换语义）+ 置场景脏 */
+function writeCommandRecord(m: Machine, key: number, record: SceneCommandRecord): void {
+  m.scene.commands.delete(key);
+  m.scene.commands.set(key, record);
+  m.scene.dirty = 1;
+}
+
+/** 按读出顺序把 1..argc 个操作数收成原始整型值（`raw` 留痕用，⛔ 不拿它反推记录格） */
+function commandOperands(m: Machine, ops: Operand[]): number[] {
+  const out: number[] = [];
+  for (let k = 1; k <= ops.length; k += 1) out.push(readInt(m, ops, k));
+  return out;
+}
+
+/**
+ * `0x223` / `0x250` / `0x251` 在写表**之前**的那一次建 / 换纹理请求。
+ *
+ * spec 的两条判据（`CORE-OPS-SCENE-COMMAND-RECORDS`）：
+ * ① 槽里**没有对象**，或 ② 对象的表面格式与**当前显示格式不符** ⇒ 请求按该编号**建 / 换纹理**；
+ * **格式相符 ⇒ 一个请求都不发**（因此也不会产生失败上报）。
+ *
+ * ★ 核心能自己判的只有「槽空」；**「当前显示格式」在本层没有状态格** ⇒ 格式比较交给
+ *   `RenderHost.textureFormatMatches`（可选）。平台不提供 ⇒ 记一条
+ *   `scene-command-texture-format-unmodeled` 诊断，⛔ 不假装"相符"、⛔ 不猜一次换纹理。
+ * ★ **请求的返回值被忽略**（spec / 证据：写入器调用后不看 `eax`）：无论成功失败，调用方
+ *   照常删旧记录、写新记录、置脏。
+ * ★ **失败后果**（spec 的「种类 0 的建 / 换纹理请求失败」）：
+ *   - 错误通道收到**一条带编号、不带脚本位置前缀**的说明（`scene.errorBuffer`；与绘制阶段
+ *     那些会带脚本位置前缀的上报不是同一个入口）；
+ *   - 槽里**仍然留下一个「建失败」的对象**（引擎先把新对象落槽、再调平台）⇒ 之后
+ *     「槽是否为空」这个判据不再能识别它，是否重建只由「格式是否相符」决定
+ *     （见 `TextureObject.creationFailed`）；
+ *   - 重试行为本身是残差 `RES-SCENE-COMMAND-TEXTURE-RETRY`（本层按格式判据如实重发）。
+ * ★ 请求的尺寸 / 格式参数 spec 不规定 ⇒ 建用槽里对象的尺寸（槽空则 0×0）、种类按普通纹理。
+ */
+async function commandTextureRequest(m: Machine, textureId: number): Promise<void> {
+  const object = m.scene.textureObjects.get(textureId);
+  const create = object === undefined;
+  if (!create) {
+    const matches = m.renderHost?.textureFormatMatches;
+    if (matches === undefined) {
+      noteOnce(m, 'scene-command-texture-format-unmodeled', textureId);
+      return;
+    }
+    if (await matches(textureId)) return;
+  }
+  const request = {
+    textureId,
+    width: object?.width ?? 0,
+    height: object?.height ?? 0,
+    kind: 'normal' as const,
+  };
+  m.effects.push({ kind: create ? 'texture.create.request' : 'texture.replace.request', detail: { ...request } });
+  if (m.renderHost === undefined) {
+    // 没有宿主 ⇒ 请求发不出去；⛔ 不静默（也不伪造"建失败"的对象：引擎里那一步没发生）
+    noteOnce(m, 'scene-command-texture-no-host', textureId);
+    return;
+  }
+  let ok: boolean;
+  if (create) {
+    ok = await m.renderHost.createTexture(request);
+  } else if (m.renderHost.replaceTexture === undefined) {
+    noteOnce(m, 'scene-command-texture-replace-unsupported', textureId);
+    return;
+  } else {
+    ok = await m.renderHost.replaceTexture(request);
+  }
+  if (ok) {
+    if (object !== undefined) object.creationFailed = false;
+    return;
+  }
+  // ★ 失败：错误通道（不带脚本位置前缀；文本来自引擎的 CTexture 错误格式串）+ 槽里留"建失败"对象。
+  m.scene.errorBuffer = `関数：CTexture エラー：テクスチャ作成に失敗． TEXTURE=${textureId}`;
+  noteOnce(m, 'scene-command-texture-request-failed', textureId);
+  if (object !== undefined) object.creationFailed = true;
+  else m.scene.textureObjects.set(textureId, { kind: 'normal', width: 0, height: 0, creationFailed: true });
+}
+
+/**
+ * `0x223` 场景命令记录：**种类 0**（8 个操作数）。**纹理覆盖命令**。
+ *
+ * 1 = 命令键、2 = 纹理编号、3 / 4 与 5 / 6 各一段（**起点键、个数**）、7 = 延迟、8 = 持续时间。
+ * ★ 纹理槽检查与建 / 换请求在**写表之前**（见 `commandTextureRequest`）；请求失败**不阻止写表**。
+ * ★ 本条**不立即画**（⛔ 不发绘制请求）。
+ */
+async function sceneCommand223(m: Machine, ops: Operand[]): Promise<void> {
+  const key = readInt(m, ops, 1);
+  const textureId = readInt(m, ops, 2);
+  const startA = readInt(m, ops, 3);
+  const countA = readInt(m, ops, 4);
+  const startB = readInt(m, ops, 5);
+  const countB = readInt(m, ops, 6);
+  const delay = readInt(m, ops, 7);
+  const duration = readInt(m, ops, 8);
+  // ★ 忽略返回值（spec：失败也照常删旧 + 写新 + 置脏）
+  await commandTextureRequest(m, textureId);
+  const record = defaultCommandRecord(0, 0);
+  record.textureId = textureId;
+  record.segmentA = [startA, countA];
+  record.segmentB = [startB, countB];
+  record.delay = delay;
+  record.duration = duration;
+  writeCommandRecord(m, key, record);
+}
+
+/**
+ * `0x24d` 场景命令记录：**种类 1**（12 个操作数）。**影片覆盖命令**：
+ * 把一条**已有的影片纹理**按目标矩形叠进画面，并接管一段绘制键区间。
+ *
+ * 操作数 → 字段（`CORE-OPS-SCENE-COMMAND-RECORDS`）：
+ * - 1 = 命令键，**同时**是影片名表的索引（**不写进记录**）；
+ * - 2 = 一条**已经存在**的影片纹理的编号（本条**不建纹理**）；
+ * - 3 = 覆盖区间的起点键、4 = 个数；
+ * - 5 / 6 = 目标矩形的左 / 上，7 / 8 = 宽 / 高（⇒ 右 = 5 + 7、下 = 6 + 8，宽高是**加出来的**）；
+ * - 9 = 取 0 / 1 的**标志**；10 = 另一个影片名表索引（**不写进记录**）；
+ * - 11 = 延迟、12 = 持续时间。
+ *
+ * ★ **先判纹理槽**：槽空 ⇒ 引擎抛**显示消息型异常**终止本条（⛔ 不是错误通道上报）；
+ *   此时**旧记录不动**（删旧记录在判槽之后）。
+ * ★ 写成功 ⇒ 时间戳清 0、场景标脏，并置场景「有动画」（与「脏」是**两个不同的格**）。
+ * ★ 「第一帧画 / 之后只标记」的判据是**记录的时间戳格**，时机在渲染步 —— ⛔ 不在本条里画。
+ */
+function sceneCommand24d(m: Machine, ops: Operand[]): void {
+  // 读序前缀按证据是 2 → 1；判槽在删旧记录之前。
+  const textureId = readInt(m, ops, 2);
+  const key = readInt(m, ops, 1);
+  if (!m.scene.textureObjects.has(textureId)) {
+    // 文本逐字照引擎（`Command_ShowMessage_Exception`）；它会被显示给玩家 ⇒ ⛔ 不往里塞编号。
+    throw new Error('display-message: ムービーの初期化に失敗しました．\r\nテクスチャが確保されていません．');
+  }
+  const rangeStart = readInt(m, ops, 3);
+  const rangeCount = readInt(m, ops, 4);
+  const left = readInt(m, ops, 5);
+  const top = readInt(m, ops, 6);
+  const width = readInt(m, ops, 7);
+  const height = readInt(m, ops, 8);
+  const flag = readInt(m, ops, 9);
+  // 第 10 个操作数也是影片名表索引（不落记录），但它是**一次操作数读**（读到非法类型时会抛）。
+  readInt(m, ops, 10);
+  const delay = readInt(m, ops, 11);
+  const duration = readInt(m, ops, 12);
+  const record = defaultCommandRecord(1, 0);
+  record.textureId = textureId;
+  record.rangeStart = rangeStart;
+  record.rangeCount = rangeCount;
+  record.rect = { left, top, right: left + width, bottom: top + height };
+  record.flag = flag;
+  record.delay = delay;
+  record.duration = duration;
+  record.raw = commandOperands(m, ops);
+  writeCommandRecord(m, key, record);
+  m.scene.animating = 1;
+}
+
+/**
+ * `0x24f` 场景命令记录：**种类 2**（10 个操作数）。**抹除命令** —— 把两段绘制键区间各画进一块离屏画布，
+ * 再按类型选出的图案把它们合成到**本条自己的纹理**上。
+ *
+ * 操作数 → 记录（`CORE-OPS-SCENE-COMMAND-RECORDS`）：1 = **命令键**（**同时**记进记录 `ownerKey`，
+ * 命令档用它去绘制项表找抹除矩形）、2 = **纹理编号**、3 / 4 = 区间 A、5 / 6 = 区间 B、
+ * 7 = 类型 / 模式、8 = 分割幅、9 / 10 = 延迟 / 持续时间。另写：`kind = 2`、`timestamp = 0`。
+ *
+ * **先校验、后写表**（两条顺序固定、后果**不同**）：
+ *
+ * - **分割幅**（操作数 8）**< 1** ⇒ 错误通道「分割幅が０以下です」；把分割幅记 **1**、类型记 **−1**、
+ *   延迟与持续时间**清 0**，然后**照常写记录**（跳过类型校验 ⇒ 表里会有一条 `mode = -1` 的命令）。
+ * - **类型 / 模式**（操作数 7）∉ **[0, 11]**（**两端闭、含负数**）⇒ 错误通道「タイプが不正です」并
+ *   **直接返回**：不建记录、**不删旧记录**、⛔ 也不发纹理请求（表完全不变）。
+ * - 通过 ⇒ 先发建 / 换纹理请求（**校验之后、删旧记录之前**），再替换命令记录并置脏。
+ *
+ * ★ 两条**不许合并**成"非法就拒绝"；⛔ 不许把负数放行（负数与 > 11 走同一个错误支）。
+ * ★ 本条**不置**场景「有动画」（与种类 1 不同）。
+ * ★ 类型 < 0 的副作用（命令档把场景「强制完成」置 1 ⇒ 所有计时窗立刻到期）属**渲染侧**，本层未建模。
+ */
+async function sceneCommand24f(m: Machine, ops: Operand[]): Promise<void> {
+  const key = readInt(m, ops, 1);
+  const textureId = readInt(m, ops, 2);
+  const startA = readInt(m, ops, 3);
+  const countA = readInt(m, ops, 4);
+  const startB = readInt(m, ops, 5);
+  const countB = readInt(m, ops, 6);
+  let mode = readInt(m, ops, 7);
+  let split = readInt(m, ops, 8);
+  let delay = readInt(m, ops, 9);
+  let duration = readInt(m, ops, 10);
+  if (split < 1) {
+    m.scene.errorBuffer = '分割幅が０以下です';
+    split = 1;
+    mode = -1;
+    delay = 0; // ★ 清的是**实参**：记录里落的也是 0（不是"反正默认 0 就不写"）
+    duration = 0;
+  } else if (mode < 0 || mode > 11) {
+    m.scene.errorBuffer = 'タイプが不正です';
+    return; // ⛔ 不写表、⛔ 不删旧记录、⛔ 不发纹理请求
+  }
+  if (mode < 0) {
+    // 类型 < 0 的**唯一可见后果**在渲染侧：命令档每帧看到它就把场景「强制完成」置 1
+    // （⇒ 所有计时窗立刻到期）。本层没有命令档 ⇒ 只留诊断，⛔ 不假装那个副作用已经实现。
+    noteOnce(m, 'scene-command-kind2-negative-mode', key);
+  }
+  // ★ 建 / 换纹理请求在两条校验**之后**、删旧记录**之前**（返回值忽略；失败也照常写表）。
+  await commandTextureRequest(m, textureId);
+  const record = defaultCommandRecord(2, 0);
+  record.ownerKey = key;
+  record.textureId = textureId;
+  record.segmentA = [startA, countA];
+  record.segmentB = [startB, countB];
+  record.mode = mode;
+  record.split = split;
+  record.delay = delay;
+  record.duration = duration;
+  record.raw = commandOperands(m, ops);
+  writeCommandRecord(m, key, record); // 置脏；⛔ 不置「有动画」
+}
+
+/**
+ * `0x250`（种类 3、**变体 0**、10 个操作数）/ `0x251`（种类 3、**变体 1**、12 个操作数）。
+ *
+ * 两条**同为种类 3（模糊转场命令）**，只有**变体格**不同：
+ *
+ * | 字段 | 变体 0（`0x250`） | 变体 1（`0x251`） |
+ * |---|---|---|
+ * | 长度「起 → 终」 | 5 → 7 | 5 → 8 |
+ * | 角度「起 → 终」 | 6 → 8 | **不用**（两格 0） |
+ * | 中心 U「起 → 终」 | **不用**（两格 0） | 6 → 9（像素） |
+ * | 中心 V「起 → 终」 | **不用**（两格 0） | 7 → 10（像素） |
+ * | 延迟 / 持续时间 | 9 / 10 | 11 / 12 |
+ *
+ * 公共：1 = 命令键、2 = 纹理编号（写表**之前**先发一次建 / 换纹理请求）、3 = 区间起点、4 = 个数；
+ * 写成功 ⇒ 时间戳清 0、场景标脏（**不**置「有动画」——那由推进决定）。
+ */
+async function sceneCommand3(m: Machine, ops: Operand[], variant: number): Promise<void> {
+  const key = readInt(m, ops, 1);
+  const textureId = readInt(m, ops, 2);
+  const rangeStart = readInt(m, ops, 3);
+  const rangeCount = readInt(m, ops, 4);
+  let rampLength: [number, number];
+  let rampAngle: [number, number] = [0, 0];
+  let rampCenterU: [number, number] = [0, 0];
+  let rampCenterV: [number, number] = [0, 0];
+  let delay: number;
+  let duration: number;
+  if (variant === 0) {
+    const lengthFrom = readInt(m, ops, 5);
+    const angleFrom = readInt(m, ops, 6);
+    const lengthTo = readInt(m, ops, 7);
+    const angleTo = readInt(m, ops, 8);
+    delay = readInt(m, ops, 9);
+    duration = readInt(m, ops, 10);
+    rampLength = [lengthFrom, lengthTo];
+    rampAngle = [angleFrom, angleTo];
+  } else {
+    const lengthFrom = readInt(m, ops, 5);
+    const centerUFrom = readInt(m, ops, 6);
+    const centerVFrom = readInt(m, ops, 7);
+    const lengthTo = readInt(m, ops, 8);
+    const centerUTo = readInt(m, ops, 9);
+    const centerVTo = readInt(m, ops, 10);
+    delay = readInt(m, ops, 11);
+    duration = readInt(m, ops, 12);
+    rampLength = [lengthFrom, lengthTo];
+    rampCenterU = [centerUFrom, centerUTo];
+    rampCenterV = [centerVFrom, centerVTo];
+  }
+  // ★ 写表之前的建 / 换纹理请求（返回值忽略）；失败也照常写表。
+  await commandTextureRequest(m, textureId);
+  const record = defaultCommandRecord(3, variant);
+  record.textureId = textureId;
+  record.rangeStart = rangeStart;
+  record.rangeCount = rangeCount;
+  record.delay = delay;
+  record.duration = duration;
+  record.rampLength = rampLength;
+  record.rampAngle = rampAngle;
+  record.rampCenterU = rampCenterU;
+  record.rampCenterV = rampCenterV;
+  record.raw = commandOperands(m, ops);
+  writeCommandRecord(m, key, record); // 置脏；⛔ 不置「有动画」
 }
 
 /* ──────────────────────────── 渲染请求边界（60-ops-render.md） ──────────────────────────── */
@@ -1007,7 +1339,7 @@ async function exitScript9(m: Machine): Promise<void> {
     name: m.scriptName?.(0) ?? m.rootName,
     body: root,
     ip: 0,
-    frame: m.freshFrame(),
+    frame: m.freshFrame(0),
     parent: -1,
     length: 0,
   }];
@@ -1015,6 +1347,8 @@ async function exitScript9(m: Machine): Promise<void> {
   m.operandCount = 0;
   // 复位：状态选择字归 0；三个全局池清回初值（整型池 decode 后为 0、浮点池 0、字符串池空）
   // ★ show-logo 标志已在 reload 之前清 0（见 `0x428A75`）：重跑的根脚本经 `0x130` 读到 0。
+  // ★ 两份缓冲（SPC-POOL-MEMFLIP）下"是否连备用组一起复位"本版未观察 ⇒ 只清**当前选中**的那一组
+  //   （备用组留原值）。这是实现口径、**不是规范合同**（spec 未规定）。
   m.flags = 0;
   m.globalInt.clear();
   m.globalFloat.clear();
@@ -1113,6 +1447,30 @@ function stopVoice2f6(m: Machine, ops: Operand[]): void {
     }
   }
   m.scalars.set('voice.stillPlaying', stillPlaying);
+}
+
+/* ──────────────────────────── 全局池的两份缓冲（40-pools.md） ──────────────────────────── */
+
+/**
+ * 0x6d memflip（SPC-POOL-MEMFLIP）：把六个全局池族的主 / 备选择**整体对调**。
+ *
+ * - 推进格数**先**写成 1，**然后**才查配置 ⇒ 异常路径上它已经是 1（spec 明写的先后）。
+ * - 配置命名键 `set:EnableMemFlip`（整数键；缺失按 `55-config.md` 的缺键规则读 0）：
+ *   为 0 或缺键 ⇒ 引擎抛**显示消息型异常**（「memflipは現在使用不可になっています．」），六个选择不变。
+ * - 非 0 ⇒ 对调。对调**只改选择**：不搬数据、不重新分配、不改变任何计数、不改变元素宽度。
+ * ★ 本实现的"两份缓冲"= 地址空间里两组窗口（`address.ts`）+ 一个共享选择量（`Machine.globalFlip`）；
+ *   备用组是否存在由**启动期**同一个键决定。若该键在启动后被改写（spec 归为 UB），翻页本身按
+ *   执行期读到的键成功，但随后的访问落到**未映射**的地址 ⇒ 池访问器响亮失败
+ *   （⛔ 不在翻页时补分配来掩盖 —— spec 明写不许）。
+ */
+function memFlip6d(m: Machine): void {
+  m.operandCount = 1;
+  const enabled = m.config ? m.config.getInt('set:EnableMemFlip') : 0;
+  if (enabled === 0) {
+    throw new Error('display-message: memflipは現在使用不可になっています．');
+  }
+  m.globalFlip = m.globalFlip === 0 ? 1 : 0;
+  m.effects.push({ kind: 'pool.memflip', detail: { flip: m.globalFlip } });
 }
 
 /* ──────────────────────────── 等待 / 输入 ──────────────────────────── */
@@ -1631,6 +1989,8 @@ function cloneDrawItem(src: DrawItem): DrawItem {
     fields: new Map(src.fields),
     extraMatrices: new Map([...src.extraMatrices].map(([k, m]) => [k, [...m]])),
     unknown: new Map(src.unknown),
+    // ★ 具名字段也要深拷：否则副本与源共享同一个 `sourceWindow` 对象（`0x239` 写副本会改到源）
+    sourceWindow: src.sourceWindow === null ? null : { ...src.sourceWindow },
   };
 }
 
@@ -1672,7 +2032,15 @@ function setter242(m: Machine, ops: Operand[]): void {
   // 不标脏、不置位；建默认记录那一步是否间接标脏见正文 / 残差。
 }
 
-/** 0x239：带位 0 门的一对整数 + 附加组三个整数；标脏 + 动画。 */
+/**
+ * 0x239：带位 0 门的一对整数 + 附加组三个整数；标脏 + 动画。
+ *
+ * 过门后置**首字第 1 位**（"有窗"，与颜色窗同一位）、把**窗起点**清 0
+ * （`item.start` 是那个共用起点；`fields[0x34]` 保留同一格的按偏移视图），
+ * 再把五格写进**源矩形窗口**（`CORE-OPS-TEXTURE-DRAW-CONSUMER` 4.1）：
+ * op2/op3 = 延迟 / 持续时间；op4/op5/op6 = 步进总数 / 每行步数 / 开关字。
+ * ★ 后三格与 `0x231` 重叠（真实复用）：两条指令写的是**同一份格**。
+ */
 function setter239(m: Machine, ops: Operand[]): void {
   const id = readInt(m, ops, 1) | 0;
   const a = readInt(m, ops, 2) | 0;
@@ -1683,14 +2051,37 @@ function setter239(m: Machine, ops: Operand[]): void {
   const item = drawItemOf(m, id);
   if ((item.flags & 1) === 0) return;
   item.flags |= 2;
+  item.start = 0;
   setField(item, 0x34, 0);
   setField(item, 0x48, a);
   setField(item, 0x5c, b);
   setField(item, 0x238, c);
   setField(item, 0x23c, d);
   setField(item, 0x234, e);
+  item.sourceWindow = { delay: a, duration: b, steps: c, perRow: d, switchWord: e };
   m.scene.dirty = 1;
   m.scene.animating = 1;
+}
+
+/**
+ * 0x229：**先重置场景自身状态**，再写作用键区间与三元平移（`CORE-OPS-SCENE-SELF-TRANSFORM-229`）。
+ *
+ * 读序按证据：先 op2（计数）再 op1（起点），然后三个浮点；重置在**读之前**（证据里的调用次序）。
+ * ★ 重置**不许漏**：它同时清掉上一次的作用键区间（否则连写两条会残留）。
+ * ★ 只重置被建模的那几格（平移 + 区间）；记录其余格本层不建模。
+ */
+function sceneSelfTransform229(m: Machine, ops: Operand[]): void {
+  m.scene.selfRecord = { translate: { x: 0, y: 0, z: 0 }, keyStart: 0, keyCount: 0 };
+  m.scene.dirty = 1;
+  const count = readInt(m, ops, 2) | 0;
+  const start = readInt(m, ops, 1) | 0;
+  m.scene.selfRecord.keyStart = start;
+  m.scene.selfRecord.keyCount = count;
+  const x = readFloat(m, ops, 3);
+  const y = readFloat(m, ops, 4);
+  const z = readFloat(m, ops, 5);
+  m.scene.selfRecord.translate = { x, y, z };
+  m.scene.dirty = 1;
 }
 
 /** 0x217 / 0x219 写三元向量：读序 2→3→4→1；缺记录先建默认记录。 */
@@ -1942,13 +2333,39 @@ function buildSlotFile(m: Machine): Uint8Array {
   return buildSaveFile({ frame, records, ints, floats, strings, version1: 3, version2: 20 }, m.key, seed, saveKey);
 }
 
-/** 0x1a1：无确认写槽（未压缩负载；块 1/4 写 0；返回 0/1）。 */
-async function saveWrite1a1(m: Machine, ops: Operand[]): Promise<void> {
+/**
+ * 0x1a1：无确认的**读回**（只读打开该槽的 `.DAT` 并读头 + 读负载）。
+ *
+ * ★ 合同（`CORE-OPS-SAVE-WRITE` 的 `0x1a1` 那一半）：
+ *   - 打不开 ⇒ 第 1 个操作数 ← 1，结束；这是**唯一**写第 1 个操作数的支路；
+ *   - 能打开 ⇒ 读头 + 读负载；★ 成功路径**不写**第 1 个操作数（与 `0x19f` 不同）；
+ *   - 读完之后整池重编码（全局整型池：计数格 + 1 格）。
+ * ⛔ 这不是写：写是 `0x19e`（`saveWrite19e`），两条的**方向与分支都不同**，
+ *   不许合并成一条带开关的实现。
+ *
+ * ⚠ **本层未建模**（记诊断、不假装做到）：
+ *   - 负载的还原（帧 / 池 / 局部）：`save-restore-unmodeled`；
+ *   - 整池重编码：core 没有现成的整池重编码入口 ⇒ `save-recode-unmodeled`。
+ *   两者都只在**读成功**之后记（头坏 = 读失败，不进这两条）。
+ * ⚠ 头不合法的行为**未取证**：合同只写了"打不开"，没有规定"头坏"这一支
+ *   ⇒ 记 `save-1a1-header-invalid` 且**不写**第 1 个操作数（⛔ 不照抄 `0x1a0` 的 2）。
+ */
+async function saveRead1a1(m: Machine, ops: Operand[]): Promise<void> {
   const host = m.saveHost;
   if (!host) throw new Error('save-host-missing:0x1a1');
   const slot = readInt(m, ops, 2) | 0;
-  const ok = await host.write(host.fileForSlot(slot, 'dat'), buildSlotFile(m));
-  writeInt(m, ops, 1, ok ? 0 : 1);
+  const bytes = await host.read(host.fileForSlot(slot, 'dat'));
+  if (!bytes) {
+    writeInt(m, ops, 1, 1);
+    return;
+  }
+  const magic = String.fromCharCode(bytes[0] ?? 0, bytes[1] ?? 0, bytes[2] ?? 0, bytes[3] ?? 0);
+  if (bytes.length < 292 || (magic !== 'S4SD' && magic !== 'S3SD')) {
+    m.diagnostics.push({ kind: 'save-1a1-header-invalid', index: slot });
+    return;
+  }
+  m.diagnostics.push({ kind: 'save-restore-unmodeled', index: slot });
+  m.diagnostics.push({ kind: 'save-recode-unmodeled', index: slot });
 }
 
 /** 0x19e：带覆写确认的写槽；目标存在且头读不回来时问宿主，拒绝 ⇒ 1。 */
@@ -2137,7 +2554,11 @@ function localEnterTargets7b(m: Machine, ops: Operand[]): void {
   m.frame.localSub = readInt(m, ops, 2) | 0;
 }
 
-/** 0x7c：身份 / 深度判据；成功则整字覆盖状态选择字、清存档字、跳回存档位置。 */
+/**
+ * 0x7c：身份 / 深度判据；成功则整字覆盖状态选择字、清存档字、跳回存档位置。
+ * ★ 深度判据比较的是「**本帧记录里的身份编号**」（`frame.localDepth`，建帧时定下）与
+ *   「引擎的入块深度」（`localSaveDepth`，由 `0x199` 首次进入写）—— 判的是**两个编号相等**，不是调用层数。
+ */
 function localRet7c(m: Machine): void {
   if ((m.localSaveWord & (1 << 25)) === 0) {
     m.operandCount = 1;
@@ -2148,6 +2569,8 @@ function localRet7c(m: Machine): void {
   }
   m.ip = 4 * m.localSavePos;
   m.operandCount = 0;
+  // ★ 只清第 25 位 ⇒ 进入本地块时被置起的第 26 位会**带着 1 回来**（可观察；
+  //   见 CORE-OPS-FRAME-LOCAL-RET-7C 的「第 26 位若被置起则保留」）。
   m.flags = m.localSaveWord & ~(1 << 25);
   m.localSaveWord = 0;
   m.localCellA = 0;
@@ -2156,6 +2579,56 @@ function localRet7c(m: Machine): void {
   m.localCellD = 0;
   if (m.localPending !== 0) m.localPending = 0;
   m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x7c', slot: 'localReturn' } });
+}
+
+/**
+ * 0x199 进入本地块（`CORE-OPS-STATE-199`）：把执行位置交给本地块的**两个进入目标之一**
+ * （`0x7b` 登记，`-1` = 未登记），并记下"回来时要用的状态"。
+ *
+ * 次序**是合同**：
+ * 1. 推进格数 ← **1** —— 发生在**任何判断之前**（两条"什么都不做"的路径也留着 1）；
+ * 2. 输入字 ← **0**，**无条件执行**（含两条"什么都不做"的路径）；
+ * 3. 分支开关 = **存档字第 26 位**：
+ *    - **= 0（首次进入形态）**：主目标 `-1` ⇒ 什么都不做；否则推进格数 ← 0、
+ *      `save ← state 整字 | 第 25、26 位` 且 `state ← 0`、**返回点 ← 本条之后那一格（位置）**、
+ *      **入块深度 ← 本帧记录里的身份编号**、执行位置 ← 4 × 主目标。★ 这一形态**不读** `save` 原值。
+ *    - **= 1（已在块内形态）**：副目标 `-1` ⇒ 什么都不做；否则推进格数 ← 0、
+ *      `save ← (save & ~第 26 位) | 第 25 位`（读-改-写）、执行位置 ← 4 × 副目标。
+ *      ★ **不写**返回点、**不写**入块深度、**不动** `state`（保留外层记录）。
+ *
+ * ⛔ 三处易踩：
+ * - **`m.ip` 是字节、`localSavePos` 是位置**（dword 下标）：入口处 `m.ip` 指向本条自身 ⇒ `m.ip / 4 + 1`，
+ *   那个 `+1` 不能省（`0x7c` 用 `m.ip = 4 * localSavePos`）。
+ * - **不要动 `frame.retStack`**：返回点走 `localSavePos` 这一**单格**，`0x7c` 不 pop 返回栈；
+ *   混起来会让 `0x3` / `0x2` 的栈失衡。
+ * - **"什么都不做" ≠ "什么都不写"**：两条早退路径仍然写了推进格数 1 与清输入字。
+ * - 本条**不判断门位**、不产生异常、不切换当前帧号；尾段没有动画 / 标脏动作。
+ */
+function localEnter199(m: Machine): void {
+  m.operandCount = 1;
+  m.input.word = 0;
+  m.inputWord = 0;
+  const inside = (m.localSaveWord & (1 << 26)) !== 0;
+  const target = inside ? m.frame.localSub : m.frame.localMain;
+  if (target === -1) {
+    // 未登记 ⇒ 退化成一条空指令（除上面两件已经写掉的事）
+    m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x199', path: 'none', entered: false } });
+    return;
+  }
+  m.operandCount = 0;
+  if (inside) {
+    m.localSaveWord = ((m.localSaveWord & ~(1 << 26)) | (1 << 25)) >>> 0;
+  } else {
+    m.localSaveWord = (m.flags | (1 << 25) | (1 << 26)) >>> 0;
+    m.flags = 0;
+    m.localSavePos = m.ip / 4 + 1;
+    m.localSaveDepth = m.frame.localDepth;
+  }
+  m.ip = 4 * target;
+  m.effects.push({
+    kind: 'engine.scalar.write',
+    detail: { opcode: '0x199', path: inside ? 'sub' : 'main', entered: true },
+  });
 }
 
 /** 0x1f4 / 0x1f5：执行区间进入 / 离开；本实现没有待处理队列，泵在空队列上是空操作。 */
@@ -2644,14 +3117,29 @@ function loadShowLogo130(m: Machine, ops: Operand[]): void {
 
 /**
  * `0xfe` 键总数（CORE-INPUT-WORD）：无符号比较 > 31 ⇒ 显示消息型异常。
- * ★ 落点身份（键总数）由 `0x100` 的扫描上限读点支撑；初值本版不规定。
+ * ★ 落点身份（键总数）由 `0x100` 的扫描上限读点支撑。
+ * ★ 引擎**不建立**这一格的初值（唯一写点是本条）⇒ 在此之前读到它是**未定义行为**；
+ *   本实现按 0 兜底（UB，不是合同），读者见 `readKeyTotal`（只记一次诊断）。
  */
 function keyTotalFe(m: Machine, ops: Operand[]): void {
   const value = readInt(m, ops, 1) >>> 0;
   if (value > 31) throw new Error(`opcode 0xfe 的操作数 ${value} 超出引擎的范围检查（> 0x1f）—— 引擎这里抛异常`);
   m.input.keyTotal = value;
+  m.input.keyTotalEstablished = true;
   scalarWrite(m, '0xfe', 'Engine.d517', value);
   m.effects.push({ kind: 'input.key-total', detail: { value } });
+}
+
+/**
+ * 读引擎的**键总数**格。
+ * ★ 引擎不建立初值（CORE-INPUT-WORD 的「成立条件」）⇒ 在 `0xfe` 之前读到它是**未定义行为**：
+ *   本实现用 0 兜底，但那是 UB 兜底、**不是合同**；这里**只记一次**诊断，⛔ 不把它表述成"启动值"。
+ */
+function readKeyTotal(m: Machine): number {
+  if (!m.input.keyTotalEstablished && !m.diagnostics.some((d) => d.kind === 'key-total-unset')) {
+    m.diagnostics.push({ kind: 'key-total-unset' });
+  }
+  return m.input.keyTotal >>> 0;
 }
 
 /** `0xff` 采样按键位图（CORE-INPUT-WORD）：清输入字 → 平台采样 → 重置游标与上限 */
@@ -2664,8 +3152,10 @@ function keySampleFf(m: Machine): void {
   }
   m.input.samples += 1;
   m.frame.keyCursor = 0;
-  m.frame.keyLimit = m.input.keyTotal;
-  m.effects.push({ kind: 'input.sample', detail: { mask: m.input.word, keyTotal: m.input.keyTotal } });
+  // ★ 按帧上限是**键总数在这一次采样时的快照**；它的唯一读者是未实现的 `0x104`（`0x100` 读键总数本身）。
+  const keyTotal = readKeyTotal(m);
+  m.frame.keyLimit = keyTotal;
+  m.effects.push({ kind: 'input.sample', detail: { mask: m.input.word, keyTotal } });
 }
 
 /** `0xfb` 登记按键回调（CORE-INPUT-CALLBACK-REGISTER） */
@@ -2713,11 +3203,12 @@ function mouseCallbackCd(m: Machine): void {
 /**
  * `0x100` 派发按键回调（CORE-INPUT-KEY-DISPATCH）。
  * ★ 输入字为 0 ⇒ 走"无按键"表项、返回位置 = 下一条；非 0 ⇒ 压当前位置（有意重派发）、游标前进。
+ * ★ 扫描上界 = **引擎的键总数本身**（不是 `0xff` 抄下的按帧上限；那一格的唯一读者是未实现的 `0x104`）。
  */
 function keyDispatch100(m: Machine): void {
   m.operandCount = 1;
   const word = m.input.word >>> 0;
-  const limit = m.frame.keyLimit;
+  const limit = readKeyTotal(m);
   const table = m.frame.keyJumps;
   if (word === 0) {
     const target = table.get(limit);
@@ -2740,6 +3231,152 @@ function keyDispatch100(m: Machine): void {
   m.effects.push({ kind: 'input.key.dispatch', detail: { key: cursor, target } });
   m.ip = 4 * target;
   m.operandCount = 0;
+}
+
+/**
+ * `0x102` 登记按住派发槽（CORE-INPUT-102-SLOT）。
+ * ★ 表按**当前帧**分层、每（帧 × 键）固定 **10 槽**；键 0..31 与槽 0..9 是两个**独立**写死的上界。
+ * ★ 越界在**写表之前**返回 ⇒ 一个槽都不写（显示消息型异常）；异常文本只提"第 1 个操作数"，
+ *   ⛔ 不许拿消息文本判断是哪个操作数错了。
+ * ★ 目标位置**完全不做检查**：−1 = 取消登记，按位置原样写进格。键编号的检查与键总数**无关**。
+ */
+function holdSlot102(m: Machine, ops: Operand[]): void {
+  m.operandCount = 2 * 3 + 1; // 推进格数 7
+  const key = readInt(m, ops, 1) | 0;
+  const slot = readInt(m, ops, 2) | 0;
+  const target = readInt(m, ops, 3) | 0;
+  if (key < 0 || key > 31) throw new Error('display-message: SetKeyJumpEx の第１引数が不正です（键编号越界）');
+  if (slot < 0 || slot > 9) throw new Error('display-message: SetKeyJumpEx の第１引数が不正です（槽号越界）');
+  m.frame.holdSlots.set(key * 10 + slot, target);
+  m.effects.push({ kind: 'input.hold.register', detail: { key, slot, target } });
+}
+
+/**
+ * `0x103` 设置按住游标模数（CORE-INPUT-103-MODULUS）。
+ * ★ 模数是**引擎级**一格（所有帧共用）：原样写、**不做任何范围检查**（0 / 负数照写、不抛）。
+ * ★ 按住游标是**按帧**的 ⇒ 只清**当前帧**的游标，其它帧保持原值。
+ * ★ 模数 0 的后果是**延迟**的：本条不拦，下一次 `0x104` 的游标推进才会响亮失败。
+ */
+function holdModulus103(m: Machine, ops: Operand[]): void {
+  m.operandCount = 2 * 1 + 1; // 推进格数 3
+  const modulus = readInt(m, ops, 1) | 0;
+  m.hold.modulus = modulus;
+  m.frame.holdCursor = 0;
+  // 0 是脚本自己制造的 UB，不是"设置失败"：只留诊断，下一次派发才响。
+  if (modulus === 0) m.diagnostics.push({ kind: 'hold-modulus-zero:0x103' });
+  m.effects.push({ kind: 'input.hold.modulus', detail: { modulus } });
+}
+
+/**
+ * `0x105` 设置按住掩码（CORE-INPUT-105-MASK）：32 位位集（第 i 位 = 编号 i），**原样、不归一**。
+ * ★ 引擎级（帧释放 / 重载不清它，`0xfc` 也不清）；唯一读者是 `0x104`。
+ * ★ 它**不是**输入字：本条不碰输入字，`0x104` 也不拿它判"哪个键被按住"。
+ */
+function holdMask105(m: Machine, ops: Operand[]): void {
+  m.operandCount = 2 * 1 + 1; // 推进格数 3
+  m.hold.mask = readInt(m, ops, 1) >>> 0;
+  m.effects.push({ kind: 'input.hold.mask', detail: { mask: m.hold.mask } });
+}
+
+/**
+ * 按住游标推进：`(游标 + 1) mod 模数`。**三条出口都要走这里**（跳 / 不跳、登记 / 未登记）。
+ * ★ `modulus === 0` ⇒ 目标机上是整数除零（UB）。本仓口径：**显式响亮失败**，
+ *   ⛔ 不按 0 / 不按 1 / 不用默认模数兜底（那会把 UB 伪装成合同）。
+ * ★ 游标未被定义（引擎不建立初值）⇒ 同样是 UB，也响亮失败（⛔ 不把 `null` 当 0）。
+ */
+function advanceHoldCursor(m: Machine): void {
+  const modulus = m.hold.modulus | 0;
+  if (modulus === 0) {
+    m.diagnostics.push({ kind: 'hold-cursor-divide-by-zero:0x104' });
+    throw new Error('input-hold: modulus is 0（0x104 的游标推进是整数除零；先执行 0x103 设一个非 0 模数）');
+  }
+  const cursor = m.frame.holdCursor;
+  if (cursor === null) {
+    m.diagnostics.push({ kind: 'hold-cursor-uninitialized' });
+    throw new Error('input-hold: hold cursor is uninitialized（引擎不建立这一格的初值）');
+  }
+  m.frame.holdCursor = (cursor + 1) % modulus;
+}
+
+/**
+ * `0x104` 按住派发按键回调（CORE-OPS-INPUT-104）。
+ *
+ * 与 `0x100` 的五处分工（⛔ 别把它写成 `0x100` 的参数化版本）：
+ * | | `0x100` | 本条 |
+ * |---|---|---|
+ * | 上界 | **键总数** | **按键扫描上限** `frame.keyLimit`（本条还会夹它） |
+ * | 方向 | 正向、从扫描游标起 | **反向**、从 `limit − 1` 递减取第一个置位 |
+ * | 游标 | 按键扫描游标（找到时 ← 键号 + 1） | 按住游标（**每条出口** ← `(游标+1) mod 模数`） |
+ * | 表 | `keyJumps`（每（帧 × 键）一个目标） | `holdSlots`（每（帧 × 键）**10 槽**） |
+ * | 返回点 | 输入字 0 ⇒ 下一条；按键 ⇒ 本条自身 | **掩码**该位置起 ⇒ 本条自身 + 夹上限；否则下一条 |
+ *
+ * ★ 掩码只在**找到键**时判（无按键路径固定"下一条"）；夹上限发生在**查表之前**且**不撤销**。
+ * ★ 编号 = 无按键编号（键总数）时同样走上下文闸与查表；`limit ≤ 0` 时**不扫描**。
+ */
+function holdDispatch104(m: Machine): void {
+  m.operandCount = 1; // 推进格数 1（缺省只前进一条）
+  const here = m.ip / 4; // 本条指令自己的位置（掩码命中时的返回点）
+  const word = m.input.word >>> 0;
+  const limit = m.frame.keyLimit | 0;
+
+  // ① 反向找编号：`limit − 1` 递减到 0，取**第一个**置位；`limit ≤ 0` ⇒ 不扫描。
+  let key = -1;
+  for (let i = limit - 1; i >= 0; i -= 1) {
+    if (((word >>> i) & 1) === 1) { key = i; break; }
+  }
+  const found = key >= 0;
+  const index = found ? key : readKeyTotal(m); // 无按键 ⇒ 编号 = 键总数
+
+  // ② 上下文闸：编号变了 ⇒ 只清**当前帧**的游标；然后把编号写进引擎级格。
+  if (m.hold.contextKey !== index) m.frame.holdCursor = 0;
+  m.hold.contextKey = index;
+
+  // ③ 返回点：掩码只在"找到键"时判；夹上限在**查表之前**，且未登记时也**不回滚**。
+  const masked = found && ((m.hold.mask >>> key) & 1) === 1;
+  if (masked) m.frame.keyLimit = key;
+  m.frame.retStack.push(masked ? here : here + 1);
+
+  // ④ 查表：槽号 = 当前游标；缺格与写进去的 −1 都算"未登记"。
+  const cursor = m.frame.holdCursor;
+  if (cursor === null) {
+    // UB：上下文闸在第一次调用时必然定义它（contextKey 初值 −1 ≠ 任何编号）⇒ 走到这里是实现错。
+    m.frame.retStack.pop();
+    m.diagnostics.push({ kind: 'hold-cursor-uninitialized' });
+    throw new Error('input-hold: hold cursor is uninitialized（引擎不建立这一格的初值）');
+  }
+  const target = m.frame.holdSlots.get(index * 10 + cursor);
+  if (target === undefined || target === -1) {
+    m.frame.retStack.pop(); // 未登记 ⇒ 撤销刚压的返回点；推进格数留在 1
+  } else {
+    m.hold.dispatches += 1;
+    m.input.keyDispatches += 1;
+    m.effects.push({ kind: 'input.hold.dispatch', detail: { index, slot: cursor, target } });
+    m.ip = 4 * target;
+    m.operandCount = 0;
+  }
+
+  // ⑤ 每条出口都推进游标（跳 / 不跳、登记 / 未登记）。
+  advanceHoldCursor(m);
+}
+
+/**
+ * `0xfc` 输入复位（CORE-INPUT-RESET-FC）：把**两张回调表**（`0xfb` 的按键回调表与按住派发表）
+ * **全部**清成"未登记"，再把按住游标模数写成 0。
+ * ★ 清的是**所有帧**（引擎清整条数组），⛔ 不是只清当前帧。
+ * ★ 不碰：输入字 / 门位 / 键总数 / **按住掩码** / 任何游标 / 按键扫描上限。
+ * ★ 模数归 0 是**有意的复位**：之后必须先 `0x103`，否则 `0x104` 在游标推进处除零。
+ */
+function inputResetFc(m: Machine): void {
+  m.operandCount = 1;
+  let frames = 0;
+  for (const rec of m.slots) {
+    if (!rec) continue;
+    rec.frame.keyJumps.clear();
+    rec.frame.holdSlots.clear();
+    frames += 1;
+  }
+  m.hold.modulus = 0;
+  m.effects.push({ kind: 'input.reset', detail: { frames } });
 }
 
 /**
@@ -2945,6 +3582,11 @@ export const HANDLERS = new Map<number, Handler>([
   [0x320, scene320],
   [0x322, scene322],
   [0x323, scene323],
+  [0x223, sceneCommand223],
+  [0x24d, sceneCommand24d],
+  [0x24f, sceneCommand24f],
+  [0x250, (m, o) => sceneCommand3(m, o, 0)],
+  [0x251, (m, o) => sceneCommand3(m, o, 1)],
   [0x20d, renderTarget20d],
   [0x33f, blend33f],
   [0x204, drawText204],
@@ -2955,6 +3597,11 @@ export const HANDLERS = new Map<number, Handler>([
   [0xcc, mouseCallbackCc],
   [0xcd, mouseCallbackCd],
   [0x100, keyDispatch100],
+  [0x102, holdSlot102],
+  [0x103, holdModulus103],
+  [0x104, holdDispatch104],
+  [0x105, holdMask105],
+  [0xfc, inputResetFc],
   [0x12e, hitTest12e],
   [0x2fc, mouseEvent2fc],
   [0x109, mousePos109],
@@ -3024,6 +3671,7 @@ export const HANDLERS = new Map<number, Handler>([
   [0x61, lookupArray61],
   [0x12c, lookupArray2d12c],
   [0x64, copyLocalArray64],
+  [0x6d, memFlip6d],
   [0x2d8, setArrayTo2d8],
   [0x1aa, loadString1aa],
   [0x63, lea63],
@@ -3070,6 +3718,7 @@ export const HANDLERS = new Map<number, Handler>([
   [0x1ce, rngEnable1ce],
   [0x7b, localEnterTargets7b],
   [0x7c, (m) => localRet7c(m)],
+  [0x199, (m) => localEnter199(m)],
   [0x21e, setter21e],
   [0x21f, setter21f],
   [0x230, setter230],
@@ -3077,6 +3726,7 @@ export const HANDLERS = new Map<number, Handler>([
   [0x233, setter233],
   [0x234, setter234],
   [0x235, setter235],
+  [0x229, sceneSelfTransform229],
   [0x239, setter239],
   [0x242, setter242],
   [0x21d, copy21d],
@@ -3084,7 +3734,7 @@ export const HANDLERS = new Map<number, Handler>([
   [0x1ac, saveCopy1ac],
   [0x1a0, saveRead1a0],
   [0xc8, sleepC8],
-  [0x1a1, saveWrite1a1],
+  [0x1a1, saveRead1a1],
   [0x19e, saveWrite19e],
   [0x20b, fillTexture20b],
   [0x1ae, thumbWrite1ae],

@@ -27,8 +27,10 @@
  * 1. **扁平**：`地址 = 池基址 + 元素宽度 × 下标` —— 引擎的 `base + 4*i` / `lea` 原样成立。
  * 2. **合成**：基址是**固定分区**（不是引擎里的真实地址；真实地址不是可观察语义）：
  *    - 全局池：`0x10000000` 起，每池一个 `0x04000000` 窗口，顺序 3/4/5/6/7/8；
+ *      ★ **主 / 备两组缓冲**（`40-pools.md` 的 SPC-POOL-MEMFLIP）各占一组同样的窗口，
+ *      两组紧邻：备用组从 `GLOBAL_ORIGIN + GLOBAL_BANK_SPAN` 起（正好铺到 `LOCAL_ORIGIN`）；
  *    - 局部池：`0x40000000` 起，**每帧**一个 `0x00800000` 窗口，帧内六池各占 `0x00100000`。
- *    ⇒ 40 帧 × 8 MiB + 6 × 64 MiB 仍在 u32 内（指针槽只有 4 字节）。
+ *    ⇒ 40 帧 × 8 MiB + 6 × 64 MiB × 2 仍在 u32 内（指针槽只有 4 字节）。
  * 3. **稀疏**：地址只是算术；格子有没有被写过由池（`Map`）回答。**没写过 ≠ 值是 0**
  *    （整型池在装载期被填 `ENC(key,0)` 是另一回事，见 `values.ts`）。
  *
@@ -53,6 +55,16 @@ export const isPointerTag = (tag: number): tag is PoolTag => (POINTER_TAGS as re
 const GLOBAL_ORIGIN = 0x10000000;
 const GLOBAL_SPAN = 0x04000000;
 const GLOBAL_ORDER: readonly PoolTag[] = [3, 4, 5, 6, 7, 8];
+
+/**
+ * 一整组全局池（六个族）的窗口跨度。
+ * ★ 主 / 备**两组缓冲**各占一组窗口，两组紧邻 ⇒ `GLOBAL_ORIGIN + 2 × GLOBAL_BANK_SPAN === LOCAL_ORIGIN`。
+ *   备用组何时存在由**启动期**配置键 `set:EnableMemFlip` 决定（见 `Machine`）；本文件只给窗口算术。
+ */
+const GLOBAL_BANK_SPAN = GLOBAL_SPAN * GLOBAL_ORDER.length;
+
+/** 全局池的缓冲选择：0 = 主、1 = 备用（`0x6d` 把六个族的选择整体对调） */
+export type PoolBank = 0 | 1;
 
 /** 局部池：每帧一个窗口，帧内六池各占 `LOCAL_POOL_STRIDE` */
 const LOCAL_ORIGIN = 0x40000000;
@@ -84,12 +96,14 @@ export function arrayStrideFor(tag: number): number {
   }
 }
 
-/** 池基址（`frameSlot` 只对局部池有意义） */
-export function poolBase(tag: PoolTag, frameSlot = 0): number {
+/** 池基址（`frameSlot` 只对局部池有意义；`bank` 只对全局池有意义） */
+export function poolBase(tag: PoolTag, frameSlot = 0, bank: PoolBank = 0): number {
+  if (bank !== 0 && bank !== 1) throw new Error(`不是合法的缓冲选择：${bank}（只有主 0 / 备 1）`);
   const gi = GLOBAL_ORDER.indexOf(tag);
-  if (gi >= 0) return (GLOBAL_ORIGIN + gi * GLOBAL_SPAN) >>> 0;
+  if (gi >= 0) return (GLOBAL_ORIGIN + bank * GLOBAL_BANK_SPAN + gi * GLOBAL_SPAN) >>> 0;
   const li = LOCAL_ORDER.indexOf(tag);
   if (li < 0) throw new Error(`不是合法的池标签：0x${tag.toString(16)}`);
+  if (bank !== 0) throw new Error(`局部池没有缓冲选择（只有全局池有主 / 备两组）：tag 0x${tag.toString(16)}`);
   if (!Number.isInteger(frameSlot) || frameSlot < 0 || frameSlot >= MAX_FRAMES) {
     throw new Error(`局部池的帧号越界：${frameSlot}（帧区只有 ${MAX_FRAMES} 槽）`);
   }
@@ -97,9 +111,9 @@ export function poolBase(tag: PoolTag, frameSlot = 0): number {
 }
 
 /** 某一格的地址 */
-export function slotAddress(tag: PoolTag, index: number, frameSlot = 0): number {
+export function slotAddress(tag: PoolTag, index: number, frameSlot = 0, bank: PoolBank = 0): number {
   if (!Number.isInteger(index) || index < 0) throw new Error(`池下标必须是非负整数：${index}`);
-  return (poolBase(tag, frameSlot) + slotBytes(tag) * index) >>> 0;
+  return (poolBase(tag, frameSlot, bank) + slotBytes(tag) * index) >>> 0;
 }
 
 /** 一个地址解析出来的落点 */
@@ -108,11 +122,15 @@ export interface Resolved {
   /** 池内下标 */
   index: number;
   frameSlot: number;
+  /** 全局池的缓冲选择（局部池恒 0） */
+  bank: PoolBank;
 }
 
 /**
- * 地址 → (池, 下标)。
+ * 地址 → (池, 下标, 缓冲组)。
  * ★ 三类失败都**不许**补 0：落在任何窗口外 / 没对齐到元素边界 / 帧号越界 ⇒ 抛。
+ * ★ 备用组窗口**结构上**总是可解析的（窗口是固定分区）；"备用缓冲是否存在"是 `Machine` 的状态，
+ *   访问未登记的备用组时由 `Machine` 的池访问器响亮失败（= 那个地址未映射）。
  */
 export function resolveAddress(addr: number): Resolved {
   const a = addr >>> 0;
@@ -124,22 +142,25 @@ export function resolveAddress(addr: number): Resolved {
     const li = Math.floor(rel / LOCAL_POOL_STRIDE);
     const tag = LOCAL_ORDER[li];
     const within = rel - li * LOCAL_POOL_STRIDE;
-    return withinPool(tag, within, a, frameSlot);
+    return withinPool(tag, within, a, frameSlot, 0);
   }
   if (a >= GLOBAL_ORIGIN) {
     const off = a - GLOBAL_ORIGIN;
-    const gi = Math.floor(off / GLOBAL_SPAN);
+    // ★ `GLOBAL_ORIGIN + 2 × GLOBAL_BANK_SPAN === LOCAL_ORIGIN` ⇒ 这里 bank 只可能是 0 / 1
+    const bank = Math.floor(off / GLOBAL_BANK_SPAN) as PoolBank;
+    const withinBank = off - bank * GLOBAL_BANK_SPAN;
+    const gi = Math.floor(withinBank / GLOBAL_SPAN);
     if (gi >= GLOBAL_ORDER.length) throw new Error(`地址 0x${a.toString(16)} 落在全局池窗口之外`);
     const tag = GLOBAL_ORDER[gi];
-    return withinPool(tag, off - gi * GLOBAL_SPAN, a, 0);
+    return withinPool(tag, withinBank - gi * GLOBAL_SPAN, a, 0, bank);
   }
   throw new Error(`地址 0x${a.toString(16)} 不落在任何池窗口里（引擎那里是 UB，不是 0）`);
 }
 
-function withinPool(tag: PoolTag, within: number, addr: number, frameSlot: number): Resolved {
+function withinPool(tag: PoolTag, within: number, addr: number, frameSlot: number, bank: PoolBank): Resolved {
   const eb = slotBytes(tag);
   if (within % eb !== 0) {
     throw new Error(`地址 0x${addr.toString(16)} 没对齐到元素边界（池 0x${tag.toString(16)} 的元素宽度 ${eb}）`);
   }
-  return { tag, index: within / eb, frameSlot };
+  return { tag, index: within / eb, frameSlot, bank };
 }

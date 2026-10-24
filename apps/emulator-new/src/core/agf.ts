@@ -173,7 +173,10 @@ export function decodeAgf(bytes: Uint8Array): DecodedAgf {
         rgba[d] = body[s + 2]!;
         rgba[d + 1] = body[s + 1]!;
         rgba[d + 2] = body[s]!;
-        rgba[d + 3] = alpha ? alpha[y * width + x]! : body[s + 3]!;
+        // ★ **引擎已观察行为**：32bpp 的实现只取像素的**第 4 字节**，不读 ACIF alpha 段
+        //   ⇒ 这里也只用 `body[s + 3]`。`30-agf.md` 的 FMT-AGF-PIXELS 已按同一结论写成合同
+        //   （alpha 段仍被装载 / 解码，但 32bpp 下没有消费者）。
+        rgba[d + 3] = body[s + 3]!;
       }
     }
   }

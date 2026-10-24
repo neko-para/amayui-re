@@ -17,7 +17,12 @@
  *   1. `CORE-BOOT-WINDOW-CLASS`   —— `registerWindowClass`（类名 / 实例 / 图标 / 光标 / 背景刷 / 菜单名 / 风格）
  *   2. `CORE-BOOT-WINDOW-CREATE`  —— 形态字 S（`display:ScreenMode` + `display:ForceScreen`）→ 两种形态 → 显示 / 重绘
  *   3. `CORE-BOOT-WINDOW-ATTACH`  —— 解绑输入法 → 记录服务窗口槽 → 仅窗口态安装菜单
- *   4. `CORE-BOOT-GRAPHICS-INIT`  —— `set:CreateObject` 最低位选路线；失败 ⇒ 写错误通道 + 结束启动（⛔ 不静默）
+ *   4. `CORE-BOOT-GRAPHICS-INIT`  —— `set:CreateObject` **两个独立位**选路线（0 旧式 / 1 三维，键 3 两条都跑）；
+ *      设备创建的每个参数都由配置键推导（呈现间隔 / 是否全屏 / 后缓冲三分支 / 多重采样 / 重试序列），
+ *      设备建成之后按 spec 发对话框模式 → 能力查询 → 32 位格式检查 → 清渲染目标；
+ *      失败按逐步骤表写**分类日志**并决定是否结束启动（⛔ 不静默；"错误文本 ≠ 致命"）；
+ *      日志落点 = 配置根 [+分隔符] + `set:RegFilePath` [+分隔符] + 固定文件名（`joinEnginePath`），
+ *      在**窗口附加之后、图形设备之前**打开一次。
  *   5. `CORE-BOOT-EVENT-LOOP`     —— 周期定时器 / 泵（窥视 → 取一条 → 翻译 → 派发）/ 四类消息 / 悬停定时器
  *
  * ★ 顺序（`06-window.md` 开头）：注册类 → 建窗 → 显示 / 重绘 → 解绑输入法 → 装菜单 → 图形设备 →
@@ -94,6 +99,9 @@ export const DEFAULT_WINDOW_POSITION = 0x80000000;
 /** 窗口标题缓冲上限（`0x100` 字节；建窗当时的内容本版不规定，见 ignored） */
 export const WINDOW_TITLE_MAX_BYTES = 0x100;
 
+/** 分辨率校验的**高宽比阈值**（spec「校验分辨率」：`r ≥ 0.7` ⇒ 窄档池，否则宽档池） */
+export const RESOLUTION_ASPECT_THRESHOLD = 0.7;
+
 /** 周期定时器：标识 2、周期 10000 毫秒、无回调（引擎常量，⛔ 不是仿真参数） */
 export const PERIODIC_TIMER_ID = 2;
 export const PERIODIC_TIMER_PERIOD_MS = 10000;
@@ -109,12 +117,251 @@ export const ADAPTER_INDEX = 0;
 /** 辅助宿主模块「操作菜单」入口的安装类别的号（启动期只观察到 0 / 1 / 2；本版只按 spec 传 1） */
 export const MENU_CATEGORY_INSTALL = 1;
 
+/* ───────────── 设备创建请求的实参：键 → 值的映射（spec「设备创建请求的实参」） ───────────── */
+
+/** 设备类型（spec 表：1 ⇒ 硬件；其它非 0 ⇒ 参考；0 ⇒ 依次试 1、2） */
+export type DeviceType = 'hal' | 'reference';
+/** 顶点处理（spec 表：1 ⇒ 硬件、2 ⇒ 软件、3 ⇒ 混合；0 ⇒ 依次试 1、2、3） */
+export type VertexProcessing = 'software' | 'hardware' | 'mixed';
+/** 交换效果（窗口化 ⇒ 复制；全屏 ⇒ 丢弃；多重采样启用时强制丢弃） */
+export type SwapEffect = 'copy' | 'discard';
+
+/**
+ * `display:PresentInterval` → 请求里的"等待垂直回扫次数"。
+ * 0 ⇒ 立即（`0`）；1 / 2 / 3 / 4 ⇒ `1 / 2 / 4 / 8`；**其它值 ⇒ 平台默认（`null`）**。
+ * ★ 键缺 ⇒ 读 0 ⇒ 立即；★ 3 → 4、4 → 8 不是笔误：请求里的是"档位值"，不是配置原值。
+ */
+export function presentationIntervalOf(configValue: number): number | null {
+  switch (configValue) {
+    case 0: return 0;
+    case 1: return 1;
+    case 2: return 2;
+    case 3: return 4;
+    case 4: return 8;
+    default: return null;
+  }
+}
+
+/**
+ * `display:DeviceType` → 设备类型的尝试顺序（spec 表：0 ⇒ 依次试 1、2）。
+ * ★ 返回值是**顺序表**：调用方按顺序尝试、任一成功即停（见 `deviceCreationAttempts`）。
+ */
+export function deviceTypeCandidates(configValue: number): DeviceType[] {
+  if (configValue === 0) return ['hal', 'reference'];
+  return [configValue === 1 ? 'hal' : 'reference'];
+}
+
+/**
+ * `display:VertexProcessing` → 顶点处理的尝试顺序（spec 表：0 ⇒ 依次试 1、2、3）。
+ * ★ 返回值是**顺序表**：调用方按顺序尝试、任一成功即停（见 `deviceCreationAttempts`）。
+ */
+export function vertexProcessingCandidates(configValue: number): VertexProcessing[] {
+  if (configValue === 0) return ['hardware', 'software', 'mixed'];
+  if (configValue === 1) return ['hardware'];
+  if (configValue === 2) return ['software'];
+  return ['mixed'];
+}
+
+/** 一次设备创建尝试的两个取值（其余呈现参数每次尝试都一样） */
+export interface DeviceCreationAttempt {
+  deviceType: DeviceType;
+  vertexProcessing: VertexProcessing;
+}
+
+/**
+ * 设备创建的**尝试序列**（spec「尝试序列」）：设备类型是**外层**、顶点处理是**内层**；
+ * 每个新的设备类型都把顶点处理**重置为 1**（内层每次都从顺序表的起点开始）。
+ * - 两键都为 0 ⇒ 6 次：(1,1) → (1,2) → (1,3) → (2,1) → (2,2) → (2,3)；
+ * - 只有设备类型为 0 ⇒ 2 次；只有顶点处理为 0 ⇒ 3 次；都不为 0 ⇒ 1 次。
+ * ★ 停止条件只有一个：某次尝试成功；枚举耗尽仍是失败（由调用方收口）。
+ */
+export function deviceCreationAttempts(
+  deviceTypeKey: number,
+  vertexProcessingKey: number,
+): DeviceCreationAttempt[] {
+  const attempts: DeviceCreationAttempt[] = [];
+  for (const deviceType of deviceTypeCandidates(deviceTypeKey)) {
+    for (const vertexProcessing of vertexProcessingCandidates(vertexProcessingKey)) {
+      attempts.push({ deviceType, vertexProcessing });
+    }
+  }
+  return attempts;
+}
+
+/**
+ * 旧式绘制路线的**行为位**（spec「旧式绘制路线的实参」）：
+ * `display:UseDirectDrawEmuration` 原值 **或上**（形态字 `display:ScreenMode` ≠ 0 ⇒ 2 / = 0 ⇒ 0）。
+ * ★ 旧式路线**不看** `display:VirtualFullScreen`（那是三维路线独有的规则）；
+ *   `display:FullScreenBit` 是**独立的第 4 实参**，⛔ 不进这里、也不与任何键做或。
+ */
+export function legacyBehaviorBitsOf(useDirectDrawEmuration: number, screenMode: number): number {
+  return (useDirectDrawEmuration | (screenMode !== 0 ? 2 : 0)) >>> 0;
+}
+
+/* ───────────── 日志文本的类别（spec「失败后果」：错误 / 警告 / 诊断（无前缀）） ───────────── */
+
+/** 日志文本类别：错误 / 警告 / 诊断（无前缀） */
+export type GraphicsTextCategory = 'error' | 'warning' | 'diagnostic';
+
+/**
+ * 日志文本的**落点**（spec「日志通道的落点与丢弃」）：
+ * - `file` = `system:OutErrorLog` 非 0 且宿主把日志文件打开成功 ⇒ 文本真的会进那个文件；
+ * - `unavailable` = 该键为 0 / 缺键（不打开）、或打开失败 ⇒ 句柄无效，**整条文本被静默丢弃**。
+ * ★ `graphicsLog` 只表示"引擎产生了这条文本"，不表示"它到了磁盘"；两者不是同一件事。
+ * ★ 核心**不持有**文件句柄（文件系统全走 `Host`）：本字段只是落点状态，纯数据。
+ */
+export type GraphicsLogSink = 'unavailable' | 'file';
+
+/**
+ * 图形路线里会写日志的步骤 —— 比 `GraphicsStep`（失败步骤）宽：
+ * 另含两处"有文本但不中止"的步骤，以及实现侧"宿主缺可选方法"的诊断。
+ */
+export type GraphicsLogStep = GraphicsOutcomeStep | 'host-missing-method' | 'config-missing-key';
+
+/** 一条带**类别**的日志（⛔ 不是自由文本：类别 + 步骤 + 文本三件套） */
+export interface GraphicsLogEntry {
+  category: GraphicsTextCategory;
+  step: GraphicsLogStep;
+  text: string;
+}
+
+/** 逐步骤的日志类别与后果（spec「失败后果」的逐步骤表） */
+export interface GraphicsStepOutcome {
+  /** 写哪一类日志；`null` = 这一步**不写日志**（文本直接送给用户） */
+  log: GraphicsTextCategory | null;
+  /** 是否结束启动 */
+  fatal: boolean;
+}
+
+/** 逐步骤表里的行（含两处"有文本但不中止"的步骤，它们不是失败步骤） */
+export type GraphicsOutcomeStep = GraphicsStep | 'set-dialog-box-mode' | 'check-texture-format-32';
+
+/**
+ * spec「失败后果」的**逐步骤表**（纯数据，守卫可直接钉）。
+ * ★ 关键一条：`set-dialog-box-mode` 写**错误**类文本却 `fatal: false` ——
+ *   "文本前缀 = 致命性"是错的，实现必须按本表的 `fatal` 决定是否中止。
+ * ★ 旧式路线与"上层绘制对象"**不写日志**：它们的文本直接送用户（本层记在 `failure.errorText`）。
+ */
+export const GRAPHICS_STEP_OUTCOME = {
+  'create-legacy-draw': { log: null, fatal: true },
+  'create-d3d9': { log: 'error', fatal: true },
+  'query-adapter-display-mode': { log: 'error', fatal: true },
+  'create-device': { log: 'error', fatal: true },
+  'validate-resolution': { log: 'diagnostic', fatal: true },
+  'set-dialog-box-mode': { log: 'error', fatal: false },
+  'query-device-caps': { log: 'error', fatal: true },
+  'check-texture-format-32': { log: 'warning', fatal: false },
+  'create-draw-object': { log: null, fatal: true },
+} as const satisfies Record<GraphicsOutcomeStep, GraphicsStepOutcome>;
+
 /**
  * 图形设备初始化失败时写进错误通道的**内建文本**。
  * ★ 规范只要求"把一条内建错误文本写进错误通道"，文本的**类别与内容**未取证（`RES-BOOT-GFX-TEXT`）
  *   ⇒ 本实现用一个实现侧常量占位；内容不是规范结论。
+ * ★ 设备创建重试穷尽时**复用"取显示模式"的文本**（spec「失败后果」）——这里同一个占位常量就是它。
  */
 export const GRAPHICS_INIT_ERROR_TEXT = 'graphics-init-failed';
+
+/**
+ * 32 位纹理格式不可用时写进**警告通道**的内建文本（spec：不可用只写一条警告，**不**结束启动）。
+ * ★ 警告文本的内容不是规范结论（`RES-BOOT-GFX-TEXT`）。
+ */
+export const TEXTURE_FORMAT_32_WARNING_TEXT = 'texture-format-32-unavailable';
+
+/**
+ * 对话框绘制模式失败的**错误类**文本（spec：写错误文本但**不**结束启动）。
+ * ★ 与上面的失败文本分开：类别相同、后果不同 ⇒ ⛔ 不许用它推断启动是否结束。
+ */
+export const GRAPHICS_DIALOG_BOX_MODE_ERROR_TEXT = 'graphics-dialog-box-mode-failed';
+
+/**
+ * 分辨率校验失败时写进**诊断通道**的一行（spec：诊断 + "请求的分辨率不可接受"，随后结束启动）。
+ * ★ 同时**不写回**请求宽 / 高（`resolvedFullScreen` 保持 `null`，后缓冲仍按配置键 / 客户区算）。
+ */
+export const GRAPHICS_RESOLUTION_REJECTED_TEXT = 'requested-resolution-not-acceptable';
+
+/* ─────────────── 日志文件的路径（spec「日志通道的落点与丢弃」） ─────────────── */
+
+/** 日志文件名（引擎内建常量，⛔ 不来自配置） */
+export const ERROR_LOG_FILE_NAME = 'Error.log';
+
+/** 整条日志路径的上限（spec：256 **字节**；超长按字节截断后照用，引擎不检查返回值） */
+export const ERROR_LOG_MAX_PATH_BYTES = 0x100;
+
+/**
+ * 引擎的路径分隔符：引擎写的是反斜杠。
+ * ★ 核心**不按平台换**（核心不 import `node:path`）；"引擎路径 → 宿主路径"是平台层的事
+ *   （`Host.pathFromEngine` 的同一口径）。
+ */
+export const ENGINE_PATH_SEPARATOR = '\\';
+
+/** `joinEnginePath` 的输入（三个领域字段 + 一个上限） */
+export interface EnginePathParts {
+  /** **已解析**的配置根（`set:UseAppDataFolder` 恰为 1 ⇒ 用户本地应用数据目录；其它值 ⇒ 空串） */
+  root: string;
+  /** `set:RegFilePath` 的原值（不展开、不补分隔符） */
+  relativeDirectory: string;
+  fileName: string;
+  /** 整条路径的字节上限；缺省 = `ERROR_LOG_MAX_PATH_BYTES`（256） */
+  maxPathBytes?: number;
+}
+
+/**
+ * 纯函数：按引擎规则拼一条路径 —— `配置根 [+分隔符] + 相对目录 [+分隔符] + 固定文件名`。
+ *
+ * ★ **两个分隔符各自的条件是"拼到此处的结果非空"**，⛔ 不是"根非空"、也不是"相对目录非空"：
+ *   - 根与相对目录都空 ⇒ **裸文件名**（相对进程工作目录，⛔ 不是 `\Error.log`）；
+ *   - 根非空、相对目录空 ⇒ **连续两个分隔符**；
+ *   - 相对目录自带尾分隔符 ⇒ 也**不去重**（`C:\base\` + `savedata` ⇒ `C:\base\\savedata\…`）。
+ *   ⇒ ⛔ 不许用 `path.join` / `path.resolve`：它们会折叠重复分隔符、吃掉空段，与本合同不符。
+ * ★ 超长 ⇒ 按**字节**截断（引擎传给路径构造器的缓冲上限就是 256 字节）。
+ *   核心不认识 ANSI 代码页 ⇒ 字节数按 UTF-8 计（纯 ASCII 路径与 ANSI 逐字节一致；非 ASCII 是保守近似）。
+ */
+export function joinEnginePath(parts: EnginePathParts): string {
+  const maxPathBytes = parts.maxPathBytes ?? ERROR_LOG_MAX_PATH_BYTES;
+  let path = parts.root;
+  if (path !== '') path += ENGINE_PATH_SEPARATOR;
+  path += parts.relativeDirectory;
+  if (path !== '') path += ENGINE_PATH_SEPARATOR;
+  path += parts.fileName;
+  return truncateToUtf8Bytes(path, maxPathBytes);
+}
+
+/** 按 UTF-8 字节数截断（不切断多字节序列 / 代理对） */
+function truncateToUtf8Bytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  const encoder = new TextEncoder();
+  if (encoder.encode(text).byteLength <= maxBytes) return text;
+  let out = '';
+  let used = 0;
+  for (const ch of text) {
+    const size = encoder.encode(ch).byteLength;
+    if (used + size > maxBytes) break;
+    used += size;
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * 日志落点的**引擎侧**参数（领域字段）：核心给出"文件名 / 相对目录 / 是否用配置根 / 上限 / 已解析的配置根"，
+ * 宿主只负责探存在性 → 递归建目录 → **覆盖**打开。
+ * ★ `useAppDataFolder` 判的是**恰为 1**（⛔ 不是"非 0"）—— spec 明写"恰为 1 ⇒ 用户应用数据目录；其它值 ⇒ 空串"。
+ */
+export interface ErrorLogPathSpec {
+  fileName: string;
+  /** `set:RegFilePath` 的原值（不展开、不补分隔符） */
+  relativeDirectory: string;
+  /** `set:UseAppDataFolder === 1`（恰为 1） */
+  useAppDataFolder: boolean;
+  /** 整条路径的字节上限 */
+  maxPathBytes: number;
+  /**
+   * **已解析**的配置根（纯数据）：`useAppDataFolder` 为真 ⇒ 宿主 `appDataDir()` 给的目录；否则 `''`。
+   * ★ 宿主直接把它当 `joinEnginePath` 的 `root` —— 打开时不必再问一次平台。
+   */
+  baseDirectory: string;
+}
 
 /* ─────────────────────────── 平台句柄（对核心不透明） ─────────────────────────── */
 
@@ -173,6 +420,101 @@ export interface DisplayMode {
   height: number;
   /** 像素格式标识（位含义属平台侧） */
   format: number;
+}
+
+/** 逐档判定的七个符号（spec「校验分辨率」：判定专属，⛔ 不钉字节与排版） */
+export type ResolutionVerdictSymbol = '×' | '―' | '△' | '○' | '▲' | '■' | '●';
+
+/** 一档显示模式的判定（逐档诊断 + 收口输入） */
+export interface ResolutionModeVerdict {
+  width: number;
+  height: number;
+  /** 模式自己的**高宽比** `r = height / width`（spec 判定的量） */
+  ratio: number;
+  symbol: ResolutionVerdictSymbol;
+}
+
+/** 一次分辨率校验的结果 */
+export interface ResolutionVerdict {
+  /**
+   * 选中的一档；`null` = 收口后没有任何一档 ⇒ **不写回**请求宽 / 高、结束启动
+   * （spec「失败」：请求宽 / 高保持原值）。
+   */
+  picked: { width: number; height: number } | null;
+  /** 逐档判定（与输入 `modes` **同序**；诊断用） */
+  perMode: ResolutionModeVerdict[];
+}
+
+/**
+ * 分辨率校验的**纯函数**判据（spec「校验分辨率」§3 的伪代码逐字实现）。
+ *
+ * 判定（按 spec 的次序，⛔ 别按"最接近"重写）：
+ * 1. **尺寸闸**：模式宽 < W 或模式高 < H ⇒ `×` 出局（⛔ 不许"缩小凑合"）；
+ * 2. **分流**（按**模式自己**的 `r`）：`r ≥ 0.7` ⇒ 窄档池（`●` / `▲` / `■` / `―`）；
+ *    `r < 0.7` ⇒ 宽档池（`○` / `△` / `×` / `―`）；
+ * 3. **比值闸**：`r < R` ⇒ 出局（宽档 `×` / 窄档 `■`）；`r = R` ⇒ 进池（`○` / `●`）；
+ *    `r > R` ⇒ 进池（`△` / `▲`）；
+ * 4. **池的替换**：每个池只留**一档**；新模式只有宽与高都**不大于**池里现档时才替换，否则记 `―`
+ *    ⇒ 池里是"过闸的**最小一档**"，⛔ 不是"比值最接近"；
+ * 5. **收口**（两支不对称，⛔ 别合并成"取两者更小的"）：
+ *    `R ≥ 0.7` ⇒ 先取宽档池，若窄档池的宽**严格更小**则改取窄档池；
+ *    `R < 0.7` ⇒ 宽档池非空就取它（忽略窄档池），空才取窄档池。
+ *
+ * ★ 纯函数：不读配置、不发请求、不写会话（守卫可直接钉）。
+ *
+ * @param modes 适配器枚举出来的可用模式（按宿主给的顺序）
+ * @param requestedWidth 请求对的宽（`display:FullScreenWidth` 整对覆盖或客户区宽）
+ * @param requestedHeight 请求对的高
+ */
+export function pickResolution(
+  modes: readonly DisplayMode[],
+  requestedWidth: number,
+  requestedHeight: number,
+): ResolutionVerdict {
+  // R = 请求高 / 请求宽；A = 宽档池（r < 0.7）、B = 窄档池（r ≥ 0.7）—— 与 spec 伪代码同名。
+  const R = requestedHeight / requestedWidth;
+  let wide: ResolutionModeVerdict | null = null;
+  let narrow: ResolutionModeVerdict | null = null;
+  const perMode: ResolutionModeVerdict[] = [];
+  for (const mode of modes) {
+    const ratio = mode.height / mode.width;
+    const entry: ResolutionModeVerdict = { width: mode.width, height: mode.height, ratio, symbol: '×' };
+    if (mode.width < requestedWidth || mode.height < requestedHeight) {
+      // 1. 尺寸闸
+      entry.symbol = '×';
+    } else if (ratio >= RESOLUTION_ASPECT_THRESHOLD) {
+      // 2' / 3 / 4. 窄档池（B）：先过比值闸，再判池替换
+      if (ratio === R) {
+        if (narrow !== null && (narrow.width < mode.width || narrow.height < mode.height)) entry.symbol = '―';
+        else { narrow = entry; entry.symbol = '●'; }
+      } else if (ratio > R) {
+        if (narrow !== null && (narrow.width < mode.width || narrow.height < mode.height)) entry.symbol = '―';
+        else { narrow = entry; entry.symbol = '▲'; }
+      } else {
+        entry.symbol = '■';
+      }
+    } else if (ratio === R) {
+      // 2 / 3 / 4. 宽档池（A）：先过比值闸，再判池替换
+      if (wide !== null && (wide.width < mode.width || wide.height < mode.height)) entry.symbol = '―';
+      else { wide = entry; entry.symbol = '○'; }
+    } else if (ratio > R) {
+      if (wide !== null && (wide.width < mode.width || wide.height < mode.height)) entry.symbol = '―';
+      else { wide = entry; entry.symbol = '△'; }
+    } else {
+      entry.symbol = '×';
+    }
+    perMode.push(entry);
+  }
+  // 5. 收口（两支不对称）：结果统一落到 wide（spec 的 A）。
+  if (R >= RESOLUTION_ASPECT_THRESHOLD) {
+    if (narrow !== null && (wide === null || narrow.width < wide.width)) wide = narrow;
+  } else if (wide === null) {
+    wide = narrow;
+  }
+  return {
+    picked: wide === null ? null : { width: wide.width, height: wide.height },
+    perMode,
+  };
 }
 
 /* ─────────────────────────── 窗口 / 消息 / 图形 的平台接口 ─────────────────────────── */
@@ -302,50 +644,85 @@ export interface MessageHost {
   translateMessage(message: WindowMessage): void;
 }
 
-/** 旧式绘制路线的参数（"参数含窗口、客户区尺寸、行为位"） */
+/**
+ * 旧式绘制路线的参数（spec「旧式绘制路线的实参」）。
+ * ★ 这条路线**没有**设备 / 呈现参数，只有一次"建立绘制对象"的请求；五个实参如下。
+ * ⛔ `set:AlwaysBackupSurface` 不是实参（它只写进引擎自己的一个格子）；
+ * ⛔ `display:VirtualFullScreen` 在旧式路线上**没有**作用（"窗口 / 占屏"只看形态字）。
+ */
 export interface LegacyDrawParams {
   window: WindowHandle;
+  /** 客户区宽 / 高（引擎级缓存；与三维路线第 3 / 4 实参同一个来源） */
   clientWidth: number;
   clientHeight: number;
-  /** 行为位：来源未取证（见 ignored `legacy-behavior-bits`） */
+  /**
+   * 行为位 = `display:UseDirectDrawEmuration` **原值** 或上（形态字 ≠ 0 ⇒ 2 / = 0 ⇒ 0）。
+   * 见 `legacyBehaviorBitsOf`。
+   * ★ 位 1 是"窗口化请求"；**对象内部**可能在两次判断后把它清掉（spec「旧式绘制对象内部的"窗口化"降级」）。
+   *   那是对象内部的事：⛔ 本层不建模、也不据此改任何引擎级形态字（`session.screenMode` 仍是配置值）。
+   */
   behaviorBits: number;
+  /** `display:FullScreenBit` **原值直传**（独立实参，⛔ 不与任何键做或） */
+  fullscreenBit: number;
 }
 
-/** 三维设备路线的设备参数（领域字段；键 → 参数映射未取证，见 ignored `device-param-mapping`） */
+/**
+ * 三维设备路线的设备参数（领域字段）。**全部由配置键推导**（spec「设备创建请求的实参」）：
+ * ⛔ 调用方不再注入设备类型 / 顶点处理 / 呈现间隔 / 多重采样 / 是否全屏 —— 那五个键是合同的输入。
+ */
 export interface DeviceParams {
   d3d: D3d9Handle;
   window: WindowHandle;
-  /** 屏幕形态字 S */
+  /** 屏幕形态字 S（`display:ScreenMode` 经 `display:ForceScreen` 归一后的值） */
   screenMode: number;
-  /** 适配器显示模式报告的像素格式 */
+  /** 后缓冲格式：适配器显示模式的格式（⛔ 不来自配置） */
   adapterFormat: number;
-  /** 全屏宽 / 高：配置值；为 0 ⇒ 取适配器显示模式（桌面）尺寸 */
-  fullscreenWidth: number;
-  fullscreenHeight: number;
-  deviceType: 'hal' | 'reference' | 'software';
-  vertexProcessing: 'software' | 'hardware' | 'mixed';
-  presentationInterval: number;
+  /** 后缓冲宽 / 高（spec「后缓冲尺寸」三条互斥分支的结果） */
+  backBufferWidth: number;
+  backBufferHeight: number;
+  /** 设备类型（`display:DeviceType`；取 0 时这里是"顺序表第一个"） */
+  deviceType: DeviceType;
+  /** 顶点处理（`display:VertexProcessing`；取 0 时这里是"顺序表第一个"） */
+  vertexProcessing: VertexProcessing;
+  /** 呈现间隔：`0` = 立即、`n` = 等待 n 个回扫；`null` = 平台默认（`display:PresentInterval` 其它值） */
+  presentationInterval: number | null;
+  /** 多重采样：类型原样来自 `display:MultiSample`（0 ⇒ 不启用）；quality 本版不规定 ⇒ 0 */
   multisample: { type: number; quality: number };
-  /** 纹理位深（取自 `display:FullScreenBit`；映射未取证） */
-  textureBitDepth: number;
-  pixelShaderVersion: number;
-  /** 是否全屏呈现（与"窗口态 / 占满屏态"**不是**同一个量；组合表未取证） */
+  /** 交换效果（窗口化 ⇒ `copy`；全屏 ⇒ `discard`；多重采样启用时强制 `discard`） */
+  swapEffect: SwapEffect;
+  /** 后缓冲可锁定（固定开；多重采样启用时关） */
+  backBufferLockable: boolean;
+  /** 是否全屏呈现（与"窗口态 / 占满屏态"**不是**同一个量，见 spec 成立条件） */
   fullscreenPresent: boolean;
 }
 
-/** 上层绘制对象的参数（三维设备路线第 4 步） */
+/** 上层绘制对象的参数（设备建成之后的最后一步） */
 export interface DrawObjectParams {
   device: DeviceHandle;
   /** 纹理宽 / 高（取自 `set:TexWidth` / `set:TexHeight`） */
   textureWidth: number;
   textureHeight: number;
-  /** 像素着色器配置（来源未取证 ⇒ 由平台查询设备） */
+  /**
+   * 纹理位深：`display:TextureBit`。
+   * ★ 设备建成**之后**才读，用来配置上层绘制对象 —— ⛔ 不是设备创建请求的参数（spec 明确）。
+   */
+  textureBitDepth: number;
+  /** 像素着色器版本：`display:PixelShader`（同上：不是设备创建请求的参数） */
   pixelShader: number;
+}
+
+/** 设备能力（最大纹理宽 / 高；spec「查询设备能力」） */
+export interface DeviceCaps {
+  maxTextureWidth: number;
+  maxTextureHeight: number;
 }
 
 /**
  * 图形设备（两条互斥路线）。
  * ★ 全部 `Promise`：每一步都要等平台给出**真实结果**（`null` = 失败）；⛔ 不许先返一个假句柄再补错误。
+ * ★ 设备建成之后的四个请求是**可选方法**（本层的新增能力）：宿主没有提供时核心记**诊断**
+ *   （`session.diagnostics`），⛔ 不静默跳过。设备能力查询缺席 ⇒ 无法做 spec 的"纹理能力下限"致命比较，
+ *   这就是一条实现侧缺口，必须显式记账。
  */
 export interface GraphicsHost {
   /** 旧式绘制路线；`null` = 失败 */
@@ -354,12 +731,44 @@ export interface GraphicsHost {
   createD3d9(params: { sdkVersion: number }): Promise<D3d9Handle | null>;
   /** 三维路线 2：查询适配器显示模式（适配器 0）；`null` = 失败 */
   queryAdapterDisplayMode(params: { d3d: D3d9Handle; adapter: number }): Promise<DisplayMode | null>;
-  /** 三维路线 3：创建设备；`null` = 失败 */
+  /**
+   * 三维路线 3a（**可选**）：枚举该适配器可用的显示模式（分辨率校验用）。
+   * ★ 缺席 ⇒ 无法执行 spec 第 3 步的枚举 / 诊断 / 写回 ⇒ 显式记账（⛔ 不静默跳过）。
+   */
+  enumerateAdapterDisplayModes?(params: { d3d: D3d9Handle; adapter: number }): Promise<DisplayMode[]>;
+  /** 三维路线 4：创建设备；`null` = 失败（**重试序列**见 `deviceCreationAttempts`，成功即停） */
   createDevice(params: DeviceParams): Promise<DeviceHandle | null>;
-  /** 三维路线 4a：读设备的像素着色器配置（不能失败的查询） */
-  readPixelShaderConfig(params: { device: DeviceHandle }): Promise<number>;
-  /** 三维路线 4b：建立上层绘制对象；`null` = 失败 */
+  /**
+   * 三维路线 4a（可选）：请求对话框绘制模式（参数 = 开）。
+   * ★ 返回 `false` = 这一次请求失败 ⇒ 写**错误**类文本但**不**中止（spec 唯一一处）。
+   */
+  setDialogBoxMode?(params: { device: DeviceHandle; enabled: boolean }): Promise<boolean>;
+  /** 三维路线 4b（可选）：查询设备能力（最大纹理宽 / 高） */
+  queryDeviceCaps?(params: { device: DeviceHandle }): Promise<DeviceCaps>;
+  /** 三维路线 4c（可选）：32 位纹理格式可用性检查（`false` ⇒ 只写一条警告） */
+  checkTextureFormat32?(params: { device: DeviceHandle }): Promise<boolean>;
+  /** 三维路线 4d（可选）：清一次渲染目标 */
+  clearRenderTarget?(params: { device: DeviceHandle }): Promise<void>;
+  /**
+   * 三维路线 4e：建立上层绘制对象；`null` = 失败
+   */
   createDrawObject(params: DrawObjectParams): Promise<DrawObjectHandle | null>;
+  /**
+   * 日志落点（**可选**，spec「日志通道的落点与丢弃」）：`system:OutErrorLog` **非 0** 时，宿主按 `spec`
+   * 拼路径并**覆盖**打开那个固定的日志文件；返回 `true` = 句柄可用（`session.logSink = 'file'`），
+   * `false` = 打开失败（`'unavailable'`，之后的文本**静默丢弃** —— 不写第二处、不弹框、不影响启动）。
+   * ★ 核心**不做 IO**、但**持有拼接规则**：宿主必须用
+   *   `joinEnginePath({ root: spec.baseDirectory, relativeDirectory: spec.relativeDirectory, … })`
+   *   （⛔ 不是 `path.join` 的折叠语义），再按 spec 探存在性 → 递归建目录 → 覆盖打开。
+   * ★ 缺席 ⇒ 本层无法知道落点 ⇒ 记一条**诊断**并按 `'unavailable'` 处理（⛔ 不静默当成功）。
+   */
+  openErrorLog?(spec: ErrorLogPathSpec): Promise<boolean>;
+  /**
+   * 配置根（**可选**，spec「日志通道的落点与丢弃」）：`set:UseAppDataFolder` **恰为 1** 时才问。
+   * ★ 返回**用户本地应用数据目录**（现代系统上是 Local，⛔ 不是 Roaming）；核心只把它当路径的 `root`。
+   * ★ 缺席 ⇒ 这一层无法展开"配置根"⇒ 记一条**诊断**并按 `'unavailable'` 处理（⛔ 不静默当成功）。
+   */
+  appDataDir?(): Promise<string>;
 }
 
 /** 组合接口：`bootWindow` 需要的全部平台能力 */
@@ -377,29 +786,11 @@ export interface WindowEntry {
   showMode: number;
 }
 
-/**
- * 未取证的图形参数映射（`RES-BOOT-GFX-PARAMS` / `RES-BOOT-GFX-FULLSCREEN-COMBO`）。
- * ★ 规范只到"参数来自哪些键"这一层；这些字段由调用方注入，缺省值是本实现的选择（见 `session.ignored`）。
- */
-export interface GraphicsParamChoices {
-  deviceType: 'hal' | 'reference' | 'software';
-  vertexProcessing: 'software' | 'hardware' | 'mixed';
-  presentationInterval: number;
-  multisample: { type: number; quality: number };
-  pixelShaderVersion: number;
-  /** 旧式绘制路线的"行为位" */
-  legacyBehaviorBits: number;
-  /** 覆盖"是否全屏呈现"（缺省 = 屏幕形态字为 0） */
-  fullscreenPresent: boolean;
-}
-
 export interface BootWindowOptions {
   host: BootHost;
   /** 已建立的配置库（发行默认表 + 玩家文件；`55-config.md`） */
   config: ConfigStore;
   entry: WindowEntry;
-  /** 未取证的图形参数（缺省值见 `GraphicsParamChoices`） */
-  graphics?: Partial<GraphicsParamChoices>;
   /**
    * 周期定时器到期时两个引擎格（"状态选择字里的一个位在效" + "另一个引擎级格为 0"）的**判据**。
    * ★ 两者的身份 / 位号未取证（`RES-BOOT-TIMER-CONDITION`）⇒ 核心不读引擎格，由引擎侧注入合取结果。
@@ -442,7 +833,10 @@ export interface IgnoredRequest {
   residual?: string;
 }
 
-/** 图形路线（由 `set:CreateObject` 最低位选） */
+/**
+ * 图形路线（`set:CreateObject` 的**两个独立位**：位 0 = 旧式绘制、位 1 = 三维设备；
+ * 键 = 3 时两条都跑，次序 = 旧式在前）。
+ */
 export type GraphicsRoute = 'legacy-draw' | 'three-dimensional';
 
 /** 图形路线里失败的那一步 */
@@ -450,7 +844,9 @@ export type GraphicsStep =
   | 'create-legacy-draw'
   | 'create-d3d9'
   | 'query-adapter-display-mode'
+  | 'validate-resolution'
   | 'create-device'
+  | 'query-device-caps'
   | 'create-draw-object';
 
 /**
@@ -510,8 +906,42 @@ export class WindowSession {
   readonly trace: TraceRecord[] = [];
   /** 显式忽略清单（见 `IgnoredRequest`） */
   readonly ignored: IgnoredRequest[] = [];
-  /** 错误通道（只有图形路线失败会写文本；⛔ 失败不许静默） */
-  readonly errors: string[] = [];
+  /**
+   * **带类别的日志**（spec「失败后果」：错误 / 警告 / 诊断三类前缀）。
+   * ★ 这是唯一写入口；下面的 `errors` / `warnings` / `diagnostics` 是它的三个通道视图
+   *   （按类别过滤）——⛔ 不要绕过 `logGraphics` 直接往通道里塞自由文本。
+   * ★ **记录 ≠ 送达**：本数组只表示"引擎产生了这条文本"；真到磁盘的只有 `logSink === 'file'`
+   *   时（落点无效 ⇒ 整条文本被引擎**静默丢弃**，见 `GraphicsLogSink`）。
+   */
+  readonly graphicsLog: GraphicsLogEntry[] = [];
+  /**
+   * 日志落点（spec「日志通道的落点与丢弃」）：由 `system:OutErrorLog` + 路径参数（`ErrorLogPathSpec`）
+   * + 宿主的 `openErrorLog` 决定；打开时机在**窗口附加之后、图形设备之前**（见 `runStartup`）。
+   * ★ 缺省 `'unavailable'`（该键为 0 / 缺键 ⇒ 引擎**不打开**）；⛔ 丢弃不影响任何判定，
+   *   也不改变 `errors` / `warnings` / `diagnostics` 的内容（文本仍照记）。
+   */
+  logSink: GraphicsLogSink = 'unavailable';
+
+  /** 错误通道（错误类文本；⛔ 写了错误文本**不一定**中止，见 `GRAPHICS_STEP_OUTCOME`） */
+  get errors(): string[] {
+    return this.textsOf('error');
+  }
+
+  /**
+   * 警告通道（spec：32 位纹理格式不可用**只**写一条警告文本，⛔ 不结束启动）。
+   * ★ 错误 / 警告是两个通道：把"只警告"写进 `errors` 会让启动被误判成失败。
+   */
+  get warnings(): string[] {
+    return this.textsOf('warning');
+  }
+
+  /**
+   * 诊断通道（无前缀：分辨率校验的两段诊断 + 实现侧"宿主缺可选方法"）。
+   * ⛔ 不许静默跳过：每一条都点名缺的是哪个方法、因而没能发送哪个 spec 请求。
+   */
+  get diagnostics(): string[] {
+    return this.textsOf('diagnostic');
+  }
 
   /** 窗口类（注册失败时为 `null`） */
   windowClass: WindowClassHandle | null = null;
@@ -523,10 +953,23 @@ export class WindowSession {
   device: DeviceHandle | null = null;
   /** 上层绘制对象（两条路线成功时都有值） */
   drawObject: DrawObjectHandle | null = null;
-  /** 图形路线（`set:CreateObject` 最低位；未到该阶段为 `null`） */
+  /**
+   * 实际跑过的图形路线（`set:CreateObject` 的两个**独立位**）。
+   * ★ 键 = 3 ⇒ `['legacy-draw', 'three-dimensional']`（旧式在前）。
+   */
+  graphicsRoutes: GraphicsRoute[] = [];
+  /** 第一条实际跑的图形路线（兼容字段；未到该阶段 / 两个位都为 0 ⇒ `null`） */
   graphicsRoute: GraphicsRoute | null = null;
   /** 形态字 S（`display:ScreenMode` 经 `display:ForceScreen` 归一后的值） */
   screenMode = 0;
+  /**
+   * 是否全屏呈现（三维路线在建设备时算出的值；未到该阶段为 `null`）。
+   * ★ 与 `screenMode` **不是**同一个量：形态字 S = 0 表示"占满屏形态"，但 `display:VirtualFullScreen`
+   *   非 0 时呈现仍是窗口化的（spec「设备创建请求的实参」）。
+   */
+  fullscreenPresent: boolean | null = null;
+  /** 纹理位深（`display:TextureBit`；设备建成之后才读，用于配置上层绘制对象） */
+  textureBitDepth = 0;
   /** 共享出口（`null` = 启动继续到了"图形设备就绪"） */
   failure: BootFailure | null = null;
 
@@ -535,15 +978,11 @@ export class WindowSession {
   /** 占满屏态量到的屏幕尺寸（旧式绘制路线要用客户区尺寸，不再问一次） */
   private screenWidth = 0;
   private screenHeight = 0;
-  private readonly graphics: {
-    deviceType: 'hal' | 'reference' | 'software';
-    vertexProcessing: 'software' | 'hardware' | 'mixed';
-    presentationInterval: number;
-    multisample: { type: number; quality: number };
-    pixelShaderVersion: number;
-    legacyBehaviorBits: number;
-    fullscreenPresent: boolean | null;
-  };
+  /**
+   * 分辨率校验**写回**的全屏宽 / 高（spec：挑一个最接近的可用分辨率写回请求宽高）。
+   * ★ 只有 `display:VirtualFullScreen = 0` 分支会写；窗口化时后缓冲仍取客户区（写回不可见）。
+   */
+  private resolvedFullScreen: { width: number; height: number } | null = null;
   private readonly timerActivationCondition: (() => boolean) | null;
   private readonly engineTeardown: (() => void) | null;
 
@@ -553,16 +992,6 @@ export class WindowSession {
     this.entry = opts.entry;
     this.timerActivationCondition = opts.timerActivationCondition ?? null;
     this.engineTeardown = opts.engineTeardown ?? null;
-    const g = opts.graphics ?? {};
-    this.graphics = {
-      deviceType: g.deviceType ?? 'hal',
-      vertexProcessing: g.vertexProcessing ?? 'software',
-      presentationInterval: g.presentationInterval ?? 0,
-      multisample: g.multisample ?? { type: 0, quality: 0 },
-      pixelShaderVersion: g.pixelShaderVersion ?? 0,
-      legacyBehaviorBits: g.legacyBehaviorBits ?? 0,
-      fullscreenPresent: g.fullscreenPresent ?? null,
-    };
   }
 
   /** 周期定时器是否在效（标识 2） */
@@ -588,6 +1017,9 @@ export class WindowSession {
     if (!(await this.registerWindowClass())) return;
     if (!(await this.createWindow())) return;
     await this.attachWindow();
+    // ★ 日志文件在**窗口附加之后、图形设备初始化之前**打开一次（spec「时机」；每次启动一次）——
+    //   窗口阶段的文本没有落点，所以这一步不能更早；图形阶段每条文本都要先知道落点。
+    await this.resolveLogSink();
     if (!(await this.initGraphics())) return;
     // 事件入口规则：启动期在**设备初始化之后、根脚本之前**直接请求过一次空闲抑制。
     this.record(RULE_EVENT_LOOP, 'set-thread-execution-state', {
@@ -767,23 +1199,137 @@ export class WindowSession {
 
   /* ── 4. 图形设备初始化（CORE-BOOT-GRAPHICS-INIT） ────────────────────────── */
 
-  private async initGraphics(): Promise<boolean> {
-    const createObject = this.config.getInt('set:CreateObject');
-    const legacy = (createObject & 1) !== 0; // 最低位 = 1 ⇒ 旧式绘制；= 0 ⇒ 三维设备
-    this.graphicsRoute = legacy ? 'legacy-draw' : 'three-dimensional';
-    return legacy ? await this.initLegacyDraw() : await this.initThreeDimensional();
+  /**
+   * 日志落点（spec「日志通道的落点与丢弃」）：`system:OutErrorLog` **非 0** ⇒ 请求宿主**按引擎的路径规则**
+   * 覆盖打开那个固定的日志文件；该键为 0 / 缺键 ⇒ 引擎**不打开**；打开失败 ⇒ 句柄同样无效。
+   * 三种"没有句柄"的情形都收敛到 `'unavailable'`：此后文本仍被记录，但引擎会**静默丢弃**它们
+   * （⛔ 不写第二处、不弹框、不影响启动是否继续）。
+   *
+   * ★ 路径是**引擎规则**（见 `joinEnginePath`）：配置根 [+分隔符] + `set:RegFilePath` [+分隔符] + 固定文件名；
+   *   配置根 = `set:UseAppDataFolder` **恰为 1** ⇒ 宿主给的用户本地应用数据目录，其它值 ⇒ 空串。
+   *   核心只把**领域字段**（含已解析的配置根）交给宿主，⛔ 不在这里做 IO。
+   * ★ 打开时机：**窗口附加之后、图形设备初始化之前**（见 `runStartup`）。
+   * ★ 宿主缺 `openErrorLog`（或 `set:UseAppDataFolder` 恰为 1 时缺 `appDataDir`）是**实现侧能力缺口**
+   *   （这一层无法执行 spec 的"非 0 ⇒ 打开"）⇒ 各记一条诊断，⛔ 不静默当成功；
+   *   缺方法的诊断只在"该打开却没处打开"时发（键为 0 时本来就该不打开）。
+   */
+  private async resolveLogSink(): Promise<void> {
+    if (this.readConfigInt('system:OutErrorLog') === 0) {
+      this.logSink = 'unavailable';
+      return;
+    }
+    const openErrorLog = this.host.openErrorLog;
+    if (openErrorLog === undefined) {
+      this.logGraphics(
+        'diagnostic',
+        'host-missing-method',
+        'graphics-host-missing-method:openErrorLog —— 宿主没有提供可选的 `openErrorLog`，无法执行 spec'
+          + '「日志通道的落点与丢弃」里"该键非 0 ⇒ 打开日志文件"那一步；日志落点按 unavailable 处理'
+          + '（之后每条文本都会被静默丢弃）',
+      );
+      this.logSink = 'unavailable';
+      return;
+    }
+    // 配置根：**恰为 1** ⇒ 用户本地应用数据目录；其它值（含 0 / 2 / 缺键）⇒ 空串。
+    const useAppDataFolder = this.readConfigInt('set:UseAppDataFolder') === 1;
+    let baseDirectory = '';
+    if (useAppDataFolder) {
+      const appDataDir = this.host.appDataDir;
+      if (appDataDir === undefined) {
+        this.logGraphics(
+          'diagnostic',
+          'host-missing-method',
+          'graphics-host-missing-method:appDataDir —— 宿主没有提供可选的 `appDataDir`，无法执行 spec'
+            + '「日志通道的落点与丢弃」里"`set:UseAppDataFolder` 恰为 1 ⇒ 配置根 = 用户本地应用数据目录"'
+            + '那一步；日志落点按 unavailable 处理（之后每条文本都会被静默丢弃）',
+        );
+        this.logSink = 'unavailable';
+        return;
+      }
+      this.record(RULE_GRAPHICS_INIT, 'app-data-dir', { key: 'set:UseAppDataFolder' });
+      baseDirectory = await appDataDir.call(this.host);
+    }
+    const pathSpec: ErrorLogPathSpec = {
+      fileName: ERROR_LOG_FILE_NAME,
+      relativeDirectory: this.readConfigString('set:RegFilePath'),
+      useAppDataFolder,
+      maxPathBytes: ERROR_LOG_MAX_PATH_BYTES,
+      baseDirectory,
+    };
+    this.record(RULE_GRAPHICS_INIT, 'open-error-log', { ...pathSpec });
+    const opened = await openErrorLog.call(this.host, pathSpec);
+    this.logSink = opened ? 'file' : 'unavailable';
   }
 
+  /**
+   * 读一个整数配置键（**带缺键诊断**）。
+   * ★ spec「日志通道的落点与丢弃」：读一个不存在的配置键会返回 0，但**先弹一次模态错误框**
+   *   （键名 + "不正なキー"）—— 这条对本规则读的所有键都成立。
+   * ★ 本层**没有**弹窗类请求（结构上就弹不出来）⇒ 不建模 UI，只记一条诊断 `config-missing-key:<key>`；
+   *   ⛔ 不静默、也不伪造一个假的模态框。
+   */
+  private readConfigInt(key: string): number {
+    this.noteMissingConfigKey(key);
+    return this.config.getInt(key);
+  }
+
+  /** 读一个字符串配置键（缺键诊断同 `readConfigInt`） */
+  private readConfigString(key: string): string {
+    this.noteMissingConfigKey(key);
+    return this.config.getString(key);
+  }
+
+  /** 缺键 ⇒ 一条诊断（⛔ 缺键 ≠ 显式写 0：后者是"在的"）。 */
+  private noteMissingConfigKey(key: string): void {
+    if (this.config.has(key)) return;
+    this.logGraphics('diagnostic', 'config-missing-key', `config-missing-key:${key}`);
+  }
+
+  /**
+   * 图形设备初始化（spec「图形设备初始化」）：`set:CreateObject` 的**两个独立位**。
+   * 位 0 = 旧式绘制、位 1 = 三维设备 —— ⛔ 不是 if/else：键 = 3 时两条都跑（旧式在前，失败即停）。
+   * 两个位都为 0 ⇒ 两条都不跑（不是"默认跑三维"）。
+   */
+  private async initGraphics(): Promise<boolean> {
+    const createObject = this.config.getInt('set:CreateObject');
+    const legacy = (createObject & 1) !== 0;
+    const threeDimensional = (createObject & 2) !== 0;
+    if (legacy) {
+      this.noteGraphicsRoute('legacy-draw');
+      if (!(await this.initLegacyDraw())) return false;
+    }
+    if (threeDimensional) {
+      this.noteGraphicsRoute('three-dimensional');
+      if (!(await this.initThreeDimensional())) return false;
+    }
+    return true;
+  }
+
+  /** 记一条实际跑过的路线（`graphicsRoute` 兼容字段 = 第一条） */
+  private noteGraphicsRoute(route: GraphicsRoute): void {
+    this.graphicsRoutes.push(route);
+    if (this.graphicsRoute === null) this.graphicsRoute = route;
+  }
+
+  /**
+   * 旧式绘制路线（一次"建立绘制对象"的请求）。
+   * ★ 实参全部按 spec「旧式绘制路线的实参」推导：
+   *   行为位 = `display:UseDirectDrawEmuration` 原值 |（形态字 ≠ 0 ⇒ 2）；
+   *   `display:FullScreenBit` 是**独立**的第 4 实参（⛔ 不与任何键做或）；
+   *   客户区宽 / 高来自引擎级缓存（与三维路线第 3 / 4 实参同一个来源）。
+   * ★ 旧式路线**不看** `display:VirtualFullScreen`；`set:AlwaysBackupSurface` 不是实参。
+   */
   private async initLegacyDraw(): Promise<boolean> {
     const window = this.window as WindowHandle;
-    const windowed = this.screenMode !== 0;
-    const clientWidth = windowed ? this.config.getInt('set:WinX') : this.screenWidth;
-    const clientHeight = windowed ? this.config.getInt('set:WinY') : this.screenHeight;
     const args: LegacyDrawParams = {
       window,
-      clientWidth,
-      clientHeight,
-      behaviorBits: this.graphics.legacyBehaviorBits,
+      clientWidth: this.clientWidth(),
+      clientHeight: this.clientHeight(),
+      behaviorBits: legacyBehaviorBitsOf(
+        this.config.getInt('display:UseDirectDrawEmuration'),
+        this.screenMode,
+      ),
+      fullscreenBit: this.config.getInt('display:FullScreenBit'),
     };
     this.record(RULE_GRAPHICS_INIT, 'create-legacy-draw', { ...args });
     const drawObject = await this.host.createLegacyDraw(args);
@@ -795,6 +1341,7 @@ export class WindowSession {
     return true;
   }
 
+  /** 三维设备路线：建 D3D9 → 取显示模式 →（VFS=0）分辨率校验 → 建设备（重试）→ 设备之后的四步 */
   private async initThreeDimensional(): Promise<boolean> {
     const window = this.window as WindowHandle;
     // 1. 创建 Direct3D 9 对象
@@ -811,37 +1358,73 @@ export class WindowSession {
       this.failGraphics('query-adapter-display-mode');
       return false;
     }
-    // 3. 创建设备
-    const configuredWidth = this.config.getInt('display:FullScreenWidth');
-    const configuredHeight = this.config.getInt('display:FullScreenHeight');
-    const deviceParams: DeviceParams = {
+    // 3. 分辨率校验（只做 `display:VirtualFullScreen = 0` 分支）：诊断 + 写回请求宽 / 高；失败致命。
+    //    ★ 诊断② 的数值是**适配器显示模式的格式字段**（spec），所以把第 2 步查到的 `format` 带进去。
+    if (!(await this.validateResolution(d3d, mode.format))) return false;
+    // 4. 创建设备：**每个参数都由配置键推导**（spec「设备创建请求的实参」）。
+    //    ★ 呈现参数**只在这里构造一次**，重试时只换设备类型 / 顶点处理这两个取值。
+    const virtualFullscreen = this.config.getInt('display:VirtualFullScreen');
+    // 是否窗口化 = (形态字 S ≠ 0) 或（虚拟全屏非 0）；是否全屏呈现取反。
+    const fullscreenPresent = !((this.screenMode !== 0) || (virtualFullscreen !== 0));
+    this.fullscreenPresent = fullscreenPresent;
+    const multisampleType = this.config.getInt('display:MultiSample');
+    const multisampleEnabled = multisampleType !== 0;
+    const backBuffer = this.backBufferSize(mode);
+    const presentation: Omit<DeviceParams, 'deviceType' | 'vertexProcessing'> = {
       d3d,
       window,
       screenMode: this.screenMode,
       adapterFormat: mode.format,
-      fullscreenWidth: configuredWidth !== 0 ? configuredWidth : mode.width,
-      fullscreenHeight: configuredHeight !== 0 ? configuredHeight : mode.height,
-      deviceType: this.graphics.deviceType,
-      vertexProcessing: this.graphics.vertexProcessing,
-      presentationInterval: this.graphics.presentationInterval,
-      multisample: { ...this.graphics.multisample },
-      textureBitDepth: this.config.getInt('display:FullScreenBit'),
-      pixelShaderVersion: this.graphics.pixelShaderVersion,
-      fullscreenPresent: this.graphics.fullscreenPresent ?? this.screenMode === 0,
+      backBufferWidth: backBuffer.width,
+      backBufferHeight: backBuffer.height,
+      presentationInterval: presentationIntervalOf(this.config.getInt('display:PresentInterval')),
+      multisample: { type: multisampleType, quality: 0 },
+      // 交换效果：窗口化 ⇒ 复制；全屏 ⇒ 丢弃；多重采样启用时强制丢弃。
+      swapEffect: multisampleEnabled ? 'discard' : (fullscreenPresent ? 'discard' : 'copy'),
+      backBufferLockable: !multisampleEnabled,
+      fullscreenPresent,
     };
-    this.record(RULE_GRAPHICS_INIT, 'create-device', { ...deviceParams });
-    const device = await this.host.createDevice(deviceParams);
-    if (device === null) {
+    // 尝试序列：设备类型外层、顶点处理内层（每个新设备类型都把顶点处理重置为 1）；成功即停。
+    const attempts = deviceCreationAttempts(
+      this.config.getInt('display:DeviceType'),
+      this.config.getInt('display:VertexProcessing'),
+    );
+    let device: DeviceHandle | null = null;
+    let created: DeviceParams | null = null;
+    for (const [index, attempt] of attempts.entries()) {
+      const params: DeviceParams = { ...presentation, ...attempt };
+      this.record(RULE_GRAPHICS_INIT, 'create-device-attempt', {
+        attempt: index,
+        attempts: attempts.length,
+        deviceType: attempt.deviceType,
+        vertexProcessing: attempt.vertexProcessing,
+      });
+      device = await this.host.createDevice(params);
+      if (device !== null) {
+        created = params;
+        break;
+      }
+    }
+    if (device === null || created === null) {
+      // 枚举耗尽仍是失败：**复用"取显示模式"的文本**（spec「失败后果」）
       this.failGraphics('create-device');
       return false;
     }
+    this.record(RULE_GRAPHICS_INIT, 'create-device', { ...created });
     this.device = device;
-    // 4. 读纹理宽 / 高与像素着色器配置，建立上层绘制对象
-    const textureWidth = this.config.getInt('set:TexWidth');
-    const textureHeight = this.config.getInt('set:TexHeight');
-    this.record(RULE_GRAPHICS_INIT, 'read-pixel-shader-config', { device });
-    const pixelShader = await this.host.readPixelShaderConfig({ device });
-    const drawParams: DrawObjectParams = { device, textureWidth, textureHeight, pixelShader };
+    // 5. 设备建成之后：对话框绘制模式 → 设备能力（纹理能力下限是**致命**）→
+    //    32 位纹理格式检查（**只警告**）→ 清一次渲染目标。
+    if (!(await this.applyPostDeviceRequests(device))) return false;
+    // 6. 按 `display:TextureBit` / `display:PixelShader` 建立上层的绘制对象
+    //    ★ 这两个键**不是**设备创建请求的参数：设备建成之后才读。
+    this.textureBitDepth = this.config.getInt('display:TextureBit');
+    const drawParams: DrawObjectParams = {
+      device,
+      textureWidth: this.config.getInt('set:TexWidth'),
+      textureHeight: this.config.getInt('set:TexHeight'),
+      textureBitDepth: this.textureBitDepth,
+      pixelShader: this.config.getInt('display:PixelShader'),
+    };
     this.record(RULE_GRAPHICS_INIT, 'create-draw-object', { ...drawParams });
     const drawObject = await this.host.createDrawObject(drawParams);
     if (drawObject === null) {
@@ -852,10 +1435,198 @@ export class WindowSession {
     return true;
   }
 
-  /** 图形路线失败：写内建错误文本进错误通道，并结束启动（共享出口） */
-  private failGraphics(step: GraphicsStep): void {
-    this.errors.push(GRAPHICS_INIT_ERROR_TEXT);
-    this.fail(RULE_GRAPHICS_INIT, 'graphics-init-failed', step, GRAPHICS_INIT_ERROR_TEXT);
+  /**
+   * 分辨率校验（spec「三维设备路线」第 3 步）。
+   * - 只在 `display:VirtualFullScreen = 0` 的分支里做（其余分支直接返回成功）；
+   * - 请求对：**整对**取 `display:FullScreenWidth` / `FullScreenHeight`（任一非 0 时），否则客户区对；
+   * - 枚举适配器可用模式、逐档写诊断（请求 / 清单 / 每档一个符号）、按 `pickResolution` 收口，
+   *   选中的宽 / 高**写回**请求宽 / 高（`resolvedFullScreen`）；
+   * - 没有可接受的分辨率 ⇒ **不写回**、写一行诊断（`GRAPHICS_RESOLUTION_REJECTED_TEXT`）、结束启动。
+   * ★ 判据是已证实的引擎行为（`RES-BOOT-GFX-RESOLUTION-PICK` 已关闭）⇒ 恒按 spec「校验分辨率」跑，
+   *   ⛔ 不再由调用方注入挑选规则。
+   * @param adapterFormat 第 2 步查到的适配器显示模式的**格式字段**（诊断② 印的那个数；⛔ 不是宽）
+   * @returns `false` = 没有可接受的分辨率（已写诊断并结束启动）
+   */
+  private async validateResolution(d3d: D3d9Handle, adapterFormat: number | undefined): Promise<boolean> {
+    if (this.config.getInt('display:VirtualFullScreen') !== 0) return true;
+    const request = this.requestedFullScreenPair();
+    const enumerate = this.host.enumerateAdapterDisplayModes;
+    if (enumerate === undefined) return true; // 宿主能力缺口：`declareIgnored` 已记账
+    this.record(RULE_GRAPHICS_INIT, 'enumerate-adapter-display-modes', { d3d, adapter: ADAPTER_INDEX });
+    const modes = await enumerate.call(this.host, { d3d, adapter: ADAPTER_INDEX });
+    this.logGraphics(
+      'diagnostic',
+      'validate-resolution',
+      `requested-resolution:${request.width}x${request.height}`,
+    );
+    // 诊断②：本机可用分辨率**一览** —— 那一行的数值是**显示模式的格式字段**（spec「诊断的形态」②：
+    // 颜色模式 / 格式号），⛔ 不是宽。宿主没报格式 ⇒ 印 `format=?`（不编一个数）。
+    this.logGraphics(
+      'diagnostic',
+      'validate-resolution',
+      `available-display-modes:format=${typeof adapterFormat === 'number' ? adapterFormat : '?'};`
+        + (modes.map((m) => `${m.width}x${m.height}`).join(',') || '(none)'),
+    );
+    const verdict = pickResolution(modes, request.width, request.height);
+    // 逐档一行（符号集合是七元闭集；规范只钉对应关系，⛔ 不钉字节与排版）
+    for (const entry of verdict.perMode) {
+      this.logGraphics(
+        'diagnostic',
+        'validate-resolution',
+        `mode-verdict:${entry.width}x${entry.height}:${entry.symbol}`,
+      );
+    }
+    if (verdict.picked === null) {
+      // 失败：请求宽 / 高**保持原值**（resolvedFullScreen 不写）；诊断 + 结束启动
+      this.failGraphics('validate-resolution', GRAPHICS_RESOLUTION_REJECTED_TEXT);
+      return false;
+    }
+    this.resolvedFullScreen = { width: verdict.picked.width, height: verdict.picked.height };
+    this.logGraphics(
+      'diagnostic',
+      'validate-resolution',
+      `picked-resolution:${verdict.picked.width}x${verdict.picked.height}`,
+    );
+    return true;
+  }
+
+  /**
+   * 分辨率校验的**请求对**（spec「校验分辨率」）：`display:FullScreenWidth` **或**
+   * `display:FullScreenHeight` **任一非 0** ⇒ 整对取这两个键的值（允许其中一个为 0）；
+   * 两者都为 0 ⇒ 客户区宽 / 高。
+   * ★ **整对覆盖，⛔ 不做逐分量回退**（把 `0` 换回客户区是错的）。
+   */
+  private requestedFullScreenPair(): { width: number; height: number } {
+    const width = this.config.getInt('display:FullScreenWidth');
+    const height = this.config.getInt('display:FullScreenHeight');
+    if (width !== 0 || height !== 0) return { width, height };
+    return { width: this.clientWidth(), height: this.clientHeight() };
+  }
+
+  /**
+   * 后缓冲尺寸（spec「后缓冲尺寸」：三条互斥，按顺序取第一条成立的）。
+   * ★ 这里的"窗口化"是**形态字** S ≠ 0（建窗时选的两种形态之一）——"是否全屏呈现"是另一个量
+   *   （`fullscreenPresent`）；否则第 2 条不可达（它要求 S = 0 且虚拟全屏非 0）。
+   * ★ 第 3 档取"分辨率校验写回的值"（若校验跑过），否则取 `display:FullScreenWidth` / `Height`。
+   */
+  private backBufferSize(desktop: DisplayMode): { width: number; height: number } {
+    // 1. 窗口化 ⇒ 客户区宽 / 高（引擎级缓存：窗口态来自 set:WinX / set:WinY）
+    if (this.screenMode !== 0) return { width: this.clientWidth(), height: this.clientHeight() };
+    // 2. 全屏 + 虚拟全屏非 0 + 虚拟全屏类型 = 1 ⇒ 桌面宽 / 高（第 2 步查到的显示模式）
+    const virtualFullscreen = this.config.getInt('display:VirtualFullScreen');
+    if (virtualFullscreen !== 0 && this.config.getInt('display:VirtualFullScreenType') === 1) {
+      return { width: desktop.width, height: desktop.height };
+    }
+    // 3. 其余全屏 ⇒ 分辨率校验写回值 / display:FullScreenWidth / Height（取 0 ⇒ 客户区宽 / 高）
+    const configuredWidth = this.resolvedFullScreen?.width ?? this.config.getInt('display:FullScreenWidth');
+    const configuredHeight = this.resolvedFullScreen?.height ?? this.config.getInt('display:FullScreenHeight');
+    return {
+      width: configuredWidth !== 0 ? configuredWidth : this.clientWidth(),
+      height: configuredHeight !== 0 ? configuredHeight : this.clientHeight(),
+    };
+  }
+
+  /** 客户区宽（窗口态 = `set:WinX`；占满屏态 = 建窗时量到的屏幕宽） */
+  private clientWidth(): number {
+    return this.screenMode !== 0 ? this.config.getInt('set:WinX') : this.screenWidth;
+  }
+
+  /** 客户区高（同 `clientWidth`） */
+  private clientHeight(): number {
+    return this.screenMode !== 0 ? this.config.getInt('set:WinY') : this.screenHeight;
+  }
+
+  /**
+   * 设备建成之后的四个请求（spec「三维设备路线」第 4 步，**次序是合同**）。
+   * ★ 四个都是**可选**宿主方法：缺席时记一条诊断（⛔ 不静默）；
+   *   其中"设备能力查询"缺席意味着**无法**执行 spec 的纹理能力下限致命比较 —— 这必须看得见。
+   * ★ 后果按 spec「失败后果」的逐步骤表：
+   *   对话框绘制模式失败 ⇒ **错误**类文本但**不**中止；
+   *   32 位纹理格式不可用 ⇒ **警告**类文本、不中止；
+   *   纹理能力不足 ⇒ 错误类 + **结束启动**。
+   * @returns `false` = 纹理能力不足（已写错误通道并结束启动）
+   */
+  private async applyPostDeviceRequests(device: DeviceHandle): Promise<boolean> {
+    // (1) 对话框绘制模式（参数 = 开）。★ 失败**写错误类文本但不中止**（spec 唯一一处）。
+    const setDialogBoxMode = this.host.setDialogBoxMode;
+    if (setDialogBoxMode === undefined) {
+      this.noteMissingHostMethod('dialog-box-mode', 'setDialogBoxMode', '对话框绘制模式');
+    } else {
+      const params = { device, enabled: true };
+      this.record(RULE_GRAPHICS_INIT, 'set-dialog-box-mode', { ...params });
+      const ok = await setDialogBoxMode.call(this.host, params);
+      if (ok === false) {
+        // ⛔ 不调用 failGraphics：写了错误文本 ≠ 结束启动（按逐步骤表的 fatal 列决定）
+        this.logGraphics('error', 'set-dialog-box-mode', GRAPHICS_DIALOG_BOX_MODE_ERROR_TEXT);
+      }
+    }
+    // (2) 设备能力（最大纹理宽 / 高）并与 set:TexWidth / set:TexHeight 比较：不足 ⇒ 失败
+    const queryDeviceCaps = this.host.queryDeviceCaps;
+    if (queryDeviceCaps === undefined) {
+      this.noteMissingHostMethod('device-caps-query', 'queryDeviceCaps', '设备能力查询（纹理能力下限比较）');
+    } else {
+      this.record(RULE_GRAPHICS_INIT, 'query-device-caps', { device });
+      const caps = await queryDeviceCaps.call(this.host, { device });
+      const textureWidth = this.config.getInt('set:TexWidth');
+      const textureHeight = this.config.getInt('set:TexHeight');
+      if (caps.maxTextureWidth < textureWidth || caps.maxTextureHeight < textureHeight) {
+        // 能力不足是**致命**的（spec「失败后果」）：写错误通道 + 结束启动
+        this.failGraphics('query-device-caps');
+        return false;
+      }
+    }
+    // (3) 32 位纹理格式可用性检查：不可用**只写一条警告**，不结束启动
+    const checkTextureFormat32 = this.host.checkTextureFormat32;
+    if (checkTextureFormat32 === undefined) {
+      this.noteMissingHostMethod('texture-format-32-check', 'checkTextureFormat32', '32 位纹理格式可用性检查');
+    } else {
+      this.record(RULE_GRAPHICS_INIT, 'check-texture-format-32', { device });
+      if (!(await checkTextureFormat32.call(this.host, { device }))) {
+        this.logGraphics('warning', 'check-texture-format-32', TEXTURE_FORMAT_32_WARNING_TEXT);
+      }
+    }
+    // (4) 清一次渲染目标
+    const clearRenderTarget = this.host.clearRenderTarget;
+    if (clearRenderTarget === undefined) {
+      this.noteMissingHostMethod('clear-render-target', 'clearRenderTarget', '清渲染目标');
+    } else {
+      this.record(RULE_GRAPHICS_INIT, 'clear-render-target', { device });
+      await clearRenderTarget.call(this.host, { device });
+    }
+    return true;
+  }
+
+  /**
+   * 可选宿主方法缺席 ⇒ 记一条**显式诊断**。
+   * ⛔ 不许静默：spec 要求的请求没发出去，必须在会话里留下可查的痕迹。
+   */
+  private noteMissingHostMethod(what: string, method: string, purpose: string): void {
+    this.logGraphics(
+      'diagnostic',
+      'host-missing-method',
+      `graphics-host-missing-method:${method} —— 宿主没有提供可选的 \`${method}\`，`
+        + `无法发送 spec 第 4 步的「${purpose}」请求（${what}）`,
+    );
+  }
+
+  /** 写一条**带类别**的日志（三条通道都是它的视图；⛔ 不要绕过它直接 push） */
+  private logGraphics(category: GraphicsTextCategory, step: GraphicsLogStep, text: string): void {
+    this.graphicsLog.push({ category, step, text });
+  }
+
+  /** 某一类别的文本（通道视图） */
+  private textsOf(category: GraphicsTextCategory): string[] {
+    return this.graphicsLog.filter((entry) => entry.category === category).map((entry) => entry.text);
+  }
+
+  /**
+   * 图形路线失败：按 spec「失败后果」的逐步骤表写日志（该步不写日志就只给用户可见文本），并结束启动。
+   * ★ ⛔ 不要用"写了错误文本"推断是否中止 —— 是否中止由 `GRAPHICS_STEP_OUTCOME.fatal` / 调用点决定。
+   */
+  private failGraphics(step: GraphicsStep, text = GRAPHICS_INIT_ERROR_TEXT): void {
+    const outcome = GRAPHICS_STEP_OUTCOME[step];
+    if (outcome.log !== null) this.logGraphics(outcome.log, step, text);
+    this.fail(RULE_GRAPHICS_INIT, 'graphics-init-failed', step, text);
   }
 
   private fail(
@@ -1098,32 +1869,31 @@ export class WindowSession {
     );
     this.ignore(
       RULE_GRAPHICS_INIT,
-      'device-param-mapping',
-      '键 → 设备参数的逐位映射未取证（RES-BOOT-GFX-PARAMS）⇒ 未映射的字段（设备类型 / 顶点处理 / 呈现间隔 / '
-        + '多重采样 / 像素着色器版本）取注入值或本实现的默认值；纹理位深取 `display:FullScreenBit`（映射亦未取证）',
-      'RES-BOOT-GFX-PARAMS',
+      'device-type-not-distinguishable',
+      '当前后端（Pixi/WebGL）不区分"硬件设备 / 参考设备 / 硬件·软件·混合顶点处理" ⇒ 核心按 spec 的序列'
+        + '真的重试（每失败一次就发下一次），但后端的这六次是**同一个请求**；核心侧序列可被守卫钉住，'
+        + '后端侧的区分能力不存在，⛔ 不假装。',
     );
     this.ignore(
       RULE_GRAPHICS_INIT,
       'fullscreen-present-combination',
-      '窗口态 / 占满屏态与"是否全屏呈现"的完整组合表未规定（RES-BOOT-GFX-FULLSCREEN-COMBO）⇒ '
-        + '默认取 `S == 0`，可由注入覆盖',
+      '三维路线的"是否全屏呈现"已由 spec 钉住（形态字 S 与虚拟全屏键的或）；**旧式绘制路线**下的组合仍未取证'
+        + '（RES-BOOT-GFX-FULLSCREEN-COMBO）⇒ 本层只在三维路线计算，旧式路线不消费该组合',
       'RES-BOOT-GFX-FULLSCREEN-COMBO',
     );
-    this.ignore(
-      RULE_GRAPHICS_INIT,
-      'legacy-behavior-bits',
-      '旧式绘制路线的"行为位"取值与来源未取证（06-window 只说"参数含行为位"）⇒ 默认 0，可注入',
-    );
-    this.ignore(
-      RULE_GRAPHICS_INIT,
-      'pixel-shader-config-source',
-      '"像素着色器配置"读的是哪一层的哪个键未取证 ⇒ 本层按"设备能力查询"取平台结果',
-    );
+    if (this.host.enumerateAdapterDisplayModes === undefined) {
+      this.ignore(
+        RULE_GRAPHICS_INIT,
+        'resolution-enumeration',
+        '宿主没有提供 `enumerateAdapterDisplayModes` ⇒ 无法执行 spec 第 3 步的分辨率枚举 / 诊断 / 写回；'
+          + '这是实现侧能力缺口（不是"引擎不做"），⛔ 不静默',
+      );
+    }
     this.ignore(
       RULE_GRAPHICS_INIT,
       'error-text',
-      '错误文本的类别与内容未取证（RES-BOOT-GFX-TEXT）⇒ 本层写实现侧的内建常量（内容不是规范结论）',
+      '错误文本的类别与内容未取证（RES-BOOT-GFX-TEXT）⇒ 本层写实现侧的内建常量（内容不是规范结论）；'
+        + '32 位纹理格式不可用的警告文本同样只是实现侧占位',
       'RES-BOOT-GFX-TEXT',
     );
     this.ignore(
@@ -1179,7 +1949,7 @@ export class WindowSession {
  * 按 `06-window.md` 的顺序执行启动期的窗口 / 图形设备阶段，返回会话。
  *
  * 步骤：注册窗口类 → 建窗 → 显示 / 重绘 → 解绑输入法 + 记录服务窗口槽 + 仅窗口态装菜单
- *       → 图形设备（`set:CreateObject` 最低位选路线）→ 启动期直接请求一次空闲抑制。
+ *       → 图形设备（`set:CreateObject` 两个独立位选路线）→ 启动期直接请求一次空闲抑制。
  * ★ 失败 ⇒ 共享出口：`session.failure` 非空，窗口 / 图形对象为空，之后的请求一条都不发（⛔ 不弹消息）。
  * ★ 根脚本装载夹在图形设备与周期定时器之间：调用方装完根脚本后调 `session.beginMainLoop()`。
  * ★ `async`：图形设备的请求是 `Promise`（设备创建要等平台的图形后端真的就绪，见 `GraphicsHost`）；

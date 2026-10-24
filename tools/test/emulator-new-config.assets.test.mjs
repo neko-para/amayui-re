@@ -39,7 +39,7 @@ const TEMP = path.join(REPO_ROOT, '.tmp', 'emulator-new-config-assets');
 const KEYS = await loadConfigKeys();
 const env = { host: nodeHost, table: await loadOpcodeTable(), configKeys: KEYS };
 
-test('★ 真实索引：51 条发行默认（SCREENX/SCREENY/FONT/SAVEVERSION）', { skip }, async () => {
+test('★ 真实索引：51 条发行默认（SCREENX/SCREENY/FONT/SAVEVERSION/ENABLEMEMFLIP）', { skip }, async () => {
   const install = await Install.open(nodeHost, installDir);
   assert.equal(install.index.configDefaults.length, 51, 'SYS4INI.BIN 尾部应有 51 对默认值');
   const keys = install.index.configDefaults.map((x) => x.key);
@@ -53,6 +53,8 @@ test('★ 真实索引：51 条发行默认（SCREENX/SCREENY/FONT/SAVEVERSION�
   assert.equal(s.getInt('set:WinY'), 720);
   assert.equal(s.getInt('set:SaveVersion1'), 3);
   assert.equal(s.getInt('set:SaveVersion2'), 20);
+  // 发行数据事实（不是引擎合同）：发行默认表把 ENABLEMEMFLIP 显式置 0
+  assert.equal(s.getInt('set:EnableMemFlip'), 0, '发行默认 ENABLEMEMFLIP 应为 0');
   assert.equal(new TextDecoder('shift_jis').decode(Buffer.from(s.getString('message:Font'), 'latin1')), 'ＭＳ 明朝');
   assert.ok(new TextDecoder('shift_jis').decode(Buffer.from(s.getString('set:SavePath'), 'latin1')).endsWith('\\SAVE'));
 

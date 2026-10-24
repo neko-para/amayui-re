@@ -4,6 +4,8 @@
  * 真实入口：索引 `SYS4INI.BIN`（ALF 索引）→ 统一文件 id == TOC 条目下标 → 根脚本 id 0。
  * 取脚本的顺序（本机安装的实测）：**松散文件优先**（安装根下的同名 `.BIN`），否则按 TOC 的
  * `(archive, offset, length)` 从 `DATA*.ALF` 切片。
+ * ★ 装载栈（`CORE-FS-INDEX-STACK`）：基础索引恰好一份；成功之后枚举当前目录的 `*.AAI`
+ *   （扩展索引，`CORE-FS-EXT-INDEX-KEY`），每份按**头内区号**写槽，id 的高 8 位选出槽。
  * ★ 安装目录只读；载荷按需切片（归档有 GB 级，⛔ 不整份读）。
  * ★ 玩家配置只写**调用方显式给出的路径**（`--init-config`）；装载不写安装目录。
  *
@@ -22,6 +24,8 @@ import type { AlfFile, AlfIndex } from './alf.ts';
  *   - `readSlice(path, offset, length)`：读 `[offset, offset+length)`，**长度必须精确**；
  *     短读 / 越界 ⇒ 抛（归档切片不许退化成整份读）。
  *   - `isFile`：不是文件 / 不存在 ⇒ `false`；其它 IO 错误照抛（不许静默当成"不存在"）。
+ *   - `listDir`：列**一层**条目名，顺序 = **宿主顺序**（核心不排序）；目录项可以出现在结果里；
+ *     枚举失败 ⇒ **抛**（"当成没有扩展索引"是调用方的决定，见 `Install.open`）。
  *   - `ensureReadDir`：只读路径上的建目录；权限 / 只读盘一类失败**视为正常**（读不到 ⇒ 走默认值）。
  *   - `writeBytes`：建父目录 + 写；任何失败都**硬失败**。
  */
@@ -33,6 +37,13 @@ export interface Host {
   readSlice(file: string, offset: number, length: number): Promise<Uint8Array>;
   readText(file: string): Promise<string>;
   isFile(file: string): Promise<boolean>;
+  /**
+   * **列目录**：返回 `dir` 下一层的**条目名字**（不含路径），顺序 = **宿主顺序**。
+   * ★ 核心**不排序**、不比较名字 / 时间：枚举顺序就是合同的一部分（`CORE-FS-INDEX-STACK`）。
+   * ★ 只列一层（不递归）；目录项**可以**出现在结果里 —— 调用方自己用 `isFile` 过滤。
+   * ★ 枚举失败（目录不存在 / 没权限）⇒ **抛**；⛔ 不许静默返回空数组来冒充"目录是空的"。
+   */
+  listDir(dir: string): Promise<string[]>;
   ensureReadDir(dir: string): Promise<void>;
   writeBytes(file: string, data: Uint8Array): Promise<void>;
   /**
@@ -68,35 +79,123 @@ function isBareName(name: string): boolean {
     && !/^[A-Za-z]:/.test(name);
 }
 
+/** 扩展索引槽表容量（引擎固定 256 格；高 8 位按有符号字节解释 ⇒ 可用区号只有 1..127） */
+const AAI_SLOT_COUNT = 256;
+
+/** `offset` 字段上的"没有归档可回退"哨兵（`CORE-FS-ARCHIVE-FALLBACK` 未定名的那个值） */
+const OFFSET_NO_ARCHIVE = 0xffffffff;
+
 export class Install {
   readonly host: Host;
   readonly dir: string;
   readonly indexFile: string;
   readonly index: AlfIndex;
+  /**
+   * 扩展索引槽表（`CORE-FS-INDEX-STACK`）：下标 = **头内区号**，值 = 那份扩展索引。
+   * ★ 长度固定 256（引擎的槽表容量），不是"有几份 AAI 就多长"。
+   * ★ 同区号**后装载者胜**（无条件覆盖，见 `loadExtensionIndexes`）。
+   */
+  readonly slots: (AlfIndex | null)[];
+  /** 扩展索引装载失败的诊断（每份一条）；★ 装载失败不中止启动，也不写槽 */
+  readonly aaiDiagnostics: string[];
 
   private constructor(host: Host, dir: string, indexFile: string, index: AlfIndex) {
     this.host = host;
     this.dir = dir;
     this.indexFile = indexFile;
     this.index = index;
+    this.slots = new Array<AlfIndex | null>(AAI_SLOT_COUNT).fill(null);
+    this.aaiDiagnostics = [];
   }
 
-  /** 打开安装目录：只要求 `SYS4INI.BIN`（索引）在场；归档按需打开 */
+  /**
+   * 打开安装目录：只要求 `SYS4INI.BIN`（基础索引）在场；归档按需打开。
+   * ★ 基础索引成功之后才枚举 `*.AAI`（`CORE-FS-INDEX-STACK`）；基础失败时一个也不扫 ——
+   *   `readBytes` 抛出去，调用方看到"打不开"，与扩展索引无关。
+   */
   static async open(host: Host, dir: string): Promise<Install> {
     const indexFile = host.join(dir, 'SYS4INI.BIN');
     const index = parseAlfIndex(await host.readBytes(indexFile));
-    return new Install(host, dir, indexFile, index);
+    const install = new Install(host, dir, indexFile, index);
+    await install.loadExtensionIndexes();
+    return install;
   }
 
   get entryCount(): number {
     return this.index.files.length;
   }
 
-  entry(id: number): AlfFile {
-    if (!Number.isInteger(id) || id < 0 || id >= this.index.files.length) {
-      throw new Error(`script-id-out-of-range:${id}/${this.index.files.length}`);
+  /**
+   * 枚举当前目录里的 `*.AAI` 并按**头内区号**写槽（`CORE-FS-EXT-INDEX-KEY`）。
+   * - 顺序 = `Host.listDir` 给的顺序（核心不排序、不比较名字 / 时间）；
+   * - 不递归；`*.AAI` 里若是目录 ⇒ 跳过；
+   * - 每份独立解析 → 头标题与**基础索引**头标题**逐字节相同** → 用头内区号写槽；
+   * - 任何一份失败 ⇒ 一条诊断 + 跳过（**不中止**，也**不写槽**：失败不顶掉同区号旧档）；
+   * - 目录枚举失败 ⇒ 视为"没有扩展索引"（引擎里枚举失败也只是没扫到）。
+   */
+  private async loadExtensionIndexes(): Promise<void> {
+    let names: string[];
+    try {
+      names = await this.host.listDir(this.dir);
+    } catch {
+      return;
     }
-    return this.index.files[id];
+    for (const name of names) {
+      // `*.AAI`：大小写不敏感（Windows 上文件名本来就不区分大小写）
+      if (!/\.aai$/i.test(name)) continue;
+      try {
+        const file = this.host.join(this.dir, name);
+        if (!(await this.host.isFile(file))) continue; // 目录项：跳过
+        const index = parseAlfIndex(await this.host.readBytes(file));
+        if (index.title !== this.index.title) {
+          throw new Error(`aai-title-mismatch:${index.title}`);
+        }
+        if (!Number.isInteger(index.zone) || index.zone < 0 || index.zone >= AAI_SLOT_COUNT) {
+          // 规范不规定 ≥ 槽表容量的区号（`CORE-FS-EXT-INDEX-KEY` 的成立条件）
+          throw new Error(`aai-zone-out-of-slot:${index.zone}`);
+        }
+        this.slots[index.zone] = index;
+      } catch (err) {
+        this.aaiDiagnostics.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  /** 槽表某一格（诊断用）；越界 / 空 ⇒ `null` */
+  slot(zone: number): AlfIndex | null {
+    if (!Number.isInteger(zone) || zone < 0 || zone >= AAI_SLOT_COUNT) return null;
+    return this.slots[zone] ?? null;
+  }
+
+  entry(id: number): AlfFile {
+    return this.resolve(id).entry;
+  }
+
+  /**
+   * id → （索引, 条目）。id 分两区（`CORE-FS-ID-ZONES`）：
+   * 高 8 位 0 ⇒ 基础索引；非 0 ⇒ 按**有符号字节**解释成区号，低 24 位是**那份索引自己的**下标。
+   * ★ 失败必须彼此可分（`CORE-FS-FETCH-FAIL`）：
+   *   `script-id-out-of-range`（基础区）· `aai-zone-undefined`（128..255，无定义）·
+   *   `aai-not-loaded`（槽空）· `aai-entry-out-of-range`（扩展区下标越界）。
+   */
+  private resolve(id: number): { index: AlfIndex; entry: AlfFile; zone: number } {
+    if (!Number.isInteger(id)) throw new Error(`script-id-not-integer:${id}`);
+    const zone = (id | 0) >> 24; // ★ 算术右移 = 有符号区号（128..255 得负数）
+    if (zone === 0) {
+      if (id < 0 || id >= this.index.files.length) {
+        throw new Error(`script-id-out-of-range:${id}/${this.index.files.length}`);
+      }
+      return { index: this.index, entry: this.index.files[id]!, zone: 0 };
+    }
+    // 128..255：规范说没有定义（槽表里没有那一格）⇒ 明确失败，⛔ 不模拟"读槽表之外"
+    if (zone < 0) throw new Error(`aai-zone-undefined:${zone}`);
+    const index = this.slots[zone] ?? null;
+    if (index === null) throw new Error(`aai-not-loaded:${zone}`);
+    const idx = id & 0xffffff;
+    if (idx >= index.files.length) {
+      throw new Error(`aai-entry-out-of-range:${zone}:${idx}:${index.files.length}`);
+    }
+    return { index, entry: index.files[idx]!, zone };
   }
 
   /** 松散文件是否存在（只按裸文件名） */
@@ -113,8 +212,11 @@ export class Install {
     return hit ? 'archive' : 'missing';
   }
 
-  private async readArchiveSlice(entry: AlfFile): Promise<Uint8Array> {
-    const archive = this.index.archives[entry.archiveIndex];
+  /** 归档切片：归档名用**该条目所属那份索引自己的**归档表（⛔ 不给扩展索引加盘符前缀） */
+  private async readArchiveSlice(index: AlfIndex, entry: AlfFile): Promise<Uint8Array> {
+    // ★ 哨兵在**偏移**字段上：offset == 0xFFFFFFFF ⇒ 这条记录不进入归档回退 ⇒ 取件失败
+    if (entry.offset === OFFSET_NO_ARCHIVE) throw new Error(`alf-no-archive:${entry.name}`);
+    const archive = index.archives[entry.archiveIndex];
     const hostArchive = archive === undefined ? null : this.host.pathFromEngine(archive);
     if (hostArchive === null || !isBareName(hostArchive)) {
       throw new Error(`alf-bad-archive:${entry.archiveIndex}/${entry.name}`);
@@ -125,33 +227,53 @@ export class Install {
     return this.host.readSlice(file, entry.offset, entry.length);
   }
 
-  /** 只读归档（诊断 / 对照松散覆盖用） */
+  /** 只读归档（诊断 / 对照松散覆盖用）：id 可以是基础区或扩展区 */
   async readArchiveById(id: number): Promise<ScriptSource> {
-    const entry = this.entry(id);
+    const { index, entry } = this.resolve(id);
     return {
       id,
       name: entry.name,
       side: 'archive',
-      bytes: await this.readArchiveSlice(entry),
+      bytes: await this.readArchiveSlice(index, entry),
       entryLength: entry.length,
-      archive: this.index.archives[entry.archiveIndex],
+      archive: index.archives[entry.archiveIndex],
     };
   }
 
-  /** 真实入口：松散优先，否则归档切片 */
+  /** 真实入口：松散优先，否则归档切片（两个区走同一套形状） */
   async readById(id: number): Promise<ScriptSource> {
-    const entry = this.entry(id);
+    const { index, entry } = this.resolve(id);
     const loose = await this.loosePath(entry.name);
     if (loose) {
       return { id, name: entry.name, side: 'loose', bytes: await this.host.readBytes(loose), entryLength: entry.length };
     }
-    return this.readArchiveById(id);
+    return {
+      id,
+      name: entry.name,
+      side: 'archive',
+      bytes: await this.readArchiveSlice(index, entry),
+      entryLength: entry.length,
+      archive: index.archives[entry.archiveIndex],
+    };
   }
 
-  /** 按名字查（名字只用于日志 / 诊断；引擎侧引用的是 id） */
+  /**
+   * 按名字反查（`CORE-FS-INDEX-STACK` 第 4 条）：**基础索引优先**，其次按**区号升序**
+   * （1..255；区号 0 恒指基础索引，不参与第二段扫描）；每份索引内部按文件表顺序取第一条。
+   * ★ 不区分大小写（宿主文件系统不区分；名字只是定位手段）。
+   * ★ 命中扩展索引 ⇒ 返回 `(区号 << 24) | 下标`；全不中 ⇒ `null`（不抛、不返回 0 号文件）。
+   */
   async readByName(name: string): Promise<ScriptSource | null> {
-    const id = this.index.files.findIndex((f) => f.name === name);
-    return id < 0 ? null : this.readById(id);
+    const wanted = name.toLowerCase();
+    const base = this.index.files.findIndex((f) => f.name.toLowerCase() === wanted);
+    if (base >= 0) return this.readById(base);
+    for (let zone = 1; zone < AAI_SLOT_COUNT; zone += 1) {
+      const index = this.slots[zone];
+      if (index === null) continue;
+      const idx = index.files.findIndex((f) => f.name.toLowerCase() === wanted);
+      if (idx >= 0) return this.readById(((zone << 24) | idx) >>> 0);
+    }
+    return null;
   }
 }
 

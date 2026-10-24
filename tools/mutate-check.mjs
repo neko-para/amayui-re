@@ -1794,8 +1794,8 @@ const MUTATIONS = [
   // ── emulator-new：统一文件 id == TOC 条目下标 ──
   {
     file: 'apps/emulator-new/src/core/install.ts',
-    from: '    return this.index.files[id];',
-    to: '    return this.index.files[id + 1] ?? this.index.files[id]; // 变异：id 偏一位',
+    from: '      return { index: this.index, entry: this.index.files[id]!, zone: 0 };',
+    to: '      return { index: this.index, entry: this.index.files[id + 1]!, zone: 0 }; // 变异：id 偏一位',
     guard: 'tools/test/emulator-new-alf.test.mjs',
     what: '★ 统一文件 id 偏一位 ⇒ 根脚本取到 BGM 而不是 SYSTEM4.BIN（名字看起来仍是合法条目）',
   },
@@ -2080,12 +2080,16 @@ const MUTATIONS = [
   {
     file: 'apps/emulator-new/src/core/handlers.ts',
     from:
+      "  if (!host) throw new Error('save-host-missing:0x1a0');\n" +
+      '  const slot = readInt(m, ops, 2) | 0;\n' +
       "  const bytes = await host.read(host.fileForSlot(slot, 'dat'));\n" +
       '  if (!bytes) {\n' +
       '    writeInt(m, ops, 1, 1);\n' +
       '    return;\n' +
       '  }',
     to:
+      "  if (!host) throw new Error('save-host-missing:0x1a0');\n" +
+      '  const slot = readInt(m, ops, 2) | 0;\n' +
       "  const bytes = await host.read(host.fileForSlot(slot, 'dat'));\n" +
       '  if (!bytes) {\n' +
       '    writeInt(m, ops, 1, 1);\n' +
@@ -2122,6 +2126,500 @@ const MUTATIONS = [
     to: "  assert.equal(h.declaredSize, 54 + pixels, '声明的文件长度 = 像素字节数 + 54'); // 变异：把 +40 修正成 +54",
     guard: 'tools/test/spec-save-sth.assets.test.mjs',
     what: '把 `.STH` 的声明长度"修正"成 54 + 像素 ⇒ 真机四份样本当场对不上（bfSize 是承重字段，不是可自由解释的怪癖）',
+  },
+  // ── 第三批残差（池翻页 / 键总数 / 帧辅助格 / AGF alpha / 图形参数 / 扩展索引 / 场景命令）──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  if (enabled === 0) {',
+    to: '  if (false) { // 变异：不再按配置键拒绝',
+    guard: 'tools/test/emulator-new-ops-memflip.test.mjs',
+    what: '0x6d 去掉配置门 ⇒ 键缺失时仍翻页，而不是抛显示消息型异常（两份缓冲的不变量被绕过）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.globalFlip = m.globalFlip === 0 ? 1 : 0;',
+    to: '  void 0; // 变异：翻页成 no-op',
+    guard: 'tools/test/emulator-new-ops-memflip.test.mjs',
+    what: '0x6d 不再切换主/备选择 ⇒ 翻页后仍读到原缓冲的 42',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '  get globalInt(): Map<number, number> { return this.intPoolAt(this.globalFlip); }',
+    to: '  get globalInt(): Map<number, number> { return this.intPoolAt(0); } // 变异：两份缓冲塌成一份',
+    guard: 'tools/test/emulator-new-ops-memflip.test.mjs',
+    what: '全局整型池的 getter 固定 bank 0 ⇒ 翻页对读写不生效（看似实现了一半）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  const limit = readKeyTotal(m);',
+    to: '  const limit = m.frame.keyLimit; // 变异：退回按帧上限',
+    guard: 'tools/test/emulator-new-input-keytotal.test.mjs',
+    what: '0x100 读 0xff 抄下的按帧上限而不是键总数 ⇒ 0xfe 与 0xff 的先后会改变派发结果',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '      localMain: -1, localSub: -1,',
+    to: '      // 变异：两格不给初值',
+    guard: 'tools/test/emulator-new-frame-aux.test.mjs',
+    what: '新帧的两格本地块进入目标退回 undefined ⇒ "未登记"判断在 0 与 undefined 之间漂移',
+  },
+  {
+    file: 'apps/emulator-new/src/core/agf.ts',
+    from: '        rgba[d + 3] = body[s + 3]!;',
+    to: '        rgba[d + 3] = alpha ? alpha[y * width + x]! : body[s + 3]!; // 变异：alpha 段覆盖 32bpp',
+    guard: 'tools/test/emulator-new-agf.test.mjs',
+    what: '32bpp 退回"ACIF alpha 覆盖像素第 4 字节" ⇒ 输出 alpha 从 10/20 变 200/0',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: '    case 3: return 4;',
+    to: '    case 3: return 3; // 变异：3 直接透传',
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: 'PresentInterval 3 → 3（透传）⇒ 配置值与 D3D 档位值的映射被抹平',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: '    const fullscreenPresent = !((this.screenMode !== 0) || (virtualFullscreen !== 0));',
+    to: '    const fullscreenPresent = this.screenMode === 0; // 变异：忽略虚拟全屏键',
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '是否窗口化只看形态字 ⇒ VirtualFullScreen 非 0 时仍请求全屏呈现',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: "    this.textureBitDepth = this.config.getInt('display:TextureBit');",
+    to: "    this.textureBitDepth = this.config.getInt('display:FullScreenBit'); // 变异：读错键",
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '纹理位深读 display:FullScreenBit（旧式绘制路线的参数）⇒ 两条键的值互换时静默错',
+  },
+  {
+    file: 'apps/emulator-new/src/core/install.ts',
+    from: '    const zone = (id | 0) >> 24; // ★ 算术右移 = 有符号区号（128..255 得负数）',
+    to: '    const zone = id >>> 24; // 变异：无符号区号',
+    guard: 'tools/test/emulator-new-aai.test.mjs',
+    what: '区号改成无符号右移 ⇒ 0x81… 落进槽表 129 而不是"未定义区号"',
+  },
+  {
+    file: 'apps/emulator-new/src/core/install.ts',
+    from: '    if (entry.offset === OFFSET_NO_ARCHIVE) throw new Error(`alf-no-archive:${entry.name}`);',
+    to: '    if (false) throw new Error(`alf-no-archive:${entry.name}`); // 变异：不再看偏移哨兵',
+    guard: 'tools/test/emulator-new-aai.test.mjs',
+    what: 'offset == 0xFFFFFFFF 的哨兵不再挡住归档回退 ⇒ 取件会去读一个不存在的位置',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-order.ts',
+    from: '    entries.push({ drawable: { kind: \'item\', key: item.key, item }, seq: index });',
+    to: '    if (item.key < 0) return; // 变异：绘制项也过滤负键\n    entries.push({ drawable: { kind: \'item\', key: item.key, item }, seq: index });',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '绘制项恢复"负键不参与"⇒ spec 的按表分口径被抹成旧版通则（负键项永远不发出）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  if (split < 1) {',
+    to: '  if (false) { // 变异：不检查分割幅',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '0x24f 不再检查分割幅 < 1 ⇒ 缺了"报告后仍照写（split=1 / mode=-1）"这条真实行为',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '    return; // ⛔ 不写表、⛔ 不删旧记录',
+    to: '    m.scene.commands.delete(key); return; // 变异：拒绝前先删旧记录',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '0x24f 类型 > 11 时先删旧记录 ⇒ "表完全不变"这条合同被破坏（半截写）',
+  },
+  // ── 第四批：场景命令字段 / 纹理消费者规划器 / 图形重试与旧式路线 ──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  record.rect = { left, top, right: left + width, bottom: top + height };',
+    to: '  record.rect = { left, top, right: width, bottom: height }; // 变异：右下不加上左',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '种类 1 的目标矩形右下没有由左 / 上加出来 ⇒ 覆盖区域少一块（看起来只是"矩形小了一点"）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  rampAngle = [angleFrom, angleTo];',
+    to: '  rampCenterU = [angleFrom, angleTo]; // 变异：两变体共用布局',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '变体 0 的角度写进变体 1 的中心格 ⇒ 两种模糊的字段布局混在一起',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "    throw new Error('display-message: ムービーの初期化に失敗しました．\\r\\nテクスチャが確保されていません．');",
+    to: '    void 0; // 变异：槽空不再抛',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '种类 1 的空纹理槽不再抛异常 ⇒ 会照常删旧记录 / 写记录（失败路径被吞掉）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.scene.errorBuffer = `関数：CTexture エラー：テクスチャ作成に失敗． TEXTURE=${textureId}`;',
+    to: '  void 0; // 变异：失败不上报',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '种类 0 的建 / 换纹理失败不再上报 ⇒ 错误通道里没有带编号的说明（静默跳过）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '    timestamp: 0,',
+    to: '    timestamp: 1, // 变异：写表时就盖了时间戳',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '命令记录的时间戳写表时不是 0 ⇒ 种类 1 / 3 的"第一帧"判据永远不会命中',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
+    from: 'const ROUND_HALF_UP_BIAS = 0.5;',
+    to: 'const ROUND_HALF_UP_BIAS = 0; // 变异：半上取整退化成截断',
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '位置取整丢 0.5 ⇒ 编号 20..29 + 缩放 2 + 位置 1.4 得到 2 而不是 3',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
+    from: "  if (left >= right || top >= bottom) return finish('empty-clip', null, null);",
+    to: "  if (left >= right || top >= bottom) return finish('empty-clip', { category: 'empty-clip', textureId, text: 'empty' }, null); // 变异：夹空也上报",
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '夹空从"静默"变成"上报" ⇒ 错误通道多出噪声（spec 明确夹空不上报）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
+    from: `    return finish('missing-texture', {
+      category: 'draw-source-missing',
+      textureId,
+      text: \`绘制源纹理尚未创建（纹理 \${textureId}）\`,
+    }, null);`,
+    to: "    return finish('missing-texture', null, null); // 变异：空槽静默",
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '空纹理槽不再上报 ⇒ 错误通道里没有带编号的说明（"画不出来"变成静默）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: `  for (const deviceType of deviceTypeCandidates(deviceTypeKey)) {
+    for (const vertexProcessing of vertexProcessingCandidates(vertexProcessingKey)) {
+      attempts.push({ deviceType, vertexProcessing });
+    }
+  }`,
+    to: `  for (const vertexProcessing of vertexProcessingCandidates(vertexProcessingKey)) {
+    for (const deviceType of deviceTypeCandidates(deviceTypeKey)) {
+      attempts.push({ deviceType, vertexProcessing });
+    }
+  } // 变异：两层循环互换`,
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '重试序列的层序互换 ⇒ 次序变成 (1,1)(2,1)(1,2)…（顶点处理不再内层）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: '  return (useDirectDrawEmuration | (screenMode !== 0 ? 2 : 0)) >>> 0;',
+    to: '  return useDirectDrawEmuration >>> 0; // 变异：丢掉窗口化位',
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '旧式行为位不再带"窗口化请求"位 ⇒ 窗口态被当成全屏',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: "        this.logGraphics('error', 'set-dialog-box-mode', GRAPHICS_DIALOG_BOX_MODE_ERROR_TEXT);",
+    to: "        this.failGraphics('set-dialog-box-mode'); // 变异：错误文本当致命",
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '对话框绘制模式失败改成结束启动 ⇒ 与"错误文本 ≠ 致命"的逐步骤表冲突',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: '    if (threeDimensional) {',
+    to: '    if (false && threeDimensional) { // 变异：三维路线被跳过',
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '三维位被短路 ⇒ 键 = 3 时只跑旧式路线（两个独立位退化成 if/else 的一种表现）',
+  },
+  // ── 第五批：分辨率判据 / 日志落点 / 源矩形窗口 / 场景自身变换 ──
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: `    } else if (ratio > R) {
+      if (wide !== null && (wide.width < mode.width || wide.height < mode.height)) entry.symbol = '―';
+      else { wide = entry; entry.symbol = '△'; }`,
+    to: `    } else if (ratio > R) {
+      if (wide !== null && (wide.width < mode.width && wide.height < mode.height)) entry.symbol = '―';
+      else { wide = entry; entry.symbol = '△'; } // 变异：池替换的"任一更小"改成"两者都更小"`,
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '池替换判据从"宽或高任一更小"改成"两者都更小" ⇒ 该替换的档不替换（池里留下更大的档）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: '    } else if (ratio >= RESOLUTION_ASPECT_THRESHOLD) {',
+    to: '    } else if (ratio > RESOLUTION_ASPECT_THRESHOLD) { // 变异：r = 0.7 落错池',
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '阈值 `>=` 改 `>` ⇒ r 恰好 0.7 的档从窄档池掉进宽档池（符号与收口都可能翻）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: '    if (width !== 0 || height !== 0) return { width, height };',
+    to: '    if (width !== 0 || height !== 0) return { width: width !== 0 ? width : this.clientWidth(), height: height !== 0 ? height : this.clientHeight() }; // 变异：逐分量回退',
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '请求对退回逐分量回退 ⇒ FullScreenWidth=0 / Height=1080 时宽被换成客户区宽',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: "    this.logSink = opened ? 'file' : 'unavailable';",
+    to: "    this.logSink = 'file'; // 变异：记录 = 送达",
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '日志落点恒 file ⇒ 打开失败时仍声称"送达"（记录 ≠ 送达被抹掉）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
+    from: '      const expired = input.forcedComplete === 1 || (now >>> 0) > deadline; // 相等算窗内（70-vm）',
+    to: '      const expired = input.forcedComplete === 1 || (now >>> 0) >= deadline; // 变异：相等就算到期',
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '到期边界改回"相等也到期" ⇒ 与「场景计时窗」的"相等算窗内"冲突',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
+    from: '        else rect = shiftRect(rect, delta);',
+    to: '        else { rect = shiftRect(rect, delta); rectWriteBack = { ...rect }; } // 变异：推进中也写回',
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '推进中也写回矩形 ⇒ 记录逐帧漂走（只有到期帧才回写）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
+    from: '  return value >= start && value < end;',
+    to: '  return value >= start && value <= end; // 变异：右端改闭',
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '键区间右端改闭 ⇒ key = 起点+计数 也被算进作用区间',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: `  item.flags |= 2;
+  item.start = 0;
+  setField(item, 0x34, 0);
+  setField(item, 0x48, a);`,
+    to: `  item.flags |= 2;
+  void 0; // 变异：不清共用窗起点
+  setField(item, 0x34, 0);
+  setField(item, 0x48, a);`,
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '0x239 不清共用窗起点 ⇒ 新的源矩形窗沿用上一次的起点（第一帧判据错）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.scene.selfRecord.keyStart = start;',
+    to: '  void start; // 变异：不写区间起点',
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '0x229 不写区间起点 ⇒ 作用区间恒从 0 开始（额外变换错位）',
+  },
+  // ── 第六批：0x199 本地块 / 种类 2 / 日志路径 ──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.localSavePos = m.ip / 4 + 1;',
+    to: '  m.localSavePos = m.ip / 4; // 变异：返回点少 1（回到本条自己）',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '0x199 首次进入的返回点少 1 ⇒ 0x7c 回到 0x199 自身（死循环）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  } else if (mode < 0 || mode > 11) {',
+    to: '  } else if (mode > 11) { // 变异：负数放行',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '种类 2 类型判据只挡 > 11 ⇒ −1 被写进表（与"两端闭、含负数"相反）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '    delay = 0; // ★ 清的是**实参**：记录里落的也是 0（不是"反正默认 0 就不写"）',
+    to: '    delay = readInt(m, ops, 9); // 变异：不清延迟',
+    guard: 'tools/test/emulator-new-scene-commands.test.mjs',
+    what: '分割幅 < 1 支不清延迟 ⇒ 记录里留着原延迟（spec 要求清 0 后照写）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/machine.ts',
+    from: '    localDepth: id ?? -1,',
+    to: '    localDepth: -1, // 变异：不取帧身份',
+    guard: 'tools/test/emulator-new-ops-100-200.test.mjs',
+    what: '建帧不写身份编号 ⇒ 0x199 记下的入块深度恒 −1，0x7c 的深度判据与真实帧身份脱钩',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: `  path += parts.relativeDirectory;
+  if (path !== '') path += ENGINE_PATH_SEPARATOR;`,
+    to: `  path += parts.relativeDirectory;
+  if (parts.relativeDirectory !== '') path += ENGINE_PATH_SEPARATOR; // 变异：看目录是否为空，而不是看拼到此处的结果`,
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: '第二个分隔符只在"相对目录非空"时补 ⇒ 根非空+目录空时丢掉双分隔符（与引擎路径规则相反）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/window.ts',
+    from: "    const useAppDataFolder = this.readConfigInt('set:UseAppDataFolder') === 1;",
+    to: "    const useAppDataFolder = this.readConfigInt('set:UseAppDataFolder') !== 0; // 变异：非 0 就当 1",
+    guard: 'tools/test/emulator-new-graphics-params.test.mjs',
+    what: 'UseAppDataFolder 判"非 0"⇒ 值 2 也走用户目录（spec 是"恰为 1"）',
+  },
+  // ── 第七批：按住派发按键族 ──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "  if (key < 0 || key > 31) throw new Error('display-message: SetKeyJumpEx の第１引数が不正です（键编号越界）');",
+    to: "  if (key < 0 || key > 32) throw new Error('display-message: SetKeyJumpEx の第１引数が不正です（键编号越界）'); // 变异：键上界放宽到 32",
+    guard: 'tools/test/emulator-new-input-hold.test.mjs',
+    what: '0x102 键编号上界从 31 放宽到 32 ⇒ 键 32 也被写进表（spec：0..31）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: `  for (let i = limit - 1; i >= 0; i -= 1) {
+    if (((word >>> i) & 1) === 1) { key = i; break; }
+  }`,
+    to: `  for (let i = 0; i < limit; i += 1) { // 变异：反向改正向
+    if (((word >>> i) & 1) === 1) { key = i; break; }
+  }`,
+    guard: 'tools/test/emulator-new-input-hold.test.mjs',
+    what: '0x104 扫描改成正向 ⇒ 同时按住 3 与 7 时先派发 3（spec：先派发最高位 7）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  m.hold.modulus = 0;',
+    to: '  void 0; // 变异：0xfc 不复位模数',
+    guard: 'tools/test/emulator-new-input-hold.test.mjs',
+    what: '0xfc 不清模数 ⇒ 复位后仍沿用旧口径（spec：模数 ← 0，下一次 0x104 应响亮失败）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: '  const modulus = m.hold.modulus | 0;',
+    to: '  const modulus = (m.hold.modulus | 0) || 1; // 变异：模数 0 兜底成 1',
+    guard: 'tools/test/emulator-new-input-hold.test.mjs',
+    what: '模数 0 兜底成 1 ⇒ 把"未定义行为"伪装成可执行（spec 要求显式响亮失败）',
+  },
+  // ── 第八批：显示适配 / 矩阵门 ──
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
+    from: '    if (target.id < 0 || target.id === RESERVED_VIEW_TARGET) {',
+    to: '    if (target.id >= 0 && target.id !== RESERVED_VIEW_TARGET) { // 变异：旧的反门',
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '视图矩阵门写成"目标 ≥ 0 且 ≠ 39"（反门）⇒ 目标 38 与纹理目标被乘、后缓冲那路漏乘',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/display-fit.ts',
+    from: '    CW = Math.trunc(BH * (1 / t));',
+    to: '    CW = Math.trunc(BH / t); // 变异：先除再截断（边界差 1 像素）',
+    guard: 'tools/test/emulator-new-display-fit.test.mjs',
+    what: '画布宽用 `BH/t` 而不是 `BH*(1/t)` ⇒ 边界用例得到 1921 而不是 1920',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/display-fit.ts',
+    from: '  return Math.trunc(x * 0.5);',
+    to: '  return Math.floor(x * 0.5); // 变异：向零截断变向下取整',
+    guard: 'tools/test/emulator-new-display-fit.test.mjs',
+    what: 'half 用 floor ⇒ 负奇数差得到 −12 而不是 −11（原点偏 1 像素）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
+    from: '  const fixedResolution = view?.fixedResolution === true;',
+    to: '  const fixedResolution = false; // 变异：固定分辨率模式失效',
+    guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
+    what: '固定分辨率模式不再短路缩放 / 原点 ⇒ 该模式下位置仍被乘缩放',
+  },
+  // ── 第九批：命令档规划器 ──
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
+    from: '  const belowRangeAllowed = tier < 2;',
+    to: '  const belowRangeAllowed = tier <= 2; // 变异：能力档 2 也做区间之下',
+    guard: 'tools/test/emulator-new-scene-command-plan.test.mjs',
+    what: '能力档 2 仍做「区间之下」⇒ 该档本应完全抑制这一趟',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
+    from: '  const clearTable = animating === 0 && forcedComplete === 0;',
+    to: '  const clearTable = animating === 1; // 变异：清表判据写反',
+    guard: 'tools/test/emulator-new-scene-command-plan.test.mjs',
+    what: '清表判据写成"有动画才清" ⇒ 还在动的命令被清、静止的反而留下',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
+    from: '    a.commandKey < b.commandKey ? -1 : a.commandKey > b.commandKey ? 1 : 0',
+    to: '    a.commandKey < b.commandKey ? 1 : a.commandKey > b.commandKey ? -1 : 0 // 变异：降序',
+    guard: 'tools/test/emulator-new-scene-command-plan.test.mjs',
+    what: '命令档按命令键降序执行 ⇒ 与"严格升序"相反',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
+    from: '    if (timestamp === 0) {',
+    to: '    if (false) { // 变异：不盖时间戳',
+    guard: 'tools/test/emulator-new-scene-command-plan.test.mjs',
+    what: '首次遍历不盖时间戳 ⇒ 种类 1 的"第一帧"判据永远不命中',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
+    from: '    if (other !== null && entry.key >= other.start && entry.key < other.start + other.count) continue;',
+    to: '    if (false) continue; // 变异：不跳过另一段',
+    guard: 'tools/test/emulator-new-scene-command-plan.test.mjs',
+    what: '双画布种类不跳过另一段区间 ⇒ 两个画布内容互相污染',
+  },
+  // ── 第十批：12 抹除图案 ──
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/wipe-pattern.ts',
+    from: '  const phase = mode === 0 || mode === 2 ? 0 : 1;',
+    to: '  const phase = 0; // 变异：1/3 的相位 +1 丢失',
+    guard: 'tools/test/emulator-new-wipe-pattern.test.mjs',
+    what: '模式 1/3 的步序不再 +1 ⇒ 它们与 0/2 同相（少一道）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/wipe-pattern.ts',
+    from: '  const reveal = clamp(staggered ? index - stripe : index, 0, split);',
+    to: '  const reveal = staggered ? index - stripe : index; // 变异：不钳在本带内',
+    guard: 'tools/test/emulator-new-wipe-pattern.test.mjs',
+    what: '条带让出量不钳在本带内 ⇒ 步序超过 S 后每带继续变宽（越出本带）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/wipe-pattern.ts',
+    from: '      : axisEnd - remainder - split * stripe;',
+    to: '      : axisEnd - split * stripe; // 变异：反向网格丢掉余数',
+    guard: 'tools/test/emulator-new-wipe-pattern.test.mjs',
+    what: '反向族的第 0 带不再按余数锚定 ⇒ 网格整体偏移（越界量错）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/wipe-pattern.ts',
+    from: "  if (!(duration > 0)) diagnostics.push('wipe-duration-zero');",
+    to: "  if (!(duration > 0)) { /* 变异：不记诊断 */ }",
+    guard: 'tools/test/emulator-new-wipe-pattern.test.mjs',
+    what: 'duration = 0 不再记诊断 ⇒ "保持未定"被静默吞掉',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/wipe-pattern.ts',
+    from: '    { canvas: CANVAS_A, rect: first },',
+    to: '    { canvas: CANVAS_B, rect: first }, // 变异：A/B 颠倒',
+    guard: 'tools/test/emulator-new-wipe-pattern.test.mjs',
+    what: '两笔的落笔顺序/画布颠倒 ⇒ 先 B 后 A（与"先 A 后 B"相反）',
+  },
+  // ── 第十一批：0x1a1 读回方向 ──
+  {
+    file: 'apps/emulator-new/src/core/handlers.ts',
+    from: "  m.diagnostics.push({ kind: 'save-restore-unmodeled', index: slot });",
+    to: "  writeInt(m, ops, 1, 0); // 变异：成功路径也写 op1\n  m.diagnostics.push({ kind: 'save-restore-unmodeled', index: slot });",
+    guard: 'tools/test/emulator-new-save-1a1.test.mjs',
+    what: '0x1a1 成功路径写第 1 操作数 ⇒ 与"成功不写、只有打不开写 1"相反',
+  },
+  // ── 第十二批：抹除笔接线 ──
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
+    from: '    elapsed: now - (timestamp + command.delay),',
+    to: '    elapsed: now - timestamp, // 变异：不减延迟',
+    guard: 'tools/test/emulator-new-scene-command-plan.test.mjs',
+    what: '抹除笔的经过时间不减延迟 ⇒ 有延迟的命令提前开始（笔的进度整体偏移）',
+  },
+  {
+    file: 'apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts',
+    from: "    note('scene-command-wipe-rect-unmodeled', command.commandKey);\n    return null;",
+    to: "    return []; // 变异：缺矩形当'算过、没笔'",
+    guard: 'tools/test/emulator-new-scene-command-plan.test.mjs',
+    what: '缺矩形不再记缺口、返回空笔 ⇒ 把"算不出来"伪装成"这一帧没笔"',
+  },
+  // ── 第十四批：存档块布局 ──
+  {
+    file: 'apps/emulator-new/src/core/save-codec.ts',
+    from: '  const block1 = 4 * c1;',
+    to: '  const block1 = 0; // 变异：浮点块长度 0',
+    guard: 'tools/test/emulator-new-save-codec.test.mjs',
+    what: '浮点块长度写成 0 ⇒ 浮点内容被写到错误位置 / 丢掉（块 1 布局崩）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/save-codec.ts',
+    from: '  const writesFloatContent = s.version1 !== 2 && s.version2 >= 20;',
+    to: '  const writesFloatContent = true; // 变异：无视版本门',
+    guard: 'tools/test/emulator-new-save-codec.test.mjs',
+    what: '浮点内容不再受 v1/v2 门控 ⇒ v2<20 或 v1=2 的容器也写出浮点（洞不存在）',
+  },
+  {
+    file: 'apps/emulator-new/src/core/save-codec.ts',
+    from: '  writeU32(view, countBase + 4, c1);',
+    to: '  writeU32(view, countBase + 4, 0); // 变异：c1 计数写 0',
+    guard: 'tools/test/emulator-new-save-codec.test.mjs',
+    what: '计数槽 c1 写成 0 ⇒ 读侧看不到浮点块长度（文件自相矛盾）',
   },
 
 ];

@@ -18,8 +18,8 @@ import { initialRenderState } from './render.ts';
 import type { RenderHost, RenderState, TextureKind } from './render.ts';
 import type { MovieHandle, MovieHost } from './movie.ts';
 import type { SaveHost } from './save.ts';
-import { initialInputState } from './input.ts';
-import type { InputHost, InputState } from './input.ts';
+import { initialHoldState, initialInputState } from './input.ts';
+import type { HoldState, InputHost, InputState } from './input.ts';
 
 export interface Operand {
   type: number;
@@ -46,17 +46,35 @@ export interface Frame {
   retStack: number[];
   /** 帧记录里的"本条指令的位置"（帧+0x6C；写入者是 0x71，读者未定） */
   position: number;
-  /** 0x7b 登记的两个本地块进入目标（位置，不是字节地址）。 */
-  localMain?: number;
-  localSub?: number;
-  /** 进入本地块时记下的深度（0x7c 的深度判据）。 */
-  localDepth?: number;
+  /** 0x7b 登记的两个本地块进入目标（位置，不是字节地址）。初值 / 重置 = **−1**（未登记哨兵）。 */
+  localMain: number;
+  localSub: number;
+  /**
+   * **本帧记录里的身份编号**（`CORE-OPS-FRAME-LOCAL-RET-7C` 的"深度判据"比较**这一格**与引擎的入块深度）。
+   * ★ 它在**建帧时**定下：取该脚本的统一文件 id，没有 id 就是 **−1**（`freshFrame(id)`）。
+   *   `0x199` 的首次进入形态把它抄进 `localSaveDepth`；已在块内形态**不写**它 ⇒ 嵌套进入不改判据。
+   * ★ ⛔ 它不是"调用层数"，也**不是** `0xcd` 的注册深度（引擎里是两格）。
+   */
+  localDepth: number;
   /** `0xfb` 在每个帧上登记的「键编号 → 脚本位置」（dword 下标；缺省 = 未登记） */
   keyJumps: Map<number, number>;
   /** `0xff` 重置的按键扫描游标（`0x100` 从这里开始找置位） */
   keyCursor: number;
-  /** `0xff` 写成的按键扫描上限（= 键总数） */
+  /** `0xff` 写成的按键扫描上限（= 那一次采样时的键总数快照）；★ `0x100` **不**读它，唯一读者是 `0x104` */
   keyLimit: number;
+  /**
+   * `0x102` 的**按住派发表**：`键编号 * 10 + 槽号` → 目标位置（dword 下标）。
+   * ★ 按帧分层、每（帧 × 键）固定 10 槽；缺格 = **未登记**，写进 **−1** 与缺格同义（−1 是引擎的哨兵）。
+   * ⛔ 不与 `keyJumps` 合表：两张表互不可见（`0x104` 不命中 `0xfb` 登记的目标）。
+   */
+  holdSlots: Map<number, number>;
+  /**
+   * **按住游标**（`0x103` 清当前帧 / 上下文闸清当前帧 / `0x104` 每条出口推进）。
+   * ★ 引擎**不建立**这一格的初值（帧装载 / 释放都不写它）⇒ 本层用 `null` 表示"还没有定义值"，
+   *   ⛔ **不填 0**（0 是合法槽号，用 0 兜底会把 UB 说成合同）。`0x104` 的上下文闸在第一次调用时
+   *   就会定义它（`contextKey` 初值 −1 ≠ 任何编号）；读到 `null` 是 UB，推进处**响亮失败**。
+   */
+  holdCursor: number | null;
 }
 
 /** 纹理记录：来源文件（-1 = 无）、颜色键、空白创建标记（见 CORE-OPS-TEXTURE-*） */
@@ -66,16 +84,50 @@ export interface TextureRecord {
   blank: number;
 }
 
-/** 纹理槽里的对象：种类 / 逻辑尺寸 / 外部表面（像素由平台持有） */
+/**
+ * 纹理槽里的对象：种类 / 逻辑尺寸 / 外部表面（像素由平台持有）。
+ *
+ * ★ 「建失败」状态是**要建模的**（`CORE-OPS-SCENE-COMMAND-RECORDS` 的种类 0 失败路径）：
+ *   请求失败后槽里**仍然有一个对象**（引擎先把对象落槽、再调平台）⇒ 「槽是否为空」不再能识别它；
+ *   之后是否重建只由「**格式是否与当前显示格式相符**」决定（相符 ⇒ 一个请求都不发）。
+ */
 export interface TextureObject {
   kind: TextureKind;
   width: number;
   height: number;
+  /**
+   * 最近一次「按编号建 / 换纹理」请求**失败**留下的标记（成功的那一次会清掉）。
+   * ★ 它只解释"槽非空但不可用"，⛔ 不是"槽里没有对象"的替身：槽空 = `textureObjects` 里没有这条。
+   */
+  creationFailed?: boolean;
+}
+
+/**
+ * **源矩形窗口**的五格（`CORE-OPS-TEXTURE-DRAW-CONSUMER` 4.1；由 `0x239` 排上）。
+ * ★ 窗起点**不在**这里：它与颜色窗**共用** `DrawItem.start`（0 = 未盖章）。
+ * ★ 这五格只是"记录里排了什么"；三档判定 / 步进 / 到期写回全在 `scene-draw-plan.ts`（纯函数）。
+ */
+export interface SourceRectWindow {
+  /** 延迟（毫秒） */
+  delay: number;
+  /** 持续时间（毫秒）；≤ 0 ⇒ 4.1 整段不动作 */
+  duration: number;
+  /** 步进总数（图集总格数） */
+  steps: number;
+  /** 每行步数（列数）；0 且持续时间 > 0 时整数除零后果 spec 不规定 */
+  perRow: number;
+  /** 开关字：位 1 = 延迟内原样、位 0 = 到期末帧（否则塌空） */
+  switchWord: number;
 }
 
 /** 绘制项（见 CORE-OPS-TEXTURE-DRAW / CORE-OPS-SCENE-*） */
 export interface DrawItem {
-  /** 位 0 = 有效；位 1 = 有颜色渐变窗 */
+  /**
+   * 位 0 = 有效；位 1 = 有颜色渐变窗；
+   * **位 16（`0x10000`）= 本轮已消费**（命令档画过 / 占位；收尾扫描访问后清 0）。
+   * ★ 第 16 位与第 1 位是**两个不同的位**（"本轮已消费" vs "有窗"），⛔ 不许合并。
+   * ★ 本版**没有命令档** ⇒ 位 16 没有写入方，也没有清位路径（只在此登记语义，等命令档落地）。
+   */
   flags: number;
   textureId: number;
   left: number;
@@ -108,6 +160,12 @@ export interface DrawItem {
   fields: Map<number, number>;
   /** 场景 setter 的按字段偏移写入的矩阵（与 matrices[6] 分开，避免与 1fd/1fe/1ff/220 混用）。 */
   extraMatrices: Map<number, number[]>;
+  /**
+   * **源矩形窗口**（4.1；`0x239` 在「已存在」门通过后写）；`null` = 没排过（那五格是默认 0）。
+   * ★ 与 `fields`（按偏移原样存）**双写**是有意的：`fields` 保留"按偏移落库"的原始视图，
+   *   这里给消费者一个具名输入。⛔ 不要只留一份却让消费者去解偏移。
+   */
+  sourceWindow: SourceRectWindow | null;
 }
 
 /** 缓冲地址（0x320 的第 4 / 7 / 8 个操作数；只记录，装配属外部模块） */
@@ -118,7 +176,7 @@ export interface BufferAddress {
 
 /** 网格（见 CORE-OPS-SCENE-320/322/323）：三个缓冲在本层只保留可观察的部分 */
 export interface Mesh {
-  /** 位 0 = 已存在；位 1 = 有颜色渐变窗 */
+  /** 位 0 = 已存在；位 1 = 有颜色渐变窗；**位 16（`0x10000`）= 本轮已消费**（本版无写入方，见 `DrawItem.flags`） */
   flags: number;
   count: number;
   op10: number;
@@ -136,6 +194,104 @@ export interface Mesh {
   colorNow: number;
   colorTo: number;
   unknown: Map<number, number>;
+}
+
+/**
+ * 一条**场景命令记录**（写侧见 `CORE-OPS-SCENE-COMMAND-RECORDS`；命令表按**命令键**索引）。
+ *
+ * ★ 命令表 = 引擎同键空间的**第五张表**：它**不参与** `0x1f7` / `0x1f6` / `0x23b` 的删除或清空
+ *   （`0x1f6` 的规则写明"这四张表以外的表**不在**清空范围"）⇒ 本层让它在 `SceneState` 里独立存在，
+ *   ⛔ 不塞进 `sameKeyTables`。
+ * ★ 字段纪律：**只有 spec 逐格写到的格**才有名字。spec 明说"另有两格"的那两格**不命名**、
+ *   也不断言它们的值（种类 1：两格**不被本条写**；种类 3：两格**被写成 0**）。
+ * ★ `raw` 是**读操作数留痕**（未取证格 / 诊断用）；⛔ 它不是记录格的第二份真源 ——
+ *   有名字的格以具名字段为准，且 spec 明写"第 1 个操作数（以及种类 1 的第 10 个）**不写进记录**"。
+ */
+export interface SceneCommandRecord {
+  /** 记录首格 = **命令种类**：0 = `0x223`、1 = `0x24d`、2 = `0x24f`、3 = `0x250` / `0x251` */
+  kind: number;
+  /**
+   * 种类 3 的**变体格**：`0x250` → 0（「滑移模糊」）、`0x251` → 1（「缩放模糊」）；其它种类恒 0。
+   * ★ 变体只选**哪一种模糊**（长度 + 角度 / 长度 + 中心），⛔ 不改变"先画区间、再插值、再合成"的次序。
+   */
+  variant: number;
+  /**
+   * **时间戳格**：写表时清 **0**；命令档**首次**遍历到该记录时盖成**本帧场景时刻**。
+   * ★ 「第一帧」的判据就是它（`timestamp === 本帧场景时刻`），⛔ 不是"记录刚被写"、⛔ 不是"每帧都画"。
+   * ★ 重写同一命令键 ⇒ 重新清 0 ⇒ 下一次遍历又回到"第一帧"。
+   */
+  timestamp: number;
+  /**
+   * **纹理编号**（本条自己的纹理）：种类 0 / 2 / 3 = 第 2 个操作数（写表**之前**先发一次建 / 换纹理请求）；
+   * 种类 1 = 影片纹理编号（第 2 个，必须**已存在**；本条不建纹理）。
+   * ★ 种类 2 的抹除结果**落在这条纹理上**，所以它也读纹理 —— ⛔ 旧注释「种类 2 恒 0」是错的。
+   */
+  textureId: number;
+  /**
+   * **命令键在记录里的那份副本**（种类 2 = 第 1 个操作数）。
+   * ★ 命令档用它去**绘制项表**里找同键的那条绘制项，取它的浮点位置与四条边算**抹除矩形**
+   *   （spec：抹除矩形不来自本命令的操作数）。找不到 ⇒ 清持续时间并**中止整趟命令档**（未建模）。
+   * ★ 它是记录**内部**的格，不是命令表的排序键（排序键是 `SceneState.commands` 的 map key）。
+   */
+  ownerKey: number;
+  /** **覆盖区间起点键**：种类 1 / 3 = 第 3 个操作数（种类 0 / 2 用 `segmentA` / `segmentB` 两段） */
+  rangeStart: number;
+  /** **覆盖区间个数**：种类 1 / 3 = 第 4 个操作数 */
+  rangeCount: number;
+  /**
+   * **第一段「起点键、个数」**：种类 0 / 2 = 操作数 3 / 4。
+   * ★ 种类 2 的两段**各喂一块画布**：区间 A 只喂第一块、区间 B 只喂第二块 —— ⛔ 不许合成一段。
+   */
+  segmentA: [number, number];
+  /** **第二段「起点键、个数」**：种类 0 / 2 = 操作数 5 / 6（种类 1 / 3 只用 `rangeStart` / `rangeCount`） */
+  segmentB: [number, number];
+  /**
+   * 种类 1：**目标矩形**（第 5、6 个操作数与「第 5 + 第 7」「第 6 + 第 8」四边）。
+   * ★ 宽高是**加出来的**（`right - left` / `bottom - top`）—— 记录里**没有**宽 / 高两格，
+   *   ⛔ 不要另存 `width` / `height` 把这件事藏起来。
+   */
+  rect: { left: number; top: number; right: number; bottom: number };
+  /** **延迟**：种类 0 = 第 7、种类 1 = 第 11、种类 2 = 第 9、种类 3 = `0x250` 第 9 / `0x251` 第 11 */
+  delay: number;
+  /**
+   * **持续时间**：种类 0 = 第 8、种类 1 = 第 12、种类 2 = 第 10、种类 3 = `0x250` 第 10 / `0x251` 第 12。
+   * ★ 种类 2 的「分割幅 < 1」错误支把**延迟与持续时间都清 0**（照写记录，不是拒绝）。
+   */
+  duration: number;
+  /**
+   * 种类 1：**取 0 / 1 的标志**（第 9 个操作数）。
+   * ★ 已知它决定"结束影片时把该纹理的一段缓冲填 255（1）还是填 0（其它）"；
+   *   两种分别对应什么画面见残差 `RES-SCENE-COMMAND-KIND1-FLAG`。
+   * ★ 它和种类 2 的 `mode` 是记录里**同一个整数格**的两套语义（证据见批 6 kind2）：各条只写自己的语义，
+   *   ⛔ 别因为"字段名不同"就以为是两条独立的格。
+   */
+  flag: number;
+  /**
+   * 种类 2：**类型 / 模式**格（操作数 7；与种类 1 的 `flag` 同格）。
+   * ★ 合法域 = **闭区间 [0, 11]（含负数拒绝）**：`< 0` 与 `> 11` 走**同一个**错误支（「タイプが不正です」，
+   *   一个字段都不写）；分割幅 < 1 的错误支把它记成 **−1**（那一支跳过类型校验、照写记录）。
+   * ★ 类型 < 0 的副作用（场景「强制完成」= 1 ⇒ 所有计时窗立刻到期）属**渲染侧**，本层未建模。
+   */
+  mode: number;
+  /** 种类 2：**分割幅**（操作数 8，"图案被分成几道"）；错误支记成 **1** */
+  split: number;
+  /**
+   * 种类 3：**长度**的「起 → 终」对。
+   * 变体 0：第 5 → 第 7；变体 1：第 5 → 第 8。两个变体都只用这一对同名同义。
+   */
+  rampLength: [number, number];
+  /** 种类 3 **变体 0**：**角度**的「起 → 终」对（第 6 → 第 8）；变体 1 下恒 `[0, 0]` */
+  rampAngle: [number, number];
+  /** 种类 3 **变体 1**：**中心横向**的「起 → 终」对（第 6 → 第 9，单位像素）；变体 0 下恒 `[0, 0]` */
+  rampCenterU: [number, number];
+  /** 种类 3 **变体 1**：**中心纵向**的「起 → 终」对（第 7 → 第 10，单位像素）；变体 0 下恒 `[0, 0]` */
+  rampCenterV: [number, number];
+  /**
+   * 读出顺序的操作数留痕（诊断 / 未取证格用）。
+   * ★ ⛔ 它不是记录格的第二份真源，也**不是**命令档的输入：未来的命令档只许读上面的具名字段
+   *   （绘制 / 推进 / 合成都不许读 `raw`）。
+   */
+  raw: number[];
 }
 
 /**
@@ -252,9 +408,19 @@ export interface SceneState {
   animating: number;
   /**
    * 两张辅助键表（与对象记录表 / 网格表同键空间）：规范只要求"按键删除"，内容语义不在本版。
-   * ★ 引擎同键空间还有第五张表（`+418`），但它**不参与** `0x1f7` / `0x1f6` / `0x23b` 的删除或清空 ⇒ 不建模。
+   * ★ 引擎同键空间还有第五张表（命令表，按**命令键**索引）：它**不参与** `0x1f7` / `0x1f6` / `0x23b`
+   *   的删除或清空 ⇒ 不在这组里；它的写侧见 `commands`（`CORE-OPS-SCENE-COMMAND-RECORDS`）。
    */
   auxTables: [Map<number, unknown>, Map<number, unknown>];
+  /**
+   * **场景命令表**：命令键 → 一条命令记录（`0x223` / `0x24d` / `0x24f` / `0x250` / `0x251` 写）。
+   * ★ 同键是**替换**（写前先删旧记录），⛔ 不是追加。
+   * ★ 命令**不立即画**：本层只做写侧；命令档的**规划**已在 renderer 侧（`renderer/scene-command-plan.ts`，
+   *   S0/S1：只规划、不执行），执行 / 像素操作仍未建模（见 `renderer/scene-order.ts` 的
+   *   `scene-command-pass-render-unmodeled` 诊断）。
+   * ★ `0x1f6` 只清四张表 ⇒ **不清**本表（spec 未规定清它，见残差）。
+   */
+  commands: Map<number, SceneCommandRecord>;
   /** `0x258` / `0x259` 的两张 1000 项标志表（每项两个位）。 */
   flagTableA: number[];
   flagTableB: number[];
@@ -282,6 +448,22 @@ export interface SceneState {
   framePrev: number;
   frameNow: number;
   frameFlags: number;
+  /**
+   * **场景自身记录**里被建模的那几格（`CORE-OPS-SCENE-SELF-TRANSFORM-229`）：
+   * 三元平移 + 作用键区间（起点 / 计数）。
+   * ★ 默认值 = 全 0（引擎的场景默认值重置把它们清成 (0,0)；本层没有其它写入者）。
+   * ★ 记录其余格（740 B）**不建模**：消费者只用"由记录派生出的额外变换矩阵"，
+   *   而那个派生（`sub_49AA30`）未建模 ⇒ 渲染侧显式留空（见 `SceneSelfRecordSnapshot.matrix`），
+   *   ⛔ 不在这里编一个矩阵。
+   */
+  selfRecord: {
+    /** 三元平移（记录 +0x18 / +0x1C / +0x20；浮点） */
+    translate: { x: number; y: number; z: number };
+    /** 作用键区间起点（记录 +0x458）；0 = 没设 */
+    keyStart: number;
+    /** 作用键区间计数（+0x45C）；非 0 才派生额外变换 */
+    keyCount: number;
+  };
 }
 
 /**
@@ -331,6 +513,7 @@ const INTERNAL_EFFECT_KINDS = new Set([
   'engine.scalar.write',
   'engine.scalar.pair',
   'engine.indirect-write',
+  'pool.memflip',
 ]);
 
 const UNMODELED_EFFECT_KINDS = new Set([
@@ -376,6 +559,19 @@ export interface RunResult {
  * ★ 分派器**总是** `await` 它 ⇒ 同步处理器不会多付一次微任务。
  */
 export type Handler = (m: Machine, ops: Operand[]) => void | Promise<void>;
+
+/**
+ * 全局池**一组缓冲**的六个族（`40-pools.md` 的 SPC-POOL-MEMFLIP）。
+ * ★ 主 / 备两组各一份；`0x6d` 只换选择，所以两组必须分开存。
+ */
+interface GlobalPools {
+  int: Map<number, number>;
+  float: Map<number, number>;
+  string: Map<number, string>;
+  intRef: Map<number, number>;
+  floatRef: Map<number, number>;
+  stringRef: Map<number, number>;
+}
 
 export interface MachineOptions {
   /** 脚本 body（头部之后的全部字节；指令流从第 0 字节开始） */
@@ -486,6 +682,11 @@ export class Machine {
   readonly inputHost: InputHost | undefined;
   /** 引擎侧输入状态（输入字 / 键总数 / 模式字 / 鼠标回调登记） */
   input: InputState = initialInputState();
+  /**
+   * 按住派发族的**引擎级**状态（掩码 / 模数 / 上下文编号；`0x102` 的表不在这里 —— 它按帧）。
+   * ★ 与 `input` 分开：这三格**不按帧**，而 `Frame.holdCursor` 按帧；混在一处会让"帧释放不清掩码"变错。
+   */
+  hold: HoldState = initialHoldState();
   /** 未建模子系统 opcode 的已诊断集合（诊断只在首次出现时记一条） */
   readonly unmodeledSeen = new Set<number>();
   /** 宿主睡眠（缺省 `undefined`，见 `MachineOptions.sleepHost`） */
@@ -606,18 +807,61 @@ export class Machine {
   /** 0x01 / 0x0c8 的退出码；`halted` 为 true 时它才有效。 */
   exitCode = 0;
 
-  /** 全局整型池：编码后的位模式 */
-  globalInt = new Map<number, number>();
-  /** 全局浮点池：裸 32 位位模式 */
-  globalFloat = new Map<number, number>();
+  /**
+   * 全局池的**两份缓冲**（`40-pools.md` 的 SPC-POOL-MEMFLIP）。
+   * ★ 六个族各两组：`globalPrimary` = 主缓冲（bank 0）；`globalBackup` = 备用缓冲（bank 1），
+   *   只有**启动期**配置命名键 `set:EnableMemFlip` 非 0 时才登记（否则是 `null`）。
+   * ★ `globalFlip` 是六个族**共享**的选择量：`0x6d` 只翻它 —— 不搬数据、不重新分配、不改计数与元素宽度。
+   * ★ 备用缓冲未登记时翻页在正常路径上**不可达**（`0x6d` 会先抛显示消息型异常）；若配置在启动后
+   *   被改写而翻页成功（spec 归为 UB），随后的访问会落到未映射地址 ⇒ 池访问器**响亮失败**，
+   *   ⛔ 不在这里偷偷补分配来掩盖它。
+   */
+  private readonly globalPrimary: GlobalPools = {
+    int: new Map(), float: new Map(), string: new Map(),
+    intRef: new Map(), floatRef: new Map(), stringRef: new Map(),
+  };
+  private readonly globalBackup: GlobalPools | null;
+  /** 六个全局池族的缓冲选择：0 = 主、1 = 备用（`0x6d` 整体对调） */
+  globalFlip: 0 | 1 = 0;
+
+  /** 备用缓冲是否已登记（启动期配置键 `set:EnableMemFlip` 非 0） */
+  get globalFlipAvailable(): boolean {
+    return this.globalBackup !== null;
+  }
+
+  /** 取某一组缓冲；bank 1 未登记 ⇒ 这个地址**未映射**（响亮失败，不补 0） */
+  private bankOf(bank: 0 | 1): GlobalPools {
+    if (bank === 0) return this.globalPrimary;
+    if (this.globalBackup === null) {
+      throw new Error(
+        'unmapped: 全局池的备用缓冲未登记（启动期配置键 set:EnableMemFlip 为 0/缺失）⇒ 这个地址是未映射的',
+      );
+    }
+    return this.globalBackup;
+  }
+
+  // ★ 六个族的按组访问器：值族 / 引用族的**裸地址访问**（`values.ts` 的 readRawAt 等）按地址解析出的
+  //   bank 取池；操作数族（type 3/4/5/6/7/8）走上面那组 getter（= 当前选择）。
+
+  intPoolAt(bank: 0 | 1): Map<number, number> { return this.bankOf(bank).int; }
+  floatPoolAt(bank: 0 | 1): Map<number, number> { return this.bankOf(bank).float; }
+  stringPoolAt(bank: 0 | 1): Map<number, string> { return this.bankOf(bank).string; }
+  intRefPoolAt(bank: 0 | 1): Map<number, number> { return this.bankOf(bank).intRef; }
+  floatRefPoolAt(bank: 0 | 1): Map<number, number> { return this.bankOf(bank).floatRef; }
+  stringRefPoolAt(bank: 0 | 1): Map<number, number> { return this.bankOf(bank).stringRef; }
+
+  /** 全局整型池：编码后的位模式（**当前选中的那一组缓冲**，见 `globalPrimary` / `globalBackup`） */
+  get globalInt(): Map<number, number> { return this.intPoolAt(this.globalFlip); }
+  /** 全局浮点池：裸 32 位位模式（当前选中的那一组） */
+  get globalFloat(): Map<number, number> { return this.floatPoolAt(this.globalFlip); }
   /** 全局字符串池（字节串，latin1；`55-config.md` 的脚本访问只用到 type 5） */
-  globalString = new Map<number, string>();
+  get globalString(): Map<number, string> { return this.stringPoolAt(this.globalFlip); }
   /** 全局整型引用池（type 6）：槽里装**地址** */
-  globalIntRef = new Map<number, number>();
+  get globalIntRef(): Map<number, number> { return this.intRefPoolAt(this.globalFlip); }
   /** 全局浮点引用池（type 7）：槽里装**地址** */
-  globalFloatRef = new Map<number, number>();
+  get globalFloatRef(): Map<number, number> { return this.floatRefPoolAt(this.globalFlip); }
   /** 全局字符串引用池（type 8）：槽里装**地址** */
-  globalStringRef = new Map<number, number>();
+  get globalStringRef(): Map<number, number> { return this.stringRefPoolAt(this.globalFlip); }
   /** 场景状态（纹理 / 绘制项 / 计时窗） */
   scene: SceneState = {
     dirty: 0,
@@ -627,6 +871,7 @@ export class Machine {
     meshes: new Map(),
     animating: 0,
     auxTables: [new Map(), new Map()],
+    commands: new Map(),
     flagTableA: new Array(1000).fill(0),
     flagTableB: new Array(1000).fill(0),
     cgRecords: new Map(),
@@ -645,6 +890,11 @@ export class Machine {
     framePrev: 0,
     frameNow: 0,
     frameFlags: 0,
+    selfRecord: {
+      translate: { x: 0, y: 0, z: 0 },
+      keyStart: 0,
+      keyCount: 0,
+    },
   };
   /**
    * 声音对象（引擎里是一个子对象；语音对象在它 `+0x408` 存着指向它的指针）。
@@ -712,6 +962,14 @@ export class Machine {
     this.clock = opts.clock;
     this.uninitializedFloat = opts.uninitializedFloat ?? 'throw';
     this.config = opts.config;
+    // ★ 两份缓冲由**启动期**的同一个配置键决定是否登记（SPC-POOL-MEMFLIP）：0 / 缺失 ⇒ 每个族只有一组。
+    //   缺键按 0 读是 `55-config.md` 的缺键规则，不是这条规则自己的默认值。
+    this.globalBackup = opts.config !== undefined && opts.config.getInt('set:EnableMemFlip') !== 0
+      ? {
+        int: new Map(), float: new Map(), string: new Map(),
+        intRef: new Map(), floatRef: new Map(), stringRef: new Map(),
+      }
+      : null;
     // key 非 0 是引擎初始化期的不变量；宿主给 0 = 模型处在引擎不可能的状态。
     // 只在入口记一次（不是每条 0x6 都记；0x6 的内联前置只是同一不变量的一个相遇点）。
     if (this.key === 0) this.diagnostics.push({ kind: 'codec-key-placeholder' });
@@ -742,7 +1000,7 @@ export class Machine {
       name: opts.rootName ?? (opts.rootId === undefined ? undefined : this.scriptName?.(opts.rootId) ?? undefined),
       body: opts.body,
       ip: 0,
-      frame: this.freshFrame(),
+      frame: this.freshFrame(opts.rootId),
       parent: -1,
       length: 0,
     }];
@@ -933,12 +1191,21 @@ export class Machine {
   }
 
   /** 空白帧（新脚本用）：池与返回栈都重新建 */
-  freshFrame(): Frame {
+  freshFrame(id?: number): Frame {
     return {
       localInt: new Map(), localFloat: new Map(),
       localPtr: new Map(), localFloatPtr: new Map(), localString: new Map(), localStringPtr: new Map(),
       retStack: [], position: 0,
+      // ★ 两格本地块进入目标的**初值是 −1**（CORE-OPS-FRAME-LOCAL-SET-7B 的「初值与重置」；
+      //   帧装载 / 释放也重置成 −1）。引擎的读者一律与 −1 比较 ⇒ ⛔ 不用 `undefined` 表示"未登记"：
+      //   位置 0 是**合法目标**，而 `undefined`/`0` 的混淆正是这类哨兵的经典坑。`0x7b` 照旧覆盖两格。
+      localMain: -1, localSub: -1,
+      // ★ 身份编号在**建帧时**定下：`0x7c` 的深度判据拿它跟引擎的入块深度比（缺 id ⇒ −1）。
+      //   ⛔ 不许把它留成 `undefined`：那样 `0x7c` 的成功路径永远不可达（必然抛「深度不符」）。
+      localDepth: id ?? -1,
       keyJumps: new Map(), keyCursor: 0, keyLimit: 0,
+      // ★ 按住派发表随帧一起重建（帧释放 / 重载 = 表清空）；游标**不建立初值**（`null`，见 `Frame`）。
+      holdSlots: new Map(), holdCursor: null,
     };
   }
 
@@ -958,7 +1225,7 @@ export class Machine {
       name: id === undefined ? undefined : this.scriptName?.(id) ?? undefined,
       body,
       ip: 0,
-      frame: this.freshFrame(),
+      frame: this.freshFrame(id),
       parent: this.cur,
       length: 0,
     };
@@ -1006,7 +1273,7 @@ export class Machine {
       name: id === undefined ? undefined : this.scriptName?.(id) ?? undefined,
       body,
       ip: 0,
-      frame: this.freshFrame(),
+      frame: this.freshFrame(id),
       parent: this.cur,
       length: 0,
     };

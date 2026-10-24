@@ -121,6 +121,17 @@ export interface RenderHost {
    */
   getRenderSurface(textureId: number): Promise<SurfaceHandle | null>;
 
+  /**
+   * 可选：`0x223` 的槽可用性检查 —— 该纹理槽里**已有**对象的表面格式，是否与**当前显示格式**相符。
+   *
+   * ★ 为什么在平台侧：spec 只说"对象的表面格式与当前显示格式不符"，**两个格式的取值都不在 spec 正文**，
+   *   而且"当前显示格式"在本层**没有状态格**（`window.ts` 的 `checkTextureFormat32` 是**能力**检查，
+   *   不是当前格式）。核心能自己判的只有"槽空不空" ⇒ 格式比较交给平台。
+   * ★ 缺省（没实现）= **不知道格式是否相符**：调用方记一条
+   *   `scene-command-texture-format-unmodeled` 诊断，⛔ 不假装"相符"。
+   */
+  textureFormatMatches?(textureId: number): Promise<boolean>;
+
   /** 把一份表面设为当前渲染目标；`false` = 设置失败（失败路径由调用方写错误通道） */
   setRenderTarget(surface: SurfaceHandle): Promise<boolean>;
 
@@ -145,6 +156,17 @@ export interface RenderHost {
    * ★ 颜色键的像素清零由平台实现（见请求字段）；核心只搬运归一化后的键。
    */
   uploadTexture(request: TextureUploadRequest): Promise<boolean>;
+
+  /**
+   * 可选：`0x223` / `0x250` / `0x251` 按同 id **换**纹理（槽里已有对象、但表面格式与当前显示格式不符）。
+   *
+   * ★ spec 把它与"建纹理"写成同一个**外部请求**（「请求按该 id 建 / 换纹理」）；请求的**尺寸 / 格式参数**
+   *   不在正文里 ⇒ 核心只搬运槽里对象的逻辑尺寸。失败后果**已规定**
+   *   （`CORE-OPS-SCENE-COMMAND-RECORDS`：错误通道一条带编号说明 + 槽里留"建失败"对象 + 照常写表）。
+   * ★ 缺省 = 平台不提供"换"这个入口：调用方只留 `texture.replace.request` 记账 + 一条诊断，
+   *   ⛔ 不退回"静默成功"。
+   */
+  replaceTexture?(request: TextureCreateRequest): Promise<boolean>;
 
   /** `0x20b` 矩形填充；缺省 = 平台不支持该请求（调用方写错误通道）。 */
   fillTexture?(request: FillTextureRequest): Promise<boolean>;
@@ -303,6 +325,8 @@ export type HeadlessRenderRequest =
   | { kind: 'set-render-target'; surface: SurfaceHandle; ok: boolean }
   | { kind: 'release-surface'; surface: SurfaceHandle }
   | { kind: 'create-texture'; request: TextureCreateRequest; ok: boolean }
+  | { kind: 'replace-texture'; request: TextureCreateRequest; ok: boolean }
+  | { kind: 'texture-format-matches'; textureId: number; ok: boolean }
   | { kind: 'upload-texture'; request: TextureUploadRequest; ok: boolean }
   | { kind: 'release-texture'; textureId: number }
   | { kind: 'fill-texture'; request: FillTextureRequest; ok: boolean }
@@ -324,6 +348,13 @@ export interface HeadlessRenderOptions {
   setRenderTargetSucceeds?: boolean;
   /** `createTexture` 会成功吗（缺省 `true`） */
   createTextureSucceeds?: boolean;
+  /** `replaceTexture` 会成功吗（缺省 `true`；同 `createTexture`，只影响记账里的 `ok`） */
+  replaceTextureSucceeds?: boolean;
+  /**
+   * `0x223` 的格式比较：给了才实现 `textureFormatMatches`（返回 `true` = 相符）。
+   * ★ 缺省 = **不提供这个能力**（headless 不知道"当前显示格式"，⛔ 不假装相符）。
+   */
+  textureFormatMatches?: (textureId: number) => boolean;
   /** `uploadTexture` 会成功吗（缺省 `true`） */
   uploadTextureSucceeds?: boolean;
   /**
@@ -354,18 +385,33 @@ export class HeadlessRenderHost implements RenderHost {
   readonly backBuffer: boolean;
   setRenderTargetSucceeds: boolean;
   createTextureSucceeds: boolean;
+  replaceTextureSucceeds: boolean;
   uploadTextureSucceeds: boolean;
   drawTextSucceeds: boolean;
   captureBytes: Uint8Array | undefined;
+  /**
+   * `0x223` 的格式比较：**只有构造时给了 `textureFormatMatches` 才存在**。
+   * ★ 缺省（`undefined`）= 这个宿主不声称知道"表面格式与当前显示格式是否相符"。
+   */
+  readonly textureFormatMatches?: (textureId: number) => Promise<boolean>;
 
   constructor(options: HeadlessRenderOptions = {}) {
     this.hasSurface = options.hasSurface ?? (() => true);
     this.backBuffer = options.backBuffer ?? true;
     this.setRenderTargetSucceeds = options.setRenderTargetSucceeds ?? true;
     this.createTextureSucceeds = options.createTextureSucceeds ?? true;
+    this.replaceTextureSucceeds = options.replaceTextureSucceeds ?? true;
     this.uploadTextureSucceeds = options.uploadTextureSucceeds ?? true;
     this.drawTextSucceeds = options.drawTextSucceeds ?? true;
     this.captureBytes = options.captureBytes;
+    const matches = options.textureFormatMatches;
+    if (matches !== undefined) {
+      this.textureFormatMatches = async (textureId: number): Promise<boolean> => {
+        const ok = matches(textureId);
+        this.requests.push({ kind: 'texture-format-matches', textureId, ok });
+        return ok;
+      };
+    }
   }
 
   async getRenderSurface(textureId: number): Promise<SurfaceHandle | null> {
@@ -393,6 +439,12 @@ export class HeadlessRenderHost implements RenderHost {
     // ★ 只记账：不建 GPU 纹理、不分配像素
     this.requests.push({ kind: 'create-texture', request: { ...request }, ok: this.createTextureSucceeds });
     return this.createTextureSucceeds;
+  }
+
+  async replaceTexture(request: TextureCreateRequest): Promise<boolean> {
+    // ★ 只记账（同 createTexture）：不释放旧纹理、不建新纹理
+    this.requests.push({ kind: 'replace-texture', request: { ...request }, ok: this.replaceTextureSucceeds });
+    return this.replaceTextureSucceeds;
   }
 
   async uploadTexture(request: TextureUploadRequest): Promise<boolean> {

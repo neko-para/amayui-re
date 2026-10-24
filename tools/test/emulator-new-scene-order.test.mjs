@@ -5,7 +5,8 @@
  * 判据是 spec 的 `CORE-SCENE-DRAW-ORDER`（无命令记录时）：TITLE 用 key 0 的全屏黑网格当背景、
  * key 10/100/… 的绘制项当前景、key 200000 的网格当覆盖层；两类对象按 **key 升序**放在同一条序列里。
  * 同键时**网格先于绘制项**（绘制项后发出、压在上面）。
- * ★ 有场景命令记录时的两档顺序仍未成篇；这个守卫只覆盖无命令记录的帧。
+ * ★ **负键口径按表分**：网格 / 辅助表的负键不参与（0 是哨兵），**绘制项不做符号检查**（负键绘制项照发）。
+ * ★ 有场景命令记录时的两档顺序（命令档）**未建模**；这个守卫只覆盖收尾扫描那一档。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,14 +39,16 @@ test('★ LOGO 场景：影片绘制项 200000 仍在 200002/200003 网格之前
   );
 });
 
-test('负键条目不参与绘制', () => {
+test('★ 负键口径**按表分**：负键绘制项被发出（排最前），负键网格不参与', () => {
+  // CORE-SCENE-DRAW-ORDER 的纠错点：收尾扫描用 0 当"该表已没有可出条目"的哨兵 ⇒
+  // 网格 / 辅助表 A / 辅助表 B 的负键不参与；**绘制项是最后候选，不做符号检查**。
   const scene = {
     drawItems: [item(-1), item(5)],
     meshes: [mesh(-2), mesh(3)],
   };
   assert.deepEqual(
     orderedDrawables(scene).map((entry) => `${entry.kind}#${entry.key}`),
-    ['mesh#3', 'item#5'],
+    ['item#-1', 'mesh#3', 'item#5'],
   );
 });
 

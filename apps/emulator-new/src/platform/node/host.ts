@@ -89,6 +89,15 @@ export const nodeHost: Host = {
     }
   },
 
+  /**
+   * 列目录：返回**条目名字**（不含路径），顺序 = 宿主给的顺序（`readdir` 不排序）。
+   * ★ 只列一层；目录项也在结果里（核心自己用 `isFile` 过滤 `*.AAI`）。
+   * ★ 枚举失败（目录不存在 / 无权限）⇒ 抛（与 `readBytes` 同口径）。
+   */
+  async listDir(dir: string): Promise<string[]> {
+    return await fs.promises.readdir(dir);
+  },
+
   async ensureReadDir(dir: string): Promise<void> {
     try {
       await fs.promises.mkdir(dir, { recursive: true });

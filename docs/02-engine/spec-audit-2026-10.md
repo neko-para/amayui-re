@@ -886,3 +886,356 @@ n < 10 走注入的 `sleepHost`；`SLEEP_BIT` 服务分支按 `now >= sleepUntil
   守卫 `emulator-new-scene-order.test.mjs`，变异"退回先绘制项后网格 / 同键类别序写反"。
 - **下次 review 要问什么**：① 有场景命令记录时的两档顺序（命令区间先 / 全键域收尾）何时成篇？
   ② 另两类可绘制条目的语义与同键位置？③ 平台侧还有没有别的"顺序"被默认成自由选择（多渲染目标、`present` 与提交的先后）？
+
+## 二十、第三批残差收口：AAI/ALF · 绘制链 · 池翻页 · 异常三支 · 图形参数（2026-10-23）
+
+**范围**：交接单「待处理」里排在最前的残差；audio / text-system / Live2D 三个模块仍然**跳过**。
+五个只读 subagent 并行取证（AAI/ALF、绘制链、池/帧/输入、VM 异常、AGF/启动图形），只写 `.tmp/spec-draft/`；
+合并、守卫与变异由外层做。
+
+**闭合 20 条旧残差**：
+`RES-FS-AAI-KEY` · `RES-FS-EXT-LOAD` · `RES-FS-INDEX-AAI-PARTIAL` · `RES-FS-ARCHIVE-AAI-PREFIX` ·
+`RES-ALF-MULTI-INDEX` · `RES-FS-CH-MULTI-INDEX` · `RES-TEX-DRAW-CONSUMER` · `RES-SCENE-DRAW-ORDER-COMMAND` ·
+`RES-POOL-MEMFLIP` · `RES-FRAME-LOAD-AUX-ARRAYS` · `RES-LOCAL-TARGETS-CONSUMER` · `RES-LOCAL-TARGETS-INIT` ·
+`RES-INPUT-KEYTOTAL-WRITERS` · `RES-VM-EXC-PROPAGATION` · `RES-BOOT-EXC-DIALOG-VALUES` ·
+`RES-BOOT-EXC-RETRY-SCOPE` · `RES-BOOT-EXC-TEXT-CONTEXT` · `RES-ISA-DOMAIN-EXC` ·
+`RES-AGF-CHANNEL-ORDER` · `RES-BOOT-GFX-PARAMS`。
+
+**新写成合同（4 条）**：
+- `SPC-POOL-MEMFLIP`（`0x6d`）：六个全局池族的主 / 备缓冲整体对调；配置键 `set:EnableMemFlip` 为 0/缺失 ⇒
+  显示消息型异常（推进格数先写 1）；**初始选主组**；两份缓冲互不影响。
+- `CORE-FS-EXT-INDEX-KEY`：`*.AAI` = ALF 索引族（268 头），与基础索引（300 头初始化文件）只共用**目录区布局**；
+  区号是头 `+264` 的 4 字节；高 8 位按**有符号字节**；同区号后装载者胜；槽空 / 下界越界 / 128..255 是**三种不同失败**。
+- `CORE-OPS-TEXTURE-DRAW-CONSUMER`：有效位门 / 第 16 位当轮已消费 / 空纹理槽与无渲染目标上报并跳过 /
+  矩形夹到纹理逻辑矩形、夹空静默 / 附加绘制位。
+- `CORE-OPS-SCENE-COMMAND-RECORDS`：`0x223` / `0x24d` / `0x24f` / `0x250` / `0x251` 的**写侧**（同键替换、
+  种类、置脏、种类 1 另置有动画、种类 2 的两条校验后果不同）。
+
+**改写（16 条）**：`CORE-BOOT-LOOP-EXC`（五类捕获与三支分流：重试 = IP 不动 / 忽略 = 4×推进格数现值 /
+其它终止；**不回滚**；重试与忽略回保护区入口）· `CORE-SCENE-DRAW-ORDER`（两档：命令档 + 四表收尾扫描；
+平键序 网格→辅助B→辅助A→绘制项；**负键口径按表分**：绘制项不过滤负键且最先发出）· `CORE-INPUT-WORD` /
+`CORE-INPUT-KEY-DISPATCH`（键总数**无初值**；`0x100` 读键总数本身）· `CORE-OPS-FRAME-LOAD-FRAME` /
+`CORE-OPS-FRAME-LOCAL-SET-7B`（两格 = 本地块进入目标，初值 −1，消费方按存档字第 26 位二选一）·
+`FMT-AGF-PIXELS`（通道 = **输出接口**；32bpp 只用像素第 4 字节）· `CORE-BOOT-GRAPHICS-INIT`
+（设备实参表 / 后缓冲三分支 / 两个**独立**路线位 / 建成后四步）· `CORE-FS-ID-ZONES` / `CORE-FS-INDEX-STACK` /
+`CORE-FS-LOOSE-FIRST` / `CORE-FS-ARCHIVE-ROOT` · `FMT-ALF-TOC`（独立命名空间 + 重名仲裁）· `CORE-VM-LOOP` /
+`CORE-OPS-ABORT-01`（异常码不可观察）· `CORE-OPS-RENDER-FRAME-STEP`（指向两档顺序）。
+
+**emulator-new 落地**：`0x6d` 两份缓冲 + 配置门；`0x100` 上界改键总数 + `key-total-unset` 诊断；
+新帧两格 `−1`；AGF 32bpp 只用 `body[s+3]`；图形参数全部由配置键推导（PresentInterval 3→4/4→8、
+虚拟全屏强制窗口化、后缓冲尺寸三分支、`display:TextureBit`、MultiSample、设备建成后四步）；
+`Host.listDir` + `S?AI` + 扩展索引槽表 + 有符号区号 + 名字反查；场景命令表 + 五条写侧 handler +
+绘制项负键不再过滤。**未做**：命令档执行（只报一次诊断）、设备创建重试（单次 + 失败即结束，代码里明说）、
+`0x223` 建立/刷新纹理槽对象、`0x104`/`0x199`。
+
+**守卫与变异**：新 `emulator-new-ops-memflip` / `-input-keytotal` / `-frame-aux` / `-graphics-params` /
+`-aai` / `-aai-region.assets` / `-scene-commands` / `spec-sites-batch3.assets`；旧 `-agf` / `-input` /
+`-window` / `-scene-order` 的断言按新合同修正。`tools/mutate-check.mjs` 新增 **14** 条变异，全部按预期红。
+
+**独立复审（只读 `data/spec`，三轮）**：
+- 第一轮 S1 **9** 条：路线"互斥" vs 键 3 两条都跑、VFS 与后缓冲第 2 档不可达、32bpp alpha 自相矛盾、
+  "两类条目" vs 四表扫描、透明度位段三处口径、准备段泵 vs 迭代头泵、扩展索引与基础索引协议、AAI 区号字段未给、
+  正文文件名。全部处置（6 修 + 3 降级为 S2 并继续收窄）。
+- 第二轮 S1 **2** 条（均为上轮修复引入）：基础索引标题串来源、第五张表是否被 `0x1f6` 清空。已改。
+- 第三轮跟报：**新 S1 = 0**。遗留 S2/S3 已再收：`20-alf` 的 300 头口径、第五张表命名、`70-vm` 正常迭代措辞、
+  `05-boot` 去掉未定义的"节流计数复位"、`60-ops-render` 透明度残差、AGF "两处/三处"口径、名字反查排除区号 0。
+
+**诚实项**：残差总数 `unknown` 449 → **457**（闭合 20 条，但把原先笼统的条目拆成了更窄的 20+ 条：
+种类 1/3 布局、命令档请求、异常显示类别、重试顺序、32bpp 第三消费者…）。计数上升不等于退步；
+它表示"哪一段还不知道"变得更可判。命令档执行、种类字段布局、真机采样仍**不是**合同。
+
+**下次 review 要问什么**：① 命令档执行（区间覆盖 / 请求形态 / 第 16 位）何时能成篇？
+② 种类 1 / 3 的操作数→字段能不能从写点机械读出？③ 图形设备重试序列与 `VirtualFullScreenType` 的完整组合？
+④ 多路推导的共同误解：AAI 区号、异常显示类别、负键绘制项——各自还缺哪一条**独立**证据？
+
+**门禁**：`pnpm test` 865/0 · `pnpm test:assets` 189/0（1 skip）· `pnpm test:mutation` **280/280** ·
+`pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十一、第四批残差收口：场景命令字段 · 绘制消费者档位 · 图形重试/旧式路线（2026-10-24）
+
+**范围**：第三批收口后仍开着的四条主线残差（场景命令族、纹理消费者、图形设备初始化、池/AGF 的数据事实）；audio / text-system / Live2D 仍跳过。
+四个只读 subagent 并行取证（commands / gfx / pool-agf / texconsumer），只写 `.tmp/spec-draft/batch4/`；合并、复审、实现由外层做。
+
+**闭合 / 移出 13 条**：`RES-SCENE-COMMAND-KIND1-LAYOUT` · `-KIND3-LAYOUT` · `-VARIANT` · `-DRAW-REQUESTS` · `-TEXTURE-FAIL` ·
+`RES-BOOT-GFX-RETRY-ORDER` · `-FULLSCREEN-COMBO` · `-TEXT` · `RES-TEX-DRAW-CONSUMER-OFFSET` · `-COLOR` · `-BLEND` ·
+`RES-POOL-MEMFLIP-DEFAULT` · `RES-AGF-ALPHA-32`。另移除两条重复/已由合同接住的残差（`RES-TEX-DRAW-OOB`、`RES-TEX-DETACH-FIFTH-TABLE`）。
+
+**新写成合同**（都写进既有规则，不新增规则）：
+- `CORE-OPS-SCENE-COMMAND-RECORDS`：种类 1 = **影片覆盖命令**（不是消息窗口）——12 操作数布局、第一帧由**时间戳格**判、
+  之后只标记不画、区间之下那一趟只作观察；种类 3 两变体（滑移模糊 / 缩放模糊）的起终对、进度不夹取、中心按纹理宽高归一；
+  命令档对覆盖区间条目**用条目自己的纹理**、绘制项走消费者、每帧一次（种类 1 之后零请求）、辅助 B 不参与、离屏目标恢复；
+  种类 0 建 / 换纹理请求在写表前、失败**仍写表**并上报（不带脚本位置）。
+- `CORE-OPS-TEXTURE-DRAW-CONSUMER`：纹理槽 **1000 格**、消费路径不检查；越界读到相邻状态（0 ⇒ 空槽上报，非 0 ⇒ 当对象用）；
+  自引用**不比较、不跳过**；**5.1 位置四步**（裁剪补偿 / 仅编号 `[20,30)` 乘缩放并半上取整 / 场景偏移两档 / 相加）；
+  本步派生色只写出参、插值不落表、到期写回当前颜色；位 2 = **附加组派生**（改输入，不是第二次绘制）。
+- `CORE-BOOT-GRAPHICS-INIT`：尝试序列**设备类型外层 / 顶点处理内层**、每轮重置（6/2/3/1）；旧式路线实参表
+  （行为位 = 原值 | 窗口化位；`FullScreenBit` 独立；不看虚拟全屏）；失败后果**双通道** + 逐步骤表
+  （对话框模式写错误文本但**不**中止；32 位格式只警告；旧式三处只发用户消息）。
+- `SPC-POOL-MEMFLIP` 的「成立条件」新增**发行数据事实**（默认表把 `ENABLEMEMFLIP` 置 0）；`FMT-AGF-PIXELS`
+  写成"32bpp 不使用 alpha 段"（四条装载路径 / 两处 32bpp 实现穷尽，18 份 AGF 中 0 份 32bpp）。
+
+**emulator-new 落地**：
+- 场景命令：`SceneCommandRecord` 全字段 + `TextureObject.creationFailed`；0x223 失败仍写表 / 仍置脏 / 错误通道带编号；
+  0x24d 槽空抛出且旧记录不动、12 操作数落格、`timestamp=0`；0x250/251 两变体字段互不共用。命令档执行仍未建模（诊断保留）。
+- 绘制消费者：新增纯规划器 `renderer/scene-draw-plan.ts`（空槽上报并跳过 / 夹空静默 / 位置四步 / 自引用不跳过 /
+  位 2 派生一次）；`pixi-host` 删占位块与自引用跳过，错误进 error 通道。
+- 图形：`deviceCreationAttempts` 真重试（null ⇒ 下一次，穷尽 ⇒ 失败）；旧式行为位 / `FullScreenBit` / 客户区；
+  两个独立路线位；`graphicsLog{category,step,text}` + 逐步骤 outcome 表（对话框非致命、32 位格式仅警告）。
+- 守卫：新增 `emulator-new-scene-draw-plan`、`spec-sites-batch4.assets`；更新 `emulator-new-scene-commands`（17）/
+  `emulator-new-graphics-params`（22）/ `emulator-new-window` / `emulator-new-config.assets`（发行默认 0）。变异 +12 条。
+
+**独立复审（只读 `data/spec`，三轮）**：第一轮 S1 **7** 条（错误文本两条通道、启动失败 vs 中止、每帧一次 vs 种类 1 零请求、
+区间之下一处合同一处不合同、消费者不置脏 vs 跨步标脏、种类 3 时间戳无盖章规则）；第二轮复核 5 修 2 留（上层绘制对象无日志、
+05-boot 的"所有失败"未收窄为"中止"）；第三轮跟报：**新 S1 = 0**（待最后一轮确认）。
+
+**诚实项**：残差 `unknown` 457 → **452**（闭合 13、新增 10、移除 2）。命令档**执行**、种类 1 第 9 操作数身份、
+「跳过额外变换」键窗、种类 1 离屏结果回画面、分辨率"最接近"判据、日志句柄、32bpp 端到端样本仍未闭合。
+场景相机（缩放 / 偏移 / 显示模式）与附加组终色在核心里**没有模型** ⇒ 规划器实路只走"无相机 / 单位变换"档，
+`group-unmodeled` 显式留痕；这不是"已实现"，是"合同已写、数据面缺失"。
+
+**下次 review 要问什么**：① 相机 / 附加组字段的生产者是谁（为什么核心没有）？② 命令档执行何时能做（需要哪些场景状态）？
+③ 分辨率枚举器的完整判据？④ 32bpp 端到端样本从哪来（可枚举 AGF 里 0 份）？
+
+**门禁**：`pnpm test` **897/0** · `pnpm test:assets` **192/0（1 skip）** · `pnpm test:mutation` **292/292** ·
+`pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十二、第五批残差收口：分辨率判据 · 源矩形窗口 · 显示适配 · 0x229（2026-10-24）
+
+**范围**：第四批后仍开着的三条主线（图形设备初始化剩余、绘制消费者步进/编号、命令族离屏与遮罩）+ 上一轮叫"场景相机"的生产者问题。audio / text-system / Live2D 仍跳过。三个只读 subagent 并行取证（commands / gfx / texconsumer），只写 `.tmp/spec-draft/batch5/`。
+
+**闭合 / 移出 6 条**：`RES-BOOT-GFX-RESOLUTION-PICK` · `-LEGACY-WINDOW-DOWNGRADE` · `-LOGSINK` · `RES-SCENE-COMMAND-DRAW-FLAG` · `-KIND1-OFFSCREEN` · `RES-TEX-DRAW-CONSUMER-RECTSTEP`；另收窄 `KIND1-FLAG` / `-BELOW-RANGE` / `TEX-...-BELOW-RANGE` / `-OOB` / `-SELFTARGET`。
+
+**新写成合同**：
+- `CORE-BOOT-GRAPHICS-INIT`：分辨率校验全量判据（请求对**整对覆盖**、`r=高/宽` 与 0.7 两池、七个分类符号、池只留最小一档、收口两支不对称、失败**不写回**、写回 → 绘制区域与全屏后缓冲）；旧式对象内部**窗口化降级**（色深<16：确定⇒降级、取消⇒失败；桌面高≤客户区高⇒直接降级；**不回写引擎形态字**）；日志落点（`system:OutErrorLog` 决定是否开固定文件、覆盖语义、句柄无效**静默丢弃且无第二落点**）。
+- `CORE-OPS-SCENE-COMMAND-RECORDS`：种类 1 第 9 操作数 = **影片纹理逐像素遮罩**的取值（写表 / 结束两个时刻、互补）；离屏结果回画面 = **表面拷贝 36 → 影片纹理** + 每帧按目标矩形的**遮罩混合**（画布**从不**直接呈现）；"区间之下"那趟只在**第一帧路径** + 设备就绪 + 着色器能力档 <2 时发生。
+- `CORE-OPS-TEXTURE-DRAW-CONSUMER`：新增 **4.1 源矩形窗口**（0x239 的五个字段、三档、步进公式、只有到期帧回写四条边、逐帧标脏、清位由计时窗统一执行）与 **6.1 场景自身变换**（键区间 + 0x229、命令档"起点粗判"）；越界读到非 0 ⇒ 以该值作对象、经虚表第 6 项调用；编号档命名纪律（`[20,30)` 无命名、38=自建离屏目标、39 无生产者）。
+- **新规则** `CORE-SCENE-DISPLAY-FIT`：显示适配参数（固定分辨率模式 / 虚拟全屏类型 / 视口原点 / 内容缩放两分量），**没有**脚本 / 存档 / 场景资产写入者 —— 上一轮"场景相机"是渲染器状态，⛔ 不能进 `Machine.scene`。
+- **新规则** `CORE-OPS-SCENE-SELF-TRANSFORM-229`：先重置场景自身状态，再写作用键区间 + 三元平移。
+
+**emulator-new 落地**：
+- 图形：`pickResolution` 纯函数（伪代码逐条；含两池/七符号/收口）、请求对整对覆盖、诊断逐档、`logSink: 'file' | 'unavailable'`。
+- 绘制：`SourceRectWindow` + `setter239` 具名写入 + 规划器 4.1（盖章 / 三档 / 步进 / 只在到期产出 `rectWriteBack` / perRow 0 诊断）；`scene.selfRecord` + 0x229 handler + 6.1（键区间右开、计数 0 不乘、skip 参数）；`session` 投影。
+- 守卫：`emulator-new-graphics-params`（29+1）· `emulator-new-scene-draw-plan`（31+1）· `spec-sites-batch5.assets`（2）；变异 +9。
+
+**独立复审（只读 `data/spec`，两轮）**：第一轮 S1 **12**（后缓冲两来源、降级效果两说、池替换先于比值闸、区间之下合同 vs 残差、无"何时"判据、已删残差留正文、RECTSTEP 反向、共享窗位生命周期、矩阵无来源、偏移归属、适配公式缺、种类 2 只映射 2 个）；第二轮 **10/12 已修** + 新 S1 **2**（70-vm 未接清位委托、scene 成立条件仍写种类 2），均已修；最终跟报只剩"种类 2 的离屏通道"一条，已改为"种类 3 有、种类 2 未取证（见残差）"并待最后确认。
+
+**诚实项**：残差 `unknown` 452 → **454**（闭合 6，新增 ~8 条窄项）。命令档**执行**、显示适配公式、场景自身矩阵内容、影片遮罩的画面极性、种类 2 布局、`[20,30)` 的机制名仍未闭合。规划器实路仍走"无相机 / 单位变换"档（显示适配参数已在正文、实现未接），`rectWriteBack` 核心无回写入口（平台只记账）。
+
+**下次 review 要问什么**：① 显示适配的公式与设备重置条件何时补？② 命令档执行需要哪些场景状态（现在只差实现）？③ 遮罩极性 / 种类 2 字段 / `[20,30)` 命名，哪个还能靠静态证据解决？
+
+**门禁**：`pnpm test` **920/0** · `pnpm test:assets` 见下 · `pnpm test:mutation` **301/301** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十三、第六批残差收口：进入本地块 · 种类 2 全字段 · 日志路径（2026-10-24）
+
+**范围**：`0x199`（进入本地块，未成篇 opcode）· 种类 2 的完整字段/校验/出口 · 遮罩算术 · 图形剩余三条窄残差（日志路径 / 诊断格式 / 旧式降级实参）· `[20,30)` 命名。audio / text-system / Live2D 仍跳过。三个只读 subagent 并行取证（ops199-104 / kind2 / gfx），只写 `.tmp/spec-draft/batch6/`。
+
+**闭合 / 移出 4 条**：`RES-SCENE-COMMAND-KIND2-LAYOUT` · `RES-BOOT-GFX-RESOLUTION-DIAG-FORMAT` · `-LEGACY-DOWNGRADE-EFFECT` · `-LOGSINK-PATH`；新增 `RES-LOCAL-ENTER-DEPTH-NAME` / `RES-SCENE-COMMAND-KIND2-RECT-OFFSET` / `-KIND0-OUTPUT` / `RES-BOOT-GFX-LOGSINK-PATH-DATA`；`KIND1-FLAG` / `TEX-...-BELOW-RANGE` 收窄。
+
+**新写成合同**：
+- **`CORE-OPS-STATE-199`（新规则）**：无操作数；推进格数←1、输入字←0（无条件）；按存档字第 26 位两种形态——首次进入：状态字整字搬进存档字并置 25|26、清状态字、返回点←下一条、**入块深度←本帧身份编号**、PC←主目标；已在块内：存档字读-改-写、PC←副目标，不写返回点/深度/状态。未登记目标 ⇒ 退化成空指令（除清输入字）。
+- `0x7c` 的深度判据改为"**本帧身份编号 vs 入块深度**"（写者 = 0x199 首次进入），不再是黑箱。
+- **种类 2 全字段**：10 操作数 → 命令键（另写一格）/纹理/区间 A/B/类型/分割幅/延迟/持续；类型判据 **[0,11] 两端闭、含负数**（纠错）；分割幅<1 ⇒ 夹 1 / 类型 −1 / 延迟持续清 0、跳过类型校验照写；两条校验**之后**才发建/换纹理请求；覆盖 = **两段各喂一块画布**、**每帧**都画；抹除矩形来自**绘制项表同键条目**、缺它 ⇒ 清持续时间并**中止整趟**；类型<0 ⇒ 场景「强制完成」。
+- 种类 1 遮罩：**只改源像素最高字节、RGB 逐位不变、255 不是恒等**；遮罩只在每帧尾段混合（源=画布、目标=影片纹理）。
+- `70-vm` 新增**「强制完成」档**（本帧有效、不跨帧；推进读到 ⇒ 所有窗按到期）。
+- `06-window` 日志路径全量：根 [+分隔符] + 相对目录 [+分隔符] + 固定文件名；分隔符**只在拼到此处结果非空时**补；256 字节；探存在性 + 递归建目录；`UseAppDataFolder` 恰为 1 ⇒ 用户**本地**应用数据、其它值 ⇒ 安装目录；缺键值仍 0 但**读取器会弹一次模态框**（表现层）；打开时机在窗口附加之后、图形之前。
+- 旧式降级：**五条请求**（改样式 → 量屏幕 → 移动/调整 → 摘菜单 → 置顶）+ 位深改配置全屏位深；"已降级"标志只在第二条件置位且**无读点**（有界负结论）。
+
+**emulator-new 落地**：
+- `0x199` handler；`freshFrame(id)` 写 `localDepth = id ?? -1`（修掉"0x7c 真跑必抛"的缺陷）；种类 2 handler 全字段 + 两条校验 + 写表前纹理请求 + `ownerKey`。
+- 日志：`joinEnginePath` 纯函数（不折叠双分隔符、256 字节截断）、`ErrorLogPathSpec` / `openErrorLog` / `appDataDir`、`resolveLogSink` 后移到窗口附加之后、`config.has` 区分缺键、诊断②带 `format`。
+- 守卫：`spec-sites-batch6.assets`（0x199 站点）；`emulator-new-ops-100-200`（0x199 两形态 + 真跑 0x199→0x7c）；`emulator-new-scene-commands`（种类 2 四条）；`emulator-new-graphics-params`（joinEnginePath 7 例 + 落点/时机/格式）。变异 +6。
+
+**独立复审（只读 `data/spec`，两轮）**：第一轮 S1 **5**（遮罩两份互斥定义、强制完成无归属、种类 0 出口、配置根两定义、缺键弹框 vs 静默）+ S2 13 / S3 11；第二轮 4/5 已修、**新 S1 = 0**，剩"强制完成时序"一条已改为「渲染步置位 / **下一次**推进读取 / 读到后清 0 / 不粘住」，并补了章内残差块与站点描述。S2 关键项已顺手修：`0x199` 清输入字进写点、`0x100` 不再指向未成篇的 0x104 规则、种类 2 请求/校验次序。
+
+**诚实项**：残差 `unknown` 454（闭合 4、新增 4，净 0）。命令档**执行**（两画布/两区间/12 图案/抹除矩形/缺项中止）仍未建模；种类 0 的离屏出口、类型<0 的「强制完成」副作用只记诊断；`0x104`（按住派发）仍留在 gap（它的表指令 0x102/0x103/0x105 也还没成篇）；显示适配参数仍未接 renderer。
+
+**门禁**：`pnpm test` **930/0** · `pnpm test:assets` **195/0（1 skip）** · `pnpm test:mutation` **307/307** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十四、第七批残差收口：按住派发按键族 · 种类 0 出口 · 深度 = 统一文件 id（2026-10-24）
+
+**范围**：把 `0x102` / `0x103` / `0x104` / `0x105` / `0xfc` 这一组**未成篇的输入表指令**一次写成规则并落地；顺带收口三条窄残差（种类 0 出口、种类 2 抹除矩形偏移、`0x7c` 的"深度"身份）。audio / text-system / Live2D 仍跳过。两个只读 subagent 并行取证（input-hold / residuals），只写 `.tmp/spec-draft/batch7/`。
+
+**新规则 5 条**：
+- `CORE-INPUT-102-SLOT`：三个操作数（键 0..31 / 槽 0..9 / 目标参数）写"每（帧 × 键）10 个槽"的表；越界先抛、一槽不写；目标原样、−1 = 取消；与 `0xfb` 的按键回调表**不是同一张**。
+- `CORE-INPUT-103-MODULUS`：模数原样写（不检查、含 0/负数）；只清**当前帧**按住游标；模数初值 0（启动复位本体与 `0xfc` 都写）。
+- `CORE-OPS-INPUT-104`：反向从上界往下找最高置位；上下文闸；掩码命中 ⇒ 返回点 = 本条自身 + 把按键扫描上限**夹到该键号（查表之前、不撤销）**；未登记 ⇒ 撤销返回点、推进 1；**每条出口** `(游标+1) mod 模数`；模数 0 = 整数除零 UB（规范不给兜底）。
+- `CORE-INPUT-105-MASK`：32 位掩码原样写；唯一读者 = `0x104`；初值 0；不按帧。
+- `CORE-INPUT-RESET-FC`：清**两张**回调表（全部帧）+ 模数 ← 0；不碰掩码 / 游标 / 上限 / 输入字。
+
+**闭合 / 移出 3 条**：`RES-SCENE-COMMAND-KIND0-OUTPUT` · `RES-SCENE-COMMAND-KIND2-RECT-OFFSET` · `RES-LOCAL-ENTER-DEPTH-NAME`；新增 `RES-SCENE-COMMAND-KIND0-ALPHA` / `RES-INPUT-103-NEGATIVE-MODULUS` / `RES-INPUT-104-CURSOR-INIT`；`RES-SCENE-DISPLAY-FIT-MATRIX` 扩写。
+
+**纠错 / 补强**：
+- 种类 0 **也有**"命令自己的纹理"通道：区间 A → 画布 36、区间 B → 画布 37，再把两块合成到记录里的纹理（进度 0..1；效果路径 `"Fade"` / 默认路径两笔不透明白 + `ARGB(round(进度×255),255,255,255)`）；能力档 < 2 时每块先多一趟"区间之下"。
+- 种类 2 的抹除矩形：窗口态偏移 0、占满屏态非 0（来源 = 视口原点 + 内容缩放；**减绘制位置、不减四边**；确切组合次序见残差）。
+- `0x7c` 的"深度" = **统一文件 id**（高 8 位区号 / 低 24 位条目下标；帧装载从打开该脚本的同一整数抄入；`0x3` 的第 1 操作数）；异常消息把它解析成名字。
+- `0x105` 的 falsifier 修正（原"先 7 后 3"在 7 仍按住时不可能发生）。
+
+**emulator-new 落地**：
+- `core/input.ts` 的 `HoldState`（mask / modulus / contextKey / dispatches）+ `initialHoldState`；`Frame.holdSlots`（键×10+槽，缺格 ≡ −1）与 `holdCursor: number | null`（**不建立初值**，⛔ 不填 0）。
+- 五个 handler；0x104 模数 0 与未初始化游标都**显式抛**；0xfc 清两张表 + 模数 0。
+- 守卫：新增 `emulator-new-input-hold.test.mjs`（9 条，含反向、夹上限、两表互不可见、0xfc 复位后 0x104 抛）；站点守卫 `spec-sites-batch7.assets`（62 个站点）。变异 +4。
+
+**独立复审（只读 `data/spec`，两轮）**：第一轮 S1 **8**（章节残差未同步、audit 两条旧文本、模数初值来源、除零后果、0x105 falsifier 不可达、种类 2 偏移公式与术语、显示适配归属）+ S2 16 / S3 7；第二轮 7/8 已修、**新 S1 = 1**（audit 的 0x105 falsifier 未同步），已改，最终新 S1 = 0。
+
+**诚实项**：残差 `unknown` 454 → **453**。命令档**执行**仍未建模；`0x104` 的游标初值（引擎不建立）与负数模数仍是 UB（新残差）；种类 0 默认路径的 alpha 可见性需截帧；显示适配的矩阵 / 组合次序仍开。
+
+**门禁**：`pnpm test` **939/0** · `pnpm test:assets` **200/0（1 skip）** · `pnpm test:mutation` **311/311** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十五、第八批残差收口：显示适配公式 · 矩阵乘入门（2026-10-24）
+
+**范围**：`CORE-SCENE-DISPLAY-FIT` 的两条残差（公式 / 矩阵），以及由此暴露的一处**实现与正文同错**：5.1 的视图矩阵门写反。只读取证在 `.tmp/spec-draft/batch8/display-fit/`；命令档执行的结构取证（`.tmp/spec-draft/batch8/command-pass/`）留给下一批合并。
+
+**闭合 2 条**：`RES-SCENE-DISPLAY-FIT-FORMULA`（算术全量：输入、trunc 向零、half、双精度、`1/t` 舍入、`rH≤rW` 含等号、VF 关 1:1 居中、T=0/1/2 三支、A!=0、退化出口、三条不变量）· `RES-SCENE-DISPLAY-FIT-MATRIX`（两张矩阵的构造、何时单位阵、**互斥乘入门**、与 6.1 的左右关系、折回坐标）。新增 `RES-SCENE-DISPLAY-FIT-SCALE-DIRECTION`（缩放方向语义需截帧）。
+
+**纠错（重要）**：5.1 原写"场景视图矩阵在目标编号 ≥ 0 且 ≠ 39 时乘"——**反了**。逐字证据：视图矩阵 ⇐ `F==0 && (D<0 || D==39) && tex∉[20,30)`；逆缩放矩阵 ⇐ `F==0 && D>=0 && D!=39 && tex∈[20,30)`；两条互补，每笔最多一张。目标 38（画布）与一切纹理目标**不乘**视图矩阵。实现 `scene-draw-plan.ts` 同步修正，并补了 `F`（场景屏幕形态副本）门。
+
+**合同补充**：
+- 显示适配输入补 **`display:AspectMode`** 与**固定分辨率模式**（= `display:ScreenMode` 生效值；不进公式，只在取值器短路 `s=(1,1)`、`o=(0,0)`）。
+- 非 `[20,30)` 档位置**不缩放、也不取整**（原 5.1 说"取整仍做"是错的）。
+- 折回坐标：位置**加上**偏移，偏移 = **负的**视口原点 / 内容缩放（等价于"位置 − 原点/缩放"）。
+- `T ∉ {0,1,2}` 的退化出口：只写参考尺寸，**其余格保持旧值**（不是"强制 view 单位阵"）。
+
+**emulator-new 落地**：
+- 新纯函数 `renderer/display-fit.ts` 的 `computeDisplayFit`（输入 / 输出 / 退化出口；`trunc`/`half`/`1/t` 逐条）；`session.ts` 去掉 `view: null`，按 config 计算并投影 `SceneViewSnapshot`（含 `fixedResolution` / `screenForm`）。
+- `scene-draw-plan.ts`：矩阵门纠正（38/39、band 内外、F 门、固定分辨率短路），新增 `adaptMatrixCount` 观测量。
+- 守卫：新增 `emulator-new-display-fit.test.mjs`（VF 关居中 / 负奇数差 −11 / 1.5→1 / T=0 两支 / T=1 Scaling(1.125) / T=2 min / `1/t` 边界 1920≠1921 / 退化保旧值 / 300 组不变量）；`-scene-draw-plan` 加 8 条矩阵门。变异 +4（315 条）。
+
+**独立复审（只读 `data/spec`）**：第一轮 S1 **6**（偏移符号、非 band 取整、矩阵左右、固定分辨率来源、退化出口、悬空残差引用）+ S2 11 / S3 6；已逐条修订（符号统一成"加负偏移"、非 band 不取整、适配矩阵右乘、固定分辨率 = ScreenMode 生效值、退化保旧值、删除悬空引用并写清组合次序）。
+
+**诚实项**：残差 `unknown` 453 → **452**。命令档**执行**仍未建模；`createDevice` 仍忽略 `backBufferWidth/Height`（screenW/H 取 Pixi 画布，VF 关且全屏宽≠窗口时原点会按两者差算，诊断已印出）；缩放方向需截帧。
+
+**门禁**：`pnpm test` **963/0** · `pnpm test:assets` **200/0（1 skip）** · `pnpm test:mutation` **315/315** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十六、第九批：命令档执行合同 + S0 规划器（2026-10-24）
+
+**范围**：命令档执行的**结构**（入口次序 / 空表 / 前置 / 出档 / 中止 / 命令表生命周期 / 区间之下口径），以及规划器 S0（只规划、不真实绘制）落地。证据在 `.tmp/spec-draft/batch8/command-pass/`。
+
+**闭合 1 条**：`RES-SCENE-DRAW-COMMAND-COVERAGE`（四种命令的区间语义 / 何时置已消费 / 区间之下全部落定）；`RES-SCENE-COMMAND-KIND1-BELOW-RANGE` 并入新 `RES-SCENE-COMMAND-BELOW-RANGE-ROLE`；新增 `RES-SCENE-COMMAND-TABLE-LIFETIME` / `RES-SCENE-COMMAND-EFFECT-TECHNIQUE`。
+
+**合同**：
+- **两档**：命令档（命令键**严格升序**）→ 收尾扫描；空表无动作（不发请求、不写场景格、不切目标）。
+- **每条前置**：取记录 → 时间戳 0 盖章 → 用**区间 A 起点** + 场景自身键窗算「跳过额外变换」→ 按种类分派。
+- **正常出档**：目标不同才恢复；「有动画 ∨ 强制完成」⇒ 置脏。
+- **中止路径**（种类 2 缺同键绘制项）：清持续时间后**整档返回**，不恢复、不收尾；它发生在切目标之前 ⇒ 不留悬空目标。
+- **生命周期**：渲染步收尾检查「有动画」= 0 ⇒ **整张命令表清空**；随后「强制完成」清 0；各命令在推进期会置「有动画」（种类 0 进度 / 2 图案 / 3 进度 / 1 尾段）。
+- **区间之下**：不是种类 1 独有 —— 种类 1 仅首帧 ∧ 设备就绪 ∧ 能力档<2；种类 0/2 每帧每块画布 ∧ <2（跳过另一段）；种类 3 不发生；不置已消费（单画布同帧两次、双画布三次）。
+
+**emulator-new 落地（S0/S1，只规划不画）**：
+- 新纯函数 `renderer/scene-command-plan.ts`：输入 commands / now / 场景键窗 / 三表键集合 / 能力档 / 有动画 / 强制完成 → 输出规划命令（阶段、目标 36/37/own/movie、区间 A/B、覆盖键、是否置消费）、`consumedKeys`、`stamps`、`clearTable`、`diagnostics`。
+- `protocol.ts` 加 `SceneCommandSnapshot` / `SceneSnapshot.commands` / `animating` / `forcedComplete` / `shaderTier`；`session.ts` 按命令键升序投影；`scene-order.ts` 去掉 `scene-command-order-unmodeled`，改报 `scene-command-pass-planned` 与 `scene-command-pass-render-unmodeled`；`pixi-host.ts` 只加统计。
+- 守卫：`emulator-new-scene-command-plan`（12 条：升序 / 盖章 / 首帧门含时钟不前进 / 空表 / clearTable / 类型 0·2 区间之下 / 类型 3 无 / 档 2 抑制 / consumed / 键窗粗判 / 类型 2 中止 / **B 段起点更低时 A 的区间之下排除尚未消费的 B 段条目**）；变异 +5（320 条）。
+
+**独立复审（只读 `data/spec`）**：第一轮 S1 **4**（强制完成清点与 70-vm 冲突、种类 0/2 不置「有动画」导致生命周期塌成一次、区间之下表漏"设备就绪"、两段区间时「跳过额外变换」取哪段不唯一）+ S2 7 / S3 8；已逐条修订（强制完成读点改成绘制期、清点在渲染步收尾；补「各命令推进期置有动画」；表格补设备就绪；跳过额外变换固定用区间 A 起点；"两次"改"单画布两次 / 双画布三次"）。
+
+**诚实项**：残差 `unknown` 452 → **453**。**真实绘制仍未做**：离屏画布 36/37 的建/切、表面拷贝、逐像素遮罩、12 种图案、效果技法、进度插值、`clearTable` 的真实清表都还没接；`shaderTier` 的映射（`display:PixelShader` 版本 → 0/1/2）未取证；`forcedComplete` 核心无格（投影 0）。
+
+**门禁**：`pnpm test` **975/0** · `pnpm test:assets` **200/0（1 skip）** · `pnpm test:mutation` **320/320** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十七、第十批：12 抹除图案 · 效果技法内部（2026-10-24）
+
+**范围**：种类 2 的 **12 种抹除图案**（残差 `RES-SCENE-COMMAND-WIPE`）与种类 0/3 的**效果技法内部**（`RES-SCENE-COMMAND-EFFECT-TECHNIQUE`）；证据在 `.tmp/spec-draft/batch10/{wipe,effects}/`。
+
+**合同**：
+- **12 图案全部落定**：每个图案单元**两趟落笔**（先画布 36=A、后 37=B，相接不重叠）；12 种**都用两块画布**（更正"0..3 只用一块"）。一族 0..3 = 整幅、按道跳（`步数=⌊轴长/S⌋+2`、`让出量=S×步序`、1/3 相位 +1）；二族 4..7 = 条带同相逐像素（`步长=D/(S+1)`、每带钳在本带内）；三族 8..11 = 条带错相（`步长=D/(S+条带数)`、第 i 带晚 i 像素步）。条带网格锚点 / 余数 / 多出 `S−余数`；三族都"提前走完"。
+- **效果技法**：`"Fade"`（低档 200 / 高档 201 两个版本，1 pass、不声明混合）、`"ZoomBlur"` / `"SlideBlur"`（同一资源 203，各 1 pass，抽数与权重已写）；退路是 CPU 逐像素另一套；**不写"像素等价"**。新增 `RES-SCENE-COMMAND-BLEND-STATE`（pass 继承设备混合，命令档前最后一档未钉）；`EFFECT-TECHNIQUE` → `EFFECT-EQUIVALENCE`；`WIPE` → `WIPE-BOUNDARY`（D=0 / 矩形外覆盖 / 画布领域名 / 晚 1 像素意图四件边界）。
+
+**emulator-new 落地**：
+- 新纯函数 `renderer/wipe-pattern.ts`：`wipePattern({mode, rect, split, elapsed, duration}) → {strokes, diagnostics}`；一族 2 笔、二/三族每带 2 笔；`duration≤0` / `split≤0` 只记诊断（⛔ 不定义成"立即完成"）。**未接渲染**（调用方后续接）。
+- 守卫：`emulator-new-wipe-pattern`（12 条：12 模式各一例 / 1·3 相位 / 二族钳位 / 三族错相 / 网格余数 / 余数 0 多一带 / 2 笔相接 / 诊断 / 类型越界 / 三档步长）；站点守卫 `spec-sites-batch10.assets`（36 个图案 / 技法站点）。变异 +5（325 条）。
+
+**独立复审（只读 `data/spec`）**：第一轮 S1 **8**（"每区域 2 笔"与每带 2 笔冲突、让出量是宽还是位移、多出量上限、折回偏移双重否定、Fade 的 `a_ret`、抽样公式、零 site、条件表无 falsifier）+ S2 10 / S3 4；已修 1–6、补 4 条 falsifier 与 36 个站点；`a_ret = 0` 的 0/0 并入 `EFFECT-EQUIVALENCE` 残差。
+
+**诚实项**：残差 `unknown` 453 → **455**。**图案尚未接渲染**（`scene-command-plan` 的种类 2 通道仍只记 `scene-command-wipe-rect-missing`；`pixi-host` 未调用 `wipePattern`）；落点 / 视野偏移、时间戳盖章 + 延迟、`mode<0` 的「强制完成」副作用仍在调用方。
+
+**门禁**：`pnpm test` **987/0** · `pnpm test:assets` **201/0（1 skip）** · `pnpm test:mutation` **325/325** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十八、第十一批：存档槽目录 / 范围 · 0x1a1 方向纠错 · STH 头（2026-10-24）
+
+**范围**：存档槽的三条残差（槽号范围 / 目录 / 半槽）与 STH / 存档头的四条格式残差；并纠正一条**方向性错误**：`0x1a1` 是**读档**，不是写档。证据在 `.tmp/spec-draft/batch11/{slot,sth}/`。
+
+**纠错（重要）**：`CORE-OPS-SAVE-WRITE` 原写"`0x19e` / `0x1a1` 两条都写"——字节证据显示 `0x1a1` 以**只读 + 只打开已存在**方式打开 `.DAT`，然后读头 + 读负载；写只有 `0x19e`。合同改为：`0x1a1` 打不开 ⇒ 第 1 操作数 ← 1（**唯一写它的支路**）；成功路径**不写**；读完后整池重编码。`RES-OPS-SAVE-WRITE-RECODE` 的预言方向同步改成"读同一个槽之后"。
+
+**闭合 / 移出 5 条**：`RES-SAVE-SLOT-RANGE` / `-DIR`（引擎侧闭合；剩"本作用了哪些槽号"归数据 → 新 `RES-SAVE-SLOT-SPACE`）· `RES-SAVE-STH-BFSIZE`（`+40` 有三处写、**读侧零读者**；"不要按它截断"升格为断言）· `RES-SAVE-MAGIC-FAMILY` / `-HEADER-VERSION-STRING` / `-HEADER-RESERVED`（族标识 = 初始化文件头两字节；版本串 = EXE 版本资源去第二字符取前四；保留区写侧清零、读侧不判）。`RES-SAVE-STH-SHORTREAD` 收窄（像素 / 调色板清零分配、两段头不清零 ⇒ 头短读是堆残留）。
+
+**合同补充**：
+- **槽号**：任意 32 位整数、**不做范围检查**；`%2.2d`（十进、至少两位、左补 0、负数带负号）；槽号**不可能**跑出存档目录；唯一边界是 256 字节路径截断（引擎不检查）。
+- **存档目录** = 根 [+分隔符] + `set:SavePath`；根 = `set:UseAppDataFolder` **恰为 1** ? 用户本地应用数据 : 空串；`set:RegFilePath` 与槽无关；无搜索顺序；目录按需创建（**读操作也建**），探测名固定 `SAVE.DAT`；缺键默认 `0 / "SAVE" / ""`。
+- **半槽**：`.DAT` 与 `.STH` **同号**（无映射）；`SAVEVERSION` 是一个整数（主 = trunc(v/100)、次 = v − 100×主）；半槽来自"独立写 + 先截断后写 + 删拷非事务"，读侧无一致性判据。
+- **STH 头**：BFSIZE 少 14 是写侧算术、无读者；族标识 / 版本串 / 保留区的实际取值与"读侧不比"已写。
+
+**emulator-new 落地**：
+- `saveWrite1a1` → `saveRead1a1`：只读打开；打不开 ⇒ op1=1；头不合法 ⇒ 诊断且**不写** op1；成功 ⇒ **不写** op1 + `save-restore-unmodeled` / `save-recode-unmodeled`（负载还原 / 整池重编码未建模，⛔ 不假装）。
+- 守卫：新增 `emulator-new-save-1a1`（3 条：打不开 / 成功不写 / 头坏不写）；删旧"0x1a1 写文件"断言；变异 +1（326 条）。
+
+**诚实项**：残差 `unknown` 455 → **449**（闭合 6、新增 1、其余为既有收窄的账）。STH 的 `VERSION2` / `TRAILER` 收窄与"740/2964 是负载内部只写表、尾段门含 v1≥2"的正文修正**本轮未合并**（留待下一批）；`.STH` 半截读与短读残差耦合，未单独收。
+
+**门禁**：`pnpm test` **989/0** · `pnpm test:assets` **201/0（1 skip）** · `pnpm test:mutation` **326/326** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 二十九、第十二批：STH 尾段归属修正 · 抹除笔接入规划器（2026-10-24）
+
+**范围**：合并上一批留下的 STH `VERSION2` / `TRAILER` 收窄与正文修正；并把 `wipePattern` 接进命令档规划器（S2 的第一步，仍不发绘制）。
+
+**合同修正**：
+- **版本字段 2 不只是相等比较**：它还是块 1 / 4 内容的写入门与回填门（≥ 20 才写 / 才回填），配置版本 1 == 1 时用 `== 20` 选择另一条位置还原分支；判据统一是"版本 2 与 20 比"。
+- **"尾段"拆成两件事**：负载末尾的 **740/2964 只写表**（本作无读取路径，只影响字节布局）与负载之后真正的**文本缓冲尾段**（12 字节压缩前缀 + LZSS；解码后 = 键值对数 / 每对 8 字节 / 记录数 / 每条 44 字节 / 字符串区）。尾段由**完整变体**读取、**只在文件版本 1 ≥ 2 时**读，写侧只有"存到槽"那条路径追加；定位是顺序的，不是由负载内的表算出来的。
+- 残差：`RES-SAVE-VERSION2-MEANING` 收窄（20 是界限还是阈值未定）；`RES-SAVE-TRAILER` 改为"归属已定、字段含义未定"。
+
+**emulator-new 落地（S2 第一步）**：
+- 规划器输入加 `tables.itemRects`（同键绘制项的矩形投影；`session` 的 `drawItems` 是唯一来源）；`CommandPlanPhase` 加 `strokes?: WipeStroke[]`。
+- 种类 2 通过"缺同键条目 ⇒ 中止"前置后：有矩形 ⇒ `wipePattern({mode, rect, split, elapsed: now − (盖章后 timestamp + delay), duration})`，笔挂 `composite`；无矩形 ⇒ `scene-command-wipe-rect-unmodeled` 且不产笔（⛔ 不编矩形）；`wipe-*` 诊断一一转成 `scene-command-wipe-*`（带命令键）。
+- **仍不真的画**：`pixi-host` 不消费 `strokes`，只统计阶段数。
+- 守卫：`emulator-new-scene-command-plan` +5（笔与 `wipePattern` 逐笔一致 / `duration=0` / `split=0` / 缺矩形 / `mode=12`）；变异 +2（328 条）。
+
+**诚实项**：残差 `unknown` 449。真实绘制仍未做（画布 36/37、表面拷贝、遮罩、效果技法、真实清表）；笔的落点 / 视野偏移、两块画布内容与混合档仍未接。
+
+**门禁**：`pnpm test` **994/0** · `pnpm test:assets` **201/0（1 skip）** · `pnpm test:mutation` **328/328** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十、第十三批：存档负载的块身份 · 场景表 · 帧记录（2026-10-24）
+
+**范围**：存档负载的五条结构残差（六个块的身份 / 局部池是否持久化 / 帧记录数 / `rec[259]/rec[260]` / 负载内 740 表）。证据在 `.tmp/spec-draft/batch13/body/`。
+
+**纠错 / 新增合同**：
+- **六个块 = 六个全局池**：`c0` 整型值池、`c1` **浮点值池**、`c2` 字符串、`c3` **整型引用池**、`c4` **浮点引用池**、`c5` **字符串引用表**（只写计数，写侧不写内容；样本里的 0 是分配残留）。原文"块 3 = 浮点池""块 5 写 0"都错；"只在 v2 ≥ 20"指的是**浮点族两块（c1/c4）的内容**，计数与洞无条件。
+- **局部池不持久化**：帧记录只覆盖状态 / 脚本索引 / 位置表两格 / 位置 1 / 位置 2；局部池随脚本装载重建，存档无法恢复某个局部槽的当时取值（恢复后是 0 还是残留本版不规定）。
+- **帧记录数 = 当前帧下标 + 1**（写侧循环上界，`0x5718 = 1252+20000+1044` ⇒ 无 ±1 空隙）。
+- **`rec[259]` / `rec[260]` 是帧自带位置表的下标**（不是地址）：返回点 = 表 3 表项 + 3 字；`rec[260]` 优先、恢复后推进 3 字；否则 `rec[259]`、推进 0；当前帧 `rec[260]` 恒 −1。
+- **负载内 740/2964 表 = 场景记录表**（键 + 740 B 记录；尾块 = 键窗 + 场景自身记录），**有读取路径、参与恢复**；与"负载之后的文本缓冲尾段"是**两张不同的表**（上一批的"只写表、无读者"是错的：读者用 `4*740` 而非立即数）。
+
+**残差**：`RES-SAVE-POOLFAMILIES` / `-FRAME-COUNT` / `-TRAILING-TREE` 关闭；`LOCAL-POOLS` 窄化为"不持久化 / 不可恢复"；`FRAMEREC` 窄化为"表 1/2 的填充者与场景侧消费者未取证"。
+
+**实现**：本轮不改代码；但登记与引擎互通的两处写侧缺口（浮点应写块 1 而非块 3；`tailBase` 漏 `4*(c1+c4+c5)` 保留洞）与"`rec[259]` 现写位置本身而非表下标"。
+
+**诚实项**：残差 `unknown` 449 → **446**。真实绘制仍未做；保存写侧的三处格式缺口只登记未修。
+
+**门禁**：`pnpm test` **994/0** · `pnpm test:assets` **201/0（1 skip）** · `pnpm test:mutation` **328/328** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十一、第十四批：存档写侧块布局落地（2026-10-24）
+
+**范围**：把上一批的六块合同落到 `apps/emulator-new` 的写侧（`buildSaveBody`），并修一处正文自相矛盾（块 0 是"解码后的明文" vs "写侧编码、读侧解码"）。
+
+**代码**：
+- 计数：`c0=ints.length`、`c1=floats.length`、`c2=strings.length`、`c3=c4=c5=0`（引用三池未建模）。
+- 块：块 0 = 4×c0 整型（`encodeInt`）、块 1 = 4×c1 **浮点 raw**、块 2 = 4+4×capWords 字符串；块 3/4/5 零长。
+- `tailBase = blocksBase + 4*(c0 + c1 + capWords + 1)`；注释写明将来启用引用池必须再加 `4*(c3+c4+c5)`。
+- 浮点内容门控 `version1 !== 2 && version2 >= 20`：不写时留 4×c1 全 0 洞、块位置不动。
+- 正文修正：块 0 的文件内容是**编码后的值**（内存池里是明文），写侧编码、读侧解码。
+
+**守卫**：`emulator-new-save-codec` 从 1 条布局用例拆成 4 条（计数槽 / 块 1 逐位 / 块 3 零长 / v2<20 门控 / v1=2 门控），共 8 条；变异 +3（331 条）。
+
+**仍开着**：读侧（还原 / 整池重编码）、`rec[259]` 的表下标语义、引用三池内容、尾段场景表、`createDevice` 的 backBuffer、真实绘制 S2+。
+
+**门禁**：`pnpm test` **998/0** · `pnpm test:assets` **201/0（1 skip）** · `pnpm test:mutation` **331/331** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 三十二、第十五批：混合状态闭合 · 存档尾段字段（2026-10-24）
+
+**范围**：`RES-SCENE-COMMAND-BLEND-STATE`（技法 / 命令档进入时的混合状态）与 `RES-SAVE-TRAILER`（尾段字段）。证据在 `.tmp/spec-draft/batch15/{blend,trailer}/`。
+
+**闭合 / 收窄**：
+- **混合状态**：命令档入口前**没有**任何混合写入；每条条目画完立刻复位成**中立值**（混合开 / 源因子 1 / 目标因子 0 / 运算加 ⇒ 覆盖式写入）。种类 0 出口 A、种类 3 技法、种类 3 CPU 退路进入时都是中立值；**只有种类 0 默认退路不同**：不写因子、**无条件关 alpha 测试**，并在条件下写一次 (源=1,目标=0)。`BLEND-STATE` 关闭，劈出 `BLEND-INTERFRAME`（渲染步之外谁写未逐个读）；`KIND0-ALPHA` 收窄为"淡入到底来自哪里"未定。
+- **尾段**：不是"文本库快照"，而是**消息窗口的显示 / 音声命令日志 + 检查点**：8 字节对 = `(槽号, 记录下标)`（下标指向标志 bit0=1 的组首条、末对是导航哨兵）；44 字节记录 = 槽号 / 矩形四边 / 族载荷 / 字距 / 标志；字符串区连续、**整段按 32 位字取反**、尾部 1..4 字节是未定义内存；写总长 `12+8P+44N+4W`；读时**从尾部弹出到第一条 bit0（含）** ⇒ 恢复后 N = 末对下标（最后一组被丢弃）、**不恢复游标**、不校验计数。`TRAILER` 关闭归属，收窄为 `TRAILER-FIELDS`（显示族 +28/+32、命令族键值空间、bit1/2/3 语义）。
+
+**实现**：均不改（模拟器还没有技法 pass / 尾段实现；⛔ 不写"逐字节相同"守卫 —— 字距与串区 padding 是未定义内存）。
+
+**诚实项**：残差 `unknown` **446**。真实绘制 S2+、保存读侧 / `rec[259]` 表下标、`createDevice` backBuffer 仍未做；静态可取证项已基本收口，剩下多为真机 / 数据 / 渲染实现。
+
+**门禁**：`pnpm test` **998/0** · `pnpm test:assets` **201/0（1 skip）** · `pnpm test:mutation` **331/331** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。

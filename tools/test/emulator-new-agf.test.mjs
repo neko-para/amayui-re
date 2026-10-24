@@ -5,7 +5,7 @@
  * 合成 AGF（不依赖游戏安装），钉住四件最容易静默错的事：
  *   ① 行宽按 **32 位（4 字节）对齐**（8bpp 1026 宽 ⇒ 1028 字节/行）；
  *   ② 盘上 bottom-up，解出来是 top-down；
- *   ③ 8bpp 调色板从 meta+56 起、24bpp BGR、32bpp BGRA，ACIF alpha 覆盖；
+ *   ③ 8bpp 调色板从 meta+56 起、24bpp BGR、32bpp BGRA（alpha 只取第 4 字节，ACIF alpha 不覆盖）；
  *   ④ 颜色键在上传期把命中像素整条清 0，且比较的是 **32 位 ARGB 全值**（A 参与）；
  *      `0` 是"无键"（`0x1f9` 的负数操作数归一化成 0），不是黑键。
  */
@@ -94,14 +94,18 @@ test('★ 24bpp：BGR → RGBA，且无 ACIF 的 version 1 不读 alpha', () => 
   assert.deepEqual([...image.rgba], [30, 20, 10, 255, 60, 50, 40, 255]);
 });
 
-test('★ 32bpp：ACIF alpha 覆盖 body 的 alpha', () => {
+test('★ 32bpp：alpha 只来自像素第 4 字节（ACIF alpha **不**覆盖）', () => {
+  // ★ 引擎已观察行为：32bpp 的两处搬运路径只取第 4 字节、不读 ACIF alpha 段；
+  //   spec 的 FMT-AGF-PIXELS 本版**不规定** alpha 段是否覆盖 32bpp ⇒ 这条钉的是"跟随观察"的实现侧。
+  //   回到 `alpha ? alpha[...] : body[s+3]`（旧实现）⇒ 这里会读成 200 / 0，当场红。
   const body = Buffer.alloc(8); // 2×1
   body.set([1, 2, 3, 10, 4, 5, 6, 20], 0);
   const image = decodeAgf(buildAgf({
     width: 2, height: 1, bpp: 32, body,
     alpha: Buffer.from([200, 0]),
   }));
-  assert.deepEqual([...image.rgba], [3, 2, 1, 200, 6, 5, 4, 0]);
+  assert.deepEqual([...image.rgba], [3, 2, 1, 10, 6, 5, 4, 20],
+    'ACIF alpha 给了 200 / 0，但 32bpp 的 alpha 必须是 body 第 4 字节（10 / 20）');
 });
 
 test('★ 颜色键：键 0 = 无键 ⇒ 不透明黑（alpha=255）不被清掉', () => {

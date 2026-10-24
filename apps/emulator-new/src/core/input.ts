@@ -42,12 +42,43 @@ export interface MouseCallbackState {
   depth: number;
 }
 
+/**
+ * **按住派发族**（`0x102` / `0x103` / `0x104` / `0x105`）的引擎级状态。
+ * ★ 三格初值都是**合同值**（不是兜底）：`mask = 0`、`modulus = 0`、`contextKey = −1`
+ *   （启动路径与 `0xfc` 都写它们）。⚠ 与 `keyTotal` 不同：那一格引擎**不建立**初值（UB）。
+ * ★ 按住**游标**不在这里：它是**按帧**的（见 `Frame.holdCursor`）。
+ */
+export interface HoldState {
+  /** `0x105` ← ；`0x104` 用第 i 位（i = 键编号，与输入字同一套编号）决定返回点与是否夹上限。初值 0 */
+  mask: number;
+  /** `0x103` ← ；`0x104` 每条出口对游标取余。初值 0 ⇒ 第一次 `0x104` 在游标推进处除零 */
+  modulus: number;
+  /**
+   * `0x104` 的"上一次决定游标上下文的编号"（引擎里是**进程级静态格**，不复位）。
+   * ★ 本层一个 `Machine` 就是"一个引擎" ⇒ 放成字段与"跨引擎共享"行为等价。初值 −1（`.data` 初值）。
+   * ⛔ 它**不按帧**，别塞进 `Frame`。
+   */
+  contextKey: number;
+  /** 只记账：按住派发次数（CLI / 诊断用） */
+  dispatches: number;
+}
+
+/** 按住派发族的初值（合同值，不是"没写就 0"的兜底） */
+export function initialHoldState(): HoldState {
+  return { mask: 0, modulus: 0, contextKey: -1, dispatches: 0 };
+}
+
 /** 引擎侧输入状态（可观察的输入字 / 键总数 / 模式字 / 鼠标回调登记） */
 export interface InputState {
   /** 32 位输入字（`0xff` 清后重采、`0x101` 采样后清零、平台采样写入） */
   word: number;
   /** 键总数（`0xfe` 写；决定 `0x100` 的扫描范围与"无按键"表项） */
   keyTotal: number;
+  /**
+   * ★ 键总数是否已被 `0xfe` 写过（引擎**不建立**初值：构造 / 帧装载 / 重置都不写它）。
+   * `false` 时读 `keyTotal` 是**未定义行为**：读者要留一条 `key-total-unset` 诊断。
+   */
+  keyTotalEstablished: boolean;
   /** 主循环模式字（`0x24e` 写；位 0 被等待服务读取） */
   mode: number;
   mouse: MouseCallbackState;
@@ -63,8 +94,11 @@ export interface InputState {
 export function initialInputState(): InputState {
   return {
     word: 0,
-    // ★ 初值本版不规定（spec 残差）；真实启动链里 SYSTEM4 的 0xfe 会写它。
+    // ★ 引擎**不建立**这一格的初值（唯一写点是 `0xfe`）⇒ 0 是**本实现的 UB 兜底，不是合同**；
+    //   任何断言 / 日志都不得把它表述成"引擎启动后的值"。`0xfe` 之前读到它的读者
+    //   （`0x100` / `0xff`）会经 `readKeyTotal` 记一条 `key-total-unset` 诊断。
     keyTotal: 0,
+    keyTotalEstablished: false,
     mode: 0,
     mouse: { interval: 1, last: 0, target: -1, depth: -1 },
     samples: 0,

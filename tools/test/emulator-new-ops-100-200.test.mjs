@@ -17,8 +17,17 @@ import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
 import { HeadlessRenderHost } from '../../apps/emulator-new/src/core/render.ts';
 import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
 import { encodeInt, readInt } from '../../apps/emulator-new/src/core/values.ts';
+import { loadOpcodeTable } from '../../apps/emulator-new/src/platform/node/spec.ts';
 
 const KEY = 0x1234abcd;
+/** 真跑（`Machine.run`）要真实指令表（直接调 handler 的用例用 `machine()` 里的空表就够）。 */
+const REAL_TABLE = await loadOpcodeTable();
+/** 一段 dword 序列 → body（真跑用例用；`0x199` / `0x7c` / `0x01` 都无操作数）。 */
+function words(...values) {
+  const buf = Buffer.alloc(values.length * 4);
+  values.forEach((value, i) => buf.writeUInt32LE(value >>> 0, i * 4));
+  return buf;
+}
 const op = (type, raw) => ({ type, raw });
 const f32bits = (v) => new Uint32Array(new Float32Array([v]).buffer)[0] >>> 0;
 const f32 = (bits) => new Float32Array(new Uint32Array([bits >>> 0]).buffer)[0];
@@ -460,6 +469,122 @@ test('★ `0x7b` / `0x7c`：两个进入目标按帧存；0x7c 的身份 / 深�
   assert.equal(ok.localPending, 0);
 });
 
+/* ──────────────────────────── 0x199 进入本地块（CORE-OPS-STATE-199） ──────────────────────────── */
+
+test('★ `0x199`：主目标未登记 ⇒ 只推进 1、清输入字、其余一格不动；`0x7c` 此刻仍按身份判据抛', () => {
+  const m = machine();
+  m.ip = 4 * 20;
+  m.input.word = 0x8;
+  m.inputWord = 0x8;
+  m.localSaveWord = 0;
+  m.localSavePos = 77;
+  m.localSaveDepth = 99;
+  HANDLERS.get(0x199)(m);
+  assert.equal(m.operandCount, 1, '推进格数 = 1（不是 0：未登记时这条退化成空指令）');
+  assert.equal(m.ip, 4 * 20, '执行位置不动');
+  assert.equal(m.localSaveWord, 0, '存档字不被读、也不被写（首次进入形态不读 save 原值）');
+  assert.equal(m.localSavePos, 77, '返回点不动');
+  assert.equal(m.localSaveDepth, 99, '入块深度不动');
+  assert.equal(m.flags, 0, '状态选择字不动');
+  assert.equal(m.input.word, 0, '输入字**无条件**清 0（含这条"什么都不做"的路径）');
+  assert.equal(m.inputWord, 0, '两处都要清（照 `0xff` 的写法）');
+  // 「0x199 不抛」但「0x7c 仍抛」：第 25 位 = 0 是 0x7c 的判据，不是 0x199 的
+  assert.throws(() => HANDLERS.get(0x7c)(m), /不在本地块里/, '未进入 ⇒ 0x7c 的身份判据仍然生效');
+});
+
+test('★ `0x199` 首次进入：state 整字搬进 save 并置第 25 / 26 位、state 清 0、返回点 = 本条 +1、深度 = 帧身份', () => {
+  const m = machine({ rootId: 0x2a });
+  assert.equal(m.frame.localDepth, 0x2a, '★ 建帧路径就把帧身份写进 localDepth（⛔ 不是 undefined）');
+  m.frame.localMain = 5;
+  m.frame.localSub = 9;
+  m.flags = 1 << 10; // 一个可观察的状态位
+  m.ip = 4 * 20;
+  m.input.word = 0x4;
+  m.inputWord = 0x4;
+  HANDLERS.get(0x199)(m);
+  assert.equal(m.operandCount, 0, '真进入 ⇒ 推进格数清 0（分派器不再自动前进）');
+  assert.equal(m.ip, 4 * 5, '执行位置 ← 4 × 主进入目标');
+  assert.equal(m.localSaveWord, ((1 << 25) | (1 << 26) | (1 << 10)) >>> 0, '存档字 = state 整字 | 第 25 | 26 位');
+  assert.equal(m.flags, 0, '状态选择字被整字搬走 ⇒ 清 0');
+  assert.equal(m.localSavePos, 21, '返回点 = 本条之后那一格（**位置**，不是字节）');
+  assert.equal(m.localSaveDepth, 0x2a, '入块深度 = 本帧记录里的身份编号');
+  assert.equal(m.input.word, 0);
+  assert.equal(m.inputWord, 0);
+
+  // 同一帧里退出：真读 localDepth（不手工赋值）⇒ 深度判据通过
+  HANDLERS.get(0x7c)(m);
+  assert.equal(m.ip, 4 * 21, '回到 0x199 的下一条');
+  assert.equal((m.flags >>> 10) & 1, 1, '状态位进入时被保住 ⇒ 回来还在');
+  assert.equal((m.flags >>> 26) & 1, 1, '第 26 位带着 1 回来（0x7c 只清第 25 位）');
+  assert.equal(m.localSaveWord, 0, '成功退出清存档字（第二次 0x7c 会命中第 25 位判据）');
+});
+
+test('★ `0x199` 已在块内（第 26 位 = 1）：save 读-改-写、跳副目标，且**不写**返回点 / 入块深度 / state', () => {
+  const m = machine({ rootId: 3 });
+  m.frame.localMain = 5;
+  m.frame.localSub = 9;
+  m.localSaveWord = ((1 << 26) | (1 << 25) | 0x1000) >>> 0;
+  m.localSavePos = 77;
+  m.localSaveDepth = 99;
+  m.flags = 0x400;
+  m.ip = 4 * 20;
+  m.input.word = 0x2;
+  m.inputWord = 0x2;
+  HANDLERS.get(0x199)(m);
+  assert.equal(m.operandCount, 0);
+  assert.equal(m.ip, 4 * 9, '执行位置 ← 4 × 副进入目标（不是主目标）');
+  assert.equal(m.localSaveWord, ((1 << 25) | 0x1000) >>> 0, '读-改-写：清第 26 位、置第 25 位、保留其余位');
+  assert.equal(m.localSavePos, 77, '⛔ 不写返回点（保留外层记录的）');
+  assert.equal(m.localSaveDepth, 99, '⛔ 不写入块深度（嵌套进入不改深度判据）');
+  assert.equal(m.flags, 0x400, '⛔ 不动状态选择字');
+  assert.equal(m.input.word, 0, '输入字仍无条件清 0');
+  assert.equal(m.inputWord, 0);
+
+  // 副目标也未登记 ⇒ 同样"什么都不做"（只剩推进 1 + 清输入字）
+  const none = machine();
+  none.localSaveWord = 1 << 26;
+  none.localSavePos = 7;
+  none.localSaveDepth = 8;
+  none.input.word = 0x1;
+  none.inputWord = 0x1;
+  HANDLERS.get(0x199)(none);
+  assert.equal(none.operandCount, 1);
+  assert.equal(none.ip, 0, '副目标 = −1 ⇒ 不跳');
+  assert.equal(none.localSavePos, 7);
+  assert.equal(none.localSaveDepth, 8);
+  assert.equal(none.input.word, 0);
+
+  // 真正的嵌套：首次进入（主）→ 块内再进入（副）→ 退出，返回点仍是**第一次**那个
+  const nested = machine({ rootId: 3 });
+  nested.frame.localMain = 5;
+  nested.frame.localSub = 9;
+  nested.ip = 4 * 20;
+  HANDLERS.get(0x199)(nested);
+  assert.equal(nested.ip, 4 * 5, '首次进入走主目标');
+  assert.equal((nested.localSaveWord >>> 26) & 1, 1, '第 26 位置起 ⇒ 下一次是"已在块内"形态');
+  nested.ip = 4 * 30;
+  HANDLERS.get(0x199)(nested);
+  assert.equal(nested.ip, 4 * 9, '块内进入走副目标');
+  assert.equal(nested.localSavePos, 21, '⛔ 第二次不覆盖返回点');
+  HANDLERS.get(0x7c)(nested);
+  assert.equal(nested.ip, 4 * 21, '退出后回到**第一次**进入时记下的返回点');
+  assert.equal(nested.localSaveWord, 0);
+});
+
+test('★★ 真跑 `0x199` → `0x7c`：不再抛深度异常（身份来自建帧路径，⛔ 不手工赋 localDepth）', async () => {
+  // 位置 0：0x7b（主目标 7 / 副目标 −1）⇒ 5 格；位置 5：0x199；位置 6：0x01（退出）；位置 7：0x7c
+  const body = words(0x7b, 0, 7, 0, 0xffffffff, 0x199, 0x01, 0x7c);
+  const m = new Machine({ body, table: REAL_TABLE, key: KEY, rootId: 0x2a });
+  assert.equal(m.frame.localDepth, 0x2a, '根帧的身份编号在建帧时就位');
+  const r = await m.run();
+  assert.equal(r.steps, 3, '三步都执行了：0x7b → 0x199 → 0x7c（抛深度异常的话这里到不了）');
+  assert.equal(r.ip, 4 * 6, '退出后 PC 落在 0x199 的下一条（返回点是位置）');
+  assert.equal(m.localSaveWord, 0, '成功退出 ⇒ 存档字清 0');
+  assert.equal((m.flags >>> 26) & 1, 1, '第 26 位带着 1 回来');
+  assert.equal(r.stop.kind, 'gate', '第 26 位让门还关着（那一支的服务分支不在本版 ⇒ 停下来报告，⛔ 不是执行出错）');
+  assert.equal(r.stop.bit, 1 << 26, '停因就是「第 26 位」这一格');
+});
+
 test('★ `0x21e` / `0x21f`：带位 0 门；浮点 ÷100 / 轴角另存 + 矩阵落点', () => {
   const m = machine();
   const base = [op(0, 3), op(0, 11), op(0, 22), op(1, f32bits(100)), op(1, f32bits(200)), op(1, f32bits(300))];
@@ -569,21 +694,7 @@ test('★ `0x19e`：目标不存在 / 头可读 ⇒ 直接写；头不合法 ⇒
   assert.equal(writes, 2);
 });
 
-test('★ `0x1a1`：无确认写槽；文件头 + 参数块 + 非压缩信封落盘', async () => {
-  let written = null;
-  const host = saveHost({ write: async (_p, bytes) => { written = bytes; return true; } });
-  const m = machine({ saveHost: host });
-  m.slots[0].id = 7;
-  m.globalInt.set(0, encodeInt(5, KEY));
-  m.globalFloat.set(0, f32bits(1.5));
-  m.globalString.set(0, 'AB');
-  await HANDLERS.get(0x1a1)(m, [op(3, 1), op(0, 4)]);
-  assert.equal(readInt(m, [op(3, 1)], 1), 0);
-  assert.ok(written && written.length > 340);
-  assert.equal(new TextDecoder().decode(written.slice(0, 4)), 'S4SD');
-  assert.equal(new DataView(written.buffer).getUint32(284, true), 3);
-  assert.equal(new DataView(written.buffer).getUint32(288, true), 20);
-});
+// ★ `0x1a1` 是**无确认的读回**（不是写）⇒ 它的守卫在 `emulator-new-save-1a1.test.mjs`。
 
 test('★ `0x1a0`：读 292 字节头，7 个字段按序写 op3..9；打不开 1 / 头不合法 2', async () => {
   const buf = Buffer.alloc(292);

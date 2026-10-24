@@ -245,6 +245,15 @@ export class ConfigStore {
     return this.strings.get(key) ?? '';
   }
 
+  /**
+   * 这个键**在不在**配置里（⛔ 不是"值是不是 0"）。
+   * ★ 读缺失键在引擎里**不是静默的**：会先弹一次模态错误框（键名 + "不正なキー"），然后返回 0 / 空串
+   *   （spec `06-window.md`「日志通道的落点与丢弃」）。调用方要能区分"缺键"与"显式写 0"才记得出诊断。
+   */
+  has(key: string): boolean {
+    return this.ints.has(key) || this.strings.has(key) || this.lists.has(key);
+  }
+
   setString(key: string, value: string): void {
     this.ints.delete(key);
     this.lists.delete(key);

@@ -48,18 +48,22 @@
  *    全部未取证。未知值 ⇒ normal + 一条日志（⛔ 不猜）。
  * 7. `present` 渲染到纹理目标时：空白槽（`hasContent = false`）用 `clear: true`；已有文件像素 /
  *    离屏文字的槽用 `clear: false`，否则会把它们擦掉。呈现与目标的次序本版未取证 ⇒ diagnostics 标出。
- * 8. 文件纹理由 core 的 AGF 解码 + `uploadTexture` 上传；占位块只在槽没有可画内容时出现。
- *    空白创建（`0x1f8`）的初始像素未定义，本实现不保证清零。
- * 9. `0x1fb` 的四条边是**来源矩形**、两个浮点是**目标位置**；来源矩形越出纹理时只记计数，
- *    Pixi 按 frame 裁掉，不缩放（拉伸是否会篡改像素未取证）。
+ * 8. 文件纹理由 core 的 AGF 解码 + `uploadTexture` 上传；**绘制项的消费**按
+ *    `CORE-OPS-TEXTURE-DRAW-CONSUMER` 走纯规划器 `scene-draw-plan.ts`（空槽 / 无目标 / 绘制失败
+ *    ⇒ 上报并**跳过**，⛔ 不建占位块；夹空 ⇒ 静默跳过）。空白创建（`0x1f8`）的初始像素未定义。
+ * 9. `0x1fb` 的四条边是**来源矩形**、两个浮点是**目标位置**；来源矩形**夹到纹理对象自己的逻辑矩形**
+ *    （不是表面尺寸），左 / 上被裁时位置补回同样的量。位置档位（`[20,30)` 缩放 + 半上取整、场景偏移）
+ *    由规划器按 spec 5.1 算；**场景相机模型本实现还没有** ⇒ 按"无相机 / 无缩放"档（缩放 1、偏移 0），
+ *    诊断面板会标出这条缺口。⛔ 不缩放 / 不拉伸纹理（拉伸是否会篡改像素未取证）。
  */
 
 import { Application, Container, Graphics, Rectangle, RenderTexture, Sprite, Text, Texture } from 'pixi.js';
 import type { BLEND_MODES } from 'pixi.js';
 import { applyColorKey } from '../../../core/agf.ts';
-import { orderedDrawables } from './scene-order.ts';
+import { orderedDrawables, planCommandPassForScene } from './scene-order.ts';
+import { drawFailedReport, planDraw } from './scene-draw-plan.ts';
+import type { DrawPlanNote, DrawPlanSlot } from './scene-draw-plan.ts';
 import type {
-  DrawItemSnapshot,
   RendererInit,
   RendererReady,
   RenderCall,
@@ -107,16 +111,6 @@ export const GAME_FONT_FAMILY = 'Amayui CN';
 /** 统一字体栈；`sans-serif` 只是字体加载失败时的最后兜底（正常路径第一项就命中）。 */
 export const FALLBACK_FONT_FAMILIES: readonly string[] = [GAME_FONT_FAMILY, 'sans-serif'];
 
-/** 占位块的 alpha 下限：低于它占位块几乎看不见，调试时无法判断"这里本来有东西"（可见性选择） */
-const PLACEHOLDER_MIN_ALPHA = 0.35;
-/** 占位块默认灰（绘制项 `color === -1` = 无颜色时） */
-const PLACEHOLDER_GRAY = 0x7f7f7f;
-/** `blank = 1` 的空白纹理占位色（偏蓝，和"来自文件"的灰区分开） */
-const BLANK_SLOT_COLOR = 0x8899aa;
-/** 纹理槽不在快照里（画不出东西）的占位色 */
-const MISSING_SLOT_COLOR = 0xcc4444;
-/** 一条场景里最多画多少个占位标签（每个标签是一张 canvas 纹理，纯诊断用，不值得无限画） */
-const MAX_PLACEHOLDER_LABELS = 32;
 /** diagnostics 里保留的日志条数 */
 const MAX_NOTES = 200;
 
@@ -139,7 +133,7 @@ export const BLEND_MODE_MAP: readonly { mode: number; pixi: BLEND_MODES; evidenc
 export const DISCLOSURES: readonly string[] = [
   '影片：pl_mpeg WASM 解码 MPEG-1/PS，仅视频（音频忽略）；不重编码 / 不做音频同步；帧尺寸来自码流，成品像素由 pl_mpeg 决定',
   '全屏语义未实现：screenMode=0 被平台降级为 set:WinX×set:WinY 的普通窗口（不做分辨率切换 / 缩放）；这是模拟器决策，不是 spec 结论',
-  '网格渲染仅支持“4 顶点、四色一致”的全屏四边形（LOGO 版权页 / TITLE 背景）；逐顶点布局 / topology 未取证，其它网格跳过并诊断。绘制顺序是**引擎侧行为**：无命令记录时按 `CORE-SCENE-DRAW-ORDER` 的 key 升序 / 同键网格先于绘制项；有命令记录时的两档顺序尚未成篇（⛔ 不是平台自由选择）',
+  '网格渲染仅支持“4 顶点、四色一致”的全屏四边形（LOGO 版权页 / TITLE 背景）；逐顶点布局 / topology 未取证，其它网格跳过并诊断。绘制顺序是**引擎侧行为**：无命令记录时按 `CORE-SCENE-DRAW-ORDER` 的 key 升序 / 同键网格先于绘制项；负键口径按表分（网格 / 辅助表的负键不参与，**绘制项不做符号检查**）。**命令档（有命令记录时的第一档）只规划、不执行**：`renderer/scene-command-plan.ts` 是纯规划器（命令键升序 / 时间戳盖章 / 三表合并序 / 按种类的阶段 / 区间之下 / clearTable），诊断是 `scene-command-pass-planned` 与 `scene-command-pass-render-unmodeled` —— 阶段一个都没发，画面仍来自收尾扫描（⛔ 不假装执行了命令档）',
   '纹理加载：AGF 解码 + uploadTexture 已实现；BMP 分支未成篇，颜色键的 16 位通道装配未取证，空白纹理的初始像素未定义',
   '字体对象部分建模：size 24 / 主色 0xFFFFFF / 副色 0 / 绘制模式 1 来自 Font::init 的逐字证据（0x4654C3 / 0x4655FB / 0x465605 / 0x465611）；face name（0x1a5 → Font+0x4EC）只记录',
   '★ 产品选择：所有文字统一映射到 Amayui CN（更纱黑体 cnjp 变体，随仓字体资产 Amayui-CN_cnjp*.ttf）；引擎 face name 不参与字体选择',
@@ -149,6 +143,10 @@ export const DISCLOSURES: readonly string[] = [
   '纵向对位：alignMode != 0 时引擎会做 y 修正，修正量未取证 ⇒ 本实现不改 y（未实现，不是"等价"）',
   '混合模式映射未取证：只有 0 = normal 是本实现约定，1/2/3 = add/multiply/screen 是猜测（RES-RENDER-BLEND-PIXEL）',
   '渲染到纹理目标时：空白目标用背景色 clear；已有文件像素 / 离屏文字的目标不清屏（呈现与目标的次序未取证）',
+  '★ 绘制项的消费按 `CORE-OPS-TEXTURE-DRAW-CONSUMER` 走纯规划器（`scene-draw-plan.ts`）：空纹理槽 / 无渲染目标 / 绘制失败 ⇒ 上报（带编号）并**跳过**（⛔ 不建占位块）；源矩形夹空 ⇒ **静默**跳过；矩形**夹到纹理对象自己的逻辑矩形**（不是表面尺寸）；**自引用不跳过**（引擎不比较源与目标 —— 平台把同一张纹理当源采样属未定义行为）',
+  '★ 位置档位的第 2 / 3 步（`[20,30)` 缩放 + 半上取整、场景偏移的两档）**已按 spec 写进规划器**，但本实现**没有场景相机模型** ⇒ 相机档按"无相机 / 无缩放"（缩放 1、偏移 0），只有取整那一档生效；诊断面板会把 `scene-view-unmodeled` 标出来（⛔ 不是 spec 结论）',
+  '★ 附加组派生（首字第 2 位）：颜色三角波混合 / 变换乘入并强制有效 / 源矩形步进 的**语义**已在规划器里实现，但本实现缺三样取值 —— 附加组终色（`+0x240` 没有已建模的写入方）、步进量（残差 `RES-TEX-DRAW-CONSUMER-RECTSTEP`）、哪一张矩阵是变换通道（未取证） ⇒ 默认不混色、不步进、不乘矩阵；⛔ 不编常数',
+  '★ 本步变换：规划器会给出 `base × 附加组 → 档位矩阵`，但 Pixi 路径**不消费矩阵**（Sprite 用位置实参定位）；变换的像素结果未实现，⛔ 不声称等价',
 ];
 
 /* ─────────────────────────────── 纯函数（可单测） ─────────────────────────────── */
@@ -331,7 +329,11 @@ export interface TextureSlot {
   /** 被 `present` 当纹理目标写过的次数 */
   renderTargetWrites: number;
   writeCount: number;
-  /** 有没有真实内容（文件上传 / 离屏文字 / 目标渲染）；false ⇒ 画占位块 */
+  /**
+   * 有没有真实内容（文件上传 / 离屏文字 / 目标渲染）。
+   * ★ 只影响**呈现**（`present` 的 clear）与影片覆盖顺序 —— ⛔ 它**不是**绘制项的"可画"判据：
+   *   槽里有对象就照画（像素未定义属平台），见 `CORE-OPS-TEXTURE-DRAW-CONSUMER` 第 3 条。
+   */
   hasContent: boolean;
   lastDraw: LastDrawState | null;
 }
@@ -398,23 +400,36 @@ export interface SceneBuildStats {
   drawItems: number;
   activeItems: number;
   sprites: number;
-  placeholders: number;
-  /** 有 flags & 1，但纹理槽不在快照里 */
-  missingSlots: number;
-  /** 绘制项引用的纹理 == 当前渲染目标 ⇒ 跳过（否则渲染自己的目标 = 反馈环 / 重影） */
-  selfTargetSkips: number;
-  /** 绘制项矩形与纹理逻辑尺寸不一致（按 1:1 贴、不缩放） */
-  sizeMismatch: number;
-  /** 零面积（right <= left 或 bottom <= top） */
-  zeroArea: number;
-  /** 实际画出的占位标签数 */
-  labels: number;
+  /**
+   * 空纹理槽（槽里没有对象）⇒ **上报 + 跳过**（⛔ 不建占位块）。
+   * ★ 与"条目无效"是两条不同的跳过：后者静默（见 `activeItems` 的差）。
+   */
+  missingTextures: number;
+  /** 当前没有渲染目标 ⇒ 上报 + 跳过 */
+  noTarget: number;
+  /** 首字第 16 位（本轮已消费）⇒ 静默跳过 */
+  consumedSkips: number;
+  /** 源矩形夹到纹理逻辑矩形后为空 ⇒ **静默**跳过（不上报、不建占位物） */
+  clippedEmpty: number;
+  /** 绘制入口失败（纹理不可用 / 建 frame 抛异常）⇒ 上报 + 跳过 */
+  drawFailed: number;
+  /** 附加组「跨步进 ⇒ 场景标脏」的次数（本层没有回写路径，只记数与诊断） */
+  dirtyRequests: number;
+  /** 源矩形窗口「到期 ⇒ 写回四条边」的次数（4.1；本层没有回写路径，只记数与诊断） */
+  rectWriteBacks: number;
   /** 快照里的网格数 / 画出的 4 顶点四边形数 / 因布局未知跳过的网格数 */
   meshes: number;
   meshQuads: number;
   meshSkipped: number;
   /** 实际绘制顺序（`item#10 → mesh#200000 → …`，最多列 16 项；诊断用） */
   order: string;
+  /**
+   * 命令档**规划**统计（本实现只规划、不执行：阶段一个都没发，画面仍由收尾扫描产生）。
+   * ★ 命令数 / 阶段数 / 本帧被记成「本轮已消费」的键数 —— 与诊断 `scene-command-pass-planned` 同源。
+   */
+  commandPassCommands: number;
+  commandPassPhases: number;
+  commandPassConsumedKeys: number;
 }
 
 /** diagnostics 面板要的全部数字（**纯数据**；DOM 由 `renderer.ts` 画） */
@@ -461,7 +476,7 @@ export interface TextureSlotView {
   writeCount: number;
   drawCount: number;
   renderTargetWrites: number;
-  /** 有没有可画内容：真实上传 / `drawText` / `present` 目标写过；占位块不算 */
+  /** 有没有可画内容：真实上传 / `drawText` / `present` 目标写过（`0x1f8` 的空白创建 ⇒ false，但它**仍会照画**） */
   hasPixels: boolean;
 }
 
@@ -469,6 +484,12 @@ export interface TextureSlotView {
 export interface PixiRenderHostOptions {
   /** 写日志（`session.ts` 把它转成 `bridge.report`）；⛔ 业务日志不走 `console` */
   log?: (text: string) => void;
+  /**
+   * **错误通道**（spec 的「错误通道」：空纹理槽 / 无渲染目标 / 绘制失败）。
+   * ★ 与 `log` 分开：它要能被当成错误（`level: 'error'`）筛出来，否则"上报了"在日志里看不见。
+   * ★ 缺省 ⇒ 退回 `log`（不丢上报）。
+   */
+  error?: (text: string) => void;
   /** 初始画布尺寸（`ready` 回报用；随后 `init` 会覆盖） */
   initialWidth?: number;
   initialHeight?: number;
@@ -482,6 +503,8 @@ const EMPTY_CONTAINER = new Container();
 export class PixiRenderHost {
   private readonly app: Application;
   private readonly logSink: (text: string) => void;
+  /** 错误通道（空槽 / 无目标 / 绘制失败）；缺省时就是 `logSink` */
+  private readonly errorSink: (text: string) => void;
 
   /** 当前场景的根节点；⛔ 不在 `app.stage` 里（`present` 自己决定画到哪） */
   private readonly sceneRoot = new Container();
@@ -515,11 +538,18 @@ export class PixiRenderHost {
   private presentCount = 0;
   /** 各类场景警告上次发出的文本（同一条不每帧重复写） */
   private readonly lastSceneNotes = new Map<string, string>();
+  /**
+   * 已发过的错误通道上报（`类别:纹理编号`）。
+   * ★ 场景每帧重建 ⇒ 同一个空槽会每帧都"上报"；引擎是写错误缓冲，本实现只有日志/诊断两条出口
+   *   ⇒ 同类同编号**只发一次**（不改变"上过报"这个事实，只是不让日志被刷满）。
+   */
+  private readonly reportedDrawErrors = new Set<string>();
   private readonly notes: string[] = [];
 
   private constructor(app: Application, options: PixiRenderHostOptions) {
     this.app = app;
     this.logSink = options.log ?? (() => {});
+    this.errorSink = options.error ?? this.logSink;
     this.sceneRoot.label = 'amayui-scene-root';
   }
 
@@ -823,6 +853,20 @@ export class PixiRenderHost {
     this.logSink(text);
   }
 
+  /**
+   * **错误通道**上报（`CORE-OPS-TEXTURE-DRAW-CONSUMER` 第 3 / 4 / 7 条：空纹理槽 / 无渲染目标 / 绘制失败）。
+   * ★ 文本里**必须带纹理编号**（否则日志定位不到坏条目）；内容本版不规定。
+   * ★ 同类同编号只发一次：场景每帧重建，否则日志会被同一条刷满（"上报过"这件事不变）。
+   */
+  private errorNote(category: string, textureId: number, text: string): void {
+    if (this.notes.length >= MAX_NOTES) this.notes.shift();
+    this.notes.push(text);
+    const key = `${category}:${textureId}`;
+    if (this.reportedDrawErrors.has(key)) return;
+    this.reportedDrawErrors.add(key);
+    this.errorSink(text);
+  }
+
   /* ─────────────────────────── init / 表面 ─────────────────────────── */
 
   private init(params: RendererInit): void {
@@ -1022,7 +1066,7 @@ export class PixiRenderHost {
     this.lastDraw = slot.lastDraw;
 
     // ★ 纹理槽刚拿到像素：用**同一份快照**重建一次场景节点，否则下一次 `present` 还会画
-    //   推送时建好的占位块（快照不含像素，`writeCount` 是渲染进程自己的状态）。
+    //   上一帧的节点（快照不含像素，`writeCount` 是渲染进程自己的状态）。
     //   ⛔ 不伪造场景内容：只是把"同一份快照 + 新像素"重新画一遍。
     this.rebuildSceneFromLastSnapshot();
   }
@@ -1136,6 +1180,10 @@ export class PixiRenderHost {
   private buildScene(scene: SceneSnapshot): SceneBuildStats {
     this.applyBlend(scene.blend);
 
+    // ★ 命令档：**只规划、不执行**（S0/S1）。这里用规划结果做统计与诊断；⛔ 一个阶段都不发，
+    //   下面的绘制仍然只来自收尾扫描 —— 所以 renderer 的诊断里有 `scene-command-pass-render-unmodeled`。
+    const commandPass = planCommandPassForScene(scene);
+
     const stats: SceneBuildStats = {
       width: scene.width,
       height: scene.height,
@@ -1144,17 +1192,33 @@ export class PixiRenderHost {
       drawItems: scene.drawItems.length,
       activeItems: 0,
       sprites: 0,
-      placeholders: 0,
-      missingSlots: 0,
-      selfTargetSkips: 0,
-      sizeMismatch: 0,
-      zeroArea: 0,
-      labels: 0,
+      missingTextures: 0,
+      noTarget: 0,
+      consumedSkips: 0,
+      clippedEmpty: 0,
+      drawFailed: 0,
+      dirtyRequests: 0,
+      rectWriteBacks: 0,
       meshes: scene.meshes.length,
       meshQuads: 0,
       meshSkipped: 0,
       order: '',
+      commandPassCommands: commandPass.commands.length,
+      commandPassPhases: commandPass.commands.reduce((sum, command) => sum + command.phases.length, 0),
+      commandPassConsumedKeys: commandPass.consumedKeys.length,
     };
+
+    // 纹理槽解析（`CORE-OPS-TEXTURE-DRAW-CONSUMER` 第 3 条）：**快照里没有这个编号 ⇒ 空槽**。
+    // ★ 快照的 `textures` 只装"有对象的槽"（核心的 `textureObjects`），所以"数组里没有"就是"空槽"；
+    //   ⛔ 不要拿渲染侧自己的 `this.slots` 当解析源（那是平台资产表，不是引擎的纹理槽表）。
+    const planSlots = new Map<number, DrawPlanSlot>();
+    for (const texture of scene.textures) {
+      planSlots.set(texture.id, { width: texture.width, height: texture.height });
+    }
+    // 有没有渲染目标：后缓冲（-1）永远有；其它编号要求"那个纹理槽还在"（对象已被释放 ⇒ 没有目标）。
+    const hasTarget = scene.target < 0 || planSlots.has(scene.target);
+    /** 规划器报上来的实现缺口（去重后一次性进诊断，⛔ 不是引擎错误） */
+    const planNotes = new Set<DrawPlanNote>();
 
     // ★ 绘制项与网格按 `CORE-SCENE-DRAW-ORDER`：**key 严格升序**，同键网格先于绘制项（见 `scene-order.ts`）。
     //   TITLE 的黑色背景网格 key 0 必须落到前景绘制项下面，否则整屏被它盖黑。
@@ -1194,59 +1258,89 @@ export class PixiRenderHost {
       }
 
       const item = entry.item;
-      if ((item.flags & 1) === 0) continue;
-      stats.activeItems += 1;
+      // ★ 每个条目**只由规划器**决定"发不发请求、实参是什么"（`scene-draw-plan.ts`）。
+      //   ⛔ 这里不再有"空槽画占位块"、"零面积"、"自引用跳过"这些实现自造的规则。
+      const plan = planDraw({
+        item,
+        resolveSlot: (textureId) => planSlots.get(textureId) ?? null,
+        target: { id: scene.target, present: hasTarget },
+        view: scene.view,
+        now: scene.clock,
+        // 场景自身记录（6.1）：核心侧已建模键区间 / 平移；派生矩阵未建模（`matrix: null`）
+        selfTransform: scene.selfRecord,
+        // 收尾扫描**总是**不跳过额外变换（命令档执行未建模 ⇒ 现在没有传 true 的调用方）
+        skipExtraTransform: false,
+      });
+      for (const note of plan.notes) planNotes.add(note);
+      if (plan.markDirty) stats.dirtyRequests += 1;
+      if (plan.rectWriteBack !== null) stats.rectWriteBacks += 1;
+      if ((item.flags & 1) !== 0) stats.activeItems += 1;
 
-      const width = item.right - item.left;
-      const height = item.bottom - item.top;
-      if (width <= 0 || height <= 0) {
-        stats.zeroArea += 1;
+      if (plan.skip !== null) {
+        switch (plan.skip) {
+          case 'no-valid':
+            // 静默：不画、不报错
+            break;
+          case 'consumed':
+            stats.consumedSkips += 1;
+            break;
+          case 'missing-texture':
+            stats.missingTextures += 1;
+            if (plan.report) this.errorNote('missing-texture', plan.report.textureId, plan.report.text);
+            break;
+          case 'no-target':
+            stats.noTarget += 1;
+            if (plan.report) this.errorNote('no-target', plan.report.textureId, plan.report.text);
+            break;
+          case 'empty-clip':
+            // 夹空是**静默**的：不上报、不建占位物
+            stats.clippedEmpty += 1;
+            break;
+        }
         continue;
       }
-      // 绘制项引用的就是当前渲染目标 ⇒ 跳过：把"正在当目标写的纹理"再画进它自己 = 反馈环 / 重影
-      if (item.textureId === scene.target) {
-        stats.selfTargetSkips += 1;
+
+      const args = plan.draw;
+      if (args === null) continue; // 规划器的约定：skip === null ⇒ draw 非 null（防御）
+      const slot = this.slots.get(args.textureId);
+      if (!slot) {
+        // 快照里有纹理对象、平台侧却没有这个槽：按「绘制失败」上报并跳过（⛔ 不建占位物）
+        stats.drawFailed += 1;
+        this.errorNote('draw-failed', args.textureId,
+          drawFailedReport(args.textureId, '平台侧没有该纹理槽').text);
         continue;
       }
-
-      const slot = this.slots.get(item.textureId);
-      if (!slot) stats.missingSlots += 1;
-
-      if (slot && slot.rt && slot.hasContent) {
-        // `0x1fb` 的四条边是**来源矩形**，第 7/8 个操作数是**目标位置**。
-        // 全图时不建 frame；子矩形按 RenderTexture 的物理/逻辑比例换算。
-        let texture = slot.rt as Texture;
-        if (item.left !== 0 || item.top !== 0
-          || width !== slot.rt.width || height !== slot.rt.height) {
-          const u = slot.rt.source.width / Math.max(1, slot.rt.width);
-          const v = slot.rt.source.height / Math.max(1, slot.rt.height);
+      try {
+        // 全图时不建 frame；子矩形按 RenderTexture 的物理 / 逻辑比例换算（裁剪后的矩形来自规划器）。
+        const rt = slot.rt ?? this.ensureTexture(slot);
+        let texture = rt as Texture;
+        const frameWidth = args.rect.right - args.rect.left;
+        const frameHeight = args.rect.bottom - args.rect.top;
+        if (args.rect.left !== 0 || args.rect.top !== 0
+          || frameWidth !== rt.width || frameHeight !== rt.height) {
+          const u = rt.source.width / Math.max(1, rt.width);
+          const v = rt.source.height / Math.max(1, rt.height);
           texture = new Texture({
-            source: slot.rt.source,
-            frame: new Rectangle(item.left * u, item.top * v, width * u, height * v),
+            source: rt.source,
+            frame: new Rectangle(args.rect.left * u, args.rect.top * v, frameWidth * u, frameHeight * v),
           });
           this.frameTextures.push(texture);
         }
         const sprite = new Sprite(texture);
-        sprite.position.set(item.aux[0], item.aux[1]);
-        if (item.color >= 0) {
-          const color = argbOf(item.color);
-          sprite.tint = color.rgb;
-          sprite.alpha = color.alpha;
-        }
-        if (item.left < 0 || item.top < 0 || item.right > slot.rt.width || item.bottom > slot.rt.height) {
-          stats.sizeMismatch += 1;
-        }
+        // 位置 = 裁剪补偿 / 档位缩放取整 / 场景偏移之后的三个浮点格（第三格不参与显示）
+        sprite.position.set(args.position[0], args.position[1]);
+        // 本步颜色是**一个** 32 位值（含透明度）；默认不透明白
+        const color = argbOf(args.color);
+        sprite.tint = color.rgb;
+        sprite.alpha = color.alpha;
+        // ★ 本步变换（`args.transform`）**没有在这里应用**：Pixi 的 Sprite 用位置实参定位，
+        //   而"绘制入口怎么解释矩阵"属平台（见 DISCLOSURES）；⛔ 不要拿它再算一遍位置（会双重变换）。
         this.addBuilt(sprite);
         stats.sprites += 1;
-        continue;
+      } catch (error) {
+        stats.drawFailed += 1;
+        this.errorNote('draw-failed', args.textureId, drawFailedReport(args.textureId, messageOf(error)).text);
       }
-
-      const canLabel = stats.labels < MAX_PLACEHOLDER_LABELS && width >= 96 && height >= 24;
-      const node = this.buildPlaceholder(item, slot, width, height, canLabel);
-      node.position.set(item.aux[0], item.aux[1]);
-      this.addBuilt(node);
-      stats.placeholders += 1;
-      if (canLabel) stats.labels += 1;
     }
 
     // 影片帧：放在网格之后覆盖（LOGO 收尾的黑色网格属于场景，不应盖住影片）。
@@ -1262,21 +1356,46 @@ export class PixiRenderHost {
     // ★ 场景是每帧重建的，同一条警告会重复几十次 ⇒ 按 kind 记住"上次发出的文本"，
     //   只在文本（通常是计数）变化时记一条；否则 diagnostics 的"最近日志"会被同一行刷满。
     this.sceneNote(
-      'size-mismatch',
-      stats.sizeMismatch > 0
-        ? `场景：${stats.sizeMismatch} 条绘制项的来源矩形越出纹理尺寸 ⇒ 按记录值裁剪 / 不缩放（是否该拉伸未取证）`
+      'draw-source-missing',
+      stats.missingTextures > 0
+        ? `场景：${stats.missingTextures} 条绘制项的纹理槽里没有对象 ⇒ 已上报并跳过（⛔ 不建占位物）`
         : null,
     );
     this.sceneNote(
-      'missing-slots',
-      stats.missingSlots > 0
-        ? `场景：${stats.missingSlots} 条绘制项引用了快照里不存在的纹理槽 ⇒ 画"无纹理槽"占位块`
+      'draw-target-missing',
+      stats.noTarget > 0 ? `场景：${stats.noTarget} 条绘制项没有渲染目标 ⇒ 已上报并跳过` : null,
+    );
+    this.sceneNote(
+      'draw-failed',
+      stats.drawFailed > 0 ? `场景：${stats.drawFailed} 条绘制项绘制失败 ⇒ 已上报并跳过` : null,
+    );
+    this.sceneNote(
+      'clipped-empty',
+      stats.clippedEmpty > 0
+        ? `场景：${stats.clippedEmpty} 条绘制项的源矩形夹到纹理逻辑矩形后为空 ⇒ 静默跳过（不上报）`
         : null,
     );
     this.sceneNote(
-      'self-target',
-      stats.selfTargetSkips > 0
-        ? `场景：${stats.selfTargetSkips} 条绘制项引用当前渲染目标（槽 ${scene.target}）⇒ 跳过（防自引用重影）`
+      'scene-command-pass',
+      commandPass.commands.length > 0
+        ? `场景：命令档规划 ${commandPass.commands.length} 条 / ${stats.commandPassPhases} 阶段 / 覆盖键 `
+          + `${stats.commandPassConsumedKeys} 个（本实现只规划、不执行 ⇒ 画面仍来自收尾扫描）`
+        : null,
+    );
+    this.sceneNote(
+      'draw-plan-gaps',
+      planNotes.size > 0 ? `场景：绘制项消费的未建模 / 未取证档：${[...planNotes].join('、')}` : null,
+    );
+    this.sceneNote(
+      'dirty-requests',
+      stats.dirtyRequests > 0
+        ? `场景：${stats.dirtyRequests} 条绘制项请求标脏（本层没有回写路径 ⇒ 只记账）`
+        : null,
+    );
+    this.sceneNote(
+      'rect-writeback-requests',
+      stats.rectWriteBacks > 0
+        ? `场景：${stats.rectWriteBacks} 条绘制项的源矩形窗口到期、要求写回四条边（本层没有回写路径 ⇒ 只记账）`
         : null,
     );
     this.sceneNote(
@@ -1299,52 +1418,6 @@ export class PixiRenderHost {
     if (previous === next) return;
     this.lastSceneNotes.set(kind, next);
     if (next) this.note(next);
-  }
-
-  /**
-   * 占位块：**没有像素**时的可见替代物（⛔ 不是"画出了纹理内容"）。
-   * ★ 颜色取绘制项的 `color`（ARGB）；`color = -1` ⇒ 灰 / 空白纹理用偏蓝灰。
-   * ★ alpha 有下限 `PLACEHOLDER_MIN_ALPHA`：占位块的意义是"让人看见这里本来有东西"，
-   *   完全照 ARGB 的 alpha 画会在 alpha = 0 时变成不可见（可见性选择，⛔ 不是规范口径）。
-   */
-  private buildPlaceholder(
-    item: DrawItemSnapshot,
-    slot: TextureSlot | undefined,
-    width: number,
-    height: number,
-    withLabel: boolean,
-  ): Container {
-    const container = new Container();
-    const color = item.color >= 0 ? argbOf(item.color) : null;
-    const baseColor = color?.rgb ?? (slot ? (slot.snapshot.blank !== 0 ? BLANK_SLOT_COLOR : PLACEHOLDER_GRAY) : MISSING_SLOT_COLOR);
-    const alpha = Math.max(color?.alpha ?? 0.5, PLACEHOLDER_MIN_ALPHA);
-
-    const graphics = new Graphics();
-    graphics
-      .rect(0, 0, width, height)
-      .fill({ color: baseColor, alpha })
-      .stroke({ width: 1, color: 0xffffff, alpha: 0.35 });
-    container.addChild(graphics);
-
-    if (withLabel) {
-      const detail = slot
-        ? slot.snapshot.blank !== 0
-          ? `blank #${item.textureId} ${width}×${height}`
-          : `占位 #${item.textureId} ${width}×${height}（无可画内容）`
-        : `无纹理槽 #${item.textureId} ${width}×${height}`;
-      const label = new Text({
-        text: detail,
-        style: {
-          fontFamily: [...FALLBACK_FONT_FAMILIES],
-          fontSize: 11,
-          fill: 0xffffff,
-          stroke: { color: 0x000000, width: 2 },
-        },
-      });
-      label.position.set(4, 4);
-      container.addChild(label);
-    }
-    return container;
   }
 
   /**

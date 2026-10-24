@@ -103,11 +103,25 @@ export interface SaveSnapshot {
 
 const writeU32 = (view: DataView, off: number, v: number): void => view.setUint32(off, v >>> 0, true);
 
-/** 按 `FMT-SAVE-CODEC` 构造主体（未压缩；块 1/4 写 0；尾段 N = 0）。 */
+/**
+ * 按 `FMT-SAVE-CODEC` 构造主体（未压缩；尾段 N = 0）。
+ *
+ * ★ 六个块 = 六个**全局池**（局部池不在里面）：
+ *   0 整型值池 / 1 浮点值池 / 2 字符串池 / 3 整型引用池 / 4 浮点引用池 / 5 字符串引用表。
+ *   本实现对值族三池有模型 ⇒ 写 c0/c1/c2 + 块 0/1/2；引用三池尚未建模（读侧只按计数跳过）
+ *   ⇒ `c3 = c4 = c5 = 0`、块 3/4/5 长度为 0。
+ * ★ 浮点族两块（c1 / c4）的**内容**只在版本 2 ≥ 20 时写；`版本 1 = 2` 的容器**无论版本 2**
+ *   都不写这两块内容（`FMT-SAVE-CODEC` 的两条门控）。计数与洞始终存在 ⇒
+ *   "非 0 计数 + 未写空洞"是**合法**文件。
+ */
 export function buildSaveBody(s: SaveSnapshot, intKey: number): Uint8Array {
   const c0 = s.ints.length;
-  const c3 = s.floats.length;
+  const c1 = s.floats.length;
   const c2 = s.strings.length;
+  const c3 = 0;
+  const c4 = 0;
+  const c5 = 0;
+  const writesFloatContent = s.version1 !== 2 && s.version2 >= 20;
   const arena = new Uint8Array(s.strings.reduce((n, x) => n + x.length + 1, 0));
   let ap = 0;
   for (const str of s.strings) {
@@ -120,10 +134,14 @@ export function buildSaveBody(s: SaveSnapshot, intKey: number): Uint8Array {
   const countBase = recBase + 1044 * recCount;
   const blocksBase = countBase + 24;
   const block0 = 4 * c0;
+  const block1 = 4 * c1;
   const block2 = 4 + 4 * capWords;
-  const block3 = 4 * c3;
-  const tailBase = blocksBase + block0 + block2 + block3;
+  // 引用三池的块长恒为 0（写侧不写内容、读侧只跳过）⇒ 现在是 block0 + block1 + block2。
+  // ★ 将来启用引用池时**必须**在这里加上 `4 * (c3 + c4 + c5)` —— 那一项在 spec 的 tail 公式里，
+  //   漏掉会让尾段整体前移（这正是本轮修掉的那处缺口）。
+  const tailBase = blocksBase + block0 + block1 + block2;
   const tailLen = 4 + 4 + 2 * 4 + 740;
+  // slack = `c2 + 16463 + 3N` 个 32 位字（N = 场景记录条数，本实现恒 0）
   const slackWords = c2 + 16463 + 3 * 0;
   const total = tailBase + tailLen + slackWords * 4;
   const out = new Uint8Array(total);
@@ -141,16 +159,21 @@ export function buildSaveBody(s: SaveSnapshot, intKey: number): Uint8Array {
     writeU32(view, off + 1040, rec.tableB);
   }
   writeU32(view, countBase, c0);
-  writeU32(view, countBase + 4, 0);
+  writeU32(view, countBase + 4, c1);
   writeU32(view, countBase + 8, c2);
   writeU32(view, countBase + 12, c3);
-  writeU32(view, countBase + 16, 0);
-  writeU32(view, countBase + 20, 0);
+  writeU32(view, countBase + 16, c4);
+  writeU32(view, countBase + 20, c5);
   let p = blocksBase;
+  // 块 0：全局整型池前缀 —— 写侧对每个值做一次编码
   for (const v of s.ints) { writeU32(view, p, encodeInt(v | 0, intKey)); p += 4; }
+  // 块 1：全局浮点池前缀（raw 32 位）。内容被门控时**只留等长空洞**（全 0），块长仍是 4×c1
+  if (writesFloatContent) for (const v of s.floats) { writeU32(view, p, v >>> 0); p += 4; }
+  else p += block1;
+  // 块 2：字符串段 —— `u32 capWords` + `capWords` 个字的 NUL 结尾字节池
   writeU32(view, p, capWords); p += 4;
   out.set(arena, p); p += 4 * capWords;
-  for (const v of s.floats) { writeU32(view, p, v >>> 0); p += 4; }
+  // 块 3 / 4 / 5：c3 = c4 = c5 = 0 ⇒ 零长，紧接尾段
   writeU32(view, tailBase, 740);
   writeU32(view, tailBase + 4, 0);
   return out;

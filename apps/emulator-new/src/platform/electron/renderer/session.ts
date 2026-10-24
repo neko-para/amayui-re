@@ -15,7 +15,7 @@
 import { ConfigStore } from '../../../core/config.ts';
 import { buildConfigKeys, buildOpcodeTable } from '../../../core/spec.ts';
 import { Machine, WAIT_BIT } from '../../../core/machine.ts';
-import type { Operand } from '../../../core/machine.ts';
+import type { DrawItem, Operand, SceneCommandRecord } from '../../../core/machine.ts';
 import { analyzeInstall } from '../../../core/runner.ts';
 import type { CoreEnv } from '../../../core/runner.ts';
 import { EngineExit, bootWindow } from '../../../core/window.ts';
@@ -45,17 +45,24 @@ import type {
   PlatformInfo,
   RendererBootInfo,
   SceneSnapshot,
+  SceneViewSnapshot,
   StartJob,
   SurfaceRef,
   TextureSnapshot,
   DrawItemSnapshot,
+  DrawItemGroupSnapshot,
+  DrawItemSourceWindowSnapshot,
   MeshSnapshot,
   RenderCall,
+  SceneCommandSnapshot,
 } from '../protocol.ts';
 import { dirnamePath, joinPath, pathFromEngine } from './paths.ts';
+import { SceneOrderNotes } from './scene-order.ts';
 import { applyPresentationPolicy } from './presentation.ts';
 import { LocalMovieHost } from './local-movie-host.ts';
 import { DomInputHost } from './input-host.ts';
+import type { DisplayFit } from './display-fit.ts';
+import { computeDisplayFit } from './display-fit.ts';
 import type { PresentationPolicy } from './presentation.ts';
 import type { PixiRenderHost } from './pixi-host.ts';
 
@@ -66,6 +73,96 @@ const PROCESS_INSTANCE = 1;
 const RESOURCE_INSTANCE = 1;
 const SHOW_MODE_NORMAL = 1;
 const WINDOW_TITLE = 'ARCGameEngine';
+
+/* ───────────────── 附加组视图（记录第 2 位 ⇒ 消费者侧的派生输入） ───────────────── */
+
+/**
+ * 附加组视图（`DrawItemSnapshot.group`）—— 条目首字第 2 位 = 1 时才取。
+ *
+ * ★ 语义名来自 `CORE-OPS-TEXTURE-DRAW-CONSUMER` 第 6 条；**机器格 → 语义名**的对应只有
+ *   **消费者侧读点**的证据（`.tmp/spec-draft/batch4/texconsumer/evidence.md` §3.2 / §3.3 B6）：
+ *   `+0x20C / +0x220`（颜色通道起点 / 周期）、`+0x21C / +0x230`（源矩形通道起点 / 周期）、
+ *   `+0x238` 步进数、`+0x23C` 每步数、`+0x240` 附加组终色。
+ *   ⇒ 这是"**观察到的读点**"，不是已取证的领域命名（写侧命名属残差）—— 偏移只属于机器层，
+ *     这里的语义名只是给规划器一个**输入槽**。
+ *
+ * ★ 未取证 / 未建模的项**显式留空**（⛔ 不编常数、不编公式）：
+ *   - `colorEnd`：`+0x240` 在**已建模**的写入方里没有写点 ⇒ `null`（不混色）；
+ *   - `stepX / stepY`：步进量的公式属残差 `RES-TEX-DRAW-CONSUMER-RECTSTEP` ⇒ `0`；
+ *   - `lastStepIndex`：核心没有"每帧记步号"的状态 ⇒ `null`（于是不标脏）；
+ *   - `transform`：三张附加组矩阵里哪一张是"变换通道"未取证 ⇒ `null`。
+ */
+const GROUP_OFFSETS = {
+  colorStart: 0x20c,
+  colorPeriod: 0x220,
+  colorEnd: 0x240,
+  rectStart: 0x21c,
+  rectPeriod: 0x230,
+} as const;
+
+function groupSnapshotOf(item: DrawItem): DrawItemGroupSnapshot | null {
+  if ((item.flags & 0x4) === 0) return null;
+  const field = (offset: number): number => item.fields.get(offset) ?? 0;
+  const end = item.fields.get(GROUP_OFFSETS.colorEnd);
+  return {
+    colorStart: field(GROUP_OFFSETS.colorStart),
+    colorPeriod: field(GROUP_OFFSETS.colorPeriod),
+    colorEnd: end === undefined ? null : end,
+    rectStart: field(GROUP_OFFSETS.rectStart),
+    rectPeriod: field(GROUP_OFFSETS.rectPeriod),
+    stepX: 0,
+    stepY: 0,
+    lastStepIndex: null,
+    transform: null,
+  };
+}
+
+/**
+ * 源矩形窗口（`DrawItemSnapshot.sourceWindow`；`0x239` 排上、`0x239` 的「已存在」门通过才写）。
+ *
+ * ★ 位 1（有窗）与颜色窗**共用**：颜色窗单独置位时这五格是**默认 0**（持续时间 ≤ 0 ⇒ 4.1 不动作），
+ *   ⇒ 位 1 为 1 而记录里没有 `sourceWindow` 不是"缺字段"，是"没排源矩形窗"。
+ * ★ 位 1 为 0 ⇒ `null`（消费侧的门根本不会走到 4.1）。
+ */
+function sourceWindowSnapshotOf(item: DrawItem): DrawItemSourceWindowSnapshot | null {
+  if ((item.flags & 0x2) === 0) return null;
+  const window = item.sourceWindow;
+  if (window === null) {
+    return { delay: 0, duration: 0, steps: 0, perRow: 0, switchWord: 0 };
+  }
+  return { ...window };
+}
+
+/**
+ * 一条**场景命令记录** → 快照（`SceneSnapshot.commands`）。
+ *
+ * ★ **只投具名格**：`raw` 是读操作数留痕（记录自己的注释写明它**不是**命令档的输入）⇒ ⛔ 不投。
+ * ★ **区间 A / B 的挪移**：种类 0 / 2 的两段在记录里是 `segmentA` / `segmentB`；
+ *   种类 1 / 3 只有 `rangeStart` / `rangeCount` 那一对 ⇒ `rangeA` 取它、`rangeB` 投**显式空**
+ *   `{ start: 0, count: 0 }`（⛔ 不要留 `undefined` 让调用方各自编）。
+ * ★ 未被本实现建模的格（种类 1 的 `flag` / 目标矩形、种类 3 的四对插值）不在快照的闭集合里：
+ *   S0/S1 只执行**结构**；要用它们时再投影，⛔ 不要先塞默认值。
+ */
+function commandSnapshotOf(commandKey: number, record: SceneCommandRecord): SceneCommandSnapshot {
+  const twoSegments = record.kind === 0 || record.kind === 2;
+  return {
+    kind: record.kind,
+    commandKey,
+    timestamp: record.timestamp,
+    delay: record.delay,
+    duration: record.duration,
+    textureId: record.textureId,
+    rangeA: twoSegments
+      ? { start: record.segmentA[0], count: record.segmentA[1] }
+      : { start: record.rangeStart, count: record.rangeCount },
+    rangeB: twoSegments
+      ? { start: record.segmentB[0], count: record.segmentB[1] }
+      : { start: 0, count: 0 },
+    mode: record.mode,
+    split: record.split,
+    ownerKey: record.ownerKey,
+  };
+}
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error);
@@ -123,6 +220,10 @@ class BridgeHost implements Host {
 
   async isFile(file: string): Promise<boolean> {
     return await this.bridge.invoke('host.isFile', { path: file }) as boolean;
+  }
+
+  async listDir(dir: string): Promise<string[]> {
+    return await this.bridge.invoke('host.listDir', { dir }) as string[];
   }
 
   async ensureReadDir(dir: string): Promise<void> {
@@ -317,6 +418,28 @@ class BridgeBootHost implements BootHost {
 
 /* ──────────────────────────── RenderHost（本地 Pixi） ──────────────────────────── */
 
+/**
+ * 显示适配的**上下文**（`CORE-SCENE-DISPLAY-FIT` 的输入里不来自渲染器状态的那几部分）。
+ * ★ 由启动路径（`onBeforeScript` / `runDemo`）在窗口 + 图形建成之后填一次；
+ *   `null` = 还没到那一步 ⇒ 场景快照的 `view` 仍是 `null`（消费者按"无相机 / 无缩放"档算并记缺口）。
+ */
+export interface DisplayFitContext {
+  /** 配置（VF 开关 / 类型 / 宽高比 / 参考尺寸族 `display:FullScreenWidth/Height` / `set:WinX/Y`） */
+  config: ConfigStore;
+  /**
+   * **桌面尺寸**（引擎初始化时来自适配器显示模式 `GetAdapterDisplayMode`；本实现取宿主
+   * `boot.screenSize` = 主显示器尺寸）。
+   * ★ `null` = 宿主没有报 ⇒ 用客户区顶上，并在诊断里记一条 `display-fit-ref-assumed`（⛔ 不静默编造）。
+   */
+  desktop: { width: number; height: number } | null;
+  /**
+   * 形态字 S（`display:ScreenMode` 经 `display:ForceScreen` 归一后的值）。
+   * ★ 场景的屏幕形态副本 `F` = `S != 0 ? 1 : 0`（窗口态 1 / 占满屏态 0）。
+   *   ⛔ 模拟器的 `ignoreFullscreen` 只改窗口外观，不改这个引擎级形态字（与 `window.ts` 同口径）。
+   */
+  screenMode: number;
+}
+
 function textureShape(kind: string, width: number, height: number): string {
   return `${kind}:${width}x${height}`;
 }
@@ -329,6 +452,21 @@ class LocalRenderHost implements RenderHost {
   private lastScenePushAt = 0;
   private readonly pushedTextures = new Map<number, string>();
   private readonly surfaceIds = new WeakMap<object, SurfaceRef>();
+  /**
+   * 命令档的诊断记录器（**只报一次**）。
+   * ★ 命令表非空 ⇒ 引擎有"命令档 + 收尾扫描"两档；本实现**只规划命令档、不执行它** ⇒
+   *   诊断分两条显式记账：`scene-command-pass-planned`（规划了什么）与
+   *   `scene-command-pass-render-unmodeled`（**仍未真的画**，⛔ 不假装）。
+   *   规划器是纯函数（`scene-command-plan.ts`），执行 / 像素操作仍未建模。
+   */
+  private readonly orderNotes = new SceneOrderNotes();
+  /** 显示适配上下文（窗口 + 图形建成后由启动路径填；`null` ⇒ 场景快照的 `view` 为 `null`） */
+  private display: DisplayFitContext | null = null;
+  /** 上一轮适配结果（退化出口 `T ∉ {0,1,2}` 要"保持旧值"）；`null` = 还没算过 */
+  private lastFit: DisplayFit | null = null;
+  /** 一次性 / 变化时才报的诊断（避免每帧刷屏） */
+  private readonly fitNotes = new Set<string>();
+  private lastFitSignature = '';
 
   constructor(pixi: PixiRenderHost, bridge: AmayuiBridge) {
     this.pixi = pixi;
@@ -339,6 +477,17 @@ class LocalRenderHost implements RenderHost {
     this.machine = machine;
     this.pushedTextures.clear();
     this.lastScenePushAt = 0;
+  }
+
+  /**
+   * 接上显示适配的输入（`CORE-SCENE-DISPLAY-FIT`）。
+   * ★ 只在窗口 + 图形建成之后调一次；`null` = 断开（诊断 / demo 用不到时）。
+   */
+  attachDisplayContext(context: DisplayFitContext | null): void {
+    this.display = context;
+    this.lastFit = null;
+    this.fitNotes.clear();
+    this.lastFitSignature = '';
   }
 
   /** 推一次场景（节流；`force` 跳过节流）。返回是否真的推了。 */
@@ -505,6 +654,9 @@ class LocalRenderHost implements RenderHost {
     }
     const drawItems: DrawItemSnapshot[] = [];
     for (const [key, item] of machine.scene.drawItems) {
+      // ★ 四条边（left/top/right/bottom）同时是**种类 2 抹除矩形**的唯一来源（spec：抹除矩形来自
+      //   同键绘制项）⇒ `scene-order.ts:commandPlanInput` 把它们投影成 `tables.itemRects`，
+      //   ⛔ 别在规划器 / 平台侧另算一份矩形。
       drawItems.push({
         key,
         flags: item.flags,
@@ -515,6 +667,9 @@ class LocalRenderHost implements RenderHost {
         bottom: item.bottom,
         color: item.colorNow,
         aux: [item.aux[0], item.aux[1], item.aux[2]],
+        start: item.start,
+        group: groupSnapshotOf(item),
+        sourceWindow: sourceWindowSnapshotOf(item),
       });
     }
     const meshes: MeshSnapshot[] = [];
@@ -528,7 +683,12 @@ class LocalRenderHost implements RenderHost {
         color: mesh.colorNow,
       });
     }
-    return {
+    const commands: SceneCommandSnapshot[] = [];
+    // ★ 遍历序是**命令键升序**（命令表按命令键有序）；`Map` 只保插入次序 ⇒ 这里显式排序。
+    for (const [commandKey, record] of [...machine.scene.commands].sort((a, b) => a[0] - b[0])) {
+      commands.push(commandSnapshotOf(commandKey, record));
+    }
+    const scene: SceneSnapshot = {
       width,
       height,
       script: machine.currentFrameInfo(),
@@ -537,7 +697,128 @@ class LocalRenderHost implements RenderHost {
       meshes,
       blend: { mode: machine.render.blendMode, color: machine.render.blendColor },
       target: machine.render.target,
+      clock: machine.scene.now,
+      // ★ 显示适配（`CORE-SCENE-DISPLAY-FIT`）：窗口 + 图形建成后由 `display-fit.ts` 的纯函数算，
+      //   `null` 只发生在"还没走到那一步"（消费者按无相机档算并记 `scene-view-unmodeled`）。
+      //   ⛔ 不要在这里就地算几何：公式只有一份真源（`computeDisplayFit`）。
+      view: this.viewSnapshot(width, height),
+      // ★ 场景自身记录（`0x229` 写）：作用键区间与三元平移**已建模**；由记录派生额外变换的
+      //   `sub_49AA30` **未建模** ⇒ `matrix: null`（规划器用单位阵 + `self-transform-matrix-unmodeled`），
+      //   ⛔ 不按平移现拼一个矩阵（平移已折进那份未建模的派生里，现拼会重复平移）。
+      selfRecord: {
+        translate: { ...machine.scene.selfRecord.translate },
+        keyStart: machine.scene.selfRecord.keyStart,
+        keyCount: machine.scene.selfRecord.keyCount,
+        matrix: null,
+      },
+      commands,
+      // 「有动画」是核心已有的格（等待门也读它）；命令档的收尾与清表判据都用它。
+      animating: machine.scene.animating,
+      // ★ 核心**没有**「强制完成」这一格（写者：场景推进 / 种类 2 的类型 < 0，都未建模）
+      //   ⇒ 显式投影 0，并在规划器里记缺口；⛔ 这个 0 不是引擎初值。
+      forcedComplete: 0,
+      // ★ 渲染器能力档未建模：`display:PixelShader` 是**版本号**（如 3），版本 → 档（0/1/2）的
+      //   映射未取证 ⇒ `null`（规划器按 ≥2 跑 + `scene-command-tier-unmodeled`）。
+      shaderTier: null,
     };
+    // ★ 命令档规划诊断（本层只记账，⛔ 不执行命令档）：命令表非空的帧才可能报。
+    for (const note of this.orderNotes.next(scene)) this.log('warn', `场景绘制顺序：${note}`);
+    return scene;
+  }
+
+  /**
+   * 按当前画布 / 配置算一次显示适配，并投影成消费者（`scene-draw-plan.ts`）的档位输入。
+   *
+   * ★ 输入全部来自配置 + 宿主（**没有一条来自脚本或存档**）：
+   *   - `screenW/H` = 当前画布（本实现 = Pixi 画布 = 实际后缓冲；见 `pixi-host.canvasSize`）；
+   *   - `vfOn` = `display:VirtualFullScreen != 0`；`T` = `display:VirtualFullScreenType`（VF 关 ⇒ 0）；
+   *   - `A` = `display:AspectMode`；
+   *   - `refW/refH`：VF 开 = `max(桌面, set:WinX/Y)` 逐分量；VF 关 = `display:FullScreenWidth/Height`，缺则客户区；
+   *   - 画布：VF 关时先摆成参考尺寸（引擎初始化那条路）；VF 开时被公式覆写（退化出口保持上一轮）。
+   * ★ 每帧算一次是有意的：画布随窗口变化（显示设置改变的等价物），公式是纯的、代价可忽略；
+   *   ⛔ 结果只进**快照**，不写回任何引擎状态（这四类参数没有脚本 / 存档写入者）。
+   */
+  private viewSnapshot(screenW: number, screenH: number): SceneViewSnapshot | null {
+    const context = this.display;
+    if (context === null) return null;
+    const { config, desktop, screenMode } = context;
+    const vfOn = config.getInt('display:VirtualFullScreen') !== 0;
+    const vfType = vfOn ? config.getInt('display:VirtualFullScreenType') : 0;
+    const aspectMode = config.getInt('display:AspectMode');
+    let refW: number;
+    let refH: number;
+    if (vfOn) {
+      let baseW = screenW;
+      let baseH = screenH;
+      if (desktop !== null) {
+        baseW = desktop.width;
+        baseH = desktop.height;
+      } else if (this.fitNoteOnce('display-fit-ref-assumed')) {
+        // 宿主没有桌面尺寸 ⇒ 用客户区顶上，但必须留痕（⛔ 不静默编造）
+        this.log('warn', '显示适配：宿主没有桌面尺寸（boot.screenSize）⇒ 参考尺寸按客户区算（display-fit-ref-assumed）');
+      }
+      refW = Math.max(baseW, config.getInt('set:WinX'));
+      refH = Math.max(baseH, config.getInt('set:WinY'));
+    } else {
+      // 「缺则客户区」：整对为 0 就是配置没写全屏分辨率；0 进不了公式（t = refH/refW）⇒ 逐分量回退
+      const fullW = config.getInt('display:FullScreenWidth');
+      const fullH = config.getInt('display:FullScreenHeight');
+      refW = fullW !== 0 ? fullW : screenW;
+      refH = fullH !== 0 ? fullH : screenH;
+    }
+    const canvasW = vfOn ? (this.lastFit?.canvasW ?? screenW) : refW;
+    const canvasH = vfOn ? (this.lastFit?.canvasH ?? screenH) : refH;
+    const fit = computeDisplayFit({
+      screenW,
+      screenH,
+      vfOn,
+      vfType,
+      aspectMode,
+      refW,
+      refH,
+      canvasW,
+      canvasH,
+      previous: this.lastFit ?? undefined,
+    });
+    // ★ 退化出口（T ∉ {0,1,2}）：原点 / 视口 / 缩放保持旧值 ⇒ 不覆盖上一轮结果
+    if (!fit.degenerate) this.lastFit = fit;
+    else if (this.fitNoteOnce('display-fit-degenerate')) {
+      this.log('warn', `显示适配：虚拟全屏类型 ${vfType} 非法（∉ {0,1,2}）⇒ 原点 / 缩放保持旧值，仅视图矩阵置单位阵`);
+    }
+    // 诊断：只在这几个格变化时报一行（⛔ 不每帧刷屏）
+    const fixedResolution = screenMode !== 0;
+    const signature = `${vfOn ? vfType : 'off'}/${aspectMode}/${screenW}x${screenH}/${refW}x${refH}/${fixedResolution}`;
+    if (signature !== this.lastFitSignature) {
+      this.lastFitSignature = signature;
+      this.log(
+        'info',
+        `显示适配：VF=${vfOn ? vfType : 'off'} A=${aspectMode} 后缓冲 ${screenW}x${screenH} 参考 ${refW}x${refH}`
+          + ` ⇒ 画布 ${fit.canvasW}x${fit.canvasH} 原点 ${fit.originX},${fit.originY}`
+          + ` 视口 ${fit.viewportW}x${fit.viewportH} 缩放 ${fit.scaleX},${fit.scaleY}`
+          + `${fixedResolution ? ' · 固定分辨率模式（取值器短路缩放 1 / 原点 0）' : ''}`
+          + `${fit.degenerate ? ' · 退化出口（T 非法）' : ''}`,
+      );
+    }
+    return {
+      // 兼容字段：规则的缩放 / 偏移短路由 fixedResolution 表达（会话侧不再用 noCamera 表达缺口）
+      noCamera: false,
+      scaleX: fit.scaleX,
+      scaleY: fit.scaleY,
+      offsetX: fit.originX,
+      offsetY: fit.originY,
+      displayMode: vfType,
+      fixedResolution,
+      // F = 形态字 S != 0 ⇒ 窗口态 1 / 占满屏态 0（见 `DisplayFitContext.screenMode`）
+      screenForm: fixedResolution ? 1 : 0,
+      viewMatrix: fit.view.slice(),
+    };
+  }
+
+  /** 一次性诊断（同一个 code 只报一次；返回 true = 本次真的要报） */
+  private fitNoteOnce(code: string): boolean {
+    if (this.fitNotes.has(code)) return false;
+    this.fitNotes.add(code);
+    return true;
   }
 
   private log(level: 'info' | 'warn' | 'error', text: string): void {
@@ -687,6 +968,20 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
         env.movieHost = new LocalMovieHost(pixi, async (id) => (await ctx.install.readById(id)).bytes);
         const booted = await bootSession(ctx.config, bridge, pixi, hooks);
         windowSession = booted.session;
+        // 显示适配的输入：桌面尺寸（`boot.screenSize` = 主显示器尺寸）+ 同一份配置 + 形态字。
+        // ★ 宿主没报桌面尺寸（抛 / 缺）时传 `null` ⇒ `viewSnapshot` 用客户区顶上并记 `display-fit-ref-assumed`。
+        let desktop: { width: number; height: number } | null = null;
+        try {
+          const size = await booted.bootHost.screenSize();
+          desktop = { width: size.width, height: size.height };
+        } catch (error) {
+          bridge.report({ kind: 'log', level: 'warn', text: `显示适配：取桌面尺寸失败 ⇒ 参考尺寸按客户区算（display-fit-ref-assumed）：${messageOf(error)}` });
+        }
+        render.attachDisplayContext({
+          config: ctx.config,
+          desktop,
+          screenMode: booted.session.screenMode,
+        });
       },
       onMachine: async (machine) => {
         machineRef = machine;
@@ -724,8 +1019,17 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
 async function runDemo(job: Extract<StartJob, { mode: 'demo' }>, bridge: AmayuiBridge, pixi: PixiRenderHost, hooks: SessionHooks): Promise<void> {
   const config = new ConfigStore(job.configKeys);
   for (const [key, value] of DEMO_CONFIG) config.setInt(key, value);
-  const { session } = await bootSession(config, bridge, pixi, hooks);
+  const { session, bootHost } = await bootSession(config, bridge, pixi, hooks);
   const render = new LocalRenderHost(pixi, bridge);
+  // demo 也接显示适配（同一份公式；`DEMO_CONFIG` 里 ScreenMode = 1 ⇒ 固定分辨率模式生效）
+  let desktop: { width: number; height: number } | null = null;
+  try {
+    const size = await bootHost.screenSize();
+    desktop = { width: size.width, height: size.height };
+  } catch (error) {
+    bridge.report({ kind: 'log', level: 'warn', text: `demo：取桌面尺寸失败 ⇒ 参考尺寸按客户区算（display-fit-ref-assumed）：${messageOf(error)}` });
+  }
+  render.attachDisplayContext({ config, desktop, screenMode: session.screenMode });
   const machine = new Machine({ body: new Uint8Array(0), table: new Map(), renderHost: render });
   render.attachMachine(machine);
   await driveDemoScene(machine);

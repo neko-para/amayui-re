@@ -13,8 +13,9 @@
  *     或让平台自动换算，尺寸就不同；
  *   - `ForceScreen == 1` ⇒ S=1 **且** `display:ScreenMode` 被写 1（先于建窗）；
  *     缺键 ⇒ S=0 占满屏（缺键不是 1、不是 2）；
- *   - `set:CreateObject` 判**最低位**（3 ⇒ 旧式，2 ⇒ 三维）：写成 `=== 1` 的实现在 3 上会选错路线；
- *   - 两条图形路线失败 ⇒ 错误通道有文本 + 启动结束（不建主循环），⛔ 静默吞掉就是这条测试红；
+ *   - `set:CreateObject` 的两个位**独立**（键 3 ⇒ 旧式与三维都跑，旧式在前；2 / 1 只跑一条；0 都不跑）；
+ *   - 旧式实参由配置推导（行为位 = UseDirectDrawEmuration |（形态字 ≠ 0 ⇒ 2）、FullScreenBit 独立）；
+ *   - 两条图形路线失败 ⇒ 结束启动（⛔ 静默吞掉就是这条测试红），日志类别按逐步骤表；
  *   - 销毁 ⇒ 隐藏 → PostQuitMessage(0) → 泵抛 EngineExit（链断在任何一环都红）；
  *   - 关闭 ⇒ 引擎收尾 → 杀周期定时器 → 销毁窗口（次序颠倒就红）；
  *   - 被忽略项必须显式（`disposition: 'ignored'` + 规则 id + 非空原因），且**不许**把必做请求标成 ignored。
@@ -79,7 +80,8 @@ class FakeHost {
     this.d3dHandle = opts.d3dHandle === undefined ? 7 : opts.d3dHandle;
     this.mode = opts.mode === undefined ? { width: 1920, height: 1080, format: 22 } : opts.mode;
     this.deviceHandle = opts.deviceHandle === undefined ? 8 : opts.deviceHandle;
-    this.pixelShader = opts.pixelShader === undefined ? 3 : opts.pixelShader;
+    this.caps = opts.caps ?? { maxTextureWidth: 4096, maxTextureHeight: 4096 };
+    this.format32 = opts.format32 === undefined ? true : opts.format32;
     this.drawHandle = opts.drawHandle === undefined ? 9 : opts.drawHandle;
     this.foreground = opts.foreground === undefined ? true : opts.foreground;
     this.menuHandle = opts.menuHandle === undefined ? 501 : opts.menuHandle;
@@ -213,9 +215,22 @@ class FakeHost {
     return this.deviceHandle;
   }
 
-  async readPixelShaderConfig(params) {
-    this.record('readPixelShaderConfig', params);
-    return this.pixelShader;
+  async setDialogBoxMode(params) {
+    this.record('setDialogBoxMode', params);
+  }
+
+  async queryDeviceCaps(params) {
+    this.record('queryDeviceCaps', params);
+    return this.caps;
+  }
+
+  async checkTextureFormat32(params) {
+    this.record('checkTextureFormat32', params);
+    return this.format32;
+  }
+
+  async clearRenderTarget(params) {
+    this.record('clearRenderTarget', params);
   }
 
   async createDrawObject(params) {
@@ -241,6 +256,9 @@ const WINDOWED_DEFAULTS = [
 function makeConfig(defaults = WINDOWED_DEFAULTS) {
   const store = new ConfigStore(CONFIG_KEYS);
   store.applyDefaults(defaults);
+  // 运行期命名键（不在发行默认表里）：设备建成之后读的两个绘制对象参数
+  store.setInt('display:TextureBit', 32);
+  store.setInt('display:PixelShader', 3);
   return store;
 }
 
@@ -303,8 +321,12 @@ test('★★ 窗口态 + 三维设备：请求次序 / 类参数 / 窗口尺寸 
     'record-service-window',
     'create-d3d9',
     'query-adapter-display-mode',
+    'create-device-attempt',
     'create-device',
-    'read-pixel-shader-config',
+    'set-dialog-box-mode',
+    'query-device-caps',
+    'check-texture-format-32',
+    'clear-render-target',
     'create-draw-object',
     'set-thread-execution-state',
   ]);
@@ -322,7 +344,10 @@ test('★★ 窗口态 + 三维设备：请求次序 / 类参数 / 窗口尺寸 
     'createD3d9',
     'queryAdapterDisplayMode',
     'createDevice',
-    'readPixelShaderConfig',
+    'setDialogBoxMode',
+    'queryDeviceCaps',
+    'checkTextureFormat32',
+    'clearRenderTarget',
     'createDrawObject',
     'setThreadExecutionState',
   ]);
@@ -379,19 +404,31 @@ test('★★ 窗口态 + 三维设备：请求次序 / 类参数 / 窗口尺寸 
     'associate-input-context', 'get-menu', 'operate-menu', 'draw-menu-bar', 'record-service-window',
   ]);
 
-  // 三维路线：D3D9（SDK 32）→ 适配器 0 → 设备 → 绘制对象
+  // 三维路线：D3D9（SDK 32）→ 适配器 0 → 设备（参数全由配置键推导）→ 设备建成后的四步 → 绘制对象
   assert.equal(host.argsOf('createD3d9').sdkVersion, 32);
   assert.equal(host.argsOf('queryAdapterDisplayMode').adapter, 0);
   const device = host.argsOf('createDevice');
   assert.equal(device.screenMode, 2);
-  assert.equal(device.fullscreenWidth, 1600, '全屏宽来自 display:FullScreenWidth');
-  assert.equal(device.fullscreenHeight, 900);
+  assert.equal(device.backBufferWidth, 1024, '窗口化 ⇒ 后缓冲宽 = 客户区宽（不是 display:FullScreenWidth）');
+  assert.equal(device.backBufferHeight, 768);
   assert.equal(device.adapterFormat, 22);
-  assert.equal(device.textureBitDepth, 32, '纹理位深来自 display:FullScreenBit');
+  assert.equal(device.presentationInterval, 0, 'display:PresentInterval 缺键 ⇒ 读 0 ⇒ 立即');
+  assert.equal(device.multisample.type, 0);
+  assert.equal(device.swapEffect, 'copy', '窗口化且无多重采样 ⇒ 交换效果 = 复制');
+  assert.equal(device.backBufferLockable, true);
+  // ★ 纹理位深 / 像素着色器版本**不是**设备创建请求的参数（spec 明确），它们出现在绘制对象上
+  assert.equal('textureBitDepth' in device, false, '⛔ 纹理位深不许进设备创建请求');
+  assert.equal('pixelShaderVersion' in device, false, '⛔ 像素着色器版本不许进设备创建请求');
   const draw = host.argsOf('createDrawObject');
   assert.equal(draw.textureWidth, 512, '纹理宽来自 set:TexWidth');
   assert.equal(draw.textureHeight, 256);
-  assert.equal(draw.pixelShader, 3);
+  assert.equal(draw.textureBitDepth, 32, '纹理位深来自 display:TextureBit');
+  assert.equal(draw.pixelShader, 3, '像素着色器版本来自 display:PixelShader');
+  assert.equal(session.textureBitDepth, 32);
+  assert.deepEqual(host.argsOf('setDialogBoxMode'), { device: 8, enabled: true });
+  assert.deepEqual(host.argsOf('queryDeviceCaps'), { device: 8 });
+  assert.deepEqual(host.argsOf('checkTextureFormat32'), { device: 8 });
+  assert.deepEqual(host.argsOf('clearRenderTarget'), { device: 8 });
   assert.equal(session.drawObject, 9);
   assert.equal(session.device, 8);
   assert.equal(session.graphicsRoute, 'three-dimensional');
@@ -519,50 +556,66 @@ test('★★ 建窗失败 ⇒ 共享出口：不显示 / 不重绘、不解绑�
   assert.throws(() => session.pump(), /window-session-failed/);
 });
 
-/* ────────────────────────────── 图形路线：最低位选路 ────────────────────────────── */
+/* ────────────────────────────── 图形路线：两个独立位 ────────────────────────────── */
 
-test('★★ set:CreateObject 判最低位：3 ⇒ 旧式绘制（不是 1！），2 ⇒ 三维设备', async () => {
-  const legacyConfig = makeConfig(WINDOWED_DEFAULTS.map((row) => (row.key === 'CREATEOBJECT'
-    ? { key: 'CREATEOBJECT', value: '3' }
+test('★★ set:CreateObject 的两个位独立：3 ⇒ 旧式与三维都跑（旧式在前）；2 / 1 ⇒ 只跑一条；0 ⇒ 都不跑', async () => {
+  const configWith = (value) => makeConfig(WINDOWED_DEFAULTS.map((row) => (row.key === 'CREATEOBJECT'
+    ? { key: 'CREATEOBJECT', value }
     : row)));
-  const legacy = await boot({ config: legacyConfig, screenMode: 2 });
-  assert.equal(legacy.session.graphicsRoute, 'legacy-draw');
-  assert.equal(legacy.host.names().includes('createLegacyDraw'), true);
-  assert.equal(legacy.host.names().includes('createD3d9'), false);
-  assert.equal(legacy.session.drawObject, 9);
-  assert.equal(legacy.session.device, null, '旧式路线没有三维设备对象');
+  const both = await boot({ config: configWith('3'), screenMode: 2 });
+  assert.deepEqual(both.session.graphicsRoutes, ['legacy-draw', 'three-dimensional'], '键 = 3 ⇒ 两条路线都跑');
+  assert.equal(both.session.graphicsRoute, 'legacy-draw', '兼容字段 = 第一条实际跑的路线');
+  assert.equal(both.host.names().includes('createLegacyDraw'), true);
+  assert.equal(both.host.names().includes('createD3d9'), true);
+  assert.ok(
+    both.host.names().indexOf('createLegacyDraw') < both.host.names().indexOf('createD3d9'),
+    '旧式段在前（spec 表次序）',
+  );
 
   const threeConfig = makeConfig(WINDOWED_DEFAULTS.map((row) => (row.key === 'CREATEOBJECT'
     ? { key: 'CREATEOBJECT', value: '2' }
     : row)));
   const three = await boot({ config: threeConfig, screenMode: 2 });
-  assert.equal(three.session.graphicsRoute, 'three-dimensional');
+  assert.deepEqual(three.session.graphicsRoutes, ['three-dimensional']);
   assert.equal(three.host.names().includes('createD3d9'), true);
   assert.equal(three.host.names().includes('createLegacyDraw'), false);
+
+  const legacyConfig = makeConfig(WINDOWED_DEFAULTS.map((row) => (row.key === 'CREATEOBJECT'
+    ? { key: 'CREATEOBJECT', value: '1' }
+    : row)));
+  const legacy = await boot({ config: legacyConfig, screenMode: 2 });
+  assert.deepEqual(legacy.session.graphicsRoutes, ['legacy-draw']);
+  assert.equal(legacy.host.names().includes('createLegacyDraw'), true);
+  assert.equal(legacy.host.names().includes('createD3d9'), false, '位 1 = 0 ⇒ 不走三维段');
+  assert.equal(legacy.session.device, null, '旧式路线没有三维设备对象');
+
+  const noneConfig = makeConfig(WINDOWED_DEFAULTS.map((row) => (row.key === 'CREATEOBJECT'
+    ? { key: 'CREATEOBJECT', value: '0' }
+    : row)));
+  const none = await boot({ config: noneConfig, screenMode: 2 });
+  assert.deepEqual(none.session.graphicsRoutes, [], '两个位都为 0 ⇒ 两条都不跑（不是"默认跑三维"）');
+  assert.equal(none.session.graphicsRoute, null);
 });
 
-test('★ 旧式绘制参数：窗口 / 客户区尺寸 / 行为位（缺省 0，可注入）', async () => {
+test('★★ 旧式绘制参数：行为位 = UseDirectDrawEmuration | (形态字≠0 ? 2 : 0)；FullScreenBit 独立；AlwaysBackupSurface 不是实参', async () => {
   const legacyConfig = makeConfig(WINDOWED_DEFAULTS.map((row) => (row.key === 'CREATEOBJECT'
     ? { key: 'CREATEOBJECT', value: '1' }
     : row)));
   const { host } = await boot({ config: legacyConfig, screenMode: 2 });
   const params = host.argsOf('createLegacyDraw');
   assert.equal(params.window, 100);
-  assert.equal(params.clientWidth, 1024);
+  assert.equal(params.clientWidth, 1024, '客户区宽来自引擎级缓存（set:WinX）');
   assert.equal(params.clientHeight, 768);
-  assert.equal(params.behaviorBits, 0);
-
-  const injected = await boot({
-    config: makeConfig(WINDOWED_DEFAULTS.map((row) => (row.key === 'CREATEOBJECT'
-      ? { key: 'CREATEOBJECT', value: '1' }
-      : row))),
-    screenMode: 2,
-    extra: { graphics: { legacyBehaviorBits: 0x21 } },
-  });
-  assert.equal(injected.host.argsOf('createLegacyDraw').behaviorBits, 0x21);
+  assert.equal(params.behaviorBits, 2, '形态字 ≠ 0 ⇒ 行为位带 2（UseDirectDrawEmuration 缺键 = 0）');
+  assert.equal(params.fullscreenBit, 32, 'display:FullScreenBit 原值直传（发行默认 32）');
+  assert.deepEqual(
+    Object.keys(params).sort(),
+    ['behaviorBits', 'clientHeight', 'clientWidth', 'fullscreenBit', 'window'],
+    '⛔ set:AlwaysBackupSurface 不是这条请求的实参',
+  );
 });
 
-test('★★ 两条图形路线失败 ⇒ 写内建错误文本进错误通道 + 结束启动（⛔ 不静默）', async () => {
+test('★★ 两条图形路线失败 ⇒ 结束启动（⛔ 不静默）；日志类别按逐步骤表', async () => {
   const legacyConfig = makeConfig(WINDOWED_DEFAULTS.map((row) => (row.key === 'CREATEOBJECT'
     ? { key: 'CREATEOBJECT', value: '1' }
     : row)));
@@ -571,24 +624,29 @@ test('★★ 两条图形路线失败 ⇒ 写内建错误文本进错误通道 +
   assert.equal(legacy.session.failure.reason, 'graphics-init-failed');
   assert.equal(legacy.session.failure.step, 'create-legacy-draw');
   assert.equal(legacy.session.failure.errorText, GRAPHICS_INIT_ERROR_TEXT);
-  assert.deepEqual(legacy.session.errors, [GRAPHICS_INIT_ERROR_TEXT]);
+  assert.deepEqual(legacy.session.errors, [], '旧式路线不写日志通道（文本直接送用户 ⇒ failure.errorText）');
   assert.equal(legacy.session.drawObject, null);
   assert.equal(legacy.host.calls.at(-1).name, 'createLegacyDraw', '失败后不再发空闲抑制请求');
   assert.equal(legacy.session.hasPeriodicTimer, false, '不建主循环');
   assert.throws(() => legacy.session.beginMainLoop(), /graphics-init-failed/);
 
-  // 三维路线四个失败点
+  // 三维路线四个失败点：前三步写错误类文本；"上层绘制对象"按 spec 不写日志（只给用户可见文本）
   const cases = [
-    { hostOpts: { d3dHandle: null }, step: 'create-d3d9', last: 'createD3d9' },
-    { hostOpts: { mode: null }, step: 'query-adapter-display-mode', last: 'queryAdapterDisplayMode' },
-    { hostOpts: { deviceHandle: null }, step: 'create-device', last: 'createDevice' },
-    { hostOpts: { drawHandle: null }, step: 'create-draw-object', last: 'createDrawObject' },
+    { hostOpts: { d3dHandle: null }, step: 'create-d3d9', last: 'createD3d9', logged: true },
+    { hostOpts: { mode: null }, step: 'query-adapter-display-mode', last: 'queryAdapterDisplayMode', logged: true },
+    { hostOpts: { deviceHandle: null }, step: 'create-device', last: 'createDevice', logged: true },
+    { hostOpts: { drawHandle: null }, step: 'create-draw-object', last: 'createDrawObject', logged: false },
   ];
   for (const c of cases) {
     const { host, session } = await boot({ screenMode: 2, hostOpts: c.hostOpts });
     assert.equal(session.failure.rule, RULE_GRAPHICS_INIT, c.step);
     assert.equal(session.failure.step, c.step);
-    assert.deepEqual(session.errors, [GRAPHICS_INIT_ERROR_TEXT], `错误通道必须有文本（${c.step}）`);
+    assert.equal(session.failure.errorText, GRAPHICS_INIT_ERROR_TEXT, `用户可见文本（${c.step}）`);
+    assert.deepEqual(
+      session.errors,
+      c.logged ? [GRAPHICS_INIT_ERROR_TEXT] : [],
+      c.logged ? `错误通道必须有文本（${c.step}）` : `该步不写日志通道（${c.step}）`,
+    );
     assert.equal(host.calls.at(-1).name, c.last, `失败点 ${c.step}`);
     assert.equal(session.drawObject, null);
     assert.equal(session.hasPeriodicTimer, false);
@@ -772,9 +830,9 @@ test('★★ 被忽略项必须显式：规则 id 合法 / 原因非空 / 指到
     `${RULE_WINDOW_CREATE}/windowed-client-vs-screen`,
     `${RULE_WINDOW_ATTACH}/ime-rebind`,
     `${RULE_WINDOW_ATTACH}/menu-content`,
-    `${RULE_GRAPHICS_INIT}/device-param-mapping`,
+    `${RULE_GRAPHICS_INIT}/device-type-not-distinguishable`,
     `${RULE_GRAPHICS_INIT}/fullscreen-present-combination`,
-    `${RULE_GRAPHICS_INIT}/legacy-behavior-bits`,
+    `${RULE_GRAPHICS_INIT}/resolution-enumeration`,
     `${RULE_GRAPHICS_INIT}/error-text`,
     `${RULE_EVENT_LOOP}/timer-activation-condition`,
     `${RULE_EVENT_LOOP}/pump-second-site`,
@@ -790,7 +848,9 @@ test('★★ 被忽略项必须显式：规则 id 合法 / 原因非空 / 指到
   const required = [
     'register-window-class', 'measure-window-frame', 'create-window', 'show-window', 'update-window',
     'associate-input-context', 'record-service-window', 'operate-menu', 'draw-menu-bar',
-    'create-d3d9', 'query-adapter-display-mode', 'create-device', 'create-draw-object',
+    'create-d3d9', 'query-adapter-display-mode', 'create-device',
+    'set-dialog-box-mode', 'query-device-caps', 'check-texture-format-32', 'clear-render-target',
+    'create-draw-object',
   ];
   const requests = new Set(traceNames(session));
   for (const req of required) assert.ok(requests.has(req), `缺必做请求：${req}`);

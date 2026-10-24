@@ -418,6 +418,8 @@ export class ElectronWindowHost {
         return await nodeHost.readText(String(p.path));
       case 'host.isFile':
         return await nodeHost.isFile(String(p.path));
+      case 'host.listDir':
+        return await nodeHost.listDir(String(p.dir));
       case 'host.ensureReadDir':
         return await nodeHost.ensureReadDir(String(p.dir));
       case 'host.writeBytes': {
