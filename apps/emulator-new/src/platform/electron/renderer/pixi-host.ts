@@ -552,6 +552,8 @@ export interface PixiRenderHostOptions {
    * ★ 本轮只有结构：copy / composite 的目标与次序对，像素 / 进度 / 遮罩仍是残差。
    */
   commandExecKinds?: number[];
+  /** 白闪取证：命中白帧时把 canvas 存成 PNG（名字 + 字节）；缺省不存。 */
+  flashCapture?: (name: string, bytes: Uint8Array) => void;
 }
 
 /* ─────────────────────────── 命令档执行 / 发射的内部形状 ─────────────────────────── */
@@ -677,6 +679,19 @@ export class PixiRenderHost {
   private lastDraw: LastDrawState | null = null;
   private lastPresent: LastPresentState | null = null;
   private presentCount = 0;
+  /** 白闪取证：启动后 10s 内每帧读 1 个像素，只记“接近纯白”的帧。 */
+  // ★ 取证窗口要覆盖 INITCONFIG4（本机可到 ~96k 步 / 数十秒）⇒ 120s，而不是 10s。
+  private flashProbeUntil = performance.now() + 120000;
+  private flashProbeHits = 0;
+  /** 取证：进入 movie 之前保存每一帧缩略图。 */
+  private captureAllFrames = false;
+  private captureAllIndex = 0;
+  /** 可见呈现层：WebGL canvas 只做离屏渲染，每帧 blit 到这里。 */
+  private displayCanvas: HTMLCanvasElement | null = null;
+  private displayCtx: CanvasRenderingContext2D | null = null;
+  /** 已释放、但快照里还引用着的纹理 id；在快照真正去掉它们之前不 present。 */
+  private readonly releasedAwaitingScene = new Set<number>();
+  private readonly flashCapture: ((name: string, bytes: Uint8Array) => void) | undefined;
   /** 各类场景警告上次发出的文本（同一条不每帧重复写） */
   private readonly lastSceneNotes = new Map<string, string>();
   /**
@@ -691,6 +706,7 @@ export class PixiRenderHost {
     this.app = app;
     this.logSink = options.log ?? (() => {});
     this.errorSink = options.error ?? this.logSink;
+    this.flashCapture = options.flashCapture;
     this.commandExecKinds = [...(options.commandExecKinds ?? [])];
     this.sceneRoot.label = 'amayui-scene-root';
   }
@@ -704,8 +720,12 @@ export class PixiRenderHost {
   static async create(hostElement: HTMLElement, options: PixiRenderHostOptions = {}): Promise<PixiRenderHost> {
     const app = new Application();
     await app.init({
-      width: Math.max(1, Math.round(options.initialWidth ?? hostElement.clientWidth ?? 1)),
-      height: Math.max(1, Math.round(options.initialHeight ?? hostElement.clientHeight ?? 1)),
+      // ★ 用窗口 innerWidth/innerHeight，不用 hostElement.clientHeight：后者实测是 721，
+      //   会让 init 的 1280x720 resize 成为一次“可见后重分配”。
+      // ★ 硬编码游戏分辨率：窗口/客户区测量会有 1px 误差（实测 721），
+      //   会让 init 的 1280x720 resize 变成一次可见后重分配。
+      width: options.initialWidth ?? 1280,
+      height: options.initialHeight ?? 720,
       background: 0x000000,
       backgroundAlpha: 1,
       antialias: false,
@@ -714,9 +734,16 @@ export class PixiRenderHost {
       autoDensity: true,
       autoStart: false,
       preference: ['webgl'],
+      // ★ 跳过 present 时要保留上一帧：否则后缓冲被清空，合成器可能合到白色（版权页白闪）。
+      preserveDrawingBuffer: false,
     });
     const host = new PixiRenderHost(app, options);
+    // ★ 单 canvas：WebGL canvas 直接可见（旧模拟器口径），不做 2D blit。
+    //   双 canvas + 每帧 drawImage 是额外的一次 surface 更新，正是要排除的差异。
     hostElement.appendChild(app.canvas);
+    // ★ 画布自身也钉黑：WebGL 上下文是 alpha 的，合成器在“无新帧/清空”时
+    //   透出的是画布 CSS 背景；不设就会透到页面/窗口的默认白。
+    (app.canvas as HTMLCanvasElement).style.backgroundColor = '#000000';
     // ★ **在窗口 show 之前**先把画布清成背景色。顺序（`.tmp/emulator-new.log` 实测）：
     //   renderer ready → main `createWindow` → `boot.showWindow` → 然后才是 `init`（0x1f5 的
     //   createDevice）。也就是说窗口**先可见**、画布**后**才有第一笔 ⇒ 在那一小段里画布是
@@ -894,6 +921,7 @@ export class PixiRenderHost {
       }
       slot.hasContent = true;
       slot.writeCount += 1;
+      this.releasedAwaitingScene.delete(textureId);
       if (!params.quiet) {
         this.note(color === 0
           ? `uploadTexture(${textureId})：${width}×${height}，无颜色键`
@@ -909,12 +937,97 @@ export class PixiRenderHost {
 
   /** 影片帧上传：不应用颜色键、不每帧写诊断；随后由影片 host 调 `presentNow()` */
   uploadMovieFrame(params: { textureId: number; width: number; height: number; rgba: Uint8Array }): boolean {
+    this.captureAllFrames = false;
     // ★ 必须先标记再上传：`uploadTexture` 内部会重建场景；若等它返回再标记，重建出的场景
     //   仍把影片画在黑网格下面 ⇒ 每次上传后的第一次 present 都会黑一帧（正是闪烁的来源）。
     this.movieSlots.add(params.textureId);
     const ok = this.uploadTexture({ ...params, kind: 'normal', color: -1, quiet: true, movie: true });
     if (!ok) this.movieSlots.delete(params.textureId);
     return ok;
+  }
+
+  /** 当前快照里有没有绘制项引用这个纹理槽（影片首帧据此决定能不能立即 present）。 */
+  hasDrawableForTexture(textureId: number): boolean {
+    const scene = this.scene;
+    if (!scene) return false;
+    return scene.drawItems.some((item) => item.textureId === textureId && item.flags !== undefined);
+  }
+
+  /** 只在这里改变可见 canvas 尺寸；初始化/显式 resize 时调用，不在每帧 blit 里改。 */
+  private resizeDisplay(width: number, height: number): void {
+    const display = this.displayCanvas;
+    const ctx = this.displayCtx;
+    if (display === null || ctx === null) return;
+    if (display.width === width && display.height === height) return;
+    display.width = width;
+    display.height = height;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  /** 把 WebGL 画布当前内容 blit 到可见 2D canvas。 */
+  private blitDisplay(): void {
+    const display = this.displayCanvas;
+    const ctx = this.displayCtx;
+    if (display === null || ctx === null) return;
+    const source = this.app.canvas as HTMLCanvasElement;
+    // ★ 尺寸只在 init()/显式 resize 时同步；这里作为兜底（正常不会走到）。
+    if (display.width !== source.width || display.height !== source.height) {
+      this.resizeDisplay(source.width, source.height);
+    }
+    // ⛔ 不要 clearRect：2D canvas 若被提升成独立层，clear 与 draw 之间可能被合成器采样到透明。
+    //   源是完整画布，drawImage 会覆盖全部像素；首帧另用黑底初始化。
+    ctx.drawImage(source, 0, 0, display.width, display.height);
+  }
+
+  /** 取证：进入 movie 之前逐帧保存缩略图（避免 4MB/帧）。 */
+  private captureAllFrame(): void {
+    if (!this.captureAllFrames || this.flashCapture === undefined) return;
+    if (this.captureAllIndex >= 3000) {
+      this.captureAllFrames = false;
+      return;
+    }
+    this.captureAllIndex += 1;
+    try {
+      const small = document.createElement('canvas');
+      small.width = 480;
+      small.height = 270;
+      const ctx = small.getContext('2d');
+      if (ctx === null) return;
+      ctx.drawImage((this.displayCanvas ?? this.app.canvas) as HTMLCanvasElement, 0, 0, small.width, small.height);
+      const dataUrl = small.toDataURL('image/png');
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      this.flashCapture('all-' + String(this.captureAllIndex).padStart(4, '0') + '.png', bytes);
+    } catch { /* 取证失败不影响呈现 */ }
+  }
+
+  /** 取证：把当前场景渲染成 PNG 交给 flashCapture（不改变呈现）。 */
+  captureScene(name: string): void {
+    if (this.flashCapture === undefined) {
+      this.note('captureScene：没有 flashCapture 回调');
+      return;
+    }
+    let canvas: HTMLCanvasElement | null = null;
+    try {
+      canvas = this.app.renderer.extract.canvas(this.sceneRoot) as HTMLCanvasElement;
+    } catch (error) {
+      this.note('captureScene：extract 失败，退回 app.canvas：' + (error instanceof Error ? error.message : String(error)));
+      canvas = this.app.canvas;
+    }
+    try {
+      const dataUrl = canvas.toDataURL('image/png');
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      this.flashCapture(name, bytes);
+      this.note('captureScene：已写 ' + name + ' (' + bytes.length + ' B)');
+    } catch (error) {
+      this.note('captureScene：toDataURL/写盘失败：' + (error instanceof Error ? error.message : String(error)));
+    }
   }
 
   /** 影片 host 的同步呈现入口（`present` 是 private；视频帧不能每帧等 async 协议） */
@@ -926,30 +1039,30 @@ export class PixiRenderHost {
     this.present('movie');
   }
 
+  /** 帧边界之间重复提交**上一份已提交场景**：保证合成器每帧都有内容，不会合到清空缓冲。 */
+  presentLast(): void {
+    this.present('frame');
+  }
+
+  /**
+   * 跳过“不该画”的帧时用**黑色**占住画布，⛔ 不是不 present。
+   * 关闭 preserveDrawingBuffer 后，跳过一次 present 可能让合成器合到已清空的后缓冲 ⇒ 白帧。
+   */
+  presentBlank(): void {
+    this.app.renderer.render({ container: EMPTY_CONTAINER, clear: true });
+  }
+
   /** `0x1fa`：释放平台纹理（幂等） */
   releaseTexture(textureId: number): void {
+    this.releasedAwaitingScene.add(textureId);
     if (!this.slots.has(textureId)) {
-      this.note(`releaseTexture(${textureId})：槽不存在 ⇒ 幂等忽略`);
+      this.note('releaseTexture(' + textureId + ')：槽不存在 ⇒ 幂等忽略');
       return;
     }
     this.dropSlot(textureId);
-    // ★ 不能用**旧快照**重建：核心的 0x1f7 已经删掉绘制项，但 renderer 的上一份快照可能
-    //   还包含它；释放 43 时会把“引用空槽的白色绘制项”画成整屏白色 placeholder。
-    //   先把这份快照里对该纹理的引用一并剥掉，再做重建 / 呈现。
-    this.scrubTextureFromSnapshot(textureId);
-    this.note(`releaseTexture(${textureId})：已销毁平台纹理`);
-    this.rebuildSceneFromLastSnapshot();
-    // ★ **这里不呈现**（2026-10 修正）。两次历史修复都在这个函数里加东西：
-    //   36f9444 加了"立刻 present"、2f0f362 加了 scrub —— 白闪仍在，因为两者的前提是错的：
-    //   0x1fa 执行的那一刻，核心**已经前进**了（可能是 LOAD_FRAME / 换页的中途），而 renderer 手里
-    //   只有**上一份**快照。剥掉被释放的那个 id 并不能让快照变新 —— 剩下的条目（尤其是网格：
-    //   它们不引用纹理）照样把"上一页"画出来。在版权页（白底网格 + 前景纹理）上就是**整屏白**闪一帧。
-    //   ⇒ 呈现只发生在**帧边界**（主循环推完新快照之后）：那时画的是引擎此刻的状态。
-    //   合成器那一边不需要担心"白后缓冲"：布局/窗口底色的每一步都钉了黑（window-host 的
-    //   setBackgroundColor + renderer 的 background），而主循环最多 16ms 就会再画一帧。
-    this.note(
-      `releaseTexture(${textureId})：本帧不呈现（呈现只在帧边界 ⇒ 下一次 syncScene 推新快照后再画）`,
-    );
+    // ★ 不 scrub、不重建 sceneRoot：那会把“正在显示的页面”改成缺层版本，
+    //   下一帧再提交就是白/黑一帧。可见 2D canvas 保持上一帧，等新的帧边界快照。
+    this.note('releaseTexture(' + textureId + ')：已销毁平台纹理（等新快照）');
   }
 
   /** diagnostics 面板的数据源（每次调用后重新取；纯数据） */
@@ -1030,6 +1143,7 @@ export class PixiRenderHost {
     if (this.app.renderer.width !== width || this.app.renderer.height !== height) {
       this.app.renderer.resize(width, height);
     }
+    this.resizeDisplay(Math.round(this.app.renderer.width), Math.round(this.app.renderer.height));
     // `background` 在协议里写作"ARGB 的 0xRRGGBB" ⇒ 只取低 24 位当颜色（高位若被置位不参与）
     const background = params.background & 0xffffff;
     this.app.renderer.background.color = background;
@@ -1588,6 +1702,13 @@ export class PixiRenderHost {
       return;
     }
     const argb = argbOf(color);
+    // ★ 完全透明（alpha = 0）的网格不画：这是语义上的无操作。
+    //   同时避开 Pixi `Graphics.fill({ color: 0, alpha: 0 })` 在部分后端上被当成
+    //   “无填充 ⇒ 默认白”的边界（版权页淡出结束时 m200002/m200003 正好会到 0）。
+    if (argb.alpha <= 0) {
+      result.stats.meshSkipped += 1;
+      return;
+    }
     const graphics = new Graphics();
     // LOGO 的 copies 是 strip 顺序：0-1-2 与 1-3-2 两个三角形。
     graphics.poly([xs[0]!, ys[0]!, xs[1]!, ys[1]!, xs[2]!, ys[2]!]).fill({ color: argb.rgb, alpha: argb.alpha });
@@ -2035,11 +2156,57 @@ export class PixiRenderHost {
    * ★ **次序**：命令档（`runPendingCommandExec`）→ 收尾扫描（下面的 `sceneRoot` render）。
    *   闸门关着时前半段一次宿主调用都没有 ⇒ 与"只规划"时逐字节一致。
    */
+  /**
+   * 白闪取证：只读 backbuffer 中心 1 像素；接近纯白就记一条（每帧最多一条）。
+   * ★ 不截图、不落盘；只为定位“哪一帧、哪个 trigger、场景里有多少节点”。
+   */
+  private probeFlash(trigger: PresentTrigger): void {
+    if (performance.now() > this.flashProbeUntil) return;
+    try {
+      const renderer = this.app.renderer as unknown as { gl?: WebGL2RenderingContext };
+      const gl = renderer.gl;
+      if (!gl) return;
+      const width = Math.max(1, Math.round(this.app.renderer.width));
+      const height = Math.max(1, Math.round(this.app.renderer.height));
+      const pixel = new Uint8Array(4);
+      gl.readPixels(Math.floor(width / 2), Math.floor(height / 2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      // 渐变边缘可能不是纯 255，用 235 阈值；仍只记“接近白”的整屏帧
+      if ((pixel[0] ?? 0) < 235 || (pixel[1] ?? 0) < 235 || (pixel[2] ?? 0) < 235) return;
+      this.flashProbeHits += 1;
+      if (this.flashProbeHits > 20) return;
+      if (this.flashCapture !== undefined) {
+        try {
+          const dataUrl = this.app.canvas.toDataURL('image/png');
+          const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+          const binary = atob(base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          this.flashCapture(`flash-${this.flashProbeHits}-${trigger}.png`, bytes);
+        } catch { /* 取证失败不影响呈现 */ }
+      }
+      const scene = this.scene;
+      this.note(`[flash-probe] white present trigger=${trigger} target=${scene?.target ?? '?'} nodes=${this.built.length} textures=${scene?.textures.length ?? '?'}`);
+    } catch {
+      /* 取证失败不影响呈现 */
+    }
+  }
+
   private present(trigger: PresentTrigger = 'frame'): void {
     const scene = this.scene;
     if (!scene) {
       this.note('present：还没有收到任何场景快照 ⇒ 无事可做');
       return;
+    }
+    // ★ 释放纹理后，快照里可能还引用着它（核心已前进、renderer 还是旧快照）。
+    //   在快照真正去掉这些 id 之前不 present：否则会把上一页（版权页白底）再画一帧。
+    if (this.releasedAwaitingScene.size > 0) {
+      const stillReferenced = scene.textures.some((texture) => this.releasedAwaitingScene.has(texture.id))
+        || scene.drawItems.some((item) => this.releasedAwaitingScene.has(item.textureId));
+      if (stillReferenced) {
+        this.note('present：等快照去掉已释放纹理（本帧不呈现）');
+        return;
+      }
+      this.releasedAwaitingScene.clear();
     }
 
     // ★ 命令档**先**跑：它画进两块离屏画布 / 命令自己的纹理；收尾扫描**后**跑，画进 `scene.target`。
@@ -2070,6 +2237,7 @@ export class PixiRenderHost {
     }
 
     this.app.renderer.render({ container: this.sceneRoot, clear: true });
+    this.blitDisplay();
     this.presentCount += 1;
     this.lastPresent = {
       kind: 'backbuffer',

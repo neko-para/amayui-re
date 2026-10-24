@@ -66,6 +66,38 @@ import { computeDisplayFit } from './display-fit.ts';
 import type { PresentationPolicy } from './presentation.ts';
 import type { PixiRenderHost } from './pixi-host.ts';
 
+/**
+ * 桥接调用计时：按 method 累计 count / total / max，每 200 次或单次 ≥ 50ms 写一条日志。
+ * 目的：让“INITCONFIG4 卡很久”能区分是 FS 往返还是指令本身。
+ */
+const bridgeTimings = new Map<string, { count: number; total: number; max: number }>();
+
+function logBridgeTiming(bridge: AmayuiBridge, method: Parameters<AmayuiBridge['invoke']>[0], ms: number): void {
+  const item = bridgeTimings.get(method) ?? { count: 0, total: 0, max: 0 };
+  item.count += 1;
+  item.total += ms;
+  if (ms > item.max) item.max = ms;
+  bridgeTimings.set(method, item);
+  if (ms >= 50) {
+    bridge.report({ kind: 'log', level: 'info', text: `[timing] slow ${method} ${ms.toFixed(1)}ms` });
+  } else if (item.count % 200 === 0) {
+    bridge.report({
+      kind: 'log',
+      level: 'info',
+      text: `[timing] ${method} count=${item.count} total=${item.total.toFixed(0)}ms max=${item.max.toFixed(1)}ms`,
+    });
+  }
+}
+
+async function timedInvoke<T>(bridge: AmayuiBridge, method: Parameters<AmayuiBridge['invoke']>[0], params: unknown): Promise<T> {
+  const started = performance.now();
+  try {
+    return await bridge.invoke(method, params) as T;
+  } finally {
+    logBridgeTiming(bridge, method, performance.now() - started);
+  }
+}
+
 const QUIT = Symbol('quit-message');
 type QueueEntry = WindowMessage | typeof QUIT;
 
@@ -205,36 +237,36 @@ class BridgeHost implements Host {
   }
 
   async readBytes(file: string): Promise<Uint8Array> {
-    return await this.bridge.invoke('host.readBytes', { path: file }) as Uint8Array;
+    return await timedInvoke(this.bridge, 'host.readBytes', { path: file }) as Uint8Array;
   }
 
   async readBytesMaybe(file: string): Promise<Uint8Array | null> {
-    const result = await this.bridge.invoke('host.readBytesMaybe', { path: file });
+    const result = await timedInvoke(this.bridge, 'host.readBytesMaybe', { path: file });
     return (result ?? null) as Uint8Array | null;
   }
 
   async readSlice(file: string, offset: number, length: number): Promise<Uint8Array> {
-    return await this.bridge.invoke('host.readSlice', { path: file, offset, length }) as Uint8Array;
+    return await timedInvoke(this.bridge, 'host.readSlice', { path: file, offset, length }) as Uint8Array;
   }
 
   async readText(file: string): Promise<string> {
-    return await this.bridge.invoke('host.readText', { path: file }) as string;
+    return await timedInvoke(this.bridge, 'host.readText', { path: file }) as string;
   }
 
   async isFile(file: string): Promise<boolean> {
-    return await this.bridge.invoke('host.isFile', { path: file }) as boolean;
+    return await timedInvoke(this.bridge, 'host.isFile', { path: file }) as boolean;
   }
 
   async listDir(dir: string): Promise<string[]> {
-    return await this.bridge.invoke('host.listDir', { dir }) as string[];
+    return await timedInvoke(this.bridge, 'host.listDir', { dir }) as string[];
   }
 
   async ensureReadDir(dir: string): Promise<void> {
-    await this.bridge.invoke('host.ensureReadDir', { dir });
+    await timedInvoke(this.bridge, 'host.ensureReadDir', { dir });
   }
 
   async writeBytes(file: string, data: Uint8Array): Promise<void> {
-    await this.bridge.invoke('host.writeBytes', { path: file, data });
+    await timedInvoke(this.bridge, 'host.writeBytes', { path: file, data });
   }
 }
 
@@ -247,6 +279,7 @@ class BridgeBootHost implements BootHost {
   private readonly queue: QueueEntry[] = [];
   private readonly timers = new Map<number, ReturnType<typeof setInterval>>();
   private foreground = false;
+  private firstFrameSent = false;
 
   constructor(bridge: AmayuiBridge, pixi: PixiRenderHost, presentation: PresentationPolicy) {
     this.bridge = bridge;
@@ -261,43 +294,43 @@ class BridgeBootHost implements BootHost {
   /* WindowHost */
 
   async frameMetrics(): Promise<FrameMetrics> {
-    return await this.bridge.invoke('boot.frameMetrics', {}) as FrameMetrics;
+    return await timedInvoke(this.bridge, 'boot.frameMetrics', {}) as FrameMetrics;
   }
 
   async screenSize(): Promise<ScreenSize> {
-    return await this.bridge.invoke('boot.screenSize', {}) as ScreenSize;
+    return await timedInvoke(this.bridge, 'boot.screenSize', {}) as ScreenSize;
   }
 
   async registerWindowClass(params: WindowClassParams): Promise<WindowClassHandle | null> {
-    return await this.bridge.invoke('boot.registerWindowClass', params) as WindowClassHandle | null;
+    return await timedInvoke(this.bridge, 'boot.registerWindowClass', params) as WindowClassHandle | null;
   }
 
   async createWindow(params: WindowCreateParams): Promise<WindowHandle | null> {
-    return await this.bridge.invoke('boot.createWindow', applyPresentationPolicy(params, this.presentation)) as WindowHandle | null;
+    return await timedInvoke(this.bridge, 'boot.createWindow', applyPresentationPolicy(params, this.presentation)) as WindowHandle | null;
   }
 
   showWindow(window: WindowHandle, showMode: number): void {
-    void this.bridge.invoke('boot.showWindow', { window, showMode });
+    void timedInvoke(this.bridge, 'boot.showWindow', { window, showMode });
   }
 
   updateWindow(window: WindowHandle): void {
-    void this.bridge.invoke('boot.updateWindow', { window });
+    void timedInvoke(this.bridge, 'boot.updateWindow', { window });
   }
 
   associateInputContext(window: WindowHandle, context: PlatformHandle | null): void {
-    void this.bridge.invoke('boot.associateInputContext', { window, context });
+    void timedInvoke(this.bridge, 'boot.associateInputContext', { window, context });
   }
 
   async getMenu(window: WindowHandle): Promise<PlatformHandle | null> {
-    return await this.bridge.invoke('boot.getMenu', { window }) as PlatformHandle | null;
+    return await timedInvoke(this.bridge, 'boot.getMenu', { window }) as PlatformHandle | null;
   }
 
   operateMenu(params: { category: number; window: WindowHandle; menu: PlatformHandle | null; extra: number }): void {
-    void this.bridge.invoke('boot.operateMenu', params);
+    void timedInvoke(this.bridge, 'boot.operateMenu', params);
   }
 
   drawMenuBar(window: WindowHandle): void {
-    void this.bridge.invoke('boot.drawMenuBar', { window });
+    void timedInvoke(this.bridge, 'boot.drawMenuBar', { window });
   }
 
   isForegroundWindow(window: WindowHandle): boolean {
@@ -306,11 +339,11 @@ class BridgeBootHost implements BootHost {
   }
 
   hideWindow(window: WindowHandle): void {
-    void this.bridge.invoke('boot.hideWindow', { window });
+    void timedInvoke(this.bridge, 'boot.hideWindow', { window });
   }
 
   destroyWindow(window: WindowHandle): void {
-    void this.bridge.invoke('boot.destroyWindow', { window });
+    void timedInvoke(this.bridge, 'boot.destroyWindow', { window });
   }
 
   postQuitMessage(exitCode: number): void {
@@ -326,7 +359,7 @@ class BridgeBootHost implements BootHost {
   /* MessageHost */
 
   setThreadExecutionState(flags: number): void {
-    void this.bridge.invoke('boot.setThreadExecutionState', { flags });
+    void timedInvoke(this.bridge, 'boot.setThreadExecutionState', { flags });
   }
 
   setTimer(window: WindowHandle, params: { id: number; periodMs: number; callback: null }): void {
@@ -376,7 +409,7 @@ class BridgeBootHost implements BootHost {
 
   async queryAdapterDisplayMode(params: { d3d: D3d9Handle; adapter: number }): Promise<DisplayMode | null> {
     void params;
-    const size = await this.bridge.invoke('boot.screenSize', {}) as ScreenSize;
+    const size = await timedInvoke(this.bridge, 'boot.screenSize', {}) as ScreenSize;
     return { width: size.width, height: size.height, format: 0 };
   }
 
@@ -401,6 +434,12 @@ class BridgeBootHost implements BootHost {
       return null;
     }
     this.log('info', `createDevice → Pixi ${width}x${height}（${this.presentation.ignoreFullscreen ? '全屏已忽略 ⇒ 窗口态' : `screenMode ${params.screenMode}`}）`);
+    // ★ 窗口显示必须晚于 init 的 renderer.resize：可见 canvas 的尺寸同步在 init 内完成，
+    //   否则窗口先可见、之后 resize 重分配 canvas，会出一帧白。
+    if (!this.firstFrameSent) {
+      this.firstFrameSent = true;
+      void this.bridge.invoke('host.firstFrame', {}).catch(() => {});
+    }
     return 1;
   }
 
@@ -453,6 +492,18 @@ class LocalRenderHost implements RenderHost {
   private machine: Machine | null = null;
   private nextId = 1;
   private lastScenePushAt = 0;
+  private lastHoldPresentAt = 0;
+  /** 旧模拟器的 #holdFrames：全屏遮盖消失、替换层还没到时保持上一帧。 */
+  private coverHoldFrames = 0;
+  private lastCovered = false;
+  private firstFrameSent = false;
+  /** 上一次快照里的可绘制键；用于“新建条目首帧不 present”。 */
+  private lastDrawableKeys = new Set<string>();
+  /** 上一帧是否“有动画”，用于记录渐变收尾帧。 */
+  private lastAnimating = 0;
+  private lastFadeLogAt = 0;
+  private capturedTextFade = false;
+  private fadeSeq = 0;
   private readonly pushedTextures = new Map<number, string>();
   private readonly surfaceIds = new WeakMap<object, SurfaceRef>();
   /**
@@ -493,6 +544,36 @@ class LocalRenderHost implements RenderHost {
     this.lastFitSignature = '';
   }
 
+  /** 当前快照里是否有一个不透明、覆盖整个视口的元素（网格或绘制项）。 */
+  private coversViewport(scene: ReturnType<LocalRenderHost['snapshot']>): boolean {
+    const width = 1280;
+    const height = 720;
+    for (const mesh of scene.meshes) {
+      if ((mesh.color >>> 24) === 0) continue;
+      if (mesh.count !== 4 || mesh.copies[0].length < 4 || mesh.copies[1].length < 4) continue;
+      const xs = mesh.copies[0].slice(0, 4).map((bits) => {
+        const buffer = new ArrayBuffer(4);
+        new DataView(buffer).setUint32(0, bits >>> 0, true);
+        return new DataView(buffer).getFloat32(0, true);
+      });
+      const ys = mesh.copies[1].slice(0, 4).map((bits) => {
+        const buffer = new ArrayBuffer(4);
+        new DataView(buffer).setUint32(0, bits >>> 0, true);
+        return new DataView(buffer).getFloat32(0, true);
+      });
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      if (minX <= 0 && minY <= 0 && maxX >= width && maxY >= height) return true;
+    }
+    for (const item of scene.drawItems) {
+      if ((item.color >>> 24) === 0) continue;
+      if (item.left <= 0 && item.top <= 0 && item.right >= width && item.bottom >= height) return true;
+    }
+    return false;
+  }
+
   /** 推一次场景（节流；`force` 跳过节流）。返回是否真的推了。 */
   syncScene(force = false): boolean {
     const machine = this.machine;
@@ -504,6 +585,41 @@ class LocalRenderHost implements RenderHost {
     machine.stampCommands();
     machine.advanceCommands();
     const scene = this.snapshot(machine);
+    if (!this.capturedTextFade) {
+      const textItem = scene.drawItems.find((item) => item.key === 200001);
+      if (textItem !== undefined && ((textItem.color >>> 24) & 0xff) === 255) {
+        this.capturedTextFade = true;
+      }
+    }
+    if (scene.animating === 1 && now - this.lastFadeLogAt >= 100) {
+      this.lastFadeLogAt = now;
+      const meshes = scene.meshes.map((m) => 'm' + m.key + ':color=' + (m.color >>> 0).toString(16) + ':v0=' + (m.colors[0] ?? -1).toString(16)).join(' ');
+      const items = scene.drawItems.map((d) => 'd' + d.key + ':color=' + (d.color >>> 0).toString(16) + ':tex=' + d.textureId + ':rect=' + d.left + ',' + d.top + ',' + d.right + ',' + d.bottom).join(' ');
+      this.log('info', '[fade] meshes=' + scene.meshes.length + ' drawItems=' + scene.drawItems.length + ' ' + meshes + ' ' + items);
+    }
+    if (this.lastAnimating === 1 && scene.animating === 0) {
+      const meshes = scene.meshes.map((m) => 'm' + m.key + ':color=' + (m.color >>> 0).toString(16) + ':v0=' + (m.colors[0] ?? -1).toString(16)).join(' ');
+      const items = scene.drawItems.map((d) => 'd' + d.key + ':color=' + (d.color >>> 0).toString(16) + ':tex=' + d.textureId + ':rect=' + d.left + ',' + d.top + ',' + d.right + ',' + d.bottom).join(' ');
+      this.log('info', '[fade-end] meshes=' + scene.meshes.length + ' drawItems=' + scene.drawItems.length + ' ' + meshes + ' ' + items);
+    }
+    this.lastAnimating = scene.animating;
+    // ★ 帧批次边界：只在 VM 进入等待/门（flags != 0）时提交。
+    //   VM 连续执行指令期间（包括场景有动画）都可能处于页面构建的中间态，
+    //   ⛔ 不 apply、不 present；这正是旧模拟器“一批指令一次 present”的口径。
+    machine.scene.windowStamped = false;
+    if (!force && machine.flags === 0) {
+      return false;
+    }
+    const covered = this.coversViewport(scene);
+    if (!force && this.lastCovered && !covered && this.coverHoldFrames < 60) {
+      this.coverHoldFrames += 1;
+      this.log('info', '[present-hold] 全屏遮盖消失、替换层未到 ⇒ 保持上一帧 ' + this.coverHoldFrames);
+      return false;
+    }
+    if (covered || this.coverHoldFrames > 0) {
+      this.lastCovered = covered;
+      this.coverHoldFrames = 0;
+    }
     this.pixi.applyScene(scene);
     for (const texture of scene.textures) {
       this.pushedTextures.set(texture.id, textureShape(texture.kind, texture.width, texture.height));
@@ -626,6 +742,13 @@ class LocalRenderHost implements RenderHost {
     } catch (error) {
       this.log('error', `present 失败：${messageOf(error)}`);
     }
+  }
+
+  /** 非帧边界：重复提交上一份已提交场景（不重建），避免合成器合到空缓冲。 */
+  presentLast(): void {
+    // ★ 可见层是 2D canvas：跳过 present 时它自然保持上一帧，
+    //   再提交 sceneRoot 只会把可能被中间态改坏的场景画出来。
+    void this.lastHoldPresentAt;
   }
 
   /** 收尾：强制推一次最新场景并 present（避免停在旧快照上，见白屏问题） */
@@ -958,6 +1081,7 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
   let windowSession: Awaited<ReturnType<typeof bootWindow>> | null = null;
   let machineRef: Machine | null = null;
   let lastYieldAt = 0;
+  let lastProgressAt = 0;
   const clockOrigin = Date.now();
   const inputHost = new DomInputHost(pixi.canvasElement());
 
@@ -971,6 +1095,20 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
       key: job.key,
       showLogo: job.showLogo,
       clock: () => Date.now() - clockOrigin,
+      onProgress: (info) => {
+        bridge.report({
+          kind: 'log',
+          level: 'info',
+          text: `[progress] step=${info.step} script=${info.script} ip=0x${info.ip.toString(16)} last=${info.ms.toFixed(0)}ms`,
+        });
+      },
+      onSlowStep: (info) => {
+        bridge.report({
+          kind: 'log',
+          level: 'info',
+          text: `[slow] opcode=0x${info.opcode.toString(16)} step=${info.step} ${info.ms.toFixed(1)}ms script=${info.script}`,
+        });
+      },
       inputHost,
       sleepHost: async (ms: number) => { await new Promise<void>((resolve) => { setTimeout(resolve, ms); }); },
       onBeforeScript: async (ctx) => {
@@ -1002,8 +1140,19 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
       onIteration: async () => {
         const session = windowSession;
         if (session === null) return;
+        const progressNow = Date.now();
+        if (machineRef !== null && progressNow - lastProgressAt >= 1000) {
+          lastProgressAt = progressNow;
+          const frame = machineRef.slots[machineRef.cur] ?? null;
+          bridge.report({
+            kind: 'log',
+            level: 'info',
+            text: `[progress] step=${machineRef.steps} cur=${machineRef.cur} script=${frame?.id === undefined ? 'root' : '0x' + frame.id.toString(16)} ip=0x${(frame?.ip ?? 0).toString(16)} flags=0x${(machineRef.flags >>> 0).toString(16)} anim=${machineRef.scene.animating}`,
+          });
+        }
         session.pump();
         if (render.syncScene()) await render.present();
+        else render.presentLast();
         // ★ 渲染步收尾：本帧无动画 ⇒ 清命令表；随后清「强制完成」。必须在 present 之后。
         if (machineRef !== null) machineRef.finishRenderStep();
         if (machineRef !== null && (machineRef.flags & WAIT_BIT) !== 0) {
@@ -1013,8 +1162,11 @@ async function runInstall(job: Extract<StartJob, { mode: 'install' }>, bridge: A
         }
         const now = Date.now();
         if (now - lastYieldAt >= 4) {
-          lastYieldAt = now;
+          // ★ 先等、再把 lastYieldAt 记成“回来之后”的时间。
+          //   若先记时间，setTimeout(0) 在 Windows 上常要 8ms ⇒ 下一次迭代又满足 ≥4ms ⇒ 每条指令都让出一次
+          //   （实测只有 ~125 条/秒）。记在 await 之后，才有 4ms 的连续执行窗口。
           await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+          lastYieldAt = Date.now();
         }
       },
     },

@@ -99,6 +99,10 @@ export interface RunOpts {
   tickMs?: number;
   /** 宿主毫秒时钟（可选；给了就覆盖虚拟步长，见 `MachineOptions.clock`） */
   clock?: () => number;
+  /** 单步慢日志（≥ 25ms）：平台取证用。 */
+  onSlowStep?: (info: { opcode: number; step: number; ms: number; script: string }) => void;
+  /** 每 10 万步的进度日志。 */
+  onProgress?: (info: { step: number; script: string; ip: number; ms: number }) => void;
   /** 报告里是否带**全量**效果明细（可能上千条；`--effects` / `--trace` 用） */
   includeEffects?: boolean;
   uninitializedFloat?: 'throw' | 'zero';
@@ -258,7 +262,7 @@ export async function analyzeBytes(env: CoreEnv, buf: Uint8Array, opts: RunOpts 
   // key 是运行期状态：调用方没给就让实现生成一个非 0 值（规范不允许把 0 当默认）。
   const key = opts.key ?? generateIntKey();
   const machine = new Machine({
-    body, table: env.table, key, tickMs: opts.tickMs, clock: opts.clock, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
+    body, table: env.table, key, tickMs: opts.tickMs, clock: opts.clock, onSlowStep: opts.onSlowStep, onProgress: opts.onProgress, uninitializedFloat: opts.uninitializedFloat, config: opts.config, loadScript: opts.loadScript,
     scriptName: opts.scriptName, rootId: opts.rootId, rootName: opts.rootName, showLogo: opts.showLogo,
     // ★ 根脚本的表：`analyzeBytes` 收到的那份字节**就是**根脚本 ⇒ 缺省按它自己的头 + body 派生。
     rootTables: opts.rootTables !== undefined ? opts.rootTables : tablesFromHeader(header, body),

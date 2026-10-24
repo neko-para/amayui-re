@@ -415,6 +415,8 @@ export interface SceneState {
   meshes: Map<number, Mesh>;
   /** "场景还有动画在跑"（等待门看它；见 CORE-TIMING-WINDOW） */
   animating: number;
+  /** 本帧 stepScene 是否刚给某个窗盖章（起点 0 → now）；平台据此跳过“盖章帧”的 present。 */
+  windowStamped: boolean;
   /**
    * **强制完成**档：种类 2 的 mode < 0 等路径置 1；渲染步收尾清 0。
    * ★ 命令档的进度判据读它（到期 / 强制完成 ⇒ 进度 1）；它不是脚本可写格。
@@ -639,6 +641,10 @@ export interface MachineOptions {
    * ★ 返回值应是单调递增的毫秒（整数或小数都可；本层原样使用）。
    */
   clock?: () => number;
+  /** 单步慢日志（≥ 25ms）：给平台层取证用；缺省不记。 */
+  onSlowStep?: (info: { opcode: number; step: number; ms: number; script: string }) => void;
+  /** 每 10 万步的进度日志（取证“是不是在跑、跑多快”）。 */
+  onProgress?: (info: { step: number; script: string; ip: number; ms: number }) => void;
   /** 未写过的浮点槽的读法：`throw`（缺省）或 `zero`（显式选择 + 记诊断） */
   uninitializedFloat?: 'throw' | 'zero';
   /** 配置库（`55-config.md`）；缺省 = 未建立（配置 opcode 会响亮失败） */
@@ -741,6 +747,8 @@ export class Machine {
   /** 渲染宿主（缺省 `undefined` = 没有后端；见 `MachineOptions.renderHost`） */
   readonly renderHost: RenderHost | undefined;
   /** 影片播放后端（缺省 `undefined` = 没有后端；见 `MachineOptions.movieHost`） */
+  readonly onSlowStep: ((info: { opcode: number; step: number; ms: number; script: string }) => void) | undefined;
+  readonly onProgress: ((info: { step: number; script: string; ip: number; ms: number }) => void) | undefined;
   readonly movieHost: MovieHost | undefined;
   /** 存档文件边界（缺省 `undefined`，见 `MachineOptions.saveHost`） */
   readonly saveHost: SaveHost | undefined;
@@ -947,6 +955,7 @@ export class Machine {
     drawItems: new Map(),
     meshes: new Map(),
     animating: 0,
+    windowStamped: false,
     forcedComplete: 0,
     auxTables: [new Map(), new Map()],
     commands: new Map(),
@@ -1068,6 +1077,8 @@ export class Machine {
     this.loadImage = opts.loadImage;
     this.fontNames = [...(opts.fontNames ?? [])];
     this.renderHost = opts.renderHost;
+    this.onSlowStep = opts.onSlowStep;
+    this.onProgress = opts.onProgress;
     this.movieHost = opts.movieHost;
     this.saveHost = opts.saveHost;
     this.inputHost = opts.inputHost;
@@ -1345,12 +1356,13 @@ export class Machine {
    */
   stepScene(): void {
     this.scene.animating = 0;
+    // ★ windowStamped 是**闩锁**：由平台在快照时消费；⛔ 不要每步清掉，否则 16ms 节流会把它吃掉。
     const now = this.scene.now;
     for (const item of this.scene.drawItems.values()) {
       if ((item.flags & 2) === 0) continue;
       // 持续时间 ≤ 0（从未排窗，或已到期）⇒ 这一趟不推进
       if (item.duration <= 0) continue;
-      if (item.start === 0) item.start = now;
+      if (item.start === 0) { item.start = now; this.scene.windowStamped = true; }
       if (item.duration > 0 && now <= item.start + item.delay + item.duration) {
         if (now > item.start + item.delay) {
           const t = (now - item.start - item.delay) / item.duration;
@@ -1371,7 +1383,7 @@ export class Machine {
     for (const mesh of this.scene.meshes.values()) {
       if ((mesh.flags & 2) === 0) continue;
       if (mesh.duration <= 0) continue;
-      if (mesh.start === 0) mesh.start = now;
+      if (mesh.start === 0) { mesh.start = now; this.scene.windowStamped = true; }
       if (mesh.duration > 0 && now <= mesh.start + mesh.delay + mesh.duration) {
         if (now > mesh.start + mesh.delay) {
           const t = (now - mesh.start - mesh.delay) / mesh.duration;
@@ -1546,11 +1558,13 @@ export class Machine {
     for (;;) {
       // 迭代头（CORE-VM-LOOP）：先泵一次宿主消息（节流由平台 / 注入方决定），再读时钟、过门。
       // ★ 泵完仍继续本迭代的其余步骤；缺省不泵（连一次 `await` 都不多付）。
+      // ★ 先推进场景计时窗，再让平台 pump / 快照 / present：
+      //   否则版权页第一帧会拿到“推进前”的整页颜色（先完整展示，再黑→渐变）。
+      this.stepScene();
       if (this.onIteration) {
         const stop = await this.onIteration();
         if (stop) return { steps: this.steps, index: this.steps, ip: this.ip, stop };
       }
-      this.stepScene();
       this.serviceMovies();
       if (this.halted) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'exit' } };
       if (this.steps >= maxSteps) return { steps: this.steps, index: this.steps, ip: this.ip, stop: { kind: 'step-limit', index: this.steps } };
@@ -1576,6 +1590,7 @@ export class Machine {
       }
       // 分派器协议：handler 之前在「操作数个数」槽写 2·argc+1；handler 可以清零（控制转移）
       this.operandCount = 2 * dec.argc + 1;
+      const slowStart = performance.now();
       try {
         await handler(this, dec.ops);
       } catch (error) {
@@ -1594,8 +1609,25 @@ export class Machine {
         if (error instanceof FrameLoadError) Object.assign(wrapped, { category: error.category });
         throw wrapped;
       }
+      const slowMs = performance.now() - slowStart;
+      if (slowMs >= 25) {
+        const activeFrame = this.slots[this.cur];
+        this.onSlowStep?.({ opcode: dec.opcode, step: this.steps, ms: slowMs, script: activeFrame?.id === undefined ? 'root' : '0x' + activeFrame.id.toString(16) });
+      }
       this.ip += 4 * this.operandCount;
       this.steps += 1;
+      if (this.steps % 100000 === 0) {
+        const progressFrame = this.slots[this.cur];
+        const nowMs = performance.now();
+        const prev = (this as unknown as { lastProgressMs?: number }).lastProgressMs ?? nowMs;
+        (this as unknown as { lastProgressMs?: number }).lastProgressMs = nowMs;
+        this.onProgress?.({
+          step: this.steps,
+          script: progressFrame?.id === undefined ? 'root' : '0x' + progressFrame.id.toString(16),
+          ip: this.ip,
+          ms: nowMs - prev,
+        });
+      }
     }
   }
 }

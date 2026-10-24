@@ -79,6 +79,12 @@ export class ElectronWindowHost {
   /** 关闭请求交给 renderer 后，若主循环已经结束 / 卡住，强制收尾的兜底定时器 */
   private closeFallback: ReturnType<typeof setTimeout> | null = null;
   private powerSaveBlockerId: number | null = null;
+  /** 第一次 show 是否已真正执行（避免重复 show / 抢在首帧前显示） */
+  private shown = false;
+  private pendingShow = false;
+  private firstFrameSeen = false;
+  private readyToShow = false;
+  private showFallback: ReturnType<typeof setTimeout> | null = null;
 
   private readonly readyPromise: Promise<RendererReady>;
   private resolveReady: (info: RendererReady) => void = () => {};
@@ -135,48 +141,18 @@ export class ElectronWindowHost {
       throw new Error(`${this.loadFailure} —— 先构建渲染进程（vite build）`);
     }
 
-    const debug = new BrowserWindow({
-      width: 560,
-      height: 900,
-      show: true,
-      x: 40,
-      y: 40,
-      backgroundColor: '#0b0f14',
-      title: 'amayui debug — 只读诊断',
-      autoHideMenuBar: true,
-      webPreferences: {
-        preload: this.preloadPath,
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: false,
-      },
-    });
-    this.debugWin = debug;
-    debug.on('closed', () => {
-      this.debugWin = null;
-      this.log('info', 'debug 窗口已关闭（不影响 game renderer）');
-    });
-    debug.webContents.on('render-process-gone', (_event, details) => {
-      this.log('error', `debug 窗口渲染进程结束：${details.reason}`);
-    });
-    // macOS 全屏 Space：让 debug 窗口跟随到所有 Space（否则 install 的全屏窗口会盖掉它）
-    if (process.platform === 'darwin') {
-      debug.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    }
-    try {
-      await debug.loadURL(`${pathToFileURL(htmlPath).toString()}?debug=1`);
-      this.log('info', 'debug 窗口已加载（只读诊断）');
-    } catch (err) {
-      this.log('warn', `debug 窗口加载失败（不影响 game）：${err instanceof Error ? err.message : String(err)}`);
-      if (!debug.isDestroyed()) debug.destroy();
-      this.debugWin = null;
-    }
+    // ★ 临时禁用 debug 窗口：它是第二个 BrowserWindow，会独立参与 GPU/合成，
+    //   也是启动阶段“右上角白色东西”的嫌疑源。先排除它对白闪的影响。
+    this.debugWin = null;
 
     const win = new BrowserWindow({
-      show: false,
+      // ★ 旧模拟器口径：创建即可见（黑底）。不再有隐藏→show 的状态转换。
+      show: true,
       width: BOOTSTRAP_WIDTH,
       height: BOOTSTRAP_HEIGHT,
       useContentSize: true,
+      // ★ 旧模拟器固定窗口；可缩放窗口在 show/布局时会多一次非客户区状态。
+      resizable: false,
       backgroundColor: '#000000',
       title: WINDOW_TITLE,
       autoHideMenuBar: true,
@@ -186,10 +162,22 @@ export class ElectronWindowHost {
         nodeIntegration: false,
         // preload 要 import electron 并跑 Node 类型剥壳 ⇒ 不能开 sandbox
         sandbox: false,
+        // 画面是游戏主循环驱动的；被遮挡时也不要停 rAF/合成。
+        backgroundThrottling: false,
       },
     });
     this.win = win;
+    // ★ 旧模拟器口径：窗口创建即可见（黑底），不在“首帧/init 完成后”再 show。
+    //   一次性 show/激活发生在任何游戏内容之前，避免它在后续页面附近插入一帧。
+    win.show();
+    this.shown = true;
     this.destroyed = false;
+    // ★ ready-to-show 之前 show 会露出未合成的白底（Windows 实测）：先记着，等首帧可显示再 show。
+    win.once('ready-to-show', () => {
+      this.readyToShow = true;
+      // ★ 不在这里 show：ready-to-show 只代表页面已加载，WebGL 还没提交第一帧。
+      //   等 renderer 的 host.firstFrame 再显示，避开“窗口可见但无内容”的 DWM 白底竞态。
+    });
 
     win.on('close', (event) => {
       if (!this.destroyed && this.preventClose) {
@@ -428,6 +416,10 @@ export class ElectronWindowHost {
         return await nodeHost.listDir(String(p.dir));
       case 'host.ensureReadDir':
         return await nodeHost.ensureReadDir(String(p.dir));
+      case 'host.firstFrame':
+        this.firstFrameSeen = true;
+        if (this.pendingShow) void this.showNow();
+        return undefined;
       case 'host.writeBytes': {
         const data = p.data;
         if (!(data instanceof Uint8Array)) throw new Error('host.writeBytes: data 必须是 Uint8Array');
@@ -517,12 +509,20 @@ export class ElectronWindowHost {
     const y = Number(params.y);
     const defaultPosition = (x >>> 0) === 0x80000000 && (y >>> 0) === 0x80000000;
 
+    // ★ 只在值真的不同时才改窗口：setContentSize / setFullScreen / setTitle 都会触发
+    //   一次非客户区重绘（DWM 可能先画一帧默认白）。窗口构造时已是 1280x720 + 标题，
+    //   这里的调用在旧模拟器里不存在。
     if (!fullscreen) {
-      win.setContentSize(clientWidth, clientHeight);
-      if (!defaultPosition) win.setPosition(x, y);
+      const [currentWidth, currentHeight] = win.getContentSize();
+      if (currentWidth !== clientWidth || currentHeight !== clientHeight) {
+        win.setContentSize(clientWidth, clientHeight);
+      }
+      if (!defaultPosition) {
+        const [currentX, currentY] = win.getPosition();
+        if (currentX !== x || currentY !== y) win.setPosition(x, y);
+      }
     }
-    win.setFullScreen(fullscreen);
-    win.setTitle(WINDOW_TITLE);
+    if (win.isFullScreen() !== fullscreen) win.setFullScreen(fullscreen);
     this.log('info', `createWindow：客户区 ${clientWidth}x${clientHeight} · fullscreen=${fullscreen} · 逻辑句柄 ${SINGLE_HANDLE}`);
     return SINGLE_HANDLE;
   }
@@ -530,12 +530,110 @@ export class ElectronWindowHost {
   private showWindow(): void {
     const win = this.win;
     if (win === null || win.isDestroyed()) return;
-    // ★ 原生窗口底色再钉一次黑：某些 Windows / 显卡组合在 show / 尺寸切换的第一帧
-    //   会先合成窗口底色；不给白底，避免版权页结束后偶发白闪。
+    if (this.shown) {
+      this.log('info', 'showWindow → 窗口创建时已可见（无 show 状态转换）');
+      return;
+    }
+    // ★ 即使 ready-to-show 已到，也等第一帧真正提交后再显示。
+    // ready-to-show 还没到：先挂起。若事件一直不来（隐藏窗口被节流），300ms 后兜底显示。
+    this.pendingShow = true;
+    if (this.showFallback === null) {
+      this.showFallback = setTimeout(() => {
+        this.showFallback = null;
+        if (this.pendingShow) void this.showNow();
+      }, 5000);
+    }
+    this.log('info', 'showWindow → 等 ready-to-show 后再显示（避免白底）');
+  }
+
+  /**
+   * 窗口级白闪取证（逐帧）：beginFrameSubscription 每收到一帧 compositor 结果就采样，
+   * 不靠 40ms 轮询（capturePage 本身就要几十 ms，短白闪会漏）。
+   * 四角+中心 ≥4 点接近白才存 PNG；最多 5 张。
+   */
+  private startWindowFlashProbe(win: BrowserWindow): void {
+    const until = Date.now() + 120000;
+    let hits = 0;
+    let frames = 0;
+    const onFrame = (image: Electron.NativeImage): void => {
+      frames += 1;
+      if (frames % 60 === 0) this.log('info', `win-flash：已收到 ${frames} 帧`);
+      if (Date.now() > until || hits >= 5 || win.isDestroyed()) {
+        try { win.webContents.endFrameSubscription(); } catch { /* ignore */ }
+        return;
+      }
+      try {
+        const size = image.getSize();
+        const bitmap = image.getBitmap() as unknown as Uint8Array;
+        if (size.width <= 0 || size.height <= 0 || bitmap.length < 4) return;
+        const points = [[0.5, 0.5], [0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]];
+        let white = 0;
+        for (const [px, py] of points) {
+          const x = Math.min(size.width - 1, Math.floor(size.width * px!));
+          const y = Math.min(size.height - 1, Math.floor(size.height * py!));
+          const off = (y * size.width + x) * 4;
+          if ((bitmap[off] ?? 0) >= 235 && (bitmap[off + 1] ?? 0) >= 235 && (bitmap[off + 2] ?? 0) >= 235) white += 1;
+        }
+        if (white < 4) return;
+        hits += 1;
+        const file = path.join(path.resolve(this.appRoot, '..', '..', '.tmp'), 'win-flash-' + hits + '.png');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, image.toPNG());
+        this.log('warn', 'win-flash：逐帧采样白帧 ' + file);
+      } catch { /* 取证失败不影响窗口 */ }
+    };
+    try {
+      win.webContents.beginFrameSubscription(false, onFrame);
+      this.log('info', 'win-flash：逐帧 compositor 探针已开启（120s / 最多 5 张）');
+      setTimeout(() => {
+        try { win.webContents.endFrameSubscription(); } catch { /* ignore */ }
+      }, 120000);
+    } catch (err) {
+      this.log('warn', 'win-flash：beginFrameSubscription 失败：' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+
+  /** 真正 show；只执行一次。★ 先等到首帧是黑（capturePage 采样）再显示。 */
+  private async showNow(): Promise<void> {
+    const win = this.win;
+    if (win === null || win.isDestroyed() || this.shown) return;
+    this.shown = true;
+    this.pendingShow = false;
+    if (this.showFallback !== null) {
+      clearTimeout(this.showFallback);
+      this.showFallback = null;
+    }
+    // ★ 不做任何 capturePage：隐藏窗口的 capturePage 会异步触发一次合成/读回，
+    //   完成时机不可控，可能在后续页面渐变附近插入一帧白。
+    // ★ 不用 show()+focus()：激活/焦点切换会让 DWM 先合成一帧窗口底色。
     win.setBackgroundColor('#000000');
-    win.show();
-    win.focus();
-    this.log('info', 'showWindow → 显示 bootstrap 窗口');
+    win.showInactive();
+    // ★ 不主动 focus：聚焦/激活是另一个一次性的 DWM 合成时机。用户点击窗口时自然获得焦点。
+    this.log('info', 'showWindow → showInactive 显示 bootstrap 窗口（不主动 focus）');
+  }
+
+  /**
+   * 一次异步截图取证：只记中心像素，**不阻塞 show**。
+   * ★ 隐藏窗口的 capturePage 可能拖到首帧甚至更晚 ⇒ 绝不能拿它当 show 的前置。
+   */
+  private async sampleFirstPaint(win: BrowserWindow): Promise<void> {
+    try {
+      const image = await win.webContents.capturePage();
+      const size = image.getSize();
+      const bitmap = image.getBitmap() as unknown as Uint8Array;
+      if (size.width <= 0 || size.height <= 0 || bitmap.length < 4) return;
+      const x = Math.floor(size.width / 2);
+      const y = Math.floor(size.height / 2);
+      const off = (y * size.width + x) * 4;
+      const b = bitmap[off] ?? 0;
+      const g = bitmap[off + 1] ?? 0;
+      const r = bitmap[off + 2] ?? 0;
+      const a = bitmap[off + 3] ?? 0;
+      this.log('info', `first-paint 中心像素 rgba(${r},${g},${b},${a})`);
+    } catch (err) {
+      this.log('warn', `first-paint 采样失败：${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private updateWindow(): void {

@@ -224,12 +224,15 @@ async function runDemo(args: Args): Promise<void> {
     if (args.smoke) {
       // 两个窗口的 smoke：game 只要 canvas；debug 必须真的收到投影。
       const debug = host.debugWindow();
-      if (debug === null || debug.isDestroyed()) throw new Error('debug 窗口没有创建');
-      await delay(500);
-      const debugText = await debug.webContents.executeJavaScript(
-        'document.getElementById("diagnostics")?.innerText ?? ""',
-      ) as string;
-      if (!debugText.includes('diagnostics')) throw new Error('debug 窗口没有收到 diagnostics 投影');
+      if (debug !== null && !debug.isDestroyed()) {
+        await delay(500);
+        const debugText = await debug.webContents.executeJavaScript(
+          'document.getElementById("diagnostics")?.innerText ?? ""',
+        ) as string;
+        if (!debugText.includes('diagnostics')) throw new Error('debug 窗口没有收到 diagnostics 投影');
+      } else {
+        log('info', '--smoke：debug 窗口已禁用，跳过投影检查');
+      }
       const win = host.browserWindow();
       if (win === null || win.isDestroyed()) throw new Error('没有窗口可截屏');
       const gamePanelHidden = await win.webContents.executeJavaScript(

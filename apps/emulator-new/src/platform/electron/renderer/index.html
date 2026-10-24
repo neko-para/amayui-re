@@ -12,7 +12,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>amayui emulator — renderer</title>
+    <title>ARCGameEngine</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
@@ -26,7 +26,7 @@
       ★ 内容是 game renderer 发来的只读投影（`debug:event`）；debug 窗口不跑 core。
       ★ 每一条都必须对应一个真实的实现缺口（BMP 分支未成篇 / 字体对象未建模 / 混合映射未取证…）。
     -->
-    <aside id="diagnostics" class="diagnostics" aria-label="渲染诊断">
+    <aside id="diagnostics" class="diagnostics" aria-label="渲染诊断" hidden>
       <header class="diagnostics__header">
         <strong>diagnostics</strong>
         <span id="diagnostics-summary" class="diagnostics__summary"></span>

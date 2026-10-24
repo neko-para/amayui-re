@@ -382,6 +382,7 @@ export type BridgeMethod =
   | 'host.listDir'
   | 'host.ensureReadDir'
   | 'host.writeBytes'
+  | 'host.firstFrame'
   // 窗口 / 图形启动（main 侧的 BrowserWindow 与显示器信息）
   | 'boot.frameMetrics'
   | 'boot.screenSize'

@@ -345,7 +345,6 @@ function startJob(job: StartJob): void {
   void runStartJob(job, bridge, host, {
     boot(info) {
       bootInfo = info;
-      document.title = `${info.title} — amayui renderer`;
       scheduleDiagnostics();
     },
   });
@@ -409,6 +408,9 @@ async function main(): Promise<void> {
   try {
     host = await PixiRenderHost.create(hostElement, {
       commandExecKinds,
+      flashCapture: (name, bytes) => {
+        void bridge.invoke('host.writeBytes', { path: '.tmp/' + name, data: bytes }).catch(() => {});
+      },
       log: (text) => {
         try {
           bridge.report({ kind: 'log', level: 'info', text });
