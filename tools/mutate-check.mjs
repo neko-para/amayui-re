@@ -2841,6 +2841,15 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-cxx-pl-mpeg-sync.test.mjs',
     what: '只改 C++ 那份 pl_mpeg 副本 ⇒ 两处解码器漂移（两边的影片测试各自仍然绿）',
   },
+  // ── C++ 分派表 ↔ handler 声明（★ 删掉一行 `case` ⇒ handler 还在、编译链接全绿，
+  //    但该 opcode 运行期落进 default 抛"未实现" —— 这正是"看起来实现了、其实没接上"）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: '        case 0xA3: op_a3(instruction); return;\n',
+    to: '',
+    guard: 'tools/test/emulator-cxx-dispatch.test.mjs',
+    what: '`0xa3` 的 case 被删掉（声明与定义都在）⇒ 分派表守卫当场红（否则"补了指令"只是补了函数体）',
+  },
 
 ];
 

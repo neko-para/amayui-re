@@ -1741,3 +1741,39 @@ n < 10 走注入的 `sleepHost`；`SLEEP_BIT` 服务分支按 `now >= sleepUntil
 **未做**：用带参数的真实安装跑 LOGO / TITLE 的像素对照（需要人工看窗口）。
 
 **门禁**：`pnpm test` **1068/0** · `pnpm test:assets` **204/0（1 skip）** · `pnpm test:mutation` **361/361** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6 · `pnpm typecheck` 六工程绿。
+
+## 六十四、第三十一批：emulator-cxx 补齐到 TITLE 的 17 条指令 + 执行区间时间戳归属（2026-10-26）
+
+**范围**（两件事，第二件由第一件的取证带出）：
+1. `apps/emulator-cxx`（C++ 原生宿主）补齐 **boot → TITLE 的脚本链**里缺 handler 的 17 条指令（排除 audio / text-subsystem / live2d）。
+2. `data/spec/chapters/70-vm.md` 的「两个时间戳格是**本帧记录里的**两格、与场景不是同一对」与语料冲突 ⇒ 修正（连同残差、falsifier）。
+
+**判据（17 条怎么定的）**：boot → TITLE 的脚本链（`0` / `20936` / `20947…21027` / `21089…21092` / `21037`）**静态足迹** ∩ C++ 分派表缺 handler 的差集 = 17 条。`--footprint` 的**动态足迹**（2,000,000 步）证明这 17 条没有一条在本实现的 boot 路径上被取指 —— 它们改变的是 TITLE 的菜单 / 输入 / 状态路径，不是"能不能到 TITLE"。
+
+**代码**（`apps/emulator-cxx`）：
+- `vm.h`：命名表 / 状态字与相邻格 / 模式七格 / 乱数三格 / 执行区间计数 / `Frame::key_limit`；平台注入点 `set_input_word` / `set_key_sampler` / `set_mouse_event_source`；测试脚手架 `seed_mode_cells` / `seed_d9_cells`（⛔ 不是平台边界）。
+- `vm_ops_flow.cpp`（`0x009` / `0x1F4` / `0x1F5`）· `vm_ops_engine.cpp`（`0xA1` / `0xA2` / `0xA3` / `0xD9` / `0x19B` / `0x19C` / `0x1BF` / `0x1CF`）· `vm_ops_numeric.cpp`（`0x1CE`）· `vm_ops_io.cpp`（`0xFF` / `0x100` / `0x12E` / `0x2FC`）· `vm_ops_texture.cpp`（`0x208`）· `vm.cpp` 分派 17 行。
+- `boot.cpp` / `main.cpp`：新增 `--footprint`（跑到 `--max-steps` 或停机，按**首次出现顺序**汇总真的被取指过的 opcode；不开窗）。
+- `tests/core_selftest.cpp`：每条至少一个会红的断言（含 `0x1f4` ↔ `0x20c` 共用忙标记的交叉判据、`0x1bf` 整字清 0 与判据顺序、`0x19c` 四支、`0x09` 复位先于装载）。
+- `tools/test/emulator-cxx-dispatch.test.mjs`：分派表 ↔ handler 声明**两个方向**都不许漏 + 17 条在表里；`tools/mutate-check.mjs` 加一条变异（删 `case 0xA3`）。
+
+**实证**：`ctest` 5/5（selftest / smoke / boot-play / logo-movie / logo-gpu）· `--footprint --max-steps 2000000` 仍进到脚本 `21092`（TITLE）、109 个不同 opcode、无"未实现"停点 · `pnpm test` **1071/0** · `pnpm test:mutation` **363/363** · `pnpm tools spec validate` 13/13 · `pnpm tools requirements validate` 6/6。
+
+**spec 修正（错误类型 C：规则在、但错；另有归属错）**
+- **判据**：`0x1f4` 与 `0x20c` 写同一组固定偏移（`0x41A0C9` / `0x41A0CF` / `0x41A0D5` vs `0x41A1CA` / `0x41A1D0` / `0x41A1D6`）；场景的「当前 / 上一」也是同一对（`0x41278D` / `0x41279F`；`T_Scene@0x4ED10 + 0xB5A4 = 0x5A2B4`）⇒ 原文「本帧记录里的两格、与场景不是同一对」为假，且与 `60-ops-render.md` 的「这两格是引擎级的，不是帧记录里的那一对」自相矛盾。
+- **处置**：`70-vm.md` 的 `:19` / `:27` / `:123` / `:125` / `:132` / `:221` 与 `60-ops-render.md` 的 `:180` / `:181` / `:219` 按「同一对场景时钟、**本版登记的写者**都先搬旧再写新」对齐；`:213` 的对应表行删除（`0x1f5` / 泵不读这对格）；`audit.json` 三条残差改写 + 新增 `RES-RENDER-STEP-SCENE-NOW`，`CORE-OPS-RUN-BRACKET` 的 falsifier 换成两条可观察量。
+- **复审（独立 subagent，只读 `data/spec/`，四轮）**：
+  1. 第一轮：6 条自相矛盾（其中 `:213` 行、`:19` 行由本次改动引入/暴露）；
+  2. 第二轮：6 条未收口 + 5 条新矛盾（区间忙 vs 主循环「暂停」、`0x20c` 覆盖后「本帧场景时刻」无定义、同一格三套名字）；
+  3. 第三轮（有界判据：自洽 / 未决项全部登记 / 未取证不许写成已规定）：剩 3 处一行级（`:27` 的「现在」映射、`:125` 的"任何写者"全称、falsifier 1 把留白的一支判成反例）；
+  4. 第四轮（同一有界判据，只复核那 3 处）：**收口**（3 处均判一致；只要删掉 `falsifiers[0]` 这个"两支都登记成结论"的伪 falsifier、保留「同一对」那条）。该 nit 已处置。
+- **未做（已登记为残差，各带具体 `next`）**：`0x23c` 的刷新点无合同（只出现在 `GAP-OPS-0200-02FF`）· 区间忙与主循环「暂停」是否同一状态 · `0x20c` 覆盖后「本帧场景时刻」取哪次采样 · 「上一步」格有没有读者。
+
+**未做（实现侧）**：输入后端（键盘 / 鼠标）⇒ `0xff` 恒采到 0、`0x2fc` 恒"没有事件"、`0x12e` 恒"没有命中"；门字第 27 / 30 位的服务分支（规范：第 30 位「启用后门恒关」）；`0x1CE` 的停用支在脚本里不可达。
+
+**下次 review 要问什么**
+1. 同迭代先 `0x20c` 再渲染时，命令档盖章取到覆盖前还是覆盖后的采样？（`RES-RENDER-STEP-SCENE-NOW`）
+2. 区间忙标记与主循环「暂停」是不是同一状态？（`RES-OPS-BRACKET-STAMP-PAIR`）若不是，区间内 `0x20c` 的覆盖时机要重判。
+3. `0x23c` 什么时候成篇？它刷新场景时钟的语义决定「同一对」还有没有第四个写者要进合同。
+4. C++ 侧：接上输入后端之后，`0xff` / `0x100` / `0x2fc` 的三条非零支是否仍与规范一致（现在只有注入点 + 单测）。
+

@@ -127,7 +127,8 @@ int run_core_agf(const std::string& agf_path);
 int run_core_install(const std::string& install_dir, const std::string& table_path,
                      const std::string& config_path, const std::string& config_keys_path,
                      std::size_t max_steps, std::uint32_t stop_at, int trace_steps, int play_frames,
-                     const std::string& logo_dir, int logo_stride, int logo_frames);
+                     const std::string& logo_dir, int logo_stride, int logo_frames,
+                     bool footprint = false);
 int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
                         int width, int height, int max_frames);
 

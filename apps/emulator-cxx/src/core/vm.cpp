@@ -83,6 +83,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x02: op_02(instruction); return;
         case 0x88: op_88(instruction); return;
         case 0x03: op_03(instruction); return;
+        case 0x09: op_09(instruction); return;
         case 0x06: op_06(instruction); return;
         case 0x6C: op_6c(instruction); return;
         case 0x2D8: op_2d8(instruction); return;
@@ -106,6 +107,10 @@ void Machine::execute(const Instruction& instruction) {
         case 0xCC: op_cc(instruction); return;
         case 0xCD: op_cd(instruction); return;
         case 0xFB: op_fb(instruction); return;
+        case 0xFF: op_ff(instruction); return;
+        case 0x100: op_100(instruction); return;
+        case 0x12E: op_12e(instruction); return;
+        case 0x2FC: op_2fc(instruction); return;
         case 0x24E: op_24e(instruction); return;
         case 0x2DA: op_2da(instruction); return;
         case 0x344: op_344(instruction); return;
@@ -113,11 +118,14 @@ void Machine::execute(const Instruction& instruction) {
         case 0x1FD: op_1fd(instruction); return;
         case 0x1FE: op_1fe(instruction); return;
         case 0x20B: op_20b(instruction); return;
+        case 0x208: op_208(instruction); return;
         case 0x20C: op_20c(instruction); return;
         case 0x20D: op_20d(instruction); return;
         case 0x33F: op_33f(instruction); return;
         case 0x204: op_204(instruction); return;
         case 0x1F6: op_1f6(instruction); return;
+        case 0x1F4: op_1f4(instruction); return;
+        case 0x1F5: op_1f5(instruction); return;
         case 0x20F: op_20f(instruction); return;
         case 0x21C: op_21c(instruction); return;
         case 0x101: op_101(instruction); return;
@@ -139,6 +147,10 @@ void Machine::execute(const Instruction& instruction) {
         case 0x2BD: op_2bd(instruction); return;
         case 0x2DE: op_2de(instruction); return;
         case 0x192: op_192(instruction); return;
+        case 0x19B: op_19b(instruction); return;
+        case 0x19C: op_19c(instruction); return;
+        case 0x1BF: op_1bf(instruction); return;
+        case 0x1CF: op_1cf(instruction); return;
         case 0x1A9: op_1a9(instruction); return;
         case 0x1AA: op_1aa(instruction); return;
         case 0x1A3: op_1a3(instruction); return;
@@ -165,6 +177,9 @@ void Machine::execute(const Instruction& instruction) {
         case 0x25D: op_25d(instruction); return;
         case 0x1C1: op_1c1(instruction); return;
         case 0x79: op_79(instruction); return;
+        case 0xA1: op_a1(instruction); return;
+        case 0xA2: op_a2(instruction); return;
+        case 0xA3: op_a3(instruction); return;
         case 0x2DB: op_2db(instruction); return;
         case 0x78: op_78(instruction); return;
         case 0x73: op_73(instruction); return;
@@ -177,6 +192,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x149: op_149(instruction); return;
         case 0x21B: op_21b(instruction); return;
         case 0x252: op_252(instruction); return;
+        case 0xD9: op_d9(instruction); return;
         case 0x1A7: op_1a7(instruction); return;
         case 0x1A8: op_1a8(instruction); return;
         case 0x2F8: op_2f8(instruction); return;
@@ -202,6 +218,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x5E: op_5e(instruction); return;
         case 0x5F: op_5f(instruction); return;
         case 0x135: op_135(instruction); return;
+        case 0x1CE: op_1ce(instruction); return;
         case 0x136: op_136(instruction); return;
         case 0x13F: op_13f(instruction); return;
         case 0x55: op_55(instruction); return;

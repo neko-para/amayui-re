@@ -93,6 +93,9 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 | 影片 | `CORE-OPS-MOVIE`、`CORE-VM-MOVIE` | `0x20F` 对象表 / 纹理绑定门 / 影片位；门之前的对象表服务按引擎时钟推进 pl_mpeg 解码，新帧写进**同槽纹理**并标脏；收尾 `(选项字 & 3) != 2` 填最后一帧，循环位原地重启 |
 | 渲染接入 | `CORE-OPS-TEXTURE-DRAW`、`CORE-TIMING-WINDOW` | AGF 像素进入纹理记录；绘制项 / 网格按有符号 key 软件合成；颜色窗四档派生；`0x33F` tint + 混合模式 |
 | 场景命令档 | `CORE-OPS-SCENE-COMMAND-RECORDS`、`CORE-SCENE-DRAW-ORDER` | `0x223/24D/24F/250/251` 写表与校验；命令档 → 离屏画布 36/37 → 四种类合成（Fade / 遮罩 / 12 种抹除图案 / SlideBlur / ZoomBlur）→ 收尾扫描 |
+| 命名表 / 状态字 / 模式族 | `CORE-OPS-TABLE-RESET-A1` / `-BIND-A2` / `-DISPATCH-A3`、`CORE-OPS-STATUS-WORD`、`CORE-OPS-MODE-BIT`、`CORE-OPS-STATUS-CLEAR-D9`、`CORE-OPS-RNG-ENABLE` | `0xa1/0xa2/0xa3` 文本键命名表（清空 / 绑定 / 分派）；`0x1cf/0x1bf` 状态字（第 16 位 ⇒ **整字**清 0）；`0x19b/0x19c` 模式位与四个分支；`0x0d9` 清位；`0x1ce` 乱数启用（种子 = 本迭代宿主时钟） |
+| 输入派发 | `CORE-INPUT-WORD`、`CORE-INPUT-KEY-DISPATCH`、`CORE-INPUT-MOUSE-EVENT` | `0xff` 清字 + 平台采样（无设备 ⇒ 保持 0）+ 按帧上限；`0x100` 派发一个按键回调（无按键走"编号 = 键总数"表项，有按键压**当前位置**重派发）；`0x2fc` 取鼠标事件（无事件只写 0）；`0x12e` **显式未建模**：只写 −1（条目表布局还是 audit gap） |
+| 控制流 / 执行区间 / 纹理查询 | `CORE-OPS-FRAME-EXIT-SCRIPT`、`CORE-OPS-RUN-BRACKET`、`CORE-OPS-TEXTURE-SIZE` | `0x09` 丢全部帧 + 复位引擎级状态 + 以 id 0 重装根脚本；`0x1f4/0x1f5` 区间忙 / 嵌套计数（忙标记与 `0x20c` 的「别处驱动」是同一格）；`0x208` 纹理逻辑尺寸（>999 上报、槽空静默） |
 | 离屏文字 | `CORE-OPS-RENDER-TEXT-204` | Shift-JIS（平台代码页 / iconv）→ FreeType 字形；主色 / 副色 / 绘制模式 / 对位状态来自字体对象 |
 | 源矩形窗 | `CORE-OPS-SCENE3D-239` | `0x239` 步进 / 延迟 / 到期回写四条边 |
 | 安装文件切片 | `CORE-FS` 临时引导 | 松散文件优先，否则 `DATA*.ALF` 按 offset/length 切片 |
@@ -114,6 +117,9 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 # 单步跟踪指定条数（调试主循环 / 门服务）；跟踪完就退出，不开窗
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --trace 40
 
+# 执行足迹：跑到 --max-steps 或停机，按首次出现顺序汇总「真的被取指过的 opcode」（不开窗）
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --footprint --max-steps 2000000
+
 # 影片：跑到 LOGO 的 play-movie，再逐帧导出 GPU 合成（`0` 帧 = 只跑到收尾）
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-logo-gpu out\logo --logo-stride 40 --logo-frames 6
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-logo-gpu out\logo --logo-frames 0
@@ -126,6 +132,8 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 `--config` 可指定玩家 `SYS4REG.INI`；缺省按 `set:UseAppDataFolder` 选配置根（`%APPDATA%` / `XDG_CONFIG_HOME` / `~/.config`，否则安装根），
 再拼 `set:RegFilePath` 与文件名。
 门 / 状态位服务：**等待位与影片位**已建模（影片位只管关门，收尾在门之前的影片对象表服务里）；其余状态位、换帧 / 换脚本、容器句柄尚未完整建模。
+★ 由此有一条**看起来像卡死、其实是规范要求**的行为：`0x19c` 的置位支与 `0x1ce` 的非 0 支会把门字第 27 / 30 位置起，而这两个位**没有服务分支**（第 30 位按规范就是「启用后门恒关」）⇒ 门一直关着，`run()` 走到 step 上限。那不是 handler 写错，是「位是待服务标记，清不清由服务分支决定」的直接后果；要推进只能由外部清位写点（可达性未取证）。
+输入字形 / 鼠标事件都是**平台边界**：本层没有输入后端（`--play-frames` 只按 `set:DrawMode` 自动渲染），所以 `0xff` 恒采到 0、`0x2fc` 恒"没有事件"、`0x12e` 恒"没有命中"。测试用 `set_input_word()` / `set_key_sampler()` / `set_mouse_event_source()` 注入，⛔ 不要把这几个注入点当产品路径。
 `--stop-at <opcode>` 可用于在任意 opcode 前停止（`0` = 不设停止线，缺省）。
 根脚本静态解码会在数据区遇到非法 opcode 后停止，这是规范允许的静态解码边界，不是执行边界。
 

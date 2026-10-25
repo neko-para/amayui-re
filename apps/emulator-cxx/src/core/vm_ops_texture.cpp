@@ -291,4 +291,22 @@ void Machine::op_1f9(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_208(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 查询纹理尺寸（CORE-OPS-TEXTURE-SIZE）：编号（读）→ 宽（写）→ 高（写）。
+    const auto id = read_int(ops[0]);
+    // ★ 上界是**无符号**比较：id > 999（负值也算越界）⇒ 上报一条 + 两个输出写 0。
+    if (static_cast<std::uint32_t>(id) > 999u) {
+        report_error("texture-id-out-of-range:" + std::to_string(id));
+        write_int(ops[1], 0);
+        write_int(ops[2], 0);
+        return;
+    }
+    // 「槽空」与「越界」不是同一失败：槽空静默、两个输出 0。
+    const TextureRecord* found = texture(static_cast<std::uint32_t>(id));
+    write_int(ops[1], found == nullptr ? 0 : static_cast<std::int32_t>(found->width));
+    write_int(ops[2], found == nullptr ? 0 : static_cast<std::int32_t>(found->height));
+    return;
+}
+
 }  // namespace core

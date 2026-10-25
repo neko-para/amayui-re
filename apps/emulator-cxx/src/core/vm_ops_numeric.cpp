@@ -230,4 +230,21 @@ void Machine::op_55(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_1ce(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 乱数启用（CORE-OPS-RNG-ENABLE）：开关值只读、不归一、不夹取。
+    const auto value = read_int(ops[0]);
+    if (value != 0) {
+        rng_switch_ = value;                 // 开关格 ← 第 1 个操作数（仅非 0 支写）
+        state_flags_ |= 1u << 30;            // 门字第 30 位（服务分支不清位 ⇒ 启用后门恒关）
+        rng_enabled_ = 1;
+        rng_seed_ = scene_clock_ms_;         // 播种源 = 本迭代的宿主毫秒时钟
+    } else if ((state_flags_ & (1u << 30)) != 0) {
+        // 停用支：投递事件的条件未取证 ⇒ 不投递；「已启用」清 0、「种子」保留（规范不规定）。
+        state_flags_ &= ~(1u << 30);
+        rng_enabled_ = 0;
+    }
+    return;
+}
+
 }  // namespace core

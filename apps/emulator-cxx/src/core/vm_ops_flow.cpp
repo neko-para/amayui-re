@@ -128,4 +128,56 @@ void Machine::op_a0(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_09(const Instruction& instruction) {
+    (void)instruction;
+    // exit-script（CORE-OPS-FRAME-EXIT-SCRIPT）：**不是返回** —— 丢掉全部帧、复位引擎级状态，
+    // 再以统一文件 id 0 重装根脚本、从它的 dword 0 开始执行。调用者永远拿不回控制权。
+    // ★ 顺序照站点：show-logo → 帧释放 → 池复位 → 重装（装载失败才停在最后一步）。
+    show_logo_ = 0;
+    state_flags_ = 0;
+    driven_elsewhere_ = false;
+    bracket_depth_ = 0;
+    for (auto& slot : frames_) slot = Frame{};
+    global_int_.clear();
+    global_float_.clear();
+    global_string_.clear();
+    // ⛔ `ref_slots_` 不清：三个引用族全局池是否复位本版不规定（别顺手复位）。
+    // 待核（规范未规定，故本版不建模）：站点把"整型池逐格写初值 + 浮点池 memset"挂在
+    // `set:EnableMemFlip` 上、把"纹理槽释放"挂在 `set:AutoFreeTex` 上 ⇒ 这里的无条件 clear
+    // 是**最简实现**，不是"引擎无条件复位"的结论。
+    if (install_ == nullptr) throw CoreError("exit-script-loader-missing");
+    const Bytes script = read_install_file(*install_, 0u);
+    // 重装进 0 号槽：ip ← 0、长度槽 ← 0 ⇒ 本迭代不再推进（从新根脚本的 dword 0 继续）。
+    load_root(script, 0u);
+    return;
+}
+
+void Machine::op_1f4(const Instruction& instruction) {
+    (void)instruction;
+    // 执行区间进入（CORE-OPS-RUN-BRACKET）：忙 ⇒ 只 +1（不读时钟、不动时间戳）。
+    if (driven_elsewhere_) {
+        bracket_depth_ += 1;
+        return;
+    }
+    driven_elsewhere_ = true;                 // 置忙（早于取时钟）
+    const std::uint32_t now = scene_clock_ms_;  // 本迭代的宿主毫秒时钟读数
+    engine_previous_ms_ = engine_now_ms_;
+    engine_now_ms_ = now;
+    return;
+}
+
+void Machine::op_1f5(const Instruction& instruction) {
+    (void)instruction;
+    // 执行区间离开（CORE-OPS-RUN-BRACKET）：深度 > 0 ⇒ 只 −1（不清忙、不泵）。
+    if (bracket_depth_ > 0) {
+        bracket_depth_ -= 1;
+        return;
+    }
+    // 未进入就离开 ⇒ 空操作（⛔ 不许无条件清忙）。
+    if (!driven_elsewhere_) return;
+    driven_elsewhere_ = false;
+    // 队列占用标记恒 0（本实现没有待处理命令队列）⇒ 泵在空队列上是空操作。
+    return;
+}
+
 }  // namespace core

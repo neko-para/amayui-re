@@ -69,4 +69,71 @@ void Machine::op_1a8(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_ff(const Instruction& instruction) {
+    (void)instruction;
+    // 采样按键位图（CORE-INPUT-WORD）：次序固定 = 清字 → 平台采样 → 游标 ← 0 → 上限 ← 键总数。
+    input_word_ = 0;
+    if (key_sampler_) input_word_ = key_sampler_();  // 没有设备 ⇒ 保持 0（不是偷偷补值）
+    Frame& f = frame_mut();
+    f.key_cursor = 0;
+    // ★ 上限是**键总数在这一次采样时的快照**，与 `0x100` 的扫描上界（键总数本身）不是同一格。
+    f.key_limit = key_total_;
+    return;
+}
+
+void Machine::op_100(const Instruction& instruction) {
+    (void)instruction;
+    // 派发按键回调（CORE-INPUT-KEY-DISPATCH）：按输入字与游标派发**一个**回调。
+    Frame& f = frame_mut();
+    const auto word = input_word_;
+    // ★ 扫描上界是**键总数本身**（不是 `0xff` 抄下的按帧上限）。
+    const auto limit = static_cast<std::uint32_t>(key_total_);
+    if (word == 0) {
+        // 无按键 ⇒ 走"无按键"表项（编号 = 键总数）；返回位置 = 下一条。
+        const auto it = f.key_jumps.find(static_cast<std::int32_t>(limit));
+        if (it == f.key_jumps.end()) return;  // 未登记 ⇒ 只前进一条
+        push_return(static_cast<std::uint32_t>(f.ip / 4 + 1));
+        jump_to(static_cast<std::uint32_t>(it->second));
+        return;
+    }
+    std::uint32_t cursor = static_cast<std::uint32_t>(f.key_cursor);
+    while (cursor < limit && ((word >> cursor) & 1u) == 0) ++cursor;  // 左闭右开 [游标, 键总数)
+    if (cursor >= limit) return;                                  // 没有置位 ⇒ 只前进一条
+    f.key_cursor = static_cast<std::int32_t>(cursor + 1);          // 先推进游标（未登记也推进）
+    const auto it = f.key_jumps.find(static_cast<std::int32_t>(cursor));
+    if (it == f.key_jumps.end()) return;  // 未登记 ⇒ 放弃本轮剩余置位
+    // ★ 返回位置 = **当前位置**（有意重派发），不是下一条。
+    push_return(static_cast<std::uint32_t>(f.ip / 4));
+    jump_to(static_cast<std::uint32_t>(it->second));
+    return;
+}
+
+void Machine::op_12e(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 鼠标命中查找：**显式部分实现** —— 条目表 / 偏移数组的布局还没成 spec（audit gap）。
+    // 这里不猜命中，只写 -1（没有命中）；第 2…8 个操作数**不读不写**。
+    write_int(ops[0], -1);
+    if (!hit_test_reported_) {
+        hit_test_reported_ = true;
+        report_error("unmodeled-input-hit-test:0x12e");
+    }
+    return;
+}
+
+void Machine::op_2fc(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 取一条鼠标事件（CORE-INPUT-MOUSE-EVENT）：没有事件 ⇒ 只写结果 0，坐标/标志/附加量**不写**。
+    MouseEvent event;
+    if (!mouse_event_source_ || !mouse_event_source_(event)) {
+        write_int(ops[0], 0);
+        return;
+    }
+    write_int(ops[0], 1);
+    write_int(ops[1], event.x);      // 客户区坐标（映射属平台边界）
+    write_int(ops[2], event.y);
+    write_int(ops[3], event.flags);  // 位段本版不规定 ⇒ 原样传递
+    write_int(ops[4], event.extra);
+    return;
+}
+
 }  // namespace core

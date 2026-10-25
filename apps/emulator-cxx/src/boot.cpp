@@ -18,8 +18,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <random>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -59,7 +61,7 @@ int run_core_agf(const std::string& agf_path) {
 int run_core_install(const std::string& install_dir, const std::string& table_path,
                      const std::string& config_path, const std::string& config_keys_path,
                      std::size_t max_steps, std::uint32_t stop_at, int trace_steps, int play_frames,
-                     const std::string& logo_dir, int logo_stride, int logo_frames) {
+                     const std::string& logo_dir, int logo_stride, int logo_frames, bool footprint) {
     try {
         const core::Install install = core::open_install(core::path_from_utf8(install_dir));
         const auto& index = install.index;
@@ -228,15 +230,65 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
             return 1;
 #endif
         }
+        if (footprint) {
+            // 诊断口（`--footprint`）：跑到 `--max-steps` 为止，按**首次出现顺序**汇总
+            // 「这段流程实际执行过哪些 opcode」。★ 这是"执行到 TITLE 用到的指令"的机械判据，
+            // 不是静态足迹：只统计真的被取指的那一条。
+            struct Occ {
+                std::size_t steps = 0;
+                std::uint32_t first_script = 0;
+                std::size_t first_step = 0;
+            };
+            std::vector<std::uint32_t> order;
+            std::map<std::uint32_t, Occ> seen;
+            std::vector<std::uint32_t> scripts;
+            std::size_t steps = 0;
+            while (steps < max_steps) {
+                const auto& code = machine.frame().code;
+                const auto ip = machine.frame().ip;
+                if (ip + 4 > code.size()) break;
+                const std::uint32_t opcode = core::read_u32(code, ip);
+                const std::uint32_t script = machine.frame().script_id;
+                if (scripts.empty() || scripts.back() != script) scripts.push_back(script);
+                auto it = seen.find(opcode);
+                if (it == seen.end()) {
+                    it = seen.emplace(opcode, Occ{0, script, steps}).first;
+                    order.push_back(opcode);
+                }
+                ++it->second.steps;
+                if (!machine.step()) break;
+                ++steps;
+            }
+            const auto& stop = machine.last_stop();
+            std::printf("[footprint] steps=%zu opcodes=%zu scripts=%zu stop=%d script=%u opcode=0x%X\n",
+                        steps, order.size(), scripts.size(), static_cast<int>(stop.reason),
+                        machine.frame().script_id, stop.opcode);
+            std::printf("[footprint] script-chain:");
+            for (const auto script : scripts) std::printf(" %u", script);
+            std::printf("\n");
+            for (const auto opcode : order) {
+                const auto& occ = seen[opcode];
+                const core::OpcodeRow* row = table.find(opcode);
+                std::printf("[footprint] 0x%03X %-18s count=%-7zu first=script:%u@%zu\n", opcode,
+                            row != nullptr ? row->name.c_str() : "?", occ.steps,
+                            occ.first_script, occ.first_step);
+            }
+            return 0;
+        }
         if (trace_steps > 0) {
             for (int i = 0; i < trace_steps; ++i) {
                 const auto& code = machine.frame().code;
                 const auto ip = machine.frame().ip;
                 if (ip + 4 > code.size()) break;
-                std::printf("[trace] #%d ip=%zu opcode=0x%X flags=0x%X\n", i, ip,
-                            core::read_u32(code, ip), machine.state_flags());
+                std::printf("[trace] #%d script=%u ip=%zu opcode=0x%X flags=0x%X\n", i,
+                            machine.frame().script_id, ip, core::read_u32(code, ip),
+                            machine.state_flags());
                 if (!machine.step()) break;
             }
+            const auto& stop = machine.last_stop();
+            std::printf("[trace] stop reason=%d steps=%zu script=%u ip=%zu opcode=0x%X message=%s\n",
+                        static_cast<int>(stop.reason), stop.steps, machine.frame().script_id,
+                        stop.offset, stop.opcode, stop.message.c_str());
             return 0;  // 跟踪是 debug 口：给了帧数就只跟踪、不开窗（否则会一直跑下去）
         }
 

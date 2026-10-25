@@ -282,4 +282,94 @@ void Machine::op_2f6(const Instruction& instruction) {
     return;
 }
 
+// ── 命名表（CORE-OPS-TABLE-RESET-A1 / -BIND-A2 / -DISPATCH-A3） ──
+// ★ 这张表与配置的命名键表**不是同一张**；键相等 = 完整文本相等。
+
+void Machine::op_a1(const Instruction& instruction) {
+    (void)instruction;
+    // 重置：键与值一起失效（表变空，计数即 0）。
+    named_table_.clear();
+    return;
+}
+
+void Machine::op_a2(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 读序固定：先读**值**（第 2 个），再**按文本**读键（第 1 个）。
+    const auto value = read_int(ops[1]);
+    const std::string key = read_text(ops[0]);
+    // 键已存在 ⇒ 改写值（不新增一项）；本版不设上限（表满后的行为规范不规定）。
+    named_table_[key] = value;
+    return;
+}
+
+void Machine::op_a3(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 先按键（按文本）查表；★ 命中时第 2 个操作数**不被读**。
+    const std::string key = read_text(ops[0]);
+    const auto it = named_table_.find(key);
+    const auto target = it != named_table_.end() ? it->second : read_int(ops[1]);
+    // 两支都清推进格数：`jump_to` 写 ip 并把长度槽清 0。登记值不做范围检查（越界由 jump_to 响亮失败）。
+    jump_to(static_cast<std::uint32_t>(target));
+    return;
+}
+
+// ── 状态字 / 模式族 / 清位 ──
+
+void Machine::op_d9(const Instruction& instruction) {
+    (void)instruction;
+    // 清门字第 12 位（读-改-写；⛔ 不许整字写 0）。
+    state_flags_ &= ~(1u << 12);
+    // 那一格非 0 时，才对另一个引擎级字清它的第 12 位。
+    if (d9_cell_ != 0) d9_word_ &= ~(1 << 12);
+    return;
+}
+
+void Machine::op_19b(const Instruction& instruction) {
+    (void)instruction;
+    // 清模式位（CORE-OPS-MODE-BIT）：第 27 位按掩码清，再依次 D / A / B ← 0。
+    state_flags_ &= ~(1u << 27);
+    mode_d_ = 0;
+    mode_a_ = 0;
+    mode_b_ = 0;
+    return;
+}
+
+void Machine::op_19c(const Instruction& instruction) {
+    (void)instruction;
+    // 按 C / E / F 条件置模式位；四支的落点不同（见 CORE-OPS-MODE-BIT）。
+    mode_a_ = 1;
+    mode_b_ = 0;
+    if (mode_c_ != 0) {
+        mode_d_ = 1;                       // C 支：置 D，进置位支
+    } else if (mode_e_ != 0) {
+        // E 支：★ 不碰 D
+    } else if (mode_f_ != 0) {
+        return;                            // F 支：A=1/B=0 保留，位与 D、G 都不动
+    } else {
+        mode_d_ = 0;                       // 三格皆 0 支
+        state_flags_ &= ~(1u << 27);
+        return;
+    }
+    state_flags_ |= 1u << 27;              // 置位支
+    mode_g_ = 1;
+    if ((state_flags_ & (1u << 29)) != 0) state_flags_ &= ~(1u << 29);
+    return;
+}
+
+void Machine::op_1bf(const Instruction& instruction) {
+    (void)instruction;
+    // 消费状态字（CORE-OPS-STATUS-WORD）：第 16 位 ⇒ **整字**清 0（不是只清那一位）。
+    if ((static_cast<std::uint32_t>(status_word_) & 0x10000u) != 0) status_word_ = 0;
+    // 第 0 位的判据在清整字**之后**；命中才写相邻格为 1（否则不动那一格）。
+    if ((static_cast<std::uint32_t>(status_word_) & 1u) == 0) status_neighbor_ = 1;
+    return;
+}
+
+void Machine::op_1cf(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 原样覆盖状态字：不归一、不夹取、不做范围检查。
+    status_word_ = read_int(ops[0]);
+    return;
+}
+
 }  // namespace core

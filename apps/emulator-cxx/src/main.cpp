@@ -43,6 +43,7 @@ int main(int argc, char** argv) {
     std::string logo_dir;
     int logo_stride = 24;
     int logo_frames = 12;
+    bool footprint = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--smoke") == 0) {
             smoke = true;
@@ -54,6 +55,8 @@ int main(int argc, char** argv) {
             config_path = argv[++i];
         } else if (std::strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
             trace_steps = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--footprint") == 0) {
+            footprint = true;
         } else if (std::strcmp(argv[i], "--play-frames") == 0 && i + 1 < argc) {
             play_frames = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--render-logo-gpu") == 0 && i + 1 < argc) {
@@ -81,12 +84,12 @@ int main(int argc, char** argv) {
         if (config_keys_path.empty()) config_keys_path = (exe_dir / "config-keys.json").string();
         return run_core_install(install_dir, table_path, config_path, config_keys_path, max_steps,
                                 stop_at, trace_steps, play_frames, logo_dir, logo_stride,
-                                logo_frames);
+                                logo_frames, footprint);
     }
 
     if (!smoke) {
         std::fprintf(stderr,
-                     "用法：emulator-cxx --install <dir> [--play-frames N] [--trace N] "
+                     "用法：emulator-cxx --install <dir> [--play-frames N] [--trace N] [--footprint] "
                      "[--stop-at <opcode>] [--config <SYS4REG.INI>]\n"
                      "      emulator-cxx --install <dir> --render-logo-gpu <dir> "
                      "[--logo-stride N] [--logo-frames N]\n"

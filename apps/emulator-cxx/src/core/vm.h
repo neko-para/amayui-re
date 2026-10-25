@@ -38,6 +38,9 @@ struct Frame {
     std::unordered_map<std::uint32_t, std::string> local_string;
     std::unordered_map<std::int32_t, std::int32_t> key_jumps;
     std::int32_t key_cursor = 0;
+    // 按键扫描上限（`0xff` 写、`0x104` 读；本版只有写者）：采样时的键总数快照。
+    // ★ 与 `Machine::key_total_` **不是同一格**：`0x100` 的扫描上界是键总数本身（`CORE-INPUT-KEY-DISPATCH`）。
+    std::int32_t key_limit = 0;
 };
 
 enum class StopReason {
@@ -242,6 +245,22 @@ public:
     std::int32_t input_a() const { return input_a_; }
     std::int32_t input_b() const { return input_b_; }
     std::uint32_t input_mode() const { return input_mode_; }
+    // 输入字（`CORE-INPUT-WORD`）：`0xff` 清 / 采样、`0x100` 读、`0x101` 清。
+    std::uint32_t input_word() const { return input_word_; }
+    // ★ 平台边界注入点（测试 / 脚本化输入用）：⛔ 产品路径不要靠它伪造输入。
+    void set_input_word(std::uint32_t value) { input_word_ = value; }
+    // 平台输入采样（`0xff` 的外部请求）；缺省 = 没有设备 ⇒ 输入字保持 0。
+    using KeySampler = std::function<std::uint32_t()>;
+    void set_key_sampler(KeySampler sampler) { key_sampler_ = std::move(sampler); }
+    // 一条待处理鼠标事件（`0x2fc` 的外部请求）；坐标是**客户区**坐标，由平台负责映射。
+    struct MouseEvent {
+        std::int32_t x = 0;
+        std::int32_t y = 0;
+        std::int32_t flags = 0;
+        std::int32_t extra = 0;
+    };
+    using MouseEventSource = std::function<bool(MouseEvent&)>;
+    void set_mouse_event_source(MouseEventSource source) { mouse_event_source_ = std::move(source); }
     std::uint32_t scene_clock_ms() const { return scene_clock_ms_; }
     std::uint32_t scene_previous_ms() const { return scene_previous_ms_; }
     std::uint32_t engine_now_ms() const { return engine_now_ms_; }
@@ -334,6 +353,41 @@ public:
         const auto it = forward_container_.find(index);
         return it == forward_container_.end() ? 0 : it->second;
     }
+    // 「文本键 → 整数」命名表（`CORE-OPS-TABLE-RESET-A1` / `-BIND-A2` / `-DISPATCH-A3`）。
+    // ★ 与配置的命名键表**不是同一张**；键相等 = 完整文本相等。
+    const std::unordered_map<std::string, std::int32_t>& named_table() const { return named_table_; }
+    // 状态字（`CORE-OPS-STATUS-WORD`；`0x1cf` 写、`0x1bf` 读-清）—— ⛔ 不是门字 `state_flags_`。
+    std::int32_t status_word() const { return status_word_; }
+    std::int32_t status_neighbor() const { return status_neighbor_; }
+    // `0x0d9` 的两格（身份在规范里未规定；本版按无读者格建模）。
+    std::int32_t d9_cell() const { return d9_cell_; }
+    std::int32_t d9_word() const { return d9_word_; }
+    // 模式族的七个格（`CORE-OPS-MODE-BIT`；代号见规范，地址对应未取证）。
+    std::int32_t mode_a() const { return mode_a_; }
+    std::int32_t mode_b() const { return mode_b_; }
+    std::int32_t mode_c() const { return mode_c_; }
+    std::int32_t mode_d() const { return mode_d_; }
+    std::int32_t mode_e() const { return mode_e_; }
+    std::int32_t mode_f() const { return mode_f_; }
+    std::int32_t mode_g() const { return mode_g_; }
+    // 乱数启用族（`CORE-OPS-RNG-ENABLE`）。
+    std::int32_t rng_switch() const { return rng_switch_; }
+    std::int32_t rng_enabled() const { return rng_enabled_; }
+    std::uint32_t rng_seed() const { return rng_seed_; }
+    // 执行区间（`CORE-OPS-RUN-BRACKET`）：忙标记与 `0x20c` 的「别处驱动」是同一格。
+    bool bracket_busy() const { return driven_elsewhere_; }
+    std::int32_t bracket_depth() const { return bracket_depth_; }
+    // ★ 测试脚手架（⛔ 不是平台边界）：这几格由引擎里本版未建模的路径写，
+    //   没有脚本可达的写者 ⇒ 想让对应分支被测到，只能由测试播种。
+    void seed_mode_cells(std::int32_t mode_c, std::int32_t mode_e, std::int32_t mode_f) {
+        mode_c_ = mode_c;
+        mode_e_ = mode_e;
+        mode_f_ = mode_f;
+    }
+    void seed_d9_cells(std::int32_t cell, std::int32_t word) {
+        d9_cell_ = cell;
+        d9_word_ = word;
+    }
     bool halted() const { return halted_; }
     const RunResult& last_stop() const { return stop_; }
 
@@ -374,6 +428,8 @@ private:
     void op_01(const Instruction&); void op_02(const Instruction&); void op_03(const Instruction&); void op_06(const Instruction&);
     void op_143(const Instruction&); void op_05(const Instruction&); void op_8c(const Instruction&); void op_8f(const Instruction&);
     void op_a0(const Instruction&);
+    // 全局重置 / 执行区间（vm_ops_flow.cpp）
+    void op_09(const Instruction&); void op_1f4(const Instruction&); void op_1f5(const Instruction&);
     // 渲染入口（vm_ops_render.cpp）
     void op_23b(const Instruction&); void op_2da(const Instruction&); void op_20b(const Instruction&); void op_20c(const Instruction&);
     void op_20d(const Instruction&); void op_33f(const Instruction&); void op_204(const Instruction&);
@@ -382,6 +438,8 @@ private:
     void op_1f6(const Instruction&); void op_320(const Instruction&); void op_322(const Instruction&); void op_323(const Instruction&);
     void op_1fb(const Instruction&); void op_239(const Instruction&); void op_202(const Instruction&); void op_203(const Instruction&);
     void op_1f7(const Instruction&); void op_1f8(const Instruction&); void op_1fa(const Instruction&); void op_1f9(const Instruction&);
+    // 纹理尺寸查询（vm_ops_texture.cpp）
+    void op_208(const Instruction&);
     // 影片（vm_movie.cpp）
     void op_20f(const Instruction&);
     // 场景命令记录（vm_ops_scene.cpp）
@@ -396,6 +454,10 @@ private:
     void op_1c1(const Instruction&); void op_79(const Instruction&); void op_73(const Instruction&); void op_80(const Instruction&);
     void op_70(const Instruction&); void op_1ca(const Instruction&); void op_149(const Instruction&); void op_21b(const Instruction&);
     void op_252(const Instruction&); void op_2f8(const Instruction&); void op_2f6(const Instruction&);
+    // 命名表 / 状态字 / 模式族 / 清位（vm_ops_engine.cpp）
+    void op_a1(const Instruction&); void op_a2(const Instruction&); void op_a3(const Instruction&);
+    void op_d9(const Instruction&); void op_19b(const Instruction&); void op_19c(const Instruction&);
+    void op_1bf(const Instruction&); void op_1cf(const Instruction&);
     // 数值 / 数组（vm_ops_numeric.cpp）
     void op_6c(const Instruction&); void op_2d8(const Instruction&); void op_61(const Instruction&); void op_12c(const Instruction&);
     void op_64(const Instruction&); void op_10c(const Instruction&); void op_fe(const Instruction&); void op_107(const Instruction&);
@@ -405,6 +467,8 @@ private:
     void op_58(const Instruction&); void op_59(const Instruction&); void op_5a(const Instruction&); void op_5b(const Instruction&);
     void op_5c(const Instruction&); void op_5d(const Instruction&); void op_5e(const Instruction&); void op_5f(const Instruction&);
     void op_135(const Instruction&); void op_136(const Instruction&); void op_13f(const Instruction&); void op_55(const Instruction&);
+    // 乱数启用（vm_ops_numeric.cpp）
+    void op_1ce(const Instruction&);
     // 字体与文本（vm_ops_text.cpp）
     void op_2ec(const Instruction&); void op_2eb(const Instruction&); void op_1a4(const Instruction&); void op_76(const Instruction&);
     void op_2bd(const Instruction&); void op_2de(const Instruction&); void op_192(const Instruction&); void op_1a9(const Instruction&);
@@ -415,6 +479,8 @@ private:
     void op_109(const Instruction&); void op_108(const Instruction&); void op_c8(const Instruction&); void op_cc(const Instruction&);
     void op_cd(const Instruction&); void op_fb(const Instruction&); void op_24e(const Instruction&); void op_21c(const Instruction&);
     void op_101(const Instruction&); void op_1a7(const Instruction&); void op_1a8(const Instruction&);
+    // 输入采样 / 按键派发 / 命中查找 / 鼠标事件（vm_ops_io.cpp）
+    void op_ff(const Instruction&); void op_100(const Instruction&); void op_12e(const Instruction&); void op_2fc(const Instruction&);
 
     void execute(const Instruction& instruction);
 
@@ -438,6 +504,26 @@ private:
     std::int32_t scalar_88b_ = 0;
     std::int32_t scalar_88c_ = 0;
     std::int32_t named_message_read_text_skip_ = 0;
+    // （`a1`/`a2`/`a3`）「文本键 → 整数」命名表；`a1` 清空、`a2` 写、`a3` 按键分派。
+    std::unordered_map<std::string, std::int32_t> named_table_;
+    // （`1cf` / `1bf`）状态字与它的相邻格 —— ⛔ 与门字 `state_flags_` 是**不同**的引擎格。
+    std::int32_t status_word_ = 0;
+    std::int32_t status_neighbor_ = 0;
+    // （`0d9`）清位判据的两格；身份在规范里未规定。
+    std::int32_t d9_cell_ = 0;
+    std::int32_t d9_word_ = 0;
+    // （`19b` / `19c`）模式族的七个格。
+    std::int32_t mode_a_ = 0;
+    std::int32_t mode_b_ = 0;
+    std::int32_t mode_c_ = 0;
+    std::int32_t mode_d_ = 0;
+    std::int32_t mode_e_ = 0;
+    std::int32_t mode_f_ = 0;
+    std::int32_t mode_g_ = 0;
+    // （`1ce`）乱数启用族：开关值 / 已启用 / 种子（种子 = 本迭代宿主毫秒时钟）。
+    std::int32_t rng_switch_ = 0;
+    std::int32_t rng_enabled_ = 0;
+    std::uint32_t rng_seed_ = 0;
     std::unordered_map<std::uint32_t, std::int32_t> forward_container_;
     std::array<ListRecord, 10> list_records_{};
     std::int32_t default_group_ = 1;
@@ -468,6 +554,12 @@ private:
     std::int32_t input_a_ = 0;
     std::int32_t input_b_ = 0;
     std::uint32_t input_word_ = 0;
+    // 平台输入采样的注入点（`0xff`）；空 = 没有设备。
+    KeySampler key_sampler_;
+    // 平台鼠标事件的注入点（`0x2fc`）；空 = 永远没有事件。
+    MouseEventSource mouse_event_source_;
+    // `0x12e` 的未建模诊断只报一次。
+    bool hit_test_reported_ = false;
     std::uint32_t input_mode_ = 0;
     std::int32_t render_target_ = -1;
     std::int32_t blend_mode_ = 0;
@@ -485,6 +577,8 @@ private:
     std::uint32_t engine_now_ms_ = 0;
     std::uint32_t engine_previous_ms_ = 0;
     bool driven_elsewhere_ = false;
+    // （`1f4` / `1f5`）执行区间的嵌套计数；忙标记复用 `driven_elsewhere_`（同一格）。
+    std::int32_t bracket_depth_ = 0;
     std::int32_t mouse_interval_ = 0;
     std::int32_t mouse_position_ = -1;
     std::unordered_map<std::int32_t, std::int32_t> indirect_;
