@@ -63,7 +63,13 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 add_executable(emulator-cxx
-    src/main.cpp)
+    src/main.cpp
+    src/gpu_device.cpp
+    src/gpu_quad.cpp
+    src/gpu_scene.cpp
+    src/smoke.cpp
+    src/boot.cpp
+    src/window.cpp)
 target_link_libraries(emulator-cxx PRIVATE emulator-core)
 
 enable_testing()
@@ -74,18 +80,11 @@ add_executable(emulator-core-selftest
 target_link_libraries(emulator-core-selftest PRIVATE emulator-core)
 add_test(NAME emulator-core-selftest COMMAND emulator-core-selftest)
 
-set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the TITLE render smoke")
+set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)
-    add_test(NAME emulator-core-title
-        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --render-title)
-    add_test(NAME emulator-core-title-gpu
-        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --render-title-gpu)
-    add_test(NAME emulator-core-title-frames
-        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --render-frames 2)
-    add_test(NAME emulator-core-title-play
-        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --play-frames 2)
+    # 唯一的游戏流程是 boot（根脚本 → LOGO → 影片 → TITLE）：没有"直接跳到 TITLE"的测试档。
     add_test(NAME emulator-core-boot-play
-        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --play-boot --play-frames 1)
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --play-frames 1)
     # 影片：真 MPEG-1 program stream（LOGO.MPG）→ 门前服务 → 同槽纹理 → GPU 场景批次。
     # `--logo-frames 0` 只跑到收尾（判据在程序里：必须有帧、必须走到收尾）。
     add_test(NAME emulator-core-logo-movie

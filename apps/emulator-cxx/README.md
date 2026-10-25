@@ -20,7 +20,14 @@ apps/emulator-cxx/
   vcpkg.json
   vcpkg/                    git submodule（vcpkg 本体，不入库）
   third_party/pl_mpeg/      影片解码（vendored 单文件，来源与为什么见该目录 README）
-  src/main.cpp              窗口 / present / --smoke / core CLI
+  src/main.cpp              **只有 CLI 解析与分派**
+  src/app.h                 宿主内部 API（常量 / 小类型 / 跨 TU 函数；不是 core、不是公共库）
+  src/gpu_device.cpp        SDL_GPU 设备 / 读回 / 纹理上传
+  src/gpu_quad.cpp          贴图四边形（软件回退 / 冒烟用）
+  src/gpu_scene.cpp         场景批次：顶点构建 · 纹理按 revision 缓存 · 离屏导出
+  src/smoke.cpp             `--smoke` 的离屏自检（测试，不是产品路径）
+  src/boot.cpp              boot 流程（根脚本 → LOGO → 影片 → TITLE）与单 AGF 解码
+  src/window.cpp            窗口播放循环（按 core 的渲染请求呈现）
   src/core/                 C++ core（按 spec 重写）：ALF / LZSS / AGF / 脚本头 / opcode 解码 / 影片后端
                             `vm.cpp` 只做分派表 + 主循环；handler 按族分在 `vm_ops_*.cpp`，
                             值/池原语 `vm_value.cpp`、计时窗 `vm_timing.cpp`、影片 `vm_movie.cpp`
@@ -94,23 +101,17 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 显示与宿主路径统一经 `core/encoding` 解码为 UTF-8（Windows 路径再走 UTF-16），
 控制台输出在 Windows 上切 `CP_UTF8`。⛔ 不要把 CP932 字节直接 `printf` 或塞进 `std::filesystem::path`。
 
-★ 呈现分层：`--play-*` 的绘制项 / 4 顶点网格走 **SDL_GPU 场景批次**（纹理按 `TextureRecord::revision` 缓存）；
-命令档与离屏文字还没有 GPU 实现，命中时回退到软件 `rasterize_scene`。`--render-title` 的 BMP 导出
-仍用软件合成，它是像素 oracle，不是交互呈现路径。
+★ 呈现分层：绘制项 / 4 顶点网格走 **SDL_GPU 场景批次**（纹理按 `TextureRecord::revision` 缓存）；
+命令档与离屏文字还没有 GPU 实现，命中时回退到软件 `rasterize_scene`（它是像素 oracle，不是交互呈现路径）。
 
 ```powershell
-# ALF 索引 → 根脚本 id 0 → 脚本头 → 静态解码
-.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --to-title
+# 唯一的游戏流程：从根脚本走完整 boot（LOGO → 影片 → TITLE），窗口按宿主时钟推进
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install"
 
-# TITLE 合成帧导出 / 逐帧导出 / 窗口显示（Esc 退出）/ 逐帧播放
-.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-title
-.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-title-gpu
-.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-frames 4
-.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --show-title
-.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --play-title
-.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --play-boot
+# 无人值守：呈现 N 帧后退出（固定分辨率 1280×720）
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --play-frames 40
 
-# 单步跟踪指定条数（调试主循环 / 门服务）
+# 单步跟踪指定条数（调试主循环 / 门服务）；跟踪完就退出，不开窗
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --trace 40
 
 # 影片：跑到 LOGO 的 play-movie，再逐帧导出 GPU 合成（`0` 帧 = 只跑到收尾）
@@ -124,26 +125,23 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 ★ 当前是 **最小可执行层**：`CORE-ISA` / `CORE-POOL` / `CORE-FRAME` / `CORE-VM` / `CORE-CONFIG` + `FMT-ALF` / `FMT-AGF`。
 `--config` 可指定玩家 `SYS4REG.INI`；缺省按 `set:UseAppDataFolder` 选配置根（`%APPDATA%` / `XDG_CONFIG_HOME` / `~/.config`，否则安装根），
 再拼 `set:RegFilePath` 与文件名。
-`--to-title` 以 `TITLE.BIN`（统一文件 id 21092）为停止线；未知 opcode 仍停在它前面并报告偏移。
 门 / 状态位服务：**等待位与影片位**已建模（影片位只管关门，收尾在门之前的影片对象表服务里）；其余状态位、换帧 / 换脚本、容器句柄尚未完整建模。
-`--stop-at <opcode>` 仍可用于在任意 opcode 前停止；`0` 表示不设停止线。
+`--stop-at <opcode>` 可用于在任意 opcode 前停止（`0` = 不设停止线，缺省）。
 根脚本静态解码会在数据区遇到非法 opcode 后停止，这是规范允许的静态解码边界，不是执行边界。
 
-`--render-frames N` 把 TITLE 之后的前 N 帧写成 `title-frame-NN.bmp`（每帧显式请求一次渲染步）；
-`--render-title-gpu` 用 GPU 场景批次把 TITLE 画到离屏纹理、读回 `title-gpu.bmp`，用于核对 GPU 路径。
-`--play-title` 在 TITLE 刚成为当前帧时就停（不预跑 TITLE 主体），再开窗用真实时钟跑 TITLE，
-**只在 core 请求渲染时**合成 / 呈现（静态 TITLE 可能只呈现一帧）；
-`--play-boot` 从根脚本开始就开窗，按引擎的「门前渲染」节奏呈现（场景脏 / 有动画 / 影片新帧 ⇒ 下一次满足闸门的迭代渲染一次），
-因此能看到 LOGO 影片与之后的渐变。`--play-frames N` 是它们的无人值守版本。
+★ **没有"直接跳到 TITLE"之类的捷径**：早期那批 `--to-title` / `--render-title*` / `--play-title` 选项已删除 ——
+它们会跳过 boot，看到的东西不是引擎真实会走出来的画面。现在唯一流程是从根脚本跑 boot，
+按引擎的「门前渲染」节奏呈现（场景脏 / 有动画 / 影片新帧 ⇒ 下一次满足闸门的迭代渲染一次）。
+`--play-frames N` 只是给这个流程一个帧数上限，便于无人值守。
 
 ## 运行 / 门禁
 
 ```powershell
-.\out\build\windows-x64\emulator-cxx.exe           # 可见窗口，Esc 退出
+.\out\build\windows-x64\emulator-cxx.exe --install "<游戏安装目录>"   # boot 窗口，Esc 退出
 .\out\build\windows-x64\emulator-cxx.exe --smoke   # 离屏 clear + 读回 + BMP
 ctest --test-dir out\build\windows-x64 --output-on-failure
 
-# 可选：把真实安装目录挂进 CTest（title / title-gpu / title-frames / title-play / boot-play）
+# 可选：把真实安装目录挂进 CTest（boot-play / logo-movie / logo-gpu）
 cmake --preset windows-x64 -DEMULATOR_CXX_INSTALL_DIR="E:\Games\Eushully\天結\install"
 ctest --test-dir out\build\windows-x64 --output-on-failure
 ```

@@ -69,7 +69,7 @@ ctest --test-dir apps/emulator-cxx/out/build/windows-x64 --output-on-failure
 | 观测面 | 能看见什么 | 怎么跑 |
 |---|---|---|
 | `apps/emulator-new`（headless） | **执行轨迹 / 引擎数据 / 副作用记录**；没有像素、没有窗口 | `node apps/emulator-new/src/main.ts --install <dir> …`（`--trace` / `--effects` / `--json`）+ `@env assets` 守卫 |
-| `apps/emulator-cxx`（原生） | **像素**（GPU 场景批次 / 离屏 BMP 导出）+ 真窗口节奏 + CTest | `--play-boot`（开窗）· `--render-title` / `--render-title-gpu` / `--render-logo-gpu`（离屏 BMP）· `ctest` |
+| `apps/emulator-cxx`（原生） | **像素**（GPU 场景批次 / 离屏 BMP 导出）+ 真窗口节奏 + CTest | 默认 = boot 窗口（`--install <dir>`，`--play-frames N` 无人值守）· `--render-logo-gpu`（影片逐帧离屏 BMP）· `ctest` |
 
 ⛔ 两条边界：**"能跑"≠"有 oracle"**（"看起来对"不是证据）；**没有真机 trace** ⇒ 引擎内部时序仍只能靠静态读 + 残差。
 所以 ① 那个"能红的 repro"必须是**机械判据**（像素统计 / 请求次数 / 字段值 / 步数），不是"我看了眼截图"。
