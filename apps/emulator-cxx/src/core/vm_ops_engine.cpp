@@ -372,4 +372,48 @@ void Machine::op_1cf(const Instruction& instruction) {
     return;
 }
 
+// ── 标志格 / 状态格 / 模式位读 / 层号（三格互不相同：⛔ 不要合并） ──
+
+void Machine::op_19a(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 格 X 的**原值**写进第 1 个操作数（不归一）。
+    write_int(ops[0], flag_x_);
+    return;
+}
+
+void Machine::op_1b6(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 格 Y **归一成 0/1** 写进第 1 个操作数。
+    write_int(ops[0], flag_y_ != 0 ? 1 : 0);
+    return;
+}
+
+void Machine::op_1b7(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 格 Y ← 第 1 个操作数**先归一、再存**。
+    flag_y_ = read_int(ops[0]) != 0 ? 1 : 0;
+    return;
+}
+
+void Machine::op_1ad(const Instruction& instruction) {
+    (void)instruction;
+    // 层号写进引擎格：只搬值，不切层（不改当前层号）。落点格复位值是 −1。
+    layer_cell_ = current_layer_;
+    return;
+}
+
+void Machine::op_1c7(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 门字第 27 位 → 0/1（⛔ 不许写 0x08000000 这种掩码原值）。
+    write_int(ops[0], static_cast<std::int32_t>((state_flags_ >> 27) & 1u));
+    return;
+}
+
+void Machine::op_1cc(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 状态格的**原值**写进第 1 个操作数（不归一；与 0x1cf 的状态字是不同格）。
+    write_int(ops[0], status_cell_);
+    return;
+}
+
 }  // namespace core

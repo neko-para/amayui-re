@@ -9,6 +9,8 @@
 #include "core/agf.h"
 #include "core/install.h"
 
+#include <cmath>
+
 namespace core {
 
 void Machine::op_344(const Instruction& instruction) {
@@ -306,6 +308,177 @@ void Machine::op_208(const Instruction& instruction) {
     const TextureRecord* found = texture(static_cast<std::uint32_t>(id));
     write_int(ops[1], found == nullptr ? 0 : static_cast<std::int32_t>(found->width));
     write_int(ops[2], found == nullptr ? 0 : static_cast<std::int32_t>(found->height));
+    return;
+}
+
+void Machine::op_218(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 取第一三元向量（CORE-OPS-SCENE3D-GET-VEC1）：**只查不建**；查不到三个输出都写 0。
+    const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+    float values[3] = {0.0f, 0.0f, 0.0f};
+    if (const SceneRecord* record = scene_record(key); record != nullptr) {
+        values[0] = record->vec1[0];
+        values[1] = record->vec1[1];
+        values[2] = record->vec1[2];
+    }
+    write_float(ops[1], values[0]);
+    write_float(ops[2], values[1]);
+    write_float(ops[3], values[2]);
+    return;
+}
+
+void Machine::op_21a(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 取第二三元向量（CORE-OPS-SCENE3D-GET-VEC2）：★ 与 0x218 读的是**不同的三个格**。
+    const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+    float values[3] = {0.0f, 0.0f, 0.0f};
+    if (const SceneRecord* record = scene_record(key); record != nullptr) {
+        values[0] = record->vec2[0];
+        values[1] = record->vec2[1];
+        values[2] = record->vec2[2];
+    }
+    write_float(ops[1], values[0]);
+    write_float(ops[2], values[1]);
+    write_float(ops[3], values[2]);
+    return;
+}
+
+void Machine::op_228(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 取本地平移分量（CORE-OPS-SCENE3D-GET-LOCAL-TRANS）：读序 2 → 写 3 → 4 → 5 → 写 1（标志最后）。
+    const auto key = static_cast<std::uint32_t>(read_int(ops[1]));
+    const SceneRecord* record = scene_record(key);
+    if (record == nullptr) {
+        write_int(ops[0], 1);  // 静默失败：三个浮点一个都不写
+        return;
+    }
+    write_float(ops[2], record->translate[0]);
+    write_float(ops[3], record->translate[1]);
+    write_float(ops[4], record->translate[2]);
+    write_int(ops[0], 0);
+    return;
+}
+
+void Machine::op_21d(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 记录复制（CORE-OPS-SCENE3D-21D）：第 2 个是**目标**、第 1 个是**源**（读序 2 → 1）。
+    // 三张表互相独立；一张都没有源 ⇒ 上报错误通道且**一张表都不改**；成功才标脏（不置「有动画」）。
+    const auto target = static_cast<std::uint32_t>(read_int(ops[1]));
+    const auto source = static_cast<std::uint32_t>(read_int(ops[0]));
+    bool copied = false;
+    if (const DrawItem* item = draw_item(source); item != nullptr) {
+        const DrawItem copy = *item;  // 先拷局部：目标键可能是新键，插入会 rehash
+        draw_items_[target] = copy;
+        copied = true;
+    }
+    if (const MeshRecord* mesh = this->mesh(source); mesh != nullptr) {
+        const MeshRecord copy = *mesh;  // 值类型：顶点缓冲是新的一份
+        meshes_[target] = copy;
+        copied = true;
+    }
+    if (const auto it = aux_a_.find(static_cast<std::int32_t>(source)); it != aux_a_.end()) {
+        aux_a_[static_cast<std::int32_t>(target)] = it->second;
+        copied = true;
+    }
+    if (const auto it = aux_b_.find(static_cast<std::int32_t>(source)); it != aux_b_.end()) {
+        aux_b_[static_cast<std::int32_t>(target)] = it->second;
+        copied = true;
+    }
+    if (!copied) {
+        report_error("scene-copy-source-missing:" + std::to_string(source));
+        return;
+    }
+    scene_dirty_ = true;
+    return;
+}
+
+DrawItem& Machine::draw_item_or_create(std::uint32_t key) {
+    const auto it = draw_items_.find(key);
+    if (it != draw_items_.end()) return it->second;
+    // 建记录那一步标脏（`CORE-OPS-SCENE3D-RECORD-LOOKUP`）；默认记录见 `0x21e` 的规范引文。
+    scene_dirty_ = true;
+    return draw_items_[key];
+}
+
+std::array<float, 16> Machine::scale_matrix(double x, double y, double z) {
+    std::array<float, 16> matrix{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    matrix[0] = static_cast<float>(x);
+    matrix[5] = static_cast<float>(y);
+    matrix[10] = static_cast<float>(z);
+    return matrix;
+}
+
+std::array<float, 16> Machine::rotate_matrix_deg(double ax, double ay, double az, double degrees) {
+    // ★ 规范只规定「度 → 弧度（× π/180）写进旋转矩阵」，**没有**规定轴归一化与元素布局 ⇒ 本实现
+    //   选「轴按 hypot 归一化（全 0 时当作 1）+ Rodrigues + 行主序」。这是**实现选择**，不是规范结论。
+    const double pi = 3.14159265358979323846;
+    const double radians = degrees * pi / 180.0;
+    double length = std::sqrt(ax * ax + ay * ay + az * az);
+    if (length == 0.0) length = 1.0;
+    const double x = ax / length;
+    const double y = ay / length;
+    const double z = az / length;
+    const double c = std::cos(radians);
+    const double s = std::sin(radians);
+    const double t = 1.0 - c;
+    std::array<float, 16> matrix{};
+    matrix[0] = static_cast<float>(t * x * x + c);
+    matrix[1] = static_cast<float>(t * x * y - s * z);
+    matrix[2] = static_cast<float>(t * x * z + s * y);
+    matrix[4] = static_cast<float>(t * x * y + s * z);
+    matrix[5] = static_cast<float>(t * y * y + c);
+    matrix[6] = static_cast<float>(t * y * z - s * x);
+    matrix[8] = static_cast<float>(t * x * z - s * y);
+    matrix[9] = static_cast<float>(t * y * z + s * x);
+    matrix[10] = static_cast<float>(t * z * z + c);
+    matrix[15] = 1.0f;
+    return matrix;
+}
+
+void Machine::op_21e(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 缩放 setter（CORE-OPS-SCENE3D-21E）：读序 4 → 5 → 6 → 3 → 2 → 1（三个浮点先读）。
+    const double z = read_float(ops[5]);
+    const double y = read_float(ops[4]);
+    const double x = read_float(ops[3]);
+    const std::int32_t b = read_int(ops[2]);
+    const std::int32_t a = read_int(ops[1]);
+    DrawItem& item = draw_item_or_create(static_cast<std::uint32_t>(read_int(ops[0])));
+    if ((item.flags & 1u) == 0) return;  // 「已存在」位为 0 ⇒ 一个字段都不写（记录已建）
+    item.flags |= 2u;                    // 首字第 1 位（与 0x202 的「有窗」同一位）
+    item.config_g3 = 1;
+    item.window_start = 0;
+    item.set21e_int0 = a;
+    item.set21e_int1 = b;
+    item.set21e_scale = scale_matrix(x / 100.0, y / 100.0, z / 100.0);  // ÷100 是语义（百分数）
+    scene_dirty_ = true;
+    scene_animating_ = true;
+    return;
+}
+
+void Machine::op_21f(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 旋转 setter（CORE-OPS-SCENE3D-21F）：读序 4 → 5 → 6 → 7 → 3 → 2 → 1。
+    const double degrees = read_float(ops[6]);
+    const double az = read_float(ops[5]);
+    const double ay = read_float(ops[4]);
+    const double ax = read_float(ops[3]);
+    const std::int32_t b = read_int(ops[2]);
+    const std::int32_t a = read_int(ops[1]);
+    DrawItem& item = draw_item_or_create(static_cast<std::uint32_t>(read_int(ops[0])));
+    if ((item.flags & 1u) == 0) return;
+    item.flags |= 2u;
+    item.config_g3 = 1;
+    item.window_start = 0;
+    item.set21f_int0 = a;
+    item.set21f_int1 = b;
+    item.set21f_axis[0] = static_cast<float>(ax);  // 轴与角**另存一份**（不是从矩阵反解）
+    item.set21f_axis[1] = static_cast<float>(ay);
+    item.set21f_axis[2] = static_cast<float>(az);
+    item.set21f_degrees = static_cast<float>(degrees);  // 度，原样存
+    item.set21f_rot = rotate_matrix_deg(ax, ay, az, degrees);
+    scene_dirty_ = true;
+    scene_animating_ = true;
     return;
 }
 

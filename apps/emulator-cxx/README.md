@@ -95,6 +95,13 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 | 场景命令档 | `CORE-OPS-SCENE-COMMAND-RECORDS`、`CORE-SCENE-DRAW-ORDER` | `0x223/24D/24F/250/251` 写表与校验；命令档 → 离屏画布 36/37 → 四种类合成（Fade / 遮罩 / 12 种抹除图案 / SlideBlur / ZoomBlur）→ 收尾扫描 |
 | 命名表 / 状态字 / 模式族 | `CORE-OPS-TABLE-RESET-A1` / `-BIND-A2` / `-DISPATCH-A3`、`CORE-OPS-STATUS-WORD`、`CORE-OPS-MODE-BIT`、`CORE-OPS-STATUS-CLEAR-D9`、`CORE-OPS-RNG-ENABLE` | `0xa1/0xa2/0xa3` 文本键命名表（清空 / 绑定 / 分派）；`0x1cf/0x1bf` 状态字（第 16 位 ⇒ **整字**清 0）；`0x19b/0x19c` 模式位与四个分支；`0x0d9` 清位；`0x1ce` 乱数启用（种子 = 本迭代宿主时钟） |
 | 输入派发 | `CORE-INPUT-WORD`、`CORE-INPUT-KEY-DISPATCH`、`CORE-INPUT-MOUSE-EVENT` | `0xff` 清字 + 平台采样（无设备 ⇒ 保持 0）+ 按帧上限；`0x100` 派发一个按键回调（无按键走"编号 = 键总数"表项，有按键压**当前位置**重派发）；`0x2fc` 取鼠标事件（无事件只写 0）；`0x12e` **显式未建模**：只写 −1（条目表布局还是 audit gap） |
+| 键盘 / 鼠标（宿主） | `CORE-INPUT-MOUSE-POS`、`-MOUSE-BUTTON`、`-CALLBACK-REGISTER`、`-MOUSE-CALLBACK-PUMP` | 窗口路径把 SDL 的键盘 / 鼠标归约成输入字、客户区光标、按钮位图与一条事件队列；`0x109` 光标（不可用 ⇒ −100000）、`0x108` 按钮位图（位 0 左 / 位 1 右、不可用 ⇒ 0）、`0xcc` 登记 + `0xcd` 时间闸派发（`elapsed >= interval`，含等号）。★ **不接摇杆**；物理键 ↔ 输入位号的映射是**宿主策略**（`window.cpp` 的 `kKeyBits` 一张表，⛔ 不是规范结论） |
+| 帧 / 本地块 | `CORE-OPS-FRAME-CALL-FRAME`、`-LOCAL-SET-7B`、`-LOCAL-RET-7C`、`CORE-OPS-STATE-199` | `0x08` 切到**已装载**帧（只改父帧号 / ip / 长度槽，不清返回栈）；`0x7b` 两个目标位置（初值 −1）；`0x199` 进块（存档字带第 25/26 位、返回点 = `here + 1`、深度判据存**本帧身份编号**）；`0x7c` 离开（成功后门字带第 26 位 ⇒ `GateStalled` 是规范表现） |
+| 标量 / 数值 / 随机 / 时钟 / 取址 / 池拷贝 | `CORE-OPS-FLAG-CELLS`、`-MODE-BIT`、`-STATUS-CELL-READ`、`-LAYER-CELL`、`CORE-OPS-RANDOM-60`、`-CLOCK-D0`、`-PARAM-74-7F`、`-FLOAT-ABS`、`-SCALAR-FLOAT-ARITH`、`-POOL-MEMCPY`、`-POOL-LEA-63` | `0x19a/1b6/1b7` 三个**互不相同**的格（Y 归一成 0/1）、`0x1c7`（位 27 → 0/1）、`0x1cc`（状态格原值）、`0x1ad`（落点格复位值 −1）、`0x60`（计数器 → 随机 → 范围 → 落点；范围 0 先写 0 再抛）、`0xd0`（本迭代时钟）、`0x74/0x7f`（参数格，未写过 ⇒ 响亮失败）、`0x191/2d0/2d1/2d3`（浮点族）、`0x1b0`（池拷贝，按编码位模式）、`0x63`（lea：先取址、再校验目标必须是引用族） |
+| 3D 记录 | `CORE-OPS-SCENE3D-GET-VEC1` / `-GET-VEC2` / `-GET-LOCAL-TRANS` / `-21D` / `-21E` / `-21F` | `0x218/21a` 两个三元向量（**只查不建**，查不到写 0）、`0x228` 平移分量（标志最后写）、`0x21d` 三张表各自复制（成功才标脏）、`0x21e`（三个浮点 ÷100）、`0x21f`（轴角另存 + 度 → 弧度）。★ `0x21e/21f` 记录「已存在」位为 0 ⇒ 只建记录、一个字段都不写；旋转矩阵的元素布局 / 归一化规范**未成篇** ⇒ 实现选择（行主序 + Rodrigues，注释已标明） |
+| 按住派发族 | `CORE-INPUT-RESET-FC`、`-102-SLOT`、`-103-MODULUS`、`CORE-OPS-INPUT-104`、`-105-MASK` | `0xfc` 清两张回调表（**所有帧**）+ 模数写 0，不动掩码 / 键总数 / 扫描上限 / 游标；`0x102` 键 0..31、槽 0..9 两个**独立**上界（越界一个槽都不写）；`0x103` 模数原样（0 / 负数照写）+ **只清当前帧槽**的游标；`0x104` 反向取最高置位（`limit ≤ 0` 不扫描 ⇒ 编号 = 键总数）+ 上下文闸（**只比编号**）+ 掩码命中夹扫描上限（未登记也不回滚）+ **每条出口**推进游标；`0x105` 32 位掩码原样 |
+| 池翻页 | `SPC-POOL-MEMFLIP` | `0x6d` 六个全局族主 / 备**整体对调**（两组 bank 共用同一张表、键带 bank；不搬数据）；`0x09` 只清**当前选中 bank**。★ 发行数据把 `set:EnableMemFlip` 显式置 0 ⇒ 本作的翻页指令**只有异常支可达** |
+| 存档族 | `CORE-OPS-SAVE-WRITE`、`-READ`、`-FILES`、`FMT-SAVE-SLOT`、`FMT-SAVE-STH` | `0x19e` 写（覆写确认只在「已存在且头读不回来」时；成功 = **0**）、`0x1a0` 读头（0/1/2 + 七个字段）、`0x1a1` 读回（打不开 ⇒ 1；成功**不写** op1；打开成功后**无条件**重编码全局整型池）、`0x1ab`/`0x1ac` 删 / 拷（两文件都尝试、后一步覆盖前一步）、`0x1ae`/`0x1af` 缩略图写 / 读（`.STH` 里的 BMP；先建空文件后捕捉、捕捉失败不删）。★ 文件系统与表面捕捉全走 `core/save_host.h` 的 `SaveHost`（核心不碰 `std::fstream`）；`0x19e` 的写侧内容构造与 `0x1a1` 的整档读回是另几张单的 seam（没注入就响亮失败） |
 | 控制流 / 执行区间 / 纹理查询 | `CORE-OPS-FRAME-EXIT-SCRIPT`、`CORE-OPS-RUN-BRACKET`、`CORE-OPS-TEXTURE-SIZE` | `0x09` 丢全部帧 + 复位引擎级状态 + 以 id 0 重装根脚本；`0x1f4/0x1f5` 区间忙 / 嵌套计数（忙标记与 `0x20c` 的「别处驱动」是同一格）；`0x208` 纹理逻辑尺寸（>999 上报、槽空静默） |
 | 离屏文字 | `CORE-OPS-RENDER-TEXT-204` | Shift-JIS（平台代码页 / iconv）→ FreeType 字形；主色 / 副色 / 绘制模式 / 对位状态来自字体对象 |
 | 源矩形窗 | `CORE-OPS-SCENE3D-239` | `0x239` 步进 / 延迟 / 到期回写四条边 |
@@ -134,6 +141,13 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 门 / 状态位服务：**等待位与影片位**已建模（影片位只管关门，收尾在门之前的影片对象表服务里）；其余状态位、换帧 / 换脚本、容器句柄尚未完整建模。
 ★ 由此有一条**看起来像卡死、其实是规范要求**的行为：`0x19c` 的置位支与 `0x1ce` 的非 0 支会把门字第 27 / 30 位置起，而这两个位**没有服务分支**（第 30 位按规范就是「启用后门恒关」）⇒ 门一直关着，`run()` 走到 step 上限。那不是 handler 写错，是「位是待服务标记，清不清由服务分支决定」的直接后果；要推进只能由外部清位写点（可达性未取证）。
 输入字形 / 鼠标事件都是**平台边界**：本层没有输入后端（`--play-frames` 只按 `set:DrawMode` 自动渲染），所以 `0xff` 恒采到 0、`0x2fc` 恒"没有事件"、`0x12e` 恒"没有命中"。测试用 `set_input_word()` / `set_key_sampler()` / `set_mouse_event_source()` 注入，⛔ 不要把这几个注入点当产品路径。
+
+★ **窗口路径已接键盘 + 鼠标**（不接摇杆）：`window.cpp` 每个外层迭代泵事件，
+`SDL_GetKeyboardState` → 输入字（`kKeyBits` 表：位号 ↔ 扫描码）、`SDL_GetMouseState` → 光标 / 按钮位图、
+按钮与滚轮 → 事件队列。三者只在脚本执行到 `0xff` / `0x109` / `0x108` / `0x2fc` 时才被取用
+（引擎不在等待期间自己泵输入）。鼠标回调按 `0xcd` 的时间闸派发。
+★ 键位映射是**宿主策略**：规范明说「物理键与输入位号的映射」属平台边界，所以它**不进 spec**；
+要换键位只改 `window.cpp` 的 `kKeyBits`。Esc 仍然直接关窗（与"取消"位同时映射到 1）。
 `--stop-at <opcode>` 可用于在任意 opcode 前停止（`0` = 不设停止线，缺省）。
 根脚本静态解码会在数据区遇到非法 opcode 后停止，这是规范允许的静态解码边界，不是执行边界。
 

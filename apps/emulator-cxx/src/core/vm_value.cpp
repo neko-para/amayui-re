@@ -28,13 +28,39 @@ std::uint32_t Machine::script_int_key_index(const Operand& operand) {
     throw CoreError("config-key-unsupported-tag:" + std::to_string(operand.type));
 }
 
-std::uint32_t Machine::pool_base(std::uint32_t tag) const {
-    if (tag >= 3 && tag <= 8) return 0x10000000u + (tag - 3) * 0x04000000u;
+std::uint32_t Machine::pool_base(std::uint32_t tag) const { return pool_base(tag, global_flip_); }
+
+std::uint32_t Machine::pool_base(std::uint32_t tag, std::uint32_t bank) const {
+    // 六个全局族：一组 = 6 × 0x04000000 = 0x18000000，两组正好铺到 0x40000000（局部池起点）。
+    if (tag >= 3 && tag <= 8) {
+        return 0x10000000u + bank * 0x18000000u + (tag - 3) * 0x04000000u;
+    }
     if (tag >= 9 && tag <= 14) {
         return 0x40000000u + static_cast<std::uint32_t>(current_frame_) * 0x00800000u +
                (tag - 9) * 0x00100000u;
     }
     throw CoreError("pool-base-unsupported-tag:" + std::to_string(tag));
+}
+
+std::uint32_t Machine::bank_key(std::uint32_t index) const {
+    return global_flip_ == 0 ? index : kBankKeyStride + index;
+}
+
+void Machine::clear_global_pool_bank() {
+    // 只清**当前选中 bank**（另一组保留原值）：键 >= kBankKeyStride 属于 bank 1。
+    const auto in_bank = [this](std::uint32_t key) {
+        return global_flip_ == 0 ? key < kBankKeyStride : key >= kBankKeyStride;
+    };
+    for (auto it = global_int_.begin(); it != global_int_.end();) {
+        it = in_bank(it->first) ? global_int_.erase(it) : std::next(it);
+    }
+    for (auto it = global_float_.begin(); it != global_float_.end();) {
+        it = in_bank(it->first) ? global_float_.erase(it) : std::next(it);
+    }
+    for (auto it = global_string_.begin(); it != global_string_.end();) {
+        it = in_bank(it->first) ? global_string_.erase(it) : std::next(it);
+    }
+    return;
 }
 
 std::uint32_t Machine::address_of(const Operand& operand) const {
@@ -44,15 +70,41 @@ std::uint32_t Machine::address_of(const Operand& operand) const {
     return pool_base(tag) + width * operand.raw;
 }
 
+bool Machine::is_pointer_tag(std::uint32_t tag) {
+    switch (tag) {
+        case 6: case 7: case 8: case 12: case 13: case 14:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::uint32_t Machine::address_of_operand(const Operand& operand) const {
+    // 「取址」（`0x63` / `0x1b0`）：值族给槽地址；引用族给**它指向的**地址（槽内容）。
+    if (is_pointer_tag(operand.type)) return read_pointer(operand);
+    return address_of(operand);
+}
+
+std::uint32_t Machine::next_random() {
+    // 宿主随机源优先；缺省是确定性 LCG（同种子同序列）。返回值按**非负**用（规范：被除数非负）。
+    if (random_source_) return random_source_() & 0x7FFFFFFFu;
+    random_state_ = random_state_ * 1664525u + 1013904223u;
+    return random_state_ >> 1;  // 31 位非负
+}
+
 bool Machine::resolve_address(std::uint32_t address, std::uint32_t& tag, std::uint32_t& index) const {
     for (std::uint32_t candidate = 3; candidate <= 8; ++candidate) {
-        const std::uint32_t base = pool_base(candidate);
-        const std::uint32_t width = (candidate == 5) ? 28u : 4u;
-        if (address >= base && address < base + 0x04000000u) {
-            if ((address - base) % width != 0) return false;
-            tag = candidate;
-            index = (address - base) / width;
-            return true;
+        for (std::uint32_t bank = 0; bank <= 1; ++bank) {
+            // 备组未登记（启动期键为 0）⇒ 落到备组窗口的访问**响亮失败**（⛔ 不补分配）。
+            if (bank == 1 && !memflip_available_) continue;
+            const std::uint32_t base = pool_base(candidate, bank);
+            const std::uint32_t width = (candidate == 5) ? 28u : 4u;
+            if (address >= base && address < base + 0x04000000u) {
+                if ((address - base) % width != 0) return false;
+                tag = candidate;
+                index = bank * kBankKeyStride + (address - base) / width;  // 键里带 bank
+                return true;
+            }
         }
     }
     for (std::uint32_t candidate = 9; candidate <= 14; ++candidate) {
@@ -97,7 +149,7 @@ void Machine::store_raw(std::uint32_t address, std::uint32_t bits) {
     std::uint32_t index = 0;
     if (!resolve_address(address, tag, index)) throw CoreError("store-raw-unmapped-address");
     switch (tag) {
-        case 3: global_int_[index] = bits; return;
+        case 3: global_int_[index] = bits; note_global_int_write(index); return;
         case 9: frame_mut().local_int[index] = bits; return;
         case 4: global_float_[index] = std::bit_cast<float>(bits); return;
         case 10: frame_mut().local_float[index] = std::bit_cast<float>(bits); return;
@@ -137,7 +189,7 @@ void Machine::write_int_at(std::uint32_t address, std::int32_t value) {
     std::uint32_t index = 0;
     if (!resolve_address(address, tag, index)) throw CoreError("write-int-unmapped-address");
     switch (tag) {
-        case 3: global_int_[index] = encode_int(value); return;
+        case 3: global_int_[index] = encode_int(value); note_global_int_write(index); return;
         case 9: frame_mut().local_int[index] = encode_int(value); return;
         case 4: global_float_[index] = static_cast<float>(value); return;
         case 10: frame_mut().local_float[index] = static_cast<float>(value); return;
@@ -150,7 +202,7 @@ void Machine::write_float_at(std::uint32_t address, double value) {
     std::uint32_t index = 0;
     if (!resolve_address(address, tag, index)) throw CoreError("write-float-unmapped-address");
     switch (tag) {
-        case 3: global_int_[index] = encode_int(static_cast<std::int32_t>(value)); return;
+        case 3: global_int_[index] = encode_int(static_cast<std::int32_t>(value)); note_global_int_write(index); return;
         case 9: frame_mut().local_int[index] = encode_int(static_cast<std::int32_t>(value)); return;
         case 4: global_float_[index] = static_cast<float>(value); return;
         case 10: frame_mut().local_float[index] = static_cast<float>(value); return;
@@ -165,15 +217,15 @@ std::int32_t Machine::read_int(const Operand& operand) {
         case 1:
             return static_cast<std::int32_t>(std::bit_cast<float>(operand.raw));
         case 3: {
-            const auto it = global_int_.find(operand.raw);
+            const auto it = global_int_.find(bank_key(operand.raw));
             return it == global_int_.end() ? decode_int(encode_int(0)) : decode_int(it->second);
         }
         case 4: {
-            const auto it = global_float_.find(operand.raw);
+            const auto it = global_float_.find(bank_key(operand.raw));
             return it == global_float_.end() ? 0 : static_cast<std::int32_t>(it->second);
         }
         case 5: {
-            const auto it = global_string_.find(operand.raw);
+            const auto it = global_string_.find(bank_key(operand.raw));
             return it == global_string_.end() ? 0 : parse_int_text(it->second);
         }
         case 6: case 7: case 12: case 13: {
@@ -200,15 +252,15 @@ double Machine::read_float(const Operand& operand) {
         case 1:
             return static_cast<double>(std::bit_cast<float>(operand.raw));
         case 3: {
-            const auto it = global_int_.find(operand.raw);
+            const auto it = global_int_.find(bank_key(operand.raw));
             return static_cast<double>(decode_int(it == global_int_.end() ? encode_int(0) : it->second));
         }
         case 4: {
-            const auto it = global_float_.find(operand.raw);
+            const auto it = global_float_.find(bank_key(operand.raw));
             return it == global_float_.end() ? 0.0 : static_cast<double>(it->second);
         }
         case 5: {
-            const auto it = global_string_.find(operand.raw);
+            const auto it = global_string_.find(bank_key(operand.raw));
             return it == global_string_.end() ? 0.0 : parse_float_text(it->second);
         }
         case 6: case 7: case 12: case 13: {
@@ -231,10 +283,10 @@ double Machine::read_float(const Operand& operand) {
 void Machine::write_int(const Operand& operand, std::int32_t value) {
     switch (operand.type) {
         case 3:
-            global_int_[operand.raw] = encode_int(value);
+            global_int_[bank_key(operand.raw)] = encode_int(value); note_global_int_write(operand.raw);
             return;
         case 4:
-            global_float_[operand.raw] = static_cast<float>(value);
+            global_float_[bank_key(operand.raw)] = static_cast<float>(value);
             return;
         case 6: case 7: case 12: case 13: {
             const auto address = read_pointer(operand);
@@ -255,10 +307,10 @@ void Machine::write_int(const Operand& operand, std::int32_t value) {
 void Machine::write_float(const Operand& operand, double value) {
     switch (operand.type) {
         case 3:
-            global_int_[operand.raw] = encode_int(static_cast<std::int32_t>(value));
+            global_int_[bank_key(operand.raw)] = encode_int(static_cast<std::int32_t>(value)); note_global_int_write(operand.raw);
             return;
         case 4:
-            global_float_[operand.raw] = static_cast<float>(value);
+            global_float_[bank_key(operand.raw)] = static_cast<float>(value);
             return;
         case 6: case 7: case 12: case 13: {
             const auto address = read_pointer(operand);
@@ -290,7 +342,7 @@ std::string Machine::read_text(const Operand& operand) {
         return text;
     }
     if (operand.type == 5) {
-        const auto it = global_string_.find(operand.raw);
+        const auto it = global_string_.find(bank_key(operand.raw));
         return it == global_string_.end() ? std::string{} : it->second;
     }
     if (operand.type == 11) {
@@ -303,7 +355,7 @@ std::string Machine::read_text(const Operand& operand) {
 
 void Machine::write_text(const Operand& operand, std::string value) {
     if (operand.type == 5) {
-        global_string_[operand.raw] = std::move(value);
+        global_string_[bank_key(operand.raw)] = std::move(value);
         return;
     }
     if (operand.type == 11) {

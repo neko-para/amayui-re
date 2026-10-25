@@ -3,6 +3,7 @@
 #include "core/config.h"
 #include "core/encoding.h"
 #include "core/install.h"
+#include "core/save_host.h"
 #include "core/movie.h"
 #include "core/opcode_table.h"
 #include "core/scene_raster.h"
@@ -10,6 +11,10 @@
 #include "core/text_raster.h"
 #include "core/vm.h"
 
+#include <cmath>
+#include <map>
+#include <optional>
+#include <string_view>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -533,6 +538,29 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1ce zero-branch was not a no-op\n");
         return false;
     }
+
+    // 门一直关着、且挡门的位**没有服务分支**（位 27 = `0x19c` 置位支）⇒ 必须给明确诊断与停因，
+    // 否则外面只看到"停在原地 + 烧步数"（与"在等输入"分不开）。
+    auto stall_script = make_script_with_body();
+    emit_instruction(stall_script, 0x19C, {});
+    emit_instruction(stall_script, 2, {});
+    core::Machine stall_machine(0x12345678u, table);
+    stall_machine.seed_mode_cells(1, 0, 0);
+    stall_machine.load_root(stall_script);
+    if (!stall_machine.step() || (stall_machine.state_flags() & (1u << 27)) == 0) {
+        std::fprintf(stderr, "gate stall fixture did not set bit 27\n");
+        return false;
+    }
+    for (int i = 0; i < 10001 && !stall_machine.halted(); ++i) stall_machine.step();
+    if (!stall_machine.halted() ||
+        stall_machine.last_stop().reason != core::StopReason::GateStalled ||
+        stall_machine.errors().empty()) {
+        std::fprintf(stderr, "gate stall was not diagnosed (halted=%d reason=%d errors=%zu)\n",
+                     stall_machine.halted() ? 1 : 0,
+                     static_cast<int>(stall_machine.last_stop().reason),
+                     stall_machine.errors().size());
+        return false;
+    }
     return true;
 }
 
@@ -677,6 +705,1136 @@ bool check_input_dispatch(const core::OpcodeTable& table) {
         unreg_machine.frame().ip != 36 || !unreg_machine.frame().ret_stack.empty()) {
         std::fprintf(stderr, "0x100 unregistered key mismatch cursor=%d\n",
                      unreg_machine.frame().key_cursor);
+        return false;
+    }
+    return true;
+}
+
+// ── 键盘 / 鼠标设备（0x109 · 0x108 · 0xCC · 0xCD） ──
+// `CORE-INPUT-MOUSE-POS` / `-MOUSE-BUTTON` / `-CALLBACK-REGISTER` / `-MOUSE-CALLBACK-PUMP`。
+bool check_input_devices(const core::OpcodeTable& table) {
+    // 0x109：设备可用 ⇒ 写客户区坐标；不可用 ⇒ 两个都写 −100000（哨兵，不是"不写"）。
+    auto cursor_script = make_script_with_body();
+    emit_instruction(cursor_script, 0x109, {{3, 0}, {3, 1}});
+    emit_instruction(cursor_script, 2, {});
+    core::Machine cursor_machine(0x12345678u, table);
+    cursor_machine.set_cursor_source([](std::int32_t& x, std::int32_t& y) {
+        x = 640;
+        y = 360;
+        return true;
+    });
+    cursor_machine.load_root(cursor_script);
+    if (!cursor_machine.step() || cursor_machine.read_int(core::Operand{3, 0}) != 640 ||
+        cursor_machine.read_int(core::Operand{3, 1}) != 360) {
+        std::fprintf(stderr, "0x109 cursor mismatch (%d,%d)\n",
+                     cursor_machine.read_int(core::Operand{3, 0}),
+                     cursor_machine.read_int(core::Operand{3, 1}));
+        return false;
+    }
+    core::Machine no_cursor_machine(0x12345678u, table);
+    no_cursor_machine.load_root(cursor_script);
+    if (!no_cursor_machine.step() || no_cursor_machine.read_int(core::Operand{3, 0}) != -100000 ||
+        no_cursor_machine.read_int(core::Operand{3, 1}) != -100000) {
+        std::fprintf(stderr, "0x109 unavailable-device sentinel mismatch\n");
+        return false;
+    }
+
+    // 0x108：位 0 左 / 位 1 右；设备不可用 ⇒ 写 0（不是保持旧值）。
+    auto button_script = make_script_with_body();
+    emit_instruction(button_script, 0x55, {{3, 2}, {0, 99}});
+    emit_instruction(button_script, 0x108, {{3, 2}});
+    emit_instruction(button_script, 2, {});
+    core::Machine button_machine(0x12345678u, table);
+    button_machine.set_mouse_button_source([](std::int32_t& mask) {
+        mask = 0b11;
+        return true;
+    });
+    button_machine.load_root(button_script);
+    if (!button_machine.step() || !button_machine.step() ||
+        button_machine.read_int(core::Operand{3, 2}) != 0b11) {
+        std::fprintf(stderr, "0x108 button bitmap mismatch (%d)\n",
+                     button_machine.read_int(core::Operand{3, 2}));
+        return false;
+    }
+    core::Machine no_button_machine(0x12345678u, table);
+    no_button_machine.load_root(button_script);
+    if (!no_button_machine.step() || !no_button_machine.step() ||
+        no_button_machine.read_int(core::Operand{3, 2}) != 0) {
+        std::fprintf(stderr, "0x108 unavailable-device must write 0\n");
+        return false;
+    }
+
+    // 0xcc / 0xcd：时间闸 `elapsed >= interval`（含等号）才派发；压「当前位置 + 1」。
+    // ★ 两次 pump 要两条 `0xcd`（一条指令执行完 ip 就过去了，不能靠"再跑一次同一条"）。
+    auto mouse_cb = make_script_with_body();
+    emit_instruction(mouse_cb, 0xCC, {{0, 100}, {0, 9}});  // 位置 0..4：间隔 100、目标 9
+    emit_instruction(mouse_cb, 0xCD, {});                  // 位置 5：第一次（未到期）
+    emit_instruction(mouse_cb, 0xCD, {});                  // 位置 6：第二次（到期）
+    emit_instruction(mouse_cb, 0x1A8, {});                 // 位置 7（回调返回点）
+    emit_instruction(mouse_cb, 2, {});                     // 位置 8
+    emit_instruction(mouse_cb, 0x1A8, {});                 // 位置 9（回调目标）
+    emit_instruction(mouse_cb, 5, {});                     // 位置 10：ret → 回 7
+    core::Machine pump_machine(0x12345678u, table);
+    pump_machine.set_host_clock_ms(1000);
+    pump_machine.load_root(mouse_cb);
+    if (!pump_machine.step() || pump_machine.mouse_interval() != 100 ||
+        pump_machine.mouse_target() != 9 || pump_machine.mouse_last_ms() != 1000u) {
+        std::fprintf(stderr, "0xcc registration mismatch interval=%d target=%d last=%u\n",
+                     pump_machine.mouse_interval(), pump_machine.mouse_target(),
+                     pump_machine.mouse_last_ms());
+        return false;
+    }
+    pump_machine.set_host_clock_ms(1050);  // 50 < 100 ⇒ 不派发
+    if (!pump_machine.step() || pump_machine.frame().ip != 24 ||
+        !pump_machine.frame().ret_stack.empty()) {
+        std::fprintf(stderr, "0xcd dispatched before the interval elapsed (ip=%zu)\n",
+                     pump_machine.frame().ip);
+        return false;
+    }
+    pump_machine.set_host_clock_ms(1100);  // 100 >= 100（含等号）⇒ 派发
+    if (!pump_machine.step() || pump_machine.frame().ip != 36 ||
+        pump_machine.frame().ret_stack.empty() || pump_machine.frame().ret_stack.back() != 7 ||
+        pump_machine.mouse_last_ms() != 1100u) {
+        std::fprintf(stderr, "0xcd dispatch mismatch ip=%zu last=%u stack=%zu\n",
+                     pump_machine.frame().ip, pump_machine.mouse_last_ms(),
+                     pump_machine.frame().ret_stack.size());
+        return false;
+    }
+    // 回调体（位置 9 的 0x1A8）走完 ⇒ ip = 40（位置 10 的 ret）。
+    if (!pump_machine.step() || pump_machine.frame().ip != 40) {
+        std::fprintf(stderr, "0xcd callback body mismatch ip=%zu\n", pump_machine.frame().ip);
+        return false;
+    }
+
+    // 间隔 0 ⇒ 写成 1；目标 −1 ⇒ 压了返回位置又撤销（只前进一条，返回栈不变）。
+    auto cancel_script = make_script_with_body();
+    emit_instruction(cancel_script, 0xCC, {{0, 0}, {0, 0xFFFFFFFFu}});
+    emit_instruction(cancel_script, 0xCD, {});
+    emit_instruction(cancel_script, 2, {});
+    core::Machine cancel_machine(0x12345678u, table);
+    cancel_machine.set_host_clock_ms(2000);
+    cancel_machine.load_root(cancel_script);
+    if (!cancel_machine.step() || cancel_machine.mouse_interval() != 1) {
+        std::fprintf(stderr, "0xcc interval 0 must become 1 (got %d)\n",
+                     cancel_machine.mouse_interval());
+        return false;
+    }
+    cancel_machine.set_host_clock_ms(2100);
+    if (!cancel_machine.step() || cancel_machine.frame().ip != 24 ||
+        !cancel_machine.frame().ret_stack.empty()) {
+        std::fprintf(stderr, "0xcd cancel sentinel mismatch ip=%zu stack=%zu\n",
+                     cancel_machine.frame().ip, cancel_machine.frame().ret_stack.size());
+        return false;
+    }
+    return true;
+}
+
+// ── 暂停（= 区间忙）与时钟重盖（CORE-VM-LOOP · CORE-TIMING-CLOCK 的 0x23C） ──
+bool check_pause_and_clock(const core::OpcodeTable& table) {
+    // 暂停 = 区间忙标记 = 1 **且等待位 = 0** ⇒ 场景推进整段跳过（窗不盖 / 不插值 / 不到期）。
+    const auto make_pause_script = [&](bool release) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1FB, {{0, 1}, {0, 1}, {0, 0}, {0, 0},
+                                        {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+        emit_instruction(bytes, 0x202, {{0, 1}, {0, 0}, {0, 100}, {0, 200}, {0, 0x00ABCDEFu}});
+        emit_instruction(bytes, 0x1F4, {});
+        if (release) emit_instruction(bytes, 0x21C, {});
+        const std::uint32_t loop_position =
+            static_cast<std::uint32_t>((bytes.size() - 60) / 4);  // 自环：位置 = 本条自身
+        emit_instruction(bytes, 0x8C, {{0, loop_position}});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+
+    core::Machine paused_machine(0x12345678u, table);
+    paused_machine.set_host_clock_ms(1000);
+    paused_machine.load_root(make_pause_script(false));
+    for (int i = 0; i < 3; ++i) {  // 0x1FB / 0x202 / 0x1F4
+        if (!paused_machine.step()) {
+            std::fprintf(stderr, "pause fixture failed: %s\n",
+                         paused_machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    paused_machine.set_host_clock_ms(1200);  // 窗本应在 1100 之后到期
+    if (!paused_machine.step()) return false;
+    const core::DrawItem* paused_item = paused_machine.draw_item(1);
+    if (paused_item == nullptr || paused_item->color == 0xC8ABCDEFu ||
+        paused_item->duration != 100) {
+        std::fprintf(stderr, "paused scene advanced the window (color=0x%08X duration=%d)\n",
+                     paused_item == nullptr ? 0u : paused_item->color,
+                     paused_item == nullptr ? -1 : paused_item->duration);
+        return false;
+    }
+
+    // 等待位置起 ⇒ 暂停不挡场景推进（同一时刻、同一窗必须到期）。
+    core::Machine released_machine(0x12345678u, table);
+    released_machine.set_host_clock_ms(1000);
+    released_machine.load_root(make_pause_script(true));
+    for (int i = 0; i < 4; ++i) {  // 0x1FB / 0x202 / 0x1F4 / 0x21C
+        if (!released_machine.step()) return false;
+    }
+    released_machine.set_host_clock_ms(1200);
+    if (!released_machine.step()) return false;
+    const core::DrawItem* released_item = released_machine.draw_item(1);
+    if (released_item == nullptr || released_item->color != 0xC8ABCDEFu ||
+        released_item->duration != 0) {
+        std::fprintf(stderr, "wait bit did not release the scene advance (color=0x%08X)\n",
+                     released_item == nullptr ? 0u : released_item->color);
+        return false;
+    }
+
+    // 0x23C：无条件重盖时钟对（不受区间忙门限制）。
+    auto clock_script = make_script_with_body();
+    emit_instruction(clock_script, 0x23C, {});
+    emit_instruction(clock_script, 0x23C, {});
+    emit_instruction(clock_script, 2, {});
+    core::Machine clock_machine(0x12345678u, table);
+    clock_machine.set_host_clock_ms(700);
+    clock_machine.load_root(clock_script);
+    if (!clock_machine.step() || clock_machine.engine_now_ms() != 700u ||
+        clock_machine.engine_previous_ms() != 0u) {
+        std::fprintf(stderr, "0x23c first stamp mismatch now=%u prev=%u\n",
+                     clock_machine.engine_now_ms(), clock_machine.engine_previous_ms());
+        return false;
+    }
+    clock_machine.set_host_clock_ms(800);
+    if (!clock_machine.step() || clock_machine.engine_now_ms() != 800u ||
+        clock_machine.engine_previous_ms() != 700u) {
+        std::fprintf(stderr, "0x23c " "prev<-now" " mismatch now=%u prev=%u\n",
+                     clock_machine.engine_now_ms(), clock_machine.engine_previous_ms());
+        return false;
+    }
+    return true;
+}
+
+// ── 帧 / 本地块 / 标志 / 数值 / 场景读回（第二批 24 条） ──
+bool check_second_batch(const core::OpcodeTable& table) {
+    // 0x08 call-frame：目标槽未装载 ⇒ 只记诊断、不切帧；长度 3 已写 ⇒ 推进 12 字节。
+    auto call_frame = make_script_with_body();
+    emit_instruction(call_frame, 0x08, {{0, 1}});
+    emit_instruction(call_frame, 2, {});
+    core::Machine call_machine(0x12345678u, table);
+    call_machine.load_root(call_frame);
+    if (!call_machine.step() || call_machine.current_frame() != 0 ||
+        call_machine.errors().size() != 1 || call_machine.frame().ip != 12) {
+        std::fprintf(stderr, "0x08 unloaded slot mismatch frame=%zu ip=%zu errors=%zu\n",
+                     call_machine.current_frame(), call_machine.frame().ip,
+                     call_machine.errors().size());
+        return false;
+    }
+
+    // 0x7b：两格按帧、初值 −1；0x199 进入；0x7c 离开（深度 = 本帧身份编号）。
+    auto local = make_script_with_body();
+    emit_instruction(local, 0x7B, {{0, 8}, {0, 0xFFFFFFFFu}});  // 位置 0..4：main=8、sub=−1
+    emit_instruction(local, 0x199, {});                         // 位置 5
+    emit_instruction(local, 0x1A8, {});                         // 位置 6（返回点）
+    emit_instruction(local, 2, {});                             // 位置 7
+    emit_instruction(local, 0x7C, {});                          // 位置 8（目标）
+    emit_instruction(local, 2, {});                             // 位置 9
+    core::Machine local_machine(0x12345678u, table);
+    local_machine.load_root(local);
+    if (local_machine.frame().local_main != -1 || local_machine.frame().local_sub != -1) {
+        std::fprintf(stderr, "0x7b frame defaults must be -1\n");
+        return false;
+    }
+    if (!local_machine.step() || local_machine.frame().local_main != 8 ||
+        local_machine.frame().local_sub != -1 || local_machine.frame().ip != 20) {
+        std::fprintf(stderr, "0x7b targets mismatch main=%d sub=%d ip=%zu\n",
+                     local_machine.frame().local_main, local_machine.frame().local_sub,
+                     local_machine.frame().ip);
+        return false;
+    }
+    if (!local_machine.step() || local_machine.frame().ip != 32 ||
+        local_machine.local_save_pos() != 6 || local_machine.local_save_depth() != 0 ||
+        local_machine.local_save_word() != ((1u << 25) | (1u << 26)) ||
+        local_machine.state_flags() != 0) {
+        std::fprintf(stderr, "0x199 enter mismatch ip=%zu pos=%u word=0x%X\n",
+                     local_machine.frame().ip, local_machine.local_save_pos(),
+                     local_machine.local_save_word());
+        return false;
+    }
+    if (!local_machine.step() || local_machine.frame().ip != 24 ||
+        local_machine.state_flags() != (1u << 26) || local_machine.local_save_word() != 0) {
+        std::fprintf(stderr, "0x7c leave mismatch ip=%zu flags=0x%X\n",
+                     local_machine.frame().ip, local_machine.state_flags());
+        return false;
+    }
+    // 门带着第 26 位 ⇒ 没有服务分支 ⇒ 一定停成 GateStalled（正确表现）。
+    for (int i = 0; i < 10001 && !local_machine.halted(); ++i) local_machine.step();
+    if (!local_machine.halted() ||
+        local_machine.last_stop().reason != core::StopReason::GateStalled) {
+        std::fprintf(stderr, "0x7c did not leave the gate closed with bit 26\n");
+        return false;
+    }
+
+    // 0x19a / 0x1b6 / 0x1b7：三个互不相同的格；Y 归一成 0/1。
+    auto flags = make_script_with_body();
+    emit_instruction(flags, 0x1B7, {{0, 5}});
+    emit_instruction(flags, 0x1B6, {{3, 0}});
+    emit_instruction(flags, 0x19A, {{3, 1}});
+    emit_instruction(flags, 0x1B7, {{0, 0}});
+    emit_instruction(flags, 0x1B6, {{3, 2}});
+    emit_instruction(flags, 2, {});
+    core::Machine flag_machine(0x12345678u, table);
+    flag_machine.load_root(flags);
+    for (int i = 0; i < 2; ++i) {
+        if (!flag_machine.step()) return false;
+    }
+    if (flag_machine.flag_y() != 1 || flag_machine.read_int(core::Operand{3, 0}) != 1 ||
+        flag_machine.read_int(core::Operand{3, 1}) != flag_machine.flag_x()) {
+        std::fprintf(stderr, "0x1b7/0x1b6/0x19a mismatch\n");
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (!flag_machine.step()) return false;
+    }
+    if (flag_machine.flag_y() != 0 || flag_machine.read_int(core::Operand{3, 2}) != 0) {
+        std::fprintf(stderr, "0x1b7 normalization mismatch\n");
+        return false;
+    }
+
+    // 0x1ad：落点格复位值 −1；执行后写当前层号（本版恒 0）。
+    if (core::Machine(0x12345678u, table).layer_cell() != -1) {
+        std::fprintf(stderr, "0x1ad layer cell must start at -1\n");
+        return false;
+    }
+    auto layer = make_script_with_body();
+    emit_instruction(layer, 0x1AD, {});
+    emit_instruction(layer, 2, {});
+    core::Machine layer_machine(0x12345678u, table);
+    layer_machine.load_root(layer);
+    if (!layer_machine.step() || layer_machine.layer_cell() != 0) {
+        std::fprintf(stderr, "0x1ad layer cell mismatch (%d)\n", layer_machine.layer_cell());
+        return false;
+    }
+
+    // 0x1b0：源 → 目标，复制的是编码位模式；n=0 一次都不复制。
+    auto copy = make_script_with_body();
+    emit_instruction(copy, 0x55, {{3, 0}, {0, 42}});
+    emit_instruction(copy, 0x1B0, {{3, 0}, {3, 1}, {0, 1}});
+    emit_instruction(copy, 2, {});
+    core::Machine copy_machine(0x12345678u, table);
+    copy_machine.load_root(copy);
+    if (!copy_machine.step() || !copy_machine.step() ||
+        copy_machine.read_int(core::Operand{3, 1}) != 42) {
+        std::fprintf(stderr, "0x1b0 memcpy mismatch (%d)\n",
+                     copy_machine.read_int(core::Operand{3, 1}));
+        return false;
+    }
+    auto copy_zero = make_script_with_body();
+    emit_instruction(copy_zero, 0x55, {{3, 0}, {0, 42}});
+    emit_instruction(copy_zero, 0x1B0, {{3, 0}, {3, 1}, {0, 0}});
+    emit_instruction(copy_zero, 2, {});
+    core::Machine zero_machine(0x12345678u, table);
+    zero_machine.load_root(copy_zero);
+    if (!zero_machine.step() || !zero_machine.step() ||
+        zero_machine.read_int(core::Operand{3, 1}) != 0) {
+        std::fprintf(stderr, "0x1b0 copied with n=0\n");
+        return false;
+    }
+
+    // 0x1c7 与 0x1cc：位 27 = 0（唯一可达支）；状态格与状态字**不是同一格**。
+    auto cells = make_script_with_body();
+    emit_instruction(cells, 0x1C7, {{3, 0}});
+    emit_instruction(cells, 0x1CF, {{0, 7}});
+    emit_instruction(cells, 0x1CC, {{3, 1}});
+    emit_instruction(cells, 2, {});
+    core::Machine cell_machine(0x12345678u, table);
+    cell_machine.load_root(cells);
+    for (int i = 0; i < 3; ++i) {
+        if (!cell_machine.step()) return false;
+    }
+    if (cell_machine.read_int(core::Operand{3, 0}) != 0 ||
+        cell_machine.read_int(core::Operand{3, 1}) != 0) {
+        std::fprintf(stderr, "0x1c7/0x1cc mismatch bit=%d cell=%d\n",
+                     cell_machine.read_int(core::Operand{3, 0}),
+                     cell_machine.read_int(core::Operand{3, 1}));
+        return false;
+    }
+
+    // 0x63 lea：把取址结果写进引用槽（写指向的值可读回）；非引用族目标 ⇒ 抛。
+    auto lea = make_script_with_body();
+    emit_instruction(lea, 0x55, {{3, 5}, {0, 42}});
+    emit_instruction(lea, 0x63, {{6, 1}, {3, 5}});
+    emit_instruction(lea, 0x55, {{3, 6}, {6, 1}});
+    emit_instruction(lea, 2, {});
+    core::Machine lea_machine(0x12345678u, table);
+    lea_machine.load_root(lea);
+    for (int i = 0; i < 3; ++i) {
+        if (!lea_machine.step()) {
+            std::fprintf(stderr, "0x63 lea failed: %s\n", lea_machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    if (lea_machine.read_int(core::Operand{3, 6}) != 42) {
+        std::fprintf(stderr, "0x63 lea wrote the wrong address (%d)\n",
+                     lea_machine.read_int(core::Operand{3, 6}));
+        return false;
+    }
+    auto lea_bad = make_script_with_body();
+    emit_instruction(lea_bad, 0x63, {{9, 0}, {3, 5}});
+    emit_instruction(lea_bad, 2, {});
+    core::Machine lea_bad_machine(0x12345678u, table);
+    lea_bad_machine.load_root(lea_bad);
+    if (lea_bad_machine.step() ||
+        lea_bad_machine.last_stop().message.rfind("lea-destination-not-reference-tag", 0) != 0) {
+        std::fprintf(stderr, "0x63 accepted a non-reference destination\n");
+        return false;
+    }
+
+    // 0x60 随机：注入源；范围 = 0 ⇒ 先写 0 再抛。
+    auto random_script = make_script_with_body();
+    emit_instruction(random_script, 0x60, {{3, 1}, {0, 10}});
+    emit_instruction(random_script, 2, {});
+    core::Machine random_machine(0x12345678u, table);
+    random_machine.set_random_source([] { return 0x40000000u; });
+    random_machine.load_root(random_script);
+    if (!random_machine.step() || random_machine.read_int(core::Operand{3, 1}) != 4 ||
+        random_machine.random_counter() != 1 || random_machine.random_range() != 10) {
+        std::fprintf(stderr, "0x60 random mismatch value=%d counter=%d\n",
+                     random_machine.read_int(core::Operand{3, 1}),
+                     random_machine.random_counter());
+        return false;
+    }
+    auto random_zero = make_script_with_body();
+    emit_instruction(random_zero, 0x60, {{3, 1}, {0, 0}});
+    emit_instruction(random_zero, 2, {});
+    core::Machine random_zero_machine(0x12345678u, table);
+    random_zero_machine.load_root(random_zero);
+    if (random_zero_machine.step() ||
+        random_zero_machine.read_int(core::Operand{3, 1}) != 0) {
+        std::fprintf(stderr, "0x60 range=0 must write 0 then throw\n");
+        return false;
+    }
+
+    // 0x74 / 0x7f：同一格；没写过就读 ⇒ 响亮失败。
+    auto param = make_script_with_body();
+    emit_instruction(param, 0x74, {{0, 0xFFFFFFF9u}});  // −7
+    emit_instruction(param, 0x7F, {{3, 0}});
+    emit_instruction(param, 2, {});
+    core::Machine param_machine(0x12345678u, table);
+    param_machine.load_root(param);
+    if (!param_machine.step() || !param_machine.step() ||
+        param_machine.read_int(core::Operand{3, 0}) != -7) {
+        std::fprintf(stderr, "0x74/0x7f round trip mismatch (%d)\n",
+                     param_machine.read_int(core::Operand{3, 0}));
+        return false;
+    }
+    auto param_uninit = make_script_with_body();
+    emit_instruction(param_uninit, 0x7F, {{3, 0}});
+    emit_instruction(param_uninit, 2, {});
+    core::Machine param_uninit_machine(0x12345678u, table);
+    param_uninit_machine.load_root(param_uninit);
+    if (param_uninit_machine.step()) {
+        std::fprintf(stderr, "0x7f read an uninitialized param cell\n");
+        return false;
+    }
+
+    // 0xd0 时钟：本迭代读数。
+    auto clock = make_script_with_body();
+    emit_instruction(clock, 0xD0, {{3, 0}});
+    emit_instruction(clock, 2, {});
+    core::Machine clock_machine2(0x12345678u, table);
+    clock_machine2.set_host_clock_ms(12345);
+    clock_machine2.load_root(clock);
+    if (!clock_machine2.step() || clock_machine2.read_int(core::Operand{3, 0}) != 12345) {
+        std::fprintf(stderr, "0xd0 clock mismatch (%d)\n",
+                     clock_machine2.read_int(core::Operand{3, 0}));
+        return false;
+    }
+
+    // 0x191 / 0x2d0 / 0x2d1 / 0x2d3：浮点族（含减法/除法的方向）。
+    auto floats = make_script_with_body();
+    emit_instruction(floats, 0x191, {{4, 0}, {1, 0xC0600000u}});         // −3.5 → 3.5
+    emit_instruction(floats, 0x2D0, {{4, 1}, {1, 0x40200000u}, {1, 0x40800000u}});  // 2.5+4
+    emit_instruction(floats, 0x2D1, {{4, 2}, {1, 0x40E00000u}, {1, 0x40400000u}});  // 7−3
+    emit_instruction(floats, 0x2D3, {{4, 3}, {1, 0x41000000u}, {1, 0x40000000u}});  // 8÷2
+    emit_instruction(floats, 2, {});
+    core::Machine float_machine(0x12345678u, table);
+    float_machine.load_root(floats);
+    for (int i = 0; i < 4; ++i) {
+        if (!float_machine.step()) {
+            std::fprintf(stderr, "float fixture failed: %s\n",
+                         float_machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    if (float_machine.read_float(core::Operand{4, 0}) != 3.5 ||
+        float_machine.read_float(core::Operand{4, 1}) != 6.5 ||
+        float_machine.read_float(core::Operand{4, 2}) != 4.0 ||
+        float_machine.read_float(core::Operand{4, 3}) != 4.0) {
+        std::fprintf(stderr, "float ops mismatch %f %f %f %f\n",
+                     float_machine.read_float(core::Operand{4, 0}),
+                     float_machine.read_float(core::Operand{4, 1}),
+                     float_machine.read_float(core::Operand{4, 2}),
+                     float_machine.read_float(core::Operand{4, 3}));
+        return false;
+    }
+
+    // 0x218 / 0x21a：查不到 ⇒ 三个输出写 0（覆盖旧值）。
+    auto vec = make_script_with_body();
+    emit_instruction(vec, 0x55, {{4, 0}, {0, 5}});
+    emit_instruction(vec, 0x218, {{0, 9}, {4, 0}, {4, 1}, {4, 2}});
+    emit_instruction(vec, 0x21A, {{0, 9}, {4, 3}, {4, 4}, {4, 5}});
+    emit_instruction(vec, 2, {});
+    core::Machine vec_machine(0x12345678u, table);
+    vec_machine.load_root(vec);
+    for (int i = 0; i < 3; ++i) {
+        if (!vec_machine.step()) return false;
+    }
+    for (std::uint32_t slot = 0; slot <= 5; ++slot) {
+        if (vec_machine.read_float(core::Operand{4, slot}) != 0.0) {
+            std::fprintf(stderr, "0x218/0x21a slot %u not zero\n", slot);
+            return false;
+        }
+    }
+
+    // 0x228：0x1ff 写平移 → 读回；记录不存在 ⇒ 标志 1 且三个浮点不写。
+    auto trans = make_script_with_body();
+    emit_instruction(trans, 0x1FF, {{0, 7}, {1, 0x40400000u}, {1, 0}, {1, 0}});  // 3,0,0
+    emit_instruction(trans, 0x228, {{3, 0}, {0, 7}, {4, 0}, {4, 1}, {4, 2}});
+    emit_instruction(trans, 2, {});
+    core::Machine trans_machine(0x12345678u, table);
+    trans_machine.load_root(trans);
+    if (!trans_machine.step() || !trans_machine.step() ||
+        trans_machine.read_int(core::Operand{3, 0}) != 0 ||
+        trans_machine.read_float(core::Operand{4, 0}) != 3.0) {
+        std::fprintf(stderr, "0x228 success path mismatch flag=%d x=%f\n",
+                     trans_machine.read_int(core::Operand{3, 0}),
+                     trans_machine.read_float(core::Operand{4, 0}));
+        return false;
+    }
+    auto trans_missing = make_script_with_body();
+    emit_instruction(trans_missing, 0x55, {{4, 0}, {0, 5}});
+    emit_instruction(trans_missing, 0x228, {{3, 0}, {0, 8}, {4, 0}, {4, 1}, {4, 2}});
+    emit_instruction(trans_missing, 2, {});
+    core::Machine missing_machine(0x12345678u, table);
+    missing_machine.load_root(trans_missing);
+    for (int i = 0; i < 2; ++i) {
+        if (!missing_machine.step()) return false;
+    }
+    if (missing_machine.read_int(core::Operand{3, 0}) != 1 ||
+        missing_machine.read_float(core::Operand{4, 0}) != 5.0 || !missing_machine.errors().empty()) {
+        std::fprintf(stderr, "0x228 missing-record path mismatch\n");
+        return false;
+    }
+
+    // 0x21d：三张表各拷各的；没有源 ⇒ 上报且不标脏。
+    auto scene_copy = make_script_with_body();
+    emit_instruction(scene_copy, 0x1FB, {{0, 1}, {0, 1}, {0, 0}, {0, 0},
+                                         {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+    emit_instruction(scene_copy, 0x21D, {{0, 1}, {0, 2}});
+    emit_instruction(scene_copy, 2, {});
+    core::Machine scene_copy_machine(0x12345678u, table);
+    scene_copy_machine.load_root(scene_copy);
+    scene_copy_machine.end_render();  // 清脏
+    if (!scene_copy_machine.step()) return false;
+    scene_copy_machine.end_render();
+    if (!scene_copy_machine.step() || scene_copy_machine.draw_item(2) == nullptr ||
+        !scene_copy_machine.scene_dirty()) {
+        std::fprintf(stderr, "0x21d copy mismatch\n");
+        return false;
+    }
+    auto scene_copy_missing = make_script_with_body();
+    emit_instruction(scene_copy_missing, 0x21D, {{0, 9}, {0, 10}});
+    emit_instruction(scene_copy_missing, 2, {});
+    core::Machine missing_copy_machine(0x12345678u, table);
+    missing_copy_machine.load_root(scene_copy_missing);
+    missing_copy_machine.end_render();
+    if (!missing_copy_machine.step() || missing_copy_machine.scene_dirty() ||
+        missing_copy_machine.errors().size() != 1) {
+        std::fprintf(stderr, "0x21d missing-source path mismatch\n");
+        return false;
+    }
+    return true;
+}
+
+// ── 池翻页（0x6D；SPC-POOL-MEMFLIP） ──
+bool check_memflip(const core::OpcodeTable& table) {
+    // 发行配置（键缺失 = 0）⇒ 恒走异常支，选择不变。
+    auto disabled = make_script_with_body();
+    emit_instruction(disabled, 0x6D, {});
+    emit_instruction(disabled, 2, {});
+    core::Machine off_machine(0x12345678u, table);
+    off_machine.load_root(disabled);
+    if (off_machine.step() ||
+        off_machine.last_stop().message.rfind("display-message:memflip", 0) != 0) {
+        std::fprintf(stderr, "0x6d accepted a disabled memflip\n");
+        return false;
+    }
+
+    // 启动期键 = 1：翻页只换选择（不搬数据），再翻一次回原组、原值仍在。
+    core::ConfigStore config;
+    config.set_int("set:EnableMemFlip", 1);
+    auto flip = make_script_with_body();
+    emit_instruction(flip, 0x55, {{3, 0}, {0, 42}});
+    emit_instruction(flip, 0x6D, {});
+    emit_instruction(flip, 0x55, {{3, 1}, {3, 0}});  // 另一组：未写过 ⇒ 0
+    emit_instruction(flip, 0x6D, {});
+    emit_instruction(flip, 0x55, {{3, 2}, {3, 0}});  // 翻回主组：42
+    emit_instruction(flip, 2, {});
+    core::Machine flip_machine(0x12345678u, table, nullptr, config);
+    flip_machine.load_root(flip);
+    for (int i = 0; i < 5; ++i) {
+        if (!flip_machine.step()) {
+            std::fprintf(stderr, "0x6d fixture failed: %s\n",
+                         flip_machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    if (flip_machine.read_int(core::Operand{3, 1}) != 0 ||
+        flip_machine.read_int(core::Operand{3, 2}) != 42) {
+        std::fprintf(stderr, "0x6d flip mismatch (other=%d main=%d)\n",
+                     flip_machine.read_int(core::Operand{3, 1}),
+                     flip_machine.read_int(core::Operand{3, 2}));
+        return false;
+    }
+    return true;
+}
+
+// ── 3D setter 族（0x21E / 0x21F；CORE-OPS-SCENE3D-21E / -21F） ──
+bool check_scene3d_setters(const core::OpcodeTable& table) {
+    // 「已存在」位为 0 ⇒ 记录**已建**但一个字段都不写（与"没调用"在表内容上不同）。
+    auto gate_off = make_script_with_body();
+    emit_instruction(gate_off, 0x21E, {{0, 3}, {0, 11}, {0, 22},
+                                       {1, 0x42C80000u}, {1, 0x43480000u}, {1, 0x43960000u}});
+    emit_instruction(gate_off, 2, {});
+    core::Machine off_machine(0x12345678u, table);
+    off_machine.load_root(gate_off);
+    if (!off_machine.step()) return false;
+    const core::DrawItem* off_item = off_machine.draw_item(3);
+    if (off_item == nullptr || (off_item->flags & 1u) != 0 || off_item->config_g3 != 0 ||
+        off_item->set21e_scale[0] != 1.0f || off_item->set21e_scale[5] != 1.0f) {
+        std::fprintf(stderr, "0x21e wrote fields with the record-exists bit clear\n");
+        return false;
+    }
+
+    // 位 0 = 1（由 0x1fb 置）⇒ 置「有窗」位、G3 ← 1、清窗起点、两个整数、三个浮点 ÷100。
+    auto gate_on = make_script_with_body();
+    emit_instruction(gate_on, 0x1FB, {{0, 3}, {0, 1}, {0, 0}, {0, 0},
+                                      {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+    emit_instruction(gate_on, 0x21E, {{0, 3}, {0, 11}, {0, 22},
+                                      {1, 0x42C80000u}, {1, 0x43480000u}, {1, 0x43960000u}});
+    emit_instruction(gate_on, 2, {});
+    core::Machine on_machine(0x12345678u, table);
+    on_machine.load_root(gate_on);
+    if (!on_machine.step() || !on_machine.step()) return false;
+    const core::DrawItem* on_item = on_machine.draw_item(3);
+    if (on_item == nullptr || (on_item->flags & 2u) == 0 || on_item->config_g3 != 1 ||
+        on_item->window_start != 0 || on_item->set21e_int0 != 11 || on_item->set21e_int1 != 22 ||
+        on_item->set21e_scale[0] != 1.0f || on_item->set21e_scale[5] != 2.0f ||
+        on_item->set21e_scale[10] != 3.0f || !on_machine.scene_dirty()) {
+        std::fprintf(stderr, "0x21e scale mismatch (s0=%f s5=%f s10=%f g3=%d)\n",
+                     on_item == nullptr ? 0.0f : on_item->set21e_scale[0],
+                     on_item == nullptr ? 0.0f : on_item->set21e_scale[5],
+                     on_item == nullptr ? 0.0f : on_item->set21e_scale[10],
+                     on_item == nullptr ? -1 : on_item->config_g3);
+        return false;
+    }
+
+    // 0x21F：轴与角另存一份；矩阵按**度**换算（90° 绕 z ⇒ cos = 0）。
+    auto rotate = make_script_with_body();
+    emit_instruction(rotate, 0x1FB, {{0, 4}, {0, 1}, {0, 0}, {0, 0},
+                                     {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+    emit_instruction(rotate, 0x21F, {{0, 4}, {0, 1}, {0, 2}, {1, 0}, {1, 0}, {1, 0x3F800000u},
+                                     {1, 0x42B40000u}});
+    emit_instruction(rotate, 2, {});
+    core::Machine rotate_machine(0x12345678u, table);
+    rotate_machine.load_root(rotate);
+    if (!rotate_machine.step() || !rotate_machine.step()) return false;
+    const core::DrawItem* rot_item = rotate_machine.draw_item(4);
+    if (rot_item == nullptr || rot_item->config_g3 != 1 || rot_item->set21f_axis[2] != 1.0f ||
+        rot_item->set21f_degrees != 90.0f || rot_item->set21f_rot[10] < 0.999f ||
+        std::abs(rot_item->set21f_rot[5]) > 0.001f || std::abs(rot_item->set21f_rot[1] + 1.0f) > 0.001f) {
+        std::fprintf(stderr, "0x21f rotation mismatch deg=%f r5=%f r10=%f\n",
+                     rot_item == nullptr ? 0.0f : rot_item->set21f_degrees,
+                     rot_item == nullptr ? 0.0f : rot_item->set21f_rot[5],
+                     rot_item == nullptr ? 0.0f : rot_item->set21f_rot[10]);
+        return false;
+    }
+    return true;
+}
+
+// ── 按住派发族（0xFC / 0x102 / 0x103 / 0x104 / 0x105） ──
+bool check_input_hold(const core::OpcodeTable& table) {
+    // 0xfc：两张回调表**所有帧**清空 + 模数写 0；别的（掩码 / 键总数 / 扫描上限 / 游标 / ip）都不动。
+    auto reset = make_script_with_body();
+    emit_instruction(reset, 0xFE, {{0, 5}});
+    emit_instruction(reset, 0xFF, {});
+    emit_instruction(reset, 0x103, {{0, 4}});
+    emit_instruction(reset, 0x102, {{0, 7}, {0, 3}, {0, 20}});
+    emit_instruction(reset, 0xFB, {{0, 4}, {0, 21}});
+    emit_instruction(reset, 0x105, {{0, 9}});
+    emit_instruction(reset, 0xFC, {});
+    emit_instruction(reset, 2, {});
+    core::Machine reset_machine(0x12345678u, table);
+    reset_machine.load_root(reset);
+    for (int i = 0; i < 5; ++i) {
+        if (!reset_machine.step()) return false;
+    }
+    if (reset_machine.frame().hold_slots.size() != 1 || reset_machine.frame().key_jumps.size() != 1) {
+        std::fprintf(stderr, "0x102/0xfb tables not registered before reset\n");
+        return false;
+    }
+    reset_machine.seed_hold_cursor(0, 3);
+    if (!reset_machine.step() || !reset_machine.step()) return false;  // 0x105 / 0xfc
+    if (!reset_machine.frame().hold_slots.empty() || !reset_machine.frame().key_jumps.empty() ||
+        reset_machine.hold_modulus() != 0 || reset_machine.hold_mask() != 9u ||
+        reset_machine.key_total() != 5 || reset_machine.frame().key_limit != 5 ||
+        reset_machine.frame().key_cursor != 0 || !reset_machine.hold_cursor() ||
+        *reset_machine.hold_cursor() != 3 || reset_machine.frame().ip != 4u * 23u) {
+        std::fprintf(stderr, "0xfc reset mismatch (mask=%u modulus=%d ip=%zu)\n",
+                     reset_machine.hold_mask(), reset_machine.hold_modulus(),
+                     reset_machine.frame().ip);
+        return false;
+    }
+
+    // 0xfc 之后模数 0 ⇒ 下一次 0x104 在出口处响亮失败。
+    auto reset_then_dispatch = make_script_with_body();
+    emit_instruction(reset_then_dispatch, 0xFE, {{0, 2}});
+    emit_instruction(reset_then_dispatch, 0x103, {{0, 4}});
+    emit_instruction(reset_then_dispatch, 0xFC, {});
+    emit_instruction(reset_then_dispatch, 0x104, {});
+    emit_instruction(reset_then_dispatch, 2, {});
+    core::Machine dz_machine(0x12345678u, table);
+    dz_machine.load_root(reset_then_dispatch);
+    for (int i = 0; i < 3; ++i) {
+        if (!dz_machine.step()) return false;
+    }
+    if (dz_machine.step() ||
+        dz_machine.last_stop().message.rfind("hold-cursor-divide-by-zero", 0) != 0) {
+        std::fprintf(stderr, "0x104 with modulus 0 did not fail loudly\n");
+        return false;
+    }
+
+    // 0x102：上界 31/9、后写覆盖、−1 哨兵、推进 7；槽号越界 ⇒ 抛且一槽不写。
+    auto slots = make_script_with_body();
+    emit_instruction(slots, 0x102, {{0, 31}, {0, 9}, {0, 1234}});
+    emit_instruction(slots, 0x102, {{0, 31}, {0, 9}, {0, 0xFFFFFFFFu}});
+    emit_instruction(slots, 2, {});
+    core::Machine slot_machine(0x12345678u, table);
+    slot_machine.load_root(slots);
+    if (!slot_machine.step() || !slot_machine.step()) return false;
+    const auto terminal = slot_machine.frame().hold_slots.find(319);
+    if (terminal == slot_machine.frame().hold_slots.end() || terminal->second != -1 ||
+        slot_machine.frame().ip != 56) {
+        std::fprintf(stderr, "0x102 upper bound / overwrite mismatch (ip=%zu)\n",
+                     slot_machine.frame().ip);
+        return false;
+    }
+    auto slot_bad = make_script_with_body();
+    emit_instruction(slot_bad, 0x102, {{0, 7}, {0, 9}, {0, 30}});
+    emit_instruction(slot_bad, 0x102, {{0, 7}, {0, 10}, {0, 99}});
+    emit_instruction(slot_bad, 2, {});
+    core::Machine slot_bad_machine(0x12345678u, table);
+    slot_bad_machine.load_root(slot_bad);
+    if (!slot_bad_machine.step() || slot_bad_machine.step() ||
+        slot_bad_machine.frame().hold_slots.size() != 1 ||
+        slot_bad_machine.frame().hold_slots.at(79) != 30) {
+        std::fprintf(stderr, "0x102 slot 10 was clamped or written\n");
+        return false;
+    }
+    for (const auto key : {32, -1}) {
+        auto key_bad = make_script_with_body();
+        emit_instruction(key_bad, 0x102, {{0, static_cast<std::uint32_t>(key)}, {0, 0}, {0, 5}});
+        emit_instruction(key_bad, 2, {});
+        core::Machine key_bad_machine(0x12345678u, table);
+        key_bad_machine.load_root(key_bad);
+        if (key_bad_machine.step() || !key_bad_machine.frame().hold_slots.empty()) {
+            std::fprintf(stderr, "0x102 accepted key %d\n", key);
+            return false;
+        }
+    }
+
+    // 0x103：模数原样（含 0 与负数）、只清当前帧槽。
+    auto modulus = make_script_with_body();
+    emit_instruction(modulus, 0x103, {{0, 7}});
+    emit_instruction(modulus, 2, {});
+    core::Machine modulus_machine(0x12345678u, table);
+    modulus_machine.seed_hold_cursor(1, 5);
+    modulus_machine.load_root(modulus);
+    if (!modulus_machine.step() || modulus_machine.hold_modulus() != 7 ||
+        !modulus_machine.hold_cursor() || *modulus_machine.hold_cursor() != 0 ||
+        !modulus_machine.hold_cursor(1) || *modulus_machine.hold_cursor(1) != 5) {
+        std::fprintf(stderr, "0x103 modulus / per-slot cursor mismatch\n");
+        return false;
+    }
+    auto modulus_zero = make_script_with_body();
+    emit_instruction(modulus_zero, 0x103, {{0, 0}});
+    emit_instruction(modulus_zero, 2, {});
+    core::Machine zero_mod_machine(0x12345678u, table);
+    zero_mod_machine.load_root(modulus_zero);
+    if (!zero_mod_machine.step() || zero_mod_machine.hold_modulus() != 0) {
+        std::fprintf(stderr, "0x103 rejected modulus 0\n");
+        return false;
+    }
+
+    // 0x105：32 位掩码原样（−1 = 全 1），不碰输入字。
+    auto mask = make_script_with_body();
+    emit_instruction(mask, 0x105, {{0, 0xFFFFFFFFu}});
+    emit_instruction(mask, 2, {});
+    core::Machine mask_machine(0x12345678u, table);
+    mask_machine.set_input_word(0x5A);
+    mask_machine.load_root(mask);
+    if (!mask_machine.step() || mask_machine.hold_mask() != 0xFFFFFFFFu ||
+        mask_machine.input_word() != 0x5A || mask_machine.frame().ip != 12) {
+        std::fprintf(stderr, "0x105 mask mismatch (%u)\n", mask_machine.hold_mask());
+        return false;
+    }
+
+    // 0x104：反向取最高置位；未命中不跳、撤销返回点；每条出口推进游标（模 7 回到 0）。
+    auto dispatch = make_script_with_body();
+    emit_instruction(dispatch, 0xFE, {{0, 8}});
+    emit_instruction(dispatch, 0xFF, {});
+    emit_instruction(dispatch, 0x103, {{0, 7}});
+    emit_instruction(dispatch, 0x102, {{0, 7}, {0, 0}, {0, 20}});
+    emit_instruction(dispatch, 0x104, {});
+    for (int i = 0; i < 6; ++i) emit_instruction(dispatch, 0x1A8, {});
+    emit_instruction(dispatch, 2, {});
+    core::Machine dispatch_machine(0x12345678u, table);
+    dispatch_machine.load_root(dispatch);
+    for (int i = 0; i < 4; ++i) {  // 0xFE / 0xFF / 0x103 / 0x102（0xFF 会清输入字）
+        if (!dispatch_machine.step()) {
+            std::fprintf(stderr, "0x104 fixture failed: %s\n",
+                         dispatch_machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    dispatch_machine.set_input_word((1u << 3) | (1u << 7));
+    if (!dispatch_machine.step()) {
+        std::fprintf(stderr, "0x104 dispatch failed: %s\n",
+                     dispatch_machine.last_stop().message.c_str());
+        return false;
+    }
+    if (dispatch_machine.frame().ip != 4u * 20u || dispatch_machine.frame().ret_stack.size() != 1 ||
+        dispatch_machine.frame().ret_stack.back() != 15 || !dispatch_machine.hold_cursor() ||
+        *dispatch_machine.hold_cursor() != 1) {
+        std::fprintf(stderr, "0x104 dispatch mismatch ip=%zu cursor=%d\n",
+                     dispatch_machine.frame().ip,
+                     dispatch_machine.hold_cursor() ? *dispatch_machine.hold_cursor() : -1);
+        return false;
+    }
+
+    // 0x104：掩码命中 ⇒ 返回点 = 本条 + 扫描上限夹到该键；上下文编号变化 ⇒ 清游标。
+    auto masked = make_script_with_body();
+    emit_instruction(masked, 0xFE, {{0, 8}});
+    emit_instruction(masked, 0xFF, {});
+    emit_instruction(masked, 0x103, {{0, 10}});
+    emit_instruction(masked, 0x104, {});
+    emit_instruction(masked, 0x104, {});
+    emit_instruction(masked, 0x105, {{0, 1u << 7}});
+    emit_instruction(masked, 0x104, {});
+    emit_instruction(masked, 2, {});
+    core::Machine masked_machine(0x12345678u, table);
+    masked_machine.load_root(masked);
+    for (int i = 0; i < 5; ++i) {  // 0xFE / 0xFF / 0x103 / 0x104 / 0x104
+        if (!masked_machine.step()) return false;
+    }
+    if (masked_machine.hold_context_key() != 8 || !masked_machine.hold_cursor() ||
+        *masked_machine.hold_cursor() != 2) {
+        std::fprintf(stderr, "0x104 pre-mask cursor mismatch cursor=%d ctx=%d\n",
+                     masked_machine.hold_cursor() ? *masked_machine.hold_cursor() : -1,
+                     masked_machine.hold_context_key());
+        return false;
+    }
+    if (!masked_machine.step()) return false;  // 0x105
+    masked_machine.set_input_word(1u << 7);
+    if (!masked_machine.step()) return false;  // 0x104：掩码命中
+    if (!masked_machine.hold_cursor() || *masked_machine.hold_cursor() != 1 ||
+        masked_machine.hold_context_key() != 7 || masked_machine.frame().key_limit != 7 ||
+        !masked_machine.frame().ret_stack.empty()) {
+        std::fprintf(stderr,
+                     "0x104 masked/context path mismatch cursor=%d ctx=%d limit=%d stack=%zu\n",
+                     masked_machine.hold_cursor() ? *masked_machine.hold_cursor() : -1,
+                     masked_machine.hold_context_key(), masked_machine.frame().key_limit,
+                     masked_machine.frame().ret_stack.size());
+        return false;
+    }
+    return true;
+}
+
+// ── 存档族（0x19E / 0x1A0 / 0x1A1 / 0x1AB / 0x1AC / 0x1AE / 0x1AF） ──
+namespace {
+struct FakeSaveHost final : core::SaveHost {
+    std::map<std::string, core::Bytes> files;
+    std::vector<std::string> calls;
+    bool confirm_answer = false;
+    bool fail_dat_remove = false;
+    bool fail_sth_remove = false;
+    bool fail_dat_copy = false;
+    bool fail_sth_copy = false;
+    std::optional<core::SurfacePixels> surface;
+
+    std::string app_data_root() override { return ""; }
+    bool ensure_directory(const std::string&) override { return true; }
+    core::ReadResult read(const std::string& path) override {
+        const auto it = files.find(path);
+        if (it == files.end()) return {core::ReadOutcome::OpenFailed, {}};
+        return {core::ReadOutcome::Ok, it->second};
+    }
+    core::WriteOutcome write_create_always(const std::string& path, core::ByteSpan bytes) override {
+        calls.push_back("write:" + path + ":" + std::to_string(bytes.size()));
+        files[path] = core::Bytes(bytes.begin(), bytes.end());
+        return core::WriteOutcome::Ok;
+    }
+    bool remove(const std::string& path) override {
+        calls.push_back("remove:" + path);
+        if (path.ends_with(".DAT") && fail_dat_remove) return false;
+        if (path.ends_with(".STH") && fail_sth_remove) return false;
+        return files.erase(path) != 0;
+    }
+    bool copy_overwrite(const std::string& from, const std::string& to) override {
+        calls.push_back("copy:" + from + ">" + to);
+        if (from.ends_with(".DAT") && fail_dat_copy) return false;
+        if (from.ends_with(".STH") && fail_sth_copy) return false;
+        const auto it = files.find(from);
+        if (it == files.end()) return false;
+        files[to] = it->second;
+        return true;
+    }
+    bool confirm_overwrite(std::int32_t slot) override {
+        calls.push_back("confirm:" + std::to_string(slot));
+        return confirm_answer;
+    }
+    std::optional<core::SurfacePixels> capture_surface(std::int32_t object_id) override {
+        calls.push_back("capture:" + std::to_string(object_id));
+        return surface;
+    }
+    int count(const std::string& prefix) const {
+        int total = 0;
+        for (const auto& call : calls) {
+            if (call.rfind(prefix, 0) == 0) total += 1;
+        }
+        return total;
+    }
+};
+
+core::Bytes make_save_header(std::string_view magic, std::string_view title) {
+    core::Bytes bytes(292, 0u);
+    std::memcpy(bytes.data(), magic.data(), magic.size());
+    std::memcpy(bytes.data() + 8, title.data(), title.size());
+    const auto put16 = [&bytes](std::size_t offset, std::uint32_t value) {
+        bytes[offset] = static_cast<std::uint8_t>(value);
+        bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    };
+    put16(264, 2026);  // 年
+    put16(266, 10);    // 月
+    put16(268, 7);     // 星期（跳过）
+    put16(270, 26);    // 日
+    put16(272, 2);     // 时
+    put16(274, 33);    // 分
+    put16(276, 44);    // 秒
+    put16(278, 77);    // 毫秒（跳过）
+    bytes[280] = 0x10;  // 游戏时间（u32 原样）
+    return bytes;
+}
+}  // namespace
+
+bool check_save_ops(const core::OpcodeTable& table) {
+    if (table.find(0x1A0) == nullptr || table.find(0x55) == nullptr) {
+        return true;  // 与 check_input_dispatch 同一前提：没有真表就跳过
+    }
+
+    // 0x1a0：打不开 ⇒ 1 且 op3..9 保持原值；头合法 ⇒ 0 + 七个字段；短读/坏魔数 ⇒ 2。
+    auto header_script = make_script_with_body();
+    for (int i = 2; i <= 8; ++i) emit_instruction(header_script, 0x55, {{3, static_cast<std::uint32_t>(i)}, {0, 7}});
+    emit_instruction(header_script, 0x1A0, {{3, 0}, {0, 1}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 7}, {3, 8}});
+    emit_instruction(header_script, 2, {});
+    FakeSaveHost host;
+    host.files["SAVE\\SAVE01.DAT"] = make_save_header("S4SD", "TENKETSU");
+    core::Machine save_machine(0x12345678u, table);
+    save_machine.set_save_host(&host);
+    save_machine.set_save_identity("TENKETSU", "S4");
+    save_machine.load_root(header_script);
+    for (int i = 0; i < 7; ++i) {
+        if (!save_machine.step()) return false;
+    }
+    if (!save_machine.step()) return false;  // 0x1a0
+    if (save_machine.read_int(core::Operand{3, 0}) != 0 ||
+        save_machine.read_int(core::Operand{3, 2}) != 2026 ||
+        save_machine.read_int(core::Operand{3, 7}) != 44 ||
+        save_machine.read_int(core::Operand{3, 8}) != 0x10) {
+        std::fprintf(stderr, "0x1a0 header read mismatch\n");
+        return false;
+    }
+
+    // 打不开：状态 1，op3..9 一律不动。
+    auto missing_script = make_script_with_body();
+    for (int i = 2; i <= 8; ++i) emit_instruction(missing_script, 0x55, {{3, static_cast<std::uint32_t>(i)}, {0, 7}});
+    emit_instruction(missing_script, 0x1A0, {{3, 0}, {0, 9}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 7}, {3, 8}});
+    emit_instruction(missing_script, 2, {});
+    FakeSaveHost missing_host;
+    core::Machine missing_machine(0x12345678u, table);
+    missing_machine.set_save_host(&missing_host);
+    missing_machine.load_root(missing_script);
+    for (int i = 0; i < 8; ++i) {
+        if (!missing_machine.step()) return false;
+    }
+    if (missing_machine.read_int(core::Operand{3, 0}) != 1 ||
+        missing_machine.read_int(core::Operand{3, 2}) != 7) {
+        std::fprintf(stderr, "0x1a0 missing-file path wrote op3..\n");
+        return false;
+    }
+
+    // 坏魔数（S3SD）⇒ 2（本实现只接受本族）。
+    auto wrong_family = make_script_with_body();
+    emit_instruction(wrong_family, 0x1A0, {{3, 0}, {0, 1}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 7}, {3, 8}});
+    emit_instruction(wrong_family, 2, {});
+    FakeSaveHost wrong_host;
+    wrong_host.files["SAVE\\SAVE01.DAT"] = make_save_header("S3SD", "TENKETSU");
+    core::Machine wrong_machine(0x12345678u, table);
+    wrong_machine.set_save_host(&wrong_host);
+    wrong_machine.set_save_identity("TENKETSU", "S4");
+    wrong_machine.load_root(wrong_family);
+    if (!wrong_machine.step() || wrong_machine.read_int(core::Operand{3, 0}) != 2) {
+        std::fprintf(stderr, "0x1a0 accepted a foreign family magic\n");
+        return false;
+    }
+
+    // 0x1a1：打不开 ⇒ 1；打开成功（哪怕头坏）⇒ op1 不变 + 整池重编码。
+    auto load_script = make_script_with_body();
+    emit_instruction(load_script, 0x55, {{3, 0}, {0, 7}});
+    emit_instruction(load_script, 0x1A1, {{3, 1}, {0, 1}});
+    emit_instruction(load_script, 2, {});
+    FakeSaveHost load_host;
+    load_host.files["SAVE\\SAVE01.DAT"] = core::Bytes(10, 0u);  // 头坏但打开成功
+    core::Machine load_machine(0x12345678u, table);
+    load_machine.set_save_host(&load_host);
+    load_machine.load_root(load_script);
+    load_machine.seed_global_int_count(0);
+    if (!load_machine.step() || !load_machine.step()) return false;  // mov + 0x1a1
+    const auto expected = static_cast<std::int32_t>(load_machine.encode_int(7));
+    if (load_machine.read_int(core::Operand{3, 0}) != expected ||
+        load_machine.read_int(core::Operand{3, 1}) != 0) {
+        std::fprintf(stderr, "0x1a1 recode mismatch (%d vs %d)\n",
+                     load_machine.read_int(core::Operand{3, 0}), expected);
+        return false;
+    }
+    auto load_missing = make_script_with_body();
+    emit_instruction(load_missing, 0x1A1, {{3, 1}, {0, 5}});
+    emit_instruction(load_missing, 2, {});
+    FakeSaveHost load_missing_host;
+    core::Machine load_missing_machine(0x12345678u, table);
+    load_missing_machine.set_save_host(&load_missing_host);
+    load_missing_machine.load_root(load_missing);
+    if (!load_missing_machine.step() || load_missing_machine.read_int(core::Operand{3, 1}) != 1) {
+        std::fprintf(stderr, "0x1a1 missing-file status mismatch\n");
+        return false;
+    }
+
+    // 0x1ab：两个文件都尝试；后一步覆盖前一步（都失败 ⇒ 2）。
+    auto remove_script = make_script_with_body();
+    emit_instruction(remove_script, 0x1AB, {{3, 0}, {0, 3}});
+    emit_instruction(remove_script, 2, {});
+    FakeSaveHost remove_host;
+    remove_host.files["SAVE\\SAVE03.DAT"] = {1u};
+    remove_host.files["SAVE\\SAVE03.STH"] = {2u};
+    core::Machine remove_machine(0x12345678u, table);
+    remove_machine.set_save_host(&remove_host);
+    remove_machine.load_root(remove_script);
+    if (!remove_machine.step() || remove_machine.read_int(core::Operand{3, 0}) != 0 ||
+        remove_host.files.count("SAVE\\SAVE03.DAT") != 0) {
+        std::fprintf(stderr, "0x1ab delete mismatch\n");
+        return false;
+    }
+    FakeSaveHost remove_fail_host;
+    remove_fail_host.files["SAVE\\SAVE03.DAT"] = {1u};
+    remove_fail_host.fail_dat_remove = true;
+    remove_fail_host.fail_sth_remove = true;
+    core::Machine remove_fail_machine(0x12345678u, table);
+    remove_fail_machine.set_save_host(&remove_fail_host);
+    remove_fail_machine.load_root(remove_script);
+    if (!remove_fail_machine.step() || remove_fail_machine.read_int(core::Operand{3, 0}) != 2 ||
+        remove_fail_host.count("remove:") != 2) {
+        std::fprintf(stderr, "0x1ab did not override status with the second file\n");
+        return false;
+    }
+
+    // 0x1ac：覆盖目标（不因已存在而失败）。
+    auto copy_script = make_script_with_body();
+    emit_instruction(copy_script, 0x1AC, {{3, 0}, {0, 4}, {0, 5}});
+    emit_instruction(copy_script, 2, {});
+    FakeSaveHost copy_host;
+    copy_host.files["SAVE\\SAVE04.DAT"] = {9u};
+    copy_host.files["SAVE\\SAVE04.STH"] = {7u};
+    copy_host.files["SAVE\\SAVE05.DAT"] = {1u};
+    core::Machine copy_machine(0x12345678u, table);
+    copy_machine.set_save_host(&copy_host);
+    copy_machine.load_root(copy_script);
+    if (!copy_machine.step() || copy_machine.read_int(core::Operand{3, 0}) != 0 ||
+        copy_host.files["SAVE\\SAVE05.DAT"] != core::Bytes{9u} ||
+        copy_host.files["SAVE\\SAVE05.STH"] != core::Bytes{7u}) {
+        std::fprintf(stderr, "0x1ac overwrite mismatch\n");
+        return false;
+    }
+
+    // 0x1ae：先建空文件、后捕捉；捕捉失败 ⇒ 2 且不删除。
+    auto thumb_write = make_script_with_body();
+    emit_instruction(thumb_write, 0x1AE, {{3, 0}, {0, 6}, {0, 3}});
+    emit_instruction(thumb_write, 2, {});
+    FakeSaveHost thumb_host;
+    core::SurfacePixels surface;
+    surface.width = 2;
+    surface.height = 2;
+    surface.bytes_per_pixel = 3;
+    surface.stride_bytes = 6;
+    surface.r_mask = 0x00FF0000u;
+    surface.g_mask = 0x0000FF00u;
+    surface.b_mask = 0x000000FFu;
+    // bottom-up：第 1 行 = 画面最后一行（蓝、绿）。
+    surface.pixels = {0, 0, 255, 0, 255, 0, 255, 0, 0, 0, 0, 255};
+    thumb_host.surface = surface;
+    core::Machine thumb_machine(0x12345678u, table);
+    thumb_machine.set_save_host(&thumb_host);
+    thumb_machine.load_root(thumb_write);
+    if (!thumb_machine.step() || thumb_machine.read_int(core::Operand{3, 0}) != 0) return false;
+    const auto bmp = thumb_host.files["SAVE\\SAVE06.STH"];
+    if (bmp.size() != 54u + 16u || bmp[0] != 'B' || bmp[1] != 'M' ||
+        (bmp[2] | (bmp[3] << 8)) != 16 + 40) {
+        std::fprintf(stderr, "0x1ae BMP header mismatch (size=%zu)\n", bmp.size());
+        return false;
+    }
+    FakeSaveHost thumb_fail_host;
+    thumb_fail_host.surface = std::nullopt;
+    core::Machine thumb_fail_machine(0x12345678u, table);
+    thumb_fail_machine.set_save_host(&thumb_fail_host);
+    thumb_fail_machine.load_root(thumb_write);
+    if (!thumb_fail_machine.step() || thumb_fail_machine.read_int(core::Operand{3, 0}) != 2 ||
+        thumb_fail_host.count("capture:") != 1 || thumb_fail_host.count("remove:") != 0) {
+        std::fprintf(stderr, "0x1ae capture-failure path mismatch\n");
+        return false;
+    }
+
+    // 0x1af：打不开优先于表面门（1 而不是 2）；0/1/2 被拒 ⇒ 2；合法 BMP ⇒ 0 + 纹理落地。
+    auto thumb_read = make_script_with_body();
+    emit_instruction(thumb_read, 0x1AF, {{3, 0}, {0, 6}, {0, 0}});
+    emit_instruction(thumb_read, 2, {});
+    FakeSaveHost read_missing_host;
+    core::Machine read_missing_machine(0x12345678u, table);
+    read_missing_machine.set_save_host(&read_missing_host);
+    read_missing_machine.load_root(thumb_read);
+    if (!read_missing_machine.step() || read_missing_machine.read_int(core::Operand{3, 0}) != 1) {
+        std::fprintf(stderr, "0x1af open-failure must win over the surface gate\n");
+        return false;
+    }
+    auto thumb_read_ok = make_script_with_body();
+    emit_instruction(thumb_read_ok, 0x1AF, {{3, 0}, {0, 6}, {0, 9}});
+    emit_instruction(thumb_read_ok, 2, {});
+    FakeSaveHost read_ok_host;
+    read_ok_host.files["SAVE\\SAVE06.STH"] = bmp;
+    core::Machine read_ok_machine(0x12345678u, table);
+    read_ok_machine.set_save_host(&read_ok_host);
+    read_ok_machine.load_root(thumb_read_ok);
+    if (!read_ok_machine.step() || read_ok_machine.read_int(core::Operand{3, 0}) != 0) {
+        std::fprintf(stderr, "0x1af decode mismatch\n");
+        return false;
+    }
+    const core::TextureRecord* decoded = read_ok_machine.texture(9);
+    if (decoded == nullptr || decoded->width != 2 || decoded->height != 2 ||
+        decoded->rgba.size() != 16 || decoded->rgba[0] != 255 || decoded->rgba[1] != 0 ||
+        decoded->rgba[2] != 0) {  // 画面第 1 行、左像素 = 红
+        std::fprintf(stderr, "0x1af texture landing mismatch\n");
         return false;
     }
     return true;
@@ -1811,10 +2969,18 @@ int main() {
             }
         }
 
+
         if (!check_menu_table(table)) return 1;
         if (!check_status_and_mode(table)) return 1;
         if (!check_run_bracket(table)) return 1;
         if (!check_input_dispatch(table)) return 1;
+        if (!check_input_devices(table)) return 1;
+        if (!check_pause_and_clock(table)) return 1;
+        if (!check_second_batch(table)) return 1;
+        if (!check_scene3d_setters(table)) return 1;
+        if (!check_memflip(table)) return 1;
+        if (!check_save_ops(table)) return 1;
+        if (!check_input_hold(table)) return 1;
         if (!check_mouse_and_hit_test(table)) return 1;
         if (!check_texture_size(table)) return 1;
         if (!check_exit_script(table)) return 1;

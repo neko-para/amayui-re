@@ -113,6 +113,16 @@ void Machine::op_20c(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_23c(const Instruction& instruction) {
+    (void)instruction;
+    // 无条件重盖引擎时钟对（`CORE-TIMING-CLOCK` 的第四个写者）：
+    // 「上一步」←「现在」、「现在」← 本次读数；★ 与 `0x20c` 的唯一差别是**没有区间忙门**，
+    // 与 `0x1f4` 的差别是不碰忙标记 / 嵌套计数。推进格数 = 1（step 已写）。
+    engine_previous_ms_ = engine_now_ms_;
+    engine_now_ms_ = scene_clock_ms_;
+    return;
+}
+
 void Machine::op_20d(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 渲染目标：<1000 纹理槽，>=1000 后缓冲

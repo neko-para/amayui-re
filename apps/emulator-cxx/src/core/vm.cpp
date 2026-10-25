@@ -39,6 +39,8 @@ Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install*
     : key_(int_key == 0 ? 1u : int_key), table_(table), install_(install), config_(std::move(config)) {
     // 主循环的渲染闸门：`set:DrawMode == 1` 才自动渲染。缺键按配置口径为 0（不自动渲染）。
     draw_mode_ = config_.get_int("set:DrawMode");
+    // 启动期登记：键非 0 才认为"备组已分配"（发行数据里该键恒 0 ⇒ 只有异常支可达）。
+    memflip_available_ = config_.get_int("set:EnableMemFlip") != 0;
 }
 
 void Machine::load_root(const Bytes& script, std::uint32_t script_id) {
@@ -51,6 +53,7 @@ void Machine::load_root(const Bytes& script, std::uint32_t script_id) {
     root.length_slot = 0;
     root.parent = -1;
     root.script_id = script_id;
+    root.local_depth = static_cast<std::int32_t>(script_id);  // 本帧的身份编号（本地块深度判据用）
     current_frame_ = 0;
     halted_ = false;
     scene_dirty_ = true;
@@ -85,9 +88,43 @@ void Machine::execute(const Instruction& instruction) {
         case 0x03: op_03(instruction); return;
         case 0x09: op_09(instruction); return;
         case 0x06: op_06(instruction); return;
+        case 0x08: op_08(instruction); return;
         case 0x6C: op_6c(instruction); return;
         case 0x2D8: op_2d8(instruction); return;
         case 0x61: op_61(instruction); return;
+        case 0x60: op_60(instruction); return;
+        case 0x63: op_63(instruction); return;
+        case 0x6D: op_6d(instruction); return;
+        case 0x74: op_74(instruction); return;
+        case 0x7B: op_7b(instruction); return;
+        case 0x7C: op_7c(instruction); return;
+        case 0x7F: op_7f(instruction); return;
+        case 0xD0: op_d0(instruction); return;
+        case 0x191: op_191(instruction); return;
+        case 0x199: op_199(instruction); return;
+        case 0x19A: op_19a(instruction); return;
+        case 0x1AD: op_1ad(instruction); return;
+        case 0x19E: op_19e(instruction); return;
+        case 0x1A0: op_1a0(instruction); return;
+        case 0x1A1: op_1a1(instruction); return;
+        case 0x1AB: op_1ab(instruction); return;
+        case 0x1AC: op_1ac(instruction); return;
+        case 0x1AE: op_1ae(instruction); return;
+        case 0x1AF: op_1af(instruction); return;
+        case 0x1B0: op_1b0(instruction); return;
+        case 0x1B6: op_1b6(instruction); return;
+        case 0x1B7: op_1b7(instruction); return;
+        case 0x1C7: op_1c7(instruction); return;
+        case 0x1CC: op_1cc(instruction); return;
+        case 0x218: op_218(instruction); return;
+        case 0x21A: op_21a(instruction); return;
+        case 0x21D: op_21d(instruction); return;
+        case 0x21E: op_21e(instruction); return;
+        case 0x21F: op_21f(instruction); return;
+        case 0x228: op_228(instruction); return;
+        case 0x2D0: op_2d0(instruction); return;
+        case 0x2D1: op_2d1(instruction); return;
+        case 0x2D3: op_2d3(instruction); return;
         case 0x12C: op_12c(instruction); return;
         case 0x64: op_64(instruction); return;
         case 0x10C: op_10c(instruction); return;
@@ -107,7 +144,12 @@ void Machine::execute(const Instruction& instruction) {
         case 0xCC: op_cc(instruction); return;
         case 0xCD: op_cd(instruction); return;
         case 0xFB: op_fb(instruction); return;
+        case 0xFC: op_fc(instruction); return;
         case 0xFF: op_ff(instruction); return;
+        case 0x102: op_102(instruction); return;
+        case 0x103: op_103(instruction); return;
+        case 0x104: op_104(instruction); return;
+        case 0x105: op_105(instruction); return;
         case 0x100: op_100(instruction); return;
         case 0x12E: op_12e(instruction); return;
         case 0x2FC: op_2fc(instruction); return;
@@ -120,6 +162,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x20B: op_20b(instruction); return;
         case 0x208: op_208(instruction); return;
         case 0x20C: op_20c(instruction); return;
+        case 0x23C: op_23c(instruction); return;
         case 0x20D: op_20d(instruction); return;
         case 0x33F: op_33f(instruction); return;
         case 0x204: op_204(instruction); return;
@@ -240,14 +283,16 @@ void Machine::execute(const Instruction& instruction) {
 
 bool Machine::step() {
     if (halted_) return false;
-    // 每次迭代先读一次时钟、推进场景：颜色窗在门之前推进（`CORE-TIMING-WINDOW`）。
-    advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16);
+    // 每次迭代先读一次时钟并写进场景；**暂停**（区间忙标记 = 1 且等待位 = 0）时只更新时间戳，
+    // 场景推进 / 影片逐槽计时 / 门前渲染步都整段跳过（`CORE-VM-LOOP`：暂停就是区间忙标记，同一格）。
+    const bool paused = driven_elsewhere_ && (state_flags_ & (1u << 10)) == 0;
+    advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16, !paused);
     // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：新帧会置脏，所以必须在门前那次渲染判定之前。
-    service_movies();
+    if (!paused) service_movies();
     // 门前渲染：主循环闸门（0x412739–0x4127E2）先要求
     // `(0x21B != 0) || (状态字 & 0x2400)`，脏只是更内层条件。
     const bool render_gate = scalar_21b_ != 0 || (state_flags_ & (0x400u | 0x2000u)) != 0;
-    if (draw_mode_ == 1 && render_gate && (state_flags_ & (1u << 24)) == 0 &&
+    if (!paused && draw_mode_ == 1 && render_gate && (state_flags_ & (1u << 24)) == 0 &&
         (scene_dirty_ || scene_animating_ || command_animating_)) {
         frame_step_requested_ = true;
     }
@@ -263,6 +308,33 @@ bool Machine::step() {
         }
         // 等待位：放行看「场景有动画」，不是"表里还有没有未到期的窗"。
         if ((state_flags_ & (1u << 10)) != 0 && !scene_animating_) state_flags_ &= ~(1u << 10);
+        // 位 0 / 10 / 13 有服务分支；其余位**没有**（规范只登记存在；第 30 位按规范「启用后门恒关」）。
+        // ★ 连续撞到"没有分支的位"时给一个明确诊断与停因：否则外面只看到"停在原地 + 烧步数"，
+        //   与"在等输入"完全分不开。这不是引擎语义，是观测。
+        constexpr std::uint32_t kServicedGateBits = (1u << 0) | (1u << 10) | (1u << 13);
+        if ((state_flags_ & kServicedGateBits) == 0) {
+            gate_stall_steps_ += 1;
+            if (!gate_stall_reported_) {
+                gate_stall_reported_ = true;
+                char buffer[64];
+                std::snprintf(buffer, sizeof(buffer), "gate-bit-unserviced:0x%X",
+                              static_cast<unsigned>(state_flags_));
+                report_error(buffer);
+            }
+            constexpr std::size_t kGateStallLimit = 10000;
+            if (gate_stall_steps_ >= kGateStallLimit) {
+                char buffer[96];
+                std::snprintf(buffer, sizeof(buffer), "gate-stalled:0x%X",
+                              static_cast<unsigned>(state_flags_));
+                halted_ = true;
+                stop_.reason = StopReason::GateStalled;
+                stop_.offset = frame_mut().ip;
+                stop_.message = buffer;
+                return false;
+            }
+        } else {
+            gate_stall_steps_ = 0;
+        }
         return true;
     }
     Frame& f = frame_mut();

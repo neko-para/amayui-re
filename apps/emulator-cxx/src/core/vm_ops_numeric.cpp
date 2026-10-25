@@ -230,6 +230,115 @@ void Machine::op_55(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_1b0(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 池拷贝（CORE-OPS-POOL-MEMCPY）：读序 n → 源址 → 目标址；复制的是**池里的编码位模式**。
+    const auto count = read_int(ops[2]);
+    const auto source = address_of_operand(ops[0]);
+    const auto target = address_of_operand(ops[1]);
+    for (std::int32_t i = 0; i < count; ++i) {
+        const auto offset = 4u * static_cast<std::uint32_t>(i);
+        store_raw(target + offset, read_raw(source + offset));  // 不解码、不再编码
+    }
+    return;
+}
+
+void Machine::op_191(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 浮点绝对值（CORE-OPS-FLOAT-ABS）：读浮点(op2) → |·| → 写浮点(op1)；−0.0 ⇒ +0.0。
+    write_float(ops[0], std::abs(read_float(ops[1])));
+    return;
+}
+
+void Machine::op_2d0(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 浮点加（CORE-OPS-SCALAR-FLOAT-ARITH）：读序 3 → 2。
+    const auto b = read_float(ops[2]);
+    const auto a = read_float(ops[1]);
+    write_float(ops[0], a + b);
+    return;
+}
+
+void Machine::op_2d1(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 浮点减：第 2 − 第 3（不是反的）；读序 2 → 3。
+    const auto a = read_float(ops[1]);
+    const auto b = read_float(ops[2]);
+    write_float(ops[0], a - b);
+    return;
+}
+
+void Machine::op_2d3(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 浮点除：第 2 ÷ 第 3；除数 0 **不检查**（按 IEEE 得 inf / nan，不抛）。
+    const auto a = read_float(ops[1]);
+    const auto b = read_float(ops[2]);
+    write_float(ops[0], a / b);
+    return;
+}
+
+void Machine::op_d0(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 时钟（CORE-OPS-CLOCK-D0）：把本迭代的宿主毫秒读数按整型写出（32 位、会回绕）。
+    write_int(ops[0], as_i32(scene_clock_ms_));
+    return;
+}
+
+void Machine::op_74(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 参数格写（CORE-OPS-PARAM-74-7F）：原样，不归一、不夹取。
+    param_cell_ = read_int(ops[0]);
+    return;
+}
+
+void Machine::op_7f(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 参数格读：初值没有观察 ⇒ 没写过就**响亮失败**（⛔ 不伪造 0）。
+    if (!param_cell_) throw CoreError("param-cell-uninitialized");
+    write_int(ops[0], *param_cell_);
+    return;
+}
+
+void Machine::op_60(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 随机（CORE-OPS-RANDOM-60）：读序 计数器 → 随机数 → 范围 → 落点。
+    random_counter_ += 1;
+    if (random_counter_ > 12) random_counter_ = 0;
+    const auto bits = next_random();           // 非负（规范：被除数非负 ⇒ 余数非负）
+    random_last_ = as_i32(bits);
+    const auto range = read_int(ops[1]);
+    random_range_ = range;
+    if (range == 0) {
+        write_int(ops[0], 0);                  // 先写 0，再抛
+        throw CoreError("display-message:random-range-zero");
+    }
+    write_int(ops[0], as_i32(bits) % range);   // 有符号余数（被除数非负）
+    return;
+}
+
+void Machine::op_6d(const Instruction& instruction) {
+    (void)instruction;
+    // 池翻页（SPC-POOL-MEMFLIP）：把六个全局族的主 / 备选择**整体对调**（不搬数据、不重分配）。
+    // 配置键在**执行期**再读一次（启动期那次只决定备组是否"已登记"）。
+    if (config_.get_int("set:EnableMemFlip") == 0) {
+        // 发行数据把该键显式置 0 ⇒ 本作的翻页指令恒走异常支。
+        throw CoreError("display-message:memflip-unavailable");
+    }
+    global_flip_ ^= 1u;
+    return;
+}
+
+void Machine::op_63(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // lea（CORE-OPS-POOL-LEA-63）：先取址(op2)，再校验 op1 是引用族，最后把**地址本身**写进引用槽。
+    const auto address = address_of_operand(ops[1]);
+    if (!is_pointer_tag(ops[0].type)) {
+        throw CoreError("lea-destination-not-reference-tag:" + std::to_string(ops[0].type));
+    }
+    write_pointer(ops[0], address);  // 不编码
+    return;
+}
+
 void Machine::op_1ce(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 乱数启用（CORE-OPS-RNG-ENABLE）：开关值只读、不归一、不夹取。

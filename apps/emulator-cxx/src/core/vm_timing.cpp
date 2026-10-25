@@ -8,9 +8,10 @@
 
 namespace core {
 
-void Machine::advance_scene(std::uint32_t now_ms) {
+void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
     scene_previous_ms_ = scene_clock_ms_;
     scene_clock_ms_ = now_ms;
+    if (!advance_windows) return;  // 暂停：只更新时间戳，不推进任何窗（`CORE-VM-LOOP`）
     scene_animating_ = false;
 
     // 共享推进：盖章 → 延迟内 / 推进中 → 到期收尾（`CORE-TIMING-WINDOW`）。

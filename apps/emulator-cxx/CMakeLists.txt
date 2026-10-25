@@ -45,6 +45,8 @@ add_library(emulator-core STATIC
     src/core/vm_ops_scene.cpp
     src/core/vm_ops_render.cpp
     src/core/vm_ops_engine.cpp
+    src/core/vm_ops_save.cpp
+    src/core/save_bmp.cpp
     src/core/vm_ops_numeric.cpp
     src/core/vm_ops_text.cpp
     src/core/vm_ops_io.cpp
@@ -78,6 +80,13 @@ add_test(NAME emulator-cxx-smoke COMMAND emulator-cxx --smoke)
 add_executable(emulator-core-selftest
     tests/core_selftest.cpp)
 target_link_libraries(emulator-core-selftest PRIVATE emulator-core)
+# 自检脚本把十几台 `Machine` 放在同一个栈帧里（Debug /Od 不复用栈槽）；
+# 默认 1 MiB 栈在夹具变多之后会撞上（0xC00000FD）。这是**测试**的显式预算，不是产品设置。
+if(WIN32)
+    target_link_options(emulator-core-selftest PRIVATE "/STACK:8388608")
+else()
+    target_link_options(emulator-core-selftest PRIVATE "-Wl,-z,stack-size=8388608")
+endif()
 add_test(NAME emulator-core-selftest COMMAND emulator-core-selftest)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")

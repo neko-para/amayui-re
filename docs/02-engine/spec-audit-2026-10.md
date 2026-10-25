@@ -1777,3 +1777,77 @@ n < 10 走注入的 `sleepHost`；`SLEEP_BIT` 服务分支按 `now >= sleepUntil
 3. `0x23c` 什么时候成篇？它刷新场景时钟的语义决定「同一对」还有没有第四个写者要进合同。
 4. C++ 侧：接上输入后端之后，`0xff` / `0x100` / `0x2fc` 的三条非零支是否仍与规范一致（现在只有注入点 + 单测）。
 
+
+## 六十五、第三十一批（续）：残差收口 + 键盘鼠标接入 + 第二批 24 条指令（2026-10-26）
+
+**范围**（按用户排序）：① 残差取证并落 spec；② emulator-cxx 接键盘 + 鼠标（**不接摇杆**）；③ 第二批 24 条指令 + 暂停门 + `0x23c`。
+
+**取证**（两份独立只读 subagent，结论互相印证）：
+- 「暂停」读点 `0x4124a0` / `0x4127bb` / `0x4125d2` / `0x4129ee` / `0x412b7c`，写点 `0x41a0bd` / `0x41a11a` ⇒ **暂停 = 区间忙标记**（同一格），条件是「忙 = 1 且**等待位 = 0**」（原正文写反）。
+- `0x20c` 的忙门 `0x41a1bb` 读**同一格** ⇒ 「别处驱动」是误命名；**区间内它不重盖**时钟对。
+- 「本帧场景时刻」= **活格**（`0x4b0876` / `0x4b08db` / 帧差 `0x49ccd5` / `0x4a08ba`），不是迭代头快照。
+- 「上一步」格的读者：`0x49c941` / `0x49ccdd` / `0x49dc07` / `0x4a08ba`（4 处）。
+- `0x23c` = `sub_41A2C0`：**无条件**重盖时钟对（`0x41a2db` / `0x41a2e7` / `0x41a2ed`），无忙门，未成篇。
+
+**spec 处置**（只由 subagent 落，data/spec/ 5 文件 / +29 −57）：`70-vm.md` 的暂停开关与 `:12/:19` 术语、`60-ops-render.md` 的 `0x20c` 忙门口径与「自己那次渲染步读覆盖后的值」、`60-ops-scene.md` 的「本帧场景时刻 = 活格」定义 + 可证伪判据、CORE-TIMING-CLOCK 写者清单补 `0x23c`；`audit.json` **删 6 条已答残差**（`RES-OPS-BRACKET-STAMPS` / `-STAMP-PAIR` / `RES-RENDER-STEP-TIMESTAMPS` / `-SCENE-NOW` / `-DRIVER` / `RES-VM-PAUSE`）、`RES-MOVIE-PAUSE` 收窄、新增 2 条 falsifier；`bindings.json` 追加 `0x4124a0` / `0x4127bb` 两个站点。
+**门禁**：`pnpm tools spec validate` 13/13 · `spec report` 未登记 0 · `spec.test.mjs` 27/0。
+
+**代码（C++）**：
+- 输入：`vm.h` 平台注入点（光标 / 按钮 / 键采样 / 事件队列 / 随机源）；`op_109` / `op_108` / `op_cc` / `op_cd`（时间闸 `elapsed >= interval` 含等号、深度校验 = 本帧号、目标 −1 撤销）；`window.cpp` 的 `kKeyBits` **宿主键位表** + SDL 键盘 / 鼠标 → 输入字 / 客户区光标 / 按钮位图 / 事件队列。**不接摇杆**。
+- 主循环：`paused = 区间忙 && 等待位 == 0` ⇒ 只更新时间戳、不推进窗、不服务影片、不发门前渲染请求；`advance_scene(now, advance_windows)`。
+- 门：撞到**没有服务分支**的位 ⇒ 一次性诊断 `gate-bit-unserviced:0x…`；连续 10000 迭代 ⇒ `StopReason::GateStalled`（只做观测，不改语义）。
+- 24 条指令：`0x008/0x07B/0x07C/0x199` · `0x19A/0x1B6/0x1B7/0x1C7/0x1CC/0x1AD` · `0x060/0x063/0x074/0x07F/0x0D0/0x191/0x1B0/0x2D0/0x2D1/0x2D3` · `0x218/0x21A/0x228/0x21D`。
+
+**实证**：`ctest` 5/5 · `core-selftest` 全绿（新增 `check_input_devices` / `check_pause_and_clock` / `check_second_batch`）· `--footprint --max-steps 500000` 仍进 `21092`（115 个 opcode）· `pnpm test` 1071/0 · 分派守卫 2/2。
+
+**未做**：剩余 15 条（按住派发族 5 / 场景 setter 2 / memflip 1 / 存档族 7）—— 已在需求树开单；摇杆不在范围。
+
+**下次 review 要问什么**
+1. `0x21E` / `0x21F` 的落点什么时候收敛到 `0x1FD/1FE/1FF` 的同一条记录（G3 是同一格）？
+2. `0x6D` 的两组 bank 形状（会波及 `read_int` / `write_int` / `read_raw` / `store_raw` / `op_09`）什么时候做？
+3. 存档族的 IO 边界（`SaveHost`）怎么划：核心只定义接口、宿主注入？
+4. `GateStalled` 的 10000 迭代阈值是不是合适的观测口径（还是应停在门上不动、只记诊断）？
+
+**复审（独立 subagent，只读 data/spec/）**：指出 6 条 + 1 个真缺口 —— 70-vm.md:91 的「逐槽计时 vs 扫描未定」自相矛盾、:198 三个→四个、:13 的「时间戳」已被 60-ops-render.md:181 写定、60-ops-render.md:182 把未取证判据写成触发条件、:125 两处悬空（其余写者 / 0x23c）、falsifier 归属错；缺口 = **暂停 × 已置影片位**（影片位让门保持非 0，而该位服务在暂停时被挡 ⇒ 区间内启动影片可能让 0x1f5 永远不可执行）。7 条均已落：新增残差 `RES-CLOCK-WRITERS` 与 `RES-VM-PAUSE-MOVIE-BIT`（各带具体 next）、falsifier 挪到 `CORE-SCENE-DRAW-ORDER`、其余按最小改。★ 这两条新残差**只在 audit**（`CORE-TIMING-CLOCK` / `CORE-VM-LOOP` 正文没有「残差」小节），`:125` 有指向 `RES-CLOCK-WRITERS` 的指针。
+
+## 六十六、第三十一批（续二）：3D setter + 按住派发族（2026-10-26）
+
+**范围**：接着 ③ 补指令。本段落了 7 条，全部按 spec 正文（`60-ops-scene.md` / `60-ops-input.md`）实现，参考实现只作旁证。
+
+**3D setter（`0x21E` / `0x21F`）**
+- 记录「已存在」位（`flags` 位 0，唯一生产者 `0x1fb`）为 0 ⇒ **只建记录、一个字段都不写**；为 1 ⇒ 置「有窗」位、`config_g3 ← 1`、窗起点清 0、两格 / 矩阵 / 轴角。
+- `0x21E` 三个浮点**÷100**（百分数）；`0x21F` 角度按**度**原样另存、矩阵按 π/180 换算。
+- ★ 旋转矩阵的元素布局 / 轴归一化**规范未成篇** ⇒ 实现选择（hypot 归一化 + Rodrigues + 行主序）已写进注释，守卫只断言不变量（`rot[5] ≈ cos 90° = 0`、`rot[10] ≈ 1`、`rot[1] ≈ −1`）。
+- 新增 `DrawItem` 具名字段（`config_g3` / 两格 / 两个 4×4 矩阵 / 轴角）与 `draw_item_or_create`（**建记录那一步标脏**）。
+
+**按住派发族（`0xFC` / `0x102` / `0x103` / `0x104` / `0x105`）**
+- `Frame::hold_slots`（键号 × 10 + 槽号 → 位置，−1 = 未登记；**64 位键**避免游标越界时的有符号溢出）。
+- 引擎级三格：`hold_mask_` / `hold_modulus_` / `hold_context_key_`（初值 0 / 0 / −1）+ `hold_cursor_by_slot_`（按**帧槽号**索引、`nullopt` = 引擎不建立初值）。
+- `0x104`：反向取最高置位（`limit ≤ 0` 不扫描 ⇒ 编号 = 键总数）→ 上下文闸（**只比编号**）→ 掩码命中则把扫描上限夹到该键号且**未登记也不回滚** → 查表（缺格 / −1 都算未登记、撤销返回点）→ **每条出口**都 `advance_hold_cursor()`（先 32 位回绕再取余；模数 0 / `INT_MIN % -1` 都响亮失败）。
+- 自检里两条**踩过的坑**：`0xff` 会清输入字 ⇒ 输入字必须在它之后设；`jump_to` 目标必须在代码区内（越界抛 `jump-out-of-code`，所以夹具目标点要留够 no-op）。
+
+**测试栈**：`core-selftest` 现在把二十多台 `Machine` 放进同一栈帧（Debug /Od 不复用栈槽）会撞 1 MiB ⇒ `CMakeLists` 对**测试**显式给 `/STACK:8388608`（注释写明"不是产品设置"）。
+
+**门禁**：`ctest` 5/5 · `core-selftest` PASS（新增 `check_scene3d_setters` / `check_input_hold`）· 分派守卫 2/2 · `pnpm test` 1071/0 · `pnpm test:mutation` 363/363 · `requirements validate` 6/6 · `--footprint` 仍进 `21092`（115 opcode）。
+
+**还剩**：`0x6D`（memflip：要改池表形状与 `pool_base`/`resolve_address`，波及 `read_*`/`store_raw`/`op_09`）+ 存档族 7 条（要 `SaveHost` 宿主 IO 边界）。
+## 六十七、第三十一批（续三）：池翻页 + 存档族 7 条 —— 过滤条件内**缺失指令归零**（2026-10-26）
+
+**范围**：`0x6D`（memflip）+ 存档族 7 条（`0x19E/0x1A0/0x1A1/0x1AB/0x1AC/0x1AE/0x1AF`）。对照 `apps/emulator-new` 的 `HANDLERS` 表机械核对：**missing = 0**（202 条 JS handler ↔ 203 个 C++ case）。
+
+**池翻页（`0x6D`）**
+- 六个全局族两组 bank：地址 `0x10000000 + bank*0x18000000 + (tag-3)*0x04000000`（一组 6 × 0x04000000，两组正好铺到局部池起点）。
+- 存储共用一张表、**键带 bank**（`bank_key`）；`resolve_address` 解出 bank 并把 bank 编进键 ⇒ 所有按地址的裸访问自动落对组；`0x09` 只清当前 bank。
+- 执行期再读一次 `set:EnableMemFlip`；发行数据置 0 ⇒ 只有异常支。备组未登记时落到备组窗口的裸访问**响亮失败**。
+
+**存档族（7 条）**（证据侧由 subagent 逐条给：spec 正文 + `.lst` 的 EA；并纠正了两处命名与三处参考实现偏差）
+- `core/save_host.h`：`SaveHost` 抽象 —— **三态读**（打不开 ≠ 读失败）、CREATE_ALWAYS 写、DeleteFileA 语义删、CopyFile 覆盖拷、确认框、表面捕捉。核心不碰文件系统。
+- `core/save_bmp.{h,cpp}`：`.STH` 的 BMP 容器（写 24 位 / 声明长度 = 像素 + 40 / 行自下而上 / BGR / 行末填充 0；读位深 ∈ {1,4,8,24,32} + 调色板 + 行翻正 + 短读 false）。
+- `core/vm_ops_save.cpp`：7 个 handler + 目录 / 文件名拼法（`SAVE%2.2d`）+ 头校验（本族魔数 + 标题，星期 / 毫秒跳过）+ 整池重编码（计数格 + 1 格，**对存储位再 ENC**）。
+- 三条照 spec、**没照参考实现**的口径：`0x19e` 成功 = **0**；`0x1a1` 打开成功后**无条件**重编码且**成功不写 op1**；`0x1af` **打不开优先于表面门**（缺文件 + 目标 0 ⇒ 1，不是 2）。
+
+**自检**：`core_selftest` 新增 `check_memflip` / `check_save_ops`（内存 `FakeSaveHost`，含「不删除捕获失败的半截 `.STH`」「`0x1a1` 的 ENC 可观察」等**会红**判据）。
+
+**门禁**：`ctest` 5/5 · `core-selftest` PASS · 分派守卫 2/2 · `pnpm test` 1071/0 · `pnpm test:mutation` 363/363 · `spec validate` 13/13（未登记 0）· `requirements validate` 6/6 · `--footprint` 仍进 `21092`（115 opcode）。
+
+**结论**：排除 audio / text-subsystem / live2d 之后，**"按名字到 TITLE 路径用到 + 参考实现有 handler"的缺失指令集合为空**。剩下的都是**未成篇的语义**（成篇归各自 gap 单），不是"没接上的 handler"。

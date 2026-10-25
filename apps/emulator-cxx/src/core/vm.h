@@ -11,11 +11,16 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace core {
+
+// 存档族的宿主边界与头部结构（定义见 `core/save_host.h`）。
+class SaveHost;
+struct SaveHeader;
 
 // 「无颜色」哨兵（机器细节；与 `CORE-TIMING-WINDOW` / 场景族共用这一口径）。
 inline constexpr std::uint32_t kNoColor = 0xFFFFFFFFu;
@@ -38,9 +43,19 @@ struct Frame {
     std::unordered_map<std::uint32_t, std::string> local_string;
     std::unordered_map<std::int32_t, std::int32_t> key_jumps;
     std::int32_t key_cursor = 0;
-    // 按键扫描上限（`0xff` 写、`0x104` 读；本版只有写者）：采样时的键总数快照。
+    // 按键扫描上限（`0xff` 写、`0x100` / `0x104` 读）：采样时的键总数快照；`0x104` 还会把它夹到被掩码命中的键号。
     // ★ 与 `Machine::key_total_` **不是同一格**：`0x100` 的扫描上界是键总数本身（`CORE-INPUT-KEY-DISPATCH`）。
     std::int32_t key_limit = 0;
+    // 进入本地块的两个目标位置（`0x7b` 写、`0x199` 读；初值 −1 = 未登记）。
+    std::int32_t local_main = -1;
+    std::int32_t local_sub = -1;
+    // 本帧记录里的**身份编号**（= 该帧所跑脚本的统一文件 id）；`0x199` / `0x7c` 的深度判据比它。
+    // ★ 不是帧号、不是调用层数。
+    std::int32_t local_depth = -1;
+    // `0x102` 的**按住派发表**：键号 × 10 + 槽号 → 目标位置（dword 下标；−1 = 未登记）。
+    // ★ 按帧分层、每（帧 × 键）固定 10 槽；⛔ 不与 key_jumps 合表。
+    // ★ 键用 64 位算：槽号 = 按住游标，而模数**不做范围检查** ⇒ 32 位算会溢出（UB）。
+    std::unordered_map<std::int64_t, std::int32_t> hold_slots;
 };
 
 enum class StopReason {
@@ -51,6 +66,9 @@ enum class StopReason {
     StepLimit,
     StoppedAtOpcode,
     ScriptReached,
+    // 门一直关着，且挡门的位没有任何服务分支（规范：其余位只登记存在；第 30 位启用后门恒关）。
+    // ★ 这是**观测**结论，不是引擎语义：引擎表现为"停在门上"，外面看不出与"等输入"的区别。
+    GateStalled,
     Error,
 };
 
@@ -105,6 +123,17 @@ struct DrawItem {
     std::int32_t rect_step_total = 0;
     std::int32_t rect_row_steps = 0;
     std::int32_t rect_switch = 0;
+    // 3D setter 族（`0x21e` / `0x21f`）**自己的**格与矩阵。
+    // ★ 与 `0x1fd/1fe/1ff` 写的那组（`SceneRecord::scale/rotate_*`）不是同一组（规范明文不同矩阵）。
+    std::int32_t config_g3 = 0;
+    std::int32_t set21e_int0 = 0;
+    std::int32_t set21e_int1 = 0;
+    std::array<float, 16> set21e_scale{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::int32_t set21f_int0 = 0;
+    std::int32_t set21f_int1 = 0;
+    float set21f_axis[3]{};
+    float set21f_degrees = 0.0f;
+    std::array<float, 16> set21f_rot{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 };
 
 struct SceneRecord {
@@ -113,6 +142,9 @@ struct SceneRecord {
     float rotate_axis[3]{};
     float rotate_degrees = 0.0f;
     std::uint32_t color = 0xFFFFFFFFu;
+    // 两个三元向量（`0x218` / `0x21a` 读；`0x217` / `0x219` 写，后者本版未实现）。
+    float vec1[3]{};
+    float vec2[3]{};
 };
 
 // 影片对象（对象表的一格）：引擎状态 + 播放后端句柄（平台边界，核心不解释其形状）。
@@ -261,6 +293,18 @@ public:
     };
     using MouseEventSource = std::function<bool(MouseEvent&)>;
     void set_mouse_event_source(MouseEventSource source) { mouse_event_source_ = std::move(source); }
+    // 平台光标位置（`0x109` 的 `CORE-INPUT-MOUSE-POS`）：返回 false = 设备不可用（写 −100000）。
+    // 坐标是**客户区**坐标，映射属平台边界。
+    using CursorSource = std::function<bool(std::int32_t& x, std::int32_t& y)>;
+    void set_cursor_source(CursorSource source) { cursor_source_ = std::move(source); }
+    // 平台鼠标按钮位图（`0x108` 的 `CORE-INPUT-MOUSE-BUTTON`）：返回 false = 设备不可用（写 0）。
+    // 位 0 左 / 位 1 右（左右交换属平台）。
+    using MouseButtonSource = std::function<bool(std::int32_t& mask)>;
+    void set_mouse_button_source(MouseButtonSource source) { mouse_button_source_ = std::move(source); }
+    // 宿主随机源（`0x60` 的 `CORE-OPS-RANDOM-60`）：缺省是确定性 LCG（同种子同序列）。
+    // ★ 返回值按**非负**使用（规范：被除数非负 ⇒ 余数非负）。
+    using RandomSource = std::function<std::uint32_t()>;
+    void set_random_source(RandomSource source) { random_source_ = std::move(source); }
     std::uint32_t scene_clock_ms() const { return scene_clock_ms_; }
     std::uint32_t scene_previous_ms() const { return scene_previous_ms_; }
     std::uint32_t engine_now_ms() const { return engine_now_ms_; }
@@ -278,7 +322,9 @@ public:
         scene_previous_ms_ = now_ms;
     }
     // 场景推进：盖章 / 插值 / 到期（`CORE-TIMING-WINDOW`）。step() 在门之前调用它。
-    void advance_scene(std::uint32_t now_ms);
+    // ★ `advance_windows = false` = 只更新场景时钟（迭代头读数），**不推进窗** —— 这是
+    //   「暂停」时主循环的行为（`CORE-VM-LOOP`：区间忙标记 = 1 且等待位 = 0 ⇒ 场景推进整段跳过）。
+    void advance_scene(std::uint32_t now_ms, bool advance_windows = true);
     // 0x20C 的帧步进请求：由渲染步消费。
     bool frame_step_requested() const { return frame_step_requested_; }
     void request_render() { frame_step_requested_ = true; }
@@ -377,6 +423,60 @@ public:
     // 执行区间（`CORE-OPS-RUN-BRACKET`）：忙标记与 `0x20c` 的「别处驱动」是同一格。
     bool bracket_busy() const { return driven_elsewhere_; }
     std::int32_t bracket_depth() const { return bracket_depth_; }
+    // 鼠标回调（`0xcc` / `0xcd` 的 `CORE-INPUT-MOUSE-CALLBACK-PUMP`）。
+    std::int32_t mouse_interval() const { return mouse_interval_; }
+    std::int32_t mouse_target() const { return mouse_target_; }
+    std::int32_t mouse_depth() const { return mouse_depth_; }
+    std::uint32_t mouse_last_ms() const { return mouse_last_ms_; }
+    // 本地块（`0x7b` / `0x199` / `0x7c`）：存档字 / 存档位置 / 入块深度。
+    std::uint32_t local_save_word() const { return local_save_word_; }
+    std::uint32_t local_save_pos() const { return local_save_pos_; }
+    std::int32_t local_save_depth() const { return local_save_depth_; }
+    // 三个互不相同的格（⛔ 不要合并）：`0x19a` 的 X 格 / `0x1b6`+`0x1b7` 的 Y 格 / `0x1cc` 的状态格。
+    std::int32_t flag_x() const { return flag_x_; }
+    std::int32_t flag_y() const { return flag_y_; }
+    std::int32_t status_cell() const { return status_cell_; }
+    // 当前层号（本版没有观察到的写者 ⇒ 恒 0）与 `0x1ad` 写的那一格（复位值 −1）。
+    std::int32_t current_layer() const { return current_layer_; }
+    std::int32_t layer_cell() const { return layer_cell_; }
+    // 参数格（`0x74` 写 / `0x7f` 读）：没写过 ⇒ nullopt（规范：初值没有观察）。
+    const std::optional<std::int32_t>& param_cell() const { return param_cell_; }
+    // 随机族（`0x60`）：计数器 0..12 / 上一次随机数 / 上一次范围（后两个无读者，规范明说）。
+    std::int32_t random_counter() const { return random_counter_; }
+    std::int32_t random_last() const { return random_last_; }
+    std::int32_t random_range() const { return random_range_; }
+    // 按住派发族（`0x102`..`0x105` / `0xfc`）：掩码 / 模数 / 上下文编号 / 按住游标（按帧槽号）。
+    std::uint32_t hold_mask() const { return hold_mask_; }
+    std::int32_t hold_modulus() const { return hold_modulus_; }
+    std::int32_t hold_context_key() const { return hold_context_key_; }
+    const std::optional<std::int32_t>& hold_cursor() const { return hold_cursor_by_slot_[current_frame_]; }
+    const std::optional<std::int32_t>& hold_cursor(std::size_t slot) const {
+        return hold_cursor_by_slot_[slot];
+    }
+    // ★ 测试脚手架（⛔ 不是平台边界，同 seed_mode_cells 的口径）：`0x103` 只清**当前帧槽**，
+    //   纯 selftest 没有切帧路径 ⇒ 「只清当前帧 / 0xfc 不清游标」只能靠播种别的槽来判。
+    void seed_hold_cursor(std::size_t slot, std::int32_t value) {
+        hold_cursor_by_slot_[slot] = value;
+    }
+    // 存档族的宿主注入（核心只定义接口，平台实现）。
+    void set_save_host(SaveHost* host) { save_host_ = host; }
+    // 头部校验用的两个引擎串（标题 / 族标识；族标识是数据 ⇒ 本作 `S4`）。
+    void set_save_identity(std::string title, std::string family) {
+        save_title_ = std::move(title);
+        save_family_ = std::move(family);
+    }
+    // `0x19e` 的写侧与 `0x1a1` 的 stage-2 都是**另几张单**的 seam；没注入就响亮失败。
+    void set_save_codec(std::function<Bytes(const Machine&)> builder,
+                        std::function<void(Machine&, const Bytes&)> loader) {
+        slot_builder_ = std::move(builder);
+        slot_loader_ = std::move(loader);
+    }
+    // 测试脚手架：全局整型池的「计数格」（`0x1a1` 的重编码范围 = 计数格 + 1 格）。
+    void seed_global_int_count(std::uint32_t count) { global_int_count_ = count; }
+    // 槽位 → 完整路径（宿主与测试共用同一套拼法；`thumbnail` 选 `.STH`）。
+    std::string save_path_for(std::int32_t slot, bool thumbnail) const {
+        return slot_path(save_directory(), slot, thumbnail);
+    }
     // ★ 测试脚手架（⛔ 不是平台边界）：这几格由引擎里本版未建模的路径写，
     //   没有脚本可达的写者 ⇒ 想让对应分支被测到，只能由测试播种。
     void seed_mode_cells(std::int32_t mode_c, std::int32_t mode_e, std::int32_t mode_f) {
@@ -409,6 +509,17 @@ private:
     // 把一帧写进同槽纹理（呈现层的像素效果，不在规范正文里）；写成功 ⇒ true。
     bool fill_movie_texture(std::uint32_t slot, const MovieFrame& frame);
     std::uint32_t address_of(const Operand& operand) const;
+    // 「取址」原语（`0x63` / `0x1b0` 共用）：值族 ⇒ 槽地址；引用族 6/7/8/12/13/14 ⇒ **它指向的地址**。
+    std::uint32_t address_of_operand(const Operand& operand) const;
+    static bool is_pointer_tag(std::uint32_t tag);
+    // 一次随机数（`0x60`）：注入源优先，否则确定性 LCG；返回**非负**值。
+    std::uint32_t next_random();
+    // 按编号取记录；**查不到就先建一条默认记录**（建记录那一步标脏，见 `CORE-OPS-SCENE3D-RECORD-LOOKUP`）。
+    DrawItem& draw_item_or_create(std::uint32_t key);
+    // `0x21e` 的缩放矩阵（百分数 ÷100 后进对角）与 `0x21f` 的旋转矩阵（度 → 弧度）。
+    // ★ 旋转矩阵的元素布局 / 轴归一化方式规范**未成篇** ⇒ 这里是一个**实现选择**（行主序 + Rodrigues）。
+    static std::array<float, 16> scale_matrix(double x, double y, double z);
+    static std::array<float, 16> rotate_matrix_deg(double ax, double ay, double az, double degrees);
     bool resolve_address(std::uint32_t address, std::uint32_t& tag, std::uint32_t& index) const;
     std::uint32_t read_pointer(const Operand& operand) const;
     void write_pointer(const Operand& operand, std::uint32_t address);
@@ -419,6 +530,13 @@ private:
     void write_int_at(std::uint32_t address, std::int32_t value);
     void write_float_at(std::uint32_t address, double value);
     std::uint32_t pool_base(std::uint32_t tag) const;
+    // 带 bank 的池基点：六个全局族的 bank 1 整体上移 0x18000000（一组 = 6 × 0x04000000）。
+    std::uint32_t pool_base(std::uint32_t tag, std::uint32_t bank) const;
+    // 全局槽的**存储键**：bank 1 的槽统一加 kBankKeyStride（两张 bank 共用同一张表）。
+    std::uint32_t bank_key(std::uint32_t index) const;
+    static constexpr std::uint32_t kBankKeyStride = 0x40000000u;
+    // `0x09` 只清**当前选中 bank** 的三个全局池（另一组保留）。
+    void clear_global_pool_bank();
     std::uint32_t script_int_key_index(const Operand& operand);
     void jump_to(std::uint32_t position);
     void push_return(std::uint32_t position);
@@ -430,9 +548,13 @@ private:
     void op_a0(const Instruction&);
     // 全局重置 / 执行区间（vm_ops_flow.cpp）
     void op_09(const Instruction&); void op_1f4(const Instruction&); void op_1f5(const Instruction&);
+    // 帧切换 / 本地块（vm_ops_flow.cpp）
+    void op_08(const Instruction&); void op_7b(const Instruction&); void op_7c(const Instruction&);
+    void op_199(const Instruction&);
     // 渲染入口（vm_ops_render.cpp）
     void op_23b(const Instruction&); void op_2da(const Instruction&); void op_20b(const Instruction&); void op_20c(const Instruction&);
     void op_20d(const Instruction&); void op_33f(const Instruction&); void op_204(const Instruction&);
+    void op_23c(const Instruction&);
     // 纹理 / 绘制项 / 网格（vm_ops_texture.cpp）
     void op_344(const Instruction&); void op_1ff(const Instruction&); void op_1fd(const Instruction&); void op_1fe(const Instruction&);
     void op_1f6(const Instruction&); void op_320(const Instruction&); void op_322(const Instruction&); void op_323(const Instruction&);
@@ -440,6 +562,12 @@ private:
     void op_1f7(const Instruction&); void op_1f8(const Instruction&); void op_1fa(const Instruction&); void op_1f9(const Instruction&);
     // 纹理尺寸查询（vm_ops_texture.cpp）
     void op_208(const Instruction&);
+    // 3D 记录取回（vm_ops_texture.cpp）：两个三元向量 + 平移分量
+    void op_218(const Instruction&); void op_21a(const Instruction&); void op_228(const Instruction&);
+    // 记录复制（vm_ops_texture.cpp）
+    void op_21d(const Instruction&);
+    // 3D setter 族（vm_ops_texture.cpp）
+    void op_21e(const Instruction&); void op_21f(const Instruction&);
     // 影片（vm_movie.cpp）
     void op_20f(const Instruction&);
     // 场景命令记录（vm_ops_scene.cpp）
@@ -458,6 +586,9 @@ private:
     void op_a1(const Instruction&); void op_a2(const Instruction&); void op_a3(const Instruction&);
     void op_d9(const Instruction&); void op_19b(const Instruction&); void op_19c(const Instruction&);
     void op_1bf(const Instruction&); void op_1cf(const Instruction&);
+    // 标志格 / 状态格 / 模式位读 / 层号（vm_ops_engine.cpp）
+    void op_19a(const Instruction&); void op_1b6(const Instruction&); void op_1b7(const Instruction&);
+    void op_1ad(const Instruction&); void op_1c7(const Instruction&); void op_1cc(const Instruction&);
     // 数值 / 数组（vm_ops_numeric.cpp）
     void op_6c(const Instruction&); void op_2d8(const Instruction&); void op_61(const Instruction&); void op_12c(const Instruction&);
     void op_64(const Instruction&); void op_10c(const Instruction&); void op_fe(const Instruction&); void op_107(const Instruction&);
@@ -469,6 +600,14 @@ private:
     void op_135(const Instruction&); void op_136(const Instruction&); void op_13f(const Instruction&); void op_55(const Instruction&);
     // 乱数启用（vm_ops_numeric.cpp）
     void op_1ce(const Instruction&);
+    // 池拷贝（vm_ops_numeric.cpp）
+    void op_1b0(const Instruction&);
+    // 池翻页（vm_ops_numeric.cpp）
+    void op_6d(const Instruction&);
+    // 浮点族 / 时钟 / 参数 / 随机 / lea（vm_ops_numeric.cpp）
+    void op_191(const Instruction&); void op_2d0(const Instruction&); void op_2d1(const Instruction&);
+    void op_2d3(const Instruction&); void op_d0(const Instruction&); void op_74(const Instruction&);
+    void op_7f(const Instruction&); void op_60(const Instruction&); void op_63(const Instruction&);
     // 字体与文本（vm_ops_text.cpp）
     void op_2ec(const Instruction&); void op_2eb(const Instruction&); void op_1a4(const Instruction&); void op_76(const Instruction&);
     void op_2bd(const Instruction&); void op_2de(const Instruction&); void op_192(const Instruction&); void op_1a9(const Instruction&);
@@ -481,6 +620,20 @@ private:
     void op_101(const Instruction&); void op_1a7(const Instruction&); void op_1a8(const Instruction&);
     // 输入采样 / 按键派发 / 命中查找 / 鼠标事件（vm_ops_io.cpp）
     void op_ff(const Instruction&); void op_100(const Instruction&); void op_12e(const Instruction&); void op_2fc(const Instruction&);
+    // 按住派发族（vm_ops_io.cpp）
+    void op_fc(const Instruction&); void op_102(const Instruction&); void op_103(const Instruction&);
+    void op_104(const Instruction&); void op_105(const Instruction&);
+    void advance_hold_cursor();  // `0x104` 的游标推进（三条出口共用）
+    // 存档族（vm_ops_save.cpp）
+    void op_19e(const Instruction&); void op_1a0(const Instruction&); void op_1a1(const Instruction&);
+    void op_1ab(const Instruction&); void op_1ac(const Instruction&); void op_1ae(const Instruction&);
+    void op_1af(const Instruction&);
+    std::string save_directory() const;
+    static std::string slot_path(const std::string& dir, std::int32_t slot, bool thumbnail);
+    bool parse_save_header(ByteSpan bytes, SaveHeader& header) const;
+    void require_save_host(const char* opcode) const;
+    void recode_global_int_pool();
+    void note_global_int_write(std::uint32_t index);
 
     void execute(const Instruction& instruction);
 
@@ -494,6 +647,10 @@ private:
     std::unordered_map<std::uint32_t, std::uint32_t> global_int_;
     std::unordered_map<std::uint32_t, float> global_float_;
     std::unordered_map<std::uint32_t, std::string> global_string_;
+    // 六个全局族的 bank 选择（`0x6d` 整体对调；0 = 主组、1 = 备组）。存储键由 `bank_key()` 平移。
+    std::uint32_t global_flip_ = 0;
+    // 启动期配置 `set:EnableMemFlip` 是否为非 0（决定备组是否"已登记"）。
+    bool memflip_available_ = false;
     std::unordered_map<std::uint32_t, std::uint32_t> ref_slots_;
     std::array<std::array<std::int32_t, 4>, 3> voice_engine_cells_{};
     std::array<std::int32_t, 3> voice_volumes_{};
@@ -524,6 +681,47 @@ private:
     std::int32_t rng_switch_ = 0;
     std::int32_t rng_enabled_ = 0;
     std::uint32_t rng_seed_ = 0;
+    // 本地块的存档（`0x199` 整字搬 + 置第 25/26 位；`0x7c` 读/清）。
+    std::uint32_t local_save_word_ = 0;
+    std::uint32_t local_save_pos_ = 0;
+    std::int32_t local_save_depth_ = 0;
+    // 本地块的四格与"待处理"标记：领域身份未取证、也没有脚本可达的写者 ⇒ 只有"清 0"这条合同。
+    std::int32_t local_cell_a_ = 0;
+    std::int32_t local_cell_b_ = 0;
+    std::int32_t local_cell_c_ = 0;
+    std::int32_t local_cell_d_ = 0;
+    std::int32_t local_pending_ = 0;
+    // 三个互不相同的格（`0x19a` / `0x1b6`+`0x1b7` / `0x1cc`）。
+    std::int32_t flag_x_ = 0;
+    std::int32_t flag_y_ = 0;
+    std::int32_t status_cell_ = 0;
+    // 按住派发族：掩码 / 模数 / 上下文编号（引擎级）+ 按住游标（引擎级数组、按**帧槽号**索引）。
+    // ★ 前三个是**合同初值**（启动路径写 0 / 0 / −1）；游标 nullopt = 引擎不建立初值（读到是 UB）。
+    std::uint32_t hold_mask_ = 0;
+    std::int32_t hold_modulus_ = 0;
+    std::int32_t hold_context_key_ = -1;
+    std::array<std::optional<std::int32_t>, kFrameCount> hold_cursor_by_slot_{};
+    // 层号：`current_layer_` 无观察到的写者（本版恒 0）；`layer_cell_` 的复位值是 **−1**。
+    std::int32_t current_layer_ = 0;
+    std::int32_t layer_cell_ = -1;
+    // 参数格（`0x74` / `0x7f`）：没写过 ⇒ nullopt（初值没有观察）。
+    std::optional<std::int32_t> param_cell_;
+    // 随机族（`0x60`）：计数器 / 上一次随机数 / 上一次范围 / 确定性 LCG 状态 / 注入源。
+    std::int32_t random_counter_ = 0;
+    std::int32_t random_last_ = 0;
+    std::int32_t random_range_ = 0;
+    std::uint32_t random_state_ = 0x12345678u;
+    RandomSource random_source_;
+    // ── 存档族（`0x19e`..`0x1af`） ──
+    SaveHost* save_host_ = nullptr;
+    std::function<Bytes(const Machine&)> slot_builder_;
+    std::function<void(Machine&, const Bytes&)> slot_loader_;
+    std::string save_title_;            // 头 +8 的标题串（来源未取证 ⇒ 空 = 不校验）
+    std::string save_family_ = "S4";    // 族标识 ⇒ 魔数 "S4SD"
+    // 全局整型池的「计数格」：`0x1a1` 的重编码范围 = 它 + 1 格（写入时维护成 max(index + 1)）。
+    std::uint32_t global_int_count_ = 0;
+    std::uint32_t save_file_version1_ = 0;  // 版本门通过后回填（`FMT-SAVE-ENVELOPE`，本批不建模）
+    std::uint32_t save_file_version2_ = 0;
     std::unordered_map<std::uint32_t, std::int32_t> forward_container_;
     std::array<ListRecord, 10> list_records_{};
     std::int32_t default_group_ = 1;
@@ -558,6 +756,9 @@ private:
     KeySampler key_sampler_;
     // 平台鼠标事件的注入点（`0x2fc`）；空 = 永远没有事件。
     MouseEventSource mouse_event_source_;
+    // 平台光标 / 按钮（`0x109` / `0x108`）；空 = 设备不可用。
+    CursorSource cursor_source_;
+    MouseButtonSource mouse_button_source_;
     // `0x12e` 的未建模诊断只报一次。
     bool hit_test_reported_ = false;
     std::uint32_t input_mode_ = 0;
@@ -579,8 +780,14 @@ private:
     bool driven_elsewhere_ = false;
     // （`1f4` / `1f5`）执行区间的嵌套计数；忙标记复用 `driven_elsewhere_`（同一格）。
     std::int32_t bracket_depth_ = 0;
-    std::int32_t mouse_interval_ = 0;
-    std::int32_t mouse_position_ = -1;
+    // 「门一直关着且没有服务分支」的连续迭代计数（只用于诊断，不是引擎状态）。
+    std::size_t gate_stall_steps_ = 0;
+    bool gate_stall_reported_ = false;
+    std::int32_t mouse_interval_ = 1;
+    // 鼠标回调的登记状态（引擎级一格；`0xcc` 写、`0xcd` 读）。
+    std::int32_t mouse_target_ = -1;   // 登记的脚本位置（dword 下标）；−1 = 取消
+    std::int32_t mouse_depth_ = -1;    // 登记时的当前帧号（本版用它当"调用层数"，见残差）
+    std::uint32_t mouse_last_ms_ = 0;  // 上一次派发时刻（登记时 = 当前时刻）
     std::unordered_map<std::int32_t, std::int32_t> indirect_;
     std::unordered_map<std::uint32_t, TextureRecord> textures_;
     std::unordered_map<std::uint32_t, DrawItem> draw_items_;
