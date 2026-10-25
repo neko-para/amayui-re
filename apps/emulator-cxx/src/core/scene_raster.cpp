@@ -1,5 +1,7 @@
 #include "core/scene_raster.h"
 
+#include "core/color.h"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -10,20 +12,6 @@
 
 namespace core {
 namespace {
-
-std::uint8_t clamp_byte(int value) {
-    return static_cast<std::uint8_t>(std::clamp(value, 0, 255));
-}
-
-// ARGB 逐通道插值（截断）。`t` 可以越出 [0,1]：规范只判上界，负延迟 / 未夹取的进度会外推。
-std::uint32_t lerp_argb(std::uint32_t from, std::uint32_t to, double t) {
-    const auto channel = [&](int shift) {
-        const double a = static_cast<double>((from >> shift) & 0xFFu);
-        const double b = static_cast<double>((to >> shift) & 0xFFu);
-        return static_cast<std::uint32_t>(std::clamp(static_cast<int>(a + (b - a) * t), 0, 255));
-    };
-    return (channel(24) << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0);
-}
 
 double lerp_double(double from, double to, double t) { return from + (to - from) * t; }
 
@@ -102,16 +90,10 @@ void source_rect(const DrawItem& item, std::uint32_t now, bool forced, int& left
 
 void blend_pixel(Surface& target, int x, int y, std::uint32_t argb) {
     if (x < 0 || x >= static_cast<int>(target.width) || y < 0 || y >= static_cast<int>(target.height)) return;
-    const int alpha = static_cast<int>((argb >> 24) & 0xFFu);
-    if (alpha <= 0) return;
-    const int r = static_cast<int>((argb >> 16) & 0xFFu);
-    const int g = static_cast<int>((argb >> 8) & 0xFFu);
-    const int b = static_cast<int>(argb & 0xFFu);
     const std::size_t d = (static_cast<std::size_t>(y) * target.width + x) * 4;
-    target.rgba[d + 0] = clamp_byte((r * alpha + target.rgba[d + 0] * (255 - alpha)) / 255);
-    target.rgba[d + 1] = clamp_byte((g * alpha + target.rgba[d + 1] * (255 - alpha)) / 255);
-    target.rgba[d + 2] = clamp_byte((b * alpha + target.rgba[d + 2] * (255 - alpha)) / 255);
-    target.rgba[d + 3] = clamp_byte(alpha + target.rgba[d + 3] * (255 - alpha) / 255);
+    blend_argb_over(&target.rgba[d], static_cast<int>((argb >> 16) & 0xFFu),
+                    static_cast<int>((argb >> 8) & 0xFFu), static_cast<int>(argb & 0xFFu),
+                    static_cast<int>((argb >> 24) & 0xFFu));
 }
 
 void raster_triangle(Surface& target, float ax, float ay, float bx, float by, float cx, float cy,

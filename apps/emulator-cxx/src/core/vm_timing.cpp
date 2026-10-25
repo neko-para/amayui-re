@@ -4,22 +4,9 @@
 //   不判脏、不请求渲染 —— 那些是主循环的事。
 #include "core/vm.h"
 
-#include <algorithm>
+#include "core/color.h"
 
 namespace core {
-
-namespace {
-// ARGB 逐通道插值（截断）。`t` 可以越出 [0,1]：规范只判上界，负延迟 / 未夹取的进度会外推。
-std::uint32_t lerp_argb(std::uint32_t from, std::uint32_t to, double t) {
-    const auto channel = [&](int shift) {
-        const double a = static_cast<double>((from >> shift) & 0xFFu);
-        const double b = static_cast<double>((to >> shift) & 0xFFu);
-        const int value = static_cast<int>(a + (b - a) * t);
-        return static_cast<std::uint32_t>(std::clamp(value, 0, 255));
-    };
-    return (channel(24) << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0);
-}
-}  // namespace
 
 void Machine::advance_scene(std::uint32_t now_ms) {
     scene_previous_ms_ = scene_clock_ms_;

@@ -5,18 +5,14 @@
 // ★ 本文件的切分是**按职责**聚合，不严格等于规范章节边界（章节归属以 spec 正文为准）。
 #include "core/vm.h"
 #include "core/vm_internal.h"
+
+#include "core/color.h"
 #include "core/text_raster.h"
 
 #include <algorithm>
 #include <cmath>
 
 namespace core {
-namespace {
-// 纹理矩形填充（0x20B）的通道夹取。
-std::uint8_t clamp_byte(int value) {
-    return static_cast<std::uint8_t>(std::clamp(value, 0, 255));
-}
-}  // namespace
 
 void Machine::op_23b(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();

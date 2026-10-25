@@ -1,5 +1,7 @@
 #include "core/text_raster.h"
 
+#include "core/color.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -23,20 +25,12 @@
 namespace core {
 namespace {
 
-std::uint8_t clamp_byte(int value) {
-    return static_cast<std::uint8_t>(std::clamp(value, 0, 255));
-}
-
 void blend_texel(TextureRecord& texture, int x, int y, int r, int g, int b, int alpha) {
-    if (alpha <= 0) return;
     if (x < 0 || x >= static_cast<int>(texture.width) || y < 0 || y >= static_cast<int>(texture.height)) {
         return;
     }
     const std::size_t d = (static_cast<std::size_t>(y) * texture.width + x) * 4;
-    texture.rgba[d + 0] = clamp_byte((r * alpha + texture.rgba[d + 0] * (255 - alpha)) / 255);
-    texture.rgba[d + 1] = clamp_byte((g * alpha + texture.rgba[d + 1] * (255 - alpha)) / 255);
-    texture.rgba[d + 2] = clamp_byte((b * alpha + texture.rgba[d + 2] * (255 - alpha)) / 255);
-    texture.rgba[d + 3] = clamp_byte(alpha + texture.rgba[d + 3] * (255 - alpha) / 255);
+    blend_argb_over(&texture.rgba[d], r, g, b, alpha);
 }
 
 #ifdef EMULATOR_CXX_HAVE_TEXT
