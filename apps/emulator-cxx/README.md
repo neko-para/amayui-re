@@ -148,6 +148,10 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 （引擎不在等待期间自己泵输入）。鼠标回调按 `0xcd` 的时间闸派发。
 ★ 键位映射是**宿主策略**：规范明说「物理键与输入位号的映射」属平台边界，所以它**不进 spec**；
 要换键位只改 `window.cpp` 的 `kKeyBits`。Esc 仍然直接关窗（与"取消"位同时映射到 1）。
+★ 光标"可用"的判据照规范：**光标是否落在客户区内**（不是"窗口有没有鼠标焦点"）——
+有鼠标焦点时用 `SDL_GetMouseState`（客户区坐标），否则用全局光标减窗口位置；两种都按
+`逻辑分辨率 / SDL 窗口尺寸` 缩放。落在客户区外 ⇒ `0x109` 写 −100000（`0x108` 在无鼠标设备时写 0）。
+诊断：`EMULATOR_CXX_INPUT_TRACE=1` 时每 30 次采样往 stderr 打一行 `[input] cursor inside=…`。
 `--stop-at <opcode>` 可用于在任意 opcode 前停止（`0` = 不设停止线，缺省）。
 根脚本静态解码会在数据区遇到非法 opcode 后停止，这是规范允许的静态解码边界，不是执行边界。
 

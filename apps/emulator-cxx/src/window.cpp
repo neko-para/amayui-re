@@ -9,6 +9,7 @@
 #include "core/scene_raster.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <deque>
 
@@ -67,11 +68,6 @@ bool window_to_logical(SDL_Window* window, int logical_width, int logical_height
     return true;
 }
 
-// 「光标在客户区」的判据：窗口有鼠标焦点。没有焦点 ⇒ 设备不可用（`0x109` 写 −100000）。
-bool mouse_focused(SDL_Window* window) {
-    return (SDL_GetWindowFlags(window) & SDL_WINDOW_MOUSE_FOCUS) != 0;
-}
-
 }  // namespace
 
 int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
@@ -99,14 +95,56 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     std::deque<core::Machine::MouseEvent> mouse_events;
     machine.set_key_sampler([] { return sample_key_mask(); });
     machine.set_cursor_source([window, width, height](std::int32_t& x, std::int32_t& y) -> bool {
-        if (!mouse_focused(window)) return false;
+        static int probe = 0;
+        const bool probe_on = std::getenv("EMULATOR_CXX_INPUT_TRACE") != nullptr;
+        // ★ 规范口径（`CORE-INPUT-MOUSE-POS`）：**设备不可用 = 没有窗口 / 光标不在客户区**。
+        //   所以"可用性"由**光标是否落在客户区内**决定，⛔ 不是"窗口有没有鼠标焦点"：
+        //   实测窗口已显示、鼠标也在客户区时 `SDL_WINDOW_MOUSE_FOCUS` 仍可能是 0（合成器/焦点策略），
+        //   拿它当哨兵会让 `0x109` 恒写 −100000、hover 整段失效。
+        int window_width = 0;
+        int window_height = 0;
+        if (!SDL_GetWindowSize(window, &window_width, &window_height) || window_width <= 0 ||
+            window_height <= 0) {
+            return false;
+        }
         float mouse_x = 0.0f;
         float mouse_y = 0.0f;
-        SDL_GetMouseState(&mouse_x, &mouse_y);
-        return window_to_logical(window, width, height, mouse_x, mouse_y, x, y);
+        const bool has_mouse_focus = (SDL_GetWindowFlags(window) & SDL_WINDOW_MOUSE_FOCUS) != 0;
+        if (has_mouse_focus) {
+            // 有鼠标焦点：SDL 直接给**客户区**坐标（与 `SDL_GetWindowSize` 同一套点坐标）。
+            SDL_GetMouseState(&mouse_x, &mouse_y);
+        } else {
+            // 没有焦点：用全局光标减窗口位置（两者都是 SDL 屏幕坐标，同一套点坐标）。
+            float global_x = 0.0f;
+            float global_y = 0.0f;
+            int window_x = 0;
+            int window_y = 0;
+            if (!SDL_GetGlobalMouseState(&global_x, &global_y) ||
+                !SDL_GetWindowPosition(window, &window_x, &window_y)) {
+                return false;
+            }
+            mouse_x = global_x - static_cast<float>(window_x);
+            mouse_y = global_y - static_cast<float>(window_y);
+        }
+        // 「光标不在客户区」⇒ 不可用（规范原话），两个操作数都会写 −100000。
+        const bool inside = mouse_x >= 0.0f && mouse_y >= 0.0f &&
+                            mouse_x < static_cast<float>(window_width) &&
+                            mouse_y < static_cast<float>(window_height);
+        if (probe_on && (++probe % 30) == 0) {
+            std::fprintf(stderr,
+                         "[input] cursor inside=%d focus=%d mouse=%.1f,%.1f win=%dx%d\n",
+                         inside ? 1 : 0, has_mouse_focus ? 1 : 0, mouse_x, mouse_y, window_width,
+                         window_height);
+        }
+        if (!inside) return false;
+        x = static_cast<std::int32_t>(mouse_x * static_cast<float>(width) /
+                                      static_cast<float>(window_width));
+        y = static_cast<std::int32_t>(mouse_y * static_cast<float>(height) /
+                                      static_cast<float>(window_height));
+        return true;
     });
     machine.set_mouse_button_source([window](std::int32_t& mask) -> bool {
-        if (!mouse_focused(window)) return false;
+        if (!SDL_HasMouse()) return false;
         float mouse_x = 0.0f;
         float mouse_y = 0.0f;
         // SDL 的 LMASK / RMASK 恰好就是位 0 左 / 位 1 右（与 `CORE-INPUT-MOUSE-BUTTON` 同口径）。

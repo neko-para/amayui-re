@@ -9,61 +9,50 @@
 
 ## 一句话
 
-2026-10-24 交接（第二十五次）：`apps/emulator-new` 已从 SYSTEM4 启动链走到 TITLE（`0x5264`）并进入输入环；`--skip-logo` 可用。**工作树有未提交改动**（长期纪律：不 `git add` / `commit`）。
+2026-10-26 交接：`apps/emulator-cxx`（C++ 原生宿主）已按 spec 重写并在真实安装上跑到 TITLE；**过滤条件内（排除 audio / text-subsystem / live2d）的缺失指令 = 0**，门禁全绿。工作树有未提交改动（长期纪律：不 `git add` / `commit`）。
 
-## 最近完成
+## 交付物在哪
 
-### 显示 bug（等实机复测）
-- **影片 logo 黑噪点**：`uploadTexture` 把 `color: -1` 当 `0xFFFFFFFF` 白键 ⇒ 白底/边缘透明。修：`hasColorKey(color)=color>0`。
-- **启动 ~1s 白闪**：① `create` 先清一帧；② `releaseTexture` 不再中途 present，改下一帧边界推新快照；`present` 加 `trigger` 诊断；空白槽不画。
-- **`plugins/pnpm-priv`** 新增宿主侧 `op=run`：`build-renderer` / `smoke` / `electron`（argv/cwd 写死、`write:true`、`installDir` 校验、`allowRun` 总闸）。宿主插件不热重载 ⇒ 重装 + 重启 DSH。
+- **规范**：`data/spec/`（真源）；工具 `pnpm tools spec validate|report|describe`。
+- **C++ 实现线**：`apps/emulator-cxx/`（CMake preset `windows-x64`，SDL3 + SDL_GPU，clang-cl）。
+- **参考实现（只作旁证）**：`apps/emulator-new/`。
+- **审计记录**：`docs/02-engine/spec-audit-2026-10.md`（本阶段见 §64–§67）。
+- **进度**：`pnpm tools requirements plan`（本文件只是交接摘要，不是进度真源）。
+- **本线已覆盖的机制**（spec 机制表里属于 `emulator-cxx` 的部分）：`CORE-ISA`、`CORE-POOL`、`CORE-FRAME`、`CORE-VM`、`CORE-VM-LOOP`、`CORE-BOOT`、`CORE-CONFIG`（配置库：词表 + ALF 发行默认表 + `SYS4REG.INI` 覆盖 + 脚本键表）、`FMT-ALF`、`FMT-AGF`、`CORE-OPS-*`、`CORE-INPUT-*`、`CORE-TIMING-*`、`CORE-SCENE-*`、`SPC-POOL-MEMFLIP`。
 
-### 残差 / spec
-- 第三批到第二十六批已收口，审计见 `docs/02-engine/spec-audit-2026-10.md` §20–§44。
-- 第二十六批：关闭四条“代码确定、只缺观测”残差（帧栈 / 异常重试 / 窗口清理 / 退出码）与 `RES-SAVE-STH-CAPTURE`；修正 `0x3` / `0x6` 装载失败与重试合同（打开失败 = 类别 7、当前帧停在目标槽；头坏 = 退出）；STH 生效实现 = 屏幕捕捉、恒 24 位。
-- “真机/采样”29 条已分诊：真 UB 标 `discarded`（建议显式报错），子头变体关闭，像素叠放合并，样本/代码确定项改写为条件合同，输入平台项延后。
-- `unknown` 残差 **426**；`discarded` 11。
+## 最近完成（第三十一批 · 2026-10-26）
 
-### S2（命令档真实绘制）
-- **S2a-1 完成**：`scene-command-plan` 阶段带表身份 `entries {key,table}`；新增 `scene-command-exec.ts` 纯执行层（默认 `enabled=false` 零 op）；9 条 pure 守卫 + 3 条变异。
-- **S2a-2 完成**：`pixi-host` 独立画布 36/37、`emitEntries`、`present(frame)` 先执行 op 再收尾扫描；`commandExecKinds` 缺省空 ⇒ 产品零回退；6 条 pure 守卫 + 3 条变异。
-- **S2a-3 完成**：`Machine.stampCommands()` 与 `finishRenderStep()`，session 在快照前盖章、present 后收尾；守卫 +2、变异 +2。
-- **S2b-2 完成**：`advanceCommands`（种类 0/3 的 animating/duration、种类 2 mode<0 的 forcedComplete）+ 进度读 forcedComplete；守卫 +2、变异 +2。
-- **S2c 完成（结构）**：种类 2 strokes 接到执行层与 Pixi；种类 1 遮罩（rect/flag/mask 投影 + 均匀 alpha；影片结束补反值已接，判据=对象槽空）。
-- **S2d 记账**：种类 0/3 走退路时记 `scene-command-effect-unmodeled`；效果技法本身未实现。
-- **STH 边界完成**：`core/bmp.ts` 组装 / 解析 BMP，平台只给 `SurfacePixels`；`0x1ae` 先截断建空文件，`0x1af` 先拒 0/1/2；真样本 decode→encode 逐字节可逆。
-- **0x3/0x6 状态**：打开失败当前帧停在目标槽 / 子槽、抛类别 7；深度类别 1；运行器不自动重试。
-- **S2 开闸入口**：`?commandExecKinds=0,1,2` 经 `parseCommandExecKinds` 传给 `PixiRenderHost`；默认零回退。
-- **构建 / smoke**：`pnpm_priv run build-renderer` + `smoke` 均退出 0；截图 `.tmp/emulator-new-electron-smoke.png` 与 demo 场景一致。
-- **Electron 开闸参数**：`--command-exec-kinds 0,1,2` ⇒ window-host 拼 renderer URL 查询串；无参数行为不变。
-- **存档读侧信封 + 负载结构 + 应用**：`0x1a1` 解析、三池清零 / 按当前 key 重编码、按帧记录重建帧槽（loadScript + tableB/tableA 位置）；解析失败不写 op1。核心 advanceCommands / forcedComplete 已接；效果技法未做。
+### ① 残差收口（subagent 取证 → spec → 独立复审 → 二次收口）
+- **暂停 = 区间忙标记（同一格）**，条件是「忙 = 1 且**等待位 = 0**」（原正文写反）；`0x1f4` 置 / `0x1f5` 在嵌套计数归零时清。
+- `0x20c` 的「别处驱动」读**同一格** ⇒ 区间内**不重盖**时钟对；不忙时它先覆盖再请求渲染步 ⇒ 它自己那次步读**覆盖后**的值。
+- **本帧场景时刻 = 渲染步内直读的活格**（不是迭代头快照）；`0x23c` 是**无条件重盖**的第四写者（`sub_41A2C0`）。
+- spec 5 文件（`70-vm.md` / `60-ops-render.md` / `60-ops-scene.md` / `bindings.json` / `audit.json`）：**删 6 条已答残差**、`RES-MOVIE-PAUSE` 收窄、新增 `RES-CLOCK-WRITERS` / `RES-VM-PAUSE-MOVIE-BIT`。
+- 独立复审指出 6 条矛盾 + 1 个真缺口（暂停 × 已置影片位），已全部收口。
+
+### ② 键盘 + 鼠标接入（不接摇杆）
+- `window.cpp` 的 `kKeyBits` **宿主键位表**（规范明说物理键映射属平台边界 ⇒ 不进 spec）；SDL 键盘 → 输入字（`0xff` 采样）、鼠标 → 客户区光标（`0x109`）、按钮位图（`0x108`，位 0 左 / 位 1 右）、按钮按下/抬起与滚轮 → 事件队列（`0x2fc`）；`0xcc`/`0xcd` 回调按时间闸派发（`elapsed >= interval`）。
+- 只在窗口路径生效；`--footprint` / `--trace` / `--render-*` 无窗口 ⇒ 无输入（`0x109` 写 −100000、`0x108` 写 0、`0x2fc` 恒"没有事件"）。
+- **实测边界**（500k 步到 TITLE）：输入环在轮询鼠标 —— `0x109` 9133、`0x2fc` 9132、`0x108` 9132、`0x100` 9132 次；**不执行 `0xff` / `0xcc` / `0xcd`** ⇒ 键盘位在 TITLE 上不会写进输入字（`input_word_` 恒 0），键盘目前只是宿主侧接通、脚本未使用；**TITLE 的鼠标是轮询（不是回调）**。
+- ⚠ **未解决**：实测在 TITLE 里 hover 无反应（预期 TITLE 脚本自己读光标做 hover 特效）——正在查是"光标源在窗口路径返回不可用 / 坐标空间不对"还是"脚本另有门"。
+
+### ③ 过滤条件内缺失指令 → 0
+- 对照 `apps/emulator-new` 的 `HANDLERS` 表机械核对：**202 条 JS handler ↔ 203 个 C++ case，missing 0**。
+- 本阶段补的批次：17 条 TITLE 路径 → 24 条（帧/本地块/标志/数值/场景读回 + 暂停门 + `0x23c`）→ 3D setter 2 条 + 按住派发族 5 条 → **memflip `0x6d`（两组 bank）** + **存档族 7 条**（`SaveHost` 三态读宿主边界、`.STH` 的 BMP 容器）。
+- 存档族的三条硬口径（照 spec，不照参考实现）：`0x19e` 成功 = **0**；`0x1a1` 打开成功后**无条件**重编码全局整型池且**成功不写 op1**；`0x1af` **打不开优先于表面门**。
+
+## 未做 / 待核
+
+- **摇杆**（范围外）；键盘在 TITLE 路径上未被脚本使用（见上）。
+- `0x19e` 的写侧内容构造与 `0x1a1` 的整档读回 —— 属 `FMT-SAVE-CODEC` / `FMT-SAVE-ENVELOPE` 等 gap 单的 seam；没注入就**响亮失败**（`save-codec-missing` / `save-restore-unmodeled`）。
+- 存档族的实现选择（已登记）：标题串来源（`set_save_identity`，空串 = 不校验）、写盘失败的 op1（用 1 + 诊断）、`0x1a1` 头坏时 op1 不写、整池重编码在 memflip 下按当前 bank、1/4/8/32bpp 缩略图解码无样本。
+- spec 侧仍有 **24 条残差 + 5 条 `unhandled`**（`pnpm tools spec report`）。
 
 ## 当前门禁
 
 ```bash
-pnpm test                 # 1068 pass / 0 fail
-pnpm test:assets          # 204 pass / 0 fail / 1 skip
-pnpm test:mutation        # 361/361 按预期变红
+ctest --test-dir apps/emulator-cxx/out/build/windows-x64 --output-on-failure  # 5/5
+pnpm test                 # 1071 pass / 0 fail
+pnpm test:mutation        # 363/363 按预期变红
 pnpm tools spec validate  # 13/13 全绿，未登记 0
 pnpm tools requirements validate # 6/6 全绿
-pnpm typecheck            # 六工程全绿
 ```
-
-## 待处理（按优先）
-
-1. **保存读侧**：`0x1a1` 还原 / 整池重编码；`RES-SAVE-PREAMBLE-BLOCKS` / `RESTORE-PREFREE`。
-2. **S2c**：种类 1 遮罩 + 种类 2 strokes；S2d 效果技法。
-3. **S2c**：种类 1 遮罩 + 种类 2 strokes 落笔；S2d：效果技法（暂无接口）+ 真实 `clearTable`。
-4. **核心写回**：盖章 / 位 16 / 强制完成 / 有动画 / 清表（现全无写者）。
-5. **保存读侧**：`0x1a1` 还原 / 整池重编码；v1=3 纹理记录表读侧；STH 边界（core 组装 BMP）。
-6. **0x3/0x6 装载失败语义落地**（spec 已改，emulator 未改）：新单 `0x3/0x6 装载失败与重试语义落地`。
-7. **STH 边界改造**：新单 `缩略图 STH：BMP 容器搬回 core（实现边界）`。
-8. 其它剩余：`RES-SAVE-PREAMBLE-BLOCKS` / `RESTORE-PREFREE`、辅助表 B 领域字段、真实绘制像素采样。
-9. audio / text-system / Live2D 仍按用户要求排除。
-
-## 新会话从这读
-
-- 技能：`amayui-spec` / `amayui-emulator` / `amayui-re-engine`。
-- 进度：`pnpm tools requirements plan`；审计：`pnpm tools spec report`；本批：`docs/02-engine/spec-audit-2026-10.md` §44。
-- S2 设计：`.tmp/spec-draft/batch26/s2/{slice-plan.md,impl-notes.md}`。
-- 机制地图以 `data/spec/core/README.md` 为准：`CORE-ISA` / `CORE-POOL` / `CORE-CONFIG` / `CORE-FRAME` / `CORE-OPS` 等。
