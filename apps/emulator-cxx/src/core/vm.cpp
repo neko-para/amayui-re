@@ -1509,9 +1509,10 @@ bool Machine::step() {
     if (halted_) return false;
     // 每次迭代先读一次时钟、推进场景：颜色窗在门之前推进（`CORE-TIMING-WINDOW`）。
     advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16);
-    // 门前渲染：`set:DrawMode == 1` 且场景脏 / 有动画 ⇒ 本迭代请求一次渲染步。
-    // 与执行哪条指令无关（`0x4127E2` 在门 `0x41280C` 之前）。
-    if (draw_mode_ == 1 && (state_flags_ & (1u << 24)) == 0 &&
+    // 门前渲染：主循环闸门（0x412739–0x4127E2）先要求
+    // `(0x21B != 0) || (状态字 & 0x2400)`，脏只是更内层条件。
+    const bool render_gate = scalar_21b_ != 0 || (state_flags_ & (0x400u | 0x2000u)) != 0;
+    if (draw_mode_ == 1 && render_gate && (state_flags_ & (1u << 24)) == 0 &&
         (scene_dirty_ || scene_animating_ || command_animating_)) {
         frame_step_requested_ = true;
     }

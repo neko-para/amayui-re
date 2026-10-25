@@ -729,7 +729,7 @@ void build_scene_vertices(const core::Machine& machine, float width, float heigh
 
 bool draw_scene_gpu(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command, SDL_GPUTexture* target,
                     const core::Machine& machine, const ScenePipeline& pipeline,
-                    SceneTextureCache& cache, int width, int height) {
+                    SceneTextureCache& cache, int width, int height, bool clear) {
     std::vector<SceneVertex> vertices;
     std::vector<SceneRange> ranges;
     build_scene_vertices(machine, static_cast<float>(width), static_cast<float>(height), vertices,
@@ -769,7 +769,7 @@ bool draw_scene_gpu(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command, SDL_GP
     SDL_GPUColorTargetInfo target_info{};
     target_info.texture = target;
     target_info.clear_color = kClearColor;
-    target_info.load_op = SDL_GPU_LOADOP_CLEAR;
+    target_info.load_op = clear ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
     target_info.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command, &target_info, 1, nullptr);
     if (pass == nullptr) {
@@ -834,7 +834,7 @@ bool render_scene_gpu_to_bmp(SDL_GPUDevice* device, const core::Machine& machine
         destroy_scene_pipeline(device, pipeline);
         return false;
     }
-    if (!draw_scene_gpu(device, command, target, machine, pipeline, cache, width, height)) {
+    if (!draw_scene_gpu(device, command, target, machine, pipeline, cache, width, height, true)) {
         SDL_CancelGPUCommandBuffer(command);
         release_scene_textures(device, cache);
         SDL_ReleaseGPUTexture(device, target);
@@ -1701,7 +1701,7 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
             }
             if (swapchain != nullptr) {
                 if (!draw_scene_gpu(device, command, swapchain, machine, scene_pipeline, scene_cache,
-                                    width, height)) {
+                                    width, height, false)) {
                     SDL_CancelGPUCommandBuffer(command);
                     break;
                 }

@@ -788,6 +788,7 @@ int main() {
 
         // ── 渲染：门前渲染（脏标记 / 0x20C / DrawMode 闸门） ──
         auto dirty_script = make_script_with_body();
+        emit_instruction(dirty_script, 0x21B, {{0, 1}});
         emit_instruction(dirty_script, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
         emit_instruction(dirty_script, 0x55, {{3, 0}, {0, 7}});
         emit_instruction(dirty_script, 2, {});
@@ -795,6 +796,9 @@ int main() {
         render_config.set_int("set:DrawMode", 1);
         core::Machine dirty_machine(0x12345678u, table, nullptr, std::move(render_config));
         dirty_machine.load_root(dirty_script);
+        if (!dirty_machine.step()) {  // 0x21B
+            return 1;
+        }
         if (!dirty_machine.step() || !dirty_machine.consume_frame_step()) {
             std::fprintf(stderr, "dirty scene did not request a render\n");
             return 1;
@@ -830,8 +834,11 @@ int main() {
         step_config.set_int("set:DrawMode", 1);
         core::Machine step_machine(0x12345678u, table, nullptr, std::move(step_config));
         step_machine.load_root(step_script);
-        if (!step_machine.step() || !step_machine.consume_frame_step()) {
-            std::fprintf(stderr, "0x20C setup failed\n");
+        if (!step_machine.step()) {  // 0x1F8
+            return 1;
+        }
+        if (step_machine.consume_frame_step()) {
+            std::fprintf(stderr, "dirty scene rendered without gate before 0x20C\n");
             return 1;
         }
         core::rasterize_scene(step_machine, 4, 4);
@@ -877,6 +884,38 @@ int main() {
         clock_item = clock_machine.draw_item(1);
         if (clock_item == nullptr || ((clock_item->color >> 24) & 0xFFu) != 255) {
             std::fprintf(stderr, "host-clock window expiry mismatch\n");
+            return 1;
+        }
+
+        // 门前闸门：脏本身不触发渲染；需要 0x21B 或等待/影片位。
+        auto gate_script = make_script_with_body();
+        emit_instruction(gate_script, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
+        emit_instruction(gate_script, 0x1FB,
+                         {{0, 1}, {0, 1}, {0, 0}, {0, 0}, {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+        emit_instruction(gate_script, 0x1A8, {});
+        emit_instruction(gate_script, 0x21B, {{0, 1}});
+        emit_instruction(gate_script, 0x1A8, {});
+        emit_instruction(gate_script, 2, {});
+        core::ConfigStore gate_config;
+        gate_config.set_int("set:DrawMode", 1);
+        core::Machine gate_machine(0x12345678u, table, nullptr, std::move(gate_config));
+        gate_machine.load_root(gate_script);
+        if (!gate_machine.step() || gate_machine.consume_frame_step()) {
+            std::fprintf(stderr, "dirty scene rendered without 0x21B\n");
+            return 1;
+        }
+        if (!gate_machine.step() || gate_machine.consume_frame_step()) {
+            std::fprintf(stderr, "dirty 0x1FB rendered without 0x21B\n");
+            return 1;
+        }
+        if (!gate_machine.step()) {  // 0x1A8
+            return 1;
+        }
+        if (!gate_machine.step()) {  // 0x21B = 1
+            return 1;
+        }
+        if (!gate_machine.step() || !gate_machine.consume_frame_step()) {
+            std::fprintf(stderr, "0x21B did not open the render gate\n");
             return 1;
         }
 
