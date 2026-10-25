@@ -31,7 +31,8 @@ pnpm tools opcodes handlers                  # opcode → handler EA（表基址
 #    交 `amayui-re-engine`：`pnpm tools disasm-fn show sub_XXXXXX` → C 体 + .lst 窗口 + 参数/全局/调用关系
 
 # ③ 实现：**三条线各有一个落点**（★ 先确认你要改哪条，别在废弃的那条上干活）
-#    · apps/emulator-cxx/src/core/   原生 C++（SDL_GPU 呈现）；指令语义在 `vm.cpp` 的 execute()
+#    · apps/emulator-cxx/src/core/   原生 C++（SDL_GPU 呈现）；`vm.cpp` 只做分派（一个 opcode 一行），
+#      handler 按族分在 `vm_ops_*.cpp`（影片 0x20F 在 `vm_movie.cpp`，值/池原语在 `vm_value.cpp`）
 #    · apps/emulator-new/src/core/   只读 data/spec 的参考实现（handlers.ts / machine.ts）
 #    · apps/emulator/src/model/      最早的 TS 模型（**已废弃**，只剩 `@env assets` 守卫还 import 它）
 #    ★ 硬口径：**语义层不写偏移/EA**（那是 packages/age-format/src/engine/layout.mts）。

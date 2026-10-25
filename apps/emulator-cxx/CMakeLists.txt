@@ -37,6 +37,17 @@ add_library(emulator-core STATIC
     src/core/movie.cpp
     src/core/opcode_table.cpp
     src/core/vm.cpp
+    src/core/vm_value.cpp
+    src/core/vm_timing.cpp
+    src/core/vm_movie.cpp
+    src/core/vm_ops_flow.cpp
+    src/core/vm_ops_texture.cpp
+    src/core/vm_ops_scene.cpp
+    src/core/vm_ops_render.cpp
+    src/core/vm_ops_engine.cpp
+    src/core/vm_ops_numeric.cpp
+    src/core/vm_ops_text.cpp
+    src/core/vm_ops_io.cpp
     src/core/install.cpp)
 target_include_directories(emulator-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # pl_mpeg 是第三方单文件解码器（见 third_party/pl_mpeg/README.md）；只有 movie.cpp 编译它。
@@ -134,3 +145,4 @@ add_custom_command(TARGET emulator-cxx POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/../../data/spec/format/config-keys.json
         $<TARGET_FILE_DIR:emulator-cxx>/config-keys.json)
+

@@ -22,6 +22,8 @@ apps/emulator-cxx/
   third_party/pl_mpeg/      影片解码（vendored 单文件，来源与为什么见该目录 README）
   src/main.cpp              窗口 / present / --smoke / core CLI
   src/core/                 C++ core（按 spec 重写）：ALF / LZSS / AGF / 脚本头 / opcode 解码 / 影片后端
+                            `vm.cpp` 只做分派表 + 主循环；handler 按族分在 `vm_ops_*.cpp`，
+                            值/池原语 `vm_value.cpp`、计时窗 `vm_timing.cpp`、影片 `vm_movie.cpp`
 ```
 
 ## 依赖（vcpkg submodule + manifest）

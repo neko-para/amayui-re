@@ -368,6 +368,54 @@ private:
     std::uint32_t script_int_key_index(const Operand& operand);
     void jump_to(std::uint32_t position);
     void push_return(std::uint32_t position);
+
+    // ── 指令实现：一个 opcode 一个函数；分派仍在 vm.cpp 的 execute()，实现按规范章节分文件 ──
+    // 控制流 / 帧（vm_ops_flow.cpp）
+    void op_01(const Instruction&); void op_02(const Instruction&); void op_03(const Instruction&); void op_06(const Instruction&);
+    void op_143(const Instruction&); void op_05(const Instruction&); void op_8c(const Instruction&); void op_8f(const Instruction&);
+    void op_a0(const Instruction&);
+    // 渲染入口（vm_ops_render.cpp）
+    void op_23b(const Instruction&); void op_2da(const Instruction&); void op_20b(const Instruction&); void op_20c(const Instruction&);
+    void op_20d(const Instruction&); void op_33f(const Instruction&); void op_204(const Instruction&);
+    // 纹理 / 绘制项 / 网格（vm_ops_texture.cpp）
+    void op_344(const Instruction&); void op_1ff(const Instruction&); void op_1fd(const Instruction&); void op_1fe(const Instruction&);
+    void op_1f6(const Instruction&); void op_320(const Instruction&); void op_322(const Instruction&); void op_323(const Instruction&);
+    void op_1fb(const Instruction&); void op_239(const Instruction&); void op_202(const Instruction&); void op_203(const Instruction&);
+    void op_1f7(const Instruction&); void op_1f8(const Instruction&); void op_1fa(const Instruction&); void op_1f9(const Instruction&);
+    // 影片（vm_movie.cpp）
+    void op_20f(const Instruction&);
+    // 场景命令记录（vm_ops_scene.cpp）
+    void op_223(const Instruction&); void op_24d(const Instruction&); void op_24f(const Instruction&); void op_250(const Instruction&);
+    void op_251(const Instruction&);
+    // 引擎级状态与宿主请求（vm_ops_engine.cpp）
+    void op_88(const Instruction&); void op_308(const Instruction&); void op_bf(const Instruction&); void op_b4(const Instruction&);
+    void op_b5(const Instruction&); void op_2c7(const Instruction&); void op_341(const Instruction&); void op_ae(const Instruction&);
+    void op_2ee(const Instruction&); void op_10f(const Instruction&); void op_248(const Instruction&); void op_8b(const Instruction&);
+    void op_261(const Instruction&); void op_260(const Instruction&); void op_25b(const Instruction&); void op_130(const Instruction&);
+    void op_303(const Instruction&); void op_212(const Instruction&); void op_213(const Instruction&); void op_25d(const Instruction&);
+    void op_1c1(const Instruction&); void op_79(const Instruction&); void op_73(const Instruction&); void op_80(const Instruction&);
+    void op_70(const Instruction&); void op_1ca(const Instruction&); void op_149(const Instruction&); void op_21b(const Instruction&);
+    void op_252(const Instruction&); void op_2f8(const Instruction&); void op_2f6(const Instruction&);
+    // 数值 / 数组（vm_ops_numeric.cpp）
+    void op_6c(const Instruction&); void op_2d8(const Instruction&); void op_61(const Instruction&); void op_12c(const Instruction&);
+    void op_64(const Instruction&); void op_10c(const Instruction&); void op_fe(const Instruction&); void op_107(const Instruction&);
+    void op_10b(const Instruction&); void op_30a(const Instruction&); void op_32f(const Instruction&); void op_324(const Instruction&);
+    void op_50(const Instruction&); void op_51(const Instruction&); void op_52(const Instruction&); void op_53(const Instruction&);
+    void op_54(const Instruction&); void op_2d5(const Instruction&); void op_56(const Instruction&); void op_57(const Instruction&);
+    void op_58(const Instruction&); void op_59(const Instruction&); void op_5a(const Instruction&); void op_5b(const Instruction&);
+    void op_5c(const Instruction&); void op_5d(const Instruction&); void op_5e(const Instruction&); void op_5f(const Instruction&);
+    void op_135(const Instruction&); void op_136(const Instruction&); void op_13f(const Instruction&); void op_55(const Instruction&);
+    // 字体与文本（vm_ops_text.cpp）
+    void op_2ec(const Instruction&); void op_2eb(const Instruction&); void op_1a4(const Instruction&); void op_76(const Instruction&);
+    void op_2bd(const Instruction&); void op_2de(const Instruction&); void op_192(const Instruction&); void op_1a9(const Instruction&);
+    void op_1aa(const Instruction&); void op_1a3(const Instruction&); void op_1a2(const Instruction&); void op_2db(const Instruction&);
+    void op_78(const Instruction&); void op_71(const Instruction&); void op_1a5(const Instruction&); void op_197(const Instruction&);
+    void op_75(const Instruction&);
+    // 输入 / 等待 / 空操作（vm_ops_io.cpp）
+    void op_109(const Instruction&); void op_108(const Instruction&); void op_c8(const Instruction&); void op_cc(const Instruction&);
+    void op_cd(const Instruction&); void op_fb(const Instruction&); void op_24e(const Instruction&); void op_21c(const Instruction&);
+    void op_101(const Instruction&); void op_1a7(const Instruction&); void op_1a8(const Instruction&);
+
     void execute(const Instruction& instruction);
 
     std::uint32_t key_;
