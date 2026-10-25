@@ -13,6 +13,13 @@
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_main.h>
 
+#include "core/agf.h"
+#include "core/config.h"
+#include "core/install.h"
+#include "core/opcode_table.h"
+#include "core/script.h"
+#include "core/vm.h"
+
 #ifdef EMULATOR_CXX_HAVE_SHADERCROSS
 #include <SDL3_shadercross/SDL_shadercross.h>
 #endif
@@ -21,6 +28,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <random>
 #include <string>
 
 namespace {
@@ -742,6 +752,132 @@ SmokeResult run_smoke_shader(SDL_GPUDevice* device) {
 }
 #endif
 
+std::filesystem::path path_from_utf8(const std::string& text);
+
+int run_core_agf(const std::string& agf_path) {
+    try {
+        std::ifstream input(path_from_utf8(agf_path), std::ios::binary);
+        if (!input) throw core::CoreError("agf-open-failed:" + agf_path);
+        input.seekg(0, std::ios::end);
+        const auto size = input.tellg();
+        input.seekg(0, std::ios::beg);
+        core::Bytes bytes(static_cast<std::size_t>(size));
+        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!input) throw core::CoreError("agf-read-failed:" + agf_path);
+        const core::DecodedAgf image = core::decode_agf(bytes);
+        std::printf(
+            "[core] agf %s: %ux%u bpp=%u rgba=%zu first=%u,%u,%u,%u\n",
+            agf_path.c_str(),
+            image.width,
+            image.height,
+            image.bpp,
+            image.rgba.size(),
+            image.rgba[0],
+            image.rgba[1],
+            image.rgba[2],
+            image.rgba[3]);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[core] AGF FAIL: %s\n", e.what());
+        return 1;
+    }
+}
+
+std::filesystem::path path_from_utf8(const std::string& text) {
+    return std::filesystem::path(std::u8string(
+        reinterpret_cast<const char8_t*>(text.data()), text.size()));
+}
+
+int run_core_install(const std::string& install_dir, const std::string& table_path,
+                     const std::string& config_path, const std::string& config_keys_path,
+                     std::size_t max_steps, std::uint32_t stop_at) {
+    try {
+        const core::Install install = core::open_install(path_from_utf8(install_dir));
+        const auto& index = install.index;
+        std::printf(
+            "[core] alf signature=%s title=%s zone=%d archives=%zu files=%zu configDefaults=%zu\n",
+            index.signature.c_str(),
+            index.title.c_str(),
+            index.zone,
+            index.archives.size(),
+            index.files.size(),
+            index.config_defaults.size());
+
+        if (index.files.empty()) {
+            std::fprintf(stderr, "[core] no files in TOC\n");
+            return 1;
+        }
+        const auto& root_record = index.files[0];
+        const core::Bytes root = core::read_install_file(install, 0);
+        std::printf(
+            "[core] root id=0 name=%s archive=%u length=%u bytes=%zu\n",
+            root_record.name.c_str(),
+            root_record.archive_index,
+            root_record.length,
+            root.size());
+
+        const core::ScriptHeader header = core::parse_script_header(root);
+        const core::OpcodeTable table = core::OpcodeTable::load_from_file(table_path);
+        core::ConfigVocabulary vocabulary = core::ConfigVocabulary::load_from_file(config_keys_path);
+        core::ConfigStore config(std::move(vocabulary));
+        config.load_defaults(index.config_defaults);
+        std::filesystem::path player_path = config_path.empty()
+            ? install.root / config.get_string("set:RegFilePath") / "SYS4REG.INI"
+            : path_from_utf8(config_path);
+        config.load_player_file(player_path);
+        std::printf(
+            "[core] config named=%zu script=%zu player=%s\n",
+            config.named_size(),
+            config.script_size(),
+            player_path.string().c_str());
+        std::string error;
+        const auto instructions = core::decode_instructions(
+            std::span<const std::uint8_t>(root).subspan(header.body_offset),
+            table,
+            200000,
+            &error);
+        std::printf(
+            "[core] script magic=%s version=%s header=%zu body=%zu instructions=%zu table=%zu\n",
+            header.magic.c_str(),
+            header.version.c_str(),
+            header.header_size,
+            root.size() - header.body_offset,
+            instructions.size(),
+            table.size());
+        if (!error.empty()) std::printf("[core] decode-stop=%s\n", error.c_str());
+
+        std::random_device random;
+        std::uint32_t key = random();
+        if (key == 0) key = 1;
+        core::Machine machine(key, table, &install, config);
+        machine.load_root(root, 0);
+        machine.stop_at_opcode(stop_at);
+        const core::RunResult vm = machine.run(max_steps);
+        std::printf(
+            "[core] vm stop=%d steps=%zu opcode=0x%X offset=%zu message=%s\n",
+            static_cast<int>(vm.reason),
+            vm.steps,
+            vm.opcode,
+            vm.offset,
+            vm.message.c_str());
+
+        const std::size_t show = std::min<std::size_t>(instructions.size(), 8);
+        for (std::size_t i = 0; i < show; ++i) {
+            const auto& ins = instructions[i];
+            std::printf(
+                "[core]   #%zu off=0x%zX opcode=0x%X argc=%zu\n",
+                i,
+                ins.offset,
+                ins.opcode,
+                ins.operands.size());
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[core] FAIL: %s\n", e.what());
+        return 1;
+    }
+}
+
 SmokeResult run_smoke(SDL_GPUDevice* device) {
     SmokeResult clear = run_smoke_clear(device);
     if (!clear.ok) return clear;
@@ -845,8 +981,40 @@ int run_windowed(SDL_GPUDevice* device, SDL_Window* window) {
 
 int main(int argc, char** argv) {
     bool smoke = false;
+    std::string install_dir;
+    std::string table_path;
+    std::string config_path;
+    std::string config_keys_path;
+    std::string agf_path;
+    std::size_t max_steps = 200000;
+    std::uint32_t stop_at = 0x20F;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--smoke") == 0) smoke = true;
+        if (std::strcmp(argv[i], "--smoke") == 0) {
+            smoke = true;
+        } else if (std::strcmp(argv[i], "--install") == 0 && i + 1 < argc) {
+            install_dir = argv[++i];
+        } else if (std::strcmp(argv[i], "--opcode-table") == 0 && i + 1 < argc) {
+            table_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            config_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--stop-at") == 0 && i + 1 < argc) {
+            stop_at = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (std::strcmp(argv[i], "--max-steps") == 0 && i + 1 < argc) {
+            max_steps = static_cast<std::size_t>(std::strtoull(argv[++i], nullptr, 10));
+        } else if (std::strcmp(argv[i], "--config-keys") == 0 && i + 1 < argc) {
+            config_keys_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--agf") == 0 && i + 1 < argc) {
+            agf_path = argv[++i];
+        }
+    }
+
+    if (!agf_path.empty()) return run_core_agf(agf_path);
+
+    if (!install_dir.empty()) {
+        const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
+        if (table_path.empty()) table_path = (exe_dir / "opcode-table.json").string();
+        if (config_keys_path.empty()) config_keys_path = (exe_dir / "config-keys.json").string();
+        return run_core_install(install_dir, table_path, config_path, config_keys_path, max_steps, stop_at);
     }
 
     SDL_SetAppMetadata("emulator-cxx", "0.1.0", "dev.amayui.emulator-cxx");

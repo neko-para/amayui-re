@@ -24,7 +24,7 @@ import { describe as describeSamples } from '../lib/samples.mjs';
  * 外部工具定义的 JSON（说明书不在本仓）—— 保持这份判据短且显式。
  * `tsconfig*.json` 与 `package.json` 同类：由 TypeScript / npm 定义，不是本仓的"结构化数据"。
  */
-const isEcosystem = (name) => name === 'package.json' || /^tsconfig[.-].*\.json$/.test(name) || name === 'tsconfig.json';
+const isEcosystem = (name) => name === 'package.json' || name === 'vcpkg.json' || name === 'CMakePresets.json' || /^tsconfig[.-].*\.json$/.test(name) || name === 'tsconfig.json';
 /**
  * **本机私有配置**：`*.local.json`（`.gitignore` 命中 ⇒ 不入库）—— 它是**这台机器**的事实
  * （平台相关的绝对路径等），不是仓库的结构化数据 ⇒ 不该被要求配说明书。
@@ -48,8 +48,11 @@ const SKIP_DIRS = new Set([
   '.npm-cache',
   'dist',
   'tmp',
+  'out',
   '.cache',
   '.vscode',
+  // 第三方依赖树（vcpkg submodule）：里面的 JSON 不属于本仓自有结构化数据。
+  'vcpkg',
 ]);
 
 /** 说明书必须覆盖的三件事（正是"只讲查询不讲编辑"的反面）；最后一项是"指向脚本自描述" */

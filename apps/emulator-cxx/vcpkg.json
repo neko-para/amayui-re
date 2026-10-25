@@ -3,7 +3,8 @@
   "version-string": "0.1.0",
   "description": "Amayui clean-room emulator, native C++ host (SDL3 + bgfx)",
   "dependencies": [
-    "sdl3"
+    "sdl3",
+    "nlohmann-json"
   ],
   "features": {
     "renderer": {

@@ -8,6 +8,7 @@ project(emulator-cxx
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(EMULATOR_CXX_WITH_BGFX "Link bgfx (vcpkg feature: renderer)" OFF)
 option(EMULATOR_CXX_WITH_SHADER "Link SDL_shadercross (vcpkg feature: shader)" OFF)
@@ -22,12 +23,32 @@ if(NOT DEFINED VCPKG_TARGET_TRIPLET AND NOT DEFINED ENV{VCPKG_ROOT})
 endif()
 
 find_package(SDL3 CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+
+add_library(emulator-core STATIC
+    src/core/lzss.cpp
+    src/core/alf.cpp
+    src/core/agf.cpp
+    src/core/config.cpp
+    src/core/script.cpp
+    src/core/opcode_table.cpp
+    src/core/vm.cpp
+    src/core/install.cpp)
+target_include_directories(emulator-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(emulator-core PUBLIC nlohmann_json::nlohmann_json)
+target_compile_features(emulator-core PUBLIC cxx_std_20)
 
 add_executable(emulator-cxx
     src/main.cpp)
+target_link_libraries(emulator-cxx PRIVATE emulator-core)
 
 enable_testing()
 add_test(NAME emulator-cxx-smoke COMMAND emulator-cxx --smoke)
+
+add_executable(emulator-core-selftest
+    tests/core_selftest.cpp)
+target_link_libraries(emulator-core-selftest PRIVATE emulator-core)
+add_test(NAME emulator-core-selftest COMMAND emulator-core-selftest)
 
 target_compile_features(emulator-cxx PRIVATE cxx_std_20)
 target_link_libraries(emulator-cxx PRIVATE SDL3::SDL3)
@@ -62,3 +83,12 @@ if(MSVC)
 else()
     target_compile_options(emulator-cxx PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+add_custom_command(TARGET emulator-cxx POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../data/spec/format/opcode-table.json
+        $<TARGET_FILE_DIR:emulator-cxx>/opcode-table.json)
+add_custom_command(TARGET emulator-cxx POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../data/spec/format/config-keys.json
+        $<TARGET_FILE_DIR:emulator-cxx>/config-keys.json)
