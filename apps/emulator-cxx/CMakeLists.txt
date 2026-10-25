@@ -34,12 +34,22 @@ add_library(emulator-core STATIC
     src/core/script.cpp
     src/core/scene_raster.cpp
     src/core/text_raster.cpp
+    src/core/movie.cpp
     src/core/opcode_table.cpp
     src/core/vm.cpp
     src/core/install.cpp)
 target_include_directories(emulator-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# pl_mpeg 是第三方单文件解码器（见 third_party/pl_mpeg/README.md）；只有 movie.cpp 编译它。
+target_include_directories(emulator-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pl_mpeg)
 target_link_libraries(emulator-core PUBLIC nlohmann_json::nlohmann_json)
 target_compile_features(emulator-core PUBLIC cxx_std_20)
+
+# 解码是第三方代码、且是热点：Debug 构建也按优化编译它（引擎逻辑仍在 /Od 下单步）。
+if(MSVC)
+    set_source_files_properties(src/core/movie.cpp PROPERTIES COMPILE_OPTIONS "/O2")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    set_source_files_properties(src/core/movie.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
 
 add_executable(emulator-cxx
     src/main.cpp)
@@ -65,6 +75,14 @@ if(EMULATOR_CXX_INSTALL_DIR)
         COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --play-frames 2)
     add_test(NAME emulator-core-boot-play
         COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --play-boot --play-frames 1)
+    # 影片：真 MPEG-1 program stream（LOGO.MPG）→ 门前服务 → 同槽纹理 → GPU 场景批次。
+    # `--logo-frames 0` 只跑到收尾（判据在程序里：必须有帧、必须走到收尾）。
+    add_test(NAME emulator-core-logo-movie
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
+                --render-logo-gpu "${CMAKE_CURRENT_BINARY_DIR}/logo-movie" --logo-frames 0)
+    add_test(NAME emulator-core-logo-gpu
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
+                --render-logo-gpu "${CMAKE_CURRENT_BINARY_DIR}/logo-frames" --logo-stride 80 --logo-frames 2)
 endif()
 
 target_compile_features(emulator-cxx PRIVATE cxx_std_20)

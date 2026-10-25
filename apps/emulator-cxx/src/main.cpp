@@ -1209,7 +1209,8 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
                      const std::string& config_path, const std::string& config_keys_path,
                      std::size_t max_steps, std::uint32_t stop_at, bool to_title,
                      bool render_title, bool show_title, bool play_title, int render_frames,
-                     int trace_steps, int play_frames, bool play_boot, bool gpu_title) {
+                     int trace_steps, int play_frames, bool play_boot, bool gpu_title,
+                     const std::string& logo_dir, int logo_stride, int logo_frames) {
     try {
         const core::Install install = core::open_install(core::path_from_utf8(install_dir));
         const auto& index = install.index;
@@ -1304,6 +1305,94 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
             if (device != nullptr) SDL_DestroyGPUDevice(device);
             SDL_Quit();
             return 0;
+        }
+        // 无窗口影片校验：从根脚本跑到 LOGO 的 `0x20f`，以后端时间推进，逐帧导出 GPU 合成。
+        // `--logo-frames 0` = 不导出、只跑到影片收尾（CTest 用的确定性判据）。
+        if (!logo_dir.empty()) {
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+            std::filesystem::create_directories(core::path_from_utf8(logo_dir));
+            std::size_t steps = 0;
+            while (!machine.halted() && !machine.movie_active() && steps < max_steps) {
+                if (!machine.step()) break;
+                ++steps;
+            }
+            std::printf("[movie] start steps=%zu clock=%ums script=%u active=%d\n", steps,
+                        machine.scene_clock_ms(), machine.frame().script_id,
+                        machine.movie_active() ? 1 : 0);
+            if (!machine.movie_active()) {
+                std::fprintf(stderr, "[movie] LOGO 影片没有启动（未到 0x20f 或绑定门失败）\n");
+                return 1;
+            }
+            const bool dump = logo_frames > 0;
+            bool ok = true;
+            SDL_GPUDevice* device = nullptr;
+            if (dump) {
+                if (!SDL_Init(SDL_INIT_VIDEO)) { log_sdl_error("SDL_Init(logo-gpu)"); return 1; }
+                if (!SDL_ShaderCross_Init()) {
+                    log_sdl_error("SDL_ShaderCross_Init");
+                    SDL_Quit();
+                    return 1;
+                }
+                device = create_gpu_device();
+                if (device == nullptr) { SDL_ShaderCross_Quit(); SDL_Quit(); return 1; }
+            }
+            int requests = 0;
+            int dumped = 0;
+            while (ok && !machine.halted() && machine.movie_active()) {
+                bool requested = false;
+                for (int i = 0; i < 20000; ++i) {
+                    if (!machine.step()) break;
+                    if (machine.consume_frame_step()) { requested = true; break; }
+                    if (!machine.movie_active()) break;
+                }
+                if (!requested) break;
+                const int index = requests++;
+                if (!dump) { machine.end_render(); continue; }
+                if (index % (logo_stride > 0 ? logo_stride : 1) != 0) {
+                    machine.end_render();
+                    continue;
+                }
+                // 采样影片纹理的平均亮度：全黑 / 全同色的回归在这里就能看出来。
+                double mean = 0.0;
+                if (const core::TextureRecord* texture = machine.texture(42);
+                    texture != nullptr && texture->rgba.size() >= 4) {
+                    const std::size_t step = (texture->rgba.size() / 4 / 997) * 4;
+                    std::uint64_t sum = 0;
+                    std::size_t n = 0;
+                    for (std::size_t i = 0; i + 3 < texture->rgba.size() && step > 0; i += step) {
+                        sum += texture->rgba[i] + texture->rgba[i + 1] + texture->rgba[i + 2];
+                        ++n;
+                    }
+                    mean = n > 0 ? static_cast<double>(sum) / static_cast<double>(n * 3) : 0.0;
+                }
+                char name[512];
+                std::snprintf(name, sizeof(name), "%s/logo-%03d.bmp", logo_dir.c_str(), index);
+                if (!render_scene_gpu_to_bmp(device, machine, name, 1280, 720)) {
+                    ok = false;
+                    break;
+                }
+                machine.end_render();
+                ++dumped;
+                std::printf("[movie] frame %d clock=%ums mean=%.1f -> %s\n", index,
+                            machine.scene_clock_ms(), mean, name);
+                if (dumped >= logo_frames) break;
+            }
+            std::printf("[movie] logo done requests=%d dumped=%d clock=%ums active=%d\n", requests,
+                        dumped, machine.scene_clock_ms(), machine.movie_active() ? 1 : 0);
+            if (device != nullptr) SDL_DestroyGPUDevice(device);
+            if (dump) { SDL_ShaderCross_Quit(); SDL_Quit(); }
+            if (!ok) return 1;
+            // 判据：影片真的播了（至少一帧）且走到了收尾（导出模式按帧数截断时不要求）。
+            if (requests < 1) { std::fprintf(stderr, "[movie] 一帧都没有请求\n"); return 1; }
+            if (!dump && machine.movie_active()) {
+                std::fprintf(stderr, "[movie] 影片没有走到收尾\n");
+                return 1;
+            }
+            return 0;
+#else
+            std::fprintf(stderr, "[movie] --render-logo-gpu requires shadercross\n");
+            return 1;
+#endif
         }
         // 窗口播放：在 TITLE 刚成为当前帧时就停，交给窗口按真实时钟跑 TITLE 的渐变；
         // 静态导出仍跑到步数上限，保证画面已建好。
@@ -1649,6 +1738,7 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     bool running = true;
     std::size_t frame = 0;
     std::size_t max_windows = 0;
+    std::size_t idle_batches = 0;
     const std::uint32_t clock_base = machine.scene_clock_ms();
     const Uint64 start_ticks = SDL_GetTicks();
     const auto present = [&]() -> bool {
@@ -1670,6 +1760,8 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         }
         if (!running) break;
         if (machine.halted()) {
+            // 无人值守（给了帧数）时"脚本结束"就是跑完；交互模式保留最后一帧等你关窗。
+            if (max_frames > 0) break;
             SDL_Delay(10);
             continue;
         }
@@ -1682,11 +1774,20 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         for (int i = 0; i < 4096 && !requested; ++i) {
             if (!machine.step()) break;
             if (machine.consume_frame_step()) requested = true;
+            // 影片期间门被影片位关住：同一时钟下的后续迭代都不会推进脚本，交给外层的 1ms 节拍。
+            if (machine.movie_active()) break;
         }
         if (!requested) {
+            // 场景变成静态以后，引擎就不会再请求渲染 ⇒ 按帧数推进的无人值守模式会空转；
+            // 连续一批都没有请求就收工（交互模式仍然等窗口事件 / Esc）。
+            if (max_frames > 0 && ++idle_batches > 3000) {
+                std::printf("[render] play idle: %zu 批没有渲染请求，按帧数收工\n", idle_batches);
+                break;
+            }
             SDL_Delay(1);
             continue;
         }
+        idle_batches = 0;
 
         bool presented = false;
 #ifdef EMULATOR_CXX_HAVE_SHADERCROSS
@@ -1774,6 +1875,9 @@ int main(int argc, char** argv) {
     int play_frames = 0;
     bool play_boot = false;
     bool gpu_title = false;
+    std::string logo_dir;
+    int logo_stride = 24;
+    int logo_frames = 12;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--smoke") == 0) {
             smoke = true;
@@ -1809,6 +1913,13 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--play-boot") == 0) {
             play_boot = true;
             stop_at = 0;
+        } else if (std::strcmp(argv[i], "--render-logo-gpu") == 0 && i + 1 < argc) {
+            logo_dir = argv[++i];
+            stop_at = 0;
+        } else if (std::strcmp(argv[i], "--logo-stride") == 0 && i + 1 < argc) {
+            logo_stride = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--logo-frames") == 0 && i + 1 < argc) {
+            logo_frames = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--play-frames") == 0 && i + 1 < argc) {
             play_title = true;
             play_frames = std::atoi(argv[++i]);
@@ -1841,7 +1952,7 @@ int main(int argc, char** argv) {
         const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
         if (table_path.empty()) table_path = (exe_dir / "opcode-table.json").string();
         if (config_keys_path.empty()) config_keys_path = (exe_dir / "config-keys.json").string();
-        return run_core_install(install_dir, table_path, config_path, config_keys_path, max_steps, stop_at, to_title, render_title, show_title, play_title, render_frames, trace_steps, play_frames, play_boot, gpu_title);
+        return run_core_install(install_dir, table_path, config_path, config_keys_path, max_steps, stop_at, to_title, render_title, show_title, play_title, render_frames, trace_steps, play_frames, play_boot, gpu_title, logo_dir, logo_stride, logo_frames);
     }
 
     SDL_SetAppMetadata("emulator-cxx", "0.1.0", "dev.amayui.emulator-cxx");

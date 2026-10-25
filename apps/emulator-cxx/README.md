@@ -8,7 +8,8 @@
 - SDL_GPU（当前 POC）：显式 `submit` + `present`，无浏览器合成器；
 - bgfx（可选 feature）：后续 2D sprite/mesh/混合渲染；
 - FreeType（可选）：文字；Shift-JIS 用平台代码页转换（Windows `MultiByteToWideChar(932)` / 其它平台 iconv）；
-- FFmpeg（可选）：影片解码。
+- 影片：`third_party/pl_mpeg`（**vendored 单文件**，MIT，MPEG-1 program stream + 只视频）；
+  FFmpeg 仍留作可选 feature，但当前没有用到它。
 
 ## 目录
 
@@ -18,8 +19,9 @@ apps/emulator-cxx/
   CMakePresets.json
   vcpkg.json
   vcpkg/                    git submodule（vcpkg 本体，不入库）
+  third_party/pl_mpeg/      影片解码（vendored 单文件，来源与为什么见该目录 README）
   src/main.cpp              窗口 / present / --smoke / core CLI
-  src/core/                 C++ core（按 spec 重写）：ALF / LZSS / AGF / 脚本头 / opcode 解码
+  src/core/                 C++ core（按 spec 重写）：ALF / LZSS / AGF / 脚本头 / opcode 解码 / 影片后端
 ```
 
 ## 依赖（vcpkg submodule + manifest）
@@ -33,7 +35,7 @@ vcpkg 以 **git submodule** 固定在 `apps/emulator-cxx/vcpkg`；依赖由同�
 | `shader` | `sdl3-shadercross` | HLSL → DXIL/SPIR-V（默认开启） |
 | `text` | `freetype` | 字形光栅化；Shift-JIS 用平台代码页转换（Windows `MultiByteToWideChar(932)`，其它平台系统 iconv）（默认开启） |
 | `renderer` | `bgfx` | 2D 渲染后端（可选） |
-| `video` | `ffmpeg` | 影片解码（可选） |
+| `video` | `ffmpeg` | 影片解码（可选、当前未用；实际走 vendored pl_mpeg） |
 
 首次拉取：
 
@@ -79,7 +81,7 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 | 配置库 | `CORE-CONFIG` | 词表 + ALF 发行默认表 + `SYS4REG.INI` 覆盖 + 脚本键表 |
 | 已接处理器族 | `CORE-OPS-*` | no-op、语音、标量、列表、字符串、数组/引用地址、纹理/绘制项/网格、`0x3` call-script |
 | 启动链 | `CORE-BOOT` | 真实 `SYSTEM4.BIN` 越过 LOGO 影片，进入 `TITLE.BIN`（id 21092）主循环 |
-| 影片 | `CORE-OPS-MOVIE` | `0x20F` 对象表 / 纹理绑定门 / 影片位；headless 后端立即收尾 |
+| 影片 | `CORE-OPS-MOVIE`、`CORE-VM-MOVIE` | `0x20F` 对象表 / 纹理绑定门 / 影片位；门之前的对象表服务按引擎时钟推进 pl_mpeg 解码，新帧写进**同槽纹理**并标脏；收尾 `(选项字 & 3) != 2` 填最后一帧，循环位原地重启 |
 | 渲染接入 | `CORE-OPS-TEXTURE-DRAW`、`CORE-TIMING-WINDOW` | AGF 像素进入纹理记录；绘制项 / 网格按有符号 key 软件合成；颜色窗四档派生；`0x33F` tint + 混合模式 |
 | 场景命令档 | `CORE-OPS-SCENE-COMMAND-RECORDS`、`CORE-SCENE-DRAW-ORDER` | `0x223/24D/24F/250/251` 写表与校验；命令档 → 离屏画布 36/37 → 四种类合成（Fade / 遮罩 / 12 种抹除图案 / SlideBlur / ZoomBlur）→ 收尾扫描 |
 | 离屏文字 | `CORE-OPS-RENDER-TEXT-204` | Shift-JIS（平台代码页 / iconv）→ FreeType 字形；主色 / 副色 / 绘制模式 / 对位状态来自字体对象 |
@@ -109,6 +111,10 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 # 单步跟踪指定条数（调试主循环 / 门服务）
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --trace 40
 
+# 影片：跑到 LOGO 的 play-movie，再逐帧导出 GPU 合成（`0` 帧 = 只跑到收尾）
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-logo-gpu out\logo --logo-stride 40 --logo-frames 6
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-logo-gpu out\logo --logo-frames 0
+
 # 单个 AGF
 .\out\build\windows-x64\emulator-cxx.exe --agf "E:\Games\Eushully\天結\install\MI040.AGF"
 ```
@@ -117,7 +123,7 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 `--config` 可指定玩家 `SYS4REG.INI`；缺省按 `set:UseAppDataFolder` 选配置根（`%APPDATA%` / `XDG_CONFIG_HOME` / `~/.config`，否则安装根），
 再拼 `set:RegFilePath` 与文件名。
 `--to-title` 以 `TITLE.BIN`（统一文件 id 21092）为停止线；未知 opcode 仍停在它前面并报告偏移。
-门 / 状态位服务、换帧/换脚本、容器句柄尚未完整建模。
+门 / 状态位服务：**等待位与影片位**已建模（影片位只管关门，收尾在门之前的影片对象表服务里）；其余状态位、换帧 / 换脚本、容器句柄尚未完整建模。
 `--stop-at <opcode>` 仍可用于在任意 opcode 前停止；`0` 表示不设停止线。
 根脚本静态解码会在数据区遇到非法 opcode 后停止，这是规范允许的静态解码边界，不是执行边界。
 
@@ -125,8 +131,8 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 `--render-title-gpu` 用 GPU 场景批次把 TITLE 画到离屏纹理、读回 `title-gpu.bmp`，用于核对 GPU 路径。
 `--play-title` 在 TITLE 刚成为当前帧时就停（不预跑 TITLE 主体），再开窗用真实时钟跑 TITLE，
 **只在 core 请求渲染时**合成 / 呈现（静态 TITLE 可能只呈现一帧）；
-`--play-boot` 从根脚本开始就开窗，按引擎的「门前渲染」节奏呈现（场景脏 / 有动画 ⇒ 下一次满足闸门的迭代渲染一次），
-因此能看到 LOGO 之后的渐变；影片本身仍是 headless。`--play-frames N` 是它们的无人值守版本。
+`--play-boot` 从根脚本开始就开窗，按引擎的「门前渲染」节奏呈现（场景脏 / 有动画 / 影片新帧 ⇒ 下一次满足闸门的迭代渲染一次），
+因此能看到 LOGO 影片与之后的渐变。`--play-frames N` 是它们的无人值守版本。
 
 ## 运行 / 门禁
 

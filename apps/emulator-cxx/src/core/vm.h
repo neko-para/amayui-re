@@ -2,12 +2,15 @@
 
 #include "core/bytes.h"
 #include "core/config.h"
+#include "core/movie.h"
 #include "core/opcode_table.h"
 #include "core/script.h"
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -109,11 +112,15 @@ struct SceneRecord {
     std::uint32_t color = 0xFFFFFFFFu;
 };
 
+// 影片对象（对象表的一格）：引擎状态 + 播放后端句柄（平台边界，核心不解释其形状）。
 struct MovieRecord {
     bool present = false;
-    bool started = false;
+    bool started = false;  // 只有成功启动过才进「播完」判据 / 维持影片位
     std::uint32_t file_id = 0;
     std::uint32_t options = 0;
+    // 启播时的引擎时钟（毫秒）：后端报告的「当前位置」由它换算。
+    std::uint32_t started_ms = 0;
+    std::shared_ptr<MovieBackend> backend;
 };
 
 struct MeshRecord {
@@ -307,6 +314,17 @@ public:
     const DrawItem* draw_item(std::uint32_t key) const { const auto it = draw_items_.find(key); return it == draw_items_.end() ? nullptr : &it->second; }
     const SceneRecord* scene_record(std::uint32_t key) const { const auto it = scene_records_.find(key); return it == scene_records_.end() ? nullptr : &it->second; }
     const MovieRecord* movie(std::uint32_t slot) const { const auto it = movies_.find(slot); return it == movies_.end() ? nullptr : &it->second; }
+    // 「有活动对象」标记：对象表里是否还有已启动的影片槽（`CORE-VM-MOVIE`）。
+    bool movie_active() const { return movie_active_; }
+    // 影片后端工厂（平台边界注入点）：缺省 = MPEG-1 program stream（pl_mpeg）。
+    // 测试用它换一个确定性的假后端；⛔ 生产代码不要改。
+    using MovieBackendFactory = std::function<std::unique_ptr<MovieBackend>()>;
+    void set_movie_backend_factory(MovieBackendFactory factory) { movie_factory_ = std::move(factory); }
+    // 影片字节的来源（统一文件 id → 字节）。缺省 = 安装目录 / ALF 切片；测试用它喂固定字节。
+    using MovieBytesLoader = std::function<Bytes(std::uint32_t file_id)>;
+    void set_movie_bytes_loader(MovieBytesLoader loader) { movie_bytes_loader_ = std::move(loader); }
+    std::size_t aux_a_count() const { return aux_a_.size(); }
+    std::size_t aux_b_count() const { return aux_b_.size(); }
     const MeshRecord* mesh(std::uint32_t key) const { const auto it = meshes_.find(key); return it == meshes_.end() ? nullptr : &it->second; }
     const TextureRecord* texture(std::uint32_t id) const {
         const auto it = textures_.find(id);
@@ -332,6 +350,10 @@ public:
 private:
     Frame& frame_mut();
     void write_length(std::uint32_t words);
+    // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：轮询 / 收尾 / 循环 / 填纹理。
+    void service_movies();
+    // 把一帧写进同槽纹理（呈现层的像素效果，不在规范正文里）；写成功 ⇒ true。
+    bool fill_movie_texture(std::uint32_t slot, const MovieFrame& frame);
     std::uint32_t address_of(const Operand& operand) const;
     bool resolve_address(std::uint32_t address, std::uint32_t& tag, std::uint32_t& index) const;
     std::uint32_t read_pointer(const Operand& operand) const;
@@ -422,6 +444,8 @@ private:
     std::unordered_map<std::uint32_t, DrawItem> draw_items_;
     std::unordered_map<std::uint32_t, MeshRecord> meshes_;
     std::unordered_map<std::uint32_t, MovieRecord> movies_;
+    MovieBackendFactory movie_factory_;
+    MovieBytesLoader movie_bytes_loader_;
     std::unordered_map<std::uint32_t, SceneRecord> scene_records_;
     std::map<std::uint32_t, SceneCommandRecord> scene_commands_;
     std::uint32_t render_now_ms_ = 0;

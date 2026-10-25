@@ -2834,6 +2834,13 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-frame.test.mjs',
     what: '0x6 打开失败抛退出型 ⇒ 可重试路径消失（只能终止）',
   },
+  {
+    file: 'apps/emulator-cxx/third_party/pl_mpeg/pl_mpeg.h',
+    from: 'PL_MPEG - MPEG1 Video decoder, MP2 Audio decoder, MPEG-PS demuxer',
+    to: 'PL_MPEG - MPEG1 Video decoder, MP2 Audio decoder, MPEG-PS demuxer (drifted)',
+    guard: 'tools/test/emulator-cxx-pl-mpeg-sync.test.mjs',
+    what: '只改 C++ 那份 pl_mpeg 副本 ⇒ 两处解码器漂移（两边的影片测试各自仍然绿）',
+  },
 
 ];
 

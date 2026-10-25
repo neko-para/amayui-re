@@ -2,6 +2,7 @@
 #include "core/alf.h"
 #include "core/config.h"
 #include "core/encoding.h"
+#include "core/movie.h"
 #include "core/opcode_table.h"
 #include "core/scene_raster.h"
 #include "core/script.h"
@@ -212,6 +213,81 @@ std::vector<std::uint8_t> make_agf_1x1() {    std::vector<std::uint8_t> bytes(24
     bytes.push_back(0x20); // G
     bytes.push_back(0x10); // R
     bytes.push_back(0x00); // pad
+    return bytes;
+}
+
+// 影片后端替身：确定性、不读文件、不出像素（像素只由产物帧决定）。
+struct FakeMovieStats {
+    int frames = 0;    // 产出的"新帧"次数
+    int rewinds = 0;   // 循环重启次数
+    int plays = 0;
+    bool opened = false;
+    bool closed = false;
+    std::size_t bytes = 0;
+};
+
+class FakeMovieBackend final : public core::MovieBackend {
+public:
+    FakeMovieBackend(FakeMovieStats* stats, std::uint32_t width, std::uint32_t height,
+                     std::uint8_t value)
+        : stats_(stats) {
+        frame_.width = width;
+        frame_.height = height;
+        frame_.rgba.assign(static_cast<std::size_t>(width) * height * 4u, value);
+        for (std::size_t i = 3; i < frame_.rgba.size(); i += 4) frame_.rgba[i] = 255;
+    }
+
+    bool open(core::Bytes bytes, std::string&) override {
+        stats_->opened = true;
+        stats_->bytes = bytes.size();
+        return true;
+    }
+    bool play() override {
+        stats_->plays += 1;
+        return true;
+    }
+    bool advance_to(double seconds) override {
+        if (!(seconds > position_)) return false;
+        position_ = seconds;
+        if (position_ >= duration) {
+            ended_ = true;
+            return false;
+        }
+        if (!produce_frames) return false;
+        stats_->frames += 1;
+        return true;
+    }
+    double position() const override { return position_; }
+    double stop_time() const override { return duration; }
+    bool ended() const override { return ended_; }
+    const core::MovieFrame& frame() const override { return frame_; }
+    bool rewind() override {
+        stats_->rewinds += 1;
+        position_ = 0.0;
+        ended_ = false;
+        return true;
+    }
+    void close() override { stats_->closed = true; }
+
+    double duration = 1.0;
+    bool produce_frames = true;
+
+private:
+    FakeMovieStats* stats_;
+    double position_ = 0.0;
+    bool ended_ = false;
+    core::MovieFrame frame_;
+};
+
+// 建一台带影片替身的机器：4×4 纹理槽 42 + `0x20f`（资源 7 / 槽 42 / 选项）。
+std::vector<std::uint8_t> make_movie_script(std::uint32_t options, bool create_texture) {
+    std::vector<std::uint8_t> bytes = make_script_with_body();
+    if (create_texture) {
+        emit_instruction(bytes, 0x1F8, {{0, 42}, {0, 4}, {0, 4}, {0, 0}});
+    }
+    emit_instruction(bytes, 0x20F, {{0, 7}, {0, 42}, {0, options}});
+    emit_instruction(bytes, 0x1A8, {});  // 影片收尾后才执行到这里
+    emit_instruction(bytes, 2, {});
     return bytes;
 }
 
@@ -917,6 +993,267 @@ int main() {
         if (!gate_machine.step() || !gate_machine.consume_frame_step()) {
             std::fprintf(stderr, "0x21B did not open the render gate\n");
             return 1;
+        }
+
+        // ── 影片：0x20f 的对象表 / 绑定门 / 影片位 / 门前服务（CORE-OPS-MOVIE / CORE-VM-MOVIE） ──
+        {
+            FakeMovieStats stats;
+            core::ConfigStore movie_config;
+            movie_config.set_int("set:DrawMode", 1);
+            core::Machine movie_machine(0x12345678u, table, nullptr, std::move(movie_config));
+            movie_machine.set_movie_bytes_loader([](std::uint32_t) { return core::Bytes{0, 0, 1, 0xBA}; });
+            movie_machine.set_movie_backend_factory([&stats]() {
+                auto backend = std::make_unique<FakeMovieBackend>(&stats, 4, 4, 0x40);
+                return std::unique_ptr<core::MovieBackend>(std::move(backend));
+            });
+            movie_machine.load_root(make_movie_script(0, true));
+            if (!movie_machine.step()) {  // 0x1f8 建空白纹理
+                std::fprintf(stderr, "movie fixture create-texture failed: %s\n",
+                             movie_machine.last_stop().message.c_str());
+                return 1;
+            }
+            if (!movie_machine.step() || !movie_machine.movie_active()) {  // 0x20f
+                std::fprintf(stderr, "0x20f did not start the movie: %s\n",
+                             movie_machine.last_stop().message.c_str());
+                return 1;
+            }
+            const core::MovieRecord* started = movie_machine.movie(42);
+            if (started == nullptr || !started->present || !started->started ||
+                started->file_id != 7 || started->options != 0) {
+                std::fprintf(stderr, "0x20f object table mismatch\n");
+                return 1;
+            }
+            if ((movie_machine.state_flags() & 0x2000u) == 0) {
+                std::fprintf(stderr, "0x20f did not set the movie bit\n");
+                return 1;
+            }
+            if (!stats.opened || stats.bytes != 4 || stats.plays != 1) {
+                std::fprintf(stderr, "0x20f backend open/play mismatch\n");
+                return 1;
+            }
+            // 影片位关住门：后续迭代只服务，不推进脚本。
+            const std::size_t movie_ip = movie_machine.frame().ip;
+            if (!movie_machine.step()) {
+                std::fprintf(stderr, "movie service step failed\n");
+                return 1;
+            }
+            if (movie_machine.frame().ip != movie_ip) {
+                std::fprintf(stderr, "script advanced while the movie bit was set\n");
+                return 1;
+            }
+            const core::TextureRecord* playing = movie_machine.texture(42);
+            if (playing == nullptr || playing->rgba.size() != 4u * 4u * 4u ||
+                playing->rgba[0] != 0x40 || playing->rgba[3] != 255 || playing->revision < 2) {
+                std::fprintf(stderr, "movie frame was not written into the bound texture\n");
+                return 1;
+            }
+            if (!movie_machine.consume_frame_step()) {
+                std::fprintf(stderr, "movie new frame did not request a render step\n");
+                return 1;
+            }
+            // 跑到收尾：对象槽被移除、后端关闭、影片位由位服务清掉。
+            bool finished = false;
+            for (int i = 0; i < 400; ++i) {
+                if (!movie_machine.step()) {
+                    std::fprintf(stderr, "movie run failed: %s\n",
+                                 movie_machine.last_stop().message.c_str());
+                    return 1;
+                }
+                if (!movie_machine.movie_active()) {
+                    finished = true;
+                    break;
+                }
+            }
+            if (!finished || movie_machine.movie(42) != nullptr || !stats.closed) {
+                std::fprintf(stderr, "movie teardown mismatch (finished=%d closed=%d)\n",
+                             finished ? 1 : 0, stats.closed ? 1 : 0);
+                return 1;
+            }
+            movie_machine.step();  // 影片位服务：没有已启动槽 ⇒ 清位放行
+            if ((movie_machine.state_flags() & 0x2000u) != 0) {
+                std::fprintf(stderr, "movie bit was not cleared after teardown\n");
+                return 1;
+            }
+            const core::TextureRecord* last = movie_machine.texture(42);
+            if (last == nullptr || last->rgba[0] != 0x40) {
+                std::fprintf(stderr, "teardown did not fill the texture with the last frame\n");
+                return 1;
+            }
+        }
+
+        // 循环位：收尾 ⇒ 回到开头重新启动，保留对象与槽，不填纹理。
+        {
+            FakeMovieStats stats;
+            core::ConfigStore loop_config;
+            loop_config.set_int("set:DrawMode", 1);
+            core::Machine loop_machine(0x12345678u, table, nullptr, std::move(loop_config));
+            loop_machine.set_movie_bytes_loader([](std::uint32_t) { return core::Bytes{0, 0, 1, 0xBA}; });
+            loop_machine.set_movie_backend_factory([&stats]() {
+                return std::unique_ptr<core::MovieBackend>(
+                    std::make_unique<FakeMovieBackend>(&stats, 4, 4, 0x40));
+            });
+            loop_machine.load_root(make_movie_script(1, true));  // 选项字第 0 位 = 循环
+            for (int i = 0; i < 200; ++i) {
+                if (!loop_machine.step()) {
+                    std::fprintf(stderr, "looping movie failed: %s\n",
+                                 loop_machine.last_stop().message.c_str());
+                    return 1;
+                }
+            }
+            if (stats.rewinds < 1 || !loop_machine.movie_active() ||
+                loop_machine.movie(42) == nullptr || (loop_machine.state_flags() & 0x2000u) == 0) {
+                std::fprintf(stderr, "looping movie did not restart in place (rewinds=%d)\n",
+                             stats.rewinds);
+                return 1;
+            }
+        }
+
+        // `(选项字 & 3) == 2` ⇒ 收尾**不**发"填纹理"：纹理保持空白（这一支不出新帧）。
+        {
+            for (const std::uint32_t options : {0u, 2u}) {
+                FakeMovieStats stats;
+                core::ConfigStore fill_config;
+                fill_config.set_int("set:DrawMode", 1);
+                core::Machine fill_machine(0x12345678u, table, nullptr, std::move(fill_config));
+                fill_machine.set_movie_bytes_loader([](std::uint32_t) { return core::Bytes{0, 0, 1, 0xBA}; });
+                fill_machine.set_movie_backend_factory([&stats]() {
+                    auto backend = std::make_unique<FakeMovieBackend>(&stats, 4, 4, 0x40);
+                    backend->produce_frames = false;  // 播放期不出帧 ⇒ 只剩收尾这一次填纹理
+                    return std::unique_ptr<core::MovieBackend>(std::move(backend));
+                });
+                fill_machine.load_root(make_movie_script(options, true));
+                bool finished = false;
+                bool seen = false;  // 先等它真的启动，否则第一趟就会把"槽为空"当成收尾
+                for (int i = 0; i < 400; ++i) {
+                    if (!fill_machine.step()) {
+                        std::fprintf(stderr, "option=%u movie failed: %s\n", options,
+                                     fill_machine.last_stop().message.c_str());
+                        return 1;
+                    }
+                    if (fill_machine.movie_active()) seen = true;
+                    if (seen && fill_machine.movie(42) == nullptr) {
+                        finished = true;
+                        break;
+                    }
+                }
+                const core::TextureRecord* texture = fill_machine.texture(42);
+                if (!finished || texture == nullptr) {
+                    std::fprintf(stderr, "option=%u movie did not finish\n", options);
+                    return 1;
+                }
+                const bool filled = texture->rgba[0] == 0x40;
+                if (filled != (options == 0u)) {
+                    std::fprintf(stderr, "option=%u fill-texture rule mismatch (filled=%d)\n",
+                                 options, filled ? 1 : 0);
+                    return 1;
+                }
+            }
+        }
+
+        // 失败路径：绑定门为空 / 取文件失败 ⇒ 已建对象留在槽里、未启动、不置影片位。
+        {
+            FakeMovieStats stats;
+            core::Machine gate_movie(0x12345678u, table);
+            gate_movie.set_movie_backend_factory([&stats]() {
+                return std::unique_ptr<core::MovieBackend>(
+                    std::make_unique<FakeMovieBackend>(&stats, 4, 4, 0x40));
+            });
+            gate_movie.set_movie_bytes_loader([](std::uint32_t) { return core::Bytes{0, 0, 1, 0xBA}; });
+            gate_movie.load_root(make_movie_script(0, false));  // 槽 42 没有纹理绑定
+            gate_movie.step();
+            const core::MovieRecord* leftover = gate_movie.movie(42);
+            if (gate_movie.last_stop().message.find("movie-texture-slot-empty") == std::string::npos ||
+                leftover == nullptr || !leftover->present || leftover->started ||
+                gate_movie.movie_active() || (gate_movie.state_flags() & 0x2000u) != 0) {
+                std::fprintf(stderr, "movie binding-gate failure path mismatch: %s\n",
+                             gate_movie.last_stop().message.c_str());
+                return 1;
+            }
+
+            FakeMovieStats open_stats;
+            core::Machine open_movie(0x12345678u, table);
+            open_movie.set_movie_backend_factory([&open_stats]() {
+                return std::unique_ptr<core::MovieBackend>(
+                    std::make_unique<FakeMovieBackend>(&open_stats, 4, 4, 0x40));
+            });
+            open_movie.set_movie_bytes_loader([](std::uint32_t) -> core::Bytes {
+                throw core::CoreError("fixture-no-such-file");
+            });
+            open_movie.load_root(make_movie_script(0, true));
+            open_movie.step();  // 0x1f8
+            open_movie.step();  // 0x20f → 取文件失败
+            const core::MovieRecord* open_leftover = open_movie.movie(42);
+            if (open_movie.last_stop().message.find("movie-open-failed") == std::string::npos ||
+                open_leftover == nullptr || !open_leftover->present || open_leftover->started ||
+                open_movie.movie_active()) {
+                std::fprintf(stderr, "movie open-failure path mismatch: %s\n",
+                             open_movie.last_stop().message.c_str());
+                return 1;
+            }
+        }
+
+        // ── 0x1f7 拆离：四张同键表一起删（绘制项 / 网格 / 辅助 A；辅助 B 无写入口） ──
+        {
+            auto detach_script = make_script_with_body();
+            // 键 100：绘制项 + 网格 + 辅助 A；键 102：只放辅助 A，用来验区间。
+            emit_instruction(detach_script, 0x1FB,
+                             {{0, 100}, {0, 1}, {0, 0}, {0, 0}, {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+            emit_instruction(detach_script, 0x322, {{0, 100}, {0, 0}, {0, 255}, {0, 0}});
+            emit_instruction(detach_script, 0x344, {{0, 100}, {0, 7}});
+            emit_instruction(detach_script, 0x344, {{0, 102}, {0, 8}});
+            emit_instruction(detach_script, 0x1F7, {{0, 100}, {0, 3}});  // 左闭右开 [100, 103)
+            emit_instruction(detach_script, 0x1A8, {});
+            emit_instruction(detach_script, 2, {});
+            core::Machine detach_machine(0x12345678u, table);
+            detach_machine.load_root(detach_script);
+            for (int i = 0; i < 4; ++i) {
+                if (!detach_machine.step()) {
+                    std::fprintf(stderr, "detach fixture failed: %s\n",
+                                 detach_machine.last_stop().message.c_str());
+                    return 1;
+                }
+            }
+            if (detach_machine.draw_item_count() != 1 || detach_machine.mesh_count() != 1 ||
+                detach_machine.aux_a_count() != 2) {
+                std::fprintf(stderr, "detach fixture did not fill the four tables\n");
+                return 1;
+            }
+            if (!detach_machine.step()) {  // 0x1f7 count=3
+                std::fprintf(stderr, "0x1f7 step failed: %s\n",
+                             detach_machine.last_stop().message.c_str());
+                return 1;
+            }
+            if (detach_machine.draw_item_count() != 0 || detach_machine.mesh_count() != 0 ||
+                detach_machine.aux_a_count() != 0) {
+                std::fprintf(stderr, "0x1f7 did not delete from all same-key tables "
+                                     "(draw=%zu mesh=%zu auxA=%zu)\n",
+                             detach_machine.draw_item_count(), detach_machine.mesh_count(),
+                             detach_machine.aux_a_count());
+                return 1;
+            }
+            if (!detach_machine.scene_dirty()) {
+                std::fprintf(stderr, "0x1f7 did not dirty the scene after deleting entries\n");
+                return 1;
+            }
+            detach_machine.end_render();  // 清脏
+            if (!detach_machine.step()) {  // 0x1A8
+                return 1;
+            }
+            // 再拆一次空键：什么都没删 ⇒ 不标脏。
+            auto empty_detach = make_script_with_body();
+            emit_instruction(empty_detach, 0x1F7, {{0, 999}, {0, 0}});
+            emit_instruction(empty_detach, 2, {});
+            core::Machine empty_machine(0x12345678u, table);
+            empty_machine.load_root(empty_detach);
+            empty_machine.end_render();
+            if (!empty_machine.step()) {
+                std::fprintf(stderr, "0x1f7 empty-key step failed\n");
+                return 1;
+            }
+            if (empty_machine.scene_dirty()) {
+                std::fprintf(stderr, "0x1f7 dirtied the scene without deleting anything\n");
+                return 1;
+            }
         }
 
         std::printf(

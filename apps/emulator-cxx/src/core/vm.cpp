@@ -48,7 +48,7 @@ std::uint8_t clamp_byte(int value) {
 // 以后补 handler 时不会漏掉脏标记。
 bool is_scene_mutating(std::uint32_t opcode) {
     switch (opcode) {
-        case 0x1F7:  // 拆离绘制键
+        // 0x1F7（拆离）不在这里：它只在真的删掉条目时才标脏，由处理器自己写。
         case 0x1F8:  // 空白纹理
         case 0x1F9:  // 设置纹理
         case 0x1FA:  // 释放纹理
@@ -820,19 +820,48 @@ void Machine::execute(const Instruction& instruction) {
             return;
         }
         case 0x1F6: draw_items_.clear(); meshes_.clear(); aux_a_.clear(); aux_b_.clear(); scene_dirty_ = false; return;  // 清四张同键表；脏标记清 0（不是置 1）
-        case 0x20F: {  // play-movie：建对象、绑定门、启动后端（headless 立即收尾）
-            const auto slot = read_int(ops[1]);
-            const auto file_id = read_int(ops[0]);
-            (void)read_int(ops[0]);
-            const auto options = read_int(ops[2]);
-            if (textures_.find(static_cast<std::uint32_t>(slot)) == textures_.end()) {
+        case 0x20F: {  // 播影片：建对象 → 初始化后端 → 绑定门 → 取文件配置 → 读选项 → 启动 → 置影片位
+            // 读取顺序 2 → 1 → 1 → 3（`CORE-OPS-MOVIE`）：槽号 → 资源 id → 资源 id → 选项字。
+            const auto slot = static_cast<std::uint32_t>(read_int(ops[1]));
+            MovieRecord& movie = movies_[slot];  // 槽为空 ⇒ 新建；同槽已有 ⇒ 不重建
+            if (!movie.present) movie.present = true;
+            // 只改配置与启动：先落成「未启动」，失败时正是规范要求的残留形态。
+            movie.started = false;
+            if (movie.backend) {
+                movie.backend->close();
+                movie.backend.reset();
+            }
+            movie.file_id = static_cast<std::uint32_t>(read_int(ops[0]));
+            // 初始化播放后端（外部请求）。失败留在槽里，不启动、不置位。
+            auto backend = movie_factory_ ? movie_factory_() : make_mpeg_backend();
+            if (!backend) throw CoreError("movie-backend-init-failed");
+            movie.backend = std::move(backend);
+            (void)read_int(ops[0]);  // 绑定步骤再读一次资源 id
+            // 绑定门：纹理槽必须有绑定；对象表空只是建对象，纹理槽空则抛「显示消息型」异常。
+            if (textures_.find(slot) == textures_.end()) {
                 throw CoreError("movie-texture-slot-empty:" + std::to_string(slot));
             }
-            MovieRecord& movie = movies_[static_cast<std::uint32_t>(slot)];
-            movie.present = true;
+            // 取文件并配置播放后端。打开失败同样留下未启动的残留对象。
+            Bytes bytes;
+            try {
+                if (movie_bytes_loader_) {
+                    bytes = movie_bytes_loader_(movie.file_id);
+                } else if (install_ != nullptr) {
+                    bytes = read_install_file(*install_, movie.file_id);
+                } else {
+                    throw CoreError("movie-install-missing");
+                }
+            } catch (const std::exception& e) {
+                throw CoreError(std::string("movie-open-failed:") + e.what());
+            }
+            std::string error;
+            if (!movie.backend->open(std::move(bytes), error)) {
+                throw CoreError("movie-open-failed:" + error);
+            }
+            movie.options = static_cast<std::uint32_t>(read_int(ops[2]));
+            movie.started_ms = scene_clock_ms_;
+            movie.backend->play();
             movie.started = true;
-            movie.file_id = static_cast<std::uint32_t>(file_id);
-            movie.options = static_cast<std::uint32_t>(options);
             movie_active_ = true;
             state_flags_ |= (1u << 13);
             return;
@@ -1201,11 +1230,25 @@ void Machine::execute(const Instruction& instruction) {
             item.color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
             return;
         }
-        case 0x1F7: {  // 拆离绘制键
+        case 0x1F7: {  // 按键拆离：四张同键表（绘制项 / 网格 / 辅助 A / 辅助 B）一起删；场景命令表不动
             const auto count = read_int(ops[1]);
             const auto key = read_int(ops[0]);
-            if (count <= 1) draw_items_.erase(static_cast<std::uint32_t>(key));
-            else for (std::int32_t i = 0; i < count; ++i) draw_items_.erase(static_cast<std::uint32_t>(key + i));
+            bool erased = false;
+            const auto erase_one = [&](std::int32_t slot_key) {
+                const auto index = static_cast<std::uint32_t>(slot_key);
+                if (draw_items_.erase(index) > 0) erased = true;
+                if (meshes_.erase(index) > 0) erased = true;
+                if (aux_a_.erase(slot_key) > 0) erased = true;
+                if (aux_b_.erase(slot_key) > 0) erased = true;
+            };
+            // 负数个数也走「≤ 1」的单键路径；区间是左闭右开。
+            if (count <= 1) {
+                erase_one(key);
+            } else {
+                for (std::int32_t i = 0; i < count; ++i) erase_one(key + i);
+            }
+            // 只有真的删掉东西才标脏（没删 ⇒ 脏标记不动）。
+            if (erased) scene_dirty_ = true;
             return;
         }
         case 0x1F8: {  // 空白建纹理
@@ -1505,10 +1548,101 @@ void Machine::execute(const Instruction& instruction) {
     }
 }
 
+// 门之前的影片对象表服务（`CORE-VM-MOVIE`）：每次迭代、过门之前，若「有活动对象」为 1 就扫一遍。
+// ★ 它只做轮询 / 收尾 / 循环 / 填纹理；影片位（门上那一位）只管把门关住。
+void Machine::service_movies() {
+    if (!movie_active_) return;
+    bool any = false;
+    for (auto it = movies_.begin(); it != movies_.end();) {
+        MovieRecord& movie = it->second;
+        const std::uint32_t slot = it->first;
+        // 槽为空 / 未启动（打开或绑定失败留下的残留）⇒ 跳过：不进播完判据、不维持影片位。
+        if (!movie.present || !movie.started) {
+            ++it;
+            continue;
+        }
+        if (!movie.backend) {
+            // 已启动却没有后端（正常路径不会出现）：⛔ 不伪造"播完"，门继续关着（与参考实现同口径）。
+            any = true;
+            ++it;
+            continue;
+        }
+        MovieBackend& backend = *movie.backend;
+        // 「当前位置」按启播后的引擎时钟换算（32 位回绕用有符号差）。
+        const std::int32_t elapsed = static_cast<std::int32_t>(scene_clock_ms_ - movie.started_ms);
+        const double target = elapsed > 0 ? static_cast<double>(elapsed) / 1000.0 : 0.0;
+        if (backend.advance_to(target)) {
+            // 新帧：写进同槽纹理；它同时是一次「场景需要重绘」的输入（影片新帧）。
+            if (fill_movie_texture(slot, backend.frame())) scene_dirty_ = true;
+        }
+        const double stop = backend.stop_time();
+        const bool done = backend.ended() || (stop > 0.0 && backend.position() >= stop);
+        if (!done) {
+            any = true;
+            ++it;
+            continue;
+        }
+        if ((movie.options & 1u) != 0u) {
+            // 循环位：回到开头重新启动；保留对象与槽，不销毁、不填纹理。
+            backend.rewind();
+            backend.play();
+            movie.started_ms = scene_clock_ms_;
+            any = true;
+            ++it;
+            continue;
+        }
+        // 正常收尾：`(选项字 & 3) != 2` ⇒ 一次「填纹理」请求；随后停止 / 关闭 / 移除槽。
+        if ((movie.options & 3u) != 2u) fill_movie_texture(slot, backend.frame());
+        backend.close();
+        it = movies_.erase(it);
+    }
+    movie_active_ = any;
+}
+
+// 「填纹理」的像素效果不在规范正文里（`RES-MOVIE-FILL`）：本实现写最新解码帧；
+// 尺寸不一致时按最近邻缩放（只为不越界，不是取证结论）。
+bool Machine::fill_movie_texture(std::uint32_t slot, const MovieFrame& frame) {
+    if (frame.width == 0 || frame.height == 0 || frame.rgba.empty()) return false;
+    const auto it = textures_.find(slot);
+    if (it == textures_.end()) return false;  // 绑定已被换掉：没有最后一帧可留（残差）
+    TextureRecord& texture = it->second;
+    if (texture.width == 0 || texture.height == 0) return false;
+    const std::size_t expected =
+        static_cast<std::size_t>(texture.width) * texture.height * 4u;
+    if (texture.width == frame.width && texture.height == frame.height &&
+        frame.rgba.size() == expected) {
+        texture.rgba = frame.rgba;
+    } else {
+        texture.rgba.resize(expected);
+        for (std::uint32_t y = 0; y < texture.height; ++y) {
+            const std::uint32_t sy = static_cast<std::uint32_t>(
+                static_cast<std::uint64_t>(y) * frame.height / texture.height);
+            for (std::uint32_t x = 0; x < texture.width; ++x) {
+                const std::uint32_t sx = static_cast<std::uint32_t>(
+                    static_cast<std::uint64_t>(x) * frame.width / texture.width);
+                const std::size_t src =
+                    (static_cast<std::size_t>(sy) * frame.width + sx) * 4u;
+                const std::size_t dst =
+                    (static_cast<std::size_t>(y) * texture.width + x) * 4u;
+                if (src + 4u > frame.rgba.size()) continue;
+                texture.rgba[dst + 0] = frame.rgba[src + 0];
+                texture.rgba[dst + 1] = frame.rgba[src + 1];
+                texture.rgba[dst + 2] = frame.rgba[src + 2];
+                texture.rgba[dst + 3] = frame.rgba[src + 3];
+            }
+        }
+    }
+    texture.blank = false;
+    texture.revision++;  // 让宿主（GPU 纹理缓存）重传
+    return true;
+}
+
 bool Machine::step() {
     if (halted_) return false;
     // 每次迭代先读一次时钟、推进场景：颜色窗在门之前推进（`CORE-TIMING-WINDOW`）。
     advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16);
+    // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：新帧会置脏，所以必须在门前那次渲染判定之前。
+    service_movies();
     // 门前渲染：主循环闸门（0x412739–0x4127E2）先要求
     // `(0x21B != 0) || (状态字 & 0x2400)`，脏只是更内层条件。
     const bool render_gate = scalar_21b_ != 0 || (state_flags_ & (0x400u | 0x2000u)) != 0;
@@ -1517,12 +1651,13 @@ bool Machine::step() {
         frame_step_requested_ = true;
     }
     if (state_flags_ != 0) {
-        // 影片位：headless 影片后端立即收尾，扫描对象表后放行。
+        // 第 0 位（长睡眠）：本实现没有计时器服务，先按"服务一次就清位"处理。
         if ((state_flags_ & 1u) != 0) { state_flags_ &= ~1u; return true; }
+        // 影片位（门上 0x2000）：只清位；对象表仍有已启动影片槽 ⇒ 再置起（`CORE-VM-MOVIE`）。
+        // 它不轮询、不销毁、不填纹理 —— 那些都在门之前的 service_movies 里。
         if ((state_flags_ & (1u << 13)) != 0) {
-            for (auto& [slot, movie] : movies_) { (void)slot; movie.started = false; }
-            movie_active_ = false;
             state_flags_ &= ~(1u << 13);
+            if (movie_active_) state_flags_ |= (1u << 13);
             return true;
         }
         // 等待位：放行看「场景有动画」，不是"表里还有没有未到期的窗"。
