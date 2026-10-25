@@ -14,10 +14,9 @@
       ]
     },
     "text": {
-      "description": "FreeType + HarfBuzz glyph shaping",
+      "description": "FreeType glyph rasterization (Shift-JIS via OS codec / iconv)",
       "dependencies": [
-        "freetype",
-        "harfbuzz"
+        "freetype"
       ]
     },
     "video": {

@@ -30,7 +30,10 @@ add_library(emulator-core STATIC
     src/core/alf.cpp
     src/core/agf.cpp
     src/core/config.cpp
+    src/core/encoding.cpp
     src/core/script.cpp
+    src/core/scene_raster.cpp
+    src/core/text_raster.cpp
     src/core/opcode_table.cpp
     src/core/vm.cpp
     src/core/install.cpp)
@@ -50,6 +53,20 @@ add_executable(emulator-core-selftest
 target_link_libraries(emulator-core-selftest PRIVATE emulator-core)
 add_test(NAME emulator-core-selftest COMMAND emulator-core-selftest)
 
+set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the TITLE render smoke")
+if(EMULATOR_CXX_INSTALL_DIR)
+    add_test(NAME emulator-core-title
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --render-title)
+    add_test(NAME emulator-core-title-gpu
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --render-title-gpu)
+    add_test(NAME emulator-core-title-frames
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --render-frames 2)
+    add_test(NAME emulator-core-title-play
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --play-frames 2)
+    add_test(NAME emulator-core-boot-play
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --play-boot --play-frames 1)
+endif()
+
 target_compile_features(emulator-cxx PRIVATE cxx_std_20)
 target_link_libraries(emulator-cxx PRIVATE SDL3::SDL3)
 
@@ -66,10 +83,17 @@ if(EMULATOR_CXX_WITH_BGFX)
 endif()
 
 if(EMULATOR_CXX_WITH_TEXT)
-    find_package(Freetype CONFIG REQUIRED)
-    find_package(harfbuzz CONFIG REQUIRED)
-    target_compile_definitions(emulator-cxx PRIVATE EMULATOR_CXX_HAVE_TEXT=1)
-    target_link_libraries(emulator-cxx PRIVATE Freetype::Freetype harfbuzz::harfbuzz)
+    find_package(Freetype REQUIRED)
+    target_compile_definitions(emulator-core PRIVATE
+        EMULATOR_CXX_HAVE_TEXT=1
+        EMULATOR_CXX_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/fonts/Amayui-CN_cnjp.ttf")
+    target_link_libraries(emulator-core PRIVATE Freetype::Freetype)
+    if(NOT WIN32)
+        # Windows 用 MultiByteToWideChar(932)；其它平台用系统 iconv（glibc / macOS 自带）。
+        find_package(Iconv REQUIRED)
+        target_compile_definitions(emulator-core PRIVATE EMULATOR_CXX_HAVE_ICONV=1)
+        target_link_libraries(emulator-core PRIVATE Iconv::Iconv)
+    endif()
 endif()
 
 if(EMULATOR_CXX_WITH_VIDEO)

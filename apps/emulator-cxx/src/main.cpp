@@ -15,9 +15,11 @@
 
 #include "core/agf.h"
 #include "core/config.h"
+#include "core/encoding.h"
 #include "core/install.h"
 #include "core/opcode_table.h"
 #include "core/script.h"
+#include "core/scene_raster.h"
 #include "core/vm.h"
 
 #ifdef EMULATOR_CXX_HAVE_SHADERCROSS
@@ -25,6 +27,7 @@
 #endif
 
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +35,14 @@
 #include <fstream>
 #include <random>
 #include <string>
+#include <unordered_map>
+#include <vector>
+#include <bit>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -449,6 +460,413 @@ bool draw_quad(SDL_GPUCommandBuffer* command, SDL_GPUTexture* target, const Quad
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// 场景 GPU 渲染（绘制项 / 4 顶点网格）
+// ---------------------------------------------------------------------------
+SDL_GPUTexture* upload_texture(SDL_GPUDevice* device, const core::Bytes& rgba, int width, int height);
+// ★ 这是呈现路径；软件 `rasterize_scene` 只作为命令档 / 无后端导出用的 oracle。
+struct SceneVertex {
+    float x, y;
+    float u, v;
+    float r, g, b, a;
+};
+
+struct SceneRange {
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+    std::uint32_t texture = 0;  // 0 = 内置白纹理（网格）
+};
+
+struct ScenePipeline {
+    SDL_GPUGraphicsPipeline* pipeline = nullptr;
+    SDL_GPUSampler* sampler = nullptr;
+};
+
+constexpr const char* kSceneVertexShader = R"(
+struct VSInput {
+    float2 position : TEXCOORD0;
+    float2 uv : TEXCOORD1;
+    float4 color : TEXCOORD2;
+};
+struct VSOutput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float4 color : TEXCOORD1;
+};
+VSOutput VSMain(VSInput input) {
+    VSOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.color = input.color;
+    return output;
+}
+)";
+
+constexpr const char* kSceneFragmentShader = R"(
+Texture2D tex : register(t0, space2);
+SamplerState samp : register(s0, space2);
+float4 PSMain(float2 uv : TEXCOORD0, float4 color : TEXCOORD1) : SV_Target {
+    return tex.Sample(samp, uv) * color;
+}
+)";
+
+bool create_scene_pipeline(SDL_GPUDevice* device, SDL_GPUTextureFormat format, ScenePipeline& out) {
+    SDL_GPUShader* vertex = compile_shader(
+        device, kSceneVertexShader, "VSMain", SDL_SHADERCROSS_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* fragment = compile_shader(
+        device, kSceneFragmentShader, "PSMain", SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT, 1);
+    if (vertex == nullptr || fragment == nullptr) {
+        if (vertex != nullptr) SDL_ReleaseGPUShader(device, vertex);
+        if (fragment != nullptr) SDL_ReleaseGPUShader(device, fragment);
+        return false;
+    }
+
+    SDL_GPUVertexBufferDescription buffer_description{};
+    buffer_description.slot = 0;
+    buffer_description.pitch = sizeof(SceneVertex);
+    buffer_description.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+
+    SDL_GPUVertexAttribute attributes[3]{};
+    attributes[0].location = 0;
+    attributes[0].buffer_slot = 0;
+    attributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+    attributes[0].offset = 0;
+    attributes[1].location = 1;
+    attributes[1].buffer_slot = 0;
+    attributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+    attributes[1].offset = sizeof(float) * 2;
+    attributes[2].location = 2;
+    attributes[2].buffer_slot = 0;
+    attributes[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+    attributes[2].offset = sizeof(float) * 4;
+
+    SDL_GPUVertexInputState vertex_input{};
+    vertex_input.vertex_buffer_descriptions = &buffer_description;
+    vertex_input.num_vertex_buffers = 1;
+    vertex_input.vertex_attributes = attributes;
+    vertex_input.num_vertex_attributes = 3;
+
+    SDL_GPUColorTargetBlendState blend{};
+    blend.enable_blend = true;
+    blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+
+    SDL_GPUColorTargetDescription target{};
+    target.format = format;
+    target.blend_state = blend;
+
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = vertex;
+    info.fragment_shader = fragment;
+    info.vertex_input_state = vertex_input;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.target_info.color_target_descriptions = &target;
+    info.target_info.num_color_targets = 1;
+    out.pipeline = SDL_CreateGPUGraphicsPipeline(device, &info);
+    SDL_ReleaseGPUShader(device, vertex);
+    SDL_ReleaseGPUShader(device, fragment);
+    if (out.pipeline == nullptr) {
+        log_sdl_error("SDL_CreateGPUGraphicsPipeline(scene)");
+        return false;
+    }
+
+    SDL_GPUSamplerCreateInfo sampler_info{};
+    sampler_info.min_filter = SDL_GPU_FILTER_NEAREST;
+    sampler_info.mag_filter = SDL_GPU_FILTER_NEAREST;
+    sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    sampler_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    sampler_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    sampler_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    out.sampler = SDL_CreateGPUSampler(device, &sampler_info);
+    return out.sampler != nullptr;
+}
+
+void destroy_scene_pipeline(SDL_GPUDevice* device, ScenePipeline& pipeline) {
+    if (pipeline.sampler != nullptr) SDL_ReleaseGPUSampler(device, pipeline.sampler);
+    if (pipeline.pipeline != nullptr) SDL_ReleaseGPUGraphicsPipeline(device, pipeline.pipeline);
+    pipeline = {};
+}
+
+struct SceneTextureCache {
+    std::unordered_map<std::uint32_t, SDL_GPUTexture*> textures;
+    std::unordered_map<std::uint32_t, std::uint32_t> revisions;
+    SDL_GPUTexture* white = nullptr;
+};
+
+void release_scene_textures(SDL_GPUDevice* device, SceneTextureCache& cache) {
+    for (auto& [id, texture] : cache.textures) {
+        (void)id;
+        if (texture != nullptr) SDL_ReleaseGPUTexture(device, texture);
+    }
+    if (cache.white != nullptr) SDL_ReleaseGPUTexture(device, cache.white);
+    cache.textures.clear();
+    cache.revisions.clear();
+    cache.white = nullptr;
+}
+
+SDL_GPUTexture* scene_texture(SDL_GPUDevice* device, SceneTextureCache& cache, const core::Machine& machine,
+                              std::uint32_t id) {
+    if (id == 0) {
+        if (cache.white == nullptr) {
+            const core::Bytes white{255, 255, 255, 255};
+            cache.white = upload_texture(device, white, 1, 1);
+        }
+        return cache.white;
+    }
+    const core::TextureRecord* record = machine.texture(id);
+    if (record == nullptr || record->rgba.empty()) return nullptr;
+    const auto revision_it = cache.revisions.find(id);
+    const auto texture_it = cache.textures.find(id);
+    if (texture_it != cache.textures.end() && revision_it != cache.revisions.end() &&
+        revision_it->second == record->revision) {
+        return texture_it->second;
+    }
+    SDL_GPUTexture* uploaded = upload_texture(device, record->rgba, static_cast<int>(record->width),
+                                              static_cast<int>(record->height));
+    if (uploaded == nullptr) return nullptr;
+    if (texture_it != cache.textures.end() && texture_it->second != nullptr) {
+        SDL_ReleaseGPUTexture(device, texture_it->second);
+    }
+    cache.textures[id] = uploaded;
+    cache.revisions[id] = record->revision;
+    return uploaded;
+}
+
+void push_quad(std::vector<SceneVertex>& vertices, std::vector<SceneRange>& ranges,
+               float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
+               std::uint32_t argb, std::uint32_t texture_id, float width, float height) {
+    const float a = static_cast<float>((argb >> 24) & 0xFFu) / 255.0f;
+    const float r = static_cast<float>((argb >> 16) & 0xFFu) / 255.0f;
+    const float g = static_cast<float>((argb >> 8) & 0xFFu) / 255.0f;
+    const float b = static_cast<float>(argb & 0xFFu) / 255.0f;
+    const auto px = [&](float x) { return x / width * 2.0f - 1.0f; };
+    const auto py = [&](float y) { return 1.0f - y / height * 2.0f; };
+    const auto push = [&](float x, float y, float u, float v) {
+        vertices.push_back({px(x), py(y), u, v, r, g, b, a});
+    };
+    const std::uint32_t first = static_cast<std::uint32_t>(vertices.size());
+    push(x0, y0, u0, v0);
+    push(x1, y0, u1, v0);
+    push(x1, y1, u1, v1);
+    push(x0, y0, u0, v0);
+    push(x1, y1, u1, v1);
+    push(x0, y1, u0, v1);
+    ranges.push_back({first, 6, texture_id});
+}
+
+void build_scene_vertices(const core::Machine& machine, float width, float height,
+                          std::vector<SceneVertex>& vertices, std::vector<SceneRange>& ranges) {
+    std::vector<std::uint32_t> keys;
+    for (const auto& [key, item] : machine.draw_items()) { (void)item; keys.push_back(key); }
+    for (const auto& [key, mesh] : machine.meshes()) {
+        if (static_cast<std::int32_t>(key) < 0) continue;
+        keys.push_back(key);
+    }
+    std::sort(keys.begin(), keys.end(), [](std::uint32_t a, std::uint32_t b) {
+        return static_cast<std::int32_t>(a) < static_cast<std::int32_t>(b);
+    });
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+    const std::uint32_t now = machine.scene_clock_ms();
+    const bool forced = machine.forced_complete();
+    for (const auto key : keys) {
+        const auto mesh_it = machine.meshes().find(key);
+        if (mesh_it != machine.meshes().end()) {
+            const core::MeshRecord& mesh = mesh_it->second;
+            if ((mesh.flags & 1u) != 0 && mesh.count == 4 && mesh.copies[0].size() >= 4 &&
+                mesh.copies[1].size() >= 4) {
+                const auto color = core::derive_color(mesh, now, forced);
+                if ((color >> 24) != 0) {
+                    const auto fx = [&](std::size_t i) { return std::bit_cast<float>(mesh.copies[0][i]); };
+                    const auto fy = [&](std::size_t i) { return std::bit_cast<float>(mesh.copies[1][i]); };
+                    // 两个三角形：0-1-2 / 1-3-2（与软件光栅同一拓扑）。
+                    const std::uint32_t first = static_cast<std::uint32_t>(vertices.size());
+                    const auto push = [&](std::size_t i) {
+                        vertices.push_back({fx(i) / width * 2.0f - 1.0f, 1.0f - fy(i) / height * 2.0f,
+                                            0.0f, 0.0f,
+                                            static_cast<float>((color >> 16) & 0xFFu) / 255.0f,
+                                            static_cast<float>((color >> 8) & 0xFFu) / 255.0f,
+                                            static_cast<float>(color & 0xFFu) / 255.0f,
+                                            static_cast<float>((color >> 24) & 0xFFu) / 255.0f});
+                    };
+                    push(0); push(1); push(2); push(1); push(3); push(2);
+                    ranges.push_back({first, 6, 0});
+                }
+            }
+        }
+
+        const auto item_it = machine.draw_items().find(key);
+        if (item_it == machine.draw_items().end()) continue;
+        const core::DrawItem& item = item_it->second;
+        if ((item.flags & 1u) == 0) continue;
+        const core::TextureRecord* texture = machine.texture(item.texture_id);
+        if (texture == nullptr || texture->rgba.empty()) continue;
+        const int sx0 = std::max(0, item.left);
+        const int sy0 = std::max(0, item.top);
+        const int sx1 = std::min(static_cast<int>(texture->width), item.right);
+        const int sy1 = std::min(static_cast<int>(texture->height), item.bottom);
+        if (sx1 <= sx0 || sy1 <= sy0) continue;
+        const float dx = item.aux[0] + static_cast<float>(sx0 - item.left);
+        const float dy = item.aux[1] + static_cast<float>(sy0 - item.top);
+        const auto color = core::derive_color(item, now, forced);
+        if ((color >> 24) == 0) continue;
+        push_quad(vertices, ranges, dx, dy, dx + static_cast<float>(sx1 - sx0),
+                  dy + static_cast<float>(sy1 - sy0),
+                  static_cast<float>(sx0) / static_cast<float>(texture->width),
+                  static_cast<float>(sy0) / static_cast<float>(texture->height),
+                  static_cast<float>(sx1) / static_cast<float>(texture->width),
+                  static_cast<float>(sy1) / static_cast<float>(texture->height),
+                  color, item.texture_id, width, height);
+    }
+}
+
+bool draw_scene_gpu(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command, SDL_GPUTexture* target,
+                    const core::Machine& machine, const ScenePipeline& pipeline,
+                    SceneTextureCache& cache, int width, int height) {
+    std::vector<SceneVertex> vertices;
+    std::vector<SceneRange> ranges;
+    build_scene_vertices(machine, static_cast<float>(width), static_cast<float>(height), vertices,
+                         ranges);
+
+    SDL_GPUBuffer* vertex_buffer = nullptr;
+    SDL_GPUTransferBuffer* transfer = nullptr;
+    if (!vertices.empty()) {
+        SDL_GPUBufferCreateInfo buffer_info{};
+        buffer_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        buffer_info.size = static_cast<Uint32>(vertices.size() * sizeof(SceneVertex));
+        vertex_buffer = SDL_CreateGPUBuffer(device, &buffer_info);
+        SDL_GPUTransferBufferCreateInfo transfer_info{};
+        transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        transfer_info.size = static_cast<Uint32>(vertices.size() * sizeof(SceneVertex));
+        transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
+        if (vertex_buffer == nullptr || transfer == nullptr) {
+            if (vertex_buffer != nullptr) SDL_ReleaseGPUBuffer(device, vertex_buffer);
+            if (transfer != nullptr) SDL_ReleaseGPUTransferBuffer(device, transfer);
+            return false;
+        }
+        void* mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+        if (mapped == nullptr) {
+            SDL_ReleaseGPUBuffer(device, vertex_buffer);
+            SDL_ReleaseGPUTransferBuffer(device, transfer);
+            return false;
+        }
+        std::memcpy(mapped, vertices.data(), vertices.size() * sizeof(SceneVertex));
+        SDL_UnmapGPUTransferBuffer(device, transfer);
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command);
+        SDL_GPUTransferBufferLocation source{transfer, 0};
+        SDL_GPUBufferRegion destination{vertex_buffer, 0, static_cast<Uint32>(vertices.size() * sizeof(SceneVertex))};
+        SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+        SDL_EndGPUCopyPass(copy);
+    }
+
+    SDL_GPUColorTargetInfo target_info{};
+    target_info.texture = target;
+    target_info.clear_color = kClearColor;
+    target_info.load_op = SDL_GPU_LOADOP_CLEAR;
+    target_info.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command, &target_info, 1, nullptr);
+    if (pass == nullptr) {
+        if (vertex_buffer != nullptr) SDL_ReleaseGPUBuffer(device, vertex_buffer);
+        if (transfer != nullptr) SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return false;
+    }
+    SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+    SDL_SetGPUViewport(pass, &viewport);
+    SDL_Rect scissor{0, 0, width, height};
+    SDL_SetGPUScissor(pass, &scissor);
+    SDL_BindGPUGraphicsPipeline(pass, pipeline.pipeline);
+    if (vertex_buffer != nullptr) {
+        SDL_GPUBufferBinding binding{vertex_buffer, 0};
+        SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
+        for (const SceneRange& range : ranges) {
+            SDL_GPUTexture* texture = scene_texture(device, cache, machine, range.texture);
+            if (texture == nullptr) continue;
+            SDL_GPUTextureSamplerBinding sampler_binding{texture, pipeline.sampler};
+            SDL_BindGPUFragmentSamplers(pass, 0, &sampler_binding, 1);
+            SDL_DrawGPUPrimitives(pass, range.count, 1, range.first, 0);
+        }
+    }
+    SDL_EndGPURenderPass(pass);
+    if (vertex_buffer != nullptr) SDL_ReleaseGPUBuffer(device, vertex_buffer);
+    if (transfer != nullptr) SDL_ReleaseGPUTransferBuffer(device, transfer);
+    return true;
+}
+
+void preload_scene_textures(SDL_GPUDevice* device, SceneTextureCache& cache,
+                            const core::Machine& machine) {
+    for (const auto& [key, item] : machine.draw_items()) {
+        (void)key;
+        if ((item.flags & 1u) != 0) scene_texture(device, cache, machine, item.texture_id);
+    }
+}
+
+bool render_scene_gpu_to_bmp(SDL_GPUDevice* device, const core::Machine& machine,
+                             const std::string& path, int width, int height) {
+    ScenePipeline pipeline;
+    if (!create_scene_pipeline(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, pipeline)) return false;
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = static_cast<Uint32>(width);
+    info.height = static_cast<Uint32>(height);
+    info.layer_count_or_depth = 1;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* target = SDL_CreateGPUTexture(device, &info);
+    if (target == nullptr) {
+        destroy_scene_pipeline(device, pipeline);
+        return false;
+    }
+    SceneTextureCache cache;
+    preload_scene_textures(device, cache, machine);
+    SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device);
+    if (command == nullptr) {
+        release_scene_textures(device, cache);
+        SDL_ReleaseGPUTexture(device, target);
+        destroy_scene_pipeline(device, pipeline);
+        return false;
+    }
+    if (!draw_scene_gpu(device, command, target, machine, pipeline, cache, width, height)) {
+        SDL_CancelGPUCommandBuffer(command);
+        release_scene_textures(device, cache);
+        SDL_ReleaseGPUTexture(device, target);
+        destroy_scene_pipeline(device, pipeline);
+        return false;
+    }
+    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    if (fence == nullptr) {
+        release_scene_textures(device, cache);
+        SDL_ReleaseGPUTexture(device, target);
+        destroy_scene_pipeline(device, pipeline);
+        return false;
+    }
+    SDL_WaitForGPUFences(device, true, &fence, 1);
+    SDL_ReleaseGPUFence(device, fence);
+    Readback readback = readback_texture(device, target, width, height);
+    bool ok = false;
+    if (readback.mapped != nullptr) {
+        core::Bytes canvas(static_cast<std::size_t>(width) * height * 4);
+        std::memcpy(canvas.data(), readback.mapped, canvas.size());
+        core::save_bmp_rgba(path, canvas, static_cast<std::uint32_t>(width),
+                            static_cast<std::uint32_t>(height));
+        ok = true;
+    }
+    release_readback(device, readback);
+    release_scene_textures(device, cache);
+    SDL_ReleaseGPUTexture(device, target);
+    destroy_scene_pipeline(device, pipeline);
+    return ok;
+}
+
+
 #endif  // EMULATOR_CXX_HAVE_SHADERCROSS
 
 // ---------------------------------------------------------------------------
@@ -752,11 +1170,15 @@ SmokeResult run_smoke_shader(SDL_GPUDevice* device) {
 }
 #endif
 
-std::filesystem::path path_from_utf8(const std::string& text);
+int run_windowed_image(SDL_GPUDevice* device, SDL_Window* window, const core::Bytes& rgba,
+                       int width, int height);
+
+int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
+                        int width, int height, int max_frames);
 
 int run_core_agf(const std::string& agf_path) {
     try {
-        std::ifstream input(path_from_utf8(agf_path), std::ios::binary);
+        std::ifstream input(core::path_from_utf8(agf_path), std::ios::binary);
         if (!input) throw core::CoreError("agf-open-failed:" + agf_path);
         input.seekg(0, std::ios::end);
         const auto size = input.tellg();
@@ -783,21 +1205,18 @@ int run_core_agf(const std::string& agf_path) {
     }
 }
 
-std::filesystem::path path_from_utf8(const std::string& text) {
-    return std::filesystem::path(std::u8string(
-        reinterpret_cast<const char8_t*>(text.data()), text.size()));
-}
-
 int run_core_install(const std::string& install_dir, const std::string& table_path,
                      const std::string& config_path, const std::string& config_keys_path,
-                     std::size_t max_steps, std::uint32_t stop_at) {
+                     std::size_t max_steps, std::uint32_t stop_at, bool to_title,
+                     bool render_title, bool show_title, bool play_title, int render_frames,
+                     int trace_steps, int play_frames, bool play_boot, bool gpu_title) {
     try {
-        const core::Install install = core::open_install(path_from_utf8(install_dir));
+        const core::Install install = core::open_install(core::path_from_utf8(install_dir));
         const auto& index = install.index;
         std::printf(
             "[core] alf signature=%s title=%s zone=%d archives=%zu files=%zu configDefaults=%zu\n",
             index.signature.c_str(),
-            index.title.c_str(),
+            core::cp932_to_utf8(index.title).c_str(),
             index.zone,
             index.archives.size(),
             index.files.size(),
@@ -811,25 +1230,44 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
         const core::Bytes root = core::read_install_file(install, 0);
         std::printf(
             "[core] root id=0 name=%s archive=%u length=%u bytes=%zu\n",
-            root_record.name.c_str(),
-            root_record.archive_index,
+            core::cp932_to_utf8(root_record.name).c_str(),            root_record.archive_index,
             root_record.length,
             root.size());
 
         const core::ScriptHeader header = core::parse_script_header(root);
-        const core::OpcodeTable table = core::OpcodeTable::load_from_file(table_path);
-        core::ConfigVocabulary vocabulary = core::ConfigVocabulary::load_from_file(config_keys_path);
+        const core::OpcodeTable table = core::OpcodeTable::load_from_file(core::path_from_utf8(table_path));
+        core::ConfigVocabulary vocabulary = core::ConfigVocabulary::load_from_file(core::path_from_utf8(config_keys_path));
         core::ConfigStore config(std::move(vocabulary));
         config.load_defaults(index.config_defaults);
+        std::filesystem::path config_root = install.root;
+        if (config.get_int("set:UseAppDataFolder") != 0) {
+#ifdef _WIN32
+            wchar_t appdata[32768]{};
+            const DWORD appdata_length =
+                GetEnvironmentVariableW(L"APPDATA", appdata, static_cast<DWORD>(32768));
+            if (appdata_length > 0 && appdata_length < 32768) {
+                config_root = std::filesystem::path(appdata);
+            }
+#else
+            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr) {
+                config_root = core::path_from_utf8(xdg);
+            } else if (const char* home = std::getenv("HOME"); home != nullptr) {
+                config_root = core::path_from_utf8(home) / ".config";
+            }
+#endif
+        }
         std::filesystem::path player_path = config_path.empty()
-            ? install.root / config.get_string("set:RegFilePath") / "SYS4REG.INI"
-            : path_from_utf8(config_path);
+            ? config_root / core::path_from_engine(config.get_string("set:RegFilePath")) / "SYS4REG.INI"
+            : core::path_from_utf8(config_path);
         config.load_player_file(player_path);
+        std::printf("[core] drawMode=%d named=%d\n",
+                    config.get_int("set:DrawMode"),
+                    config.has_named("set:DrawMode") ? 1 : 0);
         std::printf(
             "[core] config named=%zu script=%zu player=%s\n",
             config.named_size(),
             config.script_size(),
-            player_path.string().c_str());
+            core::path_to_utf8(player_path).c_str());
         std::string error;
         const auto instructions = core::decode_instructions(
             std::span<const std::uint8_t>(root).subspan(header.body_offset),
@@ -852,14 +1290,125 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
         core::Machine machine(key, table, &install, config);
         machine.load_root(root, 0);
         machine.stop_at_opcode(stop_at);
-        const core::RunResult vm = machine.run(max_steps);
+        if (play_boot) {
+            // 从根脚本开始逐帧呈现：颜色窗用宿主真实时钟推进，能看到 LOGO 之后的渐变过程。
+            machine.reset_scene_clock(1000);
+            machine.set_host_clock_ms(1000);
+            if (!SDL_Init(SDL_INIT_VIDEO)) { log_sdl_error("SDL_Init(play-boot)"); return 1; }
+            SDL_GPUDevice* device = create_gpu_device();
+            SDL_Window* window = SDL_CreateWindow("emulator-cxx — boot", 1280, 720, SDL_WINDOW_RESIZABLE);
+            if (device != nullptr && window != nullptr) {
+                run_windowed_frames(device, window, machine, 1280, 720, play_frames);
+            }
+            if (window != nullptr) SDL_DestroyWindow(window);
+            if (device != nullptr) SDL_DestroyGPUDevice(device);
+            SDL_Quit();
+            return 0;
+        }
+        // 窗口播放：在 TITLE 刚成为当前帧时就停，交给窗口按真实时钟跑 TITLE 的渐变；
+        // 静态导出仍跑到步数上限，保证画面已建好。
+        const core::RunResult vm = (play_title && !render_title)
+            ? machine.run_until_script(21092, max_steps)
+            : machine.run(max_steps);
+        const bool title_reached = machine.frame().script_id == 21092;
         std::printf(
-            "[core] vm stop=%d steps=%zu opcode=0x%X offset=%zu message=%s\n",
+            "[core] vm stop=%d steps=%zu frame=%zu script=%u opcode=0x%X offset=%zu message=%s\n",
             static_cast<int>(vm.reason),
             vm.steps,
+            machine.current_frame(),
+            machine.frame().script_id,
             vm.opcode,
             vm.offset,
             vm.message.c_str());
+
+        std::printf("[core] state drawItems=%zu textures=%zu meshes=%zu\n", machine.draw_item_count(), machine.texture_count(), machine.mesh_count());
+        if (render_title) {
+            const core::Bytes canvas = core::rasterize_scene(machine, 1280, 720);
+            std::size_t visible = 0;
+            for (std::size_t i = 3; i < canvas.size(); i += 4) if (canvas[i] != 0) ++visible;
+            core::save_bmp_rgba("title-frame.bmp", canvas, 1280, 720);
+            std::printf("[render] title-frame 1280x720 visible=%zu -> title-frame.bmp\n", visible);
+            if (visible == 0) { std::fprintf(stderr, "[render] empty frame\n"); return 1; }
+            if (show_title) {
+                if (!SDL_Init(SDL_INIT_VIDEO)) { log_sdl_error("SDL_Init(show-title)"); return 1; }
+                SDL_GPUDevice* device = create_gpu_device();
+                SDL_Window* window = SDL_CreateWindow("emulator-cxx — TITLE", 1280, 720, SDL_WINDOW_RESIZABLE);
+                if (device != nullptr && window != nullptr) run_windowed_image(device, window, canvas, 1280, 720);
+                if (window != nullptr) SDL_DestroyWindow(window);
+                if (device != nullptr) SDL_DestroyGPUDevice(device);
+                SDL_Quit();
+            }
+        }
+        if (trace_steps > 0) {
+            for (int i = 0; i < trace_steps; ++i) {
+                const auto& code = machine.frame().code;
+                const auto ip = machine.frame().ip;
+                if (ip + 4 > code.size()) break;
+                std::printf("[trace] #%d ip=%zu opcode=0x%X flags=0x%X\n", i, ip,
+                            core::read_u32(code, ip), machine.state_flags());
+                if (!machine.step()) break;
+            }
+        }
+        if (render_frames > 0) {
+            machine.consume_frame_step();
+            // 以「到达 TITLE 时的场景时钟」为基准继续走；归零会让已盖章的窗回到延迟前。
+            const std::uint32_t clock_base = machine.scene_clock_ms();
+            for (int f = 0; f < render_frames; ++f) {
+                // 无窗口导出：每帧显式请求一次渲染步（等价于 0x20C），再推进到请求被消费。
+                machine.set_host_clock_ms(clock_base + static_cast<std::uint32_t>(f) * 16u);
+                machine.request_render();
+                for (int i = 0; i < 20000; ++i) {
+                    if (!machine.step()) break;
+                    if (machine.consume_frame_step()) break;
+                }
+                const core::Bytes frame = core::rasterize_scene(machine, 1280, 720);
+                std::size_t visible = 0;
+                for (std::size_t i = 3; i < frame.size(); i += 4) if (frame[i] != 0) ++visible;
+                char name[64];
+                std::snprintf(name, sizeof(name), "title-frame-%02d.bmp", f);
+                core::save_bmp_rgba(name, frame, 1280, 720);
+                std::printf("[render] frame %d clock=%ums visible=%zu -> %s\n", f,
+                            machine.scene_clock_ms(), visible, name);
+                if (visible == 0) { std::fprintf(stderr, "[render] empty frame %d\n", f); return 1; }
+            }
+        }
+        if (gpu_title) {
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+            if (!SDL_Init(SDL_INIT_VIDEO)) { log_sdl_error("SDL_Init(gpu-title)"); return 1; }
+            if (!SDL_ShaderCross_Init()) { log_sdl_error("SDL_ShaderCross_Init"); SDL_Quit(); return 1; }
+            SDL_GPUDevice* device = create_gpu_device();
+            bool ok = false;
+            if (device != nullptr) {
+                ok = render_scene_gpu_to_bmp(device, machine, "title-gpu.bmp", 1280, 720);
+                SDL_DestroyGPUDevice(device);
+            }
+            SDL_ShaderCross_Quit();
+            SDL_Quit();
+            if (!ok) { std::fprintf(stderr, "[render] GPU TITLE frame failed\n"); return 1; }
+            std::printf("[render] GPU TITLE frame -> title-gpu.bmp\n");
+#else
+            std::fprintf(stderr, "[render] --render-title-gpu requires shadercross\n");
+            return 1;
+#endif
+        }
+        if (play_title) {
+            if (title_reached) {
+                if (!SDL_Init(SDL_INIT_VIDEO)) { log_sdl_error("SDL_Init(play-title)"); return 1; }
+                SDL_GPUDevice* device = create_gpu_device();
+                SDL_Window* window = SDL_CreateWindow("emulator-cxx — TITLE (play)", 1280, 720, SDL_WINDOW_RESIZABLE);
+                if (device != nullptr && window != nullptr) run_windowed_frames(device, window, machine, 1280, 720, play_frames);
+                if (window != nullptr) SDL_DestroyWindow(window);
+                if (device != nullptr) SDL_DestroyGPUDevice(device);
+                SDL_Quit();
+            } else {
+                std::fprintf(stderr, "[render] title not reached\n");
+                return 1;
+            }
+        }
+        if (to_title) {
+            std::printf("[core] title-loop reached=%s\n", title_reached ? "true" : "false");
+            if (!title_reached) return 1;
+        }
 
         const std::size_t show = std::min<std::size_t>(instructions.size(), 8);
         for (std::size_t i = 0; i < show; ++i) {
@@ -979,7 +1528,235 @@ int run_windowed(SDL_GPUDevice* device, SDL_Window* window) {
 
 }  // namespace
 
+namespace {
+
+SDL_GPUTexture* upload_texture(SDL_GPUDevice* device, const core::Bytes& rgba, int width, int height) {
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = static_cast<Uint32>(width);
+    info.height = static_cast<Uint32>(height);
+    info.layer_count_or_depth = 1;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = SDL_CreateGPUTexture(device, &info);
+    if (texture == nullptr) return nullptr;
+
+    SDL_GPUTransferBufferCreateInfo transfer_info{};
+    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transfer_info.size = static_cast<Uint32>(rgba.size());
+    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
+    if (transfer == nullptr) return nullptr;
+    void* mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    std::memcpy(mapped, rgba.data(), rgba.size());
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+
+    SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command);
+    SDL_GPUTextureTransferInfo source{};
+    source.transfer_buffer = transfer;
+    source.pixels_per_row = static_cast<Uint32>(width);
+    source.rows_per_layer = static_cast<Uint32>(height);
+    SDL_GPUTextureRegion region{};
+    region.texture = texture;
+    region.w = static_cast<Uint32>(width);
+    region.h = static_cast<Uint32>(height);
+    region.d = 1;
+    SDL_UploadToGPUTexture(copy, &source, &region, true);
+    SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(command);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    return texture;
+}
+
+int run_windowed_image(SDL_GPUDevice* device, SDL_Window* window, const core::Bytes& rgba,
+                       int width, int height) {
+    if (!SDL_ClaimWindowForGPUDevice(device, window)) {
+        log_sdl_error("SDL_ClaimWindowForGPUDevice");
+        return 1;
+    }
+    QuadPipeline pipeline;
+    const SDL_GPUTextureFormat swapchain_format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    std::printf("[render] swapchain format=%d\n", static_cast<int>(swapchain_format));
+    if (!create_quad_pipeline(device, swapchain_format,
+                              SDL_GPU_BLENDOP_ADD, SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+                              SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, pipeline)) {
+        return 1;
+    }
+    SDL_GPUTexture* image = upload_texture(device, rgba, width, height);
+    if (image == nullptr) {
+        destroy_quad_pipeline(device, pipeline);
+        return 1;
+    }
+    SDL_ReleaseGPUTexture(device, pipeline.texture);
+    pipeline.texture = image;
+
+    bool running = true;
+    while (running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_EVENT_QUIT) running = false;
+            else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) running = false;
+        }
+        SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device);
+        if (command == nullptr) break;
+        SDL_GPUTexture* swapchain = nullptr;
+        if (!SDL_WaitAndAcquireGPUSwapchainTexture(command, window, &swapchain, nullptr, nullptr)) {
+            SDL_CancelGPUCommandBuffer(command);
+            break;
+        }
+        if (swapchain != nullptr) draw_quad(command, swapchain, pipeline);
+        if (!SDL_SubmitGPUCommandBuffer(command)) break;
+    }
+    destroy_quad_pipeline(device, pipeline);
+    SDL_ReleaseWindowFromGPUDevice(device, window);
+    return 0;
+}
+
+// 主循环宿主的呈现：每次迭代（门前）由 core 决定是否请求渲染；有请求才合成 / 上传 / 呈现。
+// 静态场景没有新请求时保留最后一帧；`max_frames > 0` 时按帧数强制推进，便于无人值守验证。
+int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
+                        int width, int height, int max_frames) {
+    if (!SDL_ClaimWindowForGPUDevice(device, window)) {
+        log_sdl_error("SDL_ClaimWindowForGPUDevice");
+        return 1;
+    }
+    QuadPipeline pipeline;
+    const SDL_GPUTextureFormat swapchain_format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    std::printf("[render] swapchain format=%d\n", static_cast<int>(swapchain_format));
+    if (!create_quad_pipeline(device, swapchain_format,
+                              SDL_GPU_BLENDOP_ADD, SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+                              SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, pipeline)) {
+        return 1;
+    }
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+    ScenePipeline scene_pipeline;
+    const bool scene_gpu_ok = create_scene_pipeline(device, swapchain_format, scene_pipeline);
+    SceneTextureCache scene_cache;
+#endif
+    machine.consume_frame_step();  // 丢掉预跑期留下的请求
+    // 只建一张 1×1 占位纹理给软件回退路径；⛔ 不要在这里 rasterize（那会清脏、跳过首帧）。
+    core::Bytes canvas{0, 0, 0, 0};
+    SDL_GPUTexture* image = upload_texture(device, canvas, 1, 1);
+    if (image == nullptr) {
+        destroy_quad_pipeline(device, pipeline);
+        return 1;
+    }
+    SDL_ReleaseGPUTexture(device, pipeline.texture);
+    pipeline.texture = image;
+
+    bool running = true;
+    std::size_t frame = 0;
+    std::size_t max_windows = 0;
+    const std::uint32_t clock_base = machine.scene_clock_ms();
+    const Uint64 start_ticks = SDL_GetTicks();
+    const auto present = [&]() -> bool {
+        SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device);
+        if (command == nullptr) return false;
+        SDL_GPUTexture* swapchain = nullptr;
+        if (!SDL_WaitAndAcquireGPUSwapchainTexture(command, window, &swapchain, nullptr, nullptr)) {
+            SDL_CancelGPUCommandBuffer(command);
+            return false;
+        }
+        if (swapchain != nullptr) draw_quad(command, swapchain, pipeline);
+        return SDL_SubmitGPUCommandBuffer(command);
+    };
+    while (running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_EVENT_QUIT) running = false;
+            else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) running = false;
+        }
+        if (!running) break;
+        if (machine.halted()) {
+            SDL_Delay(10);
+            continue;
+        }
+
+        machine.set_host_clock_ms(clock_base +
+                                  static_cast<std::uint32_t>(SDL_GetTicks() - start_ticks));
+        // 一次迭代 = 至多一条指令；门前渲染由 core 决定。没有渲染请求时本迭代不呈现，
+        // 但宿主可以连续跑一批迭代（不是“一帧 N 条”的语义，只是调度批量）。
+        bool requested = false;
+        for (int i = 0; i < 4096 && !requested; ++i) {
+            if (!machine.step()) break;
+            if (machine.consume_frame_step()) requested = true;
+        }
+        if (!requested) {
+            SDL_Delay(1);
+            continue;
+        }
+
+        bool presented = false;
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+        if (scene_gpu_ok && machine.scene_commands().empty()) {
+            preload_scene_textures(device, scene_cache, machine);
+            SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device);
+            if (command == nullptr) break;
+            SDL_GPUTexture* swapchain = nullptr;
+            if (!SDL_WaitAndAcquireGPUSwapchainTexture(command, window, &swapchain, nullptr, nullptr)) {
+                SDL_CancelGPUCommandBuffer(command);
+                break;
+            }
+            if (swapchain != nullptr) {
+                if (!draw_scene_gpu(device, command, swapchain, machine, scene_pipeline, scene_cache,
+                                    width, height)) {
+                    SDL_CancelGPUCommandBuffer(command);
+                    break;
+                }
+            }
+            if (!SDL_SubmitGPUCommandBuffer(command)) break;
+            machine.end_render();  // 清脏 + 命令表生命周期（GPU 路径没有走 rasterize_scene）
+            presented = true;
+        }
+#endif
+        if (!presented) {
+            // 命令档 / 文字等仍由软件 oracle 合成；GPU 场景路径覆盖绘制项 + 4 顶点网格。
+            canvas = core::rasterize_scene(machine, static_cast<std::uint32_t>(width),
+                                           static_cast<std::uint32_t>(height));
+            SDL_GPUTexture* next = upload_texture(device, canvas, width, height);
+            if (next != nullptr) {
+                SDL_ReleaseGPUTexture(device, pipeline.texture);
+                pipeline.texture = next;
+            }
+            if (!present()) break;
+        }
+        {
+            std::size_t active = 0;
+            for (const auto& [key, item] : machine.draw_items()) {
+                (void)key;
+                if ((item.flags & 2u) != 0) ++active;
+            }
+            max_windows = std::max(max_windows, active);
+        }
+        ++frame;
+        if (max_frames > 0 && static_cast<int>(frame) >= max_frames) break;
+    }
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+    release_scene_textures(device, scene_cache);
+    destroy_scene_pipeline(device, scene_pipeline);
+#endif
+    destroy_quad_pipeline(device, pipeline);
+    SDL_ReleaseWindowFromGPUDevice(device, window);
+    std::size_t windows = 0;
+    for (const auto& [key, item] : machine.draw_items()) {
+        (void)key;
+        if ((item.flags & 2u) != 0) ++windows;
+    }
+    std::printf("[render] play frames=%zu clock=%ums script=%u windows=%zu maxWindows=%zu\n", frame,
+                machine.scene_clock_ms(), machine.frame().script_id, windows, max_windows);
+    return 0;
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // 引擎字符串在核心内部是 CP932 字节；显示前统一解码成 UTF-8，控制台也切 UTF-8。
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
     bool smoke = false;
     std::string install_dir;
     std::string table_path;
@@ -988,6 +1765,15 @@ int main(int argc, char** argv) {
     std::string agf_path;
     std::size_t max_steps = 200000;
     std::uint32_t stop_at = 0x20F;
+    bool to_title = false;
+    bool render_title = false;
+    bool show_title = false;
+    bool play_title = false;
+    int render_frames = 0;
+    int trace_steps = 0;
+    int play_frames = 0;
+    bool play_boot = false;
+    bool gpu_title = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--smoke") == 0) {
             smoke = true;
@@ -997,6 +1783,47 @@ int main(int argc, char** argv) {
             table_path = argv[++i];
         } else if (std::strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--show-title") == 0) {
+            show_title = true;
+            render_title = true;
+            to_title = true;
+            stop_at = 0;
+            if (max_steps < 400000) max_steps = 400000;
+        } else if (std::strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
+            trace_steps = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--render-frames") == 0 && i + 1 < argc) {
+            render_frames = std::atoi(argv[++i]);
+            to_title = true;
+            stop_at = 0;
+            if (max_steps < 400000) max_steps = 400000;
+        } else if (std::strcmp(argv[i], "--play-title") == 0) {
+            play_title = true;
+            to_title = true;
+            stop_at = 0;
+            if (max_steps < 400000) max_steps = 400000;
+        } else if (std::strcmp(argv[i], "--render-title-gpu") == 0) {
+            gpu_title = true;
+            to_title = true;
+            stop_at = 0;
+            if (max_steps < 400000) max_steps = 400000;
+        } else if (std::strcmp(argv[i], "--play-boot") == 0) {
+            play_boot = true;
+            stop_at = 0;
+        } else if (std::strcmp(argv[i], "--play-frames") == 0 && i + 1 < argc) {
+            play_title = true;
+            play_frames = std::atoi(argv[++i]);
+            to_title = true;
+            stop_at = 0;
+            if (max_steps < 400000) max_steps = 400000;
+        } else if (std::strcmp(argv[i], "--render-title") == 0) {
+            render_title = true;
+            to_title = true;
+            stop_at = 0;
+            if (max_steps < 400000) max_steps = 400000;
+        } else if (std::strcmp(argv[i], "--to-title") == 0) {
+            to_title = true;
+            stop_at = 0;
+            if (max_steps < 400000) max_steps = 400000;
         } else if (std::strcmp(argv[i], "--stop-at") == 0 && i + 1 < argc) {
             stop_at = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
         } else if (std::strcmp(argv[i], "--max-steps") == 0 && i + 1 < argc) {
@@ -1014,7 +1841,7 @@ int main(int argc, char** argv) {
         const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
         if (table_path.empty()) table_path = (exe_dir / "opcode-table.json").string();
         if (config_keys_path.empty()) config_keys_path = (exe_dir / "config-keys.json").string();
-        return run_core_install(install_dir, table_path, config_path, config_keys_path, max_steps, stop_at);
+        return run_core_install(install_dir, table_path, config_path, config_keys_path, max_steps, stop_at, to_title, render_title, show_title, play_title, render_frames, trace_steps, play_frames, play_boot, gpu_title);
     }
 
     SDL_SetAppMetadata("emulator-cxx", "0.1.0", "dev.amayui.emulator-cxx");

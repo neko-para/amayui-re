@@ -18,8 +18,9 @@
         "VCPKG_MANIFEST_MODE": "ON",
         "CMAKE_C_COMPILER": "clang-cl",
         "CMAKE_CXX_COMPILER": "clang-cl",
-        "VCPKG_MANIFEST_FEATURES": "shader",
-        "EMULATOR_CXX_WITH_SHADER": "ON"
+        "VCPKG_MANIFEST_FEATURES": "shader;text",
+        "EMULATOR_CXX_WITH_SHADER": "ON",
+        "EMULATOR_CXX_WITH_TEXT": "ON"
       }
     },
     {

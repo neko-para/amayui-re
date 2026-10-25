@@ -1,5 +1,7 @@
 #include "core/config.h"
 
+#include "core/encoding.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -50,9 +52,9 @@ std::vector<std::size_t> top_level_equals(const std::string& line) {
 }
 }  // namespace
 
-ConfigVocabulary ConfigVocabulary::load_from_file(const std::string& path) {
+ConfigVocabulary ConfigVocabulary::load_from_file(const std::filesystem::path& path) {
     std::ifstream input(path);
-    if (!input) throw CoreError("config-vocabulary-open-failed:" + path);
+    if (!input) throw CoreError("config-vocabulary-open-failed:" + path_to_utf8(path));
     const auto json = nlohmann::json::parse(input);
 
     ConfigVocabulary vocabulary;

@@ -1,5 +1,7 @@
 #include "core/opcode_table.h"
 
+#include "core/encoding.h"
+
 #include <nlohmann/json.hpp>
 
 #include <fstream>
@@ -15,12 +17,12 @@ OpcodeTable OpcodeTable::from_rows(std::vector<OpcodeRow> rows) {
     return table;
 }
 
-OpcodeTable OpcodeTable::load_from_file(const std::string& path) {
+OpcodeTable OpcodeTable::load_from_file(const std::filesystem::path& path) {
     std::ifstream input(path);
-    if (!input) throw CoreError("opcode-table-open-failed:" + path);
+    if (!input) throw CoreError("opcode-table-open-failed:" + path_to_utf8(path));
 
     const auto json = nlohmann::json::parse(input);
-    if (!json.is_array()) throw CoreError("opcode-table-not-array:" + path);
+    if (!json.is_array()) throw CoreError("opcode-table-not-array:" + path_to_utf8(path));
 
     std::vector<OpcodeRow> rows;
     rows.reserve(json.size());

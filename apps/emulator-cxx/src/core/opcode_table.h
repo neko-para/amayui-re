@@ -3,6 +3,7 @@
 #include "core/bytes.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,7 +19,7 @@ struct OpcodeRow {
 
 class OpcodeTable {
 public:
-    static OpcodeTable load_from_file(const std::string& path);
+    static OpcodeTable load_from_file(const std::filesystem::path& path);
     static OpcodeTable from_rows(std::vector<OpcodeRow> rows);
 
     const OpcodeRow* find(std::uint32_t opcode) const;

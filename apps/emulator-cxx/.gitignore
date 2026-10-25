@@ -3,3 +3,5 @@ vcpkg_installed/
 .vcpkg/
 *.bmp
 CMakeUserPresets.json
+title-frame.bmp
+title-frame.png

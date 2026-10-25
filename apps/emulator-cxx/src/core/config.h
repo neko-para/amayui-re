@@ -42,7 +42,7 @@ public:
         std::string kind;
     };
 
-    static ConfigVocabulary load_from_file(const std::string& path);
+    static ConfigVocabulary load_from_file(const std::filesystem::path& path);
 
     const DefaultKey* find_default(const std::string& index_key) const;
     const IniKey* find_ini(const std::string& section, const std::string& key) const;
@@ -62,6 +62,7 @@ public:
     void load_player_file(const std::filesystem::path& path);
 
     std::int32_t get_int(const std::string& key) const;
+    bool has_named(const std::string& key) const { return named_.find(key) != named_.end(); }
     std::string get_string(const std::string& key) const;
     const std::vector<std::string>* get_list(const std::string& key) const;
     void set_int(const std::string& key, std::int32_t value);

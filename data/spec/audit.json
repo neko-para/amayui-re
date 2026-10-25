@@ -3423,8 +3423,8 @@
         {
           "id": "RES-RENDER-TARGET-FIELD",
           "kind": "unknown",
-          "what": "「当前渲染目标」格的领域用途（谁读它、读取后怎样分支）未逐条取证",
-          "next": "枚举该格的读取点，确认它是否参与渲染路径的决策"
+          "what": "渲染步在步末读它判是否提交；命令档切/恢复也读它（场景章规定）。其余读者未枚举。",
+          "next": "枚举该格读取点。"
         },
         {
           "id": "RES-RENDER-TARGET-TEXT",
@@ -3447,8 +3447,8 @@
         {
           "id": "RES-RENDER-TARGET-ORDER",
           "kind": "unknown",
-          "what": "渲染目标切换与帧提交 / 呈现的先后关系没有取证；本版只规定目标切换本身",
-          "next": "定位主循环的 present 点，给出相对顺序"
+          "what": "0x20d 写目标格在门之后，从下一次渲染步（门前或 0x20c）起生效；命令档切/恢复由 CORE-SCENE-DRAW-ORDER 规定。未定：38 切/贴回/复位与平台换链逐位。",
+          "next": "补 38 实参；平台逐位进 discards。"
         },
         {
           "id": "RES-RENDER-TARGET-BOUNDS",
@@ -5995,28 +5995,58 @@
       "disposition": "handled",
       "residual": [
         {
-          "id": "RES-RENDER-STEP-SCENE-ORDER",
+          "id": "RES-RENDER-STEP-NEEDS-REDRAW",
           "kind": "unknown",
-          "what": "两档顺序已写成 `CORE-SCENE-DRAW-ORDER`；未定的是命令段的实际遍历与 D3D 提交点没有逐段取证。",
-          "next": "逐段读命令段遍历与提交点。"
+          "what": "门前闸门里「场景需要重绘」的判据（脏 / 有动画 / 命令表在动 / 影片新帧）及读取点未取证。",
+          "next": "逐条读闸门条件。"
+        },
+        {
+          "id": "RES-RENDER-STEP-INTERNAL",
+          "kind": "unknown",
+          "what": "渲染步内部的清 / 38 切与贴回 / 目标复位 / 收尾顺序、以及各请求参数与失败后果未取证。",
+          "next": "逐段读渲染步并对齐纹理族的 38 语义。"
+        },
+        {
+          "id": "RES-RENDER-STEP-BUSY",
+          "kind": "unknown",
+          "what": "渲染器忙的判据（谁置 / 何时清）未取证；门前闸门只把它当\"为真则本迭代不渲染\"。",
+          "next": "读忙标记的读写点。"
         },
         {
           "id": "RES-RENDER-STEP-DRIVER",
           "kind": "unknown",
-          "what": "「别处驱动」标记的身份与写点未取证。",
-          "next": "找该格的写入点，确认它是否表示\"外部已推进过时钟\"。"
-        },
-        {
-          "id": "RES-RENDER-STEP-TIMESTAMPS",
-          "kind": "unknown",
-          "what": "两个引擎级时间戳格的领域身份未取证；只确认它们不是帧记录里 0x1f4 写的那一对。",
-          "next": "枚举两格的读者。"
+          "what": "主循环闸门里的「别处驱动」标记身份与写点未取证。",
+          "next": "找该格写入点。"
         },
         {
           "id": "RES-RENDER-STEP-FLAG",
           "kind": "unknown",
           "what": "帧标志格的写者与含义未取证；本条只规定清 0。",
-          "next": "找该格的置位点，确认它是否表示“新帧可用”。"
+          "next": "找该格的置位点。"
+        },
+        {
+          "id": "RES-RENDER-STEP-TIMESTAMPS",
+          "kind": "unknown",
+          "what": "两个引擎级时间戳格的领域身份未取证。",
+          "next": "枚举两格的读者。"
+        },
+        {
+          "id": "RES-RENDER-STEP-DRAW-SWITCH",
+          "kind": "unknown",
+          "what": "场景绘制开关的领域名、缺省值以及第二重角色未取证；本条只规定为 1 才走门前渲染。",
+          "next": "读配置样本与该格的所有读者。"
+        },
+        {
+          "id": "RES-RENDER-STEP-WAITBIT",
+          "kind": "unknown",
+          "what": "状态选择字里「等消息」位的位号、置点与服务分支未取证。",
+          "next": "枚举状态选择字第 24 位附近的写点。"
+        },
+        {
+          "id": "RES-RENDER-STEP-DOUBLE",
+          "kind": "unknown",
+          "what": "同一迭代门前后两次渲染步请求是否都执行，以及帧记录/时间戳/命令档第一帧如何共享场景时刻，未取证。",
+          "next": "真机/断点观察同迭代双请求。"
         }
       ],
       "falsifiers": [

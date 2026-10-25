@@ -2,6 +2,7 @@
 
 #include "core/agf.h"
 #include "core/install.h"
+#include "core/text_raster.h"
 
 #include <algorithm>
 #include <bit>
@@ -38,11 +39,54 @@ double parse_float_text(const std::string& text) {
 std::uint32_t as_u32(std::int32_t value) {
     return static_cast<std::uint32_t>(value);
 }
+
+std::uint8_t clamp_byte(int value) {
+    return static_cast<std::uint8_t>(std::clamp(value, 0, 255));
+}
+
+// 会改场景（因而置脏、让下一次迭代渲染）的 opcode。按章归组；未实现的也先登记，
+// 以后补 handler 时不会漏掉脏标记。
+bool is_scene_mutating(std::uint32_t opcode) {
+    switch (opcode) {
+        case 0x1F7:  // 拆离绘制键
+        case 0x1F8:  // 空白纹理
+        case 0x1F9:  // 设置纹理
+        case 0x1FA:  // 释放纹理
+        case 0x1FB:  // 写绘制项
+        case 0x1FD: case 0x1FE: case 0x1FF:  // 场景对象变换
+        case 0x202: case 0x203:              // 绘制项颜色
+        case 0x217: case 0x219: case 0x220:  // 3D 记录
+        case 0x223: case 0x239: case 0x242:
+        case 0x24D: case 0x24F: case 0x250: case 0x251:  // 场景命令表
+        case 0x229: case 0x230: case 0x231: case 0x233: case 0x234: case 0x235:
+        case 0x23B:                          // CG 数字条
+        case 0x258: case 0x259:              // 1000 项表
+        case 0x320: case 0x322: case 0x323:  // 网格
+        case 0x344:                          // 辅助表 A
+            return true;
+        default:
+            return false;
+    }
+}
+
+// ARGB 逐通道插值（截断）。`t` 可以越出 [0,1]：规范只判上界，负延迟 / 未夹取的进度会外推。
+std::uint32_t lerp_argb(std::uint32_t from, std::uint32_t to, double t) {
+    const auto channel = [&](int shift) {
+        const double a = static_cast<double>((from >> shift) & 0xFFu);
+        const double b = static_cast<double>((to >> shift) & 0xFFu);
+        const int value = static_cast<int>(a + (b - a) * t);
+        return static_cast<std::uint32_t>(std::clamp(value, 0, 255));
+    };
+    return (channel(24) << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0);
+}
 }  // namespace
 
 Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install* install,
                  ConfigStore config)
-    : key_(int_key == 0 ? 1u : int_key), table_(table), install_(install), config_(std::move(config)) {}
+    : key_(int_key == 0 ? 1u : int_key), table_(table), install_(install), config_(std::move(config)) {
+    // 主循环的渲染闸门：`set:DrawMode == 1` 才自动渲染。缺键按配置口径为 0（不自动渲染）。
+    draw_mode_ = config_.get_int("set:DrawMode");
+}
 
 std::uint32_t Machine::encode_int(std::int32_t value) const {
     return rol32(ror32(as_u32(value), 7) ^ key_, 21);
@@ -50,6 +94,90 @@ std::uint32_t Machine::encode_int(std::int32_t value) const {
 
 std::int32_t Machine::decode_int(std::uint32_t bits) const {
     return as_i32(ror32(rol32(bits, 11) ^ key_, 25));
+}
+
+void Machine::advance_scene(std::uint32_t now_ms) {
+    scene_previous_ms_ = scene_clock_ms_;
+    scene_clock_ms_ = now_ms;
+    scene_animating_ = false;
+
+    // 共享推进：盖章 → 延迟内 / 推进中 → 到期收尾（`CORE-TIMING-WINDOW`）。
+    // 返回本步派生色（只写进出参，不写记录字段；到期那一步才写当前颜色）。
+    const auto advance_window = [&](std::uint32_t& flags, std::uint32_t& current,
+                                    std::uint32_t& target, std::int32_t& delay,
+                                    std::int32_t& duration, std::uint32_t& start,
+                                    bool keep_window = false) {
+        if ((flags & 2u) == 0) return current;
+        if (duration <= 0) return current;  // 不盖章 / 不插值 / 不置动画 / 不到期
+        if (start == 0) start = now_ms;
+        if (now_ms <= start + static_cast<std::uint32_t>(delay) +
+                          static_cast<std::uint32_t>(duration)) {
+            scene_animating_ = true;
+            if (now_ms <= start + static_cast<std::uint32_t>(delay)) return current;
+            const auto elapsed = now_ms - start - static_cast<std::uint32_t>(delay);
+            const auto progress = static_cast<double>(elapsed) / static_cast<double>(duration);
+            return lerp_argb(current, target, progress);
+        }
+        // 到期：当前颜色 ← 终色；终色 ← 无颜色；延迟 / 持续时间清 0；清「有窗」位与起点。
+        current = target;
+        target = kNoColor;
+        delay = 0;
+        duration = 0;
+        if (!keep_window) {
+            flags &= ~2u;
+            start = 0;
+        }
+        return current;
+    };
+
+    for (auto& [key, item] : draw_items_) {
+        (void)key;
+        if ((item.flags & 2u) != 0 && item.window_start == 0 &&
+            (item.duration > 0 || item.rect_duration > 0)) {
+            item.window_start = now_ms;  // 源矩形窗与颜色窗共用一次盖章
+        }
+        const bool rect_active = (item.flags & 2u) != 0 && item.rect_duration > 0;
+        const bool rect_expired =
+            rect_active && now_ms > item.window_start + static_cast<std::uint32_t>(item.rect_delay) +
+                                         static_cast<std::uint32_t>(item.rect_duration);
+        (void)advance_window(item.flags, item.color, item.target_color, item.delay, item.duration,
+                             item.window_start, rect_active && !rect_expired);
+        if (rect_expired) {
+            // 到期那一档把结果写回条目的四条边（末帧或空矩形）。
+            const int width = std::max(0, item.right - item.left);
+            const int height = std::max(0, item.bottom - item.top);
+            if ((item.rect_switch & 1) != 0 && item.rect_row_steps > 0 &&
+                item.rect_step_total > 0) {
+                const std::int64_t step = item.rect_step_total - 1;
+                const int dx = width * static_cast<int>(step % item.rect_row_steps);
+                const int dy = height * static_cast<int>(step / item.rect_row_steps);
+                item.left += dx;
+                item.right += dx;
+                item.top += dy;
+                item.bottom += dy;
+            } else {
+                item.right = item.left;
+                item.bottom = item.top;
+            }
+            item.rect_delay = 0;
+            item.rect_duration = 0;
+            if (item.duration <= 0) {
+                item.flags &= ~2u;
+                item.window_start = 0;
+            }
+        }
+    }
+    for (auto& [key, mesh] : meshes_) {
+        (void)key;
+        const bool had_window = (mesh.flags & 2u) != 0;
+        const auto derived = advance_window(mesh.flags, mesh.color, mesh.target_color, mesh.delay,
+                                            mesh.duration, mesh.window_start);
+        // 网格只在被推进的那一步按派生色重烘顶点缓冲（`CORE-TIMING-WINDOW`）。
+        if (had_window && !mesh.colors.empty()) {
+            for (auto& value : mesh.colors) value = derived;
+        }
+    }
+    if (scene_animating_) scene_dirty_ = true;  // 有动画 ⇒ 下一迭代重绘
 }
 
 void Machine::load_root(const Bytes& script, std::uint32_t script_id) {
@@ -64,6 +192,7 @@ void Machine::load_root(const Bytes& script, std::uint32_t script_id) {
     root.script_id = script_id;
     current_frame_ = 0;
     halted_ = false;
+    scene_dirty_ = true;
     stop_ = {};
 }
 
@@ -148,6 +277,20 @@ std::uint32_t Machine::read_pointer(const Operand& operand) const {
 
 void Machine::write_pointer(const Operand& operand, std::uint32_t address) {
     ref_slots_[address_of(operand)] = address;
+}
+
+std::uint32_t Machine::read_raw(std::uint32_t address) {
+    std::uint32_t tag = 0;
+    std::uint32_t index = 0;
+    if (!resolve_address(address, tag, index)) throw CoreError("read-raw-unmapped-address");
+    switch (tag) {
+        case 3: { const auto it = global_int_.find(index); return it == global_int_.end() ? encode_int(0) : it->second; }
+        case 9: { const auto it = frame_mut().local_int.find(index); return it == frame_mut().local_int.end() ? encode_int(0) : it->second; }
+        case 4: { const auto it = global_float_.find(index); return it == global_float_.end() ? 0u : std::bit_cast<std::uint32_t>(it->second); }
+        case 10: { const auto it = frame_mut().local_float.find(index); return it == frame_mut().local_float.end() ? 0u : std::bit_cast<std::uint32_t>(it->second); }
+        case 6: case 7: case 12: case 13: { const auto it = ref_slots_.find(address); return it == ref_slots_.end() ? 0u : it->second; }
+        default: throw CoreError("read-raw-unsupported-tag");
+    }
 }
 
 void Machine::store_raw(std::uint32_t address, std::uint32_t bits) {
@@ -489,6 +632,211 @@ void Machine::execute(const Instruction& instruction) {
         case 0x10C: { const auto value = read_int(ops[0]); const auto slot = read_int(ops[1]); if (value > 0x1f) throw CoreError("key-multi-range"); indirect_[slot] = value; return; }
         case 0x308: (void)read_int(ops[0]); return;  // 宿主接口转发请求；字段未建模
         case 0xFE: { const auto value = read_int(ops[0]); if (static_cast<std::uint32_t>(value) > 31u) throw CoreError("key-total-out-of-range"); key_total_ = value; return; }
+        case 0xBF: (void)read_int(ops[0]); state_flags_ &= ~(1u << 9); return;  // BGM 请求；配置音量路径未建模
+        case 0xB4: (void)read_int(ops[0]); (void)read_int(ops[1]); return;  // 音频装载请求
+        case 0xB5: (void)read_int(ops[0]); return;  // 音频播放请求
+        case 0x2C7: return;  // ADV 文字工具请求（内部未建模）
+        case 0x341: case 0x345: case 0x34E: case 0x352: return;  // Live2D 请求边界（内部未建模）
+        case 0x2EC: write_int(ops[0], parse_int_text(read_text(ops[1]))); return;  // 十进制文本转整数
+        case 0x2EB: write_text(ops[0], config_.get_string("set:GameVersion")); return;  // 配置版本写进字符串记录
+        case 0x23B: {  // CG 数字条：建绘制项（像素输出未建模）
+            const auto id = read_int(ops[1]);
+            if (id < 0 || id > 10) return;
+            if (id < 10 && cg_params_[static_cast<std::size_t>(id)][0] == 0) return;
+            const auto start = read_int(ops[0]);
+            const auto value = read_int(ops[2]);
+            const auto digits = read_int(ops[5]);
+            const auto flags = read_int(ops[6]);
+            if (digits > 0) {
+                for (std::int32_t i = 0; i < digits; ++i) draw_items_.erase(static_cast<std::uint32_t>(start + i));
+            }
+            if (digits <= 0) return;
+            const auto target_x = read_int(ops[3]);
+            const auto target_y = read_int(ops[4]);
+            const auto& cg = cg_params_[static_cast<std::size_t>(id)];
+            const std::int32_t cell = cg[3] + cg[6];
+            const std::int32_t number_digits = value == 0 ? 1 : static_cast<std::int32_t>(std::to_string(std::abs(value)).size());
+            for (std::int32_t j = 0; j < digits; ++j) {
+                const auto digit = static_cast<std::int32_t>((std::abs(value) / static_cast<std::int32_t>(std::pow(10, j))) % 10);
+                const std::int32_t index = digits - 1 - j;
+                std::int32_t x = target_x + index * cell;
+                if ((flags & 2) != 0) x -= (digits - number_digits) * cell;
+                else if ((flags & 4) != 0) x -= 0;
+                DrawItem& item = draw_items_[static_cast<std::uint32_t>(start + j)];
+                item.flags |= 1u;
+                item.texture_id = static_cast<std::uint32_t>(cg[0]);
+                item.left = cg[1] + cell * digit;
+                item.top = cg[2];
+                item.right = item.left + cg[3];
+                item.bottom = item.top + cg[4];
+                item.aux[0] = static_cast<float>(x);
+                item.aux[1] = static_cast<float>(target_y);
+                item.aux[2] = 0.0f;
+            }
+            return;
+        }
+        case 0x109: write_int(ops[0], -100000); write_int(ops[1], -100000); return;  // 无窗口：光标不可用
+        case 0x108: write_int(ops[0], 0); return;  // 无窗口：按钮位图 0
+        case 0xC8: { const auto ms = read_int(ops[0]); if (ms >= 10) state_flags_ |= 1u; return; }  // 计时器请求；短睡眠按无操作
+        case 0xCC: mouse_interval_ = read_int(ops[0]); if (mouse_interval_ == 0) mouse_interval_ = 1; mouse_position_ = read_int(ops[1]); return;
+        case 0xCD: return;  // 鼠标回调时间闸：无时钟/无回调时不派发
+        case 0xFB: {  // 登记按键回调
+            const auto key = read_int(ops[0]);
+            const auto position = read_int(ops[1]);
+            if (key < 0 || key > 31) throw CoreError("key-register-out-of-range");
+            frame_mut().key_jumps[key] = position;
+            return;
+        }
+        case 0x24E: input_mode_ = static_cast<std::uint32_t>(read_int(ops[0])); return;  // 主循环模式字
+        case 0x2DA: {  // CG 参数记录七格
+            const auto id = read_int(ops[0]);
+            if (id < 0 || id > 10) return;
+            for (std::size_t i = 0; i < 7; ++i) cg_params_[static_cast<std::size_t>(id)][i] = read_int(ops[i + 1]);
+            return;
+        }
+        case 0x344: {  // 辅助表 A（Live2D 条目不透明桶）
+            const auto value = read_int(ops[1]);
+            const auto key = read_int(ops[0]);
+            aux_a_[key] = {1, value};
+            return;
+        }
+        case 0x1FF: {  // 平移矩阵
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto x = read_float(ops[1]);
+            const auto y = read_float(ops[2]);
+            const auto z = read_float(ops[3]);
+            SceneRecord& rec = scene_records_[key];
+            rec.translate[0] = static_cast<float>(x);
+            rec.translate[1] = static_cast<float>(y);
+            rec.translate[2] = static_cast<float>(z);
+            return;
+        }
+        case 0x1FD: {  // 缩放矩阵：百分之一
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto x = read_float(ops[1]) / 100.0;
+            const auto y = read_float(ops[2]) / 100.0;
+            const auto z = read_float(ops[3]) / 100.0;
+            SceneRecord& rec = scene_records_[key];
+            rec.scale[0] = static_cast<float>(x);
+            rec.scale[1] = static_cast<float>(y);
+            rec.scale[2] = static_cast<float>(z);
+            return;
+        }
+        case 0x1FE: {  // 旋转矩阵：轴 + 角度（度）
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto ax = read_float(ops[1]);
+            const auto ay = read_float(ops[2]);
+            const auto az = read_float(ops[3]);
+            const auto degrees = read_float(ops[4]);
+            SceneRecord& rec = scene_records_[key];
+            rec.rotate_axis[0] = static_cast<float>(ax);
+            rec.rotate_axis[1] = static_cast<float>(ay);
+            rec.rotate_axis[2] = static_cast<float>(az);
+            rec.rotate_degrees = static_cast<float>(degrees);
+            return;
+        }
+        case 0x20B: {  // 纹理矩形填充：夹到逻辑矩形，颜色 = (颜色 & 0xFFFFFF) | 0xFF000000
+            const auto id = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto x = read_int(ops[1]);
+            const auto y = read_int(ops[2]);
+            const auto w = read_int(ops[3]);
+            const auto h = read_int(ops[4]);
+            auto alpha = read_int(ops[5]);
+            const auto color = as_u32(read_int(ops[6])) & 0xFFFFFFu;
+            if (alpha > 255) alpha = 255;
+            if (id > 999u) return;
+            auto it = textures_.find(id);
+            if (it == textures_.end()) return;
+            TextureRecord& texture = it->second;
+            texture.non_file = true;
+                texture.revision++;
+            if (texture.rgba.empty()) return;
+            const int left = std::max(0, x);
+            const int top = std::max(0, y);
+            const int right = std::min(static_cast<int>(texture.width), x + w);
+            const int bottom = std::min(static_cast<int>(texture.height), y + h);
+            if (right <= left || bottom <= top) return;
+            const int a = std::max(0, alpha);
+            const int sr = static_cast<int>((color >> 16) & 0xFFu);
+            const int sg = static_cast<int>((color >> 8) & 0xFFu);
+            const int sb = static_cast<int>(color & 0xFFu);
+            for (int py = top; py < bottom; ++py) {
+                for (int px = left; px < right; ++px) {
+                    const std::size_t d = (static_cast<std::size_t>(py) * texture.width + px) * 4;
+                    texture.rgba[d + 0] = clamp_byte((sr * a + texture.rgba[d + 0] * (255 - a)) / 255);
+                    texture.rgba[d + 1] = clamp_byte((sg * a + texture.rgba[d + 1] * (255 - a)) / 255);
+                    texture.rgba[d + 2] = clamp_byte((sb * a + texture.rgba[d + 2] * (255 - a)) / 255);
+                    texture.rgba[d + 3] = clamp_byte(a + texture.rgba[d + 3] * (255 - a) / 255);
+                }
+            }
+            return;
+        }
+        case 0x20C: {  // 帧步进：时间戳 + 一次渲染请求 + 清帧标志
+            if (!driven_elsewhere_) {
+                engine_previous_ms_ = engine_now_ms_;
+                engine_now_ms_ = scene_clock_ms_;
+            }
+            frame_step_requested_ = true;
+            frame_flag_ = false;
+            return;
+        }
+        case 0x20D: {  // 渲染目标：<1000 纹理槽，>=1000 后缓冲
+            const auto id = read_int(ops[0]);
+            if (static_cast<std::uint32_t>(id) < 1000u) {
+                if (textures_.find(static_cast<std::uint32_t>(id)) != textures_.end()) render_target_ = id;
+            } else {
+                render_target_ = -1;
+            }
+            return;
+        }
+        case 0x33F: {  // 场景混合：alpha 先读、color 再读、mode 最后
+            auto alpha = read_int(ops[1]);
+            auto color = read_int(ops[2]);
+            const auto mode = read_int(ops[0]);
+            const auto key = static_cast<std::uint32_t>(mode);
+            const auto item = draw_items_.find(key);
+            if (alpha < 0) alpha = item == draw_items_.end() ? 255 : static_cast<std::int32_t>((item->second.color >> 24) & 0xFFu);
+            if (color < 0) color = item == draw_items_.end() ? static_cast<std::int32_t>(0xFFFFFFFFu) : static_cast<std::int32_t>(item->second.color);
+            if (alpha > 255) alpha = 255;
+            blend_mode_ = mode;
+            blend_color_ = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+            return;
+        }
+        case 0x204: {  // 离屏文字：读序 3 → 2 → 4 → 1；三条入口条件在请求之前
+            const auto y = read_int(ops[2]);
+            const auto x = read_int(ops[1]);
+            const auto text = read_text(ops[3]);
+            const auto id = read_int(ops[0]);
+            if (id < 0) return;
+            const auto texture_id = static_cast<std::uint32_t>(id);
+            const TextureRecord* texture = this->texture(texture_id);
+            if (texture == nullptr || texture->rgba.empty() || text.empty()) return;
+            std::string error;
+            if (draw_text_into_texture(*this, texture_id, x, y, text, &error)) {
+                if (TextureRecord* mutable_texture = texture_mut(texture_id)) mutable_texture->revision++;
+            } else if (!error.empty()) {
+                report_error(error);
+            }
+            return;
+        }
+        case 0x1F6: draw_items_.clear(); meshes_.clear(); aux_a_.clear(); aux_b_.clear(); scene_dirty_ = false; return;  // 清四张同键表；脏标记清 0（不是置 1）
+        case 0x20F: {  // play-movie：建对象、绑定门、启动后端（headless 立即收尾）
+            const auto slot = read_int(ops[1]);
+            const auto file_id = read_int(ops[0]);
+            (void)read_int(ops[0]);
+            const auto options = read_int(ops[2]);
+            if (textures_.find(static_cast<std::uint32_t>(slot)) == textures_.end()) {
+                throw CoreError("movie-texture-slot-empty:" + std::to_string(slot));
+            }
+            MovieRecord& movie = movies_[static_cast<std::uint32_t>(slot)];
+            movie.present = true;
+            movie.started = true;
+            movie.file_id = static_cast<std::uint32_t>(file_id);
+            movie.options = static_cast<std::uint32_t>(options);
+            movie_active_ = true;
+            state_flags_ |= (1u << 13);
+            return;
+        }
         case 0x21C: state_flags_ |= (1u << 10); return;  // 置等待位；放行由 step 的等待服务做
         case 0x101: state_flags_ &= ~(1u << 27); input_word_ = 0; input_a_ = 1; input_b_ = 0; return;
         case 0xAE: { write_length(1); if (save_version_flag_ == 0) return; throw CoreError("save-version-repair-unmodeled"); }
@@ -548,7 +896,196 @@ void Machine::execute(const Instruction& instruction) {
             config_.save_script_int(key, read_int(ops[0]));
             return;
         }
-        case 0x320: {  // 建/换网格：顶点数 <= 0 不建
+        case 0x223: {  // 种类 0：纹理覆盖命令（先建 / 换纹理请求，再替换记录）
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto texture_id = static_cast<std::uint32_t>(read_int(ops[1]));
+            const auto a_start = read_int(ops[2]);
+            const auto a_count = read_int(ops[3]);
+            const auto b_start = read_int(ops[4]);
+            const auto b_count = read_int(ops[5]);
+            const auto delay = read_int(ops[6]);
+            const auto duration = read_int(ops[7]);
+            if (textures_.find(texture_id) == textures_.end()) {
+                TextureRecord& texture = textures_[texture_id];
+                texture.blank = true;
+                texture.non_file = true;
+                texture.revision++;
+                texture.present = true;
+                texture.width = 1280;
+                texture.height = 720;
+                texture.rgba.assign(static_cast<std::size_t>(texture.width) * texture.height * 4, 0);
+            }
+            SceneCommandRecord& record = scene_commands_[key];
+            record = SceneCommandRecord{};
+            record.kind = 0;
+            record.key = key;
+            record.texture_id = texture_id;
+            record.a_start = a_start;
+            record.a_count = a_count;
+            record.b_start = b_start;
+            record.b_count = b_count;
+            record.delay = delay;
+            record.duration = duration;
+            return;
+        }
+        case 0x24D: {  // 种类 1：影片覆盖命令；第 2 个操作数必须是已存在的影片纹理
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto texture_id = static_cast<std::uint32_t>(read_int(ops[1]));
+            const auto a_start = read_int(ops[2]);
+            const auto a_count = read_int(ops[3]);
+            const auto left = read_int(ops[4]);
+            const auto top = read_int(ops[5]);
+            const auto width = read_int(ops[6]);
+            const auto height = read_int(ops[7]);
+            const auto mask_flag = read_int(ops[8]);
+            (void)read_int(ops[9]);  // 影片名表索引（不写记录）
+            const auto delay = read_int(ops[10]);
+            const auto duration = read_int(ops[11]);
+            if (textures_.find(texture_id) == textures_.end()) {
+                throw CoreError("movie-texture-slot-empty:" + std::to_string(texture_id));
+            }
+            SceneCommandRecord& record = scene_commands_[key];
+            record = SceneCommandRecord{};
+            record.kind = 1;
+            record.key = key;
+            record.texture_id = texture_id;
+            record.a_start = a_start;
+            record.a_count = a_count;
+            record.delay = delay;
+            record.duration = duration;
+            record.rect[0] = left;
+            record.rect[1] = top;
+            record.rect[2] = left + width;
+            record.rect[3] = top + height;
+            record.mask_flag = mask_flag;
+            command_animating_ = true;  // 写表时置「有动画」
+            return;
+        }
+        case 0x24F: {  // 种类 2：抹除命令（先校验、后写表）
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto texture_id = static_cast<std::uint32_t>(read_int(ops[1]));
+            auto a_start = read_int(ops[2]);
+            auto a_count = read_int(ops[3]);
+            auto b_start = read_int(ops[4]);
+            auto b_count = read_int(ops[5]);
+            auto wipe_type = read_int(ops[6]);
+            auto split = read_int(ops[7]);
+            auto delay = read_int(ops[8]);
+            auto duration = read_int(ops[9]);
+            if (split < 1) {
+                report_error("分割幅が０以下です");
+                split = 1;
+                wipe_type = -1;
+                delay = 0;
+                duration = 0;
+            } else if (wipe_type < 0 || wipe_type > 11) {
+                report_error("タイプが不正です");
+                return;  // 一个字段都不写
+            }
+            if (textures_.find(texture_id) == textures_.end()) {
+                TextureRecord& texture = textures_[texture_id];
+                texture.blank = true;
+                texture.non_file = true;
+                texture.revision++;
+                texture.present = true;
+                texture.width = 1280;
+                texture.height = 720;
+                texture.rgba.assign(static_cast<std::size_t>(texture.width) * texture.height * 4, 0);
+            }
+            SceneCommandRecord& record = scene_commands_[key];
+            record = SceneCommandRecord{};
+            record.kind = 2;
+            record.key = key;
+            record.texture_id = texture_id;
+            record.a_start = a_start;
+            record.a_count = a_count;
+            record.b_start = b_start;
+            record.b_count = b_count;
+            record.wipe_type = wipe_type;
+            record.split = split;
+            record.delay = delay;
+            record.duration = duration;
+            return;
+        }
+        case 0x250: {  // 种类 3 变体 0：滑移模糊（长度 / 角度）
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto texture_id = static_cast<std::uint32_t>(read_int(ops[1]));
+            const auto a_start = read_int(ops[2]);
+            const auto a_count = read_int(ops[3]);
+            const auto from_length = read_int(ops[4]);
+            const auto from_angle = read_int(ops[5]);
+            const auto to_length = read_int(ops[6]);
+            const auto to_angle = read_int(ops[7]);
+            const auto delay = read_int(ops[8]);
+            const auto duration = read_int(ops[9]);
+            if (textures_.find(texture_id) == textures_.end()) {
+                TextureRecord& texture = textures_[texture_id];
+                texture.blank = true;
+                texture.non_file = true;
+                texture.revision++;
+                texture.present = true;
+                texture.width = 1280;
+                texture.height = 720;
+                texture.rgba.assign(static_cast<std::size_t>(texture.width) * texture.height * 4, 0);
+            }
+            SceneCommandRecord& record = scene_commands_[key];
+            record = SceneCommandRecord{};
+            record.kind = 3;
+            record.key = key;
+            record.texture_id = texture_id;
+            record.a_start = a_start;
+            record.a_count = a_count;
+            record.delay = delay;
+            record.duration = duration;
+            record.variant = 0;
+            record.from[0] = from_length;
+            record.to[0] = to_length;
+            record.from[1] = from_angle;
+            record.to[1] = to_angle;
+            return;
+        }
+        case 0x251: {  // 种类 3 变体 1：缩放模糊（长度 / 中心横 / 中心纵）
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            const auto texture_id = static_cast<std::uint32_t>(read_int(ops[1]));
+            const auto a_start = read_int(ops[2]);
+            const auto a_count = read_int(ops[3]);
+            const auto from_length = read_int(ops[4]);
+            const auto from_cx = read_int(ops[5]);
+            const auto from_cy = read_int(ops[6]);
+            const auto to_length = read_int(ops[7]);
+            const auto to_cx = read_int(ops[8]);
+            const auto to_cy = read_int(ops[9]);
+            const auto delay = read_int(ops[10]);
+            const auto duration = read_int(ops[11]);
+            if (textures_.find(texture_id) == textures_.end()) {
+                TextureRecord& texture = textures_[texture_id];
+                texture.blank = true;
+                texture.non_file = true;
+                texture.revision++;
+                texture.present = true;
+                texture.width = 1280;
+                texture.height = 720;
+                texture.rgba.assign(static_cast<std::size_t>(texture.width) * texture.height * 4, 0);
+            }
+            SceneCommandRecord& record = scene_commands_[key];
+            record = SceneCommandRecord{};
+            record.kind = 3;
+            record.key = key;
+            record.texture_id = texture_id;
+            record.a_start = a_start;
+            record.a_count = a_count;
+            record.delay = delay;
+            record.duration = duration;
+            record.variant = 1;
+            record.from[0] = from_length;
+            record.to[0] = to_length;
+            record.from[1] = from_cx;
+            record.to[1] = to_cx;
+            record.from[2] = from_cy;
+            record.to[2] = to_cy;
+            return;
+        }
+        case 0x320: {  // 建/换网格：保存逐顶点位置 / 颜色
             const auto count = read_int(ops[8]);
             const auto op10 = read_int(ops[9]);
             const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
@@ -557,6 +1094,21 @@ void Machine::execute(const Instruction& instruction) {
             mesh.flags |= 1u;
             mesh.count = count;
             mesh.op10 = op10;
+            mesh.copies[0].clear();
+            mesh.copies[1].clear();
+            mesh.colors.clear();
+            const auto address0 = address_of(ops[1]);
+            const auto address1 = address_of(ops[2]);
+            const auto address2 = address_of(ops[4]);
+            const auto address3 = address_of(ops[5]);
+            for (std::int32_t i = 0; i < count; ++i) {
+                const auto step = static_cast<std::uint32_t>(i) * 4u;
+                mesh.copies[0].push_back(read_raw(address0 + step));
+                mesh.copies[1].push_back(read_raw(address1 + step));
+                const auto high = as_u32(read_int_at(address2 + step)) & 0xFFu;
+                const auto low = as_u32(read_int_at(address3 + step)) & 0xFFFFFFu;
+                mesh.colors.push_back((high << 24) | low);
+            }
             return;
         }
         case 0x322: {  // 网格当前颜色
@@ -566,6 +1118,8 @@ void Machine::execute(const Instruction& instruction) {
             const auto color = read_int(ops[3]);
             MeshRecord& mesh = meshes_[key];
             mesh.color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+            mesh.target_color = mesh.color;
+            for (auto& value : mesh.colors) value = mesh.color;
             return;
         }
         case 0x323: {  // 网格颜色窗
@@ -578,7 +1132,8 @@ void Machine::execute(const Instruction& instruction) {
             mesh.flags |= 2u;
             mesh.delay = delay;
             mesh.duration = duration;
-            mesh.color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+            mesh.target_color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+            mesh.window_start = 0;  // 未盖章
             return;
         }
         case 0x1FB: {  // 绘制纹理：只入队
@@ -603,6 +1158,24 @@ void Machine::execute(const Instruction& instruction) {
             item.aux[2] = 0.0f;
             return;
         }
+        case 0x239: {  // 源矩形窗口：读序 6 → 5 → 4 → 3 → 2 → 1；「已存在」位为 0 ⇒ 一个字段都不写
+            const auto rect_switch = read_int(ops[5]);
+            const auto row_steps = read_int(ops[4]);
+            const auto step_total = read_int(ops[3]);
+            const auto duration = read_int(ops[2]);
+            const auto delay = read_int(ops[1]);
+            const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+            DrawItem& item = draw_items_[key];
+            if ((item.flags & 1u) == 0) return;
+            item.flags |= 2u;
+            item.window_start = 0;
+            item.rect_delay = delay;
+            item.rect_duration = duration;
+            item.rect_step_total = step_total;
+            item.rect_row_steps = row_steps;
+            item.rect_switch = rect_switch;
+            return;
+        }
         case 0x202: {  // 颜色窗：已存在位为 1 才排窗
             const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
             const auto delay = read_int(ops[1]);
@@ -614,7 +1187,8 @@ void Machine::execute(const Instruction& instruction) {
                 it->second.flags |= 2u;
                 it->second.delay = delay;
                 it->second.duration = duration;
-                it->second.color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+                it->second.target_color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+                it->second.window_start = 0;  // 未盖章
             }
             return;
         }
@@ -643,8 +1217,11 @@ void Machine::execute(const Instruction& instruction) {
             record.file = -1;
             record.blank = true;
             record.present = true;
+            record.revision++;
             record.width = static_cast<std::uint32_t>(width);
             record.height = static_cast<std::uint32_t>(height);
+            record.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0);
+            record.revision = 1;
             return;
         }
         case 0x1FA: {  // 释放纹理
@@ -666,7 +1243,20 @@ void Machine::execute(const Instruction& instruction) {
             record.color_key = raw_key < 0 ? 0u : (0xFF000000u | (static_cast<std::uint32_t>(raw_key) & 0xFFFFFFu));
             record.width = image.width;
             record.height = image.height;
+            record.rgba = image.rgba;
+            if (record.color_key != 0) {
+                for (std::size_t i = 0; i + 3 < record.rgba.size(); i += 4) {
+                    const auto argb = (static_cast<std::uint32_t>(record.rgba[i + 3]) << 24) |
+                                      (static_cast<std::uint32_t>(record.rgba[i]) << 16) |
+                                      (static_cast<std::uint32_t>(record.rgba[i + 1]) << 8) |
+                                      record.rgba[i + 2];
+                    if (argb == record.color_key) {
+                        record.rgba[i] = 0; record.rgba[i + 1] = 0; record.rgba[i + 2] = 0; record.rgba[i + 3] = 0;
+                    }
+                }
+            }
             record.present = true;
+            record.revision++;
             textures_[static_cast<std::uint32_t>(id)] = record;
             return;
         }
@@ -917,9 +1507,25 @@ void Machine::execute(const Instruction& instruction) {
 
 bool Machine::step() {
     if (halted_) return false;
+    // 每次迭代先读一次时钟、推进场景：颜色窗在门之前推进（`CORE-TIMING-WINDOW`）。
+    advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16);
+    // 门前渲染：`set:DrawMode == 1` 且场景脏 / 有动画 ⇒ 本迭代请求一次渲染步。
+    // 与执行哪条指令无关（`0x4127E2` 在门 `0x41280C` 之前）。
+    if (draw_mode_ == 1 && (state_flags_ & (1u << 24)) == 0 &&
+        (scene_dirty_ || scene_animating_ || command_animating_)) {
+        frame_step_requested_ = true;
+    }
     if (state_flags_ != 0) {
-        // 只建模“场景不再有动画”这一路等待服务：清第 10 位后放行。
-        if ((state_flags_ & (1u << 10)) != 0) state_flags_ &= ~(1u << 10);
+        // 影片位：headless 影片后端立即收尾，扫描对象表后放行。
+        if ((state_flags_ & 1u) != 0) { state_flags_ &= ~1u; return true; }
+        if ((state_flags_ & (1u << 13)) != 0) {
+            for (auto& [slot, movie] : movies_) { (void)slot; movie.started = false; }
+            movie_active_ = false;
+            state_flags_ &= ~(1u << 13);
+            return true;
+        }
+        // 等待位：放行看「场景有动画」，不是"表里还有没有未到期的窗"。
+        if ((state_flags_ & (1u << 10)) != 0 && !scene_animating_) state_flags_ &= ~(1u << 10);
         return true;
     }
     Frame& f = frame_mut();
@@ -982,6 +1588,7 @@ bool Machine::step() {
         stop_.message = e.what();
         return false;
     }
+    if (is_scene_mutating(opcode)) scene_dirty_ = true;
 
     if (!halted_) {
         const auto advance = 4u * frame_mut().length_slot;
@@ -992,6 +1599,28 @@ bool Machine::step() {
         }
     }
     return !halted_;
+}
+
+RunResult Machine::run_until_script(std::uint32_t script_id, std::size_t max_steps) {
+    std::size_t steps = 0;
+    while (!halted_ && steps < max_steps) {
+        if (frame().script_id == script_id) {
+            stop_.reason = StopReason::ScriptReached;
+            stop_.message = "script-reached";
+            break;
+        }
+        if (!step()) {
+            if (stop_.reason == StopReason::Halted) ++steps;
+            break;
+        }
+        ++steps;
+    }
+    if (!halted_ && steps == max_steps && stop_.reason != StopReason::ScriptReached) {
+        stop_.reason = StopReason::StepLimit;
+        stop_.message = "step-limit";
+    }
+    stop_.steps = steps;
+    return stop_;
 }
 
 RunResult Machine::run(std::size_t max_steps) {
