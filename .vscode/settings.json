@@ -6,5 +6,6 @@
     "**/.DS_Store": true,
     "**/Thumbs.db": true,
     "**/.pnpm-store": true,
-  }
+  },
+  "cmake.sourceDirectory": "E:/Projects/amayui-re/apps/emulator-cxx"
 }

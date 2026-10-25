@@ -1,0 +1,35 @@
+{
+  "name": "emulator-cxx",
+  "version-string": "0.1.0",
+  "description": "Amayui clean-room emulator, native C++ host (SDL3 + bgfx)",
+  "dependencies": [
+    "sdl3"
+  ],
+  "features": {
+    "renderer": {
+      "description": "bgfx renderer (cross-platform D3D11/12, Vulkan, Metal, OpenGL)",
+      "dependencies": [
+        "bgfx"
+      ]
+    },
+    "text": {
+      "description": "FreeType + HarfBuzz glyph shaping",
+      "dependencies": [
+        "freetype",
+        "harfbuzz"
+      ]
+    },
+    "video": {
+      "description": "FFmpeg movie decoding",
+      "dependencies": [
+        "ffmpeg"
+      ]
+    },
+    "shader": {
+      "description": "SDL_shadercross for runtime HLSL/GLSL -> SPIR-V/DXIL/MSL",
+      "dependencies": [
+        "sdl3-shadercross"
+      ]
+    }
+  }
+}

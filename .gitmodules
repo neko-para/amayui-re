@@ -1,0 +1,3 @@
+[submodule "apps/emulator-cxx/vcpkg"]
+	path = apps/emulator-cxx/vcpkg
+	url = https://github.com/microsoft/vcpkg.git
