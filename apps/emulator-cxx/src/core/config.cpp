@@ -83,6 +83,16 @@ ConfigVocabulary ConfigVocabulary::load_from_file(const std::filesystem::path& p
             item.value("key", ""),
             item.value("internal", ""),
             item.value("kind", "int"),
+            item.value("if", ""),
+        });
+    }
+    for (const auto& item : json.at("persist")) {
+        vocabulary.persist_.push_back(IniKey{
+            item.value("section", ""),
+            item.value("key", ""),
+            item.value("internal", ""),
+            item.value("kind", "int"),
+            item.value("if", ""),
         });
     }
     return vocabulary;
@@ -279,6 +289,32 @@ std::int32_t ConfigStore::load_script_int(std::uint32_t index) const {
     const auto it = script_.find(script_key(3, index));
     if (it == script_.end() || it->second.kind != ConfigValue::Kind::Int) return 0;
     return it->second.integer;
+}
+
+void ConfigStore::save_player_file(const std::filesystem::path& path) const {
+    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw CoreError("config-save-open-failed:" + path.string());
+    static const char* kSections[] = {"display", "sound", "message", "system"};
+    std::string current;
+    for (const char* section : kSections) {
+        for (const auto& key : vocabulary_.persist_keys()) {
+            if (key.section != section) continue;
+            if (!key.condition.empty() && get_int(key.condition) == 0) continue;
+            const auto it = named_.find(key.internal);
+            if (current != section) {
+                out << '[' << section << "]\r\n";
+                current = section;
+            }
+            out << key.key << '=';
+            const bool is_string = it != named_.end() ? it->second.kind == ConfigValue::Kind::String
+                                                      : key.kind == "string";
+            if (is_string) out << (it == named_.end() ? std::string{} : it->second.text);
+            else out << (it == named_.end() ? 0 : it->second.integer);
+            out << "\r\n";
+        }
+    }
+    if (!out) throw CoreError("config-save-write-failed:" + path.string());
 }
 
 void ConfigStore::save_script_int(std::uint32_t index, std::int32_t value) {

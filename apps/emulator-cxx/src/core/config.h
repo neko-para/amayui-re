@@ -40,16 +40,21 @@ public:
         std::string key;
         std::string internal;
         std::string kind;
+        // 条件写出：非空时，只有该内部键的整数值非 0 才写出本条。
+        std::string condition;
     };
 
     static ConfigVocabulary load_from_file(const std::filesystem::path& path);
 
     const DefaultKey* find_default(const std::string& index_key) const;
     const IniKey* find_ini(const std::string& section, const std::string& key) const;
+    const std::vector<IniKey>& ini_keys() const { return ini_; }
+    const std::vector<IniKey>& persist_keys() const { return persist_; }
 
 private:
     std::vector<DefaultKey> defaults_;
     std::vector<IniKey> ini_;
+    std::vector<IniKey> persist_;
 };
 
 // 引擎配置库：命名键表 + 脚本键表。发行默认表与玩家文件都只写命名键表。
@@ -60,6 +65,8 @@ public:
 
     void load_defaults(const std::vector<ConfigDefault>& entries);
     void load_player_file(const std::filesystem::path& path);
+    // 按「保存」合同的固定段序 / 词表顺序整体重写玩家文件。
+    void save_player_file(const std::filesystem::path& path) const;
 
     std::int32_t get_int(const std::string& key) const;
     bool has_named(const std::string& key) const { return named_.find(key) != named_.end(); }

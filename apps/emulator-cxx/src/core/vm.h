@@ -276,6 +276,8 @@ public:
     const std::string& font_string() const { return font_string_; }
     std::int32_t engine5(std::size_t i) const { return engine5_[i]; }
     std::int32_t key_total() const { return key_total_; }
+    // 引擎配置库（保存 / 脚本配置读写共用）。
+    const ConfigStore& config() const { return config_; }
     std::int32_t input_a() const { return input_a_; }
     std::int32_t input_b() const { return input_b_; }
     std::uint32_t input_mode() const { return input_mode_; }
@@ -353,6 +355,22 @@ public:
     std::size_t mesh_count() const { return meshes_.size(); }
     const std::unordered_map<std::uint32_t, DrawItem>& draw_items() const { return draw_items_; }
     const std::unordered_map<std::uint32_t, TextureRecord>& textures() const { return textures_; }
+    // 测试 / 诊断注入点：直接布置纹理记录的来源文件；⛔ 产品路径不要靠它伪造状态。
+    void set_texture_file(std::uint32_t slot, std::int32_t file) {
+        textures_[slot].file = file;
+    }
+    // 释放守卫（`0x1fa` / `0x23d` 读；本语料没有写者，观察上恒 0）。
+    std::int32_t surface_release_gate(std::uint32_t slot) const {
+        return slot < surface_release_gate_.size() ? surface_release_gate_[slot] : 0;
+    }
+    void set_surface_release_gate(std::uint32_t slot, std::int32_t value) {
+        if (slot < surface_release_gate_.size()) surface_release_gate_[slot] = value;
+    }
+    // 测试用：读一个全局整型槽（解码后）。缺槽 = 0。
+    std::int32_t global_int(std::uint32_t index) const {
+        const auto it = global_int_.find(index);
+        return it == global_int_.end() ? 0 : decode_int(it->second);
+    }
     const std::unordered_map<std::uint32_t, MeshRecord>& meshes() const { return meshes_; }
     const std::map<std::uint32_t, SceneCommandRecord>& scene_commands() const { return scene_commands_; }
     std::map<std::uint32_t, SceneCommandRecord>& scene_commands_mut() { return scene_commands_; }
@@ -561,7 +579,7 @@ private:
     void op_23c(const Instruction&);
     // 纹理 / 绘制项 / 网格（vm_ops_texture.cpp）
     void op_344(const Instruction&); void op_1ff(const Instruction&); void op_1fd(const Instruction&); void op_1fe(const Instruction&);
-    void op_1f6(const Instruction&); void op_320(const Instruction&); void op_322(const Instruction&); void op_323(const Instruction&); void op_23d(const Instruction&); void op_32b(const Instruction&);
+    void op_1f6(const Instruction&); void op_216(const Instruction&); void op_320(const Instruction&); void op_322(const Instruction&); void op_323(const Instruction&); void op_23d(const Instruction&); void op_32b(const Instruction&);
     void op_1fb(const Instruction&); void op_239(const Instruction&); void op_202(const Instruction&); void op_203(const Instruction&);
     void op_1f7(const Instruction&); void op_1f8(const Instruction&); void op_1fa(const Instruction&); void op_1f9(const Instruction&);
     // 纹理尺寸查询（vm_ops_texture.cpp）
@@ -792,6 +810,8 @@ private:
     std::uint32_t mouse_last_ms_ = 0;  // 上一次派发时刻（登记时 = 当前时刻）
     std::unordered_map<std::int32_t, std::int32_t> indirect_;
     std::unordered_map<std::uint32_t, TextureRecord> textures_;
+    // 1000 槽的释放守卫（默认 0；没有脚本写者）。
+    std::array<std::int32_t, 1000> surface_release_gate_{};
     std::unordered_map<std::uint32_t, DrawItem> draw_items_;
     std::unordered_map<std::uint32_t, MeshRecord> meshes_;
     std::unordered_map<std::uint32_t, MovieRecord> movies_;

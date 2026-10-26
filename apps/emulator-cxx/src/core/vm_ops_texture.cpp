@@ -87,6 +87,17 @@ void Machine::op_1f6(const Instruction& instruction) {
 void Machine::op_23d(const Instruction& instruction) {
     (void)instruction;
     // 退出清理（CORE-OPS-MOVIE-CLEAR-23D）：销毁槽 42..999 的影片对象并清槽。
+    // 同一次扫描也清掉这些槽的纹理记录来源文件格（场景侧解绑，`0x216` 可观察）；
+    // 释放守卫非 0 的槽跳过（`CORE-OPS-MOVIE-CLEAR-23D` 的门的观察档）。
+    for (auto& [slot, record] : textures_) {
+        if (slot < 42u || slot >= 1000u || surface_release_gate_[slot] != 0) continue;
+        record.file = -1;
+        // 纹理槽对象也被释放（0x208 / 0x1fb 消费端看到空槽）；记录本身保留。
+        record.present = false;
+        record.width = 0;
+        record.height = 0;
+        record.rgba.clear();
+    }
     // ★ 场景侧的槽→纹理绑定解绑未建模（见 RES-23D-SCENE-UNBIND）；纹理记录不在这里删除。
     bool erased = false;
     bool active = false;
@@ -307,6 +318,8 @@ void Machine::op_1fa(const Instruction& instruction) {
     // 释放纹理
     const auto id = static_cast<std::uint32_t>(read_int(ops[0]));
     (void)read_int(ops[0]);
+    // 释放守卫非 0：只清共享对象槽，纹理记录 / 纹理槽都不动（CORE-OPS-TEXTURE-RELEASE）。
+    if (id < surface_release_gate_.size() && surface_release_gate_[id] != 0) return;
     textures_.erase(id);
     return;
 }
@@ -357,8 +370,22 @@ void Machine::op_208(const Instruction& instruction) {
     }
     // 「槽空」与「越界」不是同一失败：槽空静默、两个输出 0。
     const TextureRecord* found = texture(static_cast<std::uint32_t>(id));
-    write_int(ops[1], found == nullptr ? 0 : static_cast<std::int32_t>(found->width));
-    write_int(ops[2], found == nullptr ? 0 : static_cast<std::int32_t>(found->height));
+    const bool present = found != nullptr && found->present;
+    write_int(ops[1], present ? static_cast<std::int32_t>(found->width) : 0);
+    write_int(ops[2], present ? static_cast<std::int32_t>(found->height) : 0);
+    return;
+}
+
+void Machine::op_216(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 读纹理槽 → 文件绑定（CORE-OPS-TEXTURE-SLOT-IMGID）：先读槽号，再写目标；缺省 -1。
+    const auto slot = read_int(ops[1]);
+    // 槽号越界是未定义行为（RES-216-OUT-OF-RANGE）：⛔ 不复刻宿主布局，响亮失败。
+    if (slot < 0 || static_cast<std::uint32_t>(slot) >= 1000u) {
+        throw CoreError("texture-slot-out-of-range:" + std::to_string(slot));
+    }
+    const TextureRecord* record = texture(static_cast<std::uint32_t>(slot));
+    write_int(ops[0], record == nullptr ? -1 : record->file);
     return;
 }
 

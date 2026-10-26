@@ -1795,7 +1795,23 @@
         },
         {
           "ea": "0x41a34f",
-          "what": "对场景侧的槽解绑调用（目标表 / 时机未建模）"
+          "what": "对 Scene 调用槽解绑（清来源文件 + 纹理槽对象）"
+        },
+        {
+          "ea": "0x49e98a",
+          "what": "释放守卫 Scene[slot+0B670h]：非 0 跳过清理"
+        },
+        {
+          "ea": "0x49e997",
+          "what": "纹理记录来源文件格 = -1"
+        },
+        {
+          "ea": "0x49e9a2",
+          "what": "取纹理槽对象指针"
+        },
+        {
+          "ea": "0x49e9b5",
+          "what": "纹理槽对象置 0"
         },
         {
           "ea": "0x41a35b",
@@ -1803,9 +1819,14 @@
         }
       ],
       "functions": [
-        "sub_41A300"
+        "sub_41A300",
+        "sub_49E980"
       ],
-      "storage": [],
+      "storage": [
+        "shape:T_Scene@0x748",
+        "shape:T_Scene@0xB670",
+        "shape:T_Scene@0xa5d8"
+      ],
       "evidence": [
         "guard:tools/test/exit-cleanup-contract.test.mjs#★ 0x23d：清影片槽 42..999，保留 0..41 与 1000"
       ]
@@ -2452,10 +2473,20 @@
         {
           "ea": "0x41a4cb",
           "what": "槽号 < 1000 继续"
+        },
+        {
+          "ea": "0x4a0750",
+          "what": "取网格槽对象并释放"
+        },
+        {
+          "ea": "0x479a50",
+          "what": "网格对象内部资源释放链"
         }
       ],
       "functions": [
-        "sub_41A4A0"
+        "sub_41A4A0",
+        "sub_4A0750",
+        "sub_479A50"
       ],
       "storage": [],
       "evidence": [
@@ -3334,6 +3365,51 @@
       ],
       "evidence": [
         "guard:tools/test/emulator-new-config.test.mjs#★ 保存：四段 CRLF 与条件键；重解析 round-trip"
+      ],
+      "storage": []
+    },
+    {
+      "rule": "CORE-CONFIG-EXIT-SAVE",
+      "functions": [
+        "sub_4057B0",
+        "sub_490590",
+        "sub_428A60",
+        "sub_412290",
+        "sub_418E60"
+      ],
+      "sites": [
+        {
+          "ea": "0x405a1d",
+          "what": "关闭分支：配置已装载（var_30 != 0）"
+        },
+        {
+          "ea": "0x405a2b",
+          "what": "关闭分支：取配置对象 vtable[+28h] 并调用保存"
+        },
+        {
+          "ea": "0x405a7d",
+          "what": "保存之后走退出清理（sub_428A60）"
+        },
+        {
+          "ea": "0x418e60",
+          "what": "abort 抛 Command_Exit_Exception（与根帧结束同一退出异常）"
+        },
+        {
+          "ea": "0x4138b7",
+          "what": "根帧结束 / abort / 错误终止的异常捕获：向窗口发送关闭消息（WM_CLOSE）"
+        },
+        {
+          "ea": "0x4138c2",
+          "what": "SendMessageA(hWnd, WM_CLOSE, 0, 0)"
+        },
+        {
+          "ea": "0x405b78",
+          "what": "另一条退出分支：同一保存调用（进入条件未绑定）"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/config-exit-save-contract.test.mjs#★ 窗口关闭：已装载配置 ⇒ 先保存、再清理",
+        "guard:tools/test/config-exit-save-contract.test.mjs#★ 根帧结束：catch 发关闭消息 ⇒ 保存再清理"
       ],
       "storage": []
     },
@@ -9785,6 +9861,48 @@
       ],
       "evidence": [
         "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-SLOT-IMGID",
+      "sites": [
+        {
+          "ea": "0x499bc0",
+          "what": "场景初始化：1000 条记录来源文件 = -1，并复制到快照"
+        },
+        {
+          "ea": "0x4113ed",
+          "what": "读档恢复：逐项 sub_4A3800 重建活动表来源文件"
+        },
+        {
+          "ea": "0x430390",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x43039f",
+          "what": "读槽号（第 2 个操作数）"
+        },
+        {
+          "ea": "0x4303a7",
+          "what": "读「槽 → 文件」绑定表"
+        },
+        {
+          "ea": "0x4303b3",
+          "what": "写目标（第 1 个操作数）"
+        }
+      ],
+      "functions": [
+        "sub_430380",
+        "sub_499BC0",
+        "sub_410160",
+        "sub_4A3800"
+      ],
+      "storage": [
+        "shape:T_Scene@0x748"
+      ],
+      "evidence": [
+        "guard:tools/test/texture-slot-imgid-contract.test.mjs#★ 0x216：缺省 -1；1f8/1f9/1fa 写槽→文件绑定",
+        "guard:tools/test/texture-slot-imgid-contract.test.mjs#★ 0x23d：只清 42..999 的槽→文件绑定"
       ]
     },
     {

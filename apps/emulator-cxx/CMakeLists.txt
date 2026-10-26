@@ -112,6 +112,13 @@ if(EMULATOR_CXX_INSTALL_DIR)
     # `--skip-logo` 走引擎的 ShowLogo 格（`0x130`），不是宿主捷径；仍必须到 TITLE。
     add_test(NAME emulator-core-boot-play-skip-logo
         COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-frames 1)
+    # 端到端：关闭请求 → 保存 SYS4REG.INI；检查完整持久键（不是只测 writer）。
+    add_test(NAME emulator-core-config-save-exit
+        COMMAND ${CMAKE_COMMAND}
+            -DEXE=$<TARGET_FILE:emulator-cxx>
+            -DINSTALL=${EMULATOR_CXX_INSTALL_DIR}
+            -DINI=${CMAKE_CURRENT_BINARY_DIR}/config-exit-save.ini
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_save_exit.cmake)
     # 影片：真 MPEG-1 program stream（LOGO.MPG）→ 门前服务 → 同槽纹理 → GPU 场景批次。
     # `--logo-frames 0` 只跑到收尾（判据在程序里：必须有帧、必须走到收尾）。
     add_test(NAME emulator-core-logo-movie

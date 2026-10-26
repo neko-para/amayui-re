@@ -1851,3 +1851,63 @@ n < 10 走注入的 `sleepHost`；`SLEEP_BIT` 服务分支按 `now >= sleepUntil
 **门禁**：`ctest` 5/5 · `core-selftest` PASS · 分派守卫 2/2 · `pnpm test` 1071/0 · `pnpm test:mutation` 363/363 · `spec validate` 13/13（未登记 0）· `requirements validate` 6/6 · `--footprint` 仍进 `21092`（115 opcode）。
 
 **结论**：排除 audio / text-subsystem / live2d 之后，**"按名字到 TITLE 路径用到 + 参考实现有 handler"的缺失指令集合为空**。剩下的都是**未成篇的语义**（成篇归各自 gap 单），不是"没接上的 handler"。
+
+## 六十八、第三十四批：0x216 槽→文件绑定 + 0x23d 解绑 / 0x32b 内部释放（2026-10-26）
+
+**范围**：0x23d 的 `RES-23D-SCENE-UNBIND`、0x32b 的 `RES-32B-D3DX-RELEASE`，以及为让 0x23d 可观察而补的 0x216。
+
+**取证**
+- `sub_49E980`（0x23d 调）：`Scene[5*slot+466] = -1`（纹理记录来源文件格），并在释放闸为 0 时释放 `Scene[slot+10614]` 的图像对象。
+- `sub_4A0750`（0x32b 调）：取 `Scene[slot+12677]` 网格对象，`sub_479A50` 释放内部资源 + `operator delete` + 置 0。
+
+**落点**
+- 0x216 读的是**纹理记录的第一个格（来源文件号）**，不是独立的第二张表；`storage: shape:T_Scene@0x748`。0x1f8 / 0x1f9 / 0x1fa / 0x23d 是写者（各自带失败 / 守卫条件）。
+- 0x23d 只对 42..999 写来源文件 -1；0..41 不变；图像对象释放闸仍为 `RES-23D-IMAGE-OBJECT`（unknown）。
+- 0x32b 的 `RES-32B-D3DX-RELEASE` 改为 `omitted`：内部渲染资源释放不建模；脚本可见的是槽表，由合同 + `exit-cleanup-contract` 固定。
+- `GAP-OPS-0200-02FF` 108→107；纹理章 9→10 条 / 7→8 opcode。
+
+**复审（独立 subagent，只读 data/spec）**
+- 第一轮指出：绑定被误写成独立表、0x1f9 失败路径与既有表冲突、0x23d 释放闸与残差矛盾、0x32b 正文仍写 unknown/D3DX、缺 storage/falsifier。
+- 处置：绑定并回纹理记录来源文件；删除 0x23d 正文的释放闸断言（只留 residual）；0x32b 正文同步 omitted；补 `shape:T_Scene@0x748`、条件写者与 falsifier。
+- 仍未消解：`RES-23D-IMAGE-OBJECT`（图像对象释放闸）与 `RES-216-OUT-OF-RANGE`（槽号越界）。
+
+**门禁**：`pnpm test` 1077/0 · `ctest` 6/6 · `spec validate` 13/13 · `requirements validate` 6/6 · `ledger validate` 8/8。
+
+## 六十九、第三十五批：0x216 越界 + 0x23d 图像对象闸（2026-10-26）
+
+**0x216 越界**
+- `sub_430380` 只按 `5*slot` 索引，`0x4303a7` 读表前没有 `>=1000` 比较 ⇒ 越界读相邻引擎内存。
+- 处置：`RES-216-OUT-OF-RANGE` 改 `unknown`：1000..1999 落到快照表、>=2000 落到后续内存，本版只保证 0..999；C++ `op_216` 对 `<0` / `>=1000` 抛 `texture-slot-out-of-range`；`check_slot_imgid` 覆盖未写入槽、槽 1000。后由 0x4113ED 的读档逐项重建收口 `RES-216-SAVE-RESTORE`。
+
+**0x23d 图像对象闸**
+- `sub_49E980`：`Scene[slot+0xB670] == 0` 时写来源文件 -1，并释放 `Scene[slot+0xA5D8]` 图像对象。`0xB670` 只有这一个读点，没有写者 ⇒ 观察上恒 0（旧仓字段名 `surfaceReleaseGate`）。
+- 处置：图像对象**内部资源**释放登记 `omitted`；纹理槽清空 + 来源文件 -1 写成合同；C++ 加 `surface_release_gate_`，`0x23d` / `0x1fa` 按守卫分流，`0x208` 看 `present`；`check_slot_imgid` 覆盖未写入槽、守卫 0 / 非 0、槽 1000。
+- 守卫写者并入既有 `RES-TEX-GUARD-WRITER`（0x1fa / 0x23d 两处读、没有写者；观察上恒 0）。
+
+**门禁**：`pnpm test` 1077/0 · `ctest` 6/6 · `spec validate` 13/13 · `requirements validate` 6/6 · `ledger validate` 8/8。
+
+## 七十、第三十六批：退出保存 SYS4REG.INI（2026-10-26）
+
+**取证**
+- `sub_4057B0` 的退出分支在 0x405A2B / 0x405B78 取配置对象 `vtable[+28h]` 调保存；0x405A7D 之后才走 `sub_428A60` / 退出清理。0x405B78 属于哪条消息分支仍登记在 `RES-CONFIG-PERSIST-TRIGGER`；根帧结束经 0x4138B7 发送 WM_CLOSE，同走关闭收尾。
+- 保存实现 `sub_490590` → `sub_495AD0`；路径由 `sub_4900F0` 选 `SYS4REG.INI`。
+- 触发条件 `var_30` 在配置装载路径（vtable+24）置 1；未装载不保存。
+
+**落点**
+- spec 新规则 `CORE-CONFIG-EXIT-SAVE`：窗口关闭收尾且配置库已建立 ⇒ 保存一次，先于销毁窗口；失败写日志、不阻止关闭；宿主调试上限不触发。
+- C++ `ConfigStore::save_player_file`：按 `CORE-CONFIG-PERSIST` 固定段序 / 条件键整体重写；`run_windowed_frames` 返回 `user_quit`，boot 在 Quit 或根帧 `Halted` 时保存。
+- 守卫：`core-selftest` 保存合同（段序 / CRLF / 条件键）+ pure `config-exit-save-contract`（保存先于清理）。实测默认路径 `~/.config/Eushully/天結いキャッスルマイスター/SYS4REG.INI` 写出 903 B，与 `.tmp/SYS4REG.INI` 逐字节一致。
+
+**门禁**：`pnpm test` 1080/0 · `ctest` 7/7（新增 `emulator-core-config-save-exit`）· `spec validate` 13/13 · `requirements validate` 6/6 · `ledger validate` 8/8。
+
+## 七十一、第三十七批：释放守卫写者 · 存档恢复同步（2026-10-26）
+
+**释放守卫**
+- 全语料唯一读点 `0x49e98a`（0x1fa / 0x23d），没有写点；`sub_499BC0` 只初始化 0x748 / 0x5568，不写 0xB670。
+- 结论保持 `RES-TEX-GUARD-WRITER`（unknown）：可能依赖零页 / 宿主写；不把“恒 0”写成合同。
+
+**0x216 存档恢复**
+- `sub_41ED80` 在保存前把活动表 0x748 复制到快照 0x5568；`sub_40CD10` 从快照复制进保存缓冲。
+- 读档 `sub_410160` 在 0x4113ED 逐项调用 `sub_4A3800`，后者写活动表 0x748 的来源文件格 ⇒ `RES-216-SAVE-RESTORE` 收口（0x216 读到恢复后的活动表）。
+
+**门禁**：`pnpm test` 1080/0 · `ctest` 7/7（新增 `emulator-core-config-save-exit`）· `spec validate` 13/13 · `requirements validate` 6/6 · `ledger validate` 8/8。

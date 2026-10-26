@@ -156,6 +156,10 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 # 跳过 LOGO：把引擎的 ShowLogo 格置 0（根脚本用 0x130 读它），仍走 boot 到 TITLE
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --skip-logo
 
+# 正常退出（窗口 Quit / 根帧 exit）会把当前配置写回 --config 路径或默认 SYS4REG.INI；
+# --play-frames N 只是宿主帧数上限，不触发保存。
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --config out\SYS4REG.INI
+
 # 单步跟踪指定条数（调试主循环 / 门服务）；跟踪完就退出，不开窗
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --trace 40
 

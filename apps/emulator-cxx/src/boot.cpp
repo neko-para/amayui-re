@@ -297,8 +297,26 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
         if (!SDL_Init(SDL_INIT_VIDEO)) { log_sdl_error("SDL_Init(boot)"); return 1; }
         SDL_GPUDevice* device = create_gpu_device();
         SDL_Window* window = SDL_CreateWindow("emulator-cxx — boot", kWidth, kHeight, SDL_WINDOW_RESIZABLE);
+        bool user_quit = false;
         if (device != nullptr && window != nullptr) {
-            run_windowed_frames(device, window, machine, kWidth, kHeight, play_frames);
+            run_windowed_frames(device, window, machine, kWidth, kHeight, play_frames, &user_quit);
+        }
+        // 引擎退出时保存玩家配置（`Reg::Save`）：窗口 Quit、根帧 `exit`、`abort`、错误对话框选“终止”
+        // 都经主循环的退出捕获发送关闭消息，进入同一收尾；`--play-frames N` 的帧数上限不是引擎退出。
+        // `machine.halted()` 是这些引擎退出在模拟器里的并集；host-only 的 unsupported-opcode halt 也保存，
+        // 这是保守选择，不是引擎证据。
+        const bool save_config = user_quit || machine.halted();
+        const auto& stop = machine.last_stop();
+        std::printf("[core] exit user_quit=%d halted=%d reason=%d opcode=0x%X message=%s\n",
+                    user_quit ? 1 : 0, machine.halted() ? 1 : 0,
+                    static_cast<int>(stop.reason), stop.opcode, stop.message.c_str());
+        if (save_config) {
+            try {
+                machine.config().save_player_file(player_path);
+                std::printf("[core] config saved: %s\n", core::path_to_utf8(player_path).c_str());
+            } catch (const std::exception& e) {
+                std::printf("[core] config save failed: %s\n", e.what());
+            }
         }
         if (window != nullptr) SDL_DestroyWindow(window);
         if (device != nullptr) SDL_DestroyGPUDevice(device);

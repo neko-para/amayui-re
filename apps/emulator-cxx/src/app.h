@@ -155,6 +155,6 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
                      const std::string& logo_dir, int logo_stride, int logo_frames,
                      bool footprint = false, bool skip_logo = false);
 int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
-                        int width, int height, int max_frames);
+                        int width, int height, int max_frames, bool* user_quit = nullptr);
 
 }  // namespace app

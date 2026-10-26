@@ -1,0 +1,31 @@
+# 端到端：投递关闭请求 → 窗口收尾保存 → 检查 53 个持久键写出的文件。
+# 只由 CTest 调用；EMULATOR_CXX_QUIT_AFTER_MS 是测试钩子，不是产品退出路径。
+if(NOT DEFINED EXE OR NOT DEFINED INSTALL OR NOT DEFINED INI)
+  message(FATAL_ERROR "EXE / INSTALL / INI 必须由 CTest 传入")
+endif()
+file(REMOVE "${INI}")
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E env EMULATOR_CXX_QUIT_AFTER_MS=2000
+          "${EXE}" --install "${INSTALL}" --config "${INI}" --skip-logo
+  RESULT_VARIABLE result)
+if(NOT result EQUAL 0)
+  message(FATAL_ERROR "emulator-cxx 退出码 ${result}")
+endif()
+if(NOT EXISTS "${INI}")
+  message(FATAL_ERROR "关闭退出后没有写出 ${INI}")
+endif()
+file(SIZE "${INI}" size)
+if(size LESS 500)
+  message(FATAL_ERROR "配置只有 ${size} B（应写出完整持久键）")
+endif()
+file(READ "${INI}" text)
+if(NOT text MATCHES "\\[display\\]")
+  message(FATAL_ERROR "缺少 [display] 段")
+endif()
+if(NOT text MATCHES "\\[sound\\]")
+  message(FATAL_ERROR "缺少 [sound] 段")
+endif()
+if(NOT text MATCHES "\\[message\\]")
+  message(FATAL_ERROR "缺少 [message] 段")
+endif()
+file(REMOVE "${INI}")

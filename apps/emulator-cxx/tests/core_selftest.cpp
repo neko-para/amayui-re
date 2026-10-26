@@ -2053,6 +2053,75 @@ bool check_exit_cleanup(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── 纹理槽 → 文件绑定（0x216 / 0x23d） ──
+bool check_slot_imgid(const core::OpcodeTable& table) {
+    // 从未写入的槽 500：记录表初始化写 -1。
+    auto fresh = make_script_with_body();
+    emit_instruction(fresh, 0x216, {{3, 6}, {0, 500}});
+    core::Machine fresh_machine(0x12345678u, table);
+    fresh_machine.load_root(fresh);
+    if (!fresh_machine.step() || fresh_machine.global_int(6) != -1) {
+        std::fprintf(stderr, "0x216 uncreated slot must read -1, got %d\n",
+                     fresh_machine.global_int(6));
+        return false;
+    }
+
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x1FA, {{0, 41}});
+    emit_instruction(bytes, 0x23D, {});
+    emit_instruction(bytes, 0x216, {{3, 1}, {0, 42}});
+    emit_instruction(bytes, 0x216, {{3, 2}, {0, 999}});
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(0x12345678u, table);
+    machine.set_texture_file(41, 7);
+    machine.set_texture_file(42, 8);
+    machine.set_texture_file(999, 9);
+    machine.set_surface_release_gate(41, 1);
+    machine.set_surface_release_gate(42, 1);
+    machine.load_root(bytes);
+    for (int i = 0; i < 4; ++i) if (!machine.step()) return false;
+    // 0x1fa 守卫非 0 ⇒ 41 保留；0x23d 守卫非 0 的 42 保留、守卫 0 的 999 清掉。
+    if (machine.global_int(1) != 8 || machine.global_int(2) != -1) {
+        std::fprintf(stderr, "0x216 after guards must read 8/-1, got %d/%d\n",
+                     machine.global_int(1), machine.global_int(2));
+        return false;
+    }
+    const auto* t41 = machine.texture(41);
+    if (t41 == nullptr || t41->file != 7) {
+        std::fprintf(stderr, "0x1fa release guard must keep slot 41, got %d\n",
+                     t41 == nullptr ? -999 : t41->file);
+        return false;
+    }
+    // 槽号越界是 UB：实现必须响亮失败，⛔ 不返回 -1。
+    auto bad = make_script_with_body();
+    emit_instruction(bad, 0x216, {{3, 3}, {0, 1000}});
+    core::Machine oob(0x12345678u, table);
+    oob.load_root(bad);
+    oob.step();
+    if (!oob.halted() ||
+        oob.last_stop().message.find("texture-slot-out-of-range") == std::string::npos) {
+        std::fprintf(stderr, "0x216 slot 1000 must fail loudly, got %s\n",
+                     oob.last_stop().message.c_str());
+        return false;
+    }
+
+    // 0x23d 把纹理槽对象也清掉：0x208 对槽 50 必须 0/0（记录仍保留来源 -1）。
+    auto slot = make_script_with_body();
+    emit_instruction(slot, 0x1F8, {{0, 50}, {0, 4}, {0, 4}, {0, 0}});
+    emit_instruction(slot, 0x23D, {});
+    emit_instruction(slot, 0x208, {{0, 50}, {3, 4}, {3, 5}});
+    emit_instruction(slot, 2, {});
+    core::Machine slot_machine(0x12345678u, table);
+    slot_machine.load_root(slot);
+    for (int i = 0; i < 3; ++i) if (!slot_machine.step()) return false;
+    if (slot_machine.global_int(4) != 0 || slot_machine.global_int(5) != 0) {
+        std::fprintf(stderr, "0x23d must empty texture slot 50, 0x208 got %d/%d\n",
+                     slot_machine.global_int(4), slot_machine.global_int(5));
+        return false;
+    }
+    return true;
+}
+
 // ── 场景颜色归一化（0x202 / 0x203 / 0x322 / 0x323） ──
 bool check_color_normalization(const core::OpcodeTable& table) {
     auto bytes = make_script_with_body();
@@ -2297,6 +2366,30 @@ int main() {
             std::fprintf(stderr, "config player override mismatch\n");
             return 1;
         }
+        // 保存合同：固定段序 + 条件键；文件用 CRLF 且整体重写。
+        config.set_int("display:VirtualFullScreen", 0);
+        config.set_int("display:VirtualFullScreenType", 2);
+        config.set_int("set:EnableAntiFont", 0);
+        config.set_int("message:UseAntiFont", 1);
+        config.set_string("message:Font", "Arial");
+        config.save_player_file("core-selftest-save.ini");
+        {
+            std::ifstream saved("core-selftest-save.ini", std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(saved)),
+                                   std::istreambuf_iterator<char>());
+            if (text.rfind("[display]\r\n", 0) != 0 ||
+                text.find("VirtualFullScreen=0\r\n") == std::string::npos ||
+                text.find("[message]\r\n") == std::string::npos ||
+                text.find("Font=Arial\r\n") == std::string::npos ||
+                text.find("VirtualFullScreenType") != std::string::npos ||
+                text.find("UseAntiFont") != std::string::npos ||
+                text.find("\n") == std::string::npos || text.find("\r\n") == std::string::npos) {
+                std::fprintf(stderr, "config save contract mismatch: %s\n", text.c_str());
+                std::remove("core-selftest-save.ini");
+                return 1;
+            }
+        }
+        std::remove("core-selftest-save.ini");
 
         core::Machine list_machine(0x12345678u, table);
         list_machine.load_root(make_list_script());
@@ -3150,6 +3243,7 @@ int main() {
         if (!check_mouse_and_hit_test(table)) return 1;
         if (!check_exit_cleanup(table)) return 1;
         if (!check_color_normalization(table)) return 1;
+        if (!check_slot_imgid(table)) return 1;
         if (!check_texture_size(table)) return 1;
         if (!check_exit_script(table)) return 1;
 

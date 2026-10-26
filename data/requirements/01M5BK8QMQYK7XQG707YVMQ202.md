@@ -53,6 +53,10 @@
 - **P2 输入**：`0x2fc` 改为触点查询（桌面鼠标-only 恒无触点 ⇒ 结果 0，TITLE 回退 `0x109`/`0x108`）；键总数初值 7；`0x101` 先采样再丢弃；`0x202/0x203/0x322/0x323` 负值归一化 + `0x203` op2 落记录；emulator-new 同步。
 - **需求**：`REQ-01M5VBVGWE7ZQN0K1EK936M5TM`（P2，done）、`REQ-01M5VV4Z8ZTARZFV9RD8NE8VGP`（退出，done）、`REQ-01M5VV4ZSGQ8PGNYDBAA47VBTP`（skip-logo，done）、`REQ-01M5VV50B4PJYC3QWK466H0CZ6`（0x23d/32b spec，done）。
 
+- **残差收口**：`0x216` 读纹理记录来源文件格；`0x23d` 对 42..999 清来源 + 纹理槽（守卫非 0 跳过）；`0x32b` 内部释放 `omitted`。`RES-216` 越界 unknown（快照别名）、`RES-23D-IMAGE-OBJECT` `omitted`；守卫写者仍 unknown+next；存档恢复已由读档逐项 `sub_4A3800` 重建活动表收口。节点 `REQ-01M5W02...` / `REQ-01M5W0...` / `REQ-01M5W25...` done；`REQ-01M5W2YX...` 配置保存 done。
+
+- **退出保存配置**：spec 新增 `CORE-CONFIG-EXIT-SAVE`；C++ `ConfigStore::save_player_file` + boot 在 Quit / 根帧 `Halted` 保存；帧数上限不写盘。节点 `REQ-01M5W2YX4V31S5J08C3TRQGBTC` done。
+
 ## 未做 / 待核
 
 - **摇杆**（范围外）；TITLE 的键盘路径已采样并会派发“无按键”表项，实际按键按下路径未做真机验证。
@@ -63,7 +67,7 @@
 ## 当前门禁
 
 ```bash
-ctest --test-dir apps/emulator-cxx/out --output-on-failure  # macOS + links/install: 6/6（含 boot / skip-logo / logo）
+ctest --test-dir apps/emulator-cxx/out --output-on-failure  # macOS + links/install: 7/7（含 config-save-exit）
 pnpm test                 # 1075 pass / 0 fail
 pnpm typecheck            # 六个工程全绿
 pnpm tools spec validate  # 13/13 全绿，未登记 0

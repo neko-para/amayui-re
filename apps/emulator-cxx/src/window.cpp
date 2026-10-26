@@ -54,7 +54,7 @@ std::uint32_t sample_key_mask() {
 }  // namespace
 
 int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
-                        int width, int height, int max_frames) {
+                        int width, int height, int max_frames, bool* user_quit) {
     if (!SDL_ClaimWindowForGPUDevice(device, window)) {
         log_sdl_error("SDL_ClaimWindowForGPUDevice");
         return 1;
@@ -74,6 +74,20 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     // 宿主输入：键盘 / 鼠标（**不接摇杆**）。三者都只在脚本执行到对应 opcode 时才被取用：
     // `0xff` 采样输入字、`0x109` 光标、`0x108` 按钮位图、`0xcc`/`0xcd` 鼠标回调。
     // ★ `0x2fc` 是**触点查询**（不是鼠标事件队列）：桌面鼠标-only 不提供触点源 ⇒ 恒写 0。
+    // 测试 / 诊断：到点投递一次 SDL_EVENT_QUIT，用来端到端验证“关窗保存配置”。
+    // 只在显式设置环境变量时启用；⛔ 不是产品退出路径。
+    if (const char* quit_ms = std::getenv("EMULATOR_CXX_QUIT_AFTER_MS")) {
+        const Uint32 delay = static_cast<Uint32>(std::strtoul(quit_ms, nullptr, 10));
+        if (delay > 0) {
+            SDL_AddTimer(delay, [](void* data, SDL_TimerID, Uint32) -> Uint32 {
+                SDL_Event close{};
+                close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+                close.window.windowID = SDL_GetWindowID(static_cast<SDL_Window*>(data));
+                SDL_PushEvent(&close);
+                return 0;
+            }, window);
+        }
+    }
     machine.set_key_sampler([] { return sample_key_mask(); });
     machine.set_cursor_source([window, width, height](std::int32_t& x, std::int32_t& y) -> bool {
         static int probe = 0;
@@ -168,8 +182,15 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_EVENT_QUIT) running = false;
-            else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) running = false;
+            if (event.type == SDL_EVENT_QUIT ||
+                (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
+                 event.window.windowID == SDL_GetWindowID(window))) {
+                running = false;
+                if (user_quit != nullptr) *user_quit = true;
+            } else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
+                running = false;
+                if (user_quit != nullptr) *user_quit = true;
+            }
         }
         if (!running) break;
         if (machine.halted()) {
