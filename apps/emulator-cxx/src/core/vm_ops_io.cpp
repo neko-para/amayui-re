@@ -90,7 +90,13 @@ void Machine::op_21c(const Instruction& instruction) {
 
 void Machine::op_101(const Instruction& instruction) {
     (void)instruction;
-    state_flags_ &= ~(1u << 27); input_word_ = 0; input_a_ = 1; input_b_ = 0; return;
+    // 采样输入并丢弃（CORE-OPS-WAIT-POLL-INPUT）：先请求一次平台采样，再清第 27 位 / 清字 / 写 A、B。
+    input_word_ = key_sampler_ ? key_sampler_() : 0;  // 采样结果是外部请求；随后被丢弃
+    state_flags_ &= ~(1u << 27);
+    input_word_ = 0;
+    input_a_ = 1;
+    input_b_ = 0;
+    return;
 }
 
 void Machine::op_1a7(const Instruction& instruction) {
@@ -195,9 +201,9 @@ void Machine::op_12e(const Instruction& instruction) {
 
 void Machine::op_2fc(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 取一条鼠标事件（CORE-INPUT-MOUSE-EVENT）：没有事件 ⇒ 只写结果 0，坐标/标志/附加量**不写**。
-    MouseEvent event;
-    if (!mouse_event_source_ || !mouse_event_source_(event)) {
+    // 取一个触点（CORE-INPUT-TOUCH-POINT）：没有触点 ⇒ 只写结果 0，坐标/标志/编号**不写**。
+    TouchPoint event;
+    if (!touch_source_ || !touch_source_(event)) {
         write_int(ops[0], 0);
         return;
     }

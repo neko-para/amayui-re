@@ -3264,8 +3264,7 @@ function loadShowLogo130(m: Machine, ops: Operand[]): void {
 /**
  * `0xfe` 键总数（CORE-INPUT-WORD）：无符号比较 > 31 ⇒ 显示消息型异常。
  * ★ 落点身份（键总数）由 `0x100` 的扫描上限读点支撑。
- * ★ 引擎**不建立**这一格的初值（唯一写点是本条）⇒ 在此之前读到它是**未定义行为**；
- *   本实现按 0 兜底（UB，不是合同），读者见 `readKeyTotal`（只记一次诊断）。
+ * ★ 引擎构造建立初值 7（`Input[259] = 7`）；本条只覆盖它。
  */
 function keyTotalFe(m: Machine, ops: Operand[]): void {
   const value = readInt(m, ops, 1) >>> 0;
@@ -3278,13 +3277,11 @@ function keyTotalFe(m: Machine, ops: Operand[]): void {
 
 /**
  * 读引擎的**键总数**格。
- * ★ 引擎不建立初值（CORE-INPUT-WORD 的「成立条件」）⇒ 在 `0xfe` 之前读到它是**未定义行为**：
- *   本实现用 0 兜底，但那是 UB 兜底、**不是合同**；这里**只记一次**诊断，⛔ 不把它表述成"启动值"。
+ * ★ 初值 7 是引擎构造建立的合同值（CORE-INPUT-WORD）；`keyTotalEstablished` 只供诊断"是否被
+ *   `0xfe` 显式设过"，不再是 UB 判据。
  */
 function readKeyTotal(m: Machine): number {
-  if (!m.input.keyTotalEstablished && !m.diagnostics.some((d) => d.kind === 'key-total-unset')) {
-    m.diagnostics.push({ kind: 'key-total-unset' });
-  }
+  // 初值 7 是引擎构造建立的合同值；`keyTotalEstablished` 只供诊断"是否被 0xfe 显式设过"。
   return m.input.keyTotal >>> 0;
 }
 
@@ -3579,20 +3576,20 @@ function hitTest12e(m: Machine, ops: Operand[]): void {
   m.effects.push({ kind: 'input.hit-test', detail: { result } });
 }
 
-/** `0x2fc` 取一条鼠标事件（CORE-INPUT-MOUSE-EVENT）：没有事件时只写结果 0 */
-function mouseEvent2fc(m: Machine, ops: Operand[]): void {
-  const event = m.inputHost?.nextMouseEvent(m.now) ?? null;
-  if (!event) {
+/** `0x2fc` 取一个触点（CORE-INPUT-TOUCH-POINT）：没有触点时只写结果 0 */
+function touchPoint2fc(m: Machine, ops: Operand[]): void {
+  const point = m.inputHost?.nextTouchPoint(m.now) ?? null;
+  if (!point) {
     writeInt(m, ops, 1, 0);
-    m.effects.push({ kind: 'input.mouse.event', detail: { present: false } });
+    m.effects.push({ kind: 'input.touch', detail: { present: false } });
     return;
   }
   writeInt(m, ops, 1, 1);
-  writeInt(m, ops, 2, event.x);
-  writeInt(m, ops, 3, event.y);
-  writeInt(m, ops, 4, event.flags);
-  writeInt(m, ops, 5, event.extra);
-  m.effects.push({ kind: 'input.mouse.event', detail: { present: true, x: event.x, y: event.y, flags: event.flags } });
+  writeInt(m, ops, 2, point.x);
+  writeInt(m, ops, 3, point.y);
+  writeInt(m, ops, 4, point.flags);
+  writeInt(m, ops, 5, point.extra);
+  m.effects.push({ kind: 'input.touch', detail: { present: true, x: point.x, y: point.y, flags: point.flags } });
 }
 
 /** `0x109` 读光标位置（CORE-INPUT-MOUSE-POS）：设备不可用写 (-100000, -100000) */
@@ -3787,7 +3784,7 @@ export const HANDLERS = new Map<number, Handler>([
   [0x105, holdMask105],
   [0xfc, inputResetFc],
   [0x12e, hitTest12e],
-  [0x2fc, mouseEvent2fc],
+  [0x2fc, touchPoint2fc],
   [0x109, mousePos109],
   [0x108, mouseButton108],
   [0x24e, modeWord24e],

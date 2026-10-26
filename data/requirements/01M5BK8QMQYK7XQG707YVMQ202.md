@@ -46,6 +46,13 @@
 - **emulator-new**：同步 `0x12e` 与 owner 语义（参考实现不再断言 stub）。
 - **需求**：`REQ-01M5VBGREC7T3CC7H3QCTV2877`（hover，已收口）、`REQ-01M5VBGG3YTDGKBD339YD6HF17`（P1，已收口）、`REQ-01M5VBVGWE7ZQN0K1EK936M5TM`（P2，open：`0x2fc` 触点 / 键总数 7 / `0x101` 采样 / `0x202-0x203` 归一化）。
 
+## 第三十三批 · 2026-10-26（启动 / 退出 + 输入 P2）
+
+- **`--skip-logo`**：跑根脚本前把引擎 ShowLogo 格置 0（`0x130` 分支），不是宿主捷径。`--footprint --skip-logo` 的 script-chain 不再含 21090、`0x20F` 不出现，仍到 21092；`--skip-logo --play-frames 1` 正常退出。
+- **退出路径**：补 `0x23d` / `0x32b` handler（影片槽 42..999 清理 / 网格槽 0..999 清空），根帧 `exit` ⇒ `Halted`；窗口宿主遇 `halted()` 立即关窗返回。spec 规则 `CORE-OPS-MOVIE-CLEAR-23D` / `CORE-OPS-SCENE-MESH-CLEAR-32B` 已成篇并移出 gaps。守卫 `check_exit_cleanup` + `exit-cleanup-contract`。
+- **P2 输入**：`0x2fc` 改为触点查询（桌面鼠标-only 恒无触点 ⇒ 结果 0，TITLE 回退 `0x109`/`0x108`）；键总数初值 7；`0x101` 先采样再丢弃；`0x202/0x203/0x322/0x323` 负值归一化 + `0x203` op2 落记录；emulator-new 同步。
+- **需求**：`REQ-01M5VBVGWE7ZQN0K1EK936M5TM`（P2，done）、`REQ-01M5VV4Z8ZTARZFV9RD8NE8VGP`（退出，done）、`REQ-01M5VV4ZSGQ8PGNYDBAA47VBTP`（skip-logo，done）、`REQ-01M5VV50B4PJYC3QWK466H0CZ6`（0x23d/32b spec，done）。
+
 ## 未做 / 待核
 
 - **摇杆**（范围外）；TITLE 的键盘路径已采样并会派发“无按键”表项，实际按键按下路径未做真机验证。
@@ -56,8 +63,8 @@
 ## 当前门禁
 
 ```bash
-ctest --test-dir apps/emulator-cxx/out --output-on-failure  # macOS: 2/2（Windows preset 仍走 out/build/windows-x64）
-pnpm test                 # 1073 pass / 0 fail
+ctest --test-dir apps/emulator-cxx/out --output-on-failure  # macOS + links/install: 6/6（含 boot / skip-logo / logo）
+pnpm test                 # 1075 pass / 0 fail
 pnpm typecheck            # 六个工程全绿
 pnpm tools spec validate  # 13/13 全绿，未登记 0
 pnpm tools requirements validate # 6/6 全绿

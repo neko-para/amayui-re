@@ -61,7 +61,8 @@ int run_core_agf(const std::string& agf_path) {
 int run_core_install(const std::string& install_dir, const std::string& table_path,
                      const std::string& config_path, const std::string& config_keys_path,
                      std::size_t max_steps, std::uint32_t stop_at, int trace_steps, int play_frames,
-                     const std::string& logo_dir, int logo_stride, int logo_frames, bool footprint) {
+                     const std::string& logo_dir, int logo_stride, int logo_frames, bool footprint,
+                     bool skip_logo) {
     try {
         const core::Install install = core::open_install(core::path_from_utf8(install_dir));
         const auto& index = install.index;
@@ -140,6 +141,9 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
         std::uint32_t key = random();
         if (key == 0) key = 1;
         core::Machine machine(key, table, &install, config);
+        // `--skip-logo`：根脚本用 `0x130` 读这个格决定是否 `call-script 5262`（LOGO）。
+        // 这是引擎自身的 ShowLogo 通路，不是"直接跳到 TITLE"的宿主捷径。
+        machine.set_show_logo(!skip_logo);
         machine.load_root(root, 0);
         machine.stop_at_opcode(stop_at);
         // 无窗口影片校验：从根脚本跑到 LOGO 的 `0x20f`，以后端时间推进，逐帧导出 GPU 合成。

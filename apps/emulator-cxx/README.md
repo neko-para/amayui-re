@@ -126,8 +126,8 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 | 渲染接入 | `CORE-OPS-TEXTURE-DRAW`、`CORE-TIMING-WINDOW` | AGF 像素进入纹理记录；绘制项 / 网格按有符号 key 软件合成；颜色窗四档派生；`0x33F` tint + 混合模式 |
 | 场景命令档 | `CORE-OPS-SCENE-COMMAND-RECORDS`、`CORE-SCENE-DRAW-ORDER` | `0x223/24D/24F/250/251` 写表与校验；命令档 → 离屏画布 36/37 → 四种类合成（Fade / 遮罩 / 12 种抹除图案 / SlideBlur / ZoomBlur）→ 收尾扫描 |
 | 命名表 / 状态字 / 模式族 | `CORE-OPS-TABLE-RESET-A1` / `-BIND-A2` / `-DISPATCH-A3`、`CORE-OPS-STATUS-WORD`、`CORE-OPS-MODE-BIT`、`CORE-OPS-STATUS-CLEAR-D9`、`CORE-OPS-RNG-ENABLE` | `0xa1/0xa2/0xa3` 文本键命名表（清空 / 绑定 / 分派）；`0x1cf/0x1bf` 状态字（第 16 位 ⇒ **整字**清 0）；`0x19b/0x19c` 模式位与四个分支；`0x0d9` 清位；`0x1ce` 乱数启用（种子 = 本迭代宿主时钟） |
-| 输入派发 | `CORE-INPUT-WORD`、`CORE-INPUT-KEY-DISPATCH`、`CORE-INPUT-MOUSE-EVENT` | `0xff` 清字 + 平台采样（无设备 ⇒ 保持 0）+ 按帧上限；`0x100` 派发一个按键回调（无按键走"编号 = 键总数"表项，有按键压**当前位置**重派发）；`0x2fc` 取鼠标事件（无事件只写 0）；`0x12e` 命中查找：按 `start+1` 起扫框表，命中写项下标、未命中写 −1（`CORE-INPUT-HIT-TEST-12E`） |
-| 键盘 / 鼠标（宿主） | `CORE-INPUT-MOUSE-POS`、`-MOUSE-BUTTON`、`-CALLBACK-REGISTER`、`-MOUSE-CALLBACK-PUMP` | 窗口路径把 SDL 的键盘 / 鼠标归约成输入字、客户区光标、按钮位图与一条事件队列；`0x109` 光标（输入停用 ⇒ −100000；客户区外仍写真实坐标）、`0x108` 按钮位图（SDL 左右键归约到引擎位 0/1、输入停用 ⇒ 0）、`0xcc` 登记 + `0xcd` 时间闸派发（`elapsed >= interval`，含等号）。★ **不接摇杆**；物理键 ↔ 输入位号的映射是**宿主策略**（`window.cpp` 的 `kKeyBits` 一张表，⛔ 不是规范结论） |
+| 输入派发 | `CORE-INPUT-WORD`、`CORE-INPUT-KEY-DISPATCH`、`CORE-INPUT-TOUCH-POINT` | `0xff` 清字 + 平台采样（无设备 ⇒ 保持 0）+ 按帧上限；`0x100` 派发一个按键回调（无按键走"编号 = 键总数"表项，有按键压**当前位置**重派发）；`0x2fc` 取一个触点（无触点只写 0；桌面鼠标-only 恒无触点）；`0x12e` 命中查找：按 `start+1` 起扫框表，命中写项下标、未命中写 −1（`CORE-INPUT-HIT-TEST-12E`） |
+| 键盘 / 鼠标（宿主） | `CORE-INPUT-MOUSE-POS`、`-MOUSE-BUTTON`、`-CALLBACK-REGISTER`、`-MOUSE-CALLBACK-PUMP` | 窗口路径把 SDL 的键盘 / 鼠标归约成输入字、客户区光标、按钮位图；`0x109` 光标（输入停用 ⇒ −100000；客户区外仍写真实坐标）、`0x108` 按钮位图（SDL 左右键归约到引擎位 0/1、输入停用 ⇒ 0）、`0xcc` 登记 + `0xcd` 时间闸派发（`elapsed >= interval`，含等号）。★ **不接摇杆**；物理键 ↔ 输入位号的映射是**宿主策略**（`window.cpp` 的 `kKeyBits` 一张表，⛔ 不是规范结论） |
 | 帧 / 本地块 | `CORE-OPS-FRAME-CALL-FRAME`、`-LOCAL-SET-7B`、`-LOCAL-RET-7C`、`CORE-OPS-STATE-199` | `0x08` 切到**已装载**帧（只改父帧号 / ip / 长度槽，不清返回栈）；`0x7b` 两个目标位置（初值 −1）；`0x199` 进块（存档字带第 25/26 位、返回点 = `here + 1`、深度判据存**本帧身份编号**）；`0x7c` 离开（成功后门字带第 26 位 ⇒ `GateStalled` 是规范表现） |
 | 标量 / 数值 / 随机 / 时钟 / 取址 / 池拷贝 | `CORE-OPS-FLAG-CELLS`、`-MODE-BIT`、`-STATUS-CELL-READ`、`-LAYER-CELL`、`CORE-OPS-RANDOM-60`、`-CLOCK-D0`、`-PARAM-74-7F`、`-FLOAT-ABS`、`-SCALAR-FLOAT-ARITH`、`-POOL-MEMCPY`、`-POOL-LEA-63` | `0x19a/1b6/1b7` 三个**互不相同**的格（Y 归一成 0/1）、`0x1c7`（位 27 → 0/1）、`0x1cc`（状态格原值）、`0x1ad`（落点格复位值 −1）、`0x60`（计数器 → 随机 → 范围 → 落点；范围 0 先写 0 再抛）、`0xd0`（本迭代时钟）、`0x74/0x7f`（参数格，未写过 ⇒ 响亮失败）、`0x191/2d0/2d1/2d3`（浮点族）、`0x1b0`（池拷贝，按编码位模式）、`0x63`（lea：先取址、再校验目标必须是引用族） |
 | 3D 记录 | `CORE-OPS-SCENE3D-GET-VEC1` / `-GET-VEC2` / `-GET-LOCAL-TRANS` / `-21D` / `-21E` / `-21F` | `0x218/21a` 两个三元向量（**只查不建**，查不到写 0）、`0x228` 平移分量（标志最后写）、`0x21d` 三张表各自复制（成功才标脏）、`0x21e`（三个浮点 ÷100）、`0x21f`（轴角另存 + 度 → 弧度）。★ `0x21e/21f` 记录「已存在」位为 0 ⇒ 只建记录、一个字段都不写；旋转矩阵的元素布局 / 归一化规范**未成篇** ⇒ 实现选择（行主序 + Rodrigues，注释已标明） |
@@ -153,6 +153,9 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 # 无人值守：呈现 N 帧后退出（固定分辨率 1280×720）
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --play-frames 40
 
+# 跳过 LOGO：把引擎的 ShowLogo 格置 0（根脚本用 0x130 读它），仍走 boot 到 TITLE
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --skip-logo
+
 # 单步跟踪指定条数（调试主循环 / 门服务）；跟踪完就退出，不开窗
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --trace 40
 
@@ -172,11 +175,12 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 再拼 `set:RegFilePath` 与文件名。
 门 / 状态位服务：**等待位与影片位**已建模（影片位只管关门，收尾在门之前的影片对象表服务里）；其余状态位、换帧 / 换脚本、容器句柄尚未完整建模。
 ★ 由此有一条**看起来像卡死、其实是规范要求**的行为：`0x19c` 的置位支与 `0x1ce` 的非 0 支会把门字第 27 / 30 位置起，而这两个位**没有服务分支**（第 30 位按规范就是「启用后门恒关」）⇒ 门一直关着，`run()` 走到 step 上限。那不是 handler 写错，是「位是待服务标记，清不清由服务分支决定」的直接后果；要推进只能由外部清位写点（可达性未取证）。
-输入字形 / 鼠标事件都是**平台边界**：本层没有输入后端（`--play-frames` 只按 `set:DrawMode` 自动渲染），所以 `0xff` 恒采到 0、`0x2fc` 恒"没有事件"；`0x12e` 的命中查找已实现，但 headless 没有光标源 ⇒ TITLE 的"坐标变了才命中"分支不会进入（`0x109` 与初始化值同为 −100000）。测试用 `set_input_word()` / `set_key_sampler()` / `set_mouse_event_source()` 注入，⛔ 不要把这几个注入点当产品路径。
+输入字形 / 触点都是**平台边界**：本层没有输入后端（`--play-frames` 只按 `set:DrawMode` 自动渲染），所以 `0xff` 恒采到 0、`0x2fc` 恒"没有触点"；`0x12e` 的命中查找已实现，但 headless 没有光标源 ⇒ TITLE 的"坐标变了才命中"分支不会进入（`0x109` 与初始化值同为 −100000）。测试用 `set_input_word()` / `set_key_sampler()` / `set_touch_source()` 注入，⛔ 不要把这几个注入点当产品路径。
 
 ★ **窗口路径已接键盘 + 鼠标**（不接摇杆）：`window.cpp` 每个外层迭代泵事件，
-`SDL_GetKeyboardState` → 输入字（`kKeyBits` 表：位号 ↔ 扫描码）、`SDL_GetMouseState` → 光标 / 按钮位图、
-按钮与滚轮 → 事件队列。三者只在脚本执行到 `0xff` / `0x109` / `0x108` / `0x2fc` 时才被取用
+`SDL_GetKeyboardState` → 输入字（`kKeyBits` 表：位号 ↔ 扫描码）、`SDL_GetMouseState` → 光标 / 按钮位图。
+鼠标点击边沿由 `0x108` 的位图差分得到；**不把鼠标按钮合成触点**（桌面鼠标-only 的 `0x2fc` 恒为 0）。
+它们只在脚本执行到 `0xff` / `0x109` / `0x108` / `0x2fc` 时才被取用
 （引擎不在等待期间自己泵输入）。鼠标回调按 `0xcd` 的时间闸派发。
 ★ 键位映射是**宿主策略**：规范明说「物理键与输入位号的映射」属平台边界，所以它**不进 spec**；
 要换键位只改 `window.cpp` 的 `kKeyBits`。Esc 仍然直接关窗（与"取消"位同时映射到 1）。
@@ -184,11 +188,13 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 客户区外写**真实坐标（可为负 / 超界）**。有鼠标焦点时用 `SDL_GetMouseState`（客户区坐标），否则用全局光标减窗口位置；
 两种都按 `逻辑分辨率 / SDL 窗口尺寸` 缩放。没有窗口 / 输入停用 ⇒ `0x109` 写 −100000（`0x108` 写 0）。
 诊断：`EMULATOR_CXX_INPUT_TRACE=1` 时每 30 次采样往 stderr 打一行 `[input] cursor inside=…`。
+★ 根帧执行 `exit`（TITLE 退出路径的 `0x2`）⇒ 脚本结束 ⇒ 关窗并返回；不再"保留最后一帧等用户关窗"。
 `--stop-at <opcode>` 可用于在任意 opcode 前停止（`0` = 不设停止线，缺省）。
 根脚本静态解码会在数据区遇到非法 opcode 后停止，这是规范允许的静态解码边界，不是执行边界。
 
 ★ **没有"直接跳到 TITLE"之类的捷径**：早期那批 `--to-title` / `--render-title*` / `--play-title` 选项已删除 ——
-它们会跳过 boot，看到的东西不是引擎真实会走出来的画面。现在唯一流程是从根脚本跑 boot，
+它们会跳过 boot，看到的东西不是引擎真实会走出来的画面。`--skip-logo` **不是**这种捷径：它只把引擎自己的
+`ShowLogo` 格置 0，根脚本仍按 `0x130` 的分支走 boot（只是不 `call-script` LOGO）。现在唯一流程是从根脚本跑 boot，
 按引擎的「门前渲染」节奏呈现（场景脏 / 有动画 / 影片新帧 ⇒ 下一次满足闸门的迭代渲染一次）。
 `--play-frames N` 只是给这个流程一个帧数上限，便于无人值守。
 

@@ -2,8 +2,9 @@
 
 - id: REQ-01M5VBVGWE7ZQN0K1EK936M5TM
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M5BK8QMQYK7XQG707YVMQ202
+- done_reason: 0x2fc 改为触点查询（C++/emulator-new/spec）；键总数初值 7；0x101 补平台采样；0x202/0x203/0x322/0x323 负值归一化与 0x203 op2 落记录。C++ selftest check_input_dispatch / check_color_normalization / check_mouse_and_hit_test；pnpm test / typecheck / ctest 全绿。
 - tags: [input, spec]
 
 ## 范围

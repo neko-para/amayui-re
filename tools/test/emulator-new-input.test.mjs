@@ -7,7 +7,7 @@
  * - `CORE-INPUT-CALLBACK-REGISTER`：0xcc 鼠标回调登记 / 0xfb 按键回调登记（0..31）
  * - `CORE-INPUT-MOUSE-CALLBACK-PUMP`：0xcd 时间闸 / 返回位置 / 脚本身份校验 / 目标 -1
  * - `CORE-INPUT-KEY-DISPATCH`：0x100 无按键表项 / 逐位置位 / 当前指令重派发 / 未登记放弃
- * - `CORE-INPUT-MOUSE-EVENT` / `-POS` / `-BUTTON`：0x2fc / 0x109 / 0x108
+ * - `CORE-INPUT-TOUCH-POINT` / `-POS` / `-BUTTON`：0x2fc / 0x109 / 0x108
  * - `CORE-INPUT-MODE-WORD`：0x24e
  * - `CORE-OPS-WAIT-POLL-INPUT`：0x101 只清第 27 位
  * - 短睡眠：0xc8 必须推进时间，不是 no-op
@@ -44,7 +44,7 @@ function inputHost(overrides = {}) {
     sampleKeys: () => 0,
     cursor: () => null,
     buttons: () => null,
-    nextMouseEvent: () => null,
+    nextTouchPoint: () => null,
     ...overrides,
   };
 }
@@ -65,7 +65,7 @@ test('★ 输入字与键总数：0xfe / 0xff', async () => {
 
   const bad = machineFor([[0xfe, [[0, 32]]]]);
   await assert.rejects(() => bad.run(), /超出引擎的范围检查/, '32 必须按无符号比较拒绝');
-  assert.equal(bad.input.keyTotal, 0, '越界不写');
+  assert.equal(bad.input.keyTotal, 7, '越界不写（保留初值 7）');
 
   const negative = machineFor([[0xfe, [[0, 0xffffffff]]]]);
   await assert.rejects(() => negative.run(), /超出引擎的范围检查/, '-1 按无符号看是最大值，也必须拒绝');
@@ -128,7 +128,6 @@ test('★ 按键派发：0x100', async () => {
 
   const noKey = machineFor(body);
   noKey.input.keyTotal = 2;
-  noKey.input.keyTotalEstablished = true; // 这里模拟"0xfe 已写过"，否则读到的是 UB 兜底（会记诊断）
   noKey.frame.keyLimit = 2;
   noKey.frame.keyJumps.set(2, 2);
   noKey.input.word = 0;
@@ -139,7 +138,6 @@ test('★ 按键派发：0x100', async () => {
   // 两个键都指向 ret：0x100 压"当前位置"、返回后重新派发，直到游标走完
   const multi = machineFor(body);
   multi.input.keyTotal = 2;
-  multi.input.keyTotalEstablished = true;
   multi.frame.keyLimit = 2;
   multi.frame.keyJumps.set(0, 2);
   multi.frame.keyJumps.set(1, 2);
@@ -151,7 +149,6 @@ test('★ 按键派发：0x100', async () => {
 
   const unregistered = machineFor(body);
   unregistered.input.keyTotal = 2;
-  unregistered.input.keyTotalEstablished = true;
   unregistered.frame.keyLimit = 2;
   unregistered.input.word = 0b10;
   await unregistered.run();
@@ -159,17 +156,17 @@ test('★ 按键派发：0x100', async () => {
   assert.equal(unregistered.frame.retStack.length, 0, '不压返回位置');
 });
 
-test('★ 鼠标事件查询：0x2fc', async () => {
-  const event = { x: 10, y: 20, flags: 0x11, extra: 3 };
+test('★ 触点查询：0x2fc', async () => {
+  const point = { x: 10, y: 20, flags: 0x11, extra: 3 };
   const m = machineFor([[0x2fc, [[3, 1], [3, 2], [3, 3], [3, 4], [3, 5]]]], {
-    inputHost: inputHost({ nextMouseEvent: () => event }),
+    inputHost: inputHost({ nextTouchPoint: () => point }),
   });
   await m.run();
   assert.deepEqual(
     [m.globalInt.get(1), m.globalInt.get(2), m.globalInt.get(3), m.globalInt.get(4), m.globalInt.get(5)]
       .map((v) => decodeInt(v ?? encodeInt(0, KEY), KEY)),
     [1, 10, 20, 0x11, 3],
-    '有事件：结果 1 / x / y / flags / extra',
+    '有触点：结果 1 / x / y / flags / 编号',
   );
 
   const none = machineFor([[0x2fc, [[3, 1], [3, 2], [3, 3], [3, 4], [3, 5]]]], { inputHost: inputHost() });
@@ -249,14 +246,13 @@ test('★ 脚本化输入解析与事件时序：CLI --input 的语法', async (
   assert.deepEqual(host.stats(), { applied: 0, lastEventAt: 0, exhausted: false }, '初始未应用');
   assert.equal(host.sampleKeys(99), 0);
   assert.equal(host.cursor(99), null, '还没 move ⇒ 光标不可用');
-  assert.equal(host.nextMouseEvent(99), null);
+  assert.equal(host.nextTouchPoint(99), null);
 
   assert.deepEqual(host.cursor(150), { x: 640, y: 360 }, '100ms 的 move 已应用');
   assert.equal(host.sampleKeys(150), 0);
 
   assert.equal(host.buttons(220), 1 << 1, '200ms 的 down 1 ⇒ 位 1（button 是位号）');
-  assert.deepEqual(host.nextMouseEvent(220), { x: 640, y: 360, flags: 0x11, extra: 1 }, '鼠标按下事件入队');
-  assert.equal(host.nextMouseEvent(220), null, '事件被消费');
+  assert.equal(host.nextTouchPoint(220), null, '桌面鼠标没有触点缓冲');
 
   assert.equal(host.sampleKeys(310), 1 << 4, '300ms 的 key 4 down ⇒ 位 4');
   assert.equal(host.buttons(310), 0, '260ms 的 up 1 已生效');

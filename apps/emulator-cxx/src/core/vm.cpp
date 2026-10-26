@@ -204,6 +204,8 @@ void Machine::execute(const Instruction& instruction) {
         case 0x250: op_250(instruction); return;
         case 0x251: op_251(instruction); return;
         case 0x320: op_320(instruction); return;
+        case 0x23D: op_23d(instruction); return;
+        case 0x32B: op_32b(instruction); return;
         case 0x322: op_322(instruction); return;
         case 0x323: op_323(instruction); return;
         case 0x1FB: op_1fb(instruction); return;

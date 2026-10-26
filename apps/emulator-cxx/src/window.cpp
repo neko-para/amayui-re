@@ -11,7 +11,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
-#include <deque>
 
 namespace app {
 
@@ -52,22 +51,6 @@ std::uint32_t sample_key_mask() {
     return mask;
 }
 
-// 窗口像素 → 逻辑分辨率的客户区坐标（窗口可缩放；引擎坐标是逻辑分辨率那一套）。
-bool window_to_logical(SDL_Window* window, int logical_width, int logical_height, float window_x,
-                       float window_y, std::int32_t& x, std::int32_t& y) {
-    int window_width = 0;
-    int window_height = 0;
-    if (!SDL_GetWindowSize(window, &window_width, &window_height) || window_width <= 0 ||
-        window_height <= 0) {
-        return false;
-    }
-    x = static_cast<std::int32_t>(window_x * static_cast<float>(logical_width) /
-                                  static_cast<float>(window_width));
-    y = static_cast<std::int32_t>(window_y * static_cast<float>(logical_height) /
-                                  static_cast<float>(window_height));
-    return true;
-}
-
 }  // namespace
 
 int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
@@ -89,8 +72,8 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     SceneTextureCache scene_cache;
     machine.consume_frame_step();  // 丢掉预跑期留下的请求
     // 宿主输入：键盘 / 鼠标（**不接摇杆**）。三者都只在脚本执行到对应 opcode 时才被取用：
-    // `0xff` 采样输入字、`0x109` 光标、`0x108` 按钮位图、`0x2fc` 取一条事件、`0xcc`/`0xcd` 鼠标回调。
-    std::deque<core::Machine::MouseEvent> mouse_events;
+    // `0xff` 采样输入字、`0x109` 光标、`0x108` 按钮位图、`0xcc`/`0xcd` 鼠标回调。
+    // ★ `0x2fc` 是**触点查询**（不是鼠标事件队列）：桌面鼠标-only 不提供触点源 ⇒ 恒写 0。
     machine.set_key_sampler([] { return sample_key_mask(); });
     machine.set_cursor_source([window, width, height](std::int32_t& x, std::int32_t& y) -> bool {
         static int probe = 0;
@@ -155,12 +138,6 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         if ((sdl & SDL_BUTTON_RMASK) != 0) mask |= 2;
         return true;
     });
-    machine.set_mouse_event_source([&mouse_events](core::Machine::MouseEvent& out) -> bool {
-        if (mouse_events.empty()) return false;  // 没有事件：`0x2fc` 只写结果 0
-        out = mouse_events.front();
-        mouse_events.pop_front();
-        return true;
-    });
     // 只建一张 1×1 占位纹理给软件回退路径；⛔ 不要在这里 rasterize（那会清脏、跳过首帧）。
     core::Bytes canvas{0, 0, 0, 0};
     SDL_GPUTexture* image = upload_texture(device, canvas, 1, 1);
@@ -193,41 +170,16 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) running = false;
             else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) running = false;
-            else if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                      event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
-                     event.button.windowID == SDL_GetWindowID(window)) {
-                // 事件标志低两位由宿主定义（规范只要求原样传递，见 `CORE-INPUT-MOUSE-EVENT` 的残差）。
-                core::Machine::MouseEvent queued;
-                std::int32_t x = 0;
-                std::int32_t y = 0;
-                window_to_logical(window, width, height, event.button.x, event.button.y, x, y);
-                queued.x = x;
-                queued.y = y;
-                queued.flags = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? 0x11 : 0x12;
-                queued.extra = static_cast<std::int32_t>(event.button.button) - 1;  // 0 = 左 / 1 = 右
-                mouse_events.push_back(queued);
-            } else if (event.type == SDL_EVENT_MOUSE_WHEEL &&
-                       event.wheel.windowID == SDL_GetWindowID(window)) {
-                core::Machine::MouseEvent queued;
-                std::int32_t x = 0;
-                std::int32_t y = 0;
-                window_to_logical(window, width, height, event.wheel.mouse_x, event.wheel.mouse_y, x,
-                                  y);
-                queued.x = x;
-                queued.y = y;
-                queued.flags = 0x40;  // 滚轮
-                queued.extra = static_cast<std::int32_t>(event.wheel.integer_y != 0
-                                                             ? event.wheel.integer_y
-                                                             : static_cast<Sint32>(event.wheel.y));
-                mouse_events.push_back(queued);
-            }
         }
         if (!running) break;
         if (machine.halted()) {
-            // 无人值守（给了帧数）时"脚本结束"就是跑完；交互模式保留最后一帧等你关窗。
-            if (max_frames > 0) break;
-            SDL_Delay(10);
-            continue;
+            // 脚本结束（TITLE 的 `exit` 把根帧结束成 Halted）就是**整个游戏结束**：
+            // 关窗并回到 boot 收尾。⛔ 不能"保留最后一帧等用户关窗"——那会让退出路径
+            // 看起来像进程没退出。错误型 halt 也一并收工，由 boot 打印的 stop 诊断负责。
+            const auto& stop = machine.last_stop();
+            std::printf("[render] script halted reason=%d opcode=0x%X message=%s\n",
+                        static_cast<int>(stop.reason), stop.opcode, stop.message.c_str());
+            break;
         }
 
         machine.set_host_clock_ms(clock_base +

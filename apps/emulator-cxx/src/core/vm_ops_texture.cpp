@@ -12,6 +12,19 @@
 #include <cmath>
 
 namespace core {
+namespace {
+
+// 颜色归一化（`CORE-OPS-SCENE-202/203/322/323` 共用）：
+// alpha > 255 ⇒ 255；alpha < 0 ⇒ 现有 alpha；color < 0 ⇒ 现有颜色；其余原样。
+std::uint32_t normalized_color(int alpha, int color, std::uint32_t existing) {
+    if (alpha > 255) alpha = 255;
+    if (alpha < 0) alpha = static_cast<int>((existing >> 24) & 0xFFu);
+    const auto rgb = color < 0 ? (existing & 0xFFFFFFu)
+                               : (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+    return (static_cast<std::uint32_t>(alpha) << 24) | rgb;
+}
+
+}  // namespace
 
 void Machine::op_344(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
@@ -71,6 +84,43 @@ void Machine::op_1f6(const Instruction& instruction) {
     draw_items_.clear(); meshes_.clear(); aux_a_.clear(); aux_b_.clear(); scene_dirty_ = false; return;  // 清四张同键表；脏标记清 0（不是置 1）
 }
 
+void Machine::op_23d(const Instruction& instruction) {
+    (void)instruction;
+    // 退出清理（CORE-OPS-MOVIE-CLEAR-23D）：销毁槽 42..999 的影片对象并清槽。
+    // ★ 场景侧的槽→纹理绑定解绑未建模（见 RES-23D-SCENE-UNBIND）；纹理记录不在这里删除。
+    bool erased = false;
+    bool active = false;
+    for (auto it = movies_.begin(); it != movies_.end();) {
+        if (it->first < 42u) {
+            if (it->second.present && it->second.started) active = true;
+            ++it;
+            continue;
+        }
+        if (it->second.backend) it->second.backend->close();
+        it = movies_.erase(it);
+        erased = true;
+    }
+    movie_active_ = active;
+    if (erased) scene_dirty_ = true;
+    return;
+}
+
+void Machine::op_32b(const Instruction& instruction) {
+    (void)instruction;
+    // 退出清理（CORE-OPS-SCENE-MESH-CLEAR-32B）：清空网格槽表 0..999。
+    bool erased = false;
+    for (auto it = meshes_.begin(); it != meshes_.end();) {
+        if (it->first >= 1000u) {
+            ++it;
+            continue;
+        }
+        it = meshes_.erase(it);
+        erased = true;
+    }
+    if (erased) scene_dirty_ = true;
+    return;
+}
+
 void Machine::op_320(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 建/换网格：保存逐顶点位置 / 颜色
@@ -108,7 +158,7 @@ void Machine::op_322(const Instruction& instruction) {
     const auto alpha = read_int(ops[2]);
     const auto color = read_int(ops[3]);
     MeshRecord& mesh = meshes_[key];
-    mesh.color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+    mesh.color = normalized_color(alpha, color, mesh.color);
     mesh.target_color = mesh.color;
     for (auto& value : mesh.colors) value = mesh.color;
     return;
@@ -126,7 +176,7 @@ void Machine::op_323(const Instruction& instruction) {
     mesh.flags |= 2u;
     mesh.delay = delay;
     mesh.duration = duration;
-    mesh.target_color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+    mesh.target_color = normalized_color(alpha, color, mesh.color);
     mesh.window_start = 0;  // 未盖章
     return;
 }
@@ -190,7 +240,7 @@ void Machine::op_202(const Instruction& instruction) {
         it->second.flags |= 2u;
         it->second.delay = delay;
         it->second.duration = duration;
-        it->second.target_color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+        it->second.target_color = normalized_color(alpha, color, it->second.color);
         it->second.window_start = 0;  // 未盖章
     }
     return;
@@ -198,13 +248,14 @@ void Machine::op_202(const Instruction& instruction) {
 
 void Machine::op_203(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 直接设当前颜色
+    // 直接设当前颜色（CORE-OPS-SCENE-203）：负 alpha / color 取现有值；第 2 个操作数落记录。
     const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
-    (void)read_int(ops[1]);
+    const auto mode = read_int(ops[1]);
     const auto alpha = read_int(ops[2]);
     const auto color = read_int(ops[3]);
     DrawItem& item = draw_items_[key];
-    item.color = (static_cast<std::uint32_t>(alpha) << 24) | (static_cast<std::uint32_t>(color) & 0xFFFFFFu);
+    item.set_color_int = mode;
+    item.color = normalized_color(alpha, color, item.color);
     return;
 }
 

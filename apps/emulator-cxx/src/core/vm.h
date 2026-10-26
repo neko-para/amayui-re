@@ -113,6 +113,8 @@ struct DrawItem {
     float aux[3]{};
     std::uint32_t color = 0xFFFFFFFFu;
     std::uint32_t target_color = 0xFFFFFFFFu;
+    // `0x203` 第 2 个操作数（记录里的一个整数位；本版没有读者）。
+    std::int32_t set_color_int = 0;
     std::int32_t delay = 0;
     std::int32_t duration = 0;
     // 窗起点（毫秒）：0 = 未盖章哨兵（`CORE-TIMING-WINDOW`）。
@@ -284,15 +286,15 @@ public:
     // 平台输入采样（`0xff` 的外部请求）；缺省 = 没有设备 ⇒ 输入字保持 0。
     using KeySampler = std::function<std::uint32_t()>;
     void set_key_sampler(KeySampler sampler) { key_sampler_ = std::move(sampler); }
-    // 一条待处理鼠标事件（`0x2fc` 的外部请求）；坐标是**客户区**坐标，由平台负责映射。
-    struct MouseEvent {
+    // 一个当前触点（`0x2fc` 的外部请求）；坐标是**客户区**坐标，由平台负责映射。
+    struct TouchPoint {
         std::int32_t x = 0;
         std::int32_t y = 0;
         std::int32_t flags = 0;
         std::int32_t extra = 0;
     };
-    using MouseEventSource = std::function<bool(MouseEvent&)>;
-    void set_mouse_event_source(MouseEventSource source) { mouse_event_source_ = std::move(source); }
+    using TouchSource = std::function<bool(TouchPoint&)>;
+    void set_touch_source(TouchSource source) { touch_source_ = std::move(source); }
     // 平台光标位置（`0x109` 的 `CORE-INPUT-MOUSE-POS`）：返回 false = 设备不可用（写 −100000）。
     // 坐标是**客户区**坐标，映射属平台边界。
     using CursorSource = std::function<bool(std::int32_t& x, std::int32_t& y)>;
@@ -310,6 +312,8 @@ public:
     std::uint32_t engine_now_ms() const { return engine_now_ms_; }
     std::uint32_t engine_previous_ms() const { return engine_previous_ms_; }
     void set_driven_elsewhere(bool value) { driven_elsewhere_ = value; }
+    // 启动时是否跑 LOGO（`0x130` 读的格）：`--skip-logo` 在跑根脚本前置 0。
+    void set_show_logo(bool value) { show_logo_ = value ? 1 : 0; }
     bool scene_animating() const { return scene_animating_; }
     bool forced_complete() const { return forced_complete_; }
     void force_complete() { forced_complete_ = true; }
@@ -557,7 +561,7 @@ private:
     void op_23c(const Instruction&);
     // 纹理 / 绘制项 / 网格（vm_ops_texture.cpp）
     void op_344(const Instruction&); void op_1ff(const Instruction&); void op_1fd(const Instruction&); void op_1fe(const Instruction&);
-    void op_1f6(const Instruction&); void op_320(const Instruction&); void op_322(const Instruction&); void op_323(const Instruction&);
+    void op_1f6(const Instruction&); void op_320(const Instruction&); void op_322(const Instruction&); void op_323(const Instruction&); void op_23d(const Instruction&); void op_32b(const Instruction&);
     void op_1fb(const Instruction&); void op_239(const Instruction&); void op_202(const Instruction&); void op_203(const Instruction&);
     void op_1f7(const Instruction&); void op_1f8(const Instruction&); void op_1fa(const Instruction&); void op_1f9(const Instruction&);
     // 纹理尺寸查询（vm_ops_texture.cpp）
@@ -618,7 +622,7 @@ private:
     void op_109(const Instruction&); void op_108(const Instruction&); void op_c8(const Instruction&); void op_cc(const Instruction&);
     void op_cd(const Instruction&); void op_fb(const Instruction&); void op_24e(const Instruction&); void op_21c(const Instruction&);
     void op_101(const Instruction&); void op_1a7(const Instruction&); void op_1a8(const Instruction&);
-    // 输入采样 / 按键派发 / 命中查找 / 鼠标事件（vm_ops_io.cpp）
+    // 输入采样 / 按键派发 / 命中查找 / 触点查询（vm_ops_io.cpp）
     void op_ff(const Instruction&); void op_100(const Instruction&); void op_12e(const Instruction&); void op_2fc(const Instruction&);
     // 按住派发族（vm_ops_io.cpp）
     void op_fc(const Instruction&); void op_102(const Instruction&); void op_103(const Instruction&);
@@ -747,15 +751,15 @@ private:
     std::int32_t font_size_ = 24;
     std::string font_string_;
     std::array<std::int32_t, 5> engine5_{};
-    std::int32_t key_total_ = 0;
+    std::int32_t key_total_ = 7;  // 引擎构造（Input[259]=7）建立的初值；0xfe 可覆盖
     std::int32_t save_version_flag_ = 0;
     std::int32_t input_a_ = 0;
     std::int32_t input_b_ = 0;
     std::uint32_t input_word_ = 0;
     // 平台输入采样的注入点（`0xff`）；空 = 没有设备。
     KeySampler key_sampler_;
-    // 平台鼠标事件的注入点（`0x2fc`）；空 = 永远没有事件。
-    MouseEventSource mouse_event_source_;
+    // 平台触点的注入点（`0x2fc`）；空 = 永远没有触点。
+    TouchSource touch_source_;
     // 平台光标 / 按钮（`0x109` / `0x108`）；空 = 设备不可用。
     CursorSource cursor_source_;
     MouseButtonSource mouse_button_source_;

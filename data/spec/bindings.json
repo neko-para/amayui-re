@@ -1779,6 +1779,38 @@
       ]
     },
     {
+      "rule": "CORE-OPS-MOVIE-CLEAR-23D",
+      "sites": [
+        {
+          "ea": "0x41a310",
+          "what": "推进格数 ← 1"
+        },
+        {
+          "ea": "0x41a31b",
+          "what": "起始槽号 42"
+        },
+        {
+          "ea": "0x41a330",
+          "what": "逐槽销毁影片对象"
+        },
+        {
+          "ea": "0x41a34f",
+          "what": "对场景侧的槽解绑调用（目标表 / 时机未建模）"
+        },
+        {
+          "ea": "0x41a35b",
+          "what": "槽号 < 1000 继续"
+        }
+      ],
+      "functions": [
+        "sub_41A300"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/exit-cleanup-contract.test.mjs#★ 0x23d：清影片槽 42..999，保留 0..41 与 1000"
+      ]
+    },
+    {
       "rule": "CORE-OPS-TEXTURE-CREATE",
       "sites": [
         {
@@ -2400,6 +2432,34 @@
       "storage": [],
       "evidence": [
         "guard:tools/test/emulator-new-scene.test.mjs#★ 0x320：2..8 全按地址读 ⇒ 前两段原样拷贝、第三段合成、4/7/8 交给顶点缓冲对象"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-MESH-CLEAR-32B",
+      "sites": [
+        {
+          "ea": "0x41a4af",
+          "what": "推进格数 ← 1"
+        },
+        {
+          "ea": "0x41a4ba",
+          "what": "起始槽号 0"
+        },
+        {
+          "ea": "0x41a4c2",
+          "what": "逐槽释放网格对象"
+        },
+        {
+          "ea": "0x41a4cb",
+          "what": "槽号 < 1000 继续"
+        }
+      ],
+      "functions": [
+        "sub_41A4A0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/exit-cleanup-contract.test.mjs#★ 0x32b：清网格槽 0..999，保留负键与 1000 以上"
       ]
     },
     {
@@ -12473,7 +12533,7 @@
         },
         {
           "ea": "0x421ccf",
-          "what": "键总数 ← op1（范围检查通过后）"
+          "what": "键总数 ← op1（写 Engine+0x814，范围检查通过后）"
         },
         {
           "ea": "0x419ab8",
@@ -12493,19 +12553,15 @@
         },
         {
           "ea": "0x421ca0",
-          "what": "唯一写者（0xfe）起点"
+          "what": "脚本写者（0xfe）起点"
         },
         {
           "ea": "0x421cda",
           "what": "越界 ⇒ 不改这一格"
         },
         {
-          "ea": "0x4baa11",
-          "what": "★ 反证：引擎对象来自 operator new(0xAABC8)，不置零"
-        },
-        {
-          "ea": "0x415677",
-          "what": "★ 反证：构造器对低偏移的唯一访问是 +0x408 ⇒ +0x814 零写点"
+          "ea": "0x477e5b",
+          "what": "构造写键总数 7（Input[259] → Engine+0x814）"
         },
         {
           "ea": "0x419ada",
@@ -12527,10 +12583,12 @@
       "functions": [
         "sub_421CA0",
         "sub_419A90",
-        "sub_4780D0"
+        "sub_4780D0",
+        "sub_477DD0"
       ],
       "storage": [],
       "evidence": [
+        "KN:01M5VVNB9B6X066X630Y30000X",
         "guard:tools/test/emulator-new-input.test.mjs#★ 输入字与键总数：0xfe / 0xff"
       ]
     },
@@ -12677,7 +12735,7 @@
       ]
     },
     {
-      "rule": "CORE-INPUT-MOUSE-EVENT",
+      "rule": "CORE-INPUT-TOUCH-POINT",
       "sites": [
         {
           "ea": "0x431bbc",
@@ -12685,19 +12743,35 @@
         },
         {
           "ea": "0x431bd5",
-          "what": "sub_477980 取一条鼠标事件"
+          "what": "sub_477980 查询当前触点"
         },
         {
           "ea": "0x431bda",
-          "what": "有 / 无事件分支"
+          "what": "有 / 无触点分支"
         },
         {
           "ea": "0x431bde",
-          "what": "无事件 ⇒ 只写结果 0"
+          "what": "无触点 ⇒ 只写结果 0"
         },
         {
           "ea": "0x431bef",
-          "what": "有事件 ⇒ 坐标变换与结果写入"
+          "what": "有触点 ⇒ 坐标变换与结果写入"
+        },
+        {
+          "ea": "0x477990",
+          "what": "输入可用标志为 0 ⇒ 没有触点"
+        },
+        {
+          "ea": "0x4779c0",
+          "what": "每次从缓冲首项扫；不递增读游标"
+        },
+        {
+          "ea": "0x477a2a",
+          "what": "命中即返回 1；不清计数 / 不消费"
+        },
+        {
+          "ea": "0x477a53",
+          "what": "全部无效 ⇒ 清触点计数"
         }
       ],
       "functions": [
@@ -12706,7 +12780,8 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-input.test.mjs#★ 鼠标事件查询：0x2fc"
+        "KN:01M5VVNAGW72671R32512Y3F6N",
+        "guard:tools/test/emulator-new-input.test.mjs#★ 触点查询：0x2fc"
       ]
     },
     {

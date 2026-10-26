@@ -1,14 +1,14 @@
 /**
  * Electron renderer 的输入后端（`60-ops-input.md` 的 `InputHost`）。
  *
- * ★ 这是**平台实现**：把 DOM 的鼠标 / 键盘事件归约成核心要的「光标 / 按钮位图 / 输入字 / 鼠标事件」。
+ * ★ 这是**平台实现**：把 DOM 的鼠标 / 键盘事件归约成核心要的「光标 / 按钮位图 / 输入字 / 触点」。
  * ★ 物理键 → 引擎输入位号的映射**不在 spec 里**（`CORE-INPUT-WORD` 的残差）。本实现用一组**调试映射**
  *   （`Digit0..9` → 0..9，`KeyA..C` → 10..12），只用于让 TITLE 的按键回调可被驱动；
  *   ⛔ 它不是引擎的真实按键表，换一台机器/换一套配置不应把它当合同。
- * ★ 鼠标事件按引擎的「位图 + 事件队列」两路提供：`buttons()` 是当前状态，`nextMouseEvent()` 是边沿事件。
+ * ★ 触点查询（`0x2fc`）在桌面鼠标-only 下恒为“没有触点”；鼠标边沿只走 `buttons()`。
  *   鼠标移动只更新光标，不排队事件（避免每像素一条事件）。
  */
-import type { InputHost, MouseEventRecord } from '../../../core/input.ts';
+import type { InputHost, TouchPointRecord } from '../../../core/input.ts';
 
 /** 调试用物理键 → 引擎输入位号（不是 spec 合同；见文件头） */
 const DEBUG_KEY_MAP: Readonly<Record<string, number>> = {
@@ -41,7 +41,6 @@ function buttonIndex(button: number): number | null {
 export class DomInputHost implements InputHost {
   private readonly canvas: HTMLCanvasElement;
   private readonly keys = new Set<number>();
-  private readonly queue: MouseEventRecord[] = [];
   private x = 0;
   private y = 0;
   private cursorAvailable = false;
@@ -60,7 +59,6 @@ export class DomInputHost implements InputHost {
     const bit = buttonIndex(event.button);
     if (bit === null) return;
     this.buttonsMask |= 1 << bit;
-    this.queue.push({ x: this.x, y: this.y, flags: 0x11, extra: bit });
     event.preventDefault();
   };
 
@@ -68,7 +66,6 @@ export class DomInputHost implements InputHost {
     const bit = buttonIndex(event.button);
     if (bit === null) return;
     this.buttonsMask &= ~(1 << bit);
-    this.queue.push({ x: this.x, y: this.y, flags: 0x12, extra: bit });
     event.preventDefault();
   };
 
@@ -119,7 +116,7 @@ export class DomInputHost implements InputHost {
     return this.buttonsMask >>> 0;
   }
 
-  nextMouseEvent(): MouseEventRecord | null {
-    return this.queue.shift() ?? null;
+  nextTouchPoint(): TouchPointRecord | null {
+    return null;  // 桌面鼠标没有触点缓冲；TITLE 会回退到 0x109 / 0x108。
   }
 }

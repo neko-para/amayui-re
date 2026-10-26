@@ -135,7 +135,7 @@
     {
       "id": "ops-input",
       "file": "chapters/60-ops-input.md",
-      "title": "输入：键鼠 / 手柄 / 回调"
+      "title": "输入：键鼠 / 手柄 / 触点 / 回调 / 命中查找"
     },
     {
       "id": "vm",

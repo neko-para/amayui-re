@@ -24,12 +24,12 @@
   脚本的 `0x1a2` / `0x1a3` / `0x1a9` / `0x1aa` 只支持全局值族（type 3 / 5）；引用族先响亮失败。
 - **CLI 入口**：没有渲染 / 音频输出；外部请求只记进 `m.effects`（`data/spec/core/README.md` §1 裁决）。
   ★ **输入**：`--input` / `--input-script` 提供一个**指令式**的脚本化输入后端（`platform/node/input.ts`），
-  把「at 毫秒 + move / down / up / key」归约成核心的输入字 / 光标 / 按钮 / 鼠标事件；
+  把「at 毫秒 + move / down / up / key」归约成核心的输入字 / 光标 / 按钮 / 触点；
   没有 `--input` 时核心看到 `inputHost === undefined`（没有设备：输入字 0、光标不可用、无事件）。
   `--input-idle-ms`（缺省 500）在脚本耗尽且输入环已启动后以 `input-idle` 收口；`--max-steps` / `--max-ticks` 是安全阀。
   ★ **当前帧**：CLI 报告（`--json` 的 `frame`）与 Electron debug 窗口都会给当前帧的名称 / 统一文件 id /
   帧槽 / 父帧 / ip；名称由安装索引解析，未解析时退回 id。
-  ★ **Electron 输入**：renderer 的 `DomInputHost` 接鼠标光标 / 左右键 / 鼠标事件；键盘用**调试映射**
+  ★ **Electron 输入**：renderer 的 `DomInputHost` 接鼠标光标 / 左右键 / 触点；键盘用**调试映射**
   （`Digit0..9` → 0..9、`KeyA..C` → 10..12，不是引擎真实按键表）。`0x12e` 鼠标命中查找目前只写 -1 +
   一次诊断（让鼠标移动不阻塞），悬停 / 点击菜单的命中语义仍留 gap。
   ★ **Electron 短睡眠**：`sleepHost` 真实 `setTimeout(ms)`；`0xc8` 的 `sleep 1` 不再抛 `sleep-host-missing`。

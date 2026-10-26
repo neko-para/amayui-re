@@ -109,6 +109,9 @@ if(EMULATOR_CXX_INSTALL_DIR)
     # 唯一的游戏流程是 boot（根脚本 → LOGO → 影片 → TITLE）：没有"直接跳到 TITLE"的测试档。
     add_test(NAME emulator-core-boot-play
         COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --play-frames 1)
+    # `--skip-logo` 走引擎的 ShowLogo 格（`0x130`），不是宿主捷径；仍必须到 TITLE。
+    add_test(NAME emulator-core-boot-play-skip-logo
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-frames 1)
     # 影片：真 MPEG-1 program stream（LOGO.MPG）→ 门前服务 → 同槽纹理 → GPU 场景批次。
     # `--logo-frames 0` 只跑到收尾（判据在程序里：必须有帧、必须走到收尾）。
     add_test(NAME emulator-core-logo-movie

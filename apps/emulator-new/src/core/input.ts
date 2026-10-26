@@ -2,16 +2,16 @@
  * 输入的平台边界（`data/spec/chapters/60-ops-input.md` 的 `CORE-INPUT-*`）。
  *
  * ★ 核心只认这个接口，不认键盘 / 鼠标 / 手柄的具体形态：平台把「当前输入」归约成
- *   一个 32 位输入字、一个光标位置、一个按钮位图与一条鼠标事件队列。
+ *   一个 32 位输入字、一个光标位置、一个按钮位图与一个当前触点。
  * ★ 所有方法都带 `now`（仿真 / 宿主毫秒）：平台按自己的时钟决定"这一刻有哪些事件"，
  *   核心不替平台排队。
  * ★ 没有输入后端时（`--script` 调试口 / 纯核心测试）调用方传 `undefined`：
- *   输入字恒 0、光标不可用、按钮位图 0、没有鼠标事件 —— 这是显式的"没有设备"，
+ *   输入字恒 0、光标不可用、按钮位图 0、没有触点 —— 这是显式的"没有设备"，
  *   不是"悄悄补 0"。
  */
 
-/** 一条鼠标事件记录（字段语义由平台定义；核心只原样传给脚本） */
-export interface MouseEventRecord {
+/** 一条触点记录（字段语义由平台定义；核心只原样传给脚本） */
+export interface TouchPointRecord {
   x: number;
   y: number;
   flags: number;
@@ -26,8 +26,8 @@ export interface InputHost {
   cursor(now: number): { x: number; y: number } | null;
   /** 当前鼠标按钮位图；`null` = 设备不可用 */
   buttons(now: number): number | null;
-  /** 取一条待处理鼠标事件；`null` = 没有事件 */
-  nextMouseEvent(now: number): MouseEventRecord | null;
+  /** 查询当前触点；`null` = 没有触点 */
+  nextTouchPoint(now: number): TouchPointRecord | null;
 }
 
 /** 鼠标回调的登记状态（`0xcc` / `0xcd`；引擎级一格） */
@@ -45,7 +45,7 @@ export interface MouseCallbackState {
 /**
  * **按住派发族**（`0x102` / `0x103` / `0x104` / `0x105`）的引擎级状态。
  * ★ 三格初值都是**合同值**（不是兜底）：`mask = 0`、`modulus = 0`、`contextKey = −1`
- *   （启动路径与 `0xfc` 都写它们）。⚠ 与 `keyTotal` 不同：那一格引擎**不建立**初值（UB）。
+ *   （启动路径与 `0xfc` 都写它们）。`keyTotal` 由引擎构造建立初值 7。
  * ★ 按住**游标**不在 `HoldState` 里，也**不是**按 `Frame` 对象的：它按**帧槽号**存在
  *   `Machine.holdCursorBySlot`（帧释放 / 重载不复位）。`HoldState` 只放引擎级那三格 + 计数。
  */
@@ -76,8 +76,8 @@ export interface InputState {
   /** 键总数（`0xfe` 写；决定 `0x100` 的扫描范围与"无按键"表项） */
   keyTotal: number;
   /**
-   * ★ 键总数是否已被 `0xfe` 写过（引擎**不建立**初值：构造 / 帧装载 / 重置都不写它）。
-   * `false` 时读 `keyTotal` 是**未定义行为**：读者要留一条 `key-total-unset` 诊断。
+   * ★ 键总数是否已被 `0xfe` 显式写过。引擎构造先建立初值 **7**（`Input[259] = 7`），
+   * 所以 `false` 不再是 UB；这个字段只用于诊断"脚本有没有显式设过"。
    */
   keyTotalEstablished: boolean;
   /** 主循环模式字（`0x24e` 写；位 0 被等待服务读取） */
@@ -95,11 +95,10 @@ export interface InputState {
 export function initialInputState(): InputState {
   return {
     word: 0,
-    // ★ 引擎**不建立**这一格的初值（唯一写点是 `0xfe`）⇒ 0 是**本实现的 UB 兜底，不是合同**；
-    //   任何断言 / 日志都不得把它表述成"引擎启动后的值"。`0xfe` 之前读到它的读者
-    //   （`0x100` / `0xff`）会经 `readKeyTotal` 记一条 `key-total-unset` 诊断。
-    keyTotal: 0,
-    keyTotalEstablished: false,
+    // ★ 引擎构造建立初值 7（`Input[259] = 7`）；`0xfe` 只覆盖它。
+    //   在第一次 `0xfe` 之前，`0x100` 的"无按键"表项就是 7，不是 UB。
+    keyTotal: 7,
+    keyTotalEstablished: true,
     mode: 0,
     mouse: { interval: 1, last: 0, target: -1, owner: -1 },
     samples: 0,

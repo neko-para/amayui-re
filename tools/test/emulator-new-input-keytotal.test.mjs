@@ -1,4 +1,4 @@
-/** @env pure @kind contract @why 0x100 读按帧上限而不是键总数 ⇒ 0xfe 与 0xff 的先后会改变派发结果（真机不会）；键总数 UB 兜底被当成合同则跨实现对照失效 */
+/** @env pure @kind contract @why 0x100 读按帧上限而不是键总数 ⇒ 0xfe 与 0xff 的先后会改变派发结果（真机不会）；键总数初值 7 被实现成 0 则跨实现对照失效 */
 /**
  * tools/test/emulator-new-input-keytotal.test.mjs —— `60-ops-input.md` 的
  * CORE-INPUT-WORD（键总数 / 采样）与 CORE-INPUT-KEY-DISPATCH（0x100 的扫描上界）守卫。
@@ -8,8 +8,7 @@
  *     ⇒ `0xfe 5 → 0xff → 0xfe 3` 之后，键 4 已经越界、**不许**再派发；
  *     用 `frame.keyLimit`（= 5）的旧实现会派发 ⇒ 第一条断言红。
  *   - 同一脚本把最后一个 `0xfe` 去掉（键总数仍 5）⇒ 键 4 **必须**派发。这一半防"输入字根本没置位"的假绿。
- *   - 引擎**不建立**键总数初值 ⇒ `0xfe` 之前读到它必须留一条 `key-total-unset` 诊断（只记一次），
- *     且不许把 0 兜底说成"引擎启动值"。
+ *   - 引擎构造建立键总数初值 **7**（`Input[259] = 7`）⇒ `0xfe` 之前读它就是 7，不是 UB。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -41,7 +40,7 @@ function inputHost(mask) {
     sampleKeys: () => mask >>> 0,
     cursor: () => null,
     buttons: () => null,
-    nextMouseEvent: () => null,
+    nextTouchPoint: () => null,
   };
 }
 
@@ -77,21 +76,19 @@ test('★★ 0xfe 5 → 0xff → 0xfe 3 → 0x100：键 4 已越界，不再派�
   assert.equal(inRange.frame.keyCursor, 5, '派发后游标 = 找到的编号 + 1');
 });
 
-test('★ 读到未 0xfe 的键总数 ⇒ 只记一条 key-total-unset 诊断', async () => {
+test('★ 未 0xfe 时键总数是引擎初值 7', async () => {
   const unset = machineFor([[0x100, []], [0x100, []], [0x1a8, []]]);
   await unset.run();
-  assert.equal(unset.diagnostics.filter((d) => d.kind === 'key-total-unset').length, 1,
-    '0xfe 之前读键总数是 UB：只记一次诊断，⛔ 不静默、也不重复刷');
+  assert.equal(unset.input.keyTotal, 7, '构造初值 7');
+  assert.equal(unset.diagnostics.filter((d) => d.kind === 'key-total-unset').length, 0,
+    '初值 7 是合同，不是 UB；⛔ 不再刷 key-total-unset');
 
-  // 0xff 也读键总数（抄进按帧上限）⇒ 同样要留诊断
   const sampled = machineFor([[0xff, []]], { inputHost: inputHost(0) });
   await sampled.run();
-  assert.equal(sampled.diagnostics.filter((d) => d.kind === 'key-total-unset').length, 1,
-    '0xff 写按帧上限时也读了键总数');
+  assert.equal(sampled.frame.keyLimit, 7, '0xff 把初值 7 抄进按帧扫描上限');
 
-  // 0xfe 先写过 ⇒ 不再记
   const established = machineFor([[0xfe, [[0, 2]]], [0xff, []], [0x100, []]], { inputHost: inputHost(0) });
   await established.run();
-  assert.equal(established.diagnostics.filter((d) => d.kind === 'key-total-unset').length, 0,
-    '0xfe 写过键总数之后它是已定义状态');
+  assert.equal(established.input.keyTotal, 2, '0xfe 覆盖初值');
+  assert.equal(established.frame.keyLimit, 2, '0xff 抄的是覆盖后的键总数');
 });

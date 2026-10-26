@@ -429,7 +429,7 @@ test('★ 0xfc：清两张表（所有帧）+ 模数 0 + 掩码/游标/上限/�
   assert.equal(cursorOf(m, 1), 2, '其它帧的游标也不被清');
   assert.equal(m.frame.keyLimit, 8, '按键扫描上限不被清');
   assert.equal(m.input.word, 0x10, '输入字不被清');
-  assert.equal(m.input.keyTotalEstablished, false, '键总数不被写');
+  assert.equal(m.input.keyTotal, 7, '键总数不被写（初值 7）');
 
   // 复位之后必须重新设模数：否则下一次 0x104 在游标推进处除零。
   assert.throws(() => HANDLERS.get(0x104)(m, []), /input-hold: modulus is 0/, '复位后 0x104 必须响亮失败');

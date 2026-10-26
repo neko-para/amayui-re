@@ -10,7 +10,7 @@
  * ★ 没有 `--input` 时 CLI 不创建它 ⇒ 核心看到 `inputHost === undefined`（没有设备）。
  */
 
-import type { InputHost, MouseEventRecord } from '../../core/input.ts';
+import type { InputHost, TouchPointRecord } from '../../core/input.ts';
 
 export type InputEvent =
   | { at: number; kind: 'move'; x: number; y: number }
@@ -86,7 +86,6 @@ export class ScriptedInputHost implements InputHost {
   private readonly events: InputEvent[];
   private cursorIndex = 0;
   private readonly keys = new Set<number>();
-  private readonly queue: MouseEventRecord[] = [];
   private x = 0;
   private y = 0;
   private cursorAvailable = false;
@@ -116,18 +115,10 @@ export class ScriptedInputHost implements InputHost {
         }
         if (event.down) this.buttonsMask |= 1 << event.button;
         else this.buttonsMask &= ~(1 << event.button);
-        this.queue.push({
-          x: this.x,
-          y: this.y,
-          // 事件标志低两位给"按下 / 抬起"，其余位为 0；TITLE 只读事件是否存在。
-          flags: event.down ? 0x11 : 0x12,
-          extra: event.button,
-        });
       } else if (event.kind === 'key') {
         if (event.down) this.keys.add(event.key);
         else this.keys.delete(event.key);
       } else if (event.kind === 'wheel') {
-        this.queue.push({ x: this.x, y: this.y, flags: 0x40, extra: event.delta });
       }
     }
   }
@@ -149,9 +140,9 @@ export class ScriptedInputHost implements InputHost {
     return this.buttonsMask >>> 0;
   }
 
-  nextMouseEvent(now: number): MouseEventRecord | null {
+  nextTouchPoint(now: number): TouchPointRecord | null {
     this.apply(now);
-    return this.queue.shift() ?? null;
+    return null;  // 桌面鼠标没有触点缓冲；TITLE 会回退到 0x109 / 0x108。
   }
 
   /** 统计（CLI 收口 / 报告用） */

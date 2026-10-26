@@ -631,6 +631,32 @@ bool check_run_bracket(const core::OpcodeTable& table) {
 
 // ── 输入采样 / 按键派发（0xFF · 0x100；CORE-INPUT-WORD / -KEY-DISPATCH） ──
 bool check_input_dispatch(const core::OpcodeTable& table) {
+    // 键总数初值 7（引擎 Input 构造）：0xfe 之前 0x100 / 0xff 就读这个值。
+    core::Machine default_machine(0x12345678u, table);
+    if (default_machine.key_total() != 7) {
+        std::fprintf(stderr, "key total default must be 7, got %d\n", default_machine.key_total());
+        return false;
+    }
+
+    // 0x101：先向平台采样一次，再清第 27 位 / 清输入字 / 写 A、B。
+    auto poll = make_script_with_body();
+    emit_instruction(poll, 0x101, {});
+    emit_instruction(poll, 2, {});
+    core::Machine poll_machine(0x12345678u, table);
+    int poll_samples = 0;
+    poll_machine.set_key_sampler([&poll_samples] {
+        ++poll_samples;
+        return 0b101u;
+    });
+    poll_machine.load_root(poll);
+    if (!poll_machine.step() || poll_samples != 1 || poll_machine.input_word() != 0 ||
+        poll_machine.input_a() != 1 || poll_machine.input_b() != 0) {
+        std::fprintf(stderr, "0x101 must sample once then discard; samples=%d word=0x%X A=%d B=%d\n",
+                     poll_samples, poll_machine.input_word(), poll_machine.input_a(),
+                     poll_machine.input_b());
+        return false;
+    }
+
     auto sample = make_script_with_body();
     emit_instruction(sample, 0xFE, {{0, 2}});
     emit_instruction(sample, 0xFF, {});
@@ -1854,7 +1880,7 @@ bool check_save_ops(const core::OpcodeTable& table) {
     return true;
 }
 
-// ── 鼠标事件 / 命中查找（0x2FC · 0x12E） ──
+// ── 触点查询 / 命中查找（0x2FC · 0x12E） ──
 bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
     const auto make_mouse_script = [&]() {
         auto bytes = make_script_with_body();
@@ -1881,8 +1907,8 @@ bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
         return false;
     }
     core::Machine mouse_some(0x12345678u, table);
-    mouse_some.set_mouse_event_source([](core::Machine::MouseEvent& event) {
-        event = core::Machine::MouseEvent{10, 20, 0x11, 3};
+    mouse_some.set_touch_source([](core::Machine::TouchPoint& event) {
+        event = core::Machine::TouchPoint{10, 20, 0x11, 3};
         return true;
     });
     mouse_some.load_root(make_mouse_script());
@@ -1994,6 +2020,55 @@ bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
             std::fprintf(stderr, "0x12e same-address record must be skipped\n");
             return false;
         }
+    }
+    return true;
+}
+
+// ── 退出清理（0x1F6 · 0x23D · 0x32B · 0x2） ──
+// TITLE 的退出路径必须先跑 0x1F6 / 0x23D / 0x32B，再 `exit`；缺 handler 会停在
+// `opcode-without-handler:573/811`，窗口宿主也永远不该把"脚本已结束"当成"继续等用户关窗"。
+bool check_exit_cleanup(const core::OpcodeTable& table) {
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x1F6, {});
+    emit_instruction(bytes, 0x23D, {});
+    emit_instruction(bytes, 0x32B, {});
+    emit_instruction(bytes, 0x2, {});
+    core::Machine machine(0x12345678u, table);
+    machine.load_root(bytes);
+    for (int i = 0; i < 3; ++i) {
+        if (!machine.step()) {
+            std::fprintf(stderr, "exit cleanup fixture failed at step %d: %s\n", i,
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    // 第 4 步是 `exit`：它把根帧结束成 Halted，因此 step() 返回 false 是**预期**。
+    machine.step();
+    if (!machine.halted() || machine.last_stop().reason != core::StopReason::Halted) {
+        std::fprintf(stderr, "exit cleanup must end with root-exit, reason=%d msg=%s\n",
+                     static_cast<int>(machine.last_stop().reason),
+                     machine.last_stop().message.c_str());
+        return false;
+    }
+    return true;
+}
+
+// ── 场景颜色归一化（0x202 / 0x203 / 0x322 / 0x323） ──
+bool check_color_normalization(const core::OpcodeTable& table) {
+    auto bytes = make_script_with_body();
+    // 0x203：key 1、第 2 操作数 7、alpha 0x44、color 0x112233。
+    emit_instruction(bytes, 0x203, {{0, 1}, {0, 7}, {0, 0x44}, {0, 0x112233}});
+    // 负 alpha / 负 color ⇒ 取现有值；第 2 操作数覆盖为 9。
+    emit_instruction(bytes, 0x203, {{0, 1}, {0, 9}, {0, 0xffffffffu}, {0, 0xffffffffu}});
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(0x12345678u, table);
+    machine.load_root(bytes);
+    if (!machine.step() || !machine.step()) return false;
+    const auto it = machine.draw_items().find(1);
+    if (it == machine.draw_items().end() || it->second.color != 0x44112233u ||
+        it->second.set_color_int != 9) {
+        std::fprintf(stderr, "0x203 negative color must keep existing ARGB and write op2\n");
+        return false;
     }
     return true;
 }
@@ -3073,6 +3148,8 @@ int main() {
         if (!check_save_ops(table)) return 1;
         if (!check_input_hold(table)) return 1;
         if (!check_mouse_and_hit_test(table)) return 1;
+        if (!check_exit_cleanup(table)) return 1;
+        if (!check_color_normalization(table)) return 1;
         if (!check_texture_size(table)) return 1;
         if (!check_exit_script(table)) return 1;
 
