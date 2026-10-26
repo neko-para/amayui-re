@@ -145,7 +145,6 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
         // 无窗口影片校验：从根脚本跑到 LOGO 的 `0x20f`，以后端时间推进，逐帧导出 GPU 合成。
         // `--logo-frames 0` = 不导出、只跑到影片收尾（CTest 用的确定性判据）。
         if (!logo_dir.empty()) {
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
             std::filesystem::create_directories(core::path_from_utf8(logo_dir));
             std::size_t steps = 0;
             while (!machine.halted() && !machine.movie_active() && steps < max_steps) {
@@ -164,13 +163,12 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
             SDL_GPUDevice* device = nullptr;
             if (dump) {
                 if (!SDL_Init(SDL_INIT_VIDEO)) { log_sdl_error("SDL_Init(logo-gpu)"); return 1; }
-                if (!SDL_ShaderCross_Init()) {
-                    log_sdl_error("SDL_ShaderCross_Init");
+                if (!init_shader_toolchain()) {
                     SDL_Quit();
                     return 1;
                 }
                 device = create_gpu_device();
-                if (device == nullptr) { SDL_ShaderCross_Quit(); SDL_Quit(); return 1; }
+                if (device == nullptr) { quit_shader_toolchain(); SDL_Quit(); return 1; }
             }
             int requests = 0;
             int dumped = 0;
@@ -216,7 +214,7 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
             std::printf("[movie] logo done requests=%d dumped=%d clock=%ums active=%d\n", requests,
                         dumped, machine.scene_clock_ms(), machine.movie_active() ? 1 : 0);
             if (device != nullptr) SDL_DestroyGPUDevice(device);
-            if (dump) { SDL_ShaderCross_Quit(); SDL_Quit(); }
+            if (dump) { quit_shader_toolchain(); SDL_Quit(); }
             if (!ok) return 1;
             // 判据：影片真的播了（至少一帧）且走到了收尾（导出模式按帧数截断时不要求）。
             if (requests < 1) { std::fprintf(stderr, "[movie] 一帧都没有请求\n"); return 1; }
@@ -225,10 +223,6 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
                 return 1;
             }
             return 0;
-#else
-            std::fprintf(stderr, "[movie] --render-logo-gpu requires shadercross\n");
-            return 1;
-#endif
         }
         if (footprint) {
             // 诊断口（`--footprint`）：跑到 `--max-steps` 为止，按**首次出现顺序**汇总

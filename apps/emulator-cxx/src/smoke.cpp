@@ -81,9 +81,7 @@ SmokeResult run_smoke_clear(SDL_GPUDevice* device) {
     return result;
 }
 
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
-
-[[maybe_unused]] SmokeResult run_smoke_quad(
+SmokeResult run_smoke_quad(
     SDL_GPUDevice* device,
     SDL_GPUBlendOp color_op,
     SDL_GPUBlendFactor src_factor,
@@ -158,9 +156,6 @@ SmokeResult run_smoke_clear(SDL_GPUDevice* device) {
     return result;
 }
 
-#endif
-
-
 SmokeResult run_smoke_texture(SDL_GPUDevice* device) {
     SmokeResult result;
 
@@ -232,84 +227,35 @@ SmokeResult run_smoke_texture(SDL_GPUDevice* device) {
     return result;
 }
 
+// 两条 pipeline × 两种目标格式（离屏 RGBA8 / 呈现用的 BGRA8）。只建不画：
+// 验的是**这套着色器在当前后端能不能编出来、顶点属性/混合状态对不对**（Metal 的 API 校验
+// 会在建 pipeline 时当场报错），像素判据在上面两条混合断言上。
+// ★ 场景批次的 pipeline 只有真的渲染场景时才建（需要游戏数据），所以这里单独建一次。
+SmokeResult run_smoke_pipelines(SDL_GPUDevice* device) {
+    constexpr SDL_GPUTextureFormat formats[] = {
+        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,
+    };
+    for (const SDL_GPUTextureFormat format : formats) {
+        QuadPipeline quad;
+        if (!create_quad_pipeline(device, format, SDL_GPU_BLENDOP_ADD,
+                                  SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+                                  SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, quad)) {
+            destroy_quad_pipeline(device, quad);
+            return SmokeResult{false, "quad pipeline failed: format=" + std::to_string(int(format))};
+        }
+        destroy_quad_pipeline(device, quad);
 
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
-SmokeResult run_smoke_shader(SDL_GPUDevice* device) {
-    SmokeResult result;
-    const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device);
-
-    SDL_ShaderCross_HLSL_Info info{};
-    info.include_dir = nullptr;
-    info.defines = nullptr;
-    info.props = 0;
-
-    size_t vertex_size = 0;
-    size_t fragment_size = 0;
-    void* vertex_code = nullptr;
-    void* fragment_code = nullptr;
-    SDL_GPUShaderFormat format = SDL_GPU_SHADERFORMAT_INVALID;
-
-    if ((formats & SDL_GPU_SHADERFORMAT_DXIL) != 0) {
-        info.source = kVertexShader;
-        info.entrypoint = "VSMain";
-        info.shader_stage = SDL_SHADERCROSS_SHADERSTAGE_VERTEX;
-        vertex_code = SDL_ShaderCross_CompileDXILFromHLSL(&info, &vertex_size);
-        info.source = kFragmentShader;
-        info.entrypoint = "PSMain";
-        info.shader_stage = SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT;
-        fragment_code = SDL_ShaderCross_CompileDXILFromHLSL(&info, &fragment_size);
-        format = SDL_GPU_SHADERFORMAT_DXIL;
-    } else if ((formats & SDL_GPU_SHADERFORMAT_SPIRV) != 0) {
-        info.source = kVertexShader;
-        info.entrypoint = "VSMain";
-        info.shader_stage = SDL_SHADERCROSS_SHADERSTAGE_VERTEX;
-        vertex_code = SDL_ShaderCross_CompileSPIRVFromHLSL(&info, &vertex_size);
-        info.source = kFragmentShader;
-        info.entrypoint = "PSMain";
-        info.shader_stage = SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT;
-        fragment_code = SDL_ShaderCross_CompileSPIRVFromHLSL(&info, &fragment_size);
-        format = SDL_GPU_SHADERFORMAT_SPIRV;
+        ScenePipeline scene;
+        if (!create_scene_pipeline(device, format, scene)) {
+            destroy_scene_pipeline(device, scene);
+            return SmokeResult{false, "scene pipeline failed: format=" + std::to_string(int(format))};
+        }
+        destroy_scene_pipeline(device, scene);
+        std::printf("[emulator-cxx] smoke: pipelines ok format=%d\n", int(format));
     }
-
-    if (vertex_code == nullptr || fragment_code == nullptr) {
-        result.detail = std::string("shader compile failed: ") + SDL_GetError();
-        if (vertex_code != nullptr) SDL_free(vertex_code);
-        if (fragment_code != nullptr) SDL_free(fragment_code);
-        return result;
-    }
-
-    SDL_GPUShaderCreateInfo vertex_info{};
-    vertex_info.code_size = vertex_size;
-    vertex_info.code = static_cast<const Uint8*>(vertex_code);
-    vertex_info.entrypoint = "VSMain";
-    vertex_info.format = format;
-    vertex_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-    vertex_info.num_samplers = 0;
-    SDL_GPUShader* vertex = SDL_CreateGPUShader(device, &vertex_info);
-
-    SDL_GPUShaderCreateInfo fragment_info{};
-    fragment_info.code_size = fragment_size;
-    fragment_info.code = static_cast<const Uint8*>(fragment_code);
-    fragment_info.entrypoint = "PSMain";
-    fragment_info.format = format;
-    fragment_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    fragment_info.num_samplers = 1;
-    SDL_GPUShader* fragment = SDL_CreateGPUShader(device, &fragment_info);
-
-    SDL_free(vertex_code);
-    SDL_free(fragment_code);
-
-    const bool ok = vertex != nullptr && fragment != nullptr;
-    result.ok = ok;
-    result.detail = ok
-        ? std::string("shader compile=ok format=") + (format == SDL_GPU_SHADERFORMAT_DXIL ? "DXIL" : "SPIRV")
-        : std::string("SDL_CreateGPUShader failed: ") + SDL_GetError();
-
-    if (vertex != nullptr) SDL_ReleaseGPUShader(device, vertex);
-    if (fragment != nullptr) SDL_ReleaseGPUShader(device, fragment);
-    return result;
+    return SmokeResult{true, "pipelines ok (rgba8/bgra8 × quad/scene)"};
 }
-#endif
 
 SmokeResult run_smoke(SDL_GPUDevice* device) {
     SmokeResult clear = run_smoke_clear(device);
@@ -318,7 +264,8 @@ SmokeResult run_smoke(SDL_GPUDevice* device) {
     SmokeResult texture = run_smoke_texture(device);
     if (!texture.ok) return texture;
 
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+    // 两条混合断言都靠 fixed-function 的 blend state，着色器只负责采样 ⇒ 三个平台应该给出
+    // 同一组像素（着色器那一步的差别只有 DXIL / SPIR-V / MSL 三种形式）。
     const int alpha_expected[3] = {15, 11, 13};
     SmokeResult alpha = run_smoke_quad(
         device,
@@ -339,12 +286,14 @@ SmokeResult run_smoke(SDL_GPUDevice* device) {
         subtract_expected);
     if (!subtract.ok) return subtract;
 
-    SmokeResult shader = run_smoke_shader(device);
-    if (!shader.ok) return shader;
-    return SmokeResult{true, clear.detail + " | " + texture.detail + " | " + alpha.detail + " | " + subtract.detail + " | " + shader.detail};
-#else
-    return SmokeResult{true, clear.detail + " | " + texture.detail};
-#endif
+    SmokeResult pipelines = run_smoke_pipelines(device);
+    if (!pipelines.ok) return pipelines;
+
+    // 走到这里 ⇒ 设备的原生着色器格式真的建出了两条 pipeline；把路径记进 detail 便于对照平台。
+    return SmokeResult{true,
+                       clear.detail + " | " + texture.detail + " | " + alpha.detail + " | " +
+                           subtract.detail + " | " + pipelines.detail + " | shader=" +
+                           shader_backend_name(device)};
 }
 
 }  // namespace app

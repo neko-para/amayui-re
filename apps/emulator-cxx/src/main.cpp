@@ -106,16 +106,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
-    if (!SDL_ShaderCross_Init()) {
-        log_sdl_error("SDL_ShaderCross_Init");
+    if (!init_shader_toolchain()) {
         SDL_Quit();
         return 1;
     }
-#endif
 
     SDL_GPUDevice* device = create_gpu_device();
     if (device == nullptr) {
+        quit_shader_toolchain();
         SDL_Quit();
         return 1;
     }
@@ -126,9 +124,7 @@ int main(int argc, char** argv) {
         result.ok ? "PASS" : "FAIL",
         result.detail.c_str());
     SDL_DestroyGPUDevice(device);
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
-    SDL_ShaderCross_Quit();
-#endif
+    quit_shader_toolchain();
     SDL_Quit();
     return result.ok ? 0 : 1;
 }

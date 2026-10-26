@@ -1,15 +1,34 @@
-// 四边形管线：一张纹理铺满目标（软件回退 / 冒烟测试用）。
+// 四边形管线：一张纹理铺满目标（冒烟测试 / 场景批次不可用时的兜底）。
 //
 // ★ 场景批次在 gpu_scene.cpp；这里只保留最简单的"整幅贴图 + 混合模式"。
+//
+// ── 着色器：一套管线、两个语言的源 ────────────────────────────────────────────
+// SDL_GPU 的后端各认各的格式，本仓的搭配是：
+//   · Windows / D3D12 → **DXIL**：HLSL 在运行时由 SDL_shadercross 编出来；
+//   · Linux  / Vulkan → **SPIR-V**：同一份 HLSL，同样由 shadercross 编；
+//   · macOS  / Metal  → **MSL**：SDL 的 `SDL_GPU_SHADERFORMAT_MSL` 收的是**源码文本**
+//     （Metal 后端直接 `newLibraryWithSource:` 编译），所以 **macOS 不需要 shadercross**。
+//     这一点很关键：shadercross 依赖 directx-dxc，而那个 vcpkg port 只支持 windows / linux-x64
+//     ⇒ 想让 macOS 也走 GPU，只能喂 MSL。这也是 SDL 生态的标准做法（SDL_shadercross 的
+//     README / ImGui 的 SDL_GPU3 后端都是这么分派的：设备支持 MSL 就发 MSL 源码）。
+// ⇒ `compile_shader()` 按 `SDL_GetGPUShaderFormats(device)` 现场挑一套源。
+// ★ 两份源描述**同一对管线**，改一个必须改另一个（否则两个平台画出不一样的东西）。
+//   骨架照 SDL_shadercross 的输出写（入口 `main0`、varying `[[user(locnN)]]`、
+//   纹理 `[[texture(0)]]` / 采样器 `[[sampler(0)]]`、顶点属性 `[[attribute(n)]]`），
+//   这样将来若改用 shadercross 生成的 MSL，调用点一个字都不用动。
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
 
 #include "app.h"
+
+#include <cstring>
+
 namespace app {
 
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+namespace {
 
-const char* const kVertexShader = R"(
+// ── 四边形：HLSL（shadercross 平台） ──
+constexpr const char* kQuadHlslVertex = R"(
 struct VSInput {
     float2 position : TEXCOORD0;
     float4 color : TEXCOORD1;
@@ -28,7 +47,7 @@ VSOutput VSMain(VSInput input) {
 }
 )";
 
-const char* const kFragmentShader = R"(
+constexpr const char* kQuadHlslFragment = R"(
 Texture2D tex : register(t0, space2);
 SamplerState samp : register(s0, space2);
 float4 PSMain(float4 position : SV_Position, float4 uv : TEXCOORD0) : SV_Target {
@@ -36,21 +55,69 @@ float4 PSMain(float4 position : SV_Position, float4 uv : TEXCOORD0) : SV_Target 
 }
 )";
 
-SDL_GPUShader* compile_shader(
-    SDL_GPUDevice* device,
-    const char* source,
-    const char* entrypoint,
-    SDL_ShaderCross_ShaderStage stage,
-    Uint32 num_samplers) {
+// ── 四边形：MSL（Metal） ──
+// 顶点属性 0/1 与 `create_quad_pipeline()` 的 vertex attribute location 一一对应；
+// 目标分辨率 1280×720 是**逻辑分辨率**（与 HLSL 那份的 640.0 / 360.0 一致）。
+// ★ vertex / fragment 分成两份源：一个 MSL 编译单元里放两个同名 entry 是不必要的风险。
+constexpr const char* kQuadMslVertex = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSInput {
+    float2 position [[attribute(0)]];
+    float4 color    [[attribute(1)]];
+};
+
+struct VSOutput {
+    float4 position [[position]];
+    float4 color    [[user(locn0)]];
+};
+
+vertex VSOutput main0(VSInput input [[stage_in]]) {
+    VSOutput output;
+    output.position = float4(input.position.x / 640.0 - 1.0,
+                             1.0 - input.position.y / 360.0,
+                             0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+)";
+
+constexpr const char* kQuadMslFragment = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct PSInput {
+    float4 color [[user(locn0)]];
+};
+
+fragment float4 main0(PSInput input [[stage_in]],
+                      texture2d<float> tex [[texture(0)]],
+                      sampler samp [[sampler(0)]]) {
+    return tex.sample(samp, input.color.xy);
+}
+)";
+
+}  // namespace
+
+SDL_GPUShader* compile_shader(SDL_GPUDevice* device, const ShaderPair& shaders,
+                              SDL_GPUShaderStage stage, Uint32 num_samplers) {
+    const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device);
+
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+    const SDL_ShaderCross_ShaderStage cross_stage = stage == SDL_GPU_SHADERSTAGE_VERTEX
+        ? SDL_SHADERCROSS_SHADERSTAGE_VERTEX
+        : SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT;
+    // 入口名是 HLSL 里的函数名；MSL 那套用 kShaderEntrypoint。
+    const char* hlsl_entrypoint = stage == SDL_GPU_SHADERSTAGE_VERTEX ? "VSMain" : "PSMain";
+
     SDL_ShaderCross_HLSL_Info hlsl_info{};
-    hlsl_info.source = source;
-    hlsl_info.entrypoint = entrypoint;
+    hlsl_info.source = shaders.hlsl;
+    hlsl_info.entrypoint = hlsl_entrypoint;
     hlsl_info.include_dir = nullptr;
     hlsl_info.defines = nullptr;
-    hlsl_info.shader_stage = stage;
+    hlsl_info.shader_stage = cross_stage;
     hlsl_info.props = 0;
-
-    const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device);
 
     // D3D12：直接 DXIL，避免 SPIRV 中转后的 root signature 绑定差异。
     if ((formats & SDL_GPU_SHADERFORMAT_DXIL) != 0) {
@@ -63,11 +130,9 @@ SDL_GPUShader* compile_shader(
         SDL_GPUShaderCreateInfo create_info{};
         create_info.code_size = dxil_size;
         create_info.code = static_cast<const Uint8*>(dxil);
-        create_info.entrypoint = entrypoint;
+        create_info.entrypoint = hlsl_entrypoint;
         create_info.format = SDL_GPU_SHADERFORMAT_DXIL;
-        create_info.stage = stage == SDL_SHADERCROSS_SHADERSTAGE_VERTEX
-            ? SDL_GPU_SHADERSTAGE_VERTEX
-            : SDL_GPU_SHADERSTAGE_FRAGMENT;
+        create_info.stage = stage;
         create_info.num_samplers = num_samplers;
         SDL_GPUShader* shader = SDL_CreateGPUShader(device, &create_info);
         SDL_free(dxil);
@@ -77,37 +142,82 @@ SDL_GPUShader* compile_shader(
         return shader;
     }
 
-    size_t spirv_size = 0;
-    void* spirv = SDL_ShaderCross_CompileSPIRVFromHLSL(&hlsl_info, &spirv_size);
-    if (spirv == nullptr) {
-        std::fprintf(stderr, "[emulator-cxx] shadercross: SPIRV 编译失败: %s\n", SDL_GetError());
-        return nullptr;
-    }
+    if ((formats & SDL_GPU_SHADERFORMAT_SPIRV) != 0) {
+        size_t spirv_size = 0;
+        void* spirv = SDL_ShaderCross_CompileSPIRVFromHLSL(&hlsl_info, &spirv_size);
+        if (spirv == nullptr) {
+            std::fprintf(stderr, "[emulator-cxx] shadercross: SPIRV 编译失败: %s\n", SDL_GetError());
+            return nullptr;
+        }
 
-    auto* metadata = SDL_ShaderCross_ReflectGraphicsSPIRV(
-        static_cast<const Uint8*>(spirv), spirv_size, 0);
-    if (metadata == nullptr) {
-        std::fprintf(stderr, "[emulator-cxx] shadercross: 反射失败: %s\n", SDL_GetError());
+        auto* metadata = SDL_ShaderCross_ReflectGraphicsSPIRV(
+            static_cast<const Uint8*>(spirv), spirv_size, 0);
+        if (metadata == nullptr) {
+            std::fprintf(stderr, "[emulator-cxx] shadercross: 反射失败: %s\n", SDL_GetError());
+            SDL_free(spirv);
+            return nullptr;
+        }
+
+        SDL_ShaderCross_SPIRV_Info info{
+            static_cast<const Uint8*>(spirv),
+            spirv_size,
+            hlsl_entrypoint,
+            cross_stage,
+            0,
+        };
+        SDL_GPUShader* shader = SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
+            device, &info, &metadata->resource_info, 0);
+        SDL_free(metadata);
         SDL_free(spirv);
-        return nullptr;
+        if (shader == nullptr) {
+            std::fprintf(stderr, "[emulator-cxx] shadercross: GPU shader 创建失败: %s\n", SDL_GetError());
+        }
+        return shader;
+    }
+#else
+    (void)shaders.hlsl;  // 没有 shadercross ⇒ HLSL 这条路不存在（只剩 MSL）
+#endif
+
+    // Metal：MSL 是**源码**，Metal 自己在运行时编译（macOS 10.14+ 就能用；
+    // METALLIB 那条要 macOS 14+，所以这里优先 MSL）。
+    if ((formats & SDL_GPU_SHADERFORMAT_MSL) != 0) {
+        SDL_GPUShaderCreateInfo create_info{};
+        create_info.code_size = std::strlen(shaders.msl);
+        create_info.code = reinterpret_cast<const Uint8*>(shaders.msl);
+        create_info.entrypoint = kShaderEntrypoint;
+        create_info.format = SDL_GPU_SHADERFORMAT_MSL;
+        create_info.stage = stage;
+        create_info.num_samplers = num_samplers;
+        SDL_GPUShader* shader = SDL_CreateGPUShader(device, &create_info);
+        if (shader == nullptr) {
+            std::fprintf(stderr, "[emulator-cxx] MSL shader 创建失败: %s\n", SDL_GetError());
+        }
+        return shader;
     }
 
-    SDL_ShaderCross_SPIRV_Info info{
-        static_cast<const Uint8*>(spirv),
-        spirv_size,
-        entrypoint,
-        stage,
-        0,
-    };
-    SDL_GPUShader* shader = SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
-        device, &info, &metadata->resource_info, 0);
-    SDL_free(metadata);
-    SDL_free(spirv);
-    if (shader == nullptr) {
-        std::fprintf(stderr, "[emulator-cxx] shadercross: GPU shader 创建失败: %s\n", SDL_GetError());
-    }
-    return shader;
+    std::fprintf(stderr,
+                 "[emulator-cxx] 这台设备的着色器格式无法满足（formats=0x%X）："
+                 "需要 DXIL / SPIR-V（配 shadercross）或 MSL（Metal）。\n",
+                 static_cast<unsigned>(formats));
+    return nullptr;
 }
+
+bool init_shader_toolchain() {
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+    if (!SDL_ShaderCross_Init()) {
+        log_sdl_error("SDL_ShaderCross_Init");
+        return false;
+    }
+#endif
+    return true;
+}
+
+void quit_shader_toolchain() {
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+    SDL_ShaderCross_Quit();
+#endif
+}
+
 bool create_quad_pipeline(
     SDL_GPUDevice* device,
     SDL_GPUTextureFormat target_format,
@@ -115,10 +225,10 @@ bool create_quad_pipeline(
     SDL_GPUBlendFactor src_factor,
     SDL_GPUBlendFactor dst_factor,
     QuadPipeline& out) {
-    SDL_GPUShader* vertex = compile_shader(
-        device, kVertexShader, "VSMain", SDL_SHADERCROSS_SHADERSTAGE_VERTEX, 0);
-    SDL_GPUShader* fragment = compile_shader(
-        device, kFragmentShader, "PSMain", SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT, 1);
+    const ShaderPair vertex_source{kQuadHlslVertex, kQuadMslVertex};
+    const ShaderPair fragment_source{kQuadHlslFragment, kQuadMslFragment};
+    SDL_GPUShader* vertex = compile_shader(device, vertex_source, SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* fragment = compile_shader(device, fragment_source, SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     if (vertex == nullptr || fragment == nullptr) {
         if (vertex != nullptr) SDL_ReleaseGPUShader(device, vertex);
         if (fragment != nullptr) SDL_ReleaseGPUShader(device, fragment);
@@ -315,10 +425,5 @@ bool draw_quad(SDL_GPUCommandBuffer* command, SDL_GPUTexture* target, const Quad
     SDL_EndGPURenderPass(pass);
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// 场景 GPU 渲染（绘制项 / 4 顶点网格）
-
-#endif
 
 }  // namespace app

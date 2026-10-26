@@ -15,6 +15,17 @@ option(EMULATOR_CXX_WITH_SHADER "Link SDL_shadercross (vcpkg feature: shader)" O
 option(EMULATOR_CXX_WITH_TEXT "Link FreeType/HarfBuzz (vcpkg feature: text)" OFF)
 option(EMULATOR_CXX_WITH_VIDEO "Link FFmpeg (vcpkg feature: video)" OFF)
 
+# macOS **不需要** shadercross：Metal 后端收 MSL **源码**（`SDL_GPU_SHADERFORMAT_MSL`），
+# 由 Metal 自己在运行时编译，所以本仓在 macOS 上直接喂 MSL（见 src/gpu_quad.cpp 顶部）。
+# 反过来说 shadercross 在 macOS 上装不上：它依赖 directx-dxc，而那个 port 只支持 windows / linux-x64。
+# ⇒ 打开开关时给一句人话，而不是让 find_package 抛一句难懂的错。
+if(APPLE AND EMULATOR_CXX_WITH_SHADER)
+    message(WARNING
+        "macOS 走 MSL 源（Metal 运行时编译），不需要 shadercross；"
+        "已忽略 EMULATOR_CXX_WITH_SHADER（sdl3-shadercross 依赖 directx-dxc，只在 windows / linux-x64 有）。")
+    set(EMULATOR_CXX_WITH_SHADER OFF)
+endif()
+
 # vcpkg 通过 toolchain 注入前缀；这里只做显式检查，缺依赖时给出可读的失败信息。
 if(NOT DEFINED VCPKG_TARGET_TRIPLET AND NOT DEFINED ENV{VCPKG_ROOT})
     message(WARNING
@@ -84,6 +95,10 @@ target_link_libraries(emulator-core-selftest PRIVATE emulator-core)
 # 默认 1 MiB 栈在夹具变多之后会撞上（0xC00000FD）。这是**测试**的显式预算，不是产品设置。
 if(WIN32)
     target_link_options(emulator-core-selftest PRIVATE "/STACK:8388608")
+elseif(APPLE)
+    # ★ ld64 不认 GNU ld 的 `-z`（实测 `ld: unknown options: -z`）；macOS 的写法是 `-stack_size`。
+    # 主线程在 macOS 上默认就是 8 MiB，这里只是把预算**钉住**，不靠平台默认值。
+    target_link_options(emulator-core-selftest PRIVATE "-Wl,-stack_size,0x800000")
 else()
     target_link_options(emulator-core-selftest PRIVATE "-Wl,-z,stack-size=8388608")
 endif()

@@ -2,6 +2,9 @@
 //
 // ★ 绘制顺序（含同键平键序）是引擎语义，见 scene_raster 与 CORE-SCENE-DRAW-ORDER；
 //   这里按同一顺序产出 GPU 顶点，纹理按 `TextureRecord::revision` 缓存。
+// ★ 着色器两套源（HLSL / MSL）的来由见 `gpu_quad.cpp` 顶部：Windows 走 DXIL、Linux 走
+//   SPIR-V（都由 shadercross 从 HLSL 编），macOS 走 MSL（Metal 自己编译源码，不需要 shadercross）。
+//   顶点属性 0/1/2 = position / uv / color，与下面 `attributes[]` 的 location 一一对应。
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
 
@@ -17,9 +20,9 @@
 #include "core/scene_raster.h"
 namespace app {
 
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+namespace {
 
-constexpr const char* kSceneVertexShader = R"(
+constexpr const char* kSceneHlslVertex = R"(
 struct VSInput {
     float2 position : TEXCOORD0;
     float2 uv : TEXCOORD1;
@@ -39,7 +42,7 @@ VSOutput VSMain(VSInput input) {
 }
 )";
 
-constexpr const char* kSceneFragmentShader = R"(
+constexpr const char* kSceneHlslFragment = R"(
 Texture2D tex : register(t0, space2);
 SamplerState samp : register(s0, space2);
 float4 PSMain(float2 uv : TEXCOORD0, float4 color : TEXCOORD1) : SV_Target {
@@ -47,11 +50,54 @@ float4 PSMain(float2 uv : TEXCOORD0, float4 color : TEXCOORD1) : SV_Target {
 }
 )";
 
+constexpr const char* kSceneMslVertex = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSInput {
+    float2 position [[attribute(0)]];
+    float2 uv       [[attribute(1)]];
+    float4 color    [[attribute(2)]];
+};
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv       [[user(locn0)]];
+    float4 color    [[user(locn1)]];
+};
+
+vertex VSOutput main0(VSInput input [[stage_in]]) {
+    VSOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.color = input.color;
+    return output;
+}
+)";
+
+constexpr const char* kSceneMslFragment = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct PSInput {
+    float2 uv    [[user(locn0)]];
+    float4 color [[user(locn1)]];
+};
+
+fragment float4 main0(PSInput input [[stage_in]],
+                      texture2d<float> tex [[texture(0)]],
+                      sampler samp [[sampler(0)]]) {
+    return tex.sample(samp, input.uv) * input.color;
+}
+)";
+
+}  // namespace
+
 bool create_scene_pipeline(SDL_GPUDevice* device, SDL_GPUTextureFormat format, ScenePipeline& out) {
-    SDL_GPUShader* vertex = compile_shader(
-        device, kSceneVertexShader, "VSMain", SDL_SHADERCROSS_SHADERSTAGE_VERTEX, 0);
-    SDL_GPUShader* fragment = compile_shader(
-        device, kSceneFragmentShader, "PSMain", SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT, 1);
+    const ShaderPair vertex_source{kSceneHlslVertex, kSceneMslVertex};
+    const ShaderPair fragment_source{kSceneHlslFragment, kSceneMslFragment};
+    SDL_GPUShader* vertex = compile_shader(device, vertex_source, SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* fragment = compile_shader(device, fragment_source, SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     if (vertex == nullptr || fragment == nullptr) {
         if (vertex != nullptr) SDL_ReleaseGPUShader(device, vertex);
         if (fragment != nullptr) SDL_ReleaseGPUShader(device, fragment);
@@ -396,8 +442,5 @@ bool render_scene_gpu_to_bmp(SDL_GPUDevice* device, const core::Machine& machine
     destroy_scene_pipeline(device, pipeline);
     return ok;
 }
-
-
-#endif
 
 }  // namespace app

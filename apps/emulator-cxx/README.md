@@ -22,8 +22,8 @@ apps/emulator-cxx/
   third_party/pl_mpeg/      影片解码（vendored 单文件，来源与为什么见该目录 README）
   src/main.cpp              **只有 CLI 解析与分派**
   src/app.h                 宿主内部 API（常量 / 小类型 / 跨 TU 函数；不是 core、不是公共库）
-  src/gpu_device.cpp        SDL_GPU 设备 / 读回 / 纹理上传
-  src/gpu_quad.cpp          贴图四边形（软件回退 / 冒烟用）
+  src/gpu_device.cpp        SDL_GPU 设备 / 读回 / 纹理上传 / 着色器路径判定
+  src/gpu_quad.cpp          贴图四边形（冒烟 / 兜底）+ 着色器源（HLSL + MSL）与编译分派
   src/gpu_scene.cpp         场景批次：顶点构建 · 纹理按 revision 缓存 · 离屏导出
   src/smoke.cpp             `--smoke` 的离屏自检（测试，不是产品路径）
   src/boot.cpp              boot 流程（根脚本 → LOGO → 影片 → TITLE）与单 AGF 解码
@@ -36,12 +36,12 @@ apps/emulator-cxx/
 ## 依赖（vcpkg submodule + manifest）
 
 vcpkg 以 **git submodule** 固定在 `apps/emulator-cxx/vcpkg`；依赖由同目录的
-`vcpkg.json` 声明（manifest mode）。默认装 `sdl3`、`nlohmann-json`，并开启
-`shader` + `text` 两个 feature。
+`vcpkg.json` 声明（manifest mode）。基础依赖是 `sdl3`、`nlohmann-json`；
+Windows 预设再开 `shader` + `text` 两个 feature，macOS 只开 `text`（原因见下一节）。
 
 | feature | 依赖 | 用途 |
 |---|---|---|
-| `shader` | `sdl3-shadercross` | HLSL → DXIL/SPIR-V（默认开启） |
+| `shader` | `sdl3-shadercross` | HLSL → DXIL/SPIR-V（Windows/Linux 默认开启；macOS 不需要，见下节） |
 | `text` | `freetype` | 字形光栅化；Shift-JIS 用平台代码页转换（Windows `MultiByteToWideChar(932)`，其它平台系统 iconv）（默认开启） |
 | `renderer` | `bgfx` | 2D 渲染后端（可选） |
 | `video` | `ffmpeg` | 影片解码（可选、当前未用；实际走 vendored pl_mpeg） |
@@ -53,6 +53,30 @@ git submodule update --init --recursive
 .\apps\emulator-cxx\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 ```
 
+## 着色器与平台路径（★ 三个平台都走 GPU）
+
+SDL_GPU 的后端各认各的着色器格式，本仓的搭配是：
+
+| 平台 | 后端 | 着色器格式 | 从哪来 |
+|---|---|---|---|
+| Windows | D3D12 | DXIL | HLSL →（运行时）`SDL_shadercross` |
+| Linux | Vulkan | SPIR-V | 同一份 HLSL →（运行时）`SDL_shadercross` |
+| macOS | Metal | MSL | MSL **源码文本**，由 Metal 运行时编译（不用 shadercross） |
+
+为什么 macOS 不需要 `shader` feature：`SDL_GPU_SHADERFORMAT_MSL` 收的是**源码**，
+Metal 后端自己 `newLibraryWithSource:` 编译它；而 `sdl3-shadercross` 依赖 `directx-dxc`，
+那个 vcpkg port 的 supports 只有 `windows | linux-x64` ⇒ 在 macOS 上装不上，也没必要装。
+（这也是 SDL 生态的标准做法：设备支持 MSL 就发 MSL 源码。）
+
+⇒ 每条管线有**两套源**（HLSL + MSL），落在 `src/gpu_quad.cpp` 与 `src/gpu_scene.cpp`，
+`compile_shader()` 按 `SDL_GetGPUShaderFormats(device)` 现场挑：
+**改一个管线要同时改两份源**（两份描述同一个管线，不同步就会两个平台画出不一样的东西）。
+MSL 是**手写**的（不是生成物）：两份源并排放在同一个文件里，就是为了"改一个时另一个就在眼前"。
+骨架照 `SDL_shadercross` 的输出写（入口 `main0`、varying `[[user(locnN)]]`、
+纹理 `[[texture(0)]]` / 采样器 `[[sampler(0)]]`、顶点属性 `[[attribute(n)]]` 与
+vertex attribute location 一一对应）⇒ 将来若改成"用 shadercross CLI 在 Windows 上把 HLSL
+生成成 MSL 再提交"的做法，调用点一个字都不用改。
+
 ## 构建（Windows）
 
 本机 Visual Studio 18 的 `cl.exe` 在 CMake 探测阶段会报
@@ -63,6 +87,14 @@ git submodule update --init --recursive
 cd apps\emulator-cxx
 cmake --preset windows-x64
 cmake --build --preset windows-x64
+```
+
+macOS / Linux 用同一份 manifest，preset 已按平台选好 feature（macOS 只有 `text`）：
+
+```bash
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64
+ctest --test-dir out --output-on-failure
 ```
 
 依赖 feature 打开方式：
@@ -179,9 +211,11 @@ ctest --test-dir out\build\windows-x64 --output-on-failure
 3. `SDL_SubmitGPUCommandBufferAndAcquireFence` 等待完成；
 4. `SDL_DownloadFromGPUTexture` 读回并断言中心像素；
 5. 2×2 纹理 upload → download 往返断言；
-6. 2×2 纹理四边形：alpha 混合与 reverse-subtract 混合，各自读回断言；
-7. shadercross 编译 HLSL 为 DXIL 并创建 shader 对象；
-8. 写 `emulator-cxx-smoke.bmp`。
+6. 2×2 纹理四边形：alpha 混合与 reverse-subtract 混合，各自读回断言
+   （混合是 fixed-function，所以三个平台该给出同一组像素）；
+7. 四边形 / 场景两条 pipeline 各按 RGBA8（离屏）与 BGRA8（呈现用的 swapchain 格式）建一遍；
+8. 打印本次实际走的着色器路径（`shader=dxil|spirv|msl`）；
+9. 写 `emulator-cxx-smoke.bmp`。
 
 它不依赖窗口合成器，因此是后续渲染回归的确定性基线。
 
@@ -191,9 +225,9 @@ ctest --test-dir out\build\windows-x64 --output-on-failure
 - SDL3 窗口创建；
 - SDL_GPU 设备 / swapchain / 显式 present；
 - 离屏 clear、GPU 命令提交、download 读回与像素断言；
-- 纹理四边形：alpha / reverse-subtract 混合（HLSL sampler 走 SDL 约定的 `space2`）；
+- 纹理四边形：alpha / reverse-subtract 混合（HLSL sampler 走 SDL 约定的 `space2`，MSL 走 `[[texture(0)]]` / `[[sampler(0)]]`）；
 - 2×2 纹理 upload/download 往返；
-- HLSL → DXIL 的 shadercross 编译；
+- HLSL → DXIL 的 shadercross 编译（Windows / Linux）与 MSL 源文本直编（macOS）；
 - 程序不依赖 Electron / Chromium / WebGL。
 
 下一步在 `renderer` feature 打开后接入 bgfx：

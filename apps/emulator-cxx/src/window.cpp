@@ -84,11 +84,9 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
                               SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, pipeline)) {
         return 1;
     }
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
     ScenePipeline scene_pipeline;
     const bool scene_gpu_ok = create_scene_pipeline(device, swapchain_format, scene_pipeline);
     SceneTextureCache scene_cache;
-#endif
     machine.consume_frame_step();  // 丢掉预跑期留下的请求
     // 宿主输入：键盘 / 鼠标（**不接摇杆**）。三者都只在脚本执行到对应 opcode 时才被取用：
     // `0xff` 采样输入字、`0x109` 光标、`0x108` 按钮位图、`0x2fc` 取一条事件、`0xcc`/`0xcd` 鼠标回调。
@@ -143,7 +141,7 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
                                       static_cast<float>(window_height));
         return true;
     });
-    machine.set_mouse_button_source([window](std::int32_t& mask) -> bool {
+    machine.set_mouse_button_source([](std::int32_t& mask) -> bool {
         if (!SDL_HasMouse()) return false;
         float mouse_x = 0.0f;
         float mouse_y = 0.0f;
@@ -250,7 +248,6 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         idle_batches = 0;
 
         bool presented = false;
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
         if (scene_gpu_ok && machine.scene_commands().empty()) {
             preload_scene_textures(device, scene_cache, machine);
             SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device);
@@ -271,7 +268,6 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
             machine.end_render();  // 清脏 + 命令表生命周期（GPU 路径没有走 rasterize_scene）
             presented = true;
         }
-#endif
         if (!presented) {
             // 命令档 / 文字等仍由软件 oracle 合成；GPU 场景路径覆盖绘制项 + 4 顶点网格。
             canvas = core::rasterize_scene(machine, static_cast<std::uint32_t>(width),
@@ -294,10 +290,8 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         ++frame;
         if (max_frames > 0 && static_cast<int>(frame) >= max_frames) break;
     }
-#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
     release_scene_textures(device, scene_cache);
     destroy_scene_pipeline(device, scene_pipeline);
-#endif
     destroy_quad_pipeline(device, pipeline);
     SDL_ReleaseWindowFromGPUDevice(device, window);
     std::size_t windows = 0;

@@ -9,6 +9,6 @@
   },
   "cmake.sourceDirectory": "E:/Projects/amayui-re/apps/emulator-cxx",
   "clangd.arguments": [
-    "--compile-commands-dir=${workspaceFolder}/apps/emulator-cxx/out/build/windows-x64"
+    "--compile-commands-dir=${workspaceFolder}/apps/emulator-cxx/out"
   ]
 }

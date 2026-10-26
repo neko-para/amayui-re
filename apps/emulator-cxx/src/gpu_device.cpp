@@ -12,11 +12,24 @@ void log_sdl_error(const char* what) {
 }
 
 SDL_GPUDevice* create_gpu_device() {
+    // 三个格式都要请求：DXIL（D3D12）/ SPIR-V（Vulkan）/ MSL（Metal）。
+    // 注意把 MSL 也列上 —— macOS 的 Metal 后端只认 MSL（+ METALLIB），漏了它整台机器就拿不到设备。
     const SDL_GPUShaderFormat formats =
         SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_MSL;
     SDL_GPUDevice* device = SDL_CreateGPUDevice(formats, true, nullptr);
     if (device == nullptr) log_sdl_error("SDL_CreateGPUDevice");
     return device;
+}
+
+const char* shader_backend_name(SDL_GPUDevice* device) {
+    const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device);
+    // 顺序与 compile_shader() 的分派一致：先 DXIL、再 SPIR-V、最后 MSL。
+#ifdef EMULATOR_CXX_HAVE_SHADERCROSS
+    if ((formats & SDL_GPU_SHADERFORMAT_DXIL) != 0) return "dxil";
+    if ((formats & SDL_GPU_SHADERFORMAT_SPIRV) != 0) return "spirv";
+#endif
+    if ((formats & SDL_GPU_SHADERFORMAT_MSL) != 0) return "msl";
+    return "unsupported";
 }
 
 Readback readback_texture(SDL_GPUDevice* device, SDL_GPUTexture* texture, int width, int height) {
