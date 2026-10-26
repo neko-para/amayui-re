@@ -30,29 +30,36 @@
 - 独立复审指出 6 条矛盾 + 1 个真缺口（暂停 × 已置影片位），已全部收口。
 
 ### ② 键盘 + 鼠标接入（不接摇杆）
-- `window.cpp` 的 `kKeyBits` **宿主键位表**（规范明说物理键映射属平台边界 ⇒ 不进 spec）；SDL 键盘 → 输入字（`0xff` 采样）、鼠标 → 客户区光标（`0x109`）、按钮位图（`0x108`，位 0 左 / 位 1 右）、按钮按下/抬起与滚轮 → 事件队列（`0x2fc`）；`0xcc`/`0xcd` 回调按时间闸派发（`elapsed >= interval`）。
-- 只在窗口路径生效；`--footprint` / `--trace` / `--render-*` 无窗口 ⇒ 无输入（`0x109` 写 −100000、`0x108` 写 0、`0x2fc` 恒"没有事件"）。
-- **实测边界**（500k 步到 TITLE）：输入环在轮询鼠标 —— `0x109` 9133、`0x2fc` 9132、`0x108` 9132、`0x100` 9132 次；**不执行 `0xff` / `0xcc` / `0xcd`** ⇒ 键盘位在 TITLE 上不会写进输入字（`input_word_` 恒 0），键盘目前只是宿主侧接通、脚本未使用；**TITLE 的鼠标是轮询（不是回调）**。
-- ⚠ **未解决**：实测在 TITLE 里 hover 无反应（预期 TITLE 脚本自己读光标做 hover 特效）——正在查是"光标源在窗口路径返回不可用 / 坐标空间不对"还是"脚本另有门"。
+- `window.cpp` 的 `kKeyBits` **宿主键位表**（规范明说物理键映射属平台边界 ⇒ 不进 spec）；SDL 键盘 → 输入字（`0xff` 采样）、鼠标 → 客户区光标（`0x109`）、按钮位图（`0x108`，SDL 左右键归约到引擎位 0/1）、`0xcc`/`0xcd` 回调按时间闸派发（`elapsed >= interval`）。
+- **实测边界（600k 步到 TITLE）**：`0xcc` 1 次、`0xcd` 11405 次、`0x109` 11406 次、`0x2fc` 11405 次、`0x108` 11405 次、`0xff`/`0x100` 各 11405 次 ⇒ **回调链是活的**；headless 的 `0x12e` 为 0 只是因为没有光标源、坐标没变化，不是“脚本没走回调”。
+- **hover 已修**（第三十二批）：`0x12e` 命中查找已写 spec 并在 C++ 实现；`0xcc/0xcd` 身份、`0x109` 哨兵、`0x108` 右键位同批订正。窗口路径的“光标在客户区内”仍需真机点一次确认（代码路径已改）。
 
 ### ③ 过滤条件内缺失指令 → 0
 - 对照 `apps/emulator-new` 的 `HANDLERS` 表机械核对：**202 条 JS handler ↔ 203 个 C++ case，missing 0**。
 - 本阶段补的批次：17 条 TITLE 路径 → 24 条（帧/本地块/标志/数值/场景读回 + 暂停门 + `0x23c`）→ 3D setter 2 条 + 按住派发族 5 条 → **memflip `0x6d`（两组 bank）** + **存档族 7 条**（`SaveHost` 三态读宿主边界、`.STH` 的 BMP 容器）。
 - 存档族的三条硬口径（照 spec，不照参考实现）：`0x19e` 成功 = **0**；`0x1a1` 打开成功后**无条件**重编码全局整型池且**成功不写 op1**；`0x1af` **打不开优先于表面门**。
 
+## 第三十二批 · 2026-10-26（hover / 输入契约）
+
+- **spec**：新增 `CORE-INPUT-HIT-TEST-12E`；订正 `CORE-INPUT-CALLBACK-REGISTER` / `-PUMP`（脚本身份，不是深度）、`-MOUSE-POS`（哨兵只在输入停用；出窗写真实坐标）、`-MOUSE-BUTTON`（引擎位 0/1 固定，交换只换内容）；`GAP-OPS-0100-01FF` 移出 `0x12e`。
+- **C++**：`op_12e` 实现；`mouse_owner_` 改 `frame.local_depth`；窗口光标不再把“出客户区”当哨兵；SDL 右键重映射到引擎位 1；selftest 覆盖命中 / 未命中 / `start+1` / `count=0` / 同址跳过（同址门已做变异验证）。
+- **emulator-new**：同步 `0x12e` 与 owner 语义（参考实现不再断言 stub）。
+- **需求**：`REQ-01M5VBGREC7T3CC7H3QCTV2877`（hover，已收口）、`REQ-01M5VBGG3YTDGKBD339YD6HF17`（P1，已收口）、`REQ-01M5VBVGWE7ZQN0K1EK936M5TM`（P2，open：`0x2fc` 触点 / 键总数 7 / `0x101` 采样 / `0x202-0x203` 归一化）。
+
 ## 未做 / 待核
 
-- **摇杆**（范围外）；键盘在 TITLE 路径上未被脚本使用（见上）。
+- **摇杆**（范围外）；TITLE 的键盘路径已采样并会派发“无按键”表项，实际按键按下路径未做真机验证。
 - `0x19e` 的写侧内容构造与 `0x1a1` 的整档读回 —— 属 `FMT-SAVE-CODEC` / `FMT-SAVE-ENVELOPE` 等 gap 单的 seam；没注入就**响亮失败**（`save-codec-missing` / `save-restore-unmodeled`）。
 - 存档族的实现选择（已登记）：标题串来源（`set_save_identity`，空串 = 不校验）、写盘失败的 op1（用 1 + 诊断）、`0x1a1` 头坏时 op1 不写、整池重编码在 memflip 下按当前 bank、1/4/8/32bpp 缩略图解码无样本。
-- spec 侧仍有 **24 条残差 + 5 条 `unhandled`**（`pnpm tools spec report`）。
+- spec 侧的残差 / 未成篇计数以 `pnpm tools spec report` 为准；P2 输入契约仍是 open。
 
 ## 当前门禁
 
 ```bash
-ctest --test-dir apps/emulator-cxx/out/build/windows-x64 --output-on-failure  # 5/5
-pnpm test                 # 1071 pass / 0 fail
-pnpm test:mutation        # 363/363 按预期变红
+ctest --test-dir apps/emulator-cxx/out --output-on-failure  # macOS: 2/2（Windows preset 仍走 out/build/windows-x64）
+pnpm test                 # 1073 pass / 0 fail
+pnpm typecheck            # 六个工程全绿
 pnpm tools spec validate  # 13/13 全绿，未登记 0
 pnpm tools requirements validate # 6/6 全绿
+pnpm tools ledger validate # 8/8 全绿
 ```

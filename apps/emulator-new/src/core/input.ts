@@ -38,8 +38,8 @@ export interface MouseCallbackState {
   last: number;
   /** 登记的脚本位置（dword 下标）；-1 = 取消 */
   target: number;
-  /** 登记时的当前帧调用层数 */
-  depth: number;
+  /** 登记时当前帧的脚本身份（frame.localDepth；打开脚本用的统一文件 id） */
+  owner: number;
 }
 
 /**
@@ -101,7 +101,7 @@ export function initialInputState(): InputState {
     keyTotal: 0,
     keyTotalEstablished: false,
     mode: 0,
-    mouse: { interval: 1, last: 0, target: -1, depth: -1 },
+    mouse: { interval: 1, last: 0, target: -1, owner: -1 },
     samples: 0,
     mouseDispatches: 0,
     keyDispatches: 0,

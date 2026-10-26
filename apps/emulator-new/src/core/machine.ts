@@ -1275,25 +1275,6 @@ export class Machine {
     }
   }
 
-  /**
-   * 当前帧的**调用层数**（根帧 0；每沿 `parent` 走一步 +1）。
-   * ★ `0xcc` 登记时记它、`0xcd` 派发时校验它；本层只要求两处取同一个量。
-   */
-  frameDepth(): number {
-    let depth = 0;
-    let slot = this.cur;
-    let guard = 0;
-    while (slot >= 0) {
-      const rec = this.slots[slot];
-      if (!rec || rec.parent < 0) break;
-      depth += 1;
-      slot = rec.parent;
-      guard += 1;
-      if (guard > FRAME_SLOT_COUNT) throw new Error('frame-depth-cycle');
-    }
-    return depth;
-  }
-
 
   /**
    * 门之前的影片对象表服务（CORE-VM-MOVIE）。

@@ -5,7 +5,7 @@
  * 覆盖：
  * - `CORE-INPUT-WORD`：0xfe 键总数（无符号上界）/ 0xff 清字 + 采样 + 游标/上限
  * - `CORE-INPUT-CALLBACK-REGISTER`：0xcc 鼠标回调登记 / 0xfb 按键回调登记（0..31）
- * - `CORE-INPUT-MOUSE-CALLBACK-PUMP`：0xcd 时间闸 / 返回位置 / 深度校验 / 目标 -1
+ * - `CORE-INPUT-MOUSE-CALLBACK-PUMP`：0xcd 时间闸 / 返回位置 / 脚本身份校验 / 目标 -1
  * - `CORE-INPUT-KEY-DISPATCH`：0x100 无按键表项 / 逐位置位 / 当前指令重派发 / 未登记放弃
  * - `CORE-INPUT-MOUSE-EVENT` / `-POS` / `-BUTTON`：0x2fc / 0x109 / 0x108
  * - `CORE-INPUT-MODE-WORD`：0x24e
@@ -35,7 +35,7 @@ function script(instrs) {
 }
 
 function machineFor(instrs, opts = {}) {
-  return new Machine({ body: script(instrs), table, key: KEY, tickMs: 1, ...opts });
+  return new Machine({ body: script(instrs), table, key: KEY, tickMs: 1, rootId: 0, ...opts });
 }
 
 /** 一个可控的输入后端；缺省"没有设备" */
@@ -75,9 +75,9 @@ test('★ 回调登记：0xcc / 0xfb', async () => {
   const m = machineFor([[0xcc, [[0, 16], [0, 2]]], [0xfb, [[0, 4], [0, 7]]]]);
   await m.run();
   assert.deepEqual(
-    { interval: m.input.mouse.interval, target: m.input.mouse.target, depth: m.input.mouse.depth, last: m.input.mouse.last },
-    { interval: 16, target: 2, depth: 0, last: 0 },
-    '0xcc：间隔 / 目标 / 根帧层数 / 上次时刻',
+    { interval: m.input.mouse.interval, target: m.input.mouse.target, owner: m.input.mouse.owner, last: m.input.mouse.last },
+    { interval: 16, target: 2, owner: 0, last: 0 },
+    '0xcc：间隔 / 目标 / 根帧身份 / 上次时刻',
   );
   assert.equal(m.frame.keyJumps.get(4), 7, '0xfb：键 4 → 位置 7');
 
@@ -94,7 +94,7 @@ test('★ 定时派发鼠标回调：0xcd', async () => {
   // 位置 0 = 0xcd，位置 1 = 0x2 exit，位置 2 = 0x5 ret（目标）
   const body = [[0xcd, []], [0x2, []], [0x5, []]];
   const m = machineFor(body);
-  m.input.mouse = { interval: 10, last: 0, target: 2, depth: 0 };
+  m.input.mouse = { interval: 10, last: 0, target: 2, owner: 0 };
   m.now = 10;
   const r = await m.run();
   assert.equal(m.input.mouseDispatches, 1, '间隔到 ⇒ 派发一次');
@@ -103,23 +103,23 @@ test('★ 定时派发鼠标回调：0xcd', async () => {
   assert.equal(m.input.mouse.last, 10, '上次派发时刻更新');
 
   const early = machineFor(body);
-  early.input.mouse = { interval: 10, last: 0, target: 2, depth: 0 };
+  early.input.mouse = { interval: 10, last: 0, target: 2, owner: 0 };
   early.now = 5;
   await early.run();
   assert.equal(early.input.mouseDispatches, 0, '间隔未到 ⇒ 只前进一条');
   assert.equal(early.frame.retStack.length, 0, '不压返回位置');
 
   const cancel = machineFor(body);
-  cancel.input.mouse = { interval: 0, last: 0, target: -1, depth: 0 };
+  cancel.input.mouse = { interval: 0, last: 0, target: -1, owner: 0 };
   cancel.now = 1;
   await cancel.run();
   assert.equal(cancel.input.mouseDispatches, 0, '目标 -1 ⇒ 不派发');
   assert.equal(cancel.frame.retStack.length, 0, '压入的返回位置被撤销');
 
   const deep = machineFor(body);
-  deep.input.mouse = { interval: 0, last: 0, target: 2, depth: 99 };
+  deep.input.mouse = { interval: 0, last: 0, target: 2, owner: 99 };
   deep.now = 1;
-  await assert.rejects(() => deep.run(), /Depth/, '注册层数不符 ⇒ 显示消息型异常');
+  await assert.rejects(() => deep.run(), /Depth/, '注册脚本身份不符 ⇒ 显示消息型异常');
 });
 
 test('★ 按键派发：0x100', async () => {
@@ -264,12 +264,33 @@ test('★ 脚本化输入解析与事件时序：CLI --input 的语法', async (
   assert.equal(host.stats().exhausted, true);
 });
 
-test('★ 鼠标命中查找：0x12e 的部分实现写 -1 + 诊断', async () => {
-  const m = machineFor([[0x12e, [[3, 1], [0, 0], [0, 0], [0, 0], [9, 3], [9, 4], [9, 5], [0, 0]]]]);
-  await m.run();
-  assert.equal(decodeInt(m.globalInt.get(1), KEY), -1, '未成篇 ⇒ 明确写"没有命中"');
-  assert.equal(m.effects.filter((e) => e.kind === 'input.hit-test.unmodeled').length, 1);
-  assert.equal(m.diagnostics.filter((d) => d.kind === 'unmodeled-input-hit-test:0x12e').length, 1, '诊断只记首次');
+test('★ 鼠标命中查找：0x12e 命中 / 起始下标 / 未命中', async () => {
+  const planeX = [0x44e, 0x3e0, 0x365, 0x2d9, 0x453];
+  const planeY = [0x126, 0x192, 0x1e5, 0x21f, 0x22a];
+  const makeHit = (start, x, y) => {
+    const m = machineFor([[0x12e, [[9, 0x3f5], [9, 1], [9, 0x3f0], [9, 0x3f1], [9, 0xcd], [9, 5], [9, 0x69], [9, 0]]]]);
+    m.frame.localInt.set(0x3f5, encodeInt(start, KEY));
+    for (let i = 0; i < 5; i += 1) {
+      for (let k = 0; k < 4; k += 1) {
+        m.frame.localInt.set(0xcd + 4 * i + k, encodeInt([0, 0x9c, 0, 0x9c][k], KEY));
+      }
+      m.frame.localInt.set(5 + i, encodeInt(planeX[i], KEY));
+      m.frame.localInt.set(0x69 + i, encodeInt(planeY[i], KEY));
+    }
+    m.frame.localInt.set(0, encodeInt(5, KEY));
+    m.frame.localInt.set(0x3f0, encodeInt(x, KEY));
+    m.frame.localInt.set(0x3f1, encodeInt(y, KEY));
+    return m;
+  };
+  const inside = makeHit(-1, 0x3c0, 0x220); // 第 2 项框内
+  await inside.run();
+  assert.equal(decodeInt(inside.frame.localInt.get(0x3f5), KEY), 2);
+  const outside = makeHit(-1, 0, 0);
+  await outside.run();
+  assert.equal(decodeInt(outside.frame.localInt.get(0x3f5), KEY), -1);
+  const skip = makeHit(2, 0x3c0, 0x220);
+  await skip.run();
+  assert.equal(decodeInt(skip.frame.localInt.get(0x3f5), KEY), -1, 'start=2 ⇒ 从第 3 项起扫');
 });
 
 test('★ 异常必须带指令位置：opcode / 偏移 / 操作数', async () => {

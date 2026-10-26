@@ -426,7 +426,7 @@ public:
     // 鼠标回调（`0xcc` / `0xcd` 的 `CORE-INPUT-MOUSE-CALLBACK-PUMP`）。
     std::int32_t mouse_interval() const { return mouse_interval_; }
     std::int32_t mouse_target() const { return mouse_target_; }
-    std::int32_t mouse_depth() const { return mouse_depth_; }
+    std::int32_t mouse_owner() const { return mouse_owner_; }
     std::uint32_t mouse_last_ms() const { return mouse_last_ms_; }
     // 本地块（`0x7b` / `0x199` / `0x7c`）：存档字 / 存档位置 / 入块深度。
     std::uint32_t local_save_word() const { return local_save_word_; }
@@ -759,8 +759,6 @@ private:
     // 平台光标 / 按钮（`0x109` / `0x108`）；空 = 设备不可用。
     CursorSource cursor_source_;
     MouseButtonSource mouse_button_source_;
-    // `0x12e` 的未建模诊断只报一次。
-    bool hit_test_reported_ = false;
     std::uint32_t input_mode_ = 0;
     std::int32_t render_target_ = -1;
     std::int32_t blend_mode_ = 0;
@@ -786,7 +784,7 @@ private:
     std::int32_t mouse_interval_ = 1;
     // 鼠标回调的登记状态（引擎级一格；`0xcc` 写、`0xcd` 读）。
     std::int32_t mouse_target_ = -1;   // 登记的脚本位置（dword 下标）；−1 = 取消
-    std::int32_t mouse_depth_ = -1;    // 登记时的当前帧号（本版用它当"调用层数"，见残差）
+    std::int32_t mouse_owner_ = -1;    // 登记时的当前帧脚本身份（frame.local_depth；见 CORE-INPUT-CALLBACK-REGISTER）
     std::uint32_t mouse_last_ms_ = 0;  // 上一次派发时刻（登记时 = 当前时刻）
     std::unordered_map<std::int32_t, std::int32_t> indirect_;
     std::unordered_map<std::uint32_t, TextureRecord> textures_;

@@ -731,6 +731,19 @@ bool check_input_devices(const core::OpcodeTable& table) {
                      cursor_machine.read_int(core::Operand{3, 1}));
         return false;
     }
+    // 光标在客户区外仍是“源可用” ⇒ 必须写真实坐标（可为负），不是 -100000。
+    core::Machine outside_machine(0x12345678u, table);
+    outside_machine.set_cursor_source([](std::int32_t& x, std::int32_t& y) {
+        x = -7;
+        y = 760;
+        return true;
+    });
+    outside_machine.load_root(cursor_script);
+    if (!outside_machine.step() || outside_machine.read_int(core::Operand{3, 0}) != -7 ||
+        outside_machine.read_int(core::Operand{3, 1}) != 760) {
+        std::fprintf(stderr, "0x109 outside-client coords must stay real\n");
+        return false;
+    }
     core::Machine no_cursor_machine(0x12345678u, table);
     no_cursor_machine.load_root(cursor_script);
     if (!no_cursor_machine.step() || no_cursor_machine.read_int(core::Operand{3, 0}) != -100000 ||
@@ -776,12 +789,13 @@ bool check_input_devices(const core::OpcodeTable& table) {
     emit_instruction(mouse_cb, 5, {});                     // 位置 10：ret → 回 7
     core::Machine pump_machine(0x12345678u, table);
     pump_machine.set_host_clock_ms(1000);
-    pump_machine.load_root(mouse_cb);
+    pump_machine.load_root(mouse_cb, 0x1234);
     if (!pump_machine.step() || pump_machine.mouse_interval() != 100 ||
-        pump_machine.mouse_target() != 9 || pump_machine.mouse_last_ms() != 1000u) {
-        std::fprintf(stderr, "0xcc registration mismatch interval=%d target=%d last=%u\n",
+        pump_machine.mouse_target() != 9 || pump_machine.mouse_owner() != 0x1234 ||
+        pump_machine.mouse_last_ms() != 1000u) {
+        std::fprintf(stderr, "0xcc registration mismatch interval=%d target=%d owner=%d last=%u\n",
                      pump_machine.mouse_interval(), pump_machine.mouse_target(),
-                     pump_machine.mouse_last_ms());
+                     pump_machine.mouse_owner(), pump_machine.mouse_last_ms());
         return false;
     }
     pump_machine.set_host_clock_ms(1050);  // 50 < 100 ⇒ 不派发
@@ -1884,25 +1898,102 @@ bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
         return false;
     }
 
-    // 0x12e：显式部分实现 ⇒ 只写 -1；第 2..8 个操作数不读（给不可读类型也不抛）；
-    // 诊断只报一次；推进格数 = 17。
-    auto hit = make_script_with_body();
-    for (int i = 0; i < 2; ++i) {
-        emit_instruction(hit, 0x12E,
-                         {{3, 1}, {8, 0}, {8, 0}, {8, 0}, {8, 0}, {8, 0}, {8, 0}, {8, 0}});
-    }
-    emit_instruction(hit, 2, {});
-    core::Machine hit_machine(0x12345678u, table);
-    hit_machine.load_root(hit);
-    if (!hit_machine.step() || hit_machine.read_int(core::Operand{3, 1}) != -1 ||
-        hit_machine.frame().ip != 68 || hit_machine.errors().size() != 1) {
-        std::fprintf(stderr, "0x12e hit-test placeholder mismatch ip=%zu errors=%zu\n",
-                     hit_machine.frame().ip, hit_machine.errors().size());
+    // 0x12e：TITLE 同形五框命中；只写第 1 个操作数，推进格数 = 17。
+    // 夹具：margin = 0、框 [0,0x9c,0,0x9c] × 5、基准平面 = TITLE 的绘制坐标。
+    const std::int32_t plane_x[5] = {0x44e, 0x3e0, 0x365, 0x2d9, 0x453};
+    const std::int32_t plane_y[5] = {0x126, 0x192, 0x1e5, 0x21f, 0x22a};
+    const auto make_hit_script = [&]() {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x12E,
+                         {{9, 0x3f5}, {9, 1}, {9, 0x3f0}, {9, 0x3f1},
+                          {9, 0xcd}, {9, 5}, {9, 0x69}, {9, 0}});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    const auto put_local = [](core::Machine& machine, std::uint32_t slot, std::int32_t value) {
+        machine.write_int(core::Operand{9, slot}, value);
+    };
+    const auto get_local = [](core::Machine& machine, std::uint32_t slot) {
+        return machine.read_int(core::Operand{9, slot});
+    };
+    const auto fill_hit = [&](core::Machine& machine, std::int32_t start, std::int32_t x,
+                              std::int32_t y) {
+        put_local(machine, 0x3f5, start);
+        for (std::int32_t slot = 1; slot <= 4; ++slot) put_local(machine, slot, 0);
+        for (int i = 0; i < 5; ++i) {
+            const auto base = 0xcd + static_cast<std::uint32_t>(i) * 4;
+            put_local(machine, base + 0, 0);
+            put_local(machine, base + 1, 0x9c);
+            put_local(machine, base + 2, 0);
+            put_local(machine, base + 3, 0x9c);
+            put_local(machine, 5 + static_cast<std::uint32_t>(i), plane_x[i]);
+            put_local(machine, 0x69 + static_cast<std::uint32_t>(i), plane_y[i]);
+        }
+        put_local(machine, 0, 5);
+        put_local(machine, 0x3f0, x);
+        put_local(machine, 0x3f1, y);
+        // 第 2..8 个操作数只读：预置哨兵，执行后必须仍是 77。
+        for (std::int32_t slot = 0x3f6; slot <= 0x3fd; ++slot) put_local(machine, slot, 77);
+    };
+    const auto hit_result = [&](std::int32_t start, std::int32_t x, std::int32_t y) {
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(make_hit_script());
+        fill_hit(machine, start, x, y);
+        if (!machine.step()) return std::int32_t{-999};
+        for (std::int32_t slot = 0x3f6; slot <= 0x3fd; ++slot) {
+            if (get_local(machine, slot) != 77) return std::int32_t{-998};
+        }
+        if (machine.frame().ip != 68) return std::int32_t{-997};
+        return get_local(machine, 0x3f5);
+    };
+    if (hit_result(-1, 0x3c0, 0x220) != 2) {
+        std::fprintf(stderr, "0x12e must hit the second box\n");
         return false;
     }
-    if (!hit_machine.step() || hit_machine.errors().size() != 1) {
-        std::fprintf(stderr, "0x12e reported the unmodeled diagnostic twice\n");
+    if (hit_result(2, 0x3c0, 0x220) != -1) {
+        std::fprintf(stderr, "0x12e must scan from start + 1\n");
         return false;
+    }
+    if (hit_result(-1, 0, 0) != -1) {
+        std::fprintf(stderr, "0x12e must miss outside every box\n");
+        return false;
+    }
+    // count = 0 ⇒ 不读框表，直接写 -1。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(make_hit_script());
+        fill_hit(machine, -1, 0x3c0, 0x220);
+        put_local(machine, 0, 0);
+        if (!machine.step() || get_local(machine, 0x3f5) != -1) {
+            std::fprintf(stderr, "0x12e count=0 must write -1\n");
+            return false;
+        }
+    }
+    // 补偿四元组与当前框记录同址 ⇒ 跳过该项（不是命中、也不终止扫描）。
+    // 下标 0 = 四元组本身（m = 0），下标 1 = 正常框；光标同时落在两者内 ⇒ 必须返回 1。
+    {
+        auto alias_script = make_script_with_body();
+        emit_instruction(alias_script, 0x12E,
+                         {{9, 0x3f5}, {9, 1}, {9, 0x3f0}, {9, 0x3f1},
+                          {9, 1}, {9, 9}, {9, 0xa}, {9, 0}});
+        emit_instruction(alias_script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(alias_script);
+        put_local(machine, 0x3f5, -1);
+        for (std::uint32_t slot = 1; slot <= 4; ++slot) put_local(machine, slot, 0);
+        put_local(machine, 5, 0);
+        put_local(machine, 6, 0x9c);
+        put_local(machine, 7, 0);
+        put_local(machine, 8, 0x9c);
+        put_local(machine, 0, 2);
+        put_local(machine, 9, 0);
+        put_local(machine, 0xa, 0);
+        put_local(machine, 0x3f0, 0);
+        put_local(machine, 0x3f1, 0);
+        if (!machine.step() || get_local(machine, 0x3f5) != 1) {
+            std::fprintf(stderr, "0x12e same-address record must be skipped\n");
+            return false;
+        }
     }
     return true;
 }

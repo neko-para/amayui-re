@@ -124,7 +124,9 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
             mouse_x = global_x - static_cast<float>(window_x);
             mouse_y = global_y - static_cast<float>(window_y);
         }
-        // 「光标不在客户区」⇒ 不可用（规范原话），两个操作数都会写 −100000。
+        // ★ 规范口径（`CORE-INPUT-MOUSE-POS`）：哨兵只由“输入轮询被停用 / 没有输入源”触发。
+        //   窗口存在时，**光标在客户区外也返回真实客户区坐标（可为负 / 超界）**；把它写成 −100000
+        //   会让脚本无法区分“出窗”与“没有输入设备”。
         const bool inside = mouse_x >= 0.0f && mouse_y >= 0.0f &&
                             mouse_x < static_cast<float>(window_width) &&
                             mouse_y < static_cast<float>(window_height);
@@ -134,7 +136,6 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
                          inside ? 1 : 0, has_mouse_focus ? 1 : 0, mouse_x, mouse_y, window_width,
                          window_height);
         }
-        if (!inside) return false;
         x = static_cast<std::int32_t>(mouse_x * static_cast<float>(width) /
                                       static_cast<float>(window_width));
         y = static_cast<std::int32_t>(mouse_y * static_cast<float>(height) /
@@ -145,8 +146,13 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         if (!SDL_HasMouse()) return false;
         float mouse_x = 0.0f;
         float mouse_y = 0.0f;
-        // SDL 的 LMASK / RMASK 恰好就是位 0 左 / 位 1 右（与 `CORE-INPUT-MOUSE-BUTTON` 同口径）。
-        mask = static_cast<std::int32_t>(SDL_GetMouseState(&mouse_x, &mouse_y));
+        // ★ 宿主映射（平台边界）：SDL 的右键是 `SDL_BUTTON_RMASK` = 1<<2，而引擎的位图是
+        //   **位 0 左 / 位 1 右**（`CORE-INPUT-MOUSE-BUTTON`）。⛔ 不能把 SDL 掩码原样传进核心：
+        //   那会让右键落在 bit2，TITLE 的 `and 3f2, 2` 永远看不到右键。
+        const auto sdl = SDL_GetMouseState(&mouse_x, &mouse_y);
+        mask = 0;
+        if ((sdl & SDL_BUTTON_LMASK) != 0) mask |= 1;
+        if ((sdl & SDL_BUTTON_RMASK) != 0) mask |= 2;
         return true;
     });
     machine.set_mouse_event_source([&mouse_events](core::Machine::MouseEvent& out) -> bool {

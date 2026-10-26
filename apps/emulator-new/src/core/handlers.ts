@@ -3312,19 +3312,19 @@ function keyRegisterFb(m: Machine, ops: Operand[]): void {
   m.frame.keyJumps.set(key, target);
 }
 
-/** `0xcc` 登记鼠标回调（CORE-INPUT-CALLBACK-REGISTER）：间隔 / 目标 / 注册层数 / 上次时刻 */
+/** `0xcc` 登记鼠标回调（CORE-INPUT-CALLBACK-REGISTER）：间隔 / 目标 / 脚本身份 / 上次时刻 */
 function mouseCallbackCc(m: Machine, ops: Operand[]): void {
   const interval = readInt(m, ops, 1) | 0;
   const target = readInt(m, ops, 2) | 0;
   m.input.mouse.interval = interval === 0 ? 1 : interval;
   m.input.mouse.target = target;
-  m.input.mouse.depth = m.frameDepth();
+  m.input.mouse.owner = m.frame.localDepth;
   m.input.mouse.last = m.now;
 }
 
 /**
  * `0xcd` 定时派发鼠标回调（CORE-INPUT-MOUSE-CALLBACK-PUMP）：
- * 时间闸（或第 27 位）→ 压返回位置（当前位置 + 1）→ 目标 -1 撤销 → 深度校验 → 跳到目标、推进格数 0。
+ * 时间闸（或第 27 位）→ 压返回位置（当前位置 + 1）→ 目标 -1 撤销 → 脚本身份校验 → 跳到目标、推进格数 0。
  */
 function mouseCallbackCd(m: Machine): void {
   m.operandCount = 1;
@@ -3337,7 +3337,8 @@ function mouseCallbackCd(m: Machine): void {
     m.frame.retStack.pop();
     return;
   }
-  if (m.frameDepth() !== m.input.mouse.depth) {
+  if (m.frame.localDepth !== m.input.mouse.owner) {
+    // 引擎异常文本把它称作 Depth；实际比较的是帧记录的脚本身份（统一文件 id）。
     throw new Error('display-message: Depth が不正です');
   }
   m.input.mouseDispatches += 1;
@@ -3539,19 +3540,43 @@ function inputResetFc(m: Machine): void {
 }
 
 /**
- * 0x12e 鼠标命中查找：**显式部分实现**。
- *
- * 完整条目表 / 偏移数组的布局还没写成 spec（audit.gaps），所以这里不猜命中，只写 **-1（没有命中）**
- * 并留一条请求记录 + 首次诊断。目的：鼠标移动不让 TITLE 停在"未实现 opcode"上；
- * 悬停 / 点击菜单的命中语义仍然缺（见 README 的未建模白名单）。
+ * 0x12e 命中查找（`CORE-INPUT-HIT-TEST-12E`）：
+ * 从 `start + 1` 起扫框表；`dx = x - planeX[i]`、`dy = y - planeY[i]`；
+ * 四项判据全 ≥ 0 ⇒ 命中项下标，否则 -1。只写第 1 个操作数。
  */
 function hitTest12e(m: Machine, ops: Operand[]): void {
-  writeInt(m, ops, 1, -1);
-  m.effects.push({ kind: 'input.hit-test.unmodeled', detail: { opcode: '0x12e' } });
-  if (!m.unmodeledSeen.has(0x12e)) {
-    m.unmodeledSeen.add(0x12e);
-    m.diagnostics.push({ kind: 'unmodeled-input-hit-test:0x12e' });
+  const start = readInt(m, ops, 1);
+  const margin = readAddress(m, ops, 2);
+  const x = readInt(m, ops, 3);
+  const y = readInt(m, ops, 4);
+  const boxes = readAddress(m, ops, 5);
+  const planeX = readAddress(m, ops, 6);
+  const planeY = readAddress(m, ops, 7);
+  const count = readInt(m, ops, 8);
+  const m0 = readIntAt(m, margin, 0);
+  const m1 = readIntAt(m, margin, 1);
+  const m2 = readIntAt(m, margin, 2);
+  const m3 = readIntAt(m, margin, 3);
+  let result = -1;
+  if (count > 0) {
+    for (let i = start + 1; i < count; i += 1) {
+      const recordWord = 4 * i;
+      // 引擎同址门：补偿四元组与当前框记录同址 ⇒ 跳过该记录（不是命中、也不是终止）。
+      if (boxes.pool === margin.pool && boxes.index + recordWord === margin.index) continue;
+      const dx = x - readIntAt(m, planeX, i);
+      const dy = y - readIntAt(m, planeY, i);
+      const s0 = readIntAt(m, boxes, recordWord + 0);
+      const s1 = readIntAt(m, boxes, recordWord + 1);
+      const s2 = readIntAt(m, boxes, recordWord + 2);
+      const s3 = readIntAt(m, boxes, recordWord + 3);
+      if (m1 + dx - s0 >= 0 && m3 + dy - s2 >= 0 && s1 - dx - m0 >= 0 && s3 - dy - m2 >= 0) {
+        result = i;
+        break;
+      }
+    }
   }
+  writeInt(m, ops, 1, result);
+  m.effects.push({ kind: 'input.hit-test', detail: { result } });
 }
 
 /** `0x2fc` 取一条鼠标事件（CORE-INPUT-MOUSE-EVENT）：没有事件时只写结果 0 */
@@ -3669,7 +3694,7 @@ function textAtoi2ec(m: Machine, ops: Operand[]): void {
  *   与 Live2D（`0x34e` 动作装载 / `0x352` 动作参数）。它们不置门位、不改帧 / 返回栈 / 输入字。
  * ★ `0x23b`（数字绘制）**已建模**：TITLE 的 `Version` 数字经它画（见 `cgDraw23b`），
  *   不再是未建模请求 —— 把它留在白名单会让版本号只剩两个小数点。
- * ★ 未列入的 gap（`0x12e` / `0x140` / `0x23d` / `0x32b`）仍然"未实现即停"。
+ * ★ 未列入的 gap（`0x140` / `0x23d` / `0x32b`）仍然"未实现即停"；`0x12e` 已按 `CORE-INPUT-HIT-TEST-12E` 建模。
  */
 const UNMODELED_SUBSYSTEM = new Map<number, { subsystem: string; why: string }>([
   [0x2c7, { subsystem: 'adv-text', why: 'SJIS 字符串工具' }],

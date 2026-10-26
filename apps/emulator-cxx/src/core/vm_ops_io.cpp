@@ -37,11 +37,11 @@ void Machine::op_c8(const Instruction& instruction) {
 void Machine::op_cc(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 登记鼠标回调（CORE-INPUT-CALLBACK-REGISTER）：间隔（0 写成 1）、目标位置、
-    // 登记时的当前帧号（本版当"调用层数"）、上次派发时刻（= 当前时刻）。
+    // 登记时的当前帧脚本身份、上次派发时刻（= 当前时刻）。
     const auto interval = read_int(ops[0]);
     mouse_interval_ = interval == 0 ? 1 : interval;
     mouse_target_ = read_int(ops[1]);
-    mouse_depth_ = static_cast<std::int32_t>(current_frame_);
+    mouse_owner_ = frame_mut().local_depth;
     mouse_last_ms_ = scene_clock_ms_;
     return;
 }
@@ -50,7 +50,7 @@ void Machine::op_cd(const Instruction& instruction) {
     (void)instruction;
     // 定时派发鼠标回调（CORE-INPUT-MOUSE-CALLBACK-PUMP）：
     // 时间闸（elapsed >= interval，含等号；或门字第 27 位）→ 压返回位置（当前位置 + 1）
-    // → 目标 −1 撤销 → 深度校验 → 跳到目标、推进格数 0。
+    // → 目标 −1 撤销 → 脚本身份校验 → 跳到目标、推进格数 0。
     Frame& f = frame_mut();
     const auto elapsed = static_cast<std::int64_t>(static_cast<std::uint32_t>(scene_clock_ms_ - mouse_last_ms_));
     const bool force = (state_flags_ & (1u << 27)) != 0;
@@ -61,8 +61,8 @@ void Machine::op_cd(const Instruction& instruction) {
         f.ret_stack.pop_back();  // 目标 −1 = 取消登记：撤销刚压的返回位置，只前进一条
         return;
     }
-    if (mouse_depth_ != static_cast<std::int32_t>(current_frame_)) {
-        throw CoreError("mouse-callback-depth-mismatch");
+    if (mouse_owner_ != frame_mut().local_depth) {
+        throw CoreError("mouse-callback-owner-mismatch");
     }
     jump_to(static_cast<std::uint32_t>(mouse_target_));
     return;
@@ -146,13 +146,50 @@ void Machine::op_100(const Instruction& instruction) {
 
 void Machine::op_12e(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 鼠标命中查找：**显式部分实现** —— 条目表 / 偏移数组的布局还没成 spec（audit gap）。
-    // 这里不猜命中，只写 -1（没有命中）；第 2…8 个操作数**不读不写**。
-    write_int(ops[0], -1);
-    if (!hit_test_reported_) {
-        hit_test_reported_ = true;
-        report_error("unmodeled-input-hit-test:0x12e");
+    // 命中查找（CORE-INPUT-HIT-TEST-12E）：第 2 / 5 / 6 / 7 个操作数是数组地址，
+    // 第 1 / 3 / 4 / 8 个按整数读。从 start+1 起扫到 count-1，命中写项下标，否则写 -1。
+    // ★ 池里的整数是编码位模式：按地址读原始 dword 后必须过 decode_int。
+    const auto start = static_cast<std::int64_t>(read_int(ops[0]));
+    const auto margin_address = address_of_operand(ops[1]);
+    const auto x = static_cast<std::int64_t>(read_int(ops[2]));
+    const auto y = static_cast<std::int64_t>(read_int(ops[3]));
+    const auto boxes_address = address_of_operand(ops[4]);
+    const auto plane_x_address = address_of_operand(ops[5]);
+    const auto plane_y_address = address_of_operand(ops[6]);
+    const auto count = static_cast<std::int64_t>(read_int(ops[7]));
+
+    const auto decode_at = [this](std::uint32_t address) {
+        return static_cast<std::int64_t>(decode_int(read_raw(address)));
+    };
+
+    // 补偿四元组（第 2 个操作数指向的四个连续整数）。
+    const auto m0 = decode_at(margin_address + 0u);
+    const auto m1 = decode_at(margin_address + 4u);
+    const auto m2 = decode_at(margin_address + 8u);
+    const auto m3 = decode_at(margin_address + 12u);
+
+    std::int32_t result = -1;
+    if (count > 0 && start + 1 < count) {
+        for (std::int64_t i = start + 1; i < count; ++i) {
+            const auto index = static_cast<std::uint32_t>(i);
+            const auto record_address = boxes_address + index * 16u;
+            // 引擎的同址门：补偿四元组与当前框记录同址 ⇒ 跳过该记录（不是命中、也不是终止）。
+            if (record_address != margin_address) {
+                const auto s0 = decode_at(record_address + 0u);
+                const auto s1 = decode_at(record_address + 4u);
+                const auto s2 = decode_at(record_address + 8u);
+                const auto s3 = decode_at(record_address + 12u);
+                const auto dx = x - decode_at(plane_x_address + index * 4u);
+                const auto dy = y - decode_at(plane_y_address + index * 4u);
+                if (m1 + dx - s0 >= 0 && m3 + dy - s2 >= 0 && s1 - dx - m0 >= 0 &&
+                    s3 - dy - m2 >= 0) {
+                    result = static_cast<std::int32_t>(i);
+                    break;
+                }
+            }
+        }
     }
+    write_int(ops[0], result);
     return;
 }
 
