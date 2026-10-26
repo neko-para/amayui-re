@@ -82,7 +82,9 @@ add_executable(emulator-cxx
     src/gpu_scene.cpp
     src/smoke.cpp
     src/boot.cpp
-    src/window.cpp)
+    src/window.cpp
+    src/input_script.cpp
+    src/play_headless.cpp)
 target_link_libraries(emulator-cxx PRIVATE emulator-core)
 
 enable_testing()
@@ -127,6 +129,28 @@ if(EMULATOR_CXX_INSTALL_DIR)
     add_test(NAME emulator-core-logo-gpu
         COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
                 --render-logo-gpu "${CMAKE_CURRENT_BINARY_DIR}/logo-frames" --logo-stride 80 --logo-frames 2)
+    # ★ TITLE → Option → CONFIG.BIN（设置界面）：宿主脚本化输入（`--input-script`）把光标搬到
+    #   Option 按钮上并按一次左键，判据是**真的进了 CONFIG.BIN（统一文件 id 52）**。
+    #   这是"打开设置界面的路径"的入口判据；⛔ 它不断言画面像素（没有像素 oracle）。
+    add_test(NAME emulator-core-title-option
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
+                --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option.txt"
+                --anchor-script 21092 --expect-script 52 --tick-ms 16 --max-steps 400000)
+    # ★ 再往前一步：CONFIG.BIN 会调起 **CONFIG1.BIN（统一文件 id 20940）** —— 设置界面的实际脚本。
+    #   这条判据比上一条强：它要求 CONFIG.BIN 的装载段真的跑起来（不是"进了脚本就停"）。
+    add_test(NAME emulator-core-title-option-config1
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
+                --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option.txt"
+                --anchor-script 21092 --expect-script 20940 --tick-ms 16 --max-steps 600000)
+    # ★ 设置界面"真的在跑"：从 TITLE 点 Option 一路到 CONFIG1.BIN（20940）并**留在它的输入环里**，
+    #   期间不许出现"未实现 / 非法 opcode / 内部错误"的停机。少实现任何一条这条都会红。
+    add_test(NAME emulator-core-config-screen
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
+                --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option.txt"
+                --anchor-script 21092 --require-script 20940 --tick-ms 16 --max-steps 300000)
 endif()
 
 target_compile_features(emulator-cxx PRIVATE cxx_std_20)

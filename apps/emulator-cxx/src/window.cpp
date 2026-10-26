@@ -5,6 +5,7 @@
 #include <SDL3/SDL_gpu.h>
 
 #include "app.h"
+#include "input_script.h"
 
 #include "core/scene_raster.h"
 
@@ -51,43 +52,9 @@ std::uint32_t sample_key_mask() {
     return mask;
 }
 
-}  // namespace
-
-int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
-                        int width, int height, int max_frames, bool* user_quit) {
-    if (!SDL_ClaimWindowForGPUDevice(device, window)) {
-        log_sdl_error("SDL_ClaimWindowForGPUDevice");
-        return 1;
-    }
-    QuadPipeline pipeline;
-    const SDL_GPUTextureFormat swapchain_format = SDL_GetGPUSwapchainTextureFormat(device, window);
-    std::printf("[render] swapchain format=%d\n", static_cast<int>(swapchain_format));
-    if (!create_quad_pipeline(device, swapchain_format,
-                              SDL_GPU_BLENDOP_ADD, SDL_GPU_BLENDFACTOR_SRC_ALPHA,
-                              SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, pipeline)) {
-        return 1;
-    }
-    ScenePipeline scene_pipeline;
-    const bool scene_gpu_ok = create_scene_pipeline(device, swapchain_format, scene_pipeline);
-    SceneTextureCache scene_cache;
-    machine.consume_frame_step();  // 丢掉预跑期留下的请求
-    // 宿主输入：键盘 / 鼠标（**不接摇杆**）。三者都只在脚本执行到对应 opcode 时才被取用：
-    // `0xff` 采样输入字、`0x109` 光标、`0x108` 按钮位图、`0xcc`/`0xcd` 鼠标回调。
-    // ★ `0x2fc` 是**触点查询**（不是鼠标事件队列）：桌面鼠标-only 不提供触点源 ⇒ 恒写 0。
-    // 测试 / 诊断：到点投递一次 SDL_EVENT_QUIT，用来端到端验证“关窗保存配置”。
-    // 只在显式设置环境变量时启用；⛔ 不是产品退出路径。
-    if (const char* quit_ms = std::getenv("EMULATOR_CXX_QUIT_AFTER_MS")) {
-        const Uint32 delay = static_cast<Uint32>(std::strtoul(quit_ms, nullptr, 10));
-        if (delay > 0) {
-            SDL_AddTimer(delay, [](void* data, SDL_TimerID, Uint32) -> Uint32 {
-                SDL_Event close{};
-                close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
-                close.window.windowID = SDL_GetWindowID(static_cast<SDL_Window*>(data));
-                SDL_PushEvent(&close);
-                return 0;
-            }, window);
-        }
-    }
+// 把 SDL 的四类真实设备接到 core 的采样口（窗口路径的默认输入源）。
+// ★ `scripted != nullptr` 时不调用它：那时输入来自 `--input-script` 的时间线。
+void bind_sdl_input(core::Machine& machine, SDL_Window* window, int width, int height) {
     machine.set_key_sampler([] { return sample_key_mask(); });
     machine.set_cursor_source([window, width, height](std::int32_t& x, std::int32_t& y) -> bool {
         static int probe = 0;
@@ -152,6 +119,49 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         if ((sdl & SDL_BUTTON_RMASK) != 0) mask |= 2;
         return true;
     });
+}
+
+}  // namespace
+
+int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
+                        int width, int height, int max_frames, bool* user_quit,
+                        ScriptedInput* scripted) {
+    if (!SDL_ClaimWindowForGPUDevice(device, window)) {
+        log_sdl_error("SDL_ClaimWindowForGPUDevice");
+        return 1;
+    }
+    QuadPipeline pipeline;
+    const SDL_GPUTextureFormat swapchain_format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    std::printf("[render] swapchain format=%d\n", static_cast<int>(swapchain_format));
+    if (!create_quad_pipeline(device, swapchain_format,
+                              SDL_GPU_BLENDOP_ADD, SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+                              SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, pipeline)) {
+        return 1;
+    }
+    ScenePipeline scene_pipeline;
+    const bool scene_gpu_ok = create_scene_pipeline(device, swapchain_format, scene_pipeline);
+    SceneTextureCache scene_cache;
+    machine.consume_frame_step();  // 丢掉预跑期留下的请求
+    // 宿主输入：键盘 / 鼠标（**不接摇杆**）。三者都只在脚本执行到对应 opcode 时才被取用：
+    // `0xff` 采样输入字、`0x109` 光标、`0x108` 按钮位图、`0xcc`/`0xcd` 鼠标回调。
+    // ★ `0x2fc` 是**触点查询**（不是鼠标事件队列）：桌面鼠标-only 不提供触点源 ⇒ 恒写 0。
+    // 测试 / 诊断：到点投递一次 SDL_EVENT_QUIT，用来端到端验证“关窗保存配置”。
+    // 只在显式设置环境变量时启用；⛔ 不是产品退出路径。
+    if (const char* quit_ms = std::getenv("EMULATOR_CXX_QUIT_AFTER_MS")) {
+        const Uint32 delay = static_cast<Uint32>(std::strtoul(quit_ms, nullptr, 10));
+        if (delay > 0) {
+            SDL_AddTimer(delay, [](void* data, SDL_TimerID, Uint32) -> Uint32 {
+                SDL_Event close{};
+                close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+                close.window.windowID = SDL_GetWindowID(static_cast<SDL_Window*>(data));
+                SDL_PushEvent(&close);
+                return 0;
+            }, window);
+        }
+    }
+    // 窗口路径的输入源：**给了脚本化输入就用脚本**（可复现的自动化）；否则用 SDL 的真实设备。
+    // ★ 两者是同一层的替身：`--input-script` 不是引擎语义，它只是把"平台归约"换成时间线。
+    if (scripted == nullptr) bind_sdl_input(machine, window, width, height);
     // 只建一张 1×1 占位纹理给软件回退路径；⛔ 不要在这里 rasterize（那会清脏、跳过首帧）。
     core::Bytes canvas{0, 0, 0, 0};
     SDL_GPUTexture* image = upload_texture(device, canvas, 1, 1);
@@ -190,6 +200,9 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
             } else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
                 running = false;
                 if (user_quit != nullptr) *user_quit = true;
+            } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                // ★ 滚轮：把增量推进引擎那一格（`0x10d` 读并清）。刻度 / 符号是宿主策略。
+                machine.add_wheel_delta(static_cast<std::int32_t>(event.wheel.y));
             }
         }
         if (!running) break;
@@ -205,6 +218,10 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
 
         machine.set_host_clock_ms(clock_base +
                                   static_cast<std::uint32_t>(SDL_GetTicks() - start_ticks));
+        if (scripted != nullptr) {
+            scripted->advance(machine.scene_clock_ms());
+            machine.add_wheel_delta(scripted->take_wheel_delta());
+        }
         // 一次迭代 = 至多一条指令；门前渲染由 core 决定。没有渲染请求时本迭代不呈现，
         // 但宿主可以连续跑一批迭代（不是“一帧 N 条”的语义，只是调度批量）。
         bool requested = false;

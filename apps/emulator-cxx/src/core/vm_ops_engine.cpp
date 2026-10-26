@@ -10,6 +10,109 @@
 
 namespace core {
 
+void Machine::op_c0(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写引擎标量（0xC0）：把引擎字段 `+0xAA9E4` 写进**第 1 个操作数**（落点按写原语的标签集：
+    // 3/4/6/7/9/10/12；字符串族 / 0/1/2 / 13/14 ⇒ 类型异常）。★ 它**不读操作数的值**。
+    // ⛔ 那条引擎字段的领域名未取证（只知复位为 0、写者是 `0xC3`）⇒ 本版只保存与写回。
+    write_int(ops[0], engine_aa9e4_);
+    return;
+}
+
+void Machine::op_142(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写引擎标量（0x142 / `sub_422930`）：读 op1 → `Engine+0xAAB70 ← 值`；无分支、无检查。
+    // ★ 值**不是布尔**（读者只判非 0，但写入的是原值）⇒ ⛔ 不许夹到 0/1。
+    engine_aab70_ = read_int(ops[0]);
+    return;
+}
+
+void Machine::op_1bb(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 文本显示门（0x1BB / `sub_420000`）：同一个操作数**读两次**（`.lst` `0x42001F` / `0x420038`）。
+    //   0 ⇒ `Engine+0x5EC7C = 0x80000000`（bit31 = 抑制），**不记日志**；
+    //   1 ⇒ `= 0`（正常显示）；
+    //   其余 ⇒ **不写**（保旧值）+ 记一行日志（引擎是 WriteFile 到日志句柄，不是异常）。
+    // ★ 三支都正常返回、不抛 ⇒ 日志走 `report_error` 的错误通道（不置停机）。
+    const auto value = read_int(ops[0]);
+    if (value == 0) {
+        font_text_gate_5ec7c_ = static_cast<std::int32_t>(0x80000000u);
+        return;
+    }
+    if (value == 1) {
+        font_text_gate_5ec7c_ = 0;
+        return;
+    }
+    report_error("set-text-gate-argument-invalid:" + std::to_string(value));
+    return;
+}
+
+void Machine::op_2cc(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 配置 getter（0x2CC / `sub_4309E0`）：目标 ← `Reg::Get("message:AdvanceMesOnWheel")`。
+    // ★ 它**不读任何源操作数**；键缺失时引擎弹 MessageBox 并返回 0（本版按配置缺省 0）。
+    write_int(ops[0], config_.get_int("message:AdvanceMesOnWheel"));
+    return;
+}
+
+void Machine::op_2cd(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 配置 setter（0x2CD / `sub_426390`）：`Reg::Set(同键, 操作数#1)`；操作数只读一次。
+    config_.set_int("message:AdvanceMesOnWheel", read_int(ops[0]));
+    return;
+}
+
+void Machine::op_2ce(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 画面模式 getter（0x2CE / `sub_430A20`）：目标 ← (引擎缓存字段 != 0)。
+    // ★ 它**绕过配置**读缓存（脚本改了键但还没 apply 时，两者值会不同）⇒ ⛔ 不许实现成 `config_.get_int`。
+    write_int(ops[0], display_mode_cache_ != 0 ? 1 : 0);
+    return;
+}
+
+void Machine::op_2e6(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 读"自动消息间隔"某一档（0x2E6 / `sub_431110`）：op1 = 档号（0 / 1），op2 = **落点**（只写不读）。
+    // 档号 ∉ {0,1} ⇒ 引擎写一行日志、**不写落点**、不抛。
+    const auto selector = read_int(ops[0]);
+    if (selector == 0) {
+        write_int(ops[1], config_.get_int("message:AutoMessagePitch0"));
+    } else if (selector == 1) {
+        write_int(ops[1], config_.get_int("message:AutoMessagePitch1"));
+    } else {
+        report_error("auto-message-pitch-selector-invalid:" + std::to_string(selector));
+    }
+    return;
+}
+
+void Machine::op_2e7(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写"自动消息间隔"某一档（0x2E7 / `sub_426540`）：op1 = 档号，op2 = 值；档号 ∉ {0,1} ⇒ 只记日志。
+    const auto selector = read_int(ops[0]);
+    if (selector == 0) {
+        config_.set_int("message:AutoMessagePitch0", read_int(ops[1]));
+    } else if (selector == 1) {
+        config_.set_int("message:AutoMessagePitch1", read_int(ops[1]));
+    } else {
+        report_error("auto-message-pitch-selector-invalid:" + std::to_string(selector));
+    }
+    return;
+}
+
+void Machine::op_2e8(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写"自动消息选项"（0x2E8 / `sub_4265E0`）：`message:AutoMessageOption ← op1`；没有档号校验。
+    config_.set_int("message:AutoMessageOption", read_int(ops[0]));
+    return;
+}
+
+void Machine::op_2ea(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 读"自动消息选项"（0x2EA / `sub_4311B0`）：**不读任何操作数**，只写落点。
+    write_int(ops[0], config_.get_int("message:AutoMessageOption"));
+    return;
+}
+
 void Machine::op_88(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 成对写 + 条件清门字第 27 位

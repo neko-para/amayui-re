@@ -39,6 +39,12 @@ Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install*
     : key_(int_key == 0 ? 1u : int_key), table_(table), install_(install), config_(std::move(config)) {
     // 主循环的渲染闸门：`set:DrawMode == 1` 才自动渲染。缺键按配置口径为 0（不自动渲染）。
     draw_mode_ = config_.get_int("set:DrawMode");
+    // 参数格（`Engine+0x15290`，`0x74` 写 / `0x7f` 读）的初值 = 配置键 `message:MessageSpeed`
+    // —— 启动期有确定写点：`0x417E98` 取键、`0x417EAB` 写格（取证见 ops-forensics 文档 §6）。
+    // ★ 这解决了 spec 的 `RES-PARAM-21668-INIT`（"初值没有观察"）：它不是分配残留，是配置。
+    param_cell_ = config_.get_int("message:MessageSpeed");
+    // 画面模式缓存（`Engine+0xA40D8`）的初值 = 配置 `display:ScreenMode`（引擎启动时由该键写入）。
+    display_mode_cache_ = config_.get_int("display:ScreenMode");
     // 启动期登记：键非 0 才认为"备组已分配"（发行数据里该键恒 0 ⇒ 只有异常支可达）。
     memflip_available_ = config_.get_int("set:EnableMemFlip") != 0;
 }
@@ -85,6 +91,26 @@ void Machine::execute(const Instruction& instruction) {
         case 0x01: op_01(instruction); return;
         case 0x02: op_02(instruction); return;
         case 0x88: op_88(instruction); return;
+        case 0xC0: op_c0(instruction); return;
+        case 0x142: op_142(instruction); return;
+        case 0x12F: op_12f(instruction); return;
+        case 0x2CC: op_2cc(instruction); return;
+        case 0x2CD: op_2cd(instruction); return;
+        case 0x2CE: op_2ce(instruction); return;
+        case 0x2E6: op_2e6(instruction); return;
+        case 0x2E7: op_2e7(instruction); return;
+        case 0x2E8: op_2e8(instruction); return;
+        case 0x2EA: op_2ea(instruction); return;
+        case 0x10D: op_10d(instruction); return;
+        case 0x1BB: op_1bb(instruction); return;
+        case 0x1A6: op_1a6(instruction); return;
+        case 0x300: op_300(instruction); return;
+        case 0x301: op_301(instruction); return;
+        case 0x1D2: op_1d2(instruction); return;
+        case 0x1D3: op_1d3(instruction); return;
+        case 0x6E: op_6e(instruction); return;
+        case 0x6F: op_6f(instruction); return;
+        case 0x196: op_196(instruction); return;
         case 0x03: op_03(instruction); return;
         case 0x09: op_09(instruction); return;
         case 0x06: op_06(instruction); return;
@@ -117,6 +143,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x1C7: op_1c7(instruction); return;
         case 0x1CC: op_1cc(instruction); return;
         case 0x218: op_218(instruction); return;
+        case 0x217: op_217(instruction); return;
         case 0x21A: op_21a(instruction); return;
         case 0x21D: op_21d(instruction); return;
         case 0x21E: op_21e(instruction); return;

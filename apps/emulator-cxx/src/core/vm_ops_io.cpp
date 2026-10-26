@@ -9,6 +9,15 @@
 
 namespace core {
 
+void Machine::op_10d(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 读滚轮（0x10D `read-mouse-wheel` / `sub_42EF50`）：`op1 ← Engine+0x1E74`，**随后把那一格清 0**。
+    // ★ 增量由**宿主**在窗口过程里推进来（WM_MOUSEWHEEL）；符号 / 刻度属平台边界，本层不解释。
+    write_int(ops[0], wheel_accum_);
+    wheel_accum_ = 0;
+    return;
+}
+
 void Machine::op_109(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 读光标位置（CORE-INPUT-MOUSE-POS）：设备可用 ⇒ 写客户区坐标；不可用 ⇒ 两个都写 −100000。

@@ -128,6 +128,8 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 | 命名表 / 状态字 / 模式族 | `CORE-OPS-TABLE-RESET-A1` / `-BIND-A2` / `-DISPATCH-A3`、`CORE-OPS-STATUS-WORD`、`CORE-OPS-MODE-BIT`、`CORE-OPS-STATUS-CLEAR-D9`、`CORE-OPS-RNG-ENABLE` | `0xa1/0xa2/0xa3` 文本键命名表（清空 / 绑定 / 分派）；`0x1cf/0x1bf` 状态字（第 16 位 ⇒ **整字**清 0）；`0x19b/0x19c` 模式位与四个分支；`0x0d9` 清位；`0x1ce` 乱数启用（种子 = 本迭代宿主时钟） |
 | 输入派发 | `CORE-INPUT-WORD`、`CORE-INPUT-KEY-DISPATCH`、`CORE-INPUT-TOUCH-POINT` | `0xff` 清字 + 平台采样（无设备 ⇒ 保持 0）+ 按帧上限；`0x100` 派发一个按键回调（无按键走"编号 = 键总数"表项，有按键压**当前位置**重派发）；`0x2fc` 取一个触点（无触点只写 0；桌面鼠标-only 恒无触点）；`0x12e` 命中查找：按 `start+1` 起扫框表，命中写项下标、未命中写 −1（`CORE-INPUT-HIT-TEST-12E`） |
 | 键盘 / 鼠标（宿主） | `CORE-INPUT-MOUSE-POS`、`-MOUSE-BUTTON`、`-CALLBACK-REGISTER`、`-MOUSE-CALLBACK-PUMP` | 窗口路径把 SDL 的键盘 / 鼠标归约成输入字、客户区光标、按钮位图；`0x109` 光标（输入停用 ⇒ −100000；客户区外仍写真实坐标）、`0x108` 按钮位图（SDL 左右键归约到引擎位 0/1、输入停用 ⇒ 0）、`0xcc` 登记 + `0xcd` 时间闸派发（`elapsed >= interval`，含等号）。★ **不接摇杆**；物理键 ↔ 输入位号的映射是**宿主策略**（`window.cpp` 的 `kKeyBits` 一张表，⛔ 不是规范结论） |
+| 脚本化输入 / 无窗口播放 | （宿主策略，⛔ **不进 spec**） | `input_script.cpp` 把指令式时间线（`at move / down / up / key / wheel`）归约成四个采样口 + 滚轮增量；`play_headless.cpp` 按仿真 tick 推进（与窗口路径同一个门、同一套输入注入），可 `--expect-script` / `--require-script` 收口、可导出 BMP。`--anchor-script` 把时间线的 0 点锚在某个脚本**首次进入**时（否则 boot 期间就把光标搬好，TITLE 的"坐标变了才命中"不成立）。★ 与 `apps/emulator-new` 的 `parseInputScript` 同语法：两条实现线互为对照，**不互为真源** |
+| TITLE → Option → 设置界面 | `CORE-INPUT-*`、`CORE-OPS-*`（逐条见 `data/spec`） | 实测链：`0x12e` 命中框表（局部 205 / 基准 5、105）→ `0xa1/0xa2/0xa3` 菜单分派 → `0x3 call-script 52`（CONFIG.BIN）→ `0x3 call-script 20940`（CONFIG1.BIN）。CTest：`emulator-core-title-option`（进 52）· `...-config1`（进 20940）· `emulator-core-config-screen`（在 20940 里跑 30 万步不许停） |
 | 帧 / 本地块 | `CORE-OPS-FRAME-CALL-FRAME`、`-LOCAL-SET-7B`、`-LOCAL-RET-7C`、`CORE-OPS-STATE-199` | `0x08` 切到**已装载**帧（只改父帧号 / ip / 长度槽，不清返回栈）；`0x7b` 两个目标位置（初值 −1）；`0x199` 进块（存档字带第 25/26 位、返回点 = `here + 1`、深度判据存**本帧身份编号**）；`0x7c` 离开（成功后门字带第 26 位 ⇒ `GateStalled` 是规范表现） |
 | 标量 / 数值 / 随机 / 时钟 / 取址 / 池拷贝 | `CORE-OPS-FLAG-CELLS`、`-MODE-BIT`、`-STATUS-CELL-READ`、`-LAYER-CELL`、`CORE-OPS-RANDOM-60`、`-CLOCK-D0`、`-PARAM-74-7F`、`-FLOAT-ABS`、`-SCALAR-FLOAT-ARITH`、`-POOL-MEMCPY`、`-POOL-LEA-63` | `0x19a/1b6/1b7` 三个**互不相同**的格（Y 归一成 0/1）、`0x1c7`（位 27 → 0/1）、`0x1cc`（状态格原值）、`0x1ad`（落点格复位值 −1）、`0x60`（计数器 → 随机 → 范围 → 落点；范围 0 先写 0 再抛）、`0xd0`（本迭代时钟）、`0x74/0x7f`（参数格，未写过 ⇒ 响亮失败）、`0x191/2d0/2d1/2d3`（浮点族）、`0x1b0`（池拷贝，按编码位模式）、`0x63`（lea：先取址、再校验目标必须是引用族） |
 | 3D 记录 | `CORE-OPS-SCENE3D-GET-VEC1` / `-GET-VEC2` / `-GET-LOCAL-TRANS` / `-21D` / `-21E` / `-21F` | `0x218/21a` 两个三元向量（**只查不建**，查不到写 0）、`0x228` 平移分量（标志最后写）、`0x21d` 三张表各自复制（成功才标脏）、`0x21e`（三个浮点 ÷100）、`0x21f`（轴角另存 + 度 → 弧度）。★ `0x21e/21f` 记录「已存在」位为 0 ⇒ 只建记录、一个字段都不写；旋转矩阵的元素布局 / 归一化规范**未成篇** ⇒ 实现选择（行主序 + Rodrigues，注释已标明） |
@@ -170,16 +172,47 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-logo-gpu out\logo --logo-stride 40 --logo-frames 6
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-logo-gpu out\logo --logo-frames 0
 
+# ★ 无窗口 + 脚本化输入：把光标搬到 TITLE 的 Option 上点一次，判据是"真的进了 CONFIG.BIN（id 52）"
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --skip-logo --play-headless ^
+    --input-script tests\input\title-option.txt --anchor-script 21092 --expect-script 52 --max-steps 400000
+
+# 再往前一步：设置界面脚本 CONFIG1.BIN（id 20940）**留在自己的输入环里**跑 30 万步，期间不许停
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --skip-logo --play-headless ^
+    --input-script tests\input\title-option.txt --anchor-script 21092 --require-script 20940 --max-steps 300000
+
+# 同一个装置的诊断口：盯脚本把输入读成了什么、只跟某个脚本的取指、把每帧导出成 BMP
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --skip-logo --play-headless ^
+    --input-script tests\input\title-option.txt --anchor-script 21092 --max-steps 400000 ^
+    --watch-locals 1008,1009,1010,1013,1015 --trace-script 21092 --trace-opcodes 0xcd,0x12e,0x108,0x109 ^
+    --bmp out\title-bmp --bmp-stride 60 --bmp-limit 4
+
 # 单个 AGF
 .\out\build\windows-x64\emulator-cxx.exe --agf "E:\Games\Eushully\天結\install\MI040.AGF"
 ```
 
-★ 当前是 **最小可执行层**：`CORE-ISA` / `CORE-POOL` / `CORE-FRAME` / `CORE-VM` / `CORE-CONFIG` + `FMT-ALF` / `FMT-AGF`。
-`--config` 可指定玩家 `SYS4REG.INI`；缺省按 `set:UseAppDataFolder` 选配置根（`%APPDATA%` / `XDG_CONFIG_HOME` / `~/.config`，否则安装根），
+★ **`--input-script` / `--play-headless` 的口径**（宿主测试装置，⛔ 不进 spec）：
+- 时间线语法与 `apps/emulator-new` 的 `parseInputScript` 一致：`<毫秒> move x y` / `down N` / `up N` /
+  `key N down|up` / `wheel D`，换行或 `;` 分隔，`#` 起注释。键与按钮都是**引擎编号** 0..31。
+- 采样口与窗口路径**同一层**：输入字 / 光标 / 按钮位图 / 触点。没写 `move` 之前光标不可用
+  （`0x109` 写 −100000、`0x108` 写 0），⛔ 不伪造坐标。
+- `--anchor-script <id>`：时间线的 0 点 = **首次进入该脚本**的时刻；不给就以"播放开始"为 0 点。
+  用处是让输入脚本与 boot 的快慢解耦（boot 到 TITLE 用了多久不影响脚本）。
+- `--expect-script <id>`：进入该脚本即算达成（退出码 0），没进 ⇒ 退出码 1 —— 这就是 CTest 的判据。
+- `--require-script <id>`：**收口时**当前脚本必须仍是它（配合 `--max-steps` 用：跑 N 步后断言"还在这个脚本里"）。
+- 未实现 / 非法 opcode / 内部错误停机 ⇒ 退出码 1（正常的 `exit` 停机不算失败）。
+- `--bmp <dir>`：每次渲染请求导出一张（`--bmp-stride` / `--bmp-limit` 限流）；达成时另存 `reached-<id>.bmp`。
+- 诊断口（⛔ 不是产品路径）：`--watch-locals 1008,1013`（看脚本把输入读成了什么）、
+  `--trace-script <id> --trace-opcodes 0xcd,0x12e`（只看该脚本里这些 opcode 的取指）。
+
+★ 当前是 **最小可执行层**：`CORE-ISA` / `CORE-POOL` / `CORE-FRAME` / `CORE-VM` / `CORE-CONFIG` + `FMT-ALF` / `FMT-AGF`。`--config` 可指定玩家 `SYS4REG.INI`；缺省按 `set:UseAppDataFolder` 选配置根（`%APPDATA%` / `XDG_CONFIG_HOME` / `~/.config`，否则安装根），
 再拼 `set:RegFilePath` 与文件名。
 门 / 状态位服务：**等待位与影片位**已建模（影片位只管关门，收尾在门之前的影片对象表服务里）；其余状态位、换帧 / 换脚本、容器句柄尚未完整建模。
 ★ 由此有一条**看起来像卡死、其实是规范要求**的行为：`0x19c` 的置位支与 `0x1ce` 的非 0 支会把门字第 27 / 30 位置起，而这两个位**没有服务分支**（第 30 位按规范就是「启用后门恒关」）⇒ 门一直关着，`run()` 走到 step 上限。那不是 handler 写错，是「位是待服务标记，清不清由服务分支决定」的直接后果；要推进只能由外部清位写点（可达性未取证）。
-输入字形 / 触点都是**平台边界**：本层没有输入后端（`--play-frames` 只按 `set:DrawMode` 自动渲染），所以 `0xff` 恒采到 0、`0x2fc` 恒"没有触点"；`0x12e` 的命中查找已实现，但 headless 没有光标源 ⇒ TITLE 的"坐标变了才命中"分支不会进入（`0x109` 与初始化值同为 −100000）。测试用 `set_input_word()` / `set_key_sampler()` / `set_touch_source()` 注入，⛔ 不要把这几个注入点当产品路径。
+★ 输入字形 / 触点都是**平台边界**：没有窗口时默认没有输入后端（`0xff` 恒采到 0、`0x2fc` 恒"没有触点"、
+`0x109` 恒写 −100000），`0x12e` 的命中查找因此不会进入。**无人值守要驱动 TITLE 的输入环，用 `--input-script`**
+（见下）：它把一份**指令式时间线**归约成引擎要的四个量（输入字 / 光标 / 按钮位图 / 触点），
+与 `apps/emulator-new` 的 `parseInputScript` 同一套语法。测试用 `set_input_word()` / `set_key_sampler()` /
+`set_touch_source()` 注入，⛔ 不要把这几个注入点当产品路径。
 
 ★ **窗口路径已接键盘 + 鼠标**（不接摇杆）：`window.cpp` 每个外层迭代泵事件，
 `SDL_GetKeyboardState` → 输入字（`kKeyBits` 表：位号 ↔ 扫描码）、`SDL_GetMouseState` → 光标 / 按钮位图。

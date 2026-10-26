@@ -23,6 +23,14 @@ const TITLE_PATH_OPCODES = [
   0x1f5, 0x208, 0x2fc,
 ];
 
+/** ★ 下一段：TITLE 点 Option → CONFIG.BIN（id 52，设置界面）用到的 opcode 里**已经实现**的那些。
+ *  这不是"CONFIG 的全部"（那由 CTest `emulator-core-config-screen` 判），而是"声明了就必须有 case"
+ *  的棘轮：每实现一条就往这里加一条，⛔ 不要用它替代那条端到端 CTest。 */
+const CONFIG_PATH_OPCODES = [
+  0x06e, 0x06f, 0x0c0, 0x10d, 0x12f, 0x142, 0x196, 0x1a6, 0x1bb, 0x1d2, 0x1d3, 0x217,
+  0x2cc, 0x2cd, 0x2ce, 0x2e6, 0x2e7, 0x2e8, 0x2ea, 0x300, 0x301,
+];
+
 function read(url) {
   return fs.readFileSync(url, 'utf8');
 }
@@ -83,6 +91,14 @@ test('★ 分派表 ↔ handler 声明：两个方向都不许漏', () => {
 test('★ 到 TITLE 用到的 17 条必须在分派表里', () => {
   const dispatch = dispatchTable();
   const missing = TITLE_PATH_OPCODES.filter((opcode) => !dispatch.has(opcode)).map(
+    (opcode) => `0x${opcode.toString(16)}`,
+  );
+  assert.deepEqual(missing, [], `分派表缺这些 opcode：${missing.join(', ')}`);
+});
+
+test('★ CONFIG 路径上已实现的 opcode 不许漏 case', () => {
+  const dispatch = dispatchTable();
+  const missing = CONFIG_PATH_OPCODES.filter((opcode) => !dispatch.has(opcode)).map(
     (opcode) => `0x${opcode.toString(16)}`,
   );
   assert.deepEqual(missing, [], `分派表缺这些 opcode：${missing.join(', ')}`);

@@ -389,6 +389,22 @@ void Machine::op_216(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_217(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写第一三元向量（CORE-OPS-SCENE3D-SET-VEC1）：读序 2 → 3 → 4 → 1（三个浮点先读，编号最后读）。
+    // ★ 没有「对象已存在」门：编号不存在 ⇒ 先建一条默认记录再照写；编号不做范围检查。
+    // ⛔ 写的只是**第一**组三个浮点；第二组由 `0x219` 写（不许合并）。
+    const double z = read_float(ops[3]);
+    const double y = read_float(ops[2]);
+    const double x = read_float(ops[1]);
+    SceneRecord& record = scene_records_[static_cast<std::uint32_t>(read_int(ops[0]))];
+    record.vec1[0] = static_cast<float>(x);
+    record.vec1[1] = static_cast<float>(y);
+    record.vec1[2] = static_cast<float>(z);
+    scene_dirty_ = true;
+    return;
+}
+
 void Machine::op_218(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 取第一三元向量（CORE-OPS-SCENE3D-GET-VEC1）：**只查不建**；查不到三个输出都写 0。

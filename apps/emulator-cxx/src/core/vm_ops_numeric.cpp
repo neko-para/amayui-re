@@ -299,6 +299,42 @@ void Machine::op_7f(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_12f(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 排序置换（0x12F / `sub_42F560`）：
+    //   op1 / op2 / op3 = **三个数组的基址**（A 被写、B / C 只读），op4 = 元素个数 N。
+    //   ① `A[0] := 0`（**无条件**，N = 0 也写；存的是**原始下标**，不是编码值）；
+    //   ② N ≥ 2 时对 j = 1..N−1 做插入排序，键 = `dec(B[i]) + dec(C[i])`（i = A 里的下标；
+    //      32 位回绕、**有符号**比较、升序），落位时写 `A[k+1] := j`；
+    //   ③ 收尾 i = 0..N−1：`A[i] := enc(A[i])`。
+    // ★ 三条引擎口径：op4 **每轮重求值**（不是缓存的值）；写 A 前**不做长度检查**（N 超长时静默越界，
+    //   这是引擎行为，⛔ 不要替它加检查）；B / C 一个字节都不写。
+    const std::uint32_t a = address_of_operand(ops[0]);
+    const std::uint32_t b = address_of_operand(ops[1]);
+    const std::uint32_t c = address_of_operand(ops[2]);
+    store_raw(a, 0u);
+    const auto key_of = [&](std::uint32_t index) {
+        return static_cast<std::int32_t>(decode_int(read_raw(b + 4u * index)) +
+                                         decode_int(read_raw(c + 4u * index)));
+    };
+    for (std::int32_t j = 1; j < read_int(ops[3]); ++j) {
+        const auto key_j = key_of(static_cast<std::uint32_t>(j));
+        std::int32_t k = j - 1;
+        while (k >= 0) {
+            const auto index_k = read_raw(a + 4u * static_cast<std::uint32_t>(k));
+            if (key_of(index_k) <= key_j) break;  // 相等也落位（不交换）
+            store_raw(a + 4u * static_cast<std::uint32_t>(k + 1), index_k);
+            --k;
+        }
+        store_raw(a + 4u * static_cast<std::uint32_t>(k + 1), static_cast<std::uint32_t>(j));
+    }
+    for (std::int32_t i = 0; i < read_int(ops[3]); ++i) {
+        const std::uint32_t slot = a + 4u * static_cast<std::uint32_t>(i);
+        store_raw(slot, encode_int(static_cast<std::int32_t>(read_raw(slot))));
+    }
+    return;
+}
+
 void Machine::op_60(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 随机（CORE-OPS-RANDOM-60）：读序 计数器 → 随机数 → 范围 → 落点。

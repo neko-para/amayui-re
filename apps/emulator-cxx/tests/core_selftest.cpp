@@ -1148,7 +1148,10 @@ bool check_second_batch(const core::OpcodeTable& table) {
         return false;
     }
 
-    // 0x74 / 0x7f：同一格；没写过就读 ⇒ 响亮失败。
+    // 0x74 / 0x7f：同一格（`Engine+0x15290`）。
+    // ★ 初值不是"分配残留"：启动期有确定写点 —— `0x417E98` 取配置键 `message:MessageSpeed`、
+    //   `0x417EAB` 写格（取证见 docs/02-engine/ops-forensics-2026-10-title-option.md §6）。
+    //   ⇒ "没写过就读"不再响亮失败，而是读出配置值；这里用**不给配置**的 Machine 断言它是 0。
     auto param = make_script_with_body();
     emit_instruction(param, 0x74, {{0, 0xFFFFFFF9u}});  // −7
     emit_instruction(param, 0x7F, {{3, 0}});
@@ -1166,8 +1169,9 @@ bool check_second_batch(const core::OpcodeTable& table) {
     emit_instruction(param_uninit, 2, {});
     core::Machine param_uninit_machine(0x12345678u, table);
     param_uninit_machine.load_root(param_uninit);
-    if (param_uninit_machine.step()) {
-        std::fprintf(stderr, "0x7f read an uninitialized param cell\n");
+    if (!param_uninit_machine.step() || param_uninit_machine.read_int(core::Operand{3, 0}) != 0) {
+        std::fprintf(stderr, "0x7f 初值 = %d（没有 message:MessageSpeed 时按缺省 0）\n",
+                     param_uninit_machine.read_int(core::Operand{3, 0}));
         return false;
     }
 
@@ -1227,6 +1231,288 @@ bool check_second_batch(const core::OpcodeTable& table) {
         if (vec_machine.read_float(core::Operand{4, slot}) != 0.0) {
             std::fprintf(stderr, "0x218/0x21a slot %u not zero\n", slot);
             return false;
+        }
+    }
+
+    // 0x217：写第一三元向量 —— 记录不存在 ⇒ 先建默认记录再写；只写 vec1，vec2 一个都不动。
+    auto vec1 = make_script_with_body();
+    emit_instruction(vec1, 0x217, {{0, 9}, {1, 0x3F800000u}, {1, 0x40000000u}, {1, 0x40400000u}});  // 1,2,3
+    emit_instruction(vec1, 0x218, {{0, 9}, {4, 0}, {4, 1}, {4, 2}});
+    emit_instruction(vec1, 0x21A, {{0, 9}, {4, 3}, {4, 4}, {4, 5}});
+    emit_instruction(vec1, 2, {});
+    core::Machine vec1_machine(0x12345678u, table);
+    vec1_machine.load_root(vec1);
+    for (int i = 0; i < 3; ++i) {
+        if (!vec1_machine.step()) return false;
+    }
+    for (std::uint32_t slot = 0; slot < 3; ++slot) {
+        const double value = vec1_machine.read_float(core::Operand{4, slot});
+        if (value != static_cast<double>(slot + 1)) {
+            std::fprintf(stderr, "0x217 vec1 slot %u = %f\n", slot, value);
+            return false;
+        }
+    }
+    for (std::uint32_t slot = 3; slot < 6; ++slot) {
+        if (vec1_machine.read_float(core::Operand{4, slot}) != 0.0) {
+            std::fprintf(stderr, "0x217 写到了第二组三元向量（slot %u）\n", slot);
+            return false;
+        }
+    }
+    const core::SceneRecord* vec1_record = vec1_machine.scene_record(9);
+    if (vec1_record == nullptr || vec1_record->vec2[0] != 0.0f || vec1_record->vec2[1] != 0.0f ||
+        vec1_record->vec2[2] != 0.0f) {
+        std::fprintf(stderr, "0x217 的记录：vec2 必须保持 0\n");
+        return false;
+    }
+
+    // 0xC0：把引擎标量写进第 1 个操作数（**不读操作数的值**）；推进格数 3。
+    auto c0 = make_script_with_body();
+    emit_instruction(c0, 0xC0, {{9, 7}});
+    emit_instruction(c0, 2, {});
+    core::Machine c0_machine(0x12345678u, table);
+    c0_machine.load_root(c0);
+    c0_machine.seed_engine_aa9e4(0x2A);
+    if (!c0_machine.step()) return false;
+    if (c0_machine.frame().length_slot != 3) {
+        std::fprintf(stderr, "0xC0 推进格数 = %u（期望 3）\n", c0_machine.frame().length_slot);
+        return false;
+    }
+    if (c0_machine.local_int(7) != 0x2A) {
+        std::fprintf(stderr, "0xC0 写进局部格的值 = %d（期望 42）\n", c0_machine.local_int(7));
+        return false;
+    }
+
+    // ── CONFIG.BIN 路径上的一批（0x142 / 0x1BB / 0x1A6 / 0x300 / 0x301 / 0x1D2 / 0x1D3 / 0x6E / 0x6F / 0x196）──
+    // ★ 每条都断言"引擎可见的那一格"，⛔ 不断言实现细节；取证锚见 docs/02-engine/ops-forensics-2026-10-title-option.md。
+    {
+        // 0x142：写引擎标量 —— 值原样（⛔ 不许夹成 0/1）。
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x142, {{0, 5}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        if (!machine.step() || machine.engine_aab70() != 5) {
+            std::fprintf(stderr, "0x142 engine_aab70 = %d（期望 5）\n", machine.engine_aab70());
+            return false;
+        }
+    }
+    {
+        // 0x1BB：0 ⇒ bit31（抑制）；1 ⇒ 0；其它 ⇒ 不写 + 一条诊断（不抛）。
+        auto make = [&](std::uint32_t arg) {
+            auto script = make_script_with_body();
+            emit_instruction(script, 0x1BB, {{0, arg}});
+            emit_instruction(script, 2, {});
+            return script;
+        };
+        core::Machine zero(0x12345678u, table);
+        zero.load_root(make(0));
+        zero.step();
+        if (zero.font_text_gate() != static_cast<std::int32_t>(0x80000000u)) {
+            std::fprintf(stderr, "0x1BB(0) gate = 0x%X（期望 0x80000000）\n",
+                         static_cast<unsigned>(zero.font_text_gate()));
+            return false;
+        }
+        core::Machine one(0x12345678u, table);
+        one.load_root(make(1));
+        one.step();
+        if (one.font_text_gate() != 0) {
+            std::fprintf(stderr, "0x1BB(1) gate = %d（期望 0）\n", one.font_text_gate());
+            return false;
+        }
+        // 其它值：先置 bit31，再给 2 ⇒ 保持 bit31、且多一条诊断。
+        auto strange = make_script_with_body();
+        emit_instruction(strange, 0x1BB, {{0, 0}});
+        emit_instruction(strange, 0x1BB, {{0, 2}});
+        emit_instruction(strange, 2, {});
+        core::Machine other(0x12345678u, table);
+        other.load_root(strange);
+        other.step();
+        other.step();
+        if (other.font_text_gate() != static_cast<std::int32_t>(0x80000000u) || other.errors().size() != 1) {
+            std::fprintf(stderr, "0x1BB(2) gate = 0x%X errors=%zu（期望保持 0x80000000 且 1 条）\n",
+                         static_cast<unsigned>(other.font_text_gate()), other.errors().size());
+            return false;
+        }
+    }
+    {
+        // 0x1A6：`strlen >> 1`（**按字节**，不是按字）。
+        auto run = [&](const std::string& text) -> std::int32_t {
+            auto script = make_script_with_body();
+            emit_instruction(script, 0x1A6, {{9, 0}, {5, 0}});
+            emit_instruction(script, 2, {});
+            core::Machine machine(0x12345678u, table);
+            machine.load_root(script);
+            machine.write_text(core::Operand{5, 0}, text);
+            machine.step();
+            return machine.local_int(0);
+        };
+        if (run("ABCDE") != 2 || run("AB") != 1 || run("") != 0) {
+            std::fprintf(stderr, "0x1A6 减半 = %d/%d/%d（期望 2/1/0）\n", run("ABCDE"), run("AB"), run(""));
+            return false;
+        }
+    }
+    {
+        // 0x300：`A[idx] = op2 | (A[idx] & 0x10000)`（bit16 粘住）+ `B[idx] = op3`；下标不检查范围。
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x300, {{0, 2}, {0, 0x10001}, {0, 1000}});
+        emit_instruction(script, 0x300, {{0, 2}, {0, 0}, {0, 0}});
+        emit_instruction(script, 0x300, {{0, 10}, {0, 1}, {0, 7}});  // 越界下标：引擎不拦
+        emit_instruction(script, 0x301, {{0, 2}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) return false;
+        }
+        if (machine.font_slot_state(2) != 0x10000 || machine.font_slot_deadline(2) != 0) {
+            std::fprintf(stderr, "0x300 A/B = 0x%X/%d（期望 0x10000/0）\n",
+                         static_cast<unsigned>(machine.font_slot_state(2)), machine.font_slot_deadline(2));
+            return false;
+        }
+        if (machine.font_slot_state(10) != 1 || machine.font_slot_deadline(10) != 7) {
+            std::fprintf(stderr, "0x300 越界下标没有落格（state=%d deadline=%d）\n",
+                         machine.font_slot_state(10), machine.font_slot_deadline(10));
+            return false;
+        }
+        if (machine.font_slot_start(2) != 0) {
+            std::fprintf(stderr, "0x301 没清 C[2]\n");
+            return false;
+        }
+    }
+    {
+        // 0x1D2 / 0x1D3：入队 → 按 key 查回；未命中写 0/0（不是 −1）；门关时整条跳过。
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1D2, {{0, 3}, {0, 7}});      // key=3, value=7
+        emit_instruction(script, 0x1D3, {{9, 1}, {9, 2}, {0, 0}, {9, 0}, {0, 3}});  // 命中
+        emit_instruction(script, 0x1D3, {{9, 3}, {9, 4}, {0, 0}, {9, 0}, {0, 9}});  // 未命中
+        emit_instruction(script, 0x1BB, {{0, 0}});              // 关门
+        emit_instruction(script, 0x1D2, {{0, 4}, {0, 8}});      // 被守卫跳过
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        for (int i = 0; i < 5; ++i) {
+            if (!machine.step()) return false;
+        }
+        if (machine.local_int(1) != 1 || machine.local_int(2) != 7) {
+            std::fprintf(stderr, "0x1D3 命中 = %d/%d（期望 1/7）\n", machine.local_int(1), machine.local_int(2));
+            return false;
+        }
+        if (machine.local_int(3) != 0 || machine.local_int(4) != 0) {
+            std::fprintf(stderr, "0x1D3 未命中 = %d/%d（期望 0/0）\n", machine.local_int(3), machine.local_int(4));
+            return false;
+        }
+        if (machine.font_entries().size() != 1) {
+            std::fprintf(stderr, "0x1D2 门关时仍入队（%zu 条）\n", machine.font_entries().size());
+            return false;
+        }
+    }
+    {
+        // 0x6E / 0x6F / 0x196：正文追加 / 行计数 / 振り仮名截断；空正文整段跳过。
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x6E, {{0, 0}, {5, 0}});       // 正文 = 串 0
+        emit_instruction(script, 0x6E, {{0, 0}, {5, 1}});       // 空串 ⇒ 不写、不追加
+        emit_instruction(script, 0x6F, {{0, 0}});               // 行结束
+        emit_instruction(script, 0x196, {{0, 0}, {5, 0}, {5, 2}});  // 正文 + 振り仮名
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.write_text(core::Operand{5, 1}, "");
+        std::string long_rubi(2000, 'x');
+        machine.write_text(core::Operand{5, 2}, long_rubi);
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) return false;
+        }
+        const core::TextWindowRecord* window = machine.text_window(0);
+        if (window == nullptr || window->text != "ABAB" || window->lines != 1) {
+            std::fprintf(stderr, "0x6E/0x6F 窗口 = %s / %d 行\n",
+                         window == nullptr ? "(null)" : window->text.c_str(),
+                         window == nullptr ? -1 : window->lines);
+            return false;
+        }
+        if (window->rubi.size() != 1023) {
+            std::fprintf(stderr, "0x196 振り仮名截断 = %zu 字节（期望 1023）\n", window->rubi.size());
+            return false;
+        }
+        if (machine.current_text_slot() != 0) {
+            std::fprintf(stderr, "0x6E 文本槽 = %d\n", machine.current_text_slot());
+            return false;
+        }
+    }
+
+    // ── 0x12F：排序置换（A 里写下标的升序排列；键 = dec(B[i]) + dec(C[i])）──
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x55, {{9, 10}, {0, 3}});  // B = [3,1,2]
+        emit_instruction(script, 0x55, {{9, 11}, {0, 1}});
+        emit_instruction(script, 0x55, {{9, 12}, {0, 2}});
+        emit_instruction(script, 0x55, {{9, 20}, {0, 0}});  // C = [0,0,0]（经编码写）
+        emit_instruction(script, 0x55, {{9, 21}, {0, 0}});
+        emit_instruction(script, 0x55, {{9, 22}, {0, 0}});
+        emit_instruction(script, 0x12F, {{9, 0}, {9, 10}, {9, 20}, {0, 3}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        for (int i = 0; i < 7; ++i) {
+            if (!machine.step()) return false;
+        }
+        const std::int32_t expected[3] = {1, 2, 0};  // 键 1/2/3 对应的下标
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            if (machine.local_int(i) != expected[i]) {
+                std::fprintf(stderr, "0x12F A[%u] = %d（期望 %d）\n", i, machine.local_int(i),
+                             expected[i]);
+                return false;
+            }
+        }
+        // N = 0：`A[0] := 0` 是**无条件**的原始写（不经过编码）。
+        auto empty = make_script_with_body();
+        emit_instruction(empty, 0x12F, {{9, 0}, {9, 10}, {9, 20}, {0, 0}});
+        emit_instruction(empty, 2, {});
+        core::Machine empty_machine(0x12345678u, table);
+        empty_machine.load_root(empty);
+        if (!empty_machine.step()) return false;
+        if (empty_machine.local_int(0) != empty_machine.decode_int(0u)) {
+            std::fprintf(stderr, "0x12F(N=0) 没有写原始 0\n");
+            return false;
+        }
+    }
+
+    // ── 配置族 + 滚轮（0x2CC / 0x2CD / 0x2CE / 0x2E6 / 0x2E7 / 0x2E8 / 0x2EA / 0x10D）──
+    {
+        core::ConfigStore config;
+        config.set_int("message:AdvanceMesOnWheel", 3);
+        config.set_int("message:AutoMessagePitch0", 11);
+        config.set_int("message:AutoMessagePitch1", 13);
+        config.set_int("message:AutoMessageOption", 5);
+        config.set_int("display:ScreenMode", 1);
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x2E6, {{0, 0}, {9, 0}});   // Pitch0 → loc0
+        emit_instruction(script, 0x2E6, {{0, 1}, {9, 1}});   // Pitch1 → loc1
+        emit_instruction(script, 0x2EA, {{9, 2}});           // Option → loc2
+        emit_instruction(script, 0x2E8, {{0, 7}});           // Option = 7
+        emit_instruction(script, 0x2EA, {{9, 3}});           // Option → loc3
+        emit_instruction(script, 0x2E7, {{0, 1}, {0, 21}});  // Pitch1 = 21
+        emit_instruction(script, 0x2E6, {{0, 1}, {9, 4}});   // Pitch1 → loc4
+        emit_instruction(script, 0x2CC, {{9, 5}});           // AdvanceMesOnWheel → loc5
+        emit_instruction(script, 0x2CD, {{0, 4}});           // AdvanceMesOnWheel = 4
+        emit_instruction(script, 0x2CC, {{9, 6}});           // → loc6
+        emit_instruction(script, 0x2CE, {{9, 7}});           // ScreenMode 缓存 → loc7
+        emit_instruction(script, 0x10D, {{9, 8}});           // 滚轮 → loc8（并清）
+        emit_instruction(script, 0x10D, {{9, 9}});           // 再读 ⇒ 0
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table, nullptr, std::move(config));
+        machine.load_root(script);
+        machine.add_wheel_delta(240);
+        for (int i = 0; i < 13; ++i) {
+            if (!machine.step()) return false;
+        }
+        const std::int32_t expected[10] = {11, 13, 5, 7, 21, 3, 4, 1, 240, 0};
+        for (std::uint32_t i = 0; i < 10; ++i) {
+            if (machine.local_int(i) != expected[i]) {
+                std::fprintf(stderr, "配置族 loc[%u] = %d（期望 %d）\n", i, machine.local_int(i),
+                             expected[i]);
+                return false;
+            }
         }
     }
 

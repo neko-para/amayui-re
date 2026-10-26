@@ -15,6 +15,12 @@ std::int32_t Machine::decode_int(std::uint32_t bits) const {
     return as_i32(ror32(rol32(bits, 11) ^ key_, 25));
 }
 
+std::int32_t Machine::local_int(std::uint32_t index) const {
+    const auto& locals = frames_[current_frame_].local_int;
+    const auto it = locals.find(index);
+    return it == locals.end() ? 0 : decode_int(it->second);
+}
+
 std::uint32_t Machine::script_int_key_index(const Operand& operand) {
     if (operand.type == 3) return operand.raw;
     if (operand.type == 6 || operand.type == 12) {
@@ -348,6 +354,25 @@ std::string Machine::read_text(const Operand& operand) {
     if (operand.type == 11) {
         const auto it = frame_mut().local_string.find(operand.raw);
         return it == frame_mut().local_string.end() ? std::string{} : it->second;
+    }
+    // 指针族里的**字符串**两条（8 = 全局 / 14 = 局部的"指向字符串记录"）：
+    // 槽里存的是地址，地址解析回 (池, 下标) 后按字符串记录取。★ 引擎的文本读原语支持 0–14 除 7/13，
+    // 所以这两条必须能读；`read_int` 对它们**应当**抛（它们是地址，不是整数）。
+    // 待核：指针指向的字符串记录在本模型里就是 `global_string_` / `local_string` 的那一格（残差）。
+    if (operand.type == 8 || operand.type == 14) {
+        const auto address = read_pointer(operand);
+        std::uint32_t tag = 0;
+        std::uint32_t index = 0;
+        if (!resolve_address(address, tag, index)) throw CoreError("read-text-unmapped-address");
+        if (tag == 5) {
+            const auto it = global_string_.find(index);  // resolve_address 给的键已带 bank
+            return it == global_string_.end() ? std::string{} : it->second;
+        }
+        if (tag == 11) {
+            const auto it = frame_mut().local_string.find(index);
+            return it == frame_mut().local_string.end() ? std::string{} : it->second;
+        }
+        throw CoreError("read-text-unsupported-pool-tag:" + std::to_string(tag));
     }
     const auto value = read_int(operand);
     return std::to_string(value);

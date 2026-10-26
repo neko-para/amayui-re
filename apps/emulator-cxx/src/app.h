@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace app {
 
@@ -148,13 +149,60 @@ bool render_scene_gpu_to_bmp(SDL_GPUDevice* device, const core::Machine& machine
                              const std::string& path, int width, int height);
 
 // ── 流程 ──
+
+// 脚本化输入（`--input-script`）：文件落点由宿主读、事件按仿真毫秒应用。
+// 定义在 `input_script.h`；这里是前向声明，避免 app.h 拖进 core 的输入接口。
+class ScriptedInput;
+
+// 无窗口「按帧推进」的选项（`--play-headless`）：给 CTest 一个确定性判据。
+struct HeadlessPlayOptions {
+    std::uint32_t tick_ms = 16;      // 每次外层迭代推进的仿真毫秒（不是墙钟）
+    std::uint32_t expect_script = 0; // 非 0 ⇒ 进入该脚本即算达成（退出码 0），否则算失败
+    std::uint32_t require_script = 0;// 非 0 ⇒ **收口时**当前脚本必须仍是它（否则算失败）
+    std::uint32_t anchor_script = 0; // 非 0 ⇒ 输入脚本的时刻以**首次进入该脚本**为 0 点
+    int max_frames = 0;              // 0 = 不限（直到达成 / 停机 / 步数上限）
+    std::size_t limit_steps = 0;     // 0 = 不限；否则到点收口并打印（不是引擎停因）
+    std::string bmp_dir;             // 非空 ⇒ 每次渲染请求导出一张 BMP
+    int bmp_stride = 1;
+    int bmp_limit = 0;               // 0 = 不限
+    // 诊断：观察这些**当前帧局部整型格**，值变化时打一行（`--watch-locals 1008,1013`）。
+    // ★ 宿主观察口，不改引擎状态；用途是"输入到底被脚本读成了什么"。
+    std::vector<std::uint32_t> watch_locals;
+    // 诊断：只跟踪某个脚本 id 的取指（`--trace-script 21092 --trace-script-steps 200`）。
+    // ⛔ 这是 debug 口，不是产品路径。
+    std::uint32_t trace_script = 0;
+    std::size_t trace_script_steps = 0;
+    // 诊断：只打这些 opcode 的取指（空 = 不打）。与 `trace_script` 叠加生效。
+    std::vector<std::uint32_t> trace_opcodes;
+};
+
+// 一次 `--install` 运行的全部输入（CLI 解析只在 main.cpp，这里只是搬运）。
+struct InstallRunOptions {
+    std::string install_dir;
+    std::string table_path;
+    std::string config_path;
+    std::string config_keys_path;
+    std::size_t max_steps = 200000;
+    std::uint32_t stop_at = 0;
+    int trace_steps = 0;
+    int play_frames = 0;
+    std::string logo_dir;
+    int logo_stride = 24;
+    int logo_frames = 12;
+    bool footprint = false;
+    bool skip_logo = false;
+    std::string input_script;    // 空 = 没有输入设备（与窗口路径的取舍一致）
+    bool headless = false;       // true = `--play-headless`：不开窗、按仿真节拍推进
+    HeadlessPlayOptions headless_play;
+};
+
 int run_core_agf(const std::string& agf_path);
-int run_core_install(const std::string& install_dir, const std::string& table_path,
-                     const std::string& config_path, const std::string& config_keys_path,
-                     std::size_t max_steps, std::uint32_t stop_at, int trace_steps, int play_frames,
-                     const std::string& logo_dir, int logo_stride, int logo_frames,
-                     bool footprint = false, bool skip_logo = false);
+int run_core_install(const InstallRunOptions& options);
 int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine& machine,
-                        int width, int height, int max_frames, bool* user_quit = nullptr);
+                        int width, int height, int max_frames, bool* user_quit = nullptr,
+                        ScriptedInput* scripted = nullptr);
+// 无窗口播放：与窗口路径同一个门 / 同一套输入注入，只是呈现换成离屏导出（可关）。
+int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
+                      const HeadlessPlayOptions& options, int width, int height);
 
 }  // namespace app

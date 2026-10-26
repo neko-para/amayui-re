@@ -4,6 +4,7 @@
 #include <SDL3/SDL.h>
 
 #include "app.h"
+#include "input_script.h"
 
 #include "core/agf.h"
 #include "core/config.h"
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -58,11 +60,20 @@ int run_core_agf(const std::string& agf_path) {
     }
 }
 
-int run_core_install(const std::string& install_dir, const std::string& table_path,
-                     const std::string& config_path, const std::string& config_keys_path,
-                     std::size_t max_steps, std::uint32_t stop_at, int trace_steps, int play_frames,
-                     const std::string& logo_dir, int logo_stride, int logo_frames, bool footprint,
-                     bool skip_logo) {
+int run_core_install(const InstallRunOptions& options) {
+    const std::string& install_dir = options.install_dir;
+    const std::string& table_path = options.table_path;
+    const std::string& config_path = options.config_path;
+    const std::string& config_keys_path = options.config_keys_path;
+    const std::size_t max_steps = options.max_steps;
+    const std::uint32_t stop_at = options.stop_at;
+    const int trace_steps = options.trace_steps;
+    const int play_frames = options.play_frames;
+    const std::string& logo_dir = options.logo_dir;
+    const int logo_stride = options.logo_stride;
+    const int logo_frames = options.logo_frames;
+    const bool footprint = options.footprint;
+    const bool skip_logo = options.skip_logo;
     try {
         const core::Install install = core::open_install(core::path_from_utf8(install_dir));
         const auto& index = install.index;
@@ -146,6 +157,15 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
         machine.set_show_logo(!skip_logo);
         machine.load_root(root, 0);
         machine.stop_at_opcode(stop_at);
+        // 脚本化输入（宿主测试装置）：把 `--input-script` 归约成引擎要的四个量。
+        // ★ 无脚本 ⇒ 不接任何输入源（`0xff` 采样恒 0、`0x109` 恒 −100000），与窗口路径"没有设备"同口径。
+        std::optional<ScriptedInput> scripted;
+        if (!options.input_script.empty()) {
+            scripted.emplace(load_input_script(options.input_script));
+            scripted->bind(machine);
+            std::printf("[core] input-script events=%zu last=%ums\n", scripted->size(),
+                        scripted->last_time_ms());
+        }
         // 无窗口影片校验：从根脚本跑到 LOGO 的 `0x20f`，以后端时间推进，逐帧导出 GPU 合成。
         // `--logo-frames 0` = 不导出、只跑到影片收尾（CTest 用的确定性判据）。
         if (!logo_dir.empty()) {
@@ -294,12 +314,27 @@ int run_core_install(const std::string& install_dir, const std::string& table_pa
         // 颜色窗 / 影片都用宿主时钟，所以这里先把场景时钟对齐到 1000ms 再开窗。
         machine.reset_scene_clock(1000);
         machine.set_host_clock_ms(1000);
+        if (options.headless) {
+            // 无窗口播放（`--play-headless`）：同一套门 / 输入注入，呈现换成可选离屏导出。
+            HeadlessPlayOptions play = options.headless_play;
+            play.max_frames = options.play_frames > 0 ? options.play_frames : play.max_frames;
+            if (play.limit_steps == 0) play.limit_steps = max_steps;
+            const int code = run_headless_play(machine, scripted ? &*scripted : nullptr, play,
+                                               kWidth, kHeight);
+            if (machine.halted()) {
+                const auto& stop = machine.last_stop();
+                std::printf("[core] exit halted=1 reason=%d opcode=0x%X message=%s\n",
+                            static_cast<int>(stop.reason), stop.opcode, stop.message.c_str());
+            }
+            return code;
+        }
         if (!SDL_Init(SDL_INIT_VIDEO)) { log_sdl_error("SDL_Init(boot)"); return 1; }
         SDL_GPUDevice* device = create_gpu_device();
         SDL_Window* window = SDL_CreateWindow("emulator-cxx — boot", kWidth, kHeight, SDL_WINDOW_RESIZABLE);
         bool user_quit = false;
         if (device != nullptr && window != nullptr) {
-            run_windowed_frames(device, window, machine, kWidth, kHeight, play_frames, &user_quit);
+            run_windowed_frames(device, window, machine, kWidth, kHeight, play_frames, &user_quit,
+                                scripted ? &*scripted : nullptr);
         }
         // 引擎退出时保存玩家配置（`Reg::Save`）：窗口 Quit、根帧 `exit`、`abort`、错误对话框选“终止”
         // 都经主循环的退出捕获发送关闭消息，进入同一收尾；`--play-frames N` 的帧数上限不是引擎退出。

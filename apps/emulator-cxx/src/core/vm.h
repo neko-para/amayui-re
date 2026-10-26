@@ -150,6 +150,25 @@ struct SceneRecord {
 };
 
 // 影片对象（对象表的一格）：引擎状态 + 播放后端句柄（平台边界，核心不解释其形状）。
+// Font 的**条目登记表**里的一条（`0x1D2` 入队 / `0x1D3` 按 key 查）。
+// ★ 这是引擎状态（Font 侧），不是渲染缓冲：消费方未建模（残差）。域名词多半未取证 ⇒ 名字保持中性。
+struct FontEntry {
+    std::int32_t list = 0;    // +0x00 列表号
+    std::int32_t value = 0;   // +0x14 值
+    std::int32_t key = 0;     // +0x18 key
+    std::uint32_t flags = 0;  // +0x28 flags（bit0 = 脏槽曾非 0 / bit29 = 可被 0x1D3 命中）
+    std::string text;         // +0x2C 起的 std::string（本版没有写者）
+};
+
+// 消息窗口记录（`Engine+0x14D30` 的 Font 侧）里**本版建模的那一部分**：追加的正文 / 振り仮名 / 行数。
+// ★ 窗口记录的其余字段（行结束三格、按键区间、`[vtbl+8]` 载荷）未建模 ⇒ 残差。
+// ★ 键是**窗口号**（0 = 引擎默认槽）：`0x6E` / `0x196` 追加、`0x6F` 行结束、`0x301` 释放。
+struct TextWindowRecord {
+    std::string text;   // 追加的正文（`0x6E` 的 op2 / `0x196` 的 op2）
+    std::string rubi;   // 最近一次的振り仮名（`0x196` 的 op3，截断到 1023 字节）
+    std::int32_t lines = 0;
+};
+
 struct MovieRecord {
     bool present = false;
     bool started = false;  // 只有成功启动过才进「播完」判据 / 维持影片位
@@ -247,6 +266,32 @@ public:
     std::int32_t voice_volume(std::size_t group) const { return voice_volumes_[group]; }
     std::int32_t scalar_149() const { return scalar_149_; }
     std::int32_t scalar_21b() const { return scalar_21b_; }
+    // `0xC0` 读的引擎标量（观察口 + 测试注入；写者 `0xC3` 未实现）。
+    std::int32_t engine_aa9e4() const { return engine_aa9e4_; }
+    void seed_engine_aa9e4(std::int32_t value) { engine_aa9e4_ = value; }
+    // `0x142` / `0x1BB` 写的引擎格（观察口）。
+    std::int32_t engine_aab70() const { return engine_aab70_; }
+    std::int32_t font_text_gate() const { return font_text_gate_5ec7c_; }
+    // 字体槽表的观察口（`0x300` / `0x301`）。
+    std::int32_t font_slot_state(std::int32_t index) const {
+        const auto it = font_slot_state_.find(index);
+        return it == font_slot_state_.end() ? 0 : it->second;
+    }
+    std::int32_t font_slot_deadline(std::int32_t index) const {
+        const auto it = font_slot_deadline_.find(index);
+        return it == font_slot_deadline_.end() ? 0 : it->second;
+    }
+    std::int32_t font_slot_start(std::int32_t index) const {
+        const auto it = font_slot_start_.find(index);
+        return it == font_slot_start_.end() ? 0 : it->second;
+    }
+    const std::vector<FontEntry>& font_entries() const { return font_entries_; }
+    // 消息窗口的观察口（`0x6E` / `0x6F` / `0x196`）。
+    std::int32_t current_text_slot() const { return current_text_slot_; }
+    const TextWindowRecord* text_window(std::int32_t index) const {
+        const auto it = text_windows_.find(index);
+        return it == text_windows_.end() ? nullptr : &it->second;
+    }
     std::int32_t scalar_252() const { return scalar_252_; }
     std::int32_t scalar_88a() const { return scalar_88a_; }
     std::int32_t scalar_88b() const { return scalar_88b_; }
@@ -288,6 +333,10 @@ public:
     // 平台输入采样（`0xff` 的外部请求）；缺省 = 没有设备 ⇒ 输入字保持 0。
     using KeySampler = std::function<std::uint32_t()>;
     void set_key_sampler(KeySampler sampler) { key_sampler_ = std::move(sampler); }
+    // 滚轮增量（`0x10d` 读并清 `Engine+0x1E74`）：**宿主推**（窗口过程把 WM_MOUSEWHEEL 加进那一格）。
+    // ★ 符号与刻度属平台边界（0x10d 只规定"读出后清 0"）⇒ 本版按宿主给的原值累加。
+    void add_wheel_delta(std::int32_t delta) { wheel_accum_ += delta; }
+    std::int32_t wheel_delta() const { return wheel_accum_; }
     // 一个当前触点（`0x2fc` 的外部请求）；坐标是**客户区**坐标，由平台负责映射。
     struct TouchPoint {
         std::int32_t x = 0;
@@ -371,6 +420,9 @@ public:
         const auto it = global_int_.find(index);
         return it == global_int_.end() ? 0 : decode_int(it->second);
     }
+    // 诊断用：读**当前帧**的一个局部整型格（解码后）。缺格 = 0。
+    // ★ 这是宿主的**观察口**（`--watch-locals`），⛔ 不是脚本可见量，也不改任何状态。
+    std::int32_t local_int(std::uint32_t index) const;
     const std::unordered_map<std::uint32_t, MeshRecord>& meshes() const { return meshes_; }
     const std::map<std::uint32_t, SceneCommandRecord>& scene_commands() const { return scene_commands_; }
     std::map<std::uint32_t, SceneCommandRecord>& scene_commands_mut() { return scene_commands_; }
@@ -586,6 +638,8 @@ private:
     void op_208(const Instruction&);
     // 3D 记录取回（vm_ops_texture.cpp）：两个三元向量 + 平移分量
     void op_218(const Instruction&); void op_21a(const Instruction&); void op_228(const Instruction&);
+    // 写第一三元向量（vm_ops_texture.cpp）
+    void op_217(const Instruction&);
     // 记录复制（vm_ops_texture.cpp）
     void op_21d(const Instruction&);
     // 3D setter 族（vm_ops_texture.cpp）
@@ -597,6 +651,15 @@ private:
     void op_251(const Instruction&);
     // 引擎级状态与宿主请求（vm_ops_engine.cpp）
     void op_88(const Instruction&); void op_308(const Instruction&); void op_bf(const Instruction&); void op_b4(const Instruction&);
+    // 把引擎标量写进第 1 个操作数（vm_ops_engine.cpp）
+    void op_c0(const Instruction&);
+    // 引擎标量写入 / 文本显示门（vm_ops_engine.cpp）
+    void op_142(const Instruction&); void op_1bb(const Instruction&);
+    // 配置 getter / setter · 画面模式 getter（vm_ops_engine.cpp）
+    void op_2cc(const Instruction&); void op_2cd(const Instruction&); void op_2ce(const Instruction&);
+    void op_2e6(const Instruction&); void op_2e7(const Instruction&); void op_2e8(const Instruction&);
+    void op_2ea(const Instruction&);
+    std::int32_t display_mode_cache() const { return display_mode_cache_; }
     void op_b5(const Instruction&); void op_2c7(const Instruction&); void op_341(const Instruction&); void op_ae(const Instruction&);
     void op_2ee(const Instruction&); void op_10f(const Instruction&); void op_248(const Instruction&); void op_8b(const Instruction&);
     void op_261(const Instruction&); void op_260(const Instruction&); void op_25b(const Instruction&); void op_130(const Instruction&);
@@ -629,6 +692,8 @@ private:
     // 浮点族 / 时钟 / 参数 / 随机 / lea（vm_ops_numeric.cpp）
     void op_191(const Instruction&); void op_2d0(const Instruction&); void op_2d1(const Instruction&);
     void op_2d3(const Instruction&); void op_d0(const Instruction&); void op_74(const Instruction&);
+    // 排序置换（vm_ops_numeric.cpp）：三个数组基址 + 元素个数 → A 里写下标的升序置换
+    void op_12f(const Instruction&);
     void op_7f(const Instruction&); void op_60(const Instruction&); void op_63(const Instruction&);
     // 字体与文本（vm_ops_text.cpp）
     void op_2ec(const Instruction&); void op_2eb(const Instruction&); void op_1a4(const Instruction&); void op_76(const Instruction&);
@@ -636,9 +701,15 @@ private:
     void op_1aa(const Instruction&); void op_1a3(const Instruction&); void op_1a2(const Instruction&); void op_2db(const Instruction&);
     void op_78(const Instruction&); void op_71(const Instruction&); void op_1a5(const Instruction&); void op_197(const Instruction&);
     void op_75(const Instruction&);
+    // 文本长度 / 字体槽表 / Font 条目登记表（vm_ops_text.cpp）
+    void op_1a6(const Instruction&); void op_300(const Instruction&); void op_301(const Instruction&);
+    void op_1d2(const Instruction&); void op_1d3(const Instruction&);
+    // 消息窗口的文本追加 / 行结束（vm_ops_text.cpp）
+    void op_6e(const Instruction&); void op_6f(const Instruction&); void op_196(const Instruction&);
     // 输入 / 等待 / 空操作（vm_ops_io.cpp）
     void op_109(const Instruction&); void op_108(const Instruction&); void op_c8(const Instruction&); void op_cc(const Instruction&);
-    void op_cd(const Instruction&); void op_fb(const Instruction&); void op_24e(const Instruction&); void op_21c(const Instruction&);
+    // 滚轮（读并清 `Engine+0x1E74`）
+    void op_10d(const Instruction&);    void op_cd(const Instruction&); void op_fb(const Instruction&); void op_24e(const Instruction&); void op_21c(const Instruction&);
     void op_101(const Instruction&); void op_1a7(const Instruction&); void op_1a8(const Instruction&);
     // 输入采样 / 按键派发 / 命中查找 / 触点查询（vm_ops_io.cpp）
     void op_ff(const Instruction&); void op_100(const Instruction&); void op_12e(const Instruction&); void op_2fc(const Instruction&);
@@ -763,6 +834,28 @@ private:
     std::int32_t scalar_25b_b_ = 0;
     std::int32_t show_logo_ = 1;
     std::int32_t scalar_2ee_ = 0;
+    // `0xC0` 读的引擎标量（复位为 0；写者是 `0xC3`，本版未实现）。领域名未取证。
+    std::int32_t engine_aa9e4_ = 0;
+    // `0x142` 写的引擎标量（初值 1；读者 `sub_4765C0` = 判非 0）。领域名未取证。
+    std::int32_t engine_aab70_ = 1;
+    // `0x1BB` 写的文本门：0 = 正常显示，bit31 = 抑制（`0x1D2` 的守卫读它）。
+    std::int32_t font_text_gate_5ec7c_ = 0;
+    // 画面模式缓存（`0x2CE` 读 / `0x2CF` apply 时写回配置；初值 = 配置 `display:ScreenMode`）。
+    std::int32_t display_mode_cache_ = 0;
+    // 字体槽表的三个各 10 条的 dword 数组（`0x300` 写 A/B、`0x301` 清 C）。
+    // ★ 引擎**不做范围检查** ⇒ 这里用 map 表达"任何下标都落得下"，⛔ 不用定长数组冒充。
+    std::unordered_map<std::int32_t, std::int32_t> font_slot_state_;   // A（状态位 + 粘住位）
+    std::unordered_map<std::int32_t, std::int32_t> font_slot_deadline_; // B（期限 ms）
+    std::unordered_map<std::int32_t, std::int32_t> font_slot_start_;   // C（起点时刻）
+    // Font 的**条目登记表**（`0x1D2` 入队 / `0x1D3` 按 key 查；`0x1D0` 走对表，本版未实现）。
+    // ★ 这是引擎状态（Font 侧），不是渲染缓冲：消费方未建模（残差）。
+    std::vector<FontEntry> font_entries_;
+    std::vector<std::uint32_t> font_entry_dirty_;  // 每记录一个"脏槽"（`0x1D2` 读并清）
+    std::vector<std::pair<std::int32_t, std::int32_t>> font_pairs_;  // 8 字节对表（无写者）
+    std::int32_t font_pair_cursor_ = 0;            // 对表光标
+    // 消息窗口记录（`0x6E` / `0x196` 追加、`0x6F` 行结束、`0x301` 释放）。
+    std::unordered_map<std::int32_t, TextWindowRecord> text_windows_;
+    std::int32_t current_text_slot_ = 0;  // `Engine+0x7780C`（`0x6E` / `0x196` 写）
     std::int32_t scalar_10f_ = 0;
     std::int32_t scalar_248_ = 0;
     std::int32_t font_8b_ = 0;
@@ -772,6 +865,8 @@ private:
     std::int32_t key_total_ = 7;  // 引擎构造（Input[259]=7）建立的初值；0xfe 可覆盖
     std::int32_t save_version_flag_ = 0;
     std::int32_t input_a_ = 0;
+    // 滚轮累加格（`Engine+0x1E74`；`0x10d` 读并清 0）。
+    std::int32_t wheel_accum_ = 0;
     std::int32_t input_b_ = 0;
     std::uint32_t input_word_ = 0;
     // 平台输入采样的注入点（`0xff`）；空 = 没有设备。
