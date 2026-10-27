@@ -179,6 +179,13 @@ struct HeadlessPlayOptions {
     std::string dump_texture_out;
     // 诊断：只打这些 opcode 的取指（空 = 不打）。与 `trace_script` 叠加生效。
     std::vector<std::uint32_t> trace_opcodes;
+    // 诊断（`--sweep-missing`）：**没有 handler 的 opcode 不抛错，当空操作跳过并记账**，收口时按
+    // 首次出现顺序打印「这次走到的还没实现的 opcode」。用途是**一次跑遍界面把缺口全枚举出来**
+    // （否则一次停机只暴露一条）。⛔ 这不是引擎语义：跳过会让脚本行为失真，只能当发现工具。
+    bool sweep_missing = false;
+    // 诊断（`--dump-config <path>`）：收口时把**命名键表**写成 `key=value` 纯文本。
+    // 用途：让"界面点一下到底改了哪个配置键"变成可比对的产物（⛔ 不是引擎语义）。
+    std::string dump_config;
 };
 
 // 一次 `--install` 运行的全部输入（CLI 解析只在 main.cpp，这里只是搬运）。

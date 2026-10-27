@@ -447,6 +447,15 @@ public:
     void report_error(std::string text) { errors_.push_back(std::move(text)); }
     const std::vector<std::string>& errors() const { return errors_; }
     void clear_errors() { errors_.clear(); }
+    // ── 诊断（⛔ 不是引擎语义）：`--sweep-missing` 时把"没有 handler 的 opcode"" 记账后跳过 ──
+    void set_sweep_missing(bool value) { sweep_missing_ = value; }
+    bool sweep_missing() const { return sweep_missing_; }
+    /** 按首次出现顺序记一次「这个 opcode 还没 handler」；已记过只加计数。 */
+    void note_missing_opcode(std::uint32_t opcode);
+    /** 首次出现顺序的 (opcode, 次数)。 */
+    const std::vector<std::pair<std::uint32_t, std::size_t>>& missing_opcodes() const {
+        return missing_opcodes_;
+    }
     bool command_animating() const { return command_animating_; }
     void set_command_animating(bool value) { command_animating_ = value; }
     std::uint32_t render_now_ms() const { return render_now_ms_; }
@@ -664,6 +673,15 @@ private:
     void op_142(const Instruction&); void op_1bb(const Instruction&);
     // 配置 getter / setter · 画面模式 getter（vm_ops_engine.cpp）
     void op_2cc(const Instruction&); void op_2cd(const Instruction&); void op_2ce(const Instruction&);
+    void op_2cf(const Instruction&); void op_307(const Instruction&);
+    // 配置命名键 / 声音模式（`55-config` 与 `60-ops-voice`）：本批按取证补的 4 条。
+    void op_1b5(const Instruction&); void op_1b8(const Instruction&);
+    void op_1b9(const Instruction&); void op_1ba(const Instruction&);
+    // 音频请求族（0xb6 停止一个音效槽 / 0xb7 BGM 播放 / 0xb8 BGM 停止 / 0xba 循环变体）。
+    void op_b6(const Instruction&); void op_b7(const Instruction&); void op_b8(const Instruction&);
+    void op_ba(const Instruction&);
+    /** 显示模式请求的实现（`0x2cf` 转发到的入口；`0x2ce` 读的是同一个缓存格）。 */
+    void apply_display_mode(std::int32_t target);
     void op_2e6(const Instruction&); void op_2e7(const Instruction&); void op_2e8(const Instruction&);
     void op_2ea(const Instruction&);
     // 设置表 getter：声道音量（0xC5）/ 点击跳过效果（0x306）
@@ -671,6 +689,17 @@ private:
     // 声道音量 setter（0xC6）/ 声道开关 getter（0xC7）
     void op_c6(const Instruction&); void op_c7(const Instruction&);
     std::int32_t display_mode_cache() const { return display_mode_cache_; }
+    // 音频观察口（守卫用；⛔ 不是产品接口）。
+    std::int32_t se_slot_resource(std::size_t slot) const { return se_slot_resource_[slot]; }
+    std::int32_t bgm_track() const { return bgm_track_; }
+    std::int32_t bgm_param() const { return bgm_param_; }
+    std::int32_t bgm_progress() const { return bgm_progress_; }
+    std::size_t bgm_play_requests() const { return bgm_play_requests_; }
+    std::size_t bgm_stop_requests() const { return bgm_stop_requests_; }
+    std::size_t se_play_requests() const { return se_play_requests_; }
+    std::size_t se_stop_requests() const { return se_stop_requests_; }
+    bool sound_se_enabled() const { return sound_se_enabled_; }
+    bool sound_voice_enabled() const { return sound_voice_enabled_; }
     void op_b5(const Instruction&); void op_2c7(const Instruction&); void op_341(const Instruction&); void op_ae(const Instruction&);
     void op_2ee(const Instruction&); void op_10f(const Instruction&); void op_248(const Instruction&); void op_8b(const Instruction&);
     void op_261(const Instruction&); void op_260(const Instruction&); void op_25b(const Instruction&); void op_130(const Instruction&);
@@ -853,6 +882,23 @@ private:
     std::int32_t font_text_gate_5ec7c_ = 0;
     // 画面模式缓存（`0x2CE` 读 / `0x2CF` apply 时写回配置；初值 = 配置 `display:ScreenMode`）。
     std::int32_t display_mode_cache_ = 0;
+    // ── 音频（`60-ops-voice`）：只建模**引擎侧可见的格**与**向声音后端发出的请求计数**。 ──
+    // 引擎的可观察状态（取证：0xb4/0xb6/0xb7/0xb8/0xba 的 handler）：
+    //   · 每个音效槽"当前资源号"（0xb4 成功写、0xb6 清 0）；
+    //   · BGM 的 曲目 / 参数 / 淡变进度 三格（0xb7 写前两格、0xb8 清前两格）；
+    //   · "音乐淡变进行中"就是门字第 9 位（0xb7/0xb8/0xc2 置、主循环清）。
+    // ⛔ 声音本身不建模 —— 请求只计数（守卫靠它区分"发了/没发"）。
+    std::array<std::int32_t, 15> se_slot_resource_{};
+    std::int32_t bgm_track_ = 0;
+    std::int32_t bgm_param_ = 0;
+    std::int32_t bgm_progress_ = 0;
+    std::size_t bgm_play_requests_ = 0;
+    std::size_t bgm_stop_requests_ = 0;
+    std::size_t se_play_requests_ = 0;
+    std::size_t se_stop_requests_ = 0;
+    // `0x1ba` 的两个引擎开关格（构造期默认 **1 = 开**，取证 `0x491932` / `0x49194f`）。
+    bool sound_se_enabled_ = true;
+    bool sound_voice_enabled_ = true;
     // 字体槽表的三个各 10 条的 dword 数组（`0x300` 写 A/B、`0x301` 清 C）。
     // ★ 引擎**不做范围检查** ⇒ 这里用 map 表达"任何下标都落得下"，⛔ 不用定长数组冒充。
     std::unordered_map<std::int32_t, std::int32_t> font_slot_state_;   // A（状态位 + 粘住位）
@@ -928,6 +974,8 @@ private:
     std::uint32_t render_now_ms_ = 0;
     bool command_animating_ = false;
     std::vector<std::string> errors_;
+    bool sweep_missing_ = false;
+    std::vector<std::pair<std::uint32_t, std::size_t>> missing_opcodes_;
     std::unordered_map<std::int32_t, std::pair<std::int32_t, std::int32_t>> aux_a_;
     std::unordered_map<std::int32_t, std::pair<std::int32_t, std::int32_t>> aux_b_;
     std::array<std::array<std::int32_t, 7>, 11> cg_params_{};

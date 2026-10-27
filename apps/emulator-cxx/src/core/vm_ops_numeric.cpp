@@ -10,8 +10,9 @@ namespace core {
 
 void Machine::op_6c(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // fill-zero：按取址写 count 个 ENC(0)
-    const auto target = address_of(ops[0]);
+    // fill-zero（CORE-OPS-ARRAY-FILL-ZERO）：目标走**取址原语**（`address_of_operand`）——
+    // 引用族的落点是"它指向的那一格"，不是引用槽自己。⛔ 用 `address_of` 会把数据写进指针槽。
+    const auto target = address_of_operand(ops[0]);
     const auto count = read_int(ops[1]);
     const auto zero = encode_int(0);
     for (std::int32_t i = 0; i < count; ++i) store_raw(target + 4u * static_cast<std::uint32_t>(i), zero);
@@ -20,8 +21,8 @@ void Machine::op_6c(const Instruction& instruction) {
 
 void Machine::op_2d8(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // set-array-to
-    const auto target = address_of(ops[0]);
+    // set-array-to（CORE-OPS-ARRAY-SET-TO）：目标同样走取址原语。
+    const auto target = address_of_operand(ops[0]);
     const auto value = encode_int(read_int(ops[1]));
     const auto count = read_int(ops[2]);
     for (std::int32_t i = 0; i < count; ++i) store_raw(target + 4u * static_cast<std::uint32_t>(i), value);
@@ -30,9 +31,12 @@ void Machine::op_2d8(const Instruction& instruction) {
 
 void Machine::op_61(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // lookup-array
+    // lookup-array（CORE-OPS-ARRAY-LOOKUP）：落点必须是引用族；数组基址走取址原语。
     const auto index = read_int(ops[2]);
-    const auto base = address_of(ops[1]);
+    const auto base = address_of_operand(ops[1]);
+    if (!is_pointer_tag(ops[0].type)) {
+        throw CoreError("lookup-array-destination-not-reference-tag:" + std::to_string(ops[0].type));
+    }
     const auto width = (ops[0].type == 8 || ops[0].type == 14) ? 28u : 4u;
     write_pointer(ops[0], base + width * static_cast<std::uint32_t>(index));
     return;
@@ -40,11 +44,14 @@ void Machine::op_61(const Instruction& instruction) {
 
 void Machine::op_12c(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // lookup-array-2d：读序 4 → 3 → 5 → 2
+    // lookup-array-2d（CORE-OPS-ARRAY-LOOKUP-2D）：读序 4 → 3 → 5 → 2；基址走取址原语。
     const auto row_width = read_int(ops[3]);
     const auto row = read_int(ops[2]);
     const auto column = read_int(ops[4]);
-    const auto base = address_of(ops[1]);
+    const auto base = address_of_operand(ops[1]);
+    if (!is_pointer_tag(ops[0].type)) {
+        throw CoreError("lookup-array-2d-destination-not-reference-tag:" + std::to_string(ops[0].type));
+    }
     const auto width = (ops[0].type == 8 || ops[0].type == 14) ? 28u : 4u;
     const auto index = as_i32(as_u32(row) * as_u32(row_width) + as_u32(column));
     write_pointer(ops[0], base + width * static_cast<std::uint32_t>(index));
@@ -53,8 +60,8 @@ void Machine::op_12c(const Instruction& instruction) {
 
 void Machine::op_64(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // copy-local-array：块首 word 是 count，后接源 dword
-    const auto target = address_of(ops[0]);
+    // copy-local-array（CORE-OPS-ARRAY-COPY）：目标是**取址原语**给出的地址，块首 word 是 count。
+    const auto target = address_of_operand(ops[0]);
     const auto block = read_int(ops[1]);
     const auto* code = frame_mut().code.data();
     const auto size = frame_mut().code.size();
@@ -393,3 +400,5 @@ void Machine::op_1ce(const Instruction& instruction) {
 }
 
 }  // namespace core
+
+

@@ -103,6 +103,10 @@ int main(int argc, char** argv) {
                 options.headless_play.trace_opcodes.push_back(static_cast<std::uint32_t>(value));
                 cursor = (*end == ',') ? end + 1 : end;
             }
+        } else if (std::strcmp(argv[i], "--sweep-missing") == 0) {
+            options.headless_play.sweep_missing = true;
+        } else if (std::strcmp(argv[i], "--dump-config") == 0 && i + 1 < argc) {
+            options.headless_play.dump_config = argv[++i];
         } else if (std::strcmp(argv[i], "--dump-scene-at") == 0 && i + 1 < argc) {
             options.headless_play.dump_scene_at = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--dump-texture") == 0 && i + 1 < argc) {
@@ -142,6 +146,7 @@ int main(int argc, char** argv) {
                      "[--logo-stride N] [--logo-frames N]\n"
                      "      emulator-cxx --install <dir> --play-headless [--input-script <file>] "
                      "[--anchor-script <id>] [--expect-script <id>] [--tick-ms N] [--bmp <dir>]\n"
+                     "      （诊断）--play-headless --sweep-missing：缺 handler 的 opcode 记账后跳过\n"
                      "      emulator-cxx --smoke\n"
                      "      emulator-cxx --agf <file>\n"
                      "★ 没有「直接跳到 TITLE」之类的捷径：唯一的游戏流程是从根脚本跑 boot。\n"

@@ -78,6 +78,7 @@ bool write_texture_bmp(const core::TextureRecord& texture, const std::string& pa
 int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
                       const HeadlessPlayOptions& options, int width, int height) {
     const std::uint32_t tick = options.tick_ms == 0 ? 16 : options.tick_ms;
+    machine.set_sweep_missing(options.sweep_missing);
     std::uint32_t clock = machine.scene_clock_ms();
     bool anchored = options.anchor_script == 0;
     std::uint32_t anchor_clock = clock;
@@ -288,6 +289,40 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
                     scripted->exhausted() ? 1 : 0, static_cast<long long>(scripted->applied_until()));
     }
     dump_watch("final");
+    if (!options.dump_config.empty()) {
+        // ★ 诊断：把命名键表导成 `key=value` 纯文本（⛔ 不是引擎语义，是宿主观察口）。
+        //   用途：让「界面点一下到底改了配置库里的哪个键」变成可比对的产物。
+        std::FILE* file = std::fopen(options.dump_config.c_str(), "wb");
+        if (file == nullptr) {
+            std::fprintf(stderr, "[play] 配置导出打不开：%s\n", options.dump_config.c_str());
+        } else {
+            for (const auto& entry : machine.config().named()) {
+                const auto& value = entry.second;
+                switch (value.kind) {
+                    case core::ConfigValue::Kind::Int:
+                        std::fprintf(file, "%s=%d\n", entry.first.c_str(), value.integer);
+                        break;
+                    case core::ConfigValue::Kind::String:
+                        std::fprintf(file, "%s=%s\n", entry.first.c_str(), value.text.c_str());
+                        break;
+                    case core::ConfigValue::Kind::List:
+                        std::fprintf(file, "%s=<list:%zu>\n", entry.first.c_str(), value.list.size());
+                        break;
+                }
+            }
+            std::fclose(file);
+            std::printf("[play] config -> %s (%zu keys)\n", options.dump_config.c_str(),
+                        machine.config().named().size());
+        }
+    }
+    if (!machine.missing_opcodes().empty()) {
+        // ★ 诊断（`--sweep-missing`）：按**首次出现顺序**列出"这次走到过、但还没有 handler"的
+        //   opcode。跳过它们会让脚本行为失真 ⇒ 这张表只用来**枚举缺口**，不是"引擎能跑"的证据。
+        std::printf("[play] missing-opcodes=%zu\n", machine.missing_opcodes().size());
+        for (const auto& entry : machine.missing_opcodes()) {
+            std::printf("[play]   missing 0x%X hits=%zu\n", entry.first, entry.second);
+        }
+    }
     if (!machine.errors().empty()) {
         std::printf("[play] errors=%zu\n", machine.errors().size());
         for (std::size_t i = 0; i < machine.errors().size() && i < 8; ++i) {

@@ -5,6 +5,8 @@
 // ★ 本文件的切分是**按职责**聚合，不严格等于规范章节边界（章节归属以 spec 正文为准）。
 #include "core/vm.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 namespace core {
@@ -205,6 +207,15 @@ void Machine::op_12e(const Instruction& instruction) {
         }
     }
     write_int(ops[0], result);
+    // ★ 诊断（`EMULATOR_CXX_TRACE_HIT=1`）：把一次命中查找的输入与结果打出来。
+    //   ⛔ 宿主观察口，不是引擎语义（默认关闭、不改任何状态）。
+    if (std::getenv("EMULATOR_CXX_TRACE_HIT") != nullptr) {
+        std::fprintf(stderr,
+                     "[hit] start=%lld x=%lld y=%lld count=%lld boxes=0x%X px=0x%X py=0x%X -> %d\n",
+                     static_cast<long long>(start), static_cast<long long>(x),
+                     static_cast<long long>(y), static_cast<long long>(count), boxes_address,
+                     plane_x_address, plane_y_address, result);
+    }
     return;
 }
 

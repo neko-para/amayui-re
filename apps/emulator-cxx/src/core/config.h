@@ -85,6 +85,8 @@ public:
     const ConfigVocabulary& vocabulary() const { return vocabulary_; }
     std::size_t named_size() const { return named_.size(); }
     std::size_t script_size() const { return script_.size(); }
+    /** 命名键表的只读视图（宿主诊断用：把"界面到底写进配置库什么"导出来）。 */
+    const std::map<std::string, ConfigValue>& named() const { return named_; }
 
 private:
     static std::string script_key(char type, std::uint32_t index);

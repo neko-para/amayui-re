@@ -132,6 +132,7 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 | 键盘 / 鼠标（宿主） | `CORE-INPUT-MOUSE-POS`、`-MOUSE-BUTTON`、`-CALLBACK-REGISTER`、`-MOUSE-CALLBACK-PUMP` | 窗口路径把 SDL 的键盘 / 鼠标归约成输入字、客户区光标、按钮位图；`0x109` 光标（输入停用 ⇒ −100000；客户区外仍写真实坐标）、`0x108` 按钮位图（SDL 左右键归约到引擎位 0/1、输入停用 ⇒ 0）、`0xcc` 登记 + `0xcd` 时间闸派发（`elapsed >= interval`，含等号）。★ **不接摇杆**；物理键 ↔ 输入位号的映射是**宿主策略**（`window.cpp` 的 `kKeyBits` 一张表，⛔ 不是规范结论） |
 | 脚本化输入 / 无窗口播放 | （宿主策略，⛔ **不进 spec**） | `input_script.cpp` 把指令式时间线（`at move / down / up / key / wheel`）归约成四个采样口 + 滚轮增量；`play_headless.cpp` 按仿真 tick 推进（与窗口路径同一个门、同一套输入注入），可 `--expect-script` / `--require-script` 收口、可导出 BMP。`--anchor-script` 把时间线的 0 点锚在某个脚本**首次进入**时（否则 boot 期间就把光标搬好，TITLE 的"坐标变了才命中"不成立）。★ 与 `apps/emulator-new` 的 `parseInputScript` 同语法：两条实现线互为对照，**不互为真源** |
 | TITLE → Option → 设置界面 | `CORE-INPUT-*`、`CORE-OPS-*`（逐条见 `data/spec`） | 实测链：`0x12e` 命中框表（局部 205 / 基准 5、105）→ `0xa1/0xa2/0xa3` 菜单分派 → `0x3 call-script 52`（CONFIG.BIN）→ `0x3 call-script 20940`（CONFIG1.BIN）。CTest：`emulator-core-title-option`（进 52）· `...-config1`（进 20940）· `emulator-core-config-screen`（在 20940 里跑 30 万步不许停） |
+| 设置界面：命中 / 开关 / 分页 | `CORE-INPUT-HIT-TEST-12E`、`CORE-OPS-ARRAY-*`、`CORE-OPS-FORWARD-DISPLAY-MODE`、`-NAMED-KEY`、`CORE-CONFIG-NAMED-WRITE`、`-NAMED-AUTOTIME`、`CORE-OPS-AUDIO-*` | ★ **数组族五条的目标 / 基址走「取址原语」**（`0x61/0x12c/0x64/0x6c/0x2d8`；引用族的落点是"它指向的那一格"，不是引用槽）——这一条曾让右列控件的命中表一个框都建不出来。右列 ON/OFF ⇒ `0x2cf`（显示模式请求：目标 ∉ {0,1} 静默；三条早退都不写键；写 `display:ScreenMode` = 归一键值）。命名键：`0x307`（`system:EffectSkipOnClick`，缺键**不建键**）、`0x1b5`（`message:MessageSpeed` + 参数格同值）、`0x1b8/0x1b9`（`AutoMessageTime0/1` 读 / 写，越界只记日志）。声道：`0x1ba`（1..4 ⇒ `sound:*` 四支语义各不相同）。音频请求：`0xb6`（停一个音效槽，**后端不存在时连槽格都不清**）、`0xb7`（BGM 播放，**无同曲判据**）、`0xb8`（BGM 停止，**无在播判据**）、`0xba`（与 `0xb5` 同一请求、循环位 = 1）、`0xb4`（成功路径写「该槽资源号」）。CTest：`emulator-core-config-hover-hit`（命中 ≥ 0 / −1 两半）· `-config-toggle`（ON/OFF 的配置快照必须不同）· `-config-pages`（六页各：页内命中项数量 + 滚 6 格无停机） |
 | 帧 / 本地块 | `CORE-OPS-FRAME-CALL-FRAME`、`-LOCAL-SET-7B`、`-LOCAL-RET-7C`、`CORE-OPS-STATE-199` | `0x08` 切到**已装载**帧（只改父帧号 / ip / 长度槽，不清返回栈）；`0x7b` 两个目标位置（初值 −1）；`0x199` 进块（存档字带第 25/26 位、返回点 = `here + 1`、深度判据存**本帧身份编号**）；`0x7c` 离开（成功后门字带第 26 位 ⇒ `GateStalled` 是规范表现） |
 | 标量 / 数值 / 随机 / 时钟 / 取址 / 池拷贝 | `CORE-OPS-FLAG-CELLS`、`-MODE-BIT`、`-STATUS-CELL-READ`、`-LAYER-CELL`、`CORE-OPS-RANDOM-60`、`-CLOCK-D0`、`-PARAM-74-7F`、`-FLOAT-ABS`、`-SCALAR-FLOAT-ARITH`、`-POOL-MEMCPY`、`-POOL-LEA-63` | `0x19a/1b6/1b7` 三个**互不相同**的格（Y 归一成 0/1）、`0x1c7`（位 27 → 0/1）、`0x1cc`（状态格原值）、`0x1ad`（落点格复位值 −1）、`0x60`（计数器 → 随机 → 范围 → 落点；范围 0 先写 0 再抛）、`0xd0`（本迭代时钟）、`0x74/0x7f`（参数格，未写过 ⇒ 响亮失败）、`0x191/2d0/2d1/2d3`（浮点族）、`0x1b0`（池拷贝，按编码位模式）、`0x63`（lea：先取址、再校验目标必须是引用族） |
 | 3D 记录 | `CORE-OPS-SCENE3D-GET-VEC1` / `-GET-VEC2` / `-GET-LOCAL-TRANS` / `-21D` / `-21E` / `-21F` | `0x218/21a` 两个三元向量（**只查不建**，查不到写 0）、`0x228` 平移分量（标志最后写）、`0x21d` 三张表各自复制（成功才标脏）、`0x21e`（三个浮点 ÷100）、`0x21f`（轴角另存 + 度 → 弧度）。★ `0x21e/21f` 记录「已存在」位为 0 ⇒ 只建记录、一个字段都不写；旋转矩阵的元素布局 / 归一化规范**未成篇** ⇒ 实现选择（行主序 + Rodrigues，注释已标明） |
@@ -187,6 +188,15 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
     --input-script tests\input\title-option.txt --anchor-script 21092 --max-steps 400000 ^
     --watch-locals 1008,1009,1010,1013,1015 --trace-script 21092 --trace-opcodes 0xcd,0x12e,0x108,0x109 ^
     --bmp out\title-bmp --bmp-stride 60 --bmp-limit 4
+
+# 诊断：一次跑遍界面，把「走到过、但还没有 handler」的 opcode 按首次出现顺序列出来
+# （缺 handler 的指令当空操作跳过 ⇒ ⛔ 这不是引擎语义，只是**发现缺口**的工具）
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --skip-logo --play-headless ^
+    --input-script .tmp\probe\walk-b.txt --anchor-script 21092 --sweep-missing
+
+# 诊断：把命名键表导成 key=value 纯文本（"界面点一下到底改了哪个配置键"的可比对产物）
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --skip-logo --play-headless ^
+    --input-script apps\emulator-cxx\tests\input\config-toggle-on.txt --anchor-script 21092 --dump-config out\cfg.txt
 
 # 单个 AGF
 .\out\build\windows-x64\emulator-cxx.exe --agf "E:\Games\Eushully\天結\install\MI040.AGF"

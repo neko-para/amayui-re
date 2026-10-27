@@ -152,21 +152,33 @@ if(EMULATOR_CXX_INSTALL_DIR)
                 --skip-logo --play-headless
                 --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option.txt"
                 --anchor-script 21092 --require-script 20940 --tick-ms 16 --max-steps 300000)
-    # ★ 设置界面左列每个 tab 一条：点进该 tab 后跑 30 万步，**不许出现未实现 / 非法 opcode 停机**。
-    #   每条脚本 = TITLE 点 Option + 点该 tab（见 tests/input/title-option-tab-*.txt）。
-    foreach(tab system game chara ops adv)
-        add_test(NAME emulator-core-tab-${tab}
-            COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
-                    --skip-logo --play-headless
-                    --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option-tab-${tab}.txt"
-                    --anchor-script 21092 --require-script 20940 --tick-ms 16 --max-steps 400000)
-    endforeach()
-    # 「声音设定」打开的是**另一个**子脚本（CONFIG.BIN 按配置键走 20939/20940 两个变体）。
-    add_test(NAME emulator-core-tab-sound
-        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
-                --skip-logo --play-headless
-                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option-tab-sound.txt"
-                --anchor-script 21092 --require-script 20939 --tick-ms 16 --max-steps 400000)
+    # ★ 设置界面**每一页**一条：点该 tab（判据 = 停在期望脚本 **且** 该页命中项数量对得上）+
+    #   同一页滚 6 格（判据 = 一次都不许"未实现 / 非法 opcode"停机）。细节见 tests/config_pages.cmake。
+    #   ★ 旧版是"每个 tab 一条 add_test + 只查还在 20940 里"：那个判据**恒真**（点错 tab 也仍在同一个
+    #     脚本里），而坐标又整体偏了一个 tab ⇒ 一路绿却什么也没验。这里换成"数量 + 脚本 id + 滚动"。
+    add_test(NAME emulator-core-config-pages
+        COMMAND ${CMAKE_COMMAND}
+            -DEXE=$<TARGET_FILE:emulator-cxx>
+            -DINSTALL=${EMULATOR_CXX_INSTALL_DIR}
+            -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/tests
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_pages.cmake)
+    # ★ 设置界面的**命中查找**：光标在右侧 ON 按钮上 ⇒ 命中下标 ≥ 0；在列表正文里 ⇒ −1。
+    #   两半一起才有效（只有一半会"恒绿"）。红 = 右列控件又命中不到了（悬停 / 点击会一起失效）。
+    add_test(NAME emulator-core-config-hover-hit
+        COMMAND ${CMAKE_COMMAND}
+            -DEXE=$<TARGET_FILE:emulator-cxx>
+            -DINSTALL=${EMULATOR_CXX_INSTALL_DIR}
+            -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/tests
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_hit_test.cmake)
+    # ★ 设置界面的**开关真的写配置**：点 ON 与点 OFF 的配置快照必须不同、且 OFF ⇒ 0。
+    #   红 = 右列开关点了没反应（缺 handler / 写错键 / 走了早退却不写键）。
+    add_test(NAME emulator-core-config-toggle
+        COMMAND ${CMAKE_COMMAND}
+            -DEXE=$<TARGET_FILE:emulator-cxx>
+            -DINSTALL=${EMULATOR_CXX_INSTALL_DIR}
+            -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/tests
+            -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_toggle.cmake)
 endif()
 
 target_compile_features(emulator-cxx PRIVATE cxx_std_20)

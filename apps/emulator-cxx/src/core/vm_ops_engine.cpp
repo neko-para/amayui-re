@@ -101,6 +101,204 @@ void Machine::op_2ce(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_2cf(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 显示模式请求（0x2CF / `sub_4263D0` → `sub_413DD0`，规则 `CORE-OPS-FORWARD-DISPLAY-MODE`）：
+    // 第 1 个操作数 = **目标模式**（0 = 窗口 / 1 = 全屏）。
+    // ★ 引擎逐字读它**三次**（`0x4263F4` / `0x426401` / `0x42640A`）：第一次判 `< 0`、第二次判 `> 1`、
+    //   第三次才当实参。越界是**静默返回**（不 clamp、不记日志、不改任何格）。
+    // ★ 这个 handler 自己**不碰配置**；配置写在转发目标里（见 `apply_display_mode`）。
+    if (read_int(ops[0]) < 0) return;
+    if (read_int(ops[0]) > 1) return;
+    apply_display_mode(read_int(ops[0]));
+    return;
+}
+
+void Machine::apply_display_mode(std::int32_t target) {
+    // 三条**早退**都不写任何键（`sub_413DD0` 三支汇合到同一出口）：
+    //   ① `display:ForceScreen == 1` 且缓存非 0（强制全屏）；
+    //   ② 目标 == 缓存（请求已满足；含"目标 0、缓存 0"那一支）。
+    if (config_.get_int("display:ForceScreen") == 1 && display_mode_cache_ != 0) return;
+    if (target == display_mode_cache_) return;
+    const auto previous = display_mode_cache_;
+    // 引擎做的是"缓存翻转 new = (old == 0)"；在前置条件（目标 ∈ {0,1} 且 目标 != 旧值）下等价于
+    // "缓存 ← 目标"。★ 按翻转写，越界目标下不会凭空造出第三个值。
+    display_mode_cache_ = previous == 0 ? 1 : 0;
+    // ── 平台请求（窗口重建 / 分辨率与整窗尺寸 / `CALLBACK_WINDOW.BIN` 重载）──────────────────
+    // ⛔ core 不伪造窗口：这几步只登记为**残差**（`RES-OPS-2CF-PLATFORM`），这里不发任何请求。
+    // 更换路径的尾部才把键写成**归一后的**值（`0x4146F8 setnz`），不是目标原值。
+    config_.set_int("display:ScreenMode", display_mode_cache_ != 0 ? 1 : 0);
+    // 条件写：`set:SaveWinPos` 为真且**旧缓存**非 0 时，引擎还会写窗口位置两键；那两个值来自平台窗口，
+    // core 没有窗口 ⇒ 本版**不写**（残差 `RES-OPS-2CF-WINPOS`）。
+    return;
+}
+
+void Machine::op_1b5(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写消息速度（0x1B5 / `sub_41FED0`，规则 `CORE-CONFIG-NAMED-WRITE`）：
+    // 同一个值写**两个地方** —— 引擎参数格（`0x74/0x7f` 那一格，文本自动推进时长）与命名键
+    // `message:MessageSpeed`。★ 只写键不写格会让紧随其后的 `0x7f` 读到旧值。
+    // ★ 无范围检查、不夹取。
+    const auto value = read_int(ops[0]);
+    param_cell_ = value;
+    if (!config_.has_named("message:MessageSpeed")) {
+        report_error("named-key-missing:message:MessageSpeed");
+        return;
+    }
+    config_.set_int("message:MessageSpeed", value);
+    return;
+}
+
+void Machine::op_1b8(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 读"自动消息显示时长"某一档（0x1B8 / `sub_42D2F0`，规则 `CORE-CONFIG-NAMED-AUTOTIME`）：
+    // 档号 0 ⇒ `message:AutoMessageTime0`、1 ⇒ `AutoMessageTime1`，**值写进第 2 个操作数**。
+    // ★ 其它档号：**不写落点**、只记一行日志（不是写 0）。
+    const auto selector = read_int(ops[0]);
+    if (selector == 0) {
+        write_int(ops[1], config_.get_int("message:AutoMessageTime0"));
+    } else if (selector == 1) {
+        write_int(ops[1], config_.get_int("message:AutoMessageTime1"));
+    } else {
+        report_error("auto-message-time-selector-invalid:" + std::to_string(selector));
+    }
+    return;
+}
+
+void Machine::op_1b9(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写"自动消息显示时长"某一档（0x1B9 / `sub_41FF60`）：与 0x1b8 同一对键的**写入**版，
+    // 值 = 第 2 个操作数。★ 其它档号：**连第 2 个操作数都不读**、不写任何键、只记一行日志。
+    const auto selector = read_int(ops[0]);
+    if (selector == 0) {
+        config_.set_int("message:AutoMessageTime0", read_int(ops[1]));
+    } else if (selector == 1) {
+        config_.set_int("message:AutoMessageTime1", read_int(ops[1]));
+    } else {
+        report_error("auto-message-time-selector-invalid:" + std::to_string(selector));
+    }
+    return;
+}
+
+void Machine::op_1ba(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 声道开关（0x1BA / `sub_421200`，规则 `CORE-OPS-AUDIO-MODE`）：声道 **1..4**（1 基，与音量 0xC6 的
+    // 0..4 **不同**）⇒ 音乐 / 音效 / 语音 / 影片四个命名键。四条支的语义**互不相同**：
+    //   1 音乐：**符号阶梯**（键值 < 0 视为"关"）：开 ⇒ +3、关 ⇒ −3；**已在同侧 ⇒ 什么都不做**。
+    //   2 音效 / 3 语音：判**引擎开关格**是否已与请求同态 ⇒ 同态就 no-op（含"不发停通道请求"）；
+    //                   否则写格 + 写键（0/1）。
+    //   4 影片：键值**原样**写（非 0/1 归一），相同则 no-op。
+    // 其余声道：三样都不动、只记日志（不抛）。★ 命中支都会通知影片子系统（`set:DependMovieSound`），
+    // 那一步属平台/音频侧，本版只记账不建模。
+    const auto channel = read_int(ops[0]);
+    if (channel < 1 || channel > 4) {
+        report_error("set-sound-mode-channel-invalid:" + std::to_string(channel));
+        return;
+    }
+    const auto value = read_int(ops[1]);
+    switch (channel) {
+        case 1: {
+            const auto current = config_.get_int("sound:Music");
+            if (value != 0 && current < 0) {
+                config_.set_int("sound:Music", current + 3);
+            } else if (value == 0 && current >= 0) {
+                config_.set_int("sound:Music", current - 3);
+            }
+            return;
+        }
+        case 2: {
+            const bool on = value != 0;
+            if (sound_se_enabled_ == on) return;  // 同态：连"停通道"也不发
+            sound_se_enabled_ = on;
+            config_.set_int("sound:SE", on ? 1 : 0);
+            return;
+        }
+        case 3: {
+            const bool on = value != 0;
+            if (sound_voice_enabled_ == on) return;
+            sound_voice_enabled_ = on;
+            config_.set_int("sound:Voice", on ? 1 : 0);
+            return;
+        }
+        default: {
+            if (config_.get_int("sound:Movie") == value) return;
+            config_.set_int("sound:Movie", value);  // 原样，不归一
+            return;
+        }
+    }
+}
+
+void Machine::op_b6(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 停止一个音效槽（0x0B6 / `sub_420B80`，规则 `CORE-OPS-AUDIO-SE-STOP`）：op1 = 槽号 0..14。
+    // ★ 次序：**后端存在时**才释放该槽缓冲并把"该槽资源号"与同组另一格清 0；后端不存在时连清格都不做。
+    //   本版没有声音后端 ⇒ 按"后端不存在"处置（不清格、不发请求），并把"要释放"记成一笔待办。
+    const auto slot = read_int(ops[0]);
+    if (slot < 0 || slot > 14) {
+        // 引擎：写一段固定错误文本（dsStop），**但随后的两个清格仍按越界下标执行** —— 那属越界写，
+        // 本版不复制未定义行为，只记日志。
+        report_error("se-stop-slot-out-of-range:" + std::to_string(slot));
+        return;
+    }
+    se_stop_requests_ += 1;
+    return;
+}
+
+void Machine::op_b7(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // BGM 播放（0x0B7 / `sub_420C00`，规则 `CORE-OPS-AUDIO-BGM-RESTART`）：op1 = 曲目号。
+    // ★ 与 0xbf 的**唯一但决定性**差别：这条**没有"同曲同参就跳过"的判据** ⇒ 每次都发播放请求。
+    // ★ op1 == 0 的两支：已有曲目 ⇒ 用**旧曲目**重发；没有 ⇒ 等价于停止（但参数格已被写成 1）。
+    state_flags_ &= ~(1u << 9);  // 第 9 位（音乐淡变进行中）在这里被清
+    const auto track = read_int(ops[0]);
+    bgm_param_ = 1;              // 参数格**无条件**写 1（先于一切判据）
+    if (track == 0 && bgm_track_ == 0) {
+        bgm_track_ = 0;
+        bgm_stop_requests_ += 1;
+        return;
+    }
+    bgm_track_ = track == 0 ? bgm_track_ : track;
+    bgm_progress_ = 0;
+    bgm_play_requests_ += 1;
+    return;
+}
+
+void Machine::op_b8(const Instruction& instruction) {
+    (void)instruction;
+    // BGM 停止（0x0B8 / `sub_419720`，规则 `CORE-OPS-AUDIO-BGM-STOP`）：**没有操作数**。
+    // ★ 没有"是否在播"的判据 —— 重复调用会重复发停止请求；参数格**不被这条改动**。
+    state_flags_ &= ~(1u << 9);
+    bgm_track_ = 0;
+    bgm_stop_requests_ += 1;
+    return;
+}
+
+void Machine::op_ba(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 音效播放的**循环变体**（0x0BA / `sub_420BC0`，规则 `CORE-OPS-AUDIO-WAV` 的补充段）：
+    // 与 0xb5 是同一条播放请求，唯一差别是请求里的**循环位 = 1**（0xb5 = 0）。
+    const auto slot = read_int(ops[0]);
+    if (slot < 0 || slot > 14) {
+        report_error("se-play-slot-out-of-range:" + std::to_string(slot));
+        return;
+    }
+    se_play_requests_ += 1;
+    return;
+}
+
+void Machine::op_307(const Instruction& instruction) {    const Operand* ops = instruction.operands.data();
+    // 命名键 setter（0x307 / `sub_426AE0` → 配置库 vtable+0xC 写整，规则 `CORE-OPS-FORWARD-NAMED-KEY`）：
+    // 键逐字 = `system:EffectSkipOnClick`（与 0x306 的 getter 是同一键）。
+    // ★ **原值写入**：不归一成 0/1、不夹取。
+    // ★ 引擎的写入口**只覆盖已存在的键**（缺键 ⇒ 弹框 + 返回 0，**不建键**）⇒ 这里先判存在。
+    if (!config_.has_named("system:EffectSkipOnClick")) {
+        report_error("named-key-missing:system:EffectSkipOnClick");
+        return;
+    }
+    config_.set_int("system:EffectSkipOnClick", read_int(ops[0]));
+    return;
+}
+
 void Machine::op_2e6(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 读"自动消息间隔"某一档（0x2E6 / `sub_431110`）：op1 = 档号（0 / 1），op2 = **落点**（只写不读）。
@@ -190,12 +388,29 @@ void Machine::op_bf(const Instruction& instruction) {
 
 void Machine::op_b4(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    (void)read_int(ops[0]); (void)read_int(ops[1]); return;  // 音频装载请求
+    // 音频装载请求（0x0B4 / `sub_420B00`）：op1 = 资源标识、op2 = 槽号。
+    // ★ 取证补正了旧注释的"不改任何引擎数据"：装载成功路径会写"该槽当前资源号"这一格
+    //   （`0x4B5004`），而 0xb6 清的正是同一格 ⇒ 两者成对。
+    const auto resource = read_int(ops[0]);
+    const auto slot = read_int(ops[1]);
+    if (slot < 0 || slot > 14) {
+        report_error("se-load-slot-out-of-range:" + std::to_string(slot));
+        return;
+    }
+    se_slot_resource_[static_cast<std::size_t>(slot)] = resource;
+    return;
 }
 
 void Machine::op_b5(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    (void)read_int(ops[0]); return;  // 音频播放请求
+    // 音频播放请求（0x0B5 / `sub_420B40`）：op1 = 槽号；循环位 = 0（与 0xba 的唯一差别）。
+    const auto slot = read_int(ops[0]);
+    if (slot < 0 || slot > 14) {
+        report_error("se-play-slot-out-of-range:" + std::to_string(slot));
+        return;
+    }
+    se_play_requests_ += 1;
+    return;
 }
 
 void Machine::op_2c7(const Instruction& instruction) {

@@ -70,6 +70,16 @@ Frame& Machine::frame_mut() {
     return frames_[current_frame_];
 }
 
+void Machine::note_missing_opcode(std::uint32_t opcode) {
+    for (auto& entry : missing_opcodes_) {
+        if (entry.first == opcode) {
+            entry.second += 1;
+            return;
+        }
+    }
+    missing_opcodes_.emplace_back(opcode, 1);
+}
+
 void Machine::write_length(std::uint32_t words) {
     frame_mut().length_slot = words;
 }
@@ -97,6 +107,8 @@ void Machine::execute(const Instruction& instruction) {
         case 0x2CC: op_2cc(instruction); return;
         case 0x2CD: op_2cd(instruction); return;
         case 0x2CE: op_2ce(instruction); return;
+        case 0x2CF: op_2cf(instruction); return;
+        case 0x307: op_307(instruction); return;
         case 0x2E6: op_2e6(instruction); return;
         case 0x2E7: op_2e7(instruction); return;
         case 0x2E8: op_2e8(instruction); return;
@@ -106,6 +118,14 @@ void Machine::execute(const Instruction& instruction) {
         case 0xC7: op_c7(instruction); return;
         case 0x306: op_306(instruction); return;
         case 0x10D: op_10d(instruction); return;
+        case 0x1B5: op_1b5(instruction); return;
+        case 0x1B8: op_1b8(instruction); return;
+        case 0x1B9: op_1b9(instruction); return;
+        case 0x1BA: op_1ba(instruction); return;
+        case 0xB6: op_b6(instruction); return;
+        case 0xB7: op_b7(instruction); return;
+        case 0xB8: op_b8(instruction); return;
+        case 0xBA: op_ba(instruction); return;
         case 0x1BB: op_1bb(instruction); return;
         case 0x1A6: op_1a6(instruction); return;
         case 0x300: op_300(instruction); return;
@@ -428,10 +448,18 @@ bool Machine::step() {
         write_length(2 * row->argc + 1);
         execute(instruction);
     } catch (const std::exception& e) {
-        halted_ = true;
-        stop_.reason = StopReason::Error;
-        stop_.message = e.what();
-        return false;
+        // 诊断扫场（`--sweep-missing`）：缺 handler 不中止，记账后当空操作继续 —— 一次跑遍界面
+        // 就能把所有缺口按首次出现顺序列出来。⛔ 这不是引擎语义（跳过会让脚本失真）。
+        const std::string what = e.what();
+        const std::string prefix = "opcode-not-implemented:";
+        if (sweep_missing_ && what.compare(0, prefix.size(), prefix) == 0) {
+            note_missing_opcode(opcode);
+        } else {
+            halted_ = true;
+            stop_.reason = StopReason::Error;
+            stop_.message = what;
+            return false;
+        }
     }
     if (is_scene_mutating(opcode)) scene_dirty_ = true;
 
@@ -486,3 +514,5 @@ RunResult Machine::run(std::size_t max_steps) {
 }
 
 }  // namespace core
+
+
