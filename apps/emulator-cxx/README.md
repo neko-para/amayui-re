@@ -11,6 +11,8 @@
 - 影片：`third_party/pl_mpeg`（**vendored 单文件**，MIT，MPEG-1 program stream + 只视频）；
   FFmpeg 仍留作可选 feature，但当前没有用到它。
 
+> 覆盖范围与显式限制（字体 / 全屏 / 已知限制）见 [SCOPE.md](SCOPE.md)。
+
 ## 目录
 
 ```text
@@ -137,7 +139,7 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 | 池翻页 | `SPC-POOL-MEMFLIP` | `0x6d` 六个全局族主 / 备**整体对调**（两组 bank 共用同一张表、键带 bank；不搬数据）；`0x09` 只清**当前选中 bank**。★ 发行数据把 `set:EnableMemFlip` 显式置 0 ⇒ 本作的翻页指令**只有异常支可达** |
 | 存档族 | `CORE-OPS-SAVE-WRITE`、`-READ`、`-FILES`、`FMT-SAVE-SLOT`、`FMT-SAVE-STH` | `0x19e` 写（覆写确认只在「已存在且头读不回来」时；成功 = **0**）、`0x1a0` 读头（0/1/2 + 七个字段）、`0x1a1` 读回（打不开 ⇒ 1；成功**不写** op1；打开成功后**无条件**重编码全局整型池）、`0x1ab`/`0x1ac` 删 / 拷（两文件都尝试、后一步覆盖前一步）、`0x1ae`/`0x1af` 缩略图写 / 读（`.STH` 里的 BMP；先建空文件后捕捉、捕捉失败不删）。★ 文件系统与表面捕捉全走 `core/save_host.h` 的 `SaveHost`（核心不碰 `std::fstream`）；`0x19e` 的写侧内容构造与 `0x1a1` 的整档读回是另几张单的 seam（没注入就响亮失败） |
 | 控制流 / 执行区间 / 纹理查询 | `CORE-OPS-FRAME-EXIT-SCRIPT`、`CORE-OPS-RUN-BRACKET`、`CORE-OPS-TEXTURE-SIZE` | `0x09` 丢全部帧 + 复位引擎级状态 + 以 id 0 重装根脚本；`0x1f4/0x1f5` 区间忙 / 嵌套计数（忙标记与 `0x20c` 的「别处驱动」是同一格）；`0x208` 纹理逻辑尺寸（>999 上报、槽空静默） |
-| 离屏文字 | `CORE-OPS-RENDER-TEXT-204` | Shift-JIS（平台代码页 / iconv）→ FreeType 字形；主色 / 副色 / 绘制模式 / 对位状态来自字体对象。★ **宿主策略**：引擎的缓存 ascent 量的是重建入口硬编码的参考字体 "ＭＳ ゴシック"，本 emulator 改用渲染字体（Amayui CN）量度（引擎在赌两者 ascent 相近，替换字体后不成立；见 `text_raster.cpp` 与 ops-forensics §28）。投影偏移是引擎内建常量 (1,1)（FontVWindow 样式表只抄当前值、应用借用后归还，见 §29）。**字形按引擎的 1-bit GGO_BITMAP + max/覆写合成**（`sub_46D9F0`；AA 由配置 `set:EnableAntiFont`/`message:UseAntiFont` 决定，默认关）——灰度 AA + alpha-over 会把两趟在笔画缝处相加，产生重影（§32） |
+| 离屏文字 | `CORE-OPS-RENDER-TEXT-204` | Shift-JIS（平台代码页 / iconv）→ FreeType 字形；主色 / 副色 / 绘制模式 / 对位状态来自字体对象。★ **宿主策略**：引擎的缓存 ascent 量的是重建入口硬编码的参考字体 "ＭＳ ゴシック"，本 emulator 改用渲染字体（Amayui CN）量度（引擎在赌两者 ascent 相近，替换字体后不成立；见 `text_raster.cpp` 与 ops-forensics §28）。投影偏移是引擎内建常量 (1,1)（FontVWindow 样式表只抄当前值、应用借用后归还，见 §29）。**字形格式按引擎的 AA 开关**（`set:EnableAntiFont`+`message:UseAntiFont` → 1-bit / GRAY4 / GRAY8；级数 `message:AntiFontLevel`），合成按 `sub_46D9F0` 的 max/覆写（§32/§33）。**字形来源分流**：`EMULATOR_CXX_GLYPH_ATLAS` 指向的离线 bake 数据存在时**完全按引擎**——格式由 AA 配置（`set:EnableAntiFont` + `message:UseAntiFont` + `AntiFontLevel`）决定，两趟照引擎；无 bake 时走两个宿主方案：**同色**（fake bold）⇒ 1-bit mono + **单趟**，**异色**（shadow）⇒ 默认灰度 + **两趟**。无 bake 的**同色**默认用 **Bold 字体 + 默认灰度 AA + 单趟**；`EMULATOR_CXX_SAME_COLOR_MONO=1` 回到 normal + 1-bit mono + 单趟（用于对比）。bake loader 目前是 stub（会警告，仍用 FT 字形）；见 §37/§38 |
 | 源矩形窗 | `CORE-OPS-SCENE3D-239` | `0x239` 步进 / 延迟 / 到期回写四条边 |
 | 安装文件切片 | `CORE-FS` 临时引导 | 松散文件优先，否则 `DATA*.ALF` 按 offset/length 切片 |
 

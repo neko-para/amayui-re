@@ -2023,3 +2023,71 @@ n < 10 走注入的 `sleepHost`；`SLEEP_BIT` 服务分支按 `now >= sleepUntil
 
 **下次 review 要问什么**：1-bit vs AA 的配置接线（`set:EnableAntiFont`/`message:UseAntiFont`）；
 GDI 掩码与 FreeType 掩码的 1px 差是否要 autohint 逼近；模式 2 的第二趟位图（`var_78`）未逐字追。
+
+## 七十七、AA 开关 → 字形格式（0x204）（2026-10-27）
+
+**错误类型**：C/A（spec 把"字形位图"整体推给平台，漏了引擎的 **AA 开关** 与 **格式选择**）。
+
+**可观察量**：真机截图（系统页）文字平滑、第二趟几乎不可见；实现用 1-bit 硬掩码 + 第二趟 ⇒ 明显粗/硬。
+**取证**：`Font+0x55C` 是 0x204 的模式（默认 1，`0x78` 写；第二趟在真机存在）；漏的是 `Font+0x548` 的
+AA 开关（`set:EnableAntiFont`+`message:UseAntiFont` → 1-bit / GRAY4 / GRAY8；级数 `message:AntiFontLevel`
+→ `+0x35584`）。本机配置 `UseAntiFont=0` ⇒ 1-bit；真机截图对应 `UseAntiFont=1`。
+
+**处置**：spec 的 0x204 增加"**字形位图的请求格式** = 1-bit 默认 / 4 位或 8 位灰度（按 AA 开关 + 级数）；
+⛔ 不是平台自由"；实现读配置并分别走 1-bit / GRAY4 / GRAY8（量化）+ 引擎的 max/覆写合成。
+**仍未定**：真机 Windows 的 `UseAntiFont`/`AntiFontLevel` 实际值；GDI 掩码 vs FreeType 掩码的 1px 差（平台）。
+**下次 review 要问什么**：AA 开关的配置键在 spec 的措辞（总开关 vs 子开关）；GRAY4/GRAY8 的级数是否还有
+16bpp 的 α 修正差异（`0x46DB8E` 支）。
+
+## 七十八、策略 A：真 mono + 每字一次栅格（2026-10-27）
+
+**决策**：用户明确不追求字体逐像素对齐，只要基本样式/粗细一致；阈值采样（208）不是策略。按讨论改为策略 A。
+**实现**：1-bit 走 `FT_LOAD_TARGET_MONO` + `FT_RENDER_MODE_MONO`（无阈值）；AA 走 `FT_RENDER_MODE_NORMAL`
++ GRAY4/GRAY8 量化（0..16 / 0..64 = 17/65 级，再展开 0..255）；每字**只加载一次**，两趟同一 bitmap；
+advance/bearing 原 glyph；合成 max/覆写。移除 208 的默认与"覆 ink 200..299"阈值守卫；保留 alpha 0/255、
+合成幂等/覆写守卫。**1px 差**（FT mono 336 vs GDI 262）归平台栅格化（spec discard），不再采样补偿。
+**spec**：格式规则（1-bit/GRAY4/GRAY8、AA 开关）不变；`RES-RENDER-TEXT-GLYPH-RASTER` 仍 discard。
+**下次 review**：GRAY4/GRAY8 的 17/65 级展开是否与引擎 16bpp/32bpp 两条路径都一致（16bpp 的 4 位 α 是残差）。
+
+## 七十九、Wine 参考核实（策略 A 的对照）（2026-10-27）
+
+**目的**：核实 research3 对 Wine `dlls/win32u/freetype.c` 的 GGO 结论。**方法**：`git clone --depth 1
+--filter=blob:none --sparse` Wine master（f343ca6，2026-10-26），只读 `dlls/win32u`。
+
+**核实结果**：research3 的 1–7 基本成立（load flags、manual `FT_Outline_Get_Bitmap`、pitch、EBDT、ppem、
+v35<2.8.1、合成粗体、GRAY4/8 的 17/65、AA 默认 GGO_BITMAP）。**补正**：漏了 `FT_LOAD_PEDANTIC` + 无 hint 重试；
+Wine 的 scalable 路径 `width=0`（不用 lfWidth），故"ppem 算错"不适用于我们（`lfHeight=-size ⇒ ppem=size`）；
+合成粗体是 bbox **width +1**，不是 advance；真 mono 下 `FT_Render_Glyph(MONO)` 与 `FT_Outline_Get_Bitmap(MONO)`
+是同一个 FT 光栅器（差别在 flags/bbox，不在阈值）。
+
+**对实现的处置**：`load_glyph` 采用 Wine 的 flags（`IGNORE_GLOBAL_ADVANCE_WIDTH`、`TARGET_MONO/NORMAL`、
+非 BITMAP 加 `NO_BITMAP`、`PEDANTIC`、失败退 `NO_HINTING`）；实测覆 ink 不变（336/0）⇒ 1px 是 FT ftraster vs
+GDI 的差（Wine 同样存在）。**A 保持默认/兜底；C（Windows GDI 提供者/离线 bake）才是精确路径**；B（阈值）废弃。
+
+## 八十、显式宿主 profile：负向 outline embolden（替换 A 的"只近似"）（2026-10-27）
+
+**决策**：用户接受显式特殊处理；要求 FT 输出更细的 1-bit，而不是灰度阈值采样。
+**实现**：`load_glyph` 在 `FT_Load_Glyph`（Wine flags）后、render 前，对轮廓做
+`FT_Outline_Embolden(&outline, -48)`（0.75px；Wine fake bold 的同一 API 反向），仅 1-bit；advance/bearing 不变。
+**数据**（覆）：不 thin 336/right 0；0.5px 305/3；**0.75px 278/1**；1px 281/2（整字洞 33，细笔画开始碎）；
+GDI 参考 262/2。AA 不加（AA+thin 过淡，AA 318）。
+**门禁**：覆 20px 模式 1 同色的 1-bit ink ∈ 200..319（不 thin 336 红，默认 278 绿）。**spec 不改**（逐像素属
+平台栅格化，discard）；这是宿主 profile，不是引擎语义。**1px 仍近似**；精确靠 C（Windows GDI/bake）。
+**下次 review**：0.75px 是否对全部字号/字重都合适（还是按 ppem 比例）；细笔画（1px）在 0.75px 下的完整性。
+
+## 八十一、字形来源策略：bake 2-pass / FT 1-pass（2026-10-27）
+
+**决策**：§36 的 thin 因重新引入两趟 gap 被撤回；改为按来源分流：有离线 bake（`EMULATOR_CXX_GLYPH_ATLAS`
+文件存在）⇒ 离线字形 + 引擎两趟；无 bake ⇒ FT 默认 render（灰度 AA）+ **单趟**（无阴影）。
+**现状**：bake loader 仍是 stub（警告 + FT 字形 + 两趟），用于体验另一界面有/无阴影。实测覆：无 bake 177/4，
+bake-sim 318/1。**守卫**：无 bake 时模式 1/0 的纹理墨迹相等。旧 1-bit/AA/thin/Wine flags 路径移除。
+**spec 不改**：引擎的两趟语义在 bake 路径；FT 回退是宿主无阴影近似（逐像素仍 discard）。
+**下次 review**：bake loader（C：Windows GDI/离线 atlas）接入；另一界面阴影与真机对比。
+
+## 八十二、字形来源策略（用户口径，2026-10-27 修正）
+
+**有 bake**：完全按引擎——离线字形；格式由 AA 配置（1-bit/GRAY4/GRAY8）决定；两趟/模式 2/3 照引擎；
+**不**按颜色选择。**无 bake**（宿主近似）：同色 ⇒ 1-bit mono + 单趟；异色 ⇒ 默认灰度 + 两趟。
+**实测**（覆）：无 bake 同色 199/3；无 bake 异色 318/1；有 bake（config 0）336/0。**守卫**：无 bake 同色 alpha 0/255、
+无 bake 异色含中间值、有 bake 异色仍 0/255。**口径**：无 bake 的颜色选择是宿主视觉策略，不是引擎；bake 的格式是
+引擎语义。spec 不改。**下次 review**：真实 bake 数据接入后"完全按引擎"的复现；无 bake 两方案的观感。

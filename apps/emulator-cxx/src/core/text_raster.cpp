@@ -1,5 +1,6 @@
 #include "core/text_raster.h"
 
+#include <cstdio>
 #include <cstdlib>
 
 #include "core/color.h"
@@ -201,21 +202,15 @@ void compose_texel(TextureRecord& texture, int x, int y, const Rgb& color, int a
     texel[3] = static_cast<std::uint8_t>(out_alpha);
 }
 
-void draw_glyph(TextureRecord& texture, FT_Face face, std::uint32_t codepoint, int pen_x, int pen_y,
-                const Rgb& color) {
-    // 引擎默认 1-bit（GGO_BITMAP）。`EMULATOR_CXX_GLYPH_AA` 可切回灰度 AA（实验/对照用；
-    // 引擎的 AA 分支是 GRAY4/GRAY8，且同样用 max 合成，不是 alpha-over）。
-    const bool mono = std::getenv("EMULATOR_CXX_GLYPH_AA") == nullptr;
-    FT_Int32 flags = FT_LOAD_RENDER;
-    if (mono) {
-        flags |= FT_LOAD_TARGET_MONO;
-        if (std::getenv("EMULATOR_CXX_MONO_AUTOHINT") != nullptr) flags |= FT_LOAD_FORCE_AUTOHINT;
-    }
-    if (FT_Load_Char(face, codepoint, flags) != 0) return;
-    const FT_GlyphSlot slot = face->glyph;
-    const FT_Bitmap& bitmap = slot->bitmap;
-    const int origin_x = pen_x + slot->bitmap_left;
-    const int origin_y = pen_y - slot->bitmap_top;
+// ★ 无离线 bake 数据时的宿主回退：FreeType 的**默认 render**（灰度 AA），并且**只画一趟**
+//   （不画副色/径向/主色二遍 = 无阴影）。这是用户选定的回退形态，见 ops-forensics §37。
+bool load_glyph(FT_Face face, std::uint32_t codepoint, bool mono) {
+    const FT_Int32 flags = FT_LOAD_RENDER | (mono ? FT_LOAD_TARGET_MONO : FT_LOAD_TARGET_NORMAL);
+    return FT_Load_Char(face, codepoint, flags) == 0;
+}
+
+void blit_glyph(TextureRecord& texture, const FT_Bitmap& bitmap, int origin_x, int origin_y,
+                const Rgb& color, bool quantize, bool gray8) {
     for (unsigned row = 0; row < bitmap.rows; ++row) {
         for (unsigned column = 0; column < bitmap.width; ++column) {
             int value = 0;
@@ -227,10 +222,24 @@ void draw_glyph(TextureRecord& texture, FT_Face face, std::uint32_t codepoint, i
                 value = bitmap.buffer[static_cast<std::size_t>(row) * bitmap.pitch + column];
             }
             if (value == 0) continue;
+            if (quantize && bitmap.pixel_mode != FT_PIXEL_MODE_MONO) {
+                const int levels = gray8 ? 64 : 16;
+                const int level = (value * levels + 127) / 255;
+                value = (level * 255 + levels / 2) / levels;
+                if (value == 0) continue;
+            }
             compose_texel(texture, origin_x + static_cast<int>(column),
                           origin_y + static_cast<int>(row), color, value);
         }
     }
+}
+
+// 离线 bake 数据的**存在性探测**（loader 尚未实现；见 §37）。有数据时保留引擎的两趟语义。
+bool baked_glyphs_available() {
+    const char* path = std::getenv("EMULATOR_CXX_GLYPH_ATLAS");
+    if (path == nullptr || path[0] == '\0') return false;
+    std::error_code ec;
+    return std::filesystem::exists(std::filesystem::path(path), ec);
 }
 
 #endif  // EMULATOR_CXX_HAVE_TEXT
@@ -270,13 +279,27 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     if (texture == nullptr || texture->rgba.empty() || sjis.empty()) return false;
 
     const int size = machine.font_size() > 0 ? machine.font_size() : 24;
-    const bool bold = machine.font_metric_a() >= 700;
+    // 引擎的 AA 开关（bake 路径按它选格式：1-bit / GRAY4 / GRAY8）。无 bake 时不用它。
+    const bool anti_alias = machine.config().get_int("set:EnableAntiFont") != 0 &&
+                            machine.config().get_int("message:UseAntiFont") != 0;
+    const bool gray8 = machine.config().get_int("message:AntiFontLevel") == 1;
+    const int draw_mode = machine.font_draw_mode();
+    const Rgb primary = decode_color(machine.font_primary_color());
+    const Rgb secondary = decode_color(machine.font_secondary_color());
+    const bool baked = baked_glyphs_available();
+    const bool same_color = primary.r == secondary.r && primary.g == secondary.g &&
+                            primary.b == secondary.b;
+    // ★ §38：有 bake ⇒ 完全按引擎（格式看 AA 配置、两趟照引擎）；无 bake ⇒ 同色默认 **Bold 字体 +
+    //   默认灰度 AA + 单趟**（`EMULATOR_CXX_SAME_COLOR_MONO` 回到 normal + mono），异色 灰度+两趟。
+    const bool mono_same_switch = std::getenv("EMULATOR_CXX_SAME_COLOR_MONO") != nullptr;
+    const bool use_bold = machine.font_metric_a() >= 700 ||
+                          (!mono_same_switch && !baked && same_color);
     std::string path = default_font_path();
     if (path.empty()) {
         if (error != nullptr) *error = "font-path-missing";
         return false;
     }
-    if (bold) {
+    if (use_bold) {
         // 粗体文件不存在时退回常规字面；字重是字体对象的一格，不改变字符编码。
         const std::string candidate = bold_font_path(path);
         std::error_code ignored;
@@ -298,9 +321,6 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     //   再按 MS Gothic 量会把模式 1 的基线压低约 2px。引擎侧的参考字体行为仍记录在 spec/取证。
     const int current_ascent = static_cast<int>(face->size->metrics.ascender >> 6);
     const int cached_ascent = current_ascent;  // emulator：用渲染字体（Amayui CN）量度
-    const int draw_mode = machine.font_draw_mode();
-    const Rgb primary = decode_color(machine.font_primary_color());
-    const Rgb secondary = decode_color(machine.font_secondary_color());
 
     int pen_x = x;
     // ★ `0x204` 的 y 语义 = **字形格顶**（不是基线）。引擎把 ascent 加两次、减一次
@@ -329,26 +349,56 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     // （配置词表里没有 shadow/offset 键）；字段语义尚未逐字核。本模型没有该资源记录，用构造初值 (1,1)；副色与主色
     // 同色时（CONFIG1.BIN 的标签把两者都设成白）它就是 1px 膨胀 —— 这是脚本 + 引擎默认的直接结果，
     // ⛔ 不要在这里加"同色就跳过"的引擎没有的分支。真机/资源侧的偏移值见 ops-forensics §29。
+    bool mono = false;
+    bool quantize = false;
+    if (baked) {
+        // 有 bake ⇒ 完全按引擎：格式看 AA 配置。
+        mono = !anti_alias;
+        quantize = anti_alias;
+    } else {
+        // 无 bake + 同色：默认 Bold + 默认灰度 AA；`EMULATOR_CXX_SAME_COLOR_MONO=1` 回到 normal + 1-bit mono。
+        mono = same_color && mono_same_switch;
+        quantize = false;
+    }
+    const bool one_pass = !baked && same_color;
+    if (baked) {
+        static bool warned = false;
+        if (!warned) {
+            std::fprintf(stderr,
+                         "[text] baked atlas present (%s) but loader is a stub; using FT glyphs + 2-pass\n",
+                         std::getenv("EMULATOR_CXX_GLYPH_ATLAS"));
+            warned = true;
+        }
+    }
     for (const std::uint32_t codepoint : decode_sjis(sjis)) {
-        // 投影偏移的起点：模式 0 只画主色；1 = 副色 (+1,+1) 再主色；2 = 主色两遍；3 = 多趟径向副色。
-        if (draw_mode == 1) {
-            draw_glyph(*texture, face, codepoint, pen_x + 1, baseline + 1, secondary);
-        } else if (draw_mode == 3) {
-            for (int step = 1; step <= 4; ++step) {
-                draw_glyph(*texture, face, codepoint, pen_x + step, baseline + step, secondary);
-                draw_glyph(*texture, face, codepoint, pen_x - step, baseline - step, secondary);
-            }
-        }
-        draw_glyph(*texture, face, codepoint, pen_x, baseline, primary);
-        if (draw_mode == 2) {
-            draw_glyph(*texture, face, codepoint, pen_x, baseline, primary);
-        }
-        if (FT_Load_Char(face, codepoint, FT_LOAD_DEFAULT) != 0) {
+        if (!load_glyph(face, codepoint, mono)) {
             pen_x += size / 2;
             continue;
         }
-        int advance = static_cast<int>(face->glyph->advance.x >> 6);
-        if (advance <= 0) advance = size / 2;
+        const FT_GlyphSlot slot = face->glyph;
+        const int advance = static_cast<int>(slot->advance.x >> 6) > 0
+                                ? static_cast<int>(slot->advance.x >> 6)
+                                : size / 2;
+        const int origin_x = pen_x + slot->bitmap_left;
+        const int origin_y = baseline - slot->bitmap_top;
+        if (one_pass) {
+            // 无 bake + 同色：mono + 单趟（无阴影）。
+            blit_glyph(*texture, slot->bitmap, origin_x, origin_y, primary, quantize, gray8);
+        } else {
+            // 有 bake（引擎真实）或无 bake + 异色（阴影）：两趟/模式 2、3 照引擎。
+            if (draw_mode == 1) {
+                blit_glyph(*texture, slot->bitmap, origin_x + 1, origin_y + 1, secondary, quantize, gray8);
+            } else if (draw_mode == 3) {
+                for (int step = 1; step <= 4; ++step) {
+                    blit_glyph(*texture, slot->bitmap, origin_x + step, origin_y + step, secondary, quantize, gray8);
+                    blit_glyph(*texture, slot->bitmap, origin_x - step, origin_y - step, secondary, quantize, gray8);
+                }
+            }
+            blit_glyph(*texture, slot->bitmap, origin_x, origin_y, primary, quantize, gray8);
+            if (draw_mode == 2) {
+                blit_glyph(*texture, slot->bitmap, origin_x, origin_y, primary, quantize, gray8);
+            }
+        }
         pen_x += advance;
     }
     texture->non_file = true;

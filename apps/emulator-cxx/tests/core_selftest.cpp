@@ -12,6 +12,7 @@
 #include "core/vm.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -3105,21 +3106,6 @@ int main() {
                 std::fprintf(stderr, "0x204 text raster mismatch ink=%zu\n", ink);
                 return 1;
             }
-            // ★ 引擎默认字形 = 1-bit 硬掩码（`Font+0x548 = 0`；GGO_BITMAP）⇒ alpha 只有 0/255。
-            //   坏法：用灰度 AA（我们旧实现）⇒ 边缘出现 1..254 的 alpha，副色趟会与它累加。
-            if (text_texture != nullptr) {
-                bool partial_alpha = false;
-                for (std::size_t i = 3; i < text_texture->rgba.size(); i += 4) {
-                    if (text_texture->rgba[i] != 0 && text_texture->rgba[i] != 255) {
-                        partial_alpha = true;
-                        break;
-                    }
-                }
-                if (partial_alpha) {
-                    std::fprintf(stderr, "0x204 glyph alpha not binary (engine default is 1-bit GGO_BITMAP)\n");
-                    return 1;
-                }
-            }
             // ★ 引擎的字形合成（`0x46D9F0`）：满覆盖覆写；否则 outA = max(dstA, srcA)、
             //   outC = (srcC*srcA + dstC*(255-srcA))/255。⛔ 不是 alpha-over：同像素画两遍不得变实。
             {
@@ -3225,6 +3211,90 @@ int main() {
                              "0x204 vertical alignment mismatch (mode 0 vs 1) mode0_top=%d mode1_top=%d"
                              "（期望两者相同：缓存 = 本次 = 渲染字体的 ascent）\n",
                              mode0_top, mode1_top);
+                return 1;
+            }
+            // ★ 无 bake 数据时是 **FT 默认 render + 单趟**（无阴影）：绘制模式 1 与模式 0 的
+            //   纹理必须逐位相同。坏法：回退路径又画了副色趟 ⇒ 模式 1 的墨迹多于模式 0。
+            auto draw_ink = [&](bool mode_one) {
+                auto script = make_script_with_body();
+                emit_instruction(script, 0x1F8, {{0, 1}, {0, 96}, {0, 48}, {0, 0}});
+                emit_instruction(script, 0x75, {{0, 20}});
+                if (mode_one) emit_instruction(script, 0x2DB, {{0, 1}});
+                emit_text_204(script, 1, 0, 10, cjk);
+                emit_instruction(script, 2, {});
+                core::Machine machine(0x12345678u, table);
+                machine.load_root(script);
+                machine.run(8);
+                const core::TextureRecord* texture = machine.texture(1);
+                std::size_t ink = 0;
+                if (texture != nullptr) {
+                    for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+                        if (texture->rgba[i] != 0) ++ink;
+                    }
+                }
+                return ink;
+            };
+            if (draw_ink(true) != draw_ink(false)) {
+                std::fprintf(stderr,
+                             "0x204 fallback drew a secondary pass: mode1 ink=%zu mode0 ink=%zu\n",
+                             draw_ink(true), draw_ink(false));
+                return 1;
+            }
+            // ★ 字形来源策略（§38）：无 bake ⇒ 同色 mono+1pass（alpha 0/255）、异色 默认灰度+2pass（含中间值）；
+            //   有 bake ⇒ 完全按引擎（本 fixture 无 AA 配置 ⇒ 1-bit，同色/异色都应只含 0/255）。
+            auto draw_alpha_binary = [&](bool same_color) {
+                auto script = make_script_with_body();
+                emit_instruction(script, 0x1F8, {{0, 1}, {0, 96}, {0, 48}, {0, 0}});
+                emit_instruction(script, 0x75, {{0, 20}});
+                emit_instruction(script, 0x76, {{0, 0xFFFFFF}});
+                emit_instruction(script, 0x77, {{0, same_color ? 0xFFFFFF : 0x000000}});
+                emit_instruction(script, 0x78, {{0, 1}});
+                emit_text_204(script, 1, 0, 10, cjk);
+                emit_instruction(script, 2, {});
+                core::Machine machine(0x12345678u, table);
+                machine.load_root(script);
+                machine.run(8);
+                const core::TextureRecord* texture = machine.texture(1);
+                if (texture == nullptr) return false;
+                for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+                    const int a = texture->rgba[i];
+                    if (a != 0 && a != 255) return false;
+                }
+                return true;
+            };
+            // 同色默认 = Bold + 默认灰度 AA（alpha 含中间值）；`SAME_COLOR_MONO=1` 回到 mono。
+            const bool nobake_same_bold_mono = draw_alpha_binary(true);
+#ifdef _WIN32
+            _putenv_s("EMULATOR_CXX_SAME_COLOR_MONO", "1");
+#else
+            setenv("EMULATOR_CXX_SAME_COLOR_MONO", "1", 1);
+#endif
+            const bool nobake_same_mono = draw_alpha_binary(true);
+#ifdef _WIN32
+            _putenv_s("EMULATOR_CXX_SAME_COLOR_MONO", "");
+#else
+            unsetenv("EMULATOR_CXX_SAME_COLOR_MONO");
+#endif
+            const bool nobake_diff_mono = draw_alpha_binary(false);
+            const std::filesystem::path atlas_path =
+                std::filesystem::temp_directory_path() / "amayui-atlas-selftest.stub";
+            { std::ofstream(atlas_path) << 'x'; }
+#ifdef _WIN32
+            _putenv_s("EMULATOR_CXX_GLYPH_ATLAS", atlas_path.string().c_str());
+#else
+            setenv("EMULATOR_CXX_GLYPH_ATLAS", atlas_path.string().c_str(), 1);
+#endif
+            const bool bake_diff_mono = draw_alpha_binary(false);
+#ifdef _WIN32
+            _putenv_s("EMULATOR_CXX_GLYPH_ATLAS", "");
+#else
+            unsetenv("EMULATOR_CXX_GLYPH_ATLAS");
+#endif
+            { std::error_code ignored; std::filesystem::remove(atlas_path, ignored); }
+            if (nobake_same_bold_mono || !nobake_same_mono || nobake_diff_mono || !bake_diff_mono) {
+                std::fprintf(stderr,
+                             "0x204 glyph profile: nobake_same_mono=%d nobake_diff_mono=%d nobake_same_bold_mono=%d bake_diff_mono=%d\n",
+                             nobake_same_mono, nobake_diff_mono, nobake_same_bold_mono, bake_diff_mono);
                 return 1;
             }
             // ★ 纹理版本号必须**严格单调递增**：窗口路径的 GPU 纹理缓存按 revision 命中。

@@ -7747,6 +7747,30 @@
           "what": "取本次量度（平台请求；有指针出参，写栈上的量度结构，不写字体对象的缓存格 +0x313EC）"
         },
         {
+          "ea": "0x46f382",
+          "what": "模式 0 入口：按 Font+0x548（抗锯齿开关）选 fuFormat"
+        },
+        {
+          "ea": "0x46f38b",
+          "what": "模式 0 入口：Font+0x35584（级数）== 1 ⇒ GRAY8，否则 GRAY4"
+        },
+        {
+          "ea": "0x471259",
+          "what": "模式 1/2/3 入口：按 Font+0x548 选 fuFormat"
+        },
+        {
+          "ea": "0x471260",
+          "what": "模式 1/2/3 入口：Font+0x35584 == 1 ⇒ GRAY8，否则 GRAY4"
+        },
+        {
+          "ea": "0x4155c1",
+          "what": "抗锯齿开关写点：Font+0x548 ← message:UseAntiFont（总开关 set:EnableAntiFont 作闸）"
+        },
+        {
+          "ea": "0x417b36",
+          "what": "抗锯齿级数写点：Font+0x35584 ← message:AntiFontLevel"
+        },
+        {
           "ea": "0x4567d5",
           "what": "绘制模式 ≠ 0 ⇒ 带模式实参的入口"
         },
@@ -8019,7 +8043,9 @@
         "shape:T_Font@0x4d0",
         "shape:T_Renderer@0x48c",
         "shape:T_Font@0x568",
-        "shape:T_Font@0x56c"
+        "shape:T_Font@0x56c",
+        "shape:T_Font@0x548",
+        "shape:T_Font@0x35584"
       ],
       "evidence": [
         "guard:tools/test/spec-window-render-sites.assets.test.mjs#★ 窗口与渲染规则的站点 EA 都在 .lst 的指令行首"
