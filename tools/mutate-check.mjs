@@ -2850,6 +2850,34 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-cxx-dispatch.test.mjs',
     what: '`0xa3` 的 case 被删掉（声明与定义都在）⇒ 分派表守卫当场红（否则"补了指令"只是补了函数体）',
   },
+  // ── wait-subagent 插件：`any_of` 必须如实交回“谁还在跑” ──
+  //   ★ 把 `pending` 抹成 `[]` ⇒ 模型以为“都结束了”，于是不再等剩下的 completion notice。
+  {
+    file: 'plugins/wait-subagent/index.mjs',
+    from: 'pending: targets.map((target) => target.childId),',
+    to: 'pending: [],',
+    guard: 'plugins/wait-subagent/test/plugin.test.mjs',
+    what: 'any_of 的 already_finished 不再列出仍在跑的 child ⇒ “还有人没结束”被当成“都结束了”',
+  },
+  // ── wait-subagent 插件：同一同步边上“人消息优先于 end” ──
+  //   ★ 拿掉这条 ⇒ 人正在等的那条插话被 end 吞掉（等待返回“finished”，而人消息没人看）。
+  {
+    file: 'plugins/wait-subagent/lib/wait.mjs',
+    from:
+      '      const pending = pendingHumanMessages(agent);\n' +
+      '      if (pending.length > 0) {\n' +
+      '        interjected(pending[0]);\n' +
+      '        return;\n' +
+      '      }',
+    to:
+      '      const pending = pendingHumanMessages(agent);\n' +
+      '      if (false && pending.length > 0) {\n' +
+      '        interjected(pending[0]);\n' +
+      '        return;\n' +
+      '      }',
+    guard: 'plugins/wait-subagent/test/wait.test.mjs',
+    what: 'end 与人消息同一同步边到达时不再优先报人插话 ⇒ 人正在等的那条消息被吞掉',
+  },
 
 ];
 

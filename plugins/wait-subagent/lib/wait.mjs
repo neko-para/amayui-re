@@ -10,6 +10,11 @@
  *   ③ **竞态安全地等**：先挂监听、再复查 pending / tracker，最后才进入 await。
  *      这样“子代理在挂监听前刚好结束”“用户消息在开始等之前刚好入队”都不会丢。
  *
+ * ★ 为什么要 `mode`：一次等多个 child 时，“等第一个”与“等全部”是**两种不同的需求**。
+ *   `any_of`（默认）只要**任意一个** target 结束就返回（其余仍在跑，用 `pending` 交回去）；
+ *   `all_of` 要等**每个** target 都结束。缺省 `any_of` 的理由：并行开了 N 个子代理时，
+ *   绝大多数时候要的是“有结果就先看”，而不是被最慢的那个拖住。
+ *
  * ★ 为什么用事件而不是轮询：`subagent/end` 是 managed activation 的**唯一终态边**
  *   （`finishDisposal` 在清理、通知父级之后发出），`agent/inbox/inserted` 是 inbox
  *   **每次插入**的同步通知；两者都在同一个进程里同步派发，不需要 sleep / 定时器。
@@ -28,6 +33,14 @@ export const WAIT_KINDS = Object.freeze({
   USER_INTERJECTED: 'user_interjected',
   TIMED_OUT: 'timed_out',
   CANCELLED: 'cancelled',
+});
+
+/** 等一组 child 的哪一类终态。 */
+export const WAIT_MODES = Object.freeze({
+  /** 任意一个 target 结束就返回（其余仍在跑）。 */
+  ANY_OF: 'any_of',
+  /** 每个 target 都结束才返回。 */
+  ALL_OF: 'all_of',
 });
 
 /**
@@ -132,7 +145,7 @@ export function createRunTracker(ctx) {
 }
 
 /**
- * 等一个 subagent 的终态，或等人插话。
+ * 等一组 subagent 的终态，或等人插话。
  *
  * **注册顺序是契约**：
  *   1. 先挂 `subagent/end` / `agent/inbox/inserted` / abort 监听；
@@ -140,22 +153,38 @@ export function createRunTracker(ctx) {
  *   3. 再复查 tracker（补上“挂监听前刚好结束”的窗口）；
  *   4. 最后才设 timeout / 进入 await。
  *
+ * **返回口径**（`settled` / `pending` 都只描述本次传进来的 `targets`）：
+ *   · `finished` —— `mode` 的条件在本次调用里达到；`race: true` 表示**根本不用等**
+ *     （挂监听时条件已经满足）。`any_of` 只把**已经结束**的放进 `settled`，其余进 `pending`；
+ *   · `user_interjected` / `timed_out` / `cancelled` —— 同样带上当时的 `settled` / `pending` 快照，
+ *     这样模型知道“等到哪一步了”，不必重新猜。
+ *
  * @param {object} options - 等待参数。
  * @param {object} options.agent - 调用方 Agent（`exec.agent`）。
- * @param {string} options.childId - 要等的 child session id。
- * @param {string} [options.runId] - 只等这一次 activation；省略时接受该 child 的任意 end。
- * @param {number} [options.timeoutMs] - 可选安全上限；省略表示一直等到终态或人插话。
+ * @param {Array<{childId: string, runId?: string}>} options.targets - 要等的 child（至少一个）。
+ * @param {'any_of'|'all_of'} [options.mode] - 等第一个还是等全部；缺省 `any_of`。
+ * @param {number} [options.timeoutMs] - 可选安全上限；省略表示一直等到条件达成或人插话。
  * @param {AbortSignal} [options.signal] - 调用方取消信号（turn cancel）。
  * @param {{get(childId: string): object|undefined}} [options.tracker] - 生命周期 tracker。
  * @returns {Promise<object>} 内部结果：finished / user_interjected / timed_out / cancelled。
  */
-export function waitForSubagent({ agent, childId, runId, timeoutMs, signal, tracker }) {
+export function waitForSubagents({ agent, targets, mode = WAIT_MODES.ANY_OF, timeoutMs, signal, tracker }) {
+  const isAllOf = mode === WAIT_MODES.ALL_OF;
+
   return new Promise((resolve, reject) => {
-    let settled = false;
+    let done = false;
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let timer;
     /** @type {Array<() => void>} */
     const disposers = [];
+    /** childId -> 只等这一次 activation 时的 runId；undefined 表示接受任意 end。 */
+    const remaining = new Map();
+    for (const target of targets) remaining.set(target.childId, target.runId);
+    /**
+     * 本次调用期间确认结束的 child（按确认顺序）。
+     * @type {Array<{childId: string, info: object|undefined}>}
+     */
+    const settled = [];
 
     const cleanup = () => {
       if (timer !== undefined) {
@@ -171,45 +200,71 @@ export function waitForSubagent({ agent, childId, runId, timeoutMs, signal, trac
       }
     };
     const finish = (outcome) => {
-      if (settled) return;
-      settled = true;
+      if (done) return;
+      done = true;
       cleanup();
       resolve(outcome);
     };
     const fail = (error) => {
-      if (settled) return;
-      settled = true;
+      if (done) return;
+      done = true;
       cleanup();
       reject(error);
     };
 
-    const onEnd = (info) => {
-      if (info?.id !== childId) return;
-      if (runId !== undefined && info.runId !== runId) return;
-      // If a human message is already pending at the same edge, prefer reporting
-      // the interjection: the model must not miss that a human is waiting.
-      const pending = pendingHumanMessages(agent);
-      if (pending.length > 0) {
-        const message = pending[0];
-        finish({
-          kind: WAIT_KINDS.USER_INTERJECTED,
-          message,
-          delivery: inboxDelivery(agent, message),
-        });
-        return;
-      }
-      finish({ kind: WAIT_KINDS.FINISHED, info });
-    };
-    const onInserted = (payload) => {
-      const message = payload?.message;
-      if (!isHumanMessage(message)) return;
+    /** 结果里的 settled / pending 快照（复制，避免调用方拿到内部可变数组）。 */
+    const snapshot = () => ({
+      settled: settled.map((entry) => ({ childId: entry.childId, info: entry.info })),
+      pending: [...remaining.keys()],
+    });
+    const interjected = (message) =>
       finish({
         kind: WAIT_KINDS.USER_INTERJECTED,
         message,
         delivery: inboxDelivery(agent, message),
+        ...snapshot(),
       });
+    const finishFinished = (race) =>
+      finish({ kind: WAIT_KINDS.FINISHED, ...snapshot(), ...(race === true ? { race: true } : {}) });
+
+    /** 条件是否已经满足：all_of 要没有 remaining；any_of 只要有一个 settled。 */
+    const conditionMet = () => (isAllOf ? remaining.size === 0 : settled.length > 0);
+    /** 记录一个 child 结束；重复结束返回 false（不改状态）。 */
+    const recordSettled = (childId, info) => {
+      if (!remaining.has(childId)) return false;
+      remaining.delete(childId);
+      settled.push({ childId, info });
+      return true;
     };
-    const onAbort = () => finish({ kind: WAIT_KINDS.CANCELLED, reason: signal?.reason });
+
+    const onEnd = (info) => {
+      if (done) return;
+      const childId = info?.id;
+      if (typeof childId !== 'string' || !remaining.has(childId)) return;
+      const expectedRunId = remaining.get(childId);
+      if (expectedRunId !== undefined && info.runId !== expectedRunId) return;
+      // If a human message is already pending at the same edge, prefer reporting
+      // the interjection: the model must not miss that a human is waiting.
+      const pending = pendingHumanMessages(agent);
+      if (pending.length > 0) {
+        interjected(pending[0]);
+        return;
+      }
+      recordSettled(childId, { id: childId, runId: info.runId, stopReason: info.stopReason });
+      if (conditionMet()) finishFinished(false);
+    };
+    const onInserted = (payload) => {
+      const message = payload?.message;
+      if (!isHumanMessage(message)) return;
+      interjected(message);
+    };
+    const onAbort = () => finish({ kind: WAIT_KINDS.CANCELLED, reason: signal?.reason, ...snapshot() });
+
+    // 空 targets 没有可等的东西：直接按“条件已满足”返回，避免挂到 timeout（调用方不该这么调）。
+    if (remaining.size === 0) {
+      finishFinished(true);
+      return;
+    }
 
     try {
       disposers.push(agent.ctx.on('subagent/end', onEnd));
@@ -230,34 +285,45 @@ export function waitForSubagent({ agent, childId, runId, timeoutMs, signal, trac
     // 挂上监听之后复查：这个窗口里入队的人消息不能漏。
     const pending = pendingHumanMessages(agent);
     if (pending.length > 0) {
-      const message = pending[0];
-      finish({
-        kind: WAIT_KINDS.USER_INTERJECTED,
-        message,
-        delivery: inboxDelivery(agent, message),
-      });
+      interjected(pending[0]);
       return;
     }
 
     // 挂上监听之后复查：这个窗口里结束的 activation 不能漏。
     // 若 tracker 已经换成了另一个 run，说明原来那次已经结束（或根本没有），
-    // 立即返回而不是继续等一个永远不会再来的 end。
-    const current = tracker?.get(childId);
-    if (current?.state === 'settled' && (runId === undefined || current.runId === runId)) {
-      finish({ kind: WAIT_KINDS.FINISHED, info: current.info, race: true });
-      return;
+    // 立即算作 settled，而不是继续等一个永远不会再来的 end。
+    for (const childId of [...remaining.keys()]) {
+      const expectedRunId = remaining.get(childId);
+      const current = tracker?.get(childId);
+      if (current === undefined) {
+        // 有 runId 却查不到记录：那次 activation 已经不在了（tracker 被清 / 早于插件），
+        // 与原来的单 child 口径一致 —— 不挂死，按“已结束”返回，info 缺省。
+        if (expectedRunId !== undefined) recordSettled(childId, undefined);
+        continue;
+      }
+      if (expectedRunId !== undefined) {
+        if (current.state === 'settled' && current.runId === expectedRunId) {
+          recordSettled(childId, current.info);
+          continue;
+        }
+        if (current.runId !== expectedRunId) {
+          // 新 activation 已覆盖旧记录 ⇒ 要等的那一次已经结束。
+          recordSettled(childId, current.info);
+        }
+        continue;
+      }
+      if (current.state === 'settled') recordSettled(childId, current.info);
     }
-    if (runId !== undefined && current?.runId !== runId) {
-      finish({ kind: WAIT_KINDS.FINISHED, info: current?.info, race: true });
-      return;
-    }
-    if (runId === undefined && current?.state === 'settled') {
-      finish({ kind: WAIT_KINDS.FINISHED, info: current.info, race: true });
+    if (conditionMet()) {
+      finishFinished(true);
       return;
     }
 
     if (timeoutMs !== undefined) {
-      timer = setTimeout(() => finish({ kind: WAIT_KINDS.TIMED_OUT, elapsedMs: timeoutMs }), timeoutMs);
+      timer = setTimeout(
+        () => finish({ kind: WAIT_KINDS.TIMED_OUT, elapsedMs: timeoutMs, ...snapshot() }),
+        timeoutMs,
+      );
     }
   });
 }

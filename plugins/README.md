@@ -22,6 +22,7 @@ DSH 插件的源码放这里。**位置是自由的** —— 与技能不同，�
   任务名 → argv / cwd 全部写死在插件里，见它自己的 README §3.1。
 * **`wait-subagent`**（`plugins/wait-subagent/`）—— **会话内**的 `wait_subagent` 工具：订阅运行中的
   subagent 生命周期与 agent inbox 事件，等到子代理结束、用户插话 / turn 取消就立刻返回。
+  可一次等一组 child：缺省 `mode: any_of`（**谁先结束就返回**，其余留在 `pending`），要等全部才 `all_of`。
   ★ 它不要宿主特权，但**仍然必须是插件**：要拿 `exec.agent` 的 scope context 与正在运行的事件流，
   网页视图拿不到这些。它替代的是"用 `bash sleep` 猜时长"。
 
