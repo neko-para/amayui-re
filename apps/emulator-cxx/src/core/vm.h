@@ -302,6 +302,9 @@ public:
     std::int32_t scalar_d107656() const { return scalar_d107656_; }
     std::int32_t font_draw_mode() const { return font_draw_mode_; }
     std::int32_t font_align_mode() const { return font_align_mode_; }
+    // `0x204` 的「缓存 ascent」（`Font+0x313F0`）：引擎里**只有读者、没有写者**（全语料 0 处 store）
+    // ⇒ 运行期恒 0。⛔ 不要把它刷成"上一次量度的 ascent"，那会造出引擎里不存在的补偿。
+    std::int32_t cached_text_ascent() const { return cached_text_ascent_; }
     std::int32_t font_primary_color() const { return font_primary_color_; }
     std::int32_t font_secondary_color() const { return font_secondary_color_; }
     std::int32_t font_metric_a() const { return font_metric_a_; }
@@ -628,6 +631,8 @@ private:
     // 渲染入口（vm_ops_render.cpp）
     void op_23b(const Instruction&); void op_2da(const Instruction&); void op_20b(const Instruction&); void op_20c(const Instruction&);
     void op_20d(const Instruction&); void op_33f(const Instruction&); void op_204(const Instruction&);
+    // 数值文本（0x205）/ 清屏（0x20e）
+    void op_205(const Instruction&); void op_20e(const Instruction&);
     void op_23c(const Instruction&);
     // 纹理 / 绘制项 / 网格（vm_ops_texture.cpp）
     void op_344(const Instruction&); void op_1ff(const Instruction&); void op_1fd(const Instruction&); void op_1fe(const Instruction&);
@@ -659,6 +664,10 @@ private:
     void op_2cc(const Instruction&); void op_2cd(const Instruction&); void op_2ce(const Instruction&);
     void op_2e6(const Instruction&); void op_2e7(const Instruction&); void op_2e8(const Instruction&);
     void op_2ea(const Instruction&);
+    // 设置表 getter：声道音量（0xC5）/ 点击跳过效果（0x306）
+    void op_c5(const Instruction&); void op_306(const Instruction&);
+    // 声道音量 setter（0xC6）/ 声道开关 getter（0xC7）
+    void op_c6(const Instruction&); void op_c7(const Instruction&);
     std::int32_t display_mode_cache() const { return display_mode_cache_; }
     void op_b5(const Instruction&); void op_2c7(const Instruction&); void op_341(const Instruction&); void op_ae(const Instruction&);
     void op_2ee(const Instruction&); void op_10f(const Instruction&); void op_248(const Instruction&); void op_8b(const Instruction&);
@@ -821,6 +830,8 @@ private:
     std::int32_t scalar_d107656_ = 0;
     std::int32_t font_draw_mode_ = 1;
     std::int32_t font_align_mode_ = 0;
+    // `0x204` 的「缓存 ascent」：引擎只有读者、没有写者 ⇒ 恒 0（见 cached_text_ascent()）。
+    std::int32_t cached_text_ascent_ = 0;
     std::int32_t font_primary_color_ = 0xFFFFFF;
     std::int32_t font_secondary_color_ = 0x000000;
     std::int32_t font_metric_a_ = 0;

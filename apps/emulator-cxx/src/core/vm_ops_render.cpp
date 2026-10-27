@@ -151,6 +151,113 @@ void Machine::op_33f(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_205(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 数值文本（0x205 / `sub_4233E0`，argc 6，推进 13）：**0x204 的数值兄弟** —— 同一个绘制入口、
+    // 同样的 y 语义（格顶，落像素时 +ascent），只多了"格式化整数 + 按格数算 X"。
+    // 读序 **2 → 6 → 5 → 4 →（格式化）→ 3 → 1**：
+    //   op2 = 字段原点（**不是文本落点**）、op6 = 格式位、op5 = 字段格数、op4 = 值、op3 = y、op1 = 纹理槽号。
+    const auto anchor_x = read_int(ops[1]);
+    const auto flags = read_int(ops[5]);
+    const auto cells = read_int(ops[4]);
+    const auto value = read_int(ops[3]);
+    const auto y = read_int(ops[2]);
+    const auto slot = read_int(ops[0]);
+
+    // 格式化成 ASCII，再按 0x10000 决定是否扩成全角 S-JIS。
+    const auto format = [&](int& chars) {
+        std::string text;
+        chars = 0;
+        if (cells <= 0) {
+            const bool wants_sign = (flags & 0x8) || (flags & 0x10) || (flags & 0x20);
+            if (!wants_sign) return text;              // 无符号位且无格数 ⇒ 空串（不画）
+            text = "#";                                 // 宽度放不下 ⇒ 单字符 '#'
+            chars = 1;
+            return text;
+        }
+        const bool negative = value < 0;
+        const auto magnitude = negative ? static_cast<std::uint32_t>(-static_cast<std::int64_t>(value))
+                                        : static_cast<std::uint32_t>(value);
+        char digits[16] = {0};
+        int n = 0;
+        if (magnitude == 0) digits[n++] = '0';
+        for (std::uint32_t v = magnitude; v > 0 && n < 12; v /= 10) digits[n++] = static_cast<char>('0' + v % 10);
+        std::string number;
+        for (int i = n - 1; i >= 0; --i) number.push_back(digits[i]);
+        char sign = 0;
+        if (negative) sign = '-';
+        else if (value > 0 && (flags & 0x8)) sign = '+';
+        else if (value == 0 && (flags & 0x10)) sign = '+';
+        else if (value == 0 && (flags & 0x20)) sign = '-';
+        const int digit_cells = cells - (sign != 0 ? 1 : 0);
+        if (static_cast<int>(number.size()) > digit_cells) {
+            text = "#";
+            chars = 1;
+            return text;
+        }
+        const int pad = digit_cells - static_cast<int>(number.size());
+        if (sign != 0) text.push_back(sign);
+        if ((flags & 0x1) != 0) text.append(static_cast<std::size_t>(pad), '0');  // 0x1 = 补前导 0
+        text += number;
+        chars = static_cast<int>(text.size());
+        return text;
+    };
+    int chars = 0;
+    const std::string ascii = format(chars);
+    if (ascii.empty() || slot < 0) return;
+    const auto texture_id = static_cast<std::uint32_t>(slot);
+    const TextureRecord* texture = this->texture(texture_id);
+    if (texture == nullptr || texture->rgba.empty()) return;  // 三条入口条件之一：槽里没有可用表面
+
+    // X = op2 + 未用格数 × 格宽 × k：默认右齐(k=1)、0x2 居中(1/2)、0x4 左齐(0)。
+    // ★ 格宽取字体对象的高度格（引擎 `Engine+0x46104` = 字号链写入的格宽；本模型用 `font_size_`）。
+    const int cell_width = font_size_ > 0 ? font_size_ : 24;
+    const int width = (flags & 0x10000) != 0 ? cell_width / 2 : cell_width;
+    const int free_cells = cells - chars;
+    // k（以 1/2 为单位）：右齐 = 2/2、居中 = 1/2、左齐 = 0/2。
+    const int k_num = (flags & 0x2) != 0 ? 1 : ((flags & 0x4) != 0 ? 0 : 2);
+    const int x = anchor_x + (free_cells * width * k_num) / 2;
+
+    // 全角化：'0'-'9' → 0x824F..，'-'/'+'/'#' → 0x817C/0x817B/0x8194，其它 → 0x8148。
+    std::string sjis;
+    if ((flags & 0x10000) != 0) {
+        sjis = ascii;
+    } else {
+        for (const char c : ascii) {
+            if (c >= '0' && c <= '9') {
+                const auto code = static_cast<std::uint16_t>(0x824F + (c - '0'));
+                sjis.push_back(static_cast<char>(code >> 8));
+                sjis.push_back(static_cast<char>(code & 0xFF));
+            } else if (c == '-') {
+                sjis += "\x81\x7C";
+            } else if (c == '+') {
+                sjis += "\x81\x7B";
+            } else if (c == '#') {
+                sjis += "\x81\x94";
+            } else {
+                sjis += "\x81\x48";
+            }
+        }
+    }
+    std::string error;
+    if (draw_text_into_texture(*this, texture_id, x, y, sjis, &error)) {
+        if (TextureRecord* mutable_texture = texture_mut(texture_id)) mutable_texture->revision++;
+    } else if (!error.empty()) {
+        report_error(error);
+    }
+    return;
+}
+
+void Machine::op_20e(const Instruction& instruction) {
+    (void)instruction;
+    // 清屏（0x20E / `sub_41A200`，argc 0，推进 1）：`IDirect3DDevice9::Clear(0, NULL, 3, 0, 1.0, 0)`
+    // ⇒ 清**当前绑定的渲染目标**整面成透明黑（没有矩形、没有操作数）。
+    // ★ 本模型没有"渲染目标栈"（我们每帧重建场景）⇒ 这里**什么都不用做**；
+    //   门控支（虚拟全屏类型 == 1 且当前目标 = 后缓冲）会额外清纹理槽 38，那一支同样落在"渲染目标"上，
+    //   本模型无对应物。⛔ 不要顺手清纹理表：那不是这条的语义（见 ops-forensics §21）。
+    return;
+}
+
 void Machine::op_204(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 离屏文字：读序 3 → 2 → 4 → 1；三条入口条件在请求之前

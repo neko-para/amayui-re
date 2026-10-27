@@ -228,7 +228,15 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     const Rgb secondary = decode_color(machine.font_secondary_color());
 
     int pen_x = x;
-    const int baseline = y + ascent;
+    // ★ `0x204` 的 y 语义 = **单元格顶部**（不是基线）。引擎的两次加法（`sub_456710` → `sub_46F2D0`）：
+    //   ① 对位模式 = 1 时 `y ← y + 缓存ascent − 本次ascent`（`0x4567AF`/`0x4567B5`/`0x4567B7`）；
+    //   ② 绘制入口 `y ← y + 本次ascent`（`0x46F37C add [arg_8], eax`，eax = tmAscent）⇒ **基线**；
+    //   ③ 字形顶 = 基线 − `gmptGlyphOrigin.y`（`0x46F893`，≈ FreeType 的 `bitmap_top`）。
+    //   模式 1 展开后：基线 = `y + 缓存ascent`（本次 ascent 被消掉）。
+    //   ★ 取证事实：`Font+0x313F0`（缓存 ascent）**全语料 0 处写** ⇒ 运行期恒 0 ⇒ 模式 1 的有效基线 = `y`。
+    //   锚：`CORE-OPS-RENDER-TEXT-204`「纵向对位」；实现映射见 docs/02-engine/ops-forensics §21。
+    const int y_effective = machine.font_align_mode() == 1 ? y + machine.cached_text_ascent() - ascent : y;
+    const int baseline = y_effective + ascent;
     for (const std::uint32_t codepoint : decode_sjis(sjis)) {
         // 投影偏移的起点：模式 0 只画主色；1 = 副色 (+1,+1) 再主色；2 = 主色两遍；3 = 多趟径向副色。
         if (draw_mode == 1) {

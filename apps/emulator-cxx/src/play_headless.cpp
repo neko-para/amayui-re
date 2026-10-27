@@ -9,11 +9,62 @@
 #include "app.h"
 #include "input_script.h"
 
+#include "core/encoding.h"
+
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
 namespace app {
+namespace {
+
+// 把一张纹理记录写成 24 位 BMP（bottom-up BGR）—— 诊断用（看"那一格纹理到底是什么"）。
+bool write_texture_bmp(const core::TextureRecord& texture, const std::string& path) {
+    if (texture.width == 0 || texture.height == 0 || texture.rgba.size() < texture.width * texture.height * 4u) {
+        return false;
+    }
+    const std::uint32_t row = texture.width * 3u;
+    const std::uint32_t pad = (4u - (row % 4u)) % 4u;
+    const std::uint32_t image = (row + pad) * texture.height;
+    std::vector<std::uint8_t> header(54, 0);
+    header[0] = 'B';
+    header[1] = 'M';
+    const std::uint32_t size = 54u + image;
+    header[2] = static_cast<std::uint8_t>(size);
+    header[3] = static_cast<std::uint8_t>(size >> 8);
+    header[4] = static_cast<std::uint8_t>(size >> 16);
+    header[5] = static_cast<std::uint8_t>(size >> 24);
+    header[10] = 54;
+    header[14] = 40;
+    const auto put32 = [&](std::size_t offset, std::uint32_t value) {
+        header[offset] = static_cast<std::uint8_t>(value);
+        header[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+        header[offset + 2] = static_cast<std::uint8_t>(value >> 16);
+        header[offset + 3] = static_cast<std::uint8_t>(value >> 24);
+    };
+    put32(18, texture.width);
+    put32(22, texture.height);
+    header[26] = 1;   // biPlanes
+    header[28] = 24;  // biBitCount
+    put32(34, image);
+    std::ofstream output(core::path_from_utf8(path), std::ios::binary);
+    if (!output) return false;
+    output.write(reinterpret_cast<const char*>(header.data()), 54);
+    std::vector<std::uint8_t> line(row + pad, 0);
+    for (std::uint32_t y = texture.height; y-- > 0;) {
+        for (std::uint32_t x = 0; x < texture.width; ++x) {
+            const std::size_t source = (static_cast<std::size_t>(y) * texture.width + x) * 4u;
+            line[x * 3u + 0] = texture.rgba[source + 2];
+            line[x * 3u + 1] = texture.rgba[source + 1];
+            line[x * 3u + 2] = texture.rgba[source + 0];
+        }
+        output.write(reinterpret_cast<const char*>(line.data()), row + pad);
+    }
+    return output.good();
+}
+
+}  // namespace
 
 int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
                       const HeadlessPlayOptions& options, int width, int height) {
@@ -128,6 +179,27 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
         if (stop || machine.halted()) break;
         if (requested) {
             const int index = presented++;
+            if (options.dump_scene_at == index) {
+                std::printf("[scene] frame=%d\n", index);
+                for (const auto& [key, item] : machine.draw_items()) {
+                    std::printf(
+                        "[scene] item key=%d flags=%u tex=%u src=(%d,%d,%d,%d) aux=(%.1f,%.1f,%.1f) color=%08X\n",
+                        static_cast<std::int32_t>(key), item.flags, item.texture_id, item.left, item.top,
+                        item.right, item.bottom, item.aux[0], item.aux[1], item.aux[2], item.color);
+                }
+                for (const auto& [key, mesh] : machine.meshes()) {
+                    std::printf("[scene] mesh key=%d flags=%u count=%d op10=%d color=%08X\n",
+                                static_cast<std::int32_t>(key), mesh.flags, mesh.count, mesh.op10,
+                                mesh.color);
+                    std::printf("[scene]   copies0:");
+                    for (const auto value : mesh.copies[0]) std::printf(" %u", value);
+                    std::printf("\n[scene]   copies1:");
+                    for (const auto value : mesh.copies[1]) std::printf(" %u", value);
+                    std::printf("\n[scene]   colors:");
+                    for (const auto value : mesh.colors) std::printf(" %08X", value);
+                    std::printf("\n");
+                }
+            }
             const bool want = !options.bmp_dir.empty() &&
                               (options.bmp_stride <= 1 || index % options.bmp_stride == 0) &&
                               (options.bmp_limit <= 0 || dumped < options.bmp_limit);
@@ -190,6 +262,42 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
                     scripted->exhausted() ? 1 : 0, static_cast<long long>(scripted->applied_until()));
     }
     dump_watch("final");
+    if (!machine.errors().empty()) {
+        std::printf("[play] errors=%zu\n", machine.errors().size());
+        for (std::size_t i = 0; i < machine.errors().size() && i < 8; ++i) {
+            std::printf("[play]   error[%zu]=%s\n", i, machine.errors()[i].c_str());
+        }
+    }
+    if (options.dump_texture_id != 0 && !options.dump_texture_out.empty()) {
+        const core::TextureRecord* texture = machine.texture(options.dump_texture_id);
+        if (texture == nullptr) {
+            std::fprintf(stderr, "[play] 纹理 %u 不存在\n", options.dump_texture_id);
+        } else if (!write_texture_bmp(*texture, options.dump_texture_out)) {
+            std::fprintf(stderr, "[play] 纹理 %u 导出失败\n", options.dump_texture_id);
+        } else {
+            std::printf("[play] texture %u (%ux%u) -> %s\n", options.dump_texture_id, texture->width,
+                        texture->height, options.dump_texture_out.c_str());
+            // 顺带报一下 alpha 分布：区分"贴图本身是黑的"与"alpha=0 但 RGB=黑"。
+            std::size_t zero = 0;
+            std::size_t full = 0;
+            for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+                if (texture->rgba[i] == 0) ++zero;
+                if (texture->rgba[i] == 255) ++full;
+            }
+            const std::size_t center =
+                (static_cast<std::size_t>(texture->height / 2) * texture->width + texture->width / 2) * 4;
+            std::printf("[play] texture alpha0=%zu opaque=%zu center=%02X%02X%02X%02X\n", zero, full,
+                        texture->rgba[center], texture->rgba[center + 1], texture->rgba[center + 2],
+                        texture->rgba[center + 3]);
+            for (const auto [px, py] : {std::pair<std::uint32_t, std::uint32_t>{1160, 700},
+                                        {1160, 800}, {1160, 900}, {900, 300}}) {
+                if (px >= texture->width || py >= texture->height) continue;
+                const std::size_t at = (static_cast<std::size_t>(py) * texture->width + px) * 4;
+                std::printf("[play] texture (%u,%u)=%02X%02X%02X%02X\n", px, py, texture->rgba[at],
+                            texture->rgba[at + 1], texture->rgba[at + 2], texture->rgba[at + 3]);
+            }
+        }
+    }
     if (!dump_failure.empty()) {
         std::fprintf(stderr, "[play] BMP 导出失败：%s\n", dump_failure.c_str());
         return 1;

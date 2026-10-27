@@ -103,6 +103,13 @@ int main(int argc, char** argv) {
                 options.headless_play.trace_opcodes.push_back(static_cast<std::uint32_t>(value));
                 cursor = (*end == ',') ? end + 1 : end;
             }
+        } else if (std::strcmp(argv[i], "--dump-scene-at") == 0 && i + 1 < argc) {
+            options.headless_play.dump_scene_at = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--dump-texture") == 0 && i + 1 < argc) {
+            options.headless_play.dump_texture_id =
+                static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (std::strcmp(argv[i], "--dump-texture-out") == 0 && i + 1 < argc) {
+            options.headless_play.dump_texture_out = argv[++i];
         } else if (std::strcmp(argv[i], "--watch-locals") == 0 && i + 1 < argc) {
             // 逗号分隔的局部整型格编号（诊断口：看脚本把输入读成了什么）。
             const char* cursor = argv[++i];

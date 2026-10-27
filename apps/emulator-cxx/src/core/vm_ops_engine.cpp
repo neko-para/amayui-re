@@ -10,6 +10,37 @@
 
 namespace core {
 
+void Machine::op_c6(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 声道音量 setter（0xC6 / `sub_421070`）：op1 = 声道 0..4 ⇒ `sound:Volume{n} ← op2`。
+    // ★ 越界（∉0..4）⇒ 记一行日志、**不写任何键/字段**、不抛。
+    // ★ 引擎还会把增益立刻应用到在播声音/流（`sub_4885A0`/`sub_4879E0`）—— 音频层未建模（残差）。
+    const auto channel = read_int(ops[0]);
+    if (channel < 0 || channel > 4) {
+        report_error("set-volume-channel-invalid:" + std::to_string(channel));
+        return;
+    }
+    config_.set_int("sound:Volume" + std::to_string(channel), read_int(ops[1]));
+    return;
+}
+
+void Machine::op_c7(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 声道开关 getter（0xC7 / `sub_42E670`）：op1 = 1..4（Music/SE/Voice/Movie）⇒ op2 ← 0/1。
+    // ★ 只读 op1；op2 是**结果槽**（从不读旧值）。
+    // ★ 负值分流**不对称**：Music 判 `>= 0`（负 ⇒ 0，**0 ⇒ 1**）；SE / Voice / Movie 判 `!= 0`（负 ⇒ 1）。
+    const auto channel = read_int(ops[0]);
+    if (channel < 1 || channel > 4) {
+        report_error("get-sound-mode-channel-invalid:" + std::to_string(channel));
+        return;
+    }
+    static const char* kKeys[] = {"", "sound:Music", "sound:SE", "sound:Voice", "sound:Movie"};
+    const auto value = config_.get_int(kKeys[channel]);
+    const bool on = channel == 1 ? (value >= 0) : (value != 0);
+    write_int(ops[1], on ? 1 : 0);
+    return;
+}
+
 void Machine::op_c0(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 写引擎标量（0xC0）：把引擎字段 `+0xAA9E4` 写进**第 1 个操作数**（落点按写原语的标签集：
@@ -110,6 +141,26 @@ void Machine::op_2ea(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 读"自动消息选项"（0x2EA / `sub_4311B0`）：**不读任何操作数**，只写落点。
     write_int(ops[0], config_.get_int("message:AutoMessageOption"));
+    return;
+}
+
+void Machine::op_c5(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 声道音量 getter（0xC5 / `sub_42E540`）：op1 = 声道号（0..4）⇒ 设置表 `sound:Volume{n}` → 写 op2。
+    // ★ 声道号越界（≥5 / 负）⇒ 引擎**记日志、不写落点、不抛**。
+    const auto channel = read_int(ops[0]);
+    if (channel < 0 || channel > 4) {
+        report_error("get-volume-channel-invalid:" + std::to_string(channel));
+        return;
+    }
+    write_int(ops[1], config_.get_int("sound:Volume" + std::to_string(channel)));
+    return;
+}
+
+void Machine::op_306(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 点击跳过效果 getter（0x306 / `sub_431FC0`）：**不读任何操作数**，只把 `system:EffectSkipOnClick` 写进 op1。
+    write_int(ops[0], config_.get_int("system:EffectSkipOnClick"));
     return;
 }
 

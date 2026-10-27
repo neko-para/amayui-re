@@ -172,6 +172,11 @@ struct HeadlessPlayOptions {
     // ⛔ 这是 debug 口，不是产品路径。
     std::uint32_t trace_script = 0;
     std::size_t trace_script_steps = 0;
+    // 诊断：在第 N 个渲染请求上把场景（绘制项 / 网格）导到 stdout（`--dump-scene-at N`）。
+    int dump_scene_at = -1;
+    // 诊断：收口时把一张纹理写成 BMP（`--dump-texture <id> --dump-texture-out <path>`）。
+    std::uint32_t dump_texture_id = 0;
+    std::string dump_texture_out;
     // 诊断：只打这些 opcode 的取指（空 = 不打）。与 `trace_script` 叠加生效。
     std::vector<std::uint32_t> trace_opcodes;
 };

@@ -181,12 +181,26 @@ bool draw_item(Machine& machine, std::uint32_t key, Surface& target, std::uint32
     const int tint_g = static_cast<int>((item_color >> 8) & 0xFFu);
     const int tint_b = static_cast<int>(item_color & 0xFFu);
 
-    for (int y = sy0; y < sy1; ++y) {
-        const int canvas_y = dy + (y - top);
+    // ★ 物体空间缩放（`0x1FD` 写在同一张 Scene 记录上；四边形边长 = 源矩形 × 缩放）。
+    //   滚动条中段就是「1px 源 × sy」⇒ 这里必须最近邻放大，否则中段只有 1px。
+    float scale_x = 1.0f;
+    float scale_y = 1.0f;
+    if (const SceneRecord* record = machine.scene_record(key); record != nullptr) {
+        scale_x = record->scale[0];
+        scale_y = record->scale[1];
+    }
+    const int span_x = std::max(0, sx1 - sx0);
+    const int span_y = std::max(0, sy1 - sy0);
+    const int dest_w = std::max(0, static_cast<int>(std::lround(static_cast<float>(span_x) * scale_x)));
+    const int dest_h = std::max(0, static_cast<int>(std::lround(static_cast<float>(span_y) * scale_y)));
+    for (int oy = 0; oy < dest_h; ++oy) {
+        const int canvas_y = dy + oy;
         if (canvas_y < 0 || canvas_y >= static_cast<int>(target.height)) continue;
-        for (int x = sx0; x < sx1; ++x) {
-            const int canvas_x = dx + (x - left);
+        const int y = dest_h > 0 ? sy0 + (oy * span_y) / dest_h : sy0;
+        for (int ox = 0; ox < dest_w; ++ox) {
+            const int canvas_x = dx + ox;
             if (canvas_x < 0 || canvas_x >= static_cast<int>(target.width)) continue;
+            const int x = dest_w > 0 ? sx0 + (ox * span_x) / dest_w : sx0;
             const std::size_t source = (static_cast<std::size_t>(y) * texture->width + x) * 4;
             const std::size_t destination =
                 (static_cast<std::size_t>(canvas_y) * target.width + canvas_x) * 4;

@@ -1516,6 +1516,67 @@ bool check_second_batch(const core::OpcodeTable& table) {
         }
     }
 
+    // ── 设置表 getter：0xC5（声道音量）/ 0x306（点击跳过效果）──
+    {
+        core::ConfigStore config;
+        config.set_int("sound:Volume2", 37);
+        config.set_int("system:EffectSkipOnClick", 3);
+        auto script = make_script_with_body();
+        emit_instruction(script, 0xC5, {{0, 2}, {9, 0}});   // 声道 2 → loc0 = 37
+        emit_instruction(script, 0xC5, {{0, 5}, {9, 1}});   // 越界 ⇒ 不写、只记日志
+        emit_instruction(script, 0x306, {{9, 2}});          // → loc2 = 3
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table, nullptr, std::move(config));
+        machine.load_root(script);
+        for (int i = 0; i < 3; ++i) {
+            if (!machine.step()) return false;
+        }
+        if (machine.local_int(0) != 37 || machine.local_int(1) != 0 || machine.local_int(2) != 3) {
+            std::fprintf(stderr, "0xC5/0x306 = %d/%d/%d（期望 37/0/3）\n", machine.local_int(0),
+                         machine.local_int(1), machine.local_int(2));
+            return false;
+        }
+        if (machine.errors().size() != 1) {
+            std::fprintf(stderr, "0xC5 越界声道应记 1 条日志（实际 %zu）\n", machine.errors().size());
+            return false;
+        }
+    }
+
+    // ── 0xC6（音量 setter）/ 0xC7（声道开关 getter，Music 的负值分流与别的声道不同）──
+    {
+        core::ConfigStore config;
+        config.set_int("sound:Music", -1);
+        config.set_int("sound:SE", -1);
+        config.set_int("sound:Voice", 0);
+        config.set_int("sound:Movie", 5);
+        auto script = make_script_with_body();
+        emit_instruction(script, 0xC7, {{0, 1}, {9, 0}});
+        emit_instruction(script, 0xC7, {{0, 2}, {9, 1}});
+        emit_instruction(script, 0xC7, {{0, 3}, {9, 2}});
+        emit_instruction(script, 0xC7, {{0, 4}, {9, 3}});
+        emit_instruction(script, 0xC7, {{0, 0}, {9, 4}});   // 非法声道 ⇒ 不写 + 1 条日志
+        emit_instruction(script, 0xC6, {{0, 2}, {0, 42}});  // Volume2 = 42
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table, nullptr, std::move(config));
+        machine.load_root(script);
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return false;
+        }
+        const std::int32_t expected[4] = {0, 1, 0, 1};
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            if (machine.local_int(i) != expected[i]) {
+                std::fprintf(stderr, "0xC7 loc[%u] = %d（期望 %d）\n", i, machine.local_int(i), expected[i]);
+                return false;
+            }
+        }
+        if (machine.local_int(4) != 0 || machine.config().get_int("sound:Volume2") != 42 ||
+            machine.errors().size() != 1) {
+            std::fprintf(stderr, "0xC6/0xC7 收尾不符（loc4=%d Volume2=%d errors=%zu）\n", machine.local_int(4),
+                         machine.config().get_int("sound:Volume2"), machine.errors().size());
+            return false;
+        }
+    }
+
     // 0x228：0x1ff 写平移 → 读回；记录不存在 ⇒ 标志 1 且三个浮点不写。
     auto trans = make_script_with_body();
     emit_instruction(trans, 0x1FF, {{0, 7}, {1, 0x40400000u}, {1, 0}, {1, 0}});  // 3,0,0

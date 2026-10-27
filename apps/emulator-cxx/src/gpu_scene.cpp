@@ -292,10 +292,20 @@ void build_scene_vertices(const core::Machine& machine, float width, float heigh
         if (sx1 <= sx0 || sy1 <= sy0) continue;
         const float dx = item.aux[0] + static_cast<float>(sx0 - item.left);
         const float dy = item.aux[1] + static_cast<float>(sy0 - item.top);
+        // ★ 物体空间缩放（`0x1FD` 写在**同一条 Scene 记录**上；`rec+0x68` = "有本地矩阵"）。
+        //   引擎的绘制入口是 `ID3DXSprite::Draw(tex, pSrcRect, pCenter=0, pPosition, Color)` +
+        //   物体空间矩阵 ⇒ 四边形边长 = 源矩形 × 缩放，**纵向拉伸只认 sy**。
+        //   实测：滚动条中段就是 1px 源 × sy（见 docs/02-engine/ops-forensics §13–§15）。
+        float scale_x = 1.0f;
+        float scale_y = 1.0f;
+        if (const core::SceneRecord* record = machine.scene_record(key); record != nullptr) {
+            scale_x = record->scale[0];
+            scale_y = record->scale[1];
+        }
         const auto color = core::derive_color(item, now, forced);
         if ((color >> 24) == 0) continue;
-        push_quad(vertices, ranges, dx, dy, dx + static_cast<float>(sx1 - sx0),
-                  dy + static_cast<float>(sy1 - sy0),
+        push_quad(vertices, ranges, dx, dy, dx + static_cast<float>(sx1 - sx0) * scale_x,
+                  dy + static_cast<float>(sy1 - sy0) * scale_y,
                   static_cast<float>(sx0) / static_cast<float>(texture->width),
                   static_cast<float>(sy0) / static_cast<float>(texture->height),
                   static_cast<float>(sx1) / static_cast<float>(texture->width),

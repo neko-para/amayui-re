@@ -151,6 +151,21 @@ if(EMULATOR_CXX_INSTALL_DIR)
                 --skip-logo --play-headless
                 --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option.txt"
                 --anchor-script 21092 --require-script 20940 --tick-ms 16 --max-steps 300000)
+    # ★ 设置界面左列每个 tab 一条：点进该 tab 后跑 30 万步，**不许出现未实现 / 非法 opcode 停机**。
+    #   每条脚本 = TITLE 点 Option + 点该 tab（见 tests/input/title-option-tab-*.txt）。
+    foreach(tab system game chara ops adv)
+        add_test(NAME emulator-core-tab-${tab}
+            COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
+                    --skip-logo --play-headless
+                    --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option-tab-${tab}.txt"
+                    --anchor-script 21092 --require-script 20940 --tick-ms 16 --max-steps 400000)
+    endforeach()
+    # 「声音设定」打开的是**另一个**子脚本（CONFIG.BIN 按配置键走 20939/20940 两个变体）。
+    add_test(NAME emulator-core-tab-sound
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}"
+                --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option-tab-sound.txt"
+                --anchor-script 21092 --require-script 20939 --tick-ms 16 --max-steps 400000)
 endif()
 
 target_compile_features(emulator-cxx PRIVATE cxx_std_20)
