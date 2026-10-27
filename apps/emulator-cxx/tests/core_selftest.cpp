@@ -3213,6 +3213,54 @@ int main() {
                              mode0_top, mode1_top);
                 return 1;
             }
+            // ★ 宿主对齐补偿（2026-10-28 用户口径）：Amayui 的 ascent 比引擎的参考字体大
+            //   （GDI 实测 20px 19 vs 17、28px 27 vs 24）⇒ 墨迹整体偏低。宿主策略 = **固定用渲染
+            //   字体量度、再把基线抬 2px**（`EMULATOR_CXX_BASELINE_LIFT`，0 = 关）。
+            //   判据：关掉补偿后墨迹顶必须**正好低 2px** —— 否则补偿没生效 / 被别处顶掉。
+            const auto draw_top_with_lift = [&](const char* lift) {
+                auto script = make_script_with_body();
+                emit_instruction(script, 0x1F8, {{0, 1}, {0, 96}, {0, 48}, {0, 0}});
+                emit_instruction(script, 0x75, {{0, 20}});
+                emit_instruction(script, 0x2DB, {{0, 1}});
+                emit_text_204(script, 1, 0, 10, cjk);
+                emit_instruction(script, 2, {});
+                if (lift != nullptr) {
+#ifdef _WIN32
+                    _putenv_s("EMULATOR_CXX_BASELINE_LIFT", lift);
+#else
+                    setenv("EMULATOR_CXX_BASELINE_LIFT", lift, 1);
+#endif
+                }
+                core::Machine machine(0x12345678u, table);
+                machine.load_root(script);
+                machine.run(8);
+                if (lift != nullptr) {
+#ifdef _WIN32
+                    _putenv_s("EMULATOR_CXX_BASELINE_LIFT", "");
+#else
+                    unsetenv("EMULATOR_CXX_BASELINE_LIFT");
+#endif
+                }
+                const core::TextureRecord* texture = machine.texture(1);
+                if (texture == nullptr) return -1;
+                for (int row = 0; row < static_cast<int>(texture->height); ++row) {
+                    for (int column = 0; column < static_cast<int>(texture->width); ++column) {
+                        const std::size_t at =
+                            (static_cast<std::size_t>(row) * texture->width + column) * 4;
+                        if (texture->rgba[at + 3] != 0) return row;
+                    }
+                }
+                return -1;
+            };
+            const int lift_top_default = draw_top_with_lift(nullptr);
+            const int lift_top_off = draw_top_with_lift("0");
+            if (lift_top_default < 0 || lift_top_off - lift_top_default != 2) {
+                std::fprintf(stderr,
+                             "0x204 宿主基线补偿没生效：默认墨迹顶=%d、lift=0 的墨迹顶=%d"
+                             "（期望关掉补偿后**正好低 2px**）\n",
+                             lift_top_default, lift_top_off);
+                return 1;
+            }
             // ★ 无 bake 数据时是 **FT 默认 render + 单趟**（无阴影）：绘制模式 1 与模式 0 的
             //   纹理必须逐位相同。坏法：回退路径又画了副色趟 ⇒ 模式 1 的墨迹多于模式 0。
             auto draw_ink = [&](bool mode_one) {
@@ -3285,6 +3333,181 @@ int main() {
             setenv("EMULATOR_CXX_GLYPH_ATLAS", atlas_path.string().c_str(), 1);
 #endif
             const bool bake_diff_mono = draw_alpha_binary(false);
+            // ★ 绘制模式 3 的副色趟 = **径向一圈**（1px），不是斜向光晕。
+            //   引擎 `sub_471180` 的模式 3 支（`0x471A4A..0x471AFD`）+ `sub_46ECC0`：
+            //   `step = 360 / (sqrt(off_x + off_y) * 8)`（`dbl_526A98=8.0` / `dbl_526A90=360.0`）
+            //   ⇒ 偏移 (1,1) 时 12 趟；每趟 `(round(sin(rad)*off_x), round(cos(rad)*off_y))`，
+            //   `rad = 角度 * 180 / π`（`dbl_5263F0=180.0` / `dbl_526A80=π`，照抄）⇒ 偏移落在 3×3
+            //   邻域内。⇒ 副色像素到主色像素的**切比雪夫距离只能是 1**。
+            //   坏法（已实测，用户口径「选项/角色设定的黑边比真机粗很多」）：按 ±1..±4 斜向各画一遍
+            //   ⇒ 副色伸到距离 4（黑边 4px）。
+            //   ★ 这里沿用上面刚设好的 bake stub（引擎字形 ⇒ 1-bit）：灰度会让半覆盖像素混进主色一侧，
+            //     量出来的距离就不再是整数格。
+            {
+                auto ring_script = make_script_with_body();
+                emit_instruction(ring_script, 0x1F8, {{0, 1}, {0, 64}, {0, 40}, {0, 0}});
+                emit_instruction(ring_script, 0x75, {{0, 20}});
+                emit_instruction(ring_script, 0x76, {{0, 0xFFFFFF}});
+                emit_instruction(ring_script, 0x77, {{0, 0x000000}});
+                emit_instruction(ring_script, 0x78, {{0, 3}});  // 绘制模式 3
+                emit_text_204(ring_script, 1, 0, 8, cjk);
+                emit_instruction(ring_script, 2, {});
+                core::Machine ring_machine(0x12345678u, table);
+                ring_machine.load_root(ring_script);
+                ring_machine.run(8);
+                const core::TextureRecord* texture = ring_machine.texture(1);
+                if (texture == nullptr) {
+                    std::fprintf(stderr, "0x204 mode 3 ring: texture missing\n");
+                    return 1;
+                }
+                const int width = static_cast<int>(texture->width);
+                const int height = static_cast<int>(texture->height);
+                const auto texel = [&](int row, int column, int channel) {
+                    return texture->rgba[(static_cast<std::size_t>(row) * width + column) * 4 +
+                                         channel];
+                };
+                const auto primary_ink = [&](int row, int column) {
+                    return texel(row, column, 3) != 0 &&
+                           (texel(row, column, 0) | texel(row, column, 1) | texel(row, column, 2)) != 0;
+                };
+                const auto secondary_ink = [&](int row, int column) {
+                    return texel(row, column, 3) != 0 &&
+                           (texel(row, column, 0) | texel(row, column, 1) | texel(row, column, 2)) == 0;
+                };
+                std::size_t secondary_pixels = 0;
+                std::size_t far_pixels = 0;
+                // ★ 引擎的位移集合（照 `sub_471180`/`sub_46ECC0` 的公式算出来，**硬写在测试里**当 oracle）：
+                //   `rad = 角度 × 180 ÷ π` ⇒ 12 趟收敛成这 6 个位移（各出现两次）。⛔ 不是"八方向圆"：
+                //   (1,-1) / (-1,1) 这两个方向**不该有副色**（它们只在把角度"修正"成 ×π÷180 时才出现）。
+                const int kRing[6][2] = {{0, 1}, {1, 1}, {1, 0}, {0, -1}, {-1, -1}, {-1, 0}};
+                for (int row = 0; row < height; ++row) {
+                    for (int column = 0; column < width; ++column) {
+                        if (!secondary_ink(row, column)) continue;
+                        ++secondary_pixels;
+                        // 该副色像素必须能由"某个主色像素 + 某个引擎位移"解释（否则就是画远了 / 画偏了）。
+                        bool explained = false;
+                        for (const auto& offset : kRing) {
+                            for (int sign = 0; sign < 2 && !explained; ++sign) {
+                                const int dy = sign == 0 ? offset[0] : -offset[0];
+                                const int dx = sign == 0 ? offset[1] : -offset[1];
+                                const int ny = row - dy;
+                                const int nx = column - dx;
+                                if (ny < 0 || ny >= height || nx < 0 || nx >= width) continue;
+                                explained = primary_ink(ny, nx);
+                            }
+                        }
+                        if (!explained) ++far_pixels;
+                    }
+                }
+                // 反向：主色按这 6 个位移平移的并集（去掉主色自身）必须**恰好**等于副色集合 ——
+                // 这一条同时钉住"趟数不是 1"（单趟 (1,1) 会缺 5 个方向）、"不是八方向"（多出 2 个方向）
+                // 与"没画远"。
+                std::size_t missing_pixels = 0;
+                for (int row = 0; row < height; ++row) {
+                    for (int column = 0; column < width; ++column) {
+                        if (!primary_ink(row, column)) continue;
+                        for (const auto& offset : kRing) {
+                            const int ny = row + offset[0];
+                            const int nx = column + offset[1];
+                            if (ny < 0 || ny >= height || nx < 0 || nx >= width) continue;
+                            if (primary_ink(ny, nx)) continue;   // 主色趟会把它覆盖掉
+                            if (!secondary_ink(ny, nx)) ++missing_pixels;
+                        }
+                    }
+                }
+                if (secondary_pixels == 0 || far_pixels != 0 || missing_pixels != 0) {
+                    std::fprintf(stderr,
+                                 "0x204 mode 3 副色趟与引擎的径向位移不符：secondary=%zu "
+                                 "无法由（主色+6 个引擎位移）解释的=%zu 该有却没有的=%zu"
+                                 "（引擎：12 趟、位移 = round(sin/cos(角度×180÷π)×偏移)，共 6 个方向各两次）\n",
+                                 secondary_pixels, far_pixels, missing_pixels);
+                    return 1;
+                }
+            }
+#ifdef _WIN32
+            // ★ 真机字形来源（Windows GDI）：开启 `EMULATOR_CXX_GLYPH_GDI` 后必须真的走 GDI，
+            //   而且格式按引擎的 AA 配置（本 fixture 没有 AA 配置 ⇒ 1-bit，alpha 只含 0/255）。
+            //   坏法：env 被忽略 / 提供者没建起来而静默回退到 FreeType ⇒ 来源不是 Gdi（当场红）。
+            {
+                _putenv_s("EMULATOR_CXX_GLYPH_GDI", "1");
+                auto gdi_script = make_script_with_body();
+                emit_instruction(gdi_script, 0x1F8, {{0, 1}, {0, 96}, {0, 48}, {0, 0}});
+                emit_instruction(gdi_script, 0x75, {{0, 20}});
+                emit_instruction(gdi_script, 0x76, {{0, 0xFFFFFF}});
+                emit_instruction(gdi_script, 0x77, {{0, 0x000000}});
+                emit_instruction(gdi_script, 0x78, {{0, 1}});
+                emit_text_204(gdi_script, 1, 0, 10, cjk);
+                emit_instruction(gdi_script, 2, {});
+                core::Machine gdi_machine(0x12345678u, table);
+                gdi_machine.load_root(gdi_script);
+                gdi_machine.run(8);
+                const core::TextGlyphSource source = core::last_glyph_source();
+                std::size_t gdi_ink = 0;
+                bool gdi_binary = true;
+                if (const core::TextureRecord* texture = gdi_machine.texture(1)) {
+                    for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+                        const int alpha = texture->rgba[i];
+                        if (alpha == 0) continue;
+                        ++gdi_ink;
+                        if (alpha != 255) gdi_binary = false;
+                    }
+                }
+                _putenv_s("EMULATOR_CXX_GLYPH_GDI", "");
+                if (source != core::TextGlyphSource::Gdi || gdi_ink == 0 || !gdi_binary) {
+                    std::fprintf(stderr,
+                                 "0x204 GDI 字形来源没生效：source=%d ink=%zu binary=%d"
+                                 "（期望 source=Gdi、有墨迹、无 AA 配置 ⇒ alpha 只含 0/255）\n",
+                                 static_cast<int>(source), gdi_ink, gdi_binary ? 1 : 0);
+                    return 1;
+                }
+                // ★ AA 档：把配置打开（`set:EnableAntiFont` + `message:UseAntiFont` ⇒ GRAY4，
+                //   `AntiFontLevel = 0`）。这条钉住的是**引擎的 ÷17 换算**（`0x46DAAF`）：
+                //   GRAY4 的原始值域是 0..16 ⇒ alpha = 0,15,30,…,240 ⇒ **上限 240、且有中间值**。
+                //   坏法：把 GRAY4 当成 0..255 直接用 ⇒ alpha 上到 255（red）；不量化 ⇒ 中间值全无规律。
+                {
+                    auto aa_script = make_script_with_body();
+                    emit_instruction(aa_script, 0x1F8, {{0, 1}, {0, 96}, {0, 48}, {0, 0}});
+                    emit_instruction(aa_script, 0x75, {{0, 20}});
+                    emit_instruction(aa_script, 0x76, {{0, 0xFFFFFF}});
+                    emit_instruction(aa_script, 0x77, {{0, 0x000000}});
+                    emit_instruction(aa_script, 0x78, {{0, 1}});
+                    emit_text_204(aa_script, 1, 0, 10, cjk);
+                    emit_instruction(aa_script, 2, {});
+                    _putenv_s("EMULATOR_CXX_GLYPH_GDI", "1");
+                    core::Machine aa_machine(0x12345678u, table);
+                    aa_machine.config_mut().set_int("set:EnableAntiFont", 1);
+                    aa_machine.config_mut().set_int("message:UseAntiFont", 1);
+                    aa_machine.config_mut().set_int("message:AntiFontLevel", 0);
+                    aa_machine.load_root(aa_script);
+                    aa_machine.run(8);
+                    int max_alpha = 0;
+                    bool has_partial = false;
+                    bool multiple_of_15 = true;
+                    std::size_t aa_ink = 0;
+                    if (const core::TextureRecord* texture = aa_machine.texture(1)) {
+                        for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+                            const int alpha = texture->rgba[i];
+                            if (alpha == 0) continue;
+                            ++aa_ink;
+                            if (alpha > max_alpha) max_alpha = alpha;
+                            if (alpha != 255) has_partial = true;
+                            // 引擎 `0x46DAAF` 是 `value × 255 ÷ 17`：原始值 0..17 ⇒ alpha 必是 15 的倍数。
+                            if (alpha % 15 != 0) multiple_of_15 = false;
+                        }
+                    }
+                    _putenv_s("EMULATOR_CXX_GLYPH_GDI", "");
+                    if (aa_ink == 0 || !has_partial || max_alpha < 200 || !multiple_of_15) {
+                        std::fprintf(stderr,
+                                     "0x204 GDI 的 GRAY4 档不对：ink=%zu 有中间值=%d max_alpha=%d "
+                                     "全是 15 的倍数=%d（引擎 ÷17 ⇒ alpha ∈ 0,15,…,255；"
+                                     "把原始值直接当 alpha ⇒ 16；×255÷16 ⇒ 31/47…）\n",
+                                     aa_ink, has_partial ? 1 : 0, max_alpha,
+                                     multiple_of_15 ? 1 : 0);
+                        return 1;
+                    }
+                }
+            }
+#endif
 #ifdef _WIN32
             _putenv_s("EMULATOR_CXX_GLYPH_ATLAS", "");
 #else

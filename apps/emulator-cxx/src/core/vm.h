@@ -324,8 +324,10 @@ public:
     const std::string& font_string() const { return font_string_; }
     std::int32_t engine5(std::size_t i) const { return engine5_[i]; }
     std::int32_t key_total() const { return key_total_; }
-    // 引擎配置库（保存 / 脚本配置读写共用）。
+    // 引擎配置库（保存 / 脚本配置读写共用）。`config_mut()` 只给**自检 / 夹具**注入键值用
+    // （引擎自己写配置走 0x1a9 / 0x1a2 那些入口，⛔ 不是这条旁路）。
     const ConfigStore& config() const { return config_; }
+    ConfigStore& config_mut() { return config_; }
     std::int32_t input_a() const { return input_a_; }
     std::int32_t input_b() const { return input_b_; }
     std::uint32_t input_mode() const { return input_mode_; }

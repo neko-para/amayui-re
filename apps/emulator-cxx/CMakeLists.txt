@@ -45,6 +45,7 @@ add_library(emulator-core STATIC
     src/core/script.cpp
     src/core/scene_raster.cpp
     src/core/text_raster.cpp
+    src/core/text_gdi.cpp
     src/core/movie.cpp
     src/core/opcode_table.cpp
     src/core/vm.cpp

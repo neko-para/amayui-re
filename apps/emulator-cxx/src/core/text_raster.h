@@ -21,4 +21,10 @@ void compose_glyph_texel(std::uint8_t* texel, int r, int g, int b, int alpha);
 // 本次构建是否带字体后端（FreeType + libiconv）。
 bool text_backend_available();
 
+// 最近一次 `0x204` 真正用的字形来源（诊断 / 守卫用；⛔ 不是产品选择器）。
+// `FreeType` = 宿主回退；`Gdi` = 真机路径（Windows + `EMULATOR_CXX_GLYPH_GDI`）；`Bake` 目前不会出现
+// （loader 是 stub，会退回 `FreeType`）。
+enum class TextGlyphSource { None, FreeType, Gdi };
+TextGlyphSource last_glyph_source();
+
 }  // namespace core

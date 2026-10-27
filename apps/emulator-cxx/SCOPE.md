@@ -9,13 +9,24 @@
 
 ### 1.1 字体总是 Amayui CN（宿主替换）
 
-- **总是使用 Amayui CN**：`corpus/assets/fonts/Amayui-CN_cnjp.ttf`（CMake 的 `EMULATOR_CXX_FONT_PATH`），
-  粗体是同目录的 `-Bold.ttf`。
-- 引擎字体对象里的字面名（`0x1a5` 写入的名称）**一律忽略**；引擎用来量 ascent 的常量参考字体
-  "ＭＳ ゴシック"（`0x456D09`）**不加载**。
-- 引擎在重建字体时用参考字体量 ascent；emulator **改用渲染字体（Amayui）量**
+- **总是使用 Amayui CN**（宿主替换）：`corpus/assets/fonts/Amayui-CN_cnjp.ttf`（CMake 的
+  `EMULATOR_CXX_FONT_PATH`），粗体是同目录的 `-Bold.ttf`。★ **这条在 GDI 档同样生效**（见 §1.3）：
+  GDI 档默认就按宿主族名 `Amayui CN` 取字、不读引擎的字面名。
+- 引擎字体对象里的字面名（`0x1a5` 写入的名称）**一律忽略**。★ 实测本机数据的 `0x1a5` 写的是
+  **「ＭＳ ゴシック」/「ＭＳ 明朝」**（不是 Amayui CN —— 译文脚本没有改这一格，所以宿主替换是必需的，
+  否则简体字形要靠系统字体链接兜底）。`EMULATOR_CXX_GLYPH_GDI_FACE=engine` 是**显式对照档**：
+  按引擎的字面名取字（纯真机字型，用来 A/B 对比），不是产品行为。
+- 引擎用来量 ascent 的常量参考字体 "ＭＳ ゴシック"（`0x456D09`）**不加载**；它的量度只在
+  `EMULATOR_CXX_ALIGN_REFERENCE=1` 时用来当「缓存 ascent」（见下条）。
+- 引擎在重建字体时用参考字体量 ascent；emulator **固定改用渲染字体（Amayui）量**
   （`cached_ascent = current_ascent`，`src/core/text_raster.cpp`）。这是宿主策略，不是引擎语义；
   引擎的参考行为仍登记在 spec 的 `RES-RENDER-TEXT-ALIGN-REFERENCE`。
+- **宿主基线补偿 +2px**：替换字体后墨迹整体偏低 —— Amayui 的 ascent 比引擎的参考字体大
+  （FT 量到 20px 20 / 28px 28，参考字体 17 / 24），而引擎的"字形格顶"是按参考字体量的 ⇒ 多出来的
+  那几像素全落在下方。所以画字前把基线再**抬 2px**（`EMULATOR_CXX_BASELINE_LIFT`，`0` = 关、可微调）。
+  这是**宿主视觉策略**（⛔ 不是引擎语义；引擎没有这条）。补偿后与真机（= GDI 用引擎字面名那一档）比：
+  **20px 完全一致，28px 低 1px**。数值与取证见 ops-forensics §42。
+  ★ GDI 档若显式用引擎的字面名（`GLYPH_GDI_FACE=engine`，量度与字形同源）⇒ 补偿自动为 0。
 - `EMULATOR_CXX_FONT` 环境变量只作调试覆盖；默认/产品行为就是 Amayui。
 
 ### 1.2 字形格式与合成
@@ -29,16 +40,24 @@
 
 ### 1.3 字形来源策略
 
+- **Windows + `EMULATOR_CXX_GLYPH_GDI=1`** ⇒ **真机路径**：字型 / hinting / 栅格化 / 灰度级数全部来自
+  GDI 的 `GetGlyphOutline`（引擎本来就是这么要字形的），格式按 AA 配置、两趟照引擎。
+  字面名**仍走 §1.1 的宿主替换**（默认族名 `Amayui CN`，私有挂载仓库里的 TTF）；
+  `EMULATOR_CXX_GLYPH_GDI_FACE=engine` 才按引擎 `0x1a5` 那格取字（对照用），
+  `= <族名>` 则用指定族名。这不是"另一种观感方案"，而是把引擎脚下的平台接成同一台机器上的同一个 GDI。
+  实现在 `src/core/text_gdi.cpp`（只在 `_WIN32` 有实体）；默认关闭。
 - **有离线 bake 数据**（`EMULATOR_CXX_GLYPH_ATLAS` 指向的文件存在）⇒ **完全按引擎**：格式看 AA 配置、
   两趟照引擎。当前 loader 仍是 **stub**（会打警告，仍用 FT 字形）；真实 GDI 字形（Windows 提供者 /
   离线 atlas）接进同一入口后绘制逻辑不变。
-- **无 bake** ⇒ 两个宿主方案（为了更好的观感，不是引擎语义）：
+- **其它（默认）** ⇒ 两个宿主方案（为了更好的观感，不是引擎语义）：
   - **同色**（fake bold）⇒ **Bold 字体 + 默认灰度 AA + 单趟**（默认）；`EMULATOR_CXX_SAME_COLOR_MONO=1` 回到
     normal + 1-bit mono + 单趟；
   - **异色**（真 shadow）⇒ 默认灰度 AA + **两趟**。
-- 无 bake 的颜色选择是宿主视觉策略；bake 的格式是引擎语义。
+- 无 bake 的颜色选择是宿主视觉策略；bake / GDI 的格式是引擎语义。
+- **绘制模式 3 的副色趟按引擎是"径向一圈"**（12 趟、位移落 3×3 邻域、只外扩 **1px**）——三档都一样，
+  这不随字形来源变；见 ops-forensics §40。
 - FT 与 GDI 的 1-bit 差约 1px，属平台栅格化（spec 的 `RES-RENDER-TEXT-GLYPH-RASTER` 明确 discard）；
-  不追求逐像素对齐。
+  不追求逐像素对齐。GDI 档没有这条差（同一个平台栅格器）。
 
 ### 1.4 已覆盖的文本行为
 
@@ -64,8 +83,10 @@
 
 - **全屏**（§2.2）。
 - **任意字体**：只支持 Amayui CN（+Bold）；引擎字体对象的字面名、参考字体不生效。
-- **逐像素 GDI 字形**：FT 与 GDI 的 1px 差异按平台 discard；无 bake 时是近似。
+- **逐像素 GDI 字形（默认档）**：FT 与 GDI 的 1px 差异按平台 discard；无 bake 时是近似。
+  （想要真机字形就开 `EMULATOR_CXX_GLYPH_GDI=1`，见 §1.3。）
 - **离线 bake 的真实字形**：loader 仍是 stub（`EMULATOR_CXX_GLYPH_ATLAS` 只做存在性探测）。
+- **非 Windows 上的 GDI 档**：没有实体（`text_gdi.cpp` 在那里只剩返回 false 的桩），自动回退到 FT。
 
 ## 4. 相关文档
 
