@@ -254,8 +254,14 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
                 break;
             }
             if (swapchain != nullptr) {
+                // ★ 宿主呈现策略：交换链每帧**清一次**（`clear = true`）。
+                //   引擎的"渲染步不自动清"说的是它的渲染目标；游戏靠**全屏背景项**盖满画面。
+                //   本宿主的场景批次如果没盖满（例如行带 40px 之间的 10px 背景缝、半透明/未绘区域），
+                //   取 `LOAD` 会把上一帧留在交换链上 ⇒ 滚动/切页时同一行文字在两个 y 位置都可见
+                //   （"两个位置 + 背景缝"）。交换链是平台的呈现表面，清它不影响引擎的渲染步语义；
+                //   无头 `--bmp` 每帧新建目标 ⇒ 看不到这类现象。
                 if (!draw_scene_gpu(device, command, swapchain, machine, scene_pipeline, scene_cache,
-                                    width, height, false)) {
+                                    width, height, true)) {
                     SDL_CancelGPUCommandBuffer(command);
                     break;
                 }

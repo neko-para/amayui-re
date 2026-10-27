@@ -2,6 +2,7 @@
 
 #include "core/vm.h"
 
+#include <cstdint>
 #include <string>
 
 namespace core {
@@ -11,6 +12,11 @@ namespace core {
 // 返回 false 表示没有字体后端 / 目标纹理不可用；错误说明写进 `error`（可为 nullptr）。
 bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, int y,
                             const std::string& sjis, std::string* error = nullptr);
+
+// 引擎的字形写入规则（`sub_46D9F0`）：满覆盖 ⇒ 覆写；否则 outA = max(dstA, srcA)、
+// outC = (srcC*srcA + dstC*(255-srcA))/255（⛔ 不是 alpha-over，重复画不累加）。
+// `texel` 是 RGBA 四字节；给自检 / 诊断用。
+void compose_glyph_texel(std::uint8_t* texel, int r, int g, int b, int alpha);
 
 // 本次构建是否带字体后端（FreeType + libiconv）。
 bool text_backend_available();

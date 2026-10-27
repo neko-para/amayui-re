@@ -10,6 +10,7 @@
 #include "input_script.h"
 
 #include "core/encoding.h"
+#include "core/scene_raster.h"
 
 #include <cstdio>
 #include <fstream>
@@ -20,6 +21,14 @@ namespace app {
 namespace {
 
 // 把一张纹理记录写成 24 位 BMP（bottom-up BGR）—— 诊断用（看"那一格纹理到底是什么"）。
+bool write_texture_raw(const core::TextureRecord& texture, const std::string& path) {
+    if (texture.width == 0 || texture.height == 0 || texture.rgba.size() < texture.width * texture.height * 4u) return false;
+    std::ofstream output(core::path_from_utf8(path), std::ios::binary);
+    if (!output) return false;
+    output.write(reinterpret_cast<const char*>(texture.rgba.data()), static_cast<std::streamsize>(texture.rgba.size()));
+    return output.good();
+}
+
 bool write_texture_bmp(const core::TextureRecord& texture, const std::string& path) {
     if (texture.width == 0 || texture.height == 0 || texture.rgba.size() < texture.width * texture.height * 4u) {
         return false;
@@ -206,6 +215,23 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
             if (want) {
                 char name[512];
                 std::snprintf(name, sizeof(name), "%s/frame-%04d.bmp", options.bmp_dir.c_str(), index);
+                if (std::getenv("EMULATOR_CXX_SOFT_BMP") != nullptr) {
+                    std::size_t ncmd = machine.scene_commands().size();
+                    std::fprintf(stderr, "[soft] frame=%d t=%u commands=%zu", index, machine.scene_clock_ms(), ncmd);
+                    for (const auto& [key, rec] : machine.scene_commands()) {
+                        std::fprintf(stderr, " {k=%u kind=%d a=%d/%d b=%d/%d delay=%d dur=%d ts=%u wipe=%d split=%d}",
+                                     key, rec.kind, rec.a_start, rec.a_count, rec.b_start, rec.b_count,
+                                     rec.delay, rec.duration, rec.timestamp, rec.wipe_type, rec.split);
+                    }
+                    std::fprintf(stderr, "\n");
+                    core::Bytes canvas = core::rasterize_scene(machine, static_cast<std::uint32_t>(width),
+                                                               static_cast<std::uint32_t>(height));
+                    core::TextureRecord record;
+                    record.width = static_cast<std::uint32_t>(width);
+                    record.height = static_cast<std::uint32_t>(height);
+                    record.rgba = std::move(canvas);
+                    if (write_texture_bmp(record, name)) { ++dumped; machine.end_render(); continue; }
+                }
                 if (!render_scene_gpu_to_bmp(device, machine, name, width, height)) {
                     dump_failure = name;
                     machine.end_render();
@@ -272,7 +298,9 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
         const core::TextureRecord* texture = machine.texture(options.dump_texture_id);
         if (texture == nullptr) {
             std::fprintf(stderr, "[play] 纹理 %u 不存在\n", options.dump_texture_id);
-        } else if (!write_texture_bmp(*texture, options.dump_texture_out)) {
+        } else if (!write_texture_bmp(*texture, options.dump_texture_out) ||
+                   (std::getenv("EMULATOR_CXX_RAW_TEXTURE") != nullptr &&
+                    !write_texture_raw(*texture, options.dump_texture_out + ".rgba"))) {
             std::fprintf(stderr, "[play] 纹理 %u 导出失败\n", options.dump_texture_id);
         } else {
             std::printf("[play] texture %u (%ux%u) -> %s\n", options.dump_texture_id, texture->width,

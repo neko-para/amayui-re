@@ -3105,6 +3105,46 @@ int main() {
                 std::fprintf(stderr, "0x204 text raster mismatch ink=%zu\n", ink);
                 return 1;
             }
+            // ★ 引擎默认字形 = 1-bit 硬掩码（`Font+0x548 = 0`；GGO_BITMAP）⇒ alpha 只有 0/255。
+            //   坏法：用灰度 AA（我们旧实现）⇒ 边缘出现 1..254 的 alpha，副色趟会与它累加。
+            if (text_texture != nullptr) {
+                bool partial_alpha = false;
+                for (std::size_t i = 3; i < text_texture->rgba.size(); i += 4) {
+                    if (text_texture->rgba[i] != 0 && text_texture->rgba[i] != 255) {
+                        partial_alpha = true;
+                        break;
+                    }
+                }
+                if (partial_alpha) {
+                    std::fprintf(stderr, "0x204 glyph alpha not binary (engine default is 1-bit GGO_BITMAP)\n");
+                    return 1;
+                }
+            }
+            // ★ 引擎的字形合成（`0x46D9F0`）：满覆盖覆写；否则 outA = max(dstA, srcA)、
+            //   outC = (srcC*srcA + dstC*(255-srcA))/255。⛔ 不是 alpha-over：同像素画两遍不得变实。
+            {
+                std::uint8_t texel[4] = {0, 0, 0, 0};
+                core::compose_glyph_texel(texel, 255, 255, 255, 128);
+                core::compose_glyph_texel(texel, 255, 255, 255, 128);
+                if (texel[3] != 128) {
+                    std::fprintf(stderr, "0x204 glyph composition not idempotent alpha=%u（alpha-over 会变成 192）\n",
+                                 static_cast<unsigned>(texel[3]));
+                    return 1;
+                }
+                std::uint8_t full[4] = {10, 20, 30, 40};
+                core::compose_glyph_texel(full, 1, 2, 3, 255);
+                if (full[0] != 1 || full[1] != 2 || full[2] != 3 || full[3] != 255) {
+                    std::fprintf(stderr, "0x204 full-coverage compose must overwrite\n");
+                    return 1;
+                }
+                std::uint8_t blend[4] = {200, 200, 200, 128};
+                core::compose_glyph_texel(blend, 0, 0, 0, 128);
+                if (blend[3] != 128 || blend[0] != 99) {
+                    std::fprintf(stderr, "0x204 partial compose mismatch rgba=%u,%u,%u,%u\n",
+                                 blend[0], blend[1], blend[2], blend[3]);
+                    return 1;
+                }
+            }
 
             // 入口条件：文本为空 ⇒ 不画、不报错；槽不存在 ⇒ 静默跳过。
             auto empty_text_script = make_script_with_body();
@@ -3125,6 +3165,93 @@ int main() {
             if (empty_ink != 0 || !empty_text.errors().empty()) {
                 std::fprintf(stderr, "0x204 entry-condition mismatch ink=%zu errors=%zu\n",
                              empty_ink, empty_text.errors().size());
+                return 1;
+            }
+
+            // ★ 纵向对位：`0x204` 的 y = **字形格顶**，不是基线。绘制入口把「本次量度 ascent」加回
+            //   （`0x46F37C` / `0x471253`）再落字；对位模式 = 1 时先做 `y + 缓存ascent − 本次ascent`，
+            //   缓存 = 字体重建时对**参考字体**量到的 tmAscent（`Font+0x313EC` 那张 TEXTMETRICA，
+            //   由 `GetTextMetricsA` 的出参写；`+0x313F0` = tmAscent）。参考字体是重建入口用**常量
+            //   字面名 "ＭＳ ゴシック"** 建的那份（`0x456D09`），不是对象当前字面名（Amayui CN）！
+            //   ⇒ 模式 1 的基线 = y + 参考 ascent（≈17@20px），模式 0 = y + 渲染 ascent（≈19）。
+            //   ★ 坏法（已实测）：把缓存当 0 ⇒ 基线 = y ⇒ 整行上移一个 ascent（CONFIG1.BIN 的纹理 196
+            //   被切成两半）；把缓存当渲染字体 ⇒ 整体低约 2px（用户口径「有点偏下」）。
+            //   用 CJK 字形（CP932 "設"）让墨迹顶可分辨；两个模式各画一次，比较墨迹顶。
+            const std::string cjk = "\x90\xDD";  // "設"
+            auto draw_alignment = [&](bool mode_one) {
+                auto script = make_script_with_body();
+                emit_instruction(script, 0x1F8, {{0, 1}, {0, 96}, {0, 48}, {0, 0}});
+                emit_instruction(script, 0x75, {{0, 20}});  // 字号 20（与 CONFIG1.BIN 的标签同）
+                if (mode_one) emit_instruction(script, 0x2DB, {{0, 1}});  // 对位模式 1；缺省 = 0
+                emit_text_204(script, 1, 0, 10, cjk);  // y = 10 = 字形格顶
+                emit_instruction(script, 2, {});
+                core::Machine machine(0x12345678u, table);
+                machine.load_root(script);
+                machine.run(8);
+                const core::TextureRecord* texture = machine.texture(1);
+                int top = -1;
+                int bottom = -1;
+                if (texture != nullptr) {
+                    for (int row = 0; row < static_cast<int>(texture->height); ++row) {
+                        bool any = false;
+                        for (int column = 0; column < static_cast<int>(texture->width) && !any; ++column) {
+                            const std::size_t at =
+                                (static_cast<std::size_t>(row) * texture->width + column) * 4;
+                            any = texture->rgba[at + 3] != 0;
+                        }
+                        if (!any) continue;
+                        if (top < 0) top = row;
+                        bottom = row;
+                    }
+                }
+                return std::pair<int, int>{top, bottom};
+            };
+            const auto [mode1_top, mode1_bottom] = draw_alignment(true);
+            const auto [mode0_top, mode0_bottom] = draw_alignment(false);
+            // 本 emulator 刻意用渲染字体（Amayui CN，20px ascender = 19）做缓存量度（引擎量的是
+            // 常量参考字体 MS Gothic；见 text_raster.cpp 的宿主策略说明）。「設」bbox top ≈17
+            // ⇒ 墨迹顶 ≈ y + 2 = 12；容许 [10,14]（字体版本 / 取整）。
+            if (mode1_top < 10 || mode1_top > 14 || mode1_bottom >= 40) {
+                std::fprintf(stderr,
+                             "0x204 vertical alignment mismatch (mode 1) top=%d bottom=%d"
+                             "（期望 top∈[10,14]；基线 = y + 渲染字体的 ascent）\n",
+                             mode1_top, mode1_bottom);
+                return 1;
+            }
+            // 缓存 ascent == 本次量度（本 emulator 用渲染字体重测）⇒ 模式 0 与模式 1 的基线相同；
+            // 两者差超过 1px 说明缓存又走成了别的字体 / 别的量度。
+            if (mode0_top < mode1_top - 1 || mode0_top > mode1_top + 1 || mode0_bottom >= 40) {
+                std::fprintf(stderr,
+                             "0x204 vertical alignment mismatch (mode 0 vs 1) mode0_top=%d mode1_top=%d"
+                             "（期望两者相同：缓存 = 本次 = 渲染字体的 ascent）\n",
+                             mode0_top, mode1_top);
+                return 1;
+            }
+            // ★ 纹理版本号必须**严格单调递增**：窗口路径的 GPU 纹理缓存按 revision 命中。
+            //   一次重画 = 0x1f8（重建 + 清空）+ N 次 0x204；若重建把 revision 重置回 1，
+            //   "每次重画都写同样多条文字" ⇒ 终值恒等 ⇒ 缓存命中上一轮的纹理 ⇒ 滚动/切页不刷新。
+            //   坏法（已实测，用户口径「必须文字数量变多/变少才会刷新」）：0x1f8 清空后 revision = 1。
+            //   两轮「重建 + 一条 0x204」：正常终值 = 4（建=1、画=2、再建=3、再画=4）；
+            //   坏法终值 = 2（再建把版本号打回 1）。
+            //   ★ 这里用**字符串池**（type 5）当文本源：内联文本（type 2）的字节放在指令流里，
+            //     本测试要在 0x204 之后继续执行下一条指令，不能让它踩到文本字节。
+            auto revision_script = make_script_with_body();
+            emit_instruction(revision_script, 0x1F8, {{0, 1}, {0, 64}, {0, 32}, {0, 0}});
+            emit_instruction(revision_script, 0x204, {{0, 1}, {0, 0}, {0, 6}, {5, 0}});
+            emit_instruction(revision_script, 0x1F8, {{0, 1}, {0, 64}, {0, 32}, {0, 0}});
+            emit_instruction(revision_script, 0x204, {{0, 1}, {0, 0}, {0, 6}, {5, 1}});
+            emit_instruction(revision_script, 2, {});
+            core::Machine revision_machine(0x12345678u, table);
+            revision_machine.load_root(revision_script);
+            revision_machine.write_text(core::Operand{5, 0}, "A");
+            revision_machine.write_text(core::Operand{5, 1}, "B");
+            revision_machine.run(1000);
+            const auto final_revision = revision_machine.texture(1)->revision;
+            if (final_revision <= 3) {
+                std::fprintf(stderr,
+                             "两轮「重建 + 同条数文字」后纹理版本号 = %u（≤3）："
+                             "GPU 缓存会命中上一轮纹理，滚动重画不会刷新\n",
+                             final_revision);
                 return 1;
             }
         }

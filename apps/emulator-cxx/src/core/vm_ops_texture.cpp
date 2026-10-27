@@ -309,7 +309,12 @@ void Machine::op_1f8(const Instruction& instruction) {
     record.width = static_cast<std::uint32_t>(width);
     record.height = static_cast<std::uint32_t>(height);
     record.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0);
-    record.revision = 1;
+    // ★ `revision` 必须**严格单调递增**（这里只加不减）。窗口路径的 GPU 纹理缓存按 `revision` 命中：
+    //   一次重画 = 0x1f8 重建 + N 次 0x204/0x205；若重建把版本号重置回 1，则"每次重画都写同样多条文字"
+    //   的终值恒等 ⇒ 缓存命中上一轮的纹理 ⇒ 滚动 / 切页时画面停在上一次的文字。2026-10-27 实测：
+    //   CONFIG1.BIN 的列表每次滚动重画**恰好 14 条** 0x204（9 条标签 + 5 条值），版本号终值恒为 15
+    //   ⇒ 只有条数变化时才刷新（用户口径「必须文字数量变多/变少才会刷新」）。
+    //   ⛔ 不要为了"让空白纹理重新上传"而重置版本号。
     return;
 }
 
@@ -352,7 +357,10 @@ void Machine::op_1f9(const Instruction& instruction) {
         }
     }
     record.present = true;
-    record.revision++;
+    // ★ 替换同一槽时版本号必须**前进**（GPU 缓存按 revision 命中）：旧记录存在就取旧值 + 1，
+    //   否则从 1 开始。⛔ 用一个新记录的 0+1 会在"重载同一槽的另一张图"时命中旧纹理。
+    const auto previous = textures_.find(static_cast<std::uint32_t>(id));
+    record.revision = previous == textures_.end() ? 1u : previous->second.revision + 1u;
     textures_[static_cast<std::uint32_t>(id)] = record;
     return;
 }

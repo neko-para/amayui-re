@@ -302,9 +302,9 @@ public:
     std::int32_t scalar_d107656() const { return scalar_d107656_; }
     std::int32_t font_draw_mode() const { return font_draw_mode_; }
     std::int32_t font_align_mode() const { return font_align_mode_; }
-    // `0x204` 的「缓存 ascent」（`Font+0x313F0`）：引擎里**只有读者、没有写者**（全语料 0 处 store）
-    // ⇒ 运行期恒 0。⛔ 不要把它刷成"上一次量度的 ascent"，那会造出引擎里不存在的补偿。
-    std::int32_t cached_text_ascent() const { return cached_text_ascent_; }
+    // ★ `0x204` 的「缓存 ascent」（`Font+0x313F0` = 重建入口那张 TEXTMETRICA 的 tmAscent）**不单独建模**：
+    //   它由 `GetTextMetricsA` 的出参写入，量的是**重建入口的固定参考字体**（常量 "ＭＳ ゴシック"），
+    //   不是对象当前字面名那份渲染字体。绘制侧按 `reference_ascent()` 单独取（见 `text_raster.cpp`）。
     std::int32_t font_primary_color() const { return font_primary_color_; }
     std::int32_t font_secondary_color() const { return font_secondary_color_; }
     std::int32_t font_metric_a() const { return font_metric_a_; }
@@ -830,8 +830,6 @@ private:
     std::int32_t scalar_d107656_ = 0;
     std::int32_t font_draw_mode_ = 1;
     std::int32_t font_align_mode_ = 0;
-    // `0x204` 的「缓存 ascent」：引擎只有读者、没有写者 ⇒ 恒 0（见 cached_text_ascent()）。
-    std::int32_t cached_text_ascent_ = 0;
     std::int32_t font_primary_color_ = 0xFFFFFF;
     std::int32_t font_secondary_color_ = 0x000000;
     std::int32_t font_metric_a_ = 0;
