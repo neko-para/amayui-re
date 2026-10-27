@@ -352,8 +352,12 @@ export const anchorText = (a) =>
 export function testNames(text) {
   const out = [];
   const re = /\b(?:test|it|describe)\s*\(\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)/g;
+  // ★ CTest：`add_test(NAME <名字> …)`。`apps/emulator-cxx` 的守卫是 CTest，不是 JS 用例；
+  //   不认它 ⇒ 那批语义永远只能绑到"只证明接线"的证据上。
+  const cmake = /\badd_test\s*\(\s*NAME\s+([A-Za-z0-9_.-]+)/g;
   let m;
   while ((m = re.exec(text)) !== null) out.push(m[1] ?? m[2] ?? m[3]);
+  while ((m = cmake.exec(text)) !== null) out.push(m[1]);
   return out;
 }
 

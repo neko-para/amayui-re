@@ -106,3 +106,22 @@ test('★ CONFIG 路径上已实现的 opcode 不许漏 case', () => {
   );
   assert.deepEqual(missing, [], `分派表缺这些 opcode：${missing.join(', ')}`);
 });
+
+/** ★ 设置界面这批（右列控件 / 整页重建 / 声音页）用到的 handler：**声明 → 定义 → 分派**三处都要在。
+ *  它们各自的语义由 spec 的 9 条规则管；这条只钉住"别在分派表里漏掉一条又把状态退回到未实现"。 */
+const CONFIG_UI_OPCODES = [
+  0x2cf, 0x307, 0x1b5, 0x1b8, 0x1b9, 0x1ba, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xba,
+];
+
+test('★ 设置界面这批 handler 都分派到位（声明 / 定义 / case 三处齐）', () => {
+  const dispatch = dispatchTable();
+  const declared = declaredHandlers();
+  const missing = CONFIG_UI_OPCODES.filter((opcode) => !dispatch.has(opcode)).map(
+    (opcode) => `0x${opcode.toString(16)}`,
+  );
+  assert.deepEqual(missing, [], `分派表缺这些 opcode：${missing.join(', ')}`);
+  const undeclared = CONFIG_UI_OPCODES.filter((opcode) => !declared.has(dispatch.get(opcode))).map(
+    (opcode) => `0x${opcode.toString(16)}→${dispatch.get(opcode)}`,
+  );
+  assert.deepEqual(undeclared, [], `case 指向未声明的 handler：${undeclared.join(', ')}`);
+});

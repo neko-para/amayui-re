@@ -161,6 +161,37 @@ const std::vector<std::string>* ConfigStore::get_list(const std::string& key) co
     return &it->second.list;
 }
 
+void ConfigStore::register_engine_defaults() {
+    // ★ 引擎在**配置库构造期**自己登记的默认值（`Reg` 构造 `sub_491880` / EA 0x491880 里的逐条写）。
+    //   它们**不在**发行默认表（ALF 索引里那份实测也没有这些键），也**不在**玩家 `SYS4REG.INI`：
+    //   INI 只覆盖它。少了这一步的后果是真机读 5 / 500 / 2000 / 1，模拟器读 **0**
+    //   —— 设置界面的初值、`0x1b8` 读回的时长、`0x1ba` 的同态判据都会跟着错。
+    //   优先级最低：发行默认表 → 玩家文件 → 运行期写入 都会把它盖掉。
+    struct Builtin {
+        const char* key;
+        std::int32_t value;
+    };
+    // 键名逐字 + 值 + 登记点 EA（取证：`Reg` 构造体内的立即数写）。
+    static const Builtin kBuiltins[] = {
+        {"sound:Music", 0},                  // 0x491919
+        {"sound:Sound", 1},                  // 0x491932（总开关）
+        {"sound:Voice", 1},                  // 0x49194F
+        {"sound:SE", 1},                     // 0x49196C
+        {"sound:Movie", 1},                  // 0x491989
+        {"message:MessageSpeed", 5},         // 0x491D4D
+        {"message:AutoMessageTime0", 500},   // 0x49201C
+        {"message:AutoMessageTime1", 2000},  // 0x492039
+    };
+    for (const auto& builtin : kBuiltins) {
+        if (named_.find(builtin.key) != named_.end()) continue;
+        ConfigValue value;
+        value.kind = ConfigValue::Kind::Int;
+        value.integer = builtin.value;
+        named_[builtin.key] = value;
+    }
+    return;
+}
+
 void ConfigStore::load_defaults(const std::vector<ConfigDefault>& entries) {
     // 整表处理前一次性清空列表键（不是逐条清）。
     for (auto it = named_.begin(); it != named_.end();) {

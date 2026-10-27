@@ -15167,6 +15167,333 @@
       "evidence": [
         "guard:tools/test/spec-sites-batch7.assets.test.mjs#★ CORE-INPUT-RESET-FC 的站点都在 .lst 指令行首"
       ]
+    },
+    {
+      "rule": "CORE-OPS-FORWARD-DISPLAY-MODE",
+      "functions": [
+        "sub_4263D0",
+        "sub_413DD0"
+      ],
+      "sites": [
+        {
+          "ea": "0x4263d0",
+          "what": "0x2cf handler 起点"
+        },
+        {
+          "ea": "0x4263e0",
+          "what": "长度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x4263f6",
+          "what": "精度检查：目标 < 0 ⇒ 静默返回"
+        },
+        {
+          "ea": "0x426404",
+          "what": "精度检查：目标 > 1 ⇒ 静默返回"
+        },
+        {
+          "ea": "0x426412",
+          "what": "转发到显示模式入口（目标模式）"
+        },
+        {
+          "ea": "0x413e26",
+          "what": "早退①：请求 == 缓存"
+        },
+        {
+          "ea": "0x413e2f",
+          "what": "早退②：强制全屏且缓存非 0"
+        },
+        {
+          "ea": "0x414357",
+          "what": "缓存翻转 new = (old == 0)"
+        },
+        {
+          "ea": "0x4146fc",
+          "what": "写 display:ScreenMode（归一后）"
+        },
+        {
+          "ea": "0x414050",
+          "what": "条件写 set:WinPosLeft"
+        },
+        {
+          "ea": "0x41406a",
+          "what": "条件写 set:WinPosTop"
+        }
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FORWARD-NAMED-KEY",
+      "functions": [
+        "sub_426AE0",
+        "sub_431FC0"
+      ],
+      "sites": [
+        {
+          "ea": "0x426ae0",
+          "what": "0x307 handler 起点"
+        },
+        {
+          "ea": "0x426af5",
+          "what": "长度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x426b04",
+          "what": "读第 1 个操作数（唯一一次）"
+        },
+        {
+          "ea": "0x426b0a",
+          "what": "接口槽 +0xC =「设置一个命名键」入口"
+        },
+        {
+          "ea": "0x426b0d",
+          "what": "键名 system:EffectSkipOnClick（静态串）"
+        },
+        {
+          "ea": "0x431fdb",
+          "what": "0x306 走同一槽 +4（同一个键的读入口）"
+        },
+        {
+          "ea": "0x492ab0",
+          "what": "写入口实现体：缺键只弹框、不建键"
+        }
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-CONFIG-NAMED-WRITE",
+      "functions": [
+        "sub_41FED0"
+      ],
+      "sites": [
+        {
+          "ea": "0x41fed0",
+          "what": "0x1b5 handler 起点"
+        },
+        {
+          "ea": "0x41fee2",
+          "what": "长度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x41fef1",
+          "what": "读第 1 个操作数（第一次）"
+        },
+        {
+          "ea": "0x41ff00",
+          "what": "引擎参数格 ← 同一值（文本自动推进时长）"
+        },
+        {
+          "ea": "0x41ff06",
+          "what": "读第 1 个操作数（第二次，给写入口）"
+        },
+        {
+          "ea": "0x41ff0f",
+          "what": "键名 message:MessageSpeed（静态串）"
+        },
+        {
+          "ea": "0x417eab",
+          "what": "启动期：同名键 → 参数格（初值的唯一确定写点）"
+        },
+        {
+          "ea": "0x491d4d",
+          "what": "内建默认登记 message:MessageSpeed = 5"
+        }
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-CONFIG-NAMED-AUTOTIME",
+      "functions": [
+        "sub_42D2F0"
+      ],
+      "sites": [
+        {
+          "ea": "0x42d2f0",
+          "what": "0x1b8 handler 起点"
+        },
+        {
+          "ea": "0x42d300",
+          "what": "长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x42d30f",
+          "what": "读档号"
+        },
+        {
+          "ea": "0x42d327",
+          "what": "键名 message:AutoMessageTime0（静态串）"
+        },
+        {
+          "ea": "0x42d333",
+          "what": "键值 → 落点（只写）"
+        },
+        {
+          "ea": "0x42d357",
+          "what": "键名 message:AutoMessageTime1（静态串）"
+        },
+        {
+          "ea": "0x42d36b",
+          "what": "越界：只上报一段固定文本（不写落点）"
+        },
+        {
+          "ea": "0x49201c",
+          "what": "内建默认登记 AutoMessageTime0 = 500"
+        },
+        {
+          "ea": "0x492039",
+          "what": "内建默认登记 AutoMessageTime1 = 2000"
+        }
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-CONFIG-NAMED-AUTOTIME-WRITE",
+      "functions": [
+        "sub_41FF60"
+      ],
+      "sites": [
+        {
+          "ea": "0x41ff60",
+          "what": "0x1b9 handler 起点"
+        },
+        {
+          "ea": "0x41ff72",
+          "what": "长度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x41ff81",
+          "what": "读档号"
+        },
+        {
+          "ea": "0x41ff94",
+          "what": "档 0 支：读第 2 个操作数"
+        },
+        {
+          "ea": "0x41ff9d",
+          "what": "键名 message:AutoMessageTime0（写入）"
+        },
+        {
+          "ea": "0x41ffb0",
+          "what": "档号 == 1 的比较"
+        },
+        {
+          "ea": "0x41ffcd",
+          "what": "键名 message:AutoMessageTime1（写入）"
+        },
+        {
+          "ea": "0x41ffde",
+          "what": "越界：只上报（不读第 2 个操作数）"
+        }
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "FMT-SAVE-SYSTEM",
+      "functions": [
+        "sub_40AAE0",
+        "sub_438320",
+        "sub_437480",
+        "sub_438940",
+        "sub_40AEE0",
+        "sub_4B92F0"
+      ],
+      "sites": [
+        {
+          "ea": "0x40aae0",
+          "what": "系统容器写入主体（拼路径 / 写临时件 / 换名 / 旧件转备份）"
+        },
+        {
+          "ea": "0x40ab49",
+          "what": "临时文件名 SAVE.DAT"
+        },
+        {
+          "ea": "0x40ac84",
+          "what": "调用负载构建者 sub_438320"
+        },
+        {
+          "ea": "0x438320",
+          "what": "负载构建：四段 + 内层校验头"
+        },
+        {
+          "ea": "0x4383d8",
+          "what": "段 2 取脚本整型键表的元素个数（哈希表 size）"
+        },
+        {
+          "ea": "0x4383ff",
+          "what": "段 2 取键首址"
+        },
+        {
+          "ea": "0x438457",
+          "what": "段 2 拷 12 字节键"
+        },
+        {
+          "ea": "0x438476",
+          "what": "段 2 写值"
+        },
+        {
+          "ea": "0x438482",
+          "what": "段 2 步长 16 字节/条"
+        },
+        {
+          "ea": "0x43848a",
+          "what": "段 3 取脚本字符串键表元素个数"
+        },
+        {
+          "ea": "0x438519",
+          "what": "段 3 写键 NUL 串"
+        },
+        {
+          "ea": "0x438567",
+          "what": "段 3 写值 NUL 串"
+        },
+        {
+          "ea": "0x4385b8",
+          "what": "段 4 的版本门（主版本）"
+        },
+        {
+          "ea": "0x438625",
+          "what": "交给外层容器写入"
+        },
+        {
+          "ea": "0x40b03a",
+          "what": "启动期读回系统容器"
+        },
+        {
+          "ea": "0x438940",
+          "what": "读回后重建两张脚本键表"
+        },
+        {
+          "ea": "0x438a85",
+          "what": "段 2 逐条插回整型键表"
+        },
+        {
+          "ea": "0x438b45",
+          "what": "段 3 逐条插回字符串键表"
+        },
+        {
+          "ea": "0x4b9632",
+          "what": "窗口关闭且 set:NoSaveDat 为 0 时也写一次"
+        }
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:tools/test/spec-save-sites.assets.test.mjs#★ FMT-SAVE 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+      ]
     }
   ]
 }

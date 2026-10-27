@@ -64,6 +64,8 @@ public:
     explicit ConfigStore(ConfigVocabulary vocabulary) : vocabulary_(std::move(vocabulary)) {}
 
     void load_defaults(const std::vector<ConfigDefault>& entries);
+    /** 引擎**构造期**登记的默认值（优先级最低：发行默认表 / 玩家文件 / 运行期写入都会覆盖）。 */
+    void register_engine_defaults();
     void load_player_file(const std::filesystem::path& path);
     // 按「保存」合同的固定段序 / 词表顺序整体重写玩家文件。
     void save_player_file(const std::filesystem::path& path) const;

@@ -328,6 +328,10 @@ test('★ #4 文件存在 ≠ 用例存在：锚指向文件里**没有的用例
 
 test('★ 用例名抽取：`test()` / `it()` / `describe()` 的字面量；抽不出的文件 ⇒ 红（不是"跳过"）', () => {
   assert.deepEqual(testNames("test('a', () => {}); it(\"b\", () => {}); describe(`c`, () => {});"), ['a', 'b', 'c']);
+  // ★ CTest 名字也要抽（apps/emulator-cxx 的守卫是 CTest，不是 JS 用例）
+  assert.deepEqual(testNames("add_test(NAME emulator-core-selftest COMMAND x)"), [
+    'emulator-core-selftest',
+  ]);
   const dir = tmp();
   try {
     seedWithVocab(dir, [rec({ anchor: [{ type: 'guard', repo: 'self', path: 'package.json', test: '随便什么' }] })]);

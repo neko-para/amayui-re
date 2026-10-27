@@ -447,6 +447,19 @@ public:
     void report_error(std::string text) { errors_.push_back(std::move(text)); }
     const std::vector<std::string>& errors() const { return errors_; }
     void clear_errors() { errors_.clear(); }
+    // ── 观察口（守卫用；⛔ 不是产品接口）──
+    std::int32_t display_mode_cache() const { return display_mode_cache_; }
+    // 音频观察口（守卫用；⛔ 不是产品接口）。
+    std::int32_t se_slot_resource(std::size_t slot) const { return se_slot_resource_[slot]; }
+    std::int32_t bgm_track() const { return bgm_track_; }
+    std::int32_t bgm_param() const { return bgm_param_; }
+    std::int32_t bgm_progress() const { return bgm_progress_; }
+    std::size_t bgm_play_requests() const { return bgm_play_requests_; }
+    std::size_t bgm_stop_requests() const { return bgm_stop_requests_; }
+    std::size_t se_play_requests() const { return se_play_requests_; }
+    std::size_t se_stop_requests() const { return se_stop_requests_; }
+    bool sound_se_enabled() const { return sound_se_enabled_; }
+    bool sound_voice_enabled() const { return sound_voice_enabled_; }
     // ── 诊断（⛔ 不是引擎语义）：`--sweep-missing` 时把"没有 handler 的 opcode"" 记账后跳过 ──
     void set_sweep_missing(bool value) { sweep_missing_ = value; }
     bool sweep_missing() const { return sweep_missing_; }
@@ -688,18 +701,6 @@ private:
     void op_c5(const Instruction&); void op_306(const Instruction&);
     // 声道音量 setter（0xC6）/ 声道开关 getter（0xC7）
     void op_c6(const Instruction&); void op_c7(const Instruction&);
-    std::int32_t display_mode_cache() const { return display_mode_cache_; }
-    // 音频观察口（守卫用；⛔ 不是产品接口）。
-    std::int32_t se_slot_resource(std::size_t slot) const { return se_slot_resource_[slot]; }
-    std::int32_t bgm_track() const { return bgm_track_; }
-    std::int32_t bgm_param() const { return bgm_param_; }
-    std::int32_t bgm_progress() const { return bgm_progress_; }
-    std::size_t bgm_play_requests() const { return bgm_play_requests_; }
-    std::size_t bgm_stop_requests() const { return bgm_stop_requests_; }
-    std::size_t se_play_requests() const { return se_play_requests_; }
-    std::size_t se_stop_requests() const { return se_stop_requests_; }
-    bool sound_se_enabled() const { return sound_se_enabled_; }
-    bool sound_voice_enabled() const { return sound_voice_enabled_; }
     void op_b5(const Instruction&); void op_2c7(const Instruction&); void op_341(const Instruction&); void op_ae(const Instruction&);
     void op_2ee(const Instruction&); void op_10f(const Instruction&); void op_248(const Instruction&); void op_8b(const Instruction&);
     void op_261(const Instruction&); void op_260(const Instruction&); void op_25b(const Instruction&); void op_130(const Instruction&);

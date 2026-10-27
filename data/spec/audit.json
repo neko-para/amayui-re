@@ -6491,6 +6491,144 @@
         "先设模数 7、登记一个槽，再执行 0xfc ⇒ 模数必须是 0、两张表全\"未登记\"。",
         "0xfc 之后按住掩码必须仍是原值。"
       ]
+    },
+    {
+      "id": "CORE-OPS-FORWARD-DISPLAY-MODE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-2CF-PLATFORM",
+          "kind": "unknown",
+          "what": "更换路径上引擎向平台发出的那组请求（整窗重建 / 分辨率与整窗尺寸 / 外部资源重载 / 一个时间戳格）只在静态层看到调用，没有逐条取证它们的参数与顺序",
+          "next": "按 EA 读那组调用点，逐条登记「请求 + 参数 + 时序」；平台细节仍不进正文（只进边界契约）"
+        },
+        {
+          "id": "RES-OPS-2CF-WINPOS",
+          "kind": "unknown",
+          "what": "条件写 set:WinPosLeft / set:WinPosTop 的取值来自平台窗口矩形；两处写与 display:LimitAero / VirtualFullScreenType 的路径可达性只按条件读出、未逐路径合并",
+          "next": "在带窗口的宿主里取一次两键的写入值，再与新窗口矩形对照"
+        },
+        {
+          "id": "RES-OPS-2CF-RANGE",
+          "kind": "unknown",
+          "what": "显示模式缓存的取值域未观察：早退判据只与 0 比较、翻转只产生 0/1，但配置里写 2 时缓存会是什么没有采样",
+          "next": "用合成配置（display:ScreenMode = 2）跑一次启动 + 一次 0x2cf，读缓存格"
+        }
+      ],
+      "falsifiers": [
+        "构造\"缓存 = 1、display:ScreenMode = 0\"的运行态跑 0x2cf 1：若键变成 1 ⇒ 实现走了\"总是写键\"的路，本条被证伪。",
+        "跑 0x2cf 2：若缓存或 display:ScreenMode 有任何变化、或出现错误上报 ⇒ 范围检查缺失，本条被证伪。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-FORWARD-NAMED-KEY",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-307-CONSUMER",
+          "kind": "unknown",
+          "what": "system:EffectSkipOnClick 的消费点只知道 0x306 读它；它控制哪个表现（点击是否快进效果）没有取证",
+          "next": "在带效果的场景里把该键置 0 / 1 各跑一次，比较是否跳过"
+        }
+      ],
+      "falsifiers": [
+        "把该键从发行默认表里去掉再跑 0x307：若跑完后键出现在存储里 ⇒ 实现用了\"缺键即创建\"的入口，本条被证伪。",
+        "跑 0x307 7 之后再跑 0x306：读回必须 == 7；不等 ⇒ 两侧键身份不同，本条被证伪。"
+      ]
+    },
+    {
+      "id": "CORE-CONFIG-NAMED-WRITE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-CONFIG-NAMED-WRITE-PARAM",
+          "kind": "unknown",
+          "what": "参数格还有别的写者（例如 0x74 只写格不写键）；本条只规定\"两处同值\"，没有枚举所有读者 / 写者",
+          "next": "把该格的读者 / 写者按 EA 列全，逐条确认与 0x1b5 的先后关系"
+        }
+      ],
+      "falsifiers": [
+        "跑 0x1b5 7 之后立刻读参数格（0x7f）：必须读回 7；读回旧值 ⇒ \"两处都写\"被证伪。",
+        "跑 0x1b5 7 之后触发一次保存：玩家文件里 message:MessageSpeed 必须是 7；否则落盘侧口径错。"
+      ]
+    },
+    {
+      "id": "CORE-CONFIG-NAMED-AUTOTIME",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-CONFIG-AUTOTIME-LOG",
+          "kind": "unknown",
+          "what": "越界支那段固定文本的最终形态（是否带行号前缀）没有逐字取证",
+          "next": "读错误上报链最末端一次，确认前缀拼接"
+        }
+      ],
+      "falsifiers": [
+        "把落点预置成 42 再跑 0x1b8 2（越界）：落点必须仍是 42；变成 0 ⇒ \"越界不写\"被证伪。",
+        "预置两键为 500 / 2000 后跑 0x1b8 0 与 0x1b8 1：必须分别读回 500 / 2000；接反 ⇒ 档号映射错。"
+      ]
+    },
+    {
+      "id": "CORE-CONFIG-NAMED-AUTOTIME-WRITE",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-CONFIG-AUTOTIME-RANGE",
+          "kind": "unknown",
+          "what": "写进去的值是否被消费方夹取 / 拒绝，没有观察（写入侧逐字不检查）",
+          "next": "写一个负值与一个极大值，看消费该键的计时器行为"
+        }
+      ],
+      "falsifiers": [
+        "跑 0x1b9 1 33 再跑 0x1b8 1：必须读回 33；不等 ⇒ 两条不是同一对键。",
+        "把两键预置成 500 / 2000 后跑 0x1b9 2 7（越界）：两键必须都不变；任一变化 ⇒ 越界支写错。"
+      ]
+    },
+    {
+      "id": "FMT-SAVE-SYSTEM",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SAVE-SYSTEM-SEG1",
+          "kind": "unknown",
+          "what": "负载第 1 段那个整型数组属于哪个池族未定（只能看到计数 / 指针 / 编解码头的地址关系）",
+          "next": "沿该数组的读侧逐格写回点，确认它写进哪个池族，再决定是本条的子段还是另一条规则的义务"
+        },
+        {
+          "id": "RES-SAVE-SYSTEM-SEG4",
+          "kind": "unknown",
+          "what": "版本门之后那段 0x400 字节块与门控 u32 数组的身份未定",
+          "next": "按版本门两分支各取一份产物对照，先定它的长度与内容来源"
+        },
+        {
+          "id": "RES-SAVE-SYSTEM-NOSAMPLE",
+          "kind": "unknown",
+          "what": "仓库里只有槽样本（SAVE76..79），**没有 SAVE.DAT / RT.DAT 样本** ⇒ 本条目前是静态证据（写侧 + 读侧逐字），不是字节级观察",
+          "next": "在测试安装树里跑一次存槽生成系统容器，按本条的解包口径逐字节核一遍（或在清单里补一份真机系统容器）"
+        },
+        {
+          "id": "RES-SAVE-SYSTEM-RT",
+          "kind": "unknown",
+          "what": "同一时机还会重写 RT.DAT，它写的是**另一张表**（消息/文本库：键前缀 0x2E、12 字节描述符 + 4×count 负载），不是脚本键",
+          "next": "先定那张表的领域身份（消费方），再把 RT.DAT 落成独立规则或独立残差"
+        }
+      ],
+      "falsifiers": [
+        "脚本 save-int 写 v → 存槽 → 解 SAVE.DAT 的整型段，应能逐条读到键 = 前缀 03 + 8 位十六进制、值 = v；重启后 load-int 必须读回 v（键表若不持久化，重启必得 0）。",
+        "条数必须等于该哈希表的元素个数（不是容量），记录顺序 = 哈希槽升序且空槽跳过 ⇒ 同一组键在不同插入历史下文件字节可以不同：⛔ 不得把文件偏移当身份，也不得按插入顺序断言产物逐字节相同。"
+      ]
     }
   ],
   "gaps": [
@@ -6631,7 +6769,7 @@
       "id": "GAP-OPS-0100-01FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0100–0x01FF 段：尚无规范条目",
-      "note": "本段 72 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 69 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x106",
         "0x10a",
@@ -6676,9 +6814,6 @@
         "0x1b2",
         "0x1b3",
         "0x1b4",
-        "0x1b5",
-        "0x1b8",
-        "0x1b9",
         "0x1ba",
         "0x1bb",
         "0x1bc",
@@ -6710,7 +6845,7 @@
         {
           "id": "RES-GAP-OPS-0100-01FF",
           "kind": "unhandled",
-          "what": "本段 72 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "what": "本段 69 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
           "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
         }
       ]
@@ -6719,7 +6854,7 @@
       "id": "GAP-OPS-0200-02FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0200–0x02FF 段：尚无规范条目",
-      "note": "本段 107 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 106 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x200",
         "0x201",
@@ -6792,7 +6927,6 @@
         "0x2cc",
         "0x2cd",
         "0x2ce",
-        "0x2cf",
         "0x2d2",
         "0x2d4",
         "0x2d6",
@@ -6833,7 +6967,7 @@
         {
           "id": "RES-GAP-OPS-0200-02FF",
           "kind": "unhandled",
-          "what": "本段 107 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "what": "本段 106 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
           "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
         }
       ]
@@ -6842,7 +6976,7 @@
       "id": "GAP-OPS-0300-03FF",
       "chapter": "ops-unwritten",
       "title": "opcode 0x0300–0x03FF 段：尚无规范条目",
-      "note": "本段 51 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
+      "note": "本段 50 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x300",
         "0x301",
@@ -6850,7 +6984,6 @@
         "0x304",
         "0x305",
         "0x306",
-        "0x307",
         "0x309",
         "0x321",
         "0x325",
@@ -6900,7 +7033,7 @@
         {
           "id": "RES-GAP-OPS-0300-03FF",
           "kind": "unhandled",
-          "what": "本段 51 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
+          "what": "本段 50 个有处理函数的 opcode 尚未成篇（`ops` 列出全部）",
           "next": "按族取证：先从被真实脚本足迹命中的 opcode 起逐条读 handler + 语料站点，写最小合同（输入 / 状态改变 / 边界），再把该 opcode 从本 gap 的 `ops` 里移出"
         }
       ]

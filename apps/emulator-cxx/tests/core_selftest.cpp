@@ -2589,6 +2589,187 @@ bool check_exit_script(const core::OpcodeTable& table) {
 
 }  // namespace
 
+// ── 设置界面这批指令（合成脚本；不依赖游戏安装 ⇒ 可以算 pure 档行为守卫）─────────────────────
+// 每条都从"破坏就该红"的角度挑：早退不写键 / 越界不写落点 / 越界不读操作数 / 缺键不建键 /
+// 同态 no-op / 后端不存在不清槽格 / 无同曲判据 / 无在播判据。
+bool check_config_ui_surface(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "config-ui: %s\n", what);
+        return false;
+    };
+
+    // ① 0x2cf 更换路径：缓存 0→1，且命名键被写成**归一值** 1
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2CF, {{0, 1}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.config_mut().set_int("display:ScreenMode", 0);
+        machine.config_mut().set_int("display:ForceScreen", 0);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2cf(1) 停机");
+        if (machine.display_mode_cache() != 1) return fail("0x2cf(1) 没有把缓存改成 1");
+        if (machine.config().get_int("display:ScreenMode") != 1) {
+            return fail("0x2cf(1) 没有把 display:ScreenMode 写成 1");
+        }
+    }
+
+    // ② 0x2cf 早退：目标 == 缓存 ⇒ 一个键都不写（键里放 7 当标记）
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2CF, {{0, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.config_mut().set_int("display:ScreenMode", 7);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2cf(0) 早退支停机");
+        if (machine.display_mode_cache() != 0) return fail("0x2cf(0) 早退支改了缓存");
+        if (machine.config().get_int("display:ScreenMode") != 7) {
+            return fail("0x2cf(0) 早退支写了键（应当一个键都不写）");
+        }
+    }
+
+    // ③ 0x2cf 越界静默：不改缓存、不写键、不记错误
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2CF, {{0, 2}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.config_mut().set_int("display:ScreenMode", 7);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2cf(2) 越界支不该停机");
+        if (machine.display_mode_cache() != 0 || machine.config().get_int("display:ScreenMode") != 7) {
+            return fail("0x2cf(2) 越界支改了状态（应当是静默）");
+        }
+        if (!machine.errors().empty()) return fail("0x2cf(2) 越界支记了错误（应当静默）");
+    }
+
+    // ④ 0x307：缺键**不建键**；键存在时写**原值**（3 就是 3）
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x307, {{0, 3}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x307 停机");
+        if (machine.config().has_named("system:EffectSkipOnClick")) {
+            return fail("0x307 在缺键时把键建出来了（应当只上报、不创建）");
+        }
+        core::Machine with_key(key, table);
+        with_key.config_mut().set_int("system:EffectSkipOnClick", 1);
+        with_key.load_root(bytes);
+        if (!with_key.step()) return fail("0x307（键存在）停机");
+        if (with_key.config().get_int("system:EffectSkipOnClick") != 3) {
+            return fail("0x307 没有写原值 3");
+        }
+    }
+
+    // ⑤ 0x1b5：同一个值写进命名键**与**参数格（用 0x7f 读回参数格）
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1B5, {{0, 7}});
+        emit_instruction(bytes, 0x7F, {{9, 5}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.config_mut().set_int("message:MessageSpeed", 0);
+        machine.load_root(bytes);
+        if (!machine.step() || !machine.step()) return fail("0x1b5/0x7f 停机");
+        if (machine.config().get_int("message:MessageSpeed") != 7) return fail("0x1b5 没写命名键");
+        if (machine.local_int(5) != 7) return fail("0x1b5 没写参数格（0x7f 读回的不是 7）");
+    }
+
+    // ⑥ 0x1b8：命中写值 / 越界**不写落点**
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1B8, {{0, 0}, {9, 5}});
+        emit_instruction(bytes, 0x1B8, {{0, 1}, {9, 6}});
+        emit_instruction(bytes, 0x55, {{9, 7}, {0, 42}});   // 落点预置 42
+        emit_instruction(bytes, 0x1B8, {{0, 9}, {9, 7}});   // 越界
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.config_mut().set_int("message:AutoMessageTime0", 500);
+        machine.config_mut().set_int("message:AutoMessageTime1", 2000);
+        machine.load_root(bytes);
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) return fail("0x1b8 停机");
+        }
+        if (machine.local_int(5) != 500) return fail("0x1b8 档 0 没写到落点（期望 500）");
+        if (machine.local_int(6) != 2000) return fail("0x1b8 档 1 没写到落点（期望 2000）");
+        if (machine.local_int(7) != 42) return fail("0x1b8 越界改了落点（应当一个格都不写）");
+    }
+
+    // ⑦ 0x1b9：写对应键；越界**连第 2 个操作数都不读**（给不可读的指针类型也不许抛）
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1B9, {{0, 1}, {0, 33}});
+        emit_instruction(bytes, 0x1B9, {{0, 2}, {8, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x1b9 停机");
+        if (machine.config().get_int("message:AutoMessageTime1") != 33) return fail("0x1b9 没写档 1");
+        if (!machine.step()) return fail("0x1b9 越界支读了第 2 个操作数（抛了）");
+        if (machine.config().get_int("message:AutoMessageTime0") != 0) return fail("0x1b9 越界支写了键");
+    }
+
+    // ⑧ 0x1ba：音乐 ±3 阶梯（同侧 no-op）/ 音效同态 no-op
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1BA, {{0, 1}, {0, 0}});
+        emit_instruction(bytes, 0x1BA, {{0, 1}, {0, 0}});
+        emit_instruction(bytes, 0x1BA, {{0, 1}, {0, 1}});
+        emit_instruction(bytes, 0x1BA, {{0, 2}, {0, 1}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x1ba 声道停机");
+        if (machine.config().get_int("sound:Music") != -3) return fail("0x1ba 关音乐没有 −3");
+        if (!machine.step()) return fail("0x1ba 第二跳停机");
+        if (machine.config().get_int("sound:Music") != -3) return fail("0x1ba 已在同侧却再减了 3");
+        if (!machine.step()) return fail("0x1ba 第三跳停机");
+        if (machine.config().get_int("sound:Music") != 0) return fail("0x1ba 开音乐没有 +3");
+        if (!machine.step()) return fail("0x1ba 音效停机");
+        if (!machine.sound_se_enabled()) return fail("0x1ba 同态请求把音效关掉了");
+    }
+
+    // ⑨ 0xb6：没有声音后端时**不清槽格**（只记一次停止请求）；0xb4 成功会写槽资源格
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xB4, {{0, 7}, {0, 9}});
+        emit_instruction(bytes, 0xB6, {{0, 9}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0xb4 停机");
+        if (machine.se_slot_resource(9) != 7) return fail("0xb4 没有写槽资源格");
+        if (!machine.step()) return fail("0xb6 停机");
+        if (machine.se_slot_resource(9) != 7) return fail("0xb6 在没有后端时清了槽格（规范：不清）");
+        if (machine.se_stop_requests() != 1) return fail("0xb6 没有发停止请求");
+    }
+
+    // ⑩ 0xb7 同曲连播两次 = **两次**播放请求（与 0xbf 的"同曲跳过"相反）；⑪ 0xb8 无"在播"判据
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xB7, {{0, 5}});
+        emit_instruction(bytes, 0xB7, {{0, 5}});
+        emit_instruction(bytes, 0xB8, {});
+        emit_instruction(bytes, 0xB8, {});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) return fail("0xb7/0xb8 停机");
+        }
+        if (machine.bgm_play_requests() != 2) return fail("0xb7 同曲连播没有发两次请求");
+        if (machine.bgm_stop_requests() != 2) return fail("0xb8 连调两次没有发两次停止请求");
+        if (machine.bgm_param() != 1) return fail("0xb8 改了参数格（规范：不改）");
+        if (machine.bgm_track() != 0) return fail("0xb8 没有清曲目格");
+    }
+
+    return true;
+}
+
 int main() {
     try {
         // CP932 → UTF-8：引擎字符串/路径是 ANSI 字节，显示与宿主路径必须先解码。
@@ -4009,6 +4190,7 @@ int main() {
         if (!check_input_hold(table)) return 1;
         if (!check_mouse_and_hit_test(table)) return 1;
         if (!check_exit_cleanup(table)) return 1;
+        if (!check_config_ui_surface(table)) return 1;
         if (!check_color_normalization(table)) return 1;
         if (!check_slot_imgid(table)) return 1;
         if (!check_texture_size(table)) return 1;

@@ -102,6 +102,8 @@ int run_core_install(const InstallRunOptions& options) {
         const core::OpcodeTable table = core::OpcodeTable::load_from_file(core::path_from_utf8(table_path));
         core::ConfigVocabulary vocabulary = core::ConfigVocabulary::load_from_file(core::path_from_utf8(config_keys_path));
         core::ConfigStore config(std::move(vocabulary));
+        // ★ 顺序就是优先级：引擎内建（构造期登记）→ 发行默认表（ALF）→ 玩家 `SYS4REG.INI` → 运行期写入。
+        config.register_engine_defaults();
         config.load_defaults(index.config_defaults);
         std::filesystem::path config_root = install.root;
         if (config.get_int("set:UseAppDataFolder") != 0) {
