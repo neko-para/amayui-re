@@ -683,10 +683,11 @@ void Machine::op_212(const Instruction& instruction) {
 void Machine::op_213(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 写 f68 / f6c
+    // ★ 引擎 0x213 **不做**「0 ⇒ 默认组」的解析：`sub_423A80` 直接 `[Font+0x414+4*op1]`（0 就是槽 0）；
+    //   与 0x70 / 0x79 / 0x71 / 0x6e / 0x6f / 0x196 的 0 ⇒ 默认层不同。这里照实现，不再归一。
     const auto b = read_int(ops[2]);
     const auto a = read_int(ops[1]);
     auto group = read_int(ops[0]);
-    if (group == 0) group = default_group_;
     if (group < 0 || group >= 10) throw CoreError("list-group-out-of-range");
     auto& rec = list_records_[static_cast<std::size_t>(group)];
     rec.f68 = a;
@@ -733,6 +734,9 @@ void Machine::op_79(const Instruction& instruction) {
     auto& rec = list_records_[static_cast<std::size_t>(group)];
     rec.f1c = a;
     rec.f20 = b;
+    // 文本层的**文本绘制原点偏移**（引擎 `sub_4563A0` 写 `层+28/+32`）：游标跟着复位。
+    text_layer_state_[static_cast<std::size_t>(group)].cursor_x = a;
+    text_layer_state_[static_cast<std::size_t>(group)].cursor_y = b;
     return;
 }
 
@@ -787,6 +791,8 @@ void Machine::op_70(const Instruction& instruction) {
     record.f7c = a3;
     record.f80 = a4;
     record.registered = 1;
+    // 文本层矩形：按 w/h 建（或重建）离屏画布；逐字符绘制条目由 `0x6e` / `0x196` 在画字时排。
+    ensure_text_layer_texture(group);
     return;
 }
 

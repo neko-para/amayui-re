@@ -8,6 +8,7 @@
 
 **在 core 里**：引擎自身的行为 —— 脚本解码、指令驱动、帧、池与值、逐 opcode 的引擎数据效果、启动入口、容器格式。
 **不在 core 里**：render / audio / input / ADV 文字 / Live2D 等相对独立的模块的**内部语义**。
+★ 例外：ADV 文本层的**可观察合同**已单独成章（`62-adv-text`，模块章，不挂 core 机制前缀）；它仍是 core 外的模块，只是不再以「未成篇」的形式留在 `planned[]`。
 
 ★ core **不实现**这三个模块；但它们**向平台发出的请求边界**（请求 + 参数 + 时序）可以写在 spec 的专门章节：
 `06-window`（启动期窗口 / 图形设备 / 消息泵）、`60-ops-render`（渲染目标 / 场景混合 / 离屏文字）
@@ -66,10 +67,10 @@
 | `objects` | `CORE-OBJECTS` |
 | `save` | `FMT-SAVE` |
 | `presentation` | **请求边界已成篇**（规则挂在 `CORE-BOOT` / `CORE-OPS` 下，见 `06-window` / `60-ops-render`）；表现层**内部**（像素 / 混音 / 音频输出）仍未成篇，仍属 `core-out` |
-| `adv-text` | **core 外**（ADV 文字显示内部；请求侧 / 字符串侧的条目已散在 `60-ops-text` / `60-ops-list`） |
 | `live2d` | **core 外**（Live2D 内部；接口 / 不变量 / source binding 三件套未做） |
 
 ★ `config` / `timing` 两行已删除：它们**已有章节（机制未闭环）**（`55-config` / `70-vm`），不在 `planned[]` 里。
+★ `adv-text` 一行已删除：它已有**模块章**（`62-adv-text`，core 外，不挂 core 机制前缀），不再算"还没成篇的域"；请求侧 / 字符串侧的条目仍散在 `60-ops-text` / `60-ops-list`。
 ★ `files` 一行已删除：`CORE-FS` / `CORE-BOOT` **已有章节（机制未闭环）**（`25-fs` / `05-boot`），不再算"还没成篇的域"；两者的未闭合项见 §1.1 与本文件 §8 —— **有章不等于机制闭环**（判据见 §4）。`CORE-FS` 的**搜索路径仍未覆盖**（§1.1 第一行）。
 ★ `containers` 的机制归属按上表仍是 `CORE-POOL` 的容器句柄两条：它们在 `40-pools` 里已有规则，
 但"元素类型 / 生命周期 / 失败路径"还没成篇 ⇒ 保留 planned，不冒成 `CORE-CONTAINERS` 的独立章。
@@ -103,7 +104,7 @@
    机制只体现在**规则 id 前缀**上；⛔ 不为机制建目录（阅读顺序由 `spec.json` 的 `chapters[]` 决定）。
 2. **规则 id 带机制前缀**：`CORE-ISA-*` / `CORE-VM-*` / `CORE-FRAME-*` / `CORE-POOL-*` / `CORE-CONTAINERS-*` /
    `CORE-OBJECTS-*` / `CORE-OPS-*` / `CORE-CONFIG-*` / `CORE-TIMING-*` / `CORE-BOOT-*` / `CORE-FS-*` /
-   `FMT-ALF-*` / `FMT-AGF-*` / `FMT-SAVE-*`。
+   `FMT-ALF-*` / `FMT-AGF-*` / `FMT-SAVE-*` / **`ADV-TEXT-*`（模块章前缀：ADV 文本层，不挂 core）**。
    ★ `SPC-*`（`SPC-POOL-*` / `SPC-OPERAND-*` / `SPC-VALUE-*`）是**试点期的历史前缀**，仍合法、不再新增；
    新规则按机制前缀命名。
 3. **函数 ↔ 机制多对多**：⛔ 不做"一个函数属于一个机制"的分区；大函数内部可以驱动多个机制。

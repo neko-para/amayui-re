@@ -5,7 +5,9 @@
 // ★ 本文件的切分是**按职责**聚合，不严格等于规范章节边界（章节归属以 spec 正文为准）。
 #include "core/vm.h"
 #include "core/vm_internal.h"
+#include "core/text_raster.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -16,6 +18,19 @@ namespace {
 bool text_trace_enabled() {
     static const bool on = std::getenv("EMULATOR_CXX_TRACE_TEXT") != nullptr;
     return on;
+}
+
+/** CP932 字节串按一个显示字符切开：前导字节 0x81..0x9F / 0xE0..0xFC 带一个后继字节。 */
+std::vector<std::string> split_sjis_units(const std::string& text) {
+    std::vector<std::string> units;
+    for (std::size_t i = 0; i < text.size();) {
+        const auto lead = static_cast<unsigned char>(text[i]);
+        const bool two = ((lead >= 0x81u && lead <= 0x9Fu) || (lead >= 0xE0u && lead <= 0xFCu)) &&
+                         i + 1 < text.size();
+        units.emplace_back(text.substr(i, two ? 2 : 1));
+        i += two ? 2 : 1;
+    }
+    return units;
 }
 }  // namespace
 
@@ -118,10 +133,175 @@ void Machine::op_78(const Instruction& instruction) {
     return;
 }
 
+// ── 文本层画布（`0x70` / `0x71` / `0x79` / `0x213` 的宿主侧） ──
+// ★ 引擎把每个文本层做成一张离屏画布（纹理编号 = 20 + 层号），文本按下标逐字栅格进去；
+//   场景消费时**每个字符一个绘制条目**（键 = 键基数 + 字符序号，源 = 该字符格）。
+//   本实现也按逐字符条目落库；创建时机是追加时（引擎是推进器消费时，见 audit 的 TIMING 残差）。
+
+int Machine::resolve_text_layer(int slot) const {
+    if (slot == 0) slot = default_group_;
+    return slot;
+}
+
+bool Machine::ensure_text_layer_texture(int slot) {
+    if (slot < 0 || slot >= 10) return false;
+    const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
+    const auto width = rec.f14;
+    const auto height = rec.f18;
+    if (width <= 0 || height <= 0) return false;
+    const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
+    auto it = textures_.find(id);
+    const bool rebuild = it == textures_.end() || it->second.rgba.empty() ||
+                         it->second.width != static_cast<std::uint32_t>(width) ||
+                         it->second.height != static_cast<std::uint32_t>(height);
+    if (rebuild) {
+        // 与 `0x1f8` 空白建纹理同口径：透明、无来源文件、revision 单调递增。
+        TextureRecord& texture = textures_[id];
+        texture.file = -1;
+        texture.blank = true;
+        texture.present = true;
+        texture.width = static_cast<std::uint32_t>(width);
+        texture.height = static_cast<std::uint32_t>(height);
+        texture.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4,
+                            0);
+        texture.revision++;
+        text_layer_state_[static_cast<std::size_t>(slot)].cursor_x = rec.f1c;
+        text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
+    }
+    text_layer_state_[static_cast<std::size_t>(slot)].texture_ready = true;
+    return true;
+}
+
+void Machine::create_text_layer_item(int slot, int left, int top, int right, int bottom) {
+    if (slot < 0 || slot >= 10) return;
+    const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
+    if (rec.f68 <= 0) return;
+    const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
+    const TextureRecord* texture = this->texture(id);
+    if (texture == nullptr) return;
+    left = std::max(0, left);
+    top = std::max(0, top);
+    right = std::min(static_cast<int>(texture->width), right);
+    bottom = std::min(static_cast<int>(texture->height), bottom);
+    if (right <= left || bottom <= top) return;
+    TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
+    const auto key = static_cast<std::uint32_t>(rec.f68) + static_cast<std::uint32_t>(state.draw_index++);
+    DrawItem& item = draw_items_[key];
+    item.flags = 1u;
+    item.texture_id = id;
+    item.left = left;
+    item.top = top;
+    item.right = right;
+    item.bottom = bottom;
+    item.aux[0] = static_cast<float>(rec.f0c + left);
+    item.aux[1] = static_cast<float>(rec.f10 + top);
+    item.aux[2] = 0.0f;
+    item.color = 0xFFFFFFFFu;
+    item.target_color = 0xFFFFFFFFu;
+}
+
+void Machine::erase_text_layer_draw_items(int slot) {
+    if (slot < 0 || slot >= 10) return;
+    const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
+    TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
+    if (rec.f68 > 0) {
+        for (std::int32_t i = 0; i < state.draw_index; ++i) {
+            draw_items_.erase(static_cast<std::uint32_t>(rec.f68) + static_cast<std::uint32_t>(i));
+        }
+    }
+    state.draw_index = 0;
+}
+
+void Machine::clear_text_layer(int slot) {
+    if (!ensure_text_layer_texture(slot)) return;
+    const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
+    TextureRecord* texture = texture_mut(id);
+    if (texture == nullptr) return;
+    std::fill(texture->rgba.begin(), texture->rgba.end(), 0);
+    texture->revision++;
+    texture->non_file = true;
+    const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
+    erase_text_layer_draw_items(slot);
+    text_layer_state_[static_cast<std::size_t>(slot)].cursor_x = rec.f1c;
+    text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
+}
+
+void Machine::draw_text_layer_text(int slot, const std::string& text, const std::string& rubi) {
+    if (slot < 0 || slot >= 10) return;
+    if (text.empty() && rubi.empty()) return;
+    if (!ensure_text_layer_texture(slot)) return;
+    const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
+    TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
+    std::string error;
+    const int start_x = state.cursor_x;
+    const int start_y = state.cursor_y;
+    const int line_height = (glyph_height_ > 0 ? glyph_height_ : 24) + 6;
+    const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
+    const bool auto_line_feed = config_.get_int("set:AutoLineFeed") == 1;
+    if (!text.empty()) {
+        // 逐字符绘制 + 逐字符绘制条目（键 = 键基数 + 本层条目序号）：与引擎的 per-cell 提交同形，
+        // 也让“文本层与窗口 key 交错”成为可表达的行为（整张画布一次贴出是它的退化情形）。
+        // ★ 自动折行门 = 配置 `set:AutoLineFeed`（引擎读进 `Font+0x57C`，见 0x417B6E / 0x46C132）；
+        //   超右界时的禁则 / 整行重排不在本实现（残差）。
+        for (const std::string& unit : split_sjis_units(text)) {
+            int advance = 0;
+            // 量度：画在画布外（blit 会越界丢弃，但 pen_x 仍然推进），避免先画后折行。
+            if (!draw_text_into_texture(*this, id, -10000, state.cursor_y, unit, &error, &advance)) {
+                if (!error.empty()) report_error(error);
+                return;
+            }
+            if (auto_line_feed && advance > 0 && state.cursor_x > rec.f1c &&
+                state.cursor_x + advance > rec.f24) {
+                state.cursor_x = rec.f1c;
+                state.cursor_y += line_height;
+            }
+            const int x0 = state.cursor_x;
+            const int y0 = state.cursor_y;
+            if (!draw_text_into_texture(*this, id, x0, y0, unit, &error, &advance)) {
+                if (!error.empty()) report_error(error);
+                return;
+            }
+            create_text_layer_item(slot, x0, y0, x0 + advance, y0 + line_height);
+            state.cursor_x += advance;
+        }
+    }
+    if (!rubi.empty()) {
+        // 振り仮名用 **B 支字号**（`0x197` 写的那一格；示例里是 10），画在主文本上方。
+        const int ruby_size = font_b_height_ > 0 ? font_b_height_ : 10;
+        const int ruby_y = start_y - ruby_size - 2;
+        int ruby_advance = 0;
+        if (!draw_text_into_texture(*this, id, start_x, ruby_y, rubi, &error, &ruby_advance,
+                                    ruby_size)) {
+            if (!error.empty()) report_error(error);
+        } else {
+            create_text_layer_item(slot, start_x, ruby_y, start_x + ruby_advance,
+                                   ruby_y + ruby_size + 2);
+        }
+    }
+    if (TextureRecord* texture = texture_mut(id)) texture->revision++;
+}
+void Machine::end_text_layer_line(int slot) {
+    if (slot < 0 || slot >= 10) return;
+    const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
+    TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
+    state.cursor_x = rec.f1c;
+    // 行距 = 行間隙 + 字号（普通模式；`Font+0x564` 缺省 6、`Font+0x313D4` 是 A 支字号）。
+    // 证据：`sub_46AF90` 的 0x46B001/06/0C/18/20/2E；`0x418617` 每次设字号把 `Font+0x4D0` 重写成 −字号。
+    const int line_gap = 6;
+    const int line_advance = (glyph_height_ > 0 ? glyph_height_ : 24) + line_gap;
+    state.cursor_y += line_advance;
+}
+
 void Machine::op_71(const Instruction& instruction) {
-    (void)instruction;
-    // 文本请求：写当前帧“本条位置”；文本子系统未建模
+    const Operand* ops = instruction.operands.data();
+    // 文本请求（`0x71` / `sub_41ED80` → `sub_45EC60`，argc 1）：
+    // ① 当前帧「本条位置」← 本条指令的 dword 下标；② 清空该层的画布与游标；
+    // ③ 把画布按层矩形排成一条绘制项（键基数 = `0x213` 写的 +104 格）。
+    // ★ 引擎还会做两处整块拷贝 / 一次子系统内调用 / 有条件置状态字第 27 位 ⇒ **未建模**（残差）。
+    const auto requested = read_int(ops[0]);
     frame_mut().position = static_cast<std::uint32_t>(frame_mut().ip / 4);
+    const int slot = resolve_text_layer(requested);
+    clear_text_layer(slot);
     return;
 }
 
@@ -182,22 +362,29 @@ void Machine::op_6e(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 追加正文（0x6E `show-text` / `sub_41EB20`）：读序 **op2（文本）→ op1（整型）**。
     // ★ 空串 ⇒ 引擎的追加入口立即返回：**不写文本槽、不追加、不登记计时**（这三件一起跳过）。
-    // ★ 这里建模"引擎可见的确定部分"：文本槽 ← op1、窗口记录追加 op2；状态位（0xAAB44 位 27/29）
-    //   与计时队列（0x691EC，时长取 0x15290）依赖未取证的 `0x77A04` / `0x15290` ⇒ 残差。
+    // ★ `op1 == 0` ⇒ 引擎的**默认槽**（`Font+1228`，由 `0x80` 写）—— 不是第 0 槽。
+    // ★ 正文进**文本层画布**（纹理 = 20 + 层号）的当前游标；状态位（0xAAB44 位 27/29）与计时队列
+    //   （0x691EC，时长取 0x15290）依赖未取证的 `0x77A04` / `0x15290` ⇒ 残差。
     const std::string text = read_text(ops[1]);
-    const auto slot = read_int(ops[0]);
+    const auto requested = read_int(ops[0]);
     if (text.empty()) return;
-    current_text_slot_ = slot;
+    const int slot = resolve_text_layer(requested);
+    if (slot < 0 || slot >= 10) return;
+    current_text_slot_ = requested;
     text_windows_[slot].text += text;
+    draw_text_layer_text(slot, text, std::string());
     return;
 }
 
 void Machine::op_6f(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 行结束（0x6F `end-text-line` / `sub_41ECE0`）：只读 op1；无外部请求。
-    // ★ 引擎改的是窗口记录里的"行结束三格 + 行计数"；本版只建模**行计数**（其余格未建模 ⇒ 残差）。
-    const auto slot = read_int(ops[0]);
+    // ★ op1 == 0 ⇒ 默认槽；行结束把游标 x 复位、y 前进一行（行距 = 字体对象的行高）。
+    const auto requested = read_int(ops[0]);
+    const int slot = resolve_text_layer(requested);
+    if (slot < 0 || slot >= 10) return;
     text_windows_[slot].lines += 1;
+    end_text_layer_line(slot);
     return;
 }
 
@@ -206,14 +393,18 @@ void Machine::op_196(const Instruction& instruction) {
     // 带振り仮名的追加（0x196 `display-furigana` / `sub_41FC20`）：读序
     // **op3（文本，无条件最先）→ op2（文本）→ op1（整型）**。
     // ★ op3 先被拷进 1024 字节缓冲（上限 **1023 字节**，超长静默截断）；空正文 ⇒ 整段跳过写。
+    // ★ 主文本用 A 支字号，振り仮名用 B 支字号（示例里 `0x197(10)`）画在主文本上方。
     const std::string rubi = read_text(ops[2]);
     const std::string text = read_text(ops[1]);
-    const auto slot = read_int(ops[0]);
+    const auto requested = read_int(ops[0]);
     if (text.empty()) return;
-    current_text_slot_ = slot;
+    const int slot = resolve_text_layer(requested);
+    if (slot < 0 || slot >= 10) return;
+    current_text_slot_ = requested;
     TextWindowRecord& window = text_windows_[slot];
     window.text += text;
     window.rubi = rubi.size() > 1023 ? rubi.substr(0, 1023) : rubi;
+    draw_text_layer_text(slot, text, window.rubi);
     return;
 }
 

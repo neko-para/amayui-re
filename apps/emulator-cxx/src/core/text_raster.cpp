@@ -379,12 +379,15 @@ TextGlyphSource g_last_glyph_source = TextGlyphSource::None;
 TextGlyphSource last_glyph_source() { return g_last_glyph_source; }
 
 bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, int y,
-                            const std::string& sjis, std::string* error) {
+                            const std::string& sjis, std::string* error, int* advance_out,
+                            int font_size_override) {
 #ifdef EMULATOR_CXX_HAVE_TEXT
     TextureRecord* texture = machine.texture_mut(texture_id);
     if (texture == nullptr || texture->rgba.empty() || sjis.empty()) return false;
 
-    const int size = machine.font_size() > 0 ? machine.font_size() : 24;
+    const int size = font_size_override > 0
+                         ? font_size_override
+                         : (machine.font_size() > 0 ? machine.font_size() : 24);
     // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：把**实际用来出字形的字号**打出来。
     //   判据用：配置界面里 0x204 必须按 A 支字号画（`0x75` 写的那支），⛔ 不是 `0x197` 的 B 支。
     // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：本函数在 `vm_ops_text.cpp` 的匿名命名空间里没有那个 helper，
@@ -617,6 +620,7 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
         }
         pen_x += advance;
     }
+    if (advance_out != nullptr) *advance_out = pen_x - x;
     texture->non_file = true;
     return true;
 #else
@@ -625,6 +629,8 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     (void)x;
     (void)y;
     (void)sjis;
+    (void)advance_out;
+    (void)font_size_override;
     if (error != nullptr) *error = "text-backend-missing";
     return false;
 #endif

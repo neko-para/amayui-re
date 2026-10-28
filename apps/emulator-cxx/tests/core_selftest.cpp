@@ -1426,7 +1426,7 @@ bool check_second_batch(const core::OpcodeTable& table) {
         for (int i = 0; i < 4; ++i) {
             if (!machine.step()) return false;
         }
-        const core::TextWindowRecord* window = machine.text_window(0);
+        const core::TextWindowRecord* window = machine.text_window(machine.default_group());
         if (window == nullptr || window->text != "ABAB" || window->lines != 1) {
             std::fprintf(stderr, "0x6E/0x6F 窗口 = %s / %d 行\n",
                          window == nullptr ? "(null)" : window->text.c_str(),
@@ -3157,6 +3157,209 @@ bool check_font_branches(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── 文本层画布：`0x70/0x79/0x213/0x71` 的状态 + `0x6e/0x196/0x6f` 的栅格化 ──
+/** 设置界面底部示例文本的**结构级**判据（不依赖游戏安装）：
+ *  · 层 9 的画布 = 纹理 29，尺寸来自 `0x70`（824×120），屏幕位置 = (324,570)；
+ *  · `0x213` 的键基数 = 逐字符绘制条目的键（键 = 基数 + 序号）；`0x71` 把画布清空并清掉旧条目；
+ *  · `0x6e` / `0x196` 只推进**该层**的游标，`0x6f` 复位 x 并前进一行；
+ *  · 再次 `0x71` ⇒ 画布回到全透明、旧条目被清。
+ *  ★ 像素级观感不在这里断言（字体后端 / 宿主字体不同）；这里只断言"画进去了"（存在非透明像素）。 */
+bool check_text_layer_surface(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "text-layer: %s\n", what);
+        return false;
+    };
+
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x80, {{0, 9}});  // 默认槽 = 9（`show-text 0` 落到层 9）
+    emit_instruction(bytes, 0x70, {{0, 9}, {0, 824}, {0, 120}, {0, 324}, {0, 570}});
+    emit_instruction(bytes, 0x79, {{0, 9}, {0, 108}, {0, 52}});
+    emit_instruction(bytes, 0x213, {{0, 9}, {0, 180500}, {0, 500}});
+    emit_instruction(bytes, 0x75, {{0, 30}});   // A 支字号（主文本）
+    emit_instruction(bytes, 0x197, {{0, 10}});  // B 支字号（振り仮名）
+    emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+    emit_instruction(bytes, 0x77, {{0, 0x000000}});
+    emit_instruction(bytes, 0x78, {{0, 1}});
+    emit_instruction(bytes, 0x71, {{0, 9}});
+    emit_instruction(bytes, 0x196, {{0, 0}, {5, 0}, {5, 1}});  // 正文 AB + 振り仮名 R
+    emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});            // 再追加 AB
+    emit_instruction(bytes, 0x6F, {{0, 0}});
+    emit_instruction(bytes, 2, {});
+
+    core::Machine machine(key, table);
+    machine.write_text(core::Operand{5, 0}, "AB");
+    machine.write_text(core::Operand{5, 1}, "R");
+    machine.load_root(bytes);
+    for (int i = 0; i < 10; ++i) {
+        if (!machine.step()) return fail("0x71 之前就停机");
+    }
+    if (!machine.text_layer_texture_ready(9)) return fail("0x71 没有建出层 9 的画布");
+    const core::TextureRecord* texture = machine.texture(core::Machine::text_layer_texture_id(9));
+    if (texture == nullptr || texture->width != 824 || texture->height != 120) {
+        return fail("层 9 的纹理不是 824×120（0x70 的 w/h 没落到画布）");
+    }
+    {
+        bool any = false;
+        for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+            if (texture->rgba[i] != 0) { any = true; break; }
+        }
+        if (any) return fail("0x71 之后画布不是全透明（清空没生效）");
+    }
+    if (machine.draw_item(180500) != nullptr) return fail("0x71 在还没有正文时就排了绘制条目");
+
+    // 0x196 + 0x6e：游标从文本原点 (108,52) 向右推进；空串不推进。
+    for (int debug_step = 0; debug_step < 2; ++debug_step) {
+        if (!machine.step()) {
+            std::fprintf(stderr, "text-layer debug: step=%d ip=%zu errors=%zu halted=%d\n",
+                         debug_step, machine.frame().ip, machine.errors().size(), machine.halted() ? 1 : 0);
+            for (const auto& e : machine.errors()) std::fprintf(stderr, "  err=%s\n", e.c_str());
+            return fail("0x196 / 0x6e 停机");
+        }
+    }
+    const std::int32_t after_text_x = machine.text_layer_cursor_x(9);
+    if (core::text_backend_available() && after_text_x <= 108) {
+        return fail("0x6e / 0x196 没有推进文本层游标");
+    }
+    if (machine.text_layer_cursor_y(9) != 52) return fail("0x6e / 0x196 改了游标 y（只有行结束才前进一行）");
+    if (core::text_backend_available()) {
+        bool any = false;
+        for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+            if (texture->rgba[i] != 0) { any = true; break; }
+        }
+        if (!any) return fail("0x6e / 0x196 没有把字画进纹理 29（全透明）");
+    }
+    // 逐字符条目：AB(0x196) + AB(0x6e) = 4 个主文本条目 + 1 个振り仮名条目，键 = 180500 + 序号。
+    const core::DrawItem* first = machine.draw_item(180500);
+    if (first == nullptr || (first->flags & 1u) == 0) return fail("0x6e / 0x196 没有排逐字符绘制条目");
+    if (first->texture_id != core::Machine::text_layer_texture_id(9)) return fail("逐字符条目指向的不是层 9 的画布");
+    if (first->left != 108 || first->top != 52) return fail("第一个逐字符条目的源矩形不是文本原点 (108,52)");
+    if (first->aux[0] != 324.0f + 108.0f || first->aux[1] != 570.0f + 52.0f) {
+        return fail("第一个逐字符条目的位置不是「层左上 + 文本原点」");
+    }
+    const core::DrawItem* second = machine.draw_item(180501);
+    if (second == nullptr || second->left <= first->left) return fail("逐字符条目的键没有按序号递增");
+    if (machine.draw_item(180502) == nullptr) return fail("缺少振り仮名条目（key 应为 180502）");
+
+    // 0x6f：x 复位到文本原点，y 前进「行間隙 6 + A 支字号 30」。
+    if (!machine.step()) return fail("0x6f 停机");
+    if (machine.text_layer_cursor_x(9) != 108) return fail("0x6f 没有把游标 x 复位到文本原点");
+    if (machine.text_layer_cursor_y(9) != 52 + 30 + 6) return fail("0x6f 没有把游标 y 前进「字号 + 行間隙」");
+
+    // 第二次 0x71：画布必须回到全透明（绘制项仍指向同一张画布）。
+    auto clear_bytes = make_script_with_body();
+    emit_instruction(clear_bytes, 0x80, {{0, 9}});
+    emit_instruction(clear_bytes, 0x70, {{0, 9}, {0, 64}, {0, 32}, {0, 10}, {0, 20}});
+    emit_instruction(clear_bytes, 0x213, {{0, 9}, {0, 190000}, {0, 10}});
+    emit_instruction(clear_bytes, 0x75, {{0, 16}});
+    emit_instruction(clear_bytes, 0x71, {{0, 9}});
+    emit_instruction(clear_bytes, 0x6E, {{0, 0}, {5, 0}});
+    emit_instruction(clear_bytes, 0x71, {{0, 9}});
+    emit_instruction(clear_bytes, 2, {});
+    core::Machine cleared(key, table);
+    cleared.write_text(core::Operand{5, 0}, "X");
+    cleared.load_root(clear_bytes);
+    for (int i = 0; i < 7; ++i) {
+        if (!cleared.step()) break;
+    }
+    const core::TextureRecord* cleared_texture =
+        cleared.texture(core::Machine::text_layer_texture_id(9));
+    if (cleared_texture == nullptr) return fail("第二次 0x71 把画布删了（应当只清空）");
+    for (std::size_t i = 3; i < cleared_texture->rgba.size(); i += 4) {
+        if (cleared_texture->rgba[i] != 0) return fail("第二次 0x71 之后画布仍有像素");
+    }
+    for (int i = 0; i < 10; ++i) {
+        if (cleared.draw_item(190000u + static_cast<std::uint32_t>(i)) != nullptr) {
+            return fail("第二次 0x71 之后旧逐字符条目还在");
+        }
+    }
+
+    // 自动折行门：配置 `set:AutoLineFeed` 非 0 ⇒ 超右界回原点、y 前进一行；0 ⇒ 不折行。
+    const auto make_wrap_script = []() {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 64}, {0, 64}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 190100}, {0, 40}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+        emit_instruction(bytes, 0x77, {{0, 0x000000}});
+        emit_instruction(bytes, 0x78, {{0, 1}});
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    {
+        auto wrap_bytes = make_wrap_script();
+        core::Machine wrap_machine(key, table);
+        wrap_machine.write_text(core::Operand{5, 0}, "AAAAAAAAAA");
+        wrap_machine.config_mut().set_int("set:AutoLineFeed", 1);
+        wrap_machine.load_root(wrap_bytes);
+        for (int i = 0; i < 10; ++i) {
+            if (!wrap_machine.step()) return fail("AutoLineFeed=1 停机");
+        }
+        if (!core::text_backend_available()) return true;
+        if (wrap_machine.text_layer_cursor_y(9) <= 5) {
+            return fail("AutoLineFeed=1 时超右界没有折行");
+        }
+        bool second_line = false;
+        bool second_line_at_origin = false;
+        for (std::uint32_t k = 0; k < 40; ++k) {
+            const core::DrawItem* item = wrap_machine.draw_item(190100u + k);
+            if (item != nullptr && item->top > 5) {
+                second_line = true;
+                if (item->left == 5) second_line_at_origin = true;
+            }
+        }
+        if (!second_line) return fail("AutoLineFeed=1 时没有第二行的绘制条目");
+        if (!second_line_at_origin) return fail("折行后没有回到文本原点 x=5");
+    }
+    {
+        // 0x1c1 改宽 / 高拷贝（+0x24/+0x28）⇒ 折行阈值跟着改小。
+        // 在 0x70 之后插入 0x1c1：槽 9、宽 20、高 64。
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 64}, {0, 64}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x1C1, {{0, 9}, {0, 20}, {0, 64}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 190100}, {0, 40}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+        emit_instruction(bytes, 0x77, {{0, 0x000000}});
+        emit_instruction(bytes, 0x78, {{0, 1}});
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine pair_machine(key, table);
+        pair_machine.write_text(core::Operand{5, 0}, "AAAAAAAAAA");
+        pair_machine.config_mut().set_int("set:AutoLineFeed", 1);
+        pair_machine.load_root(bytes);
+        for (int i = 0; i < 11; ++i) {
+            if (!pair_machine.step()) return fail("0x1c1 折行阈值用例停机");
+        }
+        if (!core::text_backend_available()) return true;
+        if (pair_machine.text_layer_cursor_y(9) <= 31) {
+            return fail("0x1c1 改小宽后折行阈值没有跟着变小");
+        }
+    }
+    {
+        auto no_wrap_bytes = make_wrap_script();
+        core::Machine no_wrap(key, table);
+        no_wrap.write_text(core::Operand{5, 0}, "AAAAAAAAAA");
+        no_wrap.config_mut().set_int("set:AutoLineFeed", 0);
+        no_wrap.load_root(no_wrap_bytes);
+        for (int i = 0; i < 10; ++i) {
+            if (!no_wrap.step()) return fail("AutoLineFeed=0 停机");
+        }
+        if (!core::text_backend_available()) return true;
+        if (no_wrap.text_layer_cursor_y(9) != 5) {
+            return fail("AutoLineFeed=0 时仍然折行了");
+        }
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
     // `--only-audio`：只跑音效 / 配音那条子集（供一条**独立注册**的 CTest 用）。
     // ★ 为什么要单独一个用例：spec 的证据要求"点得到某条用例"，而聚合的自检只有一个名字 ——
@@ -4617,6 +4820,7 @@ int main(int argc, char** argv) {
         if (!check_audio_slot_bounds(table)) return 1;
         if (!check_gate_split_branches(table)) return 1;
         if (!check_font_branches(table)) return 1;
+        if (!check_text_layer_surface(table)) return 1;
 
         std::printf(
             "core-selftest: PASS (alf files=%zu, script body=%zu, instructions=%zu, opcode table=%zu)\n",

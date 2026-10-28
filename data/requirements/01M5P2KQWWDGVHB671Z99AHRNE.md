@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M5BK8QMQYK7XQG707YVMQ202
-- verify: tools/test/emulator-new-flash-probe.assets.test.mjs#启动期白闪：呈现过 ≥10 帧且没有一条 white present
+- done_reason: 用户决定移除 emulator-new 的 Electron 白闪探针测试项（assets 档、依赖真窗口），后续不再维护；白闪残余按用户决定收口，不再有自动判据。
 - tags: [bug render]
 
 ## 症状
@@ -13,9 +13,9 @@
 
 ## 已定位并修的两条高置信路径
 
-1. **窗口先 show、画布后才有第一笔**：日志次序 `ready → createWindow → showWindow → init`；canvas 在 `PixiRenderHost.create` 挂上后，直到 `init` 才第一次 `render` ⇒ show 出来那一瞬是"没画过的 WebGL 画布"。
+1. **窗口先 show、画布后才有第一笔**：日志次序 `ready → createWindow → showWindow → init`；canvas 在 `PixiRenderHost.create` 挂上后，直到 `init` 才第一次 `render` ⇒ show 出来那一瞬是“没画过的 WebGL 画布”。
    - 修复：`create` 里 append 后立即 `render({EMPTY_CONTAINER, clear:true})`（背景 0 / alpha 1 = 黑）。
-2. **释放纹理时用旧快照中途 present**：`releaseTexture` 里 `scrub` 只剥纹理 id，**网格不引用纹理** ⇒ 版权页的白底网格仍留在旧快照里；`0x1fa` 那一刻核心已前进，画出来就是"上一页白底闪一帧"。
+2. **释放纹理时用旧快照中途 present**：`releaseTexture` 里 `scrub` 只剥纹理 id，**网格不引用纹理** ⇒ 版权页的白底网格仍留在旧快照里；`0x1fa` 那一刻核心已前进，画出来就是“上一页白底闪一帧”。
    - 修复：`releaseTexture` **不 present**；`session.ts` 置 `lastScenePushAt=0`，让下一次帧边界推**新快照**再画；`present` 加 `trigger(frame|movie|release)` 诊断（出现 `release` = 有人又加回去了）。
 
 ## 辅助（不是根因）
@@ -35,35 +35,8 @@
 
 `tools/test/emulator-new-scene-order.test.mjs`（剥离只删纹理引用、网格保留）· `apps/emulator-new/src/platform/electron/renderer/{pixi-host,session,scene-order}.ts`。
 
-## 自动判据尝试（2026-10-28，不需要人眼）
+## 自动判据（已按用户决定移除）
 
-`apps/emulator-new` 的 renderer 里**自带白闪探针**：每次 present 读后缓冲中心 1 像素，接近纯白（RGB ≥ 235）就记
-`[flash-probe] white present trigger=<trigger> target=… nodes=… textures=…`，最多 20 条，且只在启动后 120s 内生效
-（`pixi-host.ts` 的 `probeFlash`）。`--smoke` 还能自动截图（`.tmp/emulator-new-electron-smoke.png`）。
-
-实测（本机 macOS，Electron 可跑）：
-```
-cd apps/emulator-new && npx electron --no-sandbox . --install <repo>/links/install --skip-logo
-```
-- 启动链正常：`renderer ready（webgl 1280x720）` → `createWindow 1280x720` → `showWindow` → `boot：1280x720 · screenMode 1`；
-- **60 秒运行期间没有出现任何 `[flash-probe] white present` 行** ⇒ 至少"后缓冲中心接近纯白"这条判据下，启动白闪**没有复现**；
-- `--smoke` 路径可跑通并自动截图（2560x1440）。
-
-★ 这一条还不能直接关单：探针只看**中心 1 像素**，且当前没有"跑到 TITLE / 已呈现 N 帧"的日志，
-所以"没有白"也可能只是"没有帧"。**下一步（很小）**：给 renderer 加一条低频诊断（每次 present 计数，或在到达
-TITLE 时打一行 `frames=<n>`），再用同一条命令确认"确实呈现过 N 帧且无白闪"，即可把本单挂 `verify` 收口。
-
-## 收口（2026-10-28，自动判据）
-
-给 renderer 加了**低频 present 诊断**（`[present] frames=N lastTrigger=… triggers={…}`，每 120 帧一行 + 第一帧立即打），
-把"没有白闪"与"根本没有帧"分开。然后用真安装跑 150s：
-
-```
-npx electron --no-sandbox . --install <repo>/links/install --skip-logo
-⇒ [present] frames=16320 … triggers={"frame":8165}；[flash-probe] white present 一条都没有
-```
-
-**守卫**：`tools/test/emulator-new-flash-probe.assets.test.mjs#启动期白闪：呈现过 ≥10 帧且没有一条 white present`
-（assets 档：要真安装 + Electron；跑一次约 150s —— 它**故意跑满**整个启动窗口，因为白闪发生在启动期）。
-两条判据缺一不可：**呈现过 ≥10 帧**（否则"没白"可能是"没帧"）+ **零条 `white present`**。
-★ 它不看像素是否正确，只看"有没有整屏白"；像素级观感仍属人工/真机。
+原 `tools/test/emulator-new-flash-probe.assets.test.mjs`（Electron 真窗口 + `links/install`，跑 150s）
+在 2026-10-28 被用户要求移除；原因：它会打开 emulator-new 窗口，且后续不再维护。
+⇒ 本单改为 `done` + `done_reason`，不再挂 `verify`。白闪残余仍可按上面“怎么查”人工/真机目视。

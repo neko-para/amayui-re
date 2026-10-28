@@ -170,6 +170,16 @@ struct TextWindowRecord {
     std::int32_t lines = 0;
 };
 
+// 文本层（`0x70` / `0x79` / `0x213` / `0x71` 一起描述的那张离屏画布）的**宿主侧游标**。
+// ★ 层矩形 / 文本原点 / 绘制项键基数仍落在 `ListRecord`（`0x70` / `0x79` / `0x213` 的既有格）；
+//   这里只存"下一个字符画在哪"，它是引擎在一帧内推进的状态，不是独立领域量。
+struct TextLayerState {
+    std::int32_t cursor_x = 0;
+    std::int32_t cursor_y = 0;
+    std::int32_t draw_index = 0;  // 本层已排的逐字符绘制条目数（键 = 键基数 + draw_index）
+    bool texture_ready = false;
+};
+
 struct MovieRecord {
     bool present = false;
     bool started = false;  // 只有成功启动过才进「播完」判据 / 维持影片位
@@ -293,6 +303,14 @@ public:
         const auto it = text_windows_.find(index);
         return it == text_windows_.end() ? nullptr : &it->second;
     }
+    // 文本层观察口（守卫用；⛔ 不是产品接口）：画布纹理编号 = 20 + 层号；游标是纹理内坐标。
+    static constexpr std::uint32_t text_layer_texture_id(std::size_t slot) {
+        return static_cast<std::uint32_t>(20 + slot);
+    }
+    std::int32_t text_layer_cursor_x(std::size_t slot) const { return text_layer_state_[slot].cursor_x; }
+    std::int32_t text_layer_cursor_y(std::size_t slot) const { return text_layer_state_[slot].cursor_y; }
+    bool text_layer_texture_ready(std::size_t slot) const { return text_layer_state_[slot].texture_ready; }
+    std::int32_t text_layer_draw_key(std::size_t slot) const { return list_records_[slot].f68; }
     std::int32_t scalar_252() const { return scalar_252_; }
     std::int32_t scalar_88a() const { return scalar_88a_; }
     std::int32_t scalar_88b() const { return scalar_88b_; }
@@ -818,6 +836,14 @@ private:
     void op_1d2(const Instruction&); void op_1d3(const Instruction&);
     // 消息窗口的文本追加 / 行结束（vm_ops_text.cpp）
     void op_6e(const Instruction&); void op_6f(const Instruction&); void op_196(const Instruction&);
+    // 文本层画布（0x70 / 0x71 / 0x79 / 0x213 的宿主侧）：纹理 = 20 + 层号；rect / 原点 / 键基数在 ListRecord。
+    int resolve_text_layer(int slot) const;
+    bool ensure_text_layer_texture(int slot);
+    void clear_text_layer(int slot);
+    void draw_text_layer_text(int slot, const std::string& text, const std::string& rubi);
+    void end_text_layer_line(int slot);
+    void create_text_layer_item(int slot, int left, int top, int right, int bottom);
+    void erase_text_layer_draw_items(int slot);
     // 输入 / 等待 / 空操作（vm_ops_io.cpp）
     void op_109(const Instruction&); void op_108(const Instruction&); void op_c8(const Instruction&); void op_cc(const Instruction&);
     // 滚轮（读并清 `Engine+0x1E74`）
@@ -1050,6 +1076,8 @@ private:
     // 消息窗口记录（`0x6E` / `0x196` 追加、`0x6F` 行结束、`0x301` 释放）。
     std::unordered_map<std::int32_t, TextWindowRecord> text_windows_;
     std::int32_t current_text_slot_ = 0;  // `Engine+0x7780C`（`0x6E` / `0x196` 写）
+    // 十个文本层的宿主游标（纹理 = 20 + 层号；矩形 / 原点 / 键基数在 `list_records_`）。
+    std::array<TextLayerState, 10> text_layer_state_{};
     std::int32_t scalar_10f_ = 0;
     std::int32_t scalar_248_ = 0;
     std::int32_t font_8b_ = 0;

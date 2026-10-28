@@ -161,6 +161,16 @@ if(EMULATOR_CXX_INSTALL_DIR)
                 --skip-logo --play-headless
                 --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/title-option.txt"
                 --anchor-script 21092 --require-script 20940 --tick-ms 16 --max-steps 300000)
+    # ★ 设置界面底部**示例文本**：文本层画布（纹理 29）必须存在、尺寸 = 824×120、而且**有墨**。
+    #   这条是文本子系统（0x70/0x71/0x79/0x213 + 0x6e/0x196/0x6f）的资产档入口判据：
+    #   任何一环断了（层矩形 / 画布创建 / 清空 / 文本追加 / 栅格化）都会红。
+    add_test(NAME emulator-core-config-sample-text
+        COMMAND ${CMAKE_COMMAND}
+            -DEXE=$<TARGET_FILE:emulator-cxx>
+            -DINSTALL=${EMULATOR_CXX_INSTALL_DIR}
+            -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/tests
+            -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_sample_text.cmake)
     # ★ 设置界面**每一页**一条：点该 tab（判据 = 停在期望脚本 **且** 该页命中项数量对得上）+
     #   同一页滚 6 格（判据 = 一次都不许"未实现 / 非法 opcode"停机）。细节见 tests/config_pages.cmake。
     #   ★ 旧版是"每个 tab 一条 add_test + 只查还在 20940 里"：那个判据**恒真**（点错 tab 也仍在同一个

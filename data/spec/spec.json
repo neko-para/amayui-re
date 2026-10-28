@@ -78,6 +78,11 @@
       "title": "字符串"
     },
     {
+      "id": "adv-text",
+      "file": "chapters/62-adv-text.md",
+      "title": "ADV 文本层：画布、追加与行结束"
+    },
+    {
       "id": "ops-frame",
       "file": "chapters/60-ops-frame.md",
       "title": "帧类指令"
