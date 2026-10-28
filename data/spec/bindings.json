@@ -6493,17 +6493,100 @@
         {
           "ea": "0x432dd0",
           "what": "0x2fe 的 callee 入口"
+        },
+        {
+          "ea": "0x459f63",
+          "what": "A 支字号（`Font+0x313D4`）→ 逐字字体的 lfHeight 原料（`0x459F6B neg`）⇒ A 支是普通文本绘制用的高度"
+        },
+        {
+          "ea": "0x45a7f8",
+          "what": "B 支字号（`Font+0x355D8`）→ family B 的 lfHeight（`fild` 后 `fmul` 缩放、`__ftol2_sse`）"
+        },
+        {
+          "ea": "0x45607c",
+          "what": "每绘制选支的判据：第 9 实参 == 0 走 A 支"
+        },
+        {
+          "ea": "0x456082",
+          "what": "第 9 实参非 0 ⇒ 选 family B 的 HFONT（`Font+0x448`）"
+        },
+        {
+          "ea": "0x45608b",
+          "what": "第 9 实参 == 0 ⇒ 选 family A 的 HFONT（`Font+0x43C`）"
+        },
+        {
+          "ea": "0x4186bf",
+          "what": "0x197 把同一个操作数写进十个文本槽的高度格（`+0xC8`）"
+        },
+        {
+          "ea": "0x46516a",
+          "what": "显示缩放初值 1.0（构造器里把 `Font+0x355E4` 写成 1.0）"
+        },
+        {
+          "ea": "0x465875",
+          "what": "缩放的高分量 = 视口高 ÷ 配置客户区高（`set:WinY`）；它才是乘进 lfHeight 的那个（`0x45A3A9` 用 `+0x355E4`）"
+        },
+        {
+          "ea": "0x465884",
+          "what": "同一算式的宽分量 ÷（`Font+0x355E0`），不参与字号缩放"
+        },
+        {
+          "ea": "0x465e1d",
+          "what": "（★ 不在 `0x82` 的链上）`sub_465A20` 追加记录后经 `sub_455ED0` 平台文本输出时第 9 实参 = 常量 1 ⇒ 选 B 支"
+        },
+        {
+          "ea": "0x46c7b6",
+          "what": "普通文本（`0x196`）经 `sub_455ED0` 时第 9 实参压 0 ⇒ 选 A 支（这一条不是 `0x204` 的链）"
+        },
+        {
+          "ea": "0x4658c3",
+          "what": "同一对比例还抄进十个文本槽（+0x74 / +0x78）；宽分量落在 `Font+0x355E0`，用途未取证"
+        },
+        {
+          "ea": "0x4233d9",
+          "what": "`0x204` 的链：handler → `sub_456710`（这条链按 A 支字号逐字建临时字体，不存在选支标志）"
+        },
+        {
+          "ea": "0x458a6b",
+          "what": "`0x204` 链里取 A 支字号当逐字字体的高度实参"
+        },
+        {
+          "ea": "0x466a85",
+          "what": "`0x82` 的记录绘制：`test byte [记录+0x28], 4` ⇒ 位 2 决定走哪条（0x466A9A 分叉）"
+        },
+        {
+          "ea": "0x466c87",
+          "what": "位 2 = 0 的调用点：第 9 实参 = `[记录+0x28] & 4`（必为 0）⇒ 选 A 支"
+        },
+        {
+          "ea": "0x466eea",
+          "what": "位 2 = 1 的调用点：第 9 实参 = 常量 1 ⇒ 选 B 支"
+        },
+        {
+          "ea": "0x465bf8",
+          "what": "追加器把标志 `or 4`（位 2 置起）⇒ 经它追加的记录画的时候恒选 B 支"
         }
       ],
       "functions": [
-        "sub_426B20",
+        "sub_4185F0",
+        "sub_418680",
         "sub_41F350",
         "sub_41FDD0",
+        "sub_426B20",
         "sub_433290",
-        "sub_4332D0"
+        "sub_4332D0",
+        "sub_455ED0",
+        "sub_459F40",
+        "sub_45A6E0"
       ],
-      "storage": [],
+      "storage": [
+        "shape:T_Font@0x313d4",
+        "shape:T_Font@0x355d8",
+        "shape:T_Font@0x355e4",
+        "shape:T_Font@0x355e0"
+      ],
       "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-font-size",
         "KN:01M4E5TZHT442X4F1Z6Z5F0A7Y"
       ]
     },
@@ -13259,16 +13342,68 @@
         {
           "ea": "0x420b29",
           "what": "读第 2 个操作数（槽）"
+        },
+        {
+          "ea": "0x4b4eab",
+          "what": "装载器的构造器逐格清「槽 → 当前资源号」表（十格；到 0x4b4ee1 为止）"
+        },
+        {
+          "ea": "0x4b5004",
+          "what": "装载成功路径写该槽的「当前资源号」格（无边界检查）"
+        },
+        {
+          "ea": "0x4b50db",
+          "what": "该表的读者：重装全部音效时按 0..9 逐格取回资源标识并重新装载（`sub_4B5090`）"
+        },
+        {
+          "ea": "0x4156f0",
+          "what": "T_SE 的嵌入基址（下一块嵌入对象在 +0x148a0 ⇒ 表尾 == 对象尾）"
+        },
+        {
+          "ea": "0x4b603e",
+          "what": "播放受理边界：槽号 > 0Eh 拒绝"
+        },
+        {
+          "ea": "0x4b65c5",
+          "what": "装载受理边界：槽号 ≥ 0Fh 拒绝（dsReadSound 错误文本）"
+        },
+        {
+          "ea": "0x4b4f69",
+          "what": "后端对象为空 ⇒ 直接返回（不写格、不发请求）：后端不存在这条支路"
+        },
+        {
+          "ea": "0x4b4f8b",
+          "what": "装载入口取第 1 个实参（= 脚本第 1 个操作数：资源标识）"
+        },
+        {
+          "ea": "0x4b4f9a",
+          "what": "装载入口取第 2 个实参（= 脚本第 2 个操作数：槽号），它就是写表的下标"
+        },
+        {
+          "ea": "0x4b50e0",
+          "what": "读者：按槽取该表的值（`cmp [T_SE+4BCh+slot*4], 0`）"
+        },
+        {
+          "ea": "0x4b50f5",
+          "what": "读者：把该表的值当资源标识交给装载入口"
         }
       ],
       "functions": [
         "sub_420B00",
         "sub_420B40",
         "sub_4B4F60",
-        "sub_4B5020"
+        "sub_4B5020",
+        "sub_4B4E60",
+        "sub_4B5090",
+        "sub_4B6570"
       ],
-      "storage": [],
+      "storage": [
+        "shape:T_SE@0x4bc",
+        "shape:T_Sound@0x51c"
+      ],
       "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-audio-voice",
+        "guard:tools/test/emulator-cxx-audio-slots.test.mjs#音效槽量：shape ↔ 实现 ↔ spec 三处说同一件事",
         "guard:tools/test/emulator-new-audio.test.mjs#★ 音效装载与播放：0xb4 / 0xb5"
       ]
     },
@@ -15633,7 +15768,7 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-audio-voice"
       ]
     },
     {
@@ -15686,11 +15821,135 @@
         {
           "ea": "0x4671e5",
           "what": "向渲染器追加绘制命令（本版只记账）"
+        },
+        {
+          "ea": "0x45eea0",
+          "what": "记录追加的构造器（`0xc4` 一族共用）：在栈上拼一条 72 字节记录再交给向量"
+        },
+        {
+          "ea": "0x45ef0c",
+          "what": "记录 +0x00 ← 记录槽号（`arg0 == 0` ⇒ 取当前文本槽 `Engine+0x4CC`）"
+        },
+        {
+          "ea": "0x45ef12",
+          "what": "记录 +0x28 ← 标志（`0x40000000`，且该槽开关曾被消费时再或上位 0）"
+        },
+        {
+          "ea": "0x45ef18",
+          "what": "记录 +0x18 ← 第 4 个实参"
+        },
+        {
+          "ea": "0x45ef1f",
+          "what": "记录 +0x1c ← 第 6 个实参"
+        },
+        {
+          "ea": "0x45ef36",
+          "what": "记录 +0x20 ← 第 5 个实参"
+        },
+        {
+          "ea": "0x45ef39",
+          "what": "记录 +0x14 ← 第 3 个实参"
+        },
+        {
+          "ea": "0x45ef2a",
+          "what": "记录 +0x10 ← 0（随后 0x45ef2d / 0x45ef30 / 0x45ef33 分别清 +0x08 / +0x04 / +0x0c；清零段只到这四格）"
+        },
+        {
+          "ea": "0x45bb13",
+          "what": "元素复制：11 个 dword 逐个搬（含 +0x24）"
+        },
+        {
+          "ea": "0x45bb1e",
+          "what": "元素复制：偏移 0x2c 处是一条 28 字节字符串（`lea ecx,[esi+2Ch]`）"
+        },
+        {
+          "ea": "0x45bb38",
+          "what": "元素复制：字符串赋值调用 ⇒ 元素 = 44 字节 POD + 28 字节字符串 = 72"
+        },
+        {
+          "ea": "0x466538",
+          "what": "消费者读记录 +0x28 并测试位 1 / 位 30 / 位 2；★ 生产端只写位 30（与位 0），位 1、位 2 的写入者未取证 ⇒ 这两位的测试在同批记录上恒假"
+        },
+        {
+          "ea": "0x46656c",
+          "what": "消费者：记录 +0x20 当配音槽号用（索引计数表 / 传给播放请求）"
+        },
+        {
+          "ea": "0x466585",
+          "what": "消费者：记录 +0x14 当资源号用（传给配音播放）"
+        },
+        {
+          "ea": "0x4666d2",
+          "what": "消费者：读记录 +0x24（生产者不写这一格）并与引擎级值比较"
+        },
+        {
+          "ea": "0x4665bb",
+          "what": "消费者：记录 +0x1c 作为播放请求的一个实参"
+        },
+        {
+          "ea": "0x4665bf",
+          "what": "消费者：记录 +0x18 作为播放请求的一个实参"
+        },
+        {
+          "ea": "0x45ef1e",
+          "what": "字符串赋值的长度实参 = 0（`push ebx`，此时 ebx = 0）"
+        },
+        {
+          "ea": "0x45ef22",
+          "what": "字符串赋值的来源 = `byte_51EA3C`：`.data` 里一个 4 字节零缓冲（没有字符串初值）"
+        },
+        {
+          "ea": "0x45ef27",
+          "what": "字符串赋值的目标 = 记录 +0x2c"
+        },
+        {
+          "ea": "0x45ef3c",
+          "what": "以长度 0 调字符串赋值 ⇒ 追加后记录里的文本是**空串**"
+        },
+        {
+          "ea": "0x46678c",
+          "what": "消费者读记录 +0x40（字符串容量格）判 SSO"
+        },
+        {
+          "ea": "0x466791",
+          "what": "消费者取记录 +0x2c 的字符串（内容被复制进一块缓冲，见 0x4667c2 / 0x4667c9；缓冲身份未取证）"
+        },
+        {
+          "ea": "0x4667c2",
+          "what": "消费者重新取记录 +0x2c 的字符串（`lea [esi+ecx+2Ch]`）"
+        },
+        {
+          "ea": "0x4667c9",
+          "what": "消费者按 +0x14（= 记录 +0x40）判 SSO，随后把这串复制进一块**缓冲**（该缓冲的身份未取证）；⇒ 记录这一格的**内容**被消费"
         }
       ],
       "functions": [
         "sub_41F720",
-        "sub_466000"
+        "sub_4576C0",
+        "sub_457800",
+        "sub_457960",
+        "sub_457A20",
+        "sub_457CE0",
+        "sub_459770",
+        "sub_459860",
+        "sub_45BAB0",
+        "sub_45CD60",
+        "sub_45CF00",
+        "sub_45D3A0",
+        "sub_45D660",
+        "sub_45DF50",
+        "sub_45E7E0",
+        "sub_45EBE0",
+        "sub_45EC60",
+        "sub_45EEA0",
+        "sub_45EFA0",
+        "sub_45F090",
+        "sub_45F1B0",
+        "sub_462040",
+        "sub_4634B0",
+        "sub_464FD0",
+        "sub_466000",
+        "sub_4675A0"
       ],
       "storage": [],
       "evidence": [
@@ -15740,7 +15999,7 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-audio-voice"
       ]
     }
   ]

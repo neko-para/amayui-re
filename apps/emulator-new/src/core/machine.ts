@@ -40,7 +40,7 @@ export interface Frame {
   /** 局部字符串指针池（type 14）：槽里装**地址** */
   localStringPtr: Map<number, number>;
   /**
-   * 本帧的**返回栈**（位置 = 同脚本内 dword 序号；见 CORE-FRAME-CALL / CORE-FRAME-RET）。
+   * 本帧的**返回栈**（位置 = 同脚本内 dword 序号；见 CORE-OPS-FRAME-CALL / CORE-OPS-FRAME-RET）。
    * ★ 每帧一份：换帧就换成另一条栈（引擎给每帧各留一段固定容量，容量属机器细节）。
    */
   retStack: number[];
@@ -539,6 +539,15 @@ export interface ScriptFrame {
 /** 帧区容量：引擎是 **40 槽**（上限按**帧号**判，不按"已占用了几个槽"） */
 export const FRAME_SLOT_COUNT = 40;
 
+/**
+ * 声音后端的槽数：槽号 **0..14** 有效，≥15 后端拒绝这次调用（`CORE-OPS-AUDIO-WAV`）。
+ * ★ 与下面的 `SE_SLOT_TABLE_SIZE` **不是**同一个数 —— 合成一个会让引擎凭空多出 5 个格。
+ */
+export const SOUND_SLOT_COUNT = 15;
+
+/** 引擎自己那张「槽 → 当前资源号」表的格数：**10 格（0..9）**，比后端的槽少。 */
+export const SE_SLOT_TABLE_SIZE = 10;
+
 /** 外部请求留痕：规范不规定外部效果，但参考实现要把"发出过什么请求"记下来 */
 export interface EffectRecord {
   kind: string;
@@ -885,6 +894,12 @@ export class Machine {
   diagnostics: Diagnostic[] = [];
   /** 语义未定、但**确实**被写的引擎级标量（键是实现侧标签，不是引擎字段名） */
   scalars = new Map<string, number>();
+  /**
+   * 每个音效槽「当前装着的资源号」（`CORE-OPS-AUDIO-WAV` 第 2 步）。
+   * ★ 它比声音后端的槽少：**10 格**（槽号 0..9），后端是 **15** 个槽。
+   *   槽号 10..14 在引擎里会写到表外（未定义）；本实现只记诊断、不写表（spec 的已知偏离）。
+   */
+  seSlotResource = new Int32Array(SE_SLOT_TABLE_SIZE);
 
   /** 已执行的指令条数（不是 ip / 4：控制流可以往回跳） */
   steps = 0;

@@ -182,7 +182,7 @@ void Machine::op_1b9(const Instruction& instruction) {
 
 void Machine::op_1ba(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 声道开关（0x1BA / `sub_421200`，规则 `CORE-OPS-AUDIO-MODE`）：声道 **1..4**（1 基，与音量 0xC6 的
+    // 声道开关（0x1BA / `sub_421200`；★ 本版**尚无规范条目**，见 spec 的未成篇 gap）：声道 **1..4**（1 基，与音量 0xC6 的
     // 0..4 **不同**）⇒ 音乐 / 音效 / 语音 / 影片四个命名键。四条支的语义**互不相同**：
     //   1 音乐：**符号阶梯**（键值 < 0 视为"关"）：开 ⇒ +3、关 ⇒ −3；**已在同侧 ⇒ 什么都不做**。
     //   2 音效 / 3 语音：判**引擎开关格**是否已与请求同态 ⇒ 同态就 no-op（含"不发停通道请求"）；
@@ -230,23 +230,32 @@ void Machine::op_1ba(const Instruction& instruction) {
 
 void Machine::op_b6(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 停止一个音效槽（0x0B6 / `sub_420B80`，规则 `CORE-OPS-AUDIO-SE-STOP`）：op1 = 槽号 0..14。
-    // ★ 次序：**后端存在时**才释放该槽缓冲并把"该槽资源号"与同组另一格清 0；后端不存在时连清格都不做。
-    //   本版没有声音后端 ⇒ 按"后端不存在"处置（不清格、不发请求），并把"要释放"记成一笔待办。
+    // 停止一个音效槽（0x0B6 / `sub_420B80` → `sub_4B5050`；本版**尚无规范条目**，见 spec 的 gap）。
+    // 取证（`sub_4B5050`，`esi` = T_SE）：
+    //   ① 向后端发一次"释放该槽缓冲"的调用 `0x4b5065 call sub_4B6390` —— 后者只在槽号 < 0Fh 时受理
+    //      （`0x4b639a cmp edi,0Fh / jl`），否则写 `dsStop エラー：不正なSound番号です` 并返回 0；
+    //   ② **无条件**按槽号清两格：`0x4b506a [T_SE+0x4BC+slot*4] ← 0`（本版建模的那张 10 格表）
+    //      与 `0x4b5075 [T_SE+0x418+slot*4] ← 0`（本版未建模的槽结构体首格）。
+    //   ⇒ 槽号 ≥10 时这两笔清是**表外写**（T_SE 到 +0x4E4 结束）——本版不复刻，只记诊断。
+    // ★ 与 0xb4 同一套建模前提（后端存在、后端受理）；「`T_SE+408h == 0`（后端不存在）时整段跳过、
+    //   连清格都不做」这条退化支路本版**不建模**（登记残差）。
     const auto slot = read_int(ops[0]);
-    if (slot < 0 || slot > 14) {
-        // 引擎：写一段固定错误文本（dsStop），**但随后的两个清格仍按越界下标执行** —— 那属越界写，
-        // 本版不复制未定义行为，只记日志。
+    if (slot < 0 || slot >= kSoundSlotCount) {
         report_error("se-stop-slot-out-of-range:" + std::to_string(slot));
         return;
     }
     se_stop_requests_ += 1;
+    if (slot >= kSeSlotTableSize) {
+        report_error("se-stop-slot-past-engine-table:" + std::to_string(slot));
+        return;
+    }
+    se_slot_resource_[static_cast<std::size_t>(slot)] = 0;
     return;
 }
 
 void Machine::op_b7(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // BGM 播放（0x0B7 / `sub_420C00`，规则 `CORE-OPS-AUDIO-BGM-RESTART`）：op1 = 曲目号。
+    // BGM 播放（0x0B7 / `sub_420C00`；★ 本版**尚无规范条目**，见 spec 的未成篇 gap）：op1 = 曲目号。
     // ★ 与 0xbf 的**唯一但决定性**差别：这条**没有"同曲同参就跳过"的判据** ⇒ 每次都发播放请求。
     // ★ op1 == 0 的两支：已有曲目 ⇒ 用**旧曲目**重发；没有 ⇒ 等价于停止（但参数格已被写成 1）。
     state_flags_ &= ~(1u << 9);  // 第 9 位（音乐淡变进行中）在这里被清
@@ -265,7 +274,7 @@ void Machine::op_b7(const Instruction& instruction) {
 
 void Machine::op_b8(const Instruction& instruction) {
     (void)instruction;
-    // BGM 停止（0x0B8 / `sub_419720`，规则 `CORE-OPS-AUDIO-BGM-STOP`）：**没有操作数**。
+    // BGM 停止（0x0B8 / `sub_419720`；★ 本版**尚无规范条目**，见 spec 的未成篇 gap）：**没有操作数**。
     // ★ 没有"是否在播"的判据 —— 重复调用会重复发停止请求；参数格**不被这条改动**。
     state_flags_ &= ~(1u << 9);
     bgm_track_ = 0;
@@ -277,8 +286,9 @@ void Machine::op_ba(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 音效播放的**循环变体**（0x0BA / `sub_420BC0`，规则 `CORE-OPS-AUDIO-WAV` 的补充段）：
     // 与 0xb5 是同一条播放请求，唯一差别是请求里的**循环位 = 1**（0xb5 = 0）。
+    // ★ 界是**后端的 15**（`0x4b603e cmp edi,0Eh / ja`）；播放这条不碰引擎那张 10 格表。
     const auto slot = read_int(ops[0]);
-    if (slot < 0 || slot > 14) {
+    if (slot < 0 || slot >= kSoundSlotCount) {
         report_error("se-play-slot-out-of-range:" + std::to_string(slot));
         return;
     }
@@ -555,13 +565,23 @@ void Machine::op_bf(const Instruction& instruction) {
 
 void Machine::op_b4(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 音频装载请求（0x0B4 / `sub_420B00`）：op1 = 资源标识、op2 = 槽号。
-    // ★ 取证补正了旧注释的"不改任何引擎数据"：装载成功路径会写"该槽当前资源号"这一格
-    //   （`0x4B5004`），而 0xb6 清的正是同一格 ⇒ 两者成对。
+    // 音频装载请求（0x0B4 / `sub_420B00` → `sub_4B4F60`，规则 `CORE-OPS-AUDIO-WAV`）：
+    // 读序 **1 → 2**，第 1 个 = 资源标识、第 2 个 = 槽号（handler 先 push 第 1 个、再 push 第 2 个
+    // ⇒ `__thiscall` 的第 1 形参是槽号，`0x4b5004` 用它当表下标）。
+    // ★ 两个界（见 `vm.h` 的 `kSoundSlotCount` / `kSeSlotTableSize` 与那里的取证）：
+    //   后端受理 0..14；引擎那张「槽 → 当前资源号」表只有 10 格（0..9）。
+    //   `0x4b5004 [T_SE+0x4BC+slot*4] ← 资源` 没有边界检查 ⇒ 槽号 10..14 是表外写（写进下一个嵌入对象，
+    //   未定义）；本版不复刻那笔越界写，只记诊断、**不动**表。
+    // ★ 建模前提：后端存在 + 装载成功（失败路径抛显示消息型异常，本版不写合同，见残差）。
     const auto resource = read_int(ops[0]);
     const auto slot = read_int(ops[1]);
-    if (slot < 0 || slot > 14) {
+    if (slot < 0 || slot >= kSoundSlotCount) {
         report_error("se-load-slot-out-of-range:" + std::to_string(slot));
+        return;
+    }
+    se_load_requests_ += 1;
+    if (slot >= kSeSlotTableSize) {
+        report_error("se-load-slot-past-engine-table:" + std::to_string(slot));
         return;
     }
     se_slot_resource_[static_cast<std::size_t>(slot)] = resource;
@@ -570,9 +590,10 @@ void Machine::op_b4(const Instruction& instruction) {
 
 void Machine::op_b5(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 音频播放请求（0x0B5 / `sub_420B40`）：op1 = 槽号；循环位 = 0（与 0xba 的唯一差别）。
+    // 音频播放请求（0x0B5 / `sub_420B40`，规则 `CORE-OPS-AUDIO-WAV`）：op1 = 槽号；循环位 = 0（与 0xba 的唯一差别）。
+    // ★ 界是**后端的 15**（`0x4b603e cmp edi,0Eh / ja`）；播放这条不碰引擎那张 10 格表。
     const auto slot = read_int(ops[0]);
-    if (slot < 0 || slot > 14) {
+    if (slot < 0 || slot >= kSoundSlotCount) {
         report_error("se-play-slot-out-of-range:" + std::to_string(slot));
         return;
     }

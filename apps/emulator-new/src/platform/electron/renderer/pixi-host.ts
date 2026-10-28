@@ -683,6 +683,7 @@ export class PixiRenderHost {
   // ★ 取证窗口要覆盖 INITCONFIG4（本机可到 ~96k 步 / 数十秒）⇒ 120s，而不是 10s。
   private flashProbeUntil = performance.now() + 120000;
   private flashProbeHits = 0;
+  private presentTriggers: Record<string, number> = {};
   /** 取证开关：所有 present 只提交纯灰背景，绕过场景/纹理/命令。 */
   private readonly forceGrayPresent = false;
   /** 取证：手工创建的静态黑 canvas；不经过 Pixi/WebGL。 */
@@ -2201,6 +2202,13 @@ export class PixiRenderHost {
   }
 
   private present(trigger: PresentTrigger = 'frame'): void {
+    // ★ 低频诊断：每 120 次 present 打一行（+ 第一次立即打），用来把"没有白闪"与"根本没有帧"分开。
+    //   白闪取证只看中心 1 像素（`probeFlash`），没有帧计数时两者在日志上长得一样。
+    this.presentCount += 1;
+    if (this.presentCount === 1 || this.presentCount % 120 === 0) {
+      this.note(`[present] frames=${this.presentCount} lastTrigger=${trigger} triggers=${JSON.stringify(this.presentTriggers)}`);
+    }
+    this.presentTriggers[trigger] = (this.presentTriggers[trigger] ?? 0) + 1;
     if (this.forceGrayPresent) {
       // 取证：present 完全空操作，不调用任何 render。
       this.presentCount += 1;

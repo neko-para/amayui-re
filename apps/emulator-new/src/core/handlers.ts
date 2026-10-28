@@ -8,7 +8,7 @@
 import { decodeCp932, readU16LE, readU32LE } from './bytes.ts';
 import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, SceneCommandRecord, TextureObject, VoiceGroup } from './machine.ts';
 import { FrameLoadError } from './machine.ts';
-import { FRAME_SLOT_COUNT, MOVIE_BIT, SLEEP_BIT, WAIT_BIT, indexInTable } from './machine.ts';
+import { FRAME_SLOT_COUNT, MOVIE_BIT, SE_SLOT_TABLE_SIZE, SLEEP_BIT, SOUND_SLOT_COUNT, WAIT_BIT, indexInTable } from './machine.ts';
 import { decodeInt, encodeInt, readAddress, readFloat, readInt, readIntAt, readRawAt, readText, writeBitsAt, writeFloat, writeInt, writeRawAt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
 import { arrayStrideFor, resolveAddress } from './address.ts';
@@ -938,7 +938,7 @@ async function drawText204(m: Machine, ops: Operand[]): Promise<void> {
 /* ──────────────────────────── 帧与调用 ──────────────────────────── */
 
 /**
- * 0x8f 同脚本调用（CORE-FRAME-CALL）。
+ * 0x8f 同脚本调用（CORE-OPS-FRAME-CALL）。
  *
  * 逐字（`sub_420560`）：压返回点 `(PC − 基址) >> 2 + 3` 进本帧返回栈、SP+1；读第 1 个操作数：
  * 等于 −1 ⇒ SP−1（撤销压栈）、**不跳**（长度槽仍是 3 ⇒ 分派器照常推进）；
@@ -954,7 +954,7 @@ function call8f(m: Machine, ops: Operand[]): void {
 }
 
 /**
- * 0x5 同脚本返回（CORE-FRAME-RET）。
+ * 0x5 同脚本返回（CORE-OPS-FRAME-RET）。
  *
  * 逐字（`sub_41A9B0`）：长度槽 ← 1、本帧返回栈 SP−1、弹出位置；
  * 位置 = −1 ⇒ **不跳**（长度槽留 1 ⇒ 分派器只前进 4 字节）；
@@ -1263,7 +1263,7 @@ function pair303(m: Machine, ops: Operand[]): void {
 }
 
 /**
- * 0xa0 条件跳转（CORE-FRAME-JUMP-A0）。
+ * 0xa0 条件跳转（CORE-OPS-FRAME-JUMP-A0）。
  *
  * 逐字（sub_4209B0，argc 3）：读 op1 作条件；非 0 ⇒ 读 op2 作目标，等于 0 ⇒ 读 op3 作目标；
  * 目标为 −1（全 1 位模式）⇒ 不跳（长度槽留着 ⇒ 分派器照常推进）；否则
@@ -1279,7 +1279,7 @@ function jumpA0(m: Machine, ops: Operand[]): void {
 }
 
 /**
- * 0x3 换脚本（CORE-FRAME-CALL-SCRIPT）：操作数是**统一文件 id**；在「当前帧号 + 1」那个槽上建子帧
+ * 0x3 换脚本（CORE-OPS-FRAME-CALL-SCRIPT）：操作数是**统一文件 id**；在「当前帧号 + 1」那个槽上建子帧
  * 并切过去，从子脚本 dword 0 开始；子帧的局部池**新分配**（不继承父池）。
  * ★ 深度按**槽号**判（`cur + 1 >= 40` 才超限）；装载失败 ⇒ 整个执行中止（本层响亮失败）。
  */
@@ -1302,7 +1302,7 @@ async function callScript3(m: Machine, ops: Operand[]): Promise<void> {
 }
 
 /**
- * 0x2 结束当前脚本（CORE-FRAME-EXIT）：有父帧 ⇒ 回到**父帧号**那一帧；根帧 ⇒ 整个执行结束。
+ * 0x2 结束当前脚本（CORE-OPS-FRAME-EXIT）：有父帧 ⇒ 回到**父帧号**那一帧；根帧 ⇒ 整个执行结束。
  * ★ 它**不写 ip**：父帧 ip 仍停在调用点，靠父帧自己的长度槽推进到"下一条"（引擎的算术结果）。
  * ★ 释放是**有条件**的（只有「父号 + 1 == 当前号」才清槽）：`0x8 换帧` 切出来的返回可以跨槽。
  */
@@ -1350,7 +1350,7 @@ function callFrame8(m: Machine, ops: Operand[]): void {
 }
 
 /**
- * 0x9 全局重置并重装根脚本（CORE-FRAME-EXIT-SCRIPT）：丢全部帧、以统一文件 id 0 重装进 0 号帧。
+ * 0x9 全局重置并重装根脚本（CORE-OPS-FRAME-EXIT-SCRIPT）：丢全部帧、以统一文件 id 0 重装进 0 号帧。
  * ★ 它**不是返回**：调用者永远不会拿回控制权（本层用"重置后从根脚本 dword 0 继续"表达）。
  */
 async function exitScript9(m: Machine): Promise<void> {
@@ -3616,16 +3616,31 @@ function modeWord24e(m: Machine, ops: Operand[]): void {
 
 /* ──────────────────────────── 音频请求边界（60-ops-voice） ──────────────────────────── */
 
-/** `0xb4` 音效装载（CORE-OPS-AUDIO-WAV）：只发请求，不改引擎数据 */
+/** `0xb4` 音效装载（CORE-OPS-AUDIO-WAV）：发请求；**装载成功时写该槽的「当前资源号」格**。
+ *  ★ 槽号有两个界（不许合并）：后端 15 个槽、引擎那张表 10 格。10..14 ⇒ 后端受理但引擎写表时越界，
+ *    本实现照常发请求、不写表、记诊断（spec 的已知偏离）。≥15 ⇒ 后端拒绝这次装载，不写表。 */
 function audioWavLoadB4(m: Machine, ops: Operand[]): void {
   const resource = readInt(m, ops, 1);
   const slot = readInt(m, ops, 2);
+  if (slot < 0 || slot >= SOUND_SLOT_COUNT) {
+    m.diagnostics.push({ kind: 'audio.wav.load-slot-out-of-range', index: slot });
+    return;
+  }
   m.effects.push({ kind: 'audio.wav.load', detail: { resource, slot } });
+  if (slot >= SE_SLOT_TABLE_SIZE) {
+    m.diagnostics.push({ kind: 'audio.wav.load-slot-past-engine-table', index: slot });
+    return;
+  }
+  m.seSlotResource[slot] = resource;
 }
 
-/** `0xb5` 音效播放（CORE-OPS-AUDIO-WAV）：只发请求，不改引擎数据 */
+/** `0xb5` 音效播放（CORE-OPS-AUDIO-WAV）：发播放请求；槽号 ≥15 时后端拒绝（不播放）。 */
 function audioWavPlayB5(m: Machine, ops: Operand[]): void {
   const slot = readInt(m, ops, 1);
+  if (slot < 0 || slot >= SOUND_SLOT_COUNT) {
+    m.diagnostics.push({ kind: 'audio.wav.play-slot-out-of-range', index: slot });
+    return;
+  }
   m.effects.push({ kind: 'audio.wav.play', detail: { slot } });
 }
 

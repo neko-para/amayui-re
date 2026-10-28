@@ -137,21 +137,26 @@ void Machine::op_197(const Instruction& instruction) {
     //   LOGFONTA 的 `lfHeight = -v`、`lfWidth = -(v/2)`（向零截断）；随后重建三种 HFONT。
     // ★ 它**不碰**行高那一组（`Font+0x313D4`，那是 `0x75` 的活）—— 两件事一个格是本模型以前的错。
     // ★ 缺省 8（引擎 `0x46551C` 的初值），不是行高的 24。
-    // ★ 最终像素 = round(v × 显示缩放 `Font+0x355E4`)；本宿主按逻辑分辨率渲染 ⇒ 缩放恒 1.0。
+    // ★ 最终像素 = round(|v| × 显示缩放 `Font+0x355E4`)，乘在**建字体**那一步（`0x45A7FE fmul [ebx+355E4h]`；
+    //   0x204 走的是另一支：`0x45A3A9 fmul [ebx+355E4h]`）。该比例 = 视口 ÷ `set:WinX/WinY`，初值 1.0，
+    //   只在「窗口态 + 虚拟全屏类型 2」时刷新（`0x46584E..0x46588A`）⇒ **设计分辨率下恒 1.0**；
+    //   本宿主按逻辑分辨率渲染 ⇒ 1.0，**不需要**再乘。
+    // ★ 这条写的是 **B 支**（`Font+0x355D8`）：只有跨度绘制路径在特定标志下用它；0x204 不用它。
     const auto value = read_int(ops[0]);
-    glyph_height_ = value;
+    font_b_height_ = value;
     for (auto& slot : text_slots_) slot.glyph_height = value;
-    if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x197 glyph_height=%d\n", value);
+    if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x197 font_b_height=%d\n", value);
     return;
 }
 
 void Machine::op_75(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // `0x75` 设行高（`sub_4185F0`）：只写行高那一组（`0x418611/0x418617/0x418619/0x418667/0x41866D`），
-    // **不碰**字号格与 LOGFONTA ⇒ 与 `0x197` 是两个量。缺省 24。
-    line_height_ = read_int(ops[0]);
-    if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x75 line_height=%d\n", line_height_);
-    return;  // 行距链的消费者（换行/自动推进）未建模
+    // `0x75` 设的是**A 支字号**（`sub_4185F0`）：`Font+0x313D4 ← v`（`0x418611`），
+    // 两份 LOGFONTA 的 lfHeight ← −v（`0x418617` / `0x418619`），随后重建字体（`sub_459F40`）。
+    // ★ **0x204 画文字用的就是这一支**（`0x459F63` 读它当逐字字体的高度）⇒ 它不是"行高"。
+    glyph_height_ = read_int(ops[0]);
+    if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x75 glyph_height(family A)=%d\n", glyph_height_);
+    return;
 }
 
 void Machine::op_198(const Instruction& instruction) {

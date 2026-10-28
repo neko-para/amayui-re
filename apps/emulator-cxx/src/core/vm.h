@@ -327,7 +327,7 @@ public:
     //   本宿主按**逻辑分辨率**渲染 ⇒ 该缩放恒为 1.0，乘法是恒等；换成分辨率无关的呈现时要补上。
     std::int32_t font_size() const { return glyph_height_; }
     std::int32_t glyph_height() const { return glyph_height_; }
-    std::int32_t line_height() const { return line_height_; }
+    std::int32_t font_b_height() const { return font_b_height_; }
     // 十个**文本槽**：各自的字形高度（`槽+0xC8`）与绘制原点偏移（`槽+0x0C` / `槽+0x10`）。
     std::int32_t text_slot_glyph_height(std::size_t i) const { return text_slots_[i].glyph_height; }
     std::int32_t text_slot_x(std::size_t i) const { return text_slots_[i].x_offset; }
@@ -478,6 +478,13 @@ public:
     // 门字（`state_flags_`）：**只给自检 / 夹具**摆前置位用（当前没有哪条已实现的指令能可靠置第 27 位，
     // 而 `0xc2` 的两条支路正是按那一位分的）。⛔ 不要在产品代码里用它绕开指令。
     std::uint32_t& state_flags_mut() { return state_flags_; }
+    // ── **门外直派**：⛔ 只给自检 ──
+    // 门（`state_flags_`）一旦非 0 就不取指，而本模型的主循环只有第 0 / 10 / 13 位的服务分支：
+    // 第 27 位（"影片 / 立即"）没有服务者 ⇒ `0xc2` 的 A 支与 `0xc4` 的影片门支**用合成脚本永远走不到**
+    // （只会得到 `gate-bit-unserviced` 诊断）。这两条支路按取证实现了，却因此长期没有行为级守卫。
+    // ⇒ 给一个最小接缝，口径与 `emulator-new` 那边"测试直接取 `HANDLERS.get(op)` 调"一致。
+    // ★ 它只做**一次派发**：不取指、不推进 ip、不服务门位。⛔ 生产路径只有 `step()`。
+    void dispatch_for_test(const Instruction& instruction) { execute(instruction); }
     bool bgm_fade_active() const { return (state_flags_ & (1u << 9)) != 0; }
     std::int32_t voice_resource() const { return voice_resource_; }
     bool voice_pending() const { return voice_pending_; }
@@ -500,8 +507,24 @@ public:
     std::int32_t text_span_flags(std::size_t i) const { return text_spans_[i].flags; }
     std::size_t text_span_draw_requests() const { return text_span_draw_requests_; }
     std::size_t text_span_alt_requests() const { return text_span_alt_requests_; }
+    // ── 音效的两个**不同**槽量（⛔ 别再合成一个 15 —— 那曾让实现假造 5 个引擎格） ──
+    //   · `kSoundSlotCount` = **15**：声音后端（`T_Sound`）的槽数组条数。
+    //     语料：`0x4b603e cmp edi,0Eh / ja`（播放受理边界）、`0x4b65c5 cmp edi,0Fh / jl`（装载受理边界）、
+    //     `0x4b639a cmp edi,0Fh / jl`（释放受理边界）；shape 里 `T_Sound` 的 +0x51c / +0x564 / +0x5a0 /
+    //     +0x5dc / +0x618 / +0x690 / +0x7f8 七张表都是 count 15。
+    //   · `kSeSlotTableSize` = **10**：引擎自己那张「槽 → 当前资源号」表（`T_SE+0x4BC`）。
+    //     语料：构造器 `sub_4B4E60` 逐格清 10 个（`0x4b4eab`..`0x4b4ee1`：0x4BC / 0x4C0 / … / 0x4E0）；
+    //     重装全表的循环 `0x4b50db cmp edi,0Ah / jge` 也是 0..9；对象边界印证同一件事 ——
+    //     `Engine+0x143BC` 是 T_SE、下一块嵌入对象在 `+0x148A0`（`0x4156ea` / `0x4156f9`）⇒ 大小 0x4E4，
+    //     而 0x4BC + 10*4 = 0x4E4 正好是表尾。
+    //   ⇒ 装载成功路径 `0x4b5004 [T_SE+0x4BC+slot*4] ← 资源` 与停止路径 `0x4b506a` / `0x4b5075` 的清格
+    //     **都没有边界检查**：槽号 10..14 落在 T_SE 表外（越界写，写进下一个嵌入对象），本版不复刻。
+    // ★ 建模前提（不是取证结论）：后端存在 + 装载成功（两条都有残差登记）。
+    static constexpr int kSeSlotTableSize = 10;
+    static constexpr int kSoundSlotCount = 15;
     std::size_t se_play_requests() const { return se_play_requests_; }
     std::size_t se_stop_requests() const { return se_stop_requests_; }
+    std::size_t se_load_requests() const { return se_load_requests_; }
     bool sound_se_enabled() const { return sound_se_enabled_; }
     bool sound_voice_enabled() const { return sound_voice_enabled_; }
     // ── 诊断（⛔ 不是引擎语义）：`--sweep-missing` 时把"没有 handler 的 opcode"" 记账后跳过 ──
@@ -911,8 +934,15 @@ private:
     std::int32_t font_draw_mode_ = 1;
     // 字形高度（`Font+0x355D8`）缺省 **8**、行高（`Font+0x313D4`）缺省 **24** —— 这是引擎的两个不同缺省，
     // 不是同一个量的两个名字（实测：`0x75` 只写行高那一组，`0x197` 只写字号那一组）。
-    std::int32_t glyph_height_ = 8;
-    std::int32_t line_height_ = 24;
+    // 字体对象有**两套字号**（不是"行高 / 字形高度"——那是本模型以前的误读）：
+    //   · A 支：`Font+0x313D4`（缺省 0x18=24），由 `0x75` 写；**0x204 把文字画进纹理时用的就是它**
+    //     （`0x459F63 mov eax,[ebx+313D4h]` → `0x459F6B neg eax` → 逐字字体的 lfHeight；HFONT 在 `Font+0x43C`）。
+    //   · B 支：`Font+0x355D8`（缺省 8），由 `0x197` 写（`0x418687`）；只有 `0x82` 跨度那条路径在
+    //     `sub_455ED0` 的第 9 实参 ≠ 0 时才选它（`0x45607C cmp [ebp+arg_1C],0` / `0x456082 mov eax,[esi+448h]`），
+    //     HFONT 在 `Font+0x448`（`0x45A792`）。
+    //   ⇒ 把 `0x75` 当成"行高"会让界面里"设行高"顺手改字号（历史上正是这个错）。
+    std::int32_t glyph_height_ = 24;      // A 支（0x75）：0x204 出字形的那个高度
+    std::int32_t font_b_height_ = 8;      // B 支（0x197）：跨度绘制那条路径的字号
     struct TextSlot {
         std::int32_t glyph_height = 0;  // `槽+0xC8`：`0x197` 把**十槽全写**成同一个值
         std::int32_t x_offset = 0;      // `槽+0x0C`：`0x198` 的 op2
@@ -942,13 +972,15 @@ private:
     // 画面模式缓存（`0x2CE` 读 / `0x2CF` apply 时写回配置；初值 = 配置 `display:ScreenMode`）。
     std::int32_t display_mode_cache_ = 0;
     // ── 音频（`60-ops-voice`）：只建模**引擎侧可见的格**与**向声音后端发出的请求计数**。 ──
+    // ★ 音效的两个槽量见 `public:` 的 `kSeSlotTableSize` / `kSoundSlotCount`（那里有取证）。
     // 引擎的可观察状态（取证：0xb4/0xb6/0xb7/0xb8/0xba 的 handler）：
     //   · 每个音效槽"当前资源号"（0xb4 成功写、0xb6 清 0）；
     //   · BGM 的 曲目 / 参数 / 淡变进度 三格（0xb7 写前两格、0xb8 清前两格）；
     //   · "音乐淡变进行中"就是门字第 9 位：**`0xc2` 置它**（`0x420E55 or …0x200`），
     //     `0xb7` / `0xb8` / `0xbf` / 主循环都是**清**它（本文件以前把这条注释放反过）。
     // ⛔ 声音本身不建模 —— 请求只计数（守卫靠它区分"发了/没发"）。
-    std::array<std::int32_t, 15> se_slot_resource_{};
+    // ★ 表量由 `T_SE+0x4BC` 定（10），⛔ 不是后端的 15：见上面两条常量的取证。
+    std::array<std::int32_t, kSeSlotTableSize> se_slot_resource_{};
     std::int32_t bgm_track_ = 0;
     std::int32_t bgm_param_ = 0;
     std::int32_t bgm_progress_ = 0;
@@ -956,6 +988,7 @@ private:
     std::size_t bgm_stop_requests_ = 0;
     std::size_t se_play_requests_ = 0;
     std::size_t se_stop_requests_ = 0;
+    std::size_t se_load_requests_ = 0;
     // `0xc2`（BGM 淡变）：目标值 / 步长 / 进度 / 间隔（ms）/ 混音方式，外加一笔"发了淡变请求"。
     // ★ `op1` **不是曲目号**（曲目另有格）；刻度满值 = 10000（唯一观察），本条不解释它的单位。
     std::int32_t bgm_fade_target_ = 0;

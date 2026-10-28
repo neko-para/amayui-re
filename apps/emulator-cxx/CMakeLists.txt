@@ -94,6 +94,10 @@ add_test(NAME emulator-cxx-smoke COMMAND emulator-cxx --smoke)
 add_executable(emulator-core-selftest
     tests/core_selftest.cpp)
 target_link_libraries(emulator-core-selftest PRIVATE emulator-core)
+# ★ 自检要**读** shape 来判"实现的槽量 == shape 声明"（音效槽表 10 / 后端 15）：
+#   把仓库里的文件路径注进去，**不拷贝**进构建目录 —— 拷贝会制造"文件在就算对"的假象。
+target_compile_definitions(emulator-core-selftest PRIVATE
+    EMULATOR_CXX_SHAPE_TYPES_JSON="${CMAKE_CURRENT_SOURCE_DIR}/../../data/shape/types.json")
 # 自检脚本把十几台 `Machine` 放在同一个栈帧里（Debug /Od 不复用栈槽）；
 # 默认 1 MiB 栈在夹具变多之后会撞上（0xC00000FD）。这是**测试**的显式预算，不是产品设置。
 if(WIN32)
@@ -106,6 +110,11 @@ else()
     target_link_options(emulator-core-selftest PRIVATE "-Wl,-z,stack-size=8388608")
 endif()
 add_test(NAME emulator-core-selftest COMMAND emulator-core-selftest)
+# ★ 音效 / 配音的**子集**单独注册一条：spec 的 evidence 要点到"某条用例"，聚合的那一条点不出子集
+#   （`CORE-OPS-AUDIO-WAV` / `-BGM-FADE` / `CORE-OPS-VOICE-PLAY` 的证据都指这里）。
+add_test(NAME emulator-core-audio-voice COMMAND emulator-core-selftest --only-audio)
+# ★ 两套字号（`0x75` = A 支 / `0x197` = B 支）单独一条：spec 的 `CORE-OPS-FORWARD-PROLOGUE` 证据指这里。
+add_test(NAME emulator-core-font-size COMMAND emulator-core-selftest --only-font)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)

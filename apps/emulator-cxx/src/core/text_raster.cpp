@@ -385,6 +385,14 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     if (texture == nullptr || texture->rgba.empty() || sjis.empty()) return false;
 
     const int size = machine.font_size() > 0 ? machine.font_size() : 24;
+    // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：把**实际用来出字形的字号**打出来。
+    //   判据用：配置界面里 0x204 必须按 A 支字号画（`0x75` 写的那支），⛔ 不是 `0x197` 的 B 支。
+    // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：本函数在 `vm_ops_text.cpp` 的匿名命名空间里没有那个 helper，
+    //   这里就地读环境变量（同一个开关、同一个语义）。
+    {
+        static const bool trace = std::getenv("EMULATOR_CXX_TRACE_TEXT") != nullptr;
+        if (trace) std::fprintf(stderr, "[text] draw size=%d chars=%zu\n", size, sjis.size());
+    }
     // 引擎的 AA 开关（决定字形格式：1-bit / GRAY4 / GRAY8；见 §32/§33）。只在"真机字形来源"下用。
     const bool anti_alias = machine.config().get_int("set:EnableAntiFont") != 0 &&
                             machine.config().get_int("message:UseAntiFont") != 0;

@@ -11,6 +11,8 @@
 #include "core/text_raster.h"
 #include "core/vm.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cmath>
 #include <cstdlib>
 #include <map>
@@ -2733,7 +2735,10 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (!machine.sound_se_enabled()) return fail("0x1ba 同态请求把音效关掉了");
     }
 
-    // ⑨ 0xb6：没有声音后端时**不清槽格**（只记一次停止请求）；0xb4 成功会写槽资源格
+    // ⑨ 0xb4 成功装载写「该槽当前资源号」这一格（`0x4b5004`）；0xb6 清**同一格**（`0x4b506a`）。
+    //    ★ 旧版这里断言"0xb6 不清"并引了"规范"—— 规范里此前**没有** 0xb6 这一条（它在 spec 的未成篇 gap 里），
+    //    而 0xb4 又按"后端存在"写了表 ⇒ 同一个 T_SE 上两条指令用了两套前提。现在两条都按「后端存在、后端受理」
+    //    建模；槽号的两个界（后端 15 / 引擎表 10）与越界处置在 `check_audio_slot_bounds()` 里逐条咬。
     {
         auto bytes = make_script_with_body();
         emit_instruction(bytes, 0xB4, {{0, 7}, {0, 9}});
@@ -2744,7 +2749,7 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (!machine.step()) return fail("0xb4 停机");
         if (machine.se_slot_resource(9) != 7) return fail("0xb4 没有写槽资源格");
         if (!machine.step()) return fail("0xb6 停机");
-        if (machine.se_slot_resource(9) != 7) return fail("0xb6 在没有后端时清了槽格（规范：不清）");
+        if (machine.se_slot_resource(9) != 0) return fail("0xb6 没有清槽资源格（取证 0x4b506a）");
         if (machine.se_stop_requests() != 1) return fail("0xb6 没有发停止请求");
     }
 
@@ -2924,36 +2929,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.font_primary_color() != 0x332211) return fail("0x82（op3=8）不该再写颜色");
     }
 
-    // ⑫ 0x197 / 0x75 是**两个量**（字形高度 / 行高），各有缺省，互不覆盖；0x197 还把十个文本槽一起写
-    {
-        auto bytes = make_script_with_body();
-        emit_instruction(bytes, 0x75, {{0, 30}});
-        emit_instruction(bytes, 2, {});
-        core::Machine machine(key, table);
-        machine.load_root(bytes);
-        if (machine.glyph_height() != 8) return fail("字号缺省应当是 8（引擎的初值，不是行高的 24）");
-        if (machine.line_height() != 24) return fail("行高缺省应当是 24");
-        if (!machine.step()) return fail("0x75 停机");
-        if (machine.line_height() != 30) return fail("0x75 没有写行高");
-        if (machine.glyph_height() != 8) return fail("0x75 顺带改掉了字号（两者是两个格）");
-    }
-    {
-        auto bytes = make_script_with_body();
-        emit_instruction(bytes, 0x197, {{0, 10}});
-        emit_instruction(bytes, 0x75, {{0, 20}});
-        emit_instruction(bytes, 2, {});
-        core::Machine machine(key, table);
-        machine.load_root(bytes);
-        if (!machine.step()) return fail("0x197 停机");
-        if (machine.glyph_height() != 10) return fail("0x197 没有写字形高度");
-        for (std::size_t i = 0; i < core::Machine::text_slot_count(); ++i) {
-            if (machine.text_slot_glyph_height(i) != 10) return fail("0x197 没有把十个文本槽一起写");
-        }
-        if (!machine.step()) return fail("0x75（在 0x197 之后）停机");
-        if (machine.glyph_height() != 10) return fail("0x75 把 0x197 写的字号覆盖了（两者是两个格）");
-        if (machine.line_height() != 20) return fail("0x75 没有写行高");
-    }
-
     // ⑬ 0x198：槽下标 0 ⇒ **默认槽 1**；只写那一槽的两个偏移；不碰字号 / 行高 / 别的槽
     {
         auto bytes = make_script_with_body();
@@ -2975,8 +2950,8 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (!machine.step()) return fail("0x198(3,7,8) 停机");
         if (machine.text_slot_x(3) != 7 || machine.text_slot_y(3) != 8) return fail("0x198 没有写槽 3");
         if (machine.text_slot_x(1) != 100) return fail("0x198 写槽 3 时把槽 1 改了");
-        if (machine.glyph_height() != 10) return fail("0x198 改了字形高度（规范：只写偏移）");
-        if (machine.line_height() != 24) return fail("0x198 改了行高（规范：只写偏移）");
+        if (machine.glyph_height() != 24) return fail("0x198 改了 A 支字号（规范：只写偏移；缺省 24）");
+        if (machine.font_b_height() != 10) return fail("0x198 改了 B 支字号（规范：只写偏移；此前 0x197(10)）");
     }
     // ⑭ 0x198 越界下标：引擎里是未定义行为 ⇒ 本实现**夹紧后跳过**（不写任何槽、不停机）
     {
@@ -2996,7 +2971,207 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
     return true;
 }
 
-int main() {
+// ── 音效槽：引擎表（`T_SE+0x4BC` = 10）与后端槽数组（`T_Sound` = 15） ──
+/** 实现的两个槽量与 **shape 声明**一致。
+ *  ★ 为什么读 `data/shape/types.json` 而不是在这里再抄一遍数字：这两个数量曾经被写成一个 `15` ⇒
+ *    "槽号 10..14"被当成合法的引擎格写进那张 10 格表（假造了 5 个引擎格）。
+ *    取证在 `vm.h` 的两个常量旁（构造器逐格清零 / 相邻嵌入对象基址 / 后端三条受理边界）；
+ *    这里只判"实现 == shape 声明"，⛔ 不解释语义。
+ *  ★ 路径由 CMake 注入（`EMULATOR_CXX_SHAPE_TYPES_JSON`）：它**不拷贝**进构建目录 —— 它是守卫的输入，
+ *    读不到就该红（拷贝会让人以为"文件在就算对"）。 */
+bool check_audio_slot_table() {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "audio-slots: %s\n", what);
+        return false;
+    };
+    const std::filesystem::path path(EMULATOR_CXX_SHAPE_TYPES_JSON);
+    std::ifstream in{path};
+    if (!in) {
+        std::fprintf(stderr, "audio-slots: cannot open %s\n", path.string().c_str());
+        return false;
+    }
+    nlohmann::json doc;
+    in >> doc;
+    const auto& types = doc.at("types");
+    const auto member_count = [&types](const char* type, const char* off) -> long long {
+        for (const auto& member : types.at(type).at("members")) {
+            if (member.at("off") != off) continue;
+            if (!member.contains("count") || !member.at("count").is_number_integer()) return -1;
+            return member.at("count").get<long long>();
+        }
+        return -2;
+    };
+    const auto engine_table = member_count("T_SE", "0x4bc");
+    if (engine_table < 0) return fail("shape 的 T_SE+0x4bc 不是条数有界的数组（count 缺失）");
+    if (core::Machine::kSeSlotTableSize != engine_table) {
+        return fail("实现的引擎槽表量 != shape 的 T_SE+0x4bc count");
+    }
+    // 后端的槽数组有 7 张同量（+0x51c / +0x564 / +0x5a0 / +0x5dc / +0x618 / +0x690 / +0x7f8）。
+    for (const char* off : {"0x51c", "0x564", "0x5a0", "0x5dc", "0x618", "0x690", "0x7f8"}) {
+        if (member_count("T_Sound", off) != core::Machine::kSoundSlotCount) {
+            return fail("实现的后端槽量 != shape 的 T_Sound 槽数组 count");
+        }
+    }
+    return true;
+}
+
+/** 音效三条的槽号边界：0..9 写引擎表；10..14 后端受理但引擎表外（本版只记诊断）；
+ *  ≥15 后端拒绝（装载/停止都不动表、不记请求）。 */
+bool check_audio_slot_bounds(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "audio-bounds: %s\n", what);
+        return false;
+    };
+    const auto has_error = [](const core::Machine& machine, const std::string& prefix) {
+        for (const auto& text : machine.errors()) {
+            if (text.rfind(prefix, 0) == 0) return true;
+        }
+        return false;
+    };
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0xB4, {{0, 7}, {0, 9}});   // 0：表内
+    emit_instruction(bytes, 0xB4, {{0, 8}, {0, 10}});  // 1：表外（后端受理）
+    emit_instruction(bytes, 0xB4, {{0, 9}, {0, 15}});  // 2：后端拒绝
+    emit_instruction(bytes, 0xB5, {{0, 14}});          // 3：后端受理的最后一格
+    emit_instruction(bytes, 0xB5, {{0, 15}});          // 4：后端拒绝
+    emit_instruction(bytes, 0xB6, {{0, 12}});          // 5：表外
+    emit_instruction(bytes, 0xB6, {{0, 15}});          // 6：后端拒绝
+    emit_instruction(bytes, 0xB6, {{0, 9}});           // 7：清表内那格
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(0x12345678u, table);
+    machine.load_root(bytes);
+    if (!machine.step()) return fail("0xb4 槽 9 停机");
+    if (machine.se_slot_resource(9) != 7) return fail("0xb4 槽 9 没有写表");
+    if (machine.se_load_requests() != 1) return fail("0xb4 槽 9 没有记装载请求");
+    if (!machine.step()) return fail("0xb4 槽 10 停机");
+    if (machine.se_load_requests() != 2) return fail("0xb4 槽 10 该记装载请求（后端受理）");
+    if (!has_error(machine, "se-load-slot-past-engine-table:10")) return fail("0xb4 槽 10 没有记表外诊断");
+    if (machine.se_slot_resource(9) != 7) return fail("0xb4 槽 10 动了槽 9");
+    if (!machine.step()) return fail("0xb4 槽 15 停机");
+    if (machine.se_load_requests() != 2) return fail("0xb4 槽 15 不该记装载请求（后端拒绝）");
+    if (!has_error(machine, "se-load-slot-out-of-range:15")) return fail("0xb4 槽 15 没有记越界诊断");
+    if (!machine.step()) return fail("0xb5 槽 14 停机");
+    if (machine.se_play_requests() != 1) return fail("0xb5 槽 14 没有记播放请求");
+    if (!machine.step()) return fail("0xb5 槽 15 停机");
+    if (machine.se_play_requests() != 1) return fail("0xb5 槽 15 不该记播放请求");
+    if (!machine.step()) return fail("0xb6 槽 12 停机");
+    if (machine.se_stop_requests() != 1) return fail("0xb6 槽 12 该记停止请求（后端受理）");
+    if (!has_error(machine, "se-stop-slot-past-engine-table:12")) return fail("0xb6 槽 12 没有记表外诊断");
+    if (!machine.step()) return fail("0xb6 槽 15 停机");
+    if (machine.se_stop_requests() != 1) return fail("0xb6 槽 15 不该记停止请求");
+    if (!has_error(machine, "se-stop-slot-out-of-range:15")) return fail("0xb6 槽 15 没有记越界诊断");
+    if (!machine.step()) return fail("0xb6 槽 9 停机");
+    if (machine.se_stop_requests() != 2) return fail("0xb6 槽 9 没有记停止请求");
+    if (machine.se_slot_resource(9) != 0) return fail("0xb6 槽 9 没有清表");
+    return true;
+}
+
+// ── 门字第 27 位的两条支路：`0xc2` 的"瞬间到位"与 `0xc4` 的"影片门" ──
+/** 这两条支路**合成脚本走不到**：位 27 同时是主循环要服务的"影片 / 文本请求"位，而本模型的主循环
+ *  只有第 0 / 10 / 13 位的服务分支 ⇒ 门会挡住、只报 `gate-bit-unserviced`。
+ *  于是它们长期只有"按取证写了"的注释、没有行为级守卫（两条都登记成了残差）。
+ *  ★ 这里用 `dispatch_for_test()`（门外直派）分别喂两条支路 —— ⛔ 不是放宽门，门本身的行为另有守卫
+ *    （`gate-stalled` / `0x19c` 那条）。第 27 位由谁服务仍然未取证（仍是残差）。 */
+bool check_gate_split_branches(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "gate-branches: %s\n", what);
+        return false;
+    };
+    constexpr std::uint32_t kMovieGateBit = 1u << 27;
+
+    // ① `0xc2` A 支（第 27 位 = 1）：目标 ← op1、步长 ← op2、**瞬间到位**（进度 = 目标）、
+    //    **不动第 9 位**、不读混音配置、不写间隔。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.state_flags_mut() |= kMovieGateBit;
+        core::Instruction instruction{0, 0xC2, {{0, 7000}, {0, 250}}};
+        machine.dispatch_for_test(instruction);
+        if (machine.bgm_fade_target() != 7000) return fail("0xc2 A 支没有写目标值（op1）");
+        if (machine.bgm_fade_step() != 250) return fail("0xc2 A 支没有写步长（op2）");
+        if (machine.bgm_fade_progress() != 7000) return fail("0xc2 A 支没有瞬间到位（进度应 = 目标）");
+        if (machine.bgm_fade_requests() != 1) return fail("0xc2 A 支没有记一次淡变请求");
+        if (machine.bgm_fade_active()) return fail("0xc2 A 支动了第 9 位（规范：这一支不进淡变状态）");
+        if (machine.bgm_fade_mix_mode() != 0) return fail("0xc2 A 支读了混音配置（规范：只在 B 支读）");
+        if (machine.bgm_fade_interval_ms() != 0) return fail("0xc2 A 支写了间隔（规范：只在 B 支写）");
+        // 门字本身不被这条改动（A 支对第 9 位"没有写动作"，也没清第 27 位）。
+        if ((machine.state_flags() & kMovieGateBit) == 0) return fail("0xc2 A 支把第 27 位清掉了");
+        if (machine.state_flags() != kMovieGateBit) return fail("0xc2 A 支改了门字的其它位");
+    }
+
+    // ② `0xc4` 影片门支（第 27 位 = 1）：只把 op1 写进镜像格、**不发装载 / 播放请求**、
+    //    但**仍然追加文本记录**、并且照样压低 BGM。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.state_flags_mut() |= kMovieGateBit;
+        core::Instruction instruction{0, 0xC4, {{0, 777}}};
+        machine.dispatch_for_test(instruction);
+        if (machine.voice_mirror_resource(0) != 777) return fail("0xc4 影片支没有把 op1 写进镜像资源格");
+        if (machine.voice_mirror_a4(0) != 0) return fail("0xc4 影片支写的镜像第二格不是 0");
+        if (machine.voice_play_requests() != 0) return fail("0xc4 影片支仍发了播放请求");
+        if (machine.voice_load_requests() != 0) return fail("0xc4 影片支仍发了装载请求");
+        if (!machine.bgm_ducked()) return fail("0xc4 影片支没有压低 BGM");
+        if (machine.text_span_count() != 1) return fail("0xc4 影片支没有追加文本记录（规范：仍然追加）");
+        if (machine.text_span_resource(0) != 777) return fail("0xc4 影片支的记录没有带 op1");
+        if (machine.text_span_flags(0) != 0x40000000) return fail("0xc4 影片支的记录 flags 不是 0x40000000");
+        if (machine.text_span_voice_slot(0) != 0) return fail("0xc4 影片支的记录配音槽不是 0");
+    }
+
+    return true;
+}
+
+// ── 两套字号：`0x75` = A 支（`0x204` 用）、`0x197` = B 支（记录绘制用） ──
+/** 这条专门守"字号跟错格"这一类错：A 支缺省 24、B 支缺省 8、互不覆盖；`0x204` 用的必须是 A 支。
+ *  ★ 历史：模型曾把 `0x75` 当"行高"、`0x197` 当"字形高度"，于是配置界面按 B 支的 10 画（帮助文字"极小"）。
+ *  证据见 `vm.h` 里两个格的注释（EA 锚都在那里）。 */
+bool check_font_branches(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "font-branches: %s\n", what);
+        return false;
+    };
+    // ⑫ 0x75 / 0x197 是**两套字号**：A 支（0x75，缺省 24，`0x204` 出字形用它）/ B 支（0x197，缺省 8，
+    //    跨度绘制路径才用），互不覆盖；0x197 还把十个文本槽一起写。
+    //    ★ 历史教训：以前把 0x75 当"行高"、0x197 当"字形高度" ⇒ 配置界面里 `0x75(20)` 后 `0x197(10)`，
+    //      0x204 就按 10 画（帮助文字"极小"）。取证见 `vm.h` 两个格的注释（EA 都在那里）。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x197, {{0, 10}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (machine.glyph_height() != 24) return fail("A 支字号缺省应当是 24（引擎初值 0x18）");
+        if (machine.font_b_height() != 8) return fail("B 支字号缺省应当是 8");
+        if (!machine.step()) return fail("0x75 停机");
+        if (machine.glyph_height() != 20) return fail("0x75 没有写 A 支字号（0x204 用的就是它）");
+        if (machine.font_b_height() != 8) return fail("0x75 顺带改了 B 支字号（两支应当互不覆盖）");
+        if (!machine.step()) return fail("0x197 停机");
+        if (machine.font_b_height() != 10) return fail("0x197 没有写 B 支字号");
+        for (std::size_t i = 0; i < core::Machine::text_slot_count(); ++i) {
+            if (machine.text_slot_glyph_height(i) != 10) return fail("0x197 没有把十个文本槽一起写");
+        }
+        if (machine.glyph_height() != 20) {
+            return fail("0x197 把 0x204 用的 A 支字号改掉了（配置界面的帮助文字会因此变小）");
+        }
+    }
+    return true;
+}
+
+int main(int argc, char** argv) {
+    // `--only-audio`：只跑音效 / 配音那条子集（供一条**独立注册**的 CTest 用）。
+    // ★ 为什么要单独一个用例：spec 的证据要求"点得到某条用例"，而聚合的自检只有一个名字 ——
+    //   子集用例让"音效槽量 / 两条门位分支"的回归有一个**能被点名的**失败入口。
+    bool only_audio = false;
+    bool only_font = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
+        else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
+        else {
+            // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
+            std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
     try {
         // CP932 → UTF-8：引擎字符串/路径是 ANSI 字节，显示与宿主路径必须先解码。
         if (core::cp932_to_utf8("\x82\xA0") != "\xE3\x81\x82") {  // 「あ」
@@ -3053,6 +3228,21 @@ int main() {
             table = core::OpcodeTable::load_from_file(table_path);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "opcode table load failed, using fixture rows: %s\n", e.what());
+        }
+
+        if (only_font) {
+            // 两套字号（`0x75` = A 支 / `0x197` = B 支）+ 选支的行为级断言。
+            if (!check_font_branches(table)) return 1;
+            std::printf("core-selftest(font): PASS\n");
+            return 0;
+        }
+        if (only_audio) {
+            // 音效槽（后端 15 / 引擎表 10）+ 门位第 27 位的两条支路（`0xc2` A 支 / `0xc4` 影片门支）。
+            if (!check_audio_slot_table()) return 1;
+            if (!check_audio_slot_bounds(table)) return 1;
+            if (!check_gate_split_branches(table)) return 1;
+            std::printf("core-selftest(audio): PASS\n");
+            return 0;
         }
 
         std::string error;
@@ -4423,6 +4613,10 @@ int main() {
         if (!check_slot_imgid(table)) return 1;
         if (!check_texture_size(table)) return 1;
         if (!check_exit_script(table)) return 1;
+        if (!check_audio_slot_table()) return 1;
+        if (!check_audio_slot_bounds(table)) return 1;
+        if (!check_gate_split_branches(table)) return 1;
+        if (!check_font_branches(table)) return 1;
 
         std::printf(
             "core-selftest: PASS (alf files=%zu, script body=%zu, instructions=%zu, opcode table=%zu)\n",

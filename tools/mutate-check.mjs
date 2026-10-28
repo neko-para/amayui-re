@@ -1561,10 +1561,10 @@ const MUTATIONS = [
   // ── 章首「本章 N 条规则」与 `<!-- rule:` 标记数同一份账（★ 只改声明、不改标记 ⇒ 章首计数立刻对不上）──
   {
     file: 'data/spec/chapters/65-save.md',
-    from: '本章 8 条规则。',
-    to: '本章 7 条规则。',
+    from: '本章 9 条规则。',
+    to: '本章 8 条规则。',
     guard: 'tools/test/spec-gaps.test.mjs',
-    what: '★ 章首声明「本章 7 条规则」而文件里仍有 8 个 <!-- rule: --> 标记 ⇒ 章首计数与规则标记不是同一份账（spec-gaps 的章首规则计数必须红）',
+    what: '★ 章首声明「本章 8 条规则」而文件里仍有 9 个 <!-- rule: --> 标记 ⇒ 章首计数与规则标记不是同一份账（spec-gaps 的章首规则计数必须红）',
   },
   // ── 0x000–0x0FF 段新增规则的站点锚：`0x8c` 的 handler 起点偏移一格 ⇒ 锚落到指令中间 ──
   {
@@ -2898,6 +2898,25 @@ const MUTATIONS = [
     guard: 'tools/test/spec.test.mjs',
     what: 'CTest 的档位退化成"一律 pure" ⇒ 装机流程里的用例被当成默认门禁会跑，撑起了 reviewed',
   },
+  // ── 音效槽：引擎表 **10** 格 vs 后端 **15** 个槽（★ 合成一个 15 ⇒ 凭空多出 5 个引擎格）──
+  //   ★ 配套的 C++ 侧守护在 `emulator-core-selftest`（`check_audio_slot_table` / `check_audio_slot_bounds`）；
+  //     这条变异打的是**跨源判据**（shape ↔ 实现 ↔ spec 的 storage 指针）。
+  {
+    file: 'apps/emulator-cxx/src/core/vm.h',
+    from: '    static constexpr int kSeSlotTableSize = 10;',
+    to: '    static constexpr int kSeSlotTableSize = 15;',
+    guard: 'tools/test/emulator-cxx-audio-slots.test.mjs',
+    what: '引擎的槽表量写成后端的 15 ⇒ "槽号 10..14 装着什么"变成可读，而引擎里根本没有那 5 格',
+  },
+  // ── 注释里引用的规范条目 id 必须存在（★ 实测两次：`0xb6` 引了一条不存在的 `CORE-OPS-AUDIO-SE-STOP`，
+  //    并据此写下了"规范：不清"的断言；帧族把 `CORE-OPS-FRAME-*` 写成 `CORE-FRAME-*`）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
+    from: '规则 `CORE-OPS-AUDIO-WAV`）',
+    to: '规则 `CORE-OPS-AUDIO-WAV-SLOT`）',
+    guard: 'tools/test/spec-rule-refs.test.mjs',
+    what: '注释指向一条不存在的规范条目 ⇒ 读者把"注释说有这条规范"当成证据',
+  },
 
 ];
 
@@ -2940,7 +2959,9 @@ export function main(argv = process.argv.slice(2)) {
     const abs = path.join(ROOT, m.file);
     const before = fs.readFileSync(abs, 'utf8');
     if (!before.includes(m.from)) {
-      results.push({ ...m, verdict: '⚠ 变异点没找到（源文件已变？先更新清单）', ok: false });
+      // ★ 这不是"守卫没抓住"，而是**清单过期**：`from` 已经不在源文件里 ⇒ 这次自检什么也没验到。
+      //   必须与"守卫没红"分开报 —— 否则真实症状（清单没跟上源文件）会被读成"守卫是假的"。
+      results.push({ ...m, verdict: '⚠ 变异点没找到（源文件已变 ⇒ 清单过期）', ok: false, stale: true });
       continue;
     }
     fs.writeFileSync(abs, before.replace(m.from, m.to));
@@ -2989,19 +3010,26 @@ export function main(argv = process.argv.slice(2)) {
 
   console.log('守卫自检（改坏一处常量 ⇒ 指定守卫是否当场红）：\n');
   for (const r of results) console.log(`  ${r.verdict}  ${r.what}`);
-  const failed = results.filter((r) => !r.ok && !r.unverifiable);
+  const stale = results.filter((r) => r.stale);
+  const failed = results.filter((r) => !r.ok && !r.unverifiable && !r.stale);
   const unver = results.filter((r) => r.unverifiable);
-  console.log(`\n${results.length - failed.length - unver.length}/${results.length} 条按预期变红${unver.length ? ` · ${unver.length} 条**无法判定**（守卫在本机 skip ⇒ 不能算"没红"）` : ''}。`);
+  console.log(`\n${results.length - failed.length - unver.length - stale.length}/${results.length} 条按预期变红${unver.length ? ` · ${unver.length} 条**无法判定**（守卫在本机 skip ⇒ 不能算"没红"）` : ''}。`);
   if (unver.length) {
     console.log('⏭ 这些守卫在**本机**跑不起来（不是"没抓住"）—— 要它有意义就得先备齐它的语料/资产：');
     for (const u of unver) console.log(`  - ${u.what}（${u.guard}）：${u.ran.skipReason ?? '（无原因）'}`);
+  }
+  if (stale.length) {
+    console.error('⚠ 这些变异的**施加点已经不存在**（源文件改过 ⇒ 清单过期，等于什么也没验到）：');
+    for (const s of stale) {
+      console.error(`  - ${s.file}：找不到 ${JSON.stringify(s.from)}（本该由 ${s.guard} 抓）`);
+    }
   }
   if (failed.length) {
     console.error('★ 这些守卫**没抓住**已知的破坏 ⇒ 它们不是"会红的守卫"（断言恒真？或压根没验那个常量）：');
     for (const f of failed) console.error(`  - ${f.what}（${f.guard}）`);
     return 1;
   }
-  return 0;
+  return stale.length ? 1 : 0;
 }
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
