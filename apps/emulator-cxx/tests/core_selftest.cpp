@@ -8,6 +8,7 @@
 #include "core/opcode_table.h"
 #include "core/scene_raster.h"
 #include "core/script.h"
+#include "core/text_alpha.h"
 #include "core/text_raster.h"
 #include "core/vm.h"
 
@@ -3157,6 +3158,201 @@ bool check_font_branches(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── 字形 AA 档：格式选择 + 灰度级换算（引擎是 17 / 65 级，⛔ 不是 2^n） ──
+/** 这条守"文字亮度"的**算术**那一半。
+ *  · 格式只看三个配置格：总开关 `set:EnableAntiFont` 与子开关 `message:UseAntiFont` 都非 0 才开；
+ *    级数 `message:AntiFontLevel` == 1 ⇒ 8 位，其余 ⇒ 4 位。任一为 0 ⇒ 1 位掩码。
+ *  · 灰度级换算按引擎 `0x46DAAF` / `0x46DA9C`：`值 × 255 / 17`、`值 × 255 / 65`
+ *    ⇒ **满覆盖 alpha = 240 / 251**，不是 255。
+ *  ★ 历史：宿主回退（FreeType）曾经完全无视这三个格 ⇒ 满覆盖 255 ⇒ 设置界面文字比真机**亮一档**
+ *    （与"配置根读成漫游、AA 开关根本没打开"是两件事，两条都要对）。 */
+bool check_glyph_alpha() {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "glyph-alpha: %s\n", what);
+        return false;
+    };
+    // ① 格式选择
+    if (core::glyph_format(true, true, 0) != core::GlyphFormat::Gray4) {
+        return fail("开关都开、级数 0 ⇒ 应当是 GRAY4（4 位）");
+    }
+    if (core::glyph_format(true, true, 1) != core::GlyphFormat::Gray8) {
+        return fail("级数 1 ⇒ 应当是 GRAY8（8 位）");
+    }
+    if (core::glyph_format(true, true, 2) != core::GlyphFormat::Gray4) {
+        return fail("级数只有 == 1 才是 8 位");
+    }
+    if (core::glyph_format(false, true, 0) != core::GlyphFormat::Mono ||
+        core::glyph_format(true, false, 0) != core::GlyphFormat::Mono) {
+        return fail("任一开关为 0 ⇒ 应当是 1 位掩码（⛔ 不是灰度）");
+    }
+
+    // ② 原始级数 → alpha（引擎同式）：17 级满覆盖 240、65 级满覆盖 251
+    if (core::level_to_alpha(0, core::kGray4Levels) != 0) return fail("级数 0 应当是透明");
+    if (core::level_to_alpha(16, core::kGray4Levels) != 240) {
+        return fail("GRAY4 满覆盖应当是 240（值 × 255 / 17）；得 255 说明按 16 级算了");
+    }
+    if (core::level_to_alpha(64, core::kGray8Levels) != 251) {
+        return fail("GRAY8 满覆盖应当是 251（值 × 255 / 65）；得 255 说明按 64 级算了");
+    }
+
+    // ③ 连续覆盖率 → 量化后 alpha：GRAY4 只能是 15 的倍数、上限 240；GRAY8 上限 251
+    int previous = -1;
+    for (int coverage = 0; coverage <= 255; ++coverage) {
+        const int gray4 = core::coverage_to_alpha(coverage, core::kGray4Levels);
+        if (gray4 > 240) return fail("GRAY4 量化后的 alpha 超过 240（满覆盖会比真机亮）");
+        if (gray4 % 15 != 0) return fail("GRAY4 量化后的 alpha 不是 15 的倍数（级数写错了）");
+        if (gray4 < previous) return fail("量化不是单调的");
+        previous = gray4;
+        const int gray8 = core::coverage_to_alpha(coverage, core::kGray8Levels);
+        if (gray8 > 251) return fail("GRAY8 量化后的 alpha 超过 251");
+    }
+    if (core::coverage_to_alpha(255, core::kGray4Levels) != 240) {
+        return fail("满覆盖率在 GRAY4 下应当是 240（真机偏暗的来源）");
+    }
+    return true;
+}
+
+// ── 文字亮度那条链的**端到端**那一半：AA 关 ⇒ 最大 alpha 255；AA 开（GRAY4）⇒ 240 ──
+/** 同一个场景各画一次，唯一变量是三个 AA 配置格。判据 = 文本层画布里的**最大 alpha** 与**墨迹 RGB**：
+ *  · 关 ⇒ 1 位掩码 ⇒ 覆盖像素全是 255（且源色原值）；
+ *  · 开 ⇒ GRAY4 的 17 级 ⇒ 满覆盖 240，**RGB 仍是源色原值**（真机在空画布上走"整像素覆写"支，
+ *    ⛔ 不是"与黑色加权" —— 后者会把 AA 边缘压成 α 倍、字更细更暗）。
+ *  ★ 这条把"配置 → 格式 → 级换算 → 覆写/加权"整条链钉在一起：只改其中一环（回退路径又无视
+ *   `message:UseAntiFont`、把 17 改回 16、把"目标 alpha=0"实现成加权）都会让本条变红。 */
+bool check_glyph_brightness(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "glyph-brightness: %s\n", what);
+        return false;
+    };
+    if (!core::text_backend_available()) return true;  // 没编文本后端 ⇒ 这条不成立（不是失败）
+
+    // 返回 {最大 alpha, 墨迹里最小的 RGB 通道}；-1 表示画布没建出来。
+    const auto draw_and_probe = [&](bool anti_alias) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 824}, {0, 120}, {0, 324}, {0, 570}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 108}, {0, 52}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 180500}, {0, 500}});
+        emit_instruction(bytes, 0x75, {{0, 30}});
+        emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});  // 主色 = 白（墨迹应当就是 FF FF FF）
+        emit_instruction(bytes, 0x77, {{0, 0x000000}});
+        emit_instruction(bytes, 0x78, {{0, 0}});  // 绘制模式 0 ⇒ 只画主色一遍（每像素只写一次）
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x196, {{0, 0}, {5, 0}, {5, 1}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.config_mut().set_int("set:EnableAntiFont", 1);
+        machine.config_mut().set_int("message:UseAntiFont", anti_alias ? 1 : 0);
+        machine.config_mut().set_int("message:AntiFontLevel", 0);  // ⇒ GRAY4
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.write_text(core::Operand{5, 1}, "");
+        machine.load_root(bytes);
+        for (int i = 0; i < 11; ++i) {
+            if (!machine.step()) break;
+        }
+        const core::TextureRecord* texture =
+            machine.texture(core::Machine::text_layer_texture_id(9));
+        if (texture == nullptr) return std::pair<int, int>{-1, -1};
+        int best_alpha = 0;
+        int worst_rgb = 255;
+        for (std::size_t i = 0; i + 3 < texture->rgba.size(); i += 4) {
+            const int alpha = texture->rgba[i + 3];
+            if (alpha == 0) continue;
+            best_alpha = std::max(best_alpha, alpha);
+            for (std::size_t c = 0; c < 3; ++c) {
+                worst_rgb = std::min(worst_rgb, static_cast<int>(texture->rgba[i + c]));
+            }
+        }
+        return std::pair<int, int>{best_alpha, worst_rgb};
+    };
+
+    const auto mono = draw_and_probe(false);
+    const auto gray4 = draw_and_probe(true);
+    if (mono.first != 255) {
+        std::fprintf(stderr, "glyph-brightness: AA 关时最大 alpha 应当是 255（1 位掩码），实际 %d\n",
+                     mono.first);
+        return false;
+    }
+    if (gray4.first != 240) {
+        std::fprintf(stderr,
+                     "glyph-brightness: AA 开（GRAY4）时最大 alpha 应当是 240（值 × 255 / 17），实际 %d\n",
+                     gray4.first);
+        return false;
+    }
+    // ★ 空画布上的第一次写入是**整像素覆写**（引擎 `0x46DDD5`）⇒ 墨迹 RGB 必须是源色原值。
+    //   坏法：与黑色加权 ⇒ 满覆盖 240 处 RGB = FF×240/255 = F0、AA 边缘更暗（字变细变暗）。
+    if (gray4.second != 255) {
+        std::fprintf(stderr,
+                     "glyph-brightness: AA 开时墨迹 RGB 被压暗了（最小通道 = %d，期望 255）"
+                     "—— 空画布上的首次写入必须是整像素覆写，不是与黑色加权\n",
+                     gray4.second);
+        return false;
+    }
+    return true;
+}
+
+// ── 玩家配置的根与保存闸（引擎用**本地**应用数据目录，⛔ 不是漫游） ──
+/** 这条守"配置根选错"这一类错 —— 它的后果不是报错，而是**读到另一个世界**的配置
+ *  （字体名 / AA 开关 / 消息速度全是另一份值），以及把我们的退时保存写进真机那份文件。
+ *  · `set:UseAppDataFolder != 0` ⇒ `%LOCALAPPDATA%`；两个候选都给时**必须**选本地那个；
+ *    只有漫游候选时⛔ 不许回退过去（宁可留在安装目录）。
+ *  · 保存闸：真实玩家配置（落在解析出来的根里面）**默认不写**，要写得显式指路。 */
+bool check_config_paths() {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "config-paths: %s\n", what);
+        return false;
+    };
+    const std::filesystem::path local("C:/Users/x/AppData/Local");
+    const std::filesystem::path roaming("C:/Users/x/AppData/Roaming");
+    // `set:UseAppDataFolder` 的判据是**恰为 1**（spec 两处都这么写）：0 / 2 / 负数都不换根。
+    if (core::use_app_data_folder_root(0) || !core::use_app_data_folder_root(1) ||
+        core::use_app_data_folder_root(2) || core::use_app_data_folder_root(-1)) {
+        return fail("set:UseAppDataFolder 的判据不是「恰为 1」（0 / 2 / -1 都不该换根）");
+    }
+    core::ConfigRootEnvironment env;
+    env.local_app_data = local;
+    env.roaming_app_data = roaming;
+    if (core::player_config_root("E:/game", true, env) != local) {
+        return fail("两个候选都在时必须选**本地**应用数据目录（引擎不读漫游根）");
+    }
+    if (core::player_config_root("E:/game", false, env) != std::filesystem::path("E:/game")) {
+        return fail("set:UseAppDataFolder == 0 时根应当是安装目录");
+    }
+    env.local_app_data.clear();
+    if (core::player_config_root("E:/game", true, env) != std::filesystem::path("E:/game")) {
+        return fail("本地根缺失时回退到了漫游根（该值只用于诊断，不许参与选择）");
+    }
+    env.data_home = local;  // 非 Windows 的候选：同样不许是漫游那种"按用户配置"的根
+    if (core::player_config_root("E:/game", true, env) != local) {
+        return fail("XDG 数据目录没有参与选择");
+    }
+
+    // 保存闸
+    const std::filesystem::path player = local / "Eushully" / "title" / "SYS4REG.INI";
+    if (!core::path_is_within(player, local)) return fail("path_is_within 判错了前缀");
+    if (core::path_is_within(roaming / "Eushully" / "x.ini", local)) {
+        return fail("path_is_within 把根之外的路径判成在里面");
+    }
+    using Policy = core::ConfigSavePolicy;
+    if (core::should_save_player_config(player, local, false, true, Policy::Default)) {
+        return fail("默认策略写了真实玩家配置（外部只读数据）");
+    }
+    if (!core::should_save_player_config("tmp/copy.ini", local, true, true, Policy::Default)) {
+        return fail("显式指路的落点却不写（--config 是用户自己的选择）");
+    }
+    if (core::should_save_player_config(player, local, false, false, Policy::Allow)) {
+        return fail("没有发生引擎退出也写了配置");
+    }
+    if (!core::should_save_player_config(player, local, false, true, Policy::Allow)) {
+        return fail("--config-save 没有生效");
+    }
+    if (core::should_save_player_config(player, local, true, true, Policy::Never)) {
+        return fail("--no-config-save 没有生效");
+    }
+    return true;
+}
+
 // ── 文本层画布：`0x70/0x79/0x213/0x71` 的状态 + `0x6e/0x196/0x6f` 的栅格化 ──
 /** 设置界面底部示例文本的**结构级**判据（不依赖游戏安装）：
  *  · 层 9 的画布 = 纹理 29，尺寸来自 `0x70`（824×120），屏幕位置 = (324,570)；
@@ -3366,9 +3562,13 @@ int main(int argc, char** argv) {
     //   子集用例让"音效槽量 / 两条门位分支"的回归有一个**能被点名的**失败入口。
     bool only_audio = false;
     bool only_font = false;
+    bool only_glyph = false;
+    bool only_config = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
+        else if (std::strcmp(argv[i], "--only-glyph") == 0) only_glyph = true;
+        else if (std::strcmp(argv[i], "--only-config") == 0) only_config = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -3439,6 +3639,20 @@ int main(int argc, char** argv) {
             std::printf("core-selftest(font): PASS\n");
             return 0;
         }
+        if (only_glyph) {
+            // 字形格式（1 位 / GRAY4 / GRAY8）与灰度级换算（17 / 65 级 ⇒ 满覆盖 240 / 251），
+            // 外加端到端那条：AA 关 255 / 开 240。
+            if (!check_glyph_alpha()) return 1;
+            if (!check_glyph_brightness(table)) return 1;
+            std::printf("core-selftest(glyph): PASS\n");
+            return 0;
+        }
+        if (only_config) {
+            // 玩家配置的根（本地应用数据，⛔ 不是漫游）+ 退时保存的宿主闸。
+            if (!check_config_paths()) return 1;
+            std::printf("core-selftest(config): PASS\n");
+            return 0;
+        }
         if (only_audio) {
             // 音效槽（后端 15 / 引擎表 10）+ 门位第 27 位的两条支路（`0xc2` A 支 / `0xc4` 影片门支）。
             if (!check_audio_slot_table()) return 1;
@@ -3447,6 +3661,11 @@ int main(int argc, char** argv) {
             std::printf("core-selftest(audio): PASS\n");
             return 0;
         }
+
+        // 这两条不依赖游戏安装：放进**全量**自检里也会跑（子集开关只是让 CTest 点得到名字）。
+        if (!check_glyph_alpha()) return 1;
+        if (!check_glyph_brightness(table)) return 1;
+        if (!check_config_paths()) return 1;
 
         std::string error;
         const auto instructions = core::decode_instructions(
@@ -4090,9 +4309,12 @@ int main(int argc, char** argv) {
                              draw_ink(true), draw_ink(false));
                 return 1;
             }
-            // ★ 字形来源策略（§38）：无 bake ⇒ 同色 mono+1pass（alpha 0/255）、异色 默认灰度+2pass（含中间值）；
-            //   有 bake ⇒ 完全按引擎（本 fixture 无 AA 配置 ⇒ 1-bit，同色/异色都应只含 0/255）。
-            auto draw_alpha_binary = [&](bool same_color) {
+            // ★ 字形格式只看引擎的 AA 配置（§38 修订）：AA 关 ⇒ 1 位掩码（alpha 只有 0/255）；
+            //   AA 开 ⇒ 灰度（GRAY4 的 17 级 ⇒ 含中间值、满覆盖 240）。**不分同色 / 异色、也不分
+            //   字形来源** —— 格式是引擎侧的选择（`Font+0x548` / `Font+0x35584`），不是宿主观感开关。
+            //   ★ 旧口径是"同色 ⇒ Bold + 灰度 + 单趟"，它的后果是：配里关掉 AA 时我们仍画出抗锯齿、
+            //     满覆盖 255 ⇒ 设置界面文字比真机亮一档。
+            auto draw_alpha_binary = [&](bool same_color, bool anti_alias) {
                 auto script = make_script_with_body();
                 emit_instruction(script, 0x1F8, {{0, 1}, {0, 96}, {0, 48}, {0, 0}});
                 emit_instruction(script, 0x75, {{0, 20}});
@@ -4102,6 +4324,9 @@ int main(int argc, char** argv) {
                 emit_text_204(script, 1, 0, 10, cjk);
                 emit_instruction(script, 2, {});
                 core::Machine machine(0x12345678u, table);
+                machine.config_mut().set_int("set:EnableAntiFont", 1);
+                machine.config_mut().set_int("message:UseAntiFont", anti_alias ? 1 : 0);
+                machine.config_mut().set_int("message:AntiFontLevel", 0);  // ⇒ GRAY4
                 machine.load_root(script);
                 machine.run(8);
                 const core::TextureRecord* texture = machine.texture(1);
@@ -4112,20 +4337,22 @@ int main(int argc, char** argv) {
                 }
                 return true;
             };
-            // 同色默认 = Bold + 默认灰度 AA（alpha 含中间值）；`SAME_COLOR_MONO=1` 回到 mono。
-            const bool nobake_same_bold_mono = draw_alpha_binary(true);
+            const bool nobake_same_aa_off = draw_alpha_binary(true, false);
+            const bool nobake_diff_aa_off = draw_alpha_binary(false, false);
+            const bool nobake_same_aa_on = draw_alpha_binary(true, true);
+            const bool nobake_diff_aa_on = draw_alpha_binary(false, true);
+            // 对照开关 `SAME_COLOR_MONO`：AA 开着也强制 1 位（观感对比用，不改变配置语义）。
 #ifdef _WIN32
             _putenv_s("EMULATOR_CXX_SAME_COLOR_MONO", "1");
 #else
             setenv("EMULATOR_CXX_SAME_COLOR_MONO", "1", 1);
 #endif
-            const bool nobake_same_mono = draw_alpha_binary(true);
+            const bool nobake_same_mono = draw_alpha_binary(true, true);
 #ifdef _WIN32
             _putenv_s("EMULATOR_CXX_SAME_COLOR_MONO", "");
 #else
             unsetenv("EMULATOR_CXX_SAME_COLOR_MONO");
 #endif
-            const bool nobake_diff_mono = draw_alpha_binary(false);
             const std::filesystem::path atlas_path =
                 std::filesystem::temp_directory_path() / "amayui-atlas-selftest.stub";
             { std::ofstream(atlas_path) << 'x'; }
@@ -4134,7 +4361,7 @@ int main(int argc, char** argv) {
 #else
             setenv("EMULATOR_CXX_GLYPH_ATLAS", atlas_path.string().c_str(), 1);
 #endif
-            const bool bake_diff_mono = draw_alpha_binary(false);
+            const bool bake_diff_mono = draw_alpha_binary(false, false);
             // ★ 绘制模式 3 的副色趟 = **径向一圈**（1px），不是斜向光晕。
             //   引擎 `sub_471180` 的模式 3 支（`0x471A4A..0x471AFD`）+ `sub_46ECC0`：
             //   `step = 360 / (sqrt(off_x + off_y) * 8)`（`dbl_526A98=8.0` / `dbl_526A90=360.0`）
@@ -4301,8 +4528,8 @@ int main(int argc, char** argv) {
                     if (aa_ink == 0 || !has_partial || max_alpha < 200 || !multiple_of_15) {
                         std::fprintf(stderr,
                                      "0x204 GDI 的 GRAY4 档不对：ink=%zu 有中间值=%d max_alpha=%d "
-                                     "全是 15 的倍数=%d（引擎 ÷17 ⇒ alpha ∈ 0,15,…,255；"
-                                     "把原始值直接当 alpha ⇒ 16；×255÷16 ⇒ 31/47…）\n",
+                                     "全是 15 的倍数=%d（引擎 ÷17 ⇒ alpha ∈ 0,15,…,240；"
+                                     "把原始值直接当 alpha ⇒ 16；×255÷16 ⇒ 满覆盖 255、真机偏暗）\n",
                                      aa_ink, has_partial ? 1 : 0, max_alpha,
                                      multiple_of_15 ? 1 : 0);
                         return 1;
@@ -4316,10 +4543,23 @@ int main(int argc, char** argv) {
             unsetenv("EMULATOR_CXX_GLYPH_ATLAS");
 #endif
             { std::error_code ignored; std::filesystem::remove(atlas_path, ignored); }
-            if (nobake_same_bold_mono || !nobake_same_mono || nobake_diff_mono || !bake_diff_mono) {
+            if (!nobake_same_aa_off || !nobake_diff_aa_off || !bake_diff_mono) {
                 std::fprintf(stderr,
-                             "0x204 glyph profile: nobake_same_mono=%d nobake_diff_mono=%d nobake_same_bold_mono=%d bake_diff_mono=%d\n",
-                             nobake_same_mono, nobake_diff_mono, nobake_same_bold_mono, bake_diff_mono);
+                             "0x204 AA 关却没走 1 位掩码：same_off=%d diff_off=%d bake_diff=%d"
+                             "（配置关掉抗锯齿 ⇒ 字形只能是 0/255；回退路径又无视配置 ⇒ 会变亮）\n",
+                             nobake_same_aa_off ? 1 : 0, nobake_diff_aa_off ? 1 : 0,
+                             bake_diff_mono ? 1 : 0);
+                return 1;
+            }
+            if (nobake_same_aa_on || nobake_diff_aa_on) {
+                std::fprintf(stderr,
+                             "0x204 AA 开却没出灰度：same_on=%d diff_on=%d"
+                             "（配置打开抗锯齿 ⇒ 应当有中间 alpha，且满覆盖 240 而不是 255）\n",
+                             nobake_same_aa_on ? 1 : 0, nobake_diff_aa_on ? 1 : 0);
+                return 1;
+            }
+            if (!nobake_same_mono) {
+                std::fprintf(stderr, "0x204 SAME_COLOR_MONO 对照开关没有强制 1 位\n");
                 return 1;
             }
             // ★ 纹理版本号必须**严格单调递增**：窗口路径的 GPU 纹理缓存按 revision 命中。

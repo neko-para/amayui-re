@@ -205,6 +205,11 @@ struct InstallRunOptions {
     bool skip_logo = false;
     std::string input_script;    // 空 = 没有输入设备（与窗口路径的取舍一致）
     bool headless = false;       // true = `--play-headless`：不开窗、按仿真节拍推进
+    // 退出时写玩家配置的宿主闸（见 `core::should_save_player_config`）：
+    //   缺省 = 只在"解析出来的根之外"的路径上写（真实玩家配置 / 安装目录都不写）；
+    //   `--config <副本>` 显式指路 ⇒ 写那一份；`--config-save` 强制写；`--no-config-save` 强制不写。
+    bool force_config_save = false;
+    bool no_config_save = false;
     HeadlessPlayOptions headless_play;
 };
 

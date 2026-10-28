@@ -57,6 +57,44 @@ private:
     std::vector<IniKey> persist_;
 };
 
+// 玩家配置文件的根目录候选（宿主把环境填进来；核心**不**碰环境变量，因此这条可纯测）。
+//
+// ★ 引擎的根是**本地**应用数据目录（`%LOCALAPPDATA%`），⛔ 不是漫游（`%APPDATA%`）。
+//   判据是实测路径：真机把 `SYS4REG.INI` 与 `SAVE/` 都写在
+//   `%LOCALAPPDATA%\Eushully\<标题>\` 下；漫游根下的那份是**别的进程**写的，引擎从不读它。
+//   ⇒ 字段 `roaming_app_data` **只用于诊断打印**，选择逻辑一次都不读它（守卫见自检）。
+struct ConfigRootEnvironment {
+    std::filesystem::path local_app_data;   // Windows：`%LOCALAPPDATA%`
+    std::filesystem::path roaming_app_data;  // Windows：`%APPDATA%`（⛔ 不参与选择）
+    std::filesystem::path data_home;         // 非 Windows：`$XDG_DATA_HOME`
+    std::filesystem::path home;              // 非 Windows：`$HOME`
+};
+
+// `set:UseAppDataFolder` 的判据：**恰为 1** 才把根换成应用数据目录（0 / 2 / 负数都算"不换"）。
+// ★ 与存档目录的根同一条口径（spec 的「窗口与呈现」配置根、「存档」目录两处都写"恰为 1"）。
+constexpr bool use_app_data_folder_root(std::int32_t value) { return value == 1; }
+
+// 玩家配置文件的根：`set:UseAppDataFolder` 恰为 1 ⇒ 本地应用数据目录；否则安装目录。
+// 候选目录一个都没有 ⇒ 留在安装目录（⛔ 不回退到漫游根）。
+std::filesystem::path player_config_root(const std::filesystem::path& install_root,
+                                         bool use_app_data_folder,
+                                         const ConfigRootEnvironment& env);
+
+// 保存的宿主安全闸策略。`Default` = 只在**不是**真实玩家配置时才写。
+enum class ConfigSavePolicy { Default, Allow, Never };
+
+// `path` 是否落在 `root` 里面（按路径分量比较，不碰文件系统 ⇒ 可纯测）。
+bool path_is_within(const std::filesystem::path& path, const std::filesystem::path& root);
+
+// 退出时要不要把配置写回玩家文件。
+// ★ `save_requested` = 引擎退出（窗口关闭 / 某个引擎停因）确实发生了（spec 的
+//   `CORE-CONFIG-EXIT-SAVE`）；本函数只回答"**宿主**允不允许真的去写那个路径"。
+//   真实玩家配置是**外部只读数据**（`AGENTS.md` §8）：默认不写，要写必须显式指路
+//   （`--config <副本>` 或 `--config-save`）。
+bool should_save_player_config(const std::filesystem::path& player_path,
+                               const std::filesystem::path& config_root, bool explicit_config_path,
+                               bool save_requested, ConfigSavePolicy policy);
+
 // 引擎配置库：命名键表 + 脚本键表。发行默认表与玩家文件都只写命名键表。
 class ConfigStore {
 public:

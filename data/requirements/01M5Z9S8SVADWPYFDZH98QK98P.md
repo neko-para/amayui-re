@@ -2,33 +2,28 @@
 
 - id: REQ-01M5Z9S8SVADWPYFDZH98QK98P
 - type: spike
-- status: open
+- status: dropped
 - parent: REQ-01M5BK8QMQYK7XQG707YVMQ202
+- dropped_reason: 用户口径（2026-10-28）：AGERC 明确不实现，视为外部系统（插件桥 = 平台边界，不是引擎语义）
 
-## 结论（本机可落地，缺一个决定）
+## 决定（2026-10-28，用户口径）
 
-`0x14b` / `0x14c` / `0x14d` **不是存档 IO**，是 **AGERC 插件桥**：
+**AGERC 不实现，视为外部系统。**
 
-| opcode | handler | argc | 语义 |
-|---|---|---|---|
-| `0x14b` | `sub_4229D0` | 1 | op1 = **install 统一文件 id** → 路径 → `LoadLibraryA`（先 FreeLibrary 旧句柄），句柄存引擎一格 |
-| `0x14c` | `422AB0` | 2 | op2 按**文本**读 → `GetProcAddress`；**解析成功后**才读 op1；0..99 之外抛 |
-| `0x14d` | `sub_430170` | 6 | op1 → 函数格（**无越界检查**）→ 5 实参调用；op3 数组 `DEC → call → ENC`；op2 ← 返回值 |
+`0x14b` / `0x14c` / `0x14d` 是**插件桥**（`LoadLibraryA` / `GetProcAddress` / 按下标调导出），
+不是存档 IO，也不是本仓要重实现的引擎语义。三条的接收者是一个**外部模块**（`AGERC.DLL`，PE i386）；
+`AGERC.DLL` 的**内容**不在本仓范围内（它自己的重建另有单，且已 `dropped`）。
 
-三条各只出现 1 次，全在 `SAVE.BIN`（install id 51）开头的 dword 5/8/13，调 `_SetNameLenMax@20`。
-`0x1a0` **不是**它们的前置（`0x1a0` 是"只读 292 字节头"的读侧指令，argc 9，三态 0/1/2）——
-本节点原记录里"撞 0x1a0 seam"的时序是反的。
+## 落点（规范侧怎么摆）
 
-## 缺的决定
+- 这三条在 spec 里属于**平台边界**：只写"把工作交给外部模块的哪个导出"，**不写**那个模块内部做什么。
+  与「平台 API 是 spec 的边界」同一口径（渲染 / 窗口 / 声音请求都是这样摆的）。
+- 模拟器侧：**不实现**，落到"未实现指令"是**可接受**的终态（不是欠账）；若将来某条脚本真的走到它，
+  应当**响亮失败**（`opcode-not-implemented`），而不是静默跳过。
+- ⛔ 不要为它们造 32 位 shim / 子进程：那是在重实现一个明确排除的系统。
 
-`AGERC.DLL` 是 **PE i386**，而 `emulator-cxx` 预设是 x64 ⇒ 真 `LoadLibrary` 装不进 x64 进程。三选一：
+## 已完成
 
-- **A（推荐）**：核心定一个 `ModuleHost`（load / resolve / call）注入 seam，平台实现**明确拒绝**并给诊断
-  ⇒ 三条当场可收口，行为也与"x64 宿主上模块装不进来"的事实一致；
-- **B**：按名字建模唯一导出（`_SetNameLenMax@20` 的体 = `*(u32*)DLLglobal = a2[0]; return 0;`）⇒ 能跑但**不是**引擎语义；
-- **C**：32 位 shim / 子进程 ⇒ 只有这条要真机或 32 位工具链。
-
-## 现状
-
-`apps/emulator-cxx` 里三条**无 case、无 handler、无 TODO** ⇒ 走到 `SAVE.BIN` dword 5 就抛
-`opcode-not-implemented:0x14b`。当前没有流程会走到那里（除非真存档 / 真读档路径被启用）。
+- 需求树：本条按本决定 `dropped`。
+- 取证结论留在 `.tmp/forensics/save-0x14b-0x14d.md`（handler / argc / 读序 / 失败分支 / 唯一调用点），
+  将来若要重开，从那里起。

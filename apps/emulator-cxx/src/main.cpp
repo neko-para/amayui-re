@@ -71,6 +71,10 @@ int main(int argc, char** argv) {
             options.input_script = argv[++i];
         } else if (std::strcmp(argv[i], "--play-headless") == 0) {
             options.headless = true;
+        } else if (std::strcmp(argv[i], "--config-save") == 0) {
+            options.force_config_save = true;
+        } else if (std::strcmp(argv[i], "--no-config-save") == 0) {
+            options.no_config_save = true;
         } else if (std::strcmp(argv[i], "--expect-script") == 0 && i + 1 < argc) {
             options.headless_play.expect_script =
                 static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
@@ -141,7 +145,8 @@ int main(int argc, char** argv) {
     if (!smoke) {
         std::fprintf(stderr,
                      "用法：emulator-cxx --install <dir> [--play-frames N] [--trace N] [--footprint] "
-                     "[--skip-logo] [--stop-at <opcode>] [--config <SYS4REG.INI>]\n"
+                     "[--skip-logo] [--stop-at <opcode>] [--config <SYS4REG.INI>] "
+                     "[--config-save|--no-config-save]\n"
                      "      emulator-cxx --install <dir> --render-logo-gpu <dir> "
                      "[--logo-stride N] [--logo-frames N]\n"
                      "      emulator-cxx --install <dir> --play-headless [--input-script <file>] "

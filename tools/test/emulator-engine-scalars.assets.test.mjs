@@ -115,8 +115,12 @@ test('★★ 条件位副作用：`0x88` 真支写常量 1 / 假支清 bit27、`
   const c = of(0x88, 'op1==0');
   assert.equal(at(0x41faf0), `and dword ptr [esi+${idaHex(c.dword * 4)}], ${idaHex(~c.mask)}`,
     '假支那条 `and [esi+0AAB44h], 0F7FFFFFFh` 与知识层的 dword/mask 不再一致');
-  // ③ `0x71`：置**同一位**
-  const s = of(0x71, 'always');
+  // ③ `0x71`：置**同一位**；★ 而且它**不是无条件**的 —— 两个门逐字对
+  const s = of(0x71, 'ReadTextSkip!=0 && marked(file,pos)');
+  assert.equal(at(0x41ee31), 'jz loc_41EEC9',
+    '`0x71` 的第一道门（配置键 message:ReadTextSkip == 0 就跳过置位）不见了 —— 这正是一条"无条件置位"的实现会漏掉的那一步');
+  assert.equal(at(0x41ee8b), 'jz short loc_41EEAF',
+    '`0x71` 的第二道门（"已标记"查表结果为 0 就跳过置位）不见了');
   assert.equal(at(0x41ee8d), `or dword ptr [ebx+${idaHex(s.dword * 4)}], ${idaHex(s.mask)}`,
     '`0x71` 那条 `or [ebx+0AAB44h], 8000000h` 与知识层的 dword/mask 不再一致');
   // ④ 成对：同一格、同一位（"两条合起来才构成这个位的来去"）

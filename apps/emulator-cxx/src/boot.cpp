@@ -31,6 +31,24 @@
 #endif
 namespace app {
 
+namespace {
+#ifdef _WIN32
+// 环境变量 → 路径（`%LOCALAPPDATA%` 等）。取不到 ⇒ 空路径（调用方回退）。
+std::filesystem::path environment_path(const wchar_t* name) {
+    wchar_t buffer[32768]{};
+    const DWORD length = GetEnvironmentVariableW(name, buffer, static_cast<DWORD>(32768));
+    if (length == 0 || length >= 32768) return {};
+    return std::filesystem::path(buffer);
+}
+#else
+std::filesystem::path environment_path(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') return {};
+    return core::path_from_utf8(value);
+}
+#endif
+}  // namespace
+
 int run_core_agf(const std::string& agf_path) {
     try {
         std::ifstream input(core::path_from_utf8(agf_path), std::ios::binary);
@@ -105,23 +123,20 @@ int run_core_install(const InstallRunOptions& options) {
         // ★ 顺序就是优先级：引擎内建（构造期登记）→ 发行默认表（ALF）→ 玩家 `SYS4REG.INI` → 运行期写入。
         config.register_engine_defaults();
         config.load_defaults(index.config_defaults);
-        std::filesystem::path config_root = install.root;
-        if (config.get_int("set:UseAppDataFolder") != 0) {
+        // ★ 玩家配置的根：`set:UseAppDataFolder != 0` ⇒ **本地**应用数据目录（`%LOCALAPPDATA%`）。
+        //   ⛔ 不是漫游（`%APPDATA%`）：真机的 `SYS4REG.INI` / `SAVE/` 都在本地根下，漫游根那份
+        //   是别的进程写的。判据见 `core::player_config_root` 的注释与自检 `--only-config`。
+        core::ConfigRootEnvironment app_env;
 #ifdef _WIN32
-            wchar_t appdata[32768]{};
-            const DWORD appdata_length =
-                GetEnvironmentVariableW(L"APPDATA", appdata, static_cast<DWORD>(32768));
-            if (appdata_length > 0 && appdata_length < 32768) {
-                config_root = std::filesystem::path(appdata);
-            }
+        app_env.local_app_data = environment_path(L"LOCALAPPDATA");
+        app_env.roaming_app_data = environment_path(L"APPDATA");
 #else
-            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr) {
-                config_root = core::path_from_utf8(xdg);
-            } else if (const char* home = std::getenv("HOME"); home != nullptr) {
-                config_root = core::path_from_utf8(home) / ".config";
-            }
+        app_env.data_home = environment_path("XDG_DATA_HOME");
+        app_env.home = environment_path("HOME");
 #endif
-        }
+        const std::filesystem::path config_root = core::player_config_root(
+            install.root, core::use_app_data_folder_root(config.get_int("set:UseAppDataFolder")),
+            app_env);
         std::filesystem::path player_path = config_path.empty()
             ? config_root / core::path_from_engine(config.get_string("set:RegFilePath")) / "SYS4REG.INI"
             : core::path_from_utf8(config_path);
@@ -134,6 +149,17 @@ int run_core_install(const InstallRunOptions& options) {
             config.named_size(),
             config.script_size(),
             core::path_to_utf8(player_path).c_str());
+        // ★ 诊断：把"解析出来的根"与"漫游候选"同时打出来 —— 后者**只**用于证明选择没有读它。
+        if (!app_env.roaming_app_data.empty()) {
+            std::printf("[core] config root=%s (local) roaming=%s (unused)\n",
+                        core::path_to_utf8(config_root).c_str(),
+                        core::path_to_utf8(app_env.roaming_app_data).c_str());
+        }
+        // AA 三格：格式（1 位 / GRAY4 / GRAY8）只看它们，读错根就会整段文字偏亮。
+        std::printf("[core] antiFont enable=%d use=%d level=%d\n",
+                    config.get_int("set:EnableAntiFont"),
+                    config.get_int("message:UseAntiFont"),
+                    config.get_int("message:AntiFontLevel"));
         std::string error;
         const auto instructions = core::decode_instructions(
             std::span<const std::uint8_t>(root).subspan(header.body_offset),
@@ -342,11 +368,24 @@ int run_core_install(const InstallRunOptions& options) {
         // 都经主循环的退出捕获发送关闭消息，进入同一收尾；`--play-frames N` 的帧数上限不是引擎退出。
         // `machine.halted()` 是这些引擎退出在模拟器里的并集；host-only 的 unsupported-opcode halt 也保存，
         // 这是保守选择，不是引擎证据。
-        const bool save_config = user_quit || machine.halted();
+        const bool save_requested = user_quit || machine.halted();
+        const core::ConfigSavePolicy policy = options.no_config_save
+                                                  ? core::ConfigSavePolicy::Never
+                                                  : (options.force_config_save
+                                                         ? core::ConfigSavePolicy::Allow
+                                                         : core::ConfigSavePolicy::Default);
+        const bool save_config = core::should_save_player_config(
+            player_path, config_root, !config_path.empty(), save_requested, policy);
         const auto& stop = machine.last_stop();
         std::printf("[core] exit user_quit=%d halted=%d reason=%d opcode=0x%X message=%s\n",
                     user_quit ? 1 : 0, machine.halted() ? 1 : 0,
                     static_cast<int>(stop.reason), stop.opcode, stop.message.c_str());
+        if (save_requested && !save_config) {
+            // 引擎会保存，但**宿主**不写：真实玩家配置 / 安装目录都是外部只读数据。
+            // 要验证保存语义就显式指一个落点（`--config <副本>`）或 `--config-save`。
+            std::printf("[core] config save skipped (host safety gate): %s\n",
+                        core::path_to_utf8(player_path).c_str());
+        }
         if (save_config) {
             try {
                 machine.config().save_player_file(player_path);

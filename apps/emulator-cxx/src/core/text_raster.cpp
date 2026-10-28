@@ -5,6 +5,7 @@
 
 #include "core/color.h"
 #include "core/encoding.h"
+#include "core/text_alpha.h"
 #include "core/text_gdi.h"
 
 #include <algorithm>
@@ -189,14 +190,21 @@ void compose_texel(TextureRecord& texture, int x, int y, const Rgb& color, int a
     }
     const std::size_t d = (static_cast<std::size_t>(y) * texture.width + x) * 4;
     std::uint8_t* texel = &texture.rgba[d];
-    if (alpha >= 255) {  // 满覆盖 ⇒ 覆写
+    if (alpha <= 0) return;  // 覆盖值 0 ⇒ 一个字节都不写（引擎 0x46DD60）
+    const int dst_alpha = texel[3];
+    // ★ 引擎 `sub_46D9F0` 有**两条**整像素覆写支（32 位表面 ⇒ 满 = 255）：
+    //   ① 满覆盖（`0x46DDC6`）—— 灰度档到不了 255，只有 1 位掩码会走；
+    //   ② **目标 alpha == 0**（`0x46DDD5`）—— 刚清空 / 新建的文本层上，每个像素的**第一次**写入都走它。
+    //   两支都是 `(覆盖值<<24) | 源RGB` ⇒ **RGB 是源色原值**、alpha = 覆盖值。
+    //   ⛔ 别把 ② 实现成"与黑色加权"：那会把 AA 边缘的 RGB 压成 α 倍（GRAY4 满覆盖 240 ⇒ 94%、
+    //   低覆盖边缘更狠），字看起来更细更暗，而真机边缘是"源色 + 低 alpha"。
+    if (alpha >= 255 || dst_alpha == 0) {
         texel[0] = static_cast<std::uint8_t>(color.r);
         texel[1] = static_cast<std::uint8_t>(color.g);
         texel[2] = static_cast<std::uint8_t>(color.b);
-        texel[3] = 255;
+        texel[3] = static_cast<std::uint8_t>(alpha >= 255 ? 255 : alpha);
         return;
     }
-    const int dst_alpha = texel[3];
     const int out_alpha = std::max(dst_alpha, alpha);
     const int keep = 255 - alpha;
     texel[0] = static_cast<std::uint8_t>((color.r * alpha + texel[0] * keep) / 255);
@@ -245,21 +253,20 @@ int mask_alpha(const MaskView& mask, int row, int column) {
         case MaskKind::Gray4: {
             // 引擎 `0x46DAAF`：alpha = value * 255 / 17（GRAY4 = 17 级；实测 GDI 的原始值 0..16
             // ⇒ alpha ∈ {15,30,…,240}，是 15 的倍数）。
-            return static_cast<int>(mask.pixels[offset]) * 255 / 17;
+            return core::level_to_alpha(mask.pixels[offset], core::kGray4Levels);
         }
         case MaskKind::Gray8: {
-            // 引擎 `0x46DA9C`：alpha = value * 255 / 65（GRAY8 = 65 级）。
-            return std::min(255, static_cast<int>(mask.pixels[offset]) * 255 / 65);
+            // 引擎 `0x46DA9C`：alpha = value * 255 / 65（GRAY8 = 65 级 ⇒ 满覆盖 251）。
+            return core::level_to_alpha(mask.pixels[offset], core::kGray8Levels);
         }
         case MaskKind::FtGray:
         default: {
-            int value = mask.pixels[offset];
-            if (mask.quantize) {
-                const int levels = mask.gray8 ? 64 : 16;
-                const int level = (value * levels + 127) / 255;
-                value = (level * 255 + levels / 2) / levels;
-            }
-            return value;
+            const int value = mask.pixels[offset];
+            if (!mask.quantize) return value;
+            // ★ 宿主回退也必须**落到引擎的级数上**：把连续的覆盖率量化到 17 / 65 级，
+            //   再按引擎的 ×255/17、×255/65 换算 ⇒ 满覆盖是 240 / 251，不是 255。
+            return core::coverage_to_alpha(value, mask.gray8 ? core::kGray8Levels
+                                                             : core::kGray4Levels);
         }
     }
 }
@@ -347,15 +354,16 @@ bool gdi_glyphs_enabled() {
 }  // namespace
 
 void compose_glyph_texel(std::uint8_t* texel, int r, int g, int b, int alpha) {
-    if (texel == nullptr) return;
-    if (alpha >= 255) {  // 满覆盖 ⇒ 覆写
+    if (texel == nullptr || alpha <= 0) return;  // 覆盖值 0 ⇒ 不写
+    const int dst_alpha = texel[3];
+    // 同 `compose_texel`：两条覆写支（满覆盖 / 目标 alpha == 0）都是"源色 + 覆盖值"。
+    if (alpha >= 255 || dst_alpha == 0) {
         texel[0] = static_cast<std::uint8_t>(r);
         texel[1] = static_cast<std::uint8_t>(g);
         texel[2] = static_cast<std::uint8_t>(b);
-        texel[3] = 255;
+        texel[3] = static_cast<std::uint8_t>(alpha >= 255 ? 255 : alpha);
         return;
     }
-    const int dst_alpha = texel[3];
     const int out_alpha = std::max(dst_alpha, alpha);
     const int keep = 255 - alpha;
     texel[0] = static_cast<std::uint8_t>((r * alpha + texel[0] * keep) / 255);
@@ -396,10 +404,14 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
         static const bool trace = std::getenv("EMULATOR_CXX_TRACE_TEXT") != nullptr;
         if (trace) std::fprintf(stderr, "[text] draw size=%d chars=%zu\n", size, sjis.size());
     }
-    // 引擎的 AA 开关（决定字形格式：1-bit / GRAY4 / GRAY8；见 §32/§33）。只在"真机字形来源"下用。
-    const bool anti_alias = machine.config().get_int("set:EnableAntiFont") != 0 &&
-                            machine.config().get_int("message:UseAntiFont") != 0;
-    const bool gray8 = machine.config().get_int("message:AntiFontLevel") == 1;
+    // 引擎的 AA 开关（决定字形格式：1-bit / GRAY4 / GRAY8；见 §32/§33）。**不分字形来源**都按它走 ——
+    // 格式是引擎侧的选择（`Font+0x548` / `Font+0x35584`），不是"平台自由"。
+    const GlyphFormat format =
+        core::glyph_format(machine.config().get_int("set:EnableAntiFont") != 0,
+                           machine.config().get_int("message:UseAntiFont") != 0,
+                           machine.config().get_int("message:AntiFontLevel"));
+    const bool anti_alias = format != GlyphFormat::Mono;
+    const bool gray8 = format == GlyphFormat::Gray8;
     const int draw_mode = machine.font_draw_mode();
     const Rgb primary = decode_color(machine.font_primary_color());
     const Rgb secondary = decode_color(machine.font_secondary_color());
@@ -514,17 +526,11 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     const int y_effective = machine.font_align_mode() == 1 ? y + cached_ascent - current_ascent : y;
     // ★ 基线 = 引擎算出来的那个再减掉宿主对齐补偿（见上：替换字体后墨迹偏低 2px）。
     const int baseline = y_effective + current_ascent - lift;
-    bool mono = false;
-    bool quantize = false;
-    if (engine_glyphs) {
-        // 引擎字形 ⇒ 完全按引擎：格式看 AA 配置（1-bit / GRAY4 / GRAY8）。
-        mono = !anti_alias;
-        quantize = anti_alias;
-    } else {
-        // 宿主回退 + 同色：默认 Bold + 默认灰度 AA；`EMULATOR_CXX_SAME_COLOR_MONO=1` 回到 normal + mono。
-        mono = same_color && mono_same_switch;
-        quantize = false;
-    }
+    // ★ 格式只看引擎的 AA 配置（上面那三行）：宿主回退**也**只能这样 ——
+    //   引擎要 1 位就用 1 位、要灰度就量化到 17 / 65 级。否则满覆盖 255（比真机亮一档）。
+    //   `EMULATOR_CXX_SAME_COLOR_MONO` 是**对照开关**（同色 + 强制 1 位），不改变上面的判定。
+    const bool mono = format == GlyphFormat::Mono || (!engine_glyphs && same_color && mono_same_switch);
+    const bool quantize = anti_alias;
     const bool one_pass = !engine_glyphs && same_color;
     // 诊断口（宿主，⛔ 不是产品路径）：`EMULATOR_CXX_TEXT_TRACE=1` 逐次打印 0x204 的参数形状。
     // 用来回答"这一段文字是几趟、什么颜色、什么绘制模式、字形从哪来"，不改变任何绘制行为。

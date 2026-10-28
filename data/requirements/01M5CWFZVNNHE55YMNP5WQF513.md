@@ -2,8 +2,9 @@
 
 - id: REQ-01M5CWFZVNNHE55YMNP5WQF513
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M48DJ3PK48CXQXAV1M3EEQNR
+- verify: tools/test/emulator-engine-scalars.assets.test.mjs#条件位副作用
 - repro: packages/age-format/src/engine/layout.mts#ENGINE_SCALAR_BITS
 - severity: S3
 - tags: [engine scalar bits]

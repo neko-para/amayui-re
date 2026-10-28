@@ -12,6 +12,39 @@
 #include <sstream>
 
 namespace core {
+
+std::filesystem::path player_config_root(const std::filesystem::path& install_root,
+                                         bool use_app_data_folder,
+                                         const ConfigRootEnvironment& env) {
+    if (!use_app_data_folder) return install_root;
+    // ★ 顺序固定：本地应用数据 → XDG 数据目录 → `~/.local/share` → 安装目录。
+    //   ⛔ `env.roaming_app_data` 不在这里出现 —— 它只是诊断用的对照值。
+    if (!env.local_app_data.empty()) return env.local_app_data;
+    if (!env.data_home.empty()) return env.data_home;
+    if (!env.home.empty()) return env.home / ".local" / "share";
+    return install_root;
+}
+
+bool path_is_within(const std::filesystem::path& path, const std::filesystem::path& root) {
+    if (root.empty()) return false;
+    const auto relative = path.lexically_normal().lexically_relative(root.lexically_normal());
+    if (relative.empty()) return true;  // 同一路径 / 相对路径无法表达 ⇒ 当作在里面
+    const std::string first = relative.begin()->string();
+    return first != "..";
+}
+
+bool should_save_player_config(const std::filesystem::path& player_path,
+                               const std::filesystem::path& config_root, bool explicit_config_path,
+                               bool save_requested, ConfigSavePolicy policy) {
+    if (!save_requested) return false;
+    if (policy == ConfigSavePolicy::Never) return false;
+    if (policy == ConfigSavePolicy::Allow) return true;
+    // `Default`：显式指路了就写（用户自己选的落点，例如 `--config <副本>`）；
+    // 否则只写"解析出来的根之外"的路径 —— 真实玩家配置 / 安装目录都算外部只读数据。
+    if (explicit_config_path) return true;
+    return !path_is_within(player_path, config_root);
+}
+
 namespace {
 std::string upper_ascii(std::string text) {
     for (char& c : text) {
@@ -181,6 +214,14 @@ void ConfigStore::register_engine_defaults() {
         {"message:MessageSpeed", 5},         // 0x491D4D
         {"message:AutoMessageTime0", 500},   // 0x49201C
         {"message:AutoMessageTime1", 2000},  // 0x492039
+        // ★ 抗锯齿的两个**子**开关也在构造期登记（⛔ 不在发行默认表里：本作 ALF 的 51 条没有它们）。
+        //   `0x491F52` = 键名 `"message:UseAntiFont"` 在构造体内的唯一一处引用，`0x491F59` 把值槽写成 **1**
+        //   （`0x491F63` 调"按键名写整数"的 upsert）；`0x492A04` / `0x492A0B` / `0x492A11` 是
+        //   `"message:AntiFontLevel"` ⇒ 值取自 `ebx`，而全函数 `ebx` 只在 `0x4918C6` 被清零过 ⇒ **0**。
+        //   ⇒ 全新玩家档（没有 SYS4REG.INI）的 AA 子开关就是"开 + 4 位"，与真机观测一致；
+        //     总开关 `set:EnableAntiFont` 构造期登记 0（键 @0x492790 / 值 @0x492797）、由发行默认表盖成 1。
+        {"message:UseAntiFont", 1},    // 0x491F59
+        {"message:AntiFontLevel", 0},  // 0x492A0B
     };
     for (const auto& builtin : kBuiltins) {
         if (named_.find(builtin.key) != named_.end()) continue;

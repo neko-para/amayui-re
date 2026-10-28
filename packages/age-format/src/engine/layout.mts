@@ -415,8 +415,25 @@ export const ENGINE_SCALAR_WRITES: readonly ScalarWrite[] = [
   { name: 'Engine.unsupported', dword: -1, opcode: 0x112, handler: 'sub_418E30', form: 'unsupported' },
 ];
 
-/** 一条条件副作用的**门**（什么时候发生；`op1` = 第 1 个操作数的值） */
-export type ScalarBitWhen = 'op1!=0' | 'op1==0' | 'always';
+/**
+ * 一条条件副作用的**门**（什么时候发生；`op1` = 第 1 个操作数的值）。
+ *
+ * ★ 后两种是"**依赖未建模引擎状态**"的门：条件里出现的是别的子系统的格（例如 `0x71` 的
+ *   「已标记」查表、配置键），本层**判不了** ⇒ 登记成**原样文本**，由 `scalarBitWhenHolds` 统一判成"不成立"。
+ *   ⛔ 不要为了让它"能动"就把它归进 `always`：那会把"有条件置位"变成"无条件置位"。
+ */
+export type ScalarBitWhen = 'op1!=0' | 'op1==0' | 'always' | 'ReadTextSkip!=0 && marked(file,pos)';
+
+/**
+ * 门是否成立。**只认这张表里登记过的三种**（`always` / `op1!=0` / `op1==0`）；
+ * 其余条件式一律**不成立** —— 它们依赖未建模的引擎状态（漏判只会"少置一位"，不会凭空置位）。
+ */
+export function scalarBitWhenHolds(when: ScalarBitWhen, op1: number): boolean {
+  if (when === 'always') return true;
+  if (when === 'op1!=0') return op1 !== 0;
+  if (when === 'op1==0') return op1 === 0;
+  return false;
+}
 
 /** 一条条件副作用的**形态**：`write` = 写死一个常量；`set` = `|= mask`；`clear` = `&= ~mask` */
 export type ScalarBitOp = 'write' | 'set' | 'clear';
@@ -447,7 +464,7 @@ export interface ScalarBitEffect {
  * ## 为什么单列一张表（而不是往上面那张表加一行）
  * 上面那张表的一条记录 = "**读操作数 → 把它（或它的一个变体）写进某个固定槽**"，值总是操作数的函数。
  * 这里的两条**不是**：`0x88` 的两条副作用**由 `op1` 是否为 0 二选一**，其中一条写的是**常量 1**、
- * 另一条是**位清除**；`0x71` 的那条是**无条件置位**。⇒ 硬塞进上面那张表会让 `form` 变成一个
+ * 另一条是**位清除**；`0x71` 的那条是**有条件置位**（两个门 EA 见下表那条的注释）。⇒ 硬塞进上面那张表会让 `form` 变成一个
  * 二义字段（"op1" 还是"常量"还是"位"），而**条件**（什么时候发生）没处放。
  *
  * ## 判据（都可复跑）
@@ -466,7 +483,12 @@ export const ENGINE_SCALAR_BITS: readonly ScalarBitEffect[] = [
   // `0x88` **假支**：`0x41FAF0 and dword ptr [esi+0AAB44h], 0F7FFFFFFh`（`0xAAB44 / 4 = 174801`）
   { opcode: 0x88, handler: 'sub_41FAB0', when: 'op1==0', name: 'Engine.d174801', dword: 174801, op: 'clear', mask: 0x08000000 },
   // `0x71`（handler `sub_41ED80`，argc 1）：`0x41EE8D or dword ptr [ebx+0AAB44h], 8000000h` —— 与上面那一清**成对**
-  { opcode: 0x71, handler: 'sub_41ED80', when: 'always', name: 'Engine.d174801', dword: 174801, op: 'set', mask: 0x08000000 },
+  //   ★ **不是无条件**：`or` 之前有两个门 ——
+  //     ① `0x41EE2F test eax,eax` / `0x41EE31 jz`（`eax` = 配置键 `message:ReadTextSkip` 的读值 ⇒ 非 0 才继续）；
+  //     ② `0x41EE84 call sub_48F000` / `0x41EE89 test eax,eax` / `0x41EE8B jz`
+  //        （`sub_48F000` = 纯查表：`(当前帧文件号, 当前位置下标)` 在"已标记"表里的查表结果 ⇒ 非 0 才继续）。
+  //   两条都成立才置位；置位后还把 `Engine[0x7795C]` 写 1（`0x41EE99`）、`Engine[0x77A00]` 写 0（`0x41EEA3`）。
+  { opcode: 0x71, handler: 'sub_41ED80', when: 'ReadTextSkip!=0 && marked(file,pos)', name: 'Engine.d174801', dword: 174801, op: 'set', mask: 0x08000000 },
 ];
 
 /**

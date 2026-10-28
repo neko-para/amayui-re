@@ -31,7 +31,7 @@ import { addressOfOperand, asFloat, asInt32, asUint32, floatFromBits, GLOBAL_POO
 import { instructionIndexAt, labelByteOffsetOf, localCountList } from './script.ts';
 import type { OperandValue } from './operand.ts';
 import { localPoolByTypeTag } from '../model/pools.ts';
-import { ENGINE_SCALAR_ARRAYS, ENGINE_SCALAR_BITS, ENGINE_SCALAR_WRITES, type CallArgForm } from '@amayui/age-format/src/engine/layout.mts';
+import { ENGINE_SCALAR_ARRAYS, ENGINE_SCALAR_BITS, ENGINE_SCALAR_WRITES, scalarBitWhenHolds, type CallArgForm } from '@amayui/age-format/src/engine/layout.mts';
 import { encInt, encZero } from '@amayui/age-format/src/asm/value-codec.mts';
 
 /** 一个 handler 拿到的东西（**够用就好**：不要把手伸进 machine 的内部状态） */
@@ -546,7 +546,9 @@ function operandForms(argc: number): CallArgForm[] {
 function applyScalarBits(ctx: VmContext, opcode: number, v: number): void {
   for (const b of ENGINE_SCALAR_BITS) {
     if (b.opcode !== opcode) continue;
-    const hit = b.when === 'always' ? true : b.when === 'op1!=0' ? v !== 0 : v === 0;
+    // ★ 门由知识层判（`scalarBitWhenHolds`）：**未登记的条件式一律不成立** ——
+    //   那些条件依赖未建模的引擎状态（例如 `0x71` 的「已标记」查表），漏判只会少置一位，不会凭空置位。
+    const hit = scalarBitWhenHolds(b.when, v);
     if (!hit) continue;
     const name = scalarName(b.name);
     if (b.op === 'write') ctx.machine.scalars.write(name, b.value!);

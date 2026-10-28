@@ -32,7 +32,10 @@
 ### 1.2 字形格式与合成
 
 - 格式由引擎的 AA 配置决定：`set:EnableAntiFont` + `message:UseAntiFont`（+ `message:AntiFontLevel`）
-  ⇒ 1-bit / GRAY4 / GRAY8。
+  ⇒ 1-bit / GRAY4 / GRAY8。**这条对所有字形来源一致**（含下面的默认 FreeType 回退）—— 格式不是观感开关。
+- 灰度档的级换算按引擎：GRAY4 是 **17 级**（`值 × 255 / 17` ⇒ 0,15,…,**240**）、GRAY8 是 **65 级**
+  （`值 × 255 / 65` ⇒ 0…**251**）。⛔ 不是 2^n（16 / 64 ⇒ 满覆盖 255）。宿主的连续覆盖率先量化到
+  17 / 65 级再换算，见 `src/core/text_alpha.h`。
 - 两趟按引擎：模式 1 = 副色 (x+1, y+1) → 主色；模式 2 = 主色两遍；模式 3 = 径向副色。
 - 合成用引擎规则：满覆盖覆写；否则 `outA = max(dstA, srcA)`、
   `outC = (srcC*srcA + dstC*(255-srcA))/255`（不是 alpha-over）。
@@ -49,11 +52,12 @@
 - **有离线 bake 数据**（`EMULATOR_CXX_GLYPH_ATLAS` 指向的文件存在）⇒ **完全按引擎**：格式看 AA 配置、
   两趟照引擎。当前 loader 仍是 **stub**（会打警告，仍用 FT 字形）；真实 GDI 字形（Windows 提供者 /
   离线 atlas）接进同一入口后绘制逻辑不变。
-- **其它（默认）** ⇒ 两个宿主方案（为了更好的观感，不是引擎语义）：
-  - **同色**（fake bold）⇒ **Bold 字体 + 默认灰度 AA + 单趟**（默认）；`EMULATOR_CXX_SAME_COLOR_MONO=1` 回到
-    normal + 1-bit mono + 单趟；
-  - **异色**（真 shadow）⇒ 默认灰度 AA + **两趟**。
-- 无 bake 的颜色选择是宿主视觉策略；bake / GDI 的格式是引擎语义。
+- **其它（默认）** ⇒ 只换"字形从哪来"（FreeType），**格式判据仍是上面那条引擎口径**：
+  - **同色**（fake bold）⇒ **Bold 字体 + 单趟**（默认）；`EMULATOR_CXX_SAME_COLOR_MONO=1` 是对照开关
+    （同色时强制 1 位 + 单趟）；
+  - **异色**（真 shadow）⇒ **两趟**。
+- 字形来源与粗体选择是宿主视觉策略；**格式（1 位 / GRAY4 / GRAY8 与 17 / 65 级换算）是引擎语义**，
+  三档共用同一条判据 —— 否则"配置关掉抗锯齿"时我们会比真机亮一档。
 - **绘制模式 3 的副色趟按引擎是"径向一圈"**（12 趟、位移落 3×3 邻域、只外扩 **1px**）——三档都一样，
   这不随字形来源变；见 ops-forensics §40。
 - FT 与 GDI 的 1-bit 差约 1px，属平台栅格化（spec 的 `RES-RENDER-TEXT-GLYPH-RASTER` 明确 discard）；
@@ -78,6 +82,17 @@
 - **模拟器不做全屏**：没有 `SDL_WINDOW_FULLSCREEN`，也没有 `SDL_SetWindowFullscreen` / 全屏切换。
 - 理由：窗口 + 交换链缩放已经覆盖"大画面"的需求；全屏会引入显示器模式/缩放策略，与"窗口可缩放"重复。
 - 想接近真机观感时，把可缩放窗口拖到 1602×958（或显示器尺寸）即可。
+
+## 2A. 玩家配置：根与保存闸
+
+- **根 = 本地应用数据目录**（`%LOCALAPPDATA%`），⛔ 不是漫游（`%APPDATA%`）：与 spec「窗口与呈现」的
+  配置根一条同源（`set:UseAppDataFolder` **恰为 1** 时才换根）。实现是纯函数 `core::player_config_root`
+  （本地 → XDG 数据目录 → `~/.local/share` → 安装目录；**漫游候选只出现在诊断打印里**）。
+- **保存闸**：spec 的 `CORE-CONFIG-EXIT-SAVE` 说"窗口关闭收尾会整体重写玩家文件"，但那**目标路径**在本仓
+  是**外部只读数据**（真机那份 `SYS4REG.INI`，以及只读的游戏安装目录）⇒ 宿主侧加一道闸：
+  **默认不写**；要写得显式指路（`--config <副本>`）或 `--config-save`，`--no-config-save` 强制不写。
+  跳过时会打印 `config save skipped (host safety gate)`。
+  ⛔ 这不是引擎语义：引擎确实会写；这是我们**不去改外部数据**的取舍（`AGENTS.md` §8）。
 
 ## 3. 显式不做 / 已知限制
 

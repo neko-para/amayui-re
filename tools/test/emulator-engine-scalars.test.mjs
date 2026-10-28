@@ -25,7 +25,7 @@ import { HANDLERS, __configKeyIntByValue } from '../../apps/emulator/src/vm/ops.
 import { ScriptFrame } from '../../apps/emulator/src/vm/machine.ts';
 import { GlobalPools } from '../../apps/emulator/src/model/pools.ts';
 import { AddressSpace } from '../../apps/emulator/src/model/address-space.ts';
-import { ENGINE_SCALAR_BITS, ENGINE_SCALAR_WRITES } from '@amayui/age-format/src/engine/layout.mts';
+import { ENGINE_SCALAR_BITS, ENGINE_SCALAR_WRITES, scalarBitWhenHolds } from '@amayui/age-format/src/engine/layout.mts';
 import { MemoryConfig } from '../../apps/emulator/src/host/config.ts';
 import { inlineString } from '../../apps/emulator/src/vm/script.ts';
 
@@ -131,7 +131,7 @@ test('★ 前段那批：`form` 真的生效（`bool(op1)` 归一，不是原值
   //   （此前是 `logged-only` ⇒ 位永远是 0）。下面按"这道门在这个操作数下成不成立"现算应写集合。
   const bitSlotsFor = (opcode, op1) => ENGINE_SCALAR_BITS
     .filter((b) => b.opcode === opcode)
-    .filter((b) => (b.when === 'always' ? true : b.when === 'op1!=0' ? op1 !== 0 : op1 === 0))
+    .filter((b) => scalarBitWhenHolds(b.when, op1))
     .map((b) => b.name);
   const byOpcode = new Map();
   for (const w of ENGINE_SCALAR_WRITES) {
@@ -638,11 +638,16 @@ test('★ `0xfe` **照抄引擎的范围检查**（`op1 > 0x1F` ⇒ 抛，⛔ �
  */
 test('★ `0x71` 置 bit27 ⇒ `0x88` 能把它清掉（位状态真的变；记录是 `modeled`）', () => {
   const BIT = 0x08000000;
-  // ① 置位 ⇒ 位从 0 变 1
+  // ★ 名字保留原来的措辞（台账 `01M4GYTBDW7S344D4F032M650J` 的 guard 锚按名字命中；改名 = 观察失效）。
+  //   口径已订正：`0x71` 的置位**是有条件的**（配置键 + 「已标记」查表），所以下面第一段断言的是"默认不置位"。
+  // ① `0x71` 的置位**是有条件的**（配置键 `message:ReadTextSkip` 非 0 **且** 该位置在「已标记」表里被查中 ——
+  //    两个条件都依赖未建模的引擎状态）⇒ **默认不置位**。把它登记成 `always` 就等于"无条件置位"。
   const m = machineStub();
   assert.equal(m.scalars.read('Engine.d174801'), 0, '没跑过 ⇒ 没写过的槽读 0');
   HANDLERS[0x71](ctxOf(m, [imm(1)], 0x71));
-  assert.equal(m.scalars.read('Engine.d174801') & BIT, BIT, '★ `0x71` 之后 bit27 必须是 1');
+  assert.equal(m.scalars.read('Engine.d174801') & BIT, 0, '★ 条件未成立 ⇒ `0x71` 不许置 bit27');
+  // ①' 位本身仍要能置起来（否则下面"清得掉"无从判起）—— 直接写位，再让 `0x88` 清
+  m.scalars.setBits('Engine.d174801', BIT);
   // ② 清位 ⇒ 位从 1 变 0（★ 这一条就是"成对"的判据：只置不清 / 只清不置 都会红）
   HANDLERS[0x88](ctxOf(m, [imm(0)], 0x88));
   assert.equal(m.scalars.read('Engine.d174801') & BIT, 0, '★ op1 = 0 ⇒ `0x88` 的假支必须把 bit27 清掉');
@@ -654,7 +659,9 @@ test('★ `0x71` 置 bit27 ⇒ `0x88` 能把它清掉（位状态真的变；记
   assert.equal(m2.scalars.read('Engine.d174801') & BIT, 0, '真支**不**置位（条件二选一）');
   // ④ 两条记录都必须是 `modeled`（退回 `logged-only` = 又变成"只记录、不落状态"）
   const bitsOf = (mm) => mm.effects.filter((e) => e.action === 'engine.scalar.bits');
-  assert.deepEqual(bitsOf(m).map((e) => e.detail.op), ['set', 'clear'], '置 → 清，两次各留一笔（且顺序照执行序）');
+  // ★ `0x71` 的置位门依赖未建模的引擎状态 ⇒ 这里**不该有** `set` 那一笔（条件置位不许凭空发生）；
+  //   置位那一侧的判据由 `tools/test/emulator-engine-scalars.assets.test.mjs` 回语料逐字咬（两个门 EA）。
+  assert.deepEqual(bitsOf(m).map((e) => e.detail.op), ['clear'], '条件未成立 ⇒ 只该有 `0x88` 那一笔清位');
   assert.deepEqual(bitsOf(m2).map((e) => e.detail.op), ['write'], '真支只写常量（不清位）');
   const bits = [...bitsOf(m), ...bitsOf(m2)];
   assert.ok(bits.every((e) => e.disposition === 'modeled'),

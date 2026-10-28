@@ -59,6 +59,12 @@ void Machine::op_76(const Instruction& instruction) {
     const auto swapped = ((value & 0xFFu) << 16) | (value & 0xFF00u) | ((value >> 16) & 0xFFu);
     if (instruction.opcode == 0x76) font_primary_color_ = as_i32(swapped);
     else font_secondary_color_ = as_i32(swapped);
+    if (text_trace_enabled()) {
+        // 诊断：题目是"为什么我们画出来是纯白而真机偏暗" ⇒ 先看**脚本到底给了什么颜色**、经哪条指令。
+        std::fprintf(stderr, "[text] 0x%X color op=%d raw=0x%06X stored=0x%06X\n",
+                     static_cast<unsigned>(instruction.opcode), read_int(ops[0]),
+                     static_cast<unsigned>(value), static_cast<unsigned>(swapped));
+    }
     return;
 }
 

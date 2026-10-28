@@ -115,6 +115,12 @@ add_test(NAME emulator-core-selftest COMMAND emulator-core-selftest)
 add_test(NAME emulator-core-audio-voice COMMAND emulator-core-selftest --only-audio)
 # ★ 两套字号（`0x75` = A 支 / `0x197` = B 支）单独一条：spec 的 `CORE-OPS-FORWARD-PROLOGUE` 证据指这里。
 add_test(NAME emulator-core-font-size COMMAND emulator-core-selftest --only-font)
+# ★ 字形 AA 档（1 位 / GRAY4 / GRAY8 的**选择**与 17 / 65 级换算 ⇒ 满覆盖 240 / 251）：
+#   "设置界面文字比真机亮一档"的算术那一半。拆回 2^n（16 / 64）⇒ 满覆盖 255 ⇒ 本条红。
+add_test(NAME emulator-core-glyph-alpha COMMAND emulator-core-selftest --only-glyph)
+# ★ 玩家配置的根（**本地**应用数据，⛔ 不是漫游）+ 退时保存的宿主闸（真实玩家配置默认不写）。
+#   把根换回 `%APPDATA%` 或去掉保存闸 ⇒ 本条红。
+add_test(NAME emulator-core-config-root COMMAND emulator-core-selftest --only-config)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)
