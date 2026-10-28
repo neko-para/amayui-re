@@ -361,6 +361,67 @@ export function testNames(text) {
   return out;
 }
 
+/** 这份守卫文件是 CMake 吗（`CMakeLists.txt` / `*.cmake`）—— 决定分级判据用哪一套 */
+export function isCmakeGuardFile(p) {
+  return /(?:^|[\\/])CMakeLists\.txt$|\.cmake$/i.test(String(p ?? ''));
+}
+
+/** 去掉 CMake 一行里的注释与字符串字面量（只为了数块结构，不求完整解析） */
+function cmakeStructureLine(raw) {
+  let out = '';
+  let quoted = false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (ch === '"') { quoted = !quoted; out += ' '; continue; }
+    if (!quoted && ch === '#') break;
+    out += quoted ? ' ' : ch;
+  }
+  return out;
+}
+
+const CMK_BLOCK_OPEN = new Set(['if', 'foreach', 'function', 'macro', 'while', 'block']);
+
+/**
+ * CTest 的**分级**：`pure` = 无条件注册（默认门禁 `ctest` 就会跑、免游戏安装）；
+ * `assets` = 落在任何条件 / 函数块里（`if` / `foreach` / `function` / `macro` / `while` / `block`）。
+ *
+ * ★ 为什么判据是"注册位置"而不是"条件里提没提到 `EMULATOR_CXX_INSTALL_DIR`"：
+ *   这一档要回答的问题是**默认门禁跑不跑**，不是"这个测试长什么样"。名字启发会把
+ *   `if(WIN32)` 里注册的免安装测试判成 pure，反过来漏掉"被 `if(TARGET …)` 包住的安装测试"。
+ *   `pnpm test` 的 pure 档语义同形：**默认选择器会不会选中它**。
+ * ★ 为什么不做 pragma：CTest 没有"一个用例一个文件"的落点，pragma 只能挂在文件头上 ——
+ *   而一个 `CMakeLists.txt` 里同时有 pure 与 assets 两档测试。位置是唯一**不可能说谎**的来源：
+ *   把 `add_test` 挪进 `if(...)`，分级**自己**就变了。
+ *
+ * @returns {'pure'|'assets'|null} `null` = 这个名字在文本里找不到 `add_test`
+ */
+export function cmakeTestTier(text, name) {
+  const wanted = String(name ?? '');
+  if (wanted === '') return null;
+  const at = new RegExp(
+    `\\badd_test\\s*\\(\\s*NAME\\s+${wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_.-])`,
+  );
+  let depth = 0;
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    const line = cmakeStructureLine(raw);
+    const hit = at.exec(line);
+    const limit = hit ? hit.index : line.length;
+    // 只数**出现在这一行命中位置之前**的块关键字（同一行里的 `if(X) add_test(...)` 也算包住）
+    const words = /\b([A-Za-z_]+)\s*\(/g;
+    let m;
+    while ((m = words.exec(line)) !== null) {
+      if (m.index >= limit) break;
+      const w = m[1].toLowerCase();
+      if (CMK_BLOCK_OPEN.has(w)) depth += 1;
+      else if (w === 'endif' || w === 'endforeach' || w === 'endfunction' || w === 'endmacro' || w === 'endwhile' || w === 'endblock') {
+        depth = Math.max(0, depth - 1);
+      }
+    }
+    if (hit) return depth > 0 ? 'assets' : 'pure';
+  }
+  return null;
+}
+
 /**
  * 解析一个锚点：**它现在还能不能重校验**。
  * @returns {{ok:boolean, kind:'ok'|'warning'|'error', why:string, file?:string}}

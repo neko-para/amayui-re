@@ -304,6 +304,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x54: op_54(instruction); return;
         case 0x1A5: case 0x2FE: op_1a5(instruction); return;
         case 0x197: op_197(instruction); return;
+        case 0x198: op_198(instruction); return;
         case 0x75: op_75(instruction); return;
         case 0x2D5: op_2d5(instruction); return;
         case 0x56: op_56(instruction); return;
@@ -323,6 +324,11 @@ void Machine::execute(const Instruction& instruction) {
         case 0x55: op_55(instruction); return;
         case 0x8c: op_8c(instruction); return;
         case 0x8f: op_8f(instruction); return;
+        case 0xC2: op_c2(instruction); return;
+        case 0xC4: op_c4(instruction); return;
+        case 0x82: op_82(instruction); return;
+        case 0x2F5: op_2f5(instruction); return;
+        case 0x2FF: op_2ff(instruction); return;
         case 0xa0: op_a0(instruction); return;
         default:
             throw CoreError(

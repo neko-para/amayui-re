@@ -3,13 +3,15 @@
  * tools/test/fixtures.test.mjs — 真存档样本（`corpus/fixtures/`）的守卫
  *
  * 真源分工：
- *   · `samples.json` —— 这一批 fixture 的**结构化描述**：槽 → 游戏内定位（`where`）→ 各文件 mtime
+ *   · `samples.json` —— 这一批 fixture 的**结构化描述**：`samples[]`（槽 → 游戏内定位 `where` → 各文件 mtime）
+ *     与 `containers[]`（**不属任何槽**的系统容器 / 玩家配置，身份 = 文件名 + `what`）
  *   · `corpus/assets.json` —— 只管"入库 / 去向 / 走哪种存储"：fixture 是**自足条目**
  *     （固化资源，没有加工链）⇒ 它**不登记 origin**，"内容没变"由 git/LFS 与下面的 mtime 事实回答。
  *
  * 钉住：① 结构合法；② 槽 76–79 齐备且 .DAT/.STH 成对；③ 盘上文件与登记集合**两边相等**；
  *       ④ mtime 与 samples.json 一致时，「槽头 +264 起七个 u16 == 文件 mtime」必须成立；
- *       ⑤ mtime 已漂移时**如实 skip**（fresh clone 的正常状态）并指向恢复命令 —— 不假装通过。
+ *       ⑤ mtime 已漂移时**如实 skip**（fresh clone 的正常状态）并指向恢复命令 —— 不假装通过；
+ *       ⑥ `containers` 的名字唯一、`what` 非空、与槽载荷不重名。
  *
  * 运行：`pnpm test`
  */
@@ -29,7 +31,10 @@ const samples = () => JSON.parse(fs.readFileSync(SAMPLES, 'utf8'));
 
 const pad = (n) => String(n).padStart(2, '0');
 
-const allFiles = () => samples().samples.flatMap((s) => s.files.map((f) => f.name));
+const allFiles = () => [
+  ...samples().samples.flatMap((s) => s.files.map((f) => f.name)),
+  ...(samples().containers ?? []).map((c) => c.name),
+];
 
 test('samples.json 存在，结构合法（每个样本都要有 where、files[] 与三时间字段）', () => {
   assert.ok(fs.existsSync(SAMPLES), 'corpus/fixtures/samples.json 必须存在');
@@ -45,6 +50,23 @@ test('samples.json 存在，结构合法（每个样本都要有 where、files[]
       assert.equal(typeof f.mtimeMs, 'number');
       assert.equal(typeof f.tzOffsetMinutes, 'number', `${f.name} 缺 tzOffsetMinutes`);
     }
+  }
+});
+
+test('★ 系统容器 / 玩家配置（`containers`）：不属任何槽，名字唯一、`what` 非空、三时间字段齐全', () => {
+  const doc = samples();
+  assert.ok(Array.isArray(doc.containers), 'containers 必须是数组（可以为空，但字段要在）');
+  const payload = new Set(doc.samples.flatMap((s) => s.files.map((f) => f.name)));
+  const seen = new Set();
+  for (const c of doc.containers) {
+    assert.ok(typeof c.name === 'string' && c.name.trim() !== '', 'containers 里有条目的 name 为空');
+    assert.ok(!seen.has(c.name), `containers 里重名：${c.name}`);
+    seen.add(c.name);
+    assert.ok(!payload.has(c.name), `${c.name} 同时被登记成槽载荷与系统容器（一个文件只能有一个身份）`);
+    assert.ok(typeof c.what === 'string' && c.what.trim() !== '', `${c.name} 缺 what（它是什么 / 这份样本本身的口径）`);
+    assert.match(c.mtimeLocal, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/, `${c.name} 的 mtimeLocal 形态异常`);
+    assert.equal(typeof c.mtimeMs, 'number', `${c.name} 的 mtimeMs 必须是数字`);
+    assert.equal(typeof c.tzOffsetMinutes, 'number', `${c.name} 缺 tzOffsetMinutes`);
   }
 });
 

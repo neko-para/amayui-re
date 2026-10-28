@@ -286,6 +286,173 @@ void Machine::op_ba(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_c2(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // BGM 淡变（`0x0C2` / `sub_420E00`，**argc 2**）。两条支路按门字两位分：
+    //   A 支（第 27 位 = 1，"立即"）：读序 **op2 → op1**，目标 ← op1、步长 ← op2，随即按"满进度"走完
+    //     ⇒ **瞬间到位**，**不动**第 9 位。
+    //   B 支：第 9 位已置才进来 —— 读配置 `set:TransferMusicVolume` 定混音方式（1 按进度混合 / 2 直取）、
+    //     置第 9 位；`op2` **读三次** ⇒ 间隔 = `op2 < 1000 ? op2/10 : op2/100`（向零截断）、步长 = `op2 < 1000 ? 10 : 1`；
+    //     最后读 `op1` 写目标值。音量的真正生效在音乐对象的虚表里（本版只记请求）。
+    // ★ `op1` **不是曲目号**（曲目另有格）；刻度满值 = 10000（唯一观察，单位本版不解释）。
+    // ★ 复用的就是 `0xb7` / `0xb8` 那套 BGM 状态（同一对象、同一门字第 9 位）。
+    const bool immediate = (state_flags_ & (1u << 27)) != 0;
+    if (immediate) {
+        const auto step = read_int(ops[1]);
+        const auto target = read_int(ops[0]);
+        bgm_fade_target_ = target;
+        bgm_fade_step_ = step;
+        bgm_fade_progress_ = target;  // 走完（相对刻度 10000）
+        bgm_fade_requests_ += 1;
+        return;
+    }
+    bgm_fade_mix_mode_ = config_.get_int("set:TransferMusicVolume");
+    state_flags_ |= (1u << 9);
+    const auto op2 = read_int(ops[1]);
+    bgm_fade_interval_ms_ = op2 < 1000 ? op2 / 10 : op2 / 100;
+    bgm_fade_step_ = op2 < 1000 ? 10 : 1;
+    bgm_fade_progress_ = 0;
+    bgm_fade_target_ = read_int(ops[0]);
+    bgm_fade_requests_ += 1;
+    return;
+}
+
+void Machine::op_2f5(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 配音排队（`0x2F5` / `sub_4267D0`，**argc 4**，读序 **4 → 3 → 2 → 1**，读序是合同）。
+    // 写五格、**零检查、零外部调用**：延时 ms ← op3、资源号 ← op1、pending ← 1、起算 ← 0、状态字 ← op2。
+    // ★ 状态字的低 2 位 == 3 表示"已完成 / 跳过"（读侧据此不再播）。
+    // ★ 真正"响"在帧更新的计时里（`now − 起算 ≥ 延时`）⇒ 本版只落状态（时钟不建模）。
+    const auto op4 = read_int(ops[3]);
+    const auto op3 = read_int(ops[2]);
+    const auto op2 = read_int(ops[1]);
+    const auto op1 = read_int(ops[0]);
+    if (op4 < 0 || op4 >= static_cast<int>(voice_delay_.size())) {
+        // 引擎**不查**这个下标（T_Voice 只有 3 格）⇒ 越界写属未定义行为；本版记日志后跳过（已知偏离）。
+        report_error("voice-slot-out-of-range:" + std::to_string(op4));
+        return;
+    }
+    const auto slot = static_cast<std::size_t>(op4);
+    voice_delay_[slot] = op3;
+    voice_resource_ = op1;
+    voice_pending_ = true;
+    voice_start_ms_ = 0;
+    voice_state_[slot] = op2;
+    return;
+}
+
+void Machine::op_2ff(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 配音组（`0x2FF` / `sub_426940`，**argc 2**）。★ 读序是合同：**先写组开关位（= 1），才读 op2**，
+    // 再写组值。组值的领域含义**未取证**（只证到播放时会抄进声音后端的一列，而那一列在本语料里没有读者）。
+    const auto index = read_int(ops[0]);
+    if (index < 0 || index >= static_cast<int>(voice_group_enabled_.size())) {
+        report_error("voice-group-out-of-range:" + std::to_string(index));
+        return;
+    }
+    const auto slot = static_cast<std::size_t>(index);
+    voice_group_enabled_[slot] = 1;
+    voice_group_value_[slot] = read_int(ops[1]);
+    return;
+}
+
+namespace {
+/** 24 位色的**字节反转**：脚本给 `0x112233`，引擎的色格存 `0x332211`（两条绘制入口共用） */
+inline std::int32_t bswap24(std::int32_t v) {
+    const auto u = static_cast<std::uint32_t>(v);
+    return static_cast<std::int32_t>(((u & 0xFFu) << 16) | (((u >> 8) & 0xFFu) << 8) | ((u >> 16) & 0xFFu));
+}
+
+/** `0xc4` / `0x2f4` / `0x1bd` 共用的"开关消费"：位16 置 ⇒ 整格 0；否则位0 置 ⇒ 置位16（**位0 保留**）。 */
+inline void consume_switch_keep_bit0(std::int32_t& cell) {
+    if ((cell & 0x10000) != 0) {
+        cell = 0;
+    } else if ((cell & 1) != 0) {
+        cell |= 0x10000;
+    }
+}
+
+/** "影片/立即"门位（`0xAAB44` 第 27 位）：`0xc2` 的 A 支与 `0xc4` 的 movie 支读的是同一位。 */
+constexpr std::uint32_t kMovieGateBit = 1u << 27;
+}  // namespace
+
+void Machine::op_82(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 画一段**已排版的文本记录**（`0x82` / `sub_41F720`，**argc 5**、推进 11）。
+    // 读序 **5 → 4 → 3 → 2 → 1**（读序是合同）。实参：op1 = 节点槽号（`T_Font+0x414` 十项，**引擎不查界**）、
+    // op2 = 记录下标（`T_Font+0xD24` 的 72 字节向量，**有检查**）、op3 = 标志（位1 = op4/op5 是颜色、位3 = 允许触发语音）、
+    // op4/op5 = 主色 / 副色（**字节反转**后存）。
+    // ★ 早退：`op2` 不在 `[0, count)` ⇒ **整条静默什么都不做**（不写颜色、不发请求、不报错）。
+    // ★ 未建模（残差）：GDI 度量（`GetTextMetricsA` / `GetTextExtentPoint32A`）、经渲染器追加的绘制命令、
+    //   三条"文本-语音"队列表头的清 0、`node[0x70]==1` 时转交的那条绘制路径（只记次数）。
+    const auto op5 = read_int(ops[4]);
+    const auto op4 = read_int(ops[3]);
+    const auto op3 = read_int(ops[2]);
+    const auto op2 = read_int(ops[1]);
+    const auto op1 = read_int(ops[0]);
+    if (op2 < 0 || static_cast<std::size_t>(op2) >= text_spans_.size()) return;
+    if (op1 < 0 || op1 >= 10) {
+        // 引擎不检查 0..9（越界是未定义读）⇒ 本实现记日志后跳过（已知偏离）。
+        report_error("text-node-slot-out-of-range:" + std::to_string(op1));
+        return;
+    }
+    const auto kind = font_node_kind_.find(op1);
+    if (kind != font_node_kind_.end() && kind->second == 1) {
+        text_span_alt_requests_ += 1;  // 转交另一条绘制路径（未建模）
+        return;
+    }
+    if ((op3 & 2) != 0) {
+        font_primary_color_ = bswap24(op4);
+        font_secondary_color_ = bswap24(op5);
+    }
+    const TextSpanRecord& rec = text_spans_[static_cast<std::size_t>(op2)];
+    if ((op3 & 8) != 0 && (rec.flags & 0x40000000) != 0) {
+        // ★ 引擎在这里还要判"本槽本次是否已排过"：已排过 ⇒ 入队而不是立即播。队列未建模 ⇒ 只记播放请求。
+        voice_play_requests_ += 1;
+    }
+    text_span_draw_requests_ += 1;
+    return;
+}
+
+void Machine::op_c4(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 配音播放（`0xc4` / `sub_420F70`，**argc 1**、推进 3）。七步，全部无条件：
+    //   ① 消费**槽 0 的两个开关格**（位16 ⇒ 整格 0；否则位0 ⇒ 置位16、**位0 保留**）；
+    //   ② BGM 压低（门字第 14 位）；
+    //   ③ 影片门（第 27 位）开着 ⇒ 只把 op1 写进镜像格、**不播**；否则清两个镜像格 + 发一次播放请求；
+    //   ④ 文本门（`0x1BB` 写的那格）== 0 ⇒ **往文本记录向量追加一条**（`flags = 0x40000000`）；
+    //   ⑤（未建模）另一格非 0 时置"有配音在播"。
+    // ★ `op1` 在正常支被读**两次**（一次给播放、一次给记录）；影片支也读两次（镜像 + 记录）。
+    // ★ 未建模：`sub_407120` 的真实混音压低、装载解码（`sub_4BB840` 里读文件那一段）、第 ⑤ 步的门格。
+    consume_switch_keep_bit0(voice_switch_46c_[0]);
+    consume_switch_keep_bit0(voice_group_enabled_[0]);
+    // ★ 引擎在这一步置门字第 14 位（"BGM 压低中"），**本实现刻意不置**：本模型的主循环没有服务第 14 位的
+    //   分支，置了只会让门停在原地（`gate-bit-unserviced`）。⇒ 只落一个可观察投影 `bgm_ducked_`，
+    //   并把"第 14 位的服务者"登记成残差。
+    bgm_ducked_ = true;
+    if ((state_flags_ & kMovieGateBit) != 0) {
+        voice_mirror_resource_[0] = read_int(ops[0]);
+        voice_mirror_a4_[0] = 0;
+    } else {
+        voice_mirror_resource_[0] = 0;
+        voice_mirror_a4_[0] = 0;
+        const auto resource = read_int(ops[0]);
+        // `sound:Voice` 关着 ⇒ 装载请求不发，但**播放请求照发**（取证明确）。
+        if (sound_voice_enabled_) voice_load_requests_ += 1;
+        (void)resource;
+        voice_play_requests_ += 1;
+    }
+    if (font_text_gate_5ec7c_ == 0) {
+        TextSpanRecord rec;
+        rec.slot = current_text_slot_;
+        rec.resource = read_int(ops[0]);
+        rec.voice_slot = 0;
+        rec.flags = 0x40000000;
+        text_spans_.push_back(rec);
+    }
+    return;
+}
+
 void Machine::op_307(const Instruction& instruction) {    const Operand* ops = instruction.operands.data();
     // 命名键 setter（0x307 / `sub_426AE0` → 配置库 vtable+0xC 写整，规则 `CORE-OPS-FORWARD-NAMED-KEY`）：
     // 键逐字 = `system:EffectSkipOnClick`（与 0x306 的 getter 是同一键）。

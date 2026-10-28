@@ -74,5 +74,21 @@
         }
       ]
     }
+  ],
+  "containers": [
+    {
+      "name": "RT.DAT",
+      "what": "系统容器（文本/消息库，不是脚本键表；与 SAVE.DAT 同一时机被真实引擎写出）",
+      "mtimeMs": 1793113400973,
+      "mtimeLocal": "2026-10-27T23:03:20",
+      "tzOffsetMinutes": 480
+    },
+    {
+      "name": "SAVE.DAT",
+      "what": "系统容器（脚本键表；真实引擎 2026-10-27 23:03 一次正常退出后写出）",
+      "mtimeMs": 1793113400964,
+      "mtimeLocal": "2026-10-27T23:03:20",
+      "tzOffsetMinutes": 480
+    }
   ]
 }

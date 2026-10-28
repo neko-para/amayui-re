@@ -15492,7 +15492,255 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/spec-save-sites.assets.test.mjs#★ FMT-SAVE 规则的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+        "guard:tools/test/fixtures-system-container.assets.test.mjs#系统容器 SAVE.DAT：分段恰好消费到 EOF"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FORWARD-TEXT-SLOT",
+      "sites": [
+        {
+          "ea": "0x41fe10",
+          "what": "`0x198` 的 handler 入口（分派表 Engine+0xA56FC 指向它）"
+        },
+        {
+          "ea": "0x41fe20",
+          "what": "长度槽 = 7（1 + 2×argc ⇒ argc 3）"
+        },
+        {
+          "ea": "0x456400",
+          "what": "handler 的 callee：写两个偏移的那个函数"
+        },
+        {
+          "ea": "0x456406",
+          "what": "槽下标 0 ⇒ 换成默认槽（读到 0 就改成 1）"
+        },
+        {
+          "ea": "0x45640a",
+          "what": "同上：默认槽常量的来源"
+        },
+        {
+          "ea": "0x456421",
+          "what": "callee 里**唯一**两处写内存之一：槽 +0x0C ← op2"
+        },
+        {
+          "ea": "0x456424",
+          "what": "callee 里**唯一**两处写内存之二：槽 +0x10 ← op3"
+        },
+        {
+          "ea": "0x45af29",
+          "what": "读者：绘制时把 槽+0x0C 加到调用方 x 上"
+        },
+        {
+          "ea": "0x45af3b",
+          "what": "读者：绘制时把 槽+0x10 加到调用方 y 上"
+        }
+      ],
+      "functions": [
+        "sub_41FE10",
+        "sub_456400"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-VOICE-QUEUE",
+      "sites": [
+        {
+          "ea": "0x4267d0",
+          "what": "`0x2f5` 的 handler（表项 Engine+0xA5C70 指向它）"
+        },
+        {
+          "ea": "0x426819",
+          "what": "`0x2f5` 把四个操作数交给排队入口"
+        },
+        {
+          "ea": "0x4bba40",
+          "what": "排队入口：写五格（延时 / 资源 / pending / 起算 / 状态字）"
+        },
+        {
+          "ea": "0x426940",
+          "what": "`0x2ff` 的 handler（表项 Engine+0xA5C98 指向它）"
+        },
+        {
+          "ea": "0x42696b",
+          "what": "`0x2ff` **先**写组开关位 = 1"
+        },
+        {
+          "ea": "0x426976",
+          "what": "`0x2ff` **才**读第 2 个操作数"
+        },
+        {
+          "ea": "0x42697b",
+          "what": "`0x2ff` 写组值格"
+        },
+        {
+          "ea": "0x4bbab0",
+          "what": "排队记录的消费者：计时到点后调播放入口"
+        }
+      ],
+      "functions": [
+        "sub_4267D0",
+        "sub_426940",
+        "sub_4BBA40",
+        "sub_4BBAB0"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-BGM-FADE",
+      "sites": [
+        {
+          "ea": "0x420e00",
+          "what": "`0xc2` 的 handler（表项 Engine+0xA53A4 指向它）"
+        },
+        {
+          "ea": "0x420e1b",
+          "what": "入口读状态选择字（两位分支的判据）"
+        },
+        {
+          "ea": "0x420e55",
+          "what": "B 支：**置**第 9 位（淡变进行中）"
+        },
+        {
+          "ea": "0x420e63",
+          "what": "B 支：第 2 个操作数的第一次读（间隔）"
+        },
+        {
+          "ea": "0x420e86",
+          "what": "B 支：第 2 个操作数的第二 / 第三次读（步长档）"
+        },
+        {
+          "ea": "0x420ed5",
+          "what": "B 支：写目标值并下发淡变请求"
+        },
+        {
+          "ea": "0x489d10",
+          "what": "音乐对象的淡变入口（写目标 / 步长 / 进度三格）"
+        },
+        {
+          "ea": "0x489f80",
+          "what": "刻度满值 = 10000（单位本版不解释）"
+        }
+      ],
+      "functions": [
+        "sub_420E00",
+        "sub_489D10"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-SPAN",
+      "sites": [
+        {
+          "ea": "0x41f720",
+          "what": "`0x82` 的 handler（表项 Engine+0xA52A4 指向它）"
+        },
+        {
+          "ea": "0x41f746",
+          "what": "读序起点：先读第 5 个操作数"
+        },
+        {
+          "ea": "0x41f76e",
+          "what": "最后读第 1 个操作数（节点槽号）"
+        },
+        {
+          "ea": "0x466036",
+          "what": "记录条数 = (end − begin) / 72"
+        },
+        {
+          "ea": "0x46605f",
+          "what": "早退：条数 ≤ 下标 ⇒ 整条什么都不做"
+        },
+        {
+          "ea": "0x466067",
+          "what": "早退：下标 < 0 ⇒ 同上"
+        },
+        {
+          "ea": "0x46606f",
+          "what": "节点表按槽号取值（引擎不查 0..9）"
+        },
+        {
+          "ea": "0x466076",
+          "what": "该节点的一个种类格 == 1 ⇒ 转交另一条绘制路径"
+        },
+        {
+          "ea": "0x46643c",
+          "what": "标志位 1 已置 ⇒ 主色格 ← 字节反转后的第 4 个操作数"
+        },
+        {
+          "ea": "0x466460",
+          "what": "副色格 ← 字节反转后的第 5 个操作数"
+        },
+        {
+          "ea": "0x4665d1",
+          "what": "标志位 3 + 记录位 30 ⇒ 触发配音播放"
+        },
+        {
+          "ea": "0x4671e5",
+          "what": "向渲染器追加绘制命令（本版只记账）"
+        }
+      ],
+      "functions": [
+        "sub_41F720",
+        "sub_466000"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-VOICE-PLAY",
+      "sites": [
+        {
+          "ea": "0x420f70",
+          "what": "`0xc4` 的 handler（表项 Engine+0xA53AC 指向它）"
+        },
+        {
+          "ea": "0x420f9b",
+          "what": "开关消费：位 16 已置 ⇒ 整格 0（槽 0 的第一格）"
+        },
+        {
+          "ea": "0x420fbf",
+          "what": "开关消费：否则位 0 ⇒ 置位 16、保留位 0（槽 0 的第二格）"
+        },
+        {
+          "ea": "0x420fd0",
+          "what": "同上（第二格）"
+        },
+        {
+          "ea": "0x407120",
+          "what": "BGM 压低请求"
+        },
+        {
+          "ea": "0x4bb840",
+          "what": "播放入口：装载（`sound:Voice` 关着则跳过）+ 播放"
+        },
+        {
+          "ea": "0x4bb901",
+          "what": "播放路径写该槽资源格"
+        },
+        {
+          "ea": "0x45eea0",
+          "what": "文本门为 0 时把一条记录追加进文本记录向量"
+        }
+      ],
+      "functions": [
+        "sub_420F70",
+        "sub_407120",
+        "sub_4BB840"
+      ],
+      "storage": [],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
       ]
     }
   ]

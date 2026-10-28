@@ -2878,6 +2878,26 @@ const MUTATIONS = [
     guard: 'plugins/wait-subagent/test/wait.test.mjs',
     what: 'end 与人消息同一同步边到达时不再优先报人插话 ⇒ 人正在等的那条消息被吞掉',
   },
+  // ── fixtures：**一个文件只能有一个身份**（槽载荷 vs 系统容器）──
+  //   ★ 去掉它 ⇒ 同一份 `SAVE76.DAT` 能同时登记成槽载荷与 `containers[]`，
+  //     两条不变量会互相打架，而 `--list` / 守卫都看不出来。
+  {
+    file: 'tools/lib/samples.mjs',
+    from: '    if (payloadNames.has(n)) bad.push(`containers 的 ${n} 与槽载荷重名（一个文件只能有一个身份）`);',
+    to: "    if (false) bad.push('x');",
+    guard: 'tools/test/fixtures-cli-write.test.mjs',
+    what: '去掉"一个文件只能有一个身份" ⇒ 同一份文件能同时登记成槽载荷与系统容器',
+  },
+  // ── spec 证据分级：CTest 的档位看**注册位置**（顶层 = pure，块里 = assets）──
+  //   ★ 把它退化成"一律 pure" ⇒ 装机流程里的 CTest（`if(EMULATOR_CXX_INSTALL_DIR)` 里注册的那些）
+  //     会被当成"默认门禁就会跑"，于是**默认门禁根本不跑的用例**撑起了 reviewed。
+  {
+    file: 'tools/lib/ledger.mjs',
+    from: "    if (hit) return depth > 0 ? 'assets' : 'pure';",
+    to: "    if (hit) return 'pure';",
+    guard: 'tools/test/spec.test.mjs',
+    what: 'CTest 的档位退化成"一律 pure" ⇒ 装机流程里的用例被当成默认门禁会跑，撑起了 reviewed',
+  },
 
 ];
 

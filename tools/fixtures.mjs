@@ -82,11 +82,21 @@ function cmdList(args, samples) {
     });
     return { slot: s.slot, where: s.where, files };
   });
+  // 系统容器 / 玩家配置：不属任何槽，`what` 就是它的身份说明
+  const containers = (samples.containers ?? []).map((c) => {
+    const p = path.join(FIXTURES_DIR, c.name);
+    const st = statKind(p) === 'file' ? Math.round(fs.statSync(p).mtimeMs) : null;
+    const drift = st === null ? 'missing' : Math.abs(st - c.mtimeMs) <= 1000 ? 'ok' : 'drifted';
+    return { name: c.name, what: c.what, files: [`${c.name} ${drift}`] };
+  });
   const plan = args.json
-    ? [JSON.stringify(rows, null, 2)]
+    ? [JSON.stringify({ samples: rows, containers }, null, 2)]
     : [
         'slot  where                  files',
         ...rows.map((r) => `${r.slot}    ${r.where.padEnd(20)} ${r.files.join(' , ')}`),
+        '',
+        '系统容器 / 玩家配置（不属任何槽）',
+        ...containers.map((c) => `      ${c.what.padEnd(40)} ${c.files.join(' , ')}`),
       ];
   return { plan, apply: null };
 }
@@ -94,21 +104,23 @@ function cmdList(args, samples) {
 function cmdRestoreMtime(args, samples) {
   const plan = [];
   const jobs = [];
-  for (const s of samples.samples) {
-    for (const f of s.files) {
-      const p = path.join(FIXTURES_DIR, f.name);
-      if (statKind(p) !== 'file') {
-        plan.push(`FAIL 缺文件 ${f.name}`);
-        continue;
-      }
-      const cur = Math.round(fs.statSync(p).mtimeMs);
-      if (Math.abs(cur - f.mtimeMs) <= 1000) {
-        plan.push(`ok   ${f.name} 已经是记录的 instant`);
-        continue;
-      }
-      plan.push(`set  ${f.name}  ${new Date(cur).toISOString()} → ${new Date(f.mtimeMs).toISOString()}（墙上 ${f.mtimeLocal} @UTC${f.tzOffsetMinutes >= 0 ? '+' : ''}${f.tzOffsetMinutes / 60}）`);
-      jobs.push([p, f.mtimeMs]);
+  const all = [
+    ...samples.samples.flatMap((s) => s.files),
+    ...(samples.containers ?? []),
+  ];
+  for (const f of all) {
+    const p = path.join(FIXTURES_DIR, f.name);
+    if (statKind(p) !== 'file') {
+      plan.push(`FAIL 缺文件 ${f.name}`);
+      continue;
     }
+    const cur = Math.round(fs.statSync(p).mtimeMs);
+    if (Math.abs(cur - f.mtimeMs) <= 1000) {
+      plan.push(`ok   ${f.name} 已经是记录的 instant`);
+      continue;
+    }
+    plan.push(`set  ${f.name}  ${new Date(cur).toISOString()} → ${new Date(f.mtimeMs).toISOString()}（墙上 ${f.mtimeLocal} @UTC${f.tzOffsetMinutes >= 0 ? '+' : ''}${f.tzOffsetMinutes / 60}）`);
+    jobs.push([p, f.mtimeMs]);
   }
   return {
     plan,
@@ -118,6 +130,75 @@ function cmdRestoreMtime(args, samples) {
         fs.utimesSync(p, t, t);
       }
       return `${jobs.length} 个文件的 mtime 已按 samples.json 设回`;
+    },
+  };
+}
+
+/**
+ * 加一份**系统容器 / 玩家配置**（不属任何槽的文件）。
+ * ★ 与 `--add` 的区别只有一个：它没有槽号、也没有 `where`（游戏内定位）——它的身份就是**文件名**，
+ *   所以用 `--what` 说清"它是什么 + 这份样本本身的口径"。
+ */
+function cmdAddContainer(args, samples, manifest) {
+  const name = args.rest[0];
+  if (!name) throw new Error('--add-container 需要 <文件名>（例如 SAVE.DAT）');
+  if (name.includes('/') || name.includes('\\')) throw new Error(`文件名不许带路径：${name}`);
+  const existing = samples.containers ?? [];
+  if (existing.some((c) => c.name === name)) throw new Error(`${name} 已在 samples.json 的 containers 里`);
+  if (samples.samples.some((s) => s.files.some((f) => f.name === name))) {
+    throw new Error(`${name} 已经是某个槽的载荷（一个文件只能有一个身份）`);
+  }
+  if (!args.what) throw new Error('--add-container 需要 --what <它是什么>（这份样本的口径，例如"被哪一次运行写过"）');
+
+  const { fromAbs } = resolveSource(args, manifest);
+  const src = path.join(fromAbs, name);
+  if (statKind(src) !== 'file') throw new Error(`源文件不存在：${src}`);
+  const rec = fileRec(src);
+  const plan = [
+    `add 系统容器 ${name}（${args.what}） 取自 ${fromAbs}`,
+    `  copy ${src}\n    →  corpus/fixtures/${name}   (mtime ← 源；sha256 ${sha256File(src).slice(0, 12)}…)`,
+    '★ 不写清单 origin：fixture 是自足条目（与槽样本同一口径）',
+  ];
+  return {
+    plan,
+    apply: () => {
+      const dst = path.join(FIXTURES_DIR, name);
+      fs.copyFileSync(src, dst);
+      const t = rec.mtimeMs / 1000;
+      fs.utimesSync(dst, t, t);
+      samples.containers = [...existing, { ...rec, what: args.what }];
+      const sres = saveSamples(samples, args.samples);
+      if (!sres.ok) {
+        try {
+          fs.unlinkSync(dst);
+        } catch {
+          /* ignore */
+        }
+        throw new Error(sres.reason);
+      }
+      return `已加入系统容器 ${name}（samples.json 已复验）`;
+    },
+  };
+}
+
+function cmdRemoveContainer(args, samples) {
+  const name = args.rest[0];
+  if (!name) throw new Error('--remove-container 需要 <文件名>');
+  const list = samples.containers ?? [];
+  const idx = list.findIndex((c) => c.name === name);
+  if (idx < 0) throw new Error(`samples.json 的 containers 里没有 ${name}`);
+  return {
+    plan: [`remove 系统容器 ${name}：删 corpus/fixtures/${name} 并摘掉登记`],
+    apply: () => {
+      try {
+        fs.unlinkSync(path.join(FIXTURES_DIR, name));
+      } catch {
+        /* ignore */
+      }
+      samples.containers = list.filter((c) => c.name !== name);
+      const sres = saveSamples(samples, args.samples);
+      if (!sres.ok) throw new Error(sres.reason);
+      return `已移除系统容器 ${name}`;
     },
   };
 }
@@ -305,12 +386,13 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--list' || a === '--restore-mtime' || a === '--refresh-all' || a === '--normalize' || a === '--describe')
       out.action = a.slice(2);
-    else if (a === '--add' || a === '--refresh' || a === '--remove') {
+    else if (a === '--add' || a === '--refresh' || a === '--remove' || a === '--add-container' || a === '--remove-container') {
       out.action = a.slice(2);
       out.rest.push(argv[++i]);
     } else if (a === '--from') out.from = argv[++i];
     else if (a === '--root') out.root = argv[++i];
     else if (a === '--where') out.where = argv[++i];
+    else if (a === '--what') out.what = argv[++i];
     else if (a === '--samples') out.samples = path.resolve(argv[++i]);
     else if (a === '--manifest') out.manifest = path.resolve(argv[++i]);
     else if (a === '--write') out.write = true;
@@ -325,8 +407,10 @@ const HELP = `tools/fixtures.mjs — corpus/fixtures/ 的唯一编辑入口（�
   node tools/fixtures.mjs --list [--json]
   node tools/fixtures.mjs --restore-mtime [--write]
   node tools/fixtures.mjs --add <槽> --where <定位> [--from <源目录> | --root <roots 名>] [--write]
+  node tools/fixtures.mjs --add-container <文件名> --what <它是什么> [--from <源目录> | --root <roots 名>] [--write]
   node tools/fixtures.mjs --refresh <槽> | --refresh-all [--from <源目录>] [--root <roots 名>] [--write]
   node tools/fixtures.mjs --remove <槽> [--write]
+  node tools/fixtures.mjs --remove-container <文件名> [--write]
   node tools/fixtures.mjs --normalize [--write]              # schema 变过后把文件拉回规范形态
   pnpm tools fixtures describe [--json]                # 自描述：字段 / 不变量（含谁在守）/ 怎么查怎么改
 
@@ -351,6 +435,8 @@ export function main(argv = process.argv.slice(2)) {
     list: () => cmdList(args, samples),
     'restore-mtime': () => cmdRestoreMtime(args, samples),
     add: () => cmdAdd(args, samples, manifest),
+    'add-container': () => cmdAddContainer(args, samples, manifest),
+    'remove-container': () => cmdRemoveContainer(args, samples),
     refresh: () => cmdRefresh(args, samples, manifest),
     'refresh-all': () => cmdRefresh({ ...args, rest: [] }, samples, manifest),
     normalize: () => cmdNormalize(args, samples),

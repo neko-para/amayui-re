@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 #include <unordered_map>
 #include <vector>
 
@@ -320,7 +321,18 @@ public:
     std::int32_t scalar_10f() const { return scalar_10f_; }
     std::int32_t scalar_248() const { return scalar_248_; }
     std::int32_t font_8b() const { return font_8b_; }
-    std::int32_t font_size() const { return font_size_; }
+    // ★ 字号与行高是**两个量**：字号 = 字形高度（`Font+0x355D8`，缺省 8，`0x197` 写它），
+    //   行高 = 行距（`Font+0x313D4`，缺省 24，`0x75` 写它）。合并成一个格会让「设字号」把行高也改掉。
+    //   ⚠ 未建模：引擎绘制时把字号乘**显示缩放**（`Font+0x355E4`，初值 1.0，随渲染器高度比例刷新）。
+    //   本宿主按**逻辑分辨率**渲染 ⇒ 该缩放恒为 1.0，乘法是恒等；换成分辨率无关的呈现时要补上。
+    std::int32_t font_size() const { return glyph_height_; }
+    std::int32_t glyph_height() const { return glyph_height_; }
+    std::int32_t line_height() const { return line_height_; }
+    // 十个**文本槽**：各自的字形高度（`槽+0xC8`）与绘制原点偏移（`槽+0x0C` / `槽+0x10`）。
+    std::int32_t text_slot_glyph_height(std::size_t i) const { return text_slots_[i].glyph_height; }
+    std::int32_t text_slot_x(std::size_t i) const { return text_slots_[i].x_offset; }
+    std::int32_t text_slot_y(std::size_t i) const { return text_slots_[i].y_offset; }
+    static constexpr std::size_t text_slot_count() { return 10; }
     const std::string& font_string() const { return font_string_; }
     std::int32_t engine5(std::size_t i) const { return engine5_[i]; }
     std::int32_t key_total() const { return key_total_; }
@@ -456,6 +468,38 @@ public:
     std::int32_t bgm_progress() const { return bgm_progress_; }
     std::size_t bgm_play_requests() const { return bgm_play_requests_; }
     std::size_t bgm_stop_requests() const { return bgm_stop_requests_; }
+    // ── `0xc2` 淡变 / `0x2f5` 配音排队 / `0x2ff` 配音组（观察口，给自检用）──
+    std::int32_t bgm_fade_target() const { return bgm_fade_target_; }
+    std::int32_t bgm_fade_step() const { return bgm_fade_step_; }
+    std::int32_t bgm_fade_progress() const { return bgm_fade_progress_; }
+    std::int32_t bgm_fade_interval_ms() const { return bgm_fade_interval_ms_; }
+    std::int32_t bgm_fade_mix_mode() const { return bgm_fade_mix_mode_; }
+    std::size_t bgm_fade_requests() const { return bgm_fade_requests_; }
+    // 门字（`state_flags_`）：**只给自检 / 夹具**摆前置位用（当前没有哪条已实现的指令能可靠置第 27 位，
+    // 而 `0xc2` 的两条支路正是按那一位分的）。⛔ 不要在产品代码里用它绕开指令。
+    std::uint32_t& state_flags_mut() { return state_flags_; }
+    bool bgm_fade_active() const { return (state_flags_ & (1u << 9)) != 0; }
+    std::int32_t voice_resource() const { return voice_resource_; }
+    bool voice_pending() const { return voice_pending_; }
+    std::int32_t voice_start_ms() const { return voice_start_ms_; }
+    std::int32_t voice_delay(std::size_t i) const { return voice_delay_[i]; }
+    std::int32_t voice_state(std::size_t i) const { return voice_state_[i]; }
+    std::int32_t voice_group_enabled(std::size_t i) const { return voice_group_enabled_[i]; }
+    std::int32_t voice_group_value(std::size_t i) const { return voice_group_value_[i]; }
+    static constexpr std::size_t voice_slot_count() { return 3; }
+    // ── `0xc4`（配音播放）/ `0x82`（画一段文本记录）的观察口 ──
+    std::size_t voice_load_requests() const { return voice_load_requests_; }
+    std::size_t voice_play_requests() const { return voice_play_requests_; }
+    std::int32_t voice_mirror_resource(std::size_t i) const { return voice_mirror_resource_[i]; }
+    std::int32_t voice_mirror_a4(std::size_t i) const { return voice_mirror_a4_[i]; }
+    bool bgm_ducked() const { return bgm_ducked_; }
+    std::int32_t voice_switch(std::size_t i) const { return voice_switch_46c_[i]; }
+    std::size_t text_span_count() const { return text_spans_.size(); }
+    std::int32_t text_span_resource(std::size_t i) const { return text_spans_[i].resource; }
+    std::int32_t text_span_voice_slot(std::size_t i) const { return text_spans_[i].voice_slot; }
+    std::int32_t text_span_flags(std::size_t i) const { return text_spans_[i].flags; }
+    std::size_t text_span_draw_requests() const { return text_span_draw_requests_; }
+    std::size_t text_span_alt_requests() const { return text_span_alt_requests_; }
     std::size_t se_play_requests() const { return se_play_requests_; }
     std::size_t se_stop_requests() const { return se_stop_requests_; }
     bool sound_se_enabled() const { return sound_se_enabled_; }
@@ -693,6 +737,10 @@ private:
     // 音频请求族（0xb6 停止一个音效槽 / 0xb7 BGM 播放 / 0xb8 BGM 停止 / 0xba 循环变体）。
     void op_b6(const Instruction&); void op_b7(const Instruction&); void op_b8(const Instruction&);
     void op_ba(const Instruction&);
+    // `60-ops-voice`：BGM 淡变 / 配音排队 / 配音组
+    void op_c2(const Instruction&); void op_2f5(const Instruction&); void op_2ff(const Instruction&);
+    // 文本记录（`0x82` 消费者 / `0xc4` 生产者）
+    void op_82(const Instruction&); void op_c4(const Instruction&);
     /** 显示模式请求的实现（`0x2cf` 转发到的入口；`0x2ce` 读的是同一个缓存格）。 */
     void apply_display_mode(std::int32_t target);
     void op_2e6(const Instruction&); void op_2e7(const Instruction&); void op_2e8(const Instruction&);
@@ -740,7 +788,7 @@ private:
     void op_2ec(const Instruction&); void op_2eb(const Instruction&); void op_1a4(const Instruction&); void op_76(const Instruction&);
     void op_2bd(const Instruction&); void op_2de(const Instruction&); void op_192(const Instruction&); void op_1a9(const Instruction&);
     void op_1aa(const Instruction&); void op_1a3(const Instruction&); void op_1a2(const Instruction&); void op_2db(const Instruction&);
-    void op_78(const Instruction&); void op_71(const Instruction&); void op_1a5(const Instruction&); void op_197(const Instruction&);
+    void op_78(const Instruction&); void op_71(const Instruction&); void op_1a5(const Instruction&); void op_197(const Instruction&); void op_198(const Instruction&);
     void op_75(const Instruction&);
     // 文本长度 / 字体槽表 / Font 条目登记表（vm_ops_text.cpp）
     void op_1a6(const Instruction&); void op_300(const Instruction&); void op_301(const Instruction&);
@@ -861,6 +909,16 @@ private:
     std::int32_t default_group_ = 1;
     std::int32_t scalar_d107656_ = 0;
     std::int32_t font_draw_mode_ = 1;
+    // 字形高度（`Font+0x355D8`）缺省 **8**、行高（`Font+0x313D4`）缺省 **24** —— 这是引擎的两个不同缺省，
+    // 不是同一个量的两个名字（实测：`0x75` 只写行高那一组，`0x197` 只写字号那一组）。
+    std::int32_t glyph_height_ = 8;
+    std::int32_t line_height_ = 24;
+    struct TextSlot {
+        std::int32_t glyph_height = 0;  // `槽+0xC8`：`0x197` 把**十槽全写**成同一个值
+        std::int32_t x_offset = 0;      // `槽+0x0C`：`0x198` 的 op2
+        std::int32_t y_offset = 0;      // `槽+0x10`：`0x198` 的 op3
+    };
+    std::array<TextSlot, 10> text_slots_{};
     std::int32_t font_align_mode_ = 0;
     std::int32_t font_primary_color_ = 0xFFFFFF;
     std::int32_t font_secondary_color_ = 0x000000;
@@ -887,7 +945,8 @@ private:
     // 引擎的可观察状态（取证：0xb4/0xb6/0xb7/0xb8/0xba 的 handler）：
     //   · 每个音效槽"当前资源号"（0xb4 成功写、0xb6 清 0）；
     //   · BGM 的 曲目 / 参数 / 淡变进度 三格（0xb7 写前两格、0xb8 清前两格）；
-    //   · "音乐淡变进行中"就是门字第 9 位（0xb7/0xb8/0xc2 置、主循环清）。
+    //   · "音乐淡变进行中"就是门字第 9 位：**`0xc2` 置它**（`0x420E55 or …0x200`），
+    //     `0xb7` / `0xb8` / `0xbf` / 主循环都是**清**它（本文件以前把这条注释放反过）。
     // ⛔ 声音本身不建模 —— 请求只计数（守卫靠它区分"发了/没发"）。
     std::array<std::int32_t, 15> se_slot_resource_{};
     std::int32_t bgm_track_ = 0;
@@ -897,6 +956,50 @@ private:
     std::size_t bgm_stop_requests_ = 0;
     std::size_t se_play_requests_ = 0;
     std::size_t se_stop_requests_ = 0;
+    // `0xc2`（BGM 淡变）：目标值 / 步长 / 进度 / 间隔（ms）/ 混音方式，外加一笔"发了淡变请求"。
+    // ★ `op1` **不是曲目号**（曲目另有格）；刻度满值 = 10000（唯一观察），本条不解释它的单位。
+    std::int32_t bgm_fade_target_ = 0;
+    std::int32_t bgm_fade_step_ = 0;
+    std::int32_t bgm_fade_progress_ = 0;
+    std::int32_t bgm_fade_interval_ms_ = 0;
+    std::int32_t bgm_fade_mix_mode_ = 0;
+    std::size_t bgm_fade_requests_ = 0;
+    // `0x2f5`（配音排队）写的那五格：延时 ms / 资源号 / pending / 起算 / 状态字（每槽一格）。
+    // ★ 真正"响"是帧更新里的计时（本版不建模时钟 ⇒ 只落状态与请求）。
+    std::int32_t voice_resource_ = 0;
+    bool voice_pending_ = false;
+    std::int32_t voice_start_ms_ = 0;
+    std::array<std::int32_t, 3> voice_delay_{};
+    std::array<std::int32_t, 3> voice_state_{};
+    // `0x2ff`（配音组）：三个槽各一对「组开关位」与「组值」。★ 组值的领域含义未取证
+    //（只证到播放时会抄进声音后端的一列里，而那一列在本语料里没有读者）。
+    std::array<std::int32_t, 3> voice_group_enabled_{};
+    std::array<std::int32_t, 3> voice_group_value_{};
+    // `0xc4` 消费的**另一个**槽 0 开关格（`T_Voice+0x46C`）。本模型里没有写者 ⇒ 保持缺省 0。
+    // ★ 两个开关格的消费写法与排队路径**不同**：这里是"位16 ⇒ 整格 0；否则位0 ⇒ 置位16（**保留位0**）"，
+    //   而排队播放那一路是 `and 0x10000`（**清位0**）。照抄，不要统一。
+    std::array<std::int32_t, 3> voice_switch_46c_{};
+    // `0xc4` 写的两个"镜像"格（`Engine+0x77A24` / `+0x77A30`，每槽一份）。
+    std::array<std::int32_t, 3> voice_mirror_resource_{};
+    std::array<std::int32_t, 3> voice_mirror_a4_{};
+    std::size_t voice_load_requests_ = 0;
+    std::size_t voice_play_requests_ = 0;
+    bool bgm_ducked_ = false;  // `0xAAB44` 第 14 位的投影（BGM 压低，`sub_407120` 那一步）
+    // `0x82` 消费的那条**文本记录向量**（`T_Font+0xD24`，72 字节/条）的**最小可观察投影**：
+    // 只建已取证的 6 个字段（+0x00 / +0x14 / +0x18 / +0x1C / +0x20 / +0x28），其余字段不建（残差）。
+    struct TextSpanRecord {
+        std::int32_t slot = 0;        // +0x00 当前文本槽
+        std::int32_t resource = 0;    // +0x14 语音资源
+        std::int32_t a18 = 0;         // +0x18
+        std::int32_t a1c = 0;         // +0x1C
+        std::int32_t voice_slot = 0;  // +0x20
+        std::int32_t flags = 0;       // +0x28（bit1 = 按 op3 位0 显隐；bit30 = 可触发语音）
+    };
+    std::vector<TextSpanRecord> text_spans_;
+    std::size_t text_span_draw_requests_ = 0;  // 追加绘制命令（度量与命令本身未建模）
+    std::size_t text_span_alt_requests_ = 0;   // `node[0x70]==1` 时转交的另一条绘制路径
+    // 文本节点槽的"种类"格（`T_Font+0x414` 十项数组各自的 +0x70）。本模型里没有写者 ⇒ 缺省 0（= 走主路径）。
+    std::unordered_map<std::int32_t, std::int32_t> font_node_kind_;
     // `0x1ba` 的两个引擎开关格（构造期默认 **1 = 开**，取证 `0x491932` / `0x49194f`）。
     bool sound_se_enabled_ = true;
     bool sound_voice_enabled_ = true;
@@ -917,7 +1020,6 @@ private:
     std::int32_t scalar_10f_ = 0;
     std::int32_t scalar_248_ = 0;
     std::int32_t font_8b_ = 0;
-    std::int32_t font_size_ = 24;
     std::string font_string_;
     std::array<std::int32_t, 5> engine5_{};
     std::int32_t key_total_ = 7;  // 引擎构造（Input[259]=7）建立的初值；0xfe 可覆盖

@@ -2767,6 +2767,232 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.bgm_track() != 0) return fail("0xb8 没有清曲目格");
     }
 
+    // ⑮ 0x2f5：读序 4→1、五格落位（延时 / 资源 / pending / 起算 / 状态字）；越界只记日志不写
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2F5, {{0, 7}, {0, 3}, {0, 250}, {0, 2}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2f5 停机");
+        if (machine.voice_resource() != 7) return fail("0x2f5 没有把 op1 写成资源号");
+        if (!machine.voice_pending()) return fail("0x2f5 没有置 pending");
+        if (machine.voice_state(2) != 3) return fail("0x2f5 没有把 op2 写成该槽状态字");
+        if (machine.voice_delay(2) != 250) return fail("0x2f5 没有把 op3 写成延时");
+        if (machine.voice_start_ms() != 0) return fail("0x2f5 没有把起算清 0");
+    }
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2F5, {{0, 0}, {0, 0}, {0, 0}, {0, 5}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2f5 越界下标不该停机");
+        if (machine.voice_pending()) return fail("0x2f5 越界下标仍写了槽（应当记日志后跳过）");
+    }
+
+    // ⑯ 0x2ff：**先写组开关位、才读 op2** ⇒ 组值落位；三个槽互不影响
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2FF, {{0, 1}, {0, 9}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2ff 停机");
+        if (machine.voice_group_enabled(1) != 1) return fail("0x2ff 没有置组开关位");
+        if (machine.voice_group_value(1) != 9) return fail("0x2ff 没有写组值");
+        if (machine.voice_group_enabled(0) != 0 || machine.voice_group_value(0) != 0) {
+            return fail("0x2ff 写了别的槽");
+        }
+    }
+
+    // ⑰ 0xc2：A 支（第 27 位）瞬间到位、**不动第 9 位**；B 支置第 9 位 + 间隔 / 步长两档
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xC2, {{0, 5000}, {0, 30}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0xc2（B 支）停机");
+        if (!machine.bgm_fade_active()) return fail("0xc2 B 支没有置第 9 位（淡变进行中）");
+        if (machine.bgm_fade_target() != 5000) return fail("0xc2 B 支没有写目标值 op1");
+        if (machine.bgm_fade_interval_ms() != 3) return fail("0xc2 B 支：op2<1000 ⇒ 间隔 = op2/10");
+        if (machine.bgm_fade_step() != 10) return fail("0xc2 B 支：op2<1000 ⇒ 步长 10");
+    }
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xC2, {{0, 4000}, {0, 3500}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0xc2（B 支大数）停机");
+        if (machine.bgm_fade_interval_ms() != 35) return fail("0xc2 B 支：op2>=1000 ⇒ 间隔 = op2/100");
+        if (machine.bgm_fade_step() != 1) return fail("0xc2 B 支：op2>=1000 ⇒ 步长 1");
+    }
+    // ★ `0xc2` 的 A 支（门字第 27 位 = "立即到位"）**没法用合成脚本走到**：那一位同时是主循环要服务的
+    //   "文本请求"位，本模型的门一旦看到**未服务**的位就只报诊断、不取指 ⇒ 在 A 支之前就被挡住。
+    //   该支路按取证实现了（目标 / 步长 / 瞬间到位 / 不动第 9 位），但**没有行为级守卫** ⇒ 已登记为残差。
+
+    // ⑱ 0xc4：正常支（无影片门）⇒ 1 次装载 + 1 次播放请求、镜像格清 0、文本记录追加一条
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xC4, {{0, 500}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0xc4 停机");
+        if (machine.voice_play_requests() != 1) return fail("0xc4 没有发播放请求");
+        if (machine.voice_load_requests() != 1) return fail("0xc4 没有发装载请求");
+        if (machine.voice_mirror_resource(0) != 0) return fail("0xc4 正常支没有清镜像资源格");
+        if (!machine.bgm_ducked()) return fail("0xc4 没有压低 BGM（门字第 14 位）");
+        if (machine.text_span_count() != 1) return fail("0xc4 没有追加文本记录（文本门开着 ⇒ 必须追加）");
+        if (machine.text_span_flags(0) != 0x40000000) return fail("0xc4 追加的记录 flags 不是 0x40000000");
+        if (machine.text_span_resource(0) != 500) return fail("0xc4 追加的记录没有带 op1");
+        if (machine.text_span_voice_slot(0) != 0) return fail("0xc4 追加的记录配音槽不是 0");
+    }
+
+    // ⑲ 0xc4：文本门被关（0x1bb 写 0 ⇒ 抑制）⇒ **不追加记录**
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1BB, {{0, 0}});
+        emit_instruction(bytes, 0xC4, {{0, 500}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x1bb 停机");
+        if (!machine.step()) return fail("0xc4（文本门关）停机");
+        if (machine.text_span_count() != 0) return fail("0xc4 在文本门关着时仍追加了记录");
+        if (machine.voice_play_requests() != 1) return fail("0xc4 文本门关着时不该影响播放请求");
+    }
+
+    // ⑳ 0xc4 的**开关消费**：位0 ⇒ 置位16（位0 保留）；再来一次（位16 已置）⇒ 整格 0
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2FF, {{0, 0}, {0, 7}});
+        emit_instruction(bytes, 0xC4, {{0, 500}});
+        emit_instruction(bytes, 0xC4, {{0, 500}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2ff 停机");
+        if (!machine.step()) return fail("0xc4 第一次停机");
+        if (machine.voice_group_enabled(0) != 0x10001) {
+            return fail("0xc4 第一次开关消费：应当 位0 保留 + 置位16（= 0x10001）");
+        }
+        if (!machine.step()) return fail("0xc4 第二次停机");
+        if (machine.voice_group_enabled(0) != 0) {
+            std::fprintf(stderr, "config-ui: 0xc4 第二次开关消费后格 = 0x%X\n",
+                         static_cast<unsigned>(machine.voice_group_enabled(0)));
+            return fail("0xc4 第二次开关消费：位16 已置 ⇒ 整格 0");
+        }
+    }
+
+    // ㉑ 0x82：记录向量为空 ⇒ **整条静默**（不写颜色、不发请求、不抛），且推进 11 格（下一条照常执行）
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x82, {{0, 0}, {0, 0}, {0, 2}, {0, 0x112233}, {0, 0x445566}});
+        emit_instruction(bytes, 0xC4, {{0, 500}});  // 用一条**有可观察副作用**的指令验推进格数
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x82（空向量）不该停机");
+        if (machine.font_primary_color() != 0xFFFFFF) return fail("0x82 在建界早退时仍写了主色");
+        if (machine.font_secondary_color() != 0x000000) return fail("0x82 在建界早退时仍写了副色");
+        if (!machine.errors().empty()) return fail("0x82 早退不该记错误");
+        if (!machine.step()) return fail("0x82 之后的指令没有执行（推进格数不对）");
+        if (machine.voice_play_requests() != 1) {
+            return fail("0x82 之后的 0xc4 没有生效（0x82 的推进/长度不对）");
+        }
+    }
+
+    // ㉒ 0x82：有记录时按 op3 位1 写两格颜色（**字节反转**）；位3 + 记录 bit30 ⇒ 触发一次配音
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xC4, {{0, 500}});                                  // 先产出一条记录
+        emit_instruction(bytes, 0x82, {{0, 0}, {0, 0}, {0, 2}, {0, 0x112233}, {0, 0x445566}});
+        emit_instruction(bytes, 0x82, {{0, 0}, {0, 0}, {0, 8}, {0, 0}, {0, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0xc4（产出记录）停机");
+        if (!machine.step()) return fail("0x82（颜色支）停机");
+        if (machine.font_primary_color() != 0x332211) return fail("0x82 主色没有字节反转（应 0x332211）");
+        if (machine.font_secondary_color() != 0x665544) return fail("0x82 副色没有字节反转（应 0x665544）");
+        if (machine.voice_play_requests() != 1) return fail("0x82（op3=2）不该发配音请求");
+        if (!machine.step()) return fail("0x82（配音支）停机");
+        if (machine.voice_play_requests() != 2) return fail("0x82（op3=8）没有触发配音请求");
+        if (machine.font_primary_color() != 0x332211) return fail("0x82（op3=8）不该再写颜色");
+    }
+
+    // ⑫ 0x197 / 0x75 是**两个量**（字形高度 / 行高），各有缺省，互不覆盖；0x197 还把十个文本槽一起写
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x75, {{0, 30}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (machine.glyph_height() != 8) return fail("字号缺省应当是 8（引擎的初值，不是行高的 24）");
+        if (machine.line_height() != 24) return fail("行高缺省应当是 24");
+        if (!machine.step()) return fail("0x75 停机");
+        if (machine.line_height() != 30) return fail("0x75 没有写行高");
+        if (machine.glyph_height() != 8) return fail("0x75 顺带改掉了字号（两者是两个格）");
+    }
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x197, {{0, 10}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x197 停机");
+        if (machine.glyph_height() != 10) return fail("0x197 没有写字形高度");
+        for (std::size_t i = 0; i < core::Machine::text_slot_count(); ++i) {
+            if (machine.text_slot_glyph_height(i) != 10) return fail("0x197 没有把十个文本槽一起写");
+        }
+        if (!machine.step()) return fail("0x75（在 0x197 之后）停机");
+        if (machine.glyph_height() != 10) return fail("0x75 把 0x197 写的字号覆盖了（两者是两个格）");
+        if (machine.line_height() != 20) return fail("0x75 没有写行高");
+    }
+
+    // ⑬ 0x198：槽下标 0 ⇒ **默认槽 1**；只写那一槽的两个偏移；不碰字号 / 行高 / 别的槽
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x197, {{0, 10}});
+        emit_instruction(bytes, 0x198, {{0, 0}, {0, 100}, {0, 200}});
+        emit_instruction(bytes, 0x198, {{0, 3}, {0, 7}, {0, 8}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x198 前置 0x197 停机");
+        if (!machine.step()) return fail("0x198(0,100,200) 停机");
+        // ★ 槽 0 不可达：`0` 是"默认槽"，写进去的是槽 1
+        if (machine.text_slot_x(0) != 0 || machine.text_slot_y(0) != 0) {
+            return fail("0x198 槽下标 0 写到了槽 0（规范：0 ⇒ 默认槽 1）");
+        }
+        if (machine.text_slot_x(1) != 100 || machine.text_slot_y(1) != 200) {
+            return fail("0x198 没有把两个偏移写进默认槽 1");
+        }
+        if (!machine.step()) return fail("0x198(3,7,8) 停机");
+        if (machine.text_slot_x(3) != 7 || machine.text_slot_y(3) != 8) return fail("0x198 没有写槽 3");
+        if (machine.text_slot_x(1) != 100) return fail("0x198 写槽 3 时把槽 1 改了");
+        if (machine.glyph_height() != 10) return fail("0x198 改了字形高度（规范：只写偏移）");
+        if (machine.line_height() != 24) return fail("0x198 改了行高（规范：只写偏移）");
+    }
+    // ⑭ 0x198 越界下标：引擎里是未定义行为 ⇒ 本实现**夹紧后跳过**（不写任何槽、不停机）
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x198, {{0, 12}, {0, 5}, {0, 6}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x198 越界下标不该停机");
+        for (std::size_t i = 0; i < core::Machine::text_slot_count(); ++i) {
+            if (machine.text_slot_x(i) != 0 || machine.text_slot_y(i) != 0) {
+                return fail("0x198 越界下标写了槽（应当夹紧后跳过）");
+            }
+        }
+    }
+
     return true;
 }
 
@@ -3348,7 +3574,9 @@ int main() {
             auto draw_alignment = [&](bool mode_one) {
                 auto script = make_script_with_body();
                 emit_instruction(script, 0x1F8, {{0, 1}, {0, 96}, {0, 48}, {0, 0}});
-                emit_instruction(script, 0x75, {{0, 20}});  // 字号 20（与 CONFIG1.BIN 的标签同）
+                // ★ 字形高度用 `0x197` 设：**`0x75` 是行高**，两者是引擎里两组不同的格。
+                //   这条用例曾用 `0x75` 设"字号" —— 那正是本模型以前把两个量合成一个格的证据。
+                emit_instruction(script, 0x197, {{0, 20}});
                 if (mode_one) emit_instruction(script, 0x2DB, {{0, 1}});  // 对位模式 1；缺省 = 0
                 emit_text_204(script, 1, 0, 10, cjk);  // y = 10 = 字形格顶
                 emit_instruction(script, 2, {});

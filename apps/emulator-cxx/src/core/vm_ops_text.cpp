@@ -6,7 +6,18 @@
 #include "core/vm.h"
 #include "core/vm_internal.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 namespace core {
+namespace {
+// `EMULATOR_CXX_TRACE_TEXT=1` ⇒ 把字号 / 行高 / 文本槽偏移的**每次写入**打到 stderr。
+// ★ 诊断用（问"界面里这段文字为什么这么小"）：这三个量在引擎里是**不同的格**，混起来看不出是谁写的。
+bool text_trace_enabled() {
+    static const bool on = std::getenv("EMULATOR_CXX_TRACE_TEXT") != nullptr;
+    return on;
+}
+}  // namespace
 
 void Machine::op_2ec(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
@@ -121,12 +132,45 @@ void Machine::op_1a5(const Instruction& instruction) {
 
 void Machine::op_197(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    const auto value = read_int(ops[0]); font_size_ = value; return;
+    // `0x197` 设字号（`sub_41FDD0`，**argc 1**）：op1 = **字形高度（未缩放的逻辑像素）**，**没有**字体对象下标。
+    // ★ 引擎的写点（`sub_418680`）：全局字号格 ← v；**十个槽全写** `槽+0xC8 = v`（展开、无下标、无越界检查）；
+    //   LOGFONTA 的 `lfHeight = -v`、`lfWidth = -(v/2)`（向零截断）；随后重建三种 HFONT。
+    // ★ 它**不碰**行高那一组（`Font+0x313D4`，那是 `0x75` 的活）—— 两件事一个格是本模型以前的错。
+    // ★ 缺省 8（引擎 `0x46551C` 的初值），不是行高的 24。
+    // ★ 最终像素 = round(v × 显示缩放 `Font+0x355E4`)；本宿主按逻辑分辨率渲染 ⇒ 缩放恒 1.0。
+    const auto value = read_int(ops[0]);
+    glyph_height_ = value;
+    for (auto& slot : text_slots_) slot.glyph_height = value;
+    if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x197 glyph_height=%d\n", value);
+    return;
 }
 
 void Machine::op_75(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    font_size_ = read_int(ops[0]); return;  // 字体重建请求未建模
+    // `0x75` 设行高（`sub_4185F0`）：只写行高那一组（`0x418611/0x418617/0x418619/0x418667/0x41866D`），
+    // **不碰**字号格与 LOGFONTA ⇒ 与 `0x197` 是两个量。缺省 24。
+    line_height_ = read_int(ops[0]);
+    if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x75 line_height=%d\n", line_height_);
+    return;  // 行距链的消费者（换行/自动推进）未建模
+}
+
+void Machine::op_198(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // `0x198` 设**文本槽的绘制原点偏移**（`sub_41FE10`，**argc 3**）：
+    //   op1 = 槽下标（`0` ⇒ 默认槽 **1**；合法 0..9），op2 → `槽+0x0C`，op3 → `槽+0x10`。
+    // ★ 它**不碰**字号、不重建字体：`sub_456400` 里仅 `0x456421` / `0x456424` 两处写内存。
+    // ★ 槽指针为 0 时引擎不检查（直写 [0+…]），越界/负数是**未定义行为** ⇒ 这里夹紧后跳过（已知偏离）。
+    int slot = read_int(ops[0]);
+    if (slot == 0) slot = 1;
+    if (slot < 0 || slot >= static_cast<int>(text_slots_.size())) return;
+    text_slots_[static_cast<std::size_t>(slot)].x_offset = read_int(ops[1]);
+    text_slots_[static_cast<std::size_t>(slot)].y_offset = read_int(ops[2]);
+    if (text_trace_enabled()) {
+        std::fprintf(stderr, "[text] 0x198 slot=%d x=%d y=%d\n", slot,
+                     text_slots_[static_cast<std::size_t>(slot)].x_offset,
+                     text_slots_[static_cast<std::size_t>(slot)].y_offset);
+    }
+    return;
 }
 
 void Machine::op_6e(const Instruction& instruction) {

@@ -197,6 +197,12 @@ pnpm typecheck                  # ★ `tsc --noEmit`，**六个工程**（`packa
 
 `@kind` ∈ `gate`（不变量/清单/约定）· `contract`（领域能力行为）· `safety`（写路径不写坏数据）· `product`（产出物不变量）。
 
+★ **CTest 那一档不写 pragma，判据是「注册位置」**：`apps/emulator-cxx` 的守卫是 CTest（`add_test`），
+它的档位 = **是否顶层无条件注册** —— 顶层 ⇒ 默认 `ctest` 就会跑（免安装）⇒ `pure`；
+落在 `if` / `foreach` / `function` / `macro` / `while` / `block` 里 ⇒ `assets`。
+解析在同一处（`tools/lib/ledger.mjs` 的 `cmakeTestTier()`，判据不建清单），两侧守卫见
+`tools/test/ledger.test.mjs` 与 `tools/test/spec.test.mjs`。⇒ **想让一条 CTest 成为 spec 的 reviewed 级证据，就把它注册在最外层。**
+
 ★ 为什么要有分级（实测）：旧形态一条命令跑全部 = 23 文件 / 220 用例 / **~28.7 s**，其中
 `inventory` 13.8 s + `corpus-manifest` 9.8 s 占了 **82%**；而且 **13/23 个文件依赖仓库外的东西**，
 "这台机器上没跑"与"跑了且绿"在输出里长得一样。选择器是 `tools/test-run.mjs`。

@@ -259,6 +259,12 @@ cmake --preset windows-x64 -DEMULATOR_CXX_INSTALL_DIR="E:\Games\Eushully\天結\
 ctest --test-dir out\build\windows-x64 --output-on-failure
 ```
 
+★ **CTest 的分级由「注册位置」决定**（不是 pragma，也不另建清单）：`add_test` 写在**顶层** ⇒
+免安装、默认 `ctest` 就会跑 ⇒ 可当 spec 的 `reviewed` 级证据；写进任何
+`if` / `foreach` / `function` / `macro` / `while` / `block` 块里 ⇒ 默认门禁不跑 ⇒ 只能当 `draft` 证据。
+判据在 `tools/lib/ledger.mjs` 的 `cmakeTestTier`，由 `tools/test/ledger.test.mjs` 与
+`tools/test/spec.test.mjs` 两侧钉住。⇒ 想让一条行为级用例成为规范证据，**把它注册在最外层**。
+
 `--smoke` 会：
 
 1. 创建 1280×720 `R8G8B8A8_UNORM` 离屏纹理；

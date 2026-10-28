@@ -8,12 +8,20 @@
 
 ## 它是什么
 
-`corpus/fixtures/` 这一批**真存档样本**的**结构化描述**：一个样本 = 一个槽 = 一对文件（`.DAT` + `.STH`）。
-它只管**文件级事实**（槽 → 游戏内定位 → 各文件的源 instant）。
+`corpus/fixtures/` 这一批**真存档样本**的**结构化描述**，两段：
+
+* `samples[]` —— 一个样本 = 一个槽 = 一对文件（`.DAT` + `.STH`）；
+* `containers[]` —— **不属任何槽**的文件（系统容器 / 玩家配置一类）：身份就是文件名，
+  所以每条用 `what` 说明"它是什么 + 这份样本本身的口径"（例如"由哪一次运行写出"）。
+
+它只管**文件级事实**（槽 → 游戏内定位 → 各文件的源 instant；容器 → 它是谁 → 源 instant）。
 
 **存储去向不在这里**：那是 `corpus/assets.json` 里 `fixtures/save-samples` 一条（说明书 `../assets.md`）。
 而**来源不登记在任何地方** —— fixture 是**自足条目**（固化资源，没有加工链，入库的那一份就是原件），
-所以清单不记 `origin`；`slot` + `where` + 源 mtime 这三样合起来**就是**它的身份。
+所以清单不记 `origin`；`slot` + `where` + 源 mtime 这三样合起来**就是**槽样本的身份，
+容器则是 `name` + `what` + 源 mtime。
+
+★ **一个文件只能有一个身份**：既登记成槽载荷、又登记成 `containers[]` 会被写入口与守卫同时挡住。
 
 ## 非显然的口径（脚本里学不到、必须写下来的那种）
 
@@ -32,7 +40,7 @@
 
 ```bash
 pnpm tools fixtures describe      # ★ 字段 / 不变量（含谁在守）/ 操作表（本文件不含这些）
-pnpm tools fixtures list                 # 槽 / 定位 / 每个文件是否与记录的 instant 一致
+pnpm tools fixtures list                 # 槽 / 系统容器 / 定位 / 每个文件是否与记录的 instant 一致
 pnpm tools fixtures list --json
 ```
 
@@ -44,10 +52,12 @@ pnpm tools fixtures list --json
 
 ```bash
 pnpm tools fixtures add <槽> --where "<定位>" [--from <源目录> | --root <roots 名>] --write
+pnpm tools fixtures add-container <文件名> --what "<它是什么 / 这份样本的口径>" [--from <源目录> | --root <roots 名>] --write
 pnpm tools fixtures refresh <槽> [--from <源目录>] --write   # 重取（缺省按登记的 origin；没有就如实报出）
 pnpm tools fixtures refresh-all [--from <源目录>] --write
-pnpm tools fixtures restore-mtime --write     # 刚 clone：按记录的 instant 拨回
+pnpm tools fixtures restore-mtime --write     # 刚 clone：按记录的 instant 拨回（槽载荷与容器一起拨）
 pnpm tools fixtures remove <槽> --write
+pnpm tools fixtures remove-container <文件名> --write
 pnpm tools fixtures normalize --write         # schema 变过之后拉回规范形态
 ```
 

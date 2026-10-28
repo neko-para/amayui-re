@@ -210,8 +210,9 @@ void Machine::op_205(const Instruction& instruction) {
     if (texture == nullptr || texture->rgba.empty()) return;  // 三条入口条件之一：槽里没有可用表面
 
     // X = op2 + 未用格数 × 格宽 × k：默认右齐(k=1)、0x2 居中(1/2)、0x4 左齐(0)。
-    // ★ 格宽取字体对象的高度格（引擎 `Engine+0x46104` = 字号链写入的格宽；本模型用 `font_size_`）。
-    const int cell_width = font_size_ > 0 ? font_size_ : 24;
+    // ★ 格宽取字体对象的高度格（引擎 `Engine+0x46104` = 字号链写入的格宽）⇒ 本模型用**字形高度**
+    //   （`0x197` 写它；⛔ 不是行高 —— 行高是 `0x75` 的另一个量）。
+    const int cell_width = glyph_height_ > 0 ? glyph_height_ : 8;
     const int width = (flags & 0x10000) != 0 ? cell_width / 2 : cell_width;
     const int free_cells = cells - chars;
     // k（以 1/2 为单位）：右齐 = 2/2、居中 = 1/2、左齐 = 0/2。

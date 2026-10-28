@@ -19,6 +19,7 @@ export { DEFAULT_SAMPLES, FIXTURES_DIR, wallClock };
 export const CARRY_ID = 'fixtures/save-samples';
 const EXTS = ['DAT', 'STH'];
 const FILE_KEY_ORDER = ['name', 'mtimeMs', 'mtimeLocal', 'tzOffsetMinutes'];
+const CONTAINER_KEY_ORDER = ['name', 'what', 'mtimeMs', 'mtimeLocal', 'tzOffsetMinutes'];
 
 /** 工具**拥有**的顶层 `_doc`（写盘时自动注入 ⇒ 指向自描述，不会漂） */
 export const SAMPLES_DOC =
@@ -27,23 +28,25 @@ export const SAMPLES_DOC =
 /** 工具层的自我声明：**我动哪片数据、有哪些操作**（`tools/cli.mjs` 的域地图从它派生） */
 export const DOMAIN = {
   id: 'fixtures',
-  title: '真存档样本（槽 76/77/78/79；文件级事实 + mtime）',
+  title: '真存档样本（槽 76/77/78/79 + 系统容器 / 玩家配置；文件级事实 + mtime）',
   data: [
     '`corpus/fixtures/samples.json`（本工具的唯一写入口）',
-    '`corpus/fixtures/SAVE*.DAT` / `.STH`（载荷，LFS；本工具是它们唯一的增删入口）',
+    '`corpus/fixtures/SAVE*.DAT` / `.STH`（槽载荷，LFS）与系统容器 / 玩家配置（`containers`；本工具是它们唯一的增删入口）',
   ],
   access: 'rw（唯一编辑入口；缺省 dry-run，写后复验，不绿回滚）',
   tool: 'tools/fixtures.mjs',
 };
 
 export const OPERATIONS = [
-  { name: 'list', argv: ['--list'], mutates: false, summary: '槽 / 定位 / 每个文件是否与记录的 instant 一致' },
+  { name: 'list', argv: ['--list'], mutates: false, summary: '槽 / 系统容器 / 定位 / 每个文件是否与记录的 instant 一致' },
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 不变量（含谁在守）/ 操作' },
   { name: 'restore-mtime', argv: ['--restore-mtime'], mutates: true, summary: '刚 clone：按记录的 instant 把 mtime 拨回（跨时区也对）[--write]' },
   { name: 'add', argv: ['--add'], mutates: true, summary: '加一个槽（拷文件 + 设 mtime）：`<槽> --from <源目录> [--root <roots 名>] --where <定位>` [--write]' },
+  { name: 'add-container', argv: ['--add-container'], mutates: true, summary: '加一份系统容器 / 玩家配置（不属任何槽）：`<文件名> --from <源目录> [--root <roots 名>] --what <它是什么>` [--write]' },
   { name: 'refresh', argv: ['--refresh'], mutates: true, summary: '重新取一个槽：`<槽> --from <源目录>`（缺省按登记的 origin 找，没有就如实报出）[--write]' },
   { name: 'refresh-all', argv: ['--refresh-all'], mutates: true, summary: '按登记的 origin 全部重取一遍（没有 origin 就都给 --from）[--write]' },
   { name: 'remove', argv: ['--remove'], mutates: true, summary: '删一个槽（文件 + samples.json 的登记；有 origin 就连它一起摘）：`<槽>` [--write]' },
+  { name: 'remove-container', argv: ['--remove-container'], mutates: true, summary: '删一份系统容器 / 玩家配置：`<文件名>` [--write]' },
   { name: 'normalize', argv: ['--normalize'], mutates: true, summary: 'schema 变过后拉回规范形态 [--write]' },
 ];
 
@@ -58,10 +61,21 @@ const SAMPLE_FIELD_DOC = [
   ['files[].tzOffsetMinutes', '✅', 'number（东为正，如 UTC+8 = 480）', '把 instant 还原成墙上时间用；**与跑命令的机器时区无关**'],
 ];
 
+/** 系统容器 / 玩家配置（**不属于任何槽**的文件）的字段说明 */
+const CONTAINER_FIELD_DOC = [
+  ['name', '✅', 'string', '文件名（= 存档目录 / 配置目录里的那个名字；决定它在工具里怎么被点名）'],
+  ['what', '✅', 'string 非空', '它是什么 + **这份样本本身的口径**（例如"被哪一次运行写过"），因为它不属任何槽、没有 `where`'],
+  ['mtimeMs', '✅', 'number', '源文件的 instant（权威值；与槽样本同一口径，`restore-mtime` 一并拨回）'],
+  ['mtimeLocal', '✅', '`yyyy-MM-ddTHH:mm:ss`', '采集时区下的墙上时间（给人看）'],
+  ['tzOffsetMinutes', '✅', 'number', '采集时区'],
+];
+
 /** 不变量 + **谁在守它**（自校验 / 测试 / 守卫） */
 const SAMPLE_INVARIANTS = [
   ['每槽 DAT + STH 成对；槽号形态合法且不重复；where 非空', '本工具写入时自校验（`saveSamples` 写后复验，不绿回滚）'],
   ['每个文件三时间字段齐全', '同上'],
+  ['`containers` 里的文件不属任何槽：名字唯一、`what` 非空、三时间字段齐全', '同上'],
+  ['`containers` 的条目名不得与槽载荷重名（一个文件只能有一个身份）', '同上'],
   ['槽头 +264 起七个 u16 的年月日时分秒 == `wallClock(mtimeMs, tzOffsetMinutes)`；星期与日期自洽', '`tools/test/fixtures.test.mjs`'],
   ['目录里的文件集合 == 本文件登记的集合（两边都不许多）', '`tools/test/fixtures.test.mjs`'],
   ['载荷的 `filter=lfs`（**不靠 origin 枚举**）', '`pnpm tools corpus validate` 的守卫 #6'],
@@ -98,13 +112,19 @@ export function canonicalSamples(doc) {
           .filter(Boolean)
           .map((f) => order(f, FILE_KEY_ORDER)),
       })),
+    // ★ 系统容器 / 玩家配置**不属任何槽**：单独一段（按文件名排序），否则它们会被 `files` 的
+    //   "DAT + STH 成对"判据挡住 —— 那对"一份文件本身就是身份"的样本是无意义的约束。
+    containers: (doc.containers ?? [])
+      .slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .map((c) => order(c, CONTAINER_KEY_ORDER)),
   };
   for (const k of Object.keys(doc)) if (!(k in out)) out[k] = doc[k];
   return `${JSON.stringify(out, null, 2)}\n`;
 }
 
 /** 本文件认得的顶层键；其余一律算"多余键"（由 --normalize 报出并剔除） */
-export const KNOWN_TOP_KEYS = ['schemaVersion', '_doc', 'samples'];
+export const KNOWN_TOP_KEYS = ['schemaVersion', '_doc', 'samples', 'containers'];
 
 /** 剔除多余顶层键（schema 变过之后用它把文件拉回规范形态） */
 export function stripUnknownTopKeys(doc) {
@@ -149,6 +169,21 @@ export function structuralProblems(doc) {
       if (typeof f?.tzOffsetMinutes !== 'number') bad.push(`${f?.name} 缺 tzOffsetMinutes（采集时区，用于把 instant 还原成墙上时间）`);
     }
   }
+  if (doc.containers !== undefined && !Array.isArray(doc.containers)) return [...bad, 'containers 必须是数组'];
+  const payloadNames = new Set(doc.samples.flatMap((s) => (s.files ?? []).map((f) => f?.name)));
+  const seenC = new Set();
+  for (const c of doc.containers ?? []) {
+    const n = c?.name;
+    if (typeof n !== 'string' || n.trim() === '') { bad.push('containers 里有条目的 name 为空'); continue; }
+    if (seenC.has(n)) bad.push(`containers 里重名：${n}`);
+    seenC.add(n);
+    // ★ 一个文件只有一个身份：既登记成槽载荷、又登记成系统容器 ⇒ 两条不变量会互相打架
+    if (payloadNames.has(n)) bad.push(`containers 的 ${n} 与槽载荷重名（一个文件只能有一个身份）`);
+    if (typeof c?.what !== 'string' || c.what.trim() === '') bad.push(`${n} 缺 what（它是什么 / 这份样本的口径）`);
+    if (typeof c?.mtimeMs !== 'number') bad.push(`${n} 的 mtimeMs 必须是数字`);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(c?.mtimeLocal ?? '')) bad.push(`${n} 的 mtimeLocal 形态非法`);
+    if (typeof c?.tzOffsetMinutes !== 'number') bad.push(`${n} 缺 tzOffsetMinutes`);
+  }
   return bad;
 }
 
@@ -156,12 +191,20 @@ export function structuralProblems(doc) {
 export function describe() {
   return {
     file: 'corpus/fixtures/samples.json',
-    purpose: '这一批真存档样本的结构化描述（每个样本 = 一个槽 = 一对 .DAT/.STH）；只管**文件级事实**',
+    purpose:
+      '这一批真存档样本的结构化描述，分两段：`samples`（每个样本 = 一个槽 = 一对 .DAT/.STH）与 ' +
+      '`containers`（不属任何槽的文件：系统容器 / 玩家配置）；只管**文件级事实**',
     notHere:
       '存储去向（LFS）与"这批样本在清单里是哪一条"不在这里 —— 见 corpus/assets.json 的 `fixtures/save-samples`（说明书 corpus/assets.md）。' +
       '★ 该条目是**自足条目**（固化资源，没有加工链）⇒ **不登记 origin**：样本的"来源"就是入库的那一份本身',
-    topLevel: { schemaVersion: 1, _doc: '由本工具拥有（写盘时自动注入指向本自描述的指针）', samples: '见下方字段表' },
+    topLevel: {
+      schemaVersion: 1,
+      _doc: '由本工具拥有（写盘时自动注入指向本自描述的指针）',
+      samples: '见下方字段表（**槽样本**：一个槽 = 一对 .DAT/.STH）',
+      containers: '**系统容器 / 玩家配置**（不属任何槽的文件；见下方 containers 字段表）。★ 空数组合法；缺省按空处理',
+    },
     fields: SAMPLE_FIELD_DOC.map(([name, req, type, desc]) => ({ name, req, type, desc })),
+    containerFields: CONTAINER_FIELD_DOC.map(([name, req, type, desc]) => ({ name, req, type, desc })),
     invariants: SAMPLE_INVARIANTS.map(([text, enforcedBy], i) => ({ id: i + 1, text, enforcedBy })),
     operations: OPERATIONS,
     writePath:
@@ -179,10 +222,15 @@ export function describeText(d = describe()) {
   L.push('## 顶层');
   for (const [k, v] of Object.entries(d.topLevel)) L.push(`* \`${k}\`: ${v}`);
   L.push('');
-  L.push('## 字段');
+  L.push('## 字段（`samples[]`——槽样本）');
   L.push('| 字段 | 必填 | 类型 | 说明 |');
   L.push('|---|---|---|---|');
   for (const f of d.fields) L.push(`| \`${f.name}\` | ${f.req} | ${f.type} | ${f.desc} |`);
+  L.push('');
+  L.push('## 字段（`containers[]`——系统容器 / 玩家配置）');
+  L.push('| 字段 | 必填 | 类型 | 说明 |');
+  L.push('|---|---|---|---|');
+  for (const f of d.containerFields ?? []) L.push(`| \`${f.name}\` | ${f.req} | ${f.type} | ${f.desc} |`);
   L.push('');
   L.push('## 不变量（含"谁在守它"）');
   for (const c of d.invariants) L.push(`${c.id}. ${c.text}　—　${c.enforcedBy}`);

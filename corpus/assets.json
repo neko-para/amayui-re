@@ -654,11 +654,11 @@
       "origin": [],
       "dest": "corpus/fixtures/",
       "readOnly": true,
-      "consume": "真玩家存档样本（SAVE76/77/78/79 的 .DAT + .STH + README）；落 corpus/fixtures/，走 LFS",
+      "consume": "真玩家存档样本（槽 76/77/78/79 的 .DAT + .STH，以及不属于任何槽的系统容器 SAVE.DAT / RT.DAT）+ README；落 corpus/fixtures/，走 LFS",
       "blocks": [
         "M1"
       ],
-      "note": "8 个 .DAT/.STH（槽 76/77/78/79，全部走 LFS）：文件级事实（各槽在游戏里的定位 where、每个文件的源 mtime）在 corpus/fixtures/samples.json；之所以要记 mtime 是因为槽头 +264 起七个 u16 就是存档时刻、而 git 不保存 mtime。★ 固化资源：没有加工链、也没有可再取的上游 ⇒ 不登记 origin（见 pnpm tools corpus describe 的「自足条目」）"
+      "note": "槽样本 8 个 .DAT/.STH（槽 76/77/78/79）+ 系统容器 2 个（SAVE.DAT = 脚本键表、RT.DAT = 文本/消息库），全部走 LFS；文件级事实（各槽在游戏里的定位 where、每个文件的源 mtime、系统容器的 what）在 corpus/fixtures/samples.json。之所以要记 mtime：槽样本的槽头 +264 起七个 u16 就是存档时刻、而 git 不保存 mtime；系统容器没有这个字段，记 mtime 只为「这份样本是哪一次运行写出来的」可追溯。★ 固化资源：没有加工链、也没有可再取的上游 ⇒ 不登记 origin（见 pnpm tools corpus describe 的「自足条目」）。★ 系统容器只收**真实引擎**写出来的：本机 SYS4REG.INI 是模拟器自己写的（数值全 0），不当样本入库"
     },
     {
       "id": "game/install-dir",

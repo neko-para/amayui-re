@@ -294,6 +294,15 @@ test('★ 判别力：证据失效 / 用例不存在 / reviewed 只有弱证据 
   const assetsOnly = clone();
   assetsOnly.entries[0].binding.evidence = ['guard:tools/test/emulator-model.test.mjs#local 池的 slot 几何'];
   assert.ok(checksOf(assetsOnly).has(7), '只有 assets 守卫不能撑 reviewed');
+
+  // ★ CTest 的分级看**注册位置**（不是 pragma）：`if(EMULATOR_CXX_INSTALL_DIR)` 里注册的那些
+  //   默认 `ctest` 不跑 ⇒ 撑不了 reviewed；顶层无条件注册的那条可以。
+  const cmakeInstall = clone();
+  cmakeInstall.entries[0].binding.evidence = ['guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-config-pages'];
+  assert.ok(checksOf(cmakeInstall).has(7), '装机流程里的 CTest 不能撑 reviewed');
+  const cmakePure = clone();
+  cmakePure.entries[0].binding.evidence = ['guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest'];
+  assert.ok(!checksOf(cmakePure).has(7), '顶层注册的 CTest 应当撑得起 reviewed（免安装、默认 ctest 就跑）');
 });
 
 test('★ 判别力：reviewed 没有 falsifiers ⇒ #7 红（不可证伪的合同不许贴 reviewed）', () => {

@@ -39,8 +39,10 @@ import {
   appendRecord,
   buildVocabulary,
   describe,
+  cmakeTestTier,
   describeText,
   isoNow,
+  isCmakeGuardFile,
   monthOf,
   newUlid,
   peOffsetOf,
@@ -340,6 +342,39 @@ test('★ 用例名抽取：`test()` / `it()` / `describe()` 的字面量；抽�
   } finally {
     rm(dir);
   }
+});
+
+test('★ CTest 分级：`add_test` 的**注册位置**决定 pure/assets（顶层 = pure，落在块里 = assets）', () => {
+  const cm = [
+    'add_test(NAME top-level COMMAND x)',
+    'if(EMULATOR_CXX_INSTALL_DIR)',
+    '  add_test(NAME needs-install COMMAND y)',
+    'endif()',
+    '# add_test(NAME commented-out COMMAND z)',
+    'foreach(t a b)',
+    '  add_test(NAME in-loop COMMAND ${t})',
+    'endforeach()',
+    'if(WIN32)',
+    'elseif(APPLE)',
+    'else()',
+    'endif()',
+    'add_test(NAME after-branches COMMAND w)',
+  ].join('\n');
+  assert.equal(cmakeTestTier(cm, 'top-level'), 'pure');
+  assert.equal(cmakeTestTier(cm, 'needs-install'), 'assets', 'if() 里注册 ⇒ 默认门禁不跑');
+  assert.equal(cmakeTestTier(cm, 'in-loop'), 'assets');
+  // ★ elseif / else **不是**新的块：否则每个分支都会把后面的顶层测试判成 assets
+  assert.equal(cmakeTestTier(cm, 'after-branches'), 'pure');
+  // 注释掉的注册不算注册（否则"删掉测试但留注释"会看起来还活着）
+  assert.equal(cmakeTestTier(cm, 'commented-out'), null);
+  assert.equal(cmakeTestTier(cm, 'missing'), null);
+  // 名字前缀不许互相吃掉（`core-x` 不能命中 `core-xy`）
+  assert.equal(cmakeTestTier('add_test(NAME core-xy COMMAND q)', 'core-x'), null);
+  // 同一行里 `if(X) add_test(...)` 也算被包住
+  assert.equal(cmakeTestTier('if(X) add_test(NAME q COMMAND z) endif()', 'q'), 'assets');
+  assert.equal(isCmakeGuardFile('apps/emulator-cxx/CMakeLists.txt'), true);
+  assert.equal(isCmakeGuardFile('apps/emulator-cxx/tests/config_pages.cmake'), true);
+  assert.equal(isCmakeGuardFile('tools/test/ledger.test.mjs'), false);
 });
 
 test('#4 观察可再校验：accepted 的 self 锚解析不了 ⇒ 红，且**投影自动降级 stale**（不删除）', () => {

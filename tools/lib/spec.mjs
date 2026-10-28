@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { REPO_ROOT } from './paths.mjs';
-import { project, readRecords, testNames } from './ledger.mjs';
+import { cmakeTestTier, isCmakeGuardFile, project, readRecords, testNames } from './ledger.mjs';
 import { pickListing } from './disasm.mjs';
 import { computeEffectCoverage, derivePilotEffects, selectorMatches } from './spec-effects.mjs';
 
@@ -417,12 +417,20 @@ export function resolveEvidence(ev, { ledger, repoRoot = REPO_ROOT } = {}) {
   if (!fs.existsSync(abs)) return { ok: false, kind: 'error', why: `守卫文件不存在：${parsed.path}`, evidence: ev };
   const text = fs.readFileSync(abs, 'utf8');
   const names = testNames(text);
-  if (!names.some((n) => n.includes(parsed.test))) {
+  const hit = names.find((n) => n.includes(parsed.test));
+  if (!hit) {
     return { ok: false, kind: 'error', why: `用例名在该文件里找不到：${parsed.test}`, evidence: ev };
   }
   // 测试分级：纯文本档的守卫才可以"现在就能跑"；assets / external 档默认门禁不跑（不能撑 reviewed）。
-  const tier = /@env\s+(pure|assets|external)/.exec(text)?.[1] ?? 'unknown';
-  return { ok: true, kind: 'guard', path: relativePath(parsed.path), test: parsed.test, strong: true, tier, evidence: ev };
+  // ★ 两套判据按**守卫文件形态**分派，不存在第三套：
+  //   · JS 用例（`*.test.mjs`）：首行 pragma `@env pure|assets|external`；
+  //   · CTest（`CMakeLists.txt` / `*.cmake`）：**注册位置**——顶层 `add_test` = pure，落在
+  //     `if`/`foreach`/`function`/… 块里 = assets（`apps/emulator-cxx` 的安装流程测试就在
+  //     `if(EMULATOR_CXX_INSTALL_DIR)` 里）。见 `tools/lib/ledger.mjs` 的 `cmakeTestTier`。
+  const tier = isCmakeGuardFile(parsed.path)
+    ? (cmakeTestTier(text, hit) ?? 'unknown')
+    : (/@env\s+(pure|assets|external)/.exec(text)?.[1] ?? 'unknown');
+  return { ok: true, kind: 'guard', path: relativePath(parsed.path), test: hit, strong: true, tier, evidence: ev };
 }
 
 function relativePath(p) {
@@ -763,7 +771,7 @@ export function validate(input, { ledger, repoRoot = REPO_ROOT, effects = null }
     }
     if (e.status === 'reviewed' && strong === 0) evp.push(`${at} 是 reviewed，但没有一条 accepted / guard 证据`);
     if (e.status === 'reviewed' && reviewable === 0) {
-      evp.push(`${at} 是 reviewed，但强证据只有 assets/external 档守卫（默认门禁不跑）—— 至少要有 accepted 台账记录或 @env pure 守卫`);
+      evp.push(`${at} 是 reviewed，但强证据只有 assets/external 档守卫（默认门禁不跑）—— 至少要有 accepted 台账记录，或 pure 档守卫（JS 用例的 @env pure / CTest 的顶层注册）`);
     }
     if (e.status === 'reviewed' && !isNonEmptyArray(e.falsifiers)) evp.push(`${at} 是 reviewed，但没有 falsifiers（可证伪的核验问题 / 预言）`);
     if (e.status === 'reviewed' && weakHere > 0) evp.push(`${at} 是 reviewed，却含 ${weakHere} 条弱证据（proposed）—— reviewed 要求证据链全部过 accepted`);
@@ -1040,7 +1048,7 @@ export function describe() {
       ],
       auditFields: [
         ['id', '✅', '规则 id', '与章节里的 <!-- rule: ID --> 一一对应'],
-        ['status', '✅', ENTRY_STATUSES.join(' | '), 'draft=可以含弱证据；reviewed=全部证据 strong、至少一条 accepted 台账或 @env pure 守卫、且有 falsifiers'],
+        ['status', '✅', ENTRY_STATUSES.join(' | '), 'draft=可以含弱证据；reviewed=全部证据 strong、至少一条 accepted 台账或 pure 档守卫（JS 用例看 @env pragma；CTest 看是否顶层注册）、且有 falsifiers'],
         ['disposition', '✅', DISPOSITIONS.join(' | '), '处理状态：spec 处理 / 替换 / 有依据省略 / 明确舍弃 / 尚未处理'],
         ['covers', '⬜', '选择器[]（{blocks?,kinds?,ops?,targets?}）', '这条规则解释哪些 effect；调用按实际符号（targets）匹配，不另起名字'],
         ['residual', '✅', '对象[]', 'id / kind / what / next /（candidate? / range[] / reason? / impact? / evidence[]?）'],
@@ -1070,7 +1078,7 @@ export function describe() {
       [4, '规则形态：每个 <!-- rule: ID --> 在 ### 小节里、有标题与正文；id 唯一'],
       [5, '处理状态：handled 有机器绑定；replaced 声明 preserves/discards/chosen；omitted 有依据；discarded 不冒充解释；unhandled 有残差'],
       [6, '绑定：EA/函数符号形态合法；storage 指针能在 shape（types.json 的类型与成员起点）里解析到'],
-      [7, '证据：每条证据都解析得到；reviewed 要求全部证据 strong、至少一条 accepted 台账或 @env pure 守卫、且必须给 falsifiers'],
+      [7, '证据：每条证据都解析得到；reviewed 要求全部证据 strong、至少一条 accepted 台账或 pure 档守卫（JS 用例看 @env pragma；CTest 看是否顶层注册）、且必须给 falsifiers'],
       [8, '自包含：规范正文不含汇编引用 / 台账 id / 守卫 / 本仓路径（复核信息只许进 bindings / audit）'],
       [9, '试点闭合（effect 级）：每个 effect 被规则 covers / pilot.internal / pilot.residuals 归属；未登记义务 = 0（assets 档现算）'],
       [10, '范围：域外项必须显式（what + why），不许用沉默代替排除'],
