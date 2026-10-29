@@ -185,11 +185,22 @@ struct TextLayerState {
 //   （推进器 `sub_409400` 每帧 → `0x4096a9` 序号 +1，帧间按 `message:MessageSpeed` 睡眠，
 //   有按键 / 跳过时把剩余格一次抽干）。我们的 `step()` 就是"一帧"（`advance_scene` 每步 +16ms），
 //   所以这里排的是一个**跨帧队列**：追加时入队，每步画出一个。
+//
+// ★ 队里存的是**追加当时的字形样式快照**（字号 / 粗细 / 绘制模式 / 主色 / 副色），不是"画的时候再读字体对象"：
+//   引擎的 `sub_46BE30` 在**追加时**就 SelectObject + 逐字写出（量度与光栅化都在那一刻完成），
+//   之后的推进只是把已排好的格逐格呈现。画的时候再读字体对象会让"追加之后、这一格画出来之前"
+//   的 `0x75` / `0x2bd` / `0x76` / `0x77` 写到**已经排好版的行**上 —— 实测症状两例：
+//   ① 设置界面示例文本里恰好被跨帧夹住的那一个字按别的行的字号（30 → 20）画出来，字宽仍按 30；
+//   ② 同一个字按**常规体**画出来（其余是粗体），因为那一帧脚本刚把 `0x2bd` 写成 0。
 struct PendingGlyph {
     std::int32_t slot = 0;
     std::int32_t x = 0;
     std::int32_t y = 0;
-    std::int32_t size = 0;  // 0 ⇒ 用 A 支字号（主文本）；> 0 ⇒ 显式字号（振り仮名）
+    std::int32_t size = 0;    // 追加当时的字号（A 支或振り仮名的 B 支）；0 ⇒ 回退到"画的时候再读"
+    std::int32_t weight = 0;  // 追加当时的粗细（`0x2bd` 的两格）；0 ⇒ 回退
+    std::int32_t draw_mode = 0;
+    std::int32_t primary = 0;
+    std::int32_t secondary = 0;
     std::string unit;       // 一个字符的 SJIS 字节串（1~2 字节；振り仮名可能是一整串）
 };
 
@@ -504,6 +515,15 @@ public:
         const auto it = textures_.find(id);
         return it == textures_.end() ? nullptr : &it->second;
     }
+    // 纹理版本号的**全局下限**（每个 id 一条单调计数，跨 `0x1fa` 删除 / 重建也不回退）。
+    // 窗口路径的 GPU 纹理缓存按 `(id, revision)` 命中：记录被删掉再建、版本号若回到 1，缓存会把
+    // **上一条记录**的纹理当成当前纹理。实测（2026-10-29，用户口径 + 本机窗口复现）：设置界面
+    // （CONFIG1.BIN）↔ 初始配置界面（Game Start）来回一次，后进的那个界面整张美术图**不画**
+    // （背景透出来）或画成**对方的内容** —— 两个界面用的是同一批纹理编号。
+    // ⛔ 不要为了"省一次上传"把版本号变小；`revision++` 的增量写法在删/建那一刻是看不见的，
+    //   所以删除与替换前都要把"用过的最高版本"记进下限。
+    void note_texture_revision(std::uint32_t id);
+    std::uint32_t next_texture_revision(std::uint32_t id);
     void report_error(std::string text) { errors_.push_back(std::move(text)); }
     const std::vector<std::string>& errors() const { return errors_; }
     void clear_errors() { errors_.clear(); }
@@ -1183,6 +1203,8 @@ private:
     std::uint32_t mouse_last_ms_ = 0;  // 上一次派发时刻（登记时 = 当前时刻）
     std::unordered_map<std::int32_t, std::int32_t> indirect_;
     std::unordered_map<std::uint32_t, TextureRecord> textures_;
+    // 每个纹理编号"已经用过的最高版本号"（见 `note_texture_revision`）。删除记录不清它。
+    std::unordered_map<std::uint32_t, std::uint32_t> texture_revision_floor_;
     // 1000 槽的释放守卫（默认 0；没有脚本写者）。
     std::array<std::int32_t, 1000> surface_release_gate_{};
     std::unordered_map<std::uint32_t, DrawItem> draw_items_;

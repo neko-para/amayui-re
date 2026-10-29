@@ -372,9 +372,18 @@ bool draw_scene_gpu(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command, SDL_GP
     if (vertex_buffer != nullptr) {
         SDL_GPUBufferBinding binding{vertex_buffer, 0};
         SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
+        const bool gpu_log = std::getenv("EMULATOR_CXX_GPU_LOG") != nullptr;
         for (const SceneRange& range : ranges) {
             SDL_GPUTexture* texture = scene_texture(device, cache, machine, range.texture);
-            if (texture == nullptr) continue;
+            if (texture == nullptr) {
+                if (gpu_log)
+                    std::fprintf(stderr, "[gpu] skip range tex=%u count=%u（没有 GPU 纹理）\n",
+                                 range.texture, range.count);
+                continue;
+            }
+            if (gpu_log)
+                std::fprintf(stderr, "[gpu] draw range tex=%u count=%u ptr=%p\n", range.texture,
+                             range.count, static_cast<void*>(texture));
             SDL_GPUTextureSamplerBinding sampler_binding{texture, pipeline.sampler};
             SDL_BindGPUFragmentSamplers(pass, 0, &sampler_binding, 1);
             SDL_DrawGPUPrimitives(pass, range.count, 1, range.first, 0);

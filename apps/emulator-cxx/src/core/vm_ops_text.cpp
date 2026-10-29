@@ -173,7 +173,8 @@ bool Machine::ensure_text_layer_texture(int slot) {
                          it->second.width != static_cast<std::uint32_t>(width) ||
                          it->second.height != static_cast<std::uint32_t>(height);
     if (rebuild) {
-        // 与 `0x1f8` 空白建纹理同口径：透明、无来源文件、revision 单调递增。
+        // 与 `0x1f8` 空白建纹理同口径：透明、无来源文件、revision **跨删除/重建单调递增**
+        // （GPU 纹理缓存按 (id, revision) 命中；回到 1 会让画布显示上一条记录的内容）。
         TextureRecord& texture = textures_[id];
         texture.file = -1;
         texture.blank = true;
@@ -182,7 +183,8 @@ bool Machine::ensure_text_layer_texture(int slot) {
         texture.height = static_cast<std::uint32_t>(height);
         texture.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4,
                             0);
-        texture.revision++;
+        note_texture_revision(id);
+        texture.revision = next_texture_revision(id);
         text_layer_state_[static_cast<std::size_t>(slot)].cursor_x = rec.f1c;
         text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
     }
@@ -312,7 +314,19 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
             const int x0 = state.cursor_x;
             const int y0 = state.cursor_y;
             create_text_layer_item(slot, x0, y0, x0 + advance, y0 + line_height);
-            pending_glyphs_.push_back(PendingGlyph{slot, x0, y0, 0, unit});
+            PendingGlyph pending;
+            pending.slot = slot;
+            pending.x = x0;
+            pending.y = y0;
+            // ★ 字号 / 模式 / 两色都是**追加当时**的快照（引擎在这里就逐字写出）：
+            //   画的时候再读字体对象 ⇒ 别的行在这期间改 `0x75` 会让这一格按别人的字号画出来。
+            pending.size = glyph_height_;
+            pending.weight = font_metric_a();
+            pending.draw_mode = font_draw_mode();
+            pending.primary = font_primary_color();
+            pending.secondary = font_secondary_color();
+            pending.unit = unit;
+            pending_glyphs_.push_back(std::move(pending));
             state.cursor_x += advance;
             line_text += unit;
         }
@@ -354,7 +368,17 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
                     continue;
                 }
                 create_text_layer_item(slot, x, ruby_y, x + advance, ruby_y + ruby_size + 2);
-                pending_glyphs_.push_back(PendingGlyph{slot, x, ruby_y, ruby_size, kana});
+                PendingGlyph pending;
+                pending.slot = slot;
+                pending.x = x;
+                pending.y = ruby_y;
+                pending.size = ruby_size;
+                pending.weight = font_metric_a();
+                pending.draw_mode = font_draw_mode();
+                pending.primary = font_primary_color();
+                pending.secondary = font_secondary_color();
+                pending.unit = kana;
+                pending_glyphs_.push_back(std::move(pending));
                 x += advance + (kana.size() == 1 ? step / 2 : step);
             }
             // 振り仮名 run 也**追加一条文本记录**（`sub_465a20` 的收尾）：**位 2 置起**（用 B 支字号），
@@ -382,8 +406,10 @@ void Machine::draw_front_pending_glyph() {
     if (!text_layer_state_[slot].texture_ready) return;  // 画布被拆掉 / 没建 ⇒ 这个字丢掉
     std::string error;
     int advance = 0;
+    // 用**追加当时**的样式快照画（⛔ 不是画的时候再读字体对象）—— 见 `PendingGlyph` 的注释。
+    const TextStyleSnapshot style{glyph.size, glyph.weight, glyph.draw_mode, glyph.primary, glyph.secondary};
     if (!draw_text_into_texture(*this, text_layer_texture_id(slot), glyph.x, glyph.y, glyph.unit,
-                                &error, &advance, glyph.size)) {
+                                &error, &advance, glyph.size, &style)) {
         if (!error.empty()) report_error(error);
     }
     if (TextureRecord* texture = texture_mut(text_layer_texture_id(slot))) texture->revision++;

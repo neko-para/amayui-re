@@ -388,21 +388,25 @@ TextGlyphSource last_glyph_source() { return g_last_glyph_source; }
 
 bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, int y,
                             const std::string& sjis, std::string* error, int* advance_out,
-                            int font_size_override) {
+                            int font_size_override, const TextStyleSnapshot* style) {
 #ifdef EMULATOR_CXX_HAVE_TEXT
     TextureRecord* texture = machine.texture_mut(texture_id);
     if (texture == nullptr || texture->rgba.empty() || sjis.empty()) return false;
 
-    const int size = font_size_override > 0
-                         ? font_size_override
-                         : (machine.font_size() > 0 ? machine.font_size() : 24);
+    const int size = style != nullptr && style->size > 0
+                         ? style->size
+                         : (font_size_override > 0
+                                ? font_size_override
+                                : (machine.font_size() > 0 ? machine.font_size() : 24));
     // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：把**实际用来出字形的字号**打出来。
     //   判据用：配置界面里 0x204 必须按 A 支字号画（`0x75` 写的那支），⛔ 不是 `0x197` 的 B 支。
     // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：本函数在 `vm_ops_text.cpp` 的匿名命名空间里没有那个 helper，
     //   这里就地读环境变量（同一个开关、同一个语义）。
     {
         static const bool trace = std::getenv("EMULATOR_CXX_TRACE_TEXT") != nullptr;
-        if (trace) std::fprintf(stderr, "[text] draw size=%d chars=%zu\n", size, sjis.size());
+        if (trace)
+            std::fprintf(stderr, "[text] draw tex=%u x=%d y=%d size=%d chars=%zu override=%d\n",
+                         texture_id, x, y, size, sjis.size(), font_size_override);
     }
     // 引擎的 AA 开关（决定字形格式：1-bit / GRAY4 / GRAY8；见 §32/§33）。**不分字形来源**都按它走 ——
     // 格式是引擎侧的选择（`Font+0x548` / `Font+0x35584`），不是"平台自由"。
@@ -412,9 +416,9 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
                            machine.config().get_int("message:AntiFontLevel"));
     const bool anti_alias = format != GlyphFormat::Mono;
     const bool gray8 = format == GlyphFormat::Gray8;
-    const int draw_mode = machine.font_draw_mode();
-    const Rgb primary = decode_color(machine.font_primary_color());
-    const Rgb secondary = decode_color(machine.font_secondary_color());
+    const int draw_mode = style != nullptr ? style->draw_mode : machine.font_draw_mode();
+    const Rgb primary = decode_color(style != nullptr ? style->primary : machine.font_primary_color());
+    const Rgb secondary = decode_color(style != nullptr ? style->secondary : machine.font_secondary_color());
     // ★ 字形来源三档（§37/§38 + 本轮的 GDI 档）：
     //   ① offline bake（`EMULATOR_CXX_GLYPH_ATLAS` 指向的文件存在）—— loader 仍是 stub；
     //   ② **Windows GDI**（`EMULATOR_CXX_GLYPH_GDI=1`）—— **真机路径**：字型/hinting/栅格化/灰度级数
@@ -430,9 +434,13 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     // ★ §38：引擎字形 ⇒ 完全按引擎（格式看 AA 配置、两趟照引擎）；宿主回退 ⇒ 同色默认 **Bold 字体 +
     //   默认灰度 AA + 单趟**（`EMULATOR_CXX_SAME_COLOR_MONO` 回到 normal + mono），异色 灰度+两趟。
     const bool mono_same_switch = std::getenv("EMULATOR_CXX_SAME_COLOR_MONO") != nullptr;
-    const bool use_bold = engine_glyphs ? machine.font_metric_a() >= 700
-                                        : (machine.font_metric_a() >= 700 ||
-                                           (!mono_same_switch && same_color));
+    // ★ 粗细（`0x2bd` 写的那两格）与字号 / 颜色一样是**追加那一刻**的字形样式（见 `TextStyleSnapshot`）。
+    //   画的时候现读会让"追加之后、这一格被推进之前"别人写的 `0x2bd` 落到已经排好版的格上 ——
+    //   实测（2026-10-29）：设置界面示例文本里恰好跨帧的那一个字按**常规体**画出来、其余都是粗体，
+    //   而它的字宽仍是追加时按粗体量出来的 30px（量的宽与画的宽不自洽）。
+    const int weight = style != nullptr ? style->weight : machine.font_metric_a();
+    const bool use_bold = engine_glyphs ? weight >= 700
+                                        : (weight >= 700 || (!mono_same_switch && same_color));
 
     int current_ascent = 0;
     FT_Face face = nullptr;
@@ -451,7 +459,7 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
                                                     : gdi_face_from_utf8(env);
         }
         // 真机路径：量度也走 GDI（引擎的"本次量度 ascent"就是 `GetTextMetricsA` 的 tmAscent）。
-        if (!gdi_font_ascent(gdi_face, size, machine.font_metric_a(), &current_ascent)) {
+        if (!gdi_font_ascent(gdi_face, size, weight, &current_ascent)) {
             if (error != nullptr) *error = "gdi-font-metrics-failed";
             return false;
         }
@@ -535,14 +543,21 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
     // 诊断口（宿主，⛔ 不是产品路径）：`EMULATOR_CXX_TEXT_TRACE=1` 逐次打印 0x204 的参数形状。
     // 用来回答"这一段文字是几趟、什么颜色、什么绘制模式、字形从哪来"，不改变任何绘制行为。
     if (std::getenv("EMULATOR_CXX_TEXT_TRACE") != nullptr) {
+        // ★ 诊断（临时）：把**画的时候现读**的量也打出来（字重 / AA 格式 / 实际字体文件）——
+        //   题目是"同一个字号下某个字更粗"，只有这几项能在字形不变的前提下改变笔画粗细。
+        const std::string font_base =
+            path.empty() ? std::string("-") : std::filesystem::path(path).filename().string();
         std::fprintf(stderr,
                      "[text] tex=%u x=%d y=%d size=%d mode=%d align=%d primary=%02X%02X%02X "
                      "secondary=%02X%02X%02X src=%s same=%d one_pass=%d ascent=%d cached=%d "
-                     "baseline=%d lift=%d face=\"%s\" utf8=\"%s\"\n",
+                     "baseline=%d lift=%d fmt=%d mono=%d quant=%d metric=%d bold=%d font=\"%s\" "
+                     "face=\"%s\" utf8=\"%s\"\n",
                      texture_id, x, y, size, draw_mode, machine.font_align_mode(), primary.r, primary.g,
                      primary.b, secondary.r, secondary.g, secondary.b,
                      gdi ? "gdi" : (baked ? "bake" : "ft"), same_color ? 1 : 0, one_pass ? 1 : 0,
                      current_ascent, cached_ascent, baseline, lift,
+                     static_cast<int>(format), mono ? 1 : 0, quantize ? 1 : 0,
+                     weight, use_bold ? 1 : 0, font_base.c_str(),
                      cp932_to_utf8(machine.font_string()).c_str(), cp932_to_utf8(sjis).c_str());
     }
     if (baked) {
@@ -561,7 +576,7 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
         int origin_x = 0;
         int origin_y = 0;
         if (gdi) {
-            if (!gdi_load_glyph(gdi_face, size, machine.font_metric_a(), gdi_format, codepoint,
+            if (!gdi_load_glyph(gdi_face, size, weight, gdi_format, codepoint,
                                 &gdi_glyph)) {
                 pen_x += size / 2;
                 continue;

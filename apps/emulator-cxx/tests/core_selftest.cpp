@@ -3704,6 +3704,129 @@ bool check_text_pacing(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── 跨帧队列的**样式快照**：追加之后改字号，不许影响已经排好版的那一格 ──
+/** 引擎在**追加时**就量度 + 逐字写出（`sub_46BE30` 的 SelectObject / 逐字写出），之后的推进只呈现
+ *  已经排好版的格。旧实现（画的时候再读 `Font+0x313D4`）在设置界面被实测到：示例文本中间恰好跨帧的
+ *  那一个字按**别的行的字号**画出来（30 → 20），字宽仍是 30 —— 看起来"一个字莫名变小"。
+ *  这条钉两半：① 入队时带的是**追加当时的字号**；② 改字号之后画出来的字形高度仍按原字号。 */
+bool check_text_pending_style_snapshot(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "pending-style: %s\n", what);
+        return false;
+    };
+    if (!core::text_backend_available()) return true;  // 没有字体后端 ⇒ 字形断言无意义
+
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x80, {{0, 9}});
+    emit_instruction(bytes, 0x70, {{0, 9}, {0, 824}, {0, 120}, {0, 324}, {0, 570}});
+    emit_instruction(bytes, 0x79, {{0, 9}, {0, 108}, {0, 52}});
+    emit_instruction(bytes, 0x75, {{0, 30}});         // A 支 = 30（追加时的字号）
+    emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+    emit_instruction(bytes, 0x77, {{0, 0x000000}});
+    emit_instruction(bytes, 0x78, {{0, 1}});
+    emit_instruction(bytes, 0x71, {{0, 9}});
+    emit_instruction(bytes, 0x74, {{0, 100}});        // 每字间隔 100ms ⇒ 这一格要**跨好几帧**才画出来
+    emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});  // 追加主文本 "M"
+    emit_instruction(bytes, 0x75, {{0, 10}});         // ★ 追加之后、画出来之前把 A 支改成 10
+    for (int i = 0; i < 12; ++i) emit_instruction(bytes, 0x1A8, {});
+    emit_instruction(bytes, 2, {});
+
+    core::Machine machine(key, table);
+    machine.write_text(core::Operand{5, 0}, "M");
+    machine.load_root(bytes);
+    for (int i = 0; i < 40 && machine.pending_glyph_count() == 0; ++i) {
+        if (!machine.step()) return fail("0x6E 之前停机");
+    }
+    if (machine.pending_glyph_count() != 1) return fail("待画格不是 1（追加没有入队）");
+    if (machine.pending_glyph_size(0) != 30) {
+        std::fprintf(stderr, "pending-style: queued size=%d（期望 30 = 追加当时的 A 支）\n",
+                     machine.pending_glyph_size(0));
+        return fail("待画格没有快照追加当时的字号");
+    }
+    for (int i = 0; i < 40 && machine.pending_glyph_count() != 0; ++i) {
+        if (!machine.step()) return fail("放出待画格时停机");
+    }
+    if (machine.pending_glyph_count() != 0) return fail("待画格没有画出来");
+    const core::TextureRecord* texture = machine.texture(core::Machine::text_layer_texture_id(9));
+    if (texture == nullptr) return fail("层 9 的画布不存在");
+    int top = 1 << 30, bottom = -1;
+    for (int y = 0; y < texture->height; ++y) {
+        bool row_has_ink = false;
+        for (int x = 0; x < texture->width && !row_has_ink; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * texture->width + x) * 4 + 3;
+            if (i < texture->rgba.size() && texture->rgba[i] != 0) row_has_ink = true;
+        }
+        if (row_has_ink) {
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+        }
+    }
+    const int ink_height = bottom >= 0 ? bottom - top + 1 : 0;
+    // 30 号 "M" 的墨迹高约 21；10 号约 7 ⇒ 阈值 15 分开两档。
+    if (ink_height < 15) {
+        std::fprintf(stderr, "pending-style: 墨迹高=%d（期望 >=15：按 30 号画；按 10 号画约 7）\n",
+                     ink_height);
+        return fail("待画格是按**画的时候**的字号画的（旧行为）");
+    }
+
+    // ── ② 粗细（`0x2bd`）也必须随格快照 ──
+    // 实测缺陷（2026-10-29）：示例文本的 12 格里恰好跨帧的那一格按**常规体**画出来、其余是粗体，
+    // 字宽却仍是按粗体量出来的 —— 因为 `draw_text_into_texture` 在**画的时候**现读
+    // `machine.font_metric_a()` 挑字体文件，而这一帧脚本刚把 `0x2bd` 写成 0。
+    // 这条钉三件：① 基准（追加时 700）；② 追加**之后**把字重改成 0 ⇒ 光栅结果必须与基准**完全相同**；
+    // ③ 追加**之前**就是 0（对照）⇒ 必须与基准**不同**（证明夹具真能分辨两种字面，防假绿）。
+    const auto run_weight_case = [&](int weight_change) -> int {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x80, {{0, 9}});
+        emit_instruction(script, 0x70, {{0, 9}, {0, 824}, {0, 120}, {0, 324}, {0, 570}});
+        emit_instruction(script, 0x79, {{0, 9}, {0, 108}, {0, 52}});
+        emit_instruction(script, 0x75, {{0, 30}});
+        emit_instruction(script, 0x76, {{0, 0xFFFFFF}});
+        emit_instruction(script, 0x77, {{0, 0x000000}});  // 异色 ⇒ same_color=0，字重门才生效
+        emit_instruction(script, 0x78, {{0, 1}});
+        emit_instruction(script, 0x2BD, {{0, 1}});        // 基准：700（粗体）
+        emit_instruction(script, 0x71, {{0, 9}});
+        emit_instruction(script, 0x74, {{0, 100}});       // 跨几帧才放出来
+        if (weight_change == 0) emit_instruction(script, 0x2BD, {{0, 0}});  // 对照：追加**之前**变细
+        emit_instruction(script, 0x6E, {{0, 0}, {5, 0}});
+        if (weight_change == 1) emit_instruction(script, 0x2BD, {{0, 0}});  // ★ 追加**之后**变细
+        for (int i = 0; i < 12; ++i) emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 2, {});
+        core::Machine m(key, table);
+        m.write_text(core::Operand{5, 0}, "M");
+        m.load_root(script);
+        // 走完整段脚本（脚本末尾是 `exit`；12 条空转足够把那一格在 100ms 间隔后放出来）。
+        for (int i = 0; i < 80 && !m.halted(); ++i) {
+            if (!m.step()) break;
+        }
+        const core::TextureRecord* canvas = m.texture(core::Machine::text_layer_texture_id(9));
+        if (canvas == nullptr) return -1;
+        int count = 0;
+        for (std::size_t i = 3; i < canvas->rgba.size(); i += 4) {
+            if (canvas->rgba[i] != 0) ++count;
+        }
+        return count;
+    };
+    const int ink_bold = run_weight_case(2);
+    if (ink_bold <= 0) return true;  // 没有字体文件 / 字形后端 ⇒ 这条判不了
+    const int ink_after_change = run_weight_case(1);
+    const int ink_before_change = run_weight_case(0);
+    if (ink_after_change != ink_bold) {
+        std::fprintf(stderr,
+                     "pending-style: 追加后改字重 → 墨迹 %d，基准（粗体）%d ⇒ 已排好版的格没有快照字重\n",
+                     ink_after_change, ink_bold);
+        return fail("待画格是按**画的时候**的字重画的（旧行为）");
+    }
+    if (ink_before_change == ink_bold) {
+        std::fprintf(stderr,
+                     "pending-style: 夹具分辨不出粗体/常规（两者墨迹都是 %d；Bold 字面缺失？）\n",
+                     ink_bold);
+        return fail("夹具没有分辨力：粗体与常规字面产生同样的墨迹");
+    }
+    return true;
+}
+
 // ── 文本记录标志位 2：**B 支字号**的置位者与消费口径 ──
 /** 引擎：位 2 不是共用追加器置的，而是**两个调用方**在 flags 实参上置起（振り仮名 run / 层模式 = 1 的逐字支）；
  *  消费者按它选 B 支（`0x197`）或 A 支（`0x75`）。这条守三件：
@@ -3755,11 +3878,13 @@ bool check_text_record_flags(const core::OpcodeTable& table) {
         if (machine.record_font_size(0) != 0) return fail("位 2 未置时字号覆盖应当是 0（沿用 A 支）");
         if (machine.record_font_size(4) != 10) return fail("位 2 置起时字号覆盖应当是 B 支 = 10");
         if (machine.record_font_size(8) != 0) return fail("行结束记录（位 3）不该被当成 B 支");
-        // 待画格：主文本的格 A 支（size = 0）、振り仮名的格 B 支（size = 10）
+        // 待画格：主文本的格带**追加当时的 A 支字号**（这条夹具里 `0x75` = 20）；振り仮名的格是 B 支（10）。
+        // ★ 这里刻意断言"带了字号"而不是"size = 0 让绘制侧现读"——后者会让跨帧夹住的那一格
+        //   被别的行改过的字号画出来（设置界面示例文本实测：30 → 20，一个字莫名变小）。
         const std::size_t count = machine.pending_glyph_count();
         if (count < 2) return fail("待画格太少（主文本或振り仮名没有入队）");
-        if (machine.pending_glyph_size(0) != 0 || machine.pending_glyph_size(1) != 0) {
-            return fail("主文本的待画格带了字号覆盖（A 支应当用缺省）");
+        if (machine.pending_glyph_size(0) != 20 || machine.pending_glyph_size(1) != 20) {
+            return fail("主文本的待画格没有快照 A 支字号（这条夹具里是 20）");
         }
         for (std::size_t i = count; i-- > 2;) {
             if (machine.pending_glyph_size(i) != 10) return fail("振り仮名的待画格没有按 B 支字号（10）入队");
@@ -4453,6 +4578,8 @@ int main(int argc, char** argv) {
         if (only_pacing) {
             // 打字节流：每 D 毫秒一格、每帧最多一格；间隔 = 0 ⇒ 立即抽干。
             if (!check_text_pacing(table)) return 1;
+            // 跨帧队列的样式快照：追加之后改字号不得影响已排好的那一格。
+            if (!check_text_pending_style_snapshot(table)) return 1;
         if (!check_text_record_flags(table)) return 1;
             std::printf("core-selftest(pacing): PASS\n");
             return 0;
@@ -4498,6 +4625,7 @@ int main(int argc, char** argv) {
             // typewriter：追加时只写布局格，绘制侧每帧推进一格。
             if (!check_text_typewriter(table)) return 1;
         if (!check_text_pacing(table)) return 1;
+            if (!check_text_pending_style_snapshot(table)) return 1;
             std::printf("core-selftest(typewriter): PASS\n");
             return 0;
         }
@@ -5439,6 +5567,28 @@ int main(int argc, char** argv) {
                              "两轮「重建 + 同条数文字」后纹理版本号 = %u（≤3）："
                              "GPU 缓存会命中上一轮纹理，滚动重画不会刷新\n",
                              final_revision);
+                return 1;
+            }
+            // ★ **删除 → 重建**也必须接着涨（`0x1fa` 把记录删掉，但窗口路径的 GPU 缓存仍记得
+            //   `(id, revision)`）。实测缺陷（2026-10-29，用户口径 + 本机窗口复现）：设置界面
+            //   （CONFIG1.BIN）↔ 初始配置界面（Game Start）来回一次，后进的那个界面对应的整张
+            //   美术图**整张不画**（背景透出来）或画成**对方的内容** —— 两界面用同一批纹理编号，
+            //   前者 `0x1fa` 释放、后者重建时版本号若回到 1，缓存就命中上一条记录的纹理。
+            //   坏法：0x1f8 建（rev=1）→ 0x1fa 删 → 0x1f8 再建（rev 又 = 1）。
+            auto release_script = make_script_with_body();
+            emit_instruction(release_script, 0x1F8, {{0, 7}, {0, 64}, {0, 32}, {0, 0}});
+            emit_instruction(release_script, 0x1FA, {{0, 7}});
+            emit_instruction(release_script, 0x1F8, {{0, 7}, {0, 64}, {0, 32}, {0, 0}});
+            emit_instruction(release_script, 2, {});
+            core::Machine release_machine(0x12345678u, table);
+            release_machine.load_root(release_script);
+            release_machine.run(1000);
+            const core::TextureRecord* rebound = release_machine.texture(7);
+            if (rebound == nullptr || rebound->revision <= 1) {
+                std::fprintf(stderr,
+                             "0x1fa 释放后重建同一编号：revision=%u（必须 > 1；回到 1 会让窗口路径"
+                             "命中上一条记录的 GPU 纹理 —— 两个界面互相污染）\n",
+                             rebound == nullptr ? 0u : rebound->revision);
                 return 1;
             }
         }

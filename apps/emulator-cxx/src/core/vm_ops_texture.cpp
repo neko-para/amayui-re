@@ -305,7 +305,8 @@ void Machine::op_1f8(const Instruction& instruction) {
     record.file = -1;
     record.blank = true;
     record.present = true;
-    record.revision++;
+    note_texture_revision(id);                     // 旧记录（若有）用过的最高版本进下限
+    record.revision = next_texture_revision(id);   // ★ 跨删除/重建也单调（见 note_texture_revision）
     record.width = static_cast<std::uint32_t>(width);
     record.height = static_cast<std::uint32_t>(height);
     record.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0);
@@ -325,6 +326,9 @@ void Machine::op_1fa(const Instruction& instruction) {
     (void)read_int(ops[0]);
     // 释放守卫非 0：只清共享对象槽，纹理记录 / 纹理槽都不动（CORE-OPS-TEXTURE-RELEASE）。
     if (id < surface_release_gate_.size() && surface_release_gate_[id] != 0) return;
+    // ★ 删之前把这一条用过的最高版本记进下限：同一编号以后重建时版本号必须**接着往上涨**，
+    //   否则窗口路径的 GPU 纹理缓存会命中"上一条记录"的纹理（实测：两个界面互相污染）。
+    note_texture_revision(id);
     textures_.erase(id);
     return;
 }
@@ -357,12 +361,25 @@ void Machine::op_1f9(const Instruction& instruction) {
         }
     }
     record.present = true;
-    // ★ 替换同一槽时版本号必须**前进**（GPU 缓存按 revision 命中）：旧记录存在就取旧值 + 1，
-    //   否则从 1 开始。⛔ 用一个新记录的 0+1 会在"重载同一槽的另一张图"时命中旧纹理。
-    const auto previous = textures_.find(static_cast<std::uint32_t>(id));
-    record.revision = previous == textures_.end() ? 1u : previous->second.revision + 1u;
+    // ★ 替换同一槽时版本号必须**前进**，且要接着"这个编号用过的最高版本"往前（GPU 缓存按
+    //   revision 命中）：旧记录存在就取旧值 + 1；旧记录已被 `0x1fa` 删掉时取**下限 + 1**
+    //   （⛔ 不能从 1 重新开始 —— 那会命中上一条记录留在缓存里的纹理）。
+    note_texture_revision(static_cast<std::uint32_t>(id));
+    record.revision = next_texture_revision(static_cast<std::uint32_t>(id));
     textures_[static_cast<std::uint32_t>(id)] = record;
     return;
+}
+
+void Machine::note_texture_revision(std::uint32_t id) {
+    const auto it = textures_.find(id);
+    if (it == textures_.end()) return;
+    auto& floor = texture_revision_floor_[id];
+    if (it->second.revision > floor) floor = it->second.revision;
+}
+
+std::uint32_t Machine::next_texture_revision(std::uint32_t id) {
+    auto& floor = texture_revision_floor_[id];
+    return ++floor;
 }
 
 void Machine::op_208(const Instruction& instruction) {
