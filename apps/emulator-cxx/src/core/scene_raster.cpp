@@ -161,7 +161,7 @@ bool draw_item(Machine& machine, std::uint32_t key, Surface& target, std::uint32
     if (it == machine.draw_items().end()) return false;
     const DrawItem& item = it->second;
     if ((item.flags & 1u) == 0) return false;
-    const TextureRecord* texture = machine.texture(item.texture_id);
+    const TextureSlotObject* texture = machine.texture_slot(item.texture_id);
     if (texture == nullptr || texture->rgba.empty()) return false;
 
     int left = 0, top = 0, right = 0, bottom = 0;
@@ -478,32 +478,32 @@ Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t heigh
                 case 0: {
                     paint_interval(machine, canvas_a, record.a_start, record.a_count, now, forced);
                     paint_interval(machine, canvas_b, record.b_start, record.b_count, now, forced);
-                    TextureRecord* texture = machine.texture_mut(record.texture_id);
-                    if (texture == nullptr) break;
+                    TextureEntry* texture = machine.texture_mut(record.texture_id);
+                    if (texture == nullptr || !texture->slot.present) break;
                     double progress = command_progress(record, now, forced);
                     progress = std::clamp(progress, 0.0, 1.0);
                     if (progress >= 1.0) record.duration = 0;
                     else machine.set_command_animating(true);
-                    Surface target(texture->width, texture->height);
-                    target.rgba = texture->rgba;
+                    Surface target(texture->slot.width, texture->slot.height);
+                    target.rgba = texture->slot.rgba;
                     composite_fade(target, canvas_a, canvas_b, progress);
-                    texture->rgba = std::move(target.rgba);
-                    texture->revision++;
-                    texture->non_file = true;
+                    texture->slot.rgba = std::move(target.rgba);
+                    texture->slot.revision++;
+                    texture->record.non_file = true;
                     break;
                 }
                 case 1: {
                     if (first_frame) {
                         paint_interval(machine, canvas_a, record.a_start, record.a_count, now, forced);
-                        TextureRecord* texture = machine.texture_mut(record.texture_id);
-                        if (texture != nullptr) {
-                            Surface target(texture->width, texture->height);
-                            target.rgba = texture->rgba;
+                        TextureEntry* texture = machine.texture_mut(record.texture_id);
+                        if (texture != nullptr && texture->slot.present) {
+                            Surface target(texture->slot.width, texture->slot.height);
+                            target.rgba = texture->slot.rgba;
                             composite_plain(target, canvas_a, 0, 0);
                             apply_alpha_factor(target, record.mask_flag == 1 ? 0 : 255);
-                            texture->rgba = std::move(target.rgba);
-                    texture->revision++;
-                            texture->non_file = true;
+                            texture->slot.rgba = std::move(target.rgba);
+                            texture->slot.revision++;
+                            texture->record.non_file = true;
                         }
                     } else {
                         // 之后各帧只记「已消费」，零绘制请求。
@@ -512,13 +512,13 @@ Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t heigh
                     if (record.duration != 0) {
                         machine.set_command_animating(true);
                         record.duration = 0;
-                        TextureRecord* texture = machine.texture_mut(record.texture_id);
-                        if (texture != nullptr) {
-                            Surface target(texture->width, texture->height);
-                            target.rgba = texture->rgba;
+                        TextureEntry* texture = machine.texture_mut(record.texture_id);
+                        if (texture != nullptr && texture->slot.present) {
+                            Surface target(texture->slot.width, texture->slot.height);
+                            target.rgba = texture->slot.rgba;
                             apply_alpha_factor(target, record.mask_flag == 1 ? 255 : 0);
-                            texture->rgba = std::move(target.rgba);
-                    texture->revision++;
+                            texture->slot.rgba = std::move(target.rgba);
+                            texture->slot.revision++;
                         }
                     }
                     break;
@@ -536,10 +536,10 @@ Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t heigh
                     const int top = rect_item->top + static_cast<int>(std::lround(rect_item->aux[1]));
                     const int right = rect_item->right + static_cast<int>(std::lround(rect_item->aux[0]));
                     const int bottom = rect_item->bottom + static_cast<int>(std::lround(rect_item->aux[1]));
-                    TextureRecord* texture = machine.texture_mut(record.texture_id);
-                    if (texture == nullptr) break;
-                    Surface target(texture->width, texture->height);
-                    target.rgba = texture->rgba;
+                    TextureEntry* texture = machine.texture_mut(record.texture_id);
+                    if (texture == nullptr || !texture->slot.present) break;
+                    Surface target(texture->slot.width, texture->slot.height);
+                    target.rgba = texture->slot.rgba;
                     if (record.wipe_type >= 0) {
                         for (std::uint32_t y = 0; y < target.height; ++y) {
                             for (std::uint32_t x = 0; x < target.width; ++x) {
@@ -561,9 +561,9 @@ Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t heigh
                             }
                         }
                     }
-                    texture->rgba = std::move(target.rgba);
-                    texture->revision++;
-                    texture->non_file = true;
+                    texture->slot.rgba = std::move(target.rgba);
+                    texture->slot.revision++;
+                    texture->record.non_file = true;
                     // 到期 ⇒ 持续时间清 0；动画中 ⇒ 置「有动画」。
                     const auto elapsed = now - record.timestamp - static_cast<std::uint32_t>(record.delay);
                     if (record.duration > 0 &&
@@ -576,8 +576,8 @@ Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t heigh
                 }
                 case 3: {
                     paint_interval(machine, canvas_a, record.a_start, record.a_count, now, forced);
-                    TextureRecord* texture = machine.texture_mut(record.texture_id);
-                    if (texture == nullptr) break;
+                    TextureEntry* texture = machine.texture_mut(record.texture_id);
+                    if (texture == nullptr || !texture->slot.present) break;
                     double progress = command_progress(record, now, forced);
                     if (progress >= 1.0) {
                         progress = 1.0;
@@ -588,12 +588,12 @@ Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t heigh
                     const double length = lerp_double(record.from[0], record.to[0], progress);
                     const double param_a = lerp_double(record.from[1], record.to[1], progress);
                     const double param_b = lerp_double(record.from[2], record.to[2], progress);
-                    Surface target(texture->width, texture->height);
-                    target.rgba = texture->rgba;
+                    Surface target(texture->slot.width, texture->slot.height);
+                    target.rgba = texture->slot.rgba;
                     blur_into(target, canvas_a, record.variant, length, param_a, param_b);
-                    texture->rgba = std::move(target.rgba);
-                    texture->revision++;
-                    texture->non_file = true;
+                    texture->slot.rgba = std::move(target.rgba);
+                    texture->slot.revision++;
+                    texture->record.non_file = true;
                     break;
                 }
                 default:

@@ -240,7 +240,7 @@ int run_core_install(const InstallRunOptions& options) {
                 }
                 // 采样影片纹理的平均亮度：全黑 / 全同色的回归在这里就能看出来。
                 double mean = 0.0;
-                if (const core::TextureRecord* texture = machine.texture(42);
+                if (const core::TextureSlotObject* texture = machine.texture_slot(42);
                     texture != nullptr && texture->rgba.size() >= 4) {
                     const std::size_t step = (texture->rgba.size() / 4 / 997) * 4;
                     std::uint64_t sum = 0;
@@ -353,6 +353,9 @@ int run_core_install(const InstallRunOptions& options) {
                 const auto& stop = machine.last_stop();
                 std::printf("[core] exit halted=1 reason=%d opcode=0x%X message=%s\n",
                             static_cast<int>(stop.reason), stop.opcode, stop.message.c_str());
+                if (stop.reason != core::StopReason::Halted) {
+                    std::fputs(machine.stop_stack_report().c_str(), stdout);
+                }
             }
             return code;
         }
@@ -380,6 +383,9 @@ int run_core_install(const InstallRunOptions& options) {
         std::printf("[core] exit user_quit=%d halted=%d reason=%d opcode=0x%X message=%s\n",
                     user_quit ? 1 : 0, machine.halted() ? 1 : 0,
                     static_cast<int>(stop.reason), stop.opcode, stop.message.c_str());
+        if (machine.halted() && stop.reason != core::StopReason::Halted) {
+            std::fputs(machine.stop_stack_report().c_str(), stdout);
+        }
         if (save_requested && !save_config) {
             // 引擎会保存，但**宿主**不写：真实玩家配置 / 安装目录都是外部只读数据。
             // 要验证保存语义就显式指一个落点（`--config <副本>`）或 `--config-save`。

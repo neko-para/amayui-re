@@ -19,16 +19,7 @@ void Machine::op_223(const Instruction& instruction) {
     const auto b_count = read_int(ops[5]);
     const auto delay = read_int(ops[6]);
     const auto duration = read_int(ops[7]);
-    if (textures_.find(texture_id) == textures_.end()) {
-        TextureRecord& texture = textures_[texture_id];
-        texture.blank = true;
-        texture.non_file = true;
-        texture.revision++;
-        texture.present = true;
-        texture.width = 1280;
-        texture.height = 720;
-        texture.rgba.assign(static_cast<std::size_t>(texture.width) * texture.height * 4, 0);
-    }
+    if (texture_slot(texture_id) == nullptr) ensure_scene_texture_slot(texture_id);
     SceneCommandRecord& record = scene_commands_[key];
     record = SceneCommandRecord{};
     record.kind = 0;
@@ -58,7 +49,8 @@ void Machine::op_24d(const Instruction& instruction) {
     (void)read_int(ops[9]);  // 影片名表索引（不写记录）
     const auto delay = read_int(ops[10]);
     const auto duration = read_int(ops[11]);
-    if (textures_.find(texture_id) == textures_.end()) {
+    // ★ 门是**槽里有没有对象**（不是"记录存不存在"）：记录在、槽已释放 ⇒ 仍然是空槽。
+    if (texture_slot(texture_id) == nullptr) {
         throw CoreError("movie-texture-slot-empty:" + std::to_string(texture_id));
     }
     SceneCommandRecord& record = scene_commands_[key];
@@ -102,16 +94,7 @@ void Machine::op_24f(const Instruction& instruction) {
         report_error("タイプが不正です");
         return;  // 一个字段都不写
     }
-    if (textures_.find(texture_id) == textures_.end()) {
-        TextureRecord& texture = textures_[texture_id];
-        texture.blank = true;
-        texture.non_file = true;
-        texture.revision++;
-        texture.present = true;
-        texture.width = 1280;
-        texture.height = 720;
-        texture.rgba.assign(static_cast<std::size_t>(texture.width) * texture.height * 4, 0);
-    }
+    if (texture_slot(texture_id) == nullptr) ensure_scene_texture_slot(texture_id);
     SceneCommandRecord& record = scene_commands_[key];
     record = SceneCommandRecord{};
     record.kind = 2;
@@ -141,16 +124,7 @@ void Machine::op_250(const Instruction& instruction) {
     const auto to_angle = read_int(ops[7]);
     const auto delay = read_int(ops[8]);
     const auto duration = read_int(ops[9]);
-    if (textures_.find(texture_id) == textures_.end()) {
-        TextureRecord& texture = textures_[texture_id];
-        texture.blank = true;
-        texture.non_file = true;
-        texture.revision++;
-        texture.present = true;
-        texture.width = 1280;
-        texture.height = 720;
-        texture.rgba.assign(static_cast<std::size_t>(texture.width) * texture.height * 4, 0);
-    }
+    if (texture_slot(texture_id) == nullptr) ensure_scene_texture_slot(texture_id);
     SceneCommandRecord& record = scene_commands_[key];
     record = SceneCommandRecord{};
     record.kind = 3;
@@ -183,16 +157,7 @@ void Machine::op_251(const Instruction& instruction) {
     const auto to_cy = read_int(ops[9]);
     const auto delay = read_int(ops[10]);
     const auto duration = read_int(ops[11]);
-    if (textures_.find(texture_id) == textures_.end()) {
-        TextureRecord& texture = textures_[texture_id];
-        texture.blank = true;
-        texture.non_file = true;
-        texture.revision++;
-        texture.present = true;
-        texture.width = 1280;
-        texture.height = 720;
-        texture.rgba.assign(static_cast<std::size_t>(texture.width) * texture.height * 4, 0);
-    }
+    if (texture_slot(texture_id) == nullptr) ensure_scene_texture_slot(texture_id);
     SceneCommandRecord& record = scene_commands_[key];
     record = SceneCommandRecord{};
     record.kind = 3;

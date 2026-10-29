@@ -20,8 +20,8 @@
 namespace app {
 namespace {
 
-// 把一张纹理记录写成 24 位 BMP（bottom-up BGR）—— 诊断用（看"那一格纹理到底是什么"）。
-bool write_texture_raw(const core::TextureRecord& texture, const std::string& path) {
+// 把一张纹理**槽里的对象**写成 24 位 BMP（bottom-up BGR）—— 诊断用（看"那一格纹理到底是什么"）。
+bool write_texture_raw(const core::TextureSlotObject& texture, const std::string& path) {
     if (texture.width == 0 || texture.height == 0 || texture.rgba.size() < texture.width * texture.height * 4u) return false;
     std::ofstream output(core::path_from_utf8(path), std::ios::binary);
     if (!output) return false;
@@ -29,7 +29,7 @@ bool write_texture_raw(const core::TextureRecord& texture, const std::string& pa
     return output.good();
 }
 
-bool write_texture_bmp(const core::TextureRecord& texture, const std::string& path) {
+bool write_texture_bmp(const core::TextureSlotObject& texture, const std::string& path) {
     if (texture.width == 0 || texture.height == 0 || texture.rgba.size() < texture.width * texture.height * 4u) {
         return false;
     }
@@ -227,7 +227,7 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
                     std::fprintf(stderr, "\n");
                     core::Bytes canvas = core::rasterize_scene(machine, static_cast<std::uint32_t>(width),
                                                                static_cast<std::uint32_t>(height));
-                    core::TextureRecord record;
+                    core::TextureSlotObject record;
                     record.width = static_cast<std::uint32_t>(width);
                     record.height = static_cast<std::uint32_t>(height);
                     record.rgba = std::move(canvas);
@@ -281,9 +281,19 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
         "[play] steps=%zu presented=%d clock=%ums script=%u halted=%d reason=%d opcode=0x%X message=%s\n",
         steps, presented, clock - start_clock, machine.frame().script_id, machine.halted() ? 1 : 0,
         static_cast<int>(stop.reason), stop.opcode, stop.message.c_str());
+    // ★ 异常停机补帧链（哪个 BIN 的哪个偏移）：正常 `exit`（Halted）不刷这一段。
+    if (machine.halted() && stop.reason != core::StopReason::Halted) {
+        std::fputs(machine.stop_stack_report().c_str(), stdout);
+    }
     std::printf("[play] script-chain:");
     for (const auto script : chain) std::printf(" %u", script);
     std::printf("\n");
+    // ★ 诊断：`0x300` 演示闸的重放轮数（0 = 只展示一次；设置界面示例文本的缺陷就是这一格为 0）。
+    for (std::size_t slot = 1; slot < 10; ++slot) {
+        if (machine.text_layer_cell_count(slot) == 0 && machine.text_gate_cycles(slot) == 0) continue;
+        std::printf("[play] text-gate slot=%zu cells=%zu cycles=%d\n", slot,
+                    machine.text_layer_cell_count(slot), machine.text_gate_cycles(slot));
+    }
     if (scripted != nullptr) {
         std::printf("[play] input applied=%zu exhausted=%d last=%lld\n", scripted->applied(),
                     scripted->exhausted() ? 1 : 0, static_cast<long long>(scripted->applied_until()));
@@ -330,9 +340,9 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
         }
     }
     if (options.dump_texture_id != 0 && !options.dump_texture_out.empty()) {
-        const core::TextureRecord* texture = machine.texture(options.dump_texture_id);
+        const core::TextureSlotObject* texture = machine.texture_slot(options.dump_texture_id);
         if (texture == nullptr) {
-            std::fprintf(stderr, "[play] 纹理 %u 不存在\n", options.dump_texture_id);
+            std::fprintf(stderr, "[play] 纹理 %u 不存在（或槽已释放）\n", options.dump_texture_id);
         } else if (!write_texture_bmp(*texture, options.dump_texture_out) ||
                    (std::getenv("EMULATOR_CXX_RAW_TEXTURE") != nullptr &&
                     !write_texture_raw(*texture, options.dump_texture_out + ".rgba"))) {
@@ -381,6 +391,7 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
             reason == core::StopReason::BadOpcode) {
             std::fprintf(stderr, "[play] 停机原因不是正常退出：reason=%d opcode=0x%X %s\n",
                          static_cast<int>(reason), stop.opcode, stop.message.c_str());
+            std::fputs(machine.stop_stack_report().c_str(), stderr);
             return 1;
         }
     }

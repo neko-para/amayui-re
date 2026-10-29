@@ -89,14 +89,15 @@ void Machine::op_23d(const Instruction& instruction) {
     // 退出清理（CORE-OPS-MOVIE-CLEAR-23D）：销毁槽 42..999 的影片对象并清槽。
     // 同一次扫描也清掉这些槽的纹理记录来源文件格（场景侧解绑，`0x216` 可观察）；
     // 释放守卫非 0 的槽跳过（`CORE-OPS-MOVIE-CLEAR-23D` 的门的观察档）。
-    for (auto& [slot, record] : textures_) {
+    for (auto& [slot, entry] : textures_) {
         if (slot < 42u || slot >= 1000u || surface_release_gate_[slot] != 0) continue;
-        record.file = -1;
-        // 纹理槽对象也被释放（0x208 / 0x1fb 消费端看到空槽）；记录本身保留。
-        record.present = false;
-        record.width = 0;
-        record.height = 0;
-        record.rgba.clear();
+        // ★ 记录与槽对象分开：这里只把**来源文件**写成「无」并清**槽里的对象**；颜色键 / 空白标记等
+        //   记录字段保留（与 `0x1fa` 同口径）。
+        entry.record.file = -1;
+        entry.slot.present = false;
+        entry.slot.width = 0;
+        entry.slot.height = 0;
+        entry.slot.rgba.clear();
     }
     // ★ 场景侧的槽→纹理绑定解绑未建模（见 RES-23D-SCENE-UNBIND）；纹理记录不在这里删除。
     bool erased = false;
@@ -301,15 +302,16 @@ void Machine::op_1f8(const Instruction& instruction) {
     const auto width = read_int(ops[1]);
     const auto height = read_int(ops[2]);
     (void)read_int(ops[3]);
-    TextureRecord& record = textures_[id];
-    record.file = -1;
-    record.blank = true;
-    record.present = true;
-    note_texture_revision(id);                     // 旧记录（若有）用过的最高版本进下限
-    record.revision = next_texture_revision(id);   // ★ 跨删除/重建也单调（见 note_texture_revision）
-    record.width = static_cast<std::uint32_t>(width);
-    record.height = static_cast<std::uint32_t>(height);
-    record.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0);
+    // ★ 记录与槽对象**分开写**：`0x1f8` 只动「来源 = 无 / 空白标记」与槽里的像素，
+    //   **颜色键等记录字段保持原值**（spec「空白创建纹理」；`0x1fa` 之后记录还在，所以这里能保住）。
+    TextureEntry& entry = texture_entry(id);
+    entry.record.file = -1;
+    entry.record.blank = true;
+    entry.slot.present = true;
+    entry.slot.width = static_cast<std::uint32_t>(width);
+    entry.slot.height = static_cast<std::uint32_t>(height);
+    entry.slot.revision = next_texture_revision(id);   // ★ 跨释放 / 重建也单调（见 next_texture_revision）
+    entry.slot.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0);
     // ★ `revision` 必须**严格单调递增**（这里只加不减）。窗口路径的 GPU 纹理缓存按 `revision` 命中：
     //   一次重画 = 0x1f8 重建 + N 次 0x204/0x205；若重建把版本号重置回 1，则"每次重画都写同样多条文字"
     //   的终值恒等 ⇒ 缓存命中上一轮的纹理 ⇒ 滚动 / 切页时画面停在上一次的文字。2026-10-27 实测：
@@ -321,15 +323,22 @@ void Machine::op_1f8(const Instruction& instruction) {
 
 void Machine::op_1fa(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 释放纹理
+    // 释放纹理（CORE-OPS-TEXTURE-RELEASE）：**只清槽里的对象**，纹理记录保留 ——
+    // ★ 记录 vs 槽对象是两层：「空槽」≠「空白纹理」。旧实现删整条记录，把颜色键一起丢了，
+    //   还让同一编号重建时版本号打回 1（GPU 缓存把上一条记录的纹理当成当前纹理）。
     const auto id = static_cast<std::uint32_t>(read_int(ops[0]));
     (void)read_int(ops[0]);
     // 释放守卫非 0：只清共享对象槽，纹理记录 / 纹理槽都不动（CORE-OPS-TEXTURE-RELEASE）。
     if (id < surface_release_gate_.size() && surface_release_gate_[id] != 0) return;
-    // ★ 删之前把这一条用过的最高版本记进下限：同一编号以后重建时版本号必须**接着往上涨**，
-    //   否则窗口路径的 GPU 纹理缓存会命中"上一条记录"的纹理（实测：两个界面互相污染）。
-    note_texture_revision(id);
-    textures_.erase(id);
+    TextureEntry* entry = texture_mut(id);
+    if (entry == nullptr) return;  // 没有记录 ⇒ 也没有槽对象可清
+    // ★ `next_texture_revision` 自己会把这一条用过的最高版本算进下限，所以下面清槽不会让
+    //   以后重建的版本号回退（否则 GPU 缓存会命中"上一条记录"的纹理，实测两个界面互相污染）。
+    entry->record.file = -1;        // 记录的来源文件写成「无」；颜色键 / 空白标记不动
+    entry->slot.present = false;    // 槽里的对象释放（平台纹理）
+    entry->slot.width = 0;
+    entry->slot.height = 0;
+    entry->slot.rgba.clear();
     return;
 }
 
@@ -343,43 +352,56 @@ void Machine::op_1f9(const Instruction& instruction) {
     if (install_ == nullptr) throw CoreError("texture-loader-missing");
     const core::Bytes bytes = core::read_install_file(*install_, static_cast<std::uint32_t>(file));
     const core::DecodedAgf image = core::decode_agf(bytes);
-    TextureRecord record;
-    record.file = file;
-    record.color_key = raw_key < 0 ? 0u : (0xFF000000u | (static_cast<std::uint32_t>(raw_key) & 0xFFFFFFu));
-    record.width = image.width;
-    record.height = image.height;
-    record.rgba = image.rgba;
-    if (record.color_key != 0) {
-        for (std::size_t i = 0; i + 3 < record.rgba.size(); i += 4) {
-            const auto argb = (static_cast<std::uint32_t>(record.rgba[i + 3]) << 24) |
-                              (static_cast<std::uint32_t>(record.rgba[i]) << 16) |
-                              (static_cast<std::uint32_t>(record.rgba[i + 1]) << 8) |
-                              record.rgba[i + 2];
-            if (argb == record.color_key) {
-                record.rgba[i] = 0; record.rgba[i + 1] = 0; record.rgba[i + 2] = 0; record.rgba[i + 3] = 0;
+    // ★ 这是「换纹理」：**记录**整条替换、槽对象换成新像素（旧的颜色键 / 空白标记都不留）。
+    TextureEntry entry;
+    entry.record.file = file;
+    entry.record.color_key =
+        raw_key < 0 ? 0u : (0xFF000000u | (static_cast<std::uint32_t>(raw_key) & 0xFFFFFFu));
+    entry.slot.width = image.width;
+    entry.slot.height = image.height;
+    entry.slot.rgba = image.rgba;
+    if (entry.record.color_key != 0) {
+        for (std::size_t i = 0; i + 3 < entry.slot.rgba.size(); i += 4) {
+            const auto argb = (static_cast<std::uint32_t>(entry.slot.rgba[i + 3]) << 24) |
+                              (static_cast<std::uint32_t>(entry.slot.rgba[i]) << 16) |
+                              (static_cast<std::uint32_t>(entry.slot.rgba[i + 1]) << 8) |
+                              entry.slot.rgba[i + 2];
+            if (argb == entry.record.color_key) {
+                entry.slot.rgba[i] = 0; entry.slot.rgba[i + 1] = 0;
+                entry.slot.rgba[i + 2] = 0; entry.slot.rgba[i + 3] = 0;
             }
         }
     }
-    record.present = true;
+    entry.slot.present = true;
     // ★ 替换同一槽时版本号必须**前进**，且要接着"这个编号用过的最高版本"往前（GPU 缓存按
-    //   revision 命中）：旧记录存在就取旧值 + 1；旧记录已被 `0x1fa` 删掉时取**下限 + 1**
+    //   revision 命中）：旧槽对象在就取旧值 + 1；槽已被 `0x1fa` 释放时同样接着下限涨
     //   （⛔ 不能从 1 重新开始 —— 那会命中上一条记录留在缓存里的纹理）。
-    note_texture_revision(static_cast<std::uint32_t>(id));
-    record.revision = next_texture_revision(static_cast<std::uint32_t>(id));
-    textures_[static_cast<std::uint32_t>(id)] = record;
+    entry.slot.revision = next_texture_revision(static_cast<std::uint32_t>(id));
+    textures_[static_cast<std::uint32_t>(id)] = std::move(entry);
     return;
-}
-
-void Machine::note_texture_revision(std::uint32_t id) {
-    const auto it = textures_.find(id);
-    if (it == textures_.end()) return;
-    auto& floor = texture_revision_floor_[id];
-    if (it->second.revision > floor) floor = it->second.revision;
 }
 
 std::uint32_t Machine::next_texture_revision(std::uint32_t id) {
     auto& floor = texture_revision_floor_[id];
+    // ★ 先把条目**当前**的版本算进下限：文本绘制 / 场景效果走的是 `slot.revision++`，
+    //   它们不经过这里 —— 若只信下限，可能发一个**已被用过**的版本号，GPU 缓存就命中旧内容。
+    const auto it = textures_.find(id);
+    if (it != textures_.end() && it->second.slot.revision > floor) floor = it->second.slot.revision;
     return ++floor;
+}
+
+void Machine::ensure_scene_texture_slot(std::uint32_t id) {
+    // 场景命令族（`0x223` / `0x24f` / `0x250` / `0x251`）的「没有就建一张 1280×720 透明画布」。
+    // ★ 判据是**槽对象**是否为空：`0x1fa` 之后记录还在、槽已释放 ⇒ 这里照建（与旧的"删整条再建"等价）。
+    TextureEntry& entry = texture_entry(id);
+    entry.record.file = -1;  // 画布没有来源文件（与 `0x1f8` 空白创建同口径）
+    entry.record.blank = true;
+    entry.record.non_file = true;
+    entry.slot.present = true;
+    entry.slot.width = 1280;
+    entry.slot.height = 720;
+    entry.slot.revision = next_texture_revision(id);
+    entry.slot.rgba.assign(1280u * 720u * 4u, 0);
 }
 
 void Machine::op_208(const Instruction& instruction) {
@@ -394,10 +416,10 @@ void Machine::op_208(const Instruction& instruction) {
         return;
     }
     // 「槽空」与「越界」不是同一失败：槽空静默、两个输出 0。
-    const TextureRecord* found = texture(static_cast<std::uint32_t>(id));
-    const bool present = found != nullptr && found->present;
-    write_int(ops[1], present ? static_cast<std::int32_t>(found->width) : 0);
-    write_int(ops[2], present ? static_cast<std::int32_t>(found->height) : 0);
+    // ★ 判据是**槽里的对象**：`0x1fa` 之后记录还在（颜色键等字段保原值）但槽已释放 ⇒ 这里仍然是 0/0。
+    const TextureSlotObject* found = texture_slot(static_cast<std::uint32_t>(id));
+    write_int(ops[1], found != nullptr ? static_cast<std::int32_t>(found->width) : 0);
+    write_int(ops[2], found != nullptr ? static_cast<std::int32_t>(found->height) : 0);
     return;
 }
 
@@ -409,7 +431,8 @@ void Machine::op_216(const Instruction& instruction) {
     if (slot < 0 || static_cast<std::uint32_t>(slot) >= 1000u) {
         throw CoreError("texture-slot-out-of-range:" + std::to_string(slot));
     }
-    const TextureRecord* record = texture(static_cast<std::uint32_t>(slot));
+    // ★ 读的是**记录的来源文件格**（不是槽对象）：`0x1fa` 把来源写成「无」之后这里读 -1。
+    const TextureRecord* record = texture_record(static_cast<std::uint32_t>(slot));
     write_int(ops[0], record == nullptr ? -1 : record->file);
     return;
 }

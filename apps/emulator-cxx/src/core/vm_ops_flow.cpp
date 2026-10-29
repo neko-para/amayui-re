@@ -49,6 +49,7 @@ void Machine::op_03(const Instruction& instruction) {
     child.loaded = true;
     child.code.assign(script.begin() + header.body_offset, script.end());
     child.ip = 0;
+    child.body_offset = header.body_offset;
     child.length_slot = 0;
     child.parent = static_cast<std::int32_t>(current_frame_);
     child.script_id = static_cast<std::uint32_t>(file_id);
@@ -72,6 +73,7 @@ void Machine::op_06(const Instruction& instruction) {
     slot.loaded = true;
     slot.code.assign(script.begin() + header.body_offset, script.end());
     slot.ip = 0;
+    slot.body_offset = header.body_offset;
     slot.length_slot = 0;
     slot.parent = static_cast<std::int32_t>(current_frame_);
     slot.script_id = static_cast<std::uint32_t>(file_id);
@@ -92,6 +94,7 @@ void Machine::op_05(const Instruction& instruction) {
     if (f.ret_stack.empty()) return;
     const auto position = f.ret_stack.back();
     f.ret_stack.pop_back();
+    if (!f.call_sites.empty()) f.call_sites.pop_back();
     if (position == -1) return;
     jump_to(static_cast<std::uint32_t>(position));
     return;

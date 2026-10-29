@@ -387,6 +387,31 @@ void Machine::write_text(const Operand& operand, std::string value) {
         frame_mut().local_string[operand.raw] = std::move(value);
         return;
     }
+    // ★ 指针族里的**字符串**两条（8 = 全局 / 14 = 局部的"指向字符串记录"）：槽里存的是
+    //   **记录地址**，解引用后写那一条记录。引擎的落点分派（EA `0x433310`）接受 5 / 8 / 11 / 14，
+    //   四条都汇到同一个收尾（EA `0x43362F` = `sub_40C120(记录, -1, 0, 源)`）⇒ 语义上与 5 / 11
+    //   同一件事，只是多一层间接。只改那条记录的字节 + 长度；⛔ 不碰字体对象 / 文本层画布 / 绘制项。
+    //   ⛔ 容器句柄（0x8005 / 0x800B）不在这里：它们走另一条容器写入路径，且本语料的 `0x192` 没有
+    //   这种站点（取证见需求树 / bindings 的 CORE-OPS-TEXT-SET）。
+    if (operand.type == 8 || operand.type == 14) {
+        const auto address = read_pointer(operand);
+        std::uint32_t tag = 0;
+        std::uint32_t index = 0;
+        if (!resolve_address(address, tag, index)) {
+            // 引擎不解引用判空、也不查池界（空指针 / 跨界都是 UB）；本模型**响亮失败**，
+            // ⛔ 不许静默写成 0 号记录。
+            throw CoreError("write-text-unmapped-address:" + std::to_string(address));
+        }
+        if (tag == 5) {
+            global_string_[index] = std::move(value);
+            return;
+        }
+        if (tag == 11) {
+            frame_mut().local_string[index] = std::move(value);
+            return;
+        }
+        throw CoreError("write-text-unsupported-pool-tag:" + std::to_string(tag));
+    }
     throw CoreError("write-text-unsupported-tag:" + std::to_string(operand.type));
 }
 

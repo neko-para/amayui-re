@@ -2259,7 +2259,7 @@ bool check_save_ops(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1af decode mismatch\n");
         return false;
     }
-    const core::TextureRecord* decoded = read_ok_machine.texture(9);
+    const core::TextureSlotObject* decoded = read_ok_machine.texture_slot(9);
     if (decoded == nullptr || decoded->width != 2 || decoded->height != 2 ||
         decoded->rgba.size() != 16 || decoded->rgba[0] != 255 || decoded->rgba[1] != 0 ||
         decoded->rgba[2] != 0) {  // 画面第 1 行、左像素 = 红
@@ -2475,7 +2475,7 @@ bool check_slot_imgid(const core::OpcodeTable& table) {
                      machine.global_int(1), machine.global_int(2));
         return false;
     }
-    const auto* t41 = machine.texture(41);
+    const auto* t41 = machine.texture_record(41);
     if (t41 == nullptr || t41->file != 7) {
         std::fprintf(stderr, "0x1fa release guard must keep slot 41, got %d\n",
                      t41 == nullptr ? -999 : t41->file);
@@ -2573,6 +2573,105 @@ bool check_texture_size(const core::OpcodeTable& table) {
         size_empty.read_int(core::Operand{3, 0}) != 0 ||
         size_empty.read_int(core::Operand{3, 1}) != 0) {
         std::fprintf(stderr, "0x208 empty slot reported an error\n");
+        return false;
+    }
+    return true;
+}
+
+// ── 文本落点：指针族（0x192 的 tag 8 / 14；CORE-OPS-TEXT-SET） ──
+bool check_text_pointer_write(const core::OpcodeTable& table) {
+    // ① 正例：`0x61` 让局部指针槽 0 指向 global-string 0，`0x192` 写穿那条记录。
+    //    ★ 引擎落点分派（EA 0x433310）接受 5 / 8 / 11 / 14，四条汇到同一个记录级写入
+    //      （EA 0x43362F = `sub_40C120(记录, -1, 0, 源)`）⇒ tag 14 = 比 5 多一层间接。
+    auto write_script = make_script_with_body();
+    emit_instruction(write_script, 0x61, {{14, 0}, {5, 0}, {9, 0}});
+    emit_instruction(write_script, 0x192, {{14, 0}, {5, 1}});
+    emit_instruction(write_script, 2, {});
+    core::Machine machine(0x12345678u, table);
+    machine.write_text(core::Operand{5, 0}, "seed");
+    machine.write_text(core::Operand{5, 1}, "abc");
+    machine.load_root(write_script);
+    machine.run(8);
+    if (machine.last_stop().reason != core::StopReason::Halted ||
+        machine.read_text(core::Operand{5, 0}) != "abc") {
+        std::fprintf(stderr,
+                     "0x192 落点 type 14 没有写穿指针目标：got=%s halted=%d msg=%s\n",
+                     machine.read_text(core::Operand{5, 0}).c_str(), machine.halted() ? 1 : 0,
+                     machine.last_stop().message.c_str());
+        return false;
+    }
+    // ①b 落点 type 8（**全局**指针池）：同一套解引用，只是换一张指针表。
+    auto global_ptr = make_script_with_body();
+    emit_instruction(global_ptr, 0x61, {{8, 0}, {5, 0}, {9, 0}});
+    emit_instruction(global_ptr, 0x192, {{8, 0}, {5, 1}});
+    emit_instruction(global_ptr, 2, {});
+    core::Machine global_machine(0x12345678u, table);
+    global_machine.write_text(core::Operand{5, 0}, "g0");
+    global_machine.write_text(core::Operand{5, 1}, "g1");
+    global_machine.load_root(global_ptr);
+    global_machine.run(8);
+    if (global_machine.last_stop().reason != core::StopReason::Halted ||
+        global_machine.read_text(core::Operand{5, 0}) != "g1") {
+        std::fprintf(stderr, "0x192 落点 type 8 没有写穿指针目标：got=%s msg=%s\n",
+                     global_machine.read_text(core::Operand{5, 0}).c_str(),
+                     global_machine.last_stop().message.c_str());
+        return false;
+    }
+    // ② 源侧 type 14：同样经指针读（读完写进 global-string 2）。
+    auto read_script = make_script_with_body();
+    emit_instruction(read_script, 0x61, {{14, 0}, {5, 0}, {9, 0}});
+    emit_instruction(read_script, 0x192, {{5, 2}, {14, 0}});
+    emit_instruction(read_script, 2, {});
+    core::Machine reader(0x12345678u, table);
+    reader.write_text(core::Operand{5, 0}, "xyz");
+    reader.load_root(read_script);
+    reader.run(8);
+    if (reader.last_stop().reason != core::StopReason::Halted ||
+        reader.read_text(core::Operand{5, 2}) != "xyz") {
+        std::fprintf(stderr, "0x192 源侧 type 14 没读出指针目标：got=%s halted=%d msg=%s\n",
+                     reader.read_text(core::Operand{5, 2}).c_str(), reader.halted() ? 1 : 0,
+                     reader.last_stop().message.c_str());
+        return false;
+    }
+    // ③ 反例：指针槽从没写过（地址 0）⇒ 响亮失败；⛔ 不许静默写 0 号记录。
+    auto null_script = make_script_with_body();
+    emit_instruction(null_script, 0x192, {{14, 1}, {5, 1}});
+    emit_instruction(null_script, 2, {});
+    core::Machine null_machine(0x12345678u, table);
+    null_machine.write_text(core::Operand{5, 0}, "keep");
+    null_machine.write_text(core::Operand{5, 1}, "abc");
+    null_machine.load_root(null_script);
+    null_machine.step();
+    if (!null_machine.halted() ||
+        null_machine.last_stop().message.rfind("write-text-unmapped-address", 0) != 0 ||
+        null_machine.read_text(core::Operand{5, 0}) != "keep") {
+        std::fprintf(stderr, "0x192 空指针槽没有响亮失败（msg=%s）\n",
+                     null_machine.last_stop().message.c_str());
+        return false;
+    }
+    // ④ 回归：落点仍是**值族**（type 3）⇒ 照旧响亮失败（放宽只针对 8 / 14）。
+    auto int_dest = make_script_with_body();
+    emit_instruction(int_dest, 0x192, {{3, 0}, {5, 1}});
+    emit_instruction(int_dest, 2, {});
+    core::Machine int_machine(0x12345678u, table);
+    int_machine.write_text(core::Operand{5, 1}, "abc");
+    int_machine.load_root(int_dest);
+    int_machine.step();
+    if (!int_machine.halted() ||
+        int_machine.last_stop().message.rfind("write-text-unsupported-tag:3", 0) != 0) {
+        std::fprintf(stderr, "0x192 落点 type 3 的失败语义被放宽了（msg=%s）\n",
+                     int_machine.last_stop().message.c_str());
+        return false;
+    }
+    // ⑤ halt 报告：帧链必须给出 script / ip / file（文件内偏移）/ opcode ——
+    //    事故里只有 `opcode=0x192` 时，靠这几格定位"哪个 BIN 的哪一条"。
+    const std::string report = null_machine.stop_stack_report();
+    if (report.find("[stack] #1 frame=0/") == std::string::npos ||
+        report.find("script=0") == std::string::npos ||
+        report.find("ip=0") == std::string::npos ||
+        report.find("file=") == std::string::npos ||
+        report.find("opcode=0x192") == std::string::npos) {
+        std::fprintf(stderr, "halt 帧链报告缺字段：\n%s", report.c_str());
         return false;
     }
     return true;
@@ -3270,8 +3369,8 @@ bool check_render_prims(const core::OpcodeTable& table) {
         run.target = machine.render_target();
         run.count = machine.texture_count();
         for (const auto& entry : machine.textures()) {
-            run.pixels[entry.first] = entry.second.rgba;
-            run.revisions[entry.first] = entry.second.revision;
+            run.pixels[entry.first] = entry.second.slot.rgba;
+            run.revisions[entry.first] = entry.second.slot.revision;
         }
         return run;
     };
@@ -3649,7 +3748,8 @@ bool check_text_pacing(const core::OpcodeTable& table) {
         return bytes;
     };
     const auto ink = [](core::Machine& machine) {
-        const core::TextureRecord* texture = machine.texture(core::Machine::text_layer_texture_id(9));
+        const core::TextureSlotObject* texture =
+            machine.texture_slot(core::Machine::text_layer_texture_id(9));
         if (texture == nullptr) return std::size_t{0};
         std::size_t count = 0;
         for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
@@ -3704,6 +3804,111 @@ bool check_text_pacing(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── `0x300` 循环演示闸：逐格揭示 → 停「期限」→ 清条目 → 从第一格重来 ──
+/** 引擎文本泵 `sub_409400`：槽 1..9 任一状态非 0 ⇒ 有槽在用（第 29 位保持）；每 `MessageSpeed` 毫秒
+ *  从层记录 `+0x84` 揭示一格（`sub_45BE20`）；整段揭示完记起点，`现在−起点 ≥ 期限` 时清该层两段
+ *  绘制键区间并把游标归 0、闸位保持（`sub_404F80`）⇒ 无限重放。`0x301` 是同一段清除的一次性入口。
+ *  ★ 旧实现只把 0x300/0x301 写成两张无人读的 map ⇒ 示例文本只出现一次（用户口径："不会刷新"）。 */
+bool check_text_slot_replay(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "text-gate: %s\n", what);
+        return false;
+    };
+    const auto build = [&](std::int32_t deadline, std::int32_t speed) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 190700}, {0, 40}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x74, {{0, static_cast<std::uint32_t>(speed)}});
+        emit_instruction(bytes, 0x300, {{0, 9}, {0, 1}, {0, static_cast<std::uint32_t>(deadline)}});
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});  // "AB" ⇒ 两格
+        emit_instruction(bytes, 0x6F, {{0, 0}});
+        for (int i = 0; i < 400; ++i) emit_instruction(bytes, 0x1A8, {});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    const auto ink = [](core::Machine& machine) {
+        const core::TextureSlotObject* texture =
+            machine.texture_slot(core::Machine::text_layer_texture_id(9));
+        if (texture == nullptr) return std::size_t{0};
+        std::size_t count = 0;
+        for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+            if (texture->rgba[i] != 0) ++count;
+        }
+        return count;
+    };
+    core::Machine machine(key, table);
+    machine.write_text(core::Operand{5, 0}, "AB");
+    machine.load_root(build(50, 20));
+    for (int i = 0; i < 9; ++i) {  // 走完 0x6E（追加），停在 0x6F 之前
+        if (!machine.step()) return fail("走到追加之前停机");
+    }
+    if (machine.text_layer_cell_count(9) != 2) {
+        return fail("闸开着的层没有保留字符格（重放没有源）");
+    }
+    if (machine.text_layer_revealed(9) != 0) return fail("追加那一帧就揭示了格（应为 0）");
+    if (machine.pending_glyph_count() != 0) {
+        return fail("闸开着的层还在走普通打字队列（两个推进者）");
+    }
+    int last_cycles = 0;
+    bool saw_erase = false;
+    bool saw_ink = false;
+    for (int i = 0; i < 600; ++i) {
+        if (!machine.step()) break;
+        if (ink(machine) > 0) saw_ink = true;
+        const int cycles = machine.text_gate_cycles(9);
+        if (cycles > last_cycles) {
+            saw_erase = true;
+            if (machine.draw_item(190700) != nullptr) {
+                return fail("重放时刻没有清掉本层绘制条目（文本会一直叠着）");
+            }
+            if (machine.text_layer_revealed(9) != 0) return fail("重放时刻揭示游标没有归 0");
+            last_cycles = cycles;
+        }
+        if (last_cycles >= 2) break;
+    }
+    if (!saw_ink) return fail("闸门层一个像素都没落（揭示没有真的画字）");
+    if (!saw_erase || last_cycles < 2) {
+        return fail("`0x300` 的演示闸没有循环（只展示一次 —— 用户口径的缺陷）");
+    }
+    if (machine.text_layer_cell_count(9) != 2) {
+        return fail("重放期间字符格被改了（重放不需要重新追加）");
+    }
+    // ★ 闸在推进时第 29 位必须保着（否则主循环不再调泵 ⇒ 停在"揭示完"那一帧）。
+    if (!machine.text_typing()) return fail("闸在跑的时候第 29 位被清了（泵会停）");
+    // 参数格 = 0：整段一次揭示、**不重放**（引擎 `0x409452` 跳过记起点 / 期限清除），第 29 位清掉。
+    {
+        core::Machine zero_machine(key, table);
+        zero_machine.write_text(core::Operand{5, 0}, "AB");
+        zero_machine.load_root(build(50, 0));
+        for (int i = 0; i < 300; ++i) {
+            if (!zero_machine.step()) break;
+        }
+        if (zero_machine.text_layer_revealed(9) != zero_machine.text_layer_cell_count(9)) {
+            return fail("参数格 = 0 时没有一次揭示完（引擎走抽干支）");
+        }
+        if (zero_machine.text_gate_cycles(9) != 0) {
+            return fail("参数格 = 0 时竟然重放了（引擎跳过了记起点 / 期限清除）");
+        }
+        if (zero_machine.text_typing()) {
+            return fail("参数格 = 0 抽干之后第 29 位没有清（泵会一直被调）");
+        }
+    }
+    // `0x301`：立刻清本层绘制条目 + 揭示游标归 0；**不清画布像素、不删字符格**。
+    const std::size_t ink_before = ink(machine);
+    const std::size_t cells_before = machine.text_layer_cell_count(9);
+    machine.dispatch_for_test(core::Instruction{0, 0x301, {{0, 9}}});
+    if (machine.draw_item(190700) != nullptr) return fail("0x301 没有清掉本层绘制条目");
+    if (machine.text_layer_revealed(9) != 0) return fail("0x301 没有把揭示游标归 0");
+    if (machine.text_layer_cell_count(9) != cells_before) return fail("0x301 删掉了字符格");
+    if (ink(machine) != ink_before) return fail("0x301 清了画布像素（它只清绘制条目与游标）");
+    return true;
+}
+
 // ── 跨帧队列的**样式快照**：追加之后改字号，不许影响已经排好版的那一格 ──
 /** 引擎在**追加时**就量度 + 逐字写出（`sub_46BE30` 的 SelectObject / 逐字写出），之后的推进只呈现
  *  已经排好版的格。旧实现（画的时候再读 `Font+0x313D4`）在设置界面被实测到：示例文本中间恰好跨帧的
@@ -3748,7 +3953,8 @@ bool check_text_pending_style_snapshot(const core::OpcodeTable& table) {
         if (!machine.step()) return fail("放出待画格时停机");
     }
     if (machine.pending_glyph_count() != 0) return fail("待画格没有画出来");
-    const core::TextureRecord* texture = machine.texture(core::Machine::text_layer_texture_id(9));
+    const core::TextureSlotObject* texture =
+        machine.texture_slot(core::Machine::text_layer_texture_id(9));
     if (texture == nullptr) return fail("层 9 的画布不存在");
     int top = 1 << 30, bottom = -1;
     for (int y = 0; y < texture->height; ++y) {
@@ -3800,7 +4006,8 @@ bool check_text_pending_style_snapshot(const core::OpcodeTable& table) {
         for (int i = 0; i < 80 && !m.halted(); ++i) {
             if (!m.step()) break;
         }
-        const core::TextureRecord* canvas = m.texture(core::Machine::text_layer_texture_id(9));
+        const core::TextureSlotObject* canvas =
+            m.texture_slot(core::Machine::text_layer_texture_id(9));
         if (canvas == nullptr) return -1;
         int count = 0;
         for (std::size_t i = 3; i < canvas->rgba.size(); i += 4) {
@@ -4055,8 +4262,8 @@ bool check_text_typewriter(const core::OpcodeTable& table) {
         ++guard_steps;
     }
     const auto ink = [&machine]() {
-        const core::TextureRecord* texture =
-            machine.texture(core::Machine::text_layer_texture_id(9));
+        const core::TextureSlotObject* texture =
+            machine.texture_slot(core::Machine::text_layer_texture_id(9));
         if (texture == nullptr) return std::size_t{0};
         std::size_t count = 0;
         for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
@@ -4127,8 +4334,8 @@ bool check_glyph_brightness(const core::OpcodeTable& table) {
         for (int i = 0; i < 11; ++i) {
             if (!machine.step()) break;
         }
-        const core::TextureRecord* texture =
-            machine.texture(core::Machine::text_layer_texture_id(9));
+        const core::TextureSlotObject* texture =
+            machine.texture_slot(core::Machine::text_layer_texture_id(9));
         if (texture == nullptr) return std::pair<int, int>{-1, -1};
         int best_alpha = 0;
         int worst_rgb = 255;
@@ -4267,7 +4474,8 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
         if (!machine.step()) return fail("0x71 之前就停机");
     }
     if (!machine.text_layer_texture_ready(9)) return fail("0x71 没有建出层 9 的画布");
-    const core::TextureRecord* texture = machine.texture(core::Machine::text_layer_texture_id(9));
+    const core::TextureSlotObject* texture =
+        machine.texture_slot(core::Machine::text_layer_texture_id(9));
     if (texture == nullptr || texture->width != 824 || texture->height != 120) {
         return fail("层 9 的纹理不是 824×120（0x70 的 w/h 没落到画布）");
     }
@@ -4334,8 +4542,8 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
     for (int i = 0; i < 7; ++i) {
         if (!cleared.step()) break;
     }
-    const core::TextureRecord* cleared_texture =
-        cleared.texture(core::Machine::text_layer_texture_id(9));
+    const core::TextureSlotObject* cleared_texture =
+        cleared.texture_slot(core::Machine::text_layer_texture_id(9));
     if (cleared_texture == nullptr) return fail("第二次 0x71 把画布删了（应当只清空）");
     for (std::size_t i = 3; i < cleared_texture->rgba.size(); i += 4) {
         if (cleared_texture->rgba[i] != 0) return fail("第二次 0x71 之后画布仍有像素");
@@ -4495,6 +4703,8 @@ int main(int argc, char** argv) {
     bool only_render_prims = false;
     bool only_pacing = false;
     bool only_record_flags = false;
+    bool only_text_pointer = false;
+    bool only_text_gate = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
@@ -4506,6 +4716,8 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-render-prims") == 0) only_render_prims = true;
         else if (std::strcmp(argv[i], "--only-pacing") == 0) only_pacing = true;
         else if (std::strcmp(argv[i], "--only-record-flags") == 0) only_record_flags = true;
+        else if (std::strcmp(argv[i], "--only-text-pointer") == 0) only_text_pointer = true;
+        else if (std::strcmp(argv[i], "--only-text-gate") == 0) only_text_gate = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -4614,6 +4826,18 @@ int main(int argc, char** argv) {
         if (only_drain) {
             if (!check_text_drain(table)) return 1;
             std::printf("core-selftest(drain): PASS\n");
+            return 0;
+        }
+        if (only_text_pointer) {
+            // `0x192` 的落点 / 源可以是指针族（tag 8 / 14）+ halt 帧链报告的形状。
+            if (!check_text_pointer_write(table)) return 1;
+            std::printf("core-selftest(text-pointer): PASS\n");
+            return 0;
+        }
+        if (only_text_gate) {
+            // `0x300` 的循环演示闸：逐格揭示 → 停期限 → 清条目 → 从第一格重来。
+            if (!check_text_slot_replay(table)) return 1;
+            std::printf("core-selftest(text-gate): PASS\n");
             return 0;
         }
         if (only_ruby) {
@@ -4919,9 +5143,9 @@ int main(int argc, char** argv) {
                          multiplied[0], multiplied[1], multiplied[2], multiplied[3]);
             return 1;
         }
-        const core::TextureRecord* filled = multiply_machine.texture(1);
-        if (filled == nullptr || filled->rgba.size() != 64 || filled->rgba[0] != 255 ||
-            filled->rgba[1] != 255 || filled->rgba[2] != 255 || !filled->non_file) {
+        const core::TextureEntry* filled = multiply_machine.texture(1);
+        if (filled == nullptr || filled->slot.rgba.size() != 64 || filled->slot.rgba[0] != 255 ||
+            filled->slot.rgba[1] != 255 || filled->slot.rgba[2] != 255 || !filled->record.non_file) {
             std::fprintf(stderr, "0x20B fill mismatch\n");
             return 1;
         }
@@ -4954,7 +5178,7 @@ int main(int argc, char** argv) {
         }
         command_machine.reset_scene_clock(1000);
         core::rasterize_scene(command_machine, 4, 4);
-        const core::TextureRecord* fade_texture = command_machine.texture(10);
+        const core::TextureSlotObject* fade_texture = command_machine.texture_slot(10);
         if (fade_texture == nullptr || fade_texture->rgba[0] != 255 ||
             fade_texture->rgba[2] != 0) {
             std::fprintf(stderr, "kind0 fade progress 0 mismatch\n");
@@ -4962,7 +5186,7 @@ int main(int argc, char** argv) {
         }
         command_machine.reset_scene_clock(1050);
         core::rasterize_scene(command_machine, 4, 4);
-        fade_texture = command_machine.texture(10);
+        fade_texture = command_machine.texture_slot(10);
         if (fade_texture == nullptr || fade_texture->rgba[0] == 0 || fade_texture->rgba[2] == 0) {
             std::fprintf(stderr, "kind0 fade progress 0.5 mismatch r=%u b=%u\n",
                          fade_texture ? fade_texture->rgba[0] : 0,
@@ -4971,7 +5195,7 @@ int main(int argc, char** argv) {
         }
         command_machine.reset_scene_clock(1100);
         core::rasterize_scene(command_machine, 4, 4);
-        fade_texture = command_machine.texture(10);
+        fade_texture = command_machine.texture_slot(10);
         if (fade_texture == nullptr || fade_texture->rgba[0] != 0 || fade_texture->rgba[2] != 255) {
             std::fprintf(stderr, "kind0 fade progress 1 mismatch\n");
             return 1;
@@ -5094,14 +5318,14 @@ int main(int argc, char** argv) {
             core::Machine text_machine(0x12345678u, table);
             text_machine.load_root(text_script);
             text_machine.run(8);
-            const core::TextureRecord* text_texture = text_machine.texture(1);
+            const core::TextureEntry* text_texture = text_machine.texture(1);
             std::size_t ink = 0;
             if (text_texture != nullptr) {
-                for (std::size_t i = 3; i < text_texture->rgba.size(); i += 4) {
-                    if (text_texture->rgba[i] != 0) ++ink;
+                for (std::size_t i = 3; i < text_texture->slot.rgba.size(); i += 4) {
+                    if (text_texture->slot.rgba[i] != 0) ++ink;
                 }
             }
-            if (text_texture == nullptr || ink == 0 || !text_texture->non_file) {
+            if (text_texture == nullptr || ink == 0 || !text_texture->record.non_file) {
                 std::fprintf(stderr, "0x204 text raster mismatch ink=%zu\n", ink);
                 return 1;
             }
@@ -5141,7 +5365,7 @@ int main(int argc, char** argv) {
             empty_text.load_root(empty_text_script);
             empty_text.run(8);
             std::size_t empty_ink = 0;
-            const core::TextureRecord* empty_texture = empty_text.texture(1);
+            const core::TextureSlotObject* empty_texture = empty_text.texture_slot(1);
             if (empty_texture != nullptr) {
                 for (std::size_t i = 3; i < empty_texture->rgba.size(); i += 4) {
                     if (empty_texture->rgba[i] != 0) ++empty_ink;
@@ -5175,7 +5399,7 @@ int main(int argc, char** argv) {
                 core::Machine machine(0x12345678u, table);
                 machine.load_root(script);
                 machine.run(8);
-                const core::TextureRecord* texture = machine.texture(1);
+                const core::TextureSlotObject* texture = machine.texture_slot(1);
                 int top = -1;
                 int bottom = -1;
                 if (texture != nullptr) {
@@ -5242,7 +5466,7 @@ int main(int argc, char** argv) {
                     unsetenv("EMULATOR_CXX_BASELINE_LIFT");
 #endif
                 }
-                const core::TextureRecord* texture = machine.texture(1);
+                const core::TextureSlotObject* texture = machine.texture_slot(1);
                 if (texture == nullptr) return -1;
                 for (int row = 0; row < static_cast<int>(texture->height); ++row) {
                     for (int column = 0; column < static_cast<int>(texture->width); ++column) {
@@ -5274,7 +5498,7 @@ int main(int argc, char** argv) {
                 core::Machine machine(0x12345678u, table);
                 machine.load_root(script);
                 machine.run(8);
-                const core::TextureRecord* texture = machine.texture(1);
+                const core::TextureSlotObject* texture = machine.texture_slot(1);
                 std::size_t ink = 0;
                 if (texture != nullptr) {
                     for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
@@ -5309,7 +5533,7 @@ int main(int argc, char** argv) {
                 machine.config_mut().set_int("message:AntiFontLevel", 0);  // ⇒ GRAY4
                 machine.load_root(script);
                 machine.run(8);
-                const core::TextureRecord* texture = machine.texture(1);
+                const core::TextureSlotObject* texture = machine.texture_slot(1);
                 if (texture == nullptr) return false;
                 for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
                     const int a = texture->rgba[i];
@@ -5364,7 +5588,7 @@ int main(int argc, char** argv) {
                 core::Machine ring_machine(0x12345678u, table);
                 ring_machine.load_root(ring_script);
                 ring_machine.run(8);
-                const core::TextureRecord* texture = ring_machine.texture(1);
+                const core::TextureSlotObject* texture = ring_machine.texture_slot(1);
                 if (texture == nullptr) {
                     std::fprintf(stderr, "0x204 mode 3 ring: texture missing\n");
                     return 1;
@@ -5453,7 +5677,7 @@ int main(int argc, char** argv) {
                 const core::TextGlyphSource source = core::last_glyph_source();
                 std::size_t gdi_ink = 0;
                 bool gdi_binary = true;
-                if (const core::TextureRecord* texture = gdi_machine.texture(1)) {
+                if (const core::TextureSlotObject* texture = gdi_machine.texture_slot(1)) {
                     for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
                         const int alpha = texture->rgba[i];
                         if (alpha == 0) continue;
@@ -5493,7 +5717,7 @@ int main(int argc, char** argv) {
                     bool has_partial = false;
                     bool multiple_of_15 = true;
                     std::size_t aa_ink = 0;
-                    if (const core::TextureRecord* texture = aa_machine.texture(1)) {
+                    if (const core::TextureSlotObject* texture = aa_machine.texture_slot(1)) {
                         for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
                             const int alpha = texture->rgba[i];
                             if (alpha == 0) continue;
@@ -5561,7 +5785,7 @@ int main(int argc, char** argv) {
             revision_machine.write_text(core::Operand{5, 0}, "A");
             revision_machine.write_text(core::Operand{5, 1}, "B");
             revision_machine.run(1000);
-            const auto final_revision = revision_machine.texture(1)->revision;
+            const auto final_revision = revision_machine.texture_slot(1)->revision;
             if (final_revision <= 3) {
                 std::fprintf(stderr,
                              "两轮「重建 + 同条数文字」后纹理版本号 = %u（≤3）："
@@ -5569,21 +5793,56 @@ int main(int argc, char** argv) {
                              final_revision);
                 return 1;
             }
-            // ★ **删除 → 重建**也必须接着涨（`0x1fa` 把记录删掉，但窗口路径的 GPU 缓存仍记得
+            // ★ **释放槽对象 → 重建**也必须接着涨（`0x1fa` 只清槽里的对象，但窗口路径的 GPU 缓存仍记得
             //   `(id, revision)`）。实测缺陷（2026-10-29，用户口径 + 本机窗口复现）：设置界面
             //   （CONFIG1.BIN）↔ 初始配置界面（Game Start）来回一次，后进的那个界面对应的整张
             //   美术图**整张不画**（背景透出来）或画成**对方的内容** —— 两界面用同一批纹理编号，
             //   前者 `0x1fa` 释放、后者重建时版本号若回到 1，缓存就命中上一条记录的纹理。
-            //   坏法：0x1f8 建（rev=1）→ 0x1fa 删 → 0x1f8 再建（rev 又 = 1）。
+            //   坏法：0x1f8 建（rev=1）→ 0x1fa 删整条记录 → 0x1f8 再建（rev 又 = 1）。
+            // ★ 同时守「记录 vs 槽对象」两层：`0x1fa` 之后**记录还在**（来源写成「无」、颜色键 / 空白
+            //   标记不动）、**槽对象没了**；`0x208` 在"记录在、槽空"时仍必须回 0/0。
             auto release_script = make_script_with_body();
             emit_instruction(release_script, 0x1F8, {{0, 7}, {0, 64}, {0, 32}, {0, 0}});
             emit_instruction(release_script, 0x1FA, {{0, 7}});
+            emit_instruction(release_script, 0x208, {{0, 7}, {3, 1}, {3, 2}});  // 槽空 ⇒ 0/0
             emit_instruction(release_script, 0x1F8, {{0, 7}, {0, 64}, {0, 32}, {0, 0}});
+            emit_instruction(release_script, 0x208, {{0, 7}, {3, 3}, {3, 4}});
             emit_instruction(release_script, 2, {});
             core::Machine release_machine(0x12345678u, table);
             release_machine.load_root(release_script);
+            for (int i = 0; i < 2; ++i) {
+                if (!release_machine.step()) break;
+            }
+            const core::TextureRecord* released_record = release_machine.texture_record(7);
+            if (released_record == nullptr) {
+                std::fprintf(stderr,
+                             "0x1fa 把纹理**记录**删掉了：spec 只清槽里的对象、记录（来源 / 颜色键 / "
+                             "空白标记）必须保留\n");
+                return 1;
+            }
+            if (released_record->file != -1 || !released_record->blank) {
+                std::fprintf(stderr,
+                             "0x1fa 之后记录字段不对：file=%d blank=%d（期望 file=-1、blank 保持 1）\n",
+                             released_record->file, released_record->blank ? 1 : 0);
+                return 1;
+            }
+            if (release_machine.texture_slot(7) != nullptr) {
+                std::fprintf(stderr, "0x1fa 之后纹理槽对象还在（期望已释放：present=0）\n");
+                return 1;
+            }
             release_machine.run(1000);
-            const core::TextureRecord* rebound = release_machine.texture(7);
+            if (release_machine.global_int(1) != 0 || release_machine.global_int(2) != 0) {
+                std::fprintf(stderr,
+                             "0x1fa 之后 0x208 必须回 0/0（记录在、槽空），实得 %d/%d\n",
+                             release_machine.global_int(1), release_machine.global_int(2));
+                return 1;
+            }
+            if (release_machine.global_int(3) != 64 || release_machine.global_int(4) != 32) {
+                std::fprintf(stderr, "重建之后 0x208 必须回 64/32，实得 %d/%d\n",
+                             release_machine.global_int(3), release_machine.global_int(4));
+                return 1;
+            }
+            const core::TextureSlotObject* rebound = release_machine.texture_slot(7);
             if (rebound == nullptr || rebound->revision <= 1) {
                 std::fprintf(stderr,
                              "0x1fa 释放后重建同一编号：revision=%u（必须 > 1；回到 1 会让窗口路径"
@@ -5611,7 +5870,7 @@ int main(int argc, char** argv) {
         core::rasterize_scene(wipe_machine, 4, 4);
         wipe_machine.reset_scene_clock(1050);
         core::rasterize_scene(wipe_machine, 4, 4);
-        const core::TextureRecord* wiped = wipe_machine.texture(10);
+        const core::TextureSlotObject* wiped = wipe_machine.texture_slot(10);
         if (wiped == nullptr || wiped->rgba[0] != 255 || wiped->rgba[2] != 0 ||
             wiped->rgba[12] != 0 || wiped->rgba[14] != 255) {
             std::fprintf(stderr, "kind2 wipe mismatch x0=(%u,%u,%u) x3=(%u,%u,%u)\n",
@@ -5634,7 +5893,7 @@ int main(int argc, char** argv) {
         movie_machine.run(32);
         movie_machine.reset_scene_clock(1000);
         core::rasterize_scene(movie_machine, 4, 4);
-        const core::TextureRecord* movie_texture = movie_machine.texture(10);
+        const core::TextureSlotObject* movie_texture = movie_machine.texture_slot(10);
         if (movie_texture == nullptr || movie_texture->rgba[3] != 0 ||
             movie_texture->rgba[0] != 255) {
             std::fprintf(stderr, "kind1 first-frame mask mismatch a=%u r=%u size=%zu tex=%p\n",
@@ -5824,7 +6083,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "script advanced while the movie bit was set\n");
                 return 1;
             }
-            const core::TextureRecord* playing = movie_machine.texture(42);
+            const core::TextureSlotObject* playing = movie_machine.texture_slot(42);
             if (playing == nullptr || playing->rgba.size() != 4u * 4u * 4u ||
                 playing->rgba[0] != 0x40 || playing->rgba[3] != 255 || playing->revision < 2) {
                 std::fprintf(stderr, "movie frame was not written into the bound texture\n");
@@ -5857,7 +6116,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "movie bit was not cleared after teardown\n");
                 return 1;
             }
-            const core::TextureRecord* last = movie_machine.texture(42);
+            const core::TextureSlotObject* last = movie_machine.texture_slot(42);
             if (last == nullptr || last->rgba[0] != 0x40) {
                 std::fprintf(stderr, "teardown did not fill the texture with the last frame\n");
                 return 1;
@@ -5919,7 +6178,7 @@ int main(int argc, char** argv) {
                         break;
                     }
                 }
-                const core::TextureRecord* texture = fill_machine.texture(42);
+                const core::TextureSlotObject* texture = fill_machine.texture_slot(42);
                 if (!finished || texture == nullptr) {
                     std::fprintf(stderr, "option=%u movie did not finish\n", options);
                     return 1;

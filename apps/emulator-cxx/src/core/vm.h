@@ -38,7 +38,13 @@ struct Frame {
     std::uint32_t position = 0;
     std::int32_t parent = -1;
     std::uint32_t script_id = 0;
+    // 脚本头里的 body 起址：`ip` 是 **body 内偏移**，文件内偏移 = `body_offset + ip`。
+    // ★ 诊断用（halt 时报告"哪个 BIN 的哪个偏移"）；⛔ 不是脚本可见量。
+    std::uint32_t body_offset = 0;
     std::vector<std::int32_t> ret_stack;
+    // 压返回栈的**位置**（dword 下标；与 `ret_stack` 同深）。`0x8d` 的 call 与几条回调登记
+    // （`vm_ops_io`）共用这条栈 ⇒ 报告里叫 `call_at`，含义是"这一层最近一次登记返回点的地方"。
+    std::vector<std::int32_t> call_sites;
     std::unordered_map<std::uint32_t, std::uint32_t> local_int;
     std::unordered_map<std::uint32_t, float> local_float;
     std::unordered_map<std::uint32_t, std::string> local_string;
@@ -170,16 +176,6 @@ struct TextWindowRecord {
     std::int32_t lines = 0;
 };
 
-// 文本层（`0x70` / `0x79` / `0x213` / `0x71` 一起描述的那张离屏画布）的**宿主侧游标**。
-// ★ 层矩形 / 文本原点 / 绘制项键基数仍落在 `ListRecord`（`0x70` / `0x79` / `0x213` 的既有格）；
-//   这里只存"下一个字符画在哪"，它是引擎在一帧内推进的状态，不是独立领域量。
-struct TextLayerState {
-    std::int32_t cursor_x = 0;
-    std::int32_t cursor_y = 0;
-    std::int32_t draw_index = 0;  // 本层已排的逐字符绘制条目数（键 = 键基数 + draw_index）
-    bool texture_ready = false;
-};
-
 // 逐字符显现（typewriter）的**待画格**。
 // ★ 引擎：`0x6e` / `0x196` 在追加时一次性写好布局格与文本记录，**绘制侧每帧只推进一格**
 //   （推进器 `sub_409400` 每帧 → `0x4096a9` 序号 +1，帧间按 `message:MessageSpeed` 睡眠，
@@ -196,12 +192,32 @@ struct PendingGlyph {
     std::int32_t slot = 0;
     std::int32_t x = 0;
     std::int32_t y = 0;
+    std::int32_t x1 = 0;  // 这一格的右 / 下边 = 逐字符绘制条目的源矩形（`0x300` 重放时要用）
+    std::int32_t y1 = 0;
     std::int32_t size = 0;    // 追加当时的字号（A 支或振り仮名的 B 支）；0 ⇒ 回退到"画的时候再读"
     std::int32_t weight = 0;  // 追加当时的粗细（`0x2bd` 的两格）；0 ⇒ 回退
     std::int32_t draw_mode = 0;
     std::int32_t primary = 0;
     std::int32_t secondary = 0;
     std::string unit;       // 一个字符的 SJIS 字节串（1~2 字节；振り仮名可能是一整串）
+};
+
+// 文本层（`0x70` / `0x79` / `0x213` / `0x71` 一起描述的那张离屏画布）的**宿主侧游标**。
+// ★ 层矩形 / 文本原点 / 绘制项键基数仍落在 `ListRecord`（`0x70` / `0x79` / `0x213` 的既有格）；
+//   这里只存"下一个字符画在哪"，它是引擎在一帧内推进的状态，不是独立领域量。
+struct TextLayerState {
+    std::int32_t cursor_x = 0;
+    std::int32_t cursor_y = 0;
+    std::int32_t draw_index = 0;  // 本层已排的逐字符绘制条目数（键 = 键基数 + draw_index）
+    bool texture_ready = false;
+    // ── `0x300` 的**循环演示闸**（规则 `CORE-OPS-TEXT-SLOT-TIMER`）──
+    // 本层已追加的字符格（样式快照同 `PendingGlyph`）+ 揭示游标：闸开时泵每 `MessageSpeed` 毫秒
+    // 揭示一格；整段揭示完等「期限」毫秒后清掉本层绘制条目、游标归 0（闸位保持）⇒ 从第一格重来。
+    std::vector<PendingGlyph> cells;
+    std::size_t reveal_cursor = 0;
+    std::uint32_t reveal_due_ms = 0;   // 下一格的到期时刻（0 = 立刻）
+    std::uint32_t reveal_done_ms = 0;  // 最后一格揭示的时刻（0 = 还没揭示完）
+    std::int32_t gate_cycles = 0;      // 已完成的重放轮数（守卫用）
 };
 
 struct MovieRecord {
@@ -227,18 +243,34 @@ struct MeshRecord {
     std::uint32_t window_start = 0;
 };
 
+// ── 纹理的两层：**记录**与**槽里的对象**（⛔ 不要再合成一张表）──
+// 2026-10-29 的跨界面纹理污染就是"合成一张表 + `0x1fa` 删整条"造成的：删记录把版本号打回 1，
+// 窗口路径的 GPU 缓存按 (id, revision) 命中，于是后进的那个界面拿到对方的纹理。
+// spec 的「释放纹理」（`0x1fa`）本来就分两步：把**记录的来源文件**写成「无」、清**槽里的对象**；
+// 记录本身保留（颜色键等字段不动）⇒「槽空」≠「空白纹理」是两种状态。
+
+// **纹理记录**：由 `0x1f8`（空白创建）/ `0x1f9`（设纹理）建或替换，`0x1fa` / `0x23d` / `0x1af` 不删它。
 struct TextureRecord {
     std::int32_t file = -1;
     std::uint32_t color_key = 0;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
     bool blank = false;
-    bool present = false;
     // 「内容非文件装载」标志（`0x1f8` 空白创建 / `0x20b` 填充共用；全语料无读点）。
     bool non_file = false;
+};
+
+// **纹理槽里的对象**：像素 + 尺寸 + 版本。`0x1fa` / `0x23d` 只清它（`present = false`）。
+struct TextureSlotObject {
+    bool present = false;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
     // 像素内容版本：宿主用它判断是否需要重传 GPU 纹理（不是引擎字段）。
     std::uint32_t revision = 0;
     Bytes rgba;  // top-down RGBA8；空白纹理为透明
+};
+
+struct TextureEntry {
+    TextureRecord record;
+    TextureSlotObject slot;
 };
 
 struct SceneCommandRecord {
@@ -335,6 +367,14 @@ public:
     std::int32_t text_layer_cursor_y(std::size_t slot) const { return text_layer_state_[slot].cursor_y; }
     bool text_layer_texture_ready(std::size_t slot) const { return text_layer_state_[slot].texture_ready; }
     std::int32_t text_layer_draw_key(std::size_t slot) const { return list_records_[slot].f68; }
+    // `0x300` 循环演示闸（守卫用；⛔ 不是产品接口）：已揭示的格数 / 已完成的重放轮数。
+    std::size_t text_layer_revealed(std::size_t slot) const {
+        return text_layer_state_[slot].reveal_cursor;
+    }
+    std::int32_t text_gate_cycles(std::size_t slot) const { return text_layer_state_[slot].gate_cycles; }
+    std::size_t text_layer_cell_count(std::size_t slot) const {
+        return text_layer_state_[slot].cells.size();
+    }
     // typewriter：还没画出来的待画格数（守卫用；⛔ 不是产品接口）。
     std::size_t pending_glyph_count() const { return pending_glyphs_.size(); }
     // 打字中（状态字第 29 位）与计时器间隔（守卫用；⛔ 不是产品接口）。
@@ -479,10 +519,10 @@ public:
     std::size_t texture_count() const { return textures_.size(); }
     std::size_t mesh_count() const { return meshes_.size(); }
     const std::unordered_map<std::uint32_t, DrawItem>& draw_items() const { return draw_items_; }
-    const std::unordered_map<std::uint32_t, TextureRecord>& textures() const { return textures_; }
+    const std::unordered_map<std::uint32_t, TextureEntry>& textures() const { return textures_; }
     // 测试 / 诊断注入点：直接布置纹理记录的来源文件；⛔ 产品路径不要靠它伪造状态。
     void set_texture_file(std::uint32_t slot, std::int32_t file) {
-        textures_[slot].file = file;
+        textures_[slot].record.file = file;
     }
     // 释放守卫（`0x1fa` / `0x23d` 读；本语料没有写者，观察上恒 0）。
     std::int32_t surface_release_gate(std::uint32_t slot) const {
@@ -511,18 +551,31 @@ public:
         const auto it = meshes_.find(key);
         return it == meshes_.end() ? nullptr : &it->second;
     }
-    TextureRecord* texture_mut(std::uint32_t id) {
+    // 写：**整条**（记录 + 槽对象）。只有「建 / 换纹理 / 某条指令顺手建画布」该用它；
+    // ⛔ 读完像素前先看 `slot.present` —— 记录在、槽空是合法状态。
+    TextureEntry* texture_mut(std::uint32_t id) {
         const auto it = textures_.find(id);
         return it == textures_.end() ? nullptr : &it->second;
     }
-    // 纹理版本号的**全局下限**（每个 id 一条单调计数，跨 `0x1fa` 删除 / 重建也不回退）。
-    // 窗口路径的 GPU 纹理缓存按 `(id, revision)` 命中：记录被删掉再建、版本号若回到 1，缓存会把
+    // 建 / 取条目（没有就建一条**空记录 + 空槽**）。⛔ 不要用它"顺手"造一个可见表面。
+    TextureEntry& texture_entry(std::uint32_t id) { return textures_[id]; }
+    // 只读两半（绝大多数读点只要一半）。
+    const TextureRecord* texture_record(std::uint32_t id) const {
+        const auto it = textures_.find(id);
+        return it == textures_.end() ? nullptr : &it->second.record;
+    }
+    // 没有记录、或记录在但**槽对象已释放** ⇒ nullptr（`0x1fa` 之后就是这一档）。
+    const TextureSlotObject* texture_slot(std::uint32_t id) const {
+        const auto it = textures_.find(id);
+        return it == textures_.end() || !it->second.slot.present ? nullptr : &it->second.slot;
+    }
+    // 纹理版本号的**全局下限**（每个 id 一条单调计数，跨 `0x1fa` 释放槽 / 重建也不回退）。
+    // 窗口路径的 GPU 纹理缓存按 `(id, revision)` 命中：槽被释放再建、版本号若回到 1，缓存会把
     // **上一条记录**的纹理当成当前纹理。实测（2026-10-29，用户口径 + 本机窗口复现）：设置界面
     // （CONFIG1.BIN）↔ 初始配置界面（Game Start）来回一次，后进的那个界面整张美术图**不画**
     // （背景透出来）或画成**对方的内容** —— 两个界面用的是同一批纹理编号。
-    // ⛔ 不要为了"省一次上传"把版本号变小；`revision++` 的增量写法在删/建那一刻是看不见的，
-    //   所以删除与替换前都要把"用过的最高版本"记进下限。
-    void note_texture_revision(std::uint32_t id);
+    // ★ 它自己就把"条目当前的 slot.revision"算进下限（不需要调用方先记一次），⛔ 也不要为了
+    //   "省一次上传"把版本号变小。
     std::uint32_t next_texture_revision(std::uint32_t id);
     void report_error(std::string text) { errors_.push_back(std::move(text)); }
     const std::vector<std::string>& errors() const { return errors_; }
@@ -629,7 +682,7 @@ public:
     std::size_t aux_a_count() const { return aux_a_.size(); }
     std::size_t aux_b_count() const { return aux_b_.size(); }
     const MeshRecord* mesh(std::uint32_t key) const { const auto it = meshes_.find(key); return it == meshes_.end() ? nullptr : &it->second; }
-    const TextureRecord* texture(std::uint32_t id) const {
+    const TextureEntry* texture(std::uint32_t id) const {
         const auto it = textures_.find(id);
         return it == textures_.end() ? nullptr : &it->second;
     }
@@ -728,6 +781,11 @@ public:
     }
     bool halted() const { return halted_; }
     const RunResult& last_stop() const { return stop_; }
+    // ★ halt 诊断（`[stack]` 行）：当前帧链**最内层在前**，每层给
+    // `script=<id> bin=<名> ip=<body 内> file=<文件内偏移> opcode=<该位置的指令> calls=<返回栈深>`。
+    // 目的：halt 只说 `opcode=0x192` 时能直接定位"哪个 BIN 的哪个偏移"，不用再猜。
+    // ★ 只读；⛔ 不是引擎字段，也不是脚本可见量。
+    std::string stop_stack_report() const;
 
     std::int32_t read_int(const Operand& operand);
     double read_float(const Operand& operand);
@@ -746,6 +804,9 @@ private:
     void service_movies();
     // 把一帧写进同槽纹理（呈现层的像素效果，不在规范正文里）；写成功 ⇒ true。
     bool fill_movie_texture(std::uint32_t slot, const MovieFrame& frame);
+    // 场景命令族（`0x223` / `0x24f` / `0x250` / `0x251`）的「槽里没有对象 ⇒ 建一张 1280×720 透明画布」。
+    // ★ 判据是**槽对象**是否为空（不是"记录是否存在"）：`0x1fa` 之后记录还在、槽已释放 ⇒ 这里照建。
+    void ensure_scene_texture_slot(std::uint32_t id);
     std::uint32_t address_of(const Operand& operand) const;
     // 「取址」原语（`0x63` / `0x1b0` 共用）：值族 ⇒ 槽地址；引用族 6/7/8/12/13/14 ⇒ **它指向的地址**。
     std::uint32_t address_of_operand(const Operand& operand) const;
@@ -907,6 +968,10 @@ private:
     void draw_front_pending_glyph();
     void drain_pending_glyphs();
     void erase_pending_glyphs(int slot);
+    // `0x300` 循环演示闸（规则 `CORE-OPS-TEXT-SLOT-TIMER`）：揭示下一格 / 揭示全部（关闸时抽干）。
+    void reveal_text_layer_cell(int slot);
+    void reveal_all_text_layer_cells(int slot);
+    void service_text_gate(int slot);
     // 输入 / 等待 / 空操作（vm_ops_io.cpp）
     void op_109(const Instruction&); void op_108(const Instruction&); void op_c8(const Instruction&); void op_cc(const Instruction&);
     // 滚轮（读并清 `Engine+0x1E74`）
@@ -1202,8 +1267,8 @@ private:
     std::int32_t mouse_owner_ = -1;    // 登记时的当前帧脚本身份（frame.local_depth；见 CORE-INPUT-CALLBACK-REGISTER）
     std::uint32_t mouse_last_ms_ = 0;  // 上一次派发时刻（登记时 = 当前时刻）
     std::unordered_map<std::int32_t, std::int32_t> indirect_;
-    std::unordered_map<std::uint32_t, TextureRecord> textures_;
-    // 每个纹理编号"已经用过的最高版本号"（见 `note_texture_revision`）。删除记录不清它。
+    std::unordered_map<std::uint32_t, TextureEntry> textures_;
+    // 每个纹理编号"已经用过的最高版本号"（见 `next_texture_revision`）。释放槽对象 / 重建都不清它。
     std::unordered_map<std::uint32_t, std::uint32_t> texture_revision_floor_;
     // 1000 槽的释放守卫（默认 0；没有脚本写者）。
     std::array<std::int32_t, 1000> surface_release_gate_{};

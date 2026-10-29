@@ -19,6 +19,7 @@ import { loadConfigKeys } from '../../apps/emulator-new/src/platform/node/spec.t
 import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
 import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
 import { readText } from '../../apps/emulator-new/src/core/values.ts';
+import { slotAddress } from '../../apps/emulator-new/src/core/address.ts';
 
 const KEY = 0x1234abcd;
 const op = (type, raw) => ({ type, raw });
@@ -72,6 +73,29 @@ test('★ `0x192`：落点不是 type 5 ⇒ 响亮失败（不静默写错池）
     () => HANDLERS.get(0x192)(m, [op(3, 7), op(2, 3)]),
     /text-unsupported-operand-type:0x3/,
     '局部整型（type 3）当落点必须抛 —— 引擎那条按 op1 type 分派，非串池类会抛',
+  );
+});
+
+test('★★ `0x192` 的落点 / 源可以是指针族（type 8 / 14）：解引用后写 / 读那条记录', async () => {
+  const m = machine(inlineBody(3, 'AB'));
+  m.globalString.set(4, 'seed');
+  // 指针槽 0 指向 global-string 4 的记录地址（与 `0x61` 落进去的是同一种地址）。
+  // ★ 8 = 全局指针池、14 = 当前帧的指针池 —— 两张表不是同一张。
+  m.globalStringRef.set(0, slotAddress(5, 4, 0, 0));
+  m.frame.localStringPtr.set(0, slotAddress(5, 4, 0, 0));
+  m.globalString.set(7, 'abc');
+  HANDLERS.get(0x192)(m, [op(14, 0), op(5, 7)]);
+  assert.equal(m.globalString.get(4), 'abc', '落点 14 ⇒ 写指针指向的那条记录（不是槽本身）');
+  HANDLERS.get(0x192)(m, [op(8, 0), op(5, 7)]);
+  assert.equal(m.globalString.get(4), 'abc', '落点 8 同样写穿');
+  m.globalString.set(8, '');
+  HANDLERS.get(0x192)(m, [op(5, 8), op(14, 0)]);
+  assert.equal(m.globalString.get(8), 'abc', '源 14 ⇒ 读指针指向的那条记录');
+  assert.equal(readText(m, [op(8, 0)], 1), 'abc', '源 8 / 14 的文本读');
+  assert.throws(
+    () => HANDLERS.get(0x192)(m, [op(14, 1), op(5, 7)]),
+    /地址|0x0/,
+    '空指针槽 ⇒ 响亮失败（空指针是 UB，⛔ 不许静默写 0 号记录）',
   );
 });
 

@@ -403,6 +403,14 @@ export function readText(m: Machine, ops: Operand[], k: number): string {
   if (op.type === 9) return String(decodeInt(m.frame.localInt.get(op.raw) ?? encodeInt(0, m.key), m.key));
   if (op.type === 4) return String(f32(readFloatCell(m, m.globalFloat, op.raw)));
   if (op.type === 10) return String(f32(readFloatCell(m, m.frame.localFloat, op.raw)));
+  // ★ 指针族里的**字符串**两条（8 = 全局 / 14 = 局部"指向字符串记录"）：槽里装的是**记录地址**，
+  //   解引用后读那一条记录。引擎的读原语支持 0–14（除 7 / 13），文本读也在其中。
+  if (op.type === 8 || op.type === 14) {
+    const r = deref(m, op);
+    if (r.tag === 5) return m.stringPoolAt(r.bank).get(r.index) ?? '';
+    if (r.tag === 11) return m.frame.localString.get(r.index) ?? '';
+    throw new Error(`text-unsupported-pointer-target:0x${r.tag.toString(16)}`);
+  }
   throw new Error(`text-unsupported-operand-type:0x${op.type.toString(16)}`);
 }
 
@@ -440,6 +448,21 @@ export function writeText(m: Machine, ops: Operand[], k: number, value: string):
   if (op.type === 11) {
     m.frame.localString.set(op.raw, value);
     return;
+  }
+  // ★ 指针族里的**字符串**两条（8 / 14）：解引用后写它指向的那一条字符串记录。
+  //   引擎的落点分派接受 5 / 8 / 11 / 14，四条汇到同一次记录级写入（只多一层间接）。
+  //   ⛔ 容器句柄 0x8005 / 0x800B 不在这里（另一条容器写入路径，本语料无站点）。
+  if (op.type === 8 || op.type === 14) {
+    const r = deref(m, op);
+    if (r.tag === 5) {
+      m.stringPoolAt(r.bank).set(r.index, value);
+      return;
+    }
+    if (r.tag === 11) {
+      m.frame.localString.set(r.index, value);
+      return;
+    }
+    throw new Error(`text-unsupported-pointer-target:0x${r.tag.toString(16)}`);
   }
   throw new Error(`text-unsupported-operand-type:0x${op.type.toString(16)}`);
 }

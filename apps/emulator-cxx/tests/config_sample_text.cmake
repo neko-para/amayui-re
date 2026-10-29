@@ -39,3 +39,13 @@ if(zero GREATER_EQUAL pixels)
 endif()
 
 message(STATUS "config-sample-text: 纹理 29 有墨（alpha0=${zero} / ${pixels}）")
+
+# 第二半：**循环演示闸真的在重放**。示例文本不是一次性打字机 —— 用户口径是"应当不断重复刷新展示
+# （让用户看到推进速度）"。旧实现把它写成一次性（纹理 19 秒与 169 秒逐字节相同）⇒ 这里为 0。
+if(NOT out MATCHES "text-gate slot=9 cells=[0-9]+ cycles=([0-9]+)")
+  message(FATAL_ERROR "config-sample-text: 输出里没有 text-gate 诊断行（演示闸没被服务）\n${out}")
+endif()
+if(NOT CMAKE_MATCH_1 GREATER 0)
+  message(FATAL_ERROR "config-sample-text: 演示闸 cycles=0 —— 示例文本只展示了一次（没有循环重放）")
+endif()
+message(STATUS "config-sample-text: 演示闸重放 ${CMAKE_MATCH_1} 轮")

@@ -234,16 +234,16 @@ void Machine::op_1af(const Instruction& instruction) {
         write_int(ops[0], 2);
         return;
     }
-    TextureRecord record;
-    record.file = -1;
-    record.width = image.width;
-    record.height = image.height;
-    record.rgba = std::move(image.rgba);
-    record.present = true;
-    record.blank = false;
-    record.non_file = false;
-    record.revision += 1;
-    textures_[static_cast<std::uint32_t>(target)] = std::move(record);
+    TextureEntry entry;
+    entry.record.file = -1;
+    entry.slot.width = image.width;
+    entry.slot.height = image.height;
+    entry.slot.rgba = std::move(image.rgba);
+    entry.slot.present = true;
+    entry.record.blank = false;
+    entry.record.non_file = false;
+    entry.slot.revision = next_texture_revision(static_cast<std::uint32_t>(target));
+    textures_[static_cast<std::uint32_t>(target)] = std::move(entry);
     write_int(ops[0], 0);
     return;
 }

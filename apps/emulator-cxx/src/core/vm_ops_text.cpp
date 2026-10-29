@@ -169,22 +169,22 @@ bool Machine::ensure_text_layer_texture(int slot) {
     if (width <= 0 || height <= 0) return false;
     const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
     auto it = textures_.find(id);
-    const bool rebuild = it == textures_.end() || it->second.rgba.empty() ||
-                         it->second.width != static_cast<std::uint32_t>(width) ||
-                         it->second.height != static_cast<std::uint32_t>(height);
+    const bool rebuild = it == textures_.end() || !it->second.slot.present ||
+                         it->second.slot.rgba.empty() ||
+                         it->second.slot.width != static_cast<std::uint32_t>(width) ||
+                         it->second.slot.height != static_cast<std::uint32_t>(height);
     if (rebuild) {
         // 与 `0x1f8` 空白建纹理同口径：透明、无来源文件、revision **跨删除/重建单调递增**
         // （GPU 纹理缓存按 (id, revision) 命中；回到 1 会让画布显示上一条记录的内容）。
-        TextureRecord& texture = textures_[id];
-        texture.file = -1;
-        texture.blank = true;
-        texture.present = true;
-        texture.width = static_cast<std::uint32_t>(width);
-        texture.height = static_cast<std::uint32_t>(height);
-        texture.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4,
-                            0);
-        note_texture_revision(id);
-        texture.revision = next_texture_revision(id);
+        auto& entry = texture_entry(id);
+        entry.record.file = -1;
+        entry.record.blank = true;
+        entry.slot.present = true;
+        entry.slot.width = static_cast<std::uint32_t>(width);
+        entry.slot.height = static_cast<std::uint32_t>(height);
+        entry.slot.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4,
+                               0);
+        entry.slot.revision = next_texture_revision(id);
         text_layer_state_[static_cast<std::size_t>(slot)].cursor_x = rec.f1c;
         text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
     }
@@ -197,7 +197,7 @@ void Machine::create_text_layer_item(int slot, int left, int top, int right, int
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     if (rec.f68 <= 0) return;
     const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
-    const TextureRecord* texture = this->texture(id);
+    const TextureSlotObject* texture = texture_slot(id);
     if (texture == nullptr) return;
     left = std::max(0, left);
     top = std::max(0, top);
@@ -235,13 +235,21 @@ void Machine::erase_text_layer_draw_items(int slot) {
 void Machine::clear_text_layer(int slot) {
     if (!ensure_text_layer_texture(slot)) return;
     const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
-    TextureRecord* texture = texture_mut(id);
-    if (texture == nullptr) return;
-    std::fill(texture->rgba.begin(), texture->rgba.end(), 0);
-    texture->revision++;
-    texture->non_file = true;
+    TextureEntry* entry = texture_mut(id);
+    if (entry == nullptr || !entry->slot.present) return;
+    std::fill(entry->slot.rgba.begin(), entry->slot.rgba.end(), 0);
+    entry->slot.revision++;
+    entry->record.non_file = true;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     erase_text_layer_draw_items(slot);
+    // ★ 清画布同时丢掉这一层的**字符格与揭示游标**：引擎那边 `0x71` 清的是布局向量（源），
+    //   重放闸也据此从头开始（⛔ 不清会让重放把上一段的字补画进来）。
+    TextLayerState& layer = text_layer_state_[static_cast<std::size_t>(slot)];
+    layer.cells.clear();
+    layer.reveal_cursor = 0;
+    layer.reveal_due_ms = 0;
+    layer.reveal_done_ms = 0;
+    layer.gate_cycles = 0;
     // ★ 清画布同时丢掉这一层的**待画格**：引擎那边 `0x71` 清的是布局向量（源），我们的队列就是它的对应物
     //   —— 不清会让"清空后紧接着的下一帧"把上一段的字补画进来（可见的串字）。
     erase_pending_glyphs(slot);
@@ -326,7 +334,12 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
             pending.primary = font_primary_color();
             pending.secondary = font_secondary_color();
             pending.unit = unit;
-            pending_glyphs_.push_back(std::move(pending));
+            pending.x1 = x0 + advance;
+            pending.y1 = y0 + line_height;
+            // ★ 每层保留一份**字符格**：`0x300` 的循环演示闸要按它逐格重放（绘制条目被清掉后重建）。
+            state.cells.push_back(pending);
+            // ★ 闸开着的层由闸门泵推进（普通打字队列不再管它，否则同一条文本会有两个推进者）。
+            if ((font_slot_state_[slot] & 1) == 0) pending_glyphs_.push_back(std::move(pending));
             state.cursor_x += advance;
             line_text += unit;
         }
@@ -378,7 +391,10 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
                 pending.primary = font_primary_color();
                 pending.secondary = font_secondary_color();
                 pending.unit = kana;
-                pending_glyphs_.push_back(std::move(pending));
+                pending.x1 = x + advance;
+                pending.y1 = ruby_y + ruby_size + 2;
+                state.cells.push_back(pending);
+                if ((font_slot_state_[slot] & 1) == 0) pending_glyphs_.push_back(std::move(pending));
                 x += advance + (kana.size() == 1 ? step / 2 : step);
             }
             // 振り仮名 run 也**追加一条文本记录**（`sub_465a20` 的收尾）：**位 2 置起**（用 B 支字号），
@@ -387,7 +403,7 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
                                     ruby_y + ruby_size + 2, font_text_gate_5ec7c_ | 4);
         }
     }
-    if (TextureRecord* texture = texture_mut(id)) texture->revision++;
+    if (TextureEntry* entry = texture_mut(id)) entry->slot.revision++;
 }
 
 void Machine::erase_pending_glyphs(int slot) {
@@ -412,7 +428,7 @@ void Machine::draw_front_pending_glyph() {
                                 &error, &advance, glyph.size, &style)) {
         if (!error.empty()) report_error(error);
     }
-    if (TextureRecord* texture = texture_mut(text_layer_texture_id(slot))) texture->revision++;
+    if (TextureEntry* entry = texture_mut(text_layer_texture_id(slot))) entry->slot.revision++;
 }
 
 void Machine::drain_pending_glyphs() {
@@ -437,7 +453,98 @@ void Machine::begin_text_typing_or_drain() {
     drain_pending_glyphs();
 }
 
+// ── `0x300` 的循环演示闸（规则 `CORE-OPS-TEXT-SLOT-TIMER`） ──
+// 引擎：文本泵 `sub_409400` 里"槽 1..9 任一状态非 0"⇒ 有槽在用（bit16 粘住）；泵每 `MessageSpeed`
+// 毫秒调 `sub_45BE20` 揭示该层的下一格（层记录 `+0x84` 是揭示游标）；整段揭示完返回 1 ⇒ 记起点，
+// `现在 − 起点 ≥ 期限` 时调 `sub_404F80` 清掉该层两段绘制键区间并把游标归 0，**闸位保持** ⇒ 下一拍
+// 从第一格重来。`0x301` 是同一段清除的一次性入口。
+void Machine::reveal_text_layer_cell(int slot) {
+    TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
+    if (state.reveal_cursor >= state.cells.size()) return;
+    const PendingGlyph glyph = state.cells[state.reveal_cursor];
+    std::string error;
+    int advance = 0;
+    // 与普通打字机同一个口径：用**追加当时**的样式快照画。
+    const TextStyleSnapshot style{glyph.size, glyph.weight, glyph.draw_mode, glyph.primary,
+                                  glyph.secondary};
+    if (!draw_text_into_texture(*this, text_layer_texture_id(static_cast<std::size_t>(slot)), glyph.x,
+                                glyph.y, glyph.unit, &error, &advance, glyph.size, &style)) {
+        if (!error.empty()) report_error(error);
+    }
+    // 绘制条目在"揭示"这一步重建（`sub_45BE20` 把这一格交给绘制侧）；源矩形 = 追加时排好的格。
+    create_text_layer_item(slot, glyph.x, glyph.y, glyph.x1, glyph.y1);
+    if (TextureEntry* entry = texture_mut(text_layer_texture_id(static_cast<std::size_t>(slot)))) {
+        entry->slot.revision++;
+    }
+    ++state.reveal_cursor;
+}
+
+void Machine::reveal_all_text_layer_cells(int slot) {
+    TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
+    while (state.reveal_cursor < state.cells.size()) reveal_text_layer_cell(slot);
+}
+
+void Machine::service_text_gate(int slot) {
+    TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
+    if (state.cells.empty()) return;
+    const std::int32_t speed = param_cell_.value_or(0);
+    const std::uint32_t now = scene_clock_ms_;
+    if (speed <= 0) {
+        // 参数格 == 0：引擎走"抽干到末格"支并直接跳到槽循环尾（`0x409452`）⇒ 整段一次揭示，
+        // **不记起点、不清条目、不重放**。
+        reveal_all_text_layer_cells(slot);
+        return;
+    }
+    if (state.reveal_cursor < state.cells.size()) {
+        if (state.reveal_due_ms == 0) state.reveal_due_ms = now;
+        if (now < state.reveal_due_ms) return;
+        reveal_text_layer_cell(slot);
+        state.reveal_due_ms = now + static_cast<std::uint32_t>(speed);
+        if (state.reveal_cursor >= state.cells.size()) state.reveal_done_ms = now;
+        return;
+    }
+    // 全部揭示完：停「期限」毫秒，然后清本层绘制条目 + 游标归 0（闸位保持）⇒ 下一拍从第一格重来。
+    if (state.reveal_done_ms == 0) state.reveal_done_ms = now;
+    const std::int32_t deadline = font_slot_deadline_[slot];
+    const std::uint32_t hold = deadline > 0 ? static_cast<std::uint32_t>(deadline) : 0;
+    if (now - state.reveal_done_ms < hold) return;
+    erase_text_layer_draw_items(slot);
+    state.reveal_cursor = 0;
+    state.reveal_due_ms = 0;
+    state.reveal_done_ms = 0;
+    ++state.gate_cycles;
+}
+
 void Machine::service_text_layers() {
+    // ── 先服务 `0x300` 的循环演示闸：只要有闸在，泵就继续跑（**不清第 29 位**） ──
+    bool gate_active = false;
+    bool advancing = false;
+    for (int slot = 1; slot < 10; ++slot) {
+        const auto it = font_slot_state_.find(slot);
+        if (it == font_slot_state_.end()) continue;
+        if ((it->second & 1) != 0) {      // 位 0 = 闸开着
+            gate_active = true;
+            it->second |= 0x10000;        // 位 16 粘住：这一刻有槽在用（`0x300` 写状态时保留它）
+            // 引擎的"在推进"计数（`var_4`）只在**进了计时支**的槽上加一（位 0 置起且参数格 ≠ 0）。
+            if (param_cell_.value_or(0) != 0) advancing = true;
+            service_text_gate(slot);
+        } else if ((it->second & 0x10000) != 0) {
+            // 闸已关（`0x300` 写了位 0 = 0）⇒ 抽干剩余格，然后清该槽的记录（"抽干后清"）。
+            // ★ 没有字符格的槽不在这里清：那是"只写过 0x300、从没当过演示闸"的槽，清洗它会把
+            //   `0x300` 的写语义（位 16 粘住）一起抹掉（既有守卫就守这一格）。
+            TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
+            if (!state.cells.empty()) {
+                reveal_all_text_layer_cells(slot);
+                it->second = 0;
+            }
+        }
+    }
+    if (gate_active) {
+        // 引擎：没有槽进计时支（参数格 = 0 ⇒ 全部抽干）⇒ 清第 29 位（`0x4094EF`）；否则保持。
+        if (advancing) state_flags_ |= (1u << 29);
+        else state_flags_ &= ~(1u << 29);
+        return;
+    }
     // 打字中（第 29 位）才推进；**每 D 毫秒一格、每帧最多一格**（`sub_453b60` 的闸门：
     // `elapsed <= n × interval` ⇒ 本帧一格都不画，超出才画一格并把 n 推到 ⌊elapsed/interval⌋+1）。
     if ((state_flags_ & (1u << 29)) == 0) {
@@ -633,11 +740,18 @@ void Machine::op_300(const Instruction& instruction) {
 
 void Machine::op_301(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 释放字体槽（0x301 / `sub_4269F0`）：读 op1 一次、用两次 —— 先 `C[idx] = 0`，再释放该槽。
-    // ★ 槽表本身（Font+1044+4*idx 的窗口记录）**本版未建模**：释放的"容器删除 + 载荷析构"
-    //   没有可观测的替代物 ⇒ 这里只清 C，并在残差里记着（⛔ 不要伪造一次释放）。
+    // 释放字体槽（0x301 / `sub_4269F0`）：读 op1 一次、用两次 —— 先 `C[idx] = 0`，再清该层：
+    //   `sub_404F80` 把揭示游标（层记录 `+0x84`）归 0，并删掉该层的两段绘制键区间。
+    // ★ 它**不删字符格、不清画布像素**（所以关闸后再开闸能重新逐格揭示同一段文本）。
     const auto index = read_int(ops[0]);
     font_slot_start_[index] = 0;
+    if (index >= 0 && index < 10) {
+        erase_text_layer_draw_items(index);
+        TextLayerState& state = text_layer_state_[static_cast<std::size_t>(index)];
+        state.reveal_cursor = 0;
+        state.reveal_due_ms = 0;
+        state.reveal_done_ms = 0;
+    }
     return;
 }
 

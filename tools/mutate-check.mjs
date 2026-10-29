@@ -207,6 +207,14 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-new-string.test.mjs',
     what: '内联字符串少了 `^0xFF` ⇒ 字体名一类文本整体变成乱码（落点照样写成功，只有内容是错的）',
   },
+  // ── `0x192` 的落点 / 源可以是指针族（8 / 14）★ 退回"只认 5 / 11" ⇒ GAME START 的 tag-14 直接失败 ──
+  {
+    file: 'apps/emulator-new/src/core/values.ts',
+    from: "  if (op.type === 8 || op.type === 14) {\n    const r = deref(m, op);\n    if (r.tag === 5) {\n      m.stringPoolAt(r.bank).set(r.index, value);",
+    to: "  if (op.type === 88) {\n    const r = deref(m, op);\n    if (r.tag === 5) {\n      m.stringPoolAt(r.bank).set(r.index, value);",
+    guard: 'tools/test/emulator-new-string.test.mjs',
+    what: '文本落点退回"只认 5 / 11" ⇒ 指针族落点（type 8 / 14）抛异常；实测症状是 GAME START 的 0x192 直接 halt',
+  },
   // ── TITLE 场景的**合成顺序**（★ 退回"先所有绘制项、再所有网格" ⇒ key 0 黑色背景盖住前景，整屏黑）──
   {
     file: 'apps/emulator-new/src/platform/electron/renderer/scene-order.ts',

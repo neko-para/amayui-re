@@ -213,6 +213,10 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
             const auto& stop = machine.last_stop();
             std::printf("[render] script halted reason=%d opcode=0x%X message=%s\n",
                         static_cast<int>(stop.reason), stop.opcode, stop.message.c_str());
+            // ★ 异常停机补帧链（哪个 BIN 的哪个偏移）：正常 `exit`（Halted）不刷这一段。
+            if (stop.reason != core::StopReason::Halted) {
+                std::fputs(machine.stop_stack_report().c_str(), stdout);
+            }
             break;
         }
 

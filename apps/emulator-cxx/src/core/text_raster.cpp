@@ -32,7 +32,7 @@
 namespace core {
 namespace {
 
-void blend_texel(TextureRecord& texture, int x, int y, int r, int g, int b, int alpha) {
+void blend_texel(TextureSlotObject& texture, int x, int y, int r, int g, int b, int alpha) {
     if (x < 0 || x >= static_cast<int>(texture.width) || y < 0 || y >= static_cast<int>(texture.height)) {
         return;
     }
@@ -183,7 +183,7 @@ Rgb decode_color(int stored) {
 //   `set:EnableAntiFont` + `message:UseAntiFont` 才切 GRAY4/GRAY8）。1-bit 掩码的两趟只是
 //   同一张掩码平移 (1,1) ⇒ **几何膨胀（右下加粗）**，不会把半透明覆盖率相加进笔画缝。
 //   锚：0x46DA87-0x46DC36（16bpp）/ 0x46DCD0-0x46DE89（32bpp）；取证见 ops-forensics §32。
-void compose_texel(TextureRecord& texture, int x, int y, const Rgb& color, int alpha) {
+void compose_texel(TextureSlotObject& texture, int x, int y, const Rgb& color, int alpha) {
     if (x < 0 || x >= static_cast<int>(texture.width) || y < 0 ||
         y >= static_cast<int>(texture.height)) {
         return;
@@ -271,7 +271,7 @@ int mask_alpha(const MaskView& mask, int row, int column) {
     }
 }
 
-void blit_mask(TextureRecord& texture, const MaskView& mask, int origin_x, int origin_y,
+void blit_mask(TextureSlotObject& texture, const MaskView& mask, int origin_x, int origin_y,
                const Rgb& color) {
     if (mask.pixels == nullptr || mask.pitch <= 0) return;
     for (int row = 0; row < mask.height; ++row) {
@@ -306,7 +306,7 @@ constexpr const char* kReferenceFaceUtf8 = "ＭＳ ゴシック";
 // ★ `rad = 角度 * 180 / π` 是引擎**逐字**的写法（不是 `* π / 180`）。照抄，不做"修正"：
 //   本版的合同是"副色按多趟径向画"，半径/趟数/步长原先登记为未定（`RES-RENDER-TEXT-PROJECTION`），
 //   这里把它改成**按站点取数**。
-void draw_radial_outline(TextureRecord& texture, const MaskView& mask, int origin_x, int origin_y,
+void draw_radial_outline(TextureSlotObject& texture, const MaskView& mask, int origin_x, int origin_y,
                          const Rgb& color, int off_x, int off_y) {
     const auto engine_round = [](double value) {
         // `sub_46ECC0` 的 (int) 之前那两步：>0 加 0.5、<0 减 0.5（⇒ 四舍五入，不是截断）。
@@ -390,8 +390,10 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
                             const std::string& sjis, std::string* error, int* advance_out,
                             int font_size_override, const TextStyleSnapshot* style) {
 #ifdef EMULATOR_CXX_HAVE_TEXT
-    TextureRecord* texture = machine.texture_mut(texture_id);
-    if (texture == nullptr || texture->rgba.empty() || sjis.empty()) return false;
+    TextureEntry* entry = machine.texture_mut(texture_id);
+    if (entry == nullptr || !entry->slot.present || entry->slot.rgba.empty() || sjis.empty())
+        return false;
+    TextureSlotObject* texture = &entry->slot;
 
     const int size = style != nullptr && style->size > 0
                          ? style->size
@@ -642,7 +644,7 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
         pen_x += advance;
     }
     if (advance_out != nullptr) *advance_out = pen_x - x;
-    texture->non_file = true;
+    entry->record.non_file = true;
     return true;
 #else
     (void)machine;

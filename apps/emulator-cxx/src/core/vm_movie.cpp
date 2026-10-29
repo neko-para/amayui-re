@@ -113,35 +113,34 @@ bool Machine::fill_movie_texture(std::uint32_t slot, const MovieFrame& frame) {
     if (frame.width == 0 || frame.height == 0 || frame.rgba.empty()) return false;
     const auto it = textures_.find(slot);
     if (it == textures_.end()) return false;  // 绑定已被换掉：没有最后一帧可留（残差）
-    TextureRecord& texture = it->second;
-    if (texture.width == 0 || texture.height == 0) return false;
-    const std::size_t expected =
-        static_cast<std::size_t>(texture.width) * texture.height * 4u;
-    if (texture.width == frame.width && texture.height == frame.height &&
+    TextureEntry& entry = it->second;
+    if (!entry.slot.present || entry.slot.width == 0 || entry.slot.height == 0) return false;
+    const std::size_t expected = static_cast<std::size_t>(entry.slot.width) * entry.slot.height * 4u;
+    if (entry.slot.width == frame.width && entry.slot.height == frame.height &&
         frame.rgba.size() == expected) {
-        texture.rgba = frame.rgba;
+        entry.slot.rgba = frame.rgba;
     } else {
-        texture.rgba.resize(expected);
-        for (std::uint32_t y = 0; y < texture.height; ++y) {
+        entry.slot.rgba.resize(expected);
+        for (std::uint32_t y = 0; y < entry.slot.height; ++y) {
             const std::uint32_t sy = static_cast<std::uint32_t>(
-                static_cast<std::uint64_t>(y) * frame.height / texture.height);
-            for (std::uint32_t x = 0; x < texture.width; ++x) {
+                static_cast<std::uint64_t>(y) * frame.height / entry.slot.height);
+            for (std::uint32_t x = 0; x < entry.slot.width; ++x) {
                 const std::uint32_t sx = static_cast<std::uint32_t>(
-                    static_cast<std::uint64_t>(x) * frame.width / texture.width);
+                    static_cast<std::uint64_t>(x) * frame.width / entry.slot.width);
                 const std::size_t src =
                     (static_cast<std::size_t>(sy) * frame.width + sx) * 4u;
                 const std::size_t dst =
-                    (static_cast<std::size_t>(y) * texture.width + x) * 4u;
+                    (static_cast<std::size_t>(y) * entry.slot.width + x) * 4u;
                 if (src + 4u > frame.rgba.size()) continue;
-                texture.rgba[dst + 0] = frame.rgba[src + 0];
-                texture.rgba[dst + 1] = frame.rgba[src + 1];
-                texture.rgba[dst + 2] = frame.rgba[src + 2];
-                texture.rgba[dst + 3] = frame.rgba[src + 3];
+                entry.slot.rgba[dst + 0] = frame.rgba[src + 0];
+                entry.slot.rgba[dst + 1] = frame.rgba[src + 1];
+                entry.slot.rgba[dst + 2] = frame.rgba[src + 2];
+                entry.slot.rgba[dst + 3] = frame.rgba[src + 3];
             }
         }
     }
-    texture.blank = false;
-    texture.revision++;  // 让宿主（GPU 纹理缓存）重传
+    entry.record.blank = false;
+    entry.slot.revision++;  // 让宿主（GPU 纹理缓存）重传
     return true;
 }
 

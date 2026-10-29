@@ -4,7 +4,11 @@
 // `is_scene_mutating`（脏白名单）、构造、`step()` / `run()`。
 #include "core/vm.h"
 
+#include "core/encoding.h"
+#include "core/install.h"
+
 #include <cstdio>
+#include <string>
 
 namespace core {
 namespace {
@@ -56,6 +60,7 @@ void Machine::load_root(const Bytes& script, std::uint32_t script_id) {
     root.loaded = true;
     root.code.assign(script.begin() + header.body_offset, script.end());
     root.ip = 0;
+    root.body_offset = header.body_offset;
     root.length_slot = 0;
     root.parent = -1;
     root.script_id = script_id;
@@ -93,7 +98,41 @@ void Machine::jump_to(std::uint32_t position) {
 }
 
 void Machine::push_return(std::uint32_t position) {
-    frame_mut().ret_stack.push_back(static_cast<std::int32_t>(position));
+    Frame& f = frame_mut();
+    // 先记"在哪条指令上登记的返回点"（诊断用），再压返回位置 —— 两条栈必须同深。
+    f.call_sites.push_back(static_cast<std::int32_t>(f.ip / 4));
+    f.ret_stack.push_back(static_cast<std::int32_t>(position));
+}
+
+std::string Machine::stop_stack_report() const {
+    std::string out;
+    const auto bin_name = [this](std::uint32_t script_id) -> std::string {
+        if (install_ == nullptr) return {};
+        if (script_id >= install_->index.files.size()) return {};
+        return cp932_to_utf8(install_->index.files[script_id].name);
+    };
+    std::size_t depth = 0;
+    for (std::int32_t index = static_cast<std::int32_t>(current_frame_); index >= 0;
+         index = frames_[static_cast<std::size_t>(index)].parent) {
+        const Frame& frame = frames_[static_cast<std::size_t>(index)];
+        if (!frame.loaded) break;
+        ++depth;
+        std::uint32_t opcode = 0;
+        if (frame.ip + 4 <= frame.code.size()) opcode = read_u32(frame.code, frame.ip);
+        const std::string name = bin_name(frame.script_id);
+        char line[512];
+        std::snprintf(line, sizeof(line),
+                      "[stack] #%zu frame=%d/%zu script=%u bin=%s ip=%zu file=%zu opcode=0x%X",
+                      depth, index, kFrameCount, frame.script_id, name.empty() ? "?" : name.c_str(),
+                      frame.ip, static_cast<std::size_t>(frame.body_offset) + frame.ip, opcode);
+        out += line;
+        if (!frame.call_sites.empty()) {
+            out += " call_at=" + std::to_string(frame.call_sites.back());
+        }
+        out += "\n";
+    }
+    if (out.empty()) out = "[stack] (no frame)\n";
+    return out;
 }
 
 void Machine::execute(const Instruction& instruction) {

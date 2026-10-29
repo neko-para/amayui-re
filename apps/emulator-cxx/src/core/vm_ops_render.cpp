@@ -76,14 +76,14 @@ void Machine::op_20b(const Instruction& instruction) {
     if (id > 999u) return;
     auto it = textures_.find(id);
     if (it == textures_.end()) return;
-    TextureRecord& texture = it->second;
-    texture.non_file = true;
-        texture.revision++;
-    if (texture.rgba.empty()) return;
+    TextureEntry& entry = it->second;
+    entry.record.non_file = true;
+    entry.slot.revision++;
+    if (!entry.slot.present || entry.slot.rgba.empty()) return;
     const int left = std::max(0, x);
     const int top = std::max(0, y);
-    const int right = std::min(static_cast<int>(texture.width), x + w);
-    const int bottom = std::min(static_cast<int>(texture.height), y + h);
+    const int right = std::min(static_cast<int>(entry.slot.width), x + w);
+    const int bottom = std::min(static_cast<int>(entry.slot.height), y + h);
     if (right <= left || bottom <= top) return;
     const int a = std::max(0, alpha);
     const int sr = static_cast<int>((color >> 16) & 0xFFu);
@@ -91,11 +91,14 @@ void Machine::op_20b(const Instruction& instruction) {
     const int sb = static_cast<int>(color & 0xFFu);
     for (int py = top; py < bottom; ++py) {
         for (int px = left; px < right; ++px) {
-            const std::size_t d = (static_cast<std::size_t>(py) * texture.width + px) * 4;
-            texture.rgba[d + 0] = clamp_byte((sr * a + texture.rgba[d + 0] * (255 - a)) / 255);
-            texture.rgba[d + 1] = clamp_byte((sg * a + texture.rgba[d + 1] * (255 - a)) / 255);
-            texture.rgba[d + 2] = clamp_byte((sb * a + texture.rgba[d + 2] * (255 - a)) / 255);
-            texture.rgba[d + 3] = clamp_byte(a + texture.rgba[d + 3] * (255 - a) / 255);
+            const std::size_t d = (static_cast<std::size_t>(py) * entry.slot.width + px) * 4;
+            entry.slot.rgba[d + 0] =
+                clamp_byte((sr * a + entry.slot.rgba[d + 0] * (255 - a)) / 255);
+            entry.slot.rgba[d + 1] =
+                clamp_byte((sg * a + entry.slot.rgba[d + 1] * (255 - a)) / 255);
+            entry.slot.rgba[d + 2] =
+                clamp_byte((sb * a + entry.slot.rgba[d + 2] * (255 - a)) / 255);
+            entry.slot.rgba[d + 3] = clamp_byte(a + entry.slot.rgba[d + 3] * (255 - a) / 255);
         }
     }
     return;
@@ -208,7 +211,7 @@ void Machine::op_205(const Instruction& instruction) {
     const std::string ascii = format(chars);
     if (ascii.empty() || slot < 0) return;
     const auto texture_id = static_cast<std::uint32_t>(slot);
-    const TextureRecord* texture = this->texture(texture_id);
+    const TextureSlotObject* texture = texture_slot(texture_id);
     if (texture == nullptr || texture->rgba.empty()) return;  // 三条入口条件之一：槽里没有可用表面
 
     // X = op2 + 未用格数 × 格宽 × k：默认右齐(k=1)、0x2 居中(1/2)、0x4 左齐(0)。
@@ -247,7 +250,7 @@ void Machine::op_205(const Instruction& instruction) {
     }
     std::string error;
     if (draw_text_into_texture(*this, texture_id, x, y, sjis, &error)) {
-        if (TextureRecord* mutable_texture = texture_mut(texture_id)) mutable_texture->revision++;
+        if (TextureEntry* entry = texture_mut(texture_id)) entry->slot.revision++;
     } else if (!error.empty()) {
         report_error(error);
     }
@@ -265,9 +268,9 @@ void Machine::op_20e(const Instruction& instruction) {
     //   虚拟全屏类型格 ⇒ 见 `apps/emulator-cxx/SCOPE.md` 的显式限制。
     // ⛔ 不要顺手清纹理表 / 不要清非目标纹理：那不是这条的语义（见 ops-forensics §21）。
     if (render_target_ >= 0) {
-        if (TextureRecord* texture = texture_mut(static_cast<std::uint32_t>(render_target_))) {
-            std::fill(texture->rgba.begin(), texture->rgba.end(), std::uint8_t{0});
-            texture->revision++;
+        if (TextureEntry* entry = texture_mut(static_cast<std::uint32_t>(render_target_))) {
+            std::fill(entry->slot.rgba.begin(), entry->slot.rgba.end(), std::uint8_t{0});
+            entry->slot.revision++;
         }
     }
     return;
@@ -282,11 +285,11 @@ void Machine::op_204(const Instruction& instruction) {
     const auto id = read_int(ops[0]);
     if (id < 0) return;
     const auto texture_id = static_cast<std::uint32_t>(id);
-    const TextureRecord* texture = this->texture(texture_id);
+    const TextureSlotObject* texture = texture_slot(texture_id);
     if (texture == nullptr || texture->rgba.empty() || text.empty()) return;
     std::string error;
     if (draw_text_into_texture(*this, texture_id, x, y, text, &error)) {
-        if (TextureRecord* mutable_texture = texture_mut(texture_id)) mutable_texture->revision++;
+        if (TextureEntry* entry = texture_mut(texture_id)) entry->slot.revision++;
     } else if (!error.empty()) {
         report_error(error);
     }

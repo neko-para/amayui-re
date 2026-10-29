@@ -5237,7 +5237,9 @@
       "evidence": [
         "KN:01M4G4N4NZ0C036Y6F3F002B3K",
         "guard:tools/test/emulator-new-string.test.mjs#★ type 2（内联字符串）",
-        "guard:tools/test/emulator-new-string.test.mjs#★★ `0x192 set-string`"
+        "guard:tools/test/emulator-new-string.test.mjs#★★ `0x192 set-string`",
+        "guard:tools/test/emulator-new-string.test.mjs#★★ `0x192` 的落点 / 源可以是指针族（type 8 / 14）：解引用后写 / 读那条记录",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-text-pointer-write"
       ]
     },
     {
@@ -16790,7 +16792,8 @@
       "evidence": [
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest",
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-config-sample-text",
-        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-adv-pacing"
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-adv-pacing",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-text-gate-replay"
       ]
     },
     {
@@ -18473,7 +18476,7 @@
         },
         {
           "ea": "0x426a26",
-          "what": "释放该槽的字体资源"
+          "what": "清该槽：起点归 0 + 调 sub_404F80（清绘制条目 + 揭示游标归 0）"
         },
         {
           "ea": "0x409421",
@@ -18489,7 +18492,19 @@
         },
         {
           "ea": "0x409439",
-          "what": "参数格为 0 ⇒ 只等空闲"
+          "what": "参数格为 0 ⇒ 本次把剩余格抽干到末格"
+        },
+        {
+          "ea": "0x409471",
+          "what": "揭示该层的下一格（揭示游标 +1）"
+        },
+        {
+          "ea": "0x45be20",
+          "what": "揭示入口：层记录 = 字体对象 +0x414 的第 n 项，游标 = 层记录 +0x84"
+        },
+        {
+          "ea": "0x404f80",
+          "what": "到期清除：游标归 0 + 删该层两段绘制键区间（不清像素 / 不删字符格）"
         },
         {
           "ea": "0x409480",
@@ -18505,15 +18520,23 @@
         },
         {
           "ea": "0x40949c",
-          "what": "按期限释放该槽"
+          "what": "按期限清除该槽（清条目 + 游标归 0；闸位保持 ⇒ 下一拍重来）"
+        },
+        {
+          "ea": "0x4094e9",
+          "what": "有槽在用 ⇒ 不清状态字第 29 位（泵继续跑）"
         },
         {
           "ea": "0x4094a3",
           "what": "第 0 位未置分支：判第 16 位"
         },
         {
+          "ea": "0x409452",
+          "what": "参数格 = 0 的抽干循环出口：直接跳到槽循环尾（跳过记起点 / 期限清除 ⇒ 不重放）"
+        },
+        {
           "ea": "0x4094c2",
-          "what": "等空闲后清状态位"
+          "what": "抽干后清状态位"
         },
         {
           "ea": "0x4094c4",
@@ -18525,7 +18548,9 @@
         }
       ],
       "evidence": [
-        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-text-gate-replay",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-config-sample-text"
       ]
     }
   ]

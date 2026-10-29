@@ -1,7 +1,7 @@
 // 场景批次：绘制项 / 4 顶点网格 → 顶点缓冲 + 每段绑一张纹理。
 //
 // ★ 绘制顺序（含同键平键序）是引擎语义，见 scene_raster 与 CORE-SCENE-DRAW-ORDER；
-//   这里按同一顺序产出 GPU 顶点，纹理按 `TextureRecord::revision` 缓存。
+//   这里按同一顺序产出 GPU 顶点，纹理按 `TextureSlotObject::revision` 缓存。
 // ★ 着色器两套源（HLSL / MSL）的来由见 `gpu_quad.cpp` 顶部：Windows 走 DXIL、Linux 走
 //   SPIR-V（都由 shadercross 从 HLSL 编），macOS 走 MSL（Metal 自己编译源码，不需要 shadercross）。
 //   顶点属性 0/1/2 = position / uv / color，与下面 `attributes[]` 的 location 一一对应。
@@ -197,7 +197,7 @@ SDL_GPUTexture* scene_texture(SDL_GPUDevice* device, SceneTextureCache& cache, c
         }
         return cache.white;
     }
-    const core::TextureRecord* record = machine.texture(id);
+    const core::TextureSlotObject* record = machine.texture_slot(id);
     if (record == nullptr || record->rgba.empty()) return nullptr;
     const auto revision_it = cache.revisions.find(id);
     const auto texture_it = cache.textures.find(id);
@@ -283,7 +283,7 @@ void build_scene_vertices(const core::Machine& machine, float width, float heigh
         if (item_it == machine.draw_items().end()) continue;
         const core::DrawItem& item = item_it->second;
         if ((item.flags & 1u) == 0) continue;
-        const core::TextureRecord* texture = machine.texture(item.texture_id);
+        const core::TextureSlotObject* texture = machine.texture_slot(item.texture_id);
         if (texture == nullptr || texture->rgba.empty()) continue;
         const int sx0 = std::max(0, item.left);
         const int sy0 = std::max(0, item.top);

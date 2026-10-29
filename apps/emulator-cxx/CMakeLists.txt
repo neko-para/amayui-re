@@ -140,6 +140,15 @@ add_test(NAME emulator-core-adv-pacing COMMAND emulator-core-selftest --only-pac
 # ★ 文本记录的**字号支**：位 2 只在振り仮名 run（及层模式 = 1 的逐字支）的 flags 上置起；消费口径只有
 #   `record_font_size` 一处（位 2 ⇒ B 支、否则 A 支）。主线 run 置位 / 振り仮名不置位 ⇒ 本条红。
 add_test(NAME emulator-core-text-record-flags COMMAND emulator-core-selftest --only-record-flags)
+# ★ 文本落点可以是指针族（`0x192` 的 tag 8 / 14）：引擎落点分派（EA 0x433310）接受 5 / 8 / 11 / 14，
+#   四条汇到同一个记录级写入（EA 0x43362F）。tag 14 = 槽里装**记录地址** ⇒ 解引用后写那条记录。
+#   退回"只认 5 / 11" ⇒ 本条红（实测：TITLE / GAME START 的 `0x192` 直接 halt）。
+#   同时守 halt 帧链报告的字段（script / ip / file / opcode）。
+add_test(NAME emulator-core-text-pointer-write COMMAND emulator-core-selftest --only-text-pointer)
+# ★ `0x300` 的**循环演示闸**：设置界面下方那段 ADV 示例文本要"逐格揭示 → 停「期限」→ 清绘制条目 →
+#   从第一格重来"。旧实现只把 0x300/0x301 写成两张无人读的 map ⇒ 只展示一次（用户口径"不会刷新"）。
+#   `0x301` 只清条目 + 游标，不清画布像素、不删字符格。
+add_test(NAME emulator-core-text-gate-replay COMMAND emulator-core-selftest --only-text-gate)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)
