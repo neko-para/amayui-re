@@ -17098,6 +17098,1435 @@
       "evidence": [
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
       ]
+    },
+    {
+      "rule": "CORE-CONFIG-WHEEL-ADVANCE",
+      "functions": [
+        "sub_4309E0",
+        "sub_426390"
+      ],
+      "sites": [
+        {
+          "ea": "0x4309e0",
+          "what": "0x2cc handler 起点"
+        },
+        {
+          "ea": "0x426390",
+          "what": "0x2cd handler 起点"
+        },
+        {
+          "ea": "0x4309f0",
+          "what": "0x2cc 宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x430a0a",
+          "what": "读键名 message:AdvanceMesOnWheel"
+        },
+        {
+          "ea": "0x430a16",
+          "what": "写第 1 个操作数 ← 键值"
+        },
+        {
+          "ea": "0x4263a5",
+          "what": "0x2cd 宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x4263b4",
+          "what": "读第 1 个操作数"
+        },
+        {
+          "ea": "0x4263c4",
+          "what": "写键 message:AdvanceMesOnWheel ← 值"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ],
+      "storage": []
+    },
+    {
+      "rule": "CORE-CONFIG-DISPLAY-CACHE",
+      "functions": [
+        "sub_430A20"
+      ],
+      "sites": [
+        {
+          "ea": "0x430a20",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x430a2f",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x430a3a",
+          "what": "测试显示模式缓存是否非 0"
+        },
+        {
+          "ea": "0x430a42",
+          "what": "缓存非 0 ⇒ 1"
+        },
+        {
+          "ea": "0x430a4a",
+          "what": "写第 1 个操作数"
+        },
+        {
+          "ea": "0x406c4d",
+          "what": "启动：读 display:ScreenMode"
+        },
+        {
+          "ea": "0x406c5b",
+          "what": "启动：显示模式缓存（= 引擎屏幕形态）← （键值 ≠ 0）"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ],
+      "storage": []
+    },
+    {
+      "rule": "CORE-CONFIG-AUTO-PITCH",
+      "functions": [
+        "sub_431110",
+        "sub_426540"
+      ],
+      "sites": [
+        {
+          "ea": "0x431110",
+          "what": "0x2e6 handler 起点"
+        },
+        {
+          "ea": "0x426540",
+          "what": "0x2e7 handler 起点"
+        },
+        {
+          "ea": "0x431120",
+          "what": "0x2e6 宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x43112f",
+          "what": "读档号"
+        },
+        {
+          "ea": "0x431136",
+          "what": "档号 == 0 分支"
+        },
+        {
+          "ea": "0x431147",
+          "what": "键名 message:AutoMessagePitch0"
+        },
+        {
+          "ea": "0x431153",
+          "what": "写落点 ← 键值"
+        },
+        {
+          "ea": "0x431166",
+          "what": "档号 == 1 判定"
+        },
+        {
+          "ea": "0x431177",
+          "what": "键名 message:AutoMessagePitch1"
+        },
+        {
+          "ea": "0x43118b",
+          "what": "档号非法的错误串"
+        },
+        {
+          "ea": "0x426552",
+          "what": "0x2e7 宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x426561",
+          "what": "读档号"
+        },
+        {
+          "ea": "0x42656a",
+          "what": "档号 == 0 分支"
+        },
+        {
+          "ea": "0x426574",
+          "what": "读第 2 个操作数（值）"
+        },
+        {
+          "ea": "0x426588",
+          "what": "写键 pitch0 ← 值"
+        },
+        {
+          "ea": "0x4265a4",
+          "what": "读第 2 个操作数（值）"
+        },
+        {
+          "ea": "0x4265b8",
+          "what": "写键 pitch1 ← 值"
+        },
+        {
+          "ea": "0x4265be",
+          "what": "档号非法的错误串"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ],
+      "storage": []
+    },
+    {
+      "rule": "CORE-CONFIG-AUTO-OPTION",
+      "functions": [
+        "sub_4265E0",
+        "sub_4311B0"
+      ],
+      "sites": [
+        {
+          "ea": "0x4265e0",
+          "what": "0x2e8 handler 起点"
+        },
+        {
+          "ea": "0x4311b0",
+          "what": "0x2ea handler 起点"
+        },
+        {
+          "ea": "0x4265f5",
+          "what": "0x2e8 宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x426604",
+          "what": "读第 1 个操作数（值）"
+        },
+        {
+          "ea": "0x42660d",
+          "what": "键名 message:AutoMessageOption"
+        },
+        {
+          "ea": "0x426614",
+          "what": "写键 ← 值"
+        },
+        {
+          "ea": "0x4311c0",
+          "what": "0x2ea 宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x4311da",
+          "what": "键名 message:AutoMessageOption"
+        },
+        {
+          "ea": "0x4311df",
+          "what": "读键值"
+        },
+        {
+          "ea": "0x4311e6",
+          "what": "写第 1 个操作数 ← 键值"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ],
+      "storage": []
+    },
+    {
+      "rule": "CORE-CONFIG-EFFECT-SKIP",
+      "functions": [
+        "sub_431FC0"
+      ],
+      "sites": [
+        {
+          "ea": "0x431fc0",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x431fd0",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x431fea",
+          "what": "键名 system:EffectSkipOnClick"
+        },
+        {
+          "ea": "0x431fef",
+          "what": "读键值"
+        },
+        {
+          "ea": "0x431ff6",
+          "what": "写第 1 个操作数 ← 键值"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ],
+      "storage": []
+    },
+    {
+      "rule": "CORE-INPUT-WHEEL-READ",
+      "functions": [
+        "sub_42EF50"
+      ],
+      "sites": [
+        {
+          "ea": "0x42ef50",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x42ef5d",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x42ef68",
+          "what": "读滚轮增量累加格"
+        },
+        {
+          "ea": "0x42ef71",
+          "what": "累加格清零（在写落点之前）"
+        },
+        {
+          "ea": "0x42ef7b",
+          "what": "写第 1 个操作数 ← 旧值"
+        },
+        {
+          "ea": "0x4b9ccb",
+          "what": "宿主滚轮消息：把增量累加进该格"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ],
+      "storage": []
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-MUSIC-FADE-CELL",
+      "functions": [
+        "sub_42E510",
+        "sub_407120"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x42e510",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x42e51d",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x42e528",
+          "what": "读音乐淡出状态格"
+        },
+        {
+          "ea": "0x42e531",
+          "what": "写第 1 个操作数"
+        },
+        {
+          "ea": "0x407123",
+          "what": "读者：该格非 0 时才看 sound:MusicFadeOnVoicePlaying"
+        },
+        {
+          "ea": "0x40e164",
+          "what": "引擎整体复位：该格 ← 0"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-FLAG-CELL-142",
+      "functions": [
+        "sub_422930",
+        "sub_4765C0"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x422930",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x422940",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x42294f",
+          "what": "读第 1 个操作数"
+        },
+        {
+          "ea": "0x422954",
+          "what": "写引擎标志格"
+        },
+        {
+          "ea": "0x40df7b",
+          "what": "启动初始化：标志格 ← 1"
+        },
+        {
+          "ea": "0x415aec",
+          "what": "启动初始化：标志格 ← 1"
+        },
+        {
+          "ea": "0x4765c8",
+          "what": "唯一读者：按 != 0 得真"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "ADV-TEXT-GATE-1BB",
+      "functions": [
+        "sub_420000",
+        "sub_408050"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x420000",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x420010",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x42001f",
+          "what": "读门值"
+        },
+        {
+          "ea": "0x420028",
+          "what": "值 0 ⇒ 门 ← 最高位"
+        },
+        {
+          "ea": "0x420038",
+          "what": "门值再读一次（判 == 1）"
+        },
+        {
+          "ea": "0x420042",
+          "what": "值 1 ⇒ 门 ← 0"
+        },
+        {
+          "ea": "0x42004f",
+          "what": "非法值的错误串"
+        },
+        {
+          "ea": "0x420068",
+          "what": "上报一次错误"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-HALF-LEN-1A6",
+      "functions": [
+        "sub_42D110"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x42d110",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x42d120",
+          "what": "宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x42d12f",
+          "what": "读源文本"
+        },
+        {
+          "ea": "0x42d140",
+          "what": "长度右移 1（整除 2）"
+        },
+        {
+          "ea": "0x42d147",
+          "what": "写落点"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-SUBSTR-2C7",
+      "functions": [
+        "sub_433FD0",
+        "sub_429F60"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x433fd0",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x43400a",
+          "what": "宽度槽写 9（argc 4）"
+        },
+        {
+          "ea": "0x434019",
+          "what": "读源文本"
+        },
+        {
+          "ea": "0x434053",
+          "what": "读起点"
+        },
+        {
+          "ea": "0x43405e",
+          "what": "读字节数"
+        },
+        {
+          "ea": "0x43408e",
+          "what": "起点 ≥ 长度 ⇒ 空串支"
+        },
+        {
+          "ea": "0x434096",
+          "what": "字节数 ≤ 0 ⇒ 空串支"
+        },
+        {
+          "ea": "0x4340e8",
+          "what": "首字节修正的警告"
+        },
+        {
+          "ea": "0x434148",
+          "what": "尾字节修正的警告"
+        },
+        {
+          "ea": "0x43415f",
+          "what": "取子串"
+        },
+        {
+          "ea": "0x43416d",
+          "what": "写落点（正常支）"
+        },
+        {
+          "ea": "0x4341ef",
+          "what": "写落点（空串支）"
+        },
+        {
+          "ea": "0x4340bd",
+          "what": "双字节首字节判据（cmp 81h / 0A0h / 0E0h）"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-config-screen"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-FONT-NAME-2DE",
+      "functions": [
+        "sub_430DF0",
+        "sub_428990"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x430df0",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x430e00",
+          "what": "宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x430e0f",
+          "what": "读名字文本"
+        },
+        {
+          "ea": "0x430e1b",
+          "what": "查字体名表"
+        },
+        {
+          "ea": "0x430e25",
+          "what": "写落点"
+        },
+        {
+          "ea": "0x428990",
+          "what": "线性查表例程起点"
+        },
+        {
+          "ea": "0x4289cd",
+          "what": "跳过名字开头的一个 @"
+        },
+        {
+          "ea": "0x428a0e",
+          "what": "逐字节比较"
+        },
+        {
+          "ea": "0x428a38",
+          "what": "未命中 ⇒ −1"
+        },
+        {
+          "ea": "0x428a4c",
+          "what": "命中 ⇒ 下标"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-config-screen"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ARRAY-SORT-12F",
+      "functions": [
+        "sub_42F560"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x42f560",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x42f577",
+          "what": "宽度槽写 9（argc 4）"
+        },
+        {
+          "ea": "0x42f58a",
+          "what": "取址第 1 个操作数（A）"
+        },
+        {
+          "ea": "0x42f598",
+          "what": "取址第 2 个操作数（B）"
+        },
+        {
+          "ea": "0x42f5a6",
+          "what": "取址第 3 个操作数（C）"
+        },
+        {
+          "ea": "0x42f5ba",
+          "what": "A[0] ← 0（无条件）"
+        },
+        {
+          "ea": "0x42f5c6",
+          "what": "读元素个数 N"
+        },
+        {
+          "ea": "0x42f6b7",
+          "what": "有符号比较与落位"
+        },
+        {
+          "ea": "0x42f761",
+          "what": "收尾：A[i] ← 编码后的下标"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-VOLUME-GET",
+      "functions": [
+        "sub_42E540"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x42e540",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x42e550",
+          "what": "宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x42e55f",
+          "what": "读声道号"
+        },
+        {
+          "ea": "0x42e577",
+          "what": "取 sound:Volume0（其余四支同形）"
+        },
+        {
+          "ea": "0x42e583",
+          "what": "写第 2 个操作数"
+        },
+        {
+          "ea": "0x42e64b",
+          "what": "声道号越界的错误串"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-VOLUME-SET",
+      "functions": [
+        "sub_421070",
+        "sub_4071D0"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x421070",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x421082",
+          "what": "宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x421091",
+          "what": "读声道号"
+        },
+        {
+          "ea": "0x4210b8",
+          "what": "写 sound:Volume0（其余四支同形）"
+        },
+        {
+          "ea": "0x4210c6",
+          "what": "声道 0 的下发"
+        },
+        {
+          "ea": "0x4210ff",
+          "what": "第 2 个操作数再读一次（下发用）"
+        },
+        {
+          "ea": "0x4211dc",
+          "what": "声道号越界的错误串"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-MODE-GET",
+      "functions": [
+        "sub_42E670"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x42e670",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x42e680",
+          "what": "宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x42e68f",
+          "what": "读开关号"
+        },
+        {
+          "ea": "0x42e6ad",
+          "what": "取 sound:Music"
+        },
+        {
+          "ea": "0x42e6b3",
+          "what": "音乐支：值 < 0 ⇒ 假"
+        },
+        {
+          "ea": "0x42e6b9",
+          "what": "写 1（真）"
+        },
+        {
+          "ea": "0x42e6e8",
+          "what": "音效 / 语音支：值 == 0 ⇒ 假"
+        },
+        {
+          "ea": "0x42e738",
+          "what": "写 0（假）"
+        },
+        {
+          "ea": "0x42e740",
+          "what": "开关号越界的错误串"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-MODE-SET",
+      "functions": [
+        "sub_421200",
+        "sub_408CF0",
+        "sub_408D90",
+        "sub_408E20",
+        "sub_408EB0"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x421200",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x421210",
+          "what": "宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x42121f",
+          "what": "读开关号"
+        },
+        {
+          "ea": "0x421235",
+          "what": "开关 1 → 音乐阶梯"
+        },
+        {
+          "ea": "0x421253",
+          "what": "开关 2 → 音效"
+        },
+        {
+          "ea": "0x421272",
+          "what": "开关 3 → 语音"
+        },
+        {
+          "ea": "0x421291",
+          "what": "开关 4 → 影片"
+        },
+        {
+          "ea": "0x421299",
+          "what": "开关号越界的错误串"
+        },
+        {
+          "ea": "0x408d3a",
+          "what": "写 sound:Music ← 旧值 ±3"
+        },
+        {
+          "ea": "0x408dff",
+          "what": "写 sound:SE ← 0/1"
+        },
+        {
+          "ea": "0x408e92",
+          "what": "写 sound:Voice ← 0/1"
+        },
+        {
+          "ea": "0x408ee8",
+          "what": "写 sound:Movie ← 原值"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-TIMING-STAMP-23C",
+      "functions": [
+        "sub_41A2C0"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x41a2c0",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x41a2d0",
+          "what": "宽度槽写 1（无操作数）"
+        },
+        {
+          "ea": "0x41a2db",
+          "what": "读系统毫秒"
+        },
+        {
+          "ea": "0x41a2e7",
+          "what": "上一次读数 ← 现在的旧值"
+        },
+        {
+          "ea": "0x41a2ed",
+          "what": "现在 ← 系统毫秒"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RENDER-DISPLAY-STATE-25B",
+      "functions": [
+        "sub_425E20",
+        "sub_408440"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x425e20",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x425e30",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x425e3f",
+          "what": "读图像号"
+        },
+        {
+          "ea": "0x425e44",
+          "what": "显示状态 ← 2"
+        },
+        {
+          "ea": "0x425e4e",
+          "what": "当前图像号 ← 操作数"
+        },
+        {
+          "ea": "0x425e5b",
+          "what": "判显示模式缓存（全屏则早退）"
+        },
+        {
+          "ea": "0x425e61",
+          "what": "再读图像号（载图用）"
+        },
+        {
+          "ea": "0x425e69",
+          "what": "载图请求"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-CONFIG-MESSAGE-FADE-2EE",
+      "functions": [
+        "sub_426650"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x426650",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x426662",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x426671",
+          "what": "读第 1 个操作数"
+        },
+        {
+          "ea": "0x426680",
+          "what": "消息淡变时长格 ← 值"
+        },
+        {
+          "ea": "0x426686",
+          "what": "再读第 1 个操作数（写键用）"
+        },
+        {
+          "ea": "0x42669a",
+          "what": "写命名键 message:MessageFade"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-L2D-LOAD",
+      "functions": [
+        "sub_427BA0",
+        "sub_427CF0",
+        "sub_428200",
+        "sub_4A1860",
+        "sub_4A1970",
+        "sub_4A19F0"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x427ba0",
+          "what": "0x341 handler 起点"
+        },
+        {
+          "ea": "0x427bb8",
+          "what": "0x341 宽度槽写 5（argc 2）"
+        },
+        {
+          "ea": "0x427bc7",
+          "what": "0x341 读文件名（最先）"
+        },
+        {
+          "ea": "0x427bf9",
+          "what": "0x341 读第 2 个操作数"
+        },
+        {
+          "ea": "0x427c0f",
+          "what": "0x341 载入模型"
+        },
+        {
+          "ea": "0x427c3b",
+          "what": "0x341 写错误文本"
+        },
+        {
+          "ea": "0x427c57",
+          "what": "0x341 抛显示消息型异常"
+        },
+        {
+          "ea": "0x427cf0",
+          "what": "0x345 handler 起点"
+        },
+        {
+          "ea": "0x427d08",
+          "what": "0x345 宽度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x427d17",
+          "what": "0x345 读文件名（最先）"
+        },
+        {
+          "ea": "0x427d49",
+          "what": "0x345 读第 3 个操作数"
+        },
+        {
+          "ea": "0x427d53",
+          "what": "0x345 读第 2 个操作数"
+        },
+        {
+          "ea": "0x427d69",
+          "what": "0x345 载入纹理"
+        },
+        {
+          "ea": "0x427db1",
+          "what": "0x345 抛显示消息型异常"
+        },
+        {
+          "ea": "0x428200",
+          "what": "0x34e handler 起点"
+        },
+        {
+          "ea": "0x428218",
+          "what": "0x34e 宽度槽写 9（argc 4）"
+        },
+        {
+          "ea": "0x428227",
+          "what": "0x34e 读文件名（最先）"
+        },
+        {
+          "ea": "0x428259",
+          "what": "0x34e 读第 4 个操作数"
+        },
+        {
+          "ea": "0x428263",
+          "what": "0x34e 读第 3 个操作数"
+        },
+        {
+          "ea": "0x42826d",
+          "what": "0x34e 读第 2 个操作数"
+        },
+        {
+          "ea": "0x428283",
+          "what": "0x34e 载入动作"
+        },
+        {
+          "ea": "0x4282cb",
+          "what": "0x34e 抛显示消息型异常"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-L2D-MARK",
+      "functions": [
+        "sub_4283B0",
+        "sub_4A1AC0",
+        "sub_478540",
+        "sub_478560"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x4283b0",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x4283c0",
+          "what": "宽度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x4283cf",
+          "what": "读第 3 个操作数（时间量）"
+        },
+        {
+          "ea": "0x4283d9",
+          "what": "读第 2 个操作数（方向）"
+        },
+        {
+          "ea": "0x4283e3",
+          "what": "读第 1 个操作数（对象下标）"
+        },
+        {
+          "ea": "0x4283ef",
+          "what": "按对象下标取对象并写标记"
+        },
+        {
+          "ea": "0x478540",
+          "what": "方向 0 ⇒ 写“开始”支"
+        },
+        {
+          "ea": "0x478560",
+          "what": "方向 ≠ 0 ⇒ 写“结束”支"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-EQUAL-194",
+      "functions": [
+        "sub_42CF10",
+        "sub_42A420"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x42cf10",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x42cf4f",
+          "what": "宽度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x42cf5d",
+          "what": "读第 3 个操作数（右值）"
+        },
+        {
+          "ea": "0x42cf71",
+          "what": "读第 2 个操作数（左值）"
+        },
+        {
+          "ea": "0x42cf8e",
+          "what": "逐字节比较"
+        },
+        {
+          "ea": "0x42cf9d",
+          "what": "写第 1 个操作数 ← 1 / 0"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-SLOT-STOP-B6",
+      "functions": [
+        "sub_420B80",
+        "sub_4B5050",
+        "sub_4B6390"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x420b80",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x420b90",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x420b9f",
+          "what": "读槽号"
+        },
+        {
+          "ea": "0x420bab",
+          "what": "转发到后端包装"
+        },
+        {
+          "ea": "0x4b505e",
+          "what": "后端不存在 ⇒ 整段跳过（连清格也不做）"
+        },
+        {
+          "ea": "0x4b5065",
+          "what": "向后端发停止请求"
+        },
+        {
+          "ea": "0x4b506a",
+          "what": "清「槽 → 资源标识」格（10 格表）"
+        },
+        {
+          "ea": "0x4b5075",
+          "what": "清该槽结构体首格"
+        },
+        {
+          "ea": "0x4b63a2",
+          "what": "槽号 ≥ 15 的错误串（后端受理判据）"
+        },
+        {
+          "ea": "0x4b639a",
+          "what": "后端的受理判据：有符号比较槽号 < 15"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-SLOT-PLAY-BA",
+      "functions": [
+        "sub_420BC0",
+        "sub_4B5020",
+        "sub_4B6020"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x420bc0",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x420bd0",
+          "what": "固定附加实参 1"
+        },
+        {
+          "ea": "0x420bd2",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x420be1",
+          "what": "读槽号"
+        },
+        {
+          "ea": "0x420bed",
+          "what": "转发到播放包装"
+        },
+        {
+          "ea": "0x4b502d",
+          "what": "静默门①：后端未就绪"
+        },
+        {
+          "ea": "0x4b5036",
+          "what": "静默门②：无活动缓冲"
+        },
+        {
+          "ea": "0x4b6041",
+          "what": "槽号上界（无符号比较）"
+        },
+        {
+          "ea": "0x4b6093",
+          "what": "槽号非法的错误串"
+        },
+        {
+          "ea": "0x4b608b",
+          "what": "槽未装载的错误串"
+        },
+        {
+          "ea": "0x4b6026",
+          "what": "静默门③：播放闸格非 0"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-FADE-TARGET-B7",
+      "functions": [
+        "sub_420C00",
+        "sub_489E50",
+        "sub_489F80"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x420c00",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x420c10",
+          "what": "宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x420c1b",
+          "what": "探状态字第 9 位（0x200）"
+        },
+        {
+          "ea": "0x420c28",
+          "what": "清第 9 位"
+        },
+        {
+          "ea": "0x420c3b",
+          "what": "把渐变进度冲到满"
+        },
+        {
+          "ea": "0x420c46",
+          "what": "读目标值"
+        },
+        {
+          "ea": "0x420c52",
+          "what": "设定渐变"
+        },
+        {
+          "ea": "0x489f89",
+          "what": "目标值 ← 操作数"
+        },
+        {
+          "ea": "0x489f93",
+          "what": "渐变开启 ← 1"
+        },
+        {
+          "ea": "0x489fa4",
+          "what": "两端值 ← 10000"
+        },
+        {
+          "ea": "0x489fb0",
+          "what": "另一格 ← 0"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-AUDIO-FADE-STOP-B8",
+      "functions": [
+        "sub_419720",
+        "sub_489B50"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x419720",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x419730",
+          "what": "宽度槽写 1（无操作数）"
+        },
+        {
+          "ea": "0x41973b",
+          "what": "探状态字第 9 位（0x200）"
+        },
+        {
+          "ea": "0x419748",
+          "what": "清第 9 位"
+        },
+        {
+          "ea": "0x41975b",
+          "what": "把渐变进度冲到满"
+        },
+        {
+          "ea": "0x419767",
+          "what": "尾调用：关闭渐变"
+        },
+        {
+          "ea": "0x489b52",
+          "what": "渐变开启 ← 0"
+        },
+        {
+          "ea": "0x489b58",
+          "what": "另一格 ← 0"
+        }
+      ],
+      "evidence": [
+        "guard:tools/test/spec-ops-000-sites.assets.test.mjs#★ 新增 opcode 条目的站点 EA 都在 .lst 指令行首"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-SLOT-TIMER",
+      "functions": [
+        "sub_426990",
+        "sub_4269F0",
+        "sub_409400",
+        "sub_404F80"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x426990",
+          "what": "0x300 handler 起点"
+        },
+        {
+          "ea": "0x4269a1",
+          "what": "0x300 宽度槽写 7（argc 3）"
+        },
+        {
+          "ea": "0x4269b0",
+          "what": "读槽下标"
+        },
+        {
+          "ea": "0x4269bb",
+          "what": "读状态值"
+        },
+        {
+          "ea": "0x4269d3",
+          "what": "写状态位（保留第 16 位）"
+        },
+        {
+          "ea": "0x4269da",
+          "what": "读期限"
+        },
+        {
+          "ea": "0x4269df",
+          "what": "写期限"
+        },
+        {
+          "ea": "0x4269f0",
+          "what": "0x301 handler 起点"
+        },
+        {
+          "ea": "0x426a00",
+          "what": "0x301 宽度槽写 3（argc 1）"
+        },
+        {
+          "ea": "0x426a0f",
+          "what": "读槽下标"
+        },
+        {
+          "ea": "0x426a1b",
+          "what": "起点时刻 ← 0"
+        },
+        {
+          "ea": "0x426a26",
+          "what": "释放该槽的字体资源"
+        },
+        {
+          "ea": "0x409421",
+          "what": "服务循环起点（槽 1..9）"
+        },
+        {
+          "ea": "0x40942e",
+          "what": "判状态位第 0 位"
+        },
+        {
+          "ea": "0x409432",
+          "what": "置第 16 位"
+        },
+        {
+          "ea": "0x409439",
+          "what": "参数格为 0 ⇒ 只等空闲"
+        },
+        {
+          "ea": "0x409480",
+          "what": "起点为 0 ⇒ 起点 ← 现在"
+        },
+        {
+          "ea": "0x409489",
+          "what": "比较 现在 − 起点 与期限"
+        },
+        {
+          "ea": "0x409495",
+          "what": "起点 ← 0"
+        },
+        {
+          "ea": "0x40949c",
+          "what": "按期限释放该槽"
+        },
+        {
+          "ea": "0x4094a3",
+          "what": "第 0 位未置分支：判第 16 位"
+        },
+        {
+          "ea": "0x4094c2",
+          "what": "等空闲后清状态位"
+        },
+        {
+          "ea": "0x4094c4",
+          "what": "清期限"
+        },
+        {
+          "ea": "0x4094c7",
+          "what": "清起点"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
     }
   ]
 }

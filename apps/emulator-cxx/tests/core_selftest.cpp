@@ -1356,6 +1356,39 @@ bool check_second_batch(const core::OpcodeTable& table) {
         }
     }
     {
+        // 0x194：把"op2 与 op3 的字符串形式**逐字节相等**"归一成 1 / 0（读序 3 → 2）。
+        auto run = [&](const std::string& lhs, const std::string& rhs) -> std::int32_t {
+            auto script = make_script_with_body();
+            emit_instruction(script, 0x194, {{9, 0}, {5, 0}, {5, 1}});
+            emit_instruction(script, 2, {});
+            core::Machine machine(0x12345678u, table);
+            machine.load_root(script);
+            machine.write_text(core::Operand{5, 0}, lhs);
+            machine.write_text(core::Operand{5, 1}, rhs);
+            machine.step();
+            return machine.local_int(0);
+        };
+        if (run("abc", "abc") != 1 || run("abc", "abd") != 0 || run("", "") != 1) {
+            std::fprintf(stderr, "0x194 字符串相等 = %d/%d/%d（期望 1/0/1）\n", run("abc", "abc"),
+                         run("abc", "abd"), run("", ""));
+            return false;
+        }
+        // 整数标签走同一个"格式化成字符串"的读法：type 0 的 5 与文本 "5" 相等。
+        {
+            auto script = make_script_with_body();
+            emit_instruction(script, 0x194, {{9, 0}, {0, 5}, {5, 1}});
+            emit_instruction(script, 2, {});
+            core::Machine machine(0x12345678u, table);
+            machine.load_root(script);
+            machine.write_text(core::Operand{5, 1}, "5");
+            machine.step();
+            if (machine.local_int(0) != 1) {
+                std::fprintf(stderr, "0x194 整数 5 与文本 \"5\" 应相等（实际 %d）\n", machine.local_int(0));
+                return false;
+            }
+        }
+    }
+    {
         // 0x300：`A[idx] = op2 | (A[idx] & 0x10000)`（bit16 粘住）+ `B[idx] = op3`；下标不检查范围。
         auto script = make_script_with_body();
         emit_instruction(script, 0x300, {{0, 2}, {0, 0x10001}, {0, 1000}});

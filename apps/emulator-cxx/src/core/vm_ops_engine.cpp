@@ -182,7 +182,7 @@ void Machine::op_1b9(const Instruction& instruction) {
 
 void Machine::op_1ba(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 声道开关（0x1BA / `sub_421200`；★ 本版**尚无规范条目**，见 spec 的未成篇 gap）：声道 **1..4**（1 基，与音量 0xC6 的
+    // 声道开关（0x1BA / `sub_421200`；规则 `CORE-OPS-AUDIO-MODE-SET`）：声道 **1..4**（1 基，与音量 0xC6 的
     // 0..4 **不同**）⇒ 音乐 / 音效 / 语音 / 影片四个命名键。四条支的语义**互不相同**：
     //   1 音乐：**符号阶梯**（键值 < 0 视为"关"）：开 ⇒ +3、关 ⇒ −3；**已在同侧 ⇒ 什么都不做**。
     //   2 音效 / 3 语音：判**引擎开关格**是否已与请求同态 ⇒ 同态就 no-op（含"不发停通道请求"）；

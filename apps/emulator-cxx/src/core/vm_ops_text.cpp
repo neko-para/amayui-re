@@ -92,6 +92,18 @@ void Machine::op_192(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_194(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 字符串相等（0x194 / `sub_42CF10`，argc 3、推进 7；规则 `CORE-OPS-TEXT-EQUAL-194`）：
+    // 读序 **op3 → op2**（读序是合同），两者都按"格式化成字符串"的读法（整数标签 ⇒ 十进制文本，
+    // 文本标签 ⇒ 原文本）。把"两串**逐字节相等**"归一成 1 / 0 写进 op1。
+    // ★ 无早退、不记日志、不发请求；两条读都在写之前（任一条类型非法 ⇒ 抛且不写）。
+    const std::string right = read_text(ops[2]);
+    const std::string left = read_text(ops[1]);
+    write_int(ops[0], left == right ? 1 : 0);
+    return;
+}
+
 void Machine::op_1a9(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // save-string：把源文本写进脚本字符串键

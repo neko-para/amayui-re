@@ -45,6 +45,8 @@ const RULES = [
   'CORE-OPS-SCALAR-FLOAT-ARITH',
   'CORE-OPS-CG-SET',
   'CORE-OPS-SCENE-CG-NUMBER-23B',
+  'CORE-OPS-L2D-LOAD',
+  'CORE-OPS-L2D-MARK',
 ];
 
 /** `.lst` 里“EA → [{段, 该行剩余文本}]” */

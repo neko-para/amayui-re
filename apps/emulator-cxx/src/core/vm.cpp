@@ -243,6 +243,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x76: case 0x77: op_76(instruction); return;
         case 0x2BD: op_2bd(instruction); return;
         case 0x2DE: op_2de(instruction); return;
+        case 0x194: op_194(instruction); return;
         case 0x192: op_192(instruction); return;
         case 0x19B: op_19b(instruction); return;
         case 0x19C: op_19c(instruction); return;
