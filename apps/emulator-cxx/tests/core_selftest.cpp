@@ -1386,26 +1386,31 @@ bool check_second_batch(const core::OpcodeTable& table) {
     {
         // 0x1D2 / 0x1D3：入队 → 按 key 查回；未命中写 0/0（不是 −1）；门关时整条跳过。
         auto script = make_script_with_body();
-        emit_instruction(script, 0x1D2, {{0, 3}, {0, 7}});      // key=3, value=7
-        emit_instruction(script, 0x1D3, {{9, 1}, {9, 2}, {0, 0}, {9, 0}, {0, 3}});  // 命中
+        emit_instruction(script, 0x1D2, {{0, 3}, {0, 7}});      // key=3, value=7（同组第一条）
+        emit_instruction(script, 0x1D2, {{0, 3}, {0, 9}});      // key=3, value=9（同组第二条，位 0 = 0）
+        emit_instruction(script, 0x1D3, {{9, 1}, {9, 2}, {0, 0}, {9, 0}, {0, 3}});  // 命中：取**最后一条** ⇒ 9
         emit_instruction(script, 0x1D3, {{9, 3}, {9, 4}, {0, 0}, {9, 0}, {0, 9}});  // 未命中
         emit_instruction(script, 0x1BB, {{0, 0}});              // 关门
         emit_instruction(script, 0x1D2, {{0, 4}, {0, 8}});      // 被守卫跳过
         emit_instruction(script, 2, {});
         core::Machine machine(0x12345678u, table);
         machine.load_root(script);
-        for (int i = 0; i < 5; ++i) {
-            if (!machine.step()) return false;
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "0x1D2/0x1D3 夹具提前停机（第 %d 步）\n", i + 1);
+                return false;
+            }
         }
-        if (machine.local_int(1) != 1 || machine.local_int(2) != 7) {
-            std::fprintf(stderr, "0x1D3 命中 = %d/%d（期望 1/7）\n", machine.local_int(1), machine.local_int(2));
+        if (machine.local_int(1) != 1 || machine.local_int(2) != 9) {
+            std::fprintf(stderr, "0x1D3 命中 = %d/%d（期望 1/9 ⇒ 同组取最后一条）\n",
+                         machine.local_int(1), machine.local_int(2));
             return false;
         }
         if (machine.local_int(3) != 0 || machine.local_int(4) != 0) {
             std::fprintf(stderr, "0x1D3 未命中 = %d/%d（期望 0/0）\n", machine.local_int(3), machine.local_int(4));
             return false;
         }
-        if (machine.font_entries().size() != 1) {
+        if (machine.font_entries().size() != 2) {
             std::fprintf(stderr, "0x1D2 门关时仍入队（%zu 条）\n", machine.font_entries().size());
             return false;
         }
@@ -3113,6 +3118,33 @@ bool check_gate_split_branches(const core::OpcodeTable& table) {
         if (machine.state_flags() != kMovieGateBit) return fail("0xc2 A 支改了门字的其它位");
     }
 
+    // ③ `0xc2` B 支（第 27 位未置）：读配置定混音方式、置第 9 位、由 op2 算间隔 / 步长、目标 ← op1、进度清 0。
+    {
+        core::Machine fade(0x12345678u, table);
+        fade.config_mut().set_int("set:TransferMusicVolume", 2);
+        fade.dispatch_for_test(core::Instruction{0, 0xC2, {{0, 6400}, {0, 500}}});
+        if (!fade.bgm_fade_active()) return fail("0xc2 B 支没有置第 9 位（不进淡变状态）");
+        if (fade.bgm_fade_mix_mode() != 2) return fail("0xc2 B 支没有读混音配置 set:TransferMusicVolume");
+        if (fade.bgm_fade_interval_ms() != 50) return fail("0xc2 B 支间隔算错（500 ⇒ 50ms）");
+        if (fade.bgm_fade_step() != 10) return fail("0xc2 B 支步长算错（< 1000 ⇒ 10）");
+        if (fade.bgm_fade_target() != 6400) return fail("0xc2 B 支没有把 op1 写进目标值");
+        if (fade.bgm_fade_progress() != 0) return fail("0xc2 B 支没有把进度清 0");
+        if (fade.bgm_fade_requests() != 1) return fail("0xc2 B 支没有记一次淡变请求");
+        // 大值分支：≥ 1000 时按 /100、步长 = 1；边界 999 / 1000 各一次。
+        fade.dispatch_for_test(core::Instruction{0, 0xC2, {{0, 1}, {0, 1500}}});
+        if (fade.bgm_fade_interval_ms() != 15 || fade.bgm_fade_step() != 1) {
+            return fail("0xc2 B 支大值分支算错（1500 ⇒ 15ms / 步长 1）");
+        }
+        fade.dispatch_for_test(core::Instruction{0, 0xC2, {{0, 1}, {0, 999}}});
+        if (fade.bgm_fade_interval_ms() != 99 || fade.bgm_fade_step() != 10) {
+            return fail("0xc2 B 支边界 999 算错（应为 99ms / 步长 10）");
+        }
+        fade.dispatch_for_test(core::Instruction{0, 0xC2, {{0, 1}, {0, 1000}}});
+        if (fade.bgm_fade_interval_ms() != 10 || fade.bgm_fade_step() != 1) {
+            return fail("0xc2 B 支边界 1000 算错（应为 10ms / 步长 1）");
+        }
+    }
+
     // ② `0xc4` 影片门支（第 27 位 = 1）：只把 op1 写进镜像格、**不发装载 / 播放请求**、
     //    但**仍然追加文本记录**、并且照样压低 BGM。
     {
@@ -3168,6 +3200,229 @@ bool check_font_branches(const core::OpcodeTable& table) {
         if (machine.glyph_height() != 20) {
             return fail("0x197 把 0x204 用的 A 支字号改掉了（配置界面的帮助文字会因此变小）");
         }
+    }
+    return true;
+}
+
+// ── 渲染原语：数值文本 `0x205` 与清屏 `0x20e` ──
+/** 判据是**整张纹理逐字节相等**：0x205 的输出必须与"把期望串用 0x204 画在同一位置"完全相同
+ *  （像素 + 宽度 + 高度），因此格式化结果、横向落点与纵向对位**一起**被钉住。
+ *  正向控制：参照串必须真的出墨；字体缺失 / 后端不可用时**当场红**（⛔ 不把"两边都失败"当成通过）。
+ *  `0x20e`：清的是**当前渲染目标**（`0x20d` 写）。目标是纹理槽 ⇒ 该纹理表面变透明黑且内容版本 +1；
+ *  非目标纹理不动；目标是后缓冲（-1）⇒ 模型里没有可写表面（宿主限制，见 SCOPE）。
+ *  门控支（虚拟全屏类型 = 1 → 槽 38）**未建模**（模型没有 VFS 格）。 */
+bool check_render_prims(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "render-prims: %s\n", what);
+        return false;
+    };
+    struct Run {
+        std::size_t errors = 0;
+        core::StopReason reason = core::StopReason::Halted;
+        std::map<std::uint32_t, core::Bytes> pixels;
+        std::map<std::uint32_t, std::uint32_t> revisions;
+        bool dirty = false;
+        std::int32_t target = -1;
+        std::size_t count = 0;
+    };
+    const auto run_script = [&](std::vector<std::uint8_t> script) {
+        Run run;
+        core::Machine machine(key, table);
+        machine.load_root(script);
+        const auto result = machine.run(32);
+        run.errors = machine.errors().size();
+        run.reason = result.reason;
+        run.dirty = machine.scene_dirty();
+        run.target = machine.render_target();
+        run.count = machine.texture_count();
+        for (const auto& entry : machine.textures()) {
+            run.pixels[entry.first] = entry.second.rgba;
+            run.revisions[entry.first] = entry.second.revision;
+        }
+        return run;
+    };
+    const auto bytes_of = [](const Run& run, std::uint32_t id) {
+        const auto it = run.pixels.find(id);
+        return it == run.pixels.end() ? core::Bytes{} : it->second;
+    };
+    const auto has_ink = [](const core::Bytes& pixels) {
+        for (std::size_t i = 3; i < pixels.size(); i += 4) {
+            if (pixels[i] != 0) return true;
+        }
+        return false;
+    };
+    const auto same = [](const Run& a, const Run& b) {
+        return a.errors == b.errors && a.pixels == b.pixels;
+    };
+    // 0x205 的操作数：op1 纹理槽 / op2 字段原点 / op3 y / op4 值 / op5 格数 / op6 格式位。
+    const auto draw_205 = [&](std::uint32_t cell, std::uint32_t slot, std::uint32_t anchor_x,
+                              std::uint32_t value, std::uint32_t cells, std::uint32_t flags) {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1F8, {{0, 1}, {0, 160}, {0, 64}, {0, 0}});
+        emit_instruction(script, 0x75, {{0, cell}});
+        emit_instruction(script, 0x205,
+                         {{0, slot}, {0, anchor_x}, {0, 10}, {0, value}, {0, cells}, {0, flags}});
+        emit_instruction(script, 2, {});
+        return run_script(script);
+    };
+    // 参照实现：把期望串用 `0x204` 画在同一张画布的 (x, 10)。
+    const auto draw_text = [&](std::uint32_t cell, std::uint32_t x, const std::string& text) {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1F8, {{0, 1}, {0, 160}, {0, 64}, {0, 0}});
+        emit_instruction(script, 0x75, {{0, cell}});
+        emit_text_204(script, 1, x, 10, text);
+        emit_instruction(script, 2, {});
+        return run_script(script);
+    };
+
+    if (core::text_backend_available()) {
+        // ⓪ 正向控制：参照串必须真出墨。字体缺失时 0x205 与 0x204 会"同样失败" ⇒ 不加这条就会静默绿。
+        const Run control = draw_text(20, 20, "45");
+        if (control.errors != 0 || !has_ink(bytes_of(control, 1))) {
+            return fail("文本后端没出墨（字体缺失？）⇒ 本守卫无法判定，⛔ 不把两边都失败当成通过");
+        }
+        const auto expect = [&](const Run& actual, const Run& expected, const char* what) {
+            if (!same(actual, expected)) {
+                std::fprintf(stderr, "render-prims: %s\n", what);
+                return false;
+            }
+            return true;
+        };
+        // ① 无格数且无符号位 ⇒ 空串：不画、不报错（⛔ 不是把 0 画出来）
+        const Run blank = draw_205(20, 1, 0, 1234, 0, 0);
+        if (has_ink(bytes_of(blank, 1)) || blank.errors != 0 || blank.reason != core::StopReason::Halted) {
+            return fail("0x205 无格数且无符号位时不该画（cells=0 是空串，不是 '0'）");
+        }
+        // ② 放不下 ⇒ 只画低位数字（⛔ 不是 '#'）
+        if (!expect(draw_205(20, 1, 0, 12345, 2, 0x10000), draw_text(20, 0, "45"),
+                    "0x205 放不下时应当只画低位数字（2 格 12345 ⇒ \"45\"）")) return false;
+        // ③ 三个对齐档：右齐（缺省）/ 居中（0x2）/ 左齐（0x4）；4 格 7 ⇒ 未用 3 个半角格
+        if (!expect(draw_205(20, 1, 0, 7, 4, 0x10000), draw_text(20, 30, "7"),
+                    "0x205 右齐：4 格 1 位应落在最右")) return false;
+        if (!expect(draw_205(20, 1, 0, 7, 4, 0x10000 | 0x2), draw_text(20, 15, "7"),
+                    "0x205 居中：0x2 应把 1 位放到 ⌊3×20÷4⌋ = 15")) return false;
+        if (!expect(draw_205(20, 1, 0, 7, 4, 0x10000 | 0x4), draw_text(20, 0, "7"),
+                    "0x205 左齐：0x4 应把 1 位放到 0")) return false;
+        if (!expect(draw_205(20, 1, 0, 7, 4, 0x10000 | 0x2 | 0x4), draw_text(20, 15, "7"),
+                    "0x205 0x2 与 0x4 同时置位时应按居中（0x2 优先）")) return false;
+        // ④ 右齐 + 两位：3 格 99 ⇒ 未用 1 格（x = 10）
+        if (!expect(draw_205(20, 1, 0, 99, 3, 0x10000), draw_text(20, 10, "99"),
+                    "0x205 右齐没有按未用格数左移（3 格 99 应从第 2 格起）")) return false;
+        // ⑤ `#` 的唯一入口：有符号且格数 < 2（0 与 1 都试；含格数为 0 的 clamp）
+        if (!expect(draw_205(20, 1, 0, 7, 1, 0x10000 | 0x8), draw_text(20, 0, "#"),
+                    "0x205 有符号且格数 = 1 时应画单个 '#'")) return false;
+        if (!expect(draw_205(20, 1, 0, 7, 0, 0x10000 | 0x8), draw_text(20, 0, "#"),
+                    "0x205 有符号且格数 = 0 时应画单个 '#'（第一格序号夹到 0）")) return false;
+        const Run negative_cells = draw_205(20, 1, 0, 7, static_cast<std::uint32_t>(-1), 0x10000);
+        if (has_ink(bytes_of(negative_cells, 1)) || negative_cells.errors != 0) {
+            return fail("0x205 无符号且格数为负时应是空串（不画、不报错）");
+        }
+        // ⑥ 前导零：补满可用格（3 格 7 ⇒ "007"）；不补 ⇒ "7" 落在右端
+        if (!expect(draw_205(20, 1, 0, 7, 3, 0x10000 | 0x1), draw_text(20, 0, "007"),
+                    "0x205 的 0x1（补前导 0）没有补满字段")) return false;
+        // ⑦ 符号：0x8 只对正数、0x10/0x20 只对零（0x10 优先）、负值一律 '-'
+        if (!expect(draw_205(20, 1, 0, 5, 3, 0x10000 | 0x8), draw_text(20, 10, "+5"),
+                    "0x205 的 0x8（正数带正号）没有画出 '+'")) return false;
+        if (!expect(draw_205(20, 1, 0, static_cast<std::uint32_t>(-5), 3, 0x10000 | 0x8),
+                    draw_text(20, 10, "-5"), "0x205 负值即使置 0x8 也应当是 '-'")) return false;
+        if (!expect(draw_205(20, 1, 0, 0, 2, 0x10000 | 0x10), draw_text(20, 0, "+0"),
+                    "0x205 的 0x10（零带正号）没有画出 '+'")) return false;
+        if (!expect(draw_205(20, 1, 0, 0, 2, 0x10000 | 0x20), draw_text(20, 0, "-0"),
+                    "0x205 的 0x20（零带负号）没有画出 '-'")) return false;
+        if (!expect(draw_205(20, 1, 0, 0, 2, 0x10000 | 0x10 | 0x20), draw_text(20, 0, "+0"),
+                    "0x205 的 0x10 与 0x20 同时置位时应是 '+'（0x10 优先）")) return false;
+        if (!expect(draw_205(20, 1, 0, 5, 3, 0x10000 | 0x10), draw_text(20, 20, "5"),
+                    "0x205 的 0x10 不应对非零值生效")) return false;
+        if (!expect(draw_205(20, 1, 0, 5, 3, 0x10000 | 0x20), draw_text(20, 20, "5"),
+                    "0x205 的 0x20 不应对非零值生效")) return false;
+        // ⑧ 负值：符号占一格、数字按可用格截断；有符号也能补零
+        if (!expect(draw_205(20, 1, 0, static_cast<std::uint32_t>(-1234), 3, 0x10000),
+                    draw_text(20, 0, "-34"), "0x205 负值的格式 / 截断不对（3 格 −1234 ⇒ \"-34\"）")) return false;
+        if (!expect(draw_205(20, 1, 0, static_cast<std::uint32_t>(-5), 3, 0x10000 | 0x1),
+                    draw_text(20, 0, "-05"), "0x205 有符号 + 0x1 应当补成 \"-05\"")) return false;
+        // ⑨ 全角 / 半角：缺省全角（数字与符号都有固定映射），0x10000 才是 ASCII
+        if (!expect(draw_205(20, 1, 0, 77, 4, 0), draw_text(20, 40, "\x82\x56\x82\x56"),
+                    "0x205 缺省应当扩成全角 S-JIS（4 格 77 ⇒「７７」从第 3 格起）")) return false;
+        if (!expect(draw_205(20, 1, 0, 0, 2, 0x10), draw_text(20, 0, "\x81\x7B\x82\x4F"),
+                    "0x205 全角的正号 / 数字映射不对（应 0x817B + 0x824F）")) return false;
+        if (!expect(draw_205(20, 1, 0, 7, 1, 0x8), draw_text(20, 0, "\x81\x94"),
+                    "0x205 全角的 '#' 应映射到 0x8194")) return false;
+        // ⑩ 奇数格宽：引擎先乘后除（先除半格会差 1px）
+        if (!expect(draw_205(15, 1, 0, 77, 4, 0x10000), draw_text(15, 15, "77"),
+                    "0x205 奇数格宽右齐：应 ⌊2×15÷2⌋ = 15（不是 14）")) return false;
+        if (!expect(draw_205(15, 1, 0, 7, 4, 0x10000 | 0x2), draw_text(15, 11, "7"),
+                    "0x205 奇数格宽居中：应 ⌊3×15÷4⌋ = 11（不是 10）")) return false;
+        // ⑪ 槽里没有可用表面 ⇒ 静默跳过（三条入口条件之一）
+        const Run missing = draw_205(20, 99, 0, 1234, 4, 0);
+        if (missing.errors != 0 || missing.reason != core::StopReason::Halted) {
+            return fail("0x205 槽不存在时应当静默跳过（不报错）");
+        }
+        // ⑫ 不置脏 / 不改当前渲染目标 / 不改纹理槽表（与参照逐项比）
+        const Run normal = draw_205(20, 1, 0, 99, 3, 0x10000);
+        const Run reference = draw_text(20, 10, "99");
+        if (normal.dirty != reference.dirty || normal.target != reference.target ||
+            normal.count != reference.count) {
+            return fail("0x205 改了参照不会改的状态（脏标记 / 当前渲染目标 / 纹理槽表）");
+        }
+    }
+
+    // ⑬ 0x20e：清**当前渲染目标**。目标是纹理槽 ⇒ 该表面变透明黑、内容版本 +1；非目标纹理不动；
+    //    目标是后缓冲（-1）⇒ 模型没有可写表面（宿主限制）。
+    {
+        const auto fill_one = [&](std::vector<std::uint8_t>& script, std::uint32_t id) {
+            emit_instruction(script, 0x1F8, {{0, id}, {0, 32}, {0, 16}, {0, 0}});
+            emit_instruction(script, 0x20B,
+                             {{0, id}, {0, 0}, {0, 0}, {0, 32}, {0, 16}, {0, 255}, {0, 0x00FF00FFu}});
+        };
+        auto single = make_script_with_body();
+        fill_one(single, 1);
+        auto filled = single;
+        emit_instruction(filled, 2, {});
+        const Run before = run_script(filled);
+        if (!has_ink(bytes_of(before, 1))) return fail("0x20E 夹具的前置填充没落地");
+
+        auto cleared = single;
+        emit_instruction(cleared, 0x20D, {{0, 1}});
+        emit_instruction(cleared, 0x20E, {});
+        emit_instruction(cleared, 2, {});
+        const Run after = run_script(cleared);
+        if (after.errors != 0) return fail("0x20E 报错");
+        if (has_ink(bytes_of(after, 1))) return fail("0x20E 没有把当前渲染目标（纹理 1）清成透明黑");
+        if (after.target != 1) return fail("0x20E 改变了当前渲染目标");
+        if (after.count != before.count) return fail("0x20E 动了纹理槽表");
+        const auto revision = after.revisions.find(1);
+        if (revision == after.revisions.end() || revision->second <= before.revisions.at(1)) {
+            return fail("0x20E 清了纹理却没有换内容版本（宿主不会重传）");
+        }
+
+        // 非目标纹理不动：两张都填色、目标是 1
+        auto two = make_script_with_body();
+        fill_one(two, 1);
+        fill_one(two, 2);
+        auto two_before = two;
+        emit_instruction(two_before, 2, {});
+        const Run kept_before = run_script(two_before);
+        auto two_after = two;
+        emit_instruction(two_after, 0x20D, {{0, 1}});
+        emit_instruction(two_after, 0x20E, {});
+        emit_instruction(two_after, 2, {});
+        const Run kept = run_script(two_after);
+        if (bytes_of(kept, 2) != bytes_of(kept_before, 2)) {
+            return fail("0x20E 清了非目标纹理（⛔ 不是清纹理表）");
+        }
+        if (has_ink(bytes_of(kept, 1))) return fail("0x20E 没清目标纹理（双纹理夹具）");
+
+        // 目标是后缓冲（缺省 -1）⇒ 纹理原样、不报错、目标还是 -1
+        auto buffered = single;
+        emit_instruction(buffered, 0x20E, {});
+        emit_instruction(buffered, 2, {});
+        const Run untouched = run_script(buffered);
+        if (untouched.errors != 0) return fail("0x20E（后缓冲目标）报了错");
+        if (bytes_of(untouched, 1) != bytes_of(before, 1)) {
+            return fail("0x20E 在后缓冲目标下改了纹理");
+        }
+        if (untouched.target != -1) return fail("0x20E 把当前渲染目标从后缓冲改掉了");
     }
     return true;
 }
@@ -3299,6 +3554,7 @@ bool check_text_drain(const core::OpcodeTable& table) {
     emit_instruction(bytes, 0x75, {{0, 20}});
     emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
     emit_instruction(bytes, 0x78, {{0, 0}});
+    emit_instruction(bytes, 0x74, {{0, 5}});  // 每字间隔 5ms（自检 ConfigStore 没有发行默认表 ⇒ 不设就是 0）
     emit_instruction(bytes, 0x71, {{0, 9}});
     emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});  // "ABC"
     emit_instruction(bytes, 0x75, {{0, 20}});
@@ -3326,7 +3582,181 @@ bool check_text_drain(const core::OpcodeTable& table) {
     if (machine.pending_glyph_count() != 0) {
         return fail("报了有输入却没有抽干（剩余格仍非 0）");
     }
+    if (machine.text_typing()) return fail("抽干之后第 29 位没有清（引擎 `0x40953c`）");
     machine.set_input_pressed(false);
+    return true;
+}
+
+// ── 打字节流：按**每字间隔毫秒**推进，每帧最多一格（未到期的帧一格都不画） ──
+/** 引擎 `sub_409400` / `sub_453b60`：`elapsed <= n × interval` ⇒ **整个函数返回**（本帧一格都不画），
+ *  超过才推进一格并把 n 推到 ⌊elapsed/interval⌋+1。启动 = `sub_453a60`（间隔 = `Font+0x560`）。
+ *  ★ 这条区分两套模型：旧实现"每帧一格"在间隔 100ms 时也会每帧画一个字；引擎是**按毫秒**的。
+ *  ★ 间隔 = 0 ⇒ 追加时直接走"立即抽干"（不置第 29 位、队列当步清空）。 */
+bool check_text_pacing(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "pacing: %s\n", what);
+        return false;
+    };
+    const auto build = [&](std::int32_t speed) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 190600}, {0, 40}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+        emit_instruction(bytes, 0x78, {{0, 0}});
+        emit_instruction(bytes, 0x74, {{0, static_cast<std::uint32_t>(speed)}});
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});  // "ABC"
+        // 追加之后给足"帧"：`0x1a8` 是无副作用的空转指令（每步一条）。
+        for (int i = 0; i < 80; ++i) emit_instruction(bytes, 0x1A8, {});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    const auto ink = [](core::Machine& machine) {
+        const core::TextureRecord* texture = machine.texture(core::Machine::text_layer_texture_id(9));
+        if (texture == nullptr) return std::size_t{0};
+        std::size_t count = 0;
+        for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+            if (texture->rgba[i] != 0) ++count;
+        }
+        return count;
+    };
+    // ① 间隔 100ms：追加后进打字态；前 5 帧（80ms）一格都不画；跨过 100ms 才画一格。
+    {
+        core::Machine machine(key, table);
+        machine.write_text(core::Operand{5, 0}, "ABC");
+        machine.load_root(build(100));
+        for (int i = 0; i < 10; ++i) {
+            if (!machine.step()) return fail("走到 0x6e 之前停机");
+        }
+        if (machine.pending_glyph_count() != 3) return fail("追加之后待画格数不是 3");
+        if (!machine.text_typing()) return fail("间隔 > 0 时追加后应当置第 29 位（打字中）");
+        if (machine.text_timer_interval_ms() != 100) return fail("计时器间隔不是 MessageSpeed");
+        for (int i = 0; i < 5; ++i) {
+            if (!machine.step()) return fail("节流期停机");
+            if (machine.pending_glyph_count() != 3) {
+                return fail("未到 100ms 的帧画了字（把「每 D 毫秒一格」实现成「每帧一格」）");
+            }
+        }
+        int drew = -1;
+        for (int i = 0; i < 5 && drew < 0; ++i) {
+            if (!machine.step()) return fail("跨过间隔时停机");
+            if (machine.pending_glyph_count() == 2) drew = i;
+        }
+        if (drew < 0) return fail("跨过 100ms 仍一格都没画（计时器没有到期分支）");
+        if (ink(machine) == 0) return fail("到期那一帧没有真的落字");
+        int guard = 0;
+        while (machine.text_typing() && guard < 200) {
+            if (!machine.step()) break;
+            ++guard;
+        }
+        if (machine.text_typing()) return fail("末格画完之后第 29 位没有自清");
+        if (machine.pending_glyph_count() != 0) return fail("清掉第 29 位时还有待画格");
+    }
+    // ② 间隔 = 0：追加当步走"立即抽干"——不置第 29 位、队列为空、字已经全画出来。
+    {
+        core::Machine machine(key, table);
+        machine.write_text(core::Operand{5, 0}, "ABC");
+        machine.load_root(build(0));
+        for (int i = 0; i < 10; ++i) {
+            if (!machine.step()) return fail("间隔 = 0 时在 0x6e 之前停机");
+        }
+        if (machine.text_typing()) return fail("间隔 = 0 时不该置第 29 位（应当立即抽干）");
+        if (machine.pending_glyph_count() != 0) return fail("间隔 = 0 时没有同帧抽干");
+        if (ink(machine) == 0) return fail("间隔 = 0 时字没有画出来");
+    }
+    return true;
+}
+
+// ── 文本记录标志位 2：**B 支字号**的置位者与消费口径 ──
+/** 引擎：位 2 不是共用追加器置的，而是**两个调用方**在 flags 实参上置起（振り仮名 run / 层模式 = 1 的逐字支）；
+ *  消费者按它选 B 支（`0x197`）或 A 支（`0x75`）。这条守三件：
+ *   ① 主线正文 run 的记录**位 2 = 0**；② 振り仮名 run 追加的记录**位 2 置起**；
+ *   ③ 字号支只有一处口径（`record_font_size`）：位 2 ⇒ B 支高度，否则 A 支；待画格也按它取字号。
+ *  另守"文本目标 id 的位 31 置起 ⇒ 一条记录都不追加"（`0x1bb` 写 0x80000000）。 */
+bool check_text_record_flags(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "record-flags: %s\n", what);
+        return false;
+    };
+    const auto build = [&](bool suppress_gate) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 400}, {0, 120}, {0, 108}, {0, 52}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 108}, {0, 52}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 180700}, {0, 40}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x197, {{0, 10}});
+        emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+        if (suppress_gate) emit_instruction(bytes, 0x1BB, {{0, 0}});  // 0x80000000 ⇒ 抑制整批记录
+        emit_instruction(bytes, 0x74, {{0, 100}});  // 打字中：待画格留在队列里
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x196, {{0, 0}, {5, 0}, {5, 1}});
+        for (int i = 0; i < 20; ++i) emit_instruction(bytes, 0x1A8, {});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    // ① 主文本 + 振り仮名：两条记录，位 2 只在振り仮名那条上。
+    {
+        auto bytes = build(false);
+        core::Machine machine(key, table);
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.write_text(core::Operand{5, 1}, "\x82\xA9\x82\xAB");  // かき
+        machine.load_root(bytes);
+        for (int i = 0; i < 40 && machine.pending_glyph_count() == 0; ++i) {
+            if (!machine.step()) return fail("走到 0x196 之前停机");
+        }
+        if (machine.text_span_count() != 2) {
+            std::fprintf(stderr, "record-flags: count=%zu\n", machine.text_span_count());
+            return fail("主文本 + 振り仮名应当各追加一条文本记录");
+        }
+        if ((machine.text_span_flags(0) & 4) != 0) return fail("主线正文记录置了位 2（只有振り仮名 / 层模式支该置）");
+        if (machine.text_span_text(0) != "AB") return fail("主线记录的文本不是主文本");
+        if ((machine.text_span_flags(1) & 4) == 0) return fail("振り仮名记录没有置位 2（应当用 B 支字号）");
+        if (machine.text_span_text(1) != "\x82\xA9\x82\xAB") return fail("振り仮名记录的文本不对");
+        // ③ 字号支的唯一口径
+        if (machine.record_font_size(0) != 0) return fail("位 2 未置时字号覆盖应当是 0（沿用 A 支）");
+        if (machine.record_font_size(4) != 10) return fail("位 2 置起时字号覆盖应当是 B 支 = 10");
+        if (machine.record_font_size(8) != 0) return fail("行结束记录（位 3）不该被当成 B 支");
+        // 待画格：主文本的格 A 支（size = 0）、振り仮名的格 B 支（size = 10）
+        const std::size_t count = machine.pending_glyph_count();
+        if (count < 2) return fail("待画格太少（主文本或振り仮名没有入队）");
+        if (machine.pending_glyph_size(0) != 0 || machine.pending_glyph_size(1) != 0) {
+            return fail("主文本的待画格带了字号覆盖（A 支应当用缺省）");
+        }
+        for (std::size_t i = count; i-- > 2;) {
+            if (machine.pending_glyph_size(i) != 10) return fail("振り仮名的待画格没有按 B 支字号（10）入队");
+        }
+    }
+    // ② 振り仮名为空：只有主文本那一条记录，且位 2 = 0。
+    {
+        auto bytes = build(false);
+        core::Machine machine(key, table);
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.write_text(core::Operand{5, 1}, "");
+        machine.load_root(bytes);
+        for (int i = 0; i < 40 && machine.pending_glyph_count() == 0; ++i) {
+            if (!machine.step()) return fail("（空振り仮名）走到 0x196 之前停机");
+        }
+        if (machine.text_span_count() != 1) return fail("空振り仮名时不该追加振り仮名记录");
+        if ((machine.text_span_flags(0) & 4) != 0) return fail("空振り仮名时主线记录置了位 2");
+    }
+    // ③ 文本目标 id 的位 31 置起 ⇒ 整批记录都不追加（振り仮名那条也不追加）。
+    {
+        auto bytes = build(true);
+        core::Machine machine(key, table);
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.write_text(core::Operand{5, 1}, "\x82\xA9\x82\xAB");
+        machine.load_root(bytes);
+        for (int i = 0; i < 40 && machine.pending_glyph_count() == 0; ++i) {
+            if (!machine.step()) return fail("（抑制）走到 0x196 之前停机");
+        }
+        if (machine.text_span_count() != 0) return fail("文本目标 id 置了位 31 却仍追加了记录");
+    }
     return true;
 }
 
@@ -3438,6 +3868,7 @@ bool check_text_typewriter(const core::OpcodeTable& table) {
     emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
     emit_instruction(bytes, 0x77, {{0, 0x000000}});
     emit_instruction(bytes, 0x78, {{0, 0}});
+    emit_instruction(bytes, 0x74, {{0, 5}});  // 每字间隔 5ms（自检 ConfigStore 没有发行默认表 ⇒ 不设就是 0）
     emit_instruction(bytes, 0x71, {{0, 9}});
     emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});  // "ABC" ⇒ 三个待画格
     // 之后几条"帧"（用幂等的设字号当空转指令）：每步揭示一格。
@@ -3903,6 +4334,9 @@ int main(int argc, char** argv) {
     bool only_typewriter = false;
     bool only_ruby = false;
     bool only_drain = false;
+    bool only_render_prims = false;
+    bool only_pacing = false;
+    bool only_record_flags = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
@@ -3911,6 +4345,9 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-typewriter") == 0) only_typewriter = true;
         else if (std::strcmp(argv[i], "--only-ruby") == 0) only_ruby = true;
         else if (std::strcmp(argv[i], "--only-drain") == 0) only_drain = true;
+        else if (std::strcmp(argv[i], "--only-render-prims") == 0) only_render_prims = true;
+        else if (std::strcmp(argv[i], "--only-pacing") == 0) only_pacing = true;
+        else if (std::strcmp(argv[i], "--only-record-flags") == 0) only_record_flags = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -3975,6 +4412,24 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "opcode table load failed, using fixture rows: %s\n", e.what());
         }
 
+        if (only_record_flags) {
+            if (!check_text_record_flags(table)) return 1;
+            std::printf("core-selftest(record-flags): PASS\n");
+            return 0;
+        }
+        if (only_pacing) {
+            // 打字节流：每 D 毫秒一格、每帧最多一格；间隔 = 0 ⇒ 立即抽干。
+            if (!check_text_pacing(table)) return 1;
+        if (!check_text_record_flags(table)) return 1;
+            std::printf("core-selftest(pacing): PASS\n");
+            return 0;
+        }
+        if (only_render_prims) {
+            // 数值文本 `0x205` 与清屏 `0x20E`（交接单第 3 项的两个空档）。
+            if (!check_render_prims(table)) return 1;
+            std::printf("core-selftest(render-prims): PASS\n");
+            return 0;
+        }
         if (only_font) {
             // 两套字号（`0x75` = A 支 / `0x197` = B 支）+ 选支的行为级断言。
             if (!check_font_branches(table)) return 1;
@@ -4009,6 +4464,7 @@ int main(int argc, char** argv) {
         if (only_typewriter) {
             // typewriter：追加时只写布局格，绘制侧每帧推进一格。
             if (!check_text_typewriter(table)) return 1;
+        if (!check_text_pacing(table)) return 1;
             std::printf("core-selftest(typewriter): PASS\n");
             return 0;
         }
@@ -5423,6 +5879,7 @@ int main(int argc, char** argv) {
         if (!check_audio_slot_bounds(table)) return 1;
         if (!check_gate_split_branches(table)) return 1;
         if (!check_font_branches(table)) return 1;
+        if (!check_render_prims(table)) return 1;
         if (!check_text_layer_surface(table)) return 1;
 
         std::printf(

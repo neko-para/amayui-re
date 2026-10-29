@@ -113,6 +113,10 @@ add_test(NAME emulator-core-selftest COMMAND emulator-core-selftest)
 # ★ 音效 / 配音的**子集**单独注册一条：spec 的 evidence 要点到"某条用例"，聚合的那一条点不出子集
 #   （`CORE-OPS-AUDIO-WAV` / `-BGM-FADE` / `CORE-OPS-VOICE-PLAY` 的证据都指这里）。
 add_test(NAME emulator-core-audio-voice COMMAND emulator-core-selftest --only-audio)
+# ★ 渲染原语：数值文本 `0x205`（格式化 / 三个对齐档 / 全角化 / 奇数格宽）与清屏 `0x20E`
+#   （目标是纹理槽 ⇒ 清该表面；后缓冲无可写表面；⛔ 不清非目标纹理 / 不清纹理表）。
+#   交接单第 3 项的两个空档；把格式位反过来、把格宽先除半、或让 `0x20E` 提前 return ⇒ 本条红。
+add_test(NAME emulator-core-render-prims COMMAND emulator-core-selftest --only-render-prims)
 # ★ 两套字号（`0x75` = A 支 / `0x197` = B 支）单独一条：spec 的 `CORE-OPS-FORWARD-PROLOGUE` 证据指这里。
 add_test(NAME emulator-core-font-size COMMAND emulator-core-selftest --only-font)
 # ★ 字形 AA 档（1 位 / GRAY4 / GRAY8 的**选择**与 17 / 65 级换算 ⇒ 满覆盖 240 / 251）：
@@ -130,6 +134,12 @@ add_test(NAME emulator-core-adv-ruby COMMAND emulator-core-selftest --only-ruby)
 # ★ 抽干：宿主报"有输入在按下" ⇒ 剩余待画格**同一帧**画完（无输入时仍然一帧一格）。
 #   把抽干写成无条件 ⇒ "一帧画了不止一个" 那条红；把抽干去掉 ⇒ "没有抽干" 那条红。
 add_test(NAME emulator-core-adv-drain COMMAND emulator-core-selftest --only-drain)
+# ★ 打字节流：按每字间隔（`Font+0x560`）**每 D 毫秒一格、每帧最多一格**；间隔 = 0 ⇒ 追加时立即抽干。
+#   退回"每帧一格" ⇒ 间隔 100ms 的用例在头 5 帧就画字 ⇒ 本条红。
+add_test(NAME emulator-core-adv-pacing COMMAND emulator-core-selftest --only-pacing)
+# ★ 文本记录的**字号支**：位 2 只在振り仮名 run（及层模式 = 1 的逐字支）的 flags 上置起；消费口径只有
+#   `record_font_size` 一处（位 2 ⇒ B 支、否则 A 支）。主线 run 置位 / 振り仮名不置位 ⇒ 本条红。
+add_test(NAME emulator-core-text-record-flags COMMAND emulator-core-selftest --only-record-flags)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)

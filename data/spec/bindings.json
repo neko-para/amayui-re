@@ -4035,7 +4035,7 @@
         },
         {
           "ea": "0x41edb4",
-          "what": "转发：sub_45EC60(Engine+0x14D30, op1, Engine[97055])"
+          "what": "0x71 转发到文本子系统（Font = Engine+0x14D30，第 3 实参 = 文本目标 id）"
         },
         {
           "ea": "0x41edcd",
@@ -6591,7 +6591,8 @@
       ],
       "evidence": [
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-font-size",
-        "KN:01M4E5TZHT442X4F1Z6Z5F0A7Y"
+        "KN:01M4E5TZHT442X4F1Z6Z5F0A7Y",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-text-record-flags"
       ]
     },
     {
@@ -15932,7 +15933,7 @@
         },
         {
           "ea": "0x45eea0",
-          "what": "记录追加的构造器（`0xc4` 一族共用）：在栈上拼一条 72 字节记录再交给向量"
+          "what": "文本目标 id 为 0 时把一条记录追加进文本记录向量"
         },
         {
           "ea": "0x45ef0c",
@@ -15976,7 +15977,7 @@
         },
         {
           "ea": "0x466538",
-          "what": "消费者读记录 +0x28 并测试位 1 / 位 30 / 位 2；★ 生产端写位 30 与位 0（条件见 0x45ef12），位 2 由追加器恒置起（0x465BF8）⇒ 经该追加器产出的记录在绘制时恒选 B 支字号；**位 1 的写入者仍未取证** ⇒ 位 1 的那次测试在同批记录上恒假"
+          "what": "消费者读记录 +0x28 并测试位 1 / 位 30 / 位 2；★ 位 2 不是共用追加器置的，而是两个调用方在 flags 实参上置起（0x461c93 = 层模式 = 1 的逐字支、0x465bf8 = 振り仮名 run），主线正文 run 不置起（位 2 = 0 ⇒ 按 A 支字号画）；位 1 无写者"
         },
         {
           "ea": "0x46656c",
@@ -16153,7 +16154,7 @@
         },
         {
           "ea": "0x45eea0",
-          "what": "文本门为 0 时把一条记录追加进文本记录向量"
+          "what": "文本目标 id 为 0 时把一条记录追加进文本记录向量"
         }
       ],
       "functions": [
@@ -16227,7 +16228,7 @@
         },
         {
           "ea": "0x41edb4",
-          "what": "0x71 转发到文本子系统（Font = Engine+0x14D30，第 3 实参 = 文本门）"
+          "what": "0x71 转发到文本子系统（Font = Engine+0x14D30，第 3 实参 = 文本目标 id）"
         },
         {
           "ea": "0x41edda",
@@ -16446,7 +16447,7 @@
         },
         {
           "ea": "0x41eb44",
-          "what": "第 5 实参 = 文本门 Engine+0x5EC7C"
+          "what": "第 5 实参 = 文本目标 id（Engine+0x5EC7C）"
         },
         {
           "ea": "0x41eb51",
@@ -16466,11 +16467,11 @@
         },
         {
           "ea": "0x41ec01",
-          "what": "跳过支：状态字第 27 位置 1"
+          "what": "前置支（子系统返回非 0）：置状态字第 27 位 + 0x7795C=1（本条随后落进旁路）"
         },
         {
           "ea": "0x41ec85",
-          "what": "正常支：状态字第 29 位置 1（已起计时器）"
+          "what": "打字支：置状态字第 29 位（仅当每字间隔 > 0 且第 27 位未置）"
         },
         {
           "ea": "0x46be96",
@@ -16770,11 +16771,11 @@
         },
         {
           "ea": "0x41f5eb",
-          "what": "0x82 末尾：当前文本槽 ← 节点槽号（同形，但不置第 29 位）"
+          "what": "opcode 0x7d 支（不是 0x82）：当前文本槽 ← 节点槽号；同支还置第 29 位并起计时器"
         },
         {
           "ea": "0x41f5f8",
-          "what": "0x82 末尾：启动文本计时器（与追加支同一个入口）"
+          "what": "opcode 0x7d 支：启动文本计时器（参数 = Font+0x560）"
         }
       ],
       "functions": [
@@ -16788,7 +16789,314 @@
       "storage": [],
       "evidence": [
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest",
-        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-config-sample-text"
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-config-sample-text",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-adv-pacing"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RENDER-NUMTEXT-205",
+      "sites": [
+        {
+          "ea": "0x4233f3",
+          "what": "handler 入口：长度槽 ← 13（推进 13）"
+        },
+        {
+          "ea": "0x42340f",
+          "what": "读第 2 个操作数（字段原点，整型）；格式化写入的 x 以它为初值"
+        },
+        {
+          "ea": "0x42341b",
+          "what": "读第 6 个操作数（格式位，整型）"
+        },
+        {
+          "ea": "0x423425",
+          "what": "读第 5 个操作数（格数，整型）"
+        },
+        {
+          "ea": "0x42342f",
+          "what": "读第 4 个操作数（值，整型）"
+        },
+        {
+          "ea": "0x42343f",
+          "what": "调用格式化：文本缓冲 + x 出参 + 值 / 格数 / 格式位"
+        },
+        {
+          "ea": "0x423448",
+          "what": "格式化之后读第 3 个操作数（纵坐标，整型）"
+        },
+        {
+          "ea": "0x42345a",
+          "what": "读第 1 个操作数（纹理槽号，整型），最后读"
+        },
+        {
+          "ea": "0x423466",
+          "what": "交给字体对象的『把文本画进纹理』入口（槽 / 文本 / x / y）"
+        },
+        {
+          "ea": "0x407334",
+          "what": "格宽：行距模式格为 0 走负行距项那一支"
+        },
+        {
+          "ea": "0x40733c",
+          "what": "格宽：行距模式非 0 ⇒ 字号格"
+        },
+        {
+          "ea": "0x40734a",
+          "what": "格宽：行距模式 0 ⇒ 行距项取负（无缩放时 = 字号）"
+        },
+        {
+          "ea": "0x407367",
+          "what": "读配置 set:BlankExtentMode"
+        },
+        {
+          "ea": "0x407370",
+          "what": "set:BlankExtentMode == 1 才改格宽"
+        },
+        {
+          "ea": "0x407386",
+          "what": "半角模式：格宽 = 半角空格量度宽 × 2"
+        },
+        {
+          "ea": "0x4073a3",
+          "what": "全角模式：格宽 = 全角空格量度宽"
+        },
+        {
+          "ea": "0x4073c8",
+          "what": "负值 ⇒ 第一格序号从格数 − 2 起（0 基）；可用数字格 = 格数 − 1（符号占一格）"
+        },
+        {
+          "ea": "0x4073ca",
+          "what": "负值取绝对值"
+        },
+        {
+          "ea": "0x4073d0",
+          "what": "格式位 0x8：正数带 '+'"
+        },
+        {
+          "ea": "0x4073dd",
+          "what": "格式位 0x10：零带 '+'"
+        },
+        {
+          "ea": "0x4073e6",
+          "what": "格式位 0x20：零带 '-'"
+        },
+        {
+          "ea": "0x407400",
+          "what": "逐位循环：i == 第一格 或 商非 0 或 置 0x1 ⇒ 写一位（⇒ 放不下时丢高位、置 0x1 时补前导 0）"
+        },
+        {
+          "ea": "0x40745b",
+          "what": "唯一的 '#' 写点：有符号且第一格序号 < 0（格数 < 2）"
+        },
+        {
+          "ea": "0x407462",
+          "what": "符号字符：+ / -"
+        },
+        {
+          "ea": "0x407475",
+          "what": "格式位 0x2：居中（先于左齐判）"
+        },
+        {
+          "ea": "0x407483",
+          "what": "居中 + 半角 ⇒ x = 锚点 + 未用格数 × 格宽 ÷ 4"
+        },
+        {
+          "ea": "0x4074a0",
+          "what": "居中 + 全角 ⇒ x = 锚点 + 未用格数 × 格宽 ÷ 2"
+        },
+        {
+          "ea": "0x4074ae",
+          "what": "格式位 0x4：左齐（x 不动）"
+        },
+        {
+          "ea": "0x4074c0",
+          "what": "右齐 + 半角 ⇒ x = 锚点 + 未用格数 × 格宽 ÷ 2"
+        },
+        {
+          "ea": "0x4074dd",
+          "what": "右齐 + 全角 ⇒ x = 锚点 + 未用格数 × 格宽"
+        },
+        {
+          "ea": "0x4074f1",
+          "what": "非半角时把文本就地扩成全角 S-JIS（数字 / '-' / '+' / '#' 各有固定映射）"
+        },
+        {
+          "ea": "0x4073f7",
+          "what": "格数 − 1 < 0（无符号）⇒ 数字循环不执行 ⇒ 空串"
+        },
+        {
+          "ea": "0x41a6c0",
+          "what": "非半角时把文本就地扩成全角 S-JIS：数字 0x824F+、'-'→0x817C、'+'→0x817B、'#'→0x8194、其它→0x8148"
+        }
+      ],
+      "functions": [
+        "sub_4233E0",
+        "sub_4072F0"
+      ],
+      "storage": [
+        "shape:T_Font@0x313d0",
+        "shape:T_Font@0x313d4",
+        "shape:T_Font@0x4d0"
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-render-prims"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-RENDER-CLEAR-20E",
+      "sites": [
+        {
+          "ea": "0x41a200",
+          "what": "handler 入口"
+        },
+        {
+          "ea": "0x41a215",
+          "what": "长度槽 ← 1（无操作数、推进 1）"
+        },
+        {
+          "ea": "0x41a21c",
+          "what": "门条件 1：虚拟全屏类型 == 1"
+        },
+        {
+          "ea": "0x41a224",
+          "what": "门条件 2：当前渲染目标 == -1（后缓冲哨兵）"
+        },
+        {
+          "ea": "0x41a236",
+          "what": "门控支：切到纹理槽 38 的渲染表面"
+        },
+        {
+          "ea": "0x41a241",
+          "what": "门控支：清屏（槽 38）"
+        },
+        {
+          "ea": "0x41a24e",
+          "what": "门控支：切回后缓冲（-1）"
+        },
+        {
+          "ea": "0x41a25b",
+          "what": "清当前渲染目标（门控支的第二次；无门控时唯一一次）"
+        }
+      ],
+      "functions": [
+        "sub_41A200"
+      ],
+      "storage": [
+        "shape:T_Scene@0xb578",
+        "shape:T_Scene@0xa5d8"
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-render-prims"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-RECORD-REGISTER-1D2",
+      "sites": [
+        {
+          "ea": "0x420380",
+          "what": "handler 入口"
+        },
+        {
+          "ea": "0x420390",
+          "what": "长度槽 ← 5（推进 5）"
+        },
+        {
+          "ea": "0x42039b",
+          "what": "守卫：文本目标 id != 0 ⇒ 整条跳过（在读操作数之前）"
+        },
+        {
+          "ea": "0x4203a8",
+          "what": "读第 2 个操作数（值，先读）"
+        },
+        {
+          "ea": "0x4203b2",
+          "what": "读第 1 个操作数（key，后读）"
+        },
+        {
+          "ea": "0x4203c0",
+          "what": "入队：追加一条 72 字节记录（值 / key / 标志 = 第 29 位 | 脏槽非 0 ⇒ 第 0 位），并清该下标的脏槽"
+        }
+      ],
+      "functions": [
+        "sub_420380",
+        "sub_45EFA0"
+      ],
+      "storage": [
+        "shape:T_Font@0xd24"
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-RECORD-QUERY-1D3",
+      "sites": [
+        {
+          "ea": "0x42d4a0",
+          "what": "handler 入口"
+        },
+        {
+          "ea": "0x42d4b4",
+          "what": "长度槽 ← 11（推进 11）"
+        },
+        {
+          "ea": "0x42d4c3",
+          "what": "读第 5 个操作数（key，最先）"
+        },
+        {
+          "ea": "0x42d4cd",
+          "what": "读第 4 个操作数（起始下标）"
+        },
+        {
+          "ea": "0x42d4d7",
+          "what": "读第 3 个操作数（读而不用；类型非法照样抛）"
+        },
+        {
+          "ea": "0x42d4e7",
+          "what": "查询：字体对象的记录表扫描"
+        },
+        {
+          "ea": "0x42d4f0",
+          "what": "命中标志 ← (返回值 != 0 ? 1 : 0)，写第 1 个操作数"
+        },
+        {
+          "ea": "0x42d4fc",
+          "what": "值写第 2 个操作数（未命中 = 0）"
+        },
+        {
+          "ea": "0x457960",
+          "what": "查询体入口（起始下标 → 记录扫描）"
+        },
+        {
+          "ea": "0x45798f",
+          "what": "起始下标越界 / 无命中 ⇒ 返回 0（值保持 0）"
+        },
+        {
+          "ea": "0x4579b6",
+          "what": "命中判据 1：记录标志的续段位"
+        },
+        {
+          "ea": "0x4579c6",
+          "what": "命中判据 2：key 相等"
+        },
+        {
+          "ea": "0x4579cb",
+          "what": "命中 ⇒ 值 ← 记录的值（**不中断扫描**，同组后命中覆盖前面的）"
+        },
+        {
+          "ea": "0x457a02",
+          "what": "组边界：下一条记录的新段首条位 ⇒ 断组（在命中测试之后判）"
+        }
+      ],
+      "functions": [
+        "sub_42D4A0",
+        "sub_457960"
+      ],
+      "storage": [
+        "shape:T_Font@0xd24"
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
       ]
     }
   ]

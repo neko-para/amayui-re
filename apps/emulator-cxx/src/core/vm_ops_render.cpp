@@ -165,40 +165,42 @@ void Machine::op_205(const Instruction& instruction) {
     const auto slot = read_int(ops[0]);
 
     // 格式化成 ASCII，再按 0x10000 决定是否扩成全角 S-JIS。
+    // ★ 引擎 `sub_4072F0` 的溢出口径：数字**放不下可用格数时丢掉高位**（只画低位那几格），
+    //   ⛔ 不是退化成 '#'；'#' 只在"符号位都排不下"（有符号且格数 < 2）时出现。
+    //   曾经按"放不下就画 '#'"实现 —— 那是把引擎的截断当成了溢出提示（取证 `0x407400` 的循环条件
+    //   与 `0x40744F` 的唯一 `#` 写点）。
     const auto format = [&](int& chars) {
         std::string text;
         chars = 0;
-        if (cells <= 0) {
-            const bool wants_sign = (flags & 0x8) || (flags & 0x10) || (flags & 0x20);
-            if (!wants_sign) return text;              // 无符号位且无格数 ⇒ 空串（不画）
-            text = "#";                                 // 宽度放不下 ⇒ 单字符 '#'
-            chars = 1;
-            return text;
-        }
         const bool negative = value < 0;
-        const auto magnitude = negative ? static_cast<std::uint32_t>(-static_cast<std::int64_t>(value))
-                                        : static_cast<std::uint32_t>(value);
-        char digits[16] = {0};
-        int n = 0;
-        if (magnitude == 0) digits[n++] = '0';
-        for (std::uint32_t v = magnitude; v > 0 && n < 12; v /= 10) digits[n++] = static_cast<char>('0' + v % 10);
-        std::string number;
-        for (int i = n - 1; i >= 0; --i) number.push_back(digits[i]);
-        char sign = 0;
-        if (negative) sign = '-';
-        else if (value > 0 && (flags & 0x8)) sign = '+';
-        else if (value == 0 && (flags & 0x10)) sign = '+';
-        else if (value == 0 && (flags & 0x20)) sign = '-';
-        const int digit_cells = cells - (sign != 0 ? 1 : 0);
-        if (static_cast<int>(number.size()) > digit_cells) {
+        const bool plus = value > 0 ? (flags & 0x8) != 0 : (value == 0 && (flags & 0x10) != 0);
+        const bool minus_zero = value == 0 && !plus && (flags & 0x20) != 0;
+        const bool signed_text = negative || plus || minus_zero;
+        if (signed_text && cells < 2) {   // 符号都排不下 ⇒ 单字符 '#'（引擎在这里写 0x23）
             text = "#";
             chars = 1;
             return text;
         }
-        const int pad = digit_cells - static_cast<int>(number.size());
-        if (sign != 0) text.push_back(sign);
-        if ((flags & 0x1) != 0) text.append(static_cast<std::size_t>(pad), '0');  // 0x1 = 补前导 0
-        text += number;
+        if (cells <= 0) return text;      // 无符号且没有格 ⇒ 空串（不画）
+        const int available = cells - (signed_text ? 1 : 0);
+        // 绝对值用 64 位取：引擎对 INT_MIN 取负会溢出（本版不规定那条边界，见 spec 残差）。
+        const auto magnitude = negative ? static_cast<std::uint64_t>(-static_cast<std::int64_t>(value))
+                                        : static_cast<std::uint64_t>(value);
+        std::string digits;
+        if (magnitude == 0) digits = "0";
+        else {
+            for (std::uint64_t v = magnitude; v > 0; v /= 10) {
+                digits.insert(digits.begin(), static_cast<char>('0' + static_cast<int>(v % 10)));
+            }
+        }
+        if (static_cast<int>(digits.size()) > available) {
+            digits = digits.substr(digits.size() - static_cast<std::size_t>(available));
+        }
+        if ((flags & 0x1) != 0) {  // 0x1 = 补前导 0（补满可用格）
+            digits.insert(0, static_cast<std::size_t>(available - static_cast<int>(digits.size())), '0');
+        }
+        if (signed_text) text.push_back(negative ? '-' : (plus ? '+' : '-'));
+        text += digits;
         chars = static_cast<int>(text.size());
         return text;
     };
@@ -213,11 +215,14 @@ void Machine::op_205(const Instruction& instruction) {
     // ★ 格宽取字体对象的高度格（引擎 `Engine+0x46104` = 字号链写入的格宽）⇒ 本模型用 **A 支字号**
     //   （`0x75` 写的 `Font+0x313D4`，也是 0x204 出字形时用的那一支；⛔ 不是 `0x197` 的 B 支）。
     const int cell_width = glyph_height_ > 0 ? glyph_height_ : 8;
-    const int width = (flags & 0x10000) != 0 ? cell_width / 2 : cell_width;
-    const int free_cells = cells - chars;
+    // 引擎的"第一格序号"在循环没跑时是 0（而不是 cells − 字符数）⇒ 这里夹到 0。
+    const int free_cells = std::max(0, cells - chars);
     // k（以 1/2 为单位）：右齐 = 2/2、居中 = 1/2、左齐 = 0/2。
+    // ★ 引擎**先乘后除**（`0x4074c0` 右齐半角 = free×格宽÷2；`0x407483` 居中半角 = free×格宽÷4）：
+    //   ⛔ 不要先把格宽除成半角再乘 —— 奇数格宽会差 1px。
     const int k_num = (flags & 0x2) != 0 ? 1 : ((flags & 0x4) != 0 ? 0 : 2);
-    const int x = anchor_x + (free_cells * width * k_num) / 2;
+    const int divisor = (flags & 0x10000) != 0 ? 4 : 2;
+    const int x = anchor_x + (free_cells * cell_width * k_num) / divisor;
 
     // 全角化：'0'-'9' → 0x824F..，'-'/'+'/'#' → 0x817C/0x817B/0x8194，其它 → 0x8148。
     std::string sjis;
@@ -252,10 +257,19 @@ void Machine::op_205(const Instruction& instruction) {
 void Machine::op_20e(const Instruction& instruction) {
     (void)instruction;
     // 清屏（0x20E / `sub_41A200`，argc 0，推进 1）：`IDirect3DDevice9::Clear(0, NULL, 3, 0, 1.0, 0)`
-    // ⇒ 清**当前绑定的渲染目标**整面成透明黑（没有矩形、没有操作数）。
-    // ★ 本模型没有"渲染目标栈"（我们每帧重建场景）⇒ 这里**什么都不用做**；
-    //   门控支（虚拟全屏类型 == 1 且当前目标 = 后缓冲）会额外清纹理槽 38，那一支同样落在"渲染目标"上，
-    //   本模型无对应物。⛔ 不要顺手清纹理表：那不是这条的语义（见 ops-forensics §21）。
+    // ⇒ 清**当前渲染目标**整面成透明黑（没有矩形、没有操作数）。
+    // ★ 本模型有当前渲染目标（`0x20d` 写）：目标是**纹理槽** ⇒ 该纹理表面清成透明黑，并按内容版本
+    //   （`revision`）通知宿主重传；目标是**后缓冲**（-1）⇒ 交换链由宿主每帧重建、模型里没有可写的表面
+    //   ⇒ 没有可观察状态（⛔ 不是"清纹理表"）。
+    // ★ 门控支（虚拟全屏类型 == 1 且目标是后缓冲 ⇒ 再清纹理槽 38）**未建模**：模型没有显示记录的
+    //   虚拟全屏类型格 ⇒ 见 `apps/emulator-cxx/SCOPE.md` 的显式限制。
+    // ⛔ 不要顺手清纹理表 / 不要清非目标纹理：那不是这条的语义（见 ops-forensics §21）。
+    if (render_target_ >= 0) {
+        if (TextureRecord* texture = texture_mut(static_cast<std::uint32_t>(render_target_))) {
+            std::fill(texture->rgba.begin(), texture->rgba.end(), std::uint8_t{0});
+            texture->revision++;
+        }
+    }
     return;
 }
 

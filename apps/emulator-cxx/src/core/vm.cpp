@@ -351,7 +351,7 @@ bool Machine::step() {
     advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16, !paused);
     // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：新帧会置脏，所以必须在门前那次渲染判定之前。
     if (!paused) service_movies();
-    // 门之前的**逐字符显现**（typewriter）：引擎的推进器每帧跑一次、帧间按 `message:MessageSpeed` 睡眠，
+    // 门之前的**逐字符显现**（typewriter）：引擎的推进器每帧跑一次，**按每字间隔（ms）每帧最多一格**；
     // 等待输入时**也在跑**（那正是"字还在打"的形态）⇒ 这里不受 `paused` 影响。
     service_text_layers();
     // 门前渲染：主循环闸门（0x412739–0x4127E2）先要求
@@ -361,7 +361,10 @@ bool Machine::step() {
         (scene_dirty_ || scene_animating_ || command_animating_)) {
         frame_step_requested_ = true;
     }
-    if (state_flags_ != 0) {
+    // 第 29 位（打字中）**不挡脚本**：引擎服务完文本泵之后仍派发一条指令（`0x41342d` → `0x413439`）。
+    // 门判只看其余位；本模型不置第 27 位（它没有服务者），所以这里只需摘掉第 29 位。
+    const std::uint32_t gate_bits = state_flags_ & ~(1u << 29);
+    if (gate_bits != 0) {
         // 第 0 位（长睡眠）：本实现没有计时器服务，先按"服务一次就清位"处理。
         if ((state_flags_ & 1u) != 0) { state_flags_ &= ~1u; return true; }
         // 影片位（门上 0x2000）：只清位；对象表仍有已启动影片槽 ⇒ 再置起（`CORE-VM-MOVIE`）。
@@ -377,7 +380,7 @@ bool Machine::step() {
         // ★ 连续撞到"没有分支的位"时给一个明确诊断与停因：否则外面只看到"停在原地 + 烧步数"，
         //   与"在等输入"完全分不开。这不是引擎语义，是观测。
         constexpr std::uint32_t kServicedGateBits = (1u << 0) | (1u << 10) | (1u << 13);
-        if ((state_flags_ & kServicedGateBits) == 0) {
+        if ((gate_bits & kServicedGateBits) == 0) {
             gate_stall_steps_ += 1;
             if (!gate_stall_reported_) {
                 gate_stall_reported_ = true;

@@ -319,7 +319,8 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
         //              （2 字节整份、1 字节半份，`0x465ef1`）⇒ 两端各留一份、恰好铺满格宽；
         //     d ≤ 0  ⇒ 不加步进，整串以格**中心**对齐：首字 x = 格左 − ⌊|d|÷2⌋（`0x465b25`）。
         //   ⛔ 不是"按行比例切分"（按比例只决定这一行分到几个假名，`0x46c2ed`）。
-        const int ruby_size = font_b_height_ > 0 ? font_b_height_ : 10;
+        // 振り仮名 run 的字号支 = **记录标志位 2**（B 支）—— 与"画记录"同一个口径（`record_font_size`）。
+        const int ruby_size = record_font_size(4);
         const int ruby_y = start_y - ruby_size - 2;
         const int cell_x = line_start_x;
         const int cell_width = state.cursor_x - cell_x;  // 最后一行主文本的宽
@@ -344,6 +345,10 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
                 pending_glyphs_.push_back(PendingGlyph{slot, x, ruby_y, ruby_size, kana});
                 x += advance + (kana.size() == 1 ? step / 2 : step);
             }
+            // 振り仮名 run 也**追加一条文本记录**（`sub_465a20` 的收尾）：**位 2 置起**（用 B 支字号），
+            // 位置 = 这一格（主文本最后一行的范围）× 振り仮名那一行。主线 run 的记录不含位 2。
+            append_text_span_record(slot, rubi, cell_x, ruby_y, cell_x + cell_width,
+                                    ruby_y + ruby_size + 2, font_text_gate_5ec7c_ | 4);
         }
     }
     if (TextureRecord* texture = texture_mut(id)) texture->revision++;
@@ -356,27 +361,77 @@ void Machine::erase_pending_glyphs(int slot) {
         pending_glyphs_.end());
 }
 
-void Machine::service_text_layers() {
-    // 每帧只画**一格**（引擎的推进器是全局的、每帧一次；帧间按 `message:MessageSpeed` 睡眠，属宿主时钟）。
-    // ★ 空队列 ⇒ 无事可做（这是常态：大部分帧没有待画字）。
-    // ★ **抽干**：宿主报了"有输入在按下" ⇒ 把剩下的待画格**一次**画完（引擎 `0x4096e0`–`0x4096f4`
-    //   的 do-while：每轮仍走"推进一格"那条路，循环到队列空）。
-    const bool drain = input_pressed_;
-    while (!pending_glyphs_.empty()) {
-        const PendingGlyph glyph = pending_glyphs_.front();
-        pending_glyphs_.erase(pending_glyphs_.begin());
-        const auto slot = static_cast<std::size_t>(glyph.slot);
-        if (slot >= 10) continue;
-        if (!text_layer_state_[slot].texture_ready) continue;  // 画布被拆掉 / 没建 ⇒ 这个字丢掉
-        std::string error;
-        int advance = 0;
-        if (!draw_text_into_texture(*this, text_layer_texture_id(slot), glyph.x, glyph.y, glyph.unit,
-                                    &error, &advance, glyph.size)) {
-            if (!error.empty()) report_error(error);
-        }
-        if (TextureRecord* texture = texture_mut(text_layer_texture_id(slot))) texture->revision++;
-        if (!drain) return;  // 没有输入 ⇒ 这一帧就画这一个
+void Machine::draw_front_pending_glyph() {
+    if (pending_glyphs_.empty()) return;
+    const PendingGlyph glyph = pending_glyphs_.front();
+    pending_glyphs_.erase(pending_glyphs_.begin());
+    const auto slot = static_cast<std::size_t>(glyph.slot);
+    if (slot >= 10) return;
+    if (!text_layer_state_[slot].texture_ready) return;  // 画布被拆掉 / 没建 ⇒ 这个字丢掉
+    std::string error;
+    int advance = 0;
+    if (!draw_text_into_texture(*this, text_layer_texture_id(slot), glyph.x, glyph.y, glyph.unit,
+                                &error, &advance, glyph.size)) {
+        if (!error.empty()) report_error(error);
     }
+    if (TextureRecord* texture = texture_mut(text_layer_texture_id(slot))) texture->revision++;
+}
+
+void Machine::drain_pending_glyphs() {
+    // 引擎 `0x4096e0`–`0x4096f4` / `sub_46CBF0` 的 do-while：每轮仍走"推进一格"那条路，循环到队列空。
+    while (!pending_glyphs_.empty()) draw_front_pending_glyph();
+}
+
+void Machine::begin_text_typing_or_drain() {
+    // 引擎 `0x41ec35` / `0x41fcf8` 的两档：**每字间隔 > 0 且状态字第 27 位未置** ⇒ 置第 29 位 +
+    // 启动文本计时器（间隔 = `Font+0x560` = `param_cell_`、起点 = 现在）；否则 ⇒ 立即追加 + 同帧抽干
+    // （`sub_46cbf0`）。
+    // ★ 第 27 位的置位（按键 / 前置支）**不在本实现**：那个门位没有服务者，置了会让主循环卡住
+    //   （见 `REQ-01M60CFPK2X36ZCQD21M3E5G7E` 与 `SCOPE.md`）。抽干本身与字节一致。
+    const std::int32_t speed = param_cell_.value_or(0);
+    if (speed > 0 && (state_flags_ & (1u << 27)) == 0) {
+        state_flags_ |= (1u << 29);
+        text_timer_start_ms_ = scene_clock_ms_;
+        text_timer_interval_ms_ = speed;
+        text_timer_step_ = 1;
+        return;
+    }
+    drain_pending_glyphs();
+}
+
+void Machine::service_text_layers() {
+    // 打字中（第 29 位）才推进；**每 D 毫秒一格、每帧最多一格**（`sub_453b60` 的闸门：
+    // `elapsed <= n × interval` ⇒ 本帧一格都不画，超出才画一格并把 n 推到 ⌊elapsed/interval⌋+1）。
+    if ((state_flags_ & (1u << 29)) == 0) {
+        // 不在打字态：队列本应已被"立即抽干"清空；万一有残留（宿主换了时钟 / 加载期）一次画完，
+        // ⛔ 不要退回"每帧一格"（那会让"间隔 = 0"的脚本又变成打字机）。
+        if (!pending_glyphs_.empty()) drain_pending_glyphs();
+        return;
+    }
+    if (pending_glyphs_.empty()) {
+        state_flags_ &= ~(1u << 29);  // 没有待画格 ⇒ 没有可服务的东西（引擎的"无活动槽"支）
+        return;
+    }
+    if (input_pressed_) {
+        // 按键 / 跳过 ⇒ **同帧抽干** + 清第 29 位（引擎 `0x40953c`–`0x409554`；它同时置第 27 位，
+        // 本实现不置 —— 理由同 `begin_text_typing_or_drain`）。
+        drain_pending_glyphs();
+        state_flags_ &= ~(1u << 29);
+        return;
+    }
+    if (text_timer_interval_ms_ <= 0) {  // 计时器没被正确启动（防御；正常路径间隔 > 0）
+        draw_front_pending_glyph();
+        if (pending_glyphs_.empty()) state_flags_ &= ~(1u << 29);
+        return;
+    }
+    const std::uint32_t elapsed = scene_clock_ms_ - text_timer_start_ms_;
+    const std::int64_t due = static_cast<std::int64_t>(text_timer_step_) * text_timer_interval_ms_;
+    if (static_cast<std::int64_t>(elapsed) <= due) return;  // 未到期 ⇒ 本帧一格都不画
+    const auto crossed = static_cast<std::int32_t>(
+        elapsed / static_cast<std::uint32_t>(text_timer_interval_ms_));
+    text_timer_step_ = crossed + 1;
+    draw_front_pending_glyph();
+    if (pending_glyphs_.empty()) state_flags_ &= ~(1u << 29);  // 末格 ⇒ 清第 29 位（`0x4096b2`）
 }
 void Machine::end_text_layer_line(int slot) {
     if (slot < 0 || slot >= 10) return;
@@ -473,6 +528,7 @@ void Machine::op_6e(const Instruction& instruction) {
     current_text_slot_ = requested;
     text_windows_[slot].text += text;
     draw_text_layer_text(slot, text, std::string());
+    begin_text_typing_or_drain();
     return;
 }
 
@@ -505,6 +561,7 @@ void Machine::op_196(const Instruction& instruction) {
     window.text += text;
     window.rubi = rubi.size() > 1023 ? rubi.substr(0, 1023) : rubi;
     draw_text_layer_text(slot, text, window.rubi);
+    begin_text_typing_or_drain();
     return;
 }
 
@@ -574,7 +631,8 @@ void Machine::op_1d3(const Instruction& instruction) {
     // 按 key 查 Font 条目（0x1D3 / `sub_42D4A0`）：读序 op5（key）→ op4（起始下标）→ op3（读而不用）。
     // ★ op3 的值被丢弃，但**类型非法照样抛** ⇒ 必须真的读一次（不是跳过）。
     // 命中判据：`flags & 0x20000000` 且 `key` 相等；组边界 = **下一条**记录 flags 低位（bit0）置起。
-    // 未命中 ⇒ op1 写 0、op2 写 0（不是 −1）。
+    // ★ 命中**不中断扫描**（引擎 `0x457A07` 的循环继续）：同组里后命中的记录覆盖前面的 ⇒ 取**最后一条**；
+    //   组边界在命中测试**之后**判（`0x457A02`），断组才停。未命中 ⇒ op1 写 0、op2 写 0（不是 −1）。
     const auto key = read_int(ops[4]);
     const auto start = read_int(ops[3]);
     (void)read_int(ops[2]);
@@ -585,8 +643,7 @@ void Machine::op_1d3(const Instruction& instruction) {
             const FontEntry& entry = font_entries_[i];
             if ((entry.flags & 0x20000000u) != 0 && entry.key == key) {
                 found = 1;
-                value = entry.value;
-                break;
+                value = entry.value;  // ⛔ 不要在这里 break：同组后命中的覆盖前面的
             }
             if (i + 1 < font_entries_.size() && (font_entries_[i + 1].flags & 1u) != 0) break;
         }

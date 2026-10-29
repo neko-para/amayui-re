@@ -100,7 +100,7 @@
     {
       "id": "ops-render",
       "file": "chapters/60-ops-render.md",
-      "title": "渲染请求边界：渲染目标、场景混合、离屏文字与帧步进"
+      "title": "渲染请求边界：目标、混合、离屏文字族、清屏与帧步进"
     },
     {
       "id": "ops-voice",

@@ -21,7 +21,7 @@
 17. [`60-ops-frame.md`](60-ops-frame.md) —— 帧类指令
 18. [`60-ops-texture.md`](60-ops-texture.md) —— 纹理族
 19. [`60-ops-scene.md`](60-ops-scene.md) —— 场景 / 颜色族
-20. [`60-ops-render.md`](60-ops-render.md) —— 渲染请求边界（渲染目标 / 场景混合 / 离屏文字 / 帧步进）
+20. [`60-ops-render.md`](60-ops-render.md) —— 渲染请求边界（目标 / 混合 / 离屏文字族 / 清屏 / 帧步进）
 21. [`60-ops-voice.md`](60-ops-voice.md) —— 音频（语音 / 音效 / BGM）
 22. [`60-ops-list.md`](60-ops-list.md) —— 列表项与子系统写入
 23. [`60-ops-save.md`](60-ops-save.md) —— 存档槽的读写与文件级操作

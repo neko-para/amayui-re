@@ -326,6 +326,16 @@ public:
     std::int32_t text_layer_draw_key(std::size_t slot) const { return list_records_[slot].f68; }
     // typewriter：还没画出来的待画格数（守卫用；⛔ 不是产品接口）。
     std::size_t pending_glyph_count() const { return pending_glyphs_.size(); }
+    // 打字中（状态字第 29 位）与计时器间隔（守卫用；⛔ 不是产品接口）。
+    bool text_typing() const { return (state_flags_ & (1u << 29)) != 0; }
+    std::int32_t text_timer_interval_ms() const { return text_timer_interval_ms_; }
+    // 文本记录的**字号支**：位 2（0x4）置起 ⇒ B 支（`0x197`），否则 A 支（`0x75`）。
+    // 返回值是"画这条记录时给绘制入口的字号覆盖"（0 = 沿用 A 支，与 `0x204` 同口径）。
+    std::int32_t record_font_size(std::int32_t flags) const {
+        return (flags & 4) != 0 ? (font_b_height_ > 0 ? font_b_height_ : 10) : 0;
+    }
+    // 待画格的字号覆盖（守卫用：ruby run 的格应当是 B 支）。
+    std::int32_t pending_glyph_size(std::size_t i) const { return pending_glyphs_[i].size; }
     std::int32_t scalar_252() const { return scalar_252_; }
     std::int32_t scalar_88a() const { return scalar_88a_; }
     std::int32_t scalar_88b() const { return scalar_88b_; }
@@ -869,8 +879,12 @@ private:
     void end_text_layer_line(int slot);
     void create_text_layer_item(int slot, int left, int top, int right, int bottom);
     void erase_text_layer_draw_items(int slot);
-    // 逐字符显现（typewriter）：每帧（= 每次 `step()`）画出一格；`0x71` 清空时丢掉该层的待画格。
+    // 逐字符显现（typewriter）：按每字间隔**每 D 毫秒画一格、每帧最多一格**（`0x409400` 的计时器闸门）；
+    // 追加成功时由 `begin_text_typing_or_drain()` 两档决定"置第 29 位 + 起计时器"还是"同帧抽干"。
     void service_text_layers();
+    void begin_text_typing_or_drain();
+    void draw_front_pending_glyph();
+    void drain_pending_glyphs();
     void erase_pending_glyphs(int slot);
     // 输入 / 等待 / 空操作（vm_ops_io.cpp）
     void op_109(const Instruction&); void op_108(const Instruction&); void op_c8(const Instruction&); void op_cc(const Instruction&);
@@ -1111,8 +1125,13 @@ private:
     std::int32_t current_text_slot_ = 0;  // `Engine+0x7780C`（`0x6E` / `0x196` 写）
     // 十个文本层的宿主游标（纹理 = 20 + 层号；矩形 / 原点 / 键基数在 `list_records_`）。
     std::array<TextLayerState, 10> text_layer_state_{};
-    // typewriter 的跨帧待画格（追加时入队、每次 step 画出一个；全局一个队列 = 引擎的推进器是全局的）。
+    // typewriter 的跨帧待画格（追加时入队；全局一个队列 = 引擎的推进器是全局的）。
     std::vector<PendingGlyph> pending_glyphs_;
+    // 文本计时器（`Engine+0x691EC` 的模型对应物）：起点 / 间隔（= `Font+0x560`，即 `param_cell_`）/ 步号。
+    // 语义 = `sub_453A60` 启动、`sub_453B60` 非阻塞步进：未超过 n×间隔 ⇒ 本帧一格都不画。
+    std::uint32_t text_timer_start_ms_ = 0;
+    std::int32_t text_timer_interval_ms_ = 0;
+    std::int32_t text_timer_step_ = 1;
     std::int32_t scalar_10f_ = 0;
     std::int32_t scalar_248_ = 0;
     std::int32_t font_8b_ = 0;
