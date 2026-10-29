@@ -9,11 +9,17 @@ if(NOT DEFINED EXE OR NOT DEFINED INSTALL OR NOT DEFINED SRC OR NOT DEFINED OUTD
   message(FATAL_ERROR "EXE / INSTALL / SRC / OUTDIR 必须由 CTest 传入")
 endif()
 
-function(run_toggle name script out_var)
+function(run_toggle name script seed out_var)
   set(dump "${OUTDIR}/config-toggle-${name}.txt")
   file(REMOVE "${dump}")
+  # ★ 种子配置：两个方向都要**真的写一次**，所以让初始值与点击目标相反。
+  #   ⛔ 不要依赖本机玩家 `SYS4REG.INI` 的初值 —— 没有玩家文件时 OFF（目标 0 = 缺省）根本不会建键，
+  #   测试就会在"全新机器"上红（这正是本文件早先版本踩过的：换一台机器/换一个配置根就红）。
+  set(seed_config "${OUTDIR}/config-toggle-${name}-seed.ini")
+  file(WRITE "${seed_config}" "[display]\r\nScreenMode=${seed}\r\n")
   execute_process(
     COMMAND "${EXE}" --install "${INSTALL}" --skip-logo --play-headless
+            --config "${seed_config}"
             --input-script "${SRC}/input/${script}"
             --anchor-script 21092 --require-script 20940
             --tick-ms 16 --max-steps 220000 --dump-config "${dump}"
@@ -38,8 +44,8 @@ function(run_toggle name script out_var)
   set(${out_var} "${value}" PARENT_SCOPE)
 endfunction()
 
-run_toggle("on" "config-toggle-on.txt" on_mode)
-run_toggle("off" "config-toggle-off.txt" off_mode)
+run_toggle("on" "config-toggle-on.txt" 0 on_mode)
+run_toggle("off" "config-toggle-off.txt" 1 off_mode)
 
 if(NOT off_mode EQUAL 0)
   message(FATAL_ERROR "点 OFF 之后 display:ScreenMode 应为 0，实际 ${off_mode}")

@@ -9,71 +9,59 @@
 
 ## 一句话
 
-2026-10-27：`apps/emulator-cxx` 已能从 **TITLE 点 Option** 进设置界面（`CONFIG.BIN` 52 → `CONFIG1.BIN` 20940 / 声牌子脚本 20939），
-**左列六个 tab 全部可打开**（六条 CTest 钉住），并有**宿主脚本化输入 + 无窗口播放**这条无人值守观测面；`ctest` 16/16 绿。
+本节点**保持 open**，作为「当前实现总览与交接」持续更新，不按收口处理（用户口径 2026-10-29）。
+2026-10-29：设置界面（右列点击 / 悬停 + 各页滚动）与 ADV 文本层残差两条线已收口；文本记录生产链已落地。
+当前剩余集中在「文本记录账 / 门位与计时」与「未成篇 opcode」。
 
 ## 交付物在哪
 
-- **规范**：`data/spec/`（真源）· 工具 `pnpm tools spec validate|report|describe`。
-- **C++ 实现线**：`apps/emulator-cxx/`（preset `windows-x64`，SDL3 + SDL_GPU + FreeType；`out/` 是 binaryDir）。
-- **参考实现（只作旁证）**：`apps/emulator-new/`。
-- **本轮取证记录**（锚 EA、含不确定项，⛔ 不是 spec）：`repo:docs/02-engine/ops-forensics-2026-10-title-option.md`。
-- **本线需求单**：`REQ-01M5WD5Q5HDE246W3T97F3NA8C`（TITLE→Option→CONFIG 路径与未实现指令）。
+- **规范**：`repo:data/spec`（真源）· 工具 `pnpm tools spec validate|report|describe`。
+- **C++ 实现线**：`repo:apps/emulator-cxx`（preset `windows-x64`，SDL3 + SDL_GPU + FreeType；`out/` 是 binaryDir）。
+- **参考实现（只作旁证）**：`repo:apps/emulator-new`。
+- **取证记录**（锚 EA、含不确定项，⛔ 不是 spec）：`repo:docs/02-engine/ops-forensics-2026-10-title-option.md`。
+- **本线需求单**：`REQ-01M5WD5Q5HDE246W3T97F3NA8C`。
 
 ## 宿主观测面（不是引擎语义）
 
-- `--input-script <file>`：指令式时间线 `at move/down/up/key/wheel` → 输入字 / 光标 / 按钮位图 / 触点 / 滚轮；
-  与 `apps/emulator-new` 的 `parseInputScript` 同语法。落点 `repo:apps/emulator-cxx/src/input_script.h`。
-- `--play-headless` + `--tick-ms` + `--anchor-script`（时间线 0 点 = 某脚本首次进入）+ `--expect-script` /
-  `--require-script` + `--bmp`。落点 `repo:apps/emulator-cxx/src/play_headless.cpp`。
-- 诊断口：`--watch-locals` · `--trace-script`/`--trace-opcodes` · `--dump-scene-at N` · `--dump-texture <id> --dump-texture-out <bmp>`；
-  收口时打印引擎错误通道。
+- `--input-script` / `--play-headless` / `--tick-ms` / `--anchor-script` / `--expect-script` / `--require-script` / `--bmp`。
+- 诊断口：`--watch-locals` · `--trace-script` / `--trace-opcodes` · `--dump-scene-at N` ·
+  `--dump-texture <id> --dump-texture-out <bmp>`；收口时打印引擎错误通道。
+
+## 当前需要处理（2026-10-29）
+
+1. `REQ-01M630YKF34EVZPMMBAJVMDDQW`：状态字第 29 位 / 文本计时器 / 文本门的服务者。
+   静态线索：`0x406F79` 主循环在该位置起时清位并循环 `sub_45BE20`；`0x4096A9` 是每帧推进点；
+   两套入口（每帧一格 / 置位后抽干）的关系要写进合同，不能停在"每帧一格"。
+2. `REQ-01M633QTR9VXK1CA1AYJCJPNN8`：记录标志位 2（另一支字号）。
+   已定：`0x4666B6` 的 `test [record+0x28],4`；`0x82` 按它选字体。未定：谁置位（排版层只 `|1` / gate / `|8`）。
+3. `0x205` / `0x20E` 仍无 `core_selftest` 断言。
+4. **取证齐未实现**：`0x82` 的绘制（只记请求）、`0xC2` 音乐转移、`0x2CF` 画面模式（不做真全屏）、`0x1D0` 步进算法。
+5. **静态出现未走到**：`0x1BA`、`0xBA`/`0xB6`/`0xB7`/`0xC4`/`0x194`/`0x1B5`/`0x1B8`/`0x1B9`/`0x2F5`/`0x2FF`/`0x307`/`0xB8`/`0x215`。
+6. **spec 条目**：上述实现多数只有取证记录，`repo:data/spec` 未成篇（准入门下一层）。
+
+## 本轮已收口（2026-10-29）
+
+- 设置界面单 `REQ-01M5Z5D786WF65YWHFK7K8Z7Q8` → done。
+- ADV 文本层残差单 `REQ-01M618MSP80J9FHXB4JS4VE1J5` → done。
+- 文本记录生产链 `REQ-01M630YH3RVEJJEGYKZJW2VQE7` → done（`0x196` 追加 72 字节记录；`0x82` 下标空间对齐；`core_selftest` 守卫）。
+- `config-toggle` 环境依赖 bug `REQ-01M631SB4CRGK48ZXC34XC0SR4` → done（`--config` 种子）。
 
 ## 已打通（实测）
 
-TITLE：`0x12e` 命中框表（局部 205；基准 5/105）→ `0xa1/0xa2/0xa3` 菜单分派 → key 3 → `0x3 call-script 52` ⇒ CONFIG.BIN → `0x3 call-script 20940`（或按配置键 20939）。
-点击在**抬起**时生效；左键 = 引擎位 0。
-
-## 本轮实现的指令（取证锚见取证记录）
-
-`0xC0` · `0x142` · `0x1BB` · `0x1A6` · `0x1D2`/`0x1D3` · `0x300`/`0x301` · `0x6E`/`0x6F`/`0x196` · `0x217`（spec 成篇）· `0x12F` ·
-`0x2CC`/`0x2CD`/`0x2CE` · `0x2E6`/`0x2E7`/`0x2E8`/`0x2EA` · `0x10D` · `0x205` · `0x20E` · `0xC5`/`0xC6`/`0xC7` · `0x306`。
-★ `0x74/0x7f` 参数格初值 = 配置 `message:MessageSpeed`（写点 `0x417E98`/`0x417EAB`）。
-
-## 修复 / 未定
-
-- **已修：滚动条中段断开**。真因是绘制项的**物体空间矩阵**（`0x1FD` 的 `sy`）被忽略；`gpu_scene.cpp` 与
-  `scene_raster.cpp` 都按 `scene_record(key)->scale` 放大四边形（真机截图对照一致）。
-- **`0x204` 对位规则已定案（2026-10-27）**：`y` = **字形格顶**；两条绘制入口在落字前 `+ 本次ascent` ⇒ 用基线。
-  模式 1 的基线 = `y + 缓存ascent`（本次被抵消）；缓存 = 字体重建时对**参考字体**（重建入口常量 "ＭＳ ゴシック"，
-  不是对象当前字面名）量到的 `tmAscent`（`GetTextMetricsA` 的**出参**写 `Font+0x313EC`，`+0x313F0` = tmAscent）。
-  取证：`repo:docs/02-engine/ops-forensics-2026-10-title-option.md` §26 / §28。
-- **已修：文字被割裂到两行之间 / 整体偏一个 ascent**。`0x2db` 实测在根脚本 `ip=788` 就是 1；真因是缓存钉成 0。
-  守卫：`core_selftest` 的「0x204 纵向对位」（改回 0 ⇒ 当场红）。
-- **度量：本 emulator 用 Amayui CN（渲染字体）量缓存**（用户口径：引擎量常量 MS Gothic 是偷懒假设）。
-  `cached_ascent = current_ascent` ⇒ 模式 1 与模式 0 基线相同；引擎的参考字体事实仍记在 spec 的
-  `RES-RENDER-TEXT-ALIGN-REFERENCE`（不是本实现的取值来源）。守卫：同一守卫断言两模式墨迹顶差 ≤1px。
-  spec 复审记录：`repo:docs/02-engine/spec-audit-2026-10.md` §七十二。
-- **已修：滚动时文字不刷新**。真因是 GPU 纹理缓存按 revision 命中、`0x1f8` 又把 revision 重置成 1
-  （每页固定 14 条 0x204 ⇒ 终值恒 15）；去掉重置后每轮重画版本号必前进。守卫：`core_selftest` 的两轮
-  「重建 + 同条数 0x204」（旧行为 2 ⇒ 红）。⚠ 无头 `--bmp` 每帧新建 cache，**看不到**这类 bug；窗口路径才命中。
-  若"底部残留五行"仍在，再按 §27 的边界查 0x1f7/0x1fb 的键区间。
-- **来源分流（§37/§38）**：有 bake ⇒ **完全按引擎**（格式看 AA 配置 + 两趟）；无 bake ⇒ 同色 mono+1趟、
-  异色 灰度+2趟。bake loader 仍 stub；覆：无 bake 同色 199/3、无 bake 异色 318/1、有 bake(config 0) 336/0；
-  守卫：无 bake 同色 alpha 0-255 / 异色含中间值 / 有 bake 异色仍 0-255。颜色选择是宿主视觉（引擎格式只看 AA 配置）。另两条见子节点（黑边 = 模式 3 副色趟、真机字形 = `EMULATOR_CXX_GLYPH_GDI`），取证 §40/§41。
-
-## 欠账
-
-- `0x205` / `0x20E` **没有** `core_selftest` 断言（`0x204` 对位规则已有，且做过变异验证；`0xC5`/`0xC6`/`0xC7`/`0x306` 已有）。
-- **取证齐未实现**：`0x82`（文本排版）、`0xC2`（音乐转移）、`0x2CF`（画面模式 apply；按用户口径**不做真全屏**）、`0x1D0`（步进算法未定）。
-- **静态出现未走到**：`0x1BA`（取证齐）、`0xBA`/`0xB6`/`0xB7`/`0xC4`/`0x194`/`0x1B5`/`0x1B8`/`0x1B9`/`0x2F5`/`0x2FF`/`0x307`/`0xB8`/`0x215`。
-- **spec 条目**：上面所有实现目前只有取证记录，`data/spec` 未成篇（准入门下一层工作）。
+TITLE：`0x12e` 命中框表 → `0xa1/a2/a3` 菜单分派 → key 3 → `0x3 call-script 52` ⇒ CONFIG.BIN → `0x3 call-script 20940`。
+点击在**抬起**时生效；左键 = 引擎位 0。实现指令：`0xC0`/`0x142`/`0x1BB`/`0x1A6`/`0x1D2`/`0x1D3`/`0x300`/`0x301`/`0x6E`/`0x6F`/`0x196`/`0x217`/`0x12F`/`0x2CC`/`0x2CD`/`0x2CE`/`0x2E6`/`0x2E7`/`0x2E8`/`0x2EA`/`0x10D`/`0x205`/`0x20E`/`0xC5`/`0xC6`/`0xC7`/`0x306`。
 
 ## 当前门禁（实测）
 
-```bash
-ctest --test-dir apps/emulator-cxx/out --output-on-failure   # 16/16
-pnpm test                                                    # exit 0（0 fail）
-pnpm tools requirements validate                             # 6/6
-pnpm tools corpus validate                                   # exit 0（8 通过 / 1 警告）
-```
+`ctest --test-dir apps/emulator-cxx/out` 21/21 · `pnpm test` 1103 通过 · `pnpm tools spec validate` 13/13 ·
+`pnpm tools requirements validate` 6/6 · `pnpm tools corpus validate` 8 通过 / 0 失败 / 1 警告。
+
+## 工作口径（2026-10-29）
+
+- 本节点**不关闭**：它是"当前实现总览与交接"，随工作更新；进度仍以 `pnpm tools requirements plan` 为准。
+- **spec 完整性判据**：所有影响可观察行为的字段 / 触发 / 转换都写全，独立实现者**只凭 spec**能写出唯一实现。
+  ⇒ 需要回看 `.lst` 才能补的字段 / 触发 = **spec 缺口**（进正文或 residual/gap），不是"原则上定不了"。
+- **静态优先**：单线程确定性程序，分支 / 触发都可静态枚举；"需要真机采样"只有静态读完后仍有两个在 spec tick 边界上
+  不可区分的模型时才成立，并要写明采什么。先把 `0x4096A9` / `0x406F90` / `sub_45BE20` 读完。
+- **spec vs emulator**：spec 写领域状态机（字段 / 触发 / 请求），机器布局走 `storage` 指针；emulator 是示范与第二实现证据。
+- 详细口径：`repo:docs/02-engine/spec-proposal.md` §9；技能 `amayui-spec` §0.5。

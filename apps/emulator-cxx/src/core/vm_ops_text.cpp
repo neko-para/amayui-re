@@ -235,6 +235,21 @@ void Machine::clear_text_layer(int slot) {
     text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
 }
 
+void Machine::append_text_span_record(int slot, const std::string& text, int x, int y, int x1,
+                                      int y1, std::int32_t flags) {
+    // 文本门 < 0（`0x1bb` 写 0x80000000）⇒ 排版层整批不追加记录（`0x46BE30` 的 `a5 >= 0` 分支）。
+    if (font_text_gate_5ec7c_ < 0) return;
+    TextSpanRecord record;
+    record.slot = slot;
+    record.x = x;
+    record.y = y;
+    record.x1 = x1;
+    record.y1 = y1;
+    record.flags = flags;
+    record.text = text;
+    text_spans_.push_back(std::move(record));
+}
+
 void Machine::draw_text_layer_text(int slot, const std::string& text, const std::string& rubi) {
     if (slot < 0 || slot >= 10) return;
     if (text.empty() && rubi.empty()) return;
@@ -248,29 +263,50 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     const bool auto_line_feed = config_.get_int("set:AutoLineFeed") == 1;
     int line_start_x = start_x;  // 主文本最后一行的左端（振り仮名那一格的左端用它）
+    int line_start_y = start_y;
     if (!text.empty()) {
         // 逐字符**布局**（量度 + 折行 + 逐字符绘制条目）+ 把真正的落字**入队**：
         // 引擎在追加时一次性写好布局格与文本记录，绘制侧每帧只推进一格（`sub_409400` → `0x4096a9`）。
         // ★ 自动折行门 = 配置 `set:AutoLineFeed`（引擎读进 `Font+0x57C`，见 `0x417B6E` / `0x46C132`）；
         //   行头禁则是"查一张本作恒空的表" ⇒ 折行只看右界与门（见 spec 的 `ADV-TEXT-APPEND`）。
-        for (const std::string& unit : split_sjis_units(text)) {
+        // ★ 文本记录（72 字节向量）：排版层在**每段结束时**追加一条（正常收尾 `0x46CAB7`；折行时先把
+        //   当前段的前缀提交，`0x46C225`），并在**每次行结束**再追加一条空串记录（`sub_46AF90`，
+        //   折行 `0x46C3B1` / `0x6f`）。`a3` = 文本门 `Engine+0x5EC7C`：它 < 0（抑制）时整批不追加
+        //   （`0x46BE30` 的 `if (a5 >= 0)`）；正常是 0，行结束那条再或上 8。
+        const std::vector<std::string> units = split_sjis_units(text);
+        std::string line_text;
+        for (std::size_t ui = 0; ui < units.size(); ++ui) {
+            const std::string& unit = units[ui];
             int advance = 0;
             // 量度：画在画布外（blit 会越界丢弃，但 pen_x 仍然推进），避免先画后折行。
             if (!draw_text_into_texture(*this, id, -10000, state.cursor_y, unit, &error, &advance)) {
                 if (!error.empty()) report_error(error);
-                return;
+                // 没有字体后端也要留下"这一段"的记录：排版账与栅格化是两件事。
+                for (std::size_t j = ui; j < units.size(); ++j) line_text += units[j];
+                break;
             }
             if (auto_line_feed && advance > 0 && state.cursor_x > rec.f1c &&
                 state.cursor_x + advance > rec.f24) {
+                append_text_span_record(slot, line_text, line_start_x, line_start_y, state.cursor_x,
+                                        state.cursor_y + line_height, font_text_gate_5ec7c_);
+                append_text_span_record(slot, std::string(), 0, 0, 0, 0,
+                                        font_text_gate_5ec7c_ | 8);
+                line_text.clear();
                 state.cursor_x = rec.f1c;
                 state.cursor_y += line_height;
                 line_start_x = state.cursor_x;
+                line_start_y = state.cursor_y;
             }
             const int x0 = state.cursor_x;
             const int y0 = state.cursor_y;
             create_text_layer_item(slot, x0, y0, x0 + advance, y0 + line_height);
             pending_glyphs_.push_back(PendingGlyph{slot, x0, y0, 0, unit});
             state.cursor_x += advance;
+            line_text += unit;
+        }
+        if (!line_text.empty()) {
+            append_text_span_record(slot, line_text, line_start_x, line_start_y, state.cursor_x,
+                                    state.cursor_y + line_height, font_text_gate_5ec7c_);
         }
     }
     if (!rubi.empty()) {
@@ -352,6 +388,8 @@ void Machine::end_text_layer_line(int slot) {
     const int line_gap = 6;
     const int line_advance = (glyph_height_ > 0 ? glyph_height_ : 24) + line_gap;
     state.cursor_y += line_advance;
+    // `sub_46AF90` 在 `a3 >= 0` 时还会追加一条**空串记录**（标志 |= 8）；`0x6f` 与折行共用这个入口。
+    append_text_span_record(slot, std::string(), 0, 0, 0, 0, font_text_gate_5ec7c_ | 8);
 }
 
 void Machine::op_71(const Instruction& instruction) {

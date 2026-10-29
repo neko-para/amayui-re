@@ -3797,6 +3797,16 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
         }
         if (!second_line) return fail("AutoLineFeed=1 时没有第二行的绘制条目");
         if (!second_line_at_origin) return fail("折行后没有回到文本原点 x=5");
+        // ★ 折行是"提前结束当前行"，不是"把已排好的前缀搬到新行重排"：
+        //   第一行的字符格必须留在原 y（= 文本原点），整行被搬走 ⇒ 这里红。
+        std::size_t first_line_items = 0;
+        for (std::uint32_t k = 0; k < 40; ++k) {
+            const core::DrawItem* item = wrap_machine.draw_item(190100u + k);
+            if (item != nullptr && item->top == 5 && item->left >= 5) ++first_line_items;
+        }
+        if (first_line_items == 0) {
+            return fail("折行把第一行的字符格搬到了新行（前缀不应在新行重排；引擎的越界分支只提交该行、不改坐标）");
+        }
     }
     {
         // 0x1c1 改宽 / 高拷贝（+0x24/+0x28）⇒ 折行阈值跟着改小。
@@ -3838,6 +3848,45 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
         if (!core::text_backend_available()) return true;
         if (no_wrap.text_layer_cursor_y(9) != 5) {
             return fail("AutoLineFeed=0 时仍然折行了");
+        }
+    }
+    // 文本记录：`0x196` 的排版层必须**追加一条记录**（不是只画像素）⇒ `0x82` 按下标 0 不能早退。
+    // ★ 这条钉的是"记录下标空间与引擎一致"；本实现早先只画像素、`text_spans_` 为空，
+    //   于是 0x82 对正文记录直接走建界早退（`0x82` 的用例 ㉑ 只覆盖了"向量为空"）。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 64}, {0, 64}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 200000}, {0, 20}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x196, {{0, 0}, {5, 0}, {5, 1}});   // 正文 AB
+        emit_instruction(bytes, 0x82, {{0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}});  // op2 = 记录 0
+        emit_instruction(bytes, 0x6F, {{0, 0}});                    // 行结束 ⇒ 空串记录
+        emit_instruction(bytes, 2, {});
+        core::Machine records(key, table);
+        records.write_text(core::Operand{5, 0}, "AB");
+        records.load_root(bytes);
+        for (int i = 0; i < 6; ++i) {
+            if (!records.step()) return fail("0x196 之前就停机");
+        }
+        if (!records.step()) return fail("0x196 停机");
+        if (records.text_span_count() != 1) {
+            return fail("0x196 没有追加文本记录（0x82 会因此对正文记录早退）");
+        }
+        if (records.text_span_text(0) != "AB") return fail("0x196 追加的记录文本不是 AB");
+        if (records.text_span_slot(0) != 9) return fail("0x196 追加的记录槽不是层 9");
+        const auto draws_before = records.text_span_draw_requests();
+        if (!records.step()) return fail("0x82 停机");
+        if (records.text_span_draw_requests() != draws_before + 1) {
+            return fail("0x82 对 0x196 产出的记录早退了（下标空间不一致）");
+        }
+        if (!records.step()) return fail("0x6f 停机");
+        if (records.text_span_count() != 2) return fail("0x6f 没有追加行结束的空串记录");
+        if (!records.text_span_text(1).empty()) return fail("行结束记录不是空串");
+        if ((records.text_span_flags(1) & 8) == 0) {
+            return fail("行结束记录没有置 bit3（标志 |= 8）");
         }
     }
     return true;

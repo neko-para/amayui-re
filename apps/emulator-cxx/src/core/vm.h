@@ -543,6 +543,8 @@ public:
     std::int32_t text_span_resource(std::size_t i) const { return text_spans_[i].resource; }
     std::int32_t text_span_voice_slot(std::size_t i) const { return text_spans_[i].voice_slot; }
     std::int32_t text_span_flags(std::size_t i) const { return text_spans_[i].flags; }
+    const std::string& text_span_text(std::size_t i) const { return text_spans_[i].text; }
+    std::int32_t text_span_slot(std::size_t i) const { return text_spans_[i].slot; }
     std::size_t text_span_draw_requests() const { return text_span_draw_requests_; }
     std::size_t text_span_alt_requests() const { return text_span_alt_requests_; }
     // ── 音效的两个**不同**槽量（⛔ 别再合成一个 15 —— 那曾让实现假造 5 个引擎格） ──
@@ -861,6 +863,9 @@ private:
     bool ensure_text_layer_texture(int slot);
     void clear_text_layer(int slot);
     void draw_text_layer_text(int slot, const std::string& text, const std::string& rubi);
+    // 排版层追加一条 72 字节文本记录（`sub_45F090` 的最小投影；文本 / 位置 / 标志）。
+    void append_text_span_record(int slot, const std::string& text, int x, int y, int x1, int y1,
+                                 std::int32_t flags);
     void end_text_layer_line(int slot);
     void create_text_layer_item(int slot, int left, int top, int right, int bottom);
     void erase_text_layer_draw_items(int slot);
@@ -1070,12 +1075,17 @@ private:
     // `0x82` 消费的那条**文本记录向量**（`T_Font+0xD24`，72 字节/条）的**最小可观察投影**：
     // 只建已取证的 6 个字段（+0x00 / +0x14 / +0x18 / +0x1C / +0x20 / +0x28），其余字段不建（残差）。
     struct TextSpanRecord {
-        std::int32_t slot = 0;        // +0x00 当前文本槽
+        std::int32_t slot = 0;        // +0x00 当前文本槽（排版记录里是层号）
+        std::int32_t x = 0;           // +0x04 绘制起点 x（排版记录）
+        std::int32_t y = 0;           // +0x08 绘制起点 y（排版记录）
+        std::int32_t x1 = 0;          // +0x0C 段末 x（排版记录）
+        std::int32_t y1 = 0;          // +0x10 段末 y（排版记录）
         std::int32_t resource = 0;    // +0x14 语音资源
         std::int32_t a18 = 0;         // +0x18
         std::int32_t a1c = 0;         // +0x1C
         std::int32_t voice_slot = 0;  // +0x20
-        std::int32_t flags = 0;       // +0x28（bit1 = 按 op3 位0 显隐；bit30 = 可触发语音）
+        std::int32_t flags = 0;       // +0x28（bit0 = 新段；bit3 = 行结束空串记录；bit30 = 可触发语音）
+        std::string text;             // +0x2C 起的 28 字节字符串对象（本模型只存内容）
     };
     std::vector<TextSpanRecord> text_spans_;
     std::size_t text_span_draw_requests_ = 0;  // 追加绘制命令（度量与命令本身未建模）
