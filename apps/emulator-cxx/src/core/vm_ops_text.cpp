@@ -228,6 +228,9 @@ void Machine::clear_text_layer(int slot) {
     texture->non_file = true;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     erase_text_layer_draw_items(slot);
+    // ★ 清画布同时丢掉这一层的**待画格**：引擎那边 `0x71` 清的是布局向量（源），我们的队列就是它的对应物
+    //   —— 不清会让"清空后紧接着的下一帧"把上一段的字补画进来（可见的串字）。
+    erase_pending_glyphs(slot);
     text_layer_state_[static_cast<std::size_t>(slot)].cursor_x = rec.f1c;
     text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
 }
@@ -244,11 +247,12 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
     const int line_height = (glyph_height_ > 0 ? glyph_height_ : 24) + 6;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     const bool auto_line_feed = config_.get_int("set:AutoLineFeed") == 1;
+    int line_start_x = start_x;  // 主文本最后一行的左端（振り仮名那一格的左端用它）
     if (!text.empty()) {
-        // 逐字符绘制 + 逐字符绘制条目（键 = 键基数 + 本层条目序号）：与引擎的 per-cell 提交同形，
-        // 也让“文本层与窗口 key 交错”成为可表达的行为（整张画布一次贴出是它的退化情形）。
-        // ★ 自动折行门 = 配置 `set:AutoLineFeed`（引擎读进 `Font+0x57C`，见 0x417B6E / 0x46C132）；
-        //   超右界时的禁则 / 整行重排不在本实现（残差）。
+        // 逐字符**布局**（量度 + 折行 + 逐字符绘制条目）+ 把真正的落字**入队**：
+        // 引擎在追加时一次性写好布局格与文本记录，绘制侧每帧只推进一格（`sub_409400` → `0x4096a9`）。
+        // ★ 自动折行门 = 配置 `set:AutoLineFeed`（引擎读进 `Font+0x57C`，见 `0x417B6E` / `0x46C132`）；
+        //   行头禁则是"查一张本作恒空的表" ⇒ 折行只看右界与门（见 spec 的 `ADV-TEXT-APPEND`）。
         for (const std::string& unit : split_sjis_units(text)) {
             int advance = 0;
             // 量度：画在画布外（blit 会越界丢弃，但 pen_x 仍然推进），避免先画后折行。
@@ -260,31 +264,83 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
                 state.cursor_x + advance > rec.f24) {
                 state.cursor_x = rec.f1c;
                 state.cursor_y += line_height;
+                line_start_x = state.cursor_x;
             }
             const int x0 = state.cursor_x;
             const int y0 = state.cursor_y;
-            if (!draw_text_into_texture(*this, id, x0, y0, unit, &error, &advance)) {
-                if (!error.empty()) report_error(error);
-                return;
-            }
             create_text_layer_item(slot, x0, y0, x0 + advance, y0 + line_height);
+            pending_glyphs_.push_back(PendingGlyph{slot, x0, y0, 0, unit});
             state.cursor_x += advance;
         }
     }
     if (!rubi.empty()) {
         // 振り仮名用 **B 支字号**（`0x197` 写的那一格；示例里是 10），画在主文本上方。
+        //
+        // ★ 横向算式（`sub_465a20`，调用点 `0x46c379`）：振り仮名摆进**它自己那一格** ——
+        //   格 = 本条主文本**最后一行**占的范围（调用方把该格的 x / x1 写进两个局部，`a5` 就是两者之差
+        //   = 格宽，`0x46c363`）；`d = 格宽 − 整串量度宽 W`、`n = 假名数 + 1`（= `⌊(字节数+3)÷2⌋`）：
+        //     d > 0  ⇒ 每档步进 = ⌊d ÷ n⌋；首字 x = 格左 + 步进，每个假名再加一次步进
+        //              （2 字节整份、1 字节半份，`0x465ef1`）⇒ 两端各留一份、恰好铺满格宽；
+        //     d ≤ 0  ⇒ 不加步进，整串以格**中心**对齐：首字 x = 格左 − ⌊|d|÷2⌋（`0x465b25`）。
+        //   ⛔ 不是"按行比例切分"（按比例只决定这一行分到几个假名，`0x46c2ed`）。
         const int ruby_size = font_b_height_ > 0 ? font_b_height_ : 10;
         const int ruby_y = start_y - ruby_size - 2;
-        int ruby_advance = 0;
-        if (!draw_text_into_texture(*this, id, start_x, ruby_y, rubi, &error, &ruby_advance,
+        const int cell_x = line_start_x;
+        const int cell_width = state.cursor_x - cell_x;  // 最后一行主文本的宽
+        int whole_advance = 0;
+        if (!draw_text_into_texture(*this, id, -10000, ruby_y, rubi, &error, &whole_advance,
                                     ruby_size)) {
             if (!error.empty()) report_error(error);
         } else {
-            create_text_layer_item(slot, start_x, ruby_y, start_x + ruby_advance,
-                                   ruby_y + ruby_size + 2);
+            const int d = cell_width - whole_advance;
+            const int gaps = static_cast<int>((rubi.size() + 3) / 2);  // 假名数 + 1
+            const int step = d > 0 && gaps > 0 ? d / gaps : 0;
+            const int shift = d <= 0 ? (-d) / 2 : 0;
+            int x = cell_x + step - shift;
+            for (const std::string& kana : split_sjis_units(rubi)) {
+                int advance = 0;
+                if (!draw_text_into_texture(*this, id, -10000, ruby_y, kana, &error, &advance,
+                                            ruby_size)) {
+                    if (!error.empty()) report_error(error);
+                    continue;
+                }
+                create_text_layer_item(slot, x, ruby_y, x + advance, ruby_y + ruby_size + 2);
+                pending_glyphs_.push_back(PendingGlyph{slot, x, ruby_y, ruby_size, kana});
+                x += advance + (kana.size() == 1 ? step / 2 : step);
+            }
         }
     }
     if (TextureRecord* texture = texture_mut(id)) texture->revision++;
+}
+
+void Machine::erase_pending_glyphs(int slot) {
+    pending_glyphs_.erase(
+        std::remove_if(pending_glyphs_.begin(), pending_glyphs_.end(),
+                       [slot](const PendingGlyph& glyph) { return glyph.slot == slot; }),
+        pending_glyphs_.end());
+}
+
+void Machine::service_text_layers() {
+    // 每帧只画**一格**（引擎的推进器是全局的、每帧一次；帧间按 `message:MessageSpeed` 睡眠，属宿主时钟）。
+    // ★ 空队列 ⇒ 无事可做（这是常态：大部分帧没有待画字）。
+    // ★ **抽干**：宿主报了"有输入在按下" ⇒ 把剩下的待画格**一次**画完（引擎 `0x4096e0`–`0x4096f4`
+    //   的 do-while：每轮仍走"推进一格"那条路，循环到队列空）。
+    const bool drain = input_pressed_;
+    while (!pending_glyphs_.empty()) {
+        const PendingGlyph glyph = pending_glyphs_.front();
+        pending_glyphs_.erase(pending_glyphs_.begin());
+        const auto slot = static_cast<std::size_t>(glyph.slot);
+        if (slot >= 10) continue;
+        if (!text_layer_state_[slot].texture_ready) continue;  // 画布被拆掉 / 没建 ⇒ 这个字丢掉
+        std::string error;
+        int advance = 0;
+        if (!draw_text_into_texture(*this, text_layer_texture_id(slot), glyph.x, glyph.y, glyph.unit,
+                                    &error, &advance, glyph.size)) {
+            if (!error.empty()) report_error(error);
+        }
+        if (TextureRecord* texture = texture_mut(text_layer_texture_id(slot))) texture->revision++;
+        if (!drain) return;  // 没有输入 ⇒ 这一帧就画这一个
+    }
 }
 void Machine::end_text_layer_line(int slot) {
     if (slot < 0 || slot >= 10) return;

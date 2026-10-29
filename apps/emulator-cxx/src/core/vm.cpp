@@ -351,6 +351,9 @@ bool Machine::step() {
     advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16, !paused);
     // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：新帧会置脏，所以必须在门前那次渲染判定之前。
     if (!paused) service_movies();
+    // 门之前的**逐字符显现**（typewriter）：引擎的推进器每帧跑一次、帧间按 `message:MessageSpeed` 睡眠，
+    // 等待输入时**也在跑**（那正是"字还在打"的形态）⇒ 这里不受 `paused` 影响。
+    service_text_layers();
     // 门前渲染：主循环闸门（0x412739–0x4127E2）先要求
     // `(0x21B != 0) || (状态字 & 0x2400)`，脏只是更内层条件。
     const bool render_gate = scalar_21b_ != 0 || (state_flags_ & (0x400u | 0x2000u)) != 0;

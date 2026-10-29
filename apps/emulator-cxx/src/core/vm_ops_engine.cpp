@@ -411,7 +411,11 @@ void Machine::op_82(const Instruction& instruction) {
         text_span_alt_requests_ += 1;  // 转交另一条绘制路径（未建模）
         return;
     }
-    if ((op3 & 2) != 0) {
+    // 借用的两份旧值（见函数尾部的归还）；位 1 未置 ⇒ 根本不借。
+    const bool borrow_colors = (op3 & 2) != 0;
+    const std::int32_t saved_primary = font_primary_color_;
+    const std::int32_t saved_secondary = font_secondary_color_;
+    if (borrow_colors) {
         font_primary_color_ = bswap24(op4);
         font_secondary_color_ = bswap24(op5);
     }
@@ -421,6 +425,15 @@ void Machine::op_82(const Instruction& instruction) {
         voice_play_requests_ += 1;
     }
     text_span_draw_requests_ += 1;
+    // ★ 颜色是**借用**，不是改字体：`0x82` 的实现（`sub_466000`）在同一次调用里把两格改成操作数、
+    //   画完之后把**旧值写回**并重建字体 —— 副色 `0x467371`、主色 `0x4673e1`，归还的判据里带一个
+    //   "本次借过颜色"的标志（它在 `0x46641d` 记下，正好与跳过写入的是同一个 `jz`）。
+    //   ⇒ 本条返回时两格颜色与进入时**相同**。⛔ 别实现成永久改色：那会让此后所有"不吃颜色实参"的
+    //   绘制（`0x204` 的主色 / 副色就来自这两格）用残留色画。
+    if (borrow_colors) {
+        font_primary_color_ = saved_primary;
+        font_secondary_color_ = saved_secondary;
+    }
     return;
 }
 

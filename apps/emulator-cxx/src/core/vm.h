@@ -180,6 +180,19 @@ struct TextLayerState {
     bool texture_ready = false;
 };
 
+// 逐字符显现（typewriter）的**待画格**。
+// ★ 引擎：`0x6e` / `0x196` 在追加时一次性写好布局格与文本记录，**绘制侧每帧只推进一格**
+//   （推进器 `sub_409400` 每帧 → `0x4096a9` 序号 +1，帧间按 `message:MessageSpeed` 睡眠，
+//   有按键 / 跳过时把剩余格一次抽干）。我们的 `step()` 就是"一帧"（`advance_scene` 每步 +16ms），
+//   所以这里排的是一个**跨帧队列**：追加时入队，每步画出一个。
+struct PendingGlyph {
+    std::int32_t slot = 0;
+    std::int32_t x = 0;
+    std::int32_t y = 0;
+    std::int32_t size = 0;  // 0 ⇒ 用 A 支字号（主文本）；> 0 ⇒ 显式字号（振り仮名）
+    std::string unit;       // 一个字符的 SJIS 字节串（1~2 字节；振り仮名可能是一整串）
+};
+
 struct MovieRecord {
     bool present = false;
     bool started = false;  // 只有成功启动过才进「播完」判据 / 维持影片位
@@ -311,6 +324,8 @@ public:
     std::int32_t text_layer_cursor_y(std::size_t slot) const { return text_layer_state_[slot].cursor_y; }
     bool text_layer_texture_ready(std::size_t slot) const { return text_layer_state_[slot].texture_ready; }
     std::int32_t text_layer_draw_key(std::size_t slot) const { return list_records_[slot].f68; }
+    // typewriter：还没画出来的待画格数（守卫用；⛔ 不是产品接口）。
+    std::size_t pending_glyph_count() const { return pending_glyphs_.size(); }
     std::int32_t scalar_252() const { return scalar_252_; }
     std::int32_t scalar_88a() const { return scalar_88a_; }
     std::int32_t scalar_88b() const { return scalar_88b_; }
@@ -368,6 +383,11 @@ public:
     // 平台输入采样（`0xff` 的外部请求）；缺省 = 没有设备 ⇒ 输入字保持 0。
     using KeySampler = std::function<std::uint32_t()>;
     void set_key_sampler(KeySampler sampler) { key_sampler_ = std::move(sampler); }
+    // 宿主每帧喂一次"当前有没有输入被按下"（键盘 / 鼠标任一）。它只被**文本层的抽干**读：
+    // 引擎在推进器里"有按键 ⇒ 把剩下的待画格一次画完"（`0x4096e0`–`0x4096f4` 的 do-while），
+    // 那是主循环**被动观察**输入状态，⛔ 与脚本主动取键（`0xff` / `0x109`）不是一回事。
+    void set_input_pressed(bool pressed) { input_pressed_ = pressed; }
+    bool input_pressed() const { return input_pressed_; }
     // 滚轮增量（`0x10d` 读并清 `Engine+0x1E74`）：**宿主推**（窗口过程把 WM_MOUSEWHEEL 加进那一格）。
     // ★ 符号与刻度属平台边界（0x10d 只规定"读出后清 0"）⇒ 本版按宿主给的原值累加。
     void add_wheel_delta(std::int32_t delta) { wheel_accum_ += delta; }
@@ -844,6 +864,9 @@ private:
     void end_text_layer_line(int slot);
     void create_text_layer_item(int slot, int left, int top, int right, int bottom);
     void erase_text_layer_draw_items(int slot);
+    // 逐字符显现（typewriter）：每帧（= 每次 `step()`）画出一格；`0x71` 清空时丢掉该层的待画格。
+    void service_text_layers();
+    void erase_pending_glyphs(int slot);
     // 输入 / 等待 / 空操作（vm_ops_io.cpp）
     void op_109(const Instruction&); void op_108(const Instruction&); void op_c8(const Instruction&); void op_cc(const Instruction&);
     // 滚轮（读并清 `Engine+0x1E74`）
@@ -1078,6 +1101,8 @@ private:
     std::int32_t current_text_slot_ = 0;  // `Engine+0x7780C`（`0x6E` / `0x196` 写）
     // 十个文本层的宿主游标（纹理 = 20 + 层号；矩形 / 原点 / 键基数在 `list_records_`）。
     std::array<TextLayerState, 10> text_layer_state_{};
+    // typewriter 的跨帧待画格（追加时入队、每次 step 画出一个；全局一个队列 = 引擎的推进器是全局的）。
+    std::vector<PendingGlyph> pending_glyphs_;
     std::int32_t scalar_10f_ = 0;
     std::int32_t scalar_248_ = 0;
     std::int32_t font_8b_ = 0;
@@ -1092,6 +1117,8 @@ private:
     std::uint32_t input_word_ = 0;
     // 平台输入采样的注入点（`0xff`）；空 = 没有设备。
     KeySampler key_sampler_;
+    // 宿主每帧喂的"有输入在按下"（见 set_input_pressed）：只驱动文本层的抽干。
+    bool input_pressed_ = false;
     // 平台触点的注入点（`0x2fc`）；空 = 永远没有触点。
     TouchSource touch_source_;
     // 平台光标 / 按钮（`0x109` / `0x108`）；空 = 设备不可用。

@@ -2911,23 +2911,37 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         }
     }
 
-    // ㉒ 0x82：有记录时按 op3 位1 写两格颜色（**字节反转**）；位3 + 记录 bit30 ⇒ 触发一次配音
+    // ㉒ 0x82：有记录时按 op3 位1 把两格颜色**借用**给这次绘制（字节反转），**返回前恢复**
+    //    （引擎 `sub_466000` 写完颜色后逐字段把旧值写回：副色 `0x467371` / 主色 `0x4673e1`）；
+    //    位3 + 记录 bit30 ⇒ 触发一次配音。
+    //    ★ 这条钉的是"**借用而非改色**"：永久写会让后续 `0x204`（它的颜色来自这两格）用残留色画。
     {
         auto bytes = make_script_with_body();
-        emit_instruction(bytes, 0xC4, {{0, 500}});                                  // 先产出一条记录
+        emit_instruction(bytes, 0x76, {{0, 0x0A0B0C}});  // 主色先设成可辨认的值（存的是反转后的值）
+        emit_instruction(bytes, 0x77, {{0, 0x0D0E0F}});  // 副色
+        emit_instruction(bytes, 0xC4, {{0, 500}});       // 产出一条记录
         emit_instruction(bytes, 0x82, {{0, 0}, {0, 0}, {0, 2}, {0, 0x112233}, {0, 0x445566}});
         emit_instruction(bytes, 0x82, {{0, 0}, {0, 0}, {0, 8}, {0, 0}, {0, 0}});
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
         machine.load_root(bytes);
+        if (!machine.step()) return fail("0x76 停机");
+        if (!machine.step()) return fail("0x77 停机");
+        const auto primary_before = machine.font_primary_color();
+        const auto secondary_before = machine.font_secondary_color();
+        if (primary_before != 0x0C0B0A) return fail("0x76 没有按字节反转存主色（应 0x0C0B0A）");
+        if (secondary_before != 0x0F0E0D) return fail("0x77 没有按字节反转存副色（应 0x0F0E0D）");
         if (!machine.step()) return fail("0xc4（产出记录）停机");
         if (!machine.step()) return fail("0x82（颜色支）停机");
-        if (machine.font_primary_color() != 0x332211) return fail("0x82 主色没有字节反转（应 0x332211）");
-        if (machine.font_secondary_color() != 0x665544) return fail("0x82 副色没有字节反转（应 0x665544）");
+        if (machine.font_primary_color() != primary_before ||
+            machine.font_secondary_color() != secondary_before) {
+            return fail("0x82 把颜色**永久**改了 —— 引擎是借用后归还（0x467371 副色 / 0x4673e1 主色），"
+                        "本条返回时两格必须与进入时相同");
+        }
         if (machine.voice_play_requests() != 1) return fail("0x82（op3=2）不该发配音请求");
         if (!machine.step()) return fail("0x82（配音支）停机");
         if (machine.voice_play_requests() != 2) return fail("0x82（op3=8）没有触发配音请求");
-        if (machine.font_primary_color() != 0x332211) return fail("0x82（op3=8）不该再写颜色");
+        if (machine.font_primary_color() != primary_before) return fail("0x82（op3=8）不该改颜色");
     }
 
     // ⑬ 0x198：槽下标 0 ⇒ **默认槽 1**；只写那一槽的两个偏移；不碰字号 / 行高 / 别的槽
@@ -3212,7 +3226,280 @@ bool check_glyph_alpha() {
     return true;
 }
 
-// ── 文字亮度那条链的**端到端**那一半：AA 关 ⇒ 最大 alpha 255；AA 开（GRAY4）⇒ 240 ──
+// ── 写入三条支路（`CORE-OPS-RENDER-TEXT-204` 的合同；纯算术，不需要文本后端） ──
+/** ① 覆盖值 = 0 ⇒ 一个字节都不写；② 通道值 = 通道满值 **或** 目标自身通道值 = 0 ⇒ 整像素覆写源色；
+ *  ③ 其余 ⇒ 逐通道加权 `(源×值 + 目标×(满−值)) ÷ 满`、输出通道值 = max(目标, 覆盖值)。
+ *  ★ 钉住的是"**哪一支**"：把 ② 写成"与黑色加权"（旧实现）会让空白画布上的墨迹颜色被压成 α 倍；
+ *    把 ③ 写成覆写会让叠加失去混合。 */
+bool check_glyph_compose() {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "compose: %s\n", what);
+        return false;
+    };
+    // ① 覆盖值 0 ⇒ 不动（连 alpha 都不写）。
+    {
+        std::uint8_t texel[4] = {10, 20, 30, 40};
+        core::compose_glyph_texel(texel, 200, 100, 50, 0);
+        if (texel[0] != 10 || texel[1] != 20 || texel[2] != 30 || texel[3] != 40) {
+            return fail("覆盖值 0 写了像素（应当是「一个字节都不写」）");
+        }
+    }
+    // ② 目标通道值 0 ⇒ 整像素覆写：颜色是**源色原值**、通道值 = 覆盖值（不是 α 倍）。
+    {
+        std::uint8_t texel[4] = {0, 0, 0, 0};
+        core::compose_glyph_texel(texel, 255, 128, 0, 240);
+        if (texel[0] != 255 || texel[1] != 128 || texel[2] != 0 || texel[3] != 240) {
+            std::fprintf(stderr, "compose: 得到 %u,%u,%u,%u\n", texel[0], texel[1], texel[2], texel[3]);
+            return fail("目标通道值 = 0 时没有整像素覆写源色（把 α 乘进颜色了）");
+        }
+    }
+    // ② 通道值 = 通道满值（255）⇒ 同样是覆写，且幂等。
+    {
+        std::uint8_t texel[4] = {7, 8, 9, 11};
+        core::compose_glyph_texel(texel, 200, 100, 50, 255);
+        if (texel[0] != 200 || texel[1] != 100 || texel[2] != 50 || texel[3] != 255) {
+            return fail("通道值 = 255 时没有整像素覆写");
+        }
+        core::compose_glyph_texel(texel, 200, 100, 50, 255);
+        if (texel[0] != 200 || texel[3] != 255) return fail("满覆盖重复写不是幂等");
+    }
+    // ③ 其余 ⇒ 加权；输出通道值 = max(目标, 覆盖值)。
+    {
+        std::uint8_t texel[4] = {255, 0, 0, 240};  // 目标：不透明红
+        core::compose_glyph_texel(texel, 0, 255, 0, 15);
+        const int expected_r = (0 * 15 + 255 * (255 - 15)) / 255;  // 240
+        const int expected_g = (255 * 15 + 0 * (255 - 15)) / 255;  // 15
+        if (texel[0] != expected_r || texel[1] != expected_g || texel[2] != 0) {
+            std::fprintf(stderr, "compose: 加权结果 %u,%u,%u（期望 %d,%d,0）\n", texel[0], texel[1],
+                         texel[2], expected_r, expected_g);
+            return fail("逐通道加权不是 (源×值 + 目标×(满−值)) ÷ 满");
+        }
+        if (texel[3] != 240) return fail("输出通道值不是 max(目标, 覆盖值)");
+    }
+    return true;
+}
+
+// ── 抽干：宿主报了"有输入在按下" ⇒ 剩余待画格在同一帧内画完 ──
+/** 引擎 `0x4096e0`–`0x4096f4` 的 do-while：有按键 / 跳过时不再"每帧一格"，而是把队列抽干。
+ *  我们的信号是宿主每帧喂的 `set_input_pressed()`（主循环**被动观察**输入，与脚本主动取键
+ *  `0xff` / `0x109` 无关）。
+ *  ★ 判据：同一段 3 字文本 —— ① 无输入时走一帧只多一个字；② 报"有输入"之后**一帧**就把剩下两个字
+ *  全画完（待画格归 0 且墨迹面积 ≥ 3 个字的量级）。 */
+bool check_text_drain(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "drain: %s\n", what);
+        return false;
+    };
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x80, {{0, 9}});
+    emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+    emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+    emit_instruction(bytes, 0x213, {{0, 9}, {0, 190500}, {0, 40}});
+    emit_instruction(bytes, 0x75, {{0, 20}});
+    emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+    emit_instruction(bytes, 0x78, {{0, 0}});
+    emit_instruction(bytes, 0x71, {{0, 9}});
+    emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});  // "ABC"
+    emit_instruction(bytes, 0x75, {{0, 20}});
+    emit_instruction(bytes, 0x75, {{0, 20}});
+    emit_instruction(bytes, 0x75, {{0, 20}});
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table);
+    machine.write_text(core::Operand{5, 0}, "ABC");
+    machine.load_root(bytes);
+    for (int i = 0; i < 9; ++i) {
+        if (!machine.step()) return fail("0x71 之前就停机");
+    }
+    int guard_steps = 0;
+    while (machine.pending_glyph_count() == 0 && guard_steps < 200) {
+        if (!machine.step()) return fail("没走到 0x6e 就停机");
+        ++guard_steps;
+    }
+    if (machine.pending_glyph_count() != 3) return fail("追加之后待画格数不是 3");
+    // ① 无输入：一帧只画一个。
+    if (!machine.step()) return fail("无输入那一帧停机");
+    if (machine.pending_glyph_count() != 2) return fail("无输入时一帧画了不止一个（抽干被无条件打开了）");
+    // ② 有输入：一帧抽干。
+    machine.set_input_pressed(true);
+    if (!machine.step()) return fail("抽干那一帧停机");
+    if (machine.pending_glyph_count() != 0) {
+        return fail("报了有输入却没有抽干（剩余格仍非 0）");
+    }
+    machine.set_input_pressed(false);
+    return true;
+}
+
+// ── 振り仮名的横向定位：铺满格宽（两端各留一份步进）/ 过宽时以格中心对齐 ──
+/** 引擎 `sub_465a20`（调用点 `0x46c379`）：振り仮名摆进**它自己那一格**（= 本条主文本最后一行的范围），
+ *  `d = 格宽 − 整串量度宽`、`n = 假名数 + 1`：
+ *   · d > 0 ⇒ 每档步进 ⌊d÷n⌋、首字 = 格左 + 步进 ⇒ **左右两端各留一份步进**（两端对齐）、假名之间等间距；
+ *   · d ≤ 0 ⇒ 整串以格中心对齐 ⇒ 左侧伸出量与右侧伸出量相等。
+ *  ★ 下面只用**绘制条目的矩形**做断言（不需要知道字体量度）：旧实现（左对齐 + 整串一个条目）
+ *   必然让"左端缩进 > 0"与"右端缩进 = 左端缩进"同时不成立 ⇒ 红。 */
+bool check_text_ruby(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "ruby: %s\n", what);
+        return false;
+    };
+    // 建一台机器：主文本 + 振り仮名各排一遍，然后返回条目的矩形（键 = 基数 + 序号）。
+    const auto layout = [&](const std::string& main_text, const std::string& ruby,
+                            std::vector<core::DrawItem>* out) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 824}, {0, 120}, {0, 108}, {0, 52}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 108}, {0, 52}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 180700}, {0, 40}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x197, {{0, 10}});
+        emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x196, {{0, 0}, {5, 0}, {5, 1}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.write_text(core::Operand{5, 0}, main_text);
+        machine.write_text(core::Operand{5, 1}, ruby);
+        machine.load_root(bytes);
+        for (int i = 0; i < 200 && out->empty(); ++i) {
+            if (!machine.step()) break;
+        }
+        for (std::uint32_t k = 0; k < 40; ++k) {
+            const core::DrawItem* item = machine.draw_item(180700u + k);
+            if (item == nullptr) continue;
+            out->push_back(*item);
+        }
+    };
+    // ① 窄振り仮名 × 宽格 ⇒ 两端各留一份步进、假名之间等间距。
+    {
+        std::vector<core::DrawItem> items;
+        layout("ABCDEFGH", "\x82\xA9\x82\xAB\x82\xAD", &items);  // かきく（3 假名）
+        if (items.size() != 11) return fail("条目数不是 8 主文本 + 3 振り仮名");
+        const int cell_left = items[0].left;
+        const int cell_right = items[7].right;
+        const int left_inset = items[8].left - cell_left;
+        const int right_inset = cell_right - items[10].right;
+        const int gap1 = items[9].left - items[8].right;
+        const int gap2 = items[10].left - items[9].right;
+        if (left_inset <= 0) {
+            return fail("振り仮名仍贴着格左（左对齐）—— 引擎是两端各留一份步进");
+        }
+        if (std::abs(left_inset - right_inset) > 1) {
+            std::fprintf(stderr, "ruby: 左缩进=%d 右缩进=%d\n", left_inset, right_inset);
+            return fail("两端缩进不相等（不是「铺满格宽」那一支）");
+        }
+        if (std::abs(gap1 - gap2) > 1 || std::abs(gap1 - left_inset) > 1) {
+            std::fprintf(stderr, "ruby: gap1=%d gap2=%d inset=%d\n", gap1, gap2, left_inset);
+            return fail("假名之间的间距不等于两端边距（步进没有均匀分摊）");
+        }
+    }
+    // ② 宽振り仮名 × 窄格 ⇒ 以格中心对齐：左侧伸出量 ≈ 右侧伸出量。
+    {
+        std::vector<core::DrawItem> items;
+        layout("A", "\x82\xA9\x82\xAB\x82\xAD\x82\xAF\x82\xB1", &items);  // かきくけこ（5 假名）
+        if (items.size() != 6) return fail("条目数不是 1 主文本 + 5 振り仮名");
+        const int cell_left = items[0].left;
+        const int cell_right = items[0].right;
+        const int overflow_left = cell_left - items[1].left;
+        const int overflow_right = items[5].right - cell_right;
+        if (overflow_left <= 0) {
+            return fail("振り仮名比格宽却没有向左伸出 —— 不是「以格中心对齐」那一支");
+        }
+        if (std::abs(overflow_left - overflow_right) > 2) {
+            std::fprintf(stderr, "ruby: 左伸出=%d 右伸出=%d 格宽=%d\n", overflow_left,
+                         overflow_right, cell_right - cell_left);
+            return fail("左右伸出量不相等（不是居中）");
+        }
+    }
+    return true;
+}
+
+// ── typewriter：追加时只写布局格，绘制侧**每帧只推进一格** ──
+/** 引擎：`0x6e` / `0x196` 追加时一次性写好布局格与文本记录（绘制条目也是**预先**排好、指向画布区域），
+ *  但**落字**由推进器每帧推一格（`sub_409400` 每帧 → `0x4096a9` 序号 +1；帧间按 `message:MessageSpeed`
+ *  睡眠；按键 / 跳过时一次抽干）。我们的 `step()` 就是"一帧"。
+ *  ⇒ 判据（三半，缺一不可）：
+ *   ① 追加那一步之后：待画格数 = 字符数、**画布仍是全透明**、绘制条目**已经**排好（布局是预先的）；
+ *   ② 之后每走一步：待画格数 −1，且画布上出现墨；
+ *   ③ 走满字符数步之后：待画格数 = 0。
+ *  ★ 反例（旧实现）：追加那一步就把整段画进画布 ⇒ ① 的画布不透明（红）。 */
+bool check_text_typewriter(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "typewriter: %s\n", what);
+        return false;
+    };
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x80, {{0, 9}});
+    emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+    emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+    emit_instruction(bytes, 0x213, {{0, 9}, {0, 190300}, {0, 20}});
+    emit_instruction(bytes, 0x75, {{0, 20}});
+    emit_instruction(bytes, 0x76, {{0, 0xFFFFFF}});
+    emit_instruction(bytes, 0x77, {{0, 0x000000}});
+    emit_instruction(bytes, 0x78, {{0, 0}});
+    emit_instruction(bytes, 0x71, {{0, 9}});
+    emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});  // "ABC" ⇒ 三个待画格
+    // 之后几条"帧"（用幂等的设字号当空转指令）：每步揭示一格。
+    emit_instruction(bytes, 0x75, {{0, 20}});
+    emit_instruction(bytes, 0x75, {{0, 20}});
+    emit_instruction(bytes, 0x75, {{0, 20}});
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table);
+    machine.write_text(core::Operand{5, 0}, "ABC");
+    machine.load_root(bytes);
+    for (int i = 0; i < 9; ++i) {
+        if (!machine.step()) return fail("0x71 之前就停机");
+    }
+    if (machine.pending_glyph_count() != 0) return fail("清空之后不该有待画格");
+    // 走到 0x6e 真正执行（中间可能过门；门帧也是"帧"，只是队列空所以什么也不做）。
+    int guard_steps = 0;
+    while (machine.pending_glyph_count() == 0 && guard_steps < 200) {
+        if (!machine.step()) {
+            const auto& stop = machine.last_stop();
+            std::fprintf(stderr, "typewriter: 走到 0x6e 之前停机 reason=%d opcode=0x%X msg=%s errors=%zu\n",
+                         static_cast<int>(stop.reason), stop.opcode, stop.message.c_str(),
+                         machine.errors().size());
+            for (const auto& e : machine.errors()) std::fprintf(stderr, "  err=%s\n", e.c_str());
+            return fail("没走到 0x6e 就停机");
+        }
+        ++guard_steps;
+    }
+    const auto ink = [&machine]() {
+        const core::TextureRecord* texture =
+            machine.texture(core::Machine::text_layer_texture_id(9));
+        if (texture == nullptr) return std::size_t{0};
+        std::size_t count = 0;
+        for (std::size_t i = 3; i < texture->rgba.size(); i += 4) {
+            if (texture->rgba[i] != 0) ++count;
+        }
+        return count;
+    };
+    // ① 追加之后：布局已排好（条目在），但一个像素都没落。
+    if (machine.draw_item(190300) == nullptr || machine.draw_item(190301) == nullptr ||
+        machine.draw_item(190302) == nullptr) {
+        return fail("追加那一步没有把三个布局条目预先排好");
+    }
+    if (machine.pending_glyph_count() != 3) {
+        return fail("追加之后待画格数不是 3 —— 追加时就画了（typewriter 被压平）");
+    }
+    if (core::text_backend_available() && ink() != 0) {
+        return fail("追加那一步就落了像素 —— 引擎是每帧只推进一格");
+    }
+    // ② 每走一步揭示一格。
+    const std::size_t before = ink();
+    if (!machine.step()) return fail("第一帧停机");
+    if (machine.pending_glyph_count() != 2) return fail("走一帧后待画格数没有 −1");
+    if (core::text_backend_available() && ink() <= before) return fail("第一帧没有把第一个字画进画布");
+    // ③ 走满后队列空。
+    for (int i = 0; i < 4; ++i) {
+        if (!machine.step()) break;
+    }
+    if (machine.pending_glyph_count() != 0) return fail("走满字符数帧之后待画格仍非 0");
+    return true;
+}
+
+
 /** 同一个场景各画一次，唯一变量是三个 AA 配置格。判据 = 文本层画布里的**最大 alpha** 与**墨迹 RGB**：
  *  · 关 ⇒ 1 位掩码 ⇒ 覆盖像素全是 255（且源色原值）；
  *  · 开 ⇒ GRAY4 的 17 级 ⇒ 满覆盖 240，**RGB 仍是源色原值**（真机在空画布上走"整像素覆写"支，
@@ -3564,11 +3851,17 @@ int main(int argc, char** argv) {
     bool only_font = false;
     bool only_glyph = false;
     bool only_config = false;
+    bool only_typewriter = false;
+    bool only_ruby = false;
+    bool only_drain = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
         else if (std::strcmp(argv[i], "--only-glyph") == 0) only_glyph = true;
         else if (std::strcmp(argv[i], "--only-config") == 0) only_config = true;
+        else if (std::strcmp(argv[i], "--only-typewriter") == 0) only_typewriter = true;
+        else if (std::strcmp(argv[i], "--only-ruby") == 0) only_ruby = true;
+        else if (std::strcmp(argv[i], "--only-drain") == 0) only_drain = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -3643,6 +3936,7 @@ int main(int argc, char** argv) {
             // 字形格式（1 位 / GRAY4 / GRAY8）与灰度级换算（17 / 65 级 ⇒ 满覆盖 240 / 251），
             // 外加端到端那条：AA 关 255 / 开 240。
             if (!check_glyph_alpha()) return 1;
+            if (!check_glyph_compose()) return 1;
             if (!check_glyph_brightness(table)) return 1;
             std::printf("core-selftest(glyph): PASS\n");
             return 0;
@@ -3651,6 +3945,22 @@ int main(int argc, char** argv) {
             // 玩家配置的根（本地应用数据，⛔ 不是漫游）+ 退时保存的宿主闸。
             if (!check_config_paths()) return 1;
             std::printf("core-selftest(config): PASS\n");
+            return 0;
+        }
+        if (only_drain) {
+            if (!check_text_drain(table)) return 1;
+            std::printf("core-selftest(drain): PASS\n");
+            return 0;
+        }
+        if (only_ruby) {
+            if (!check_text_ruby(table)) return 1;
+            std::printf("core-selftest(ruby): PASS\n");
+            return 0;
+        }
+        if (only_typewriter) {
+            // typewriter：追加时只写布局格，绘制侧每帧推进一格。
+            if (!check_text_typewriter(table)) return 1;
+            std::printf("core-selftest(typewriter): PASS\n");
             return 0;
         }
         if (only_audio) {
@@ -3664,7 +3974,11 @@ int main(int argc, char** argv) {
 
         // 这两条不依赖游戏安装：放进**全量**自检里也会跑（子集开关只是让 CTest 点得到名字）。
         if (!check_glyph_alpha()) return 1;
+        if (!check_glyph_compose()) return 1;
         if (!check_glyph_brightness(table)) return 1;
+        if (!check_text_typewriter(table)) return 1;
+        if (!check_text_ruby(table)) return 1;
+        if (!check_text_drain(table)) return 1;
         if (!check_config_paths()) return 1;
 
         std::string error;

@@ -218,6 +218,13 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
 
         machine.set_host_clock_ms(clock_base +
                                   static_cast<std::uint32_t>(SDL_GetTicks() - start_ticks));
+        // 文本层的抽干（`ADV-TEXT-APPEND`）：主循环**被动观察**输入 —— 有键按下 / 鼠标键按下就把
+        // 剩下的待画格一次画完。⛔ 与脚本主动取键（`0xff` / `0x109`）无关。
+        {
+            const bool any_key = sample_key_mask() != 0;
+            const bool any_mouse = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)) != 0;
+            machine.set_input_pressed(any_key || any_mouse);
+        }
         if (scripted != nullptr) {
             scripted->advance(machine.scene_clock_ms());
             machine.add_wheel_delta(scripted->take_wheel_delta());

@@ -121,6 +121,15 @@ add_test(NAME emulator-core-glyph-alpha COMMAND emulator-core-selftest --only-gl
 # ★ 玩家配置的根（**本地**应用数据，⛔ 不是漫游）+ 退时保存的宿主闸（真实玩家配置默认不写）。
 #   把根换回 `%APPDATA%` 或去掉保存闸 ⇒ 本条红。
 add_test(NAME emulator-core-config-root COMMAND emulator-core-selftest --only-config)
+# ★ 逐字符显现（typewriter）：追加那一步只写布局格（条目已排、画布仍全透明），绘制侧**每帧推进一格**。
+#   把"追加即全画"写回去 ⇒ 本条红。
+add_test(NAME emulator-core-adv-typewriter COMMAND emulator-core-selftest --only-typewriter)
+# ★ 振り仮名的横向定位：窄假名 × 宽格 ⇒ 两端各留一份步进、假名等间距；宽假名 × 窄格 ⇒ 以格中心对齐。
+#   退回"左对齐 + 整串一个条目" ⇒ 本条红。
+add_test(NAME emulator-core-adv-ruby COMMAND emulator-core-selftest --only-ruby)
+# ★ 抽干：宿主报"有输入在按下" ⇒ 剩余待画格**同一帧**画完（无输入时仍然一帧一格）。
+#   把抽干写成无条件 ⇒ "一帧画了不止一个" 那条红；把抽干去掉 ⇒ "没有抽干" 那条红。
+add_test(NAME emulator-core-adv-drain COMMAND emulator-core-selftest --only-drain)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)
