@@ -1127,6 +1127,9 @@ private:
     // `0x72` 的放行（帧服务）：等推进位置起时，输入一到就清位。
     void service_advance_wait();
     void service_auto_message();
+    // `0x21c` 谓词 A：消息子系统"还有事"（定时器在窗内 **或** 待处理）。谓词 B（影片对象扫描）另算。
+    bool message_subsystem_busy();
+    bool movie_gate_busy() const;
     void service_choice_click();
     void op_2f7(const Instruction&); void op_304(const Instruction&); void op_305(const Instruction&);
     // 门之前的 BGM 淡变推进（第 9 位的服务分支；规范未规定 ⇒ 见实现里的残差说明）。
@@ -1448,6 +1451,11 @@ private:
     std::uint32_t auto_interval_ms_ = 0;
     std::uint32_t auto_due_ms_ = 0;
     bool auto_armed_ = false;
+    // 输入是**事件锁存**（引擎：窗口过程把按下位或进输入字，消费者读一次就清）：
+    // 只在"上一拍没按、这一拍按"时置锁存；放行/选中各消费一次。⛔ 按电平每帧读会让长按连发。
+    bool advance_input_prev_ = false;
+    bool advance_input_latch_ = false;
+    bool choice_input_prev_ = false;
     std::array<std::int32_t, 10> line_records_{};
     std::size_t text_appends_ = 0;
     // `0x2f7` 写的语音选项格（每槽一格，整格写 1）。

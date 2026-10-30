@@ -2963,8 +2963,8 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator-cxx/src/core/vm.cpp',
-    from: 'if ((state_flags_ & (1u << 10)) != 0 && pending_glyphs_.empty() &&\n            (state_flags_ & (1u << 29)) == 0) {',
-    to: 'if ((state_flags_ & (1u << 10)) != 0 && !scene_animating_) {',
+    from: 'if (msg_wait_c_ != 0) {',
+    to: 'if (false) {',
     guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
     what: '0x21c 的等待位退回「场景无动画才放行」⇒ 每句 1800ms 淡入把脚本卡住、点击全丢（实测 80 击 13 推进）',
   },
@@ -2977,10 +2977,10 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
-    from: 'if ((have && (mask & 1) != 0) || skip) {',
-    to: 'if ((have && (mask & 3) != 0) || skip) {',
+    from: 'if (down && !advance_input_prev_) advance_input_latch_ = true;',
+    to: 'if (down) advance_input_latch_ = true;',
     guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
-    what: '0x72 的等推进把右键也算放行 ⇒ 右键菜单/取消会顺手推进一句',
+    what: '0x72 的等推进退回“按电平置锁存”⇒ 按住不放会一句接一句推进（实测回归）',
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',

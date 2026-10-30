@@ -900,12 +900,18 @@ void Machine::service_auto_message() {
 }
 
 void Machine::service_advance_wait() {
-    // 0x72 的放行：等推进位置起时，左键（或"跳过"位）一到就清位（引擎在消息输入处理里清）。
-    if ((state_flags_ & (1u << 31)) == 0) return;
+    // 0x72 的放行：输入是**事件锁存**（一次按下只放行一次）。
+    // ★ 语料：窗口过程把"按下"或进输入字（`0x4B8DE6`），消费者读一次就清（`0x4772A9/B7`、
+    //   `0x41330B`）；**不是**每帧按电平读 —— 后者会让"按住不放"一句接一句推进（实测回归）。
     std::int32_t mask = 0;
     const bool have = mouse_button_source_ && mouse_button_source_(mask);
+    const bool down = have && (mask & 1) != 0;
+    if (down && !advance_input_prev_) advance_input_latch_ = true;  // 上升沿 ⇒ 锁一次
+    advance_input_prev_ = down;
+    if ((state_flags_ & (1u << 31)) == 0) return;  // 没在等：只更新边沿状态（按住不算新的按下）
     const bool skip = (state_flags_ & (1u << 27)) != 0;  // 读跳过 ⇒ 直接放行
-    if ((have && (mask & 1) != 0) || skip) {
+    if (advance_input_latch_ || skip) {
+        advance_input_latch_ = false;  // 消费掉这一次按下
         state_flags_ &= ~(1u << 31);
         state_flags_ &= ~(1u << 30);
         auto_armed_ = false;

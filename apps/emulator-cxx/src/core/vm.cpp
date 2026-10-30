@@ -418,6 +418,36 @@ void Machine::execute(const Instruction& instruction) {
 // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：每次迭代、过门之前，若「有活动对象」为 1 就扫一遍。
 // ★ 它只做轮询 / 收尾 / 循环 / 填纹理；影片位（门上那一位）只管把门关住。
 
+// `0x21c` 谓词 A（`sub_407E20` 的合同）：消息子系统"还有事"。
+// 定时器就是 `0x238` 写的那一对格：起点（0 = 未盖章，首次检查时盖章 = 现在）+ 时长；
+// 判据用**无符号比较、相等仍算窗内**（引擎 `ja`）。到期 / 中止（`0x243`/`0x305` 的 A=1）
+// 就把那一对清 0，退回看"待处理"标记。
+// ★ "待处理"标记（S+0xB5B4）的写者全集未取证 ⇒ 本模型用"还有待画格 / 在打字态"代理（残差）。
+bool Machine::message_subsystem_busy() {
+    if (msg_wait_c_ != 0) {
+        if (msg_wait_b_ == 0) msg_wait_b_ = static_cast<std::int32_t>(scene_clock_ms_);
+        const auto start = static_cast<std::uint32_t>(msg_wait_b_);
+        const auto duration = static_cast<std::uint32_t>(msg_wait_c_);
+        if (msg_wait_a_ != 1 && scene_clock_ms_ <= start + duration) return true;  // 窗内（相等算窗内）
+        msg_wait_b_ = 0;
+        msg_wait_c_ = 0;
+    }
+    return !pending_glyphs_.empty() || (state_flags_ & (1u << 29)) != 0;
+}
+
+// `0x21c` 谓词 B（`0x41322A` 的 var_768 ← `0x412648` 扫 1000 槽 + `sub_4050E0`）：
+// 影片对象表里还有对象处于"等它播完"的状态 ⇒ 不放行。
+// 判据 = 生效参数 `& 5 == 4`（第 0 位 = 循环、第 2 位 = 未取证，残差 `RES-WAIT-MOVIE-BIT2`）；
+// 本模型没有"延时启动待办"那一支，直接用最近一次启动的参数。
+bool Machine::movie_gate_busy() const {
+    for (const auto& [slot, record] : movies_) {
+        (void)slot;
+        if (!record.present || !record.started) continue;
+        if ((record.options & 5u) == 4u) return true;
+    }
+    return false;
+}
+
 bool Machine::step() {
     if (halted_) return false;
     // 每次迭代先读一次时钟并写进场景；**暂停**（区间忙标记 = 1 且等待位 = 0）时只更新时间戳，
@@ -462,13 +492,9 @@ bool Machine::step() {
             if (movie_active_) state_flags_ |= (1u << 13);
             return true;
         }
-        // 等待位（0x21c）的放行条件：引擎是 `sub_407E20(消息对象)==0`（0x413221/0x413226）
-        // **且** 场景里没有状态字 `&5==4` 的对象（0x41322A 的 var_768 ← 0x412648 扫 1000 槽）。
-        // ★ 它**不看颜色窗**（`0x413210` 那条支路里没有任何窗口/插值字段）⇒ 把"任意带
-        //   duration 的窗"当放行条件会让每句 1800ms 的淡入把脚本卡住（实测 80 击只推进 13 次）。
-        // 本模型没有 0xB5B4 那个计时器 ⇒ 用"没有待画格、且不在打字态"代替"消息子系统没工作"。
-        if ((state_flags_ & (1u << 10)) != 0 && pending_glyphs_.empty() &&
-            (state_flags_ & (1u << 29)) == 0) {
+        // 等待位（0x21c）的放行条件 = 谓词 A（消息子系统"还有事"）与谓词 B（影片对象扫描）
+        // **都为假**（0x413221 / 0x41322A）。见 `message_subsystem_busy()` 与 spec 60-ops-wait。
+        if ((state_flags_ & (1u << 10)) != 0 && !message_subsystem_busy() && !movie_gate_busy()) {
             state_flags_ &= ~(1u << 10);
         }
         // 位 0 / 10 / 13 有服务分支；其余位**没有**（规范只登记存在；第 30 位按规范「启用后门恒关」）。

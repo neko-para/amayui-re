@@ -420,9 +420,16 @@ void Machine::reset_choice_table() {
 // `PC ← 帧基址 + 4×入口`，不压返回点），清表、关窗、置闩锁。
 // ★ 与 spec 的 `ADV-CHOICE-CONSUMER` 一致：这里只落**机制**；"何时消费"的次序仍属残差。
 void Machine::service_choice_click() {
-    if (!choice_window_.input_gate || choices_.empty()) return;
+    // 同样是**事件锁存**：光标停在某条上不动、或按住不放，都不该反复触发选中。
+    // ★ 边沿状态**每拍都更新**（窗口没开也要更新）：否则"打开窗口的那一下点击"会被当成新按下、
+    //   立刻选中第一条 —— 那正是"菜单一打开就被点掉"的形态。
     std::int32_t mask = 0;
-    if (!mouse_button_source_ || !mouse_button_source_(mask) || (mask & 1) == 0) return;
+    const bool have = mouse_button_source_ && mouse_button_source_(mask);
+    const bool down = have && (mask & 1) != 0;
+    const bool pressed = down && !choice_input_prev_;
+    choice_input_prev_ = down;
+    if (!choice_window_.input_gate || choices_.empty()) return;
+    if (!pressed) return;
     const auto hit = choice_hit_test();
     if (hit < 0) return;
     const auto decide = choices_[static_cast<std::size_t>(hit)].decide;

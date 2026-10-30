@@ -3803,7 +3803,7 @@ bool check_scene_records(const core::OpcodeTable& table) {
             return false;
         }
     }
-    // ④ 0x242 两处写（+0x2D0 与第二张表的一格）；只有建记录那一步标脏。
+    // ④ 0x242 两处写（+0x2D0 与第二张表的一格）；**两次都不标脏**（语料这条路径没有脏位写点）。
     {
         auto script = make_script_with_body();
         emit_instruction(script, 0x242, {{0, 5}, {0, 7}});
@@ -3816,8 +3816,8 @@ bool check_scene_records(const core::OpcodeTable& table) {
         std::int32_t pair_a = 0, pair_b = 0;
         const bool has_pair = machine.scene_keyed_pair(5, pair_a, pair_b);
         if (machine.scene_record_2d0(5) != 7 || !has_pair || pair_a != 7 ||
-            pair_b != 0 || !machine.scene_dirty()) {
-            std::fprintf(stderr, "0x242 两处写/建记录标脏不对：2d0=%d pair=%d/%d dirty=%d\n",
+            pair_b != 0 || machine.scene_dirty()) {
+            std::fprintf(stderr, "0x242 两处写/建记录竟然标脏：2d0=%d pair=%d/%d dirty=%d\n",
                          machine.scene_record_2d0(5), pair_a, pair_b,
                          machine.scene_dirty() ? 1 : 0);
             return false;
@@ -4052,8 +4052,14 @@ bool check_choice_consumer(const core::OpcodeTable& table) {
     emit_instruction(script, 2, {});
     core::Machine machine(0x12345678u, table);
     machine.set_cursor_source([](std::int32_t& x, std::int32_t& y) -> bool { x = 5; y = 5; return true; });
-    machine.set_mouse_button_source([](std::int32_t& mask) -> bool { mask = 1; return true; });
+    int down = 0;  // 窗口开之前不按；开窗之后才按下（引擎里是"打开菜单的那一下"不被当选中）
+    machine.set_mouse_button_source([&down](std::int32_t& mask) -> bool { mask = down; return true; });
     machine.load_root(script);
+    if (!machine.step() || !machine.step()) {  // 0x90 建表 / 0x94 开窗
+        std::fprintf(stderr, "choice-consumer 开窗前两步失败：%s\n", machine.last_stop().message.c_str());
+        return false;
+    }
+    down = 1;  // 开窗之后新按下
     for (int i = 0; i < 6 && !machine.halted(); ++i) {
         if (!machine.step()) break;
     }
@@ -4061,6 +4067,86 @@ bool check_choice_consumer(const core::OpcodeTable& table) {
         std::fprintf(stderr, "点中选项没有跳到决定入口（decide=%d fallthrough=%d 条数=%zu）\n",
                      machine.voice_option_2f7(1), machine.voice_option_2f7(0), machine.choices().size());
         return false;
+    }
+    return true;
+}
+
+// `0x21c` 的谓词 A（定时器）：`0x238` 写的"起点 + 时长"必须在窗内挡住、到期才放行；
+// ★ 相等仍算窗内（引擎 `now > start + duration` 才到期），所以 200 挡、201 放。
+bool check_wait_timer(const core::OpcodeTable& table) {
+    auto build = [&]() {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x238, {{0, 200}});
+        emit_instruction(script, 0x21C, {});
+        emit_instruction(script, 0x2F7, {{0, 0}});
+        emit_instruction(script, 2, {});
+        return script;
+    };
+    core::Machine machine(0x12345678u, table);
+    machine.load_root(build());
+    if (!machine.step() || !machine.step()) {  // 0x238 / 0x21c
+        std::fprintf(stderr, "wait-timer 起始两步失败：%s\n", machine.last_stop().message.c_str());
+        return false;
+    }
+    // 第一拍服务会给起点盖章；起点 = 现在。
+    if (!machine.step()) {
+        std::fprintf(stderr, "wait-timer 盖章那拍停机\n");
+        return false;
+    }
+    const auto waiting = [](const core::Machine& m) { return (m.state_flags() & 0x400u) != 0; };
+    const auto start = static_cast<std::uint32_t>(machine.msg_wait(1));
+    if (machine.msg_wait(2) != 200 || start == 0 || !waiting(machine)) {
+        std::fprintf(stderr, "wait-timer 没建窗：B=%d C=%d waiting=%d\n", machine.msg_wait(1), machine.msg_wait(2),
+                     waiting(machine) ? 1 : 0);
+        return false;
+    }
+    const auto at = [&](std::uint32_t offset) {
+        machine.set_host_clock_ms(start + offset);
+        return machine.step();
+    };
+    if (!at(199) || !waiting(machine) || machine.voice_option_2f7(0) != 0) {
+        std::fprintf(stderr, "wait-timer：199ms 就放行了\n");
+        return false;
+    }
+    if (!at(200) || !waiting(machine) || machine.voice_option_2f7(0) != 0) {
+        std::fprintf(stderr, "wait-timer：200ms（相等）就放行了，应仍算窗内\n");
+        return false;
+    }
+    // 放行那一拍只服务、不派发（引擎的服务分支独占本拍）⇒ 再走一拍才执行下一条。
+    if (!at(201) || waiting(machine)) {
+        std::fprintf(stderr, "wait-timer：201ms 没有放行（waiting=%d）\n", waiting(machine) ? 1 : 0);
+        return false;
+    }
+    if (!machine.step() || machine.voice_option_2f7(0) != 1) {
+        std::fprintf(stderr, "wait-timer：放行后没执行下一条（opt=%d）\n", machine.voice_option_2f7(0));
+        return false;
+    }
+    // 中止：`0x243` 把 (A,B,C) 写成 (1,0,0) ⇒ 没有窗，下一拍就放行。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x238, {{0, 5000}});
+        emit_instruction(script, 0x243, {});
+        emit_instruction(script, 0x21C, {});
+        emit_instruction(script, 0x2F7, {{0, 0}});
+        emit_instruction(script, 2, {});
+        core::Machine m2(0x12345678u, table);
+        m2.load_root(script);
+        for (int i = 0; i < 3; ++i) {
+            if (!m2.step()) {
+                std::fprintf(stderr, "wait-timer(abort) 第 %d 步停机\n", i + 1);
+                return false;
+            }
+        }
+        m2.set_host_clock_ms(m2.scene_clock_ms() + 1);
+        if (!m2.step() || (m2.state_flags() & 0x400u) != 0) {
+            std::fprintf(stderr, "wait-timer：0x243 中止之后还在等（waiting=%d）\n",
+                         (m2.state_flags() & 0x400u) != 0 ? 1 : 0);
+            return false;
+        }
+        if (!m2.step() || m2.voice_option_2f7(0) != 1) {
+            std::fprintf(stderr, "wait-timer：中止放行后没执行下一条（opt=%d）\n", m2.voice_option_2f7(0));
+            return false;
+        }
     }
     return true;
 }
@@ -4328,6 +4414,60 @@ bool check_adv_wait(const core::OpcodeTable& table) {
         if (!machine.advance_waiting() || machine.voice_option_2f7(0) != 0) {
             std::fprintf(stderr, "右键把「等推进」放行了（waiting=%d opt=%d）\n",
                          machine.advance_waiting() ? 1 : 0, machine.voice_option_2f7(0));
+            return false;
+        }
+    }
+    // ④ **按住不放只放行一次**（引擎的输入是事件锁存，不是电平）：两条 0x72 连着来，
+    //    按住期间第二条不许被同一次按下放行；松开再按才放行。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x72, {{0, 9}});
+        emit_instruction(script, 0x2F7, {{0, 0}});
+        emit_instruction(script, 0x72, {{0, 9}});
+        emit_instruction(script, 0x2F7, {{0, 1}});
+        emit_instruction(script, 2, {});
+        int down = 0;
+        core::Machine machine(0x12345678u, table);
+        machine.set_mouse_button_source([&down](std::int32_t& mask) -> bool { mask = down; return true; });
+        machine.load_root(script);
+        if (!machine.step()) {  // 0x72 #1 武装
+            std::fprintf(stderr, "adv-hold：step1 停机\n");
+            return false;
+        }
+        down = 1;  // 按下
+        if (!machine.step()) {  // 放行 + 执行 0x2F7 #1
+            std::fprintf(stderr, "adv-hold：step2 停机\n");
+            return false;
+        }
+        if (machine.voice_option_2f7(0) != 1 || machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-hold：第一次按下没有放行（opt0=%d waiting=%d）\n",
+                         machine.voice_option_2f7(0), machine.advance_waiting() ? 1 : 0);
+            return false;
+        }
+        if (!machine.step()) {  // 0x72 #2 武装（此时**仍按着**）
+            std::fprintf(stderr, "adv-hold：step3 停机\n");
+            return false;
+        }
+        if (!machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-hold：第二条 0x72 没武装\n");
+            return false;
+        }
+        if (!machine.step()) {  // 按住的一拍：不许放行
+            std::fprintf(stderr, "adv-hold：按住期间停机\n");
+            return false;
+        }
+        if (!machine.advance_waiting() || machine.voice_option_2f7(1) != 0) {
+            std::fprintf(stderr, "adv-hold：按住不放把第二条也放行了（opt1=%d）\n", machine.voice_option_2f7(1));
+            return false;
+        }
+        down = 0;  // 松开
+        if (!machine.step() || !machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-hold：松开那拍不该放行\n");
+            return false;
+        }
+        down = 1;  // 再按
+        if (!machine.step() || machine.advance_waiting() || machine.voice_option_2f7(1) != 1) {
+            std::fprintf(stderr, "adv-hold：松开再按没有放行（opt1=%d）\n", machine.voice_option_2f7(1));
             return false;
         }
     }
@@ -6519,6 +6659,7 @@ int main(int argc, char** argv) {
     bool only_texture_stretch = false;
     bool only_auto_message = false;
     bool only_choice_consumer = false;
+    bool only_wait_timer = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
@@ -6548,6 +6689,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-texture-stretch") == 0) only_texture_stretch = true;
         else if (std::strcmp(argv[i], "--only-auto-message") == 0) only_auto_message = true;
         else if (std::strcmp(argv[i], "--only-choice-consumer") == 0) only_choice_consumer = true;
+        else if (std::strcmp(argv[i], "--only-wait-timer") == 0) only_wait_timer = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -6709,6 +6851,12 @@ int main(int argc, char** argv) {
             // `0x70` 的键基数兜底：没有 `0x213` 的层也必须出绘制条目。
             if (!check_text_layer_fallback(table)) return 1;
             std::printf("core-selftest(text-layer-fallback): PASS\n");
+            return 0;
+        }
+        if (only_wait_timer) {
+            // `0x21c` 谓词 A：定时器窗内挡住、到期（相等仍算窗内）才放行。
+            if (!check_wait_timer(table)) return 1;
+            std::printf("core-selftest(wait-timer): PASS\n");
             return 0;
         }
         if (only_choice_consumer) {

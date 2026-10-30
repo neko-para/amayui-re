@@ -200,6 +200,9 @@ add_test(NAME emulator-core-auto-message COMMAND emulator-core-selftest --only-a
 # ★ 选项消费侧：窗口开着 + 左键 + 命中带决定入口的条 ⇒ 执行位置 ← 该入口（jump）、清表、关窗。
 #   不跳 / 不关窗 / 不清表 ⇒ 本条红。★ 只验机制，"何时消费"的次序仍是残差。
 add_test(NAME emulator-core-choice-consumer COMMAND emulator-core-selftest --only-choice-consumer)
+# ★ `0x21c` 谓词 A：`0x238` 的"起点+时长"窗内挡住（相等仍算窗内）、到期放行；`0x243` 中止后立刻放行。
+#   不看这一对格（比如只按"没有待画格"放行）⇒ 本条红。
+add_test(NAME emulator-core-wait-timer COMMAND emulator-core-selftest --only-wait-timer)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)

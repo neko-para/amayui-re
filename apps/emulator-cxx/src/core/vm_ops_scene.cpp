@@ -268,23 +268,20 @@ void Machine::op_242(const Instruction& instruction) {
     write_length(5);
     const auto value = read_int(ops[1]);
     const auto key = read_int(ops[0]);
-    // 第一处：容器 `+0x408` 里同一编号的记录（缺则先建 —— 建记录这一步标脏）；
+    // 第一处：容器 `+0x408` 里同一编号的记录（缺则先建；建的时候也不标脏）；
     //   写的是 `+0x2D0`（模型 `SceneRecord::field_2d0`），⛔ 不是 `0x215` 读的 `+0x4`（`tag`）。
-    bool created = false;
     const auto object_key = static_cast<std::uint32_t>(key);
     if (scene_records_.find(object_key) == scene_records_.end()) {
         scene_records_[object_key] = SceneRecord{};
-        created = true;
     }
     scene_records_[object_key].field_2d0 = value;
     // 第二处：另一张表（`+0x438`）里同一编号的记录（缺则先建）；只写**一格**。
     if (scene_keyed_pair_.find(key) == scene_keyed_pair_.end()) {
         scene_keyed_pair_[key] = KeyedPairRecord{};
-        created = true;
     }
     scene_keyed_pair_[key].field_a = value;
-    // ★ 「本条不标脏」是观察事实；只有上面「建默认记录」那一步会标脏。
-    if (created) scene_dirty_ = true;
+    // ★ 本条**不标脏**（连"建默认记录"那一步也不标）：语料这条路径上没有写脏位的写点
+    //   （`sub_4251A0 → sub_4AD9A0 → {4AAA50/4AAD40/4AAC00/4AAEC0}` 全无 `0xB5AC` 写点）。
     return;
 }
 

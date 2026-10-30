@@ -60,9 +60,9 @@ const CASES = [
   },
   {
     file: 'apps/emulator-cxx/src/core/vm.cpp',
-    snippet: 'if ((state_flags_ & (1u << 10)) != 0 && pending_glyphs_.empty() &&',
+    snippet: 'if (msg_wait_c_ != 0) {',
     count: 1,
-    why: '0x21c 的等待位放行看「消息子系统没工作」（待画格 / 打字态），不看颜色窗 —— 看颜色窗会把每句 1800ms 淡入变成脚本阻塞、点击全丢',
+    why: '0x21c 的谓词 A 必须读 0x238 写的那一对格（起点 0=未盖章、时长）；不读它就会把窗当空气（①③ 的直接成因）',
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_io.cpp',
@@ -72,9 +72,9 @@ const CASES = [
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
-    snippet: 'if ((have && (mask & 1) != 0) || skip) {',
+    snippet: 'if (down && !advance_input_prev_) advance_input_latch_ = true;',
     count: 1,
-    why: '0x72 的等推进只认左键（位 0）；认整张掩码会让右键放行',
+    why: '0x72 的等推进按**事件上升沿**锁存（一次按下只放行一次）；按电平读会让长按连发',
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
