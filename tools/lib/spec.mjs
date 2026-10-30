@@ -1182,3 +1182,136 @@ export function checkCorpusBindings(spec, { repoRoot = REPO_ROOT } = {}) {
   }
   return { ok: problems.length === 0, problems };
 }
+
+/**
+ * 残差地图：把 `audit.rules[].residual[]` 摊平成"**通道 × 类别**"两轴。
+ *
+ * 目的：残差数量本身不能回答"这个缺陷值不值得修"——能回答的是**它落在哪个子系统、
+ * 以及它是不是 spec 在可观察面上弃权**。所以两轴都必须机械可重算：
+ *
+ * - **通道**（`RESIDUAL_CHANNELS`，按章节文件声明）：缺陷按子系统评估（输入 / 音频 / 渲染 / 文本 /
+ *   时序 / 保存 / 状态 / 平台 / 格式 / 容器 / 文件系统 / 引导 / 配置）。★ 新章必须在这里登记，
+ *   否则 `residualInventory()` 会把它标成 `unclassified`，守卫 `tools/test/spec-residuals.test.mjs` 变红。
+ * - **类别**：
+ *   **A = 该规则的正文声明了「未规定」（弃权）** —— 判据是**规则正文**，不是残差措辞：
+ *   弃权是正文里的一句「本版不规定…」，它可能**没有**对应残差（实测：正文弃权的规则远多于挂 A 类残差的）。
+ *   A 的含义：引擎在这条规则的某个可观察结果上**没被钉住** ⇒ 实现怎么选都不算错，缺陷无法判"错"。
+ *   **B = 残差说「消费者 / 只记账 / 观察格」** —— 功能实现了一半，请求发出去没人用。
+ *   **C = 其余**（纯知识缺口：未取证；不会掩盖缺陷，只是暂时判不了对错）。
+ *
+ * ★ **正文弃权 ≠ 残差**：前者是"引擎没定义"（读完汇编可能仍然成立），后者是"我们还没读"（读完就没了）。
+ *
+ * ⚠ 两轴都是**筛查器**，不是判决书：A 只说明"这条要有人来定"，不说明"这条一定掩盖了缺陷"。
+ */
+export const RESIDUAL_CHANNELS = {
+  '05-boot': 'boot',
+  '06-window': 'platform',
+  '10-format': 'format',
+  '15-frame': 'vm',
+  '20-alf': 'container',
+  '25-fs': 'filesystem',
+  '30-agf': 'format',
+  '40-pools': 'state',
+  '45-objects': 'state',
+  '50-engine-state': 'state',
+  '55-config': 'config',
+  '60-ops-array': 'state',
+  '60-ops-forward': 'state',
+  '60-ops-frame': 'vm',
+  '60-ops-input': 'input',
+  '60-ops-list': 'text',
+  '60-ops-numeric': 'state',
+  '60-ops-render': 'render',
+  '60-ops-save': 'save',
+  '60-ops-scalar': 'state',
+  '60-ops-scene': 'render',
+  '60-ops-text': 'text',
+  '60-ops-texture': 'render',
+  '60-ops-voice': 'audio',
+  '60-ops-wait': 'timing',
+  '62-adv-text': 'text',
+  '65-save': 'save',
+  '70-vm': 'vm',
+};
+
+/** 正文里的**弃权**声明（`amayui-spec` 的「未规定」档）：这是规则级属性，不是残差措辞 */
+const ABSTAIN_RE = /不规定|未规定/;
+/** 残差里的「有写无读」措辞：请求发出去了，但没有消费者 */
+const RESIDUAL_CLASS_B = /消费者|没人读|不被读|只记|仅记|只落观察格|观察格/;
+
+/** 一条规则是否在正文里声明了「未规定」 */
+export function ruleAbstains(entry) {
+  return ABSTAIN_RE.test(String(entry?.text ?? ''));
+}
+
+/**
+ * 一条残差的类别（A/B/C）。★ A 由**规则正文**决定（`abstains`），不看这条残差的措辞 ——
+ * 弃权是规则级的，残差只是恰好挂在它下面。
+ */
+export function classifyResidual(residual, { abstains = false } = {}) {
+  if (abstains) return 'A';
+  return RESIDUAL_CLASS_B.test(String(residual?.what ?? '')) ? 'B' : 'C';
+}
+
+function chapterFiles(model) {
+  return new Map(
+    (model?.chapters ?? []).map((c) => [c.id, String(c.file ?? '').replace(/\.md$/, '').split('/').pop()]),
+  );
+}
+
+/**
+ * 摊平残差 → 行（`{channel, chapter, rule, id, kind, cls, what, next}`）。
+ * `channels` 可注入（测试用），缺省 `RESIDUAL_CHANNELS`。未登记的章节 → `channel: 'unclassified'`。
+ */
+export function residualInventory(model, { channels = RESIDUAL_CHANNELS } = {}) {
+  const fileById = chapterFiles(model);
+  const rows = [];
+  for (const e of model?.entries ?? []) {
+    const file = fileById.get(e.chapter) ?? '';
+    const abstains = ruleAbstains(e);
+    for (const r of e.residual ?? []) {
+      rows.push({
+        channel: channels[file] ?? 'unclassified',
+        chapter: file || String(e.chapter ?? ''),
+        rule: e.id,
+        id: r.id,
+        kind: r.kind,
+        cls: classifyResidual(r, { abstains }),
+        abstains,
+        unconsumed: RESIDUAL_CLASS_B.test(String(r.what ?? '')),
+        what: String(r.what ?? ''),
+        next: String(r.next ?? ''),
+      });
+    }
+  }
+  return rows;
+}
+
+/** 按通道的规则级统计（`rules` / `abstainRules`）——弃权是规则级的，残差表看不见它 */
+export function channelRules(model, { channels = RESIDUAL_CHANNELS } = {}) {
+  const fileById = chapterFiles(model);
+  const out = new Map();
+  const bump = (ch, key) => {
+    if (!out.has(ch)) out.set(ch, { rules: 0, abstainRules: 0 });
+    out.get(ch)[key] += 1;
+  };
+  for (const e of model?.entries ?? []) {
+    const ch = channels[fileById.get(e.chapter) ?? ''] ?? 'unclassified';
+    bump(ch, 'rules');
+    if (ruleAbstains(e)) bump(ch, 'abstainRules');
+  }
+  return out;
+}
+
+/** 行 → `{matrix, counts, channels}`：matrix[channel][cls] = 计数 */
+export function residualMatrix(rows) {
+  const matrix = new Map();
+  const counts = { A: 0, B: 0, C: 0 };
+  for (const r of rows) {
+    if (!matrix.has(r.channel)) matrix.set(r.channel, { A: 0, B: 0, C: 0, total: 0 });
+    matrix.get(r.channel)[r.cls] += 1;
+    matrix.get(r.channel).total += 1;
+    counts[r.cls] += 1;
+  }
+  return { matrix, counts, channels: [...matrix.keys()].sort() };
+}

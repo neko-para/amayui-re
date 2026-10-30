@@ -26,6 +26,7 @@ import {
   DISPOSITIONS,
   SPEC_FILE,
   chaptersText,
+  channelRules,
   checkCorpusBindings,
   derive,
   describe,
@@ -33,6 +34,8 @@ import {
   loadLedger,
   loadSpec,
   reportText,
+  residualInventory,
+  residualMatrix,
   resolveEvidence,
   validate,
 } from './lib/spec.mjs';
@@ -54,6 +57,7 @@ export const DOMAIN = {
 export const OPERATIONS = [
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '不变量（红 = 退出码 1）：形态 / 处理状态 / 绑定 / 证据 / 措辞 / **试点未登记义务 = 0**（条数见 describe）' },
   { name: 'report', argv: ['--report'], mutates: false, summary: '★ 派生处理账：effect 覆盖 / 内部省略 / 残差 / **未登记** + 章节与绑定计数（不给百分数）' },
+  { name: 'residuals', argv: ['--residuals'], mutates: false, summary: '★ 残差地图：按**子系统通道 × 类别**摊平（A=正文弃权 / B=消费者缺失 / C=知识缺口）；`--channel` / `--class` 过滤，`--json` 给机器读' },
   { name: 'chapters', argv: ['--chapters'], mutates: false, summary: '整份 spec 的章节骨架 + 每章条目与残差（"整个 spec 到哪一步"的只读视图）' },
   { name: 'show', argv: ['--show'], mutates: false, summary: '一条合同的全貌 + 证据解析结果 + 机器站点（`<id 或唯一前缀>`；`--json` 给机器读）' },
   { name: 'at', argv: ['--at'], mutates: false, summary: '★ 反向查询：某个 EA / 函数符号出现在哪些规则的绑定里（`--at <EA|sub_xxx>`）' },
@@ -65,6 +69,8 @@ const HELP = `tools/spec.mjs —— spec 层（领域本体）：章节 Markdown
 
   node tools/spec.mjs --validate [--dir data/spec]   # 不变量（含章节规则与 bindings/audit 一一对应）
   node tools/spec.mjs --report                        # 审计账（effect 覆盖 / 内部 / 残差 / 未登记）
+  node tools/spec.mjs --residuals [--channel render|input|audio|text|timing|…] [--class A|B|C] [--json]
+                                                      # 残差地图：子系统 × 类别（A 弃权 / B 无消费者 / C 知识缺口）
   node tools/spec.mjs --effects --pilot [--json]       # 从语料机械枚举试点块的 effect
   node tools/spec.mjs --effects <sub_XXXXXX> [--json]  # 枚举一个函数的全部 effect
   node tools/spec.mjs --chapters                      # 章节骨架（审计视图）
@@ -306,6 +312,54 @@ export async function main(argv = process.argv.slice(2)) {
           for (const g of gapFn) L.push(`  · ${g.id} —— ${g.title}`);
         }
       }
+    }
+    thisOut(`${L.join('\n')}\n`);
+    return 0;
+  }
+
+  if (args.includes('--residuals')) {
+    const rows = residualInventory(spec);
+    const { matrix, counts, channels } = residualMatrix(rows);
+    const wantChannel = opt(args, '--channel');
+    const wantClass = opt(args, '--class');
+    if (wantChannel && !channels.includes(wantChannel)) {
+      thisErr(`--channel 认不出：${wantChannel}\n可用：${channels.join(' / ')}\n`);
+      return 2;
+    }
+    if (wantClass && !['A', 'B', 'C'].includes(wantClass)) {
+      thisErr('--class 只能是 A / B / C\n');
+      return 2;
+    }
+    const filtered = rows.filter((r) => (!wantChannel || r.channel === wantChannel) && (!wantClass || r.cls === wantClass));
+    if (args.includes('--json')) {
+      thisOut(`${JSON.stringify({ counts, channels, matrix: Object.fromEntries(matrix), rows: filtered }, null, 2)}\n`);
+      return 0;
+    }
+    const L = [`残差地图：${rows.length} 条（A 弃权 ${counts.A} · B 无消费者 ${counts.B} · C 知识缺口 ${counts.C}）`, ''];
+    L.push('通道'.padEnd(14) + 'A'.padStart(5) + 'B'.padStart(5) + 'C'.padStart(5) + '合计'.padStart(7));
+    for (const ch of channels) {
+      const m = matrix.get(ch);
+      L.push(ch.padEnd(14) + String(m.A).padStart(5) + String(m.B).padStart(5) + String(m.C).padStart(5) + String(m.total).padStart(7));
+    }
+    const rules = channelRules(spec);
+    const unpinned = rows.filter((r) => r.unconsumed).length;
+    L.push('', '规则级（★ 弃权是**规则正文**的属性，残差表看不见它）：');
+    L.push('通道'.padEnd(14) + '规则'.padStart(5) + '弃权规则'.padStart(9) + '无消费者残差'.padStart(13));
+    for (const ch of channels) {
+      const r = rules.get(ch) ?? { rules: 0, abstainRules: 0 };
+      const u = rows.filter((x) => x.channel === ch && x.unconsumed).length;
+      L.push(ch.padEnd(14) + String(r.rules).padStart(5) + String(r.abstainRules).padStart(9) + String(u).padStart(13));
+    }
+    L.push('', `合计：规则 ${[...rules.values()].reduce((a, x) => a + x.rules, 0)} 条，其中**正文弃权 ${[...rules.values()].reduce((a, x) => a + x.abstainRules, 0)} 条**；有写无读的残差 ${unpinned} 条（与 A/B/C 正交，独立计数）`);
+    if (matrix.has('unclassified')) {
+      L.push('', '⚠ 有章节没有登记通道 —— 在 `tools/lib/spec.mjs` 的 `RESIDUAL_CHANNELS` 里加一行（守卫会红）');
+    }
+    const show = wantClass ? filtered : wantChannel ? filtered.filter((r) => r.cls === 'A' || r.cls === 'B') : [];
+    if (show.length) {
+      L.push('', `明细 ${show.length} 条${wantChannel ? `（通道 ${wantChannel}）` : ''}${wantClass ? `（类别 ${wantClass}）` : '（仅 A/B）'}`);
+      for (const r of show) L.push(`  [${r.cls}] ${r.channel} · ${r.rule} :: ${r.id}\n        ${r.what.replace(/\s+/g, ' ').slice(0, 200)}`);
+    } else if (!wantClass && !wantChannel) {
+      L.push('', '明细：`--class A`（弃权 = 最可能掩盖缺陷）或 `--channel <通道>`（该子系统的 A/B）');
     }
     thisOut(`${L.join('\n')}\n`);
     return 0;

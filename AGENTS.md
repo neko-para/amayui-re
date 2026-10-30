@@ -165,6 +165,7 @@ pnpm tools disasm verify        # 反汇编语料保真断言（逐行反解回�
 pnpm tools shape claims --sample # ★ 对象 shape：claims 校验（访问记录 / 段落导出 / 独立复核见 `pnpm tools shape describe`）
 pnpm tools spec validate        # ★ spec 层：不变量（规范自包含 / 章节规则与 bindings·audit 一一对应 / 试点未登记义务 = 0）
 pnpm tools spec report          # ★ 审计账：effect 覆盖 / 内部省略 / 残差（不给百分数；范围闭合 ≠ 解释正确）
+pnpm tools spec residuals       # ★ 残差地图：**子系统通道 × 类别**（A=正文弃权 / B=消费者缺失 / C=知识缺口）；`--channel` / `--class` / `--json`
 pnpm tools spec effects --pilot # ★ 从语料机械枚举 effect（覆盖判定输入；不是“整条指令”）
 pnpm tools old-repo inventory   # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
 pnpm test                       # ★ 测试（默认只跑 @env pure；分级见下）

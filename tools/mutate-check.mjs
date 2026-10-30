@@ -1440,10 +1440,17 @@ const MUTATIONS = [
   },
   {
     file: 'tools/lib/spec.mjs',
-    from: "    if (e.status === 'reviewed' && weakHere > 0)",
+    from: "  if (e.status === 'reviewed' && weakHere > 0)",
     to: '    if (false)',
     guard: 'tools/test/spec.test.mjs',
     what: '★ reviewed 允许夹 weak（proposed）证据 ⇒ 没核过的结论可以贴着 reviewed 标签进主交付物',
+  },
+  {
+    file: 'tools/lib/spec.mjs',
+    from: "  if (abstains) return 'A';",
+    to: '  // 变异：正文弃权不再算 A（全掉进 B/C）',
+    guard: 'tools/test/spec-residuals.test.mjs',
+    what: '★ 「正文未规定」不再判 A ⇒ 最可能掩盖缺陷的那一类静默并进 B/C，残差地图失去首要用途',
   },
   {
     file: 'tools/lib/spec.mjs',
