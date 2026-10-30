@@ -806,8 +806,13 @@ void Machine::op_70(const Instruction& instruction) {
     record.f80 = a4;
     record.registered = 1;
     // 文本层矩形：按 w/h 建（或重建）离屏画布；逐字符绘制条目由 `0x6e` / `0x196` 在画字时排。
-    // 绘制键基数：脚本没给（0x213 没调过）时给一个宿主侧的默认基数，否则逐字符绘制条目会一条都不建。
-    if (!record.key_base_set) record.f68 = kTextLayerFallbackBase + group * 1000;
+    // 绘制键基数：脚本没给（0x213 没调过）时给一个宿主侧的默认基数 —— 本作 ADV 的消息层**不调**
+    // `0x213`，不给兜底就"只有窗框没有字"。★ 兜底要同时把 `key_base_fallback` 置起：绘制 / 擦除
+    // 只看"f68 是否可用"（`key_base_ready()`），⛔ 不是"脚本是否写过"。
+    if (!record.key_base_ready()) {
+        record.f68 = kTextLayerFallbackBase + group * 1000;
+        record.key_base_fallback = true;
+    }
     ensure_text_layer_texture(group);
     return;
 }

@@ -192,18 +192,18 @@ test('★ 窗进行中：插值写派生色 / 顶点缓冲，不写回当前颜�
   assert.deepEqual(me.colors, [0x80000000], '网格顶点缓冲每步重烘');
 });
 
-test('★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行', async () => {
+test('★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）', async () => {
   const m = machineFor([
     [0x21c, []],
     [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
   ], { tickMs: 16 });
-  // 场景里有一个 100ms 的窗（起点未盖章）
+  // 场景里有一个 100ms 的窗（起点未盖章）——**它不许**把等待位挡住：
+  // 语料的自然放行只读消息子系统的计时器 + 场景对象状态字，颜色窗不在其中。
   m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 100, colorFrom: 0, colorTo: 0xffffffff }));
   const r = await m.run();
   assert.equal(r.steps, 2, 'wait 之后的那条指令被执行了');
   assert.equal(m.flags, 0, '等待位已清');
-  assert.ok(m.ticks >= 7, `门关着的迭代次数（实际 ${m.ticks}）`);
-  assert.ok(m.now > 100, `虚拟时钟走过了窗长（实际 ${m.now}ms）`);
+  assert.equal(m.ticks, 0, '颜色窗还在走也必须立刻放行（不许 tick 空转）');
 });
 
 test('★ 0x21c 等待门：场景没有动画 ⇒ 下一个迭代就放行（不空转）', async () => {
@@ -267,17 +267,17 @@ test('★ 宿主时钟：给了 clock 时 `tick()` 读宿主读数，而不是 `
   assert.equal(m.ticks, 1);
 });
 
-test('★ 宿主时钟 + 等待门：时钟按宿主读数推进，窗到期才放行', async () => {
+test('★ 宿主时钟 + 等待门：颜色窗不挡，等待位当拍就清', async () => {
   let now = 0;
   const m = machineFor([
     [0x21c, []],
     [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
-  ], { clock: () => now, onIteration: () => { now += 16; } });
+  ], { clock: () => now });
   m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 100, colorFrom: 0, colorTo: 0xffffffff }));
   const r = await m.run();
   assert.equal(r.steps, 2);
-  assert.ok(m.now >= 112, `宿主时钟走过了窗长（实际 ${m.now}ms）`);
-  assert.ok(m.ticks >= 7, `门关着的迭代次数（实际 ${m.ticks}）`);
+  assert.equal(m.flags, 0, '等待位已清');
+  assert.equal(m.ticks, 0, '颜色窗还在走也必须立刻放行');
 });
 
 test('★ 0x344 场景条目：置存在位 + 写值 + 标脏', async () => {

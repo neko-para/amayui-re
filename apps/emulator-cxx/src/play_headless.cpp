@@ -294,6 +294,7 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
         std::printf("[play] text-gate slot=%zu cells=%zu cycles=%d\n", slot,
                     machine.text_layer_cell_count(slot), machine.text_gate_cycles(slot));
     }
+    std::printf("[play] text-appends=%zu\n", machine.text_appends());
     if (scripted != nullptr) {
         std::printf("[play] input applied=%zu exhausted=%d last=%lld\n", scripted->applied(),
                     scripted->exhausted() ? 1 : 0, static_cast<long long>(scripted->applied_until()));

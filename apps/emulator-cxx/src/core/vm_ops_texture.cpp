@@ -770,17 +770,78 @@ void Machine::op_32(const Instruction& instruction) {
     if (span_x == 0 || span_y == 0) return;
     const int dest_w = right - left;
     const int dest_h = bottom - top;
+    // 采样比 = 源跨度 / 目标跨度。引擎 `sub_4A87A0` 按比例把目标夹进目标纹理后再分派：
+    // srcW<=dstW 且 srcH<=dstH ⇒ 放大（EnlargeTexture），两个方向都 ≥ ⇒ 缩小（ShrinkTexture），
+    // 一边放一边缩 ⇒ 临时介面两趟（本模型按放大支处理，见残差 `RES-TEX-STRETCH-MIXED`）。
+    const double scale_x = static_cast<double>(span_x) / static_cast<double>(dest_w);
+    const double scale_y = static_cast<double>(span_y) / static_cast<double>(dest_h);
+    const bool shrink = scale_x >= 1.0 && scale_y >= 1.0;
+    const auto pixel = [&](int x, int y, int channel) -> int {
+        x = std::clamp(x, 0, static_cast<int>(source->width) - 1);
+        y = std::clamp(y, 0, static_cast<int>(source->height) - 1);
+        const std::size_t at = (static_cast<std::size_t>(y) * source->width + static_cast<std::size_t>(x)) * 4u;
+        return at + 3u < source->rgba.size() ? static_cast<int>(source->rgba[at + static_cast<std::size_t>(channel)])
+                                            : 0;
+    };
     for (int oy = 0; oy < dest_h; ++oy) {
-        const int sy = sy0 + (oy * span_y) / dest_h;
         for (int ox = 0; ox < dest_w; ++ox) {
-            const int sx = sx0 + (ox * span_x) / dest_w;
-            const std::size_t from = (static_cast<std::size_t>(sy) * source->width + sx) * 4u;
-            const std::size_t to = (static_cast<std::size_t>(top + oy) * target->slot.width + (left + ox)) * 4u;
-            if (from + 3 >= source->rgba.size() || to + 3 >= canvas.size()) continue;
-            canvas[to + 0] = source->rgba[from + 0];
-            canvas[to + 1] = source->rgba[from + 1];
-            canvas[to + 2] = source->rgba[from + 2];
-            canvas[to + 3] = source->rgba[from + 3];
+            const std::size_t to = (static_cast<std::size_t>(top + oy) * target->slot.width +
+                                    static_cast<std::size_t>(left + ox)) * 4u;
+            if (to + 3u >= canvas.size()) continue;
+            if (shrink) {
+                // 缩小 = **面积加权平均**（引擎 `sub_4A42C0`：区间比例 0x4A43DD / 0x4A4423，
+                // 逐源像素取 0x4A44F8，最后除以权重 0x4A4631）。
+                const double x0f = static_cast<double>(ox) * scale_x;
+                const double x1f = static_cast<double>(ox + 1) * scale_x;
+                const double y0f = static_cast<double>(oy) * scale_y;
+                const double y1f = static_cast<double>(oy + 1) * scale_y;
+                double sum[4] = {0.0, 0.0, 0.0, 0.0};
+                double total = 0.0;
+                for (int sy = static_cast<int>(std::floor(y0f)); sy < static_cast<int>(std::ceil(y1f)); ++sy) {
+                    const double wy = std::min(y1f, static_cast<double>(sy + 1)) -
+                                      std::max(y0f, static_cast<double>(sy));
+                    if (wy <= 0.0) continue;
+                    for (int sx = static_cast<int>(std::floor(x0f)); sx < static_cast<int>(std::ceil(x1f)); ++sx) {
+                        const double wx = std::min(x1f, static_cast<double>(sx + 1)) -
+                                          std::max(x0f, static_cast<double>(sx));
+                        if (wx <= 0.0) continue;
+                        const double weight = wx * wy;
+                        total += weight;
+                        for (int c = 0; c < 4; ++c) sum[c] += weight * pixel(sx0 + sx, sy0 + sy, c);
+                    }
+                }
+                if (total <= 0.0) continue;
+                for (int c = 0; c < 4; ++c) {
+                    const int value = static_cast<int>(std::trunc(sum[c] / total + 0.5));
+                    canvas[to + static_cast<std::size_t>(c)] =
+                        static_cast<std::uint8_t>(std::clamp(value, 0, 255));
+                }
+                continue;
+            }
+            // 放大 = **双线性**（引擎 `sub_4A3F90`：sx = u·srcW/dstW（`0x4A3FA6` imul + `0x4A3FCB`
+            // fdivp），整数部分 `__ftol2_sse`（0x4A3FE3）截断、`0x4A3FFB` fsubp 取小数，
+            // 索引夹到 srcW-1（0x4A400C–0x4A4012），四邻域 0x4A4043/0x4A4095/0x4A40E3/0x4A418C，
+            // 每通道 `sub_49EE00`：加权 + 0.5（0x49EE33）后截断并夹 0..255（0x49EE39–0x49EE4E））。
+            const double sx_f = static_cast<double>(ox) * scale_x;
+            const double sy_f = static_cast<double>(oy) * scale_y;
+            int ix = static_cast<int>(std::trunc(sx_f));
+            int iy = static_cast<int>(std::trunc(sy_f));
+            const double fx = sx_f - static_cast<double>(ix);
+            const double fy = sy_f - static_cast<double>(iy);
+            ix = std::clamp(ix, 0, std::max(0, span_x - 1));
+            iy = std::clamp(iy, 0, std::max(0, span_y - 1));
+            const int ix1 = std::clamp(ix + 1, 0, std::max(0, span_x - 1));
+            const int iy1 = std::clamp(iy + 1, 0, std::max(0, span_y - 1));
+            for (int c = 0; c < 4; ++c) {
+                const double p00 = pixel(sx0 + ix, sy0 + iy, c);
+                const double p10 = pixel(sx0 + ix1, sy0 + iy, c);
+                const double p01 = pixel(sx0 + ix, sy0 + iy1, c);
+                const double p11 = pixel(sx0 + ix1, sy0 + iy1, c);
+                const double value = (1.0 - fy) * ((1.0 - fx) * p00 + fx * p10) +
+                                     fy * ((1.0 - fx) * p01 + fx * p11);
+                canvas[to + static_cast<std::size_t>(c)] =
+                    static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::trunc(value + 0.5)), 0, 255));
+            }
         }
     }
     target->slot.rgba = std::move(canvas);
@@ -806,7 +867,36 @@ void Machine::op_72(const Instruction& instruction) {
     current_text_slot_ = slot;
     state_flags_ |= (1u << 31);
     state_flags_ |= (1u << 30);
+    // 自动消息：`0x1b7` 写的引擎格非 0 ⇒ 按"时长公式"武装计时器；到期由逐帧服务**放行**这一位
+    // （与点击同一对操作：清 bit31 + bit30，不换行、不取下一行）。
+    // 时长 = max(100, TimeX + PitchX × (N − 1 − 0x2e9 的格))；本模型没有音频后端 ⇒ 语音恒"不在播"
+    // ⇒ 取第 1 组（Time1 / Pitch1）。N = 该槽的行记录数。
+    auto_armed_ = false;
+    auto_interval_ms_ = 0;
+    if (flag_y_ != 0) {
+        const std::int32_t n = line_records_[static_cast<std::size_t>(resolved)];
+        const std::int64_t time1 = config_.get_int("message:AutoMessageTime1");
+        const std::int64_t pitch1 = config_.get_int("message:AutoMessagePitch1");
+        const std::int64_t raw = time1 + pitch1 * (static_cast<std::int64_t>(n) - 1 - cell_2e9_);
+        auto_interval_ms_ = static_cast<std::uint32_t>(std::max<std::int64_t>(100, raw));
+        auto_due_ms_ = scene_clock_ms_ + auto_interval_ms_;
+        auto_armed_ = true;
+    }
     return;
+}
+
+void Machine::service_auto_message() {
+    // 自动消息的到期服务：`0x72` 武装后，到 `auto_due_ms_` 就**放行**同一对位（bit31 + bit30）。
+    // ⛔ 不换行、不取下一行、不改执行位置 —— 下一行仍由脚本产生（与点击放行完全同一条路）。
+    if (!auto_armed_) return;
+    if ((state_flags_ & (1u << 31)) == 0) {
+        auto_armed_ = false;  // 已被点击 / 跳过放行
+        return;
+    }
+    if (scene_clock_ms_ < auto_due_ms_) return;
+    state_flags_ &= ~(1u << 31);
+    state_flags_ &= ~(1u << 30);
+    auto_armed_ = false;
 }
 
 void Machine::service_advance_wait() {
@@ -818,6 +908,7 @@ void Machine::service_advance_wait() {
     if ((have && (mask & 1) != 0) || skip) {
         state_flags_ &= ~(1u << 31);
         state_flags_ &= ~(1u << 30);
+        auto_armed_ = false;
     }
 }
 

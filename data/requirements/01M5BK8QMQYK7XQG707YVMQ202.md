@@ -55,7 +55,7 @@
 
 ## 当前门禁（实测 2026-10-30，macOS 干净树）
 
-`pnpm test` **1113 通过 / 0 失败** · `ctest` **37/37** · `pnpm typecheck` 六工程通过 · `pnpm tools spec validate` 13/13 ·
+`pnpm test` **1113 通过 / 0 失败** · `ctest` **39/39** · `pnpm typecheck` 六工程通过 · `pnpm tools spec validate` 13/13 ·
 `pnpm tools requirements validate` **6/6** · `pnpm tools routes validate` 12/12 · `pnpm tools corpus validate` 8 通过 / 0 失败 / 1 警告。
 
 ## 2026-10-30 独立复审（`323b5a5`）与清理

@@ -105,6 +105,13 @@ struct ListRecord {
     std::int32_t f6c = 0;
     // `0x213` 是否写过键基数：0 是**合法值**，不能用 `f68 <= 0` 当"没写过"。
     bool key_base_set = false;
+    // 宿主兜底基数是否已写进 `f68`（`0x70` 在该层**没有** `0x213` 时补一个，见残差
+    // `ADV-TEXT-LAYER-DRAW-KEY`）。★ 它与 `key_base_set` **不是**一回事：前者 = "脚本写过"，
+    // 后者 = "f68 现在可用"。⛔ 把"脚本没写过"当成"没有基数"会让 ADV 消息层一个字都画不出来
+    // （本作 ADV 的消息层**不调** `0x213`）。
+    bool key_base_fallback = false;
+    // 逐字符绘制条目的键基数是否可用（脚本写过 **或** 兜底写过）。
+    bool key_base_ready() const { return key_base_set || key_base_fallback; }
     std::int32_t f114 = 0;
     std::int32_t f118 = 0;
     std::int32_t f120 = 0;
@@ -593,6 +600,8 @@ public:
     std::size_t mesh_count() const { return meshes_.size(); }
     const std::unordered_map<std::uint32_t, DrawItem>& draw_items() const { return draw_items_; }
     const std::unordered_map<std::uint32_t, TextureEntry>& textures() const { return textures_; }
+    // 测试 / 诊断注入点：直接写一个配置键（自动消息时长这类"配置驱动"的行为用它布场）。
+    void set_config_int(const std::string& key, std::int32_t value) { config_.set_int(key, value); }
     // 测试 / 诊断注入点：直接布置纹理记录的来源文件；⛔ 产品路径不要靠它伪造状态。
     void set_texture_file(std::uint32_t slot, std::int32_t file) {
         textures_[slot].record.file = file;
@@ -625,7 +634,8 @@ public:
     const std::vector<ChoiceEntry>& choices() const { return choices_; }
     std::int32_t choice_index() const { return choice_index_; }
     const ChoiceWindowState& choice_window() const { return choice_window_; }
-    // 守卫用：摆一个非 -1 的兜底目标，验证 `0x93` 清表**不**复位它（引擎 `[0CA84h]` 不在这 7 格内）。
+    // 守卫用：摆一个非 -1 的兜底目标，验证 `0x93` 清表**会**把它复位成 -1
+    // （`0x403F07 [ecx+74ACh] = -1`；`[+74ACh]` = engine `0CA84h`，就是 `0x92` 写的那一格）。
     void set_choice_fallback(std::int32_t value) { choice_window_.fallback = value; }
     // `0x32d` 发过的「场景颜色」请求（命令 0x8B）；`0x32a` 销毁过的子对象槽。
     const SceneColorRequest& scene_color_request() const { return scene_color_request_; }
@@ -637,6 +647,17 @@ public:
         return i == 0 ? msg_wait_a_ : (i == 1 ? msg_wait_b_ : msg_wait_c_);
     }
     void set_msg_wait_gate(std::int32_t value) { msg_wait_gate_ = value; }
+    // 自动消息（auto-message）：`0x1b7` 写的那个引擎格（`0x5EC70`）就是开关；`0x72` 在它非 0 时
+    // 会按"时长公式"武装一个计时器，到期后**放行**等推进位（与点击同一对操作，不换行、不取下一行）。
+    std::uint32_t auto_interval_ms() const { return auto_interval_ms_; }
+    bool auto_armed() const { return auto_armed_; }
+    // 文本追加次数（`0x6e` / `0x196` 成功追加一条就 +1）：宿主拿它当"这一轮真的推进了几句"的观测口。
+    std::size_t text_appends() const { return text_appends_; }
+    std::int32_t line_record_count(std::size_t slot) const {
+        return slot < line_records_.size() ? line_records_[slot] : 0;
+    }
+    // 测试 / 诊断注入点：语音是否在播（`0x77A14`；本模型没有音频后端 ⇒ 产品里恒 0）。
+    void set_voice_playing(bool value) { voice_playing_ = value; }
     std::int32_t voice_option_2f7(std::size_t i) const { return i < 3 ? voice_option_2f7_[i] : 0; }
     std::int32_t cursor_request_x() const { return cursor_request_x_; }
     std::int32_t cursor_request_y() const { return cursor_request_y_; }
@@ -1105,6 +1126,8 @@ private:
     void op_214(const Instruction&);
     // `0x72` 的放行（帧服务）：等推进位置起时，输入一到就清位。
     void service_advance_wait();
+    void service_auto_message();
+    void service_choice_click();
     void op_2f7(const Instruction&); void op_304(const Instruction&); void op_305(const Instruction&);
     // 门之前的 BGM 淡变推进（第 9 位的服务分支；规范未规定 ⇒ 见实现里的残差说明）。
     void service_bgm_fade();
@@ -1421,6 +1444,12 @@ private:
     std::int32_t msg_wait_b_ = 0;
     std::int32_t msg_wait_c_ = 0;
     std::int32_t msg_wait_gate_ = 0;
+    // 自动消息：时长 / 到期时刻（0 = 未武装）。`line_records_` 是每槽"行记录数"（≈行号 + 1）。
+    std::uint32_t auto_interval_ms_ = 0;
+    std::uint32_t auto_due_ms_ = 0;
+    bool auto_armed_ = false;
+    std::array<std::int32_t, 10> line_records_{};
+    std::size_t text_appends_ = 0;
     // `0x2f7` 写的语音选项格（每槽一格，整格写 1）。
     std::array<std::int32_t, 3> voice_option_2f7_{};
     // `0x10a` 的光标瞬移请求（平台边界：本模型只记请求，不改任何引擎状态）。

@@ -2592,7 +2592,7 @@
         "shape:T1@0x60"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行",
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）",
         "KN:01M5FK4FKN4A6C1D6E5G0P4T3C"
       ]
     },
@@ -2711,7 +2711,7 @@
         "shape:T_Command@0x5d880"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）"
       ]
     },
     {
@@ -2759,7 +2759,7 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）"
       ]
     },
     {
@@ -2795,7 +2795,7 @@
         "shape:T_Command@0x5d880"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：门关着时只推进时钟；场景不再有动画才放行"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）"
       ]
     },
     {

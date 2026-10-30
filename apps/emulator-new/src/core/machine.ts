@@ -1126,11 +1126,11 @@ export class Machine {
       return null;
     }
     if ((this.flags & WAIT_BIT) !== 0) {
-      if (this.scene.animating === 0) {
-        this.flags &= ~WAIT_BIT;
-        return null;
-      }
-      this.tick();
+      // 放行看「消息 / 文本子系统没有未完成的工作」，**不看颜色窗 / 场景动画**
+      // （语料：自然放行只读消息子系统的计时器 + 场景对象的状态字，那条支路里没有窗口/插值字段）。
+      // ★ 本参考实现没有建模文本子系统的待画格 ⇒ 这里等价于"立即放行"；⛔ 不要退回
+      //   `scene.animating === 0`：那会让每句的窗口淡入把脚本卡住数秒，点击全丢。
+      this.flags &= ~WAIT_BIT;
       return null;
     }
     if ((this.flags & MOVIE_BIT) !== 0) {

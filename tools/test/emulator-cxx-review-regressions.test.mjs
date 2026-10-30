@@ -42,9 +42,39 @@ const CASES = [
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
-    snippet: 'if (!rec.key_base_set) return;',
+    snippet: 'if (!rec.key_base_ready()) return;',
     count: 1,
-    why: '脚本显式写基数 0 时不得被宿主兜底覆盖',
+    why: '绘制条目认「基数可用」（脚本 0x213 **或** 0x70 的宿主兜底）；只看 key_base_set 会让 ADV 消息层无字',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm.h',
+    snippet: 'bool key_base_ready() const { return key_base_set || key_base_fallback; }',
+    count: 1,
+    why: '「脚本写过」与「f68 可用」是两个格：兜底写过也必须算可用',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    snippet: 'const bool shrink = scale_x >= 1.0 && scale_y >= 1.0;',
+    count: 1,
+    why: '0x32 缩小走面积加权平均、放大走双线性；判据按采样比分成两支',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    snippet: 'if ((state_flags_ & (1u << 10)) != 0 && pending_glyphs_.empty() &&',
+    count: 1,
+    why: '0x21c 的等待位放行看「消息子系统没工作」（待画格 / 打字态），不看颜色窗 —— 看颜色窗会把每句 1800ms 淡入变成脚本阻塞、点击全丢',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_io.cpp',
+    snippet: 'choice_window_.fallback = -1;',
+    count: 1,
+    why: '0x93 的清表是七格复位，兜底跳转目标也在里面（0x403F07 [ecx+74ACh] = -1）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    snippet: 'if ((have && (mask & 1) != 0) || skip) {',
+    count: 1,
+    why: '0x72 的等推进只认左键（位 0）；认整张掩码会让右键放行',
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',

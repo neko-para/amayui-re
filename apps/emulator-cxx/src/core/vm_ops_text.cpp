@@ -229,7 +229,9 @@ bool Machine::ensure_text_layer_texture(int slot) {
 void Machine::create_text_layer_item(int slot, int left, int top, int right, int bottom) {
     if (slot < 0 || slot >= 10) return;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
-    if (!rec.key_base_set) return;  // 脚本没给键基数 ⇒ 不建条目（宿主兜底在 `0x70` 里）
+    // 键基数可用 = 脚本写过 `0x213` **或** `0x70` 补过兜底（`key_base_ready()`）。
+    // ⛔ 只看 `key_base_set` 会让"没调 0x213 的层"（= 本作 ADV 的消息层）一条条目都不建。
+    if (!rec.key_base_ready()) return;
     const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
     const TextureSlotObject* texture = texture_slot(id);
     if (texture == nullptr) return;
@@ -259,7 +261,7 @@ void Machine::erase_text_layer_draw_items(int slot) {
     if (slot < 0 || slot >= 10) return;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
-    if (rec.key_base_set) {
+    if (rec.key_base_ready()) {
         for (std::int32_t i = 0; i < state.draw_index; ++i) {
             draw_items_.erase(static_cast<std::uint32_t>(rec.f68) + static_cast<std::uint32_t>(i));
         }
@@ -628,6 +630,7 @@ void Machine::end_text_layer_line(int slot) {
     state.cursor_y += line_advance;
     // `sub_46AF90` 在 `a3 >= 0` 时还会追加一条**空串记录**（标志 |= 8）；`0x6f` 与折行共用这个入口。
     append_text_span_record(slot, std::string(), 0, 0, 0, 0, font_text_gate_5ec7c_ | 8);
+    if (slot >= 0 && slot < 10) ++line_records_[static_cast<std::size_t>(slot)];
 }
 
 void Machine::op_71(const Instruction& instruction) {
@@ -639,6 +642,7 @@ void Machine::op_71(const Instruction& instruction) {
     const auto requested = read_int(ops[0]);
     frame_mut().position = static_cast<std::uint32_t>(frame_mut().ip / 4);
     const int slot = resolve_text_layer(requested);
+    if (slot >= 0 && slot < 10) line_records_[static_cast<std::size_t>(slot)] = 1;  // 清空后追加 1 条
     clear_text_layer(slot);
     return;
 }
@@ -710,6 +714,7 @@ void Machine::op_6e(const Instruction& instruction) {
     if (slot < 0 || slot >= 10) return;
     current_text_slot_ = requested;
     text_windows_[slot].text += text;
+    ++text_appends_;
     draw_text_layer_text(slot, text, std::string());
     // ★ 成功追加时置消息臂位的第 16 位（引擎 `0x41EB7D`：`or [esi+77A04h], 10000h`；只在
     //   `0x304` 已把臂位第 0 位置起的支路里做）。`0x305` 的「武装」= 位 0 与位 16 同时成立。
@@ -747,6 +752,7 @@ void Machine::op_196(const Instruction& instruction) {
     TextWindowRecord& window = text_windows_[slot];
     window.text += text;
     window.rubi = rubi.size() > 1023 ? rubi.substr(0, 1023) : rubi;
+    ++text_appends_;
     draw_text_layer_text(slot, text, window.rubi);
     // ★ 与 `0x6e` 同一条：成功追加时置消息臂位第 16 位（引擎 `0x41FCD8`）。
     if ((msg_arm_ & 1) != 0) msg_arm_ |= 0x10000;

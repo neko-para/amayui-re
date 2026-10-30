@@ -183,6 +183,23 @@ add_test(NAME emulator-core-scene-records COMMAND emulator-core-selftest --only-
 # ★ 0x193 字符串拼接 / 0x2e9 固定格 / 0x2f7 语音选项格 / 0x32 纹理缩放拷贝 / 0x10a 光标请求 / 0x20a 重绘：
 #   复审点名的零 CTest opcode 各一条最小行为断言。
 add_test(NAME emulator-core-misc-ops COMMAND emulator-core-selftest --only-misc-ops)
+# ★ 文本层的**键基数兜底**：本作 ADV 的消息层**不调** `0x213`（残差 `ADV-TEXT-LAYER-DRAW-KEY`）⇒
+#   `0x70` 必须补宿主基数，绘制条目必须真的出现。把"脚本写过 `0x213`"当"有键基数"⇒ 消息层
+#   一个字都不显示（表现为"点一下屏幕什么都不变"）⇒ 本条红。
+add_test(NAME emulator-core-text-layer-fallback COMMAND emulator-core-selftest --only-text-layer-fallback)
+# ★ `0x72` 的「等推进」闸：门位置起后**一条指令都不派发**；只有**左键**（位 0）放行，右键不算；
+#   放行的那一步就要执行下一条。放行看错位 / 提前派发 ⇒ 本条红。
+add_test(NAME emulator-core-adv-wait COMMAND emulator-core-selftest --only-adv-wait)
+# ★ `0x32` 缩放拷贝：放大 = **双线性**（4 邻域加权 +0.5 截断）、缩小 = **面积加权平均**
+#   （0x4A3FA6/0x4A3FCB 求 sx、0x4A3FE3 截断、0x4A400C 夹索引、0x49EE00 加权；缩小 0x4A42C0）。
+#   退回最近邻 ⇒ (1,1) 会是源 (0,0)、本条红。
+add_test(NAME emulator-core-texture-stretch COMMAND emulator-core-selftest --only-texture-stretch)
+# ★ 自动消息：`0x1b7` 开启后 `0x72` 武装计时器，到期**放行同一对位**（不换行、不取下一行）；
+#   时长 = max(100, Time1 + Pitch1 × (N − 1 − 0x2e9 的格))。不武装 / 永不放行 / Pitch 不进公式 ⇒ 本条红。
+add_test(NAME emulator-core-auto-message COMMAND emulator-core-selftest --only-auto-message)
+# ★ 选项消费侧：窗口开着 + 左键 + 命中带决定入口的条 ⇒ 执行位置 ← 该入口（jump）、清表、关窗。
+#   不跳 / 不关窗 / 不清表 ⇒ 本条红。★ 只验机制，"何时消费"的次序仍是残差。
+add_test(NAME emulator-core-choice-consumer COMMAND emulator-core-selftest --only-choice-consumer)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)
@@ -259,6 +276,35 @@ if(EMULATOR_CXX_INSTALL_DIR)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_hit_test.cmake)
     # ★ 设置界面的**开关真的写配置**：点 ON 与点 OFF 的配置快照必须不同、且 OFF ⇒ 0。
     #   红 = 右列开关点了没反应（缺 handler / 写错键 / 走了早退却不写键）。
+    # ★ 路由（`data/routes/screens.json` 的**可执行**出口）：每条 = 一段脚本化点击时间线 +
+    #   必须到达的脚本 id。它们以前只被"元数据校验"覆盖，**从没真跑过** —— 于是"点击丢了"
+    #   这类问题不会被任何门禁发现（实测：等待位被颜色窗卡住时，本组会红在 chapter0 上）。
+    add_test(NAME emulator-core-route-title
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/route-title.txt"
+                --anchor-script 21092 --expect-script 21092 --tick-ms 16 --max-steps 200000)
+    add_test(NAME emulator-core-route-gamestart
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/route-gamestart.txt"
+                --anchor-script 21092 --expect-script 21099 --tick-ms 16 --max-steps 400000)
+    add_test(NAME emulator-core-route-gamestart-newgame
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/route-gamestart-newgame.txt"
+                --anchor-script 21092 --expect-script 20964 --tick-ms 16 --max-steps 400000)
+    # ★ 点击节奏：同一段时间线里 80 次点击（每 300 ms、按住 100 ms）必须推进 ≥ 60 次正文。
+    #   守的是"点击大量被吞"——等待位被颜色窗卡住时只会推进十几次（实测 13）。阈值在
+    #   tests/adv_click_rate.cmake 里，日志留在构建目录。
+    add_test(NAME emulator-core-adv-click-rate
+        COMMAND ${CMAKE_COMMAND}
+            -DEXE=$<TARGET_FILE:emulator-cxx>
+            -DINSTALL=${EMULATOR_CXX_INSTALL_DIR}
+            -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/tests
+            -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/adv_click_rate.cmake)
+    add_test(NAME emulator-core-route-newgame-chapter0
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/route-newgame-chapter0.txt"
+                --anchor-script 21092 --expect-script 115 --tick-ms 16 --max-steps 600000)
     add_test(NAME emulator-core-config-toggle
         COMMAND ${CMAKE_COMMAND}
             -DEXE=$<TARGET_FILE:emulator-cxx>

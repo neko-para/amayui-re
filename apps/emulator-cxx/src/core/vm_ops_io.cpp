@@ -400,15 +400,38 @@ void Machine::op_97(const Instruction& instruction) {
     return;
 }
 
-// 选项窗口的**清表**（`sub_403EF0`）：条目数 0、选中 -1、步长 0、悬停 -1、移动命中开关 0、变更挂起 0。
-// ★ 引擎**不**在这里复位兜底目标（`[0CA84h]` 不在这 7 格内）⇒ 兜底跨窗保留，⛔ 不是 -1。
+// 选项窗口的**清表**（`sub_403EF0`）：条目数 0、选中 -1、步长 0、**兜底跳转目标 -1**、悬停 -1、
+// 移动命中开关 0、变更挂起 0 —— 七格。
+// ★ 兜底目标**在**这 7 格里：`0x403F07 [ecx+74ACh] = -1`，而 `[+74ACh]` = engine `0CA84h`，
+//   正是 `0x92` 写（`0x420830`）、消费侧当跳转下标读（`0x4099EC`）的那一格 ⇒ **清表会复位它**，
+//   ⛔ 不是"跨窗保留"（本仓 2026-10-30 的那版注释写反了，已按语料改正）。
 void Machine::reset_choice_table() {
     choices_.clear();
     choice_index_ = -1;
     choice_window_.step = 0;
+    choice_window_.fallback = -1;
     choice_window_.hover = -1;
     choice_window_.move_hit = false;
     choice_window_.pending = false;
+}
+
+// 选项**消费侧**（引擎在帧循环里、门之后的一个分支里做，`sub_4098E0`）：
+// 窗口开着 + 左键位 + 命中一条且该条有**决定入口** ⇒ 执行位置 ← 该入口（引擎是 **jump**：
+// `PC ← 帧基址 + 4×入口`，不压返回点），清表、关窗、置闩锁。
+// ★ 与 spec 的 `ADV-CHOICE-CONSUMER` 一致：这里只落**机制**；"何时消费"的次序仍属残差。
+void Machine::service_choice_click() {
+    if (!choice_window_.input_gate || choices_.empty()) return;
+    std::int32_t mask = 0;
+    if (!mouse_button_source_ || !mouse_button_source_(mask) || (mask & 1) == 0) return;
+    const auto hit = choice_hit_test();
+    if (hit < 0) return;
+    const auto decide = choices_[static_cast<std::size_t>(hit)].decide;
+    if (decide < 0) return;  // 该条没有决定入口 ⇒ 点了也不跳（引擎返回 -1 时同样不写 PC）
+    frame_mut().ip = static_cast<std::uint32_t>(decide) * 4u;
+    reset_choice_table();
+    choice_window_.input_gate = false;
+    choice_window_.latch = true;
+    return;
 }
 
 // 用当前光标对选项表做一次**矩形命中**（`sub_403C50`）：返回第一条命中的下标，没有 ⇒ -1。

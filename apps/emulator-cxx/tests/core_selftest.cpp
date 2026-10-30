@@ -3340,7 +3340,9 @@ bool check_choice_window(const core::OpcodeTable& table) {
             return false;
         }
     }
-    // ⑤ 0x93 清表**不**复位兜底目标（它跨窗保留；引擎 `[0CA84h]` 不在这 7 格内）。
+    // ⑤ 0x93 清表**会**把兜底跳转目标复位成 -1（7 格之一：`0x403F07 [ecx+74ACh] = -1`，
+    //    `[+74ACh]` = engine `0CA84h` = `0x92` 写的那一格）。★ 这条以前断言"跨窗保留"，
+    //    与语料相反 —— 症状是上一个窗口的兜底目标被带到下一个窗口（没选就关窗时跳到错的下标）。
     {
         auto script = make_script_with_body();
         emit_instruction(script, 0x93, {});
@@ -3349,8 +3351,27 @@ bool check_choice_window(const core::OpcodeTable& table) {
         machine.set_choice_fallback(123);
         machine.load_root(script);
         machine.step();
-        if (machine.choice_window().fallback != 123) {
-            std::fprintf(stderr, "0x93 清表把兜底目标复位了（%d；应为 123）\n",
+        if (machine.choice_window().fallback != -1) {
+            std::fprintf(stderr, "0x93 清表没有把兜底目标复位成 -1（%d）\n",
+                         machine.choice_window().fallback);
+            return false;
+        }
+    }
+    // ⑥ 0x92 的兜底目标由**清表**复位（不是"跨窗保留"）：`0x92` 阻塞时不能先写兜底再走到
+    //    0x93（闩锁未置 ⇒ 0x92 每拍重跑），所以这一条用 ⑤ 的同一条可观察路径：摆一个值 ⇒ 0x93 ⇒ -1。
+    //    这里只钉"清表之后**再**开窗，兜底不会从上一窗漏过来"。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x93, {});
+        emit_instruction(script, 0x94, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_choice_fallback(777);
+        machine.load_root(script);
+        machine.step();  // 0x93：清表 ⇒ 兜底 -1
+        machine.step();  // 0x94：开窗
+        if (machine.choice_window().fallback != -1) {
+            std::fprintf(stderr, "清表后再开窗，兜底目标从上一窗漏过来了（%d）\n",
                          machine.choice_window().fallback);
             return false;
         }
@@ -3961,6 +3982,376 @@ bool check_msg_block(const core::OpcodeTable& table) {
     }
     return true;
 }
+
+// 文本层的**键基数兜底**：本作 ADV 的消息层**不调** `0x213`（残差 `ADV-TEXT-LAYER-DRAW-KEY`），
+// 所以 `0x70` 必须补一个宿主基数，且绘制 / 擦除都认它。★ 判据是"真的出现了绘制条目"，
+// ⛔ 不是"兜底格被写了" —— 只看 `key_base_set`（= 脚本写过）会让消息层一个字都不显示，
+// 表现为"点一下什么都不变"（本轮实际踩过）。
+bool check_text_layer_fallback(const core::OpcodeTable& table) {
+    constexpr std::int32_t kGroup = 9;
+    const auto base = core::kTextLayerFallbackBase + kGroup * 1000;
+    const auto build = [&](bool with_213) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, kGroup}});
+        emit_instruction(bytes, 0x70, {{0, kGroup}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+        if (with_213) emit_instruction(bytes, 0x213, {{0, kGroup}, {0, 190700}, {0, 40}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x74, {{0, 0}});  // 间隔 0 ⇒ 立即抽干，格子一次全部排好
+        emit_instruction(bytes, 0x71, {{0, kGroup}});
+        emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    const auto prepare = [&](core::Machine& machine) {
+        machine.write_text(core::Operand{5, 0}, "AB");
+    };
+    const auto run = [&](const std::vector<std::uint8_t>& script) {
+        core::Machine machine(0x12345678u, table);
+        prepare(machine);
+        machine.load_root(script);
+        for (int i = 0; i < 64 && !machine.halted(); ++i) machine.step();
+        return machine;
+    };
+    // ① 没有 0x213：兜底基数上必须有条目（否则消息层只剩窗框）。
+    {
+        auto machine = run(build(false));
+        if (machine.text_layer_draw_key(kGroup) != base) {
+            std::fprintf(stderr, "0x70 没补兜底基数（draw_key=%d 期望 %d）\n",
+                         machine.text_layer_draw_key(kGroup), base);
+            return false;
+        }
+        if (machine.draw_item(static_cast<std::uint32_t>(base)) == nullptr) {
+            std::fprintf(stderr, "没有 0x213 的层一条绘制条目都没建（键 %d）\n", base);
+            return false;
+        }
+    }
+    // ② 有 0x213：脚本基数**覆盖**兜底，条目落在脚本的键上。
+    {
+        auto machine = run(build(true));
+        if (machine.text_layer_draw_key(kGroup) != 190700 ||
+            machine.draw_item(190700) == nullptr) {
+            std::fprintf(stderr, "0x213 的基数被兜底覆盖 / 条目不在脚本键上（draw_key=%d）\n",
+                         machine.text_layer_draw_key(kGroup));
+            return false;
+        }
+    }
+    return true;
+}
+
+// 选项**消费侧**：窗口开着 + 左键 + 命中一条带"决定入口"的选项 ⇒ 执行位置 ← 该入口（jump，
+// 不压返回点）、清表、关窗。★ 只验机制；"何时消费"的次序仍是残差 `ADV-CHOICE-CONSUMER`。
+bool check_choice_consumer(const core::OpcodeTable& table) {
+    // 布局：0x90(15 个 dword) + 0x94(1) + 0x91(3) = 19；落空路径的标记在 19，跳转目标在 22。
+    auto script = make_script_with_body();
+    emit_instruction(script, 0x90, {{0, 0}, {0, 0}, {0, 10}, {0, 10}, {0, -1}, {0, -1}, {0, 23}});
+    emit_instruction(script, 0x94, {});
+    emit_instruction(script, 0x91, {{0, 0}});
+    emit_instruction(script, 0x2F7, {{0, 0}});  // 19：落空（0x91 闩锁支之后）会走到这里
+    emit_instruction(script, 2, {});           // 22：落空路径到此为止
+    emit_instruction(script, 0x2F7, {{0, 1}});  // 23：点中之后的**决定入口**
+    emit_instruction(script, 2, {});
+    core::Machine machine(0x12345678u, table);
+    machine.set_cursor_source([](std::int32_t& x, std::int32_t& y) -> bool { x = 5; y = 5; return true; });
+    machine.set_mouse_button_source([](std::int32_t& mask) -> bool { mask = 1; return true; });
+    machine.load_root(script);
+    for (int i = 0; i < 6 && !machine.halted(); ++i) {
+        if (!machine.step()) break;
+    }
+    if (machine.voice_option_2f7(1) != 1 || machine.voice_option_2f7(0) != 0 || !machine.choices().empty()) {
+        std::fprintf(stderr, "点中选项没有跳到决定入口（decide=%d fallthrough=%d 条数=%zu）\n",
+                     machine.voice_option_2f7(1), machine.voice_option_2f7(0), machine.choices().size());
+        return false;
+    }
+    return true;
+}
+
+// 自动消息（auto-message）：`0x1b7` 开启后，`0x72` 会按"时长公式"武装计时器，
+// 到期**放行同一对位**（bit31 + bit30），不换行、不取下一行。
+// 公式：`max(100, Time1 + Pitch1 × (N − 1 − 0x2e9 的格))`；本模型没有音频后端 ⇒ 语音恒不在播 ⇒ 第 1 组。
+bool check_auto_message(const core::OpcodeTable& table) {
+    const auto build = [&](std::int32_t auto_on) {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1B7, {{0, auto_on}});
+        emit_instruction(script, 0x72, {{0, 9}});
+        emit_instruction(script, 0x2F7, {{0, 0}});
+        emit_instruction(script, 2, {});
+        return script;
+    };
+    // ① Time1 = 2000、Pitch1 = 0 ⇒ 时长 2000；1999 ms 不放行、2000 ms 放行并执行下一条。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_config_int("message:AutoMessageTime1", 2000);
+        machine.set_config_int("message:AutoMessagePitch1", 0);
+        machine.load_root(build(1));
+        if (!machine.step() || !machine.step()) {
+            std::fprintf(stderr, "auto-message 起始两步失败：%s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        if (!machine.auto_armed() || machine.auto_interval_ms() != 2000 || !machine.advance_waiting()) {
+            std::fprintf(stderr, "自动消息没有武装：armed=%d interval=%u waiting=%d\n", machine.auto_armed() ? 1 : 0,
+                         machine.auto_interval_ms(), machine.advance_waiting() ? 1 : 0);
+            return false;
+        }
+        const auto armed_at = machine.scene_clock_ms();
+        machine.set_host_clock_ms(armed_at + 1999);
+        if (!machine.step()) {
+            std::fprintf(stderr, "auto-message 第 1999ms 步停机\n");
+            return false;
+        }
+        if (!machine.advance_waiting() || machine.voice_option_2f7(0) != 0) {
+            std::fprintf(stderr, "自动消息提前放行了（1999ms）\n");
+            return false;
+        }
+        machine.set_host_clock_ms(armed_at + 2000);
+        if (!machine.step()) {
+            std::fprintf(stderr, "auto-message 第 2000ms 步停机\n");
+            return false;
+        }
+        if (machine.advance_waiting() || machine.voice_option_2f7(0) != 1) {
+            std::fprintf(stderr, "自动消息到期没有放行 / 放行后没执行下一条（waiting=%d opt=%d）\n",
+                         machine.advance_waiting() ? 1 : 0, machine.voice_option_2f7(0));
+            return false;
+        }
+    }
+    // ② Pitch1 = 2、cell = 0、N = 0 ⇒ 2000 + 2×(0−1−0) = 1998（系数与"−1−格"都真的进了公式）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_config_int("message:AutoMessageTime1", 2000);
+        machine.set_config_int("message:AutoMessagePitch1", 2);
+        machine.load_root(build(1));
+        if (!machine.step() || !machine.step()) {
+            std::fprintf(stderr, "auto-message(pitch) 起始两步失败\n");
+            return false;
+        }
+        if (machine.auto_interval_ms() != 1998) {
+            std::fprintf(stderr, "Pitch 没有进公式：interval=%u（期望 1998）\n", machine.auto_interval_ms());
+            return false;
+        }
+    }
+    // ③ 自动消息关着（`0x1b7 0`）：不武装、等到 5000ms 也不放行（只有点击能放）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_config_int("message:AutoMessageTime1", 2000);
+        machine.load_root(build(0));
+        if (!machine.step() || !machine.step()) {
+            std::fprintf(stderr, "auto-message(off) 起始两步失败\n");
+            return false;
+        }
+        machine.set_host_clock_ms(5000);
+        if (!machine.step()) {
+            std::fprintf(stderr, "auto-message(off) 第 5000ms 步停机\n");
+            return false;
+        }
+        if (!machine.advance_waiting() || machine.auto_armed() || machine.voice_option_2f7(0) != 0) {
+            std::fprintf(stderr, "自动消息关着却放行了（waiting=%d armed=%d opt=%d）\n",
+                         machine.advance_waiting() ? 1 : 0, machine.auto_armed() ? 1 : 0,
+                         machine.voice_option_2f7(0));
+            return false;
+        }
+    }
+    // ④ N 进公式：`0x71` 清空后行记录数 = 1，每 `0x6f` +1 ⇒ 两行结束时 N = 3；
+    //    Time1 = 2000、Pitch1 = 10 ⇒ 2000 + 10×(3−1−0) = 2020。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x80, {{0, 9}});
+        emit_instruction(script, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+        emit_instruction(script, 0x75, {{0, 20}});
+        emit_instruction(script, 0x74, {{0, 0}});
+        emit_instruction(script, 0x71, {{0, 9}});
+        emit_instruction(script, 0x6E, {{0, 0}, {5, 0}});
+        emit_instruction(script, 0x6F, {{0, 9}});
+        emit_instruction(script, 0x6F, {{0, 9}});
+        emit_instruction(script, 0x1B7, {{0, 1}});
+        emit_instruction(script, 0x72, {{0, 9}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.set_config_int("message:AutoMessageTime1", 2000);
+        machine.set_config_int("message:AutoMessagePitch1", 10);
+        machine.load_root(script);
+        for (int i = 0; i < 10; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "auto-message(N) 第 %d 步停机：%s\n", i + 1, machine.last_stop().message.c_str());
+                return false;
+            }
+        }
+        if (machine.line_record_count(9) != 3 || machine.auto_interval_ms() != 2020) {
+            std::fprintf(stderr, "N 没有进公式：lines=%d interval=%u（期望 3 / 2020）\n",
+                         machine.line_record_count(9), machine.auto_interval_ms());
+            return false;
+        }
+    }
+    return true;
+}
+
+// `0x32` 缩放拷贝的**像素公式**（语料：放大 = 双线性 4 邻域加权 + 0.5 截断；缩小 = 面积加权平均）。
+// ★ 判据用 4×4 → 8×8 这种"每格都算得出来"的尺寸：最近邻会给 (1,1) = 源 (0,0)，
+//   双线性给 (1,1) = 四邻域均值 —— 两者差得开，才是一条会红的断言。
+bool check_texture_stretch(const core::OpcodeTable& table) {
+    const auto fill = [](core::Machine& machine, std::uint32_t id, std::uint32_t w, std::uint32_t h,
+                         const std::function<std::array<int, 4>(int, int)>& color) {
+        auto& slot = machine.texture_entry(id).slot;
+        slot.present = true;
+        slot.width = w;
+        slot.height = h;
+        slot.rgba.assign(static_cast<std::size_t>(w) * h * 4u, 0);
+        for (std::uint32_t y = 0; y < h; ++y) {
+            for (std::uint32_t x = 0; x < w; ++x) {
+                const auto c = color(static_cast<int>(x), static_cast<int>(y));
+                const std::size_t at = (static_cast<std::size_t>(y) * w + x) * 4u;
+                for (int k = 0; k < 4; ++k) slot.rgba[at + static_cast<std::size_t>(k)] = static_cast<std::uint8_t>(c[k]);
+            }
+        }
+    };
+    const auto stretched = [&](core::Machine& machine, int steps) {
+        for (int i = 0; i < steps; ++i) {
+            if (!machine.step()) return false;
+        }
+        return true;
+    };
+    // ① 放大 4×4 → 8×8：红 = x·10、绿 = y·10、蓝 = 50、α = 255。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x32, {{0, 1}, {0, 2}, {0, 0}, {0, 0}, {0, 4}, {0, 4}, {0, 0}, {0, 0}, {0, 8}, {0, 8}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        fill(machine, 1, 4, 4, [](int x, int y) { return std::array<int, 4>{x * 10, y * 10, 50, 255}; });
+        fill(machine, 2, 8, 8, [](int, int) { return std::array<int, 4>{0, 0, 0, 0}; });
+        machine.load_root(script);
+        if (!stretched(machine, 1)) {
+            std::fprintf(stderr, "0x32 放大那一步停机：%s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        const auto* out = machine.texture_slot(2);
+        if (out == nullptr) {
+            std::fprintf(stderr, "0x32 放大后目标纹理不见了\n");
+            return false;
+        }
+        const auto at = [&](int x, int y, int c) {
+            return static_cast<int>(out->rgba[(static_cast<std::size_t>(y) * 8u + static_cast<std::size_t>(x)) * 4u +
+                                              static_cast<std::size_t>(c)]);
+        };
+        // (1,1)：sx = sy = 0.5 ⇒ 四邻域均值：红 (0+10+0+10)/4 = 5、绿 (0+0+10+10)/4 = 5。
+        if (at(1, 1, 0) != 5 || at(1, 1, 1) != 5 || at(1, 1, 2) != 50) {
+            std::fprintf(stderr, "0x32 放大 (1,1) 不是双线性：rgba=(%d,%d,%d,%d)\n", at(1, 1, 0), at(1, 1, 1),
+                         at(1, 1, 2), at(1, 1, 3));
+            return false;
+        }
+        // (2,0)：sx = 1.0、sy = 0 ⇒ 正好是源 (1,0)。
+        if (at(2, 0, 0) != 10 || at(2, 0, 1) != 0) {
+            std::fprintf(stderr, "0x32 放大 (2,0) 不等于源 (1,0)：rgba=(%d,%d)\n", at(2, 0, 0), at(2, 0, 1));
+            return false;
+        }
+        // (7,7)：sx = sy = 3.5，索引夹到 3 ⇒ 源 (3,3)（边界复制）。
+        if (at(7, 7, 0) != 30 || at(7, 7, 1) != 30) {
+            std::fprintf(stderr, "0x32 放大 (7,7) 不等于源 (3,3)：rgba=(%d,%d)\n", at(7, 7, 0), at(7, 7, 1));
+            return false;
+        }
+    }
+    // ② 缩小 8×8 → 4×4：每 2×2 块同色 ⇒ 面积平均必须正好得到块色（最近邻抽点会时对时错）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x32, {{0, 3}, {0, 4}, {0, 0}, {0, 0}, {0, 8}, {0, 8}, {0, 0}, {0, 0}, {0, 4}, {0, 4}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        fill(machine, 3, 8, 8, [](int x, int y) { return std::array<int, 4>{x * 10, y * 10, 7, 255}; });
+        fill(machine, 4, 4, 4, [](int, int) { return std::array<int, 4>{0, 0, 0, 0}; });
+        machine.load_root(script);
+        if (!stretched(machine, 1)) {
+            std::fprintf(stderr, "0x32 缩小那一步停机：%s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        const auto* out = machine.texture_slot(4);
+        if (out == nullptr) {
+            std::fprintf(stderr, "0x32 缩小后目标纹理不见了\n");
+            return false;
+        }
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                const std::size_t at = (static_cast<std::size_t>(y) * 4u + static_cast<std::size_t>(x)) * 4u;
+                const int red = out->rgba[at + 0], green = out->rgba[at + 1], blue = out->rgba[at + 2];
+                // 面积平均：块 = 源 x∈[2x,2x+1] ⇒ 均值 = (20x + 20x+10)/2 = 20x+5（最近邻会给 20x）。
+                if (red != x * 20 + 5 || green != y * 20 + 5 || blue != 7) {
+                    std::fprintf(stderr, "0x32 缩小 (%d,%d) 不是面积平均：rgba=(%d,%d,%d)\n", x, y, red, green, blue);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// `0x72` 的「等推进」闸（点击推进的唯一入口）：门位置起 ⇒ **一条指令都不派发**；
+// 只有**左键**（位 0）到位才清位并继续。★ 右键（位 1）不算 —— 把它当放行会让右键菜单穿透。
+bool check_adv_wait(const core::OpcodeTable& table) {
+    auto build = [&]() {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x72, {{0, 9}});   // 等推进（槽 9）
+        emit_instruction(bytes, 0x2F7, {{0, 0}});  // 语音槽 0 选项格 ← 1（可观察的"下一条真的跑了"）
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    const auto steps = [&](core::Machine& machine, int count, const char* what) {
+        for (int i = 0; i < count; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "adv-wait(%s)：走到第 %d 步停机：%s\n", what, i + 1,
+                             machine.last_stop().message.c_str());
+                return false;
+            }
+        }
+        return true;
+    };
+    // ① 没有输入：闸一直挡着，执行位置停在 0x72 之后（= 4 字节），后面的 0x2f7 不许跑。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_mouse_button_source([](std::int32_t& mask) -> bool { mask = 0; return true; });
+        machine.load_root(build());
+        if (!steps(machine, 5, "idle")) return false;
+        if (!machine.advance_waiting()) {
+            std::fprintf(stderr, "0x72 没有置「等推进」位\n");
+            return false;
+        }
+        // 0x72 占 3 个 32 位字（1 opcode + 2 操作数字），所以闸门置起后执行位置正当停在 12 字节。
+        if (machine.frame().ip != 12 || machine.voice_option_2f7(0) != 0) {
+            std::fprintf(stderr, "「等推进」期间竟然派发了指令（ip=%zu 字 opt=%d）\n",
+                         static_cast<std::size_t>(machine.frame().ip / 4),
+                         machine.voice_option_2f7(0));
+            return false;
+        }
+    }
+    // ② 只有右键按下：仍不许放行。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_mouse_button_source([](std::int32_t& mask) -> bool { mask = 2; return true; });
+        machine.load_root(build());
+        if (!steps(machine, 5, "right")) return false;
+        if (!machine.advance_waiting() || machine.voice_option_2f7(0) != 0) {
+            std::fprintf(stderr, "右键把「等推进」放行了（waiting=%d opt=%d）\n",
+                         machine.advance_waiting() ? 1 : 0, machine.voice_option_2f7(0));
+            return false;
+        }
+    }
+    // ③ 左键按下：同一步内清位并执行下一条。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_mouse_button_source([](std::int32_t& mask) -> bool { mask = 0; return true; });
+        machine.load_root(build());
+        if (!steps(machine, 3, "arm")) return false;
+        machine.set_mouse_button_source([](std::int32_t& mask) -> bool { mask = 1; return true; });
+        if (!machine.step()) {
+            std::fprintf(stderr, "adv-wait(click)：点击那一步停机：%s\n",
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.advance_waiting() || machine.voice_option_2f7(0) != 1) {
+            std::fprintf(stderr, "左键没有放行 / 放行后没执行下一条（waiting=%d opt=%d）\n",
+                         machine.advance_waiting() ? 1 : 0, machine.voice_option_2f7(0));
+            return false;
+        }
+    }
+    return true;
+}
+
 
 // 锚：0x423FE0（handler）· 0x423FF6（长度字 0x0B）· 0x424008（先重置）· 0x424011/0x42401B（先读 2 再读 1）
 // · 0x424030/0x42403C/0x424048（三个浮点）· 0x49A6C0 / 0x49A6F0（写区间与平移）。
@@ -6123,6 +6514,11 @@ int main(int argc, char** argv) {
     bool only_msg_block = false;
     bool only_scene_records = false;
     bool only_misc_ops = false;
+    bool only_text_layer_fallback = false;
+    bool only_adv_wait = false;
+    bool only_texture_stretch = false;
+    bool only_auto_message = false;
+    bool only_choice_consumer = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
@@ -6147,6 +6543,11 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-msg-block") == 0) only_msg_block = true;
         else if (std::strcmp(argv[i], "--only-scene-records") == 0) only_scene_records = true;
         else if (std::strcmp(argv[i], "--only-misc-ops") == 0) only_misc_ops = true;
+        else if (std::strcmp(argv[i], "--only-text-layer-fallback") == 0) only_text_layer_fallback = true;
+        else if (std::strcmp(argv[i], "--only-adv-wait") == 0) only_adv_wait = true;
+        else if (std::strcmp(argv[i], "--only-texture-stretch") == 0) only_texture_stretch = true;
+        else if (std::strcmp(argv[i], "--only-auto-message") == 0) only_auto_message = true;
+        else if (std::strcmp(argv[i], "--only-choice-consumer") == 0) only_choice_consumer = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -6302,6 +6703,36 @@ int main(int argc, char** argv) {
             // 0x193 / 0x2e9 / 0x2f7 / 0x32 / 0x10a / 0x20a：复审点名的零测试 opcode。
             if (!check_misc_ops(table)) return 1;
             std::printf("core-selftest(misc-ops): PASS\n");
+            return 0;
+        }
+        if (only_text_layer_fallback) {
+            // `0x70` 的键基数兜底：没有 `0x213` 的层也必须出绘制条目。
+            if (!check_text_layer_fallback(table)) return 1;
+            std::printf("core-selftest(text-layer-fallback): PASS\n");
+            return 0;
+        }
+        if (only_choice_consumer) {
+            // 选项消费：点中 ⇒ 执行位置 ← 决定入口。
+            if (!check_choice_consumer(table)) return 1;
+            std::printf("core-selftest(choice-consumer): PASS\n");
+            return 0;
+        }
+        if (only_auto_message) {
+            // 自动消息：`0x1b7` 开启 ⇒ `0x72` 武装计时器，到期放行等推进位。
+            if (!check_auto_message(table)) return 1;
+            std::printf("core-selftest(auto-message): PASS\n");
+            return 0;
+        }
+        if (only_texture_stretch) {
+            // `0x32`：放大双线性、缩小面积平均（不是最近邻）。
+            if (!check_texture_stretch(table)) return 1;
+            std::printf("core-selftest(texture-stretch): PASS\n");
+            return 0;
+        }
+        if (only_adv_wait) {
+            // `0x72`：等推进期间不派发；只有左键放行；右键不算。
+            if (!check_adv_wait(table)) return 1;
+            std::printf("core-selftest(adv-wait): PASS\n");
             return 0;
         }
         if (only_misc_cells) {
@@ -6574,14 +7005,18 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "wait bit not set\n");
             return 1;
         }
+        // ★ 颜色窗**不**是等待位的放行条件（语料 0x413210 / 0x413232：放行看消息子系统
+        //   没有未完成的工作 + 没有状态字 `&5==4` 的对象，那条支路里没有任何窗口/插值字段）。
+        //   旧版这里断言"动画期间不放行"——那正是让每句 1800ms 淡入把脚本卡死、点击全丢的条件
+        //   （实测 80 击只推进 13 次）。现在**反过来**断言：颜色窗还在走，等待位也必须放行。
         wait_machine.set_host_clock_ms(1150);
-        if (!wait_machine.step() || (wait_machine.state_flags() & (1u << 10)) == 0) {
-            std::fprintf(stderr, "wait released while animating\n");
+        if (!wait_machine.step()) {
+            std::fprintf(stderr, "wait release step halted: %s\n",
+                         wait_machine.last_stop().message.c_str());
             return 1;
         }
-        wait_machine.set_host_clock_ms(1201);
-        if (!wait_machine.step() || (wait_machine.state_flags() & (1u << 10)) != 0) {
-            std::fprintf(stderr, "wait not released after animation ended\n");
+        if ((wait_machine.state_flags() & (1u << 10)) != 0) {
+            std::fprintf(stderr, "wait bit still set while only a colour window is animating\n");
             return 1;
         }
 
