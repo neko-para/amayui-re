@@ -900,10 +900,18 @@ public:
     std::int32_t mode_e() const { return mode_e_; }
     std::int32_t mode_f() const { return mode_f_; }
     std::int32_t mode_g() const { return mode_g_; }
-    // 乱数启用族（`CORE-OPS-RNG-ENABLE`）。
-    std::int32_t rng_switch() const { return rng_switch_; }
-    std::int32_t rng_enabled() const { return rng_enabled_; }
-    std::uint32_t rng_seed() const { return rng_seed_; }
+    // 逐格揭示当前文本族（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：开关格（只写不读）/ 当前格号 / 格数 /
+    // 节拍器相位起点·周期·计数 / 两个请求计数（画一格 / 释放排版；请求的参数与像素不在本条）。
+    std::int32_t reveal_switch() const { return reveal_switch_; }
+    std::int32_t reveal_cursor() const { return reveal_cursor_; }
+    std::int32_t reveal_count() const { return reveal_count_; }
+    std::uint32_t reveal_tick_start_ms() const { return reveal_tick_start_ms_; }
+    std::uint32_t reveal_tick_period_ms() const { return reveal_tick_period_ms_; }
+    std::uint32_t reveal_tick_counter() const { return reveal_tick_counter_; }
+    // ★ 「最近一次画格请求的格号」（推进**之前**的值；−1 = 还没画过）。守卫观察口，⛔ 不是产品接口。
+    std::int32_t text_cell_last_draw_cursor() const { return text_cell_last_draw_cursor_; }
+    std::size_t text_cell_draw_requests() const { return text_cell_draw_requests_; }
+    std::size_t text_layout_release_requests() const { return text_layout_release_requests_; }
     // 执行区间（`CORE-OPS-RUN-BRACKET`）：忙标记与 `0x20c` 的「别处驱动」是同一格。
     bool bracket_busy() const { return driven_elsewhere_; }
     std::int32_t bracket_depth() const { return bracket_depth_; }
@@ -972,6 +980,19 @@ public:
         d9_cell_ = cell;
         d9_word_ = word;
     }
+    // ★ 测试脚手架（⛔ 不是平台边界）：格数由排版侧写入，而本模型的排版侧没有"格数快照"这条写路径的
+    //   全部前置（`0x72` 尾段能写它，纯 selftest 里要先把字符格追加出来）⇒ 想让取模推进被测到，只能播种。
+    void seed_reveal_cells(std::int32_t cursor, std::int32_t count) {
+        reveal_cursor_ = cursor;
+        reveal_count_ = count;
+    }
+    // ★ 测试脚手架（⛔ 不是平台边界）：节拍长度**不是 `0x1ce` 的写点**（本条规定"本条不复位它"）。
+    //   要让"不复位"这条成为**会红的断言**（而不是读一次初值 500 的恒真断言），就得先把它播种成别的值。
+    void seed_reveal_tick_period_ms(std::uint32_t period) { reveal_tick_period_ms_ = period; }
+    // ★ 测试脚手架（测试后门，⛔ 不是平台边界）：只**置位**、**不清位** —— 调用方给的是"要拉起来的位"，
+    //   返回值是不可观察的内部字，所以这里不许做整字覆盖（那会让测试能伪造门字的任意取值）。
+    //   调用点（改签名时逐处核对）：`tests/core_selftest.cpp` 的 `check_text_cell_reveal`（置第 20 位）。
+    void set_state_flags_for_test(std::uint32_t bits) { state_flags_ |= bits; }
     bool halted() const { return halted_; }
     const RunResult& last_stop() const { return stop_; }
     // ★ halt 诊断（`[stack]` 行）：当前帧链**最内层在前**，每层给
@@ -1136,13 +1157,14 @@ private:
     void service_auto_message();
     // `0x21c` 谓词 A：消息子系统"还有事"（定时器在窗内 **或** 待处理）。谓词 B（影片对象扫描）另算。
     bool message_subsystem_busy();
-    // 已排窗但还没盖章（`window_start == 0`）且**真会盖章**（时长 > 0）的条目 ⇒ 也算忙。
-    bool scene_window_unqueued() const;
     bool movie_gate_busy() const;
     void service_choice_click();
     void op_2f7(const Instruction&); void op_304(const Instruction&); void op_305(const Instruction&);
     // 门之前的 BGM 淡变推进（第 9 位的服务分支；规范未规定 ⇒ 见实现里的残差说明）。
     void service_bgm_fade();
+    // 每迭代一次的**逐格揭示**服务（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：活动位（第 30 位）置起才走；
+    // 够一拍 ⇒ 只请求画一格，然后格号 ← (格号+1) mod 格数。放在 vm_timing.cpp，由每迭代的时钟推进调用。
+    void service_text_cell_reveal();
     // 标志格 / 状态格 / 模式位读 / 层号（vm_ops_engine.cpp）
     void op_19a(const Instruction&); void op_1b6(const Instruction&); void op_1b7(const Instruction&);
     void op_1ad(const Instruction&); void op_1c7(const Instruction&); void op_1cc(const Instruction&);
@@ -1155,7 +1177,7 @@ private:
     void op_58(const Instruction&); void op_59(const Instruction&); void op_5a(const Instruction&); void op_5b(const Instruction&);
     void op_5c(const Instruction&); void op_5d(const Instruction&); void op_5e(const Instruction&); void op_5f(const Instruction&);
     void op_135(const Instruction&); void op_136(const Instruction&); void op_13f(const Instruction&); void op_55(const Instruction&);
-    // 乱数启用（vm_ops_numeric.cpp）
+    // 逐格揭示当前文本的启停（`0x1ce`；vm_ops_numeric.cpp。⛔ 不是"乱数启用"）
     void op_1ce(const Instruction&);
     // 池拷贝（vm_ops_numeric.cpp）
     void op_1b0(const Instruction&);
@@ -1265,10 +1287,19 @@ private:
     std::int32_t mode_e_ = 0;
     std::int32_t mode_f_ = 0;
     std::int32_t mode_g_ = 0;
-    // （`1ce`）乱数启用族：开关值 / 已启用 / 种子（种子 = 本迭代宿主毫秒时钟）。
-    std::int32_t rng_switch_ = 0;
-    std::int32_t rng_enabled_ = 0;
-    std::uint32_t rng_seed_ = 0;
+    // （`1ce`）逐格揭示当前文本：开关格（只写不读）/ 当前格号 / 格数 /
+    // 节拍器（相位起点 / 周期 / 计数，1 起算）/ 两个请求计数 / **最近一次画格请求的格号**。
+    std::int32_t reveal_switch_ = 0;
+    std::int32_t reveal_cursor_ = 0;
+    std::int32_t reveal_count_ = 0;
+    std::uint32_t reveal_tick_start_ms_ = 0;
+    std::uint32_t reveal_tick_period_ms_ = 500;  // 初始化写死的默认周期（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）
+    std::uint32_t reveal_tick_counter_ = 1;
+    std::size_t text_cell_draw_requests_ = 0;
+    // ★ 「最近一次画格请求的格号」= 请求发出**那一刻**的当前格号（推进**之前**的值；−1 = 还没画过）。
+    //   它把"画的是推进前的格号"这条合同变成**可观察量**：⛔ 它不是产品字段，只是守卫的观察口。
+    std::int32_t text_cell_last_draw_cursor_ = -1;
+    std::size_t text_layout_release_requests_ = 0;
     // 本地块的存档（`0x199` 整字搬 + 置第 25/26 位；`0x7c` 读/清）。
     std::uint32_t local_save_word_ = 0;
     std::uint32_t local_save_pos_ = 0;

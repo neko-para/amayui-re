@@ -5,6 +5,12 @@ description: 在本仓推进《天結いキャッスルマイスター》引擎*
 
 # Amayui Emulator（模拟器开发：**观测驱动**的闭环）
 
+> ★ **范围（2026-10-31 用户口径）**：**唯一在维护的是 `apps/emulator-cxx`**。
+> `apps/emulator` 与 `apps/emulator-new` **都已废弃**（同级只读遗产）：⛔ 不新增功能、不补守卫、
+> ⛔ 不为它们改 spec、⛔ 不因为"另一套实现没同步"去改它们。
+> ⇒ 下面提到"三条线"时，只有第一条是活的；提到"两条线各有各的门"时，只有 CTest 那条是活的。
+> 判据与为什么：`AGENTS.md` §11 · `docs/00-origin/decisions.md` §8.1。
+
 ## 0. 三条最常踩的
 
 1. **⛔ 不要把"逆向"当起点**。起点**永远是可观测的东西**：一条 opcode、一次不符预期的表现、一个跑不起来的场景。
@@ -68,8 +74,8 @@ ctest --test-dir apps/emulator-cxx/out/build/windows-x64 --output-on-failure
 
 | 观测面 | 能看见什么 | 怎么跑 |
 |---|---|---|
-| `apps/emulator-new`（headless） | **执行轨迹 / 引擎数据 / 副作用记录**；没有像素、没有窗口 | `node apps/emulator-new/src/main.ts --install <dir> …`（`--trace` / `--effects` / `--json`）+ `@env assets` 守卫 |
-| `apps/emulator-cxx`（原生） | **像素**（GPU 场景批次 / 离屏 BMP 导出）+ 真窗口节奏 + CTest | 默认 = boot 窗口（`--install <dir>`，`--play-frames N` 无人值守）· `--render-logo-gpu`（影片逐帧离屏 BMP）· `ctest` |
+| `apps/emulator-cxx`（原生）**← 唯一在维护的** | **像素**（GPU 场景批次 / 离屏 BMP 导出）+ 真窗口节奏 + CTest | 默认 = boot 窗口（`--install <dir>`，`--play-frames N` 无人值守）· `--render-logo-gpu`（影片逐帧离屏 BMP）· `ctest` |
+| `apps/emulator-new`（headless）**已废弃 / 冻结** | 只作**历史参考**；⛔ 不再用它做新观测、⛔ 拿它的测试当新规则唯一证据 | `node apps/emulator-new/src/main.ts …`（能跑，但冻结） |
 
 ⛔ 两条边界：**"能跑"≠"有 oracle"**（"看起来对"不是证据）；**没有真机 trace** ⇒ 引擎内部时序仍只能靠静态读 + 残差。
 所以 ① 那个"能红的 repro"必须是**机械判据**（像素统计 / 请求次数 / 字段值 / 步数），不是"我看了眼截图"。

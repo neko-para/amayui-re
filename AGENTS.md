@@ -44,7 +44,7 @@
 ## 3. 语言与代码口径
 
 * **TypeScript 只出现在两类落点**：① **自带工具链的 app** —— `apps/emulator`、`apps/emulator-new`
-  （只读 `data/spec` 的参考实现；Node 侧无构建，renderer 走 `vite build`）与 `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）；
+  （**两者均已废弃**，见 §11 —— ⛔ 不要在这里写新代码）与 `apps/workbench`（项目工作台：客户端 Vue 3 + Vite + TS；服务端 `server.ts`）；
   ② **`packages/age-format`**
   （源码是 `.mts` 的**一份真源**，见下 —— 它**没有**自己的工具链，只靠根上的 `tsc --noEmit` 检查）。
   仓库内**其余一切 JS 一律 `.mjs`**。★ 新增一个带工具链的 app 就写在这里。
@@ -308,6 +308,14 @@ pnpm typecheck                  # ★ `tsc --noEmit`，**六个工程**（`packa
 
 * 主交付物是 **spec（引擎规范）**（落点 `data/spec/`，工具 `pnpm tools spec`）；**emulator 是示范与测试项目**（cleanroom rewrite，类比 Wine —— 但这里的界面是**未文档化**的私有语义 ⇒ 理解是唯一路径）。
   ⇒ ⛔ **emulator 不许当 spec 的真源**；spec 也不许依赖 emulator 的实现细节（shape 已按此守：`⛔ 不读 apps/emulator`）。
+* **唯一在维护的模拟器是 `apps/emulator-cxx`**；`apps/emulator` 与 **`apps/emulator-new` 都已废弃**（只读遗产，同级）：
+  ⛔ 不新增功能、不补守卫、**不为它们改 spec**、不因为"另一套实现没同步"去改它们。
+  判据：新工作（实现 / 守卫 / CTest / 变异）只落 `apps/emulator-cxx`；新规则的 `evidence` **优先挂它的顶层 CTest**，
+  `tools/test/emulator-new-*.test.mjs` 只能当**辅助**证据、不许当唯一证据（那是冻结件，改它等于解冻）。
+  ★ **既有**挂在它上面的证据保持原样（冻结件仍可执行、`spec validate` 仍绿）；要迁移是**单独一条单**
+  （`pnpm tools requirements plan` 里标题含 "spec 证据去 emulator-new 化" 的那条），⛔ 不顺手删证据。
+  ★ 它们仍留在 `pnpm typecheck` / `pnpm test` 里，是为了**发现"冻结件被无意改动"**，不是为了让它继续演进。
+  为什么与边界：`docs/00-origin/decisions.md` §8.1。
 * **两层本体，之间只走指针**：偏移 / 布局 / 宽度 / 数组 / 池基点 / 步长 = **机器本体（shape，实现细节）**；
   实体 / 状态 / 操作 / 规则 = **领域本体（spec）**。两者之间只允许 `storage` 这类**指针**，⛔ 不许把布局内联进 spec。
 * **平台 API 是 spec 的边界**：spec 只写到"引擎观察到的外部行为"（请求 + 参数 + 时序），⛔ 不写 Win32/D3D 细节；

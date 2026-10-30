@@ -1,5 +1,10 @@
-# apps/emulator-new —— 只读 `data/spec` 的参考实现
+# apps/emulator-new —— 只读 `data/spec` 的参考实现（**已废弃**）
 
+> ★ **已废弃（2026-10-31）**：与 `apps/emulator` 同级的**只读遗产** —— ⛔ 不新增功能、不补守卫、
+> ⛔ 不为它改 `data/spec`、⛔ 不因为"它没跟另一套实现同步"去改它。**唯一在维护的模拟器是 `apps/emulator-cxx`**。
+> 它仍留在 `pnpm typecheck` / `pnpm test` 里，只为**发现"冻结件被无意改动"**。
+> 下面所有内容都是**当时的记录**，不是待办。口径：`AGENTS.md` §11 · 为什么：`docs/00-origin/decisions.md` §8.1。
+>
 > ⛔ **本目录是 spec 的消费者，不是 spec 的来源。**
 > 它**只读 `data/spec/`**（指令表 + 章节规则）；⛔ 不 import `@amayui/age-format`、
 > `data/shape`、`data/ledger`、`corpus/`，也⛔ 不复制 `apps/emulator`（已废弃，仅作架构参考）。

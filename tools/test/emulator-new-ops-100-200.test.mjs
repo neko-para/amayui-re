@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Machine } from '../../apps/emulator-new/src/core/machine.ts';
+import { Machine, REDRAW_PENDING_BIT } from '../../apps/emulator-new/src/core/machine.ts';
 import { HeadlessRenderHost } from '../../apps/emulator-new/src/core/render.ts';
 import { HANDLERS } from '../../apps/emulator-new/src/core/handlers.ts';
 import { encodeInt, readInt } from '../../apps/emulator-new/src/core/values.ts';
@@ -421,19 +421,91 @@ test('★ `0x1ad`：把当前层号写进引擎格（默认 −1）', () => {
   assert.equal(m.layerCell, 5);
 });
 
-test('★ `0x1ce`：非 0 启用（置第 30 位 + 播种）；0 且已置 ⇒ 清位', () => {
+test('★ `0x1ce`：非 0 ⇒ 活动位起 + 格号归 0 + 相位重置；0 且已置 ⇒ 清位（格号不复位）', () => {
   const m = machine();
   m.now = 1234;
+  m.revealCount = 3;   // 格数由排版侧写入；本参考实现没有排版侧 ⇒ 用例直接给格数
+  m.revealCursor = 2;  // 先让格号非 0：启用必须把它归 0（⛔ 不是"保留"）
+  m.revealTickStart = 1;
+  m.revealTickCounter = 9;
   HANDLERS.get(0x1ce)(m, [op(0, 7)]);
-  assert.equal(m.rngEnabled, 1);
-  assert.equal(m.rngSwitch, 7);
-  assert.equal(m.rngSeed, 1234);
-  assert.equal((m.flags >>> 30) & 1, 1);
+  assert.equal(m.revealSwitch, 7, '开关格记下操作数（两条支都写）');
+  assert.equal((m.flags >>> 30) & 1, 1, '非 0 ⇒ 第 30 位（逐格揭示活动中）');
+  assert.equal(m.revealCursor, 0, '非 0 ⇒ 当前格号归 0');
+  assert.equal(m.revealTickStart, 1234, '相位起点 = 本迭代的宿主毫秒时钟（不是种子）');
+  assert.equal(m.revealTickCounter, 1, '相位重置后节拍计数从 1 起算');
+  assert.equal(m.revealTickPeriod, 500, '节拍长度初值 500 ms（本条只重置相位）');
+
+  // 到点一拍只画一格、格号 +1；不足一拍什么都不做
+  m.now = 1733;
+  m.serviceTextCellReveal();
+  assert.equal(m.revealDrawRequests, 0, '不足一拍不许画');
+  assert.equal(m.revealCursor, 0);
+  m.now = 1734;  // 正好 500 ms
+  m.serviceTextCellReveal();
+  assert.equal(m.revealDrawRequests, 1, '够一拍：恰好一个画格请求');
+  assert.equal(m.revealCursor, 1, '画的是推进前的格号 0 ⇒ 格号前进到 1');
+  m.serviceTextCellReveal();
+  assert.equal(m.revealDrawRequests, 1, '同一毫秒再服务不许多画一格（一次服务最多推进一格）');
+  const draw = m.effects.find((e) => e.kind === 'text.request' && e.detail.request === 'draw.cell');
+  assert.deepEqual({ cursor: draw.detail.cursor, count: draw.detail.count }, { cursor: 0, count: 3 },
+    '画格请求带「推进前的格号 + 格数」（参数 / 像素不在本条）');
+
+  // 停用：清位；格号与相位都不复位；非「重绘待处理」⇒ 发一次释放请求
+  const releases = (x) => x.effects.filter((e) => e.kind === 'text.request' && e.detail.request === 'release.layout').length;
   HANDLERS.get(0x1ce)(m, [op(0, 0)]);
-  assert.equal(m.rngEnabled, 0);
-  assert.equal((m.flags >>> 30) & 1, 0);
+  assert.equal((m.flags >>> 30) & 1, 0, '0 且已置 ⇒ 清第 30 位');
+  assert.equal(m.revealCursor, 1, '停用不复位当前格号');
+  assert.equal(m.revealTickStart, 1234, '停用不复位节拍器相位');
+  assert.equal(releases(m), 1, '非重绘待处理 ⇒ 停用时请求一次释放排版');
   HANDLERS.get(0x1ce)(m, [op(0, 0)]);
-  assert.equal((m.flags >>> 30) & 1, 0, '未置位时再停用是空操作');
+  assert.equal(releases(m), 1, '第 30 位未置时 0 支是空操作（不许再发一次释放）');
+
+  // 再启用 ⇒ 格号回 0、相位重新起算
+  m.now = 5000;
+  HANDLERS.get(0x1ce)(m, [op(0, 1)]);
+  assert.equal(m.revealCursor, 0, '再启用 ⇒ 格号回 0');
+  assert.equal(m.revealTickStart, 5000, '再启用 ⇒ 相位起点 ← 新的当前毫秒');
+
+  // 重绘待处理位已置 ⇒ 停用**不**发释放请求（这份排版马上要重画）
+  const pending = machine();
+  pending.now = 100;
+  pending.revealCount = 2;
+  HANDLERS.get(0x1ce)(pending, [op(0, 5)]);
+  pending.flags |= REDRAW_PENDING_BIT;
+  HANDLERS.get(0x1ce)(pending, [op(0, 0)]);
+  assert.equal((pending.flags >>> 30) & 1, 0);
+  assert.equal(releases(pending), 0, '重绘待处理置起 ⇒ 停用跳过释放');
+
+  // 格数 0（没有排版 / 排版侧从未写入）⇒ 每拍照画一格，但格号**不推进**（⛔ 不夹成 1）
+  const zero = machine();
+  zero.now = 0;
+  HANDLERS.get(0x1ce)(zero, [op(0, 2)]);
+  zero.now = 500;
+  zero.serviceTextCellReveal();
+  zero.now = 1000;
+  zero.serviceTextCellReveal();
+  assert.equal(zero.revealDrawRequests, 2, '格数 0 仍然每拍请求画一格');
+  assert.equal(zero.revealCursor, 0, '格数 0 ⇒ 格号不推进（残差 RES-TEXT-CELL-REVEAL-COUNT0）');
+
+  // 格号按格数取模：count = 2 ⇒ 0 → 1 → 0
+  const mod = machine();
+  mod.now = 0;
+  mod.revealCount = 2;
+  HANDLERS.get(0x1ce)(mod, [op(0, 9)]);
+  mod.now = 500;
+  mod.serviceTextCellReveal();
+  assert.equal(mod.revealCursor, 1);
+  mod.now = 1000;
+  mod.serviceTextCellReveal();
+  assert.equal(mod.revealCursor, 0, '格号按格数取模回 0');
+
+  // 活动位未置 ⇒ 服务是空操作（不是"每拍都画"）
+  const idle = machine();
+  idle.revealCount = 3;
+  idle.now = 900;
+  idle.serviceTextCellReveal();
+  assert.equal(idle.revealDrawRequests, 0);
 });
 
 test('★ `0x7b` / `0x7c`：两个进入目标按帧存；0x7c 的身份 / 深度判据与整字覆盖', () => {

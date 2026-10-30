@@ -384,17 +384,22 @@ void Machine::op_63(const Instruction& instruction) {
 
 void Machine::op_1ce(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 乱数启用（CORE-OPS-RNG-ENABLE）：开关值只读、不归一、不夹取。
+    // 逐格揭示当前文本的启停（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：**不是**乱数启用。
+    // 非 0 ⇒ 置门字第 30 位（逐格揭示活动中）+ 当前格号归 0 + 节拍器相位重置（相位起点 ← 本迭代的
+    // 宿主毫秒时钟；**不是播种**）。0 ⇒ 只在第 30 位已置时动作：「重绘待处理」位（第 20 位）未置 ⇒
+    // 先请求一次释放排版资源，再清第 30 位；**格号与相位都不复位**。
+    // 操作数的值进「开关格」：唯一写点、全引擎无读者（也无取址）⇒ 对可观察行为没有后果（两条支都写）。
     const auto value = read_int(ops[0]);
+    reveal_switch_ = value;
     if (value != 0) {
-        rng_switch_ = value;                 // 开关格 ← 第 1 个操作数（仅非 0 支写）
-        state_flags_ |= 1u << 30;            // 门字第 30 位（服务分支不清位 ⇒ 启用后门恒关）
-        rng_enabled_ = 1;
-        rng_seed_ = scene_clock_ms_;         // 播种源 = 本迭代的宿主毫秒时钟
+        state_flags_ |= (1u << 30);
+        reveal_cursor_ = 0;
+        reveal_tick_start_ms_ = scene_clock_ms_;
+        reveal_tick_counter_ = 1;
     } else if ((state_flags_ & (1u << 30)) != 0) {
-        // 停用支：投递事件的条件未取证 ⇒ 不投递；「已启用」清 0、「种子」保留（规范不规定）。
+        // 「重绘待处理」（第 20 位）已置 ⇒ 这份排版马上要重画，别释放它（跳过释放、仍清活动位）。
+        if ((state_flags_ & 0x100000u) == 0) ++text_layout_release_requests_;
         state_flags_ &= ~(1u << 30);
-        rng_enabled_ = 0;
     }
     return;
 }

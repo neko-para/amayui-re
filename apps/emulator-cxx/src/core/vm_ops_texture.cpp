@@ -882,6 +882,13 @@ void Machine::op_72(const Instruction& instruction) {
         throw CoreError("text-layer-slot-out-of-range:" + std::to_string(slot));
     }
     current_text_slot_ = slot;
+    // ★ 0x72 尾段的同一批写点（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：把当前文本槽的**格数**取进「格数」格
+    //   （引擎以 a3 = −1 调绘制入口，out 参数写格数）、当前格号归 0、节拍器相位重置；
+    //   第 30 位（逐格揭示活动中）在未置时置起 —— 引擎是"先测后置"，净效果与无条件 or 相同。
+    reveal_count_ = static_cast<std::int32_t>(text_layer_cell_count(static_cast<std::size_t>(resolved)));
+    reveal_cursor_ = 0;
+    reveal_tick_start_ms_ = scene_clock_ms_;
+    reveal_tick_counter_ = 1;
     state_flags_ |= (1u << 31);
     state_flags_ |= (1u << 30);
     // 自动消息：`0x1b7` 写的引擎格非 0 ⇒ 按"时长公式"武装计时器；到期由逐帧服务**放行**这一位

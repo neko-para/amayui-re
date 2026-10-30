@@ -106,6 +106,33 @@ const CASES = [
     count: 1,
     why: '0x1ca 与 0x1cb 必须读写同一张命名键表',
   },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    snippet: 'if (reveal_count_ > 0) reveal_cursor_ = (reveal_cursor_ + 1) % reveal_count_;',
+    count: 1,
+    why: '0x1ce 的主循环服务：每拍推进一格必须**取模格数**（格数 0 不推进、不夹成 1）；'
+      + '写成裸 +1 会让格号越过格数（CTest emulator-core-text-cell-reveal 当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    snippet: 'reveal_cursor_ = 0;',
+    count: 1,
+    why: '0x1ce 的启用支必须把**当前格号归 0**（不是保留上一拍的格号）；停用支不许碰它',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    snippet: 'if (now_ms < start + static_cast<std::uint32_t>(delay) +',
+    count: 1,
+    why: '窗内判据必须是 `现在 < 起点+延迟+持续时间`（引擎 0x4B17F9 的 `jge`：相等**已到期**）；'
+      + '写成 `<=` 会比引擎晚 1 ms（CTest emulator-core-wait-colour-window 的等值用例当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    snippet: 'if (start == 0) start = now_ms;',
+    count: 1,
+    why: '盖章**不看持续时间**（引擎 0x4B085E 只判"起点为 0"）⇒ 持续时间 ≤ 0 的窗也必须在第一次推进时盖章并立刻到期；'
+      + '退回"duration <= 0 直接 return"会让 emulator-core-wait-colour-window 的 dur=0 + delay=200 用例红',
+  },
 ];
 
 test('★ 复审修过的关键源码锚必须还在（变异测试的入口）', () => {

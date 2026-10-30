@@ -441,26 +441,10 @@ bool Machine::message_subsystem_busy() {
     }
     // 待处理闩（`+0B5B4`）：排过窗、或窗还没走完 ⇒ 消息子系统不算完成。
     if (scene_pending_) return true;
-    // 已排窗但还没盖章（`window_start == 0`）也忙：那是"渲染步还没跑到"的那一帧差额。
-    if (scene_window_unqueued()) return true;
+    // ★ 不再另加"已排窗但还没盖章"的兜底：引擎在**第一次推进时无条件盖章**（`0x4B087C`，
+    //   只判起点为 0、不看持续时间），所以"排过窗"那一帧的忙态由 setter 置起的闩本身表达
+    //   （`0x4AD155` 等），下一次推进就把起点盖上。那个兜底在引擎里没有对应物。
     return !pending_glyphs_.empty() || (state_flags_ & (1u << 29)) != 0;
-}
-
-// 已排窗但**还没盖章**的条目：`window_start == 0` 是"未盖章"哨兵（`CORE-TIMING-WINDOW`）。
-// ★ 只算**真会盖章**的窗（时长 > 0）：`0x202 key 0 0 …` 这种"排窗但不动画"的一支在
-//   `advance_scene` 里**永远不盖章**（`duration <= 0` 直接返回、窗位也不清），把它算忙会把门**永关**。
-bool Machine::scene_window_unqueued() const {
-    for (const auto& [key, item] : draw_items_) {
-        (void)key;
-        if ((item.flags & 2u) == 0 || item.window_start != 0) continue;
-        if (item.duration > 0 || item.rect_duration > 0) return true;
-    }
-    for (const auto& [key, mesh] : meshes_) {
-        (void)key;
-        if ((mesh.flags & 2u) == 0 || mesh.window_start != 0) continue;
-        if (mesh.duration > 0) return true;
-    }
-    return false;
 }
 
 // `0x21c` 谓词 B（`0x41322A` 的 var_768 ← `0x412648` 扫 1000 槽 + `sub_4050E0`）：

@@ -277,7 +277,7 @@ test('drawFailedReport：绘制入口失败的上报**也带纹理编号**（spe
 const window6x3 = (over = {}) => ({ delay: 0, duration: 100, steps: 6, perRow: 3, switchWord: 1, ...over });
 
 test('★ 4.1 到期帧 ⇒ 写回**末帧**矩形（步序号 = 步进总数 − 1；走不完的推进不落表）', () => {
-  // 基准 10×10、起点 1000、延迟 0、持续 100 ⇒ now=1101 到期（相等算窗内）；末帧 step=5 ⇒ 第 2 列 / 第 1 行
+  // 基准 10×10、起点 1000、延迟 0、持续 100 ⇒ 终点 1100、now=1101 已过期（判据是 `>=`）；末帧 step=5 ⇒ 第 2 列 / 第 1 行
   const result = plan({ flags: 1 | 2, start: 1000, left: 0, top: 0, right: 10, bottom: 10, sourceWindow: window6x3() }, { now: 1101 });
   assert.equal(result.skip, null);
   assert.deepEqual(result.draw?.rect, { left: 20, top: 10, right: 30, bottom: 20 }, 'Δx = 宽 × (5 mod 3) = 20、Δy = 高 × floor(5/3) = 10');
@@ -446,13 +446,13 @@ test('★ 0x239：过「已存在」门才写源矩形窗口五格 + 清共用�
   assert.equal(gated.scene.dirty, 0, '门不过 ⇒ 也不标脏 / 不置动画');
 });
 
-test('★ 4.1 相等（now == 终点）算窗内 ⇒ 不写回、仍标脏；只有 now > 终点才到期', () => {
+test('★ 4.1 相等（now == 终点）**即已到期** ⇒ 写回末帧；延迟段才算是窗内', () => {
   const result = plan(
     { flags: 1 | 2, start: 1000, left: 0, top: 0, right: 10, bottom: 10, sourceWindow: window6x3() },
     { now: 1100 },
   );
   assert.equal(result.skip, null);
-  assert.equal(result.rectWriteBack, null, '相等算窗内 ⇒ 不是到期帧，⛔ 不写回');
+  assert.deepEqual(result.rectWriteBack, { left: 20, top: 10, right: 30, bottom: 20 }, '相等已到期 ⇒ 就是到期帧，必须写回（引擎 jge）');
   assert.equal(result.markDirty, true);
 });
 

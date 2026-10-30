@@ -2382,10 +2382,10 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
-    from: '      const expired = input.forcedComplete === 1 || (now >>> 0) > deadline; // 相等算窗内（70-vm）',
-    to: '      const expired = input.forcedComplete === 1 || (now >>> 0) >= deadline; // 变异：相等就算到期',
+    from: '      const expired = input.forcedComplete === 1 || (now >>> 0) >= deadline;',
+    to: '      const expired = input.forcedComplete === 1 || (now >>> 0) > deadline; // 变异：相等仍算窗内',
     guard: 'tools/test/emulator-new-scene-draw-plan.test.mjs',
-    what: '到期边界改回"相等也到期" ⇒ 与「场景计时窗」的"相等算窗内"冲突',
+    what: '到期边界退回 ">"（相等仍算窗内）⇒ 比引擎的 `jge` 晚 1 ms，等值用例当场红',
   },
   {
     file: 'apps/emulator-new/src/platform/electron/renderer/scene-draw-plan.ts',
@@ -2983,6 +2983,26 @@ const MUTATIONS = [
     to: 'const bool shrink = false;',
     guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
     what: '0x32 不再区分缩小支 ⇒ 缩小退回抽点/单点采样（面积平均没有出口）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    from: 'if (reveal_count_ > 0) reveal_cursor_ = (reveal_cursor_ + 1) % reveal_count_;',
+    to: 'if (reveal_count_ > 0) reveal_cursor_ = reveal_cursor_ + 1;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x1ce 的每拍推进不再取模格数 ⇒ 格号越过格数（源码锚仍在；行为红由 CTest `emulator-core-text-cell-reveal` 覆盖，`pnpm test:mutation` 不跑 CTest）',
+  },
+  {
+    // ★ 窗到期边界：引擎 `0x4B17F9` 是 `jge`（相等**已到期**），写成 `<=` 会晚 1 ms。
+    //   行为断言在 CTest `emulator-core-wait-colour-window`（等值用例）；这里给变异测试一个 node 可跑的入口。
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    from:
+      '        if (now_ms < start + static_cast<std::uint32_t>(delay) +\n' +
+      '                        static_cast<std::uint32_t>(duration)) {',
+    to:
+      '        if (now_ms <= start + static_cast<std::uint32_t>(delay) +\n' +
+      '                         static_cast<std::uint32_t>(duration)) { // 变异：相等仍算窗内',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '颜色窗 / 源矩形窗的窗内判据退回 `<=`（相等仍算窗内）⇒ 比引擎的 `jge` 晚 1 ms（源码锚仍在；行为红由 CTest `emulator-core-wait-colour-window` 的等值用例覆盖，`pnpm test:mutation` 不跑 CTest）',
   },
   {
     file: 'apps/emulator-cxx/src/core/vm.cpp',

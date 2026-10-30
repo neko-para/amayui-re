@@ -334,11 +334,13 @@ export function planDraw(input: DrawPlanInput): DrawPlan {
       const startCell = item.start ?? 0;
       const start = startCell === 0 ? now : startCell;
       if (startCell === 0) note('rect-window-unstamped');
-      // 三档：按 **32 位无符号**比较（spec 原文）
+      // 三档：按 **32 位无符号**算术（本层不改 spec 的符号性口径）
       const startU = start >>> 0;
       const delayU = delay >>> 0;
       const deadline = (startU + delayU + (duration >>> 0)) >>> 0;
-      const expired = input.forcedComplete === 1 || (now >>> 0) > deadline; // 相等算窗内（70-vm）
+      // ★ 引擎 `0x4B3C8B` 是 `jge` ⇒ `现在 >= 终点` **已到期**（相等已到期）；延迟段（`现在 <= 起点+延迟`）算窗内。
+      //   ⛔ 别退回 `>`：那会比引擎晚 1 ms，且与消息等待计时器的 `>` 不是同一个比较。
+      const expired = input.forcedComplete === 1 || (now >>> 0) >= deadline;
       const delayed = !expired && (now >>> 0) <= ((startU + delayU) >>> 0);
       const width = rect.right - rect.left;
       const height = rect.bottom - rect.top;

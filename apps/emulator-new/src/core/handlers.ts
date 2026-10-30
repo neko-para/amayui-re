@@ -8,7 +8,7 @@
 import { decodeCp932, readU16LE, readU32LE } from './bytes.ts';
 import type { DrawItem, Handler, ListRecord, Machine, Mesh, MovieObject, Operand, SceneCommandRecord, TextureObject, VoiceGroup } from './machine.ts';
 import { FrameLoadError } from './machine.ts';
-import { FRAME_SLOT_COUNT, MOVIE_BIT, SE_SLOT_TABLE_SIZE, SLEEP_BIT, SOUND_SLOT_COUNT, WAIT_BIT, indexInTable } from './machine.ts';
+import { CELL_REVEAL_BIT, FRAME_SLOT_COUNT, MOVIE_BIT, REDRAW_PENDING_BIT, SE_SLOT_TABLE_SIZE, SLEEP_BIT, SOUND_SLOT_COUNT, WAIT_BIT, indexInTable } from './machine.ts';
 import { decodeInt, encodeInt, readAddress, readFloat, readInt, readIntAt, readRawAt, readText, writeBitsAt, writeFloat, writeInt, writeRawAt, writeText } from './values.ts';
 import { addressOfOperand, pointerSlotAddress, writeBitsToAddress, writePointerSlot } from './values.ts';
 import { arrayStrideFor, resolveAddress } from './address.ts';
@@ -2812,19 +2812,35 @@ function layerCell1ad(m: Machine): void {
   m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1ad', slot: 'layerCell', value: m.layerCell } });
 }
 
-/** 0x1ce：非 0 启用（置第 30 位 + 播种）；0 且位已置 ⇒ 清位。 */
-function rngEnable1ce(m: Machine, ops: Operand[]): void {
-  const v = readInt(m, ops, 1) | 0;
-  if (v !== 0) {
-    m.rngSwitch = v;
-    m.flags |= 1 << 30;
-    m.rngEnabled = 1;
-    m.rngSeed = m.now;
-  } else if ((m.flags & (1 << 30)) !== 0) {
-    m.flags &= ~(1 << 30);
-    m.rngEnabled = 0;
+/**
+ * 0x1ce：逐格揭示当前文本的启停（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）。
+ *
+ * ★ 身份是「逐格揭示动画的开关」，**不是乱数启用**：非 0 支置门字第 30 位（逐格揭示活动中）、
+ *   当前格号归 0、节拍器相位重置（相位起点 ← 本迭代的宿主毫秒时钟；**不是播种**）；
+ *   0 支只在活动位已置时动作 —— 重绘待处理位未置 ⇒ 先请求释放这份排版，再清活动位；
+ *   **格号与相位都不复位**。
+ * ★ 操作数的值进「开关格」：唯一写点、全引擎无读者（也无取址）⇒ 对可观察行为没有后果。
+ */
+function cellReveal1ce(m: Machine, ops: Operand[]): void {
+  const value = readInt(m, ops, 1) | 0;
+  // 两条支都写开关格：引擎在分支之前就把它记下了（写点无读者）。
+  m.revealSwitch = value;
+  if (value !== 0) {
+    m.flags |= CELL_REVEAL_BIT;
+    m.revealCursor = 0;
+    m.revealTickStart = m.now;
+    m.revealTickCounter = 1;
+  } else if ((m.flags & CELL_REVEAL_BIT) !== 0) {
+    if ((m.flags & REDRAW_PENDING_BIT) === 0) {
+      // 释放请求本身只留痕：释放哪些资源不在本条（残差 `RES-TEXT-CELL-REVEAL-RELEASE`）。
+      m.effects.push({ kind: 'text.request', detail: { request: 'release.layout' } });
+    }
+    m.flags &= ~CELL_REVEAL_BIT;
   }
-  m.effects.push({ kind: 'engine.scalar.write', detail: { opcode: '0x1ce', enabled: m.rngEnabled } });
+  m.effects.push({
+    kind: 'engine.scalar.write',
+    detail: { opcode: '0x1ce', active: (m.flags & CELL_REVEAL_BIT) !== 0, cursor: m.revealCursor },
+  });
 }
 
 /** 0x19b：清第 27 位；再依次 D / A / B ← 0（顺序是合同）。 */
@@ -3917,7 +3933,7 @@ export const HANDLERS = new Map<number, Handler>([
   [0x1f4, (m) => runBracket1f4(m)],
   [0x1f5, (m) => runBracket1f5(m)],
   [0x1ad, (m) => layerCell1ad(m)],
-  [0x1ce, rngEnable1ce],
+  [0x1ce, cellReveal1ce],
   [0x7b, localEnterTargets7b],
   [0x7c, (m) => localRet7c(m)],
   [0x199, (m) => localEnter199(m)],

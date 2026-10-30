@@ -835,10 +835,20 @@ export class Machine {
   /** 0x1ad：当前层号与它落进的引擎格（复位值 −1）。 */
   currentLayer = 0;
   layerCell = -1;
-  /** 0x1ce：乱数启用开关 / 启用状态 / 种子。 */
-  rngSwitch = 0;
-  rngEnabled = 0;
-  rngSeed = 0;
+  /**
+   * 0x1ce「逐格揭示当前文本」（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：
+   * 开关格（**只写不读**：操作数的值不产生可观察后果）/ 当前格号 / 格数（由排版侧写入，
+   * 本条不清不重算）/ 节拍器的相位起点·周期·计数 / 「画一格」请求计数。
+   * ★ 活动位就是门字第 30 位（`CELL_REVEAL_BIT`），不另存一份。
+   * ★ 节拍长度初值 500 ms；别的脚本指令可以改它（本条不复位、不读）。
+   */
+  revealSwitch = 0;
+  revealCursor = 0;
+  revealCount = 0;
+  revealTickStart = 0;
+  revealTickPeriod = 500;
+  revealTickCounter = 1;
+  revealDrawRequests = 0;
   /** 0x7c 的存档字 / 存档位置 / 深度 / 四格 / 待处理标记（进入本地块的那条指令写下）。 */
   localSaveWord = 0;
   localSavePos = 0;
@@ -1184,6 +1194,29 @@ export class Machine {
     //   不在这里做"至少走 tickMs"的夹取：宿主时钟慢/快都应如实反映；仿真侧要固定步长就显式传 tickMs。
     this.advance(this.tickMs);
     this.ticks += 1;
+  }
+
+  /**
+   * 逐格揭示的**每迭代服务**（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：活动位未置 ⇒ 不服务。
+   * 每个迭代读一次时钟，按毫秒节拍器判"够没够一拍"：够 ⇒ **只请求画一格**（画推进前的当前格号），
+   * 然后 `格号 ← (格号 + 1) mod 格数`。`revealTickCounter`（1 起算）保证一次服务最多推进一格
+   * （掉拍不补：引擎只拿"够没够"当判据）。
+   * ★ 格数为 0 ⇒ **不推进**（⛔ 不夹成 1）：真机的推进侧在这是除零，本模型只保留诚实边界
+   *   （残差 `RES-TEXT-CELL-REVEAL-COUNT0`）。
+   * ★ 画格的**参数与像素**不在本条（残差 `RES-TEXT-CELL-REVEAL-DRAW`）：这里只留一条请求。
+   */
+  serviceTextCellReveal(): void {
+    if ((this.flags & CELL_REVEAL_BIT) === 0) return;
+    const period = this.revealTickPeriod > 0 ? this.revealTickPeriod : 1;
+    const ticks = Math.floor(Math.max(0, this.now - this.revealTickStart) / period);
+    if (ticks < this.revealTickCounter) return;  // 本拍不够一个周期
+    this.revealTickCounter = ticks + 1;
+    this.revealDrawRequests += 1;
+    this.effects.push({
+      kind: 'text.request',
+      detail: { request: 'draw.cell', cursor: this.revealCursor, count: this.revealCount },
+    });
+    if (this.revealCount > 0) this.revealCursor = (this.revealCursor + 1) % this.revealCount;
   }
 
   /**
@@ -1584,6 +1617,9 @@ export class Machine {
       // ★ 先推进场景计时窗，再让平台 pump / 快照 / present：
       //   否则版权页第一帧会拿到“推进前”的整页颜色（先完整展示，再黑→渐变）。
       this.stepScene();
+      // 每迭代一次的逐格揭示服务（`CORE-OPS-TEXT-CELL-REVEAL-1CE`；活动位未置 ⇒ 直接返回）。
+      // ★ 位置与场景步并列：引擎在主循环里读时钟后按毫秒节拍器判"够没够一拍"。
+      this.serviceTextCellReveal();
       if (this.onIteration) {
         const stop = await this.onIteration();
         if (stop) return { steps: this.steps, index: this.steps, ip: this.ip, stop };
@@ -1659,6 +1695,14 @@ export class Machine {
 export const WAIT_BIT = 0x400;
 /** 0xc8 的长睡眠位（状态选择字第 0 位）。 */
 export const SLEEP_BIT = 0x1;
+
+/** 逐格揭示活动位（状态选择字第 30 位；`CORE-OPS-TEXT-CELL-REVEAL-1CE`）。 */
+export const CELL_REVEAL_BIT = 1 << 30;
+/**
+ * 「重绘待处理」位（状态选择字第 20 位）：`0x1ce` 的停用支只读它（置起 ⇒ 不释放排版资源）。
+ * ★ 本参考实现**没有置它的指令**（那是文本定位 / 重绘路径的活）⇒ 它恒为 0；这里不假装有写者。
+ */
+export const REDRAW_PENDING_BIT = 0x100000;
 
 /** 影片位（CORE-OPS-MOVIE：置起后门会关；本版不实现它的服务分支） */
 export const MOVIE_BIT = 0x2000;

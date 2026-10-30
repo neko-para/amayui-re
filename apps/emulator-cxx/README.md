@@ -127,7 +127,7 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 | 影片 | `CORE-OPS-MOVIE`、`CORE-VM-MOVIE` | `0x20F` 对象表 / 纹理绑定门 / 影片位；门之前的对象表服务按引擎时钟推进 pl_mpeg 解码，新帧写进**同槽纹理**并标脏；收尾 `(选项字 & 3) != 2` 填最后一帧，循环位原地重启 |
 | 渲染接入 | `CORE-OPS-TEXTURE-DRAW`、`CORE-TIMING-WINDOW` | AGF 像素进入纹理记录；绘制项 / 网格按有符号 key 软件合成；颜色窗四档派生；`0x33F` tint + 混合模式 |
 | 场景命令档 | `CORE-OPS-SCENE-COMMAND-RECORDS`、`CORE-SCENE-DRAW-ORDER` | `0x223/24D/24F/250/251` 写表与校验；命令档 → 离屏画布 36/37 → 四种类合成（Fade / 遮罩 / 12 种抹除图案 / SlideBlur / ZoomBlur）→ 收尾扫描 |
-| 命名表 / 状态字 / 模式族 | `CORE-OPS-TABLE-RESET-A1` / `-BIND-A2` / `-DISPATCH-A3`、`CORE-OPS-STATUS-WORD`、`CORE-OPS-MODE-BIT`、`CORE-OPS-STATUS-CLEAR-D9`、`CORE-OPS-RNG-ENABLE` | `0xa1/0xa2/0xa3` 文本键命名表（清空 / 绑定 / 分派）；`0x1cf/0x1bf` 状态字（第 16 位 ⇒ **整字**清 0）；`0x19b/0x19c` 模式位与四个分支；`0x0d9` 清位；`0x1ce` 乱数启用（种子 = 本迭代宿主时钟） |
+| 命名表 / 状态字 / 模式族 | `CORE-OPS-TABLE-RESET-A1` / `-BIND-A2` / `-DISPATCH-A3`、`CORE-OPS-STATUS-WORD`、`CORE-OPS-MODE-BIT`、`CORE-OPS-STATUS-CLEAR-D9`、`CORE-OPS-TEXT-CELL-REVEAL-1CE` | `0xa1/0xa2/0xa3` 文本键命名表（清空 / 绑定 / 分派）；`0x1cf/0x1bf` 状态字（第 16 位 ⇒ **整字**清 0）；`0x19b/0x19c` 模式位与四个分支；`0x0d9` 清位；`0x1ce` 逐格揭示当前文本的启停（活动位 + 当前格号 + 500 ms 节拍器；非 0 = 开，0 = 只清活动位） |
 | 输入派发 | `CORE-INPUT-WORD`、`CORE-INPUT-KEY-DISPATCH`、`CORE-INPUT-TOUCH-POINT` | `0xff` 清字 + 平台采样（无设备 ⇒ 保持 0）+ 按帧上限；`0x100` 派发一个按键回调（无按键走"编号 = 键总数"表项，有按键压**当前位置**重派发）；`0x2fc` 取一个触点（无触点只写 0；桌面鼠标-only 恒无触点）；`0x12e` 命中查找：按 `start+1` 起扫框表，命中写项下标、未命中写 −1（`CORE-INPUT-HIT-TEST-12E`） |
 | 键盘 / 鼠标（宿主） | `CORE-INPUT-MOUSE-POS`、`-MOUSE-BUTTON`、`-CALLBACK-REGISTER`、`-MOUSE-CALLBACK-PUMP` | 窗口路径把 SDL 的键盘 / 鼠标归约成输入字、客户区光标、按钮位图；`0x109` 光标（输入停用 ⇒ −100000；客户区外仍写真实坐标）、`0x108` 按钮位图（SDL 左右键归约到引擎位 0/1、输入停用 ⇒ 0）、`0xcc` 登记 + `0xcd` 时间闸派发（`elapsed >= interval`，含等号）。★ **不接摇杆**；物理键 ↔ 输入位号的映射是**宿主策略**（`window.cpp` 的 `kKeyBits` 一张表，⛔ 不是规范结论） |
 | 脚本化输入 / 无窗口播放 | （宿主策略，⛔ **不进 spec**） | `input_script.cpp` 把指令式时间线（`at move / down / up / key / wheel`）归约成四个采样口 + 滚轮增量；`play_headless.cpp` 按仿真 tick 推进（与窗口路径同一个门、同一套输入注入），可 `--expect-script` / `--require-script` 收口、可导出 BMP。`--anchor-script` 把时间线的 0 点锚在某个脚本**首次进入**时（否则 boot 期间就把光标搬好，TITLE 的"坐标变了才命中"不成立）。★ 与 `apps/emulator-new` 的 `parseInputScript` 同语法：两条实现线互为对照，**不互为真源** |
@@ -222,7 +222,7 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 ★ 当前是 **最小可执行层**：`CORE-ISA` / `CORE-POOL` / `CORE-FRAME` / `CORE-VM` / `CORE-CONFIG` + `FMT-ALF` / `FMT-AGF`。`--config` 可指定玩家 `SYS4REG.INI`；缺省按 `set:UseAppDataFolder` 选配置根（`%APPDATA%` / `XDG_CONFIG_HOME` / `~/.config`，否则安装根），
 再拼 `set:RegFilePath` 与文件名。
 门 / 状态位服务：**等待位与影片位**已建模（影片位只管关门，收尾在门之前的影片对象表服务里）；其余状态位、换帧 / 换脚本、容器句柄尚未完整建模。
-★ 由此有一条**看起来像卡死、其实是规范要求**的行为：`0x19c` 的置位支与 `0x1ce` 的非 0 支会把门字第 27 / 30 位置起，而这两个位**没有服务分支**（第 30 位按规范就是「启用后门恒关」）⇒ 门一直关着，`run()` 走到 step 上限。那不是 handler 写错，是「位是待服务标记，清不清由服务分支决定」的直接后果；要推进只能由外部清位写点（可达性未取证）。
+★ 由此有一条**看起来像卡死、其实是规范要求**的行为：`0x19c` 的置位支与 `0x1ce` 的非 0 支会把门字第 27 / 30 位置起，而这两个位在门里**都没有清位分支**（第 30 位 = 「逐格揭示活动中」：门之前的每迭代服务只按节拍请求画一格并推进格号、**不负责清它**；第 27 位连服务分支都没有）⇒ 门一直关着，`run()` 走到 step 上限。那不是 handler 写错，是「位是待服务标记，清不清由服务分支决定」的直接后果；要推进只能由外部清位写点（可达性未取证）。
 ★ 输入字形 / 触点都是**平台边界**：没有窗口时默认没有输入后端（`0xff` 恒采到 0、`0x2fc` 恒"没有触点"、
 `0x109` 恒写 −100000），`0x12e` 的命中查找因此不会进入。**无人值守要驱动 TITLE 的输入环，用 `--input-script`**
 （见下）：它把一份**指令式时间线**归约成引擎要的四个量（输入字 / 光标 / 按钮位图 / 触点），

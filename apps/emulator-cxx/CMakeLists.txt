@@ -205,10 +205,19 @@ add_test(NAME emulator-core-choice-consumer COMMAND emulator-core-selftest --onl
 add_test(NAME emulator-core-wait-timer COMMAND emulator-core-selftest --only-wait-timer)
 # ★ `0x21c` 谓词 A 的**「待处理」闩**（引擎 `+0B5B4`）：`0x202` 排窗置 1、窗推进时每帧再置 1、
 #   渲染步入（`0x4B40B0` ⇒ `end_render()`）清 0。判据：`0x1fb` → `0x202 delay 0 dur 200` → `0x21c`，
-#   等待位 `0x400` 在 `start + 200` 之前一直置起、`start + 201` 才清。
+#   等待位 `0x400` 在 `start + 199` 仍置起、**`start + 200`（相等）就放行** —— 窗的到期判据是
+#   `现在 >= 起点 + 延迟 + 持续时间`（引擎 `0x4B17F9` 的 `jge`：**相等已到期**），⛔ 不是 `start + 201`。
 #   把闩写回恒 false（旧模型：放行只看"计时器 + 待画格 / 打字态"）⇒ 下一拍就放行 ⇒ 本条红。
 #   ★ 它同时是 TITLE 的 mesh 200000 在**任何一帧渲染前**被 `0x1f7` 拆掉的成因。
 add_test(NAME emulator-core-wait-colour-window COMMAND emulator-core-selftest --only-wait-colour-window)
+# ★ `0x1ce` 的领域身份是「**逐格揭示当前文本**」（`CORE-OPS-TEXT-CELL-REVEAL-1CE`），不是乱数启用：
+#   非 0 ⇒ 活动位（第 30 位）+ 格号归 0 + 节拍器相位重置（起点 = 本迭代宿主毫秒时钟）；0 ⇒ 只在活动位
+#   已置时清位，**格号与相位都不复位**；主循环每拍**只画一格**、格号 ← (格号+1) mod 格数，格数 0 不推进。
+#   ★ 每条的判据都要**会红**：格号归 0 / 相位重置 / 停用不动格号相位 / 取模 / 格数 0 不推进之外，
+#   还咬住「请求画的是**推进前**的格号」（`text_cell_last_draw_cursor()`）、**掉拍不补**（跨 3 拍也只画一格）、
+#   「开关格**两条支都写**」（停用后必须读到 0）、「节拍周期**不被本条复位**」（播种 300 后仍是 300）、
+#   以及 `0x72` 尾段的四个写点（格数 / 格号 / 相位起点 / 节拍计数——删掉任何一行本条红）。
+add_test(NAME emulator-core-text-cell-reveal COMMAND emulator-core-selftest --only-cell-reveal)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)
@@ -300,9 +309,12 @@ if(EMULATOR_CXX_INSTALL_DIR)
         COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-headless
                 --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/route-gamestart-newgame.txt"
                 --anchor-script 21092 --expect-script 20964 --tick-ms 16 --max-steps 400000)
-    # ★ 点击节奏：同一段时间线里 80 次点击（每 300 ms、按住 100 ms）必须推进 ≥ 60 次正文。
-    #   守的是"点击大量被吞"——等待位被颜色窗卡住时只会推进十几次（实测 13）。阈值在
-    #   tests/adv_click_rate.cmake 里，日志留在构建目录。
+    # ★ 点击节奏（**程序侧基线，不是引擎要求**）：同一段时间线里 80 次点击（每 300 ms、按住 100 ms），
+    #   在这份脚本 + 这份配置下**实测**推进 37 次正文（`text-appends`）；阈值取 30 留余量。
+    #   守的是"点击大量被吞"——等待位不看颜色窗闩时只推进 0–13 次。
+    #   ⚠ 脚本 / 配置一变就要重算这个基线（它由 `0x238` / `0x202` 的操作数决定）；
+    #   **引擎不变量**不在这条里，见 `emulator-core-wait-colour-window`。
+    #   阈值与实测值也写在 tests/adv_click_rate.cmake 里 —— 两处必须是同一组数字，日志留在构建目录。
     add_test(NAME emulator-core-adv-click-rate
         COMMAND ${CMAKE_COMMAND}
             -DEXE=$<TARGET_FILE:emulator-cxx>

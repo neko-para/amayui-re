@@ -57,7 +57,8 @@ void source_rect(const DrawItem& item, std::uint32_t now, bool forced, int& left
     const auto start = item.window_start;
     const auto delay = static_cast<std::uint32_t>(item.rect_delay);
     const auto duration = static_cast<std::uint32_t>(item.rect_duration);
-    const bool expired = forced || now > start + delay + duration;
+    // 与颜色窗同一边界：引擎 `0x4B3C8B` 是 `jge` ⇒ `现在 >= 终点` 已到期（相等已到期）。
+    const bool expired = forced || now >= start + delay + duration;
     const auto offset = [&](std::int64_t step_index) {
         const int row_steps = item.rect_row_steps;
         if (row_steps <= 0 || item.rect_step_total <= 0) return std::pair<int, int>{0, 0};
@@ -440,7 +441,8 @@ std::uint32_t derive_color(const DrawItem& item, std::uint32_t now, bool forced)
     const auto start = item.window_start;
     const auto delay = static_cast<std::uint32_t>(item.delay);
     const auto duration = static_cast<std::uint32_t>(item.duration);
-    if (now > start + delay + duration) return item.target_color;
+    // 与推进侧同一边界（引擎 `0x4B17F9` 的 `jge`）：`现在 >= 终点` **即已到期**（相等已到期）。
+    if (now >= start + delay + duration) return item.target_color;
     if (now <= start + delay) return item.color;
     const auto progress = static_cast<double>(now - start - delay) / static_cast<double>(duration);
     return lerp_argb(item.color, item.target_color, progress);
@@ -455,7 +457,8 @@ std::uint32_t derive_color(const MeshRecord& mesh, std::uint32_t now, bool force
     const auto start = mesh.window_start;
     const auto delay = static_cast<std::uint32_t>(mesh.delay);
     const auto duration = static_cast<std::uint32_t>(mesh.duration);
-    if (now > start + delay + duration) return mesh.target_color;
+    // 与绘制项同一边界（`jge`：相等已到期）。
+    if (now >= start + delay + duration) return mesh.target_color;
     if (now <= start + delay) return mesh.color;
     const auto progress = static_cast<double>(now - start - delay) / static_cast<double>(duration);
     return lerp_argb(mesh.color, mesh.target_color, progress);

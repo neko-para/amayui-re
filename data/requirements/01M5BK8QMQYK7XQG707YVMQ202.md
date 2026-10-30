@@ -10,12 +10,14 @@
 ## 一句话
 
 本节点**保持 open**，作为「当前实现总览与交接」持续更新，不按收口处理（用户口径 2026-10-29）。
-2026-10-30：**GameStart → ゲーム開始 → ADV 界面（夕阳背景 + 旁白正文）已跑通**，该路径上缺的 opcode 全部补齐。
+2026-10-30：**GameStart → ADV 界面已跑通**。
+2026-10-31：四个提交（`323b5a5..6821e19`）的 spec 回归修复收口；`apps/emulator-new` **冻结**（见下）。
 
-## 交付物在哪
+## 交付物 / 实现线
 
 - **规范**：`repo:data/spec`（真源）· 工具 `pnpm tools spec validate|report|describe`。
-- **C++ 实现线**：`repo:apps/emulator-cxx`（preset `windows-x64`；`out/` 是 binaryDir）；参考实现 `repo:apps/emulator-new`。
+- **唯一在维护的模拟器**：`repo:apps/emulator-cxx`（preset `windows-x64`；`out/` 是 binaryDir）。
+- **`apps/emulator` 与 `apps/emulator-new` 已废弃**（只读遗产）：⛔ 不新增功能 / 不补守卫 / 不为它们改 spec。
 - **取证记录**（锚 EA、含不确定项，⛔ 不是 spec）：`repo:docs/02-engine/ops-forensics-2026-10-title-option.md`。
 - **本线需求单**：`REQ-01M5WD5Q5HDE246W3T97F3NA8C`；ADV 路径单 `REQ-01M6495R6H85GSSVDGXPJVTAGH` 已 done。
 
@@ -33,41 +35,40 @@
 - 证据（headless，`presented` 3188 帧 / 57 s）：`.tmp/adv/bmp5` 的 `frame-0700`（夕阳天空）、
   `.tmp/adv/bmp6` 的 `frame-1500`（章节标题卡）、`.tmp/adv/bmp4` 的末帧（消息窗正文）。
 
-## 这一轮（2026-10-30）收口了什么
+## 历史：2026-10-30 收口了什么
 
-- **补 30 条 opcode**，每条都有 spec 落点 + `bindings` 站点/证据 + `audit` 残差（并同步移出 `GAP-OPS-*`）：
-  `0x1bc 0x32a 0x32d 0x1b1 0x238 0x215 0x242 0x219 0x220 0x224 0x7a 0x1cb 0x256 0x2e9 0x214`
-  `0x193 0x20a 0x243 0x2f7 0x304 0x305 0x32 0x72 0x10a`。
-- **两处模型纠错**：① 门字第 9 位（BGM 淡变）原先没有服务分支 ⇒ 补最小推进；
-  ② `0x1fb` 才是「场景对象记录」的建记录者（置 bit0 + 写整数标签），`0x215`/`0x220` 与它同表。
+- **补 30 条 opcode**，每条都有 spec 落点 + `bindings` 站点/证据 + `audit` 残差（并同步移出 `GAP-OPS-*`）。
+- **两处模型纠错**：① 门字第 9 位（BGM 淡变）补最小推进；② `0x1fb` 才是「场景对象记录」的建记录者。
 - **正文渲染**：逐字符绘制条目需要「绘制键基数」，ADV 的消息层脚本没给 ⇒ 加宿主兜底（残差 `ADV-TEXT-LAYER-DRAW-KEY`）。
 
-## 当前需要处理（2026-10-30 交接，按优先级）
+## 2026-10-31 收口了什么
 
-1. 🐞 **序章「夕阳 ↔ 光柱塔」之间的中心旁白不出**，点击直接跳到下一幕 —— `REQ-01M65A72Y5ZHJPXMGPMHB0KH92`。
-2. 🐞 **章节标题卡位置歪**（真机在左侧中心、现在画在下方中央）+ 其后的**人物轮廓整体渲染错** —— `REQ-01M65A7BCESQG4C2B59V1HT3SB`。
-3. **文本层绘制键基数是宿主兜底**（残差 `ADV-TEXT-LAYER-DRAW-KEY`）——⛔ 不是引擎语义，取证后要撤。
-4. **`0x305` 的「自旋到该层揭示完」** 用「揭示全部格」实现 ⇒ **打字机逐字效果丢失**（已知偏离）。
-5. **ADV 之后**：`CALCREVISE.BIN` 停在 `0x132`；`SC0000` 还缺 `0x26 0x28 0xc3 0x140 0x230 0x233 0x234 0x235`。
-6. **`0x82` 的真实绘制 / `0x1D0` 的对表前置**（`REQ-01M63XEX9NXKJAJMZYJDCEX96Y`）：共同前置是读排版层。
-7. **spec 已成篇、实现是桩 / 归属错**（`REQ-01M63YS3T54VYCXCBJ6RPCHDAY`）：`op_2c7` / `op_2de` / L2D 四条 /
-   `op_2ee` / `op_25b`，以及 `0xb7`/`0xb8` 被当成 BGM 播放/停止。
+- **`0x1ce` 身份改判并重写**：不是「乱数启用」，是「逐格揭示当前文本」的启停 ⇒ 规则改名
+  `CORE-OPS-TEXT-CELL-REVEAL-1CE`、移到字符串章；格单位 = **等长瓦片**（≠ 打字机的字符格）；
+  两套机制的游标 / 单位 / 终止规则都不同。
+- **等待门（`0x21c`）两处到期边界纠错**：颜色窗 `≥`（相等已到期）、消息计时器 `>`（相等仍窗内）；
+  源矩形窗同样拉「待处理」闩（原先只有颜色窗拉）。
+- **门条新增「第 29 位例外」**：打字进行中（且待处理队列格 ≠ 0）时门忙**仍派发一条** ——
+  这也是 `0x1ce` 停用支可达的**唯一已知路径**。
+- **`0x72` 补三格合同**：无条件取格数；置第 30 位 / 清格号 / 复位相位**仅当第 30 位未置**。
+- spec 侧经**两轮独立复审**（规则面 + 实现面）并落地复审后的 14 条修正；实现侧补齐 8 处
+  「改坏会红」的守卫（含 `0x72` 四写点、掉拍不补、画推进前的格号、周期不被复位）。
 
-## 当前门禁（实测 2026-10-30，macOS 干净树）
+## 当前需要处理（2026-10-31 交接）
 
-`pnpm test` **1113 通过 / 0 失败** · `ctest` **39/39** · `pnpm typecheck` 六工程通过 · `pnpm tools spec validate` 13/13 ·
-`pnpm tools requirements validate` **6/6** · `pnpm tools routes validate` 12/12 · `pnpm tools corpus validate` 8 通过 / 0 失败 / 1 警告。
+1. 🐞 **五个缺陷单等用户真机验证后再动**（不自行收口）：序章旁白 / 章节标题卡 / TITLE 按钮提前渲染 /
+   SN0000 渐变反向 / SN0000 旁白贴边。
+2. **`0x82` 真实绘制 / `0x1D0` 对表前置**：`REQ-01M63XEX9NXKJAJMZYJDCEX96Y`（共同前置 = 读排版层）。
+3. **spec 成篇但 cxx 仍是桩**：`REQ-01M63YS3T54VYCXCBJ6RPCHDAY`（`op_2c7` / `op_341` 空返回、`op_2de` 恒 −1）。
+4. **`0x215` 前置未定位**：`REQ-01M63XE3X819G3WAY28Y0XSJKV`（`0x194` 已收口）。
+5. **`0x32a` / `0x32` 混合支 / `0x20a` 绑定站点**：`REQ-01M66W5F242YMCSER2ETG7DYCQ` 的剩余项。
+6. **spec 证据去 emulator-new 化**：`REQ-01M67147KK2PSR3T4PNPPB653H` —— 本子树有 47 个 done 节点的
+   `verify` 指向冻结件；它们**不失效**（仍可跑），但不宜再当唯一证据。
 
-## 2026-10-30 独立复审（`323b5a5`）与清理
+## 门禁（怎么查，不记数字）
 
-- 全量清单：`repo:docs/02-engine/review-323b5a5-2026-10-30.md`；审计记录：`docs/02-engine/spec-audit-2026-10.md` §九十五。
-- 已修（均有 CTest / mutation 守卫）：`0x305` 武装位（`0x6e` / `0x196` 置 bit16）；`0x214` 读序 / 标脏 / 交换；
-  `0x238` 写消息等待格；`0x219` / `0x220` / `0x242` 两半同步；`0x217` / `0x220` 读序；文本层渲染请求与 fallback base；
-  `0x7a` 默认槽；`0x1ca` / `0x1cb` 同一存储；`0x258` 读序；`0x90` arm / 清表 / 兜底；`0x229` GPU 路径；
-  14 个零测试 opcode 全部补 CTest；站点证据新增“RULES 必须覆盖 rule”守卫；干净树两门禁转绿。
-- 未修（已登记在 review §7）：`0x2e9` 自动消息偏移的消费者、`0x10a` 换算、`0x1bc` 声道 / 后端、`0x32d` / `0x10a` 请求消费者、
-  选项消费侧、`0x93` / `0x94` 命中格身份、`0x305` 自旋 / bit27 / 已读、`0x229` 命令档跳过、`0x224` 容器载荷。
-- 本节点仍不关闭；未修项按 review §7 继续。
+`pnpm test` · `ctest --test-dir apps/emulator-cxx/out` · `pnpm typecheck` · `pnpm tools spec validate` ·
+`pnpm tools requirements validate` · `git diff --check`。★ 数字会漂，一律以命令实测为准。
 
 ## 工作口径
 
