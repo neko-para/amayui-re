@@ -24,7 +24,7 @@ bool is_scene_mutating(std::uint32_t opcode) {
         case 0x1FD: case 0x1FE: case 0x1FF:  // 场景对象变换
         case 0x202: case 0x203:              // 绘制项颜色
         case 0x217: case 0x219: case 0x220:  // 3D 记录
-        case 0x223: case 0x239: case 0x242:
+        case 0x223: case 0x239:
         case 0x24D: case 0x24F: case 0x250: case 0x251:  // 场景命令表
         case 0x229: case 0x230: case 0x231: case 0x233: case 0x234: case 0x235:
         case 0x23B:                          // CG 数字条

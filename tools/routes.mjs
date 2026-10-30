@@ -49,7 +49,9 @@ export const SCHEMA = 1;
 export const DEFAULT_ROUTES = path.join(REPO_ROOT, 'data', 'routes', 'screens.json');
 export const DEFAULT_INPUT_DIR = path.join(REPO_ROOT, 'apps', 'emulator-cxx', 'tests', 'input');
 /** 播放器可执行文件（相对仓库根；replay 打印的命令也相对仓库根执行）。 */
-export const EMULATOR_EXE = 'apps/emulator-cxx/out/emulator-cxx.exe';
+export const EMULATOR_EXE = process.platform === 'win32'
+  ? 'apps/emulator-cxx/out/emulator-cxx.exe'
+  : 'apps/emulator-cxx/out/emulator-cxx';
 /**
  * 本机实测用的安装根。**它是宿主测试事实，不是仓库事实** ⇒ 换机器用 `--install` 或
  * `AMAYUI_INSTALL` 覆盖它；⛔ 不要把这个路径写进 `screens.json`（数据里只写命令形式）。
@@ -123,6 +125,11 @@ export const INVARIANTS = [
   {
     id: 'evidence-shape',
     text: '`evidence.verifiedAt` 是 `YYYY-MM-DD`，`evidence.command` 非空 —— 证据必须能照着再跑一次。',
+    enforcedBy: '`pnpm tools routes validate` + `tools/test/routes.test.mjs`',
+  },
+  {
+    id: 'evidence-command-portable',
+    text: '`evidence.command` **不许写机器绝对路径**（盘符 / `\Users\` / `\home\` 等）：安装根一律用 `$AMAYUI_INSTALL` 占位，换机器才跑得起来。',
     enforcedBy: '`pnpm tools routes validate` + `tools/test/routes.test.mjs`',
   },
 ];
@@ -252,6 +259,11 @@ function evidenceProblem(routeId, evidence) {
   }
   if (typeof evidence.command !== 'string' || evidence.command.trim() === '') {
     return `${routeId}.evidence.command 必须非空（要能照着再跑一次）`;
+  }
+  // ★ 机器绝对路径写进数据 ⇒ 换机器/干净 clone 照抄跑不了；安装根用 `$AMAYUI_INSTALL`。
+  if (/(^|[\s"'])[A-Za-z]:[\\/]/.test(evidence.command) ||
+      /(^|[\s"'])\/(Users|home|opt|tmp)\//.test(evidence.command)) {
+    return `${routeId}.evidence.command 写了机器绝对路径（改用 $AMAYUI_INSTALL 占位）`;
   }
   return null;
 }

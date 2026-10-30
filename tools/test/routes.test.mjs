@@ -117,3 +117,13 @@ test('⑤ arrive.script ↔ arrive.bin 在表内自洽（同一 script 不许对
 test('validateRoutes：真源通过全部不变量', () => {
   assert.deepEqual(validateRoutes(data), [], '`pnpm tools routes validate` 有红项（这里汇总看一眼）');
 });
+
+test('⑥ evidence.command 写机器绝对路径 ⇒ 必须红（换机器照抄跑不了）', () => {
+  const bad = JSON.parse(JSON.stringify(data));
+  bad.routes[0].evidence.command = 'emulator --install "E:\\Games\\Eushully\\天結いキャッスルマイスター"';
+  const problems = validateRoutes(bad);
+  assert.ok(
+    problems.some((p) => typeof p?.message === 'string' && p.message.includes('机器绝对路径')),
+    `机器绝对路径没有被 evidence-command-portable 抓住：${problems.join(' / ')}`,
+  );
+});

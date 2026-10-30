@@ -359,7 +359,7 @@ void Machine::op_90(const Instruction& instruction) {
     const auto leave = read_int(ops[5]);
     const auto enter = read_int(ops[4]);
     // 容量 100（EA 0x403B39 的 `cmp eax, 64h`）：满了 ⇒ 一个字段都不写、抛显示消息型异常。
-    if (choices_.size() >= kChoiceCapacity) throw CoreError("choice-table-full");
+    if (choices_.size() >= kChoiceCapacity) throw CoreError("display-message:choice-table-full");
     ChoiceEntry entry;
     entry.left = x;
     entry.top = y;
@@ -371,6 +371,9 @@ void Machine::op_90(const Instruction& instruction) {
     entry.depth = 0;  // 本模型没有帧深度档（残差）
     choices_.push_back(entry);
     choice_index_ = -1;
+    // ★ 追加成功也把 **arm 闸清 0**（引擎 `sub_403B30` 尾部 `0x403BBE: [ecx+74A4h]=0`）：
+    //   下一次 0x94 才会重新用当前光标算悬停。
+    choice_window_.arm = false;
     return;
 }
 
@@ -397,13 +400,14 @@ void Machine::op_97(const Instruction& instruction) {
     return;
 }
 
-// 选项窗口的**清表**（`sub_403EF0`）：条目数 0、选中 -1、步长 0、悬停 -1、兜底 -1、变更挂起 0。
+// 选项窗口的**清表**（`sub_403EF0`）：条目数 0、选中 -1、步长 0、悬停 -1、移动命中开关 0、变更挂起 0。
+// ★ 引擎**不**在这里复位兜底目标（`[0CA84h]` 不在这 7 格内）⇒ 兜底跨窗保留，⛔ 不是 -1。
 void Machine::reset_choice_table() {
     choices_.clear();
     choice_index_ = -1;
     choice_window_.step = 0;
     choice_window_.hover = -1;
-    choice_window_.fallback = -1;
+    choice_window_.move_hit = false;
     choice_window_.pending = false;
 }
 

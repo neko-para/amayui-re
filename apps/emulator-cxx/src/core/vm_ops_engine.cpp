@@ -705,6 +705,7 @@ void Machine::op_213(const Instruction& instruction) {
     auto& rec = list_records_[static_cast<std::size_t>(group)];
     rec.f68 = a;
     rec.f6c = b;
+    rec.key_base_set = true;  // 0 也是合法基数；⛔ 不能用 `f68 <= 0` 判"没写过"
     return;
 }
 
@@ -806,15 +807,16 @@ void Machine::op_70(const Instruction& instruction) {
     record.registered = 1;
     // 文本层矩形：按 w/h 建（或重建）离屏画布；逐字符绘制条目由 `0x6e` / `0x196` 在画字时排。
     // 绘制键基数：脚本没给（0x213 没调过）时给一个宿主侧的默认基数，否则逐字符绘制条目会一条都不建。
-    if (record.f68 <= 0) record.f68 = kTextLayerFallbackBase + group * 1000;
+    if (!record.key_base_set) record.f68 = kTextLayerFallbackBase + group * 1000;
     ensure_text_layer_texture(group);
     return;
 }
 
 void Machine::op_1ca(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 命名键 message:ReadTextSkip ← 第 1 个操作数
-    named_message_read_text_skip_ = read_int(ops[0]);
+    // 命名键 message:ReadTextSkip ← 第 1 个操作数（写的是**配置库的命名键表**；
+    // `0x1cb` 读的就是同一张表，⛔ 不是另一个标量副本）。
+    config_.set_int("message:ReadTextSkip", read_int(ops[0]));
     return;
 }
 

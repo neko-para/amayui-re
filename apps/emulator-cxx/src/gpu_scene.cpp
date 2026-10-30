@@ -290,8 +290,14 @@ void build_scene_vertices(const core::Machine& machine, float width, float heigh
         const int sx1 = std::min(static_cast<int>(texture->width), item.right);
         const int sy1 = std::min(static_cast<int>(texture->height), item.bottom);
         if (sx1 <= sx0 || sy1 <= sy0) continue;
-        const float dx = item.aux[0] + static_cast<float>(sx0 - item.left);
-        const float dy = item.aux[1] + static_cast<float>(sy0 - item.top);
+        float dx = item.aux[0] + static_cast<float>(sx0 - item.left);
+        float dy = item.aux[1] + static_cast<float>(sy0 - item.top);
+        // ★ 场景自身变换（`0x229`）：CPU 光栅在 `scene_raster.cpp` 里加；窗口走 GPU 路径时
+        //   这里必须同样加，否则"带窗口运行时 0x229 不生效、只有 --bmp 看得到"。
+        if (machine.scene_self_transform().covers(key)) {
+            dx += static_cast<float>(std::lround(machine.scene_self_transform().translate[0]));
+            dy += static_cast<float>(std::lround(machine.scene_self_transform().translate[1]));
+        }
         // ★ 物体空间缩放（`0x1FD` 写在**同一条 Scene 记录**上；`rec+0x68` = "有本地矩阵"）。
         //   引擎的绘制入口是 `ID3DXSprite::Draw(tex, pSrcRect, pCenter=0, pPosition, Color)` +
         //   物体空间矩阵 ⇒ 四边形边长 = 源矩形 × 缩放，**纵向拉伸只认 sy**。

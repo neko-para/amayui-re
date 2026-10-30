@@ -2918,6 +2918,65 @@ const MUTATIONS = [
   },
   // ── 注释里引用的规范条目 id 必须存在（★ 实测两次：`0xb6` 引了一条不存在的 `CORE-OPS-AUDIO-SE-STOP`，
   //    并据此写下了"规范：不清"的断言；帧族把 `CORE-OPS-FRAME-*` 写成 `CORE-FRAME-*`）──
+  // ── 复审修复的源码锚（行为断言在 CTest；这里给变异测试一个 node 可跑的入口）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: 'msg_arm_ |= 0x10000;',
+    to: '',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x6e / 0x196 少一处置 arm bit16 ⇒ 0x305 的整段块结束逻辑重新变成死代码',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_scene.cpp',
+    from: 'std::swap(scene_records_[key_a], scene_records_[key_b]);',
+    to: '/* mutated */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x214 两边都有记录时不再交换 ⇒ 只剩单向覆盖（源记录被删）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_scene.cpp',
+    from: 'msg_wait_c_ = value;',
+    to: '(void)value;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x238 不再写消息等待三格的 C ⇒ 与 0x243 / 0x305 的三格脱钩',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    from: 'item.set21e_int0 = g1;',
+    to: 'item.set21e_int0 = 0;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x220 的 G1 不再同步到 DrawItem ⇒ 窗位/配置格对消费者不可见',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: 'if (!rec.key_base_set) return;',
+    to: 'if (false) return;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '去掉“脚本是否写过键基数”的门 ⇒ 显式基数 0 被宿主兜底覆盖',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    from: 'const auto mask = read_int(ops[1]);',
+    to: 'const auto mask = read_int(ops[0]);',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x258 读序从 2→1 退回 1→2（两个操作数都非法时抛点不同）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
+    from: 'config_.set_int("message:ReadTextSkip", read_int(ops[0]));',
+    to: 'config_.set_int("message:ReadTextSkip", 0);',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x1ca 不再把操作数写进命名键 ⇒ 0x1cb 的 falsifier“设 1 再读必须是 1”失败',
+  },
+  // ── spec 证据锚的“覆盖”判据（★ 2026-10-30 复审实测：19 条新规则引用站点用例，
+  //    而该用例的 RULES 名单一条都不含它们 ⇒ 站点写错/删空也不会红）──
+  {
+    file: 'tools/test/spec-ops-100-200-sites.assets.test.mjs',
+    from: "  'CORE-OPS-MSG-WAIT-INPUT-72',\n",
+    to: '',
+    guard: 'tools/test/spec-evidence-covers-rule.test.mjs',
+    what: '站点用例的 RULES 名单删掉一条仍被 bindings 引用 ⇒ “用例存在”被当成“用例覆盖该 rule”',
+  },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
     from: '规则 `CORE-OPS-AUDIO-WAV`）',

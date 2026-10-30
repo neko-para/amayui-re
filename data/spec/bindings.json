@@ -9856,7 +9856,8 @@
         "shape:T_Scene_460@0x18"
       ],
       "evidence": [
-        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-scene-records"
       ]
     },
     {
@@ -9902,7 +9903,8 @@
         "shape:T_Scene_460@0x24"
       ],
       "evidence": [
-        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-scene-records"
       ]
     },
     {
@@ -10052,7 +10054,8 @@
         "shape:T_Scene_460@0x68"
       ],
       "evidence": [
-        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-scene-records"
       ]
     },
     {
@@ -12373,7 +12376,8 @@
       "functions": [],
       "storage": [],
       "evidence": [
-        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首"
+        "guard:tools/test/spec-scene-setters-sites.assets.test.mjs#★ 场景 10 条 setter 的 handler 起点都在 .lst 的指令行首",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-scene-records"
       ]
     },
     {
@@ -18279,7 +18283,9 @@
         {"ea": "0x433771", "what": "读第 2 个操作数（左值）"},
         {"ea": "0x433791", "what": "写第 1 个操作数（与 0x192 同一写原语）"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-ops"
+      ]
     },
     {
       "rule": "CORE-OPS-TEXT-REDRAW-20A",
@@ -18292,7 +18298,9 @@
         {"ea": "0x423668", "what": "只测门字第 30 位"},
         {"ea": "0x423688", "what": "第 30 位置起 ⇒ 再读一次层号并补画一个延迟格"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-ops"
+      ]
     },
     {
       "rule": "CORE-OPS-MSG-WAIT-243",
@@ -18318,10 +18326,12 @@
         {"ea": "0x41b1e7", "what": "门 = 第 0 位 ∧ 第 16 位"},
         {"ea": "0x41b218", "what": "揭示游标回卷到块开头"},
         {"ea": "0x41b314", "what": "自旋到该层揭示完"},
-        {"ea": "0x41b32c", "what": "写消息等待三格 (0, 0, 1)"},
+        {"ea": "0x41b32c", "what": "写消息等待三格：B=0 / C=0 / A=1（最终 (1,0,0)）"},
         {"ea": "0x41b348", "what": "三条出口都清臂位"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-msg-block"
+      ]
     },
     {
       "rule": "CORE-OPS-TEXTURE-STRETCH-32",
@@ -18334,7 +18344,9 @@
         {"ea": "0x41e363", "what": "目标矩形下边 = y + 高"},
         {"ea": "0x4a87a0", "what": "源 / 目标矩形各自夹取后做缩放拷贝"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-ops"
+      ]
     },
     {
       "rule": "CORE-OPS-MSG-WAIT-INPUT-72",
@@ -18345,9 +18357,11 @@
         {"ea": "0x41ef08", "what": "推进格数 ← 3（argc 1）"},
         {"ea": "0x41f070", "what": "当前消息槽 ← 第 1 个操作数"},
         {"ea": "0x41f07b", "what": "置「等推进」位（第 31 位）"},
-        {"ea": "0x41f097", "what": "并置第 30 位"}
+        {"ea": "0x41f092", "what": "并置第 30 位（or eax,40000000h）"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-msg-block"
+      ]
     },
     {
       "rule": "CORE-OPS-INPUT-SET-CURSOR-10A",
@@ -18358,7 +18372,9 @@
         {"ea": "0x421eb7", "what": "推进格数 ← 5（argc 2）"},
         {"ea": "0x42202e", "what": "请求平台把光标移到换算后的坐标"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-ops"
+      ]
     },
     {
       "rule": "CORE-OPS-VOICE-OPTION-2F7",
@@ -18369,17 +18385,29 @@
         {"ea": "0x4268a0", "what": "推进格数 ← 3（argc 1）"},
         {"ea": "0x4268b4", "what": "该槽选项格整格写 1"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-ops"
+      ]
     },
     {
       "rule": "CORE-OPS-SCENE3D-214",
       "functions": ["sub_423AE0", "sub_4ABEF0"],
       "storage": [],
       "sites": [
-        {"ea": "0x423ae0", "what": "handler 起点"},
-        {"ea": "0x4abef0", "what": "复制到目标编号后删源"}
+        {"ea": "0x423ae0", "what": "handler 起点（0x423AFB push 2 / 0x423B05 push 1：读序 2→1）"},
+        {"ea": "0x4abef0", "what": "三条出口（两个都在 ⇒ 交换；只有一个 ⇒ 搬运；都不在 ⇒ 只标脏）"},
+        {"ea": "0x4abf5c", "what": "两边都有：源载荷 → 缓冲"},
+        {"ea": "0x4abf80", "what": "两边都有：源载荷 → 目标"},
+        {"ea": "0x4abf9d", "what": "两边都有：旧目标载荷 → 源（交换完成）"},
+        {"ea": "0x4abfa1", "what": "出口 1：场景标脏"},
+        {"ea": "0x4abfbc", "what": "单边：把存在的那条搬到另一个键"},
+        {"ea": "0x4ac010", "what": "出口 2：场景标脏"},
+        {"ea": "0x4ac08a", "what": "出口 3：场景标脏"},
+        {"ea": "0x4ac0a9", "what": "两个都没有：仍标脏"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-scene-relocate"
+      ]
     },
     {
       "rule": "CORE-OPS-ENGINE-CELL-2E9",
@@ -18390,7 +18418,9 @@
         {"ea": "0x426630", "what": "推进格数 ← 3（argc 1）"},
         {"ea": "0x426644", "what": "写那个固定格"}
       ],
-      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-ops"
+      ]
     },    {
       "rule": "CORE-OPS-CONFIG-READ-1CB",
       "functions": ["sub_42D3D0"],

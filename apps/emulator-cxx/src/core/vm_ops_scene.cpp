@@ -235,12 +235,13 @@ void Machine::op_32a(const Instruction& instruction) {
 void Machine::op_238(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 设两格（0x238 / `sub_4248C0`，argc 1、推进 3；规则 `CORE-OPS-ENGINE-CELL-238`）：
-    // 第 1 格**清 0**、第 2 格原样 ← 操作数（调用点给的是 `5500` 这种毫秒量）。
-    // ★ 两格的读者 / 是否由帧服务倒数未取证（残差）。
+    // 引擎写的是 `5A2C8h ← 0`、`5A2CCh ← 操作数` —— 这两格就是**消息等待三格**的 B / C
+    // （`0x243` / `0x305` 写的也是同一组；A = `5A2C0h` 不动）。
+    // ★ 全语料对这两格只有写、没有字面读点（残差 `RES-ENGINE-CELL-238-READER`）。
     write_length(3);
     const auto value = read_int(ops[0]);
-    cell_238_left_ = 0;
-    cell_238_value_ = value;
+    msg_wait_b_ = 0;
+    msg_wait_c_ = value;
     return;
 }
 
@@ -267,13 +268,23 @@ void Machine::op_242(const Instruction& instruction) {
     write_length(5);
     const auto value = read_int(ops[1]);
     const auto key = read_int(ops[0]);
-    // 第一处：场景对象记录表里同一编号的**一条记录**（缺则先建 —— 建记录这一步标脏）。
-    SceneRecord& object = scene_records_[static_cast<std::uint32_t>(key)];
-    (void)object;
-    // 第二处：另一张表里同一编号的记录（缺则先建）。
-    KeyedPairRecord& record = scene_keyed_pair_[key];
-    record.field_a = value;
-    record.field_b = value;
+    // 第一处：容器 `+0x408` 里同一编号的记录（缺则先建 —— 建记录这一步标脏）；
+    //   写的是 `+0x2D0`（模型 `SceneRecord::field_2d0`），⛔ 不是 `0x215` 读的 `+0x4`（`tag`）。
+    bool created = false;
+    const auto object_key = static_cast<std::uint32_t>(key);
+    if (scene_records_.find(object_key) == scene_records_.end()) {
+        scene_records_[object_key] = SceneRecord{};
+        created = true;
+    }
+    scene_records_[object_key].field_2d0 = value;
+    // 第二处：另一张表（`+0x438`）里同一编号的记录（缺则先建）；只写**一格**。
+    if (scene_keyed_pair_.find(key) == scene_keyed_pair_.end()) {
+        scene_keyed_pair_[key] = KeyedPairRecord{};
+        created = true;
+    }
+    scene_keyed_pair_[key].field_a = value;
+    // ★ 「本条不标脏」是观察事实；只有上面「建默认记录」那一步会标脏。
+    if (created) scene_dirty_ = true;
     return;
 }
 
@@ -318,17 +329,55 @@ void Machine::op_256(const Instruction& instruction) {
 
 void Machine::op_214(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 记录的**改键 / 搬运**（0x214 / `sub_423AE0` → `sub_4ABEF0`，argc 2、推进 5；
-    // 规则 `CORE-OPS-SCENE3D-214`）：把 key = 第 2 个操作数的记录复制到 key = 第 1 个操作数，再删掉源。
-    // 读序 **1 → 2**；源不存在 ⇒ 什么都不做（不建目标）。不标脏（引擎同一支）。
+    // 两个编号上**整条场景记录**的交换 / 搬运（0x214 / `sub_423AE0` → `sub_4ABEF0`，argc 2、推进 5；
+    // 规则 `CORE-OPS-SCENE3D-214`）。引擎的语义是**对称**的（不是单向的「源→目标」）：
+    //   两个键都有记录 ⇒ 交换两条记录的载荷（`0x4ABF5C/80/9D` 三次整块拷贝）；
+    //   只有一个键有记录 ⇒ 把它搬到另一个键（`0x4ABFBC` / `0x4AC02B` 两条出口，`sub_4A8AF0` 删除旧键）；
+    //   两个键都没有 ⇒ 不建记录；三条出口都写 `Scene+0xB5AC ← 1`（`0x4ABFA1/4AC010/4AC08A/4AC0A9`）。
+    // ★ 读序 **2 → 1**（`sub_423AE0`：`0x423AFB push 2` 先读、`0x423B05 push 1` 后读）。
+    // ★ 本模型的记录被拆成 `SceneRecord` + `DrawItem` 两半 ⇒ 两半按同一个键规则一起搬/换。
     write_length(5);
-    const auto target_key = read_int(ops[0]);
-    const auto source_key = read_int(ops[1]);
-    const auto it = scene_records_.find(static_cast<std::uint32_t>(source_key));
-    if (it == scene_records_.end()) return;
-    const SceneRecord copy = it->second;
-    scene_records_.erase(it);
-    scene_records_[static_cast<std::uint32_t>(target_key)] = copy;
+    const auto key_b = static_cast<std::uint32_t>(read_int(ops[1]));
+    const auto key_a = static_cast<std::uint32_t>(read_int(ops[0]));
+    scene_dirty_ = true;  // 三条出口都置脏（包括两个键都不存在的那支）
+    if (key_a == key_b) return;
+    const auto has_scene = [this](std::uint32_t key) { return scene_records_.find(key) != scene_records_.end(); };
+    const auto has_item = [this](std::uint32_t key) { return draw_items_.find(key) != draw_items_.end(); };
+    const bool a_any = has_scene(key_a) || has_item(key_a);
+    const bool b_any = has_scene(key_b) || has_item(key_b);
+    if (!a_any && !b_any) return;
+    if (a_any && b_any) {
+        // 两个键都有记录：两半各自交换；某一半只在一侧存在时，把它搬到另一侧（对应引擎的整条记录）。
+        if (has_scene(key_a) && has_scene(key_b)) {
+            std::swap(scene_records_[key_a], scene_records_[key_b]);
+        } else if (has_scene(key_a)) {
+            scene_records_[key_b] = std::move(scene_records_[key_a]);
+            scene_records_.erase(key_a);
+        } else if (has_scene(key_b)) {
+            scene_records_[key_a] = std::move(scene_records_[key_b]);
+            scene_records_.erase(key_b);
+        }
+        if (has_item(key_a) && has_item(key_b)) {
+            std::swap(draw_items_[key_a], draw_items_[key_b]);
+        } else if (has_item(key_a)) {
+            draw_items_[key_b] = std::move(draw_items_[key_a]);
+            draw_items_.erase(key_a);
+        } else if (has_item(key_b)) {
+            draw_items_[key_a] = std::move(draw_items_[key_b]);
+            draw_items_.erase(key_b);
+        }
+    } else {
+        const std::uint32_t from = a_any ? key_a : key_b;
+        const std::uint32_t to = a_any ? key_b : key_a;
+        if (has_scene(from)) {
+            scene_records_[to] = std::move(scene_records_[from]);
+            scene_records_.erase(from);
+        }
+        if (has_item(from)) {
+            draw_items_[to] = std::move(draw_items_[from]);
+            draw_items_.erase(from);
+        }
+    }
     return;
 }
 }  // namespace core

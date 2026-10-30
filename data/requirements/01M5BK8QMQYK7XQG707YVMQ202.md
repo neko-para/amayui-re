@@ -53,10 +53,21 @@
 7. **spec 已成篇、实现是桩 / 归属错**（`REQ-01M63YS3T54VYCXCBJ6RPCHDAY`）：`op_2c7` / `op_2de` / L2D 四条 /
    `op_2ee` / `op_25b`，以及 `0xb7`/`0xb8` 被当成 BGM 播放/停止。
 
-## 当前门禁（实测 2026-10-30）
+## 当前门禁（实测 2026-10-30，macOS 干净树）
 
-`pnpm test` 1110 通过 / 0 失败 · `ctest --test-dir apps/emulator-cxx/out` 33/33 · `pnpm typecheck` 六工程通过 ·
-`pnpm tools spec validate` 全绿 · `pnpm tools requirements validate` 6/6 · `pnpm tools corpus validate` 8 通过 / 0 失败 / 1 警告。
+`pnpm test` **1113 通过 / 0 失败** · `ctest` **37/37** · `pnpm typecheck` 六工程通过 · `pnpm tools spec validate` 13/13 ·
+`pnpm tools requirements validate` **6/6** · `pnpm tools routes validate` 12/12 · `pnpm tools corpus validate` 8 通过 / 0 失败 / 1 警告。
+
+## 2026-10-30 独立复审（`323b5a5`）与清理
+
+- 全量清单：`repo:docs/02-engine/review-323b5a5-2026-10-30.md`；审计记录：`docs/02-engine/spec-audit-2026-10.md` §九十五。
+- 已修（均有 CTest / mutation 守卫）：`0x305` 武装位（`0x6e` / `0x196` 置 bit16）；`0x214` 读序 / 标脏 / 交换；
+  `0x238` 写消息等待格；`0x219` / `0x220` / `0x242` 两半同步；`0x217` / `0x220` 读序；文本层渲染请求与 fallback base；
+  `0x7a` 默认槽；`0x1ca` / `0x1cb` 同一存储；`0x258` 读序；`0x90` arm / 清表 / 兜底；`0x229` GPU 路径；
+  14 个零测试 opcode 全部补 CTest；站点证据新增“RULES 必须覆盖 rule”守卫；干净树两门禁转绿。
+- 未修（已登记在 review §7）：`0x2e9` 自动消息偏移的消费者、`0x10a` 换算、`0x1bc` 声道 / 后端、`0x32d` / `0x10a` 请求消费者、
+  选项消费侧、`0x93` / `0x94` 命中格身份、`0x305` 自旋 / bit27 / 已读、`0x229` 命令档跳过、`0x224` 容器载荷。
+- 本节点仍不关闭；未修项按 review §7 继续。
 
 ## 工作口径
 

@@ -2473,3 +2473,52 @@ RGB ≥ 235 记一条 `[flash-probe] white present trigger=<trigger> …`（≤2
 - **判据（为什么是结构而不是抖动）**：`0x46dd60`（覆盖值 0 ⇒ 一个字节都不写）与 `0x46ddd5`（目标自身通道值 0 ⇒ 整像素覆写）会改变**后续叠加的结果** —— 同一段文本在"刚清空的画布"与"已有内容"上写出来的颜色与不透明度不同，可被独立实现复现；而取整顺序只影响 ±1 的像素值。
 - **同步改动**：正文新条 + 两条可证伪观察（空白画布上墨迹 = 源色原值且重复写幂等；叠加时颜色加权、输出通道值 = max）；`RES-RENDER-TEXT-SURFACE` 从残差里删除；`RES-RENDER-TEXT-SURFACE-FORMAT` 收窄到**通道顺序**（它还欠一环：`0x76`/`0x77` 的字节反转口径要先定）；bindings 给 16 个支路站点（32 位 / 16 位各 8 个）补了绑定。
 - **实现侧**：模拟器的 `compose_texel` / `compose_glyph_texel` 本来就按这三支写的（上一轮的亮度修复），本轮只补了一条**纯算术守卫**（`core_selftest` 的 `check_glyph_compose`，挂在 `emulator-core-glyph-alpha` 里）：覆盖值 0 不动、目标 0 覆写、满值覆写且幂等、其余加权 + max。变异（去掉"目标通道值 = 0 ⇒ 覆写"）⇒ `目标通道值 = 0 时没有整像素覆写源色（把 α 乘进颜色了）` 当场红。
+
+## 九十五、`323b5a5` 的独立复审（2026-10-30）
+
+**触发**：`323b5a5`（`feat: game start routine`）改了 `data/spec/` +1753 行（24 条新规则 + 5 处旧条目）与
+`apps/emulator-cxx` 的 30+ 个 handler，但提交不含 `docs/`，本轮没有独立复审记录。按 `amayui-spec` §9.1 补做：
+4 个 subagent 分「规则面（只读 `data/spec/`）/ 实现面 / 证据绑定 / 门禁台账」，主 agent 对关键结论回 `.lst` 复核。
+
+**全量清单**：`docs/02-engine/review-323b5a5-2026-10-30.md`（含 `文件:行`、`.lst` EA、复现命令与“已验证为对”的项）。
+
+**错误类型 · 判据 · 本次处置 · 下次 review 要问**
+
+1. **机器事实与合同矛盾（0x214 / 0x258 / 0x238 / 0x305 位 16）**
+   - 判据：`.lst` 的 `sub_423AE0` 读序 `2→1`（正文写 `1→2`）；`sub_4ABEF0` 四条出口写 `B5AC←1`（正文写“不标脏”）；
+     `0x4ABF5C/80/9D` 目标存在时是交换（正文写“删源”）；`sub_425D20` 读序 `2→1`（正文与自身 bindings 写 `1→2`）；
+     `sub_4248C0` 写 `5A2C8h/5A2CCh`（= `0x243/0x305` 的等待三格后两格，正文写“互不相邻”）；
+     `0x41EB7D/0x41FCD8` 由 `0x6e/0x196` 置 `10000h`（正文只写 `0x6e`，实现两处都没置）。
+   - 本次处置（同日清理）：按 EA 改了正文与实现 —— `0x214` 读序 2→1 / 三条出口标脏 / 两边都有即交换；`0x258` 读序 2→1；
+     `0x238` 改成写消息等待三格的 B / C；`0x305` 的 bit16 由 `0x6e` / `0x196` 置。守卫：`emulator-core-scene-relocate`、
+     `-msg-block`、`-misc-cells`、`-scene-table-flags`。
+   - 下次 review 要问：`0x214` 目标存在时的“交换”是否写进正文；`0x238` 与 `0x243/0x305` 的三格是否合并成一条合同；
+     `0x305` 的 `(0,0,1)` 是否还受 `[0xA30D0]==1` / `[0x5A2D0]&2==0` 两个条件约束。
+
+2. **实现与合同同错（0x220 / 0x219 / 0x1fb / 0x214 的记录拆分）**
+   - 判据：`0x220` 写 `SceneRecord.flags/g[]/translate4`，消费者 `0x202` 与绘制侧读 `DrawItem.flags`（`scene_raster.cpp:437`）；
+     `0x219` 写 `vec2`、`0x1fb` 写 `aux`，而引擎同一组 `+0x24..+0x2C`；`0x214` 只搬 `SceneRecord`。
+   - 本次处置（同日清理）：先按“同一条引擎格在两半同步”落地 —— `0x1fb` 写 `vec2`、`0x219` 同步 `aux`、`0x220` 同步
+     `DrawItem` 的窗位 / `config_g3` / 窗起点、`0x242` 写 `field_2d0` + 第二表单格、`0x214` 两半一起搬/换；`0x217` / `0x220`
+     读序改为与 `.lst` 一致。守卫：`emulator-core-scene-records`。
+   - 下次 review 要问：`0x220` 的位 1 / G0 / G3 在哪个消费者上可观察；`0x1fb → 0x21a` 是否必须读回 op7/op8/0；
+     `0x214` 的 `DrawItem` 是否必须一起搬。
+
+3. **守卫与证据空转（24 条新规则 / 19 条 evidence）**
+   - 判据：`tools/test/spec-ops-100-200-sites.assets.test.mjs:20-50` 的 `RULES` 是硬编码名单，与 24 条新规则交集为 0；
+     10 条规则只剩这一条证据；14 个新 handler 零 CTest（`0x32/0x72/0x10A/0x193/0x20A/0x214/0x219/0x220/0x242/0x243/0x2E9/0x2F7/0x304/0x305`）。
+   - 本次处置（同日清理）：24 条新规则加进 `spec-ops-100-200-sites` 的 `RULES`；新增
+     `tools/test/spec-evidence-covers-rule.test.mjs`（RULES 必须列出引用它的 rule）并加 mutation；
+     14 个零 CTest opcode 全部补最小行为断言（`-scene-relocate` / `-msg-block` / `-scene-records` / `-misc-ops`）。
+   - 下次 review 要问：`guard:` 锚是否带 rule 覆盖判据；`mutate-check` 是否覆盖本次新增常量（`kChoiceCapacity`、`kTextLayerFallbackBase`、位 16、停止请求 3）。
+
+4. **门禁与台账（干净树红）**
+   - 判据：`pnpm test` 1109/1、`requirements validate` 5/6；两个新缺陷单的 `repro` 指向 `.gitignore` 的 `.tmp`；
+     交接单写“1110 通过 / 0 失败”“6/6”；`screens.json` 的 `evidence.command` 写死 `E:\Games\…`，同目录 md 明令禁止。
+   - 本次处置（同日清理）：两条缺陷单的 `repro` 改成 `docs/02-engine/repro/*.md#观测点`；`screens.json` 的
+     `evidence.command` 用 `$AMAYUI_INSTALL`；新增 `evidence-command-portable` 不变量。干净树门禁已转绿
+     （`pnpm test` 1113/0、`requirements validate` 6/6）。
+   - 下次 review 要问：干净 clone 上 `pnpm test` 是否必红；交接单数字是否由工具现算而不是手写。
+
+**下次 review 的总问题**：先按 `.lst` 裁决“正文 vs 绑定 vs 实现”的三方冲突，再谈补守卫；
+在 P0 裁决前，`spec validate` 全绿**不能**作为本轮的收口证据。

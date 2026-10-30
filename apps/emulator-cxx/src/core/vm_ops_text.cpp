@@ -220,6 +220,7 @@ bool Machine::ensure_text_layer_texture(int slot) {
         entry.slot.revision = next_texture_revision(id);
         text_layer_state_[static_cast<std::size_t>(slot)].cursor_x = rec.f1c;
         text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
+        scene_dirty_ = true;  // 画布被建 / 重建
     }
     text_layer_state_[static_cast<std::size_t>(slot)].texture_ready = true;
     return true;
@@ -228,7 +229,7 @@ bool Machine::ensure_text_layer_texture(int slot) {
 void Machine::create_text_layer_item(int slot, int left, int top, int right, int bottom) {
     if (slot < 0 || slot >= 10) return;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
-    if (rec.f68 <= 0) return;
+    if (!rec.key_base_set) return;  // 脚本没给键基数 ⇒ 不建条目（宿主兜底在 `0x70` 里）
     const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
     const TextureSlotObject* texture = texture_slot(id);
     if (texture == nullptr) return;
@@ -251,18 +252,20 @@ void Machine::create_text_layer_item(int slot, int left, int top, int right, int
     item.aux[2] = 0.0f;
     item.color = 0xFFFFFFFFu;
     item.target_color = 0xFFFFFFFFu;
+    scene_dirty_ = true;  // 新绘制条目 ⇒ 下一次渲染步必须重画
 }
 
 void Machine::erase_text_layer_draw_items(int slot) {
     if (slot < 0 || slot >= 10) return;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
-    if (rec.f68 > 0) {
+    if (rec.key_base_set) {
         for (std::int32_t i = 0; i < state.draw_index; ++i) {
             draw_items_.erase(static_cast<std::uint32_t>(rec.f68) + static_cast<std::uint32_t>(i));
         }
     }
     state.draw_index = 0;
+    scene_dirty_ = true;  // 条目被移除 ⇒ 下一次渲染步必须重画
 }
 
 void Machine::clear_text_layer(int slot) {
@@ -437,6 +440,7 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
         }
     }
     if (TextureEntry* entry = texture_mut(id)) entry->slot.revision++;
+    scene_dirty_ = true;  // 文本层画布（含振り仮名）变了
 }
 
 void Machine::erase_pending_glyphs(int slot) {
@@ -462,6 +466,7 @@ void Machine::draw_front_pending_glyph() {
         if (!error.empty()) report_error(error);
     }
     if (TextureEntry* entry = texture_mut(text_layer_texture_id(slot))) entry->slot.revision++;
+    scene_dirty_ = true;  // 画布像素变了 ⇒ 下一次渲染步必须重画
 }
 
 void Machine::drain_pending_glyphs() {
@@ -706,6 +711,10 @@ void Machine::op_6e(const Instruction& instruction) {
     current_text_slot_ = requested;
     text_windows_[slot].text += text;
     draw_text_layer_text(slot, text, std::string());
+    // ★ 成功追加时置消息臂位的第 16 位（引擎 `0x41EB7D`：`or [esi+77A04h], 10000h`；只在
+    //   `0x304` 已把臂位第 0 位置起的支路里做）。`0x305` 的「武装」= 位 0 与位 16 同时成立。
+    //   ⛔ 不置它 ⇒ `0x305` 的整段块结束逻辑永远是死代码。
+    if ((msg_arm_ & 1) != 0) msg_arm_ |= 0x10000;
     begin_text_typing_or_drain();
     return;
 }
@@ -739,6 +748,8 @@ void Machine::op_196(const Instruction& instruction) {
     window.text += text;
     window.rubi = rubi.size() > 1023 ? rubi.substr(0, 1023) : rubi;
     draw_text_layer_text(slot, text, window.rubi);
+    // ★ 与 `0x6e` 同一条：成功追加时置消息臂位第 16 位（引擎 `0x41FCD8`）。
+    if ((msg_arm_ & 1) != 0) msg_arm_ |= 0x10000;
     begin_text_typing_or_drain();
     return;
 }
@@ -844,13 +855,17 @@ void Machine::op_7a(const Instruction& instruction) {
     // 写文本 run 头的两个整数（0x7a / `sub_41F4E0` → `sub_45A910`，argc 3、推进 7；
     // 规则 `CORE-OPS-TEXT-RUN-HEADER-7A`）：第 1 个 = 文本槽（0 ⇒ 落默认槽），第 2 / 3 个原样写进
     // 该槽 run 头的两格（引擎里是"写指针之前 20 / 16 字节"那两格）。读序 **3 → 2 → 1**。
+    // ★ `op1 == 0` 与其他文本指令同义：换成**默认槽**（`sub_45A910` 的 `[ecx+4CCh]`），
+    //   ⛔ 不是"落到第 0 槽"。
     // ★ 消费者（把这些整数变成绘制请求那一段）未建模 ⇒ 本模型只保存值（残差）。
     write_length(7);
     const auto third = read_int(ops[2]);
     const auto second = read_int(ops[1]);
     const auto slot = read_int(ops[0]);
-    const auto resolved = slot == 0 ? 0 : slot;  // 0 = 默认槽（本模型把默认槽记为 0）
-    if (resolved < 0 || resolved >= static_cast<int>(run_header_.size())) return;
+    const int resolved = resolve_text_layer(slot);
+    if (resolved < 0 || resolved >= static_cast<int>(run_header_.size())) {
+        throw CoreError("text-layer-slot-out-of-range:" + std::to_string(slot));
+    }
     run_header_[static_cast<std::size_t>(resolved)] = RunHeader{second, third};
     return;
 }
@@ -872,11 +887,20 @@ void Machine::op_20a(const Instruction& instruction) {
     // 立即重绘一个文本层（0x20a / `sub_423620`，argc 1、推进 3；规则 `CORE-OPS-TEXT-REDRAW-20A`）：
     // 第 1 个操作数 = 层号（0 ⇒ 默认层）。把该层**已揭示的格**贴到画布上；随后若门字第 30 位置起，
     // 还会**再读一次**层号并补画一个延迟格。
-    // ★ 本模型的画布绘制在"追加 / 揭示"时就做了 ⇒ 这里只把场景标脏（下一次渲染步重画）+ 记层号。
+    // ★ 本模型的画布绘制在"追加 / 揭示"时就做了 ⇒ 贴已揭示格不再逐格重放；但仍要标脏让下一次
+    //   渲染步重画这一层。
     write_length(3);
     const auto layer = read_int(ops[0]);
-    (void)layer;
-    scene_dirty_ = true;
+    const int slot = resolve_text_layer(layer);
+    if (slot >= 0 && slot < 10) scene_dirty_ = true;
+    // ★ 门字第 30 位置起 ⇒ **再读一次**层号并补画一个延迟格（该格随即被清）。
+    if ((state_flags_ & (1u << 30)) != 0) {
+        (void)read_int(ops[0]);
+        if (!pending_glyphs_.empty()) {
+            draw_front_pending_glyph();
+            scene_dirty_ = true;
+        }
+    }
     return;
 }
 
@@ -910,17 +934,21 @@ void Machine::op_304(const Instruction& instruction) {
     write_length(1);
     msg_arm_ = 1;
     const int slot = resolve_text_layer(current_text_slot_);
-    msg_saved_cursor_ = slot < 0 ? 0 : static_cast<std::int32_t>(text_layer_revealed(static_cast<std::size_t>(slot)));
+    msg_saved_cursor_ =
+        (slot < 0 || slot >= 10) ? 0
+                                 : static_cast<std::int32_t>(text_layer_revealed(static_cast<std::size_t>(slot)));
     return;
 }
 
 void Machine::op_305(const Instruction& instruction) {
     (void)instruction;
     // 消息块结束（0x305 / `sub_41B1C0`，argc 0、推进 1；规则 `CORE-OPS-MSG-BLOCK-304-305`）：
-    // 门 = 消息臂位的第 0 位 **且** 第 16 位（第 16 位由 `0x6e` 成功追加时置）。
+    // 门 = 消息臂位的第 0 位 **且** 第 16 位（第 16 位由 `0x6e` / `0x196` 成功追加时置）。
     // 未武装 ⇒ 只清臂位、什么都不做。武装 ⇒ ① 揭示游标回卷到块开头；② 读 `message:ReadTextSkip`，
     // 非 0 且"已读"命中时置门字第 27 位；③ 揭示该层**全部**格（引擎是在这里自旋到"揭示完"）；
-    // ④ 写消息等待三格 **(0, 0, 1)**；⑤ 三条出口都清臂位。
+    // ④ 写消息等待三格（最终 (1,0,0)；引擎写序 0 / 0 / 1）；⑤ 三条出口都清臂位。
+    // ★ 本模型没有"已读表"（残差 `RES-MSG-BLOCK-READ-HIT`）⇒ ② 的两个条件只实现第一个；
+    //   ⛔ 不许因此把 bit27 置起：模型里它没有服务者，会让主循环 gate-stalled。
     write_length(1);
     const bool armed = (msg_arm_ & 1) != 0 && (msg_arm_ & 0x10000) != 0;
     if (!armed) {
@@ -928,16 +956,15 @@ void Machine::op_305(const Instruction& instruction) {
         return;
     }
     const int slot = resolve_text_layer(current_text_slot_);
-    if (slot >= 0) {
-        reveal_text_layer_to(static_cast<std::size_t>(slot), static_cast<std::size_t>(msg_saved_cursor_));
+    if (slot >= 0 && slot < 10) {
+        const auto saved = msg_saved_cursor_ < 0 ? std::size_t{0}
+                                                 : static_cast<std::size_t>(msg_saved_cursor_);
+        reveal_text_layer_to(static_cast<std::size_t>(slot), saved);
         reveal_all_text_layer_cells(slot);
     }
-    if (config_.get_int("message:ReadTextSkip") != 0) {
-        state_flags_ |= (1u << 27);  // "本块按已读跳过"（引擎同一位置）
-    }
+    msg_wait_a_ = 1;
     msg_wait_b_ = 0;
     msg_wait_c_ = 0;
-    msg_wait_a_ = 1;  // 写序 (0, 0, 1)
     msg_arm_ = 0;
     return;
 }

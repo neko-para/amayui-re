@@ -208,8 +208,8 @@ void Machine::op_1fb(const Instruction& instruction) {
     DrawItem& item = draw_items_[key];
     item.flags |= 1u;
     item.texture_id = static_cast<std::uint32_t>(read_int(ops[1]));
-    // ★ 引擎里  x1fb 是**场景对象记录**的建记录者：置记录首字第 0 位、并把第 2 个操作数写进
-    //   记录的整数标签（ x215 读它； x220 的门也看这个位）。本模型把同一动作同时记在记录上。
+    // ★ 引擎里 0x1fb 是**场景对象记录**的建记录者：置记录首字第 0 位、并把第 2 个操作数写进
+    //   记录的整数标签（0x215 读它；0x220 的门也看这个位）。本模型把同一动作同时记在记录上。
     SceneRecord& record = scene_records_[key];
     record.flags |= 1;
     record.tag = static_cast<std::int32_t>(item.texture_id);
@@ -220,6 +220,11 @@ void Machine::op_1fb(const Instruction& instruction) {
     item.aux[0] = static_cast<float>(read_int(ops[6]));
     item.aux[1] = static_cast<float>(read_int(ops[7]));
     item.aux[2] = 0.0f;
+    // ★ 引擎的 `+0x24..+0x2C`（第二三元向量）在 0x1fb 里也写这三个数；`0x21a` 读的就是它。
+    //   模型里 0x219 写 vec2，这里必须同步，否则 `0x1fb → 0x21a` 读回 0。
+    record.vec2[0] = item.aux[0];
+    record.vec2[1] = item.aux[1];
+    record.vec2[2] = item.aux[2];
     return;
 }
 
@@ -229,11 +234,12 @@ void Machine::op_258(const Instruction& instruction) {
     // 按编号定位两张表（活动表 + 快照）的同一项，把第 1 格 ← 掩码第 0 位、第 2 格 ← 掩码第 1 位；
     // **两张表同值**（⛔ 不是"一张存位 0、另一张存位 1"），掩码高位一律不看。
     // ★ 本模型只建活动表（快照是存档侧；见残差）⇒ 写一张表。
-    // ★ 读序 1 → 2；编号**不做**范围检查（引擎的索引没有比较，越界写落到快照表）——
-    //   本版只规定 0..999，越界按本仓口径**响亮失败**（与 `0x216` 同一条策略）。
+    // ★ 读序 **2 → 1**（`sub_425D20`：`0x425D3D push 2` 先读位掩码、`0x425D4B push 1` 后读编号）。
+    //   编号**不做**范围检查（引擎的索引没有比较，越界写落到快照表）——本版只规定 0..999，
+    //   越界按本仓口径**响亮失败**（与 `0x216` 同一条策略）。
     write_length(5);
-    const auto index = read_int(ops[0]);
     const auto mask = read_int(ops[1]);
+    const auto index = read_int(ops[0]);
     if (index < 0 || index >= 1000) throw CoreError("scene-table-index-out-of-range:" + std::to_string(index));
     TextureRecord& record = texture_entry(static_cast<std::uint32_t>(index)).record;
     record.flag0 = (mask & 1) != 0 ? 1 : 0;
@@ -478,9 +484,10 @@ void Machine::op_217(const Instruction& instruction) {
     // 写第一三元向量（CORE-OPS-SCENE3D-SET-VEC1）：读序 2 → 3 → 4 → 1（三个浮点先读，编号最后读）。
     // ★ 没有「对象已存在」门：编号不存在 ⇒ 先建一条默认记录再照写；编号不做范围检查。
     // ⛔ 写的只是**第一**组三个浮点；第二组由 `0x219` 写（不许合并）。
-    const double z = read_float(ops[3]);
-    const double y = read_float(ops[2]);
+    // 读序 2 → 3 → 4 → 1（`.lst` `sub_423B30`：先 2、再 3、再 4）。
     const double x = read_float(ops[1]);
+    const double y = read_float(ops[2]);
+    const double z = read_float(ops[3]);
     SceneRecord& record = scene_records_[static_cast<std::uint32_t>(read_int(ops[0]))];
     record.vec1[0] = static_cast<float>(x);
     record.vec1[1] = static_cast<float>(y);
@@ -497,22 +504,32 @@ void Machine::op_220(const Instruction& instruction) {
     // 读序 **4 → 5 → 6 → 3 → 2 → 1**（三个浮点先读、再三个整数、编号最后）。
     // ★ 门在「建记录」之后：位 0 为 0 ⇒ 只留下默认记录、一个字段都不写（⛔ 不是「什么都不做」）。
     // ★ 位 1 与 `0x202` 的「有窗」是同一位；G0/G3 与窗起点 / 配置格同格（见规范）。
-    const double z = read_float(ops[5]);
-    const double y = read_float(ops[4]);
+    // 读序 4 → 5 → 6 → 3 → 2 → 1（`.lst` 0x423E01 / 0x423E0D / 0x423E19 / 0x423E3E / 0x423E46 / 0x423E50）。
     const double x = read_float(ops[3]);
-    const auto second = read_int(ops[2]);
-    const auto third = read_int(ops[1]);
+    const double y = read_float(ops[4]);
+    const double z = read_float(ops[5]);
+    const auto g2 = read_int(ops[2]);   // 第 3 个操作数
+    const auto g1 = read_int(ops[1]);   // 第 2 个操作数
     const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
     SceneRecord& record = scene_records_[key];
     if ((record.flags & 1) == 0) return;  // 只建记录，不写字段
     record.flags |= 2;                    // 位 1 = 已配置（与 0x202 的「有窗」同一位）
     record.g[0] = 0;
-    record.g[1] = second;
-    record.g[2] = third;
+    record.g[1] = g1;
+    record.g[2] = g2;
     record.g[3] = 1;
     record.translate4[0] = static_cast<float>(x);
     record.translate4[1] = static_cast<float>(y);
     record.translate4[2] = static_cast<float>(z);
+    // ★ 位 1 与 `0x202` 的「有窗」同一位、G0 与窗起点同格、G3 与 `0x21e/21f` 的配置格同格；
+    //   这些格的**消费者读 `DrawItem`**（`scene_raster.cpp:437`）⇒ 必须同步到 DrawItem，
+    //   ⛔ 只写 `SceneRecord` 会让 0x220 的窗完全不可见。
+    DrawItem& item = draw_item_or_create(key);
+    item.flags |= 2u;
+    item.window_start = 0;
+    item.config_g3 = 1;
+    item.set21e_int0 = g1;
+    item.set21e_int1 = g2;
     scene_dirty_ = true;
     scene_animating_ = true;
     return;
@@ -521,13 +538,20 @@ void Machine::op_219(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 写第二三元向量（CORE-OPS-SCENE3D-SET-VEC2）：与 0x217 同形（读序 2 → 3 → 4 → 1、查不到先建、编号不检查），
     // 但写的是记录的**第二组**三个浮点格；⛔ 不许与 0x217 合并（两条写不同的格）。
-    const double z = read_float(ops[3]);
-    const double y = read_float(ops[2]);
+    // 读序 2 → 3 → 4 → 1（`.lst` 0x423BC1 / 0x423BCD / 0x423BD9）。
     const double x = read_float(ops[1]);
-    SceneRecord& record = scene_records_[static_cast<std::uint32_t>(read_int(ops[0]))];
+    const double y = read_float(ops[2]);
+    const double z = read_float(ops[3]);
+    const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+    SceneRecord& record = scene_records_[key];
     record.vec2[0] = static_cast<float>(x);
     record.vec2[1] = static_cast<float>(y);
     record.vec2[2] = static_cast<float>(z);
+    // ★ 引擎的 `+0x24..+0x2C` 与 0x1fb 写的是同一组；渲染读 `DrawItem.aux` ⇒ 两半必须同步。
+    DrawItem& item = draw_item_or_create(key);
+    item.aux[0] = static_cast<float>(x);
+    item.aux[1] = static_cast<float>(y);
+    item.aux[2] = static_cast<float>(z);
     scene_dirty_ = true;
     return;
 }
@@ -773,6 +797,12 @@ void Machine::op_72(const Instruction& instruction) {
     // ★ 本条**不靠把推进格数改回 0**；长度字照写 3，放行后从**下一条**继续。
     write_length(3);
     const auto slot = read_int(ops[0]);
+    // ★ 槽号越界是未定义行为；本仓口径是**响亮失败**（与 `0x216` / `0x258` 同一条策略），
+    //   ⛔ 不许让它落进 `std::array<TextLayerState,10>` 的越界索引（0x304/0x305 会立刻用它取层）。
+    const int resolved = resolve_text_layer(slot);
+    if (resolved < 0 || resolved >= 10) {
+        throw CoreError("text-layer-slot-out-of-range:" + std::to_string(slot));
+    }
     current_text_slot_ = slot;
     state_flags_ |= (1u << 31);
     state_flags_ |= (1u << 30);

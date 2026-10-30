@@ -170,6 +170,19 @@ add_test(NAME emulator-core-adv-choice-window COMMAND emulator-core-selftest --o
 add_test(NAME emulator-core-voice-all-stop COMMAND emulator-core-selftest --only-voice-all-stop)
 # ★ 0x1b1 / 0x238 / 0x32a / 0x32d：写固定格 / 清两格 / 销毁效果槽 / 场景颜色请求（透明度夹 255、每次执行都发）。
 add_test(NAME emulator-core-misc-cells COMMAND emulator-core-selftest --only-misc-cells)
+# ★ `0x214`（场景记录的交换 / 搬运）：两个键都有记录 ⇒ **交换**；只有一个 ⇒ 搬到另一边；两个都没有 ⇒
+#   不建记录但**仍标脏**（引擎三条出口都写 B5AC←1）。读序 2→1（0x423AFB push 2 先读）。退回"只搬 SceneRecord
+#   或只搬一边" ⇒ 本条红。
+add_test(NAME emulator-core-scene-relocate COMMAND emulator-core-selftest --only-scene-relocate)
+# ★ `0x304` / `0x305`（消息块）：`0x6e` / `0x196` 成功追加时置臂位第 16 位（0x41EB7D / 0x41FCD8）；武装后
+#   0x305 回卷到块开头、揭示全部、写等待三格 (1,0,0)、清臂位；未武装 / 空串只清臂位。不置 bit16 ⇒ 本条红。
+add_test(NAME emulator-core-msg-block COMMAND emulator-core-selftest --only-msg-block)
+# ★ `0x1fb` / `0x219` / `0x220` / `0x242`（场景记录的两半）：引擎的 +0x24..+0x2C / 窗位 / +0x2D0 在模型里
+#   被拆成 SceneRecord 与 DrawItem；消费者读 DrawItem。只写一半 ⇒ 本条红（窗不生效 / 0x21a 读回 0）。
+add_test(NAME emulator-core-scene-records COMMAND emulator-core-selftest --only-scene-records)
+# ★ 0x193 字符串拼接 / 0x2e9 固定格 / 0x2f7 语音选项格 / 0x32 纹理缩放拷贝 / 0x10a 光标请求 / 0x20a 重绘：
+#   复审点名的零 CTest opcode 各一条最小行为断言。
+add_test(NAME emulator-core-misc-ops COMMAND emulator-core-selftest --only-misc-ops)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)

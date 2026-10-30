@@ -103,6 +103,8 @@ struct ListRecord {
     std::int32_t f64 = 0;
     std::int32_t f68 = 0;
     std::int32_t f6c = 0;
+    // `0x213` 是否写过键基数：0 是**合法值**，不能用 `f68 <= 0` 当"没写过"。
+    bool key_base_set = false;
     std::int32_t f114 = 0;
     std::int32_t f118 = 0;
     std::int32_t f120 = 0;
@@ -150,6 +152,8 @@ struct SceneRecord {
     std::int32_t flags = 0;
     // `0x1fb` / `0x23b` 在**建记录时**写的那一个整数标签（引擎 payload+4；`0x215` 读它）。
     std::int32_t tag = 0;
+    // `0x242` 写的第一处（引擎容器 `+0x408` 的记录里 `+0x2D0`）；与 `tag`（`+0x4`）**不是同一格**。
+    std::int32_t field_2d0 = 0;
     // `0x256` 给一段键区间内的记录写的：一个标志字 + 一个平移矩阵的三个分量。
     std::int32_t flag_256 = 0;
     float matrix_translate[3]{};
@@ -460,7 +464,7 @@ public:
     std::int32_t scalar_88a() const { return scalar_88a_; }
     std::int32_t scalar_88b() const { return scalar_88b_; }
     std::int32_t scalar_88c() const { return scalar_88c_; }
-    std::int32_t named_message_read_text_skip() const { return named_message_read_text_skip_; }
+    std::int32_t named_message_read_text_skip() const { return config_.get_int("message:ReadTextSkip"); }
     const ListRecord& list_record(std::size_t group) const { return list_records_[group]; }
     std::int32_t default_group() const { return default_group_; }
     std::int32_t scalar_d107656() const { return scalar_d107656_; }
@@ -621,6 +625,8 @@ public:
     const std::vector<ChoiceEntry>& choices() const { return choices_; }
     std::int32_t choice_index() const { return choice_index_; }
     const ChoiceWindowState& choice_window() const { return choice_window_; }
+    // 守卫用：摆一个非 -1 的兜底目标，验证 `0x93` 清表**不**复位它（引擎 `[0CA84h]` 不在这 7 格内）。
+    void set_choice_fallback(std::int32_t value) { choice_window_.fallback = value; }
     // `0x32d` 发过的「场景颜色」请求（命令 0x8B）；`0x32a` 销毁过的子对象槽。
     const SceneColorRequest& scene_color_request() const { return scene_color_request_; }
     // `0x1b1` 写的那格（领域名未取证；ADV 脚本开头用它设一个整数档）。
@@ -637,9 +643,9 @@ public:
     std::size_t cursor_requests() const { return cursor_requests_; }
     bool advance_waiting() const { return (state_flags_ & (1u << 31)) != 0; }
     void set_voice_option_2f7(std::size_t i, std::int32_t value) { if (i < 3) voice_option_2f7_[i] = value; }
-    // `0x238` 写的两格：第 1 格清 0、第 2 格 ← 操作数（`5500` 这种毫秒量）。
-    std::int32_t cell_238_left() const { return cell_238_left_; }
-    std::int32_t cell_238_value() const { return cell_238_value_; }
+    // `0x238` 写的两格就是**消息等待三格**的 B / C（见 `msg_wait`）；A 不动。
+    std::int32_t cell_238_left() const { return msg_wait_b_; }
+    std::int32_t cell_238_value() const { return msg_wait_c_; }
     // `0x215` 的观察口 / 测试钩子。
     bool scene_keyed_record(std::int32_t key, std::int32_t& flags, std::int32_t& value) const {
         const auto it = scene_records_.find(static_cast<std::uint32_t>(key));
@@ -647,6 +653,10 @@ public:
         flags = it->second.flags;
         value = it->second.tag;
         return true;
+    }
+    std::int32_t scene_record_2d0(std::int32_t key) const {
+        const auto it = scene_records_.find(static_cast<std::uint32_t>(key));
+        return it == scene_records_.end() ? 0 : it->second.field_2d0;
     }
     bool scene_record_translate(std::int32_t key, float out[3]) const {
         const auto it = scene_records_.find(static_cast<std::uint32_t>(key));
@@ -1204,7 +1214,6 @@ private:
     std::int32_t scalar_88a_ = 0;
     std::int32_t scalar_88b_ = 0;
     std::int32_t scalar_88c_ = 0;
-    std::int32_t named_message_read_text_skip_ = 0;
     // （`a1`/`a2`/`a3`）「文本键 → 整数」命名表；`a1` 清空、`a2` 写、`a3` 按键分派。
     std::unordered_map<std::string, std::int32_t> named_table_;
     // （`1cf` / `1bf`）状态字与它的相邻格 —— ⛔ 与门字 `state_flags_` 是**不同**的引擎格。
@@ -1510,8 +1519,6 @@ private:
     std::int32_t cell_1b1_ = 0;
     std::int32_t cell_2e9_ = 0;
     // `0x238` 写的两格（第 1 格清 0、第 2 格 ← 操作数）。
-    std::int32_t cell_238_left_ = 0;
-    std::int32_t cell_238_value_ = 0;
     std::map<std::uint32_t, SceneCommandRecord> scene_commands_;
     std::uint32_t render_now_ms_ = 0;
     bool command_animating_ = false;

@@ -4,7 +4,7 @@
 - type: bug
 - status: open
 - parent: REQ-01M5BK8QMQYK7XQG707YVMQ202
-- repro: .tmp/adv/bmp5/frame-0700.bmp
+- repro: docs/02-engine/repro/adv-centered-narration.md#观测点
 - tags: [emulator-cxx, adv, text]
 
 ## 现象

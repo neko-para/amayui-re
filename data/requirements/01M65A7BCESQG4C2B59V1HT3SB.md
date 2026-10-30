@@ -4,7 +4,7 @@
 - type: bug
 - status: open
 - parent: REQ-01M5BK8QMQYK7XQG707YVMQ202
-- repro: .tmp/adv/bmp6/frame-1500.bmp
+- repro: docs/02-engine/repro/adv-title-card-position.md#观测点
 - tags: [emulator-cxx, adv, render]
 
 ## 现象（两处，同一帧里都看得见）
