@@ -208,6 +208,11 @@ void Machine::op_1fb(const Instruction& instruction) {
     DrawItem& item = draw_items_[key];
     item.flags |= 1u;
     item.texture_id = static_cast<std::uint32_t>(read_int(ops[1]));
+    // ★ 引擎里  x1fb 是**场景对象记录**的建记录者：置记录首字第 0 位、并把第 2 个操作数写进
+    //   记录的整数标签（ x215 读它； x220 的门也看这个位）。本模型把同一动作同时记在记录上。
+    SceneRecord& record = scene_records_[key];
+    record.flags |= 1;
+    record.tag = static_cast<std::int32_t>(item.texture_id);
     item.left = left;
     item.top = top;
     item.right = left + width;
@@ -215,6 +220,37 @@ void Machine::op_1fb(const Instruction& instruction) {
     item.aux[0] = static_cast<float>(read_int(ops[6]));
     item.aux[1] = static_cast<float>(read_int(ops[7]));
     item.aux[2] = 0.0f;
+    return;
+}
+
+void Machine::op_258(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 1000 项表的**两项标志**（0x258 / `sub_425D20`，argc 2、推进 5；规则 `CORE-OPS-SCENE-TABLE-FLAGS`）：
+    // 按编号定位两张表（活动表 + 快照）的同一项，把第 1 格 ← 掩码第 0 位、第 2 格 ← 掩码第 1 位；
+    // **两张表同值**（⛔ 不是"一张存位 0、另一张存位 1"），掩码高位一律不看。
+    // ★ 本模型只建活动表（快照是存档侧；见残差）⇒ 写一张表。
+    // ★ 读序 1 → 2；编号**不做**范围检查（引擎的索引没有比较，越界写落到快照表）——
+    //   本版只规定 0..999，越界按本仓口径**响亮失败**（与 `0x216` 同一条策略）。
+    write_length(5);
+    const auto index = read_int(ops[0]);
+    const auto mask = read_int(ops[1]);
+    if (index < 0 || index >= 1000) throw CoreError("scene-table-index-out-of-range:" + std::to_string(index));
+    TextureRecord& record = texture_entry(static_cast<std::uint32_t>(index)).record;
+    record.flag0 = (mask & 1) != 0 ? 1 : 0;
+    record.flag1 = (mask & 2) != 0 ? 1 : 0;
+    return;
+}
+
+void Machine::op_259(const Instruction& instruction) {
+    (void)instruction;
+    // 1000 项表**全清两项标志**（0x259 / `sub_41A3A0`，argc 0、推进 1；规则 `CORE-OPS-SCENE-TABLE-FLAGS`）：
+    // 把两张表全部 1000 项的这两格清 0，**其它字段一格不碰**；不调任何函数、不置脏。
+    write_length(1);
+    for (auto& [id, entry] : textures_) {
+        if (id >= 1000u) continue;  // 表只有 0..999 这 1000 项
+        entry.record.flag0 = 0;
+        entry.record.flag1 = 0;
+    }
     return;
 }
 
@@ -453,6 +489,48 @@ void Machine::op_217(const Instruction& instruction) {
     return;
 }
 
+
+
+void Machine::op_220(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 场景对象：写变换（平移 + 两个整数 + 标志）（0x220 / CORE-OPS-SCENE3D-SET-TRANSFORM，argc 6、推进 13）。
+    // 读序 **4 → 5 → 6 → 3 → 2 → 1**（三个浮点先读、再三个整数、编号最后）。
+    // ★ 门在「建记录」之后：位 0 为 0 ⇒ 只留下默认记录、一个字段都不写（⛔ 不是「什么都不做」）。
+    // ★ 位 1 与 `0x202` 的「有窗」是同一位；G0/G3 与窗起点 / 配置格同格（见规范）。
+    const double z = read_float(ops[5]);
+    const double y = read_float(ops[4]);
+    const double x = read_float(ops[3]);
+    const auto second = read_int(ops[2]);
+    const auto third = read_int(ops[1]);
+    const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
+    SceneRecord& record = scene_records_[key];
+    if ((record.flags & 1) == 0) return;  // 只建记录，不写字段
+    record.flags |= 2;                    // 位 1 = 已配置（与 0x202 的「有窗」同一位）
+    record.g[0] = 0;
+    record.g[1] = second;
+    record.g[2] = third;
+    record.g[3] = 1;
+    record.translate4[0] = static_cast<float>(x);
+    record.translate4[1] = static_cast<float>(y);
+    record.translate4[2] = static_cast<float>(z);
+    scene_dirty_ = true;
+    scene_animating_ = true;
+    return;
+}
+void Machine::op_219(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写第二三元向量（CORE-OPS-SCENE3D-SET-VEC2）：与 0x217 同形（读序 2 → 3 → 4 → 1、查不到先建、编号不检查），
+    // 但写的是记录的**第二组**三个浮点格；⛔ 不许与 0x217 合并（两条写不同的格）。
+    const double z = read_float(ops[3]);
+    const double y = read_float(ops[2]);
+    const double x = read_float(ops[1]);
+    SceneRecord& record = scene_records_[static_cast<std::uint32_t>(read_int(ops[0]))];
+    record.vec2[0] = static_cast<float>(x);
+    record.vec2[1] = static_cast<float>(y);
+    record.vec2[2] = static_cast<float>(z);
+    scene_dirty_ = true;
+    return;
+}
 void Machine::op_218(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 取第一三元向量（CORE-OPS-SCENE3D-GET-VEC1）：**只查不建**；查不到三个输出都写 0。
@@ -624,4 +702,104 @@ void Machine::op_21f(const Instruction& instruction) {
     return;
 }
 
+
+void Machine::op_32(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 纹理缩放拷贝（0x32 / `sub_41E2D0`，argc 10、推进 21；规则 `CORE-OPS-TEXTURE-STRETCH-32`）。
+    // 角色：1 = **源**纹理 id、2 = **目标**纹理 id；3..6 = 源矩形 (x, y, 宽, 高)；7..10 = 目标矩形 (x, y, 宽, 高)。
+    // 读序：先 3..10（预算矩形），再 1 / 2。源或目标纹理不存在 ⇒ **只记错误、不抛**（引擎同一支）。
+    write_length(21);
+    const auto src_x = read_int(ops[2]);
+    const auto src_y = read_int(ops[3]);
+    const auto src_w = read_int(ops[4]);
+    const auto src_h = read_int(ops[5]);
+    const auto dst_x = read_int(ops[6]);
+    const auto dst_y = read_int(ops[7]);
+    const auto dst_w = read_int(ops[8]);
+    const auto dst_h = read_int(ops[9]);
+    const auto src_id = static_cast<std::uint32_t>(read_int(ops[0]));
+    const auto dst_id = static_cast<std::uint32_t>(read_int(ops[1]));
+    const TextureSlotObject* source = texture_slot(src_id);
+    TextureEntry* target = texture_mut(dst_id);
+    if (source == nullptr || source->width == 0 || source->height == 0) {
+        report_error("texture-stretch-no-source");
+        return;
+    }
+    if (target == nullptr || target->slot.width == 0 || target->slot.height == 0) {
+        report_error("texture-stretch-no-target");
+        return;
+    }
+    if (dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) return;
+    // 目标矩形的四条边夹进目标纹理；源矩形夹进源纹理（引擎用两块纹理各自的裁剪字段）。
+    const int left = std::max(0, dst_x);
+    const int top = std::max(0, dst_y);
+    const int right = std::min(static_cast<int>(target->slot.width), dst_x + dst_w);
+    const int bottom = std::min(static_cast<int>(target->slot.height), dst_y + dst_h);
+    if (right <= left || bottom <= top) return;
+    std::vector<std::uint8_t> canvas = target->slot.rgba;
+    const int sx0 = std::max(0, src_x);
+    const int sy0 = std::max(0, src_y);
+    const int sx1 = std::min(static_cast<int>(source->width), src_x + src_w);
+    const int sy1 = std::min(static_cast<int>(source->height), src_y + src_h);
+    const int span_x = std::max(0, sx1 - sx0);
+    const int span_y = std::max(0, sy1 - sy0);
+    if (span_x == 0 || span_y == 0) return;
+    const int dest_w = right - left;
+    const int dest_h = bottom - top;
+    for (int oy = 0; oy < dest_h; ++oy) {
+        const int sy = sy0 + (oy * span_y) / dest_h;
+        for (int ox = 0; ox < dest_w; ++ox) {
+            const int sx = sx0 + (ox * span_x) / dest_w;
+            const std::size_t from = (static_cast<std::size_t>(sy) * source->width + sx) * 4u;
+            const std::size_t to = (static_cast<std::size_t>(top + oy) * target->slot.width + (left + ox)) * 4u;
+            if (from + 3 >= source->rgba.size() || to + 3 >= canvas.size()) continue;
+            canvas[to + 0] = source->rgba[from + 0];
+            canvas[to + 1] = source->rgba[from + 1];
+            canvas[to + 2] = source->rgba[from + 2];
+            canvas[to + 3] = source->rgba[from + 3];
+        }
+    }
+    target->slot.rgba = std::move(canvas);
+    target->slot.revision = next_texture_revision(dst_id);
+    target->record.non_file = true;
+    return;
+}
+
+void Machine::op_72(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 等玩家推进（0x72 / `sub_41EEF0`，argc 1、推进 3；规则 `CORE-OPS-MSG-WAIT-INPUT-72`）：
+    // 第 1 个操作数 = **消息槽**（0 = 默认槽）。本条把"等推进"位置起（门字第 31 位）⇒ 本拍之后
+    // **一条指令都不派发**，直到输入（左键 / skip）或自动消息计时器放行。
+    // ★ 本条**不靠把推进格数改回 0**；长度字照写 3，放行后从**下一条**继续。
+    write_length(3);
+    const auto slot = read_int(ops[0]);
+    current_text_slot_ = slot;
+    state_flags_ |= (1u << 31);
+    state_flags_ |= (1u << 30);
+    return;
+}
+
+void Machine::service_advance_wait() {
+    // 0x72 的放行：等推进位置起时，左键（或"跳过"位）一到就清位（引擎在消息输入处理里清）。
+    if ((state_flags_ & (1u << 31)) == 0) return;
+    std::int32_t mask = 0;
+    const bool have = mouse_button_source_ && mouse_button_source_(mask);
+    const bool skip = (state_flags_ & (1u << 27)) != 0;  // 读跳过 ⇒ 直接放行
+    if ((have && (mask & 1) != 0) || skip) {
+        state_flags_ &= ~(1u << 31);
+        state_flags_ &= ~(1u << 30);
+    }
+}
+
+void Machine::op_10a(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 光标瞬移（0x10a / `sub_421EA0`，argc 2、推进 5；规则 `CORE-OPS-INPUT-SET-CURSOR-10A`）：
+    // 两个操作数是**虚拟屏坐标**；引擎把它换算成客户区 / 屏幕坐标后调平台 SetCursorPos。
+    // ★ 换算是平台边界（窗口句柄、缩放、ClientToScreen）⇒ 本模型只记请求，不改引擎状态。
+    write_length(5);
+    cursor_request_x_ = read_int(ops[0]);
+    cursor_request_y_ = read_int(ops[1]);
+    cursor_requests_ += 1;
+    return;
+}
 }  // namespace core

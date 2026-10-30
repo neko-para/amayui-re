@@ -172,8 +172,16 @@ bool draw_item(Machine& machine, std::uint32_t key, Surface& target, std::uint32
     const int sy1 = std::min(static_cast<int>(texture->height), bottom);
     if (sx1 <= sx0 || sy1 <= sy0) return false;
 
-    const int dx = static_cast<int>(std::lround(item.aux[0]));
-    const int dy = static_cast<int>(std::lround(item.aux[1]));
+    int dx = static_cast<int>(std::lround(item.aux[0]));
+    int dy = static_cast<int>(std::lround(item.aux[1]));
+    // ★ 场景自身变换（`0x229` / `CORE-OPS-SCENE-SELF-TRANSFORM-229`）：键落在**作用键区间**内的
+    //   绘制项，消费者额外加一次三元平移里的 X / Y（2D 光栅没有深度 ⇒ Z 不参与，见残差）。
+    //   ★ 默认区间是 (0,0) ⇒ 不命中任何条目（新游戏起点的 `0x229 0,0,0,0,0` 就是这一支）。
+    const SceneSelfTransform& self = machine.scene_self_transform();
+    if (self.covers(key)) {
+        dx += static_cast<int>(std::lround(self.translate[0]));
+        dy += static_cast<int>(std::lround(self.translate[1]));
+    }
     const auto item_color = derive_color(item, now, forced);
     const int item_alpha = static_cast<int>((item_color >> 24) & 0xFFu);
     if (item_alpha <= 0) return false;

@@ -149,6 +149,27 @@ add_test(NAME emulator-core-text-pointer-write COMMAND emulator-core-selftest --
 #   从第一格重来"。旧实现只把 0x300/0x301 写成两张无人读的 map ⇒ 只展示一次（用户口径"不会刷新"）。
 #   `0x301` 只清条目 + 游标，不清画布像素、不删字符格。
 add_test(NAME emulator-core-text-gate-replay COMMAND emulator-core-selftest --only-text-gate)
+# ★ 文本比较族（`0x194` 相等 / `0x195` 不等）：同一对操作数上两条必须**互补**（1/0 互换），
+#   都把推进格数写成 7（EA 0x42CF4F / 0x42D04F），落点给文本族标签必须抛。
+#   0x195 是 SETFATE.BIN（新游戏第 0 章初始化）的第一条缺失指令 ⇒ 方向写反 ⇒ 本条红。
+add_test(NAME emulator-core-text-compare-ops COMMAND emulator-core-selftest --only-text-compare)
+# ★ `0x229`（场景自身变换）：先**重置**再写「作用键区间 + 三元平移」，消费者只对**键落在区间内**的
+#   绘制项加 X / Y 平移。新游戏返回路径的第一条就是 `0x229 0,0,0,0,0`（区间空 ⇒ 不动任何像素）——
+#   退回"不实现" ⇒ 本条红（该路径直接 halt）。
+add_test(NAME emulator-core-scene-self-transform COMMAND emulator-core-selftest --only-scene-self)
+# ★ `0x258` / `0x259`（1000 项表的两项标志）：按位掩码写「位 0 / 位 1」，`0x259` 全清 1000 项，
+#   **不置脏**。第 0 章剧本（SC0000.BIN）开头就是 `0x259` + 一大串 `0x258 i 1` ⇒ 不实现就 halt。
+add_test(NAME emulator-core-scene-table-flags COMMAND emulator-core-selftest --only-scene-table)
+# ★ `0x90`（选项追加）+ `0x97`（按矩形写附加整数）：第 0 章剧本开场就是「追加一条选项 + 逐个设附加整数」，
+#   不实现就 halt。容量门槛是 100（不是引擎错误文本写的 20），满表必须响亮失败。
+add_test(NAME emulator-core-adv-choice-add COMMAND emulator-core-selftest --only-adv-choice)
+# ★ 选项窗口（`0x93` 清表+关窗 / `0x94` 开窗 / `0x91`·`0x92` 等待）：**推进格数 = 0 是唯一的阻塞手段**，
+#   0x91/0x92 未拿到闩锁时把格数改回 0（下一拍重跑同一条），拿到才推进 3 / 5。每个场景的选项窗都要过 0x93/0x94。
+add_test(NAME emulator-core-adv-choice-window COMMAND emulator-core-selftest --only-choice-window)
+# ★ `0x1bc`（语音全部停止）：后端已挂 ⇒ 声道 12/13/14 各一次停止请求；未挂 ⇒ 0 次。两支都要清 12 格 + 「正在播」。
+add_test(NAME emulator-core-voice-all-stop COMMAND emulator-core-selftest --only-voice-all-stop)
+# ★ 0x1b1 / 0x238 / 0x32a / 0x32d：写固定格 / 清两格 / 销毁效果槽 / 场景颜色请求（透明度夹 255、每次执行都发）。
+add_test(NAME emulator-core-misc-cells COMMAND emulator-core-selftest --only-misc-cells)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)

@@ -98,9 +98,24 @@ void Machine::op_194(const Instruction& instruction) {
     // 读序 **op3 → op2**（读序是合同），两者都按"格式化成字符串"的读法（整数标签 ⇒ 十进制文本，
     // 文本标签 ⇒ 原文本）。把"两串**逐字节相等**"归一成 1 / 0 写进 op1。
     // ★ 无早退、不记日志、不发请求；两条读都在写之前（任一条类型非法 ⇒ 抛且不写）。
+    // ★ 推进格数槽在**读数之前**就写成 7（EA `0x42CF4F`，早于两次读数）—— 抛出时格数已生效。
+    write_length(7);
     const std::string right = read_text(ops[2]);
     const std::string left = read_text(ops[1]);
     write_int(ops[0], left == right ? 1 : 0);
+    return;
+}
+
+void Machine::op_195(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 字符串不等（0x195 / `sub_42D010`，argc 3、推进 7；规则 `CORE-OPS-TEXT-UNEQUAL-195`）：
+    // 与 `0x194` 同一条比较的两面 —— 读序也是 **op3 → op2**，两者都按"格式化成字符串"读，
+    // 把"两串**逐字节不等**"归一成 1 / 0 写进 op1（⇒ 同一对操作数上两条互为 0/1 互换）。
+    // ★ 推进格数槽同样在读数之前写 7（EA `0x42D04F`）。引擎里这条只被 0x195 用（表项 `0xA56F0` 单点注册）。
+    write_length(7);
+    const std::string right = read_text(ops[2]);
+    const std::string left = read_text(ops[1]);
+    write_int(ops[0], left != right ? 1 : 0);
     return;
 }
 
@@ -137,6 +152,16 @@ void Machine::op_1a2(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_1b1(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 设一个引擎整数档（0x1b1 / `sub_41FEA0`，argc 1、推进 3；规则 `CORE-OPS-ENGINE-CELL-1B1`）：
+    // 只有一个操作数，原样写进**同一个固定格**（不归一、不夹取、不做范围检查）。ADV 脚本开头用它设 1。
+    // ★ 该格的读者未取证 ⇒ 本模型只保存值（残差）。
+    write_length(3);
+    cell_1b1_ = read_int(ops[0]);
+    return;
+}
+
 void Machine::op_2db(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 字体对位模式 ← 操作数；重建入口未建模
@@ -156,6 +181,14 @@ void Machine::op_78(const Instruction& instruction) {
 //   场景消费时**每个字符一个绘制条目**（键 = 键基数 + 字符序号，源 = 该字符格）。
 //   本实现也按逐字符条目落库；创建时机是追加时（引擎是推进器消费时，见 audit 的 TIMING 残差）。
 
+
+void Machine::reveal_text_layer_to(std::size_t slot, std::size_t revealed) {
+    if (slot >= text_layer_state_.size()) return;
+    TextLayerState& layer = text_layer_state_[slot];
+    layer.reveal_cursor = std::min(revealed, layer.cells.size());
+    layer.reveal_due_ms = 0;
+    layer.reveal_done_ms = 0;
+}
 int Machine::resolve_text_layer(int slot) const {
     if (slot == 0) slot = default_group_;
     return slot;
@@ -805,4 +838,107 @@ void Machine::op_1d3(const Instruction& instruction) {
     return;
 }
 
+
+void Machine::op_7a(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写文本 run 头的两个整数（0x7a / `sub_41F4E0` → `sub_45A910`，argc 3、推进 7；
+    // 规则 `CORE-OPS-TEXT-RUN-HEADER-7A`）：第 1 个 = 文本槽（0 ⇒ 落默认槽），第 2 / 3 个原样写进
+    // 该槽 run 头的两格（引擎里是"写指针之前 20 / 16 字节"那两格）。读序 **3 → 2 → 1**。
+    // ★ 消费者（把这些整数变成绘制请求那一段）未建模 ⇒ 本模型只保存值（残差）。
+    write_length(7);
+    const auto third = read_int(ops[2]);
+    const auto second = read_int(ops[1]);
+    const auto slot = read_int(ops[0]);
+    const auto resolved = slot == 0 ? 0 : slot;  // 0 = 默认槽（本模型把默认槽记为 0）
+    if (resolved < 0 || resolved >= static_cast<int>(run_header_.size())) return;
+    run_header_[static_cast<std::size_t>(resolved)] = RunHeader{second, third};
+    return;
+}
+
+void Machine::op_193(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 字符串拼接（0x193 / `sub_433710`，argc 3、推进 7；规则 `CORE-OPS-TEXT-CONCAT-193`）：
+    // 落点 = 第 1 个操作数；结果 = **第 2 个 ++ 第 3 个**；读序 **3 → 2**（先右值再左值）。
+    // 与 `0x192` 用同一个落点写原语（它支持 5 / 8 / 11 / 14）。
+    write_length(7);
+    const std::string right = read_text(ops[2]);
+    const std::string left = read_text(ops[1]);
+    write_text(ops[0], left + right);
+    return;
+}
+
+void Machine::op_20a(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 立即重绘一个文本层（0x20a / `sub_423620`，argc 1、推进 3；规则 `CORE-OPS-TEXT-REDRAW-20A`）：
+    // 第 1 个操作数 = 层号（0 ⇒ 默认层）。把该层**已揭示的格**贴到画布上；随后若门字第 30 位置起，
+    // 还会**再读一次**层号并补画一个延迟格。
+    // ★ 本模型的画布绘制在"追加 / 揭示"时就做了 ⇒ 这里只把场景标脏（下一次渲染步重画）+ 记层号。
+    write_length(3);
+    const auto layer = read_int(ops[0]);
+    (void)layer;
+    scene_dirty_ = true;
+    return;
+}
+
+void Machine::op_243(const Instruction& instruction) {
+    (void)instruction;
+    // 消息等待三格（0x243 / `sub_41B180`，argc 0、推进 1；规则 `CORE-OPS-MSG-WAIT-243`）：
+    // 写序 **(1, 0, 0)**；整段被一道位住：那道位已置 ⇒ **一格都不写**。无调用、不置门位。
+    write_length(1);
+    if ((msg_wait_gate_ & 2) != 0) return;
+    msg_wait_a_ = 1;
+    msg_wait_b_ = 0;
+    msg_wait_c_ = 0;
+    return;
+}
+
+void Machine::op_2f7(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 语音槽选项格 ← 1（0x2f7 / `sub_426890`，argc 1、推进 3；规则 `CORE-OPS-VOICE-OPTION-2F7`）：
+    // 第 1 个 = 槽号；把该槽的选项格**整格写成 1**（⛔ 不是 or ⇒ 高位被清）。槽号不做范围检查（本版只规定 0..2）。
+    write_length(3);
+    const auto slot = read_int(ops[0]);
+    if (slot < 0 || slot >= 3) return;
+    voice_option_2f7_[static_cast<std::size_t>(slot)] = 1;
+    return;
+}
+
+void Machine::op_304(const Instruction& instruction) {
+    (void)instruction;
+    // 消息块开始（0x304 / `sub_41A420`，argc 0、推进 1；规则 `CORE-OPS-MSG-BLOCK-304-305`）：
+    // ① 把消息臂位**整格写 1**（顺手清掉上一块留下的第 16 位）；② 把当前层**已揭示的游标**存进"块开头"格。
+    write_length(1);
+    msg_arm_ = 1;
+    const int slot = resolve_text_layer(current_text_slot_);
+    msg_saved_cursor_ = slot < 0 ? 0 : static_cast<std::int32_t>(text_layer_revealed(static_cast<std::size_t>(slot)));
+    return;
+}
+
+void Machine::op_305(const Instruction& instruction) {
+    (void)instruction;
+    // 消息块结束（0x305 / `sub_41B1C0`，argc 0、推进 1；规则 `CORE-OPS-MSG-BLOCK-304-305`）：
+    // 门 = 消息臂位的第 0 位 **且** 第 16 位（第 16 位由 `0x6e` 成功追加时置）。
+    // 未武装 ⇒ 只清臂位、什么都不做。武装 ⇒ ① 揭示游标回卷到块开头；② 读 `message:ReadTextSkip`，
+    // 非 0 且"已读"命中时置门字第 27 位；③ 揭示该层**全部**格（引擎是在这里自旋到"揭示完"）；
+    // ④ 写消息等待三格 **(0, 0, 1)**；⑤ 三条出口都清臂位。
+    write_length(1);
+    const bool armed = (msg_arm_ & 1) != 0 && (msg_arm_ & 0x10000) != 0;
+    if (!armed) {
+        msg_arm_ = 0;
+        return;
+    }
+    const int slot = resolve_text_layer(current_text_slot_);
+    if (slot >= 0) {
+        reveal_text_layer_to(static_cast<std::size_t>(slot), static_cast<std::size_t>(msg_saved_cursor_));
+        reveal_all_text_layer_cells(slot);
+    }
+    if (config_.get_int("message:ReadTextSkip") != 0) {
+        state_flags_ |= (1u << 27);  // "本块按已读跳过"（引擎同一位置）
+    }
+    msg_wait_b_ = 0;
+    msg_wait_c_ = 0;
+    msg_wait_a_ = 1;  // 写序 (0, 0, 1)
+    msg_arm_ = 0;
+    return;
+}
 }  // namespace core

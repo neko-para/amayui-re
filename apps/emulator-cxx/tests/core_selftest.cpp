@@ -2677,6 +2677,822 @@ bool check_text_pointer_write(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── 文本比较族（0x194 相等 / 0x195 不等；CORE-OPS-TEXT-EQUAL-194 / CORE-OPS-TEXT-UNEQUAL-195） ──
+// 锚：0x42CF10（0x194 的 handler，宽度槽 7 @0x42CF4F）· 0x42D010（0x195 的 handler，宽度槽 7 @0x42D04F）·
+// 0x42CF8E / 0x42D08E（两条都调同一个定长比较子例程 sub_401540）· 0x42D093（三值结果只取"非 0 ⇒ 1"）。
+// ★ 这两条是**同一条比较的两面**：同一对操作数上必须互补（写错方向 ⇒ 本条红）。
+bool check_text_compare_ops(const core::OpcodeTable& table) {
+    const std::size_t body_start = 60;  // make_script_with_body 的脚本头长度
+
+    // ① 值契约：相等 / 不等 / 长度不同 / 空串 四个点，且每一步的推进格数都必须是 7。
+    struct Case {
+        const char* left;
+        const char* right;
+        std::int32_t equal;    // 0x194 的落点
+        std::int32_t unequal;  // 0x195 的落点
+    };
+    const Case cases[] = {
+        {"abc", "abc", 1, 0},
+        {"abc", "abd", 0, 1},
+        {"abc", "abc ", 0, 1},  // 长度不同 ⇒ 不等（先比长度，再看字节）
+        {"", "", 1, 0},
+        {"", "a", 0, 1},
+    };
+    for (const Case& item : cases) {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x194, {{9, 0}, {5, 0}, {5, 1}});
+        emit_instruction(script, 0x195, {{9, 1}, {5, 0}, {5, 1}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.write_text(core::Operand{5, 0}, item.left);
+        machine.write_text(core::Operand{5, 1}, item.right);
+        machine.load_root(script);
+        if (!machine.step() || machine.frame().length_slot != 7 ||
+            machine.local_int(0) != item.equal) {
+            std::fprintf(stderr,
+                         "0x194(%s,%s) 落点=%d（期望 %d）长度槽=%u（期望 7）msg=%s\n", item.left,
+                         item.right, machine.local_int(0), item.equal,
+                         static_cast<unsigned>(machine.frame().length_slot),
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+        if (!machine.step() || machine.frame().length_slot != 7 ||
+            machine.local_int(1) != item.unequal) {
+            std::fprintf(stderr,
+                         "0x195(%s,%s) 落点=%d（期望 %d）长度槽=%u（期望 7）msg=%s\n", item.left,
+                         item.right, machine.local_int(1), item.unequal,
+                         static_cast<unsigned>(machine.frame().length_slot),
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+
+    // ② 先字符串化：整数 5 与文本 "5" 相等 ⇒ 0x195 得 0（⛔ 不是"按标签比较"）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x55, {{9, 0}, {0, 5}});  // 局部整型 0 ← 5
+        emit_instruction(script, 0x195, {{9, 1}, {5, 0}, {9, 0}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.write_text(core::Operand{5, 0}, "5");
+        machine.load_root(script);
+        machine.step();
+        if (!machine.step() || machine.local_int(1) != 0) {
+            std::fprintf(stderr, "0x195(整数 5, 文本 \"5\") 得 %d（期望 0）⇒ 按标签比较了\n",
+                         machine.local_int(1));
+            return false;
+        }
+    }
+
+    // ③ 内联文本（type 2）：与 SETFATE.BIN 的真实站点同形（op3 = 代码区里的空串）。
+    {
+        auto empty_literal = make_script_with_body();
+        // 字面量落在**两条指令之后**：0x195 占 1 + 3*2 个字，`0x2`（exit）占 1 个字 ⇒ 字面量 = 第 8 个字。
+        const std::uint32_t literal_word =
+            static_cast<std::uint32_t>((empty_literal.size() - body_start) / 4) + 7 + 1;
+        emit_instruction(empty_literal, 0x195, {{9, 1}, {5, 0}, {2, literal_word}});
+        emit_instruction(empty_literal, 2, {});
+        empty_literal.push_back(0xFFu);  // 空串 = 单个终止符（XOR 0xFF 编解码）
+        while ((empty_literal.size() - body_start) % 4 != 0) empty_literal.push_back(0xFFu);
+        core::Machine blank(0x12345678u, table);
+        blank.load_root(empty_literal);
+        blank.step();
+        if (blank.local_int(1) != 0) {
+            std::fprintf(stderr, "0x195(空串, 内联空串) 得 %d（期望 0）msg=%s\n", blank.local_int(1),
+                         blank.last_stop().message.c_str());
+            return false;
+        }
+        core::Machine filled(0x12345678u, table);
+        filled.write_text(core::Operand{5, 0}, "x");
+        filled.load_root(empty_literal);
+        filled.step();
+        if (filled.local_int(1) != 1) {
+            std::fprintf(stderr, "0x195(\"x\", 内联空串) 得 %d（期望 1）msg=%s\n", filled.local_int(1),
+                         filled.last_stop().message.c_str());
+            return false;
+        }
+    }
+
+    // ④ 类型闸门：落点给文本族（type 5）⇒ 抛 write-int-unsupported-tag，且落点不被改写。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x195, {{5, 2}, {5, 0}, {5, 1}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.write_text(core::Operand{5, 0}, "abc");
+        machine.write_text(core::Operand{5, 1}, "abd");
+        machine.write_text(core::Operand{5, 2}, "keep");
+        machine.load_root(script);
+        machine.step();
+        if (!machine.halted() ||
+            machine.last_stop().message.rfind("write-int-unsupported-tag:5", 0) != 0 ||
+            machine.read_text(core::Operand{5, 2}) != "keep") {
+            std::fprintf(stderr, "0x195 落点是文本标签时没有响亮失败（msg=%s got=%s）\n",
+                         machine.last_stop().message.c_str(),
+                         machine.read_text(core::Operand{5, 2}).c_str());
+            return false;
+        }
+    }
+
+    // ⑤ 写序：读数失败（空指针槽）⇒ 抛且落点不变，但推进格数**已经是 7**（读数在写格数之后）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x195, {{9, 2}, {14, 0}, {5, 1}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.write_text(core::Operand{5, 1}, "abc");
+        machine.load_root(script);
+        machine.step();
+        if (!machine.halted() ||
+            machine.last_stop().message.rfind("read-text-unmapped-address", 0) != 0 ||
+            machine.local_int(2) != 0 || machine.frame().length_slot != 7) {
+            std::fprintf(stderr,
+                         "0x195 读数失败时的写序不对：msg=%s 落点=%d 长度槽=%u（期望 7）\n",
+                         machine.last_stop().message.c_str(), machine.local_int(2),
+                         static_cast<unsigned>(machine.frame().length_slot));
+            return false;
+        }
+    }
+    return true;
+}
+
+// ── 1000 项表的两项标志（0x258 / 0x259；CORE-OPS-SCENE-TABLE-FLAGS） ──
+// 锚：0x425D20（0x258 handler，长度字 5 @0x425D32）· 0x41A3A0（0x259 handler，长度字 1 @0x41A3AD）
+// · 0x425D66 / 0x425D6C（位 0 → 两张表的 +8）· 0x425D8F / 0x425D95（位 1 → 两张表的 +0xC）
+// · 0x41A3D0..0x41A3E5（1000 项清零循环）。
+// ★ 两条**都不**把场景标脏（所以也不在白名单里），掩码高位不看，两张表同值。
+bool check_scene_table_flags(const core::OpcodeTable& table) {
+    // ① 0x258 的位语义：mask 1 / 2 / 3 / 4（高位不看）。
+    struct Case {
+        std::uint32_t mask;
+        std::int32_t flag0;
+        std::int32_t flag1;
+    };
+    const Case masks[] = {{0, 0, 0}, {1, 1, 0}, {2, 0, 1}, {3, 1, 1}, {4, 0, 0}, {7, 1, 1}};
+    for (const Case& item : masks) {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x258, {{0, 7}, {0, item.mask}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        const core::TextureFlags flags = machine.texture_flags(7);
+        if (machine.frame().length_slot != 5 || flags.flag0 != item.flag0 ||
+            flags.flag1 != item.flag1) {
+            std::fprintf(stderr, "0x258 mask=%u 得 (%d,%d)（期望 %d/%d）长度槽=%u\n", item.mask,
+                         flags.flag0, flags.flag1, item.flag0, item.flag1,
+                         static_cast<unsigned>(machine.frame().length_slot));
+            return false;
+        }
+    }
+    // ② 0x259 全清两项标志、**其它字段一格不碰**、长度槽 = 1。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x258, {{0, 7}, {0, 3}});
+        emit_instruction(script, 0x258, {{0, 999}, {0, 3}});
+        emit_instruction(script, 0x259, {});
+        emit_instruction(script, 2, {});
+        auto bytes = script;
+        core::Machine machine(0x12345678u, table);
+        // 预置一项的"非标志"字段：0x259 之后必须原样。
+        machine.write_text(core::Operand{5, 0}, "keep");  // 不参与；只为确保池里有别的状态
+        machine.load_root(bytes);
+        machine.step();  // 0x258 7,3
+        machine.step();  // 0x258 999,3
+        const core::TextureFlags before = machine.texture_flags(7);
+        machine.step();  // 0x259
+        const core::TextureFlags after = machine.texture_flags(7);
+        const core::TextureFlags tail = machine.texture_flags(999);
+        if (before.flag0 != 1 || before.flag1 != 1 || after.flag0 != 0 || after.flag1 != 0 ||
+            tail.flag0 != 0 || tail.flag1 != 0 || machine.frame().length_slot != 1) {
+            std::fprintf(stderr,
+                         "0x259 全清不对：before=(%d,%d) after=(%d,%d) tail=(%d,%d) 长度槽=%u\n",
+                         before.flag0, before.flag1, after.flag0, after.flag1, tail.flag0, tail.flag1,
+                         static_cast<unsigned>(machine.frame().length_slot));
+            return false;
+        }
+        const core::TextureRecord* record = machine.texture_record(7);
+        if (record == nullptr || record->file != -1) {
+            std::fprintf(stderr, "0x259 动了别的字段（file 期望 -1）\n");
+            return false;
+        }
+    }
+    // ③ 两条都**不置脏**：先把脏清掉，再各跑一条，脏必须仍是 0。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x258, {{0, 2}, {0, 3}});
+        emit_instruction(script, 0x259, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.end_render();  // 清脏
+        machine.step();
+        const bool dirty_after_258 = machine.scene_dirty();
+        machine.step();
+        const bool dirty_after_259 = machine.scene_dirty();
+        if (dirty_after_258 || dirty_after_259) {
+            std::fprintf(stderr, "0x258/0x259 不该把场景标脏（got %d/%d）\n", dirty_after_258 ? 1 : 0,
+                         dirty_after_259 ? 1 : 0);
+            return false;
+        }
+    }
+    // ④ 编号越界（引擎是未定义行为，本仓口径 = 响亮失败）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x258, {{0, 1000}, {0, 1}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        if (!machine.halted() ||
+            machine.last_stop().message.rfind("scene-table-index-out-of-range:1000", 0) != 0) {
+            std::fprintf(stderr, "0x258 越界没有响亮失败（msg=%s）\n",
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+// ── 几个"写固定格 / 发请求"的整数档指令（0x1b1 / 0x238 / 0x32a / 0x32d） ──
+// 锚：0x41FEA0（0x1b1，推进 3）· 0x4248C0（0x238，推进 3）· 0x426F80（0x32a，推进 3）
+// · 0x427040（0x32d，推进 5；透明度夹 255、RGB 拼 ARGB、每次执行都发请求）。
+bool check_misc_cells(const core::OpcodeTable& table) {
+    // ① 0x1b1：覆盖写一个固定格。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1B1, {{0, 7}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        if (machine.frame().length_slot != 3 || machine.cell_1b1() != 7) {
+            std::fprintf(stderr, "0x1b1 写格不对：len=%u cell=%d\n",
+                         static_cast<unsigned>(machine.frame().length_slot), machine.cell_1b1());
+            return false;
+        }
+    }
+    // ② 0x238：第 1 格清 0、第 2 格 ← 操作数。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x238, {{0, 5500}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        if (machine.frame().length_slot != 3 || machine.cell_238_left() != 0 ||
+            machine.cell_238_value() != 5500) {
+            std::fprintf(stderr, "0x238 两格不对：len=%u left=%d value=%d\n",
+                         static_cast<unsigned>(machine.frame().length_slot), machine.cell_238_left(),
+                         machine.cell_238_value());
+            return false;
+        }
+    }
+    // ③ 0x32a：只销毁指到的那一槽。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x32A, {{0, 1}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_scene_effect_present(0, true);
+        machine.set_scene_effect_present(1, true);
+        machine.load_root(script);
+        machine.step();
+        if (machine.frame().length_slot != 3 || machine.scene_effect_present(1) ||
+            !machine.scene_effect_present(0)) {
+            std::fprintf(stderr, "0x32a 销毁了错的槽：len=%u s0=%d s1=%d\n",
+                         static_cast<unsigned>(machine.frame().length_slot),
+                         machine.scene_effect_present(0) ? 1 : 0,
+                         machine.scene_effect_present(1) ? 1 : 0);
+            return false;
+        }
+    }
+    // ④ 0x32d：透明度夹 255、RGB 拼 ARGB、每次执行都发请求。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x32D, {{0, 300}, {0, 0x123456}});
+        emit_instruction(script, 0x32D, {{0, 255}, {0, 0x123456}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        if (machine.frame().length_slot != 5 ||
+            machine.scene_color_request().argb != 0xFF123456u ||
+            machine.scene_color_request().count != 1) {
+            std::fprintf(stderr, "0x32d 请求不对：len=%u argb=%08X count=%zu\n",
+                         static_cast<unsigned>(machine.frame().length_slot),
+                         machine.scene_color_request().argb, machine.scene_color_request().count);
+            return false;
+        }
+        machine.step();
+        if (machine.scene_color_request().count != 2) {
+            std::fprintf(stderr, "0x32d 第二次执行没有发请求（count=%zu）\n",
+                         machine.scene_color_request().count);
+            return false;
+        }
+    }
+    // ⑤ 0x215：命中且位 0 = 1 ⇒ 值；未命中 / 位 0 = 0 ⇒ -1。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x215, {{9, 0}, {0, 42}});
+        emit_instruction(script, 2, {});
+        core::Machine hit(0x12345678u, table);
+        hit.set_scene_keyed_record(42, 1, 7);
+        hit.load_root(script);
+        hit.step();
+        if (hit.local_int(0) != 7 || hit.frame().length_slot != 5) {
+            std::fprintf(stderr, "0x215 命中时不对：值=%d len=%u\n", hit.local_int(0),
+                         static_cast<unsigned>(hit.frame().length_slot));
+            return false;
+        }
+        core::Machine flagged_off(0x12345678u, table);
+        flagged_off.set_scene_keyed_record(42, 0, 7);
+        flagged_off.load_root(script);
+        flagged_off.step();
+        if (flagged_off.local_int(0) != -1) {
+            std::fprintf(stderr, "0x215 位 0 = 0 时必须得 -1（得 %d）\n", flagged_off.local_int(0));
+            return false;
+        }
+        core::Machine missing(0x12345678u, table);
+        missing.load_root(script);
+        missing.step();
+        if (missing.local_int(0) != -1) {
+            std::fprintf(stderr, "0x215 未命中时必须得 -1（得 %d）\n", missing.local_int(0));
+            return false;
+        }
+    }
+    // ⑥ 0x224：计数清 0、推进 1。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x224, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_container_224_items(3);
+        machine.load_root(script);
+        machine.step();
+        if (machine.container_224_items() != 0 || machine.frame().length_slot != 1) {
+            std::fprintf(stderr, "0x224 清空不对：items=%zu len=%u\n", machine.container_224_items(),
+                         static_cast<unsigned>(machine.frame().length_slot));
+            return false;
+        }
+    }
+    // ⑦ 0x7a：读序 3 → 2 → 1，两个整数进 run 头。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x7A, {{0, 3}, {0, 140}, {0, 517}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        const auto header = machine.run_header(3);
+        if (machine.frame().length_slot != 7 || header.first != 140 || header.second != 517) {
+            std::fprintf(stderr, "0x7a 写 run 头不对：len=%u a=%d b=%d\n",
+                         static_cast<unsigned>(machine.frame().length_slot), header.first,
+                         header.second);
+            return false;
+        }
+    }
+    // ⑧ 0x1cb：读内建命名键（本测试的配置库没有该键 ⇒ 0），推进 3。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1CB, {{9, 0}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        if (machine.frame().length_slot != 3 || machine.local_int(0) != 0) {
+            std::fprintf(stderr, "0x1cb 读命名键不对：len=%u 值=%d\n",
+                         static_cast<unsigned>(machine.frame().length_slot), machine.local_int(0));
+            return false;
+        }
+    }
+    // ⑨ 0x256：只改区间内**已存在**的记录，并标脏。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x256, {{0, 5}, {0, 1}, {0, 1}, {0, 2}, {0, 3}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_scene_keyed_record(5, 1, 0);
+        machine.set_scene_keyed_record(9, 1, 0);
+        machine.load_root(script);
+        machine.end_render();  // 清脏
+        machine.step();
+        float inside[3] = {0, 0, 0};
+        float outside[3] = {0, 0, 0};
+        const bool has_inside = machine.scene_record_translate(5, inside);
+        const bool has_outside = machine.scene_record_translate(9, outside);
+        if (machine.frame().length_slot != 11 || !has_inside || inside[0] != 1.0f ||
+            inside[1] != 2.0f || inside[2] != 3.0f || !has_outside || outside[0] != 0.0f ||
+            !machine.scene_dirty()) {
+            std::fprintf(stderr,
+                         "0x256 区间/标脏不对：len=%u in=(%.1f,%.1f,%.1f) out=%.1f dirty=%d\n",
+                         static_cast<unsigned>(machine.frame().length_slot), inside[0], inside[1],
+                         inside[2], outside[0], machine.scene_dirty() ? 1 : 0);
+            return false;
+        }
+    }
+    return true;
+}
+// ── 语音：全部停止并清状态（0x1bc；CORE-OPS-VOICE-ALL-STOP） ──
+// 锚：0x4197A0（handler）· 0x4197B0（推进格数 1）· 0x4197BB（后端判空）· 0x4197DA（声道 12/13/14 停止）
+// · 0x4197E8（两组选项位 + 两组待播请求 + 正在播，全清 0）。
+// ★ 后端没挂上 ⇒ 一个停止请求都不发，但清格照做（两条支路都要能红）。
+bool check_voice_all_stop(const core::OpcodeTable& table) {
+    const auto run = [&](bool attached, core::Machine& machine) {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1BC, {});
+        emit_instruction(script, 2, {});
+        machine.load_root(script);
+        machine.set_voice_backend_attached(attached);
+        machine.set_voice_busy(1);
+        for (std::size_t i = 0; i < 3; ++i) machine.set_voice_cells(i, 1, 1, 1, 1);
+        machine.step();
+        return machine.frame().ip;
+    };
+    core::Machine attached(0x12345678u, table);
+    const std::size_t ip_after = run(true, attached);
+    if (ip_after != 4 || attached.frame().length_slot != 1 || attached.voice_stop_requests() != 3) {
+        std::fprintf(stderr, "0x1bc 后端已挂上时不对：ip=%zu len=%u stops=%zu（期望 4/1/3）\n", ip_after,
+                     static_cast<unsigned>(attached.frame().length_slot), attached.voice_stop_requests());
+        return false;
+    }
+    for (std::size_t i = 0; i < 3; ++i) {
+        if (attached.voice_switch(i) != 0 || attached.voice_switch_478(i) != 0 ||
+            attached.voice_mirror_resource(i) != 0 || attached.voice_mirror_a4(i) != 0) {
+            std::fprintf(stderr, "0x1bc 第 %zu 槽没清干净\n", i);
+            return false;
+        }
+    }
+    if (attached.voice_busy() != 0) {
+        std::fprintf(stderr, "0x1bc 没清「正在播」（%d）\n", attached.voice_busy());
+        return false;
+    }
+
+    core::Machine detached(0x12345678u, table);
+    const std::size_t ip_detached = run(false, detached);
+    if (ip_detached != 4 || detached.voice_stop_requests() != 0) {
+        std::fprintf(stderr, "0x1bc 后端没挂上时不该发停止请求（stops=%zu ip=%zu）\n",
+                     detached.voice_stop_requests(), ip_detached);
+        return false;
+    }
+    if (detached.voice_busy() != 0 || detached.voice_switch(0) != 0) {
+        std::fprintf(stderr, "0x1bc 后端缺不上时也必须清格（busy=%d switch0=%d）\n",
+                     detached.voice_busy(), detached.voice_switch(0));
+        return false;
+    }
+    return true;
+}
+
+// ── 选项窗口：开窗 / 清表 / 等待（0x93 / 0x94 / 0x91 / 0x92；ADV-CHOICE-WINDOW） ──
+// 锚：0x4191D0（0x93，推进 1，清表 + 关窗/置闩锁）· 0x419230（0x94，推进 1，开输入 + arm + 步长 10000）
+// · 0x420740（0x91，推进 3 或 0）· 0x4207D0（0x92，推进 5 或 0）· 0x403EF0（清表六格）。
+// ★ 核心合同：**推进格数 = 0 是唯一的阻塞手段**（下一拍重跑同一条）—— 闩锁就是用来放行它的。
+bool check_choice_window(const core::OpcodeTable& table) {
+    // ① 0x94 开窗：总闸 / arm / 移动命中开关置起、步长 10000、推进 1。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x90, {{0, 0}, {0, 0}, {0, 10}, {0, 10}, {0, -1}, {0, -1}, {0, 1}});
+        emit_instruction(script, 0x94, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        machine.step();
+        const core::ChoiceWindowState& window = machine.choice_window();
+        if (machine.frame().length_slot != 1 || !window.input_gate || !window.arm ||
+            !window.move_hit || window.step != 10000 || window.hover != -1) {
+            std::fprintf(stderr,
+                         "0x94 开窗状态不对：len=%u gate=%d arm=%d move=%d step=%d hover=%d\n",
+                         static_cast<unsigned>(machine.frame().length_slot), window.input_gate ? 1 : 0,
+                         window.arm ? 1 : 0, window.move_hit ? 1 : 0, window.step, window.hover);
+            return false;
+        }
+    }
+    // ② 0x93 两支：总闸开着 ⇒ 关掉（不置闩锁）；总闸关着 ⇒ 置闩锁。两支都清表、推进 1。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x90, {{0, 0}, {0, 0}, {0, 10}, {0, 10}, {0, -1}, {0, -1}, {0, 1}});
+        emit_instruction(script, 0x94, {});   // 开窗（总闸 = 1）
+        emit_instruction(script, 0x93, {});   // 关窗
+        emit_instruction(script, 0x93, {});   // 总闸已关 ⇒ 置闩锁
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        machine.step();
+        machine.step();
+        const core::ChoiceWindowState& after_close = machine.choice_window();
+        if (after_close.input_gate || after_close.latch || !machine.choices().empty() ||
+            machine.frame().length_slot != 1) {
+            std::fprintf(stderr, "0x93 关窗支不对：gate=%d latch=%d size=%zu len=%u\n",
+                         after_close.input_gate ? 1 : 0, after_close.latch ? 1 : 0,
+                         machine.choices().size(),
+                         static_cast<unsigned>(machine.frame().length_slot));
+            return false;
+        }
+        machine.step();
+        if (!machine.choice_window().latch) {
+            std::fprintf(stderr, "0x93 第二支没有置闩锁\n");
+            return false;
+        }
+    }
+    // ③ 0x91：闩锁已置 ⇒ 推进 3 且**不读操作数**（给个非法类型也不许抛）；闩锁未置 ⇒ 推进 0（阻塞）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x93, {});                       // 置闩锁
+        emit_instruction(script, 0x91, {{8, 3}});                 // 闩锁已置：非法类型也不该被读
+        emit_instruction(script, 2, {});
+        core::Machine released(0x12345678u, table);
+        released.load_root(script);
+        released.step();  // 0x93
+        released.step();  // 0x91
+        if (released.halted() || released.frame().length_slot != 3 || released.choice_window().latch) {
+            std::fprintf(stderr, "0x91 闩锁支不对：halted=%d len=%u latch=%d msg=%s\n",
+                         released.halted() ? 1 : 0,
+                         static_cast<unsigned>(released.frame().length_slot),
+                         released.choice_window().latch ? 1 : 0,
+                         released.last_stop().message.c_str());
+            return false;
+        }
+
+        auto blocked_script = make_script_with_body();
+        emit_instruction(blocked_script, 0x91, {{0, 7}});
+        emit_instruction(blocked_script, 2, {});
+        core::Machine blocked(0x12345678u, table);
+        blocked.load_root(blocked_script);
+        blocked.step();
+        if (blocked.frame().length_slot != 0 || blocked.frame().ip != 0 ||
+            blocked.choice_window().step != 7 || !blocked.choice_window().move_hit) {
+            std::fprintf(stderr, "0x91 未置闩锁时没有阻塞：len=%u ip=%zu step=%d move=%d\n",
+                         static_cast<unsigned>(blocked.frame().length_slot), blocked.frame().ip,
+                         blocked.choice_window().step, blocked.choice_window().move_hit ? 1 : 0);
+            return false;
+        }
+        // 阻塞的判据：再走一拍，执行位置**还在同一条**（下一拍重跑）。
+        blocked.step();
+        if (blocked.frame().ip != 0) {
+            std::fprintf(stderr, "0x91 阻塞后执行位置前进了（ip=%zu）\n", blocked.frame().ip);
+            return false;
+        }
+    }
+    // ④ 0x92：读序 2 → 1（兜底目标 + 步长）；闩锁已置时**两个操作数都不读**、兜底目标也不写。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x92, {{0, 5}, {0, 123}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        if (machine.frame().length_slot != 0 || machine.choice_window().fallback != 123 ||
+            machine.choice_window().step != 5) {
+            std::fprintf(stderr, "0x92 未置闩锁时不对：len=%u fallback=%d step=%d\n",
+                         static_cast<unsigned>(machine.frame().length_slot),
+                         machine.choice_window().fallback, machine.choice_window().step);
+            return false;
+        }
+
+        auto latched_script = make_script_with_body();
+        emit_instruction(latched_script, 0x93, {});       // 置闩锁
+        emit_instruction(latched_script, 0x92, {{8, 1}, {8, 2}});  // 非法类型：不该被读
+        emit_instruction(latched_script, 2, {});
+        core::Machine latched(0x12345678u, table);
+        latched.load_root(latched_script);
+        latched.step();
+        const std::int32_t fallback_before = latched.choice_window().fallback;
+        latched.step();
+        if (latched.halted() || latched.frame().length_slot != 5 || latched.choice_window().latch ||
+            latched.choice_window().fallback != fallback_before) {
+            std::fprintf(stderr,
+                         "0x92 闩锁支不对：halted=%d len=%u latch=%d fallback=%d→%d msg=%s\n",
+                         latched.halted() ? 1 : 0,
+                         static_cast<unsigned>(latched.frame().length_slot),
+                         latched.choice_window().latch ? 1 : 0, fallback_before,
+                         latched.choice_window().fallback, latched.last_stop().message.c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+// ── 選択肢の登録と付加整数（0x90 / 0x97；ADV-CHOICE-ADD-90 / ADV-CHOICE-SET-EXTRA-97） ──
+// 锚：0x420640（0x90 handler，长度字 15 @0x420658）· 0x420693 / 0x4206A5（右 / 下 = 起点 + 宽高）
+// · 0x4206C9（读序 7 → 6 → 5）· 0x4206FE（追加）· 0x403B39（容量 100）· 0x420707（满表抛异常）
+// · 0x420726（追加成功后复位选中态）· 0x420910（0x97 handler，长度字 11）· 0x403D10（按四边全等找第一条）。
+bool check_adv_choice(const core::OpcodeTable& table) {
+    // ① 追加一条：矩形按「起点 + 宽高」存，三个入口按 5 / 6 / 7 归位，条目不跳（顺序前进 15 字）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x90, {{0, 10}, {0, 20}, {0, 30}, {0, 40}, {0, 5}, {0, 6}, {0, 7}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        const auto& choices = machine.choices();
+        if (choices.size() != 1 || machine.frame().length_slot != 15 || machine.frame().ip != 60 ||
+            machine.choice_index() != -1) {
+            std::fprintf(stderr, "0x90 追加后状态不对：size=%zu len=%u ip=%zu index=%d\n", choices.size(),
+                         static_cast<unsigned>(machine.frame().length_slot), machine.frame().ip,
+                         machine.choice_index());
+            return false;
+        }
+        const core::ChoiceEntry& entry = choices[0];
+        if (entry.left != 10 || entry.top != 20 || entry.right != 40 || entry.bottom != 60 ||
+            entry.enter != 5 || entry.leave != 6 || entry.decide != 7 || entry.extra != -1) {
+            std::fprintf(stderr,
+                         "0x90 记录不对：rect=(%d,%d,%d,%d) enter/leave/decide=%d/%d/%d extra=%d\n",
+                         entry.left, entry.top, entry.right, entry.bottom, entry.enter, entry.leave,
+                         entry.decide, entry.extra);
+            return false;
+        }
+    }
+    // ② 容量 100：第 100 条成功，第 101 条抛且一条都不写。
+    {
+        auto script = make_script_with_body();
+        for (int i = 0; i <= static_cast<int>(core::kChoiceCapacity); ++i) {
+            emit_instruction(script, 0x90, {{0, i}, {0, 0}, {0, 1}, {0, 1}, {0, -1}, {0, -1}, {0, -1}});
+        }
+        emit_instruction(script, 2, {});
+        core::Machine full(0x12345678u, table);
+        full.load_root(script);
+        for (std::size_t i = 0; i < core::kChoiceCapacity; ++i) {
+            if (!full.step()) {
+                std::fprintf(stderr, "0x90 第 %zu 条就失败了：%s\n", i + 1,
+                             full.last_stop().message.c_str());
+                return false;
+            }
+        }
+        if (full.choices().size() != core::kChoiceCapacity || full.halted()) {
+            std::fprintf(stderr, "0x90 容量没到 %zu（size=%zu halted=%d）\n", core::kChoiceCapacity,
+                         full.choices().size(), full.halted() ? 1 : 0);
+            return false;
+        }
+        if (full.step() || full.last_stop().message != "choice-table-full" ||
+            full.choices().size() != core::kChoiceCapacity) {
+            std::fprintf(stderr, "0x90 满表没有响亮失败（msg=%s size=%zu）\n",
+                         full.last_stop().message.c_str(), full.choices().size());
+            return false;
+        }
+    }
+    // ③ 操作数类型非法：抛在读数处，且**一条都不追加**。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x90, {{0, 1}, {0, 1}, {0, 1}, {0, 1}, {8, 3}, {0, -1}, {0, -1}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        if (!machine.halted() ||
+            machine.last_stop().message.rfind("read-int-unsupported-tag:8", 0) != 0 ||
+            !machine.choices().empty()) {
+            std::fprintf(stderr, "0x90 类型非法时不该追加（msg=%s size=%zu）\n",
+                         machine.last_stop().message.c_str(), machine.choices().size());
+            return false;
+        }
+    }
+    // ④ 0x97：按四边**全等**找第一条，只改那条的附加整数；找不到 / 差一边 ⇒ 一条都不改。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x90, {{0, 0}, {0, 0}, {0, 10}, {0, 10}, {0, -1}, {0, -1}, {0, 1}});
+        emit_instruction(script, 0x90, {{0, 100}, {0, 0}, {0, 10}, {0, 10}, {0, -1}, {0, -1}, {0, 2}});
+        emit_instruction(script, 0x97, {{0, 100}, {0, 0}, {0, 10}, {0, 10}, {0, 9}});   // 命中第二条
+        emit_instruction(script, 0x97, {{0, 0}, {0, 0}, {0, 10}, {0, 9}, {0, 8}});      // 高差 1 ⇒ 不命中
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.step();
+        machine.step();
+        machine.step();
+        if (machine.frame().length_slot != 11) {
+            std::fprintf(stderr, "0x97 推进格数不是 11（%u）\n",
+                         static_cast<unsigned>(machine.frame().length_slot));
+            return false;
+        }
+        if (machine.choices().size() != 2 || machine.choices()[0].extra != -1 ||
+            machine.choices()[1].extra != 9) {
+            std::fprintf(stderr, "0x97 没有按矩形命中第二条（extra=%d/%d）\n",
+                         machine.choices()[0].extra, machine.choices()[1].extra);
+            return false;
+        }
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x97 未命中时不该失败：%s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.choices()[0].extra != -1 || machine.choices()[1].extra != 9) {
+            std::fprintf(stderr, "0x97 差一条边的矩形竟然改到了字段（%d/%d）\n",
+                         machine.choices()[0].extra, machine.choices()[1].extra);
+            return false;
+        }
+    }
+    return true;
+}
+
+// ── 场景自身变换（0x229；CORE-OPS-SCENE-SELF-TRANSFORM-229） ──
+// 锚：0x423FE0（handler）· 0x423FF6（长度字 0x0B）· 0x424008（先重置）· 0x424011/0x42401B（先读 2 再读 1）
+// · 0x424030/0x42403C/0x424048（三个浮点）· 0x49A6C0 / 0x49A6F0（写区间与平移）。
+// ★ 判据两面：① 状态（区间起点 / 计数 / 三元平移 / 长度槽 11）；② 消费者真的按区间给**命中键**的绘制项加平移。
+bool check_scene_self_transform(const core::OpcodeTable& table) {
+    // 4x4 白块放在 (0,0)，键 = 5；可选用 0x229 设「区间 + X 平移」。
+    const auto make_script = [&](bool with_transform, std::uint32_t start, std::uint32_t count,
+                                 std::uint32_t translate_x) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
+        emit_instruction(bytes, 0x20B, {{0, 1}, {0, 0}, {0, 0}, {0, 4}, {0, 4}, {0, 255}, {0, 0x00FFFFFFu}});
+        emit_instruction(bytes, 0x1FB, {{0, 5}, {0, 1}, {0, 0}, {0, 0}, {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+        if (with_transform) {
+            emit_instruction(bytes, 0x229, {{0, start}, {0, count}, {0, translate_x}, {0, 0}, {0, 0}});
+        }
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    constexpr std::uint32_t kWidth = 8;
+    const auto white_at = [](const core::Bytes& canvas, std::uint32_t x, std::uint32_t y) {
+        const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 4u;
+        return at + 3 < canvas.size() && canvas[at] == 255 && canvas[at + 3] == 255;
+    };
+
+    // ① 没有 0x229 ⇒ 白块在 (0,0)，状态是"未激活"。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(make_script(false, 0, 0, 0));
+        machine.run(32);
+        const core::Bytes canvas = core::rasterize_scene(machine, kWidth, 8);
+        if (!white_at(canvas, 0, 0) || white_at(canvas, 4, 0) || machine.scene_self_transform().active) {
+            std::fprintf(stderr, "0x229 缺席时画面/状态不对（白块应仍在 (0..3,0..3)）items=%zu\n",
+                         machine.draw_item_count());
+            return false;
+        }
+    }
+    // ② 区间命中键 5、X 平移 2 ⇒ 白块右移 2；状态里三格都写对、长度槽 = 11。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(make_script(true, 5, 1, 2));
+        machine.run(32);
+        const auto& self = machine.scene_self_transform();
+        if (!self.active || self.range_start != 5 || self.range_count != 1 ||
+            self.translate[0] != 2.0f || self.translate[1] != 0.0f || self.translate[2] != 0.0f) {
+            std::fprintf(stderr, "0x229 状态不对：active=%d start=%u count=%u t=(%.1f,%.1f,%.1f)\n",
+                         self.active ? 1 : 0, self.range_start, self.range_count, self.translate[0],
+                         self.translate[1], self.translate[2]);
+            return false;
+        }
+        const core::Bytes canvas = core::rasterize_scene(machine, kWidth, 8);
+        if (white_at(canvas, 0, 0) || !white_at(canvas, 4, 0) || !white_at(canvas, 5, 0)) {
+            std::fprintf(stderr, "0x229 的平移没有作用到区间内的绘制项（期望 (2,0) 起 4px）\n");
+            return false;
+        }
+    }
+    // ③ 区间不覆盖键 5（起点 6）⇒ 一个像素都不动（区间是**门槛**，不是"设了就全员平移"）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(make_script(true, 6, 1, 2));
+        machine.run(32);
+        const core::Bytes canvas = core::rasterize_scene(machine, kWidth, 8);
+        if (!white_at(canvas, 0, 0) || white_at(canvas, 4, 0)) {
+            std::fprintf(stderr, "0x229 的区间没有起门槛作用（键 5 不该被平移）\n");
+            return false;
+        }
+    }
+    // ④ 重写会**先重置**：两条 0x229（第一条区间宽、第二条窄且平移 0）⇒ 状态只等于第二条。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x229, {{0, 0}, {0, 1000}, {0, 7}, {0, 0}, {0, 0}});
+        emit_instruction(bytes, 0x229, {{0, 5}, {0, 1}, {0, 0}, {0, 0}, {0, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(bytes);
+        machine.step();  // 第一条 0x229（区间 0..999、平移 X=7）
+        machine.step();  // 第二条 0x229（先重置，再写窄区间）
+        const auto& self = machine.scene_self_transform();
+        if (self.range_start != 5 || self.range_count != 1 || self.translate[0] != 0.0f ||
+            machine.frame().length_slot != 11) {
+            std::fprintf(stderr,
+                         "0x229 没有「先重置」：start=%u count=%u tx=%.1f 长度槽=%u（期望 5/1/0/11）\n",
+                         self.range_start, self.range_count, self.translate[0],
+                         static_cast<unsigned>(machine.frame().length_slot));
+            return false;
+        }
+    }
+    // ⑤ 读数失败（第 2 个操作数是没写过的字符串指针）⇒ 抛，但**重置已经发生**、长度槽已是 11。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x229, {{0, 5}, {8, 3}, {0, 0}, {0, 0}, {0, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(bytes);
+        machine.step();
+        const auto& self = machine.scene_self_transform();
+        if (!machine.halted() || machine.last_stop().message.rfind("read-int-unsupported-tag:8", 0) != 0 ||
+            self.range_count != 0 || !self.active || machine.frame().length_slot != 11) {
+            std::fprintf(stderr,
+                         "0x229 读数失败的写序不对：msg=%s active=%d count=%u 长度槽=%u（期望 11）\n",
+                         machine.last_stop().message.c_str(), self.active ? 1 : 0, self.range_count,
+                         static_cast<unsigned>(machine.frame().length_slot));
+            return false;
+        }
+    }
+    return true;
+}
+
 // ── 全局重置（0x009；CORE-OPS-FRAME-EXIT-SCRIPT） ──
 bool check_exit_script(const core::OpcodeTable& table) {
     auto exit_script = make_script_with_body();
@@ -4705,6 +5521,13 @@ int main(int argc, char** argv) {
     bool only_record_flags = false;
     bool only_text_pointer = false;
     bool only_text_gate = false;
+    bool only_text_compare = false;
+    bool only_scene_self = false;
+    bool only_scene_table = false;
+    bool only_adv_choice = false;
+    bool only_choice_window = false;
+    bool only_voice_all_stop = false;
+    bool only_misc_cells = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
@@ -4718,6 +5541,13 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-record-flags") == 0) only_record_flags = true;
         else if (std::strcmp(argv[i], "--only-text-pointer") == 0) only_text_pointer = true;
         else if (std::strcmp(argv[i], "--only-text-gate") == 0) only_text_gate = true;
+        else if (std::strcmp(argv[i], "--only-text-compare") == 0) only_text_compare = true;
+        else if (std::strcmp(argv[i], "--only-scene-self") == 0) only_scene_self = true;
+        else if (std::strcmp(argv[i], "--only-scene-table") == 0) only_scene_table = true;
+        else if (std::strcmp(argv[i], "--only-adv-choice") == 0) only_adv_choice = true;
+        else if (std::strcmp(argv[i], "--only-choice-window") == 0) only_choice_window = true;
+        else if (std::strcmp(argv[i], "--only-voice-all-stop") == 0) only_voice_all_stop = true;
+        else if (std::strcmp(argv[i], "--only-misc-cells") == 0) only_misc_cells = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -4838,6 +5668,44 @@ int main(int argc, char** argv) {
             // `0x300` 的循环演示闸：逐格揭示 → 停期限 → 清条目 → 从第一格重来。
             if (!check_text_slot_replay(table)) return 1;
             std::printf("core-selftest(text-gate): PASS\n");
+            return 0;
+        }
+        if (only_text_compare) {
+            // `0x194` / `0x195`：同一条比较的两面（1/0 互补）+ 推进格数 7 + 类型闸门。
+            if (!check_text_compare_ops(table)) return 1;
+            std::printf("core-selftest(text-compare): PASS\n");
+            return 0;
+        }
+        if (only_scene_table) {            // 0x258 / 0x259：1000 项表的两项标志（按位掩码写 / 全清），不置脏。
+            if (!check_scene_table_flags(table)) return 1;
+            std::printf("core-selftest(scene-table): PASS\n");
+            return 0;
+        }
+        if (only_misc_cells) {
+            if (!check_misc_cells(table)) return 1;
+            std::printf("core-selftest(misc-cells): PASS\n");
+            return 0;
+        }
+        if (only_voice_all_stop) {
+            if (!check_voice_all_stop(table)) return 1;
+            std::printf("core-selftest(voice-all-stop): PASS\n");
+            return 0;
+        }
+        if (only_choice_window) {
+            if (!check_choice_window(table)) return 1;
+            std::printf("core-selftest(choice-window): PASS\n");
+            return 0;
+        }
+        if (only_adv_choice) {
+            // `0x90` 追加选项 / `0x97` 按矩形写附加整数（第 0 章开场的选项菜单）。
+            if (!check_adv_choice(table)) return 1;
+            std::printf("core-selftest(adv-choice): PASS\n");
+            return 0;
+        }
+        if (only_scene_self) {
+            // `0x229`：先重置再写「作用键区间 + 三元平移」，消费者只对区间内的绘制项加平移。
+            if (!check_scene_self_transform(table)) return 1;
+            std::printf("core-selftest(scene-self): PASS\n");
             return 0;
         }
         if (only_ruby) {

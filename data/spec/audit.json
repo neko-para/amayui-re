@@ -7549,6 +7549,461 @@
       ]
     },
     {
+      "id": "ADV-CHOICE-ADD-90",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "ADV-CHOICE-ENTER-LEAVE-SEMANTICS",
+          "kind": "unknown",
+          "what": "第 5 / 6 个操作数究竟对应「光标进入」还是「光标离开」（以及是否还有第三态「按住」）只由消费侧状态机反推，没有真机采样",
+          "next": "找真机上光标划过选项的形态（或读消费侧的两步状态机），把两条路径各自命名"
+        },
+        {
+          "id": "ADV-CHOICE-CAPACITY-TEXT",
+          "kind": "unknown",
+          "what": "容量 100（比较 100）与引擎错误文本「最大 20」的矛盾没有解释",
+          "next": "追那句错误文本的历史写入点；或找一条真机里超过 20 个选项的脚本（若存在 ⇒ 文本是旧的）"
+        },
+        {
+          "id": "ADV-CHOICE-DEPTH",
+          "kind": "unknown",
+          "what": "记录里的「当前帧深度档」从哪来、与深度校验如何交互未取证",
+          "next": "读深度校验函数的上游（谁写帧的深度档）"
+        }
+      ],
+      "falsifiers": [
+        "连续追加 100 条：第 100 条必须成功、第 101 条必须抛显示消息型异常且不写任何字段（门槛按 20 实现 ⇒ 中途就抛）。",
+        "追加 `(10,20,30,40,…)`：记录里的矩形必须是 `(10,20,40,60)`；存成 `(10,20,30,40)` ⇒ 宽高没有加。",
+        "追加之后执行位置必须不变（本条不跳）；跟着变 ⇒ 把消费侧的跳转写进了追加。",
+        "决定时选中下标越界：必须什么都不做；跳到某一项 ⇒ 越界判据错。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-TEXT-CONCAT-193",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "落点初值 A、左 B、右 C：执行后必须是 BC；得 CB ⇒ 次序反了。",
+        "落点用整数标签：必须抛类型异常且落点不变。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-TEXT-REDRAW-20A",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-TEXT-REDRAW-20A-DELAY-CELL",
+          "kind": "unknown",
+          "what": "门字第 30 位与那个「延迟格」的领域含义未取证",
+          "next": "读门位第 30 位的置位者与那个延迟格的内容"
+        }
+      ],
+      "falsifiers": [
+        "揭示游标 = 3、层共 6 格：执行后恰好 3 格被贴出。",
+        "第 30 位 = 0：操作数只被求值一次。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-MSG-WAIT-243",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-MSG-WAIT-CELLS-243",
+          "kind": "unknown",
+          "what": "三格的领域名未定（只有写者、没有直读点）；那道开关位（第 1 位）的置位者含义未定",
+          "next": "按基址寄存器找三格的读者"
+        }
+      ],
+      "falsifiers": [
+        "门位 = 0、三格预置 7：执行后必须是 (1,0,0)。",
+        "门位已置：三格必须仍是 7。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-MSG-BLOCK-304-305",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-MSG-BLOCK-SAVED-CURSOR",
+          "kind": "unknown",
+          "what": "「块开头」格是否另有读/写者未逐一排除；「已读标记表」的写入者未取证（决定 ReadTextSkip 支的命中率）",
+          "next": "搜该格的其它读点；找把 (文件, 位置) 标成已读的写入者"
+        }
+      ],
+      "falsifiers": [
+        "先 0x304 再 0x305（中间不追加文本）：0x305 必须什么都不做，只清臂位。",
+        "臂位预置 0x10000 跑 0x304：执行后必须是 1（用了 or ⇒ 0x10001）。",
+        "加一个文本块再 0x305：揭示游标回到块开头且该层最终全部揭示。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-TEXTURE-STRETCH-32",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "源 100×100、源矩形 (0,0,200,200)：实际源矩形必须被夹到 100×100。",
+        "目标纹理不存在：不得抛异常，只记一条错误。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-MSG-WAIT-INPUT-72",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-MSG-WAIT-INPUT-RELEASE",
+          "kind": "unknown",
+          "what": "放行条件的完整集合（左键 / 滚轮 / 自动消息计时器）与它们在帧循环里的次序未逐条取证",
+          "next": "读消息输入处理里清第 31 位的分支"
+        }
+      ],
+      "falsifiers": [
+        "执行后下一拍必须零派发；仍派发 ⇒ 门没关。",
+        "注入一次左键：位必须清、并从下一条继续。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-INPUT-SET-CURSOR-10A",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-INPUT-SET-CURSOR-SCALE",
+          "kind": "unknown",
+          "what": "虚拟屏坐标到客户区 / 屏幕坐标的换算（缩放方向、偏移）未逐条取证",
+          "next": "读换算里的乘除与那两个偏移格"
+        }
+      ],
+      "falsifiers": [
+        "记录请求坐标：必须等于换算前那两个操作数（不做换算的档下）。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-VOICE-OPTION-2F7",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-VOICE-OPTION-2F7-HANDSHAKE",
+          "kind": "unknown",
+          "what": "该选项格 bit0→bit16→0 三态握手的读者与分两拍的原因未取证",
+          "next": "读消费侧对这三态的判定"
+        }
+      ],
+      "falsifiers": [
+        "该格预置 0x10005、执行 0x2f7(1)：执行后必须是 1（用了 or ⇒ 0x10005）。",
+        "另两槽必须不变。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCENE3D-214",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "源不存在：表大小不变、目标不出现。",
+        "目标已有别的记录：被完全覆盖（不是字段级合并）。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-ENGINE-CELL-2E9",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ENGINE-CELL-2E9-READER",
+          "kind": "unknown",
+          "what": "该格的读者与领域名未取证",
+          "next": "搜该格的读者"
+        }
+      ],
+      "falsifiers": [
+        "依次写 1、7：读回必须是 7。",
+        "写 -1：必须原样存 -1。"
+      ]
+    },    {
+      "id": "CORE-OPS-CONFIG-READ-1CB",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [],
+      "falsifiers": [
+        "把该键设成 1 再执行：落点必须 1。",
+        "把该键删掉再执行：落点必须是 0。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCENE-RANGE-TRANSLATE-256",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-RANGE-256-CONSUMER",
+          "kind": "unknown",
+          "what": "那个标志字与平移矩阵的消费者（谁按它们画）未取证",
+          "next": "读绘制入口对记录 +104 与 +364 的读取点"
+        }
+      ],
+      "falsifiers": [
+        "表里只有键 5 与 9 的记录，跑 0x256(5,1,1,2,3)：只有键 5 的平移变。",
+        "跑 0x256(5,0,…)：一条记录都不改，但场景仍要标脏。",
+        "区间里全是不存在的键：表的大小必须不变。"
+      ]
+    },    {
+      "id": "CORE-OPS-SCENE-KEYED-215",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-KEYED-215-WRITER",
+          "kind": "unknown",
+          "what": "那张按键查的表由谁写未取证；若没有写者，本条恒返回 -1",
+          "next": "读 sub_4ADC20 的容器（Scene+0x1020 字节处的 map）的插入点"
+        }
+      ],
+      "falsifiers": [
+        "让表里有一条「位 0 = 1、值 = 7」的记录并查它：落点必须 7。",
+        "同一条把位 0 清掉：必须得 -1。",
+        "查不存在的键：必须得 -1 且不建记录。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCENE-CONTAINER-CLEAR-224",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-CONTAINER-224-FILLER",
+          "kind": "unknown",
+          "what": "谁往这个容器里放条目、条目载荷是什么未取证",
+          "next": "读 sub_4A9BE0 那个容器的插入函数与调用方"
+        }
+      ],
+      "falsifiers": [
+        "容器里有 3 条时执行：执行后计数必须是 0。",
+        "空容器执行：不得报错。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-TEXT-RUN-HEADER-7A",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-TEXT-RUN-HEADER-CONSUMER",
+          "kind": "unknown",
+          "what": "这两个整数在 run 头里的位置与消费者未取证（只知写在写指针之前 20 / 16 字节）",
+          "next": "读 run 头的排版 / 绘制消费点"
+        }
+      ],
+      "falsifiers": [
+        "对槽 3 写 (140,517) 再读回：必须是这两值；顺序反了 ⇒ 写序错。",
+        "对槽 0 写：必须落默认槽。"
+      ]
+    },    {
+      "id": "CORE-OPS-SCENE-COLOR-32D",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-COLOR-32D-CONSUMER",
+          "kind": "unknown",
+          "what": "「设场景颜色」请求（命令 0x8B）在渲染模块里怎么用（清屏色？全局乘？）未取证",
+          "next": "读渲染模块 0x8B 命令的实现"
+        }
+      ],
+      "falsifiers": [
+        "0x32d 300 0xFFFFFF：请求里的透明度必须是 255；是 44 ⇒ 夹取错。",
+        "0x32d 255 0x123456：请求必须是 ARGB 0xFF123456；字节序反了 ⇒ 拼法错。",
+        "执行两次同一颜色：必须发两次请求。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-SCENE-EFFECT-DESTROY-32A",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-SCENE-EFFECT-OBJECT",
+          "kind": "unknown",
+          "what": "三个槽的效果对象类型（雨 / 雪 / 雾？）与它们的创建指令未取证",
+          "next": "读创建侧的指令（同一段天气脚本里的另一条）"
+        }
+      ],
+      "falsifiers": [
+        "槽 0 有对象时执行：执行后必须取不到对象。",
+        "槽 0 空着时执行：不得报错、不得改别的槽。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-ENGINE-CELL-1B1",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ENGINE-CELL-1B1-READER",
+          "kind": "unknown",
+          "what": "该格的读者与领域名未取证",
+          "next": "搜该格的读者"
+        }
+      ],
+      "falsifiers": [
+        "依次写 1、7：读回必须是 7。",
+        "写 -1：必须原样存 -1。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-ENGINE-CELL-238",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-ENGINE-CELL-238-READER",
+          "kind": "unknown",
+          "what": "两格的读者、是否被逐帧递减、以及 5500 的单位未取证",
+          "next": "搜这两格的读者与递减点"
+        }
+      ],
+      "falsifiers": [
+        "先把两格置成非 0，再执行：第 1 格必须变 0、第 2 格必须等于操作数。",
+        "同参数连跑两次：两格值必须不变。"
+      ]
+    },    {
+      "id": "CORE-OPS-VOICE-ALL-STOP",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-VOICE-478-BIT0",
+          "kind": "unknown",
+          "what": "两组选项位的 bit 0 分别选「音量强制 0」还是「循环 -1 / 用显式值」，只读到分支，没有追到声道参数命名",
+          "next": "读声道参数设置子例程的三个入口，把 bit0 两支各自的参数命名"
+        },
+        {
+          "id": "RES-VOICE-CLEAR-PROTOCOL",
+          "kind": "unknown",
+          "what": "这些格与另一个「已处理」标记位（bit 0x10000）共用的协议：谁置该位未取证",
+          "next": "搜「置 bit 0x10000」的第三处写入者"
+        }
+      ],
+      "falsifiers": [
+        "预置 4 组 × 3 槽非 0 与「正在播」= 1，执行后 12 格必须全 0、正在播必须 0。",
+        "后端未挂上时执行：停止请求次数必须 0；是 3 ⇒ 没判后端。",
+        "后端挂上时执行：请求次数必须 3（声道 12/13/14）；是 1 或 5 ⇒ 声道号错。",
+        "先让待播队列有资源格非 0，执行本指令后再跑消费待播队列的那条：不得发生播放。"
+      ]
+    },
+    {
+      "id": "ADV-CHOICE-WINDOW",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "ADV-CHOICE-CONSUMER",
+          "kind": "unknown",
+          "what": "消费侧（点中某条 ⇒ 执行位置 ← 该条决定入口；光标进出 ⇒ 进入/离开入口；没选就关窗 ⇒ 兜底入口）在帧循环里的次序未取证（与命令档 / 文本推进 / 输入采样的相对位置）",
+          "next": "读帧驱动里点中那一条链的调用次序，与命令档 / 文本泵对照"
+        },
+        {
+          "id": "ADV-CHOICE-ARM-RESET",
+          "kind": "unknown",
+          "what": "arm 闸由谁复位（关窗后是否清回 0）未取证；不复位则第二次开窗不重算悬停",
+          "next": "找写 arm 闸 = 0 的函数（已知两处写 0 未定位所属函数）"
+        },
+        {
+          "id": "ADV-CHOICE-91-92-UNUSED",
+          "kind": "unknown",
+          "what": "0x91 / 0x92 在发行数据里一次都没被调用（全语料 0 处）⇒ 只有机制证据，缺一条真实调用序列",
+          "next": "在全库脚本里确认 0 次（已确认）；把「闩锁喂给等待者」这条标成 mechanism-only"
+        },
+        {
+          "id": "ADV-CHOICE-B-CONTROL",
+          "kind": "unknown",
+          "what": "引擎里还有第二个同形控件（另一张选项表，带列表滚动），其建表 / 清表 / 等待是另外几条 opcode；本版不写",
+          "next": "等有使用证据再成篇（那些 opcode 在发行数据里同样 0 处）"
+        }
+      ],
+      "falsifiers": [
+        "依次 0x94、0x93：第一次 0x93 必须关输入总闸且不置闩锁；置了 ⇒ 两支判据反了。",
+        "再跑一次 0x93：必须置闩锁；没置 ⇒ 第二支错。",
+        "未置闩锁跑 0x91：执行位置必须停在原地（推进格数 0）；前进了 ⇒ 阻塞没实现。",
+        "置闩锁后跑 0x91（操作数给非法类型）：必须不抛且推进 3；抛了 ⇒ 闩锁支读了操作数。",
+        "置闩锁后跑 0x92：兜底目标必须不变；变了 ⇒ 写序错。"
+      ]
+    },
+    {
+      "id": "ADV-CHOICE-SET-EXTRA-97",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "ADV-CHOICE-EXTRA-MEANING",
+          "kind": "unknown",
+          "what": "附加整数的领域含义（序号 / 图编号 / 状态）未取证；调用点写的是 0 / 1 / 2 / 3 / 8 这类小整数",
+          "next": "找它的读者（消费侧的状态机里按这个整数做了什么）"
+        }
+      ],
+      "falsifiers": [
+        "追加两条同矩形项后对同矩形跑 0x97：只有第一条的附加整数变；两条都变 ⇒ 取第一条错。",
+        "追加 (0,0,10,10) 后对 (0,0,10,9) 跑 0x97：必须什么都不改；改了 ⇒ 匹配不是四边全等。",
+        "空表跑 0x97：必须不抛、不建项。"
+      ]
+    },
+    {
+      "id": "CORE-OPS-TEXT-UNEQUAL-195",
+      "status": "draft",
+      "disposition": "handled",
+      "covers": [],
+      "residual": [
+        {
+          "id": "RES-OPS-195-FLOAT-TEXT",
+          "kind": "unknown",
+          "what": "浮点标签的\"格式化成文本\"结果未取证（与 0x194 同一条读原语，但浮点那一支的精度 / 小数点写法都没读）",
+          "next": "用一组浮点操作数（type 4 / 7 / 13）跑 0x195，并对照 0x194 是否幂等互补"
+        },
+        {
+          "id": "RES-OPS-195-COMPARE-SUBROUTINE",
+          "kind": "unknown",
+          "what": "比较子例程 sub_401540 内部的 memcmp（sub_401000）只按三参与返回 −1/0/1 的用法推断，未逐字读；观察不到 < / > 语义，但\"长度不同时的返回符号\"没核",
+          "next": "读 sub_401000 的 .lst；再构造长度不同的两串，看 0x195 是否恒为 1（本条只取 !=0，按理恒 1）"
+        }
+      ],
+      "falsifiers": [
+        "同一对操作数依次跑 0x194 与 0x195：必须互补；出现 1/1 或 0/0 ⇒ 有一条方向写错。",
+        "文本 \"abc\" 与 \"abd\"：0x195 必须得 1；得 0 ⇒ 比较方向错。",
+        "整数 5 与文本 \"5\"：必须得 0；得 1 ⇒ 按操作数标签比较了。",
+        "让第 3 个操作数类型非法：抛出后推进格数必须是 7；仍是上一条的值 ⇒ 写序错。"
+      ]
+    },
+    {
       "id": "CORE-OPS-AUDIO-SLOT-STOP-B6",
       "status": "draft",
       "disposition": "handled",
@@ -7726,7 +8181,6 @@
         "0x2f",
         "0x30",
         "0x31",
-        "0x32",
         "0x33",
         "0x34",
         "0x35",
@@ -7741,8 +8195,6 @@
         "0x69",
         "0x6a",
         "0x6b",
-        "0x72",
-        "0x7a",
         "0x7d",
         "0x7e",
         "0x81",
@@ -7755,14 +8207,8 @@
         "0x8a",
         "0x8d",
         "0x8e",
-        "0x90",
-        "0x91",
-        "0x92",
-        "0x93",
-        "0x94",
         "0x95",
         "0x96",
-        "0x97",
         "0xaa",
         "0xab",
         "0xac",
@@ -7812,7 +8258,6 @@
       "note": "本段 58 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x106",
-        "0x10a",
         "0x10e",
         "0x12d",
         "0x131",
@@ -7839,15 +8284,11 @@
         "0x14c",
         "0x14d",
         "0x190",
-        "0x193",
-        "0x195",
         "0x19d",
         "0x19f",
-        "0x1b1",
         "0x1b2",
         "0x1b3",
         "0x1b4",
-        "0x1bc",
         "0x1bd",
         "0x1be",
         "0x1c0",
@@ -7858,7 +8299,6 @@
         "0x1c6",
         "0x1c8",
         "0x1c9",
-        "0x1cb",
         "0x1cd",
         "0x1d0",
         "0x1d1",
@@ -7890,14 +8330,10 @@
         "0x206",
         "0x207",
         "0x209",
-        "0x20a",
         "0x210",
         "0x211",
-        "0x214",
-        "0x215",
         "0x221",
         "0x222",
-        "0x224",
         "0x225",
         "0x226",
         "0x227",
@@ -7910,13 +8346,11 @@
         "0x232",
         "0x236",
         "0x237",
-        "0x238",
         "0x23a",
         "0x23e",
         "0x23f",
         "0x240",
         "0x241",
-        "0x243",
         "0x244",
         "0x245",
         "0x246",
@@ -7928,7 +8362,6 @@
         "0x253",
         "0x254",
         "0x255",
-        "0x256",
         "0x257",
         "0x25a",
         "0x25c",
@@ -7962,7 +8395,6 @@
         "0x2e3",
         "0x2e4",
         "0x2e5",
-        "0x2e9",
         "0x2ed",
         "0x2ef",
         "0x2f0",
@@ -7970,7 +8402,6 @@
         "0x2f2",
         "0x2f3",
         "0x2f4",
-        "0x2f7",
         "0x2f9",
         "0x2fa",
         "0x2fb",
@@ -7992,8 +8423,6 @@
       "note": "本段 43 个有处理函数的 opcode 尚无任何规则标题覆盖（未成篇，尚未逐条写成规范合同）；分段只是 0x100 区间的机械分组，不代表族身份。",
       "ops": [
         "0x302",
-        "0x304",
-        "0x305",
         "0x309",
         "0x321",
         "0x325",
@@ -8001,9 +8430,7 @@
         "0x327",
         "0x328",
         "0x329",
-        "0x32a",
         "0x32c",
-        "0x32d",
         "0x32e",
         "0x330",
         "0x331",

@@ -1,0 +1,6 @@
+# route: title（标题画面）
+# 宿主测试装置：脚本化输入时间线（⛔ 不是引擎 spec；引擎语义在 data/spec）。
+# from: boot
+# anchor: 21092 TITLE.BIN（时间线 0 点 = 首次进入该脚本）
+# arrive: 21092 TITLE.BIN（播放器 --expect-script 的判据）
+# 由 `pnpm tools routes emit --id title` 从 data/routes/screens.json 生成；⛔ 别手改。

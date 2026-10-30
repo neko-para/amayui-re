@@ -344,4 +344,157 @@ void Machine::op_104(const Instruction& instruction) {
     return;
 }
 
+void Machine::op_90(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 選択肢の登録（0x90 / `sub_420640`，argc 7、推进 15；规则 `ADV-CHOICE-ADD-90`）：
+    // 前四个操作数拼矩形（存 `x, y, x+宽, y+高`），后三个是该选项的三条脚本入口（body 内字下标，-1 = 无）。
+    // ★ 读序 **1 → 2 → 3 → 4 → 7 → 6 → 5**（多操作数非法时抛在哪一条由它决定）。
+    // ★ 本条**不**改执行位置（决定 / 进入 / 离开的跳转在消费侧）；追加成功后把选中下标复位。
+    write_length(15);
+    const auto x = read_int(ops[0]);
+    const auto y = read_int(ops[1]);
+    const auto width = read_int(ops[2]);
+    const auto height = read_int(ops[3]);
+    const auto decide = read_int(ops[6]);
+    const auto leave = read_int(ops[5]);
+    const auto enter = read_int(ops[4]);
+    // 容量 100（EA 0x403B39 的 `cmp eax, 64h`）：满了 ⇒ 一个字段都不写、抛显示消息型异常。
+    if (choices_.size() >= kChoiceCapacity) throw CoreError("choice-table-full");
+    ChoiceEntry entry;
+    entry.left = x;
+    entry.top = y;
+    entry.right = x + width;
+    entry.bottom = y + height;
+    entry.enter = enter;
+    entry.leave = leave;
+    entry.decide = decide;
+    entry.depth = 0;  // 本模型没有帧深度档（残差）
+    choices_.push_back(entry);
+    choice_index_ = -1;
+    return;
+}
+
+void Machine::op_97(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 選択肢の付加整数（0x97 / `sub_420910`，argc 5、推进 11；规则 `ADV-CHOICE-SET-EXTRA-97`）：
+    // 前四个操作数拼矩形（`x, y, x+宽, y+高`），拿**四条边全等**去选项表里找**第一条**命中的项，
+    // 找到就把它的附加整数格 ← 第 5 个操作数；**找不到什么都不做**（不建项、不报错）。
+    write_length(11);
+    const auto left = read_int(ops[0]);
+    const auto top = read_int(ops[1]);
+    const auto width = read_int(ops[2]);
+    const auto height = read_int(ops[3]);
+    const auto value = read_int(ops[4]);
+    const auto right = left + width;
+    const auto bottom = top + height;
+    for (auto& choice : choices_) {
+        if (choice.left == left && choice.top == top && choice.right == right &&
+            choice.bottom == bottom) {
+            choice.extra = value;
+            return;
+        }
+    }
+    return;
+}
+
+// 选项窗口的**清表**（`sub_403EF0`）：条目数 0、选中 -1、步长 0、悬停 -1、兜底 -1、变更挂起 0。
+void Machine::reset_choice_table() {
+    choices_.clear();
+    choice_index_ = -1;
+    choice_window_.step = 0;
+    choice_window_.hover = -1;
+    choice_window_.fallback = -1;
+    choice_window_.pending = false;
+}
+
+// 用当前光标对选项表做一次**矩形命中**（`sub_403C50`）：返回第一条命中的下标，没有 ⇒ -1。
+std::int32_t Machine::choice_hit_test() const {
+    std::int32_t x = 0;
+    std::int32_t y = 0;
+    if (cursor_source_ == nullptr || !cursor_source_(x, y)) return -1;
+    for (std::size_t i = 0; i < choices_.size(); ++i) {
+        const ChoiceEntry& entry = choices_[i];
+        if (x >= entry.left && x < entry.right && y >= entry.top && y < entry.bottom) {
+            return static_cast<std::int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+void Machine::op_93(const Instruction& instruction) {
+    (void)instruction;
+    // 选项窗口：清表 + 关窗 / 置完成闩锁（0x93 / `sub_4191D0`，argc 0、推进 1；规则 `ADV-CHOICE-WINDOW`）。
+    // ★ 永远推进 1（不阻塞）：先清表，然后**二选一** —— 输入开着（总闸 ≠ 0）⇒ 关掉；否则 ⇒ 置闩锁（喂 0x91 / 0x92）。
+    write_length(1);
+    reset_choice_table();
+    if (choice_window_.input_gate) {
+        choice_window_.input_gate = false;
+    } else {
+        choice_window_.latch = true;
+    }
+    return;
+}
+
+void Machine::op_94(const Instruction& instruction) {
+    (void)instruction;
+    // 选项窗口：开窗（鼠标可选、上下键翻页被禁用）（0x94 / `sub_419230`，argc 0、推进 1；规则 `ADV-CHOICE-WINDOW`）。
+    // ★ 无任何分支、不阻塞：总闸置 1，然后 arm —— arm-once 闸为 0 时置 1 并用**当前光标**跑一次命中测试。
+    // ★ 步长写 10000（≥ 条目数 ⇒ 上下键翻页实际失效），这是本族唯一的"时间量"来源，不是超时。
+    write_length(1);
+    choice_window_.input_gate = true;
+    if (!choice_window_.arm) {
+        choice_window_.arm = true;
+        choice_window_.hover = choice_hit_test();
+    }
+    choice_window_.move_hit = true;
+    choice_window_.step = 10000;
+    return;
+}
+
+void Machine::op_91(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 选项窗口：等待（0x91 / `sub_420740`，argc 1、推进 **3 或 0**；规则 `ADV-CHOICE-WINDOW`）。
+    // ★ 唯一"阻塞"形态：闩锁已置 ⇒ 消费它（闩锁 = 0、移动命中开关 = 0）、**不读操作数**、推进 3；
+    //   否则置动作位、arm 一次、步长 ← 第 1 个操作数，再把推进格数改回 **0** ⇒ 下一拍重跑同一条。
+    write_length(3);
+    if (choice_window_.latch) {
+        choice_window_.latch = false;
+        choice_window_.move_hit = false;
+        return;
+    }
+    const auto step = read_int(ops[0]);
+    if (!choice_window_.arm) {
+        choice_window_.arm = true;
+        choice_window_.hover = choice_hit_test();
+    }
+    choice_window_.step = step;
+    choice_window_.move_hit = true;
+    write_length(0);  // 阻塞：本拍不前进，下一拍重新执行
+    return;
+}
+
+void Machine::op_92(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 选项窗口：等待 + 兜底跳转目标（0x92 / `sub_4207D0`，argc 2、推进 **5 或 0**；规则 `ADV-CHOICE-WINDOW`）。
+    // ★ 闩锁判断在**读数之前**（EA 0x4207EB → 0x4207FE 直接返回）⇒ 闩锁已置时一个操作数都不读、兜底目标也不写。
+    // ★ 读数序 **2 → 1**（先兜底目标，再步长）。
+    write_length(5);
+    if (choice_window_.latch) {
+        choice_window_.latch = false;
+        choice_window_.move_hit = false;
+        return;
+    }
+    const auto fallback = read_int(ops[1]);
+    const auto step = read_int(ops[0]);
+    choice_window_.fallback = fallback;
+    if (!choice_window_.arm) {
+        choice_window_.arm = true;
+        choice_window_.hover = choice_hit_test();
+    }
+    choice_window_.step = step;
+    choice_window_.move_hit = true;
+    write_length(0);  // 阻塞
+    return;
+}
+
 }  // namespace core

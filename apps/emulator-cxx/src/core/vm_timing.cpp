@@ -8,6 +8,38 @@
 
 namespace core {
 
+void Machine::service_bgm_fade() {
+    // ★ 残差（`RES-AUDIO-BGM-FADE-SERVICE`）：**规范没有规定状态字第 9 位的服务分支**
+    //   （60-ops-voice 的残差只登记"别处会清它"）。这里是**观测驱动的最小实现**：
+    //   按 `0xC2` 自己算出的间隔（毫秒）与步长推进，到位即清第 9 位（"淡变进行中"结束）。
+    //   ⛔ 不声称与引擎逐位一致；主循环取证后再校。
+    if ((state_flags_ & (1u << 9)) == 0) {
+        bgm_fade_last_ms_ = 0;
+        return;
+    }
+    const std::uint32_t now = scene_clock_ms_;
+    if (bgm_fade_last_ms_ == 0) {
+        bgm_fade_last_ms_ = now;
+        return;
+    }
+    const auto interval = bgm_fade_interval_ms_ > 0 ? static_cast<std::uint32_t>(bgm_fade_interval_ms_) : 1u;
+    auto step = bgm_fade_step_;
+    if (step <= 0) step = 1;
+    while (now >= bgm_fade_last_ms_ + interval) {
+        bgm_fade_last_ms_ += interval;
+        if (bgm_fade_progress_ < bgm_fade_target_) {
+            bgm_fade_progress_ = std::min(bgm_fade_target_, bgm_fade_progress_ + step);
+        } else if (bgm_fade_progress_ > bgm_fade_target_) {
+            bgm_fade_progress_ = std::max(bgm_fade_target_, bgm_fade_progress_ - step);
+        }
+        if (bgm_fade_progress_ == bgm_fade_target_) break;
+    }
+    if (bgm_fade_progress_ == bgm_fade_target_) {
+        state_flags_ &= ~(1u << 9);  // "淡变进行中"结束
+        bgm_fade_last_ms_ = 0;
+    }
+}
+
 void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
     scene_previous_ms_ = scene_clock_ms_;
     scene_clock_ms_ = now_ms;

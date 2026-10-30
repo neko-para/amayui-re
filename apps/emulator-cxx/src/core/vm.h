@@ -146,6 +146,17 @@ struct DrawItem {
 };
 
 struct SceneRecord {
+    // 记录首字的两个位：位 0 = 「已存在」（`0x1fb` 置）、位 1 = 「已配置」（`0x220` 置）。
+    std::int32_t flags = 0;
+    // `0x1fb` / `0x23b` 在**建记录时**写的那一个整数标签（引擎 payload+4；`0x215` 读它）。
+    std::int32_t tag = 0;
+    // `0x256` 给一段键区间内的记录写的：一个标志字 + 一个平移矩阵的三个分量。
+    std::int32_t flag_256 = 0;
+    float matrix_translate[3]{};
+    // `0x220` 写的四个互异整数格：G0（窗起点，清 0）/ G1 / G2（两个属性）/ G3（写 1）。
+    std::int32_t g[4] = {0, 0, 0, 0};
+    // `0x220` 写的**第四个平移矩阵**（与 `0x1ff` 的那个不是同一个）。
+    float translate4[3]{};
     float scale[3]{1.0f, 1.0f, 1.0f};
     float translate[3]{};
     float rotate_axis[3]{};
@@ -154,6 +165,59 @@ struct SceneRecord {
     // 两个三元向量（`0x218` / `0x21a` 读；`0x217` / `0x219` 写，后者本版未实现）。
     float vec1[3]{};
     float vec2[3]{};
+};
+
+// **场景自身变换**（`CORE-OPS-SCENE-SELF-TRANSFORM-229`，`0x229` 写）：
+// 作用键区间 + 三元平移。绘制项的消费者对**键落在区间内**的条目额外加这一次平移
+// （命令档则按「区间 A 的起点」跳过它）。默认 `active=false` ⇒ 不加。
+struct SceneSelfTransform {
+    bool active = false;
+    std::uint32_t range_start = 0;
+    std::uint32_t range_count = 0;
+    float translate[3]{};
+    bool covers(std::uint32_t key) const {
+        return active && key >= range_start && key < range_start + range_count;
+    }
+};
+
+// 1000 项表里每项的**标志两格**（`0x258` 写 / `0x259` 全清；观察口用）。
+// 「场景颜色」请求（`0x32d`）：按 0..1 归一化的四通道换算成 ARGB 后交给渲染模块（命令 0x8B）。
+// ★ 本模型只记**请求**（引擎侧不保存任何可观察状态），渲染模块是否用它不在本版。
+struct SceneColorRequest {
+    std::uint32_t argb = 0;
+    std::size_t count = 0;
+};struct TextureFlags {
+    std::int32_t flag0 = 0;  // 位 0：恢复时的纹理重建门
+    std::int32_t flag1 = 0;  // 位 1：本作没有读者
+};
+
+// **选项窗口的状态格**（`0x91` / `0x92` / `0x93` / `0x94` 写；`ADV-CHOICE-WINDOW`）：
+// 它们只开关"窗口 / 闩锁"，真正的输入消费在帧循环里（本模型尚未建消费侧，见残差）。
+struct ChoiceWindowState {
+    std::int32_t step = 0;         // 上下键步长（`0x91` / `0x92` 的第 1 个操作数；`0x94` 写 10000）
+    std::int32_t hover = -1;       // 悬停下标（-1 = 无）
+    std::int32_t fallback = -1;    // 兜底跳转目标（`0x92` 的第 2 个操作数；清表复位 -1）
+    bool latch = false;            // 完成闩锁：`0x93` 的 else 支置、`0x91` / `0x92` 消费
+    bool input_gate = false;       // 输入总闸：`0x94` 置、`0x93` 清
+    bool arm = false;              // arm-once 闸（命中测试只跑一次）
+    bool move_hit = false;         // 鼠标移动时做命中测试的开关
+    bool pending = false;          // 选择变更挂起
+};
+
+// **选项表的一条**（`ADV-CHOICE-ADD-90`，`0x90` 追加）：矩形四边 + 三个脚本入口（body 内字下标，-1 = 无）。
+// 第 7 个操作数是「决定」入口、第 5 / 6 个是「进入 / 离开」入口（消费侧才有读者）。
+inline constexpr std::int32_t kTextLayerFallbackBase = 200000;
+inline constexpr std::size_t kChoiceCapacity = 100;  // 选项表容量（不是错误文本里写的 20）
+struct ChoiceEntry {
+    std::int32_t left = 0;
+    std::int32_t top = 0;
+    std::int32_t right = 0;
+    std::int32_t bottom = 0;
+    std::int32_t enter = -1;   // 第 5 个操作数
+    std::int32_t leave = -1;   // 第 6 个操作数
+    std::int32_t decide = -1;  // 第 7 个操作数
+    std::int32_t extra = -1;   // `0x97` 按矩形匹配后写的附加整数（初值 -1）
+    std::int32_t depth = 0;    // 追加时当前帧的深度档（本模型没有深度 ⇒ 恒 0，见残差）
 };
 
 // 影片对象（对象表的一格）：引擎状态 + 播放后端句柄（平台边界，核心不解释其形状）。
@@ -256,6 +320,11 @@ struct TextureRecord {
     bool blank = false;
     // 「内容非文件装载」标志（`0x1f8` 空白创建 / `0x20b` 填充共用；全语料无读点）。
     bool non_file = false;
+    // 1000 项表里**每项的标志两格**（`0x258` 写 / `0x259` 全清；`CORE-OPS-SCENE-TABLE-FLAGS`）：
+    //   flag0 = 位 0 = **恢复时的纹理重建门**；flag1 = 位 1 = 本作**没有读者**。
+    // ★ 引擎把它存在纹理记录的同一项里（两张平行表 = 活动表 + 快照，本模型只有活动表）。
+    std::int32_t flag0 = 0;
+    std::int32_t flag1 = 0;
 };
 
 // **纹理槽里的对象**：像素 + 尺寸 + 版本。`0x1fa` / `0x23d` 只清它（`present = false`）。
@@ -540,6 +609,78 @@ public:
     // ★ 这是宿主的**观察口**（`--watch-locals`），⛔ 不是脚本可见量，也不改任何状态。
     std::int32_t local_int(std::uint32_t index) const;
     const std::unordered_map<std::uint32_t, MeshRecord>& meshes() const { return meshes_; }
+    // `0x229` 写的场景自身变换（观察口：绘制项的消费者按它给区间内的条目加平移）。
+    const SceneSelfTransform& scene_self_transform() const { return scene_self_transform_; }
+    // `0x258` / `0x259` 写的两项标志（观察口；`0x258` 按位掩码写、`0x259` 全清）。
+    TextureFlags texture_flags(std::uint32_t id) const {
+        const auto it = textures_.find(id);
+        if (it == textures_.end()) return TextureFlags{};
+        return TextureFlags{it->second.record.flag0, it->second.record.flag1};
+    }
+    // 选项表（`0x90` 追加；观察口）。
+    const std::vector<ChoiceEntry>& choices() const { return choices_; }
+    std::int32_t choice_index() const { return choice_index_; }
+    const ChoiceWindowState& choice_window() const { return choice_window_; }
+    // `0x32d` 发过的「场景颜色」请求（命令 0x8B）；`0x32a` 销毁过的子对象槽。
+    const SceneColorRequest& scene_color_request() const { return scene_color_request_; }
+    // `0x1b1` 写的那格（领域名未取证；ADV 脚本开头用它设一个整数档）。
+    std::int32_t cell_1b1() const { return cell_1b1_; }
+    std::int32_t cell_2e9() const { return cell_2e9_; }
+    std::int32_t msg_arm() const { return msg_arm_; }
+    std::int32_t msg_wait(std::size_t i) const {
+        return i == 0 ? msg_wait_a_ : (i == 1 ? msg_wait_b_ : msg_wait_c_);
+    }
+    void set_msg_wait_gate(std::int32_t value) { msg_wait_gate_ = value; }
+    std::int32_t voice_option_2f7(std::size_t i) const { return i < 3 ? voice_option_2f7_[i] : 0; }
+    std::int32_t cursor_request_x() const { return cursor_request_x_; }
+    std::int32_t cursor_request_y() const { return cursor_request_y_; }
+    std::size_t cursor_requests() const { return cursor_requests_; }
+    bool advance_waiting() const { return (state_flags_ & (1u << 31)) != 0; }
+    void set_voice_option_2f7(std::size_t i, std::int32_t value) { if (i < 3) voice_option_2f7_[i] = value; }
+    // `0x238` 写的两格：第 1 格清 0、第 2 格 ← 操作数（`5500` 这种毫秒量）。
+    std::int32_t cell_238_left() const { return cell_238_left_; }
+    std::int32_t cell_238_value() const { return cell_238_value_; }
+    // `0x215` 的观察口 / 测试钩子。
+    bool scene_keyed_record(std::int32_t key, std::int32_t& flags, std::int32_t& value) const {
+        const auto it = scene_records_.find(static_cast<std::uint32_t>(key));
+        if (it == scene_records_.end()) return false;
+        flags = it->second.flags;
+        value = it->second.tag;
+        return true;
+    }
+    bool scene_record_translate(std::int32_t key, float out[3]) const {
+        const auto it = scene_records_.find(static_cast<std::uint32_t>(key));
+        if (it == scene_records_.end()) return false;
+        out[0] = it->second.matrix_translate[0];
+        out[1] = it->second.matrix_translate[1];
+        out[2] = it->second.matrix_translate[2];
+        return true;
+    }
+    void set_scene_keyed_record(std::int32_t key, std::int32_t flags, std::int32_t value) {
+        SceneRecord& record = scene_records_[static_cast<std::uint32_t>(key)];
+        record.flags = flags;
+        record.tag = value;
+    }
+    bool scene_keyed_pair(std::int32_t key, std::int32_t& a, std::int32_t& b) const {
+        const auto it = scene_keyed_pair_.find(key);
+        if (it == scene_keyed_pair_.end()) return false;
+        a = it->second.field_a;
+        b = it->second.field_b;
+        return true;
+    }
+    void set_scene_keyed_pair(std::int32_t key, std::int32_t a, std::int32_t b) {
+        scene_keyed_pair_[key] = KeyedPairRecord{a, b};
+    }
+    std::size_t container_224_items() const { return container_224_items_; }
+    std::pair<std::int32_t, std::int32_t> run_header(std::size_t slot) const {
+        return slot < run_header_.size() ? std::make_pair(run_header_[slot].a, run_header_[slot].b)
+                                          : std::make_pair(0, 0);
+    }
+    void set_container_224_items(std::size_t value) { container_224_items_ = value; }
+    bool scene_effect_present(std::size_t i) const { return i < 3 ? scene_effect_present_[i] : false; }
+    void set_scene_effect_present(std::size_t i, bool value) {
+        if (i < 3) scene_effect_present_[i] = value;
+    }
     const std::map<std::uint32_t, SceneCommandRecord>& scene_commands() const { return scene_commands_; }
     std::map<std::uint32_t, SceneCommandRecord>& scene_commands_mut() { return scene_commands_; }
     void clear_scene_commands() { scene_commands_.clear(); }
@@ -622,6 +763,20 @@ public:
     std::int32_t voice_mirror_a4(std::size_t i) const { return voice_mirror_a4_[i]; }
     bool bgm_ducked() const { return bgm_ducked_; }
     std::int32_t voice_switch(std::size_t i) const { return voice_switch_46c_[i]; }
+    std::int32_t voice_switch_478(std::size_t i) const { return voice_switch_478_[i]; }
+    std::int32_t voice_busy() const { return voice_busy_; }
+    std::size_t voice_stop_requests() const { return voice_stop_requests_; }
+    // 测试钩子：`0x1bc` 的后端分支（挂上才发停止请求）与要清的格需要能预置。
+    void set_voice_backend_attached(bool value) { voice_backend_attached_ = value; }
+    void set_voice_cells(std::size_t i, std::int32_t voice46c, std::int32_t voice478,
+                         std::int32_t mirror_resource, std::int32_t mirror_a4) {
+        if (i >= 3) return;
+        voice_switch_46c_[i] = voice46c;
+        voice_switch_478_[i] = voice478;
+        voice_mirror_resource_[i] = mirror_resource;
+        voice_mirror_a4_[i] = mirror_a4;
+    }
+    void set_voice_busy(std::int32_t value) { voice_busy_ = value; }
     std::size_t text_span_count() const { return text_spans_.size(); }
     std::int32_t text_span_resource(std::size_t i) const { return text_spans_[i].resource; }
     std::int32_t text_span_voice_slot(std::size_t i) const { return text_spans_[i].voice_slot; }
@@ -837,6 +992,9 @@ private:
     // `0x09` 只清**当前选中 bank** 的三个全局池（另一组保留）。
     void clear_global_pool_bank();
     std::uint32_t script_int_key_index(const Operand& operand);
+    // 选项窗口（`0x91`…`0x94`）的内部原语。
+    void reset_choice_table();
+    std::int32_t choice_hit_test() const;
     void jump_to(std::uint32_t position);
     void push_return(std::uint32_t position);
 
@@ -864,7 +1022,12 @@ private:
     // 纹理尺寸查询（vm_ops_texture.cpp）
     void op_208(const Instruction&);
     // 3D 记录取回（vm_ops_texture.cpp）：两个三元向量 + 平移分量
-    void op_218(const Instruction&); void op_21a(const Instruction&); void op_228(const Instruction&);
+    void op_218(const Instruction&); void op_219(const Instruction&); void op_21a(const Instruction&); void op_228(const Instruction&);
+    void op_258(const Instruction&); void op_259(const Instruction&);
+    void op_90(const Instruction&);
+    void op_97(const Instruction&);
+    void op_91(const Instruction&); void op_92(const Instruction&);
+    void op_93(const Instruction&); void op_94(const Instruction&);
     // 写第一三元向量（vm_ops_texture.cpp）
     void op_217(const Instruction&);
     // 记录复制（vm_ops_texture.cpp）
@@ -875,6 +1038,7 @@ private:
     void op_20f(const Instruction&);
     // 场景命令记录（vm_ops_scene.cpp）
     void op_223(const Instruction&); void op_24d(const Instruction&); void op_24f(const Instruction&); void op_250(const Instruction&);
+    void op_229(const Instruction&);
     void op_251(const Instruction&);
     // 引擎级状态与宿主请求（vm_ops_engine.cpp）
     void op_88(const Instruction&); void op_308(const Instruction&); void op_bf(const Instruction&); void op_b4(const Instruction&);
@@ -914,6 +1078,26 @@ private:
     void op_a1(const Instruction&); void op_a2(const Instruction&); void op_a3(const Instruction&);
     void op_d9(const Instruction&); void op_19b(const Instruction&); void op_19c(const Instruction&);
     void op_1bf(const Instruction&); void op_1cf(const Instruction&);
+    void op_1bc(const Instruction&);
+    void op_32d(const Instruction&); void op_32a(const Instruction&);
+    void op_1b1(const Instruction&);
+    void op_238(const Instruction&);
+    void op_215(const Instruction&);
+    void op_242(const Instruction&);
+    void op_220(const Instruction&);
+    void op_224(const Instruction&);
+    void op_7a(const Instruction&);
+    void op_1cb(const Instruction&);
+    void op_256(const Instruction&);
+    void op_193(const Instruction&); void op_20a(const Instruction&); void op_243(const Instruction&);
+    void op_32(const Instruction&); void op_72(const Instruction&); void op_10a(const Instruction&);
+    void op_2e9(const Instruction&);
+    void op_214(const Instruction&);
+    // `0x72` 的放行（帧服务）：等推进位置起时，输入一到就清位。
+    void service_advance_wait();
+    void op_2f7(const Instruction&); void op_304(const Instruction&); void op_305(const Instruction&);
+    // 门之前的 BGM 淡变推进（第 9 位的服务分支；规范未规定 ⇒ 见实现里的残差说明）。
+    void service_bgm_fade();
     // 标志格 / 状态格 / 模式位读 / 层号（vm_ops_engine.cpp）
     void op_19a(const Instruction&); void op_1b6(const Instruction&); void op_1b7(const Instruction&);
     void op_1ad(const Instruction&); void op_1c7(const Instruction&); void op_1cc(const Instruction&);
@@ -941,7 +1125,7 @@ private:
     // 字体与文本（vm_ops_text.cpp）
     void op_2ec(const Instruction&); void op_2eb(const Instruction&); void op_1a4(const Instruction&); void op_76(const Instruction&);
     void op_2bd(const Instruction&); void op_2de(const Instruction&); void op_192(const Instruction&); void op_1a9(const Instruction&);
-    void op_194(const Instruction&);
+    void op_194(const Instruction&); void op_195(const Instruction&);
     void op_1aa(const Instruction&); void op_1a3(const Instruction&); void op_1a2(const Instruction&); void op_2db(const Instruction&);
     void op_78(const Instruction&); void op_71(const Instruction&); void op_1a5(const Instruction&); void op_197(const Instruction&); void op_198(const Instruction&);
     void op_75(const Instruction&);
@@ -970,6 +1154,7 @@ private:
     void erase_pending_glyphs(int slot);
     // `0x300` 循环演示闸（规则 `CORE-OPS-TEXT-SLOT-TIMER`）：揭示下一格 / 揭示全部（关闸时抽干）。
     void reveal_text_layer_cell(int slot);
+    void reveal_text_layer_to(std::size_t slot, std::size_t revealed);
     void reveal_all_text_layer_cells(int slot);
     void service_text_gate(int slot);
     // 输入 / 等待 / 空操作（vm_ops_io.cpp）
@@ -1150,6 +1335,8 @@ private:
     std::int32_t bgm_fade_progress_ = 0;
     std::int32_t bgm_fade_interval_ms_ = 0;
     std::int32_t bgm_fade_mix_mode_ = 0;
+    // 淡变推进的记账：上一次推进的时刻（毫秒）。`0` = 还没起算。
+    std::uint32_t bgm_fade_last_ms_ = 0;
     std::size_t bgm_fade_requests_ = 0;
     // `0x2f5`（配音排队）写的那五格：延时 ms / 资源号 / pending / 起算 / 状态字（每槽一格）。
     // ★ 真正"响"是帧更新里的计时（本版不建模时钟 ⇒ 只落状态与请求）。
@@ -1166,6 +1353,13 @@ private:
     // ★ 两个开关格的消费写法与排队路径**不同**：这里是"位16 ⇒ 整格 0；否则位0 ⇒ 置位16（**保留位0**）"，
     //   而排队播放那一路是 `and 0x10000`（**清位0**）。照抄，不要统一。
     std::array<std::int32_t, 3> voice_switch_46c_{};
+    // `0x1bc` 清的**第二组**每槽选项位（`T_Voice+0x478`）；`0x2f6` 也清它。本模型里没有写者。
+    std::array<std::int32_t, 3> voice_switch_478_{};
+    // `Engine+0x77A14`：**voice 正在播**标志（`0x1bc` 清 0；谓词在别处）。
+    std::int32_t voice_busy_ = 0;
+    // voice 后端的挂接状态（平台边界）：没挂上时 `0x1bc` 不发停止请求（引擎同一支）。
+    bool voice_backend_attached_ = false;
+    std::size_t voice_stop_requests_ = 0;
     // `0xc4` 写的两个"镜像"格（`Engine+0x77A24` / `+0x77A30`，每槽一份）。
     std::array<std::int32_t, 3> voice_mirror_resource_{};
     std::array<std::int32_t, 3> voice_mirror_a4_{};
@@ -1209,6 +1403,21 @@ private:
     // 消息窗口记录（`0x6E` / `0x196` 追加、`0x6F` 行结束、`0x301` 释放）。
     std::unordered_map<std::int32_t, TextWindowRecord> text_windows_;
     std::int32_t current_text_slot_ = 0;  // `Engine+0x7780C`（`0x6E` / `0x196` 写）
+    // 消息块状态（`0x304` / `0x305` / `0x6e`）：`msg_arm_` 的第 0 位 = 块已开始、
+    // 第 16 位 = 本块真的追加过文本；`msg_saved_cursor_` = 块开头该层的揭示游标。
+    std::int32_t msg_arm_ = 0;
+    std::int32_t msg_saved_cursor_ = 0;
+    // `0x243` 写的三格（消息等待状态）与它前面那道位（`0x5A2D0` 的第 1 位）。
+    std::int32_t msg_wait_a_ = 0;
+    std::int32_t msg_wait_b_ = 0;
+    std::int32_t msg_wait_c_ = 0;
+    std::int32_t msg_wait_gate_ = 0;
+    // `0x2f7` 写的语音选项格（每槽一格，整格写 1）。
+    std::array<std::int32_t, 3> voice_option_2f7_{};
+    // `0x10a` 的光标瞬移请求（平台边界：本模型只记请求，不改任何引擎状态）。
+    std::int32_t cursor_request_x_ = 0;
+    std::int32_t cursor_request_y_ = 0;
+    std::size_t cursor_requests_ = 0;
     // 十个文本层的宿主游标（纹理 = 20 + 层号；矩形 / 原点 / 键基数在 `list_records_`）。
     std::array<TextLayerState, 10> text_layer_state_{};
     // typewriter 的跨帧待画格（追加时入队；全局一个队列 = 引擎的推进器是全局的）。
@@ -1278,6 +1487,31 @@ private:
     MovieBackendFactory movie_factory_;
     MovieBytesLoader movie_bytes_loader_;
     std::unordered_map<std::uint32_t, SceneRecord> scene_records_;
+    // `0x215` 查的那张**按整数键的记录表**（引擎 Scene 侧；每项 = 一个标志字 + 一个整数值）。
+    // ★ 写者还没找到（残差）⇒ 本模型里通常为空，查不到就返回 -1（引擎的同一支）。
+    struct KeyedRecord { std::int32_t flags = 0; std::int32_t value = 0; };
+        struct KeyedPairRecord { std::int32_t field_a = 0; std::int32_t field_b = 0; };
+    std::unordered_map<std::int32_t, KeyedPairRecord> scene_keyed_pair_;
+    // `0x224` 清空的那个按 key 的容器（引擎 Scene 侧）：本模型只记条目数（填充者未取证）。
+    std::size_t container_224_items_ = 0;
+    // `0x7a` 往每个文本槽的 run 头写的两个整数（引擎侧；消费者未建模）。
+    struct RunHeader { std::int32_t a = 0; std::int32_t b = 0; };
+    std::array<RunHeader, 10> run_header_{};
+    // 场景自身变换（`0x229`）：作用键区间 + 三元平移；绘制项的消费者读它。
+    SceneSelfTransform scene_self_transform_;
+    // 选项表（`0x90`）：按追加顺序；`choice_index_` = 当前选中项（-1 = 无）。
+    std::vector<ChoiceEntry> choices_;
+    std::int32_t choice_index_ = -1;
+    ChoiceWindowState choice_window_;
+    // `0x32d` / `0x32a`：场景颜色的请求记录 + 三个天气子对象槽的"存在"标志。
+    SceneColorRequest scene_color_request_;
+    std::array<bool, 3> scene_effect_present_{};
+    // `0x1b1` 写的那格（Engine 侧一个整数档；领域名未取证）。
+    std::int32_t cell_1b1_ = 0;
+    std::int32_t cell_2e9_ = 0;
+    // `0x238` 写的两格（第 1 格清 0、第 2 格 ← 操作数）。
+    std::int32_t cell_238_left_ = 0;
+    std::int32_t cell_238_value_ = 0;
     std::map<std::uint32_t, SceneCommandRecord> scene_commands_;
     std::uint32_t render_now_ms_ = 0;
     bool command_animating_ = false;

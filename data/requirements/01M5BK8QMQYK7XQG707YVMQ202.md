@@ -10,55 +10,56 @@
 ## 一句话
 
 本节点**保持 open**，作为「当前实现总览与交接」持续更新，不按收口处理（用户口径 2026-10-29）。
-2026-10-29 长程两轮：**emulator-cxx 已派发但未成篇的 opcode 清零**（`dispatched ∩ gaps = 0`）；
-`0x2CF` 已实现；`0x82` / `0x1D0` 各有**可判定结论（B：带 next 的残差 + 需求单）**。
+2026-10-30：**GameStart → ゲーム開始 → ADV 界面（夕阳背景 + 旁白正文）已跑通**，该路径上缺的 opcode 全部补齐。
 
 ## 交付物在哪
 
 - **规范**：`repo:data/spec`（真源）· 工具 `pnpm tools spec validate|report|describe`。
 - **C++ 实现线**：`repo:apps/emulator-cxx`（preset `windows-x64`；`out/` 是 binaryDir）；参考实现 `repo:apps/emulator-new`。
 - **取证记录**（锚 EA、含不确定项，⛔ 不是 spec）：`repo:docs/02-engine/ops-forensics-2026-10-title-option.md`。
-- **本线需求单**：`REQ-01M5WD5Q5HDE246W3T97F3NA8C`。
+- **本线需求单**：`REQ-01M5WD5Q5HDE246W3T97F3NA8C`；ADV 路径单 `REQ-01M6495R6H85GSSVDGXPJVTAGH` 已 done。
 
 ## 宿主观测面（不是引擎语义）
 
 - 播放：`--input-script` / `--play-headless` / `--tick-ms` / `--anchor-script` / `--expect-script` /
-  `--require-script` / `--bmp`。
+  `--require-script` / `--bmp` / `--bmp-stride` / `--bmp-limit`。
 - 诊断：`--watch-locals` · `--trace-script` / `--trace-opcodes` · `--dump-scene-at N` · `--dump-texture <id>`。
 
-## 当前需要处理（2026-10-29 第二轮结束）
+## 已打通（实测 2026-10-30）
 
-1. **`0x82` 的真实绘制 / `0x1D0`**：结论走 **B**（`REQ-01M63XEX9NXKJAJMZYJDCEX96Y`）—— 共同前置是**读排版层**
-   （`sub_466000` 1000+ 行、对表 `Font+0xD34` 的 push 站点未定位）；下一轮从那里起，不是"补实现"。
-2. **spec 已成篇、实现是桩 / 归属错**（`REQ-01M63YS3T54VYCXCBJ6RPCHDAY`）：`op_2c7` 空返回、`op_2de` 恒 −1、
-   L2D 四条共用空 `op_341`、`op_2ee` 不写命名键、`op_25b` 不发载图请求、**`0xb7`/`0xb8` 被当成 BGM 播放/停止**。
-3. **`0x215`**：取证已齐、映射未建模（`REQ-01M63XE3X819G3WAY28Y0XSJKV`）。
-4. **未做**：`mutate-check` 清单只跑 node 守卫（C++ 侧变异靠手动）；多条实体的 evidence 只引到站点守卫 / 通用 CTest，
-   升 `reviewed` 前要具名用例或 `KN:` 锚。
+- TITLE：`0x12e` 命中框表 → `0xa1/a2/a3` 菜单分派 → key 3 → `0x3 call-script 52` ⇒ CONFIG.BIN → `0x3 call-script 20940`。
+- **GameStart → ADV**：GameStart 菜单 → `0x3 call-script 20964`（INITGAME）→ … → NOVEL(21096) → **SN0000(116)** →
+  DRAWCHARM(70，画角色) → SC0000(115)。点击驱动：**`0x72` 等推进**（门字第 31 位）→ 左键放行 → 一句一停。
+- 证据（headless，`presented` 3188 帧 / 57 s）：`.tmp/adv/bmp5` 的 `frame-0700`（夕阳天空）、
+  `.tmp/adv/bmp6` 的 `frame-1500`（章节标题卡）、`.tmp/adv/bmp4` 的末帧（消息窗正文）。
 
-## 这一轮（2026-10-29 长程两轮）收口了什么
+## 这一轮（2026-10-30）收口了什么
 
-- **spec 成篇 7 批 + 2 条单点**，共 **34 个 opcode** 从 `audit.gaps` 移出（329 → 295），新增 **28 条规则**（253 → 281）：
-  配置族 + 滚轮（9）· 声音设定族（4）· 标量/字符串/数组（7）· 时钟/显示状态/消息淡变（3）· L2D 载入与标记（4）·
-  声音槽 stop/play + 音乐渐变（4）· 文本槽定时释放（1 条跨 2 opcode）· `0x194`。
-- **提交前必过的判据**：每批 `gaps` 精确划分 + `spec validate` 13/13；每批都有**独立 subagent 复审**（4 轮，共 70+ 条意见），
-  硬伤逐条处置（`0x12f` 的 N=0/N=1 终态、`0x2c7` 的修正顺序、`0xb7` 不写进度、槽界有符号/无符号…）。
-- **实现**：`0x194` 进 `emulator-cxx`（读序 3 → 2、逐字节比较）+ `core_selftest` 三条断言。
-- **订正**：`0x12f` 的键/收尾带池密钥且互为逆、`0x1bb` 的读者远多于旧记录、`0x301` 的释放**没有** delete、
-  `system:EffectSkipOnClick` **不是**内建默认、`0xb7`/`0xb8` 不是 BGM 控制。
+- **补 30 条 opcode**，每条都有 spec 落点 + `bindings` 站点/证据 + `audit` 残差（并同步移出 `GAP-OPS-*`）：
+  `0x1bc 0x32a 0x32d 0x1b1 0x238 0x215 0x242 0x219 0x220 0x224 0x7a 0x1cb 0x256 0x2e9 0x214`
+  `0x193 0x20a 0x243 0x2f7 0x304 0x305 0x32 0x72 0x10a`。
+- **两处模型纠错**：① 门字第 9 位（BGM 淡变）原先没有服务分支 ⇒ 补最小推进；
+  ② `0x1fb` 才是「场景对象记录」的建记录者（置 bit0 + 写整数标签），`0x215`/`0x220` 与它同表。
+- **正文渲染**：逐字符绘制条目需要「绘制键基数」，ADV 的消息层脚本没给 ⇒ 加宿主兜底（残差 `ADV-TEXT-LAYER-DRAW-KEY`）。
 
-## 当前门禁（实测）
+## 当前需要处理（2026-10-30 交接，按优先级）
 
-`ctest --test-dir apps/emulator-cxx/out` 24/24 · `pnpm test` 1103 通过 · `pnpm tools spec validate` 13/13 ·
-`pnpm tools requirements validate` 6/6 · `pnpm tools corpus validate` 8 通过 / 0 失败 / 1 警告。
+1. 🐞 **序章「夕阳 ↔ 光柱塔」之间的中心旁白不出**，点击直接跳到下一幕 —— `REQ-01M65A72Y5ZHJPXMGPMHB0KH92`。
+2. 🐞 **章节标题卡位置歪**（真机在左侧中心、现在画在下方中央）+ 其后的**人物轮廓整体渲染错** —— `REQ-01M65A7BCESQG4C2B59V1HT3SB`。
+3. **文本层绘制键基数是宿主兜底**（残差 `ADV-TEXT-LAYER-DRAW-KEY`）——⛔ 不是引擎语义，取证后要撤。
+4. **`0x305` 的「自旋到该层揭示完」** 用「揭示全部格」实现 ⇒ **打字机逐字效果丢失**（已知偏离）。
+5. **ADV 之后**：`CALCREVISE.BIN` 停在 `0x132`；`SC0000` 还缺 `0x26 0x28 0xc3 0x140 0x230 0x233 0x234 0x235`。
+6. **`0x82` 的真实绘制 / `0x1D0` 的对表前置**（`REQ-01M63XEX9NXKJAJMZYJDCEX96Y`）：共同前置是读排版层。
+7. **spec 已成篇、实现是桩 / 归属错**（`REQ-01M63YS3T54VYCXCBJ6RPCHDAY`）：`op_2c7` / `op_2de` / L2D 四条 /
+   `op_2ee` / `op_25b`，以及 `0xb7`/`0xb8` 被当成 BGM 播放/停止。
 
-## 已打通（实测）
+## 当前门禁（实测 2026-10-30）
 
-TITLE：`0x12e` 命中框表 → `0xa1/a2/a3` 菜单分派 → key 3 → `0x3 call-script 52` ⇒ CONFIG.BIN → `0x3 call-script 20940`。
-点击在**抬起**时生效；左键 = 引擎位 0。
+`pnpm test` 1110 通过 / 0 失败 · `ctest --test-dir apps/emulator-cxx/out` 33/33 · `pnpm typecheck` 六工程通过 ·
+`pnpm tools spec validate` 全绿 · `pnpm tools requirements validate` 6/6 · `pnpm tools corpus validate` 8 通过 / 0 失败 / 1 警告。
 
-## 工作口径（2026-10-29）
+## 工作口径
 
 - 本节点**不关闭**：进度以 `pnpm tools requirements plan` 为准；变更历史看 `git log`。
-- **spec 完整性判据**：所有影响可观察行为的字段 / 触发 / 转换都写全，独立实现者**只凭 spec**能写出唯一实现。
+- **spec 完整性判据**：所有影响可观察行为的字段 / 触发 / 转换都写全，独立实现者**只凭 spec** 能写出唯一实现。
 - **spec vs emulator**：spec 写领域状态机；emulator 是示范与第二实现证据；分歧按 `amayui-spec` §9.2 归因。

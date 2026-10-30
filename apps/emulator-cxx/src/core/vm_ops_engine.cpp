@@ -805,6 +805,8 @@ void Machine::op_70(const Instruction& instruction) {
     record.f80 = a4;
     record.registered = 1;
     // 文本层矩形：按 w/h 建（或重建）离屏画布；逐字符绘制条目由 `0x6e` / `0x196` 在画字时排。
+    // 绘制键基数：脚本没给（0x213 没调过）时给一个宿主侧的默认基数，否则逐字符绘制条目会一条都不建。
+    if (record.f68 <= 0) record.f68 = kTextLayerFallbackBase + group * 1000;
     ensure_text_layer_texture(group);
     return;
 }
@@ -932,6 +934,34 @@ void Machine::op_19c(const Instruction& instruction) {
     return;
 }
 
+
+void Machine::op_1cb(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 读一个**命名配置键**（0x1cb / `sub_42D3D0`，argc 1、推进 3；规则 `CORE-OPS-CONFIG-READ-1CB`）：
+    // 走配置库的"取命名键"入口读 `message:ReadTextSkip`（整数），结果写进第 1 个操作数。
+    // ★ 键是**内建固定串**（不是操作数给的）；配置库没有该键时按配置口径返回 0。
+    write_length(3);
+    write_int(ops[0], config_.get_int("message:ReadTextSkip"));
+    return;
+}
+void Machine::op_1bc(const Instruction& instruction) {
+    (void)instruction;
+    // voice 全部停止 + 清状态（0x1bc / `sub_4197A0`，argc 0、推进 1；规则 `CORE-OPS-VOICE-ALL-STOP`）。
+    // ★ 顺序固定：先写推进格数 → 后端已挂上才对**声道 12 / 13 / 14**（= voice 槽 0 / 1 / 2）各发一次停止
+    //   → 再把 Voice 的两组每槽选项位、Command 的两组每槽待播请求（四种 × 3 槽）与 voice busy 格清 0。
+    // ★ 后端没挂上（Voice 的 ds 指针为 0）⇒ 一个停止请求都不发，但清格照做；不抛、不返回值。
+    write_length(1);
+    if (voice_backend_attached_) voice_stop_requests_ += 3;
+    for (std::size_t i = 0; i < 3; ++i) {
+        voice_switch_46c_[i] = 0;
+        voice_switch_478_[i] = 0;
+        voice_mirror_resource_[i] = 0;
+        voice_mirror_a4_[i] = 0;
+    }
+    voice_busy_ = 0;
+    return;
+}
+
 void Machine::op_1bf(const Instruction& instruction) {
     (void)instruction;
     // 消费状态字（CORE-OPS-STATUS-WORD）：第 16 位 ⇒ **整字**清 0（不是只清那一位）。
@@ -992,4 +1022,13 @@ void Machine::op_1cc(const Instruction& instruction) {
     return;
 }
 
+
+void Machine::op_2e9(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 写一个固定引擎整数格（0x2e9 / `sub_426620`，argc 1、推进 3；规则 `CORE-OPS-ENGINE-CELL-2E9`）：
+    // 只有一个操作数，原样写进**同一个固定格**（不归一、不夹取、不检查）。
+    write_length(3);
+    cell_2e9_ = read_int(ops[0]);
+    return;
+}
 }  // namespace core

@@ -1,0 +1,10 @@
+# route: gamestart（标题 → Game Start（はじめから））
+# 宿主测试装置：脚本化输入时间线（⛔ 不是引擎 spec；引擎语义在 data/spec）。
+# from: title
+# anchor: 21092 TITLE.BIN（时间线 0 点 = 首次进入该脚本）
+# arrive: 21099 GAMESTART.BIN（播放器 --expect-script 的判据）
+# 由 `pnpm tools routes emit --id gamestart` 从 data/routes/screens.json 生成；⛔ 别手改。
+1400 move 900 622
+2000 move 1174 377
+2200 down 0
+2300 up 0

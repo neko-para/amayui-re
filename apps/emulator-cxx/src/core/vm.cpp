@@ -28,7 +28,8 @@ bool is_scene_mutating(std::uint32_t opcode) {
         case 0x24D: case 0x24F: case 0x250: case 0x251:  // 场景命令表
         case 0x229: case 0x230: case 0x231: case 0x233: case 0x234: case 0x235:
         case 0x23B:                          // CG 数字条
-        case 0x258: case 0x259:              // 1000 项表
+        // ★ `0x258` / `0x259`（1000 项表的两项标志）**不在**这张白名单里：规范说它们
+        //   "不把场景标脏"（`CORE-OPS-SCENE-TABLE-FLAGS`）—— 那两格在本作也没有读者。
         case 0x320: case 0x322: case 0x323:  // 网格
         case 0x344:                          // 辅助表 A
             return true;
@@ -212,6 +213,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x21E: op_21e(instruction); return;
         case 0x21F: op_21f(instruction); return;
         case 0x228: op_228(instruction); return;
+        case 0x229: op_229(instruction); return;
         case 0x2D0: op_2d0(instruction); return;
         case 0x2D1: op_2d1(instruction); return;
         case 0x2D3: op_2d3(instruction); return;
@@ -270,6 +272,12 @@ void Machine::execute(const Instruction& instruction) {
         case 0x10F: op_10f(instruction); return;
         case 0x248: op_248(instruction); return;
         case 0x8B: op_8b(instruction); return;
+        case 0x90: op_90(instruction); return;
+        case 0x91: op_91(instruction); return;
+        case 0x92: op_92(instruction); return;
+        case 0x93: op_93(instruction); return;
+        case 0x94: op_94(instruction); return;
+        case 0x97: op_97(instruction); return;
         case 0x261: op_261(instruction); return;
         case 0x260: op_260(instruction); return;
         case 0x107: op_107(instruction); return;
@@ -283,10 +291,33 @@ void Machine::execute(const Instruction& instruction) {
         case 0x2BD: op_2bd(instruction); return;
         case 0x2DE: op_2de(instruction); return;
         case 0x194: op_194(instruction); return;
+        case 0x195: op_195(instruction); return;
         case 0x192: op_192(instruction); return;
         case 0x19B: op_19b(instruction); return;
         case 0x19C: op_19c(instruction); return;
         case 0x1BF: op_1bf(instruction); return;
+        case 0x1B1: op_1b1(instruction); return;
+        case 0x238: op_238(instruction); return;
+        case 0x219: op_219(instruction); return;
+        case 0x220: op_220(instruction); return;
+        case 0x224: op_224(instruction); return;
+        case 0x7A: op_7a(instruction); return;
+        case 0x1CB: op_1cb(instruction); return;
+        case 0x256: op_256(instruction); return;
+        case 0x32: op_32(instruction); return;
+        case 0x72: op_72(instruction); return;
+        case 0x10A: op_10a(instruction); return;
+        case 0x193: op_193(instruction); return;
+        case 0x20A: op_20a(instruction); return;
+        case 0x243: op_243(instruction); return;
+        case 0x2F7: op_2f7(instruction); return;
+        case 0x304: op_304(instruction); return;
+        case 0x305: op_305(instruction); return;
+        case 0x2E9: op_2e9(instruction); return;
+        case 0x214: op_214(instruction); return;
+        case 0x215: op_215(instruction); return;
+        case 0x242: op_242(instruction); return;
+        case 0x1BC: op_1bc(instruction); return;
         case 0x1CF: op_1cf(instruction); return;
         case 0x1A9: op_1a9(instruction); return;
         case 0x1AA: op_1aa(instruction); return;
@@ -301,9 +332,13 @@ void Machine::execute(const Instruction& instruction) {
         case 0x23D: op_23d(instruction); return;
         case 0x32B: op_32b(instruction); return;
         case 0x322: op_322(instruction); return;
+        case 0x32a: op_32a(instruction); return;
+        case 0x32d: op_32d(instruction); return;
         case 0x323: op_323(instruction); return;
         case 0x1FB: op_1fb(instruction); return;
         case 0x239: op_239(instruction); return;
+        case 0x258: op_258(instruction); return;
+        case 0x259: op_259(instruction); return;
         case 0x202: op_202(instruction); return;
         case 0x203: op_203(instruction); return;
         case 0x1F7: op_1f7(instruction); return;
@@ -391,6 +426,10 @@ bool Machine::step() {
     advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16, !paused);
     // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：新帧会置脏，所以必须在门前那次渲染判定之前。
     if (!paused) service_movies();
+    // 门之前的 **BGM 淡变推进**（`0xC2` 的 B 支把状态字第 9 位置起 ⇒ 进门；由这里逐帧推进并在到位时清位）。
+    if (!paused) service_bgm_fade();
+    // 门之前：0x72 的放行（左键 / 跳过位一到就清「等推进」位）。
+    service_advance_wait();
     // 门之前的**逐字符显现**（typewriter）：引擎的推进器每帧跑一次，**按每字间隔（ms）每帧最多一格**；
     // 等待输入时**也在跑**（那正是"字还在打"的形态）⇒ 这里不受 `paused` 影响。
     service_text_layers();
@@ -401,7 +440,12 @@ bool Machine::step() {
         (scene_dirty_ || scene_animating_ || command_animating_)) {
         frame_step_requested_ = true;
     }
-    // 第 29 位（打字中）**不挡脚本**：引擎服务完文本泵之后仍派发一条指令（`0x41342d` → `0x413439`）。
+    // ★ `0x72` 的"等推进"位（第 31 位）：这是**合法等待**（等玩家点击），不是门卡死 ⇒
+    //   本拍不派发任何指令、也不记 stall（引擎是 `0xAAB44 任一非 0 ⇒ 不派发`）。
+    if ((state_flags_ & (1u << 31)) != 0) {
+        gate_stall_steps_ = 0;
+        return true;
+    }    // 第 29 位（打字中）**不挡脚本**：引擎服务完文本泵之后仍派发一条指令（`0x41342d` → `0x413439`）。
     // 门判只看其余位；本模型不置第 27 位（它没有服务者），所以这里只需摘掉第 29 位。
     const std::uint32_t gate_bits = state_flags_ & ~(1u << 29);
     if (gate_bits != 0) {

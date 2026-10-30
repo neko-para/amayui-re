@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "_doc": "由 tools/routes.mjs 拥有：字段语义 / 不变量 / 操作看 `pnpm tools routes describe`（tools/routes.mjs 的自描述）。",
+  "routes": [
+    {
+      "id": "title",
+      "title": "标题画面",
+      "from": "boot",
+      "anchor": { "script": 21092, "bin": "TITLE.BIN" },
+      "steps": [],
+      "arrive": { "script": 21092, "bin": "TITLE.BIN" },
+      "observe": { "note": "夕阳山景 + 右侧竖排四个圆钮（Game Start / Load Data / Eushully-chan Room / Option / Quit）" },
+      "evidence": {
+        "verifiedAt": "2026-10-30",
+        "command": "apps/emulator-cxx/out/emulator-cxx.exe --install \"E:\\Games\\Eushully\\天結いキャッスルマイスター\" --skip-logo --play-headless --input-script apps/emulator-cxx/tests/input/route-title.txt --anchor-script 21092 --expect-script 21092 --tick-ms 16 --max-steps 600000"
+      },
+      "notes": "`route-title.txt` 是**空时间线**（只有注释行，解析为 0 条事件）—— 等价于不给输入脚本，播放器不会因此报错。"
+    },
+    {
+      "id": "gamestart",
+      "title": "标题 → Game Start（はじめから）",
+      "from": "title",
+      "anchor": { "script": 21092, "bin": "TITLE.BIN" },
+      "steps": [
+        "1400 move 900 622",
+        "2000 move 1174 377",
+        "2200 down 0",
+        "2300 up 0"
+      ],
+      "arrive": { "script": 21099, "bin": "GAMESTART.BIN" },
+      "observe": { "note": "GAMESTART.BIN 的界面；★ 模拟器里**还没画出像素**（仍是 TITLE 的画面）" },
+      "evidence": {
+        "verifiedAt": "2026-10-30",
+        "command": "apps/emulator-cxx/out/emulator-cxx.exe --install \"E:\\Games\\Eushully\\天結いキャッスルマイスター\" --skip-logo --play-headless --input-script apps/emulator-cxx/tests/input/route-gamestart.txt --anchor-script 21092 --expect-script 21099 --tick-ms 16 --max-steps 600000"
+      },
+      "notes": "★ 坑一：必须先 `move` 到别的坐标再 `move` 进按钮框 —— 界面只在**坐标变化**时跑命中查找。★ 坑二：点击在**抬起**时生效（`down` / `up` 至少隔一个 tick）。按钮中心 (1174,377) 来自 title-frame.png 的人工定位。"
+    },
+    {
+      "id": "gamestart-newgame",
+      "title": "Game Start → 新游戏初始配置",
+      "from": "gamestart",
+      "anchor": { "script": 21092, "bin": "TITLE.BIN" },
+      "steps": [
+        "1400 move 900 622",
+        "2000 move 1174 377",
+        "2200 down 0",
+        "2300 up 0",
+        "3000 move 715 576",
+        "3200 down 0",
+        "3300 up 0"
+      ],
+      "arrive": { "script": 20964, "bin": "INITGAME.BIN" },
+      "observe": { "note": "INITGAME.BIN（新游戏初始配置）；随后自动串起 UNITECH → CALCCC → CCINIT → SETFATE，再回 GAMESTART → TITLE → 根脚本" },
+      "evidence": {
+        "verifiedAt": "2026-10-30",
+        "command": "apps/emulator-cxx/out/emulator-cxx.exe --install \"E:\\Games\\Eushully\\天結いキャッスルマイスター\" --skip-logo --play-headless --input-script apps/emulator-cxx/tests/input/route-gamestart-newgame.txt --anchor-script 21092 --expect-script 20964 --tick-ms 16 --max-steps 600000"
+      },
+      "notes": "★ **待核**：GAMESTART 那个界面在模拟器里**还没画出像素**（仍是 TITLE 的画面），(715,576) 是从脚本的命中矩形表反推的，**未经像素确认**。到达 20964 之后引擎自动走 UNITECH → CALCCC → CCINIT → SETFATE，再回 GAMESTART → TITLE → 根脚本（所以 `--expect-script` 只认 20964 首次到达）。"
+    },
+    {
+      "id": "newgame-chapter0",
+      "title": "新游戏 → 第 0 章剧本（SC0000.BIN）",
+      "from": "gamestart-newgame",
+      "anchor": { "script": 21092, "bin": "TITLE.BIN" },
+      "steps": [
+        "1400 move 900 622",
+        "2000 move 1174 377",
+        "2200 down 0",
+        "2300 up 0",
+        "3000 move 715 576",
+        "3200 down 0",
+        "3300 up 0"
+      ],
+      "arrive": { "script": 115, "bin": "SC0000.BIN" },
+      "observe": { "note": "第 0 章剧本（SC0000.BIN，ALF id 115）：由根脚本 SYSTEM4.BIN 用 `call-script 115` 进入" },
+      "evidence": {
+        "verifiedAt": "2026-10-30",
+        "command": "apps/emulator-cxx/out/emulator-cxx.exe --install \"E:\\Games\\Eushully\\天結いキャッスルマイスター\" --skip-logo --play-headless --input-script apps/emulator-cxx/tests/input/route-newgame-chapter0.txt --anchor-script 21092 --expect-script 115 --tick-ms 16 --max-steps 600000"
+      },
+      "notes": "本 route 与 `gamestart-newgame` 的**输入完全相同**（到 20964 之后引擎自己往下走），区别只在收口的 `--expect-script`。★ 剧本内部目前还会停在缺失指令上（逐条补：0x195 → 0x229 → 0x258·0x259 → 0x90 → 0x97 → …），但**进入 115 本身是可达的**。"
+    }
+  ]
+}

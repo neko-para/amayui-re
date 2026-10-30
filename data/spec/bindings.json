@@ -10184,7 +10184,8 @@
         "shape:T_Scene_elem14@0xc"
       ],
       "evidence": [
-        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"
+        "guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-scene-table-flags"
       ]
     },
     {
@@ -14974,7 +14975,8 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/spec-sites-batch5.assets.test.mjs#★ CORE-OPS-SCENE-SELF-TRANSFORM-229 的站点都在 .lst 指令行首"
+        "guard:tools/test/spec-sites-batch5.assets.test.mjs#★ CORE-OPS-SCENE-SELF-TRANSFORM-229 的站点都在 .lst 指令行首",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-scene-self-transform"
       ]
     },
     {
@@ -18203,6 +18205,533 @@
       ],
       "evidence": [
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+      ]
+    },
+    {
+      "rule": "ADV-CHOICE-ADD-90",
+      "functions": [
+        "sub_420640",
+        "sub_403B30"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x416434",
+          "what": "处理函数表登记（0xA52DC = 0xA509C + 144*4；唯一写点）"
+        },
+        {
+          "ea": "0x420640",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x420658",
+          "what": "推进格数 ← 15（argc 7）"
+        },
+        {
+          "ea": "0x420693",
+          "what": "矩形右边 = 第 1 + 第 3 个操作数"
+        },
+        {
+          "ea": "0x4206a5",
+          "what": "矩形下边 = 第 2 + 第 4 个操作数"
+        },
+        {
+          "ea": "0x4206bd",
+          "what": "记录里写当前帧的深度档"
+        },
+        {
+          "ea": "0x4206c9",
+          "what": "读序 7 → 6 → 5（三个脚本入口）"
+        },
+        {
+          "ea": "0x4206fe",
+          "what": "追加进选项表"
+        },
+        {
+          "ea": "0x403b39",
+          "what": "容量门槛：计数 ≥ 100 ⇒ 失败"
+        },
+        {
+          "ea": "0x420707",
+          "what": "满表时抛显示消息型异常（0x10005）"
+        },
+        {
+          "ea": "0x420726",
+          "what": "追加成功后复位：选中下标 ← -1、决定标志 ← 0"
+        },
+        {
+          "ea": "0x411b36",
+          "what": "决定：执行位置 ← body 起点 + 4 × 第 i 项的决定入口"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-adv-choice-add"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-CONCAT-193",
+      "functions": ["sub_433710", "sub_433310"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x433710", "what": "handler 起点"},
+        {"ea": "0x43374f", "what": "推进格数 ← 7（argc 3）"},
+        {"ea": "0x43375d", "what": "读第 3 个操作数（右值）"},
+        {"ea": "0x433771", "what": "读第 2 个操作数（左值）"},
+        {"ea": "0x433791", "what": "写第 1 个操作数（与 0x192 同一写原语）"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-REDRAW-20A",
+      "functions": ["sub_423620", "sub_45AD30"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x423620", "what": "handler 起点"},
+        {"ea": "0x423631", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x42364c", "what": "按揭示游标把该层的格贴到画布"},
+        {"ea": "0x423668", "what": "只测门字第 30 位"},
+        {"ea": "0x423688", "what": "第 30 位置起 ⇒ 再读一次层号并补画一个延迟格"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-MSG-WAIT-243",
+      "functions": ["sub_41B180"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x41b180", "what": "handler 起点"},
+        {"ea": "0x41b192", "what": "推进格数 ← 1（argc 0）"},
+        {"ea": "0x41b199", "what": "门位（第 1 位）已置 ⇒ 整段跳过"},
+        {"ea": "0x41b1a2", "what": "三格 ← (1, 0, 0)"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-MSG-BLOCK-304-305",
+      "functions": ["sub_41A420", "sub_41B1C0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x41a420", "what": "0x304 handler 起点"},
+        {"ea": "0x41a439", "what": "消息臂位整格写 1"},
+        {"ea": "0x41a460", "what": "层「块开头」← 揭示游标"},
+        {"ea": "0x41b1c0", "what": "0x305 handler 起点"},
+        {"ea": "0x41b1e7", "what": "门 = 第 0 位 ∧ 第 16 位"},
+        {"ea": "0x41b218", "what": "揭示游标回卷到块开头"},
+        {"ea": "0x41b314", "what": "自旋到该层揭示完"},
+        {"ea": "0x41b32c", "what": "写消息等待三格 (0, 0, 1)"},
+        {"ea": "0x41b348", "what": "三条出口都清臂位"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-TEXTURE-STRETCH-32",
+      "functions": ["sub_41E2D0", "sub_4A87A0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x41e2d0", "what": "handler 起点"},
+        {"ea": "0x41e2f2", "what": "推进格数 ← 21（argc 10）"},
+        {"ea": "0x41e31e", "what": "源矩形右边 = x + 宽"},
+        {"ea": "0x41e363", "what": "目标矩形下边 = y + 高"},
+        {"ea": "0x4a87a0", "what": "源 / 目标矩形各自夹取后做缩放拷贝"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-MSG-WAIT-INPUT-72",
+      "functions": ["sub_41EEF0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x41eef0", "what": "handler 起点"},
+        {"ea": "0x41ef08", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x41f070", "what": "当前消息槽 ← 第 1 个操作数"},
+        {"ea": "0x41f07b", "what": "置「等推进」位（第 31 位）"},
+        {"ea": "0x41f097", "what": "并置第 30 位"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-INPUT-SET-CURSOR-10A",
+      "functions": ["sub_421EA0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x421ea0", "what": "handler 起点"},
+        {"ea": "0x421eb7", "what": "推进格数 ← 5（argc 2）"},
+        {"ea": "0x42202e", "what": "请求平台把光标移到换算后的坐标"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-VOICE-OPTION-2F7",
+      "functions": ["sub_426890"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x426890", "what": "handler 起点"},
+        {"ea": "0x4268a0", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x4268b4", "what": "该槽选项格整格写 1"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-SCENE3D-214",
+      "functions": ["sub_423AE0", "sub_4ABEF0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x423ae0", "what": "handler 起点"},
+        {"ea": "0x4abef0", "what": "复制到目标编号后删源"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },
+    {
+      "rule": "CORE-OPS-ENGINE-CELL-2E9",
+      "functions": ["sub_426620"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x426620", "what": "handler 起点"},
+        {"ea": "0x426630", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x426644", "what": "写那个固定格"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）"]
+    },    {
+      "rule": "CORE-OPS-CONFIG-READ-1CB",
+      "functions": ["sub_42D3D0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x42d3d0", "what": "handler 起点"},
+        {"ea": "0x42d3e0", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x42d3eb", "what": "走配置库的「取命名键」入口读 message:ReadTextSkip"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-RANGE-TRANSLATE-256",
+      "functions": ["sub_425C30", "sub_4ACD10"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x425c30", "what": "handler 起点"},
+        {"ea": "0x425c40", "what": "推进格数 ← 11（argc 5）"},
+        {"ea": "0x4acd10", "what": "按区间遍历已存在记录：标志字 ← 1、平移矩阵三分量 ← 三个浮点"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },    {
+      "rule": "CORE-OPS-SCENE-KEYED-215",
+      "functions": ["sub_430340", "sub_4ADC20", "sub_459EA0", "sub_4AAD40"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x430340", "what": "handler 起点"},
+        {"ea": "0x430350", "what": "推进格数 ← 5（argc 2）"},
+        {"ea": "0x43035b", "what": "读第 2 个操作数（键）"},
+        {"ea": "0x4adc20", "what": "按键查记录：不存在或位 0 = 0 ⇒ -1，否则返回记录 +4 的整数"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-CONTAINER-CLEAR-224",
+      "functions": ["sub_41A290", "sub_4AA180", "sub_4A9BE0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x41a290", "what": "handler 起点"},
+        {"ea": "0x41a29d", "what": "推进格数 ← 1（argc 0）"},
+        {"ea": "0x4a9be0", "what": "遍历节点销毁载荷 + 复位哨兵环 + 计数清 0"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-RUN-HEADER-7A",
+      "functions": ["sub_41F4E0", "sub_45A910"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x41f4e0", "what": "handler 起点"},
+        {"ea": "0x41f4f0", "what": "推进格数 ← 7（argc 3）"},
+        {"ea": "0x41f4fb", "what": "读序 3 → 2 → 1"},
+        {"ea": "0x45a910", "what": "按槽取记录并把两个整数写进 run 头（槽 0 ⇒ 默认槽）"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },    {
+      "rule": "CORE-OPS-SCENE-COLOR-32D",
+      "functions": ["sub_427040", "sub_499DF0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x427040", "what": "handler 起点"},
+        {"ea": "0x427055", "what": "推进格数 ← 5（argc 2）"},
+        {"ea": "0x427074", "what": "透明度按 255 夹取"},
+        {"ea": "0x427081", "what": "抓 RGB 三个字节并拼成 ARGB"},
+        {"ea": "0x499df0", "what": "四通道归一化 + 夹取 / 四舍五入，转发渲染模块命令 0x8B"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-SCENE-EFFECT-DESTROY-32A",
+      "functions": ["sub_426F80", "sub_4A0750"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x426f80", "what": "handler 起点"},
+        {"ea": "0x426f90", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x426f9f", "what": "读第 1 个操作数（槽号）"},
+        {"ea": "0x4a0750", "what": "存在才销毁并置空"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ENGINE-CELL-1B1",
+      "functions": ["sub_41FEA0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x41fea0", "what": "handler 起点"},
+        {"ea": "0x41feb0", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x41febf", "what": "读第 1 个操作数"},
+        {"ea": "0x41fec4", "what": "写那一个固定格"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-ENGINE-CELL-238",
+      "functions": ["sub_4248C0"],
+      "storage": [],
+      "sites": [
+        {"ea": "0x4248c0", "what": "handler 起点"},
+        {"ea": "0x4248d0", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x4248df", "what": "读第 1 个操作数"},
+        {"ea": "0x4248e4", "what": "第 1 格 ← 0、第 2 格 ← 操作数"}
+      ],
+      "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
+      ]
+    },    {
+      "rule": "CORE-OPS-VOICE-ALL-STOP",
+      "functions": [
+        "sub_4197A0",
+        "sub_4B60C0"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x416678",
+          "what": "处理函数表登记（0xA578C = 0xA509C + 444*4；唯一写点）"
+        },
+        {
+          "ea": "0x4197a0",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x4197b0",
+          "what": "推进格数 ← 1（argc 0）"
+        },
+        {
+          "ea": "0x4197bb",
+          "what": "语音后端指针判空（没挂上就跳过停止请求）"
+        },
+        {
+          "ea": "0x4197da",
+          "what": "声道 12 / 13 / 14 各一次停止请求"
+        },
+        {
+          "ea": "0x4197e8",
+          "what": "两组每槽选项位 + 两组每槽待播请求 + 「正在播」清 0"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-voice-all-stop"
+      ]
+    },
+    {
+      "rule": "ADV-CHOICE-WINDOW",
+      "functions": [
+        "sub_4191D0",
+        "sub_419230",
+        "sub_420740",
+        "sub_4207D0",
+        "sub_403EF0",
+        "sub_403C50",
+        "sub_404020"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x4191d0",
+          "what": "0x93 handler 起点（推进 1）"
+        },
+        {
+          "ea": "0x4191e0",
+          "what": "推进格数 ← 1"
+        },
+        {
+          "ea": "0x4191eb",
+          "what": "清「A 在等」动作位（bit23）"
+        },
+        {
+          "ea": "0x4191fb",
+          "what": "清表六格（sub_403EF0）"
+        },
+        {
+          "ea": "0x419200",
+          "what": "输入总闸：非 0 ⇒ 关掉；否则往下置闩锁"
+        },
+        {
+          "ea": "0x419215",
+          "what": "置完成闩锁"
+        },
+        {
+          "ea": "0x419230",
+          "what": "0x94 handler 起点（推进 1）"
+        },
+        {
+          "ea": "0x419249",
+          "what": "输入总闸 ← 1"
+        },
+        {
+          "ea": "0x41924f",
+          "what": "步长 ← 10000（上下键翻页实际失效）"
+        },
+        {
+          "ea": "0x41925a",
+          "what": "arm（首次开窗用当前光标跑一次命中）"
+        },
+        {
+          "ea": "0x420740",
+          "what": "0x91 handler 起点"
+        },
+        {
+          "ea": "0x420750",
+          "what": "推进格数 ← 3"
+        },
+        {
+          "ea": "0x42075b",
+          "what": "闩锁判断（在读数之前）"
+        },
+        {
+          "ea": "0x4207b6",
+          "what": "未置闩锁 ⇒ 推进格数改回 0（阻塞）"
+        },
+        {
+          "ea": "0x4207d0",
+          "what": "0x92 handler 起点"
+        },
+        {
+          "ea": "0x4207e0",
+          "what": "推进格数 ← 5"
+        },
+        {
+          "ea": "0x42081d",
+          "what": "读序 2（兜底跳转目标）"
+        },
+        {
+          "ea": "0x42082c",
+          "what": "读序 1（上下键步长）"
+        },
+        {
+          "ea": "0x420855",
+          "what": "未置闩锁 ⇒ 推进格数改回 0（阻塞）"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-adv-choice-window"
+      ]
+    },
+    {
+      "rule": "ADV-CHOICE-SET-EXTRA-97",
+      "functions": [
+        "sub_420910",
+        "sub_403D10"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x41647a",
+          "what": "处理函数表登记（0xA52F8 = 0xA509C + 151*4）"
+        },
+        {
+          "ea": "0x420910",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x420931",
+          "what": "推进格数 ← 11（argc 5）"
+        },
+        {
+          "ea": "0x420940",
+          "what": "读第 1 个操作数（矩形左）"
+        },
+        {
+          "ea": "0x42094c",
+          "what": "读第 2 个操作数（矩形上）"
+        },
+        {
+          "ea": "0x420958",
+          "what": "读第 3 个操作数（宽）"
+        },
+        {
+          "ea": "0x420963",
+          "what": "再读第 1 个操作数（算右边）"
+        },
+        {
+          "ea": "0x403d10",
+          "what": "按四边全等扫描选项表：命中第一条就把附加整数格 ← 值，未命中直接返回"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-adv-choice-add"
+      ]
+    },
+    {
+      "rule": "CORE-OPS-TEXT-UNEQUAL-195",
+      "functions": [
+        "sub_42D010",
+        "sub_401540",
+        "sub_42A420"
+      ],
+      "storage": [],
+      "sites": [
+        {
+          "ea": "0x416146",
+          "what": "处理函数表登记（0xA56F0 = 0xA509C + 405*4；全语料唯一写点）"
+        },
+        {
+          "ea": "0x42d010",
+          "what": "handler 起点"
+        },
+        {
+          "ea": "0x42d04f",
+          "what": "宽度槽写 7（argc 3，读数之前）"
+        },
+        {
+          "ea": "0x42d05d",
+          "what": "读第 3 个操作数（右值）"
+        },
+        {
+          "ea": "0x42d071",
+          "what": "读第 2 个操作数（左值）"
+        },
+        {
+          "ea": "0x42d08e",
+          "what": "定长比较子例程 sub_401540"
+        },
+        {
+          "ea": "0x42d093",
+          "what": "三值结果归一成「非 0 ⇒ 1」"
+        },
+        {
+          "ea": "0x42d09e",
+          "what": "写第 1 个操作数（类型化存值器）"
+        }
+      ],
+      "evidence": [
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-text-compare-ops"
       ]
     },
     {
