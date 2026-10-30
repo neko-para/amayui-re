@@ -2592,7 +2592,8 @@
         "shape:T1@0x60"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）",
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗**会挡**（窗没走完不放行；闩 = 引擎 +0B5B4）",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-wait-colour-window",
         "KN:01M5FK4FKN4A6C1D6E5G0P4T3C"
       ]
     },
@@ -2711,7 +2712,7 @@
         "shape:T_Command@0x5d880"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗**会挡**（窗没走完不放行；闩 = 引擎 +0B5B4）"
       ]
     },
     {
@@ -2751,15 +2752,28 @@
         },
         {
           "ea": "0x412fe0",
-          "what": "0x200 位服务分支（timer 对象 + 睡眠粒度差异的例子）"
+          "what": "bit7（0x80）服务分支，不是 0x200（分支入口 0x412fad 的 test al,al / jns 判的就是第 7 位）"
+        },
+        {
+          "ea": "0x411f38",
+          "what": "第 31 位服务体：先清第 31 位（and 7FFFFFFFh）"
+        },
+        {
+          "ea": "0x411f48",
+          "what": "第 31 位服务体：读回状态字后 test 第 30 位（40000000h）"
+        },
+        {
+          "ea": "0x411f6c",
+          "what": "第 31 位服务体：第 30 位已置 ⇒ 一起清掉（and 0BFFFFFFFh）——「放行不只清第 31 位」"
         }
       ],
       "functions": [
+        "sub_411BC0",
         "sub_412290"
       ],
       "storage": [],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗**会挡**（窗没走完不放行；闩 = 引擎 +0B5B4）"
       ]
     },
     {
@@ -2795,7 +2809,7 @@
         "shape:T_Command@0x5d880"
       ],
       "evidence": [
-        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）"
+        "guard:tools/test/emulator-new-scene.test.mjs#★ 0x21c 等待门：颜色窗**会挡**（窗没走完不放行；闩 = 引擎 +0B5B4）"
       ]
     },
     {
@@ -12371,6 +12385,18 @@
         {
           "ea": "0x4251a0",
           "what": "handler 起点"
+        },
+        {
+          "ea": "0x49a620",
+          "what": "建默认记录后置场景脏（+0B5AC ← 1）——只有第一张表（场景对象记录表）建记录才置脏"
+        },
+        {
+          "ea": "0x4aaa97",
+          "what": "建记录分支：编号缺失时调用共享的「按编号取记录，缺则先建默认记录」前置（sub_49A300）"
+        },
+        {
+          "ea": "0x4aaec0",
+          "what": "第二张表的建默认记录函数：只初始化该记录；本函数不写 +0B5AC、不置 +0B5B4"
         }
       ],
       "functions": [],
@@ -13030,6 +13056,14 @@
         {
           "ea": "0x419abe",
           "what": "sub_4780D0(&Engine+0x408, &输入字) 采样"
+        },
+        {
+          "ea": "0x411f19",
+          "what": "消费者：读输入字第 4 / 6 位（确认键 / 消息跳过）"
+        },
+        {
+          "ea": "0x411f28",
+          "what": "消费者：整字清 0（读一次就清）"
         },
         {
           "ea": "0x419ac9",
@@ -15501,6 +15535,18 @@
           "what": "0x306 走同一槽 +4（同一个键的读入口）"
         },
         {
+          "ea": "0x492264",
+          "what": "构造期登记：push 键名 system:EffectSkipOnClick（0x307 写的那个键）"
+        },
+        {
+          "ea": "0x492281",
+          "what": "构造期登记：值槽 ← 0"
+        },
+        {
+          "ea": "0x492287",
+          "what": "构造期登记：call sub_434D00（登记入口）"
+        },
+        {
           "ea": "0x492ab0",
           "what": "写入口实现体：缺键只弹框、不建键"
         }
@@ -17146,6 +17192,18 @@
         {
           "ea": "0x4263c4",
           "what": "写键 message:AdvanceMesOnWheel ← 值"
+        },
+        {
+          "ea": "0x4929b9",
+          "what": "构造期登记：push 键名 message:AdvanceMesOnWheel"
+        },
+        {
+          "ea": "0x4929c0",
+          "what": "构造期登记：值槽 ← 0"
+        },
+        {
+          "ea": "0x4929c6",
+          "what": "构造期登记：call sub_434D00（未命中即插入）"
         }
       ],
       "evidence": [
@@ -17356,6 +17414,18 @@
         {
           "ea": "0x431ff6",
           "what": "写第 1 个操作数 ← 键值"
+        },
+        {
+          "ea": "0x492264",
+          "what": "构造期登记：push 键名 system:EffectSkipOnClick"
+        },
+        {
+          "ea": "0x492281",
+          "what": "构造期登记：值槽 ← 0"
+        },
+        {
+          "ea": "0x492287",
+          "what": "构造期登记：call sub_434D00（未命中即插入）"
         }
       ],
       "evidence": [
@@ -18232,8 +18302,16 @@
           "what": "推进格数 ← 15（argc 7）"
         },
         {
+          "ea": "0x420684",
+          "what": "重读第 1 个操作数（用于右边 = x + 宽）"
+        },
+        {
           "ea": "0x420693",
           "what": "矩形右边 = 第 1 + 第 3 个操作数"
+        },
+        {
+          "ea": "0x42069a",
+          "what": "重读第 2 个操作数（用于下边 = y + 高）"
         },
         {
           "ea": "0x4206a5",
@@ -18241,7 +18319,7 @@
         },
         {
           "ea": "0x4206bd",
-          "what": "记录里写当前帧的深度档"
+          "what": "读当前帧深度档（追加时写进选项表的表级单格）"
         },
         {
           "ea": "0x4206c9",
@@ -18250,6 +18328,14 @@
         {
           "ea": "0x4206fe",
           "what": "追加进选项表"
+        },
+        {
+          "ea": "0x403bb8",
+          "what": "表级深度档写点：选项表 +0x7494 ← 当前帧深度档（无索引，追加时覆盖）"
+        },
+        {
+          "ea": "0x4083bf",
+          "what": "读者：读表级深度档并与当前帧深度档比较，不等则抛显示消息型异常「Depth が不正です」"
         },
         {
           "ea": "0x403b39",
@@ -18325,7 +18411,13 @@
         {"ea": "0x41b1c0", "what": "0x305 handler 起点"},
         {"ea": "0x41b1e7", "what": "门 = 第 0 位 ∧ 第 16 位"},
         {"ea": "0x41b218", "what": "揭示游标回卷到块开头"},
+        {"ea": "0x41b2a8", "what": "读每字间隔（= 0 ⇒ 直接跳揭示支；≠ 0 才进打字机判据）"},
+        {"ea": "0x41b2b2", "what": "取状态字（随后 test 8000000h：第 27 位已置 ⇒ 不进打字机支）"},
+        {"ea": "0x41b2bf", "what": "置第 29 位（打字位，20000000h）"},
+        {"ea": "0x41b2c5", "what": "为文本计时器装 this（随后 call sub_453A60 按每字间隔启动）"},
         {"ea": "0x41b314", "what": "自旋到该层揭示完"},
+        {"ea": "0x41b316", "what": "取常量 1（随后 cmp 0A30D0h：显示模式 ≠ 1 ⇒ 不写等待三格）"},
+        {"ea": "0x41b323", "what": "主循环模式字第 1 位（5A2D0h & 2）已置 ⇒ 不写等待三格"},
         {"ea": "0x41b32c", "what": "写消息等待三格：B=0 / C=0 / A=1（最终 (1,0,0)）"},
         {"ea": "0x41b348", "what": "三条出口都清臂位"}
       ],
@@ -18342,7 +18434,11 @@
         {"ea": "0x41e2f2", "what": "推进格数 ← 21（argc 10）"},
         {"ea": "0x41e31e", "what": "源矩形右边 = x + 宽"},
         {"ea": "0x41e363", "what": "目标矩形下边 = y + 高"},
-        {"ea": "0x4a87a0", "what": "源 / 目标矩形各自夹取后做缩放拷贝"}
+        {"ea": "0x4a87a0", "what": "源 / 目标矩形各自夹取后做缩放拷贝"},
+        {"ea": "0x4a8a5f", "what": "混合比例支（宽缩高放）：建临时介面（源宽 × 目标高）"},
+        {"ea": "0x4a8a83", "what": "混合比例支（宽放高缩）：建临时介面（目标宽 × 源高）"},
+        {"ea": "0x4a8aa9", "what": "两趟第一趟：放大到临时介面"},
+        {"ea": "0x4a8ac1", "what": "两趟第二趟：从临时介面缩小到目标"}
       ],
       "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-ops"
@@ -18355,6 +18451,9 @@
       "sites": [
         {"ea": "0x41eef0", "what": "handler 起点"},
         {"ea": "0x41ef08", "what": "推进格数 ← 3（argc 1）"},
+        {"ea": "0x41f033", "what": "跳过位（第 27 位）已置 ⇒ 整段跳过"},
+        {"ea": "0x41f04c", "what": "起播：采一次输入（跳过位未置）"},
+        {"ea": "0x41f055", "what": "起播：输入字整字清 0（跳过位未置）"},
         {"ea": "0x41f070", "what": "当前消息槽 ← 第 1 个操作数"},
         {"ea": "0x41f07b", "what": "置「等推进」位（第 31 位）"},
         {"ea": "0x41f092", "what": "并置第 30 位（or eax,40000000h）"}
@@ -18428,7 +18527,10 @@
       "sites": [
         {"ea": "0x42d3d0", "what": "handler 起点"},
         {"ea": "0x42d3e0", "what": "推进格数 ← 3（argc 1）"},
-        {"ea": "0x42d3eb", "what": "走配置库的「取命名键」入口读 message:ReadTextSkip"}
+        {"ea": "0x42d3eb", "what": "走配置库的「取命名键」入口读 message:ReadTextSkip"},
+        {"ea": "0x4920cc", "what": "构造期登记：push 键名 message:ReadTextSkip"},
+        {"ea": "0x4920d3", "what": "构造期登记：值槽 ← 0"},
+        {"ea": "0x4920d9", "what": "构造期登记：call sub_434D00（未命中即插入）"}
       ],
       "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
@@ -18441,7 +18543,10 @@
       "sites": [
         {"ea": "0x425c30", "what": "handler 起点"},
         {"ea": "0x425c40", "what": "推进格数 ← 11（argc 5）"},
-        {"ea": "0x4acd10", "what": "按区间遍历已存在记录：标志字 ← 1、平移矩阵三分量 ← 三个浮点"}
+        {"ea": "0x4acd10", "what": "按区间遍历已存在记录：标志字 ← 1、平移矩阵三分量 ← 三个浮点"},
+        {"ea": "0x4acd7a", "what": "空区间早退（起 == 止 ⇒ 不进逐记录循环，也不标脏）"},
+        {"ea": "0x4acdab", "what": "记录标志字（+0x68）← 1"},
+        {"ea": "0x4acdd4", "what": "逐记录循环体内标脏（+0B5AC ← 1）"}
       ],
       "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
@@ -18537,7 +18642,14 @@
         {"ea": "0x4248c0", "what": "handler 起点"},
         {"ea": "0x4248d0", "what": "推进格数 ← 3（argc 1）"},
         {"ea": "0x4248df", "what": "读第 1 个操作数"},
-        {"ea": "0x4248e4", "what": "第 1 格 ← 0、第 2 格 ← 操作数"}
+        {"ea": "0x4248e4", "what": "B 格（= T_Scene+0B5B8）← 0、C 格（= T_Scene+0B5BC）← 操作数"},
+        {"ea": "0x41321b", "what": "等待门服务以 Engine+4ED10 为 this 调 sub_407E20（+0B5B0/B5B8/B5BC 与 5A2C0/C8/CC 是同一格）"},
+        {"ea": "0x407e20", "what": "读者：读 C 格 +0B5BC（时长）"},
+        {"ea": "0x407e2a", "what": "读者：读 B 格 +0B5B8（起点；0 = 未盖章）"},
+        {"ea": "0x407e45", "what": "读者：起点未盖章时把“现在”写进 +0B5B8"},
+        {"ea": "0x407e5c", "what": "读者：A 格 +0B5B0 与 1 比较（中止）"},
+        {"ea": "0x407e64", "what": "读者：到期/中止清 +0B5B8 / +0B5BC"},
+        {"ea": "0x407e97", "what": "读者：返回 +0B5B4（待处理）"}
       ],
       "evidence": ["guard:tools/test/spec-ops-100-200-sites.assets.test.mjs#★ 0x100–0x3FF 新增条目的站点 EA 都在 .lst 的指令行首（数据段站点存在即可）",
         "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-misc-cells"
@@ -18633,6 +18745,18 @@
           "what": "arm（首次开窗用当前光标跑一次命中）"
         },
         {
+          "ea": "0x404029",
+          "what": "arm 闸为 0 ⇒ 首次 arm（下方才取平台光标；已 arm 则只写步长）"
+        },
+        {
+          "ea": "0x404040",
+          "what": "arm：取平台光标位置"
+        },
+        {
+          "ea": "0x404051",
+          "what": "arm：把平台光标换算成客户区坐标"
+        },
+        {
           "ea": "0x420740",
           "what": "0x91 handler 起点"
         },
@@ -18707,7 +18831,11 @@
         },
         {
           "ea": "0x420963",
-          "what": "再读第 1 个操作数（算右边）"
+          "what": "重读第 1 个操作数（用于右边 = x + 宽）"
+        },
+        {
+          "ea": "0x42097c",
+          "what": "重读第 2 个操作数（用于下边 = y + 高）"
         },
         {
           "ea": "0x403d10",

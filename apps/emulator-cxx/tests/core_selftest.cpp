@@ -3803,31 +3803,48 @@ bool check_scene_records(const core::OpcodeTable& table) {
             return false;
         }
     }
-    // ④ 0x242 两处写（+0x2D0 与第二张表的一格）；**两次都不标脏**（语料这条路径没有脏位写点）。
+    // ④ 0x242 两处写（+0x2D0 与第二张表的一格）：
+    //    ① **第一张表缺该编号 ⇒ 建默认记录 ⇒ 场景必须脏**（`sub_4AAA50` 建记录分支 → `0x4AAA8D–97
+    //      call sub_49A300`，`sub_49A300` 在 `0x49A620` 写 `[T_Scene+0B5ACh]=1`）；
+    //    ② **记录已存在 ⇒ 写值不标脏**（两次写值本身都不置脏）；
+    //    ③ **只有第二张表缺记录 ⇒ 不标脏**（`0x4AD9D7` 的第二张表路径不写 `0xB5AC`）。
     {
         auto script = make_script_with_body();
         emit_instruction(script, 0x242, {{0, 5}, {0, 7}});
         emit_instruction(script, 0x242, {{0, 5}, {0, 9}});
+        emit_instruction(script, 0x242, {{0, 6}, {0, 11}});
         emit_instruction(script, 2, {});
         core::Machine machine(0x12345678u, table);
         machine.load_root(script);
         machine.end_render();
-        if (!step_n(machine, 1, "242-a")) return false;
+        if (!step_n(machine, 1, "242-create")) return false;
         std::int32_t pair_a = 0, pair_b = 0;
         const bool has_pair = machine.scene_keyed_pair(5, pair_a, pair_b);
-        if (machine.scene_record_2d0(5) != 7 || !has_pair || pair_a != 7 ||
-            pair_b != 0 || machine.scene_dirty()) {
-            std::fprintf(stderr, "0x242 两处写/建记录竟然标脏：2d0=%d pair=%d/%d dirty=%d\n",
+        if (machine.scene_record_2d0(5) != 7 || !has_pair || pair_a != 7 || pair_b != 0 ||
+            !machine.scene_dirty()) {
+            std::fprintf(stderr,
+                         "0x242 为第一张表建默认记录必须标脏：2d0=%d pair=%d/%d dirty=%d\n",
                          machine.scene_record_2d0(5), pair_a, pair_b,
                          machine.scene_dirty() ? 1 : 0);
             return false;
         }
         machine.end_render();
-        if (!step_n(machine, 1, "242-b")) return false;
+        if (!step_n(machine, 1, "242-existing")) return false;
         if (machine.scene_record_2d0(5) != 9 || !machine.scene_keyed_pair(5, pair_a, pair_b) ||
             pair_a != 9 || machine.scene_dirty()) {
-            std::fprintf(stderr, "0x242 已存在记录时不该再标脏（2d0=%d pair=%d dirty=%d）\n",
+            std::fprintf(stderr, "0x242 已存在记录时写值不该标脏（2d0=%d pair=%d dirty=%d）\n",
                          machine.scene_record_2d0(5), pair_a, machine.scene_dirty() ? 1 : 0);
+            return false;
+        }
+        // ③ 预置第一张表的 6 号记录（场景记录表有、第二张表没有）⇒ 本条只为第二张表建记录。
+        machine.set_scene_keyed_record(6, 0, 0);
+        machine.end_render();
+        if (!step_n(machine, 1, "242-pair-create")) return false;
+        if (!machine.scene_keyed_pair(6, pair_a, pair_b) || pair_a != 11 ||
+            machine.scene_record_2d0(6) != 11 || machine.scene_dirty()) {
+            std::fprintf(stderr,
+                         "0x242 只为第二张表建记录时不该标脏（2d0=%d pair=%d dirty=%d）\n",
+                         machine.scene_record_2d0(6), pair_a, machine.scene_dirty() ? 1 : 0);
             return false;
         }
     }
@@ -4145,6 +4162,115 @@ bool check_wait_timer(const core::OpcodeTable& table) {
         }
         if (!m2.step() || m2.voice_option_2f7(0) != 1) {
             std::fprintf(stderr, "wait-timer：中止放行后没执行下一条（opt=%d）\n", m2.voice_option_2f7(0));
+            return false;
+        }
+    }
+    return true;
+}
+
+// `emulator-core-wait-colour-window`：`0x21c` 谓词 A 的「待处理」闩（引擎 `+0B5B4`）。
+// 排窗（`0x202 delay 0 dur 200`）之后，窗**没走完之前**等待位（`0x400`）必须一直置起；
+// 到期那一拍（`start + 200`，相等仍算窗内）仍置起，`start + 201` 才清。
+// ★ 判据是**时间**，不是"有没有待画格"：把闩写回恒 0 ⇒ 下一拍就放行 ⇒ 本条红。
+// ★ 第二个用例守 `duration == 0` 的排窗（`0x202 key 0 0`）：那种窗**永远不盖章**
+//   （`advance_window` 对时长 ≤ 0 直接返回），绝不能因此把门永关。
+bool check_wait_colour_window(const core::OpcodeTable& table) {
+    const auto waiting = [](const core::Machine& m) { return (m.state_flags() & 0x400u) != 0; };
+    const auto emit_item = [](std::vector<std::uint8_t>& bytes) {
+        emit_instruction(bytes, 0x1FB,
+                         {{0, 1}, {0, 1}, {0, 0}, {0, 0}, {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+    };
+    // 用例 1：dur = 200 的颜色窗。
+    {
+        auto script = make_script_with_body();
+        emit_item(script);
+        emit_instruction(script, 0x202, {{0, 1}, {0, 0}, {0, 200}, {0, 255}, {0, 0x00000000u}});
+        emit_instruction(script, 0x21C, {});
+        emit_instruction(script, 0x2F7, {{0, 0}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_host_clock_ms(1000);
+        machine.load_root(script);
+        if (!machine.step() || !machine.step()) {  // 0x1FB / 0x202
+            std::fprintf(stderr, "wait-colour-window 起始两步失败：%s\n",
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+        if (!machine.scene_pending()) {
+            std::fprintf(stderr, "wait-colour-window：0x202 没有置「待处理」闩（+0B5B4）\n");
+            return false;
+        }
+        if (!machine.step() || !waiting(machine)) {  // 0x21c
+            std::fprintf(stderr, "wait-colour-window：0x21c 没有置等待位\n");
+            return false;
+        }
+        const core::DrawItem* item = machine.draw_item(1);
+        if (item == nullptr || item->window_start == 0) {
+            std::fprintf(stderr, "wait-colour-window：窗没有被盖章（start=%u）\n",
+                         item == nullptr ? 0u : item->window_start);
+            return false;
+        }
+        const auto start = item->window_start;
+        // ★ 每一拍都按宿主的真实动作走：先 step（门 → 派发），再"走一次渲染步入"
+        //   （`end_render()` = `0x4B40AA` / `0x4B40B0`：清脏位 `+0B5AC` 与待处理闩 `+0B5B4`）。
+        //   本用例不设主循环模式字（`draw_mode == 0`）⇒ 门前渲染步不会请求帧，
+        //   所以这里直接调渲染步入；⛔ 不调就等于"渲染步一直没跑"，那是另一种状态（闩本来就不清）。
+        const auto at = [&](std::uint32_t offset) {
+            machine.set_host_clock_ms(start + offset);
+            if (!machine.step()) return false;
+            machine.end_render();
+            return true;
+        };
+        if (!at(0) || !waiting(machine)) {  // 起点那一拍
+            std::fprintf(stderr, "wait-colour-window：start+0 就放行了\n");
+            return false;
+        }
+        if (!at(199) || !waiting(machine)) {
+            std::fprintf(stderr, "wait-colour-window：199ms 就放行了（窗还没走完）\n");
+            return false;
+        }
+        if (!at(200) || !waiting(machine)) {
+            std::fprintf(stderr, "wait-colour-window：200ms（相等）就放行了，应仍算窗内\n");
+            return false;
+        }
+        if (!at(201) || waiting(machine)) {
+            std::fprintf(stderr, "wait-colour-window：201ms 没有放行（waiting=%d pending=%d）\n",
+                         waiting(machine) ? 1 : 0, machine.scene_pending() ? 1 : 0);
+            return false;
+        }
+        // 放行是**门的服务分支**（那一拍不派发）⇒ 再走一拍才执行下一条。
+        if (!machine.step() || machine.voice_option_2f7(0) != 1) {
+            std::fprintf(stderr, "wait-colour-window：放行后没执行下一条（opt=%d）\n",
+                         machine.voice_option_2f7(0));
+            return false;
+        }
+    }
+    // 用例 2：dur = 0 的排窗（不盖章 ⇒ 不能把门永关）。
+    {
+        auto script = make_script_with_body();
+        emit_item(script);
+        emit_instruction(script, 0x202, {{0, 1}, {0, 0}, {0, 0}, {0, 255}, {0, 0x00000000u}});
+        emit_instruction(script, 0x21C, {});
+        emit_instruction(script, 0x2F7, {{0, 0}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_host_clock_ms(1000);
+        machine.load_root(script);
+        if (!machine.step() || !machine.step() || !machine.step() || !waiting(machine)) {
+            std::fprintf(stderr, "wait-colour-window(zero)：0x21c 没有置等待位\n");
+            return false;
+        }
+        // 渲染步入（`0x4B40B0`）清闩：本模型的渲染步入是 `end_render()`。
+        machine.end_render();
+        machine.set_host_clock_ms(1016);
+        if (!machine.step() || waiting(machine)) {
+            std::fprintf(stderr, "wait-colour-window(zero)：时长 0 的窗把门永关了（pending=%d）\n",
+                         machine.scene_pending() ? 1 : 0);
+            return false;
+        }
+        if (!machine.step() || machine.voice_option_2f7(0) != 1) {
+            std::fprintf(stderr, "wait-colour-window(zero)：放行后没执行下一条（opt=%d）\n",
+                         machine.voice_option_2f7(0));
             return false;
         }
     }
@@ -6660,6 +6786,7 @@ int main(int argc, char** argv) {
     bool only_auto_message = false;
     bool only_choice_consumer = false;
     bool only_wait_timer = false;
+    bool only_wait_colour_window = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
@@ -6690,6 +6817,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-auto-message") == 0) only_auto_message = true;
         else if (std::strcmp(argv[i], "--only-choice-consumer") == 0) only_choice_consumer = true;
         else if (std::strcmp(argv[i], "--only-wait-timer") == 0) only_wait_timer = true;
+        else if (std::strcmp(argv[i], "--only-wait-colour-window") == 0) only_wait_colour_window = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -6859,6 +6987,12 @@ int main(int argc, char** argv) {
             std::printf("core-selftest(wait-timer): PASS\n");
             return 0;
         }
+        if (only_wait_colour_window) {
+            // `0x21c` 谓词 A 的「待处理」闩（`+0B5B4`）：颜色窗没走完之前不放行。
+            if (!check_wait_colour_window(table)) return 1;
+            std::printf("core-selftest(wait-colour-window): PASS\n");
+            return 0;
+        }
         if (only_choice_consumer) {
             // 选项消费：点中 ⇒ 执行位置 ← 决定入口。
             if (!check_choice_consumer(table)) return 1;
@@ -6940,6 +7074,8 @@ int main(int argc, char** argv) {
         if (!check_text_ruby(table)) return 1;
         if (!check_text_drain(table)) return 1;
         if (!check_config_paths()) return 1;
+        // `0x21c` 的「待处理」闩（`+0B5B4`）也进全量自检：它是 TITLE / ADV 的公共前置。
+        if (!check_wait_colour_window(table)) return 1;
 
         std::string error;
         const auto instructions = core::decode_instructions(
@@ -7134,7 +7270,11 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        // 等待位按「场景有动画」放行（`CORE-TIMING-WINDOW`）。
+        // 等待位与颜色窗：**窗没走完之前不放行**（`0x21c` 谓词 A 里的 `+0B5B4`）。
+        // ★ 旧版这里断言的是"颜色窗还在走，等待位也必须放行"（只看待画格 / 打字态）——那正是 TITLE 的
+        //   mesh 200000 在**任何一帧渲染前**被 `0x1f7` 拆掉的成因（`0x323` 排窗之后 `0x21c` 立刻放行）。
+        //   引擎的 `sub_407E20` 最后一条指令就是 `mov eax,[ecx+0B5B4h]`（0x407E97）⇒ 它进判据。
+        //   窗走完之后的那一拍才放行（独立用例：`emulator-core-wait-colour-window`）。
         auto wait_script = make_script_with_body();
         emit_instruction(wait_script, 0x1FB,
                          {{0, 1}, {0, 1}, {0, 0}, {0, 0}, {0, 4}, {0, 4}, {0, 0}, {0, 0}});
@@ -7149,22 +7289,23 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "wait setup steps failed\n");
             return 1;
         }
+        if (!wait_machine.scene_pending()) {
+            std::fprintf(stderr, "0x202 排窗没有置「待处理」闩（+0B5B4）\n");
+            return 1;
+        }
         if (!wait_machine.step() || (wait_machine.state_flags() & (1u << 10)) == 0) {
             std::fprintf(stderr, "wait bit not set\n");
             return 1;
         }
-        // ★ 颜色窗**不**是等待位的放行条件（语料 0x413210 / 0x413232：放行看消息子系统
-        //   没有未完成的工作 + 没有状态字 `&5==4` 的对象，那条支路里没有任何窗口/插值字段）。
-        //   旧版这里断言"动画期间不放行"——那正是让每句 1800ms 淡入把脚本卡死、点击全丢的条件
-        //   （实测 80 击只推进 13 次）。现在**反过来**断言：颜色窗还在走，等待位也必须放行。
+        // 窗推进中（delay 100 + duration 100）：等待位必须**保持**置起。
         wait_machine.set_host_clock_ms(1150);
         if (!wait_machine.step()) {
             std::fprintf(stderr, "wait release step halted: %s\n",
                          wait_machine.last_stop().message.c_str());
             return 1;
         }
-        if ((wait_machine.state_flags() & (1u << 10)) != 0) {
-            std::fprintf(stderr, "wait bit still set while only a colour window is animating\n");
+        if ((wait_machine.state_flags() & (1u << 10)) == 0) {
+            std::fprintf(stderr, "颜色窗还在推进（1150ms）就放行了等待位\n");
             return 1;
         }
 

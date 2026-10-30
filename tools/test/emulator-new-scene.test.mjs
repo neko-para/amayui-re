@@ -192,18 +192,20 @@ test('★ 窗进行中：插值写派生色 / 顶点缓冲，不写回当前颜�
   assert.deepEqual(me.colors, [0x80000000], '网格顶点缓冲每步重烘');
 });
 
-test('★ 0x21c 等待门：颜色窗不挡（放行看消息子系统，不看动画窗）', async () => {
+test('★ 0x21c 等待门：颜色窗**会挡**（窗没走完不放行；闩 = 引擎 +0B5B4）', async () => {
   const m = machineFor([
     [0x21c, []],
     [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
   ], { tickMs: 16 });
-  // 场景里有一个 100ms 的窗（起点未盖章）——**它不许**把等待位挡住：
-  // 语料的自然放行只读消息子系统的计时器 + 场景对象状态字，颜色窗不在其中。
+  // 场景里有一个 100ms 的窗（起点未盖章）：引擎在排窗时把「待处理」闩置 1
+  // （`0x4AD155` 一族），窗推进的每一步再置（`sub_4B06D0` 的 `0x4B326A` / `0x4B3CCB`），
+  // 渲染步入（`0x4B40B0`）清 0 ⇒ 等待门（谓词 A）在窗没走完之前不放行。
   m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 100, colorFrom: 0, colorTo: 0xffffffff }));
+  m.scene.pending = 1;
   const r = await m.run();
-  assert.equal(r.steps, 2, 'wait 之后的那条指令被执行了');
-  assert.equal(m.flags, 0, '等待位已清');
-  assert.equal(m.ticks, 0, '颜色窗还在走也必须立刻放行（不许 tick 空转）');
+  assert.equal(r.steps, 2, '窗走完之后的那条指令被执行了');
+  assert.equal(m.flags, 0, '等待位最终已清');
+  assert.ok(m.ticks >= 6, `颜色窗在走 ⇒ 必须空转到窗结束（实得 ticks=${m.ticks}）`);
 });
 
 test('★ 0x21c 等待门：场景没有动画 ⇒ 下一个迭代就放行（不空转）', async () => {
@@ -267,17 +269,18 @@ test('★ 宿主时钟：给了 clock 时 `tick()` 读宿主读数，而不是 `
   assert.equal(m.ticks, 1);
 });
 
-test('★ 宿主时钟 + 等待门：颜色窗不挡，等待位当拍就清', async () => {
+test('★ 宿主时钟 + 等待门：颜色窗**会挡**，窗走完那拍才清位', async () => {
   let now = 0;
   const m = machineFor([
     [0x21c, []],
     [0x2d5, [[4, 5], [1, f32bits(1.5)]]],
-  ], { clock: () => now });
+  ], { clock: () => (now += 16) });
   m.scene.meshes.set(1, mesh({ flags: 3, delay: 0, duration: 100, colorFrom: 0, colorTo: 0xffffffff }));
-  const r = await m.run();
+  m.scene.pending = 1;
+  const r = await m.run({ maxTicks: 1000 });
   assert.equal(r.steps, 2);
-  assert.equal(m.flags, 0, '等待位已清');
-  assert.equal(m.ticks, 0, '颜色窗还在走也必须立刻放行');
+  assert.equal(m.flags, 0, '窗走完之后等待位已清');
+  assert.ok(m.ticks >= 6, `颜色窗在走 ⇒ 宿主时钟必须走到窗结束（实得 ticks=${m.ticks}）`);
 });
 
 test('★ 0x344 场景条目：置存在位 + 写值 + 标脏', async () => {

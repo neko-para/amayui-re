@@ -203,6 +203,12 @@ add_test(NAME emulator-core-choice-consumer COMMAND emulator-core-selftest --onl
 # ★ `0x21c` 谓词 A：`0x238` 的"起点+时长"窗内挡住（相等仍算窗内）、到期放行；`0x243` 中止后立刻放行。
 #   不看这一对格（比如只按"没有待画格"放行）⇒ 本条红。
 add_test(NAME emulator-core-wait-timer COMMAND emulator-core-selftest --only-wait-timer)
+# ★ `0x21c` 谓词 A 的**「待处理」闩**（引擎 `+0B5B4`）：`0x202` 排窗置 1、窗推进时每帧再置 1、
+#   渲染步入（`0x4B40B0` ⇒ `end_render()`）清 0。判据：`0x1fb` → `0x202 delay 0 dur 200` → `0x21c`，
+#   等待位 `0x400` 在 `start + 200` 之前一直置起、`start + 201` 才清。
+#   把闩写回恒 false（旧模型：放行只看"计时器 + 待画格 / 打字态"）⇒ 下一拍就放行 ⇒ 本条红。
+#   ★ 它同时是 TITLE 的 mesh 200000 在**任何一帧渲染前**被 `0x1f7` 拆掉的成因。
+add_test(NAME emulator-core-wait-colour-window COMMAND emulator-core-selftest --only-wait-colour-window)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)

@@ -265,23 +265,28 @@ void Machine::op_242(const Instruction& instruction) {
     // 按键把**同一个整数**写进两条记录（0x242 / `sub_4251A0` → `sub_4AD9A0`，argc 2、推进 5；
     // 规则 `CORE-OPS-SCENE3D-242`）：第 2 个 = 键、第 1 个 = 值；读序 **2 → 1**。
     // 记录不存在就先建（引擎那两步是「确保存在」），再把值写进两条记录的同一格。
+    // ★ 两处**写值本身**都不标脏；**只有第一张表「建默认记录」这一步**标脏（见下）—— 两件事分开写。
     write_length(5);
     const auto value = read_int(ops[1]);
     const auto key = read_int(ops[0]);
-    // 第一处：容器 `+0x408` 里同一编号的记录（缺则先建；建的时候也不标脏）；
+    // 第一处：容器 `+0x408` 里同一编号的记录（缺则先建；**建记录这一步**标脏）。
+    //   它与 `0x1fb` / `0x230` 共用同一条前置「按编号取记录，缺则先建默认记录」：`sub_4AAA50` 的
+    //   建记录分支在 `0x4AAA8D–0x97 call sub_49A300`，而 `sub_49A300` 在 `0x49A620` 写
+    //   `[T_Scene+0B5ACh]=1` ⇒ **建默认记录会置场景脏**。
     //   写的是 `+0x2D0`（模型 `SceneRecord::field_2d0`），⛔ 不是 `0x215` 读的 `+0x4`（`tag`）。
+    //   ★ 记录已存在时写值不标脏 ⇒ 场景不因本条而重绘。
     const auto object_key = static_cast<std::uint32_t>(key);
-    if (scene_records_.find(object_key) == scene_records_.end()) {
-        scene_records_[object_key] = SceneRecord{};
-    }
+    const bool created = scene_records_.find(object_key) == scene_records_.end();
+    if (created) scene_records_[object_key] = SceneRecord{};
     scene_records_[object_key].field_2d0 = value;
+    if (created) scene_dirty_ = true;
     // 第二处：另一张表（`+0x438`）里同一编号的记录（缺则先建）；只写**一格**。
+    // ★ 为**这张**表建记录**不**标脏（`0x4AD9D7` 的第二张表路径不写 `0xB5AC`）⇒
+    //   「第一张表已有该编号、第二张表没有」时场景不因本条而变脏。
     if (scene_keyed_pair_.find(key) == scene_keyed_pair_.end()) {
         scene_keyed_pair_[key] = KeyedPairRecord{};
     }
     scene_keyed_pair_[key].field_a = value;
-    // ★ 本条**不标脏**（连"建默认记录"那一步也不标）：语料这条路径上没有写脏位的写点
-    //   （`sub_4251A0 → sub_4AD9A0 → {4AAA50/4AAD40/4AAC00/4AAEC0}` 全无 `0xB5AC` 写点）。
     return;
 }
 

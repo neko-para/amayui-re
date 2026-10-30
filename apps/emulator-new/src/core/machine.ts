@@ -413,8 +413,15 @@ export interface SceneState {
   drawItems: Map<number, DrawItem>;
   /** 网格表（按编号取记录；缺则建默认记录） */
   meshes: Map<number, Mesh>;
-  /** "场景还有动画在跑"（等待门看它；见 CORE-TIMING-WINDOW） */
+  /** "场景还有动画在跑"（平台据此决定要不要呈现；见 CORE-TIMING-WINDOW） */
   animating: number;
+  /**
+   * 场景侧的"待处理"闩（引擎 `+0B5B4`）：排窗 / 场景对象变换 / 命令档推进置 1，
+   * `stepScene`（= 渲染步的推进段）开头清 0、窗还在走的每一步再置 1。
+   * ★ 读者只有等待门（`serviceFlags` 的谓词 A）；⛔ 与 `animating` 不是同一格：
+   *   `animating` 决定"要不要重画"，闩决定"消息子系统还有没有事"。见 60-ops-wait。
+   */
+  pending: number;
   /** 本帧 stepScene 是否刚给某个窗盖章（起点 0 → now）；平台据此跳过“盖章帧”的 present。 */
   windowStamped: boolean;
   /**
@@ -970,6 +977,7 @@ export class Machine {
     drawItems: new Map(),
     meshes: new Map(),
     animating: 0,
+    pending: 0,
     windowStamped: false,
     forcedComplete: 0,
     auxTables: [new Map(), new Map()],
@@ -1126,10 +1134,20 @@ export class Machine {
       return null;
     }
     if ((this.flags & WAIT_BIT) !== 0) {
-      // 放行看「消息 / 文本子系统没有未完成的工作」，**不看颜色窗 / 场景动画**
-      // （语料：自然放行只读消息子系统的计时器 + 场景对象的状态字，那条支路里没有窗口/插值字段）。
-      // ★ 本参考实现没有建模文本子系统的待画格 ⇒ 这里等价于"立即放行"；⛔ 不要退回
-      //   `scene.animating === 0`：那会让每句的窗口淡入把脚本卡住数秒，点击全丢。
+      // 谓词 A（引擎 `sub_407E20`）：消息子系统的计时器在窗内 **或** 场景侧「待处理」闩非 0。
+      // ★ **颜色窗会挡**：`0x202` / `0x323` / `0x239` / `0x220` / `0x21e` / `0x21f` 排窗即置闩
+      //   （`0x4AD155` 一族），窗推进的每一步再置（`sub_4B06D0` 的 `0x4B326A` / `0x4B3CCB`），
+      //   渲染步入（`0x4B40B0` = `stepScene` 开头）清 0 ⇒ **窗没走完之前本条不放行**。
+      // ⛔ 不要退回"只看文本待画格 / 立即放行"：那会让 TITLE 的 `0x1f7` 在同一 clock 拆掉
+      //   刚建好的 mesh（缺陷 REQ-01M66CV5W8FWNY7B165CXSM8HB）。
+      // ★ 本参考实现**没有**建模文本子系统的待画格与 `0x238` 那一对计时器格 ⇒ 谓词 A 只剩这一格；
+      //   那是建模缺口（残差），不是"颜色窗不算"。
+      if (this.scene.pending !== 0) {
+        // 还在窗里：本拍不派发、也不清位；**推进仿真时钟**（引擎每迭代读一次毫秒时钟，
+        // 窗就是在迭代之间走完的）。⛔ 不 tick ⇒ 闩永远不会清（死循环）。
+        this.tick();
+        return null;
+      }
       this.flags &= ~WAIT_BIT;
       return null;
     }
@@ -1273,6 +1291,7 @@ export class Machine {
           record.mask = 255 - record.mask;
           record.duration = 0;
           this.scene.animating = 1;
+          this.scene.pending = 1;  // +0B5B4 待处理闩
         }
         continue;
       }
@@ -1280,6 +1299,7 @@ export class Machine {
       const start = record.timestamp + record.delay;
       if (record.kind === 0 && now <= start) {
         this.scene.animating = 1;
+        this.scene.pending = 1;  // +0B5B4 待处理闩
         continue;
       }
       if (record.duration <= 0 || now >= start + record.duration) {
@@ -1287,6 +1307,7 @@ export class Machine {
         continue;
       }
       this.scene.animating = 1;
+      this.scene.pending = 1;  // +0B5B4 待处理闩
     }
   }
 
@@ -1352,6 +1373,10 @@ export class Machine {
    */
   stepScene(): void {
     this.scene.animating = 0;
+    // ★ 渲染步入（引擎 0x4B40AA / 0x4B40B0）：脏位与"待处理"闩一起清 0，**紧接着**才推进窗；
+    //   窗还在走 ⇒ 下面的推进把闩重新置起。⛔ 别把清点绑到 present 之后：
+    //   不呈现的宿主路径（影片等）会让闩永远不清、等待门永不放行。
+    this.scene.pending = 0;
     // ★ windowStamped 是**闩锁**：由平台在快照时消费；⛔ 不要每步清掉，否则 16ms 节流会把它吃掉。
     const now = this.scene.now;
     for (const item of this.scene.drawItems.values()) {
@@ -1367,6 +1392,7 @@ export class Machine {
           item.colorNow = item.colorFrom;
         }
         this.scene.animating = 1;
+        this.scene.pending = 1;  // +0B5B4 待处理闩
       } else {
         item.delay = 0;
         item.duration = 0;
@@ -1389,6 +1415,7 @@ export class Machine {
         }
         if (mesh.colorNow !== -1) mesh.colors = mesh.colors.map(() => mesh.colorNow >>> 0);
         this.scene.animating = 1;
+        this.scene.pending = 1;  // +0B5B4 待处理闩
       } else {
         mesh.delay = 0;
         mesh.duration = 0;

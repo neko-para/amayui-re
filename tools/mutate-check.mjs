@@ -2918,6 +2918,22 @@ const MUTATIONS = [
   },
   // ── 注释里引用的规范条目 id 必须存在（★ 实测两次：`0xb6` 引了一条不存在的 `CORE-OPS-AUDIO-SE-STOP`，
   //    并据此写下了"规范：不清"的断言；帧族把 `CORE-OPS-FRAME-*` 写成 `CORE-FRAME-*`）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: 'if (scene_pending_) return true;',
+    to: 'if (false) return true; // 变异：待处理闩恒 false',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '0x21c 谓词 A 不再看「待处理」闩（+0B5B4）⇒ 颜色窗 / 网格窗没走完就放行 ' +
+      '（CTest `emulator-core-wait-colour-window` 当场红；TITLE 的 mesh 200000 又会被 0x1f7 在同一 clock 拆掉）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    from: '            scene_pending_ = true;  // `+0B5B4`：这一帧还在推进 ⇒ 消息子系统不算完成',
+    to: '',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '窗推进时不再把待处理闩置起 ⇒ 渲染步入清掉之后没人再置，等待位在窗还没走完时放行',
+  },
   // ── 复审修复的源码锚（行为断言在 CTest；这里给变异测试一个 node 可跑的入口）──
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
@@ -2939,6 +2955,13 @@ const MUTATIONS = [
     to: '(void)value;',
     guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
     what: '0x238 不再写消息等待三格的 C ⇒ 与 0x243 / 0x305 的三格脱钩',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_scene.cpp',
+    from: 'if (created) scene_dirty_ = true;',
+    to: '/* mutated */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x242 为第一张表建默认记录不再置脏 ⇒ emulator-core-scene-records 的「建记录必须脏」当场红（行为在 CTest；这条源码锚让 mutate-check 能直接跑）',
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',

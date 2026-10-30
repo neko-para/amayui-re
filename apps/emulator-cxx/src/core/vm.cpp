@@ -421,8 +421,15 @@ void Machine::execute(const Instruction& instruction) {
 // `0x21c` 谓词 A（`sub_407E20` 的合同）：消息子系统"还有事"。
 // 定时器就是 `0x238` 写的那一对格：起点（0 = 未盖章，首次检查时盖章 = 现在）+ 时长；
 // 判据用**无符号比较、相等仍算窗内**（引擎 `ja`）。到期 / 中止（`0x243`/`0x305` 的 A=1）
-// 就把那一对清 0，退回看"待处理"标记。
-// ★ "待处理"标记（S+0xB5B4）的写者全集未取证 ⇒ 本模型用"还有待画格 / 在打字态"代理（残差）。
+// 就把那一对清 0，退回看"待处理"闩。
+// ★ "待处理"闩 = 场景侧的 `+0B5B4`（`sub_407E20` 的最后一个 `mov eax,[ecx+0B5B4h]` 就是它）：
+//   · 排窗指令（`0x202` 的 `0x4AD155`、`0x323`、`0x239`、`0x220` / `0x21e` / `0x21f` 那一族 setter
+//     里的 `[this+0B5B4h] = 1`）置 1；
+//   · 窗还在走时每帧再置 1（`sub_4B06D0` 内的 `0x4B326A` / `0x4B3CCB`）；
+//   · **渲染步入**（`0x4B40AA` / `0x4B40B0`）把它与脏位（`+0B5AC`）一起清 0 ⇒ 本模型的对应物是
+//     `advance_scene()` 的开头（每步都跑，不依赖宿主是否呈现；见 vm_timing.cpp）。
+//   ⇒ 窗没走完之前本条不放行；这就是"颜色窗会挡住 0x21c"的机制（残差 `RES-WAIT-PENDING` 里那条
+//     "写者全集未取证"因此收窄到"已取证这些"）。
 bool Machine::message_subsystem_busy() {
     if (msg_wait_c_ != 0) {
         if (msg_wait_b_ == 0) msg_wait_b_ = static_cast<std::int32_t>(scene_clock_ms_);
@@ -432,7 +439,28 @@ bool Machine::message_subsystem_busy() {
         msg_wait_b_ = 0;
         msg_wait_c_ = 0;
     }
+    // 待处理闩（`+0B5B4`）：排过窗、或窗还没走完 ⇒ 消息子系统不算完成。
+    if (scene_pending_) return true;
+    // 已排窗但还没盖章（`window_start == 0`）也忙：那是"渲染步还没跑到"的那一帧差额。
+    if (scene_window_unqueued()) return true;
     return !pending_glyphs_.empty() || (state_flags_ & (1u << 29)) != 0;
+}
+
+// 已排窗但**还没盖章**的条目：`window_start == 0` 是"未盖章"哨兵（`CORE-TIMING-WINDOW`）。
+// ★ 只算**真会盖章**的窗（时长 > 0）：`0x202 key 0 0 …` 这种"排窗但不动画"的一支在
+//   `advance_scene` 里**永远不盖章**（`duration <= 0` 直接返回、窗位也不清），把它算忙会把门**永关**。
+bool Machine::scene_window_unqueued() const {
+    for (const auto& [key, item] : draw_items_) {
+        (void)key;
+        if ((item.flags & 2u) == 0 || item.window_start != 0) continue;
+        if (item.duration > 0 || item.rect_duration > 0) return true;
+    }
+    for (const auto& [key, mesh] : meshes_) {
+        (void)key;
+        if ((mesh.flags & 2u) == 0 || mesh.window_start != 0) continue;
+        if (mesh.duration > 0) return true;
+    }
+    return false;
 }
 
 // `0x21c` 谓词 B（`0x41322A` 的 var_768 ← `0x412648` 扫 1000 槽 + `sub_4050E0`）：
@@ -647,5 +675,3 @@ RunResult Machine::run(std::size_t max_steps) {
 }
 
 }  // namespace core
-
-

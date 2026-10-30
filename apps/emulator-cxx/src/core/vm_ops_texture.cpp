@@ -190,6 +190,11 @@ void Machine::op_323(const Instruction& instruction) {
     mesh.duration = duration;
     mesh.target_color = normalized_color(alpha, color, mesh.color);
     mesh.window_start = 0;  // 未盖章
+    // ★ 排窗那一支在引擎里写**同一条指令对**：脏位 `+0B5AC` = 1 与"待处理"闩 `+0B5B4` = 1
+    //   （`0x4AD14B` / `0x4AD155` 是同形的两条 `mov dword ptr […], 1`；本函数这一族共 24 处）。
+    //   少了闩 ⇒ `0x21c` 在窗还没走完时就放行（TITLE 的 mesh 200000 在**任何一帧渲染前**被 `0x1f7` 拆掉）。
+    scene_dirty_ = true;
+    scene_pending_ = true;
     return;
 }
 
@@ -278,6 +283,9 @@ void Machine::op_239(const Instruction& instruction) {
     item.rect_step_total = step_total;
     item.rect_row_steps = row_steps;
     item.rect_switch = rect_switch;
+    // 源矩形窗与颜色窗共用同一条"排窗"写点（脏位 + 待处理闩），`0x239` 自己那一支同样置两格。
+    scene_dirty_ = true;
+    scene_pending_ = true;
     return;
 }
 
@@ -296,6 +304,9 @@ void Machine::op_202(const Instruction& instruction) {
         it->second.duration = duration;
         it->second.target_color = normalized_color(alpha, color, it->second.color);
         it->second.window_start = 0;  // 未盖章
+        // 引擎：`0x4AD14B` 脏位 = 1、`0x4AD155` "待处理"闩（`+0B5B4`）= 1，两条紧挨着 ⇒ 一起写。
+        scene_dirty_ = true;
+        scene_pending_ = true;
     }
     return;
 }
@@ -532,6 +543,8 @@ void Machine::op_220(const Instruction& instruction) {
     item.set21e_int1 = g2;
     scene_dirty_ = true;
     scene_animating_ = true;
+    // 同一族 setter 在引擎里也写 `[this+0B5B4h] = 1`（`0x4B00FB` / `0x4B0257` / `0x4B034B` 等）⇒ 待处理闩。
+    scene_pending_ = true;
     return;
 }
 void Machine::op_219(const Instruction& instruction) {
@@ -697,6 +710,8 @@ void Machine::op_21e(const Instruction& instruction) {
     item.set21e_scale = scale_matrix(x / 100.0, y / 100.0, z / 100.0);  // ÷100 是语义（百分数）
     scene_dirty_ = true;
     scene_animating_ = true;
+    // 同一族 setter 在引擎里也写 `[this+0B5B4h] = 1`（`0x4B00FB` / `0x4B0257` / `0x4B034B` 等）⇒ 待处理闩。
+    scene_pending_ = true;
     return;
 }
 
@@ -723,6 +738,8 @@ void Machine::op_21f(const Instruction& instruction) {
     item.set21f_rot = rotate_matrix_deg(ax, ay, az, degrees);
     scene_dirty_ = true;
     scene_animating_ = true;
+    // 同一族 setter 在引擎里也写 `[this+0B5B4h] = 1`（`0x4B00FB` / `0x4B0257` / `0x4B034B` 等）⇒ 待处理闩。
+    scene_pending_ = true;
     return;
 }
 

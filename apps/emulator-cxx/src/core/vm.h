@@ -562,6 +562,10 @@ public:
     // 启动时是否跑 LOGO（`0x130` 读的格）：`--skip-logo` 在跑根脚本前置 0。
     void set_show_logo(bool value) { show_logo_ = value ? 1 : 0; }
     bool scene_animating() const { return scene_animating_; }
+    // 场景侧的"待处理"闩（引擎 `+0B5B4`）：排窗 / 窗还在走 ⇒ 1；渲染步入清 0。
+    // 读者只有 `message_subsystem_busy()`（`0x21c` 谓词 A）；`0x4B3F9E` 还用它把脏位置起。
+    bool scene_pending() const { return scene_pending_; }
+    void set_scene_pending(bool value) { scene_pending_ = value; }
     bool forced_complete() const { return forced_complete_; }
     void force_complete() { forced_complete_ = true; }
     // 宿主提供时钟（毫秒）；不设置时每次 step 自动 +16ms（仿真的固定步长）。
@@ -851,6 +855,9 @@ public:
     void begin_render() { render_now_ms_ = scene_clock_ms_; command_animating_ = false; }
     void end_render() {
         scene_dirty_ = false;  // 引擎在渲染步入口清脏（0x4B40AA）
+        // ★ "待处理"闩（`+0B5B4`）与脏位是**同一条指令对**（0x4B40AA / 0x4B40B0），但它必须在
+        //   "推进窗"之前清、由推进重新置起 —— 那一段在 `advance_scene` 里（它每步都跑，
+        //   不依赖宿主是否呈现）。这里不再重复清：否则影片 / 不呈现的宿主路径语义会分叉。
         if (!command_animating_ && !scene_animating_) clear_scene_commands();
     }
     const DrawItem* draw_item(std::uint32_t key) const { const auto it = draw_items_.find(key); return it == draw_items_.end() ? nullptr : &it->second; }
@@ -1129,6 +1136,8 @@ private:
     void service_auto_message();
     // `0x21c` 谓词 A：消息子系统"还有事"（定时器在窗内 **或** 待处理）。谓词 B（影片对象扫描）另算。
     bool message_subsystem_busy();
+    // 已排窗但还没盖章（`window_start == 0`）且**真会盖章**（时长 > 0）的条目 ⇒ 也算忙。
+    bool scene_window_unqueued() const;
     bool movie_gate_busy() const;
     void service_choice_click();
     void op_2f7(const Instruction&); void op_304(const Instruction&); void op_305(const Instruction&);
@@ -1503,6 +1512,8 @@ private:
     std::uint32_t host_clock_ms_ = 0;
     bool external_clock_ = false;
     bool scene_animating_ = false;
+    // 引擎 `+0B5B4`（"场景还有待处理的东西"闩）：排窗时置、窗推进时置、渲染步入清（见 `end_render`）。
+    bool scene_pending_ = false;
     bool forced_complete_ = false;
     bool frame_step_requested_ = false;
     bool frame_flag_ = false;

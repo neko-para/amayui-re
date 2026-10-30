@@ -35,6 +35,12 @@ const CASES = [
     why: '0x238 写的是消息等待三格的 C（与 0x243 / 0x305 同一组）',
   },
   {
+    file: 'apps/emulator-cxx/src/core/vm_ops_scene.cpp',
+    snippet: 'if (created) scene_dirty_ = true;',
+    count: 1,
+    why: '0x242 只为第一张表建默认记录置脏（建记录分支 → sub_49A300 在 0x49A620 写 +0B5ACh）；写值本身与第二张表都不置脏',
+  },
+  {
     file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
     snippet: 'item.set21e_int0 = g1;',
     count: 1,
@@ -63,6 +69,18 @@ const CASES = [
     snippet: 'if (msg_wait_c_ != 0) {',
     count: 1,
     why: '0x21c 的谓词 A 必须读 0x238 写的那一对格（起点 0=未盖章、时长）；不读它就会把窗当空气（①③ 的直接成因）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    snippet: 'if (scene_pending_) return true;',
+    count: 1,
+    why: '0x21c 谓词 A 必须看场景侧的「待处理」闩（`+0B5B4`：0x202 / 0x323 排窗置、窗推进再置、渲染步入清）；不看它 ⇒ 颜色窗没走完就放行（emulator-core-wait-colour-window 红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    snippet: 'scene_pending_ = true;  // `+0B5B4`：这一帧还在推进',
+    count: 1,
+    why: '窗**推进中**必须把待处理闩重新置起（引擎 sub_4B06D0 的 0x4B326A / 0x4B3CCB），否则渲染步入清掉之后再没人置 ⇒ 窗没走完就放行',
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_io.cpp',

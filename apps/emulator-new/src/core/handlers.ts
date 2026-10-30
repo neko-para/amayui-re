@@ -302,6 +302,7 @@ function scene202(m: Machine, ops: Operand[]): void {
     item.colorNow = item.colorFrom;
     m.scene.dirty = 1;
     m.scene.animating = 1;
+    m.scene.pending = 1;  // +0B5B4 待处理闩
   }
 }
 
@@ -604,6 +605,7 @@ function sceneCommand24d(m: Machine, ops: Operand[]): void {
   record.raw = commandOperands(m, ops);
   writeCommandRecord(m, key, record);
   m.scene.animating = 1;
+  m.scene.pending = 1;  // +0B5B4 待处理闩
 }
 
 /**
@@ -1848,6 +1850,7 @@ function sceneSetTransform220(m: Machine, ops: Operand[]): void {
   item.matrices[5] = mat;
   m.scene.dirty = 1;
   m.scene.animating = 1;
+  m.scene.pending = 1;  // +0B5B4 待处理闩
 }
 
 /** 0x228：查记录（不建）；读平移矩阵（矩阵 4）的平移分量，状态 0 成功 / 1 失败。 */
@@ -1912,6 +1915,7 @@ function setter21e(m: Machine, ops: Operand[]): void {
   item.extraMatrices.set(0xac, scaleMatrix(x, y, z));
   m.scene.dirty = 1;
   m.scene.animating = 1;
+  m.scene.pending = 1;  // +0B5B4 待处理闩
 }
 
 /** 0x21f：带位 0 门的一对整数 + 轴角 + 旋转矩阵。 */
@@ -1937,6 +1941,7 @@ function setter21f(m: Machine, ops: Operand[]): void {
   item.extraMatrices.set(0x12c, rotateMatrix(ax, ay, az, deg));
   m.scene.dirty = 1;
   m.scene.animating = 1;
+  m.scene.pending = 1;  // +0B5B4 待处理闩
 }
 
 /** 0x230：清附加组开关位与六个共用格；不标脏。 */
@@ -2089,6 +2094,7 @@ function setter239(m: Machine, ops: Operand[]): void {
   item.sourceWindow = { delay: a, duration: b, steps: c, perRow: d, switchWord: e };
   m.scene.dirty = 1;
   m.scene.animating = 1;
+  m.scene.pending = 1;  // +0B5B4 待处理闩
 }
 
 /**

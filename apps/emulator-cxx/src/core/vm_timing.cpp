@@ -1,7 +1,10 @@
 // 场景计时窗的推进（70-vm §时钟 / CORE-TIMING-WINDOW）：颜色窗与源矩形窗共用一次盖章。
 //
-// ★ `step()` 在门之前调用它；它只改派生态（当前颜色、四条边）与"有动画"标记，
+// ★ `step()` 在门之前调用它；它只改派生态（当前颜色、四条边）与"有动画 / 待处理"两个标记，
 //   不判脏、不请求渲染 —— 那些是主循环的事。
+// ★ "待处理"闩（`+0B5B4`）的生命周期与"有动画"（`+0B5AC` 的派生态）**不是同一格**：
+//   排窗指令（`0x202` / `0x323` / `0x239` / `0x220` / `0x21e` / `0x21f`）直接置它，
+//   这里在"窗还在走"的每一步再置一次；**清 0 就是本函数的开头**（引擎 0x4B40B0 在推进之前清）。
 #include "core/vm.h"
 
 #include "core/color.h"
@@ -45,9 +48,17 @@ void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
     scene_clock_ms_ = now_ms;
     if (!advance_windows) return;  // 暂停：只更新时间戳，不推进任何窗（`CORE-VM-LOOP`）
     scene_animating_ = false;
+    // ★ 渲染步入（`0x4B40AA` / `0x4B40B0`）把脏位与"待处理"闩一起清 0，**紧接着**才推进窗；
+    //   本模型的"渲染步"就是这一段（`step()` 在门之前调用）。⇒ 先清后置：
+    //   窗还在走 ⇒ 下面的推进把闩重新置起（`0x4B326A` / `0x4B3CCB`）；窗没了 ⇒ 闩就真的清掉。
+    //   ⛔ 别把它绑到宿主的 `end_render()`：影片 / 无渲染的宿主路径不呈现场景帧，
+    //   闩会永远不清（实测：LOGO 影片路径的 `0x21c` 会因此永不放行）。
+    scene_pending_ = false;
 
     // 共享推进：盖章 → 延迟内 / 推进中 → 到期收尾（`CORE-TIMING-WINDOW`）。
     // 返回本步派生色（只写进出参，不写记录字段；到期那一步才写当前颜色）。
+    // ★ 推进中同时置"待处理"闩（`+0B5B4`）：引擎在窗推进的那一步把它写成 1
+    //   （`sub_4B06D0` 的 `0x4B326A` / `0x4B3CCB`），渲染步入（`0x4B40B0`）再清 0。
     const auto advance_window = [&](std::uint32_t& flags, std::uint32_t& current,
                                     std::uint32_t& target, std::int32_t& delay,
                                     std::int32_t& duration, std::uint32_t& start,
@@ -58,6 +69,7 @@ void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
         if (now_ms <= start + static_cast<std::uint32_t>(delay) +
                           static_cast<std::uint32_t>(duration)) {
             scene_animating_ = true;
+            scene_pending_ = true;  // `+0B5B4`：这一帧还在推进 ⇒ 消息子系统不算完成
             if (now_ms <= start + static_cast<std::uint32_t>(delay)) return current;
             const auto elapsed = now_ms - start - static_cast<std::uint32_t>(delay);
             const auto progress = static_cast<double>(elapsed) / static_cast<double>(duration);
