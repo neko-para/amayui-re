@@ -93,8 +93,9 @@ bool decode_thumb_bmp(ByteSpan bytes, ThumbImage& image) {
         return false;  // 16 位与其它位深都被拒（唯一的内容判据是位深集合）
     }
     const std::uint32_t bpp = depth / 8u;
-    const std::uint32_t row = depth < 8u ? ((static_cast<std::uint32_t>(width) * depth + 31u) / 32u) * 4u
-                                         : static_cast<std::uint32_t>(width) * bpp;
+    // ★ 行跨距 = ⌈宽 × 位深 ÷ 32⌉ × 4 字节（**所有位深都按 32 位对齐**，行尾填充字节丢弃）。
+    //   旧实现把 24 / 32 位当 `宽 × bpp`，宽不是 4 的倍数时每一行都错位。
+    const std::uint32_t row = ((static_cast<std::uint32_t>(width) * depth + 31u) / 32u) * 4u;
     const std::uint32_t pixel_bytes = row * abs_height;
     const std::uint32_t offset = 54u + palette_entries * 4u;
     if (bytes.size() < static_cast<std::size_t>(offset) + pixel_bytes) return false;
@@ -108,12 +109,15 @@ bool decode_thumb_bmp(ByteSpan bytes, ThumbImage& image) {
         const std::uint8_t* line = bytes.data() + offset + static_cast<std::size_t>(source_row) * row;
         std::uint8_t* dst = image.rgba.data() + static_cast<std::size_t>(y) * width * 4u;
         for (std::int32_t x = 0; x < width; ++x) {
-            std::uint8_t r = 0, g = 0, b = 0;
+            std::uint8_t r = 0, g = 0, b = 0, a = 255;
             if (depth == 24 || depth == 32) {
                 const std::uint8_t* pixel = line + static_cast<std::size_t>(x) * bpp;
                 b = pixel[0];
                 g = pixel[1];
                 r = pixel[2];
+                // ★ 32 位 BMP 的 4 字节是 B / G / R / **A**（A 来自文件）；
+                //   24 位与调色板路径没有 alpha 段 ⇒ 补成**目标格式的 A 满位**（这里 = 255）。
+                if (depth == 32) a = pixel[3];
             } else {
                 const std::uint32_t bit = static_cast<std::uint32_t>(x) * depth;
                 const std::uint32_t byte_index = bit / 8u;
@@ -127,7 +131,7 @@ bool decode_thumb_bmp(ByteSpan bytes, ThumbImage& image) {
             dst[static_cast<std::size_t>(x) * 4u + 0] = r;
             dst[static_cast<std::size_t>(x) * 4u + 1] = g;
             dst[static_cast<std::size_t>(x) * 4u + 2] = b;
-            dst[static_cast<std::size_t>(x) * 4u + 3] = 255u;
+            dst[static_cast<std::size_t>(x) * 4u + 3] = a;
         }
     }
     return true;

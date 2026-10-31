@@ -1,6 +1,7 @@
 #include "core/agf.h"
 
 #include "core/lzss.h"
+#include "core/save_bmp.h"
 
 #include <algorithm>
 
@@ -50,7 +51,18 @@ bool magic_at(ByteSpan bytes, std::size_t offset, const char* magic) {
 
 DecodedAgf decode_agf(ByteSpan bytes) {
     if (bytes.size() < 24) throw CoreError("agf-too-short");
-    if (bytes[0] == 0x42 && bytes[1] == 0x4d) throw CoreError("agf-bmp-unsupported");
+    // ★ 文件头前两字节是 `BM` ⇒ 走 **BMP 分支**（容器 / 两段头 / 像素布局见「存档」的 `FMT-SAVE-STH`；
+    //   位深集合 1 / 4 / 8 / 24 / 32、行跨距 32 位对齐、行序自下而上 —— 全部由 `decode_thumb_bmp` 落）。
+    if (bytes[0] == 0x42 && bytes[1] == 0x4d) {
+        ThumbImage thumb;
+        if (!decode_thumb_bmp(bytes, thumb)) throw CoreError("agf-bmp-decode");
+        DecodedAgf image;
+        image.width = thumb.width;
+        image.height = thumb.height;
+        image.bpp = 32;  // 解码结果是 top-down RGBA8（源位深见文件头，本字段只作诊断）
+        image.rgba = std::move(thumb.rgba);
+        return image;
+    }
 
     const auto version = read_u32(bytes, 4);
     if (version != 1 && version != 2) throw CoreError("agf-version");

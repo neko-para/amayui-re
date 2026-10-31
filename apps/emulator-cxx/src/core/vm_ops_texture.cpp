@@ -403,41 +403,99 @@ void Machine::op_1fa(const Instruction& instruction) {
 
 void Machine::op_1f9(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 设置纹理：读序 2 → 1 → 3 → 2；无平台上传，只建记录
-    const auto id = read_int(ops[1]);
+    // 设置纹理（`CORE-OPS-TEXTURE-SET` / `-LOAD`）：读序 **2 → 1 → 3 → 2**，清槽时点与失败分档是合同。
+    // ① 清**共享对象槽**：发生在读第 1 个操作数**之前**。本模型没有共享对象槽（残差）⇒ 无动作。
+    // ② 读第 1 个（文件号）+ 打开 / 锁定（+ 读整份文件）。打开 / 锁定失败 ⇒ 记录与纹理槽**保持原值**。
+    const auto id = static_cast<std::uint32_t>(read_int(ops[1]));
     const auto file = read_int(ops[0]);
+    if (install_ == nullptr) throw CoreError("texture-loader-missing");
+    core::Bytes bytes;
+    bool bytes_read_failed = false;
+    std::string bytes_error;
+    try {
+        bytes = core::read_install_file(*install_, static_cast<std::uint32_t>(file));
+    } catch (const CoreError& error) {
+        const std::string what = error.what();
+        // 「读字节 / 文件头失败」与「解码失败」**同态**（槽空、记录来源 = 无）；打开 / 锁定失败不是。
+        const bool is_read_failure = what.find("read-failed") != std::string::npos ||
+                                     what.find("archive-read-failed") != std::string::npos ||
+                                     what.find("tell-failed") != std::string::npos;
+        if (!is_read_failure) throw DisplayMessageError("texture-open-failed", what);
+        bytes_read_failed = true;
+        bytes_error = what;
+    }
+    register_loaded_file(static_cast<std::uint32_t>(file));  // 文件库装载登记（`0x143` 的投递源；`0x455948`）
+    // ③ 读第 3 个（颜色键）与第二次第 2 个 —— **都在清纹理槽之前**。
+    //    ★ 第 3 个读取抛类型异常时：纹理槽里**还是旧对象**（清槽还没发生），纹理记录也没被写过。
     const auto raw_key = read_int(ops[2]);
     (void)read_int(ops[1]);
-    if (install_ == nullptr) throw CoreError("texture-loader-missing");
-    const core::Bytes bytes = core::read_install_file(*install_, static_cast<std::uint32_t>(file));
-    register_loaded_file(static_cast<std::uint32_t>(file));  // 文件库装载登记（按区号；`0x143` 的投递源；`0x455948`）
-    const core::DecodedAgf image = core::decode_agf(bytes);
-    // ★ 这是「换纹理」：**记录**整条替换、槽对象换成新像素（旧的颜色键 / 空白标记都不留）。
-    TextureEntry entry;
-    entry.record.file = file;
-    entry.record.color_key =
+    const std::uint32_t normalized_key =
         raw_key < 0 ? 0u : (0xFF000000u | (static_cast<std::uint32_t>(raw_key) & 0xFFFFFFu));
+    // ④ 清纹理槽（装载的第一步，发生在**读任何字节之前** ⇒ 后面任何装载失败都留下空槽）。
+    TextureEntry& entry = texture_entry(id);
+    entry.slot.present = false;
+    entry.slot.width = 0;
+    entry.slot.height = 0;
+    entry.slot.rgba.clear();
+    if (bytes_read_failed) {
+        entry.record.file = -1;  // 失败分档：读字节失败 = 与解码失败同态
+        throw DisplayMessageError("texture-read-failed", bytes_error);
+    }
+    // ⑤ 解码（AGF / BMP）。
+    core::DecodedAgf image;
+    try {
+        image = core::decode_agf(bytes);
+    } catch (const CoreError& error) {
+        entry.record.file = -1;  // 解码失败：槽已空、记录来源 = 无
+        throw DisplayMessageError("texture-decode-failed", error.what());
+    }
+    // ⑥ 建对象 + ⑦ 上传（外部请求）。目标表面的格式取自 `display:TextureBit`：
+    //    16 ⇒ A4R4G4B4（每通道 4 位）、32 ⇒ A8R8G8B8；其它值 ⇒ **上传失败**（对象已建出来、上传未完成）。
+    // ★ **配置没有这个键**时按设备侧的缺省 **32 位**：引擎读配置时会给一个调用方缺省值（那个常量本版
+    //   未取证），而发行默认表里没有这个键（它是玩家机型的键）⇒ 缺键当作 32，⛔ 不当成"非法值"。
     entry.slot.width = image.width;
     entry.slot.height = image.height;
     entry.slot.rgba = image.rgba;
-    if (entry.record.color_key != 0) {
+    entry.slot.present = true;
+    const std::int32_t target_bits = config_.has_named("display:TextureBit")
+                                         ? config_.get_int("display:TextureBit")
+                                         : 32;
+    if (target_bits != 16 && target_bits != 32) {
+        entry.record.file = -1;  // 上传失败：槽里留着**未完成**的对象，记录来源 = 无
+        throw DisplayMessageError("texture-upload-failed",
+                                  "display:TextureBit=" + std::to_string(target_bits));
+    }
+    if (normalized_key != 0) {
+        // ★ 命中判据与**目标位宽**同形：32 位 = 32 位 ARGB 全值相等；16 位 = 键与像素各自按
+        //   4 位通道装配后四段全等（A 参与）。命中 ⇒ **目标像素**四段全 0（源解码缓冲只读）。
+        // 装配：B 在最低段，依次 G、R、A（16 位 = A4<<12 | R4<<8 | G4<<4 | B4；量化 = 取高 4 位）。
+        const auto assemble = [target_bits](std::uint32_t a, std::uint32_t r, std::uint32_t g,
+                                            std::uint32_t b) -> std::uint32_t {
+            if (target_bits == 16) {
+                return (((a >> 4) & 0xFu) << 12) | (((r >> 4) & 0xFu) << 8) |
+                       (((g >> 4) & 0xFu) << 4) | ((b >> 4) & 0xFu);
+            }
+            return ((a & 0xFFu) << 24) | ((r & 0xFFu) << 16) | ((g & 0xFFu) << 8) | (b & 0xFFu);
+        };
+        const std::uint32_t key =
+            assemble((normalized_key >> 24) & 0xFFu, (normalized_key >> 16) & 0xFFu,
+                     (normalized_key >> 8) & 0xFFu, normalized_key & 0xFFu);
         for (std::size_t i = 0; i + 3 < entry.slot.rgba.size(); i += 4) {
-            const auto argb = (static_cast<std::uint32_t>(entry.slot.rgba[i + 3]) << 24) |
-                              (static_cast<std::uint32_t>(entry.slot.rgba[i]) << 16) |
-                              (static_cast<std::uint32_t>(entry.slot.rgba[i + 1]) << 8) |
-                              entry.slot.rgba[i + 2];
-            if (argb == entry.record.color_key) {
-                entry.slot.rgba[i] = 0; entry.slot.rgba[i + 1] = 0;
-                entry.slot.rgba[i + 2] = 0; entry.slot.rgba[i + 3] = 0;
+            const std::uint32_t pixel = assemble(entry.slot.rgba[i + 3], entry.slot.rgba[i],
+                                                 entry.slot.rgba[i + 1], entry.slot.rgba[i + 2]);
+            if (pixel == key) {
+                entry.slot.rgba[i] = 0;
+                entry.slot.rgba[i + 1] = 0;
+                entry.slot.rgba[i + 2] = 0;
+                entry.slot.rgba[i + 3] = 0;
             }
         }
     }
-    entry.slot.present = true;
-    // ★ 替换同一槽时版本号必须**前进**，且要接着"这个编号用过的最高版本"往前（GPU 缓存按
-    //   revision 命中）：旧槽对象在就取旧值 + 1；槽已被 `0x1fa` 释放时同样接着下限涨
-    //   （⛔ 不能从 1 重新开始 —— 那会命中上一条记录留在缓存里的纹理）。
-    entry.slot.revision = next_texture_revision(static_cast<std::uint32_t>(id));
-    textures_[static_cast<std::uint32_t>(id)] = std::move(entry);
+    // ⑧ 成功：记录写来源文件 / 颜色键 / 空白创建 = 0；槽里是普通纹理对象（尺寸 = 图像宽高）。
+    entry.record.file = file;
+    entry.record.color_key = normalized_key;
+    entry.record.blank = false;
+    entry.slot.revision = next_texture_revision(id);
     return;
 }
 

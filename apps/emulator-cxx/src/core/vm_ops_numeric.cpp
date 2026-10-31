@@ -103,44 +103,108 @@ void Machine::op_64(const Instruction& instruction) {
 
 void Machine::op_10c(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 按键写一格（`CORE-OPS-SCALAR-TABLE-10C`，`sub_4220B0`，argc 2）：
-    // 第 2 个是**索引（动作号）**、第 1 个是**值（键号）**。读序 **2 → 1**（EA 0x4220d6 / 0x4220e1）：
-    // 索引先读，值后读；索引读失败时值还没被读。
-    // ① 值按**无符号**比较 > 31（含负值）⇒ 抛显示消息型异常、**不改任何状态**（EA 0x4220e6 / 0x4220ff）。
-    //    文本逐字 = `.lst` 的 `.data:0052005C aSetkeymulti db 'SetKeyMultiの引数が不正です．',0`
-    //    —— **有**全角句点、**没有**回车换行（同族里带 `\r\n` 的是 `SetTB` / `SetVolume` 那几条）。
-    //    ★ spec `60-ops-scalar.md:155` 的引文少了那个全角句点（`SetKeyMultiの引数が不正です`）：
-    //      这里是 spec 与 `.lst` 的矛盾，按 `.lst` 逐字实现、并报给 spec 侧改引文。
-    // ② 用索引在「动作号 → 槽号」表里取一格（EA 0x4220eb）—— **索引完全不检查**：越界属 UB，不作语义断言。
-    // ③ 把值写进「槽号 → 键号」表的该槽（EA 0x4220f3；−1 = 未绑定）。
-    // ★ 本条**不碰**「键号 → 动作号」表（那是单键绑定 0x10b 维护的；EA 0x421c4b 那一侧）。
-    const auto action = read_int(ops[1]);  // 索引（动作号），先读
-    const auto value = read_int(ops[0]);   // 值（键号），后读
-    if (static_cast<std::uint32_t>(value) > 31u) {
+    // 键位映射表（`60-ops-scalar` 的「键位映射表（opcode 0xfd / 0x10c）」）：三张表
+    // A 槽 → 逻辑键（32 格）、B 逻辑键 → 系统键码、C 系统键码 0..255 → 位号（−1 = 未映射）。
+    // 本条（追加按键）：第 1 个操作数是**槽号（同时就是输入位号 0..31）**、第 2 个是**逻辑键号**；
+    // 读序**先第 2 个、再第 1 个**。只把"第 2 个操作数那个逻辑键的系统键码"在表 C 里登记成第 1 个
+    // 操作数（**覆盖**该键码原来的位号）：**不碰表 A、不抹旧键码**（那是 `0xfd` 的解绑）。
+    // ★ 长度槽**在检查之前**写成 5（可观察：抛异常时它已是 5）。
+    write_length(5);
+    const auto logical = read_int(ops[1]);  // 逻辑键号（不检查 = UB）
+    const auto slot = read_int(ops[0]);     // 槽号 / 输入位号
+    if (static_cast<std::uint32_t>(slot) > 31u) {
         throw DisplayMessageError("key-multi-range", "SetKeyMultiの引数が不正です．");
     }
-    // ⛔ 不要给下标加夹取 / 范围检查：引擎那一格是无检查的数组索引（spec 明文：越界读属 UB）。
-    const auto slot = action_slot_table_[static_cast<std::size_t>(action)];
-    slot_key_table_[static_cast<std::size_t>(slot)] = value;
+    // 第 2 个操作数不检查；它的系统键码由**稀疏表 B** 给出。B 里没有这个逻辑键 ⇒ 没有可登记的系统键码：
+    // 本模型**显式诊断但不抛**（逻辑键编号的取值域没有成文，见残差 `RES-INPUT-LOGICAL-KEY-CODES`）。
+    const auto code = logical_key_code(logical);
+    if (code < 0 || code >= static_cast<std::int32_t>(kSystemKeyCount)) {
+        report_error("key-multi-unknown-logical-key:" + std::to_string(logical));
+        return;
+    }
+    key_code_table_[static_cast<std::size_t>(code)] = slot;
     return;
 }
 
 void Machine::op_fe(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    const auto value = read_int(ops[0]); if (static_cast<std::uint32_t>(value) > 31u) throw CoreError("key-total-out-of-range"); key_total_ = value; return;
+    // 设置键总数（`CORE-INPUT-WORD`）：接受 0..31（**无符号**比较 ⇒ `-1` 也拒绝）。
+    // ★ 不合格 ⇒ **显示消息型异常**，键总数与输入字都不变；**写这一格在范围检查之后**
+    //   （不合格就一个字节都不写）。推进格数 = 3 已在 `step()` 的入口写好（2×1+1），抛异常时仍是 3。
+    // ★ 异常的**文本**未取证（残差）⇒ 本模型只给一条 ASCII 诊断串，⛔ 不伪造引擎的日文措辞。
+    const auto value = read_int(ops[0]);
+    if (static_cast<std::uint32_t>(value) > 31u) {
+        throw DisplayMessageError("key-total-out-of-range", "key total out of range (0..31)");
+    }
+    key_total_ = value;
+    return;
 }
 
 void Machine::op_107(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    const auto index = read_int(ops[0]); const auto value = read_int(ops[1]); if (index >= 0 && index <= 0x1f) array_d551_[static_cast<std::size_t>(index)] = value; return;
+    // 手柄按钮映射的第一组（`CORE-INPUT-WORD` / `50-engine-state` 的标量表）：第 i 格 = 槽 i 对应的
+    // **手柄按钮编号**（只决定查平台按钮位图的哪一位，**不参与位号**）。
+    // ★ 索引按**无符号**比较 > 31（含负值）⇒ 静默跳过；值不做范围检查。
+    const auto index = read_int(ops[0]);
+    const auto value = read_int(ops[1]);
+    if (static_cast<std::uint32_t>(index) > 31u) return;
+    array_d551_[static_cast<std::size_t>(index)] = value;
+    return;
 }
 
 void Machine::op_10b(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 标量表 32 格（第 2 个是索引、第 1 个是值；越界值静默跳过，见「引擎级状态」）。
-    // ★ 这张表**同时就是**键绑定三张表里的「键号 → 动作号」：单键绑定那条指令写它（EA 0x421c4b），
-    //   `0x10c` **不碰**它。⇒ ⛔ 不要再给 0x10c 建第二张键 → 动作表。
-    const auto value = read_int(ops[0]); const auto index = read_int(ops[1]); if (index >= 0 && index <= 0x1f) array_d1383_[static_cast<std::size_t>(index)] = value; return;
+    // 输入键槽映射（第 2 个是索引、第 1 个是值；`50-engine-state` 的标量表 + `CORE-INPUT-WORD`）。
+    // ★ 被检查的是**值**：按无符号比较 > 31（含负值）⇒ **静默跳过**（不写、不抛）。
+    // ★ 索引**不做任何检查**（spec 明文：越界写是未定义行为）。本模型选择**显式诊断 + 不写**
+    //   （⛔ 不静默夹取、⛔ 不写坏相邻格）。
+    // ★ 这张表是独立的「输入键槽映射」（`CORE-POOL-SCALAR-ARRAY-10B`）；`0x10c` 改的是另一组
+    //   三张表（表 A/B/C，见 `CORE-OPS-SCALAR-TABLE-10C`）—— 两条规则各管一张表，不是同一张。
+    const auto value = read_int(ops[0]);
+    const auto index = read_int(ops[1]);
+    if (static_cast<std::uint32_t>(value) > 31u) return;
+    if (index < 0 || index >= static_cast<std::int32_t>(array_d1383_.size())) {
+        report_error("scalar-table-10b-index-out-of-range");
+        return;
+    }
+    array_d1383_[static_cast<std::size_t>(index)] = value;
+    return;
+}
+
+void Machine::op_fd(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 键位映射表的三张表见 `op_10c` 的注释（`60-ops-scalar` 的「键位映射表（opcode 0xfd / 0x10c）」）。
+    // 本条（按键设置）：第 1 个操作数是**槽号（同时就是输入位号 0..31）**、第 2 个是**逻辑键号**；
+    // 读序**先第 2 个、再第 1 个**；长度槽**在检查之前**写成 5。
+    // 三步固定顺序：
+    //   ① 经 A 取该槽当前逻辑键、经 B 取系统键码，把表 C 那一格抹 −1（= 解绑）；
+    //   ② 表 A 该槽 ← 第 2 个操作数（改绑）；
+    //   ③ 新逻辑键的系统键码在表 C 登记成第 1 个操作数。
+    // ★ 只检查第 1 个操作数：无符号 > 31（含负值）⇒ 显示消息型异常，**三张表一格不写**。
+    write_length(5);
+    const auto logical = read_int(ops[1]);  // 逻辑键号（不检查 = UB）
+    const auto slot = read_int(ops[0]);     // 槽号 / 输入位号
+    if (static_cast<std::uint32_t>(slot) > 31u) {
+        throw DisplayMessageError("key-setting-range", "SetKeyの引数が不正です．");
+    }
+    const auto slot_index = static_cast<std::size_t>(slot);
+    // ① 该槽当前逻辑键（表 A）→ 系统键码（表 B）→ 把表 C 那一格抹 −1。
+    const auto old_logical = slot_key_table_[slot_index];
+    const auto old_code = logical_key_code(old_logical);
+    if (old_code >= 0 && old_code < static_cast<std::int32_t>(kSystemKeyCount)) {
+        key_code_table_[static_cast<std::size_t>(old_code)] = -1;
+    }
+    // ② 表 A 该槽 ← 第 2 个操作数。
+    slot_key_table_[slot_index] = logical;
+    // ③ 新逻辑键的系统键码在表 C 登记成该槽号。B 里没有这个逻辑键 ⇒ 没有可登记的系统键码：
+    //    本模型**显式诊断但不抛**（逻辑键编号的取值域没有成文，见残差 `RES-INPUT-LOGICAL-KEY-CODES`）。
+    const auto new_code = logical_key_code(logical);
+    if (new_code < 0 || new_code >= static_cast<std::int32_t>(kSystemKeyCount)) {
+        report_error("key-setting-unknown-logical-key:" + std::to_string(logical));
+        return;
+    }
+    key_code_table_[static_cast<std::size_t>(new_code)] = slot;
+    return;
 }
 
 void Machine::op_30a(const Instruction& instruction) {

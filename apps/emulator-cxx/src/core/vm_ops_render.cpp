@@ -263,8 +263,8 @@ void Machine::op_20e(const Instruction& instruction) {
     // ★ 本模型有当前渲染目标（`0x20d` 写）：目标是**纹理槽** ⇒ 该纹理表面清成透明黑，并按内容版本
     //   （`revision`）通知宿主重传；目标是**后缓冲**（-1）⇒ 交换链由宿主每帧重建、模型里没有可写的表面
     //   ⇒ 没有可观察状态（⛔ 不是"清纹理表"）。
-    // ★ 门控支（虚拟全屏类型 == 1 且目标是后缓冲 ⇒ 再清纹理槽 38）**未建模**：模型没有显示记录的
-    //   虚拟全屏类型格 ⇒ 见 `apps/emulator-cxx/SCOPE.md` 的显式限制。
+    // ★ 门控支（虚拟全屏类型 == 1 且目标是后缓冲 ⇒ 再清纹理槽 38）**本模型未建模**（没有显示记录的
+    //   虚拟全屏类型格）；引擎侧的域含义见残差 `RES-RENDER-CLEAR-VFS` / `RES-RENDER-CLEAR-38`。
     // ⛔ 不要顺手清纹理表 / 不要清非目标纹理：那不是这条的语义（见 ops-forensics §21）。
     if (render_target_ >= 0) {
         if (TextureEntry* entry = texture_mut(static_cast<std::uint32_t>(render_target_))) {

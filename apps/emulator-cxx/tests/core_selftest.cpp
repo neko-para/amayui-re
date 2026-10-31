@@ -12,6 +12,7 @@
 #include "core/text_raster.h"
 #include "core/vm.h"
 #include <nlohmann/json.hpp>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <map>
@@ -1452,6 +1453,1204 @@ bool check_input_dispatch(const core::OpcodeTable& table) {
     }
     return true;
 }
+// ── 输入合成（`CORE-INPUT-WORD` 的「各来源的位号合成」/「输入锁存」） ──
+// 判据（每条都能红）：
+// ① 键盘表 256 项、初值全 −1、固定 7 项；位号 = **格里的值**（⛔ 不加 4）
+// ② 鼠标左右键的位号 = **格里的基位号 + 4**（初值 0 / 1 ⇒ 4 / 5）；交换开启 ⇒ 两位互换
+// ③ 第一组手柄的位号 = **槽序号 + 4**（格里的按钮编号不参与）、循环上界 = **键总数**（不是按钮数）、
+//    组头的按钮数 ≤ 0 ⇒ 整组不采样、手柄来源**不看**输入可用标志
+// ④ `0xfe` 越界 ⇒ 显示消息型异常、键总数不变、推进格数仍是 3
+// ⑤ `0x101` = **事件并入**路径（消费锁存）、`0xff` = **电平**路径（互不吞并）；槽锁存 + 吞并标记
+// ⑥ `0xfd` 的"先解绑、再登记"；`0x10d` 的"先清零、后写落点"
+bool check_input_composition(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "input-composition: %s\n", what);
+        return false;
+    };
+
+    // ① 键盘来源：256 项的表、初值全 −1、7 项固定；位号**不加 4**。
+    {
+        core::Machine machine(key, table);
+        if (machine.key_code_bit(0x26) != 0 || machine.key_code_bit(0x27) != 1 ||
+            machine.key_code_bit(0x28) != 2 || machine.key_code_bit(0x25) != 3 ||
+            machine.key_code_bit(0x0D) != 4 || machine.key_code_bit(0x20) != 5 ||
+            machine.key_code_bit(0x08) != 6) {
+            return fail("键盘表的 7 项固定映射不对（↑0 →1 ↓2 ←3 Enter4 Space5 Backspace6）");
+        }
+        std::size_t mapped = 0;
+        for (std::size_t code = 0; code < core::Machine::kSystemKeyCount; ++code) {
+            if (machine.key_code_bit(code) != -1) ++mapped;
+        }
+        if (core::Machine::kSystemKeyCount != 256 || mapped != 7) {
+            std::fprintf(stderr, "键盘表：256 项里映射了 %zu 项（期望 7）\n", mapped);
+            return fail("键盘表的形状不对（256 项 / 只映射 7 项）");
+        }
+        machine.set_key_code_source([](int code) { return code == 0x26; });
+        if (machine.sample_level_input() != 0b1u) {
+            return fail("按住 ↑ 没有落在第 0 位（把键盘的位号加了 4？）");
+        }
+        machine.set_key_code_source([](int code) { return code == 0x0D; });
+        if (machine.sample_level_input() != (1u << 4)) return fail("按住 Enter 没有落在第 4 位");
+        // 输入可用标志 = 0 ⇒ 键盘来源整段不做（键盘 / 鼠标 / 手势受它门控）。
+        machine.set_input_available(false);
+        if (machine.sample_level_input() != 0) return fail("输入可用标志为 0 时键盘来源仍在置位");
+        machine.set_input_available(true);
+    }
+
+    // ② 鼠标左右键：位号 = 格里的基位号 + 4；初值 = 各自的槽号（槽 0/1 ⇒ 0/1）。
+    {
+        core::Machine machine(key, table);
+        if (machine.key_action(0) != 0 || machine.key_action(1) != 1 || machine.key_action(2) != 30) {
+            return fail("键槽映射的初值不对（各自的槽号，槽 2 覆写成 30）");
+        }
+        if (machine.key_slot_count() != 2) return fail("键槽组头的槽数不是 2");
+        machine.set_mouse_button_source([](std::int32_t& mask) { mask = 1; return true; });  // 左键
+        if (machine.sample_level_input() != (1u << 4)) return fail("按左键没有落在第 4 位（格值 + 4）");
+        machine.set_mouse_button_source([](std::int32_t& mask) { mask = 2; return true; });  // 右键
+        if (machine.sample_level_input() != (1u << 5)) return fail("按右键没有落在第 5 位");
+        machine.set_mouse_swap(true);  // 交换开启 ⇒ 两位互换
+        machine.set_mouse_button_source([](std::int32_t& mask) { mask = 1; return true; });
+        if (machine.sample_level_input() != (1u << 5)) return fail("交换开启后左键没有落到第 5 位");
+        // 输入可用标志 = 0 ⇒ 鼠标来源也不查平台。
+        machine.set_input_available(false);
+        if (machine.sample_level_input() != 0) return fail("输入可用标志为 0 时鼠标来源仍在置位");
+    }
+
+    // ③ 第一组手柄：槽序号 + 4、上界 = 键总数、组头按钮数、**不看**输入可用标志。
+    {
+        core::Machine machine(key, table);
+        machine.set_joy_button_source([] { return 1u; });  // 只按住按钮 0
+        machine.set_joy_button_count(0);                   // 组头 0（没有设备 / system:LimitJoy=1）
+        if (machine.sample_level_input() != 0) return fail("组头按钮数为 0 时手柄位仍被置起");
+        // ★ 设备只报告 1 个按钮，但采样的上界是**键总数**（7）⇒ 七格（初值都是按钮 0）全部落第 4..10 位。
+        machine.set_joy_button_count(1);
+        const std::uint32_t seven_slots = ((1u << 7) - 1u) << 4;
+        if (machine.sample_level_input() != seven_slots) {
+            std::fprintf(stderr, "手柄采样 = 0x%X（期望 0x%X）\n", machine.sample_level_input(),
+                         seven_slots);
+            return fail("手柄采样的上界不是键总数（七格初值都是按钮 0 ⇒ 第 4..10 位全起）");
+        }
+        machine.set_input_available(false);
+        if (machine.sample_level_input() != seven_slots) {
+            return fail("输入可用标志为 0 时手柄来源被误门掉了（它不看这个标志）");
+        }
+        machine.set_input_available(true);
+        // 键总数 1 + 0x107 槽 0 写 0（按钮 0）⇒ 输入字**恰好**是第 4 位。
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x107, {{0, 0}, {0, 0}});
+        emit_instruction(bytes, 0xFE, {{0, 1}});
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        if (!machine.step() || !machine.step()) return fail("0x107 / 0xfe 夹具停机了");
+        if (machine.sample_level_input() != (1u << 4)) {
+            return fail("键总数 1 + 槽 0 = 按钮 0 时不是恰好第 4 位（不是第 0 / 第 35 位）");
+        }
+    }
+
+    // ③b 位号 ≥ 32 的落点：移位只取低 5 位 ⇒ 槽 28 的位号 32 落到第 0 位（⛔ 不是"丢弃"）。
+    {
+        core::Machine machine(key, table);
+        machine.set_joy_button_source([] { return 1u; });  // 只按住按钮 0
+        machine.set_joy_button_count(8);
+        auto bytes = make_script_with_body();
+        for (std::uint32_t slot = 0; slot < 28; ++slot) {
+            emit_instruction(bytes, 0x107, {{0, slot}, {0, 1}});  // 槽 0..27 → 按钮 1（没按）
+        }
+        emit_instruction(bytes, 0x107, {{0, 28}, {0, 0}});        // 槽 28 → 按钮 0（按下）
+        emit_instruction(bytes, 0xFE, {{0, 29}});                 // 键总数 29
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        for (int i = 0; i < 30; ++i) {
+            if (!machine.step()) return fail("位号 ≥ 32 的夹具停机了");
+        }
+        const std::uint32_t word = machine.sample_level_input();
+        if (word != 1u) {
+            std::fprintf(stderr, "位号 ≥ 32 的采样 = 0x%X（期望 0x1：槽 28 ⇒ 位 32 ⇒ 落第 0 位）\n",
+                         word);
+            return fail("越过 32 的位号被丢弃了（应当按移位的低 5 位落位）");
+        }
+    }
+
+    // ③c 手柄的方向位 = 0..3（与键盘方向键共用），**四个半平面各自独立**（斜方向两位同时亮）。
+    {
+        core::Machine machine(key, table);
+        machine.set_joy_button_count(4);
+        machine.set_joy_hat_four_way(true);
+        auto angle = 0;
+        machine.set_joy_hat_source([&angle] { return angle; });
+        const auto bits_at = [&](int value) {
+            angle = value;
+            return machine.sample_level_input();
+        };
+        if (bits_at(0) != (1u << 0)) return fail("帽子 0° 不是只有第 0 位（上）");
+        if (bits_at(4500) != ((1u << 0) | (1u << 1))) {
+            std::fprintf(stderr, "帽子 45° = 0x%X（期望 0x3）\n", bits_at(4500));
+            return fail("斜方向没有同时点亮两位（把帽子实现成了互斥的 8 方向枚举）");
+        }
+        if (bits_at(9000) != (1u << 1)) return fail("帽子 90° 不是只有第 1 位（右）");
+        if (bits_at(18000) != (1u << 2)) return fail("帽子 180° 不是只有第 2 位（下）");
+        if (bits_at(27000) != (1u << 3)) return fail("帽子 270° 不是只有第 3 位（左）");
+        // 居中（−1）⇒ 这四位改由**摇杆轴**越过中位阈值给出。
+        machine.set_joy_stick_threshold(1000);
+        machine.set_joy_stick_source([] { return std::array<int, 2>{1500, 0}; });  // 轴右
+        angle = -1;
+        if (machine.sample_level_input() != (1u << 1)) {
+            return fail("帽子居中时摇杆轴没有给出方向位（右 ⇒ 第 1 位）");
+        }
+        // 设备能力不报"帽子可四向" ⇒ 一律按居中处理（即使平台给了角度）。
+        machine.set_joy_hat_four_way(false);
+        angle = 4500;
+        if (machine.sample_level_input() != (1u << 1)) {
+            return fail("设备不报四向时仍按帽子角度给了方向位（应当按居中处理 ⇒ 用摇杆轴）");
+        }
+    }
+
+    // ④ `0xfe` 越界：显示消息型异常、键总数不变、推进格数仍是 3。
+    for (const std::int32_t value : {32, -1}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xFE, {{0, static_cast<std::uint32_t>(value)}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (machine.step() || !machine.halted()) {
+            std::fprintf(stderr, "0xfe(value=%d) 没有抛\n", value);
+            return fail("0xfe 越界没有抛显示消息型异常");
+        }
+        if (machine.last_display_code() != "key-total-out-of-range") {
+            std::fprintf(stderr, "0xfe(value=%d) 错误码 = %s\n", value,
+                         machine.last_display_code().c_str());
+            return fail("0xfe 越界的错误码不对");
+        }
+        if (machine.key_total() != 7) return fail("0xfe 越界时键总数被改了（应当一个字节都不写）");
+        if (machine.frame().length_slot != 3) {
+            std::fprintf(stderr, "0xfe 抛异常时推进格数 = %d（期望 3）\n", machine.frame().length_slot);
+            return fail("0xfe 抛异常时推进格数不是 3");
+        }
+    }
+
+    // ⑤ `0x101` 的事件并入路径（消费）vs `0xff` 的电平路径（不消费）；槽锁存 + 吞并标记。
+    {
+        core::Machine machine(key, table);
+        machine.push_key_down_message(0x26);  // ↑ = 输入位 0
+        if (machine.latch_bits() != 1u) return fail("键按下消息没有写进位号锁存字");
+        if (machine.sample_event_input() != 0b1u) return fail("事件并入采样没有把锁存位并进输入字");
+        if (machine.latch_bits() != 0) return fail("事件并入采样没有消费位号锁存字（没有清 0）");
+        if (machine.sample_event_input() != 0b0u) return fail("同一个按下事件被第二次采样看到（没有消费）");
+        // ★ 两条路径没有被混成一条：仍按住 ↑ 时 `0xff` 的电平采样照样置第 0 位。
+        machine.set_key_code_source([](int code) { return code == 0x26; });
+        if (machine.sample_level_input() != 0b1u) return fail("事件并入把电平来源吃掉了");
+        // 槽锁存：左键**按下**消息（set:ClickOnUp = 0）⇒ 槽 0 ⇒ 基位号 0 + 4 = 第 4 位。
+        machine.push_mouse_button_message(false, true);
+        if (machine.latch_slots() != 1u) return fail("左键按下消息没有写进槽锁存字");
+        if ((machine.sample_event_input() & (1u << 4)) == 0) return fail("槽锁存的并入没有落第 4 位");
+        if (machine.latch_slots() != 0) return fail("槽锁存位没有被清掉");
+        // 吞并标记：一次采样看到左右键正按下 ⇒ 标记置起 ⇒ **下一条**鼠标键消息被丢掉。
+        machine.set_mouse_button_source([](std::int32_t& mask) { mask = 1; return true; });
+        (void)machine.sample_event_input();
+        if (!machine.mouse_swallow_pending()) return fail("采样看到左右键按下后没有置吞并标记");
+        machine.push_mouse_button_message(false, true);
+        if (machine.latch_slots() != 0 || machine.mouse_swallow_pending()) {
+            return fail("吞并标记没有把这一条鼠标键消息丢掉");
+        }
+        machine.push_mouse_button_message(false, true);  // 标记已清 ⇒ 照常写入
+        if (machine.latch_slots() != 1u) return fail("吞并后的下一条消息没有照常写入");
+        // `set:ClickOnUp` 非 0 ⇒ 只有**抬起**消息写锁存。
+        core::Machine up_machine(key, table);
+        up_machine.set_click_on_up(1);
+        up_machine.push_mouse_button_message(false, true);   // 按下：不写
+        if (up_machine.latch_slots() != 0) return fail("set:ClickOnUp 非 0 时按下消息仍写了锁存");
+        up_machine.push_mouse_button_message(false, false);  // 抬起：写
+        if (up_machine.latch_slots() != 1u) return fail("set:ClickOnUp 非 0 时抬起消息没有写锁存");
+        // ★ `0x101` 本身走的就是这条事件并入路径：它虽然把采样结果丢弃，但**消费**了锁存的事件。
+        //   ⇒ 把 `0x101` 实现成 `0xff` 那种电平采样时，这里锁存字还是 1 ⇒ 红。
+        auto poll = make_script_with_body();
+        emit_instruction(poll, 0x101, {});
+        emit_instruction(poll, 2, {});
+        core::Machine poll_machine(key, table);
+        poll_machine.load_root(poll);
+        poll_machine.push_key_down_message(0x26);
+        if (!poll_machine.step()) return fail("0x101 夹具停机了");
+        if (poll_machine.latch_bits() != 0) return fail("0x101 没有走事件并入路径（锁存字没被消费）");
+        if (poll_machine.input_word() != 0) return fail("0x101 没有把采样结果丢弃（输入字非 0）");
+        if (poll_machine.input_a() != 1 || poll_machine.input_b() != 0) {
+            return fail("0x101 的两个标量不是 A=1 / B=0");
+        }
+        // 引擎级标志 D 非 0 ⇒ 输入字第 6 位置起（0x88 写 C/D，0x19c 的 C 支把 D 置 1）。
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x88, {{0, 1}});
+        emit_instruction(bytes, 0x19C, {});
+        emit_instruction(bytes, 2, {});
+        core::Machine mode_machine(key, table);
+        mode_machine.load_root(bytes);
+        if (!mode_machine.step() || !mode_machine.step()) return fail("0x88 / 0x19c 夹具停机了");
+        if ((mode_machine.sample_event_input() & (1u << 6)) == 0) {
+            return fail("引擎级标志 D 非 0 时第 6 位没有置起");
+        }
+    }
+
+    // ⑥ `0xfd`：先解绑该槽旧逻辑键的键码，再把新键码登记到该槽的位号上。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xFD, {{0, 0}, {0, 28}});  // 槽 0 ← 逻辑键 28（Enter）
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0xfd 夹具停机了");
+        if (machine.key_code_bit(0x0D) != 0) return fail("0xfd 没有把 Enter 的键码登记到第 0 位");
+        if (machine.key_code_bit(0x26) != -1) return fail("0xfd 没有把槽 0 旧逻辑键（↑）的键码解绑");
+        machine.set_key_code_source([](int code) { return code == 0x0D; });
+        if (machine.sample_level_input() != 0b1u) {
+            return fail("0xfd 之后按 Enter 没有只点亮第 0 位（键码表一格只存一个位号）");
+        }
+        machine.set_key_code_source([](int code) { return code == 0x26; });
+        if (machine.sample_level_input() != 0) return fail("0xfd 之后按 ↑ 仍点亮了第 0 位（没有解绑）");
+        // 连续两次 0xfd 到同一槽：第 2 条把上一条绑定的 Enter 键码抹掉。
+        auto twice = make_script_with_body();
+        emit_instruction(twice, 0xFD, {{0, 7}, {0, 28}});
+        emit_instruction(twice, 0xFD, {{0, 7}, {0, 30}});  // 逻辑键 30 = Backspace
+        emit_instruction(twice, 2, {});
+        core::Machine machine2(key, table);
+        machine2.load_root(twice);
+        if (!machine2.step() || !machine2.step()) return fail("两条 0xfd 夹具停机了");
+        if (machine2.key_code_bit(0x0D) != -1) {
+            return fail("第二条 0xfd 没有把上一条绑定的 Enter 键码抹掉");
+        }
+        if (machine2.key_code_bit(0x08) != 7) return fail("第二条 0xfd 没有把新键码登记到第 7 位");
+    }
+
+    // ⑦ `0x10d`：**先清零、后写落点** —— 落点写抛异常时累加格已经清 0。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x10D, {{2, 0}});  // 落点 = 内联文本（写整型不支持）⇒ 抛
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        machine.add_wheel_delta(120);
+        machine.add_wheel_delta(-40);
+        if (machine.step() || !machine.halted()) return fail("0x10d 用不可写落点没有抛");
+        if (machine.wheel_delta() != 0) return fail("0x10d 抛之前没有先清零累加格（两步次序写反了）");
+    }
+    return true;
+}
+
+// ── 文本 / 字符串（`CORE-OPS-TEXT-SET` 的容器句柄与格式化、`CORE-OPS-TEXT-FONT-NAME-2DE`） ──
+// 判据（每条都能红）：
+// ① `0x192` 的落点是**字符串容器句柄**（`0x8005` / `0x800B`）时，记录里存的是**容器引用的十进制文本**、
+//    源文本进**首元素**（空容器追加、非空覆写首元素）；记录文本**不被本条改写**
+// ② 同一个句柄当**源**读 ⇒ 首元素文本；空记录 / 空容器 ⇒ **空串**；记录文本非数字 ⇒ 未定义行为（本实现诊断 + 停止）
+// ③ 整数源 ⇒ 十进制；浮点源 ⇒ **定点 6 位小数**（`1.5` 与 `"1.500000"` 相等，`0x194` 同一读原语）
+// ④ `0x2de` 在**系统字体名一览**里查：逐字节 + 长度相等、查前跳过**一个** `@`、未命中 −1
+// ⑤ 表项标志字节的**位 0 = 等宽** ⇒ 该字体固定半宽（字宽 = 字号 ÷ 2），⛔ 不是"跳过这个字体"；
+//    内建识别的 `IPA Pゴシック` / `IPA P明朝` 即使位 0 置起也按字形算
+bool check_text_container_and_font_names(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "text-container: %s\n", what);
+        return false;
+    };
+    constexpr std::uint32_t kGlobalStringHandle = 0x8005u;
+
+    // ① / ②：容器句柄当落点、当源；记录里存的是引用文本。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x192, {{kGlobalStringHandle, 3}, {5, 0}});  // 句柄槽 3 ← 记录 0 的文本
+        emit_instruction(bytes, 0x192, {{5, 9}, {kGlobalStringHandle, 3}}); // 记录 9 ← 句柄槽 3 的首元素
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.write_text(core::Operand{5, 0}, "hello");
+        machine.load_root(bytes);
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x192 容器落点的停因 = %s\n", machine.last_stop().message.c_str());
+            return fail("0x192（容器落点）停机了");
+        }
+        const std::string reference_text = machine.string_record_text(3, false);
+        if (reference_text.empty() || reference_text == "hello") {
+            std::fprintf(stderr, "句柄落点的记录文本 = \"%s\"\n", reference_text.c_str());
+            return fail("句柄落点的记录里没有写容器引用（源文本不该进记录）");
+        }
+        const auto reference = static_cast<std::uint32_t>(std::atoi(reference_text.c_str()));
+        if (machine.string_container_size(reference) != 1) {
+            return fail("句柄落点没有建出容器首元素");
+        }
+        if (machine.string_container_first(reference) != "hello") {
+            return fail("容器首元素不是源文本");
+        }
+        if (!machine.step()) return fail("0x192（容器源）停机了");
+        if (machine.string_record_text(9, false) != "hello") {
+            return fail("句柄当源读到的不是首元素文本（记录文本不是引用？）");
+        }
+        // 覆写首元素：记录文本**不被改写**、元素被换掉。
+        auto overwrite = make_script_with_body();
+        emit_instruction(overwrite, 0x192, {{kGlobalStringHandle, 3}, {5, 1}});
+        emit_instruction(overwrite, 2, {});
+        machine.write_text(core::Operand{5, 1}, "world");
+        machine.load_root(overwrite);
+        if (!machine.step()) return fail("第二次 0x192 停机了");
+        if (machine.string_record_text(3, false) != reference_text) {
+            return fail("已有容器时记录文本被本条改写了");
+        }
+        if (machine.string_container_size(reference) != 1 ||
+            machine.string_container_first(reference) != "world") {
+            return fail("非空容器没有覆写首元素（或追加了第二个元素）");
+        }
+        // 空记录 / 空容器 ⇒ 空串。
+        auto empty = make_script_with_body();
+        emit_instruction(empty, 0x192, {{5, 10}, {kGlobalStringHandle, 7}});  // 从未写过的句柄槽
+        emit_instruction(empty, 2, {});
+        core::Machine empty_machine(key, table);
+        empty_machine.load_root(empty);
+        if (!empty_machine.step()) return fail("空句柄当源读时停机了");
+        if (!empty_machine.string_record_text(10, false).empty()) {
+            return fail("空记录 / 空容器没有读成空串");
+        }
+        // 记录文本非数字（被脚本改成 "abc"）⇒ 句柄失败路径的未定义行为：本实现诊断 + 响亮失败。
+        auto broken = make_script_with_body();
+        emit_instruction(broken, 0x192, {{5, 11}, {kGlobalStringHandle, 8}});
+        emit_instruction(broken, 2, {});
+        core::Machine broken_machine(key, table);
+        broken_machine.write_text(core::Operand{5, 8}, "abc");
+        broken_machine.load_root(broken);
+        if (broken_machine.step() || !broken_machine.halted()) {
+            return fail("记录文本不是数字时没有响亮失败（被当成空串了？）");
+        }
+    }
+
+    // ③ 整数 ⇒ 十进制；浮点 ⇒ 定点 6 位小数；`0x194` 用同一条读原语。
+    {
+        const std::uint32_t one_and_half = std::bit_cast<std::uint32_t>(1.5f);
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x192, {{5, 0}, {0, static_cast<std::uint32_t>(-42)}});
+        emit_instruction(bytes, 0x192, {{5, 1}, {1, one_and_half}});
+        emit_instruction(bytes, 0x192, {{5, 2}, {5, 3}});  // 记录 2 ← 记录 3 的文本（对照）
+        emit_instruction(bytes, 0x194, {{9, 0}, {1, one_and_half}, {5, 4}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.write_text(core::Operand{5, 3}, "1.500000");
+        machine.write_text(core::Operand{5, 4}, "1.500000");
+        machine.load_root(bytes);
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) return fail("文本格式化夹具停机了");
+        }
+        if (machine.string_record_text(0, false) != "-42") {
+            std::fprintf(stderr, "整数源的文本 = %s\n", machine.string_record_text(0, false).c_str());
+            return fail("整数源没有格式化成十进制（可带负号 / 无前导零）");
+        }
+        if (machine.string_record_text(1, false) != "1.500000") {
+            std::fprintf(stderr, "浮点源的文本 = %s\n", machine.string_record_text(1, false).c_str());
+            return fail("浮点源没有格式化成定点 6 位小数");
+        }
+        if (machine.local_int(0) != 1) {
+            std::fprintf(stderr, "0x194(1.5, \"1.500000\") = %d\n", machine.local_int(0));
+            return fail("浮点 1.5 与文本 \"1.500000\" 不相等（两条读不是同一原语）");
+        }
+    }
+
+    // ④ `0x2de`：系统字体名一览的查找（逐字节 + 长度相等；跳过开头一个 `@`；未命中 −1）。
+    {
+        core::Machine machine(key, table);
+        machine.set_font_name_table({{"MS Gothic", 0}, {"Foo Bar", 1}, {"@At", 0}});
+        const auto query = [&](const std::string& name) -> std::int32_t {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DE, {{3, 0}, {5, 0}});
+            emit_instruction(bytes, 2, {});
+            core::Machine probe = machine;  // 表随拷贝走；每次从同一个表出发
+            probe.write_text(core::Operand{5, 0}, name);
+            probe.load_root(bytes);
+            if (!probe.step()) return -12345;
+            return probe.global_int(0);
+        };
+        if (query("MS Gothic") != 0) return fail("0x2de 没命中表项 0");
+        if (query("@MS Gothic") != 0) return fail("0x2de 没有跳过名字开头的一个 `@`");
+        if (query("@Foo Bar") != 1) return fail("0x2de 跳过 `@` 之后没命中表项 1");
+        if (query("ms gothic") != -1) return fail("0x2de 做了大小写折叠（应当逐字节比）");
+        if (query("MS") != -1) return fail("0x2de 只比了前缀（长度必须相等）");
+        if (query("At") != -1) return fail("0x2de 把表里的 `@At` 当成了 `At`（查表侧不跳 `@`）");
+        if (query("nope") != -1) return fail("0x2de 未命中没有写 −1");
+    }
+
+    // ⑤ 表项标志字节的位 0 = **等宽**（`FIXED_PITCH`）：固定半宽支（字宽 = ∓字号/2，符号看对位模式）；
+    //    ⛔ 不是"跳过这个字体"；`IPA P` 系列即使位 0 置起也按字形算。
+    {
+        // "IPA Pゴシック" / "IPA P明朝" 的 CP932 字节（引擎字符串是 ANSI 字节）。
+        const std::string ipa_gothic = std::string("IPA P") + "\x83\x53\x83\x56\x83\x62\x83\x4E";
+        const std::string ipa_mincho = std::string("IPA P") + "\x96\xBE\x92\xA9";
+        core::Machine machine(key, table);
+        machine.set_font_name_table({{"Amayui CN", 1}, {"MS Gothic", 0}, {ipa_gothic, 1}, {ipa_mincho, 1}});
+        // 设对位模式 + 字面名（0x2db 写对位模式、0x1a5 写 A 支名字）。
+        const auto set_face = [&](std::int32_t align, const std::string& face) {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DB, {{0, static_cast<std::uint32_t>(align)}});
+            emit_instruction(bytes, 0x1A5, {{5, 0}});
+            emit_instruction(bytes, 2, {});
+            machine.write_text(core::Operand{5, 0}, face);
+            machine.load_root(bytes);
+            if (!machine.step() || !machine.step()) return false;
+            return true;
+        };
+        // 字号 40 的固定半宽：对位模式 1 ⇒ −20、2 ⇒ +20。
+        if (!set_face(1, "Amayui CN")) return fail("0x2db / 0x1a5 夹具停机了");
+        if (machine.font_fixed_half_width(40) != -20) {
+            std::fprintf(stderr, "对位模式 1 的固定半宽 = %d（期望 −20）\n",
+                         machine.font_fixed_half_width(40));
+            return fail("位 0 置起 + 对位模式 1 没有给出 −字号/2");
+        }
+        if (!set_face(2, "Amayui CN")) return fail("0x2db / 0x1a5 夹具停机了");
+        if (machine.font_fixed_half_width(40) != 20) {
+            std::fprintf(stderr, "对位模式 2 的固定半宽 = %d（期望 +20）\n",
+                         machine.font_fixed_half_width(40));
+            return fail("位 0 置起 + 对位模式 2 没有给出 +字号/2");
+        }
+        // 对位模式 0 是**窄 unknown**：不适用（⛔ 不猜第三套符号）。
+        if (!set_face(0, "Amayui CN")) return fail("0x2db / 0x1a5 夹具停机了");
+        if (machine.font_fixed_half_width(40) != 0) {
+            return fail("对位模式 0 也给了固定半宽（本版是窄 unknown，不该编语义）");
+        }
+        if (!set_face(1, "MS Gothic")) return fail("0x2db / 0x1a5 夹具停机了");
+        if (machine.font_fixed_half_width(40) != 0) return fail("位 0 未置起的字体被当成了固定半宽");
+        if (!set_face(1, ipa_gothic)) return fail("0x2db / 0x1a5 夹具停机了");
+        if (machine.font_fixed_half_width(40) != 0) {
+            return fail("内建识别的 IPA Pゴシック 没有走\"按字形算\"那一支（位 0 不该生效）");
+        }
+        if (!set_face(1, ipa_mincho)) return fail("0x2db / 0x1a5 夹具停机了");
+        if (machine.font_fixed_half_width(40) != 0) {
+            return fail("内建识别的 IPA P明朝 没有走\"按字形算\"那一支");
+        }
+        // 光栅化那一半：固定半宽 ⇒ 每个字形的推进 = |字宽|（不是 FreeType 的 advance）。
+        // ★ 没有字体后端 / 没有字体文件时这条判不了（与其它文本用例同口径）。
+        const auto advance_of = [&](std::int32_t align, const std::string& face,
+                                    std::int32_t flags) -> int {
+            core::Machine draw = machine;
+            draw.set_font_name_table({{face, flags}});
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DB, {{0, static_cast<std::uint32_t>(align)}});
+            emit_instruction(bytes, 0x1A5, {{5, 0}});
+            emit_instruction(bytes, 2, {});
+            draw.write_text(core::Operand{5, 0}, face);
+            draw.load_root(bytes);
+            if (!draw.step() || !draw.step()) return -1;
+            auto& entry = draw.texture_entry(9);
+            entry.slot.present = true;
+            entry.slot.width = 400;
+            entry.slot.height = 80;
+            entry.slot.rgba.assign(static_cast<std::size_t>(400) * 80 * 4, 0);
+            int advance = 0;
+            std::string error;
+            if (!core::draw_text_into_texture(draw, 9, 0, 0, "\x82\x6C", &error, &advance, 40)) {
+                return -1;  // 没有字形后端 ⇒ 判不了
+            }
+            return advance;
+        };
+        const int half = advance_of(1, "Amayui CN", 1);
+        const int normal = advance_of(1, "Amayui CN", 0);
+        if (half > 0 && normal > 0) {
+            if (half != 20) {  // 字号 40 ⇒ 固定半宽 20
+                std::fprintf(stderr, "固定半宽的推进 = %d（期望 20）\n", half);
+                return fail("固定半宽字体没有按\"字号 ÷ 2\"推进");
+            }
+            if (normal == half) {
+                std::fprintf(stderr, "非等宽字体的推进也是 %d ⇒ 夹具分辨不出两档\n", normal);
+                return fail("等宽分支没有真的改变推进（或对照字体恰好等宽）");
+            }
+        }
+    }
+
+    // ⑥ `0x75` / `0x197` / `0x1a5` / `0x2fe` 的**度量派生**（「入口体写的值 ≠ 重建后的最终值」）：
+    //    一次派生发**两次**度量（第一次 = 常量参考字体 `ＭＳ ゴシック`、第二次 = 该描述自己的字面名），
+    //    写回两格的是**第二次**；回退（AspectMode ≠ 0 时不回退；名字不在表 / 位 0 且非 IPA）⇒ 下一格 ← 高度 ÷ 2。
+    {
+        struct Calls {
+            std::vector<std::string> faces;
+            std::vector<std::int32_t> sizes;
+        };
+        const auto make_measurer = [](Calls& calls, std::int32_t line_height,
+                                      std::int32_t average_width) {
+            return [&calls, line_height, average_width](const std::string& face,
+                                                        std::int32_t size) {
+                calls.faces.push_back(face);
+                calls.sizes.push_back(size);
+                core::Machine::FontMetrics metrics;
+                metrics.line_height = line_height;
+                metrics.average_width = average_width;
+                metrics.glyph_box_width = 0;      // 不触发"再缩一次"
+                metrics.measured_box_width = 0;   // 同上（判据要求 > 0）
+                return metrics;
+            };
+        };
+        const std::string reference_face = "\x82\x6C\x82\x72\x20\x83\x53\x83\x56\x83\x62\x83\x4E";
+        // ⑥a：对位模式 = 0 ⇒ 直接重建，**不发**度量；两格 = −字号 / −(字号/2)。
+        {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DB, {{0, 0}});
+            emit_instruction(bytes, 0x1A5, {{5, 0}});
+            emit_instruction(bytes, 0x75, {{0, 20}});
+            emit_instruction(bytes, 2, {});
+            core::Machine machine(key, table);
+            Calls calls;
+            machine.set_font_measurer(make_measurer(calls, 20, 7));
+            machine.write_text(core::Operand{5, 0}, "Amayui CN");
+            machine.load_root(bytes);
+            for (int i = 0; i < 3; ++i) {
+                if (!machine.step()) return fail("⑹a 夹具停机了");
+            }
+            if (!calls.faces.empty()) return fail("对位模式 0 时发了度量请求（应当直接重建）");
+            if (machine.font_description(false, 0).height != -20 ||
+                machine.font_description(false, 0).width != -10) {
+                return fail("对位模式 0 时入口体没有写 −字号 / −(字号/2)");
+            }
+        }
+        // ⑥b：对位模式 = 1 + 名字在表里且非等宽 ⇒ 两格来自**第二次度量**；第一次量的是参考字体。
+        {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DB, {{0, 1}});
+            emit_instruction(bytes, 0x1A5, {{5, 0}});
+            emit_instruction(bytes, 0x75, {{0, 20}});
+            emit_instruction(bytes, 2, {});
+            core::Machine machine(key, table);
+            machine.set_font_name_table({{"Amayui CN", 0}});
+            Calls calls;
+            machine.set_font_measurer(make_measurer(calls, 20, 7));
+            machine.write_text(core::Operand{5, 0}, "Amayui CN");
+            machine.load_root(bytes);
+            for (int i = 0; i < 3; ++i) {
+                if (!machine.step()) return fail("⑹b 夹具停机了");
+            }
+            if (machine.font_description(false, 0).width != -7) {
+                std::fprintf(stderr, "下一格 = %d（期望 −7 = −测得平均字宽）\n",
+                             machine.font_description(false, 0).width);
+                return fail("非 0 支的下一格不是来自度量（被写成了 −字号/2？）");
+            }
+            if (calls.faces.empty() || calls.faces[0] != reference_face) {
+                return fail("第一次度量的不是常量参考字体（ＭＳ ゴシック）");
+            }
+            if (calls.faces.size() < 2 || calls.faces[1] != "Amayui CN") {
+                return fail("第二次度量的不是该描述自己的字面名");
+            }
+            if (calls.faces.size() != 4) {  // 两份描述 × 两次（另有 0x1a5 的重建路径也跑了一次派生 ⇒ 8）
+                std::fprintf(stderr, "度量请求数 = %zu\n", calls.faces.size());
+            }
+            // 写入值是**平台输入**：换一个平均字宽 ⇒ 下一格随之变（⛔ 不是从操作数算出来的）。
+            core::Machine other(key, table);
+            other.set_font_name_table({{"Amayui CN", 0}});
+            Calls other_calls;
+            other.set_font_measurer(make_measurer(other_calls, 20, 13));
+            other.write_text(core::Operand{5, 0}, "Amayui CN");
+            other.load_root(bytes);
+            for (int i = 0; i < 3; ++i) {
+                if (!other.step()) return fail("⑹b 对照夹具停机了");
+            }
+            if (other.font_description(false, 0).width != -13) {
+                return fail("换一个测得字宽之后下一格没变（说明它不是来自度量）");
+            }
+        }
+        // ⑥c：回退三条判据。
+        const auto width_after = [&](std::int32_t align, const std::string& face,
+                                     std::int32_t aspect_mode, std::int32_t flags,
+                                     bool table_has_face) {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DB, {{0, static_cast<std::uint32_t>(align)}});
+            emit_instruction(bytes, 0x1A5, {{5, 0}});
+            emit_instruction(bytes, 0x75, {{0, 20}});
+            emit_instruction(bytes, 2, {});
+            core::Machine machine(key, table);
+            if (table_has_face) machine.set_font_name_table({{face, flags}});
+            machine.config_mut().set_int("display:AspectMode", aspect_mode);
+            Calls calls;
+            machine.set_font_measurer(make_measurer(calls, 20, 7));
+            machine.write_text(core::Operand{5, 0}, face);
+            machine.load_root(bytes);
+            for (int i = 0; i < 3; ++i) {
+                if (!machine.step()) return 999999;
+            }
+            return machine.font_description(false, 0).width;
+        };
+        // ② 名字不在表里 ⇒ 回退（下一格 = 高度 ÷ 2 = −10）。
+        if (width_after(1, "Unknown Face", 0, 0, false) != -10) {
+            return fail("名字不在字体名表里时没有回退到 高度 ÷ 2");
+        }
+        // ③ 表项位 0 置起且非 IPA P ⇒ 回退。
+        if (width_after(1, "Amayui CN", 0, 1, true) != -10) {
+            return fail("等宽（非 IPA P）时没有回退到 高度 ÷ 2");
+        }
+        // AspectMode ≠ 0 ⇒ **不回退**（即使名字不在表里也走度量）。
+        if (width_after(1, "Unknown Face", 1, 0, false) != -7) {
+            return fail("display:AspectMode ≠ 0 时仍然回退了（合同是「不回退」）");
+        }
+        // ⑥d：`0x1a5` 的重建路径同样要跑派生（入口体不分岔，重建路径分岔）。
+        {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DB, {{0, 1}});
+            emit_instruction(bytes, 0x1A5, {{5, 0}});
+            emit_instruction(bytes, 2, {});
+            core::Machine machine(key, table);
+            machine.set_font_name_table({{"Amayui CN", 0}});
+            Calls calls;
+            machine.set_font_measurer(make_measurer(calls, 20, 9));
+            machine.write_text(core::Operand{5, 0}, "Amayui CN");
+            machine.load_root(bytes);
+            if (!machine.step() || !machine.step()) return fail("⑥d 夹具停机了");
+            if (machine.font_description(false, 0).width != -9) {
+                std::fprintf(stderr, "0x1a5 之后的下一格 = %d（期望 −9）\n",
+                             machine.font_description(false, 0).width);
+                return fail("0x1a5 的重建路径没有按度量覆写下一格");
+            }
+        }
+    }
+    return true;
+}
+
+// ── 纹理装载（`CORE-OPS-TEXTURE-SET` / `-LOAD`） ──
+// 判据（每条都能红）：
+// ① 读序 **2 → 1 → 3 → 2** 且清槽在**读完第 3 个之后**：第 3 个读取抛类型异常 ⇒ 纹理槽仍是旧对象、记录未被写
+// ② 失败分档：打开 / 锁定失败 ⇒ 记录与槽**保持原值**；读字节失败 / 解码失败 ⇒ **槽空 + 记录来源 = 无**；
+//    上传失败（`display:TextureBit` ∉ {16,32}）⇒ 槽里留着**已建出**的对象 + 记录来源 = 无；都是显示消息型异常
+// ③ 颜色键按**目标位宽**装配：32 ⇒ A8R8G8B8 全值相等；16 ⇒ **A4R4G4B4**（A 参与，取高 4 位）四段全等
+// ④ BMP 分支：位深集合 1 / 4 / 8 / 24 / 32（16 拒）、行序自下而上、行跨距 32 位对齐、1 位 MSB 先
+namespace {
+// 24 位 BMP（无压缩）：`pixels_bottom_up` 是**自下而上**的 BGR 三元组序列。
+std::vector<std::uint8_t> make_bmp24(std::uint32_t width, std::uint32_t height,
+                                     const std::vector<std::uint8_t>& pixels_bottom_up) {
+    const std::uint32_t row = ((width * 24u + 31u) / 32u) * 4u;
+    std::vector<std::uint8_t> bytes(54u + static_cast<std::size_t>(row) * height, 0);
+    bytes[0] = 'B';
+    bytes[1] = 'M';
+    auto put = [&bytes](std::size_t offset, std::uint32_t value) {
+        bytes[offset + 0] = static_cast<std::uint8_t>(value);
+        bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+        bytes[offset + 2] = static_cast<std::uint8_t>(value >> 16);
+        bytes[offset + 3] = static_cast<std::uint8_t>(value >> 24);
+    };
+    put(2, static_cast<std::uint32_t>(bytes.size()));
+    put(10, 54u);
+    put(14, 40u);
+    put(18, width);
+    put(22, height);
+    bytes[26] = 1;  // planes
+    bytes[28] = 24;
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t s = (static_cast<std::size_t>(y) * width + x) * 3;
+            const std::size_t d = 54u + static_cast<std::size_t>(y) * row + x * 3;
+            bytes[d + 0] = pixels_bottom_up[s + 0];
+            bytes[d + 1] = pixels_bottom_up[s + 1];
+            bytes[d + 2] = pixels_bottom_up[s + 2];
+        }
+    }
+    return bytes;
+}
+
+// 1 位 BMP（调色板 2 项，自下而上；每字节 8 像素、最高位先）。
+std::vector<std::uint8_t> make_bmp1(std::uint32_t width, std::uint32_t height,
+                                    std::uint8_t bottom_row_byte, std::uint8_t top_row_byte) {
+    const std::uint32_t row = ((width * 1u + 31u) / 32u) * 4u;
+    std::vector<std::uint8_t> bytes(54u + 8u + static_cast<std::size_t>(row) * height, 0);
+    bytes[0] = 'B';
+    bytes[1] = 'M';
+    auto put = [&bytes](std::size_t offset, std::uint32_t value) {
+        bytes[offset + 0] = static_cast<std::uint8_t>(value);
+        bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+        bytes[offset + 2] = static_cast<std::uint8_t>(value >> 16);
+        bytes[offset + 3] = static_cast<std::uint8_t>(value >> 24);
+    };
+    put(2, static_cast<std::uint32_t>(bytes.size()));
+    put(10, 54u + 8u);
+    put(14, 40u);
+    put(18, width);
+    put(22, height);
+    bytes[26] = 1;
+    bytes[28] = 1;
+    put(46, 2u);  // 使用颜色数 = 2
+    // 调色板：0 = 黑、1 = 白（B / G / R / 不使用）
+    bytes[54] = 0; bytes[55] = 0; bytes[56] = 0;
+    bytes[58] = 255; bytes[59] = 255; bytes[60] = 255;
+    // 行序自下而上：先写底行
+    bytes[54 + 8] = bottom_row_byte;
+    bytes[54 + 8 + row] = top_row_byte;
+    return bytes;
+}
+
+// 16 位 BMP（位深集合之外 ⇒ 必须解码失败）。
+std::vector<std::uint8_t> make_bmp16(std::uint32_t width, std::uint32_t height) {
+    std::vector<std::uint8_t> bytes = make_bmp24(width, height,
+                                                 std::vector<std::uint8_t>(
+                                                     static_cast<std::size_t>(width) * height * 3, 0));
+    // 把位深改成 16（像素数据长度不再匹配也无所谓：位深先被拒）。
+    bytes[28] = 16;
+    return bytes;
+}
+
+// 临时安装树：`make_alf_ai()` 的索引 + 一个目录；文件按需写（松散文件优先）。
+struct TempInstall {
+    std::filesystem::path root;
+    core::Install install;
+
+    explicit TempInstall(std::uint32_t seed) {
+        root = std::filesystem::temp_directory_path() /
+               ("amayui-cxx-texture-" + std::to_string(seed));
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        std::filesystem::create_directories(root);
+        install.root = root;
+        install.index = core::parse_alf_index(make_alf_ai());
+    }
+    ~TempInstall() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    }
+    void write(const std::string& name, const std::vector<std::uint8_t>& bytes) const {
+        std::ofstream out(root / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+    }
+};
+}  // namespace
+
+bool check_texture_set(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "texture-set: %s\n", what);
+        return false;
+    };
+    // 一个文件 = `make_alf_ai()` 的 index 0（松散文件 SYSTEM4.BIN 优先）。
+    // ★ 颜色键用 **−1**（归一成 0 = **无键**）：这些用例判的是装载与像素布局，不是命中。
+    const auto run_texture = [&](core::Machine& machine) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1F9, {{0, 0}, {0, 5}, {0, static_cast<std::uint32_t>(-1)}});
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        return machine.step();
+    };
+
+    // ① 读序：第 3 个操作数读取抛类型异常 ⇒ 纹理槽仍是旧对象、记录未被写过。
+    {
+        TempInstall temp(1);
+        temp.write("SYSTEM4.BIN", make_bmp24(1, 1, {0, 0, 0}));
+        core::Machine machine(key, table, &temp.install);
+        machine.config_mut().set_int("display:TextureBit", 32);
+        auto& old = machine.texture_entry(5);
+        old.slot.present = true;
+        old.slot.width = 3;
+        old.slot.height = 2;
+        old.slot.rgba.assign(3u * 2u * 4u, 0x7F);
+        old.record.file = 9;
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1F9, {{0, 0}, {0, 5}, {2, 0}});  // 第 3 个 = 内联文本（读整必抛）
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        if (machine.step() || !machine.halted()) return fail("0x1f9 第 3 个操作数不可读时没有抛");
+        if (machine.last_stop().message != "read-int-unsupported-tag:2") {
+            std::fprintf(stderr, "停因 = %s\n", machine.last_stop().message.c_str());
+            return fail("0x1f9 的读序不是 2 → 1 → 3（第 3 个不是那个先抛的？）");
+        }
+        const auto* slot = machine.texture_slot(5);
+        if (slot == nullptr || !slot->present || slot->width != 3 || slot->height != 2) {
+            return fail("第 3 个操作数抛异常时纹理槽被清掉了（清槽发生得太早）");
+        }
+        const auto* record = machine.texture_record(5);
+        if (record == nullptr || record->file != 9) {
+            return fail("第 3 个操作数抛异常时纹理记录被写了");
+        }
+    }
+
+    // ② 失败分档。
+    {
+        // 解码失败：槽空、记录来源 = 无、显示消息型异常。
+        TempInstall temp(2);
+        temp.write("SYSTEM4.BIN", {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88});
+        core::Machine machine(key, table, &temp.install);
+        machine.config_mut().set_int("display:TextureBit", 32);
+        auto& old = machine.texture_entry(5);
+        old.slot.present = true;
+        old.slot.width = 3;
+        old.slot.height = 2;
+        old.slot.rgba.assign(3u * 2u * 4u, 0x7F);
+        old.record.file = 9;
+        if (run_texture(machine) || !machine.halted()) return fail("解码失败时没有抛");
+        if (machine.last_display_code() != "texture-decode-failed") {
+            std::fprintf(stderr, "解码失败的错误码 = %s\n", machine.last_display_code().c_str());
+            return fail("解码失败不是显示消息型异常（错误码不对）");
+        }
+        const auto* slot = machine.texture_slot(5);
+        if (slot != nullptr && slot->present) return fail("解码失败后纹理槽里还留着对象");
+        const auto* record = machine.texture_record(5);
+        if (record == nullptr || record->file != -1) return fail("解码失败后记录来源不是「无」");
+    }
+    {
+        // 打开 / 锁定失败：记录与槽**保持原值**。
+        TempInstall temp(3);  // 一个文件都不写 ⇒ 归档也打不开
+        core::Machine machine(key, table, &temp.install);
+        machine.config_mut().set_int("display:TextureBit", 32);
+        auto& old = machine.texture_entry(5);
+        old.slot.present = true;
+        old.slot.width = 3;
+        old.slot.height = 2;
+        old.slot.rgba.assign(3u * 2u * 4u, 0x7F);
+        old.record.file = 9;
+        if (run_texture(machine) || !machine.halted()) return fail("打开失败时没有抛");
+        if (machine.last_display_code() != "texture-open-failed") {
+            std::fprintf(stderr, "打开失败的错误码 = %s\n", machine.last_display_code().c_str());
+            return fail("打开 / 锁定失败不是显示消息型异常（或类分错了）");
+        }
+        const auto* slot = machine.texture_slot(5);
+        if (slot == nullptr || !slot->present || slot->width != 3) {
+            return fail("打开 / 锁定失败时纹理槽被清了（应当保持原值）");
+        }
+        const auto* record = machine.texture_record(5);
+        if (record == nullptr || record->file != 9) {
+            return fail("打开 / 锁定失败时记录被写了（应当保持原值）");
+        }
+    }
+    {
+        // 读字节失败：槽空、记录来源 = 无（与解码失败同态）。
+        TempInstall temp(4);
+        temp.write("DATA1.ALF", {0x00, 0x00, 0x00, 0x00});  // 4 字节，但索引说 16 ⇒ 短读
+        core::Machine machine(key, table, &temp.install);
+        machine.config_mut().set_int("display:TextureBit", 32);
+        auto& old = machine.texture_entry(5);
+        old.slot.present = true;
+        old.record.file = 9;
+        if (run_texture(machine) || !machine.halted()) return fail("读字节失败时没有抛");
+        if (machine.last_display_code() != "texture-read-failed") {
+            std::fprintf(stderr, "读字节失败的错误码 = %s\n", machine.last_display_code().c_str());
+            return fail("读字节失败与解码失败不同态（或类分错了）");
+        }
+        const auto* slot = machine.texture_slot(5);
+        if (slot != nullptr && slot->present) return fail("读字节失败后纹理槽里还留着对象");
+        const auto* record = machine.texture_record(5);
+        if (record == nullptr || record->file != -1) return fail("读字节失败后记录来源不是「无」");
+    }
+    {
+        // 上传失败（`display:TextureBit` ∉ {16,32}）：槽里留着**已建出**的对象、记录来源 = 无。
+        TempInstall temp(5);
+        temp.write("SYSTEM4.BIN", make_bmp24(1, 1, {0, 0, 0}));
+        core::Machine machine(key, table, &temp.install);
+        machine.config_mut().set_int("display:TextureBit", 8);
+        if (run_texture(machine) || !machine.halted()) return fail("非法纹理位深时没有抛");
+        if (machine.last_display_code() != "texture-upload-failed") {
+            std::fprintf(stderr, "上传失败的错误码 = %s\n", machine.last_display_code().c_str());
+            return fail("非法纹理位深不是上传失败");
+        }
+        const auto* slot = machine.texture_slot(5);
+        if (slot == nullptr || !slot->present || slot->width != 1 || slot->height != 1) {
+            return fail("上传失败时槽里没有留下已建出的对象");
+        }
+        const auto* record = machine.texture_record(5);
+        if (record == nullptr || record->file != -1) return fail("上传失败后记录来源不是「无」");
+    }
+
+    // ③ 颜色键：32 位 = A8R8G8B8 全值相等；16 位 = A4R4G4B4（A 参与）。
+    {
+        // 像素：黑（BGR 0,0,0）与红（BGR 0,0,255），自下而上 ⇒ 两行。
+        TempInstall temp(6);
+        temp.write("SYSTEM4.BIN", make_bmp24(1, 2, {0, 0, 0, 0, 0, 255}));
+        core::Machine machine(key, table, &temp.install);
+        machine.config_mut().set_int("display:TextureBit", 32);
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1F9, {{0, 0}, {0, 5}, {0, 0}});  // 键 0 ⇒ 归一成 0xFF000000（不透明黑）
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("32 位颜色键夹具停机了");
+        const auto* slot = machine.texture_slot(5);
+        if (slot == nullptr || slot->rgba.size() != 8) return fail("32 位颜色键夹具没有纹理");
+        // 行序自下而上 ⇒ 翻正后：第 0 行 = 红（BGR 0,0,255）、第 1 行 = 黑。
+        // 黑像素命中 ⇒ 四段全 0；红像素不动。
+        if (slot->rgba[7] != 0 || slot->rgba[4] != 0) return fail("32 位键没有清掉不透明黑像素");
+        if (slot->rgba[3] != 255 || slot->rgba[0] != 255) {
+            std::fprintf(stderr, "rgba = %u %u %u %u | %u %u %u %u (file=%d)\n", slot->rgba[0],
+                         slot->rgba[1], slot->rgba[2], slot->rgba[3], slot->rgba[4], slot->rgba[5],
+                         slot->rgba[6], slot->rgba[7],
+                         machine.texture_record(5) ? machine.texture_record(5)->file : -99);
+            return fail("32 位键误清了红像素");
+        }
+    }
+    {
+        // 16 位：像素 R = 0x0F（高 4 位 = 0），键 R = 0x0A（高 4 位 = 0）⇒ 16 位命中；32 位不命中。
+        TempInstall temp(7);
+        temp.write("SYSTEM4.BIN", make_bmp24(1, 1, {0, 0, 0x0F}));
+        const auto load = [&](core::Machine& machine, std::int32_t bits) {
+            machine.config_mut().set_int("display:TextureBit", bits);
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x1F9, {{0, 0}, {0, 5}, {0, 0x000A00}});
+            emit_instruction(bytes, 2, {});
+            machine.load_root(bytes);
+            if (!machine.step()) return false;
+            return true;
+        };
+        core::Machine sixteen_machine(key, table, &temp.install);
+        if (!load(sixteen_machine, 16)) return fail("16 位颜色键夹具停机了");
+        const auto* sixteen = sixteen_machine.texture_slot(5);
+        if (sixteen == nullptr || sixteen->rgba.size() != 4) return fail("16 位颜色键夹具没有纹理");
+        if (sixteen->rgba[3] != 0) return fail("16 位键没有按 4 位通道命中（A 参与的全等）");
+        core::Machine thirty_two_machine(key, table, &temp.install);
+        if (!load(thirty_two_machine, 32)) return fail("32 位对照夹具停机了");
+        const auto* thirty_two = thirty_two_machine.texture_slot(5);
+        if (thirty_two == nullptr || thirty_two->rgba.size() != 4) return fail("32 位对照没有纹理");
+        if (thirty_two->rgba[3] == 0) {
+            return fail("32 位键按 16 位的口径命中了（两种目标位宽被混成一条）");
+        }
+    }
+
+    // ④ BMP 分支：16 位拒；1 位 + 行序自下而上 + MSB 先。
+    {
+        TempInstall temp(8);
+        temp.write("SYSTEM4.BIN", make_bmp16(1, 1));
+        core::Machine machine(key, table, &temp.install);
+        machine.config_mut().set_int("display:TextureBit", 32);
+        if (run_texture(machine) || !machine.halted()) return fail("16 位 BMP 没有被拒");
+        if (machine.last_display_code() != "texture-decode-failed") {
+            return fail("16 位 BMP 不是解码失败（位深集合写宽了）");
+        }
+    }
+    {
+        // 8 像素宽 × 2 行：底行 = 全 1（白）、顶行 = 全 0（黑）⇒ 翻正后**第一行是黑**。
+        TempInstall temp(9);
+        temp.write("SYSTEM4.BIN", make_bmp1(8, 2, 0xFF, 0x00));
+        core::Machine machine(key, table, &temp.install);
+        machine.config_mut().set_int("display:TextureBit", 32);
+        if (!run_texture(machine)) {
+            std::fprintf(stderr, "1 位 BMP 装载停因 = %s\n", machine.last_stop().message.c_str());
+            return fail("1 位 BMP 装载失败（位深集合或调色板路径）");
+        }
+        const auto* slot = machine.texture_slot(5);
+        if (slot == nullptr || slot->width != 8 || slot->height != 2) return fail("1 位 BMP 尺寸不对");
+        const auto at = [slot](std::size_t x, std::size_t y) {
+            return slot->rgba[(y * slot->width + x) * 4];
+        };
+        if (at(0, 0) != 0 || at(7, 0) != 0) return fail("1 位 BMP 的行序没有翻正（顶行不是黑）");
+        if (at(0, 1) != 255 || at(7, 1) != 255) return fail("1 位 BMP 的位序/调色板不对（底行不是白）");
+        if (slot->rgba[3] != 255) return fail("1 位 BMP 的 A 没有补成满位");
+    }
+    return true;
+}
+
+// ── 帧流程（`CORE-OPS-FRAME-EXIT` 的 −11 支 / `CORE-OPS-FRAME-CALL-FRAME` / `0x8c`） ──
+// ── 文本层：**场景绘制模式门** + `0x70` 的读序（`ADV-TEXT-LAYER-RECT`） ──
+// 判据（每条都能红）：
+// ① 场景绘制模式 ≠ 1 ⇒ `0x70` **不建 / 不改纹理槽**（旧路径只共用编号；本版不规定它的正面行为）、
+//    `0x71` **仍然**复位文本游标 / 布局格 / 揭示游标，但**不清像素**、**不建逐字条目**；
+// ② 场景绘制模式 = 1 ⇒ 画布照建、逐字条目照建（对照组必须与 ① 不同，否则夹具分辨不出两档）；
+// ③ `0x70` 的读序 = **5 → 4 → 3 → 2 → 1**（读第 5 个就抛时，前 4 个一个都没读）。
+bool check_text_layer_mode_gate(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "text-layer-mode: %s\n", what);
+        return false;
+    };
+    const auto layer_script = [](bool append_text) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 190000}, {0, 40}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x75, {{0, 16}});
+        emit_instruction(bytes, 0x74, {{0, 0}});  // 间隔 0 ⇒ 立即抽干
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        if (append_text) emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    const auto run_with_mode = [&](bool texture_path, bool append_text) {
+        core::Machine machine(key, table, nullptr,
+                              texture_path ? scene_step_config() : core::ConfigStore{});
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.load_root(layer_script(append_text));
+        for (int i = 0; i < 32 && !machine.halted(); ++i) machine.step();
+        return machine;
+    };
+    const auto id = core::Machine::text_layer_texture_id(9);
+    {
+        core::Machine legacy = run_with_mode(false, false);
+        // ★ 判据只看  x70 /  x71：这两条在模式 ≠ 1 时**不碰纹理槽**（旧路径的正面行为不在本版）。
+        //   ⚠ 追加路径（ x6e /  x196）在本模型里仍会走宿主兜底建画布 ⇒ 这里不断言它。
+        if (legacy.texture_slot(id) != nullptr) {
+            return fail("场景绘制模式 ≠ 1 时 0x70 建了纹理画布（旧路径不该碰纹理槽）");
+        }
+        // 追加路径也走一遍：模式 ≠ 1 时**一条逐字条目都不许有**。
+        core::Machine legacy_append = run_with_mode(false, true);
+        bool any_item = false;
+        for (std::uint32_t k = 0; k < 40; ++k) {
+            if (legacy_append.draw_item(190000u + k) != nullptr) any_item = true;
+        }
+        if (any_item) return fail("场景绘制模式 ≠ 1 时仍建了逐字绘制条目");
+        if (legacy.text_layer_cursor_x(9) != 5 || legacy.text_layer_cursor_y(9) != 5) {
+            return fail("场景绘制模式 ≠ 1 时 0x71 没有复位文本游标（这一项不分模式）");
+        }
+        core::Machine texture = run_with_mode(true, true);
+        if (texture.texture_slot(id) == nullptr) {
+            return fail("场景绘制模式 = 1 时没有建出纹理画布");
+        }
+        bool texture_item = false;
+        for (std::uint32_t k = 0; k < 40; ++k) {
+            if (texture.draw_item(190000u + k) != nullptr) texture_item = true;
+        }
+        if (!texture_item) return fail("场景绘制模式 = 1 时没有建出逐字绘制条目");
+    }
+    const auto stop_after = [&](int throwing_index) {
+        auto bytes = make_script_with_body();
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> operands = {
+            {0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}};
+        operands[static_cast<std::size_t>(throwing_index)] = {11, 0};
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70,
+                         {operands[0], operands[1], operands[2], operands[3], operands[4]});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table, nullptr, scene_step_config());
+        machine.load_root(bytes);
+        if (!machine.step()) return std::string("layer-0x80-stop");
+        if (machine.step()) return std::string("no-throw");
+        return machine.last_stop().message;
+    };
+    if (stop_after(4) != "read-int-unsupported-tag:11") {
+        std::fprintf(stderr, "op5 的停因 = %s\n", stop_after(4).c_str());
+        return fail("0x70 没有从第 5 个操作数开始读");
+    }
+    if (stop_after(3) != "read-int-unsupported-tag:11") {
+        return fail("0x70 的第 4 个操作数没有在第 5 个之后读");
+    }
+    if (stop_after(0) != "read-int-unsupported-tag:11") {
+        return fail("0x70 的第 1 个操作数没有最后读");
+    }
+    return true;
+}
+
+// 判据（每条都能红）：
+// ① `0x2` 的 −11 = **恢复存档**（不是写存档）：父帧候选 ← −1、**先读版本 2 后读版本 1**、
+//    版本门（版本 1 = 2/3 ⇒ 全量；版本 1 = 1 ∧ 版本 2 = 10/20 ⇒ 只装载 + 位置；其余 ⇒ 什么都不做）、
+//    推进格数清 0、**不切帧号 / 不释放帧 / 不抛**
+// ② `0x6` 的前置 = **没有调试器**（有 ⇒ 退出型异常、什么都不装）；深度检查是**有符号**：
+//    ≥ 40 ⇒ 显示消息型异常（类别 1）、负值 ⇒ **未定义行为**（本实现诊断 + 拒绝，⛔ 不钳成 0）
+// ③ `0x8c` 的目标越界 = 未定义行为 ⇒ 本实现**显式诊断 + 停止**（⛔ 不钳制 / 不回绕）
+bool check_frame_flow(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "frame-flow: %s\n", what);
+        return false;
+    };
+    TempInstall temp(11);
+    temp.write("SYSTEM4.BIN", make_script());
+
+    // ① −11 支：版本门 + 读序 + 帧号不变 + 推进格数清 0。
+    {
+        const auto run_restore = [&](std::int32_t version1, std::int32_t version2,
+                                     int& calls, bool& full_flag, std::int64_t& versions) {
+            auto script = make_script_with_body();
+            emit_instruction(script, 2, {});
+            core::Machine machine(key, table, &temp.install);
+            machine.config_mut().set_int("set:SaveVersion1", version1);
+            machine.config_mut().set_int("set:SaveVersion2", version2);
+            calls = 0;
+            full_flag = false;
+            machine.set_save_exit_restore(
+                [&calls, &full_flag](core::Machine&, std::int32_t, std::int32_t,
+                                     bool full_restore) {
+                    ++calls;
+                    full_flag = full_restore;
+                });
+            machine.load_root(script);
+            machine.set_parent_candidate_for_test(-11);
+            machine.load_frame_for_test(0, 0);
+            const std::size_t frame_before = machine.current_frame();
+            if (!machine.step()) return false;
+            if (machine.halted()) return false;
+            if (machine.current_frame() != frame_before) return false;
+            if (machine.parent_candidate() != -1) return false;
+            if (machine.frame().length_slot != 0) return false;
+            versions = machine.save_exit_versions();
+            return true;
+        };
+        int calls = 0;
+        bool full = false;
+        std::int64_t versions = 0;
+        if (!run_restore(2, 7, calls, full, versions)) return fail("−11 支（版本 1 = 2）夹具失败");
+        if (calls != 1 || !full) return fail("版本 1 = 2 没有做全量恢复（装载 + 位置 + 返回栈）");
+        if (versions != ((static_cast<std::int64_t>(7) << 32) | 2)) {
+            std::fprintf(stderr, "读到的版本 = 0x%llX（期望 版本2=7 / 版本1=2）\n",
+                         static_cast<long long>(versions));
+            return fail("−11 支读的两个版本不对（或读序反了：先版本 2、后版本 1）");
+        }
+        if (!run_restore(3, 0, calls, full, versions) || calls != 1 || !full) {
+            return fail("版本 1 = 3 没有做全量恢复");
+        }
+        if (!run_restore(1, 10, calls, full, versions) || calls != 1 || full) {
+            return fail("版本 1 = 1 / 版本 2 = 10 没有做「只装载 + 位置」那一档");
+        }
+        if (!run_restore(1, 20, calls, full, versions) || calls != 1 || full) {
+            return fail("版本 1 = 1 / 版本 2 = 20 没有做「只装载 + 位置」那一档");
+        }
+        if (!run_restore(1, 0, calls, full, versions) || calls != 0) {
+            return fail("版本 1 = 1 / 版本 2 = 0 不该做任何恢复");
+        }
+        if (!run_restore(0, 10, calls, full, versions) || calls != 0) {
+            return fail("版本 1 = 0 不该做任何恢复");
+        }
+    }
+
+    // ② `0x6`：调试器前置 + 有符号深度检查。
+    {
+        const auto load_frame_script = [] {
+            auto script = make_script_with_body();
+            emit_instruction(script, 0x06, {{0, 0}, {0, 3}});
+            emit_instruction(script, 2, {});
+            return script;
+        };
+        // 有调试器 ⇒ 退出型异常、什么都不装（当前帧号不动）。
+        {
+            core::Machine machine(key, table, &temp.install);
+            machine.set_debugger_present(true);
+            machine.load_root(load_frame_script());
+            if (machine.step() || !machine.halted()) return fail("有调试器时 0x6 没有抛");
+            if (machine.last_stop().message != "debugger-present") {
+                std::fprintf(stderr, "停因 = %s\n", machine.last_stop().message.c_str());
+                return fail("有调试器时的停因不对");
+            }
+            if (machine.frame().length_slot != 5) {
+                return fail("0x6 的长度槽不是在第 1 步就写成 5（前置调用在读操作数之前）");
+            }
+        }
+        // 深度 ≥ 40 ⇒ 显示消息型异常、类别 1（只终止）、帧号没动。
+        {
+            auto script = make_script_with_body();
+            emit_instruction(script, 0x06, {{0, 0}, {0, 40}});
+            emit_instruction(script, 2, {});
+            core::Machine machine(key, table, &temp.install);
+            machine.load_root(script);
+            if (machine.step() || !machine.halted()) return fail("深度 40 时 0x6 没有抛");
+            if (machine.last_display_code() != "frame-depth-limit") {
+                std::fprintf(stderr, "深度失败的错误码 = %s\n", machine.last_display_code().c_str());
+                return fail("深度失败不是显示消息型异常（或错误码不对）");
+            }
+        }
+        // 负帧号 ⇒ 越界写 UB：本实现诊断 + 拒绝（⛔ 不钳成 0）。
+        {
+            auto script = make_script_with_body();
+            emit_instruction(script, 0x06, {{0, 0}, {0, static_cast<std::uint32_t>(-1)}});
+            emit_instruction(script, 2, {});
+            core::Machine machine(key, table, &temp.install);
+            machine.load_root(script);
+            if (machine.step() || !machine.halted()) return fail("负帧号时 0x6 没有拒绝");
+            if (machine.last_stop().message != "frame-load-negative-target:-1") {
+                std::fprintf(stderr, "负帧号的停因 = %s\n", machine.last_stop().message.c_str());
+                return fail("负帧号没有走「显式诊断 + 拒绝」（被钳成 0 了？）");
+            }
+        }
+    }
+
+    // ③ `0x8c` 的越界目标 ⇒ 显式诊断 + 停止（本版不编语义）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x8C, {{0, 9999}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(key, table, &temp.install);
+        machine.load_root(script);
+        if (machine.step() || !machine.halted()) return fail("0x8c 越界目标没有拒绝");
+        if (machine.last_stop().message.rfind("jump-out-of-code", 0) != 0) {
+            std::fprintf(stderr, "0x8c 越界的停因 = %s\n", machine.last_stop().message.c_str());
+            return fail("0x8c 越界没有显式诊断");
+        }
+    }
+    return true;
+}
+
 // ── 键盘 / 鼠标设备（0x109 · 0x108 · 0xCC · 0xCD） ──
 // `CORE-INPUT-MOUSE-POS` / `-MOUSE-BUTTON` / `-CALLBACK-REGISTER` / `-MOUSE-CALLBACK-PUMP`。
 bool check_input_devices(const core::OpcodeTable& table) {
@@ -3320,8 +4519,10 @@ bool check_save_ops(const core::OpcodeTable& table) {
     }
     const core::TextureSlotObject* decoded = read_ok_machine.texture_slot(9);
     if (decoded == nullptr || decoded->width != 2 || decoded->height != 2 ||
-        decoded->rgba.size() != 16 || decoded->rgba[0] != 255 || decoded->rgba[1] != 0 ||
-        decoded->rgba[2] != 0) {  // 画面第 1 行、左像素 = 红
+        decoded->rgba.size() != 16 || decoded->rgba[0] != 0 || decoded->rgba[1] != 0 ||
+        decoded->rgba[2] != 255) {  // 画面第 1 行、左像素 = 蓝
+        // ★ 期望值随 BMP 行跨距的修正而改：行跨距 = ⌈宽 × 位深 ÷ 32⌉ × 4（`FMT-SAVE-STH`）⇒
+        //   2×2 / 24 位的行跨距是 **8**（不是 6）。旧期望"红"是按错误的 6 字节行跨距读出来的错位行。
         std::fprintf(stderr, "0x1af texture landing mismatch\n");
         return false;
     }
@@ -4928,7 +6129,7 @@ bool check_msg_block(const core::OpcodeTable& table) {
     constexpr std::size_t kBase = 6;  // 0x80 / 0x70 / 0x213 / 0x75 / 0x74 / 0x71
     // ① 0x304 → 0x6e：bit16 必须置起；还没揭示任何格。
     {
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine(0x12345678u, table, nullptr, scene_step_config());  // ★ 场景绘制模式 1（纹理画布路径）
         prepare(machine);
         machine.load_root(build(true, 1, false, false));
         if (!steps(machine, kBase + 2, "6e")) return false;
@@ -4944,7 +6145,7 @@ bool check_msg_block(const core::OpcodeTable& table) {
     }
     // ② 武装后 0x305：回卷到块开头 → 全部揭示 → 等待三格 (1,0,0) → 清臂位。
     {
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine(0x12345678u, table, nullptr, scene_step_config());  // ★ 场景绘制模式 1（纹理画布路径）
         prepare(machine);
         machine.load_root(build(true, 1, true, false));
         if (!steps(machine, kBase + 2, "305-append")) return false;
@@ -4972,7 +6173,7 @@ bool check_msg_block(const core::OpcodeTable& table) {
     }
     // ③ 0x196 也置 bit16（两条追加指令同一分支）。
     {
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine(0x12345678u, table, nullptr, scene_step_config());  // ★ 场景绘制模式 1（纹理画布路径）
         prepare(machine);
         machine.load_root(build(true, 2, false, false));
         if (!steps(machine, kBase + 2, "196")) return false;
@@ -4983,7 +6184,7 @@ bool check_msg_block(const core::OpcodeTable& table) {
     }
     // ④ 未武装（没有追加）：只清臂位，等待三格不动。
     {
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine(0x12345678u, table, nullptr, scene_step_config());  // ★ 场景绘制模式 1（纹理画布路径）
         machine.load_root(build(true, 0, true, false));
         if (!steps(machine, kBase + 2, "unarmed")) return false;
         if (machine.msg_arm() != 0 || machine.msg_wait(0) != 0 || machine.msg_wait(1) != 0 ||
@@ -5017,7 +6218,7 @@ bool check_msg_block(const core::OpcodeTable& table) {
         emit_instruction(script, 0x71, {{0, 9}});
         emit_instruction(script, 0x6E, {{0, 0}, {5, 0}});
         emit_instruction(script, 2, {});
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine(0x12345678u, table, nullptr, scene_step_config());  // ★ 场景绘制模式 1
         prepare(machine);
         machine.load_root(script);
         if (!steps(machine, kBase + 1, "base-zero")) return false;
@@ -5068,7 +6269,8 @@ bool check_text_layer_fallback(const core::OpcodeTable& table) {
         machine.write_text(core::Operand{5, 0}, "AB");
     };
     const auto run = [&](const std::vector<std::uint8_t>& script) {
-        core::Machine machine(0x12345678u, table);
+        // ★ 纹理画布路径 = **场景绘制模式 = 1**（初值来自配置 `set:DrawMode`）⇒ 夹具显式置 1。
+        core::Machine machine(0x12345678u, table, nullptr, scene_step_config());
         prepare(machine);
         machine.load_root(script);
         for (int i = 0; i < 64 && !machine.halted(); ++i) machine.step();
@@ -6164,14 +7366,31 @@ bool check_frame_shape(const core::OpcodeTable& table) {
             machine.load_root(script);
             if (parent != -1) {  // 根帧的父帧号本来就是 −1
                 machine.set_parent_candidate_for_test(parent);
-                machine.load_frame_for_test(2, 0);
+                machine.load_frame_for_test(0, 0);
             }
             if (machine.step()) return false;
             return machine.last_stop().reason == core::StopReason::Halted &&
                    machine.last_stop().message == "root-exit";
         };
         if (!expect_exit(-1)) return fail("父帧号 −1 没有走『整个执行结束』");
-        if (!expect_exit(-11)) return fail("父帧号 −11 没有与 −1 走同一条退出路径");
+        // ★ −11 是**恢复存档专用入口**（新版合同）：它**不**走退出路径 —— 不切帧号、不释放帧、不抛异常，
+        //   只把「父帧候选」写成 −1、读两个版本、把推进格数清 0。
+        {
+            core::Machine restore(key, table, &install);
+            auto script = make_script_with_body();
+            emit_instruction(script, 2, {});
+            restore.load_root(script);
+            restore.set_parent_candidate_for_test(-11);
+            restore.load_frame_for_test(0, 0);
+            if (!restore.step()) {
+                std::fprintf(stderr, "−11 支停因 = %s\n", restore.last_stop().message.c_str());
+                return fail("父帧号 −11 被当成了执行结束（它不该走退出路径）");
+            }
+            if (restore.halted()) return fail("父帧号 −11 被当成了执行结束");
+            if (restore.parent_candidate() != -1) return fail("父帧号 −11 没有把「父帧候选」写成 −1");
+            if (restore.frame().length_slot != 0) return fail("父帧号 −11 没有把推进格数清 0");
+            if (restore.save_exit_version_reads() != 1) return fail("父帧号 −11 没有读两个存档版本");
+        }
         if (!expect_exit(-2)) return fail("父帧号 −2 没有与 −1 走同一条退出路径（引擎不区分其余负值）");
     }
     // ⑤ `0x5` 的引擎级状态字保存栈：压入时清第 31 / 20 位；跳转支弹出即写；空栈不写。
@@ -8013,66 +9232,119 @@ bool check_key_tables_10c(const core::OpcodeTable& table) {
         std::fprintf(stderr, "key-tables: %s\n", what);
         return false;
     };
-    // `0x10c`（`CORE-OPS-SCALAR-TABLE-10C`）：第 2 个 = 动作号（索引）、第 1 个 = 键号（值）。
-    // 三张表：① 键→动作（与 0x10b 共用，本条不碰）② 动作→槽（只读）③ 槽→键（写；−1 = 未绑定）。
-    // 预置：动作 3 → 槽 5；执行 键 7 / 动作 3 ⇒ ③[5] ← 7，另外两张表一格不动。
+    // 键位映射表的**三张表**（`60-ops-scalar` 的「键位映射表（opcode 0xfd / 0x10c）」）：
+    // A = 槽 → 逻辑键（`slot_key`）、B = 逻辑键 → 系统键码（`logical_key_code`）、
+    // C = 系统键码 0..255 → 位号（`key_code_bit`；−1 = 未映射）。
+    // 两条指令的第 1 个操作数都是**槽号**（= 输入位号）、第 2 个是**逻辑键号**；读序先 2 再 1。
+    // 初始：C 的 7 项固定（↑0 →1 ↓2 ←3 Enter4 Space5 Backspace6），A 的槽 0..6 ← 逻辑键 24..30。
     {
+        // `0x10c`：槽 5 ← 逻辑键 28（Enter）⇒ **只**把 Enter 的系统键码登记成 5；A 不碰、不解绑。
         auto bytes = make_script_with_body();
-        emit_instruction(bytes, 0x10C, {{0, 7}, {0, 3}});
+        emit_instruction(bytes, 0x10C, {{0, 5}, {0, 28}});
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
-        machine.set_action_slot_for_test(3, 5);
         machine.load_root(bytes);
-        const auto key_action_before = machine.key_action(7);
         if (!machine.step()) {
             std::fprintf(stderr, "合法 0x10c 停机：%s\n", machine.last_stop().message.c_str());
             return false;
         }
-        if (machine.slot_key(5) != 7) {
-            std::fprintf(stderr, "槽 5 的键号 = %d（期望 7）\n", machine.slot_key(5));
-            return false;
+        if (machine.key_code_bit(0x0D) != 5) {
+            std::fprintf(stderr, "Enter 的位号 = %d（期望 5）\n", machine.key_code_bit(0x0D));
+            return fail("0x10c 没有把逻辑键的系统键码登记成第 1 个操作数");
         }
-        if (machine.action_slot(3) != 5) return fail("0x10c 写了「动作 → 槽」表（本条只读它）");
-        if (machine.key_action(7) != key_action_before) return fail("0x10c 写了「键 → 动作」表（本条不碰它）");
-        if (machine.slot_key(4) != -1) return fail("0x10c 写了别的槽（未绑定初值该是 −1）");
+        if (machine.slot_key(5) != 29) return fail("0x10c 动了表 A（它只写表 C）");
+        // ★ 不解绑：槽 5 原来的逻辑键（Space，系统键码 0x20）仍指着槽 5。
+        if (machine.key_code_bit(0x20) != 5) return fail("0x10c 抹了旧键码（那是 0xfd 的解绑）");
     }
-    // 值按**无符号**判 > 31：32 与 −1 都要抛显示消息型异常，文本逐字（**没有**回车换行 ——
-    // `.lst` 的 `.data:0052005C aSetkeymulti db 'SetKeyMultiの引数が不正です．',0`），且不改任何状态。
-    for (const std::int32_t value : {32, -1}) {
+    // `0xfd`：三步固定顺序（解绑旧 → 改绑 A → 登记 C）。
+    {
         auto bytes = make_script_with_body();
-        emit_instruction(bytes, 0x10C, {{0, static_cast<std::uint32_t>(value)}, {0, 3}});
+        emit_instruction(bytes, 0xFD, {{0, 0}, {0, 28}});  // 槽 0 ← 逻辑键 28（Enter）
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
-        machine.set_action_slot_for_test(3, 5);
+        machine.load_root(bytes);
+        if (!machine.step()) {
+            std::fprintf(stderr, "合法 0xfd 停机：%s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.key_code_bit(0x26) != -1) return fail("0xfd 没有解绑该槽旧逻辑键（↑）的键码");
+        if (machine.key_code_bit(0x0D) != 0) return fail("0xfd 没有把新逻辑键的系统键码登记成槽号");
+        if (machine.slot_key(0) != 28) return fail("0xfd 没有把表 A 该槽改绑到第 2 个操作数");
+    }
+    {
+        // 连续两条 `0xfd` 到同一槽：第 2 条把上一条绑定的 Enter 键码抹掉。
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xFD, {{0, 7}, {0, 28}});
+        emit_instruction(bytes, 0xFD, {{0, 7}, {0, 30}});  // 逻辑键 30 = Backspace
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step() || !machine.step()) return fail("两条 0xfd 夹具停机了");
+        if (machine.key_code_bit(0x0D) != -1) return fail("第 2 条 0xfd 没有解绑上一条的 Enter 键码");
+        if (machine.key_code_bit(0x08) != 7) return fail("第 2 条 0xfd 没有把 Backspace 登记成槽 7");
+        if (machine.slot_key(7) != 30) return fail("第 2 条 0xfd 没有改绑表 A");
+    }
+    // 只检查第 1 个操作数：**无符号** > 31（含 −1）⇒ 显示消息型异常、三张表一格不写、长度槽已是 5。
+    for (const std::int32_t slot : {32, -1}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x10C, {{0, static_cast<std::uint32_t>(slot)}, {0, 28}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
         machine.load_root(bytes);
         if (machine.step() || !machine.halted()) {
-            std::fprintf(stderr, "0x10c(value=%d) 没有抛\n", value);
+            std::fprintf(stderr, "0x10c(slot=%d) 没有抛\n", slot);
             return false;
         }
         if (machine.last_display_code() != "key-multi-range") {
-            std::fprintf(stderr, "0x10c(value=%d) 错误码 = %s\n", value,
+            std::fprintf(stderr, "0x10c(slot=%d) 错误码 = %s\n", slot,
                          machine.last_display_code().c_str());
             return false;
         }
         if (machine.last_display_message() != "SetKeyMultiの引数が不正です．") {
-            std::fprintf(stderr, "0x10c(value=%d) 文本 = %s\n", value,
+            std::fprintf(stderr, "0x10c(slot=%d) 文本 = %s\n", slot,
                          machine.last_display_message().c_str());
             return false;
         }
-        if (machine.action_slot(3) != 5 || machine.slot_key(5) != -1 ||
-            machine.key_action(7) != 0) {
-            return fail("越界值改了绑定表（应当一格都不写）");
+        if (machine.frame().length_slot != 5) return fail("0x10c 的长度槽不是在检查之前写成 5");
+        if (machine.key_code_bit(0x0D) != 4 || machine.key_code_bit(0x20) != 5 ||
+            machine.slot_key(5) != 29) {
+            return fail("0x10c 越界支改了表（应当三张表一格都不写）");
+        }
+        // `0xfd` 同形（文本不同）。
+        auto fd = make_script_with_body();
+        emit_instruction(fd, 0xFD, {{0, static_cast<std::uint32_t>(slot)}, {0, 28}});
+        emit_instruction(fd, 2, {});
+        core::Machine fd_machine(key, table);
+        fd_machine.load_root(fd);
+        if (fd_machine.step() || !fd_machine.halted()) {
+            std::fprintf(stderr, "0xfd(slot=%d) 没有抛\n", slot);
+            return false;
+        }
+        if (fd_machine.last_display_code() != "key-setting-range") {
+            std::fprintf(stderr, "0xfd(slot=%d) 错误码 = %s\n", slot,
+                         fd_machine.last_display_code().c_str());
+            return false;
+        }
+        if (fd_machine.last_display_message() != "SetKeyの引数が不正です．") {
+            std::fprintf(stderr, "0xfd(slot=%d) 文本 = %s\n", slot,
+                         fd_machine.last_display_message().c_str());
+            return false;
+        }
+        if (fd_machine.frame().length_slot != 5) return fail("0xfd 的长度槽不是在检查之前写成 5");
+        if (fd_machine.key_code_bit(0x26) != 0 || fd_machine.key_code_bit(0x0D) != 4 ||
+            fd_machine.slot_key(0) != 24) {
+            return fail("0xfd 越界支改了表（应当三张表一格都不写）");
         }
     }
     // 读序 2 → 1：把第 2 个写成"读整必抛"的 type 11、第 1 个写成 type 2 ⇒ 先炸的必须是第 2 个。
-    {
+    for (const std::uint32_t opcode : {0x10Cu, 0xFDu}) {
         auto bytes = make_script_with_body();
-        emit_instruction(bytes, 0x10C, {{2, 0}, {11, 0}});
+        emit_instruction(bytes, opcode, {{2, 0}, {11, 0}});
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
         machine.load_root(bytes);
         if (machine.step() || machine.last_stop().message != "read-int-unsupported-tag:11") {
-            std::fprintf(stderr, "0x10c 的读序不是 2 → 1（停因 = %s）\n",
+            std::fprintf(stderr, "0x%X 的读序不是 2 → 1（停因 = %s）\n", opcode,
                          machine.last_stop().message.c_str());
             return false;
         }
@@ -8609,12 +9881,61 @@ bool check_error_channel(const core::OpcodeTable& table) {
         if (!out.requests.empty()) return fail("句柄无效却发了平台写请求");
         if (out.errors != 1 || out.error_text != kText) return fail("句柄无效时诊断没有保留");
     }
-    // ③ 宿主过滤器返回非 0 ⇒ 丢弃；诊断仍在。
+    // ③ 宿主过滤器返回非 0 ⇒ 丢弃；诊断仍在；**「已装」标志保留**（下一触发仍会调用它）。
     {
         const Outcome out = run_once(true, 7);
         if (!out.stepped) return fail("过滤器抑制支把机器停了");
         if (!out.requests.empty()) return fail("过滤器返回非 0 却发了请求");
         if (out.errors != 1) return fail("过滤器抑制时诊断没有保留");
+    }
+    // ④ 三道判定的**顺序与一次性**（`60-ops-numeric` 的「错误通道」）：
+    //    ① 过滤器返回 0 但句柄无效 ⇒ 不写，**「已装」标志照样清 0**（⛔ 不许把句柄判定提到过滤器之前）；
+    //    ② 过滤器返回非 0 ⇒ 整条丢弃、标志保留 ⇒ 第二次触发**仍**调过滤器。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x135, {{9, 0}, {0, 32}});  // 位号 32 ⇒ 错误通道
+        emit_instruction(bytes, 0x135, {{9, 1}, {0, 32}});  // 第二次触发
+        emit_instruction(bytes, 2, {});
+        // 过滤器返回 0、句柄无效：两次都不写；过滤器第一次之后就被清掉（第二次不再调用）。
+        core::Machine machine(key, table);
+        std::size_t writes = 0;
+        std::size_t filter_calls = 0;
+        machine.set_error_output_writer(
+            [&writes](const std::string&, std::size_t) { ++writes; });
+        machine.set_error_output_handle_valid(false);
+        machine.set_error_output_filter([&filter_calls] {
+            ++filter_calls;
+            return 0;
+        });
+        machine.load_root(bytes);
+        if (!machine.step() || !machine.step()) return fail("错误通道两连发夹具停机了");
+        if (writes != 0) return fail("句柄无效却发了平台写请求");
+        if (filter_calls != 1) {
+            std::fprintf(stderr, "过滤器被调用 %zu 次（期望 1：它是**一次性**的）\n", filter_calls);
+            return fail("「已装」标志没有在句柄无效时也被清 0（把句柄判定提到了过滤器之前？）");
+        }
+        if (machine.errors().size() != 2) return fail("两次触发的诊断没有都保留");
+        // 过滤器返回非 0：整条丢弃、标志**保留** ⇒ 第二次仍然调用它。
+        core::Machine filter_machine(key, table);
+        std::size_t filter_writes = 0;
+        std::size_t nonzero_calls = 0;
+        filter_machine.set_error_output_writer(
+            [&filter_writes](const std::string&, std::size_t) { ++filter_writes; });
+        filter_machine.set_error_output_handle_valid(true);
+        filter_machine.set_error_output_filter([&nonzero_calls] {
+            ++nonzero_calls;
+            return 7;
+        });
+        filter_machine.load_root(bytes);
+        if (!filter_machine.step() || !filter_machine.step()) {
+            return fail("过滤器丢弃支夹具停机了");
+        }
+        if (filter_writes != 0) return fail("过滤器返回非 0 却发了请求");
+        if (nonzero_calls != 2) {
+            std::fprintf(stderr, "返回非 0 的过滤器被调用 %zu 次（期望 2：标志应当保留）\n",
+                         nonzero_calls);
+            return fail("过滤器返回非 0 时「已装」标志被清掉了（合同是保留）");
+        }
     }
     return true;
 }
@@ -9491,7 +10812,7 @@ bool check_text_ruby(const core::OpcodeTable& table) {
         emit_instruction(bytes, 0x71, {{0, 9}});
         emit_instruction(bytes, 0x196, {{0, 0}, {5, 0}, {5, 1}});
         emit_instruction(bytes, 2, {});
-        core::Machine machine(key, table);
+        core::Machine machine(key, table, nullptr, scene_step_config());  // ★ 纹理画布路径 = 场景绘制模式 1
         machine.write_text(core::Operand{5, 0}, main_text);
         machine.write_text(core::Operand{5, 1}, ruby);
         machine.load_root(bytes);
@@ -9862,7 +11183,7 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
     emit_instruction(clear_bytes, 0x6E, {{0, 0}, {5, 0}});
     emit_instruction(clear_bytes, 0x71, {{0, 9}});
     emit_instruction(clear_bytes, 2, {});
-    core::Machine cleared(key, table);
+    core::Machine cleared(key, table, nullptr, scene_step_config());  // ★ 纹理画布路径 = 场景绘制模式 1
     cleared.write_text(core::Operand{5, 0}, "X");
     cleared.load_root(clear_bytes);
     for (int i = 0; i < 7; ++i) {
@@ -9897,7 +11218,7 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
     };
     {
         auto wrap_bytes = make_wrap_script();
-        core::Machine wrap_machine(key, table);
+        core::Machine wrap_machine(key, table, nullptr, scene_step_config());  // ★ 场景绘制模式 1
         wrap_machine.write_text(core::Operand{5, 0}, "AAAAAAAAAA");
         wrap_machine.config_mut().set_int("set:AutoLineFeed", 1);
         wrap_machine.load_root(wrap_bytes);
@@ -10064,6 +11385,11 @@ int main(int argc, char** argv) {
     bool only_font_pairs = false;
     bool only_font_scale = false;
     bool only_key_tables = false;
+    bool only_input_composition = false;
+    bool only_text_container = false;
+    bool only_texture_set = false;
+    bool only_frame_flow = false;
+    bool only_text_layer_mode = false;
     bool only_se_registration = false;
     bool only_se_stop = false;
     bool only_event_library = false;
@@ -10116,6 +11442,11 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-font-pairs") == 0) only_font_pairs = true;
         else if (std::strcmp(argv[i], "--only-font-scale") == 0) only_font_scale = true;
         else if (std::strcmp(argv[i], "--only-key-tables") == 0) only_key_tables = true;
+        else if (std::strcmp(argv[i], "--only-input-composition") == 0) only_input_composition = true;
+        else if (std::strcmp(argv[i], "--only-text-container") == 0) only_text_container = true;
+        else if (std::strcmp(argv[i], "--only-texture-set") == 0) only_texture_set = true;
+        else if (std::strcmp(argv[i], "--only-frame-flow") == 0) only_frame_flow = true;
+        else if (std::strcmp(argv[i], "--only-text-layer-mode") == 0) only_text_layer_mode = true;
         else if (std::strcmp(argv[i], "--only-se-registration") == 0) only_se_registration = true;
         else if (std::strcmp(argv[i], "--only-se-stop") == 0) only_se_stop = true;
         else if (std::strcmp(argv[i], "--only-event-library") == 0) only_event_library = true;
@@ -10300,6 +11631,35 @@ int main(int argc, char** argv) {
             // `0x10c` 三张表：① 不碰、② 只读、③ 写；无符号值 > 31 抛固定文本；读序 2 → 1。
             if (!check_key_tables_10c(table)) return 1;
             std::printf("core-selftest(key-tables): PASS\n");
+            return 0;
+        }
+        if (only_input_composition) {
+            // 输入合成（`CORE-INPUT-WORD`）：键盘 256 表 / 鼠标 + 4 / 手柄槽序号 + 4 / 0xfe / 0x101 / 锁存。
+            if (!check_input_composition(table)) return 1;
+            std::printf("core-selftest(input-composition): PASS\n");
+            return 0;
+        }
+        if (only_text_container) {
+            // `0x192` 的容器句柄 / 格式化 + `0x2de` 的系统字体名一览（含位 0 = 等宽）。
+            if (!check_text_container_and_font_names(table)) return 1;
+            std::printf("core-selftest(text-container): PASS\n");
+            return 0;
+        }
+        if (only_texture_set) {
+            // `0x1f9` 的读序 / 清槽时点 / 失败分档 + 颜色键的目标位宽 + BMP 位深与行序。
+            if (!check_texture_set(table)) return 1;
+            std::printf("core-selftest(texture-set): PASS\n");
+            return 0;
+        }
+        if (only_text_layer_mode) {
+            if (!check_text_layer_mode_gate(table)) return 1;
+            std::printf("core-selftest(text-layer-mode): PASS\n");
+            return 0;
+        }
+        if (only_frame_flow) {
+            // `0x2` 的 −11 支 / `0x6` 的前置与有符号深度 / `0x8c` 越界。
+            if (!check_frame_flow(table)) return 1;
+            std::printf("core-selftest(frame-flow): PASS\n");
             return 0;
         }
         if (only_se_registration) {
@@ -11945,6 +13305,11 @@ int main(int argc, char** argv) {
         if (!check_run_bracket(table)) return 1;
         if (!check_command_queue(table)) return 1;
         if (!check_input_dispatch(table)) return 1;
+        if (!check_input_composition(table)) return 1;
+        if (!check_text_container_and_font_names(table)) return 1;
+        if (!check_texture_set(table)) return 1;
+        if (!check_text_layer_mode_gate(table)) return 1;
+        if (!check_frame_flow(table)) return 1;
         if (!check_input_devices(table)) return 1;
         if (!check_pause_and_clock(table)) return 1;
         if (!check_scene_clock_gate(table)) return 1;

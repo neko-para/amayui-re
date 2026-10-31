@@ -19,43 +19,108 @@ namespace {
 
 // ── 宿主输入（★ 平台边界，⛔ 不是引擎语义） ──
 //
-// 规范只规定「平台把当前键 / 鼠标状态归约成一个 32 位输入字 + 光标 + 按钮位图 + 一条事件队列」，
-// **物理键 ↔ 输入位号的映射属宿主**（`data/spec/chapters/60-ops-input.md` 开头）。这张表就是那个策略：
-// 位号 0..31 与 `0xfb` / `0x100` / `0x104` 用的是同一套编号。要改键位只改这里。
-struct KeyBit {
-    std::uint32_t bit;
+// 规范（`data/spec/chapters/60-ops-input.md`）的口径：**位号合成是引擎的决定** —— 平台只提供
+// **原始状态**（某个系统键码是否按下、鼠标左右键、手柄按钮位图），键盘 / 鼠标 / 手柄的映射表由
+// 引擎的输入系统初始化写入。所以这里**不再**把 SDL 的扫描码直接折成输入字（那是引擎的活），
+// 只做两件平台的事：
+//   ① 扫描码 ↔ **系统键码**（Win32 VK）的对应（平台的消息就是按 VK 来的）；
+//   ② 把 SDL 事件泵成引擎窗口过程的两个写点（键按下消息 / 鼠标左右键消息）。
+// ⛔ 这张表是**宿主策略**（物理键 → VK），不是引擎的"VK → 输入位"表（那张在 `core/vm.cpp` 的构造器里）。
+struct SystemKey {
+    std::int32_t vk;
     SDL_Scancode code;
 };
 
-constexpr KeyBit kKeyBits[] = {
-    {0, SDL_SCANCODE_RETURN},  {1, SDL_SCANCODE_ESCAPE},  {2, SDL_SCANCODE_SPACE},
-    {3, SDL_SCANCODE_LEFT},    {4, SDL_SCANCODE_UP},      {5, SDL_SCANCODE_RIGHT},
-    {6, SDL_SCANCODE_DOWN},    {7, SDL_SCANCODE_BACKSPACE}, {8, SDL_SCANCODE_TAB},
-    {9, SDL_SCANCODE_LCTRL},   {10, SDL_SCANCODE_LSHIFT}, {11, SDL_SCANCODE_Z},
-    {12, SDL_SCANCODE_X},      {13, SDL_SCANCODE_C},      {14, SDL_SCANCODE_A},
-    {15, SDL_SCANCODE_S},      {16, SDL_SCANCODE_D},      {17, SDL_SCANCODE_Q},
-    {18, SDL_SCANCODE_W},      {19, SDL_SCANCODE_E},      {20, SDL_SCANCODE_R},
-    {21, SDL_SCANCODE_1},      {22, SDL_SCANCODE_2},      {23, SDL_SCANCODE_3},
-    {24, SDL_SCANCODE_4},      {25, SDL_SCANCODE_5},      {26, SDL_SCANCODE_6},
-    {27, SDL_SCANCODE_7},      {28, SDL_SCANCODE_8},      {29, SDL_SCANCODE_9},
-    {30, SDL_SCANCODE_0},      {31, SDL_SCANCODE_F1},
+constexpr SystemKey kSystemKeys[] = {
+    {0x08, SDL_SCANCODE_BACKSPACE}, {0x09, SDL_SCANCODE_TAB},  {0x0D, SDL_SCANCODE_RETURN},
+    {0x1B, SDL_SCANCODE_ESCAPE},    {0x20, SDL_SCANCODE_SPACE}, {0x25, SDL_SCANCODE_LEFT},
+    {0x26, SDL_SCANCODE_UP},        {0x27, SDL_SCANCODE_RIGHT}, {0x28, SDL_SCANCODE_DOWN},
+    {0x30, SDL_SCANCODE_0},         {0x31, SDL_SCANCODE_1},    {0x32, SDL_SCANCODE_2},
+    {0x33, SDL_SCANCODE_3},         {0x34, SDL_SCANCODE_4},    {0x35, SDL_SCANCODE_5},
+    {0x36, SDL_SCANCODE_6},         {0x37, SDL_SCANCODE_7},    {0x38, SDL_SCANCODE_8},
+    {0x39, SDL_SCANCODE_9},         {0x41, SDL_SCANCODE_A},    {0x42, SDL_SCANCODE_B},
+    {0x43, SDL_SCANCODE_C},         {0x44, SDL_SCANCODE_D},    {0x45, SDL_SCANCODE_E},
+    {0x46, SDL_SCANCODE_F},         {0x47, SDL_SCANCODE_G},    {0x48, SDL_SCANCODE_H},
+    {0x49, SDL_SCANCODE_I},         {0x4A, SDL_SCANCODE_J},    {0x4B, SDL_SCANCODE_K},
+    {0x4C, SDL_SCANCODE_L},         {0x4D, SDL_SCANCODE_M},    {0x4E, SDL_SCANCODE_N},
+    {0x4F, SDL_SCANCODE_O},         {0x50, SDL_SCANCODE_P},    {0x51, SDL_SCANCODE_Q},
+    {0x52, SDL_SCANCODE_R},         {0x53, SDL_SCANCODE_S},    {0x54, SDL_SCANCODE_T},
+    {0x55, SDL_SCANCODE_U},         {0x56, SDL_SCANCODE_V},    {0x57, SDL_SCANCODE_W},
+    {0x58, SDL_SCANCODE_X},         {0x59, SDL_SCANCODE_Y},    {0x5A, SDL_SCANCODE_Z},
+    {0x70, SDL_SCANCODE_F1},        {0x71, SDL_SCANCODE_F2},   {0x72, SDL_SCANCODE_F3},
+    {0x73, SDL_SCANCODE_F4},        {0x74, SDL_SCANCODE_F5},   {0x75, SDL_SCANCODE_F6},
+    {0x76, SDL_SCANCODE_F7},        {0x77, SDL_SCANCODE_F8},   {0x78, SDL_SCANCODE_F9},
+    {0x79, SDL_SCANCODE_F10},       {0x7A, SDL_SCANCODE_F11},  {0x7B, SDL_SCANCODE_F12},
 };
 
-// 采样一次键盘（`0xff` 的平台请求）：位号 = 上表的 bit，置起 = 当前按下。
-std::uint32_t sample_key_mask() {
+// 某个**系统键码**当前是否按下（平台边界）。
+bool system_key_down(std::int32_t vk) {
     const bool* state = SDL_GetKeyboardState(nullptr);
-    if (state == nullptr) return 0;
-    std::uint32_t mask = 0;
-    for (const auto& entry : kKeyBits) {
-        if (state[entry.code]) mask |= 1u << entry.bit;
+    if (state == nullptr) return false;
+    for (const auto& entry : kSystemKeys) {
+        if (entry.vk == vk) return state[entry.code];
     }
-    return mask;
+    return false;
+}
+
+// 扫描码 → 系统键码（窗口过程用）；找不到 ⇒ −1。
+std::int32_t vk_from_scancode(SDL_Scancode code) {
+    for (const auto& entry : kSystemKeys) {
+        if (entry.code == code) return entry.vk;
+    }
+    return -1;
+}
+
+// 有没有任何已映射的键按下（只喂文本层的"抽干"这一处宿主观察）。
+bool any_system_key_down() {
+    const bool* state = SDL_GetKeyboardState(nullptr);
+    if (state == nullptr) return false;
+    for (const auto& entry : kSystemKeys) {
+        if (state[entry.code]) return true;
+    }
+    return false;
 }
 
 // 把 SDL 的四类真实设备接到 core 的采样口（窗口路径的默认输入源）。
 // ★ `scripted != nullptr` 时不调用它：那时输入来自 `--input-script` 的时间线。
-void bind_sdl_input(core::Machine& machine, SDL_Window* window, int width, int height) {
-    machine.set_key_sampler([] { return sample_key_mask(); });
+// ★ 手柄：按 spec 的组头口径 —— 按钮数来自**设备能力查询**，`system:LimitJoy` = 1 ⇒ 0（整组不采样）。
+SDL_Joystick* bind_sdl_input(core::Machine& machine, SDL_Window* window, int width, int height) {
+    // ① 键盘：**逐系统键码**查询（映射表在引擎里；这里只回答"这个 VK 按没按下"）。
+    machine.set_key_code_source([](int vk) { return system_key_down(vk); });
+    // ② 鼠标：左 / 右键的**原始状态**（位 0 左 / 位 1 右；归约到引擎位是核心的事）。
+    machine.set_mouse_button_source([](std::int32_t& mask) -> bool {
+        if (!SDL_HasMouse()) return false;
+        const auto sdl = SDL_GetMouseState(nullptr, nullptr);
+        mask = 0;
+        if ((sdl & SDL_BUTTON_LMASK) != 0) mask |= 1;
+        if ((sdl & SDL_BUTTON_RMASK) != 0) mask |= 2;
+        return true;
+    });
+    machine.set_click_on_up(static_cast<std::int32_t>(machine.config().get_int("set:ClickOnUp")));
+    // ③ 手柄：打开第一个设备、把按钮数交给组头；没有设备 / `system:LimitJoy` ⇒ 0。
+    SDL_Joystick* joystick = nullptr;
+    if (machine.config().get_int("system:LimitJoy") == 0) {
+        int count = 0;
+        SDL_JoystickID* ids = SDL_GetJoysticks(&count);
+        if (ids != nullptr) {
+            if (count > 0) joystick = SDL_OpenJoystick(ids[0]);
+            SDL_free(ids);
+        }
+    }
+    if (joystick != nullptr) {
+        machine.set_joy_button_count(SDL_GetNumJoystickButtons(joystick));
+        machine.set_joy_button_source([joystick]() -> std::uint32_t {
+            // SDL3 只给**逐按钮**查询（`SDL_GetJoystickButton`）⇒ 这里把它拼成位图（平台边界）。
+            const int count = SDL_GetNumJoystickButtons(joystick);
+            std::uint32_t word = 0;
+            for (int i = 0; i < count && i < 32; ++i) {
+                if (SDL_GetJoystickButton(joystick, i)) word |= 1u << i;
+            }
+            return word;
+        });
+    } else {
+        machine.set_joy_button_count(0);
+    }
     machine.set_cursor_source([window, width, height](std::int32_t& x, std::int32_t& y) -> bool {
         static int probe = 0;
         const bool probe_on = std::getenv("EMULATOR_CXX_INPUT_TRACE") != nullptr;
@@ -106,19 +171,7 @@ void bind_sdl_input(core::Machine& machine, SDL_Window* window, int width, int h
                                       static_cast<float>(window_height));
         return true;
     });
-    machine.set_mouse_button_source([](std::int32_t& mask) -> bool {
-        if (!SDL_HasMouse()) return false;
-        float mouse_x = 0.0f;
-        float mouse_y = 0.0f;
-        // ★ 宿主映射（平台边界）：SDL 的右键是 `SDL_BUTTON_RMASK` = 1<<2，而引擎的位图是
-        //   **位 0 左 / 位 1 右**（`CORE-INPUT-MOUSE-BUTTON`）。⛔ 不能把 SDL 掩码原样传进核心：
-        //   那会让右键落在 bit2，TITLE 的 `and 3f2, 2` 永远看不到右键。
-        const auto sdl = SDL_GetMouseState(&mouse_x, &mouse_y);
-        mask = 0;
-        if ((sdl & SDL_BUTTON_LMASK) != 0) mask |= 1;
-        if ((sdl & SDL_BUTTON_RMASK) != 0) mask |= 2;
-        return true;
-    });
+    return joystick;
 }
 
 }  // namespace
@@ -142,7 +195,8 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     const bool scene_gpu_ok = create_scene_pipeline(device, swapchain_format, scene_pipeline);
     SceneTextureCache scene_cache;
     machine.consume_frame_step();  // 丢掉预跑期留下的请求
-    // 宿主输入：键盘 / 鼠标（**不接摇杆**）。三者都只在脚本执行到对应 opcode 时才被取用：
+    // 宿主输入：键盘 / 鼠标 / 手柄（手柄只报**按钮位图**，组头的按钮数来自设备能力查询）。
+    // 三者都只在脚本执行到对应 opcode 时才被取用：
     // `0xff` 采样输入字、`0x109` 光标、`0x108` 按钮位图、`0xcc`/`0xcd` 鼠标回调。
     // ★ `0x2fc` 是**触点查询**（不是鼠标事件队列）：桌面鼠标-only 不提供触点源 ⇒ 恒写 0。
     // 测试 / 诊断：到点投递一次 SDL_EVENT_QUIT，用来端到端验证“关窗保存配置”。
@@ -161,7 +215,8 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     }
     // 窗口路径的输入源：**给了脚本化输入就用脚本**（可复现的自动化）；否则用 SDL 的真实设备。
     // ★ 两者是同一层的替身：`--input-script` 不是引擎语义，它只是把"平台归约"换成时间线。
-    if (scripted == nullptr) bind_sdl_input(machine, window, width, height);
+    SDL_Joystick* joystick = nullptr;
+    if (scripted == nullptr) joystick = bind_sdl_input(machine, window, width, height);
     // 只建一张 1×1 占位纹理给软件回退路径；⛔ 不要在这里 rasterize（那会清脏、跳过首帧）。
     core::Bytes canvas{0, 0, 0, 0};
     SDL_GPUTexture* image = upload_texture(device, canvas, 1, 1);
@@ -200,6 +255,21 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
             } else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
                 running = false;
                 if (user_quit != nullptr) *user_quit = true;
+            } else if (event.type == SDL_EVENT_KEY_DOWN) {
+                // 引擎自己的窗口过程那一支：**键按下消息**（`event.key.repeat` 为 true 的是按住
+                // 产生的重复消息，spec 明文不算）⇒ 把对应的输入位写进位号锁存字。
+                if (!event.key.repeat) {
+                    machine.push_key_down_message(vk_from_scancode(event.key.scancode));
+                }
+            } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                       event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                // 左右键消息：按配置 `set:ClickOnUp` 选按下 / 抬起那一条（由核心判断）。
+                const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    machine.push_mouse_button_message(false, down);
+                } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                    machine.push_mouse_button_message(true, down);
+                }
             } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
                 // ★ 滚轮：把增量推进引擎那一格（`0x10d` 读并清）。刻度 / 符号是宿主策略。
                 machine.add_wheel_delta(static_cast<std::int32_t>(event.wheel.y));
@@ -225,7 +295,7 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         // 文本层的抽干（`ADV-TEXT-APPEND`）：主循环**被动观察**输入 —— 有键按下 / 鼠标键按下就把
         // 剩下的待画格一次画完。⛔ 与脚本主动取键（`0xff` / `0x109`）无关。
         {
-            const bool any_key = sample_key_mask() != 0;
+            const bool any_key = any_system_key_down();
             const bool any_mouse = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)) != 0;
             machine.set_input_pressed(any_key || any_mouse);
         }
@@ -306,6 +376,7 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     release_scene_textures(device, scene_cache);
     destroy_scene_pipeline(device, scene_pipeline);
     destroy_quad_pipeline(device, pipeline);
+    if (joystick != nullptr) SDL_CloseJoystick(joystick);
     SDL_ReleaseWindowFromGPUDevice(device, window);
     std::size_t windows = 0;
     for (const auto& [key, item] : machine.draw_items()) {

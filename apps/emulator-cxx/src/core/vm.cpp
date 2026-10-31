@@ -78,6 +78,52 @@ Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install*
     }
     // ③ 槽号 → 键号：`-1` = 未绑定（兄弟指令写 −1 解除绑定）。
     slot_key_table_.fill(-1);
+    // ★ 输入系统的初始化还把**槽 0..6 绑到这 7 个固定逻辑键**（顺序同上面的表）：`0xfd` 的"解绑该槽
+    //   当前逻辑键的键码"要靠这条绑定才成立（spec 的可证伪条：`0xfd` 把槽 0 改绑 Enter 之后，
+    //   按 ↑ ⇒ 输入字里不再有第 0 位）。其余槽仍是"未绑定"（−1）。
+    slot_key_table_[0] = 24;  // ↑
+    slot_key_table_[1] = 25;  // →
+    slot_key_table_[2] = 26;  // ↓
+    slot_key_table_[3] = 27;  // ←
+    slot_key_table_[4] = 28;  // Enter
+    slot_key_table_[5] = 29;  // Space
+    slot_key_table_[6] = 30;  // Backspace
+    // ── 输入系统的初始化（`CORE-INPUT-WORD` 的「各来源的位号合成」；⛔ 不是配置、不是脚本）──
+    // ① 系统键码表 256 项全 −1，再由「逻辑键号 → 系统键码」表登记 7 项**固定**映射。
+    //    ★ 逻辑键号的编号只有 `28 = Enter` 有观察（spec 的可证伪条）；其余 6 个的编号与"系统键码"
+    //      的取值（VK 码）是本实现的**选择**；引擎侧未定见残差 `RES-INPUT-LOGICAL-KEY-CODES`。
+    key_code_table_.fill(-1);
+    logical_key_codes_.clear();
+    {
+        struct SevenEntry {
+            std::int32_t logical_key;  // 逻辑键号
+            std::int32_t system_code;  // 系统键码（Win32 VK）
+            std::int32_t input_bit;    // 输入位号
+        };
+        constexpr SevenEntry kSeven[] = {
+            {24, 0x26, 0},  // ↑ VK_UP      → 位 0
+            {25, 0x27, 1},  // → VK_RIGHT   → 位 1
+            {26, 0x28, 2},  // ↓ VK_DOWN    → 位 2
+            {27, 0x25, 3},  // ← VK_LEFT    → 位 3
+            {28, 0x0D, 4},  // Enter VK_RETURN → 位 4（逻辑键 28 = Enter，spec 有观察）
+            {29, 0x20, 5},  // Space VK_SPACE  → 位 5
+            {30, 0x08, 6},  // Backspace VK_BACK → 位 6
+        };
+        for (const auto& entry : kSeven) {
+            logical_key_codes_[entry.logical_key] = entry.system_code;
+            key_code_table_[static_cast<std::size_t>(entry.system_code)] = entry.input_bit;
+        }
+    }
+    // ② 键槽映射（`0x10b` 那张 32 格表）：初始化把它写成**各自的槽号**，另把槽 2 覆写成 30；
+    //    组头的**槽数**写成 2。⇒ 槽 0 / 1 的基位号初值 0 / 1，鼠标左右键默认落输入位 4 / 5。
+    for (std::size_t i = 0; i < array_d1383_.size(); ++i) {
+        array_d1383_[i] = static_cast<std::int32_t>(i);
+    }
+    array_d1383_[2] = 30;
+    key_slot_count_ = 2;
+    // ③ 手柄组头的按钮数：向平台查询设备能力（`system:LimitJoy` = 1 ⇒ 整组为空）。
+    //    ★ 本模型不自己打开设备：能力查询走 `set_joy_button_count`（窗口路径在那里接 SDL）。
+    joy_button_count_ = 0;
     // 重算缩放的**第 ① 个时机**：启动、字体对象建立之后一次。视口缺省 = 客户区 ⇒ 两个分量 1.0，
     // 与缓存初值相等 ⇒ 整趟什么都不写（契约本来就是"相等 ⇒ 不写"）。
     refresh_font_scale();
@@ -502,6 +548,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0x260: op_260(instruction); return;
         case 0x107: op_107(instruction); return;
         case 0x10B: op_10b(instruction); return;
+        case 0xFD: op_fd(instruction); return;
         case 0x30A: op_30a(instruction); return;
         case 0x25B: op_25b(instruction); return;
         case 0x143: op_143(instruction); return;

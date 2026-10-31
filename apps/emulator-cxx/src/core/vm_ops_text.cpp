@@ -4,6 +4,7 @@
 // ★ 本文件只有 handler 本体；分派仍在 vm.cpp 的 execute()，一个 opcode 一行。
 // ★ 本文件的切分是**按职责**聚合，不严格等于规范章节边界（章节归属以 spec 正文为准）。
 #include "core/vm.h"
+#include "core/encoding.h"
 #include "core/vm_internal.h"
 #include "core/text_raster.h"
 
@@ -11,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 
 namespace core {
 namespace {
@@ -78,11 +80,129 @@ void Machine::op_2bd(const Instruction& instruction) {
     return;
 }
 
+std::int32_t Machine::find_font_name(const std::string& name) const {
+    // 查名前跳过名字**开头的一个** `@`（只跳一个）。比较**逐字节**且**长度必须相等**：
+    // 先按两者较短的长度比字节，再比长度（等价于 `==`，但⛔ 不做大小写折叠 / 码页转换 / 去空白）。
+    std::string_view lookup(name);
+    if (!lookup.empty() && lookup.front() == '@') lookup.remove_prefix(1);
+    for (std::size_t i = 0; i < font_names_.size(); ++i) {
+        const auto& entry = font_names_[i];
+        const std::size_t shorter = std::min(entry.name.size(), lookup.size());
+        bool equal = true;
+        for (std::size_t k = 0; k < shorter; ++k) {
+            if (entry.name[k] != lookup[k]) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal && entry.name.size() == lookup.size()) return static_cast<std::int32_t>(i);
+    }
+    return -1;
+}
+
+bool Machine::font_fixed_half_width() {
+    // 兼容旧观察口：等价于"`font_fixed_half_width(size)` 适用"（用 A 支字号量）。
+    return font_fixed_half_width(glyph_height_ > 0 ? glyph_height_ : 24) != 0;
+}
+
+const std::string& Machine::reference_font_face() {
+    // 常量参考字体：面名 `ＭＳ ゴシック`（CP932 字节；引擎字符串是 ANSI 字节）。
+    static const std::string face = "\x82\x6C\x82\x72\x20\x83\x53\x83\x56\x83\x62\x83\x4E";
+    return face;
+}
+
+void Machine::derive_font_description(FontDescription& desc, std::int32_t size) {
+    // 派生例程（`60-ops-forward` 的「非 0 支的下一格来自度量」）：**两次度量，量的不是同一个字体**。
+    // ① 第一次：**常量参考字体**（面名 `ＭＳ ゴシック`、高度 = −字号、宽度 = −字号 ÷ 2、字符 0x8C83）
+    //    ⇒ 结果进该对象自己的**参考量度**（⛔ 不是写回值）。
+    if (font_measurer_) {
+        font_reference_metric_ = font_measurer_(reference_font_face(), size);
+        ++font_measure_requests_;
+    }
+    // ② 第二次：**该描述自己的字面名**（同一个固定字符）⇒ 写回两格的是这一次。
+    FontMetrics measured{};
+    const bool measured_ok = font_measurer_ != nullptr;
+    if (measured_ok) {
+        measured = font_measurer_(desc.face, size);
+        ++font_measure_requests_;
+    }
+    // ③ 回退判据（**按下序判**）：配置 `display:AspectMode` ≠ 0 ⇒ 不回退、走度量；否则
+    //    ① 该对象的对位模式 = 0 ⇒ 回退（发行路径上恒不成立：调用点都先判过 ≠ 0）；
+    //    ② 该描述自己存着的字面名（跳过开头一个 `@` 后）不在字体名表里 ⇒ 回退；
+    //    ③ 表项第 0 位已置（等宽）且不属于 `IPA P` 系列 ⇒ 回退。
+    bool fallback = !measured_ok;  // 没有度量后端 ⇒ 量度不可得 ⇒ 回退
+    if (!fallback && config_.get_int("display:AspectMode") == 0) {
+        if (font_align_mode_ == 0) {
+            fallback = true;
+        } else {
+            std::string name = desc.face;
+            if (!name.empty() && name.front() == '@') name.erase(name.begin());
+            const auto index = find_font_name(name);
+            if (index < 0) {
+                fallback = true;
+            } else {
+                const auto& entry = font_names_[static_cast<std::size_t>(index)];
+                const bool fixed = (entry.flags & 1) != 0;
+                const bool ipa = cp932_to_utf8(name).rfind("IPA P", 0) == 0;
+                if (fixed && !ipa) fallback = true;
+            }
+        }
+    }
+    if (fallback) {
+        // 回退 ⇒ **下一格 ← 高度 ÷ 2**（高度是负的 ⇒ 数值等于 −字号/2）；高度仍 ← −字号（不缩放）。
+        desc.height = -size;
+        desc.width = desc.height / 2;
+        return;
+    }
+    // 高度 ← −字号；其中一侧在测得的字体行高 > 字号时改成 trunc(字号 ÷ 测得行高 × (−字号))。
+    desc.height = -size;
+    if (measured.line_height > size && measured.line_height > 0) {
+        desc.height = static_cast<std::int32_t>(static_cast<double>(size) /
+                                                static_cast<double>(measured.line_height) *
+                                                static_cast<double>(-size));
+    }
+    // 下一格 ← **−测得的平均字宽**；黑框宽度超过"半格"阈值 ⇒ 再缩一次。
+    // ★ 「对位模式 = 1 与其它非 0 值走两个略有差别的例程，差别只在'要不要再缩这一次'」——
+    //   本版**没有**逐值取证哪一支再缩 ⇒ 本实现取"对位模式 = 1 再缩"，**待复核**（引擎侧未定见残差 `RES-OPS-FORWARD-PROLOGUE-RESCALE`）。
+    desc.width = -measured.average_width;
+    const std::int32_t half_cell = size / 2;
+    if (font_align_mode_ == 1 && measured.measured_box_width > 0 &&
+        measured.glyph_box_width > half_cell) {
+        desc.width = static_cast<std::int32_t>(static_cast<double>(measured.glyph_box_width) /
+                                               static_cast<double>(measured.measured_box_width) *
+                                               static_cast<double>(-measured.average_width));
+    }
+}
+
+std::int32_t Machine::font_fixed_half_width(std::int32_t size) {
+    // `0x2de` 的位 0 = `FIXED_PITCH`（等宽）⇒ **固定半宽支**：该名字按固定半宽用 ——
+    //   对位模式 = **1** ⇒ 字宽 = **−字号/2**；对位模式 = **2** ⇒ 字宽 = **+字号/2**；
+    //   **其它对位模式（0 / ≥3）是本版窄 unknown** ⇒ 只记诊断、不适用（⛔ 别猜第三套符号）。
+    //   ⛔ 位 0 置起**不会**让这个字体被跳过（它照常参与画字）。
+    const std::string& face = !font_a_pair_.variants[0].face.empty() ? font_a_pair_.variants[0].face
+                                                                    : font_b_pair_.variants[0].face;
+    if (face.empty()) return 0;
+    // ★ 内建识别的 `IPA Pゴシック` / `IPA P明朝`：即使位 0 置起也走按字形算那一支（名字是 CP932 字节）。
+    if (cp932_to_utf8(face).rfind("IPA P", 0) == 0) return 0;
+    const auto index = find_font_name(face);
+    if (index < 0) return 0;
+    const auto& entry = font_names_[static_cast<std::size_t>(index)];
+    if ((entry.flags & 1) == 0) return 0;  // 位 0 未置起 ⇒ 按字形算
+    if (font_align_mode_ == 1) return -(size / 2);
+    if (font_align_mode_ == 2) return size / 2;
+    // ★ 位 0 置起 + 其它对位模式（0 / ≥3）＝本版的**窄 unknown**：显式记诊断、不编第三套符号。
+    report_error("font-fixed-halfwidth-align-mode-unknown:" + std::to_string(font_align_mode_));
+    return 0;
+}
+
 void Machine::op_2de(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 字体名查表：宿主字体表未接，空表 ⇒ 一律未命中 -1
-    (void)read_text(ops[1]);
-    write_int(ops[0], -1);
+    // 字体名查表（`CORE-OPS-TEXT-FONT-NAME-2DE`）：第 2 个是**字体名文本**、第 1 个是落点。
+    // 在**系统字体名一览**里查这个名字，命中写表项下标、未命中写 **−1**。
+    // ★ 这张表**不是**"已登记名字"那两张（`0x1a5` / `0x2fe` 之后登记进字体对象的两张向量）：
+    //   它是启动时枚举系统字体的结果；两者不互相替代。本模型不自己枚举（接缝 `set_font_name_table`）。
+    const std::string name = read_text(ops[1]);
+    write_int(ops[0], find_font_name(name));
     return;
 }
 
@@ -229,6 +349,9 @@ bool Machine::ensure_text_layer_texture(int slot) {
 
 void Machine::create_text_layer_item(int slot, int left, int top, int right, int bottom) {
     if (slot < 0 || slot >= 10) return;
+    // ★ 逐字绘制条目**只在场景绘制模式 = 1 的纹理画布路径**上建（模式 ≠ 1 ⇒ 旧路径不建条目、
+    //   也不读键基数 / 数量）。判据是**绘制项表**，⛔ 不是"屏幕上有没有字"。
+    if (draw_mode_ != 1) return;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     // 键基数可用 = 脚本写过 `0x213` **或** `0x70` 补过兜底（`key_base_ready()`）。
     // ⛔ 只看 `key_base_set` 会让"没调 0x213 的层"（= 本作 ADV 的消息层）一条条目都不建。
@@ -272,25 +395,30 @@ void Machine::erase_text_layer_draw_items(int slot) {
 }
 
 void Machine::clear_text_layer(int slot) {
-    if (!ensure_text_layer_texture(slot)) return;
-    const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
-    TextureEntry* entry = texture_mut(id);
-    if (entry == nullptr || !entry->slot.present) return;
-    std::fill(entry->slot.rgba.begin(), entry->slot.rgba.end(), 0);
-    entry->slot.revision++;
-    entry->record.non_file = true;
+    if (slot < 0 || slot >= 10) return;
+    // ★ 纹理画布存在于否由**场景绘制模式**分岔（`62-adv-text` 的「文本层：矩形、原点、清空与画布」）：
+    //   模式 = 1 才有画布（才清像素、才释放逐字条目）；模式 ≠ 1 走旧路径（本版只规定否定面）。
+    if (draw_mode_ == 1 && ensure_text_layer_texture(slot)) {
+        const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
+        TextureEntry* entry = texture_mut(id);
+        if (entry != nullptr && entry->slot.present) {
+            std::fill(entry->slot.rgba.begin(), entry->slot.rgba.end(), 0);
+            entry->slot.revision++;
+            entry->record.non_file = true;
+        }
+        erase_text_layer_draw_items(slot);
+    }
+    // ★ 下面这几件**不分模式、任何模式都做**：文本游标复位到文本原点、布局字符格序列清空、
+    //   揭示游标归零、清掉待画格。
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
-    erase_text_layer_draw_items(slot);
-    // ★ 清画布同时丢掉这一层的**字符格与揭示游标**：引擎那边 `0x71` 清的是布局向量（源），
-    //   重放闸也据此从头开始（⛔ 不清会让重放把上一段的字补画进来）。
     TextLayerState& layer = text_layer_state_[static_cast<std::size_t>(slot)];
     layer.cells.clear();
     layer.reveal_cursor = 0;
     layer.reveal_due_ms = 0;
     layer.reveal_done_ms = 0;
     layer.gate_cycles = 0;
-    // ★ 清画布同时丢掉这一层的**待画格**：引擎那边 `0x71` 清的是布局向量（源），我们的队列就是它的对应物
-    //   —— 不清会让"清空后紧接着的下一帧"把上一段的字补画进来（可见的串字）。
+    // 清画布同时丢掉这一层的**待画格**：引擎那边 `0x71` 清的是布局向量（源），我们的队列就是它的对应物
+    // —— 不清会让"清空后紧接着的下一帧"把上一段的字补画进来（可见的串字）。
     erase_pending_glyphs(slot);
     text_layer_state_[static_cast<std::size_t>(slot)].cursor_x = rec.f1c;
     text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
@@ -708,8 +836,6 @@ void Machine::write_font_pair(FontDescriptionPair& pair, const std::string& face
         variant.width = width;
         variant.height = height;
     }
-    // 入口体尾部：请求重建字体（`0x4329e1` / `0x432ecd`）。重建内部不建模。
-    request_font_rebuild();
     return;
 }
 
@@ -717,10 +843,15 @@ void Machine::op_1a5(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // `0x1a5` 设**A 支那一对**描述的字面名（`sub_432970`，argc 1，操作数**按文本读**：
     // 按整型读会得到另一件事）。⛔ 不许与 `0x2fe` 合并：合并会在改 A 支名字时把 B 支名字一起改掉。
-    // 它读**这一支自己的字号**（A 支：`Font+0x313D4`，EA 0x43297c）重写两份描述的高 / 下一格；
-    // 改名字不会改字号，只是把派生量按当前字号重算一遍。
+    // 它读**这一支自己的字号**（A 支：`Font+0x313D4`，EA 0x43297c）重写两份描述的高 / 下一格。
+    // ★ 入口体**不分岔**：写完高 = −字号、下一格 = −字号/2 就请求重建；**重建路径**自己按对位模式
+    //   分岔：≠ 0 ⇒ 对该支两份描述跑**同一个**度量派生例程、**覆写**高度与下一格；= 0 ⇒ 不覆写。
     const std::string face = read_text(ops[0]);
     write_font_pair(font_a_pair_, face, glyph_height_);
+    if (font_align_mode_ != 0) {
+        for (auto& variant : font_a_pair_.variants) derive_font_description(variant, glyph_height_);
+    }
+    request_font_rebuild();
     return;
 }
 
@@ -728,8 +859,13 @@ void Machine::op_2fe(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // `0x2fe` 设**B 支那一对**描述的字面名（`sub_432dd0`，argc 1，按文本读；EA 0x432e78..0x432ecd）。
     // 与 `0x1a5` 同形，但写另一对：`0x75`/`0x1a5` 与 `0x197`/`0x2fe` 各一对、互不覆盖。
+    // ★ B 支的重建入口是**另一个函数**（`sub_45A6E0`），但派生例程是同一个。
     const std::string face = read_text(ops[0]);
     write_font_pair(font_b_pair_, face, font_b_height_);
+    if (font_align_mode_ != 0) {
+        for (auto& variant : font_b_pair_.variants) derive_font_description(variant, font_b_height_);
+    }
+    request_font_rebuild();
     return;
 }
 
@@ -743,11 +879,16 @@ void Machine::op_197(const Instruction& instruction) {
     const auto value = read_int(ops[0]);
     font_b_height_ = value;
     for (auto& slot : text_slots_) slot.glyph_height = value;
+    // ★ 入口体**先无条件写**：该支两份描述 `高度 ← −字号`、`下一格 ← −(字号 ÷ 2)`（**不看**对位模式）。
     const std::int32_t height = -value;
     const std::int32_t width = -(value / 2);
     for (auto& variant : font_b_pair_.variants) {
         variant.height = height;
         variant.width = width;
+    }
+    // ★ 入口体随后**自己按对位模式分岔**：≠ 0 ⇒ 对该支两份描述各跑一次**度量派生例程**。
+    if (font_align_mode_ != 0) {
+        for (auto& variant : font_b_pair_.variants) derive_font_description(variant, value);
     }
     request_font_rebuild();
     if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x197 font_b_height=%d\n", value);
@@ -767,10 +908,15 @@ void Machine::op_75(const Instruction& instruction) {
     //     是**实现侧假设**、不是合同 ⇒ 守卫只许断言 spec 明写的部分，⛔ 不许断言"非 0 支什么都不写"。
     const auto value = read_int(ops[0]);
     glyph_height_ = value;
-    for (auto& variant : font_a_pair_.variants) variant.height = -value;
-    if (font_align_mode_ == 0) {
-        const std::int32_t width = -(value / 2);
-        for (auto& variant : font_a_pair_.variants) variant.width = width;
+    // ★ 入口体**先无条件写**：两份描述 `高度 ← −字号`、`下一格 ← −(字号 ÷ 2)`（**不看**对位模式）。
+    for (auto& variant : font_a_pair_.variants) {
+        variant.height = -value;
+        variant.width = -(value / 2);
+    }
+    // ★ 入口体随后**自己按对位模式分岔**：= 0 ⇒ 直接重建；≠ 0 ⇒ 对该支两份描述各跑一次
+    //   **度量派生例程**（它会覆写高度与下一格），再请求重建。
+    if (font_align_mode_ != 0) {
+        for (auto& variant : font_a_pair_.variants) derive_font_description(variant, value);
     }
     request_font_rebuild();
     if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x75 glyph_height(family A)=%d\n", glyph_height_);

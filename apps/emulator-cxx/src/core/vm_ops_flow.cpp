@@ -54,8 +54,33 @@ void Machine::op_02(const Instruction& instruction) {
         if (queue_occupied()) pump_command_queue();
         return;
     }
-    // 父帧号 = −1 ⇒ 整个执行结束；= −11 ⇒ 存档 / 读档专用入口（后续尚无合同，残差
-    // `RES-FRAME-EXIT-SAVE`）；**其余负值走同一条退出路径** —— 引擎不区分它们，没有"错误"这一档。
+    // 父帧号 = **−11** ⇒ **恢复存档专用入口**：方向是**读入并应用一份存档**（⛔ 不是写存档）。
+    if (f.parent == -11) {
+        // ① 把「父帧候选」格写成 −1 ⇒ 随后装出的帧，父帧号 = −1（该帧之后再执行到 `0x2` 走
+        //    「整个执行结束」那一支，不会回到 −11）。
+        parent_candidate_ = -1;
+        // ② 读两个**期望存档版本**：**先版本 2、后版本 1**（`set:SaveVersion2` / `set:SaveVersion1`）。
+        const std::int32_t version2 = config_.get_int("set:SaveVersion2");
+        const std::int32_t version1 = config_.get_int("set:SaveVersion1");
+        ++save_exit_version_reads_;
+        save_exit_versions_ = (static_cast<std::int64_t>(version2) << 32) | (version1 & 0xFFFFFFFFll);
+        // ③ **版本门**（引擎侧决定做哪一档）：
+        //    · 版本 1 = 2 / 3 ⇒ 装载 + 两格位置 + **返回栈**（+ 复位一个计时基准）；
+        //    · 版本 1 = 1 且版本 2 = 10 / 20 ⇒ 只做装载与两格位置，**不重建返回栈**；
+        //    · 其余版本组合 ⇒ **什么都不做**（不装载、位置不动）。
+        const bool full_restore = version1 == 2 || version1 == 3;
+        const bool positions_only = version1 == 1 && (version2 == 10 || version2 == 20);
+        if (full_restore || positions_only) {
+            // 恢复路径本体（按存档里记的脚本身份重装脚本 + 按位置下标还原两格位置 + 返回栈）属宿主接缝：
+            // 存档里的位置表 / 返回点表没有建模（残差 `RES-SAVE-EXIT-NEG`）。
+            if (save_exit_restore_) save_exit_restore_(*this, version1, version2, full_restore);
+        }
+        // ④ 装载把该帧的**指令指针**留在新代码区起点、**推进格数清 0** ⇒ 下一次取指按新脚本从起点开始。
+        frame_mut().length_slot = 0;
+        // ★ 本条在 −11 这一支**不按脚本语义返回**：不切帧号、不释放帧、不抛异常。
+        return;
+    }
+    // 父帧号 = −1 ⇒ 整个执行结束；**其余负值走同一条退出路径** —— 引擎不区分它们，没有"错误"这一档。
     halted_ = true;
     stop_.reason = StopReason::Halted;
     stop_.message = "root-exit";
@@ -82,15 +107,32 @@ void Machine::op_03(const Instruction& instruction) {
 
 void Machine::op_06(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // load-frame：装进目标槽，不切换当前帧
+    // 装载帧（`CORE-OPS-FRAME-CALL-FRAME`）：装进目标槽，不切换当前帧。
     write_length(5);
+    // ★ 前置条件（唯一可观察的那一条）：**没有调试器**。引擎在启动时取得系统提供的调试器探测入口
+    //   （取不到就留空），装载前调用它；返回非 0（有调试器）⇒ **退出型异常、什么都不装**。
+    //   ⛔ 它不是"某个外部注册者填进来的回调"（那格只有初始化清 0 与取地址两处写）。
+    //   ★ 这一调用发生在**读操作数之前**（长度槽已在第 1 步写成 5）。
+    if (debugger_present_) throw CoreError("debugger-present");
     if (install_ == nullptr) throw CoreError("load-frame-loader-missing");
     const auto file_id = read_int(ops[0]);
     const auto target = read_int(ops[1]);
     // `0x41c84e`：本条在调用装载器**之前**把「父帧候选」格写成装载时正在执行的帧号
     // （装载器只照抄 ⇒ 泵先写 −10 就能让泵帧的父帧号 = −10，`0x2` 的 −10 支才可达）。
     parent_candidate_ = static_cast<std::int32_t>(current_frame_);
-    if (target < 0 || target >= static_cast<int>(kFrameCount)) throw CoreError("frame-depth-limit");
+    // ★ 深度检查是**有符号**比较：目标帧号 ≥ 40 ⇒ 失败。它发生在**装载之前** ⇒ 当前帧号根本没动；
+    //   失败抛**显示消息型异常**，携带的**类别是 1（続行不可能）** ⇒ 保护区只给终止（没有重试 / 忽略）。
+    //   ⛔ 不要写成"退出型异常"，也⛔ 不要写成"此时帧号已停在目标槽"。
+    if (target >= static_cast<int>(kFrameCount)) {
+        throw DisplayMessageError("frame-depth-limit", "frame depth limit (40)");
+    }
+    // ★ **负帧号没有判据**（有符号比较让负值通过）⇒ 记录地址落在帧区之前 = **越界写（UB）**。
+    //   本模型按"建议"显式诊断并拒绝：⛔ 不钳成 0、⛔ 不当成空槽。
+    if (target < 0) {
+        const std::string detail = "frame-load-negative-target:" + std::to_string(target);
+        report_error(detail);
+        throw CoreError(detail);
+    }
     install_script_into(static_cast<std::size_t>(target), static_cast<std::uint32_t>(file_id));
     return;
 }
@@ -213,9 +255,9 @@ void Machine::op_09(const Instruction& instruction) {
     // 只清**当前选中 bank** 的三个值族全局池（`0x6d` 的另一组保留原值）与**三个引用族全局池**
     // （`0x428b94` / `0x428bac` / `0x428bc4` 逐池清 0，同一份 bank 口径）。
     clear_global_pool_bank();
-    // 输入子系统执行一次更新（`0x428c0c`）：向平台采样一次并写进输入字（与 `0xff` 的采样同一路径；
+    // 输入子系统执行一次更新（`0x428c0c`）：向平台采样一次并写进输入字（与 `0xff` 的**电平采样**同一路径；
     // 没有采样源 ⇒ 保持 0，⛔ 不偷偷补值）。
-    input_word_ = key_sampler_ ? key_sampler_() : 0;
+    input_word_ = sample_level_input();
     // 场景绘制模式格 ← **重读配置** `set:DrawMode`（`0x428c34`；与 `0x200` 同口径，⛔ 不是沿用构造值）。
     draw_mode_ = config_.get_int("set:DrawMode");
     // 纹理槽：`set:CreateObject` 第 1 位 ∧ `set:AutoFreeTex` 第 0 位 ⇒ 逐槽释放 **1000** 个（0..999）。

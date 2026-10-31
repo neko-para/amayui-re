@@ -147,6 +147,40 @@ add_test(NAME spec_font_build_scale COMMAND emulator-core-selftest --only-font-s
 #   值按无符号 > 31 抛 `SetKeyMultiの引数が不正です．`（全角句点、**无**回车换行）且不改状态；读序 2 → 1。
 #   写 `indirect_[动作]`（旧实现）/ 用有符号比较 / 先读第 1 个 ⇒ 本条红。
 add_test(NAME spec_ops_10c_key_tables COMMAND emulator-core-selftest --only-key-tables)
+# ★ 输入合成（`CORE-INPUT-WORD` 的「各来源的位号合成」/「输入锁存」）：
+#   键盘表的格值 = 输入位号（**不加 4**，256 项 / 初值 −1 / 固定 7 项）；
+#   鼠标左右键 = 格里的基位号 **+ 4**；第一组手柄 = **槽序号 + 4**（格里的按钮编号不参与）、
+#   采样循环上界 = **键总数**（不是组头的按钮数）、组头按钮数 0 ⇒ 整组不采样、且不看输入可用标志；
+#   `0xfe` 越界 ⇒ 显示消息型异常 + 键总数不变 + 推进格数仍是 3；
+#   `0x101` = **事件并入**路径（消费锁存、手柄按下沿、标志 D ⇒ 第 6 位）、`0xff` = **电平**路径（两者不互相吞并）；
+#   `0xfd` 的"先解绑、再登记"；`0x10d` 的"先清零、后写落点"。
+#   把 +4 加到键盘一侧 / 把 0x101 写成 0xff / 去掉锁存的消费 ⇒ 本条红。
+add_test(NAME spec_input_composition COMMAND emulator-core-selftest --only-input-composition)
+# ★ 文本 / 字符串（`CORE-OPS-TEXT-SET` 的容器句柄与格式化 + `CORE-OPS-TEXT-FONT-NAME-2DE`）：
+#   `0x192` 落点为字符串容器句柄（`0x8005` / `0x800B`）时记录里存**容器引用的十进制文本**、源文本进
+#   **首元素**（空 ⇒ 追加、非空 ⇒ 覆写首元素，记录文本不被改写）；同一句柄当源读 ⇒ 首元素；空 ⇒ 空串；
+#   记录文本非数字 ⇒ UB（本实现诊断 + 停止）；整数源 ⇒ 十进制、浮点源 ⇒ **定点 6 位小数**（`%lf`）；
+#   `0x2de` = 系统字体名一览的查找（逐字节 + 长度、跳过开头一个 `@`、未命中 −1）；
+#   表项标志字节**位 0 = 等宽**（固定半宽 = 字号 ÷ 2，⛔ 不是跳过字体；IPA 两个名字例外）。
+#   把 +4 之外的东西写错（记录文本被覆写 / 浮点走截断 / 位 0 当成跳过）⇒ 本条红。
+add_test(NAME spec_text_container_font_names COMMAND emulator-core-selftest --only-text-container)
+# ★ 纹理装载（`CORE-OPS-TEXTURE-SET` / `-LOAD`）：读序 2 → 1 → 3 → 2 且**清纹理槽在读完第 3 个之后**
+#   （第 3 个抛类型异常 ⇒ 槽里仍是旧对象、记录未被写）；失败分档三档（打开失败 ⇒ 保持原值 /
+#   读字节失败与解码失败 ⇒ 槽空 + 来源 = 无 / 上传失败 ⇒ 槽里留已建出的对象）；
+#   颜色键按目标位宽装配（32 = A8R8G8B8 全值；16 = **A4R4G4B4**，A 参与）；BMP 位深集合 1/4/8/24/32、
+#   行序自下而上、行跨距 32 位对齐、1 位 MSB 先。
+#   把清槽挪到读第 3 个之前 / 16 位键按 8 位比 / BMP 不翻行序 ⇒ 本条红。
+add_test(NAME spec_texture_set_load COMMAND emulator-core-selftest --only-texture-set)
+# ★ 帧流程：`0x2` 的 **−11 = 恢复存档**（父帧候选 ← −1、先读版本 2 后读版本 1、版本门三档、推进格数清 0、
+#   不切帧 / 不释放 / 不抛）；`0x6` 的前置 = **没有调试器** + **有符号**深度检查（≥ 40 ⇒ 显示消息型异常、
+#   负值 ⇒ UB 的显式诊断拒绝，⛔ 不钳成 0）；`0x8c` 越界 = UB 的显式诊断。
+#   把 −11 并回"整个执行结束" / 把版本读序写反 / 把负帧号钳成 0 ⇒ 本条红。
+add_test(NAME spec_frame_exit_load_flow COMMAND emulator-core-selftest --only-frame-flow)
+# ★ 文本层的**场景绘制模式门** + `0x70` 的读序（`ADV-TEXT-LAYER-RECT`）：
+#   场景绘制模式 ≠ 1 ⇒ `0x70` 不碰纹理槽、不建逐字条目（旧路径只共用编号）；`0x71` 仍然复位文本游标。
+#   模式 = 1 ⇒ 画布与逐字条目照建（对照组）。`0x70` 的读序 = **5 → 4 → 3 → 2 → 1**。
+#   把模式门去掉（旧路径也建画布）/ 把读序改回 1 → 2 → 3 → 4 → 5 ⇒ 本条红。
+add_test(NAME spec_adv_text_layer_mode COMMAND emulator-core-selftest --only-text-layer-mode)
 # ★ 字形 AA 档（1 位 / GRAY4 / GRAY8 的**选择**与 17 / 65 级换算 ⇒ 满覆盖 240 / 251）：
 #   "设置界面文字比真机亮一档"的算术那一半。拆回 2^n（16 / 64）⇒ 满覆盖 255 ⇒ 本条红。
 add_test(NAME emulator-core-glyph-alpha COMMAND emulator-core-selftest --only-glyph)

@@ -471,6 +471,11 @@ std::string Machine::read_text(const Operand& operand) {
         }
         return text;
     }
+    // ★ 字符串容器句柄（`0x8005` / `0x800B`）：本条读出的是容器**第 0 个元素**的文本，
+    //   不是记录里那串十进制引用（`CORE-OPS-TEXT-SET` 的源侧）。
+    if (operand.type == 0x8005u || operand.type == 0x800Bu) {
+        return read_string_handle(operand);
+    }
     if (operand.type == 5) {
         footprint_.note_cell_read(address_of(operand));
         const auto it = global_string_.find(bank_key(operand.raw));
@@ -501,11 +506,108 @@ std::string Machine::read_text(const Operand& operand) {
         }
         throw CoreError("read-text-unsupported-pool-tag:" + std::to_string(tag));
     }
+    // ★ 浮点源 ⇒ **定点十进制、小数点后 6 位**（`printf("%lf")`；末位舍入随宿主运行时，
+    //   跨平台末位差异属明确舍弃）。⛔ 不许走 `read_int` 的"向零截断"。
+    if (operand.type == 1 || operand.type == 4 || operand.type == 10) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "%lf", read_float(operand));
+        return std::string(buffer);
+    }
+    // 整数源 ⇒ 十进制（可带负号、无前导零、无宽度填充）。
     const auto value = read_int(operand);
     return std::to_string(value);
 }
 
+// ── 字符串容器句柄（`CORE-POOL-HANDLE-STRING` / `CORE-CONTAINERS-*`）──
+// 记录里的**十进制文本**就是容器引用；容器对象 = 元素是字符串记录的数组。
+std::uint32_t Machine::parse_container_reference(const std::string& text) {
+    // 与字符串记录的整数读同口径（C 的十进制解析）：非数字得 0（= 空引用）。
+    return static_cast<std::uint32_t>(parse_int_text(text));
+}
+
+std::uint32_t Machine::slot_address_of(const Operand& operand) const {
+    // 容器句柄 → 它所属的那个字符串池（0x8005 = 全局、0x800B = 局部）；字符串记录的宽是 28 字节。
+    const std::uint32_t tag = operand.type == 0x8005u ? 5u : 11u;
+    return pool_base(tag) + 28u * operand.raw;
+}
+
+std::string Machine::string_record_text(std::uint32_t index, bool local) const {
+    if (local) {
+        const auto it = frame().local_string.find(index);
+        return it == frame().local_string.end() ? std::string{} : it->second;
+    }
+    const auto it = global_string_.find(bank_key(index));
+    return it == global_string_.end() ? std::string{} : it->second;
+}
+
+std::size_t Machine::string_container_size(std::uint32_t reference) const {
+    const auto it = string_containers_.find(reference);
+    return it == string_containers_.end() ? 0 : it->second.size();
+}
+
+std::string Machine::string_container_first(std::uint32_t reference) const {
+    const auto it = string_containers_.find(reference);
+    if (it == string_containers_.end() || it->second.empty()) return std::string{};
+    return it->second.front();
+}
+
+std::string Machine::read_string_handle(const Operand& operand) {
+    const bool local = operand.type == 0x800Bu;
+    // ★ 容器句柄的 raw 是**池下标**，但 `address_of` 的外延不含 0x8005 / 0x800B（那四个不是值族标签）。
+    footprint_.note_cell_read(slot_address_of(operand));
+    const std::string text = string_record_text(operand.raw, local);
+    // 记录为空（从未写过 / 空容器）⇒ **空串**（不是"空引用"）。
+    if (text.empty()) return std::string{};
+    const auto reference = parse_container_reference(text);
+    // 记录文本不是有效容器引用（被脚本改成非数字 / 伪造值）⇒ 属「容器句柄的失败路径」的
+    // **未定义行为**：本模型显式诊断 + 响亮失败（⛔ 不把它当成空串）。
+    const auto it = string_containers_.find(reference);
+    if (it == string_containers_.end()) {
+        report_error("string-container-invalid-reference:" + text);
+        throw CoreError("string-container-invalid-reference:" + text);
+    }
+    if (it->second.empty()) return std::string{};
+    return it->second.front();
+}
+
+void Machine::write_string_handle(const Operand& operand, std::string value) {
+    const bool local = operand.type == 0x800Bu;
+    footprint_.note_cell_write(slot_address_of(operand));
+    std::string text = string_record_text(operand.raw, local);
+    std::uint32_t reference = 0;
+    if (text.empty()) {
+        // 空记录 ⇒ 先建容器，把**引用的十进制文本**写进记录（记录级文本写入）。
+        reference = next_string_container_reference_++;
+        string_containers_[reference] = {};
+        text = std::to_string(reference);
+        if (local) {
+            frame_mut().local_string[operand.raw] = text;
+        } else {
+            global_string_[bank_key(operand.raw)] = text;
+        }
+    } else {
+        reference = parse_container_reference(text);
+    }
+    const auto it = string_containers_.find(reference);
+    if (it == string_containers_.end()) {
+        report_error("string-container-invalid-reference:" + text);
+        throw CoreError("string-container-invalid-reference:" + text);
+    }
+    // 元素为空 ⇒ 追加第 1 个元素；不为空 ⇒ **覆写第 0 个**（其余元素不变）。
+    if (it->second.empty()) {
+        it->second.push_back(std::move(value));
+    } else {
+        it->second.front() = std::move(value);
+    }
+}
+
 void Machine::write_text(const Operand& operand, std::string value) {
+    // ★ 字符串容器句柄（`0x8005` / `0x800B`）：记录里保存的仍是容器引用（十进制文本），
+    //   源文本去的是容器**首元素**（空容器 ⇒ 先建首元素；非空 ⇒ 覆写首元素）。见 `write_string_handle`。
+    if (operand.type == 0x8005u || operand.type == 0x800Bu) {
+        write_string_handle(operand, std::move(value));
+        return;
+    }
     if (operand.type == 5) {
         footprint_.note_cell_write(address_of(operand));
         global_string_[bank_key(operand.raw)] = std::move(value);
@@ -520,8 +622,7 @@ void Machine::write_text(const Operand& operand, std::string value) {
     //   **记录地址**，解引用后写那一条记录。引擎的落点分派（EA `0x433310`）接受 5 / 8 / 11 / 14，
     //   四条都汇到同一个收尾（EA `0x43362F` = `sub_40C120(记录, -1, 0, 源)`）⇒ 语义上与 5 / 11
     //   同一件事，只是多一层间接。只改那条记录的字节 + 长度；⛔ 不碰字体对象 / 文本层画布 / 绘制项。
-    //   ⛔ 容器句柄（0x8005 / 0x800B）不在这里：它们走另一条容器写入路径，且本语料的 `0x192` 没有
-    //   这种站点（取证见需求树 / bindings 的 CORE-OPS-TEXT-SET）。
+    //   ⛔ 容器句柄（0x8005 / 0x800B）不走这里：它们走上一条**容器**路径（记录只存引用）。
     if (operand.type == 8 || operand.type == 14) {
         const auto address = read_pointer(operand);
         std::uint32_t tag = 0;
@@ -553,11 +654,22 @@ void Machine::write_text(const Operand& operand, std::string value) {
 //   用例可以同时断言"请求没发"与"诊断还在"。
 // ★ 一次触发 = 一次调用 ⇒ 本函数是**唯一**拼请求的地方：⛔ 不要在 50+ 个 handler 里各拼一次。
 void Machine::report_error(std::string text) {
-    // 先判定抑制、再发请求（用局部 `text`：回调里若再触发诊断，`errors_` 不会被引用失效）。
-    if (error_handle_valid_ && error_writer_ && !(error_filter_ && error_filter_() != 0)) {
-        ++error_write_requests_;
-        // 文本 + 它的长度：长度取**字节数**；文本里的 CRLF 已在各 handler 里逐字给出。
-        error_writer_(text, text.size());
+    // 三道判定，**顺序固定且可观察**（`60-ops-numeric` 的「错误通道」）：
+    // ① 装了**过滤器** ⇒ 先调用它：返回非 0 ⇒ 整条丢弃（不落盘、不抛、不中止），「已装」标志**保留**；
+    // ② 返回 0（或本来就没装）⇒ **这时才**判**输出句柄**：无效 ⇒ 不写（同样不抛、不中止）；
+    // ③ 无论 ② 有没有真的写出字节（**句柄无效时也一样**）⇒ 把「已装」标志清 0（过滤器是**一次性**的）。
+    // ⛔ 不许把句柄判定提到过滤器之前（那会让一次性标志在"无日志文件"的配置下永远留着）。
+    bool discard = false;
+    if (error_filter_installed_ && error_filter_) {
+        if (error_filter_() != 0) discard = true;
+    }
+    if (!discard) {
+        if (error_handle_valid_ && error_writer_) {
+            ++error_write_requests_;
+            // 文本 + 它的长度：长度取**字节数**；文本里的 CRLF 已在各 handler 里逐字给出。
+            error_writer_(text, text.size());
+        }
+        error_filter_installed_ = false;  // ③ 一次性
     }
     // 诊断**无条件**保留（抑制只影响平台写请求）。
     errors_.push_back(std::move(text));

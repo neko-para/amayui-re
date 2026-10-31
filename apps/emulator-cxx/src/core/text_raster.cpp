@@ -400,6 +400,10 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
                          : (font_size_override > 0
                                 ? font_size_override
                                 : (machine.font_size() > 0 ? machine.font_size() : 24));
+    // ★ 等宽字体（`0x2de` 的标志字节位 0 = `FIXED_PITCH`）⇒ **固定半宽**：字宽 = ∓字号/2（带符号；
+    //   对位模式 = 1 ⇒ −字号/2、= 2 ⇒ +字号/2）。画字时按 |字宽| 推进，不再按字形黑框比例算。
+    //   ⛔ 位 0 置起**不会**让这个字体被跳过（它照常参与画字）—— 跳过"按字宽居中"的修正而已。
+    const std::int32_t fixed_half_width = machine.font_fixed_half_width(size);
     // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：把**实际用来出字形的字号**打出来。
     //   判据用：配置界面里 0x204 必须按 A 支字号画（`0x75` 写的那支），⛔ 不是 `0x197` 的 B 支。
     // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：本函数在 `vm_ops_text.cpp` 的匿名命名空间里没有那个 helper，
@@ -583,7 +587,9 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
                 pen_x += size / 2;
                 continue;
             }
-            advance = gdi_glyph.advance > 0 ? gdi_glyph.advance : size / 2;
+            advance = fixed_half_width != 0
+                          ? std::abs(fixed_half_width)
+                          : (gdi_glyph.advance > 0 ? gdi_glyph.advance : size / 2);
             origin_x = pen_x + gdi_glyph.left;
             origin_y = baseline - gdi_glyph.top;
             // 诊断（`EMULATOR_CXX_TEXT_TRACE=1`）：GDI 的灰度档到底给 0..16 / 0..64 还是 0..255。
@@ -610,9 +616,11 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
                 continue;
             }
             const FT_GlyphSlot slot = face->glyph;
-            advance = static_cast<int>(slot->advance.x >> 6) > 0
-                          ? static_cast<int>(slot->advance.x >> 6)
-                          : size / 2;
+            advance = fixed_half_width != 0
+                          ? std::abs(fixed_half_width)
+                          : (static_cast<int>(slot->advance.x >> 6) > 0
+                                 ? static_cast<int>(slot->advance.x >> 6)
+                                 : size / 2);
             origin_x = pen_x + slot->bitmap_left;
             origin_y = baseline - slot->bitmap_top;
             mask.pixels = slot->bitmap.buffer;

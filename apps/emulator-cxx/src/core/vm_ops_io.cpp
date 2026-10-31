@@ -14,18 +14,22 @@ namespace core {
 void Machine::op_10d(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 读滚轮（0x10D `read-mouse-wheel` / `sub_42EF50`）：`op1 ← Engine+0x1E74`，**随后把那一格清 0**。
+    // ★ 次序是合同（`CORE-INPUT-WHEEL-READ`）：**先清零、后写落点** —— 落点写因类型不符抛异常时，
+    //   累加格**已经**被清 0（这一支可观察）。⛔ 不许交换这两步。
     // ★ 增量由**宿主**在窗口过程里推进来（WM_MOUSEWHEEL）；符号 / 刻度属平台边界，本层不解释。
-    write_int(ops[0], wheel_accum_);
+    const std::int32_t value = wheel_accum_;
     wheel_accum_ = 0;
+    write_int(ops[0], value);
     return;
 }
 
 void Machine::op_109(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 读光标位置（CORE-INPUT-MOUSE-POS）：设备可用 ⇒ 写客户区坐标；不可用 ⇒ 两个都写 −100000。
+    // 读光标位置（CORE-INPUT-MOUSE-POS）：输入可用标志非 0 ⇒ 向平台查询（写客户区坐标）；
+    // 为 0 ⇒ **不查询**、两个操作数都写 −100000（「不可用」不是「不写」）。
     std::int32_t x = 0;
     std::int32_t y = 0;
-    const bool available = cursor_source_ && cursor_source_(x, y);
+    const bool available = input_available_ && cursor_source_ && cursor_source_(x, y);
     write_int(ops[0], available ? x : -100000);
     write_int(ops[1], available ? y : -100000);
     return;
@@ -33,10 +37,193 @@ void Machine::op_109(const Instruction& instruction) {
 
 void Machine::op_108(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 读鼠标按钮位图（CORE-INPUT-MOUSE-BUTTON）：位 0 左 / 位 1 右；设备不可用 ⇒ 写 0。
+    // 读鼠标按钮位图（CORE-INPUT-MOUSE-BUTTON）：位 0 左 / 位 1 右；输入可用标志为 0 ⇒ 不查询、写 0。
+    // ★ 平台报告的是**逻辑左 / 右键**（`mask` 的位 0 / 1），引擎按交换设置把它们归约到固定的两位。
+    std::int32_t bits = 0;
     std::int32_t mask = 0;
-    const bool available = mouse_button_source_ && mouse_button_source_(mask);
-    write_int(ops[0], available ? mask : 0);
+    if (input_available_ && mouse_button_source_ && mouse_button_source_(mask)) {
+        const bool left = (mask & 1) != 0;
+        const bool right = (mask & 2) != 0;
+        if (left) bits |= mouse_swap_ ? 2 : 1;
+        if (right) bits |= mouse_swap_ ? 1 : 2;
+    }
+    write_int(ops[0], bits);
+    return;
+}
+
+// ── 一次输入采样（`CORE-INPUT-WORD` 的「各来源的位号合成」/「输入锁存」） ──
+
+void Machine::add_slot_base_bit(std::uint32_t& word, std::int32_t slot) {
+    // 从**槽**出发：键槽映射的格值 = 该槽的**基位号**，最终输入位号 = 基位号 + 4。
+    if (slot < 0 || slot >= static_cast<std::int32_t>(array_d1383_.size())) {
+        report_error("input-slot-out-of-range");
+        return;
+    }
+    const std::int32_t base = array_d1383_[static_cast<std::size_t>(slot)];
+    if (base < 0 || base > 31) {
+        // 格里的值不做范围检查（`0x10b` 只检查写入值 ≤ 31，越界写是脚本侧的 UB）⇒ 显式诊断。
+        report_error("input-slot-base-bit-out-of-range");
+        return;
+    }
+    // ★ 位号 ≥ 32 的落点：写输入字是"1 左移位号"，目标机的移位**只取低 5 位** ⇒ 位 32 / 33 / 34 / 35
+    //   实际落在 0 / 1 / 2 / 3（`CORE-INPUT-WORD` 的「位号 ≥ 32 的落点」）。⛔ 不是"超出就丢弃"。
+    word |= 1u << ((base + 4) & 31);
+}
+
+std::uint32_t Machine::sample_joystick_bits() {
+    // 第一组手柄的**这一拍**结果：方向位 0..3 + 按钮位（槽序号 + 4）。
+    // ★ 组头的按钮数 ≤ 0 ⇒ **整组**不参与采样（方向位也一起不采）。
+    if (joy_button_count_ <= 0) return 0;
+    std::uint32_t bits = 0;
+    // ① 方向位 0..3（与键盘方向键**共用**这四位）：帽子四向可用且不居中 ⇒ 按**四个半平面**判据；
+    //    否则（居中 / 设备不报四向）⇒ 改由**摇杆轴**越过中位阈值给出。
+    int angle = -1;
+    if (joy_hat_four_way_ && joy_hat_source_) angle = joy_hat_source_();
+    if (joy_hat_four_way_ && angle >= 0) {
+        if (angle <= 8999 || angle >= 27001) bits |= 1u << 0;  // 上
+        if (angle >= 1 && angle <= 17999) bits |= 1u << 1;     // 右
+        if (angle >= 9001 && angle <= 26999) bits |= 1u << 2;  // 下
+        if (angle >= 18001) bits |= 1u << 3;                   // 左
+    } else if (joy_stick_source_) {
+        const auto stick = joy_stick_source_();
+        if (stick[1] < -joy_stick_threshold_) bits |= 1u << 0;  // 上（轴值负 = 上）
+        if (stick[0] > joy_stick_threshold_) bits |= 1u << 1;   // 右
+        if (stick[1] > joy_stick_threshold_) bits |= 1u << 2;   // 下
+        if (stick[0] < -joy_stick_threshold_) bits |= 1u << 3;  // 左
+    }
+    // ② 按钮：槽 j（0 ≤ j < **键总数**）→ 位（槽序号 + 4，移位的低 5 位）。
+    if (joy_button_source_) {
+        const auto buttons = joy_button_source_();
+        const std::int32_t limit = key_total_ < 0 ? 0 : (key_total_ > 31 ? 31 : key_total_);
+        for (std::int32_t j = 0; j < limit; ++j) {
+            const std::int32_t button = array_d551_[static_cast<std::size_t>(j)];
+            if (button < 0 || button >= 32) continue;  // 按钮编号越界 = UB ⇒ 显式跳过（不夹取）
+            if ((buttons & (1u << button)) != 0) bits |= 1u << ((j + 4) & 31);
+        }
+    }
+    return bits;
+}
+
+std::uint32_t Machine::sample_level_input() {
+    // **电平采样**（`0xff` 走它）。次序固定：键盘 → 鼠标左右键 → 第一组手柄（含方向位）→ 手势。
+    std::uint32_t word = 0;
+    if (input_available_) {
+        // ① 键盘：**遍历全部 256 个系统键码**，逐键查询一次按下状态；位号 = **格里的值**（⛔ 不加 4）。
+        if (key_code_source_) {
+            for (std::int32_t code = 0; code < static_cast<std::int32_t>(kSystemKeyCount); ++code) {
+                const std::int32_t bit = key_code_table_[static_cast<std::size_t>(code)];
+                if (bit < 0 || bit >= 32) continue;  // −1 = 该键码未映射
+                if (key_code_source_(code)) word |= 1u << bit;
+            }
+        }
+        // ② 鼠标左右键：固定用槽 0 / 1（交换决定哪个按钮用哪一槽），位号 = **格里的值 + 4**。
+        if (mouse_button_source_) {
+            std::int32_t mask = 0;
+            if (mouse_button_source_(mask)) {
+                if ((mask & 1) != 0) add_slot_base_bit(word, mouse_swap_ ? 1 : 0);
+                if ((mask & 2) != 0) add_slot_base_bit(word, mouse_swap_ ? 0 : 1);
+            }
+        }
+        // ③ 手势来源：8 格表与编号的写者都未取证（残差 `RES-INPUT-LATCH-GESTURE`）⇒ 本模型恒不并入。
+    }
+    // ④ 第一组手柄：**不看**输入可用标志，只看组头的按钮数（含方向位）。
+    word |= sample_joystick_bits();
+    // ⑤ 宿主注入的输入位（测试装置 / 脚本化输入；⛔ 产品路径不用它 —— 窗口路径走逐键查询）。
+    if (key_sampler_) word |= key_sampler_();
+    return word;
+}
+
+std::uint32_t Machine::sample_event_input() {
+    // **事件并入采样**（`0x101` 与主循环的输入处理走它）：并入两个锁存字、手柄的**按下沿**、
+    // 手势锁存与引擎级标志。★ 它不是"只是读一下"：并入的锁存位被清掉、手柄按下沿的状态字被前移。
+    std::uint32_t word = 0;
+    // ① 位号锁存字：整字 OR 后清 0。
+    word |= latch_bits_;
+    latch_bits_ = 0;
+    // ② 一次性吞并标记：一次采样之后检查鼠标左右键，只要发现左键或右键正按下就把标记写成 1。
+    if (mouse_button_source_) {
+        std::int32_t mask = 0;
+        if (mouse_button_source_(mask) && (mask & 3) != 0) mouse_swallow_ = true;
+    }
+    // ③ 槽锁存字：按组头的**槽数**逐槽并入，并把该位清掉；槽数以外的位原样保留。
+    for (std::int32_t j = 0; j < key_slot_count_ && j < 32; ++j) {
+        if ((latch_slots_ & (1u << j)) == 0) continue;
+        add_slot_base_bit(word, j);
+        latch_slots_ &= ~(1u << j);
+    }
+    // ④ 手柄的**按下沿**：对第一组再采一次样（含方向 / 帽子 / 按钮），与**每设备一格的上一次结果**
+    //    逐位比较，只在"上一拍没按、这一拍按下"时并入；状态字随之前移（这一拍没按的位自然清掉）。
+    //    ★ 它是**状态字**，不是"并入后整字清 0"的锁存字。
+    const std::uint32_t joy_bits = sample_joystick_bits();
+    word |= joy_bits & ~joy_prev_bits_;
+    joy_prev_bits_ = joy_bits;
+    // ⑤ 引擎级标志 D 非 0 ⇒ 输入字第 6 位置起（`CORE-OPS-MODE-BIT` 的 D：注入"取消消息跳过"这一路）。
+    if (mode_d_ != 0) word |= 1u << 6;
+    // ⑥ 手势锁存（整字 OR 后清 0）：8 格表与写者未取证（残差 `RES-INPUT-LATCH-GESTURE`）⇒ 本模型恒空。
+    // ⑦ 宿主注入的输入位（测试装置；同电平采样那一支）。
+    if (key_sampler_) word |= key_sampler_();
+    return word;
+}
+
+void Machine::push_key_down_message(std::int32_t system_key_code) {
+    // 引擎自己的窗口过程：某个系统键码的**按下**消息（按住产生的重复消息不算 —— 由调用方过滤）。
+    // 若该键码在键码表里有映射，把**对应的输入位**写进位号锁存字。
+    if (system_key_code < 0 || system_key_code >= static_cast<std::int32_t>(kSystemKeyCount)) return;
+    const std::int32_t bit = key_code_table_[static_cast<std::size_t>(system_key_code)];
+    if (bit < 0 || bit >= 32) return;  // 未映射的键码不写锁存
+    latch_bits_ |= 1u << bit;
+}
+
+void Machine::push_mouse_button_message(bool right, bool down) {
+    // 引擎自己的窗口过程：鼠标左右键消息。
+    // ① 一次性吞并标记非 0 ⇒ **这一条**消息被丢掉（锁存字不写）并把标记清 0；
+    // ② 否则按配置 `set:ClickOnUp` 选一条：为 0 用**按下**消息、非 0 用**抬起**消息；
+    // ③ 选中的那条把**槽 0 / 1** 写进槽锁存字（交换设置决定左 / 右各用哪一槽）。
+    if (mouse_swallow_) {
+        mouse_swallow_ = false;
+        return;
+    }
+    const bool selected = click_on_up_ == 0 ? down : !down;
+    if (!selected) return;
+    const std::int32_t slot = right ? (mouse_swap_ ? 0 : 1) : (mouse_swap_ ? 1 : 0);
+    latch_slots_ |= 1u << slot;
+}
+
+void Machine::op_101(const Instruction& instruction) {
+    (void)instruction;
+    // 采样输入并丢弃（CORE-OPS-WAIT-POLL-INPUT）：走**事件并入**路径采样一次，再清第 27 位 / 清字 / 写 A、B。
+    // ★ 这次采样**有副作用**：它消费了并入的事件（锁存字被清、手柄按下沿前移）⇒ 之后走同一路径的
+    //   采样看不到这些事件。⛔ 不许把它写成"只是读一下"。
+    input_word_ = sample_event_input();
+    state_flags_ &= ~(1u << 27);
+    input_word_ = 0;
+    input_a_ = 1;
+    input_b_ = 0;
+    return;
+}
+
+void Machine::op_1a7(const Instruction& instruction) {
+    (void)instruction;
+    // comment：带一个操作数但不读它
+    return;
+}
+
+void Machine::op_1a8(const Instruction& instruction) {
+    (void)instruction;
+    // dev_ukn：无操作数 no-op
+    return;
+}
+
+void Machine::op_ff(const Instruction& instruction) {
+    (void)instruction;
+    // 采样按键位图（CORE-INPUT-WORD）：次序固定 = 清字 → **电平采样** → 游标 ← 0 → 上限 ← 键总数。
+    // ★ 这次采样**不并入输入锁存**（并入只发生在「事件并入」路径上）；没有设备 ⇒ 输入字保持 0。
+    input_word_ = 0;
+    input_word_ = sample_level_input();
+    Frame& f = frame_mut();
+    f.key_cursor = 0;
+    // ★ 上限是**键总数在这一次采样时的快照**，与 `0x100` 的扫描上界（键总数本身）不是同一格。
+    f.key_limit = key_total_;
     return;
 }
 
@@ -111,41 +298,6 @@ void Machine::op_24e(const Instruction& instruction) {
 void Machine::op_21c(const Instruction& instruction) {
     (void)instruction;
     state_flags_ |= (1u << 10); return;  // 置等待位；放行由 step 的等待服务做
-}
-
-void Machine::op_101(const Instruction& instruction) {
-    (void)instruction;
-    // 采样输入并丢弃（CORE-OPS-WAIT-POLL-INPUT）：先请求一次平台采样，再清第 27 位 / 清字 / 写 A、B。
-    input_word_ = key_sampler_ ? key_sampler_() : 0;  // 采样结果是外部请求；随后被丢弃
-    state_flags_ &= ~(1u << 27);
-    input_word_ = 0;
-    input_a_ = 1;
-    input_b_ = 0;
-    return;
-}
-
-void Machine::op_1a7(const Instruction& instruction) {
-    (void)instruction;
-    // comment：带一个操作数但不读它
-    return;
-}
-
-void Machine::op_1a8(const Instruction& instruction) {
-    (void)instruction;
-    // dev_ukn：无操作数 no-op
-    return;
-}
-
-void Machine::op_ff(const Instruction& instruction) {
-    (void)instruction;
-    // 采样按键位图（CORE-INPUT-WORD）：次序固定 = 清字 → 平台采样 → 游标 ← 0 → 上限 ← 键总数。
-    input_word_ = 0;
-    if (key_sampler_) input_word_ = key_sampler_();  // 没有设备 ⇒ 保持 0（不是偷偷补值）
-    Frame& f = frame_mut();
-    f.key_cursor = 0;
-    // ★ 上限是**键总数在这一次采样时的快照**，与 `0x100` 的扫描上界（键总数本身）不是同一格。
-    f.key_limit = key_total_;
-    return;
 }
 
 void Machine::op_100(const Instruction& instruction) {
@@ -235,9 +387,9 @@ void Machine::op_12e(const Instruction& instruction) {
 
 void Machine::op_2fc(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 取一个触点（CORE-INPUT-TOUCH-POINT）：没有触点 ⇒ 只写结果 0，坐标/标志/编号**不写**。
+    // 取一个触点（CORE-INPUT-TOUCH-POINT）：输入可用标志为 0 / 没有触点 ⇒ 只写结果 0，坐标/标志/编号**不写**。
     TouchPoint event;
-    if (!touch_source_ || !touch_source_(event)) {
+    if (!input_available_ || !touch_source_ || !touch_source_(event)) {
         write_int(ops[0], 0);
         return;
     }

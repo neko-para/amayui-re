@@ -839,33 +839,39 @@ void Machine::op_80(const Instruction& instruction) {
 
 void Machine::op_70(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 设置列表项：组号 0 = 默认组；四对字段
-    auto group = read_int(ops[0]);
+    // 设置一个列表项（`ADV-TEXT-LAYER-RECT`）：读序 **5 → 4 → 3 → 2 → 1**（失败点不同）。
+    const auto a6 = read_int(ops[4]);  // 上 / 层记录 f10
+    const auto a5 = read_int(ops[3]);  // 左 / 层记录 f0c
+    const auto a4 = read_int(ops[2]);  // 高
+    const auto a3 = read_int(ops[1]);  // 宽
+    auto group = read_int(ops[0]);     // 层号（0 = 默认层）
     if (group == 0) group = default_group_;
     if (group < 0 || group >= 10) throw CoreError("list-group-out-of-range");
-    const auto a3 = read_int(ops[1]);
-    const auto a4 = read_int(ops[2]);
-    const auto a5 = read_int(ops[3]);
-    const auto a6 = read_int(ops[4]);
     auto& record = list_records_[static_cast<std::size_t>(group)];
     record.f0c = a5;
     record.f10 = a6;
     record.f14 = a3;
     record.f18 = a4;
+    // ★ 宽 / 高先写层记录，再**无条件**把同一对值写进「缩放后尺寸」两格；纹理画布路径随后把它们
+    //   覆写成**缩放后**的值（适配比 1.0 时数值相同）。
     record.f24 = a3;
     record.f28 = a4;
     record.f7c = a3;
     record.f80 = a4;
     record.registered = 1;
-    // 文本层矩形：按 w/h 建（或重建）离屏画布；逐字符绘制条目由 `0x6e` / `0x196` 在画字时排。
-    // 绘制键基数：脚本没给（0x213 没调过）时给一个宿主侧的默认基数 —— 本作 ADV 的消息层**不调**
-    // `0x213`，不给兜底就"只有窗框没有字"。★ 兜底要同时把 `key_base_fallback` 置起：绘制 / 擦除
-    // 只看"f68 是否可用"（`key_base_ready()`），⛔ 不是"脚本是否写过"。
-    if (!record.key_base_ready()) {
-        record.f68 = kTextLayerFallbackBase + group * 1000;
-        record.key_base_fallback = true;
+    // ★ 建 / 重建纹理画布**只在场景绘制模式 = 1** 时发生（模式 ≠ 1 ⇒ 旧式精灵表面，只共用编号；
+    //   本版不规定旧路径的正面行为 ⇒ 这里不建、不改纹理槽）。
+    if (draw_mode_ == 1) {
+        // 文本层矩形：按 w/h 建（或重建）离屏画布；逐字符绘制条目由 `0x6e` / `0x196` 在画字时排。
+        // 绘制键基数：脚本没给（0x213 没调过）时给一个宿主侧的默认基数 —— 本作 ADV 的消息层**不调**
+        // `0x213`，不给兜底就"只有窗框没有字"。★ 兜底要同时把 `key_base_fallback` 置起：绘制 / 擦除
+        // 只看"f68 是否可用"（`key_base_ready()`），⛔ 不是"脚本是否写过"。
+        if (!record.key_base_ready()) {
+            record.f68 = kTextLayerFallbackBase + group * 1000;
+            record.key_base_fallback = true;
+        }
+        ensure_text_layer_texture(group);
     }
-    ensure_text_layer_texture(group);
     return;
 }
 
