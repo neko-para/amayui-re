@@ -862,9 +862,9 @@ export function derive(spec, { coverage = null, repoRoot = REPO_ROOT } = {}) {
     functions += e.binding?.functions?.length ?? 0;
     storage += e.binding?.storage?.length ?? 0;
     evidence += e.binding?.evidence?.length ?? 0;
-    for (const r of e.residual ?? []) residualKinds[r.kind] = (residualKinds[r.kind] ?? 0) + 1;
+    for (const r of e.residual ?? []) if (r.kind !== 'discarded') residualKinds[r.kind] = (residualKinds[r.kind] ?? 0) + 1;
   }
-  for (const g of spec.gaps ?? []) for (const r of g.residual ?? []) residualKinds[r.kind] = (residualKinds[r.kind] ?? 0) + 1;
+  for (const g of spec.gaps ?? []) for (const r of g.residual ?? []) if (r.kind !== 'discarded') residualKinds[r.kind] = (residualKinds[r.kind] ?? 0) + 1;
   // ★ gaps 的 `kind=unhandled` 必须计入残差：否则"未成篇数百条"会读成 unhandled=0（假象）。
   const opcodes = opcodeAccounting(spec, { repoRoot });
   const chapters = Object.fromEntries(CHAPTER_STATUSES.map((s) => [s, 0]));
@@ -930,7 +930,7 @@ export function reportText(spec, { file = SPEC_FILE, derived = derive(spec), wea
   }
   L.push('');
   L.push(`绑定      站点 ${d.totals.sites} · 函数 ${d.totals.functions} · storage 指针 ${d.totals.storage} · 证据 ${d.totals.evidence}`);
-  L.push(`残差      ${RESIDUAL_KINDS.map((k) => `${k}=${d.residualKinds[k]}`).join(' · ')}`);
+  L.push(`残差      ${['unknown', 'unhandled', 'omitted'].map((k) => `${k}=${d.residualKinds[k]}`).join(' · ')}（\`discarded\` 明确舍弃，不入统计；记录见 \`audit.json\`）`);
   if (weak.length) L.push(`弱证据    ${weak.length} 条（proposed 台账记录，只支撑 draft 条目）`);
   const unhandledChapters = [
     ...spec.chapters.filter((c) => c.status !== 'bootstrap'),
@@ -1089,6 +1089,7 @@ export function describe() {
     operations: [
       ['validate', '跑全部不变量（红 = 退出码 1；条数以 describe 为准）'],
       ['report', '审计账：effect 覆盖 / 内部省略 / 残差 / **未登记** + 章节与绑定计数（不给百分数）'],
+      ['residuals', '★ 残差地图：按子系统通道 × 类别摊平（A=正文弃权 / B=消费者缺失 / C=知识缺口；`discarded` 明确舍弃**不计入**）；`--channel` / `--class` 过滤，`--json` 给机器读'],
       ['chapters', '整份 spec 的章节骨架 + 每章规则与残差'],
       ['show', '一条规则的规范正文 + 证据解析结果（内部视图）'],
       ['at', '反向查询：某个 EA / 函数出现在哪些规则里'],
@@ -1102,7 +1103,7 @@ export function describe() {
       'bindings / audit 不进入分发产物；它们是复核材料，不是规范的一部分。',
       '试点块是声明的，不是穷举的；effect 由语料机械枚举，枚举器有边界（见 x86-effects 文件头）。',
       '报告不证明合同正确或完整；只证明"候选有没有被点名 / 解释"。',
-      'discarded 与 unknown 分列；弱证据（proposed）只支撑 draft。',
+      'discarded 与 unknown 分列（`discarded` = 明确舍弃，**不进残差地图与任何残差统计**；记录仍在 audit.json）；弱证据（proposed）只支撑 draft。',
       '没有覆盖率百分数：范围闭合 ≠ 解释正确。',
     ],
   };
@@ -1199,6 +1200,9 @@ export function checkCorpusBindings(spec, { repoRoot = REPO_ROOT } = {}) {
  *   **B = 残差说「消费者 / 只记账 / 观察格」** —— 功能实现了一半，请求发出去没人用。
  *   **C = 其余**（纯知识缺口：未取证；不会掩盖缺陷，只是暂时判不了对错）。
  *
+ * ★ **`kind: discarded`（明确舍弃）不计入任何一档**：它是"读完了、决定不建模"（带 reason / range / impact），
+ *   不是缺口；混进 C 会让"做了明确舍弃"反而抬高缺口数字。记录仍在 `audit.json`，`spec validate` 照旧核凭据。
+ *
  * ★ **正文弃权 ≠ 残差**：前者是"引擎没定义"（读完汇编可能仍然成立），后者是"我们还没读"（读完就没了）。
  *
  * ⚠ 两轴都是**筛查器**，不是判决书：A 只说明"这条要有人来定"，不说明"这条一定掩盖了缺陷"。
@@ -1262,6 +1266,10 @@ function chapterFiles(model) {
 /**
  * 摊平残差 → 行（`{channel, chapter, rule, id, kind, cls, what, next}`）。
  * `channels` 可注入（测试用），缺省 `RESIDUAL_CHANNELS`。未登记的章节 → `channel: 'unclassified'`。
+ *
+ * ★ **`discarded`（明确舍弃）不进地图**：它已经有 `reason` / `range` / `impact`，
+ *   是"读完了、决定不建模"，不是"判不了"。把它混进 C 会让"做了明确舍弃"反而**抬高**缺口数字
+ *   ⇒ 这里直接跳过（记录仍留在 `data/spec/audit.json`，`spec validate` 照旧核它的凭据）。
  */
 export function residualInventory(model, { channels = RESIDUAL_CHANNELS } = {}) {
   const fileById = chapterFiles(model);
@@ -1270,6 +1278,7 @@ export function residualInventory(model, { channels = RESIDUAL_CHANNELS } = {}) 
     const file = fileById.get(e.chapter) ?? '';
     const abstains = ruleAbstains(e);
     for (const r of e.residual ?? []) {
+      if (r.kind === 'discarded') continue;
       rows.push({
         channel: channels[file] ?? 'unclassified',
         chapter: file || String(e.chapter ?? ''),

@@ -2,12 +2,14 @@
 /**
  * tools/test/spec-residuals.test.mjs —— `spec residuals`（残差地图）的契约与判别力
  *
- * 守四件事：
+ * 守五件事：
  * ① **两轴都闭合**：每条残差都落在**已登记通道**上（新章不登记 ⇒ 红），类别只会是 A/B/C。
  * ② **A 由规则正文决定**（弃权是**正文**的一句「未规定」，不是残差措辞）——造两条样本：
  *    正文弃权 + 残差措辞中性 ⇒ A；正文不弃权 + 残差中性 ⇒ C。
  * ③ **B 独立于 A**：`unconsumed` 标志只看残差措辞，且与类别正交（弃权规则下也能有"有写无读"）。
  * ④ **矩阵与明细同源**：各格之和 == 行数 == 类别计数之和；规则级统计只数规则、不数残差。
+ * ⑤ **`discarded` 不进地图**：明确舍弃（带 reason/range/impact）不是缺口，不许被算成 C
+ *    （否则"做完舍弃"反而抬高缺口数字）。
  *
  * 运行：`pnpm test`（纯文本 / 纯函数）
  */
@@ -94,4 +96,39 @@ test('★ 矩阵与明细同源；规则级统计只数规则', () => {
   const abstain = [...rules.values()].reduce((a, x) => a + x.abstainRules, 0);
   assert.ok(abstain > 0 && abstain < (model.entries ?? []).length, '弃权规则数应在 (0, 全部) 之间');
   assert.ok(Object.keys(RESIDUAL_CHANNELS).length >= 20, '通道表不该被删空');
+});
+
+test('★ `discarded` 不进地图（明确舍弃不是缺口，不许被算进 C）', () => {
+  const fake = {
+    chapters: [{ id: 'c', file: 'chapters/60-ops-text.md' }],
+    entries: [
+      {
+        id: 'R-PIN',
+        chapter: 'c',
+        title: 'x',
+        text: '…这个值唯一确定。',
+        residual: [
+          {
+            id: 'RES-DISCARD',
+            kind: 'discarded',
+            what: '一处越界后果，已证明不可观察',
+            reason: 'S3a 四条件成立',
+            range: ['0x401000'],
+            impact: '不影响可观察行为',
+            next: '无需下一步',
+          },
+          { id: 'RES-KEEP', kind: 'unknown', what: '还没读的细节', next: '读 0x401010 的读者' },
+        ],
+      },
+    ],
+  };
+  const rows = residualInventory(fake, { channels: { '60-ops-text': 'text' } });
+  assert.deepEqual(rows.map((r) => r.id), ['RES-KEEP'], 'discarded 必须被排除出地图');
+  assert.equal(rows.some((r) => r.cls === 'C' && r.kind === 'discarded'), false);
+  assert.equal(rows.length, 1);
+  const { counts } = residualMatrix(rows);
+  assert.equal(counts.A + counts.B + counts.C, rows.length);
+
+  // 真模型里也不许有 discarded 行混进来（地图只由 inventory 供数）
+  assert.equal(residualInventory(model).some((r) => r.kind === 'discarded'), false);
 });

@@ -1491,6 +1491,13 @@ const MUTATIONS = [
   },
   {
     file: 'tools/lib/spec.mjs',
+    from: "      if (r.kind === 'discarded') continue;",
+    to: '      // 变异：不排除 discarded（明确舍弃被算成 C 缺口）',
+    guard: 'tools/test/spec-residuals.test.mjs',
+    what: '★ `discarded` 不再排除出地图 ⇒ "读完了、决定不建模"被算成知识缺口，缺口数字随舍弃动作上涨',
+  },
+  {
+    file: 'tools/lib/spec.mjs',
     from: '  if (!member) {',
     to: '  if (false) { // 变异：成员起点不再校验',
     guard: 'tools/test/spec.test.mjs',

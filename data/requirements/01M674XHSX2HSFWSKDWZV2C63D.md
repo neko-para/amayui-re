@@ -62,7 +62,7 @@
 
 ## 每批收口判据
 
-1. `--channel <该批>` 的 A 逐条有归宿：收紧成合同 / `discarded`（带理由）；B 逐条补消费者或 `discarded`。⛔ 不为清零删证据。
+1. `--channel <该批>` 的 A 逐条有归宿：收紧成合同 / `discarded`（带理由）；B 逐条补消费者或 `discarded`。⛔ 不为清零删证据。★ `discarded` 的残差**已从残差地图与统计中排除**（"读完了、决定不建模"不是缺口），所以收口后 C 只含 `unknown` / `unhandled` / `omitted`。
 2. `pnpm tools spec validate` 全绿；正文 falsifier 能推翻该条。
 3. 改到实现边界 ⇒ 补**会红**的守卫 + `mutate-check` 一条（只落 `apps/emulator-cxx`）。
 4. 收口时追加一行「批 N 完成 · 裁决 n 条 · discarded n 条 · 新增合同 n 条」。
