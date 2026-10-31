@@ -102,10 +102,12 @@ void Machine::op_143(const Instruction& instruction) {
     write_length(1);
     // 2. 队列泵占用标记 ← 1：借用泵自己"一趟正在跑"用的**同一个标记**，不是另一个格。
     pump_busy_ = true;
-    // 3. 对 255 格登记表逐格检查（格号 1..255）：非 0 的格各投一条命令进待处理命令队列，
-    //    投递值 = **格号 << 24**（32 位有符号）。每次投递自带的"顺手泵一次"尾巴被上面的标记挡下。
-    for (std::int32_t index = 1; index < static_cast<std::int32_t>(kEventTableSize); ++index) {
-        if (event_table_[static_cast<std::size_t>(index)] == 0) continue;
+    // 3. 对**文件库的 256 格槽位表**逐槽检查（槽号 1..255）：非 0 的槽各投一条命令进待处理命令队列，
+    //    投递值 = **槽号 << 24**（32 位有符号）。每次投递自带的"顺手泵一次"尾巴被上面的标记挡下。
+    //    ★ 这张表不是本条私有的：文件库装载一个索引对象时按**它自带的区号**登记（`0x455948`），
+    //    析构时逐格清（`0x454cd0`）；槽 0（基础索引）本条不检查。
+    for (std::size_t index = 1; index < file_library_slots_.size(); ++index) {
+        if (file_library_slots_[index] == 0) continue;
         // 格号 ≥ 128 ⇒ 最高位已置 ⇒ 该值按**负命令**解释（`60-ops-scalar.md:181`）；表上界仍是 255。
         const auto command = static_cast<std::int32_t>(static_cast<std::uint32_t>(index) << 24);
         enqueue_command(command);
@@ -223,6 +225,7 @@ void Machine::op_09(const Instruction& instruction) {
     }
     if (install_ == nullptr) throw CoreError("exit-script-loader-missing");
     const Bytes script = read_install_file(*install_, 0u);
+    register_loaded_file(0u);  // 文件库装载登记（按区号；`0x143` 的投递源；`0x455948`）
     // 重装进 0 号槽：ip ← 0、长度槽 ← 0 ⇒ 本迭代不再推进（从新根脚本的 dword 0 继续）。
     load_root(script, 0u);
     return;

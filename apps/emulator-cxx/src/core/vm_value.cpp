@@ -74,6 +74,8 @@ void Machine::clear_global_pool_bank() {
                                  it->first < ref_bank_base + 0x18000000u;
         it = in_ref_bank ? ref_slots_.erase(it) : std::next(it);
     }
+    // 字符串族的**裸字叠层**跟着本 bank 的字符串池一起清（同一份"释放"口径；见 `store_raw`）。
+    clear_string_record_words(ref_bank_base + 0x08000000u, 0x04000000u);
     return;
 }
 
@@ -147,29 +149,120 @@ void Machine::write_pointer(const Operand& operand, std::uint32_t address) {
 std::uint32_t Machine::read_raw(std::uint32_t address) {
     std::uint32_t tag = 0;
     std::uint32_t index = 0;
-    if (!resolve_address(address, tag, index)) throw CoreError("read-raw-unmapped-address");
-    switch (tag) {
-        case 3: { const auto it = global_int_.find(index); return it == global_int_.end() ? encode_int(0) : it->second; }
-        case 9: { const auto it = frame_mut().local_int.find(index); return it == frame_mut().local_int.end() ? encode_int(0) : it->second; }
-        case 4: { const auto it = global_float_.find(index); return it == global_float_.end() ? 0u : std::bit_cast<std::uint32_t>(it->second); }
-        case 10: { const auto it = frame_mut().local_float.find(index); return it == frame_mut().local_float.end() ? 0u : std::bit_cast<std::uint32_t>(it->second); }
-        case 6: case 7: case 12: case 13: { const auto it = ref_slots_.find(address); return it == ref_slots_.end() ? 0u : it->second; }
-        default: throw CoreError("read-raw-unsupported-tag");
+    if (resolve_address(address, tag, index)) {
+        switch (tag) {
+            case 3: { const auto it = global_int_.find(index); return it == global_int_.end() ? encode_int(0) : it->second; }
+            case 9: { const auto it = frame_mut().local_int.find(index); return it == frame_mut().local_int.end() ? encode_int(0) : it->second; }
+            case 4: { const auto it = global_float_.find(index); return it == global_float_.end() ? 0u : std::bit_cast<std::uint32_t>(it->second); }
+            case 10: { const auto it = frame_mut().local_float.find(index); return it == frame_mut().local_float.end() ? 0u : std::bit_cast<std::uint32_t>(it->second); }
+            case 6: case 7: case 12: case 13: { const auto it = ref_slots_.find(address); return it == ref_slots_.end() ? 0u : it->second; }
+            case 5: case 11: {
+                const auto it = string_record_words_.find(address);
+                if (it == string_record_words_.end()) {
+                    // 记录内部布局属机器本体（40-pools「字符串记录」）：没写过的字没有可断言的取值
+                    // ⇒ **响亮失败**，⛔ 不伪造 0。
+                    throw CoreError("read-raw-string-record-unwritten:" + std::to_string(address));
+                }
+                return it->second;
+            }
+            default: throw CoreError("read-raw-unsupported-tag");
+        }
     }
+    // 记录内偏移（0x2d8 / 0x6c / 0x64 / 0x12f 的 4 字节步进会落到 `base + 4i`，不必 28 对齐）。
+    if (is_string_record_word(address)) {
+        const auto it = string_record_words_.find(address);
+        if (it == string_record_words_.end()) {
+            throw CoreError("read-raw-string-record-unwritten:" + std::to_string(address));
+        }
+        return it->second;
+    }
+    throw CoreError("read-raw-unmapped-address");
 }
 
 void Machine::store_raw(std::uint32_t address, std::uint32_t bits) {
     std::uint32_t tag = 0;
     std::uint32_t index = 0;
-    if (!resolve_address(address, tag, index)) throw CoreError("store-raw-unmapped-address");
-    switch (tag) {
-        case 3: global_int_[index] = bits; note_global_int_write(index); return;
-        case 9: frame_mut().local_int[index] = bits; return;
-        case 4: global_float_[index] = std::bit_cast<float>(bits); return;
-        case 10: frame_mut().local_float[index] = std::bit_cast<float>(bits); return;
-        case 6: case 7: case 12: case 13: ref_slots_[address] = bits; return;
-        default: throw CoreError("store-raw-unsupported-tag");
+    if (resolve_address(address, tag, index)) {
+        switch (tag) {
+            case 3: global_int_[index] = bits; note_global_int_write(index); return;
+            case 9: frame_mut().local_int[index] = bits; return;
+            case 4: global_float_[index] = std::bit_cast<float>(bits); return;
+            case 10: frame_mut().local_float[index] = std::bit_cast<float>(bits); return;
+            case 6: case 7: case 12: case 13: ref_slots_[address] = bits; return;
+            // 字符串族：写入按位模式直接写（`0x6c` / `0x2d8` / `0x64` 的 4 字节步进）——
+            // 记录内部字段布局属机器本体 ⇒ 只登记这 4 字节字落在哪个地址（见 `read_raw`）。
+            case 5: case 11: string_record_words_[address] = bits; return;
+            default: throw CoreError("store-raw-unsupported-tag");
+        }
     }
+    if (is_string_record_word(address)) {
+        string_record_words_[address] = bits;
+        return;
+    }
+    throw CoreError("store-raw-unmapped-address");
+}
+
+bool Machine::is_string_record_word(std::uint32_t address) const {
+    // 记录步长 28 字节、是 4 的倍数 ⇒ 池窗口内每个 4 字节对齐的地址都正好落在某条记录的
+    // 偏移 0 / 4 / … / 24 上（记录内部布局不在本版，所以这里只判"落在字符串池里"）。
+    if ((address & 3u) != 0) return false;
+    for (std::uint32_t bank = 0; bank <= 1; ++bank) {
+        if (bank == 1 && !memflip_available_) continue;  // 与 `resolve_address` 同口径：备组未登记 ⇒ 不解析
+        const std::uint32_t base = pool_base(5, bank);
+        if (address >= base && address < base + 0x04000000u) return true;
+    }
+    const std::uint32_t local_base = pool_base(11);
+    return address >= local_base && address < local_base + 0x00100000u;
+}
+
+void Machine::clear_string_record_words(std::uint32_t base, std::uint32_t span) {
+    for (auto it = string_record_words_.begin(); it != string_record_words_.end();) {
+        const bool inside = it->first >= base && it->first < base + span;
+        it = inside ? string_record_words_.erase(it) : std::next(it);
+    }
+}
+
+bool Machine::pool_window_of(std::uint32_t address, std::uint32_t& base, std::uint32_t& span) const {
+    // 六个全局族：每组 0x04000000（两组 bank）；六个局部族：每族 0x00100000。
+    // 元素宽度都是 4 的倍数 ⇒ 窗口内 4 字节对齐的地址都是落在某个元素上的裸字地址。
+    if ((address & 3u) != 0) return false;
+    for (std::uint32_t candidate = 3; candidate <= 8; ++candidate) {
+        for (std::uint32_t bank = 0; bank <= 1; ++bank) {
+            if (bank == 1 && !memflip_available_) continue;  // 与 `resolve_address` 同口径
+            const std::uint32_t candidate_base = pool_base(candidate, bank);
+            if (address >= candidate_base && address < candidate_base + 0x04000000u) {
+                base = candidate_base;
+                span = 0x04000000u;
+                return true;
+            }
+        }
+    }
+    for (std::uint32_t candidate = 9; candidate <= 14; ++candidate) {
+        const std::uint32_t candidate_base = pool_base(candidate);
+        if (address >= candidate_base && address < candidate_base + 0x00100000u) {
+            base = candidate_base;
+            span = 0x00100000u;
+            return true;
+        }
+    }
+    return false;
+}
+
+void Machine::check_array_write_range(std::uint32_t target, std::uint32_t count) const {
+    if (count == 0) return;  // 一格都不写 ⇒ 没有落点，也谈不上越界
+    std::uint32_t base = 0;
+    std::uint32_t span = 0;
+    if (!pool_window_of(target, base, span)) {
+        throw CoreError("array-write-unmapped-target:" + std::to_string(target));
+    }
+    // 用 64 位算末格：count 很大时 32 位加法会回绕，那会把"越界"误判成"在界内"。
+    const std::uint64_t end = static_cast<std::uint64_t>(target) +
+                              4ull * static_cast<std::uint64_t>(count - 1);
+    if (end >= static_cast<std::uint64_t>(base) + static_cast<std::uint64_t>(span)) {
+        throw CoreError("array-write-past-pool:target=" + std::to_string(target) +
+                        ":count=" + std::to_string(count));
+    }
+    return;
 }
 
 std::int32_t Machine::read_int_at(std::uint32_t address) {
@@ -421,6 +514,49 @@ void Machine::write_text(const Operand& operand, std::string value) {
         throw CoreError("write-text-unsupported-pool-tag:" + std::to_string(tag));
     }
     throw CoreError("write-text-unsupported-tag:" + std::to_string(operand.type));
+}
+
+// ── 错误通道（`60-ops-numeric` 的「错误通道」）──
+// 引擎为一次触发发**一个**平台写请求：文本 + 它的长度。两个抑制条件都在引擎侧判定：
+//   ① 输出句柄无效 ⇒ 整条被丢弃（不写、不抛、不中止）；
+//   ② 宿主装了过滤器且过滤器返回非 0 ⇒ 同样丢弃。
+// ★ 诊断本身**无条件**保留（`errors_` 只给测试 / 诊断读）；抑制只影响那次平台写请求 ⇒
+//   用例可以同时断言"请求没发"与"诊断还在"。
+// ★ 一次触发 = 一次调用 ⇒ 本函数是**唯一**拼请求的地方：⛔ 不要在 50+ 个 handler 里各拼一次。
+void Machine::report_error(std::string text) {
+    // 先判定抑制、再发请求（用局部 `text`：回调里若再触发诊断，`errors_` 不会被引用失效）。
+    if (error_handle_valid_ && error_writer_ && !(error_filter_ && error_filter_() != 0)) {
+        ++error_write_requests_;
+        // 文本 + 它的长度：长度取**字节数**；文本里的 CRLF 已在各 handler 里逐字给出。
+        error_writer_(text, text.size());
+    }
+    // 诊断**无条件**保留（抑制只影响平台写请求）。
+    errors_.push_back(std::move(text));
+}
+
+// ── 输出对象（`45-objects`「对象前缀：类行为表与输出对象」）──
+// ★ 三项操作都**作用于那个进程级静态对象**、不改变调用对象自己的状态；本条只落外部效果的组成：
+//   追加 = 文本原样；按位置追加 = `(<脚本名>：<行号>行目) ` 前缀 + 文本；报告 = `\r\n致命的エラー[`
+//   + 文本 + `]\r\n`，随后把文本交给根对象的错误处理。
+// ★ 与**错误通道**（`report_error`：场景错误缓冲 + 一次平台写请求）是两路，⛔ 不许合并。
+void Machine::output_append(const std::string& text) {
+    if (output_object_io_.log) output_object_io_.log(text);
+}
+
+void Machine::output_append_with_position(const std::string& script_name, std::int32_t line,
+                                          const std::string& text) {
+    // 前缀逐字：`(` + 脚本名 + `：`(U+FF1A) + 行号 + `行目` + `)` + 一个半角空格。
+    // ★ 脚本名 / 行号的来源未取证（残差 `RES-OBJ-LOG-PREFIX`）⇒ 由调用方给，⛔ 这里不去查"当前脚本位置"。
+    std::string composed = "(" + script_name + "：" + std::to_string(line) + "行目) " + text;
+    output_append(composed);
+}
+
+void Machine::output_report(const std::string& text) {
+    ++output_reports_;
+    output_append("\r\n致命的エラー[" + text + "]\r\n");
+    // 基类操作只用到「窗口句柄 + 文本」那个错误处理入口（`45-objects` 的明文）；
+    // 「两个整数 + 文本」的是行为表里的另一个报告入口，本模型只留接缝、基类不调。
+    if (output_object_io_.root_error_window) output_object_io_.root_error_window(text);
 }
 
 }  // namespace core

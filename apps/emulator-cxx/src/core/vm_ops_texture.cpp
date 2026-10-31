@@ -410,6 +410,7 @@ void Machine::op_1f9(const Instruction& instruction) {
     (void)read_int(ops[1]);
     if (install_ == nullptr) throw CoreError("texture-loader-missing");
     const core::Bytes bytes = core::read_install_file(*install_, static_cast<std::uint32_t>(file));
+    register_loaded_file(static_cast<std::uint32_t>(file));  // 文件库装载登记（按区号；`0x143` 的投递源；`0x455948`）
     const core::DecodedAgf image = core::decode_agf(bytes);
     // ★ 这是「换纹理」：**记录**整条替换、槽对象换成新像素（旧的颜色键 / 空白标记都不留）。
     TextureEntry entry;

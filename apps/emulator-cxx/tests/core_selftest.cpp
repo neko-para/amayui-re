@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <tuple>
 #include <vector>
 namespace {
 void put_u32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
@@ -456,16 +457,20 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
         return false;
     }
     core::Machine mode_c(0x12345678u, table);
-    mode_c.seed_mode_cells(1, 0, 0);
-    mode_c.load_root(make_mode_script());
-    if (!mode_c.step() || mode_c.mode_d() != 1 || mode_c.mode_g() != 1 ||
+    // C 由 `0x88` 的产品路径写（⛔ 不再播种 C）：0x88(1) ⇒ C/D=1；随后 0x19c 必须走 C 支。
+    auto mode_c_script = make_script_with_body();
+    emit_instruction(mode_c_script, 0x88, {{0, 1}});
+    emit_instruction(mode_c_script, 0x19C, {});
+    emit_instruction(mode_c_script, 2, {});
+    mode_c.load_root(mode_c_script);
+    if (!mode_c.step() || !mode_c.step() || mode_c.mode_d() != 1 || mode_c.mode_g() != 1 ||
         (mode_c.state_flags() & (1u << 27)) == 0) {
         std::fprintf(stderr, "0x19c C branch mismatch d=%d g=%d\n", mode_c.mode_d(),
                      mode_c.mode_g());
         return false;
     }
     core::Machine mode_e(0x12345678u, table);
-    mode_e.seed_mode_cells(0, 1, 0);
+    mode_e.seed_mode_cells(1, 0);
     mode_e.load_root(make_mode_script());
     if (!mode_e.step() || mode_e.mode_d() != 0 || mode_e.mode_g() != 1 ||
         (mode_e.state_flags() & (1u << 27)) == 0) {
@@ -473,7 +478,7 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
         return false;
     }
     core::Machine mode_f(0x12345678u, table);
-    mode_f.seed_mode_cells(0, 0, 1);
+    mode_f.seed_mode_cells(0, 1);
     mode_f.load_root(make_mode_script());
     if (!mode_f.step() || mode_f.mode_a() != 1 || mode_f.mode_b() != 0 ||
         mode_f.mode_g() != 0 || (mode_f.state_flags() & (1u << 27)) != 0) {
@@ -546,17 +551,17 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1ce zero-branch was not a no-op\n");
         return false;
     }
-    // 门字非 0、且挡门的位在这个模型里**没有服务体**（这里 = 第 27 位，`0x19c` 的置位支）⇒ 该位按
-    // `CORE-VM-STATE` 位序表第 16 项的服务后 = **交回迭代头**：（「未建模的服务体一律按交回迭代头」
-    // 是保守选择）⇒ 本迭代**不派发、也不停死**（⛔ 旧模型把这种情形判成 `GateStalled`）。
+    // 门字非 0、第 27 位由产品路径 `0x88(1) ⇒ 0x19c` 置起 ⇒ 该位有服务体（一次消息处理，服务后 =
+    // **交回迭代头**）⇒ 本迭代**不派发、也不停死**（⛔ 旧模型把这种情形判成 `GateStalled`）。
     auto stall_script = make_script_with_body();
-    emit_instruction(stall_script, 0x19C, {});
+    emit_instruction(stall_script, 0x88, {{0, 1}});   // C/D ← 1（C 的产品写者）
+    emit_instruction(stall_script, 0x19C, {});        // C 支 ⇒ 置第 27 位
     emit_instruction(stall_script, 0x2F7, {{0, 0}});  // 位 27 不交回时才轮得到它
     emit_instruction(stall_script, 2, {});
     core::Machine stall_machine(0x12345678u, table);
-    stall_machine.seed_mode_cells(1, 0, 0);
     stall_machine.load_root(stall_script);
-    if (!stall_machine.step() || (stall_machine.state_flags() & (1u << 27)) == 0) {
+    if (!stall_machine.step() || !stall_machine.step() ||
+        (stall_machine.state_flags() & (1u << 27)) == 0) {
         std::fprintf(stderr, "gate fixture did not set bit 27\n");
         return false;
     }
@@ -575,6 +580,212 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
     }
     return true;
 }
+// ── 成对写（0x88）与模式族 C/D/E/F/G 的身份：CORE-OPS-SCALAR-PAIR-88 / CORE-OPS-MODE-BIT /
+//    CORE-OPS-STATUS-CELL-READ（第 27 位 / C / D / E / G 必须是产品可达的同一组格） ──
+bool check_pair_88_mode_cells(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "pair-88: %s\n", what);
+        return false;
+    };
+    // ① 0x88(1)：同一个值写 C / D，G ← 1；非 0 支**不碰**第 27 位。0x19a 原样读 C（= 格 X）。
+    auto script = make_script_with_body();
+    emit_instruction(script, 0x88, {{0, 1}});
+    emit_instruction(script, 0x1C7, {{9, 0}});   // 位 27 初值（应为 0）
+    emit_instruction(script, 0x19A, {{9, 1}});   // C 的原值
+    emit_instruction(script, 0x19C, {});          // C 非 0 ⇒ D←1、置第 27 位、G←1
+    emit_instruction(script, 2, {});
+    core::Machine machine(0x12345678u, table);
+    machine.load_root(script);
+    for (int i = 0; i < 3; ++i) {
+        if (!machine.step()) return fail("0x88 / 0x1c7 / 0x19a 停机");
+    }
+    if (machine.mode_c() != 1 || machine.mode_d() != 1) {
+        return fail("0x88(1) 没有把同一个值写进 C 与 D");
+    }
+    if (machine.mode_g() != 1) return fail("0x88(1) 没有把 G 写成常量 1");
+    if ((machine.state_flags() & (1u << 27)) != 0) return fail("0x88 的非 0 支碰了第 27 位");
+    if (machine.read_int(core::Operand{9, 0}) != 0) return fail("0x1c7 读到的初值不是 0");
+    if (machine.read_int(core::Operand{9, 1}) != 1) return fail("0x19a 读到的 C 不是 0x88 写的值");
+    // ② 0x19c 必须走「0x88 写出来的 C」那一支（C 支置 D、置第 27 位、G ← 1）。
+    if (!machine.step()) return fail("0x19c 停机");
+    if (machine.mode_d() != 1 || machine.mode_g() != 1 ||
+        (machine.state_flags() & (1u << 27)) == 0) {
+        return fail("0x19c 没有走 0x88 写出来的 C 支（D / G / 第 27 位）");
+    }
+    // ③ 第 27 位置起后 0x1c7 读回 1；再跑 0x88(1) 不得清位（只有为 0 支清位）。
+    machine.dispatch_for_test(core::Instruction{0, 0x1C7, {core::Operand{9, 2}}});
+    if (machine.read_int(core::Operand{9, 2}) != 1) return fail("0x1c7 没把置起的第 27 位读成 1");
+    machine.dispatch_for_test(core::Instruction{0, 0x88, {core::Operand{0, 1}}});
+    if ((machine.state_flags() & (1u << 27)) == 0) {
+        return fail("0x88(1) 把已置的第 27 位清掉了（只有为 0 支才清）");
+    }
+    if (machine.mode_c() != 1 || machine.mode_d() != 1) {
+        return fail("0x88(1) 第二次没有写 C / D");
+    }
+    // ④ 0x88(0)：C / D ← 0、清第 27 位；G 不动（仍 1）。
+    machine.dispatch_for_test(core::Instruction{0, 0x88, {core::Operand{0, 0}}});
+    if ((machine.state_flags() & (1u << 27)) != 0) return fail("0x88(0) 没有清第 27 位");
+    if (machine.mode_c() != 0 || machine.mode_d() != 0) return fail("0x88(0) 没有把 C / D 写成 0");
+    if (machine.mode_g() != 1) return fail("0x88(0) 不该清 G");
+    // ⑤ E 就是 0x1cc 读的状态格（与 0x19c 的第二个判据同一格）；E 支不碰 D。
+    machine.seed_mode_cells(1, 0);
+    machine.dispatch_for_test(core::Instruction{0, 0x1CC, {core::Operand{9, 3}}});
+    if (machine.read_int(core::Operand{9, 3}) != 1) {
+        return fail("0x1cc 读的不是 0x19c 用的 E 格");
+    }
+    machine.dispatch_for_test(core::Instruction{0, 0x19C, {}});
+    if ((machine.state_flags() & (1u << 27)) == 0) return fail("0x19c 的 E 支没有置第 27 位");
+    if (machine.mode_d() != 0) return fail("0x19c 的 E 支碰了 D（spec：E 支不动 D）");
+    return true;
+}
+
+// ── 第 27 位服务体（CORE-VM-GATE / CORE-VM-STATE 位序表第 16 行）：
+//    置起 ⇒ 一次消息处理（seam 计数 +1）→ 让出一拍 → 窥视 → 交回迭代头（本迭代不派发） ──
+bool check_gate_bit27_service(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "bit27-service: %s\n", what);
+        return false;
+    };
+    auto script = make_script_with_body();
+    emit_instruction(script, 0x88, {{0, 1}});   // C / D ← 1
+    emit_instruction(script, 0x19C, {});        // C 支 ⇒ 置第 27 位
+    emit_instruction(script, 0x2F7, {{0, 0}});  // 被挡住 ⇒ 不该执行
+    emit_instruction(script, 2, {});
+    core::Machine machine(0x12345678u, table);
+    int processed = 0;
+    int yielded = 0;
+    int peeked = 0;
+    core::Machine::HostMessageIo io;
+    io.process_one = [&] { ++processed; };
+    io.yield = [&] { ++yielded; };
+    io.peek = [&] {
+        ++peeked;
+        return false;
+    };
+    machine.set_host_message_io(io);
+    machine.load_root(script);
+    if (!machine.step() || !machine.step()) return fail("0x88 / 0x19c 停机");
+    if ((machine.state_flags() & (1u << 27)) == 0) return fail("fixture 没有置起第 27 位");
+    const std::size_t held_ip = machine.frame().ip;
+    const std::size_t before = machine.host_message_steps();
+    if (!machine.step()) return fail("第 27 位服务体那一拍停机");
+    if (machine.frame().ip != held_ip) return fail("第 27 位服务体派发了脚本指令（ip 前进了）");
+    if (machine.host_message_steps() != before + 1) {
+        return fail("第 27 位服务体没有计入一次消息处理");
+    }
+    if (processed != 1 || yielded != 1 || peeked != 1) {
+        return fail("消息处理 / 让出一拍 / 窥视 不是各一次");
+    }
+    if (machine.voice_option_2f7(0) != 0) return fail("被挡住的 0x2f7 执行了");
+    // 清位之后必须恢复派发（证明「ip 不变」不是因为机器停死）。
+    machine.dispatch_for_test(core::Instruction{0, 0x88, {core::Operand{0, 0}}});
+    if (!machine.step() || machine.frame().ip != held_ip + 12) {  // 0x2f7 自己把推进格数写成 3
+        return fail("清掉第 27 位之后没有恢复派发");
+    }
+    if (machine.voice_option_2f7(0) != 1) return fail("0x2f7 在恢复派发后没有执行");
+    if (machine.host_message_steps() != before + 1) {
+        return fail("非第 27 位服务体的迭代也计了消息处理");
+    }
+    return true;
+}
+
+// ── 第 27 位的产品置点：0x71 的子系统调用返回非 0 / 追加前置支（ReadTextSkip ∧ 已读命中）/
+//    0x305 ②（同一判据）；置起后本迭代不派发 ──
+bool check_adv_text_bit27_set_points(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "adv-text-bit27: %s\n", what);
+        return false;
+    };
+    // ① 0x71：文本子系统一次调用返回非 0 ⇒ 置第 27 位。
+    auto request = make_script_with_body();
+    emit_instruction(request, 0x80, {{0, 9}});
+    emit_instruction(request, 0x70, {{0, 9}, {0, 50}, {0, 50}, {0, 0}, {0, 0}});
+    emit_instruction(request, 0x71, {{0, 9}});
+    emit_instruction(request, 0x2F7, {{0, 0}});
+    emit_instruction(request, 2, {});
+    core::Machine request_machine(0x12345678u, table);
+    request_machine.set_text_request_result([](std::int32_t) { return 1; });
+    request_machine.load_root(request);
+    for (int i = 0; i < 3; ++i) {
+        if (!request_machine.step()) return fail("0x80 / 0x70 / 0x71 停机");
+    }
+    if ((request_machine.state_flags() & (1u << 27)) == 0) {
+        return fail("0x71 的子系统调用返回非 0 却没有置第 27 位");
+    }
+    const std::size_t request_ip = request_machine.frame().ip;
+    const std::size_t request_steps = request_machine.host_message_steps();
+    if (!request_machine.step() || request_machine.frame().ip != request_ip ||
+        request_machine.host_message_steps() != request_steps + 1 ||
+        request_machine.voice_option_2f7(0) != 0) {
+        return fail("0x71 置起的第 27 位没有挡住本迭代的派发");
+    }
+
+    // ② 追加前置支（0x6e）：ReadTextSkip 非 0 ∧ 已读命中 ⇒ 置第 27 位，且**不置打字位**、同帧抽干。
+    auto append = make_script_with_body();
+    emit_instruction(append, 0x80, {{0, 9}});
+    emit_instruction(append, 0x70, {{0, 9}, {0, 50}, {0, 50}, {0, 0}, {0, 0}});
+    emit_instruction(append, 0x74, {{0, 1000}});  // 每字间隔 ≠ 0：没有前置支时一定会置第 29 位
+    emit_instruction(append, 0x71, {{0, 9}});
+    emit_instruction(append, 0x6E, {{0, 0}, {5, 0}});
+    emit_instruction(append, 0x2F7, {{0, 0}});
+    emit_instruction(append, 2, {});
+    core::Machine append_machine(0x12345678u, table);
+    append_machine.config_mut().set_int("message:ReadTextSkip", 1);
+    append_machine.set_read_text_skip_hit([] { return true; });
+    append_machine.write_text(core::Operand{5, 0}, "AB");
+    append_machine.load_root(append);
+    for (int i = 0; i < 5; ++i) {  // 0x80 / 0x70 / 0x74 / 0x71 / 0x6e
+        if (!append_machine.step()) return fail("追加前置支的夹具停机");
+    }
+    if ((append_machine.state_flags() & (1u << 27)) == 0) {
+        return fail("追加前置支没有置第 27 位");
+    }
+    if (append_machine.text_typing()) return fail("追加前置支置位后仍置了打字位（第 29 位）");
+    if (append_machine.pending_glyph_count() != 0) return fail("追加前置支没有走同帧抽干");
+    const std::size_t append_ip = append_machine.frame().ip;
+    const std::size_t append_steps = append_machine.host_message_steps();
+    if (!append_machine.step() || append_machine.frame().ip != append_ip ||
+        append_machine.host_message_steps() != append_steps + 1) {
+        return fail("追加前置支置起的第 27 位没有挡住本迭代的派发");
+    }
+
+    // ③ 0x305 ②：同一判据（ReadTextSkip 非 0 ∧ 已读命中）⇒ 置第 27 位。
+    //    ★ 命中接缝先返回 false（0x6e 那一步不置位），到 0x305 之前再打开。
+    auto block = make_script_with_body();
+    emit_instruction(block, 0x80, {{0, 9}});
+    emit_instruction(block, 0x70, {{0, 9}, {0, 50}, {0, 50}, {0, 0}, {0, 0}});
+    emit_instruction(block, 0x74, {{0, 0}});  // 每字间隔 = 0 ⇒ 追加立即抽干（不置第 29 位）
+    emit_instruction(block, 0x71, {{0, 9}});
+    emit_instruction(block, 0x304, {});
+    emit_instruction(block, 0x6E, {{0, 0}, {5, 0}});
+    emit_instruction(block, 0x305, {});
+    emit_instruction(block, 0x2F7, {{0, 0}});
+    emit_instruction(block, 2, {});
+    core::Machine block_machine(0x12345678u, table);
+    bool read_hit = false;
+    block_machine.config_mut().set_int("message:ReadTextSkip", 1);
+    block_machine.set_read_text_skip_hit([&read_hit] { return read_hit; });
+    block_machine.write_text(core::Operand{5, 0}, "AB");
+    block_machine.load_root(block);
+    for (int i = 0; i < 6; ++i) {  // 0x80 / 0x70 / 0x74 / 0x71 / 0x304 / 0x6e
+        if (!block_machine.step()) return fail("0x305 夹具停机");
+    }
+    if ((block_machine.state_flags() & (1u << 27)) != 0) {
+        return fail("0x6e 在已读命中为假时就置了第 27 位");
+    }
+    read_hit = true;
+    if (!block_machine.step()) return fail("0x305 停机");
+    if ((block_machine.state_flags() & (1u << 27)) == 0) {
+        return fail("0x305 的 ② 没有在 ReadTextSkip ∧ 已读命中时置第 27 位");
+    }
+    const std::size_t block_ip = block_machine.frame().ip;
+    if (!block_machine.step() || block_machine.frame().ip != block_ip ||
+        block_machine.voice_option_2f7(0) != 0) {
+        return fail("0x305 置起的第 27 位没有挡住本迭代的派发");
+    }
+    return true;
+}
+
 // ── 逐格揭示当前文本（0x1CE；`CORE-OPS-TEXT-CELL-REVEAL-1CE`） ──
 // ★ 守卫必须能红的地方：启用把格号归 0（不是保留）、相位起点 = 本迭代的宿主毫秒时钟（不是"种子"）、
 //   到点一拍**只**画一格且格号 +1 取模、**画的是推进前的格号**（`text_cell_last_draw_cursor()`）、
@@ -1066,37 +1277,19 @@ bool check_command_queue(const core::OpcodeTable& table) {
         if (machine.pending_command_count() != 0) return fail("空表也投了命令");
     }
     {
+        // ⑤ 泵取走一条**非法正命令**（号不在索引里）⇒ 显示消息型异常，当前帧号停在 37。
+        //    ★ 用**小索引**（0..3）播种 `5 << 24`；文件库登记接口不参与这条（它测的是泵的失败分档）。
+        //    ★ 0x143 的投递源（文件库槽位表）与"装载登记 ⇒ 投递 / 析构 ⇒ 不再投递"在
+        //      `check_event_143_file_library()` 里单独咬（CTest `spec_event_143_file_library`）。
         auto script = make_script_with_body();
         emit_instruction(script, 0x1F4, {});
-        emit_instruction(script, 0x143, {});  // 区间仍忙 ⇒ 尾跳的泵被入口第一条挡下
-        emit_instruction(script, 0x1F5, {});
+        emit_instruction(script, 0x1F5, {});  // 区间离开 ⇒ 出口泵取走那条命令
         emit_instruction(script, 0x1A8, {});
         emit_instruction(script, 2, {});
         core::Machine machine(key, table, &install);
-        machine.seed_event_table_cell_for_test(5, 1);
-        machine.seed_event_table_cell_for_test(255, 1);
-        machine.seed_event_table_cell_for_test(0, 1);  // 格 0 **不参与**投递
+        machine.enqueue_command_for_test(static_cast<std::int32_t>(5u << 24));
         machine.load_root(script);
-        if (!machine.step()) return fail("投递夹具 0x1f4 停机");
-        if (!machine.step()) return fail("区间忙时的 0x143 停机了");
-        if (machine.pending_command_count() != 2) {
-            std::fprintf(stderr, "command-queue: delivered=%zu\n", machine.pending_command_count());
-            return fail("0x143 没有逐格投递（或把格 0 也投了）");
-        }
-        const std::int32_t first = machine.queue_command(machine.queue_head());
-        const std::int32_t second = machine.queue_command(machine.queue_head() + 1);
-        if (first != static_cast<std::int32_t>(5u << 24)) {
-            std::fprintf(stderr, "command-queue: first=0x%X\n", first);
-            return fail("5 号格的投递值不是 5 << 24");
-        }
-        if (second != static_cast<std::int32_t>(255u << 24)) {
-            std::fprintf(stderr, "command-queue: second=0x%X\n", second);
-            return fail("255 号格没有按 32 位有符号投递（≥128 是负命令）");
-        }
-        if (machine.pump_busy()) return fail("0x143 结束时没有清标记");
-        if (machine.current_frame() != 0) return fail("区间忙时泵竟然取了命令（入口第一条失效）");
-        // 区间离开之后由出口泵取走第一条：5 << 24 是非法统一文件 id ⇒ 显示消息型异常，
-        // 但**当前帧号停在 37**（`70-vm.md:309`）。
+        if (!machine.step()) return fail("泵失败夹具 0x1f4 停机");
         if (machine.step()) return fail("泵到非法 id 却没有失败");
         if (machine.last_stop().message.rfind("display-message:", 0) != 0) {
             std::fprintf(stderr, "command-queue: message=%s\n", machine.last_stop().message.c_str());
@@ -1105,7 +1298,7 @@ bool check_command_queue(const core::OpcodeTable& table) {
         if (machine.current_frame() != core::Machine::kPumpFrameSlot) {
             return fail("正命令装载失败时当前帧号没有停在 37");
         }
-        if (machine.pending_command_count() != 1) return fail("一趟取走的不止一条");
+        if (machine.pending_command_count() != 0) return fail("一趟取走的不止一条");
     }
     // ⑥ 队列泵占用标记挡下 `0x1f5` 出口泵（`70-vm.md:305` / `:315`）：泵帧里再进 / 出区间，
     //    出口**不许**开闸（否则队列会被套成两层）。
@@ -1920,7 +2113,7 @@ bool check_second_batch(const core::OpcodeTable& table) {
                      local_machine.frame().ip);
         return false;
     }
-    // 0x19a / 0x1b6 / 0x1b7：三个互不相同的格；Y 归一成 0/1。
+    // 0x19a / 0x1b6 / 0x1b7：C 与 Y 两个互不相同的格；Y 归一成 0/1。
     auto flags = make_script_with_body();
     emit_instruction(flags, 0x1B7, {{0, 5}});
     emit_instruction(flags, 0x1B6, {{3, 0}});
@@ -1934,7 +2127,7 @@ bool check_second_batch(const core::OpcodeTable& table) {
         if (!flag_machine.step()) return false;
     }
     if (flag_machine.flag_y() != 1 || flag_machine.read_int(core::Operand{3, 0}) != 1 ||
-        flag_machine.read_int(core::Operand{3, 1}) != flag_machine.flag_x()) {
+        flag_machine.read_int(core::Operand{3, 1}) != flag_machine.mode_c()) {
         std::fprintf(stderr, "0x1b7/0x1b6/0x19a mismatch\n");
         return false;
     }
@@ -1983,7 +2176,7 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1b0 copied with n=0\n");
         return false;
     }
-    // 0x1c7 与 0x1cc：位 27 = 0（唯一可达支）；状态格与状态字**不是同一格**。
+    // 0x1c7 与 0x1cc：位 27 = 0；状态格（= 模式族 E）与状态字**不是同一格**。
     auto cells = make_script_with_body();
     emit_instruction(cells, 0x1C7, {{3, 0}});
     emit_instruction(cells, 0x1CF, {{0, 7}});
@@ -6298,16 +6491,17 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (!machine.step()) return fail("0x1ba 音效停机");
         if (!machine.sound_se_enabled()) return fail("0x1ba 同态请求把音效关掉了");
     }
-    // ⑨ 0xb4 成功装载写「该槽当前资源号」这一格（`0x4b5004`）；0xb6 清**同一格**（`0x4b506a`）。
-    //    ★ 旧版这里断言"0xb6 不清"并引了"规范"—— 规范里此前**没有** 0xb6 这一条（它在 spec 的未成篇 gap 里），
-    //    而 0xb4 又按"后端存在"写了表 ⇒ 同一个 T_SE 上两条指令用了两套前提。现在两条都按「后端存在、后端受理」
-    //    建模；槽号的两个界（后端 15 / 引擎表 10）与越界处置在 `check_audio_slot_bounds()` 里逐条咬。
+    // ⑨ 0xb4 成功装载写「该槽当前资源号」这一格（`0x4b5004`）；0xb6 清**同一格**（`0x4b506a`）与
+    //    该通道的**活动**（`0x4b5075`）。
+    //    ★ `0xb6` 有"后端不存在 ⇒ 一格都不清"的前置（`0x4b5056`）⇒ 这里先把后端接上；
+    //    槽号的两个界（后端 15 / 引擎表 10）与越界处置在 `check_audio_slot_bounds()` 里逐条咬。
     {
         auto bytes = make_script_with_body();
         emit_instruction(bytes, 0xB4, {{0, 7}, {0, 9}});
         emit_instruction(bytes, 0xB6, {{0, 9}});
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
+        machine.set_se_backend_attached(true);
         machine.load_root(bytes);
         if (!machine.step()) return fail("0xb4 停机");
         if (machine.se_slot_resource(9) != 7) return fail("0xb4 没有写槽资源格");
@@ -6613,6 +6807,7 @@ bool check_audio_slot_bounds(const core::OpcodeTable& table) {
     emit_instruction(bytes, 0xB6, {{0, 9}});           // 7：清表内那格
     emit_instruction(bytes, 2, {});
     core::Machine machine(0x12345678u, table);
+    machine.set_se_backend_attached(true);  // 0xb6 的"后端不存在 ⇒ 一格都不清"前置（`0x4b5056`）
     machine.load_root(bytes);
     if (!machine.step()) return fail("0xb4 槽 9 停机");
     if (machine.se_slot_resource(9) != 7) return fail("0xb4 槽 9 没有写表");
@@ -6637,6 +6832,36 @@ bool check_audio_slot_bounds(const core::OpcodeTable& table) {
     if (!machine.step()) return fail("0xb6 槽 9 停机");
     if (machine.se_stop_requests() != 2) return fail("0xb6 槽 9 没有记停止请求");
     if (machine.se_slot_resource(9) != 0) return fail("0xb6 槽 9 没有清表");
+    // ── 负槽号（`0xb6`）：后端那条是**有符号** `< 15` 比较 ⇒ 负值**通过**、请求照发；
+    //    但两格都是表外写（spec `60-ops-voice.md:352`）⇒ 本作的选择 = **计一次停止请求、不做表外写、
+    //    只记诊断**（登记为实现侧已知偏离）。★ 前置用 `0xb4` 摆（后端接上）；执行 `0xb6(-1)` 之后
+    //    槽 9 的播放名格与通道记录必须一格不动。
+    {
+        auto negative = make_script_with_body();
+        emit_instruction(negative, 0xB4, {{0, 7}, {0, 9}});
+        emit_instruction(negative, 0xB6, {{0, 0xFFFFFFFFu}});  // 槽号 = −1
+        emit_instruction(negative, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_se_backend_attached(true);
+        machine.set_se_channel_for_test(9, true, 123, 50, 7);
+        machine.load_root(negative);
+        if (!machine.step()) return fail("负槽号夹具的 0xb4 停机");
+        if (machine.se_slot_resource(9) != 7) return fail("负槽号夹具的 0xb4 没有写播放名格");
+        if (!machine.step()) return fail("0xb6(槽号 = −1) 停机（负槽号不是异常）");
+        if (machine.se_stop_requests() != 1) {
+            return fail("0xb6(槽号 = −1) 没有记停止请求（负槽号通过后端的有符号比较）");
+        }
+        if (machine.se_slot_resource(9) != 7) {
+            return fail("0xb6(槽号 = −1) 做了表外写（动了槽 9 的播放名格）");
+        }
+        const auto& channel = machine.se_channel(9);
+        if (!channel.active || channel.start != 123 || channel.duration != 50 || channel.value != 7) {
+            return fail("0xb6(槽号 = −1) 改了引擎通道记录（表外写不复刻）");
+        }
+        if (!has_error(machine, "se-stop-slot-negative:-1")) {
+            return fail("0xb6(槽号 = −1) 没有记诊断");
+        }
+    }
     return true;
 }
 // ── 时间交付：两套到期计时器 + 第 14 → 9 位的接链（`CORE-VM-LOOP`） ──
@@ -6872,12 +7097,368 @@ bool check_time_delivery(const core::OpcodeTable& table) {
     }
     return true;
 }
+// ── 音效通道登记（0x2bf）→ 交付 / 停止（`70-vm.md`「音效通道」的登记段 + `60-ops-voice.md` 0xb6）──
+/** 钉子（每条都指向 spec 原句 / 绑定 EA）：
+ *  ① **登记**（`0x2bf` → `sub_4B5170`）：活动 ← 1（`0x4b51b7`）、起点 ← 0（`0x4b51be`）、
+ *     时长 ← 第 3 个操作数（`0x4b51a8`）、交值 ← 第 2 个操作数（`0x4b51c9`）、待办 ← 1（`0x4b51d0`）；
+ *     通道号 ≥ 10 一格都不写（`0x4b5179`）。
+ *  ② **交付读它们**：未到期 ⇒ 置待办；到期（相等已到期）⇒ 清活动、把交值交给释放入口。
+ *  ③ **0x2bf → 0xb6**：停止清该通道的活动，**不改**起点 / 时长 / 交值；此后不再到期。
+ *  ★ 变异：登记时写错字段（通道 / 交值 / 时长任一）或 0xb6 只清表不清活动 ⇒ 本条红。 */
+bool check_se_registration_2bf(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "se-registration: %s\n", what);
+        return false;
+    };
+    // ① 登记 + 字段逐项（含"≥10 一格都不写"）。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2BF, {{0, 3}, {0, 7}, {0, 50}});   // 通道 3 / 交值 7 / 时长 50
+        emit_instruction(bytes, 0x2BF, {{0, 10}, {0, 9}, {0, 80}});  // 通道 10：一格都不写
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2bf 通道 3 停机");
+        const auto& channel = machine.se_channel(3);
+        if (!channel.active) return fail("登记没有把活动置 1");
+        if (channel.start != 0) return fail("登记没有把起点写 0（未盖章哨兵）");
+        if (channel.duration != 50) return fail("时长不是第 3 个操作数（50）");
+        if (channel.value != 7) return fail("交值不是第 2 个操作数（7）");
+        if (!machine.se_work_pending()) return fail("登记没有把待办置起");
+        for (std::size_t i = 0; i < 10; ++i) {
+            if (i == 3) continue;
+            if (machine.se_channel(i).active || machine.se_channel(i).duration != 0 ||
+                machine.se_channel(i).value != 0) {
+                return fail("登记动了别的通道");
+            }
+        }
+        if (!machine.step()) return fail("0x2bf 通道 10 停机");
+        for (std::size_t i = 0; i < 10; ++i) {
+            if (i == 3) continue;
+            if (machine.se_channel(i).active || machine.se_channel(i).duration != 0 ||
+                machine.se_channel(i).value != 0) {
+                return fail("通道 ≥ 10 的登记写了一格");
+            }
+        }
+        // ≥10 单独一台机器：连"待办"也不能置（那一格由登记写，≥10 一个格都不写）。
+        auto only_high = make_script_with_body();
+        emit_instruction(only_high, 0x2BF, {{0, 10}, {0, 9}, {0, 80}});
+        emit_instruction(only_high, 2, {});
+        core::Machine ignored(0x12345678u, table);
+        ignored.load_root(only_high);
+        if (!ignored.step()) return fail("通道 10 夹具停机");
+        if (ignored.se_work_pending()) return fail("通道 ≥ 10 的登记把待办置起了");
+    }
+    // ② 交付两次：未到期 ⇒ 置待办；到期（相等）⇒ 清活动、交出交值。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2BF, {{0, 3}, {0, 7}, {0, 50}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("交付夹具 0x2bf 停机");
+        machine.deliver_sound_time(1000);  // 懒盖章：起点 ← 1000
+        if (machine.se_channel(3).start != 1000) return fail("交付没有懒盖章");
+        if (!machine.se_channel(3).active) return fail("未到期就清了活动");
+        if (machine.se_release_steps() != 0) return fail("未到期就走了释放入口");
+        if (!machine.se_work_pending()) return fail("未到期没有置待办");
+        machine.deliver_sound_time(1049);  // 差 1 未到期
+        if (!machine.se_channel(3).active) return fail("差 1 就判到期");
+        machine.deliver_sound_time(1050);  // 读数 − 起点 = 时长 ⇒ 到期
+        if (machine.se_channel(3).active) return fail("到期没有清活动");
+        if (machine.se_release_steps() != 1) return fail("到期没有交给释放入口（一次）");
+        if (machine.se_last_released_value() != 7) return fail("到期交出去的不是登记的交值 7");
+        if (machine.se_work_pending()) return fail("到期之后待办仍置着");
+    }
+    // ③ 0x2bf → 0xb6：停止清活动、不改三格，且此后不再到期。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2BF, {{0, 3}, {0, 7}, {0, 50}});
+        emit_instruction(bytes, 0xB6, {{0, 3}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_se_backend_attached(true);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2bf → 0xb6 夹具：登记停机");
+        machine.deliver_sound_time(1000);  // 先盖一次章（起点 = 1000）
+        if (!machine.step()) return fail("0x2bf → 0xb6 夹具：0xb6 停机");
+        const auto& channel = machine.se_channel(3);
+        if (channel.active) return fail("0xb6 没有清该通道的活动");
+        if (channel.start != 1000) return fail("0xb6 改写了起点");
+        if (channel.duration != 50 || channel.value != 7) return fail("0xb6 改写了时长 / 交值");
+        const std::size_t released = machine.se_release_steps();
+        machine.deliver_sound_time(2000);
+        if (machine.se_release_steps() != released) return fail("停止之后该通道仍被交付");
+    }
+    return true;
+}
+// ── 按通道停止（0xb6）：后端不存在 ⇒ 一格不清；存在 ⇒ 先请求、再无条件清两格 ──
+/** 钉子（`CORE-OPS-AUDIO-SLOT-STOP-B6`）：
+ *  ① 后端不存在（接缝缺省 = 不存在；夹具先接上后端用 `0xb4` 摆前置、再断开）⇒ 到此为止：
+ *     不发请求、播放名格与活动**原样**（`0x4b5056`）。
+ *  ② 后端存在 ⇒ 先发停止请求（后端受理槽 < 15），再无条件清「播放名」格（`0x4b506a`）与活动（`0x4b5075`）；
+ *     起点 / 时长 / 交值**不动**（那三格只由登记写）。
+ *  ③ 槽号 ≥ 15：后端拒绝 + 上报（不发请求）；表外写不复刻（只记诊断）。
+ *  ④ `0xb4` 的后端前置（`60-ops-voice.md:73`）：后端不存在 ⇒ 不写格、不发装载请求；接上后端 ⇒ 真写。
+ *  ★ 变异：没有后端前置（总是清）/ 清了表却没清活动 / `0xb4` 没有后端前置 ⇒ 本条红。 */
+bool check_se_stop_b6(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "se-stop: %s\n", what);
+        return false;
+    };
+    const auto prepare = [](core::Machine& machine) {
+        machine.set_se_channel_for_test(9, true, 123, 50, 7);
+    };
+    // ① 后端不存在：先"接上后端 → `0xb4` 摆播放名格 → 断开后端"制造那个状态。
+    //    ⛔ 不能用产品指令在"后端不存在"的机器上摆前置 —— `0xb4` 自己也要求后端存在
+    //    （`60-ops-voice.md:73`：整段跳过、一格不写），那样摆出来的前置是假前置。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xB4, {{0, 7}, {0, 9}});
+        emit_instruction(bytes, 0xB6, {{0, 9}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        prepare(machine);
+        machine.set_se_backend_attached(true);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0xb4 停机");
+        if (machine.se_slot_resource(9) != 7) return fail("0xb4 没有写播放名格");
+        machine.set_se_backend_attached(false);  // 前置摆好之后后端消失 ⇒ 测的才是"后端不存在"
+        if (!machine.step()) return fail("0xb6 停机");
+        if (machine.se_slot_resource(9) != 7) return fail("后端不存在时 0xb6 仍清了播放名格");
+        const auto& channel = machine.se_channel(9);
+        if (!channel.active || channel.start != 123 || channel.duration != 50 || channel.value != 7) {
+            return fail("后端不存在时 0xb6 仍改了通道记录");
+        }
+        if (machine.se_stop_requests() != 0) return fail("后端不存在时 0xb6 仍发了停止请求");
+    }
+    // ② 后端存在。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xB4, {{0, 7}, {0, 9}});
+        emit_instruction(bytes, 0xB6, {{0, 9}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        prepare(machine);
+        machine.set_se_backend_attached(true);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("后端存在：0xb4 停机");
+        if (!machine.step()) return fail("后端存在：0xb6 停机");
+        if (machine.se_slot_resource(9) != 0) return fail("后端存在时 0xb6 没有清播放名格");
+        const auto& channel = machine.se_channel(9);
+        if (channel.active) return fail("后端存在时 0xb6 没有清活动");
+        if (channel.start != 123 || channel.duration != 50 || channel.value != 7) {
+            return fail("0xb6 改了起点 / 时长 / 交值（那三格只由登记写）");
+        }
+        if (machine.se_stop_requests() != 1) return fail("后端存在时 0xb6 没有发停止请求");
+    }
+    // ③ 槽号 ≥15：后端拒绝 + 上报（不发请求），表外写不做。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xB4, {{0, 7}, {0, 9}});
+        emit_instruction(bytes, 0xB6, {{0, 15}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        prepare(machine);
+        machine.set_se_backend_attached(true);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("越界夹具 0xb4 停机");
+        if (!machine.step()) return fail("越界夹具 0xb6 停机");
+        if (machine.se_slot_resource(9) != 7) return fail("槽 15 的 0xb6 动了槽 9");
+        if (machine.se_stop_requests() != 0) return fail("槽 15 不该记停止请求");
+        bool reported = false;
+        for (const auto& text : machine.errors()) {
+            if (text.rfind("se-stop-slot-out-of-range:15", 0) == 0) reported = true;
+        }
+        if (!reported) return fail("槽 15 没有上报拒绝");
+    }
+    // ④ `0xb4` 的后端前置（`60-ops-voice.md:73`）：后端不存在 ⇒ 整段跳过（不发请求、一格不写）；
+    //    接上后端 ⇒ 同一份脚本真写。两支都要咬住 —— 否则"永远返回"或"永远不返回"都能绿。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xB4, {{0, 7}, {0, 9}});
+        emit_instruction(bytes, 2, {});
+        {
+            core::Machine absent(0x12345678u, table);  // 缺省 = 后端不存在
+            absent.load_root(bytes);
+            if (!absent.step()) return fail("0xb4（无后端）停机");
+            if (absent.se_slot_resource(9) != 0) return fail("后端不存在时 0xb4 仍写了播放名格");
+            if (absent.se_load_requests() != 0) return fail("后端不存在时 0xb4 仍发了装载请求");
+            if (absent.se_backend_attached()) return fail("接缝缺省不是「后端不存在」");
+        }
+        {
+            core::Machine attached(0x12345678u, table);
+            attached.set_se_backend_attached(true);
+            attached.load_root(bytes);
+            if (!attached.step()) return fail("0xb4（有后端）停机");
+            if (attached.se_slot_resource(9) != 7) return fail("后端存在时 0xb4 没有写播放名格");
+            if (attached.se_load_requests() != 1) return fail("后端存在时 0xb4 没有记装载请求");
+        }
+    }
+    return true;
+}
+// ── 0x143 的投递源 = 文件库的 256 格槽位表（`CORE-OPS-EVENT-143`）──
+/** 钉子（`60-ops-scalar.md:190-198` + 绑定 `0x455948` / `0x454cd0`）：
+ *  ① 文件库装载一个**扩展索引**（区号 ∈ 1..255）⇒ 按**它自带的区号**登记进槽位表
+ *     （不是 0x143 私有的表）；区号 0 是基础索引那一格（0x143 不检查）；
+ *  ② 执行 `0x143` ⇒ 每个非 0 槽投一条 `区号 << 24`（≥128 是负命令）；
+ *  ③ 文件库析构（逐槽清 0）之后 ⇒ 一条也不投。
+ *  ★ 变异：装载不登记（旧实现：产品路径恒 0）/ 循环从 0 起 / 析构不清 ⇒ 本条红。
+ *  ★ 为什么用 `load_extension_index()` 而不是 `read_install_file()`：本模型装到的都是**基础索引**的
+ *    文件（统一 id 的高 8 位 = 0），按 0x455948 它们只写格 0；AAI 扩展索引的解析本模型没有
+ *    （残差）⇒ 文件库的"装载扩展索引"这一入口由该 seam 承担。 */
+bool check_event_143_file_library(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "event-143: %s\n", what);
+        return false;
+    };
+    auto script = make_script_with_body();
+    emit_instruction(script, 0x1F4, {});   // 区间忙 ⇒ 0x143 尾跳的泵不取命令
+    emit_instruction(script, 0x143, {});
+    emit_instruction(script, 0x1A8, {});
+    emit_instruction(script, 2, {});
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.load_extension_index(5);    // 区号 5
+        machine.load_extension_index(255);  // 区号 255（≥128 ⇒ 投递值是负命令）
+        machine.load_extension_index(0);    // 基础索引那一格：登记，但 0x143 不检查它
+        machine.load_extension_index(256);  // 表外：不写、只记诊断
+        if (machine.file_library_slot(5) == 0 || machine.file_library_slot(255) == 0 ||
+            machine.file_library_slot(0) == 0) {
+            return fail("装载扩展索引没有按它自带的区号登记进文件库槽位表");
+        }
+        if (machine.file_library_slot(7) != 0) return fail("没装载的槽号在槽位表里非 0");
+        bool zone_reported = false;
+        for (const auto& text : machine.errors()) {
+            if (text.rfind("file-library-zone-out-of-range:256", 0) == 0) zone_reported = true;
+        }
+        if (!zone_reported) return fail("区号 256 没有记表外诊断（写进表外了？）");
+        machine.load_root(script);
+        if (!machine.step()) return fail("0x1f4 停机");
+        if (!machine.step()) return fail("区间忙时的 0x143 停机了");
+        if (machine.pending_command_count() != 2) {
+            std::fprintf(stderr, "event-143: delivered=%zu\n", machine.pending_command_count());
+            return fail("0x143 没有逐格投递（或把槽 0 也投了）");
+        }
+        const std::int32_t first = machine.queue_command(machine.queue_head());
+        const std::int32_t second = machine.queue_command(machine.queue_head() + 1);
+        if (first != static_cast<std::int32_t>(5u << 24)) {
+            std::fprintf(stderr, "event-143: first=0x%X\n", first);
+            return fail("5 号槽的投递值不是 5 << 24");
+        }
+        if (second != static_cast<std::int32_t>(255u << 24)) {
+            std::fprintf(stderr, "event-143: second=0x%X\n", second);
+            return fail("255 号槽没有按 32 位有符号投递（≥128 是负命令）");
+        }
+        if (machine.pump_busy()) return fail("0x143 结束时没有把队列泵占用标记清回 0");
+        if (machine.current_frame() != 0) return fail("区间忙时泵竟然取了命令（入口第一条失效）");
+    }
+    {
+        // 基础索引的文件（`read_install_file` 装到的全部是这种）：按统一 id 的高 8 位 = **区号 0** 登记
+        // ⇒ 写槽 0；`0x143` 不投槽 0。★ 这一条让"每个装载点都登记"可观察（删掉装载登记 ⇒ 槽 0 恒 0）。
+        const auto root_dir = std::filesystem::temp_directory_path() / "amayui-cxx-selftest-library-base";
+        std::filesystem::create_directories(root_dir);
+        auto plain = make_script_with_body();
+        emit_instruction(plain, 0x1A8, {});
+        emit_instruction(plain, 2, {});
+        {
+            std::ofstream out(root_dir / "LIBBASE0.BIN", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(plain.data()),
+                      static_cast<std::streamsize>(plain.size()));
+        }
+        core::Install install;
+        install.root = root_dir;
+        install.index.files.push_back(core::AlfFile{"LIBBASE0.BIN", 0, 0, 0, 0});
+        core::Machine base(0x12345678u, table, &install);
+        if (base.file_library_slot(0) != 0) return fail("装载之前槽 0 就非 0");
+        base.load_frame_for_test(0, 1);  // 正常装载路径 ⇒ `read_install_file` 之后登记
+        if (base.file_library_slot(0) == 0) return fail("装载基础索引的文件没有登记槽 0（区号 = 高 8 位）");
+        if (base.file_library_slot(5) != 0) return fail("基础索引的文件登记到了别的槽");
+        base.load_root(script);
+        if (!base.step()) return fail("基础索引夹具 0x1f4 停机");
+        if (!base.step()) return fail("基础索引夹具 0x143 停机了");
+        if (base.pending_command_count() != 0) return fail("0x143 投了槽 0（基础索引那一格）");
+    }
+    {
+        // 文件库析构（`0x454cd0`：逐槽销毁非空格并清 0）之后 ⇒ 0x143 一条也不投。
+        core::Machine released(0x12345678u, table);
+        released.load_extension_index(5);        released.release_file_library();
+        if (released.file_library_slot(5) != 0) return fail("文件库析构没有逐槽清 0");
+        released.load_root(script);
+        if (!released.step()) return fail("卸载夹具 0x1f4 停机");
+        if (!released.step()) return fail("卸载后的 0x143 停机了");
+        if (released.pending_command_count() != 0) {
+            return fail("文件库析构之后 0x143 仍有投递（槽位表没有逐槽清 0）");
+        }
+    }
+    return true;
+}
+// ── 输出对象（`CORE-OBJECTS-BASE` 的「输出对象」三项操作）──
+/** 钉子（`45-objects.md:50-58` + `05-boot.md:191`）：
+ *  ① 追加：文本**原样**交给日志落点；
+ *  ② 按脚本位置追加：`(<脚本名>：<行号>行目) ` 前缀 + 文本（脚本名 / 行号来源未取证 ⇒ 由调用方给）；
+ *  ③ 报告：日志落点逐字收到 `\r\n致命的エラー[` + 文本 + `]\r\n`，随后把文本交给根对象的错误处理
+ *     （「窗口句柄 + 文本」那一项）。接线 = 选择显示请求（触发一次范围 0 的 `0x60`）。
+ *  ★ 变异：报告只记 `errors_` 不发日志 seam / 前缀拼错 ⇒ 本条红。 */
+bool check_output_object_report(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "output-object: %s\n", what);
+        return false;
+    };
+    // ① / ② 两个追加操作。
+    {
+        core::Machine machine(0x12345678u, table);
+        std::vector<std::string> log;
+        std::string root_text;
+        core::Machine::OutputObjectIo io;
+        io.log = [&log](const std::string& text) { log.push_back(text); };
+        io.root_error_window = [&root_text](const std::string& text) { root_text = text; };
+        machine.set_output_object_io(io);
+        machine.output_append("plain");
+        machine.output_append_with_position("SC0000.BIN", 12, "text");
+        if (log.size() != 2) return fail("追加没有落到日志落点");
+        if (log[0] != "plain") return fail("「追加」没有把文本原样交出去");
+        if (log[1] != "(SC0000.BIN：12行目) text") {
+            std::fprintf(stderr, "output-object: prefix=%s\n", log[1].c_str());
+            return fail("「按位置追加」的前缀不是 `(<脚本名>：<行号>行目) `");
+        }
+        if (!root_text.empty()) return fail("普通追加触发了根错误处理");
+    }
+    // ③ 报告：触发一次选择显示请求（`0x60` 范围 = 0）⇒ 日志逐字 + 根错误处理收到文本。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x60, {{3, 1}, {0, 0}});  // 落点 = 全局整型 1；范围 = 0
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        std::vector<std::string> log;
+        std::string root_text;
+        core::Machine::OutputObjectIo io;
+        io.log = [&log](const std::string& text) { log.push_back(text); };
+        io.root_error_window = [&root_text](const std::string& text) { root_text = text; };
+        machine.set_output_object_io(io);
+        machine.load_root(bytes);
+        if (machine.step()) return fail("范围 0 的 0x60 没有停机");
+        const std::string expected = "\r\n致命的エラー[RANDOMの最大値が0になっています．]\r\n";
+        if (log.size() != 1) return fail("报告没有向日志落点写一次（或写了不止一次）");
+        if (log[0] != expected) {
+            std::fprintf(stderr, "output-object: report=%s\n", log[0].c_str());
+            return fail("报告的日志文本不是 `\\r\\n致命的エラー[文本]\\r\\n`");
+        }
+        if (root_text != "RANDOMの最大値が0になっています．") {
+            return fail("报告没有把文本交给根对象的错误处理");
+        }
+        if (machine.output_reports() != 1) return fail("报告计数不是 1");
+        if (!machine.errors().empty()) return fail("报告被混进了错误通道（errors_）");
+    }
+    return true;
+}
 // ── 门字第 27 位的两条支路：`0xc2` 的"瞬间到位"与 `0xc4` 的"影片门" ──
-/** 这两条支路**合成脚本走不到**：位 27 同时是主循环要服务的"影片 / 文本请求"位，而本模型的主循环
- *  只有第 0 / 10 / 13 位的服务分支 ⇒ 门会挡住、只报 `gate-bit-unserviced`。
- *  于是它们长期只有"按取证写了"的注释、没有行为级守卫（两条都登记成了残差）。
- *  ★ 这里用 `dispatch_for_test()`（门外直派）分别喂两条支路 —— ⛔ 不是放宽门，门本身的行为另有守卫
- *    （`gate-stalled` / `0x19c` 那条）。第 27 位由谁服务仍然未取证（仍是残差）。 */
+/** 第 27 位现在**有服务体**（`vm.cpp` 的 `case 27` → `service_message_frame`：处理 → 让出 → 窥视 →
+ *  交回迭代头），产品置点也已落地（`0x19c` 的 C / E 支置位、`0x88` 的 0 支清位，见
+ *  `spec_vm_gate_bit27_service` 与 `spec_ops_88_mode_cells`）。
+ *  ★ 这两条支路仍用 `dispatch_for_test()`（门外直派）喂，理由**不是"没有服务体"**：位一旦置起，
+ *    本迭代就被门挡住、脚本自己派发不到下一条 ⇒ 要测"位已置时这条 handler 怎么走"只能门外直派。
+ *    ⛔ 这不是放宽门：门本身的行为另有守卫（`spec_vm_gate_bit27_service` / `0x19c` 那条）。 */
 bool check_gate_split_branches(const core::OpcodeTable& table) {
     const auto fail = [](const char* what) {
         std::fprintf(stderr, "gate-branches: %s\n", what);
@@ -7246,6 +7827,855 @@ bool check_font_branches(const core::OpcodeTable& table) {
             return fail("0x197 把 0x204 用的 A 支字号改掉了（配置界面的帮助文字会因此变小）");
         }
     }
+    return true;
+}
+bool check_font_pairs_1a5_2fe(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "font-pairs: %s\n", what);
+        return false;
+    };
+    // 两对描述、每对两份变体（`60-ops-forward` 的「两条字符串入口不许合并」）：
+    //   0x1a5 写 **A 对**（名原样 / '@'+名、高 ← −A 字号、下一格 ← −(A 字号/2)）；
+    //   0x2fe 写 **B 对**（同形，用 B 字号）。两支互不覆盖。
+    // ★ 先 `0x2db(1)` 把"对位模式"那格置 1 —— 它只是**本模型假设**的"那个对象自己的开关"
+    //   （spec `60-ops-forward.md:87` 明说该开关身份**未取证**，残差 `RES-OPS-FORWARD-PROLOGUE-FIELD-ROLES`）。
+    //   ⇒ 这里**只断言 spec 明写的部分**：两份描述的高 ← −字号（无条件）、以及随后 `0x1a5` 按当前
+    //   A 字号把高 / 下一格重算成 −20 / −10。⛔ 不断言"非 0 支不写下一格" —— spec 没写那支写成什么，
+    //   一条会假红的断言会把未取证项锁成合同。
+    // ★ `font_rebuild_requests()` 是**实现侧可观察量**（spec 只说"随后重建字体"，没规定几次请求）；
+    //   这里的 +1/+2/+3 只防"请求彻底消失"，⛔ 不构成 spec 不变量。
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x2DB, {{0, 1}});      // 对位模式 = 1（`Font+0x313D0`）
+    emit_instruction(bytes, 0x75, {{0, 20}});      // A 支字号 20
+    emit_instruction(bytes, 0x197, {{0, 10}});     // B 支字号 10
+    emit_instruction(bytes, 0x1A5, {{5, 0}});      // A 对 ← "MSG"（按文本读）
+    emit_instruction(bytes, 0x2FE, {{5, 1}});      // B 对 ← "BIZ"（按文本读）
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table);
+    machine.write_text(core::Operand{5, 0}, "MSG");
+    machine.write_text(core::Operand{5, 1}, "BIZ");
+    machine.load_root(bytes);
+    if (!machine.step()) return fail("0x2db 停机");
+    if (machine.font_align_mode() != 1) return fail("0x2db 没有写对位模式");
+    const auto rebuilds_start = machine.font_rebuild_requests();
+    if (!machine.step()) return fail("0x75 停机");
+    if (machine.font_rebuild_requests() != rebuilds_start + 1) return fail("0x75 没有请求重建字体");
+    if (machine.font_description(false, 0).height != -20 ||
+        machine.font_description(false, 1).height != -20) {
+        return fail("0x75 没有把 A 对两份描述的高写成 −字号");
+    }
+    // ★ 这里**不**断言 `0x75` 非 0 支对"下一格"做了什么：开关身份与那支的公式 spec 都没成篇
+    //   （见函数头上面的注释）⇒ 断言方向一旦反了会拒绝一个正确实现。
+    if (!machine.step()) return fail("0x197 停机");
+    if (machine.font_rebuild_requests() != rebuilds_start + 2) return fail("0x197 没有请求重建字体");
+    if (machine.font_description(true, 0).height != -10 ||
+        machine.font_description(true, 1).height != -10 ||
+        machine.font_description(true, 0).width != -5 ||
+        machine.font_description(true, 1).width != -5) {
+        return fail("0x197 没有把 B 对两份描述的高 / 下一格写成 −字号 / −(字号/2)");
+    }
+    // ── 0x1a5：只写 A 对 ──
+    if (!machine.step()) return fail("0x1a5 停机");
+    if (machine.font_rebuild_requests() != rebuilds_start + 3) return fail("0x1a5 没有请求重建字体");
+    if (machine.font_description(false, 0).face != "MSG") return fail("0x1a5 描述一的名字不是操作数原样");
+    if (machine.font_description(false, 1).face != "@MSG") return fail("0x1a5 描述二的名字不是 '@' + 操作数");
+    for (std::size_t variant = 0; variant < 2; ++variant) {
+        if (machine.font_description(false, variant).height != -20) {
+            return fail("0x1a5 没有按 A 支字号重写两份描述的高");
+        }
+        if (machine.font_description(false, variant).width != -10) {
+            return fail("0x1a5 没有按 A 支字号重写两份描述的下一格（−(20/2)）");
+        }
+    }
+    if (machine.font_description(true, 0).face != "" || machine.font_description(true, 1).face != "") {
+        return fail("0x1a5 改了 B 对的名字（两条字符串入口被合并了）");
+    }
+    if (machine.glyph_height() != 20) return fail("0x1a5 改了 A 支字号（改名字不该改字号）");
+    // ── 0x2fe：只写 B 对 ──
+    if (!machine.step()) return fail("0x2fe 停机");
+    if (machine.font_rebuild_requests() != rebuilds_start + 4) return fail("0x2fe 没有请求重建字体");
+    if (machine.font_description(true, 0).face != "BIZ") return fail("0x2fe 描述一的名字不是操作数原样");
+    if (machine.font_description(true, 1).face != "@BIZ") return fail("0x2fe 描述二的名字不是 '@' + 操作数");
+    for (std::size_t variant = 0; variant < 2; ++variant) {
+        if (machine.font_description(true, variant).height != -10) {
+            return fail("0x2fe 没有按 B 支字号重写两份描述的高");
+        }
+        if (machine.font_description(true, variant).width != -5) {
+            return fail("0x2fe 没有按 B 支字号重写两份描述的下一格（−(10/2)）");
+        }
+    }
+    if (machine.font_description(false, 0).face != "MSG" ||
+        machine.font_description(false, 1).face != "@MSG") {
+        return fail("0x2fe 改了 A 对的名字（两条字符串入口被合并了）");
+    }
+    if (machine.font_b_height() != 10) return fail("0x2fe 改了 B 支字号（改名字不该改字号）");
+    return true;
+}
+
+bool check_font_scale_build(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "font-scale: %s\n", what);
+        return false;
+    };
+    // `60-ops-forward`「字号是"未缩放"的量」：比例 = 视口 ÷ 配置客户区；只在窗口态 ∧ 虚拟全屏类型 = 2；
+    // 高分量乘进建字体高度、宽分量只抄十槽两格；两个分量都相等 ⇒ 整趟什么都不写。
+    // 视口 {480,300}、客户区 {320,240} ⇒ 宽 1.5 / 高 1.25（两个分量不同，抄错格会当场露馅）。
+    // ★ 本用例里的 `font_build_height()` / `font_rebuild_requests()` / `font_scale_write_count()` /
+    //   `text_slot_scale_*()` 都是**实现侧可观察量**，不是 spec 不变量：spec 只规定算式、抄格与
+    //   "两个分量都相等 ⇒ 整趟不写"，没规定重建请求几次，也没让产品绘制读这些量（建字体缩放本模型
+    //   未接真建字体 —— `text_gdi.cpp` 仍用未缩放 `lfHeight`，见子单）。它们只用来让"算错 / 漏抄 /
+    //   短路失效"可证伪，⛔ 不要把它们当成合同。
+    // ★ `reapply_font_settings()` 是"重算的第 ② 个时机"的**接缝**：src 里没有产品调用者（窗口 /
+    //   显示模式变化那条路径未建模）⇒ 本用例直接调它，别读成"产品路径已被覆盖"。
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x75, {{0, 40}});
+    emit_instruction(bytes, 0x197, {{0, 16}});
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table);
+    machine.config_mut().set_int("display:ScreenMode", 1);            // 窗口态
+    machine.config_mut().set_int("display:VirtualFullScreen", 1);
+    machine.config_mut().set_int("display:VirtualFullScreenType", 2);  // 条件 2
+    machine.config_mut().set_int("set:WinX", 320);
+    machine.config_mut().set_int("set:WinY", 240);
+    machine.set_viewport_source([] { return core::Machine::Viewport{480, 300}; });
+    machine.load_root(bytes);
+    const auto writes_start = machine.font_scale_write_count();
+    const auto rebuilds_start = machine.font_rebuild_requests();
+    machine.reapply_font_settings();  // 重算的第 ② 个时机
+    if (machine.font_scale_width() != 1.5) {
+        std::fprintf(stderr, "宽分量 = %f（期望 480/320 = 1.5）\n", machine.font_scale_width());
+        return false;
+    }
+    if (machine.font_scale_height() != 1.25) {
+        std::fprintf(stderr, "高分量 = %f（期望 300/240 = 1.25）\n", machine.font_scale_height());
+        return false;
+    }
+    if (machine.font_scale_write_count() != writes_start + 1) return fail("重算没有记一次写");
+    if (machine.font_rebuild_requests() != rebuilds_start + 2) {
+        return fail("重算后没有为 A / B 两支各请求一次重建字体");
+    }
+    for (std::size_t i = 0; i < core::Machine::text_slot_count(); ++i) {
+        if (machine.text_slot_scale_width(i) != 1.5 || machine.text_slot_scale_height(i) != 1.25) {
+            std::fprintf(stderr, "槽 %zu 的两格 = (%f, %f)（期望 (1.5, 1.25)）\n", i,
+                         machine.text_slot_scale_width(i), machine.text_slot_scale_height(i));
+            return false;
+        }
+    }
+    if (!machine.step()) return fail("0x75 停机");
+    // 建字体高度 = trunc(−字号 × 比例 + 0.5)（向零截断）：−40 × 1.25 + 0.5 = −49.5 ⇒ −49。
+    if (machine.font_build_height(false) != -49) {
+        std::fprintf(stderr, "A 支建字体高度 = %d（期望 trunc(-40*1.25+0.5) = -49）\n",
+                     machine.font_build_height(false));
+        return false;
+    }
+    if (!machine.step()) return fail("0x197 停机");
+    // B 支：−16 × 1.25 + 0.5 = −19.5 ⇒ −19。
+    if (machine.font_build_height(true) != -19) {
+        std::fprintf(stderr, "B 支建字体高度 = %d（期望 trunc(-16*1.25+0.5) = -19）\n",
+                     machine.font_build_height(true));
+        return false;
+    }
+    // ── 同值再跑一趟：两个分量都相等 ⇒ 整趟什么都不写（不重抄槽、不重建字体）──
+    const auto writes_after = machine.font_scale_write_count();
+    const auto rebuilds_after = machine.font_rebuild_requests();
+    machine.reapply_font_settings();
+    if (machine.font_scale_write_count() != writes_after) return fail("同值重算又写了（缺少相等短路）");
+    if (machine.font_rebuild_requests() != rebuilds_after) return fail("同值重算又重建字体（缺少相等短路）");
+    for (std::size_t i = 0; i < core::Machine::text_slot_count(); ++i) {
+        if (machine.text_slot_scale_width(i) != 1.5 || machine.text_slot_scale_height(i) != 1.25) {
+            return fail("同值重算改动了十槽的两格");
+        }
+    }
+    // ── 条件不成立 ⇒ 两个分量一律 1.0（不是"沿用上次"）──
+    machine.config_mut().set_int("display:ScreenMode", 0);
+    machine.config_mut().set_int("display:VirtualFullScreen", 0);
+    machine.reapply_font_settings();
+    if (machine.font_scale_width() != 1.0 || machine.font_scale_height() != 1.0) {
+        return fail("窗口态 / 虚拟全屏类型条件不成立时两个分量没有回到 1.0");
+    }
+    if (machine.font_scale_write_count() != writes_after + 1) return fail("条件不成立那趟没有重抄十槽两格");
+    for (std::size_t i = 0; i < core::Machine::text_slot_count(); ++i) {
+        if (machine.text_slot_scale_width(i) != 1.0 || machine.text_slot_scale_height(i) != 1.0) {
+            return fail("条件不成立那趟没有把十槽两格抄成 1.0");
+        }
+    }
+    // 比例记 1.0 之后的建字体高度：−40 + 0.5 ⇒ −39；−16 + 0.5 ⇒ −15。
+    if (machine.font_build_height(false) != -39) return fail("比例 1.0 时 A 支建字体高度不是 −39");
+    if (machine.font_build_height(true) != -15) return fail("比例 1.0 时 B 支建字体高度不是 −15");
+    return true;
+}
+
+bool check_key_tables_10c(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "key-tables: %s\n", what);
+        return false;
+    };
+    // `0x10c`（`CORE-OPS-SCALAR-TABLE-10C`）：第 2 个 = 动作号（索引）、第 1 个 = 键号（值）。
+    // 三张表：① 键→动作（与 0x10b 共用，本条不碰）② 动作→槽（只读）③ 槽→键（写；−1 = 未绑定）。
+    // 预置：动作 3 → 槽 5；执行 键 7 / 动作 3 ⇒ ③[5] ← 7，另外两张表一格不动。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x10C, {{0, 7}, {0, 3}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.set_action_slot_for_test(3, 5);
+        machine.load_root(bytes);
+        const auto key_action_before = machine.key_action(7);
+        if (!machine.step()) {
+            std::fprintf(stderr, "合法 0x10c 停机：%s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.slot_key(5) != 7) {
+            std::fprintf(stderr, "槽 5 的键号 = %d（期望 7）\n", machine.slot_key(5));
+            return false;
+        }
+        if (machine.action_slot(3) != 5) return fail("0x10c 写了「动作 → 槽」表（本条只读它）");
+        if (machine.key_action(7) != key_action_before) return fail("0x10c 写了「键 → 动作」表（本条不碰它）");
+        if (machine.slot_key(4) != -1) return fail("0x10c 写了别的槽（未绑定初值该是 −1）");
+    }
+    // 值按**无符号**判 > 31：32 与 −1 都要抛显示消息型异常，文本逐字（**没有**回车换行 ——
+    // `.lst` 的 `.data:0052005C aSetkeymulti db 'SetKeyMultiの引数が不正です．',0`），且不改任何状态。
+    for (const std::int32_t value : {32, -1}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x10C, {{0, static_cast<std::uint32_t>(value)}, {0, 3}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.set_action_slot_for_test(3, 5);
+        machine.load_root(bytes);
+        if (machine.step() || !machine.halted()) {
+            std::fprintf(stderr, "0x10c(value=%d) 没有抛\n", value);
+            return false;
+        }
+        if (machine.last_display_code() != "key-multi-range") {
+            std::fprintf(stderr, "0x10c(value=%d) 错误码 = %s\n", value,
+                         machine.last_display_code().c_str());
+            return false;
+        }
+        if (machine.last_display_message() != "SetKeyMultiの引数が不正です．") {
+            std::fprintf(stderr, "0x10c(value=%d) 文本 = %s\n", value,
+                         machine.last_display_message().c_str());
+            return false;
+        }
+        if (machine.action_slot(3) != 5 || machine.slot_key(5) != -1 ||
+            machine.key_action(7) != 0) {
+            return fail("越界值改了绑定表（应当一格都不写）");
+        }
+    }
+    // 读序 2 → 1：把第 2 个写成"读整必抛"的 type 11、第 1 个写成 type 2 ⇒ 先炸的必须是第 2 个。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x10C, {{2, 0}, {11, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (machine.step() || machine.last_stop().message != "read-int-unsupported-tag:11") {
+            std::fprintf(stderr, "0x10c 的读序不是 2 → 1（停因 = %s）\n",
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+
+// ── 位号越界：0x135 / 0x136（`CORE-OPS-BIT-SET-RESET`）──
+// 锚：`0x135` = 0x42F8C1（长度槽 5）· 0x42F8DA `cmp edi,1Fh` + `ja` · 0x42F8E0 起为错误文本支；
+//     `0x136` = 0x42F931 / 0x42F94A / 0x42F950。越界支**不读、不写目标**，只把固定文本（含 CRLF）
+//     写进**错误通道**，然后**正常返回**（不抛、不停机）。
+// ★ 判据只咬**目标操作数**：推进格数槽在判据之前就被写（0x42F8C1 / 0x42F931，反例池），
+//   ⛔ 不许把"状态不变"扩大到它。
+bool check_bit_op_arg_invalid(const core::OpcodeTable& table, std::uint32_t opcode, const char* text,
+                              std::int32_t in_range_target, std::int32_t in_range_expected) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "bit-op-arg-invalid: %s\n", what);
+        return false;
+    };
+    // 位号 32 与 −1 都必须越界（**无符号**比较）；目标预置 −1 ⇒ 写 0 / 写 ~0 都会露馅。
+    // ★ 错误通道的合同是**一次平台写请求（文本 + 长度）**，不是"诊断缓冲里多一条"（`60-ops-numeric.md:237`）
+    //   ⇒ 每个用例都装 writer 接缝直接咬那次请求；`errors_` 只作补充。只断言 `errors_` 的话，
+    //   把 `report_error` 的 writer 分支整个删掉仍然绿（假守卫）。
+    for (const std::int32_t bit : {32, -1}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, opcode, {{9, 0}, {0, static_cast<std::uint32_t>(bit)}});
+        emit_instruction(bytes, 0x55, {{9, 1}, {0, 7}});  // 越界支必须正常返回：下一条要执行
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        std::size_t requests = 0;
+        std::string requested_text;
+        std::size_t requested_length = 0;
+        machine.set_error_output_writer([&](const std::string& emitted, std::size_t length) {
+            ++requests;
+            requested_text = emitted;
+            requested_length = length;
+        });
+        machine.set_error_output_handle_valid(true);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, 0}, -1);
+        if (!machine.step() || machine.halted()) {
+            std::fprintf(stderr, "0x%X(bit=%d) 越界支把机器停了：%s\n", opcode, bit,
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.read_int(core::Operand{9, 0}) != -1) {
+            std::fprintf(stderr, "0x%X(bit=%d) 写了目标操作数（=%d，期望仍 −1）\n", opcode, bit,
+                         machine.read_int(core::Operand{9, 0}));
+            return false;
+        }
+        if (machine.errors().size() != 1) {
+            std::fprintf(stderr, "0x%X(bit=%d) 错误通道条数 = %zu（期望恰 1）\n", opcode, bit,
+                         machine.errors().size());
+            return false;
+        }
+        if (machine.errors().front() != text) {
+            std::fprintf(stderr, "0x%X(bit=%d) 错误文本不是固定文本：%s\n", opcode, bit,
+                         machine.errors().front().c_str());
+            return false;
+        }
+        // ★ 平台写请求：恰一次，文本与长度逐字（长度 = 字节数）。
+        if (requests != 1) {
+            std::fprintf(stderr, "0x%X(bit=%d) 平台写请求 = %zu 条（期望恰 1）\n", opcode, bit, requests);
+            return false;
+        }
+        if (requested_text != text || requested_length != requested_text.size()) {
+            std::fprintf(stderr, "0x%X(bit=%d) 请求文本 / 长度不对（len=%zu）\n", opcode, bit,
+                         requested_length);
+            return false;
+        }
+        if (!machine.step() || machine.local_int(1) != 7) {
+            return fail("越界支之后的指令没有执行（不是正常返回）");
+        }
+    }
+    // 对照：位号 31 在界内 ⇒ **必须真的动作**（防"把越界写成恒不写"），且**不发**平台写请求。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, opcode, {{9, 0}, {0, 31}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        std::size_t requests = 0;
+        machine.set_error_output_writer([&](const std::string&, std::size_t) { ++requests; });
+        machine.set_error_output_handle_valid(true);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, 0}, in_range_target);
+        if (!machine.step() || machine.read_int(core::Operand{9, 0}) != in_range_expected) {
+            std::fprintf(stderr, "0x%X(bit=31) 目标 = %d（期望 %d）\n", opcode,
+                         machine.read_int(core::Operand{9, 0}), in_range_expected);
+            return false;
+        }
+        if (!machine.errors().empty()) return fail("位号 31 在界内却记了错误");
+        if (requests != 0) return fail("位号 31 在界内却发了平台写请求");
+    }
+    return true;
+}
+bool check_rembit_arg_invalid(const core::OpcodeTable& table) {
+    return check_bit_op_arg_invalid(table, 0x136, "RemBitの引数が不正です．\r\n", -1,
+                                    static_cast<std::int32_t>(0x7FFFFFFFu));
+}
+bool check_setbit_arg_invalid(const core::OpcodeTable& table) {
+    return check_bit_op_arg_invalid(table, 0x135, "SetBitの引数が不正です．\r\n", 0,
+                                    static_cast<std::int32_t>(0x80000000u));
+}
+// ── 0x13F：位号越界（`CORE-OPS-BIT-TEST`）──
+// 与 0x135 / 0x136 同形，但**源与落点是两个操作数**：越界 ⇒ 第 1 个保持原值、源**不被读**、
+// 错误文本 `GetBitの引数が不正です．` + CRLF 进错误通道，正常返回（不抛、不停机）。
+// ★ 判据里把"源"故意写成**不支持读整**的类型（type 2 = 代码区里的文本立即数）：
+//   越界支只要读一次源就会抛 ⇒ 机器当场停。这样"越界时源也不读"才是**会红**的断言。
+bool check_getbit_arg_invalid(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const std::string kText = "GetBitの引数が不正です．\r\n";
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "getbit-arg-invalid: %s\n", what);
+        return false;
+    };
+    // ★ 与 0x135 / 0x136 一样：错误通道 = **一次平台写请求（文本 + 长度）** ⇒ 咬 writer 接缝，
+    //   `errors_` 只作补充（只断言诊断缓冲抓不住"writer 分支被删掉"）。
+    for (const std::int32_t bit : {32, -1}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x13F, {{9, 0}, {2, 0}, {0, static_cast<std::uint32_t>(bit)}});
+        emit_instruction(bytes, 0x55, {{9, 1}, {0, 7}});  // 越界支必须正常返回：下一条要执行
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        std::size_t requests = 0;
+        std::string requested_text;
+        std::size_t requested_length = 0;
+        machine.set_error_output_writer([&](const std::string& emitted, std::size_t length) {
+            ++requests;
+            requested_text = emitted;
+            requested_length = length;
+        });
+        machine.set_error_output_handle_valid(true);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, 0}, -1);       // 目标预置 −1：写 0 也会露馅
+        if (!machine.step() || machine.halted()) {
+            std::fprintf(stderr, "0x13F(bit=%d) 越界支把机器停了（读了源 / 抛了异常）：%s\n", bit,
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.read_int(core::Operand{9, 0}) != -1) {
+            std::fprintf(stderr, "0x13F(bit=%d) 写了目标操作数（=%d，期望仍 −1）\n", bit,
+                         machine.read_int(core::Operand{9, 0}));
+            return false;
+        }
+        if (machine.errors().size() != 1 || machine.errors().front() != kText) {
+            std::fprintf(stderr, "0x13F(bit=%d) 错误通道 = %zu 条（期望恰 1 条固定文本）\n", bit,
+                         machine.errors().size());
+            return false;
+        }
+        if (requests != 1) {
+            std::fprintf(stderr, "0x13F(bit=%d) 平台写请求 = %zu 条（期望恰 1）\n", bit, requests);
+            return false;
+        }
+        if (requested_text != kText || requested_length != kText.size()) {
+            std::fprintf(stderr, "0x13F(bit=%d) 请求文本 / 长度不对（len=%zu）\n", bit, requested_length);
+            return false;
+        }
+        if (!machine.step() || machine.local_int(1) != 7) return fail("越界支之后的指令没有执行");
+    }
+    // 对照 1：位号 30 在界内 ⇒ 源的第 30 位（源 = 0x40000000）读成 1；结果**归一**成 1。
+    // 对照 2：位号 0 ⇒ 0（不是"原值"、也不是掩码后的整字）。界内对照**不发**平台写请求。
+    for (const auto& [bit, value, expected] :
+         {std::tuple<std::int32_t, std::int32_t, std::int32_t>{30, 0x40000000, 1},
+          std::tuple<std::int32_t, std::int32_t, std::int32_t>{0, 0x40000000, 0}}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x13F, {{9, 0}, {9, 2}, {0, static_cast<std::uint32_t>(bit)}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        std::size_t requests = 0;
+        machine.set_error_output_writer([&](const std::string&, std::size_t) { ++requests; });
+        machine.set_error_output_handle_valid(true);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, 2}, value);
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x13F(bit=%d) 合法位号把机器停了：%s\n", bit,
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.local_int(0) != expected) {
+            std::fprintf(stderr, "0x13F(bit=%d, src=%d) 落点 = %d（期望 %d）\n", bit, value,
+                         machine.local_int(0), expected);
+            return false;
+        }
+        if (!machine.errors().empty()) return fail("合法位号却记了错误");
+        if (requests != 0) return fail("合法位号却发了平台写请求");
+    }
+    return true;
+}
+// ── 0x60 范围 = 0（`CORE-OPS-RANDOM-60`）──
+// 四步里的第 3 步：落点经**写整型**先写 0，**然后**抛**显示消息型异常**（文本逐字）——
+// 抛出之前随机数已经取走一次（不回退）。⛔ 判据是"等于 0"，不是"小于等于 0"。
+bool check_random_range_zero(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const std::string kText = "RANDOMの最大値が0になっています．";
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "random-range-zero: %s\n", what);
+        return false;
+    };
+    int draws = 0;
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x60, {{3, 1}, {0, 0}});  // 范围 = 0
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table);
+    machine.set_random_source([&draws] {
+        ++draws;
+        return 0x40000000u;
+    });
+    machine.load_root(bytes);
+    // ★ 落点**先预置成非 0**：全局整型池的缺槽读出来本来就是 0 ⇒ 不预置的话，"写了 0"与
+    //   "根本没写"在观测上一样（`pnpm test:mutation` 实测过：不写 0 的变异抓不住）。
+    machine.write_int(core::Operand{3, 1}, 5);
+    if (machine.step()) return fail("范围 = 0 没有抛（step 返回 true）");
+    if (machine.read_int(core::Operand{3, 1}) != 0) {
+        std::fprintf(stderr, "0x60 范围 = 0 时落点 = %d（抛出之前必须已被写成 0）\n",
+                     machine.read_int(core::Operand{3, 1}));
+        return false;
+    }
+    if (draws != 1) return fail("随机数没有恰取一次（或抛出时回退了）");
+    if (machine.last_display_message() != kText) {
+        std::fprintf(stderr, "0x60 显示消息 = 「%s」（期望「%s」）\n",
+                     machine.last_display_message().c_str(), kText.c_str());
+        return false;
+    }
+    if (machine.last_display_code() != "random-range-zero") {
+        std::fprintf(stderr, "0x60 错误码 = %s\n", machine.last_display_code().c_str());
+        return false;
+    }
+    if (machine.last_stop().message.rfind("display-message:random-range-zero", 0) != 0) {
+        std::fprintf(stderr, "0x60 停因不是显示消息型异常：%s\n", machine.last_stop().message.c_str());
+        return false;
+    }
+    // 对照：范围 = −1 **不抛**（判据是 = 0），余数 = 随机数 mod 1 = 0；随机数仍只取一次。
+    {
+        int negative_draws = 0;
+        auto negative = make_script_with_body();
+        emit_instruction(negative, 0x60, {{3, 1}, {0, 0xFFFFFFFFu}});  // −1
+        emit_instruction(negative, 2, {});
+        core::Machine negative_machine(key, table);
+        negative_machine.set_random_source([&negative_draws] {
+            ++negative_draws;
+            return 0x40000000u;
+        });
+        negative_machine.load_root(negative);
+        if (!negative_machine.step()) {
+            std::fprintf(stderr, "0x60 范围 −1 抛了：%s\n", negative_machine.last_stop().message.c_str());
+            return false;
+        }
+        if (negative_machine.read_int(core::Operand{3, 1}) != 0 || negative_draws != 1) {
+            return fail("范围 −1 的余数 / 抽取次数不对");
+        }
+        if (!negative_machine.last_display_message().empty()) return fail("范围 −1 却记了显示消息");
+    }
+    return true;
+}
+// ── 0x64 块越界（`CORE-OPS-ARRAY-COPY`）──
+// spec 把"块编号越界 / 个数越过代码区末尾"列为**未定义行为、不作断言**；本模型选择
+// **响亮失败 + 诊断**（`array-block-past-code`），⛔ 不静默、不夹紧。判据：机器停在诊断上、
+// 目标一格都没写；再给一条**合法块**的对照（否则"永远抛"也能让上两条绿）。
+bool check_array_block_bounds(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "array-block-bounds: %s\n", what);
+        return false;
+    };
+    // 对照：块 = 6 号字（0x64 占 5 个 word、0x2 占 1 个 word）⇒ count = 3、数据 0 / 1 / −1。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x64, {{9, 0}, {0, 6}});
+        emit_instruction(bytes, 2, {});
+        put_u32(bytes, 3);            // count
+        put_u32(bytes, 0);            // ENC 的源 dword
+        put_u32(bytes, 1);
+        put_u32(bytes, 0xFFFFFFFFu);
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x64 合法块把机器停了：%s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        const std::int32_t expected[3] = {0, 1, -1};
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            if (machine.local_int(i) != expected[i]) {
+                std::fprintf(stderr, "0x64 合法块 A[%u] = %d（期望 %d）\n", i, machine.local_int(i),
+                             expected[i]);
+                return false;
+            }
+        }
+    }
+    // 越界三例：块号远在代码区外 / 块号为负 / count 越过代码区末尾。
+    for (const std::int32_t block : {0x1000, -1}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x64, {{9, 0}, {0, static_cast<std::uint32_t>(block)}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        for (std::uint32_t i = 0; i < 3; ++i) machine.write_int(core::Operand{9, i}, 7);
+        if (machine.step()) {
+            std::fprintf(stderr, "0x64(block=%d) 越界却继续执行（没有诊断）\n", block);
+            return false;
+        }
+        if (machine.last_stop().message.rfind("array-block-past-code", 0) != 0) {
+            std::fprintf(stderr, "0x64(block=%d) 诊断 = %s\n", block,
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            if (machine.local_int(i) != 7) return fail("越界支写了目标格（应当一格都不写）");
+        }
+    }
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x64, {{9, 0}, {0, 6}});
+        emit_instruction(bytes, 2, {});
+        put_u32(bytes, 100);  // count 说 100 个字，实际只有 2 个
+        put_u32(bytes, 0);
+        put_u32(bytes, 1);
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        for (std::uint32_t i = 0; i < 3; ++i) machine.write_int(core::Operand{9, i}, 7);
+        if (machine.step()) return fail("块内 count 越过代码区末尾却继续执行");
+        if (machine.last_stop().message.rfind("array-block-past-code", 0) != 0 ||
+            machine.last_stop().message.find("count=100") == std::string::npos) {
+            std::fprintf(stderr, "0x64(count 越界) 诊断 = %s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            if (machine.local_int(i) != 7) return fail("count 越界支写了目标格（应当一格都不写）");
+        }
+    }
+    // 个数 ≤ 0 ⇒ **什么都不做**（`60-ops-array.md:118`，有符号语义）：`0xFFFFFFFF` 在引擎里是 −1，
+    // ⛔ 不许按 u32 判成"越过代码区末尾"。目标三格预置 7 ⇒ 执行后必须仍是 7，且**不停机**。
+    for (const std::uint32_t raw_count : {0xFFFFFFFFu, 0u}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x64, {{9, 0}, {0, 6}});
+        emit_instruction(bytes, 2, {});
+        put_u32(bytes, raw_count);
+        put_u32(bytes, 0);  // 块里仍有数据字：本支按个数判，不看它们
+        put_u32(bytes, 1);
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        for (std::uint32_t i = 0; i < 3; ++i) machine.write_int(core::Operand{9, i}, 7);
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x64(count=%u) 把机器停了（个数 ≤ 0 应当什么都不做）：%s\n", raw_count,
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            if (machine.local_int(i) != 7) return fail("个数 ≤ 0 时写了目标格（应当一格都不写）");
+        }
+    }
+    return true;
+}
+// ── 三条数组写指令的**实现侧边界**（`RES-ARRAY-FILL-ZERO-OOB` / `-SET-TO-OOB` / `-ARRAY-COPY-OOB`）──
+// spec 的 impact：「实现必须拒绝或先记诊断再拒绝（不许 clamp、不许静默写坏相邻池）」。
+// 数据：目标 = **局部整型池窗口的最后一格**（tag 9，下标 0x100000/4 − 1），count = 2 ⇒
+// 第 2 格会落进相邻的局部浮点族窗口。本模型必须拒绝，且**一格都不写**（用预置值咬住）。
+// ★ "每条数组的容量"在本模型里没有数据（指令只给地址、不给容量；引擎结构上同样无从比较）⇒
+//   这里能机械判的是"跨出池窗口"这一档；⛔ 不是把 count 截断成容量（那会掩盖 UB）。
+bool check_array_write_bounds(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    constexpr std::uint32_t kLastLocalInt = 0x00100000u / 4u - 1u;  // 262143
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "array-write-bounds: %s\n", what);
+        return false;
+    };
+    // 0x6c / 0x2d8：目标 = 末格、count = 2 ⇒ 越界；目标格预置 1234、相邻浮点格预置 1.5。
+    for (const std::uint32_t opcode : {0x6Cu, 0x2D8u}) {
+        auto bytes = make_script_with_body();
+        if (opcode == 0x6C) {
+            emit_instruction(bytes, 0x6C, {{9, kLastLocalInt}, {0, 2}});
+        } else {
+            emit_instruction(bytes, 0x2D8, {{9, kLastLocalInt}, {0, 7}, {0, 2}});
+        }
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, kLastLocalInt}, 1234);
+        machine.write_float(core::Operand{10, 0}, 1.5);
+        if (machine.step()) {
+            std::fprintf(stderr, "0x%X 目标跨出池窗口却继续执行\n", opcode);
+            return false;
+        }
+        if (machine.last_stop().message.rfind("array-write-past-pool", 0) != 0) {
+            std::fprintf(stderr, "0x%X 诊断 = %s\n", opcode, machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.local_int(kLastLocalInt) != 1234) return fail("越界支写了目标格");
+        if (machine.read_float(core::Operand{10, 0}) != 1.5) return fail("越界支写坏了相邻池");
+    }
+    // 对照：0x6c 在窗口内（倒数第 2 格、count = 2）⇒ 两格都写 ENC(0)（读整 = 0），必须照常执行。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x6C, {{9, kLastLocalInt - 1u}, {0, 2}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, kLastLocalInt - 1u}, 1234);
+        machine.write_int(core::Operand{9, kLastLocalInt}, 1234);
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x6c 窗口内的两格被拒了：%s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.local_int(kLastLocalInt - 1u) != 0 || machine.local_int(kLastLocalInt) != 0) {
+            return fail("0x6c 窗口内没有写满两格 ENC(0)");
+        }
+    }
+    // 0x64：目标 = 末格、块内 count = 2 ⇒ 越界（目标格与相邻浮点格都不许被碰）。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x64, {{9, kLastLocalInt}, {0, 6}});
+        emit_instruction(bytes, 2, {});
+        put_u32(bytes, 2);  // count
+        put_u32(bytes, 5);  // 源 dword 0
+        put_u32(bytes, 6);  // 源 dword 1
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, kLastLocalInt}, 1234);
+        machine.write_float(core::Operand{10, 0}, 1.5);
+        if (machine.step()) return fail("0x64 目标区间跨出池窗口却继续执行");
+        if (machine.last_stop().message.rfind("array-write-past-pool", 0) != 0) {
+            std::fprintf(stderr, "0x64 诊断 = %s\n", machine.last_stop().message.c_str());
+            return false;
+        }
+        if (machine.local_int(kLastLocalInt) != 1234) return fail("0x64 越界支写了目标格");
+        if (machine.read_float(core::Operand{10, 0}) != 1.5) return fail("0x64 越界支写坏了相邻池");
+    }
+    return true;
+}
+// ── 0x6C / 0x2D8 的**字符串族落点**（`CORE-OPS-ARRAY-FILL-ZERO` / `-SET-TO`）──
+// 字符串族元素是一条 **28 字节记录**（`40-pools` 的「字符串记录」：记录内部字段布局**不在本版**）。
+// spec 的裸写口径：`0x6c` / `0x2d8` 仍是"从目标地址起逐 4 字节写 count 个 32 位字"，
+// 目标落字符串族时同样如此（⛔ 不是按 28 字节步进）⇒ 本模型按地址登记那些 4 字节字。
+// 判据走**指令面**：先写记录，再用 `0x1b0`（裸池拷贝）把记录里的字搬进局部整型池读回解码值。
+// ★ 解码是双射 ⇒ "读回 = 原值"等价于"写进去的就是 `ENC(原值)` 的裸位模式"。
+bool check_string_record_raw(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "string-record-raw: %s\n", what);
+        return false;
+    };
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x6C, {{11, 0}, {0, 2}});          // 局部字符串 0：2 格 ← ENC(0)
+    emit_instruction(bytes, 0x2D8, {{11, 1}, {0, 7}, {0, 2}});  // 局部字符串 1：2 格 ← ENC(7)
+    emit_instruction(bytes, 0x1B0, {{11, 0}, {9, 0}, {0, 2}});  // 记录 0 的前 2 个字 → 局部整型 0/1
+    emit_instruction(bytes, 0x1B0, {{11, 1}, {9, 2}, {0, 2}});  // 记录 1 的前 2 个字 → 局部整型 2/3
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table);
+    machine.load_root(bytes);
+    for (int i = 0; i < 4; ++i) {
+        if (!machine.step()) {
+            std::fprintf(stderr, "字符串族裸写第 %d 步失败：%s\n", i,
+                         machine.last_stop().message.c_str());
+            return false;
+        }
+    }
+    const std::int32_t expected[4] = {0, 0, 7, 7};
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        if (machine.local_int(i) != expected[i]) {
+            std::fprintf(stderr, "字符串族读回 [%u] = %d（期望 %d）\n", i, machine.local_int(i),
+                         expected[i]);
+            return false;
+        }
+    }
+    if (!machine.errors().empty()) return fail("字符串族裸写记了错误");
+    return true;
+}
+// ── 错误通道的**平台写请求**与两个抑制条件（`60-ops-numeric` 的「错误通道」）──
+// 一次触发 = **一个**请求（文本 + 长度）；① 输出句柄无效 ⇒ 整条丢弃；② 宿主过滤器返回非 0 ⇒ 丢弃。
+// ★ 两个抑制条件下诊断**仍然保留**在 `errors_` 里（"没发请求"与"没记诊断"是两件事）。
+bool check_error_channel(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const std::string kText = "SetBitの引数が不正です．\r\n";
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "error-channel: %s\n", what);
+        return false;
+    };
+    struct Request {
+        std::string text;
+        std::size_t length = 0;
+    };
+    struct Outcome {
+        bool stepped = false;
+        std::vector<Request> requests;
+        std::size_t errors = 0;
+        std::string error_text;
+        std::size_t write_requests = 0;
+    };
+    const auto run_once = [&](bool handle_valid, int filter_value) {
+        Outcome out;
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x135, {{9, 0}, {0, 32}});  // 位号 32 ⇒ 错误通道
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.set_error_output_writer(
+            [&out](const std::string& text, std::size_t length) {
+                out.requests.push_back(Request{text, length});
+            });
+        machine.set_error_output_handle_valid(handle_valid);
+        machine.set_error_output_filter([filter_value] { return filter_value; });
+        machine.load_root(bytes);
+        out.stepped = machine.step();
+        out.errors = machine.errors().size();
+        if (!machine.errors().empty()) out.error_text = machine.errors().front();
+        out.write_requests = machine.error_write_requests();
+        return out;
+    };
+    // ① 句柄有效 + 过滤器 0：恰一条请求，文本与长度逐字。
+    {
+        const Outcome out = run_once(true, 0);
+        if (!out.stepped) return fail("错误通道触发把机器停了（它不该抛 / 不该中止）");
+        if (out.requests.size() != 1) {
+            std::fprintf(stderr, "平台写请求 = %zu 条（期望恰 1）\n", out.requests.size());
+            return false;
+        }
+        if (out.requests.front().text != kText) {
+            std::fprintf(stderr, "请求文本 = 「%s」（期望「%s」）\n", out.requests.front().text.c_str(),
+                         kText.c_str());
+            return false;
+        }
+        if (out.requests.front().length != kText.size()) {
+            std::fprintf(stderr, "请求长度 = %zu（期望 %zu）\n", out.requests.front().length,
+                         kText.size());
+            return false;
+        }
+        if (out.write_requests != 1) return fail("请求计数 ≠ 1");
+        if (out.errors != 1 || out.error_text != kText) return fail("发了请求却丢了诊断");
+    }
+    // ② 输出句柄无效 ⇒ 不发请求；诊断仍在。
+    {
+        const Outcome out = run_once(false, 0);
+        if (!out.stepped) return fail("句柄无效支把机器停了");
+        if (!out.requests.empty()) return fail("句柄无效却发了平台写请求");
+        if (out.errors != 1 || out.error_text != kText) return fail("句柄无效时诊断没有保留");
+    }
+    // ③ 宿主过滤器返回非 0 ⇒ 丢弃；诊断仍在。
+    {
+        const Outcome out = run_once(true, 7);
+        if (!out.stepped) return fail("过滤器抑制支把机器停了");
+        if (!out.requests.empty()) return fail("过滤器返回非 0 却发了请求");
+        if (out.errors != 1) return fail("过滤器抑制时诊断没有保留");
+    }
+    return true;
+}
+// ── 0x12F 的**写序**（`CORE-OPS-ARRAY-SORT-12F`）：A 与 B 别名 ⇒ 右键必须每次比较重算 ──
+// 数据：A = B = 局部整型 0 起（三格预置**解码 0**）、C = 局部整型 20 起（不写 ⇒ 解码 0）、N = 3。
+// 写序推演（A = B 别名 ⇒ 移位会改掉正在读的键）：
+//   `A[0] ← 原始 0` 把 B[0] 改成**原始 0**（解出的不是 0）；i = 1 落位后 A[1] 也是原始 0；
+//   i = 2 第一次比较右移 `A[2] ← A[1]`（原始 0）⇒ **B[2]** 随之变成原始 0 ⇒
+//   第二次比较的右键必须**重读 B[2]/C[2]**；缓存右键（旧实现）得到 [2,1,0]，按写序是 [1,2,0]。
+bool check_sort_12f_alias(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x12F, {{9, 0}, {9, 0}, {9, 20}, {0, 3}});  // A = B（别名）
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table);
+    machine.load_root(bytes);
+    for (std::uint32_t i = 0; i < 3; ++i) machine.write_int(core::Operand{9, i}, 0);  // A 初值 = 解码 0
+    if (!machine.step()) {
+        std::fprintf(stderr, "0x12F 别名用例把机器停了：%s\n", machine.last_stop().message.c_str());
+        return false;
+    }
+    // ★ "每次重算右键"的写序结果；**缓存右键**会给出 [2, 1, 0]（等价于把 A 的前两格互换）⇒
+    //   这两格就是两种写序的判别点（数据由推演选定，不是抄实现）。
+    const std::int32_t expected[3] = {1, 2, 0};
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        if (machine.local_int(i) != expected[i]) {
+            std::fprintf(stderr, "0x12F 别名 A[%u] = %d（每次重算的写序要求 %d）\n", i,
+                         machine.local_int(i), expected[i]);
+            return false;
+        }
+    }
+    return true;
+}
+// ── 字体粗细：0x2bd（`CORE-OPS-SCALAR-VARIANT-PROLOGUE`）──
+// 锚：0x42622A `mov eax,2BCh`（700）· 0x42622F / 0x426235 写字体对象两格；0x426243 / 0x42624B 是 0 支。
+// ⛔ 它写的是**二选一常量**，不是操作数原值；两格相距很远，但同属那个字体对象。
+// ★ 本模型不建模"尾跳进重建入口"（残差 `RES-OPS-SCALAR-VARIANT-REBUILD`）：同一条脚本里连跑两条
+//   只是为了让 0 支**可证伪**（先前两格是 700，再要求它们变 0），⛔ 不是对控制流的断言。
+bool check_font_weight_2bd(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "font-weight-2bd: %s\n", what);
+        return false;
+    };
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x2BD, {{0, 1}});  // 非 0 ⇒ 两格都是 700
+    emit_instruction(bytes, 0x2BD, {{0, 0}});  // 0 ⇒ 两格都是 0
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table);
+    machine.load_root(bytes);
+    if (!machine.step() || machine.font_metric_a() != 700 || machine.font_metric_b() != 700) {
+        std::fprintf(stderr, "0x2bd(1) 两格 = %d/%d（期望 700/700）\n", machine.font_metric_a(),
+                     machine.font_metric_b());
+        return false;
+    }
+    if (!machine.step() || machine.font_metric_a() != 0 || machine.font_metric_b() != 0) {
+        std::fprintf(stderr, "0x2bd(0) 两格 = %d/%d（期望 0/0）\n", machine.font_metric_a(),
+                     machine.font_metric_b());
+        return false;
+    }
+    if (!machine.errors().empty()) return fail("0x2bd 不该记错误");
     return true;
 }
 // ── 渲染原语：数值文本 `0x205` 与清屏 `0x20e` ──
@@ -8618,6 +10048,26 @@ int main(int argc, char** argv) {
     bool only_wait_timer = false;
     bool only_wait_colour_window = false;
     bool only_text_cell_reveal = false;
+    bool only_rembit_arg_invalid = false;
+    bool only_setbit_arg_invalid = false;
+    bool only_font_weight_2bd = false;
+    bool only_getbit_arg_invalid = false;
+    bool only_random_range_zero = false;
+    bool only_array_block_bounds = false;
+    bool only_array_write_bounds = false;
+    bool only_string_record_raw = false;
+    bool only_error_channel = false;
+    bool only_sort_12f_alias = false;
+    bool only_pair_88 = false;
+    bool only_bit27_service = false;
+    bool only_adv_text_bit27 = false;
+    bool only_font_pairs = false;
+    bool only_font_scale = false;
+    bool only_key_tables = false;
+    bool only_se_registration = false;
+    bool only_se_stop = false;
+    bool only_event_library = false;
+    bool only_output_object = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
@@ -8650,6 +10100,26 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-wait-timer") == 0) only_wait_timer = true;
         else if (std::strcmp(argv[i], "--only-wait-colour-window") == 0) only_wait_colour_window = true;
         else if (std::strcmp(argv[i], "--only-cell-reveal") == 0) only_text_cell_reveal = true;
+        else if (std::strcmp(argv[i], "--only-rembit-arg-invalid") == 0) only_rembit_arg_invalid = true;
+        else if (std::strcmp(argv[i], "--only-setbit-arg-invalid") == 0) only_setbit_arg_invalid = true;
+        else if (std::strcmp(argv[i], "--only-font-weight-2bd") == 0) only_font_weight_2bd = true;
+        else if (std::strcmp(argv[i], "--only-getbit-arg-invalid") == 0) only_getbit_arg_invalid = true;
+        else if (std::strcmp(argv[i], "--only-random-range-zero") == 0) only_random_range_zero = true;
+        else if (std::strcmp(argv[i], "--only-array-block-bounds") == 0) only_array_block_bounds = true;
+        else if (std::strcmp(argv[i], "--only-array-write-bounds") == 0) only_array_write_bounds = true;
+        else if (std::strcmp(argv[i], "--only-string-record-raw") == 0) only_string_record_raw = true;
+        else if (std::strcmp(argv[i], "--only-error-channel") == 0) only_error_channel = true;
+        else if (std::strcmp(argv[i], "--only-12f-alias") == 0) only_sort_12f_alias = true;
+        else if (std::strcmp(argv[i], "--only-88-mode-cells") == 0) only_pair_88 = true;
+        else if (std::strcmp(argv[i], "--only-bit27-service") == 0) only_bit27_service = true;
+        else if (std::strcmp(argv[i], "--only-adv-text-bit27") == 0) only_adv_text_bit27 = true;
+        else if (std::strcmp(argv[i], "--only-font-pairs") == 0) only_font_pairs = true;
+        else if (std::strcmp(argv[i], "--only-font-scale") == 0) only_font_scale = true;
+        else if (std::strcmp(argv[i], "--only-key-tables") == 0) only_key_tables = true;
+        else if (std::strcmp(argv[i], "--only-se-registration") == 0) only_se_registration = true;
+        else if (std::strcmp(argv[i], "--only-se-stop") == 0) only_se_stop = true;
+        else if (std::strcmp(argv[i], "--only-event-library") == 0) only_event_library = true;
+        else if (std::strcmp(argv[i], "--only-output-object") == 0) only_output_object = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -8714,6 +10184,85 @@ int main(int argc, char** argv) {
             std::printf("core-selftest(record-flags): PASS\n");
             return 0;
         }
+        if (only_rembit_arg_invalid) {
+            // `0x136`：位号 32 / −1 ⇒ 目标原样不动、不抛、错误通道恰一条固定文本；位号 31 对照。
+            if (!check_rembit_arg_invalid(table)) return 1;
+            std::printf("core-selftest(rembit-arg-invalid): PASS\n");
+            return 0;
+        }
+        if (only_setbit_arg_invalid) {
+            // `0x135`：同形；位号 31 作用在 0 上 ⇒ 0x80000000。
+            if (!check_setbit_arg_invalid(table)) return 1;
+            std::printf("core-selftest(setbit-arg-invalid): PASS\n");
+            return 0;
+        }
+        if (only_font_weight_2bd) {
+            // `0x2bd`：非 0 ⇒ 字体对象两格都是 700；0 ⇒ 两格都是 0。
+            if (!check_font_weight_2bd(table)) return 1;
+            std::printf("core-selftest(font-weight-2bd): PASS\n");
+            return 0;
+        }
+        if (only_getbit_arg_invalid) {
+            // `0x13f`：位号 32 / −1 ⇒ 落点原样不动、源也不读、错误通道恰一条固定文本；界内对照归一成 0/1。
+            if (!check_getbit_arg_invalid(table)) return 1;
+            std::printf("core-selftest(getbit-arg-invalid): PASS\n");
+            return 0;
+        }
+        if (only_random_range_zero) {
+            // `0x60`：范围 = 0 ⇒ 先写 0、再抛显示消息型异常（固定文本）；范围 = −1 不抛。
+            if (!check_random_range_zero(table)) return 1;
+            std::printf("core-selftest(random-range-zero): PASS\n");
+            return 0;
+        }
+        if (only_array_block_bounds) {
+            // `0x64`：块号 / count 越过代码区 ⇒ 响亮失败 + 诊断，目标一格不写；合法块对照。
+            if (!check_array_block_bounds(table)) return 1;
+            std::printf("core-selftest(array-block-bounds): PASS\n");
+            return 0;
+        }
+        if (only_array_write_bounds) {
+            // 数组写区间跨出目标池窗口 ⇒ 拒绝 + 诊断（三条写指令共用判据），一格都不写。
+            if (!check_array_write_bounds(table)) return 1;
+            std::printf("core-selftest(array-write-bounds): PASS\n");
+            return 0;
+        }
+        if (only_string_record_raw) {
+            // `0x6c` / `0x2d8` 的字符串族落点：记录内 4 字节裸写（读回按裸位模式）。
+            if (!check_string_record_raw(table)) return 1;
+            std::printf("core-selftest(string-record-raw): PASS\n");
+            return 0;
+        }
+        if (only_error_channel) {
+            // 错误通道：一次触发 = 一次平台写请求；两个抑制条件；诊断无条件保留。
+            if (!check_error_channel(table)) return 1;
+            std::printf("core-selftest(error-channel): PASS\n");
+            return 0;
+        }
+        if (only_sort_12f_alias) {
+            // `0x12f` 的写序：A 与 B 别名时右键每次比较重算（⛔ 不许缓存成 key_j）。
+            if (!check_sort_12f_alias(table)) return 1;
+            std::printf("core-selftest(12f-alias): PASS\n");
+            return 0;
+        }
+        if (only_pair_88) {
+            // `0x88` 的落点 = 模式族 C / D / G（⛔ 不是死写）；`0x19c` 用 `0x88` 写的 C；
+            // `0x1cc` 的状态格 = 模式族 E。
+            if (!check_pair_88_mode_cells(table)) return 1;
+            std::printf("core-selftest(88-mode-cells): PASS\n");
+            return 0;
+        }
+        if (only_bit27_service) {
+            // 第 27 位服务体：一次消息处理 + 让出一拍 + 窥视，然后交回迭代头（本迭代不派发）。
+            if (!check_gate_bit27_service(table)) return 1;
+            std::printf("core-selftest(bit27-service): PASS\n");
+            return 0;
+        }
+        if (only_adv_text_bit27) {
+            // 第 27 位的产品置点：`0x71` 调用返回非 0 / 追加前置支 / `0x305` ②。
+            if (!check_adv_text_bit27_set_points(table)) return 1;
+            std::printf("core-selftest(adv-text-bit27): PASS\n");
+            return 0;
+        }
         if (only_pacing) {
             // 打字节流：每 D 毫秒一格、每帧最多一格；间隔 = 0 ⇒ 立即抽干。
             if (!check_text_pacing(table)) return 1;
@@ -8733,6 +10282,48 @@ int main(int argc, char** argv) {
             // 两套字号（`0x75` = A 支 / `0x197` = B 支）+ 选支的行为级断言。
             if (!check_font_branches(table)) return 1;
             std::printf("core-selftest(font): PASS\n");
+            return 0;
+        }
+        if (only_font_pairs) {
+            // `0x1a5` / `0x2fe`：各写本支那一对描述（名原样 / '@'+名、高 / 下一格按本支字号重算）。
+            if (!check_font_pairs_1a5_2fe(table)) return 1;
+            std::printf("core-selftest(font-pairs): PASS\n");
+            return 0;
+        }
+        if (only_font_scale) {
+            // 建字体缩放：比例 = 视口 ÷ 配置客户区；十槽两格；相等短路；建字体高度截断公式。
+            if (!check_font_scale_build(table)) return 1;
+            std::printf("core-selftest(font-scale): PASS\n");
+            return 0;
+        }
+        if (only_key_tables) {
+            // `0x10c` 三张表：① 不碰、② 只读、③ 写；无符号值 > 31 抛固定文本；读序 2 → 1。
+            if (!check_key_tables_10c(table)) return 1;
+            std::printf("core-selftest(key-tables): PASS\n");
+            return 0;
+        }
+        if (only_se_registration) {
+            // `0x2bf` 的登记五格（活动 / 起点 / 时长 / 交值 / 待办）、通道 ≥10 不写、交付读它们。
+            if (!check_se_registration_2bf(table)) return 1;
+            std::printf("core-selftest(se-registration-2bf): PASS\n");
+            return 0;
+        }
+        if (only_se_stop) {
+            // `0xb6`：后端不存在 ⇒ 一格不清；存在 ⇒ 先请求、再清两格（播放名 + 活动）。
+            if (!check_se_stop_b6(table)) return 1;
+            std::printf("core-selftest(se-stop-b6): PASS\n");
+            return 0;
+        }
+        if (only_event_library) {
+            // `0x143` 的投递源 = 文件库槽位表：装载登记 ⇒ 投号<<24；析构 ⇒ 不再投。
+            if (!check_event_143_file_library(table)) return 1;
+            std::printf("core-selftest(event-143-file-library): PASS\n");
+            return 0;
+        }
+        if (only_output_object) {
+            // 输出对象三项：追加 / 位置前缀追加 / 报告（日志逐字 + 根错误处理）。
+            if (!check_output_object_report(table)) return 1;
+            std::printf("core-selftest(output-object): PASS\n");
             return 0;
         }
         if (only_glyph) {
@@ -10374,9 +11965,29 @@ int main(int argc, char** argv) {
         if (!check_audio_slot_table()) return 1;
         if (!check_audio_slot_bounds(table)) return 1;
         if (!check_time_delivery(table)) return 1;
+        if (!check_se_registration_2bf(table)) return 1;
+        if (!check_se_stop_b6(table)) return 1;
+        if (!check_event_143_file_library(table)) return 1;
+        if (!check_output_object_report(table)) return 1;
         if (!check_gate_split_branches(table)) return 1;
         if (!check_gate_chain(table)) return 1;
         if (!check_font_branches(table)) return 1;
+        if (!check_font_pairs_1a5_2fe(table)) return 1;
+        if (!check_font_scale_build(table)) return 1;
+        if (!check_key_tables_10c(table)) return 1;
+        if (!check_rembit_arg_invalid(table)) return 1;
+        if (!check_setbit_arg_invalid(table)) return 1;
+        if (!check_getbit_arg_invalid(table)) return 1;
+        if (!check_random_range_zero(table)) return 1;
+        if (!check_array_block_bounds(table)) return 1;
+        if (!check_array_write_bounds(table)) return 1;
+        if (!check_string_record_raw(table)) return 1;
+        if (!check_error_channel(table)) return 1;
+        if (!check_sort_12f_alias(table)) return 1;
+        if (!check_pair_88_mode_cells(table)) return 1;
+        if (!check_gate_bit27_service(table)) return 1;
+        if (!check_adv_text_bit27_set_points(table)) return 1;
+        if (!check_font_weight_2bd(table)) return 1;
         if (!check_render_prims(table)) return 1;
         if (!check_text_layer_surface(table)) return 1;
         std::printf(

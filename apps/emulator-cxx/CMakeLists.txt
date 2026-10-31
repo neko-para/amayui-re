@@ -113,12 +113,40 @@ add_test(NAME emulator-core-selftest COMMAND emulator-core-selftest)
 # ★ 音效 / 配音的**子集**单独注册一条：spec 的 evidence 要点到"某条用例"，聚合的那一条点不出子集
 #   （`CORE-OPS-AUDIO-WAV` / `-BGM-FADE` / `CORE-OPS-VOICE-PLAY` 的证据都指这里）。
 add_test(NAME emulator-core-audio-voice COMMAND emulator-core-selftest --only-audio)
+# ★ `0x2bf`（音效通道登记）：活动 / 起点 ← 0 / 时长 / 交值 / 待办 五格逐项，通道 ≥10 一格不写，
+#   交付两次（未到 / 到期）⇒ 到期交出交值并清活动；0x2bf → 0xb6 清活动而不动另三格。
+#   登记时写错字段（通道 / 交值 / 时长）/ 不置待办 / 0xb6 只清表不清活动 ⇒ 本条红。
+add_test(NAME spec_se_registration_2bf COMMAND emulator-core-selftest --only-se-registration)
+# ★ `0xb6`（按通道停止）：后端不存在（接缝缺省）⇒ 不等于"照常清格"：两格原样、不发请求；
+#   接上后端 ⇒ 先请求、再无条件清「播放名」格与活动；起点 / 时长 / 交值不动。
+#   没有后端前置（总是清）/ 清了表却没清活动 ⇒ 本条红。
+add_test(NAME spec_se_stop_b6 COMMAND emulator-core-selftest --only-se-stop)
+# ★ `0x143` 的投递源 = **文件库的 256 格槽位表**（不是 0x143 私有的登记表）：装载按文件自带的号登记，
+#   执行时逐槽（1..255）投 `号 << 24`；文件库析构逐槽清 0 之后不再投。
+#   不登记装载（旧实现：产品路径恒 0）/ 循环从 0 起 / 析构不清 ⇒ 本条红。
+add_test(NAME spec_event_143_file_library COMMAND emulator-core-selftest --only-event-library)
+# ★ 输出对象三项（`45-objects`）：追加原样 / 按位置追加加 `(<脚本名>：<行号>行目) ` 前缀 /
+#   报告写 `\r\n致命的エラー[文本]\r\n` 再交根对象的错误处理（窗口句柄那一项）。
+#   报告只进 `errors_`（错误通道）而不发日志 seam / 前缀拼错 ⇒ 本条红。
+add_test(NAME spec_output_object_report COMMAND emulator-core-selftest --only-output-object)
 # ★ 渲染原语：数值文本 `0x205`（格式化 / 三个对齐档 / 全角化 / 奇数格宽）与清屏 `0x20E`
 #   （目标是纹理槽 ⇒ 清该表面；后缓冲无可写表面；⛔ 不清非目标纹理 / 不清纹理表）。
 #   交接单第 3 项的两个空档；把格式位反过来、把格宽先除半、或让 `0x20E` 提前 return ⇒ 本条红。
 add_test(NAME emulator-core-render-prims COMMAND emulator-core-selftest --only-render-prims)
 # ★ 两套字号（`0x75` = A 支 / `0x197` = B 支）单独一条：spec 的 `CORE-OPS-FORWARD-PROLOGUE` 证据指这里。
 add_test(NAME emulator-core-font-size COMMAND emulator-core-selftest --only-font)
+# ★ `0x1a5` / `0x2fe` 的**两对描述**（`CORE-OPS-FORWARD-PROLOGUE`）：`0x1a5` 只写 A 对、`0x2fe` 只写 B 对；
+#   每对两份变体（名原样 / '@' + 名）、高 ← −本支字号、下一格 ← −(本支字号/2)，且各请求一次重建字体。
+#   把两条并成同一个 case（都写 A 对）⇒ 本条红。
+add_test(NAME spec_ops_1a5_2fe_font_pairs COMMAND emulator-core-selftest --only-font-pairs)
+# ★ 建字体缩放（`60-ops-forward`「字号是"未缩放"的量」）：比例只在窗口态 ∧ 虚拟全屏类型 = 2 时按
+#   视口 ÷ 配置客户区重算，其余 1.0；建字体高度 = trunc(高 × 比例 + 0.5)（向零截断）；十槽两格被抄；
+#   两个分量都相等 ⇒ 整趟不写。改四舍五入 / 忽略比例 / 去掉相等短路 ⇒ 本条红。
+add_test(NAME spec_font_build_scale COMMAND emulator-core-selftest --only-font-scale)
+# ★ `0x10c` 的**三张表**（`CORE-OPS-SCALAR-TABLE-10C`）：键→动作不碰、动作→槽只读、槽→键写；
+#   值按无符号 > 31 抛 `SetKeyMultiの引数が不正です．`（全角句点、**无**回车换行）且不改状态；读序 2 → 1。
+#   写 `indirect_[动作]`（旧实现）/ 用有符号比较 / 先读第 1 个 ⇒ 本条红。
+add_test(NAME spec_ops_10c_key_tables COMMAND emulator-core-selftest --only-key-tables)
 # ★ 字形 AA 档（1 位 / GRAY4 / GRAY8 的**选择**与 17 / 65 级换算 ⇒ 满覆盖 240 / 251）：
 #   "设置界面文字比真机亮一档"的算术那一半。拆回 2^n（16 / 64）⇒ 满覆盖 255 ⇒ 本条红。
 add_test(NAME emulator-core-glyph-alpha COMMAND emulator-core-selftest --only-glyph)
@@ -218,6 +246,57 @@ add_test(NAME emulator-core-wait-colour-window COMMAND emulator-core-selftest --
 #   「开关格**两条支都写**」（停用后必须读到 0）、「节拍周期**不被本条复位**」（播种 300 后仍是 300）、
 #   以及 `0x72` 尾段的四个写点（格数 / 格号 / 相位起点 / 节拍计数——删掉任何一行本条红）。
 add_test(NAME emulator-core-text-cell-reveal COMMAND emulator-core-selftest --only-cell-reveal)
+# ★ 位号越界 = **错误通道**，不是异常（`CORE-OPS-BIT-SET-RESET`，锚 `0x42F8DA` / `0x42F94A` 的
+#   `cmp edi,1Fh` + `ja`）：目标预置 −1，位号 32 与 −1 ⇒ 目标仍是 −1、不抛、错误通道恰一条固定文本
+#   （含 CRLF）；位号 31 的对照必须真的置位 / 清位。把上界 1Fh 放宽、或删掉错误文本 ⇒ 本条红。
+add_test(NAME spec_ops_136_rembit_arg_invalid COMMAND emulator-core-selftest --only-rembit-arg-invalid)
+add_test(NAME spec_ops_135_setbit_arg_invalid COMMAND emulator-core-selftest --only-setbit-arg-invalid)
+# ★ `0x13f`（`CORE-OPS-BIT-TEST`）与上面两条**同形**：位号 32 / −1 ⇒ 落点保持原值（不写 0）、
+#   **源也不被读**（用例把源写成"读整型必抛"的类型 2 ⇒ 读一次就停）、错误通道恰一条
+#   `GetBitの引数が不正です．` + CRLF；界内对照把第 30 位读成 1、第 0 位读成 0（归一，不是原值）。
+#   去掉错误文本 / 让越界支读源 ⇒ 本条红。
+add_test(NAME spec_ops_13f_getbit_arg_invalid COMMAND emulator-core-selftest --only-getbit-arg-invalid)
+# ★ `0x60`（`CORE-OPS-RANDOM-60`）范围 = 0：落点**先**写 0、**随后**抛显示消息型异常，
+#   文本逐字 `RANDOMの最大値が0になっています．`、随机数恰取一次（不回退）；范围 = −1 **不抛**。
+#   删掉固定文本 / 不写 0 / 把判据写成 ≤ 0 ⇒ 本条红。
+add_test(NAME spec_ops_60_random_range_zero COMMAND emulator-core-selftest --only-random-range-zero)
+# ★ `0x64`（`CORE-OPS-ARRAY-COPY`）块越界 = spec 的**未定义行为**（不作断言）⇒ 本模型选择
+#   **响亮失败 + 诊断**（`array-block-past-code`）：块号越界 / 为负 / count 越过代码区末尾 ⇒ 停机且
+#   目标一格都不写；合法块（count = 3，数据 0 / 1 / −1）必须照常复制。改成静默 / 夹紧 ⇒ 本条红。
+add_test(NAME spec_ops_64_array_block_bounds COMMAND emulator-core-selftest --only-array-block-bounds)
+# ★ 数组**写区间**的实现侧边界（`RES-ARRAY-FILL-ZERO-OOB` / `-SET-TO-OOB` / `-ARRAY-COPY-OOB` 的
+#   impact：「实现必须拒绝或先记诊断再拒绝，不许静默写坏相邻池」）：目标取局部整型池窗口的**最后一格**、
+#   count = 2 ⇒ 第 2 格会落进相邻的浮点族窗口 ⇒ 三条写指令（0x6c / 0x2d8 / 0x64）都必须拒绝 + 诊断，
+#   且**一格都不写**（目标格预置 1234、相邻浮点格预置 1.5 咬住）；窗口内的对照必须照常写满。
+#   拿掉池窗口判据 / 把 count 截断成容量 ⇒ 本条红。
+add_test(NAME spec_ops_array_write_past_pool COMMAND emulator-core-selftest --only-array-write-bounds)
+# ★ `0x6c` / `0x2d8` 的**字符串族落点**：元素是 28 字节记录，写入仍是"逐 4 字节写 count 个 32 位字"
+#   （不是按 28 字节步进）。判据经 `0x1b0` 裸池拷贝把记录里的字读回局部整型池：0/0 与 7/7。
+#   把 `store_raw` 的字符串族分支删掉（退回"抛异常"）⇒ 本条红。
+add_test(NAME spec_ops_6c_2d8_string_record_raw COMMAND emulator-core-selftest --only-string-record-raw)
+# ★ **错误通道**的平台写请求（`60-ops-numeric` 的「错误通道」）：一次触发 = **一个**请求（文本 + 长度）；
+#   两个抑制条件（输出句柄无效 / 宿主过滤器返回非 0）⇒ 不发请求但**诊断仍保留**。绕开接缝
+#   （`report_error` 退回只 push_back）或忽略过滤器 ⇒ 本条红。
+add_test(NAME spec_error_channel_write COMMAND emulator-core-selftest --only-error-channel)
+# ★ `0x12f`（`CORE-OPS-ARRAY-SORT-12F`）的**写序**：A 与 B 别名（A = B、N = 3）时，右键必须
+#   **每次比较重算** `B[i] + C[i]`。按写序 A = [1,2,0]；把右键缓存成 `key_j`（旧实现）得到 [2,1,0] ⇒ 本条红。
+add_test(NAME spec_ops_12f_alias_write_order COMMAND emulator-core-selftest --only-12f-alias)
+# ★ `0x88`（`CORE-OPS-SCALAR-PAIR-88`）的落点身份：同一个值写模式族的 **C / D**，非 0 支写 **G**，
+#   为 0 支清**状态选择字第 27 位**；`0x19c` 的第一个判据必须读 `0x88` 写出来的 C，
+#   `0x1cc` 读的状态格必须就是 `0x19c` 的 **E**。把落点改回任何死格（旧 `scalar_88a_`）⇒ 本条红。
+add_test(NAME spec_ops_88_mode_cells COMMAND emulator-core-selftest --only-88-mode-cells)
+# ★ 第 27 位服务体（`CORE-VM-GATE` / `CORE-VM-STATE` 位序表第 16 行）：置起后进入**一次消息处理**
+#   （seam 计数 +1）→ 让出一拍 → 窥视 → 交回迭代头 ⇒ 本迭代 `ip` 不变、被挡的脚本指令不执行；
+#   清位后必须恢复派发。删 `case 27`（落 default 虽同样交回迭代头）⇒ 消息处理计数不 +1 ⇒ 本条红。
+add_test(NAME spec_vm_gate_bit27_service COMMAND emulator-core-selftest --only-bit27-service)
+# ★ 第 27 位的**产品置点**：`0x71` 的文本子系统调用返回非 0 / `0x6e` 的追加前置支
+#   （`message:ReadTextSkip` ∧ 已读命中 ⇒ 置位并**不置打字位**、同帧抽干）/ `0x305` ② 同一判据。
+#   删 `0x71` 的置点 ⇒ 第一段红；把置位挪进打字支 / 不置位 ⇒ 后两段红。
+add_test(NAME spec_adv_text_bit27_set_points COMMAND emulator-core-selftest --only-adv-text-bit27)
+# ★ `0x2bd`（`CORE-OPS-SCALAR-VARIANT-PROLOGUE`）：操作数非 0 ⇒ 字体对象**两格**都写 700；0 ⇒ 都写 0
+#   （0x42622A 的 `mov eax,2BCh` / 0x426243 的 0 支）。把 700 改成别的常量 ⇒ 本条红。
+add_test(NAME emulator_core_font_weight_2bd_both_cells
+    COMMAND emulator-core-selftest --only-font-weight-2bd)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)

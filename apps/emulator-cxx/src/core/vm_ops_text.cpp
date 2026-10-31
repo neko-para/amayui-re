@@ -8,6 +8,7 @@
 #include "core/text_raster.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -476,13 +477,22 @@ void Machine::drain_pending_glyphs() {
     while (!pending_glyphs_.empty()) draw_front_pending_glyph();
 }
 
+bool Machine::read_text_skip_requested() const {
+    // `CORE-OPS-MSG-BLOCK-304-305` ②：`message:ReadTextSkip` 非 0 **且**「已读」命中 ⇒ 置第 27 位。
+    // ★ 与 `0x6e` / `0x196` 的追加前置支是**同一判据、同一格**（spec 原文）。
+    // ★ 「已读」用的是哪张表 / 键是什么未取证（残差 `RES-MSG-BLOCK-READ-HIT`）⇒ 由接缝提供，
+    //   缺省 = 无命中。⛔ 不要把"键非 0"单独当成充分条件（那会把未读过的文本也当跳过）。
+    return config_.get_int("message:ReadTextSkip") != 0 && read_text_skip_hit_ &&
+           read_text_skip_hit_();
+}
+
 void Machine::begin_text_typing_or_drain() {
     // 引擎 `0x41ec35` / `0x41fcf8` 的两档：**每字间隔 > 0 且状态字第 27 位未置** ⇒ 置第 29 位 +
     // 启动文本计时器（间隔 = `Font+0x560` = `param_cell_`、起点 = 现在）；否则 ⇒ 立即追加 + 同帧抽干
     // （`sub_46cbf0`）。
-    // ★ 第 27 位的置位（按键 / 前置支）**不在本实现**：它的服务者是 `0x88`（值为 0 时清它），
-    //   不是"没有服务者"；本实现不置它，是因为**已读表**没有建模（残差 `RES-MSG-BLOCK-READ-HIT`），
-    //   置了会让"读跳过"这条语义在没有已读命中依据时也生效。抽干本身与字节一致。
+    // ★ 第 27 位由两处产品路径置起：`0x71` 的子系统调用返回非 0，以及本条之前的
+    //   **追加前置支**（`0x6e` / `0x196`，判据 = `message:ReadTextSkip` 非 0 ∧ 已读命中）。
+    //   它一旦置起，本条就走"立即追加 + 同帧抽干"（spec：旁路）。
     const std::int32_t speed = param_cell_.value_or(0);
     // ★ 演示闸（`0x300`）开着的层：字符格交给闸门泵，不进打字队列（见 `draw_text_layer_text`）。
     //   但**必须把打字位置起** —— 推进器正是闸的服务者、且**只在打字位置起时被调用**
@@ -628,8 +638,9 @@ bool Machine::service_text_layers() {
         return slot_in_use;
     }
     if (input_pressed_) {
-        // 按键 / 跳过 ⇒ **同帧抽干** + 清第 29 位（引擎 `0x40953c`–`0x409554`；它同时置第 27 位，
-        // 本实现不置 —— 理由同 `begin_text_typing_or_drain`）。
+        // 按键 / 跳过 ⇒ **同帧抽干** + 清第 29 位（引擎 `0x40953c`–`0x409554`；它同时置第 27 位）。
+        // ★ 本批只落 `0x305` / `0x71` / 追加前置支这三处置点；**推进器这一处置第 27 位尚未落**
+        //   （另单）。抽干与清位本身不变。
         drain_pending_glyphs();
         state_flags_ &= ~(1u << 29);
         return slot_in_use;
@@ -669,35 +680,76 @@ void Machine::op_71(const Instruction& instruction) {
     // 文本请求（`0x71` / `sub_41ED80` → `sub_45EC60`，argc 1）：
     // ① 当前帧「本条位置」← 本条指令的 dword 下标；② 清空该层的画布与游标；
     // ③ 把画布按层矩形排成一条绘制项（键基数 = `0x213` 写的 +104 格）。
-    // ★ 引擎还会做两处整块拷贝 / 一次子系统内调用 / 有条件置状态字第 27 位 ⇒ **未建模**（残差）。
+    // ★ 引擎还会做两处整块拷贝 / 一次子系统内调用 / 有条件置状态字第 27 位：
+    //   本模型只落**条件置位**（`CORE-OPS-LIST-TEXT-REQUEST`：文本子系统的一次调用返回非 0 ⇒ 置
+    //   第 27 位，与 `0x88` 清的是同一位）。那次调用的返回值领域含义未定 ⇒ 由接缝提供、缺省 0。
     const auto requested = read_int(ops[0]);
     frame_mut().position = static_cast<std::uint32_t>(frame_mut().ip / 4);
+    const std::int32_t request_result = text_request_result_ ? text_request_result_(requested) : 0;
     const int slot = resolve_text_layer(requested);
     if (slot >= 0 && slot < 10) line_records_[static_cast<std::size_t>(slot)] = 1;  // 清空后追加 1 条
     clear_text_layer(slot);
+    if (request_result != 0) state_flags_ |= (1u << 27);
+    return;
+}
+
+// 字体对象的两对描述（`CORE-OPS-FORWARD-PROLOGUE`）：
+//   · A 对（描述 A1 @+4D0 / A2 @+18E54）由 `0x75` 设字号、`0x1a5` 设字面名；
+//   · B 对（描述 B1 @+50C / B2 @+18E90）由 `0x197` 设字号、`0x2fe` 设字面名。
+// 两份**不是副本而是变体**：同一对的两份高 / 下一格完全相同，只有字面名不同（原样 / `'@'` + 原样）。
+// 写序按引擎入口体：先下一格（−(字号/2)），再高（−字号），最后两份字面名（EA 0x43297c..0x4329bb /
+// 0x432e78..0x432ead）。整数除以 2 是**向零截断**（引擎 `cdq; sub eax,edx; sar eax,1`）。
+void Machine::write_font_pair(FontDescriptionPair& pair, const std::string& face, std::int32_t size) {
+    const std::int32_t width = -(size / 2);
+    const std::int32_t height = -size;
+    pair.variants[0].face = face;
+    pair.variants[1].face = "@" + face;
+    for (auto& variant : pair.variants) {
+        variant.width = width;
+        variant.height = height;
+    }
+    // 入口体尾部：请求重建字体（`0x4329e1` / `0x432ecd`）。重建内部不建模。
+    request_font_rebuild();
     return;
 }
 
 void Machine::op_1a5(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    font_string_ = read_text(ops[0]); return;  // 两个字符串入口，内部未建模
+    // `0x1a5` 设**A 支那一对**描述的字面名（`sub_432970`，argc 1，操作数**按文本读**：
+    // 按整型读会得到另一件事）。⛔ 不许与 `0x2fe` 合并：合并会在改 A 支名字时把 B 支名字一起改掉。
+    // 它读**这一支自己的字号**（A 支：`Font+0x313D4`，EA 0x43297c）重写两份描述的高 / 下一格；
+    // 改名字不会改字号，只是把派生量按当前字号重算一遍。
+    const std::string face = read_text(ops[0]);
+    write_font_pair(font_a_pair_, face, glyph_height_);
+    return;
+}
+
+void Machine::op_2fe(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // `0x2fe` 设**B 支那一对**描述的字面名（`sub_432dd0`，argc 1，按文本读；EA 0x432e78..0x432ecd）。
+    // 与 `0x1a5` 同形，但写另一对：`0x75`/`0x1a5` 与 `0x197`/`0x2fe` 各一对、互不覆盖。
+    const std::string face = read_text(ops[0]);
+    write_font_pair(font_b_pair_, face, font_b_height_);
+    return;
 }
 
 void Machine::op_197(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // `0x197` 设字号（`sub_41FDD0`，**argc 1**）：op1 = **字形高度（未缩放的逻辑像素）**，**没有**字体对象下标。
     // ★ 引擎的写点（`sub_418680`）：全局字号格 ← v；**十个槽全写** `槽+0xC8 = v`（展开、无下标、无越界检查）；
-    //   LOGFONTA 的 `lfHeight = -v`、`lfWidth = -(v/2)`（向零截断）；随后重建三种 HFONT。
+    //   B 对描述的两份变体：`lfHeight = -v`、`lfWidth = -(v/2)`（向零截断）；随后重建字体。
     // ★ 它**不碰**行高那一组（`Font+0x313D4`，那是 `0x75` 的活）—— 两件事一个格是本模型以前的错。
     // ★ 缺省 8（引擎 `0x46551C` 的初值），不是行高的 24。
-    // ★ 最终像素 = round(|v| × 显示缩放 `Font+0x355E4`)，乘在**建字体**那一步（`0x45A7FE fmul [ebx+355E4h]`；
-    //   0x204 走的是另一支：`0x45A3A9 fmul [ebx+355E4h]`）。该比例 = 视口 ÷ `set:WinX/WinY`，初值 1.0，
-    //   只在「窗口态 + 虚拟全屏类型 2」时刷新（`0x46584E..0x46588A`）⇒ **设计分辨率下恒 1.0**；
-    //   本宿主按逻辑分辨率渲染 ⇒ 1.0，**不需要**再乘。
-    // ★ 这条写的是 **B 支**（`Font+0x355D8`）：只有跨度绘制路径在特定标志下用它；0x204 不用它。
     const auto value = read_int(ops[0]);
     font_b_height_ = value;
     for (auto& slot : text_slots_) slot.glyph_height = value;
+    const std::int32_t height = -value;
+    const std::int32_t width = -(value / 2);
+    for (auto& variant : font_b_pair_.variants) {
+        variant.height = height;
+        variant.width = width;
+    }
+    request_font_rebuild();
     if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x197 font_b_height=%d\n", value);
     return;
 }
@@ -705,11 +757,85 @@ void Machine::op_197(const Instruction& instruction) {
 void Machine::op_75(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // `0x75` 设的是**A 支字号**（`sub_4185F0`）：`Font+0x313D4 ← v`（`0x418611`），
-    // 两份 LOGFONTA 的 lfHeight ← −v（`0x418617` / `0x418619`），随后重建字体（`sub_459F40`）。
+    // A 对两份描述的 lfHeight ← −v（`0x418617` / `0x418619`），随后重建字体（`sub_459F40`）。
     // ★ **0x204 画文字用的就是这一支**（`0x459F63` 读它当逐字字体的高度）⇒ 它不是"行高"。
-    glyph_height_ = read_int(ops[0]);
+    // ★ 两份描述的下一格按**那个对象自己的开关**（`0x4185FD` 的 `cmp [esi+313D0h],0`）分两支：
+    //   0 支把 −(v/2) 写进两份的下一格（`0x41865E..0x41866D`）；非 0 支走 `sub_459A20` 的派生路径 ——
+    //   那条路径写什么**未成篇** ⇒ 本模型**不动**下一格（⛔ 不要在这里发明第二支的公式）。
+    //   ★ **开关身份 spec 明说本版未取证**（`60-ops-forward.md:87` +
+    //     `RES-OPS-FORWARD-PROLOGUE-FIELD-ROLES`）⇒ 本模型读的 `font_align_mode_`（= `0x2db` 写的那格）
+    //     是**实现侧假设**、不是合同 ⇒ 守卫只许断言 spec 明写的部分，⛔ 不许断言"非 0 支什么都不写"。
+    const auto value = read_int(ops[0]);
+    glyph_height_ = value;
+    for (auto& variant : font_a_pair_.variants) variant.height = -value;
+    if (font_align_mode_ == 0) {
+        const std::int32_t width = -(value / 2);
+        for (auto& variant : font_a_pair_.variants) variant.width = width;
+    }
+    request_font_rebuild();
     if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x75 glyph_height(family A)=%d\n", glyph_height_);
     return;
+}
+
+// ── 建字体缩放（`60-ops-forward`「字号是"未缩放"的量」；`sub_465840`）──
+// 视口尺寸是**平台输入**：缺省按配置的客户区尺寸（⇒ 比例 1.0），宿主 / 守卫用接缝注入真实视口。
+Machine::Viewport Machine::viewport_input() const {
+    if (viewport_source_) return viewport_source_();
+    return Viewport{config_.get_int("set:WinX"), config_.get_int("set:WinY")};
+}
+
+// 重算缩放的**两个时机**：① 启动、字体对象建立之后一次（构造器）；② 引擎重新应用字体设置的路径
+// （`sub_465840` 的调用点 0x41806E / 0x4692D7；本模型没有对应 opcode ⇒ `reapply_font_settings` 接缝）。
+// 合同（逐句）：
+//   · 两个分量初值 1.0；**只在窗口态 ∧ 虚拟全屏类型 = 2** 时按商重算，其余一律 1.0；
+//   · 高分量 = 视口高 ÷ 配置客户区高（`set:WinY`，EA 0x465884），它乘进 lfHeight；
+//     宽分量 = 视口宽 ÷ 配置客户区宽（`set:WinX`，EA 0x465875），**不参与**字号缩放；
+//   · 两个分量会连同高分量一起抄进**十个文本槽的两格**（`槽+0x74` 宽 / `槽+0x78` 高，EA 0x4658C3..0x465965）；
+//   · 两个分量各自与"上次算出的那个"比，**两个都相等 ⇒ 整趟什么都不写**（EA 0x46588D..0x465A11），
+//     不重抄槽、不重建字体。
+void Machine::refresh_font_scale() {
+    double width = 1.0;
+    double height = 1.0;
+    // 「窗口态」= 建窗的形态字：配置 `display:ScreenMode`（`06-window`「窗口创建」的形态判据；
+    // `display:ForceScreen == 1` 时引擎在建窗前把它写成 1 ⇒ 这里按同一个谓词取）。
+    const bool windowed = config_.get_int("display:ScreenMode") != 0 ||
+                          config_.get_int("display:ForceScreen") == 1;
+    // 条件 2：虚拟全屏类型 = 2（EA 0x465866 的 `cmp [eax+48Ch],2`）。
+    if (windowed && config_.get_int("display:VirtualFullScreenType") == 2) {
+        const auto viewport = viewport_input();
+        const auto client_width = config_.get_int("set:WinX");
+        const auto client_height = config_.get_int("set:WinY");
+        // 配置客户区没有尺寸时两个分量留 1.0（实现侧防御：引擎那一步是无检查的除法，
+        // 0 会得到 inf；那不是可建模的引擎语义）。平台输入本来应当为正。
+        if (client_width > 0 && client_height > 0) {
+            width = static_cast<double>(viewport.width) / static_cast<double>(client_width);
+            height = static_cast<double>(viewport.height) / static_cast<double>(client_height);
+        }
+    }
+    if (width == font_scale_width_ && height == font_scale_height_) return;  // 整趟什么都不写
+    font_scale_width_ = width;
+    font_scale_height_ = height;
+    for (auto& slot : text_slots_) {
+        slot.scale_width = width;
+        slot.scale_height = height;
+    }
+    ++font_scale_write_count_;
+    // 缩放后重建字体：A 支入口（0x4659fc）/ B 支入口（0x465a03）各一次请求。
+    request_font_rebuild();
+    request_font_rebuild();
+    return;
+}
+
+void Machine::reapply_font_settings() {
+    refresh_font_scale();
+}
+
+std::int32_t Machine::font_build_height(bool branch_b) const {
+    // `高度 ← trunc(高度 × 比例 + 0.5)`：高度是**负值**（字号取相反数）⇒ 向零截断等价于"向上取整"，
+    // ⛔ 不是四舍五入（在负值上两者差 1）。加的是字面常数 0.5（`dbl_51D7F8`）。
+    const auto& pair = branch_b ? font_b_pair_ : font_a_pair_;
+    const double scaled = static_cast<double>(pair.variants[0].height) * font_scale_height_ + 0.5;
+    return static_cast<std::int32_t>(std::trunc(scaled));
 }
 
 void Machine::op_198(const Instruction& instruction) {
@@ -717,7 +843,9 @@ void Machine::op_198(const Instruction& instruction) {
     // `0x198` 设**文本槽的绘制原点偏移**（`sub_41FE10`，**argc 3**）：
     //   op1 = 槽下标（`0` ⇒ 默认槽 **1**；合法 0..9），op2 → `槽+0x0C`，op3 → `槽+0x10`。
     // ★ 它**不碰**字号、不重建字体：`sub_456400` 里仅 `0x456421` / `0x456424` 两处写内存。
-    // ★ 槽指针为 0 时引擎不检查（直写 [0+…]），越界/负数是**未定义行为** ⇒ 这里夹紧后跳过（已知偏离）。
+    // ★ 引擎不检查槽号：它拿越界下标去索引字体对象的槽指针表，非 0 就写穿到该指针处
+    //   ⇒ 越界/负数是**未定义行为**（spec 不作语义断言）。本实现的选择是**直接返回、不写、不诊断**
+    //   （实现侧已知偏离：spec 建议记诊断）。
     int slot = read_int(ops[0]);
     if (slot == 0) slot = 1;
     if (slot < 0 || slot >= static_cast<int>(text_slots_.size())) return;
@@ -751,6 +879,11 @@ void Machine::op_6e(const Instruction& instruction) {
     //   `0x304` 已把臂位第 0 位置起的支路里做）。`0x305` 的「武装」= 位 0 与位 16 同时成立。
     //   ⛔ 不置它 ⇒ `0x305` 的整段块结束逻辑永远是死代码。
     if ((msg_arm_ & 1) != 0) msg_arm_ |= 0x10000;
+    // 追加前置支（`62-adv-text` 的「逐字符显示」）：门判**之前**若「读文本跳过」命中 ⇒ 置第 27 位，
+    // 于是本条随后落进旁路（不置打字位），直到下一次清掉第 27 位。
+    // ★ spec 同时说会「置一个标志格」，但那一格的身份与消费者未取证（残差 `RES-ADV-TEXT-APPEND-PRE27`）
+    //   ⇒ 本模型只落**已定**的第 27 位置位，⛔ 不发明一个标志格。
+    if (read_text_skip_requested()) state_flags_ |= (1u << 27);
     begin_text_typing_or_drain();
     return;
 }
@@ -787,6 +920,11 @@ void Machine::op_196(const Instruction& instruction) {
     draw_text_layer_text(slot, text, window.rubi);
     // ★ 与 `0x6e` 同一条：成功追加时置消息臂位第 16 位（引擎 `0x41FCD8`）。
     if ((msg_arm_ & 1) != 0) msg_arm_ |= 0x10000;
+    // 追加前置支（`62-adv-text` 的「逐字符显示」）：门判**之前**若「读文本跳过」命中 ⇒ 置第 27 位，
+    // 于是本条随后落进旁路（不置打字位），直到下一次清掉第 27 位。
+    // ★ spec 同时说会「置一个标志格」，但那一格的身份与消费者未取证（残差 `RES-ADV-TEXT-APPEND-PRE27`）
+    //   ⇒ 本模型只落**已定**的第 27 位置位，⛔ 不发明一个标志格。
+    if (read_text_skip_requested()) state_flags_ |= (1u << 27);
     begin_text_typing_or_drain();
     return;
 }
@@ -985,11 +1123,20 @@ void Machine::op_305(const Instruction& instruction) {
     (void)instruction;
     // 消息块结束（0x305 / `sub_41B1C0`，argc 0、推进 1；规则 `CORE-OPS-MSG-BLOCK-304-305`）：
     // 门 = 消息臂位的第 0 位 **且** 第 16 位（第 16 位由 `0x6e` / `0x196` 成功追加时置）。
-    // 未武装 ⇒ 只清臂位、什么都不做。武装 ⇒ ① 揭示游标回卷到块开头；② 读 `message:ReadTextSkip`，
-    // 非 0 且"已读"命中时置门字第 27 位；③ 揭示该层**全部**格（引擎是在这里自旋到"揭示完"）；
-    // ④ 写消息等待三格（最终 (1,0,0)；引擎写序 0 / 0 / 1）；⑤ 三条出口都清臂位。
-    // ★ 本模型没有"已读表"（残差 `RES-MSG-BLOCK-READ-HIT`）⇒ ② 的两个条件只实现第一个；
-    //   ⛔ 不许因此把 bit27 置起：模型里它没有服务者，会让主循环 gate-stalled。
+    // 未武装 ⇒ 只清臂位、什么都不做。武装 ⇒
+    //   ① 揭示游标**回卷**到块开头；
+    //   ② 读 `message:ReadTextSkip`，非 0 且"已读"命中 ⇒ 置门字第 27 位 —— 这两步都在**分叉之前**，
+    //      且 ② 的结果**直接决定**走哪一支（`62-adv-text.md:394-397`）；
+    //   ③ **按 spec 二选一**（`62-adv-text.md:398-404`）：
+    //      · **打字机支**（每字间隔 ≠ 0 ∧ 第 27 位未置）⇒ 置第 29 位 + 起计时器、**不揭示全部、
+    //        不写等待三格**（余下的格交给逐帧文本泵）；
+    //      · **揭示支**（其余）⇒ 揭示该层**全部**格，再按两道前置决定要不要写消息等待三格 (1,0,0)。
+    //   ④ 所有出口都清臂位。
+    // ★ **打字机支本模型未实现（子单，残差待登记）**：本实现总是走揭示支，所以"武装 + 每字间隔 ≠ 0"
+    //   在本模型会整段揭示并写三格 —— ⛔ 这不是合同，是已知缺口（`0x6e` 自己那条打字机路径是另一件
+    //   事，已有守卫）。守卫 `spec_adv_text_bit27_set_points` ③ 特意把 0x74 设 0 以绕开这一支。
+    // ★ 「已读」表未建模（残差 `RES-MSG-BLOCK-READ-HIT`）⇒ 命中的那一半由接缝提供（缺省无命中）；
+    //   `message:ReadTextSkip` 非 0 是 spec 明写的必要条件。条件成立 ⇒ 置第 27 位（不是"永远不置"）。
     write_length(1);
     const bool armed = (msg_arm_ & 1) != 0 && (msg_arm_ & 0x10000) != 0;
     if (!armed) {
@@ -998,9 +1145,18 @@ void Machine::op_305(const Instruction& instruction) {
     }
     const int slot = resolve_text_layer(current_text_slot_);
     if (slot >= 0 && slot < 10) {
+        // ① 揭示游标回卷到块开头（两支都做，排在分叉之前）。
         const auto saved = msg_saved_cursor_ < 0 ? std::size_t{0}
                                                  : static_cast<std::size_t>(msg_saved_cursor_);
         reveal_text_layer_to(static_cast<std::size_t>(slot), saved);
+    }
+    // ② 读 `message:ReadTextSkip`：非 0 **且**「已读」命中 ⇒ 置门字第 27 位（"跳过"）。
+    // ★ 与 `0x6e` / `0x196` 的追加前置支是同一判据、同一格；排在分叉之前且结果直接决定走哪一支
+    //   （⛔ 不许把它挪进任一支）。「已读」表未建模（残差 `RES-MSG-BLOCK-READ-HIT`）⇒ 接缝缺省无命中。
+    if (read_text_skip_requested()) state_flags_ |= (1u << 27);
+    if (slot >= 0 && slot < 10) {
+        // ③ 揭示该层全部格（引擎在这里自旋到"揭示完"）。本模型的 `0x305` 没有单列打字机分支
+        //   （见残差；本批只补第 ② 步）。
         reveal_all_text_layer_cells(slot);
     }
     msg_wait_a_ = 1;

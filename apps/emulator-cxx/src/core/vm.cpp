@@ -66,6 +66,27 @@ Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install*
     // 启动时登记引擎重置钩子（`CORE-OPS-FRAME-EXIT-SCRIPT` 的第一项；站点 `0x4165ce`）。
     // ★ 只登记、不执行；`0x9` 拿它做「推进格数 ← 1 + 清状态字第 9 位」。
     engine_reset_hook_registered_ = true;
+    // 字体对象的两对描述（构造器把两份变体都按缺省字号写成 `loHeight = −字号` / `loWidth = −字号/2`）。
+    // 字面名不建模（引擎缺省值是平台字体名，本版未取证）⇒ 留空串。
+    for (auto& variant : font_a_pair_.variants) {
+        variant.height = -glyph_height_;
+        variant.width = -(glyph_height_ / 2);
+    }
+    for (auto& variant : font_b_pair_.variants) {
+        variant.height = -font_b_height_;
+        variant.width = -(font_b_height_ / 2);
+    }
+    // ③ 槽号 → 键号：`-1` = 未绑定（兄弟指令写 −1 解除绑定）。
+    slot_key_table_.fill(-1);
+    // 重算缩放的**第 ① 个时机**：启动、字体对象建立之后一次。视口缺省 = 客户区 ⇒ 两个分量 1.0，
+    // 与缓存初值相等 ⇒ 整趟什么都不写（契约本来就是"相等 ⇒ 不写"）。
+    refresh_font_scale();
+}
+
+Machine::~Machine() {
+    // 文件库析构（`0x454cd0`）：槽位表逐格清 0。本模型没有独立的文件库对象 ⇒ 由这里承担；
+    // 测试用 `release_file_library()` 模拟同一步（`0x143` 的可达条件随之消失）。
+    release_file_library();
 }
 
 void Machine::load_root(const Bytes& script, std::uint32_t script_id) {
@@ -90,6 +111,10 @@ void Machine::apply_frame_record(std::size_t index, const Bytes& script, const S
     frame.local_int.clear();
     frame.local_float.clear();
     frame.local_string.clear();
+    // 字符串族的**裸字叠层**与文本池同寿命（见 `store_raw`）：本帧窗口里的裸字一起清，
+    // ⛔ 不让上一个脚本写下的位模式活过装载器。★ 本帧局部字符串池基点 = 帧窗口 + (11 − 9) × 0x100000。
+    clear_string_record_words(0x40000000u + static_cast<std::uint32_t>(index) * 0x00800000u + 0x00200000u,
+                              0x00100000u);
     frame.key_jumps.clear();
     frame.key_cursor = 0;
     frame.key_limit = 0;
@@ -114,6 +139,9 @@ void Machine::apply_frame_record(std::size_t index, const Bytes& script, const S
 void Machine::install_script_into(std::size_t slot, std::uint32_t file_id) {
     if (install_ == nullptr) throw CoreError("frame-loader-missing");
     const Bytes script = core::read_install_file(*install_, file_id);
+    // 文件库装载登记（`0x455948`）：按**装载文件对象自带的号**（统一 id 的高 8 位 = 区号）填槽 ——
+    // `0x143` 的投递源就是这张表。
+    register_loaded_file(file_id);
     const ScriptHeader header = core::parse_script_header(script);
     apply_frame_record(slot, script, header, file_id);
 }
@@ -160,14 +188,23 @@ void Machine::enqueue_command(std::int32_t command) {
 
 void Machine::enqueue_command_for_test(std::int32_t command) { push_command(command); }
 
-std::int32_t Machine::event_table_cell(std::int32_t index) const {
-    if (index < 0 || static_cast<std::size_t>(index) >= kEventTableSize) return 0;
-    return event_table_[static_cast<std::size_t>(index)];
+void Machine::register_loaded_file(std::uint32_t file_id) {
+    // 引擎那张表**只有 256 槽**（`0x454adc ecx = 0x100` / `0x454ae6 rep stosd`），槽号 =
+    // **装载文件对象自带的号** = `[对象+114h]` = 统一文件 id 的高 8 位（区号，见 `25-fs`）。
+    // ★ 本模型装到的都是基础索引的文件（统一 id = 区号 0 + 条目下标，`read_install_file` 用 TOC 下标）
+    //   ⇒ 区号恒 0 ⇒ 写格 0；`0x143` 不检查格 0。扩展索引（区号 1..255）见 `load_extension_index()`。
+    const auto zone = file_id >> 24;
+    file_library_slots_[zone] = 1;  // zone ∈ 0..255（高 8 位）⇒ 恒在表内
 }
 
-void Machine::seed_event_table_cell_for_test(std::int32_t index, std::int32_t value) {
-    if (index < 0 || static_cast<std::size_t>(index) >= kEventTableSize) return;
-    event_table_[static_cast<std::size_t>(index)] = value;
+void Machine::load_extension_index(std::int32_t zone) {
+    // 文件库装载一个扩展索引（AAI）：按它自带的区号登记（`0x455948`）。
+    // ★ 区号字段**没有范围校验**（`25-fs`：越界区号的行为不规定）⇒ 本版不写表外，只记诊断。
+    if (zone < 0 || zone >= static_cast<std::int32_t>(kFileLibrarySlotCount)) {
+        report_error("file-library-zone-out-of-range:" + std::to_string(zone));
+        return;
+    }
+    register_loaded_file(static_cast<std::uint32_t>(zone) << 24);
 }
 
 void Machine::pump_command_queue() {
@@ -407,6 +444,7 @@ void Machine::execute(const Instruction& instruction) {
         case 0xBF: op_bf(instruction); return;
         case 0xB4: op_b4(instruction); return;
         case 0xB5: op_b5(instruction); return;
+        case 0x2BF: op_2bf(instruction); return;
         case 0x2C7: op_2c7(instruction); return;
         case 0x341: case 0x345: case 0x34E: case 0x352: op_341(instruction); return;
         case 0x2EC: op_2ec(instruction); return;
@@ -559,7 +597,8 @@ void Machine::execute(const Instruction& instruction) {
         case 0x52: op_52(instruction); return;
         case 0x53: op_53(instruction); return;
         case 0x54: op_54(instruction); return;
-        case 0x1A5: case 0x2FE: op_1a5(instruction); return;
+        case 0x1A5: op_1a5(instruction); return;
+        case 0x2FE: op_2fe(instruction); return;
         case 0x197: op_197(instruction); return;
         case 0x198: op_198(instruction); return;
         case 0x75: op_75(instruction); return;
@@ -647,6 +686,17 @@ bool Machine::movie_gate_busy() const {
     return false;
 }
 
+// 第 27 位（位序表第 16 行）的服务体：进入**一次消息处理**（读一条消息并派发）→ 让出一拍 →
+// 窥视消息（不移除）→ 交回迭代头（本迭代不派发脚本指令）。
+// ★ 它与迭代头按节流周期触发的宿主泵**不是同一处**、也不受那个计数器约束（`60-ops-scalar`「成对写」）。
+// ★ **不自己清第 27 位**：清位归消息处理（未建模）与脚本指令（`0x88` 为 0 支 / `0x19b` / `0x101` …）。
+void Machine::service_message_frame() {
+    ++host_message_steps_;
+    if (host_message_io_.process_one) host_message_io_.process_one();
+    if (host_message_io_.yield) host_message_io_.yield();
+    if (host_message_io_.peek) (void)host_message_io_.peek();
+}
+
 // ── 门服务链（`CORE-VM-GATE` / `CORE-VM-STATE`）──
 // `CORE-VM-STATE` 的**位序表**（spec：「检查序」= 多个位同时置起时的优先级；位号从 0 起）。
 // ⛔ **不是位号升序**（列表只有一份 = 下面的数组，⛔ 别在注释里再抄一遍）。
@@ -704,6 +754,11 @@ Machine::GateAction Machine::service_gate_bit(std::int32_t bit) {
             // 服务后 = 交回迭代头（`CORE-OPS-FRAME-LOCAL-RET-7C` 的输入服务分支）。
             service_local_input_wait();
             return GateAction::ToHead;
+        case 27:
+            // 位序表第 16 行：消息逐帧推进门位（又称「跳过位」）——进入一次消息处理、让出一拍、
+            // 窥视一次，然后**交回迭代头**（本迭代不派发脚本指令）。
+            service_message_frame();
+            return GateAction::ToHead;
         case 29:
             // 位序表第 17 行：文本推进器；推进器跑完之后按**文本槽在用标志**（`[77984h]`）决定收场 ——
             // **有槽在用 ⇒ 服务体自己派发一条**（表里唯一的直派位）；**无槽在用 ⇒ 交回迭代头**。
@@ -723,7 +778,7 @@ Machine::GateAction Machine::service_gate_bit(std::int32_t bit) {
             service_advance_wait();
             return GateAction::ToHead;
         default:
-            // 表里其余位（22 / 24 / 20 / 3 / 4 / 7 / 8 / 6 / 27 / 5 / 28 / 23）在这个模型里**没有服务体**：
+            // 表里其余位（22 / 24 / 20 / 3 / 4 / 7 / 8 / 6 / 5 / 28 / 23）在这个模型里**没有服务体**：
             // 一律按"交回迭代头"（保守选择，也是本片之前的表现）。它们的领域语义见残差
             // `RES-VM-BIT-CLEARERS` / `RES-VM-OTHER-BITS-SUBSYSTEMS` —— ⛔ 不猜名字、⛔ 不发明行为。
             return GateAction::ToHead;
@@ -851,6 +906,19 @@ bool Machine::step() {
     try {
         write_length(2 * row->argc + 1);
         execute(instruction);
+    } catch (const DisplayMessageError& error) {
+        // 显示消息型异常（「三类异常」）：错**不**静默 —— 记下错误码与要给玩家看的文本，
+        // 主循环的"显示消息 + 重试 / 跳过 / 结束"三支本版未成篇 ⇒ 这里只把观察口填上并停机。
+        // ★ 选择显示请求会在引擎的错误日志里写一行「致命错误 + 文本」（`05-boot.md:191`）⇒
+        //   走**输出对象**的「报告」那一项（`45-objects`：日志落点写 `\r\n致命的エラー[...]\r\n`，
+        //   再把文本交给根对象的错误处理）。⛔ 这不是错误通道（`report_error`），别混。
+        last_display_code_ = error.code();
+        last_display_message_ = error.text();
+        output_report(error.text());
+        halted_ = true;
+        stop_.reason = StopReason::Error;
+        stop_.message = error.what();
+        return false;
     } catch (const std::exception& e) {
         // 诊断扫场（`--sweep-missing`）：缺 handler 不中止，记账后当空操作继续 —— 一次跑遍界面
         // 就能把所有缺口按首次出现顺序列出来。⛔ 这不是引擎语义（跳过会让脚本失真）。

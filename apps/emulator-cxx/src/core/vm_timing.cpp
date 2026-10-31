@@ -47,10 +47,12 @@ void Machine::service_bgm_fade() {
 // ★ 交付**不是混音**：它只推进引擎自己的到期记录，并把「到期」交给该子系统自己的释放 / 启动入口；
 //   混音 / 输出 / 音量属音频子系统与平台（`70-vm.md:23` 的范围声明）⇒ 这里**一处宿主请求都不发**。
 void Machine::deliver_sound_time(std::uint32_t now_ms) {
-    // 入口判据：「无待办 ⇒ 直接返回」（`0x4b5239`）。没有这一格，「未到期 ⇒ 重新置待办」就没有读者，
-    // 10 个通道会每迭代被无谓地扫一遍。
+    // 入口判据：「无待办 ⇒ 直接返回」（`0x4b5239`：`cmp [ebx+4B8h],0`）。没有这一格，「未到期 ⇒
+    // 重新置待办」就没有读者，10 个通道会每迭代被无谓地扫一遍。
     if (!se_work_pending_) return;
-    bool remaining = false;
+    // 「待办」是**单格**（`T_SE+0x4B8`），不是每通道一格：进入时清 0（`0x4b524a mov [ebx+4B8h],eax`），
+    // 后面**任一**通道未到期时再置 1（`0x4b5296`）。⇒ 全部到期的那一趟结束时它保持 0。
+    se_work_pending_ = false;
     for (auto& channel : se_channels_) {
         if (!channel.active) continue;
         // 懒盖章：**只判起点 = 0**（`0x4b526b`）。★ 0 是"未盖章"哨兵 ⇒ 盖章只发生一次，⛔ 不是每迭代都盖。
@@ -65,10 +67,9 @@ void Machine::deliver_sound_time(std::uint32_t now_ms) {
             se_last_released_value_ = channel.value;
             ++se_release_steps_;
         } else {
-            remaining = true;  // 未到期 ⇒ 该子系统重新置「仍有一件未完成的工作」（`0x4b5296`）
+            se_work_pending_ = true;  // 未到期 ⇒ 重新置「仍有一件未完成的工作」（`0x4b5296`）
         }
     }
-    se_work_pending_ = remaining;
 }
 
 bool Machine::deliver_voice_time(std::uint32_t now_ms) {

@@ -228,19 +228,61 @@ void Machine::op_1ba(const Instruction& instruction) {
     }
 }
 
+void Machine::op_2bf(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 音效通道登记（`0x2BF` / handler `sub_4262C0` → 登记入口 `sub_4B5170`；`70-vm.md`「音效通道」的
+    // 「登记」段，规则见该段的四类写者表）。
+    // 读序 **3 → 2 → 1**（`0x4262db push 3` / `0x4262e5 push 2` / `0x4262ef push 1`）：
+    //   第 1 个 = 通道号、第 2 个 = 交值、第 3 个 = 时长。
+    // 登记入口（`sub_4B5170(this, 通道, 交值, 时长)`）逐字：
+    //   `0x4b5179 cmp ecx,0Ah / jl` ⇒ 通道号 ≥ 10 走拒绝支，**一个格都不写**；
+    //   `0x4b51a8 [T_SE+0x468+ch*4] ← 时长` · `0x4b51b7 [T_SE+0x418+ch*4] ← 1`（活动）·
+    //   `0x4b51be [T_SE+0x440+ch*4] ← 0`（起点 = 未盖章）· `0x4b51c9 [T_SE+0x490+ch*4] ← 交值` ·
+    //   `0x4b51d0 [T_SE+0x4B8] ← 1`（待办，**单格**）。
+    // ★ 同一通道再登记一次 = **重设**：起点回到未盖章、时长与交值被覆盖（`70-vm.md` 登记段）。
+    // ★ 负通道号在引擎里会落到表外（未定义行为）⇒ 本版同样不写，只记诊断。
+    const auto duration = read_int(ops[2]);
+    const auto value = read_int(ops[1]);
+    const auto channel = read_int(ops[0]);
+    if (channel < 0 || channel >= kSeChannelCount) {
+        report_error("se-register-channel-out-of-range:" + std::to_string(channel));
+        return;
+    }
+    SeChannel& record = se_channels_[static_cast<std::size_t>(channel)];
+    record.active = true;      // 活动 ← 1
+    record.start = 0;          // 起点 ← 0（未盖章 ⇒ 交给下一次交付）
+    record.duration = duration;
+    record.value = value;
+    se_work_pending_ = true;   // 待办 ← 1（下一迭代起参与交付）
+    return;
+}
+
 void Machine::op_b6(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 停止一个音效槽（0x0B6 / `sub_420B80` → `sub_4B5050`；本版**尚无规范条目**，见 spec 的 gap）。
+    // 按通道停止（`0x0B6` / `sub_420B80` → `sub_4B5050`，规则 `CORE-OPS-AUDIO-SLOT-STOP-B6`）。
     // 取证（`sub_4B5050`，`esi` = T_SE）：
+    //   ⓪ 前置 `0x4b5056`：后端不存在（`[T_SE+408h] == 0`）⇒ **到此为止**：不发请求、连两格也不清
+    //      （`60-ops-voice.md:348` / `:365`）；
     //   ① 向后端发一次"释放该槽缓冲"的调用 `0x4b5065 call sub_4B6390` —— 后者只在槽号 < 0Fh 时受理
     //      （`0x4b639a cmp edi,0Fh / jl`），否则写 `dsStop エラー：不正なSound番号です` 并返回 0；
-    //   ② **无条件**按槽号清两格：`0x4b506a [T_SE+0x4BC+slot*4] ← 0`（本版建模的那张 10 格表）
-    //      与 `0x4b5075 [T_SE+0x418+slot*4] ← 0`（本版未建模的槽结构体首格）。
+    //   ② **无条件**按槽号清两格：`0x4b506a [T_SE+0x4BC+slot*4] ← 0`（「登记的播放名」= 本模型那张
+    //      10 格「槽 → 当前资源号」表）与 `0x4b5075 [T_SE+0x418+slot*4] ← 0`（该通道的**活动**）。
+    //   ⇒ 清格在请求之后、且不看请求结果（`60-ops-voice.md:364`）。
     //   ⇒ 槽号 ≥10 时这两笔清是**表外写**（T_SE 到 +0x4E4 结束）——本版不复刻，只记诊断。
-    // ★ 与 0xb4 同一套建模前提（后端存在、后端受理）；「`T_SE+408h == 0`（后端不存在）时整段跳过、
-    //   连清格都不做」这条退化支路本版**不建模**（登记残差）。
+    //   ⇒ **负槽号**：后端那处是**有符号**比较（`0x4b639a cmp edi,0Fh / jl`）⇒ 负值**通过**受理、
+    //      请求照发；但两格都是表外写（spec `:352`）。本作的选择 = **照常计一次停止请求、不做表外写、
+    //      只记诊断**（登记为「实现侧已知偏离」，与 `0xb4` 的 10..14 口径一致）。
     const auto slot = read_int(ops[0]);
-    if (slot < 0 || slot >= kSoundSlotCount) {
+    // ⓪ 后端不存在 ⇒ 一步都不做（推进格数与读槽号已完成，`60-ops-voice.md:365`）。
+    if (!se_backend_attached_) return;
+    if (slot < 0) {
+        // 负槽号通过后端的"< 15"比较 ⇒ 请求照发（先计数）；表外写不复刻、只记一条诊断。
+        se_stop_requests_ += 1;
+        report_error("se-stop-slot-negative:" + std::to_string(slot));
+        return;
+    }
+    if (slot >= kSoundSlotCount) {
+        // 后端用**有符号**比较、只受理 < 15：≥15 拒绝并上报，但第二步照样执行（下表外写不复刻）。
         report_error("se-stop-slot-out-of-range:" + std::to_string(slot));
         return;
     }
@@ -250,6 +292,8 @@ void Machine::op_b6(const Instruction& instruction) {
         return;
     }
     se_slot_resource_[static_cast<std::size_t>(slot)] = 0;
+    // 该通道的活动 ← 0（`0x4b5075`）。★ 不改起点 / 时长 / 交值 —— 那三格只由「登记」写。
+    se_channels_[static_cast<std::size_t>(slot)].active = false;
     return;
 }
 
@@ -339,7 +383,7 @@ void Machine::op_2f5(const Instruction& instruction) {
     const auto op2 = read_int(ops[1]);
     const auto op1 = read_int(ops[0]);
     if (op4 < 0 || op4 >= static_cast<int>(voice_slot_timers_.size())) {
-        // 引擎**不查**这个下标（T_Voice 只有 3 格）⇒ 越界写属未定义行为；本版记日志后跳过（已知偏离）。
+        // 引擎**不查**这个下标（T_Voice 只有 3 格）⇒ 越界写属未定义行为；本实现记日志后跳过（实现侧已知偏离：spec 建议记诊断）。
         report_error("voice-slot-out-of-range:" + std::to_string(op4));
         return;
     }
@@ -403,7 +447,7 @@ void Machine::op_82(const Instruction& instruction) {
     const auto op1 = read_int(ops[0]);
     if (op2 < 0 || static_cast<std::size_t>(op2) >= text_spans_.size()) return;
     if (op1 < 0 || op1 >= 10) {
-        // 引擎不检查 0..9（越界是未定义读）⇒ 本实现记日志后跳过（已知偏离）。
+        // 引擎不检查 0..9（越界是未定义读）⇒ 本实现记日志后跳过（实现侧已知偏离：spec 建议记诊断）。
         report_error("text-node-slot-out-of-range:" + std::to_string(op1));
         return;
     }
@@ -555,12 +599,14 @@ void Machine::op_306(const Instruction& instruction) {
 
 void Machine::op_88(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 成对写 + 条件清门字第 27 位
+    // 成对写（`CORE-OPS-SCALAR-PAIR-88`）：同一个值写 **C / D** 两格（两格都写、不看值）；
+    // 非 0 ⇒ 第三格 **G** ← 常量 1；为 0 ⇒ 读-改-写清**状态选择字第 27 位**（其它位原样）。
+    // ★ 非 0 支**不碰**状态选择字（⛔ 别写成"非 0 也置位 / 也清位"）。
     const auto value = read_int(ops[0]);
-    scalar_88a_ = value;
-    scalar_88b_ = value;
+    mode_c_ = value;
+    mode_d_ = value;
     if (value != 0) {
-        scalar_88c_ = 1;
+        mode_g_ = 1;
     } else {
         state_flags_ &= ~(1u << 27);
     }
@@ -586,9 +632,14 @@ void Machine::op_b4(const Instruction& instruction) {
     //   后端受理 0..14；引擎那张「槽 → 当前资源号」表只有 10 格（0..9）。
     //   `0x4b5004 [T_SE+0x4BC+slot*4] ← 资源` 没有边界检查 ⇒ 槽号 10..14 是表外写（写进下一个嵌入对象，
     //   未定义）；本版不复刻那笔越界写，只记诊断、**不动**表。
-    // ★ 建模前提：后端存在 + 装载成功（失败路径抛显示消息型异常，本版不写合同，见残差）。
+    // ★ 建模前提：**后端存在** + 装载成功（失败路径抛显示消息型异常，本版不写合同，见残差）。
+    //   ★ **后端不存在 ⇒ 整段跳过**：不发请求、不写格（`60-ops-voice.md:73`）—— 与 `0xb6` 的 ⓪
+    //     是同一个判断（`vm.h` 的「声音后端存在」接缝）。读两个操作数已完成（与 `0xb6` 同口径）。
     const auto resource = read_int(ops[0]);
     const auto slot = read_int(ops[1]);
+    // ⛔ 这一行是 spec 明文的前置（`60-ops-voice.md:73`）：后端不存在 ⇒ **整段跳过**（不发请求、不写格）。
+    //    与 `0xb6` 的 ⓪ 是同一个判断；这里取 getter（与那一行的成员读法不同 ⇒ 变异 / grep 能分开定位）。
+    if (!se_backend_attached()) return;
     if (slot < 0 || slot >= kSoundSlotCount) {
         report_error("se-load-slot-out-of-range:" + std::to_string(slot));
         return;
@@ -927,6 +978,7 @@ void Machine::op_19b(const Instruction& instruction) {
 void Machine::op_19c(const Instruction& instruction) {
     (void)instruction;
     // 按 C / E / F 条件置模式位；四支的落点不同（见 CORE-OPS-MODE-BIT）。
+    // ★ C 就是 `0x88` 写的 `mode_c_`（也是 `0x19a` 读的格）；E 就是 `0x1cc` 读的 `mode_e_`。
     mode_a_ = 1;
     mode_b_ = 0;
     if (mode_c_ != 0) {
@@ -990,12 +1042,12 @@ void Machine::op_1cf(const Instruction& instruction) {
     return;
 }
 
-// ── 标志格 / 状态格 / 模式位读 / 层号（三格互不相同：⛔ 不要合并） ──
+// ── 标志格 / 状态格 / 模式位读 / 层号（⛔ 三个名字不是三个格：C = 0x19a 的 X 格，E = 0x1cc 的状态格） ──
 
 void Machine::op_19a(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 格 X 的**原值**写进第 1 个操作数（不归一）。
-    write_int(ops[0], flag_x_);
+    // 格 C（= 规范「两个引擎标志格」里的格 X）的**原值**写进第 1 个操作数（不归一）。
+    write_int(ops[0], mode_c_);
     return;
 }
 
@@ -1030,7 +1082,8 @@ void Machine::op_1c7(const Instruction& instruction) {
 void Machine::op_1cc(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 状态格的**原值**写进第 1 个操作数（不归一；与 0x1cf 的状态字是不同格）。
-    write_int(ops[0], status_cell_);
+    // ★ 这一格就是模式族的 **E**（`CORE-OPS-MODE-BIT`：`0x19c` 的第二个判据读同一格）。
+    write_int(ops[0], mode_e_);
     return;
 }
 

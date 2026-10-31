@@ -386,7 +386,39 @@ struct RunResult {
     std::string message;
 };
 
-// 最小 CORE-VM：一次 step 至多执行一条指令；状态选择字恒 0（状态位服务尚未实现）。
+// ── 字体对象的一份字体描述（`LOGFONTA` 的最小投影）──
+// `height` = lfHeight（**负值**：字号取相反数）、`width` = lfWidth（"下一格"，`0x1a5` / `0x197` 写它）。
+// 每支一对、每对两份变体：一份字面名 = 操作数原样，一份 = `'@'` + 操作数（`60-ops-forward` 的
+// 「两条字符串入口不许合并」）。⛔ 不要把它写成"同一份的两个拷贝"：`'@'` 那份是独立的变体。
+struct FontDescription {
+    std::string face;
+    std::int32_t height = 0;
+    std::int32_t width = 0;
+};
+struct FontDescriptionPair {
+    std::array<FontDescription, 2> variants{};
+};
+
+// ── 显示消息型异常（`60-ops-numeric` 的「三类异常」之一种）──
+// 携带**错误码**（诊断 / 日志用）与**要显示给玩家的文本**（逐字）。主循环捕获它之后显示消息，
+// 再按返回值 / 用户选择决定重试 / 跳过 / 结束 —— 那三支本版未成篇。
+// ⛔ 三类异常可区分、不许合并：本类型就是"显示消息"那一支；`CoreError` 裸用 = 操作数类型异常；
+//    退出型异常另有一支（本模型里走 `StopReason::Halted`）。
+class DisplayMessageError : public CoreError {
+public:
+    DisplayMessageError(std::string code, std::string text)
+        : CoreError("display-message:" + code), code_(std::move(code)), text_(std::move(text)) {}
+    const std::string& code() const { return code_; }
+    const std::string& text() const { return text_; }
+
+private:
+    std::string code_;
+    std::string text_;
+};
+
+// 最小 CORE-VM：一次 step 至多执行一条指令。状态选择字（门字）**不是常量**：写者有 `0x88` 的 0 支、
+// `0x19b` / `0x19c` / `0x71`、追加前置支与第 27 位服务体等；位的服务链见 `service_gate_bit`，
+// 位序表与「服务后」三件事见 `CORE-VM-GATE` / `CORE-VM-STATE`。
 class Machine {
 public:
     static constexpr std::size_t kFrameCount = 40;
@@ -401,6 +433,8 @@ public:
 
     Machine(std::uint32_t int_key, const OpcodeTable& table, const Install* install = nullptr,
             ConfigStore config = ConfigStore{});
+    /** 析构 = 文件库析构的模型入口（`0x454cd0`：槽位表逐格清 0）。 */
+    ~Machine();
 
     // 解析脚本头并把 body 装进当前帧（根脚本 id 0）。
     void load_root(const Bytes& script, std::uint32_t script_id = 0);
@@ -441,16 +475,39 @@ public:
     bool queue_occupied() const { return queue_head_ < queue_tail_; }
     std::size_t queue_high_water() const { return queue_high_water_; }
     std::int32_t queue_command(std::size_t index) const { return command_queue_[index]; }
-    // 255 格登记表（`0x143` 的投递源；格号 1..255，格 0 不参与）。★ 语料里没有写者
-    // （残差 `RES-OPS-EVENT-143-QUEUE`）⇒ 产品路径上恒 0；写入只能由测试播种。
-    std::int32_t event_table_cell(std::int32_t index) const;
+    // ── 文件库的 **256 格槽位表**（`CORE-OPS-EVENT-143`）──
+    // ★ 它就是 `0x143` 第 3 步逐槽检查的那张表（不是 `0x143` 私有的登记表）：按**槽号 = 统一文件 id
+    //   的高 8 位（区号）**索引「已装载文件对象」（一张**索引对象**，不是单个文件），格值 0 = 该区号
+    //   没装载。整表在文件库建立时清 0（`0x454adc ecx = 0x100` / `0x454ae6 rep stosd`），此后只在
+    //   **文件装载**（`0x455948`：`ecx = [对象+114h]` = 该索引对象自带的区号）与**文件库析构**
+    //   （`0x454cd0`：逐槽销毁非空格并清 0）时变。
+    // ★ 本模型没有独立的文件库对象 ⇒ 表挂在 `Machine` 上。产品侧的登记点 = 走 `read_install_file`
+    //   的四个装载点（脚本 `install_script_into` / 影片 `vm_movie` / 纹理 `vm_ops_texture` /
+    //   `0x9` 的根重装）—— 它们都调 `register_loaded_file()`（按统一 id 取区号：本模型装到的都是
+    //   基础索引的文件 ⇒ 区号 0 ⇒ 写格 0，而 `0x143` 不检查格 0）。★ `src/boot.cpp` 的**启动期根装载**
+    //   不登记：它拿到的字节来自已经打开的 ALF 索引（本模型没有把"打开索引"建成一次
+    //   `read_install_file`），而 `register_loaded_file()` 是私有的 ⇒ 启动路径没有产品接缝可调；
+    //   它同样只会写格 0，`0x143` 不看格 0。
+    //   **扩展索引（AAI，区号 1..255）的装载本模型不解析** ⇒ 只留文件库的装载入口
+    //   `load_extension_index()`（引擎在启动期枚举 `*.AAI`，其解析属残差）。
+    //   `~Machine()` 走 `release_file_library()`（析构口径）。
+    static constexpr std::size_t kFileLibrarySlotCount = 256;
+    std::int32_t file_library_slot(std::size_t index) const {
+        return index < file_library_slots_.size() ? file_library_slots_[index] : 0;
+    }
+    /** 文件库装载一个**扩展索引**（AAI）：按它自带的**区号**登记槽位（`0x455948`）。
+     *  ★ 本模型不解析 AAI 文件（残差）⇒ 这是"装载一个扩展索引"的模型入口，不是 `0x143` 私有的表。
+     *  区号 0 = 基础索引那一格（`0x143` 不检查）；≥ 256 是表外写 ⇒ 不写、只记诊断。 */
+    void load_extension_index(std::int32_t zone);
+    /** 文件库析构（`0x454cd0`）：逐槽清 0。`~Machine()` 也调它 —— 测试用它模拟"卸载"，
+     *  因为本模型没有独立的文件库对象。 */
+    void release_file_library() { file_library_slots_.fill(0); }
     // 宿主消息泵的节流（`CORE-VM-LOOP`）：**本迭代**是否该泵一次（迭代头算出的结果），与计数器现值。
     bool should_pump_host() const { return host_pump_due_; }
     std::uint32_t pump_counter() const { return pump_counter_; }
     // ★ 测试接缝（⛔ 不是产品接口）：
     /** 直接往队列尾放一条命令（只模拟「投递」那一下，**不**带投递口的顺手泵尾巴）。 */
     void enqueue_command_for_test(std::int32_t command);
-    void seed_event_table_cell_for_test(std::int32_t index, std::int32_t value);
     void seed_status_restore_for_test(std::uint32_t value) { status_restore_ = value; }
     // 全局引用族槽里存的**地址**（观察口；⛔ 不是产品接口）：`0x9` 复位后必须读 0。
     std::uint32_t pointer_slot(std::uint32_t tag, std::uint32_t index) const {
@@ -527,9 +584,6 @@ public:
     // 待画格的字号覆盖（守卫用：ruby run 的格应当是 B 支）。
     std::int32_t pending_glyph_size(std::size_t i) const { return pending_glyphs_[i].size; }
     std::int32_t scalar_252() const { return scalar_252_; }
-    std::int32_t scalar_88a() const { return scalar_88a_; }
-    std::int32_t scalar_88b() const { return scalar_88b_; }
-    std::int32_t scalar_88c() const { return scalar_88c_; }
     std::int32_t named_message_read_text_skip() const { return config_.get_int("message:ReadTextSkip"); }
     const ListRecord& list_record(std::size_t group) const { return list_records_[group]; }
     std::int32_t default_group() const { return default_group_; }
@@ -556,17 +610,41 @@ public:
     std::int32_t font_8b() const { return font_8b_; }
     // ★ 字号与行高是**两个量**：字号 = 字形高度（`Font+0x355D8`，缺省 8，`0x197` 写它），
     //   行高 = 行距（`Font+0x313D4`，缺省 24，`0x75` 写它）。合并成一个格会让「设字号」把行高也改掉。
-    //   ⚠ 未建模：引擎绘制时把字号乘**显示缩放**（`Font+0x355E4`，初值 1.0，随渲染器高度比例刷新）。
-    //   本宿主按**逻辑分辨率**渲染 ⇒ 该缩放恒为 1.0，乘法是恒等；换成分辨率无关的呈现时要补上。
+    // ★ 字号是**未缩放**的量：缩放乘在**建字体**那一步（`font_build_height()`，比例见 `font_scale_*`）。
+    //   ★ 本宿主**不建模建字体缩放**：`font_build_height()` 只是**实现侧观察口**（无产品消费者，
+    //     产品绘制走 `text_gdi.cpp` 的未缩放 `lfHeight`）。比例 = 1.0 也**不**等于"未缩放字号" ——
+    //     公式是 `trunc(高 × 比例 + 0.5)`，−40 × 1.0 + 0.5 截断是 **−39** 而不是 −40（见
+    //     `font_build_height()` 与自检 `spec_font_build_scale`）。
     std::int32_t font_size() const { return glyph_height_; }
     std::int32_t glyph_height() const { return glyph_height_; }
     std::int32_t font_b_height() const { return font_b_height_; }
+    // ── 字体对象的两对字体描述（`0x75` / `0x1a5` 与 `0x197` / `0x2fe` 各一对；观察口，⛔ 不是产品接口）──
+    // 每对两份变体：`[0]` 字面名 = 操作数原样、`[1]` = `'@'` + 操作数；两份的高 / 下一格完全相同。
+    const FontDescription& font_description(bool branch_b, std::size_t variant) const {
+        const auto& pair = branch_b ? font_b_pair_ : font_a_pair_;
+        return pair.variants[variant];
+    }
+    // 建字体高度 = `trunc(该支描述的高 × 缩放比例 + 0.5)`（向零截断；高是负值 ⇒ 等价于"向上取整"）。
+    // ★ 引擎在**建字体**那一步乘缩放（`0x45A3A9` A 支 / `0x45A7F8` B 支）；重建的内部过程属实现侧，
+    //   本观察口只回答"若现在建字体，lfHeight 会是多少"。
+    std::int32_t font_build_height(bool branch_b = false) const;
+    // 缩放两个分量（高分量乘进 lfHeight；宽分量只抄进十个文本槽的两格）。
+    double font_scale_width() const { return font_scale_width_; }
+    double font_scale_height() const { return font_scale_height_; }
+    // 整趟重算**写没写** / 发了几次重建请求（守卫用来钉"两个分量都相等 ⇒ 整趟什么都不写"）。
+    std::size_t font_scale_write_count() const { return font_scale_write_count_; }
+    std::size_t font_rebuild_requests() const { return font_rebuild_requests_; }
     // 十个**文本槽**：各自的字形高度（`槽+0xC8`）与绘制原点偏移（`槽+0x0C` / `槽+0x10`）。
     std::int32_t text_slot_glyph_height(std::size_t i) const { return text_slots_[i].glyph_height; }
     std::int32_t text_slot_x(std::size_t i) const { return text_slots_[i].x_offset; }
     std::int32_t text_slot_y(std::size_t i) const { return text_slots_[i].y_offset; }
+    // 文本槽的**缩放两格**（`槽+0x74` = 宽分量、`槽+0x78` = 高分量；与绘制原点偏移不是同一对格）。
+    double text_slot_scale_width(std::size_t i) const { return text_slots_[i].scale_width; }
+    double text_slot_scale_height(std::size_t i) const { return text_slots_[i].scale_height; }
     static constexpr std::size_t text_slot_count() { return 10; }
-    const std::string& font_string() const { return font_string_; }
+    // 当前**A 支描述的字面名**（原样那一份）。消费方只有 GDI 对照档（`EMULATOR_CXX_GLYPH_GDI_FACE=engine`）；
+    // 缺省为空串（引擎的缺省字体名本版未取证）。
+    const std::string& font_string() const { return font_a_pair_.variants[0].face; }
     std::int32_t engine5(std::size_t i) const { return engine5_[i]; }
     std::int32_t key_total() const { return key_total_; }
     // 引擎配置库（保存 / 脚本配置读写共用）。`config_mut()` 只给**自检 / 夹具**注入键值用
@@ -588,6 +666,18 @@ public:
     // 那是主循环**被动观察**输入状态，⛔ 与脚本主动取键（`0xff` / `0x109`）不是一回事。
     void set_input_pressed(bool pressed) { input_pressed_ = pressed; }
     bool input_pressed() const { return input_pressed_; }
+    // ── 字体缩放的平台输入接缝（`60-ops-forward`「字号是"未缩放"的量」）──
+    // 视口 / 客户区尺寸是**平台输入**（`0x46586F` / `0x46587E` 用引擎缓存的视口与配置客户区）。
+    // 缺省 = 按配置的客户区尺寸（⇒ 比例 1.0）；宿主 / 守卫可注入真实视口。⛔ handler 里不许直接读 Win32。
+    struct Viewport {
+        std::int32_t width = 0;
+        std::int32_t height = 0;
+    };
+    using ViewportSource = std::function<Viewport()>;
+    void set_viewport_source(ViewportSource source) { viewport_source_ = std::move(source); }
+    // 引擎「重新应用字体设置」的路径（重算缩放的**第 ② 个时机**；`sub_465840` 的调用点 0x41806E / 0x4692D7）。
+    // 本模型没有与之对应的 opcode ⇒ 用这个接缝表示那一次重算（⛔ 产品脚本路径不调用它）。
+    void reapply_font_settings();
     // 滚轮增量（`0x10d` 读并清 `Engine+0x1E74`）：**宿主推**（窗口过程把 WM_MOUSEWHEEL 加进那一格）。
     // ★ 符号与刻度属平台边界（0x10d 只规定"读出后清 0"）⇒ 本版按宿主给的原值累加。
     void add_wheel_delta(std::int32_t delta) { wheel_accum_ += delta; }
@@ -707,7 +797,17 @@ public:
     std::int32_t render_target() const { return render_target_; }
     std::int32_t blend_mode() const { return blend_mode_; }
     std::uint32_t blend_color() const { return blend_color_; }
-    std::int32_t indirect_value(std::int32_t slot) const { const auto it = indirect_.find(slot); return it == indirect_.end() ? 0 : it->second; }
+    // ── 键绑定三张表（`CORE-OPS-SCALAR-TABLE-10C`；观察口，⛔ 不是产品接口）──
+    // ① 键号 → 动作号：与 0x10b（单键绑定）**共用同一张 32 格表**（`array_d1383_`）；0x10c 本条**不碰**它。
+    // ② 动作号 → 槽号：0x10c **只读**（第 2 个操作数是动作号）。
+    // ③ 槽号 → 键号：0x10c **写**它（`-1` = 未绑定）。
+    std::int32_t key_action(std::size_t key) const { return array_d1383_[key]; }
+    std::int32_t action_slot(std::size_t action) const { return action_slot_table_[action]; }
+    std::int32_t slot_key(std::size_t slot) const { return slot_key_table_[slot]; }
+    // 测试播种（⛔ 不是产品接口）：预置"动作 → 槽"那一格。
+    void set_action_slot_for_test(std::size_t action, std::int32_t slot) {
+        action_slot_table_[action] = slot;
+    }
     std::size_t draw_item_count() const { return draw_items_.size(); }
     std::size_t texture_count() const { return textures_.size(); }
     std::size_t mesh_count() const { return meshes_.size(); }
@@ -862,9 +962,71 @@ public:
     // ★ 它自己就把"条目当前的 slot.revision"算进下限（不需要调用方先记一次），⛔ 也不要为了
     //   "省一次上传"把版本号变小。
     std::uint32_t next_texture_revision(std::uint32_t id);
-    void report_error(std::string text) { errors_.push_back(std::move(text)); }
+    // ── 错误通道（`60-ops-numeric` 的「错误通道」）──
+    // 引擎为**一次**触发发**一个**平台写请求：文本 + 它的长度。两个抑制条件由引擎自己判定：
+    //   ① 输出句柄无效（宿主没打开那个文件）⇒ 整条丢弃（不写、不抛、不中止）；
+    //   ② 宿主装了过滤器、过滤器返回非 0 ⇒ 同样丢弃。
+    // ★ 诊断本身**无条件**保留在 `errors_`（测试 / 诊断读它）；抑制只影响那次平台写请求。
+    // ★ 平台写请求长什么样（哪个文件、显示给谁）属平台侧，不在规范正文：这里只留一条接缝。
+    //   ⇒ 一次触发 = 一次调用；⛔ 不要在 50+ 个 handler 里各拼一次请求（改在 `report_error` 内部）。
+    using ErrorOutputWriter = std::function<void(const std::string& text, std::size_t length)>;
+    using ErrorOutputFilter = std::function<std::int32_t()>;
+    void set_error_output_writer(ErrorOutputWriter writer) { error_writer_ = std::move(writer); }
+    void set_error_output_handle_valid(bool valid) { error_handle_valid_ = valid; }
+    void set_error_output_filter(ErrorOutputFilter filter) { error_filter_ = std::move(filter); }
+    // 平台写请求**实际发出**的次数（观察口；⛔ 不是产品接口）。
+    std::size_t error_write_requests() const { return error_write_requests_; }
+    // 触发条件判定在各 handler；这里只做「判定抑制 → 发请求 → 保留诊断」。
+    void report_error(std::string text);
     const std::vector<std::string>& errors() const { return errors_; }
     void clear_errors() { errors_.clear(); }
+    // ── 输出对象（`45-objects`「对象前缀：类行为表与输出对象」）──
+    // ★ 它是进程级静态对象、**不是**错误通道（`report_error` 是另一路：场景错误缓冲 + 平台写请求）。
+    //   本条只规定三项操作的外部效果：日志落点的文本组成 + 报告再把文本交给根对象的错误处理。
+    //   落盘时机 / 缓冲 / 平台是否受理属平台侧（写失败不改变引擎状态）⇒ 这里只留接缝。
+    // ★ 「按脚本位置追加」的前缀 = `(<脚本名>：<行号>行目) `（全角冒号 + 「行目」+ 一个半角空格）。
+    //   脚本名与行号的**来源未取证**（残差 `RES-OBJ-LOG-PREFIX`）⇒ 由调用方按参数给，⛔ 不发明来源。
+    // ★ 行为表是三项：删除式析构 + 两个致命错误报告入口。基类操作只用到「窗口句柄 + 文本」那一项
+    //   （`45-objects`：`基类操作只用到"窗口句柄"那一项`）⇒ 「两个整数 + 文本」那个入口本模型
+    //   **未接线**（没有任何调用者，对象模型属子单）⇒ 不建字段：grep 到的表面积不许大于真实能力。
+    struct OutputObjectIo {
+        std::function<void(const std::string& text)> log;              // 日志落点：写一段文本
+        std::function<void(const std::string& text)> root_error_window; // 根错误处理（窗口句柄 + 文本）
+    };
+    void set_output_object_io(OutputObjectIo io) { output_object_io_ = std::move(io); }
+    /** 追加一段文本：原样交给日志落点。 */
+    void output_append(const std::string& text);
+    /** 按脚本位置追加：`(<脚本名>：<行号>行目) ` + 文本（两参数的来源由调用方给）。 */
+    void output_append_with_position(const std::string& script_name, std::int32_t line,
+                                     const std::string& text);
+    /** 致命错误报告：先写 `\r\n致命的エラー[` + 文本 + `]\r\n`，再把文本交给根对象的错误处理
+     *  （「窗口句柄 + 文本」那一项）。★ 与错误通道无关。 */
+    void output_report(const std::string& text);
+    /** 走过「报告」这一项的次数（观察口；⛔ 不是产品接口）。 */
+    std::size_t output_reports() const { return output_reports_; }
+    // ── 第 27 位（消息逐帧推进门位）的宿主 / 子系统接缝 ──
+    // ① 门服务体的一次消息处理（`60-ops-scalar`「成对写：opcode 0x88」）：读一条消息并派发 →
+    //    让出一拍 → 窥视一次。★ 它与迭代头按节流触发的宿主泵**不是同一处**，也不受那个计数器约束。
+    //    缺省三件都是 no-op（没有宿主消息源）；`host_message_steps()` 数"进入过几次消息处理"。
+    struct HostMessageIo {
+        std::function<void()> process_one;  // 读一条消息并派发
+        std::function<void()> yield;        // 睡眠 / 让出一拍
+        std::function<bool()> peek;         // 窥视消息（不移除）
+    };
+    void set_host_message_io(HostMessageIo io) { host_message_io_ = std::move(io); }
+    std::size_t host_message_steps() const { return host_message_steps_; }
+    // ② 文本子系统一次调用的返回值（`0x71`；返回值非 0 ⇒ 置第 27 位，领域含义未定）。
+    using TextRequestResult = std::function<std::int32_t(std::int32_t request)>;
+    void set_text_request_result(TextRequestResult result) {
+        text_request_result_ = std::move(result);
+    }
+    // ③ 「读文本跳过」的**已读命中**（残差 `RES-MSG-BLOCK-READ-HIT`：已读表未建模）。
+    //    缺省 = 无命中；`0x305` 的 ② 与 `0x6e` / `0x196` 的追加前置支共用同一判据。
+    using ReadTextSkipHit = std::function<bool()>;
+    void set_read_text_skip_hit(ReadTextSkipHit hit) { read_text_skip_hit_ = std::move(hit); }
+    // 最近一次被主循环捕获的**显示消息型异常**的错误码 / 文本（观察口；⛔ 不是产品接口）。
+    const std::string& last_display_code() const { return last_display_code_; }
+    const std::string& last_display_message() const { return last_display_message_; }
     // ── 观察口（守卫用；⛔ 不是产品接口）──
     std::int32_t display_mode_cache() const { return display_mode_cache_; }
     // 音频观察口（守卫用；⛔ 不是产品接口）。
@@ -881,14 +1043,13 @@ public:
     std::int32_t bgm_fade_interval_ms() const { return bgm_fade_interval_ms_; }
     std::int32_t bgm_fade_mix_mode() const { return bgm_fade_mix_mode_; }
     std::size_t bgm_fade_requests() const { return bgm_fade_requests_; }
-    // 门字（`state_flags_`）：**只给自检 / 夹具**摆前置位用（当前没有哪条已实现的指令能可靠置第 27 位，
-    // 而 `0xc2` 的两条支路正是按那一位分的）。⛔ 不要在产品代码里用它绕开指令。
+    // 门字（`state_flags_`）：**只给自检 / 夹具**摆前置位用（`0x88` / `0x71` / `0x305` 与追加前置支
+    // 已是第 27 位的产品写者，但 `0xc2` 的两条支路仍需要能单独摆位来测）。⛔ 不要在产品代码里用它绕开指令。
     std::uint32_t& state_flags_mut() { return state_flags_; }
     // ── **门外直派**：⛔ 只给自检 ──
-    // 门（`state_flags_`）一旦非 0 就不取指，而本模型的主循环只有第 0 / 10 / 13 位的服务分支：
-    // 第 27 位（"影片 / 立即"）没有服务者 ⇒ `0xc2` 的 A 支与 `0xc4` 的影片门支**用合成脚本永远走不到**
-    // （只会得到 `gate-bit-unserviced` 诊断）。这两条支路按取证实现了，却因此长期没有行为级守卫。
-    // ⇒ 给一个最小接缝，口径与 `emulator-new` 那边"测试直接取 `HANDLERS.get(op)` 调"一致。
+    // 门（`state_flags_`）一旦非 0 就不取指；第 27 位现在有服务体（交回迭代头），而它的「清」由
+    // 消息处理 / 脚本指令负责 ⇒ 置起后脚本本身派发不到。`0xc2` 的 A 支与 `0xc4` 的影片门支、
+    // 以及 `0x19c` 置位之后的读回，都要靠这个接缝在**不取指**的情况下跑 handler。
     // ★ 它只做**一次派发**：不取指、不推进 ip、不服务门位。⛔ 生产路径只有 `step()`。
     void dispatch_for_test(const Instruction& instruction) { execute(instruction); }
     // ── 门服务链的收场（`CORE-VM-STATE` 位序表的「服务后」列）──
@@ -944,7 +1105,12 @@ public:
     //   10 这个数取自同一条 spec 句（「音效通道：10 个通道」，`70-vm.md:19`）+ 绑定里的
     //   `0x4b52a4 音效通道：10 个通道`。
     static constexpr int kSeChannelCount = 10;
-    /** 一个音效通道的到期计时记录（`70-vm.md:19`）。★ `start` 的 0 = **未盖章哨兵**。 */
+    /** 一个音效通道的到期计时记录（`70-vm.md:19`）。★ `start` 的 0 = **未盖章哨兵**。
+     *  ★ 四格逐字对应 `T_SE` 的四组：活动 `+0x418` / 起点 `+0x440` / 时长 `+0x468` / 交值 `+0x490`。
+     *    第五组（**播放名**，`+0x4BC`）不在本条记录里 —— 它是 `se_slot_resource_`（交付不读它）。
+     *    「待办」**不是每通道一格**：它是 `T_SE+0x4B8` 的**单格**（登记 `0x4b51d0` ← 1 / 交付入口
+     *    `0x4b5239` 读它并在进入时清 / 未到期 `0x4b5296` 再置 / 整组清零 `0x4b521e` ← 0）
+     *    ⇒ 由 `se_work_pending_` 承担，⛔ 不要给每个通道再发一个同义字段。 */
     struct SeChannel {
         bool active = false;        // 活动标记
         std::uint32_t start = 0;    // 起点（0 = 未盖章）
@@ -976,8 +1142,8 @@ public:
      *  并置语音的「仍有一件未完成的工作」。语音推进与 `0xc4` 的第 2 步都走这里。 */
     void request_bgm_duck();
     // ── 时间交付的测试注入口（⛔ 不是产品接口）──
-    // ★ 通道记录的**其余写者**（谁置"活动"、谁写时长与那个值）本版未取证
-    //   （残差 `RES-VM-SE-RECORD-WRITERS`）⇒ 这里只让守卫把前置摆出来，⛔ 不要在产品路径里伪造一次播放。
+    // ★ 产品路径的登记写者已落地：`0x2bf` → `op_2bf`（活动 ← 1 / 起点 ← 0 / 时长 / 交值 / 待办 ← 1，
+    //   通道 ≥ 10 一格都不写）。这里的 setter 只给守卫摆"交付本身"的前置（如符号性用例的未来起点）。
     void set_se_channel_for_test(std::size_t i, bool active, std::uint32_t start, std::int32_t duration,
                                  std::int32_t value) {
         if (i >= se_channels_.size()) return;
@@ -1031,6 +1197,11 @@ public:
     std::size_t se_play_requests() const { return se_play_requests_; }
     std::size_t se_stop_requests() const { return se_stop_requests_; }
     std::size_t se_load_requests() const { return se_load_requests_; }
+    // ── 「声音后端存在」的接缝（`60-ops-voice` 的 `0xb4` / `0xb6` / `0xba` 共用的同一个判断）──
+    // ★ 后端不存在（`T_SE+0x408` 为空）时 `0xb6` **一格都不清**、`0xb4` 整段跳过（`0x4124bc` 一族）。
+    //   本模型没有真的声音后端 ⇒ 缺省 = **不存在**；接上它才走"发请求 + 清格"那一支。
+    void set_se_backend_attached(bool value) { se_backend_attached_ = value; }
+    bool se_backend_attached() const { return se_backend_attached_; }
     bool sound_se_enabled() const { return sound_se_enabled_; }
     bool sound_voice_enabled() const { return sound_voice_enabled_; }
     // ── 诊断（⛔ 不是引擎语义）：`--sweep-missing` 时把"没有 handler 的 opcode"" 记账后跳过 ──
@@ -1098,6 +1269,9 @@ public:
     // `0x0d9` 清的第二个字（泵期间对外有效的那份状态字）见上面的 `status_restore()` ——
     // ★ 它**不是**本条私有的格：泵在挂起时整字存、收场时并回（`CORE-OPS-RUN-BRACKET`）。
     // 模式族的七个格（`CORE-OPS-MODE-BIT`；代号见规范，地址对应未取证）。
+    // ★ 身份（本批统一）：`mode_c_` = 规范字母表的 **C**（也是 `0x19a` 原样读出的那一格 /「格 X」）、
+    //   `mode_e_` = **E**（**就是 `0x1cc` 读的「状态格」**，⛔ 不是另一格）、`mode_d_` / `mode_f_` /
+    //   `mode_g_` = D / F / G。`0x88` 一次写 C 与 D。
     std::int32_t mode_a() const { return mode_a_; }
     std::int32_t mode_b() const { return mode_b_; }
     std::int32_t mode_c() const { return mode_c_; }
@@ -1129,10 +1303,9 @@ public:
     std::uint32_t local_save_word() const { return local_save_word_; }
     std::uint32_t local_save_pos() const { return local_save_pos_; }
     std::int32_t local_save_depth() const { return local_save_depth_; }
-    // 三个互不相同的格（⛔ 不要合并）：`0x19a` 的 X 格 / `0x1b6`+`0x1b7` 的 Y 格 / `0x1cc` 的状态格。
-    std::int32_t flag_x() const { return flag_x_; }
+    // 两个互不相同的格（⛔ 不要合并）：`0x1b6`+`0x1b7` 的 **Y** 格 / `0x19a` 读的那一格（= 模式族的 **C**）。
+    // ★ `0x1cc` 的「状态格」不是第三个独立格 —— 它就是模式族的 **E**（`mode_e()`）。
     std::int32_t flag_y() const { return flag_y_; }
-    std::int32_t status_cell() const { return status_cell_; }
     // 当前层号（本版没有观察到的写者 ⇒ 恒 0）与 `0x1ad` 写的那一格（复位值 −1）。
     std::int32_t current_layer() const { return current_layer_; }
     std::int32_t layer_cell() const { return layer_cell_; }
@@ -1174,10 +1347,10 @@ public:
     std::string save_path_for(std::int32_t slot, bool thumbnail) const {
         return slot_path(save_directory(), slot, thumbnail);
     }
-    // ★ 测试脚手架（⛔ 不是平台边界）：这几格由引擎里本版未建模的路径写，
-    //   没有脚本可达的写者 ⇒ 想让对应分支被测到，只能由测试播种。
-    void seed_mode_cells(std::int32_t mode_c, std::int32_t mode_e, std::int32_t mode_f) {
-        mode_c_ = mode_c;
+    // ★ 测试脚手架（⛔ 不是平台边界）：E / F 两格由引擎里本版**未建模的消息处理**写，
+    //   没有脚本可达的写者 ⇒ 想让 `0x19c` 的 E / F 支被测到，只能由测试播种。
+    //   C **不再播种**：它是 `0x88` 的产品落点，守卫走 `0x88 ⇒ 0x19c` 的真实路径。
+    void seed_mode_cells(std::int32_t mode_e, std::int32_t mode_f) {
         mode_e_ = mode_e;
         mode_f_ = mode_f;
     }
@@ -1240,8 +1413,27 @@ private:
     bool resolve_address(std::uint32_t address, std::uint32_t& tag, std::uint32_t& index) const;
     std::uint32_t read_pointer(const Operand& operand) const;
     void write_pointer(const Operand& operand, std::uint32_t address);
+    // 裸 32 位字访问。★ 字符串族（5 / 11）按「记录内 4 字节裸写」处理：记录步长 28 字节，
+    //   内部字段布局属机器本体 ⇒ 只登记"哪些 4 字节字被写进了哪些地址"（`string_record_words_`），
+    //   与文本池互不影响；未写过的字**响亮失败**（⛔ 不伪造 0）。
     void store_raw(std::uint32_t address, std::uint32_t bits);
     std::uint32_t read_raw(std::uint32_t address);
+    // 地址是不是字符串族池里的一个 4 字节字（记录内偏移 0 / 4 / … / 24）。
+    bool is_string_record_word(std::uint32_t address) const;
+    // 把 `string_record_words_` 里落在 [base, base + span) 的字一起清掉（池释放 / 帧重装用）：
+    // 裸字叠层与文本池**同寿命**，⛔ 不让释放过的记录里的位模式活到下一次装载。
+    void clear_string_record_words(std::uint32_t base, std::uint32_t span);
+    // 数组写区间的**实现侧边界**（`RES-ARRAY-FILL-ZERO-OOB` / `RES-ARRAY-SET-TO-OOB` /
+    // `RES-ARRAY-COPY-OOB` 的 impact：「实现必须拒绝或先记诊断再拒绝（不许静默写坏相邻池）」）：
+    // 目标首必须在某个池窗口里，且 count 个 4 字节格必须**整段留在同一个窗口**内。
+    // ★ 每条数组自己的容量在本模型里没有数据（指令也只给地址、不给容量；引擎结构上同样无从比较）
+    //   ⇒ 能机械判的只有"跨出池窗口"这一档；跨窗即写出相邻族，本模型选择**响亮失败 + 诊断**。
+    //   ⛔ 不夹紧、不截断 count（spec 的行为条款是"引擎照样写满 count 格"；这里拒的是 UB 落点）。
+    //   ★ `count` 按**无符号格数**传入（0 = 一格都不写）：0x64 的 count 来自块首的 u32，
+    //     转成有符号会在大值上回绕成负数、把"越界"误判成"不写"。
+    void check_array_write_range(std::uint32_t target, std::uint32_t count) const;
+    // 地址所在的池窗口（起点 + 跨度）。字符串族记录内的 4 字节偏移也算（对齐只要求 4 字节）。
+    bool pool_window_of(std::uint32_t address, std::uint32_t& base, std::uint32_t& span) const;
     std::int32_t read_int_at(std::uint32_t address);
     double read_float_at(std::uint32_t address);
     void write_int_at(std::uint32_t address, std::int32_t value);
@@ -1273,6 +1465,9 @@ private:
     void apply_frame_record(std::size_t slot, const Bytes& script, const ScriptHeader& header,
                             std::uint32_t file_id);
     void install_script_into(std::size_t slot, std::uint32_t file_id);
+    /** 文件库装载登记（`0x455948`）：按**装载文件对象自带的号**（= 统一文件 id 的高 8 位=区号）填槽。
+     *  每个 `read_install_file` 装载点都要调它 —— 文件库析构见 `release_file_library()`。 */
+    void register_loaded_file(std::uint32_t file_id);
     // 引擎级状态字保存栈的压入（`0x4116f2`）：压入时把第 31 / 20 位清 0（`CORE-OPS-FRAME-RET`）。
     void push_engine_state_word(std::uint32_t word);
     // ── 待处理命令队列 / 泵（`CORE-OPS-RUN-BRACKET`）──
@@ -1339,6 +1534,8 @@ private:
     void op_251(const Instruction&);
     // 引擎级状态与宿主请求（vm_ops_engine.cpp）
     void op_88(const Instruction&); void op_308(const Instruction&); void op_bf(const Instruction&); void op_b4(const Instruction&);
+    // 音效通道登记（`70-vm`「音效通道」的登记段；0x2bf）
+    void op_2bf(const Instruction&);
     // 把引擎标量写进第 1 个操作数（vm_ops_engine.cpp）
     void op_c0(const Instruction&);
     // 引擎标量写入 / 文本显示门（vm_ops_engine.cpp）
@@ -1395,6 +1592,12 @@ private:
     void sample_advance_input();
     // 第 31 位的服务体（服务后 = 交回迭代头）：等推进位置起时，消费锁存 / 读跳过 ⇒ 清第 31 + 30 位。
     void service_advance_wait();
+    // 第 27 位的服务体（位序表第 16 行；服务后 = 交回迭代头）：一次消息处理（读一条并派发）→
+    // 让出一拍 → 窥视一次。**不自己清第 27 位**（清位归消息处理 / 脚本指令）。
+    void service_message_frame();
+    // 「读文本跳过」的判据（`0x305` ② 与 `0x6e` / `0x196` 的追加前置支共用）：
+    // `message:ReadTextSkip` 非 0 ∧ 已读命中。★ 已读表未建模（残差 `RES-MSG-BLOCK-READ-HIT`）。
+    bool read_text_skip_requested() const;
     void service_auto_message();
     // `0x21c` 谓词 A：消息子系统"还有事"（定时器在窗内 **或** 待处理）。谓词 B（影片对象扫描）另算。
     bool message_subsystem_busy();
@@ -1439,8 +1642,13 @@ private:
     void op_2bd(const Instruction&); void op_2de(const Instruction&); void op_192(const Instruction&); void op_1a9(const Instruction&);
     void op_194(const Instruction&); void op_195(const Instruction&);
     void op_1aa(const Instruction&); void op_1a3(const Instruction&); void op_1a2(const Instruction&); void op_2db(const Instruction&);
-    void op_78(const Instruction&); void op_71(const Instruction&); void op_1a5(const Instruction&); void op_197(const Instruction&); void op_198(const Instruction&);
+    void op_78(const Instruction&); void op_71(const Instruction&); void op_1a5(const Instruction&); void op_2fe(const Instruction&); void op_197(const Instruction&); void op_198(const Instruction&);
     void op_75(const Instruction&);
+    // 字体对象的两对描述 + 建字体缩放（vm_ops_text.cpp）
+    void write_font_pair(FontDescriptionPair& pair, const std::string& face, std::int32_t size);
+    void refresh_font_scale();
+    Viewport viewport_input() const;
+    void request_font_rebuild() { ++font_rebuild_requests_; }
     // 文本长度 / 字体槽表 / Font 条目登记表（vm_ops_text.cpp）
     void op_1a6(const Instruction&); void op_300(const Instruction&); void op_301(const Instruction&);
     void op_1d2(const Instruction&); void op_1d3(const Instruction&);
@@ -1512,6 +1720,11 @@ private:
     // 引擎级状态字保存栈（`CORE-OPS-FRAME-RET`）：只由引擎重入脚本的路径压入。
     std::vector<std::uint32_t> engine_state_word_stack_;
     std::uint32_t state_flags_ = 0;
+    // 第 27 位服务体的宿主消息接缝 + 文本子系统的两个接缝（缺省全 no-op）。
+    HostMessageIo host_message_io_;
+    std::size_t host_message_steps_ = 0;
+    TextRequestResult text_request_result_;
+    ReadTextSkipHit read_text_skip_hit_;
     std::unordered_map<std::uint32_t, std::uint32_t> global_int_;
     std::unordered_map<std::uint32_t, float> global_float_;
     std::unordered_map<std::uint32_t, std::string> global_string_;
@@ -1525,9 +1738,6 @@ private:
     std::int32_t scalar_149_ = 0;
     std::int32_t scalar_21b_ = 0;
     std::int32_t scalar_252_ = 0;
-    std::int32_t scalar_88a_ = 0;
-    std::int32_t scalar_88b_ = 0;
-    std::int32_t scalar_88c_ = 0;
     // （`a1`/`a2`/`a3`）「文本键 → 整数」命名表；`a1` 清空、`a2` 写、`a3` 按键分派。
     std::unordered_map<std::string, std::int32_t> named_table_;
     // （`1cf` / `1bf`）状态字与它的相邻格 —— ⛔ 与门字 `state_flags_` 是**不同**的引擎格。
@@ -1562,10 +1772,8 @@ private:
     // ★ `0x7c` 尾段还清四对"从未写入有效登记"的格与一个回调派发闩 —— 那些在本仓的
     //   `audit` 里已判 **discarded**（`RES-LOCAL-RET-SLOTS` / `RES-LOCAL-RET-PENDING`：
     //   语料里没有有效写者，清 0 不可达）⇒ **不建模**，也不再在 `0x7c` 上写它们。
-    // 三个互不相同的格（`0x19a` / `0x1b6`+`0x1b7` / `0x1cc`）。
-    std::int32_t flag_x_ = 0;
+    // 两个互不相同的格（`0x19a` 读的 C / `0x1b6`+`0x1b7` 的 Y）；`0x1cc` 的状态格 = `mode_e_`。
     std::int32_t flag_y_ = 0;
-    std::int32_t status_cell_ = 0;
     // 按住派发族：掩码 / 模数 / 上下文编号（引擎级）+ 按住游标（引擎级数组、按**帧槽号**索引）。
     // ★ 前三个是**合同初值**（启动路径写 0 / 0 / −1）；游标 nullopt = 引擎不建立初值（读到是 UB）。
     std::uint32_t hold_mask_ = 0;
@@ -1609,10 +1817,26 @@ private:
     //   ⇒ 把 `0x75` 当成"行高"会让界面里"设行高"顺手改字号（历史上正是这个错）。
     std::int32_t glyph_height_ = 24;      // A 支（0x75）：0x204 出字形的那个高度
     std::int32_t font_b_height_ = 8;      // B 支（0x197）：跨度绘制那条路径的字号
+    // 两对字体描述（每组两份变体：原样 / '@' + 原样）。`0x75` / `0x1a5` 写 A 对、`0x197` / `0x2fe` 写 B 对。
+    FontDescriptionPair font_a_pair_{};
+    FontDescriptionPair font_b_pair_{};
+    // 建字体缩放的两个分量（`Font+0x355E0` 宽 / `Font+0x355E4` 高；构造器把两者写成 1.0）。
+    // 高分量乘进 lfHeight；宽分量**不参与**字号缩放，只与高分量一起抄进十个文本槽的两格。
+    double font_scale_width_ = 1.0;
+    double font_scale_height_ = 1.0;
+    // 守卫观察口（⛔ 不是产品状态）：整趟重算写了几次 / 发了几次重建请求。
+    std::size_t font_scale_write_count_ = 0;
+    std::size_t font_rebuild_requests_ = 0;
+    // 平台输入接缝：空 = 视口按配置的客户区尺寸（比例 1.0）。
+    ViewportSource viewport_source_;
     struct TextSlot {
         std::int32_t glyph_height = 0;  // `槽+0xC8`：`0x197` 把**十槽全写**成同一个值
         std::int32_t x_offset = 0;      // `槽+0x0C`：`0x198` 的 op2
         std::int32_t y_offset = 0;      // `槽+0x10`：`0x198` 的 op3
+        // 缩放两格（`槽+0x74` = 宽分量 / `槽+0x78` = 高分量；`sub_465840` 每次重算整表抄一遍）。
+        // 初值取 1.0（与两个缩放分量的初值同口径；引擎构造器里十槽的这两格初值本版未单独取证）。
+        double scale_width = 1.0;
+        double scale_height = 1.0;
     };
     std::array<TextSlot, 10> text_slots_{};
     std::int32_t font_align_mode_ = 0;
@@ -1651,6 +1875,8 @@ private:
     // ⛔ 声音本身不建模 —— 请求只计数（守卫靠它区分"发了/没发"）。
     // ★ 表量由 `T_SE+0x4BC` 定（10），⛔ 不是后端的 15：见上面两条常量的取证。
     std::array<std::int32_t, kSeSlotTableSize> se_slot_resource_{};
+    // 声音后端存在与否（`0xb6` 的「后端不存在 ⇒ 一格都不清」）。缺省 false = 没有后端。
+    bool se_backend_attached_ = false;
     std::int32_t bgm_track_ = 0;
     std::int32_t bgm_param_ = 0;
     std::int32_t bgm_progress_ = 0;
@@ -1776,7 +2002,6 @@ private:
     std::int32_t scalar_10f_ = 0;
     std::int32_t scalar_248_ = 0;
     std::int32_t font_8b_ = 0;
-    std::string font_string_;
     std::array<std::int32_t, 5> engine5_{};
     std::int32_t key_total_ = 7;  // 引擎构造（Input[259]=7）建立的初值；0xfe 可覆盖
     std::int32_t save_version_flag_ = 0;
@@ -1839,13 +2064,13 @@ private:
     // ★ 门上的第 29 位**不读它**：那一位的判据是「文本槽在用标志」（`text_slot_in_use()`），
     //   与队列无关（取证 `report-text-gate.md` §1.3 / §5.3）。⛔ 别把两者当成同一格。
     static constexpr std::size_t kCommandQueueCapacity = 256;
-    // `0x143` 的 255 格登记表（格号 1..255 参与投递）。格 0 存在但不用，只是让下标对上格号。
-    static constexpr std::size_t kEventTableSize = 256;
     std::array<std::int32_t, kCommandQueueCapacity> command_queue_{};
     std::size_t queue_head_ = 0;
     std::size_t queue_tail_ = 0;
     std::size_t queue_high_water_ = 0;
-    std::array<std::int32_t, kEventTableSize> event_table_{};
+    // 文件库的 256 格槽位表（`CORE-OPS-EVENT-143`）：格 0 存在但 `0x143` 不检查它，只是让下标对上格号。
+    // 登记 / 析构见 public 的 `kFileLibrarySlotCount` / `release_file_library()`。
+    std::array<std::int32_t, kFileLibrarySlotCount> file_library_slots_{};
     // 宿主的消息泵节流（`CORE-VM-LOOP`）：计数器初值 1；本迭代是否该泵一次 = 迭代头算出的结果。
     std::uint32_t pump_counter_ = 1;
     bool host_pump_due_ = false;
@@ -1854,7 +2079,16 @@ private:
     std::int32_t mouse_target_ = -1;   // 登记的脚本位置（dword 下标）；−1 = 取消
     std::int32_t mouse_owner_ = -1;    // 登记时的当前帧脚本身份（frame.local_depth；见 CORE-INPUT-CALLBACK-REGISTER）
     std::uint32_t mouse_last_ms_ = 0;  // 上一次派发时刻（登记时 = 当前时刻）
-    std::unordered_map<std::int32_t, std::int32_t> indirect_;
+    // 键绑定三张表（`CORE-OPS-SCALAR-TABLE-10C`）：
+    //   ① 与 0x10b 共用 `array_d1383_`（键号 → 动作号；0x10c 不碰它）。
+    //   ② / ③ 是本模型新增的两张表：动作号 → 槽号（0x10c 只读）、槽号 → 键号（0x10c 写；−1 = 未绑定）。
+    // ★ ② / ③ 各 **256 格**：引擎里两张表在同一对象里首尾相接，基址差 `0x1A68 − 0x1668 = 0x400`
+    //   = 256 × 4（EA 0x4220eb / 0x4220f3）。⚠ 早先按 32 格建 ⇒ 真实脚本的动作号 ≥ 32 时
+    //   MSVC Debug STL 的 `std::array::operator[]` 会断言（模态对话框、CTest 挂死）。
+    // ★ 索引**完全不检查**（越界是引擎的未定义行为，spec 不作语义断言）⇒ ⛔ 不要给下标加夹取。
+    static constexpr std::size_t kKeyBindingTableSize = 256;
+    std::array<std::int32_t, kKeyBindingTableSize> action_slot_table_{};
+    std::array<std::int32_t, kKeyBindingTableSize> slot_key_table_{};
     std::unordered_map<std::uint32_t, TextureEntry> textures_;
     // 每个纹理编号"已经用过的最高版本号"（见 `next_texture_revision`）。释放槽对象 / 重建都不清它。
     std::unordered_map<std::uint32_t, std::uint32_t> texture_revision_floor_;
@@ -1893,6 +2127,22 @@ private:
     std::uint32_t render_now_ms_ = 0;
     bool command_animating_ = false;
     std::vector<std::string> errors_;
+    // 错误通道的宿主侧接缝：缺省 = 没有输出句柄（所有平台写请求都被丢弃）。
+    ErrorOutputWriter error_writer_;
+    ErrorOutputFilter error_filter_;
+    bool error_handle_valid_ = false;
+    std::size_t error_write_requests_ = 0;
+    // 输出对象（`CORE-OBJECTS-BASE`）的宿主侧接缝与「报告」计数。缺省 = 没有日志落点 / 根错误处理
+    // （平台是否受理属平台侧 ⇒ 缺省 no-op 不改变引擎状态）。
+    OutputObjectIo output_object_io_;
+    std::size_t output_reports_ = 0;     // 走过「报告」这一项的次数
+    // 显示消息型异常的最近一次捕获（主循环写；观察口只读）。
+    std::string last_display_code_;
+    std::string last_display_message_;
+    // 字符串记录的**裸字叠层**（`store_raw` / `read_raw` 的 5 / 11 支）：键 = 绝对地址。
+    // ★ 记录内部布局属机器本体（40-pools「字符串记录」明文：字段布局不在本版）⇒ 这里只登记
+    //   "哪些 4 字节字被写进了哪些地址"，与文本池 `global_string_` / `local_string_` 互不影响。
+    std::unordered_map<std::uint32_t, std::uint32_t> string_record_words_;
     bool sweep_missing_ = false;
     std::vector<std::pair<std::uint32_t, std::size_t>> missing_opcodes_;
     std::unordered_map<std::int32_t, std::pair<std::int32_t, std::int32_t>> aux_a_;

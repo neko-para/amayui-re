@@ -25,19 +25,56 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// ★ CTest 类守卫：行为断言在 `apps/emulator-cxx` 的 CTest 里，`node --test` 跑不了它。
+//   这类条目必须**先重建再跑**（判据在 exe 里）；还原源文件之后也必须重建成基线，
+//   否则下一次 `ctest` 会假红（源文件已还原、二进制里还留着变异）。
+const CTEST_BUILD_DIR = 'apps/emulator-cxx/out';
+const ctestStdio = (logFd) => (logFd === null ? 'ignore' : ['ignore', logFd, logFd]);
+
+function buildCtestTargets(logFd) {
+  return spawnSync('cmake', ['--build', CTEST_BUILD_DIR], { cwd: ROOT, stdio: ctestStdio(logFd) });
+}
+
+/**
+ * 构建 + 跑**一条** CTest。
+ * @returns {{status:number}|{unavailable:string}} `unavailable` = 本机跑不起来（没配置构建目录 / 没 cmake）。
+ */
+function runCtestGuard(name, logFd) {
+  // ★ 先看构建目录有没有**配置过**：没有 CMakeCache.txt 时 `cmake --build` 只会给一句笼统的
+  //   "not a build directory"，那不是"守卫没红"，而是"这台机器上跑不了"（原因要写进输出）。
+  if (!fs.existsSync(path.join(ROOT, CTEST_BUILD_DIR, 'CMakeCache.txt'))) {
+    return {
+      unavailable: `构建目录未配置：${CTEST_BUILD_DIR} 里没有 CMakeCache.txt（先 \`cmake --preset windows-x64\`）`,
+    };
+  }
+  const build = buildCtestTargets(logFd);
+  if (build.error) return { unavailable: `cmake 不可用：${build.error.message}` };
+  if (build.status !== 0) {
+    return { unavailable: `构建失败（cmake --build ${CTEST_BUILD_DIR}，退出码 ${build.status}）` };
+  }
+  const run = spawnSync(
+    'ctest',
+    ['--test-dir', CTEST_BUILD_DIR, '-R', `^${name}$`, '--output-on-failure'],
+    { cwd: ROOT, stdio: ctestStdio(logFd) },
+  );
+  if (run.error) return { unavailable: `ctest 不可用：${run.error.message}` };
+  return { status: run.status };
+}
+
 export const DOMAIN = {
   id: 'mutate',
   title: '守卫自检（变异测试）：改坏一处关键常量 ⇒ 确认指定守卫**当场红**',
   data: [
-    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.ts` · `apps/emulator-new/src/**`）—— ★ **临时改写后必还原**',
+    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.ts` · `apps/emulator-new/src/**` · `apps/emulator-cxx/src/core/*.cpp`）—— ★ **临时改写后必还原**',
     '`tools/mutate-check.mjs` 里的**变异清单**（本工具的真源：一处破坏 + 该抓它的守卫）',
+    '**CTest 类条目**（`guard: \'ctest:<名字>\'`）额外依赖 `apps/emulator-cxx/out` 已配置：会重建 + 跑那一条 CTest（还原后也重建成基线）',
   ],
-  access: 'r（读原文进内存）→ rw（写入变异）→ **w（还原，且比对全文）**；★ 不写别的文件、不碰旧仓',
+  access: 'r（读原文进内存）→ rw（写入变异）→ **w（还原，且比对全文）**；CTest 类条目额外重建 `apps/emulator-cxx/out`（生成物，已 gitignore）；★ 不碰旧仓',
   tool: 'tools/mutate-check.mjs',
 };
 
 export const OPERATIONS = [
-  { name: 'check', argv: [], mutates: true, summary: '★ 逐条施加变异 ⇒ 跑指定守卫 ⇒ 要求退出码非 0，最后**逐条还原并比对全文**' },
+  { name: 'check', argv: [], mutates: true, summary: '★ 逐条施加变异 ⇒ 跑指定守卫（`node --test` 用例，或 `ctest:<名字>` 的 CTest）⇒ 要求退出码非 0，最后**逐条还原并比对全文**' },
   { name: 'list', argv: ['--list'], mutates: false, summary: '只列变异清单（不动任何文件）' },
 ];
 
@@ -3271,6 +3308,389 @@ const MUTATIONS = [
       '`0x9` 不再按配置重设场景绘制模式格（`CORE-OPS-FRAME-EXIT-SCRIPT`：「按配置 set:DrawMode 重设」）⇒ ' +
       '构造后改配置的复位沿用旧值（check_exit_script_reset_scope 的 DrawMode 断言当场红）',
   },
+  // ── 位号越界 / 字体粗细：**行为断言在 CTest 里**（`node --test` 跑不了 CTest）⇒ 这两条的
+  //    `guard` 写作 `ctest:<名字>`，名字与 `apps/emulator-cxx/CMakeLists.txt` 的 `add_test` 逐字一致。
+  //    `main()` 对这类条目会：先验基线绿 → 施加变异 → 重建 + ctest 必须红 → 还原 → 重建 + ctest 必须绿。
+  {
+    // ★ 等价于引擎的 `0x42F94A cmp edi,1Fh` → `cmp edi,20h`：位号 32 被放过（负值仍越界）。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from:
+      '    if (bit > 31) {\n' +
+      '        report_error("RemBitの引数が不正です．\\r\\n");',
+    to:
+      '    if (bit > 32) {  // 变异：上界 1Fh → 20h（位号 32 被放过）\n' +
+      '        report_error("RemBitの引数が不正です．\\r\\n");',
+    guard: 'ctest:spec_ops_136_rembit_arg_invalid',
+    ctest: 'spec_ops_136_rembit_arg_invalid',
+    what:
+      '`0x136` 的位号上界 1Fh → 20h ⇒ 位号 32 不再走错误支：目标 −1 被改写（x86 把移位量掩成 0）' +
+      '且错误通道为空 ⇒ CTest `spec_ops_136_rembit_arg_invalid` 当场红',
+  },
+  {
+    // ★ 135 与 136 同形（`0x42F8DA` / `0x42F94A` 各一处 `cmp edi,1Fh`），但它们是 bindings 里
+    //   `CORE-OPS-BIT-SET-RESET` 的**两条**证据 ⇒ 135 也必须有自己的变异，否则"它会红"只是声称。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from:
+      '    if (bit > 31) {\n' +
+      '        report_error("SetBitの引数が不正です．\\r\\n");',
+    to:
+      '    if (bit > 32) {  // 变异：上界 1Fh → 20h（位号 32 被放过）\n' +
+      '        report_error("SetBitの引数が不正です．\\r\\n");',
+    guard: 'ctest:spec_ops_135_setbit_arg_invalid',
+    ctest: 'spec_ops_135_setbit_arg_invalid',
+    what:
+      '`0x135` 的位号上界 1Fh → 20h ⇒ 位号 32 不再走错误支：目标 0 被置成位 0（x86 把移位量掩成 0）' +
+      '且错误通道为空 ⇒ CTest `spec_ops_135_setbit_arg_invalid` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: '    const auto value = read_int(ops[0]) != 0 ? 700 : 0;',
+    to: '    const auto value = read_int(ops[0]) != 0 ? 0x6FC : 0;  // 变异：700 → 6FCh',
+    guard: 'ctest:emulator_core_font_weight_2bd_both_cells',
+    ctest: 'emulator_core_font_weight_2bd_both_cells',
+    what:
+      '`0x2bd` 的常量 700 改成 6FCh（1788）⇒ 非 0 支两格都写 1788 ⇒ ' +
+      'CTest `emulator_core_font_weight_2bd_both_cells` 当场红',
+  },
+  // ── 批次 1（数组 / 数值 / 随机 / 位测试 / 错误通道）：**行为断言在 CTest 里**，口径同上。──
+  {
+    // ★ 等价于旧实现的"死写"：0x88 的落点写进模式族 A / B（无人按 C 判据读的格），而不是 C / D。
+    //   旧实现写的是 `scalar_88a_/b_/c_`（已删）—— 同样是"写成功、没人读"的一类错。
+    file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
+    from:
+      '    mode_c_ = value;\n' +
+      '    mode_d_ = value;',
+    to:
+      '    mode_a_ = value;  // 变异：0x88 的落点改回"死写"（旧 scalar_88a_ 那一类）\n' +
+      '    mode_b_ = value;',
+    guard: 'ctest:spec_ops_88_mode_cells',
+    ctest: 'spec_ops_88_mode_cells',
+    what:
+      '`0x88` 的落点从模式族 C / D 改成 A / B（旧实现写 `scalar_88a_/b_/c_` 的同形死写）⇒ ' +
+      '`0x19c` 读到的 C 恒 0、C 支永不可达 ⇒ CTest `spec_ops_88_mode_cells` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from:
+      '        case 27:\n' +
+      '            // 位序表第 16 行：消息逐帧推进门位（又称「跳过位」）——进入一次消息处理、让出一拍、\n' +
+      '            // 窥视一次，然后**交回迭代头**（本迭代不派发脚本指令）。\n' +
+      '            service_message_frame();\n' +
+      '            return GateAction::ToHead;',
+    to:
+      '        // 变异：删掉第 27 位的服务体（落 default ⇒ 只交回迭代头，消息处理不发生）',
+    guard: 'ctest:spec_vm_gate_bit27_service',
+    ctest: 'spec_vm_gate_bit27_service',
+    what:
+      '删掉 `service_gate_bit` 的 `case 27` ⇒ 第 27 位置起时落到 default（同样交回迭代头，所以 ip 仍不变）' +
+      '但**一次消息处理都不发生**（seam 计数不 +1）⇒ CTest `spec_vm_gate_bit27_service` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: '    if (request_result != 0) state_flags_ |= (1u << 27);',
+    to: '    if (request_result == 0x7FFFFFFF) state_flags_ |= (1u << 27);  // 变异：0x71 的置点失效',
+    guard: 'ctest:spec_adv_text_bit27_set_points',
+    ctest: 'spec_adv_text_bit27_set_points',
+    what:
+      '`0x71` 的"文本子系统调用返回非 0 ⇒ 置第 27 位"失效（只认 0x7FFFFFFF）⇒ 返回 1 时不再置位、' +
+      '下一迭代照常派发 ⇒ CTest `spec_adv_text_bit27_set_points` 当场红',
+  },
+  {
+    // ★ 等价于旧实现：内层比较把右键 `B[i] + C[i]` **缓存一次**（`key_j`），不再每次重算。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from:
+      '        std::int32_t j = i - 1;\n' +
+      '        while (j >= 0) {\n' +
+      '            // ② 读 A[j]，用这个值取左键 B[A[j]] + C[A[j]]。\n' +
+      '            const auto left_index = read_raw(a + 4u * static_cast<std::uint32_t>(j));\n' +
+      '            const auto left = key_of(left_index);\n' +
+      '            // ③ **重算**右键（⛔ 不是先算一张表 / 缓存一次）。\n' +
+      '            const auto right = key_of(static_cast<std::uint32_t>(i));',
+    to:
+      '        std::int32_t j = i - 1;\n' +
+      '        const auto key_j = key_of(static_cast<std::uint32_t>(i));  // 变异：右键缓存一次\n' +
+      '        while (j >= 0) {\n' +
+      '            // ② 读 A[j]，用这个值取左键 B[A[j]] + C[A[j]]。\n' +
+      '            const auto left_index = read_raw(a + 4u * static_cast<std::uint32_t>(j));\n' +
+      '            const auto left = key_of(left_index);\n' +
+      '            // ③ 变异：右键用缓存值（不再每次比较重算）\n' +
+      '            const auto right = key_j;',
+    guard: 'ctest:spec_ops_12f_alias_write_order',
+    ctest: 'spec_ops_12f_alias_write_order',
+    what:
+      '`0x12f` 把右键缓存成 `key_j`（旧实现）⇒ A 与 B 别名时排列变成 [2,1,0]（写序要求 [1,2,0]）⇒ ' +
+      'CTest `spec_ops_12f_alias_write_order` 当场红',
+  },
+  {
+    // ★ 位号越界支退回"只是 return"：不写错误通道、也没有固定文本。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from:
+      '    if (bit > 31) {\n' +
+      '        report_error("GetBitの引数が不正です．\\r\\n");\n' +
+      '        return;\n' +
+      '    }',
+    to: '    if (bit > 31) return;  // 变异：越界支不写错误通道',
+    guard: 'ctest:spec_ops_13f_getbit_arg_invalid',
+    ctest: 'spec_ops_13f_getbit_arg_invalid',
+    what:
+      '`0x13f` 的越界支不再写 `GetBitの引数が不正です．` 到错误通道（退回裸 `return`）⇒ ' +
+      '错误通道条数 = 0 ⇒ CTest `spec_ops_13f_getbit_arg_invalid` 当场红',
+  },
+  {
+    // ★ 固定文本少一个句点：显示消息型异常必须**逐字**。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from: '        throw DisplayMessageError("random-range-zero", "RANDOMの最大値が0になっています．");',
+    to: '        throw DisplayMessageError("random-range-zero", "RANDOMの最大値が0になっています");  // 变异：少了句点',
+    guard: 'ctest:spec_ops_60_random_range_zero',
+    ctest: 'spec_ops_60_random_range_zero',
+    what:
+      '`0x60` 范围 = 0 的显示消息文本少了句点（`．`）⇒ 不再是 spec 的固定文本 ⇒ ' +
+      'CTest `spec_ops_60_random_range_zero` 当场红',
+  },
+  {
+    // ★ "先写 0 再抛"的**前半**被拿掉：只抛、不写落点。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from: '        write_int(ops[0], 0);\n        throw DisplayMessageError(',
+    to: '        // 变异：抛出之前不写 0\n        throw DisplayMessageError(',
+    guard: 'ctest:spec_ops_60_random_range_zero',
+    ctest: 'spec_ops_60_random_range_zero',
+    what:
+      '`0x60` 范围 = 0 时不先把落点写成 0（直接抛）⇒ "抛出之前落点已被改"的判据当场红 ⇒ ' +
+      'CTest `spec_ops_60_random_range_zero` 红',
+  },
+  {
+    // ★ 块号越界退回"没有诊断"：由 `read_u32` 抛 `read-u32-past-eof`（诊断前缀不对）。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from: '    if (block < 0 || block_offset + 4 > size) {',
+    to: '    if (false) {  // 变异：块号越界不再诊断（退回 read_u32 抛）',
+    guard: 'ctest:spec_ops_64_array_block_bounds',
+    ctest: 'spec_ops_64_array_block_bounds',
+    what:
+      '`0x64` 的块号越界不再给 `array-block-past-code` 诊断（退回 `read_u32` 的 `read-u32-past-eof`）⇒ ' +
+      'CTest `spec_ops_64_array_block_bounds` 当场红',
+  },
+  {
+    // ★ 块内 count 越过代码区末尾退回"没有诊断"：读到一半才由 `read_u32` 抛，且**已经写了**目标格。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from: '    if (static_cast<std::int64_t>(count) * 4 > size - block_offset - 4) {',
+    to: '    if (false) {  // 变异：count 越过代码区末尾不再诊断（退回 read_u32 抛）',
+    guard: 'ctest:spec_ops_64_array_block_bounds',
+    ctest: 'spec_ops_64_array_block_bounds',
+    what:
+      '`0x64` 的 count 越过代码区末尾不再诊断 ⇒ 读到一半才抛、且**已经写了**目标格 ⇒ ' +
+      'CTest `spec_ops_64_array_block_bounds` 当场红',
+  },
+  {
+    // ★ 字符串族（5 / 11）的**记录内 4 字节裸写**退回"抛异常"（旧实现）。
+    file: 'apps/emulator-cxx/src/core/vm_value.cpp',
+    from: '            case 5: case 11: string_record_words_[address] = bits; return;',
+    to: '            case 5: case 11: throw CoreError("store-raw-unsupported-tag");  // 变异：字符串族裸写退回抛',
+    guard: 'ctest:spec_ops_6c_2d8_string_record_raw',
+    ctest: 'spec_ops_6c_2d8_string_record_raw',
+    what:
+      '`store_raw` 不再支持字符串族落点（`0x6c` / `0x2d8` 的目标落字符串池时抛异常）⇒ ' +
+      'CTest `spec_ops_6c_2d8_string_record_raw` 当场红',
+  },
+  {
+    // ★ 数组写区间的**池窗口判据**被拿掉：跨窗写会静默落进相邻族（spec 的 impact 明确禁止）。
+    file: 'apps/emulator-cxx/src/core/vm_value.cpp',
+    from: '    if (count == 0) return;  // 一格都不写 ⇒ 没有落点，也谈不上越界',
+    to: '    if (true) return;  // 变异：数组写区间的池窗口判据被拿掉',
+    guard: 'ctest:spec_ops_array_write_past_pool',
+    ctest: 'spec_ops_array_write_past_pool',
+    what:
+      '数组写区间不再判池窗口（`0x6c` / `0x2d8` / `0x64` 跨窗时静默写进相邻族）⇒ ' +
+      'CTest `spec_ops_array_write_past_pool` 当场红',
+  },
+  {
+    // ★ 绕过错误通道的**平台写请求**接缝：退回"只 push_back 诊断"。
+    file: 'apps/emulator-cxx/src/core/vm_value.cpp',
+    from: '    if (error_handle_valid_ && error_writer_ && !(error_filter_ && error_filter_() != 0)) {',
+    to: '    if (false) {  // 变异：绕过错误通道接缝（只 push_back）',
+    guard: 'ctest:spec_error_channel_write',
+    ctest: 'spec_error_channel_write',
+    what:
+      '`report_error` 绕开宿主错误输出接缝（只保留 `errors_`，不发那一个平台写请求）⇒ ' +
+      'CTest `spec_error_channel_write` 当场红',
+  },
+  {
+    // ★ 忽略宿主过滤器（返回非 0 也照发）。
+    file: 'apps/emulator-cxx/src/core/vm_value.cpp',
+    from: '    if (error_handle_valid_ && error_writer_ && !(error_filter_ && error_filter_() != 0)) {',
+    to: '    if (error_handle_valid_ && error_writer_) {  // 变异：忽略宿主过滤器',
+    guard: 'ctest:spec_error_channel_write',
+    ctest: 'spec_error_channel_write',
+    what:
+      '错误通道忽略宿主过滤器（返回非 0 也照发请求）⇒ 抑制条件 ② 的判据当场红 ⇒ ' +
+      'CTest `spec_error_channel_write` 红',
+  },
+  {
+    // ★ 两条字符串入口**被合并**：`0x2fe` 也去写 A 对（旧实现 `0x1a5` / `0x2fe` 同一个 case）。
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: '    write_font_pair(font_b_pair_, face, font_b_height_);',
+    to: '    write_font_pair(font_a_pair_, face, font_b_height_);  // 变异：0x2fe 也写 A 对',
+    guard: 'ctest:spec_ops_1a5_2fe_font_pairs',
+    ctest: 'spec_ops_1a5_2fe_font_pairs',
+    what:
+      '`0x2fe` 写 A 支那一对描述（两条字符串入口合并成一条）⇒ A 对的名字被覆盖、B 对永远没有名字 ⇒ ' +
+      'CTest `spec_ops_1a5_2fe_font_pairs` 当场红',
+  },
+  {
+    // ★ 建字体高度改**四舍五入**：负值上与"向零截断"差 1（−49.5 ⇒ −50 而不是 −49）。
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from:
+      '    const double scaled = static_cast<double>(pair.variants[0].height) * font_scale_height_ + 0.5;\n' +
+      '    return static_cast<std::int32_t>(std::trunc(scaled));',
+    to:
+      '    const double scaled = static_cast<double>(pair.variants[0].height) * font_scale_height_ + 0.5;\n' +
+      '    return static_cast<std::int32_t>(std::round(scaled));  // 变异：四舍五入',
+    guard: 'ctest:spec_font_build_scale',
+    ctest: 'spec_font_build_scale',
+    what:
+      '建字体高度用四舍五入（`std::round`）而不是向零截断 ⇒ −49.5 得到 −50、−19.5 得到 −20 ⇒ ' +
+      'CTest `spec_font_build_scale` 当场红',
+  },
+  {
+    // ★ 建字体高度**忽略比例**（乘 1.0）：条件成立时高度仍是"未缩放"的值。
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: '    const double scaled = static_cast<double>(pair.variants[0].height) * font_scale_height_ + 0.5;',
+    to: '    const double scaled = static_cast<double>(pair.variants[0].height) * 1.0 + 0.5;  // 变异：忽略比例',
+    guard: 'ctest:spec_font_build_scale',
+    ctest: 'spec_font_build_scale',
+    what:
+      '建字体高度忽略缩放的**高分量**（乘 1.0）⇒ 比例 1.25 时 −40 仍得 −39（期望 −49）⇒ ' +
+      'CTest `spec_font_build_scale` 当场红',
+  },
+  {
+    // ★ 去掉"两个分量都相等 ⇒ 整趟什么都不写"的短路：同值重算又抄十槽两格、又重建字体。
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: '    if (width == font_scale_width_ && height == font_scale_height_) return;  // 整趟什么都不写',
+    to: '    if (false) return;  // 变异：去掉相等短路',
+    guard: 'ctest:spec_font_build_scale',
+    ctest: 'spec_font_build_scale',
+    what:
+      '去掉"两个分量都相等 ⇒ 整趟什么都不写"的短路 ⇒ 同值重算又重抄槽、又请求重建字体 ⇒ ' +
+      'CTest `spec_font_build_scale` 当场红',
+  },
+  {
+    // ★ `0x10c` 用**动作号**当槽号写（旧实现 `indirect_[动作] = 值` 的等价形态）：第三张表那一格没被写。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from:
+      '    const auto slot = action_slot_table_[static_cast<std::size_t>(action)];\n' +
+      '    slot_key_table_[static_cast<std::size_t>(slot)] = value;',
+    to:
+      '    slot_key_table_[static_cast<std::size_t>(action)] = value;  // 变异：用动作号当槽号',
+    guard: 'ctest:spec_ops_10c_key_tables',
+    ctest: 'spec_ops_10c_key_tables',
+    what:
+      '`0x10c` 不查「动作 → 槽」表、直接把动作号当槽号写（旧实现 `indirect_[动作]` 的等价形态）⇒ ' +
+      '预置的槽 5 那一格没被写 ⇒ CTest `spec_ops_10c_key_tables` 当场红',
+  },
+  {
+    // ★ 值比较退回**有符号** `> 0x1f`：负值（如 −1）不再被拦（spec 要求按无符号比较）。
+    file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
+    from: '    if (static_cast<std::uint32_t>(value) > 31u) {',
+    to: '    if (value > 0x1f) {  // 变异：有符号比较',
+    guard: 'ctest:spec_ops_10c_key_tables',
+    ctest: 'spec_ops_10c_key_tables',
+    what:
+      '`0x10c` 的值比较退回有符号 `> 0x1f` ⇒ 值 −1 不再判越界、静默写进绑定表 ⇒ ' +
+      'CTest `spec_ops_10c_key_tables` 当场红',
+  },
+  // ── 批次 3（音效通道登记 / 按通道停止 / 事件登记表 / 输出对象日志）：行为断言在 CTest 里。──
+  {
+    // ★ 等价于"登记时把交值与时长两个操作数写反"：交值 7 / 时长 50 变成 时长 7 / 交值 50。
+    file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
+    from:
+      '    record.duration = duration;\n' +
+      '    record.value = value;',
+    to:
+      '    record.duration = value;  // 变异：时长 ← 交值（字段写反）\n' +
+      '    record.value = duration;',
+    guard: 'ctest:spec_se_registration_2bf',
+    ctest: 'spec_se_registration_2bf',
+    what:
+      '`0x2bf` 登记时把「时长 ← 第 3 个操作数 / 交值 ← 第 2 个操作数」写反 ⇒ 交付到期时交出去的是 50 而不是 7、' +
+      '时长也错 ⇒ CTest `spec_se_registration_2bf` 当场红',
+  },
+  {
+    // ★ 删掉"后端不存在 ⇒ 一格都不清"前置（旧实现：总是计数 + 清表）。
+    file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
+    from: '    if (!se_backend_attached_) return;',
+    to: '    // 变异：删掉"后端不存在 ⇒ 一格都不清"前置',
+    guard: 'ctest:spec_se_stop_b6',
+    ctest: 'spec_se_stop_b6',
+    what:
+      '`0xb6` 没有"后端不存在"前置（旧实现：总是发请求 + 清表）⇒ 后端不存在时播放名格被清、停止请求被计数 ⇒ ' +
+      'CTest `spec_se_stop_b6` 当场红',
+  },
+  {
+    // ★ 只清表、不清通道活动（旧实现的第二笔清写的是"未建模的槽首格"）。
+    file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
+    from: '    se_channels_[static_cast<std::size_t>(slot)].active = false;',
+    to: '    // 变异：只清表、不清通道活动',
+    guard: 'ctest:spec_se_stop_b6',
+    ctest: 'spec_se_stop_b6',
+    what:
+      '`0xb6` 只清「播放名」格、不清该通道的**活动**（`0x4b5075`）⇒ 停止之后通道仍参与交付、仍会到期 ⇒ ' +
+      'CTest `spec_se_stop_b6` 当场红',
+  },
+  {
+    // ★ `0xb4` 的"后端不存在 ⇒ 整段跳过"（`60-ops-voice.md:73`）：删掉前置 ⇒ 缺省机器上也写格 + 计请求。
+    //   （与 `0xb6` 那条前置的写法不同：这里取 getter，两条 from 不会撞串。）
+    file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
+    from: '    if (!se_backend_attached()) return;',
+    to: '    // 变异：删掉 `0xb4` 的"后端不存在 ⇒ 整段跳过"前置',
+    guard: 'ctest:spec_se_stop_b6',
+    ctest: 'spec_se_stop_b6',
+    what:
+      '`0xb4` 没有"后端不存在"前置（spec `60-ops-voice.md:73`）⇒ 后端缺省时仍写播放名格 + 计装载请求 ⇒ ' +
+      'CTest `spec_se_stop_b6`（④）当场红',
+  },
+  {
+    // ★ 0x143 的循环从 0 起（spec：槽号 1..255；槽 0 = 基础索引，本条不检查）。
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: '    for (std::size_t index = 1; index < file_library_slots_.size(); ++index) {',
+    to: '    for (std::size_t index = 0; index < file_library_slots_.size(); ++index) {  // 变异：从槽 0 起',
+    guard: 'ctest:spec_event_143_file_library',
+    ctest: 'spec_event_143_file_library',
+    what:
+      '`0x143` 的逐槽循环从 0 起 ⇒ 基础索引那一格（槽 0）也被投递 ⇒ 队列里多一条 0 命令 ⇒ ' +
+      'CTest `spec_event_143_file_library` 当场红',
+  },
+  {
+    // ★ 文件库装载**不登记**（旧实现：表是测试专用的 ⇒ 产品路径恒 0）。
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: '    register_loaded_file(static_cast<std::uint32_t>(zone) << 24);',
+    to: '    // 变异：装载扩展索引不登记槽位表',
+    guard: 'ctest:spec_event_143_file_library',
+    ctest: 'spec_event_143_file_library',
+    what:
+      '文件库装载扩展索引时不登记槽位表（旧实现：产品路径恒 0）⇒ 装载区号 5 之后 0x143 一条也不投 ⇒ ' +
+      'CTest `spec_event_143_file_library` 当场红',
+  },
+  {
+    // ★ 每个 `read_install_file` 装载点都要登记（区号 = 统一 id 的高 8 位；基础索引 ⇒ 槽 0）。
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: '    register_loaded_file(file_id);',
+    to: '    // 变异：装载点不登记文件库槽位表',
+    guard: 'ctest:spec_event_143_file_library',
+    ctest: 'spec_event_143_file_library',
+    what:
+      '装载器装完一个基础索引的文件却不登记槽位表 ⇒ 槽 0 恒 0（旧实现"产品路径恒 0"的同形）⇒ ' +
+      'CTest `spec_event_143_file_library` 当场红',
+  },
+  {
+    // ★ 报告只进错误通道（`errors_`）、不发输出对象的日志接缝。
+    file: 'apps/emulator-cxx/src/core/vm_value.cpp',
+    from: '    output_append("\\r\\n致命的エラー[" + text + "]\\r\\n");',
+    to: '    errors_.push_back(text);  // 变异：只进错误通道、不发输出对象日志 seam',
+    guard: 'ctest:spec_output_object_report',
+    ctest: 'spec_output_object_report',
+    what:
+      '输出对象的「报告」不写日志落点（改成只 push 到错误通道 `errors_`）⇒ 日志 seam 收不到 ' +
+      '`\\r\\n致命的エラー[...]\\r\\n` ⇒ CTest `spec_output_object_report` 当场红',
+  },
 ];
 
 /**
@@ -3317,9 +3737,27 @@ export function main(argv = process.argv.slice(2)) {
       results.push({ ...m, verdict: '⚠ 变异点没找到（源文件已变 ⇒ 清单过期）', ok: false, stale: true });
       continue;
     }
+    // ★ CTest 条目在**施加变异之前**先验基线：构建目录没配置 / 用例不存在 / 基线本来就红 ⇒
+    //   这次变异什么都证明不了 ⇒ 记"无法判定"，⛔ 不记成"守卫没红"。
+    if (m.ctest) {
+      const pre = runCtestGuard(m.ctest, null);
+      if (pre.unavailable || pre.status !== 0) {
+        const why = pre.unavailable ?? `\`${m.ctest}\` 基线退出码 ${pre.status}`;
+        results.push({
+          ...m,
+          verdict: `⏭ **无法判定**（CTest 基线不成立：${why}）`,
+          ok: false,
+          unverifiable: true,
+          ran: { skipReason: why },
+        });
+        continue;
+      }
+    }
     fs.writeFileSync(abs, before.replace(m.from, m.to));
     let code = null;
     let ran = null; // {pass, fail, skipped, skipReason}
+    let unavailable = null; // CTest 条目：构建/ctest 跑不起来
+    let restoreProblem = null;
     const log = path.join(os.tmpdir(), `amayui-mutate-${process.pid}.log`);
     try {
       // ★ 沙箱里不能**捕获**子进程输出（管道要命名管道 ⇒ EPERM）⇒ 用**文件描述符重定向**拿同一份答案
@@ -3328,23 +3766,67 @@ export function main(argv = process.argv.slice(2)) {
       //   `emulator-numeric-ops` 的两条要 `dist/install`，本机没有 ⇒ 变异看起来"没抓住"，其实是没跑）。
       const fd = fs.openSync(log, 'w');
       try {
-        const r = spawnSync(process.execPath, ['--test', '--test-isolation=none', m.guard], { cwd: ROOT, stdio: ['ignore', fd, fd] });
-        code = r.status;
+        if (m.ctest) {
+          const r = runCtestGuard(m.ctest, fd);
+          code = r.status ?? null;
+          unavailable = r.unavailable ?? null;
+        } else {
+          const r = spawnSync(process.execPath, ['--test', '--test-isolation=none', m.guard], { cwd: ROOT, stdio: ['ignore', fd, fd] });
+          code = r.status;
+        }
       } finally {
         fs.closeSync(fd);
       }
-      const text = fs.readFileSync(log, 'utf8');
-      const num = (k) => Number(new RegExp(`^ℹ ${k} (\\d+)$`, 'm').exec(text)?.[1] ?? 0);
-      const skipReason = /^﹣ .*?# (.+)$/m.exec(text)?.[1] ?? null;
-      ran = { pass: num('pass'), fail: num('fail'), skipped: num('skipped'), skipReason };
+      if (!m.ctest) {
+        const text = fs.readFileSync(log, 'utf8');
+        const num = (k) => Number(new RegExp(`^ℹ ${k} (\\d+)$`, 'm').exec(text)?.[1] ?? 0);
+        const skipReason = /^﹣ .*?# (.+)$/m.exec(text)?.[1] ?? null;
+        ran = { pass: num('pass'), fail: num('fail'), skipped: num('skipped'), skipReason };
+      }
     } finally {
       fs.rmSync(log, { force: true });
       // ★ 无论成败都还原；还原后**比对全文**（只比长度不够）
       fs.writeFileSync(abs, before);
+      if (m.ctest) {
+        // ★ 还原只还原了**源文件**；判据在 exe 里 ⇒ 必须重建回基线，否则下一次 ctest 会假红。
+        //   顺手把「还原 ⇒ 再跑必须绿」也机械化：不绿就中止（退出码 2）。
+        const build = buildCtestTargets(null);
+        if (build.error || build.status !== 0) {
+          restoreProblem = '还原后重建失败（exe 仍是变异版）';
+        } else {
+          const run = spawnSync('ctest', ['--test-dir', CTEST_BUILD_DIR, '-R', `^${m.ctest}$`],
+                                { cwd: ROOT, stdio: 'ignore' });
+          if (run.error || run.status !== 0) {
+            restoreProblem = `还原后 \`${m.ctest}\` 仍红（基线没有恢复）`;
+          }
+        }
+      }
+    }
+    if (restoreProblem) {
+      console.error(`\n✗ **还原失败**：${m.file} —— ${restoreProblem}。已中止（工作树可能被污染，请查 git diff）`);
+      return 2;
     }
     if (fs.readFileSync(abs, 'utf8') !== before) {
       console.error(`\n✗ **还原失败**：${m.file} 与施加前不一致 —— 已中止（工作树可能被污染，请查 git diff）`);
       return 2;
+    }
+    if (m.ctest) {
+      results.push({
+        ...m,
+        code,
+        ran: unavailable ? { skipReason: unavailable } : null,
+        verdict: unavailable
+          ? `⏭ **无法判定**（${unavailable}）`
+          : code !== 0
+            ? `✅ 守卫红了（CTest 退出码 ${code}）`
+            : '❌ **守卫没红**（CTest 退出码 0）',
+        // ★ 与 node 侧一致：**跑不起来 ≠ 守卫没抓住**。`unavailable`（构建目录缺失 / cmake 不可用 /
+        //   构建失败）只是"这台机器上无法判定"，⛔ 不许记成 `failed` 并 exit 1 —— 否则在没有
+        //   `apps/emulator-cxx/out` 的机器上，所有 CTest 条目都会被误报成"守卫坏了"。
+        ok: !unavailable && code !== 0,
+        unverifiable: Boolean(unavailable),
+      });
+      continue;
     }
     const skipped = ran && ran.fail === 0 && ran.skipped > 0;
     results.push({
@@ -3366,10 +3848,10 @@ export function main(argv = process.argv.slice(2)) {
   const stale = results.filter((r) => r.stale);
   const failed = results.filter((r) => !r.ok && !r.unverifiable && !r.stale);
   const unver = results.filter((r) => r.unverifiable);
-  console.log(`\n${results.length - failed.length - unver.length - stale.length}/${results.length} 条按预期变红${unver.length ? ` · ${unver.length} 条**无法判定**（守卫在本机 skip ⇒ 不能算"没红"）` : ''}。`);
+  console.log(`\n${results.length - failed.length - unver.length - stale.length}/${results.length} 条按预期变红${unver.length ? ` · ${unver.length} 条**无法判定**（守卫在本机跑不起来 ⇒ 不能算"没红"，也不算失败）` : ''}。`);
   if (unver.length) {
-    console.log('⏭ 这些守卫在**本机**跑不起来（不是"没抓住"）—— 要它有意义就得先备齐它的语料/资产：');
-    for (const u of unver) console.log(`  - ${u.what}（${u.guard}）：${u.ran.skipReason ?? '（无原因）'}`);
+    console.log('⏭ 这些守卫在**本机**跑不起来（不是"没抓住"）—— 要它有意义就得先备齐它的语料/资产/构建目录：');
+    for (const u of unver) console.log(`  - ${u.what}（${u.guard}）：${u.ran?.skipReason ?? '（无原因）'}`);
   }
   if (stale.length) {
     console.error('⚠ 这些变异的**施加点已经不存在**（源文件改过 ⇒ 清单过期，等于什么也没验到）：');

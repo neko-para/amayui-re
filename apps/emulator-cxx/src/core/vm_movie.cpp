@@ -37,6 +37,7 @@ void Machine::op_20f(const Instruction& instruction) {
             bytes = movie_bytes_loader_(movie.file_id);
         } else if (install_ != nullptr) {
             bytes = read_install_file(*install_, movie.file_id);
+            register_loaded_file(movie.file_id);  // 文件库装载登记（按区号；`0x143` 的投递源；`0x455948`）
         } else {
             throw CoreError("movie-install-missing");
         }
