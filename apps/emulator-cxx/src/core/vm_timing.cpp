@@ -43,6 +43,89 @@ void Machine::service_bgm_fade() {
     }
 }
 
+// ── 时间交付：**两套到期计时器**（`CORE-VM-LOOP` 的「一次迭代做哪些事」）──
+// ★ 交付**不是混音**：它只推进引擎自己的到期记录，并把「到期」交给该子系统自己的释放 / 启动入口；
+//   混音 / 输出 / 音量属音频子系统与平台（`70-vm.md:23` 的范围声明）⇒ 这里**一处宿主请求都不发**。
+void Machine::deliver_sound_time(std::uint32_t now_ms) {
+    // 入口判据：「无待办 ⇒ 直接返回」（`0x4b5239`）。没有这一格，「未到期 ⇒ 重新置待办」就没有读者，
+    // 10 个通道会每迭代被无谓地扫一遍。
+    if (!se_work_pending_) return;
+    bool remaining = false;
+    for (auto& channel : se_channels_) {
+        if (!channel.active) continue;
+        // 懒盖章：**只判起点 = 0**（`0x4b526b`）。★ 0 是"未盖章"哨兵 ⇒ 盖章只发生一次，⛔ 不是每迭代都盖。
+        if (channel.start == 0) channel.start = now_ms;
+        // 到期判据 = **有符号**「读数 − 起点 ≥ 时长」（`0x4b5275` 的比较；`70-vm.md` 的「时钟」条明说
+        // 音效 / 语音的到期是有符号，⛔ 不许并进颜色窗那一族）。⇒ 相等已到期、差 1 未到期，
+        // 起点落在"未来"时差为负 ⇒ 未到期。
+        const auto elapsed = static_cast<std::int32_t>(now_ms - channel.start);
+        if (elapsed >= channel.duration) {
+            // 到期 ⇒ 清活动，并把该通道的值交给**释放入口**（子系统内部的步骤，⛔ 不是宿主请求）。
+            channel.active = false;
+            se_last_released_value_ = channel.value;
+            ++se_release_steps_;
+        } else {
+            remaining = true;  // 未到期 ⇒ 该子系统重新置「仍有一件未完成的工作」（`0x4b5296`）
+        }
+    }
+    se_work_pending_ = remaining;
+}
+
+bool Machine::deliver_voice_time(std::uint32_t now_ms) {
+    bool advanced = false;
+    for (auto& slot : voice_slot_timers_) {
+        if (!slot.pending) continue;
+        // ★ 状态低两位 = 3（"已完成 / 跳过"，`60-ops-voice.md:130`）的槽，spec 要求**先按另外两个语音槽
+        //   的占用重排**再进懒盖章 + 到期（`70-vm.md:20`）。那一步与「启动该槽队列里的下一段」的判据
+        //   在 spec 的「配音排队与配音组」里**没有正文**（该条只规定 `0x2f5` 写五格）⇒ 本实现**不做**
+        //   （⛔ 不拍近似值）：这样的槽按"没有在播的段"跳过 —— 不盖章、不到期、不清状态。
+        if ((slot.state & 3) == 3) continue;
+        if (slot.start == 0) slot.start = now_ms;  // 懒盖章（只判起点 = 0）
+        const auto elapsed = static_cast<std::int32_t>(now_ms - slot.start);
+        if (elapsed >= slot.duration) {  // 有符号，与音效通道**同一形状**
+            // 到期 ⇒ 清槽状态；「按该槽的待办标记调整 / 启动下一段」的判据未成篇 ⇒ 只清这一段的待办。
+            slot.state = 0;
+            slot.pending = false;
+            slot.start = 0;
+            ++voice_advance_steps_;
+            advanced = true;  // `0x4bbc01`：启动了语音 ⇒ 交付返回「有推进」
+        } else {
+            voice_work_pending_ = true;  // 还有没到期的段 ⇒「该子系统仍有一件未完成的工作」
+        }
+    }
+    if (advanced) request_bgm_duck();
+    return advanced;
+}
+
+void Machine::request_bgm_duck() {
+    // 音乐压低的**进入条件**（`70-vm.md:21`；四个都成立才置位，否则**什么都不做**）：
+    //   ①「音乐淡出相关状态」格（`0xc0` 读的那一格；写者 `0xc3` 未实现）非 0；
+    //   ② 配置 `sound:MusicFadeOnVoicePlaying` 非 0；
+    //   ③ 状态选择字第 9 位未置（音乐音量渐变进行中）；
+    //   ④ 主循环模式字（`0x24e` 写的那个字）的第 0 位为 0。
+    if (engine_aa9e4_ == 0) return;
+    if (config_.get_int("sound:MusicFadeOnVoicePlaying") == 0) return;
+    if ((state_flags_ & (1u << 9)) != 0) return;
+    if ((input_mode_ & 1u) != 0) return;
+    state_flags_ |= (1u << 14);  // 写回状态选择字（`0x40716c`）
+    voice_work_pending_ = true;  // 「该子系统仍有一件未完成的工作」置起（`70-vm.md:21`）
+}
+
+void Machine::service_bgm_duck() {
+    // 位序表第 3 行（`70-vm.md:112`）：前置 = 语音子系统空闲 ∧「该子系统仍有一件未完成的工作」≠ 0
+    // ∧ 第 9 位未置；**不成立 ⇒ 第 14 位保留、下个迭代再判**（⛔ 不许在这里清它）。
+    if (voice_busy_ != 0) return;
+    if (!voice_work_pending_) return;
+    if ((state_flags_ & (1u << 9)) != 0) return;
+    state_flags_ &= ~(1u << 14);
+    state_flags_ |= (1u << 9);
+    // 压低后的恢复与 `0xc2` 的淡变**共用同一个渐变对象与计时器**（`60-ops-voice.md:121` 的
+    // 「同一生命周期」）：交接只把目标设成满值、步长 1，并**起计时**（下一次第 9 位服务从此相位步进）。
+    bgm_fade_target_ = 10000;  // 刻度满值 10000（唯一观察；单位本版不解释，见 `60-ops-voice.md:174`）
+    bgm_fade_step_ = 1;
+    bgm_fade_last_ms_ = 0;
+}
+
 void Machine::service_text_cell_reveal() {
     // 逐格揭示当前文本（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：活动位（门字第 30 位）未置 ⇒ 不服务。
     // ★ 每迭代读一次时钟（`advance_scene` 刚把 `scene_clock_ms_` 推到本迭代的读数），按毫秒节拍器
@@ -69,9 +152,68 @@ void Machine::service_text_cell_reveal() {
 void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
     scene_previous_ms_ = scene_clock_ms_;
     scene_clock_ms_ = now_ms;
-    // 逐格揭示的节拍服务（每迭代一次，与场景窗是否推进无关：暂停只跳过场景推进，不跳过主循环的服务）。
-    service_text_cell_reveal();
+    // ★ 逐格揭示（第 30 位）的**服务体**在门的服务链上（`CORE-VM-STATE` 位序表第 8 项），不在这里：
+    //   它是"位上的工作"，只能在扫描轮到它时跑（别的位有可能先把控制交回迭代头）。
+    //   这里只读一次时钟 —— 本函数是"本迭代的现在"，不是服务入口。
     if (!advance_windows) return;  // 暂停：只更新时间戳，不推进任何窗（`CORE-VM-LOOP`）
+    advance_scene_windows();
+}
+
+// 渲染步的**推进子步**（同一渲染步的更早子步）。`CORE-TIMING-WINDOW` 的「暂停时」那一段：
+// 跳过点分两类，次序**固定** —— 三个"连盖钟一起跳过" → 盖钟 → 五个"只挡推进"。
+//   (a) 场景绘制模式 ≠ 1（配置 `set:DrawMode` 决定的那个格）；
+//   (b) 画面暂停闩 ≠ 0（窗口消息置 / 清的引擎格，与区间忙标记不是同一格；消息号未取证）；
+//   (c) `0x21b` 的标量为 0 **且** 等待位（第 10 位）与影片位（第 13 位）都为 0
+//       （掩码 `2400h` 是**或**：任一位为 1 就必然放行）。
+// ★ 这三个是**持续状态** ⇒ 成立期间所有以场景时钟计的量都停走（消息等待计时器 / 颜色窗 /
+//   源矩形窗）⇒ **连盖钟一起跳过**：不判据、不发请求、不清帧标志、不推窗。
+// ★ (c) **只取消门前渲染步这一个时钟写者**（`CORE-TIMING-CLOCK`）：场景时钟仍由 `0x1f4` /
+//   `0x20c` / `0x23c` 推进 ⇒ **标量恒为 0 不会让时间停走**；迭代也不因此结束（照常过门）。
+//   ⛔ 别把它实现成"整个迭代 / 整个时钟"的否决（那会让等待谓词自己等不到头）。
+// ★ 后五个只挡推进、**盖钟照常**：第 24 位 / 影片缓冲被另一处持有 / 场景既不需要重绘且无
+//   "有待消费的新帧" / 渲染器未就绪 / **执行区间的暂停**（忙 ∧ 等待位 = 0 —— 这一条在盖钟
+//   **之后**，所以钟照盖、只跳请求；它与 (b) 的窗口消息闩不是同一格）。
+Machine::SceneAdvance Machine::advance_render_step(std::uint32_t now_ms) {
+    // ── ① 三个"连盖钟一起跳过"（次序 = spec 的列举）──
+    if (draw_mode_ != 1) return SceneAdvance::Skipped;                    // (a)
+    if (scene_hold_latch_ != 0) return SceneAdvance::Skipped;            // (b)
+    // (c) 标量 = 0 且等待位 / 影片位都为 0 ⇒ 本迭代不盖门前这一次钟、不判据、不发请求、
+    //     不清帧标志；**迭代继续**（门照走）。等待位或影片位任一为 1 ⇒ 放行。
+    if (scalar_21b_ == 0 && (state_flags_ & (0x400u | 0x2000u)) == 0) return SceneAdvance::Skipped;
+
+    // ── ② 盖钟（先搬旧、再写新 —— 与 `0x1f4` / `0x20c` / `0x23c` 同序，且是同一对）──
+    stamp_scene_clock(now_ms);
+
+    // ── ③ 五个"只挡推进"：任一成立 ⇒ 窗不前进、两个标记不重算，但**时钟照盖** ──
+    // ★ 「有待消费的新帧」**读一次即消费**：判据在哪个分支被读到，那一读就是消费点。
+    //   这里先读再判 —— 否则别的条件把它短路掉时，这个"待消费"会莫名其妙地活到下一步。
+    const bool new_frame = movie_new_frame_;
+    movie_new_frame_ = false;
+    if ((state_flags_ & (1u << 24)) != 0) return SceneAdvance::ClockOnly;
+    if (movie_held_) return SceneAdvance::ClockOnly;
+    if (!render_ready_) return SceneAdvance::ClockOnly;
+    // ★ 「场景既不需要重绘」＝**门前那条请求判据的内层条件**（脏位 / 有动画 / 命令表在动）。
+    //   ★ 为什么把后两个也算进来：spec 把"需要重绘"的判据留给残差
+    //   `RES-RENDER-STEP-NEEDS-REDRAW`（脏 / 有动画 / 命令表在动 / 影片新帧），而 70-vm 明说
+    //   「有动画」的唯一读者就是门前的「需要重绘」判据 —— 只看脏位的话，一个**还在走的窗**
+    //   会在"本步没有新脏位"的迭代里停住（窗走不完 ⇒ 等待位永远放不开）。
+    //   两个标记在这里读的是**上一迭代算出的值**（这一步不重算它们）。
+    if (!scene_dirty_ && !scene_animating_ && !command_animating_ && !new_frame) {
+        return SceneAdvance::ClockOnly;
+    }
+    // (d) 执行区间的暂停（区间忙标记 ≠ 0 **且** 等待位 = 0）。★ 忙判定在**盖钟之后**
+    //   （`0x4127BB` 在 `0x41279F` 之后）⇒ **钟已盖、只跳请求**；它与 (b) 的窗口消息闩不是同一格。
+    //   ⛔ 别把它写回"连盖钟一起跳过"（S4 的错归因：那会让暂停期间整个时钟停走）。
+    if (driven_elsewhere_ && (state_flags_ & (1u << 10)) == 0) return SceneAdvance::ClockOnly;
+
+    advance_scene_windows();
+    return SceneAdvance::Windows;
+}
+
+// 渲染步的推进本体：**先清两个标记、再推进各项**（`CORE-TIMING-WINDOW`：清与重置在同一个
+// 迭代里、门服务等待位之前）。跳过它 ⇒ 两个标记停在上一迭代的值。
+void Machine::advance_scene_windows() {
+    const std::uint32_t now_ms = scene_clock_ms_;
     scene_animating_ = false;
     // ★ 渲染步入（`0x4B40AA` / `0x4B40B0`）把脏位与"待处理"闩一起清 0，**紧接着**才推进窗；
     //   本模型的"渲染步"就是这一段（`step()` 在门之前调用）。⇒ 先清后置：
@@ -80,14 +222,16 @@ void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
     //   闩会永远不清（实测：LOGO 影片路径的 `0x21c` 会因此永不放行）。
     scene_pending_ = false;
 
-    // 共享推进：盖章 → 延迟内 / 推进中 → 到期收尾（`CORE-TIMING-WINDOW`）。
-    // 返回本步派生色（只写进出参，不写记录字段；到期那一步才写当前颜色）。
-    // ★ 推进中同时置"待处理"闩（`+0B5B4`）：引擎在窗推进的那一步把它写成 1
-    //   （`sub_4B06D0` 的 `0x4B326A` / `0x4B3CCB`），渲染步入（`0x4B40B0`）再清 0。
-    const auto advance_window = [&](std::uint32_t& flags, std::uint32_t& current,
-                                    std::uint32_t& target, std::int32_t& delay,
-                                    std::int32_t& duration, std::uint32_t& start,
-                                    bool keep_window = false) {
+    // ── 共享推进（`CORE-TIMING-WINDOW`）：盖章 → 延迟内 / 推进中 → 到期收尾 ──
+    // ★ 返回本步派生色（只写进出参，不写记录字段；到期那一步才写当前颜色）。
+    // ★ 绘制项与网格的"持续时间 ≤ 0"分叉不同 ⇒ 两个 lambda：
+    //   · 绘制项：颜色窗那一段**整段跳过**（不插值、不写派生色、不改当前 / 终色、不清起止与
+    //     「有窗」位）—— 它的"到期"只是**读者视角**（`现在 ≥ 起点 + 延迟 + 0` 成立）。
+    //   · 网格：清窗起点 + 清「有窗」位 + 置「有动画」，同样不做终色 → 当前色的收尾、不重烘。
+    const auto advance_item_window = [&](std::uint32_t& flags, std::uint32_t& current,
+                                         std::uint32_t& target, std::int32_t& delay,
+                                         std::int32_t& duration, std::uint32_t& start,
+                                         bool keep_window) -> std::uint32_t {
         if ((flags & 2u) == 0) return current;
         // ★ 盖章**不看持续时间**：引擎只判"起点为 0"（`0x4B085E` / `0x4B087C`），
         //   所以持续时间 ≤ 0 的窗也在第一次推进时盖章，随后由下面的到期判据立刻判到期。
@@ -98,23 +242,19 @@ void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
         if (now_ms < start + static_cast<std::uint32_t>(delay) +
                         static_cast<std::uint32_t>(duration)) {
             scene_animating_ = true;
-            scene_pending_ = true;  // `+0B5B4`：这一帧还在推进 ⇒ 消息子系统不算完成
+            scene_pending_ = true;  // `+0B5B4`：这一帧还在推进
+            // ★ 持续时间 ≤ 0：延迟段仍**算窗内**（上面这一支），但**不插值**（整段跳过）——
+            //   "到期"之后同样什么都不清（见下）。⛔ 别在这一支里写 current / target / flags / start。
+            if (duration <= 0) return current;
             if (now_ms <= start + static_cast<std::uint32_t>(delay)) return current;
             const auto elapsed = now_ms - start - static_cast<std::uint32_t>(delay);
             const auto progress = static_cast<double>(elapsed) / static_cast<double>(duration);
             return lerp_argb(current, target, progress);
         }
         if (duration <= 0) {
-            // 持续时间 ≤ 0：盖章之后立刻到期。**不跑**"当前颜色 ← 终色"那段共享收尾
-            // （那条合同的适用范围是持续时间 > 0，见 `CORE-TIMING-WINDOW`）；只清延迟与窗位 / 起点，
-            // 否则这道窗会一直留着、每一步都重走一遍到期支。
-            // ★ 窗位与起点是**与源矩形窗共用**的 ⇒ 源矩形窗还在走（`keep_window`）时不清它们，
-            //   也不清延迟（共用期里这道窗的记录留给源矩形窗的到期段收尾）。
-            if (!keep_window) {
-                delay = 0;
-                flags &= ~2u;
-                start = 0;
-            }
+            // 持续时间 ≤ 0：颜色窗那一段**整段跳过** —— 不插值、不写派生色、不改当前 / 终色、
+            // 不清起止与「有窗」位（`CORE-TIMING-WINDOW`）。⛔ 别把这条写成"走正常收尾"：
+            // 那会写 current ← target、target ← 无颜色、并清掉窗位与起点。
             return current;
         }
         // 到期：当前颜色 ← 终色；终色 ← 无颜色；延迟 / 持续时间清 0；清「有窗」位与起点。
@@ -132,7 +272,7 @@ void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
     for (auto& [key, item] : draw_items_) {
         (void)key;
         // 源矩形窗与颜色窗共用一次盖章；这里先盖是因为下面的到期判定要读起点
-        // （`advance_window` 自己也会盖，但对"只排了源矩形窗"的项必须在这里先有起点）。
+        // （`advance_item_window` 自己也会盖，但对"只排了源矩形窗"的项必须在这里先有起点）。
         if ((item.flags & 2u) != 0 && item.window_start == 0 &&
             (item.duration > 0 || item.rect_duration > 0)) {
             item.window_start = now_ms;  // 源矩形窗与颜色窗共用一次盖章
@@ -148,8 +288,8 @@ void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
             scene_animating_ = true;
             scene_pending_ = true;
         }
-        (void)advance_window(item.flags, item.color, item.target_color, item.delay, item.duration,
-                             item.window_start, rect_active && !rect_expired);
+        (void)advance_item_window(item.flags, item.color, item.target_color, item.delay, item.duration,
+                                  item.window_start, rect_active && !rect_expired);
         if (rect_expired) {
             // 到期那一档把结果写回条目的四条边（末帧或空矩形）。
             const int width = std::max(0, item.right - item.left);
@@ -177,13 +317,52 @@ void Machine::advance_scene(std::uint32_t now_ms, bool advance_windows) {
     }
     for (auto& [key, mesh] : meshes_) {
         (void)key;
-        const bool had_window = (mesh.flags & 2u) != 0;
-        const auto derived = advance_window(mesh.flags, mesh.color, mesh.target_color, mesh.delay,
-                                            mesh.duration, mesh.window_start);
-        // 网格只在被推进的那一步按派生色重烘顶点缓冲（`CORE-TIMING-WINDOW`）。
-        if (had_window && !mesh.colors.empty()) {
-            for (auto& value : mesh.colors) value = derived;
+        if ((mesh.flags & 2u) == 0) continue;
+        // ★ 网格的持续时间 ≤ 0 分叉（`CORE-TIMING-WINDOW`）：清**窗起点** + 清「有窗」位 + 置
+        //   「有动画」，**不**做终色 → 当前色的收尾，也**不重烘**。⛔ 与绘制项那一支不同：
+        //   这边确实要清位与起点（下一道真窗才能重新盖章）。
+        if (mesh.duration <= 0) {
+            mesh.window_start = 0;
+            mesh.flags &= ~2u;
+            scene_animating_ = true;
+            continue;
         }
+        auto& start = mesh.window_start;
+        const auto& delay = mesh.delay;
+        const auto& duration = mesh.duration;
+        if (start == 0) start = now_ms;  // 盖章（只判"起点为 0"）
+        // 与绘制项同一边界（引擎 `0x4B17F9` 的 `jge`：相等已到期）。这里把判据先算成一个局部量：
+        // 网格这一支还要用它选"延迟段 / 推进中"的派生色，写成一行也更清楚。
+        const bool in_window =
+            now_ms < start + static_cast<std::uint32_t>(delay) + static_cast<std::uint32_t>(duration);
+        if (in_window) {
+            scene_animating_ = true;
+            scene_pending_ = true;  // `+0B5B4`：网格这一帧还在推进
+            const auto derived = now_ms <= start + static_cast<std::uint32_t>(delay)
+                                     ? mesh.color
+                                     : lerp_argb(mesh.color, mesh.target_color,
+                                                 static_cast<double>(now_ms - start -
+                                                                     static_cast<std::uint32_t>(delay)) /
+                                                     static_cast<double>(duration));
+            // 网格只在被推进的那一步按派生色重烘顶点缓冲；重烘**唯一的跳过条件**是
+            // "顶点缓冲未建 / 顶点数 ≤ 0"（⛔ 不按颜色值分支）。
+            if (!mesh.colors.empty()) {
+                for (auto& value : mesh.colors) value = derived;
+            }
+            continue;
+        }
+        // 正常到期的共享收尾（持续时间 > 0）：取终色 → 当前颜色 ← 终色 →（网格按该值重烘一次）
+        // → 终色 ← "无颜色" → 延迟与持续时间清 0；窗位与起点清掉（本模型在到期支里清，残差
+        // `RES-WINDOW-FLAG-CLEAR` 记着引擎的清点未取证）。
+        mesh.color = mesh.target_color;
+        if (!mesh.colors.empty()) {
+            for (auto& value : mesh.colors) value = mesh.color;
+        }
+        mesh.target_color = kNoColor;
+        mesh.delay = 0;
+        mesh.duration = 0;
+        mesh.flags &= ~2u;
+        mesh.window_start = 0;
     }
     if (scene_animating_) scene_dirty_ = true;  // 有动画 ⇒ 下一迭代重绘
 }

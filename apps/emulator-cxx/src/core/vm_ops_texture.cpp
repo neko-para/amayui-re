@@ -374,14 +374,12 @@ void Machine::op_1f8(const Instruction& instruction) {
     return;
 }
 
-void Machine::op_1fa(const Instruction& instruction) {
-    const Operand* ops = instruction.operands.data();
-    // 释放纹理（CORE-OPS-TEXTURE-RELEASE）：**只清槽里的对象**，纹理记录保留 ——
+void Machine::release_texture_slot(std::uint32_t id) {
+    // 释放纹理（`CORE-OPS-TEXTURE-RELEASE` / `0x9` 的 1000 槽循环共用；引擎 `sub_49E980`）。
     // ★ 记录 vs 槽对象是两层：「空槽」≠「空白纹理」。旧实现删整条记录，把颜色键一起丢了，
     //   还让同一编号重建时版本号打回 1（GPU 缓存把上一条记录的纹理当成当前纹理）。
-    const auto id = static_cast<std::uint32_t>(read_int(ops[0]));
-    (void)read_int(ops[0]);
     // 释放守卫非 0：只清共享对象槽，纹理记录 / 纹理槽都不动（CORE-OPS-TEXTURE-RELEASE）。
+    // （共享对象槽不在本模型里 ⇒ 守卫非 0 时这里什么都不做。）
     if (id < surface_release_gate_.size() && surface_release_gate_[id] != 0) return;
     TextureEntry* entry = texture_mut(id);
     if (entry == nullptr) return;  // 没有记录 ⇒ 也没有槽对象可清
@@ -392,6 +390,14 @@ void Machine::op_1fa(const Instruction& instruction) {
     entry->slot.width = 0;
     entry->slot.height = 0;
     entry->slot.rgba.clear();
+}
+
+void Machine::op_1fa(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 释放纹理（CORE-OPS-TEXTURE-RELEASE）：**同一个操作数被读两次**（1 → 清共享对象槽 → 1）。
+    const auto id = static_cast<std::uint32_t>(read_int(ops[0]));
+    (void)read_int(ops[0]);
+    release_texture_slot(id);
     return;
 }
 
@@ -923,16 +929,22 @@ void Machine::service_auto_message() {
     auto_armed_ = false;
 }
 
-void Machine::service_advance_wait() {
-    // 0x72 的放行：输入是**事件锁存**（一次按下只放行一次）。
+void Machine::sample_advance_input() {
+    // 0x72 的输入是**事件锁存**（一次按下只放行一次）。
     // ★ 语料：窗口过程把"按下"或进输入字（`0x4B8DE6`），消费者读一次就清（`0x4772A9/B7`、
     //   `0x41330B`）；**不是**每帧按电平读 —— 后者会让"按住不放"一句接一句推进（实测回归）。
+    // ★ 这是**平台输入路径**（宿主把事件喂进来），不是门上的服务体：门上的第 31 位只**消费**锁存。
+    //   采样必须每迭代都做（否则打字 / 演示闸期间的一串点击会被压成一次上升沿 = 吞点击）。
     std::int32_t mask = 0;
     const bool have = mouse_button_source_ && mouse_button_source_(mask);
     const bool down = have && (mask & 1) != 0;
     if (down && !advance_input_prev_) advance_input_latch_ = true;  // 上升沿 ⇒ 锁一次
     advance_input_prev_ = down;
-    if ((state_flags_ & (1u << 31)) == 0) return;  // 没在等：只更新边沿状态（按住不算新的按下）
+}
+
+void Machine::service_advance_wait() {
+    // 第 31 位（等推进）的服务体：位未置 ⇒ 什么都不做（本迭代没有这件待办）。
+    if ((state_flags_ & (1u << 31)) == 0) return;
     const bool skip = (state_flags_ & (1u << 27)) != 0;  // 读跳过 ⇒ 直接放行
     if (advance_input_latch_ || skip) {
         advance_input_latch_ = false;  // 消费掉这一次按下

@@ -11,9 +11,7 @@
 #include "core/text_alpha.h"
 #include "core/text_raster.h"
 #include "core/vm.h"
-
 #include <nlohmann/json.hpp>
-
 #include <cmath>
 #include <cstdlib>
 #include <map>
@@ -25,30 +23,25 @@
 #include <fstream>
 #include <string>
 #include <vector>
-
 namespace {
-
 void put_u32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
     bytes.push_back(static_cast<std::uint8_t>(value & 0xFF));
     bytes.push_back(static_cast<std::uint8_t>((value >> 8) & 0xFF));
     bytes.push_back(static_cast<std::uint8_t>((value >> 16) & 0xFF));
     bytes.push_back(static_cast<std::uint8_t>((value >> 24) & 0xFF));
 }
-
 void put_field(std::vector<std::uint8_t>& bytes, const char* text, std::size_t width) {
     const std::size_t length = std::strlen(text);
     if (length > width) throw std::runtime_error("fixture-field-too-long");
     bytes.insert(bytes.end(), text, text + length);
     bytes.resize(bytes.size() + (width - length), 0);
 }
-
 std::vector<std::uint8_t> make_alf_ai() {
     std::vector<std::uint8_t> bytes(268, 0);
     std::memcpy(bytes.data(), "S4AI", 4);
     std::memcpy(bytes.data() + 8, "selftest", 8);
     const std::uint32_t zone = 7;
     std::memcpy(bytes.data() + 264, &zone, 4);
-
     put_u32(bytes, 1);  // archive count
     put_field(bytes, "DATA1.ALF", 256);
     put_u32(bytes, 1);  // file count
@@ -59,7 +52,6 @@ std::vector<std::uint8_t> make_alf_ai() {
     put_u32(bytes, 16);  // length
     return bytes;
 }
-
 std::vector<std::uint8_t> make_script() {
     std::vector<std::uint8_t> bytes;
     bytes.insert(bytes.end(), {'S', 'Y', 'S', '4'});
@@ -68,7 +60,6 @@ std::vector<std::uint8_t> make_script() {
     put_u32(bytes, 28);
     const std::uint32_t pairs[6] = {1, 10, 2, 20, 3, 30};
     for (auto value : pairs) put_u32(bytes, value);
-
     put_u32(bytes, 2);  // exit, argc 0
     put_u32(bytes, 80);  // add, argc 3
     put_u32(bytes, 3); put_u32(bytes, 0);
@@ -77,7 +68,6 @@ std::vector<std::uint8_t> make_script() {
     put_u32(bytes, 9);  // exit-script, argc 0
     return bytes;
 }
-
 std::vector<std::uint8_t> make_vm_script() {
     std::vector<std::uint8_t> bytes;
     bytes.insert(bytes.end(), {'S', 'Y', 'S', '4'});
@@ -85,7 +75,6 @@ std::vector<std::uint8_t> make_vm_script() {
     for (int i = 0; i < 6; ++i) put_u32(bytes, 0);
     put_u32(bytes, 28);
     for (int i = 0; i < 6; ++i) put_u32(bytes, 0);
-
     put_u32(bytes, 85); // mov(a=local-int 0, b=immediate 7)
     put_u32(bytes, 9); put_u32(bytes, 0);
     put_u32(bytes, 0); put_u32(bytes, 7);
@@ -96,7 +85,6 @@ std::vector<std::uint8_t> make_vm_script() {
     put_u32(bytes, 2); // exit
     return bytes;
 }
-
 std::vector<std::uint8_t> make_call_script() {
     std::vector<std::uint8_t> bytes;
     bytes.insert(bytes.end(), {'S', 'Y', 'S', '4'});
@@ -104,7 +92,6 @@ std::vector<std::uint8_t> make_call_script() {
     for (int i = 0; i < 6; ++i) put_u32(bytes, 0);
     put_u32(bytes, 28);
     for (int i = 0; i < 6; ++i) put_u32(bytes, 0);
-
     put_u32(bytes, 0x8f); // call position 9
     put_u32(bytes, 0); put_u32(bytes, 9);
     put_u32(bytes, 85); // mov local-int 0 = 42
@@ -117,7 +104,6 @@ std::vector<std::uint8_t> make_call_script() {
     put_u32(bytes, 5); // ret → 位置 3
     return bytes;
 }
-
 std::vector<std::uint8_t> make_frontier_script() {
     std::vector<std::uint8_t> bytes;
     bytes.insert(bytes.end(), {'S', 'Y', 'S', '4'});
@@ -125,7 +111,6 @@ std::vector<std::uint8_t> make_frontier_script() {
     for (int i = 0; i < 6; ++i) put_u32(bytes, 0);
     put_u32(bytes, 28);
     for (int i = 0; i < 6; ++i) put_u32(bytes, 0);
-
     put_u32(bytes, 0x1A7); // comment：载荷 type 2 不应被读
     put_u32(bytes, 2); put_u32(bytes, 0);
     put_u32(bytes, 0x1A8); // dev_ukn
@@ -147,7 +132,6 @@ std::vector<std::uint8_t> make_frontier_script() {
     put_u32(bytes, 2); // exit
     return bytes;
 }
-
 std::vector<std::uint8_t> make_list_script() {
     std::vector<std::uint8_t> bytes;
     bytes.insert(bytes.end(), {'S', 'Y', 'S', '4'});
@@ -155,7 +139,6 @@ std::vector<std::uint8_t> make_list_script() {
     for (int i = 0; i < 6; ++i) put_u32(bytes, 0);
     put_u32(bytes, 28);
     for (int i = 0; i < 6; ++i) put_u32(bytes, 0);
-
     put_u32(bytes, 0x70); // 组 1；op2/op3=10/11，op4/op5=20/21
     for (auto v : {1, 10, 11, 20, 21}) { put_u32(bytes, 0); put_u32(bytes, static_cast<std::uint32_t>(v)); }
     put_u32(bytes, 0x79); // 组 1；30/31
@@ -165,7 +148,6 @@ std::vector<std::uint8_t> make_list_script() {
     put_u32(bytes, 2);
     return bytes;
 }
-
 // 一个脚本构造器：按 (操作数类型, 原始值) 直接写指令；测试只用到整型立即数（type 0）。
 void emit_instruction(std::vector<std::uint8_t>& bytes, std::uint32_t opcode,
                       std::initializer_list<std::pair<std::uint32_t, std::uint32_t>> operands) {
@@ -175,7 +157,6 @@ void emit_instruction(std::vector<std::uint8_t>& bytes, std::uint32_t opcode,
         put_u32(bytes, raw);
     }
 }
-
 std::vector<std::uint8_t> make_script_with_body() {
     std::vector<std::uint8_t> bytes;
     bytes.insert(bytes.end(), {'S', 'Y', 'S', '4'});
@@ -186,6 +167,29 @@ std::vector<std::uint8_t> make_script_with_body() {
     return bytes;
 }
 
+// 渲染步"开闸"的配置：**场景绘制模式 = 1**（配置 `set:DrawMode` 决定的那个格，`CORE-TIMING-WINDOW`
+// 的 (a)）。★ 不设它 ⇒ 场景推进**连盖钟一起跳过** ⇒ 颜色窗 / 消息等待计时器 / 打字节拍全都停走；
+// 这些用例要的是"窗 / 节拍怎么走"，所以先让门前那个渲染步真的跑起来。
+// ⛔ 不是"为了让用例变绿"：这正是 spec 给的门槛（绘制模式 ≠ 1 ⇒ 不盖钟），用例必须显式满足它。
+core::ConfigStore scene_step_config() {
+    core::ConfigStore config;
+    config.set_int("set:DrawMode", 1);
+    return config;}
+core::Machine scene_step_machine(const core::OpcodeTable& table, std::uint32_t seed = 0x12345678u) {
+    core::Machine machine(seed, table, nullptr, scene_step_config());
+    // (c) 的第二个前置：`0x21b` 的标量 ≠ 0 **或**等待 / 影片位为 1（`70-vm.md:217`）。
+    // ★ 与 `set:DrawMode` 同理：这些夹具要的是"门前渲染步真的跑"，所以显式把标量置 1
+    //   （等价于脚本先跑一条 `0x21b 1`）。⛔ 引擎初值是 0（`0x40DFFC` 初始化写 0）—— 这条只给夹具用，
+    //   产品路径的默认值不动：(c) 的用例必须显式把它置 0。
+    machine.set_scalar_21b(1);
+    return machine;
+}
+
+core::Machine text_scene_machine(std::uint32_t key, const core::OpcodeTable& table) {
+    core::Machine machine(key, table, nullptr, scene_step_config());
+    machine.set_scalar_21b(1);  // 同 `scene_step_machine`：让门前渲染步真的跑起来
+    return machine;
+}
 // `0x204` 的内联文本操作数：type 2 的 raw 是「代码区内的字偏移」，文本字节按 XOR 0xFF 编码。
 void emit_text_204(std::vector<std::uint8_t>& bytes, std::uint32_t texture_id, std::uint32_t x,
                    std::uint32_t y, const std::string& text) {
@@ -202,7 +206,6 @@ void emit_text_204(std::vector<std::uint8_t>& bytes, std::uint32_t texture_id, s
     bytes.push_back(0xFFu);
     while ((bytes.size() - body_start) % 4 != 0) bytes.push_back(0xFFu);
 }
-
 std::vector<std::uint8_t> make_agf_1x1() {    std::vector<std::uint8_t> bytes(24, 0);
     const auto set_u32 = [&](std::size_t offset, std::uint32_t value) {
         std::memcpy(bytes.data() + offset, &value, 4);
@@ -226,7 +229,6 @@ std::vector<std::uint8_t> make_agf_1x1() {    std::vector<std::uint8_t> bytes(24
     bytes.push_back(0x00); // pad
     return bytes;
 }
-
 // 影片后端替身：确定性、不读文件、不出像素（像素只由产物帧决定）。
 struct FakeMovieStats {
     int frames = 0;    // 产出的"新帧"次数
@@ -236,7 +238,6 @@ struct FakeMovieStats {
     bool closed = false;
     std::size_t bytes = 0;
 };
-
 class FakeMovieBackend final : public core::MovieBackend {
 public:
     FakeMovieBackend(FakeMovieStats* stats, std::uint32_t width, std::uint32_t height,
@@ -247,7 +248,6 @@ public:
         frame_.rgba.assign(static_cast<std::size_t>(width) * height * 4u, value);
         for (std::size_t i = 3; i < frame_.rgba.size(); i += 4) frame_.rgba[i] = 255;
     }
-
     bool open(core::Bytes bytes, std::string&) override {
         stats_->opened = true;
         stats_->bytes = bytes.size();
@@ -279,17 +279,14 @@ public:
         return true;
     }
     void close() override { stats_->closed = true; }
-
     double duration = 1.0;
     bool produce_frames = true;
-
 private:
     FakeMovieStats* stats_;
     double position_ = 0.0;
     bool ended_ = false;
     core::MovieFrame frame_;
 };
-
 // 建一台带影片替身的机器：4×4 纹理槽 42 + `0x20f`（资源 7 / 槽 42 / 选项）。
 std::vector<std::uint8_t> make_movie_script(std::uint32_t options, bool create_texture) {
     std::vector<std::uint8_t> bytes = make_script_with_body();
@@ -301,7 +298,6 @@ std::vector<std::uint8_t> make_movie_script(std::uint32_t options, bool create_t
     emit_instruction(bytes, 2, {});
     return bytes;
 }
-
 // ── 命名表（0xA1 / 0xA2 / 0xA3；CORE-OPS-TABLE-RESET-A1 / -BIND-A2 / -DISPATCH-A3） ──
 bool check_menu_table(const core::OpcodeTable& table) {
     auto menu = make_script_with_body();
@@ -333,7 +329,6 @@ bool check_menu_table(const core::OpcodeTable& table) {
                      menu_machine.frame().ip, menu_machine.frame().length_slot);
         return false;
     }
-
     // 命中时第 2 个操作数**不被读**：给它一个不可读的类型（8）也不许抛。
     auto menu_hit = make_script_with_body();
     emit_instruction(menu_hit, 0x55, {{3, 0}, {0, 42}});
@@ -354,7 +349,6 @@ bool check_menu_table(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0xa3 hit-with-bad-default ip=%zu\n", hit_machine.frame().ip);
         return false;
     }
-
     // 0xA1 清空后，同一键不再命中 ⇒ 走默认位置。
     auto menu_clear = make_script_with_body();
     emit_instruction(menu_clear, 0x55, {{3, 0}, {0, 42}});  // 位置 0..4
@@ -379,7 +373,6 @@ bool check_menu_table(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 状态字 / 模式族 / 清位（0x1CF · 0x1BF · 0x19C · 0x19B · 0x0D9 · 0x1CE） ──
 bool check_status_and_mode(const core::OpcodeTable& table) {
     // 0x1CF 原样覆盖 + 0x1BF **整字**清 0、第 0 位判据在清字之后。
@@ -442,7 +435,6 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1cf overwrite mismatch word=%d\n", status_d.status_word());
         return false;
     }
-
     // 0x19C 的四支：C 置 D、E 不碰 D、F 什么都不动、全 0 支清 D + 清第 27 位。
     const auto make_mode_script = [&]() {
         auto bytes = make_script_with_body();
@@ -463,7 +455,6 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x19b did not clear mode A\n");
         return false;
     }
-
     core::Machine mode_c(0x12345678u, table);
     mode_c.seed_mode_cells(1, 0, 0);
     mode_c.load_root(make_mode_script());
@@ -489,33 +480,42 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x19c F branch changed the mode bit\n");
         return false;
     }
-
-    // 0x0d9：清门字第 12 位；那一格非 0 才另一个字清第 12 位（读-改-写，别整字写 0）。
-    auto d9_script = make_script_with_body();
-    emit_instruction(d9_script, 0xD9, {});
-    emit_instruction(d9_script, 2, {});
-    core::Machine d9_machine(0x12345678u, table);
-    d9_machine.seed_d9_cells(1, (1 << 12) | (1 << 14));
-    d9_machine.load_root(d9_script);
-    if (!d9_machine.step() || d9_machine.d9_word() != (1 << 14) ||
-        d9_machine.state_flags() != 0) {
-        std::fprintf(stderr, "0x0d9 bit-12 clear mismatch word=0x%X\n", d9_machine.d9_word());
-        return false;
+    // 0x0d9（`CORE-OPS-STATUS-CLEAR-D9`）：① 状态选择字第 12 位清 0（读-改-写，别整字写 0）；
+    // ② **队列泵占用标记**非 0 ⇒ 对**待恢复副本**做同样的清位；标记为 0 ⇒ 副本**不动**。
+    // ★ 旧模型拿"另一格非 0"当判据 ⇒ 这里先用泵状态把两格摆出来，再分两趟钉住判据是**标记**。
+    // ★ 用 `dispatch_for_test` 直派：本条的可观察性正是"门开着时它是空转 / 泵期间它清副本"，
+    //   而门字（第 12 / 14 位）非 0 时服务链会先服务它们、本迭代轮不到派发。
+    {
+        // 泵占用标记 = 1：活动字带第 12 / 14 位；副本带第 12 / 14 / 21 位 ⇒ 清 12、保 14 / 21。
+        core::Machine d9_machine(0x12345678u, table);
+        d9_machine.state_flags_mut() = (1u << 12) | (1u << 14);
+        d9_machine.seed_status_restore_for_test((1u << 12) | (1u << 14) | (1u << 21));
+        d9_machine.set_pump_state_for_test(1, true);
+        d9_machine.dispatch_for_test(core::Instruction{0, 0xD9, {}});
+        if (d9_machine.status_restore() != ((1u << 14) | (1u << 21)) ||            d9_machine.state_flags() != (1u << 14)) {
+            std::fprintf(stderr, "0x0d9: copy=0x%X active=0x%X\n", d9_machine.status_restore(),
+                         d9_machine.state_flags());
+            return false;
+        }
     }
-    core::Machine d9_empty(0x12345678u, table);
-    d9_empty.seed_d9_cells(0, (1 << 12));
-    d9_empty.load_root(d9_script);
-    if (!d9_empty.step() || d9_empty.d9_word() != (1 << 12)) {
-        std::fprintf(stderr, "0x0d9 cleared the word while its cell was 0\n");
-        return false;
-    }
-
+    {
+        // 泵占用标记 = 0：副本是旧值 ⇒ **不许**清它的第 12 位（判据是标记，不是"某个格非 0"）。
+        core::Machine d9_empty(0x12345678u, table);
+        d9_empty.state_flags_mut() = (1u << 12);
+        d9_empty.seed_status_restore_for_test(1u << 12);
+        d9_empty.dispatch_for_test(core::Instruction{0, 0xD9, {}});
+        if (d9_empty.status_restore() != (1u << 12) || d9_empty.state_flags() != 0) {
+            std::fprintf(stderr, "0x0d9 copy=0x%X active=0x%X (pump mark = 0)\n",
+                         d9_empty.status_restore(), d9_empty.state_flags());
+            return false;
+        }    }
     // 0x1ce：非 0 ⇒ 开关格 / 第 30 位（逐格揭示活动中）/ 格号归 0 / 相位起点 = 宿主时钟；
-    // 服务分支不负责清位 ⇒ 门随后恒关（详细语义见 check_text_cell_reveal）。
+    // 服务分支不负责清位（详细语义见 check_text_cell_reveal）。
     auto reveal_script = make_script_with_body();
     emit_instruction(reveal_script, 0x1CE, {{0, 7}});
+    emit_instruction(reveal_script, 0x1A8, {});
     emit_instruction(reveal_script, 2, {});
-    core::Machine reveal_machine(0x12345678u, table);
+    core::Machine reveal_machine = scene_step_machine(table);
     reveal_machine.set_host_clock_ms(1234);
     reveal_machine.load_root(reveal_script);
     if (!reveal_machine.step() || reveal_machine.reveal_switch() != 7 ||
@@ -527,15 +527,18 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
                      reveal_machine.frame().ip);
         return false;
     }
+    // ★ 第 30 位**不交回迭代头**（`CORE-VM-STATE` 位序表第 8 项的服务后 = **继续扫描**）⇒ 门关着也
+    //   不挡派发：扫到表尾照常执行一条（`CORE-VM-GATE`：⛔ 不许写成"任一位置起就挡住派发"）。
     const auto reveal_ip = reveal_machine.frame().ip;
-    if (!reveal_machine.step() || reveal_machine.frame().ip != reveal_ip) {
-        std::fprintf(stderr, "0x1ce did not close the gate (ip moved)\n");
+    if (!reveal_machine.step() || reveal_machine.frame().ip != reveal_ip + 4) {
+        std::fprintf(stderr, "0x1ce bit 30 held the dispatch (ip=%zu)\n",
+                     reveal_machine.frame().ip);
         return false;
     }
     auto reveal_zero = make_script_with_body();
     emit_instruction(reveal_zero, 0x1CE, {{0, 0}});
     emit_instruction(reveal_zero, 2, {});
-    core::Machine reveal_off(0x12345678u, table);
+    core::Machine reveal_off = scene_step_machine(table);
     reveal_off.set_host_clock_ms(9);
     reveal_off.load_root(reveal_zero);  // 开关 0 且第 30 位未置 ⇒ 空操作
     if (!reveal_off.step() || (reveal_off.state_flags() & (1u << 30)) != 0 ||
@@ -543,45 +546,53 @@ bool check_status_and_mode(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1ce zero-branch was not a no-op\n");
         return false;
     }
-
-    // 门一直关着、且挡门的位**没有服务分支**（位 27 = `0x19c` 置位支）⇒ 必须给明确诊断与停因，
-    // 否则外面只看到"停在原地 + 烧步数"（与"在等输入"分不开）。
+    // 门字非 0、且挡门的位在这个模型里**没有服务体**（这里 = 第 27 位，`0x19c` 的置位支）⇒ 该位按
+    // `CORE-VM-STATE` 位序表第 16 项的服务后 = **交回迭代头**：（「未建模的服务体一律按交回迭代头」
+    // 是保守选择）⇒ 本迭代**不派发、也不停死**（⛔ 旧模型把这种情形判成 `GateStalled`）。
     auto stall_script = make_script_with_body();
     emit_instruction(stall_script, 0x19C, {});
+    emit_instruction(stall_script, 0x2F7, {{0, 0}});  // 位 27 不交回时才轮得到它
     emit_instruction(stall_script, 2, {});
     core::Machine stall_machine(0x12345678u, table);
     stall_machine.seed_mode_cells(1, 0, 0);
     stall_machine.load_root(stall_script);
     if (!stall_machine.step() || (stall_machine.state_flags() & (1u << 27)) == 0) {
-        std::fprintf(stderr, "gate stall fixture did not set bit 27\n");
+        std::fprintf(stderr, "gate fixture did not set bit 27\n");
         return false;
     }
-    for (int i = 0; i < 10001 && !stall_machine.halted(); ++i) stall_machine.step();
-    if (!stall_machine.halted() ||
-        stall_machine.last_stop().reason != core::StopReason::GateStalled ||
-        stall_machine.errors().empty()) {
-        std::fprintf(stderr, "gate stall was not diagnosed (halted=%d reason=%d errors=%zu)\n",
+    const std::size_t held_ip = stall_machine.frame().ip;    for (int i = 0; i < 10001 && !stall_machine.halted(); ++i) stall_machine.step();
+    if (stall_machine.halted() ||
+        stall_machine.last_stop().reason == core::StopReason::GateStalled) {
+        std::fprintf(stderr, "bit 27 was treated as a stall (halted=%d reason=%d)\n",
                      stall_machine.halted() ? 1 : 0,
-                     static_cast<int>(stall_machine.last_stop().reason),
-                     stall_machine.errors().size());
+                     static_cast<int>(stall_machine.last_stop().reason));
+        return false;
+    }
+    if (stall_machine.frame().ip != held_ip || stall_machine.voice_option_2f7(0) != 0) {
+        std::fprintf(stderr, "bit 27 did not hold the iteration (ip=%zu opt=%d)\n",
+                     stall_machine.frame().ip, stall_machine.voice_option_2f7(0));
         return false;
     }
     return true;
 }
-
 // ── 逐格揭示当前文本（0x1CE；`CORE-OPS-TEXT-CELL-REVEAL-1CE`） ──
 // ★ 守卫必须能红的地方：启用把格号归 0（不是保留）、相位起点 = 本迭代的宿主毫秒时钟（不是"种子"）、
 //   到点一拍**只**画一格且格号 +1 取模、**画的是推进前的格号**（`text_cell_last_draw_cursor()`）、
 //   掉拍不补（跨多拍也只画一格）、停用**不复位**格号与相位但**仍写开关格**、节拍周期**不被本条复位**、
 //   格数 0 时**不推进**（不夹成 1）、`0x72` 尾段的四个写点（格数 / 格号 / 相位起点 / 节拍计数）、
 //   重绘待处理位置起时停用**不**请求释放。
-bool check_text_cell_reveal(const core::OpcodeTable& table) {
+// 一拍的门前段 + 第 30 位的服务体：`CORE-VM-STATE` 位序表第 8 项的服务后 = **继续扫描**
+// ⇒ 逐格揭示的服务体是**门上的服务体**（不是"时钟推进"的一部分）。本夹具只喂"一拍"给它；
+// 门的扫描 + 扫到表尾照常派发由 `check_gate_chain` 咬（⛔ 别把两件事混在一条里）。
+void tick_cell_reveal(core::Machine& machine, std::uint32_t now_ms) {
+    machine.advance_scene(now_ms);
+    machine.service_gate_bit_for_test(30);}bool check_text_cell_reveal(const core::OpcodeTable& table) {
     const auto fail = [](const char* why) {
         std::fprintf(stderr, "0x1ce cell-reveal: %s\n", why);
         return false;
     };
     core::Machine machine(0x12345678u, table);
-    machine.advance_scene(1234);            // 本迭代的时钟读数（引擎每迭代读一次）
+    tick_cell_reveal(machine, 1234);            // 本迭代的时钟读数（引擎每迭代读一次）
     machine.seed_reveal_cells(2, 3);        // 先让格号非 0、格数 = 3（否则取模推进看不出来）
     machine.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 7}}});
     if ((machine.state_flags() & (1u << 30)) == 0) return fail("非 0 支没有置活动位（第 30 位）");
@@ -594,18 +605,17 @@ bool check_text_cell_reveal(const core::OpcodeTable& table) {
     {
         core::Machine seeded(0x12345678u, table);
         seeded.seed_reveal_tick_period_ms(300);
-        seeded.advance_scene(700);
+        tick_cell_reveal(seeded, 700);
         seeded.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 3}}});
         if (seeded.reveal_tick_period_ms() != 300u) {
             return fail("非 0 支把节拍周期复位了（本条不写它 ⇒ 播种的 300 必须留着）");
         }
     }
-
-    machine.advance_scene(1733);  // 499 ms
+    tick_cell_reveal(machine, 1733);  // 499 ms
     if (machine.text_cell_draw_requests() != 0 || machine.reveal_cursor() != 0) {
         return fail("不足一拍就画了格");
     }
-    machine.advance_scene(1734);  // 500 ms
+    tick_cell_reveal(machine, 1734);  // 500 ms
     if (machine.text_cell_draw_requests() != 1) return fail("够一拍没有恰好请求画一格");
     // ★ 画的是**推进前**的格号：请求必须记下 0（推进之后才是 1）。
     //   把 `reveal_cursor_ = (reveal_cursor_ + 1) % reveal_count_` 挪到这条记录之前 ⇒ 这里读到 1 ⇒ 红。
@@ -613,36 +623,34 @@ bool check_text_cell_reveal(const core::OpcodeTable& table) {
         return fail("画格请求记的不是推进前的格号（记录点在推进之后）");
     }
     if (machine.reveal_cursor() != 1) return fail("一拍之后格号没有 +1（画的应是推进前的格号）");
-    machine.advance_scene(1734);  // 同一毫秒再服务
+    tick_cell_reveal(machine, 1734);  // 同一毫秒再服务
     if (machine.text_cell_draw_requests() != 1) return fail("同一毫秒被画了两次（一次服务最多一格）");
-    machine.advance_scene(2234);  // 第二拍
+    tick_cell_reveal(machine, 2234);  // 第二拍
     if (machine.text_cell_draw_requests() != 2 || machine.reveal_cursor() != 2) {
         return fail("第二拍没有恰好画一格");
     }
     if (machine.text_cell_last_draw_cursor() != 1) return fail("第二拍画的不是推进前的格号 1");
-    machine.advance_scene(2734);  // 第三拍：格号 2 → (2+1) mod 3 = 0
+    tick_cell_reveal(machine, 2734);  // 第三拍：格号 2 → (2+1) mod 3 = 0
     if (machine.reveal_cursor() != 0) return fail("格号没有按格数取模回 0");
-
     // ── 掉拍不补：一次服务跨 3 拍（1500 ms / 500 ms 周期）也只能画 **1** 格、格号只 +1 ──
     //   ⛔ 把服务改成"追赶式"（按 ticks 逐格补画）⇒ 这里红。
     {
         core::Machine catchup(0x12345678u, table);
-        catchup.advance_scene(1000);
+        tick_cell_reveal(catchup, 1000);
         catchup.seed_reveal_cells(0, 3);
         catchup.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 1}}});
-        catchup.advance_scene(2500);  // 跨 3 拍（2500 − 1000 = 1500 = 3 × 500）
+        tick_cell_reveal(catchup, 2500);  // 跨 3 拍（2500 − 1000 = 1500 = 3 × 500）
         if (catchup.text_cell_draw_requests() != 1) {
             return fail("跨 3 拍补画了多格（掉拍不补 ⇒ 一次服务最多画一格）");
         }
         if (catchup.reveal_cursor() != 1) return fail("跨 3 拍把格号推进了多格（掉拍不补）");
-        catchup.advance_scene(2500);  // 同一毫秒再服务：本拍已消费 ⇒ 不补
+        tick_cell_reveal(catchup, 2500);  // 同一毫秒再服务：本拍已消费 ⇒ 不补
         if (catchup.text_cell_draw_requests() != 1) return fail("同一毫秒的重复服务又画了一格");
-        catchup.advance_scene(3000);  // 下一拍（1000 + 4 × 500）
+        tick_cell_reveal(catchup, 3000);  // 下一拍（1000 + 4 × 500）
         if (catchup.text_cell_draw_requests() != 2 || catchup.reveal_cursor() != 2) {
             return fail("跨拍之后没有恢复「每拍一格」");
         }
     }
-
     // 停用（0 且活动位已置）⇒ 清位；**格号与相位都不复位**；**开关格两条支都写**；非「重绘待处理」⇒ 请求一次释放。
     machine.seed_reveal_cells(2, 3);
     const auto phase_before = machine.reveal_tick_start_ms();
@@ -658,14 +666,12 @@ bool check_text_cell_reveal(const core::OpcodeTable& table) {
     }
     machine.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 0}}});
     if (machine.text_layout_release_requests() != 1) return fail("第 30 位未置时的 0 支不是空操作");
-
     // 再启用 ⇒ 格号回 0。
     machine.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 1}}});
     if (machine.reveal_cursor() != 0) return fail("再启用没有把格号归 0");
-
     // 「重绘待处理」（第 20 位）已置 ⇒ 停用**不**请求释放（这份排版马上要重画）。
     core::Machine pending(0x12345678u, table);
-    pending.advance_scene(100);
+    tick_cell_reveal(pending, 100);
     pending.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 5}}});
     pending.set_state_flags_for_test(0x100000u);
     pending.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 0}}});
@@ -673,15 +679,13 @@ bool check_text_cell_reveal(const core::OpcodeTable& table) {
     if (pending.text_layout_release_requests() != 0) {
         return fail("重绘待处理置起时停用仍请求了释放");
     }
-
     // 格数 0（从未由排版侧写入）⇒ 每拍照画一格，但格号**不推进**（⛔ 不夹成 1）。
     core::Machine zero(0x12345678u, table);
     zero.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 2}}});
-    zero.advance_scene(500);
-    zero.advance_scene(1000);
+    tick_cell_reveal(zero, 500);
+    tick_cell_reveal(zero, 1000);
     if (zero.text_cell_draw_requests() != 2) return fail("格数 0 时没有每拍请求画一格");
     if (zero.reveal_cursor() != 0) return fail("格数 0 时格号被推进了（不许夹成 1）");
-
     // ── `0x72` 尾段的同一批写点（`CORE-OPS-MSG-WAIT-INPUT-72` 的尾段 = 本条的启停那一侧）──
     //   引擎以"按当前文本取一次格数"的绘制入口取回**格数**，并把当前格号归 0、节拍器相位重置
     //   （起点 ← 当时的场景时钟、计数从 1 起算）。**删掉 vm_ops_texture.cpp 里那 4 行里的任何一行** ⇒ 这里红。
@@ -690,7 +694,7 @@ bool check_text_cell_reveal(const core::OpcodeTable& table) {
         core::Machine tail(0x12345678u, table);
         tail.write_text(core::Operand{5, 0}, "AB");
         tail.set_host_clock_ms(1000);
-        tail.advance_scene(1000);
+        tick_cell_reveal(tail, 1000);
         tail.dispatch_for_test(core::Instruction{0, 0x80, {{0, 9}}});
         tail.dispatch_for_test(
             core::Instruction{0, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}}});
@@ -706,8 +710,8 @@ bool check_text_cell_reveal(const core::OpcodeTable& table) {
         // 启用（起点 ← 1000、计数 1），再把格数 / 格号播种成"不等于期望"，并推进几拍把计数抬起来。
         tail.dispatch_for_test(core::Instruction{0, 0x1CE, {{0, 1}}});
         tail.seed_reveal_cells(2, 7);
-        tail.advance_scene(1501);  // 一拍 ⇒ 计数 2、格号 3
-        tail.advance_scene(5000);  // 计数 9、格号 4
+        tick_cell_reveal(tail, 1501);  // 一拍 ⇒ 计数 2、格号 3
+        tick_cell_reveal(tail, 5000);  // 计数 9、格号 4
         if (tail.reveal_count() != 7 || tail.reveal_cursor() != 4 ||
             tail.reveal_tick_start_ms() != 1000u || tail.reveal_tick_counter() != 9) {
             std::fprintf(stderr,
@@ -739,7 +743,6 @@ bool check_text_cell_reveal(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 执行区间（0x1F4 / 0x1F5；CORE-OPS-RUN-BRACKET） ──
 bool check_run_bracket(const core::OpcodeTable& table) {
     auto bracket = make_script_with_body();
@@ -748,21 +751,17 @@ bool check_run_bracket(const core::OpcodeTable& table) {
     emit_instruction(bracket, 0x1F5, {});
     emit_instruction(bracket, 0x1F5, {});
     emit_instruction(bracket, 2, {});
-    core::Machine bracket_machine(0x12345678u, table);
+    core::Machine bracket_machine = scene_step_machine(table);
     bracket_machine.set_host_clock_ms(1000);
     bracket_machine.load_root(bracket);
     if (!bracket_machine.step() || !bracket_machine.bracket_busy() ||
-        bracket_machine.bracket_depth() != 0 ||
-        bracket_machine.engine_now_ms() != 1000u ||
-        bracket_machine.engine_previous_ms() != 0u) {
+        bracket_machine.bracket_depth() != 0) {
         std::fprintf(stderr, "0x1f4 enter mismatch\n");
         return false;
     }
     bracket_machine.set_host_clock_ms(1040);
-    if (!bracket_machine.step() || bracket_machine.bracket_depth() != 1 ||
-        bracket_machine.engine_now_ms() != 1000u ||
-        bracket_machine.engine_previous_ms() != 0u) {
-        std::fprintf(stderr, "0x1f4 busy branch read the clock or moved the timestamps\n");
+    if (!bracket_machine.step() || bracket_machine.bracket_depth() != 1) {
+        std::fprintf(stderr, "0x1f4 busy branch counted the nest wrong\n");
         return false;
     }
     if (!bracket_machine.step() || bracket_machine.bracket_depth() != 0 ||
@@ -778,33 +777,386 @@ bool check_run_bracket(const core::OpcodeTable& table) {
     auto lone_leave = make_script_with_body();
     emit_instruction(lone_leave, 0x1F5, {});
     emit_instruction(lone_leave, 2, {});
-    core::Machine lone_machine(0x12345678u, table);
+    core::Machine lone_machine = scene_step_machine(table);
+    lone_machine.reset_scene_clock(0);
     lone_machine.set_host_clock_ms(2000);
     lone_machine.load_root(lone_leave);
-    if (!lone_machine.step() || lone_machine.bracket_busy() ||
-        lone_machine.engine_now_ms() != 0u) {
+    if (!lone_machine.step() || lone_machine.bracket_busy()) {
         std::fprintf(stderr, "0x1f5 unpaired leave was not a no-op\n");
         return false;
     }
-    // 交叉判据：区间忙标记与 `0x20c` 的「别处驱动」是**同一格** ⇒ 忙时段里 `0x20c` 不更新时间戳。
-    // 若实现把它们当成两格，这条会红（而单看任何一条都"看起来正常"）。
-    auto busy_step = make_script_with_body();
-    emit_instruction(busy_step, 0x1F4, {});
-    emit_instruction(busy_step, 0x20C, {});
-    emit_instruction(busy_step, 2, {});
-    core::Machine busy_machine(0x12345678u, table);
-    busy_machine.set_host_clock_ms(1000);
-    busy_machine.load_root(busy_step);
-    if (!busy_machine.step() || !busy_machine.bracket_busy()) return false;
-    busy_machine.set_host_clock_ms(1040);
-    if (!busy_machine.step() || busy_machine.engine_now_ms() != 1000u ||
-        busy_machine.engine_previous_ms() != 0u || !busy_machine.frame_step_requested()) {
-        std::fprintf(stderr, "0x20c updated the bracket timestamps while busy\n");
-        return false;
+    // ★ `0x1f4` 的时钟写点（`CORE-TIMING-CLOCK`：`0x41A0CF` / `0x41A0D5`，**仅不忙时**）：
+    //   不忙 ⇒ 先搬旧（上一次 ← 旧现在）、再写新（现在 ← 本次读数）；忙 ⇒ 只 +1，**两格都不动**。
+    //   ★ 用直接派发（不经过 `step()` 的迭代头盖钟），否则"迭代头盖过一次"会把两格都动掉、判不出来。
+    {
+        core::Machine writer = scene_step_machine(table);
+        writer.reset_scene_clock(500);
+        writer.advance_scene(600);  // 现在 = 600、上一步 = 500（两格不同才能看出"搬旧"）
+        writer.set_host_clock_ms(700);
+        writer.dispatch_for_test(core::Instruction{0, 0x1F4, {}});
+        if (!writer.bracket_busy() || writer.scene_clock_ms() != 700u ||
+            writer.scene_previous_ms() != 600u) {
+            std::fprintf(stderr,
+                         "0x1f4 没有按「先搬旧再写新」写场景时钟对（now=%u prev=%u）\n",
+                         writer.scene_clock_ms(), writer.scene_previous_ms());
+            return false;
+        }
+        writer.set_host_clock_ms(900);
+        writer.dispatch_for_test(core::Instruction{0, 0x1F4, {}});  // 忙支：只 +1
+        if (writer.bracket_depth() != 1 || writer.scene_clock_ms() != 700u ||
+            writer.scene_previous_ms() != 600u) {
+            std::fprintf(stderr, "0x1f4 忙支动了时钟对 / 没有只 +1（now=%u prev=%u depth=%d）\n",
+                         writer.scene_clock_ms(), writer.scene_previous_ms(), writer.bracket_depth());
+            return false;
+        }
     }
+    // 交叉判据：区间忙标记与 `0x20c` 的「别处驱动」是**同一格** ⇒ 忙时段里 `0x20c` 不写时钟对
+    // （请求 / 清帧标志照做，见 `CORE-OPS-FRAME-STEP-20C`）。
+    // 若实现把它们当成两格，这条会红（而单看任何一条都"看起来正常"）。
+    {
+        core::Machine busy_machine = scene_step_machine(table);
+        busy_machine.reset_scene_clock(500);
+        busy_machine.advance_scene(600);
+        busy_machine.set_driven_elsewhere(true);  // 区间忙标记（与 0x1f4 同一格）
+        busy_machine.set_host_clock_ms(1040);
+        busy_machine.dispatch_for_test(core::Instruction{0, 0x20C, {}});
+        if (busy_machine.scene_clock_ms() != 600u || busy_machine.scene_previous_ms() != 500u ||
+            !busy_machine.frame_step_requested()) {
+            std::fprintf(stderr,
+                         "0x20c 在忙时段写了时钟对（now=%u prev=%u）或没发请求\n",
+                         busy_machine.scene_clock_ms(), busy_machine.scene_previous_ms());
+            return false;
+        }
+        // 不忙 ⇒ 同一条指令**两格都动**（先搬旧、再写新）。
+        busy_machine.set_driven_elsewhere(false);
+        busy_machine.set_host_clock_ms(1100);
+        busy_machine.dispatch_for_test(core::Instruction{0, 0x20C, {}});
+        if (busy_machine.scene_clock_ms() != 1100u || busy_machine.scene_previous_ms() != 600u) {
+            std::fprintf(stderr, "0x20c 不忙时没有按「先搬旧再写新」写（now=%u prev=%u）\n",
+                         busy_machine.scene_clock_ms(), busy_machine.scene_previous_ms());
+            return false;
+        }
+    }
+    return true;}
+// ── 待处理命令队列 / 泵 / `0x143` 投递 / `0x2`(−10) 收场 / 宿主消息泵节流 ──
+/** 守的是 `CORE-OPS-RUN-BRACKET`（`70-vm.md:295-346`）、`CORE-OPS-EVENT-143`（`60-ops-scalar.md:169-199`）与
+ *  `CORE-VM-LOOP`（`70-vm.md:8` / `:27`）。每条断言都指向 spec 句（见各段注释），不是"当前实现的取值"：
+ *  · 泵入口两判按序（区间忙 / 空）—— `70-vm.md:306`；
+ *  · 正命令 ⇒ 当前帧 37、父帧号 −10、长度槽 0（`70-vm.md:308-309`）；
+ *  · 负命令 ⇒ 当前帧 = −命令、父帧号 −10；目标帧没装载脚本 ⇒ 显示消息型异常（`:310`）；
+ *  · 泵帧收场五步（`:312`）；
+ *  · `0x143` 四件事 + 投递值 = 格号 << 24 + `ip` 只 +4（`60-ops-scalar.md:173-183`）；
+ *  · 节流 = 泵一次后隔 3 个迭代（`70-vm.md:27` / `:45`）。 */
+bool check_command_queue(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "command-queue: %s\n", what);
+        return false;
+    };
+    const std::uint32_t key = 0x12345678u;
+    // 装载器夹具：四份脚本（统一文件 id 0..3；松文件优先）。帧 37 里跑的脚本由正命令指定。
+    const auto root_dir = std::filesystem::temp_directory_path() / "amayui-cxx-selftest-command-queue";
+    std::filesystem::create_directories(root_dir);
+    auto plain = make_script_with_body();
+    emit_instruction(plain, 0x1A8, {});
+    emit_instruction(plain, 2, {});
+    auto pump_exit = make_script_with_body();  // id 1：泵帧先执行 0x2（收场五步）
+    emit_instruction(pump_exit, 2, {});
+    emit_instruction(pump_exit, 0x1A8, {});
+    auto nested_bracket = make_script_with_body();  // id 2：泵帧里再进 / 出一次区间
+    emit_instruction(nested_bracket, 0x1F4, {});
+    emit_instruction(nested_bracket, 0x1F5, {});
+    emit_instruction(nested_bracket, 0x1A8, {});
+    emit_instruction(nested_bracket, 2, {});
+    auto plain_target = make_script_with_body();  // id 3：负命令的目标帧 / 链式再泵的目标
+    emit_instruction(plain_target, 0x1A8, {});
+    emit_instruction(plain_target, 2, {});
+    const auto write_script = [&](const char* name, const std::vector<std::uint8_t>& bytes) {
+        std::ofstream out(root_dir / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()),                  static_cast<std::streamsize>(bytes.size()));
+    };
+    write_script("QUEUE0.BIN", plain);
+    write_script("QUEUE1.BIN", pump_exit);
+    write_script("QUEUE2.BIN", nested_bracket);
+    write_script("QUEUE3.BIN", plain_target);
+    core::Install install;
+    install.root = root_dir;
+    install.index.files.push_back(core::AlfFile{"QUEUE0.BIN", 0, 0, 0, 0});
+    install.index.files.push_back(core::AlfFile{"QUEUE1.BIN", 0, 0, 0, 0});
+    install.index.files.push_back(core::AlfFile{"QUEUE2.BIN", 0, 0, 0, 0});
+    install.index.files.push_back(core::AlfFile{"QUEUE3.BIN", 0, 0, 0, 0});
+    const auto bracket_script = [&](std::vector<std::uint8_t>& script) {
+        emit_instruction(script, 0x1F4, {});
+        emit_instruction(script, 0x1F5, {});
+    };
+    // ① 泵入口两判 + 空命令（`70-vm.md:306`）：空队列 ⇒ 泵不改任何格；0 = 只前进头。
+    {
+        auto script = make_script_with_body();
+        bracket_script(script);
+        emit_instruction(script, 0x2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        if (!machine.step() || !machine.bracket_busy()) return fail("0x1f4 没有置忙");
+        if (!machine.step()) return fail("空队列的 0x1f5 停机了");
+        if (machine.bracket_busy()) return fail("0x1f5 没有清忙");
+        if (machine.pump_busy()) return fail("空队列让泵置了队列泵占用标记");
+        if (machine.suspended_frame() != -1) return fail("空队列让泵记了挂起帧号");
+        if (machine.status_restore() != 0) return fail("空队列让泵写了待恢复副本");
+        if (machine.frame_at(core::Machine::kPumpFrameSlot).loaded) {
+            return fail("空队列的泵动了帧 37（入口判空失效）");
+        }
+        if (machine.current_frame() != 0 || machine.pending_command_count() != 0) {
+            return fail("空队列的泵换了帧或留下命令");
+        }
+        if (machine.frame().ip != 8) return fail("0x1f5 没有把指令指针推进 4 字节");
+    }
+    {
+        auto script = make_script_with_body();
+        bracket_script(script);
+        emit_instruction(script, 0x2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        if (!machine.step()) return fail("0x1f4 停机");
+        machine.enqueue_command_for_test(0);  // 空命令：头已前进、此外什么都不做
+        if (machine.pending_command_count() != 1) return fail("测试口没有入队");
+        if (!machine.step()) return fail("空命令的 0x1f5 停机了");
+        if (machine.pending_command_count() != 0) return fail("空命令没有被取走");
+        if (machine.pump_busy() || machine.suspended_frame() != -1 ||
+            machine.status_restore() != 0) {
+            return fail("空命令做「挂起」以外的多余动作");
+        }
+        if (machine.current_frame() != 0) return fail("空命令换了当前帧");
+    }
+    // ② 正命令（`70-vm.md:308-309`）：当前帧号 ← 37、装进帧 37、父帧号 = −10、ip = 代码区起点、
+    //    长度槽 = 0；挂起三件（挂起帧号 / 待恢复副本 / 队列泵占用标记）同时成立，且**不恢复**调用帧。
+    {
+        auto script = make_script_with_body();
+        bracket_script(script);
+        emit_instruction(script, 0x2, {});
+        core::Machine machine(key, table, &install);
+        machine.state_flags_mut() = (1u << 15);  // 表外的位不挡派发；这里只用来验"整字进副本"
+        machine.load_root(script);
+        if (!machine.step()) return fail("0x1f4 停机");
+        machine.enqueue_command_for_test(1);  // 正命令 = 统一文件 id 1
+        if (!machine.step()) return fail("正命令的 0x1f5 停机了");
+        if (machine.current_frame() != core::Machine::kPumpFrameSlot) {
+            return fail("正命令没有把当前帧号 ← 37");
+        }
+        const auto& pump_frame = machine.frame_at(core::Machine::kPumpFrameSlot);
+        if (!pump_frame.loaded || pump_frame.script_id != 1) {
+            return fail("正命令没有把统一文件 id 装进帧 37");
+        }
+        if (pump_frame.parent != core::Machine::kPumpParentSentinel) {
+            return fail("泵帧父帧号不是 −10（装载器没有照抄「父帧候选」格 / 泵没预置）");
+        }
+        if (pump_frame.ip != 0) return fail("泵帧指令指针不是代码区起点");
+        if (pump_frame.length_slot != 0) return fail("泵帧长度槽不是 0（分派器会推进）");
+        if (machine.suspended_frame() != 0) return fail("没有记住挂起帧号（= 调用泵的那一帧）");
+        if (machine.status_restore() != (1u << 15)) {
+            return fail("状态选择字没有整字存进待恢复副本");
+        }
+        if (machine.state_flags() != 0) return fail("挂起时没有把活动状态字清 0（门该打开）");
+        if (!machine.pump_busy()) return fail("没有置队列泵占用标记");
+        if (machine.pending_command_count() != 0) return fail("命令没有被取走（一趟取一条）");
+    }
+    // ③ 泵帧收场五步（`70-vm.md:312`）：① 接回挂起帧 ② 它的长度槽 ← 0 ③ 状态字 ← 副本，
+    //    第 14 位取**活动字**的值、第 21 位清 0 ④ 标记 ← 0 ⑤ 队列非空 ⇒ 立即再泵一条。
+    {
+        auto script = make_script_with_body();
+        bracket_script(script);
+        emit_instruction(script, 0x2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        if (!machine.step()) return fail("收场夹具 0x1f4 停机");
+        machine.enqueue_command_for_test(1);
+        if (!machine.step()) return fail("收场夹具 0x1f5 停机");
+        if (machine.current_frame() != core::Machine::kPumpFrameSlot) return fail("夹具没进泵帧");
+        // 泵帧里执行 0x2 之前：摆出"活动字 / 副本"两格与挂起帧的长度槽。
+        machine.state_flags_mut() = (1u << 14);  // 活动字：第 14 位置起
+        machine.seed_status_restore_for_test((1u << 21) | (1u << 10) | (1u << 15));
+        machine.seed_frame_length_for_test(0, 7);  // 挂起帧长度槽先非 0 ⇒ 证明②真的清了
+        if (!machine.step()) return fail("泵帧的 0x2 停机了");
+        if (machine.current_frame() != 0) return fail("① 没有接回挂起帧");
+        if (machine.frame().length_slot != 0) return fail("② 挂起帧的长度槽没有清 0");
+        const std::uint32_t expected = (1u << 14) | (1u << 10) | (1u << 15);
+        if (machine.state_flags() != expected) {
+            std::fprintf(stderr, "command-queue: ③ state=0x%X expected=0x%X\n",
+                         machine.state_flags(), expected);
+            return fail("③ 状态字并回不对（第 14 位该取活动字、第 21 位该清 0）");
+        }
+        if (machine.pump_busy()) return fail("④ 队列泵占用标记没有清 0");
+        if (machine.pending_command_count() != 0) return fail("⑤ 空队列却取了命令");
+        if (machine.halted()) return fail("泵帧的 0x2 被当成根结束");
+    }
+    {
+        // ⑤ 链式再泵：队列非空 ⇒ 立即再泵一条（第二趟重新挂起 **刚接回** 的那一帧）。
+        auto script = make_script_with_body();
+        bracket_script(script);
+        emit_instruction(script, 0x2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        if (!machine.step()) return fail("链式夹具 0x1f4 停机");
+        machine.enqueue_command_for_test(1);  // 第一趟：进泵帧
+        if (!machine.step()) return fail("链式夹具 0x1f5 停机");
+        machine.enqueue_command_for_test(3);  // 第二趟的目标（正命令 = 文件 id 3）
+        if (!machine.step()) return fail("链式收场的 0x2 停机了");
+        if (machine.pending_command_count() != 0) return fail("⑤ 没有立即再泵（命令还留在队列里）");
+        if (machine.current_frame() != core::Machine::kPumpFrameSlot) {
+            return fail("⑤ 没有把第二条命令取成新的泵帧");
+        }
+        if (machine.frame_at(core::Machine::kPumpFrameSlot).script_id != 3) {
+            return fail("⑤ 取的不是队列里那一条命令");
+        }
+        if (machine.suspended_frame() != 0) return fail("第二趟没有重新挂起（嵌套泵的两格该被覆盖）");
+        if (!machine.pump_busy()) return fail("第二趟没有置队列泵占用标记");
+    }
+    // ④ 负命令（`70-vm.md:310`）：当前帧号 ← −命令；父帧号 ← −10（泵直接写、不经过装载器）、
+    //    ip ← 代码区起点、长度槽 ← 0；目标帧没有装载脚本 ⇒ 显示消息型异常且**停在目标帧**。
+    {
+        auto script = make_script_with_body();
+        bracket_script(script);
+        emit_instruction(script, 0x2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        machine.load_frame_for_test(3, 2);  // 先装帧 2（文件 id 3）
+        if (!machine.step()) return fail("负命令夹具 0x1f4 停机");
+        machine.enqueue_command_for_test(-2);
+        if (!machine.step()) return fail("负命令的 0x1f5 停机了");
+        if (machine.current_frame() != 2) return fail("负命令没有把当前帧号 ← −命令");
+        const auto& target = machine.frame_at(2);
+        if (target.parent != core::Machine::kPumpParentSentinel) {
+            return fail("负命令没有把目标帧父帧号写成 −10");
+        }
+        if (target.ip != 0) return fail("负命令没有把指令指针指到代码区起点");
+        if (target.length_slot != 0) return fail("负命令没有把长度槽清 0");
+        if (!machine.pump_busy()) return fail("负命令没有置队列泵占用标记");
+        if (machine.suspended_frame() != 0) return fail("负命令没有记住挂起帧号");
+    }
+    {
+        auto script = make_script_with_body();
+        bracket_script(script);
+        emit_instruction(script, 0x2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        if (!machine.step()) return fail("负命令失败支 0x1f4 停机");
+        machine.enqueue_command_for_test(-3);  // 帧 3 没有装载脚本
+        if (machine.step()) return fail("泵到未装载的目标帧却没有失败");
+        if (machine.last_stop().message.rfind("display-message:", 0) != 0) {
+            std::fprintf(stderr, "command-queue: message=%s\n", machine.last_stop().message.c_str());
+            return fail("目标帧没有装载脚本没有走显示消息型异常");
+        }
+        if (machine.current_frame() != 3) return fail("失败时当前帧号没有停在目标帧（不该恢复）");
+    }
+    // ⑤ `0x143`（`60-ops-scalar.md:173-183`）：空表 ⇒ ip 只 +4、标记清 0；非 0 格 ⇒
+    //    投递值 = 格号 << 24（32 位有符号）、格 0 不投、逐格顺序、投递期不泵（标记挡下）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x143, {});
+        emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        const std::size_t ip_before = machine.frame().ip;
+        if (!machine.step()) return fail("空表的 0x143 停机了");
+        if (machine.frame().ip != ip_before + 4) {
+            std::fprintf(stderr, "command-queue: 0x143 ip=%zu before=%zu\n", machine.frame().ip,
+                         ip_before);
+            return fail("0x143 之后 ip 不是只 +4（推进被做了两次？）");
+        }
+        if (machine.pump_busy()) return fail("0x143 结束时没有把队列泵占用标记清回 0");
+        if (machine.pending_command_count() != 0) return fail("空表也投了命令");
+    }
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1F4, {});
+        emit_instruction(script, 0x143, {});  // 区间仍忙 ⇒ 尾跳的泵被入口第一条挡下
+        emit_instruction(script, 0x1F5, {});
+        emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(key, table, &install);
+        machine.seed_event_table_cell_for_test(5, 1);
+        machine.seed_event_table_cell_for_test(255, 1);
+        machine.seed_event_table_cell_for_test(0, 1);  // 格 0 **不参与**投递
+        machine.load_root(script);
+        if (!machine.step()) return fail("投递夹具 0x1f4 停机");
+        if (!machine.step()) return fail("区间忙时的 0x143 停机了");
+        if (machine.pending_command_count() != 2) {
+            std::fprintf(stderr, "command-queue: delivered=%zu\n", machine.pending_command_count());
+            return fail("0x143 没有逐格投递（或把格 0 也投了）");
+        }
+        const std::int32_t first = machine.queue_command(machine.queue_head());
+        const std::int32_t second = machine.queue_command(machine.queue_head() + 1);
+        if (first != static_cast<std::int32_t>(5u << 24)) {
+            std::fprintf(stderr, "command-queue: first=0x%X\n", first);
+            return fail("5 号格的投递值不是 5 << 24");
+        }
+        if (second != static_cast<std::int32_t>(255u << 24)) {
+            std::fprintf(stderr, "command-queue: second=0x%X\n", second);
+            return fail("255 号格没有按 32 位有符号投递（≥128 是负命令）");
+        }
+        if (machine.pump_busy()) return fail("0x143 结束时没有清标记");
+        if (machine.current_frame() != 0) return fail("区间忙时泵竟然取了命令（入口第一条失效）");
+        // 区间离开之后由出口泵取走第一条：5 << 24 是非法统一文件 id ⇒ 显示消息型异常，
+        // 但**当前帧号停在 37**（`70-vm.md:309`）。
+        if (machine.step()) return fail("泵到非法 id 却没有失败");
+        if (machine.last_stop().message.rfind("display-message:", 0) != 0) {
+            std::fprintf(stderr, "command-queue: message=%s\n", machine.last_stop().message.c_str());
+            return fail("id 非法没有走显示消息型异常");
+        }
+        if (machine.current_frame() != core::Machine::kPumpFrameSlot) {
+            return fail("正命令装载失败时当前帧号没有停在 37");
+        }
+        if (machine.pending_command_count() != 1) return fail("一趟取走的不止一条");
+    }
+    // ⑥ 队列泵占用标记挡下 `0x1f5` 出口泵（`70-vm.md:305` / `:315`）：泵帧里再进 / 出区间，
+    //    出口**不许**开闸（否则队列会被套成两层）。
+    {
+        auto script = make_script_with_body();
+        bracket_script(script);
+        emit_instruction(script, 0x2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        if (!machine.step()) return fail("嵌套区间夹具 0x1f4 停机");
+        machine.enqueue_command_for_test(2);  // 正命令：泵帧里会执行 0x1f4 / 0x1f5
+        if (!machine.step()) return fail("嵌套区间夹具 0x1f5 停机");
+        if (!machine.pump_busy() || machine.current_frame() != core::Machine::kPumpFrameSlot) {
+            return fail("夹具没有进泵帧");
+        }
+        if (!machine.step()) return fail("泵帧的 0x1f4 停机了");
+        machine.enqueue_command_for_test(3);  // 出口泵若开闸就会取走它
+        if (!machine.step()) return fail("泵帧的 0x1f5 停机了");
+        if (machine.pending_command_count() != 1) {
+            return fail("泵帧里 0x1f5 的出口泵没有被队列泵占用标记挡下");
+        }
+        if (!machine.pump_busy() || machine.current_frame() != core::Machine::kPumpFrameSlot) {
+            return fail("泵帧里 0x1f5 出口改动了泵状态");
+        }
+        if (machine.bracket_busy()) return fail("泵帧里的 0x1f5 没有清区间忙标记");
+    }
+    // ⑦ 宿主消息泵节流（`CORE-VM-LOOP` / `70-vm.md:27`）：初值 1；每迭代看与常量 4 的按位与，
+    //    非 0 ⇒ 本迭代泵一次、泵后回 1 再 +1 到 2；为 0 ⇒ +1 不泵。⇒ 泵一次后隔 3 个迭代再泵。
+    {
+        auto script = make_script_with_body();
+        for (int i = 0; i < 12; ++i) emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        if (machine.should_pump_host()) return fail("第一次迭代之前就宣称该泵");
+        const bool expect_pump[7] = {false, false, false, true, false, false, true};
+        const std::uint32_t expect_counter[7] = {2, 3, 4, 2, 3, 4, 2};
+        for (int i = 0; i < 7; ++i) {
+            if (!machine.step()) return fail("节流夹具停机了");
+            if (machine.should_pump_host() != expect_pump[i]) {
+                std::fprintf(stderr, "command-queue: step=%d pump=%d\n", i,
+                             machine.should_pump_host() ? 1 : 0);
+                return fail("宿主消息泵的节拍不是「泵一次后隔 3 个迭代」");
+            }
+            if (machine.pump_counter() != expect_counter[i]) {
+                std::fprintf(stderr, "command-queue: step=%d counter=%u\n", i, machine.pump_counter());
+                return fail("迭代头计数器的序列不对（初值 1 / 泵后回 1 再 +1 到 2）");
+            }
+        }    }
     return true;
 }
-
 // ── 输入采样 / 按键派发（0xFF · 0x100；CORE-INPUT-WORD / -KEY-DISPATCH） ──
 bool check_input_dispatch(const core::OpcodeTable& table) {
     // 键总数初值 7（引擎 Input 构造）：0xfe 之前 0x100 / 0xff 就读这个值。
@@ -813,7 +1165,6 @@ bool check_input_dispatch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "key total default must be 7, got %d\n", default_machine.key_total());
         return false;
     }
-
     // 0x101：先向平台采样一次，再清第 27 位 / 清输入字 / 写 A、B。
     auto poll = make_script_with_body();
     emit_instruction(poll, 0x101, {});
@@ -832,7 +1183,6 @@ bool check_input_dispatch(const core::OpcodeTable& table) {
                      poll_machine.input_b());
         return false;
     }
-
     auto sample = make_script_with_body();
     emit_instruction(sample, 0xFE, {{0, 2}});
     emit_instruction(sample, 0xFF, {});
@@ -856,7 +1206,6 @@ bool check_input_dispatch(const core::OpcodeTable& table) {
                      sampler_machine.input_word(), sampler_machine.frame().key_limit);
         return false;
     }
-
     // 无按键 ⇒ 走"无按键"表项（编号 = 键总数），返回位置 = 下一条。
     auto dispatch_none = make_script_with_body();
     emit_instruction(dispatch_none, 0xFE, {{0, 2}});            // 0..2
@@ -879,7 +1228,6 @@ bool check_input_dispatch(const core::OpcodeTable& table) {
                      none_machine.frame().ip);
         return false;
     }
-
     // 有按键：游标前进、返回位置 = **当前位置**（重派发）。
     auto dispatch_key = make_script_with_body();
     emit_instruction(dispatch_key, 0xFE, {{0, 2}});             // 0..2
@@ -911,7 +1259,6 @@ bool check_input_dispatch(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 键盘 / 鼠标设备（0x109 · 0x108 · 0xCC · 0xCD） ──
 // `CORE-INPUT-MOUSE-POS` / `-MOUSE-BUTTON` / `-CALLBACK-REGISTER` / `-MOUSE-CALLBACK-PUMP`。
 bool check_input_devices(const core::OpcodeTable& table) {
@@ -953,7 +1300,6 @@ bool check_input_devices(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x109 unavailable-device sentinel mismatch\n");
         return false;
     }
-
     // 0x108：位 0 左 / 位 1 右；设备不可用 ⇒ 写 0（不是保持旧值）。
     auto button_script = make_script_with_body();
     emit_instruction(button_script, 0x55, {{3, 2}, {0, 99}});
@@ -978,7 +1324,6 @@ bool check_input_devices(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x108 unavailable-device must write 0\n");
         return false;
     }
-
     // 0xcc / 0xcd：时间闸 `elapsed >= interval`（含等号）才派发；压「当前位置 + 1」。
     // ★ 两次 pump 要两条 `0xcd`（一条指令执行完 ip 就过去了，不能靠"再跑一次同一条"）。
     auto mouse_cb = make_script_with_body();
@@ -989,7 +1334,7 @@ bool check_input_devices(const core::OpcodeTable& table) {
     emit_instruction(mouse_cb, 2, {});                     // 位置 8
     emit_instruction(mouse_cb, 0x1A8, {});                 // 位置 9（回调目标）
     emit_instruction(mouse_cb, 5, {});                     // 位置 10：ret → 回 7
-    core::Machine pump_machine(0x12345678u, table);
+    core::Machine pump_machine = scene_step_machine(table);
     pump_machine.set_host_clock_ms(1000);
     pump_machine.load_root(mouse_cb, 0x1234);
     if (!pump_machine.step() || pump_machine.mouse_interval() != 100 ||
@@ -1021,13 +1366,12 @@ bool check_input_devices(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0xcd callback body mismatch ip=%zu\n", pump_machine.frame().ip);
         return false;
     }
-
     // 间隔 0 ⇒ 写成 1；目标 −1 ⇒ 压了返回位置又撤销（只前进一条，返回栈不变）。
     auto cancel_script = make_script_with_body();
     emit_instruction(cancel_script, 0xCC, {{0, 0}, {0, 0xFFFFFFFFu}});
     emit_instruction(cancel_script, 0xCD, {});
     emit_instruction(cancel_script, 2, {});
-    core::Machine cancel_machine(0x12345678u, table);
+    core::Machine cancel_machine = scene_step_machine(table);
     cancel_machine.set_host_clock_ms(2000);
     cancel_machine.load_root(cancel_script);
     if (!cancel_machine.step() || cancel_machine.mouse_interval() != 1) {
@@ -1044,10 +1388,10 @@ bool check_input_devices(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 暂停（= 区间忙）与时钟重盖（CORE-VM-LOOP · CORE-TIMING-CLOCK 的 0x23C） ──
 bool check_pause_and_clock(const core::OpcodeTable& table) {
-    // 暂停 = 区间忙标记 = 1 **且等待位 = 0** ⇒ 场景推进整段跳过（窗不盖 / 不插值 / 不到期）。
+    // 暂停 = 区间忙标记 = 1 **且等待位 = 0** ⇒ `CORE-TIMING-WINDOW` 的 (d)：
+    // **门前的钟照盖**（忙判定在盖钟之后），只跳**请求** ⇒ 窗不前进、两个标记不重算。
     const auto make_pause_script = [&](bool release) {
         auto bytes = make_script_with_body();
         emit_instruction(bytes, 0x1FB, {{0, 1}, {0, 1}, {0, 0}, {0, 0},
@@ -1061,8 +1405,7 @@ bool check_pause_and_clock(const core::OpcodeTable& table) {
         emit_instruction(bytes, 2, {});
         return bytes;
     };
-
-    core::Machine paused_machine(0x12345678u, table);
+    core::Machine paused_machine = scene_step_machine(table);
     paused_machine.set_host_clock_ms(1000);
     paused_machine.load_root(make_pause_script(false));
     for (int i = 0; i < 3; ++i) {  // 0x1FB / 0x202 / 0x1F4
@@ -1073,6 +1416,7 @@ bool check_pause_and_clock(const core::OpcodeTable& table) {
         }
     }
     paused_machine.set_host_clock_ms(1200);  // 窗本应在 1100 之后到期
+    paused_machine.consume_frame_step();
     if (!paused_machine.step()) return false;
     const core::DrawItem* paused_item = paused_machine.draw_item(1);
     if (paused_item == nullptr || paused_item->color == 0xC8ABCDEFu ||
@@ -1082,9 +1426,18 @@ bool check_pause_and_clock(const core::OpcodeTable& table) {
                      paused_item == nullptr ? -1 : paused_item->duration);
         return false;
     }
-
+    // ★ 暂停**不挡盖钟**（`70-vm.md:216` / `:224`：忙判定在盖钟之后，它只跳请求）。
+    if (paused_machine.scene_clock_ms() != 1200u) {
+        std::fprintf(stderr, "执行区间暂停时场景时钟没跟上宿主读数（clock=%u）\n",
+                     paused_machine.scene_clock_ms());
+        return false;
+    }
+    if (paused_machine.consume_frame_step()) {
+        std::fprintf(stderr, "执行区间暂停时仍然发了门前渲染请求\n");
+        return false;
+    }
     // 等待位置起 ⇒ 暂停不挡场景推进（同一时刻、同一窗必须到期）。
-    core::Machine released_machine(0x12345678u, table);
+    core::Machine released_machine = scene_step_machine(table);
     released_machine.set_host_clock_ms(1000);
     released_machine.load_root(make_pause_script(true));
     for (int i = 0; i < 4; ++i) {  // 0x1FB / 0x202 / 0x1F4 / 0x21C
@@ -1099,27 +1452,389 @@ bool check_pause_and_clock(const core::OpcodeTable& table) {
                      released_item == nullptr ? 0u : released_item->color);
         return false;
     }
-
-    // 0x23C：无条件重盖时钟对（不受区间忙门限制）。
-    auto clock_script = make_script_with_body();
-    emit_instruction(clock_script, 0x23C, {});
-    emit_instruction(clock_script, 0x23C, {});
-    emit_instruction(clock_script, 2, {});
-    core::Machine clock_machine(0x12345678u, table);
-    clock_machine.set_host_clock_ms(700);
-    clock_machine.load_root(clock_script);
-    if (!clock_machine.step() || clock_machine.engine_now_ms() != 700u ||
-        clock_machine.engine_previous_ms() != 0u) {
-        std::fprintf(stderr, "0x23c first stamp mismatch now=%u prev=%u\n",
-                     clock_machine.engine_now_ms(), clock_machine.engine_previous_ms());
-        return false;
+    // 0x23C：无条件重盖**场景时钟对**（`CORE-TIMING-CLOCK` 的第 3 个门后写者：`0x41A2E7` 搬旧 /
+    // `0x41A2ED` 写新；不受区间忙门限制）。★ 与 `0x1f4` / `0x20c` 写的是**同一对**（`70-vm.md:190`）
+    // ⇒ 两格都动、次序是「先搬旧再写新」；这两条一起把"另建一对引擎时刻"的错法挡在门外。
+    {
+        core::Machine clock_machine = scene_step_machine(table);
+        clock_machine.reset_scene_clock(500);
+        clock_machine.advance_scene(600);  // 现在 = 600、上一步 = 500
+        clock_machine.set_host_clock_ms(700);
+        clock_machine.dispatch_for_test(core::Instruction{0, 0x23C, {}});
+        if (clock_machine.scene_clock_ms() != 700u || clock_machine.scene_previous_ms() != 600u) {
+            std::fprintf(stderr, "0x23c 第一次重盖 mismatch now=%u prev=%u\n",
+                         clock_machine.scene_clock_ms(), clock_machine.scene_previous_ms());
+            return false;
+        }
+        // 区间忙标记置起 ⇒ 仍然重盖（`0x23c` 是唯一**无条件**的写者）。
+        clock_machine.set_driven_elsewhere(true);
+        clock_machine.set_host_clock_ms(800);
+        clock_machine.dispatch_for_test(core::Instruction{0, 0x23C, {}});
+        if (clock_machine.scene_clock_ms() != 800u || clock_machine.scene_previous_ms() != 700u) {
+            std::fprintf(stderr, "0x23c 忙时段没有重盖时钟对（now=%u prev=%u）\n",
+                         clock_machine.scene_clock_ms(), clock_machine.scene_previous_ms());
+            return false;
+        }
     }
-    clock_machine.set_host_clock_ms(800);
-    if (!clock_machine.step() || clock_machine.engine_now_ms() != 800u ||
-        clock_machine.engine_previous_ms() != 700u) {
-        std::fprintf(stderr, "0x23c " "prev<-now" " mismatch now=%u prev=%u\n",
-                     clock_machine.engine_now_ms(), clock_machine.engine_previous_ms());
+    return true;
+}
+// ── 场景时钟门槛 / 渲染步收尾判据 / 持续时间 ≤ 0（S4 + S6 的 (c)/(d) 归位） ──
+/** 守的是 `CORE-TIMING-WINDOW`（`70-vm.md:206-272`）、`CORE-TIMING-CLOCK`（`:186-204`）与
+ *  `60-ops-scene` 的「命令档的前置与出档」：
+ *  · **只有三个"连盖钟一起跳过"**（(a) 场景绘制模式 ≠ 1 / (b) 画面暂停闩 / (c) `0x21b` 空转）
+ *    ⇒ **不盖钟、不判据、不发请求、不清帧标志、不推窗**；
+ *  · **五个"只挡推进、盖钟照常"**（第 24 位 / 影片缓冲被另一处持有 / 场景既不需要重绘且无新帧 /
+ *    渲染器未就绪 / **(d) 执行区间的暂停**）—— (d) 的忙判定在盖钟**之后** ⇒ 钟照盖、只跳请求；
+ *  · **次序固定**：整段跳过 → 盖钟 → 只挡推进；
+ *  · (c) **只取消门前渲染步这一个时钟写者**：场景时钟仍由 `0x1f4` / `0x20c` / `0x23c` 推进
+ *    （`70-vm.md:217` 的作用域句）⇒ 标量恒 0 不会让时间停走；
+ *  · **持续时间 ≤ 0**：绘制项**整段跳过**（不清窗位/起点、不写颜色）；网格**清起点 + 清窗位 + 置「有动画」**、不重烘；
+ *  · 渲染步**收尾判据 = 场景待处理标记**（不是「有动画」），随后**无条件**清「强制完成」。
+ * ★ 八个 (a)…(e) 的名字与个数照 `70-vm.md:217` / `:219-225`；⛔ 别把 (d) 写回第一组（S4 的错归因）。
+ */
+bool check_scene_clock_gate(const core::OpcodeTable& table) {
+    const auto fail = [](const char* why) {
+        std::fprintf(stderr, "scene-clock-gate: %s\n", why);
         return false;
+    };
+    // 夹具：一条绘制项 + 一个颜色窗（delay 0 / dur 100）；当前色 0x00112233、终色 = 0xC8ABCDEF。
+    // `scalar_21b` = 脚本第一步 `0x21b` 的标量（(c) 的输入）；缺省 1 ⇒ 门前渲染步照常跑。
+    const auto window_script = [&](std::uint32_t scalar_21b = 1) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x21B, {{0, scalar_21b}});  // 门前渲染的 (c)：标量
+        emit_instruction(bytes, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
+        emit_instruction(bytes, 0x1FB,
+                         {{0, 1}, {0, 1}, {0, 0}, {0, 0}, {0, 4}, {0, 4}, {0, 0}, {0, 0}});
+        emit_instruction(bytes, 0x203, {{0, 1}, {0, 0}, {0, 0}, {0, 0x00112233u}});
+        emit_instruction(bytes, 0x202, {{0, 1}, {0, 0}, {0, 100}, {0, 200}, {0, 0x00ABCDEFu}});
+        for (int i = 0; i < 6; ++i) emit_instruction(bytes, 0x1A8, {});  // 空转
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    // 跑到"窗已盖章（start = 1000）、还在窗内"的那一状态（5 条夹具 + 盖章那步）。
+    const auto running_machine = [&]() {
+        core::Machine machine = scene_step_machine(table);
+        machine.set_host_clock_ms(1000);
+        machine.load_root(window_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return machine;
+        }
+        return machine;
+    };
+
+    // ① (a) 场景绘制模式 ≠ 1 ⇒ **连盖钟一起跳过**（旧模型：只不渲染、时钟照走）。
+    //    spec：`70-vm.md:217` 的 (a) / `70-vm.md:218`「它们成立期间所有以场景时钟计的量都停走」。
+    {
+        core::Machine machine(0x12345678u, table);  // 无配置 ⇒ set:DrawMode = 0
+        machine.set_host_clock_ms(1000);
+        machine.load_root(window_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return fail("DrawMode = 0 夹具停机");
+        }
+        if (machine.scene_clock_ms() != 0) return fail("绘制模式 ≠ 1 仍然盖了场景时钟");
+        if (const core::DrawItem* item = machine.draw_item(1);
+            item == nullptr || item->window_start != 0) {
+            return fail("绘制模式 ≠ 1 仍然推进了窗（窗起点被盖章）");
+        }
+        if (machine.frame_step_requested()) return fail("绘制模式 ≠ 1 仍然发了渲染步请求");
+    }
+    // ② 开闸基线：绘制模式 = 1 ⇒ 时钟按宿主读数走、窗被盖章。
+    {
+        core::Machine machine = scene_step_machine(table);
+        machine.set_host_clock_ms(1000);
+        machine.load_root(window_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return fail("开闸夹具停机");
+        }
+        const core::DrawItem* item = machine.draw_item(1);
+        if (machine.scene_clock_ms() != 1000u) return fail("绘制模式 = 1 时场景时钟没跟上宿主读数");
+        if (item == nullptr || item->window_start != 1000u || item->duration != 100) {
+            return fail("开闸之后窗没有被盖章 / 推进");
+        }
+    }
+    // ③ (b) 画面暂停闩 ≠ 0 ⇒ **连盖钟一起跳过**（与区间忙标记不是同一格）。
+    {
+        core::Machine machine = scene_step_machine(table);
+        machine.set_host_clock_ms(1000);
+        machine.set_scene_hold_latch(1);
+        machine.load_root(window_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return fail("画面暂停闩夹具停机");
+        }
+        if (machine.scene_clock_ms() != 0) return fail("画面暂停闩 ≠ 0 仍然盖了场景时钟");
+        if (const core::DrawItem* item = machine.draw_item(1);
+            item == nullptr || item->window_start != 0) {
+            return fail("画面暂停闩 ≠ 0 仍然推进了窗");
+        }
+        // 闩放开 ⇒ 时钟恢复（它是**持续状态**，不是瞬时条件）。
+        machine.set_scene_hold_latch(0);
+        machine.set_host_clock_ms(1000);
+        if (!machine.step() || machine.scene_clock_ms() != 1000u) {
+            return fail("画面暂停闩放开之后场景时钟没有恢复");
+        }
+    }
+    // ④ (d) 执行区间的暂停（区间忙 ≠ 0 **且**等待位 = 0）在**"只挡推进 / 请求"**那一组 ——
+    //    spec `70-vm.md:220-225` 第 5 条：「忙判定在盖钟之后 ⇒ **钟照盖、只跳请求**」。
+    //    ⛔ 它不是"整段跳过"（`:217` 明说连盖钟一起跳过的**只有三个**）。
+    {
+        core::Machine machine = scene_step_machine(table);
+        machine.set_host_clock_ms(1000);
+        machine.load_root(window_script());
+        for (int i = 0; i < 5; ++i) {
+            if (!machine.step()) return fail("暂停夹具停机");
+        }
+        machine.consume_frame_step();
+        machine.set_driven_elsewhere(true);  // 区间忙标记（与 0x1f4 同一格）
+        machine.set_host_clock_ms(1200);
+        if (!machine.step()) return fail("暂停夹具停机");
+        // ② 钟照盖（忙判定在盖钟**之后** ⇒ 这一迭代的钟先盖上，然后才判忙）。
+        if (machine.scene_clock_ms() != 1200u) {
+            return fail("执行区间暂停时没有盖场景时钟（spec：忙判定在盖钟之后）");
+        }
+        // 窗不前进（请求被挡下 ⇒ 推进子步没跑）：窗起点仍是 0（这一迭代本会盖到 1200）。
+        const core::DrawItem* item = machine.draw_item(1);
+        if (item == nullptr || item->window_start != 0 || item->duration != 100) {
+            return fail("执行区间暂停时窗前进了（暂停应只挡请求 / 推进）");
+        }
+        if (machine.consume_frame_step()) {
+            return fail("(d) 忙 ∧ 等待位 = 0 时仍然发了门前渲染请求");
+        }
+        // ③ 等待位 = 1 ⇒ 暂停不再挡它 ⇒ 请求照发、窗照推（`70-vm.md:216`）。
+        machine.state_flags_mut() |= (1u << 10);
+        if (!machine.step()) return fail("等待位夹具停机");
+        if (machine.scene_clock_ms() != 1200u) return fail("等待位 = 1 时场景时钟没跟上");
+        if (!machine.consume_frame_step()) {
+            return fail("(d) 忙 ∧ 等待位 = 1 时应照发门前渲染请求");
+        }
+        if (const core::DrawItem* advanced = machine.draw_item(1);
+            advanced == nullptr || advanced->window_start == 0) {
+            return fail("等待位 = 1 时窗没有前进（暂停应不再挡推进）");
+        }
+    }
+    // ④b (c) `0x21b` 标量 = 0 **且**等待位与影片位都为 0 ⇒ 本迭代**不盖门前这一次钟、不判据、
+    //     不发请求、不清帧标志**，但**迭代继续**（照常过门 / 派发）；时钟仍由 `0x20c` 推进。
+    //     spec：`70-vm.md:217` 的 (c) + 同句的作用域（"只取消门前渲染步这一个时钟写者"）。
+    {
+        core::Machine machine = scene_step_machine(table);
+        machine.set_scalar_21b(0);  // 真机根脚本跑过 `0x21b 0` 之后的样子（引擎初值也是 0）
+        machine.set_host_clock_ms(1000);
+        machine.load_root(window_script(0));
+        machine.set_frame_flag(true);
+        const std::size_t ip_before = machine.frame().ip;
+        for (int i = 0; i < 5; ++i) {
+            if (!machine.step()) return fail("(c) 夹具停机");
+        }
+        if (machine.scene_clock_ms() != 0u) return fail("(c) 时门前渲染步仍然盖了场景时钟");
+        if (machine.frame().ip == ip_before) return fail("(c) 让迭代停住了（本应照常过门 / 派发）");
+        if (machine.consume_frame_step()) return fail("(c) 时仍然发了门前渲染请求");
+        if (!machine.frame_flag()) return fail("(c) 时清掉了帧标志（spec：清帧标志也一起跳过）");
+        if (const core::DrawItem* item = machine.draw_item(1);
+            item == nullptr || item->window_start != 0) {
+            return fail("(c) 时窗被推进了（should 只跳过门前渲染步的判据 / 推进）");
+        }
+        // ★ **标量恒为 0 不会让时间停走**：`0x20c` 是另三个写者之一（`CORE-TIMING-CLOCK`）。
+        machine.set_host_clock_ms(1500);
+        machine.dispatch_for_test(core::Instruction{0, 0x20C, {}});
+        if (machine.scene_clock_ms() != 1500u) {
+            return fail("(c) 期间 `0x20c` 没能推进场景时钟（⇒ 时间停走了）");
+        }
+        // 等待位 = 1 ⇒ (c) **必然放行**（掩码 `2400h` 是「或」）⇒ 门前这一次照常盖钟。
+        machine.state_flags_mut() |= (1u << 10);
+        machine.set_host_clock_ms(1600);
+        if (!machine.step() || machine.scene_clock_ms() != 1600u) {
+            return fail("等待位 = 1 时 (c) 没有放行（门前那次钟没盖）");
+        }
+        // 影片位 = 1 同样放行。
+        machine.state_flags_mut() &= ~(1u << 10);
+        machine.state_flags_mut() |= (1u << 13);
+        machine.set_host_clock_ms(1700);
+        if (!machine.step() || machine.scene_clock_ms() != 1700u) {
+            return fail("影片位 = 1 时 (c) 没有放行（门前那次钟没盖）");
+        }
+        // 放行之后：门前那一次**请求**发出、并在请求之后清帧标志（`0x4127E7`）。
+        machine.state_flags_mut() &= ~(1u << 13);
+        machine.set_scalar_21b(1);
+        machine.set_frame_flag(true);
+        machine.mark_dirty();
+        machine.set_host_clock_ms(1800);
+        if (!machine.step() || machine.frame_flag()) {
+            return fail("放行后的门前请求没有清帧标志（0x4127E7）");
+        }
+        if (!machine.consume_frame_step()) {
+            return fail("放行后门前渲染步没有发出请求");
+        }
+    }
+    // ④c 场景时钟被 (c) 冻住时，**轮询节拍与短睡眠照走** —— 否则 TITLE 的 `0xc8` + `0xcd` 环
+    //     会把输入饿死（实测：8 条资产档全红）。判据两条：
+    //     · `0xcd` 的时间闸读**现场宿主时刻**（`0x41ACF1 call timeGetTime` / `0x41ACF9 sub edx,
+    //       [esi+68EF0h]`；`60-ops-input.md` 的「定时派发鼠标回调」只说"读一次当前时刻"）
+    //       ⇒ 场景时钟冻在 500 也能派发；
+    //     · `0xc8` 的短睡眠**不得是 no-op**（`CORE-OPS-SLEEP-C8`：「必须让**时间前进 n 毫秒**…
+    //       把 `sleep 1` 当作"什么都不做"会让轮询循环以 CPU 全速空转，属于违反本条」）。
+    {
+        auto poll_script = make_script_with_body();
+        emit_instruction(poll_script, 0x0CC, {{0, 100}, {0, 0xFFFFFFFFu}});  // 间隔 100、目标 −1（取消哨兵）
+        emit_instruction(poll_script, 0x0CD, {});
+        emit_instruction(poll_script, 2, {});
+        core::Machine poll_machine = scene_step_machine(table);
+        poll_machine.set_scalar_21b(0);        // 让 (c) 把门前那一次盖钟挡掉
+        poll_machine.reset_scene_clock(1010);  // 场景时钟冻在 1010（**故意**比宿主时刻只早/晚一点点，
+                                               // 用无符号减法的回绕掩盖错接线的话这条就抓不到）
+        poll_machine.set_host_clock_ms(1000);
+        poll_machine.load_root(poll_script);
+        if (!poll_machine.step()) return fail("0xcc 轮询夹具停机");
+        if (poll_machine.scene_clock_ms() != 1010u) {
+            return fail("轮询夹具：场景时钟被盖了（(c) 没挡住）");
+        }
+        if (poll_machine.mouse_last_ms() != 1000u) {
+            return fail("0xcc 登记的「当前时刻」不是宿主时刻");
+        }
+        // 宿主走过 100ms（≥ 间隔）、场景时钟一格没动 ⇒ 时间闸必须放行。
+        // ★ 场景时钟 1010 与登记时刻 1000 只差 10ms（< 间隔 100）⇒ 拿场景时钟算 elapsed 的实现会**不派发**
+        //   （回绕掩盖不了：两者都非零且相减是小数）。这正是 (c) 落地后 TITLE 轮询环会不会停摆的判据。
+        poll_machine.set_host_clock_ms(1150);
+        if (!poll_machine.step()) return fail("0xcd 轮询夹具停机");
+        if (poll_machine.mouse_last_ms() != 1150u) {
+            return fail("0xcd 的时间闸没读现场宿主时刻（场景时钟不动 ⇒ 轮询停摆）");
+        }
+        if (poll_machine.scene_clock_ms() != 1010u) {
+            return fail("0xcd 把场景时钟当成了自己的读数（它会跟着 (c) 冻住）");
+        }
+        // 短睡眠让时间前进 n 毫秒（虚拟阻塞）—— ⛔ 不许是 no-op。
+        const std::uint32_t before_sleep = poll_machine.host_now_ms();
+        poll_machine.dispatch_for_test(core::Instruction{0, 0x0C8, {{0, 4}}});
+        if (poll_machine.host_now_ms() != before_sleep + 4u) {
+            return fail("0xc8 的短睡眠没有让时间前进 n 毫秒（spec 明禁 no-op）");
+        }
+    }
+    // ⑤ 只挡推进 1/5：状态字第 24 位 ⇒ 盖钟照常、窗不前进。
+    {
+        core::Machine machine = running_machine();
+        machine.state_flags_mut() |= (1u << 24);
+        machine.set_host_clock_ms(1200);  // 本应到期（start 1000 + 100）
+        if (!machine.step()) return fail("第 24 位夹具停机");
+        const core::DrawItem* item = machine.draw_item(1);
+        if (machine.scene_clock_ms() != 1200u) return fail("第 24 位把场景时钟也挡掉了（它只挡推进）");
+        if (item == nullptr || item->duration != 100 || item->color == item->target_color) {
+            return fail("第 24 位置起时窗仍然前进了（应只挡推进、盖钟照常）");
+        }
+    }
+    // ⑥ 只挡推进 2/5：影片缓冲被另一处持有（`RES-WINDOW-MOVIE-HELD` 的缺省 false + 注入口）。
+    {
+        core::Machine machine = running_machine();
+        machine.set_movie_held(true);
+        machine.set_host_clock_ms(1200);
+        if (!machine.step()) return fail("影片持有夹具停机");
+        const core::DrawItem* item = machine.draw_item(1);
+        if (machine.scene_clock_ms() != 1200u) return fail("影片持有把场景时钟也挡掉了");
+        if (item == nullptr || item->duration != 100 || item->color == item->target_color) {
+            return fail("影片缓冲被另一处持有时窗仍然前进");
+        }
+    }
+    // ⑦ 只挡推进 4/5：渲染器未就绪（缺省 true + 注入口；判据体未取证）。
+    {
+        core::Machine machine = running_machine();
+        machine.set_render_ready(false);
+        machine.set_host_clock_ms(1200);
+        if (!machine.step()) return fail("渲染器未就绪夹具停机");
+        const core::DrawItem* item = machine.draw_item(1);
+        if (machine.scene_clock_ms() != 1200u) return fail("渲染器未就绪把场景时钟也挡掉了");
+        if (item == nullptr || item->duration != 100 || item->color == item->target_color) {
+            return fail("渲染器未就绪时窗仍然前进");
+        }
+    }
+    // ⑧ 只挡推进 3/5 + 「有待消费的新帧」读一次即消费。
+    //    可观察口 = 网格的「持续时间 ≤ 0」分叉：**推进那一步**会清窗位 + 起点 + 置「有动画」。
+    //    spec：`70-vm.md:219-223`（只挡推进第 3 条：场景既不需要重绘、也没有影片对象报"有待消费的新帧"，
+    //    后者**读一次即消费**）/ `:226`（网格的 dur ≤ 0 分叉）。
+    {
+        const auto mesh_script = [&]() {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x21B, {{0, 1}});
+            emit_instruction(bytes, 0x323, {{0, 7}, {0, 0}, {0, 0}, {0, 255}, {0, 0x00ABCDEFu}});
+            for (int i = 0; i < 4; ++i) emit_instruction(bytes, 0x1A8, {});
+            emit_instruction(bytes, 2, {});
+            return bytes;
+        };
+        const auto idle_machine = [&]() {
+            core::Machine machine = scene_step_machine(table);
+            machine.set_host_clock_ms(1000);
+            machine.load_root(mesh_script());
+            if (!machine.step() || !machine.step()) return machine;  // 0x21B / 0x323
+            machine.end_render();  // 渲染步收尾：清脏（⇒「场景既不需要重绘」）
+            return machine;
+        };
+        // (i) 空转：dirty = 0、无动画、有窗但 dur ≤ 0 ⇒ **只挡推进** ⇒ 网格的窗位 / 起点都留着。
+        {
+            core::Machine machine = idle_machine();
+            const core::MeshRecord* before = machine.mesh(7);
+            if (before == nullptr || (before->flags & 2u) == 0 || before->window_start != 0) {
+                return fail("网格夹具：0x323 没有排上 dur = 0 的窗");
+            }
+            machine.set_host_clock_ms(1100);
+            if (!machine.step()) return fail("空转夹具停机");
+            if (machine.scene_clock_ms() != 1100u) return fail("空转把场景时钟也挡掉了");
+            const core::MeshRecord* mesh = machine.mesh(7);
+            if (mesh == nullptr || (mesh->flags & 2u) == 0 || mesh->window_start != 0) {
+                return fail("空转时网格的 dur ≤ 0 分叉仍然跑了（应只挡推进）");
+            }
+            // 场景又需要重绘 ⇒ 推进；网格的 dur ≤ 0 分叉：清起点 + 清窗位 + 置「有动画」，不重烘。
+            machine.mark_dirty();
+            if (!machine.step()) return fail("重绘夹具停机");
+            const core::MeshRecord* advanced = machine.mesh(7);
+            if (advanced == nullptr || (advanced->flags & 2u) != 0 || advanced->window_start != 0) {
+                return fail("网格的 dur ≤ 0 分叉没有清窗位 / 起点");
+            }
+            if (!machine.scene_animating()) return fail("网格的 dur ≤ 0 分叉没有置「有动画」");
+            if (advanced->color == advanced->target_color) {
+                return fail("网格的 dur ≤ 0 窗走了「终色 → 当前色」收尾（⛔ 那一步不该发生）");
+            }
+        }
+        // (ii) 「有待消费的新帧」= 1 ⇒ 条件 3 不成立 ⇒ 推进（并且这一读把它消费掉）。
+        {
+            core::Machine machine = idle_machine();
+            machine.set_movie_new_frame(true);
+            machine.set_host_clock_ms(1100);
+            if (!machine.step()) return fail("新帧夹具停机");
+            if (machine.movie_new_frame()) return fail("「有待消费的新帧」读了一次没有被消费");
+            const core::MeshRecord* mesh = machine.mesh(7);
+            if (mesh == nullptr || (mesh->flags & 2u) != 0 || mesh->window_start != 0) {
+                return fail("「有待消费的新帧」没有让渲染步推进（条件 3 应被它否定）");
+            }
+        }
+    }
+    // ⑨ 渲染步**收尾判据 = 场景待处理标记**（不是「有动画」/ 命令动画），随后**无条件**清「强制完成」。
+    //    spec：`60-ops-scene.md` 的「命令档的前置与出档」（为 0 ⇒ 把**整张**命令表清空）+ `70-vm.md:233`。
+    {
+        const auto command_script = [&]() {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x1F8, {{0, 10}, {0, 4}, {0, 4}, {0, 0}});
+            emit_instruction(bytes, 0x223,
+                             {{0, 5}, {0, 10}, {0, 1}, {0, 1}, {0, 2}, {0, 1}, {0, 0}, {0, 100}});
+            emit_instruction(bytes, 2, {});
+            return bytes;
+        };
+        core::Machine machine = scene_step_machine(table);
+        machine.load_root(command_script());
+        if (!machine.step() || !machine.step()) return fail("命令表夹具停机");
+        if (machine.scene_commands().empty()) return fail("命令表夹具：0x223 没有写进命令记录");
+        // ⑨-1 待处理标记 = 1（命令不在动、场景不在动）⇒ **保留**整表。
+        //     旧判据（`!command_animating_ && !scene_animating_`）会在这里清表 ⇒ 本条红。
+        machine.set_command_animating(false);
+        machine.set_scene_pending(true);
+        machine.force_complete();
+        machine.end_render();
+        if (machine.scene_commands().empty()) {
+            return fail("渲染步收尾把判据用成了「有动画」/命令动画（待处理标记 = 1 时命令表必须保留）");
+        }
+        // ⑨-2 收尾**无条件**清「强制完成」（不管本步有没有人读过它）。
+        if (machine.forced_complete()) return fail("渲染步收尾没有无条件清「强制完成」");
+        // ⑨-3 待处理标记 = 0 ⇒ 清**整张**表（不是删一条）。
+        machine.set_scene_pending(false);
+        machine.end_render();
+        if (!machine.scene_commands().empty()) {
+            return fail("待处理标记 = 0 时没有清空整张命令表");
+        }
     }
     return true;
 }
@@ -1139,7 +1854,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
                      call_machine.errors().size());
         return false;
     }
-
     // 0x7b：两格按帧、初值 −1；0x199 进入；0x7c 离开（深度 = 本帧身份编号）。
     auto local = make_script_with_body();
     emit_instruction(local, 0x7B, {{0, 8}, {0, 0xFFFFFFFFu}});  // 位置 0..4：main=8、sub=−1
@@ -1176,14 +1890,36 @@ bool check_second_batch(const core::OpcodeTable& table) {
                      local_machine.frame().ip, local_machine.state_flags());
         return false;
     }
-    // 门带着第 26 位 ⇒ 没有服务分支 ⇒ 一定停成 GateStalled（正确表现）。
-    for (int i = 0; i < 10001 && !local_machine.halted(); ++i) local_machine.step();
-    if (!local_machine.halted() ||
-        local_machine.last_stop().reason != core::StopReason::GateStalled) {
-        std::fprintf(stderr, "0x7c did not leave the gate closed with bit 26\n");
+    // 门带着第 26 位（本地块内的输入等待）：它是位序表第 6 项，服务后 = **交回迭代头**
+    // （`CORE-VM-STATE` 第 6 行 / `CORE-OPS-FRAME-LOCAL-RET-7C` 的输入服务分支）⇒ 输入字为 0 时是
+    // **合法等待**：位不清、脚本不前进、也不停死（门关着不是停因）。
+    const std::size_t waiting_ip = local_machine.frame().ip;    for (int i = 0; i < 10001 && !local_machine.halted(); ++i) local_machine.step();
+    if (local_machine.halted() ||
+        (local_machine.state_flags() & (1u << 26)) == 0 ||
+        local_machine.frame().ip != waiting_ip || !local_machine.errors().empty()) {
+        std::fprintf(stderr,
+                     "0x7c bit 26 must be a legal input wait, not a stall "
+                     "(halted=%d reason=%d ip=%zu flags=0x%X errors=%zu)\n",
+                     local_machine.halted() ? 1 : 0,
+                     static_cast<int>(local_machine.last_stop().reason),
+                     local_machine.frame().ip, local_machine.state_flags(),
+                     local_machine.errors().size());
         return false;
     }
-
+    // 输入字非 0 ⇒ 服务体清第 26 位、把输入字清 0（本帧没登记副目标 ⇒ 从返回点继续）；
+    // ★ 清位那一拍**交回迭代头**（本迭代不派发），下一迭代门字归 0 才派发一条
+    //   （`CORE-VM-GATE` 的两种收场：服务体交回 ⇒ 不派发；扫到表尾 ⇒ 派发）。
+    local_machine.set_input_word(1);
+    if (!local_machine.step() || (local_machine.state_flags() & (1u << 26)) != 0 ||
+        local_machine.input_word() != 0 || local_machine.frame().ip != waiting_ip) {
+        std::fprintf(stderr, "0x7c bit 26 service did not clear the bit / input word\n");
+        return false;
+    }
+    if (!local_machine.step() || local_machine.frame().ip != waiting_ip + 4) {
+        std::fprintf(stderr, "0x7c 清位之后没有在下一迭代派发（ip=%zu）\n",
+                     local_machine.frame().ip);
+        return false;
+    }
     // 0x19a / 0x1b6 / 0x1b7：三个互不相同的格；Y 归一成 0/1。
     auto flags = make_script_with_body();
     emit_instruction(flags, 0x1B7, {{0, 5}});
@@ -1209,7 +1945,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1b7 normalization mismatch\n");
         return false;
     }
-
     // 0x1ad：落点格复位值 −1；执行后写当前层号（本版恒 0）。
     if (core::Machine(0x12345678u, table).layer_cell() != -1) {
         std::fprintf(stderr, "0x1ad layer cell must start at -1\n");
@@ -1224,7 +1959,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1ad layer cell mismatch (%d)\n", layer_machine.layer_cell());
         return false;
     }
-
     // 0x1b0：源 → 目标，复制的是编码位模式；n=0 一次都不复制。
     auto copy = make_script_with_body();
     emit_instruction(copy, 0x55, {{3, 0}, {0, 42}});
@@ -1249,7 +1983,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1b0 copied with n=0\n");
         return false;
     }
-
     // 0x1c7 与 0x1cc：位 27 = 0（唯一可达支）；状态格与状态字**不是同一格**。
     auto cells = make_script_with_body();
     emit_instruction(cells, 0x1C7, {{3, 0}});
@@ -1268,7 +2001,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
                      cell_machine.read_int(core::Operand{3, 1}));
         return false;
     }
-
     // 0x63 lea：把取址结果写进引用槽（写指向的值可读回）；非引用族目标 ⇒ 抛。
     auto lea = make_script_with_body();
     emit_instruction(lea, 0x55, {{3, 5}, {0, 42}});
@@ -1298,7 +2030,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x63 accepted a non-reference destination\n");
         return false;
     }
-
     // 0x60 随机：注入源；范围 = 0 ⇒ 先写 0 再抛。
     auto random_script = make_script_with_body();
     emit_instruction(random_script, 0x60, {{3, 1}, {0, 10}});
@@ -1323,7 +2054,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x60 range=0 must write 0 then throw\n");
         return false;
     }
-
     // 0x74 / 0x7f：同一格（`Engine+0x15290`）。
     // ★ 初值不是"分配残留"：启动期有确定写点 —— `0x417E98` 取配置键 `message:MessageSpeed`、
     //   `0x417EAB` 写格（取证见 docs/02-engine/ops-forensics-2026-10-title-option.md §6）。
@@ -1350,12 +2080,11 @@ bool check_second_batch(const core::OpcodeTable& table) {
                      param_uninit_machine.read_int(core::Operand{3, 0}));
         return false;
     }
-
     // 0xd0 时钟：本迭代读数。
     auto clock = make_script_with_body();
     emit_instruction(clock, 0xD0, {{3, 0}});
     emit_instruction(clock, 2, {});
-    core::Machine clock_machine2(0x12345678u, table);
+    core::Machine clock_machine2 = scene_step_machine(table);
     clock_machine2.set_host_clock_ms(12345);
     clock_machine2.load_root(clock);
     if (!clock_machine2.step() || clock_machine2.read_int(core::Operand{3, 0}) != 12345) {
@@ -1363,7 +2092,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
                      clock_machine2.read_int(core::Operand{3, 0}));
         return false;
     }
-
     // 0x191 / 0x2d0 / 0x2d1 / 0x2d3：浮点族（含减法/除法的方向）。
     auto floats = make_script_with_body();
     emit_instruction(floats, 0x191, {{4, 0}, {1, 0xC0600000u}});         // −3.5 → 3.5
@@ -1391,7 +2119,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
                      float_machine.read_float(core::Operand{4, 3}));
         return false;
     }
-
     // 0x218 / 0x21a：查不到 ⇒ 三个输出写 0（覆盖旧值）。
     auto vec = make_script_with_body();
     emit_instruction(vec, 0x55, {{4, 0}, {0, 5}});
@@ -1409,7 +2136,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // 0x217：写第一三元向量 —— 记录不存在 ⇒ 先建默认记录再写；只写 vec1，vec2 一个都不动。
     auto vec1 = make_script_with_body();
     emit_instruction(vec1, 0x217, {{0, 9}, {1, 0x3F800000u}, {1, 0x40000000u}, {1, 0x40400000u}});  // 1,2,3
@@ -1440,7 +2166,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x217 的记录：vec2 必须保持 0\n");
         return false;
     }
-
     // 0xC0：把引擎标量写进第 1 个操作数（**不读操作数的值**）；推进格数 3。
     auto c0 = make_script_with_body();
     emit_instruction(c0, 0xC0, {{9, 7}});
@@ -1457,7 +2182,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0xC0 写进局部格的值 = %d（期望 42）\n", c0_machine.local_int(7));
         return false;
     }
-
     // ── CONFIG.BIN 路径上的一批（0x142 / 0x1BB / 0x1A6 / 0x300 / 0x301 / 0x1D2 / 0x1D3 / 0x6E / 0x6F / 0x196）──
     // ★ 每条都断言"引擎可见的那一格"，⛔ 不断言实现细节；取证锚见 docs/02-engine/ops-forensics-2026-10-title-option.md。
     {
@@ -1653,7 +2377,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // ── 0x12F：排序置换（A 里写下标的升序排列；键 = dec(B[i]) + dec(C[i])）──
     {
         auto script = make_script_with_body();
@@ -1690,7 +2413,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // ── 配置族 + 滚轮（0x2CC / 0x2CD / 0x2CE / 0x2E6 / 0x2E7 / 0x2E8 / 0x2EA / 0x10D）──
     {
         core::ConfigStore config;
@@ -1729,7 +2451,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
             }
         }
     }
-
     // ── 设置表 getter：0xC5（声道音量）/ 0x306（点击跳过效果）──
     {
         core::ConfigStore config;
@@ -1755,7 +2476,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // ── 0xC6（音量 setter）/ 0xC7（声道开关 getter，Music 的负值分流与别的声道不同）──
     {
         core::ConfigStore config;
@@ -1790,7 +2510,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // 0x228：0x1ff 写平移 → 读回；记录不存在 ⇒ 标志 1 且三个浮点不写。
     auto trans = make_script_with_body();
     emit_instruction(trans, 0x1FF, {{0, 7}, {1, 0x40400000u}, {1, 0}, {1, 0}});  // 3,0,0
@@ -1820,7 +2539,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x228 missing-record path mismatch\n");
         return false;
     }
-
     // 0x21d：三张表各拷各的；没有源 ⇒ 上报且不标脏。
     auto scene_copy = make_script_with_body();
     emit_instruction(scene_copy, 0x1FB, {{0, 1}, {0, 1}, {0, 0}, {0, 0},
@@ -1850,7 +2568,6 @@ bool check_second_batch(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 池翻页（0x6D；SPC-POOL-MEMFLIP） ──
 bool check_memflip(const core::OpcodeTable& table) {
     // 发行配置（键缺失 = 0）⇒ 恒走异常支，选择不变。
@@ -1864,7 +2581,6 @@ bool check_memflip(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x6d accepted a disabled memflip\n");
         return false;
     }
-
     // 启动期键 = 1：翻页只换选择（不搬数据），再翻一次回原组、原值仍在。
     core::ConfigStore config;
     config.set_int("set:EnableMemFlip", 1);
@@ -1893,7 +2609,6 @@ bool check_memflip(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 3D setter 族（0x21E / 0x21F；CORE-OPS-SCENE3D-21E / -21F） ──
 bool check_scene3d_setters(const core::OpcodeTable& table) {
     // 「已存在」位为 0 ⇒ 记录**已建**但一个字段都不写（与"没调用"在表内容上不同）。
@@ -1910,7 +2625,6 @@ bool check_scene3d_setters(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x21e wrote fields with the record-exists bit clear\n");
         return false;
     }
-
     // 位 0 = 1（由 0x1fb 置）⇒ 置「有窗」位、G3 ← 1、清窗起点、两个整数、三个浮点 ÷100。
     auto gate_on = make_script_with_body();
     emit_instruction(gate_on, 0x1FB, {{0, 3}, {0, 1}, {0, 0}, {0, 0},
@@ -1933,7 +2647,6 @@ bool check_scene3d_setters(const core::OpcodeTable& table) {
                      on_item == nullptr ? -1 : on_item->config_g3);
         return false;
     }
-
     // 0x21F：轴与角另存一份；矩阵按**度**换算（90° 绕 z ⇒ cos = 0）。
     auto rotate = make_script_with_body();
     emit_instruction(rotate, 0x1FB, {{0, 4}, {0, 1}, {0, 0}, {0, 0},
@@ -1956,7 +2669,6 @@ bool check_scene3d_setters(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 按住派发族（0xFC / 0x102 / 0x103 / 0x104 / 0x105） ──
 bool check_input_hold(const core::OpcodeTable& table) {
     // 0xfc：两张回调表**所有帧**清空 + 模数写 0；别的（掩码 / 键总数 / 扫描上限 / 游标 / ip）都不动。
@@ -1990,7 +2702,6 @@ bool check_input_hold(const core::OpcodeTable& table) {
                      reset_machine.frame().ip);
         return false;
     }
-
     // 0xfc 之后模数 0 ⇒ 下一次 0x104 在出口处响亮失败。
     auto reset_then_dispatch = make_script_with_body();
     emit_instruction(reset_then_dispatch, 0xFE, {{0, 2}});
@@ -2008,7 +2719,6 @@ bool check_input_hold(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x104 with modulus 0 did not fail loudly\n");
         return false;
     }
-
     // 0x102：上界 31/9、后写覆盖、−1 哨兵、推进 7；槽号越界 ⇒ 抛且一槽不写。
     auto slots = make_script_with_body();
     emit_instruction(slots, 0x102, {{0, 31}, {0, 9}, {0, 1234}});
@@ -2047,7 +2757,6 @@ bool check_input_hold(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // 0x103：模数原样（含 0 与负数）、只清当前帧槽。
     auto modulus = make_script_with_body();
     emit_instruction(modulus, 0x103, {{0, 7}});
@@ -2070,7 +2779,6 @@ bool check_input_hold(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x103 rejected modulus 0\n");
         return false;
     }
-
     // 0x105：32 位掩码原样（−1 = 全 1），不碰输入字。
     auto mask = make_script_with_body();
     emit_instruction(mask, 0x105, {{0, 0xFFFFFFFFu}});
@@ -2083,7 +2791,6 @@ bool check_input_hold(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x105 mask mismatch (%u)\n", mask_machine.hold_mask());
         return false;
     }
-
     // 0x104：反向取最高置位；未命中不跳、撤销返回点；每条出口推进游标（模 7 回到 0）。
     auto dispatch = make_script_with_body();
     emit_instruction(dispatch, 0xFE, {{0, 8}});
@@ -2116,7 +2823,6 @@ bool check_input_hold(const core::OpcodeTable& table) {
                      dispatch_machine.hold_cursor() ? *dispatch_machine.hold_cursor() : -1);
         return false;
     }
-
     // 0x104：掩码命中 ⇒ 返回点 = 本条 + 扫描上限夹到该键；上下文编号变化 ⇒ 清游标。
     auto masked = make_script_with_body();
     emit_instruction(masked, 0xFE, {{0, 8}});
@@ -2154,7 +2860,6 @@ bool check_input_hold(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 存档族（0x19E / 0x1A0 / 0x1A1 / 0x1AB / 0x1AC / 0x1AE / 0x1AF） ──
 namespace {
 struct FakeSaveHost final : core::SaveHost {
@@ -2166,7 +2871,6 @@ struct FakeSaveHost final : core::SaveHost {
     bool fail_dat_copy = false;
     bool fail_sth_copy = false;
     std::optional<core::SurfacePixels> surface;
-
     std::string app_data_root() override { return ""; }
     bool ensure_directory(const std::string&) override { return true; }
     core::ReadResult read(const std::string& path) override {
@@ -2210,7 +2914,6 @@ struct FakeSaveHost final : core::SaveHost {
         return total;
     }
 };
-
 core::Bytes make_save_header(std::string_view magic, std::string_view title) {
     core::Bytes bytes(292, 0u);
     std::memcpy(bytes.data(), magic.data(), magic.size());
@@ -2231,12 +2934,10 @@ core::Bytes make_save_header(std::string_view magic, std::string_view title) {
     return bytes;
 }
 }  // namespace
-
 bool check_save_ops(const core::OpcodeTable& table) {
     if (table.find(0x1A0) == nullptr || table.find(0x55) == nullptr) {
         return true;  // 与 check_input_dispatch 同一前提：没有真表就跳过
     }
-
     // 0x1a0：打不开 ⇒ 1 且 op3..9 保持原值；头合法 ⇒ 0 + 七个字段；短读/坏魔数 ⇒ 2。
     auto header_script = make_script_with_body();
     for (int i = 2; i <= 8; ++i) emit_instruction(header_script, 0x55, {{3, static_cast<std::uint32_t>(i)}, {0, 7}});
@@ -2259,7 +2960,6 @@ bool check_save_ops(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1a0 header read mismatch\n");
         return false;
     }
-
     // 打不开：状态 1，op3..9 一律不动。
     auto missing_script = make_script_with_body();
     for (int i = 2; i <= 8; ++i) emit_instruction(missing_script, 0x55, {{3, static_cast<std::uint32_t>(i)}, {0, 7}});
@@ -2277,7 +2977,6 @@ bool check_save_ops(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1a0 missing-file path wrote op3..\n");
         return false;
     }
-
     // 坏魔数（S3SD）⇒ 2（本实现只接受本族）。
     auto wrong_family = make_script_with_body();
     emit_instruction(wrong_family, 0x1A0, {{3, 0}, {0, 1}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 7}, {3, 8}});
@@ -2292,7 +2991,6 @@ bool check_save_ops(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1a0 accepted a foreign family magic\n");
         return false;
     }
-
     // 0x1a1：打不开 ⇒ 1；打开成功（哪怕头坏）⇒ op1 不变 + 整池重编码。
     auto load_script = make_script_with_body();
     emit_instruction(load_script, 0x55, {{3, 0}, {0, 7}});
@@ -2323,7 +3021,6 @@ bool check_save_ops(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1a1 missing-file status mismatch\n");
         return false;
     }
-
     // 0x1ab：两个文件都尝试；后一步覆盖前一步（都失败 ⇒ 2）。
     auto remove_script = make_script_with_body();
     emit_instruction(remove_script, 0x1AB, {{3, 0}, {0, 3}});
@@ -2351,7 +3048,6 @@ bool check_save_ops(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1ab did not override status with the second file\n");
         return false;
     }
-
     // 0x1ac：覆盖目标（不因已存在而失败）。
     auto copy_script = make_script_with_body();
     emit_instruction(copy_script, 0x1AC, {{3, 0}, {0, 4}, {0, 5}});
@@ -2369,7 +3065,6 @@ bool check_save_ops(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1ac overwrite mismatch\n");
         return false;
     }
-
     // 0x1ae：先建空文件、后捕捉；捕捉失败 ⇒ 2 且不删除。
     auto thumb_write = make_script_with_body();
     emit_instruction(thumb_write, 0x1AE, {{3, 0}, {0, 6}, {0, 3}});
@@ -2406,7 +3101,6 @@ bool check_save_ops(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1ae capture-failure path mismatch\n");
         return false;
     }
-
     // 0x1af：打不开优先于表面门（1 而不是 2）；0/1/2 被拒 ⇒ 2；合法 BMP ⇒ 0 + 纹理落地。
     auto thumb_read = make_script_with_body();
     emit_instruction(thumb_read, 0x1AF, {{3, 0}, {0, 6}, {0, 0}});
@@ -2440,7 +3134,6 @@ bool check_save_ops(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 触点查询 / 命中查找（0x2FC · 0x12E） ──
 bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
     const auto make_mouse_script = [&]() {
@@ -2484,7 +3177,6 @@ bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x2fc event write mismatch\n");
         return false;
     }
-
     // 0x12e：TITLE 同形五框命中；只写第 1 个操作数，推进格数 = 17。
     // 夹具：margin = 0、框 [0,0x9c,0,0x9c] × 5、基准平面 = TITLE 的绘制坐标。
     const std::int32_t plane_x[5] = {0x44e, 0x3e0, 0x365, 0x2d9, 0x453};
@@ -2584,7 +3276,6 @@ bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 退出清理（0x1F6 · 0x23D · 0x32B · 0x2） ──
 // TITLE 的退出路径必须先跑 0x1F6 / 0x23D / 0x32B，再 `exit`；缺 handler 会停在
 // `opcode-without-handler:573/811`，窗口宿主也永远不该把"脚本已结束"当成"继续等用户关窗"。
@@ -2613,7 +3304,6 @@ bool check_exit_cleanup(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 纹理槽 → 文件绑定（0x216 / 0x23d） ──
 bool check_slot_imgid(const core::OpcodeTable& table) {
     // 从未写入的槽 500：记录表初始化写 -1。
@@ -2626,7 +3316,6 @@ bool check_slot_imgid(const core::OpcodeTable& table) {
                      fresh_machine.global_int(6));
         return false;
     }
-
     auto bytes = make_script_with_body();
     emit_instruction(bytes, 0x1FA, {{0, 41}});
     emit_instruction(bytes, 0x23D, {});
@@ -2665,7 +3354,6 @@ bool check_slot_imgid(const core::OpcodeTable& table) {
                      oob.last_stop().message.c_str());
         return false;
     }
-
     // 0x23d 把纹理槽对象也清掉：0x208 对槽 50 必须 0/0（记录仍保留来源 -1）。
     auto slot = make_script_with_body();
     emit_instruction(slot, 0x1F8, {{0, 50}, {0, 4}, {0, 4}, {0, 0}});
@@ -2682,7 +3370,6 @@ bool check_slot_imgid(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 场景颜色归一化（0x202 / 0x203 / 0x322 / 0x323） ──
 bool check_color_normalization(const core::OpcodeTable& table) {
     auto bytes = make_script_with_body();
@@ -2702,7 +3389,6 @@ bool check_color_normalization(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 纹理尺寸（0x208；CORE-OPS-TEXTURE-SIZE） ──
 bool check_texture_size(const core::OpcodeTable& table) {
     const auto make_size_script = [&](std::uint32_t id, bool create) {
@@ -2749,7 +3435,6 @@ bool check_texture_size(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 文本落点：指针族（0x192 的 tag 8 / 14；CORE-OPS-TEXT-SET） ──
 bool check_text_pointer_write(const core::OpcodeTable& table) {
     // ① 正例：`0x61` 让局部指针槽 0 指向 global-string 0，`0x192` 写穿那条记录。
@@ -2848,14 +3533,12 @@ bool check_text_pointer_write(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 文本比较族（0x194 相等 / 0x195 不等；CORE-OPS-TEXT-EQUAL-194 / CORE-OPS-TEXT-UNEQUAL-195） ──
 // 锚：0x42CF10（0x194 的 handler，宽度槽 7 @0x42CF4F）· 0x42D010（0x195 的 handler，宽度槽 7 @0x42D04F）·
 // 0x42CF8E / 0x42D08E（两条都调同一个定长比较子例程 sub_401540）· 0x42D093（三值结果只取"非 0 ⇒ 1"）。
 // ★ 这两条是**同一条比较的两面**：同一对操作数上必须互补（写错方向 ⇒ 本条红）。
 bool check_text_compare_ops(const core::OpcodeTable& table) {
     const std::size_t body_start = 60;  // make_script_with_body 的脚本头长度
-
     // ① 值契约：相等 / 不等 / 长度不同 / 空串 四个点，且每一步的推进格数都必须是 7。
     struct Case {
         const char* left;
@@ -2898,7 +3581,6 @@ bool check_text_compare_ops(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // ② 先字符串化：整数 5 与文本 "5" 相等 ⇒ 0x195 得 0（⛔ 不是"按标签比较"）。
     {
         auto script = make_script_with_body();
@@ -2915,7 +3597,6 @@ bool check_text_compare_ops(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // ③ 内联文本（type 2）：与 SETFATE.BIN 的真实站点同形（op3 = 代码区里的空串）。
     {
         auto empty_literal = make_script_with_body();
@@ -2944,7 +3625,6 @@ bool check_text_compare_ops(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // ④ 类型闸门：落点给文本族（type 5）⇒ 抛 write-int-unsupported-tag，且落点不被改写。
     {
         auto script = make_script_with_body();
@@ -2965,7 +3645,6 @@ bool check_text_compare_ops(const core::OpcodeTable& table) {
             return false;
         }
     }
-
     // ⑤ 写序：读数失败（空指针槽）⇒ 抛且落点不变，但推进格数**已经是 7**（读数在写格数之后）。
     {
         auto script = make_script_with_body();
@@ -2987,7 +3666,6 @@ bool check_text_compare_ops(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 1000 项表的两项标志（0x258 / 0x259；CORE-OPS-SCENE-TABLE-FLAGS） ──
 // 锚：0x425D20（0x258 handler，长度字 5 @0x425D32）· 0x41A3A0（0x259 handler，长度字 1 @0x41A3AD）
 // · 0x425D66 / 0x425D6C（位 0 → 两张表的 +8）· 0x425D8F / 0x425D95（位 1 → 两张表的 +0xC）
@@ -3085,7 +3763,6 @@ bool check_scene_table_flags(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 几个"写固定格 / 发请求"的整数档指令（0x1b1 / 0x238 / 0x32a / 0x32d） ──
 // 锚：0x41FEA0（0x1b1，推进 3）· 0x4248C0（0x238，推进 3）· 0x426F80（0x32a，推进 3）
 // · 0x427040（0x32d，推进 5；透明度夹 255、RGB 拼 ARGB、每次执行都发请求）。
@@ -3349,7 +4026,6 @@ bool check_voice_all_stop(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0x1bc 没清「正在播」（%d）\n", attached.voice_busy());
         return false;
     }
-
     core::Machine detached(0x12345678u, table);
     const std::size_t ip_detached = run(false, detached);
     if (ip_detached != 4 || detached.voice_stop_requests() != 0) {
@@ -3364,7 +4040,6 @@ bool check_voice_all_stop(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 选项窗口：开窗 / 清表 / 等待（0x93 / 0x94 / 0x91 / 0x92；ADV-CHOICE-WINDOW） ──
 // 锚：0x4191D0（0x93，推进 1，清表 + 关窗/置闩锁）· 0x419230（0x94，推进 1，开输入 + arm + 步长 10000）
 // · 0x420740（0x91，推进 3 或 0）· 0x4207D0（0x92，推进 5 或 0）· 0x403EF0（清表六格）。
@@ -3455,7 +4130,6 @@ bool check_choice_window(const core::OpcodeTable& table) {
                          released.last_stop().message.c_str());
             return false;
         }
-
         auto blocked_script = make_script_with_body();
         emit_instruction(blocked_script, 0x91, {{0, 7}});
         emit_instruction(blocked_script, 2, {});
@@ -3491,7 +4165,6 @@ bool check_choice_window(const core::OpcodeTable& table) {
                          machine.choice_window().fallback, machine.choice_window().step);
             return false;
         }
-
         auto latched_script = make_script_with_body();
         emit_instruction(latched_script, 0x93, {});       // 置闩锁
         emit_instruction(latched_script, 0x92, {{8, 1}, {8, 2}});  // 非法类型：不该被读
@@ -3550,7 +4223,6 @@ bool check_choice_window(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 選択肢の登録と付加整数（0x90 / 0x97；ADV-CHOICE-ADD-90 / ADV-CHOICE-SET-EXTRA-97） ──
 // 锚：0x420640（0x90 handler，长度字 15 @0x420658）· 0x420693 / 0x4206A5（右 / 下 = 起点 + 宽高）
 // · 0x4206C9（读序 7 → 6 → 5）· 0x4206FE（追加）· 0x403B39（容量 100）· 0x420707（满表抛异常）
@@ -3662,7 +4334,6 @@ bool check_adv_choice(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 场景记录交换 / 搬运（0x214；CORE-OPS-SCENE3D-214） ──
 // 锚：0x423AE0（handler；0x423AFB push 2 先读、0x423B05 push 1 后读）· 0x4ABEF0（三条出口都写 B5AC←1；
 // 两边都有记录时 0x4ABF5C/80/9D 三次整块拷贝 = 交换）。★ 判据：对称交换、单边搬移、无条件标脏。
@@ -3761,7 +4432,6 @@ bool check_scene_relocate(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 零散但必须有的行为守卫（0x193 / 0x2e9 / 0x2f7 / 0x32 / 0x10a / 0x20a） ──
 // 这些 opcode 在复审里被点名"零 CTest"；每条只断言最容易回归的一两个点（全部有 spec 合同）。
 bool check_misc_ops(const core::OpcodeTable& table) {
@@ -3884,7 +4554,11 @@ bool check_misc_ops(const core::OpcodeTable& table) {
             return false;
         }
         machine.end_render();
-        machine.step();
+        // ★ 这一步**必须走直派接缝**：普通打字期本迭代零派发（`70-vm.md`「门」条），而门忙时能
+        //   派发的另一支是演示闸层 —— 那一支的字符格在闸里（`text_layer_cell_count`），**不在**
+        //   待画队列 ⇒「打字中 + 位 30 未置 + 待画格非 0」这三个前置在脚本流里够不着。
+        //   本条守的是 handler 自己的两半（位 30 未置 ⇒ 不消费待画格、仍标脏），不守可达性。
+        machine.dispatch_for_test(core::Instruction{0, 0x20A, {{0, 9}}});
         if (machine.pending_glyph_count() != 2 || !machine.scene_dirty()) {
             std::fprintf(stderr, "0x20a 位 30=0 时不该消费待画格 / 必须标脏（pending=%zu dirty=%d）\n",
                          machine.pending_glyph_count(), machine.scene_dirty() ? 1 : 0);
@@ -3893,7 +4567,6 @@ bool check_misc_ops(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 场景记录的两半（0x1fb / 0x219 / 0x220 / 0x242；CORE-OPS-SCENE3D-*） ──
 // 锚：0x4ACE50（0x1fb 写 +4 与 +0x24..+0x2C）· 0x4ACEE0（0x219 写 +0x24..+0x2C）· 0x4ACF20（0x217 写 vec1）
 // · 0x4ABEF0（0x214 搬整条）· 0x4AD9A0（0x242 写 +408 的 +2D0 与 +438 的 +1F8）。
@@ -4022,7 +4695,6 @@ bool check_scene_records(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 消息块（0x304 / 0x305；CORE-OPS-MSG-BLOCK-304-305） ──
 // 锚：0x41B1E1（门 and 10001h）· 0x41EB7D / 0x41FCD8（0x6e / 0x196 置 10000h）· 0x41B212（回卷到 128h）
 // · 0x41B300（自旋 sub_45BE20）· 0x41B32C/332/338（等待三格 B=0,C=0,A=1）· 0x41B348（未武装只清臂位）。
@@ -4082,7 +4754,16 @@ bool check_msg_block(const core::OpcodeTable& table) {
         core::Machine machine(0x12345678u, table);
         prepare(machine);
         machine.load_root(build(true, 1, true, false));
-        if (!steps(machine, kBase + 3, "305")) return false;
+        if (!steps(machine, kBase + 2, "305-append")) return false;
+        // ★ 普通打字（无 `0x300` 演示闸）⇒ 打字位命中时**本迭代零派发**（`70-vm.md`「门」条：
+        //   「普通打字（没有开演示闸，无槽在用）时标志 = 0 ⇒ 打字期间本迭代零派发，要等服务体把
+        //   第 29 位清掉（推进器自己走完，或输入把它提前抽干）才恢复派发」）⇒ 下一条 `0x305`
+        //   要等第 29 位被清。这里用引擎自己的那条路（平台输入到达 ⇒ 同帧抽干并清位，`0x40953c`）。
+        machine.set_input_pressed(true);
+        if (!steps(machine, 1, "305-drain")) return false;
+        machine.set_input_pressed(false);
+        if (machine.text_typing()) return false;  // 夹具：抽干之后第 29 位必须已清
+        if (!steps(machine, 1, "305")) return false;
         if (machine.msg_arm() != 0 || machine.msg_wait(0) != 1 || machine.msg_wait(1) != 0 ||
             machine.msg_wait(2) != 0) {
             std::fprintf(stderr, "0x305 武装后状态不对：arm=0x%X wait=(%d,%d,%d)\n", machine.msg_arm(),
@@ -4171,7 +4852,6 @@ bool check_msg_block(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // 文本层的**键基数兜底**：本作 ADV 的消息层**不调** `0x213`（残差 `ADV-TEXT-LAYER-DRAW-KEY`），
 // 所以 `0x70` 必须补一个宿主基数，且绘制 / 擦除都认它。★ 判据是"真的出现了绘制条目"，
 // ⛔ 不是"兜底格被写了" —— 只看 `key_base_set`（= 脚本写过）会让消息层一个字都不显示，
@@ -4226,7 +4906,6 @@ bool check_text_layer_fallback(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // 选项**消费侧**：窗口开着 + 左键 + 命中一条带"决定入口"的选项 ⇒ 执行位置 ← 该入口（jump，
 // 不压返回点）、清表、关窗。★ 只验机制；"何时消费"的次序仍是残差 `ADV-CHOICE-CONSUMER`。
 bool check_choice_consumer(const core::OpcodeTable& table) {
@@ -4259,7 +4938,6 @@ bool check_choice_consumer(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // `0x21c` 的谓词 A（定时器）：`0x238` 写的"起点 + 时长"必须在窗内挡住、到期才放行；
 // ★ 相等仍算窗内（引擎 `now > start + duration` 才到期），所以 200 挡、201 放。
 bool check_wait_timer(const core::OpcodeTable& table) {
@@ -4271,7 +4949,7 @@ bool check_wait_timer(const core::OpcodeTable& table) {
         emit_instruction(script, 2, {});
         return script;
     };
-    core::Machine machine(0x12345678u, table);
+    core::Machine machine = scene_step_machine(table);
     machine.load_root(build());
     if (!machine.step() || !machine.step()) {  // 0x238 / 0x21c
         std::fprintf(stderr, "wait-timer 起始两步失败：%s\n", machine.last_stop().message.c_str());
@@ -4318,7 +4996,7 @@ bool check_wait_timer(const core::OpcodeTable& table) {
         emit_instruction(script, 0x21C, {});
         emit_instruction(script, 0x2F7, {{0, 0}});
         emit_instruction(script, 2, {});
-        core::Machine m2(0x12345678u, table);
+        core::Machine m2 = scene_step_machine(table);
         m2.load_root(script);
         for (int i = 0; i < 3; ++i) {
             if (!m2.step()) {
@@ -4339,7 +5017,6 @@ bool check_wait_timer(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // `emulator-core-wait-colour-window`：`0x21c` 谓词 A 的「待处理」闩（引擎 `+0B5B4`）。
 // 排窗（`0x202 delay 0 dur 200`）之后，窗**没走完之前**等待位（`0x400`）必须一直置起；
 // 到期判据是 `现在 >= 起点+延迟+持续时间`（引擎 `jge`）⇒ `start + 200`（相等）**已到期**、那一拍放行。
@@ -4361,7 +5038,7 @@ bool check_wait_colour_window(const core::OpcodeTable& table) {
         emit_instruction(script, 0x21C, {});
         emit_instruction(script, 0x2F7, {{0, 0}});
         emit_instruction(script, 2, {});
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine = scene_step_machine(table);
         machine.set_host_clock_ms(1000);
         machine.load_root(script);
         if (!machine.step() || !machine.step()) {  // 0x1FB / 0x202
@@ -4422,18 +5099,28 @@ bool check_wait_colour_window(const core::OpcodeTable& table) {
         emit_instruction(script, 0x21C, {});
         emit_instruction(script, 0x2F7, {{0, 0}});
         emit_instruction(script, 2, {});
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine = scene_step_machine(table);
         machine.set_host_clock_ms(1000);
         machine.load_root(script);
         if (!machine.step() || !machine.step() || !machine.step() || !waiting(machine)) {
             std::fprintf(stderr, "wait-colour-window(zero)：0x21c 没有置等待位\n");
             return false;
         }
-        // ★ 引擎在**第一次推进时无条件盖章**（`0x4B087C` 只判"起点为 0"），随后 `0x4B17F9` 的
-        //   `jge` 立刻成立 ⇒ 窗位与起点在同一拍被清掉，闩不会再被置起。
+        // ★ `CORE-TIMING-WINDOW`：「持续时间 ≤ 0 的窗**不走到期收尾**」—— 对绘制项，颜色窗那一段
+        //   **整段跳过**：不插值、不写这一步的派生色、不改当前 / 终色、**不清起止与「有窗」位**。
+        //   它的"到期"只是**读者视角**（`现在 >= 起点 + 延迟 + 0` 成立 ⇒ `derive_color` 取当前色）。
+        //   ⇒ 第一拍仍然**盖章**（盖章只判"起点为 0"），但窗位 / 起点必须留着。
+        //   ⛔ 断言"窗位被清 / 起点被清"就是回退了旧模型（把 dur ≤ 0 写成走正常收尾）。
         if (const core::DrawItem* item = machine.draw_item(1);
-            item == nullptr || (item->flags & 2u) != 0) {
-            std::fprintf(stderr, "wait-colour-window(zero)：dur=0 的窗没有在第一拍到期\n");
+            item == nullptr || (item->flags & 2u) == 0 || item->window_start == 0 ||
+            item->duration != 0 || item->color == item->target_color) {
+            std::fprintf(stderr,
+                         "wait-colour-window(zero)：dur=0 的窗走到了期收尾（flags=%u start=%u dur=%d "
+                         "color=%08X target=%08X）—— 整段跳过 ⇒ 窗位 / 起点要留着、颜色不许被写\n",
+                         item == nullptr ? 0u : item->flags, item == nullptr ? 0u : item->window_start,
+                         item == nullptr ? -1 : item->duration,
+                         item == nullptr ? 0u : item->color,
+                         item == nullptr ? 0u : item->target_color);
             return false;
         }
         // 渲染步入（`0x4B40B0`）清闩：本模型的渲染步入是 `end_render()`。
@@ -4459,7 +5146,7 @@ bool check_wait_colour_window(const core::OpcodeTable& table) {
         emit_instruction(script, 0x21C, {});
         emit_instruction(script, 0x2F7, {{0, 0}});
         emit_instruction(script, 2, {});
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine = scene_step_machine(table);
         machine.set_host_clock_ms(1000);
         machine.load_root(script);
         if (!machine.step() || !machine.step() || !machine.step() || !waiting(machine)) {
@@ -4502,7 +5189,7 @@ bool check_wait_colour_window(const core::OpcodeTable& table) {
         emit_instruction(script, 0x21C, {});
         emit_instruction(script, 0x2F7, {{0, 0}});
         emit_instruction(script, 2, {});
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine = scene_step_machine(table);
         machine.set_host_clock_ms(1000);
         machine.load_root(script);
         if (!machine.step() || !machine.step() || !machine.step() || !waiting(machine)) {
@@ -4539,7 +5226,6 @@ bool check_wait_colour_window(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // 自动消息（auto-message）：`0x1b7` 开启后，`0x72` 会按"时长公式"武装计时器，
 // 到期**放行同一对位**（bit31 + bit30），不换行、不取下一行。
 // 公式：`max(100, Time1 + Pitch1 × (N − 1 − 0x2e9 的格))`；本模型没有音频后端 ⇒ 语音恒不在播 ⇒ 第 1 组。
@@ -4554,7 +5240,7 @@ bool check_auto_message(const core::OpcodeTable& table) {
     };
     // ① Time1 = 2000、Pitch1 = 0 ⇒ 时长 2000；1999 ms 不放行、2000 ms 放行并执行下一条。
     {
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine = scene_step_machine(table);
         machine.set_config_int("message:AutoMessageTime1", 2000);
         machine.set_config_int("message:AutoMessagePitch1", 0);
         machine.load_root(build(1));
@@ -4590,7 +5276,7 @@ bool check_auto_message(const core::OpcodeTable& table) {
     }
     // ② Pitch1 = 2、cell = 0、N = 0 ⇒ 2000 + 2×(0−1−0) = 1998（系数与"−1−格"都真的进了公式）。
     {
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine = scene_step_machine(table);
         machine.set_config_int("message:AutoMessageTime1", 2000);
         machine.set_config_int("message:AutoMessagePitch1", 2);
         machine.load_root(build(1));
@@ -4605,7 +5291,7 @@ bool check_auto_message(const core::OpcodeTable& table) {
     }
     // ③ 自动消息关着（`0x1b7 0`）：不武装、等到 5000ms 也不放行（只有点击能放）。
     {
-        core::Machine machine(0x12345678u, table);
+        core::Machine machine = scene_step_machine(table);
         machine.set_config_int("message:AutoMessageTime1", 2000);
         machine.load_root(build(0));
         if (!machine.step() || !machine.step()) {
@@ -4658,7 +5344,6 @@ bool check_auto_message(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // `0x32` 缩放拷贝的**像素公式**（语料：放大 = 双线性 4 邻域加权 + 0.5 截断；缩小 = 面积加权平均）。
 // ★ 判据用 4×4 → 8×8 这种"每格都算得出来"的尺寸：最近邻会给 (1,1) = 源 (0,0)，
 //   双线性给 (1,1) = 四邻域均值 —— 两者差得开，才是一条会红的断言。
@@ -4755,7 +5440,6 @@ bool check_texture_stretch(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // `0x72` 的「等推进」闸（点击推进的唯一入口）：门位置起 ⇒ **一条指令都不派发**；
 // 只有**左键**（位 0）到位才清位并继续。★ 右键（位 1）不算 —— 把它当放行会让右键菜单穿透。
 bool check_adv_wait(const core::OpcodeTable& table) {
@@ -4824,12 +5508,21 @@ bool check_adv_wait(const core::OpcodeTable& table) {
             return false;
         }
         down = 1;  // 按下
-        if (!machine.step()) {  // 放行 + 执行 0x2F7 #1
+        if (!machine.step()) {  // 第 31 位的服务体放行（**交回迭代头 ⇒ 本迭代不派发**）
             std::fprintf(stderr, "adv-hold：step2 停机\n");
             return false;
         }
-        if (machine.voice_option_2f7(0) != 1 || machine.advance_waiting()) {
+        if (machine.advance_waiting() || machine.voice_option_2f7(0) != 0) {
             std::fprintf(stderr, "adv-hold：第一次按下没有放行（opt0=%d waiting=%d）\n",
+                         machine.voice_option_2f7(0), machine.advance_waiting() ? 1 : 0);
+            return false;
+        }
+        if (!machine.step()) {  // 下一迭代：门字归 0 ⇒ 派发 0x2F7 #1
+            std::fprintf(stderr, "adv-hold：放行之后停机\n");
+            return false;
+        }
+        if (machine.voice_option_2f7(0) != 1 || machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-hold：放行之后没有执行下一条（opt0=%d waiting=%d）\n",
                          machine.voice_option_2f7(0), machine.advance_waiting() ? 1 : 0);
             return false;
         }
@@ -4855,12 +5548,18 @@ bool check_adv_wait(const core::OpcodeTable& table) {
             return false;
         }
         down = 1;  // 再按
-        if (!machine.step() || machine.advance_waiting() || machine.voice_option_2f7(1) != 1) {
-            std::fprintf(stderr, "adv-hold：松开再按没有放行（opt1=%d）\n", machine.voice_option_2f7(1));
+        if (!machine.step() || machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-hold：松开再按没有放行（waiting=%d）\n",
+                         machine.advance_waiting() ? 1 : 0);
+            return false;
+        }
+        if (!machine.step() || machine.voice_option_2f7(1) != 1) {
+            std::fprintf(stderr, "adv-hold：放行之后没有执行下一条（opt1=%d）\n",                         machine.voice_option_2f7(1));
             return false;
         }
     }
-    // ③ 左键按下：同一步内清位并执行下一条。
+    // ③ 左键按下：放行那一拍**交回迭代头**（`CORE-VM-STATE` 位序表第 18 行：第 31 位的服务后 =
+    //    交回迭代头），下一迭代才执行下一条。
     {
         core::Machine machine(0x12345678u, table);
         machine.set_mouse_button_source([](std::int32_t& mask) -> bool { mask = 0; return true; });
@@ -4872,16 +5571,18 @@ bool check_adv_wait(const core::OpcodeTable& table) {
                          machine.last_stop().message.c_str());
             return false;
         }
-        if (machine.advance_waiting() || machine.voice_option_2f7(0) != 1) {
-            std::fprintf(stderr, "左键没有放行 / 放行后没执行下一条（waiting=%d opt=%d）\n",
+        if (machine.advance_waiting() || machine.voice_option_2f7(0) != 0) {
+            std::fprintf(stderr, "左键没有清位 / 放行那一拍就派发了（waiting=%d opt=%d）\n",
                          machine.advance_waiting() ? 1 : 0, machine.voice_option_2f7(0));
+            return false;
+        }
+        if (!machine.step() || machine.voice_option_2f7(0) != 1) {
+            std::fprintf(stderr, "放行之后没有执行下一条（opt=%d）\n", machine.voice_option_2f7(0));
             return false;
         }
     }
     return true;
 }
-
-
 // 锚：0x423FE0（handler）· 0x423FF6（长度字 0x0B）· 0x424008（先重置）· 0x424011/0x42401B（先读 2 再读 1）
 // · 0x424030/0x42403C/0x424048（三个浮点）· 0x49A6C0 / 0x49A6F0（写区间与平移）。
 // ★ 判据两面：① 状态（区间起点 / 计数 / 三元平移 / 长度槽 11）；② 消费者真的按区间给**命中键**的绘制项加平移。
@@ -4904,7 +5605,6 @@ bool check_scene_self_transform(const core::OpcodeTable& table) {
         const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 4u;
         return at + 3 < canvas.size() && canvas[at] == 255 && canvas[at + 3] == 255;
     };
-
     // ① 没有 0x229 ⇒ 白块在 (0,0)，状态是"未激活"。
     {
         core::Machine machine(0x12345678u, table);
@@ -4987,7 +5687,6 @@ bool check_scene_self_transform(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 全局重置（0x009；CORE-OPS-FRAME-EXIT-SCRIPT） ──
 bool check_exit_script(const core::OpcodeTable& table) {
     auto exit_script = make_script_with_body();
@@ -5035,11 +5734,435 @@ bool check_exit_script(const core::OpcodeTable& table) {
         return false;
     }
     std::filesystem::remove_all(root_dir);
+    return true;}
+// ── `0x9` 复位清单的其余可观察项（`CORE-OPS-FRAME-EXIT-SCRIPT`）────────────────────────
+// 逐条对着 `data/spec/chapters/60-ops-frame.md` 的那份清单（行号见 S7 报告）：
+//   · 「一个启动时登记的引擎重置钩子」—— 钩子必须被**调用**（它的两处写入在后续的
+//     「帧槽全释放 / 状态字整字清 0 / 根帧装载写长度槽 0」之后都不可观察；能红的只有调用次数）；
+//   · 「show-logo 标志 ← 0」—— 直接读那一格（`check_exit_script` 只经 `0x130` 间接读）；
+//   · 「输入子系统执行一次更新（重新算出输入字）」—— 采样源非空 ⇒ 输入字被重算；
+//   · 「纹理槽：set:CreateObject 第 1 位 ∧ set:AutoFreeTex 第 0 位 ⇒ 逐槽释放 1000 个」——
+//     0..999 被释放、1000 不被释放、两个配置位各自缺一 ⇒ 不释放；
+//   · 「按配置 set:DrawMode 重设的场景绘制模式」—— 构造后改配置，`0x9` 必须**重读**。
+//   ⛔ 本函数不断言的两项（实现里没有对应结构 / 宿主接口 ⇒ 已在 S7 报告里交父级）：
+//     「四组向量格按一份基准搬回」与「模式格为负 ⇒ 向游戏窗口发 0x1400」。
+bool check_exit_script_reset_scope(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto root_dir = std::filesystem::temp_directory_path() / "amayui-cxx-selftest-exit-scope";
+    std::filesystem::create_directories(root_dir);
+    auto root_bytes = make_script_with_body();
+    emit_instruction(root_bytes, 0x1A8, {});
+    emit_instruction(root_bytes, 2, {});
+    {
+        std::ofstream out(root_dir / "ROOT.BIN", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(root_bytes.data()),
+                  static_cast<std::streamsize>(root_bytes.size()));
+    }
+    core::Install install;
+    install.root = root_dir;
+    install.index.files.push_back(core::AlfFile{"ROOT.BIN", 0, 0, 0, 0});
+    auto reset_script = make_script_with_body();
+    emit_instruction(reset_script, 0x09, {});
+    emit_instruction(reset_script, 2, {});
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "exit-script-reset: %s\n", what);
+        return false;
+    };
+    // ① 正向：钩子被调、show-logo 0、输入字被重算、DrawMode 重读、0..999 的纹理槽被释放。
+    {
+        core::ConfigStore config;
+        config.set_int("set:DrawMode", 1);
+        config.set_int("set:CreateObject", 2);  // 第 1 位：纹理槽释放那一支
+        config.set_int("set:AutoFreeTex", 1);   // 第 0 位
+        core::Machine machine(key, table, &install, config);
+        machine.set_show_logo(true);
+        machine.set_key_sampler([] { return 0x5u; });
+        machine.set_texture_file(7, 123);
+        machine.texture_entry(7).slot.present = true;
+        machine.set_texture_file(1000, 999);  // 表外（合法槽是 0..999）：⛔ 不许被清
+        if (machine.texture_slot(7) == nullptr) return fail("夹具：纹理槽 7 没有布上");
+        machine.set_config_int("set:DrawMode", 0);  // `0x9` 必须**重读**配置，不是沿用构造值
+        machine.load_root(reset_script);
+        if (!machine.step()) return fail("0x9 夹具执行失败");
+        if (machine.show_logo()) return fail("0x9 没有把 show-logo 标志清 0");
+        if (machine.engine_reset_hook_calls() != 1) {
+            return fail("0x9 没有调用启动时登记的引擎重置钩子");
+        }
+        if (machine.input_word() != 0x5u) {
+            std::fprintf(stderr, "exit-script-reset: input_word=0x%X\n", machine.input_word());
+            return fail("0x9 没有让输入子系统更新一次（输入字没有重算）");
+        }
+        if (machine.draw_mode() != 0) {
+            return fail("0x9 没有按配置 set:DrawMode 重设场景绘制模式");
+        }
+        const core::TextureRecord* freed = machine.texture_record(7);
+        if (freed == nullptr || freed->file != -1 || machine.texture_slot(7) != nullptr) {
+            return fail("0x9 没有按 CreateObject 位 1 ∧ AutoFreeTex 位 0 释放纹理槽 7");
+        }
+        const core::TextureRecord* outside = machine.texture_record(1000);
+        if (outside == nullptr || outside->file != 999) {
+            return fail("0x9 的纹理槽释放越过了 1000 个槽（0..999）");
+        }
+    }
+    // ② 反方向：两个配置位各自缺一 ⇒ 一个槽都不释放（否则那一支的判据写成了"或"）。
+    {
+        core::ConfigStore config;
+        config.set_int("set:DrawMode", 1);
+        config.set_int("set:CreateObject", 0);  // 第 1 位 = 0
+        config.set_int("set:AutoFreeTex", 1);
+        core::Machine machine(key, table, &install, config);
+        machine.set_texture_file(7, 123);
+        machine.load_root(reset_script);
+        if (!machine.step()) return fail("0x9 反方向夹具（CreateObject 位 1 = 0）执行失败");
+        const core::TextureRecord* kept = machine.texture_record(7);
+        if (kept == nullptr || kept->file != 123) {
+            return fail("set:CreateObject 第 1 位为 0 时 0x9 仍释放了纹理槽");
+        }
+    }
+    {
+        core::ConfigStore config;
+        config.set_int("set:DrawMode", 1);
+        config.set_int("set:CreateObject", 2);
+        config.set_int("set:AutoFreeTex", 0);  // 第 0 位 = 0
+        core::Machine machine(key, table, &install, config);
+        machine.set_texture_file(7, 123);
+        machine.load_root(reset_script);
+        if (!machine.step()) return fail("0x9 反方向夹具（AutoFreeTex 位 0 = 0）执行失败");
+        const core::TextureRecord* kept = machine.texture_record(7);
+        if (kept == nullptr || kept->file != 123) {
+            return fail("set:AutoFreeTex 第 0 位为 0 时 0x9 仍释放了纹理槽");
+        }
+    }
+    std::filesystem::remove_all(root_dir);
     return true;
 }
-
+// ── 帧族形状（S1：`CORE-OPS-FRAME-CALL` / `-RET` / `-CALL-SCRIPT` / `-LOAD-FRAME` / `-EXIT` /
+//    `-EXIT-SCRIPT` / `-LOCAL-RET-7C` / `-LOCAL-SET-7B`）──────────────────────────────────────
+// ★ 这一批的判据全是 spec 写明、而实现缺失 / 偏离的点（每条都能被一处破坏弄红）：
+//   · 返回栈**每帧 256**：第 257 次压栈必须**记诊断并拒绝**（⛔ 不许覆盖最旧 / 静默截断）；
+//   · 新帧记录四格：返回栈栈顶 ← 0（内容不写）、两格本地块进入目标 ← −1、ip = 代码区起点、
+//     长度槽 ← 0 —— `0x3` / `0x6` / `0x9` 走**同一条装载路径**；
+//   · `0x6` 的父帧号 ← 「父帧候选」格（装载器只照抄，不是当前帧号）⇒ 泵的 −10 才可达；
+//   · `0x2` 三支：父帧 ≥ 0 回帧 / **−10 = 泵挂起帧** / 其余负值（含 −11）与 −1 同一条退出路径；
+//   · `0x5` 跳转支弹引擎级状态字保存栈（压入时清第 31 / 20 位；空栈**不写**；返回栈空要诊断）；
+//   · `0x9` 复位**三个引用族池** ⇒ 槽里读回 0（不是只把目标值清掉）；
+//   · 状态字第 26 位 = 本地块内输入等待：输入字 0 ⇒ 不清位、不停门；非 0 ⇒ 清位 + 输入字清 0，
+//     登记过副进入目标则按它重入（返回点 = 当前指令的 dword 位置）。
+bool check_frame_shape(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "frame-shape: %s\n", what);
+        return false;
+    };
+    const std::uint32_t key = 0x12345678u;
+    // 装载器夹具：三份脚本（统一文件 id 0 / 1 / 2；松散文件优先）。
+    const auto root_dir = std::filesystem::temp_directory_path() / "amayui-cxx-selftest-frame-shape";
+    std::filesystem::create_directories(root_dir);
+    auto plain_child = make_script_with_body();
+    emit_instruction(plain_child, 2, {});
+    const auto write_script = [&](const char* name, const std::vector<std::uint8_t>& bytes) {
+        std::ofstream out(root_dir / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()),                  static_cast<std::streamsize>(bytes.size()));
+    };
+    write_script("FRAME0.BIN", plain_child);
+    write_script("FRAME1.BIN", plain_child);
+    write_script("FRAME2.BIN", plain_child);
+    core::Install install;
+    install.root = root_dir;
+    install.index.files.push_back(core::AlfFile{"FRAME0.BIN", 0, 0, 0, 0});
+    install.index.files.push_back(core::AlfFile{"FRAME1.BIN", 0, 0, 0, 0});
+    install.index.files.push_back(core::AlfFile{"FRAME2.BIN", 0, 0, 0, 0});
+    // ① 返回栈容量 256（`CORE-OPS-FRAME-CALL` 的成立条件最后一条）。
+    //    先压 1 个可辨认的返回点（ip=0 ⇒ 位置 3），再压 255 个（ip=40 ⇒ 位置 13）⇒ 正好 256。
+    {
+        auto script = make_script_with_body();
+        for (int i = 0; i < 14; ++i) emit_instruction(script, 0x1A8, {});  // 位置 10 必须落在代码内
+        core::Machine machine(key, table);
+        machine.load_root(script);
+        machine.dispatch_for_test(core::Instruction{0, 0x8F, {{0, 10}}});  // 返回点 3，跳到位置 10
+        for (int i = 0; i < 255; ++i) machine.dispatch_for_test(core::Instruction{0, 0x8F, {{0, 10}}});
+        if (machine.frame().ret_stack.size() != core::Machine::kRetStackCapacity) {
+            std::fprintf(stderr, "frame-shape: 返回栈没有占满 256（实得 %zu）\n",
+                         machine.frame().ret_stack.size());
+            return false;
+        }
+        if (!machine.errors().empty()) return fail("第 256 次压栈就记了诊断");
+        if (machine.frame().ret_stack.front() != 3) return fail("占满 256 之前最旧一项就被动了");
+        machine.dispatch_for_test(core::Instruction{0, 0x8F, {{0, 10}}});  // 第 257 次
+        if (machine.errors().empty()) return fail("第 257 次压栈没有诊断（被静默吞掉）");
+        if (machine.frame().ret_stack.size() != core::Machine::kRetStackCapacity) {
+            return fail("第 257 次压栈越界写（栈顶被推过容量）");
+        }
+        if (machine.frame().ret_stack.front() != 3) return fail("第 257 次压栈覆盖了最旧一项");
+    }
+    // ② 新帧记录的形状 + `0x3` 的父帧候选：先把槽 1 弄脏（返回栈 / 两格本地块目标都非缺省），
+    //    再执行 `0x3` ⇒ 新记录必须把三样都复位（⛔ 只复位其中一样抓不到另外两处）。
+    {
+        auto root3 = make_script_with_body();
+        emit_instruction(root3, 0x03, {{0, 0}});  // 换脚本：统一文件 id 0
+        emit_instruction(root3, 2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(root3);
+        machine.dispatch_for_test(core::Instruction{0, 0x06, {{0, 1}, {0, 1}}});  // 装 FRAME1 进槽 1
+        machine.dispatch_for_test(core::Instruction{0, 0x08, {{0, 1}}});
+          // 切到槽 1
+        machine.dispatch_for_test(core::Instruction{0, 0x8F, {{0, 0}}});
+          // 槽 1 压返回点
+        machine.dispatch_for_test(core::Instruction{0, 0x7B, {{0, 9}, {0, 7}}});  // 两格 = 9 / 7
+        machine.dispatch_for_test(core::Instruction{0, 0x02, {}});
+                // 回槽 0
+        if (machine.frame_at(1).ret_stack.empty() || machine.frame_at(1).local_main != 9 ||
+            machine.frame_at(1).local_sub != 7) {
+            return fail("夹具没有弄脏槽 1（下面的形状断言会退化成恒真）");
+        }
+        if (!machine.step()) return fail("0x3 没有执行（夹具脚本有问题）");
+        if (machine.current_frame() != 1) return fail("0x3 没有切到子帧");
+        const auto& child = machine.frame_at(1);
+        if (!child.ret_stack.empty()) return fail("0x3 之后子帧返回栈栈顶不是 0");
+        if (child.local_main != -1 || child.local_sub != -1) {
+            return fail("0x3 之后子帧两格本地块进入目标不是 −1");
+        }
+        if (child.ip != 0 || child.length_slot != 0) {
+            return fail("0x3 之后子帧没有『ip = 代码区起点、长度槽 0』");
+        }
+        if (child.parent != 0) return fail("0x3 之后子帧父帧号不是调用帧（0）");
+        if (machine.parent_candidate() != 0) {
+            return fail("0x3 没有在装帧前把「父帧候选」格写成调用时正在执行的帧号");
+        }
+    }
+    // ③ 装载器只照抄「父帧候选」格（`CORE-OPS-FRAME-LOAD-FRAME` 的成立条件最后一条）：
+    //    候选格 = −10 ⇒ 装出来的帧父帧号 = −10（泵的正命令就靠这一条；⛔ 不是"装载器读当前帧号"）。
+    {
+        auto root6 = make_script_with_body();
+        emit_instruction(root6, 0x06, {{0, 2}, {0, 3}});  // 装 FRAME2 进槽 3
+        emit_instruction(root6, 2, {});
+        core::Machine machine(key, table, &install);
+        machine.load_root(root6);
+        machine.set_parent_candidate_for_test(-10);
+        machine.load_frame_for_test(2, 3);  // 直接调装载器（泵那条路）
+        if (machine.frame_at(3).parent != -10) {
+            return fail("装载器没有照抄「父帧候选」格（−10）⇒ 泵帧的父帧号会变成当前帧号，0x2 的 −10 支永不达");
+        }
+        // 对照：`0x6` 自己是「父帧候选」的写者（写"装载时正在执行的帧号"），不是照抄者。
+        if (!machine.step()) return fail("0x6 没有执行");
+        if (machine.frame_at(3).parent != 0) {
+            return fail("0x6 没有把「父帧候选」格写成装载时正在执行的帧号（0）");
+        }
+    }
+    // ④ `0x2` 三支（`CORE-OPS-FRAME-EXIT`）：−10 = 泵挂起帧；−1 / −11 / 其余负值同一条退出路径。
+    {
+        auto pump_script = make_script_with_body();
+        emit_instruction(pump_script, 2, {});
+        core::Machine pump(key, table, &install);
+        pump.load_root(pump_script);
+        pump.set_parent_candidate_for_test(-10);
+        pump.load_frame_for_test(2, 0);   // 当前帧 0 的父帧号 = −10（当前帧仍是 0）
+        pump.set_pump_state_for_test(1, true);   // 挂起帧 = 1、队列泵占用标记 = 1
+        pump.seed_frame_length_for_test(1, 7);   // 挂起帧长度槽先写非 0 ⇒ 证明它被清 0
+        if (pump.frame_at(0).parent != -10) return fail("夹具：当前帧的父帧号不是 −10");
+        pump.dispatch_for_test(core::Instruction{0, 0x02, {}});
+        if (pump.current_frame() != 1) return fail("0x2 的 −10 支没有接回泵挂起帧");
+        if (pump.pump_busy()) return fail("0x2 的 −10 支没有清队列泵占用标记");
+        if (pump.frame().length_slot != 0) return fail("0x2 的 −10 支没有把挂起帧长度槽清 0");
+        if (pump.halted()) return fail("0x2 的 −10 支被当成执行结束");
+        const auto expect_exit = [&](std::int32_t parent) {
+            core::Machine machine(key, table, &install);
+            auto script = make_script_with_body();
+            emit_instruction(script, 2, {});
+            machine.load_root(script);
+            if (parent != -1) {  // 根帧的父帧号本来就是 −1
+                machine.set_parent_candidate_for_test(parent);
+                machine.load_frame_for_test(2, 0);
+            }
+            if (machine.step()) return false;
+            return machine.last_stop().reason == core::StopReason::Halted &&
+                   machine.last_stop().message == "root-exit";
+        };
+        if (!expect_exit(-1)) return fail("父帧号 −1 没有走『整个执行结束』");
+        if (!expect_exit(-11)) return fail("父帧号 −11 没有与 −1 走同一条退出路径");
+        if (!expect_exit(-2)) return fail("父帧号 −2 没有与 −1 走同一条退出路径（引擎不区分其余负值）");
+    }
+    // ⑤ `0x5` 的引擎级状态字保存栈：压入时清第 31 / 20 位；跳转支弹出即写；空栈不写。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x8F, {{0, 5}});  // 位置 0..2：call 位置 5（返回点 3）
+        emit_instruction(script, 5, {});
+           // 位置 3：ret
+        emit_instruction(script, 2, {});
+           // 位置 4
+        for (int i = 0; i < 8; ++i) emit_instruction(script, 0x1A8, {});  // 位置 5..12
+        core::Machine machine(key, table);
+        machine.load_root(script);
+        machine.push_engine_state_word_for_test(0x80100400u);  // 第 31 / 20 位 + 第 10 位
+        machine.dispatch_for_test(core::Instruction{0, 0x8F, {{0, 5}}});
+        machine.dispatch_for_test(core::Instruction{0, 0x05, {}});
+        if (machine.state_flags() != 0x400u) {
+            std::fprintf(stderr, "frame-shape: 0x5 跳转支还原的状态字 = 0x%X（期望 0x400）\n",
+                         machine.state_flags());
+            return fail("0x5 跳转支没有把保存栈弹出的值写回状态选择字（且压入时要清第 31 / 20 位）");
+        }
+        if (machine.engine_state_word_stack_size() != 0) return fail("0x5 跳转支没有弹出保存栈");
+        if (!machine.errors().empty()) return fail("0x5 的正常返回记了诊断");
+        // 空返回栈：未定义行为必须诊断（⛔ 不许静默成功），且只按长度槽 1 前进 4 字节。
+        core::Machine empty(key, table);
+        auto bare = make_script_with_body();
+        emit_instruction(bare, 5, {});
+        emit_instruction(bare, 2, {});
+        empty.load_root(bare);
+        if (!empty.step()) return fail("空返回栈的 0x5 不该停执行");
+        if (empty.errors().empty()) return fail("空返回栈的 0x5 没有诊断（未定义行为被静默吞掉）");
+        if (empty.frame().ip != 4) return fail("空返回栈的 0x5 没有只前进 4 字节（长度槽 1）");
+        // 空**状态字保存栈** ⇒ 不写状态选择字（用直派避开"非 0 门字会挡住取指"的副作用）。
+        core::Machine keep(key, table);
+        auto bare2 = make_script_with_body();
+        emit_instruction(bare2, 5, {});
+        emit_instruction(bare2, 2, {});
+        keep.load_root(bare2);
+        keep.state_flags_mut() = 0x400u;
+        keep.dispatch_for_test(core::Instruction{0, 0x05, {}});
+        if (keep.state_flags() != 0x400u) return fail("空状态字栈时 0x5 写了状态选择字");
+    }
+    // ⑥ `0x9`：三个引用族池逐格清 0 + 根帧记录形状（与 0x3 / 0x6 同一条装载路径）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x55, {{3, 1}, {0, 42}});   // 位置 0..4：全局整型 1 = 42
+        emit_instruction(script, 0x63, {{6, 0}, {3, 1}});
+    // 位置 5..9：全局引用族 0 → 整型 1 的地址
+        emit_instruction(script, 0x7B, {{0, 5}, {0, 6}});
+    // 位置 10..14：两格本地块目标
+        emit_instruction(script, 0x8F, {{0, 19}});
+           // 位置 15..17：call 位置 19（返回点 18）
+        emit_instruction(script, 0x1A8, {});
+                 // 位置 18（返回点，占位）
+        emit_instruction(script, 0x09, {});
+                  // 位置 19：重置并重装根脚本
+        emit_instruction(script, 2, {});
+                     // 位置 20
+        core::Machine machine(key, table, &install);
+        machine.load_root(script);
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) return fail("0x9 夹具执行失败");
+        }
+        if (machine.pointer_slot(6, 0) == 0) {
+            return fail("0x63 没有把地址写进全局引用族槽（下面的复位断言会退化成恒真）");
+        }
+        if (machine.frame().ret_stack.empty() || machine.frame().local_main != 5 ||
+            machine.frame().local_sub != 6) {
+            return fail("0x9 夹具：返回栈 / 两格本地块目标没有脏值");
+        }
+        if (!machine.step()) return fail("0x9 没有执行");
+        if (machine.pointer_slot(6, 0) != 0) {
+            std::fprintf(stderr, "frame-shape: 0x9 后 pointer_slot(6,0)=0x%X\n",
+                         machine.pointer_slot(6, 0));
+            return fail("0x9 没有清三个引用族全局池（槽里还读得到旧地址）");
+        }
+        const auto& root = machine.frame_at(0);
+        if (!root.ret_stack.empty() || root.local_main != -1 || root.local_sub != -1) {
+            return fail("0x9 重装的根帧没有复位『返回栈栈顶 0 / 两格 −1』");
+        }
+        if (root.ip != 0 || root.length_slot != 0 || root.parent != -1) {
+            return fail("0x9 重装的根帧没有『ip = 代码区起点、长度槽 0、父帧号 −1』");
+        }
+        if (machine.current_frame() != 0) return fail("0x9 没有把帧号回 0");
+    }
+    // ⑦ 状态字第 26 位 = 本地块内的输入等待（`CORE-OPS-FRAME-LOCAL-RET-7C` 的输入服务分支）。
+    //   (a) 输入字 0 ⇒ 位不清、门继续关着、**不是** GateStalled；输入非 0 ⇒ 清位 + 输入字清 0。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x7B, {{0, 8}, {0, 0xFFFFFFFFu}});  // 位置 0..4：main=8、sub=−1
+        emit_instruction(script, 0x199, {});
+                         // 位置 5
+        emit_instruction(script, 0x1A8, {});
+                         // 位置 6（返回点）
+        emit_instruction(script, 2, {});
+                             // 位置 7
+        emit_instruction(script, 0x7C, {});
+                          // 位置 8（目标）
+        emit_instruction(script, 2, {});
+                             // 位置 9
+        core::Machine machine(key, table);
+        machine.set_input_word(0);
+        machine.load_root(script);
+        for (int i = 0; i < 3; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "frame-shape: 位26 夹具第 %d 步失败 ip=%zu msg=%s\n", i,
+                             machine.frame().ip, machine.last_stop().message.c_str());
+                return fail("位 26 夹具执行失败");
+            }
+        }
+        if ((machine.state_flags() & (1u << 26)) == 0 || machine.frame().ip != 24) {
+            return fail("0x7c 之后状态字没有带着第 26 位、ip 不在返回点");
+        }
+        for (int i = 0; i < 10001 && !machine.halted(); ++i) machine.step();
+        if (machine.halted()) return fail("第 26 位（有服务体）被当成 GateStalled 停死");
+        if ((machine.state_flags() & (1u << 26)) == 0) {
+            return fail("输入字 0 时第 26 位被服务体清掉了（应当继续等）");
+        }
+        if (machine.frame().ip != 24) return fail("输入字 0 时脚本前进了（门没关住）");
+        if (!machine.errors().empty()) return fail("合法的第 26 位等待记了诊断");
+        machine.set_input_word(1);
+        if (!machine.step()) return fail("输入字非 0 时服务体把执行停了");
+        if ((machine.state_flags() & (1u << 26)) != 0) return fail("输入字非 0 时没有清第 26 位");
+        if (machine.input_word() != 0) return fail("输入服务没有把输入字清 0");
+        if (machine.frame().ip != 24) return fail("没登记副目标时服务体不该移动执行位置");
+        if (!machine.step() || machine.frame().ip != 28) {
+            return fail("清位后脚本没有从返回点继续（位置 6 → 7）");
+        }
+    }
+    //   (b) 登记过副进入目标 ⇒ 按它重入：存档字 = 状态字 | 第 25 位、状态字清 0、
+    //       返回点 = 当前指令的 dword 位置、入块深度 = 本帧身份、ip ← 副目标、推进格数 0。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x7B, {{0, 8}, {0, 12}});  // 位置 0..4：main=8、sub=12
+        emit_instruction(script, 0x199, {});
+                 // 位置 5
+        emit_instruction(script, 0x1A8, {});
+                 // 位置 6（返回点）
+        emit_instruction(script, 2, {});
+                     // 位置 7
+        emit_instruction(script, 0x7C, {});
+                  // 位置 8（主目标）
+        emit_instruction(script, 2, {});
+                     // 位置 9
+        emit_instruction(script, 0x1A8, {});
+                 // 位置 10
+        emit_instruction(script, 0x1A8, {});
+                 // 位置 11
+        emit_instruction(script, 0x7C, {});
+                  // 位置 12（副目标）
+        emit_instruction(script, 2, {});
+                     // 位置 13
+        core::Machine machine(key, table);
+        machine.set_input_word(0);
+        machine.load_root(script);
+        for (int i = 0; i < 3; ++i) {
+            if (!machine.step()) return fail("位 26 重入夹具执行失败");
+        }
+        if ((machine.state_flags() & (1u << 26)) == 0) return fail("夹具没有停在输入等待上");
+        machine.set_input_word(1);
+        if (!machine.step()) return fail("位 26 服务体执行失败");
+        if (machine.frame().ip != 48) {
+            std::fprintf(stderr, "frame-shape: 副目标重入 ip=%zu（期望 48 = 位置 12）\n",
+                         machine.frame().ip);
+            return fail("登记过副目标时没有按它重入");
+        }
+        if (machine.state_flags() != 0) return fail("重入时没有把状态选择字清 0（门应打开）");
+        if (machine.local_save_word() != (1u << 25)) {
+            return fail("重入时存档字不是『状态字 | 第 25 位』");
+        }
+        if (machine.local_save_pos() != 6) {
+            return fail("重入时返回点不是当前指令的 dword 位置（位置 6）");
+        }
+        if (machine.local_save_depth() != 0) return fail("重入时入块深度不是本帧身份编号");
+        if (machine.input_word() != 0) return fail("重入时没有把输入字清 0");
+        // 副目标上的 0x7c 必须回到那个返回点，并把存档字清 0。
+        if (!machine.step() || machine.frame().ip != 24 || machine.state_flags() != 0 ||
+            machine.local_save_word() != 0) {
+            return fail("副目标上的 0x7c 没有回到重入时记下的返回点");
+        }    }
+    std::filesystem::remove_all(root_dir);
+    return true;
+}
 }  // namespace
-
 // ── 设置界面这批指令（合成脚本；不依赖游戏安装 ⇒ 可以算 pure 档行为守卫）─────────────────────
 // 每条都从"破坏就该红"的角度挑：早退不写键 / 越界不写落点 / 越界不读操作数 / 缺键不建键 /
 // 同态 no-op / 后端不存在不清槽格 / 无同曲判据 / 无在播判据。
@@ -5049,7 +6172,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         std::fprintf(stderr, "config-ui: %s\n", what);
         return false;
     };
-
     // ① 0x2cf 更换路径：缓存 0→1，且命名键被写成**归一值** 1
     {
         auto bytes = make_script_with_body();
@@ -5065,7 +6187,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
             return fail("0x2cf(1) 没有把 display:ScreenMode 写成 1");
         }
     }
-
     // ② 0x2cf 早退：目标 == 缓存 ⇒ 一个键都不写（键里放 7 当标记）
     {
         auto bytes = make_script_with_body();
@@ -5080,7 +6201,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
             return fail("0x2cf(0) 早退支写了键（应当一个键都不写）");
         }
     }
-
     // ③ 0x2cf 越界静默：不改缓存、不写键、不记错误
     {
         auto bytes = make_script_with_body();
@@ -5095,7 +6215,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         }
         if (!machine.errors().empty()) return fail("0x2cf(2) 越界支记了错误（应当静默）");
     }
-
     // ④ 0x307：缺键**不建键**；键存在时写**原值**（3 就是 3）
     {
         auto bytes = make_script_with_body();
@@ -5115,7 +6234,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
             return fail("0x307 没有写原值 3");
         }
     }
-
     // ⑤ 0x1b5：同一个值写进命名键**与**参数格（用 0x7f 读回参数格）
     {
         auto bytes = make_script_with_body();
@@ -5129,7 +6247,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.config().get_int("message:MessageSpeed") != 7) return fail("0x1b5 没写命名键");
         if (machine.local_int(5) != 7) return fail("0x1b5 没写参数格（0x7f 读回的不是 7）");
     }
-
     // ⑥ 0x1b8：命中写值 / 越界**不写落点**
     {
         auto bytes = make_script_with_body();
@@ -5149,7 +6266,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.local_int(6) != 2000) return fail("0x1b8 档 1 没写到落点（期望 2000）");
         if (machine.local_int(7) != 42) return fail("0x1b8 越界改了落点（应当一个格都不写）");
     }
-
     // ⑦ 0x1b9：写对应键；越界**连第 2 个操作数都不读**（给不可读的指针类型也不许抛）
     {
         auto bytes = make_script_with_body();
@@ -5163,7 +6279,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (!machine.step()) return fail("0x1b9 越界支读了第 2 个操作数（抛了）");
         if (machine.config().get_int("message:AutoMessageTime0") != 0) return fail("0x1b9 越界支写了键");
     }
-
     // ⑧ 0x1ba：音乐 ±3 阶梯（同侧 no-op）/ 音效同态 no-op
     {
         auto bytes = make_script_with_body();
@@ -5183,7 +6298,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (!machine.step()) return fail("0x1ba 音效停机");
         if (!machine.sound_se_enabled()) return fail("0x1ba 同态请求把音效关掉了");
     }
-
     // ⑨ 0xb4 成功装载写「该槽当前资源号」这一格（`0x4b5004`）；0xb6 清**同一格**（`0x4b506a`）。
     //    ★ 旧版这里断言"0xb6 不清"并引了"规范"—— 规范里此前**没有** 0xb6 这一条（它在 spec 的未成篇 gap 里），
     //    而 0xb4 又按"后端存在"写了表 ⇒ 同一个 T_SE 上两条指令用了两套前提。现在两条都按「后端存在、后端受理」
@@ -5201,7 +6315,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.se_slot_resource(9) != 0) return fail("0xb6 没有清槽资源格（取证 0x4b506a）");
         if (machine.se_stop_requests() != 1) return fail("0xb6 没有发停止请求");
     }
-
     // ⑩ 0xb7 同曲连播两次 = **两次**播放请求（与 0xbf 的"同曲跳过"相反）；⑪ 0xb8 无"在播"判据
     {
         auto bytes = make_script_with_body();
@@ -5220,7 +6333,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.bgm_param() != 1) return fail("0xb8 改了参数格（规范：不改）");
         if (machine.bgm_track() != 0) return fail("0xb8 没有清曲目格");
     }
-
     // ⑮ 0x2f5：读序 4→1、五格落位（延时 / 资源 / pending / 起算 / 状态字）；越界只记日志不写
     {
         auto bytes = make_script_with_body();
@@ -5233,7 +6345,9 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (!machine.voice_pending()) return fail("0x2f5 没有置 pending");
         if (machine.voice_state(2) != 3) return fail("0x2f5 没有把 op2 写成该槽状态字");
         if (machine.voice_delay(2) != 250) return fail("0x2f5 没有把 op3 写成延时");
-        if (machine.voice_start_ms() != 0) return fail("0x2f5 没有把起算清 0");
+        // 起算时刻是该**槽**的起点格（每槽一份）：0 = 未盖章哨兵 ⇒ 交给下一次时间交付去盖章。
+        if (machine.voice_slot_timer(2).start != 0) return fail("0x2f5 没有把起算清 0");
+        if (!machine.voice_slot_timer(2).pending) return fail("0x2f5 没有置该槽的排队标记");
     }
     {
         auto bytes = make_script_with_body();
@@ -5244,7 +6358,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (!machine.step()) return fail("0x2f5 越界下标不该停机");
         if (machine.voice_pending()) return fail("0x2f5 越界下标仍写了槽（应当记日志后跳过）");
     }
-
     // ⑯ 0x2ff：**先写组开关位、才读 op2** ⇒ 组值落位；三个槽互不影响
     {
         auto bytes = make_script_with_body();
@@ -5259,7 +6372,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
             return fail("0x2ff 写了别的槽");
         }
     }
-
     // ⑰ 0xc2：A 支（第 27 位）瞬间到位、**不动第 9 位**；B 支置第 9 位 + 间隔 / 步长两档
     {
         auto bytes = make_script_with_body();
@@ -5286,25 +6398,31 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
     // ★ `0xc2` 的 A 支（门字第 27 位 = "立即到位"）**没法用合成脚本走到**：那一位同时是主循环要服务的
     //   "文本请求"位，本模型的门一旦看到**未服务**的位就只报诊断、不取指 ⇒ 在 A 支之前就被挡住。
     //   该支路按取证实现了（目标 / 步长 / 瞬间到位 / 不动第 9 位），但**没有行为级守卫** ⇒ 已登记为残差。
-
     // ⑱ 0xc4：正常支（无影片门）⇒ 1 次装载 + 1 次播放请求、镜像格清 0、文本记录追加一条
     {
         auto bytes = make_script_with_body();
         emit_instruction(bytes, 0xC4, {{0, 500}});
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
+        // ★ 压低请求的**四条件**（`70-vm.md:21`）里有两格缺省不成立：「音乐淡出相关状态」格（`0xc0`
+        //   读的那一格；它的写者 `0xc3` 未实现）与配置 `sound:MusicFadeOnVoicePlaying`。这里把前置
+        //   摆出来 —— 断言的是"条件成立 ⇒ 第 14 位**写回状态选择字**"（旧版断言的 `bgm_ducked_`
+        //   投影不算：它不写门字）。
+        machine.seed_engine_aa9e4(1);
+        machine.config_mut().set_int("sound:MusicFadeOnVoicePlaying", 1);
         machine.load_root(bytes);
         if (!machine.step()) return fail("0xc4 停机");
         if (machine.voice_play_requests() != 1) return fail("0xc4 没有发播放请求");
         if (machine.voice_load_requests() != 1) return fail("0xc4 没有发装载请求");
         if (machine.voice_mirror_resource(0) != 0) return fail("0xc4 正常支没有清镜像资源格");
-        if (!machine.bgm_ducked()) return fail("0xc4 没有压低 BGM（门字第 14 位）");
+        if ((machine.state_flags() & (1u << 14)) == 0) {
+            return fail("0xc4 没有把第 14 位写回状态选择字（压低待执行）");
+        }
         if (machine.text_span_count() != 1) return fail("0xc4 没有追加文本记录（文本门开着 ⇒ 必须追加）");
         if (machine.text_span_flags(0) != 0x40000000) return fail("0xc4 追加的记录 flags 不是 0x40000000");
         if (machine.text_span_resource(0) != 500) return fail("0xc4 追加的记录没有带 op1");
         if (machine.text_span_voice_slot(0) != 0) return fail("0xc4 追加的记录配音槽不是 0");
     }
-
     // ⑲ 0xc4：文本门被关（0x1bb 写 0 ⇒ 抑制）⇒ **不追加记录**
     {
         auto bytes = make_script_with_body();
@@ -5318,7 +6436,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.text_span_count() != 0) return fail("0xc4 在文本门关着时仍追加了记录");
         if (machine.voice_play_requests() != 1) return fail("0xc4 文本门关着时不该影响播放请求");
     }
-
     // ⑳ 0xc4 的**开关消费**：位0 ⇒ 置位16（位0 保留）；再来一次（位16 已置）⇒ 整格 0
     {
         auto bytes = make_script_with_body();
@@ -5340,7 +6457,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
             return fail("0xc4 第二次开关消费：位16 已置 ⇒ 整格 0");
         }
     }
-
     // ㉑ 0x82：记录向量为空 ⇒ **整条静默**（不写颜色、不发请求、不抛），且推进 11 格（下一条照常执行）
     {
         auto bytes = make_script_with_body();
@@ -5358,7 +6474,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
             return fail("0x82 之后的 0xc4 没有生效（0x82 的推进/长度不对）");
         }
     }
-
     // ㉒ 0x82：有记录时按 op3 位1 把两格颜色**借用**给这次绘制（字节反转），**返回前恢复**
     //    （引擎 `sub_466000` 写完颜色后逐字段把旧值写回：副色 `0x467371` / 主色 `0x4673e1`）；
     //    位3 + 记录 bit30 ⇒ 触发一次配音。
@@ -5391,7 +6506,6 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.voice_play_requests() != 2) return fail("0x82（op3=8）没有触发配音请求");
         if (machine.font_primary_color() != primary_before) return fail("0x82（op3=8）不该改颜色");
     }
-
     // ⑬ 0x198：槽下标 0 ⇒ **默认槽 1**；只写那一槽的两个偏移；不碰字号 / 行高 / 别的槽
     {
         auto bytes = make_script_with_body();
@@ -5430,10 +6544,8 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
             }
         }
     }
-
     return true;
 }
-
 // ── 音效槽：引擎表（`T_SE+0x4BC` = 10）与后端槽数组（`T_Sound` = 15） ──
 /** 实现的两个槽量与 **shape 声明**一致。
  *  ★ 为什么读 `data/shape/types.json` 而不是在这里再抄一遍数字：这两个数量曾经被写成一个 `15` ⇒
@@ -5477,7 +6589,6 @@ bool check_audio_slot_table() {
     }
     return true;
 }
-
 /** 音效三条的槽号边界：0..9 写引擎表；10..14 后端受理但引擎表外（本版只记诊断）；
  *  ≥15 后端拒绝（装载/停止都不动表、不记请求）。 */
 bool check_audio_slot_bounds(const core::OpcodeTable& table) {
@@ -5528,7 +6639,239 @@ bool check_audio_slot_bounds(const core::OpcodeTable& table) {
     if (machine.se_slot_resource(9) != 0) return fail("0xb6 槽 9 没有清表");
     return true;
 }
-
+// ── 时间交付：两套到期计时器 + 第 14 → 9 位的接链（`CORE-VM-LOOP`） ──
+/** 钉子（每条都能指向 spec 原句）：
+ *  ① **音效 10 通道的懒盖章**：活动且起点为 0 ⇒ 起点 ← 本次读数；**未到期 ⇒ 该子系统重新置
+ *     「仍有一件未完成的工作」**（`70-vm.md:19`）。★ 起点 0 是"未盖章"哨兵 ⇒ 盖章只能发生一次。
+ *  ② **有符号到期**：判据是「读数 − 起点 ≥ 时长」的**有符号**比较（`70-vm.md:19`；`70-vm.md:192`
+ *     明说音效 / 语音的到期判据是**有符号**、⛔ 不许并进颜色窗那一族）⇒ 相等已到期、差 1 未到期；
+ *     起点落在"未来"时**有符号差为负 ⇒ 未到期**（无符号比较会判到期）。
+ *  ③ **交付不发请求**：交付只读写引擎记录、把到期交给该子系统自己的释放 / 启动入口（`70-vm.md:23`）
+ *     ⇒ 宿主请求计数在交付前后逐项不变。
+ *  ④ **第 14 → 9 的接链**：语音推进 ⇒ 压低四条件成立 ⇒ 第 14 位**写回状态选择字**（`70-vm.md:21`）；
+ *     第 14 位服务体在前置（语音空闲 ∧「仍有一件未完成的工作」≠ 0 ∧ 第 9 位未置）成立时清 14、
+ *     置 9 并起计时（`70-vm.md:112`）；第 9 位服务体计时到清位（`70-vm.md:113`）—— 与 `0xc2` 共用
+ *     同一计时器与清位点（`60-ops-voice.md:121` 的「同一生命周期」）。
+ */
+bool check_time_delivery(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "time-delivery: %s\n", what);
+        return false;
+    };
+    constexpr std::uint32_t kBit9 = 1u << 9;
+    constexpr std::uint32_t kBit14 = 1u << 14;
+    // 宿主请求计数的九个观察口（交付前后必须逐项不变 —— ③）。
+    const auto request_counts = [](const core::Machine& machine) {
+        return std::vector<std::size_t>{
+            machine.se_play_requests(),   machine.se_stop_requests(),   machine.se_load_requests(),
+            machine.bgm_play_requests(),  machine.bgm_stop_requests(),  machine.bgm_fade_requests(),
+            machine.voice_load_requests(), machine.voice_play_requests(), machine.voice_stop_requests(),
+        };
+    };
+    // ① 懒盖章只发生一次：起点 0 ⇒ 起点 ← 本次读数；当步进度 0（未到期 ⇒ 重新置待办）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_se_channel_for_test(0, true, 0, 100, 42);
+        machine.set_se_work_pending_for_test(true);
+        machine.deliver_sound_time(1000);
+        if (machine.se_channel(0).start != 1000) {
+            return fail("① 懒盖章没有把起点写成本次读数");
+        }
+        if (!machine.se_channel(0).active) return fail("① 未到期就清了活动");
+        if (machine.se_release_steps() != 0) return fail("① 未到期就走了释放入口");
+        if (!machine.se_work_pending()) {
+            return fail("① 未到期没有重新置「该子系统仍有一件未完成的工作」");
+        }
+        machine.deliver_sound_time(1050);
+        if (machine.se_channel(0).start != 1000) {
+            return fail("① 懒盖章发生了第二次（起点每一步都被盖 ⇒ “起点 0 是哨兵”被抹掉）");
+        }
+        if (machine.se_release_steps() != 0) return fail("① 第二步未到期就走了释放入口");
+    }
+    // ② 有符号到期：差 1 未到期；相等已到期并把该通道的值交给释放入口。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_se_channel_for_test(0, true, 1000, 100, 42);
+        machine.set_se_work_pending_for_test(true);
+        machine.deliver_sound_time(1099);
+        if (!machine.se_channel(0).active) {
+            return fail("② 差 1 就判到期（判据应为「读数 − 起点 ≥ 时长」）");
+        }
+        if (machine.se_release_steps() != 0) return fail("② 差 1 就交给了释放入口");
+        machine.deliver_sound_time(1100);
+        if (machine.se_channel(0).active) {
+            return fail("② 读数 − 起点 = 时长 没有判到期（相等已到期）");
+        }
+        if (machine.se_release_steps() != 1) return fail("② 到期没有把该通道交给释放入口（一次）");
+        if (machine.se_last_released_value() != 42) {
+            return fail("② 到期没有把该通道的值交给释放入口");
+        }
+        if (machine.se_work_pending()) {
+            return fail("② 没有未完成的通道却仍置着「仍有一件未完成的工作」");
+        }
+        machine.deliver_sound_time(1200);
+        if (machine.se_release_steps() != 1) return fail("② 到期之后该通道仍被交付（活动没清）");
+    }
+    {
+        // ★ 符号性的判别用例：起点 = 0x80000010、读数 = 0x7FFFFFF0、时长 16。
+        //   有符号差 = −32 ⇒ 未到期；若写成无符号，差 = 0xFFFFFFE0 ≥ 16 ⇒ 会判到期。
+        core::Machine machine(0x12345678u, table);
+        machine.set_se_channel_for_test(3, true, 0x80000010u, 16, 9);
+        machine.set_se_work_pending_for_test(true);
+        machine.deliver_sound_time(0x7FFFFFF0u);
+        if (!machine.se_channel(3).active) {
+            return fail("② 起点落在未来的通道被判到期（到期判据写成无符号了）");
+        }
+        if (machine.se_release_steps() != 0) return fail("② 起点在未来却走了释放入口");
+    }
+    // ① 的通道边界：第 10 个通道（下标 9）也在交付范围里（`70-vm.md:19` 的「10 个通道」）。
+    {
+        core::Machine machine(0x12345678u, table);
+        for (std::size_t i = 0; i < 10; ++i) {
+            machine.set_se_channel_for_test(i, true, 0, 1000, static_cast<std::int32_t>(i));
+        }
+        machine.set_se_work_pending_for_test(true);
+        machine.deliver_sound_time(7);
+        for (std::size_t i = 0; i < 10; ++i) {
+            if (!machine.se_channel(i).active || machine.se_channel(i).start != 7) {
+                return fail("① 10 个通道没有逐个懒盖章");
+            }
+        }
+    }
+    // ③ 交付不发任何宿主请求：请求计数逐项不变（音效 / BGM / 语音）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.seed_engine_aa9e4(1);
+        machine.config_mut().set_int("sound:MusicFadeOnVoicePlaying", 1);
+        machine.set_se_channel_for_test(9, true, 0, 10, 5);
+        machine.set_se_work_pending_for_test(true);
+        machine.set_voice_slot_for_test(2, 0, 0, 10, true);
+        const auto before = request_counts(machine);
+        machine.deliver_sound_time(1000);
+        machine.deliver_voice_time(1000);
+        if (request_counts(machine) != before) {
+            return fail("③ 交付向宿主发了请求（请求计数变了）");
+        }
+    }
+    // ④ 第 14 位服务体：三个前置齐 ⇒ 清 14、置 9、起计时（目标 = 满值、步长 1）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.state_flags_mut() |= kBit14;
+        machine.set_voice_work_pending_for_test(true);  // 待办 ≠ 0
+        machine.set_voice_busy(0);                      // 语音子系统空闲
+        machine.service_gate_bit_for_test(14);          // 第 9 位未置
+        if ((machine.state_flags() & kBit14) != 0) return fail("④ 第 14 位服务体没有清第 14 位");
+        if ((machine.state_flags() & kBit9) == 0) return fail("④ 第 14 位服务体没有置第 9 位");
+        if (machine.bgm_fade_target() != 10000) return fail("④ 交接没有把渐变目标设成满值");
+        if (machine.bgm_fade_step() != 1) return fail("④ 交接没有把步长设成 1");
+        // 第 9 位服务体：第一次只起计时，计时到才清位（与 `0xc2` 共用同一个计时器）。
+        machine.advance_scene(2000, false);
+        machine.service_gate_bit_for_test(9);
+        if (!machine.bgm_fade_active()) return fail("④ 第 9 位的服务体提前清了位（计时没到）");
+        machine.advance_scene(2000 + 10000, false);
+        machine.service_gate_bit_for_test(9);
+        if (machine.bgm_fade_active()) return fail("④ 计时到没有清第 9 位");
+    }
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.state_flags_mut() |= kBit14;
+        machine.set_voice_work_pending_for_test(true);
+        machine.set_voice_busy(1);  // 语音不空闲 ⇒ 前置 1 不成立
+        machine.service_gate_bit_for_test(14);
+        if ((machine.state_flags() & kBit14) == 0) {
+            return fail("④ 前置不成立时第 14 位被清掉（应保留、下个迭代再判）");
+        }
+        if ((machine.state_flags() & kBit9) != 0) return fail("④ 前置不成立时照样进了第 9 位");
+    }
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.state_flags_mut() |= kBit14 | kBit9;  // 第 9 位已置 ⇒ 前置 3 不成立
+        machine.set_voice_work_pending_for_test(true);
+        machine.service_gate_bit_for_test(14);
+        if ((machine.state_flags() & kBit14) == 0) {
+            return fail("④ 第 9 位已置时第 14 位被清掉（应保留、下个迭代再判）");
+        }
+    }
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.state_flags_mut() |= kBit14;  // 待办标记 = 0 ⇒ 前置 2 不成立
+        machine.service_gate_bit_for_test(14);
+        if ((machine.state_flags() & kBit14) == 0) {
+            return fail("④ 待办标记为 0 时第 14 位被清掉（应保留、下个迭代再判）");
+        }
+    }
+    // ④b 语音推进 ⇒ 压低四条件成立 ⇒ 第 14 位**写回状态选择字**，随后服务链接成第 9 位。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.seed_engine_aa9e4(1);                                       // 「音乐淡出相关状态」格非 0
+        machine.config_mut().set_int("sound:MusicFadeOnVoicePlaying", 1);   // 配置非 0
+        machine.set_voice_slot_for_test(1, 0, 0, 50, true);                 // 排队一段：延时 50
+        if (machine.deliver_voice_time(1000)) return fail("④b 未到期的语音槽被判「有推进」");
+        if (machine.voice_slot_timer(1).start != 1000) return fail("④b 语音槽没有懒盖章");
+        if ((machine.state_flags() & kBit14) != 0) return fail("④b 未到期就置了第 14 位");
+        if (!machine.deliver_voice_time(1050)) {
+            return fail("④b 语音槽到「已过时间 ≥ 延时」没有返回「有推进」");
+        }
+        if ((machine.state_flags() & kBit14) == 0) {
+            return fail("④b 语音推进没有把第 14 位写回状态选择字");
+        }
+        if (!machine.voice_work_pending()) {
+            return fail("④b 置第 14 位时没有置「该子系统仍有一件未完成的工作」");
+        }
+        machine.service_gate_bit_for_test(14);
+        if ((machine.state_flags() & kBit14) != 0 || (machine.state_flags() & kBit9) == 0) {
+            return fail("④b 语音推进置起的第 14 位没有交接成第 9 位");
+        }
+    }
+    // ④c 压低四条件任一不成立 ⇒ 第 14 位不置（语音推进本身照常）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.config_mut().set_int("sound:MusicFadeOnVoicePlaying", 1);
+        machine.set_voice_slot_for_test(0, 0, 1000, 10, true);
+        if (!machine.deliver_voice_time(1010)) return fail("④c 到期的语音槽没有返回「有推进」");
+        if ((machine.state_flags() & kBit14) != 0) {
+            return fail("④c 「音乐淡出相关状态」格为 0 时仍置了第 14 位");
+        }
+    }
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.seed_engine_aa9e4(1);
+        machine.state_flags_mut() |= kBit9;  // 第 9 位已置 ⇒ 条件 3 不成立
+        machine.config_mut().set_int("sound:MusicFadeOnVoicePlaying", 1);
+        machine.set_voice_slot_for_test(0, 0, 1000, 10, true);
+        if (!machine.deliver_voice_time(1010)) return fail("④c 到期的语音槽没有返回「有推进」");
+        if ((machine.state_flags() & kBit14) != 0) {
+            return fail("④c 第 9 位已置时仍置了第 14 位");
+        }
+    }
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.seed_engine_aa9e4(1);
+        machine.config_mut().set_int("sound:MusicFadeOnVoicePlaying", 0);  // 配置为 0 ⇒ 条件 2 不成立
+        machine.set_voice_slot_for_test(0, 0, 1000, 10, true);
+        if (!machine.deliver_voice_time(1010)) return fail("④c 到期的语音槽没有返回「有推进」");
+        if ((machine.state_flags() & kBit14) != 0) {
+            return fail("④c 配置 sound:MusicFadeOnVoicePlaying = 0 时仍置了第 14 位");
+        }
+    }
+    {
+        // 主循环模式字第 0 位 = 1 ⇒ 条件 4 不成立（`0x24e` 写那个字）。
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x24E, {{0, 1}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("④c 夹具：0x24e 停机");
+        machine.seed_engine_aa9e4(1);
+        machine.config_mut().set_int("sound:MusicFadeOnVoicePlaying", 1);
+        machine.set_voice_slot_for_test(0, 0, 1000, 10, true);
+        if (!machine.deliver_voice_time(1010)) return fail("④c 到期的语音槽没有返回「有推进」");
+        if ((machine.state_flags() & kBit14) != 0) {
+            return fail("④c 主循环模式字第 0 位已置时仍置了第 14 位");
+        }
+    }
+    return true;
+}
 // ── 门字第 27 位的两条支路：`0xc2` 的"瞬间到位"与 `0xc4` 的"影片门" ──
 /** 这两条支路**合成脚本走不到**：位 27 同时是主循环要服务的"影片 / 文本请求"位，而本模型的主循环
  *  只有第 0 / 10 / 13 位的服务分支 ⇒ 门会挡住、只报 `gate-bit-unserviced`。
@@ -5541,7 +6884,6 @@ bool check_gate_split_branches(const core::OpcodeTable& table) {
         return false;
     };
     constexpr std::uint32_t kMovieGateBit = 1u << 27;
-
     // ① `0xc2` A 支（第 27 位 = 1）：目标 ← op1、步长 ← op2、**瞬间到位**（进度 = 目标）、
     //    **不动第 9 位**、不读混音配置、不写间隔。
     {
@@ -5560,7 +6902,6 @@ bool check_gate_split_branches(const core::OpcodeTable& table) {
         if ((machine.state_flags() & kMovieGateBit) == 0) return fail("0xc2 A 支把第 27 位清掉了");
         if (machine.state_flags() != kMovieGateBit) return fail("0xc2 A 支改了门字的其它位");
     }
-
     // ③ `0xc2` B 支（第 27 位未置）：读配置定混音方式、置第 9 位、由 op2 算间隔 / 步长、目标 ← op1、进度清 0。
     {
         core::Machine fade(0x12345678u, table);
@@ -5587,29 +6928,290 @@ bool check_gate_split_branches(const core::OpcodeTable& table) {
             return fail("0xc2 B 支边界 1000 算错（应为 10ms / 步长 1）");
         }
     }
-
     // ② `0xc4` 影片门支（第 27 位 = 1）：只把 op1 写进镜像格、**不发装载 / 播放请求**、
     //    但**仍然追加文本记录**、并且照样压低 BGM。
     {
         core::Machine machine(0x12345678u, table);
         machine.state_flags_mut() |= kMovieGateBit;
+        // 压低四条件（`70-vm.md:21`）：两格缺省不成立 ⇒ 先摆前置，再断言第 14 位**写回门字**。
+        machine.seed_engine_aa9e4(1);
+        machine.config_mut().set_int("sound:MusicFadeOnVoicePlaying", 1);
         core::Instruction instruction{0, 0xC4, {{0, 777}}};
         machine.dispatch_for_test(instruction);
         if (machine.voice_mirror_resource(0) != 777) return fail("0xc4 影片支没有把 op1 写进镜像资源格");
         if (machine.voice_mirror_a4(0) != 0) return fail("0xc4 影片支写的镜像第二格不是 0");
         if (machine.voice_play_requests() != 0) return fail("0xc4 影片支仍发了播放请求");
         if (machine.voice_load_requests() != 0) return fail("0xc4 影片支仍发了装载请求");
-        if (!machine.bgm_ducked()) return fail("0xc4 影片支没有压低 BGM");
+        if ((machine.state_flags() & (1u << 14)) == 0) {
+            return fail("0xc4 影片支没有把第 14 位写回状态选择字（压低待执行）");
+        }
         if (machine.text_span_count() != 1) return fail("0xc4 影片支没有追加文本记录（规范：仍然追加）");
         if (machine.text_span_resource(0) != 777) return fail("0xc4 影片支的记录没有带 op1");
         if (machine.text_span_flags(0) != 0x40000000) return fail("0xc4 影片支的记录 flags 不是 0x40000000");
         if (machine.text_span_voice_slot(0) != 0) return fail("0xc4 影片支的记录配音槽不是 0");
     }
-
     return true;
 }
-
-// ── 两套字号：`0x75` = A 支（`0x204` 用）、`0x197` = B 支（记录绘制用） ──
+// ── 门：22 位有序服务链 + 表尾派发（`CORE-VM-GATE` / `CORE-VM-STATE`） ──
+/** 钉子（每条都能指向 spec 原句）：
+ *  ① `CORE-VM-STATE` 的位序表第 8 项 = 第 30 位：「逐格揭示：按节拍请求画一格并推进格号」，
+ *     **服务后 = 继续扫描（落到第 13 位）** ⇒ 它**不**交回迭代头（`70-vm.md:117`）⇒ 扫到表尾仍派发一条；
+ *     这正是 `0x1ce` 的 0 支在门忙时仍可被派发的机制（`70-vm.md:65`、`60-ops-text.md:484`）。
+ *  ② 第 14 / 9 / 12 是表里连续的三项（14 → 9 → 12），14 与 9 的「服务后」都是**继续扫描**、
+ *     第 12 位是「条件：置起配对位那一支交回迭代头，其余落到第 26 位」（`70-vm.md:112-114`）。
+ *     ★ 第 12 位的**体内三支判据未取证**（`RES-CLEAR-D9-BIT12` / `60-ops-scalar.md:297`）⇒ 本实现只落
+ *     区间忙这道**前置**（`CORE-OPS-RUN-BRACKET`：区间忙 ≠ 0 时第 12 / 13 位的服务体**不执行**）：
+ *       · 区间忙 = 0 ⇒ 体执行、按保守（未取证 ⇒ "其余"里选安全的那一支）**交回迭代头** ⇒ 本迭代不派发；
+ *       · 区间忙 ≠ 0 ⇒ 体不执行 ⇒ **不算交回迭代头** ⇒ 继续扫到表尾、照常派发一条
+ *         （`70-vm.md:25`："忙标记……不挡表尾派发 …… 暂停不阻止脚本推进"）。
+ *  ③ 多个位同时置起 ⇒ **先被检查到的位先服务**，命中之后若它交回迭代头，更晚的位本迭代不再看
+ *     （`70-vm.md:84` / `:136` 的「命中」定义：命中 ≠ 拦住派发，但"没轮到"就是未命中）。
+ *     位序表里第 26 位在第 6 项、第 10 位在第 14 项 ⇒ 26 先（⛔ 不是位号升序：10 < 26）。
+ *  ④ 第 29 位是表里**唯一**"由服务体自己派发"的位：命中 ⇒ 先跑一趟文本推进器，再按**文本槽在用标志**
+ *     （`[77984h]`：槽 1..9 任一状态字非 0）决定 —— 非 0 ⇒ 随即派发一条；为 0 ⇒ 交回迭代头
+ *     （`70-vm.md:59` / `:64`、服务链位序表第 17 行 `70-vm.md:123`）。
+ *     ★ 它是**本趟入口快照**：同一趟里随后被抽干的槽仍算在用（`70-vm.md:64` 末句）。
+ *     ⛔ 判据不是命令队列的占用标记（那是另一个状态；取证 `report-text-gate.md` §1.3 / §5.3）。
+ *  ⑤ 第 29 位的**两支**（`70-vm.md:64` / `report-text-gate.md` §3.4）：普通打字（无槽在用）⇒ 打字期
+ *     **本迭代零派发**；演示闸层（`0x300` 开着、槽在用）⇒ **每迭代派发一条**。
+ *  ★ 每条都咬住"服务体**做了那一件事**"与"本迭代**派发没派发**"两半：只咬一半就抓不到"位序表被删项"。 */
+bool check_gate_chain(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "gate-chain: %s\n", what);
+        return false;
+    };
+    // ① 第 30 位置起 ⇒ 服务它之后**扫到表尾仍派发一条**（`0x1ce` 的 0 支可达性）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1CE, {{0, 7}});  // 置活动位（第 30 位）+ 节拍器相位 ← 现在
+        emit_instruction(script, 0x1A8, {});
+        // 表尾派发要执行的那一条（无副作用）
+        emit_instruction(script, 2, {});
+        core::Machine machine = scene_step_machine(table);
+        machine.set_host_clock_ms(1000);
+        machine.load_root(script);
+        if (!machine.step() || (machine.state_flags() & (1u << 30)) == 0) {
+            return fail("夹具：0x1ce 没有置起第 30 位");
+        }
+        machine.set_host_clock_ms(1600);  // 够一拍（默认节拍周期 500ms、相位起点 = 1000）
+        const auto draws_before = machine.text_cell_draw_requests();
+        const std::size_t ip_before = machine.frame().ip;  // = 12（0x1ce 之后）
+        if (!machine.step()) return fail("第 30 位置起的那一拍停机了");
+        if (machine.text_cell_draw_requests() != draws_before + 1) {
+            return fail("第 30 位没有被服务（位序表第 8 项没有跑到它的服务体）");
+        }
+        if (machine.frame().ip != ip_before + 4) {
+            return fail("扫到表尾没有派发一条（门字非 0 也不该挡住表尾派发）");
+        }
+        if ((machine.state_flags() & (1u << 30)) == 0) {
+            return fail("第 30 位的服务体不该清位（清位在文本推进路径的共享清理里）");
+        }
+        if (!machine.errors().empty()) return fail("合法门忙记了诊断");
+    }
+    // ② 第 14 → 9 → 12 的链：三个位同置时按**表序**被服务，第 12 位的两条去向都覆盖。
+    //   (a) 区间忙 = 0 ⇒ 12 的服务体执行、交回迭代头 ⇒ 本迭代不派发。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine = scene_step_machine(table);  // 淡变按场景时钟推进 ⇒ 渲染步要开闸
+        machine.load_root(script);
+        if (!machine.step()) return fail("链夹具：第一步就停机");
+        // 第 9 位的淡变状态（`0xc2` 的 B 支）：目标 20、间隔 50ms、步长 10 ⇒ 两次到期就走完。
+        machine.dispatch_for_test(core::Instruction{0, 0xC2, {{0, 20}, {0, 500}}});
+        if (!machine.bgm_fade_active()) return fail("夹具：0xc2 没有置起第 9 位");
+        machine.state_flags_mut() |= (1u << 14) | (1u << 12);
+        const std::size_t ip_before = machine.frame().ip;
+        for (int i = 0; i < 20 && !machine.halted(); ++i) machine.step();
+        if (machine.bgm_fade_progress() != machine.bgm_fade_target()) {
+            return fail("第 9 位没有被服务体推到位（链在 14 之后没有落到 9）");
+        }
+        if (machine.bgm_fade_active()) return fail("第 9 位的服务体没有按时清位");
+        if ((machine.state_flags() & (1u << 14)) == 0) {
+            return fail("第 14 位的服务体落空时必须保留该位（前置不成立 ⇒ 下个迭代再判）");
+        }
+        if ((machine.state_flags() & (1u << 12)) == 0) {
+            return fail("第 12 位（区间忙 = 0）的服务体没有执行");
+        }
+        if (machine.frame().ip != ip_before) {
+            return fail("第 12 位交回迭代头 ⇒ 本迭代不该派发");
+        }
+    }
+    //   (b) 区间忙 ≠ 0 ⇒ 12 的服务体不执行 ⇒ 继续扫到表尾 ⇒ **仍派发一条**（暂停不挡表尾派发）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.set_driven_elsewhere(true);
+       // 区间忙标记 = 1（`0x1f4` 置）
+        machine.state_flags_mut() |= (1u << 12);  // 第 10 位必须为 0（等待位给暂停开闸）
+        const std::size_t ip_before = machine.frame().ip;
+        if (!machine.step()) return fail("区间忙 + 第 12 位的那一拍停机了");
+        if (machine.frame().ip != ip_before + 4) {
+            return fail("区间忙时第 12 位挡下了派发（暂停不挡表尾派发）");
+        }
+        if ((machine.state_flags() & (1u << 12)) == 0) {
+            return fail("区间忙时第 12 位的服务体不该执行");
+        }
+    }
+    // ③ 两个"会交回迭代头"的位同时置起 ⇒ 只服务**位序更早**的那个（本迭代不再服务后一个）。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        machine.set_input_word(1);  // 第 26 位的服务体：输入字非 0 ⇒ 清位
+        machine.state_flags_mut() |= (1u << 26) | (1u << 10);
+        const std::size_t ip_before = machine.frame().ip;
+        if (!machine.step()) return fail("两位同置的那一拍停机了");
+        if ((machine.state_flags() & (1u << 26)) != 0) {
+            return fail("位序更早的第 26 位没有被服务");
+        }
+        if ((machine.state_flags() & (1u << 10)) == 0) {
+            return fail("本迭代还服务了位序更晚的第 10 位（扫描该在 26 的交回处停下）");
+        }
+        if (machine.frame().ip != ip_before) return fail("第 26 位交回迭代头 ⇒ 本迭代不该派发");
+        if (!machine.step()) return fail("下一迭代停机了");
+        if ((machine.state_flags() & (1u << 10)) != 0) {
+            return fail("下一迭代没有服务第 10 位");
+        }
+        if (machine.frame().ip != ip_before) return fail("第 10 位也交回迭代头");
+        if (!machine.step() || machine.frame().ip != ip_before + 4) {
+            return fail("门字归 0 之后没有派发一条");
+        }
+    }
+    // ④ 第 29 位（`CORE-VM-GATE` / `CORE-OPS-TEXT-SLOT-TIMER`）：命中 ⇒ 先跑一趟文本推进器，再按
+    //    **文本槽在用标志**决定收场：**有槽在用 ⇒ 服务体自己派发一条**；**无槽在用时 ⇒ 交回迭代头**。
+    //    spec 句：`70-vm.md` 的**服务链位序表第 17 行**（「文本推进器；命中且文本槽在用标志非 0 ⇒
+    //    随即派发一条」「为 0 ⇒ 交回迭代头」）+「门」条第三收场（「由它的服务体自己派发一条」）。
+    //    ★ 判据**不是**待处理命令队列的占用格：那一格在门上几乎恒 0（投递口就在同一次调用里顺手泵掉，
+    //    取证 `report-text-gate.md` §5.3）⇒ 拿它当判据会让演示闸永远派发不出去。下面让**队列空着**
+    //    也必须派发，正是为了把这条反向钉住。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 2, {});
+        auto slotted_script = make_script_with_body();
+        // 槽 1 的状态字 ← 2：**非 0**（⇒ 有槽在用），但没有闸位（bit0）/ 粘住位（bit16）
+        // ⇒ 这一趟推进器什么都不做，`[77984h]` 仍然按"任一状态字非 0"为 1。
+        emit_instruction(slotted_script, 0x300, {{0, 1}, {0, 2}, {0, 0}});
+        emit_instruction(slotted_script, 0x1A8, {});
+        emit_instruction(slotted_script, 0x1A8, {});
+        emit_instruction(slotted_script, 2, {});
+        // (a) 无槽在用 ⇒ 交回迭代头（本迭代零派发）。
+        core::Machine bare(0x12345678u, table);
+        bare.load_root(script);
+        if (bare.text_slot_in_use()) return fail("夹具：没有写槽却报了「有槽在用」");
+        bare.state_flags_mut() |= (1u << 29);
+        const std::size_t bare_ip = bare.frame().ip;
+        if (!bare.step()) return fail("第 29 位 + 无槽那一拍停机了");
+        if (bare.frame().ip != bare_ip) {
+            return fail("无槽在用时第 29 位仍派发了（应为交回迭代头）");
+        }
+        // (b) 有槽在用（槽状态字非 0）⇒ 服务体自己派发一条 —— **队列空着也必须派发**。
+        core::Machine slotted(0x12345678u, table);
+        slotted.load_root(slotted_script);
+        if (!slotted.step()) return fail("0x300 那一拍停机了");
+        if (!slotted.text_slot_in_use()) {
+            return fail("0x300 写了非 0 状态字之后没有置「有槽在用」标志");
+        }
+        if (slotted.pending_command_count() != 0) return fail("夹具：队列不是空的");
+        slotted.state_flags_mut() |= (1u << 29);
+        const std::size_t slotted_ip = slotted.frame().ip;
+        if (!slotted.step()) return fail("有槽 + 第 29 位那一拍停机了");
+        if (slotted.frame().ip != slotted_ip + 4) {
+            return fail("有槽在用时第 29 位没有派发一条（队列占用格规则会在这里交回迭代头）");
+        }
+        if (slotted.pending_command_count() != 0) {
+            return fail("门上的第 29 位服务体不该取走命令（取命令只发生在泵里）");
+        }
+        if ((slotted.state_flags() & (1u << 29)) != 0) {
+            return fail("夹具失效：派发时第 29 位仍置（无法证明判据是槽在用标志，而不是这一位本身）");
+        }
+    }
+    // ⑤ 两支（`report-text-gate.md` §3.4）：**普通打字（没有 `0x300` 闸）⇒ 打字期零派发**；
+    //    **演示闸（`0x300` 开着、槽在用）⇒ 每迭代派发一条**。
+    {
+        // 文本层夹具（`0x80` 默认槽 9 / `0x70` 层矩形 / `0x79` 原点 / `0x213` 键基数 / `0x71` 建画布）。
+        const auto text_layer_setup = [&](std::vector<std::uint8_t>& bytes) {
+            emit_instruction(bytes, 0x80, {{0, 9}});
+            emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+            emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+            emit_instruction(bytes, 0x213, {{0, 9}, {0, 190700}, {0, 40}});
+            emit_instruction(bytes, 0x75, {{0, 20}});
+            emit_instruction(bytes, 0x71, {{0, 9}});
+        };
+        // (a) 普通打字：`0x74` 起每字间隔、`0x6e` 追加两个待画格 ⇒ 打字期推进器走、脚本不前进。
+        auto typing_script = make_script_with_body();
+        text_layer_setup(typing_script);
+        emit_instruction(typing_script, 0x74, {{0, 5}});  // 每字 5ms
+        emit_instruction(typing_script, 0x6E, {{0, 0}, {5, 0}});  // "AB" ⇒ 两格
+        emit_instruction(typing_script, 0x1A8, {});
+              // 打字期间**不该**被执行
+        emit_instruction(typing_script, 2, {});
+        core::Machine typing = text_scene_machine(0x12345678u, table);
+        typing.write_text(core::Operand{5, 0}, "AB");
+        typing.load_root(typing_script);
+        for (int i = 0; i < 8; ++i) {  // 夹具 6 条 + 0x74 + 0x6e
+            if (!typing.step()) return fail("普通打字夹具：走到追加之后停机了");
+        }
+        if (!typing.text_typing()) return fail("间隔 > 0 时追加后应当置第 29 位（打字中）");
+        if (typing.text_slot_in_use()) {
+            return fail("普通打字不该有「有槽在用」（没有起 0x300 闸）");
+        }
+        const std::size_t typing_ip = typing.frame().ip;
+        std::size_t last_pending = typing.pending_glyph_count();
+        if (last_pending == 0) return fail("普通打字夹具：追加之后没有待画格");
+        int drew = 0;
+        for (int i = 0; i < 6 && typing.text_typing(); ++i) {
+            if (!typing.step()) break;
+            if (typing.frame().ip != typing_ip) {
+                return fail("普通打字期间派发了一条指令（引擎在打字期零派发）");
+            }
+            if (typing.pending_glyph_count() < last_pending) ++drew;
+            last_pending = typing.pending_glyph_count();
+        }
+        if (drew == 0) return fail("打字期推进器没跑（「零派发」退化成「零推进」）");
+        if (typing.text_typing()) return fail("普通打字没有自己走完（第 29 位还置着）");
+        if (!typing.step() || typing.frame().ip != typing_ip + 4) {
+            return fail("打字结束后门没有重新打开（派发没有恢复）");
+        }
+        // (b) 演示闸：`0x300` 开闸（槽 9）后追加 ⇒ 槽在用 ⇒ 每迭代派发一条。
+        auto demo_script = make_script_with_body();
+        emit_instruction(demo_script, 0x300, {{0, 9}, {0, 1}, {0, 50}});  // 闸开
+        text_layer_setup(demo_script);
+        emit_instruction(demo_script, 0x74, {{0, 5}});
+        emit_instruction(demo_script, 0x6E, {{0, 0}, {5, 0}});
+        emit_instruction(demo_script, 0x1A8, {});
+        emit_instruction(demo_script, 0x1A8, {});
+        emit_instruction(demo_script, 2, {});
+        core::Machine demo(0x12345678u, table);
+        demo.write_text(core::Operand{5, 0}, "AB");
+        demo.load_root(demo_script);
+        for (int i = 0; i < 9; ++i) {  // 0x300 + 夹具 6 条 + 0x74 + 0x6e
+            if (!demo.step()) return fail("演示闸夹具：走到追加之后停机了");
+        }
+        if (!demo.text_slot_in_use()) return fail("0x300 开闸之后没有置「有槽在用」标志");
+        if (!demo.text_typing()) {
+            return fail("演示闸层追加之后第 29 位没有置起（推进器根本不会被调用）");
+        }
+        if (demo.pending_glyph_count() != 0) {
+            return fail("闸开着的层还在走普通打字队列（同一段文本有两个推进者）");
+        }
+        std::size_t demo_ip = demo.frame().ip;
+        for (int i = 0; i < 2; ++i) {
+            if (!demo.step()) return fail("演示闸期间停机了");
+            if (demo.frame().ip != demo_ip + 4) {
+                return fail("演示闸开着时没有每迭代派发一条（门停在 gate 上了）");
+            }
+            demo_ip = demo.frame().ip;
+        }
+    }
+    return true;}// ── 两套字号：`0x75` = A 支（`0x204` 用）、`0x197` = B 支（记录绘制用） ──
 /** 这条专门守"字号跟错格"这一类错：A 支缺省 24、B 支缺省 8、互不覆盖；`0x204` 用的必须是 A 支。
  *  ★ 历史：模型曾把 `0x75` 当"行高"、`0x197` 当"字形高度"，于是配置界面按 B 支的 10 画（帮助文字"极小"）。
  *  证据见 `vm.h` 里两个格的注释（EA 锚都在那里）。 */
@@ -5646,7 +7248,6 @@ bool check_font_branches(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 渲染原语：数值文本 `0x205` 与清屏 `0x20e` ──
 /** 判据是**整张纹理逐字节相等**：0x205 的输出必须与"把期望串用 0x204 画在同一位置"完全相同
  *  （像素 + 宽度 + 高度），因此格式化结果、横向落点与纵向对位**一起**被钉住。
@@ -5718,7 +7319,6 @@ bool check_render_prims(const core::OpcodeTable& table) {
         emit_instruction(script, 2, {});
         return run_script(script);
     };
-
     if (core::text_backend_available()) {
         // ⓪ 正向控制：参照串必须真出墨。字体缺失时 0x205 与 0x204 会"同样失败" ⇒ 不加这条就会静默绿。
         const Run control = draw_text(20, 20, "45");
@@ -5809,7 +7409,6 @@ bool check_render_prims(const core::OpcodeTable& table) {
             return fail("0x205 改了参照不会改的状态（脏标记 / 当前渲染目标 / 纹理槽表）");
         }
     }
-
     // ⑬ 0x20e：清**当前渲染目标**。目标是纹理槽 ⇒ 该表面变透明黑、内容版本 +1；非目标纹理不动；
     //    目标是后缓冲（-1）⇒ 模型没有可写表面（宿主限制）。
     {
@@ -5824,7 +7423,6 @@ bool check_render_prims(const core::OpcodeTable& table) {
         emit_instruction(filled, 2, {});
         const Run before = run_script(filled);
         if (!has_ink(bytes_of(before, 1))) return fail("0x20E 夹具的前置填充没落地");
-
         auto cleared = single;
         emit_instruction(cleared, 0x20D, {{0, 1}});
         emit_instruction(cleared, 0x20E, {});
@@ -5838,7 +7436,6 @@ bool check_render_prims(const core::OpcodeTable& table) {
         if (revision == after.revisions.end() || revision->second <= before.revisions.at(1)) {
             return fail("0x20E 清了纹理却没有换内容版本（宿主不会重传）");
         }
-
         // 非目标纹理不动：两张都填色、目标是 1
         auto two = make_script_with_body();
         fill_one(two, 1);
@@ -5855,7 +7452,6 @@ bool check_render_prims(const core::OpcodeTable& table) {
             return fail("0x20E 清了非目标纹理（⛔ 不是清纹理表）");
         }
         if (has_ink(bytes_of(kept, 1))) return fail("0x20E 没清目标纹理（双纹理夹具）");
-
         // 目标是后缓冲（缺省 -1）⇒ 纹理原样、不报错、目标还是 -1
         auto buffered = single;
         emit_instruction(buffered, 0x20E, {});
@@ -5869,7 +7465,6 @@ bool check_render_prims(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 字形 AA 档：格式选择 + 灰度级换算（引擎是 17 / 65 级，⛔ 不是 2^n） ──
 /** 这条守"文字亮度"的**算术**那一半。
  *  · 格式只看三个配置格：总开关 `set:EnableAntiFont` 与子开关 `message:UseAntiFont` 都非 0 才开；
@@ -5897,7 +7492,6 @@ bool check_glyph_alpha() {
         core::glyph_format(true, false, 0) != core::GlyphFormat::Mono) {
         return fail("任一开关为 0 ⇒ 应当是 1 位掩码（⛔ 不是灰度）");
     }
-
     // ② 原始级数 → alpha（引擎同式）：17 级满覆盖 240、65 级满覆盖 251
     if (core::level_to_alpha(0, core::kGray4Levels) != 0) return fail("级数 0 应当是透明");
     if (core::level_to_alpha(16, core::kGray4Levels) != 240) {
@@ -5906,7 +7500,6 @@ bool check_glyph_alpha() {
     if (core::level_to_alpha(64, core::kGray8Levels) != 251) {
         return fail("GRAY8 满覆盖应当是 251（值 × 255 / 65）；得 255 说明按 64 级算了");
     }
-
     // ③ 连续覆盖率 → 量化后 alpha：GRAY4 只能是 15 的倍数、上限 240；GRAY8 上限 251
     int previous = -1;
     for (int coverage = 0; coverage <= 255; ++coverage) {
@@ -5923,7 +7516,6 @@ bool check_glyph_alpha() {
     }
     return true;
 }
-
 // ── 写入三条支路（`CORE-OPS-RENDER-TEXT-204` 的合同；纯算术，不需要文本后端） ──
 /** ① 覆盖值 = 0 ⇒ 一个字节都不写；② 通道值 = 通道满值 **或** 目标自身通道值 = 0 ⇒ 整像素覆写源色；
  *  ③ 其余 ⇒ 逐通道加权 `(源×值 + 目标×(满−值)) ÷ 满`、输出通道值 = max(目标, 覆盖值)。
@@ -5976,7 +7568,6 @@ bool check_glyph_compose() {
     }
     return true;
 }
-
 // ── 抽干：宿主报了"有输入在按下" ⇒ 剩余待画格在同一帧内画完 ──
 /** 引擎 `0x4096e0`–`0x4096f4` 的 do-while：有按键 / 跳过时不再"每帧一格"，而是把队列抽干。
  *  我们的信号是宿主每帧喂的 `set_input_pressed()`（主循环**被动观察**输入，与脚本主动取键
@@ -6004,7 +7595,7 @@ bool check_text_drain(const core::OpcodeTable& table) {
     emit_instruction(bytes, 0x75, {{0, 20}});
     emit_instruction(bytes, 0x75, {{0, 20}});
     emit_instruction(bytes, 2, {});
-    core::Machine machine(key, table);
+    core::Machine machine = text_scene_machine(key, table);
     machine.write_text(core::Operand{5, 0}, "ABC");
     machine.load_root(bytes);
     for (int i = 0; i < 9; ++i) {
@@ -6029,7 +7620,6 @@ bool check_text_drain(const core::OpcodeTable& table) {
     machine.set_input_pressed(false);
     return true;
 }
-
 // ── 打字节流：按**每字间隔毫秒**推进，每帧最多一格（未到期的帧一格都不画） ──
 /** 引擎 `sub_409400` / `sub_453b60`：`elapsed <= n × interval` ⇒ **整个函数返回**（本帧一格都不画），
  *  超过才推进一格并把 n 推到 ⌊elapsed/interval⌋+1。启动 = `sub_453a60`（间隔 = `Font+0x560`）。
@@ -6043,6 +7633,10 @@ bool check_text_pacing(const core::OpcodeTable& table) {
     };
     const auto build = [&](std::int32_t speed) {
         auto bytes = make_script_with_body();
+        // 门前渲染闸门要求 `0x21b != 0 || 状态字 & 0x2400`（`CORE-VM-LOOP`）。★ 这里用 `0x21b`：
+        //   ⛔ 不能用"每拍置等待位（第 10 位）"那招 —— 第 10 位在服务链第 14 项、第 29 位（文本泵）
+        //   在后面，置起等待位会把文本泵整个挡掉（那测的就成了门，不是文本泵）。
+        emit_instruction(bytes, 0x21B, {{0, 1}});
         emit_instruction(bytes, 0x80, {{0, 9}});
         emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
         emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
@@ -6075,36 +7669,31 @@ bool check_text_pacing(const core::OpcodeTable& table) {
         core::Machine machine(key, table, nullptr, config);
         machine.write_text(core::Operand{5, 0}, "ABC");
         machine.load_root(build(100));
-        for (int i = 0; i < 10; ++i) {
+        // ★ 剧本从 11 条指令开始（多了一条 `0x21b`）⇒ 走完 0x6e 要 11 步。
+        for (int i = 0; i < 11; ++i) {
             if (!machine.step()) return fail("走到 0x6e 之前停机");
         }
-        if (machine.pending_glyph_count() != 3) return fail("追加之后待画格数不是 3");
+        if (machine.scalar_21b() == 0) return fail("夹具：0x21b 没有打开门前渲染闸门");        if (machine.pending_glyph_count() != 3) return fail("追加之后待画格数不是 3");
         if (!machine.text_typing()) return fail("间隔 > 0 时追加后应当置第 29 位（打字中）");
         if (machine.text_timer_interval_ms() != 100) return fail("计时器间隔不是 MessageSpeed");
         // ★ 文本层变了必须请求渲染（否则"揭示一格"在没有任何动画时不会产生新帧）。
         machine.end_render();
         machine.consume_frame_step();
-        // 门前渲染闸门还要求 `0x21b != 0 || 状态字 & 0x2400`；每拍先把等待位 0x400（bit10）置起，
-        // 让闸门在**服务段之后、清位之前**看到它（清位只影响下一拍）。这样只测文本泵的请求。
         for (int i = 0; i < 5; ++i) {
-            machine.state_flags_mut() |= 0x400u;
             if (!machine.step()) return fail("节流期停机");
             if (machine.pending_glyph_count() != 3) {
                 return fail("未到 100ms 的帧画了字（把「每 D 毫秒一格」实现成「每帧一格」）");
             }
         }
         int drew = -1;
-        bool requested_render = false;
         for (int i = 0; i < 5 && drew < 0; ++i) {
-            machine.state_flags_mut() |= 0x400u;
             if (!machine.step()) return fail("跨过间隔时停机");
-            if (machine.pending_glyph_count() == 2) {
-                drew = i;
-                requested_render = machine.consume_frame_step();
-            }
-        }
+            if (machine.pending_glyph_count() == 2) drew = i;        }
         if (drew < 0) return fail("跨过 100ms 仍一格都没画（计时器没有到期分支）");
-        if (!requested_render) {
+        // ★ 门前渲染步在门**之前**判定（`CORE-VM-LOOP`：场景推进 → 门前渲染步 → 过门）；
+        //   文本泵是门上的第 29 位服务体 ⇒ 它画的这一格要**下一迭代**才被渲染闸门看见。
+        if (!machine.step()) return fail("画完一格之后停机");
+        if (!machine.consume_frame_step()) {
             return fail("文本揭示一格没有请求渲染（没有别的动画时这一格永远不上屏）");
         }
         if (ink(machine) == 0) return fail("到期那一帧没有真的落字");
@@ -6121,7 +7710,7 @@ bool check_text_pacing(const core::OpcodeTable& table) {
         core::Machine machine(key, table);
         machine.write_text(core::Operand{5, 0}, "ABC");
         machine.load_root(build(0));
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 11; ++i) {
             if (!machine.step()) return fail("间隔 = 0 时在 0x6e 之前停机");
         }
         if (machine.text_typing()) return fail("间隔 = 0 时不该置第 29 位（应当立即抽干）");
@@ -6130,7 +7719,6 @@ bool check_text_pacing(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── `0x300` 循环演示闸：逐格揭示 → 停「期限」→ 清条目 → 从第一格重来 ──
 /** 引擎文本泵 `sub_409400`：槽 1..9 任一状态非 0 ⇒ 有槽在用（第 29 位保持）；每 `MessageSpeed` 毫秒
  *  从层记录 `+0x84` 揭示一格（`sub_45BE20`）；整段揭示完记起点，`现在−起点 ≥ 期限` 时清该层两段
@@ -6168,7 +7756,7 @@ bool check_text_slot_replay(const core::OpcodeTable& table) {
         }
         return count;
     };
-    core::Machine machine(key, table);
+    core::Machine machine = text_scene_machine(key, table);
     machine.write_text(core::Operand{5, 0}, "AB");
     machine.load_root(build(50, 20));
     for (int i = 0; i < 9; ++i) {  // 走完 0x6E（追加），停在 0x6F 之前
@@ -6235,7 +7823,6 @@ bool check_text_slot_replay(const core::OpcodeTable& table) {
     if (ink(machine) != ink_before) return fail("0x301 清了画布像素（它只清绘制条目与游标）");
     return true;
 }
-
 // ── 跨帧队列的**样式快照**：追加之后改字号，不许影响已经排好版的那一格 ──
 /** 引擎在**追加时**就量度 + 逐字写出（`sub_46BE30` 的 SelectObject / 逐字写出），之后的推进只呈现
  *  已经排好版的格。旧实现（画的时候再读 `Font+0x313D4`）在设置界面被实测到：示例文本中间恰好跨帧的
@@ -6248,7 +7835,6 @@ bool check_text_pending_style_snapshot(const core::OpcodeTable& table) {
         return false;
     };
     if (!core::text_backend_available()) return true;  // 没有字体后端 ⇒ 字形断言无意义
-
     auto bytes = make_script_with_body();
     emit_instruction(bytes, 0x80, {{0, 9}});
     emit_instruction(bytes, 0x70, {{0, 9}, {0, 824}, {0, 120}, {0, 324}, {0, 570}});
@@ -6263,8 +7849,7 @@ bool check_text_pending_style_snapshot(const core::OpcodeTable& table) {
     emit_instruction(bytes, 0x75, {{0, 10}});         // ★ 追加之后、画出来之前把 A 支改成 10
     for (int i = 0; i < 12; ++i) emit_instruction(bytes, 0x1A8, {});
     emit_instruction(bytes, 2, {});
-
-    core::Machine machine(key, table);
+    core::Machine machine = text_scene_machine(key, table);
     machine.write_text(core::Operand{5, 0}, "M");
     machine.load_root(bytes);
     for (int i = 0; i < 40 && machine.pending_glyph_count() == 0; ++i) {
@@ -6302,7 +7887,6 @@ bool check_text_pending_style_snapshot(const core::OpcodeTable& table) {
                      ink_height);
         return fail("待画格是按**画的时候**的字号画的（旧行为）");
     }
-
     // ── ② 粗细（`0x2bd`）也必须随格快照 ──
     // 实测缺陷（2026-10-29）：示例文本的 12 格里恰好跨帧的那一格按**常规体**画出来、其余是粗体，
     // 字宽却仍是按粗体量出来的 —— 因为 `draw_text_into_texture` 在**画的时候**现读
@@ -6326,7 +7910,7 @@ bool check_text_pending_style_snapshot(const core::OpcodeTable& table) {
         if (weight_change == 1) emit_instruction(script, 0x2BD, {{0, 0}});  // ★ 追加**之后**变细
         for (int i = 0; i < 12; ++i) emit_instruction(script, 0x1A8, {});
         emit_instruction(script, 2, {});
-        core::Machine m(key, table);
+        core::Machine m = text_scene_machine(key, table);
         m.write_text(core::Operand{5, 0}, "M");
         m.load_root(script);
         // 走完整段脚本（脚本末尾是 `exit`；12 条空转足够把那一格在 100ms 间隔后放出来）。
@@ -6360,7 +7944,6 @@ bool check_text_pending_style_snapshot(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 文本记录标志位 2：**B 支字号**的置位者与消费口径 ──
 /** 引擎：位 2 不是共用追加器置的，而是**两个调用方**在 flags 实参上置起（振り仮名 run / 层模式 = 1 的逐字支）；
  *  消费者按它选 B 支（`0x197`）或 A 支（`0x75`）。这条守三件：
@@ -6451,7 +8034,6 @@ bool check_text_record_flags(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 振り仮名的横向定位：铺满格宽（两端各留一份步进）/ 过宽时以格中心对齐 ──
 /** 引擎 `sub_465a20`（调用点 `0x46c379`）：振り仮名摆进**它自己那一格**（= 本条主文本最后一行的范围），
  *  `d = 格宽 − 整串量度宽`、`n = 假名数 + 1`：
@@ -6535,7 +8117,6 @@ bool check_text_ruby(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── typewriter：追加时只写布局格，绘制侧**每帧只推进一格** ──
 /** 引擎：`0x6e` / `0x196` 追加时一次性写好布局格与文本记录（绘制条目也是**预先**排好、指向画布区域），
  *  但**落字**由推进器每帧推一格（`sub_409400` 每帧 → `0x4096a9` 序号 +1；帧间按 `message:MessageSpeed`
@@ -6568,7 +8149,7 @@ bool check_text_typewriter(const core::OpcodeTable& table) {
     emit_instruction(bytes, 0x75, {{0, 20}});
     emit_instruction(bytes, 0x75, {{0, 20}});
     emit_instruction(bytes, 2, {});
-    core::Machine machine(key, table);
+    core::Machine machine = text_scene_machine(key, table);
     machine.write_text(core::Operand{5, 0}, "ABC");
     machine.load_root(bytes);
     for (int i = 0; i < 9; ++i) {
@@ -6621,8 +8202,6 @@ bool check_text_typewriter(const core::OpcodeTable& table) {
     if (machine.pending_glyph_count() != 0) return fail("走满字符数帧之后待画格仍非 0");
     return true;
 }
-
-
 /** 同一个场景各画一次，唯一变量是三个 AA 配置格。判据 = 文本层画布里的**最大 alpha** 与**墨迹 RGB**：
  *  · 关 ⇒ 1 位掩码 ⇒ 覆盖像素全是 255（且源色原值）；
  *  · 开 ⇒ GRAY4 的 17 级 ⇒ 满覆盖 240，**RGB 仍是源色原值**（真机在空画布上走"整像素覆写"支，
@@ -6636,7 +8215,6 @@ bool check_glyph_brightness(const core::OpcodeTable& table) {
         return false;
     };
     if (!core::text_backend_available()) return true;  // 没编文本后端 ⇒ 这条不成立（不是失败）
-
     // 返回 {最大 alpha, 墨迹里最小的 RGB 通道}；-1 表示画布没建出来。
     const auto draw_and_probe = [&](bool anti_alias) {
         auto bytes = make_script_with_body();
@@ -6676,7 +8254,6 @@ bool check_glyph_brightness(const core::OpcodeTable& table) {
         }
         return std::pair<int, int>{best_alpha, worst_rgb};
     };
-
     const auto mono = draw_and_probe(false);
     const auto gray4 = draw_and_probe(true);
     if (mono.first != 255) {
@@ -6701,7 +8278,6 @@ bool check_glyph_brightness(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 // ── 玩家配置的根与保存闸（引擎用**本地**应用数据目录，⛔ 不是漫游） ──
 /** 这条守"配置根选错"这一类错 —— 它的后果不是报错，而是**读到另一个世界**的配置
  *  （字体名 / AA 开关 / 消息速度全是另一份值），以及把我们的退时保存写进真机那份文件。
@@ -6737,7 +8313,6 @@ bool check_config_paths() {
     if (core::player_config_root("E:/game", true, env) != local) {
         return fail("XDG 数据目录没有参与选择");
     }
-
     // 保存闸
     const std::filesystem::path player = local / "Eushully" / "title" / "SYS4REG.INI";
     if (!core::path_is_within(player, local)) return fail("path_is_within 判错了前缀");
@@ -6762,7 +8337,6 @@ bool check_config_paths() {
     }
     return true;
 }
-
 // ── 文本层画布：`0x70/0x79/0x213/0x71` 的状态 + `0x6e/0x196/0x6f` 的栅格化 ──
 /** 设置界面底部示例文本的**结构级**判据（不依赖游戏安装）：
  *  · 层 9 的画布 = 纹理 29，尺寸来自 `0x70`（824×120），屏幕位置 = (324,570)；
@@ -6776,7 +8350,6 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
         std::fprintf(stderr, "text-layer: %s\n", what);
         return false;
     };
-
     auto bytes = make_script_with_body();
     emit_instruction(bytes, 0x80, {{0, 9}});  // 默认槽 = 9（`show-text 0` 落到层 9）
     emit_instruction(bytes, 0x70, {{0, 9}, {0, 824}, {0, 120}, {0, 324}, {0, 570}});
@@ -6792,8 +8365,7 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
     emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});            // 再追加 AB
     emit_instruction(bytes, 0x6F, {{0, 0}});
     emit_instruction(bytes, 2, {});
-
-    core::Machine machine(key, table);
+    core::Machine machine = text_scene_machine(key, table);
     machine.write_text(core::Operand{5, 0}, "AB");
     machine.write_text(core::Operand{5, 1}, "R");
     machine.load_root(bytes);
@@ -6814,7 +8386,6 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
         if (any) return fail("0x71 之后画布不是全透明（清空没生效）");
     }
     if (machine.draw_item(180500) != nullptr) return fail("0x71 在还没有正文时就排了绘制条目");
-
     // 0x196 + 0x6e：游标从文本原点 (108,52) 向右推进；空串不推进。
     for (int debug_step = 0; debug_step < 2; ++debug_step) {
         if (!machine.step()) {
@@ -6847,12 +8418,10 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
     const core::DrawItem* second = machine.draw_item(180501);
     if (second == nullptr || second->left <= first->left) return fail("逐字符条目的键没有按序号递增");
     if (machine.draw_item(180502) == nullptr) return fail("缺少振り仮名条目（key 应为 180502）");
-
     // 0x6f：x 复位到文本原点，y 前进「行間隙 6 + A 支字号 30」。
     if (!machine.step()) return fail("0x6f 停机");
     if (machine.text_layer_cursor_x(9) != 108) return fail("0x6f 没有把游标 x 复位到文本原点");
     if (machine.text_layer_cursor_y(9) != 52 + 30 + 6) return fail("0x6f 没有把游标 y 前进「字号 + 行間隙」");
-
     // 第二次 0x71：画布必须回到全透明（绘制项仍指向同一张画布）。
     auto clear_bytes = make_script_with_body();
     emit_instruction(clear_bytes, 0x80, {{0, 9}});
@@ -6880,7 +8449,6 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
             return fail("第二次 0x71 之后旧逐字符条目还在");
         }
     }
-
     // 自动折行门：配置 `set:AutoLineFeed` 非 0 ⇒ 超右界回原点、y 前进一行；0 ⇒ 不折行。
     const auto make_wrap_script = []() {
         auto bytes = make_script_with_body();
@@ -7015,7 +8583,6 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
     }
     return true;
 }
-
 int main(int argc, char** argv) {
     // `--only-audio`：只跑音效 / 配音那条子集（供一条**独立注册**的 CTest 用）。
     // ★ 为什么要单独一个用例：spec 的证据要求"点得到某条用例"，而聚合的自检只有一个名字 ——
@@ -7099,7 +8666,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "engine path decode mismatch\n");
             return 1;
         }
-
         const auto alf_bytes = make_alf_ai();
         const auto alf = core::parse_alf_index(alf_bytes);
         if (alf.signature != "S4AI" || alf.title != "selftest" || alf.zone != 7) {
@@ -7114,14 +8680,12 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "ALF file mismatch\n");
             return 1;
         }
-
         const auto agf = core::decode_agf(make_agf_1x1());
         if (agf.width != 1 || agf.height != 1 || agf.bpp != 24 || agf.rgba.size() != 4 ||
             agf.rgba[0] != 0x10 || agf.rgba[1] != 0x20 || agf.rgba[2] != 0x30 || agf.rgba[3] != 255) {
             std::fprintf(stderr, "AGF decode mismatch\n");
             return 1;
         }
-
         const auto script_bytes = make_script();
         const auto header = core::parse_script_header(script_bytes);
         if (header.magic != "SYS4" || header.version != "450 " || header.body_offset != 60) {
@@ -7133,7 +8697,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "script table pointers mismatch\n");
             return 1;
         }
-
         const std::string table_path = "opcode-table.json";
         core::OpcodeTable table = core::OpcodeTable::from_rows({
             {2, 0, "exit", true},
@@ -7146,7 +8709,6 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) {
             std::fprintf(stderr, "opcode table load failed, using fixture rows: %s\n", e.what());
         }
-
         if (only_record_flags) {
             if (!check_text_record_flags(table)) return 1;
             std::printf("core-selftest(record-flags): PASS\n");
@@ -7332,11 +8894,11 @@ int main(int argc, char** argv) {
             // 音效槽（后端 15 / 引擎表 10）+ 门位第 27 位的两条支路（`0xc2` A 支 / `0xc4` 影片门支）。
             if (!check_audio_slot_table()) return 1;
             if (!check_audio_slot_bounds(table)) return 1;
+            if (!check_time_delivery(table)) return 1;
             if (!check_gate_split_branches(table)) return 1;
             std::printf("core-selftest(audio): PASS\n");
             return 0;
         }
-
         // 这两条不依赖游戏安装：放进**全量**自检里也会跑（子集开关只是让 CTest 点得到名字）。
         if (!check_glyph_alpha()) return 1;
         if (!check_glyph_compose()) return 1;
@@ -7347,7 +8909,6 @@ int main(int argc, char** argv) {
         if (!check_config_paths()) return 1;
         // `0x21c` 的「待处理」闩（`+0B5B4`）也进全量自检：它是 TITLE / ADV 的公共前置。
         if (!check_wait_colour_window(table)) return 1;
-
         std::string error;
         const auto instructions = core::decode_instructions(
             std::span<const std::uint8_t>(script_bytes).subspan(header.body_offset),
@@ -7368,7 +8929,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "decode operand mismatch\n");
             return 1;
         }
-
         core::Machine machine(0x12345678u, table);
         machine.load_root(make_vm_script());
         const auto vm_result = machine.run(16);
@@ -7382,7 +8942,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "VM local-int arithmetic mismatch\n");
             return 1;
         }
-
         core::Machine call_machine(0x12345678u, table);
         call_machine.load_root(make_call_script());
         const auto call_result = call_machine.run(16);
@@ -7396,7 +8955,6 @@ int main(int argc, char** argv) {
                 call_result.message.c_str());
             return 1;
         }
-
         core::ConfigVocabulary vocabulary = core::ConfigVocabulary::load_from_file("config-keys.json");
         core::ConfigStore config(std::move(vocabulary));
         config.load_defaults({{"SCREENX", "320"}, {"FONT", "Arial"}});
@@ -7438,7 +8996,6 @@ int main(int argc, char** argv) {
             }
         }
         std::remove("core-selftest-save.ini");
-
         core::Machine list_machine(0x12345678u, table);
         list_machine.load_root(make_list_script());
         const auto list_result = list_machine.run(16);
@@ -7450,7 +9007,6 @@ int main(int argc, char** argv) {
                 static_cast<int>(list_result.reason), list_result.steps);
             return 1;
         }
-
         core::Machine frontier(0x12345678u, table);
         frontier.load_root(make_frontier_script());
         const auto frontier_result = frontier.run(32);
@@ -7465,7 +9021,6 @@ int main(int argc, char** argv) {
                 frontier_result.message.c_str());
             return 1;
         }
-
         // 未实现 opcode：停在它前面；前一条 mov 的写入保留。
         auto unsupported_script = make_vm_script();
         unsupported_script.resize(60 + 20); // 只保留第一条 mov
@@ -7480,7 +9035,6 @@ int main(int argc, char** argv) {
                 static_cast<int>(unsupported_result.reason), unsupported_result.offset);
             return 1;
         }
-
         // ── 渲染：颜色窗推进 + 派生色四档（CORE-TIMING-WINDOW） ──
         auto window_script = make_script_with_body();
         emit_instruction(window_script, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
@@ -7543,7 +9097,6 @@ int main(int argc, char** argv) {
                          window_machine.scene_animating());
             return 1;
         }
-
         // 等待位与颜色窗：**窗没走完之前不放行**（`0x21c` 谓词 A 里的 `+0B5B4`）。
         // ★ 旧版这里断言的是"颜色窗还在走，等待位也必须放行"（只看待画格 / 打字态）——那正是 TITLE 的
         //   mesh 200000 在**任何一帧渲染前**被 `0x1f7` 拆掉的成因（`0x323` 排窗之后 `0x21c` 立刻放行）。
@@ -7556,7 +9109,7 @@ int main(int argc, char** argv) {
                          {{0, 1}, {0, 100}, {0, 100}, {0, 200}, {0, 0x00ABCDEFu}});
         emit_instruction(wait_script, 0x21C, {});
         emit_instruction(wait_script, 2, {});
-        core::Machine wait_machine(0x12345678u, table);
+        core::Machine wait_machine = scene_step_machine(table);
         wait_machine.load_root(wait_script);
         wait_machine.set_host_clock_ms(1000);
         if (!wait_machine.step() || !wait_machine.step()) {  // 0x1FB / 0x202
@@ -7582,25 +9135,41 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "颜色窗还在推进（1150ms）就放行了等待位\n");
             return 1;
         }
-
-        // 0x20C：帧步进请求 + 时间戳 + 消费后强制完成清 0。
+        // 0x20C：帧步进请求 + 时间戳；**「强制完成」的清点在渲染步收尾，不在 `consume_frame_step`**。
+        // ★ spec 句（`CORE-TIMING-WINDOW` 的「不粘住」）：渲染步**收尾**（在"待处理 = 0 ⇒ 清空命令表"
+        //   这一步**之后**）**无条件**把「强制完成」清 0 —— 不管本步有没有人读过它；它**只活一个渲染步**。
+        //   ⇒ 读一次（`consume_frame_step` / `forced_complete`）**不消耗**它，清点只有 `end_render`。
         auto frame_script = make_script_with_body();
         emit_instruction(frame_script, 0x20C, {});
         emit_instruction(frame_script, 2, {});
-        core::Machine frame_machine(0x12345678u, table);
+        core::Machine frame_machine = scene_step_machine(table);
         frame_machine.load_root(frame_script);
         frame_machine.run(8);
-        if (!frame_machine.frame_step_requested() || frame_machine.engine_now_ms() == 0) {
+        if (!frame_machine.frame_step_requested() || frame_machine.scene_clock_ms() == 0) {
             std::fprintf(stderr, "0x20C frame request mismatch\n");
             return 1;
         }
         frame_machine.force_complete();
-        if (!frame_machine.consume_frame_step() || frame_machine.frame_step_requested() ||
-            frame_machine.forced_complete()) {
+        if (!frame_machine.consume_frame_step() || frame_machine.frame_step_requested()) {
             std::fprintf(stderr, "0x20C consume mismatch\n");
             return 1;
         }
-
+        // ⛔ 不许在这里清：`consume_frame_step` 只是"取走一次渲染请求"。
+        if (!frame_machine.forced_complete()) {
+            std::fprintf(stderr, "「强制完成」被 `consume_frame_step` 清掉了（它只活一个渲染步，清点在收尾）\n");
+            return 1;
+        }
+        // 同一步内多次读取**不消耗**它。
+        if (!frame_machine.forced_complete() || !frame_machine.forced_complete()) {
+            std::fprintf(stderr, "「强制完成」读一次就被清掉了（读点只判它是否 = 1）\n");
+            return 1;
+        }
+        // 渲染步收尾 ⇒ 无条件清 0。
+        frame_machine.end_render();
+        if (frame_machine.forced_complete()) {
+            std::fprintf(stderr, "渲染步收尾没有清「强制完成」\n");
+            return 1;
+        }
         // ── 渲染：0x20B 填充 + 0x33F 场景混合（tint / 模式） ──
         const auto make_blend_script = [&](std::uint32_t mode, std::uint32_t tint) {
             auto bytes = make_script_with_body();
@@ -7638,7 +9207,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "0x20B fill mismatch\n");
             return 1;
         }
-
         // ── 渲染：场景命令记录族 + 命令档（种类 0 / 2 / 3） ──
         const auto emit_scene_item = [&](std::vector<std::uint8_t>& bytes, std::uint32_t key,
                                          std::uint32_t texture, std::uint32_t color) {
@@ -7690,12 +9258,15 @@ int main(int argc, char** argv) {
             return 1;
         }
         command_machine.reset_scene_clock(1101);
+        // ★ 收尾判据是**场景待处理标记**（`60-ops-scene` 的「命令档的前置与出档」），它由**渲染步的
+        //   推进子步**清 0 再重算 —— 真实主循环里那一步在本渲染步之前。这里显式走一次那个子步，
+        //   否则读到的是上一步留下的闩（"命令还在动"），命令表就不该被清。
+        command_machine.advance_scene(1101);
         core::rasterize_scene(command_machine, 4, 4);
         if (!command_machine.scene_commands().empty()) {
             std::fprintf(stderr, "command table not cleared after animation ended\n");
             return 1;
         }
-
         // 种类 2：类型越界 ⇒ 不写表 + 一条上报；分割幅 < 1 ⇒ 夹取后照写。
         auto invalid_type_script = make_script_with_body();
         emit_instruction(invalid_type_script, 0x1F8, {{0, 10}, {0, 4}, {0, 4}, {0, 0}});
@@ -7727,7 +9298,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "kind2 split clamp mismatch\n");
             return 1;
         }
-
         // 种类 3：记录写下变体格与「起值 / 终值」，进度用尽后持续时间清 0。
         auto blur_script = make_script_with_body();
         emit_scene_item(blur_script, 1, 1, 0x00FF0000u);
@@ -7750,12 +9320,12 @@ int main(int argc, char** argv) {
         blur_machine.reset_scene_clock(1000);
         core::rasterize_scene(blur_machine, 4, 4);
         blur_machine.reset_scene_clock(1200);
+        blur_machine.advance_scene(1200);  // 渲染步的推进子步（清「场景待处理标记」再重算）
         core::rasterize_scene(blur_machine, 4, 4);
         if (!blur_machine.scene_commands().empty()) {
             std::fprintf(stderr, "kind3 command table not cleared after expiry\n");
             return 1;
         }
-
         // ── 渲染：源矩形窗（0x239） ──
         auto rect_script = make_script_with_body();
         emit_instruction(rect_script, 0x1F8, {{0, 1}, {0, 8}, {0, 8}, {0, 0}});
@@ -7797,7 +9367,6 @@ int main(int argc, char** argv) {
                          rect_item ? rect_item->top : -1);
             return 1;
         }
-
         // ── 渲染：0x204 离屏文字（Shift-JIS + FreeType） ──
         if (core::text_backend_available()) {
             auto text_script = make_script_with_body();
@@ -7843,7 +9412,6 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
-
             // 入口条件：文本为空 ⇒ 不画、不报错；槽不存在 ⇒ 静默跳过。
             auto empty_text_script = make_script_with_body();
             emit_instruction(empty_text_script, 0x1F8, {{0, 1}, {0, 32}, {0, 16}, {0, 0}});
@@ -7865,7 +9433,6 @@ int main(int argc, char** argv) {
                              empty_ink, empty_text.errors().size());
                 return 1;
             }
-
             // ★ 纵向对位：`0x204` 的 y = **字形格顶**，不是基线。绘制入口把「本次量度 ascent」加回
             //   （`0x46F37C` / `0x471253`）再落字；对位模式 = 1 时先做 `y + 缓存ascent − 本次ascent`，
             //   缓存 = 字体重建时对**参考字体**量到的 tmAscent（`Font+0x313EC` 那张 TEXTMETRICA，
@@ -8340,7 +9907,6 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-
         // 种类 2：0 号图案（左→右按道跳）把区间 A 的红与区间 B 的蓝按步序切开。
         auto wipe_script = make_script_with_body();
         emit_scene_item(wipe_script, 1, 1, 0x00FF0000u);
@@ -8368,7 +9934,6 @@ int main(int argc, char** argv) {
                          wiped ? wiped->rgba[13] : 0, wiped ? wiped->rgba[14] : 0);
             return 1;
         }
-
         // 种类 1：第一帧把覆盖区间拷进影片纹理；随后尾段按遮罩取值把透明度乘成 0（flag != 1）。
         auto movie_script = make_script_with_body();
         emit_scene_item(movie_script, 1, 1, 0x00FF0000u);
@@ -8392,7 +9957,6 @@ int main(int argc, char** argv) {
                          static_cast<const void*>(movie_texture));
             return 1;
         }
-
         // ── 渲染：门前渲染（脏标记 / 0x20C / DrawMode 闸门） ──
         auto dirty_script = make_script_with_body();
         emit_instruction(dirty_script, 0x21B, {{0, 1}});
@@ -8415,7 +9979,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "clean scene still requested a render\n");
             return 1;
         }
-
         // 0x1F6 清场景：脏标记被清 0，不能因为“清空”再请求一帧。
         auto clear_script = make_script_with_body();
         emit_instruction(clear_script, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
@@ -8432,7 +9995,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "0x1F6 must clear the dirty flag, not set it\n");
             return 1;
         }
-
         auto step_script = make_script_with_body();
         emit_instruction(step_script, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
         emit_instruction(step_script, 0x20C, {});
@@ -8453,16 +10015,23 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "0x20C did not force a render step\n");
             return 1;
         }
-
         core::ConfigStore off_config;
         off_config.set_int("set:DrawMode", 0);
         core::Machine off_machine(0x12345678u, table, nullptr, std::move(off_config));
+        off_machine.set_host_clock_ms(900);
         off_machine.load_root(dirty_script);
         if (!off_machine.step() || off_machine.consume_frame_step()) {
             std::fprintf(stderr, "DrawMode=0 still auto-rendered\n");
             return 1;
         }
-
+        // ★ 绘制模式 ≠ 1 是"连**盖钟**一起跳过"那一类（`CORE-TIMING-WINDOW` 的 (a)）——
+        //   旧模型只做到"不渲染、时钟照走"；spec 说成立期间**所有以场景时钟计的量都停走**。
+        //   ⇒ 判据是 `scene_clock_ms` **没动**（⛔ 不是"看起来没渲染"）。
+        if (off_machine.scene_clock_ms() != 0u) {
+            std::fprintf(stderr, "DrawMode=0 仍然盖了场景时钟（clock=%u）\n",
+                         off_machine.scene_clock_ms());
+            return 1;
+        }
         // 窗走 step() 的宿主时钟路径：不能在预跑 / 一帧多指令时被一次性推完。
         auto clock_script = make_script_with_body();
         emit_instruction(clock_script, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
@@ -8473,7 +10042,7 @@ int main(int argc, char** argv) {
                          {{0, 1}, {0, 100}, {0, 100}, {0, 255}, {0, 0x00FFFFFFu}});
         for (int i = 0; i < 4; ++i) emit_instruction(clock_script, 0x1A8, {});
         emit_instruction(clock_script, 2, {});
-        core::Machine clock_machine(0x12345678u, table);
+        core::Machine clock_machine = scene_step_machine(table);
         clock_machine.load_root(clock_script);
         clock_machine.set_host_clock_ms(1000);
         for (int i = 0; i < 4; ++i) clock_machine.step();  // 1F8 / 1FB / 203 / 202
@@ -8493,7 +10062,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "host-clock window expiry mismatch\n");
             return 1;
         }
-
         // 门前闸门：脏本身不触发渲染；需要 0x21B 或等待/影片位。
         auto gate_script = make_script_with_body();
         emit_instruction(gate_script, 0x1F8, {{0, 1}, {0, 4}, {0, 4}, {0, 0}});
@@ -8525,7 +10093,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "0x21B did not open the render gate\n");
             return 1;
         }
-
         // ── 影片：0x20f 的对象表 / 绑定门 / 影片位 / 门前服务（CORE-OPS-MOVIE / CORE-VM-MOVIE） ──
         {
             FakeMovieStats stats;
@@ -8611,7 +10178,6 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-
         // 循环位：收尾 ⇒ 回到开头重新启动，保留对象与槽，不填纹理。
         {
             FakeMovieStats stats;
@@ -8638,7 +10204,6 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-
         // `(选项字 & 3) == 2` ⇒ 收尾**不**发"填纹理"：纹理保持空白（这一支不出新帧）。
         {
             for (const std::uint32_t options : {0u, 2u}) {
@@ -8680,7 +10245,6 @@ int main(int argc, char** argv) {
                 }
             }
         }
-
         // 失败路径：绑定门为空 / 取文件失败 ⇒ 已建对象留在槽里、未启动、不置影片位。
         {
             FakeMovieStats stats;
@@ -8700,7 +10264,6 @@ int main(int argc, char** argv) {
                              gate_movie.last_stop().message.c_str());
                 return 1;
             }
-
             FakeMovieStats open_stats;
             core::Machine open_movie(0x12345678u, table);
             open_movie.set_movie_backend_factory([&open_stats]() {
@@ -8722,7 +10285,6 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-
         // ── 0x1f7 拆离：四张同键表一起删（绘制项 / 网格 / 辅助 A；辅助 B 无写入口） ──
         {
             auto detach_script = make_script_with_body();
@@ -8786,15 +10348,15 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-
-
         if (!check_menu_table(table)) return 1;
         if (!check_status_and_mode(table)) return 1;
         if (!check_text_cell_reveal(table)) return 1;
         if (!check_run_bracket(table)) return 1;
+        if (!check_command_queue(table)) return 1;
         if (!check_input_dispatch(table)) return 1;
         if (!check_input_devices(table)) return 1;
         if (!check_pause_and_clock(table)) return 1;
+        if (!check_scene_clock_gate(table)) return 1;
         if (!check_second_batch(table)) return 1;
         if (!check_scene3d_setters(table)) return 1;
         if (!check_memflip(table)) return 1;
@@ -8807,13 +10369,16 @@ int main(int argc, char** argv) {
         if (!check_slot_imgid(table)) return 1;
         if (!check_texture_size(table)) return 1;
         if (!check_exit_script(table)) return 1;
+        if (!check_exit_script_reset_scope(table)) return 1;
+        if (!check_frame_shape(table)) return 1;
         if (!check_audio_slot_table()) return 1;
         if (!check_audio_slot_bounds(table)) return 1;
+        if (!check_time_delivery(table)) return 1;
         if (!check_gate_split_branches(table)) return 1;
+        if (!check_gate_chain(table)) return 1;
         if (!check_font_branches(table)) return 1;
         if (!check_render_prims(table)) return 1;
         if (!check_text_layer_surface(table)) return 1;
-
         std::printf(
             "core-selftest: PASS (alf files=%zu, script body=%zu, instructions=%zu, opcode table=%zu)\n",
             alf.files.size(),

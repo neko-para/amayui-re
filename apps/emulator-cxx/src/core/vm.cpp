@@ -7,6 +7,7 @@
 #include "core/encoding.h"
 #include "core/install.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 
@@ -37,6 +38,16 @@ bool is_scene_mutating(std::uint32_t opcode) {
             return false;
     }
 }
+
+// 「装载帧」的失败分档（`60-ops-frame.md:151` / `70-vm.md:309` 的泵正命令）：
+//   · **id 非法 / 打不开** ⇒ 显示消息型异常（类别 7：可重试 / 忽略）；
+//   · **头坏 / 装载器返回 0** ⇒ 退出型异常（不重试）。
+// 判据按失败点本身分：打开件那几条以文件 / 归档开头，解析头那几条以 `script-` 开头。
+bool is_load_open_failure(const std::string& what) {
+    return what.rfind("file-id-out-of-range", 0) == 0 || what.rfind("open-failed", 0) == 0 ||
+           what.rfind("tell-failed", 0) == 0 || what.rfind("read-failed", 0) == 0 ||
+           what.rfind("archive-", 0) == 0;
+}
 }  // namespace
 
 Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install* install,
@@ -52,24 +63,181 @@ Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install*
     display_mode_cache_ = config_.get_int("display:ScreenMode");
     // 启动期登记：键非 0 才认为"备组已分配"（发行数据里该键恒 0 ⇒ 只有异常支可达）。
     memflip_available_ = config_.get_int("set:EnableMemFlip") != 0;
+    // 启动时登记引擎重置钩子（`CORE-OPS-FRAME-EXIT-SCRIPT` 的第一项；站点 `0x4165ce`）。
+    // ★ 只登记、不执行；`0x9` 拿它做「推进格数 ← 1 + 清状态字第 9 位」。
+    engine_reset_hook_registered_ = true;
 }
 
 void Machine::load_root(const Bytes& script, std::uint32_t script_id) {
     const ScriptHeader header = parse_script_header(script);
-    Frame& root = frames_[0];
-    root = Frame{};
-    root.loaded = true;
-    root.code.assign(script.begin() + header.body_offset, script.end());
-    root.ip = 0;
-    root.body_offset = header.body_offset;
-    root.length_slot = 0;
-    root.parent = -1;
-    root.script_id = script_id;
-    root.local_depth = static_cast<std::int32_t>(script_id);  // 本帧的身份编号（本地块深度判据用）
+    // 根帧的父帧号是哨兵 −1（`CORE-OPS-FRAME-EXIT-SCRIPT`）：装载器只照抄「父帧候选」格 ⇒ 先写它。
+    parent_candidate_ = -1;
+    apply_frame_record(0, script, header, script_id);
     current_frame_ = 0;
     halted_ = false;
     scene_dirty_ = true;
     stop_ = {};
+}
+
+// ★ **同一条装载路径**（`CORE-OPS-FRAME-CALL-SCRIPT` 的成立条件）：`0x3` / `0x6` / `0x9` 重置
+//   与泵的正命令都从这里建新帧记录，所以形状只有一份（以前三条各拼一份，于是局部块两格就各写各的）。
+void Machine::apply_frame_record(std::size_t index, const Bytes& script, const ScriptHeader& header,
+                                 std::uint32_t file_id) {
+    Frame& frame = frames_[index];
+    // 先按引擎的装载器（`0x40edd9`：装载前**无条件释放**目标帧槽）清掉原有内容：
+    // 码区 + 四个池 + 两张按键表 + 两条栈。⛔ 不因槽已被占用而报错。
+    frame.code.clear();
+    frame.local_int.clear();
+    frame.local_float.clear();
+    frame.local_string.clear();
+    frame.key_jumps.clear();
+    frame.key_cursor = 0;
+    frame.key_limit = 0;
+    frame.hold_slots.clear();
+    frame.position = 0;
+    frame.call_sites.clear();
+    // `0x40ee12`：返回栈的**栈顶指针** ← 0（数组内容不写）。容器清空 = "旧位置不再可达"，
+    // 与"只把栈顶写 0"没有可观察差别；⛔ 不要把它当成"清内容"这条合同。
+    frame.ret_stack.clear();
+    frame.loaded = true;
+    frame.code.assign(script.begin() + static_cast<std::ptrdiff_t>(header.body_offset), script.end());
+    frame.ip = 0;                      // `0x40f6db`：指令指针 ← 新代码区起点
+    frame.body_offset = header.body_offset;
+    frame.length_slot = 0;             // `0x40f6ee`：分派器不自动推进
+    frame.parent = parent_candidate_;  // `0x40ee05`：父帧号 ← 引擎的「父帧候选」格（只照抄）
+    frame.script_id = file_id;         // `0x40edeb`：统一文件 id
+    frame.local_depth = static_cast<std::int32_t>(file_id);  // 本帧的身份编号
+    frame.local_main = -1;             // `0x40ee26`：本地块主进入目标 ← −1（未登记）
+    frame.local_sub = -1;              // `0x40ee33`：本地块副进入目标 ← −1（未登记）
+}
+
+void Machine::install_script_into(std::size_t slot, std::uint32_t file_id) {
+    if (install_ == nullptr) throw CoreError("frame-loader-missing");
+    const Bytes script = core::read_install_file(*install_, file_id);
+    const ScriptHeader header = core::parse_script_header(script);
+    apply_frame_record(slot, script, header, file_id);
+}
+
+void Machine::load_frame_for_test(std::uint32_t file_id, std::int32_t target) {
+    if (target < 0 || target >= static_cast<std::int32_t>(kFrameCount)) {
+        throw CoreError("test-frame-slot-out-of-range:" + std::to_string(target));
+    }
+    // 只调装载器：**不写**「父帧候选」格（那是调用方的事 —— 泵写 −10、`0x6` 写当前帧号）。
+    install_script_into(static_cast<std::size_t>(target), file_id);
+}
+
+// ── 待处理命令队列 / 泵（`CORE-OPS-RUN-BRACKET` / `CORE-OPS-EVENT-143`）──
+
+// 队列本体：256 格线性表。判空口径照 spec 是「队列头 ≥ 队列尾」；这里用 `head < tail` 表示非空，
+// 与门的「占用标记」是**同一个状态**（⛔ 不另存一个会漂移的标记格）。
+void Machine::push_command(std::int32_t command) {
+    if (queue_tail_ >= kCommandQueueCapacity && queue_head_ > 0) {
+        // 收拢：把 [head, tail) 搬到表头。只为让"头 ≥ 尾 ⇒ 空"这条口径在长会话里仍可用；
+        // 规范没有规定满队处置（`0x143` 一趟最多投 255 条 ⇒ 空队列起步装得下）。
+        const auto count = queue_tail_ - queue_head_;
+        std::copy(command_queue_.begin() + static_cast<std::ptrdiff_t>(queue_head_),
+                  command_queue_.begin() + static_cast<std::ptrdiff_t>(queue_tail_),
+                  command_queue_.begin());
+        queue_head_ = 0;
+        queue_tail_ = count;
+    }
+    if (queue_tail_ >= kCommandQueueCapacity) {
+        // 真的满了（头 = 0 且尾 = 256）：记诊断、丢掉这一条。⛔ 不覆盖最旧项，也不静默改头尾。
+        report_error("command-queue-overflow");
+        return;
+    }
+    command_queue_[queue_tail_++] = command;
+    const auto occupancy = queue_tail_ - queue_head_;
+    if (occupancy > queue_high_water_) queue_high_water_ = occupancy;
+}
+
+void Machine::enqueue_command(std::int32_t command) {
+    push_command(command);
+    // 投递口自带的"顺手泵一次"尾巴（`60-ops-scalar.md:177`）：**队列泵占用标记**非 0 时
+    // 一次也不泵 —— 那正是 `0x143` 逐格投递期间借用这个标记的用处（`70-vm.md:315`）。
+    if (!pump_busy_) pump_command_queue();
+}
+
+void Machine::enqueue_command_for_test(std::int32_t command) { push_command(command); }
+
+std::int32_t Machine::event_table_cell(std::int32_t index) const {
+    if (index < 0 || static_cast<std::size_t>(index) >= kEventTableSize) return 0;
+    return event_table_[static_cast<std::size_t>(index)];
+}
+
+void Machine::seed_event_table_cell_for_test(std::int32_t index, std::int32_t value) {
+    if (index < 0 || static_cast<std::size_t>(index) >= kEventTableSize) return;
+    event_table_[static_cast<std::size_t>(index)] = value;
+}
+
+void Machine::pump_command_queue() {
+    // 入口两判、按此顺序（`70-vm.md:306`）：区间忙标记 ≠ 0 ⇒ 一条也不取；队列头 ≥ 队列尾（空）⇒ 返回。
+    if (driven_elsewhere_) return;
+    if (!queue_occupied()) return;
+    const std::int32_t command = command_queue_[queue_head_];
+    ++queue_head_;  // 取一条 = 头 +1（三种命令都先走这一步）
+    if (!queue_occupied()) queue_head_ = queue_tail_ = 0;  // 取空 ⇒ 收拢；判空口径仍是「头 ≥ 尾」
+    // 0 = 空命令：头已前进，此外什么都不做（`70-vm.md:306`）。
+    if (command == 0) return;
+
+    // ── 非 0 命令先做**挂起**（两支相同、顺序固定，`70-vm.md:308`）──
+    suspended_frame_ = static_cast<std::int32_t>(current_frame_);  // ① 记住当前帧号
+    status_restore_ = state_flags_;                                // ② 状态选择字整字存进待恢复副本
+    state_flags_ = 0;                                              //    再把它清 0（门随即打开）
+    pump_busy_ = true;                                             // ③ 置队列泵占用标记
+    // 泵帧父帧号 = 哨兵 −10：**不是装载器自己决定的** —— 泵先写「父帧候选」格，装载器只照抄；
+    // 负支不装帧，由泵自己把目标帧的父帧号写成 −10（`70-vm.md:308`）。
+    parent_candidate_ = kPumpParentSentinel;
+
+    if (command > 0) {
+        // 正命令（`70-vm.md:309`）：先让当前帧号 ← 37，再按「装载帧」的合同把统一文件 id 装进帧 37。
+        // 装载失败沿用失败分档，**但当前帧号停在 37、不恢复**。
+        current_frame_ = kPumpFrameSlot;
+        try {
+            install_script_into(kPumpFrameSlot, static_cast<std::uint32_t>(command));
+        } catch (const CoreError& error) {
+            const std::string what = error.what();
+            if (is_load_open_failure(what)) throw CoreError("display-message:" + what);
+            // 头坏 / 装载器返回 0 ⇒ 退出型异常：执行就此结束，队列与待恢复副本不再被读
+            //（泵帧清理不在本条范围 —— 残差 `RES-VM-PUMP-FAIL-CLEAN`）。
+            throw;
+        }
+        return;
+    }
+
+    // 负命令（`70-vm.md:310`）：**先**让当前帧号 ← 目标帧号（−命令）。
+    const auto target = -static_cast<std::int64_t>(command);
+    if (target >= static_cast<std::int64_t>(kFrameCount)) {
+        // 帧号范围在规范里是**未定义行为**（`60-ops-scalar.md:181`：格号 ≥ 128 的投递值量级 2^24 以上，
+        // 落在 0..39 之外）⇒ 本模型不许越界读帧表：记诊断并按同一失败点抛显示消息型异常。
+        report_error("pump-target-frame-out-of-range:" + std::to_string(target));
+        throw CoreError("display-message:pump-target-frame-out-of-range:" + std::to_string(target));
+    }
+    current_frame_ = static_cast<std::size_t>(target);
+    Frame& slot = frame_mut();
+    if (!slot.loaded) {
+        // 目标帧没有装载脚本（代码区起点 = 0）⇒ 显示消息型异常（「この階層には…Depth=%d」那一句；
+        // 文本本身属机器细节）。**当前帧号停在目标帧、不恢复** —— 与「换帧」的失败支相反。
+        throw CoreError("display-message:pump-frame-not-loaded:" + std::to_string(target));
+    }
+    slot.parent = kPumpParentSentinel;  // 负支由泵直接写，不经过装载器
+    slot.ip = 0;                        // 指令指针 ← 该帧代码区起点
+    slot.length_slot = 0;               // 长度槽 ← 0 ⇒ 分派器不推进，下一迭代执行该帧第一条
+}
+
+void Machine::advance_host_pump() {
+    // 迭代头的宿主消息泵节流（`CORE-VM-LOOP`：「回消息的节流是引擎侧的固定周期」）：
+    // 计数器初值 1；每迭代看它与常量 **4** 的按位与 —— 非 0（计数 = 4）⇒ 本迭代泵一次、泵后回 1，
+    // **同一迭代再判一次**（1 & 4 = 0 ⇒ 不再泵）并 +1 到 2；为 0 ⇒ 计数器 +1、不泵。
+    // ⇒ 泵一次之后隔 3 个迭代再泵，与宿主无关。这里只落计数序列与 `should_pump_host()`。
+    const bool pump = (pump_counter_ & 4u) != 0;
+    if (pump) {
+        pump_counter_ = 1;
+        pump_counter_ += 1;  // 同一迭代再判 + 加到 2
+    } else {
+        pump_counter_ += 1;
+    }
+    host_pump_due_ = pump;
 }
 
 Frame& Machine::frame_mut() {
@@ -100,9 +268,23 @@ void Machine::jump_to(std::uint32_t position) {
 
 void Machine::push_return(std::uint32_t position) {
     Frame& f = frame_mut();
+    // 每帧容量 **256**（`CORE-OPS-FRAME-CALL`；引擎的帧步长 = 256，压栈前**不检查容量**）。
+    // 第 257 次压栈在引擎里落到帧区之外 = 未定义行为 ⇒ 实现必须**拒绝或记诊断**；
+    // ⛔ 不许覆盖最旧一项、也不许静默截断（两者都会静默丢掉一个返回点）。
+    if (f.ret_stack.size() >= kRetStackCapacity) {
+        report_error("ret-stack-overflow:frame=" + std::to_string(current_frame_) +
+                     ",position=" + std::to_string(position));
+        return;
+    }
     // 先记"在哪条指令上登记的返回点"（诊断用），再压返回位置 —— 两条栈必须同深。
     f.call_sites.push_back(static_cast<std::int32_t>(f.ip / 4));
     f.ret_stack.push_back(static_cast<std::int32_t>(position));
+}
+
+void Machine::push_engine_state_word(std::uint32_t word) {
+    // `CORE-OPS-FRAME-RET`：引擎重入脚本前压入当时的状态选择字，并把它第 31 / 20 位清 0
+    // （`0x4116eb` 取实参、`0x4116f2` 是那条 push；清位是脚本返回后门要重新关上的前提）。
+    engine_state_word_stack_.push_back(word & ~((1u << 31) | (1u << 20)));
 }
 
 std::string Machine::stop_stack_report() const {
@@ -444,7 +626,12 @@ bool Machine::message_subsystem_busy() {
     // ★ 不再另加"已排窗但还没盖章"的兜底：引擎在**第一次推进时无条件盖章**（`0x4B087C`，
     //   只判起点为 0、不看持续时间），所以"排过窗"那一帧的忙态由 setter 置起的闩本身表达
     //   （`0x4AD155` 等），下一次推进就把起点盖上。那个兜底在引擎里没有对应物。
-    return !pending_glyphs_.empty() || (state_flags_ & (1u << 29)) != 0;
+    // ★ **打字位 / 待画格不是谓词 A 的一部分**（`CORE-OPS-WAIT` 的成立条件：谓词 A = 它自己的定时器
+    //   在窗内 **或** 等待谓词的待处理闩）。把它们算进来会死锁：位序表里第 10 位在第 14 项、
+    //   第 29 位在第 17 项 ⇒ 等待位先被服务；若谓词 A 因为"还在打字"而恒为真，就永远轮不到
+    //   第 29 位去推进，打字也永远不结束（实测：`emulator-core-adv-click-rate` 卡在
+    //   `gate=0xE0000400` 上只推进 18 句）。⇒ 打字 / 演示闸期间点击照常放行等待位。
+    return false;
 }
 
 // `0x21c` 谓词 B（`0x41322A` 的 var_768 ← `0x412648` 扫 1000 槽 + `sub_4050E0`）：
@@ -460,83 +647,155 @@ bool Machine::movie_gate_busy() const {
     return false;
 }
 
-bool Machine::step() {
-    if (halted_) return false;
-    // 每次迭代先读一次时钟并写进场景；**暂停**（区间忙标记 = 1 且等待位 = 0）时只更新时间戳，
-    // 场景推进 / 影片逐槽计时 / 门前渲染步都整段跳过（`CORE-VM-LOOP`：暂停就是区间忙标记，同一格）。
-    const bool paused = driven_elsewhere_ && (state_flags_ & (1u << 10)) == 0;
-    advance_scene(external_clock_ ? host_clock_ms_ : scene_clock_ms_ + 16, !paused);
-    // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：新帧会置脏，所以必须在门前那次渲染判定之前。
-    if (!paused) service_movies();
-    // 门之前的 **BGM 淡变推进**（`0xC2` 的 B 支把状态字第 9 位置起 ⇒ 进门；由这里逐帧推进并在到位时清位）。
-    if (!paused) service_bgm_fade();
-    // 门之前：0x72 的放行（左键 / 跳过位一到就清「等推进」位）。
-    service_advance_wait();
-    // 门之前：**自动消息**的到期服务（`0x1b7` 开启时由 `0x72` 武装）：到期就放行同一对位。
-    service_auto_message();
-    // 门之前：**选项消费**（点中某条 ⇒ 执行位置 ← 该条的决定入口）。
-    service_choice_click();
-    // 门之前的**逐字符显现**（typewriter）：引擎的推进器每帧跑一次，**按每字间隔（ms）每帧最多一格**；
-    // 等待输入时**也在跑**（那正是"字还在打"的形态）⇒ 这里不受 `paused` 影响。
-    service_text_layers();
-    // 门前渲染：主循环闸门（0x412739–0x4127E2）先要求
-    // `(0x21B != 0) || (状态字 & 0x2400)`，脏只是更内层条件。
-    const bool render_gate = scalar_21b_ != 0 || (state_flags_ & (0x400u | 0x2000u)) != 0;
-    if (!paused && draw_mode_ == 1 && render_gate && (state_flags_ & (1u << 24)) == 0 &&
-        (scene_dirty_ || scene_animating_ || command_animating_)) {
-        frame_step_requested_ = true;
-    }
-    // ★ `0x72` 的"等推进"位（第 31 位）：这是**合法等待**（等玩家点击），不是门卡死 ⇒
-    //   本拍不派发任何指令、也不记 stall（引擎是 `0xAAB44 任一非 0 ⇒ 不派发`）。
-    if ((state_flags_ & (1u << 31)) != 0) {
-        gate_stall_steps_ = 0;
-        return true;
-    }    // 第 29 位（打字中）**不挡脚本**：引擎服务完文本泵之后仍派发一条指令（`0x41342d` → `0x413439`）。
-    // 门判只看其余位；本模型不置第 27 位（它没有服务者），所以这里只需摘掉第 29 位。
-    const std::uint32_t gate_bits = state_flags_ & ~(1u << 29);
-    if (gate_bits != 0) {
-        // 第 0 位（长睡眠）：本实现没有计时器服务，先按"服务一次就清位"处理。
-        if ((state_flags_ & 1u) != 0) { state_flags_ &= ~1u; return true; }
-        // 影片位（门上 0x2000）：只清位；对象表仍有已启动影片槽 ⇒ 再置起（`CORE-VM-MOVIE`）。
-        // 它不轮询、不销毁、不填纹理 —— 那些都在门之前的 service_movies 里。
-        if ((state_flags_ & (1u << 13)) != 0) {
+// ── 门服务链（`CORE-VM-GATE` / `CORE-VM-STATE`）──
+// `CORE-VM-STATE` 的**位序表**（spec：「检查序」= 多个位同时置起时的优先级；位号从 0 起）。
+// ⛔ **不是位号升序**（列表只有一份 = 下面的数组，⛔ 别在注释里再抄一遍）。
+// ★ 相邻两项的接续就是表里的「服务后 = 继续扫描」：14 落到 9、9 落到 12、12 落到 26、
+//   30 落到 13、13（被暂停挡下时）落到 3。
+constexpr std::int32_t kGateServiceOrder[] = {
+    22, 24, 14, 9, 12, 26, 20, 30, 13, 3, 4, 7, 8, 10, 6, 27, 29, 31, 0, 5, 28, 23,
+};
+
+Machine::GateAction Machine::service_gate_bit(std::int32_t bit) {
+    // ★ 位序表（`kGateServiceOrder`）决定**先服务谁**；这里只决定"这一位被服务完之后控制交给谁"。
+    //   `CORE-VM-STATE` 的「服务后」列：多数位交回迭代头；14 / 9 / 30 一律继续扫描；
+    //   12 / 13 看区间忙；29 是**唯一**"服务体自己派发"的位。
+    switch (bit) {
+        case 0:
+            // 位序表第 19 行（一个计时器的到期位；服务后 = 交回迭代头）。
+            // ★ 本实现没有这个计时器的服务体：按"服务一次就清位"处理（沿用本片之前的模型）。
+            state_flags_ &= ~1u;
+            return GateAction::ToHead;
+        case 9:
+            // 位序表第 4 行：音乐音量渐变进行中（`0xc2` 的淡变 / 压低后的恢复共用同一生命周期）。
+            // 按计时器步进渐变（进度满）后清第 9 位；服务后 = **继续扫描（落到第 12 位）**。
+            service_bgm_fade();
+            return GateAction::Continue;
+        case 10:
+            // 位序表第 14 行：等待位（`0x21c`）。谓词 A（消息子系统"还有事"）与谓词 B（影片对象扫描）
+            // **都为假**时清位；服务后 = 交回迭代头（见 `message_subsystem_busy()` 与 `60-ops-wait`）。
+            if (!message_subsystem_busy() && !movie_gate_busy()) state_flags_ &= ~(1u << 10);
+            return GateAction::ToHead;
+        case 12:
+            // 位序表第 5 行：**仅当区间忙 = 0** 才做"一个等待 / 放行步（与第 11 位配对）"。
+            // ★ 那个步的内部三支判据**未取证**（残差 `RES-CLEAR-D9-BIT12` / `60-ops-scalar.md:297`）
+            //   ⇒ 本实现只落"区间忙"这道前置：
+            //   · 区间忙 ≠ 0 ⇒ 服务体**不执行**（`CORE-OPS-RUN-BRACKET` 的前置）⇒ 不算交回迭代头 ⇒
+            //     **继续扫描（落到第 26 位）** —— 这正是"暂停不挡表尾派发"（`70-vm.md:25`）；
+            //   · 区间忙 = 0 ⇒ 体执行；体内三支未取证 ⇒ 按保守选择**交回迭代头**。
+            if (driven_elsewhere_) return GateAction::Continue;
+            return GateAction::ToHead;
+        case 13:
+            // 位序表第 9 行：影片位（门上 `0x2000`）——只清位；对象表仍有已启动影片槽 ⇒ 再置位。
+            // **被暂停挡下时落到第 3 位**（`70-vm.md:84`）；这一位的判据只测区间忙，等待位**不**为它开闸
+            // （`CORE-VM-MOVIE`）。其余情形服务后 = 交回迭代头。
+            if (driven_elsewhere_) return GateAction::Continue;
             state_flags_ &= ~(1u << 13);
             if (movie_active_) state_flags_ |= (1u << 13);
-            return true;
-        }
-        // 等待位（0x21c）的放行条件 = 谓词 A（消息子系统"还有事"）与谓词 B（影片对象扫描）
-        // **都为假**（0x413221 / 0x41322A）。见 `message_subsystem_busy()` 与 spec 60-ops-wait。
-        if ((state_flags_ & (1u << 10)) != 0 && !message_subsystem_busy() && !movie_gate_busy()) {
-            state_flags_ &= ~(1u << 10);
-        }
-        // 位 0 / 10 / 13 有服务分支；其余位**没有**（规范只登记存在；第 30 位按规范「启用后门恒关」）。
-        // ★ 连续撞到"没有分支的位"时给一个明确诊断与停因：否则外面只看到"停在原地 + 烧步数"，
-        //   与"在等输入"完全分不开。这不是引擎语义，是观测。
-        constexpr std::uint32_t kServicedGateBits = (1u << 0) | (1u << 10) | (1u << 13);
-        if ((gate_bits & kServicedGateBits) == 0) {
-            gate_stall_steps_ += 1;
-            if (!gate_stall_reported_) {
-                gate_stall_reported_ = true;
-                char buffer[64];
-                std::snprintf(buffer, sizeof(buffer), "gate-bit-unserviced:0x%X",
-                              static_cast<unsigned>(state_flags_));
-                report_error(buffer);
+            return GateAction::ToHead;
+        case 14:
+            // 位序表第 3 行：音乐压低待执行。前置 = 语音子系统空闲 ∧「该子系统仍有一件未完成的工作」
+            // 标记 ≠ 0 ∧ 第 9 位未置（不成立 ⇒ 第 14 位**保留**、下个迭代再判）；成立 ⇒ 清 14、置 9
+            // 并起计时。服务后 = **继续扫描（落到第 9 位）**。
+            service_bgm_duck();
+            return GateAction::Continue;
+        case 26:
+            // 位序表第 6 行：本地块内的输入等待（读输入字，非 0 则清位并按副进入目标重入）；
+            // 服务后 = 交回迭代头（`CORE-OPS-FRAME-LOCAL-RET-7C` 的输入服务分支）。
+            service_local_input_wait();
+            return GateAction::ToHead;
+        case 29:
+            // 位序表第 17 行：文本推进器；推进器跑完之后按**文本槽在用标志**（`[77984h]`）决定收场 ——
+            // **有槽在用 ⇒ 服务体自己派发一条**（表里唯一的直派位）；**无槽在用 ⇒ 交回迭代头**。
+            // spec 句：`70-vm.md` 服务链位序表第 17 行 +「门」条第三收场（`0x41342D` / `0x413433`）。
+            // ★ 这一格的判据是「槽 1..9 任一状态字非 0」（`0x409421` / `0x409426`），**不是**待处理
+            //   命令队列的占用标记：队列判空是「头 ≥ 尾」，且投递口就在同一次调用里顺手泵掉 ⇒ 门上
+            //   那一刻它几乎恒 0。拿队列当判据 = 演示闸永远派发不出去（取证 `report-text-gate.md` §5.3）。
+            if (service_text_layers()) return GateAction::Dispatch;
+            return GateAction::ToHead;
+        case 30:
+            // 位序表第 8 行：逐格揭示——按节拍请求画一格并推进格号；**不负责清位**；
+            // 服务后 = **继续扫描（落到第 13 位）**（`70-vm.md:117` / `:65`）。
+            service_text_cell_reveal();
+            return GateAction::Continue;
+        case 31:
+            // 位序表第 18 行：等推进（抑制态）——等待一步；服务后 = 交回迭代头。
+            service_advance_wait();
+            return GateAction::ToHead;
+        default:
+            // 表里其余位（22 / 24 / 20 / 3 / 4 / 7 / 8 / 6 / 27 / 5 / 28 / 23）在这个模型里**没有服务体**：
+            // 一律按"交回迭代头"（保守选择，也是本片之前的表现）。它们的领域语义见残差
+            // `RES-VM-BIT-CLEARERS` / `RES-VM-OTHER-BITS-SUBSYSTEMS` —— ⛔ 不猜名字、⛔ 不发明行为。
+            return GateAction::ToHead;
+    }
+}
+
+bool Machine::step() {
+    if (halted_) return false;
+    // 迭代头第一件事：宿主消息泵的**节流**（`CORE-VM-LOOP`；四迭代的固定周期，泵完隔 3 个迭代）。
+    // ★ 只落计数序列与 `should_pump_host()`；**宿主的实际泵仍由现有 SDL 路径承担**。
+    advance_host_pump();
+    // 执行区间的暂停 = 区间忙标记 ≠ 0 **且**等待位 = 0（`70-vm.md:24`）。它挡的是**时间交付**、
+    // 影片逐槽计时与门前那一次**请求** —— ⛔ 不挡盖钟（盖钟在 `advance_render_step` 里、忙判定之前）。
+    const bool paused = driven_elsewhere_ && (state_flags_ & (1u << 10)) == 0;
+    // 迭代头：宿主毫秒时钟的一次采样（`CORE-TIMING-CLOCK`）。没有外部时钟时，虚拟宿主时钟
+    // 每迭代 +16ms（固定步长是仿真参数，不是引擎常量）；★ 它是**采样**，与"场景时钟有没有被盖"
+    // 无关 —— 门前的盖钟可能被 (a)(b)(c) 跳过，但宿主时刻照走，门后 `0x1f4` / `0x20c` / `0x23c`
+    // 的再采样读到的是这个值。
+    if (!external_clock_) host_clock_ms_ += 16;
+    const std::uint32_t now_ms = host_clock_ms_;
+    // 时间交付（`CORE-VM-LOOP` 的「一次迭代做哪些事」）：把这次读数交给**两个声音子系统各一次**。
+    // ★ 它是**两套到期计时器**、不是混音：只推进引擎自己的通道记录、不发宿主请求。
+    // ★ 跳过条件只有一条：区间忙标记 = 1 **且**等待位 = 0 ⇒ 两个接收者本迭代都不被调用（不盖章、不计时）；
+    //   等待位 = 1 时**照常交付**（`70-vm.md:22`）。
+    if (!paused) {
+        deliver_sound_time(now_ms);
+        deliver_voice_time(now_ms);
+    }
+    // ★ 门之前那个渲染步的"更早子步"（`CORE-TIMING-WINDOW`）：三个"整段跳过" → 盖钟 → 五个"只挡推进"。
+    //   `Skipped` ⇒ 本迭代不盖钟、不判据、不发请求、不清帧标志、不推窗；`ClockOnly` ⇒ 钟走了、窗没走；
+    //   `Windows` ⇒ 走到请求那一行。
+    const SceneAdvance scene_advance = advance_render_step(now_ms);
+    // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：新帧会置脏，所以必须在门前那次渲染判定之前。
+    if (!paused) service_movies();
+    // ★ **位上的一切服务都在门的服务链里**（`CORE-VM-GATE` / `CORE-VM-STATE`）：BGM 淡变（第 9 位）、
+    //   逐格揭示（第 30 位）、文本泵（第 29 位）、等推进（第 31 位）原先在门之前无条件跑，现在由
+    //   位序表决定"这一迭代轮到谁"。这里只留**不属于门**的引擎路径。
+    // 自动消息的到期服务（`0x1b7` 开启时由 `0x72` 武装）：到期就放行同一对位。
+    service_auto_message();
+    // 平台输入路径：把宿主按钮源的上沿锁存一次（门上的第 31 位服务体只消费这个锁存）。
+    sample_advance_input();
+    // 门之前：**选项消费**（点中某条 ⇒ 执行位置 ← 该条的决定入口）。
+    service_choice_click();
+    // 门前渲染请求（`0x4127E2`）：**这条渲染步完整通过**三个"整段跳过"与五个"只挡推进"之后才发出
+    // （`Windows`）。⇒ (a)(b)(c) 的跳过、第 24 位 / 影片持有 / 不需要重绘 / 未就绪 / (d) 暂停
+    // 都**不发请求** —— 判据与请求同在那一块里（`0x412777`–`0x4127E7`）。
+    // ★ 紧随请求之后清帧标志（`0x4127E7`）；(c) 跳过时**一并跳过**（spec 的 (c) 句）。
+    if (scene_advance == SceneAdvance::Windows) {
+        frame_step_requested_ = true;
+        frame_flag_ = false;
+    }
+    // ── 门（`CORE-VM-GATE` / `CORE-VM-STATE`）──
+    // 整字为 0 ⇒ 本迭代直接派发一条。整字非 0 ⇒ 先按**位序表**逐位扫服务链：
+    //   · 服务体交回迭代头 ⇒ 本迭代到此为止、**不派发**（更晚的位本迭代不再看）；
+    //   · 服务体继续扫描 ⇒ 落到表里的下一位；
+    //   · 扫到表尾（一路没有任何服务体交回迭代头）⇒ **照常派发一条**；
+    //   · 第 29 位命中且**有文本槽在用**（`[77984h]`：槽 1..9 任一状态字非 0，由推进器那一趟
+    //     算出）⇒ 由**它的服务体自己**派发（表里唯一的"服务体直派"位）。
+    // ★ 「门是忙的」与「本迭代仍派发一条」**不互斥**：spec 明文 ⛔ 不许写成"任一位置起就挡住派发"。
+    // ★ 表外的位不挡派发；表里未建模的体按"交回迭代头"处理（见 `service_gate_bit`）。
+    if (state_flags_ != 0) {
+        for (const std::int32_t bit : kGateServiceOrder) {
+            if ((state_flags_ & (1u << bit)) == 0) continue;  // 未置起 ⇒ 未命中
+            const GateAction action = service_gate_bit(bit);
+            if (action == GateAction::ToHead) {
+                // 合法等待（⛔ 不是停因）：位没被服务体清掉就一直关着，下一迭代继续服务同一位。
+                return true;
             }
-            constexpr std::size_t kGateStallLimit = 10000;
-            if (gate_stall_steps_ >= kGateStallLimit) {
-                char buffer[96];
-                std::snprintf(buffer, sizeof(buffer), "gate-stalled:0x%X",
-                              static_cast<unsigned>(state_flags_));
-                halted_ = true;
-                stop_.reason = StopReason::GateStalled;
-                stop_.offset = frame_mut().ip;
-                stop_.message = buffer;
-                return false;
-            }
-        } else {
-            gate_stall_steps_ = 0;
+            if (action == GateAction::Dispatch) break;  // 第 29 位：服务体自己派发一条
+            // Continue：按位序表里的**下一位**继续扫。
         }
-        return true;
+        // 扫到表尾 ⇒ 派发一条（与第 29 位的直派共用下面这条出口）。
     }
     Frame& f = frame_mut();
     if (f.ip + 4 > f.code.size()) {

@@ -66,6 +66,14 @@ void Machine::clear_global_pool_bank() {
     for (auto it = global_string_.begin(); it != global_string_.end();) {
         it = in_bank(it->first) ? global_string_.erase(it) : std::next(it);
     }
+    // 三个**引用族**全局池（类型 6 / 7 / 8）逐格清 0：`0x9` 的复位清单里它们与值族四个池并列
+    // （`0x428b94` / `0x428bac` / `0x428bc4`）。★ 键是**地址**（不是 bank_key）⇒ 用本 bank 的地址窗口判。
+    const std::uint32_t ref_bank_base = 0x10000000u + global_flip_ * 0x18000000u;
+    for (auto it = ref_slots_.begin(); it != ref_slots_.end();) {
+        const bool in_ref_bank = it->first >= ref_bank_base + 0x0C000000u &&
+                                 it->first < ref_bank_base + 0x18000000u;
+        it = in_ref_bank ? ref_slots_.erase(it) : std::next(it);
+    }
     return;
 }
 

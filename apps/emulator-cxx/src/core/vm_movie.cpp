@@ -80,6 +80,9 @@ void Machine::service_movies() {
         const double target = elapsed > 0 ? static_cast<double>(elapsed) / 1000.0 : 0.0;
         if (backend.advance_to(target)) {
             // 新帧：写进同槽纹理；它同时是一次「场景需要重绘」的输入（影片新帧）。
+            // ★ 「有待消费的新帧」是**渲染步门槛**的输入之一（`CORE-TIMING-WINDOW` 的"只挡推进"
+            //   第 3 条，**读一次即消费**）：不管填纹理成不成功，解出新帧就置它。
+            movie_new_frame_ = true;
             if (fill_movie_texture(slot, backend.frame())) scene_dirty_ = true;
         }
         const double stop = backend.stop_time();

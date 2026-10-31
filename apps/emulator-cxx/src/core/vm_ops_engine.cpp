@@ -330,24 +330,25 @@ void Machine::op_c2(const Instruction& instruction) {
 void Machine::op_2f5(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 配音排队（`0x2F5` / `sub_4267D0`，**argc 4**，读序 **4 → 3 → 2 → 1**，读序是合同）。
-    // 写五格、**零检查、零外部调用**：延时 ms ← op3、资源号 ← op1、pending ← 1、起算 ← 0、状态字 ← op2。
+    // 写五格、**零检查、零外部调用**：该槽延时 ← op3、资源号（全局一格）← op1、该槽排队标记 ← 1、
+    // 该槽起算 ← 0、该槽状态字 ← op2。
     // ★ 状态字的低 2 位 == 3 表示"已完成 / 跳过"（读侧据此不再播）。
-    // ★ 真正"响"在帧更新的计时里（`now − 起算 ≥ 延时`）⇒ 本版只落状态（时钟不建模）。
+    // ★ 真正"响"由**时间交付**推进（`CORE-VM-LOOP` 的语音通道：懒盖章 + 有符号到期）；本条只落记录。
     const auto op4 = read_int(ops[3]);
     const auto op3 = read_int(ops[2]);
     const auto op2 = read_int(ops[1]);
     const auto op1 = read_int(ops[0]);
-    if (op4 < 0 || op4 >= static_cast<int>(voice_delay_.size())) {
+    if (op4 < 0 || op4 >= static_cast<int>(voice_slot_timers_.size())) {
         // 引擎**不查**这个下标（T_Voice 只有 3 格）⇒ 越界写属未定义行为；本版记日志后跳过（已知偏离）。
         report_error("voice-slot-out-of-range:" + std::to_string(op4));
         return;
     }
     const auto slot = static_cast<std::size_t>(op4);
-    voice_delay_[slot] = op3;
+    voice_slot_timers_[slot].duration = op3;
     voice_resource_ = op1;
-    voice_pending_ = true;
-    voice_start_ms_ = 0;
-    voice_state_[slot] = op2;
+    voice_slot_timers_[slot].pending = true;
+    voice_slot_timers_[slot].start = 0;   // 0 = 未盖章哨兵 ⇒ 交给下一次时间交付去盖
+    voice_slot_timers_[slot].state = op2;
     return;
 }
 
@@ -449,10 +450,10 @@ void Machine::op_c4(const Instruction& instruction) {
     // ★ 未建模：`sub_407120` 的真实混音压低、装载解码（`sub_4BB840` 里读文件那一段）、第 ⑤ 步的门格。
     consume_switch_keep_bit0(voice_switch_46c_[0]);
     consume_switch_keep_bit0(voice_group_enabled_[0]);
-    // ★ 引擎在这一步置门字第 14 位（"BGM 压低中"），**本实现刻意不置**：本模型的主循环没有服务第 14 位的
-    //   分支，置了只会让门停在原地（`gate-bit-unserviced`）。⇒ 只落一个可观察投影 `bgm_ducked_`，
-    //   并把"第 14 位的服务者"登记成残差。
-    bgm_ducked_ = true;
+    // ★ 引擎在这一步调用压低请求 `sub_407120`：它的**进入条件**（`70-vm.md:21`）都成立时把门字第 14 位
+    //   **写回状态选择字**（`0x40716c`）并置语音的「仍有一件未完成的工作」；不成立时什么都不做。
+    //   ⛔ 不再落一个"压低的投影"：投影不写门字，第 14 → 9 的交接就永远没有入口。
+    request_bgm_duck();
     if ((state_flags_ & kMovieGateBit) != 0) {
         voice_mirror_resource_[0] = read_int(ops[0]);
         voice_mirror_a4_[0] = 0;
@@ -902,10 +903,14 @@ void Machine::op_a3(const Instruction& instruction) {
 
 void Machine::op_d9(const Instruction& instruction) {
     (void)instruction;
-    // 清门字第 12 位（读-改-写；⛔ 不许整字写 0）。
+    // 清一个待服务位（`CORE-OPS-STATUS-CLEAR-D9`）：推进格数 = 1（分派器写的 2×0+1 就是它）。
+    // ① 状态选择字第 12 位清 0（读-改-写；⛔ 不许整字写 0 —— 那会踩掉等待位 / 影片位）。
     state_flags_ &= ~(1u << 12);
-    // 那一格非 0 时，才对另一个引擎级字清它的第 12 位。
-    if (d9_cell_ != 0) d9_word_ &= ~(1 << 12);
+    // ② **队列泵占用标记**非 0 ⇒ 对**待恢复副本**做同样的清位。
+    //    那份副本就是泵期间"对外有效"的状态选择字（见 `CORE-OPS-RUN-BRACKET` 的泵合同）：
+    //    只清活动字会让泵帧里的读者仍看到第 12 位。⛔ 判据是标记，不是"某个格非 0"；
+    //    ⛔ 也不许在非泵期间清副本（那时它是旧值，清它不可观察，却会掩盖"判据是标记"）。
+    if (pump_busy_) status_restore_ &= ~(1u << 12);
     return;
 }
 

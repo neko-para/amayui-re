@@ -107,10 +107,10 @@ void Machine::op_20b(const Instruction& instruction) {
 void Machine::op_20c(const Instruction& instruction) {
     (void)instruction;
     // 帧步进：时间戳 + 一次渲染请求 + 清帧标志
-    if (!driven_elsewhere_) {
-        engine_previous_ms_ = engine_now_ms_;
-        engine_now_ms_ = scene_clock_ms_;
-    }
+    // ★ 时间戳写的是**场景时钟对**（`CORE-TIMING-CLOCK` 的第 2 个门后写者：`0x41A1D0` 搬旧 /
+    //   `0x41A1D6` 写新，仅区间忙标记 = 0 时）。它与 `0x1f4` / `0x23c` / 门前渲染步是**同一对**
+    //   ⇒ 门前那一步被 (c) 取消时，这一对仍由它推进（时间不停走）。
+    if (!driven_elsewhere_) stamp_scene_clock(host_now_ms());
     frame_step_requested_ = true;
     frame_flag_ = false;
     return;
@@ -118,11 +118,10 @@ void Machine::op_20c(const Instruction& instruction) {
 
 void Machine::op_23c(const Instruction& instruction) {
     (void)instruction;
-    // 无条件重盖引擎时钟对（`CORE-TIMING-CLOCK` 的第四个写者）：
+    // 无条件重盖时钟对（`CORE-TIMING-CLOCK` 的第三个门后写者：`0x41A2E7` 搬旧 / `0x41A2ED` 写新）：
     // 「上一步」←「现在」、「现在」← 本次读数；★ 与 `0x20c` 的唯一差别是**没有区间忙门**，
     // 与 `0x1f4` 的差别是不碰忙标记 / 嵌套计数。推进格数 = 1（step 已写）。
-    engine_previous_ms_ = engine_now_ms_;
-    engine_now_ms_ = scene_clock_ms_;
+    stamp_scene_clock(host_now_ms());
     return;
 }
 

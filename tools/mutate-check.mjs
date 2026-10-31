@@ -2936,10 +2936,22 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
-    from: '            scene_pending_ = true;  // `+0B5B4`：这一帧还在推进 ⇒ 消息子系统不算完成',
+    from: '            scene_pending_ = true;  // `+0B5B4`：这一帧还在推进',
     to: '',
     guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
     what: '窗推进时不再把待处理闩置起 ⇒ 渲染步入清掉之后没人再置，等待位在窗还没走完时放行',
+  },
+  // ── S4 场景时钟门槛 / 渲染步收尾判据（★ 成对：本清单的 `from` ↔
+  //    `tools/test/emulator-cxx-review-regressions.test.mjs` 的 `snippet`）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm.h',
+    from: '        if (!scene_pending_) clear_scene_commands();',
+    to: '        if (!scene_animating_) clear_scene_commands(); // 变异：收尾判据换回「有动画」',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '渲染步收尾判据换回「有动画」（`60-ops-scene` 的「命令档的前置与出档」要的是**场景待处理标记**）⇒ ' +
+      '「排窗但无命令」/「命令在推进但没有动画」两档的整表清空时机反过来 ' +
+      '（CTest `emulator-core-selftest` 的 `check_scene_clock_gate` ⑨ 当场红）',
   },
   // ── 复审修复的源码锚（行为断言在 CTest；这里给变异测试一个 node 可跑的入口）──
   {
@@ -3046,6 +3058,115 @@ const MUTATIONS = [
     guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
     what: '0x1ca 不再把操作数写进命名键 ⇒ 0x1cb 的 falsifier“设 1 再读必须是 1”失败',
   },
+  // ── S1 帧族（★ 成对：本清单的 `from` ↔ `tools/test/emulator-cxx-review-regressions.test.mjs`
+  //    的 `snippet`。行为断言在 CTest `emulator-core-selftest` 的 `check_frame_shape`）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: 'if (f.ret_stack.size() >= kRetStackCapacity) {',
+    to: 'if (false) { // 变异：返回栈不查容量',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '返回栈第 257 次压栈不再诊断 / 拒绝 ⇒ 栈顶推过 256（引擎里那是帧区之外 = UB；CTest check_frame_shape 当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: 'frame.parent = parent_candidate_;',
+    to: 'frame.parent = static_cast<std::int32_t>(current_frame_); // 变异：装载器自己判父帧',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '装载器改回“读当前帧号当父帧号”⇒ 泵预置的 −10 被冲掉、0x2 的 −10 支永不可达（spec 明文 ⛔ 这么写）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: 'frame.local_main = -1;',
+    to: '/* 变异：新帧不复位本地块主进入目标 */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '新帧记录的主进入目标不再复位 −1 ⇒ 复用帧槽时残留上一次登记的目标（0x3 / 0x6 同形合同）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'current_frame_ = static_cast<std::size_t>(suspended_frame_);',
+    to: '/* 变异：−10 支不接回挂起帧 */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x2 的 −10 支（泵挂起帧）不再接回挂起帧 ⇒ 泵帧结束后执行被当成根结束（CTest check_frame_shape 当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'state_flags_ = engine_state_word_stack_.back();',
+    to: '/* 变异：跳转支不还原状态字 */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x5 跳转支不再弹引擎级状态字保存栈 ⇒ 引擎回调结束后门不重新关上（状态选择字回不到挂起前的值）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'state_flags_ &= ~(1u << 26);',
+    to: '/* 变异：输入到了也不清第 26 位 */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '第 26 位服务体不清位 ⇒ 本地块内输入等待永久卡住（输入到了门也开不了；CTest check_frame_shape 当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_value.cpp',
+    from: 'it = in_ref_bank ? ref_slots_.erase(it) : std::next(it);',
+    to: 'it = std::next(it); // 变异：0x9 不清引用族池',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x9 复位时不再清三个引用族全局池 ⇒ 引用槽留着旧地址（CTest check_frame_shape 读回旧地址当场红）',
+  },
+  // ── S2 门模型（★ 成对：本清单的 `from` ↔ `tools/test/emulator-cxx-review-regressions.test.mjs`
+  //    的 `snippet`。行为断言在 CTest `emulator-core-selftest` 的 `check_gate_chain`）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: '26, 20, 30, 13,',
+    to: '26, 20, 13,',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '从服务链位序表里删掉第 30 位（逐格揭示，spec 位序表第 8 项）⇒ 它的服务体不再被扫到'
+      + '（CTest check_gate_chain 的「画一格」那一半当场红；表尾派发那一半仍绿 —— 这正是为什么断言要两半都咬）',
+  },
+  // ── S3 队列 / 泵（★ 成对：本清单的 `from` ↔ `tools/test/emulator-cxx-review-regressions.test.mjs`
+  //    的 `snippet`。行为断言在 CTest `emulator-core-selftest` 的 `check_command_queue`）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'if (queue_occupied()) pump_command_queue();',
+    to: '/* 变异：泵帧收场不链式再泵 */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x2 的 −10 支第 ⑤ 步不再"队列非空 ⇒ 立即再泵一条"⇒ 队列停在泵帧收场（check_command_queue 的链式那半当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: 'slot.parent = kPumpParentSentinel;  // 负支由泵直接写，不经过装载器',
+    to: 'slot.parent = 0;  // 变异：负支父帧号不写 −10',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '负命令的泵帧父帧号改回 0 ⇒ 0x2 的 −10 支永不可达（spec 明文：负支由泵直接写 −10）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'frame_mut().ip += 4;',
+    to: '/* 变异：0x143 不自己推进 */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '0x143 不再自己把指令指针推进 4 字节 ⇒ 下一条又执行自己（分派器的长度槽已被清 0；spec 明说推进是本条自己做的）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'state_flags_ = (state_flags_ & ~(1u << 14)) | (active & (1u << 14));',
+    to: 'state_flags_ = status_restore_;  // 变异：第 14 位也取副本',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '泵帧收场第 14 位改回"取副本" ⇒ 活动字上刚置的压低位被旧副本盖掉（spec：第 14 位取活动字的值）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: 'const bool pump = (pump_counter_ & 4u) != 0;',
+    to: 'const bool pump = (pump_counter_ & 3u) != 0;  // 变异：节流周期写成 2',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what: '宿主消息泵的节流周期从「与常量 4 按位与」改成 2 的倍数 ⇒ 泵一次后不是隔 3 个迭代（check_command_queue 的计数序列当场红）',
+  },
+  // ── S4 文本槽在用标志（★ 成对：本清单的 `from` ↔ `tools/test/emulator-cxx-review-regressions.test.mjs`
+  //    的 `snippet`。行为断言在 CTest `emulator-core-selftest` 的 `check_gate_chain` ④⑤）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from: 'if (service_text_layers()) return GateAction::Dispatch;',
+    to: 'service_text_layers(); return GateAction::ToHead;  // 变异：无视「有槽在用」',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '第 29 位服务体改成**恒交回迭代头** ⇒ 演示闸层的"由服务体自己派发"那条路断了（门停在 gate 上、' +
+      '演示脚本执行不到下一条 0x300 / 0x19c）；check_gate_chain ④「有槽 ⇒ 直派」与 ⑤「演示闸每迭代派发一条」当场红',
+  },
   // ── spec 证据锚的“覆盖”判据（★ 2026-10-30 复审实测：19 条新规则引用站点用例，
   //    而该用例的 RULES 名单一条都不含它们 ⇒ 站点写错/删空也不会红）──
   {
@@ -3062,7 +3183,94 @@ const MUTATIONS = [
     guard: 'tools/test/spec-rule-refs.test.mjs',
     what: '注释指向一条不存在的规范条目 ⇒ 读者把"注释说有这条规范"当成证据',
   },
-
+  // ── S5 时间交付 / 第 14 → 9 接链（★ 成对：本清单的 `from` ↔
+  //    `tools/test/emulator-cxx-review-regressions.test.mjs` 的 `snippet`。行为断言在 CTest
+  //    `emulator-core-audio-voice` 的 `check_time_delivery`）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    from: 'state_flags_ |= (1u << 14);',
+    to: '/* 变异：压低不写回门字第 14 位 */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '音乐压低请求不再把第 14 位写回状态选择字（`70-vm.md:21` / `0x40716c`）⇒ 语音推进触发不了压低、' +
+      '第 14 → 9 的交接没有入口（check_time_delivery ④b 当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    from: 'if (elapsed >= channel.duration) {',
+    to:
+      'if (static_cast<std::uint32_t>(elapsed) >= static_cast<std::uint32_t>(channel.duration)) { ' +
+      '// 变异：到期判据改成无符号',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '音效通道的到期判据从**有符号**「读数 − 起点 ≥ 时长」改成无符号 ⇒ 起点落在"未来"的通道被判到期 ' +
+      '（check_time_delivery ② 的符号性用例当场红）',
+  },
+  // ── S6 门前渲染步的 (c)/(d) 归位（★ 成对：本清单的 `from` ↔
+  //    `tools/test/emulator-cxx-review-regressions.test.mjs` 的 `snippet`。行为断言在 CTest
+  //    `emulator-core-selftest` 的 `check_scene_clock_gate` ④/④b/④c）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    from: '    if (draw_mode_ != 1) return SceneAdvance::Skipped;                    // (a)',
+    to:
+      '    if (draw_mode_ != 1 || (driven_elsewhere_ && (state_flags_ & (1u << 10)) == 0)) ' +
+      'return SceneAdvance::Skipped;  // 变异：把 (d) 塞回"整段跳过"组',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '(d) 执行区间的暂停退回"整段跳过（连盖钟）"—— 即 S4 的错归因，把忙判定搬到盖钟之前 ⇒ ' +
+      '暂停期间整个场景时钟停走；`70-vm.md:217` 明说连盖钟一起跳过的**只有三个**、`:220-225` 第 5 条要的是' +
+      '「忙判定在盖钟之后 ⇒ 钟照盖、只跳请求」（CTest `emulator-core-selftest` 的 `check_scene_clock_gate` ④ ' +
+      '与 `check_pause_and_clock` 的时钟断言当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_io.cpp',
+    from: 'host_now_ms() - mouse_last_ms_',
+    to: 'scene_clock_ms_ - mouse_last_ms_',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '`0xcd` 的时间闸退回读场景时钟对 ⇒ (c) 把门前盖钟取消之后，TITLE 的 `0xc8` + `0xcd` 轮询环停摆、' +
+      '输入饿死（实测 8 条资产档全红；`check_scene_clock_gate` ④c 的 `0xcd` 断言当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_io.cpp',
+    from: 'if (ms > 0) host_clock_ms_ += static_cast<std::uint32_t>(ms);',
+    to: '/* 变异：短睡眠退回 no-op */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '`0xc8` 的短睡眠（n < 10）退回 no-op ⇒ 轮询循环以 CPU 全速空转而时间不走；' +
+      '`CORE-OPS-SLEEP-C8` 原文「必须让**时间前进 n 毫秒**…把 `sleep 1` 当作"什么都不做"…属于违反本条」' +
+      '（`check_scene_clock_gate` ④c 的短睡眠断言当场红）',
+  },
+  // ── S7 `0x9` 复位清单的余下项（★ 成对：本清单的 `from` ↔
+  //    `tools/test/emulator-cxx-review-regressions.test.mjs` 的 `snippet`。行为断言在 CTest
+  //    `emulator-core-selftest` 的 `check_exit_script_reset_scope`）──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'if (engine_reset_hook_registered_) engine_reset_hook();',
+    to: 'if (false) engine_reset_hook();  // 变异：不调启动时登记的重置钩子',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '`0x9` 不再调用启动时登记的引擎重置钩子（`CORE-OPS-FRAME-EXIT-SCRIPT` 第一项）⇒ ' +
+      '钩子的「推进格数 ← 1 + 清状态字第 9 位」一次都不做（check_exit_script_reset_scope 的调用计数当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'if ((config_.get_int("set:CreateObject") & 2) != 0 && (config_.get_int("set:AutoFreeTex") & 1) != 0) {',
+    to: 'if (false) {  // 变异：纹理槽释放的两支判据被拿掉',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '`0x9` 的纹理槽释放退回"永不释放"（`set:CreateObject` 第 1 位 ∧ `set:AutoFreeTex` 第 0 位）⇒ ' +
+      '配置允许时 1000 个槽里的纹理对象留着（check_exit_script_reset_scope 的正向那半当场红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_flow.cpp',
+    from: 'draw_mode_ = config_.get_int("set:DrawMode");',
+    to: '/* 变异：0x9 不重读 set:DrawMode */;',
+    guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
+    what:
+      '`0x9` 不再按配置重设场景绘制模式格（`CORE-OPS-FRAME-EXIT-SCRIPT`：「按配置 set:DrawMode 重设」）⇒ ' +
+      '构造后改配置的复位沿用旧值（check_exit_script_reset_scope 的 DrawMode 断言当场红）',
+  },
 ];
 
 /**

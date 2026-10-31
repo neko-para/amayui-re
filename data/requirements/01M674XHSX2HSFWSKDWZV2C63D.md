@@ -75,3 +75,5 @@
 ## 交接
 
 新会话从第 1 批（vm）开始：先 `pnpm tools spec residuals --channel vm` 拿当前分母。
+
+- **批 1（vm）完成**（2026-10-31）· 裁决 25 条 · 收紧成合同 20 · discarded 3 · 保留 unknown 2（S2 1 / S1 1）· 通道 vm 的 A 33→9 · 余量见 `REQ-01M676K7E62R5YNY6PT3X17R8K`（movie 8 条）与 `REQ-01M6778APC51QF8BQJ8TYWG450`（门模型）· **遗留 10 条已清**（P1 二阶段：门模型重写 + 143/D9/voice 位 + 渲染步收尾判据 + texture 符号性 + 帧章四缺口 + 7B + 5 处悬空引用 + 队列四格 storage）· **emulator 同步已开片**（S1 帧族：ctest 50/50、变异 27/27）

@@ -484,6 +484,17 @@ void Machine::begin_text_typing_or_drain() {
     //   不是"没有服务者"；本实现不置它，是因为**已读表**没有建模（残差 `RES-MSG-BLOCK-READ-HIT`），
     //   置了会让"读跳过"这条语义在没有已读命中依据时也生效。抽干本身与字节一致。
     const std::int32_t speed = param_cell_.value_or(0);
+    // ★ 演示闸（`0x300`）开着的层：字符格交给闸门泵，不进打字队列（见 `draw_text_layer_text`）。
+    //   但**必须把打字位置起** —— 推进器正是闸的服务者、且**只在打字位置起时被调用**
+    //   （`60-ops-text.md:375-386`）；不置它，闸开着的层永远不会被揭示。
+    //   参数格 = 0 ⇒ 推进器下一次调用就抽干并清位（一次成、不重放）；≠ 0 ⇒ 保持置起、按闸的节奏循环。
+    {
+        const int slot = resolve_text_layer(current_text_slot_);
+        if (slot >= 0 && slot < 10 && (font_slot_state_[slot] & 1) != 0) {
+            state_flags_ |= (1u << 29);
+            return;
+        }
+    }
     if (speed > 0 && (state_flags_ & (1u << 27)) == 0) {
         state_flags_ |= (1u << 29);
         text_timer_start_ms_ = scene_clock_ms_;
@@ -556,7 +567,25 @@ void Machine::service_text_gate(int slot) {
     ++state.gate_cycles;
 }
 
-void Machine::service_text_layers() {
+// 「文本槽在用标志」（机器格 `[77984h]`，取证 `report-text-gate.md` §1）：
+// 槽 1..9 **任一状态字非 0** ⇒ 1（`0x409421 cmp dword ptr [edi],0` → `0x409426 mov [esi+77984h],1`；
+// 入口 `0x409413` 先清 0）。★ 槽 0 不参与 —— 服务体的槽循环从槽 1（`0x7798C`）起。
+// ⛔ 它不是待处理命令队列的占用标记：后者的判空口径是「头 ≥ 尾」（`0x40FB73` / `0x40FB79`），
+//    全语料没有"队列非空"的单格；把这一位当队列用会让演示闸在打字期永不派发（§5.3）。
+bool Machine::text_slot_in_use() const {
+    for (int slot = 1; slot < 10; ++slot) {
+        const auto it = font_slot_state_.find(slot);
+        if (it != font_slot_state_.end() && it->second != 0) return true;
+    }
+    return false;
+}
+
+// **文本推进器的一趟**（`sub_409400`）。返回值 = 这一趟的**文本槽在用标志**（`[77984h]`）：
+// 门上的第 29 位服务体就是拿它决定「随即派发一条」还是「交回迭代头」（`0x41342D`）。
+// ★ 它是**入口快照**：引擎在槽循环里先置标志（`0x409426`）、之后才可能把该槽抽干并清 0
+//   （`0x4094C2` / `0x4094C4`）⇒ 本趟被抽干的槽**照样算进去**，而门读的就是这份快照。
+bool Machine::service_text_layers() {
+    const bool slot_in_use = text_slot_in_use();
     // ── 先服务 `0x300` 的循环演示闸：只要有闸在，泵就继续跑（**不清第 29 位**） ──
     bool gate_active = false;
     bool advancing = false;
@@ -584,7 +613,7 @@ void Machine::service_text_layers() {
         // 引擎：没有槽进计时支（参数格 = 0 ⇒ 全部抽干）⇒ 清第 29 位（`0x4094EF`）；否则保持。
         if (advancing) state_flags_ |= (1u << 29);
         else state_flags_ &= ~(1u << 29);
-        return;
+        return slot_in_use;
     }
     // 打字中（第 29 位）才推进；**每 D 毫秒一格、每帧最多一格**（`sub_453b60` 的闸门：
     // `elapsed <= n × interval` ⇒ 本帧一格都不画，超出才画一格并把 n 推到 ⌊elapsed/interval⌋+1）。
@@ -592,32 +621,33 @@ void Machine::service_text_layers() {
         // 不在打字态：队列本应已被"立即抽干"清空；万一有残留（宿主换了时钟 / 加载期）一次画完，
         // ⛔ 不要退回"每帧一格"（那会让"间隔 = 0"的脚本又变成打字机）。
         if (!pending_glyphs_.empty()) drain_pending_glyphs();
-        return;
+        return slot_in_use;
     }
     if (pending_glyphs_.empty()) {
         state_flags_ &= ~(1u << 29);  // 没有待画格 ⇒ 没有可服务的东西（引擎的"无活动槽"支）
-        return;
+        return slot_in_use;
     }
     if (input_pressed_) {
         // 按键 / 跳过 ⇒ **同帧抽干** + 清第 29 位（引擎 `0x40953c`–`0x409554`；它同时置第 27 位，
         // 本实现不置 —— 理由同 `begin_text_typing_or_drain`）。
         drain_pending_glyphs();
         state_flags_ &= ~(1u << 29);
-        return;
+        return slot_in_use;
     }
     if (text_timer_interval_ms_ <= 0) {  // 计时器没被正确启动（防御；正常路径间隔 > 0）
         draw_front_pending_glyph();
         if (pending_glyphs_.empty()) state_flags_ &= ~(1u << 29);
-        return;
+        return slot_in_use;
     }
     const std::uint32_t elapsed = scene_clock_ms_ - text_timer_start_ms_;
     const std::int64_t due = static_cast<std::int64_t>(text_timer_step_) * text_timer_interval_ms_;
-    if (static_cast<std::int64_t>(elapsed) <= due) return;  // 未到期 ⇒ 本帧一格都不画
+    if (static_cast<std::int64_t>(elapsed) <= due) return slot_in_use;  // 未到期 ⇒ 本帧一格都不画
     const auto crossed = static_cast<std::int32_t>(
         elapsed / static_cast<std::uint32_t>(text_timer_interval_ms_));
     text_timer_step_ = crossed + 1;
     draw_front_pending_glyph();
     if (pending_glyphs_.empty()) state_flags_ &= ~(1u << 29);  // 末格 ⇒ 清第 29 位（`0x4096b2`）
+    return slot_in_use;
 }
 void Machine::end_text_layer_line(int slot) {
     if (slot < 0 || slot >= 10) return;
@@ -786,6 +816,10 @@ void Machine::op_300(const Instruction& instruction) {
     slot_state = state | (slot_state & 0x10000);
     const auto deadline = read_int(ops[2]);
     font_slot_deadline_[index] = deadline;
+    // ★ `0x300` **只写槽状态字与期限**（`0x4269D3` / `0x4269DF`）：`sub_426990` 全 28 行**不含门字**
+    //   `0AAB44h` ⇒ 它**不置第 29 位**（取证 `report-text-gate.md` §4.1）。
+    //   它置起的是「**槽在用**」—— 由第 29 位服务体那一趟从槽状态字读回来（`0x409421` / `0x41342D`）；
+    //   门位由文本追加（`0x6e` / `0x196`）或块结束（`0x305`）置起。
     return;
 }
 

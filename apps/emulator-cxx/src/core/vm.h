@@ -73,8 +73,9 @@ enum class StopReason {
     StepLimit,
     StoppedAtOpcode,
     ScriptReached,
-    // 门一直关着，且挡门的位没有任何服务分支（规范：其余位只登记存在；第 30 位启用后门恒关）。
-    // ★ 这是**观测**结论，不是引擎语义：引擎表现为"停在门上"，外面看不出与"等输入"的区别。
+    // ★ **新门模型不再产生这个停因**（`CORE-VM-GATE` / `CORE-VM-STATE`：22 位位序表里的每一位都有
+    //   服务体，未建模的体按「交回迭代头」处理 ⇒ 门关着是**合法等待**，不是停因）。
+    //   枚举值保留：`StopReason` 是观测面的编号（日志 / 报告按数值读），删一个值会挪动其它值的编号。
     GateStalled,
     Error,
 };
@@ -389,6 +390,14 @@ struct RunResult {
 class Machine {
 public:
     static constexpr std::size_t kFrameCount = 40;
+    // 每帧返回栈容量（`CORE-OPS-FRAME-CALL`：**每帧 256 个位置**，压栈**不检查容量**）。
+    // 第 257 次压栈在引擎里落到帧区之外（未定义行为）⇒ 实现必须**拒绝或记诊断**；
+    // ⛔ 不许把它当成"覆盖最旧一项"，也不许静默截断。
+    static constexpr std::size_t kRetStackCapacity = 256;
+    // 泵的专用帧槽（`CORE-OPS-RUN-BRACKET`：**每条正命令都装进帧 37**，装载前无条件释放它）；
+    // 泵帧父帧号的哨兵 **−10**（`0x2` 的 −10 支认它；负支由泵直接写、正支靠「父帧候选」格照抄）。
+    static constexpr std::size_t kPumpFrameSlot = 37;
+    static constexpr std::int32_t kPumpParentSentinel = -10;
 
     Machine(std::uint32_t int_key, const OpcodeTable& table, const Install* install = nullptr,
             ConfigStore config = ConfigStore{});
@@ -407,12 +416,53 @@ public:
     bool step();
 
     const Frame& frame() const { return frames_[current_frame_]; }
+    // 按槽取帧记录（观察口；⛔ 不是产品接口）：`0x6` 的目标槽 / 泵帧都**不在当前帧上**。
+    const Frame& frame_at(std::size_t index) const { return frames_[index]; }
     std::size_t current_frame() const { return current_frame_; }
     std::uint32_t state_flags() const { return state_flags_; }
+    // 引擎级状态字保存栈（`CORE-OPS-FRAME-RET`）：**只**由引擎自己重入脚本的路径压入
+    // （不是 opcode 处理体；脚本自己的调用与返回不碰它）；空栈时 `0x5` 不写状态选择字。
+    std::size_t engine_state_word_stack_size() const { return engine_state_word_stack_.size(); }
+    // 「父帧候选」格（`CORE-OPS-FRAME-LOAD-FRAME`）：**装载器只照抄它**，不自己判断父帧号；
+    // 写者是 `0x3` / `0x6` / `0x9` 重置 / 泵（泵写 −10）。
+    std::int32_t parent_candidate() const { return parent_candidate_; }
+    // ── 待处理命令队列 / 泵（`CORE-OPS-RUN-BRACKET`；观察口 + 测试接缝，⛔ 不是产品接口）──
+    // 泵挂起帧号（−1 = 没有挂起帧）与队列泵占用标记。
+    std::int32_t suspended_frame() const { return suspended_frame_; }
+    bool pump_busy() const { return pump_busy_; }
+    // 状态选择字的**待恢复副本**（挂起时整字存、泵帧收场时并回；`0xd9` 的第 2 步也写它）。
+    std::uint32_t status_restore() const { return status_restore_; }
+    // 队列本体：头 / 尾 / 占用数 / 历史最高占用。判空口径 = **头 ≥ 尾**（`CORE-OPS-RUN-BRACKET`），
+    // 占用标记与它是**同一状态**（非 0 ⟺ 头 < 尾），所以不另存一个可漂移的标记格。
+    // ★ 门上的第 29 位**不读这一格**：它的判据是「文本槽在用标志」（见 `text_slot_in_use()`）。
+    std::size_t queue_head() const { return queue_head_; }
+    std::size_t queue_tail() const { return queue_tail_; }
+    std::size_t pending_command_count() const { return queue_tail_ - queue_head_; }
+    bool queue_occupied() const { return queue_head_ < queue_tail_; }
+    std::size_t queue_high_water() const { return queue_high_water_; }
+    std::int32_t queue_command(std::size_t index) const { return command_queue_[index]; }
+    // 255 格登记表（`0x143` 的投递源；格号 1..255，格 0 不参与）。★ 语料里没有写者
+    // （残差 `RES-OPS-EVENT-143-QUEUE`）⇒ 产品路径上恒 0；写入只能由测试播种。
+    std::int32_t event_table_cell(std::int32_t index) const;
+    // 宿主消息泵的节流（`CORE-VM-LOOP`）：**本迭代**是否该泵一次（迭代头算出的结果），与计数器现值。
+    bool should_pump_host() const { return host_pump_due_; }
+    std::uint32_t pump_counter() const { return pump_counter_; }
+    // ★ 测试接缝（⛔ 不是产品接口）：
+    /** 直接往队列尾放一条命令（只模拟「投递」那一下，**不**带投递口的顺手泵尾巴）。 */
+    void enqueue_command_for_test(std::int32_t command);
+    void seed_event_table_cell_for_test(std::int32_t index, std::int32_t value);
+    void seed_status_restore_for_test(std::uint32_t value) { status_restore_ = value; }
+    // 全局引用族槽里存的**地址**（观察口；⛔ 不是产品接口）：`0x9` 复位后必须读 0。
+    std::uint32_t pointer_slot(std::uint32_t tag, std::uint32_t index) const {
+        return read_pointer(Operand{tag, index});
+    }
     bool voice_playing() const { return voice_playing_; }
     std::int32_t voice_volume(std::size_t group) const { return voice_volumes_[group]; }
     std::int32_t scalar_149() const { return scalar_149_; }
     std::int32_t scalar_21b() const { return scalar_21b_; }
+    // 夹具注入：门前渲染步的 (c)（`CORE-TIMING-WINDOW`）读这一格。⛔ 产品路径只由 `0x21b` 写它
+    // （引擎初值 0）；这里的 setter 只为「要窗 / 节拍真的走」的用例省掉一条 `0x21b 1` 指令。
+    void set_scalar_21b(std::int32_t value) { scalar_21b_ = value; }
     // `0xC0` 读的引擎标量（观察口 + 测试注入；写者 `0xC3` 未实现）。
     std::int32_t engine_aa9e4() const { return engine_aa9e4_; }
     void seed_engine_aa9e4(std::int32_t value) { engine_aa9e4_ = value; }
@@ -457,6 +507,15 @@ public:
     }
     // typewriter：还没画出来的待画格数（守卫用；⛔ 不是产品接口）。
     std::size_t pending_glyph_count() const { return pending_glyphs_.size(); }
+    // ── **文本槽在用标志**（`[77984h]`；观察口 + 第 29 位的判据，⛔ 不是产品接口）──
+    // 槽 1..9 **任一状态字非 0** ⇒ 有槽在用（`0x409421 cmp dword ptr [edi],0` / `0x409426` 置 1；
+    // 入口 `0x409413` 先清 0；槽 0 不参与 —— 服务体的循环从槽 1 起）。
+    // ★ 与 `pending_glyph_count()`（"有待画字"）**不是一回事**：这是 `0x300` 写的那张槽状态字表，
+    //   逐字推进队列是另一件东西；两条判据分开，⛔ 别用一个顶另一个。
+    // ★ 也⛔ **不是**待处理命令队列的占用标记：队列判空是「头 ≥ 尾」（`0x40FB73` / `0x40FB79`），
+    //   全语料没有"队列非空"的单格 ⇒ 拿队列当这一位的判据，演示闸会永远派发不出去
+    //   （取证 `report-text-gate.md` §1.3 / §5.3）。
+    bool text_slot_in_use() const;
     // 打字中（状态字第 29 位）与计时器间隔（守卫用；⛔ 不是产品接口）。
     bool text_typing() const { return (state_flags_ & (1u << 29)) != 0; }
     std::int32_t text_timer_interval_ms() const { return text_timer_interval_ms_; }
@@ -556,18 +615,53 @@ public:
     void set_random_source(RandomSource source) { random_source_ = std::move(source); }
     std::uint32_t scene_clock_ms() const { return scene_clock_ms_; }
     std::uint32_t scene_previous_ms() const { return scene_previous_ms_; }
-    std::uint32_t engine_now_ms() const { return engine_now_ms_; }
-    std::uint32_t engine_previous_ms() const { return engine_previous_ms_; }
+    // 「本次读数」= 宿主毫秒时钟的一次采样（`CORE-TIMING-CLOCK`）。外部时钟 = 宿主给的值
+    // （`set_host_clock_ms`）；否则 `step()` 每迭代把虚拟宿主时钟 +16ms —— 固定步长是**仿真参数**，
+    // 不是引擎常量（spec 的「成立条件」）。
+    std::uint32_t host_now_ms() const { return host_clock_ms_; }
+    // 时钟对的**唯一写法**：先搬旧、再写新（`CORE-TIMING-CLOCK` 登记的四个写者同序）。
+    // ★ 「引擎时钟对」与「场景时钟对」是**同一对**（`70-vm.md:190` / `60-ops-render.md:290-291`）：
+    //   ⇒ (c) 取消门前那一次盖钟之后，场景时钟仍由 `0x1f4` / `0x20c` / `0x23c` 推进。
+    //   ⛔ 别再为 `0x1f4` / `0x20c` 另建一对「引擎时刻」—— 那样 (c) 一落，时间就真的停走了
+    //   （实测：门前的钟被取消 + 其余三个写者写的是另一对 ⇒ TITLE 输入泵死锁）。
+    void stamp_scene_clock(std::uint32_t sample_ms) {
+        scene_previous_ms_ = scene_clock_ms_;
+        scene_clock_ms_ = sample_ms;
+    }
     void set_driven_elsewhere(bool value) { driven_elsewhere_ = value; }
     // 启动时是否跑 LOGO（`0x130` 读的格）：`--skip-logo` 在跑根脚本前置 0。
     void set_show_logo(bool value) { show_logo_ = value ? 1 : 0; }
+    // show-logo 标志的当前值（观察口；`0x130` 读的就是这一格）。`0x9` 必须把它复位成 0。
+    bool show_logo() const { return show_logo_ != 0; }
+    // 启动时登记的重置钩子被调用了几次（守卫用；⛔ 不是产品接口）。
+    // ★ 钩子的两处写入（当前帧推进格数 ← 1 / 清状态字第 9 位）在 `0x9` 后续的
+    //   「帧槽全释放 → 状态字整字清 0 → 根帧装载写长度槽 0」之后**不可观察**，所以这里
+    //   只能观察"钩子被调用过"；两处写入本身的红判据不存在（见 `core_selftest.cpp` 的说明）。
+    std::size_t engine_reset_hook_calls() const { return engine_reset_hook_calls_; }
     bool scene_animating() const { return scene_animating_; }
-    // 场景侧的"待处理"闩（引擎 `+0B5B4`）：排窗 / 窗还在走 ⇒ 1；渲染步入清 0。
-    // 读者只有 `message_subsystem_busy()`（`0x21c` 谓词 A）；`0x4B3F9E` 还用它把脏位置起。
+    // 场景侧的"待处理"标记（引擎 `+0B5B4`）：排窗 / 窗还在走 / 命令进度还在走 ⇒ 1；
+    // 渲染步的推进子步清 0 再重算。读者 = `message_subsystem_busy()`（`0x21c` 谓词 A）
+    // 与**渲染步收尾**（`end_render`：= 0 ⇒ 清空命令表）。
     bool scene_pending() const { return scene_pending_; }
+    // 测试注入口（`0x202` / `0x323` 等排窗写点之外，用来单独布「收尾判据」的两种取值）。
     void set_scene_pending(bool value) { scene_pending_ = value; }
     bool forced_complete() const { return forced_complete_; }
     void force_complete() { forced_complete_ = true; }
+    // ── 渲染步门槛的四个输入（`CORE-TIMING-WINDOW`）──
+    // (b) 画面暂停闩：非 0 ⇒ **连盖钟一起跳过**（与执行区间的区间忙标记不是同一格）。
+    //     ★ 消息号未取证（`RES-VM-SCENE-HOLD-LATCH`）：这里只暴露"宿主 / 测试怎么置它"。
+    std::int32_t scene_hold_latch() const { return scene_hold_latch_; }
+    void set_scene_hold_latch(std::int32_t value) { scene_hold_latch_ = value; }
+    // 「只挡推进」第 2 条：影片对象的缓冲被另一处持有（`RES-WINDOW-MOVIE-HELD`）。
+    bool movie_held() const { return movie_held_; }
+    void set_movie_held(bool value) { movie_held_ = value; }
+    // 「只挡推进」第 3 条的影片半边：有待消费的新帧（**读一次即消费**，由渲染步门槛消费）。
+    bool movie_new_frame() const { return movie_new_frame_; }
+    // 测试注入口：模拟"后端刚解出一帧"（真实生产者在 `service_movies()`）。
+    void set_movie_new_frame(bool value) { movie_new_frame_ = value; }
+    // 「只挡推进」第 4 条：渲染步内部的就绪判据（缺省就绪；判据体未取证）。
+    bool render_ready() const { return render_ready_; }
+    void set_render_ready(bool value) { render_ready_ = value; }
     // 宿主提供时钟（毫秒）；不设置时每次 step 自动 +16ms（仿真的固定步长）。
     void set_host_clock_ms(std::uint32_t now_ms) { host_clock_ms_ = now_ms; external_clock_ = true; }
     // 回到自动步长时钟（每次 step +16ms）；用于无窗口的确定性逐帧导出。
@@ -575,18 +669,30 @@ public:
         external_clock_ = false;
         scene_clock_ms_ = now_ms;
         scene_previous_ms_ = now_ms;
+        host_clock_ms_ = now_ms;  // 虚拟宿主时钟也从这里起步（之后每迭代 +16）
     }
     // 场景推进：盖章 / 插值 / 到期（`CORE-TIMING-WINDOW`）。step() 在门之前调用它。
     // ★ `advance_windows = false` = 只更新场景时钟（迭代头读数），**不推进窗** —— 这是
-    //   「暂停」时主循环的行为（`CORE-VM-LOOP`：区间忙标记 = 1 且等待位 = 0 ⇒ 场景推进整段跳过）。
+    //   测试 / 诊断的直接入口；主循环走下面的 `advance_render_step()`（带门槛）。
     void advance_scene(std::uint32_t now_ms, bool advance_windows = true);
+    // 渲染步的**推进子步**（同一渲染步的更早子步）：三个"连盖钟一起跳过" → **盖钟** →
+    // 五个"只挡推进"（`CORE-TIMING-WINDOW` 的「暂停时」那一段）。返回值供主循环决定
+    // "这一迭代有没有跑渲染步"（跳过 ⇒ 不判据、不发请求、不清帧标志、不推窗）。
+    enum class SceneAdvance {
+        Skipped,    // 三个"整段跳过"之一成立（(a) 绘制模式 / (b) 画面暂停闩 / (c) 0x21b 空转）：连盖钟一起跳过
+        ClockOnly,  // 盖了钟，但五个"只挡推进"之一成立（含 (d) 执行区间暂停）：窗不前进、两个标记不重算
+        Windows,    // 盖钟 + 推进（⇒ 门前那一次请求在此之后发出）
+    };
+    SceneAdvance advance_render_step(std::uint32_t now_ms);
     // 0x20C 的帧步进请求：由渲染步消费。
     bool frame_step_requested() const { return frame_step_requested_; }
     void request_render() { frame_step_requested_ = true; }
     bool consume_frame_step() {
         const bool value = frame_step_requested_;
         frame_step_requested_ = false;
-        forced_complete_ = false;  // 渲染步收尾清「强制完成」（`CORE-OPS-SCENE-COMMAND-RECORDS`）
+        // ★ 「强制完成」**不在这里清**：它的清点是**渲染步收尾**（`end_render()`，在
+        //   "待处理 = 0 ⇒ 清空命令表"之后）**无条件**清 —— `CORE-TIMING-WINDOW` 的「不粘住」。
+        //   ⛔ 别把它写成"读一次请求就清"：宿主可能只消费请求、不跑渲染步收尾。
         return value;
     }
     bool scene_dirty() const { return scene_dirty_; }
@@ -594,6 +700,9 @@ public:
     std::int32_t draw_mode() const { return draw_mode_; }
     bool frame_flag() const { return frame_flag_; }
     void clear_frame_flag() { frame_flag_ = false; }
+    // 夹具注入「帧标志」被置起（引擎里它的写者未取证，见 `RES-RENDER-STEP-FLAG`）：
+    // 用来观察 `0x4127E7` 的清点 —— (c) 跳过时**不清**，门前那一次请求之后才清。
+    void set_frame_flag(bool value) { frame_flag_ = value; }
     bool render_target_present() const { return render_target_ != -1; }
     std::int32_t render_target() const { return render_target_; }
     std::int32_t blend_mode() const { return blend_mode_; }
@@ -782,12 +891,43 @@ public:
     // ⇒ 给一个最小接缝，口径与 `emulator-new` 那边"测试直接取 `HANDLERS.get(op)` 调"一致。
     // ★ 它只做**一次派发**：不取指、不推进 ip、不服务门位。⛔ 生产路径只有 `step()`。
     void dispatch_for_test(const Instruction& instruction) { execute(instruction); }
+    // ── 门服务链的收场（`CORE-VM-STATE` 位序表的「服务后」列）──
+    // `CORE-VM-GATE`：一个位的服务体执行完之后只可能做三件事之一；扫描的收场由这三件事拼出来。
+    enum class GateAction {
+        ToHead,    // 交回迭代头：本迭代到此为止、**不派发**（更晚的位本迭代不再看）
+        Continue,  // 继续扫描：落到位序表里的**下一位**
+        Dispatch,  // 由服务体自己派发一条（位序表里只有第 29 位这一种）
+    };
+    // ── 门服务链的测试接缝（S2；⛔ 不是门本身）──
+    /** 只跑**一个位的服务体**并返回它的收场：不扫表、不派发。
+     *  `check_text_cell_reveal` 用它把"一拍"压成"时钟推进 + 第 30 位服务体"（那一格的观察口是逐拍节奏）。 */
+    GateAction service_gate_bit_for_test(std::int32_t bit) { return service_gate_bit(bit); }
+    // ── 帧族的测试脚手架（S1；⛔ 不是平台边界）──
+    // 「泵」已落地（S3），但引擎自己重入脚本的那两处入口还没实现 ⇒
+    // 「状态字保存栈非空」这个前置只能由测试摆出来。⛔ 不要在产品代码里用它们。
+    void set_parent_candidate_for_test(std::int32_t value) { parent_candidate_ = value; }
+    /** 直接调用**装载器**（`0x3` / `0x6` / `0x9` / 泵正命令共用的那条）：它只照抄「父帧候选」格。 */
+    void load_frame_for_test(std::uint32_t file_id, std::int32_t target);
+    void set_pump_state_for_test(std::int32_t suspended_frame, bool pump_busy) {
+        suspended_frame_ = suspended_frame;
+        pump_busy_ = pump_busy;
+    }
+    void seed_frame_length_for_test(std::size_t slot, std::uint32_t words) {
+        frames_[slot].length_slot = words;
+    }
+    void push_engine_state_word_for_test(std::uint32_t word) { push_engine_state_word(word); }
     bool bgm_fade_active() const { return (state_flags_ & (1u << 9)) != 0; }
     std::int32_t voice_resource() const { return voice_resource_; }
-    bool voice_pending() const { return voice_pending_; }
-    std::int32_t voice_start_ms() const { return voice_start_ms_; }
-    std::int32_t voice_delay(std::size_t i) const { return voice_delay_[i]; }
-    std::int32_t voice_state(std::size_t i) const { return voice_state_[i]; }
+    // 三个语音槽的到期计时记录（`CORE-VM-LOOP` 的**语音通道**）：状态（低两位 = 完成 / 跳过）/ 起点 /
+    // 时长 / 该槽的待办标记。★ 起点的 **0 是"未盖章"哨兵**（与真实时刻 0 撞车）⇒ 只由时间交付盖一次。
+    std::int32_t voice_delay(std::size_t i) const { return voice_slot_timers_[i].duration; }
+    std::int32_t voice_state(std::size_t i) const { return voice_slot_timers_[i].state; }
+    bool voice_pending() const {
+        for (const auto& slot : voice_slot_timers_) {
+            if (slot.pending) return true;
+        }
+        return false;
+    }
     std::int32_t voice_group_enabled(std::size_t i) const { return voice_group_enabled_[i]; }
     std::int32_t voice_group_value(std::size_t i) const { return voice_group_value_[i]; }
     static constexpr std::size_t voice_slot_count() { return 3; }
@@ -796,7 +936,60 @@ public:
     std::size_t voice_play_requests() const { return voice_play_requests_; }
     std::int32_t voice_mirror_resource(std::size_t i) const { return voice_mirror_resource_[i]; }
     std::int32_t voice_mirror_a4(std::size_t i) const { return voice_mirror_a4_[i]; }
-    bool bgm_ducked() const { return bgm_ducked_; }
+    // ── 时间交付：两套到期计时器（`CORE-VM-LOOP` 的「一次迭代做哪些事」）──
+    // ★ 交付**不是混音**：它只读写下面这些引擎记录，并把「到期」交给该子系统自己的释放 / 启动入口；
+    //   混音 / 输出 / 音量在音频子系统与平台（`70-vm.md:23` 的范围声明）。交付路径**不发宿主请求**。
+    // ★ 音效通道的 10 格与 `kSeSlotTableSize`（`T_SE+0x4BC` 的「槽 → 资源号」）**不是同一张表**：
+    //   那条记录是「活动 / 起点 / 时长 / 待交值」，这条是「槽 → 当前资源号」；条数相同只是巧合。
+    //   10 这个数取自同一条 spec 句（「音效通道：10 个通道」，`70-vm.md:19`）+ 绑定里的
+    //   `0x4b52a4 音效通道：10 个通道`。
+    static constexpr int kSeChannelCount = 10;
+    /** 一个音效通道的到期计时记录（`70-vm.md:19`）。★ `start` 的 0 = **未盖章哨兵**。 */
+    struct SeChannel {
+        bool active = false;        // 活动标记
+        std::uint32_t start = 0;    // 起点（0 = 未盖章）
+        std::int32_t duration = 0;  // 时长（毫秒）
+        std::int32_t value = 0;     // 到期时随通道交给释放入口的值
+    };
+    /** 一个语音槽的到期计时记录（`70-vm.md:20`）。★ `start` 的 0 = **未盖章哨兵**。 */
+    struct VoiceSlotTimer {
+        std::int32_t state = 0;     // 状态字：低两位 = 完成 / 跳过（3）
+        std::uint32_t start = 0;    // 起点（0 = 未盖章）
+        std::int32_t duration = 0;  // 时长（毫秒；`0x2f5` 写的延时）
+        bool pending = false;       // 该槽的待办标记（`0x2f5` 置 1）
+    };
+    const SeChannel& se_channel(std::size_t i) const { return se_channels_[i]; }
+    bool se_work_pending() const { return se_work_pending_; }
+    std::size_t se_release_steps() const { return se_release_steps_; }
+    std::int32_t se_last_released_value() const { return se_last_released_value_; }
+    const VoiceSlotTimer& voice_slot_timer(std::size_t i) const { return voice_slot_timers_[i]; }
+    // 「该子系统仍有一件未完成的工作」（语音那一份；第 14 位服务体的三个前置之一，见 `70-vm.md:21` / `:112`）。
+    bool voice_work_pending() const { return voice_work_pending_; }
+    std::size_t voice_advance_steps() const { return voice_advance_steps_; }
+    /** 时间交付的**音效通道**（`70-vm.md:19`）：逐通道懒盖章 → **有符号**到期 → 清活动 / 交值给释放入口。
+     *  未到期 ⇒ 重新置「仍有一件未完成的工作」；入口处该标记为 0 ⇒ 直接返回（`0x4b5239`）。 **不发宿主请求**。 */
+    void deliver_sound_time(std::uint32_t now_ms);
+    /** 时间交付的**语音通道**（`70-vm.md:20`）：逐槽懒盖章 → **有符号**到期 → 清槽状态。
+     *  返回 true = 「有推进」（`0x4bbc01`）；主循环据此判音乐压低。 **不发宿主请求**。 */
+    bool deliver_voice_time(std::uint32_t now_ms);
+    /** 音乐压低请求（`sub_407120`）：四条件成立 ⇒ 状态选择字**第 14 位 ← 1**（`0x40716c` 写回门字）
+     *  并置语音的「仍有一件未完成的工作」。语音推进与 `0xc4` 的第 2 步都走这里。 */
+    void request_bgm_duck();
+    // ── 时间交付的测试注入口（⛔ 不是产品接口）──
+    // ★ 通道记录的**其余写者**（谁置"活动"、谁写时长与那个值）本版未取证
+    //   （残差 `RES-VM-SE-RECORD-WRITERS`）⇒ 这里只让守卫把前置摆出来，⛔ 不要在产品路径里伪造一次播放。
+    void set_se_channel_for_test(std::size_t i, bool active, std::uint32_t start, std::int32_t duration,
+                                 std::int32_t value) {
+        if (i >= se_channels_.size()) return;
+        se_channels_[i] = SeChannel{active, start, duration, value};
+    }
+    void set_se_work_pending_for_test(bool value) { se_work_pending_ = value; }
+    void set_voice_slot_for_test(std::size_t i, std::int32_t state, std::uint32_t start,
+                                 std::int32_t duration, bool pending) {
+        if (i >= voice_slot_timers_.size()) return;
+        voice_slot_timers_[i] = VoiceSlotTimer{state, start, duration, pending};
+    }
+    void set_voice_work_pending_for_test(bool value) { voice_work_pending_ = value; }
     std::int32_t voice_switch(std::size_t i) const { return voice_switch_46c_[i]; }
     std::int32_t voice_switch_478(std::size_t i) const { return voice_switch_478_[i]; }
     std::int32_t voice_busy() const { return voice_busy_; }
@@ -850,15 +1043,28 @@ public:
         return missing_opcodes_;
     }
     bool command_animating() const { return command_animating_; }
-    void set_command_animating(bool value) { command_animating_ = value; }
+    void set_command_animating(bool value) {
+        command_animating_ = value;
+        // ★ 命令自己的计时没到终点（延迟内 / 推进中 / 进度没走完）⇒ **同一步**也置
+        //   「场景待处理标记」（`60-ops-scene` 的「命令档的前置与出档」：同一步里这些推进点
+        //   同时把两个标记置起）。少了这一句，收尾判据换到待处理标记之后，还在推进的命令
+        //   会在同一帧被清表（命令档就再也走不到第二帧）。
+        if (value) scene_pending_ = true;
+    }
     std::uint32_t render_now_ms() const { return render_now_ms_; }
     void begin_render() { render_now_ms_ = scene_clock_ms_; command_animating_ = false; }
     void end_render() {
         scene_dirty_ = false;  // 引擎在渲染步入口清脏（0x4B40AA）
         // ★ "待处理"闩（`+0B5B4`）与脏位是**同一条指令对**（0x4B40AA / 0x4B40B0），但它必须在
-        //   "推进窗"之前清、由推进重新置起 —— 那一段在 `advance_scene` 里（它每步都跑，
-        //   不依赖宿主是否呈现）。这里不再重复清：否则影片 / 不呈现的宿主路径语义会分叉。
-        if (!command_animating_ && !scene_animating_) clear_scene_commands();
+        //   "推进窗"之前清、由推进重新置起 —— 那一段在 `advance_scene_windows` 里（它在渲染步的
+        //   更早子步、不管宿主呈不呈现都跑）。这里不重复清。
+        // ★ 收尾判据是**场景待处理标记**（`60-ops-scene` 的「命令档的前置与出档」：为 0 ⇒ 把
+        //   **整张**命令表清空）—— ⛔ 不是「有动画」，也不是命令档自己的动画格。那是两个不同的
+        //   标记：同处清 0，但"有没有东西在动"只有待处理标记回答。
+        if (!scene_pending_) clear_scene_commands();
+        // ★ **随后无条件**把「强制完成」清 0（不管本步有没有人读过它）：它只活一个渲染步；
+        //   命令档每帧都会重新置位。⛔ 不许写成跨步粘住、也不许写成"读一次就清"。
+        forced_complete_ = false;
     }
     const DrawItem* draw_item(std::uint32_t key) const { const auto it = draw_items_.find(key); return it == draw_items_.end() ? nullptr : &it->second; }
     const SceneRecord* scene_record(std::uint32_t key) const { const auto it = scene_records_.find(key); return it == scene_records_.end() ? nullptr : &it->second; }
@@ -889,9 +1095,8 @@ public:
     // 状态字（`CORE-OPS-STATUS-WORD`；`0x1cf` 写、`0x1bf` 读-清）—— ⛔ 不是门字 `state_flags_`。
     std::int32_t status_word() const { return status_word_; }
     std::int32_t status_neighbor() const { return status_neighbor_; }
-    // `0x0d9` 的两格（身份在规范里未规定；本版按无读者格建模）。
-    std::int32_t d9_cell() const { return d9_cell_; }
-    std::int32_t d9_word() const { return d9_word_; }
+    // `0x0d9` 清的第二个字（泵期间对外有效的那份状态字）见上面的 `status_restore()` ——
+    // ★ 它**不是**本条私有的格：泵在挂起时整字存、收场时并回（`CORE-OPS-RUN-BRACKET`）。
     // 模式族的七个格（`CORE-OPS-MODE-BIT`；代号见规范，地址对应未取证）。
     std::int32_t mode_a() const { return mode_a_; }
     std::int32_t mode_b() const { return mode_b_; }
@@ -976,10 +1181,6 @@ public:
         mode_e_ = mode_e;
         mode_f_ = mode_f;
     }
-    void seed_d9_cells(std::int32_t cell, std::int32_t word) {
-        d9_cell_ = cell;
-        d9_word_ = word;
-    }
     // ★ 测试脚手架（⛔ 不是平台边界）：格数由排版侧写入，而本模型的排版侧没有"格数快照"这条写路径的
     //   全部前置（`0x72` 尾段能写它，纯 selftest 里要先把字符格追加出来）⇒ 想让取模推进被测到，只能播种。
     void seed_reveal_cells(std::int32_t cursor, std::int32_t count) {
@@ -1014,6 +1215,9 @@ public:
 private:
     Frame& frame_mut();
     void write_length(std::uint32_t words);
+    // **门服务链的一个位**（`CORE-VM-GATE` / `CORE-VM-STATE`）：执行该位的服务体，返回它的收场。
+    // ★ 位序由 `kGateServiceOrder`（vm.cpp，spec 的位序表）决定，⛔ 不是位号升序。
+    GateAction service_gate_bit(std::int32_t bit);
     // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：轮询 / 收尾 / 循环 / 填纹理。
     void service_movies();
     // 把一帧写进同槽纹理（呈现层的像素效果，不在规范正文里）；写成功 ⇒ true。
@@ -1050,12 +1254,46 @@ private:
     static constexpr std::uint32_t kBankKeyStride = 0x40000000u;
     // `0x09` 只清**当前选中 bank** 的三个全局池（另一组保留）。
     void clear_global_pool_bank();
+    // 启动时登记的引擎重置钩子（`CORE-OPS-FRAME-EXIT-SCRIPT`）：当前帧的推进格数 ← 1、
+    // 清状态选择字的第 9 位；此外它复位**它自己的一个子系统**（子系统身份与内部效果不在本条，
+    // ⛔ 本模型不造空函数冒充，见 `op_09` 的注释与 S7 报告）。
+    void engine_reset_hook();
+    // `0x1fa` 与 `0x9` 的 1000 槽循环共用：逐槽释放**一个**纹理槽 —— 记录保留、
+    // 只清来源文件与槽对象；释放守卫非 0 ⇒ 什么都不做（`sub_49E980` 的 `[this+id*4+0B670h]` 判据）。
+    void release_texture_slot(std::uint32_t id);
     std::uint32_t script_int_key_index(const Operand& operand);
     // 选项窗口（`0x91`…`0x94`）的内部原语。
     void reset_choice_table();
     std::int32_t choice_hit_test() const;
     void jump_to(std::uint32_t position);
     void push_return(std::uint32_t position);
+    // 帧装载器（`CORE-OPS-FRAME-CALL-SCRIPT` / `-LOAD-FRAME` / `-EXIT-SCRIPT` / 泵正命令**共用**
+    // 同一条装载路径）：返回栈栈顶 ← 0（数组内容不写）、两个本地块进入目标 ← −1、
+    // 指令指针 ← 代码区起点、长度槽 ← 0、父帧号 ← 「父帧候选」格。⛔ 各条不许再自己拼一份形状。
+    void apply_frame_record(std::size_t slot, const Bytes& script, const ScriptHeader& header,
+                            std::uint32_t file_id);
+    void install_script_into(std::size_t slot, std::uint32_t file_id);
+    // 引擎级状态字保存栈的压入（`0x4116f2`）：压入时把第 31 / 20 位清 0（`CORE-OPS-FRAME-RET`）。
+    void push_engine_state_word(std::uint32_t word);
+    // ── 待处理命令队列 / 泵（`CORE-OPS-RUN-BRACKET`）──
+    /** 只写队列尾（不带"顺手泵"尾巴）：产品投递见 `enqueue_command`，测试接缝见下一个入口。 */
+    void push_command(std::int32_t command);
+    /** 投递动作：把一条命令放进队列尾；**每次投递还带一个"顺手泵一次"的尾巴**（`0x143` 第 3 步）——
+     *  泵被**队列泵占用标记**挡下时一次也不泵（那也是 `0x143` 借用这个标记的用处）。 */
+    void enqueue_command(std::int32_t command);
+    /** 泵入口：两判按序（区间忙 ≠ 0 ⇒ 返回；队列头 ≥ 队列尾 ⇒ 返回），否则**只取一条**。
+     *  取走后按命令的三态处置（`0` / 正 = 统一文件 id 装帧 37 / 负 = 目标帧号取负）。
+     *  ⛔ 一趟只取一条：链式再泵只发生在泵帧收场那一步（`0x2` 的 −10 支第 ⑤ 步）。 */
+    void pump_command_queue();
+    /** 迭代头的宿主消息泵节流（`CORE-VM-LOOP`）：计数器与常量 4 按位与 ⇒ 本迭代泵一次 / 不泵。
+     *  只落计数序列与 `should_pump_host()`；宿主实际怎么泵仍由平台路径承担。 */
+    void advance_host_pump();
+    /** 渲染步推进的本体（`CORE-TIMING-WINDOW`）：清「有动画」/「场景待处理标记」→ 逐项盖章 / 插值 /
+     *  到期。只有 `advance_render_step()`（门前的渲染步）与 `advance_scene()`（测试直接入口）会调它；
+     *  "跳过这一迭代"时两个标记**不重算**（停在上一迭代的值）。 */
+    void advance_scene_windows();
+    // 状态字第 26 位的服务体（`CORE-OPS-FRAME-LOCAL-RET-7C`）：本地块内的输入等待。
+    void service_local_input_wait();
 
     // ── 指令实现：一个 opcode 一个函数；分派仍在 vm.cpp 的 execute()，实现按规范章节分文件 ──
     // 控制流 / 帧（vm_ops_flow.cpp）
@@ -1152,7 +1390,10 @@ private:
     void op_32(const Instruction&); void op_72(const Instruction&); void op_10a(const Instruction&);
     void op_2e9(const Instruction&);
     void op_214(const Instruction&);
-    // `0x72` 的放行（帧服务）：等推进位置起时，输入一到就清位。
+    // 平台输入路径：把宿主按钮源的上升沿**锁存**一次（事件锁存，不是电平读）。每迭代采样，
+    // 与门无关（门上的第 31 位服务体只**消费**这个锁存）。
+    void sample_advance_input();
+    // 第 31 位的服务体（服务后 = 交回迭代头）：等推进位置起时，消费锁存 / 读跳过 ⇒ 清第 31 + 30 位。
     void service_advance_wait();
     void service_auto_message();
     // `0x21c` 谓词 A：消息子系统"还有事"（定时器在窗内 **或** 待处理）。谓词 B（影片对象扫描）另算。
@@ -1160,10 +1401,14 @@ private:
     bool movie_gate_busy() const;
     void service_choice_click();
     void op_2f7(const Instruction&); void op_304(const Instruction&); void op_305(const Instruction&);
-    // 门之前的 BGM 淡变推进（第 9 位的服务分支；规范未规定 ⇒ 见实现里的残差说明）。
+    // 第 9 位的服务体（位序表第 4 行）：BGM 淡变 / 压低恢复的逐拍推进；服务后 = 继续扫描（落到第 12 位）。
+    // 规范没规定这一位的内部动作 ⇒ 见实现里的残差说明（`RES-AUDIO-BGM-FADE-SERVICE`）。
     void service_bgm_fade();
-    // 每迭代一次的**逐格揭示**服务（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：活动位（第 30 位）置起才走；
-    // 够一拍 ⇒ 只请求画一格，然后格号 ← (格号+1) mod 格数。放在 vm_timing.cpp，由每迭代的时钟推进调用。
+    // 第 14 位的服务体（位序表第 3 行）：前置齐 ⇒ 清第 14 位、置第 9 位并起计时；
+    // 不成立 ⇒ 第 14 位**保留**。服务后 = 继续扫描（落到第 9 位）。
+    void service_bgm_duck();
+    // 第 30 位的服务体（位序表第 8 行；`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：活动位置起才走；
+    // 够一拍 ⇒ 只请求画一格，然后格号 ← (格号+1) mod 格数。服务后 = 继续扫描（落到第 13 位）。
     void service_text_cell_reveal();
     // 标志格 / 状态格 / 模式位读 / 层号（vm_ops_engine.cpp）
     void op_19a(const Instruction&); void op_1b6(const Instruction&); void op_1b7(const Instruction&);
@@ -1214,7 +1459,9 @@ private:
     void erase_text_layer_draw_items(int slot);
     // 逐字符显现（typewriter）：按每字间隔**每 D 毫秒画一格、每帧最多一格**（`0x409400` 的计时器闸门）；
     // 追加成功时由 `begin_text_typing_or_drain()` 两档决定"置第 29 位 + 起计时器"还是"同帧抽干"。
-    void service_text_layers();
+    // ★ 返回值 = 这一趟的**文本槽在用标志**（`[77984h]` 的入口快照）：门上的第 29 位服务体拿它决定
+    //   「随即派发一条」还是「交回迭代头」（`CORE-VM-GATE`；取证 `report-text-gate.md` §3.2）。
+    bool service_text_layers();
     void begin_text_typing_or_drain();
     void draw_front_pending_glyph();
     void drain_pending_glyphs();
@@ -1254,6 +1501,16 @@ private:
     ConfigStore config_;
     std::array<Frame, kFrameCount> frames_{};
     std::size_t current_frame_ = 0;
+    // 「父帧候选」格（装载器照抄）与泵的挂起帧 / 队列泵占用标记（`CORE-OPS-FRAME-LOAD-FRAME` /
+    // `CORE-OPS-RUN-BRACKET`）。泵本身是 S3 的单 ⇒ 本片只建这三格与 −10 的收场支。
+    std::int32_t parent_candidate_ = -1;
+    std::int32_t suspended_frame_ = -1;
+    bool pump_busy_ = false;
+    // 状态选择字的**待恢复副本**：泵挂起时整字存、泵帧收场时并回（`CORE-OPS-RUN-BRACKET`；
+    // `0xd9` 的第 2 步读-改-写它）。★ 泵期间"对外有效"的状态字就是这份副本（读者按标记选）。
+    std::uint32_t status_restore_ = 0;
+    // 引擎级状态字保存栈（`CORE-OPS-FRAME-RET`）：只由引擎重入脚本的路径压入。
+    std::vector<std::uint32_t> engine_state_word_stack_;
     std::uint32_t state_flags_ = 0;
     std::unordered_map<std::uint32_t, std::uint32_t> global_int_;
     std::unordered_map<std::uint32_t, float> global_float_;
@@ -1276,9 +1533,7 @@ private:
     // （`1cf` / `1bf`）状态字与它的相邻格 —— ⛔ 与门字 `state_flags_` 是**不同**的引擎格。
     std::int32_t status_word_ = 0;
     std::int32_t status_neighbor_ = 0;
-    // （`0d9`）清位判据的两格；身份在规范里未规定。
-    std::int32_t d9_cell_ = 0;
-    std::int32_t d9_word_ = 0;
+    // （`0d9`）第 2 步清的字是**待恢复副本**（`status_restore_`，泵的挂起件），不是本条私有格。
     // （`19b` / `19c`）模式族的七个格。
     std::int32_t mode_a_ = 0;
     std::int32_t mode_b_ = 0;
@@ -1304,12 +1559,9 @@ private:
     std::uint32_t local_save_word_ = 0;
     std::uint32_t local_save_pos_ = 0;
     std::int32_t local_save_depth_ = 0;
-    // 本地块的四格与"待处理"标记：领域身份未取证、也没有脚本可达的写者 ⇒ 只有"清 0"这条合同。
-    std::int32_t local_cell_a_ = 0;
-    std::int32_t local_cell_b_ = 0;
-    std::int32_t local_cell_c_ = 0;
-    std::int32_t local_cell_d_ = 0;
-    std::int32_t local_pending_ = 0;
+    // ★ `0x7c` 尾段还清四对"从未写入有效登记"的格与一个回调派发闩 —— 那些在本仓的
+    //   `audit` 里已判 **discarded**（`RES-LOCAL-RET-SLOTS` / `RES-LOCAL-RET-PENDING`：
+    //   语料里没有有效写者，清 0 不可达）⇒ **不建模**，也不再在 `0x7c` 上写它们。
     // 三个互不相同的格（`0x19a` / `0x1b6`+`0x1b7` / `0x1cc`）。
     std::int32_t flag_x_ = 0;
     std::int32_t flag_y_ = 0;
@@ -1376,6 +1628,10 @@ private:
     std::int32_t scalar_25b_a_ = 0;
     std::int32_t scalar_25b_b_ = 0;
     std::int32_t show_logo_ = 1;
+    // 启动时登记的引擎重置钩子（`CORE-OPS-FRAME-EXIT-SCRIPT`）：登记发生在构造期，
+    // `0x9` 只调**已登记**的钩子。两类计数只给守卫（⛔ 不是产品状态）。
+    bool engine_reset_hook_registered_ = false;
+    std::size_t engine_reset_hook_calls_ = 0;
     std::int32_t scalar_2ee_ = 0;
     // `0xC0` 读的引擎标量（复位为 0；写者是 `0xC3`，本版未实现）。领域名未取证。
     std::int32_t engine_aa9e4_ = 0;
@@ -1413,13 +1669,10 @@ private:
     // 淡变推进的记账：上一次推进的时刻（毫秒）。`0` = 还没起算。
     std::uint32_t bgm_fade_last_ms_ = 0;
     std::size_t bgm_fade_requests_ = 0;
-    // `0x2f5`（配音排队）写的那五格：延时 ms / 资源号 / pending / 起算 / 状态字（每槽一格）。
-    // ★ 真正"响"是帧更新里的计时（本版不建模时钟 ⇒ 只落状态与请求）。
+    // `0x2f5`（配音排队）写的那五格：延时 ms / 资源号（**全局一格**）/ 排队标记 / 起算 / 该槽状态字。
+    // ★ 其中三格是**该槽**的（时间交付按槽推进）⇒ 记录形状见 `VoiceSlotTimer`。
     std::int32_t voice_resource_ = 0;
-    bool voice_pending_ = false;
-    std::int32_t voice_start_ms_ = 0;
-    std::array<std::int32_t, 3> voice_delay_{};
-    std::array<std::int32_t, 3> voice_state_{};
+    std::array<VoiceSlotTimer, 3> voice_slot_timers_{};
     // `0x2ff`（配音组）：三个槽各一对「组开关位」与「组值」。★ 组值的领域含义未取证
     //（只证到播放时会抄进声音后端的一列里，而那一列在本语料里没有读者）。
     std::array<std::int32_t, 3> voice_group_enabled_{};
@@ -1440,7 +1693,14 @@ private:
     std::array<std::int32_t, 3> voice_mirror_a4_{};
     std::size_t voice_load_requests_ = 0;
     std::size_t voice_play_requests_ = 0;
-    bool bgm_ducked_ = false;  // `0xAAB44` 第 14 位的投影（BGM 压低，`sub_407120` 那一步）
+    // ── 时间交付的引擎状态（`CORE-VM-LOOP`）──
+    // 音效通道表 10 格 + 两个子系统各自的「仍有一件未完成的工作」标记。
+    std::array<SeChannel, kSeChannelCount> se_channels_{};
+    bool se_work_pending_ = false;
+    std::size_t se_release_steps_ = 0;          // 交给释放入口的次数（子系统内部步骤，⛔ 不是宿主请求）
+    std::int32_t se_last_released_value_ = 0;   // 最近一次交给释放入口的值（观察口）
+    bool voice_work_pending_ = false;
+    std::size_t voice_advance_steps_ = 0;       // 「有推进」的次数（= 交付返回值 true 的次数）
     // `0x82` 消费的那条**文本记录向量**（`T_Font+0xD24`，72 字节/条）的**最小可观察投影**：
     // 只建已取证的 6 个字段（+0x00 / +0x14 / +0x18 / +0x1C / +0x20 / +0x28），其余字段不建（残差）。
     struct TextSpanRecord {
@@ -1543,21 +1803,52 @@ private:
     std::uint32_t host_clock_ms_ = 0;
     bool external_clock_ = false;
     bool scene_animating_ = false;
-    // 引擎 `+0B5B4`（"场景还有待处理的东西"闩）：排窗时置、窗推进时置、渲染步入清（见 `end_render`）。
+    // 引擎 `+0B5B4`（"场景还有待处理的东西"闩 = 场景待处理标记）：排窗时置、窗推进时置、
+    // 命令进度还在走时置；**渲染步的推进子步**（`advance_scene_windows`）清 0 再重算。
+    // ★ 读者两个：`message_subsystem_busy()`（`0x21c` 谓词 A）与本模型的**渲染步收尾**
+    //   （`end_render`：`+0B5B4` = 0 ⇒ 清空命令表）—— 收尾判的是它，⛔ 不是「有动画」。
     bool scene_pending_ = false;
     bool forced_complete_ = false;
     bool frame_step_requested_ = false;
     bool frame_flag_ = false;
     bool scene_dirty_ = true;
     std::int32_t draw_mode_ = 1;
-    std::uint32_t engine_now_ms_ = 0;
-    std::uint32_t engine_previous_ms_ = 0;
+    // ── 渲染步门槛的四个输入（`CORE-TIMING-WINDOW` 的跳过点分类）──
+    // ★ 注：现在是**五个**输入 —— (d) 执行区间的暂停复用 `driven_elsewhere_`（区间忙标记），
+    //   不另存一格。
+    // (b) **画面暂停闩**：由**窗口消息**置 / 清的引擎格，与执行区间的区间忙标记**不是同一格**。
+    //     消息号与初值未取证（残差 `RES-VM-SCENE-HOLD-LATCH`）⇒ 这里只留一格 + 宿主 / 测试注入口，
+    //     缺省 0（不挡）。⛔ 不伪造消息号、不接平台消息。
+    std::int32_t scene_hold_latch_ = 0;
+    // 「只挡推进」第 2 条：**有影片对象正被另一处持有**（引擎级布尔量，来源不属本条 ——
+    // 残差 `RES-WINDOW-MOVIE-HELD`）⇒ 缺省 false + 注入口。
+    bool movie_held_ = false;
+    // 「只挡推进」第 3 条的影片半边：**有待消费的新帧**（**读一次即消费**）。生产者在门前的
+    // 影片对象表服务（后端解出新帧 ⇒ 置），消费者是渲染步的门槛。
+    bool movie_new_frame_ = false;
+    // 「只挡推进」第 4 条：渲染步内部的**就绪判据**（返回 0 = 未就绪）。判据体未成篇、无 EA
+    // ⇒ 缺省 true（就绪）+ 注入口；⛔ 不实现内部判据。
+    bool render_ready_ = true;
     bool driven_elsewhere_ = false;
     // （`1f4` / `1f5`）执行区间的嵌套计数；忙标记复用 `driven_elsewhere_`（同一格）。
     std::int32_t bracket_depth_ = 0;
-    // 「门一直关着且没有服务分支」的连续迭代计数（只用于诊断，不是引擎状态）。
-    std::size_t gate_stall_steps_ = 0;
-    bool gate_stall_reported_ = false;
+    // ── 待处理命令队列 + 泵（`CORE-OPS-RUN-BRACKET` / `CORE-OPS-EVENT-143`）──
+    // 队列表 256 格（与 `T_Command` 里嵌入的那条队列同形；引擎级）。`queue_head_` / `queue_tail_`
+    // 是**线性下标**（不是回绕计数器）：判空口径照 spec 是「队列头 ≥ 队列尾」，取一条只前进头。
+    // 占用标记不另存一格：`queue_occupied()`（头 < 尾）就是泵读的**同一状态**。
+    // ★ 门上的第 29 位**不读它**：那一位的判据是「文本槽在用标志」（`text_slot_in_use()`），
+    //   与队列无关（取证 `report-text-gate.md` §1.3 / §5.3）。⛔ 别把两者当成同一格。
+    static constexpr std::size_t kCommandQueueCapacity = 256;
+    // `0x143` 的 255 格登记表（格号 1..255 参与投递）。格 0 存在但不用，只是让下标对上格号。
+    static constexpr std::size_t kEventTableSize = 256;
+    std::array<std::int32_t, kCommandQueueCapacity> command_queue_{};
+    std::size_t queue_head_ = 0;
+    std::size_t queue_tail_ = 0;
+    std::size_t queue_high_water_ = 0;
+    std::array<std::int32_t, kEventTableSize> event_table_{};
+    // 宿主的消息泵节流（`CORE-VM-LOOP`）：计数器初值 1；本迭代是否该泵一次 = 迭代头算出的结果。
+    std::uint32_t pump_counter_ = 1;
+    bool host_pump_due_ = false;
     std::int32_t mouse_interval_ = 1;
     // 鼠标回调的登记状态（引擎级一格；`0xcc` 写、`0xcd` 读）。
     std::int32_t mouse_target_ = -1;   // 登记的脚本位置（dword 下标）；−1 = 取消

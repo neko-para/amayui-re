@@ -138,6 +138,14 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
                                              static_cast<std::int64_t>(anchor_clock)
                                        : -1);
             machine.add_wheel_delta(scripted->take_wheel_delta());
+            // 宿主每帧喂一次"当前有没有输入被按下"（与窗口路径 `window.cpp` 的
+            // `any_key || any_mouse` 同口径）。★ 文本推进器**只在打字位置起时被调用**，而它读这一格
+            // 做"有输入 ⇒ 同帧抽干 + 清第 29 位"（`0x40953c`；`60-ops-text.md` 服务侧第 1 步）。
+            // 不喂它 ⇒ 无窗口路径上的点击永远抽不干打字，点击只能靠计时器走完（实测：
+            // `adv-click-rate` 从 37 掉到 22 —— 一次点击既抽不了字、也推进不了下一句）。
+            std::int32_t scripted_buttons = 0;
+            scripted->buttons(scripted_buttons);
+            machine.set_input_pressed(scripted->keys() != 0 || scripted_buttons != 0);
         }
         bool requested = false;
         bool stop = false;

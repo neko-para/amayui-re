@@ -42,18 +42,30 @@ void Machine::op_108(const Instruction& instruction) {
 
 void Machine::op_c8(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    const auto ms = read_int(ops[0]); if (ms >= 10) state_flags_ |= 1u; return;
+    const auto ms = read_int(ops[0]);
+    if (ms >= 10) { state_flags_ |= 1u; return; }
+    // 短睡眠（`CORE-OPS-SLEEP-C8`：n < 10 ⇒ **处理器内阻塞** n 毫秒）：
+    // ⛔ **不得变成 no-op** —— spec 原文「实现可以用虚拟时钟代替真实阻塞，但必须让**时间前进
+    // n 毫秒**、并保持次序…把 `sleep 1` 当作"什么都不做"会让轮询循环以 CPU 全速空转，属于违反本条」。
+    // ★ 这里推进的是**宿主采样时钟**（虚拟阻塞）：场景时钟对仍只由 `CORE-TIMING-CLOCK` 登记的
+    //   四个写者写（⛔ 别把睡眠塞成第五个写者）。读者是 `0xcd` 的时间闸 —— 它读的是现场宿主时刻
+    //   （`0x41ACF1 timeGetTime`），不是场景时钟对。
+    // ⚠ 负值（按无符号解释 ⇒ 极长阻塞）本模型不阻塞：留作残差，不在这里发明行为。
+    if (ms > 0) host_clock_ms_ += static_cast<std::uint32_t>(ms);
+    return;
 }
 
 void Machine::op_cc(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 登记鼠标回调（CORE-INPUT-CALLBACK-REGISTER）：间隔（0 写成 1）、目标位置、
     // 登记时的当前帧脚本身份、上次派发时刻（= 当前时刻）。
+    // ★ 「当前时刻」= **现场宿主时刻**（`0xcd` 的同一路读数），⛔ 不是场景时钟对 —— 门前盖钟被
+    //   (c) 取消时场景时钟会停走，而轮询节拍必须照走（否则 TITLE 的输入环等不到自己的回调）。
     const auto interval = read_int(ops[0]);
     mouse_interval_ = interval == 0 ? 1 : interval;
     mouse_target_ = read_int(ops[1]);
     mouse_owner_ = frame_mut().local_depth;
-    mouse_last_ms_ = scene_clock_ms_;
+    mouse_last_ms_ = host_now_ms();
     return;
 }
 
@@ -62,11 +74,13 @@ void Machine::op_cd(const Instruction& instruction) {
     // 定时派发鼠标回调（CORE-INPUT-MOUSE-CALLBACK-PUMP）：
     // 时间闸（elapsed >= interval，含等号；或门字第 27 位）→ 压返回位置（当前位置 + 1）
     // → 目标 −1 撤销 → 脚本身份校验 → 跳到目标、推进格数 0。
+    // ★ 「读一次当前时刻」= **现场宿主时刻**（`0x41ACF1 call timeGetTime` / `0x41ACF9 sub edx,
+    //   [esi+68EF0h]`）⇒ elapsed **不依赖场景时钟**；(c) 取消门前盖钟也挡不住这条轮询节拍。
     Frame& f = frame_mut();
-    const auto elapsed = static_cast<std::int64_t>(static_cast<std::uint32_t>(scene_clock_ms_ - mouse_last_ms_));
+    const auto elapsed = static_cast<std::int64_t>(static_cast<std::uint32_t>(host_now_ms() - mouse_last_ms_));
     const bool force = (state_flags_ & (1u << 27)) != 0;
     if (elapsed < static_cast<std::int64_t>(mouse_interval_) && !force) return;  // 只前进一条
-    mouse_last_ms_ = scene_clock_ms_;
+    mouse_last_ms_ = host_now_ms();
     push_return(static_cast<std::uint32_t>(f.ip / 4 + 1));
     if (mouse_target_ == -1) {
         f.ret_stack.pop_back();  // 目标 −1 = 取消登记：撤销刚压的返回位置，只前进一条
