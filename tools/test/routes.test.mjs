@@ -27,6 +27,7 @@ import {
   DOC_POINTER,
   SCHEMA,
   emitScript,
+  footprintEmulatorArgs,
   inputFileName,
   loadRoutes,
   parseStep,
@@ -126,4 +127,16 @@ test('⑥ evidence.command 写机器绝对路径 ⇒ 必须红（换机器照抄
     problems.some((p) => typeof p?.message === 'string' && p.message.includes('机器绝对路径')),
     `机器绝对路径没有被 evidence-command-portable 抓住：${problems.join(' / ')}`,
   );
+});
+
+test('⑦ footprint 与回放共用同一组判据（只多加 --dump-footprint）', () => {
+  const route = byId.get('title');
+  const args = footprintEmulatorArgs(route, { inputFile: 'in.txt', outFile: 'out.jsonl', install: 'X' });
+  const valueOf = (flag) => args[args.indexOf(flag) + 1];
+  assert.equal(valueOf('--input-script'), 'in.txt');
+  assert.equal(valueOf('--dump-footprint'), 'out.jsonl');
+  assert.equal(valueOf('--expect-script'), String(route.arrive.script), '判据必须仍是 --expect-script');
+  assert.equal(valueOf('--anchor-script'), String(route.anchor.script));
+  assert.ok(args.includes('--play-headless'), '足迹 dump 走无窗口播放');
+  assert.throws(() => footprintEmulatorArgs(route, { outFile: 'x' }), /inputFile/);
 });

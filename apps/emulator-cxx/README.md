@@ -174,6 +174,12 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 # 执行足迹：跑到 --max-steps 或停机，按首次出现顺序汇总「真的被取指过的 opcode」（不开窗）
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --footprint --max-steps 2000000
 
+# 足迹 dump（JSONL，供 `pnpm tools spec residuals --footprint` join）：动态 op / gate / cell + 静态 op。
+# ★ 和 --play-headless 同用（给了它就自动走无窗口）；同输入两次输出**逐字节相同**（只记数字）。
+.\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --skip-logo ^
+    --play-headless --input-script tests\input\route-title.txt --anchor-script 21092 --expect-script 21092 ^
+    --tick-ms 16 --max-steps 600000 --dump-footprint .cache\footprint\title.jsonl
+
 # 影片：跑到 LOGO 的 play-movie，再逐帧导出 GPU 合成（`0` 帧 = 只跑到收尾）
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-logo-gpu out\logo --logo-stride 40 --logo-frames 6
 .\out\build\windows-x64\emulator-cxx.exe --install "E:\Games\Eushully\天結\install" --render-logo-gpu out\logo --logo-frames 0
@@ -217,7 +223,11 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 - 未实现 / 非法 opcode / 内部错误停机 ⇒ 退出码 1（正常的 `exit` 停机不算失败）。
 - `--bmp <dir>`：每次渲染请求导出一张（`--bmp-stride` / `--bmp-limit` 限流）；达成时另存 `reached-<id>.bmp`。
 - 诊断口（⛔ 不是产品路径）：`--watch-locals 1008,1013`（看脚本把输入读成了什么）、
-  `--trace-script <id> --trace-opcodes 0xcd,0x12e`（只看该脚本里这些 opcode 的取指）。
+  `--trace-script <id> --trace-opcodes 0xcd,0x12e`（只看该脚本里这些 opcode 的取指）、
+  `--dump-footprint <out.jsonl>`（动态 / 静态足迹；格式见 `src/core/footprint.h` 的头注释 ——
+  `op` = 真的派发过的 opcode、`gate` = 门服务链服务过的位、`cell` = 读写过的 VM 格地址、
+  `writer` = **两个写的统计**（位 set/clear 与 VM 格写各自是哪个 opcode）、
+  `static-op` = 这次装载过的脚本里出现过的 opcode（上界））。
 
 ★ 当前是 **最小可执行层**：`CORE-ISA` / `CORE-POOL` / `CORE-FRAME` / `CORE-VM` / `CORE-CONFIG` + `FMT-ALF` / `FMT-AGF`。`--config` 可指定玩家 `SYS4REG.INI`；缺省按 `set:UseAppDataFolder` 选配置根（`%APPDATA%` / `XDG_CONFIG_HOME` / `~/.config`，否则安装根），
 再拼 `set:RegFilePath` 与文件名。

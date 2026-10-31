@@ -1089,7 +1089,7 @@ export function describe() {
     operations: [
       ['validate', '跑全部不变量（红 = 退出码 1；条数以 describe 为准）'],
       ['report', '审计账：effect 覆盖 / 内部省略 / 残差 / **未登记** + 章节与绑定计数（不给百分数）'],
-      ['residuals', '★ 残差地图：按子系统通道 × 类别摊平（A=正文弃权 / B=消费者缺失 / C=知识缺口；`discarded` 明确舍弃**不计入**）；`--channel` / `--class` 过滤，`--json` 给机器读'],
+      ['residuals', '★ 残差地图：按子系统通道 × 类别摊平（A=正文弃权 / B=消费者缺失 / C=知识缺口；`discarded` 明确舍弃**不计入**）；`--channel` / `--class` 过滤；`--footprint <file>` 再按**足迹**分三桶（路径内 / 路径外 / 判不了）；`--json` 给机器读'],
       ['chapters', '整份 spec 的章节骨架 + 每章规则与残差'],
       ['show', '一条规则的规范正文 + 证据解析结果（内部视图）'],
       ['at', '反向查询：某个 EA / 函数出现在哪些规则里'],

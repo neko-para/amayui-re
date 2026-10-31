@@ -49,6 +49,8 @@ int main(int argc, char** argv) {
             options.trace_steps = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--footprint") == 0) {
             options.footprint = true;
+        } else if (std::strcmp(argv[i], "--dump-footprint") == 0 && i + 1 < argc) {
+            options.dump_footprint = argv[++i];
         } else if (std::strcmp(argv[i], "--skip-logo") == 0) {
             options.skip_logo = true;
         } else if (std::strcmp(argv[i], "--play-frames") == 0 && i + 1 < argc) {
@@ -133,6 +135,9 @@ int main(int argc, char** argv) {
 
     if (!agf_path.empty()) return run_core_agf(agf_path);
 
+    // `--dump-footprint` 是播放路径的诊断口 ⇒ 没显式给 `--play-headless` 也按无窗口播放（不给窗口）。
+    if (!options.dump_footprint.empty()) options.headless = true;
+
     if (!options.install_dir.empty()) {
         const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
         if (options.table_path.empty()) options.table_path = (exe_dir / "opcode-table.json").string();
@@ -145,8 +150,8 @@ int main(int argc, char** argv) {
     if (!smoke) {
         std::fprintf(stderr,
                      "用法：emulator-cxx --install <dir> [--play-frames N] [--trace N] [--footprint] "
-                     "[--skip-logo] [--stop-at <opcode>] [--config <SYS4REG.INI>] "
-                     "[--config-save|--no-config-save]\n"
+                     "[--dump-footprint <out.jsonl>] [--skip-logo] [--stop-at <opcode>] "
+                     "[--config <SYS4REG.INI>] [--config-save|--no-config-save]\n"
                      "      emulator-cxx --install <dir> --render-logo-gpu <dir> "
                      "[--logo-stride N] [--logo-frames N]\n"
                      "      emulator-cxx --install <dir> --play-headless [--input-script <file>] "

@@ -3698,6 +3698,26 @@ const MUTATIONS = [
       '输出对象的「报告」不写日志落点（改成只 push 到错误通道 `errors_`）⇒ 日志 seam 收不到 ' +
       '`\\r\\n致命的エラー[...]\\r\\n` ⇒ CTest `spec_output_object_report` 当场红',
   },
+  {
+    // ★ 静态足迹命中 ⇒ **判不了**（数据依赖分支），⛔ 不是"路径外"。
+    //   写反会让"静态出现过、这次没执行"的残差被误判成"本次不涉及"（最会把缺陷筛掉的那种错）。
+    file: 'tools/lib/residual-footprint.mjs',
+    from: "        if (statics.length > 0) return { scope: 'unknown', by: 'op-static', triggers: statics };",
+    to: "        if (statics.length > 0) return { scope: 'offpath', by: 'op-static', triggers: statics };  // 变异：静态命中也算路径外",
+    guard: 'tools/test/spec-residual-footprint.test.mjs',
+    what:
+      '把"静态足迹命中也算路径外"写反 ⇒ 只在脚本里出现、这次没执行的 opcode 残差从「判不了」掉进「路径外」' +
+      '（缺陷会被当成"本次不涉及"）⇒ 足迹守卫当场红',
+  },
+  {
+    // ★ 位 / 格残差要消费足迹里的**写统计**（`writer` 记录）；不消费 ⇒ 写者执行过也仍是"判不了"。
+    file: 'tools/lib/residual-footprint.mjs',
+    from: 'export function classifyResidual(row, entry, footprint, { writers = footprint?.writers } = {}) {',
+    to: 'export function classifyResidual(row, entry, footprint, { writers } = {}) {  // 变异：不消费足迹里的 writer 记录',
+    guard: 'tools/test/spec-residual-footprint.test.mjs',
+    what:
+      '位 / 格残差不消费足迹里的 `writer` 记录（写者执行过也不进「路径内」）⇒ 写统计成了摆设 ⇒ 足迹守卫当场红',
+  },
 ];
 
 /**

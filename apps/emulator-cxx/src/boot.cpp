@@ -22,6 +22,7 @@
 #include <map>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,92 @@ std::filesystem::path environment_path(const char* name) {
     return core::path_from_utf8(value);
 }
 #endif
+
+// 把**动态足迹 + 静态足迹**写成逐字节确定的 JSONL（`--dump-footprint`）。
+//
+// 静态足迹 = 这次运行**成为过当前帧**的脚本逐份解码后出现过的 opcode 集合（上界）。
+// ★ 顺序只由 `std::map` 的键序决定；⛔ 不写时间戳 / 路径 / 墙钟 ⇒ 同 route 两次运行逐字节相同。
+// ★ 解码失败只计数（meta 的 staticFailures），不伪造"没有这个 opcode"。
+bool write_footprint_jsonl(const std::string& path, core::Footprint& fp,
+                           const core::Install& install, const core::OpcodeTable& table) {
+    std::size_t static_failures = 0;
+    for (const std::uint32_t script : fp.scripts) {
+        try {
+            const core::Bytes bytes = core::read_install_file(install, script);
+            const core::ScriptHeader header = core::parse_script_header(bytes);
+            if (header.body_offset > bytes.size()) {
+                ++static_failures;
+                continue;
+            }
+            std::string error;
+            const auto instructions = core::decode_instructions(
+                std::span<const std::uint8_t>(bytes).subspan(header.body_offset), table, 2000000,
+                &error);
+            for (const auto& instruction : instructions) ++fp.static_ops[instruction.opcode];
+        } catch (const std::exception&) {
+            // 不是脚本 / 装不出来的文件：记一次失败，不假装它没有 opcode。
+            ++static_failures;
+        }
+    }
+
+    std::ofstream output(core::path_from_utf8(path), std::ios::binary);
+    if (!output) return false;
+
+    std::uint64_t steps = 0;
+    for (const auto& [opcode, stat] : fp.ops) {
+        (void)opcode;
+        steps += stat.count;
+    }
+    output << "{\"schema\":1,\"kind\":\"meta\",\"steps\":" << steps << ",\"ops\":" << fp.ops.size()
+           << ",\"gates\":" << fp.gates.size() << ",\"cells\":" << fp.cells.size()
+           << ",\"bitWriters\":" << (fp.bit_sets.size() + fp.bit_clears.size())
+           << ",\"cellWriters\":" << fp.cell_writers.size()
+           << ",\"staticOps\":" << fp.static_ops.size()
+           << ",\"staticFailures\":" << static_failures << ",\"scripts\":[";
+    for (std::size_t i = 0; i < fp.scripts.size(); ++i) {
+        if (i != 0) output << ',';
+        output << fp.scripts[i];
+    }
+    output << "]}\n";
+    for (const auto& [opcode, stat] : fp.ops) {
+        output << "{\"schema\":1,\"kind\":\"op\",\"opcode\":" << opcode << ",\"count\":"
+               << stat.count << ",\"firstScript\":" << stat.first_script << "}\n";
+    }
+    for (const auto& [bit, stat] : fp.gates) {
+        output << "{\"schema\":1,\"kind\":\"gate\",\"bit\":" << bit << ",\"count\":" << stat.count
+               << "}\n";
+    }
+    char address[16];
+    for (const auto& [at, stat] : fp.cells) {
+        std::snprintf(address, sizeof(address), "0x%08X", at);
+        output << "{\"schema\":1,\"kind\":\"cell\",\"addr\":\"" << address
+               << "\",\"read\":" << stat.reads << ",\"write\":" << stat.writes << "}\n";
+    }
+    // ── 两个**写**的统计（按指令归因；只写不读）──
+    for (const auto& [key, count] : fp.bit_sets) {
+        output << "{\"schema\":1,\"kind\":\"writer\",\"target\":\"bit:" << key.first
+               << "\",\"opcode\":" << key.second << ",\"dir\":\"set\",\"count\":" << count
+               << "}\n";
+    }
+    for (const auto& [key, count] : fp.bit_clears) {
+        output << "{\"schema\":1,\"kind\":\"writer\",\"target\":\"bit:" << key.first
+               << "\",\"opcode\":" << key.second << ",\"dir\":\"clear\",\"count\":" << count
+               << "}\n";
+    }
+    for (const auto& [key, count] : fp.cell_writers) {
+        std::snprintf(address, sizeof(address), "0x%08X", key.first);
+        output << "{\"schema\":1,\"kind\":\"writer\",\"target\":\"cell:" << address
+               << "\",\"opcode\":" << key.second << ",\"dir\":\"write\",\"count\":" << count
+               << "}\n";
+    }
+    for (const auto& [opcode, count] : fp.static_ops) {
+        output << "{\"schema\":1,\"kind\":\"static-op\",\"opcode\":" << opcode
+               << ",\"count\":" << count << "}\n";
+    }
+    if (!output) return false;
+    output.close();
+    return output.good();
+}
 }  // namespace
 
 int run_core_agf(const std::string& agf_path) {
@@ -91,6 +178,7 @@ int run_core_install(const InstallRunOptions& options) {
     const int logo_stride = options.logo_stride;
     const int logo_frames = options.logo_frames;
     const bool footprint = options.footprint;
+    const std::string dump_footprint = options.dump_footprint;
     const bool skip_logo = options.skip_logo;
     try {
         const core::Install install = core::open_install(core::path_from_utf8(install_dir));
@@ -347,8 +435,30 @@ int run_core_install(const InstallRunOptions& options) {
             HeadlessPlayOptions play = options.headless_play;
             play.max_frames = options.play_frames > 0 ? options.play_frames : play.max_frames;
             if (play.limit_steps == 0) play.limit_steps = max_steps;
+            // ★ 诊断足迹：在播放开始前打开；只计数、不改行为（log-only）。
+            machine.footprint().enabled = !dump_footprint.empty();
             const int code = run_headless_play(machine, scripted ? &*scripted : nullptr, play,
                                                kWidth, kHeight);
+            if (!dump_footprint.empty()) {
+                // 收口那一帧的脚本可能只被"进入"、还没执行任何指令（`--expect-script` 正是这种）⇒
+                // 显式补记，否则静态足迹会漏掉 route 的 arrive 脚本。
+                machine.footprint().note_script(machine.frame().script_id);
+                const bool ok = write_footprint_jsonl(dump_footprint, machine.footprint(), install,
+                                                      table);
+                if (!ok) {
+                    std::fprintf(stderr, "[footprint] 写不出来：%s\n", dump_footprint.c_str());
+                } else {
+                    std::uint64_t total_ops = 0;
+                    for (const auto& entry : machine.footprint().ops) total_ops += entry.second.count;
+                    std::printf(
+                        "[footprint] -> %s (steps=%llu ops=%zu gates=%zu cells=%zu staticOps=%zu "
+                        "scripts=%zu)\n",
+                        dump_footprint.c_str(), static_cast<unsigned long long>(total_ops),
+                        machine.footprint().ops.size(), machine.footprint().gates.size(),
+                        machine.footprint().cells.size(), machine.footprint().static_ops.size(),
+                        machine.footprint().scripts.size());
+                }
+            }
             if (machine.halted()) {
                 const auto& stop = machine.last_stop();
                 std::printf("[core] exit halted=1 reason=%d opcode=0x%X message=%s\n",

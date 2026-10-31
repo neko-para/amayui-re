@@ -787,6 +787,9 @@ Machine::GateAction Machine::service_gate_bit(std::int32_t bit) {
 
 bool Machine::step() {
     if (halted_) return false;
+    // ★ 诊断足迹：先记"当前帧脚本成为过执行脚本"（即使这一步只走门、没派发），
+    //   静态足迹据此解码"这次运行装载到的脚本"。
+    footprint_.note_script(frame().script_id);
     // 迭代头第一件事：宿主消息泵的**节流**（`CORE-VM-LOOP`；四迭代的固定周期，泵完隔 3 个迭代）。
     // ★ 只落计数序列与 `should_pump_host()`；**宿主的实际泵仍由现有 SDL 路径承担**。
     advance_host_pump();
@@ -842,6 +845,8 @@ bool Machine::step() {
     if (state_flags_ != 0) {
         for (const std::int32_t bit : kGateServiceOrder) {
             if ((state_flags_ & (1u << bit)) == 0) continue;  // 未置起 ⇒ 未命中
+            // 诊断足迹：门服务链**命中并交给服务体**的位（位序 / 收场都不受影响）。
+            footprint_.note_gate(bit);
             const GateAction action = service_gate_bit(bit);
             if (action == GateAction::ToHead) {
                 // 合法等待（⛔ 不是停因）：位没被服务体清掉就一直关着，下一迭代继续服务同一位。
@@ -891,6 +896,26 @@ bool Machine::step() {
         stop_.message = "instruction-past-code:" + std::to_string(size);
         return false;
     }
+    // 诊断足迹：只记**真的要派发**的那一条（校验全部通过之后、执行之前）。
+    footprint_.note_op(opcode, f.script_id);
+
+    // ── 两个**写**的统计（`--dump-footprint` 的 `writer` 记录）──
+    // ① 位写：本指令执行前后 `state_flags_` 的净变化 ⇒ 按（位号, opcode）记 set / clear。
+    //    用 RAII 保证**异常 / 提前 return** 的路径也记（catch 里是 `return false`）。
+    // ② 格写：`current_opcode` 在执行期间非 0 ⇒ `note_cell_write` 按（地址, opcode）归因。
+    // ★ 门服务发生在快照之前 ⇒ 服务体的位 / 格写不会被算到上一条指令头上。
+    const std::uint32_t state_before = state_flags_;
+    struct StateWriteScope {
+        Footprint& footprint;
+        const std::uint32_t before;
+        const std::uint32_t opcode;
+        const std::uint32_t* after;
+        ~StateWriteScope() {
+            footprint.note_state_delta(before, *after, opcode);
+            footprint.current_opcode = 0;
+        }
+    } state_write_scope{footprint_, state_before, opcode, &state_flags_};
+    footprint_.current_opcode = opcode;
 
     Instruction instruction;
     instruction.offset = f.ip;

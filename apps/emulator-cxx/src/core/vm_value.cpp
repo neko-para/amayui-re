@@ -138,15 +138,18 @@ bool Machine::resolve_address(std::uint32_t address, std::uint32_t& tag, std::ui
 
 std::uint32_t Machine::read_pointer(const Operand& operand) const {
     const auto slot = address_of(operand);
+    footprint_.note_cell_read(slot);
     const auto it = ref_slots_.find(slot);
     return it == ref_slots_.end() ? 0u : it->second;
 }
 
 void Machine::write_pointer(const Operand& operand, std::uint32_t address) {
+    footprint_.note_cell_write(address_of(operand));
     ref_slots_[address_of(operand)] = address;
 }
 
 std::uint32_t Machine::read_raw(std::uint32_t address) {
+    footprint_.note_cell_read(address);
     std::uint32_t tag = 0;
     std::uint32_t index = 0;
     if (resolve_address(address, tag, index)) {
@@ -180,6 +183,7 @@ std::uint32_t Machine::read_raw(std::uint32_t address) {
 }
 
 void Machine::store_raw(std::uint32_t address, std::uint32_t bits) {
+    footprint_.note_cell_write(address);
     std::uint32_t tag = 0;
     std::uint32_t index = 0;
     if (resolve_address(address, tag, index)) {
@@ -269,6 +273,7 @@ std::int32_t Machine::read_int_at(std::uint32_t address) {
     std::uint32_t tag = 0;
     std::uint32_t index = 0;
     if (!resolve_address(address, tag, index)) throw CoreError("read-int-unmapped-address");
+    footprint_.note_cell_read(address);
     switch (tag) {
         case 3: { const auto it = global_int_.find(index); return it == global_int_.end() ? 0 : decode_int(it->second); }
         case 9: { const auto it = frame_mut().local_int.find(index); return it == frame_mut().local_int.end() ? 0 : decode_int(it->second); }
@@ -282,6 +287,7 @@ double Machine::read_float_at(std::uint32_t address) {
     std::uint32_t tag = 0;
     std::uint32_t index = 0;
     if (!resolve_address(address, tag, index)) throw CoreError("read-float-unmapped-address");
+    footprint_.note_cell_read(address);
     switch (tag) {
         case 3: { const auto it = global_int_.find(index); return static_cast<double>(decode_int(it == global_int_.end() ? encode_int(0) : it->second)); }
         case 9: { const auto it = frame_mut().local_int.find(index); return static_cast<double>(decode_int(it == frame_mut().local_int.end() ? encode_int(0) : it->second)); }
@@ -295,6 +301,7 @@ void Machine::write_int_at(std::uint32_t address, std::int32_t value) {
     std::uint32_t tag = 0;
     std::uint32_t index = 0;
     if (!resolve_address(address, tag, index)) throw CoreError("write-int-unmapped-address");
+    footprint_.note_cell_write(address);
     switch (tag) {
         case 3: global_int_[index] = encode_int(value); note_global_int_write(index); return;
         case 9: frame_mut().local_int[index] = encode_int(value); return;
@@ -308,6 +315,7 @@ void Machine::write_float_at(std::uint32_t address, double value) {
     std::uint32_t tag = 0;
     std::uint32_t index = 0;
     if (!resolve_address(address, tag, index)) throw CoreError("write-float-unmapped-address");
+    footprint_.note_cell_write(address);
     switch (tag) {
         case 3: global_int_[index] = encode_int(static_cast<std::int32_t>(value)); note_global_int_write(index); return;
         case 9: frame_mut().local_int[index] = encode_int(static_cast<std::int32_t>(value)); return;
@@ -318,6 +326,11 @@ void Machine::write_float_at(std::uint32_t address, double value) {
 }
 
 std::int32_t Machine::read_int(const Operand& operand) {
+    // 诊断足迹：值族（3 / 4 / 5 / 9 / 10 / 11）的**格**；指针族由 `read_pointer` 记槽、`read_int_at` 记目标。
+    if (operand.type == 3 || operand.type == 4 || operand.type == 5 || operand.type == 9 ||
+        operand.type == 10 || operand.type == 11) {
+        footprint_.note_cell_read(address_of(operand));
+    }
     switch (operand.type) {
         case 0:
             return as_i32(operand.raw);
@@ -353,6 +366,10 @@ std::int32_t Machine::read_int(const Operand& operand) {
 }
 
 double Machine::read_float(const Operand& operand) {
+    if (operand.type == 3 || operand.type == 4 || operand.type == 5 || operand.type == 9 ||
+        operand.type == 10 || operand.type == 11) {
+        footprint_.note_cell_read(address_of(operand));
+    }
     switch (operand.type) {
         case 0:
             return static_cast<double>(as_i32(operand.raw));
@@ -388,6 +405,9 @@ double Machine::read_float(const Operand& operand) {
 }
 
 void Machine::write_int(const Operand& operand, std::int32_t value) {
+    if (operand.type == 3 || operand.type == 4 || operand.type == 9 || operand.type == 10) {
+        footprint_.note_cell_write(address_of(operand));
+    }
     switch (operand.type) {
         case 3:
             global_int_[bank_key(operand.raw)] = encode_int(value); note_global_int_write(operand.raw);
@@ -412,6 +432,9 @@ void Machine::write_int(const Operand& operand, std::int32_t value) {
 }
 
 void Machine::write_float(const Operand& operand, double value) {
+    if (operand.type == 3 || operand.type == 4 || operand.type == 9 || operand.type == 10) {
+        footprint_.note_cell_write(address_of(operand));
+    }
     switch (operand.type) {
         case 3:
             global_int_[bank_key(operand.raw)] = encode_int(static_cast<std::int32_t>(value)); note_global_int_write(operand.raw);
@@ -449,10 +472,12 @@ std::string Machine::read_text(const Operand& operand) {
         return text;
     }
     if (operand.type == 5) {
+        footprint_.note_cell_read(address_of(operand));
         const auto it = global_string_.find(bank_key(operand.raw));
         return it == global_string_.end() ? std::string{} : it->second;
     }
     if (operand.type == 11) {
+        footprint_.note_cell_read(address_of(operand));
         const auto it = frame_mut().local_string.find(operand.raw);
         return it == frame_mut().local_string.end() ? std::string{} : it->second;
     }
@@ -465,6 +490,7 @@ std::string Machine::read_text(const Operand& operand) {
         std::uint32_t tag = 0;
         std::uint32_t index = 0;
         if (!resolve_address(address, tag, index)) throw CoreError("read-text-unmapped-address");
+        footprint_.note_cell_read(address);
         if (tag == 5) {
             const auto it = global_string_.find(index);  // resolve_address 给的键已带 bank
             return it == global_string_.end() ? std::string{} : it->second;
@@ -481,10 +507,12 @@ std::string Machine::read_text(const Operand& operand) {
 
 void Machine::write_text(const Operand& operand, std::string value) {
     if (operand.type == 5) {
+        footprint_.note_cell_write(address_of(operand));
         global_string_[bank_key(operand.raw)] = std::move(value);
         return;
     }
     if (operand.type == 11) {
+        footprint_.note_cell_write(address_of(operand));
         frame_mut().local_string[operand.raw] = std::move(value);
         return;
     }
@@ -503,6 +531,7 @@ void Machine::write_text(const Operand& operand, std::string value) {
             // ⛔ 不许静默写成 0 号记录。
             throw CoreError("write-text-unmapped-address:" + std::to_string(address));
         }
+        footprint_.note_cell_write(address);
         if (tag == 5) {
             global_string_[index] = std::move(value);
             return;

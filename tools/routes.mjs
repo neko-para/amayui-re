@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { REPO_ROOT } from './lib/paths.mjs';
@@ -37,6 +38,12 @@ export const OPERATIONS = [
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '跑全部不变量（红 ⇒ 退出码 1）' },
   { name: 'emit', argv: ['--emit'], mutates: true, summary: '把一条 route 的 steps 渲染成播放器输入脚本：缺省 stdout，`--out <file>` 才写盘（写后回读复验）' },
   { name: 'replay', argv: ['--replay'], mutates: false, summary: '打印（不执行）该 route 的完整播放器命令行（含 --anchor-script / --expect-script / --max-steps 600000）' },
+  {
+    name: 'footprint',
+    argv: ['--footprint'],
+    mutates: true,
+    summary: '★ 跑一条 route 并 dump **动态 + 静态足迹**（JSONL，生成物，缺省 `.cache/footprint/<id>.jsonl`）；`--twice` 再跑一次逐字节比对（确定性）；产物喂 `pnpm tools spec residuals --footprint`',
+  },
 ];
 
 /** 本工具定义的 `_doc` 指针；`screens.json` 里的值必须逐字等于它。 */
@@ -476,6 +483,51 @@ export function replayCommand(route, options = {}) {
   return parts.join(' ');
 }
 
+/** 足迹生成物的缺省落点（`.cache/` 是生成物区，不入库）。 */
+export const DEFAULT_FOOTPRINT_DIR = path.join(REPO_ROOT, '.cache', 'footprint');
+
+/**
+ * `footprint` 动作交给播放器的 argv（不含 exe 本身）。
+ * ★ 它是**宿主测试装置**的命令行拼装：与 `replayCommand` 同一组判据（`--expect-script`），
+ *   只多加 `--dump-footprint`；route id → 输入脚本由**调用方**先落盘（`emitScript` 是唯一渲染器）。
+ */
+export function footprintEmulatorArgs(route, { inputFile, outFile, install } = {}) {
+  if (!isObj(route) || !isObj(route.arrive)) throw new Error('route 缺 arrive');
+  if (typeof inputFile !== 'string' || inputFile === '') throw new Error('footprint 需要 inputFile');
+  if (typeof outFile !== 'string' || outFile === '') throw new Error('footprint 需要 outFile');
+  const parts = [
+    '--install',
+    defaultInstall(install),
+    '--skip-logo',
+    '--play-headless',
+    '--input-script',
+    inputFile,
+  ];
+  if (isObj(route.anchor)) parts.push('--anchor-script', String(route.anchor.script));
+  parts.push(
+    '--expect-script',
+    String(route.arrive.script),
+    '--tick-ms',
+    '16',
+    '--max-steps',
+    '600000',
+    '--dump-footprint',
+    outFile,
+  );
+  return parts;
+}
+
+/** 读足迹文件第一行（`meta`）—— 打印摘要用；坏文件返回 null。 */
+function footprintMeta(file) {
+  try {
+    const first = fs.readFileSync(file, 'utf8').split('\n', 1)[0];
+    const record = JSON.parse(first);
+    return record?.kind === 'meta' ? record : null;
+  } catch {
+    return null;
+  }
+}
+
 // ───────────────────────────────────────────────── 自描述
 
 export function describe() {
@@ -507,8 +559,8 @@ export function describe() {
     ],
     invariants: INVARIANTS,
     operations: OPERATIONS.map((o) => ({ name: o.name, mutates: o.mutates, summary: o.summary })),
-    writePath: '唯一写盘是 `emit --out <file>`（写派生的播放器输入脚本，写后回读逐字节复验）；`screens.json` 本身是手写真源，工具只读。',
-    derived: '`apps/emulator-cxx/tests/input/route-<id>.txt`（入库；守卫 `tools/test/routes.test.mjs` 逐字节比对 emit 的输出）。',
+    writePath: '写盘有两处：`emit --out <file>` 写**派生的**播放器输入脚本（写后回读逐字节复验）；`footprint` 写**生成物** `.cache/footprint/<id>.jsonl`（⛔ 不入库）。`screens.json` 本身是手写真源，工具只读。',
+    derived: '`apps/emulator-cxx/tests/input/route-<id>.txt`（入库；守卫 `tools/test/routes.test.mjs` 逐字节比对 emit 的输出）。足迹 `.cache/footprint/<id>.jsonl` 是生成物（`footprint` 动作的产物；喂 `pnpm tools spec residuals --footprint`）。',
     replay: {
       exe: EMULATOR_EXE,
       installDefault: DEFAULT_INSTALL,
@@ -554,20 +606,23 @@ const HELP = `tools/routes.mjs — 界面路径登记表（data/routes/screens.j
   node tools/routes.mjs --validate
   node tools/routes.mjs --emit --id <id> [--out <file>]
   node tools/routes.mjs --replay --id <id> [--install <目录>]
-  pnpm tools routes <describe|list|validate|emit|replay> [args…]
+  node tools/routes.mjs --footprint --id <id> [--out <file>] [--twice] [--install <目录>]
+  pnpm tools routes <describe|list|validate|emit|replay|footprint> [args…]
 
 ★ 这份表是**宿主测试装置**的路径知识，⛔ 不是引擎 spec（引擎语义在 data/spec）。
 ★ 唯一写盘：emit --out 写派生的播放器输入脚本（写后回读复验）；screens.json 是手写真源，工具只读。
+  footprint 写的是**生成物**（.cache/footprint/<id>.jsonl，不入库）—— 动态足迹 + 静态足迹。
 `;
 
 function parseArgs(argv) {
-  const out = { op: null, id: null, out: null, install: null, json: false, routes: DEFAULT_ROUTES };
+  const out = { op: null, id: null, out: null, install: null, json: false, twice: false, routes: DEFAULT_ROUTES };
   const OPS = OPERATIONS.map((o) => o.name);
   const takesValue = new Set(['id', 'out', 'install', 'routes']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--help' || a === '-h') out.op = 'help';
     else if (a === '--json') out.json = true;
+    else if (a === '--twice') out.twice = true;
     else if (a.startsWith('--') && OPS.includes(a.slice(2))) out.op = a.slice(2);
     else if (a.startsWith('--')) {
       const key = a.slice(2);
@@ -577,6 +632,7 @@ function parseArgs(argv) {
       i += 1;
       out[key] = value;
     } else if (out.op === null && OPS.includes(a)) out.op = a;
+    else if (out.op !== null && out.id === null && !a.startsWith('--')) out.id = a;
     else throw new Error(`多余的参数：${a}（--help 看用法）`);
   }
   return out;
@@ -641,7 +697,7 @@ function run(argv) {
   }
   if (args.op === 'validate') return printValidation(data, args.routes).length === 0 ? 0 : 1;
 
-  // emit / replay：先校验整表 —— 坏数据不许被派生/回放成"看起来能用"的命令
+  // emit / replay / footprint：先校验整表 —— 坏数据不许被派生/回放/跑成"看起来能用"的产物
   const problems = validateRoutes(data);
   if (problems.length > 0) {
     process.stdout.write(`routes ${args.op}：数据没通过校验，先跑 \`pnpm tools routes validate\`。\n`);
@@ -649,6 +705,45 @@ function run(argv) {
     return 1;
   }
   const route = routeById(data, args.id);
+
+  if (args.op === 'footprint') {
+    // ★ 输入脚本先由 `emitScript`（唯一渲染器）落到 `.cache/`，再交给播放器 —— 不读"可能过期"的入库件。
+    const outAbs = path.resolve(args.out ?? path.join(DEFAULT_FOOTPRINT_DIR, `${route.id}.jsonl`));
+    const inputAbs = path.join(DEFAULT_FOOTPRINT_DIR, `${route.id}.input.txt`);
+    fs.mkdirSync(path.dirname(outAbs), { recursive: true });
+    fs.mkdirSync(path.dirname(inputAbs), { recursive: true });
+    const inputText = emitScript(route);
+    fs.writeFileSync(inputAbs, inputText, 'utf8');
+    if (fs.readFileSync(inputAbs, 'utf8') !== inputText) throw new Error(`回读不一致：${rel(inputAbs)}`);
+    const runOnce = (outFile) => {
+      const argv = footprintEmulatorArgs(route, { inputFile: inputAbs, outFile, install: args.install });
+      return spawnSync(EMULATOR_EXE, argv, { cwd: REPO_ROOT, stdio: 'inherit' });
+    };
+    const first = runOnce(outAbs);
+    if (first.error) throw new Error(`跑不了播放器（${EMULATOR_EXE}）：${first.error.message}`);
+    const meta = footprintMeta(outAbs);
+    const bytes = fs.statSync(outAbs).size;
+    process.stdout.write(
+      `足迹 -> ${rel(outAbs)}（${bytes} 字节` +
+        (meta
+          ? `；steps=${meta.steps} op=${meta.ops} static-op=${meta.staticOps} gate=${meta.gates} cell=${meta.cells} scripts=${(meta.scripts ?? []).length}`
+          : '；⚠ 没有 meta 行') +
+        '）\n',
+    );
+    if (args.twice) {
+      const secondAbs = `${outAbs}.2`;
+      const again = runOnce(secondAbs);
+      if (again.error) throw new Error(`跑不了播放器（第二次）：${again.error.message}`);
+      const same = Buffer.compare(fs.readFileSync(outAbs), fs.readFileSync(secondAbs)) === 0;
+      if (!same) {
+        process.stdout.write(`确定性：❌ 两次不同（保留 ${rel(secondAbs)} 供 diff）。\n`);
+        return 1;
+      }
+      fs.unlinkSync(secondAbs);
+      process.stdout.write('确定性：✅ 两次运行逐字节相同。\n');
+    }
+    return first.status ?? 1;
+  }
 
   if (args.op === 'emit') {
     const text = emitScript(route);

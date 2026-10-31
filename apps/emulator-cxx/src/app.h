@@ -202,6 +202,9 @@ struct InstallRunOptions {
     int logo_stride = 24;
     int logo_frames = 12;
     bool footprint = false;
+    // 诊断（`--dump-footprint <path>`）：把这次播放的**动态 + 静态足迹**写成 JSONL（见 core/footprint.h）。
+    // ★ 与 `--play-headless` 同用（给了它自动走无窗口路径）；log-only、同输入两次输出逐字节相同。
+    std::string dump_footprint;
     bool skip_logo = false;
     std::string input_script;    // 空 = 没有输入设备（与窗口路径的取舍一致）
     bool headless = false;       // true = `--play-headless`：不开窗、按仿真节拍推进

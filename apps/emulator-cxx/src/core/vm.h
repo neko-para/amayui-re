@@ -2,6 +2,7 @@
 
 #include "core/bytes.h"
 #include "core/config.h"
+#include "core/footprint.h"
 #include "core/movie.h"
 #include "core/opcode_table.h"
 #include "core/script.h"
@@ -1213,6 +1214,10 @@ public:
     const std::vector<std::pair<std::uint32_t, std::size_t>>& missing_opcodes() const {
         return missing_opcodes_;
     }
+    // ── 动态足迹（`--dump-footprint` 的诊断口；⛔ 不是引擎语义，log-only）──
+    // 由 `play_headless.cpp` / `boot.cpp` 开关；记录点在 `step()` 与 `vm_value.cpp` 的访问原语里。
+    Footprint& footprint() { return footprint_; }
+    const Footprint& footprint() const { return footprint_; }
     bool command_animating() const { return command_animating_; }
     void set_command_animating(bool value) {
         command_animating_ = value;
@@ -2145,6 +2150,9 @@ private:
     std::unordered_map<std::uint32_t, std::uint32_t> string_record_words_;
     bool sweep_missing_ = false;
     std::vector<std::pair<std::uint32_t, std::size_t>> missing_opcodes_;
+    // 动态 / 静态足迹的容器（`enabled == false` 时所有 note_* 都是 no-op；见 core/footprint.h）。
+    // ★ `mutable`：`read_pointer` 等**只读原语**是 const 方法，但足迹计数是观测副作用，不改引擎状态。
+    mutable Footprint footprint_;
     std::unordered_map<std::int32_t, std::pair<std::int32_t, std::int32_t>> aux_a_;
     std::unordered_map<std::int32_t, std::pair<std::int32_t, std::int32_t>> aux_b_;
     std::array<std::array<std::int32_t, 7>, 11> cg_params_{};

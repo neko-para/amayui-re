@@ -19,6 +19,12 @@ import { fileURLToPath } from 'node:url';
 import { REPO_ROOT } from './lib/paths.mjs';
 import { pickListing } from './lib/disasm.mjs';
 import { functionSpans } from './lib/shape-access.mjs';
+import {
+  SCOPE_LABEL,
+  SCOPES,
+  joinResiduals,
+  parseFootprint,
+} from './lib/residual-footprint.mjs';
 import { derivePilotEffects } from './lib/spec-effects.mjs';
 import { effectsForFunction } from './lib/x86-effects.mjs';
 import {
@@ -57,7 +63,7 @@ export const DOMAIN = {
 export const OPERATIONS = [
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '不变量（红 = 退出码 1）：形态 / 处理状态 / 绑定 / 证据 / 措辞 / **试点未登记义务 = 0**（条数见 describe）' },
   { name: 'report', argv: ['--report'], mutates: false, summary: '★ 派生处理账：effect 覆盖 / 内部省略 / 残差 / **未登记** + 章节与绑定计数（不给百分数）' },
-  { name: 'residuals', argv: ['--residuals'], mutates: false, summary: '★ 残差地图：按**子系统通道 × 类别**摊平（A=正文弃权 / B=消费者缺失 / C=知识缺口；`discarded` 明确舍弃**不计入**）；`--channel` / `--class` 过滤，`--json` 给机器读' },
+  { name: 'residuals', argv: ['--residuals'], mutates: false, summary: '★ 残差地图：按**子系统通道 × 类别**摊平（A=正文弃权 / B=消费者缺失 / C=知识缺口；`discarded` 明确舍弃**不计入**）；`--channel` / `--class` 过滤；`--footprint <file>` 再按**足迹**分三桶（路径内 / 路径外 / 判不了，`--scope` 过滤）；`--json` 给机器读' },
   { name: 'chapters', argv: ['--chapters'], mutates: false, summary: '整份 spec 的章节骨架 + 每章条目与残差（"整个 spec 到哪一步"的只读视图）' },
   { name: 'show', argv: ['--show'], mutates: false, summary: '一条合同的全貌 + 证据解析结果 + 机器站点（`<id 或唯一前缀>`；`--json` 给机器读）' },
   { name: 'at', argv: ['--at'], mutates: false, summary: '★ 反向查询：某个 EA / 函数符号出现在哪些规则的绑定里（`--at <EA|sub_xxx>`）' },
@@ -70,6 +76,8 @@ const HELP = `tools/spec.mjs —— spec 层（领域本体）：章节 Markdown
   node tools/spec.mjs --validate [--dir data/spec]   # 不变量（含章节规则与 bindings/audit 一一对应）
   node tools/spec.mjs --report                        # 审计账（effect 覆盖 / 内部 / 残差 / 未登记）
   node tools/spec.mjs --residuals [--channel render|input|audio|text|timing|…] [--class A|B|C] [--json]
+  node tools/spec.mjs --residuals --footprint <out.jsonl> [--scope path|offpath|unknown]
+                                                      # ★ 足迹 join：每条残差按**触发者**分三桶（路径内 / 路径外 / 判不了）
                                                       # 残差地图：子系统 × 类别（A 弃权 / B 无消费者 / C 知识缺口；discarded 明确舍弃不计入）
   node tools/spec.mjs --effects --pilot [--json]       # 从语料机械枚举试点块的 effect
   node tools/spec.mjs --effects <sub_XXXXXX> [--json]  # 枚举一个函数的全部 effect
@@ -322,6 +330,12 @@ export async function main(argv = process.argv.slice(2)) {
     const { matrix, counts, channels } = residualMatrix(rows);
     const wantChannel = opt(args, '--channel');
     const wantClass = opt(args, '--class');
+    const wantScope = opt(args, '--scope');
+    const footprintFile = opt(args, '--footprint');
+    if (args.includes('--footprint') && !footprintFile) {
+      thisErr('--footprint 需要一个足迹文件（`apps/emulator-cxx --dump-footprint <out.jsonl>`）\n');
+      return 2;
+    }
     if (wantChannel && !channels.includes(wantChannel)) {
       thisErr(`--channel 认不出：${wantChannel}\n可用：${channels.join(' / ')}\n`);
       return 2;
@@ -330,12 +344,96 @@ export async function main(argv = process.argv.slice(2)) {
       thisErr('--class 只能是 A / B / C\n');
       return 2;
     }
-    const filtered = rows.filter((r) => (!wantChannel || r.channel === wantChannel) && (!wantClass || r.cls === wantClass));
+    if (wantScope && !SCOPES.includes(wantScope)) {
+      thisErr(`--scope 只能是 ${SCOPES.join(' / ')}\n`);
+      return 2;
+    }
+    if (wantScope && !footprintFile) {
+      thisErr('--scope 只在给了 `--footprint <file>` 时有意义（scope 是足迹 join 的派生分类）\n');
+      return 2;
+    }
+
+    // ── 足迹 join（可选）：`--footprint <out.jsonl>`；文件是生成物，读坏了就响亮失败 ──
+    let joined = null;
+    if (footprintFile) {
+      let text;
+      try {
+        text = fs.readFileSync(path.resolve(footprintFile), 'utf8');
+      } catch (err) {
+        thisErr(`足迹文件读不出来：${footprintFile}（${err.message}）\n`);
+        return 2;
+      }
+      let footprint;
+      try {
+        footprint = parseFootprint(text, { file: footprintFile });
+      } catch (err) {
+        thisErr(`${err.message}\n`);
+        return 2;
+      }
+      joined = joinResiduals(rows, spec.entries, footprint);
+    }
+
+    const scoped = joined ? joined.rows : rows;
+    const filtered = scoped.filter(
+      (r) =>
+        (!wantChannel || r.channel === wantChannel) &&
+        (!wantClass || r.cls === wantClass) &&
+        (!wantScope || r.scope === wantScope),
+    );
+
     if (args.includes('--json')) {
-      thisOut(`${JSON.stringify({ counts, channels, matrix: Object.fromEntries(matrix), rows: filtered }, null, 2)}\n`);
+      const payload = { counts, channels, matrix: Object.fromEntries(matrix), rows: filtered };
+      if (joined) {
+        payload.footprint = {
+          file: footprintFile,
+          summary: joined.summary,
+          counts: joined.counts,
+          byChannel: Object.fromEntries(joined.byChannel),
+        };
+      }
+      thisOut(`${JSON.stringify(payload, null, 2)}\n`);
       return 0;
     }
-    const L = [`残差地图：${rows.length} 条（A 弃权 ${counts.A} · B 无消费者 ${counts.B} · C 知识缺口 ${counts.C}；\`discarded\` 明确舍弃不计入）`, ''];
+
+    const L = [];
+    if (joined) {
+      const s = joined.summary;
+      L.push(
+        `残差足迹：${rows.length} 条（路径内 ${joined.counts.path} · 路径外 ${joined.counts.offpath} · ` +
+          `判不了 ${joined.counts.unknown}）`,
+      );
+      L.push(
+        `足迹　${footprintFile}：steps=${s.steps} · op ${s.ops} · static-op ${s.staticOps} · ` +
+          `gate ${s.gates} · cell ${s.cells} · writer ${s.writerBits} bit / ${s.writerCells} cell 条 · scripts ${s.scripts}` +
+          (s.staticFailures ? ` · ⚠ 静态解码失败 ${s.staticFailures} 份` : ''),
+      );
+      L.push('');
+      const scopeChannels = [...joined.byChannel.keys()].sort();
+      L.push('通道'.padEnd(14) + '路径内'.padStart(8) + '路径外'.padStart(8) + '判不了'.padStart(8));
+      for (const ch of scopeChannels) {
+        const m = joined.byChannel.get(ch);
+        L.push(ch.padEnd(14) + String(m.path).padStart(8) + String(m.offpath).padStart(8) + String(m.unknown).padStart(8));
+      }
+      const listed = joined.rows.filter(
+        (r) => (!wantChannel || r.channel === wantChannel) && (!wantClass || r.cls === wantClass) && (!wantScope || r.scope === wantScope),
+      );
+      const pathRows = listed.filter((r) => r.scope === 'path');
+      L.push('');
+      L.push(`路径内清单：${pathRows.length} 条${wantChannel ? `（通道 ${wantChannel}）` : ''}${wantClass ? `（类别 ${wantClass}）` : ''}`);
+      for (const r of pathRows) {
+        const triggers = (r.triggers ?? [])
+          .map((t) => (typeof t === 'number' ? (t <= 0x3ff && r.by.startsWith('op') ? `0x${t.toString(16)}` : t) : t))
+          .join(', ');
+        L.push(`  [${r.cls}] ${r.channel} · ${r.rule} :: ${r.id}　（${r.by}${triggers ? `：${triggers}` : ''}）`);
+      }
+      const other = listed.length - pathRows.length;
+      L.push('');
+      L.push(`其余 ${other} 条按 \`--scope offpath\` / \`--scope unknown\` 看明细（每条都已落桶，未分类 = 0）。`);
+      L.push('');
+    }
+
+    L.push(`残差地图：${rows.length} 条（A 弃权 ${counts.A} · B 无消费者 ${counts.B} · C 知识缺口 ${counts.C}；\`discarded\` 明确舍弃不计入）`);
+    L.push('');
     L.push('通道'.padEnd(14) + 'A'.padStart(5) + 'B'.padStart(5) + 'C'.padStart(5) + '合计'.padStart(7));
     for (const ch of channels) {
       const m = matrix.get(ch);
@@ -354,12 +452,20 @@ export async function main(argv = process.argv.slice(2)) {
     if (matrix.has('unclassified')) {
       L.push('', '⚠ 有章节没有登记通道 —— 在 `tools/lib/spec.mjs` 的 `RESIDUAL_CHANNELS` 里加一行（守卫会红）');
     }
-    const show = wantClass ? filtered : wantChannel ? filtered.filter((r) => r.cls === 'A' || r.cls === 'B') : [];
+    const show = wantClass || wantScope
+      ? filtered
+      : wantChannel
+        ? filtered.filter((r) => r.cls === 'A' || r.cls === 'B')
+        : [];
     if (show.length) {
-      L.push('', `明细 ${show.length} 条${wantChannel ? `（通道 ${wantChannel}）` : ''}${wantClass ? `（类别 ${wantClass}）` : '（仅 A/B）'}`);
-      for (const r of show) L.push(`  [${r.cls}] ${r.channel} · ${r.rule} :: ${r.id}\n        ${r.what.replace(/\s+/g, ' ').slice(0, 200)}`);
-    } else if (!wantClass && !wantChannel) {
-      L.push('', '明细：`--class A`（弃权 = 最可能掩盖缺陷）或 `--channel <通道>`（该子系统的 A/B）');
+      L.push('', `明细 ${show.length} 条${wantChannel ? `（通道 ${wantChannel}）` : ''}${wantClass ? `（类别 ${wantClass}）` : ''}${wantScope ? `（${SCOPE_LABEL[wantScope]}）` : '（仅 A/B）'}`);
+      for (const r of show) {
+        const scope = r.scope ? ` · ${SCOPE_LABEL[r.scope]}` : '';
+        L.push(`  [${r.cls}] ${r.channel}${scope} · ${r.rule} :: ${r.id}\n        ${r.what.replace(/\s+/g, ' ').slice(0, 200)}`);
+      }
+    } else if (!wantClass && !wantChannel && !wantScope) {
+      L.push('', '明细：`--class A`（弃权 = 最可能掩盖缺陷）或 `--channel <通道>`（该子系统的 A/B）' +
+        (joined ? '，或 `--scope path|offpath|unknown`（足迹三桶）' : ''));
     }
     thisOut(`${L.join('\n')}\n`);
     return 0;

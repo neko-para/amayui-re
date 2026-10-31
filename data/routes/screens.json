@@ -17,6 +17,25 @@
       "notes": "`route-title.txt` 是**空时间线**（只有注释行，解析为 0 条事件）—— 等价于不给输入脚本，播放器不会因此报错。"
     },
     {
+      "id": "option",
+      "title": "标题 → 设置界面（Option → CONFIG.BIN）",
+      "from": "title",
+      "anchor": { "script": 21092, "bin": "TITLE.BIN" },
+      "steps": [
+        "1400 move 900 622",
+        "2000 move 812 622",
+        "2200 down 0",
+        "2350 up 0"
+      ],
+      "arrive": { "script": 52, "bin": "CONFIG.BIN" },
+      "observe": { "note": "设置界面（CONFIG.BIN）；TITLE 的 Option 按钮 → 0x3 call-script 52" },
+      "evidence": {
+        "verifiedAt": "2026-10-31",
+        "command": "apps/emulator-cxx/out/emulator-cxx.exe --install \"$AMAYUI_INSTALL\" --skip-logo --play-headless --input-script apps/emulator-cxx/tests/input/route-option.txt --anchor-script 21092 --expect-script 52 --tick-ms 16 --max-steps 400000"
+      },
+      "notes": "按钮中心 (812,622) 来自 title-frame.png 的人工定位；★ 必须先 move 到框外（900,622）再 move 进框内（命中查找只在坐标变化时跑），点击在抬起时生效。"
+    },
+    {
       "id": "gamestart",
       "title": "标题 → Game Start（はじめから）",
       "from": "title",
