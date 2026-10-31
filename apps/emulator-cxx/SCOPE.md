@@ -5,6 +5,8 @@
 > 取证与逐条数值见 `docs/02-engine/ops-forensics-2026-10-title-option.md` §31–§38，
 > 守卫见 `tests/core_selftest.cpp`，进度/待办见 `data/requirements/`（`pnpm tools requirements plan`）。
 
+**不允许在用户没有明确要求的情况下编辑这个文件**
+
 ## 1. 字体
 
 ### 1.1 字体总是 Amayui CN（宿主替换）
