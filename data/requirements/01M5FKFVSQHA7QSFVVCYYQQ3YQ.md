@@ -2,8 +2,9 @@
 
 - id: REQ-01M5FKFVSQHA7QSFVVCYYQQ3YQ
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M5D1G31PN9EGANRVAR753BPC
+- dropped_reason: 5 条均为 audit 残差（带 next）的复述；独有项（颜色哨兵 / alpha 位段）已并入 REQ-01M694VKD97ERC5ZBHDA4AHQV2。
 - tags: [spec, evidence, review]
 
 ## 一句话

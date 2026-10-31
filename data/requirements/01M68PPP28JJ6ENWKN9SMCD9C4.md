@@ -2,8 +2,9 @@
 
 - id: REQ-01M68PPP28JJ6ENWKN9SMCD9C4
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M674XHSX2HSFWSKDWZV2C63D
+- dropped_reason: 残差清单式节点：audit.json 的残差已带 what/next，需求树不重复登记；无 audit 归宿的条目已并入 REQ-01M694VKD97ERC5ZBHDA4AHQV2。
 - tags: [spec residual]
 
 ## 目标

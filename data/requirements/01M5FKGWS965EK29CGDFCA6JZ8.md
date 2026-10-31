@@ -2,8 +2,9 @@
 
 - id: REQ-01M5FKGWS965EK29CGDFCA6JZ8
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M59B6Y8VGCZJN79XVQGHB390
+- dropped_reason: 内容已成篇（45-objects / 65-save）；剩余项在 audit 残差与 REQ-01M674XHSX2HSFWSKDWZV2C63D 下。节点正文的"内容没成篇"已过时。
 - tags: [spec, save]
 
 ## 一句话
