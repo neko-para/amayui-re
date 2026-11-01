@@ -194,10 +194,10 @@ Machine::SceneAdvance Machine::advance_render_step(std::uint32_t now_ms) {
     if (movie_held_) return SceneAdvance::ClockOnly;
     if (!render_ready_) return SceneAdvance::ClockOnly;
     // ★ 「场景既不需要重绘」＝**门前那条请求判据的内层条件**（脏位 / 有动画 / 命令表在动）。
-    //   ★ 为什么把后两个也算进来：spec 把"需要重绘"的判据留给残差
-    //   `RES-RENDER-STEP-NEEDS-REDRAW`（脏 / 有动画 / 命令表在动 / 影片新帧），而 70-vm 明说
-    //   「有动画」的唯一读者就是门前的「需要重绘」判据 —— 只看脏位的话，一个**还在走的窗**
-    //   会在"本步没有新脏位"的迭代里停住（窗走不完 ⇒ 等待位永远放不开）。
+    //   ★ 为什么把后两个也算进来：「需要重绘」在正文里是门前的「就绪判据」
+    //   （`CORE-OPS-RENDER-FRAME-STEP`：脏闩 / 第二个渲染器对象 / 动画槽表 / 场景元素表位 2），
+    //   而本实现取的是"脏 / 有动画 / 命令表在动 / 影片新帧"这一组简化 —— 只看脏位的话，一个
+    //   **还在走的窗**会在"本步没有新脏位"的迭代里停住（窗走不完 ⇒ 等待位永远放不开）。
     //   两个标记在这里读的是**上一迭代算出的值**（这一步不重算它们）。
     if (!scene_dirty_ && !scene_animating_ && !command_animating_ && !new_frame) {
         return SceneAdvance::ClockOnly;

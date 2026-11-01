@@ -153,37 +153,30 @@ void Machine::op_33f(const Instruction& instruction) {
     return;
 }
 
-void Machine::op_205(const Instruction& instruction) {
-    const Operand* ops = instruction.operands.data();
-    // 数值文本（0x205 / `sub_4233E0`，argc 6，推进 13）：**0x204 的数值兄弟** —— 同一个绘制入口、
-    // 同样的 y 语义（格顶，落像素时 +ascent），只多了"格式化整数 + 按格数算 X"。
-    // 读序 **2 → 6 → 5 → 4 →（格式化）→ 3 → 1**：
-    //   op2 = 字段原点（**不是文本落点**）、op6 = 格式位、op5 = 字段格数、op4 = 值、op3 = y、op1 = 纹理槽号。
-    const auto anchor_x = read_int(ops[1]);
-    const auto flags = read_int(ops[5]);
-    const auto cells = read_int(ops[4]);
-    const auto value = read_int(ops[3]);
-    const auto y = read_int(ops[2]);
-    const auto slot = read_int(ops[0]);
-
+// ── `0x205` 的「格式化 + 横向落点」（`CORE-OPS-RENDER-NUMTEXT-205`；正文 `60-ops-render.md:205-218`）──
+// ★ 这是**逐字搬出来**的纯函数（原先的 lambda + x 算式），⛔ 不是重写：分支顺序、截断口径、
+//   全角映射、先乘后除的算式一个字都没改。这样做只为让"格式化出的串 / 算出的 x"能被
+//   **不依赖字体后端**的表驱动用例直接断言（差分像素断言是"投影一致"，判不了这一层）。
+NumTextLayout layout_num_text(std::int32_t value, std::int32_t cells, std::int32_t flags,
+                              std::int32_t anchor_x, int cell_width) {
+    NumTextLayout layout;
     // 格式化成 ASCII，再按 0x10000 决定是否扩成全角 S-JIS。
     // ★ 引擎 `sub_4072F0` 的溢出口径：数字**放不下可用格数时丢掉高位**（只画低位那几格），
     //   ⛔ 不是退化成 '#'；'#' 只在"符号位都排不下"（有符号且格数 < 2）时出现。
     //   曾经按"放不下就画 '#'"实现 —— 那是把引擎的截断当成了溢出提示（取证 `0x407400` 的循环条件
     //   与 `0x40744F` 的唯一 `#` 写点）。
-    const auto format = [&](int& chars) {
-        std::string text;
-        chars = 0;
-        const bool negative = value < 0;
-        const bool plus = value > 0 ? (flags & 0x8) != 0 : (value == 0 && (flags & 0x10) != 0);
-        const bool minus_zero = value == 0 && !plus && (flags & 0x20) != 0;
-        const bool signed_text = negative || plus || minus_zero;
-        if (signed_text && cells < 2) {   // 符号都排不下 ⇒ 单字符 '#'（引擎在这里写 0x23）
-            text = "#";
-            chars = 1;
-            return text;
-        }
-        if (cells <= 0) return text;      // 无符号且没有格 ⇒ 空串（不画）
+    int chars = 0;
+    std::string text;
+    const bool negative = value < 0;
+    const bool plus = value > 0 ? (flags & 0x8) != 0 : (value == 0 && (flags & 0x10) != 0);
+    const bool minus_zero = value == 0 && !plus && (flags & 0x20) != 0;
+    const bool signed_text = negative || plus || minus_zero;
+    if (signed_text && cells < 2) {   // 符号都排不下 ⇒ 单字符 '#'（引擎在这里写 0x23）
+        text = "#";
+        chars = 1;
+    } else if (cells <= 0) {          // 无符号且没有格 ⇒ 空串（不画）
+        // text 保持空串
+    } else {
         const int available = cells - (signed_text ? 1 : 0);
         // 绝对值用 64 位取：引擎对 INT_MIN 取负会溢出（本版不规定那条边界，见 spec 残差）。
         const auto magnitude = negative ? static_cast<std::uint64_t>(-static_cast<std::int64_t>(value))
@@ -204,19 +197,11 @@ void Machine::op_205(const Instruction& instruction) {
         if (signed_text) text.push_back(negative ? '-' : (plus ? '+' : '-'));
         text += digits;
         chars = static_cast<int>(text.size());
-        return text;
-    };
-    int chars = 0;
-    const std::string ascii = format(chars);
-    if (ascii.empty() || slot < 0) return;
-    const auto texture_id = static_cast<std::uint32_t>(slot);
-    const TextureSlotObject* texture = texture_slot(texture_id);
-    if (texture == nullptr || texture->rgba.empty()) return;  // 三条入口条件之一：槽里没有可用表面
+    }
+    layout.ascii = text;
+    layout.chars = chars;
 
     // X = op2 + 未用格数 × 格宽 × k：默认右齐(k=1)、0x2 居中(1/2)、0x4 左齐(0)。
-    // ★ 格宽取字体对象的高度格（引擎 `Engine+0x46104` = 字号链写入的格宽）⇒ 本模型用 **A 支字号**
-    //   （`0x75` 写的 `Font+0x313D4`，也是 0x204 出字形时用的那一支；⛔ 不是 `0x197` 的 B 支）。
-    const int cell_width = glyph_height_ > 0 ? glyph_height_ : 8;
     // 引擎的"第一格序号"在循环没跑时是 0（而不是 cells − 字符数）⇒ 这里夹到 0。
     const int free_cells = std::max(0, cells - chars);
     // k（以 1/2 为单位）：右齐 = 2/2、居中 = 1/2、左齐 = 0/2。
@@ -224,14 +209,14 @@ void Machine::op_205(const Instruction& instruction) {
     //   ⛔ 不要先把格宽除成半角再乘 —— 奇数格宽会差 1px。
     const int k_num = (flags & 0x2) != 0 ? 1 : ((flags & 0x4) != 0 ? 0 : 2);
     const int divisor = (flags & 0x10000) != 0 ? 4 : 2;
-    const int x = anchor_x + (free_cells * cell_width * k_num) / divisor;
+    layout.x = anchor_x + (free_cells * cell_width * k_num) / divisor;
 
     // 全角化：'0'-'9' → 0x824F..，'-'/'+'/'#' → 0x817C/0x817B/0x8194，其它 → 0x8148。
     std::string sjis;
     if ((flags & 0x10000) != 0) {
-        sjis = ascii;
+        sjis = text;
     } else {
-        for (const char c : ascii) {
+        for (const char c : text) {
             if (c >= '0' && c <= '9') {
                 const auto code = static_cast<std::uint16_t>(0x824F + (c - '0'));
                 sjis.push_back(static_cast<char>(code >> 8));
@@ -247,8 +232,38 @@ void Machine::op_205(const Instruction& instruction) {
             }
         }
     }
+    layout.sjis = sjis;
+    return layout;
+}
+
+void Machine::op_205(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 数值文本（0x205 / `sub_4233E0`，argc 6，推进 13）：**0x204 的数值兄弟** —— 同一个绘制入口、
+    // 同样的 y 语义（格顶，落像素时 +ascent），只多了"格式化整数 + 按格数算 X"。
+    // 读序 **2 → 6 → 5 → 4 →（格式化）→ 3 → 1**：
+    //   op2 = 字段原点（**不是文本落点**）、op6 = 格式位、op5 = 字段格数、op4 = 值、op3 = y、op1 = 纹理槽号。
+    const auto anchor_x = read_int(ops[1]);
+    const auto flags = read_int(ops[5]);
+    const auto cells = read_int(ops[4]);
+    const auto value = read_int(ops[3]);
+    // 格宽 = 「ADV 文本」条行距里**不含行間隙**的那一项 X，模式 ≠ 0 那支取 **字号格本身**。
+    //   ★ 用 **A 支字号**（引擎 `Engine+0x46104` = 字号链写入的格宽；`0x75` 写的 `Font+0x313D4`，
+    //     也是 0x204 出字形时用的那一支；⛔ 不是 `0x197` 的 B 支）。
+    //   ⛔ 不要给"字号格 = 0"补任何缺省值：字号格为 0 ⇒ 未用格数 × 0 = 0 ⇒ **x 就应等于 anchor**。
+    //     （缩放档与 `set:BlankExtentMode = 1` 两支本版未覆盖，见残差 `RES-RENDER-NUMTEXT-CELLWIDTH`。）
+    const int cell_width = glyph_height_;
+    // 格式化与落点 = 纯函数（正文 `:205-218`）；它**不抛**，所以读序仍是 2 → 6 → 5 → 4 → 3 → 1。
+    const NumTextLayout layout = layout_num_text(value, cells, flags, anchor_x, cell_width);
+    last_num_text_layout_ = layout;  // 观察口（⛔ 产品路径不读；见 `last_num_text_layout()`）
+    const auto y = read_int(ops[2]);
+    const auto slot = read_int(ops[0]);
+    if (layout.ascii.empty() || slot < 0) return;
+    const auto texture_id = static_cast<std::uint32_t>(slot);
+    const TextureSlotObject* texture = texture_slot(texture_id);
+    if (texture == nullptr || texture->rgba.empty()) return;  // 三条入口条件之一：槽里没有可用表面
+
     std::string error;
-    if (draw_text_into_texture(*this, texture_id, x, y, sjis, &error)) {
+    if (draw_text_into_texture(*this, texture_id, layout.x, y, layout.sjis, &error)) {
         if (TextureEntry* entry = texture_mut(texture_id)) entry->slot.revision++;
     } else if (!error.empty()) {
         report_error(error);

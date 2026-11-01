@@ -161,14 +161,17 @@ add_test(NAME spec_input_composition COMMAND emulator-core-selftest --only-input
 #   **首元素**（空 ⇒ 追加、非空 ⇒ 覆写首元素，记录文本不被改写）；同一句柄当源读 ⇒ 首元素；空 ⇒ 空串；
 #   记录文本非数字 ⇒ UB（本实现诊断 + 停止）；整数源 ⇒ 十进制、浮点源 ⇒ **定点 6 位小数**（`%lf`）；
 #   `0x2de` = 系统字体名一览的查找（逐字节 + 长度、跳过开头一个 `@`、未命中 −1）；
-#   表项标志字节**位 0 = 等宽**（固定半宽 = 字号 ÷ 2，⛔ 不是跳过字体；IPA 两个名字例外）。
-#   把 +4 之外的东西写错（记录文本被覆写 / 浮点走截断 / 位 0 当成跳过）⇒ 本条红。
+#   表项标志字节**位 0 = 等宽**（固定半宽 = **±字号 ÷ 2**，⛔ 不是跳过字体；IPA 两个名字例外）；
+#   **两个派发点判据不同**：画字那条（= 2 ⇒ +，否则 −）与描述派生那条（= 1 ⇒ −，否则 +）
+#   ⇒ 对位模式 ≥ 3 时两路**异号**（合并成一条判据 ⇒ 本条红）。
+#   把 +4 之外的东西写错（记录文本被覆写 / 浮点走截断 / 位 0 当成跳过 / 两个派发点合并）⇒ 本条红。
 add_test(NAME spec_text_container_font_names COMMAND emulator-core-selftest --only-text-container)
 # ★ 纹理装载（`CORE-OPS-TEXTURE-SET` / `-LOAD`）：读序 2 → 1 → 3 → 2 且**清纹理槽在读完第 3 个之后**
 #   （第 3 个抛类型异常 ⇒ 槽里仍是旧对象、记录未被写）；失败分档三档（打开失败 ⇒ 保持原值 /
 #   读字节失败与解码失败 ⇒ 槽空 + 来源 = 无 / 上传失败 ⇒ 槽里留已建出的对象）；
 #   颜色键按目标位宽装配（32 = A8R8G8B8 全值；16 = **A4R4G4B4**，A 参与）；BMP 位深集合 1/4/8/24/32、
 #   行序自下而上、行跨距 32 位对齐、1 位 MSB 先。
+#   ★ 本用例的每个夹具都**显式**写 `display:TextureBit`（缺省来源由 `texture_bit_default_source` 守）。
 #   把清槽挪到读第 3 个之前 / 16 位键按 8 位比 / BMP 不翻行序 ⇒ 本条红。
 add_test(NAME spec_texture_set_load COMMAND emulator-core-selftest --only-texture-set)
 # ★ 帧流程：`0x2` 的 **−11 = 恢复存档**（父帧候选 ← −1、先读版本 2 后读版本 1、版本门三档、推进格数清 0、
@@ -331,6 +334,107 @@ add_test(NAME spec_adv_text_bit27_set_points COMMAND emulator-core-selftest --on
 #   （0x42622A 的 `mov eax,2BCh` / 0x426243 的 0 支）。把 700 改成别的常量 ⇒ 本条红。
 add_test(NAME emulator_core_font_weight_2bd_both_cells
     COMMAND emulator-core-selftest --only-font-weight-2bd)
+# ★ `0x324`（`CORE-OPS-FORWARD-FIELD`）：入口的**可观察行为是一个复位** —— 释放接收者持有的三个对象、
+#   把这三处引用清空、再清接收者自己的一个标记；改的是**接收者自己的状态**（脚本不可观察的数据），
+#   且 `0x324` 不读任何操作数（argc 0）。判据三条：注入接收者 {1,2,3,7} ⇒ 三引用全 0 / 标记 0 / 复位一次、
+#   接收者之外的引擎观察量一格不动；**负控制**（换成 `0x20e`）⇒ 接收者一格不动、复位计数仍 0；
+#   字段为空（产品路径缺省）⇒ 不抛 / 不停机 / 不写错误通道 / 不改引擎状态，只把空请求记一次
+#   （正文没规定空字段的后果 ⇒ 实现不许发明）。删三个清空里的任一 / 用别的无参指令也复位 ⇒ 本条红。
+add_test(NAME spec_ops_324_forward_field COMMAND emulator-core-selftest --only-forward-field)
+# ★ 数组地址算术的 **32 位回绕**（`CORE-OPS-ARRAY-LOOKUP` / `-2D`，正文 60-ops-array.md:84 / :110）：
+#   基址 0xFFFFF000 + 4×0x400 必须落回 0x00000000；步长按**落点族**（6 ⇒ 4、8 / 14 ⇒ 28）；
+#   落点是值族 ⇒ 类型异常且落点一格未写；2D 下标 = 行×行宽+列（**先乘后加**，≠ 行×(行宽+列)），
+#   行×行宽的乘积同样按 32 位回绕。把步长写死 4 / 把 2D 写成 行×(行宽+列) / 用 64 位算地址 ⇒ 本条红。
+add_test(NAME spec_ops_lookup_address_wrap COMMAND emulator-core-selftest --only-address-wrap)
+# ★ 数值族 `0x52`..`0x5f`（`CORE-OPS-NUMERIC-ARITH` / `-COMPARE`）：乘法 32 位截断、除法向零截断、
+#   余数随被除数、**除零不写落点**（落点保持原值，停机原因是异常）、移位位数取**低 5 位**（不 clamp）、
+#   `0x58` 是**算术**右移、按位与 / 或不看符号、六条比较**有符号**且方向 = 第 2 个 对 第 3 个、真值只 1 / 0。
+#   把 `0x58` 写成逻辑右移 / 比较改无符号 / 真写成 −1 / 除零时先写落点 ⇒ 本条红。
+add_test(NAME spec_ops_numeric_52_5f COMMAND emulator-core-selftest --only-numeric-family)
+# ★ `0x205` 的**格式化与横向落点**（`CORE-OPS-RENDER-NUMTEXT-205`）：
+#   表驱动，左 = 输入 (value, cells, flags, anchor_x, cell_width)、右 = 精确值 —— 放不下丢高位、
+#   三档 k（右齐 / 居中 / 左齐，0x2 优先于 0x4）、奇数格宽**先乘后除**、`#` 只在有符号且格数 < 2、
+#   无符号且格数 ≤ 0 ⇒ 空串、0x10 只对零、负值一律 `-`、0x1 补零、缺省全角化（S-JIS 字节）。
+#   ★ 它**不依赖字体后端**（纯函数 + 观察口）：`emulator-core-render-prims` 的 0x205 段是差分像素
+#   （用 0x204 在同一后端上画期望串 ⇒ 投影一致），这一条直接断言"串"与"x"。
+#   ★ 接线档还要钉**格宽来源 = 字号格本身**：字号格 = 0 ⇒ x == anchor（⛔ 不许给缺省格宽）。
+#   把 k 三档反过来 / 把格宽先除半 / 把 0x10 与 0x20 的优先级调换 / 给字号格补一个缺省 ⇒ 本条红。
+add_test(NAME spec_ops_205_numtext_layout COMMAND emulator-core-selftest --only-numtext-layout)
+# ★ `0x25b` + 显示状态三格 + 两条重发路径（`CORE-OPS-RENDER-DISPLAY-STATE-25B`）：
+#   窗口态 ⇒ 恰好 1 次载图（实参 = 图像号）；全屏态 ⇒ 0 次载图但两格照写；切回窗口态 ⇒ 再 1 次（重发①）；
+#   负图像号 ⇒ 1 条错误通道 + 状态 1 + 外枠编号 0 + 1 次外枠请求（编号 0）；状态 1 ⇒ 用外枠编号格且
+#   **不判符号**（−5 原样）；状态 0 ⇒ 两条请求都不发；两条接缝都不注入 ⇒ 不抛 / 不崩 / 不改格。
+#   把第 3 步的判据反过来（`== 0` → `!= 0`）/ 把负号分支挂到状态 1 上 / 删掉重发① 那块 /
+#   删掉 `outer_frame_number_ = 0` ⇒ 本条红。
+add_test(NAME spec_ops_25b_display_state COMMAND emulator-core-selftest --only-display-state)
+# ★ 字体度量的**产品接线**（`CORE-OPS-FORWARD-PROLOGUE` 的「非 0 支的下一格来自度量」）：
+#   一次派生发**两次**平台度量、写回两格的是**第二次**、
+#   第一次的请求面名是常量参考字体、第二次是该描述自己的字面名。
+#   ① 注入确定性假后端（参考那次平均字宽 99 / 描述那次 13）⇒ `0x2db(1); 0x75(20)` 之后 A 支
+#   **两份**描述的下一格 == −13（⛔ 不是 −10 = −字号/2、⛔ 不是 −99）、高度 == −20；
+#   ② 一次派生 `font_measure_requests()` 恰好 +2（整条 `0x75` = 2 份 × 2 = +4）；
+#   ③ 两次请求的面名 == 参考字体常量 / desc.face；
+#   ④ 产品装配 `core::wire_platform_fonts` ⇒ `has_font_measurer()` + `font_substitution()` 都为真，
+#   再跑一次派生仍 +2；**并且**平台量度本身必须给出正数（`measure_rendering_font(20)` 的
+#   line_height / average_width > 0）——「后端恒返回 {}」这种坏法只有这条能抓住
+#   （前四条全靠注入的假后端，真后端退化成空表时它们照样绿）。
+#   ★ 真机数值不可得 ⇒ 只用假后端断接线、只用「> 0」断真后端活着，⛔ 不声称与真机等价。
+#   把装配里装度量那一行删掉 / 第二次请求写成参考字体 / 删掉第一次请求 / 写回取第一次 /
+#   让 `measure_rendering_font` 恒返回空量度 ⇒ 本条红。
+add_test(NAME spec_font_measure_wired COMMAND emulator-core-selftest --only-font-measure-wired)
+# ★ 纹理位深 `display:TextureBit` 的**三档 + 缺省来源**（`CORE-OPS-TEXTURE-LOAD` / `-SET`）：
+#   ① 配置库**构造期**就写了内建默认 32（不加载玩家文件也能读到 32，⛔ 不是读取端补的缺省）；
+#   ② 显式 0 ⇒ 装载**失败**（显示消息型异常 + 记录来源 = 无 + 槽里留着已建出的对象）——
+#      读取端若把 0 / 缺键抬成 32 ⇒ 这条红；③ 16 / 32 ⇒ 成功（记录来源 = 文件号、颜色键按目标位宽命中）；
+#   ④ 24 ⇒ 失败（同 ②，三档里的第三档）；⑤ 库里**没有**这个键 ⇒ 也落第三档（读取端不许自造缺省）。
+#   ★ 它把「缺键 ⇒ 32」那个实现侧发明钉死：删掉构造期的 32 ⇒ ①红；把缺键 / 0 抬成 32 ⇒ ②/⑤红；
+#     把第三档改成"其它值按 32" ⇒ ②/④红。
+add_test(NAME texture_bit_default_source COMMAND emulator-core-selftest --only-texture-bit)
+
+# ★ 鼠标回调泵的**唯一入口**（`CORE-INPUT-MOUSE-CALLBACK-PUMP`）：判据咬**泵本体的进入次数**
+#   （`mouse_pump_entries()`），不只看「上次派发时刻」—— 第二入口若被时间闸挡回去，那一格根本不变，
+#   只看它的断言恒绿。三条：① 一次派发 = 泵本体进入恰一次；② 没有 `0xcd` 的 200 拍（宿主时刻每拍
+#   +16ms，早已过间隔）里入口次数 0、时刻不变；③ 第 27 位置起时派发一条 → 清第 27 位 → 紧接一次
+#   派发（不足间隔）⇒ 必须**不**派发（时刻 / 返回栈 / 指令指针全不动），而到期（含等号）那一对照
+#   必须派发。多一个调用点 / 越闸顺手把闸改成常开 / 把 `>=` 写成 `>` ⇒ 本条红。
+add_test(NAME spec_input_mouse_pump_single_entry COMMAND emulator-core-selftest --only-mouse-pump-entry)
+# ★ `0x13f`（`CORE-OPS-BIT-TEST`）越界**不写落点**：落点预置 −1、位号 32（源 = 1）⇒ 落点仍是 −1
+#   （写 0、或按低 5 位掩码算出 1 都会露馅），错误通道恰一条固定文本（证明走的是越界支）；
+#   界内对照 位号 0 / 源 1 ⇒ 1、源 0xFFFFFFFE ⇒ 0（同一个观测量上"界内写 0"与"越界不写"分得开）；
+#   负控制（同脚本换成会写落点的 `0x55`）⇒ 落点变（反"这个格观察不到写入"）。
+add_test(NAME spec_ops_13f_getbit_nowrite COMMAND emulator-core-selftest --only-getbit-nowrite)
+# ★ 表 B（逻辑键 → 系统键码，`CORE-OPS-SCALAR-TABLE-10C` 的「表 B 的初值」）：**93 条**逐条
+#   （默认七个槽 200/205/208/203/28/57/14 → 38/39/40/37/13/32/8 ⇒ 表 C 的位 0..6）、
+#   表内其余 163 格恒为 0（逻辑键 0 / 13 / 255 都换出 0）、表外（256 / 99999 / −1）不抛也不夹到 255；
+#   `0xfd` / `0x10c` 用逻辑键 200 查得到 38，且"解绑 / 不解绑"的落点不同。
+#   少写一条 / 编号用旧的 24..30 / 把未写到的格做成"未映射" ⇒ 本条红。
+add_test(NAME spec_ops_scalar_key_table_b COMMAND emulator-core-selftest --only-key-table-b)
+# ★ `0xa3` 派发（`CORE-OPS-TABLE-DISPATCH-A3` + `RES-DISPATCH-DEFAULT-READ` 的 A1–A6）：
+#   落点格**预置 −1** ⇒ "没写" / "写了 0" / "写了登记值" 三态可分；命中 ⇒ 用登记值、未命中 ⇒ 用默认位置；
+#   命中时第 2 个操作数**不被读**（类型非法也不报错），去掉绑定后同一个非法第 2 个操作数**必须**抛
+#   类型异常（证明"判据先于读"不是"根本不校验默认位置"）；登记值 0 **仍然命中**（跳到代码区第 0 格）；
+#   同一格重入 > 1 次即红（预算 8 步内必须 halt —— 命中支少写指令指针 ⇒ 推进格数 0 ⇒ 原地打转）。
+add_test(NAME spec_ops_dispatch_default_read COMMAND emulator-core-selftest --only-dispatch-default-read)
+# ★ 摇杆轴与四条阈值（`CORE-INPUT-WORD` 的「手柄的方向位」的摇杆半段）：
+#   低 =（轴最小值 + **初始化时采到的**轴位置）÷ 2、高 =（轴最大值 + 轴位置）÷ 2，**向零截断**；
+#   轴位置**只采一次**（改设备范围也**不重算**）；轴 1 小 ⇒ 左（位 3）、大 ⇒ 右（位 1）、
+#   轴 2 小 ⇒ 上（位 0）、大 ⇒ 下（位 2）；比较**严格**（等于阈值不算）且按**无符号**；
+#   平台查询有 **20 毫秒**缓存（含边界复用、21ms 起重查）；「忽略摇杆」门只挡轴、不挡帽子。
+#   把阈值写成固定 / 每次重估 / 有符号比较 / 去掉缓存 / 门把帽子也挡掉 ⇒ 本条红。
+add_test(NAME spec_input_joy_axis_thresholds COMMAND emulator-core-selftest --only-joy-axis)
+# ★ `0x12e` 的 **32 位回绕**三端点（`CORE-INPUT-HIT-TEST-12E`）：起始 / 末项都按 32 位算、
+#   扫描按"当前项指针**无符号** ≥ 末项指针"结束 ⇒ ① `start` = 最大正数 ≡ `start` = −1（从下标 0 起）；
+#   ② `start ≤ −2` 且偏移不回绕 ⇒ 首项落在框表**之前**（下标 −2 的项被扫到并命中 ⇒ 落点 −2；
+#   夹到 0 / 跳过越界项都给 0）；③ `count` 使末项指针回绕到基址 ⇒ **一项都不扫**（赶紧 −1）。
+#   用 64 位下标 / 夹住负起点 / 按"越界即无命中"处理 ⇒ 本条红。
+add_test(NAME spec_input_hit_test_12e_wrap COMMAND emulator-core-selftest --only-hit-wrap)
+# ★ `0x2fc` 的**触点缓冲整体重建**（`CORE-INPUT-TOUCH-POINT`）：每条触摸消息
+#   清计数 → 释放 → 按**这条消息的**点数重分配（每项 40 字节）→ 读入 ⇒ 点数 N→M 后容量必须 = M
+#   （⛔ 不复用旧容量、旧触点全部不可见）；有效性 = 标志字「抬起」位 0x4 为 0 **且**「主触点」位 0x10 为 1；
+#   第 4 个附加字段 = 标志字、第 5 个 = 记录 +0x14（**逐位原样**）；坐标 = 百分之一像素 ÷100 向零截断；
+#   没有触点时只写结果 0；全部无效 ⇒ 计数清 0；一条消息带很多点也不截断。
+#   把重建写成"追加" / 复用旧容量 / 判据写成"或" / 规范化附加字段 / 坐标不除 100 ⇒ 本条红。
+add_test(NAME spec_input_touch_buffer_rebuild COMMAND emulator-core-selftest --only-touch-buffer)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)
@@ -468,6 +572,11 @@ if(EMULATOR_CXX_WITH_TEXT)
     target_compile_definitions(emulator-core PRIVATE
         EMULATOR_CXX_HAVE_TEXT=1
         EMULATOR_CXX_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/fonts/Amayui-CN_cnjp.ttf")
+    # ★ 同一个开关的**对外**声明（PUBLIC ⇒ 消费者如 `emulator-core-selftest` 也看得见）：
+    #   `core_selftest.cpp` 用它在"构建声明了文本能力、后端却不可用"时**响亮失败**，而不是整段跳过 ——
+    #   后者会让 `emulator-core-render-prims` 在 `EMULATOR_CXX_WITH_TEXT=OFF` 的构建里绿而无断言。
+    #   ★ `EMULATOR_CXX_HAVE_TEXT` 保持 PRIVATE：那是 core 内部"要不要编 FreeType 分支"的实现开关。
+    target_compile_definitions(emulator-core PUBLIC EMULATOR_CXX_HAS_TEXT=1)
     target_link_libraries(emulator-core PRIVATE Freetype::Freetype)
     if(NOT WIN32)
         # Windows 用 MultiByteToWideChar(932)；其它平台用系统 iconv（glibc / macOS 自带）。

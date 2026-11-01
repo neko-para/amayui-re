@@ -70,13 +70,53 @@ void Machine::add_slot_base_bit(std::uint32_t& word, std::int32_t slot) {
     word |= 1u << ((base + 4) & 31);
 }
 
+// ── 摇杆轴的四条阈值与 20 毫秒查询缓存（`CORE-INPUT-WORD` 的「手柄的方向位」） ──
+
+void Machine::set_joy_axis_range(int axis, std::uint32_t minimum, std::uint32_t maximum) {
+    // 设备能力查询（`joyGetDevCapsA`）给的范围：**只是范围**，不参与阈值计算 ——
+    // 阈值在初始化那次采样（`sample_joy_axis_origin`）里由"范围 + 当时的轴位置"一起算出。
+    const auto index = static_cast<std::size_t>(axis) & 1u;
+    joy_axis_min_[index] = minimum;
+    joy_axis_max_[index] = maximum;
+}
+
+void Machine::sample_joy_axis_origin() {
+    // 引擎初始化：向平台取**当时**的两轴位置 `(X0, Y0)`，然后算四条阈值：
+    //   低 =（最小值 + 轴位置）÷ 2、高 =（最大值 + 轴位置）÷ 2（**向零截断**）。
+    // ★ **只采一次**：轴位置此后不重估 ⇒ 阈值固定；第二次调用不再改任何一格（只记观察口）。
+    if (joy_axis_thresholds_ready_) return;
+    if (!joy_stick_source_) return;  // 没有设备 ⇒ 没有轴位置，也就没有阈值
+    const auto origin = joy_stick_source_();
+    for (std::size_t axis = 0; axis < 2; ++axis) {
+        joy_axis_origin_[axis] = origin[axis];
+        // 无符号值的 ÷2 就是**向零截断**的 ÷2（规范：除法向零截断）。
+        joy_axis_low_[axis] = (joy_axis_min_[axis] + origin[axis]) / 2u;
+        joy_axis_high_[axis] = (joy_axis_max_[axis] + origin[axis]) / 2u;
+    }
+    joy_axis_thresholds_ready_ = true;
+    ++joy_axis_origin_samples_;
+}
+
+std::array<std::uint32_t, 2> Machine::query_joy_axes() {
+    // ★ 缓存（合同）：距上次查询**不超过 20 毫秒（含边界）**⇒ 复用上次那批原始轴值，不重新查询。
+    const std::uint32_t now = host_now_ms();
+    if (joy_axis_cache_valid_ && static_cast<std::uint32_t>(now - joy_axis_last_query_ms_) <= 20u) {
+        return joy_axis_cache_;
+    }
+    joy_axis_cache_ = joy_stick_source_ ? joy_stick_source_() : std::array<std::uint32_t, 2>{};
+    joy_axis_cache_valid_ = true;
+    joy_axis_last_query_ms_ = now;
+    ++joy_axis_queries_;
+    return joy_axis_cache_;
+}
+
 std::uint32_t Machine::sample_joystick_bits() {
     // 第一组手柄的**这一拍**结果：方向位 0..3 + 按钮位（槽序号 + 4）。
     // ★ 组头的按钮数 ≤ 0 ⇒ **整组**不参与采样（方向位也一起不采）。
     if (joy_button_count_ <= 0) return 0;
     std::uint32_t bits = 0;
     // ① 方向位 0..3（与键盘方向键**共用**这四位）：帽子四向可用且不居中 ⇒ 按**四个半平面**判据；
-    //    否则（居中 / 设备不报四向）⇒ 改由**摇杆轴**越过中位阈值给出。
+    //    否则（居中 / 设备不报四向）⇒ 改由**摇杆轴**越过四条阈值给出。
     int angle = -1;
     if (joy_hat_four_way_ && joy_hat_source_) angle = joy_hat_source_();
     if (joy_hat_four_way_ && angle >= 0) {
@@ -84,12 +124,16 @@ std::uint32_t Machine::sample_joystick_bits() {
         if (angle >= 1 && angle <= 17999) bits |= 1u << 1;     // 右
         if (angle >= 9001 && angle <= 26999) bits |= 1u << 2;  // 下
         if (angle >= 18001) bits |= 1u << 3;                   // 左
-    } else if (joy_stick_source_) {
-        const auto stick = joy_stick_source_();
-        if (stick[1] < -joy_stick_threshold_) bits |= 1u << 0;  // 上（轴值负 = 上）
-        if (stick[0] > joy_stick_threshold_) bits |= 1u << 1;   // 右
-        if (stick[1] > joy_stick_threshold_) bits |= 1u << 2;   // 下
-        if (stick[0] < -joy_stick_threshold_) bits |= 1u << 3;  // 左
+    } else if (!joy_ignore_stick_ && joy_stick_source_ && joy_axis_thresholds_ready_) {
+        // ★ 合同（`CORE-INPUT-WORD` 的「手柄的方向位」）：轴 1（横）< 低 ⇒ 左（位 3）、> 高 ⇒ 右（位 1）；
+        //   轴 2（纵）< 低 ⇒ 上（位 0）、> 高 ⇒ 下（位 2）。比较是**严格的**（等于阈值不算命中）
+        //   且按**无符号**（两端都按 `std::uint32_t` 比）。
+        // ★ 阈值**未算出**（初始化没采到轴位置）⇒ 引擎没有"中位"这个量 ⇒ 不给方向位（⛔ 不补缺省值）。
+        const auto stick = query_joy_axes();
+        if (stick[1] < joy_axis_low_[1]) bits |= 1u << 0;   // 上（小值端 = 上）
+        if (stick[0] > joy_axis_high_[0]) bits |= 1u << 1;  // 右（大值端 = 右）
+        if (stick[1] > joy_axis_high_[1]) bits |= 1u << 2;  // 下（大值端 = 下）
+        if (stick[0] < joy_axis_low_[0]) bits |= 1u << 3;   // 左（小值端 = 左）
     }
     // ② 按钮：槽 j（0 ≤ j < **键总数**）→ 位（槽序号 + 4，移位的低 5 位）。
     if (joy_button_source_) {
@@ -124,7 +168,8 @@ std::uint32_t Machine::sample_level_input() {
                 if ((mask & 2) != 0) add_slot_base_bit(word, mouse_swap_ ? 0 : 1);
             }
         }
-        // ③ 手势来源：8 格表与编号的写者都未取证（残差 `RES-INPUT-LATCH-GESTURE`）⇒ 本模型恒不并入。
+        // ③ 手势来源：那张 8 格表由构造期整表写成「不并入」，运行期**没有第二个写者**
+        //   （`CORE-INPUT-WORD` 的「手势来源的合成规则」）⇒ 发行初值下不点亮任何位 ⇒ 本模型恒不并入。
     }
     // ④ 第一组手柄：**不看**输入可用标志，只看组头的按钮数（含方向位）。
     word |= sample_joystick_bits();
@@ -159,7 +204,7 @@ std::uint32_t Machine::sample_event_input() {
     joy_prev_bits_ = joy_bits;
     // ⑤ 引擎级标志 D 非 0 ⇒ 输入字第 6 位置起（`CORE-OPS-MODE-BIT` 的 D：注入"取消消息跳过"这一路）。
     if (mode_d_ != 0) word |= 1u << 6;
-    // ⑥ 手势锁存（整字 OR 后清 0）：8 格表与写者未取证（残差 `RES-INPUT-LATCH-GESTURE`）⇒ 本模型恒空。
+    // ⑥ 手势锁存（整字 OR 后清 0）：8 格表全「不并入」且没有第二个写者（`CORE-INPUT-WORD`）⇒ 锁存恒空。
     // ⑦ 宿主注入的输入位（测试装置；同电平采样那一支）。
     if (key_sampler_) word |= key_sampler_();
     return word;
@@ -258,6 +303,9 @@ void Machine::op_cc(const Instruction& instruction) {
 
 void Machine::op_cd(const Instruction& instruction) {
     (void)instruction;
+    // 泵本体的**入口计数**（观察口，⛔ 不是引擎状态）：守卫用它把「未被派发时不跑」变成会红的断言 ——
+    // 只盯「上次派发时刻」抓不住"第二入口进来却被时间闸挡回去"（那一支不改任何格）。
+    ++mouse_pump_entries_;
     // 定时派发鼠标回调（CORE-INPUT-MOUSE-CALLBACK-PUMP）：
     // 时间闸（elapsed >= interval，含等号；或门字第 27 位）→ 压返回位置（当前位置 + 1）
     // → 目标 −1 撤销 → 脚本身份校验 → 跳到目标、推进格数 0。
@@ -330,20 +378,26 @@ void Machine::op_100(const Instruction& instruction) {
 void Machine::op_12e(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 命中查找（CORE-INPUT-HIT-TEST-12E）：第 2 / 5 / 6 / 7 个操作数是数组地址，
-    // 第 1 / 3 / 4 / 8 个按整数读。从 start+1 起扫到 count-1，命中写项下标，否则写 -1。
+    // 第 1 / 3 / 4 / 8 个按整数读。
+    // ★ 起始项与末项都按 **32 位回绕算术**算（规范「成立条件」）：
+    //   起始项地址 =（start + 1）× 每项字节数 + 框表基址；末项指针 = 框表基址 + count × 每项字节数；
+    //   扫描在"当前项指针**无符号 ≥** 末项指针"时结束（不是下标比较）。
+    //   ⇒ 三个端点因此可逐字推出：`start` = 最大正数 ≡ −1；`start ≤ −2` 且偏移不回绕 ⇒ 首项落在表**之前**；
+    //     `count` 使末项指针回绕到基址之前 ⇒ 立刻判"无命中"。
     // ★ 池里的整数是编码位模式：按地址读原始 dword 后必须过 decode_int。
-    const auto start = static_cast<std::int64_t>(read_int(ops[0]));
+    const auto start = static_cast<std::uint32_t>(read_int(ops[0]));
     const auto margin_address = address_of_operand(ops[1]);
-    const auto x = static_cast<std::int64_t>(read_int(ops[2]));
-    const auto y = static_cast<std::int64_t>(read_int(ops[3]));
+    const auto x = static_cast<std::uint32_t>(read_int(ops[2]));
+    const auto y = static_cast<std::uint32_t>(read_int(ops[3]));
     const auto boxes_address = address_of_operand(ops[4]);
     const auto plane_x_address = address_of_operand(ops[5]);
     const auto plane_y_address = address_of_operand(ops[6]);
-    const auto count = static_cast<std::int64_t>(read_int(ops[7]));
+    const auto count = static_cast<std::uint32_t>(read_int(ops[7]));
 
     const auto decode_at = [this](std::uint32_t address) {
-        return static_cast<std::int64_t>(decode_int(read_raw(address)));
+        return static_cast<std::uint32_t>(decode_int(read_raw(address)));
     };
+    const auto non_negative = [](std::uint32_t value) { return (value & 0x80000000u) == 0; };
 
     // 补偿四元组（第 2 个操作数指向的四个连续整数）。
     const auto m0 = decode_at(margin_address + 0u);
@@ -351,24 +405,33 @@ void Machine::op_12e(const Instruction& instruction) {
     const auto m2 = decode_at(margin_address + 8u);
     const auto m3 = decode_at(margin_address + 12u);
 
+    // `count ≤ 0` ⇒ **一次都不扫**（规范「成立条件」明文；`count` 为负时按 32 位回绕算出的末项
+    // 指针可能落在基址之前 —— 这一条先挡，不必依赖回绕的巧合）。
+    const auto begin = boxes_address + (start + 1u) * 16u;  // 32 位回绕
+    const auto end = boxes_address + count * 16u;            // 32 位回绕
+
     std::int32_t result = -1;
-    if (count > 0 && start + 1 < count) {
-        for (std::int64_t i = start + 1; i < count; ++i) {
-            const auto index = static_cast<std::uint32_t>(i);
-            const auto record_address = boxes_address + index * 16u;
+    if (static_cast<std::int32_t>(count) > 0) {
+        for (std::uint32_t pointer = begin; pointer < end; pointer += 16u) {  // 无符号比较
+            // 落点 =（当前项指针 − 框表基址）÷ 16，按**带符号**算：首项落在表前时是负值
+            // （与引擎的 `sar` + 向零截断除法同口径）。基准平面按**同一个项下标**取值。
+            const auto index = static_cast<std::int32_t>(pointer - boxes_address) / 16;
             // 引擎的同址门：补偿四元组与当前框记录同址 ⇒ 跳过该记录（不是命中、也不是终止）。
-            if (record_address != margin_address) {
-                const auto s0 = decode_at(record_address + 0u);
-                const auto s1 = decode_at(record_address + 4u);
-                const auto s2 = decode_at(record_address + 8u);
-                const auto s3 = decode_at(record_address + 12u);
-                const auto dx = x - decode_at(plane_x_address + index * 4u);
-                const auto dy = y - decode_at(plane_y_address + index * 4u);
-                if (m1 + dx - s0 >= 0 && m3 + dy - s2 >= 0 && s1 - dx - m0 >= 0 &&
-                    s3 - dy - m2 >= 0) {
-                    result = static_cast<std::int32_t>(i);
-                    break;
-                }
+            if (pointer == margin_address) continue;
+            const auto s0 = decode_at(pointer + 0u);
+            const auto s1 = decode_at(pointer + 4u);
+            const auto s2 = decode_at(pointer + 8u);
+            const auto s3 = decode_at(pointer + 12u);
+            const auto plane_offset = static_cast<std::uint32_t>(index) * 4u;
+            const auto dx = x - decode_at(plane_x_address + plane_offset);
+            const auto dy = y - decode_at(plane_y_address + plane_offset);
+            // 四项判据用 **32 位**加减后**合并符号位**判断（`or` + 与 0 比较）：
+            // 溢出**回绕**，不扩宽、不饱和（规范「成立条件」）。
+            const std::uint32_t merged = (m1 + dx - s0) | (m3 + dy - s2) | (s1 - dx - m0) |
+                                         (s3 - dy - m2);
+            if (non_negative(merged)) {
+                result = index;
+                break;
             }
         }
     }
@@ -377,27 +440,67 @@ void Machine::op_12e(const Instruction& instruction) {
     //   ⛔ 宿主观察口，不是引擎语义（默认关闭、不改任何状态）。
     if (std::getenv("EMULATOR_CXX_TRACE_HIT") != nullptr) {
         std::fprintf(stderr,
-                     "[hit] start=%lld x=%lld y=%lld count=%lld boxes=0x%X px=0x%X py=0x%X -> %d\n",
-                     static_cast<long long>(start), static_cast<long long>(x),
-                     static_cast<long long>(y), static_cast<long long>(count), boxes_address,
+                     "[hit] start=%d x=%d y=%d count=%d boxes=0x%X px=0x%X py=0x%X -> %d\n",
+                     static_cast<std::int32_t>(start), static_cast<std::int32_t>(x),
+                     static_cast<std::int32_t>(y), static_cast<std::int32_t>(count), boxes_address,
                      plane_x_address, plane_y_address, result);
     }
     return;
 }
 
+void Machine::push_touch_message(const std::vector<TouchPoint>& points) {
+    // 触点缓冲的**整体重建**（`CORE-INPUT-TOUCH-POINT`）—— 次序是合同：
+    //   ① 触点计数先清 0 → ② 释放旧缓冲（指针清空）→ ③ 按**这条消息携带的**点数重新分配
+    //   （每项固定 40 字节）→ ④ 把这批触点逐个读入并把取回个数写回计数。
+    // ⇒ 上一次消息的触点**全部不可见**；**不设容量上限**、不排队、也不按新消息"淘汰最旧项"。
+    // ⛔ 不许复用旧容量（那会让"从 N 降到 M"之后还看得见第 M..N 项）。
+    touch_count_ = 0;  // ①
+    // ② 释放旧缓冲 + ③ 按**这条消息的**点数重新分配（每项固定 40 字节）：
+    //   ★ 换的是**一块新缓冲**（不是把旧那块 resize）⇒ 旧容量不可能被复用；
+    //     容量观察口取的是这块新缓冲的**真实容量**（守卫据此判"从 N 降到 M 之后容量 = M"）。
+    std::vector<TouchPoint> rebuilt(points.size());
+    touch_buffer_ = std::move(rebuilt);
+    touch_buffer_capacity_ = static_cast<std::int32_t>(touch_buffer_.capacity());
+    for (std::size_t i = 0; i < points.size(); ++i) touch_buffer_[i] = points[i];  // ④ 读入
+    touch_count_ = static_cast<std::int32_t>(points.size());
+    ++touch_rebuilds_;
+}
+
 void Machine::op_2fc(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 取一个触点（CORE-INPUT-TOUCH-POINT）：输入可用标志为 0 / 没有触点 ⇒ 只写结果 0，坐标/标志/编号**不写**。
-    TouchPoint event;
-    if (!input_available_ || !touch_source_ || !touch_source_(event)) {
+    // 取一个触点（CORE-INPUT-TOUCH-POINT）：输入可用标志为 0 / 没有有效触点 ⇒ 只写结果 0，
+    // 坐标 / 标志 / 附加量**不写**（⛔ 不许清 0：那会把"没有触点"与"触点在原点"混为一谈）。
+    if (!input_available_ || touch_count_ <= 0) {
         write_int(ops[0], 0);
         return;
     }
+    // "有效"只看标志字的两位（**与**关系）：「抬起」位必须为 0、且「主触点」位必须为 1。
+    constexpr std::int32_t kTouchFlagLifted = 0x4;
+    constexpr std::int32_t kTouchFlagPrimary = 0x10;
+    std::int32_t found = -1;
+    for (std::int32_t i = 0; i < touch_count_ && i < static_cast<std::int32_t>(touch_buffer_.size()); ++i) {
+        const auto& point = touch_buffer_[static_cast<std::size_t>(i)];
+        if ((point.flags & kTouchFlagLifted) != 0) continue;
+        if ((point.flags & kTouchFlagPrimary) == 0) continue;
+        found = i;
+        break;  // 多个有效触点 ⇒ 取**缓冲顺序第一个**（不按编号排、不保证最新）
+    }
+    if (found < 0) {
+        // 缓冲里**全部无效** ⇒ 引擎把触点计数清 0（下一次仍返回"没有触点"）。
+        touch_count_ = 0;
+        write_int(ops[0], 0);
+        return;
+    }
+    const auto& point = touch_buffer_[static_cast<std::size_t>(found)];
+    // 坐标：平台给的是**百分之一像素** ⇒ 先 ÷100（向零截断），再交客户区 / 显示换算（平台接缝）。
+    std::int32_t x = point.x / 100;
+    std::int32_t y = point.y / 100;
+    if (touch_client_mapping_) touch_client_mapping_(x, y);
     write_int(ops[0], 1);
-    write_int(ops[1], event.x);      // 客户区坐标（映射属平台边界）
-    write_int(ops[2], event.y);
-    write_int(ops[3], event.flags);  // 位段本版不规定 ⇒ 原样传递
-    write_int(ops[4], event.extra);
+    write_int(ops[1], x);
+    write_int(ops[2], y);
+    write_int(ops[3], point.flags);  // 第 4 个附加字段 = 该项的**标志字**（原样）
+    write_int(ops[4], point.extra);  // 第 5 个 = 第二个附加量（原样）
     return;
 }
 

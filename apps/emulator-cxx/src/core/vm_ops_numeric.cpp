@@ -104,7 +104,7 @@ void Machine::op_64(const Instruction& instruction) {
 void Machine::op_10c(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 键位映射表（`60-ops-scalar` 的「键位映射表（opcode 0xfd / 0x10c）」）：三张表
-    // A 槽 → 逻辑键（32 格）、B 逻辑键 → 系统键码、C 系统键码 0..255 → 位号（−1 = 未映射）。
+    // A 槽 → 逻辑键（32 格）、B 逻辑键 → 系统键码（256 格）、C 系统键码 0..255 → 位号（−1 = 未映射）。
     // 本条（追加按键）：第 1 个操作数是**槽号（同时就是输入位号 0..31）**、第 2 个是**逻辑键号**；
     // 读序**先第 2 个、再第 1 个**。只把"第 2 个操作数那个逻辑键的系统键码"在表 C 里登记成第 1 个
     // 操作数（**覆盖**该键码原来的位号）：**不碰表 A、不抹旧键码**（那是 `0xfd` 的解绑）。
@@ -115,8 +115,11 @@ void Machine::op_10c(const Instruction& instruction) {
     if (static_cast<std::uint32_t>(slot) > 31u) {
         throw DisplayMessageError("key-multi-range", "SetKeyMultiの引数が不正です．");
     }
-    // 第 2 个操作数不检查；它的系统键码由**稀疏表 B** 给出。B 里没有这个逻辑键 ⇒ 没有可登记的系统键码：
-    // 本模型**显式诊断但不抛**（逻辑键编号的取值域没有成文，见残差 `RES-INPUT-LOGICAL-KEY-CODES`）。
+    // 第 2 个操作数不检查；它的系统键码由**表 B**（256 格）给出。B 是构造期的固定两段查表、
+    // 运行期没有第二个写者（`CORE-OPS-SCALAR-TABLE-10C` 的「按表索引写一格」）：
+    //   · 逻辑键号 0..255 是**表内**（未写到的格 = 0）⇒ 一律有系统键码可登记（0 也算）；
+    //   · ≥ 256 或负数是**表外越界读**（spec 明文未定义：不抛、不夹到 255、不补 0）
+    //     ⇒ 本模型只记一条诊断、不写表 C。
     const auto code = logical_key_code(logical);
     if (code < 0 || code >= static_cast<std::int32_t>(kSystemKeyCount)) {
         report_error("key-multi-unknown-logical-key:" + std::to_string(logical));
@@ -196,8 +199,8 @@ void Machine::op_fd(const Instruction& instruction) {
     }
     // ② 表 A 该槽 ← 第 2 个操作数。
     slot_key_table_[slot_index] = logical;
-    // ③ 新逻辑键的系统键码在表 C 登记成该槽号。B 里没有这个逻辑键 ⇒ 没有可登记的系统键码：
-    //    本模型**显式诊断但不抛**（逻辑键编号的取值域没有成文，见残差 `RES-INPUT-LOGICAL-KEY-CODES`）。
+    // ③ 新逻辑键的系统键码在表 C 登记成该槽号。B 没有运行期写者（`CORE-OPS-SCALAR-TABLE-10C`）
+    //    ⇒ 表内（0..255）一律有键码（未写到的格 = 0）；表外（<0 / ≥256）是未定义读 ⇒ 只记诊断、不写表。
     const auto new_code = logical_key_code(logical);
     if (new_code < 0 || new_code >= static_cast<std::int32_t>(kSystemKeyCount)) {
         report_error("key-setting-unknown-logical-key:" + std::to_string(logical));
@@ -222,7 +225,27 @@ void Machine::op_32f(const Instruction& instruction) {
 
 void Machine::op_324(const Instruction& instruction) {
     (void)instruction;
-    // 转发无参复位：接收者是引擎内部对象，当前不建模其字段
+    // 转发无参复位（`CORE-OPS-FORWARD-FIELD`，正文 `60-ops-forward.md:39-48` 逐句）：
+    //   "它从引擎的一个字段里取出一个对象，把这个对象当作接收者交给一个**无参入口**…然后返回"；
+    //   "入口的可观察行为是一个**复位**：释放接收者持有的三个对象、把这三处引用清空，
+    //    再清掉接收者自己的一个标记"。
+    // ★ 锚（注释用，⛔ 不是数据）：`0x41A488` 取接收者（`[ecx+5B320h]`）、`0x41A48E` 尾跳进 `sub_453530`；
+    //   复位体 `0x453160` / `0x453178` / `0x453190` 释放那三个对象、`0x45319E` 清标记。
+    // ★ 本条**不读任何操作数**（argc 0 是长度依据）；返回值不进脚本（分派器丢弃它）。
+    if (!forward_receiver_) {
+        // 接收者来自引擎字段，而"那个字段为空时做什么"正文**没有规定**（`60-ops-forward.md:56`：
+        // 该字段在本作样本里只有读、没有写）⇒ 本模型**不发明行为**：不抛、不改任何状态，
+        // 只记一次"空请求"给守卫看。⛔ 不要在这里补"清零格"之类的规则。
+        ++forward_receiver_null_requests_;
+        return;
+    }
+    // "释放接收者持有的三个对象、把这三处引用清空" —— 模型里可观察的是三处引用被清空
+    // （释放请求本身属分配器 / 平台侧，没有观察面）。
+    forward_receiver_->owned_a = 0;
+    forward_receiver_->owned_b = 0;
+    forward_receiver_->owned_c = 0;
+    forward_receiver_->marker = 0;  // "再清掉接收者自己的一个标记"
+    ++forward_receiver_resets_;
     return;
 }
 

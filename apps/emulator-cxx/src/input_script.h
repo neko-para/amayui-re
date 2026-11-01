@@ -45,8 +45,9 @@ std::vector<InputEvent> parse_input_script(const std::string& text);
 std::vector<InputEvent> load_input_script(const std::string& path);
 
 // 脚本化输入后端：`advance(now)` 应用所有 `at <= now` 的事件；采样读的是"当前状态"。
-// ★ 光标在第一条 `move` 之前**不可用**（`0x109` 写 −100000、`0x108` 写 0、`0x2fc` 写 0）——
+// ★ 光标在第一条 `move` 之前**不可用**（`0x109` 写 −100000、`0x108` 写 0）——
 //   这是宿主对"输入可用标志"的替身（规范只说该标志启动为 1、没有清 0 写点的取证）。
+//   `0x2fc` 不在这条替身里：桌面鼠标-only 的宿主一条触摸消息都不投 ⇒ 触点缓冲恒空 ⇒ 写 0。
 // ⛔ 不做任何 hover 去重 / 边沿合成：规范里 `0x12e` 是纯计算，边沿由脚本自己保存上一次位图，
 //   宿主替它做等于替引擎发明语义。
 class ScriptedInput {
@@ -59,7 +60,8 @@ public:
     std::uint32_t keys() const { return keys_; }
     bool cursor(std::int32_t& x, std::int32_t& y) const;
     bool buttons(std::int32_t& mask) const;
-    bool touch(core::Machine::TouchPoint& point) const;  // 桌面鼠标-only：恒无触点
+    // ★ 没有 `touch()`：触点缓冲由**引擎**整体重建（`push_touch_message`），桌面鼠标-only 的宿主
+    //   一条触摸消息都不投 ⇒ 缓冲恒空 ⇒ `0x2fc` 恒写 0。⛔ 不再给核心一个"每次查询都问平台"的替身。
 
     std::size_t applied() const { return applied_; }
     std::size_t size() const { return events_.size(); }

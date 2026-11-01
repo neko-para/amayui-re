@@ -417,6 +417,20 @@ private:
     std::string text_;
 };
 
+// ── `0x205` 的「格式化 + 横向落点」（`CORE-OPS-RENDER-NUMTEXT-205`；正文 `60-ops-render.md:205-218`）──
+// ★ **纯函数**：不读 `Machine` 的任何状态，只有**格宽**由调用方给（= 「ADV 文本」条行距三支算出的
+//   X，见正文 `:216`）。抽它的目的只有一个：让"格式化出的串 / 算出的 x"能被**不依赖字体后端**的
+//   表驱动用例直接断言 —— `emulator-core-render-prims` 是**差分像素**（用 `0x204` 在同一后端上画期望串），
+//   那是"投影一致"：两侧共同错时会一起相等，且没字体后端时整段判不了。
+struct NumTextLayout {
+    std::string ascii;  // 格式化结果（ASCII；**未**全角化）
+    std::string sjis;   // 按 `0x10000` 半角 / 缺省全角化之后的最终字节串
+    int chars = 0;      // 已写字符数（符号计入；`#` 档 = 1；空串 = 0）
+    int x = 0;          // 横向落点 = 第 2 个操作数 + 未用格数 × 格宽 × k（整除，向零截断）
+};
+NumTextLayout layout_num_text(std::int32_t value, std::int32_t cells, std::int32_t flags,
+                              std::int32_t anchor_x, int cell_width);
+
 // 最小 CORE-VM：一次 step 至多执行一条指令。状态选择字（门字）**不是常量**：写者有 `0x88` 的 0 支、
 // `0x19b` / `0x19c` / `0x71`、追加前置支与第 27 位服务体等；位的服务链见 `service_gate_bit`，
 // 位序表与「服务后」三件事见 `CORE-VM-GATE` / `CORE-VM-STATE`。
@@ -514,6 +528,13 @@ public:
     std::uint32_t pointer_slot(std::uint32_t tag, std::uint32_t index) const {
         return read_pointer(Operand{tag, index});
     }
+    // ★ 测试脚手架（⛔ 不是平台边界，同 `seed_mode_cells` 的口径）：把**地址**直接写进一个引用槽。
+    //   为什么要它：`0x61` / `0x12c` 的"地址算术 32 位回绕"要能取到接近 2^32 的基址，而模型里六个池的
+    //   基点全在低 2^30 段（`pool_base`）⇒ 脚本可达的写法造不出那种基址，回绕就**测不到**。
+    //   ⛔ 产品路径不要调用它（它绕过的正是"地址只能由取址 / 数组算术产生"这条路径）。
+    void seed_pointer_for_test(std::uint32_t tag, std::uint32_t index, std::uint32_t address) {
+        write_pointer(Operand{tag, index}, address);
+    }
     bool voice_playing() const { return voice_playing_; }
     std::int32_t voice_volume(std::size_t group) const { return voice_volumes_[group]; }
     std::int32_t scalar_149() const { return scalar_149_; }
@@ -603,8 +624,6 @@ public:
     std::int32_t array107(std::size_t i) const { return array_d551_[i]; }
     std::int32_t array10b(std::size_t i) const { return array_d1383_[i]; }
     std::int32_t array30a(std::size_t i) const { return array_d1969_[i]; }
-    std::int32_t scalar_25b_a() const { return scalar_25b_a_; }
-    std::int32_t scalar_25b_b() const { return scalar_25b_b_; }
     std::int32_t scalar_2ee() const { return scalar_2ee_; }
     std::int32_t scalar_10f() const { return scalar_10f_; }
     std::int32_t scalar_248() const { return scalar_248_; }
@@ -635,6 +654,9 @@ public:
     // 整趟重算**写没写** / 发了几次重建请求（守卫用来钉"两个分量都相等 ⇒ 整趟什么都不写"）。
     std::size_t font_scale_write_count() const { return font_scale_write_count_; }
     std::size_t font_rebuild_requests() const { return font_rebuild_requests_; }
+    // 最近一次 `0x205` 的「格式化 + 横向落点」（**只给自检用**；⛔ 产品路径不要依赖它 ——
+    // 它是观察口，不是引擎状态；产品行为只由 op_205 把 layout 交给绘制入口这一条决定）。
+    const NumTextLayout& last_num_text_layout() const { return last_num_text_layout_; }
     // 十个**文本槽**：各自的字形高度（`槽+0xC8`）与绘制原点偏移（`槽+0x0C` / `槽+0x10`）。
     std::int32_t text_slot_glyph_height(std::size_t i) const { return text_slots_[i].glyph_height; }
     std::int32_t text_slot_x(std::size_t i) const { return text_slots_[i].x_offset; }
@@ -649,7 +671,8 @@ public:
     // ── 系统字体名一览（`CORE-OPS-TEXT-FONT-NAME-2DE`；启动时枚举系统字体一次）──
     // 每项 = 名字（**不透明字节串**）+ 一个标志字节：系统字体信息里**字宽族字节的原值**
     //（低两位：0 = 默认、1 = 固定字距（**等宽**）、2 = 变宽；高位是字体族）。查找**不读**标志；
-    // 读它的是量度 / 摆字路径 —— 位 0 置起 ⇒ 固定半宽（字宽 = 字号 ÷ 2），⛔ 不是"跳过这个字体"。
+    // 读它的是量度 / 摆字路径 —— 位 0 置起 ⇒ 固定半宽（字宽 = **±字号 ÷ 2**，符号见
+    // `HalfWidthPath`：两个消费者的判据不同），⛔ 不是"跳过这个字体"。
     struct FontNameEntry {
         std::string name;
         std::int32_t flags = 0;
@@ -672,22 +695,41 @@ public:
     struct FontMetrics {
         std::int32_t line_height = 0;         // 测得的字体行高
         std::int32_t average_width = 0;       // 测得的平均字宽（正数）
-        std::int32_t glyph_box_width = 0;     // 该字形的黑框宽度
-        std::int32_t measured_box_width = 0;  // 测得框宽（"半格"阈值比较用）
+        std::int32_t glyph_box_width = 0;     // 该字形的黑框宽度（`gmBlackBoxX`；半格判据与再缩的分母都用它）
+        std::int32_t measured_box_width = 0;  // 测得框宽（文本 extent；⛔ 派生例程不用它当分母）
     };
     using FontMeasurer = std::function<FontMetrics(const std::string& face, std::int32_t size)>;
     // 度量后端接缝（没有后端 ⇒ 派生例程走**回退**：下一格 ← 高度 ÷ 2）。
     void set_font_measurer(FontMeasurer measurer) { font_measurer_ = std::move(measurer); }
+    // 产品路径有没有装度量后端（观察口；守卫用来钉"接缝真的接上了"）。
+    bool has_font_measurer() const { return font_measurer_ != nullptr; }
+    // ── 宿主的**字体替换**开关（`apps/emulator-cxx/SCOPE.md` §0 D1 / §1.1）──
+    // ★ 这是**宿主策略，⛔ 不是引擎语义**：产品路径总是用 Amayui 字体、名字不参与选择 ⇒
+    //   派生例程的回退判据 **②③**（"字面名不在字体名表里" / "表项第 0 位置起的等宽且不是 IPA P"）
+    //   在开关打开时**跳过**（判据 ① 与 `display:AspectMode` 那一层照正文保留）。
+    //   引擎**会**判这两条 —— 我们跳过它是被 SCOPE 覆盖的简化，逐条记在 `.tmp/skip-list.md`。
+    //   ⛔ 不要把它当成引擎的第四条回退判据，也⛔ 不要因此删掉判据②③ 的实现（开关关着时照旧判）。
+    void set_font_substitution(bool enabled) { font_substitution_ = enabled; }
+    bool font_substitution() const { return font_substitution_; }
     // 常量参考字体的面名（CP932 字节：`ＭＳ ゴシック`）。
     static const std::string& reference_font_face();
     // 发过几次度量请求（观察口；一次派生 = **2** 次）。
     std::size_t font_measure_requests() const { return font_measure_requests_; }
     // 派生例程：对**一份描述**发两次度量并写回它的高度 / 下一格（回退判据在内部）。
     void derive_font_description(FontDescription& desc, std::int32_t size);
-    // 固定半宽（`0x2de` 表项的位 0 = `FIXED_PITCH`）：字宽 = **−字号/2**（对位模式 = 1）或
-    // **+字号/2**（对位模式 = 2）；其它对位模式是本版窄 unknown ⇒ 记诊断并返回 0（不适用）。
-    // 返回**带符号的字宽**（0 = 这个字体不适用固定半宽）。
-    std::int32_t font_fixed_half_width(std::int32_t size);
+    // 固定半宽（`0x2de` 表项的位 0 = `FIXED_PITCH`）：字宽 = **±字号/2**，符号由**调用方是哪条路径**
+    // 决定 —— 引擎的两个派发点判据不同（见 `HalfWidthPath`；⛔ 不许合并成一条判据）。
+    // 返回**带符号的字宽**（0 = 这个字体不适用固定半宽：名字为空 / 不在表里 / 位 0 未置 / 内建 IPA 字体）。
+    enum class HalfWidthPath {
+        /** 建平台字体那条路径（画字，`0x2de` 的派发点一）：对位模式 = 2 ⇒ **+**，否则（0 / 1 / ≥3）⇒ **−**。 */
+        PlatformFont,
+        /** 描述派生那条路径（量度格，派发点二）：对位模式 = 1 ⇒ **−**，否则（0 / 2 / ≥3）⇒ **+**。
+         *  ★ 本模型的派生例程不消费它（正文「非 0 支的下一格来自度量」不经过这条半宽判据）——
+         *  它是**判据本身**的观察口，守卫用它钉住"两个派发点没有被合并成一条"（对位模式 ≥3 时两路异号）。 */
+        DescriptionMetric,
+    };
+    std::int32_t font_fixed_half_width(std::int32_t size,
+                                       HalfWidthPath path = HalfWidthPath::PlatformFont);
     std::int32_t engine5(std::size_t i) const { return engine5_[i]; }
     std::int32_t key_total() const { return key_total_; }
     // 引擎配置库（保存 / 脚本配置读写共用）。`config_mut()` 只给**自检 / 夹具**注入键值用
@@ -720,17 +762,20 @@ public:
     // ★ 三张表的初值由**输入系统的初始化**写入（不是脚本、不是配置）；运行期只能由脚本的标量表
     //   指令（`0x107` / `0x10b` / `0xfd` / `0x10c`）改写。⛔ 配置不写这些表。
     static constexpr std::size_t kSystemKeyCount = 256;  // 系统键码空间 0..255
-    static constexpr std::size_t kLogicalKeyCount = 32;  // 逻辑键号空间（`0xfd` 的槽号那一维）
+    // 表 B 的**表内**大小 = 256 格（逻辑键号 0..255；⛔ 不是 `0xfd` 的槽号那一维 32）。
+    static constexpr std::size_t kLogicalKeyCount = 256;
     // 系统键码 → 输入位号（−1 = 该键码未映射）。★ 键盘采样的位号 = **格里的值**，⛔ 不加 4。
     std::int32_t key_code_bit(std::size_t system_key_code) const {
         return system_key_code < kSystemKeyCount ? key_code_table_[system_key_code] : -1;
     }
-    // 逻辑键号 → 系统键码（−1 = 该逻辑键没有系统键码）。
-    // ★ 这是**稀疏表**：逻辑键号的取值范围没有成文（spec 只给了 7 个固定项与 28 = Enter），
-    //   发行脚本会用更大的编号（实测 44）⇒ ⛔ 不要做成 32 格数组。
+    // 逻辑键号 → 系统键码（表 B：`60-ops-scalar` 的「按表索引写一格」）。
+    // ★ 表内（0..255）**一律有格**：构造时整表清 0 再写 93 个固定条目 ⇒ 未写到的格恒为 0
+    //   （⇒ 逻辑键号落到那些格时换成系统键码 0，与"逻辑键 0"同效）。
+    // ★ 表外（<0 / ≥256）是**表外越界读**，spec 明文「未定义」（不抛、不夹到 255、不补 0）：
+    //   本模型用 −1 表示"没有可用的系统键码"，调用方据此只记诊断、不写表。
     std::int32_t logical_key_code(std::int32_t logical_key) const {
-        const auto it = logical_key_codes_.find(logical_key);
-        return it == logical_key_codes_.end() ? -1 : it->second;
+        if (logical_key < 0 || logical_key >= static_cast<std::int32_t>(kLogicalKeyCount)) return -1;
+        return logical_key_codes_[static_cast<std::size_t>(logical_key)];
     }
     // 键槽组头的槽数（初始化写 2，运行期不再改写；读者只到它为止）。
     std::int32_t key_slot_count() const { return key_slot_count_; }
@@ -743,21 +788,38 @@ public:
     // ★ 平台**原始**状态接缝（⛔ 不是"平台直接给输入字"：来源、次序与位号合成是引擎的决定）。
     using SystemKeySource = std::function<bool(int)>;        // 系统键码 0..255 是否按下
     using JoyButtonSource = std::function<std::uint32_t()>;  // 手柄按钮位图（第 b 位 = 按钮 b）
-    // 帽子角度（**百分之一度**，0 = 正上；−1 = 居中 / 不报）；摇杆轴（左/右、上/下两轴原始值）。
+    // 帽子角度（**百分之一度**，0 = 正上；−1 = 居中 / 不报）；摇杆轴（第 1 轴 = 横轴、第 2 轴 = 纵轴，
+    // **无符号原始值** —— 规范：比较按**无符号**）。
     using JoyHatSource = std::function<int()>;
-    using JoyStickSource = std::function<std::array<int, 2>()>;
+    using JoyStickSource = std::function<std::array<std::uint32_t, 2>()>;
     void set_key_code_source(SystemKeySource source) { key_code_source_ = std::move(source); }
     void set_joy_button_source(JoyButtonSource source) { joy_button_source_ = std::move(source); }
     void set_joy_hat_source(JoyHatSource source) { joy_hat_source_ = std::move(source); }
     void set_joy_stick_source(JoyStickSource source) { joy_stick_source_ = std::move(source); }
     // 设备能力字里"帽子可四向"那一位（0 ⇒ 引擎一律按居中处理 ⇒ 方向位改由摇杆轴给出）。
     void set_joy_hat_four_way(bool four_way) { joy_hat_four_way_ = four_way; }
-    // 摇杆轴的中位阈值（初始化时按设备能力给出的轴范围与当时的轴位置估出；这里是引擎一格 + 注入口）。
-    void set_joy_stick_threshold(std::int32_t threshold) { joy_stick_threshold_ = threshold; }
-    std::int32_t joy_stick_threshold() const { return joy_stick_threshold_; }
+    // ── 摇杆轴的四条阈值（`CORE-INPUT-WORD` 的「手柄的方向位」）──
+    // ★ 算式是合同：低阈值 =（轴最小值 + **初始化时采到的**轴位置）÷ 2、高阈值 =（轴最大值 + 轴位置）÷ 2，
+    //   除法**向零截断**（这里是无符号值 ⇒ 普通 ÷2 就是向零截断）。**轴位置只在初始化时采一次**，
+    //   运行期不重估 ⇒ 阈值此后固定（设备范围的后续变化**不会**重算阈值）。
+    // ⇒ 两步：设备能力给范围（`set_joy_axis_range`），初始化那一次采样（`sample_joy_axis_origin`）
+    //   把轴位置与四条阈值一起定下来；**第二次调用不再改**（采一次）。
+    void set_joy_axis_range(int axis, std::uint32_t minimum, std::uint32_t maximum);
+    void sample_joy_axis_origin();
+    bool joy_axis_thresholds_ready() const { return joy_axis_thresholds_ready_; }
+    std::uint32_t joy_axis_low(int axis) const { return joy_axis_low_[static_cast<std::size_t>(axis) & 1u]; }
+    std::uint32_t joy_axis_high(int axis) const { return joy_axis_high_[static_cast<std::size_t>(axis) & 1u]; }
+    std::uint32_t joy_axis_origin(int axis) const { return joy_axis_origin_[static_cast<std::size_t>(axis) & 1u]; }
+    std::size_t joy_axis_origin_samples() const { return joy_axis_origin_samples_; }
+    // 平台手柄查询的 **20 毫秒**缓存：距上次查询**不超过 20 毫秒（含边界）**时复用上次那批原始轴值。
+    std::size_t joy_axis_queries() const { return joy_axis_queries_; }
+    // 「忽略摇杆」门（构造时清 0；可获得的证据里**没有**置它的写点）：置起时**不**用摇杆轴给方向位，
+    // 但**不影响**帽子。⛔ 这个接缝只给守卫用；产品路径没有置它的写点。
+    void set_joy_ignore_stick(bool ignore) { joy_ignore_stick_ = ignore; }
+    bool joy_ignore_stick() const { return joy_ignore_stick_; }
     // 输入系统初始化：手柄组头的按钮数（设备能力查询的结果）。≤ 0 ⇒ 整组不参与采样。
     void set_joy_button_count(std::int32_t count) { joy_button_count_ = count > 0 ? count : 0; }
-    // 输入可用标志（启动置 1；脚本侧不可构造清 0，见残差 `RES-INPUT-POS-ENABLE`）：
+    // 输入可用标志（启动置 1；它的清 0 面见 `CORE-INPUT-WORD`）：
     // 为 0 ⇒ **键盘 / 鼠标 / 手势**三个电平来源整段不做（不查平台）；手柄来源**不看**它。
     void set_input_available(bool available) { input_available_ = available; }
     bool input_available() const { return input_available_; }
@@ -811,15 +873,30 @@ public:
     // ★ 符号与刻度属平台边界（0x10d 只规定"读出后清 0"）⇒ 本版按宿主给的原值累加。
     void add_wheel_delta(std::int32_t delta) { wheel_accum_ += delta; }
     std::int32_t wheel_delta() const { return wheel_accum_; }
-    // 一个当前触点（`0x2fc` 的外部请求）；坐标是**客户区**坐标，由平台负责映射。
+    // 一个触点（平台记录的**引擎侧**形态；`0x2fc` 的数据源）：坐标是**百分之一像素**的屏坐标 ——
+    // 引擎自己 ÷100（向零截断），再经客户区 / 显示换算（与 `0x109` 同一套，属平台边界）。
     struct TouchPoint {
-        std::int32_t x = 0;
-        std::int32_t y = 0;
-        std::int32_t flags = 0;
-        std::int32_t extra = 0;
+        std::int32_t x = 0;      // 记录 +0x0（百分之一像素）
+        std::int32_t y = 0;      // 记录 +0x4（百分之一像素）
+        std::int32_t flags = 0;  // 记录 +0x10：**标志字**（有效性只看位 0x4「抬起」/ 0x10「主触点」）
+        std::int32_t extra = 0;  // 记录 +0x14：第二个附加量（**原样**传递）
     };
-    using TouchSource = std::function<bool(TouchPoint&)>;
-    void set_touch_source(TouchSource source) { touch_source_ = std::move(source); }
+    // ★ 触点缓冲**整体重建**（`CORE-INPUT-TOUCH-POINT`）：每收到一条触摸消息就
+    //   清计数 → 释放旧缓冲 → 按**这条消息携带的**点数重新分配（每项固定 40 字节）→ 逐项读入。
+    //   ⇒ 上一次消息的触点全部不可见；不设容量上限、不排队、不按新消息"淘汰最旧项"。
+    void push_touch_message(const std::vector<TouchPoint>& points);
+    std::int32_t touch_count() const { return touch_count_; }
+    // 缓冲里**实际有多少项**（= 这条消息携带的点数）：这是规范管的量（"按该消息携带的触点数重新分配"）。
+    std::int32_t touch_buffer_size() const {
+        return static_cast<std::int32_t>(touch_buffer_.size());
+    }
+    // ⛔ 只是**宿主分配策略**（`std::vector` 的容量），不是 spec 的合同 ⇒ 守卫断言用 `touch_buffer_size()`，
+    //   这一格只进诊断输出。
+    std::int32_t touch_buffer_capacity() const { return touch_buffer_capacity_; }  // 这条消息分配的项数
+    std::size_t touch_rebuilds() const { return touch_rebuilds_; }
+    // 客户区 / 显示换算接缝（与 `0x109` 同一套；核心只做 ÷100，其余属平台边界）。
+    using TouchClientMapping = std::function<void(std::int32_t& x, std::int32_t& y)>;
+    void set_touch_client_mapping(TouchClientMapping mapping) { touch_client_mapping_ = std::move(mapping); }
     // 平台光标位置（`0x109` 的 `CORE-INPUT-MOUSE-POS`）：返回 false = 设备不可用（写 −100000）。
     // 坐标是**客户区**坐标，映射属平台边界。
     using CursorSource = std::function<bool(std::int32_t& x, std::int32_t& y)>;
@@ -919,7 +996,8 @@ public:
     std::int32_t draw_mode() const { return draw_mode_; }
     bool frame_flag() const { return frame_flag_; }
     void clear_frame_flag() { frame_flag_ = false; }
-    // 夹具注入「帧标志」被置起（引擎里它的写者未取证，见 `RES-RENDER-STEP-FLAG`）：
+    // 夹具注入「帧标志」被置起：引擎里的置 1 写者是**状态重建入口**（见 `CORE-OPS-RENDER-FRAME-STEP`
+    // 的「帧标志」）；本模型没有那条重建入口 ⇒ 产品路径里没有置 1 的写者，这个口只给夹具注入。
     // 用来观察 `0x4127E7` 的清点 —— (c) 跳过时**不清**，门前那一次请求之后才清。
     void set_frame_flag(bool value) { frame_flag_ = value; }
     bool render_target_present() const { return render_target_ != -1; }
@@ -929,8 +1007,9 @@ public:
     // ── 键位映射（`CORE-OPS-SCALAR-TABLE-10C` 的表 A/B/C；观察口，⛔ 不是产品接口）──
     // ① `array_d1383_` 是 `0x10b` 的「输入键槽映射」（`CORE-POOL-SCALAR-ARRAY-10B`），**不是** 0x10c 的表。
     // ② 表 A（槽 → 逻辑键）= `slot_key_table_`：0x10c **写**它（槽 = 第 1 个操作数）。
-    // ③ 表 B（逻辑键 → 系统键码）= `logical_key_codes_`（稀疏：构造器 7 项 + 28 = Enter；完整取值域
-    //   未定，见残差 `RES-INPUT-LOGICAL-KEY-CODES`）。
+    // ③ 表 B（逻辑键 → 系统键码）= `logical_key_codes_`：**256 格**，构造期整表清 0 再写 93 个
+    //   固定条目（见 `CORE-OPS-SCALAR-TABLE-10C` 的表 B 清单）；未写到的格恒为 0。
+    //   它**没有运行期写者**（配置与脚本都不碰它）。
     // ④ 表 C（系统键码 → 输入位号）= `key_code_table_`（256 格，−1 = 未映射）。
     // ★ `action_slot_table_` 是**旧模型残留**（0x10c 已不再「动作号 → 槽号」），只剩测试播种在用。
     std::int32_t key_action(std::size_t key) const { return array_d1383_[key]; }
@@ -1167,6 +1246,56 @@ public:
     const std::string& last_display_message() const { return last_display_message_; }
     // ── 观察口（守卫用；⛔ 不是产品接口）──
     std::int32_t display_mode_cache() const { return display_mode_cache_; }
+    // ── 显示状态三格 + 两条宿主请求（`CORE-OPS-RENDER-DISPLAY-STATE-25B`）────────────────────────
+    // 正文 `CORE-OPS-RENDER-DISPLAY-STATE-25B`（`60-ops-render.md` 的「显示状态与两条重发路径」，逐句）：
+    //   · 显示状态：`2` = 当前显示的是**图像号格**指出的图像（`0x25b` 写的）；`1` = 显示的是**外枠图像**；
+    //     `0`（以及其它既非 1 也非 2 的值）= **没有要重新显示的画面**（初值；两条重发路径对这类值都不做事）。
+    //   · 这两格的读者**只有"重新显示"那两处**（同一条规则的重发① / ②）：① 显示模式入口切回窗口态之后（本模型已落）；
+    //     ② 显示对象被释放后的恢复路径（模型里**没有对应对象** ⇒ 不建模，见残差 `RES-RENDER-25B-RECOVER`）。
+    // ★ 两条请求**只记请求**：core 不实现图像解码、也不建纹理 ——
+    //   图像号 → 文件的映射**正文没写**（做了就是发明规则）⇒ 这里只把号交出去；
+    //   外枠纹理的创建 / 释放 / 填充全在宿主侧（正文「每次请求都重建」是平台的活）。
+    /** 载图请求（同一条规则里"画图像号指出的那张"那一步 / 重发①）：实参就是**图像号原值**（⛔ 不判符号、不改写）。 */
+    using DisplayImageLoader = std::function<void(std::int32_t image_number)>;
+    void set_display_image_loader(DisplayImageLoader loader) {
+        display_image_loader_ = std::move(loader);
+    }
+    /**
+     * 外枠纹理请求的实参（同一条规则里"画外枠编号那张"那一步：矩形 `(0, 0, 宽, 高)` + 常量 `0xFF`
+     * + **外枠编号本身**）。
+     * ★ 三个实参的语义**已取证**（`.tmp/forensics/batch1-render-step.md` §3）：编号**不是资源索引**，
+     *   它被并进填充色的 RGB（低 24 位）；`0xFF` 是 alpha；矩形铺满整张纹理。
+     * ★ 宽 / 高 = **目标画面区**的整数尺寸（渲染器自己的一对格），⛔ **不是**客户区 / 窗口区
+     *   （同文件 §3.3）。本模型没有渲染器对象 ⇒ core 只填原点 `(0, 0)` 与常量，宽 / 高由**宿主**
+     *   在自己的接缝实现里按真实目标画面区补 —— ⛔ core 不许拿视口 / 配置客户区去冒充它。
+     */
+    struct OuterFrameRequest {
+        std::int32_t frame_number = 0;  // 外枠编号：**原样**（状态 1 那支不检查正负，负数照传）
+        std::int32_t left = 0;          // 矩形原点；左 / 上由 core 填 0（矩形 `(0, 0, 宽, 高)`）
+        std::int32_t top = 0;
+        std::int32_t right = 0;         // 宽 / 高由宿主补（见上面的说明）
+        std::int32_t bottom = 0;
+        std::uint32_t constant = 0xFF;  // 常量 `0xFF`（alpha 档）；取证：调用点 `push 0FFh`
+    };
+    using OuterFrameRequester = std::function<void(OuterFrameRequest& request)>;
+    void set_outer_frame_requester(OuterFrameRequester requester) {
+        outer_frame_requester_ = std::move(requester);
+    }
+    // 观察口（守卫用；⛔ 不是产品接口）：三格 + 两条请求各发了几次（接缝没注入时**也计数**，
+    // 因为"引擎发过请求"与"宿主接没接"是两件事）。
+    std::int32_t display_state() const { return display_state_; }
+    std::int32_t display_image_number() const { return display_image_number_; }
+    std::int32_t outer_frame_number() const { return outer_frame_number_; }
+    std::size_t display_image_loads() const { return display_image_loads_; }
+    std::size_t outer_frame_requests() const { return outer_frame_requests_; }
+    // 摆前置（⛔ 只给自检）：写显示状态 `1` 的通常是**另一条指令**（正文 `:354`），而那条指令本版未成篇
+    // ⇒ 状态 1 那几支只能靠这个接缝摆出来（产品路径⛔ 不要用它）。
+    void seed_display_state_for_test(std::int32_t state, std::int32_t image_number,
+                                     std::int32_t outer_frame_number) {
+        display_state_ = state;
+        display_image_number_ = image_number;
+        outer_frame_number_ = outer_frame_number;
+    }
     // 音频观察口（守卫用；⛔ 不是产品接口）。
     std::int32_t se_slot_resource(std::size_t slot) const { return se_slot_resource_[slot]; }
     std::int32_t bgm_track() const { return bgm_track_; }
@@ -1402,6 +1531,30 @@ public:
         const auto it = forward_container_.find(index);
         return it == forward_container_.end() ? 0 : it->second;
     }
+    // ── 转发无参复位的**接收者**（`0x324` / `CORE-OPS-FORWARD-FIELD`）──
+    // 正文（`60-ops-forward.md:39-48`）只说：接收者是从引擎字段取出的一个对象，入口把它**复位** ——
+    // "释放接收者持有的三个对象、把这三处引用清空，再清掉接收者自己的一个标记"；改的是**接收者自己的状态**。
+    // ★ 正文也明说"接收者是什么类型、谁把对象放进那个引擎字段：**没有观察**"（同文件 `:56`）⇒ 这里
+    //   只建一个**宿主注入**的中性结构（三个对象引用 + 一个标记），⛔ 不给它编领域名、⛔ 不建按 EA 分派的表。
+    //   产品路径不注入（默认空）：字段为空时的后果正文也没规定，见 `op_324`。
+    struct ForwardReceiver {
+        std::uint32_t owned_a = 0;  // 第 1 个被持有的对象（引用）
+        std::uint32_t owned_b = 0;  // 第 2 个
+        std::uint32_t owned_c = 0;  // 第 3 个
+        std::int32_t marker = 0;    // 接收者自己的一个标记
+    };
+    // 宿主接缝（⛔ 不是平台边界：正文没有观察的字段，由宿主决定要不要填）。
+    void set_forward_receiver(std::optional<ForwardReceiver> receiver) {
+        forward_receiver_ = receiver;
+    }
+    const std::optional<ForwardReceiver>& forward_receiver() const { return forward_receiver_; }
+    // 观察口（守卫用；⛔ 不是产品接口）：成功复位的次数 / 字段为空时记下的请求次数。
+    // ★ 只有计数、没有"释放请求"：正文的"释放"在模型里没有平台/分配器观察面，
+    //   可断言的那一半是"三处引用清空 + 标记清 0"（同文件 `:48` 的状态对应）。
+    std::size_t forward_receiver_resets() const { return forward_receiver_resets_; }
+    std::size_t forward_receiver_null_requests() const {
+        return forward_receiver_null_requests_;
+    }
     // 「文本键 → 整数」命名表（`CORE-OPS-TABLE-RESET-A1` / `-BIND-A2` / `-DISPATCH-A3`）。
     // ★ 与配置的命名键表**不是同一张**；键相等 = 完整文本相等。
     const std::unordered_map<std::string, std::int32_t>& named_table() const { return named_table_; }
@@ -1441,6 +1594,10 @@ public:
     std::int32_t mouse_target() const { return mouse_target_; }
     std::int32_t mouse_owner() const { return mouse_owner_; }
     std::uint32_t mouse_last_ms() const { return mouse_last_ms_; }
+    // ★ 泵本体（`op_cd`）被**进入**的次数（观察口，⛔ 不是引擎状态、也不进脚本）。
+    //   「唯一入口」守卫要用它：「上次派发时刻」只记"真的派发了"，而**第二入口**若被时间闸挡回去
+    //   就一格都不改 ⇒ 只看 `mouse_last_ms()` 抓不住（那种断言恒真）。这里是"进过泵本体几次"。
+    std::size_t mouse_pump_entries() const { return mouse_pump_entries_; }
     // 本地块（`0x7b` / `0x199` / `0x7c`）：存档字 / 存档位置 / 入块深度。
     std::uint32_t local_save_word() const { return local_save_word_; }
     std::uint32_t local_save_pos() const { return local_save_pos_; }
@@ -1706,6 +1863,10 @@ private:
     void op_82(const Instruction&); void op_c4(const Instruction&);
     /** 显示模式请求的实现（`0x2cf` 转发到的入口；`0x2ce` 读的是同一个缓存格）。 */
     void apply_display_mode(std::int32_t target);
+    /** 载图请求（`0x25b` 第 3 步 / 重发① 的状态 2 支）：**只记请求**，不解码（正文 `:337` / `:357`）。 */
+    void request_display_image(std::int32_t image_number);
+    /** 外枠纹理请求（重发① 的状态 1 支与黑底替代）：**只记请求**，不建纹理（正文 `:367`）。 */
+    void request_outer_frame(std::int32_t frame_number);
     void op_2e6(const Instruction&); void op_2e7(const Instruction&); void op_2e8(const Instruction&);
     void op_2ea(const Instruction&);
     // 设置表 getter：声道音量（0xC5）/ 点击跳过效果（0x306）
@@ -1890,6 +2051,8 @@ private:
     std::vector<FontNameEntry> font_names_;
     // 平台字体度量接缝 + 计数 + 该对象的**参考量度**（第一次度量的结果）。
     FontMeasurer font_measurer_;
+    // 宿主字体替换开关（SCOPE §0 D1；缺省关 ⇒ 派生例程照正文判回退判据②③）。
+    bool font_substitution_ = false;
     std::size_t font_measure_requests_ = 0;
     FontMetrics font_reference_metric_;
     std::uint32_t global_flip_ = 0;
@@ -1965,6 +2128,10 @@ private:
     std::uint32_t save_file_version1_ = 0;  // 版本门通过后回填（`FMT-SAVE-ENVELOPE`，本批不建模）
     std::uint32_t save_file_version2_ = 0;
     std::unordered_map<std::uint32_t, std::int32_t> forward_container_;
+    // `0x324` 的接收者（空 = 产品路径的缺省：正文对该字段的写者没有观察）+ 两个守卫计数。
+    std::optional<ForwardReceiver> forward_receiver_;
+    std::size_t forward_receiver_resets_ = 0;
+    std::size_t forward_receiver_null_requests_ = 0;
     std::array<ListRecord, 10> list_records_{};
     std::int32_t default_group_ = 1;
     std::int32_t scalar_d107656_ = 0;
@@ -1980,6 +2147,8 @@ private:
     //   ⇒ 把 `0x75` 当成"行高"会让界面里"设行高"顺手改字号（历史上正是这个错）。
     std::int32_t glyph_height_ = 24;      // A 支（0x75）：0x204 出字形的那个高度
     std::int32_t font_b_height_ = 8;      // B 支（0x197）：跨度绘制那条路径的字号
+    // 最近一次 `0x205` 的 layout（观察口，⛔ 不是产品状态；见 `last_num_text_layout()`）。
+    NumTextLayout last_num_text_layout_;
     // 两对字体描述（每组两份变体：原样 / '@' + 原样）。`0x75` / `0x1a5` 写 A 对、`0x197` / `0x2fe` 写 B 对。
     FontDescriptionPair font_a_pair_{};
     FontDescriptionPair font_b_pair_{};
@@ -2012,8 +2181,16 @@ private:
     std::array<std::int32_t, 32> array_d551_{};
     std::array<std::int32_t, 32> array_d1383_{};
     std::array<std::int32_t, 8> array_d1969_{};
-    std::int32_t scalar_25b_a_ = 0;
-    std::int32_t scalar_25b_b_ = 0;
+    // ── 显示状态三格（`CORE-OPS-RENDER-DISPLAY-STATE-25B`）──
+    // 初值 0 = "没有要重新显示的画面"（所以 `0x2cf` 的既有用例在初值下一条请求都不发）。
+    std::int32_t display_state_ = 0;         // 0 / 1 / 2；其它值等价于 0
+    std::int32_t display_image_number_ = 0;  // 当前图像号格（`0x25b` 唯一的写者）
+    std::int32_t outer_frame_number_ = 0;    // 外枠编号格（写状态 1 的那条指令写它；黑底替代写 0）
+    // 两条宿主请求的接缝（缺省空 = 产品路径没有后端 ⇒ 只记请求、什么都不做）与两个请求计数。
+    DisplayImageLoader display_image_loader_;
+    OuterFrameRequester outer_frame_requester_;
+    std::size_t display_image_loads_ = 0;   // 观察口：载图请求发过几次
+    std::size_t outer_frame_requests_ = 0;  // 观察口：外枠纹理请求发过几次
     std::int32_t show_logo_ = 1;
     // 启动时登记的引擎重置钩子（`CORE-OPS-FRAME-EXIT-SCRIPT`）：登记发生在构造期，
     // `0x9` 只调**已登记**的钩子。两类计数只给守卫（⛔ 不是产品状态）。
@@ -2176,9 +2353,10 @@ private:
     // 宿主注入的输入位（测试装置；见 `set_key_sampler`）；空 = 没有注入。
     KeySampler key_sampler_;
     // ── 输入映射表（`CORE-INPUT-WORD`；初值由构造器的输入系统初始化写）──
-    // ① 系统键码（0..255）→ 输入位号（−1 = 未映射）② 逻辑键号 → 系统键码（−1 = 无）。
+    // ① 系统键码（0..255）→ 输入位号（−1 = 未映射）② 表 B：逻辑键号（0..255）→ 系统键码
+    //    （256 格，构造期整表清 0 再写 93 个固定条目；表内未写到的格 = 0，表外 = 未定义）。
     std::array<std::int32_t, kSystemKeyCount> key_code_table_{};
-    std::map<std::int32_t, std::int32_t> logical_key_codes_;
+    std::array<std::int32_t, kLogicalKeyCount> logical_key_codes_{};
     // 键槽组头的槽数（= 2）与手柄组头的按钮数（设备能力；0 ⇒ 整组不采样）。
     std::int32_t key_slot_count_ = 2;
     std::int32_t joy_button_count_ = 0;
@@ -2200,7 +2378,24 @@ private:
     JoyHatSource joy_hat_source_;
     JoyStickSource joy_stick_source_;
     bool joy_hat_four_way_ = false;
-    std::int32_t joy_stick_threshold_ = 0;
+    // ── 摇杆轴（`CORE-INPUT-WORD` 的「手柄的方向位」）──
+    // 设备能力给出的两轴范围（`joyGetDevCapsA`）+ 初始化时那**一次**采样到的轴位置 + 四条阈值。
+    std::array<std::uint32_t, 2> joy_axis_min_{};
+    std::array<std::uint32_t, 2> joy_axis_max_{};
+    std::array<std::uint32_t, 2> joy_axis_origin_{};
+    std::array<std::uint32_t, 2> joy_axis_low_{};
+    std::array<std::uint32_t, 2> joy_axis_high_{};
+    bool joy_axis_thresholds_ready_ = false;
+    std::size_t joy_axis_origin_samples_ = 0;
+    // 20 毫秒查询缓存：上次查到的原始轴值 + 那次查询的时刻（宿主毫秒时钟）+ 查询次数（观察口）。
+    std::array<std::uint32_t, 2> joy_axis_cache_{};
+    bool joy_axis_cache_valid_ = false;
+    std::uint32_t joy_axis_last_query_ms_ = 0;
+    std::size_t joy_axis_queries_ = 0;
+    // 「忽略摇杆」门（构造时清 0；全语料没有置位写点）。
+    bool joy_ignore_stick_ = false;
+    // 平台手柄查询（带 20 毫秒缓存）：返回这一拍可用的原始轴值。
+    std::array<std::uint32_t, 2> query_joy_axes();
     // `0x2` 的 −11 支（恢复存档）：恢复路径接缝 + 两个观察量。
     SaveExitRestore save_exit_restore_;
     std::size_t save_exit_version_reads_ = 0;
@@ -2209,8 +2404,12 @@ private:
     bool debugger_present_ = false;
     // 宿主每帧喂的"有输入在按下"（见 set_input_pressed）：只驱动文本层的抽干。
     bool input_pressed_ = false;
-    // 平台触点的注入点（`0x2fc`）；空 = 永远没有触点。
-    TouchSource touch_source_;
+    // 触点缓冲（`CORE-INPUT-TOUCH-POINT`）：**不是**跨消息累积的队列 ⇒ 每条消息整体重建。
+    std::vector<TouchPoint> touch_buffer_;
+    std::int32_t touch_count_ = 0;
+    std::int32_t touch_buffer_capacity_ = 0;  // 由"这条消息的触点数"决定（⛔ 不复用旧容量）
+    std::size_t touch_rebuilds_ = 0;
+    TouchClientMapping touch_client_mapping_;
     // 平台光标 / 按钮（`0x109` / `0x108`）；空 = 设备不可用。
     CursorSource cursor_source_;
     MouseButtonSource mouse_button_source_;
@@ -2274,6 +2473,7 @@ private:
     std::int32_t mouse_target_ = -1;   // 登记的脚本位置（dword 下标）；−1 = 取消
     std::int32_t mouse_owner_ = -1;    // 登记时的当前帧脚本身份（frame.local_depth；见 CORE-INPUT-CALLBACK-REGISTER）
     std::uint32_t mouse_last_ms_ = 0;  // 上一次派发时刻（登记时 = 当前时刻）
+    std::size_t mouse_pump_entries_ = 0;  // 泵本体的进入次数（诊断计数；见 `mouse_pump_entries()`）
     // 键绑定三张表（`CORE-OPS-SCALAR-TABLE-10C`）：
     //   ① 与 0x10b 共用 `array_d1383_`（键号 → 动作号；0x10c 不碰它）。
     //   ② / ③ 是本模型新增的两张表：动作号 → 槽号（0x10c 只读）、槽号 → 键号（0x10c 写；−1 = 未绑定）。

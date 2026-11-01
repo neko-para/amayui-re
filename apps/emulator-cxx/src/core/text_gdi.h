@@ -49,6 +49,22 @@ std::wstring gdi_face_from_utf8(const std::string& utf8);
 // （`GetTextMetricsA` 的出参，见 ops-forensics §28）。
 bool gdi_font_ascent(const std::wstring& face, int size, int weight, int* ascent);
 
+// 一次**平台字体度量**（`60-ops-forward` 的「非 0 支的下一格来自度量」；同一处平台入口的出参）：
+//   · `line_height`      = `TEXTMETRICW.tmHeight`（行高）；
+//   · `average_width`    = `TEXTMETRICW.tmAveCharWidth`（平均字宽；引擎的"下一格"取它的相反数）；
+//   · `glyph_box_width`  = `GetGlyphOutlineW` 的 `GLYPHMETRICS.gmBlackBoxX`（该字形的**黑框宽**）；
+//   · `measured_box_width` = `GetTextExtentPoint32W` 对**同一个字**量出的宽（量度框宽；与黑框是两侧口径）。
+// ★ `codepoint` 是 CP932 码元（`60-ops-forward.md:105` 的常量 `0x8C83` 就是它），**不是** SJIS 字节串。
+// ★ 只在 `_WIN32` 有实体；其它平台返回 false（调用方按平台差异回退到 FreeType 近似）。
+struct GdiFontMetrics {
+    int line_height = 0;
+    int average_width = 0;
+    int glyph_box_width = 0;
+    int measured_box_width = 0;
+};
+bool gdi_font_metrics(const std::wstring& face, int size, int weight, std::uint32_t codepoint,
+                      GdiFontMetrics* out);
+
 // 取一个码点的字形。`codepoint` 是 SJIS 解码后的 Unicode 码点：引擎在日文代码页下把 SJIS 码交给
 // ANSI 版 API，这里用 W 版 + 同一个字符，避开宿主代码页（**不是**语义差异）。
 bool gdi_load_glyph(const std::wstring& face, int size, int weight, GdiFormat format,

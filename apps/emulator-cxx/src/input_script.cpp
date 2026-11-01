@@ -204,15 +204,10 @@ bool ScriptedInput::buttons(std::int32_t& mask) const {
     return true;
 }
 
-bool ScriptedInput::touch(core::Machine::TouchPoint&) const {
-    return false;  // 桌面鼠标-only：没有触点缓冲（与窗口路径同口径）
-}
-
 void ScriptedInput::bind(core::Machine& machine) {
     machine.set_key_sampler([this] { return keys(); });
     machine.set_cursor_source([this](std::int32_t& x, std::int32_t& y) { return cursor(x, y); });
     machine.set_mouse_button_source([this](std::int32_t& mask) { return buttons(mask); });
-    machine.set_touch_source([this](core::Machine::TouchPoint& point) { return touch(point); });
 }
 
 }  // namespace app

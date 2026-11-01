@@ -386,6 +386,89 @@ TextGlyphSource g_last_glyph_source = TextGlyphSource::None;
 
 TextGlyphSource last_glyph_source() { return g_last_glyph_source; }
 
+// ── 平台字体度量（`CORE-OPS-FORWARD-PROLOGUE`「非 0 支的下一格来自度量」）──
+// 正文 `data/spec/chapters/60-ops-forward.md:104-112`：一次派生发**两次**平台字体度量，
+// 写回两份描述的是**第二次**；**两次量度的字符是同一个固定字符**（:105 的常量 `0x8C83`）。
+// ★ 宿主替换（SCOPE §0 D1 / §1.1）：**两次都量 Amayui** —— 请求面名（参考字体常量 / 描述自己的
+//   字面名）只是请求形态，不决定量哪份字体。⛔ 这不是"与真机等价"：真机两次量的是不同字体。
+#if defined(_WIN32) || defined(EMULATOR_CXX_HAVE_TEXT)
+namespace {
+// 度量请求的固定字符：正文的常量 `0x8C83`（CP932 码元）。引擎把它当 ANSI 码元的双字节值交给平台；
+// 这里按"前导字节在前"解成 UTF-16 / Unicode（`gdi_font_metrics` 走同一条约定）。
+constexpr std::uint32_t kMeasureCodepoint = 0x8C83;
+// 宿主字体的族名（与 `text_gdi.cpp` 的 `kHostFontFamily` 同一份；GDI 档按它取字）。
+constexpr const char* kHostFaceUtf8 = "Amayui CN";
+}  // namespace
+#endif
+
+Machine::FontMetrics measure_rendering_font(std::int32_t size) {
+    Machine::FontMetrics metrics;
+    const int clamped = std::clamp(size, 1, 512);
+    // ★ 粗细按常规体（400）：`FontMeasurer` 的接缝只带 (面名, 字号)，没有粗细参数 ——
+    //   引擎把该对象的粗细格（`0x2bd` 写的字重格，见 `CORE-OPS-FORWARD-PROLOGUE`）交给 LOGFONT；
+    //   本接缝不带宽细参数 ⇒ 平台量度固定按常规体量（⛔ 不在这里发明第二条接缝）。
+    constexpr int kWeight = 400;
+#ifdef _WIN32
+    // ① Windows：与真机**同源**的平台入口（引擎本来就把量度 / 字形交给 GDI）。
+    {
+        GdiFontMetrics gdi;
+        if (gdi_font_metrics(gdi_face_from_utf8(kHostFaceUtf8), clamped, kWeight,
+                             kMeasureCodepoint, &gdi)) {
+            metrics.line_height = gdi.line_height;
+            metrics.average_width = gdi.average_width;
+            metrics.glyph_box_width = gdi.glyph_box_width;
+            metrics.measured_box_width = gdi.measured_box_width;
+            return metrics;
+        }
+    }
+#endif
+#ifdef EMULATOR_CXX_HAVE_TEXT
+    // ② 其它平台（或 GDI 用不了）：FreeType 近似 —— ★ **平台差异**，不是引擎语义。
+    //   · 行高 = ascender − descender（对应 tmHeight 的 ascent + descent，不含行距）；
+    //   · FT 没有"平均字宽"这一格 ⇒ 用**固定字符的 advance** 当近似（同一字符、同一侧口径）；
+    //   · 黑框 = 该字形位图宽；量度框 = 同一个字的 advance（与 GDI 的 extent.cx 同侧）。
+    const std::string path = default_font_path();
+    if (path.empty()) return metrics;
+    FT_Face face = font_cache().face(path);
+    if (face == nullptr) return metrics;
+    if (FT_Set_Pixel_Sizes(face, 0, static_cast<FT_UInt>(clamped)) != 0) return metrics;
+    const auto& size_metrics = face->size->metrics;
+    metrics.line_height =
+        static_cast<std::int32_t>((size_metrics.ascender - size_metrics.descender) >> 6);
+    const std::vector<std::uint32_t> codepoints = decode_sjis(std::string("\x8C\x83", 2));
+    if (codepoints.empty()) return metrics;
+    const FT_UInt glyph_index = FT_Get_Char_Index(face, codepoints[0]);
+    if (glyph_index == 0) return metrics;
+    if (FT_Load_Glyph(face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0) {
+        return metrics;
+    }
+    const std::int32_t advance = static_cast<std::int32_t>(face->glyph->advance.x >> 6);
+    metrics.glyph_box_width = static_cast<std::int32_t>(face->glyph->bitmap.width);
+    metrics.measured_box_width = advance;
+    metrics.average_width = advance;
+#endif
+    // ③ 没有字体后端：三个量都量不到 ⇒ 留 0（派生例程照它自己的判据走；⛔ 不编数值、不假装量过）。
+    return metrics;
+}
+
+Machine::FontMeasurer make_platform_font_measurer() {
+    return [](const std::string& face, std::int32_t size) {
+        // ★ 请求面名**不决定量哪份字体**（宿主替换）：产品路径两次请求的面名不同
+        //   （第一次 = 常量参考字体、第二次 = 描述自己的字面名），但两次都量 Amayui。
+        //   面名照旧进得出参数 —— 守卫 `spec_font_measure_wired` ③ 断的就是"两次请求的面名不同"。
+        (void)face;
+        return measure_rendering_font(size);
+    };
+}
+
+void wire_platform_fonts(Machine& machine) {
+    // ① 度量后端（正文：这一支的写入值是平台输入）。
+    machine.set_font_measurer(make_platform_font_measurer());
+    // ② 宿主字体替换开关（SCOPE §0 D1）：名字不参与选择 ⇒ 派生例程跳过回退判据 ②③。
+    //   ⛔ 这是 SCOPE 的简化，不是引擎语义（见 `vm.h` 的 `set_font_substitution` 注释）。
+    machine.set_font_substitution(true);
+}
+
 bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, int y,
                             const std::string& sjis, std::string* error, int* advance_out,
                             int font_size_override, const TextStyleSnapshot* style) {
@@ -401,7 +484,9 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
                                 ? font_size_override
                                 : (machine.font_size() > 0 ? machine.font_size() : 24));
     // ★ 等宽字体（`0x2de` 的标志字节位 0 = `FIXED_PITCH`）⇒ **固定半宽**：字宽 = ∓字号/2（带符号；
-    //   对位模式 = 1 ⇒ −字号/2、= 2 ⇒ +字号/2）。画字时按 |字宽| 推进，不再按字形黑框比例算。
+    //   这是**建平台字体那条路径**的判据：对位模式 = 2 ⇒ +字号/2，否则（0 / 1 / ≥3）⇒ −字号/2；
+    //   另一条（描述派生 / 量度格）的判据不同，见 `Machine::HalfWidthPath`）。
+    //   画字时按 |字宽| 推进，不再按字形黑框比例算。
     //   ⛔ 位 0 置起**不会**让这个字体被跳过（它照常参与画字）—— 跳过"按字宽居中"的修正而已。
     const std::int32_t fixed_half_width = machine.font_fixed_half_width(size);
     // ★ 诊断（`EMULATOR_CXX_TRACE_TEXT=1`）：把**实际用来出字形的字号**打出来。

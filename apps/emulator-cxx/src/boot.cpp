@@ -12,6 +12,7 @@
 #include "core/install.h"
 #include "core/opcode_table.h"
 #include "core/script.h"
+#include "core/text_raster.h"
 #include "core/vm.h"
 
 #include <algorithm>
@@ -268,6 +269,24 @@ int run_core_install(const InstallRunOptions& options) {
         std::uint32_t key = random();
         if (key == 0) key = 1;
         core::Machine machine(key, table, &install, config);
+        // ★ 平台字体度量 + 宿主字体替换（`CORE-OPS-FORWARD-PROLOGUE`「非 0 支的下一格来自度量」；
+        //   SCOPE §0 D1 / §1.1）：装度量后端 ⇒ `0x75` / `0x197` / `0x1a5` / `0x2fe` 的派生例程
+        //   从"回退（下一格 = −字号/2）"变成"写回平台度量"；打开替换开关 ⇒ 名字不参与选择。
+        //   ★ 这是产品路径的**唯一装配点**：`core_selftest.cpp` 的 `spec_font_measure_wired` ④
+        //     调同一个 `core::wire_platform_fonts` 断它，⛔ 不是自测里的旁路。
+        core::wire_platform_fonts(machine);
+        // ★ **产品接线守卫**（安装档 CTest 的机械断言）：boot 装配之后**当场**校验接缝真的接上了。
+        //   只断自测里的 `wire_platform_fonts` 不够 —— 复审实测：把上面那一行删掉，全量 ctest
+        //   仍然全绿，而产品路径会静默退回"下一格 = −字号/2"的回退。⇒ 这里让每个 `--install` 档
+        //   （boot / route / config …）在装配缺失时**直接失败**，并把它打进日志。
+        if (!machine.has_font_measurer() || !machine.font_substitution()) {
+            std::fprintf(stderr,
+                         "[core] 字体接线缺失：measurer=%d substitution=%d"
+                         "（产品路径必须两者都为真）\n",
+                         machine.has_font_measurer() ? 1 : 0, machine.font_substitution() ? 1 : 0);
+            return 1;
+        }
+        std::printf("[core] font-wiring measurer=1 substitution=1\n");
         // `--skip-logo`：根脚本用 `0x130` 读这个格决定是否 `call-script 5262`（LOGO）。
         // 这是引擎自身的 ShowLogo 通路，不是"直接跳到 TITLE"的宿主捷径。
         machine.set_show_logo(!skip_logo);

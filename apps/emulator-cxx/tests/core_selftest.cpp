@@ -1591,9 +1591,16 @@ bool check_input_composition(const core::OpcodeTable& table) {
         if (bits_at(9000) != (1u << 1)) return fail("帽子 90° 不是只有第 1 位（右）");
         if (bits_at(18000) != (1u << 2)) return fail("帽子 180° 不是只有第 2 位（下）");
         if (bits_at(27000) != (1u << 3)) return fail("帽子 270° 不是只有第 3 位（左）");
-        // 居中（−1）⇒ 这四位改由**摇杆轴**越过中位阈值给出。
-        machine.set_joy_stick_threshold(1000);
-        machine.set_joy_stick_source([] { return std::array<int, 2>{1500, 0}; });  // 轴右
+        // 居中（−1）⇒ 这四位改由**摇杆轴**越过四条阈值给出（`CORE-INPUT-WORD` 的「手柄的方向位」）。
+        // 设备能力：两轴都是 0..2000；初始化时采到的轴位置 = 1000 ⇒ 低 = 500、高 = 1500。
+        machine.set_joy_axis_range(0, 0, 2000);
+        machine.set_joy_axis_range(1, 0, 2000);
+        machine.set_joy_stick_source([] { return std::array<std::uint32_t, 2>{1000u, 1000u}; });
+        machine.sample_joy_axis_origin();
+        machine.set_joy_stick_source([] {
+            return std::array<std::uint32_t, 2>{1600u, 1000u};  // 轴 1 大于高阈值 ⇒ 右
+        });
+        machine.set_host_clock_ms(100);  // 越过 20ms 缓存窗口，让新轴值真的被查询
         angle = -1;
         if (machine.sample_level_input() != (1u << 1)) {
             return fail("帽子居中时摇杆轴没有给出方向位（右 ⇒ 第 1 位）");
@@ -1601,6 +1608,7 @@ bool check_input_composition(const core::OpcodeTable& table) {
         // 设备能力不报"帽子可四向" ⇒ 一律按居中处理（即使平台给了角度）。
         machine.set_joy_hat_four_way(false);
         angle = 4500;
+        machine.set_host_clock_ms(200);
         if (machine.sample_level_input() != (1u << 1)) {
             return fail("设备不报四向时仍按帽子角度给了方向位（应当按居中处理 ⇒ 用摇杆轴）");
         }
@@ -1708,7 +1716,7 @@ bool check_input_composition(const core::OpcodeTable& table) {
         // 连续两次 0xfd 到同一槽：第 2 条把上一条绑定的 Enter 键码抹掉。
         auto twice = make_script_with_body();
         emit_instruction(twice, 0xFD, {{0, 7}, {0, 28}});
-        emit_instruction(twice, 0xFD, {{0, 7}, {0, 30}});  // 逻辑键 30 = Backspace
+        emit_instruction(twice, 0xFD, {{0, 7}, {0, 14}});  // 逻辑键 14 = Backspace（表 B：14 → 8）
         emit_instruction(twice, 2, {});
         core::Machine machine2(key, table);
         machine2.load_root(twice);
@@ -1888,23 +1896,40 @@ bool check_text_container_and_font_names(const core::OpcodeTable& table) {
             if (!machine.step() || !machine.step()) return false;
             return true;
         };
-        // 字号 40 的固定半宽：对位模式 1 ⇒ −20、2 ⇒ +20。
-        if (!set_face(1, "Amayui CN")) return fail("0x2db / 0x1a5 夹具停机了");
-        if (machine.font_fixed_half_width(40) != -20) {
-            std::fprintf(stderr, "对位模式 1 的固定半宽 = %d（期望 −20）\n",
-                         machine.font_fixed_half_width(40));
-            return fail("位 0 置起 + 对位模式 1 没有给出 −字号/2");
+        // 字号 40 的固定半宽，**两个派发点各判一次**（`CORE-OPS-TEXT-FONT-NAME-2DE` 的对位模式表）：
+        //   · 建平台字体那条（`PlatformFont`，画字）：= 2 ⇒ **+20**，否则（0 / 1 / ≥3）⇒ **−20**；
+        //   · 描述派生那条（`DescriptionMetric`，量度格）：= 1 ⇒ **−20**，否则（0 / 2 / ≥3）⇒ **+20**。
+        //   ⇒ 对位模式 **≥ 3** 时两路**异号**（画字 −20 / 量度格 +20）——把两条判据合并成一条，就会有
+        //     一个取值变成不可达 ⇒ 这条红。
+        using HalfPath = core::Machine::HalfWidthPath;
+        const auto expect_half = [&](std::int32_t align, HalfPath path, std::int32_t want,
+                                     const char* what) {
+            if (!set_face(align, "Amayui CN")) return fail("0x2db / 0x1a5 夹具停机了");
+            const std::int32_t got = machine.font_fixed_half_width(40, path);
+            if (got != want) {
+                std::fprintf(stderr, "对位模式 %d / %s 的固定半宽 = %d（期望 %d）\n", align,
+                             path == HalfPath::PlatformFont ? "画字" : "量度格", got, want);
+                return fail(what);
+            }
+            return true;
+        };
+        if (!expect_half(1, HalfPath::PlatformFont, -20, "画字：对位模式 1 没有给出 −字号/2")) return false;
+        if (!expect_half(1, HalfPath::DescriptionMetric, -20, "量度格：对位模式 1 没有给出 −字号/2")) return false;
+        if (!expect_half(2, HalfPath::PlatformFont, 20, "画字：对位模式 2 没有给出 +字号/2")) return false;
+        if (!expect_half(2, HalfPath::DescriptionMetric, 20, "量度格：对位模式 2 没有给出 +字号/2")) return false;
+        // 对位模式 0：画字那条**照正文取 −**（旧断言「本版窄 unknown ⇒ 0」已作废——正文现在写死了这一格）。
+        if (!expect_half(0, HalfPath::PlatformFont, -20,
+                         "画字：对位模式 0 没有按正文取 −字号/2（旧的「窄 unknown」断言已作废）")) {
+            return false;
         }
-        if (!set_face(2, "Amayui CN")) return fail("0x2db / 0x1a5 夹具停机了");
-        if (machine.font_fixed_half_width(40) != 20) {
-            std::fprintf(stderr, "对位模式 2 的固定半宽 = %d（期望 +20）\n",
-                         machine.font_fixed_half_width(40));
-            return fail("位 0 置起 + 对位模式 2 没有给出 +字号/2");
+        // 对位模式 ≥ 3：两个派发点**异号**（这条是本用例的主判据）。
+        if (!expect_half(3, HalfPath::PlatformFont, -20,
+                         "画字：对位模式 ≥3 没有取 −字号/2（两个派发点被合并了？）")) {
+            return false;
         }
-        // 对位模式 0 是**窄 unknown**：不适用（⛔ 不猜第三套符号）。
-        if (!set_face(0, "Amayui CN")) return fail("0x2db / 0x1a5 夹具停机了");
-        if (machine.font_fixed_half_width(40) != 0) {
-            return fail("对位模式 0 也给了固定半宽（本版是窄 unknown，不该编语义）");
+        if (!expect_half(3, HalfPath::DescriptionMetric, 20,
+                         "量度格：对位模式 ≥3 没有取 +字号/2（两个派发点被合并了？）")) {
+            return false;
         }
         if (!set_face(1, "MS Gothic")) return fail("0x2db / 0x1a5 夹具停机了");
         if (machine.font_fixed_half_width(40) != 0) return fail("位 0 未置起的字体被当成了固定半宽");
@@ -2093,6 +2118,164 @@ bool check_text_container_and_font_names(const core::OpcodeTable& table) {
                 std::fprintf(stderr, "0x1a5 之后的下一格 = %d（期望 −9）\n",
                              machine.font_description(false, 0).width);
                 return fail("0x1a5 的重建路径没有按度量覆写下一格");
+            }
+        }
+        // ⑥e：「半格」= **参考字形的黑框宽 ÷ 2**（⛔ 不是字号 ÷ 2），且再缩只在**对位模式 = 1** 那一档。
+        //   注入一个按请求面名区分的假后端（字号固定 20 ⇒ "字号 ÷ 2" 是 10，与下面设的半格 12 **不同**，
+        //   所以"阈值取的是哪一个"当场可分辨）：
+        //     · 参考字体那次 ⇒ 黑框宽 24 ⇒ 半格（阈值）= 24 >> 1 = 12、分子 = 24 × 0.5 = 12；
+        //     · 描述那次 ⇒ 量度框 60（文本 extent）、平均字宽 50、黑框宽由本例给。
+        //   ★ 分母口径单列：再缩的分母是**本字形黑框宽**（`0x4584D2 mov eax,[…gmBlackBoxX]` →
+        //     `0x458500 mov [ebp+var_13C],eax` → `0x458506 fild` → `0x458516 fdivp`），⛔ 不是量度框。
+        //     ⇒ 本例把「本字形黑框」与「本字形量度框」**故意取成不同的数**（20 / 60）：
+        //     换成量度框 ⇒ ② 变成 12 ÷ 60 × (−50) = −10 ⇒ 红；这也是"分母"唯一的判据。
+        //   ① 本字形黑框宽 11：> 10（字号 ÷ 2 的**旧**阈值）但 ≤ 12（参考字形的半格）⇒ **不该再缩**，
+        //      下一格 = −50；若阈值取了字号 ÷ 2 ⇒ 会缩成 trunc(12 ÷ 11 × (−50)) = trunc(−54.545…) = −54。
+        //   ② 本字形黑框宽 20：> 12 ⇒ 缩一次：trunc(**12** ÷ **20** × (−50)) = **−30**
+        //      （分子 = 参考盒宽 24 × 0.5 = 12、分母 = 本字形黑框 20、乘数 = −平均字宽 50）。
+        //      错法各自的落点（都落在 −30 之外）：分母取量度框 60 ⇒ −10（本仓上一版）；
+        //      分母取参考盒 24 ⇒ −25；分子取成本字形黑框 20 ⇒ −50。
+        //   ③ 对位模式 2（不是 1 档）：同样的量度 ⇒ **不缩**，下一格 = −50（正文：其它非 0 档没有半格判据）。
+        const auto width_with_metrics = [&](std::int32_t align, std::int32_t reference_box,
+                                            std::int32_t glyph_box, std::int32_t measured_box,
+                                            std::int32_t average_width) -> std::int32_t {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DB, {{0, static_cast<std::uint32_t>(align)}});
+            emit_instruction(bytes, 2, {});
+            core::Machine machine(key, table);
+            machine.set_font_measurer([reference_box, glyph_box, measured_box,
+                                       average_width](const std::string& face, std::int32_t) {
+                core::Machine::FontMetrics metrics;
+                metrics.line_height = 20;  // = 字号 ⇒ 不触发「测得行高 > 字号」的高度重算
+                if (face == core::Machine::reference_font_face()) {
+                    metrics.glyph_box_width = reference_box;  // 参考字形的黑框宽
+                    metrics.measured_box_width = reference_box;
+                    metrics.average_width = 10;
+                } else {
+                    metrics.glyph_box_width = glyph_box;
+                    metrics.measured_box_width = measured_box;
+                    metrics.average_width = average_width;
+                }
+                return metrics;
+            });
+            machine.set_font_substitution(true);
+            machine.load_root(bytes);
+            if (!machine.step()) return 999999;
+            core::FontDescription desc;
+            desc.face = "Amayui CN";
+            machine.derive_font_description(desc, 20);
+            return desc.width;
+        };
+        const auto width_with_box = [&](std::int32_t align, std::int32_t box_width) -> std::int32_t {
+            return width_with_metrics(align, 24, box_width, 60, 50);
+        };
+        const auto expect_width = [&](std::int32_t align, std::int32_t box_width,
+                                      std::int32_t want, const char* what) {
+            const std::int32_t got = width_with_box(align, box_width);
+            if (got != want) {
+                std::fprintf(stderr, "对位模式 %d / 本字形黑框 %d ⇒ 下一格 = %d（期望 %d）\n", align,
+                             box_width, got, want);
+                return fail(what);
+            }
+            return true;
+        };
+        if (!expect_width(1, 11, -50,
+                          "对位模式 1：黑框宽只超过「字号 ÷ 2」时也再缩了一次（半格不是字号的一半）")) {
+            return false;
+        }
+        if (!expect_width(1, 20, -30,
+                          "对位模式 1：再缩不是「参考盒宽 × 0.5」÷「本字形黑框宽」「−平均字宽」（分母取成量度框 / 分子取成本字形黑框？）")) {
+            return false;
+        }
+        if (!expect_width(2, 20, -50, "对位模式 2 也做了半格再缩（正文：只有 = 1 那一档再缩）")) {
+            return false;
+        }
+        // ⑥f：**奇数参考盒宽** ⇒ 阈值（整数右移）与分子（× 0.5 精确浮点）**不是同一个数**。
+        //   取证（`60-ops-forward.md` 的「再缩一次」）：阈值 `0x4584C6` / `0x4584D8 shr ecx,1` /
+        //   `0x4584DA cmp` / `0x4584DC jnb`；分子 `0x4584DE fild [ebp+var_78]`（参考盒宽原值）→
+        //   `0x4584EE fmul dbl_51D7F8`（× 0.5）→ `0x458516 fdivp` → `0x458518 fimul [ebp+ho]`
+        //   → `0x45851E __ftol2_sse`（唯一取整处，向零截断）。
+        //   参考盒宽 25 ⇒ **阈值 12**（25 >> 1）、**分子 12.5**（25 × 0.5）。
+        //   ① 本字形黑框 20（> 12）、量度框 20、平均字宽 50：
+        //      trunc(**12.5** ÷ 20 × (−50)) = trunc(−31.25) = **−31**；
+        //      若分子退回整数半格 12 ⇒ trunc(−30) = −30 ⇒ 本条红（R5 的错法）；
+        //      若阈值漏掉右移（用 25）⇒ 20 > 25 不成立、不缩 ⇒ −50 ⇒ 本条红。
+        //   ② 本字形黑框 13（= 阈值 + 1，恰好在“缩”的一侧）、量度框 13、平均字宽 50：
+        //      trunc(12.5 ÷ 13 × (−50)) = trunc(−48.076…) = **−48**；
+        //      若阈值写成向上取整（25 ÷ 2 向上 = 13）⇒ 13 > 13 不成立、不缩 ⇒ −50 ⇒ 本条红。
+        //   ③ 本字形黑框 12（= 阈值，**不**缩）、量度框 12、平均字宽 50 ⇒ 下一格 = **−50**；
+        //      若阈值偏小（如漏算参考盒宽 ⇒ 0）⇒ 会缩成 trunc(−52.08) = −52 ⇒ 本条红。
+        //   ★ 这三例把「本字形量度框」与「本字形黑框」取成同一个数 ⇒ 断言**只依赖分子 / 阈值**
+        //     （这两格相等 ⇒ 分母取哪一个都不影响结果）；**分母的口径由 ⑥e② 单独判**
+        //     （那里黑框 20 / 量度框 60 故意不同）。
+        const auto expect_width_odd = [&](std::int32_t glyph_box, std::int32_t want,
+                                          const char* what) {
+            const std::int32_t got = width_with_metrics(1, 25, glyph_box, glyph_box, 50);
+            if (got != want) {
+                std::fprintf(stderr,
+                             "参考盒宽 25（奇数）/ 本字形黑框 %d ⇒ 下一格 = %d（期望 %d）\n",
+                             glyph_box, got, want);
+                return fail(what);
+            }
+            return true;
+        };
+        if (!expect_width_odd(20, -31,
+                              "奇数参考盒宽：再缩的分子不是「参考盒宽 × 0.5」（退回整数半格 ⇒ −30）")) {
+            return false;
+        }
+        if (!expect_width_odd(13, -48,
+                              "奇数参考盒宽：阈值不是「参考盒宽右移一位」（向上取整 ⇒ 13 那一档不缩）")) {
+            return false;
+        }
+        if (!expect_width_odd(12, -50,
+                              "奇数参考盒宽：黑框宽等于阈值时也缩了（阈值偏小 / 丢掉了参考盒宽）")) {
+            return false;
+        }
+        // ⑥g：**参考量度那次请求的字号 = 当时的 A 支字号**（⛔ 不是这次派生的传参、也不随描述变）。
+        //   正文「参考字形 = 常量参考面名 + 固定字符、**按当时的 A 支字号**量的」。
+        //   夹具：A 支字号 = 缺省 24（不执行 `0x75`），派生传参 20 ⇒ 两次请求的字号必须是 (24, 20)；
+        //   把参考那次的实参写成派生传参 ⇒ (20, 20) ⇒ 本条红。
+        {
+            auto bytes = make_script_with_body();
+            emit_instruction(bytes, 0x2DB, {{0, 1}});
+            emit_instruction(bytes, 2, {});
+            core::Machine machine(key, table);
+            std::vector<std::int32_t> sizes;
+            machine.set_font_measurer([&sizes](const std::string& face, std::int32_t size) {
+                sizes.push_back(size);
+                core::Machine::FontMetrics metrics;
+                metrics.line_height = 20;
+                if (face == core::Machine::reference_font_face()) {
+                    metrics.glyph_box_width = 24;
+                } else {
+                    metrics.glyph_box_width = 10;
+                    metrics.average_width = 10;
+                }
+                return metrics;
+            });
+            machine.set_font_substitution(true);
+            machine.load_root(bytes);
+            if (!machine.step()) return fail("⑥g 夹具停机了");
+            if (machine.glyph_height() != 24) {
+                std::fprintf(stderr, "⑥g 前置不成立：A 支字号 = %d（期望缺省 24）\n",
+                             machine.glyph_height());
+                return false;
+            }
+            core::FontDescription desc;
+            desc.face = "Amayui CN";
+            machine.derive_font_description(desc, 20);
+            if (sizes.size() != 2) {
+                std::fprintf(stderr, "⑥g 一次派生的度量请求数 = %zu（期望 2）\n", sizes.size());
+                return fail("⑥g 派生没有恰好发两次度量");
+            }
+            if (sizes[0] != 24) {
+                std::fprintf(stderr, "⑥g 参考度量的字号 = %d（期望 24 = 当时的 A 支字号，不是传参 20）\n",
+                             sizes[0]);
+                return fail("参考字形不是按当时的 A 支字号量的（写成了派生传参 ⇒ 随描述变）");
+            }
+            if (sizes[1] != 20) {
+                std::fprintf(stderr, "⑥g 描述那次度量的字号 = %d（期望传参 20）\n", sizes[1]);
+                return fail("描述那次度量的字号不是派生传参");
             }
         }
     }
@@ -2423,6 +2606,174 @@ bool check_texture_set(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── 纹理位深 `display:TextureBit` 的**三档 + 缺省来源**（`CORE-OPS-TEXTURE-LOAD` / `-SET`） ──
+// 正文写死三点（取证 `.tmp/forensics/batch3-texture.md` §1）：
+//   ① 该键在引擎里**必有值**：配置库**构造期**就写内建默认 **32**（早于图形设备建立）⇒ 玩家文件只能
+//      覆盖它、不会让它消失。★ 缺省**不在读取端**：读取器缺键返回 0（配置库那条规则），与本条无关。
+//   ② 读取端**不做替换**：上传三档 = 16 ⇒ A4R4G4B4、32 ⇒ A8R8G8B8、**其它任何整数 ⇒ 上传失败**。
+//      显式写 0 与「缺键读出的 0」**同值同后果** ⇒ 都落第三档（⛔ 不许把 0 抬成 32）。
+//   ③ 第三档的失败发生在**上传**（建表面是二档、不失败）⇒ 槽里留着**已建出**的对象、记录来源 = 无。
+// 判据（八条，每条都会红）：
+//   ① `default_installed`：**不加载任何玩家文件** ⇒ `display:TextureBit` 读出 **32**（删掉构造期那一条 ⇒ 红）；
+//   ② `explicit_zero`：显式 0 ⇒ 装载**失败**（把 0 / 缺键抬成 32 ⇒ 红）；
+//   ③ `bit16_ok`：16 ⇒ 成功、`0x216` 读回文件号、颜色键按 A4R4G4B4 命中不透明黑（按 8 位比 ⇒ 红）；
+//   ④ `bit32_ok`：32 ⇒ 成功、`0x216` 读回文件号、颜色键按 32 位全值相等（按 16 位比 ⇒ 红）；
+//   ⑤ `bit24_fail`：24 ⇒ 失败（把它当"其它值按 32" ⇒ 红）；
+//   ⑥ `surface_before_failure`：②/⑤ 失败之后槽里**仍有对象**（失败挪到建表面之前 ⇒ 红）；
+//   ⑦ `default_used_by_loader`：只用构造期的默认值装载 ⇒ 成功（缺省真的来自构造期 ⇒ 红）；
+//   ⑧ `reader_never_substitutes`：库里**没有**这个键 ⇒ 读到 0 ⇒ 第三档失败（读取端把缺键抬成 32 ⇒ 红）。
+bool check_texture_bit_default_source(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "texture-bit: %s\n", what);
+        return false;
+    };
+    // ① 缺省来源：一个**全新的**配置库 + 产品那条构造期登记（⛔ 不 load_player_file、⛔ 不 load_defaults）。
+    {
+        core::ConfigStore config;
+        config.register_engine_defaults();
+        if (!config.has_named("display:TextureBit")) {
+            return fail("配置库构造期没有登记 display:TextureBit（⇒ 读取端只能读到 0 / 自己补缺省）");
+        }
+        const std::int32_t bits = config.get_int("display:TextureBit");
+        if (bits != 32) {
+            std::fprintf(stderr, "不加载玩家文件时 display:TextureBit = %d（期望 32）\n", bits);
+            return fail("构造期写的缺省不是 32");
+        }
+    }
+    // 一次按位深装载的全部观察量（栈上取完就抄出来 —— 不持有 Machine 指针）。
+    struct BitProbe {
+        bool halted = false;
+        std::string display_code;
+        int record_file = -999;   // 纹理记录的来源文件格（`0x216` 读的同一格）
+        int reread = -999;        // `0x216` 写到全局整型 1 的值
+        bool slot_present = false;
+        int width = 0;
+        int height = 0;
+        std::vector<std::uint8_t> rgba;
+    };
+    // 夹具图：1×2、自下而上 = 黑、红（BGR）⇒ 翻正后第 0 行红、第 1 行黑（两行不同色 ⇒ "键命中了哪一块"可分辨）。
+    // `explicit_write` = 是否**显式**写该键（false ⇒ 只用构造期登记的那份默认值）。
+    // `install_defaults` = 是否走产品那条"构造期登记"（false ⇒ 库里**没有**这个键 ⇒ 读到 0 走第三档）。
+    const auto probe_bits = [&](std::int32_t bits, bool explicit_write, bool install_defaults = true) {
+        TempInstall temp(100 + static_cast<std::uint32_t>(bits) * 10 + (explicit_write ? 1u : 0u) +
+                         (install_defaults ? 0u : 1000u));
+        temp.write("SYSTEM4.BIN", make_bmp24(1, 2, {0, 0, 0, 0, 0, 255}));
+        core::ConfigStore config;
+        if (install_defaults) config.register_engine_defaults();  // 产品路径：构造期登记在先（缺省 32）
+        if (explicit_write) config.set_int("display:TextureBit", bits);
+        core::Machine machine(key, table, &temp.install, std::move(config));
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x1F9, {{0, 0}, {0, 5}, {0, 0}});  // 颜色键 0 ⇒ 归一成 0xFF000000
+        emit_instruction(bytes, 0x216, {{3, 1}, {0, 5}});          // 记录来源 → 全局整型 1
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        BitProbe probe;
+        for (int i = 0; i < 2; ++i) {
+            if (!machine.step()) {
+                probe.halted = true;
+                break;
+            }
+        }
+        probe.display_code = machine.last_display_code();
+        const core::TextureRecord* record = machine.texture_record(5);
+        probe.record_file = record == nullptr ? -999 : record->file;
+        probe.reread = machine.global_int(1);
+        if (const auto* slot = machine.texture_slot(5)) {
+            probe.slot_present = slot->present;
+            probe.width = slot->width;
+            probe.height = slot->height;
+            probe.rgba = slot->rgba;
+        }
+        return probe;
+    };
+    // ② / ⑤ / ⑥ 第三档（**其它任何整数**）：显式 0 与 24 都必须失败，且**表面已建出**、记录来源 = 无。
+    for (const std::int32_t bits : {0, 24}) {
+        const BitProbe probe = probe_bits(bits, true);
+        if (!probe.halted) {
+            std::fprintf(stderr, "display:TextureBit = %d 时没有停机（装载成功了？）\n", bits);
+            return fail(bits == 0 ? "显式 0 没有落第三档（读取端把 0 / 缺键抬成了 32？）"
+                                  : "24 没有落第三档（被当成其它值按 32 了？）");
+        }
+        if (probe.display_code != "texture-upload-failed") {
+            std::fprintf(stderr, "display:TextureBit = %d 的失败码 = %s\n", bits,
+                         probe.display_code.c_str());
+            return fail("第三档的失败不是『上传失败』（失败点挪到别处了？）");
+        }
+        if (probe.record_file != -1) {
+            std::fprintf(stderr, "display:TextureBit = %d 之后记录来源 = %d（期望 −1）\n", bits,
+                         probe.record_file);
+            return fail("第三档失败后记录来源不是「无」");
+        }
+        // ⑥ 建表面（二档、不失败）在上传（三档）之前 ⇒ 槽里留着**已建出**的 1×2 对象。
+        if (!probe.slot_present || probe.width != 1 || probe.height != 2) {
+            std::fprintf(stderr,
+                         "display:TextureBit = %d 失败之后槽 = present %d / %dx%d（期望 1×2 已建出）\n",
+                         bits, probe.slot_present ? 1 : 0, probe.width, probe.height);
+            return fail("上传失败时槽里没有留下已建出的对象（失败挪到建表面之前了？）");
+        }
+    }
+    // ③ / ④ 16 与 32 必须**成功**：记录来源 = 文件号 0、`0x216` 读回 0、颜色键按各自的目标位宽命中不透明黑
+    //   （第 1 行四段全 0），红像素（第 0 行）不许被清。
+    for (const std::int32_t bits : {16, 32}) {
+        const BitProbe probe = probe_bits(bits, true);
+        if (probe.halted) {
+            std::fprintf(stderr, "display:TextureBit = %d 时停机了（%s）\n", bits,
+                         probe.display_code.c_str());
+            return fail(bits == 16 ? "16 位档装载失败（三档写错了？）" : "32 位档装载失败");
+        }
+        if (probe.record_file != 0 || probe.reread != 0) {
+            std::fprintf(stderr, "display:TextureBit = %d ⇒ 记录来源 = %d / 0x216 读回 = %d（期望 0 / 0）\n",
+                         bits, probe.record_file, probe.reread);
+            return fail("成功档的记录来源不是文件号（或 0x216 读的不是同一格）");
+        }
+        if (probe.rgba.size() != 8) {
+            std::fprintf(stderr, "display:TextureBit = %d 的夹具没有 1×2 纹理\n", bits);
+            return fail("成功档没有纹理（尺寸 / 像素数不对）");
+        }
+        if (probe.rgba[0] != 255 || probe.rgba[3] != 255) {
+            std::fprintf(stderr, "display:TextureBit = %d 误清了红像素（rgba[0..3] = %u %u %u %u）\n",
+                         bits, probe.rgba[0], probe.rgba[1], probe.rgba[2], probe.rgba[3]);
+            return fail("颜色键把不该命中的像素也清了");
+        }
+        for (std::size_t i = 4; i < 8; ++i) {
+            if (probe.rgba[i] != 0) {
+                std::fprintf(stderr,
+                             "display:TextureBit = %d 没有按目标位宽命中不透明黑（第 1 行 = %u %u %u %u）\n",
+                             bits, probe.rgba[4], probe.rgba[5], probe.rgba[6], probe.rgba[7]);
+                return fail(bits == 16 ? "16 位档的颜色键没有按 A4R4G4B4 命中（按 8 位比了？）"
+                                       : "32 位档的颜色键没有按全值相等命中（按 16 位比了？）");
+            }
+        }
+    }
+    // ⑦ 缺键不再被读取端替换：**只**用构造期默认（显式写 false）⇒ 与显式 32 同一条成功路径。
+    //   ★ 它同时钉住"缺省来自构造期"：把构造期那一条删掉 ⇒ 这里读到 0 ⇒ 落第三档 ⇒ 红。
+    {
+        const BitProbe probe = probe_bits(32, false);
+        if (probe.halted || probe.record_file != 0) {
+            std::fprintf(stderr, "用构造期默认值装载 ⇒ 停因 %s / 记录来源 %d（期望成功 / 0）\n",
+                         probe.display_code.c_str(), probe.record_file);
+            return fail("构造期登记的默认值没有生效（缺键 ⇒ 第三档）");
+        }
+    }
+    // ⑧ 读取端**不替换**：库里**没有**这个键（不登记构造期默认、也不显式写）⇒ 读到 0 ⇒ 第三档**失败**。
+    //   ★ 这条直接钉「缺键 ⇒ 32」：只要读取端把缺键抬成 32，这次装载就会成功 ⇒ 本条红。
+    //     （⑦ 抓不到它 —— ⑦ 的库里那个键是构造期写进去的，`has_named` 恒真。）
+    {
+        const BitProbe probe = probe_bits(0, false, /*install_defaults=*/false);
+        if (!probe.halted) {
+            std::fprintf(stderr, "库里没有该键时装载成功了（记录来源 %d）\n", probe.record_file);
+            return fail("读取端把「缺键」抬成了 32（缺键 ⇒ 32 是正文没有的替换）");
+        }
+        if (probe.display_code != "texture-upload-failed" || probe.record_file != -1) {
+            std::fprintf(stderr, "库里没有该键 ⇒ 停因 %s / 记录来源 %d（期望上传失败 / −1）\n",
+                         probe.display_code.c_str(), probe.record_file);
+            return fail("缺键没有落第三档（读取端自己补了一个缺省？）");
+        }
+    }
+    return true;
+}
+
 // ── 帧流程（`CORE-OPS-FRAME-EXIT` 的 −11 支 / `CORE-OPS-FRAME-CALL-FRAME` / `0x8c`） ──
 // ── 文本层：**场景绘制模式门** + `0x70` 的读序（`ADV-TEXT-LAYER-RECT`） ──
 // 判据（每条都能红）：
@@ -2460,8 +2811,8 @@ bool check_text_layer_mode_gate(const core::OpcodeTable& table) {
     const auto id = core::Machine::text_layer_texture_id(9);
     {
         core::Machine legacy = run_with_mode(false, false);
-        // ★ 判据只看  x70 /  x71：这两条在模式 ≠ 1 时**不碰纹理槽**（旧路径的正面行为不在本版）。
-        //   ⚠ 追加路径（ x6e /  x196）在本模型里仍会走宿主兜底建画布 ⇒ 这里不断言它。
+        // ★ 判据只看 0x70 / 0x71：这两条在模式 ≠ 1 时**不碰纹理槽**（旧路径的正面行为不在本版）。
+        //   ⚠ 追加路径（0x6e / 0x196）在本模型里仍会走宿主兜底建画布 ⇒ 这里不断言它。
         if (legacy.texture_slot(id) != nullptr) {
             return fail("场景绘制模式 ≠ 1 时 0x70 建了纹理画布（旧路径不该碰纹理槽）");
         }
@@ -2777,6 +3128,139 @@ bool check_input_devices(const core::OpcodeTable& table) {
         std::fprintf(stderr, "0xcd cancel sentinel mismatch ip=%zu stack=%zu\n",
                      cancel_machine.frame().ip, cancel_machine.frame().ret_stack.size());
         return false;
+    }
+    return true;
+}
+// ── 鼠标回调泵的**唯一入口**（`CORE-INPUT-MOUSE-CALLBACK-PUMP`）──
+// 三条判据都咬**泵本体的进入次数**（`mouse_pump_entries()`），不只咬「上次派发时刻」：
+// ① **一次派发 = 泵本体进入恰一次**：派发格执行两遍、或另有第二个调用点 ⇒ 计数 > 每派发 1。
+// ② **没被派发时不跑**：同一帧里一条 `0xcd` 都没有、但宿主时刻早已过登记间隔 ⇒ 入口次数 **0**、
+//    「上次派发时刻」不变。★ 这一条**只能**用入口次数断：第二入口若每迭代进一次泵、又被时间闸
+//    挡回去，它一格都不改 ⇒ 只看 `mouse_last_ms()` 的断言恒绿（那一格只记"真的派发了"）。
+// ③ **越闸 ≠ 改闸**：第 27 位置起时派发一条（它越过间隔）→ **清掉第 27 位** → 紧接一次派发
+//    （不足间隔）⇒ 必须**不**派发（入口次数 +1，但时刻 / 返回栈 / 指令指针全不动）。
+// ★ 第 27 位置起时 `step()` 会把控制交回迭代头（`CORE-VM-GATE` 的位序表第 16 行）⇒ 脚本指令
+//   一条都不派发；所以本用例对 `0xCD`（与第 27 位置起期间的回调体）走 `dispatch_for_test` ——
+//   那正是"经分派表那一格派发"的形状，也是引擎里"门自己派发一条"的形状。
+bool check_mouse_pump_single_entry(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "mouse-pump-single-entry: %s\n", what);
+        return false;
+    };
+    const auto pump = [](core::Machine& machine) {
+        machine.dispatch_for_test(core::Instruction{0, 0xCD, {}});
+    };
+    // ── ① + ③：登记（间隔 100、目标 12）⇒ 越闸派发一条 ⇒ 清第 27 位 ⇒ 紧接一次派发 ──
+    // 布局（dword 下标）：0..4 = `0xcc` · 5..11 = 无害占位（`0x1a8`）· 12..16 = 回调体（local 1 ← 7）·
+    //   17 = 返回。★ 占位是有意的：登记之后 `ip = 20`（位置 5），泵只在下面显式派发的三处进。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xCC, {{0, 100}, {0, 12}});
+        for (int i = 0; i < 7; ++i) emit_instruction(bytes, 0x1A8, {});   // 5..11
+        emit_instruction(bytes, 0x55, {{9, 1}, {0, 7}});                  // 12..16：回调体
+        emit_instruction(bytes, 5, {});                                   // 17：返回
+        core::Machine machine = scene_step_machine(table);
+        machine.set_host_clock_ms(1000);
+        machine.load_root(bytes, 0x1234);
+        if (!machine.step()) return fail("0xcc 登记那一步停机了");
+        if (machine.mouse_last_ms() != 1000u) return fail("登记时「上次派发时刻」不是当前时刻");
+        if (machine.mouse_pump_entries() != 0) return fail("登记不派发，却已经进过泵本体");
+        // 越闸：第 27 位置起 ⇒ 距登记只过了 30ms（< 100）也必须派发。
+        machine.set_state_flags_for_test(1u << 27);
+        machine.set_host_clock_ms(1030);
+        pump(machine);
+        if (machine.mouse_pump_entries() != 1) {
+            std::fprintf(stderr, "越闸派发后泵本体进入次数 = %zu（期望恰 1）\n",
+                         machine.mouse_pump_entries());
+            return fail("一次派发没有等于一次泵本体进入");
+        }
+        if (machine.frame().ip != 48 || machine.frame().ret_stack.size() != 1 ||
+            machine.frame().ret_stack.back() != 6 || machine.mouse_last_ms() != 1030u) {
+            std::fprintf(stderr, "越闸派发 ip=%zu 栈=%zu last=%u（期望 48 / 1 / 6 / 1030）\n",
+                         machine.frame().ip, machine.frame().ret_stack.size(), machine.mouse_last_ms());
+            return fail("越闸派发的跳转 / 返回位置 / 时刻不对");
+        }
+        // 回调体与返回：第 27 位置起时 `step()` 会被门挡住 ⇒ 同样经表派发（这是"回调体真的跑了"）。
+        machine.dispatch_for_test(core::Instruction{0, 0x55, {{9, 1}, {0, 7}}});
+        if (machine.local_int(1) != 7) return fail("回调体没有执行（local 1 不是 7）");
+        machine.dispatch_for_test(core::Instruction{0, 5, {}});
+        if (machine.frame().ip != 24 || !machine.frame().ret_stack.empty()) {
+            std::fprintf(stderr, "回调返回 ip=%zu 栈=%zu（期望 24 / 0）\n", machine.frame().ip,
+                         machine.frame().ret_stack.size());
+            return fail("回调的返回没有回到压入的位置");
+        }
+        // 清掉第 27 位（产品写点就是 `0x101`）：之后再派发一次，距上次只有 0ms（< 100）。
+        machine.dispatch_for_test(core::Instruction{0, 0x101, {}});
+        if ((machine.state_flags() & (1u << 27)) != 0) return fail("0x101 没有清掉第 27 位（夹具前提）");
+        pump(machine);
+        if (machine.mouse_pump_entries() != 2) {
+            std::fprintf(stderr, "第二次派发后泵本体进入次数 = %zu（期望恰 2）\n",
+                         machine.mouse_pump_entries());
+            return fail("第二次派发没有进到泵本体（或进了不止一次）");
+        }
+        if (machine.mouse_last_ms() != 1030u) {
+            std::fprintf(stderr, "不足间隔却把「上次派发时刻」写成 %u（期望仍是 1030）\n",
+                         machine.mouse_last_ms());
+            return fail("越闸改了时间闸（「上次派发时刻」被重置）");
+        }
+        if (machine.frame().ip != 24 || !machine.frame().ret_stack.empty() || machine.local_int(1) != 7) {
+            std::fprintf(stderr, "不足间隔却派发了 ip=%zu 栈=%zu local1=%d\n", machine.frame().ip,
+                         machine.frame().ret_stack.size(), machine.local_int(1));
+            return fail("不足间隔仍派发（越闸把间隔改成 0 / 把时刻清 0）");
+        }
+        // 正向对照（反"泵坏了所以上面两条都绿"）：同一台机器、同一格里等号到期（100 ≥ 100）⇒ 必须派发。
+        machine.set_host_clock_ms(1130);
+        pump(machine);
+        if (machine.frame().ip != 48 || machine.frame().ret_stack.size() != 1 ||
+            machine.frame().ret_stack.back() != 7 || machine.mouse_last_ms() != 1130u ||
+            machine.mouse_pump_entries() != 3) {
+            std::fprintf(stderr, "到期对照 ip=%zu 栈=%zu last=%u 入口=%zu（期望 48/1/7/1130/3）\n",
+                         machine.frame().ip, machine.frame().ret_stack.size(), machine.mouse_last_ms(),
+                         machine.mouse_pump_entries());
+            return fail("到期（含等号）却没有派发 —— 时间闸的判据坏了");
+        }
+    }
+    // ── ② 没被派发时不跑：自环 200 拍（宿主时刻每拍 +16ms，早已过 100ms 间隔）、一条 `0xcd` 都没有 ──
+    // ★ 「上次派发时刻」在"第二入口被时间闸挡回去"时也不变 ⇒ 必须同时咬**入口次数**。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0xCC, {{0, 100}, {0, 0xFFFFFFFFu}});  // 间隔 100、目标 −1（取消）
+        emit_instruction(bytes, 0x8C, {{0, 5}});                      // 5..7：自环到位置 5
+        core::Machine quiet = scene_step_machine(table);
+        quiet.reset_scene_clock(1000);  // 非外部时钟 ⇒ 每迭代 +16ms（真实地"时间在走"）
+        quiet.load_root(bytes, 0x1234);
+        if (!quiet.step()) return fail("自环夹具的 0xcc 那一步停机了");
+        const std::uint32_t registered = quiet.mouse_last_ms();
+        for (int i = 0; i < 200; ++i) {
+            if (!quiet.step()) return fail("自环那一步停机了");
+        }
+        if (quiet.host_now_ms() - registered < 100u) {
+            std::fprintf(stderr, "宿主时刻只走了 %u ms（夹具前提：必须过 100ms 间隔）\n",
+                         quiet.host_now_ms() - registered);
+            return fail("夹具没有让时间越过间隔");
+        }
+        if (quiet.mouse_pump_entries() != 0) {
+            std::fprintf(stderr, "没有 0xcd 的 200 拍里泵本体被进了 %zu 次\n", quiet.mouse_pump_entries());
+            return fail("存在第二入口：没被派发也在跑泵本体");
+        }
+        if (quiet.mouse_last_ms() != registered) {
+            std::fprintf(stderr, "没有 0xcd 却把「上次派发时刻」改成 %u（登记时 %u）\n",
+                         quiet.mouse_last_ms(), registered);
+            return fail("没被派发却更新了「上次派发时刻」");
+        }
+        // 正向对照：同一台机器、同一时刻真的派发一条 ⇒ 计数与时刻都动（反"计数器恒 0"）。
+        pump(quiet);
+        if (quiet.mouse_pump_entries() != 1 || quiet.mouse_last_ms() != quiet.host_now_ms()) {
+            std::fprintf(stderr, "对照派发：入口=%zu last=%u now=%u\n", quiet.mouse_pump_entries(),
+                         quiet.mouse_last_ms(), quiet.host_now_ms());
+            return fail("真的派发一条时入口计数 / 时刻没有动");
+        }
+        // 目标 −1 = 取消：压了返回位置又撤销（这同时确认上面那一次真的走到了时间闸之后）。
+        if (!quiet.frame().ret_stack.empty() || quiet.frame().ip != 20) {
+            std::fprintf(stderr, "目标 −1 的派发 ip=%zu 栈=%zu（期望 20 / 0）\n", quiet.frame().ip,
+                         quiet.frame().ret_stack.size());
+            return fail("目标 −1 没有撤销返回位置");
+        }
     }
     return true;
 }
@@ -4555,10 +5039,9 @@ bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
         return false;
     }
     core::Machine mouse_some(0x12345678u, table);
-    mouse_some.set_touch_source([](core::Machine::TouchPoint& event) {
-        event = core::Machine::TouchPoint{10, 20, 0x11, 3};
-        return true;
-    });
+    // ★ 触点缓冲由**引擎**整体重建（`push_touch_message`）；坐标是平台给的**百分之一像素**
+    //   ⇒ 引擎 ÷100 之后才写出（1000 → 10、2000 → 20）。
+    mouse_some.push_touch_message({core::Machine::TouchPoint{1000, 2000, 0x11, 3}});
     mouse_some.load_root(make_mouse_script());
     for (int i = 0; i < 5; ++i) {
         if (!mouse_some.step()) return false;
@@ -4666,6 +5149,558 @@ bool check_mouse_and_hit_test(const core::OpcodeTable& table) {
         if (!machine.step() || get_local(machine, 0x3f5) != 1) {
             std::fprintf(stderr, "0x12e same-address record must be skipped\n");
             return false;
+        }
+    }
+    return true;
+}
+// ── 摇杆轴与四条阈值（`CORE-INPUT-WORD` 的「手柄的方向位」的摇杆半段） ──
+// 判据（每条都能红）：
+// ① 阈值 =（轴范围 + **初始化时采到的**轴位置）÷ 2、**向零截断**；**只采一次**（第二次不再改）
+// ② 轴 1（横）< 低 ⇒ 左（位 3）、> 高 ⇒ 右（位 1）；轴 2（纵）< 低 ⇒ 上（位 0）、> 高 ⇒ 下（位 2）
+// ③ 比较是**严格的**（等于阈值不算命中）且按**无符号**（0xFFFFFFFF 是大值 ⇒ 右 / 下，
+//    写成有符号比较会变成左 / 上）
+// ④ 20 毫秒缓存：距上次查询 ≤ 20ms（含边界）复用上次那批原始轴值；21ms 起重新查询
+// ⑤ 「忽略摇杆」门只挡轴、**不挡帽子**；帽子可用时方向位由帽子给（轴不参与）
+bool check_input_joy_axis(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "input-joy-axis: %s\n", what);
+        return false;
+    };
+    struct AxisState {
+        std::uint32_t x = 501;
+        std::uint32_t y = 501;
+        int hat = -1;  // −1 = 帽子居中 / 不报
+    };
+    AxisState state;
+    std::uint32_t clock = 1000;
+    // 一台"有手柄 + 帽子居中"的机器：两轴范围 [minimum, maximum]，初始化时轴位置 (x0, y0)。
+    const auto make_machine = [&](std::uint32_t x0, std::uint32_t y0, std::uint32_t minimum = 0,
+                                  std::uint32_t maximum = 1000) {
+        core::Machine machine(key, table);
+        machine.set_joy_button_count(4);
+        machine.set_joy_hat_four_way(true);
+        machine.set_joy_hat_source([&state] { return state.hat; });
+        machine.set_joy_axis_range(0, minimum, maximum);
+        machine.set_joy_axis_range(1, minimum, maximum);
+        machine.set_joy_stick_source(
+            [&state] { return std::array<std::uint32_t, 2>{state.x, state.y}; });
+        state.x = x0;
+        state.y = y0;
+        state.hat = -1;
+        machine.sample_joy_axis_origin();  // 初始化那次采样（只此一次）
+        return machine;
+    };
+    // 采样一次方向位（位 0..3）：每次把宿主时钟推过 20ms 缓存窗口 ⇒ 读到的是当时那批轴值。
+    const auto bits = [&](core::Machine& machine, std::uint32_t x, std::uint32_t y) {
+        state.x = x;
+        state.y = y;
+        clock += 100;
+        machine.set_host_clock_ms(clock);
+        return machine.sample_level_input() & 0xFu;
+    };
+    // ① 阈值算式 + ② 每条轴 / 每个方向 + ③ 严格比较 / 无符号。
+    //    范围 0..1000、初始化轴位置 501 ⇒ 低 = 501/2 = 250（250.5 向零截断）、高 = 1501/2 = 750。
+    {
+        auto machine = make_machine(501, 501);
+        if (!machine.joy_axis_thresholds_ready() || machine.joy_axis_low(0) != 250 ||
+            machine.joy_axis_high(0) != 750 || machine.joy_axis_low(1) != 250 ||
+            machine.joy_axis_high(1) != 750 || machine.joy_axis_origin(0) != 501 ||
+            machine.joy_axis_origin(1) != 501 || machine.joy_axis_origin_samples() != 1) {
+            std::fprintf(stderr,
+                         "阈值：low=(%u,%u) high=(%u,%u) origin=(%u,%u) samples=%zu"
+                         "（期望 250/750、250/750、501/501、1）\n",
+                         machine.joy_axis_low(0), machine.joy_axis_low(1), machine.joy_axis_high(0),
+                         machine.joy_axis_high(1), machine.joy_axis_origin(0),
+                         machine.joy_axis_origin(1), machine.joy_axis_origin_samples());
+            return fail("阈值不是（范围 + 初始化轴位置）÷ 2 向零截断 / 轴位置没有只在初始化时采一次");
+        }
+        struct Case {
+            std::uint32_t x;
+            std::uint32_t y;
+            std::uint32_t expected;
+            const char* why;
+        };
+        const Case cases[] = {
+            {250, 501, 0, "轴 1 等于低阈值不算命中（严格比较）"},
+            {249, 501, 1u << 3, "轴 1 低于低阈值 ⇒ 左（位 3）"},
+            {750, 501, 0, "轴 1 等于高阈值不算命中（严格比较）"},
+            {751, 501, 1u << 1, "轴 1 高于高阈值 ⇒ 右（位 1）"},
+            {501, 250, 0, "轴 2 等于低阈值不算命中（严格比较）"},
+            {501, 249, 1u << 0, "轴 2 低于低阈值 ⇒ 上（位 0）"},
+            {501, 750, 0, "轴 2 等于高阈值不算命中（严格比较）"},
+            {501, 751, 1u << 2, "轴 2 高于高阈值 ⇒ 下（位 2）"},
+            {751, 751, (1u << 1) | (1u << 2), "两轴同时越界 ⇒ 右 + 下同时点亮（四个判据各自独立）"},
+            {249, 249, (1u << 3) | (1u << 0), "两轴同时越界 ⇒ 左 + 上同时点亮"},
+            {0xFFFFFFFFu, 501, 1u << 1, "轴 1 按无符号比（0xFFFFFFFF 是大值 ⇒ 右）"},
+            {501, 0xFFFFFFFFu, 1u << 2, "轴 2 按无符号比（0xFFFFFFFF 是大值 ⇒ 下）"},
+        };
+        for (const auto& item : cases) {
+            const auto got = bits(machine, item.x, item.y);
+            if (got != item.expected) {
+                std::fprintf(stderr, "x=%u y=%u ⇒ 0x%X（期望 0x%X）：%s\n", item.x, item.y, got,
+                             item.expected, item.why);
+                return fail(item.why);
+            }
+        }
+    }
+    // ①b **只采一次**：初始化之后改设备范围并"再采一次" ⇒ 四条阈值不变（轴位置不重估）。
+    {
+        auto machine = make_machine(501, 501);
+        machine.set_joy_axis_range(0, 0, 60000);
+        machine.set_joy_axis_range(1, 0, 60000);
+        state.x = 20000;
+        state.y = 20000;
+        machine.sample_joy_axis_origin();  // 第二次：不许采
+        if (machine.joy_axis_origin_samples() != 1 || machine.joy_axis_low(0) != 250 ||
+            machine.joy_axis_high(0) != 750 || machine.joy_axis_origin(0) != 501) {
+            std::fprintf(stderr, "第二次采样后 origin=%u low=%u high=%u samples=%zu\n",
+                         machine.joy_axis_origin(0), machine.joy_axis_low(0),
+                         machine.joy_axis_high(0), machine.joy_axis_origin_samples());
+            return fail("初始化之后又采了一次轴位置 / 重算了阈值");
+        }
+        // 20000 在新范围（0..60000）里"不算大"，但阈值必须仍是旧的 ⇒ 右 + 下。
+        const auto got = bits(machine, 20000, 20000);
+        if (got != ((1u << 1) | (1u << 2))) {
+            std::fprintf(stderr, "改范围后 x=y=20000 ⇒ 0x%X（期望 0x6：仍按旧阈值）\n", got);
+            return fail("阈值跟着设备范围重估了（把「初始化采一次」实现成了「每次重估」）");
+        }
+    }
+    // ④ 20 毫秒缓存（含边界）。
+    {
+        auto machine = make_machine(751, 501);  // 原点 751 ⇒ 低 375、高 875
+        machine.set_host_clock_ms(0);
+        state.x = 2000;  // ⇒ 右
+        state.y = 501;
+        if ((machine.sample_level_input() & 0xFu) != (1u << 1)) {
+            return fail("缓存夹具的第一次采样不是右");
+        }
+        if (machine.joy_axis_queries() != 1) return fail("第一次采样没有查询平台");
+        state.x = 0;  // 若重新查询 ⇒ 左
+        machine.set_host_clock_ms(20);  // 含边界 ⇒ 必须复用
+        if ((machine.sample_level_input() & 0xFu) != (1u << 1)) {
+            return fail("距上次查询 20ms（含边界）时没有复用上次那批原始轴值");
+        }
+        if (machine.joy_axis_queries() != 1) return fail("20ms 内又向平台查询了一次");
+        machine.set_host_clock_ms(21);  // 超过 20ms ⇒ 重新查询
+        if ((machine.sample_level_input() & 0xFu) != (1u << 3)) {
+            return fail("距上次查询 21ms 后没有重新查询（缓存窗口不是 20ms）");
+        }
+        if (machine.joy_axis_queries() != 2) return fail("21ms 后的查询次数不是 2");
+    }
+    // ⑤ 「忽略摇杆」门只挡轴；帽子可用时方向位由帽子给。
+    {
+        auto machine = make_machine(501, 501);
+        machine.set_joy_ignore_stick(true);
+        if (bits(machine, 751, 751) != 0) {
+            return fail("「忽略摇杆」置起时摇杆轴仍给出了方向位");
+        }
+        state.hat = 4500;  // 45° ⇒ 位 0 + 位 1
+        if (bits(machine, 751, 751) != ((1u << 0) | (1u << 1))) {
+            return fail("「忽略摇杆」门把帽子也挡掉了（它只挡轴）");
+        }
+        state.hat = 0;  // 帽子 0° ⇒ 只有位 0（轴再越界也不参与）
+        if (bits(machine, 751, 751) != (1u << 0)) {
+            return fail("帽子可用且不居中时摇杆轴仍然参与（应当由帽子给方向位）");
+        }
+        state.hat = -1;
+    }
+    return true;
+}
+// ── 命中查找的 32 位回绕（`CORE-INPUT-HIT-TEST-12E` 的「三个端点」） ──
+// 判据（每条都能红）：
+// ① `start` = 最大正数 ⇒ `start + 1` 回绕成 0 ⇒ 与 `start = −1` **等价**（从下标 0 起扫）
+// ② `start ≤ −2` 且偏移**不回绕** ⇒ 首项落在框表**之前**：下标 −2 的项被扫到并命中 ⇒ 落点 −2
+//    （夹到 0 / 跳过越界项的实现在这里给出 0）；下标 −1 的项命中时落点就是 −1（表内下标 0 也包含光标
+//    ⇒ 夹到 0 的实现会给出 0）
+// ③ `count` 使末项指针**回绕**到基址 ⇒ 立刻判"无命中"（一项都不扫）—— 即使下标 0 的框包含光标
+// ④ `start = −2147483646` ⇒ `(start + 1) × 16` 回绕成 **48** ⇒ 首项 = 框表下标 **3**（不是"表前"、不是 0）
+// ⑤ / ⑥ 四项判据在**32 位**里加减、按**回绕后的符号位**判（上溢 / 下溢各一条：64 位扩宽求和会给出相反结论）
+// 夹具：框表基址 = 局部整型池槽 8（每项 4 个整数 = 16 字节 ⇒ 槽 0..3 = 下标 −2、槽 4..7 = 下标 −1），
+//       每一项（含表前那两项）都是同一个"包含光标"的框 ⇒ **命中谁 = 从哪一项开始扫**。
+bool check_input_hit_wrap(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "input-hit-wrap: %s\n", what);
+        return false;
+    };
+    constexpr std::uint32_t kBoxes = 8;    // 框表基址所在槽
+    constexpr std::uint32_t kMargin = 1004;  // 补偿四元组（全 0），与所有框都不同址
+    constexpr std::uint32_t kPlaneX = 200;
+    constexpr std::uint32_t kPlaneY = 300;
+    constexpr std::uint32_t kStart = 1000;
+    constexpr std::uint32_t kX = 1001;
+    constexpr std::uint32_t kY = 1002;
+    constexpr std::uint32_t kCount = 1003;
+    auto script = make_script_with_body();
+    emit_instruction(script, 0x12E,
+                     {{9, kStart}, {9, kMargin}, {9, kX}, {9, kY},
+                      {9, kBoxes}, {9, kPlaneX}, {9, kPlaneY}, {9, kCount}});
+    emit_instruction(script, 2, {});
+    const auto hit = [&](std::int32_t start, std::int32_t count) -> std::int32_t {
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        const auto put = [&machine](std::uint32_t slot, std::int32_t value) {
+            machine.write_int(core::Operand{9, slot}, value);
+        };
+        // 表前两项 + 表内 8 项：全都是 [左 0, 右 0x9c, 上 0, 下 0x9c]（光标 (0x40,0x40) 在每一项内）。
+        for (std::uint32_t item = 0; item < 10; ++item) {  // item 0 = 下标 −2、item 1 = 下标 −1
+            const std::int32_t offset = static_cast<std::int32_t>(item) - 2;
+            const auto slot = static_cast<std::int32_t>(kBoxes) + offset * 4;
+            put(static_cast<std::uint32_t>(slot) + 0u, 0);
+            put(static_cast<std::uint32_t>(slot) + 1u, 0x9c);
+            put(static_cast<std::uint32_t>(slot) + 2u, 0);
+            put(static_cast<std::uint32_t>(slot) + 3u, 0x9c);
+        }
+        // 两个基准平面按**同一个项下标**取值（下标 −2 / −1 落在表前那两格）。
+        for (std::int32_t index = -2; index < 8; ++index) {
+            put(static_cast<std::uint32_t>(static_cast<std::int32_t>(kPlaneX) + index), 0);
+            put(static_cast<std::uint32_t>(static_cast<std::int32_t>(kPlaneY) + index), 0);
+        }
+        for (std::uint32_t slot = 0; slot < 4; ++slot) put(kMargin + slot, 0);  // 补偿四元组全 0
+        put(kX, 0x40);
+        put(kY, 0x40);
+        put(kStart, start);
+        put(kCount, count);
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x12e wrap fixture halted: %s\n",
+                         machine.last_stop().message.c_str());
+            return std::int32_t{-999};
+        }
+        return machine.read_int(core::Operand{9, kStart});
+    };
+    // ① `start` = 最大正数 ⇒ `start + 1` 回绕成 0 ⇒ 与 `start = −1` 等价（从下标 0 起）。
+    {
+        const auto from_wrapped = hit(0x7FFFFFFF, 2);
+        const auto from_minus_one = hit(-1, 2);
+        if (from_wrapped != 0 || from_minus_one != 0) {
+            std::fprintf(stderr, "start=0x7FFFFFFF ⇒ %d、start=−1 ⇒ %d（都期望 0）\n",
+                         from_wrapped, from_minus_one);
+            return fail("start = 最大正数 没有等价于 start = −1（把回绕当成了越界即无命中）");
+        }
+    }
+    // ② `start = −3` ⇒ 偏移 = −32 **不回绕** ⇒ 首项 = 表内下标 −2 ⇒ 命中落点 −2。
+    {
+        const auto result = hit(-3, 4);
+        if (result != -2) {
+            std::fprintf(stderr, "start=−3 ⇒ %d（期望 −2：首项落在框表之前的下标 −2）\n", result);
+            return fail("起始下标 ≤ −2 时首项没有落到框表之前（被夹到 0 或被跳过）");
+        }
+    }
+    // ②b `start = −2` ⇒ 首项 = 下标 −1：命中时落点是 −1（表内下标 0 也包含光标 ⇒ 夹到 0 的实现在这里给 0）。
+    {
+        const auto result = hit(-2, 4);
+        if (result != -1) {
+            std::fprintf(stderr, "start=−2 ⇒ %d（期望 −1：表前那项的落点就是 −1）\n", result);
+            return fail("起始下标 −2 的首项没有落在框表之前（被夹到 0）");
+        }
+    }
+    // ③ `count` = 2^28 ⇒ `count × 16` 回绕 2^32 ⇒ 末项指针 = 基址 ⇒ 立刻判"无命中"（一项都不扫）。
+    //    ★ 下标 0 的框包含光标 ⇒ 任何"扫了至少一项"的实现都会给出 0；给出 −1 才算按 32 位回绕算末项。
+    {
+        const auto result = hit(-1, 0x10000000);
+        if (result != -1) {
+            std::fprintf(stderr, "count 回绕 ⇒ %d（期望 −1：末项指针落在基址，一项都不扫）\n", result);
+            return fail("count 使末项指针回绕之后仍在扫描（末项不是按 32 位回绕算的）");
+        }
+    }
+    // ④ 正文端点 `start = −2147483646`（= 0x80000002）⇒ `start + 1` = 0x80000003、`× 16` 的 64 位值
+    //    = 0x800000030 ⇒ **低 32 位 = 0x30 = 48** ⇒ 首项 = 框表 **+48 = 下标 3**（既不是"表前"，也不是 0）。
+    //    ★ 按 64 位带符号无溢出算这一步会得到 −34359738320 字节的偏移（指针落到表前/越过末项 ⇒ 一项都不扫）。
+    {
+        const auto result = hit(-2147483646, 4);
+        if (result != 3) {
+            std::fprintf(stderr, "start=−2147483646 ⇒ %d（期望 3：首项偏移回绕到 48）\n", result);
+            return fail("start = −2147483646 的首项偏移没有按 32 位回绕成 48（首项落点不是下标 3）");
+        }
+    }
+    // ⑤ / ⑥ 32 位极值：四项判据是**先按 32 位加减（溢出回绕）再取符号位**，不是扩宽求和。
+    //    下面两条**各自**把"改成 64 位无溢出算术"变成红灯 —— 它们的正确结论与 64 位结论**相反**。
+    //    夹具：只有下标 0 这一项参与（`start = −1`、`count = 1`）⇒ 框 = 槽 8..11、基准 = 平面表第 0 项。
+    const auto hit_box = [&](std::int32_t s0, std::int32_t s1, std::int32_t s2, std::int32_t s3,
+                             std::int32_t m0, std::int32_t m1, std::int32_t m2, std::int32_t m3,
+                             std::int32_t x, std::int32_t y, std::int32_t plane_x,
+                             std::int32_t plane_y) -> std::int32_t {
+        core::Machine machine(0x12345678u, table);
+        machine.load_root(script);
+        const auto put = [&machine](std::uint32_t slot, std::int32_t value) {
+            machine.write_int(core::Operand{9, slot}, value);
+        };
+        put(kBoxes + 0u, s0);
+        put(kBoxes + 1u, s1);
+        put(kBoxes + 2u, s2);
+        put(kBoxes + 3u, s3);
+        put(kMargin + 0u, m0);
+        put(kMargin + 1u, m1);
+        put(kMargin + 2u, m2);
+        put(kMargin + 3u, m3);
+        put(kPlaneX, plane_x);  // 项下标 0 ⇒ 基准平面取第 0 项（偏移 0）
+        put(kPlaneY, plane_y);
+        put(kX, x);
+        put(kY, y);
+        put(kStart, -1);
+        put(kCount, 1);
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x12e extreme fixture halted: %s\n",
+                         machine.last_stop().message.c_str());
+            return std::int32_t{-999};
+        }
+        return machine.read_int(core::Operand{9, kStart});
+    };
+    // ⑤ 上溢：`m1 + dx` = 0x7FFFFFFF + 0x7FFFFFFF = 0xFFFFFFFE ⇒ 32 位下**符号位为 1** ⇒ 不命中。
+    //    （64 位无溢出 = 4294967294 ≥ 0 ⇒ 会命中下标 0；其余三项两边都是 0。）
+    {
+        const auto result = hit_box(0, 0x7FFFFFFF, 0, 0, 0, 0x7FFFFFFF, 0, 0, 0x7FFFFFFF, 0, 0, 0);
+        if (result != -1) {
+            std::fprintf(stderr, "dx=0x7FFFFFFF、m1=0x7FFFFFFF ⇒ %d（期望 −1：和回绕后符号位为 1）\n",
+                         result);
+            return fail("四项判据的和没有按 32 位回绕取符号（上溢被当成正数 ⇒ 命中）");
+        }
+    }
+    // ⑥ 下溢：`m1 + dx − s0` 的 32 位值是 **5**（非负 ⇒ 通过），而真值是 −4294967291（64 位下为负）。
+    //    夹具：x = INT32_MIN、基准 = 0x7FFFFFFB ⇒ dx 的 32 位值 = 5、64 位值 = −4294967291。
+    //    （32 位：merged = 5 | 0 | 0 | 0 ⇒ 命中下标 0；64 位：第一项为负 ⇒ 不命中。）
+    {
+        const auto result = hit_box(0x7FFFFFFF, 5, 0, 0, 0, 0x7FFFFFFF, 0, 0,
+                                    static_cast<std::int32_t>(0x80000000u) /* INT32_MIN */, 0,
+                                    static_cast<std::int32_t>(0x7FFFFFFBu), 0);
+        if (result != 0) {
+            std::fprintf(stderr, "x=INT32_MIN、基准=0x7FFFFFFB ⇒ %d（期望 0：差回绕后为 5）\n", result);
+            return fail("四项判据的差没有按 32 位回绕取符号（下溢被当成负数 ⇒ 不命中）");
+        }
+    }
+    return true;
+}
+// ── 触点缓冲的整体重建（`CORE-INPUT-TOUCH-POINT`） ──
+// 判据（每条都能红）：
+// ① 每条触摸消息**清计数 → 释放 → 按点数重分配 → 读入**：点数从 N 降到 M ⇒
+//    缓冲**项数 = M**（不得把旧触点留成"追加"），计数 = M，且旧触点全部不可见
+// ② 0 点消息 ⇒ 计数 0（查询只写第 1 个操作数 0，其余四个**保持原值**）
+// ③ 有效性 = 标志字的两位**与**（「抬起」位 0x4 必须为 0、「主触点」位 0x10 必须为 1）；
+//    全部无效 ⇒ 计数清 0
+// ④ 第 4 个附加字段 = 标志字、第 5 个 = 记录 +0x14：**逐位原样**（不取低 16 位、不规范化）
+// ⑤ 坐标 = 百分之一像素 ÷100（**向零截断**）；多个有效触点 ⇒ 缓冲顺序第一个
+// ⑥ 不设容量上限（一次很多点也看得见最后一个）
+// ⑦ 「输入可用标志」为 0 ⇒ 只写结果 0（坐标 / 标志 / 附加量一个都不写）—— 即使缓冲里有有效触点
+// ★ ① 断言的是缓冲的**项数**（`touch_buffer_size()`），⛔ 不是 `std::vector::capacity()`：容量是
+//   宿主分配策略，spec 没有这条合同（容量只进诊断输出）。
+bool check_input_touch_buffer(const core::OpcodeTable& table) {
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "input-touch: %s\n", what);
+        return false;
+    };
+    using TouchPoint = core::Machine::TouchPoint;
+    // 一条 0x2fc 的夹具：第 2..5 个操作数预置 77（哨兵），执行后按合同写。
+    const auto make_touch_script = []() {
+        auto bytes = make_script_with_body();
+        for (std::uint32_t slot = 1; slot <= 5; ++slot) {
+            emit_instruction(bytes, 0x55, {{9, slot}, {0, 77}});
+        }
+        emit_instruction(bytes, 0x2FC, {{9, 1}, {9, 2}, {9, 3}, {9, 4}, {9, 5}});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    struct Query {
+        std::int32_t ok = 0;
+        std::int32_t x = 0;
+        std::int32_t y = 0;
+        std::int32_t flags = 0;
+        std::int32_t extra = 0;
+    };
+    // 投一条带 `points` 的消息 → 跑一次 0x2fc → 读五个操作数。
+    const auto query = [&](const std::vector<TouchPoint>& points) {
+        core::Machine machine(0x12345678u, table);
+        machine.push_touch_message(points);
+        machine.load_root(make_touch_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "0x2fc fixture halted: %s\n",
+                             machine.last_stop().message.c_str());
+                return Query{};
+            }
+        }
+        Query out;
+        out.ok = machine.read_int(core::Operand{9, 1});
+        out.x = machine.read_int(core::Operand{9, 2});
+        out.y = machine.read_int(core::Operand{9, 3});
+        out.flags = machine.read_int(core::Operand{9, 4});
+        out.extra = machine.read_int(core::Operand{9, 5});
+        return out;
+    };
+    // ① 点数从 N = 3 降到 M = 1：**同一条机器**上先后投两条消息 ⇒ 容量必须是 M（不是 3）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.push_touch_message({TouchPoint{1100, 2200, 0x11, 11},
+                                    TouchPoint{1200, 2200, 0x11, 12},
+                                    TouchPoint{1300, 2200, 0x11, 13}});
+        if (machine.touch_count() != 3 || machine.touch_buffer_size() != 3 ||
+            machine.touch_rebuilds() != 1) {
+            std::fprintf(stderr, "N=3 ⇒ count=%d size=%d capacity=%d rebuilds=%zu\n",
+                         machine.touch_count(), machine.touch_buffer_size(),
+                         machine.touch_buffer_capacity(), machine.touch_rebuilds());
+            return fail("一条 3 点的触摸消息没有把缓冲整体建成 3 项");
+        }
+        auto script = make_script_with_body();
+        for (std::uint32_t slot = 1; slot <= 5; ++slot) {
+            emit_instruction(script, 0x55, {{9, slot}, {0, 77}});
+        }
+        emit_instruction(script, 0x2FC, {{9, 1}, {9, 2}, {9, 3}, {9, 4}, {9, 5}});
+        emit_instruction(script, 0x1A8, {});
+        emit_instruction(script, 0x2FC, {{9, 1}, {9, 2}, {9, 3}, {9, 4}, {9, 5}});
+        emit_instruction(script, 2, {});
+        machine.load_root(script);
+        const auto read_five = [&machine]() {
+            return Query{machine.read_int(core::Operand{9, 1}), machine.read_int(core::Operand{9, 2}),
+                         machine.read_int(core::Operand{9, 3}), machine.read_int(core::Operand{9, 4}),
+                         machine.read_int(core::Operand{9, 5})};
+        };
+        // 第一次查询跑在**3 点**的缓冲上（应当是第 1 项：x = 1100/100 = 11）。
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return fail("两次 0x2fc 的夹具停机");
+        }
+        const auto after_three = read_five();
+        if (after_three.ok != 1 || after_three.x != 11 || after_three.y != 22 ||
+            after_three.extra != 11) {
+            std::fprintf(stderr, "3 点消息 ⇒ ok=%d x=%d y=%d extra=%d（期望 1/11/22/11）\n",
+                         after_three.ok, after_three.x, after_three.y, after_three.extra);
+            return fail("3 点消息的第一个触点没有按缓冲顺序取到");
+        }
+        // 再投一条只有 1 点的消息 ⇒ **容量必须是 1**（复用旧容量会留下 3），且旧触点全部不可见。
+        machine.push_touch_message({TouchPoint{9900, 8800, 0x11, 42}});
+        if (machine.touch_count() != 1 || machine.touch_buffer_size() != 1 ||
+            machine.touch_rebuilds() != 2) {
+            std::fprintf(stderr, "M=1 ⇒ count=%d size=%d capacity=%d rebuilds=%zu（size 必须 = 1）\n",
+                         machine.touch_count(), machine.touch_buffer_size(),
+                         machine.touch_buffer_capacity(), machine.touch_rebuilds());
+            return fail("点数从 3 降到 1 之后仍复用旧容量 / 旧触点没被释放");
+        }
+        if (!machine.step()) return fail("两次 0x2fc 之间的空操作停机");
+        if (!machine.step()) return fail("第二次 0x2fc 停机");
+        const auto after_second = read_five();
+        if (after_second.ok != 1 || after_second.x != 99 || after_second.y != 88 ||
+            after_second.flags != 0x11 || after_second.extra != 42) {
+            std::fprintf(stderr,
+                         "重建后查询 ok=%d x=%d y=%d flags=0x%X extra=%d（期望 1/99/88/0x11/42）\n",
+                         after_second.ok, after_second.x, after_second.y, after_second.flags,
+                         after_second.extra);
+            return fail("点数降到 1 之后查询仍看到旧缓冲的触点");
+        }
+    }
+    // ② 0 点消息 ⇒ 计数 0；查询只写第 1 个操作数 0，其余四个**保持原值**。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.push_touch_message({TouchPoint{1100, 2200, 0x11, 11}});
+        machine.push_touch_message({});
+        if (machine.touch_count() != 0 || machine.touch_buffer_size() != 0) {
+            std::fprintf(stderr, "0 点消息 ⇒ count=%d size=%d capacity=%d\n", machine.touch_count(),
+                         machine.touch_buffer_size(), machine.touch_buffer_capacity());
+            return fail("0 点消息没有把计数与缓冲项数清成 0");
+        }
+        machine.load_root(make_touch_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return fail("0 点消息的夹具停机");
+        }
+        if (machine.read_int(core::Operand{9, 1}) != 0 ||
+            machine.read_int(core::Operand{9, 2}) != 77 ||
+            machine.read_int(core::Operand{9, 3}) != 77 ||
+            machine.read_int(core::Operand{9, 4}) != 77 ||
+            machine.read_int(core::Operand{9, 5}) != 77) {
+            std::fprintf(stderr, "无触点时 op2..5 = %d/%d/%d/%d（期望 77/77/77/77）\n",
+                         machine.read_int(core::Operand{9, 2}), machine.read_int(core::Operand{9, 3}),
+                         machine.read_int(core::Operand{9, 4}), machine.read_int(core::Operand{9, 5}));
+            return fail("没有触点时把坐标 / 附加字段写掉了（应当只写第 1 个操作数 0）");
+        }
+    }
+    // ③ 有效性两位是**与**：「抬起」位置起 ⇒ 跳过；「主触点」位未置 ⇒ 跳过；两位都对 ⇒ 命中。
+    {
+        const auto lifted = query({TouchPoint{1100, 2200, 0x14, 11}});  // 0x4 置起 ⇒ 无效
+        if (lifted.ok != 0 || lifted.x != 77) return fail("「抬起」位置起的触点没有被跳过");
+        const auto not_primary = query({TouchPoint{1100, 2200, 0x1, 11}});  // 0x10 未置 ⇒ 无效
+        if (not_primary.ok != 0 || not_primary.x != 77) return fail("「主触点」位未置的触点没有被跳过");
+        const auto valid = query({TouchPoint{1100, 2200, 0x11, 11}});
+        if (valid.ok != 1) return fail("两位都对的触点没有被返回（判据写成了「或」？）");
+        // 全部无效 ⇒ 计数清 0（下一次仍返回"没有触点"）。
+        core::Machine machine(0x12345678u, table);
+        machine.push_touch_message({TouchPoint{1100, 2200, 0x14, 11}});
+        machine.load_root(make_touch_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return fail("全无效的夹具停机");
+        }
+        if (machine.touch_count() != 0) {
+            std::fprintf(stderr, "全无效 ⇒ count=%d（期望 0）\n", machine.touch_count());
+            return fail("缓冲里全部无效时没有把触点计数清 0");
+        }
+    }
+    // ④ 第 4 / 5 个附加字段**原样**：标志字 0xFFFFFFFB（0x4 清、0x10 置）、附加量 0xFFFFFFFF。
+    {
+        const auto result = query({TouchPoint{0, 0, -5, -1}});  // -5 == 0xFFFFFFFB、-1 == 0xFFFFFFFF
+        if (result.ok != 1 || result.flags != -5 || result.extra != -1) {
+            std::fprintf(stderr, "附加字段 flags=%d extra=%d（期望 −5 / −1 逐位原样）\n",
+                         result.flags, result.extra);
+            return fail("两个附加字段没有原样传递（取低 16 位 / 规范化 / 符号处理）");
+        }
+    }
+    // ⑤ 坐标 ÷100 向零截断；多个有效触点 ⇒ 缓冲顺序第一个。
+    {
+        const auto truncated = query({TouchPoint{12345, -12345, 0x11, 0}});
+        if (truncated.ok != 1 || truncated.x != 123 || truncated.y != -123) {
+            std::fprintf(stderr, "坐标 12345/−12345 ⇒ %d/%d（期望 123/−123）\n", truncated.x,
+                         truncated.y);
+            return fail("坐标不是「百分之一像素 ÷100 向零截断」");
+        }
+        const auto first = query({TouchPoint{100, 200, 0x11, 1}, TouchPoint{300, 400, 0x11, 2}});
+        if (first.ok != 1 || first.x != 1 || first.y != 2 || first.extra != 1) {
+            std::fprintf(stderr, "多有效触点 ⇒ x=%d y=%d extra=%d（期望 1/2/1：缓冲顺序第一个）\n",
+                         first.x, first.y, first.extra);
+            return fail("多个有效触点时没有取缓冲顺序的第一个");
+        }
+    }
+    // ⑥ 不设容量上限：一条消息带 64 点，前面 63 个都无效 ⇒ 必须能看到最后一个。
+    {
+        std::vector<TouchPoint> many;
+        for (std::int32_t i = 0; i < 63; ++i) many.push_back(TouchPoint{i, i, 0x14, i});  // 抬起位置起
+        many.push_back(TouchPoint{6300, 6400, 0x11, 63});
+        core::Machine machine(0x12345678u, table);
+        machine.push_touch_message(many);
+        if (machine.touch_count() != 64 || machine.touch_buffer_size() != 64) {
+            std::fprintf(stderr, "64 点 ⇒ count=%d size=%d capacity=%d\n", machine.touch_count(),
+                         machine.touch_buffer_size(), machine.touch_buffer_capacity());
+            return fail("一条消息带很多触点时缓冲被截断（引擎不设容量上限）");
+        }
+        machine.load_root(make_touch_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return fail("64 点消息的夹具停机");
+        }
+        if (machine.read_int(core::Operand{9, 1}) != 1 ||
+            machine.read_int(core::Operand{9, 2}) != 63 ||
+            machine.read_int(core::Operand{9, 3}) != 64 ||
+            machine.read_int(core::Operand{9, 5}) != 63) {
+            std::fprintf(stderr, "64 点里最后一个 ⇒ %d/%d/%d/%d（期望 1/63/64/…/63）\n",
+                         machine.read_int(core::Operand{9, 1}),
+                         machine.read_int(core::Operand{9, 2}),
+                         machine.read_int(core::Operand{9, 3}),
+                         machine.read_int(core::Operand{9, 5}));
+            return fail("最后那个有效触点看不到（被截断到固定容量）");
+        }
+    }
+    // ⑦ 「输入可用标志」为 0 ⇒ 本条**整段不做**：即使缓冲里有有效触点，也只写结果 0，
+    //    坐标 / 标志 / 附加量**一个都不写**（⛔ 不许当成"有触点且在原点"）。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_input_available(false);
+        machine.push_touch_message({TouchPoint{1100, 2200, 0x11, 11}});
+        machine.load_root(make_touch_script());
+        for (int i = 0; i < 6; ++i) {
+            if (!machine.step()) return fail("输入不可用的夹具停机");
+        }
+        const auto ok = machine.read_int(core::Operand{9, 1});
+        const auto x = machine.read_int(core::Operand{9, 2});
+        const auto y = machine.read_int(core::Operand{9, 3});
+        const auto flags = machine.read_int(core::Operand{9, 4});
+        const auto extra = machine.read_int(core::Operand{9, 5});
+        if (ok != 0 || x != 77 || y != 77 || flags != 77 || extra != 77) {
+            std::fprintf(stderr, "输入不可用 ⇒ %d/%d/%d/%d/%d（期望 0/77/77/77/77）\n", ok, x, y,
+                         flags, extra);
+            return fail("输入可用标志为 0 时仍写出了触点（0x2fc 没有看这个标志）");
         }
     }
     return true;
@@ -9057,11 +10092,11 @@ bool check_font_pairs_1a5_2fe(const core::OpcodeTable& table) {
     // 两对描述、每对两份变体（`60-ops-forward` 的「两条字符串入口不许合并」）：
     //   0x1a5 写 **A 对**（名原样 / '@'+名、高 ← −A 字号、下一格 ← −(A 字号/2)）；
     //   0x2fe 写 **B 对**（同形，用 B 字号）。两支互不覆盖。
-    // ★ 先 `0x2db(1)` 把"对位模式"那格置 1 —— 它只是**本模型假设**的"那个对象自己的开关"
-    //   （spec `60-ops-forward.md:87` 明说该开关身份**未取证**，残差 `RES-OPS-FORWARD-PROLOGUE-FIELD-ROLES`）。
+    // ★ 先 `0x2db(1)` 把"对位模式"那格置 1 —— 正文把这一格定性为字体对象的对位模式
+    //   （`CORE-OPS-FORWARD-PROLOGUE`；初值 0，不是实现侧假设）。
     //   ⇒ 这里**只断言 spec 明写的部分**：两份描述的高 ← −字号（无条件）、以及随后 `0x1a5` 按当前
-    //   A 字号把高 / 下一格重算成 −20 / −10。⛔ 不断言"非 0 支不写下一格" —— spec 没写那支写成什么，
-    //   一条会假红的断言会把未取证项锁成合同。
+    //   A 字号把高 / 下一格重算成 −20 / −10。「非 0 支的下一格来自度量」另有专条与用例守护，
+    //   本用例不重复断它（⛔ 不把"非 0 支不写下一格"当成合同）。
     // ★ `font_rebuild_requests()` 是**实现侧可观察量**（spec 只说"随后重建字体"，没规定几次请求）；
     //   这里的 +1/+2/+3 只防"请求彻底消失"，⛔ 不构成 spec 不变量。
     auto bytes = make_script_with_body();
@@ -9236,7 +10271,8 @@ bool check_key_tables_10c(const core::OpcodeTable& table) {
     // A = 槽 → 逻辑键（`slot_key`）、B = 逻辑键 → 系统键码（`logical_key_code`）、
     // C = 系统键码 0..255 → 位号（`key_code_bit`；−1 = 未映射）。
     // 两条指令的第 1 个操作数都是**槽号**（= 输入位号）、第 2 个是**逻辑键号**；读序先 2 再 1。
-    // 初始：C 的 7 项固定（↑0 →1 ↓2 ←3 Enter4 Space5 Backspace6），A 的槽 0..6 ← 逻辑键 24..30。
+    // 初始：C 的 7 项固定（↑0 →1 ↓2 ←3 Enter4 Space5 Backspace6），A 的槽 0..6 ← 逻辑键
+    // 200 / 205 / 208 / 203 / 28 / 57 / 14（表 B 换成系统键码 38 / 39 / 40 / 37 / 13 / 32 / 8）。
     {
         // `0x10c`：槽 5 ← 逻辑键 28（Enter）⇒ **只**把 Enter 的系统键码登记成 5；A 不碰、不解绑。
         auto bytes = make_script_with_body();
@@ -9252,7 +10288,7 @@ bool check_key_tables_10c(const core::OpcodeTable& table) {
             std::fprintf(stderr, "Enter 的位号 = %d（期望 5）\n", machine.key_code_bit(0x0D));
             return fail("0x10c 没有把逻辑键的系统键码登记成第 1 个操作数");
         }
-        if (machine.slot_key(5) != 29) return fail("0x10c 动了表 A（它只写表 C）");
+        if (machine.slot_key(5) != 57) return fail("0x10c 动了表 A（它只写表 C）");
         // ★ 不解绑：槽 5 原来的逻辑键（Space，系统键码 0x20）仍指着槽 5。
         if (machine.key_code_bit(0x20) != 5) return fail("0x10c 抹了旧键码（那是 0xfd 的解绑）");
     }
@@ -9275,14 +10311,14 @@ bool check_key_tables_10c(const core::OpcodeTable& table) {
         // 连续两条 `0xfd` 到同一槽：第 2 条把上一条绑定的 Enter 键码抹掉。
         auto bytes = make_script_with_body();
         emit_instruction(bytes, 0xFD, {{0, 7}, {0, 28}});
-        emit_instruction(bytes, 0xFD, {{0, 7}, {0, 30}});  // 逻辑键 30 = Backspace
+        emit_instruction(bytes, 0xFD, {{0, 7}, {0, 14}});  // 逻辑键 14 = Backspace（表 B：14 → 8）
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
         machine.load_root(bytes);
         if (!machine.step() || !machine.step()) return fail("两条 0xfd 夹具停机了");
         if (machine.key_code_bit(0x0D) != -1) return fail("第 2 条 0xfd 没有解绑上一条的 Enter 键码");
         if (machine.key_code_bit(0x08) != 7) return fail("第 2 条 0xfd 没有把 Backspace 登记成槽 7");
-        if (machine.slot_key(7) != 30) return fail("第 2 条 0xfd 没有改绑表 A");
+        if (machine.slot_key(7) != 14) return fail("第 2 条 0xfd 没有改绑表 A");
     }
     // 只检查第 1 个操作数：**无符号** > 31（含 −1）⇒ 显示消息型异常、三张表一格不写、长度槽已是 5。
     for (const std::int32_t slot : {32, -1}) {
@@ -9307,7 +10343,7 @@ bool check_key_tables_10c(const core::OpcodeTable& table) {
         }
         if (machine.frame().length_slot != 5) return fail("0x10c 的长度槽不是在检查之前写成 5");
         if (machine.key_code_bit(0x0D) != 4 || machine.key_code_bit(0x20) != 5 ||
-            machine.slot_key(5) != 29) {
+            machine.slot_key(5) != 57) {
             return fail("0x10c 越界支改了表（应当三张表一格都不写）");
         }
         // `0xfd` 同形（文本不同）。
@@ -9332,7 +10368,7 @@ bool check_key_tables_10c(const core::OpcodeTable& table) {
         }
         if (fd_machine.frame().length_slot != 5) return fail("0xfd 的长度槽不是在检查之前写成 5");
         if (fd_machine.key_code_bit(0x26) != 0 || fd_machine.key_code_bit(0x0D) != 4 ||
-            fd_machine.slot_key(0) != 24) {
+            fd_machine.slot_key(0) != 200) {
             return fail("0xfd 越界支改了表（应当三张表一格都不写）");
         }
     }
@@ -9348,6 +10384,316 @@ bool check_key_tables_10c(const core::OpcodeTable& table) {
                          machine.last_stop().message.c_str());
             return false;
         }
+    }
+    return true;
+}
+
+
+// ── 表 B（逻辑键 → 系统键码）的 **93 条初值**（`CORE-OPS-SCALAR-TABLE-10C` 的「表 B 的初值」）──
+// 判据（每条都能红）：
+// ① 七个默认槽 0..6 依次绑逻辑键 200 / 205 / 208 / 203 / 28 / 57 / 14；经表 B 换成系统键码
+//    38 / 39 / 40 / 37 / 13 / 32 / 8（= 表 C 的位 0..6：上 / 右 / 下 / 左 / Enter / Space / Backspace）；
+// ② **93 个固定条目逐条**都在（表驱动；写错一条、少写一条、下标错位 ⇒ 红）；
+// ③ 表内其余 **163 格恒为 0**：逻辑键 0 / 13 / 255 都换出 0（"未写到" ≠ "未映射"）；
+// ④ 表外（256 / −1）是**未定义读**：不抛、不夹到 255 —— 本模型用 −1 表示"没有可用的系统键码"；
+// ⑤ `0x10c` / `0xfd` 用逻辑键 **200**（默认槽 0）查得到键码 38，且两条的"解绑 / 不解绑"落点不同。
+// ★ 这张表是 spec 的**合同**而不是实现细节：它错了只会让"按哪个键点亮哪个位"整体错位，
+//   而任何一条用例都不会因此停机 ⇒ 必须有这条逐条的守卫。
+bool check_scalar_key_table_b(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "scalar-key-table-b: %s\n", what);
+        return false;
+    };
+    // ① 默认七个槽的逻辑键 + 经表 B / 表 C 的两段落点。
+    {
+        constexpr std::int32_t kSlotLogical[7] = {200, 205, 208, 203, 28, 57, 14};
+        constexpr std::int32_t kSlotSystem[7] = {38, 39, 40, 37, 13, 32, 8};
+        core::Machine machine(key, table);
+        for (std::size_t slot = 0; slot < 7; ++slot) {
+            if (machine.slot_key(slot) != kSlotLogical[slot]) {
+                std::fprintf(stderr, "槽 %zu 的逻辑键 = %d（期望 %d）\n", slot,
+                             machine.slot_key(slot), kSlotLogical[slot]);
+                return fail("表 A 的七个默认槽没有绑到 spec 的逻辑键（200/205/208/203/28/57/14）");
+            }
+            if (machine.logical_key_code(kSlotLogical[slot]) != kSlotSystem[slot]) {
+                std::fprintf(stderr, "逻辑键 %d 的系统键码 = %d（期望 %d）\n",
+                             kSlotLogical[slot], machine.logical_key_code(kSlotLogical[slot]),
+                             kSlotSystem[slot]);
+                return fail("表 B 的 93 条初值里默认槽那七条不对（下标错位或值写错）");
+            }
+            if (machine.key_code_bit(static_cast<std::size_t>(kSlotSystem[slot])) !=
+                static_cast<std::int32_t>(slot)) {
+                std::fprintf(stderr, "系统键码 %d 的位号 = %d（期望 %zu）\n", kSlotSystem[slot],
+                             machine.key_code_bit(static_cast<std::size_t>(kSlotSystem[slot])), slot);
+                return fail("表 C 的七个默认位号不是经 表 A → 表 B 两段查表得来的");
+            }
+        }
+        std::size_t mapped = 0;
+        for (std::size_t code = 0; code < core::Machine::kSystemKeyCount; ++code) {
+            if (machine.key_code_bit(code) != -1) ++mapped;
+        }
+        if (mapped != 7) {
+            std::fprintf(stderr, "表 C 映射了 %zu 项（期望 7）\n", mapped);
+            return fail("表 C 的初值不是只有七个默认项（表 B 的 93 条不该把它们全登记成位号）");
+        }
+    }
+    // ② 93 个固定条目逐条（★ 与 spec 的表 B 清单**逐字**对应；表内其余格必须是 0）。
+    {
+        struct Pair {
+            std::int32_t logical_key;
+            std::int32_t system_code;
+        };
+        constexpr Pair kExpected[] = {
+            {1, 27},   {2, 49},   {3, 50},   {4, 51},   {5, 52},   {6, 53},
+            {7, 54},   {8, 55},   {9, 56},   {10, 57},  {11, 48},  {12, 109},
+            {14, 8},   {15, 9},   {16, 81},  {17, 87},  {18, 69},  {19, 82},
+            {20, 84},  {21, 89},  {22, 85},  {23, 73},  {24, 79},  {25, 80},
+            {28, 13},  {29, 17},  {30, 65},  {31, 83},  {32, 68},  {33, 70},
+            {34, 71},  {35, 72},  {36, 74},  {37, 75},  {38, 76},  {42, 16},
+            {44, 90},  {45, 88},  {46, 67},  {47, 86},  {48, 66},  {49, 78},
+            {50, 77},  {54, 16},  {56, 18},  {57, 32},  {59, 112}, {60, 113},
+            {61, 114}, {62, 115}, {63, 116}, {64, 117}, {65, 118}, {66, 119},
+            {67, 120}, {68, 121}, {69, 144}, {70, 145}, {71, 103}, {72, 104},
+            {73, 105}, {74, 109}, {75, 100}, {76, 101}, {77, 102}, {78, 107},
+            {79, 97},  {80, 98},  {81, 99},  {82, 96},  {83, 110}, {87, 122},
+            {88, 123}, {112, 21}, {121, 28}, {123, 29}, {148, 25}, {156, 13},
+            {157, 17}, {181, 111},{184, 18}, {199, 18}, {200, 38}, {201, 33},
+            {203, 37}, {205, 39}, {207, 35}, {208, 40}, {209, 34}, {210, 45},
+            {219, 91}, {220, 92}, {221, 93},
+        };
+        static_assert(sizeof(kExpected) / sizeof(kExpected[0]) == 93, "表 B 必须是 93 条");
+        core::Machine machine(key, table);
+        for (const auto& pair : kExpected) {
+            const auto got = machine.logical_key_code(pair.logical_key);
+            if (got != pair.system_code) {
+                std::fprintf(stderr, "逻辑键 %d → %d（期望 %d）\n", pair.logical_key, got,
+                             pair.system_code);
+                return fail("表 B 的 93 条初值有一条不对（逐条对照 spec 的表 B）");
+            }
+        }
+        // ③ 未列出的 163 格恒为 0（⇒ 换出系统键码 0，与"逻辑键 0"同效）。
+        std::size_t nonzero = 0;
+        for (std::int32_t logical = 0; logical < 256; ++logical) {
+            if (machine.logical_key_code(logical) != 0) ++nonzero;
+        }
+        if (nonzero != 93) {
+            std::fprintf(stderr, "表 B 里非 0 的格 = %zu（期望 93）\n", nonzero);
+            return fail("表 B 不是「整表清 0 + 93 条」的形状（多写了 / 少写了 / 表外被补 0）");
+        }
+        for (const std::int32_t logical : {0, 13, 26, 255}) {
+            if (machine.logical_key_code(logical) != 0) {
+                std::fprintf(stderr, "逻辑键 %d → %d（期望 0）\n", logical,
+                             machine.logical_key_code(logical));
+                return fail("表内未写到的格不是 0（把\"未写到\"当成了\"未映射\"）");
+            }
+        }
+        // ④ 表外（<0 / ≥256）是未定义读：不抛、不夹到 255。
+        for (const std::int32_t logical : {256, 99999, -1}) {
+            if (machine.logical_key_code(logical) != -1) {
+                std::fprintf(stderr, "表外逻辑键 %d → %d（期望 −1 = 没有可用的系统键码）\n", logical,
+                             machine.logical_key_code(logical));
+                return fail("表外越界读被夹到表内（spec 明文：不抛、不夹到 255、不补 0）");
+            }
+        }
+    }
+    // ⑤ 两条脚本指令用逻辑键 200 查表（默认槽 0 = ↑ ⇒ 38）。
+    {
+        // `0x10c(槽 3, 逻辑键 200)`：只登记表 C ⇒ 38 的位号变成 3；表 A 不动（槽 3 仍是 203）。
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x10C, {{0, 3}, {0, 200}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) {
+            std::fprintf(stderr, "0x10c(逻辑键 200) 停机：%s\n", machine.last_stop().message.c_str());
+            return fail("0x10c 用逻辑键 200 查表失败（表 B 没有这一条？）");
+        }
+        if (machine.key_code_bit(38) != 3) {
+            std::fprintf(stderr, "0x10c 之后 38 的位号 = %d（期望 3）\n", machine.key_code_bit(38));
+            return fail("0x10c 没有把逻辑键 200 的系统键码（38）登记成槽号");
+        }
+        if (machine.slot_key(3) != 203) return fail("0x10c 动了表 A（它只写表 C）");
+        // `0xfd(槽 0, 逻辑键 205)`：先解绑旧逻辑键 200 的键码（38 ← −1），再登记 205 的键码 39 ← 0。
+        auto fd = make_script_with_body();
+        emit_instruction(fd, 0xFD, {{0, 0}, {0, 205}});
+        emit_instruction(fd, 2, {});
+        core::Machine fd_machine(key, table);
+        fd_machine.load_root(fd);
+        if (!fd_machine.step()) {
+            std::fprintf(stderr, "0xfd(逻辑键 205) 停机：%s\n", fd_machine.last_stop().message.c_str());
+            return fail("0xfd 用逻辑键 205 查表失败（表 B 没有这一条？）");
+        }
+        if (fd_machine.key_code_bit(38) != -1) return fail("0xfd 没有解绑旧逻辑键 200 的键码（38）");
+        if (fd_machine.key_code_bit(39) != 0) return fail("0xfd 没有把新逻辑键 205 的键码（39）登记成槽 0");
+        if (fd_machine.slot_key(0) != 205) return fail("0xfd 没有把表 A 该槽改绑到第 2 个操作数");
+    }
+    return true;
+}
+
+// ── 派发（`CORE-OPS-TABLE-DISPATCH-A3`）：命中 ⇒ 用登记值；未命中 ⇒ 用默认位置 ──
+// 判据（A1–A6，`RES-DISPATCH-DEFAULT-READ` 的六条；每一条都能红）：
+// 装置（A1/A2 共用**同一段字节布局**，只差 `0xa2` 绑的是哪个键）：
+//   字 0..4   `0x55` 全局整型 1 ← 75   （键格 ⇒ 文本 "75"）
+//   字 5..9   `0x55` 全局整型 0 ← −1   （**落点格预置 −1** ⇒ "没写"/"写了 0"/"写了 7" 三态可分）
+//   字 10..14 `0xa2` <键> ← 20         （A1: "75" → 20；A2: 别的键 → 20 ⇒ "75" 未绑定）
+//   字 15..19 `0xa3` "75", 默认 26
+//   字 20..24 `0x55` 落点 ← 7          （命中目标 = 登记值 20）
+//   字 25     `0x02` halt
+//   字 26..30 `0x55` 落点 ← 9          （默认目标 = 默认位置 26）
+//   字 31     `0x02` halt
+// A1 命中 ⇒ 落点 7（不是 9、不是 −1）；A2 未命中 ⇒ 落点 9；A3 命中 + 第 2 个操作数类型非法 ⇒
+// **不报错**且落点 7（"判据先于读"）；A4 A3 去掉绑定 ⇒ **必须**抛类型异常（A3 的绿灯不是因为不校验读）；
+// A5 登记值 0 ⇒ 仍然命中（跳到代码区第 0 格，⛔ 不是"缺键"）；A6 同一条按格重入 > 1 次即红（预算 8 步内必须 halt）。
+bool check_dispatch_default_read(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "dispatch-default-read: %s\n", what);
+        return false;
+    };
+    // 同一段布局：`bind_key` 是 `0xa2` 第 1 个操作数（3,1 = 键格 "75"；3,2 = 另一个键 ⇒ "75" 未绑定），
+    // `bind_value` 是登记值，`default_operand` 是 `0xa3` 第 2 个操作数（类型 + 原始值）。
+    // ★ 逐条指令**手写**在这里（不按"偏移算术"拼）：哪条指令落在哪个字必须一眼可见 ——
+    //   目标字（20 / 26）与指令起点错位一个字节，本条就红。
+    const auto build = [&](std::uint32_t bind_key, std::uint32_t bind_value,
+                           std::uint32_t default_type, std::uint32_t default_raw) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x55, {{3, 1}, {0, 75}});           // 字 0..4
+        emit_instruction(bytes, 0x55, {{3, 0}, {0, 0xFFFFFFFFu}});  // 字 5..9
+        emit_instruction(bytes, 0xA2, {{3, bind_key}, {0, bind_value}});      // 字 10..14
+        emit_instruction(bytes, 0xA3, {{3, 1}, {default_type, default_raw}});  // 字 15..19
+        emit_instruction(bytes, 0x55, {{3, 0}, {0, 7}});            // 字 20..24：命中目标
+        emit_instruction(bytes, 0x02, {});                          // 字 25：halt
+        emit_instruction(bytes, 0x55, {{3, 0}, {0, 9}});            // 字 26..30：默认目标
+        emit_instruction(bytes, 0x02, {});                          // 字 31：halt
+        return bytes;
+    };
+    // A1 + A6：命中 ⇒ 落点 7；未命中 ⇒ 落点 9；A1 的同一装置同时按"预算 + 同格重入"跑一遍。
+    {
+        // A1
+        core::Machine machine(key, table);
+        machine.load_root(build(1, 20, 0, 26));
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "A1 第 %d 步停机：%s\n", i + 1,
+                             machine.last_stop().message.c_str());
+                return fail("A1 的夹具没跑到 0xa3（布局错位）");
+            }
+        }
+        if (machine.frame().ip != 20u * 4u || machine.frame().length_slot != 0) {
+            std::fprintf(stderr, "A1 派发后 ip=%zu length=%u（期望 80 / 0）\n",
+                         machine.frame().ip, machine.frame().length_slot);
+            return fail("命中没有把指令指针写到「代码区起点 + 4 × 登记值」");
+        }
+        if (machine.global_int(0) != -1) return fail("A1 的落点格不是预置的 −1（三态不可分）");
+        if (!machine.step()) {
+            std::fprintf(stderr, "A1 命中目标停机：%s\n", machine.last_stop().message.c_str());
+            return fail("A1 的命中目标不是一个可执行指令（登记值不是指令起点）");
+        }
+        if (machine.global_int(0) != 7) {
+            std::fprintf(stderr, "A1 落点 = %d（期望 7）\n", machine.global_int(0));
+            return fail("命中没有用登记值（落到默认位置了？）");
+        }
+        // A6 —— **指令预算**：同一条按格重入 > 1 次即红。
+        // ★ 引擎没有"预算"机制：预算是**本用例**的上界（`run(max_steps)` 同形）。判据是
+        //   「命中支必须真的写指令指针」—— 少写它 ⇒ 推进格数 0 ⇒ 下一次仍派发同一个 `0xa3` 格
+        //   ⇒ 预算耗尽而红。这也是上面 A1 之后必须**继续**跑完整个程序的原因。
+        core::Machine budget(key, table);
+        budget.load_root(build(1, 20, 0, 26));
+        std::vector<std::size_t> visited;
+        bool running = true;
+        while (running && visited.size() < 8) {
+            running = budget.step();
+            visited.push_back(budget.last_stop().offset / 4);
+        }
+        const std::vector<std::size_t> expected = {0, 5, 10, 15, 20, 25};
+        if (visited != expected || !budget.halted()) {
+            std::fprintf(stderr, "A6 执行足迹 =");
+            for (const auto cell : visited) std::fprintf(stderr, " %zu", cell);
+            std::fprintf(stderr, "（期望 0 5 10 15 20 25 且已 halt）\n");
+            return fail("同一条按格重入（命中支没有写指令指针 ⇒ 推进格数 0 ⇒ 原地打转）");
+        }
+    }
+    // A2：未命中 ⇒ 默认位置（同一装置，只把 `0xa2` 绑到别的键）。
+    {
+        core::Machine machine(key, table);
+        machine.load_root(build(2, 20, 0, 26));
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "A2 第 %d 步停机：%s\n", i + 1,
+                             machine.last_stop().message.c_str());
+                return fail("A2 的夹具没跑到 0xa3");
+            }
+        }
+        if (machine.frame().ip != 26u * 4u || machine.frame().length_slot != 0) {
+            std::fprintf(stderr, "A2 派发后 ip=%zu length=%u（期望 104 / 0）\n",
+                         machine.frame().ip, machine.frame().length_slot);
+            return fail("未命中没有把指令指针写到「代码区起点 + 4 × 默认位置」");
+        }
+        if (machine.global_int(0) != -1) return fail("A2 的落点格不是预置的 −1");
+        if (!machine.step()) return fail("A2 的默认目标不可执行（默认位置不是指令起点）");
+        if (machine.global_int(0) != 9) {
+            std::fprintf(stderr, "A2 落点 = %d（期望 9）\n", machine.global_int(0));
+            return fail("未命中没有走默认位置（落点不是默认目标的标记）");
+        }
+    }
+    // A3：命中 + 第 2 个操作数类型非法（type 11 = 读整必抛）⇒ **不读它** ⇒ 不报错、落点 7。
+    {
+        core::Machine machine(key, table);
+        machine.load_root(build(1, 20, 11, 0));
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "A3 第 %d 步停机：%s\n", i + 1,
+                             machine.last_stop().message.c_str());
+                return fail("命中时读了第 2 个操作数（\"判据先于读\"不成立）");
+            }
+        }
+        if (machine.frame().ip != 20u * 4u) return fail("A3 命中后没有落到登记值的目标");
+        if (!machine.step()) return fail("A3 的命中目标不可执行");
+        if (machine.global_int(0) != 7) return fail("A3 的落点不是 7（命中支没有照常执行登记目标）");
+        if (!machine.last_display_code().empty()) return fail("A3 报了显示消息型异常（只检查第 1 个操作数）");
+    }
+    // A4：A3 但去掉绑定 ⇒ **必须**报操作数类型异常（证明 A3 的绿灯不是"引擎根本不读默认位置"）。
+    {
+        core::Machine machine(key, table);
+        machine.load_root(build(2, 20, 11, 0));
+        for (int i = 0; i < 3; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "A4 前置第 %d 步停机：%s\n", i + 1,
+                             machine.last_stop().message.c_str());
+                return fail("A4 的夹具没跑到 0xa3");
+            }
+        }
+        if (machine.step() || !machine.halted()) {
+            std::fprintf(stderr, "A4 停因 = %s\n", machine.last_stop().message.c_str());
+            return fail("未命中 + 默认位置类型非法却没有报类型异常（默认位置根本没被读）");
+        }
+        if (machine.last_stop().message != "read-int-unsupported-tag:11") {
+            std::fprintf(stderr, "A4 停因 = %s\n", machine.last_stop().message.c_str());
+            return fail("未命中支的失败原因不是「读默认位置失败」");
+        }
+        if (machine.global_int(0) != -1) return fail("A4 抛异常前就写了落点（次序不对）");
+    }
+    // A5：登记值 0 ⇒ **仍然命中**（跳过代码区第 0 格），⛔ 不是"缺键 / 值非 0 才算命中"。
+    {
+        core::Machine machine(key, table);
+        machine.load_root(build(1, 0, 0, 26));
+        for (int i = 0; i < 4; ++i) {
+            if (!machine.step()) {
+                std::fprintf(stderr, "A5 第 %d 步停机：%s\n", i + 1,
+                             machine.last_stop().message.c_str());
+                return fail("A5 的夹具没跑到 0xa3");
+            }
+        }
+        const auto bound = machine.named_table().find("75");
+        if (bound == machine.named_table().end() || bound->second != 0) {
+            return fail("A5 的绑定表里没有「75 → 0」（夹具没绑上）");
+        }
+        if (machine.frame().ip != 0 || machine.frame().length_slot != 0) {
+            std::fprintf(stderr, "A5 派发后 ip=%zu（期望 0 = 代码区第 0 格）\n", machine.frame().ip);
+            return fail("登记值 0 被当成「缺键」（命中判据被写成了「值非 0」）");
+        }
+        if (machine.global_int(0) != -1) return fail("A5 走了默认目标（落点已不是 −1）");
     }
     return true;
 }
@@ -9532,6 +10878,82 @@ bool check_getbit_arg_invalid(const core::OpcodeTable& table) {
         }
         if (!machine.errors().empty()) return fail("合法位号却记了错误");
         if (requests != 0) return fail("合法位号却发了平台写请求");
+    }
+    return true;
+}
+// ── 0x13F 越界**不写落点**（`CORE-OPS-BIT-TEST`）──
+// 与 `check_getbit_arg_invalid` 分开一条：那条咬「错误通道 + 源不被读」，这条只咬**落点写不写**，
+// 并且用**负控制**证明"落点还停在 −1"不是"这个格根本观察不到写入"。
+// ① 位号 32（越界）、落点预置 −1、源 = 1 ⇒ 落点必须**仍是 −1**。
+//    ★ 源取 1 是有意的：写 0、以及"把位号按低 5 位掩码后再算"（32 & 31 = 0 ⇒ 1）两种错法都会露馅。
+// ② 正向对照（同一格、同样预置 −1）：位号 0 / 源 1 ⇒ 落点 1；位号 0 / 源 0xFFFFFFFE ⇒ 落点 **0**
+//    ⇒ 「界内写 0」与「越界不写」在同一个观测量上必须分得开。
+// ③ 负控制：同一段脚本换成一条**会写落点**的指令（`0x55`）⇒ 落点变 ⇒ 观测通道看得见写入。
+bool check_getbit_nowrite(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const std::string kText = "GetBitの引数が不正です．\r\n";
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "getbit-nowrite: %s\n", what);
+        return false;
+    };
+    // ① 越界不写落点。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x13F, {{9, 0}, {9, 2}, {0, 32}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, 0}, -1);  // 落点预置 −1：写 0 也会露馅
+        machine.write_int(core::Operand{9, 2}, 1);   // 源的第 0 位 = 1
+        if (!machine.step() || machine.halted()) return fail("位号 32 把机器停了（越界支应正常返回）");
+        if (machine.read_int(core::Operand{9, 0}) != -1) {
+            std::fprintf(stderr, "位号 32：落点 = %d（期望仍 −1）\n",
+                         machine.read_int(core::Operand{9, 0}));
+            return fail("越界时写了落点（「不写」被写成「写 0」，或按低 5 位掩码算出了 1）");
+        }
+        // 非空转的前提：走的确实是**越界支**（固定文本进错误通道），不是"什么都没执行"。
+        if (machine.errors().size() != 1 || machine.errors().front() != kText) {
+            std::fprintf(stderr, "位号 32：错误通道 = %zu 条（期望恰 1 条固定文本）\n",
+                         machine.errors().size());
+            return fail("越界支没有走错误通道 ⇒ 这条不是在验「越界不写」");
+        }
+    }
+    // ② 正向对照：位号 0 ⇒ 落点真的被写（1 与 0 两种结果各一次）。
+    for (const auto& [source, expected] :
+         {std::pair<std::int32_t, std::int32_t>{1, 1},
+          std::pair<std::int32_t, std::int32_t>{static_cast<std::int32_t>(0xFFFFFFFEu), 0}}) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x13F, {{9, 0}, {9, 2}, {0, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, 0}, -1);
+        machine.write_int(core::Operand{9, 2}, source);
+        if (!machine.step() || machine.halted()) {
+            std::fprintf(stderr, "位号 0（源 = %d）把机器停了\n", source);
+            return false;
+        }
+        if (machine.read_int(core::Operand{9, 0}) != expected) {
+            std::fprintf(stderr, "位号 0（源 = %d）：落点 = %d（期望 %d）\n", source,
+                         machine.read_int(core::Operand{9, 0}), expected);
+            return fail("界内的位结果不对（不是归一成 0 / 1 的那一位）");
+        }
+        if (!machine.errors().empty()) return fail("界内却记了错误");
+    }
+    // ③ 负控制：同一段脚本、同一条落点，换成会写落点的指令 ⇒ 落点变（观测通道有效）。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x55, {{9, 0}, {0, 12345}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        machine.write_int(core::Operand{9, 0}, -1);
+        if (!machine.step() || machine.halted()) return fail("负控制（0x55）把机器停了");
+        if (machine.read_int(core::Operand{9, 0}) != 12345) {
+            std::fprintf(stderr, "负控制：落点 = %d（期望 12345）\n",
+                         machine.read_int(core::Operand{9, 0}));
+            return fail("会写落点的指令没有改变落点 ⇒ 上面「仍是 −1」的观测不算数");
+        }
     }
     return true;
 }
@@ -10070,7 +11492,21 @@ bool check_render_prims(const core::OpcodeTable& table) {
         emit_instruction(script, 2, {});
         return run_script(script);
     };
+#if defined(EMULATOR_CXX_HAS_TEXT)
+    // ★ 构建**声明了文本能力**（`EMULATOR_CXX_WITH_TEXT=ON` ⇒ `CMakeLists.txt` 给 `emulator-core` 的
+    //   `PUBLIC EMULATOR_CXX_HAS_TEXT=1`）⇒ 后端不可用就是**真失败**：
+    //   ⛔ 不许整段跳过 —— 旧写法 `if (text_backend_available()) { … }` 在无后端构建里让本函数
+    //   直接 `return true`（CTest 绿而 0x205 的像素断言一条都没跑）。那是**结构假绿**。
+    if (!core::text_backend_available()) {
+        return fail("文本后端不可用 ⇒ 0x205 的像素断言无法判定");
+    }
+    {
+#else
+    // 本构建**不声明**文本能力（`EMULATOR_CXX_WITH_TEXT=OFF`，如 `linux-x64` 预设）⇒ 0x205 的像素断言
+    // 无法判定：这里明确跳过（⛔ 不是"通过"）。算术前半由 `spec_ops_205_numtext_layout` 独立守住
+    // （它不依赖字体后端），所以关掉文本后端不会让 0x205 变成零守卫。
     if (core::text_backend_available()) {
+#endif
         // ⓪ 正向控制：参照串必须真出墨。字体缺失时 0x205 与 0x204 会"同样失败" ⇒ 不加这条就会静默绿。
         const Run control = draw_text(20, 20, "45");
         if (control.errors != 0 || !has_ink(bytes_of(control, 1))) {
@@ -11334,6 +12770,933 @@ bool check_text_layer_surface(const core::OpcodeTable& table) {
     }
     return true;
 }
+// ── `0x324` 的接收者复位（`CORE-OPS-FORWARD-FIELD`；正文 `60-ops-forward.md:39-48`） ──
+// 正文原句 → 机械判据（三条，互不依赖；⛔ 不是复述实现）：
+//   ① 注入接收者 {a=1,b=2,c=3,marker=7}，执行 `0x324`（argc 0）⇒ 「释放接收者持有的三个对象、
+//      把这三处引用清空，再清掉接收者自己的一个标记」⇒ 三处引用全 0、标记 0；复位恰一次；
+//      并且「改的是**接收者自己的状态**，不是脚本可观察的数据」⇒ 接收者之外的引擎观察量一格不动。
+//   ② 负控制：注同样的接收者，执行**另一条**无参指令（`0x20e` 清屏）⇒ 三处引用仍 {1,2,3}、标记仍 7、
+//      复位计数仍 0 ⇒ 「只有 `0x324` 复位接收者」（否则换个 opcode 也能过，判据就没咬住）。
+//   ③ **不注入**接收者（产品路径的缺省 = 引擎字段空）⇒ 不抛、不停机、错误通道不写、引擎状态一格不动，
+//      只把「空请求」记一次。★ 正文**没有**规定字段为空时做什么（`60-ops-forward.md:56`：该字段本作
+//      只有读、没有写）⇒ 本条**不断言行为**，只断言「没有发明行为」。
+bool check_forward_field_324(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "forward-field-0x324: %s\n", what);
+        return false;
+    };
+    // 一条无操作数的被测指令 + 收尾的 `0x2`（收尾只是让脚本形状与其它用例一致）。
+    const auto no_arg_script = [](std::uint32_t opcode) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, opcode, {});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    // ① 注入接收者 ⇒ 一次完整复位。
+    {
+        core::Machine machine(key, table);
+        machine.set_forward_receiver(core::Machine::ForwardReceiver{1, 2, 3, 7});
+        machine.load_root(no_arg_script(0x324));
+        const auto textures_before = machine.texture_count();
+        const auto target_before = machine.render_target();
+        const auto dirty_before = machine.scene_dirty();
+        if (!machine.step()) return fail("0x324 停机了（argc 0 的复位不该抛 / 不该停）");
+        if (!machine.forward_receiver().has_value()) return fail("注入的接收者没了");
+        const auto& receiver = *machine.forward_receiver();
+        if (receiver.owned_a != 0 || receiver.owned_b != 0 || receiver.owned_c != 0) {
+            std::fprintf(stderr, "0x324 之后引用仍是 {%u,%u,%u}\n", receiver.owned_a,
+                         receiver.owned_b, receiver.owned_c);
+            return fail("复位不完整：还有引用没被清空");
+        }
+        if (receiver.marker != 0) return fail("0x324 没有清接收者自己的标记");
+        if (machine.forward_receiver_resets() != 1) {
+            std::fprintf(stderr, "复位计数 = %zu\n", machine.forward_receiver_resets());
+            return fail("一次 0x324 不是恰好一次复位");
+        }
+        if (machine.render_target() != target_before || machine.texture_count() != textures_before ||
+            machine.scene_dirty() != dirty_before) {
+            return fail("0x324 改了接收者之外的引擎状态（本条只改接收者自己的状态）");
+        }
+    }
+    // ② 负控制：同一台机器、同一个接收者，换成 `0x20e` ⇒ 接收者一格不动。
+    {
+        core::Machine machine(key, table);
+        machine.set_forward_receiver(core::Machine::ForwardReceiver{1, 2, 3, 7});
+        machine.load_root(no_arg_script(0x20e));
+        if (!machine.step()) return fail("0x20e 停机了（负控制的对照指令）");
+        if (!machine.forward_receiver().has_value()) return fail("对照执行后接收者没了");
+        const auto& receiver = *machine.forward_receiver();
+        if (receiver.owned_a != 1 || receiver.owned_b != 2 || receiver.owned_c != 3 ||
+            receiver.marker != 7) {
+            std::fprintf(stderr, "0x20e 之后引用是 {%u,%u,%u}、标记 %d\n", receiver.owned_a,
+                         receiver.owned_b, receiver.owned_c, receiver.marker);
+            return fail("别的无参指令也复位了接收者（复位点不止 0x324）");
+        }
+        if (machine.forward_receiver_resets() != 0) return fail("别的无参指令也计了复位");
+    }
+    // ③ 字段为空（不注入）：不许发明行为。
+    {
+        core::Machine machine(key, table);
+        machine.load_root(no_arg_script(0x324));
+        const auto textures_before = machine.texture_count();
+        const auto target_before = machine.render_target();
+        const auto dirty_before = machine.scene_dirty();
+        if (!machine.step()) return fail("接收者为空时 0x324 停机了（正文没规定 ⇒ 不许发明失败）");
+        if (machine.halted()) return fail("接收者为空时 0x324 让引擎停了");
+        if (machine.forward_receiver().has_value()) return fail("空字段却把接收者建出来了");
+        if (machine.forward_receiver_resets() != 0) return fail("空请求被计成了复位");
+        if (machine.forward_receiver_null_requests() != 1) {
+            std::fprintf(stderr, "空请求计数 = %zu\n", machine.forward_receiver_null_requests());
+            return fail("空字段的一次请求没有恰好记一次");
+        }
+        if (!machine.errors().empty()) return fail("接收者为空时写了错误通道（那是发明出来的行为）");
+        if (machine.render_target() != target_before || machine.texture_count() != textures_before ||
+            machine.scene_dirty() != dirty_before) {
+            return fail("接收者为空时 0x324 改了引擎状态（正文没规定后果）");
+        }
+    }
+    return true;
+}
+
+// ── `0x25b` + 显示状态三格 + 两条重发路径（`CORE-OPS-RENDER-DISPLAY-STATE-25B`）──────────────
+// 这一则规则的正文逐句落成机械判据（audit 的 8 条 falsifier，
+// 去掉"重发②（显示对象释放后的恢复路径）"那条 —— 模型里没有对应对象 ⇒ 不建模）：
+//   ① 窗口态 `0x25b 7` ⇒ 显示状态 2 / 图像号 7 / **恰好一次**载图（实参 7）；
+//   ② 全屏态 `0x25b 7` ⇒ 两格照写、**0 次**载图（判据是**缓存 = 0**，不是"有没有窗口"、也不查命名键）；
+//   ③ 接②把模式切回窗口态 ⇒ **再 1 次**载图（实参仍是 7）—— 这是重发①，⛔ 不是"补载"；
+//   ④ 窗口态 `0x25b -3`（第 3 步不判符号 ⇒ 载图实参就是 −3）→ 全屏 → 回窗口 ⇒
+//      **1 条**错误通道（逐字）+ 显示状态 1 + 外枠编号 0 + 1 次外枠请求（编号 0）；
+//   ⑤ 状态 1 + 外枠编号 −5（图像号 12）：切回窗口态 ⇒ 外枠请求实参 **−5**（⛔ 不判符号、⛔ 不去载图）；
+//   ⑥ 状态 0（初值）往返 ⇒ 两条请求**都不发**；
+//   ⑦ 两条接缝**都不注入** ⇒ 不抛 / 不崩 / 不改格（正文没规定"缺后端"的后果 ⇒ 只能什么都不做）。
+bool check_display_state_25b(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "display-state-0x25b: %s\n", what);
+        return false;
+    };
+    // 本组用例只用到两条 argc 1 的指令（`0x25B` / `0x2CF`）⇒ 脚本 = 一串 (opcode, 操作数)。
+    const auto make_script =
+        [](std::initializer_list<std::pair<std::uint32_t, std::int32_t>> insns) {
+            auto bytes = make_script_with_body();
+            for (const auto& [opcode, operand] : insns) {
+                emit_instruction(bytes, opcode, {{0, static_cast<std::uint32_t>(operand)}});
+            }
+            emit_instruction(bytes, 2, {});
+            return bytes;
+        };
+    // 两条请求的探针：接缝注入后记录**实参序列**（光看计数分不清"发了 7"和"发了 0"）。
+    struct Probe {
+        std::vector<std::int32_t> loads;
+        std::vector<core::Machine::OuterFrameRequest> outer;
+        void attach(core::Machine& machine) {
+            machine.set_display_image_loader([this](std::int32_t image_number) {
+                loads.push_back(image_number);
+            });
+            machine.set_outer_frame_requester([this](core::Machine::OuterFrameRequest& request) {
+                // ★ 先按 core 给的样子存一份（原点 0/0、宽高 0/0、常量 0xFF），**再**由宿主补宽高。
+                outer.push_back(request);
+                request.right = 1919;
+                request.bottom = 1079;
+            });
+        }
+    };
+    // ① 窗口态（缓存初值 0）：三格 + 一次载图。
+    {
+        core::Machine machine(key, table);
+        Probe probe;
+        probe.attach(machine);
+        machine.load_root(make_script({{0x25B, 7}}));
+        if (!machine.step()) return fail("窗口态 0x25b 停机了（它不写操作数、不报错）");
+        if (machine.display_mode_cache() != 0) return fail("前置不成立：这台机器不是窗口态");
+        if (machine.display_state() != 2) {
+            std::fprintf(stderr, "显示状态 = %d\n", machine.display_state());
+            return fail("0x25b 没有把显示状态写成 2");
+        }
+        if (machine.display_image_number() != 7) {
+            std::fprintf(stderr, "图像号 = %d\n", machine.display_image_number());
+            return fail("0x25b 没有把图像号写成操作数");
+        }
+        if (machine.display_image_loads() != 1 || probe.loads.size() != 1) {
+            std::fprintf(stderr, "载图计数 = %zu / 探针 %zu\n", machine.display_image_loads(),
+                         probe.loads.size());
+            return fail("窗口态 0x25b 不是恰好一次载图请求");
+        }
+        if (probe.loads[0] != 7) {
+            std::fprintf(stderr, "载图实参 = %d（期望 7）\n", probe.loads[0]);
+            return fail("载图用的是别的值（不是同一个操作数）");
+        }
+        if (machine.outer_frame_requests() != 0 || !probe.outer.empty()) {
+            return fail("0x25b 发了外枠请求（第 3 步只有载图）");
+        }
+        if (!machine.errors().empty()) return fail("窗口态 0x25b 7 写了错误通道（负号 / 越界才谈错误）");
+    }
+    // ②③ 全屏态不载；切回窗口态**重发**（判据是缓存 = 0）。
+    {
+        core::Machine machine(key, table);
+        Probe probe;
+        probe.attach(machine);
+        machine.load_root(make_script({{0x2CF, 1}, {0x25B, 7}, {0x2CF, 0}}));
+        if (!machine.step()) return fail("0x2cf(1) 停机了");
+        if (machine.display_mode_cache() != 1) return fail("前置不成立：0x2cf(1) 没把缓存改成 1");
+        if (!machine.step()) return fail("全屏态 0x25b 停机了");
+        if (machine.display_state() != 2 || machine.display_image_number() != 7) {
+            std::fprintf(stderr, "全屏态：状态 %d / 图像号 %d\n", machine.display_state(),
+                         machine.display_image_number());
+            return fail("全屏态下前两步也被跳过了（它们是无条件的）");
+        }
+        if (machine.display_image_loads() != 0 || !probe.loads.empty()) {
+            std::fprintf(stderr, "全屏态载图计数 = %zu\n", machine.display_image_loads());
+            return fail("全屏态载了图（第三步的判据写反了）");
+        }
+        if (!machine.step()) return fail("0x2cf(0) 停机了");
+        if (machine.display_mode_cache() != 0) return fail("0x2cf(0) 没有切回窗口态");
+        if (machine.display_image_loads() != 1 || probe.loads.size() != 1) {
+            std::fprintf(stderr, "切回窗口态后载图计数 = %zu\n", machine.display_image_loads());
+            return fail("切回窗口态没有重发载图（重发① 那条块缺失）");
+        }
+        if (probe.loads[0] != 7) {
+            std::fprintf(stderr, "重发实参 = %d（期望 7）\n", probe.loads[0]);
+            return fail("重发用的不是图像号格的值");
+        }
+        if (!machine.errors().empty()) return fail("正常图像号的重发写了错误通道");
+    }
+    // ④ 负图像号：第 3 步照传；切回窗口态 ⇒ 错误通道 + 状态转 1 + 外枠编号 0 + 按 0 发外枠请求。
+    //    ★ 外枠编号格先摆成 **9**：否则「忘了写外枠编号 ← 0」这条破坏会被初值 0 掩盖（写与不写都读到 0）。
+    {
+        core::Machine machine(key, table);
+        Probe probe;
+        probe.attach(machine);
+        machine.seed_display_state_for_test(0, 0, 9);
+        machine.load_root(make_script({{0x25B, -3}, {0x2CF, 1}, {0x2CF, 0}}));
+        if (!machine.step()) return fail("窗口态 0x25b -3 停机了");
+        if (probe.loads.size() != 1 || probe.loads[0] != -3) {
+            std::fprintf(stderr, "负图像号载图实参 = %zu 条\n", probe.loads.size());
+            return fail("第 3 步对负图像号做了符号处理（它只判缓存 = 0，号照传）");
+        }
+        if (!machine.step()) return fail("0x2cf(1) 停机了");
+        if (!machine.step()) return fail("0x2cf(0) 停机了");
+        if (machine.errors().size() != 1) {
+            std::fprintf(stderr, "错误通道条数 = %zu\n", machine.errors().size());
+            return fail("黑底替代不是恰好一条错误通道");
+        }
+        if (machine.errors()[0] != "外枠用ビットマップを読み込めませんでした。黒で代替します。") {
+            std::fprintf(stderr, "错误文本 = %s\n", machine.errors()[0].c_str());
+            return fail("黑底替代的错误文本不逐字");
+        }
+        if (machine.display_state() != 1) {
+            std::fprintf(stderr, "黑底替代后显示状态 = %d\n", machine.display_state());
+            return fail("黑底替代没有把显示状态改成 1（此后重发该走状态 1 那支）");
+        }
+        if (machine.outer_frame_number() != 0) {
+            std::fprintf(stderr, "黑底替代后外枠编号 = %d\n", machine.outer_frame_number());
+            return fail("黑底替代没有把外枠编号格写成 0");
+        }
+        if (machine.outer_frame_requests() != 1 || probe.outer.size() != 1) {
+            std::fprintf(stderr, "外枠请求计数 = %zu\n", machine.outer_frame_requests());
+            return fail("黑底替代没有按编号 0 发一次外枠请求");
+        }
+        if (probe.outer[0].frame_number != 0) {
+            std::fprintf(stderr, "外枠请求实参 = %d\n", probe.outer[0].frame_number);
+            return fail("黑底替代的外枠请求编号不是 0");
+        }
+        if (machine.display_image_loads() != 1) {
+            std::fprintf(stderr, "载图计数 = %zu\n", machine.display_image_loads());
+            return fail("黑底替代那条支又发了一次载图（它只发外枠请求）");
+        }
+    }
+    // ⑤ 状态 1：用**外枠编号格**发请求，负数原样 ⇒ ⛔ 不判符号、⛔ 不看图像号。
+    {
+        core::Machine machine(key, table);
+        Probe probe;
+        probe.attach(machine);
+        machine.seed_display_state_for_test(1, 12, -5);  // 状态 1 / 图像号 12 / 外枠编号 −5
+        machine.load_root(make_script({{0x2CF, 1}, {0x2CF, 0}}));
+        if (!machine.step()) return fail("0x2cf(1) 停机了（状态 1 前置）");
+        if (!machine.step()) return fail("0x2cf(0) 停机了（状态 1 前置）");
+        if (probe.outer.size() != 1 || machine.outer_frame_requests() != 1) {
+            std::fprintf(stderr, "状态 1 的外枠请求条数 = %zu\n", probe.outer.size());
+            return fail("状态 1 支没有发一次外枠请求");
+        }
+        if (probe.outer[0].frame_number != -5) {
+            std::fprintf(stderr, "外枠请求实参 = %d（期望 −5 原样）\n", probe.outer[0].frame_number);
+            return fail("状态 1 支对外枠编号做了符号处理（`CORE-OPS-RENDER-DISPLAY-STATE-25B` 明令不检查）");
+        }
+        if (!probe.loads.empty() || machine.display_image_loads() != 0) {
+            return fail("状态 1 支去载图了（它只看外枠编号格，不看图像号）");
+        }
+        if (!machine.errors().empty()) return fail("状态 1 支写了错误通道");
+        if (machine.display_state() != 1 || machine.outer_frame_number() != -5) {
+            std::fprintf(stderr, "状态 1 支改了格：状态 %d / 外枠编号 %d\n", machine.display_state(),
+                         machine.outer_frame_number());
+            return fail("状态 1 支不该改这两格（请求失败才谈不改，成功更不该改）");
+        }
+        // 实参形式：常量 `0xFF` + 原点 `(0,0)`；宽 / 高是**宿主**的活（core 不许拿视口 / 客户区冒充）。
+        if (probe.outer[0].constant != 0xFF) {
+            std::fprintf(stderr, "常量 = 0x%X\n", probe.outer[0].constant);
+            return fail("外枠请求的常量不是 0xFF");
+        }
+        if (probe.outer[0].left != 0 || probe.outer[0].top != 0) {
+            return fail("外枠请求的矩形原点不是 (0,0)");
+        }
+        if (probe.outer[0].right != 0 || probe.outer[0].bottom != 0) {
+            std::fprintf(stderr, "core 填的宽高 = %d × %d\n", probe.outer[0].right,
+                         probe.outer[0].bottom);
+            return fail("core 自己填了矩形宽高（那是目标画面区尺寸，模型没有渲染器对象 ⇒ 只能留给宿主）");
+        }
+    }
+    // ⑥ 显示状态 0（初值 / 其它值）：两条重发路径都不做事。
+    {
+        core::Machine machine(key, table);
+        Probe probe;
+        probe.attach(machine);
+        machine.load_root(make_script({{0x2CF, 1}, {0x2CF, 0}}));
+        if (!machine.step()) return fail("0x2cf(1) 停机了（状态 0 前置）");
+        if (!machine.step()) return fail("0x2cf(0) 停机了（状态 0 前置）");
+        if (machine.display_state() != 0) return fail("前置不成立：显示状态不是初值 0");
+        if (machine.display_image_loads() != 0 || machine.outer_frame_requests() != 0 ||
+            !probe.loads.empty() || !probe.outer.empty()) {
+            return fail("显示状态 0 时切回窗口态发了请求（正文 :360 说这类值什么都不做）");
+        }
+        if (!machine.errors().empty()) return fail("显示状态 0 的往返写了错误通道");
+    }
+    // ⑦ 两条接缝都不注入（产品路径的缺省）：不抛 / 不崩 / 不改格，只记账。
+    {
+        core::Machine machine(key, table);
+        machine.load_root(make_script({{0x25B, 7}, {0x2CF, 1}, {0x2CF, 0}}));
+        if (!machine.step()) return fail("没有载图接缝时 0x25b 停机了（正文没规定缺后端的后果）");
+        if (machine.display_state() != 2 || machine.display_image_number() != 7) {
+            return fail("没有载图接缝时前两步也没写（它们是无条件的）");
+        }
+        if (!machine.step() || !machine.step()) return fail("没有外枠接缝时模式往返停机了");
+        if (machine.display_image_loads() != 2) {
+            std::fprintf(stderr, "载图计数 = %zu（期望 2：0x25b 一次 + 重发一次）\n",
+                         machine.display_image_loads());
+            return fail("缺后端时重发① 没有记账（记账与「接没接后端」是两件事）");
+        }
+        if (!machine.errors().empty()) return fail("缺接缝却写了错误通道（那是发明出来的行为）");
+    }
+    {
+        core::Machine machine(key, table);
+        machine.seed_display_state_for_test(1, 0, 3);
+        machine.load_root(make_script({{0x2CF, 1}, {0x2CF, 0}}));
+        if (!machine.step() || !machine.step()) return fail("状态 1 + 空外枠接缝时停机了");
+        if (machine.display_state() != 1 || machine.outer_frame_number() != 3) {
+            std::fprintf(stderr, "空接缝下格被改了：状态 %d / 外枠编号 %d\n", machine.display_state(),
+                         machine.outer_frame_number());
+            return fail("缺外枠接缝时改了两格（正文 :368：失败不抛、不改这两格）");
+        }
+        if (machine.outer_frame_requests() != 1) {
+            return fail("状态 1 支在空接缝下没记账");
+        }
+        if (!machine.errors().empty()) return fail("空外枠接缝写了错误通道（正文没这么说）");
+    }
+    {
+        core::Machine machine(key, table);
+        machine.seed_display_state_for_test(2, -4, 9);  // 状态 2 + 负图像号，两条接缝都空
+        machine.load_root(make_script({{0x2CF, 1}, {0x2CF, 0}}));
+        if (!machine.step() || !machine.step()) return fail("负图像号 + 空接缝时停机了");
+        if (machine.errors().size() != 1) {
+            std::fprintf(stderr, "错误通道条数 = %zu\n", machine.errors().size());
+            return fail("空接缝下黑底替代没写错误通道（那是本条自己的语义，不是宿主的）");
+        }
+        if (machine.display_state() != 1 || machine.outer_frame_number() != 0) {
+            return fail("空接缝下黑底替代没有改格（正文 :358 明令改）");
+        }
+        if (machine.outer_frame_requests() != 1) {
+            return fail("空接缝下黑底替代没记一次外枠请求");
+        }
+    }
+    return true;
+}
+
+
+// ── 字体度量的**产品接线**（`CORE-OPS-FORWARD-PROLOGUE`「非 0 支的下一格来自度量」） ──
+// 这一则规则里**可机械断言**的部分：
+//   · 一次派生发**两次**平台度量（「每一次派生发两次平台字体度量」那一句）；
+//   · 写回那两格的是**第二次**的结果（⛔ 不是第一次、⛔ 不是参考字体那次）；
+//   · 第一次的请求面名 = 常量参考字体，第二次 = **该描述自己的字面名**。
+// 本仓的宿主简化（`SCOPE.md` §0 D1）：字形恒 Amayui ⇒ 名字不参与选择，回退判据 ②③ 在产品替换
+// 生效时跳过；但**请求面名**仍是正文的形状 ⇒ 两次请求的面名必须不同（这一条可机械断言）。
+// 判据（五条，互不依赖）：
+//   ① 注入确定性假后端（参考字体那次与描述那次返回**不同**的固定量度）：`0x2db(1); 0x75(20)` ⇒
+//      A 支**两份描述**的下一格都 == −平均字宽（−13），**不是** −字号/2（−10）；高度 == −字号（−20）。
+//      ⇒ 断的是**值**：走回退得 −10、拿第一次的返回值得 −99，两种错法都能被区分。
+//   ② 一次派生 `font_measure_requests()` **恰好 +2**（整条 `0x75` = 2 份描述 × 2 = +4）。
+//   ③ 假后端记下两次请求的面名：第一次 == `reference_font_face()`、第二次 == 描述的 `face`
+//      （⛔ 不要求两次的**返回值**不同：产品替换下两次量的都是 Amayui —— 守卫只断请求形态）。
+//   ④ **产品接线**：新 Machine 调 `core::wire_platform_fonts(m)` ⇒ `has_font_measurer()` 与
+//      `font_substitution()` 都为真，且再跑一次派生 `font_measure_requests()` +2。
+//      ⇒ 把装配里那一行删掉 ⇒ ④ 红；这是唯一能抓住"接缝没接"的判据。
+//   ⑤ **平台量度真的给出数**（同一段里，`#if defined(EMULATOR_CXX_HAS_TEXT)`）：`measure_rendering_font(20)`
+//      的 `line_height` 与 `average_width` 都必须 > 0。
+//      ★ 为什么要它：①②③④ 全部靠**注入的假后端** —— 把 `measure_rendering_font` 改成恒返回 `{}`，
+//        那四条**一条都不响**（实测：改完之后四条用例仍全绿）。⇒ 这一条是"真后端活着"的唯一判据。
+//      ⛔ 不把真机数值写成期望（只断 > 0）：数值随平台 / 字体版本变，钉数值是把宿主差异当合同。
+// ★ 真机数值不可得 ⇒ 本用例只用注入的假后端断接线、只用「> 0」断真后端活着；⛔ 不声称与真机数值等价。
+bool check_font_measure_wired(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "font-measure-wired: %s\n", what);
+        return false;
+    };
+    // 确定性假后端：参考字体那次返回平均字宽 99、描述那次返回 13（两次**返回值不同** ⇒
+    // "取错那次"会当场变成 −99）。行高 18 < 字号 20 ⇒ 不触发"测得行高 > 字号"的高度缩放；
+    // 黑框 / 量度框留 0 ⇒ 不触发"再缩一次"（那一档的半格判据由
+    // `check_text_container_and_font_names` ⑥e / ⑥f 单独守 —— 不是 `check_font_branches`）。
+    struct Probe {
+        std::vector<std::string> faces;
+        std::vector<std::int32_t> sizes;
+        void attach(core::Machine& machine) {
+            machine.set_font_measurer([this](const std::string& face, std::int32_t size) {
+                faces.push_back(face);
+                sizes.push_back(size);
+                core::Machine::FontMetrics metrics;
+                metrics.line_height = 18;
+                metrics.average_width = face == core::Machine::reference_font_face() ? 99 : 13;
+                metrics.glyph_box_width = 0;
+                metrics.measured_box_width = 0;
+                return metrics;
+            });
+            // 产品装配的第二个动作（SCOPE §0 D1）：名字不参与选择 ⇒ 回退判据 ②③ 跳过。
+            machine.set_font_substitution(true);
+        }
+    };
+    // ②③ 单次派生：请求数 = 2，且两次的面名分别是参考字体常量与该描述自己的字面名。
+    //   ★ 放在 ① 之前：②③ 断的是**请求形态**，① 断的是**写回值**；先跑请求形态才能让
+    //     "删掉第一次请求 / 第二次写成参考字体" 各自红在它该红的那一条上。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2DB, {{0, 1}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        Probe probe;
+        probe.attach(machine);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2db(1) 停机了（单次派生的前置）");
+        if (machine.font_align_mode() != 1) return fail("前置不成立：单次派生前对位模式不是 1");
+        const std::string face = "Amayui CN";  // 描述自己的字面名（产品替换下不参与选择，只进请求）
+        core::FontDescription desc;
+        desc.face = face;
+        const std::size_t before = machine.font_measure_requests();
+        machine.derive_font_description(desc, 20);
+        const std::size_t delta = machine.font_measure_requests() - before;
+        if (delta != 2) {
+            std::fprintf(stderr, "一次派生的度量请求增量 = %zu（期望 2）\n", delta);
+            return fail("正文 :104『每一次派生发两次平台字体度量』不成立");
+        }
+        if (probe.faces.size() != 2) {
+            std::fprintf(stderr, "一次派生的请求条数 = %zu（期望 2）\n", probe.faces.size());
+            return fail("派生没有恰好发两次度量");
+        }
+        if (probe.faces[0] != core::Machine::reference_font_face()) {
+            std::fprintf(stderr, "第一次请求的面名 = %s（期望参考字体常量）\n",
+                         probe.faces[0].c_str());
+            return fail("第一次度量的不是常量参考字体（ＭＳ ゴシック）");
+        }
+        if (probe.faces[1] != face) {
+            std::fprintf(stderr, "第二次请求的面名 = %s（期望 %s）\n", probe.faces[1].c_str(),
+                         face.c_str());
+            return fail("第二次度量的不是该描述自己的字面名（写成了参考字体 / 别的名字）");
+        }
+        // 写回值取自第二次（③ 的第三面 / ① 的值）：−13，⛔ 不是 −99。
+        if (desc.width != -13) {
+            std::fprintf(stderr, "派生的下一格 = %d（期望 −13）\n", desc.width);
+            return fail("写回值不是第二次度量的结果");
+        }
+    }
+    // ① 两份描述的下一格 / 高度都来自**第二次**度量；整条 `0x75` 的请求数 = 2 份 × 2 次。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2DB, {{0, 1}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        Probe probe;
+        probe.attach(machine);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x2db(1) 停机了（对位模式夹具）");
+        if (machine.font_align_mode() != 1) return fail("前置不成立：对位模式不是 1");
+        if (!machine.step()) return fail("0x75(20) 停机了");
+        for (std::size_t variant = 0; variant < 2; ++variant) {
+            const auto& desc = machine.font_description(false, variant);
+            if (desc.width != -13) {
+                std::fprintf(stderr, "A 支描述 %zu 的下一格 = %d（期望 −13 = −测得平均字宽）\n",
+                             variant, desc.width);
+                return fail(
+                    "非 0 支的下一格不是来自第二次度量（−10 = −字号/2 ⇒ 走了回退；−99 ⇒ 取了第一次）");
+            }
+            if (desc.height != -20) {
+                std::fprintf(stderr, "A 支描述 %zu 的高度 = %d（期望 −20）\n", variant, desc.height);
+                return fail("高度不是 −字号（测得行高 18 ≤ 字号 20 ⇒ 不该缩）");
+            }
+        }
+        if (probe.faces.size() != 4) {
+            std::fprintf(stderr, "0x75 的度量请求数 = %zu（期望 4 = 2 份描述 × 2）\n",
+                         probe.faces.size());
+            return fail("并非每份描述都恰好发两次度量（少发 / 多发了）");
+        }
+    }
+    // ④ 产品接线：`core::wire_platform_fonts` 装后端 + 打开宿主替换开关，之后一次派生仍发两次度量。
+    {
+        core::Machine machine(key, table);
+        core::wire_platform_fonts(machine);
+        if (!machine.has_font_measurer()) {
+            return fail("core::wire_platform_fonts 没有装度量后端（产品路径的派生会走回退）");
+        }
+        if (!machine.font_substitution()) {
+            return fail("core::wire_platform_fonts 没有打开宿主字体替换开关（SCOPE §0 D1）");
+        }
+        core::FontDescription desc;
+        desc.face = "Amayui CN";
+        const std::size_t before = machine.font_measure_requests();
+        machine.derive_font_description(desc, 20);
+        const std::size_t delta = machine.font_measure_requests() - before;
+        if (delta != 2) {
+            std::fprintf(stderr, "产品接线下一次派生的度量增量 = %zu（期望 2）\n", delta);
+            return fail("产品接线的派生没有发两次度量（后端没装上？）");
+        }
+        // ★ 不断言这两格的**数值**：真机数值不可得，产品后端量到的量随平台 / 字体变。
+        // ⑤ 但**必须**断言真后端**活着**：上面的 ①②③④ 全用注入的假后端 —— 把
+        //   `measure_rendering_font` 改成恒返回 `{}` 时它们一条都不响（复审实测四条全绿）。
+        //   ⇒ 这里直接问平台要一次量度，只断「行高 / 平均字宽都是正数」这个**必要条件**。
+#if defined(EMULATOR_CXX_HAS_TEXT)
+        // 构建声明了文本能力 ⇒ 后端不可用就是**真失败**（与 `check_render_prims` 同口径：⛔ 不整段跳过）。
+        const core::Machine::FontMetrics platform = core::measure_rendering_font(20);
+        if (!(platform.line_height > 0 && platform.average_width > 0)) {
+            std::fprintf(stderr, "平台量度(20) = 行高 %d / 平均字宽 %d / 黑框 %d / 量度框 %d\n",
+                         platform.line_height, platform.average_width, platform.glyph_box_width,
+                         platform.measured_box_width);
+            return fail("平台字体量度没有给出正数（后端恒返回空量度 ⇒ 派生会把下一格写成 0）");
+        }
+#endif
+    }
+    return true;
+}
+
+// ── 数组地址算术的 32 位回绕（`CORE-OPS-ARRAY-LOOKUP` / `-2D`；正文 `60-ops-array.md:84` / `:110`） ──
+// 正文原句 → 机械判据：
+//   · 「地址算术是 **32 位回绕**：`取址 + 宽度 × 下标` 只保留低 32 位」（`:84`）⇒
+//     基址 0xFFFFF000 + 4×0x400 必须落回 0x00000000（写成 64 位 / 被钳住都会读出别的值）；
+//   · 「元素宽度由**落点的类型标签**决定」（`:61-67`）⇒ 落点 tag 6 步长 4、tag 8 / 14 步长 28
+//     （写死 4 ⇒ 后两条红）；
+//   · 「落点是值族…时抛**类型异常**，不是静默写错池」（`:70`）⇒ 停机原因是 Error、错误文本是类型异常，
+//     且落点那一格**一个字节都没动**；
+//   · 2D：「下标 = **操作数 3 × 操作数 4 + 操作数 5**（先乘后加）」（`:92`）+「也按 **32 位回绕**算」（`:110`）⇒
+//     行 2 / 行宽 10 / 列 3 必须与 `0x61` 下标 23 的地址相同（≠ 下标 26），
+//     行 0x10000 × 行宽 0x10000 的乘积必须回绕成下标 0。
+bool check_array_lookup_address_wrap(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "array-lookup-address-wrap: %s\n", what);
+        return false;
+    };
+    // ① 32 位回绕：0xFFFFF000 + 4 × 0x400 = 0x1_0000_0000 ⇒ 只留低 32 位 = 0。
+    {
+        core::Machine machine(key, table);
+        machine.seed_pointer_for_test(6, 0, 0xFFFFF000u);   // 数组基址放在引用族槽 {6,0}
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x61, {{6, 1}, {6, 0}, {0, 0x400}});
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x61 停机了");
+        const auto address = machine.pointer_slot(6, 1);
+        if (address != 0u) {
+            std::fprintf(stderr, "0x61 基址 0xFFFFF000 + 4×0x400 = 0x%08X（期望 0x00000000）\n", address);
+            return fail("地址算术没有按 32 位回绕（或被钳在基址附近）");
+        }
+    }
+    // ② 元素宽度来自**落点标签**：tag 6 ⇒ 4；tag 8 / 14（全局 / 局部指针）⇒ 28。
+    {
+        core::Machine machine(key, table);
+        machine.seed_pointer_for_test(6, 0, 0x20000000u);
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x61, {{6, 1}, {6, 0}, {0, 3}});    // 落点 = 局部指针 ⇒ 步长 4
+        emit_instruction(bytes, 0x61, {{8, 0}, {6, 0}, {0, 3}});    // 落点 = 全局指针 ⇒ 步长 28
+        emit_instruction(bytes, 0x61, {{14, 0}, {6, 0}, {0, 3}});   // 落点 = 局部指针（tag 14）⇒ 28
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        for (int i = 0; i < 3; ++i) {
+            if (!machine.step()) return fail("0x61 步长用例停机了");
+        }
+        if (machine.pointer_slot(6, 1) != 0x2000000Cu) {
+            std::fprintf(stderr, "落点 tag 6 的地址 = 0x%08X（期望 0x2000000C = 基址 + 4×3）\n",
+                         machine.pointer_slot(6, 1));
+            return fail("落点族 6 的步长不是 4");
+        }
+        if (machine.pointer_slot(8, 0) != 0x20000054u) {
+            std::fprintf(stderr, "落点 tag 8 的地址 = 0x%08X（期望 0x20000054 = 基址 + 28×3）\n",
+                         machine.pointer_slot(8, 0));
+            return fail("落点族 8 的步长不是 28（按 4 算了？）");
+        }
+        if (machine.pointer_slot(14, 0) != 0x20000054u) {
+            std::fprintf(stderr, "落点 tag 14 的地址 = 0x%08X（期望 0x20000054）\n",
+                         machine.pointer_slot(14, 0));
+            return fail("落点族 14 的步长不是 28（按 4 算了？）");
+        }
+    }
+    // ③ 落点是值族 ⇒ 类型异常，落点一格未写（局部整型槽预置 42）。
+    {
+        core::Machine machine(key, table);
+        machine.seed_pointer_for_test(6, 0, 0x20000000u);
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x55, {{9, 0}, {0, 42}});   // 落点预置 42
+        emit_instruction(bytes, 0x61, {{9, 0}, {6, 0}, {0, 1}});
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("落点预置的 0x55 停机了");
+        if (machine.step()) return fail("0x61 落点是值族却没有停机");
+        if (machine.last_stop().reason != core::StopReason::Error) {
+            return fail("落点是值族时的停机原因不是异常档");
+        }
+        if (machine.last_stop().message.rfind("lookup-array-destination-not-reference-tag", 0) != 0) {
+            std::fprintf(stderr, "错误文本：%s\n", machine.last_stop().message.c_str());
+            return fail("落点是值族时的错误文本不是类型异常那一档");
+        }
+        if (machine.read_int(core::Operand{9, 0}) != 42) {
+            std::fprintf(stderr, "落点被改了：%d（期望仍是 42）\n",
+                         machine.read_int(core::Operand{9, 0}));
+            return fail("类型异常之前就写了落点（既不是抛，也不是静默写错池）");
+        }
+        if (machine.pointer_slot(6, 0) != 0x20000000u) return fail("类型异常改动了数组基址槽");
+    }
+    // ④ 2D 的次序：行 2 × 行宽 10 + 列 3 = 23 ⇒ 与 `0x61` 下标 23 同址（先乘后加；写成 2×(10+3)=26 会不同）。
+    {
+        core::Machine machine(key, table);
+        machine.seed_pointer_for_test(6, 0, 0x20000000u);
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x12c, {{6, 1}, {6, 0}, {0, 2}, {0, 10}, {0, 3}});
+        emit_instruction(bytes, 0x61, {{6, 2}, {6, 0}, {0, 23}});
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        if (!machine.step() || !machine.step()) return fail("0x12c / 0x61 停机了");
+        const auto two_d = machine.pointer_slot(6, 1);
+        const auto flat = machine.pointer_slot(6, 2);
+        const auto wrong = 0x20000000u + 4u * 26u;   // 行 ×(行宽 + 列) 会落到这里
+        if (two_d != flat || two_d == wrong) {
+            std::fprintf(stderr, "0x12c 地址 = 0x%08X；0x61 下标 23 = 0x%08X；次序写反 = 0x%08X\n",
+                         two_d, flat, wrong);
+            return fail("2D 下标不是先乘后加（或没按 32 位算）");
+        }
+        if (two_d != 0x20000000u + 4u * 23u) {
+            std::fprintf(stderr, "0x12c 地址 = 0x%08X（期望 0x%08X）\n", two_d, 0x20000000u + 92u);
+            return fail("2D 地址算术不对");
+        }
+    }
+    // ⑤ 2D 下标也按 32 位回绕：行 0x10000 × 行宽 0x10000 = 0x1_0000_0000 ⇒ 下标 0 ⇒ 地址 = 基址。
+    {
+        core::Machine machine(key, table);
+        machine.seed_pointer_for_test(6, 0, 0x20000000u);
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x12c, {{6, 1}, {6, 0}, {0, 0x10000}, {0, 0x10000}, {0, 0}});
+        emit_instruction(bytes, 2, {});
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x12c 回绕用例停机了");
+        if (machine.pointer_slot(6, 1) != 0x20000000u) {
+            std::fprintf(stderr, "0x12c 行×行宽 回绕后地址 = 0x%08X（期望 0x20000000）\n",
+                         machine.pointer_slot(6, 1));
+            return fail("2D 下标的乘积没有按 32 位回绕");
+        }
+    }
+    return true;
+}
+
+// ── 数值族 `0x52`..`0x5f`（`CORE-OPS-NUMERIC-ARITH` / `-COMPARE`；正文 `60-ops-numeric.md:103-167`） ──
+// 正文原句 → 机械判据（逐行独立，左 = 输入，右 = **精确值**）：
+//   · 「乘法按 32 位截断」（`:119`）⇒ `0x52(0x10000,0x10000)` = 0；
+//   · 「商向零截断（−7 ÷ 2 = −3）」（`:120`）⇒ `0x53`；「余数的符号跟随被除数」⇒ `0x54`；
+//   · 「除数为 0 时引擎不做检查…中止发生在**写第 1 个操作数之前** ⇒ 落点保持原值」（`:120`）⇒
+//     `0x53(1,0)` 之后落点仍是预置的 7，停机原因是异常、错误文本是除零；
+//   · 「位数取第 3 个操作数的低 5 位…⛔ 不许 clamp 到 31」（`:122`）⇒ `0x59(1,63)` = 0x80000000、
+//     `0x58(−1,33)` = −1；「0x58 是符号扩展右移」（`:123`）⇒ `0x58(−8,1)` = −4；
+//   · 「按位与 / 或不对符号做任何解释」（`:124`）⇒ `0x57(−1,0)` = −1、`0x56(−1,0)` = 0；
+//   · 「大小比较是**有符号**的：−1 < 0 为真」（`:153`）⇒ `0x5f(−1,0)` = 0、`0x5c(−1,0)` = 1；
+//   · 「方向是第 2 个 对 第 3 个；结果只有 0 / 1」（`:142` / `:154-155`）⇒ 六条在 (5,2) 上的精确值。
+bool check_numeric_family_52_5f(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "numeric-family-52-5f: %s\n", what);
+        return false;
+    };
+    struct CellObs {
+        bool ran = false;            // 被测那一步是否正常返回（false = 停机 / 抛）
+        std::int32_t value = 0;      // 局部整型槽 0 的读回值（= 写进第 1 个操作数的值）
+        core::StopReason reason = core::StopReason::Running;
+        std::string message;
+    };
+    // 跑一段脚本（`steps` 条指令），回读停机状态 + 落点值。
+    const auto run_cell = [&](const std::vector<std::uint8_t>& bytes, std::size_t steps) {
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        CellObs obs;
+        for (std::size_t i = 0; i < steps; ++i) {
+            obs.ran = machine.step();
+            if (!obs.ran) break;
+        }
+        obs.value = machine.read_int(core::Operand{9, 0});
+        obs.reason = machine.last_stop().reason;
+        obs.message = machine.last_stop().message;
+        return obs;
+    };
+    // 一条被测指令：落点 = 局部整型槽 0。
+    const auto one = [](std::uint32_t opcode,
+                        std::initializer_list<std::pair<std::uint32_t, std::uint32_t>> operands) {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, opcode, operands);
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    struct Case {
+        std::uint32_t opcode;
+        std::uint32_t a;
+        std::uint32_t b;
+        std::int32_t expected;
+        const char* what;
+    };
+    const Case cases[] = {
+        {0x52, 0x10000u, 0x10000u, 0, "0x52 乘法没有按 32 位截断（0x10000 平方 = 0）"},
+        {0x53, 0xFFFFFFF9u, 2u, -3, "0x53 商没有向零截断（−7 ÷ 2 = −3，不是 −4）"},
+        {0x54, 0xFFFFFFF9u, 2u, -1, "0x54 余数的符号没有跟随被除数（−7 mod 2 = −1）"},
+        {0x54, 7u, 0xFFFFFFFEu, 1, "0x54 余数在除数为负时不是 1（7 mod −2 = 1）"},
+        {0x58, 0xFFFFFFF8u, 1u, -4, "0x58 不是算术右移（−8 >> 1 = −4，不是 2147483644）"},
+        {0x58, 0xFFFFFFFFu, 33u, -1, "0x58 的位数没有取低 5 位（−1 >> 33 = −1）"},
+        {0x59, 1u, 33u, 2, "0x59 的位数没有取低 5 位（1 << 33 = 2）"},
+        {0x59, 1u, 63u, static_cast<std::int32_t>(0x80000000u),
+         "0x59 把位数 clamp 到 31 了（1 << 63 = 0x80000000）"},
+        {0x56, 0xFFFFFFFFu, 0u, 0, "0x56 的按位与把符号当真了（−1 & 0 = 0）"},
+        {0x57, 0xFFFFFFFFu, 0u, -1, "0x57 的按位或把符号当真了（−1 | 0 = −1）"},
+        // 六条比较：方向 = 第 2 个 对 第 3 个（a = 5、b = 2），真 = 1 / 假 = 0（⛔ 不是 −1）。
+        {0x5a, 5u, 2u, 0, "0x5a 相等比较错（5 = 2 为假）"},
+        {0x5b, 5u, 2u, 1, "0x5b 不等比较错（5 ≠ 2 为真）"},
+        {0x5c, 5u, 2u, 0, "0x5c 比较方向反了（5 < 2 为假）"},
+        {0x5d, 5u, 2u, 0, "0x5d 比较方向反了（5 ≤ 2 为假）"},
+        {0x5e, 5u, 2u, 1, "0x5e 比较方向反了（5 > 2 为真）"},
+        {0x5f, 5u, 2u, 1, "0x5f 比较方向反了（5 ≥ 2 为真）"},
+        {0x5c, 2u, 5u, 1, "0x5c 与 0x5e 不是彼此的镜像（2 < 5 为真）"},
+        {0x5e, 2u, 5u, 0, "0x5e 与 0x5c 不是彼此的镜像（2 > 5 为假）"},
+        // 有符号：−1 < 0 为真（按无符号比较会把 −1 判成最大的数）。
+        {0x5c, 0xFFFFFFFFu, 0u, 1, "0x5c 用了无符号比较（−1 < 0 为真）"},
+        {0x5f, 0xFFFFFFFFu, 0u, 0, "0x5f 用了无符号比较（−1 ≥ 0 为假）"},
+    };
+    for (const auto& c : cases) {
+        const auto obs = run_cell(one(c.opcode, {{9, 0}, {0, c.a}, {0, c.b}}), 1);
+        if (!obs.ran) {
+            std::fprintf(stderr, "%s：被测指令停机了（%s）\n", c.what, obs.message.c_str());
+            return fail("数值族指令不该有失败路径（除零那一档单独测）");
+        }
+        if (obs.value != c.expected) {
+            std::fprintf(stderr, "%s：得到 %d（期望 %d）\n", c.what, obs.value, c.expected);
+            return fail(c.what);
+        }
+    }
+    // 除零：落点预置 7 ⇒ 中止发生在写第 1 个操作数之前 ⇒ 落点仍是 7；停机原因是异常，文本是除零。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x55, {{9, 0}, {0, 7}});
+        emit_instruction(bytes, 0x53, {{9, 0}, {0, 1}, {0, 0}});
+        emit_instruction(bytes, 2, {});
+        const auto obs = run_cell(bytes, 2);
+        if (obs.ran) return fail("0x53 除数为 0 却没有中止");
+        if (obs.reason != core::StopReason::Error) return fail("0x53 除零的停机原因不是异常档");
+        if (obs.message.rfind("divide-by-zero", 0) != 0) {
+            std::fprintf(stderr, "错误文本：%s\n", obs.message.c_str());
+            return fail("0x53 除零的错误文本不对");
+        }
+        if (obs.value != 7) {
+            std::fprintf(stderr, "0x53 除零之后落点 = %d（期望仍是 7）\n", obs.value);
+            return fail("除零中止之前就写了落点");
+        }
+    }
+    // 0x54 除零同样在写落点之前中止（同一条正文句子的另一半）。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x55, {{9, 0}, {0, 7}});
+        emit_instruction(bytes, 0x54, {{9, 0}, {0, 1}, {0, 0}});
+        emit_instruction(bytes, 2, {});
+        const auto obs = run_cell(bytes, 2);
+        if (obs.ran) return fail("0x54 除数为 0 却没有中止");
+        if (obs.reason != core::StopReason::Error) return fail("0x54 除零的停机原因不是异常档");
+        if (obs.message.rfind("mod-by-zero", 0) != 0) {
+            std::fprintf(stderr, "错误文本：%s\n", obs.message.c_str());
+            return fail("0x54 除零的错误文本不对");
+        }
+        if (obs.value != 7) return fail("0x54 除零中止之前就写了落点");
+    }
+    return true;
+}
+
+// ── `0x205` 的格式化与横向落点（`CORE-OPS-RENDER-NUMTEXT-205`；正文 `60-ops-render.md:205-218`）──
+// ★ 为什么单列一条：`emulator-core-render-prims` 的 0x205 段是**差分像素** —— 把期望串用 `0x204`
+//   画在同一后端的同一画布上，再要求两边整块像素相同。那是**投影一致**：两侧共用同一套字形映射时，
+//   共同的错会一起相等；而且它整段包在"有没有字体后端"里，没有后端就判不了。这条用例直接断言
+//   **格式化出的字节串**与**算出的 x**，两种病都堵得上，且**不依赖字体后端**。
+// 正文原句 → 机械判据（左 = 输入，右 = 精确值）：
+//   · 「数字位数超过可用数字格 ⇒ 丢掉高位数字」(:208)：2 格 12345 ⇒ `45`；
+//   · 「横向位置 = 第 2 个操作数 + 未用格数 × 格宽 × k，算术都是整除、向零截断」(:212)；
+//   · 「右齐（缺省）⇒ 全角 未用格数 × 格宽、半角 ÷ 2；居中（0x2）⇒ 全角 ÷ 2、半角 ÷ 4；
+//     左齐（0x4 且未置 0x2）⇒ 0」(:215)：4 格 1 位、格宽 20 ⇒ 30 / 15 / 0；
+//   · 「引擎**先乘后除**」（`0x4074c0` / `0x407483`）⇒ 4 格 77、格宽 15 ⇒ 2×15×2÷4 = 15（先除半得 7）；
+//   · 「`#` 的唯一入口：有符号且格数 < 2」(:209)：1 格 / 0 格 + 0x8 ⇒ `#`；
+//   · 「无符号且格数 ≤ 0 ⇒ 空串（不画、不报错）」(:209)：格数 0 ⇒ ``；
+//   · 「0x10 优先于 0x20」(:206) ⇒ 零 + 0x10|0x20 ⇒ `+0`；「0x10 / 0x20 只对零」(:235) ⇒ 5 + 0x10 ⇒ `5`；
+//   · 「负值一律 `-`（即使置了 0x8）」(:235) ⇒ −5 + 0x8 ⇒ `-5`；
+//   · 「0x1 ⇒ 数字补零补满可用数字格」(:207) ⇒ 3 格 7 ⇒ `007`；
+//   · 「不置 0x10000 ⇒ 每个字符就地扩成全角」(:210) ⇒ 77 ⇒ 0x8256 0x8256。
+bool check_numtext_layout(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "numtext-layout-0x205: %s\n", what);
+        return false;
+    };
+    // ── ① 表驱动：纯函数 `layout_num_text(value, cells, flags, anchor_x, cell_width)` ──
+    struct Row {
+        std::int32_t value;
+        std::int32_t cells;
+        std::int32_t flags;
+        std::int32_t anchor_x;
+        int cell_width;
+        const char* ascii;  // 期望格式化串（ASCII）
+        int chars;          // 期望已写字符数
+        int x;              // 期望横向落点
+        const char* sjis;   // 期望最终字节串；nullptr = 只判"半角档 sjis == ascii"
+        const char* what;   // 失败时说的话（这条在防什么坏）
+    };
+    const Row rows[] = {
+        {12345, 2, 0x10000, 0, 20, "45", 2, 0, nullptr,
+         "2 格 12345 应当丢高位只留 \"45\"（⛔ 不是 \"#\"、也不是 \"12\""},
+        {7, 4, 0x10000, 0, 20, "7", 1, 30, nullptr,
+         "右齐（缺省）+ 半角：4 格 1 位 ⇒ 3×20×2÷4 = 30"},
+        {7, 4, 0x10000 | 0x2, 0, 20, "7", 1, 15, nullptr,
+         "居中（0x2）+ 半角：3×20×1÷4 = 15"},
+        {7, 4, 0x10000 | 0x4, 0, 20, "7", 1, 0, nullptr,
+         "左齐（0x4）：x 不动（⛔ 不是半格 / 全格）"},
+        {7, 4, 0x10000 | 0x2 | 0x4, 0, 20, "7", 1, 15, nullptr,
+         "0x2 与 0x4 同时置位 ⇒ 按居中（0x2 优先）"},
+        {77, 4, 0x10000, 0, 15, "77", 2, 15, nullptr,
+         "奇数格宽先乘后除：2×15×2÷4 = 15（先把格宽除半会得 7）"},
+        {7, 1, 0x8, 0, 20, "#", 1, 0, "\x81\x94",
+         "有符号且格数 = 1 ⇒ 单个 '#'（全角 0x8194），未用格数夹到 0"},
+        {7, 0, 0x8, 0, 20, "#", 1, 0, nullptr,
+         "有符号且格数 = 0 ⇒ 单个 '#'（未用格数不是负数）"},
+        {7, 0, 0, 0, 20, "", 0, 0, "",
+         "无符号且格数 = 0 ⇒ 空串（不画、不报错）"},
+        {0, 2, 0x10 | 0x20, 0, 20, "+0", 2, 0, "\x81\x7B\x82\x4F",
+         "零 + 0x10|0x20 ⇒ '+'（0x10 优先），全角 0x817B 0x824F"},
+        // ★ 下面两行单独钉住两个位各自的语义：只有它们在场，"把 0x10 与 0x20 的位对调"才会红
+        //   （两位同时置时 '+' 仍成立，单看那一行抓不到位对调）。
+        {0, 2, 0x10, 0, 20, "+0", 2, 0, nullptr,
+         "零 + 0x10 ⇒ '+'（0x20 才管负号）"},
+        {0, 2, 0x20, 0, 20, "-0", 2, 0, "\x81\x7C\x82\x4F",
+         "零 + 0x20 ⇒ '-'（全角 0x817C 0x824F）"},
+        {5, 3, 0x10, 0, 20, "5", 1, 40, nullptr,
+         "0x10 只对零生效：5 仍然只有一位；全角右齐 ⇒ 2×20 = 40"},
+        {-5, 3, 0x8, 0, 20, "-5", 2, 20, "\x81\x7C\x82\x54",
+         "负值一律 '-'（即使置了 0x8）；未用 1 格 ⇒ 20；全角 0x817C 0x8254"},
+        {7, 3, 0x10000 | 0x1, 0, 20, "007", 3, 0, nullptr,
+         "0x1 补零补满可用数字格（3 格 ⇒ \"007\"）"},
+        {77, 4, 0, 0, 20, "77", 2, 40, "\x82\x56\x82\x56",
+         "不置 0x10000 ⇒ 每个字符就地扩成全角（'7' ⇒ 0x8256）；未用 2 格 ⇒ 40"},
+    };
+    for (const Row& row : rows) {
+        const auto layout =
+            core::layout_num_text(row.value, row.cells, row.flags, row.anchor_x, row.cell_width);
+        if (layout.ascii != row.ascii) {
+            std::fprintf(stderr,
+                         "value=%d cells=%d flags=0x%X anchor=%d cell_width=%d ⇒ ascii=\"%s\"（期望 \"%s\"）\n",
+                         row.value, row.cells, row.flags, row.anchor_x, row.cell_width,
+                         layout.ascii.c_str(), row.ascii);
+            return fail(row.what);
+        }
+        if (layout.chars != row.chars) {
+            std::fprintf(stderr, "value=%d cells=%d flags=0x%X ⇒ chars=%d（期望 %d）\n", row.value,
+                         row.cells, row.flags, layout.chars, row.chars);
+            return fail(row.what);
+        }
+        if (layout.x != row.x) {
+            std::fprintf(stderr,
+                         "value=%d cells=%d flags=0x%X anchor=%d cell_width=%d ⇒ x=%d（期望 %d）\n",
+                         row.value, row.cells, row.flags, row.anchor_x, row.cell_width, layout.x,
+                         row.x);
+            return fail(row.what);
+        }
+        if (row.sjis != nullptr) {
+            if (layout.sjis != row.sjis) {
+                std::fprintf(stderr, "value=%d cells=%d flags=0x%X ⇒ sjis 字节数 %zu（期望 %zu）\n",
+                             row.value, row.cells, row.flags, layout.sjis.size(),
+                             std::strlen(row.sjis));
+                return fail(row.what);
+            }
+        } else if ((row.flags & 0x10000) != 0 && layout.sjis != layout.ascii) {
+            // 半角档：`0x10000` ⇒ 文本按半角 ASCII 落字（正文 :210）
+            return fail("置了 0x10000 的档，sjis 必须与 ascii 逐字节相同");
+        }
+        if ((row.flags & 0x10000) == 0 && layout.sjis.size() != layout.ascii.size() * 2) {
+            // 全角档：每个 ASCII 字符 ⇒ 两个 S-JIS 字节（本表只用 0-9 / '-' / '+' / '#'）
+            return fail("全角档的 sjis 长度不是 ascii 的两倍（有字符没走全角映射）");
+        }
+    }
+    // ── ② 接线：`op_205` 真的调用纯函数、并把结果存进观察口（参数顺序写反 ⇒ 这里红）──
+    // ★ 这一档**不需要纹理、也不需要字体后端**：格数 = 0 ⇒ 空串档 ⇒ 三条入口条件的第一条就挡住绘制。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x205, {{0, 1}, {0, 0}, {0, 10}, {0, 1234}, {0, 0}, {0, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x205 的空串档停机了（不画、不报错）");
+        if (machine.halted()) return fail("0x205 的空串档让引擎停了");
+        const auto& layout = machine.last_num_text_layout();
+        if (!layout.ascii.empty() || layout.chars != 0 || layout.x != 0) {
+            std::fprintf(stderr, "空串档 ascii=\"%s\" chars=%d x=%d\n", layout.ascii.c_str(),
+                         layout.chars, layout.x);
+            return fail("0x205 的空串档没有把 layout 记成空（或观察口压根没写）");
+        }
+        if (!machine.errors().empty()) return fail("0x205 的空串档写了错误通道");
+    }
+    // ── ③ 参数顺序 + 格宽来源：op2 = 字段原点、op5 = 格数、op6 = 格式位、op4 = 值；
+    //    格宽 = `0x75` 写的 A 支字号（这里 20）⇒ 4 格 7、半角、右齐、原点 10 ⇒ x = 10 + 3×20×2÷4 = 40。
+    //    槽里没有纹理对象 ⇒ 不画（同样不需要字体后端），但 layout 必须已经算出来。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x205, {{0, 1}, {0, 10}, {0, 10}, {0, 7}, {0, 4}, {0, 0x10000}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x75 停机了（格宽的前置）");
+        if (!machine.step()) return fail("槽里没有纹理时 0x205 停机了（三条入口条件之一应静默跳过）");
+        if (machine.halted()) return fail("槽里没有纹理时 0x205 让引擎停了");
+        const auto& layout = machine.last_num_text_layout();
+        if (layout.ascii != "7" || layout.chars != 1 || layout.x != 40 || layout.sjis != "7") {
+            std::fprintf(stderr, "接线档 ascii=\"%s\" chars=%d x=%d sjis=%zu 字节\n",
+                         layout.ascii.c_str(), layout.chars, layout.x, layout.sjis.size());
+            return fail("0x205 的 layout 与它的操作数 / 格宽对不上（参数顺序或格宽来源写错）");
+        }
+        if (!machine.errors().empty()) return fail("槽里没有纹理时 0x205 写了错误通道");
+    }
+    // ── ④ 格宽来源 = **字号格本身**，⛔ 没有缺省值：`0x75(0)` 之后 4 格 7、半角、右齐、原点 10 ⇒
+    //    x **必须等于 anchor**（未用格数 × 0 = 0）。旧实现给"字号格 ≤ 0 ⇒ 8"的缺省 ⇒ x = 22 ⇒ 本条红。
+    //    ★ 这条钉的是「正文没有这个 8」：格宽取字号格，字号格是 0 就乘出 0。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x75, {{0, 0}});
+        emit_instruction(bytes, 0x205, {{0, 1}, {0, 10}, {0, 10}, {0, 7}, {0, 4}, {0, 0x10000}});
+        emit_instruction(bytes, 2, {});
+        core::Machine machine(key, table);
+        machine.load_root(bytes);
+        if (!machine.step()) return fail("0x75(0) 停机了（字号格 0 的前置）");
+        if (!machine.step()) return fail("字号格为 0 时 0x205 停机了");
+        const auto& layout = machine.last_num_text_layout();
+        if (layout.ascii != "7" || layout.x != 10) {
+            std::fprintf(stderr, "字号格 0 ⇒ ascii=\"%s\" x=%d（期望 \"7\" / 10）\n",
+                         layout.ascii.c_str(), layout.x);
+            return fail("字号格 = 0 时 x 不等于 anchor（给格宽补了一个正文没有的缺省值）");
+        }
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
     // `--only-audio`：只跑音效 / 配音那条子集（供一条**独立注册**的 CTest 用）。
     // ★ 为什么要单独一个用例：spec 的证据要求"点得到某条用例"，而聚合的自检只有一个名字 ——
@@ -11384,6 +13747,7 @@ int main(int argc, char** argv) {
     bool only_adv_text_bit27 = false;
     bool only_font_pairs = false;
     bool only_font_scale = false;
+    bool only_font_measure_wired = false;
     bool only_key_tables = false;
     bool only_input_composition = false;
     bool only_text_container = false;
@@ -11394,6 +13758,19 @@ int main(int argc, char** argv) {
     bool only_se_stop = false;
     bool only_event_library = false;
     bool only_output_object = false;
+    bool only_forward_field = false;
+    bool only_address_wrap = false;
+    bool only_numeric_family = false;
+    bool only_numtext_layout = false;
+    bool only_display_state = false;
+    bool only_texture_bit = false;
+    bool only_mouse_pump_entry = false;
+    bool only_getbit_nowrite = false;
+    bool only_key_table_b = false;
+    bool only_dispatch_default_read = false;
+    bool only_joy_axis = false;
+    bool only_hit_wrap = false;
+    bool only_touch_buffer = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--only-audio") == 0) only_audio = true;
         else if (std::strcmp(argv[i], "--only-font") == 0) only_font = true;
@@ -11441,6 +13818,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-adv-text-bit27") == 0) only_adv_text_bit27 = true;
         else if (std::strcmp(argv[i], "--only-font-pairs") == 0) only_font_pairs = true;
         else if (std::strcmp(argv[i], "--only-font-scale") == 0) only_font_scale = true;
+        else if (std::strcmp(argv[i], "--only-font-measure-wired") == 0) only_font_measure_wired = true;
         else if (std::strcmp(argv[i], "--only-key-tables") == 0) only_key_tables = true;
         else if (std::strcmp(argv[i], "--only-input-composition") == 0) only_input_composition = true;
         else if (std::strcmp(argv[i], "--only-text-container") == 0) only_text_container = true;
@@ -11451,6 +13829,19 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-se-stop") == 0) only_se_stop = true;
         else if (std::strcmp(argv[i], "--only-event-library") == 0) only_event_library = true;
         else if (std::strcmp(argv[i], "--only-output-object") == 0) only_output_object = true;
+        else if (std::strcmp(argv[i], "--only-forward-field") == 0) only_forward_field = true;
+        else if (std::strcmp(argv[i], "--only-address-wrap") == 0) only_address_wrap = true;
+        else if (std::strcmp(argv[i], "--only-numeric-family") == 0) only_numeric_family = true;
+        else if (std::strcmp(argv[i], "--only-numtext-layout") == 0) only_numtext_layout = true;
+        else if (std::strcmp(argv[i], "--only-display-state") == 0) only_display_state = true;
+        else if (std::strcmp(argv[i], "--only-texture-bit") == 0) only_texture_bit = true;
+        else if (std::strcmp(argv[i], "--only-mouse-pump-entry") == 0) only_mouse_pump_entry = true;
+        else if (std::strcmp(argv[i], "--only-getbit-nowrite") == 0) only_getbit_nowrite = true;
+        else if (std::strcmp(argv[i], "--only-key-table-b") == 0) only_key_table_b = true;
+        else if (std::strcmp(argv[i], "--only-dispatch-default-read") == 0) only_dispatch_default_read = true;
+        else if (std::strcmp(argv[i], "--only-joy-axis") == 0) only_joy_axis = true;
+        else if (std::strcmp(argv[i], "--only-hit-wrap") == 0) only_hit_wrap = true;
+        else if (std::strcmp(argv[i], "--only-touch-buffer") == 0) only_touch_buffer = true;
         else {
             // ★ 拼错的子集开关必须当场失败：否则它会静默跑**全套**，CTest 照样绿（本条自检踩过）。
             std::fprintf(stderr, "core-selftest: unknown argument: %s\n", argv[i]);
@@ -11627,6 +14018,13 @@ int main(int argc, char** argv) {
             std::printf("core-selftest(font-scale): PASS\n");
             return 0;
         }
+        if (only_font_measure_wired) {
+            // 字体度量的**产品接线**（`CORE-OPS-FORWARD-PROLOGUE`「非 0 支的下一格来自度量」）：
+            // 一次派生两次度量 / 写回取自第二次 / 两次请求面名不同 / `wire_platform_fonts` 真的装上后端。
+            if (!check_font_measure_wired(table)) return 1;
+            std::printf("core-selftest(font-measure-wired): PASS\n");
+            return 0;
+        }
         if (only_key_tables) {
             // `0x10c` 三张表：① 不碰、② 只读、③ 写；无符号值 > 31 抛固定文本；读序 2 → 1。
             if (!check_key_tables_10c(table)) return 1;
@@ -11684,6 +14082,95 @@ int main(int argc, char** argv) {
             // 输出对象三项：追加 / 位置前缀追加 / 报告（日志逐字 + 根错误处理）。
             if (!check_output_object_report(table)) return 1;
             std::printf("core-selftest(output-object): PASS\n");
+            return 0;
+        }
+        if (only_forward_field) {
+            // `0x324`（`CORE-OPS-FORWARD-FIELD`）：复位接收者（三引用清空 + 标记清 0）、
+            // 只动接收者自己的状态；接收者为空 ⇒ 只记一次请求、不发明行为。
+            if (!check_forward_field_324(table)) return 1;
+            std::printf("core-selftest(forward-field): PASS\n");
+            return 0;
+        }
+        if (only_address_wrap) {
+            // `0x61` / `0x12c`（`CORE-OPS-ARRAY-LOOKUP` / `-2D`）：地址算术 32 位回绕、
+            // 步长来自落点族（4 / 28）、2D 先乘后加、落点值族 ⇒ 类型异常且一格未写。
+            if (!check_array_lookup_address_wrap(table)) return 1;
+            std::printf("core-selftest(address-wrap): PASS\n");
+            return 0;
+        }
+        if (only_numeric_family) {
+            // `0x52`..`0x5f`（`CORE-OPS-NUMERIC-ARITH` / `-COMPARE`）：32 位截断 / 向零截断 /
+            // 余数随被除数 / 位数取低 5 位 / 算术右移 / 有符号比较 / 真值只 1,0 / 除零不写落点。
+            if (!check_numeric_family_52_5f(table)) return 1;
+            std::printf("core-selftest(numeric-family): PASS\n");
+            return 0;
+        }
+        if (only_numtext_layout) {
+            // `0x205`（`CORE-OPS-RENDER-NUMTEXT-205`）：格式化（丢高位 / `#` / 补零 / 符号 / 全角化）
+            // 与横向落点（三档 k / 先乘后除），**不依赖字体后端**；外加 op_205 的接线（参数顺序 / 格宽）。
+            if (!check_numtext_layout(table)) return 1;
+            std::printf("core-selftest(numtext-layout): PASS\n");
+            return 0;
+        }
+        if (only_display_state) {
+            // `0x25b`（`CORE-OPS-RENDER-DISPLAY-STATE-25B`）：显示状态三格 + 载图 / 外枠两条请求 +
+            // 重发①（切回窗口态后按状态三支走，含负图像号的黑底替代）。
+            if (!check_display_state_25b(table)) return 1;
+            std::printf("core-selftest(display-state-25b): PASS\n");
+            return 0;
+        }
+        if (only_mouse_pump_entry) {
+            // 鼠标回调泵的**唯一入口**（`CORE-INPUT-MOUSE-CALLBACK-PUMP`）：一次派发 = 泵本体进入
+            // 恰一次 / 没有 0xcd 的 200 拍里一次都不进 / 越闸（第 27 位）不改成"闸门常开"。
+            if (!check_mouse_pump_single_entry(table)) return 1;
+            std::printf("core-selftest(mouse-pump-entry): PASS\n");
+            return 0;
+        }
+        if (only_getbit_nowrite) {
+            // `0x13f` 越界**不写落点**（`CORE-OPS-BIT-TEST`）：落点预置 −1 / 位号 32 ⇒ 仍是 −1；
+            // 界内位号 0 照常写 1 与 0；负控制（换成会写落点的指令）⇒ 落点变。
+            if (!check_getbit_nowrite(table)) return 1;
+            std::printf("core-selftest(getbit-nowrite): PASS\n");
+            return 0;
+        }
+        if (only_key_table_b) {
+            // 表 B（逻辑键 → 系统键码）的 93 条初值 + 七个默认槽 + 表内未写到的格 = 0 + 表外未定义。
+            if (!check_scalar_key_table_b(table)) return 1;
+            std::printf("core-selftest(key-table-b): PASS\n");
+            return 0;
+        }
+        if (only_dispatch_default_read) {
+            // `0xa3` 派发：命中 ⇒ 登记值 / 未命中 ⇒ 默认位置；"判据先于读"；登记值 0 仍命中；
+            // 同一条按格重入 > 1 次即红（预算内的执行足迹）。
+            if (!check_dispatch_default_read(table)) return 1;
+            std::printf("core-selftest(dispatch-default-read): PASS\n");
+            return 0;
+        }
+        if (only_joy_axis) {
+            // `CORE-INPUT-WORD` 的摇杆半段：四条阈值（范围 + 初始化轴位置 ÷2 向零截断、**只采一次**）、
+            // 每条轴 / 每个方向的位、严格比较、无符号、20ms 缓存、「忽略摇杆」门只挡轴。
+            if (!check_input_joy_axis(table)) return 1;
+            std::printf("core-selftest(joy-axis): PASS\n");
+            return 0;
+        }
+        if (only_hit_wrap) {
+            // `CORE-INPUT-HIT-TEST-12E` 的三个 32 位回绕端点（start 最大正数 / start ≤ −2 / count 回绕）。
+            if (!check_input_hit_wrap(table)) return 1;
+            std::printf("core-selftest(hit-wrap): PASS\n");
+            return 0;
+        }
+        if (only_touch_buffer) {
+            // `CORE-INPUT-TOUCH-POINT`：每条触摸消息整体重建（点数 N→M 后容量 = M）、有效性两位、
+            // 两个附加字段原样、坐标 ÷100 向零截断、不设容量上限。
+            if (!check_input_touch_buffer(table)) return 1;
+            std::printf("core-selftest(touch-buffer): PASS\n");
+            return 0;
+        }
+        if (only_texture_bit) {
+            // `display:TextureBit` 的三档 + **缺省来源**（`CORE-OPS-TEXTURE-LOAD` / `-SET`）：
+            // 构造期写 32 / 读取端不替换 / 16 与 32 成功 / 0 与 24 落第三档 / 失败发生在建表面之后。
+            if (!check_texture_bit_default_source(table)) return 1;
+            std::printf("core-selftest(texture-bit-default-source): PASS\n");
             return 0;
         }
         if (only_glyph) {
@@ -13308,6 +15795,7 @@ int main(int argc, char** argv) {
         if (!check_input_composition(table)) return 1;
         if (!check_text_container_and_font_names(table)) return 1;
         if (!check_texture_set(table)) return 1;
+        if (!check_texture_bit_default_source(table)) return 1;
         if (!check_text_layer_mode_gate(table)) return 1;
         if (!check_frame_flow(table)) return 1;
         if (!check_input_devices(table)) return 1;
@@ -13319,6 +15807,9 @@ int main(int argc, char** argv) {
         if (!check_save_ops(table)) return 1;
         if (!check_input_hold(table)) return 1;
         if (!check_mouse_and_hit_test(table)) return 1;
+        if (!check_input_joy_axis(table)) return 1;
+        if (!check_input_hit_wrap(table)) return 1;
+        if (!check_input_touch_buffer(table)) return 1;
         if (!check_exit_cleanup(table)) return 1;
         if (!check_config_ui_surface(table)) return 1;
         if (!check_color_normalization(table)) return 1;
@@ -13340,6 +15831,8 @@ int main(int argc, char** argv) {
         if (!check_font_pairs_1a5_2fe(table)) return 1;
         if (!check_font_scale_build(table)) return 1;
         if (!check_key_tables_10c(table)) return 1;
+        if (!check_scalar_key_table_b(table)) return 1;
+        if (!check_dispatch_default_read(table)) return 1;
         if (!check_rembit_arg_invalid(table)) return 1;
         if (!check_setbit_arg_invalid(table)) return 1;
         if (!check_getbit_arg_invalid(table)) return 1;

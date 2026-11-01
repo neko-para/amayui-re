@@ -186,6 +186,58 @@ bool gdi_font_ascent(const std::wstring& face, int size, int weight, int* ascent
 #endif
 }
 
+bool gdi_font_metrics(const std::wstring& face, int size, int weight, std::uint32_t codepoint,
+                      GdiFontMetrics* out) {
+#ifdef _WIN32
+    if (out == nullptr) return false;
+    if (size <= 0) return false;
+    if (!ensure_font(face, size, weight)) return false;
+    HDC dc = state().dc;
+    TEXTMETRICW metrics{};
+    if (GetTextMetricsW(dc, &metrics) == 0) return false;
+    // CP932 码元 → UTF-16（前导字节在前）。引擎把同一个码元交给 ANSI 版 API；这里走 W 版，
+    // 避开宿主代码页（**不是**语义差异）。
+    char bytes[2];
+    int length = 0;
+    if (codepoint <= 0xFF) {
+        bytes[0] = static_cast<char>(codepoint & 0xFF);
+        length = 1;
+    } else {
+        bytes[0] = static_cast<char>((codepoint >> 8) & 0xFF);
+        bytes[1] = static_cast<char>(codepoint & 0xFF);
+        length = 2;
+    }
+    wchar_t wide[8]{};
+    const int produced = MultiByteToWideChar(932, 0, bytes, length, wide, 8);
+    if (produced <= 0) return false;
+    // 字形黑框：与 `gdi_load_glyph` 是同一个平台出参（`GetGlyphOutlineW` 的 `GLYPHMETRICS`）。
+    // ★ `GGO_BITMAP` 只用来取**度量**（黑框尺寸与平台的格式无关），不读像素。
+    MAT2 transform{};
+    transform.eM11.value = 1;
+    transform.eM22.value = 1;
+    GLYPHMETRICS glyph_metrics{};
+    if (GetGlyphOutlineW(dc, static_cast<UINT>(wide[0]), GGO_BITMAP, &glyph_metrics, 0, nullptr,
+                         &transform) == GDI_ERROR) {
+        return false;
+    }
+    // 量度框宽：同一个字的 extent（与黑框是两侧口径：黑框是墨迹，extent 是推进格）。
+    SIZE extent{};
+    if (GetTextExtentPoint32W(dc, wide, produced, &extent) == 0) return false;
+    out->line_height = static_cast<int>(metrics.tmHeight);
+    out->average_width = static_cast<int>(metrics.tmAveCharWidth);
+    out->glyph_box_width = static_cast<int>(glyph_metrics.gmBlackBoxX);
+    out->measured_box_width = static_cast<int>(extent.cx);
+    return true;
+#else
+    (void)face;
+    (void)size;
+    (void)weight;
+    (void)codepoint;
+    (void)out;
+    return false;
+#endif
+}
+
 bool gdi_load_glyph(const std::wstring& face, int size, int weight, GdiFormat format,
                     std::uint32_t codepoint, GdiGlyph* out) {
 #ifdef _WIN32

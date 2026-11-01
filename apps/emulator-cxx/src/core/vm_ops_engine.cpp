@@ -130,6 +130,29 @@ void Machine::apply_display_mode(std::int32_t target) {
     config_.set_int("display:ScreenMode", display_mode_cache_ != 0 ? 1 : 0);
     // 条件写：`set:SaveWinPos` 为真且**旧缓存**非 0 时，引擎还会写窗口位置两键；那两个值来自平台窗口，
     // core 没有窗口 ⇒ 本版**不写**（残差 `RES-OPS-2CF-WINPOS`）。
+    // ── 重发①（`CORE-OPS-RENDER-DISPLAY-STATE-25B`）：**切回窗口态之后**按显示状态三支重发 ──────────
+    // 「切换显示模式」把"外部资源重载"排除在它自己之外，这里就是那个重载；⛔ 全屏态不重发。
+    // ★ 两个早退支已经 return ⇒ 走到这里一定是**真的切到了窗口态**。
+    if (display_mode_cache_ != 0) return;
+    if (display_state_ == 2) {
+        if (display_image_number_ >= 0) {
+            request_display_image(display_image_number_);  // 状态 2 + 图像号 ≥ 0 ⇒ 用图像号格重发载图
+            return;
+        }
+        // 状态 2 + 图像号 < 0 ⇒ **黑底替代**：错误通道一条 → 显示状态 ← 1、外枠编号 ← 0 → 按 0 发外枠请求。
+        // ★ 负号分支**只挂在状态 2 上**（`CORE-OPS-RENDER-DISPLAY-STATE-25B` 的「黑底替代」一条）；这条支写显示状态，所以之后再重发都走状态 1 那支。
+        report_error("外枠用ビットマップを読み込めませんでした。黒で代替します。");
+        display_state_ = 1;
+        outer_frame_number_ = 0;
+        request_outer_frame(0);
+        return;
+    }
+    if (display_state_ == 1) {
+        // 状态 1 ⇒ 用**外枠编号格**的值重发一次外枠纹理请求；⛔ 不看图像号、⛔ 不检查外枠编号的正负。
+        request_outer_frame(outer_frame_number_);
+        return;
+    }
+    // 其它值（含初值 0）⇒ 什么都不做（`CORE-OPS-RENDER-DISPLAY-STATE-25B` 的三支之一）。
     return;
 }
 
@@ -713,7 +736,47 @@ void Machine::op_260(const Instruction& instruction) {
 
 void Machine::op_25b(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    scalar_25b_b_ = read_int(ops[0]); scalar_25b_a_ = 2; return;
+    // 设置显示状态与图像号（`0x25B` / `sub_425E20`；规则 `CORE-OPS-RENDER-DISPLAY-STATE-25B`，
+    // `60-ops-render.md` 的「显示状态与两条重发路径」，这里逐句照做）：
+    // 1. 显示状态格 ← **2**（无条件；⛔ 不许因为"全屏"就跳过记录状态与号）；
+    // 2. 当前图像号格 ← 该操作数（无条件）；
+    // 3. **只有显示模式缓存 = 0（窗口态）**时才按同一个图像号发一次载图请求；**全屏态不载**。
+    // ★ 判据是**缓存 = 0**，不是"有没有窗口"、也不是去查命名键（同一规则「载图的门」那句）。
+    // ★ 读一次、写格与载入都用这**同一个值**（同一规则的「读一次、用同一个值」句；⛔ 不许读两次不同来源）。
+    // ★ 不写操作数、不报错、无范围检查、不校验图像是否存在（同一规则的成立条件）⇒ 负号在这一步**照传**。
+    const auto image_number = read_int(ops[0]);
+    display_state_ = 2;
+    display_image_number_ = image_number;
+    if (display_mode_cache_ == 0) request_display_image(image_number);
+    return;
+}
+
+void Machine::request_display_image(std::int32_t image_number) {
+    // 载图请求（`CORE-OPS-RENDER-DISPLAY-STATE-25B` 的「画图像号指出的那张」/ 重发① / 恢复路径）：
+    // **只发请求**。
+    // ★ core 不实现图像解码：图像号 → 文件的映射**正文没写** ⇒ 查它是发明规则（`apps/emulator-cxx/SCOPE.md`）。
+    // ★ 号**原样**交出去：两条路径都不在本函数里判符号（负号的处理属调用方 —— 只有重发① 的状态 2 支
+    //   才把它换成本条的错误通道 + 黑底替代，同一规则的「黑底替代」一条）。
+    ++display_image_loads_;
+    if (display_image_loader_) display_image_loader_(image_number);
+    return;
+}
+
+void Machine::request_outer_frame(std::int32_t frame_number) {
+    // 外枠纹理请求（`CORE-OPS-RENDER-DISPLAY-STATE-25B` 的「画外枠编号那张」）：
+    // 实参 = 矩形 `(0, 0, 宽, 高)` + 常量 `0xFF` + **外枠编号本身**。
+    // ★ 编号**不是资源索引**（取证：它被并进填充色的 RGB 低 24 位，`0xFF` 是 alpha）⇒ 本模型只把号传下去。
+    // ★ 宽 / 高 = **目标画面区**尺寸，⛔ 不是客户区：本模型没有渲染器对象 ⇒ core 只填原点与常量，
+    //   宽 / 高由宿主在自己的接缝实现里补（见 `OuterFrameRequest` 的注释）。
+    // ★ 失败（宿主报创建 / 请求失败 / 没有后端）**不抛异常、不改显示状态与外枠编号格**（正文同条）：
+    //   这里没有后端就什么都不做，⛔ 不发明"缺后端 ⇒ 写错误通道"。
+    ++outer_frame_requests_;
+    if (!outer_frame_requester_) return;
+    OuterFrameRequest request;
+    request.frame_number = frame_number;
+    request.constant = 0xFF;
+    outer_frame_requester_(request);
+    return;
 }
 
 void Machine::op_130(const Instruction& instruction) {

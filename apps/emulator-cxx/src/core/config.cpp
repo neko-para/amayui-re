@@ -222,6 +222,12 @@ void ConfigStore::register_engine_defaults() {
         //     总开关 `set:EnableAntiFont` 构造期登记 0（键 @0x492790 / 值 @0x492797）、由发行默认表盖成 1。
         {"message:UseAntiFont", 1},    // 0x491F59
         {"message:AntiFontLevel", 0},  // 0x492A0B
+        // ★ 显示位深键的缺省**不在读取端**（`CORE-OPS-TEXTURE-LOAD` / `-SET` 三档里没有"缺键"这一档）：
+        //   构造期就把内建默认 32 写进命名键表（`0x491E37` 键名 / `0x491E3E` 立即数 20h /
+        //   `0x491E48` 写库），早于设备建立（`0x4BAA2E` 构造 → `0x4BB40D` 显示初始化）。
+        //   ⇒ 引擎自身流程里"缺键"**不可达**，读取器缺键返回 0（那是配置库那条规则的后果，读到的
+        //   0 与"显式写 0"同值同后果）。⛔ 不许把它挪进上传路径当缺省值。
+        {"display:TextureBit", 32},  // 0x491E3E
     };
     for (const auto& builtin : kBuiltins) {
         if (named_.find(builtin.key) != named_.end()) continue;

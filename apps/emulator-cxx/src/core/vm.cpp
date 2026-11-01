@@ -78,41 +78,61 @@ Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install*
     }
     // ③ 槽号 → 键号：`-1` = 未绑定（兄弟指令写 −1 解除绑定）。
     slot_key_table_.fill(-1);
-    // ★ 输入系统的初始化还把**槽 0..6 绑到这 7 个固定逻辑键**（顺序同上面的表）：`0xfd` 的"解绑该槽
-    //   当前逻辑键的键码"要靠这条绑定才成立（spec 的可证伪条：`0xfd` 把槽 0 改绑 Enter 之后，
-    //   按 ↑ ⇒ 输入字里不再有第 0 位）。其余槽仍是"未绑定"（−1）。
-    slot_key_table_[0] = 24;  // ↑
-    slot_key_table_[1] = 25;  // →
-    slot_key_table_[2] = 26;  // ↓
-    slot_key_table_[3] = 27;  // ←
-    slot_key_table_[4] = 28;  // Enter
-    slot_key_table_[5] = 29;  // Space
-    slot_key_table_[6] = 30;  // Backspace
+    // ★ 输入系统的初始化还把**槽 0..6 绑到这 7 个固定逻辑键**（`CORE-OPS-SCALAR-TABLE-10C` 的
+    //   「七个默认槽依赖的逻辑键」）：槽 0..6 依次 = 200 / 205 / 208 / 203 / 28 / 57 / 14，
+    //   经表 B 换成系统键码 38 / 39 / 40 / 37 / 13 / 32 / 8（上 / 右 / 下 / 左 / Enter / Space /
+    //   Backspace）。`0xfd` 的"解绑该槽当前逻辑键的键码"要靠这条绑定才成立（spec 的可证伪条：
+    //   `0xfd` 把槽 0 改绑 Enter 之后，按 ↑ ⇒ 输入字里不再有第 0 位）。其余槽仍是"未绑定"（−1）。
+    slot_key_table_[0] = 200;  // ↑
+    slot_key_table_[1] = 205;  // →
+    slot_key_table_[2] = 208;  // ↓
+    slot_key_table_[3] = 203;  // ←
+    slot_key_table_[4] = 28;   // Enter
+    slot_key_table_[5] = 57;   // Space
+    slot_key_table_[6] = 14;   // Backspace
     // ── 输入系统的初始化（`CORE-INPUT-WORD` 的「各来源的位号合成」；⛔ 不是配置、不是脚本）──
-    // ① 系统键码表 256 项全 −1，再由「逻辑键号 → 系统键码」表登记 7 项**固定**映射。
-    //    ★ 逻辑键号的编号只有 `28 = Enter` 有观察（spec 的可证伪条）；其余 6 个的编号与"系统键码"
-    //      的取值（VK 码）是本实现的**选择**；引擎侧未定见残差 `RES-INPUT-LOGICAL-KEY-CODES`。
+    // ① 系统键码表 256 项全 −1；表 B（逻辑键 → 系统键码）是 **256 格**：整表清 0，再写
+    //    `CORE-OPS-SCALAR-TABLE-10C` 的「表 B 的初值」那 **93 个固定条目**（未列出的 163 格恒为 0
+    //    ⇒ 逻辑键号落到那些格时换成系统键码 0，与"逻辑键 0"同效）。
+    //    ★ 表 B 是**构造期的固定两段查表**、运行期没有第二个写者（配置与脚本都不碰它）。
     key_code_table_.fill(-1);
-    logical_key_codes_.clear();
+    logical_key_codes_.fill(0);
     {
-        struct SevenEntry {
-            std::int32_t logical_key;  // 逻辑键号
+        struct KeyCodeEntry {
+            std::int32_t logical_key;  // 逻辑键号（0..255）
             std::int32_t system_code;  // 系统键码（Win32 VK）
-            std::int32_t input_bit;    // 输入位号
         };
-        constexpr SevenEntry kSeven[] = {
-            {24, 0x26, 0},  // ↑ VK_UP      → 位 0
-            {25, 0x27, 1},  // → VK_RIGHT   → 位 1
-            {26, 0x28, 2},  // ↓ VK_DOWN    → 位 2
-            {27, 0x25, 3},  // ← VK_LEFT    → 位 3
-            {28, 0x0D, 4},  // Enter VK_RETURN → 位 4（逻辑键 28 = Enter，spec 有观察）
-            {29, 0x20, 5},  // Space VK_SPACE  → 位 5
-            {30, 0x08, 6},  // Backspace VK_BACK → 位 6
+        // ★ 逐条抄 `data/spec/chapters/60-ops-scalar.md` 的「表 B 的初值」（93 条；表内其余格 = 0）。
+        constexpr KeyCodeEntry kTableB[] = {
+            {1, 27},   {2, 49},   {3, 50},   {4, 51},   {5, 52},   {6, 53},
+            {7, 54},   {8, 55},   {9, 56},   {10, 57},  {11, 48},  {12, 109},
+            {14, 8},   {15, 9},   {16, 81},  {17, 87},  {18, 69},  {19, 82},
+            {20, 84},  {21, 89},  {22, 85},  {23, 73},  {24, 79},  {25, 80},
+            {28, 13},  {29, 17},  {30, 65},  {31, 83},  {32, 68},  {33, 70},
+            {34, 71},  {35, 72},  {36, 74},  {37, 75},  {38, 76},  {42, 16},
+            {44, 90},  {45, 88},  {46, 67},  {47, 86},  {48, 66},  {49, 78},
+            {50, 77},  {54, 16},  {56, 18},  {57, 32},  {59, 112}, {60, 113},
+            {61, 114}, {62, 115}, {63, 116}, {64, 117}, {65, 118}, {66, 119},
+            {67, 120}, {68, 121}, {69, 144}, {70, 145}, {71, 103}, {72, 104},
+            {73, 105}, {74, 109}, {75, 100}, {76, 101}, {77, 102}, {78, 107},
+            {79, 97},  {80, 98},  {81, 99},  {82, 96},  {83, 110}, {87, 122},
+            {88, 123}, {112, 21}, {121, 28}, {123, 29}, {148, 25}, {156, 13},
+            {157, 17}, {181, 111},{184, 18}, {199, 18}, {200, 38}, {201, 33},
+            {203, 37}, {205, 39}, {207, 35}, {208, 40}, {209, 34}, {210, 45},
+            {219, 91}, {220, 92}, {221, 93},
         };
-        for (const auto& entry : kSeven) {
-            logical_key_codes_[entry.logical_key] = entry.system_code;
-            key_code_table_[static_cast<std::size_t>(entry.system_code)] = entry.input_bit;
+        for (const auto& entry : kTableB) {
+            logical_key_codes_[static_cast<std::size_t>(entry.logical_key)] = entry.system_code;
         }
+    }
+    // 表 C 的七个默认项**不是硬编码的常数**：它们的系统键码来自表 B（`60-ops-input` 的
+    // 「键盘来源的键码表」—— 那 7 项经「逻辑键号 → 系统键码」的表取），这里按 表 A → 表 B 两段查表
+    // 把表 C 登记成 位 0..6（上 / 右 / 下 / 左 / Enter / Space / Backspace）。
+    // ★ 这 7 个逻辑键在表 B 里**必在**（⇒ 38 / 39 / 40 / 37 / 13 / 32 / 8）；改了槽绑定就必须同步表 B，
+    //   守卫 `spec_ops_scalar_key_table_b` 会当场红（它同时断言两段落点）。
+    for (std::int32_t slot = 0; slot < 7; ++slot) {
+        const auto code = logical_key_code(slot_key_table_[static_cast<std::size_t>(slot)]);
+        key_code_table_[static_cast<std::size_t>(code)] = slot;
     }
     // ② 键槽映射（`0x10b` 那张 32 格表）：初始化把它写成**各自的槽号**，另把槽 2 覆写成 30；
     //    组头的**槽数**写成 2。⇒ 槽 0 / 1 的基位号初值 0 / 1，鼠标左右键默认落输入位 4 / 5。

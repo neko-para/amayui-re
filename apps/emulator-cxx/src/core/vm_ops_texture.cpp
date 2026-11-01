@@ -449,17 +449,18 @@ void Machine::op_1f9(const Instruction& instruction) {
         entry.record.file = -1;  // 解码失败：槽已空、记录来源 = 无
         throw DisplayMessageError("texture-decode-failed", error.what());
     }
-    // ⑥ 建对象 + ⑦ 上传（外部请求）。目标表面的格式取自 `display:TextureBit`：
-    //    16 ⇒ A4R4G4B4（每通道 4 位）、32 ⇒ A8R8G8B8；其它值 ⇒ **上传失败**（对象已建出来、上传未完成）。
-    // ★ **配置没有这个键**时按设备侧的缺省 **32 位**：引擎读配置时会给一个调用方缺省值（那个常量本版
-    //   未取证），而发行默认表里没有这个键（它是玩家机型的键）⇒ 缺键当作 32，⛔ 不当成"非法值"。
+    // ⑥ 建对象 + ⑦ 上传（外部请求）。目标表面的格式取自 `display:TextureBit`（`CORE-OPS-TEXTURE-LOAD`）：
+    //    16 ⇒ A4R4G4B4（每通道 4 位）、32 ⇒ A8R8G8B8；其它任何整数 ⇒ **上传失败**（对象已建出来、
+    //    上传未完成）。
+    // ★ **读取端不做任何替换**：该键在引擎里**必有值** —— 配置库**构造期**就写了内建默认 32
+    //   （`register_engine_defaults`，EA 0x491E3E，早于设备建立）⇒ "缺键"在引擎自身流程里不可达；
+    //   而万一读到 0（缺键的读法，见配置库那条规则），它与"显式写 0"**同值同后果** ⇒ 落第三档失败。
+    //   ⛔ 不许把这里写成"缺键 ⇒ 32"或"非 16 一律按 32"（那等于给读取器补了一个缺省）。
     entry.slot.width = image.width;
     entry.slot.height = image.height;
     entry.slot.rgba = image.rgba;
     entry.slot.present = true;
-    const std::int32_t target_bits = config_.has_named("display:TextureBit")
-                                         ? config_.get_int("display:TextureBit")
-                                         : 32;
+    const std::int32_t target_bits = config_.get_int("display:TextureBit");
     if (target_bits != 16 && target_bits != 32) {
         entry.record.file = -1;  // 上传失败：槽里留着**未完成**的对象，记录来源 = 无
         throw DisplayMessageError("texture-upload-failed",

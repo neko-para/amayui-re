@@ -237,7 +237,7 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 `0x109` 恒写 −100000），`0x12e` 的命中查找因此不会进入。**无人值守要驱动 TITLE 的输入环，用 `--input-script`**
 （见下）：它把一份**指令式时间线**归约成引擎要的四个量（输入字 / 光标 / 按钮位图 / 触点），
 与 `apps/emulator-new` 的 `parseInputScript` 同一套语法。测试用 `set_input_word()` / `set_key_sampler()` /
-`set_touch_source()` 注入，⛔ 不要把这几个注入点当产品路径。
+`push_touch_message()` 注入，⛔ 不要把这几个注入点当产品路径。
 
 ★ **窗口路径已接键盘 + 鼠标**（不接摇杆）：`window.cpp` 每个外层迭代泵事件，
 `SDL_GetKeyboardState` → 输入字（`kKeyBits` 表：位号 ↔ 扫描码）、`SDL_GetMouseState` → 光标 / 按钮位图。

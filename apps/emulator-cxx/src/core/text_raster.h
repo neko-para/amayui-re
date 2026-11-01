@@ -38,6 +38,21 @@ void compose_glyph_texel(std::uint8_t* texel, int r, int g, int b, int alpha);
 // 本次构建是否带字体后端（FreeType + libiconv）。
 bool text_backend_available();
 
+// ── 平台字体度量的**产品装配**（`CORE-OPS-FORWARD-PROLOGUE`「非 0 支的下一格来自度量」）──
+// 量的是**渲染字体**（宿主替换后的 Amayui CN，见 `SCOPE.md` §1.1），⛔ 不查引擎的字面名 ——
+// 所以请求面名（参考字体常量 / 描述自己的字面名）**只出现在请求里**，不决定量哪份字体。
+// Windows 走 GDI（`GetTextMetricsW` + `GetGlyphOutlineW` 的黑框 + `GetTextExtentPoint32W`）；
+// 其它平台走 FreeType 近似 —— ★ 这是**平台差异**（正文 `60-ops-forward.md:112`："这一支的写入值是平台输入"），
+// 不是引擎语义，也⛔ 不代表"与真机数值等价"。
+Machine::FontMetrics measure_rendering_font(std::int32_t size);
+
+// 把 `measure_rendering_font` 包成 `Machine` 的度量接缝（`set_font_measurer` 的实参）。
+Machine::FontMeasurer make_platform_font_measurer();
+
+// 产品路径的字体装配：**装度量后端 + 打开宿主字体替换开关**（SCOPE §0 D1：名字不参与选择）。
+// ★ `boot.cpp` 与 `core_selftest.cpp` 都调它 ⇒ 守卫断的是**同一条装配路径**（⛔ 不是自测里的旁路）。
+void wire_platform_fonts(Machine& machine);
+
 // 最近一次 `0x204` 真正用的字形来源（诊断 / 守卫用；⛔ 不是产品选择器）。
 // `FreeType` = 宿主回退；`Gdi` = 真机路径（Windows + `EMULATOR_CXX_GLYPH_GDI`）；`Bake` 目前不会出现
 // （loader 是 stub，会退回 `FreeType`）。

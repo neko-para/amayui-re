@@ -101,7 +101,7 @@ std::int32_t Machine::find_font_name(const std::string& name) const {
 }
 
 bool Machine::font_fixed_half_width() {
-    // 兼容旧观察口：等价于"`font_fixed_half_width(size)` 适用"（用 A 支字号量）。
+    // 兼容旧观察口：等价于"`font_fixed_half_width(size)` 适用"（用 A 支字号量；画字那条路径的判据）。
     return font_fixed_half_width(glyph_height_ > 0 ? glyph_height_ : 24) != 0;
 }
 
@@ -113,10 +113,12 @@ const std::string& Machine::reference_font_face() {
 
 void Machine::derive_font_description(FontDescription& desc, std::int32_t size) {
     // 派生例程（`60-ops-forward` 的「非 0 支的下一格来自度量」）：**两次度量，量的不是同一个字体**。
-    // ① 第一次：**常量参考字体**（面名 `ＭＳ ゴシック`、高度 = −字号、宽度 = −字号 ÷ 2、字符 0x8C83）
+    // ① 第一次：**常量参考字体**（面名 `ＭＳ ゴシック`、高度 = −**A 支字号**、宽度 = −A 支字号 ÷ 2、
+    //    字符 0x8C83）—— ★ 量的字号**按当时的 A 支字号**（`glyph_height_`），**不随这次派生的描述 /
+    //    传参变**（正文「参考字形 = 常量参考面名 + 固定字符、按当时的 A 支字号量的」）⇒ 半格阈值不漂。
     //    ⇒ 结果进该对象自己的**参考量度**（⛔ 不是写回值）。
     if (font_measurer_) {
-        font_reference_metric_ = font_measurer_(reference_font_face(), size);
+        font_reference_metric_ = font_measurer_(reference_font_face(), glyph_height_);
         ++font_measure_requests_;
     }
     // ② 第二次：**该描述自己的字面名**（同一个固定字符）⇒ 写回两格的是这一次。
@@ -130,11 +132,15 @@ void Machine::derive_font_description(FontDescription& desc, std::int32_t size) 
     //    ① 该对象的对位模式 = 0 ⇒ 回退（发行路径上恒不成立：调用点都先判过 ≠ 0）；
     //    ② 该描述自己存着的字面名（跳过开头一个 `@` 后）不在字体名表里 ⇒ 回退；
     //    ③ 表项第 0 位已置（等宽）且不属于 `IPA P` 系列 ⇒ 回退。
+    // ★ ②③ 在**宿主字体替换**生效时**跳过**（`font_substitution_`，产品路径恒真）：
+    //   SCOPE §0 D1 —— 字形总是 Amayui、名字**不参与选择**，所以"名字不在表里"不再构成回退依据。
+    //   ⛔ 这是 SCOPE 的简化，**不是引擎语义**（引擎会判②③，见 `CORE-OPS-FORWARD-PROLOGUE` 的回退三条）；
+    //   逐条记录在 `.tmp/skip-list.md` D1。判据 ① 与 `display:AspectMode` 那一层**照正文保留**。
     bool fallback = !measured_ok;  // 没有度量后端 ⇒ 量度不可得 ⇒ 回退
     if (!fallback && config_.get_int("display:AspectMode") == 0) {
         if (font_align_mode_ == 0) {
             fallback = true;
-        } else {
+        } else if (!font_substitution_) {
             std::string name = desc.face;
             if (!name.empty() && name.front() == '@') name.erase(name.begin());
             const auto index = find_font_name(name);
@@ -161,23 +167,55 @@ void Machine::derive_font_description(FontDescription& desc, std::int32_t size) 
                                                 static_cast<double>(measured.line_height) *
                                                 static_cast<double>(-size));
     }
-    // 下一格 ← **−测得的平均字宽**；黑框宽度超过"半格"阈值 ⇒ 再缩一次。
-    // ★ 「对位模式 = 1 与其它非 0 值走两个略有差别的例程，差别只在'要不要再缩这一次'」——
-    //   本版**没有**逐值取证哪一支再缩 ⇒ 本实现取"对位模式 = 1 再缩"，**待复核**（引擎侧未定见残差 `RES-OPS-FORWARD-PROLOGUE-RESCALE`）。
+    // 下一格 ← **−测得的平均字宽**；本字形黑框宽超过"半格"阈值 ⇒ 再缩一次。
+    // ★ 这一段（`0x4584C6`–`0x45851E`）里有**三个各不相同的量** ①②③（⛔ 别合并、别串用），再乘上 ④：
+    //   ① **阈值**（比较用）= **参考字形黑框宽整数右移一位**（`0x4584C6 mov ecx,[esi+313D8h]`
+    //      取参考盒宽 → `0x4584D8 shr ecx,1` → `0x4584DA cmp ecx,eax` / `0x4584DC jnb`：
+    //      阈值 ≥ 本字形盒宽 ⇒ 跳过整段），取自**参考字形**；
+    //      被比的是**本字形**的黑框宽（`0x4584D2 mov eax,[ebp+var_8C.gmBlackBoxX]`）。
+    //      ⇒ 参考盒宽为奇数时这个阈值**向下取整**。
+    //   ② **再缩的分子** = 同一个参考字形黑框宽的 **× 0.5（精确浮点，不取整）**
+    //      （`0x4584DE fild [ebp+var_78]` 取参考盒宽原值 → `0x4584EE fmul dbl_51D7F8`；
+    //      `.data:0051D7F8 dbl_51D7F8 dq 0.5` ⇒ 这里确实是 ×0.5，不是另一套取整）。
+    //   ③ **再缩的分母** = **本字形的黑框宽**（`0x4584D2 mov eax,[ebp+var_8C.gmBlackBoxX]`
+    //      → `0x458500 mov [ebp+var_13C],eax` → `0x458506 fild [ebp+var_13C]` → `0x458516 fdivp`；
+    //      `eax` 在 `0x4584D2`–`0x458500` 之间没被改写 ⇒ ③ 与 ① 比的是**同一格**）。
+    //      ⛔ 不是 `measured_box_width`：那是 `GetTextExtentPoint32W` 量出的**文本 extent**
+    //      （与黑框是两个口径，见 `text_gdi.h`），而 `0x4584D2` 读的是 `gmBlackBoxX`。
+    //   ④ **乘数** = 本字形的 **(−平均字宽)**（`0x458518 fimul [ebp+ho]`）。
+    //   ⑤ 整式 = `trunc(② ÷ ③ × ④)`，唯一取整在 `0x45851E __ftol2_sse`（向零截断）。
+    //   （`0x4584E4` / `0x45850C` 那两处 `test-jns-fadd flt_51D868` 都**紧跟**在 `fild` 之后；
+    //   `.data:0051D868 flt_51D868 dd 4.2949673e9`（= 2^32）且只在源值 < 0 时加 ⇒ 是
+    //   "无符号 → double"的编译器序列，不是第四套判据；本支的盒宽取自 `gmBlackBoxX`（非负）⇒ 恒不触发。）
+    //   ⇒ 参考盒宽为**奇数**时 ① 与 ② 差 0.5（例：参考盒宽 25 ⇒ 阈值 12、分子 12.5）。
+    //   ⛔ 别把①的整数半格当分子（R5 的错法：奇数盒宽少 1），也⛔ 别把②的 12.5 当阈值。
+    //   ⛔ 别把③换成 `measured_box_width`（本仓上一版的错法：两个口径在非等宽字体上整条分岔）。
+    // ★ 「半格」**不是字号 ÷ 2**（`CORE-OPS-FORWARD-PROLOGUE`）：①② 都来自该字体缓存里那个
+    //   **参考字形**（常量参考面名 + 固定字符，按当时的 **A 支字号**量）的**黑框宽度**，即上面第 ① 次度量的结果
+    //   （`font_reference_metric_`）—— ⛔ 不是字号的一半；只有"测得行高恰好等于字号"的字体上两者数值才相同。
+    // ★ 「再缩一次」只在**对位模式 = 1** 这一档（其它非 0 档没有半格判据、也没有这一步）。
     desc.width = -measured.average_width;
-    const std::int32_t half_cell = size / 2;
-    if (font_align_mode_ == 1 && measured.measured_box_width > 0 &&
-        measured.glyph_box_width > half_cell) {
-        desc.width = static_cast<std::int32_t>(static_cast<double>(measured.glyph_box_width) /
-                                               static_cast<double>(measured.measured_box_width) *
+    const std::int32_t half_cell_threshold = font_reference_metric_.glyph_box_width / 2;
+    if (font_align_mode_ == 1 && measured.glyph_box_width > 0 &&
+        measured.glyph_box_width > half_cell_threshold) {
+        // 分子 = 参考盒宽 × 0.5（精确浮点）；⛔ 不是上面那个整数半格 `half_cell_threshold`。
+        const double shrink_numerator =
+            static_cast<double>(font_reference_metric_.glyph_box_width) * 0.5;
+        // 分母 = **本字形黑框宽**（③）。`> 0` 是**除法保护**：引擎里阈值取自无符号字段
+        // （`gmBlackBoxX`，非负）⇒「③ > ①」已隐含 ③ > 0；这里显式写出来，后端给 0 时不许除。
+        desc.width = static_cast<std::int32_t>(shrink_numerator /
+                                               static_cast<double>(measured.glyph_box_width) *
                                                static_cast<double>(-measured.average_width));
     }
 }
 
-std::int32_t Machine::font_fixed_half_width(std::int32_t size) {
-    // `0x2de` 的位 0 = `FIXED_PITCH`（等宽）⇒ **固定半宽支**：该名字按固定半宽用 ——
-    //   对位模式 = **1** ⇒ 字宽 = **−字号/2**；对位模式 = **2** ⇒ 字宽 = **+字号/2**；
-    //   **其它对位模式（0 / ≥3）是本版窄 unknown** ⇒ 只记诊断、不适用（⛔ 别猜第三套符号）。
+std::int32_t Machine::font_fixed_half_width(std::int32_t size, HalfWidthPath path) {
+    // `0x2de` 的位 0 = `FIXED_PITCH`（等宽）⇒ **固定半宽支**：这条名字按固定半宽用。
+    // ★ **符号由两个消费者各自的对位模式判据决定，两者判据不同**（`CORE-OPS-TEXT-FONT-NAME-2DE`）：
+    //   · 建平台字体那条（画字 / 派发点一）：对位模式 = 2 ⇒ **+字号/2**，否则（0 / 1 / ≥3）⇒ **−字号/2**；
+    //   · 描述派生那条（量度格 / 派发点二）：对位模式 = 1 ⇒ **−字号/2**，否则（0 / 2 / ≥3）⇒ **+字号/2**。
+    //   ⇒ 对位模式 ≥ 3 时两条路径**异号**（画字拿负、量度格拿正）。
+    //   ⛔ 不许把两条合并成一条判据（那会让 0 / ≥3 里有一个取值变成不可达）。
     //   ⛔ 位 0 置起**不会**让这个字体被跳过（它照常参与画字）。
     const std::string& face = !font_a_pair_.variants[0].face.empty() ? font_a_pair_.variants[0].face
                                                                     : font_b_pair_.variants[0].face;
@@ -188,11 +226,10 @@ std::int32_t Machine::font_fixed_half_width(std::int32_t size) {
     if (index < 0) return 0;
     const auto& entry = font_names_[static_cast<std::size_t>(index)];
     if ((entry.flags & 1) == 0) return 0;  // 位 0 未置起 ⇒ 按字形算
-    if (font_align_mode_ == 1) return -(size / 2);
-    if (font_align_mode_ == 2) return size / 2;
-    // ★ 位 0 置起 + 其它对位模式（0 / ≥3）＝本版的**窄 unknown**：显式记诊断、不编第三套符号。
-    report_error("font-fixed-halfwidth-align-mode-unknown:" + std::to_string(font_align_mode_));
-    return 0;
+    if (path == HalfWidthPath::DescriptionMetric) {
+        return font_align_mode_ == 1 ? -(size / 2) : size / 2;
+    }
+    return font_align_mode_ == 2 ? size / 2 : -(size / 2);
 }
 
 void Machine::op_2de(const Instruction& instruction) {
@@ -902,10 +939,9 @@ void Machine::op_75(const Instruction& instruction) {
     // ★ **0x204 画文字用的就是这一支**（`0x459F63` 读它当逐字字体的高度）⇒ 它不是"行高"。
     // ★ 两份描述的下一格按**那个对象自己的开关**（`0x4185FD` 的 `cmp [esi+313D0h],0`）分两支：
     //   0 支把 −(v/2) 写进两份的下一格（`0x41865E..0x41866D`）；非 0 支走 `sub_459A20` 的派生路径 ——
-    //   那条路径写什么**未成篇** ⇒ 本模型**不动**下一格（⛔ 不要在这里发明第二支的公式）。
-    //   ★ **开关身份 spec 明说本版未取证**（`60-ops-forward.md:87` +
-    //     `RES-OPS-FORWARD-PROLOGUE-FIELD-ROLES`）⇒ 本模型读的 `font_align_mode_`（= `0x2db` 写的那格）
-    //     是**实现侧假设**、不是合同 ⇒ 守卫只许断言 spec 明写的部分，⛔ 不许断言"非 0 支什么都不写"。
+    //   正文把这一格定性为**对位模式**（`0x2db` 写的那格；初值 0，与绘制模式那格不同），
+    //   非 0 支**由平台字体度量写回**（见 `CORE-OPS-FORWARD-PROLOGUE` 的「非 0 支的下一格来自度量」）。
+    //   ⇒ 本模型读的 `font_align_mode_` 就是那格对位模式（合同，不是实现侧假设）。
     const auto value = read_int(ops[0]);
     glyph_height_ = value;
     // ★ 入口体**先无条件写**：两份描述 `高度 ← −字号`、`下一格 ← −(字号 ÷ 2)`（**不看**对位模式）。
