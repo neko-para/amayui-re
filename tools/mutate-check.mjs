@@ -705,9 +705,13 @@ const MUTATIONS = [
     what: '`0x88` 假支的**位清除**被写成**置位** ⇒ "`0x71` 置位后 `0x88` 能把它清掉"当场不成立（位只增不减，而日志看起来正常）',
   },
   {
+    // ★ `when` 是这条锚的一部分（2026-11 起）：`0x71` 的置位**不是无条件**的（两道门，见 `layout.mts`
+    //   那条的注释与 `emulator-engine-scalars.assets.test.mjs` 的 ③）。守卫用
+    //   `find((x) => x.opcode === 0x71 && x.when === 'ReadTextSkip!=0 && marked(file,pos)')` 定位那条登记
+    //   ⇒ `to` 里⛔ 不许把 `when` 一起改掉：那会让守卫在"登记找不到"那一步先红（红得没意义，验不到 dword）。
     file: 'packages/age-format/src/engine/layout.mts',
-    from: "when: 'always', name: 'Engine.d174801', dword: 174801, op: 'set', mask: 0x08000000 },",
-    to: "when: 'always', name: 'Engine.d174801', dword: 174800, op: 'set', mask: 0x08000000 },",
+    from: "when: 'ReadTextSkip!=0 && marked(file,pos)', name: 'Engine.d174801', dword: 174801, op: 'set', mask: 0x08000000 },",
+    to: "when: 'ReadTextSkip!=0 && marked(file,pos)', name: 'Engine.d174801', dword: 174800, op: 'set', mask: 0x08000000 },",
     guard: 'tools/test/emulator-engine-scalars.assets.test.mjs',
     what: '★ 语料锚版：`0x71` 置位的槽号 174801 → 174800（字节偏移 `0AAB44h` 抄成 `0AAB40h`）⇒ `.lst` 里那条 `or [ebx+0AAB44h], 8000000h` 对不上',
   },
@@ -3631,9 +3635,12 @@ const MUTATIONS = [
   },
   {
     // ★ 绕过错误通道的**平台写请求**接缝：退回"只 push_back 诊断"。
+    //   ★ 2026-11：`report_error` 的**过滤器判定已提到前面**（顺序固定且可观察：先过滤器、再句柄、
+    //     最后一次性清 0）⇒ 那条合并条件的 `from` 不再存在。本条的破坏意图只关"发不发那个平台写请求"，
+    //     所以锚回退到**写请求那一道门**（`if (!discard)` 之内）。
     file: 'apps/emulator-cxx/src/core/vm_value.cpp',
-    from: '    if (error_handle_valid_ && error_writer_ && !(error_filter_ && error_filter_() != 0)) {',
-    to: '    if (false) {  // 变异：绕过错误通道接缝（只 push_back）',
+    from: '        if (error_handle_valid_ && error_writer_) {',
+    to: '        if (false) {  // 变异：绕过错误通道接缝（只 push_back）',
     guard: 'ctest:spec_error_channel_write',
     ctest: 'spec_error_channel_write',
     what:
@@ -3642,9 +3649,11 @@ const MUTATIONS = [
   },
   {
     // ★ 忽略宿主过滤器（返回非 0 也照发）。
+    //   ★ 同上：过滤器现在单独一段求值（`discard` 变量）⇒ 本条的锚落在**过滤器那一行**
+    //     （⛔ 别再退回那条已不存在的合并条件：`from` 与 #434 会撞串，`String.replace` 只会改第一处）。
     file: 'apps/emulator-cxx/src/core/vm_value.cpp',
-    from: '    if (error_handle_valid_ && error_writer_ && !(error_filter_ && error_filter_() != 0)) {',
-    to: '    if (error_handle_valid_ && error_writer_) {  // 变异：忽略宿主过滤器',
+    from: '        if (error_filter_() != 0) discard = true;',
+    to: '        if (false) discard = true;  // 变异：忽略宿主过滤器（返回非 0 也照发请求）',
     guard: 'ctest:spec_error_channel_write',
     ctest: 'spec_error_channel_write',
     what:
@@ -3700,28 +3709,35 @@ const MUTATIONS = [
       'CTest `spec_font_build_scale` 当场红',
   },
   {
-    // ★ `0x10c` 用**动作号**当槽号写（旧实现 `indirect_[动作] = 值` 的等价形态）：第三张表那一格没被写。
+    // ★ `0x10c` 用**第 2 个操作数（逻辑键号，旧实现里叫"动作号"）**当槽号写进表 C
+    //   （旧实现 `indirect_[动作] = 值` 的等价形态）：该登记的那一格（槽 5）没被写。
+    //   ★ 2026-11：`action_slot_table_` 已是**旧模型残留**（`vm.h`：「0x10c 已不再『动作号 → 槽号』」，
+    //     只剩测试播种在用）⇒ 原来那条 `action_slot_table_[action]` 的 `from` 不再存在。
+    //     本条的破坏意图仍是"把槽号写成编号本身 ⇒ 表 C 那一格没被写"，所以锚到表 C 的**写点**。
     file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
-    from:
-      '    const auto slot = action_slot_table_[static_cast<std::size_t>(action)];\n' +
-      '    slot_key_table_[static_cast<std::size_t>(slot)] = value;',
-    to:
-      '    slot_key_table_[static_cast<std::size_t>(action)] = value;  // 变异：用动作号当槽号',
+    from: '    key_code_table_[static_cast<std::size_t>(code)] = slot;',
+    to: '    key_code_table_[static_cast<std::size_t>(code)] = logical;  // 变异：用逻辑键号（动作号）当槽号',
     guard: 'ctest:spec_ops_10c_key_tables',
     ctest: 'spec_ops_10c_key_tables',
     what:
-      '`0x10c` 不查「动作 → 槽」表、直接把动作号当槽号写（旧实现 `indirect_[动作]` 的等价形态）⇒ ' +
-      '预置的槽 5 那一格没被写 ⇒ CTest `spec_ops_10c_key_tables` 当场红',
+      '`0x10c` 把**逻辑键号**（第 2 个操作数，旧口径的"动作号"）当成槽号登记进表 C（旧实现 `indirect_[动作]` 的等价形态）⇒ ' +
+      '夹具给槽 5 的那一格落的是 28 而不是 5 ⇒ CTest `spec_ops_10c_key_tables` 当场红',
   },
   {
     // ★ 值比较退回**有符号** `> 0x1f`：负值（如 −1）不再被拦（spec 要求按无符号比较）。
+    //   ★ 2026-11：`0x10c` 现在检查的是**第 1 个操作数（槽号）**而不是旧的 `value`；带上下文两行
+    //     才唯一 —— `0xfd` 里有一行**逐字相同**的 `if (...slot) > 31u) {`（`String.replace` 只改第一处）。
     file: 'apps/emulator-cxx/src/core/vm_ops_numeric.cpp',
-    from: '    if (static_cast<std::uint32_t>(value) > 31u) {',
-    to: '    if (value > 0x1f) {  // 变异：有符号比较',
+    from:
+      '    if (static_cast<std::uint32_t>(slot) > 31u) {\n' +
+      '        throw DisplayMessageError("key-multi-range", "SetKeyMultiの引数が不正です．");',
+    to:
+      '    if (slot > 0x1f) {  // 变异：有符号比较（−1 不再判越界）\n' +
+      '        throw DisplayMessageError("key-multi-range", "SetKeyMultiの引数が不正です．");',
     guard: 'ctest:spec_ops_10c_key_tables',
     ctest: 'spec_ops_10c_key_tables',
     what:
-      '`0x10c` 的值比较退回有符号 `> 0x1f` ⇒ 值 −1 不再判越界、静默写进绑定表 ⇒ ' +
+      '`0x10c` 的槽号比较退回有符号 `> 0x1f` ⇒ 槽号 −1 不再判越界、静默写进表 C ⇒ ' +
       'CTest `spec_ops_10c_key_tables` 当场红',
   },
   // ── 批次 3（音效通道登记 / 按通道停止 / 事件登记表 / 输出对象日志）：行为断言在 CTest 里。──
