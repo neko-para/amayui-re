@@ -286,13 +286,24 @@ const CASES = [
       + '—— 退回场景时钟对 ⇒ (c) 取消门前盖钟之后 TITLE 的 `0xc8` + `0xcd` 轮询环停摆、输入饿死 '
       + '（`check_scene_clock_gate` ④c 当场红；实测 8 条资产档全红）',
   },
+  // ★ 短睡眠的**两个分支**各一个锚（缺哪一半都会红）：谁拥有时钟，就由谁让时间过去。
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_io.cpp',
-    snippet: 'if (ms > 0) host_clock_ms_ += static_cast<std::uint32_t>(ms);',
+    snippet: 'sleep_host_(sleep_ms);',
     count: 1,
-    why: '`0xc8` 的短睡眠（n < 10）必须让时间前进 n 毫秒（`CORE-OPS-SLEEP-C8`：⛔「短睡眠不得变成 no-op…'
-      + '把 `sleep 1` 当作"什么都不做"会让轮询循环以 CPU 全速空转，属于违反本条」）—— no-op 会让 '
-      + '`0xc8` + `0xcd` 的输入环永远等不到自己的时钟（`check_scene_clock_gate` ④c 当场红）',
+    why: '`0xc8` 的短睡眠（n < 10）装了**宿主睡眠口**时必须把 n 交给宿主（窗口路径 = 真的 `SDL_DelayPrecise`、'
+      + '无窗口路径 = 推进仿真时钟）。处理器体内自己再写 `host_clock_ms_` ⇒ **两个写者互相拨钟**：'
+      + 'core 把钟推到未来、宿主下一次采样又拨回真实值 ⇒ 场景时钟往回走，`0x300` 演示闸的停期限'
+      + '（无符号 `现在 − 起点 ≥ 期限`）当场成立 ⇒ 示例文本连播（CTest `emulator-core-clock-monotonic` 红）',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_io.cpp',
+    snippet: 'host_clock_ms_ += sleep_ms;',
+    count: 1,
+    why: '`0xc8` 的短睡眠（n < 10）在**没有**宿主睡眠口时（自测 / 无宿主的虚拟时钟）必须自己让时间前进 '
+      + 'n 毫秒（`CORE-OPS-SLEEP-C8`：⛔「短睡眠不得变成 no-op…把 `sleep 1` 当作"什么都不做"会让轮询循环'
+      + '以 CPU 全速空转，属于违反本条」）—— no-op 会让 `0xc8` + `0xcd` 的输入环永远等不到自己的时钟'
+      + '（`check_scene_clock_gate` ④c 当场红）',
   },
   // ── S7 `0x9` 复位清单的余下项：行为断言在 CTest `emulator-core-selftest` 的
   //    `check_exit_script_reset_scope`，这里给 `tools/mutate-check.mjs` 一个 node 可跑的

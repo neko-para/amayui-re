@@ -23,6 +23,19 @@ bool text_trace_enabled() {
     return on;
 }
 
+// ★ 诊断（宿主观察口，⛔ 不是引擎语义）：`EMULATOR_CXX_TEXT_GATE_TRACE` 非空 ⇒ 把演示闸
+//   （`0x300`）的**每次状态变化**（揭示一格 / 到期清除 + 重放）打一行，带**两个时刻**：
+//   `host` = 迭代头那次宿主毫秒采样（门前的场景时钟由它盖），`now` = 本层的场景时钟。
+//   `=2` 连"本轮什么都没做"的服务调用也打（用来量调用密度）。
+//   用途：量"重放间隔是不是固定的"（用户口径：偶尔连播两三次再恢复正常）。
+int text_gate_trace_level() {
+    static const int level = [] {
+        const char* value = std::getenv("EMULATOR_CXX_TEXT_GATE_TRACE");
+        return value == nullptr ? 0 : std::atoi(value);
+    }();
+    return level;
+}
+
 /** CP932 字节串按一个显示字符切开：前导字节 0x81..0x9F / 0xE0..0xFC 带一个后继字节。 */
 std::vector<std::string> split_sjis_units(const std::string& text) {
     std::vector<std::string> units;
@@ -750,30 +763,53 @@ void Machine::service_text_gate(int slot) {
     if (state.cells.empty()) return;
     const std::int32_t speed = param_cell_.value_or(0);
     const std::uint32_t now = scene_clock_ms_;
+    // 诊断（见 `text_gate_trace_level()`）：每个**改变状态**的分支打一行；`=2` 连无事发生的调用也打。
+    const int trace = text_gate_trace_level();
+    static std::uint32_t trace_last_host[16] = {};
+    const auto trace_line = [&](const char* what) {
+        const std::uint32_t host = host_clock_ms_;
+        const std::uint32_t last = trace_last_host[slot & 15];
+        std::printf("[textgate] %-7s host=%u dt=%u now=%u slot=%d cursor=%zu/%zu due=%u done=%u "
+                    "speed=%d hold=%d cycles=%d clamps=%u backsteps=%u\n",
+                    what, host, last == 0 ? 0u : host - last, now, slot, state.reveal_cursor,
+                    state.cells.size(), state.reveal_due_ms, state.reveal_done_ms, speed,
+                    static_cast<int>(font_slot_deadline_[slot]), state.gate_cycles,
+                    host_clock_clamps_, clock_backsteps_);
+        trace_last_host[slot & 15] = host;
+    };
     if (speed <= 0) {
         // 参数格 == 0：引擎走"抽干到末格"支并直接跳到槽循环尾（`0x409452`）⇒ 整段一次揭示，
         // **不记起点、不清条目、不重放**。
+        if (trace != 0) trace_line("drain");
         reveal_all_text_layer_cells(slot);
         return;
     }
     if (state.reveal_cursor < state.cells.size()) {
         if (state.reveal_due_ms == 0) state.reveal_due_ms = now;
-        if (now < state.reveal_due_ms) return;
+        if (now < state.reveal_due_ms) {
+            if (trace >= 2) trace_line("wait");
+            return;
+        }
         reveal_text_layer_cell(slot);
         state.reveal_due_ms = now + static_cast<std::uint32_t>(speed);
         if (state.reveal_cursor >= state.cells.size()) state.reveal_done_ms = now;
+        if (trace != 0) trace_line("reveal");
         return;
     }
     // 全部揭示完：停「期限」毫秒，然后清本层绘制条目 + 游标归 0（闸位保持）⇒ 下一拍从第一格重来。
     if (state.reveal_done_ms == 0) state.reveal_done_ms = now;
     const std::int32_t deadline = font_slot_deadline_[slot];
     const std::uint32_t hold = deadline > 0 ? static_cast<std::uint32_t>(deadline) : 0;
-    if (now - state.reveal_done_ms < hold) return;
+    if (now - state.reveal_done_ms < hold) {
+        if (trace >= 2) trace_line("hold");
+        return;
+    }
     erase_text_layer_draw_items(slot);
     state.reveal_cursor = 0;
     state.reveal_due_ms = 0;
     state.reveal_done_ms = 0;
     ++state.gate_cycles;
+    if (trace != 0) trace_line("replay");
 }
 
 // 「文本槽在用标志」（机器格 `[77984h]`，取证 `report-text-gate.md` §1）：

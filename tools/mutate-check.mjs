@@ -3277,11 +3277,11 @@ const MUTATIONS = [
   },
   {
     file: 'apps/emulator-cxx/src/core/vm_ops_io.cpp',
-    from: 'if (ms > 0) host_clock_ms_ += static_cast<std::uint32_t>(ms);',
-    to: '/* 变异：短睡眠退回 no-op */;',
+    from: '            host_clock_ms_ += sleep_ms;',
+    to: '            /* 变异：没有宿主口时的短睡眠退回 no-op */;',
     guard: 'tools/test/emulator-cxx-review-regressions.test.mjs',
     what:
-      '`0xc8` 的短睡眠（n < 10）退回 no-op ⇒ 轮询循环以 CPU 全速空转而时间不走；' +
+      '`0xc8` 的短睡眠（n < 10）在"没有宿主睡眠口"这一支退回 no-op ⇒ 轮询循环以 CPU 全速空转而时间不走；' +
       '`CORE-OPS-SLEEP-C8` 原文「必须让**时间前进 n 毫秒**…把 `sleep 1` 当作"什么都不做"…属于违反本条」' +
       '（`check_scene_clock_gate` ④c 的短睡眠断言当场红）',
   },
@@ -3332,6 +3332,18 @@ const MUTATIONS = [
     what:
       '`0x136` 的位号上界 1Fh → 20h ⇒ 位号 32 不再走错误支：目标 −1 被改写（x86 把移位量掩成 0）' +
       '且错误通道为空 ⇒ CTest `spec_ops_136_rembit_arg_invalid` 当场红',
+  },
+  // ★ **时钟单调**：宿主样本把场景钟往回拨 ⇒ `0x300` 演示闸的「现在 − 起点 ≥ 期限」按无符号减法
+  //   当场成立（用户口径：设置界面底部示例文本偶尔连播 2–5 次）。去掉夹值这条 ⇒ 新守卫必须红。
+  {
+    file: 'apps/emulator-cxx/src/core/vm.h',
+    from: '        if (now_ms < host_clock_ms_) {\n',
+    to: '        if (false) {  // 变异：去掉宿主钟的单调夹值（往回设的样本直接落进来）\n',
+    guard: 'ctest:emulator-core-clock-monotonic',
+    ctest: 'emulator-core-clock-monotonic',
+    what:
+      '`set_host_clock_ms` 不再把往回设的样本夹到「现在」⇒ 场景钟跟着回拨、演示闸的停期限被' +
+      '无符号减法当场满足（示例文本连播）⇒ CTest `emulator-core-clock-monotonic` 当场红',
   },
   {
     // ★ 135 与 136 同形（`0x42F8DA` / `0x42F94A` 各一处 `cmp edi,1Fh`），但它们是 bindings 里

@@ -216,6 +216,13 @@ add_test(NAME emulator-core-text-pointer-write COMMAND emulator-core-selftest --
 #   从第一格重来"。旧实现只把 0x300/0x301 写成两张无人读的 map ⇒ 只展示一次（用户口径"不会刷新"）。
 #   `0x301` 只清条目 + 游标，不清画布像素、不删字符格。
 add_test(NAME emulator-core-text-gate-replay COMMAND emulator-core-selftest --only-text-gate)
+# ★ **时钟单调**：宿主样本不许把场景时钟往回拨。实测缺陷（用户口径）：设置界面底部的 ADV 示例文本
+#   偶尔连播 2–5 次再恢复正常节奏 —— 链条是 `0x0c8` 短睡眠在处理器体内把宿主钟推到未来、窗口路径
+#   每个外层迭代又把宿主钟写回真实墙钟 ⇒ 场景钟往回走；`0x300` 的「现在 − 起点 ≥ 期限」是**无符号**
+#   减法，往回拨 7ms 就变成 0xFFFFFFF9 ⇒ 停期限当场到期。
+#   这条钉三半：宿主样本被夹住（计进 host_clock_clamps）· 场景钟不回拨（clock_backsteps = 0）且
+#   回拨那几拍不许让演示闸提前重放 · 装了 sleep_host 时 `0x0c8` 不再自己推进宿主钟（一个写者）。
+add_test(NAME emulator-core-clock-monotonic COMMAND emulator-core-selftest --only-clock-monotonic)
 # ★ 文本比较族（`0x194` 相等 / `0x195` 不等）：同一对操作数上两条必须**互补**（1/0 互换），
 #   都把推进格数写成 7（EA 0x42CF4F / 0x42D04F），落点给文本族标签必须抛。
 #   0x195 是 SETFATE.BIN（新游戏第 0 章初始化）的第一条缺失指令 ⇒ 方向写反 ⇒ 本条红。

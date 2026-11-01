@@ -3560,12 +3560,14 @@ bool check_scene_clock_gate(const core::OpcodeTable& table) {
         emit_instruction(poll_script, 2, {});
         core::Machine poll_machine = scene_step_machine(table);
         poll_machine.set_scalar_21b(0);        // 让 (c) 把门前那一次盖钟挡掉
-        poll_machine.reset_scene_clock(1010);  // 场景时钟冻在 1010（**故意**比宿主时刻只早/晚一点点，
-                                               // 用无符号减法的回绕掩盖错接线的话这条就抓不到）
+        // ★ 场景时钟冻在 900、宿主时刻 1000：两者**必须不同**，这条才抓得住"0xcc 记的是场景时钟"。
+        //   ⛔ 别把它写成"宿主时刻更小"（旧的 1010/1000）：宿主时刻是**单调**的（`set_host_clock_ms`
+        //   的单调条），往回设会被夹住 —— 那样夹具自己先坏了，而不是被测的东西。
+        poll_machine.reset_scene_clock(900);
         poll_machine.set_host_clock_ms(1000);
         poll_machine.load_root(poll_script);
         if (!poll_machine.step()) return fail("0xcc 轮询夹具停机");
-        if (poll_machine.scene_clock_ms() != 1010u) {
+        if (poll_machine.scene_clock_ms() != 900u) {
             return fail("轮询夹具：场景时钟被盖了（(c) 没挡住）");
         }
         if (poll_machine.mouse_last_ms() != 1000u) {
@@ -3579,7 +3581,7 @@ bool check_scene_clock_gate(const core::OpcodeTable& table) {
         if (poll_machine.mouse_last_ms() != 1150u) {
             return fail("0xcd 的时间闸没读现场宿主时刻（场景时钟不动 ⇒ 轮询停摆）");
         }
-        if (poll_machine.scene_clock_ms() != 1010u) {
+        if (poll_machine.scene_clock_ms() != 900u) {
             return fail("0xcd 把场景时钟当成了自己的读数（它会跟着 (c) 冻住）");
         }
         // 短睡眠让时间前进 n 毫秒（虚拟阻塞）—— ⛔ 不许是 no-op。
@@ -12016,6 +12018,112 @@ bool check_text_slot_replay(const core::OpcodeTable& table) {
     if (ink(machine) != ink_before) return fail("0x301 清了画布像素（它只清绘制条目与游标）");
     return true;
 }
+
+// ── 时钟单调：宿主样本不许把场景钟往回拨（示例文本"偶尔连播两三次"的根因） ──
+/** 用户口径的缺陷：设置界面底部的 ADV 示例文本**偶尔连播 2–5 次**再回到正常节奏。
+ *
+ *  旧实现的链条（三环，缺一不可）：
+ *   ① `0x0c8` 的短睡眠（n < 10）在**处理器体内**把 `host_clock_ms_` 推到未来（虚拟阻塞）；
+ *   ② 窗口路径每个外层迭代又把 `host_clock_ms_` **写回**真实墙钟 —— 它比被推到的未来值小
+ *      ⇒ **场景时钟往回走**（门前渲染步用 `host_clock_ms_` 盖钟）；
+ *   ③ `0x300` 演示闸的「停期限」判据是**无符号**减法 `现在 − 起点 ≥ 期限`；往回拨 7ms
+ *      就变成 `0xFFFFFFF9 ≥ 1000` ⇒ 期限**当场到期** ⇒ 清条目 + 挥标归 0 + 下一拍从第一格重来。
+ *      连续几次 ⇒ 看到的就是"连播两三次，然后恢复正常速度"。
+ *
+ *  这条钉三件事（任一被改回去都当场红）：
+ *   · **宿主样本单调**：往回设的样本被夹到"现在"，计进 `host_clock_clamps()`；
+ *   · **场景钟不回拨**：`clock_backsteps() == 0`；且往回拨的那几拍**不许**让演示闸提前重放；
+ *   · **一个写者**：装了 `set_sleep_host` ⇒ `0x0c8` 把 n 交给宿主、自己不再动 `host_clock_ms_`；
+ *     没装（自测 / 无宿主的虚拟时钟）⇒ 仍虚拟推进 n 毫秒（`CORE-OPS-SLEEP-C8` 明禁 no-op）。
+ */
+bool check_clock_monotonic(const core::OpcodeTable& table) {
+    const std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "clock-monotonic: %s\n", what);
+        return false;
+    };
+    // 夹具与 `check_text_slot_replay` 同形：槽 9、2 个字符格、节拍 20ms、期限 1000ms。
+    const auto build = [&]() {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x80, {{0, 9}});
+        emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
+        emit_instruction(bytes, 0x213, {{0, 9}, {0, 190700}, {0, 40}});
+        emit_instruction(bytes, 0x75, {{0, 20}});
+        emit_instruction(bytes, 0x74, {{0, 20}});
+        emit_instruction(bytes, 0x300, {{0, 9}, {0, 1}, {0, 1000}});
+        emit_instruction(bytes, 0x71, {{0, 9}});
+        emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});  // "AB" ⇒ 两格
+        emit_instruction(bytes, 0x6F, {{0, 0}});
+        for (int i = 0; i < 400; ++i) emit_instruction(bytes, 0x1A8, {});
+        emit_instruction(bytes, 2, {});
+        return bytes;
+    };
+    core::Machine machine = text_scene_machine(key, table);
+    machine.write_text(core::Operand{5, 0}, "AB");
+    // 走**外部时钟**（与窗口路径同形：宿主每个外层迭代给一个读数）。
+    std::uint32_t clock = 1000;
+    machine.set_host_clock_ms(clock);
+    machine.load_root(build());
+    const auto pump = [&](std::uint32_t advance_ms) {
+        clock += advance_ms;
+        machine.set_host_clock_ms(clock);
+        return machine.step();
+    };
+    int guard = 0;
+    while (machine.text_layer_cell_count(9) == 0) {  // 先等 `0x6e` 追加出字符格
+        if (!pump(10)) return fail("追加之前停机（夹具坏了）");
+        if (++guard > 200) return fail("字符格一直没追加（夹具坏了）");
+    }
+    while (machine.text_layer_revealed(9) < machine.text_layer_cell_count(9)) {
+        if (!pump(10)) return fail("揭示完成之前停机（夹具坏了）");
+        if (++guard > 400) return fail("揭示一直不完成（夹具坏了）");
+    }
+    const int cycles_before = machine.text_gate_cycles(9);
+    const std::uint32_t host_before = machine.host_now_ms();
+    const std::uint32_t scene_now = machine.scene_clock_ms();
+    if (scene_now < 7u) return fail("夹具的场景时钟还在 0 附近（盖钟没跑）");
+    // ① 往回拨的宿主样本：旧缺陷正是"短睡眠把钟推到未来、宿主采样又把它拨回"。
+    machine.set_host_clock_ms(scene_now - 7u);
+    if (machine.host_now_ms() != host_before) {
+        return fail("往回设的宿主样本没有被夹住（场景钟会跟着回拨）");
+    }
+    if (machine.host_clock_clamps() == 0) return fail("往回设的宿主样本没有被记进 host_clock_clamps()");
+    for (int i = 0; i < 4; ++i) {
+        if (!pump(0)) break;
+    }
+    if (machine.clock_backsteps() != 0) return fail("场景时钟被往回拨了（单调不变量破了）");
+    if (machine.text_gate_cycles(9) != cycles_before) {
+        return fail("宿主钟回拨 7ms 就让演示闸的停期限当场到期（用户口径：示例文本会连播）");
+    }
+    // ② 正常路径：真的过了期限 ⇒ 必须重放（别把"不连播"修成"永不重放"）。
+    for (int i = 0; i < 6; ++i) {
+        if (!pump(200)) break;
+    }
+    if (machine.text_gate_cycles(9) == cycles_before) {
+        return fail("过了期限仍不重放（停期限被修成了永不到期）");
+    }
+    // ③ 一个写者：装了宿主睡眠口 ⇒ 处理器体内不再自己推进宿主钟。
+    {
+        core::Machine seamed = text_scene_machine(key, table);
+        seamed.set_host_clock_ms(5000);
+        std::uint32_t slept = 0;
+        seamed.set_sleep_host([&slept](std::uint32_t ms) { slept += ms; });
+        seamed.dispatch_for_test(core::Instruction{0, 0xC8, {{0, 4}}});
+        if (slept != 4u) return fail("装了宿主睡眠口，0x0c8 没有把 n 毫秒交给宿主");
+        if (seamed.host_now_ms() != 5000u) {
+            return fail("装了宿主睡眠口，处理器体内还自己推进宿主钟（两个写者会互相拨）");
+        }
+        // 没装 ⇒ 虚拟推进（自测 / 无宿主的虚拟时钟）：`CORE-OPS-SLEEP-C8` 明禁 no-op。
+        core::Machine virtual_clock = text_scene_machine(key, table);
+        virtual_clock.set_host_clock_ms(5000);
+        virtual_clock.dispatch_for_test(core::Instruction{0, 0xC8, {{0, 4}}});
+        if (virtual_clock.host_now_ms() != 5004u) {
+            return fail("没有宿主睡眠口时 0x0c8 没有虚拟推进 n 毫秒（spec 明禁 no-op）");
+        }
+    }
+    return true;
+}
 // ── 跨帧队列的**样式快照**：追加之后改字号，不许影响已经排好版的那一格 ──
 /** 引擎在**追加时**就量度 + 逐字写出（`sub_46BE30` 的 SelectObject / 逐字写出），之后的推进只呈现
  *  已经排好版的格。旧实现（画的时候再读 `Font+0x313D4`）在设置界面被实测到：示例文本中间恰好跨帧的
@@ -13883,6 +13991,7 @@ int main(int argc, char** argv) {
     bool only_record_flags = false;
     bool only_text_pointer = false;
     bool only_text_gate = false;
+bool only_clock_monotonic = false;
     bool only_text_compare = false;
     bool only_scene_self = false;
     bool only_scene_table = false;
@@ -13955,6 +14064,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-record-flags") == 0) only_record_flags = true;
         else if (std::strcmp(argv[i], "--only-text-pointer") == 0) only_text_pointer = true;
         else if (std::strcmp(argv[i], "--only-text-gate") == 0) only_text_gate = true;
+        else if (std::strcmp(argv[i], "--only-clock-monotonic") == 0) only_clock_monotonic = true;
         else if (std::strcmp(argv[i], "--only-text-compare") == 0) only_text_compare = true;
         else if (std::strcmp(argv[i], "--only-scene-self") == 0) only_scene_self = true;
         else if (std::strcmp(argv[i], "--only-scene-table") == 0) only_scene_table = true;
@@ -14382,6 +14492,12 @@ int main(int argc, char** argv) {
             // `0x300` 的循环演示闸：逐格揭示 → 停期限 → 清条目 → 从第一格重来。
             if (!check_text_slot_replay(table)) return 1;
             std::printf("core-selftest(text-gate): PASS\n");
+            return 0;
+        }
+        if (only_clock_monotonic) {
+            // 时钟单调：宿主样本不许把场景钟往回拨（`0x300` 停期限被判据当场满足的根因）。
+            if (!check_clock_monotonic(table)) return 1;
+            std::printf("core-selftest(clock-monotonic): PASS\n");
             return 0;
         }
         if (only_text_compare) {

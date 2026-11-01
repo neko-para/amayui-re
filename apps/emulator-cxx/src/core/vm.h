@@ -9,6 +9,8 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <memory>
@@ -26,6 +28,16 @@ struct SaveHeader;
 
 // 「无颜色」哨兵（机器细节；与 `CORE-TIMING-WINDOW` / 场景族共用这一口径）。
 inline constexpr std::uint32_t kNoColor = 0xFFFFFFFFu;
+
+// ★ 诊断（`EMULATOR_CXX_CLOCK_TRACE`）：记录"时钟往回拨"这类绝不该发生的事。
+//   ⛔ 不是引擎语义；只用于定位"期限 / 到期判据被瞬间满足"的现场。
+inline bool machine_clock_trace() {
+    static const bool on = [] {
+        const char* value = std::getenv("EMULATOR_CXX_CLOCK_TRACE");
+        return value != nullptr && value[0] != '0';
+    }();
+    return on;
+}
 
 struct Install;
 
@@ -928,9 +940,15 @@ public:
     //   ⛔ 别再为 `0x1f4` / `0x20c` 另建一对「引擎时刻」—— 那样 (c) 一落，时间就真的停走了
     //   （实测：门前的钟被取消 + 其余三个写者写的是另一对 ⇒ TITLE 输入泵死锁）。
     void stamp_scene_clock(std::uint32_t sample_ms) {
+        // ★ 不变量（守卫口径）：时钟只该前进。往回拨会让一切「现在 − 起点」型的判据
+        //   （期限 / 到期 / 节拍）按无符号减法算成巨大值 ⇒ **立刻满足** —— `0x300` 演示闸的
+        //   「停期限」就是这样被跳过的（用户口径：示例文本偶尔连播两三次）。
+        //   这里只**记**一笔（`clock_backsteps()`），⛔ 不替调用方夹值：时钟的来源必须自己保证单调。
+        if (sample_ms < scene_clock_ms_) ++clock_backsteps_;
         scene_previous_ms_ = scene_clock_ms_;
         scene_clock_ms_ = sample_ms;
     }
+    std::uint32_t clock_backsteps() const { return clock_backsteps_; }
     void set_driven_elsewhere(bool value) { driven_elsewhere_ = value; }
     // 启动时是否跑 LOGO（`0x130` 读的格）：`--skip-logo` 在跑根脚本前置 0。
     void set_show_logo(bool value) { show_logo_ = value ? 1 : 0; }
@@ -966,7 +984,30 @@ public:
     bool render_ready() const { return render_ready_; }
     void set_render_ready(bool value) { render_ready_ = value; }
     // 宿主提供时钟（毫秒）；不设置时每次 step 自动 +16ms（仿真的固定步长）。
-    void set_host_clock_ms(std::uint32_t now_ms) { host_clock_ms_ = now_ms; external_clock_ = true; }
+    // ★ **单调**：引擎的时刻只有一个方向（`CORE-TIMING-CLOCK` 的「两次迭代头读数之差是这两次读数
+    //   之间的时间」）。宿主给的样本若比机器已走到的时刻更早（`0x0c8` 的短睡眠把钟推到未来了、
+    //   而宿主那一路的真实时钟还没追上），这一样本**不许把钟往回拨** —— 否则「现在 − 起点 ≥ 期限」
+    //   这类无符号判据会当场成立（实测：设置界面示例文本的「停期限」被跳过，连播 2–5 次）。
+    //   计数 `host_clock_clamps()` 就是这条不变量的观察口（健康运行 = 0）。
+    void set_host_clock_ms(std::uint32_t now_ms) {
+        if (now_ms < host_clock_ms_) {
+            if (machine_clock_trace()) {
+                std::fprintf(stderr, "[clock] host sample %u < now %u ⇒ 夹到 now（第 %u 次）\n",
+                             now_ms, host_clock_ms_, host_clock_clamps_ + 1);
+            }
+            now_ms = host_clock_ms_;
+            ++host_clock_clamps_;
+        }
+        host_clock_ms_ = now_ms;
+        external_clock_ = true;
+    }
+    std::uint32_t host_clock_clamps() const { return host_clock_clamps_; }
+    // 短睡眠（`0x0c8` 的 n < 10 那一支）的宿主执行口：**谁拥有时钟，就由谁让时间过去**。
+    // 装了它 ⇒ 处理器体内不再自己推进宿主时钟（否则两个写者互相打架：见 `set_host_clock_ms` 的单调条）；
+    // 没装（自测 / 无宿主的虚拟时钟）⇒ 处理器自己 `host_clock_ms_ += n`，那是仿真参数。
+    using SleepHost = std::function<void(std::uint32_t ms)>;
+    void set_sleep_host(SleepHost host) { sleep_host_ = std::move(host); }
+    bool has_sleep_host() const { return static_cast<bool>(sleep_host_); }
     // 回到自动步长时钟（每次 step +16ms）；用于无窗口的确定性逐帧导出。
     void reset_scene_clock(std::uint32_t now_ms = 0) {
         external_clock_ = false;
@@ -2427,7 +2468,11 @@ private:
     std::uint32_t scene_clock_ms_ = 0;
     std::uint32_t scene_previous_ms_ = 0;
     std::uint32_t host_clock_ms_ = 0;
+    std::uint32_t host_clock_clamps_ = 0;
+    SleepHost sleep_host_;
     bool external_clock_ = false;
+    // 不变量观察口：`stamp_scene_clock` 被要求把场景钟往回拨的次数（健康运行 = 0）。
+    std::uint32_t clock_backsteps_ = 0;
     bool scene_animating_ = false;
     // 引擎 `+0B5B4`（"场景还有待处理的东西"闩 = 场景待处理标记）：排窗时置、窗推进时置、
     // 命令进度还在走时置；**渲染步的推进子步**（`advance_scene_windows`）清 0 再重算。

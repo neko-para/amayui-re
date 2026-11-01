@@ -250,6 +250,13 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 客户区外写**真实坐标（可为负 / 超界）**。有鼠标焦点时用 `SDL_GetMouseState`（客户区坐标），否则用全局光标减窗口位置；
 两种都按 `逻辑分辨率 / SDL 窗口尺寸` 缩放。没有窗口 / 输入停用 ⇒ `0x109` 写 −100000（`0x108` 写 0）。
 诊断：`EMULATOR_CXX_INPUT_TRACE=1` 时每 30 次采样往 stderr 打一行 `[input] cursor inside=…`。
+★ 其它诊断口（都是**宿主观察**，⛔ 不是引擎语义）：`EMULATOR_CXX_TEXT_GATE_TRACE=1` 把 `0x300` 演示闸
+的每次状态变化（`reveal` / `replay` / `hold`…）打一行 —— 带 `host`（宿主采样）、`now`（场景时钟）、
+`cursor`、`due` / `done`、`speed`、`hold`、`cycles`，用来量"重放间隔到底是不是固定的"；
+`EMULATOR_CXX_CLOCK_TRACE=1` 在宿主样本把时钟往回拨（被夹住）时打一行。
+★ 短睡眠（`0x0c8` 的 n < 10）的执行口按"谁拥有时钟"分：**窗口路径真的睡**（`SDL_DelayPrecise`，
+让真实墙钟前进），**无窗口路径推进仿真时钟**（确定、可复现）；两者都不让处理器体内自己写宿主钟
+（两个写者会把钟来回拨 ⇒ `现在 − 起点` 型的无符号判据会当场"到期"）。
 ★ 根帧执行 `exit`（TITLE 退出路径的 `0x2`）⇒ 脚本结束 ⇒ 关窗并返回；不再"保留最后一帧等用户关窗"。
 `--stop-at <opcode>` 可用于在任意 opcode 前停止（`0` = 不设停止线，缺省）。
 根脚本静态解码会在数据区遇到非法 opcode 后停止，这是规范允许的静态解码边界，不是执行边界。

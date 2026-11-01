@@ -198,6 +198,18 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     // ★ 两者是同一层的替身：`--input-script` 不是引擎语义，它只是把"平台归约"换成时间线。
     SDL_Joystick* joystick = nullptr;
     if (scripted == nullptr) joystick = bind_sdl_input(machine, window, width, height);
+    // ★ 短睡眠（`0x0c8` 的 n < 10 那一支）的**宿主执行口**：窗口路径的时钟是真实墙钟
+    //   （`SDL_GetTicks`），所以"睡 n 毫秒"必须真的花掉 n 毫秒。让 core 自己往 `host_clock_ms_`
+    //   上加 n 会与本函数的墙钟采样**互相踩**：core 把钟推到未来、下一次采样又把它拨回真实值
+    //   ⇒ 场景时钟出现"往回走"。`0x300` 演示闸的「停期限」按无符号减法 `现在 − 起点 ≥ 期限`
+    //   判到期，往回走会当场成立 ⇒ 设置界面底部的示例文本偶尔连播 2–5 次。
+    //   装了这条 ⇒ 处理器体内不再自己推进宿主时钟（见 `Machine::set_sleep_host`）。
+    //   ★ 用 `SDL_DelayPrecise` 而不是 `SDL_Delay`：后者的粒度是系统定时器（本机实测 ≈15ms），
+    //     而引擎这一支的 n < 10ms 是"让出 1ms 给输入轮询"的意思 —— 用 15ms 的粒度会把
+    //     设置界面压到 ~3fps（实测：22s 只呈现 67 帧）。
+    machine.set_sleep_host([](std::uint32_t ms) {
+        SDL_DelayPrecise(static_cast<Uint64>(ms) * 1000000ull);
+    });
     // 只建一张 1×1 占位纹理给软件回退路径；⛔ 不要在这里 rasterize（那会清脏、跳过首帧）。
     core::Bytes canvas{0, 0, 0, 0};
     SDL_GPUTexture* image = upload_texture(device, canvas, 1, 1);
@@ -287,9 +299,15 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         // 一次迭代 = 至多一条指令；门前渲染由 core 决定。没有渲染请求时本迭代不呈现，
         // 但宿主可以连续跑一批迭代（不是“一帧 N 条”的语义，只是调度批量）。
         bool requested = false;
+        // ★ 批量的**墙钟上限**（宿主调度，⛔ 不是"一帧 N 条"的引擎语义）：脚本的短睡眠（`0x0c8`）
+        //   现在是**真的**花掉 n 毫秒（`SDL_DelayPrecise`），所以一批 4096 条迭代可能要几百毫秒；
+        //   而输入 / 脚本时间线是**每个外层迭代**喂一次的 ⇒ 批次太长会把"按下 → 抬起"整段吞掉
+        //   （实测：设置界面进不去）。这里只把批次切短，门 / 时钟 / 渲染请求的语义一个字不变。
+        const Uint64 batch_start_ns = SDL_GetTicksNS();
         for (int i = 0; i < 4096 && !requested; ++i) {
             if (!machine.step()) break;
             if (machine.consume_frame_step()) requested = true;
+            if (SDL_GetTicksNS() - batch_start_ns >= 8000000ull) break;
             // 影片期间门被影片位关住：同一时钟下的后续迭代都不会推进脚本，交给外层的 1ms 节拍。
             if (machine.movie_active()) break;
         }

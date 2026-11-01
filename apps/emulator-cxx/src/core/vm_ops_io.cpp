@@ -279,11 +279,22 @@ void Machine::op_c8(const Instruction& instruction) {
     // 短睡眠（`CORE-OPS-SLEEP-C8`：n < 10 ⇒ **处理器内阻塞** n 毫秒）：
     // ⛔ **不得变成 no-op** —— spec 原文「实现可以用虚拟时钟代替真实阻塞，但必须让**时间前进
     // n 毫秒**、并保持次序…把 `sleep 1` 当作"什么都不做"会让轮询循环以 CPU 全速空转，属于违反本条」。
-    // ★ 这里推进的是**宿主采样时钟**（虚拟阻塞）：场景时钟对仍只由 `CORE-TIMING-CLOCK` 登记的
-    //   四个写者写（⛔ 别把睡眠塞成第五个写者）。读者是 `0xcd` 的时间闸 —— 它读的是现场宿主时刻
-    //   （`0x41ACF1 timeGetTime`），不是场景时钟对。
+    // ★ **谁拥有时钟，就由谁让时间过去**（`Machine::set_sleep_host`）：装了宿主睡眠口就交给它
+    //   （窗口路径 = 真的 `SDL_DelayPrecise`；无窗口路径 = 把仿真时钟推进 n），处理器体内**不再**自己
+    //   写宿主时钟 —— 两个写者会把钟来回拨，而 `0x300` 的「现在 − 起点 ≥ 期限」按无符号减法判到期，
+    //   钟往回走就等于期限当场到了（实测：设置界面示例文本偶尔连播 2–5 次）。
+    // ★ 没有宿主口（自测 / 虚拟时钟）时仍按原口径自己推进**宿主采样时钟**：场景时钟对仍只由
+    //   `CORE-TIMING-CLOCK` 登记的四个写者写（⛔ 别把睡眠塞成第五个写者）。读者是 `0xcd` 的时间闸
+    //   —— 它读的是现场宿主时刻（`0x41ACF1 timeGetTime`），不是场景时钟对。
     // ⚠ 负值（按无符号解释 ⇒ 极长阻塞）本模型不阻塞：留作残差，不在这里发明行为。
-    if (ms > 0) host_clock_ms_ += static_cast<std::uint32_t>(ms);
+    if (ms > 0) {
+        const auto sleep_ms = static_cast<std::uint32_t>(ms);
+        if (sleep_host_) {
+            sleep_host_(sleep_ms);
+        } else {
+            host_clock_ms_ += sleep_ms;
+        }
+    }
     return;
 }
 

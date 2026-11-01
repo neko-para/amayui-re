@@ -80,6 +80,14 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
     const std::uint32_t tick = options.tick_ms == 0 ? 16 : options.tick_ms;
     machine.set_sweep_missing(options.sweep_missing);
     std::uint32_t clock = machine.scene_clock_ms();
+    // ★ 短睡眠（`0x0c8` 的 n < 10 那一支）的宿主执行口：无窗口路径的时钟是**仿真**的
+    //   （每个外层迭代 `tick` 毫秒）⇒ "睡 n 毫秒"就是把仿真时钟推进 n（确定、可复现），
+    //   并把新值交给引擎，**不**让处理器自己往宿主时钟上加（那样下一次外层迭代的
+    //   `set_host_clock_ms` 会把它拨回来 ⇒ 场景时钟往回走，`0x300` 演示闸的停期限被跳过）。
+    machine.set_sleep_host([&machine, &clock](std::uint32_t ms) {
+        clock += ms;
+        machine.set_host_clock_ms(clock);
+    });
     bool anchored = options.anchor_script == 0;
     std::uint32_t anchor_clock = clock;
 
