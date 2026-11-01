@@ -22607,31 +22607,31 @@
         },
         {
           "ea": "0x456400",
-          "what": "handler 的 callee：写两个偏移的那个函数"
+          "what": "handler 的 callee：把层左 / 上写进层记录 +0x0C / +0x10 的那个函数"
         },
         {
           "ea": "0x456406",
-          "what": "槽下标 0 ⇒ 换成默认槽（读到 0 就改成 1）"
+          "what": "层号 0 ⇒ 换成**默认层**（读 `Font+0x4CC`，与 `0x70` / `0x71` / `0x79` 同一个选择子）"
         },
         {
           "ea": "0x45640a",
-          "what": "同上：默认槽常量的来源"
+          "what": "同上：默认层常量的来源（`Font+0x4CC`，由 `0x80` 改写、初值 1）"
         },
         {
           "ea": "0x456421",
-          "what": "callee 里**唯一**两处写内存之一：槽 +0x0C ← op2"
+          "what": "层记录 +0x0C ← op2（层左；与 `0x70` 第 4 个操作数**同一格**）"
         },
         {
           "ea": "0x456424",
-          "what": "callee 里**唯一**两处写内存之二：槽 +0x10 ← op3"
+          "what": "层记录 +0x10 ← op3（层上；与 `0x70` 第 5 个操作数**同一格**）"
         },
         {
           "ea": "0x45af29",
-          "what": "读者：绘制时把 槽+0x0C 加到调用方 x 上"
+          "what": "读者：逐字绘制时把 层+0x0C 加到字符格 x 上（位置 = 层左 + 格左上）"
         },
         {
           "ea": "0x45af3b",
-          "what": "读者：绘制时把 槽+0x10 加到调用方 y 上"
+          "what": "读者：逐字绘制时把 层+0x10 加到字符格 y 上"
         }
       ],
       "functions": [
@@ -22640,7 +22640,7 @@
       ],
       "storage": [],
       "evidence": [
-        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-selftest"
+        "guard:apps/emulator-cxx/CMakeLists.txt#spec_adv_text_layer_position"
       ]
     },
     {

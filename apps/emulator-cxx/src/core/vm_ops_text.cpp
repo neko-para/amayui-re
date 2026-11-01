@@ -1191,22 +1191,25 @@ std::int32_t Machine::font_build_height(bool branch_b) const {
 
 void Machine::op_198(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // `0x198` 设**文本槽的绘制原点偏移**（`sub_41FE10`，**argc 3**）：
-    //   op1 = 槽下标（`0` ⇒ 默认槽 **1**；合法 0..9），op2 → `槽+0x0C`，op3 → `槽+0x10`。
-    // ★ 它**不碰**字号、不重建字体：`sub_456400` 里仅 `0x456421` / `0x456424` 两处写内存。
-    // ★ 引擎不检查槽号：它拿越界下标去索引字体对象的槽指针表，非 0 就写穿到该指针处
-    //   ⇒ 越界/负数是**未定义行为**（spec 不作语义断言）。本实现的选择是**直接返回、不写、不诊断**
-    //   （实现侧已知偏离：spec 建议记诊断）。
-    int slot = read_int(ops[0]);
-    if (slot == 0) slot = 1;
-    if (slot < 0 || slot >= static_cast<int>(text_slots_.size())) return;
-    text_slots_[static_cast<std::size_t>(slot)].x_offset = read_int(ops[1]);
-    text_slots_[static_cast<std::size_t>(slot)].y_offset = read_int(ops[2]);
-    if (text_trace_enabled()) {
-        std::fprintf(stderr, "[text] 0x198 slot=%d x=%d y=%d\n", slot,
-                     text_slots_[static_cast<std::size_t>(slot)].x_offset,
-                     text_slots_[static_cast<std::size_t>(slot)].y_offset);
-    }
+    // `0x198` 设**文本层的左上位置**（`sub_41FE10` → `sub_456400`，**argc 3**、推进 7）：
+    //   op1 = 层号（`0` ⇒ 默认层，与 `0x70` / `0x71` / `0x79` 同一个选择子），
+    //   op2 → 层记录 +0x0C（左），op3 → 层记录 +0x10（上）。
+    // ★ 这两格**就是** `0x70` 第 4 / 5 个操作数写的那两格（`0x45d68a` / `0x45d690`）：
+    //   `0x70` 先写尺寸与初始位置、`0x198` 只搬位置 —— 不改宽 / 高、不建 / 不重建画布、不清内容。
+    //   逐字绘制路径拿它当**层左上**（`0x45bff2` 的 `x = [层+0x0C] + cell.x`），不是"再加一次的偏移"。
+    //   ⇒ 实测（2026-11-02）：GAMESTART 的说明文字层 `0x70 9 492 92 0 0` + `0x198 9 706 425`
+    //     必须落在 (706,425) 那块棕色说明区；把它当独立偏移 ⇒ 文字画到屏幕左上角。
+    // ▼ 读序 **3 → 2 → 1**（`0x41FE10` 先 push 3、再 push 2、再 push 1）。
+    // ▼ 记录指针为空 ⇒ 一格都不写（`0x456417` / `0x456419` 的 `test eax,eax` / `jz`）；
+    //   层号越界是 UB（引擎拿它索引字体对象的层指针表）⇒ 本实现选择不写、不诊断。
+    const auto top = read_int(ops[2]);
+    const auto left = read_int(ops[1]);
+    auto group = read_int(ops[0]);
+    if (group == 0) group = default_group_;
+    if (group < 0 || group >= 10) return;
+    ListRecord& record = list_records_[static_cast<std::size_t>(group)];
+    record.f0c = left;
+    record.f10 = top;
     return;
 }
 

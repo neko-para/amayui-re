@@ -2870,6 +2870,67 @@ bool check_text_layer_mode_gate(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── 文本层位置：`0x198` **移动层**（GAMESTART 说明文字落点；2026-11-02 用户口径的缺陷） ──
+// 判据（每条都能红）：
+// ① 0x198 写的是**层记录 +0x0C/+0x10**（与 `0x70` 第 4/5 个操作数同两格）：不是"另存一对偏移"，
+//    也不改层的宽 / 高（`0x70` 写的尺寸必须原样保留）；
+// ② 层号 0 ⇒ **默认层**（`0x80` 写的选择子），不是"槽 1"；
+// ③ 逐字绘制条目的位置 = **层左/上 + 格左上**：GAMESTART 的 `0x70 9 492 92 0 0` + `0x198 9 706 425`
+//    + 原点 (10,14) ⇒ 第 1 格必须落在 (716,439)。旧实现把 0x198 当独立偏移 ⇒ 条目在 (10,14)（屏幕左上角）。
+bool check_text_layer_position_198(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "text-layer-198: %s\n", what);
+        return false;
+    };
+    auto bytes = make_script_with_body();
+    emit_instruction(bytes, 0x80, {{0, 9}});                                  // 默认层 = 9
+    emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 0}, {0, 0}});  // 层 9：200x120 @(0,0)
+    emit_instruction(bytes, 0x213, {{0, 9}, {0, 190000}, {0, 40}});           // 键基数
+    emit_instruction(bytes, 0x79, {{0, 9}, {0, 10}, {0, 14}});                // 文本原点 (10,14)
+    emit_instruction(bytes, 0x75, {{0, 16}});
+    emit_instruction(bytes, 0x74, {{0, 0}});                                  // 间隔 0 ⇒ 立即抽干
+    emit_instruction(bytes, 0x198, {{0, 9}, {0, 706}, {0, 425}});             // ★ 把层 9 搬到 (706,425)
+    emit_instruction(bytes, 0x71, {{0, 9}});
+    emit_instruction(bytes, 0x6E, {{0, 0}, {5, 0}});
+    emit_instruction(bytes, 2, {});
+    core::Machine machine(key, table, nullptr, scene_step_config());
+    machine.write_text(core::Operand{5, 0}, "AB");
+    machine.load_root(bytes);
+    for (int i = 0; i < 32 && !machine.halted(); ++i) machine.step();
+
+    const core::ListRecord& layer = machine.list_record(9);
+    if (layer.f0c != 706 || layer.f10 != 425) {
+        std::fprintf(stderr, "层 9 的左/上 = (%d,%d)\n", layer.f0c, layer.f10);
+        return fail("0x198 没有把层 9 的左/上写成 (706,425)");
+    }
+    if (layer.f14 != 200 || layer.f18 != 120) {
+        std::fprintf(stderr, "层 9 的宽/高 = (%d,%d)\n", layer.f14, layer.f18);
+        return fail("0x198 改了层 9 的宽/高（它只搬位置）");
+    }
+    const core::DrawItem* item = machine.draw_item(190000u);
+    if (item == nullptr) return fail("第一格逐字绘制条目没有建出来（0x70/0x71/0x6e 链断了）");
+    if (item->aux[0] != 716.0f || item->aux[1] != 439.0f) {
+        std::fprintf(stderr, "第 1 格的绘制位置 = (%.1f,%.1f)（期望 716,439）\n",
+                     static_cast<double>(item->aux[0]), static_cast<double>(item->aux[1]));
+        return fail("逐字条目没有落在「层左/上 + 格左上」——0x198 又被当成了独立偏移");
+    }
+
+    // 层号 0 ⇒ 默认层（这里是 9）：同一份脚本把层号换成 0，效果必须相同。
+    auto default_bytes = make_script_with_body();
+    emit_instruction(default_bytes, 0x80, {{0, 9}});
+    emit_instruction(default_bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 0}, {0, 0}});
+    emit_instruction(default_bytes, 0x198, {{0, 0}, {0, 40}, {0, 50}});
+    emit_instruction(default_bytes, 2, {});
+    core::Machine default_machine(key, table, nullptr, scene_step_config());
+    default_machine.load_root(default_bytes);
+    for (int i = 0; i < 8 && !default_machine.halted(); ++i) default_machine.step();
+    if (default_machine.list_record(9).f0c != 40 || default_machine.list_record(9).f10 != 50) {
+        return fail("0x198 的层号 0 没有落到默认层 9");
+    }
+    return true;
+}
+
 // 判据（每条都能红）：
 // ① `0x2` 的 −11 = **恢复存档**（不是写存档）：父帧候选 ← −1、**先读版本 2 后读版本 1**、
 //    版本门（版本 1 = 2/3 ⇒ 全量；版本 1 = 1 ∧ 版本 2 = 10/20 ⇒ 只装载 + 位置；其余 ⇒ 什么都不做）、
@@ -8984,41 +9045,58 @@ bool check_config_ui_surface(const core::OpcodeTable& table) {
         if (machine.voice_play_requests() != 2) return fail("0x82（op3=8）没有触发配音请求");
         if (machine.font_primary_color() != primary_before) return fail("0x82（op3=8）不该改颜色");
     }
-    // ⑬ 0x198：槽下标 0 ⇒ **默认槽 1**；只写那一槽的两个偏移；不碰字号 / 行高 / 别的槽
+    // ⑬ 0x198：**移动文本层**（写层记录 +0x0C/+0x10，与 `0x70` 的第 4/5 个操作数同两格）；
+    //    层号 0 ⇒ 默认层（初值 1）；只搬位置，不改宽 / 高、不碰字号。
+    //    ★ 实测缺陷（2026-11-02，用户口径）：GAMESTART 的说明文字层 `0x70 9 492 92 0 0` +
+    //      `0x198 9 706 425`，旧实现把 0x198 当"另一对偏移"存进字体槽 ⇒ 文字画到屏幕左上角。
     {
         auto bytes = make_script_with_body();
         emit_instruction(bytes, 0x197, {{0, 10}});
+        emit_instruction(bytes, 0x70, {{0, 3}, {0, 400}, {0, 300}, {0, 10}, {0, 20}});
         emit_instruction(bytes, 0x198, {{0, 0}, {0, 100}, {0, 200}});
         emit_instruction(bytes, 0x198, {{0, 3}, {0, 7}, {0, 8}});
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
         machine.load_root(bytes);
         if (!machine.step()) return fail("0x198 前置 0x197 停机");
+        if (!machine.step()) return fail("0x198 前置 0x70 停机");
+        if (machine.list_record(3).f0c != 10 || machine.list_record(3).f10 != 20) {
+            return fail("0x70 的层左 / 上没有被写进层记录");
+        }
         if (!machine.step()) return fail("0x198(0,100,200) 停机");
-        // ★ 槽 0 不可达：`0` 是"默认槽"，写进去的是槽 1
-        if (machine.text_slot_x(0) != 0 || machine.text_slot_y(0) != 0) {
-            return fail("0x198 槽下标 0 写到了槽 0（规范：0 ⇒ 默认槽 1）");
+        // ★ 层号 0 不是"槽 1"：它是**默认层**（`0x80` 写的选择子，初值 1）。
+        if (machine.default_group() != 1) return fail("默认层初值不是 1");
+        if (machine.list_record(1).f0c != 100 || machine.list_record(1).f10 != 200) {
+            return fail("0x198 层号 0 没有落到默认层 1 的左 / 上");
         }
-        if (machine.text_slot_x(1) != 100 || machine.text_slot_y(1) != 200) {
-            return fail("0x198 没有把两个偏移写进默认槽 1");
-        }
+        if (machine.list_record(3).f0c != 10) return fail("0x198 写默认层时把层 3 的位置改了");
         if (!machine.step()) return fail("0x198(3,7,8) 停机");
-        if (machine.text_slot_x(3) != 7 || machine.text_slot_y(3) != 8) return fail("0x198 没有写槽 3");
-        if (machine.text_slot_x(1) != 100) return fail("0x198 写槽 3 时把槽 1 改了");
-        if (machine.glyph_height() != 24) return fail("0x198 改了 A 支字号（规范：只写偏移；缺省 24）");
-        if (machine.font_b_height() != 10) return fail("0x198 改了 B 支字号（规范：只写偏移；此前 0x197(10)）");
+        if (machine.list_record(3).f0c != 7 || machine.list_record(3).f10 != 8) {
+            return fail("0x198 没有把左 / 上写进层 3");
+        }
+        // 位置不是"再叠一个偏移"：0x70 写的宽 / 高必须原样保留，字号也不动。
+        if (machine.list_record(3).f14 != 400 || machine.list_record(3).f18 != 300) {
+            return fail("0x198 改了层 3 的宽 / 高（它只搬位置）");
+        }
+        if (machine.list_record(1).f0c != 100) return fail("0x198 写层 3 时把默认层的位置改了");
+        if (machine.glyph_height() != 24) return fail("0x198 改了 A 支字号（缺省 24）");
+        if (machine.font_b_height() != 10) return fail("0x198 改了 B 支字号（此前 0x197(10)）");
     }
-    // ⑭ 0x198 越界下标：引擎里是未定义行为 ⇒ 本实现**夹紧后跳过**（不写任何槽、不停机）
+    // ⑭ 0x198 越界层号：引擎里是未定义行为 ⇒ 本实现**不写任何层、也不停机**。
     {
         auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x70, {{0, 2}, {0, 40}, {0, 40}, {0, 1}, {0, 2}});
         emit_instruction(bytes, 0x198, {{0, 12}, {0, 5}, {0, 6}});
         emit_instruction(bytes, 2, {});
         core::Machine machine(key, table);
         machine.load_root(bytes);
-        if (!machine.step()) return fail("0x198 越界下标不该停机");
-        for (std::size_t i = 0; i < core::Machine::text_slot_count(); ++i) {
-            if (machine.text_slot_x(i) != 0 || machine.text_slot_y(i) != 0) {
-                return fail("0x198 越界下标写了槽（应当夹紧后跳过）");
+        if (!machine.step()) return fail("0x198 越界层号不该停机");
+        if (!machine.step()) return fail("0x198 越界层号不该停机（第二条）");
+        for (std::size_t i = 0; i < 10; ++i) {
+            const std::int32_t expect_x = (i == 2) ? 1 : 0;
+            const std::int32_t expect_y = (i == 2) ? 2 : 0;
+            if (machine.list_record(i).f0c != expect_x || machine.list_record(i).f10 != expect_y) {
+                return fail("0x198 越界层号写了某个层的位置（应当不写、不停机）");
             }
         }
     }
@@ -16116,6 +16194,7 @@ bool only_clock_monotonic = false;
     bool only_texture_set = false;
     bool only_frame_flow = false;
     bool only_text_layer_mode = false;
+    bool only_text_layer_position = false;
     bool only_se_registration = false;
     bool only_se_stop = false;
     bool only_event_library = false;
@@ -16206,6 +16285,7 @@ bool only_clock_monotonic = false;
         else if (std::strcmp(argv[i], "--only-texture-set") == 0) only_texture_set = true;
         else if (std::strcmp(argv[i], "--only-frame-flow") == 0) only_frame_flow = true;
         else if (std::strcmp(argv[i], "--only-text-layer-mode") == 0) only_text_layer_mode = true;
+        else if (std::strcmp(argv[i], "--only-text-layer-pos") == 0) only_text_layer_position = true;
         else if (std::strcmp(argv[i], "--only-se-registration") == 0) only_se_registration = true;
         else if (std::strcmp(argv[i], "--only-se-stop") == 0) only_se_stop = true;
         else if (std::strcmp(argv[i], "--only-event-library") == 0) only_event_library = true;
@@ -16503,6 +16583,11 @@ bool only_clock_monotonic = false;
         if (only_text_layer_mode) {
             if (!check_text_layer_mode_gate(table)) return 1;
             std::printf("core-selftest(text-layer-mode): PASS\n");
+            return 0;
+        }
+        if (only_text_layer_position) {
+            if (!check_text_layer_position_198(table)) return 1;
+            std::printf("core-selftest(text-layer-pos): PASS\n");
             return 0;
         }
         if (only_frame_flow) {
@@ -18310,6 +18395,7 @@ bool only_clock_monotonic = false;
         if (!check_texture_set(table)) return 1;
         if (!check_texture_bit_default_source(table)) return 1;
         if (!check_text_layer_mode_gate(table)) return 1;
+        if (!check_text_layer_position_198(table)) return 1;
         if (!check_frame_flow(table)) return 1;
         if (!check_input_devices(table)) return 1;
         if (!check_pause_and_clock(table)) return 1;

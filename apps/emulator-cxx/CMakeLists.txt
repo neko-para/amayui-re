@@ -186,6 +186,12 @@ add_test(NAME spec_frame_exit_load_flow COMMAND emulator-core-selftest --only-fr
 #   模式 = 1 ⇒ 画布与逐字条目照建（对照组）。`0x70` 的读序 = **5 → 4 → 3 → 2 → 1**。
 #   把模式门去掉（旧路径也建画布）/ 把读序改回 1 → 2 → 3 → 4 → 5 ⇒ 本条红。
 add_test(NAME spec_adv_text_layer_mode COMMAND emulator-core-selftest --only-text-layer-mode)
+# ★ 文本层的**屏幕位置**（`0x198` 移动层，`ADV-TEXT-LAYER` 的「层左/上」两格）：
+#   0x198 写的是层记录 +0x0C/+0x10（与 `0x70` 第 4/5 个操作数同两格），层号 0 ⇒ 默认层；
+#   逐字条目的位置 = **层左/上 + 格左上**。GAMESTART 的说明文字层 `0x70 9 492 92 0 0`
+#   + `0x198 9 706 425` + 原点 (10,14) ⇒ 第 1 格在 (716,439)。
+#   把 0x198 当"另一对偏移"存到别处 / 把层号 0 当槽 1 / 让 0x198 改宽高 ⇒ 本条红。
+add_test(NAME spec_adv_text_layer_position COMMAND emulator-core-selftest --only-text-layer-pos)
 # ★ 字形 AA 档（1 位 / GRAY4 / GRAY8 的**选择**与 17 / 65 级换算 ⇒ 满覆盖 240 / 251）：
 #   "设置界面文字比真机亮一档"的算术那一半。拆回 2^n（16 / 64）⇒ 满覆盖 255 ⇒ 本条红。
 add_test(NAME emulator-core-glyph-alpha COMMAND emulator-core-selftest --only-glyph)

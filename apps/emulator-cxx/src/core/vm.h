@@ -850,11 +850,10 @@ public:
     // 最近一次 `0x205` 的「格式化 + 横向落点」（**只给自检用**；⛔ 产品路径不要依赖它 ——
     // 它是观察口，不是引擎状态；产品行为只由 op_205 把 layout 交给绘制入口这一条决定）。
     const NumTextLayout& last_num_text_layout() const { return last_num_text_layout_; }
-    // 十个**文本槽**：各自的字形高度（`槽+0xC8`）与绘制原点偏移（`槽+0x0C` / `槽+0x10`）。
+    // 十个**文本槽**：各自的字形高度（`槽+0xC8`）。★ 文本层的**位置**（+0x0C/+0x10）不在这一组：
+    // 那是**层记录**的两格（`0x70` 第 4/5 个操作数与 `0x198` 写它，见 `list_record()`）。
     std::int32_t text_slot_glyph_height(std::size_t i) const { return text_slots_[i].glyph_height; }
-    std::int32_t text_slot_x(std::size_t i) const { return text_slots_[i].x_offset; }
-    std::int32_t text_slot_y(std::size_t i) const { return text_slots_[i].y_offset; }
-    // 文本槽的**缩放两格**（`槽+0x74` = 宽分量、`槽+0x78` = 高分量；与绘制原点偏移不是同一对格）。
+    // 文本槽的**缩放两格**（`槽+0x74` = 宽分量、`槽+0x78` = 高分量）。
     double text_slot_scale_width(std::size_t i) const { return text_slots_[i].scale_width; }
     double text_slot_scale_height(std::size_t i) const { return text_slots_[i].scale_height; }
     static constexpr std::size_t text_slot_count() { return 10; }
@@ -2564,8 +2563,6 @@ private:
     ViewportSource viewport_source_;
     struct TextSlot {
         std::int32_t glyph_height = 0;  // `槽+0xC8`：`0x197` 把**十槽全写**成同一个值
-        std::int32_t x_offset = 0;      // `槽+0x0C`：`0x198` 的 op2
-        std::int32_t y_offset = 0;      // `槽+0x10`：`0x198` 的 op3
         // 缩放两格（`槽+0x74` = 宽分量 / `槽+0x78` = 高分量；`sub_465840` 每次重算整表抄一遍）。
         // 初值取 1.0（与两个缩放分量的初值同口径；引擎构造器里十槽的这两格初值本版未单独取证）。
         double scale_width = 1.0;
