@@ -160,7 +160,9 @@ add_test(NAME spec_input_composition COMMAND emulator-core-selftest --only-input
 #   `0x192` 落点为字符串容器句柄（`0x8005` / `0x800B`）时记录里存**容器引用的十进制文本**、源文本进
 #   **首元素**（空 ⇒ 追加、非空 ⇒ 覆写首元素，记录文本不被改写）；同一句柄当源读 ⇒ 首元素；空 ⇒ 空串；
 #   记录文本非数字 ⇒ UB（本实现诊断 + 停止）；整数源 ⇒ 十进制、浮点源 ⇒ **定点 6 位小数**（`%lf`）；
-#   `0x2de` = 系统字体名一览的查找（逐字节 + 长度、跳过开头一个 `@`、未命中 −1）；
+#   `0x2de` = 系统字体名一览的查找（逐字节 + 长度、跳过开头一个 `@`、未命中 −1）——
+#   ★ 本节断的是**替换关闭**时的查表规则（引擎正文这一面）；替换生效时（产品路径）名字表只有
+#     单项宿主字体 ⇒ `0x2de` 对任何非空名字写回 0，由 `spec_ops_2de_host_font_index` 单独守；
 #   表项标志字节**位 0 = 等宽**（固定半宽 = **±字号 ÷ 2**，⛔ 不是跳过字体；IPA 两个名字例外）；
 #   **两个派发点判据不同**：画字那条（= 2 ⇒ +，否则 −）与描述派生那条（= 1 ⇒ −，否则 +）
 #   ⇒ 对位模式 ≥ 3 时两路**异号**（合并成一条判据 ⇒ 本条红）。
@@ -435,6 +437,19 @@ add_test(NAME spec_input_hit_test_12e_wrap COMMAND emulator-core-selftest --only
 #   没有触点时只写结果 0；全部无效 ⇒ 计数清 0；一条消息带很多点也不截断。
 #   把重建写成"追加" / 复用旧容量 / 判据写成"或" / 规范化附加字段 / 坐标不除 100 ⇒ 本条红。
 add_test(NAME spec_input_touch_buffer_rebuild COMMAND emulator-core-selftest --only-touch-buffer)
+# ★ `0x2de` 在**宿主字体替换**生效时（`SCOPE.md` §0 D1 / §1.1；`CORE-OPS-TEXT-FONT-NAME-2DE` 的正文仍是
+#   "查系统字体名一览、未命中 −1"，本节断的是**宿主简化**这一面，⛔ 不改正文）：
+#   用户 2026-11-01 裁决「任意写都路由到 Amayui CN」⇒ 名字表 = **单项** `{宿主族名, 标志字节 0}`
+#   ⇒ `find_font_name` 对**任何非空名字**返回 0（`0x2de` 写回宿主下标 0），**空名字**仍按正文写 −1。
+#   ① `core::wire_platform_fonts` 之后：替换开关为真、名字表恰好 1 项、下标 0 的族名 = `host_font_family()`、
+#      标志字节 = 0；② 三个不同的名字（宿主族名 / `ＭＳ ゴシック` / 一个**不存在**的名字）⇒ 落点都是 0；
+#   ③ 空名字 ⇒ −1；④ 负控制（替换关闭 + 只含 `ＭＳ ゴシック` 的表）⇒ 另外两个 −1、表里那个 0；
+#   ⑤ 渲染相关逻辑不额外跳转：固定半宽**两条派发点**都返回 0（标志字节 0 ⇒ 位 0 未置），
+#      派生仍发两次度量、写回取自第二次、**不回退**（−13 而非 −10）。
+#   ★ 旧断言「表空 ⇒ `0x2de` 恒 −1」**已作废**（那不是名字解析到宿主字体，而是引擎的选择/枚举成分整个不见了）。
+#   把 `set_font_substitution` 里装表那步删掉 / 把 `find_font_name` 改回"恒 −1" / 把宿主项的标志字节写成 1
+#   / 把"任意名字"扩成"含空名字" ⇒ 本条红。
+add_test(NAME spec_ops_2de_host_font_index COMMAND emulator-core-selftest --only-font-name-host)
 
 set(EMULATOR_CXX_INSTALL_DIR "" CACHE PATH "Optional game install dir for the boot-flow tests")
 if(EMULATOR_CXX_INSTALL_DIR)

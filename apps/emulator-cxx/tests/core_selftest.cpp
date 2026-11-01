@@ -1749,6 +1749,8 @@ bool check_input_composition(const core::OpcodeTable& table) {
 // ② 同一个句柄当**源**读 ⇒ 首元素文本；空记录 / 空容器 ⇒ **空串**；记录文本非数字 ⇒ 未定义行为（本实现诊断 + 停止）
 // ③ 整数源 ⇒ 十进制；浮点源 ⇒ **定点 6 位小数**（`1.5` 与 `"1.500000"` 相等，`0x194` 同一读原语）
 // ④ `0x2de` 在**系统字体名一览**里查：逐字节 + 长度相等、查前跳过**一个** `@`、未命中 −1
+//    ★ 本节按**替换关闭**（引擎正文这一面）断查表规则；替换生效时的口径（任意非空名字 ⇒ 宿主下标 0）
+//      由 `check_font_name_host_index` / CTest `spec_ops_2de_host_font_index` 单独守。
 // ⑤ 表项标志字节的**位 0 = 等宽** ⇒ 该字体固定半宽（字宽 = 字号 ÷ 2），⛔ 不是"跳过这个字体"；
 //    内建识别的 `IPA Pゴシック` / `IPA P明朝` 即使位 0 置起也按字形算
 bool check_text_container_and_font_names(const core::OpcodeTable& table) {
@@ -1855,6 +1857,10 @@ bool check_text_container_and_font_names(const core::OpcodeTable& table) {
     }
 
     // ④ `0x2de`：系统字体名一览的查找（逐字节 + 长度相等；跳过开头一个 `@`；未命中 −1）。
+    //    ★ **替换关闭**这一面（引擎正文）：宿主策略把名字表换成单项宿主字体是**产品路径**的事
+    //      （`wire_platform_fonts` ⇒ `set_font_substitution(true)`），本节刻意不打开它。
+    //      ⇒ 「未命中 −1」在这里仍然成立；产品路径下它被 `spec_ops_2de_host_font_index` 取代
+    //      （SCOPE §0 D1：名字**总是**解析到 Amayui，⛔ 不是"表空、查找恒失败"）。
     {
         core::Machine machine(key, table);
         machine.set_font_name_table({{"MS Gothic", 0}, {"Foo Bar", 1}, {"@At", 0}});
@@ -2607,7 +2613,7 @@ bool check_texture_set(const core::OpcodeTable& table) {
 }
 
 // ── 纹理位深 `display:TextureBit` 的**三档 + 缺省来源**（`CORE-OPS-TEXTURE-LOAD` / `-SET`） ──
-// 正文写死三点（取证 `.tmp/forensics/batch3-texture.md` §1）：
+// 正文写死三点（`60-ops-texture.md` 的「上传纹理」条与「配置」条的构造期缺省面）：
 //   ① 该键在引擎里**必有值**：配置库**构造期**就写内建默认 **32**（早于图形设备建立）⇒ 玩家文件只能
 //      覆盖它、不会让它消失。★ 缺省**不在读取端**：读取器缺键返回 0（配置库那条规则），与本条无关。
 //   ② 读取端**不做替换**：上传三档 = 16 ⇒ A4R4G4B4、32 ⇒ A8R8G8B8、**其它任何整数 ⇒ 上传失败**。
@@ -13275,6 +13281,170 @@ bool check_font_measure_wired(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── `0x2de` 在**宿主字体替换**生效时（`SCOPE.md` §0 D1 / §1.1）──
+// 正文（`CORE-OPS-TEXT-FONT-NAME-2DE`）写的是"在**系统字体名一览**里查这个名字：命中写下标、未命中写 −1"。
+// 本仓的宿主简化把整张表换成**一项**：下标 0 = 宿主族名（`Amayui CN`）、标志字节 = 0
+// ⇒ **任何非空名字**都解析到宿主字体（写回 **0**），空名字仍按正文的未命中写 **−1**。
+// ★ 旧口径「表空 ⇒ 查找恒失败 ⇒ `0x2de` 恒 −1」**已作废**：它不是"名字解析到宿主字体"，而是
+//   "引擎的选择/枚举成分整个不见了"。用户 2026-11-01 的裁决是**任意写都路由到 Amayui CN**（SCOPE §0 D1）。
+// 判据（每条都能红）：
+//   ① 产品装配 `core::wire_platform_fonts` 之后：`font_substitution()` 为真，名字表**恰好一项**、
+//      下标 0 的族名 == `host_font_family()`、标志字节 == 0。
+//      ★ 把 `set_font_substitution` 里装表那一步删掉 ⇒ 表为空 ⇒ ① 红（"表空、查找恒失败"正是要防的旧形态）。
+//   ② `0x2de` 传**三个不同的名字**（宿主族名 / 真机表里有的 `ＭＳ ゴシック` / 一个**不存在**的名字）
+//      ⇒ 落点都写回 **0**。★ 把 `find_font_name` 改回"恒 −1" ⇒ ② 红（这是本用例的主判据）。
+//   ③ **空名字** ⇒ 按正文写 **−1**（表里没有空名项；⛔ 不要把"任意名字"扩成"含空名字"）。
+//   ④ 负控制（替换**关闭** + 一张只含 `ＭＳ ゴシック` 的字面表）⇒ 另外两个名字写 −1、表里那个写 0：
+//      证明 ② 的 0 来自宿主替换，而不是"落点观察不到写入"或"表里恰好有这些名字"。
+//   ⑤ 渲染相关逻辑**不额外跳转**（SCOPE §0 D1 的「⛔ 不额外跳转渲染相关逻辑」）：
+//      替换生效时 `font_fixed_half_width(40)` 的**两条派发点**都返回 0（标志字节 0 ⇒ 位 0 未置起），
+//      且一次派生仍发**两次**度量、写回值取自第二次、**不回退**（名字能解析 + 位 0 未置 ⇒ 回退判据②③
+//      判不出来 ⇒ 下一格是 −平均字宽，⛔ 不是 −字号/2）。★ 把宿主项的标志字节写成 1 ⇒ ⑤ 红。
+bool check_font_name_host_index(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    const auto fail = [](const char* what) {
+        std::fprintf(stderr, "font-name-host-index: %s\n", what);
+        return false;
+    };
+    // 真机字体名表里确实有的一项（`ＭＳ ゴシック` 的 CP932 字节 = 引擎字符串口径）。
+    const std::string ms_gothic = "\x82\x6C\x82\x72\x20\x83\x53\x83\x56\x83\x62\x83\x4E";
+    const std::string absent = "No Such Face";
+    // 一次 `0x2de`：第 2 个操作数 = 名字、第 1 个 = 落点（全局整型槽 0）。
+    const auto query = [](core::Machine& machine, const std::string& name) -> std::int32_t {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2DE, {{3, 0}, {5, 0}});
+        emit_instruction(bytes, 2, {});
+        core::Machine probe = machine;  // 表 / 替换开关随拷贝走
+        probe.write_text(core::Operand{5, 0}, name);
+        probe.load_root(bytes);
+        if (!probe.step()) return -12345;
+        return probe.global_int(0);
+    };
+    const auto expect_query = [&](core::Machine& machine, const std::string& name,
+                                  std::int32_t want, const char* what) {
+        const std::int32_t got = query(machine, name);
+        if (got != want) {
+            std::fprintf(stderr, "0x2de(\"%s\") = %d（期望 %d）\n", name.c_str(), got, want);
+            return fail(what);
+        }
+        return true;
+    };
+    core::Machine machine(key, table);
+    // ① 产品装配 ⇒ 开关打开 + 名字表恰好一项（下标 0 = 宿主族名、标志字节 0）。
+    core::wire_platform_fonts(machine);
+    if (!machine.font_substitution()) {
+        return fail("core::wire_platform_fonts 没有打开宿主字体替换开关（SCOPE §0 D1）");
+    }
+    if (machine.font_name_count() != 1) {
+        std::fprintf(stderr, "替换生效后名字表项数 = %zu（期望 1 = 单项宿主字体）\n",
+                     machine.font_name_count());
+        return fail("替换生效时名字表不是「单项 = 宿主字体」（表空 ⇒ 查找恒失败，正是作废的旧口径）");
+    }
+    const core::Machine::FontNameEntry* host = machine.font_name_entry(0);
+    if (host == nullptr || host->name != core::Machine::host_font_family()) {
+        std::fprintf(stderr, "表项 0 的族名 = %s（期望 %s）\n",
+                     host == nullptr ? "<无>" : host->name.c_str(),
+                     core::Machine::host_font_family().c_str());
+        return fail("名字表的主机字体项不在下标 0 / 族名不是宿主族名");
+    }
+    if (host->flags != 0) {
+        std::fprintf(stderr, "表项 0 的标志字节 = %d（期望 0）\n", host->flags);
+        return fail("主机字体项的标志字节不是 0（位 0 = 等宽 ⇒ 渲染路径会被这条表项改掉）");
+    }
+    // ② 三个不同的名字（含一个不存在的名字）⇒ 都写回宿主下标 0。
+    if (!expect_query(machine, core::Machine::host_font_family(), 0,
+                      "0x2de 查宿主族名没有写回 0")) {
+        return false;
+    }
+    if (!expect_query(machine, ms_gothic, 0,
+                      "0x2de 查一个真机表里有的名字没有写回 0（名字解析没路由到宿主字体）")) {
+        return false;
+    }
+    if (!expect_query(machine, absent, 0,
+                      "0x2de 查一个不存在的名字没有写回 0（任意写都该路由到宿主字体；恒 −1 ⇒ 本条红）")) {
+        return false;
+    }
+    // ③ 空名字 ⇒ 正文的未命中（−1）。
+    if (!expect_query(machine, std::string(), -1,
+                      "0x2de 查空名字没有写回 −1（正文的未命中语义没有例外）")) {
+        return false;
+    }
+    // ④ 负控制：替换关闭 + 只含 `ＭＳ ゴシック` 的字面表 ⇒ 同一批查询判得出命中与未命中。
+    {
+        core::Machine literal(key, table);
+        literal.set_font_name_table({{ms_gothic, 0}});
+        if (literal.font_substitution()) return fail("负控制的前置不成立：替换开关本来是开的");
+        if (!expect_query(literal, core::Machine::host_font_family(), -1,
+                          "替换关闭时查宿主族名居然命中了（负控制不成立）")) {
+            return false;
+        }
+        if (!expect_query(literal, absent, -1, "替换关闭时查不存在的名字居然命中了（负控制不成立）")) {
+            return false;
+        }
+        if (!expect_query(literal, ms_gothic, 0,
+                          "替换关闭时表里有的名字没命中（负控制不成立 ⇒ ④ 断言不到东西）")) {
+            return false;
+        }
+    }
+    // ⑤ 渲染相关逻辑不额外跳转：固定半宽两条路径都返回 0；派生两次度量、写回第二次、不回退。
+    {
+        auto bytes = make_script_with_body();
+        emit_instruction(bytes, 0x2DB, {{0, 1}});  // 对位模式 = 1（非 0 ⇒ 派生例程会被调用）
+        emit_instruction(bytes, 0x1A5, {{5, 0}});  // A 支字面名 = 一个**不在真机表里**的名字
+        emit_instruction(bytes, 2, {});
+        core::Machine draw(key, table);
+        core::wire_platform_fonts(draw);
+        struct Probe {
+            std::vector<std::string> faces;
+            void attach(core::Machine& machine) {
+                machine.set_font_measurer([this](const std::string& face, std::int32_t) {
+                    faces.push_back(face);
+                    core::Machine::FontMetrics metrics;
+                    metrics.line_height = 18;  // < 字号 20 ⇒ 不触发高度缩放
+                    metrics.average_width = face == core::Machine::reference_font_face() ? 99 : 13;
+                    metrics.glyph_box_width = 0;
+                    metrics.measured_box_width = 0;
+                    return metrics;
+                });
+            }
+        };
+        Probe probe;
+        probe.attach(draw);
+        draw.write_text(core::Operand{5, 0}, absent);
+        draw.load_root(bytes);
+        if (!draw.step() || !draw.step()) return fail("⑤ 的 0x2db / 0x1a5 夹具停机了");
+        // 固定半宽：两条派发点的判据不同，但**标志字节 0 ⇒ 两条都返回 0**（⛔ 不是"跳过这个字体"）。
+        const auto platform_half =
+            draw.font_fixed_half_width(40, core::Machine::HalfWidthPath::PlatformFont);
+        const auto metric_half =
+            draw.font_fixed_half_width(40, core::Machine::HalfWidthPath::DescriptionMetric);
+        if (platform_half != 0 || metric_half != 0) {
+            std::fprintf(stderr, "固定半宽：画字 = %d / 量度格 = %d（都期望 0）\n", platform_half,
+                         metric_half);
+            return fail("主机字体项让固定半宽生效了（标志字节不是 0 ⇒ 渲染路径被改了）");
+        }
+        core::FontDescription desc;
+        desc.face = absent;  // 名字不在真机表里，但替换生效 ⇒ 解析得到 ⇒ 不回退
+        const std::size_t before = draw.font_measure_requests();
+        draw.derive_font_description(desc, 20);
+        if (draw.font_measure_requests() - before != 2) {
+            std::fprintf(stderr, "一次派生的度量增量 = %zu（期望 2）\n",
+                         draw.font_measure_requests() - before);
+            return fail("替换生效后派生不再发两次度量（两次度量保留这一条被动了）");
+        }
+        if (desc.width != -13) {
+            std::fprintf(stderr, "派生的下一格 = %d（期望 −13 = −测得平均字宽；−10 ⇒ 走了回退）\n",
+                         desc.width);
+            return fail("名字能解析 + 标志字节 0 时仍然回退了（回退判据②③ 的行为变了）");
+        }
+        if (probe.faces.size() < 2 || probe.faces[0] != core::Machine::reference_font_face() ||
+            probe.faces.back() != absent) {
+            std::fprintf(stderr, "两次请求的面名数 = %zu\n", probe.faces.size());
+            return fail("两次度量的请求面名不是「参考字体常量 → 该描述自己的字面名」");
+        }
+    }
+    return true;
+}
 // ── 数组地址算术的 32 位回绕（`CORE-OPS-ARRAY-LOOKUP` / `-2D`；正文 `60-ops-array.md:84` / `:110`） ──
 // 正文原句 → 机械判据：
 //   · 「地址算术是 **32 位回绕**：`取址 + 宽度 × 下标` 只保留低 32 位」（`:84`）⇒
@@ -13748,6 +13918,7 @@ int main(int argc, char** argv) {
     bool only_font_pairs = false;
     bool only_font_scale = false;
     bool only_font_measure_wired = false;
+    bool only_font_name_host = false;
     bool only_key_tables = false;
     bool only_input_composition = false;
     bool only_text_container = false;
@@ -13819,6 +13990,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--only-font-pairs") == 0) only_font_pairs = true;
         else if (std::strcmp(argv[i], "--only-font-scale") == 0) only_font_scale = true;
         else if (std::strcmp(argv[i], "--only-font-measure-wired") == 0) only_font_measure_wired = true;
+        else if (std::strcmp(argv[i], "--only-font-name-host") == 0) only_font_name_host = true;
         else if (std::strcmp(argv[i], "--only-key-tables") == 0) only_key_tables = true;
         else if (std::strcmp(argv[i], "--only-input-composition") == 0) only_input_composition = true;
         else if (std::strcmp(argv[i], "--only-text-container") == 0) only_text_container = true;
@@ -14023,6 +14195,13 @@ int main(int argc, char** argv) {
             // 一次派生两次度量 / 写回取自第二次 / 两次请求面名不同 / `wire_platform_fonts` 真的装上后端。
             if (!check_font_measure_wired(table)) return 1;
             std::printf("core-selftest(font-measure-wired): PASS\n");
+            return 0;
+        }
+        if (only_font_name_host) {
+            // `0x2de` 在**宿主字体替换**生效时（SCOPE §0 D1）：名字表 = 单项宿主字体 ⇒ 任意非空名字写回 0、
+            // 空名字 −1；负控制（替换关闭）证明这是替换带来的；固定半宽两支 0 / 派生不回退。
+            if (!check_font_name_host_index(table)) return 1;
+            std::printf("core-selftest(font-name-host): PASS\n");
             return 0;
         }
         if (only_key_tables) {
@@ -15830,6 +16009,7 @@ int main(int argc, char** argv) {
         if (!check_font_branches(table)) return 1;
         if (!check_font_pairs_1a5_2fe(table)) return 1;
         if (!check_font_scale_build(table)) return 1;
+        if (!check_font_name_host_index(table)) return 1;
         if (!check_key_tables_10c(table)) return 1;
         if (!check_scalar_key_table_b(table)) return 1;
         if (!check_dispatch_default_read(table)) return 1;

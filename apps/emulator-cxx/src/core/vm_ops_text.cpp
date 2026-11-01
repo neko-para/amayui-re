@@ -81,6 +81,16 @@ void Machine::op_2bd(const Instruction& instruction) {
 }
 
 std::int32_t Machine::find_font_name(const std::string& name) const {
+    // ★ **宿主字体替换生效时**（`font_substitution_`，产品路径恒真；SCOPE §0 D1）：
+    //   名字**不参与选择** ⇒ 名字表恒为「下标 0 = 宿主族名 + 标志字节 0」，**任何非空名字**都解析到它
+    //   （⇒ `0x2de` 写回 0，⛔ 不是"表空、查找恒失败"的 −1）。开头的 `@` 也不影响 —— 它本来就解析到同一项。
+    //   **空名字**照旧按正文的未命中写 −1：表里没有空名项，宿主族名也不是空串（`CORE-OPS-TEXT-FONT-NAME-2DE`
+    //   的「未命中写 −1」没有例外）。表里连下标 0 都没有（没装宿主项）⇒ 同样按未命中（⛔ 不许返回一个
+    //   会越界取表项的下标）。
+    if (font_substitution_) {
+        if (name.empty() || font_names_.empty()) return -1;
+        return 0;
+    }
     // 查名前跳过名字**开头的一个** `@`（只跳一个）。比较**逐字节**且**长度必须相等**：
     // 先按两者较短的长度比字节，再比长度（等价于 `==`，但⛔ 不做大小写折叠 / 码页转换 / 去空白）。
     std::string_view lookup(name);
@@ -98,6 +108,23 @@ std::int32_t Machine::find_font_name(const std::string& name) const {
         if (equal && entry.name.size() == lookup.size()) return static_cast<std::int32_t>(i);
     }
     return -1;
+}
+
+const std::string& Machine::host_font_family() {
+    // 宿主族名（UTF-8 字节；GDI 档按它取字）。★ 与 `text_gdi.cpp` 的 `kHostFontFamily`、
+    // `text_raster.cpp` 的 `kHostFaceUtf8` 是**同一个名字**（三处各写一份是历史：core 不 include 平台层）。
+    static const std::string family = "Amayui CN";
+    return family;
+}
+
+void Machine::set_font_substitution(bool enabled) {
+    font_substitution_ = enabled;
+    if (!enabled) return;
+    // 装上宿主那一项（SCOPE §0 D1）：整表换成单项 `{宿主族名, 0}` —— 正文的"启动时枚举系统字体"
+    // 一旦被替换策略接管，表里就只剩这一项（名字解析见 `find_font_name`）。
+    // ★ 标志字节 = 0 ⇒ 位 0（等宽）**不置起** ⇒ `font_fixed_half_width` 的两条派发点都返回 0，
+    //   画字 / 量度路径的行为与"名字不在表里"时**一致**（⛔ 不额外跳转渲染相关逻辑）。
+    font_names_.assign(1, FontNameEntry{host_font_family(), 0});
 }
 
 bool Machine::font_fixed_half_width() {
@@ -135,7 +162,11 @@ void Machine::derive_font_description(FontDescription& desc, std::int32_t size) 
     // ★ ②③ 在**宿主字体替换**生效时**跳过**（`font_substitution_`，产品路径恒真）：
     //   SCOPE §0 D1 —— 字形总是 Amayui、名字**不参与选择**，所以"名字不在表里"不再构成回退依据。
     //   ⛔ 这是 SCOPE 的简化，**不是引擎语义**（引擎会判②③，见 `CORE-OPS-FORWARD-PROLOGUE` 的回退三条）；
-    //   逐条记录在 `.tmp/skip-list.md` D1。判据 ① 与 `display:AspectMode` 那一层**照正文保留**。
+    //   出处见 `apps/emulator-cxx/SCOPE.md` §0 D1 / §3。判据 ① 与 `display:AspectMode` 那一层**照正文保留**。
+    // ★ 行为核对（替换生效时**应当不变**）：名字表现在能解析（`find_font_name` 恒 0）、宿主项标志字节 = 0
+    //   ⇒ 即便**不跳过**②③，非空字面名那两步也判不出回退（`index ≥ 0` 且 `位 0 未置起`）。保留跳过是为了
+    //   **空字面名**那一档也不回退 —— 那时 ② 会判成"名字不在表里"（正文语义），而产品路径的字形根本不看名字。
+    //   ⛔ 不要因为"名字现在总能解析"就把这段跳过删掉（空名字那一档会变），也⛔ 不要借机改绘制路径。
     bool fallback = !measured_ok;  // 没有度量后端 ⇒ 量度不可得 ⇒ 回退
     if (!fallback && config_.get_int("display:AspectMode") == 0) {
         if (font_align_mode_ == 0) {
@@ -236,8 +267,11 @@ void Machine::op_2de(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 字体名查表（`CORE-OPS-TEXT-FONT-NAME-2DE`）：第 2 个是**字体名文本**、第 1 个是落点。
     // 在**系统字体名一览**里查这个名字，命中写表项下标、未命中写 **−1**。
+    // ★ 宿主字体替换生效时（SCOPE §0 D1 / 产品路径恒真）名字表 = 「下标 0 = 宿主族名」⇒ **任何非空名字**
+    //   都写回 0（含不存在的名字、含 `@` 开头的名字）；空名字仍写 −1。查找本身的规则在 `find_font_name`。
     // ★ 这张表**不是**"已登记名字"那两张（`0x1a5` / `0x2fe` 之后登记进字体对象的两张向量）：
-    //   它是启动时枚举系统字体的结果；两者不互相替代。本模型不自己枚举（接缝 `set_font_name_table`）。
+    //   它是启动时枚举系统字体的结果；两者不互相替代。本模型不自己枚举（接缝 `set_font_name_table`；
+    //   替换生效时由 `set_font_substitution` 只装宿主那一项）。
     const std::string name = read_text(ops[1]);
     write_int(ops[0], find_font_name(name));
     return;

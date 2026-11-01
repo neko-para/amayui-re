@@ -707,10 +707,17 @@ public:
     // ★ 这是**宿主策略，⛔ 不是引擎语义**：产品路径总是用 Amayui 字体、名字不参与选择 ⇒
     //   派生例程的回退判据 **②③**（"字面名不在字体名表里" / "表项第 0 位置起的等宽且不是 IPA P"）
     //   在开关打开时**跳过**（判据 ① 与 `display:AspectMode` 那一层照正文保留）。
-    //   引擎**会**判这两条 —— 我们跳过它是被 SCOPE 覆盖的简化，逐条记在 `.tmp/skip-list.md`。
+    //   引擎**会**判这两条 —— 我们跳过它是被 SCOPE 覆盖的简化（`apps/emulator-cxx/SCOPE.md` §0 D1 / §3）。
     //   ⛔ 不要把它当成引擎的第四条回退判据，也⛔ 不要因此删掉判据②③ 的实现（开关关着时照旧判）。
-    void set_font_substitution(bool enabled) { font_substitution_ = enabled; }
+    // ★ 打开时**同时装上宿主那一项**（SCOPE §0 D1 的"任意写都路由到 Amayui CN"）：名字表 = 单项
+    //   `{宿主族名, 标志字节 0}` 放在下标 0 ⇒ `find_font_name` 对**任何非空名字**返回 0（见它的实现）。
+    //   ⛔ 不是"表空、查找恒失败"：后者会让 `0x2de` 恒 −1，也会把"名字能解析"这条假象抹掉。
+    //   ★ 空名字不在此列（表里没有空名项 ⇒ 照正文的未命中 −1）。
+    void set_font_substitution(bool enabled);
     bool font_substitution() const { return font_substitution_; }
+    // 宿主字体那一项的**族名**（与 `text_gdi.cpp` 的 `kHostFontFamily` / `text_raster.cpp` 的
+    // `kHostFaceUtf8` 同一份 `Amayui CN`）。名字表在替换生效时就装这一项（下标 0）。
+    static const std::string& host_font_family();
     // 常量参考字体的面名（CP932 字节：`ＭＳ ゴシック`）。
     static const std::string& reference_font_face();
     // 发过几次度量请求（观察口；一次派生 = **2** 次）。
@@ -779,7 +786,7 @@ public:
     }
     // 键槽组头的槽数（初始化写 2，运行期不再改写；读者只到它为止）。
     std::int32_t key_slot_count() const { return key_slot_count_; }
-    // 手柄组头的按钮数（= 输入系统初始化向平台查询的设备能力；`system:LimitJoy` = 1 或没有设备 ⇒ 0）。
+    // 手柄组头的按钮数（本实现**不提供摇杆设备** ⇒ 产品路径恒 0；自测用它驱动算式，见 SCOPE §0 D4）。
     std::int32_t joy_button_count() const { return joy_button_count_; }
     // 两个**事件锁存字**（观察口；只有「事件并入」采样消费它们 ⇒ 消费后归零）。
     std::uint32_t latch_bits() const { return latch_bits_; }
@@ -1263,10 +1270,10 @@ public:
     /**
      * 外枠纹理请求的实参（同一条规则里"画外枠编号那张"那一步：矩形 `(0, 0, 宽, 高)` + 常量 `0xFF`
      * + **外枠编号本身**）。
-     * ★ 三个实参的语义**已取证**（`.tmp/forensics/batch1-render-step.md` §3）：编号**不是资源索引**，
+     * ★ 三个实参的语义**已取证**（`60-ops-render.md` 的「显示状态：0x25b」条 + `bindings.json` 的站点注记）：编号**不是资源索引**，
      *   它被并进填充色的 RGB（低 24 位）；`0xFF` 是 alpha；矩形铺满整张纹理。
      * ★ 宽 / 高 = **目标画面区**的整数尺寸（渲染器自己的一对格），⛔ **不是**客户区 / 窗口区
-     *   （同文件 §3.3）。本模型没有渲染器对象 ⇒ core 只填原点 `(0, 0)` 与常量，宽 / 高由**宿主**
+     *   （同条「状态对应」）。本模型没有渲染器对象 ⇒ core 只填原点 `(0, 0)` 与常量，宽 / 高由**宿主**
      *   在自己的接缝实现里按真实目标画面区补 —— ⛔ core 不许拿视口 / 配置客户区去冒充它。
      */
     struct OuterFrameRequest {

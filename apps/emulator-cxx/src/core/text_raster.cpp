@@ -466,6 +466,10 @@ void wire_platform_fonts(Machine& machine) {
     machine.set_font_measurer(make_platform_font_measurer());
     // ② 宿主字体替换开关（SCOPE §0 D1）：名字不参与选择 ⇒ 派生例程跳过回退判据 ②③。
     //   ⛔ 这是 SCOPE 的简化，不是引擎语义（见 `vm.h` 的 `set_font_substitution` 注释）。
+    // ③ 名字表随开关一起装上（`set_font_substitution` 内部）：下标 0 = 宿主族名 + 标志字节 0
+    //   ⇒ `0x2de` 对任何非空名字都写回 0（"任意写都路由到 Amayui CN"），⛔ 不是"表空、查找恒失败"。
+    //   ★ 标志字节 0 ⇒ 位 0（等宽）不置 ⇒ `font_fixed_half_width` 两条路径都返回 0：渲染相关
+    //     逻辑照旧（SCOPE §0 D1「不额外跳转渲染相关逻辑」）。
     machine.set_font_substitution(true);
 }
 

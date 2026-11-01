@@ -20,7 +20,7 @@ namespace {
 // ── 宿主输入（★ 平台边界，⛔ 不是引擎语义） ──
 //
 // 规范（`data/spec/chapters/60-ops-input.md`）的口径：**位号合成是引擎的决定** —— 平台只提供
-// **原始状态**（某个系统键码是否按下、鼠标左右键、手柄按钮位图），键盘 / 鼠标 / 手柄的映射表由
+// **原始状态**（某个系统键码是否按下、鼠标左右键；摇杆整套不实现，见 SCOPE §0 D4），键盘 / 鼠标的映射表由
 // 引擎的输入系统初始化写入。所以这里**不再**把 SDL 的扫描码直接折成输入字（那是引擎的活），
 // 只做两件平台的事：
 //   ① 扫描码 ↔ **系统键码**（Win32 VK）的对应（平台的消息就是按 VK 来的）；
@@ -83,7 +83,7 @@ bool any_system_key_down() {
 
 // 把 SDL 的四类真实设备接到 core 的采样口（窗口路径的默认输入源）。
 // ★ `scripted != nullptr` 时不调用它：那时输入来自 `--input-script` 的时间线。
-// ★ 手柄：按 spec 的组头口径 —— 按钮数来自**设备能力查询**，`system:LimitJoy` = 1 ⇒ 0（整组不采样）。
+// ★ 摇杆：**整套输入不实现**（SCOPE §0 D4）——本函数据此**不打开任何设备**，返回值恒为空。
 SDL_Joystick* bind_sdl_input(core::Machine& machine, SDL_Window* window, int width, int height) {
     // ① 键盘：**逐系统键码**查询（映射表在引擎里；这里只回答"这个 VK 按没按下"）。
     machine.set_key_code_source([](int vk) { return system_key_down(vk); });
@@ -97,30 +97,10 @@ SDL_Joystick* bind_sdl_input(core::Machine& machine, SDL_Window* window, int wid
         return true;
     });
     machine.set_click_on_up(static_cast<std::int32_t>(machine.config().get_int("set:ClickOnUp")));
-    // ③ 手柄：打开第一个设备、把按钮数交给组头；没有设备 / `system:LimitJoy` ⇒ 0。
-    SDL_Joystick* joystick = nullptr;
-    if (machine.config().get_int("system:LimitJoy") == 0) {
-        int count = 0;
-        SDL_JoystickID* ids = SDL_GetJoysticks(&count);
-        if (ids != nullptr) {
-            if (count > 0) joystick = SDL_OpenJoystick(ids[0]);
-            SDL_free(ids);
-        }
-    }
-    if (joystick != nullptr) {
-        machine.set_joy_button_count(SDL_GetNumJoystickButtons(joystick));
-        machine.set_joy_button_source([joystick]() -> std::uint32_t {
-            // SDL3 只给**逐按钮**查询（`SDL_GetJoystickButton`）⇒ 这里把它拼成位图（平台边界）。
-            const int count = SDL_GetNumJoystickButtons(joystick);
-            std::uint32_t word = 0;
-            for (int i = 0; i < count && i < 32; ++i) {
-                if (SDL_GetJoystickButton(joystick, i)) word |= 1u << i;
-            }
-            return word;
-        });
-    } else {
-        machine.set_joy_button_count(0);
-    }
+    // ③ 摇杆：**整套输入不实现**（SCOPE §0 D4）——产品路径**不打开任何摇杆设备**，
+    //    在 VM 边界按「无对应设备」拦截：按钮数恒 0、不装按钮 / 轴 / 帽子来源 ⇒ 方向位与按钮位永不置起。
+    //    ⛔ 不要去猜"设备能力"或补缺省阈值：没有设备就是没有设备（`0x100` / `0x101` 的摇杆支因此在产品路径不可达）。
+    machine.set_joy_button_count(0);
     machine.set_cursor_source([window, width, height](std::int32_t& x, std::int32_t& y) -> bool {
         static int probe = 0;
         const bool probe_on = std::getenv("EMULATOR_CXX_INPUT_TRACE") != nullptr;
@@ -171,7 +151,8 @@ SDL_Joystick* bind_sdl_input(core::Machine& machine, SDL_Window* window, int wid
                                       static_cast<float>(window_height));
         return true;
     });
-    return joystick;
+    // 摇杆：按 SCOPE §0 D4 **不返回设备**（调用方因此不会去关它、也不会装任何摇杆来源）。
+    return nullptr;
 }
 
 }  // namespace
@@ -195,8 +176,8 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
     const bool scene_gpu_ok = create_scene_pipeline(device, swapchain_format, scene_pipeline);
     SceneTextureCache scene_cache;
     machine.consume_frame_step();  // 丢掉预跑期留下的请求
-    // 宿主输入：键盘 / 鼠标 / 手柄（手柄只报**按钮位图**，组头的按钮数来自设备能力查询）。
-    // 三者都只在脚本执行到对应 opcode 时才被取用：
+    // 宿主输入：键盘 / 鼠标（**摇杆整套不实现**，见 SCOPE §0 D4 ⇒ 组头按钮数恒 0、不装轴/帽子来源）。
+    // 两者都只在脚本执行到对应 opcode 时才被取用：
     // `0xff` 采样输入字、`0x109` 光标、`0x108` 按钮位图、`0xcc`/`0xcd` 鼠标回调。
     // ★ `0x2fc` 是**触点查询**（不是鼠标事件队列）：桌面鼠标-only 不提供触点源 ⇒ 恒写 0。
     // 测试 / 诊断：到点投递一次 SDL_EVENT_QUIT，用来端到端验证“关窗保存配置”。

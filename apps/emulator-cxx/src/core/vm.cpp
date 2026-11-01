@@ -141,8 +141,8 @@ Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install*
     }
     array_d1383_[2] = 30;
     key_slot_count_ = 2;
-    // ③ 手柄组头的按钮数：向平台查询设备能力（`system:LimitJoy` = 1 ⇒ 整组为空）。
-    //    ★ 本模型不自己打开设备：能力查询走 `set_joy_button_count`（窗口路径在那里接 SDL）。
+    // ③ 摇杆整套不实现（SCOPE §0 D4）：产品路径**没有设备** ⇒ 组头按钮数恒 0。
+    //    core 只保留 `set_joy_button_count` 这个测试接缝（自测用它驱动轴 / 阈值 / 帽子的算式）。
     joy_button_count_ = 0;
     // 重算缩放的**第 ① 个时机**：启动、字体对象建立之后一次。视口缺省 = 客户区 ⇒ 两个分量 1.0，
     // 与缓存初值相等 ⇒ 整趟什么都不写（契约本来就是"相等 ⇒ 不写"）。
