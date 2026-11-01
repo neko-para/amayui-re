@@ -74,6 +74,11 @@ void Machine::op_24d(const Instruction& instruction) {
     (void)read_int(ops[9]);  // 影片名表索引（不写记录）
     const auto delay = read_int(ops[10]);
     const auto duration = read_int(ops[11]);
+    // ★ **次序是合同**（`60-ops-scene.md:146-147`）：同一个编号既是本表的槽号、又是影片纹理编号 ⇒
+    //   ① **先**按该编号在媒体对象表里选格（格空 ⇒ 建一条播放类对象；格非空 ⇒ 保持原对象、不重建）；
+    //   ② **再**判纹理槽。⇒ 纹理槽为空而抛出时，**已填的那一格不回收**（它是刚建的对象/原对象）。
+    //   ⛔ 不许把次序反过来（那会让"槽空 ⇒ 抛出"这条路径少填一格）。
+    (void)media_cell(texture_id);
     // ★ 门是**槽里有没有对象**（不是"记录存不存在"）：记录在、槽已释放 ⇒ 仍然是空槽。
     if (texture_slot(texture_id) == nullptr) {
         throw CoreError("movie-texture-slot-empty:" + std::to_string(texture_id));
@@ -280,13 +285,13 @@ void Machine::op_242(const Instruction& instruction) {
     if (created) scene_records_[object_key] = SceneRecord{};
     scene_records_[object_key].field_2d0 = value;
     if (created) scene_dirty_ = true;
-    // 第二处：另一张表（`+0x438`）里同一编号的记录（缺则先建）；只写**一格**。
+    // 第二处：另一张表（**辅助表 A，`+0x438`**）里同一编号的记录（缺则先建）；只写**一格**。
     // ★ 为**这张**表建记录**不**标脏（`0x4AD9D7` 的第二张表路径不写 `0xB5AC`）⇒
     //   「第一张表已有该编号、第二张表没有」时场景不因本条而变脏。
-    if (scene_keyed_pair_.find(key) == scene_keyed_pair_.end()) {
-        scene_keyed_pair_[key] = KeyedPairRecord{};
+    if (scene_aux_a_.find(key) == scene_aux_a_.end()) {
+        scene_aux_a_[key] = KeyedPairRecord{};
     }
-    scene_keyed_pair_[key].field_a = value;
+    scene_aux_a_[key].field_a = value;
     return;
 }
 

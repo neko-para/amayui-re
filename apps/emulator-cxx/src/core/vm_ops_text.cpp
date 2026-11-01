@@ -369,15 +369,95 @@ void Machine::op_1b1(const Instruction& instruction) {
 
 void Machine::op_2db(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 字体对位模式 ← 操作数；重建入口未建模
+    // 字体对位模式 ← 操作数，然后**尾跳**进该对象的重建入口（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL`：
+    // 本条自己不产生返回值，重建入口的返回值直接由分派器接收）。
+    // ★ 尾跳进的是**不销毁旧句柄**的那一套（正文「重建入口的两种形态」）。
     font_align_mode_ = read_int(ops[0]);
+    run_font_rebuild_entry(FontRebuildBranch::NonDestroy);
     return;
 }
 
 void Machine::op_78(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 字体绘制模式 ← 操作数；重建入口未建模
+    // 字体绘制模式 ← 操作数，然后**尾跳**进同一个重建入口（与 `0x2db` 同形、**不同字段**）。
+    // ★ 绘制模式**不在**入口体内读（正文：它由绘制路径读）⇒ 这里写格 + 尾跳，入口不因它分岔。
     font_draw_mode_ = read_int(ops[0]);
+    run_font_rebuild_entry(FontRebuildBranch::NonDestroy);
+    return;
+}
+
+// ── 重建入口（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL`）──
+// 正文的四步，按序落地：
+//   ① 名字为空 ⇒ 入口**什么都不做、直接返回**（⛔ 不是"重建一个空字体"，也⛔ 不是报错）；
+//   ② 名字非空 ⇒ 两份描述的**高度**都**无条件**写成 −字号（与对位模式无关）；
+//      ★ **紧接高度的下一格本入口一概不写**（正文："为 0 ⇒ 两份描述的高度保持 ② 的 −字号、
+//      紧接高度的下一格**不动**"；只有 ④ 的派生会重写它）。
+//   ③ 随后向平台发**一次**「建参考字体 + 取量度」的请求，把量度写进**两张自己的**结构
+//      （一张文本度量、一张字形度量）。★ 这一请求与派生例程的两次度量**不是同一件事**：
+//      派生那两次是逐描述量的，这里这一次是入口自己的；两处落的**不是同一张结构**。
+//   ④ 最后按**对位模式是否为 0** 分岔（★ 判据是"是否为 0"，⛔ 不是"是否为 1"）：
+//      为 0 ⇒ 跳过派生；不为 0 ⇒ A 支对**自己的两份描述各跑一次**（共两次），
+//      B 支**只对自己的横排那一份跑一次**（竖排不参与派生）。
+//   ⑤ 两套入口的生命周期差：B 支重建前**先销毁三枚**已有的平台字体引用 —— 两枚是对象自己的、
+//      第三枚是**当时选在绘制表面上的那一枚旧引用**（销毁它之前先把绘制表面换回原来的字体）；
+//      然后建新字体并取一次**文本度量**（只文本，不取字形度量）。
+//   ⑦ 入口尾段（参考量度与派生都跑完之后）还有一段**字形缓冲的重分配与字形装载**
+//      （两枚缓冲先释放、再按描述里的一个块算尺寸重新分配、然后逐字装载）—— **本版不建模**
+//      （正文如此；两块缓冲的领域角色与逐字装载行为见残差 `RES-OPS-SET-TAIL-FIELDS`）⇒
+//      ⛔ 不许据此认为"引擎里没有这一段"，也⛔ 不许据它规定字形位图的内容。
+// ★ 名字格：两套各自的名字格就是**各自那一对的横排描述的字面名**（A 对 / B 对是两个不同对象 ⇒
+//   两个名字格不同格，⛔ 不许合并）。模型不建模引擎"字体对象建立时写入的默认面名"（未取证）
+//   ⇒ 没写过名字的时候这里读到空串，正好走 ① 那一支。
+void Machine::run_font_rebuild_entry(FontRebuildBranch branch) {
+    const bool destroy = branch == FontRebuildBranch::Destroy;
+    FontDescriptionPair& pair = destroy ? font_b_pair_ : font_a_pair_;
+    const std::int32_t size = destroy ? font_b_height_ : glyph_height_;
+    ++font_rebuild_requests_;
+    // ① 空名早退：一个格都不写、一个请求都不发。
+    if (pair.variants[0].face.empty()) return;
+    // ② 两份描述的高度无条件 ← −字号（⛔ 不动下一格）。
+    for (auto& variant : pair.variants) variant.height = -size;
+    // ③ 一次「建参考字体 + 取量度」。
+    FontBuildSpec spec;
+    spec.height = -size;
+    spec.width = -(size / 2);          // 整数除以 2 向零截断（引擎 `cdq; sub eax,edx; sar eax,1`）
+    spec.weight = font_metric_a_;      // 粗细 = 该字体对象的粗细格（`0x2bd` 写的那一格）
+    spec.charset = 1;                  // 字符集 = 默认（Win32 DEFAULT_CHARSET）
+    if (destroy) {
+        // B 支：先把绘制表面换回原字体，再销毁三枚旧引用，然后建**新字体**（= 该支自己的字面名）。
+        font_lifecycle_log_.push_back(FontLifecycle::SurfaceRestore);
+        for (int i = 0; i < 3; ++i) font_lifecycle_log_.push_back(FontLifecycle::ReleaseHandle);
+        spec.face = pair.variants[0].face;
+    } else {
+        // A 支：建的是**常量参考字体**（面名 `ＭＳ ゴシック`），与这一支自己的字面名无关。
+        spec.face = reference_font_face();
+    }
+    if (destroy) {
+        font_build_spec_destroy_ = spec;
+        ++font_build_requests_destroy_;
+    } else {
+        font_build_spec_non_destroy_ = spec;
+        ++font_build_requests_non_destroy_;
+    }
+    if (font_reference_builder_) {
+        const FontBuildMetrics metrics = font_reference_builder_(spec);
+        if (destroy) {
+            // 销毁那一套只把**新建字体**的文本度量写进**它自己的另一张**结构（不取字形度量）。
+            font_text_metric_destroy_ = metrics.text;
+        } else {
+            font_text_metric_non_destroy_ = metrics.text;
+            font_glyph_metric_non_destroy_ = metrics.glyph;
+        }
+    }
+    // ④ 对位模式是否为 0 的分岔（判据是"是否为 0"）。
+    if (font_align_mode_ != 0) {
+        if (destroy) {
+            derive_font_description(pair.variants[0], size);  // 只横排那一份（共一次）
+        } else {
+            for (auto& variant : pair.variants) derive_font_description(variant, size);  // 共两次
+        }
+    }
+    // ⑦ 入口尾段的字形缓冲重分配 + 逐字装载本版不建模（残差 `RES-OPS-SET-TAIL-FIELDS`）。
     return;
 }
 
@@ -508,6 +588,22 @@ void Machine::clear_text_layer(int slot) {
     text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
 }
 
+TextRunFont Machine::text_run_font(std::int32_t flags) const {
+    // 一位 → 一支字体对象（`ADV-TEXT-LAYER` 的「位 2 = 变体选择」）：置起 ⇒ 变体那一支（B 支），
+    // 否则 A 支。★ 换的是**整支**（字面名 / 字号 / 绘制模式 / 粗细一起换），⛔ 不是只换字号。
+    // ★ 绘制模式与粗细是**字体对象**的格（`0x78` / `0x2bd` 各一格）⇒ 两支取到的是同一个值；
+    //   差别落在字面名与字号上。⛔ 不另建"第二支的绘制模式格"——正文没有它的写者（残差）。
+    TextRunFont font;
+    font.variant = (flags & 4) != 0;
+    const FontDescriptionPair& pair = font.variant ? font_b_pair_ : font_a_pair_;
+    font.face = pair.variants[0].face;  // 横排那一份的字面名
+    font.size = font.variant ? (font_b_height_ > 0 ? font_b_height_ : 10)
+                             : (glyph_height_ > 0 ? glyph_height_ : 24);
+    font.draw_mode = font_draw_mode_;
+    font.weight = font_metric_a_;
+    return font;
+}
+
 void Machine::append_text_span_record(int slot, const std::string& text, int x, int y, int x1,
                                       int y1, std::int32_t flags) {
     // 文本门 < 0（`0x1bb` 写 0x80000000）⇒ 排版层整批不追加记录（`0x46BE30` 的 `a5 >= 0` 分支）。
@@ -520,6 +616,10 @@ void Machine::append_text_span_record(int slot, const std::string& text, int x, 
     record.y1 = y1;
     record.flags = flags;
     record.text = text;
+    // ★ **追加侧**判的是**它收到的标志参数**（`flags`）的第 2 位 —— 那一刻记录还没写出 ⇒
+    //   ⛔ 不许写成"读记录自己的标志字"（那是循环）。把该位置进记录的同时，按它选**整支**
+    //   字体对象并落库（绘制侧之后按**记录自己**的标志字取同一支）。
+    record.font = text_run_font(flags);
     text_spans_.push_back(std::move(record));
 }
 
@@ -577,11 +677,15 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
             pending.slot = slot;
             pending.x = x0;
             pending.y = y0;
-            // ★ 字号 / 模式 / 两色都是**追加当时**的快照（引擎在这里就逐字写出）：
+            // ★ 字号 / 模式 / 字面名 / 两色都是**追加当时**的快照（引擎在这里就逐字写出）：
             //   画的时候再读字体对象 ⇒ 别的行在这期间改 `0x75` 会让这一格按别人的字号画出来。
+            // ★ 这一趟的支由**本段收到的标志参数**的第 2 位选（`font_text_gate_5ec7c_` 原样传下去）：
+            //   主线正文 run 的位 2 未置 ⇒ A 支。
+            const TextRunFont run_font = text_run_font(font_text_gate_5ec7c_);
             pending.size = glyph_height_;
-            pending.weight = font_metric_a();
-            pending.draw_mode = font_draw_mode();
+            pending.weight = run_font.weight;
+            pending.draw_mode = run_font.draw_mode;
+            pending.face = run_font.face;
             pending.primary = font_primary_color();
             pending.secondary = font_secondary_color();
             pending.unit = unit;
@@ -609,8 +713,10 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
         //              （2 字节整份、1 字节半份，`0x465ef1`）⇒ 两端各留一份、恰好铺满格宽；
         //     d ≤ 0  ⇒ 不加步进，整串以格**中心**对齐：首字 x = 格左 − ⌊|d|÷2⌋（`0x465b25`）。
         //   ⛔ 不是"按行比例切分"（按比例只决定这一行分到几个假名，`0x46c2ed`）。
-        // 振り仮名 run 的字号支 = **记录标志位 2**（B 支）—— 与"画记录"同一个口径（`record_font_size`）。
-        const int ruby_size = record_font_size(4);
+        // 振り仮名 run 的标志参数**位 2 置起** ⇒ 变体那一支（B 支）：字号 / 字面名 / 绘制模式
+        // **整支**换（⛔ 不是只换字号）。追加侧判的是**要传下去的参数**，不是记录自己的标志字。
+        const TextRunFont ruby_font = text_run_font(font_text_gate_5ec7c_ | 4);
+        const int ruby_size = ruby_font.size;
         const int ruby_y = start_y - ruby_size - 2;
         const int cell_x = line_start_x;
         const int cell_width = state.cursor_x - cell_x;  // 最后一行主文本的宽
@@ -637,8 +743,9 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
                 pending.x = x;
                 pending.y = ruby_y;
                 pending.size = ruby_size;
-                pending.weight = font_metric_a();
-                pending.draw_mode = font_draw_mode();
+                pending.weight = ruby_font.weight;
+                pending.draw_mode = ruby_font.draw_mode;
+                pending.face = ruby_font.face;
                 pending.primary = font_primary_color();
                 pending.secondary = font_secondary_color();
                 pending.unit = kana;
@@ -675,7 +782,8 @@ void Machine::draw_front_pending_glyph() {
     std::string error;
     int advance = 0;
     // 用**追加当时**的样式快照画（⛔ 不是画的时候再读字体对象）—— 见 `PendingGlyph` 的注释。
-    const TextStyleSnapshot style{glyph.size, glyph.weight, glyph.draw_mode, glyph.primary, glyph.secondary};
+    TextStyleSnapshot style{glyph.size, glyph.weight, glyph.draw_mode, glyph.primary, glyph.secondary};
+    style.face = glyph.face;  // 变体支 = 那一支自己的字面名（整支字体对象换了）
     if (!draw_text_into_texture(*this, text_layer_texture_id(slot), glyph.x, glyph.y, glyph.unit,
                                 &error, &advance, glyph.size, &style)) {
         if (!error.empty()) report_error(error);
@@ -739,8 +847,9 @@ void Machine::reveal_text_layer_cell(int slot) {
     std::string error;
     int advance = 0;
     // 与普通打字机同一个口径：用**追加当时**的样式快照画。
-    const TextStyleSnapshot style{glyph.size, glyph.weight, glyph.draw_mode, glyph.primary,
-                                  glyph.secondary};
+    TextStyleSnapshot style{glyph.size, glyph.weight, glyph.draw_mode, glyph.primary,
+                            glyph.secondary};
+    style.face = glyph.face;
     if (!draw_text_into_texture(*this, text_layer_texture_id(static_cast<std::size_t>(slot)), glyph.x,
                                 glyph.y, glyph.unit, &error, &advance, glyph.size, &style)) {
         if (!error.empty()) report_error(error);
@@ -955,10 +1064,7 @@ void Machine::op_1a5(const Instruction& instruction) {
     //   分岔：≠ 0 ⇒ 对该支两份描述跑**同一个**度量派生例程、**覆写**高度与下一格；= 0 ⇒ 不覆写。
     const std::string face = read_text(ops[0]);
     write_font_pair(font_a_pair_, face, glyph_height_);
-    if (font_align_mode_ != 0) {
-        for (auto& variant : font_a_pair_.variants) derive_font_description(variant, glyph_height_);
-    }
-    request_font_rebuild();
+    run_font_rebuild_entry(FontRebuildBranch::NonDestroy);
     return;
 }
 
@@ -966,13 +1072,11 @@ void Machine::op_2fe(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // `0x2fe` 设**B 支那一对**描述的字面名（`sub_432dd0`，argc 1，按文本读；EA 0x432e78..0x432ecd）。
     // 与 `0x1a5` 同形，但写另一对：`0x75`/`0x1a5` 与 `0x197`/`0x2fe` 各一对、互不覆盖。
-    // ★ B 支的重建入口是**另一个函数**（`sub_45A6E0`），但派生例程是同一个。
+    // ★ B 支的重建入口是**另一个函数**（`sub_45A6E0`），但派生例程是同一个；
+    //   而且那一套是**销毁旧句柄**的那一套 ⇒ 只对**横排那一份**跑一次派生（见下 `0x197`）。
     const std::string face = read_text(ops[0]);
     write_font_pair(font_b_pair_, face, font_b_height_);
-    if (font_align_mode_ != 0) {
-        for (auto& variant : font_b_pair_.variants) derive_font_description(variant, font_b_height_);
-    }
-    request_font_rebuild();
+    run_font_rebuild_entry(FontRebuildBranch::Destroy);
     return;
 }
 
@@ -993,11 +1097,9 @@ void Machine::op_197(const Instruction& instruction) {
         variant.height = height;
         variant.width = width;
     }
-    // ★ 入口体随后**自己按对位模式分岔**：≠ 0 ⇒ 对该支两份描述各跑一次**度量派生例程**。
-    if (font_align_mode_ != 0) {
-        for (auto& variant : font_b_pair_.variants) derive_font_description(variant, value);
-    }
-    request_font_rebuild();
+    // ★ 随后请求重建：走 **B 支（销毁旧句柄那一套）** 的重建入口 —— 它自己按对位模式分岔，
+    //   并且**只对横排那一份**跑派生（共一次，⛔ 不是两份各一次）。
+    run_font_rebuild_entry(FontRebuildBranch::Destroy);
     if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x197 font_b_height=%d\n", value);
     return;
 }
@@ -1019,12 +1121,9 @@ void Machine::op_75(const Instruction& instruction) {
         variant.height = -value;
         variant.width = -(value / 2);
     }
-    // ★ 入口体随后**自己按对位模式分岔**：= 0 ⇒ 直接重建；≠ 0 ⇒ 对该支两份描述各跑一次
-    //   **度量派生例程**（它会覆写高度与下一格），再请求重建。
-    if (font_align_mode_ != 0) {
-        for (auto& variant : font_a_pair_.variants) derive_font_description(variant, value);
-    }
-    request_font_rebuild();
+    // ★ 随后请求重建：走 **A 支（不销毁旧句柄那一套）** 的重建入口 —— 它自己按对位模式分岔，
+    //   非 0 时对**两份描述各跑一次**派生（共两次），并写参考字体的两张量度结构。
+    run_font_rebuild_entry(FontRebuildBranch::NonDestroy);
     if (text_trace_enabled()) std::fprintf(stderr, "[text] 0x75 glyph_height(family A)=%d\n", glyph_height_);
     return;
 }

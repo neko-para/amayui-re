@@ -1,19 +1,86 @@
-// 影片：`0x20F` 处理体 + **门之前**的对象表服务 + "填纹理"，都在本文件。
+// 影片 / 媒体对象表：`0x20F` 处理体 + **门之前**的对象表服务 + "填纹理"，都在本文件。
 //
 // ★ 分工（`CORE-VM-MOVIE`）：影片位只管把门关住；轮询 / 收尾 / 循环 / 填纹理都在
 //   `service_movies()` 里，每次迭代在过门之前跑一遍。解码器是平台边界（core/movie.h）。
+// ★ 这张表就是 `60-ops-render.md`「媒体对象表（合同）」的**同一张表**，也是「纹理族」的
+//   **共享对象槽**（`60-ops-wait.md:94` / `60-ops-texture.md:16-17`）：定长 1000 格、空槽为空。
+//   填 = 五条指令（`0x20f` / `0x236` / `0x240` / `0x241` / `0x24d`，**全部按第 2 个操作数选格**，
+//   同槽已有对象 ⇒ 不重建、只改配置 / 启动）；清 = ① 纹理族三条写指令 ② `0x210` / `0x249`
+//   ③ 每拍的扫描 ⑤ `0x23d` 的 `42..999`（④ 那条「本拍不计入」路径的判定身份未取证 ⇒ 未实现）。
 #include "core/vm.h"
 #include "core/install.h"
 
 namespace core {
+
+// ── 表的三条原语（见 vm.h 的声明）──
+
+MovieRecord& Machine::media_cell(std::uint32_t slot) {
+    // ★ 判据只有"格空不空"这一条：⛔ 不许在这里加"槽号 < 1000"之类的范围检查
+    //   （正文：「上限一千」是**每拍扫描的循环边界**，不是任何一条指令选格时的判据）。
+    if (slot < kMediaSlotCount) {
+        auto& cell = movies_[slot];
+        if (!cell) {
+            cell.emplace();
+            cell->present = true;
+            cell->identity = next_movie_identity_++;  // 只有**真的新建**才取号
+        }
+        return *cell;
+    }
+    // 表外落点：本版不规定它会怎样；模型不检查、不越界，也不让它进任何整表遍历。
+    auto [it, inserted] = movies_out_of_range_.try_emplace(slot);
+    if (inserted) {
+        it->second.present = true;
+        it->second.identity = next_movie_identity_++;
+    }
+    return it->second;
+}
+
+void Machine::release_media_cell(std::uint32_t slot) {
+    // 「把该格的对象释放并置空」：格空 ⇒ 静默跳过，不报错（正文：扫描**不报错**）。
+    MovieRecord* record = nullptr;
+    if (slot < kMediaSlotCount) {
+        auto& cell = movies_[slot];
+        if (!cell) return;
+        record = &*cell;
+        if (record->backend) {
+            record->backend->close();
+            record->backend.reset();
+        }
+        cell.reset();  // 先释放对象、再置空（逐槽）
+    } else {
+        const auto it = movies_out_of_range_.find(slot);
+        if (it == movies_out_of_range_.end()) return;
+        if (it->second.backend) {
+            it->second.backend->close();
+            it->second.backend.reset();
+        }
+        movies_out_of_range_.erase(it);
+    }
+    recompute_movie_active();
+}
+
+void Machine::recompute_movie_active() {
+    // 「有活动对象」= 表里还有**已启动**的对象（失败残留 / 只建未启动的格子不参与，
+    // 见 `CORE-OPS-MOVIE` 的「失败残留对象没有"已启动"」那条）。
+    for (const auto& cell : movies_) {
+        if (cell && cell->present && cell->started) {
+            movie_active_ = true;
+            return;
+        }
+    }
+    movie_active_ = false;
+}
+
+// ── 播影片：`0x20f` ──
 
 void Machine::op_20f(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 播影片：建对象 → 初始化后端 → 绑定门 → 取文件配置 → 读选项 → 启动 → 置影片位
     // 读取顺序 2 → 1 → 1 → 3（`CORE-OPS-MOVIE`）：槽号 → 资源 id → 资源 id → 选项字。
     const auto slot = static_cast<std::uint32_t>(read_int(ops[1]));
-    MovieRecord& movie = movies_[slot];  // 槽为空 ⇒ 新建；同槽已有 ⇒ 不重建
-    if (!movie.present) movie.present = true;
+    // ★ 同槽已有对象 ⇒ **不重建**：格上仍是原来那个对象（不释放、不换新），只改配置与启动。
+    MovieRecord& movie = media_cell(slot);
+    movie.present = true;
     // 只改配置与启动：先落成「未启动」，失败时正是规范要求的残留形态。
     movie.started = false;
     if (movie.backend) {
@@ -58,21 +125,56 @@ void Machine::op_20f(const Instruction& instruction) {
 
 }
 
+// ── 填格：`0x236` / `0x240` / `0x241`（三条**整条尚未成篇**）──
+//
+// 正文只登记它们**与本表有关的那一项副作用**（`60-ops-render.md:351`）：
+// 按**第 2 个操作数**选一格、**格空时**建一条播放类对象（格非空 ⇒ 原对象留着，不重建、不释放）。
+// ⇒ 本版**不读**它们其余的操作数（那些操作数的语义未取证；读了就等于替引擎编读序与类型检查）。
+
+void Machine::op_236(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    (void)media_cell(static_cast<std::uint32_t>(read_int(ops[1])));
+}
+
+void Machine::op_240(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    (void)media_cell(static_cast<std::uint32_t>(read_int(ops[1])));
+}
+
+void Machine::op_241(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    (void)media_cell(static_cast<std::uint32_t>(read_int(ops[1])));
+}
+
+// ── 显式清格：`0x210`（第 1 个操作数）/ `0x249`（第 2 个操作数）──
+//
+// 同样只登记这一项副作用（`60-ops-render.md:354`）：把该格的对象**释放并置空**。
+
+void Machine::op_210(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    release_media_cell(static_cast<std::uint32_t>(read_int(ops[0])));
+}
+
+void Machine::op_249(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    release_media_cell(static_cast<std::uint32_t>(read_int(ops[1])));
+}
+
+// ── 每拍的扫描（清 ③）──
+
 void Machine::service_movies() {
     if (!movie_active_) return;
     bool any = false;
-    for (auto it = movies_.begin(); it != movies_.end();) {
-        MovieRecord& movie = it->second;
-        const std::uint32_t slot = it->first;
+    // ★ 逐槽（0..999 = **上限一千 / 每拍扫描的循环边界**）、空槽静默跳过、扫描**不报错**。
+    for (std::uint32_t slot = 0; slot < kMediaSlotCount; ++slot) {
+        auto& cell = movies_[slot];
+        if (!cell) continue;  // 空槽：静默跳过
+        MovieRecord& movie = *cell;
         // 槽为空 / 未启动（打开或绑定失败留下的残留）⇒ 跳过：不进播完判据、不维持影片位。
-        if (!movie.present || !movie.started) {
-            ++it;
-            continue;
-        }
+        if (!movie.present || !movie.started) continue;
         if (!movie.backend) {
             // 已启动却没有后端（正常路径不会出现）：⛔ 不伪造"播完"，门继续关着（与参考实现同口径）。
             any = true;
-            ++it;
             continue;
         }
         MovieBackend& backend = *movie.backend;
@@ -87,25 +189,26 @@ void Machine::service_movies() {
             if (fill_movie_texture(slot, backend.frame())) scene_dirty_ = true;
         }
         const double stop = backend.stop_time();
+        // **结束条件** = 对象自己的两个时刻比较成立（"已经过去 / 播完"那一对）。
+        // ★ 这两个取值器的**领域名**本版未取证（残差 `RES-RENDER-STEP-COMMAND-OBJECTS` ①）
+        //   ⇒ 合同只能写成「已到结束条件」，这里**不**给它们编名字。
         const bool done = backend.ended() || (stop > 0.0 && backend.position() >= stop);
         if (!done) {
             any = true;
-            ++it;
             continue;
         }
         if ((movie.options & 1u) != 0u) {
-            // 循环位：回到开头重新启动；保留对象与槽，不销毁、不填纹理。
+            // 循环位（选项字第 0 位）= 1 ⇒ **不销毁**：回到开头重新启动；保留对象与槽，不填纹理。
             backend.rewind();
             backend.play();
             movie.started_ms = scene_clock_ms_;
             any = true;
-            ++it;
             continue;
         }
-        // 正常收尾：`(选项字 & 3) != 2` ⇒ 一次「填纹理」请求；随后停止 / 关闭 / 移除槽。
+        // 正常收尾：`(选项字 & 3) != 2` ⇒ 一次「填纹理」请求；随后停止 / 关闭 / **释放并置空**。
         if ((movie.options & 3u) != 2u) fill_movie_texture(slot, backend.frame());
         backend.close();
-        it = movies_.erase(it);
+        cell.reset();
     }
     movie_active_ = any;
 }

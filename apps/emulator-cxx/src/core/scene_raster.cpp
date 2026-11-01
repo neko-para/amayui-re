@@ -122,7 +122,9 @@ void raster_triangle(Surface& target, float ax, float ay, float bx, float by, fl
     }
 }
 
-// 一帧内被访问的键：有符号升序；网格的负键不参与（`CORE-SCENE-DRAW-ORDER`）。
+// 一帧内被访问的键：有符号升序。**负键口径按表分**（`CORE-SCENE-DRAW-ORDER`）：网格 / 辅助表 A /
+// 辅助表 B 的负键条目按哨兵处理（不参与），**绘制项**的负键没有这层过滤（它是最小键、最先发出）。
+// ★ 四张表都并入键集合：辅助表 A / B 不产生像素（条目语义是残差），但它们确实在同一次扫描里被访问。
 std::vector<std::uint32_t> sorted_keys(const Machine& machine) {
     std::vector<std::uint32_t> keys;
     keys.reserve(machine.draw_items().size() + machine.meshes().size());
@@ -134,6 +136,10 @@ std::vector<std::uint32_t> sorted_keys(const Machine& machine) {
         (void)mesh;
         if (static_cast<std::int32_t>(key) < 0) continue;
         keys.push_back(key);
+    }
+    for (const auto key : machine.scene_aux_keys()) {
+        if (key < 0) continue;
+        keys.push_back(static_cast<std::uint32_t>(key));
     }
     std::sort(keys.begin(), keys.end(), [](std::uint32_t a, std::uint32_t b) {
         return static_cast<std::int32_t>(a) < static_cast<std::int32_t>(b);
@@ -450,7 +456,10 @@ std::uint32_t derive_color(const DrawItem& item, std::uint32_t now, bool forced)
 
 std::uint32_t derive_color(const MeshRecord& mesh, std::uint32_t now, bool forced) {
     if ((mesh.flags & 2u) == 0 || mesh.duration <= 0) {
-        return mesh.colors.empty() ? mesh.color : mesh.colors[0];
+        // 绘制用的**平色**（这是投影层的简化，⛔ 不是合同：合同里顶点色是逐顶点的）：
+        // 顶点缓冲已装配 ⇒ 取装配 / 烘焙出来的色字（第 5 个 32 位分量）；没有缓冲 ⇒ 记录当前颜色。
+        if (mesh.vertex_buffer.words.size() > 4) return mesh.vertex_buffer.words[4];
+        return mesh.color;
     }
     if (forced) return mesh.target_color;
     if (mesh.window_start == 0) return mesh.color;
@@ -465,7 +474,12 @@ std::uint32_t derive_color(const MeshRecord& mesh, std::uint32_t now, bool force
 }
 
 Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t height) {
-    machine.begin_render();
+    // 渲染步（`CORE-OPS-RENDER-FRAME-STEP` 的「渲染步（合同边界）」）：
+    //   ① 清屏位判定（本版恒「不清」）→ ② 请求**开始一次批次**。
+    // ★ 批次闸被拒绝 ⇒ **整步立即结束**：返回空画布（不遍历 / 不绘制 / 不呈现 / 不复位目标 /
+    //   不清命令表 / 不写任何步末格）。宿主看见空画布就当"这一拍没有可呈现的帧"。
+    if (!machine.begin_render_step()) return Bytes{};
+    machine.note_render_traversal();  // 观察口：遍历 / 绘制本体真的进来了（闸之后）
     const std::uint32_t now = machine.render_now_ms();
     bool forced = machine.forced_complete();
 
@@ -614,24 +628,32 @@ Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t heigh
         }
     }
 
-    // 收尾扫描：四张同键表里「有效位 = 1 且第 16 位 = 0」的条目，按有符号键升序；
-    // 同键平键序 = 辅助表 A → 辅助表 B → 网格 → 绘制项（辅助表暂不产生像素）。
+    // 收尾扫描（`CORE-SCENE-DRAW-ORDER`）：四张同键表按键**严格升序**合并访问；同键平键序固定为
+    // **辅助表 B → 辅助表 A → 网格 → 绘制项**（按表身份与比较链核过；⛔ 不是表名 / 插入次序 / 字母序）。
+    // 每张表**各自**判自己的「有效位 = 1 ∧ 第 16 位 = 0」：同键的另一张表被命令档消费过，
+    // **不**阻止本表发请求（⛔ 不是"任一表被消费 ⇒ 整键跳过"）。访问过的条目一律清掉第 16 位。
+    // ★ 辅助表 A / B 的条目绘制语义不在本版（残差：条目语义未展开）⇒ 本模型只让它们参与访问次序
+    //   （键集合并入），⛔ 不要替它们发明一条像素路径。
     if (!abort_command_pass) {
         for (const auto key : keys) {
-            if (DrawItem* item = machine.draw_item_mut(key)) {
-                if ((item->flags & (1u << 16)) != 0) {
-                    item->flags &= ~(1u << 16);
-                    continue;
-                }
-            }
+            // ① 辅助表 B（`+0x448`，`0x344` 一族写）—— 只登记访问次序。
+            // ② 辅助表 A（`+0x438`，`0x242` 一族写）—— 同上。
+            // ③ 网格表（`+0x428`）：先释放 / 跳过自己的第 16 位，再画。
             if (MeshRecord* mesh = machine.mesh_mut(key)) {
                 if ((mesh->flags & (1u << 16)) != 0) {
                     mesh->flags &= ~(1u << 16);
-                    continue;
+                } else {
+                    draw_mesh(machine, key, layer, now, machine.forced_complete());
                 }
             }
-            draw_mesh(machine, key, layer, now, machine.forced_complete());
-            draw_item(machine, key, layer, now, machine.forced_complete());
+            // ④ 绘制项表（`+0x408`）：最上层，所以最后访问。
+            if (DrawItem* item = machine.draw_item_mut(key)) {
+                if ((item->flags & (1u << 16)) != 0) {
+                    item->flags &= ~(1u << 16);
+                } else {
+                    draw_item(machine, key, layer, now, machine.forced_complete());
+                }
+            }
         }
     }
 
@@ -676,7 +698,7 @@ Bytes rasterize_scene(Machine& machine, std::uint32_t width, std::uint32_t heigh
         canvas[i + 3] = clamp_byte(sa + canvas[i + 3] * (255 - sa) / 255);
     }
 
-    machine.end_render();
+    machine.end_render_step();  // 结束批次 → 呈现（门 = 步末目标是后缓冲）→ 步内收尾
     return canvas;
 }
 

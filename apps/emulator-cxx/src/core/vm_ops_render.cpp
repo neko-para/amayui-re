@@ -14,19 +14,66 @@
 
 namespace core {
 
+void Machine::op_200(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 场景绘制模式 ← 脚本给的覆盖值（`CORE-OPS-RENDER-FRAME-STEP` 写点③；站点 `0x4231e5`）：
+    // 用操作数**直接覆盖** —— 不重读配置、不校验范围、不钳上下界（第三态 2 / 3 / 负数都照写）。
+    // ★ 前置：该操作数对应的对象**已被创建** —— 位图来自配置 `set:CreateObject`，位号 = 该操作数
+    //   （与初始化那一次的位下标**同一口径**；值 ≥ 32 / 负值按平台移位语义掩到低 5 位，见残差）。
+    //   该位未置起 ⇒ **整条不生效、一个字节都不写**（可证伪：`0x201` 读回仍是旧值）。
+    //   ⛔ 这不是范围检查：位图来自配置，与模式值本身是不是 0 / 1 / 2 无关。
+    const auto value = read_int(ops[0]);
+    const auto bit = static_cast<std::uint32_t>(value) & 31u;
+    if ((static_cast<std::uint32_t>(config_.get_int("set:CreateObject")) & (1u << bit)) == 0) return;
+    draw_mode_ = value;
+    return;
+}
+
+void Machine::op_201(const Instruction& instruction) {
+    const Operand* ops = instruction.operands.data();
+    // 场景绘制模式**原值交出**（站点 `0x4302c8`：把该格交给值写出原语）：不归一化 ——
+    // 第三态取到 2 就交出 2（⛔ 不是 0 / 1 归一化的布尔）。
+    // ★ `0x201` 整条尚未成篇：它的**落点身份**在 `RES-DRAW-MODE-BIT-INDEX` ② 里仍是 unknown
+    //   ⇒ 这里按最小可观察形态实现 = 把原值写进第 1 个操作数槽（与同族 getter 一致）；⛔ 不另造语义。
+    write_int(ops[0], draw_mode_);
+    return;
+}
+
 void Machine::op_23b(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // CG 数字条：建绘制项（像素输出未建模）
+    // CG 数字条（`CORE-OPS-SCENE-CG-NUMBER-23B`）：建绘制项（像素输出未建模）。
+    // 读序是**合同**：第 2 个（判有效性）→ 1 → 3 → 6 → 7 →（清旧项）→ 每个被画出的位：4 → 5。
     const auto id = read_int(ops[1]);
-    if (id < 0 || id > 10) return;
-    if (id < 10 && cg_params_[static_cast<std::size_t>(id)][0] == 0) return;
+    // 无效记录：编号不在 0..10（负数按越界），或 0..10 的**纹理槽 = 0**（= 没登记过；编号 10 的
+    // 「纹理槽」是帧 0 的返回栈深度，刚复位时同样是 0）。
+    // ⇒ 向错误通道上报**与 `0x2da` 同一条文本**（`0x424d79`），本条到此为止：
+    //   **其余六个操作数一次都不读**（读它们会抛的类型异常因此不出现）、不删旧项、不建任何项。
+    const bool record_missing = id >= 0 && id <= 10 && cg_params_[static_cast<std::size_t>(id)][0] == 0;
+    if (id < 0 || id > 10 || record_missing) {
+        report_error("CGNumberの引数が不正です．");
+        return;
+    }
     const auto start = read_int(ops[0]);
     const auto value = read_int(ops[2]);
     const auto digits = read_int(ops[5]);
     const auto flags = read_int(ops[6]);
+    // 清旧项：与「拆离」（`0x1f7`）**同一组四张**按键有序的表、**固定表序**（偏移次序，⛔ 不是字母序）：
+    //   绘制项表 → 网格表 → 辅助表 A（`+0x438`）→ 辅助表 B（`+0x448`）。
+    // ★ 每张表只要真删到条目就各标一次脏（最多四次）；一条都没删到的表不标脏 ⇒ 用 erased 汇总一次。
+    // ★ 场景命令表**不在这四张之内**：同键的命令记录**不随**这次清理消失。
+    bool erased = false;
+    const auto erase_one = [&](std::int32_t slot_key) {
+        const auto index = static_cast<std::uint32_t>(slot_key);
+        if (draw_items_.erase(index) > 0) erased = true;
+        if (meshes_.erase(index) > 0) erased = true;
+        if (scene_aux_a_.erase(slot_key) > 0) erased = true;
+        if (scene_aux_b_.erase(slot_key) > 0) erased = true;
+    };
+    // 位数 = 0 ⇒ 清理区间为空（一条都不删、不标脏），一个位都不画，第 4 / 5 个操作数一次都不读。
     if (digits > 0) {
-        for (std::int32_t i = 0; i < digits; ++i) draw_items_.erase(static_cast<std::uint32_t>(start + i));
+        for (std::int32_t i = 0; i < digits; ++i) erase_one(start + i);
     }
+    if (erased) scene_dirty_ = true;
     if (digits <= 0) return;
     const auto target_x = read_int(ops[3]);
     const auto target_y = read_int(ops[4]);
@@ -281,6 +328,10 @@ void Machine::op_20e(const Instruction& instruction) {
     // ★ 门控支（虚拟全屏类型 == 1 且目标是后缓冲 ⇒ 再清纹理槽 38）**本模型未建模**（没有显示记录的
     //   虚拟全屏类型格）；引擎侧的域含义见残差 `RES-RENDER-CLEAR-VFS` / `RES-RENDER-CLEAR-38`。
     // ⛔ 不要顺手清纹理表 / 不要清非目标纹理：那不是这条的语义（见 ops-forensics §21）。
+    // ★ **清屏请求**：这是全仓**唯一**发出清屏请求的地方（`CORE-OPS-RENDER-FRAME-STEP` 的
+    //   「渲染步从不自行清屏」）。渲染步入口那次「清屏位」判定本版恒走"不清" ⇒ 请求序列上
+    //   只在脚本执行本条时看得见清屏。⛔ 别把这条请求挪进渲染步：那是"每步先清黑"。
+    note_renderer_request(RendererRequest::ClearScreen);
     if (render_target_ >= 0) {
         if (TextureEntry* entry = texture_mut(static_cast<std::uint32_t>(render_target_))) {
             std::fill(entry->slot.rgba.begin(), entry->slot.rgba.end(), std::uint8_t{0});

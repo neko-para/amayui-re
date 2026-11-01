@@ -347,18 +347,15 @@ void Machine::advance_scene_windows() {
                                                      static_cast<double>(duration));
             // 网格只在被推进的那一步按派生色重烘顶点缓冲；重烘**唯一的跳过条件**是
             // "顶点缓冲未建 / 顶点数 ≤ 0"（⛔ 不按颜色值分支）。
-            if (!mesh.colors.empty()) {
-                for (auto& value : mesh.colors) value = derived;
-            }
+            // ★ 烘的是**顶点缓冲的颜色分量**；第 3 张副本数组（原逐顶点颜色）是不变量，不许写。
+            bake_mesh_colors(mesh, derived);
             continue;
         }
         // 正常到期的共享收尾（持续时间 > 0）：取终色 → 当前颜色 ← 终色 →（网格按该值重烘一次）
         // → 终色 ← "无颜色" → 延迟与持续时间清 0；窗位与起点清掉（本模型在到期支里清，残差
         // `RES-WINDOW-FLAG-CLEAR` 记着引擎的清点未取证）。
         mesh.color = mesh.target_color;
-        if (!mesh.colors.empty()) {
-            for (auto& value : mesh.colors) value = mesh.color;
-        }
+        bake_mesh_colors(mesh, mesh.color);
         mesh.target_color = kNoColor;
         mesh.delay = 0;
         mesh.duration = 0;
@@ -366,6 +363,44 @@ void Machine::advance_scene_windows() {
         mesh.window_start = 0;
     }
     if (scene_animating_) scene_dirty_ = true;  // 有动画 ⇒ 下一迭代重绘
+}
+
+// ── 渲染步（合同边界）：渲染器请求接缝（`CORE-OPS-RENDER-FRAME-STEP`；正文
+//    `60-ops-render.md` 的「渲染步（合同边界）」）──
+std::size_t Machine::renderer_request_count(RendererRequest kind) const {
+    std::size_t count = 0;
+    for (const auto request : renderer_requests_) {
+        if (request == kind) ++count;
+    }
+    return count;
+}
+
+bool Machine::begin_render_step() {
+    // ① **「清屏位」判定**（在开始批次**之前**）：本版没有任何把该位置为非 0 的来源
+    //    ⇒ 恒走「不清」。判定本体留着，是为了让"开始批次不是渲染步的第一个动作"可断言；
+    //    ⛔ 它**不是**"某条件下自动清屏"的分支：该位唯一的写点是复位时清 0（`op_09`）。
+    if (scene_clear_bit_ != 0) note_renderer_request(RendererRequest::ClearScreen);
+    // ② 请求**开始一次批次**。渲染器拒绝（返回失败）⇒ 本步**立即结束**：
+    //    ⛔ 不发出配对的那次「结束批次」、⛔ 不复位目标、⛔ 不遍历 / 不绘制、⛔ 不呈现、
+    //    ⛔ 不清命令表、⛔ 不写任何步末格（连下面两格"步头格"也不写 —— 闸在它们之前）。
+    note_renderer_request(RendererRequest::BeginBatch);
+    if (renderer_begin_batch_refuses_) return false;
+    // ③ 步头两格（**过了闸才写**）：本步的"现在"与命令动画格。
+    render_now_ms_ = scene_clock_ms_;
+    command_animating_ = false;
+    return true;
+}
+
+void Machine::end_render_step() {
+    // ★ 本函数**只**被"闸已通过"的调用方调用 ⇒ 「结束批次」只在开始批次成功之后才发出。
+    //   把它挪到 `begin_render_step()` 的拒绝支里就变成"无论成败都收尾"（正文点名禁止）。
+    // ① 结束这次批次（**在呈现之前** —— 批次的范围不含"把画面交给平台"）。
+    note_renderer_request(RendererRequest::EndBatch);
+    // ② 呈现：本步**最后一项**平台绘制请求；门 = **步末的当前渲染目标是后缓冲**（模型里 = −1，
+    //    `0x20d` 的 ≥ 1000 那一支）。目标是纹理槽 ⇒ **不提交**。
+    if (render_target_ == -1) note_renderer_request(RendererRequest::Present);
+    // ③ 步内收尾（复位 / 命令表清理 / 「强制完成」的清除）—— 它在呈现**之后**。
+    end_render();
 }
 
 }  // namespace core

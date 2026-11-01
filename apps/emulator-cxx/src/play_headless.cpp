@@ -221,8 +221,11 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
                     for (const auto value : mesh.copies[0]) std::printf(" %u", value);
                     std::printf("\n[scene]   copies1:");
                     for (const auto value : mesh.copies[1]) std::printf(" %u", value);
-                    std::printf("\n[scene]   colors:");
-                    for (const auto value : mesh.colors) std::printf(" %08X", value);
+                    std::printf("\n[scene]   copies2:");
+                    for (const auto value : mesh.copies[2]) std::printf(" %08X", value);
+                    std::printf("\n[scene]   vertex-buffer fmt=%03X words=%zu:",
+                                mesh.vertex_buffer.format, mesh.vertex_buffer.words.size());
+                    for (const auto value : mesh.vertex_buffer.words) std::printf(" %08X", value);
                     std::printf("\n");
                 }
             }

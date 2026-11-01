@@ -461,8 +461,8 @@ void Machine::op_82(const Instruction& instruction) {
     // op2 = 记录下标（`T_Font+0xD24` 的 72 字节向量，**有检查**）、op3 = 标志（位1 = op4/op5 是颜色、位3 = 允许触发语音）、
     // op4/op5 = 主色 / 副色（**字节反转**后存）。
     // ★ 早退：`op2` 不在 `[0, count)` ⇒ **整条静默什么都不做**（不写颜色、不发请求、不报错）。
-    // ★ 未建模（残差）：GDI 度量（`GetTextMetricsA` / `GetTextExtentPoint32A`）、经渲染器追加的绘制命令、
-    //   三条"文本-语音"队列表头的清 0、`node[0x70]==1` 时转交的那条绘制路径（只记次数）。
+    // ★ 未建模（残差）：GDI 度量（`GetTextMetricsA` / `GetTextExtentPoint32A`）、逐字符推进那条
+    //   绘制路径里追加到渲染器的命令、三条"文本-语音"队列表头的清 0。
     const auto op5 = read_int(ops[4]);
     const auto op4 = read_int(ops[3]);
     const auto op3 = read_int(ops[2]);
@@ -474,9 +474,15 @@ void Machine::op_82(const Instruction& instruction) {
         report_error("text-node-slot-out-of-range:" + std::to_string(op1));
         return;
     }
-    const auto kind = font_node_kind_.find(op1);
-    if (kind != font_node_kind_.end() && kind->second == 1) {
-        text_span_alt_requests_ += 1;  // 转交另一条绘制路径（未建模）
+    // ★ 两条绘制路径的分岔判据 = **记录自己标志字的第 2 位**（`ADV-TEXT-LAYER` 的「位 2 = 变体
+    //   选择」）：置起 ⇒ 走「把段记录逐条变成绘制请求、再逐字符推进」那条（本条只记请求与它用的
+    //   **整支**字体对象；逐字请求本身未建模）；未置起 ⇒ 走另一条（读**同一序列**的矩形、行跨度与
+    //   第一串）。⛔ 不许按"节点种类格"分岔（那一格在本模型里没有写者，正是旧实现的错法），
+    //   也⛔ 不许写成"层的一格"—— 它是**每条记录各自**的标志位。
+    if ((text_spans_[static_cast<std::size_t>(op2)].flags & 4) != 0) {
+        text_span_alt_requests_ += 1;
+        // 变体 = 换**整支**字体对象（字面名 / 字号 / 绘制模式），不是只换字号。
+        last_alt_run_font_ = text_run_font(text_spans_[static_cast<std::size_t>(op2)].flags);
         return;
     }
     // 借用的两份旧值（见函数尾部的归还）；位 1 未置 ⇒ 根本不借。
@@ -700,8 +706,26 @@ void Machine::op_341(const Instruction& instruction) {
 }
 
 void Machine::op_ae(const Instruction& instruction) {
-    (void)instruction;
-    write_length(1); if (save_version_flag_ == 0) return; throw CoreError("save-version-repair-unmodeled");
+    (void)instruction;  // `0xae` **没有操作数**
+    // ★ 推进格数写在**读标志之前** ⇒ 早退路径也写了它（"什么都不做"指不改其它状态）。
+    write_length(1);
+    // 早退：标志 = 0 ⇒ 直接返回。★ 它**连一个命名键都不读**（判据是标志本身，不是"有没有存档"）。
+    if (save_version_flag_ == 0) return;
+    // 非 0 支：两个版本键是引擎写死的字符串（⛔ 不是操作数）。
+    const std::int32_t version1 = config_.get_int("set:SaveVersion1");
+    const std::int32_t version2 = config_.get_int("set:SaveVersion2");
+    if (version1 == 1) {
+        if (version2 != 20) return;  // 主版本 1 的次版本门 = 20（⛔ 不是"用布局 1 硬套"）
+        apply_save_layout1();
+        return;
+    }
+    if (version1 == 2 || version1 == 3) {
+        // 布局 2 / 3 **都不比较次版本**；它们的应用体本版未建模（另一张单）⇒ 响亮失败。
+        report_error("save-layout-unmodeled:" + std::to_string(version1));
+        throw CoreError("save-layout-unmodeled:" + std::to_string(version1));
+    }
+    // 其它（含主版本 1 ∧ 次版本 ≠ 20）⇒ **不应用**：除推进格数 1 外什么都不改。
+    return;
 }
 
 void Machine::op_2ee(const Instruction& instruction) {

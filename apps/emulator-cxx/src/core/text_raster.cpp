@@ -461,9 +461,49 @@ Machine::FontMeasurer make_platform_font_measurer() {
     };
 }
 
+Machine::FontReferenceBuilder make_platform_reference_builder() {
+    return [](const FontBuildSpec& spec) {
+        // ★ 请求的**面名**只进得出参数（不是选择依据）：宿主替换下两份字体都量 Amayui
+        //   （SCOPE §0 D1 / §1.1），与 `make_platform_font_measurer` 同一条策略。
+        // ★ 请求的**高 / 宽**是引擎给的字号形态（高 = −字号、宽 = −字号 ÷ 2）；平台侧要的是**字号**
+        //   本身 ⇒ 取 |高|（⛔ 不把宽当成字号，也⛔ 不把高当成"像素数"）。
+        (void)spec.face;
+        (void)spec.charset;
+        FontBuildMetrics out;
+        const int size = std::clamp(std::abs(spec.height), 1, 512);
+#ifdef _WIN32
+        {
+            const std::wstring face = gdi_face_from_utf8(kHostFaceUtf8);
+            GdiFontMetrics gdi;
+            if (gdi_font_metrics(face, size, spec.weight, kMeasureCodepoint, &gdi)) {
+                out.text.height = gdi.line_height;
+                out.text.average_width = gdi.average_width;
+                out.glyph.box_width = gdi.glyph_box_width;
+            }
+            int ascent = 0;
+            if (gdi_font_ascent(face, size, spec.weight, &ascent)) out.text.ascent = ascent;
+        }
+#endif
+#ifdef EMULATOR_CXX_HAVE_TEXT
+        // FreeType 近似（★ 平台差异）：`measure_rendering_font` 没有单独的 ascent 格 ⇒ 留 0
+        // （⛔ 不编数值）。行高 / 平均字宽 / 黑框与派生那条路径取同一侧口径。
+        if (out.text.height == 0) {
+            const Machine::FontMetrics metrics = measure_rendering_font(size);
+            out.text.height = metrics.line_height;
+            out.text.average_width = metrics.average_width;
+            out.glyph.box_width = metrics.glyph_box_width;
+        }
+#endif
+        return out;
+    };
+}
+
 void wire_platform_fonts(Machine& machine) {
     // ① 度量后端（正文：这一支的写入值是平台输入）。
     machine.set_font_measurer(make_platform_font_measurer());
+    // ①' 重建入口那一次「建参考字体 + 取量度」（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL` 的 ③）——
+    //    它写进的是对象的**两张量度结构**，与 ① 的派生度量**不是同一个接缝**。
+    machine.set_font_reference_builder(make_platform_reference_builder());
     // ② 宿主字体替换开关（SCOPE §0 D1）：名字不参与选择 ⇒ 派生例程跳过回退判据 ②③。
     //   ⛔ 这是 SCOPE 的简化，不是引擎语义（见 `vm.h` 的 `set_font_substitution` 注释）。
     // ③ 名字表随开关一起装上（`set_font_substitution` 内部）：下标 0 = 宿主族名 + 标志字节 0
@@ -550,7 +590,11 @@ bool draw_text_into_texture(Machine& machine, std::uint32_t texture_id, int x, i
         gdi_face = gdi_face_from_utf8("Amayui CN");
         if (const char* env = std::getenv("EMULATOR_CXX_GLYPH_GDI_FACE");
             env != nullptr && env[0] != '\0') {
-            gdi_face = std::string(env) == "engine" ? gdi_face_from_sjis(machine.font_string())
+            // 对照档按**这一格当时的字面名**取字：样式快照带了字面名就用它（变体支 = 另一支字体
+            // 对象的字面名），否则用对象当前字面名。
+            const std::string& engine_face =
+                style != nullptr && !style->face.empty() ? style->face : machine.font_string();
+            gdi_face = std::string(env) == "engine" ? gdi_face_from_sjis(engine_face)
                                                     : gdi_face_from_utf8(env);
         }
         // 真机路径：量度也走 GDI（引擎的"本次量度 ascent"就是 `GetTextMetricsA` 的 tmAscent）。

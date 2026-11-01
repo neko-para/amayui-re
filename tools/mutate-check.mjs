@@ -3371,6 +3371,114 @@ const MUTATIONS = [
       '`0x2bd` 的常量 700 改成 6FCh（1788）⇒ 非 0 支两格都写 1788 ⇒ ' +
       'CTest `emulator_core_font_weight_2bd_both_cells` 当场红',
   },
+  // ── 场景绘制模式 / 四张同键表 / 收尾扫描（2026-11-01 落地）：**行为断言在上面的三条新 CTest 里**
+  //    （`spec_render_draw_mode` / `spec_scene_cg_number_tables` / `spec_scene_draw_scan_order`）
+  //    与聚合的 `emulator-core-selftest`（`0x1f6` / `0x21d` 的断言在 `check_*` 里）。──
+  {
+    file: 'apps/emulator-cxx/src/core/vm.cpp',
+    from:
+      '         (1u << (static_cast<std::uint32_t>(draw_mode_) & 31u))) == 0) {\n' +
+      '        config_.set_int("set:CreateObject", 3);',
+    to:
+      '         (1u << (static_cast<std::uint32_t>(draw_mode_) & 31u))) == 0) {\n' +
+      '        config_.set_int("set:CreateObject", 2);  // 变异：构造期写 3 → 2',
+    guard: 'ctest:spec_render_draw_mode',
+    ctest: 'spec_render_draw_mode',
+    what:
+      '构造期「`1 << 场景绘制模式` 那一位未置起 ⇒ 把 `set:CreateObject` 写成 3」的写值 3 → 2 ⇒ ' +
+      'DrawMode = 1 ∧ CreateObject = 0 的夹具只拿到位 1、位 0 没置起 ⇒ CTest `spec_render_draw_mode` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_render.cpp',
+    from: '    if ((static_cast<std::uint32_t>(config_.get_int("set:CreateObject")) & (1u << bit)) == 0) return;',
+    to: '    if (false) return;  // 变异：0x200 去掉「该位已置起」的前置',
+    guard: 'ctest:spec_render_draw_mode',
+    ctest: 'spec_render_draw_mode',
+    what:
+      '`0x200` 不再要求「该操作数对应的对象已创建」⇒ `set:CreateObject` 的该位为 0 时也照写 ⇒ ' +
+      'CTest `spec_render_draw_mode` 的「位未置起时 0x200 仍写了模式」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_render.cpp',
+    from:
+      '    if (id < 0 || id > 10 || record_missing) {\n' +
+      '        report_error("CGNumberの引数が不正です．");\n' +
+      '        return;\n' +
+      '    }',
+    to:
+      '    if (id < 0 || id > 10 || record_missing) {\n' +
+      '        return;  // 变异：非法编号 / 纹理槽 0 静默 return\n' +
+      '    }',
+    guard: 'ctest:spec_scene_cg_number_tables',
+    ctest: 'spec_scene_cg_number_tables',
+    what:
+      '`0x23b` 对非法记录编号 / 纹理槽 0 不再向错误通道上报（旧实现的静默 return）⇒ ' +
+      'CTest `spec_scene_cg_number_tables` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_render.cpp',
+    from:
+      '        if (scene_aux_a_.erase(slot_key) > 0) erased = true;\n' +
+      '        if (scene_aux_b_.erase(slot_key) > 0) erased = true;\n' +
+      '    };\n' +
+      '    // 位数 = 0',
+    to:
+      '        if (false && scene_aux_a_.erase(slot_key) > 0) erased = true;  // 变异：漏删辅助表 A（+0x438）\n' +
+      '        if (scene_aux_b_.erase(slot_key) > 0) erased = true;\n' +
+      '    };\n' +
+      '    // 位数 = 0',
+    guard: 'ctest:spec_scene_cg_number_tables',
+    ctest: 'spec_scene_cg_number_tables',
+    what:
+      '`0x23b` 的「清旧项」漏掉辅助表 A（`+0x438`）⇒ 同键区间里的 A 条目留着 ⇒ ' +
+      'CTest `spec_scene_cg_number_tables` 的「0x23b 没有清掉四张表」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/scene_raster.cpp',
+    from:
+      '                if ((mesh->flags & (1u << 16)) != 0) {\n' +
+      '                    mesh->flags &= ~(1u << 16);\n' +
+      '                } else {',
+    to:
+      '                if ((mesh->flags & (1u << 16)) != 0) {\n' +
+      '                    mesh->flags &= ~(1u << 16);\n' +
+      '                    continue;  // 变异：网格被消费 ⇒ 连带跳过同键的绘制项\n' +
+      '                } else {',
+    guard: 'ctest:spec_scene_draw_scan_order',
+    ctest: 'spec_scene_draw_scan_order',
+    what:
+      '收尾扫描把「网格的第 16 位」与「绘制项的画不画」重新耦合（旧实现的 `continue`）⇒ 同键的绘制项被连坐跳过 ⇒ ' +
+      'CTest `spec_scene_draw_scan_order` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    from:
+      '    if (const auto it = scene_aux_b_.find(static_cast<std::int32_t>(source)); it != scene_aux_b_.end()) {\n' +
+      '        scene_aux_b_[static_cast<std::int32_t>(target)] = it->second;\n' +
+      '        copied = true;\n' +
+      '    }',
+    to:
+      '    if (false) {  // 变异：0x21d 不复制辅助表 B（+0x448）\n' +
+      '        copied = true;\n' +
+      '    }',
+    guard: 'ctest:emulator-core-selftest',
+    ctest: 'emulator-core-selftest',
+    what:
+      '`0x21d` 不复制辅助表 B（`+0x448`）⇒ 聚合用例的「0x21d 没有复制辅助表 B」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    from:
+      '    draw_items_.clear(); meshes_.clear(); scene_aux_a_.clear(); scene_aux_b_.clear();\n' +
+      '    scene_dirty_ = false;',
+    to:
+      '    draw_items_.clear(); meshes_.clear(); scene_aux_b_.clear();  // 变异：漏清辅助表 A（+0x438）\n' +
+      '    scene_dirty_ = false;',
+    guard: 'ctest:emulator-core-selftest',
+    ctest: 'emulator-core-selftest',
+    what:
+      '`0x1f6` 只清三张表（漏辅助表 A `+0x438`）⇒ 聚合用例的「0x1F6 没有清空四张同键表」当场红',
+  },
   // ── 批次 1（数组 / 数值 / 随机 / 位测试 / 错误通道）：**行为断言在 CTest 里**，口径同上。──
   {
     // ★ 等价于旧实现的"死写"：0x88 的落点写进模式族 A / B（无人按 C 判据读的格），而不是 C / D。
@@ -3729,6 +3837,246 @@ const MUTATIONS = [
     guard: 'tools/test/spec-residual-footprint.test.mjs',
     what:
       '位 / 格残差不消费足迹里的 `writer` 记录（写者执行过也不进「路径内」）⇒ 写统计成了摆设 ⇒ 足迹守卫当场红',
+  },
+  // ── 尾跳进的重建入口（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL`）：行为断言在 CTest
+  //    `spec_ops_set_tail`（`check_ops_set_tail`）里。★ 两条各咬不同的子条：
+  //    ① 参考字体的 lfWidth（= **−字号 ÷ 2**，⛔ 不是 −字号）；② 空名早退。──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: '    spec.width = -(size / 2);          // 整数除以 2 向零截断（引擎 `cdq; sub eax,edx; sar eax,1`）',
+    to: '    spec.width = -size;  // 变异：参考字体的 lfWidth 写成 −字号（不是 −字号÷2）',
+    guard: 'ctest:spec_ops_set_tail',
+    ctest: 'spec_ops_set_tail',
+    what:
+      '参考字体请求的 lfWidth 从 −字号÷2 写成 −字号 ⇒ 入口那一次「建参考字体 + 取量度」的形态不对 ⇒ ' +
+      'CTest `spec_ops_set_tail` 的「参考字体的高 / 宽形态不对」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: '    if (pair.variants[0].face.empty()) return;',
+    to: '    if (false) return;  // 变异：去掉入口的空名早退（名字为空也照重建）',
+    guard: 'ctest:spec_ops_set_tail',
+    ctest: 'spec_ops_set_tail',
+    what:
+      '重建入口不再在名字为空时早退 ⇒ 空名字体也被"重建"（发一次参考量度请求 / 跑派生）⇒ ' +
+      'CTest `spec_ops_set_tail` 的「名字为空时入口仍发了请求」当场红',
+  },
+  // ── 行记录日志的标志字第 2 位 = 变体选择（`ADV-TEXT-LAYER`）：行为断言在 CTest
+  //    `spec_adv_text_span_bit2` 里。★ 两条各咬一侧：① **绘制侧**按记录自己的标志字分岔；
+  //    ② **变体 = 换整支字体对象**（字面名也换，⛔ 不是只换字号）。──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_engine.cpp',
+    from: '    if ((text_spans_[static_cast<std::size_t>(op2)].flags & 4) != 0) {',
+    to: '    if ((text_spans_[static_cast<std::size_t>(op2)].flags & 4) == 0) {  // 变异：分岔判据取反',
+    guard: 'ctest:spec_adv_text_span_bit2',
+    ctest: 'spec_adv_text_span_bit2',
+    what:
+      '`0x82` 的分岔判据取反（位 2 未置的记录走变体支、置起的走段记录支）⇒ 两条绘制路径换边 ⇒ ' +
+      'CTest `spec_adv_text_span_bit2` 的「位 2 未置的记录却走了变体路径」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_text.cpp',
+    from: '    const FontDescriptionPair& pair = font.variant ? font_b_pair_ : font_a_pair_;',
+    to: '    const FontDescriptionPair& pair = font_a_pair_;  // 变异：变体支不换字面名（只换字号）',
+    guard: 'ctest:spec_adv_text_span_bit2',
+    ctest: 'spec_adv_text_span_bit2',
+    what:
+      '变体支不再换**整支**字体对象（字面名恒取 A 支，只换字号）⇒ 位 2 的变体退化成"只改字号" ⇒ ' +
+      'CTest `spec_adv_text_span_bit2` 的「变体没有换字面名」当场红',
+  },
+  // ── 媒体对象表（`CORE-OPS-RENDER-FRAME-STEP` 的「媒体对象表（合同）」+ `CORE-OPS-MOVIE`）：
+  //    行为断言在 CTest `spec_render_media_table` 里。五条各咬一处合同：
+  //    ① 上限一千 = **扫描的循环边界**（`0x23d` 的区间上界）；② 每拍扫描的**循环位**判据；
+  //    ③ `0x24d` 的**次序**（先填媒体格、后判纹理槽）；④ `0x249` 取**第 2 个**操作数；
+  //    ⑤ 纹理族三条写指令在建立前清**自己那个编号**的一格。──
+  {
+    file: 'apps/emulator-cxx/src/core/vm.h',
+    from: 'inline constexpr std::uint32_t kMediaSlotCount = 1000;',
+    to: 'inline constexpr std::uint32_t kMediaSlotCount = 999;  // 变异：上限一千 → 999',
+    guard: 'ctest:spec_render_media_table',
+    ctest: 'spec_render_media_table',
+    what:
+      '媒体对象表的格数 / 两条整表遍历的上界 1000 → 999 ⇒ `0x23d` 的 `42..999` 变成 `42..998`，' +
+      '槽 999 的对象留着 ⇒ CTest `spec_render_media_table` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_movie.cpp',
+    from: '        if ((movie.options & 1u) != 0u) {',
+    to: '        if ((movie.options & 1u) == 0u) {  // 变异：循环位判据取反',
+    guard: 'ctest:spec_render_media_table',
+    ctest: 'spec_render_media_table',
+    what:
+      '每拍扫描的「结束条件 ∧ 循环位 = 0」取反 ⇒ 非循环影片被反复重启（永不释放）、循环影片被销毁 ⇒ ' +
+      'CTest `spec_render_media_table` 的「非循环影片播完之后那一格仍在」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_scene.cpp',
+    from:
+      '    (void)media_cell(texture_id);\n' +
+      '    // ★ 门是**槽里有没有对象**（不是"记录存不存在"）：记录在、槽已释放 ⇒ 仍然是空槽。\n' +
+      '    if (texture_slot(texture_id) == nullptr) {\n' +
+      '        throw CoreError("movie-texture-slot-empty:" + std::to_string(texture_id));\n' +
+      '    }',
+    to:
+      '    // ★ 门是**槽里有没有对象**（不是"记录存不存在"）：记录在、槽已释放 ⇒ 仍然是空槽。\n' +
+      '    if (texture_slot(texture_id) == nullptr) {\n' +
+      '        throw CoreError("movie-texture-slot-empty:" + std::to_string(texture_id));\n' +
+      '    }\n' +
+      '    (void)media_cell(texture_id);  // 变异：先判纹理槽、后填媒体格（次序反转）',
+    guard: 'ctest:spec_render_media_table',
+    ctest: 'spec_render_media_table',
+    what:
+      '`0x24d` 的两件事次序反转（先判纹理槽、后填媒体格）⇒ "纹理槽为空 ⇒ 抛出"那条路径上少填一格 ⇒ ' +
+      'CTest `spec_render_media_table` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_movie.cpp',
+    from: '    release_media_cell(static_cast<std::uint32_t>(read_int(ops[1])));',
+    to: '    release_media_cell(static_cast<std::uint32_t>(read_int(ops[0])));  // 变异：`0x249` 取第 1 个操作数',
+    guard: 'ctest:spec_render_media_table',
+    ctest: 'spec_render_media_table',
+    what:
+      '`0x249` 按**第 1 个**操作数选格（合同：取第 2 个）⇒ 该格没被释放、另一格被误清 ⇒ ' +
+      'CTest `spec_render_media_table` 的「0x249 没有把该格的对象释放并置空」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    from: '    release_media_cell(id);\n    const auto width = read_int(ops[1]);',
+    to: '    const auto width = read_int(ops[1]);',
+    guard: 'ctest:spec_render_media_table',
+    ctest: 'spec_render_media_table',
+    what:
+      '`0x1f8` 建纹理前不再清该编号的共享对象槽（= 媒体对象表的同一格）⇒ 媒体对象与纹理共存 ⇒ ' +
+      'CTest `spec_render_media_table` 的「0x1f8 建纹理前没有清该编号的共享对象槽」当场红',
+  },
+  // ── 网格建 / 换（`CORE-OPS-SCENE-320`）：行为断言在 CTest `spec_scene_mesh_320_assembly` 里。
+  //    三条各咬一处合同：① 每段源数组的**每顶点步长 = 1 个 32 位字**（写成 4 个字 ⇒ 分量错位）；
+  //    ② 重烘门的判据是当前颜色与无颜色的 **32 位整字**相等（只比低 24 位 ⇒ `0x80FFFFFF` 漏烘）；
+  //    ③ **四顶点一批 + 余数逐个**（丢掉余数 ⇒ 第 5 个顶点全 0）。──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    from: '        const auto step = static_cast<std::uint32_t>(index) * 4u;',
+    to: '        const auto step = static_cast<std::uint32_t>(index) * 16u;  // 变异：源段步长 1 个字 → 4 个字',
+    guard: 'ctest:spec_scene_mesh_320_assembly',
+    ctest: 'spec_scene_mesh_320_assembly',
+    what:
+      '装配的源段每顶点步长 1 个 32 位字 → 4 个字（正文：「⛔ 不许把"位置有四个分量"读成"每个源段的' +
+      '每顶点步长是四个字"」）⇒ 第 2 个顶点起各分量读到别的格 ⇒ CTest `spec_scene_mesh_320_assembly` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    from: '    if (mesh.color != kNoColor) bake_mesh_colors(mesh, mesh.color);',
+    to:
+      '    if ((mesh.color & 0xFFFFFFu) != 0xFFFFFFu) bake_mesh_colors(mesh, mesh.color);  ' +
+      '// 变异：重烘门只比低 24 位',
+    guard: 'ctest:spec_scene_mesh_320_assembly',
+    ctest: 'spec_scene_mesh_320_assembly',
+    what:
+      '`0x320` 的重烘门只比当前颜色的低 24 位（正文：「判据是当前颜色格与无颜色的 32 位整字相等' +
+      '（透明度参与）⛔ 不许只比低 24 位」）⇒ `0x80FFFFFF` 被当成无颜色、不重烘 ⇒ ' +
+      'CTest `spec_scene_mesh_320_assembly` 的「低 24 位全 1 也必须重烘」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_ops_texture.cpp',
+    from: '    for (; i < count; ++i) fill_one(i);',
+    to: '    for (; false && i < count; ++i) fill_one(i);  // 变异：丢掉余数顶点',
+    guard: 'ctest:spec_scene_mesh_320_assembly',
+    ctest: 'spec_scene_mesh_320_assembly',
+    what:
+      '装配只做四顶点一批、**丢掉余数**（正文：「余下的顶点逐个做」）⇒ 顶点数 = 5 时第 5 个顶点的 9 个' +
+      '分量全是 0 ⇒ CTest `spec_scene_mesh_320_assembly` 当场红',
+  },
+  // ── 渲染步的**批次闸**（`CORE-OPS-RENDER-FRAME-STEP` 的「渲染步（合同边界）」）：
+  //    行为断言在 CTest `spec_render_step_batch_gate` 里。三条各咬一处合同：
+  //    ① 闸拒绝 ⇒ **不发出**配对的「结束批次」（⛔ 不是"无论成败都收尾"）；
+  //    ② 呈现的门 = 步末当前渲染目标是后缓冲（目标是纹理槽时⛔ 不提交）；
+  //    ③ 闸拒绝 ⇒ **整步立即结束**（不遍历 / 不绘制 / 不清命令表 / 不写步末格）。──
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    from: '    if (renderer_begin_batch_refuses_) return false;',
+    to:
+      '    if (renderer_begin_batch_refuses_) {  // 变异：拒绝支也发「结束批次」（无条件配对）\n' +
+      '        renderer_requests_.push_back(RendererRequest::EndBatch);\n' +
+      '        return false;\n' +
+      '    }',
+    guard: 'ctest:spec_render_step_batch_gate',
+    ctest: 'spec_render_step_batch_gate',
+    what:
+      '开始批次被拒绝时**仍然**发出配对的「结束批次」（正文：「结束批次不是无条件配对动作；它只在开始批次' +
+      '成功之后才发出」）⇒ CTest `spec_render_step_batch_gate` 的「被拒绝的一步只应发出开始批次」当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/vm_timing.cpp',
+    from: '    if (render_target_ == -1) note_renderer_request(RendererRequest::Present);',
+    to:
+      '    note_renderer_request(RendererRequest::Present);  ' +
+      '// 变异：删掉呈现门（目标是纹理时也提交）',
+    guard: 'ctest:spec_render_step_batch_gate',
+    ctest: 'spec_render_step_batch_gate',
+    what:
+      '呈现的门（步末当前渲染目标 = 后缓冲）被删掉 ⇒ 目标是纹理槽时也发一次呈现请求（正文：「目标是纹理时' +
+      '不提交」）⇒ CTest `spec_render_step_batch_gate` 当场红',
+  },
+  {
+    file: 'apps/emulator-cxx/src/core/scene_raster.cpp',
+    from: '    if (!machine.begin_render_step()) return Bytes{};',
+    to:
+      '    const bool render_batch_started = machine.begin_render_step();  ' +
+      '// 变异：闸不再早退（拒绝也照遍历 / 照收尾）\n' +
+      '    (void)render_batch_started;',
+    guard: 'ctest:spec_render_step_batch_gate',
+    ctest: 'spec_render_step_batch_gate',
+    what:
+      '批次闸拒绝后**不再立即结束**（照做遍历 + 收尾）⇒ 拒绝那一拍仍产出画布、仍清命令表、仍写步末格' +
+      '（正文：「整步立即结束、什么都不做」）⇒ CTest `spec_render_step_batch_gate` 当场红',
+  },
+  // ── 存档布局 1（`CORE-OPS-SAVE-VERSION-AE`，2026-11-01 落地）：**行为断言在上面两条新 CTest 里** ──
+  {
+    // ★ 正文原话：「⛔ 不许把它当 4 字节整数比较（那等于把 "080 " 折成一个小端 / 大端数，判据方向随之
+    //   翻转）」。这条变异就是那句话的机器化：`"/zzz"` 的字符串口径是"小"（旧格式支），小端整数口径是
+    //   "大"（三对支）⇒ 改完 `spec_ops_ae_save_layout1_record` 的 `/zzz` 段当场红。
+    file: 'apps/emulator-cxx/src/core/vm_ops_save.cpp',
+    from:
+      '    staged.marker = compare_format_marker(marker, ByteSpan(kSaveFormatMarker080, 4)) < 0\n' +
+      '                        ? SaveFormatMarker::Legacy\n' +
+      '                        : SaveFormatMarker::Current;',
+    to:
+      '    staged.marker = read_u32(bytes, kSaveRecordMarkerOffset) < 0x20303830u  ' +
+      '// 变异：按 4 字节整数比\n' +
+      '                        ? SaveFormatMarker::Legacy\n' +
+      '                        : SaveFormatMarker::Current;',
+    guard: 'ctest:spec_ops_ae_save_layout1_record',
+    ctest: 'spec_ops_ae_save_layout1_record',
+    what:
+      '格式标记的判据从「无符号字节逐比」改成「4 字节小端整数比」⇒ `"/zzz"` 被当成比 `"080 "` 大、走三对支' +
+      '（正文：⛔ 不许当 4 字节整数比）⇒ CTest `spec_ops_ae_save_layout1_record` 当场红',
+  },
+  {
+    // 正文：「**换脚本那一族读第二对的表**（优先）、另一族读第一对的表（回退）」。
+    file: 'apps/emulator-cxx/src/core/vm_ops_save.cpp',
+    from:
+      '    if (const auto target = position_at(frame.save_pairs[1], save_priority_index_[frame_index])) {',
+    to:
+      '    if (const auto target = position_at(frame.save_pairs[0], save_priority_index_[frame_index])) ' +
+      '{  // 变异：优先族读了第一对',
+    guard: 'ctest:spec_ops_ae_save_layout1_restore',
+    ctest: 'spec_ops_ae_save_layout1_restore',
+    what:
+      '优先族（换脚本）读成**第一对**的表 ⇒ 命中后 ip = 4 × 第一对表[下标]（夹具期望 24，实测 8）' +
+      '⇒ CTest `spec_ops_ae_save_layout1_restore` 当场红',
+  },
+  {
+    // 正文：「换脚本位置族优先、还原后推进 **3** 个字；否则另一族、推进 **0**」。
+    file: 'apps/emulator-cxx/src/core/vm_ops_save.cpp',
+    from: '        frame.ip = *target;\n        frame.length_slot = 3;',
+    to:
+      '        frame.ip = *target;\n' +
+      '        frame.length_slot = 0;  // 变异：优先族的推进量 3 → 0',
+    guard: 'ctest:spec_ops_ae_save_layout1_restore',
+    ctest: 'spec_ops_ae_save_layout1_restore',
+    what:
+      '优先族命中之后的推进量 3 → 0 ⇒ 换脚本那条指令不会被跳过（正文：推进 3 个字）' +
+      '⇒ CTest `spec_ops_ae_save_layout1_restore` 当场红',
   },
 ];
 

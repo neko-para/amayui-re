@@ -31,7 +31,10 @@ bool is_scene_mutating(std::uint32_t opcode) {
         case 0x23B:                          // CG 数字条
         // ★ `0x258` / `0x259`（1000 项表的两项标志）**不在**这张白名单里：规范说它们
         //   "不把场景标脏"（`CORE-OPS-SCENE-TABLE-FLAGS`）—— 那两格在本作也没有读者。
-        case 0x320: case 0x322: case 0x323:  // 网格
+        // ★ `0x320`（建 / 换网格）**不在**这张白名单里：它的标脏写在 handler 里 ——
+        //   构建成功 ⇒ 无条件标脏；顶点数 ≤ 0 的失败支 ⇒ **不标脏**（正文）。放进白名单会让
+        //   "handler 正常返回" 与 "构建成功" 混为一谈（失败支也置脏）。
+        case 0x322: case 0x323:  // 网格
         case 0x344:                          // 辅助表 A
             return true;
         default:
@@ -55,6 +58,16 @@ Machine::Machine(std::uint32_t int_key, const OpcodeTable& table, const Install*
     : key_(int_key == 0 ? 1u : int_key), table_(table), install_(install), config_(std::move(config)) {
     // 主循环的渲染闸门：`set:DrawMode == 1` 才自动渲染。缺键按配置口径为 0（不自动渲染）。
     draw_mode_ = config_.get_int("set:DrawMode");
+    // ★ 它**兼作**配置 `set:CreateObject` 的**位下标**（`CORE-OPS-RENDER-FRAME-STEP`「它还兼作一份配置的
+    //   位下标」；站点 `0x4178d6` 读值 / `0x4178ea` 左移 / `0x4178f9` 测位 / `0x417908` 写 3）：
+    //   `1 << 值` 去测 `set:CreateObject` 的那一位，**该位未置起 ⇒ 把该配置写成 3**。
+    //   ★ 值 ≥ 32 / 负值时取到哪一位本版未取证（`RES-DRAW-MODE-BIT-INDEX` ①）⇒ 按平台移位语义把
+    //     移位数掩到低 5 位（x86 的 `shl` 就是如此），⛔ 不另加范围检查。
+    //   ★ 这是**配置的改写**（不是本模型私有的标志）：`0x9` 的「纹理槽释放」读的就是改后的值。
+    if ((static_cast<std::uint32_t>(config_.get_int("set:CreateObject")) &
+         (1u << (static_cast<std::uint32_t>(draw_mode_) & 31u))) == 0) {
+        config_.set_int("set:CreateObject", 3);
+    }
     // 参数格（`Engine+0x15290`，`0x74` 写 / `0x7f` 读）的初值 = 配置键 `message:MessageSpeed`
     // —— 启动期有确定写点：`0x417E98` 取键、`0x417EAB` 写格（取证见 ops-forensics 文档 §6）。
     // ★ 这解决了 spec 的 `RES-PARAM-21668-INIT`（"初值没有观察"）：它不是分配残留，是配置。
@@ -174,6 +187,10 @@ void Machine::apply_frame_record(std::size_t index, const Bytes& script, const S
     // 先按引擎的装载器（`0x40edd9`：装载前**无条件释放**目标帧槽）清掉原有内容：
     // 码区 + 四个池 + 两张按键表 + 两条栈。⛔ 不因槽已被占用而报错。
     frame.code.clear();
+    // 布局 1 的**三对**属于代码块（表基址 = 代码块基址 + 4 × 偏移）：装载器把代码区换掉 ⇒ 它们一起失效，
+    // 否则旧表基址会指向新块里的一段无关字节（⛔ 不是"保留"；⛔ 也不是本条在恢复存档）。
+    frame.save_pairs = {};
+    frame.save_pairs_ready = false;
     frame.local_int.clear();
     frame.local_float.clear();
     frame.local_string.clear();
@@ -541,6 +558,8 @@ void Machine::execute(const Instruction& instruction) {
         case 0x216: op_216(instruction); return;
         case 0x208: op_208(instruction); return;
         case 0x20C: op_20c(instruction); return;
+        case 0x200: op_200(instruction); return;
+        case 0x201: op_201(instruction); return;
         case 0x23C: op_23c(instruction); return;
         case 0x20D: op_20d(instruction); return;
         case 0x33F: op_33f(instruction); return;
@@ -551,6 +570,13 @@ void Machine::execute(const Instruction& instruction) {
         case 0x1F4: op_1f4(instruction); return;
         case 0x1F5: op_1f5(instruction); return;
         case 0x20F: op_20f(instruction); return;
+        // 媒体对象表的填格（三条整条尚未成篇 ⇒ 只落"按第 2 个操作数选格、格空才建"这一项副作用）。
+        case 0x236: op_236(instruction); return;
+        case 0x240: op_240(instruction); return;
+        case 0x241: op_241(instruction); return;
+        // 媒体对象表的显式清格：`0x210` 取第 1 个操作数、`0x249` 取第 2 个。
+        case 0x210: op_210(instruction); return;
+        case 0x249: op_249(instruction); return;
         case 0x21C: op_21c(instruction); return;
         case 0x101: op_101(instruction); return;
         case 0xAE: op_ae(instruction); return;
@@ -745,8 +771,12 @@ bool Machine::message_subsystem_busy() {
 // 判据 = 生效参数 `& 5 == 4`（第 0 位 = 循环、第 2 位 = 未取证，残差 `RES-WAIT-MOVIE-BIT2`）；
 // 本模型没有"延时启动待办"那一支，直接用最近一次启动的参数。
 bool Machine::movie_gate_busy() const {
-    for (const auto& [slot, record] : movies_) {
-        (void)slot;
+    // ★ 遍历的是**媒体对象表的 1000 个槽**（`60-ops-wait.md:35`「遍历影片对象表的 1000 个槽」）
+    //   —— 与每拍扫描 / `0x23d` 是同一个上界；表外落点（槽号 ≥ 1000）不在任何遍历里。
+    for (std::uint32_t slot = 0; slot < kMediaSlotCount; ++slot) {
+        const auto& cell = movies_[slot];
+        if (!cell) continue;  // 空槽静默跳过
+        const MovieRecord& record = *cell;
         if (!record.present || !record.started) continue;
         if ((record.options & 5u) == 4u) return true;
     }

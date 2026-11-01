@@ -17,6 +17,10 @@ struct TextStyleSnapshot {
     int draw_mode = 0;
     std::int32_t primary = 0;
     std::int32_t secondary = 0;
+    // 追加当时那一支字体对象的**字面名**（`ADV-TEXT-LAYER` 的位 2 = 变体选择 ⇒ 整支字体对象换）。
+    // ★ 空串 = 没带（沿用 `Machine::font_string()`）。产品路径的宿主替换下名字不参与选择
+    //   （SCOPE §0 D1），所以它只影响**显式对照档** `EMULATOR_CXX_GLYPH_GDI_FACE=engine` 取哪个面名。
+    std::string face;
 };
 
 // `0x204` 的平台侧：把一段 Shift-JIS 字节串逐字画进某个纹理槽的纹理。
@@ -48,6 +52,13 @@ Machine::FontMetrics measure_rendering_font(std::int32_t size);
 
 // 把 `measure_rendering_font` 包成 `Machine` 的度量接缝（`set_font_measurer` 的实参）。
 Machine::FontMeasurer make_platform_font_measurer();
+
+// 重建入口那一次「建参考字体 + 取量度」的产品装配（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL` 的 ③；
+// `set_font_reference_builder` 的实参）。★ 与 `make_platform_font_measurer` 不是同一件事：
+// 那个服务派生例程的两次度量，这个服务入口自己那一次（写进对象自己的两张量度结构）。
+// 请求的**形态**（面名 / 高 / 宽 / 粗细 / 字符集）由引擎给、写进 `FontBuildSpec`；
+// 实际量哪份字体仍按宿主替换策略（SCOPE §0 D1）—— 平台差异，⛔ 不代表与真机数值等价。
+Machine::FontReferenceBuilder make_platform_reference_builder();
 
 // 产品路径的字体装配：**装度量后端 + 打开宿主字体替换开关**（SCOPE §0 D1：名字不参与选择）。
 // ★ `boot.cpp` 与 `core_selftest.cpp` 都调它 ⇒ 守卫断的是**同一条装配路径**（⛔ 不是自测里的旁路）。

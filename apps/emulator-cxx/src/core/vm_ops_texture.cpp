@@ -9,6 +9,7 @@
 #include "core/agf.h"
 #include "core/install.h"
 
+#include <bit>
 #include <cmath>
 
 namespace core {
@@ -26,12 +27,39 @@ std::uint32_t normalized_color(int alpha, int color, std::uint32_t existing) {
 
 }  // namespace
 
+void bake_mesh_colors(MeshRecord& mesh, std::uint32_t coefficient) {
+    // `CORE-OPS-SCENE-322` 的烘焙口径（`0x4A2050`：把当前颜色当系数与**原逐顶点颜色**逐字节相乘）：
+    // 每字节 `(原字节 × 当前字节) ÷ 255`、向下取整（整除），⛔ 不是四舍五入；
+    // 原字节 1 × 当前字节 0x80 ⇒ 128 ÷ 255 = **0**（若得到 1 ⇒ 用了四舍五入）。
+    // ★ 基准恒为第 3 张副本数组（不变量）⇒ 重复烘焙不累积；⛔ 不许拿缓冲里的旧值当基准。
+    // ★ 顶点缓冲没建 ⇒ 没有可写的颜色分量（`0x322` 可以在 `0x320` 之前调）。
+    if (mesh.vertex_buffer.words.empty()) return;
+    const auto count = mesh.copies[2].size() < static_cast<std::size_t>(mesh.count < 0 ? 0 : mesh.count)
+                           ? mesh.copies[2].size()
+                           : static_cast<std::size_t>(mesh.count < 0 ? 0 : mesh.count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto base = i * MeshVertexBuffer::kVertexWords;
+        if (base + 4 >= mesh.vertex_buffer.words.size()) break;
+        const std::uint32_t original = mesh.copies[2][i];
+        std::uint32_t baked = 0;
+        for (unsigned shift = 0; shift < 32; shift += 8) {
+            const auto a = (original >> shift) & 0xFFu;
+            const auto b = (coefficient >> shift) & 0xFFu;
+            baked |= ((a * b) / 255u) << shift;
+        }
+        mesh.vertex_buffer.words[base + 4] = baked;
+    }
+}
+
 void Machine::op_344(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 辅助表 A（Live2D 条目不透明桶）
+    // **辅助表 B**（`+0x448`；`CORE-OPS-SCENE-ENTRY-344`「按编号置存在位并写值」）：读序 2 → 1。
+    // 置该条目的**存在位**（首字第 0 位 = 1，只置不清），把值写进**第二格**。
+    // ★ 这张表是**辅助表 B**、⛔ 不是绘制项表（`0x1fb` / `0x1ff` 写的才是绘制项表）；
+    //   它在删除次序里是**最后一张**、在收尾扫描的平键序里是**第一张**（`CORE-SCENE-DRAW-ORDER`）。
     const auto value = read_int(ops[1]);
     const auto key = read_int(ops[0]);
-    aux_a_[key] = {1, value};
+    scene_aux_b_[key] = {1, value};
     return;
 }
 
@@ -81,7 +109,12 @@ void Machine::op_1fe(const Instruction& instruction) {
 
 void Machine::op_1f6(const Instruction& instruction) {
     (void)instruction;
-    draw_items_.clear(); meshes_.clear(); aux_a_.clear(); aux_b_.clear(); scene_dirty_ = false; return;  // 清四张同键表；脏标记清 0（不是置 1）
+    // 清场景（`CORE-OPS-SCENE-CLEAR` + `0x1f7` 的四张同键表口径）：四张表整块清空 ——
+    // 绘制项（`+0x408`）/ 网格（`+0x428`）/ 辅助表 A（`+0x438`）/ 辅助表 B（`+0x448`）；
+    // 场景命令表**不动**。脏标记清 0（不是置 1）。
+    draw_items_.clear(); meshes_.clear(); scene_aux_a_.clear(); scene_aux_b_.clear();
+    scene_dirty_ = false;
+    return;
 }
 
 void Machine::op_23d(const Instruction& instruction) {
@@ -100,19 +133,18 @@ void Machine::op_23d(const Instruction& instruction) {
         entry.slot.rgba.clear();
     }
     // ★ 场景侧的槽→纹理绑定解绑未建模（见 RES-23D-SCENE-UNBIND）；纹理记录不在这里删除。
+    // ★ **整表遍历的第二处**（`60-ops-render.md:357,360`）：按**槽号区间 `42..999`** 逐个槽处理
+    //   —— 起点是 42、0..41 **不动**、上界是"上限一千"；它**不看状态**（与每拍扫描 ③ 不同）。
+    //   槽里是播放类对象 ⇒ 关闭并释放、槽置空；空槽静默跳过、不报错。
     bool erased = false;
-    bool active = false;
-    for (auto it = movies_.begin(); it != movies_.end();) {
-        if (it->first < 42u) {
-            if (it->second.present && it->second.started) active = true;
-            ++it;
-            continue;
-        }
-        if (it->second.backend) it->second.backend->close();
-        it = movies_.erase(it);
+    for (std::uint32_t slot = 42; slot < kMediaSlotCount; ++slot) {
+        auto& cell = movies_[slot];
+        if (!cell) continue;  // 空槽：静默跳过
+        if (cell->backend) cell->backend->close();
+        cell.reset();         // 先释放对象、再置空
         erased = true;
     }
-    movie_active_ = active;
+    recompute_movie_active();
     if (erased) scene_dirty_ = true;
     return;
 }
@@ -135,36 +167,115 @@ void Machine::op_32b(const Instruction& instruction) {
 
 void Machine::op_320(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 建/换网格：保存逐顶点位置 / 颜色
+    // **建 / 换网格**（`CORE-OPS-SCENE-320`，handler `0x432150` / 建换入口 `0x4ADFE0` / 装配 `0x4A2280`）。
+    // ★ 读十个操作数的**读序是合同**（不是 1..10）：
+    //   第 9 个（顶点数）→ 第 5、6 个的**地址** → 第 7、8 个的**地址** → 按顶点数逐元素算出第三段
+    //   → 第 10 个 → 第 4、3、2 个的**地址** → 第 1 个（编号）。
+    //   读序的可观察后果 = 操作数类型异常时的抛出顺序（⛔ 别"顺手"整理成 1..10）。
     const auto count = read_int(ops[8]);
+    const auto address5 = address_of(ops[4]);
+    const auto address6 = address_of(ops[5]);
+    const auto address7 = address_of(ops[6]);
+    const auto address8 = address_of(ops[7]);
+    // 第三段（色字）= (解码(第 5 段[i]) 的低 8 位) << 24 | (解码(第 6 段[i]) 的低 24 位)
+    // （`0x432287` / `0x43228A` / `0x43228F`）。★ 这一段**只**用来合成色字：它自己不被装配直接读。
+    std::vector<std::uint32_t> composed;
+    if (count > 0) {
+        composed.resize(static_cast<std::size_t>(count));
+        for (std::int32_t i = 0; i < count; ++i) {
+            // ★ 每段源数组的**每顶点步长 = 1 个 32 位字**（⛔ 不是四个字）。
+            const auto step = static_cast<std::uint32_t>(i) * 4u;
+            const auto high = as_u32(read_int_at(address5 + step)) & 0xFFu;
+            const auto low = as_u32(read_int_at(address6 + step)) & 0xFFFFFFu;
+            composed[static_cast<std::size_t>(i)] = (high << 24) | low;
+        }
+    }
     const auto op10 = read_int(ops[9]);
+    const auto address4 = address_of(ops[3]);
+    const auto address3 = address_of(ops[2]);
+    const auto address2 = address_of(ops[1]);
     const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
-    if (count <= 0) return;
+    if (count <= 0) {
+        // 顶点数 ≤ 0 ⇒ 错误文本进**错误通道**、**不建网格**：上面那些格一个都不写、**也不标脏**。
+        // ★ 正文把文本写成「顶点数非法」（`60-ops-scene.md` 的状态对应表）；binding `0x432182`
+        //   只记「格式化文本 + 错误通道」，没有字节级文本 ⇒ 本实现照正文这一则的**字面**写。
+        report_error("顶点数非法");
+        return;
+    }
+    // **替换**不是追加：`meshes_[key]` 已有记录 ⇒ 三张副本数组与顶点缓冲一起被重建（旧缓冲等于释放）。
     MeshRecord& mesh = meshes_[key];
+    // ① 顶点缓冲：每顶点 36 字节 / 9 个 32 位分量（格式字 0x244）。
+    auto& words = mesh.vertex_buffer.words;
+    mesh.vertex_buffer.format = MeshVertexBuffer::kFormatWord;
+    words.assign(static_cast<std::size_t>(count) * MeshVertexBuffer::kVertexWords, 0u);
+    // 装配：九段逐顶点数组 + 顶点数 ⇒ 每顶点 9 个分量。九段（装配入口的固定次序）：
+    //   ① 位置 x ← 第 2 段 ② 位置 y ← 第 3 段 ③ 位置 z ← 第 4 段 ④ 常量 1.0（引擎自建，⛔ 不是操作数）
+    //   ⑤ 色字 ← 合成段 ⑥ 第一套 u ← 第 7 段 ⑦ 第一套 v ← 第 8 段
+    //   ⑧ 第二套 u ← **同一张**第 7 段 ⑨ 第二套 v ← **同一张**第 8 段。
+    const auto fill_one = [&](std::int32_t i) {
+        const auto index = static_cast<std::size_t>(i);
+        const auto step = static_cast<std::uint32_t>(index) * 4u;
+        const auto base = index * MeshVertexBuffer::kVertexWords;
+        // 位置前两个分量各减去**同一个**常量（`0x4A2347` 的双精度常量，x87 的 fsub + fstp dword）；
+        // 第三个分量取原值（`0x4A247D` 只 fld / fstp，没有算术）。
+        const auto x = static_cast<double>(std::bit_cast<float>(read_raw(address2 + step)));
+        const auto y = static_cast<double>(std::bit_cast<float>(read_raw(address3 + step)));
+        words[base + 0] = std::bit_cast<std::uint32_t>(static_cast<float>(x - kMeshPositionOffset));
+        words[base + 1] = std::bit_cast<std::uint32_t>(static_cast<float>(y - kMeshPositionOffset));
+        words[base + 2] = read_raw(address4 + step);
+        // 位置的第四个分量 = 引擎自建的常量 1.0 数组（`0x4321D9`..`0x432208` 先 new[] 再 fld1 填满）。
+        words[base + 3] = std::bit_cast<std::uint32_t>(1.0f);
+        // 色字按**整字**搬运（`0x4A248E`；不是浮点、不换算）—— 它就是烘色改的那一格。
+        words[base + 4] = composed[index];
+        // 两套纹理坐标**共用同一对源段**（第 7 / 8 个操作数的指针各被 push 两次 ⇒ 四个写点逐字相同）。
+        const auto u = read_raw(address7 + step);
+        const auto v = read_raw(address8 + step);
+        words[base + 5] = u;
+        words[base + 6] = v;
+        words[base + 7] = u;
+        words[base + 8] = v;
+    };
+    // 填充按**每四个顶点一批**做（`0x4A25D3` 每轮目标指针 +0x90），余下的顶点逐个做
+    // （`0x4A26B2` 每轮 +0x24）；两批写出的字节**同形**（⛔ 不是两种布局）。
+    std::int32_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        fill_one(i);
+        fill_one(i + 1);
+        fill_one(i + 2);
+        fill_one(i + 3);
+    }
+    for (; i < count; ++i) fill_one(i);
+    // ② 装配**之后**才把三张副本数组拷进记录（`0x4AE189` / `0x4AE1D1` / `0x4AE215`）：
+    //    第 1 张 ← 第 2 段原样、第 2 张 ← 第 3 段原样、第 3 张 ← 合成段（= 原逐顶点颜色，烘色基准）。
+    for (auto& copy : mesh.copies) copy.clear();
+    mesh.copies[0].resize(static_cast<std::size_t>(count));
+    mesh.copies[1].resize(static_cast<std::size_t>(count));
+    for (std::int32_t j = 0; j < count; ++j) {
+        const auto step = static_cast<std::uint32_t>(j) * 4u;
+        mesh.copies[0][static_cast<std::size_t>(j)] = read_raw(address2 + step);
+        mesh.copies[1][static_cast<std::size_t>(j)] = read_raw(address3 + step);
+    }
+    mesh.copies[2] = composed;
+    // ③ 置「已存在」位、写顶点数与第 10 个操作数（`+0x14` / `+0x18`）。
     mesh.flags |= 1u;
     mesh.count = count;
     mesh.op10 = op10;
-    mesh.copies[0].clear();
-    mesh.copies[1].clear();
-    mesh.colors.clear();
-    const auto address0 = address_of(ops[1]);
-    const auto address1 = address_of(ops[2]);
-    const auto address2 = address_of(ops[4]);
-    const auto address3 = address_of(ops[5]);
-    for (std::int32_t i = 0; i < count; ++i) {
-        const auto step = static_cast<std::uint32_t>(i) * 4u;
-        mesh.copies[0].push_back(read_raw(address0 + step));
-        mesh.copies[1].push_back(read_raw(address1 + step));
-        const auto high = as_u32(read_int_at(address2 + step)) & 0xFFu;
-        const auto low = as_u32(read_int_at(address3 + step)) & 0xFFFFFFu;
-        mesh.colors.push_back((high << 24) | low);
-    }
+    // ④ 建 / 换完成后的**重烘门**：当前颜色**不是**无颜色 ⇒ 按当前颜色重烘顶点色；是 ⇒ 不重烘。
+    // ★ 判据是当前颜色格与无颜色的 **32 位整字**相等（透明度参与）⇒ `0xFFFFFFFE` **不是**无颜色；
+    //   ⛔ 不许只比低 24 位（`0x80FFFFFF` 的低 24 位全是 1，但它不是无颜色）。
+    // ★ 这条门只影响"要不要额外烘一次"：三张副本数组 / 顶点缓冲 / 已存在位 / 顶点数 / 第 10 个操作数
+    //   都已经照常写完了。
+    if (mesh.color != kNoColor) bake_mesh_colors(mesh, mesh.color);
+    // ⑤ 构建成功 ⇒ **无条件**标脏（两种重烘支都标）。⛔ 失败支不标（上面提前 return 的那条）。
+    // ★ 所以 `0x320` **不在** `is_scene_mutating` 的白名单里（那会在失败支也置脏）。
+    scene_dirty_ = true;
     return;
 }
 
 void Machine::op_322(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 网格当前颜色
+    // 网格当前颜色（`CORE-OPS-SCENE-322`）：归一化后写进当前颜色格，并**无条件**按当前颜色烘进顶点缓冲。
+    // ★ 与 `0x320` 的重烘门**不对称**：这里**不按颜色取值跳过**（无颜色是乘法的单位元 ⇒ 字节级不变）。
     const auto key = static_cast<std::uint32_t>(read_int(ops[0]));
     (void)read_int(ops[1]);
     const auto alpha = read_int(ops[2]);
@@ -172,7 +283,7 @@ void Machine::op_322(const Instruction& instruction) {
     MeshRecord& mesh = meshes_[key];
     mesh.color = normalized_color(alpha, color, mesh.color);
     mesh.target_color = mesh.color;
-    for (auto& value : mesh.colors) value = mesh.color;
+    bake_mesh_colors(mesh, mesh.color);
     return;
 }
 
@@ -326,7 +437,10 @@ void Machine::op_203(const Instruction& instruction) {
 
 void Machine::op_1f7(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 按键拆离：四张同键表（绘制项 / 网格 / 辅助 A / 辅助 B）一起删；场景命令表不动
+    // 按键拆离（`CORE-OPS-TEXTURE-DETACH`）：四张同键表一起删，**固定表序 = 偏移次序**
+    // （⛔ 不是 A→B 的字母序，也不是「辅助表 A → 辅助表 B」的旧读法）：
+    //   绘制项表（`+0x408`）→ 网格表（`+0x428`）→ 辅助表 A（`+0x438`，`0x242` 一族写）
+    //   → 辅助表 B（`+0x448`，`0x344` 一族写）。场景命令表**不动**。
     const auto count = read_int(ops[1]);
     const auto key = read_int(ops[0]);
     bool erased = false;
@@ -334,8 +448,8 @@ void Machine::op_1f7(const Instruction& instruction) {
         const auto index = static_cast<std::uint32_t>(slot_key);
         if (draw_items_.erase(index) > 0) erased = true;
         if (meshes_.erase(index) > 0) erased = true;
-        if (aux_a_.erase(slot_key) > 0) erased = true;
-        if (aux_b_.erase(slot_key) > 0) erased = true;
+        if (scene_aux_a_.erase(slot_key) > 0) erased = true;
+        if (scene_aux_b_.erase(slot_key) > 0) erased = true;
     };
     // 负数个数也走「≤ 1」的单键路径；区间是左闭右开。
     if (count <= 1) {
@@ -352,6 +466,10 @@ void Machine::op_1f8(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 空白建纹理
     const auto id = static_cast<std::uint32_t>(read_int(ops[0]));
+    // ★ **先清共享对象槽里该 id 的对象**（`CORE-OPS-TEXTURE-CREATE` / `60-ops-render.md:353` 的
+    //   清①）：读序是 1 → 4 → 3 → 2 → 1，这一次清**发生在其余三个操作数之前**。
+    //   共享对象槽 = **媒体对象表**的同一格（`60-ops-texture.md:16-17`）。
+    release_media_cell(id);
     const auto width = read_int(ops[1]);
     const auto height = read_int(ops[2]);
     (void)read_int(ops[3]);
@@ -396,6 +514,9 @@ void Machine::op_1fa(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 释放纹理（CORE-OPS-TEXTURE-RELEASE）：**同一个操作数被读两次**（1 → 清共享对象槽 → 1）。
     const auto id = static_cast<std::uint32_t>(read_int(ops[0]));
+    // ★ 清共享对象槽 = 媒体对象表的同一格；**不受释放守卫影响**（`60-ops-texture.md:191`），
+    //   而且它在**第二次读同一个操作数之前**（读序 1 → 清 → 1）。
+    release_media_cell(id);
     (void)read_int(ops[0]);
     release_texture_slot(id);
     return;
@@ -404,9 +525,11 @@ void Machine::op_1fa(const Instruction& instruction) {
 void Machine::op_1f9(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
     // 设置纹理（`CORE-OPS-TEXTURE-SET` / `-LOAD`）：读序 **2 → 1 → 3 → 2**，清槽时点与失败分档是合同。
-    // ① 清**共享对象槽**：发生在读第 1 个操作数**之前**。本模型没有共享对象槽（残差）⇒ 无动作。
-    // ② 读第 1 个（文件号）+ 打开 / 锁定（+ 读整份文件）。打开 / 锁定失败 ⇒ 记录与纹理槽**保持原值**。
+    // ① 清**共享对象槽**：发生在读第 1 个操作数**之前**、读完第 2 个之后（`60-ops-texture.md:108`）。
+    //    ★ 共享对象槽 = **媒体对象表**的同一格 ⇒ 这条写指令的「建纹理」同时是那张表的一处**清**。
     const auto id = static_cast<std::uint32_t>(read_int(ops[1]));
+    release_media_cell(id);
+    // ② 读第 1 个（文件号）+ 打开 / 锁定（+ 读整份文件）。打开 / 锁定失败 ⇒ 记录与纹理槽**保持原值**。
     const auto file = read_int(ops[0]);
     if (install_ == nullptr) throw CoreError("texture-loader-missing");
     core::Bytes bytes;
@@ -684,7 +807,11 @@ void Machine::op_228(const Instruction& instruction) {
 
 void Machine::op_21d(const Instruction& instruction) {
     const Operand* ops = instruction.operands.data();
-    // 记录复制（CORE-OPS-SCENE3D-21D）：第 2 个是**目标**、第 1 个是**源**（读序 2 → 1）。
+    // 记录复制（`CORE-OPS-SCENE3D-21D`）：第 2 个是**目标**、第 1 个是**源**（读序 2 → 1）。
+    // 复制的是**三张**表：场景对象记录表（= 绘制项表 `+0x408`）、网格表（`+0x428`），以及
+    // **辅助表 B**（`+0x448`；「按编号置存在位并写值」那一族写的条目表）。
+    // ★ **辅助表 A（`+0x438`）不参与**本复制，场景命令表也不参与 ——
+    //   ⛔ 不许按"两张辅助表之一"的旧措辞去拷两张，也⛔ 不许读成辅助表 A。
     // 三张表互相独立；一张都没有源 ⇒ 上报错误通道且**一张表都不改**；成功才标脏（不置「有动画」）。
     const auto target = static_cast<std::uint32_t>(read_int(ops[1]));
     const auto source = static_cast<std::uint32_t>(read_int(ops[0]));
@@ -699,12 +826,8 @@ void Machine::op_21d(const Instruction& instruction) {
         meshes_[target] = copy;
         copied = true;
     }
-    if (const auto it = aux_a_.find(static_cast<std::int32_t>(source)); it != aux_a_.end()) {
-        aux_a_[static_cast<std::int32_t>(target)] = it->second;
-        copied = true;
-    }
-    if (const auto it = aux_b_.find(static_cast<std::int32_t>(source)); it != aux_b_.end()) {
-        aux_b_[static_cast<std::int32_t>(target)] = it->second;
+    if (const auto it = scene_aux_b_.find(static_cast<std::int32_t>(source)); it != scene_aux_b_.end()) {
+        scene_aux_b_[static_cast<std::int32_t>(target)] = it->second;
         copied = true;
     }
     if (!copied) {

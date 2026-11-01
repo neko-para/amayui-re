@@ -251,6 +251,10 @@ void Machine::op_09(const Instruction& instruction) {
     state_flags_ = 0;
     driven_elsewhere_ = false;
     bracket_depth_ = 0;
+    // 「清屏位」的**唯一写点**（`CORE-OPS-RENDER-FRAME-STEP` 的「渲染步（合同边界）」：本版里
+    //   没有任何把该位置为非 0 的来源，该位唯一的写点就是复位时清 0）⇒ 复位块里写 0。
+    //   ⛔ 别在这里置 1；⛔ 也别在渲染步里给它加"某条件下自动清屏"的分支（渲染步从不自行清屏）。
+    scene_clear_bit_ = 0;
     for (auto& slot : frames_) slot = Frame{};
     // 只清**当前选中 bank** 的三个值族全局池（`0x6d` 的另一组保留原值）与**三个引用族全局池**
     // （`0x428b94` / `0x428bac` / `0x428bc4` 逐池清 0，同一份 bank 口径）。
@@ -258,6 +262,11 @@ void Machine::op_09(const Instruction& instruction) {
     // 输入子系统执行一次更新（`0x428c0c`）：向平台采样一次并写进输入字（与 `0xff` 的**电平采样**同一路径；
     // 没有采样源 ⇒ 保持 0，⛔ 不偷偷补值）。
     input_word_ = sample_level_input();
+    // ★ 复位块里的**整块清零**也写这一格（写 0；站点 `0x40dfea`）—— 它只写 0、**不读配置**。
+    //   它与下面那次「按配置重设」是复位路径上的**两个**写点，先后次序本版不规定
+    //   （`CORE-OPS-RENDER-FRAME-STEP`「写点 = 三处来源 + 复位时清 0」）⇒ 这里按「先清零、后重设」
+    //   落地（终值 = 配置值，与脚本侧 `0x9` 之后 `0x201` 读到的那个值一致）。
+    draw_mode_ = 0;
     // 场景绘制模式格 ← **重读配置** `set:DrawMode`（`0x428c34`；与 `0x200` 同口径，⛔ 不是沿用构造值）。
     draw_mode_ = config_.get_int("set:DrawMode");
     // 纹理槽：`set:CreateObject` 第 1 位 ∧ `set:AutoFreeTex` 第 0 位 ⇒ 逐槽释放 **1000** 个（0..999）。

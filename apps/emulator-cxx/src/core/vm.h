@@ -29,6 +29,12 @@ struct SaveHeader;
 // 「无颜色」哨兵（机器细节；与 `CORE-TIMING-WINDOW` / 场景族共用这一口径）。
 inline constexpr std::uint32_t kNoColor = 0xFFFFFFFFu;
 
+// **媒体对象表的格数 = 一千**（`60-ops-render.md`「媒体对象表（合同）」）。
+// ★ 它的身份只是**每拍扫描的循环边界**（`0x4125AD cmp edi,3E8h`）+ `0x23d` 的区间上界；
+//   ⛔ 不是任何一条填 / 清指令选格时的判据（那五条 / 两条都**不检查**槽号）。
+inline constexpr std::uint32_t kMediaSlotCount = 1000;
+
+
 // ★ 诊断（`EMULATOR_CXX_CLOCK_TRACE`）：记录"时钟往回拨"这类绝不该发生的事。
 //   ⛔ 不是引擎语义；只用于定位"期限 / 到期判据被瞬间满足"的现场。
 inline bool machine_clock_trace() {
@@ -40,6 +46,71 @@ inline bool machine_clock_trace() {
 }
 
 struct Install;
+
+// ── 存档**布局 1**（主版本 1 / 次版本 20）的暂存块与位置还原（`CORE-OPS-SAVE-VERSION-AE`）──
+// ★ 正文（`60-ops-scalar.md:306-321`）把布局 1 的一帧定成三段：
+//   32 字节**定长记录头**（**+4 处**是 4 字节 ASCII 格式标记）→ 4 字节**长度前缀**（长度**含前缀自身**）
+//   → 六个 u32 成**三对**（每对：整数 / 该表在**代码块内**的 32 位字偏移）。
+// ★ 格式标记按**无符号字节逐比**（最多 4 字节、遇 NUL 即止）与常量 `"080 "` 比：
+//   **小于** ⇒ 不按三对解释（旧格式支，负载不读）；**不小于** ⇒ 按三对解释。
+//   ⛔ 不许当 4 字节整数比 —— 那会把 `"/zzz"` 判成"更大"、分档方向整个翻转。
+// ★ 长度前缀与格式标记是**两格**（标记在记录头里、在长度前缀之前），两者之间没有任何大小关系。
+inline constexpr std::size_t kSaveRecordHeaderBytes = 32;
+inline constexpr std::size_t kSaveRecordMarkerOffset = 4;       // 头内 +4 = 格式标记
+inline constexpr std::size_t kSaveRecordLengthPrefixBytes = 4;  // 长度前缀（长度**含自身**）
+inline constexpr std::size_t kSavePositionPairCount = 3;        // 三对（第三对**无已知读者**）
+inline constexpr std::size_t kSaveRecordPayloadBytes = 2 * kSavePositionPairCount * 4;  // 六个 u32
+// 旧格式门的常量（4 字节、含尾空格）。★ 比的是**字节串**，不是它的数值。
+inline constexpr std::uint8_t kSaveFormatMarker080[4] = {'0', '8', '0', ' '};
+// 帧管理器整块 = 定长头 **0x900** + 每帧一条记录（**步长 = 帧记录跨度 0x41C**）；长度由存档记的
+// **帧数**给出 ⇒ 覆盖的帧槽随存档变化。两个「每帧当前位置下标」数组落在这段覆盖范围内
+// （块内 **+0x8F8** = 优先族 / **+0x8FC** = 回退族，步长同上）⇒ **下标值来自存档**。
+// 锚：`0x4105dd`（长度 = 帧数 × 跨度）/ `0x4105e5`（长度 += 0x900）/ `0x4105f4`（整块 `_memcpy` 回填）/
+//     `0x40f899`（优先族 `cmp [..+7F258h], 0`）/ `0x40f856`（回退族 `cmp [..+7F25Ch], 0`）。
+inline constexpr std::size_t kSaveFrameManagerHeaderBytes = 0x900;
+inline constexpr std::size_t kSaveFrameRecordStride = 0x41C;
+inline constexpr std::size_t kSaveFrameIndexPriorityOffset = 0x8F8;
+inline constexpr std::size_t kSaveFrameIndexFallbackOffset = 0x8FC;
+
+enum class SaveFormatMarker {
+    Legacy,   // 标记 < `"080 "` ⇒ 负载不读（旧格式支；完整复原语义本版未读 ⇒ 残差）
+    Current,  // 标记 ≥ `"080 "` ⇒ 按三对解释
+};
+
+// 一对：整数槽 + 该表在**代码块内**的 32 位字偏移（表基址 = 代码块基址 + 4 × 偏移）。
+// ★ 正文对**整数槽**没有给语义（只规定"整数进整数槽"）⇒ 本模型照存、不解释。
+struct SavePositionPair {
+    std::int32_t integer = 0;
+    std::int32_t word_offset = 0;
+};
+
+// 一帧暂存块**读入后**的样子。★ 旧格式支只到"不读负载"为止 ⇒ 三对没有值。
+struct SaveStagedFrame {
+    bool header_ok = false;        // 32 字节记录头读满
+    SaveFormatMarker marker = SaveFormatMarker::Legacy;
+    bool engine_outdated = false;  // 标记 > **引擎自己的**同一份标记 ⇒ 报「引擎版本太旧」
+    bool payload_read = false;     // 只有 Current 档、且长度前缀声明的负载真的在，才按三对读
+    std::array<SavePositionPair, kSavePositionPairCount> pairs{};
+};
+
+/** 布局 1 的一帧暂存块 → 分档 + 三对（**纯解析**，不碰 `Machine` 状态）。
+ *  读序照正文：记录头 → 长度前缀 → 负载；格式标记在**长度前缀之前**，与它是两格。
+ *  `engine_marker` = 引擎自己的同一份 4 字节 ASCII 标记；空 ⇒ 不判「引擎版本太旧」（来源未取证）。 */
+SaveStagedFrame parse_save_staged_frame(ByteSpan bytes, ByteSpan engine_marker);
+
+// 布局 1 的引擎暂存区：读档路径（`0x19f`，本版未成篇）解出来的东西。
+// ⚠ 容器里这些段各自的**字节偏移**本版未读（残差 `RES-OPS-SAVE-VERSION-AE-LAYOUT1`）
+//   ⇒ 这里只按**条目**给，⛔ 不假装知道容器布局。
+struct StagedSaveFrameLayout1 {
+    Bytes staged_block;  // 32B 记录头 + 4B 长度前缀 + 三对
+    Bytes code_body;     // 该帧的代码体（恢复时整块读进代码块，⛔ 不从存档读回指令指针）
+};
+struct StagedSaveLayout1 {
+    bool present = false;
+    std::int32_t frame_number = 0;  // 存档记下的帧号（应用之后按它分叉）
+    Bytes frame_manager_block;      // 帧管理器整块（定长头 + 每帧一条记录）
+    std::vector<StagedSaveFrameLayout1> frames;
+};
 
 // 一个脚本帧：代码区（body）、指令指针（字节偏移）、长度槽、返回栈、局部池。
 // 局部整型池按规范保存**编码后的位模式**；缺省槽是 ENC(0)，不是 0。
@@ -76,6 +147,12 @@ struct Frame {
     // ★ 按帧分层、每（帧 × 键）固定 10 槽；⛔ 不与 key_jumps 合表。
     // ★ 键用 64 位算：槽号 = 按住游标，而模数**不做范围检查** ⇒ 32 位算会溢出（UB）。
     std::unordered_map<std::int64_t, std::int32_t> hold_slots;
+    // 布局 1 的**三对槽**（`CORE-OPS-SAVE-VERSION-AE`）：整数槽 + 表在代码块内的 32 位字偏移。
+    // ★ 第三对**没有已知读者**（保留槽位：⛔ 不许据此删字段，也⛔ 不许给它编语义）。
+    // ★ 表基址 = **代码块基址 + 4 × 偏移**；本模型的代码块基址 = 帧内 0（`code` 的起点）。
+    std::array<SavePositionPair, kSavePositionPairCount> save_pairs{};
+    // 三对**是否可用**：旧格式支（负载不读）/ 没重建过 ⇒ false（本版对那种帧的位置还原不规定）。
+    bool save_pairs_ready = false;
 };
 
 enum class StopReason {
@@ -288,6 +365,9 @@ struct PendingGlyph {
     std::int32_t draw_mode = 0;
     std::int32_t primary = 0;
     std::int32_t secondary = 0;
+    // 追加当时那一支字体对象的**字面名**（变体支 ⇔ B 支的字面名；空 ⇒ 沿用对象当前字面名）。
+    // ★ 变体 = 换**整支字体对象**：字面名与字号、绘制模式一起进快照（`ADV-TEXT-LAYER` 的位 2）。
+    std::string face;
     std::string unit;       // 一个字符的 SJIS 字节串（1~2 字节；振り仮名可能是一整串）
 };
 
@@ -309,6 +389,9 @@ struct TextLayerState {
     std::int32_t gate_cycles = 0;      // 已完成的重放轮数（守卫用）
 };
 
+// **媒体对象**（`60-ops-render.md` 的「媒体对象表（合同）」+ `60-ops-wait.md` 的「播影片」）：
+// 引擎那张定长对象表里的一格所指向的对象 —— ⛔ 不是场景命令记录、⛔ 也不是绘制项。
+// ★ 与「纹理族」的**共享对象槽**是**同一张表**（`60-ops-wait.md:94`）：两章各自从自己的用途称呼它。
 struct MovieRecord {
     bool present = false;
     bool started = false;  // 只有成功启动过才进「播完」判据 / 维持影片位
@@ -316,21 +399,60 @@ struct MovieRecord {
     std::uint32_t options = 0;
     // 启播时的引擎时钟（毫秒）：后端报告的「当前位置」由它换算。
     std::uint32_t started_ms = 0;
+    // **对象身份**（诊断 / 守卫用，不是引擎字段）：同一格被第二次填时对象**不重建**，
+    // 所以"格上还是原来那个对象"这条合同只能靠它观察（正文的可证伪：「同槽已有对象 ⇒ 不重建」/
+    // 「该格清空之后同一槽再播 ⇒ 建的是**新**对象」）。每次**新建**对象时取一个单调号；
+    // 复用 / 释放都不改它，所以"号变了"只可能是"换了一个对象"。
+    std::uint64_t identity = 0;
     std::shared_ptr<MovieBackend> backend;
 };
+
+// **网格的顶点缓冲对象**（`CORE-OPS-SCENE-320`）：引擎在建 / 换网格时创建的那个缓冲
+// （`sub_4A2280`：创建参数 = Pool 1 / 格式字 `0x244` / 每顶点 36 字节 / Usage 8）。
+// 每顶点 **36 字节 / 9 个 32 位分量**，格式字 `0x244` = XYZRHW | DIFFUSE | TEX2。
+// ★ 分量序是合同（`0x4A2460`..`0x4A24A7` 的写点）：
+//   `[0..3]` 位置 x / y / z / w · `[4]` 色字（**烘色改的就是这一格**）·
+//   `[5..6]` 第一套纹理坐标 u / v · `[7..8]` 第二套（**与第一套共用同一对源段**）。
+// ★ 位置的前两个分量在装配时就已各减去**同一个**常量（`kMeshPositionOffset`），第三个不减。
+struct MeshVertexBuffer {
+    static constexpr std::uint32_t kFormatWord = 0x244u;  // XYZRHW | DIFFUSE | TEX2
+    static constexpr std::uint32_t kVertexBytes = 36u;    // 9 个 32 位分量
+    static constexpr std::uint32_t kVertexWords = 9u;
+    std::uint32_t format = kFormatWord;
+    std::vector<std::uint32_t> words;
+};
+
+// 网格顶点装配时，位置前两个分量各减去的那个常量。
+// ★ 正文**不规定它的取值**（`60-ops-scene.md` 的 `CORE-OPS-SCENE-320`：「这个常量取值本版不规定…
+//   只规定两个分量减的是同一个量，且第三个分量不减」）；这里取「显示适配」里以 ×0.5 出现的那个身份
+//   （`0x4A2347` 的双精度常量）。⛔ 守卫不许断言本值，只许断言"两轴减的是同一个量、第三轴不减"。
+inline constexpr double kMeshPositionOffset = 0.5;
 
 struct MeshRecord {
     std::uint32_t flags = 0;
     std::int32_t count = 0;
     std::int32_t op10 = 0;
-    std::vector<std::uint32_t> copies[2];
-    std::vector<std::uint32_t> colors;
-    std::uint32_t color = 0xFFFFFFFFu;
-    std::uint32_t target_color = 0xFFFFFFFFu;
+    // 记录自己保存的**三张副本数组**（`+8` / `+0x0C` / `+0x10`，各「顶点数 × 4 字节」、每顶点 1 个字）：
+    //   `[0]` ← 第 2 个操作数地址处的 n 个 32 位字（原样）
+    //   `[1]` ← 第 3 个操作数地址处的 n 个 32 位字（原样）
+    //   `[2]` ← 第 5、6 段逐元素合成的色字（=「原逐顶点颜色」，烘色的**基准**、不变量）
+    // ★ 拷贝发生在**装配之后**（`0x4AE189` / `0x4AE1D1` / `0x4AE215`），它们**不是**装配的输入缓冲；
+    //   ⛔ 烘色不许改这里 —— 改它会让重复烘焙累积（正文：原逐顶点颜色是不变量数组）。
+    std::vector<std::uint32_t> copies[3];
+    // 顶点缓冲对象（装配结果）。`0x320` 每次建 / 换都**新建**一个（旧的连同三张副本一起释放）。
+    MeshVertexBuffer vertex_buffer;
+    std::uint32_t color = kNoColor;         // 当前颜色（新记录的初值 = 无颜色）
+    std::uint32_t target_color = kNoColor;
     std::int32_t delay = 0;
     std::int32_t duration = 0;
     std::uint32_t window_start = 0;
 };
+
+// **按当前颜色烘进顶点缓冲**（`CORE-OPS-SCENE-322` 的烘焙口径；`0x320` 的重烘门共用同一个入口）：
+// 逐字节 `(原字节 × 系数字节) ÷ 255`、**向下取整**（整除，⛔ 不是四舍五入）后写进顶点缓冲的
+// 颜色分量（每顶点第 5 个 32 位字）。基准恒为第 3 张副本数组（原逐顶点颜色）⇒ 重复烘焙不累积。
+// 顶点缓冲没建（从没装配过 / 顶点数 ≤ 0）⇒ 什么都不做。
+void bake_mesh_colors(MeshRecord& mesh, std::uint32_t coefficient);
 
 // ── 纹理的两层：**记录**与**槽里的对象**（⛔ 不要再合成一张表）──
 // 2026-10-29 的跨界面纹理污染就是"合成一张表 + `0x1fa` 删整条"造成的：删记录把版本号打回 1，
@@ -410,6 +532,65 @@ struct FontDescription {
 };
 struct FontDescriptionPair {
     std::array<FontDescription, 2> variants{};
+};
+
+// ── 重建入口（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL`「重建入口的两种形态」）──
+// 同一个字体对象上有**两套**重建入口（⛔ 不许合并成一条）：
+//   · `NonDestroy` = **不销毁旧句柄**的那一套 —— `0x78` / `0x2db` 的**尾跳**进它；`0x75` / `0x1a5`
+//     的重建请求也走它（`60-ops-forward` 的「入口体写的值 ≠ 重建后的最终值」）。它把参考字体的
+//     **文本度量**与**字形度量**各写进自己的一张结构（离屏文字纵向对位读的 ascent 缓存就在文本
+//     度量那一张里）；
+//   · `Destroy` = 重建前**先销毁三枚已有的平台字体引用**（两枚是对象自己的、第三枚是当时选在
+//     绘制表面上的那一枚旧引用；销毁它之前先把绘制表面换回原来的字体）的那一套 —— `0x197` /
+//     `0x2fe` 的重建请求走它。它把**新建字体**的文本度量写进**它自己的另一张**结构
+//     （⇒ 离屏文字的 ascent 缓存**不受**它影响）。
+enum class FontRebuildBranch { NonDestroy, Destroy };
+
+// 一次「建字体 + 取量度」请求的**形态**（四个参数都是合同的一部分，⛔ 只记"发过一次"不算建模）。
+struct FontBuildSpec {
+    std::string face;          // 字面名：A 支 = 常量参考面名；B 支 = 该支自己的横排字面名
+    std::int32_t height = 0;   // lfHeight = **−字号**
+    std::int32_t width = 0;    // lfWidth = **−字号 ÷ 2**（向零截断）
+    std::int32_t weight = 0;   // 粗细 = 该字体对象的**粗细格**（`0x2bd` 写的那一格）
+    std::int32_t charset = 0;  // 字符集 = **默认**（引擎把这个参数留缺省；Win32 `DEFAULT_CHARSET` = 1）
+};
+
+// 入口取到的两张量度结构 —— ⛔ **两张不是同一张**（正文点名"一张文本度量、一张字形度量"）。
+struct FontTextMetric {
+    std::int32_t height = 0;         // `TEXTMETRICA.tmHeight`
+    std::int32_t ascent = 0;         // `TEXTMETRICA.tmAscent`（离屏文字做纵向对位读的就是这一格）
+    std::int32_t average_width = 0;  // `TEXTMETRICA.tmAveCharWidth`
+};
+struct FontGlyphMetric {
+    std::int32_t box_width = 0;  // `GLYPHMETRICS.gmBlackBoxX`（该字形的黑框宽）
+};
+struct FontBuildMetrics {
+    FontTextMetric text;
+    FontGlyphMetric glyph;
+};
+
+// 一条文本记录**画的时候用哪一支字体对象**（`ADV-TEXT-LAYER` 的「消费者 = 绘制」：
+// 标志字第 2 位 = **变体选择** ⇒ 换**整支字体对象**，⛔ 不是只换字号）。
+// ★ 一支 = 一个字体对象的四个可观察格合成的一份视图：字面名 / 字号 / 绘制模式 / 粗细。
+//   两处判据分开写（同一位、**不是**同一个对象）：绘制侧读**记录自己的**标志字，追加侧读
+//   **它收到的标志参数**（那一刻记录还没写出）。
+struct TextRunFont {
+    std::string face;           // 字面名（横排那一份：A 支 = `font_a_pair_[0]`、B 支 = `font_b_pair_[0]`）
+    std::int32_t size = 0;      // 字号（A 支 = `0x75` 那格、B 支 = `0x197` 那格）
+    std::int32_t draw_mode = 0; // 绘制模式（`0x78` 写的那一格；★ 它是**对象**的一格 ⇒ 两支共用）
+    std::int32_t weight = 0;    // 粗细（`0x2bd` 写的那一格；同样按对象取，两支共用）
+    bool variant = false;       // true = 变体那一支（B 支）
+    bool operator==(const TextRunFont& other) const {
+        return face == other.face && size == other.size && draw_mode == other.draw_mode &&
+               weight == other.weight && variant == other.variant;
+    }
+    bool operator!=(const TextRunFont& other) const { return !(*this == other); }
+};
+
+// 销毁那一套的生命周期请求次序（观测点；⛔ 不是产品接口）。
+enum class FontLifecycle {
+    SurfaceRestore,  // 把绘制表面换回**原来的**字体（必须在销毁那枚旧引用**之前**）
+    ReleaseHandle,   // 销毁一枚旧平台字体引用（共三枚）
 };
 
 // ── 显示消息型异常（`60-ops-numeric` 的「三类异常」之一种）──
@@ -736,6 +917,38 @@ public:
     std::size_t font_measure_requests() const { return font_measure_requests_; }
     // 派生例程：对**一份描述**发两次度量并写回它的高度 / 下一格（回退判据在内部）。
     void derive_font_description(FontDescription& desc, std::int32_t size);
+    // ── 重建入口的平台侧接缝（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL` 的 ③）──
+    // 一次「建参考字体 + 取量度」= **一个**请求：入口给形态、平台回两张量度结构。
+    // ★ 与 `set_font_measurer`（派生例程的"两次平台字体度量"）**不是同一个接缝**：派生那两次是
+    //   逐描述量的（第一次参考字体、第二次该描述自己的字面名），而这里是入口**自己**那一次
+    //   —— 两处写进**不同**的结构（正文明说"两套取的量度不落同一张结构"）。
+    using FontReferenceBuilder = std::function<FontBuildMetrics(const FontBuildSpec&)>;
+    void set_font_reference_builder(FontReferenceBuilder builder) {
+        font_reference_builder_ = std::move(builder);
+    }
+    bool has_font_reference_builder() const { return font_reference_builder_ != nullptr; }
+    // 重建入口的可观察量（守卫用；⛔ 不是产品接口）——
+    // ① 「建字体 + 取量度」请求次数（两套分开计）；
+    std::size_t font_build_requests(FontRebuildBranch branch) const {
+        return branch == FontRebuildBranch::Destroy ? font_build_requests_destroy_
+                                                    : font_build_requests_non_destroy_;
+    }
+    // ② 最近一次请求的**形态**（面名 / 高 / 宽 / 粗细 / 字符集）；
+    const FontBuildSpec& font_build_spec(FontRebuildBranch branch) const {
+        return branch == FontRebuildBranch::Destroy ? font_build_spec_destroy_
+                                                    : font_build_spec_non_destroy_;
+    }
+    // ③ 两张各写进自己那一张的量度结构（A 支的文本度量 / 字形度量；B 支自己的另一张文本度量）。
+    const FontTextMetric& font_text_metric(FontRebuildBranch branch) const {
+        return branch == FontRebuildBranch::Destroy ? font_text_metric_destroy_
+                                                    : font_text_metric_non_destroy_;
+    }
+    const FontGlyphMetric& font_glyph_metric(FontRebuildBranch branch) const {
+        return branch == FontRebuildBranch::Destroy ? font_glyph_metric_destroy_
+                                                    : font_glyph_metric_non_destroy_;
+    }
+    // ④ 销毁那一套的请求次序（换回表面字体 → 销毁三枚旧引用）；不销毁那一套恒为空。
+    const std::vector<FontLifecycle>& font_lifecycle_log() const { return font_lifecycle_log_; }
     // 固定半宽（`0x2de` 表项的位 0 = `FIXED_PITCH`）：字宽 = **±字号/2**，符号由**调用方是哪条路径**
     // 决定 —— 引擎的两个派发点判据不同（见 `HalfWidthPath`；⛔ 不许合并成一条判据）。
     // 返回**带符号的字宽**（0 = 这个字体不适用固定半宽：名字为空 / 不在表里 / 位 0 未置 / 内建 IPA 字体）。
@@ -972,7 +1185,12 @@ public:
     // (b) 画面暂停闩：非 0 ⇒ **连盖钟一起跳过**（与执行区间的区间忙标记不是同一格）。
     //     ★ 消息号未取证（`RES-VM-SCENE-HOLD-LATCH`）：这里只暴露"宿主 / 测试怎么置它"。
     std::int32_t scene_hold_latch() const { return scene_hold_latch_; }
-    void set_scene_hold_latch(std::int32_t value) { scene_hold_latch_ = value; }
+    // ★ 闩的两个**写点**（`CORE-OPS-RENDER-FRAME-STEP`「暂停闩的两个写点都以它 = 1 为前提」；
+    //   站点 `0x406083`（置 1，窗口刷新支）/ `0x406251`（清 0，窗口位置更新支））：两者都先判
+    //   「场景绘制模式 = 1」—— 模式 ≠ 1 时闩**不动**（既不置、也不清）。⛔ 不要把它们折成一个
+    //   无门 setter：第三态下宿主一动窗口就会把闩永久置起，门前渲染步从此再也进不去。
+    void scene_hold_begin() { if (draw_mode_ == 1) scene_hold_latch_ = 1; }  // 写点①：置 1
+    void scene_hold_end() { if (draw_mode_ == 1) scene_hold_latch_ = 0; }    // 写点②：清 0
     // 「只挡推进」第 2 条：影片对象的缓冲被另一处持有（`RES-WINDOW-MOVIE-HELD`）。
     bool movie_held() const { return movie_held_; }
     void set_movie_held(bool value) { movie_held_ = value; }
@@ -1164,15 +1382,18 @@ public:
         record.flags = flags;
         record.tag = value;
     }
-    bool scene_keyed_pair(std::int32_t key, std::int32_t& a, std::int32_t& b) const {
-        const auto it = scene_keyed_pair_.find(key);
-        if (it == scene_keyed_pair_.end()) return false;
+    // 辅助表 **A**（`+0x438`；`0x242` 一族写）：**不是**辅助表 B，也⛔ 不是绘制项表。
+    // ★ 表名 / 偏移 / 写者族：`60-ops-scene` 的「CG 数字条」旧名对照（A = 删除顺序第 3 张）+
+    //   `0x344` 条的「这张表是辅助表 B，不是绘制项表」。
+    bool scene_aux_a(std::int32_t key, std::int32_t& a, std::int32_t& b) const {
+        const auto it = scene_aux_a_.find(key);
+        if (it == scene_aux_a_.end()) return false;
         a = it->second.field_a;
         b = it->second.field_b;
         return true;
     }
-    void set_scene_keyed_pair(std::int32_t key, std::int32_t a, std::int32_t b) {
-        scene_keyed_pair_[key] = KeyedPairRecord{a, b};
+    void set_scene_aux_a(std::int32_t key, std::int32_t a, std::int32_t b) {
+        scene_aux_a_[key] = KeyedPairRecord{a, b};
     }
     std::size_t container_224_items() const { return container_224_items_; }
     std::pair<std::int32_t, std::int32_t> run_header(std::size_t slot) const {
@@ -1494,6 +1715,15 @@ public:
     std::int32_t text_span_slot(std::size_t i) const { return text_spans_[i].slot; }
     std::size_t text_span_draw_requests() const { return text_span_draw_requests_; }
     std::size_t text_span_alt_requests() const { return text_span_alt_requests_; }
+    // ── 一条文本记录用哪一支字体对象（`ADV-TEXT-LAYER` 的「位 2 = 变体选择」）──
+    // `flags` 的**第 2 位**置起 ⇒ 变体那一支（B 支：字面名 / 字号 / 绘制模式整支换），否则 A 支。
+    // ★ 两处判据分开写：绘制侧传**记录自己的**标志字（`text_span_flags(i)`），追加侧传**它收到的
+    //   标志参数**（此时记录还没写出）。两处读同一位、**不是**同一个对象。
+    TextRunFont text_run_font(std::int32_t flags) const;
+    // 记录的落库形（观察口）：追加那一刻按**参数**算出的那一支。
+    const TextRunFont& text_span_run_font(std::size_t i) const { return text_spans_[i].font; }
+    // 变体支那条绘制路径最近一次用的字体对象（观察口；`0x82` 走位 2 置起的那条路径时写）。
+    const TextRunFont& last_alt_run_font() const { return last_alt_run_font_; }
     // ── 音效的两个**不同**槽量（⛔ 别再合成一个 15 —— 那曾让实现假造 5 个引擎格） ──
     //   · `kSoundSlotCount` = **15**：声音后端（`T_Sound`）的槽数组条数。
     //     语料：`0x4b603e cmp edi,0Eh / ja`（播放受理边界）、`0x4b65c5 cmp edi,0Fh / jl`（装载受理边界）、
@@ -1542,7 +1772,44 @@ public:
         if (value) scene_pending_ = true;
     }
     std::uint32_t render_now_ms() const { return render_now_ms_; }
-    void begin_render() { render_now_ms_ = scene_clock_ms_; command_animating_ = false; }
+    // ── 渲染步（合同边界）：渲染器请求接缝（`CORE-OPS-RENDER-FRAME-STEP`）──
+    // 正文（`60-ops-render.md` 的「渲染步（合同边界）」）把「开始批次 / 结束批次 / 呈现 / 清屏」
+    // 定成**发给渲染器的请求**。core 不碰平台：它只在合同给的位置把请求**记下来**（宿主照日志去调
+    // 平台），并允许注入「开始批次被拒绝」⇒ 「拒绝 ⇒ 不配对、不复位、不遍历、不呈现、不清命令表」
+    // 这五条才是可机械断言的行为，而不是"读代码觉得对"。
+    // ★ 这道闸与「就绪判据」**不是**一件事（正文点名），也与会话 / 迭代身份无关；
+    //   ⛔ 别把它实现成"设备就绪检查"。
+    enum class RendererRequest {
+        ClearScreen,  // 清屏请求：**只**随显式清屏指令 `0x20e`（渲染步自己从不发）
+        BeginBatch,   // 开始一次批次：渲染步入口、**清屏位判定之后**
+        EndBatch,     // 结束这次批次：**只在开始批次成功之后**才发（⛔ 不是无条件配对）
+        Present,      // 呈现：本步**最后一项**平台绘制请求；门 = 步末当前渲染目标是后缓冲
+    };
+    const std::vector<RendererRequest>& renderer_requests() const { return renderer_requests_; }
+    void clear_renderer_requests() { renderer_requests_.clear(); }
+    std::size_t renderer_request_count(RendererRequest kind) const;
+    // 注入：渲染器对「开始批次」返回失败（缺省 false = 接受）。⛔ 产品路径不注入。
+    void set_renderer_begin_batch_refuses(bool value) { renderer_begin_batch_refuses_ = value; }
+    bool renderer_begin_batch_refuses() const { return renderer_begin_batch_refuses_; }
+    // 「清屏位」：渲染步入口那次判定的输入。本版**没有任何把该位置为非 0 的来源**
+    // （该位唯一的写点是复位时清 0，见 `op_09`）⇒ 判定恒走「不清」。⛔ 别为它实现一个
+    // "某条件下自动清屏"的分支：独立实现者应当实现成「渲染步不隐含清屏」。
+    // ★ 这个注入口只给夹具（与 `set_frame_flag` 同性质：产品路径里没有置 1 的写者）。
+    std::int32_t scene_clear_bit() const { return scene_clear_bit_; }
+    void set_scene_clear_bit_for_test(std::int32_t value) { scene_clear_bit_ = value; }
+    // 渲染步的**遍历 / 绘制本体**进入次数（观察口，⛔ 不是引擎格）：闸拒绝 ⇒ 恒不增。
+    std::size_t render_traversals() const { return render_traversals_; }
+    void note_render_traversal() { ++render_traversals_; }
+    // 渲染步（合同边界）的**入口**：① 清屏位判定（本版恒「不清」）→ ② 请求开始一次批次。
+    // 被拒绝 ⇒ **整步立即结束**（返回 false）：不发出配对的「结束批次」、不复位目标、不遍历 /
+    // 不绘制、不呈现、不清命令表、**不写任何步末格**（连"步头两格"也不写 —— 闸在它们之前）。
+    bool begin_render_step();
+    // 渲染步的**收尾**（**只在** `begin_render_step()` 返回 true 之后才调）：
+    // 结束批次 → 呈现（门：步末当前渲染目标是后缓冲）→ 步内收尾（`end_render`）。
+    // ★ 次序是合同：**批次在呈现之前结束**；呈现是本步最后一项平台绘制请求。
+    void end_render_step();
+    // 步内收尾本体（脏位 / 命令表生命周期 / 「强制完成」的清除）。⛔ 它**不发**任何批次请求：
+    // 把「结束批次」并进这里就变成"无论成败都收尾"（正文点名禁止）。
     void end_render() {
         scene_dirty_ = false;  // 引擎在渲染步入口清脏（0x4B40AA）
         // ★ "待处理"闩（`+0B5B4`）与脏位是**同一条指令对**（0x4B40AA / 0x4B40B0），但它必须在
@@ -1558,7 +1825,18 @@ public:
     }
     const DrawItem* draw_item(std::uint32_t key) const { const auto it = draw_items_.find(key); return it == draw_items_.end() ? nullptr : &it->second; }
     const SceneRecord* scene_record(std::uint32_t key) const { const auto it = scene_records_.find(key); return it == scene_records_.end() ? nullptr : &it->second; }
-    const MovieRecord* movie(std::uint32_t slot) const { const auto it = movies_.find(slot); return it == movies_.end() ? nullptr : &it->second; }
+    // **媒体对象表**的一格（空槽 ⇒ `nullptr`）。表是**定长 1000 格**（`0..999`）。
+    // ★ 槽号 ≥ 1000 / 负数的后果**本版不规定**（正文：「上限一千是**每拍扫描的循环边界**，
+    //   ⛔ 不是任何一条指令选格时的判据」）⇒ 模型**不检查、也不越界**：那些槽落进表外一格容器，
+    //   **两条整表遍历（每拍扫描 / `0x23d` 的 `42..999`）都不含它们**。
+    const MovieRecord* movie(std::uint32_t slot) const {
+        if (slot < kMediaSlotCount) {
+            const auto& cell = movies_[slot];
+            return cell ? &*cell : nullptr;
+        }
+        const auto it = movies_out_of_range_.find(slot);
+        return it == movies_out_of_range_.end() ? nullptr : &it->second;
+    }
     // 「有活动对象」标记：对象表里是否还有已启动的影片槽（`CORE-VM-MOVIE`）。
     bool movie_active() const { return movie_active_; }
     // 影片后端工厂（平台边界注入点）：缺省 = MPEG-1 program stream（pl_mpeg）。
@@ -1568,8 +1846,25 @@ public:
     // 影片字节的来源（统一文件 id → 字节）。缺省 = 安装目录 / ALF 切片；测试用它喂固定字节。
     using MovieBytesLoader = std::function<Bytes(std::uint32_t file_id)>;
     void set_movie_bytes_loader(MovieBytesLoader loader) { movie_bytes_loader_ = std::move(loader); }
-    std::size_t aux_a_count() const { return aux_a_.size(); }
-    std::size_t aux_b_count() const { return aux_b_.size(); }
+    // 辅助表 **B**（`+0x448`；`0x344` 一族写：「按编号置存在位并写值」）的观察口。
+    // ★ 表身份：`0x344` 条明说「这张表是辅助表 B，不是绘制项表」；`0x21d` 复制的就是它。
+    std::size_t scene_aux_b_count() const { return scene_aux_b_.size(); }
+    bool scene_aux_b_entry(std::int32_t key, std::int32_t& flags, std::int32_t& value) const {
+        const auto it = scene_aux_b_.find(key);
+        if (it == scene_aux_b_.end()) return false;
+        flags = it->second.first;
+        value = it->second.second;
+        return true;
+    }
+    // 两张辅助表的**键集合**（收尾扫描把四张同键表合并按键升序访问；辅助表不产生像素，
+    // 见 `CORE-SCENE-DRAW-ORDER` 的残差）。⛔ 不返回条目本体 —— 条目语义不在本版。
+    std::vector<std::int32_t> scene_aux_keys() const {
+        std::vector<std::int32_t> keys;
+        keys.reserve(scene_aux_a_.size() + scene_aux_b_.size());
+        for (const auto& entry : scene_aux_a_) keys.push_back(entry.first);
+        for (const auto& entry : scene_aux_b_) keys.push_back(entry.first);
+        return keys;
+    }
     const MeshRecord* mesh(std::uint32_t key) const { const auto it = meshes_.find(key); return it == meshes_.end() ? nullptr : &it->second; }
     const TextureEntry* texture(std::uint32_t id) const {
         const auto it = textures_.find(id);
@@ -1688,6 +1983,35 @@ public:
         slot_builder_ = std::move(builder);
         slot_loader_ = std::move(loader);
     }
+    // ── 存档**布局 1**（主版本 1 / 次版本 20）的恢复（`CORE-OPS-SAVE-VERSION-AE`）──
+    /** 把**帧管理器整块**从存档整块拷回引擎：覆盖到的帧槽的两个当前位置下标 ← 存档
+     *  （块内 `+0x8F8` = 优先族 / `+0x8FC` = 回退族，步长 = 帧记录跨度）。长度 = `0x900` + 跨度 × 帧数。
+     *  ★ **未被覆盖的帧槽**（存档帧数少于引擎在用的槽）本版不规定 ⇒ **一格不动**（残差）。
+     *  返回 false = 这段长度不是「定长头 + 整数条记录」（记诊断、一格不写）。 */
+    bool restore_save_frame_manager(ByteSpan block);
+    /** 一帧的两个当前位置下标。`priority` = **换脚本**族（读第二对的表）/ 否则回退族（读第一对的表）。
+     *  初值 **−1** = 该帧槽没被存档覆盖 ⇒ 该族**不命中**（⛔ 不是 0、也⛔ 不是"位置不变"）。 */
+    std::int32_t save_frame_index(std::size_t frame, bool priority) const;
+    /** 布局 1 的一帧重建：**代码块**整块读入 → 三对写进帧记录的三对槽 → 指令指针初值 = **代码块基址**。
+     *  ★ 旧格式支（标记 < `"080 "`）⇒ 负载不读、不重建（残差）；标记载荷短 ⇒ 记诊断、不重建。 */
+    void rebuild_save_frame_layout1(std::size_t frame_index, ByteSpan code_body,
+                                    const SaveStagedFrame& staged);
+    /** 两族位置还原（给定帧）：命中 ⇒ `ip = 代码块基址 + 4 × 表[下标]`（模型里代码基址 = 帧内 0）、
+     *  推进格数 ← **3**（优先族 = 换脚本）/ **0**（回退族）。**某族下标 < 0 ⇒ 该族不命中 ⇒ 回退另一族**；
+     *  **两族都不命中 ⇒ 指令指针与推进格数一格不改**。返回 true = 命中。 */
+    bool resolve_save_layout1_position(std::size_t frame_index);
+    /** `0xae` 非 0 支的布局 1 一支：帧管理器整块回填 → 按帧重建 → 位置还原 → 按当前帧号分叉。 */
+    void apply_save_layout1();
+    // 引擎自己的格式标记（同一份 4 字节 ASCII；来源未取证 ⇒ 空 = 不判「引擎版本太旧」）。
+    void set_save_engine_marker(std::string marker) { save_engine_marker_ = std::move(marker); }
+    // ★ 测试脚手架 / 读档路径的 seam（⛔ 不是产品接口）：容器解码未建模 ⇒ 暂存区由调用方给。
+    void seed_staged_save_for_test(StagedSaveLayout1 staged) { staged_save_ = std::move(staged); }
+    // 观察口（守卫用）：`0xae` 的引擎级标志（非 0 = 有一份已读入、待应用的存档）。
+    std::int32_t save_version_flag() const { return save_version_flag_; }
+    // `0x19f`（本版未成篇）是那格标志的唯一写者 ⇒ 纯自检只能播种。
+    void seed_save_version_flag_for_test(std::int32_t flag) { save_version_flag_ = flag; }
+    // ★ 测试脚手架（⛔ 不是产品接口）：「未被覆盖的帧槽一格不动」要能**红** ⇒ 得先能摆一个值。
+    void seed_save_frame_index_for_test(std::size_t frame, std::int32_t priority, std::int32_t fallback);
     // 测试脚手架：全局整型池的「计数格」（`0x1a1` 的重编码范围 = 计数格 + 1 格）。
     void seed_global_int_count(std::uint32_t count) { global_int_count_ = count; }
     // 槽位 → 完整路径（宿主与测试共用同一套拼法；`thumbnail` 选 `.STH`）。
@@ -1749,6 +2073,13 @@ private:
     GateAction service_gate_bit(std::int32_t bit);
     // 门之前的影片对象表服务（`CORE-VM-MOVIE`）：轮询 / 收尾 / 循环 / 填纹理。
     void service_movies();
+    // **媒体对象表**（`60-ops-render.md` 的「媒体对象表（合同）」）的三条原语：
+    // ① 取该格；格空 ⇒ **建一条播放类对象**（只有真的新建时才取身份号）；格非空 ⇒ **原对象原样**
+    //    （「同槽已有对象 ⇒ 不重建」）。② 释放该格的对象并置空（格空 ⇒ 静默、不报错）。
+    // ③ 重算「有活动对象」标记（= 任一格 present ∧ started；失败残留不参与，见 `CORE-OPS-MOVIE`）。
+    MovieRecord& media_cell(std::uint32_t slot);
+    void release_media_cell(std::uint32_t slot);
+    void recompute_movie_active();
     // 把一帧写进同槽纹理（呈现层的像素效果，不在规范正文里）；写成功 ⇒ true。
     bool fill_movie_texture(std::uint32_t slot, const MovieFrame& frame);
     // 场景命令族（`0x223` / `0x24f` / `0x250` / `0x251`）的「槽里没有对象 ⇒ 建一张 1280×720 透明画布」。
@@ -1858,6 +2189,8 @@ private:
     void op_199(const Instruction&);
     // 渲染入口（vm_ops_render.cpp）
     void op_23b(const Instruction&); void op_2da(const Instruction&); void op_20b(const Instruction&); void op_20c(const Instruction&);
+    // 场景绘制模式：0x200 覆盖 / 0x201 原值交出（`CORE-OPS-RENDER-FRAME-STEP`）
+    void op_200(const Instruction&); void op_201(const Instruction&);
     void op_20d(const Instruction&); void op_33f(const Instruction&); void op_204(const Instruction&);
     // 数值文本（0x205）/ 清屏（0x20e）
     void op_205(const Instruction&); void op_20e(const Instruction&);
@@ -1884,6 +2217,11 @@ private:
     void op_21e(const Instruction&); void op_21f(const Instruction&);
     // 影片（vm_movie.cpp）
     void op_20f(const Instruction&);
+    // 媒体对象表的填 / 清（vm_movie.cpp）：三条「只登记这一项副作用」的填格指令 +
+    // 两条显式清格指令。★ 前三条整条尚未成篇（`60-ops-render.md:351`）⇒ 本版**只**按
+    // 第 2 个操作数选格（其余操作数的语义未取证，不读、不猜）。
+    void op_236(const Instruction&); void op_240(const Instruction&); void op_241(const Instruction&);
+    void op_210(const Instruction&); void op_249(const Instruction&);
     // 场景命令记录（vm_ops_scene.cpp）
     void op_223(const Instruction&); void op_24d(const Instruction&); void op_24f(const Instruction&); void op_250(const Instruction&);
     void op_229(const Instruction&);
@@ -2011,6 +2349,9 @@ private:
     void refresh_font_scale();
     Viewport viewport_input() const;
     void request_font_rebuild() { ++font_rebuild_requests_; }
+    // 重建入口本体（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL` 的 ①②③④；`0x78` / `0x2db` 的尾跳与
+    // 四条设字号 / 设名入口的重建请求都收敛到这里）。入口尾段的字形缓冲重分配与逐字装载本版不建模。
+    void run_font_rebuild_entry(FontRebuildBranch branch);
     // 文本长度 / 字体槽表 / Font 条目登记表（vm_ops_text.cpp）
     void op_1a6(const Instruction&); void op_300(const Instruction&); void op_301(const Instruction&);
     void op_1d2(const Instruction&); void op_1d3(const Instruction&);
@@ -2207,6 +2548,18 @@ private:
     // 守卫观察口（⛔ 不是产品状态）：整趟重算写了几次 / 发了几次重建请求。
     std::size_t font_scale_write_count_ = 0;
     std::size_t font_rebuild_requests_ = 0;
+    // ── 重建入口的两套（`CORE-OPS-LIST-SUBSYSTEM-SET-TAIL`）──
+    // 平台侧接缝（缺省空 = 没有后端 ⇒ 请求照记、两张量度结构保持 0；⛔ 不编数值）。
+    FontReferenceBuilder font_reference_builder_;
+    std::size_t font_build_requests_non_destroy_ = 0;  // 「建字体 + 取量度」请求次数（不销毁那一套）
+    std::size_t font_build_requests_destroy_ = 0;      // 同上（销毁那一套）
+    FontBuildSpec font_build_spec_non_destroy_;        // 最近一次的请求形态（不销毁那一套）
+    FontBuildSpec font_build_spec_destroy_;            // 同上（销毁那一套）
+    FontTextMetric font_text_metric_non_destroy_;      // A 支的文本度量（ascent 缓存在这一张）
+    FontGlyphMetric font_glyph_metric_non_destroy_;    // A 支的字形度量
+    FontTextMetric font_text_metric_destroy_;          // B 支自己的**另一张**（⛔ 与上面不是同一张）
+    FontGlyphMetric font_glyph_metric_destroy_;        // B 支不取字形度量 ⇒ 保持 0（观测口只用文本那一张）
+    std::vector<FontLifecycle> font_lifecycle_log_;    // 销毁那一套的请求次序（观测点）
     // 平台输入接缝：空 = 视口按配置的客户区尺寸（比例 1.0）。
     ViewportSource viewport_source_;
     struct TextSlot {
@@ -2317,6 +2670,8 @@ private:
     std::size_t voice_advance_steps_ = 0;       // 「有推进」的次数（= 交付返回值 true 的次数）
     // `0x82` 消费的那条**文本记录向量**（`T_Font+0xD24`，72 字节/条）的**最小可观察投影**：
     // 只建已取证的 6 个字段（+0x00 / +0x14 / +0x18 / +0x1C / +0x20 / +0x28），其余字段不建（残差）。
+    // ★ 另加一个**派生投影**（不是引擎记录的字段）：追加那一刻按标志参数第 2 位选出的那一支
+    //   字体对象（`font`）—— 它让"把该位置进记录"与"变体 = 整支字体对象"可被观测。
     struct TextSpanRecord {
         std::int32_t slot = 0;        // +0x00 当前文本槽（排版记录里是层号）
         std::int32_t x = 0;           // +0x04 绘制起点 x（排版记录）
@@ -2327,14 +2682,16 @@ private:
         std::int32_t a18 = 0;         // +0x18
         std::int32_t a1c = 0;         // +0x1C
         std::int32_t voice_slot = 0;  // +0x20
-        std::int32_t flags = 0;       // +0x28（bit0 = 新段；bit3 = 行结束空串记录；bit30 = 可触发语音）
+        std::int32_t flags = 0;       // +0x28（bit0 = 新段；bit2 = 变体选择；bit3 = 行结束空串记录；bit30 = 可触发语音）
         std::string text;             // +0x2C 起的 28 字节字符串对象（本模型只存内容）
+        // 追加那一刻按**收到的标志参数的第 2 位**选出来的那一支字体对象（"把该位置进记录"）。
+        // ★ 绘制侧读的是**记录自己的**标志字 + 这里落库的那一支；两处读同一位、不是同一个对象。
+        TextRunFont font;
     };
     std::vector<TextSpanRecord> text_spans_;
     std::size_t text_span_draw_requests_ = 0;  // 追加绘制命令（度量与命令本身未建模）
-    std::size_t text_span_alt_requests_ = 0;   // `node[0x70]==1` 时转交的另一条绘制路径
-    // 文本节点槽的"种类"格（`T_Font+0x414` 十项数组各自的 +0x70）。本模型里没有写者 ⇒ 缺省 0（= 走主路径）。
-    std::unordered_map<std::int32_t, std::int32_t> font_node_kind_;
+    std::size_t text_span_alt_requests_ = 0;   // 标志字第 2 位置起时走的那条（逐字）绘制路径
+    TextRunFont last_alt_run_font_;            // 上面那条路径最近一次用的字体对象（观察口）
     // `0x1ba` 的两个引擎开关格（构造期默认 **1 = 开**，取证 `0x491932` / `0x49194f`）。
     bool sound_se_enabled_ = true;
     bool sound_voice_enabled_ = true;
@@ -2393,6 +2750,23 @@ private:
     std::array<std::int32_t, 5> engine5_{};
     std::int32_t key_total_ = 7;  // 引擎构造（Input[259]=7）建立的初值；0xfe 可覆盖
     std::int32_t save_version_flag_ = 0;
+    // ── 布局 1（`CORE-OPS-SAVE-VERSION-AE`）──
+    // 每帧的两个**当前位置下标**：初值 **−1** = 该帧槽没被存档覆盖 ⇒ 该族**不命中**（⛔ 不是 0）。
+    static constexpr std::array<std::int32_t, kFrameCount> save_index_sentinel() {
+        std::array<std::int32_t, kFrameCount> values{};
+        values.fill(-1);
+        return values;
+    }
+    std::array<std::int32_t, kFrameCount> save_priority_index_ = save_index_sentinel();  // 换脚本族
+    std::array<std::int32_t, kFrameCount> save_fallback_index_ = save_index_sentinel();  // 另一族
+    // 引擎自己的 4 字节 ASCII 格式标记（空 = 不判「引擎版本太旧」）；与 `save_title_` 同口径。
+    std::string save_engine_marker_;
+    // 布局 1 的引擎暂存区（读档路径 `0x19f` 未成篇 ⇒ 本版只由 seam / 自检填）。
+    StagedSaveLayout1 staged_save_;
+    ByteSpan save_engine_marker_bytes() const {
+        return ByteSpan(reinterpret_cast<const std::uint8_t*>(save_engine_marker_.data()),
+                        save_engine_marker_.size());
+    }
     std::int32_t input_a_ = 0;
     // 滚轮累加格（`Engine+0x1E74`；`0x10d` 读并清 0）。
     std::int32_t wheel_accum_ = 0;
@@ -2483,6 +2857,10 @@ private:
     bool frame_step_requested_ = false;
     bool frame_flag_ = false;
     bool scene_dirty_ = true;
+    // 场景绘制模式（`CORE-OPS-RENDER-FRAME-STEP`「场景绘制模式」）：0 = 不显示 / 1 = 正常显示 /
+    // 其余整数 = 第三态。写点 = 初始化（配置 `set:DrawMode`）· 复位重设（同一配置）· `0x200` 覆盖 ·
+    // 复位块整块清零（写 0）；`0x201` 把原值交给脚本侧。
+    // ★ 它还兼作配置 `set:CreateObject` 的**位下标**（初始化那一次，见构造函数）。
     std::int32_t draw_mode_ = 1;
     // ── 渲染步门槛的四个输入（`CORE-TIMING-WINDOW` 的跳过点分类）──
     // ★ 注：现在是**五个**输入 —— (d) 执行区间的暂停复用 `driven_elsewhere_`（区间忙标记），
@@ -2543,7 +2921,14 @@ private:
     std::array<std::int32_t, 1000> surface_release_gate_{};
     std::unordered_map<std::uint32_t, DrawItem> draw_items_;
     std::unordered_map<std::uint32_t, MeshRecord> meshes_;
-    std::unordered_map<std::uint32_t, MovieRecord> movies_;
+    // **媒体对象表** = 定长 1000 格的指针表（空槽 = 空）。⛔ 不要退回稀疏 map：
+    // 「上限一千」是两条整表遍历的循环边界，map 迭代会让"槽号 ≥ 1000 也参与扫描"。
+    std::array<std::optional<MovieRecord>, kMediaSlotCount> movies_{};
+    // 表外落点（槽号 ≥ 1000 / 负数 —— 本版**不规定**它会发生什么，模型只是**不检查、不越界**）：
+    // ★ 它们**不在**任何一次整表遍历里（每拍扫描与 `0x23d` 都只看 `0..999`）。
+    std::unordered_map<std::uint32_t, MovieRecord> movies_out_of_range_;
+    // 媒体对象的**身份号**计数器（见 `MovieRecord::identity` 的注释）。
+    std::uint64_t next_movie_identity_ = 1;
     MovieBackendFactory movie_factory_;
     MovieBytesLoader movie_bytes_loader_;
     std::unordered_map<std::uint32_t, SceneRecord> scene_records_;
@@ -2551,7 +2936,10 @@ private:
     // ★ 写者还没找到（残差）⇒ 本模型里通常为空，查不到就返回 -1（引擎的同一支）。
     struct KeyedRecord { std::int32_t flags = 0; std::int32_t value = 0; };
         struct KeyedPairRecord { std::int32_t field_a = 0; std::int32_t field_b = 0; };
-    std::unordered_map<std::int32_t, KeyedPairRecord> scene_keyed_pair_;
+    // 辅助表 **A**（`+0x438`）：由「另三条场景指令」写（本模型里是 `0x242`）。
+    // ★ 四张同键表的身份（删表次序 = 偏移次序，⛔ 不是字母序）：
+    //   绘制项（`+0x408` = `draw_items_`）→ 网格（`+0x428` = `meshes_`）→ **A（本字段）** → **B（`scene_aux_b_`）**。
+    std::unordered_map<std::int32_t, KeyedPairRecord> scene_aux_a_;
     // `0x224` 清空的那个按 key 的容器（引擎 Scene 侧）：本模型只记条目数（填充者未取证）。
     std::size_t container_224_items_ = 0;
     // `0x7a` 往每个文本槽的 run 头写的两个整数（引擎侧；消费者未建模）。
@@ -2573,6 +2961,17 @@ private:
     std::map<std::uint32_t, SceneCommandRecord> scene_commands_;
     std::uint32_t render_now_ms_ = 0;
     bool command_animating_ = false;
+    // 渲染步（合同边界）的请求日志 / 闸注入 / 清屏位 / 遍历计数（见上面的公开面）。
+    // ★ 请求日志的**唯一写入口**：限长（观察口，⛔ 产品路径不读它 —— 免得长时间开窗时它无限长大；
+    //   真正的消费者是 CTest / 诊断，而它们都在一台刚建出来的机器上跑）。
+    static constexpr std::size_t kRendererRequestLogLimit = 4096;
+    void note_renderer_request(RendererRequest kind) {
+        if (renderer_requests_.size() < kRendererRequestLogLimit) renderer_requests_.push_back(kind);
+    }
+    std::vector<RendererRequest> renderer_requests_;
+    bool renderer_begin_batch_refuses_ = false;
+    std::int32_t scene_clear_bit_ = 0;
+    std::size_t render_traversals_ = 0;
     std::vector<std::string> errors_;
     // 错误通道的宿主侧接缝：缺省 = 没有输出句柄（所有平台写请求都被丢弃）。
     ErrorOutputWriter error_writer_;
@@ -2597,8 +2996,10 @@ private:
     // 动态 / 静态足迹的容器（`enabled == false` 时所有 note_* 都是 no-op；见 core/footprint.h）。
     // ★ `mutable`：`read_pointer` 等**只读原语**是 const 方法，但足迹计数是观测副作用，不改引擎状态。
     mutable Footprint footprint_;
-    std::unordered_map<std::int32_t, std::pair<std::int32_t, std::int32_t>> aux_a_;
-    std::unordered_map<std::int32_t, std::pair<std::int32_t, std::int32_t>> aux_b_;
+    // 辅助表 **B**（`+0x448`）：由「按编号置存在位并写值」这一族写（`0x344`）。条目 = 存在位 + 值。
+    // ★ 旧模型里还有一张同名风格的空表 `aux_b_`（**无任何写者**）—— 它是错把"两张辅助表"读成
+    //   "偏移 +0x408/+0x428/+0x438/+0x448 之外还多一张"的产物，已删除：四张表 = 绘制项 / 网格 / A / B。
+    std::unordered_map<std::int32_t, std::pair<std::int32_t, std::int32_t>> scene_aux_b_;
     std::array<std::array<std::int32_t, 7>, 11> cg_params_{};
     bool movie_active_ = false;
     bool voice_playing_ = false;

@@ -324,36 +324,48 @@ int run_windowed_frames(SDL_GPUDevice* device, SDL_Window* window, core::Machine
         idle_batches = 0;
 
         bool presented = false;
+        // 渲染步入口（`CORE-OPS-RENDER-FRAME-STEP` 的「渲染步（合同边界）」）：清屏位判定 →
+        // 请求开始一次批次。**被拒绝 ⇒ 整步立即结束**：这一拍不遍历 / 不呈现 / 不复位目标 /
+        // 不清命令表。★ GPU 与 CPU 两条路各自走一次入口，同一拍只会走其中一条。
+        bool step_refused = false;
         if (scene_gpu_ok && machine.scene_commands().empty()) {
-            preload_scene_textures(device, scene_cache, machine);
-            SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device);
-            if (command == nullptr) break;
-            SDL_GPUTexture* swapchain = nullptr;
-            if (!SDL_WaitAndAcquireGPUSwapchainTexture(command, window, &swapchain, nullptr, nullptr)) {
-                SDL_CancelGPUCommandBuffer(command);
-                break;
-            }
-            if (swapchain != nullptr) {
-                // ★ 宿主呈现策略：交换链每帧**清一次**（`clear = true`）。
-                //   引擎的"渲染步不自动清"说的是它的渲染目标；游戏靠**全屏背景项**盖满画面。
-                //   本宿主的场景批次如果没盖满（例如行带 40px 之间的 10px 背景缝、半透明/未绘区域），
-                //   取 `LOAD` 会把上一帧留在交换链上 ⇒ 滚动/切页时同一行文字在两个 y 位置都可见
-                //   （"两个位置 + 背景缝"）。交换链是平台的呈现表面，清它不影响引擎的渲染步语义；
-                //   无头 `--bmp` 每帧新建目标 ⇒ 看不到这类现象。
-                if (!draw_scene_gpu(device, command, swapchain, machine, scene_pipeline, scene_cache,
-                                    width, height, true)) {
+            if (!machine.begin_render_step()) {
+                step_refused = true;
+            } else {
+                preload_scene_textures(device, scene_cache, machine);
+                SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device);
+                if (command == nullptr) break;
+                SDL_GPUTexture* swapchain = nullptr;
+                if (!SDL_WaitAndAcquireGPUSwapchainTexture(command, window, &swapchain, nullptr, nullptr)) {
                     SDL_CancelGPUCommandBuffer(command);
                     break;
                 }
+                if (swapchain != nullptr) {
+                    // ★ 宿主呈现策略：交换链每帧**清一次**（`clear = true`）。
+                    //   引擎的"渲染步不自动清"说的是它的渲染目标；游戏靠**全屏背景项**盖满画面。
+                    //   本宿主的场景批次如果没盖满（例如行带 40px 之间的 10px 背景缝、半透明/未绘区域），
+                    //   取 `LOAD` 会把上一帧留在交换链上 ⇒ 滚动/切页时同一行文字在两个 y 位置都可见
+                    //   （"两个位置 + 背景缝"）。交换链是平台的呈现表面，清它不影响引擎的渲染步语义；
+                    //   无头 `--bmp` 每帧新建目标 ⇒ 看不到这类现象。
+                    if (!draw_scene_gpu(device, command, swapchain, machine, scene_pipeline, scene_cache,
+                                        width, height, true)) {
+                        SDL_CancelGPUCommandBuffer(command);
+                        break;
+                    }
+                }
+                if (!SDL_SubmitGPUCommandBuffer(command)) break;
+                // 结束批次 → 呈现（门 = 步末目标是后缓冲）→ 步内收尾（GPU 路径没有走 rasterize_scene）。
+                machine.end_render_step();
+                presented = true;
             }
-            if (!SDL_SubmitGPUCommandBuffer(command)) break;
-            machine.end_render();  // 清脏 + 命令表生命周期（GPU 路径没有走 rasterize_scene）
-            presented = true;
         }
+        if (step_refused) continue;  // 批次闸拒绝 ⇒ 整步结束（不呈现、不计数）
         if (!presented) {
             // 命令档 / 文字等仍由软件 oracle 合成；GPU 场景路径覆盖绘制项 + 4 顶点网格。
             canvas = core::rasterize_scene(machine, static_cast<std::uint32_t>(width),
                                            static_cast<std::uint32_t>(height));
+            // 闸拒绝 ⇒ 整步结束：没有可呈现的帧（`rasterize_scene` 内部已把请求序列停在「开始批次」）。
+            if (canvas.empty()) continue;
             SDL_GPUTexture* next = upload_texture(device, canvas, width, height);
             if (next != nullptr) {
                 SDL_ReleaseGPUTexture(device, pipeline.texture);
