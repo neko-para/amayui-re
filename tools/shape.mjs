@@ -20,10 +20,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-import { analyzeLines, functionSpans, loadListing, objRootRegs } from './lib/shape-access.mjs';
+import { analyzeLines, BASE_WHY_LABEL, functionSpans, loadListing, objRootRegs } from './lib/shape-access.mjs';
 import { censusBodies, renderBodies } from './lib/shape-bodies.mjs';
-import { censusHandlers, obj0Debt, renderCensus, renderDebt } from './lib/shape-census.mjs';
-import { checkClaims, DRILL_MAX_LEVEL, objectLevel, renderReport, sampleModel, VOCAB, REDUNDANT } from './lib/shape-claims.mjs';
+import { censusHandlers, obj0Debt, renderCensus, renderDebt, renderTypeDebt, typeAudit } from './lib/shape-census.mjs';
+import { checkClaims, DRILL_MAX_LEVEL, objectLevel, offsetUnusable, renderReport, resolveTypes, sampleModel, VOCAB, REDUNDANT } from './lib/shape-claims.mjs';
+import { needProposal, renderNeed } from './lib/shape-need.mjs';
 import { deriveRegions, insnsOf } from './lib/shape-regions.mjs';
 import { checkRow, describeEa, loadRaw } from './lib/shape-verify.mjs';
 import { coverageArchive, coverageOf, renderCoverage } from './lib/shape-coverage.mjs';
@@ -51,6 +52,9 @@ export const OPERATIONS = [
   { name: 'regions', argv: ['--regions'], mutates: false, summary: '★ **功能①**：机械导出某函数某寄存器的拆分范围（段落 / 类别 / 段首形态 / 是否被 call 打断）' },
   { name: 'depth', argv: ['--depth'], mutates: false, summary: '**对象层级分布**（level 1 / 2 / 3+）：`[<sym>]`；用来现跑"下钻上限冻结在层级 2"这个判决（层级 ≥3 单列，不静默丢）' },
   { name: 'census', argv: ['--census'], mutates: false, summary: '★ **全表普查**：每个**有 handler 的 opcode**（判据 = 语料分派表）的站点分类 / `obj0` 偏移聚类 / 索引簇 / 未解析三类报数（`--match <sym>` 收窄 · `--json` 全量 · **`--debt` 覆盖率欠账**：观察到的 obj0 偏移 − 某类型的成员表 ⇒ 已声明 / `count:null` 窗口内（判不了）/ **未声明（清单）**）' },
+  { name: 'extents', argv: ['--extents'], mutates: false, summary: '★ **块搬移 / 清零的 extent**：`rep movs*` / `rep stos*` / `memcpy` / `memset` 的 `{基址, 字节数, EA}`（`--json`）⇒ 给"一条字段访问都没有"的对象（1200B 副块 / 740B 记录 / 572B 值表）**宽度证据**。⛔ 不解成员、不放宽 G4' },
+  { name: 'need', argv: ['--need'], mutates: false, summary: '★ **按需补齐**：`need <T>[@<off>]` ⇒ 已有载体 · 传播候选（带**调用点 EA**，可作 G16 witness）· 未声明偏移 × 站点 EA × 观测宽度 · **可粘贴的 claim 草稿**（members 进 types.json、carriers 进 carriers.json）。⛔ 不写盘、不猜宽度、不判类型' },
+  { name: 'debt', argv: ['--debt'], mutates: false, summary: '★ **类型欠账**（声明 vs 用法）：每个已声明类型报「成员数 / size / 成员跨度 / 载体数 / 被引用次数 / 观察档站点」⇒ **零成员** · 尾部缺口 · 无人引用 三档单列（`--from <claims 文件>` 缺省 `data/shape/carriers.json` · `--json`）。⛔ **不判红** —— 零成员可能只是还没补，判红会逼出假声明' },
   { name: 'bodies', argv: ['--bodies'], mutates: false, summary: '★ **handler 体骨架普查**：记录槽写法（哪个立即数写进哪个位移）+ 调用序列（每个 callee 的实参立即数）⇒ 按骨架分组（`--match` · `--json`）—— 这是 A1–A6 的**可算版**' },
   { name: 'claims', argv: ['--claims'], mutates: false, summary: '★ **功能②**：校验 claims 文件（守卫 / G1..G14 / J3 / 四守恒）；`--sample` 用内置样本；`--by-type` 加一节**残差按类型聚合**（"下一批该补哪个类型的成员表"的机械依据）' },
   { name: 'propagate', argv: ['--propagate'], mutates: false, summary: '★ **类型传播（全图 BFS）**：从已声明载体沿调用图推导每个函数根寄存器是什么类 ⇒ 批次顺序 + "类判定"的**唯一机械依据**（⛔ 不按偏移命中率猜类）' },
@@ -66,7 +70,7 @@ export function describeText() {
 
 数据    corpus/disasm/files/*.{lst,c}（只读语料）· claims 文件（人/模型给；本域只读）
 读写    r（本域没有任何写操作）
-操作    access · verify · regions · depth · census · claims · describe
+操作    access · verify · regions · depth · census · extents · debt · need · claims · describe
 
 分节（claims 文件 = 模型的**判断**，不是转录）
   types      每个类型**按 id 共享一份**：成员 = { off(必填) · width | type+count · kind · name(非键) }；洞不写
@@ -124,6 +128,12 @@ export function describeText() {
      **二级对象内嵌派生** + **数据段符号** + **未解析基址**）
      ★ 没有这一条时，这几类会**从访问总数里静默消失**（数字变小，不报错）
      ★ 未解析**按载体**报数并给样例 EA（按基址寄存器分组）；⛔ 那不是"已通过"，是"形状层表达不了"
+     ★ **未解析基址再按「来路」分五档**：\`call\` 返回值 / \`stack\` 栈出参 / \`table\` 表查询（索引未解出）/
+       \`interior\` 地址算术（\`lea\` / \`[reg+idx*S]\` 带未知项）/ \`arg\` 参数位（从没写过的寄存器）；
+       其余（\`loadchain\` / \`string\` / \`addr-imm\` / \`merge\`）归 \`other\`。
+       ★ 五档之和**恒等于**未解析基址（分档不是第二套计数，恒等式就是它的守卫）。
+       ⛔ 只描述**来路形态**，不判类型；处置各不相同：\`call\`/\`stack\` 要新的表达方式、\`table\` 要索引证据、
+       \`arg\` 要载体。
      ★ **基址/索引分不清**（\`[ecx+eax]\` 两个寄存器都是"从内存读出来的值"）⇒ 谁是指针、谁是游标**判不了**，
        单列一档（⛔ 不算通过）。实测 \`sub_447810\` 的 \`0x448069 cmp byte ptr [ecx+eax], 0\`：
        \`ecx=[esi+0x204c]\`、\`eax=[esi+0x2030]\` ⇒ 0x2030 才是图基址、0x204c 是整数游标；
@@ -171,6 +181,29 @@ export function describeText() {
        ⛔ 栈槽本身永远不进任何桶（"栈槽不是本单的对象形状"这条不变）
     ⇒ 但 **SEH catch 块没有静态入边**（唯一引用在 \`.data\` 的 SEH 表里）⇒ 块内寄存器状态**解不出**，
     那里的访问只能靠 \`kind:"local"\` + \`type:"T0*"\` 表达（⛔ 不许编"匿名类型"把 obj0 变成假的）
+
+块搬移 / 清零（--extents；⛔ **只给宽度，不解成员**）
+  · 认 \`rep movs*\` / \`rep stos*\` / \`memcpy\` / \`memset\`，产出 \`{基址, 字节数, EA}\`；\`dst\`/\`src\` 只写"是谁"
+    （\`&Engine+0x…\` / \`*(…)\` / \`ds:\` / \`?\`），不判成员。
+  · 为什么必须有：有些对象**一条字段访问都没有** —— 1200 字节副块、740 字节记录、572 字节值表，
+    唯一的 width 证据就是"整块搬 N 字节"。没有它，这些宽度只能靠人读 \`.lst\`。
+  · 边界：⭐ **不放宽 G4**。G4 仍要求"数组末尾地址在语料里被引用"；extent 只是**第二证据**，
+    "这段是不是某个数组"仍要人工裁决。计数/源/目的解不出时**照记站点**并写 \`why\`（⛔ 不静默丢）。
+
+按需补齐（--need <T>[@<off>]；⛔ **只出草稿，不落盘**）
+  · 三样合成：① 已有载体 · ② 传播候选（带**调用点 EA** ⇒ G16 要的 witness）· ③ 未声明偏移（观测宽度）。
+  · 草稿**分两份**（架构要求）：\`members\` 进 \`types.json\`、\`carriers\` 进 \`carriers.json\`；
+    ⛔ 不把 \`types\` 写进族文件。
+  · ⛔ 宽度没观察到的偏移**不进草稿**（否则会写出一条看起来成立的假成员）；宽度不一致时如实列进 note。
+  · 粘贴后由 \`shape claims\` 判（G1/G2/G4/G8/G16 是最后一道闸）。\`@<off>\` 已声明 ⇒ 只报"已声明"。
+
+类型欠账（--debt；⛔ **不判红**，exit 0）
+  · 为什么单开一条：\`census --debt\` 的分母是**有载体的观察集** ⇒ 没有载体的字段永远进不了它（报"未声明 0"）；
+    而**零成员类型**连成员表都没有，任何 \`shape:<类型>@<成员>\` 都解析不到 —— 它能一直全绿，因为
+    G7 只管 \`kind:"ptr"\`、G1/G2 只遍历**已声明**成员。
+  · 三档：\`zero\`（有 size 却零成员——最可疑）· \`tail\`（成员跨度 < size；2/4 字节缺口多半是尾填充）·
+    \`orphan\`（既无载体、也无人引用）。\`count:null\` 或元素 size 未知 ⇒ **不判 tail**（跨度算不出）。
+  · ⛔ 不许为了清空这张表编成员：先分清"没观察"与"没读者"。口径见 \`docs/02-engine/shape-census.md\` §9。
 `;
 }
 
@@ -198,6 +231,7 @@ function runAccess(sym, opts = {}) {
       + `${s.stride ? ` stride=${s.stride}` : ''}${s.indexSym ? ` idx=${s.indexSym}` : ''}`
       + `${s.pointeeHost !== null && s.pointeeHost !== undefined ? ` pointee=+${hex(s.pointeeHost)}+${hex(s.pointeeOff)}` : ''}`
       + ` level=${objectLevel(s)}`
+      + `${s.baseWhy ? ` why=${s.baseWhy}` : ''}`
       + `${s.problems?.length ? `  ⚠ ${s.problems.join(',')}` : ''}\n`);
   }
   return 0;
@@ -353,12 +387,15 @@ function runCalls(args) {
   return r.rows.some((x) => x.verdict === 'mismatch') ? 1 : 0;
 }
 
-/** ★ 全图类型传播：谁是什么类、下一批是谁 */
-function runPropagate(args) {
-  const lines = loadListing();
+/**
+ * ★ 全图类型传播的**可复用入口**：`shape propagate` 与守卫**共用同一份机械依据**（不许各写一套）。
+ *
+ * 读 `data/shape/*.json`（`types.json` 是中心类型表，其余文件只放载体）→ 沿调用图 BFS。
+ * 返回的 `inferred` / `next` / `conflicts` 就是"谁是什么类 / 下一批是谁 / 哪里推不动"。
+ */
+export function analyzePropagation({ dir = path.join(REPO_ROOT, 'data', 'shape'), lines = loadListing() } = {}) {
   const spanOf = new Map(functionSpans(lines).map((s) => [s.sym, s]));
   const roots = objRootRegs();
-  const dir = 'data/shape';
   let types = {};
   const carriers = [];
   for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
@@ -400,6 +437,12 @@ function runPropagate(args) {
     acceptTarget: (sym) => roots.get(sym) === 'ecx',
   });
   const next = nextCandidates({ inferred, carriers });
+  return { inferred, next, linksSeen, conflicts, declaredMismatch, globals, extraCallers, types, carriers };
+}
+
+/** ★ 全图类型传播：谁是什么类、下一批是谁 */
+function runPropagate(args) {
+  const { inferred, next, linksSeen, conflicts, declaredMismatch, globals, extraCallers } = analyzePropagation();
   if (args.includes('--json')) {
     process.stdout.write(`${JSON.stringify({ inferred: Object.fromEntries(inferred), next, linksSeen, conflicts, declaredMismatch }, null, 2)}\n`);
     return conflicts.length ? 1 : 0;
@@ -500,6 +543,123 @@ function runClaims(target, opts = {}) {
   return rep.findings.length ? 1 : 0;
 }
 
+/** 一块内存的"是谁"（extent 渲染用；⛔ 不判类型） */
+function fmtOwner(o) {
+  if (!o) return '?';
+  if (o.kind === 'addr') {
+    const base = o.obj === 'this' ? 'Engine' : (o.obj ?? '?');
+    return `&${base}+0x${(o.off ?? 0).toString(16)}${o.unusable ? '（位移不可用）' : ''}`;
+  }
+  if (o.kind === 'load') return `*(${o.obj === 'this' ? 'Engine' : (o.obj ?? '?')}+0x${(o.off ?? 0).toString(16)})`;
+  if (o.kind === 'global') return `ds:${o.sym}`;
+  if (o.kind === 'val') return o.value === null ? '#?' : `#${o.value}`;
+  return `?（${BASE_WHY_LABEL[o.why] ?? o.why ?? '来路不明'}）`;
+}
+
+/**
+ * ★ **块搬移 / 清零的 extent**（`shape extents <sym>`）：`{基址, 字节数, EA}`。
+ *
+ * 为什么单开：有些对象**一条字段访问都没有**（1200 字节副块 / 740 字节记录 / 572 字节值表），
+ * 唯一的 shape 证据就是"整块搬 N 字节"。没有这条，宽度只能靠人读 `.lst`。
+ * ⛔ 它**只给宽度**：不解成员、不放宽 G4（"这段是不是某个数组"仍要人工裁决）。
+ */
+function runExtents(sym, args) {
+  const lines = loadListing();
+  const roots = objRootRegs();
+  const sp = functionSpans(lines).find((s) => s.sym === sym);
+  if (!sp) { process.stderr.write(`找不到函数 ${sym}\n`); return 2; }
+  const { extents } = analyzeLines(lines, sp.from, sp.to, roots.get(sym) ?? null, {});
+  if (args.includes('--json')) {
+    process.stdout.write(`${JSON.stringify({ sym, extents }, null, 2)}\n`);
+    return 0;
+  }
+  process.stdout.write(`# ${sym}  块搬移 / 清零 ${extents.length} 处（⛔ 只给宽度，不解成员）\n`);
+  for (const e of extents) {
+    const bytes = e.bytes === null ? '字节数**判不了**' : `${e.bytes} B${e.elemSize !== 1 ? ` = ${e.count ?? '?'} × ${e.elemSize}` : ''}`;
+    process.stdout.write(`  ${hex(e.ea)}  ${String(e.kind).padEnd(12)} ${String(bytes).padEnd(22)} dst=${fmtOwner(e.dst)}  src=${fmtOwner(e.src)}`
+      + `${e.dst?.abs !== null && e.dst?.abs !== undefined ? '　[obj0 相对]' : ''}`
+      + `${e.why ? `　⚠ ${e.why}` : ''}\n`);
+  }
+  if (!extents.length) process.stdout.write('  （无：这个函数没有块搬移 / 清零）\n');
+  return 0;
+}
+
+/**
+ * ★ **按需补齐**的**可复用入口**：`shape need` 与守卫共用同一份"模型 + 观察 → 提案"。
+ * ⛔ 不写盘、不猜宽度、不判类型（见 `lib/shape-need.mjs` 的注释）。
+ */
+export function buildNeed({ type, off = null, lines = loadListing(), prop = null } = {}) {
+  const { types, carriers, inferred } = prop ?? analyzePropagation({ lines });
+  if (!types?.[type]) throw new Error(`types 里没有类型 ${type}（先看 \`shape debt\` 的清单）`);
+  const spanOf = new Map(functionSpans(lines).map((s) => [s.sym, s]));
+  const roots = objRootRegs();
+  const declaredFns = carriers.filter((c) => c.fn && String(c.type ?? '').replace(/\*$/, '') === type).map((c) => c.fn);
+  const candFns = [...inferred.entries()].filter(([, v]) => v.type === type).map(([fn]) => fn);
+  const sites = [];
+  for (const fn of new Set([...declaredFns, ...candFns])) {
+    const sp = spanOf.get(fn);
+    if (!sp) continue;
+    const { sites: ss } = analyzeLines(lines, sp.from, sp.to, roots.get(fn) ?? null, {});
+    for (const s of ss) {
+      if (s.obj !== 'Engine') continue;            // 只认"相对这个类型的对象根"的站点
+      if (s.absDisp === null || offsetUnusable(s)) continue;   // 位移不可用的不算观察
+      sites.push({ fn, ea: s.ea, off: s.absDisp, width: s.width, stride: s.stride ?? null });
+    }
+  }
+  return needProposal({ types, carriers, inferred, sites, type, off });
+}
+
+/**
+ * ★ **按需补齐**（`shape need <T>[@<off>]`）：把"要补这个类型"从"回语料手读"变成一条命令。
+ *
+ * 三样东西合成一份提案：① 谁该当载体（`propagate` 已推断、尚无载体，带**调用点 EA** ⇒ G16 要的 witness）·
+ * ② 哪些偏移还没声明（观测偏移 − 已声明窗口）· ③ 可直接粘贴的草稿（members / carriers 分两份）。
+ *
+ * ⛔ 不写盘（本域没有写操作）· 不猜宽度（没观察到的偏移**不进草稿**）· 不判类型（候选只来自调用链传播）。
+ * 草稿粘贴后由 `shape claims` 判 —— G1/G2/G4/G8/G16 才是最后一道闸。
+ */
+function runNeed(spec, args) {
+  const raw = String(spec ?? '').trim();
+  const m = /^(.+?)(?:@(?:0x)?([0-9a-f]+))?$/i.exec(raw);
+  if (!m) { process.stderr.write('用法：shape need <类型>[@<十六进制偏移>]\n'); return 2; }
+  const type = m[1].trim();
+  const off = m[2] !== undefined ? Number.parseInt(m[2], 16) : null;
+  let p;
+  try { p = buildNeed({ type, off }); }
+  catch (err) { process.stderr.write(`${err.message}\n`); return 2; }
+  process.stdout.write(args.includes('--json') ? `${JSON.stringify(p, null, 2)}\n` : renderNeed(p));
+  return 0;
+}
+
+/**
+ * ★ **类型欠账**（`shape debt`）：声明 vs 用法 —— 每个已声明类型"有没有被任何东西约束"。
+ *
+ * 为什么单开一条：`census --debt` 的分母是**有载体的观察集** ⇒ 没有载体的字段永远进不了它
+ * （报"未声明 0"）。而**零成员类型**连成员表都没有，任何 `shape:T@off` 都解析不到 —— 它能一直全绿，
+ * 因为 G7 只管 `kind:"ptr"`、G1/G2 只遍历**已声明**成员。本命令把这类"声明了却没被约束"的类型单列出来。
+ *
+ * ⛔ 不判红（exit 0）：零成员可能只是还没补；判红会逼出"为了变绿编成员"——本仓最严重的错。
+ * 报告口径见 `docs/02-engine/shape-census.md` §9 诚实项。
+ */
+function runTypeDebt(args) {
+  const at = (flag) => { const i = args.indexOf(flag); return i >= 0 ? (args[i + 1] ?? null) : null; };
+  const file = path.resolve(at('--from') ?? path.join(REPO_ROOT, 'data', 'shape', 'carriers.json'));
+  const baseDir = path.dirname(file);
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const model = raw.types ? raw : resolveTypes(raw, baseDir);
+  const lines = loadListing();
+  const rep = checkClaims(raw, { lines, baseDir, observed: observedSet(lines) });
+  const audit = typeAudit(model.types, model.carriers ?? [], rep);
+  if (args.includes('--json')) {
+    process.stdout.write(`${JSON.stringify({ file: path.relative(REPO_ROOT, file), ...audit }, null, 2)}\n`);
+    return 0;
+  }
+  process.stdout.write(renderTypeDebt(audit));
+  if (!(model.carriers ?? []).length) process.stdout.write('\n⚠ 该文件没有 `carriers` ⇒ "载体数 / 观察档站点"两列全为 0（不是"没人用"，是这份文件不含载体）。\n');
+  if (rep.findings.length) process.stdout.write(`\n⚠ 顺带：这份模型在 \`shape claims\` 里有 ${rep.findings.length} 条红 —— 先修红再读欠账（红的原因在那边）。\n`);
+  return 0;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const [flag, ...rest] = argv;
   const pos = rest.filter((a) => !a.startsWith('--'));
@@ -515,6 +675,9 @@ export async function main(argv = process.argv.slice(2)) {
     case '--regions': return runRegions(pos[0], pos[1]);
     case '--depth': return runDepth(pos[0]);
     case '--census': return runCensus(argv);
+    case '--extents': return runExtents(pos[0], argv);
+    case '--need': return runNeed(pos[0], argv);
+    case '--debt': return runTypeDebt(argv);
     case '--coverage': return runCoverage(argv);
     case '--calls': return runCalls(argv);
     case '--propagate': return runPropagate(argv);
@@ -522,7 +685,7 @@ export async function main(argv = process.argv.slice(2)) {
     case '--claims': return runClaims(pos[0], { byType: argv.includes('--by-type') });
     case '--describe': process.stdout.write(describeText()); return 0;
     default:
-      process.stderr.write(`未知参数：${argv.join(' ')}\n可用：--access <sym> · --verify <EA> · --regions <sym> [reg] · --depth [sym] · --census [--match <sym>] [--json] · --claims <file>|--sample · --describe\n`);
+      process.stderr.write(`未知参数：${argv.join(' ')}\n可用：--access <sym> · --verify <EA> · --regions <sym> [reg] · --depth [sym] · --census [--match <sym>] [--json] · --extents <sym> [--json] · --debt [--from <claims>] [--json] · --need <T>[@<off>] [--json] · --claims <file>|--sample · --describe\n`);
       return 2;
   }
 }

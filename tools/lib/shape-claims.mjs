@@ -43,7 +43,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { analyzeLines, functionSpans, loadListing, objRootRegs } from './shape-access.mjs';
+import { analyzeLines, baseWhyGroup, functionSpans, loadListing, objRootRegs } from './shape-access.mjs';
 import { deriveRegions } from './shape-regions.mjs';
 
 /** 词汇守卫：**引擎 / 业务概念词**（B 层的东西混进汇编层 ⇒ 红） */
@@ -456,6 +456,9 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
     sites: 0, obj0Acc: 0, obj0Explained: 0, obj0ExplainedObserved: 0, obj0ExplainedViaView: 0, obj0Residue: 0, partial: 0, partialTakeAddr: 0, partialIndexUnresolved: 0,
     pointee: 0, pointeeOk: 0, pointeeOpaque: 0, pointeeBad: 0, pointeeMulti: 0, pointeeAmbiguous: 0, deep: 0,
     symbol: 0, unresolvedBase: 0, unresolvedIndex: 0, widthUnknown: 0, local: 0, localOk: 0, localResidue: 0,
+    // ★ 未解析基址的**来路**五档（T2）：只描述"值怎么变成未知的"，⛔ 不是类型判断；
+    //   总和恒等于 `unresolvedBase`（守恒③ 的分桶不许出现第二个说法）。
+    unresolvedByWhy: { call: 0, stack: 0, table: 0, interior: 0, arg: 0, other: 0 },
   };
   // ── G10 **局部类型载体**（"这个寄存器在这一段里装的是某个类型的对象"）
   //    ★ 为什么允许它（而不是只靠路径）：路径只能表达"从 `obj0` 的某个成员读出来的指针"；
@@ -923,6 +926,17 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
     // 未解析按**基址寄存器**分组（§7：报数要报到能处置的粒度，⛔ 不许只给个数字）
     const byReg = new Map();
     for (const s of unresolvedSites) byReg.set(s.baseReg ?? '(无基址寄存器)', (byReg.get(s.baseReg ?? '(无基址寄存器)') ?? 0) + 1);
+    // ★ 再按**来路**（T2）分组：同一个"未解析"里，`call` 返回值要新表达方式、`stack` 出参要另一套证据、
+    //   `table` 要索引证据 —— 处置完全不同，只按寄存器分组派不了活。
+    const byWhy = new Map();
+    const byWhyRaw = new Map();
+    for (const s of unresolvedSites) {
+      const g = baseWhyGroup(s.baseWhy);
+      byWhy.set(g, (byWhy.get(g) ?? 0) + 1);
+      const raw = s.baseWhy ?? 'other';
+      byWhyRaw.set(raw, (byWhyRaw.get(raw) ?? 0) + 1);
+      cons.unresolvedByWhy[g] = (cons.unresolvedByWhy[g] ?? 0) + 1;
+    }
     perCarrier.push({
       c, explained, residue, total: obj0.length,
       viaView: explained.filter((e) => e.viaView).length,
@@ -936,6 +950,7 @@ export function checkClaims(model0, { lines = loadListing(), baseDir = process.c
       sites: rawSites.length,
       symbol: symbolSites.length, symbolSyms: [...new Set(symbolSites.map((s) => s.obj))], symbolEAs: symbolSites.map((s) => s.ea),
       unresolvedBase: unresolvedSites.length, unresolvedByReg: [...byReg].sort((a, b) => b[1] - a[1]), unresolvedEAs: unresolvedSites.map((s) => s.ea),
+      unresolvedByWhy: [...byWhy].sort((a, b) => b[1] - a[1]), unresolvedByWhyRaw: [...byWhyRaw].sort((a, b) => b[1] - a[1]),
       unresolvedIndex: indexBadSites.length, unresolvedIndexEAs: indexBadSites.map((s) => s.ea),
       widthUnknown: widthBadSites.length,
       // ★ `lea` 派生自**二级对象**的基址：形状层当前表达不了（拿不到宿主偏移）⇒ 单列一桶
@@ -1301,7 +1316,8 @@ export function renderReport(rep, { title = 'claims-check', byType = false } = {
     // ★ 守恒③ 的非 obj0 桶：逐类报数 + 可处置的样例 EA（⛔ 不许静默丢）
     if (p.symbol) L.push(`        ⛔ 数据段符号 ${p.symbol} 处（${p.symbolSyms.slice(0, 4).join(' ')}）EA：${p.symbolEAs.slice(0, 3).map(hex).join(' ')}`);
     if (p.pointeeMulti) L.push(`        ⚠ **跨两级以上（未判）** ${p.pointeeMulti} 处：路径 ${p.multiHopPaths.slice(0, 3).join(` / `)}　EA ${p.multiHopEAs.slice(0, 3).map(hex).join(` `)}　⇒ 请用**局部类型载体**（kind:"local"）表达`);
-    if (p.unresolvedBase) L.push(`        ⛔ 未解析基址 ${p.unresolvedBase} 处（按基址寄存器：${p.unresolvedByReg.map(([r, n]) => `${r}×${n}`).join(' · ')}）EA：${p.unresolvedEAs.slice(0, 3).map(hex).join(' ')}`);
+    if (p.unresolvedBase) L.push(`        ⛔ 未解析基址 ${p.unresolvedBase} 处（按基址寄存器：${p.unresolvedByReg.map(([r, n]) => `${r}×${n}`).join(' · ')}）`
+      + `　| 按**来路**：${(p.unresolvedByWhy ?? []).map(([w, n]) => `${w}×${n}`).join(' · ') || '（无）'}　EA：${p.unresolvedEAs.slice(0, 3).map(hex).join(' ')}`);
     if (p.unresolvedIndex) L.push(`        ⚠ 未解析索引 ${p.unresolvedIndex} 处 EA：${p.unresolvedIndexEAs.slice(0, 3).map(hex).join(' ')}`);
     if (p.widthUnknown) L.push(`        ⚠ 推不出宽度 ${p.widthUnknown} 处（⛔ 不许当 4）`);
   }
@@ -1317,6 +1333,16 @@ export function renderReport(rep, { title = 'claims-check', byType = false } = {
     + `（lea 取址 ${rep.cons.partialTakeAddr} · 索引未解析 ${rep.cons.partialIndexUnresolved}）`
     + ` + 二级对象（含多跳）${rep.cons.pointee} + **局部载体 ${rep.cons.local}**（解释 ${rep.cons.localOk} · 残差 ${rep.cons.localResidue}）`
     + ` + 数据段符号 ${rep.cons.symbol} + 未解析基址 ${rep.cons.unresolvedBase}  ${c3}`);
+  // ★ 未解析基址的**来路**（T2）：守恒③ 只给一个总数 ⇒ 这里给可派活的五档（总和恒等于 `unresolvedBase`）。
+  {
+    const w = rep.cons.unresolvedByWhy ?? {};
+    const parts = ['call', 'stack', 'table', 'interior', 'arg', 'other'].filter((k) => (w[k] ?? 0) > 0).map((k) => `${k} ${w[k]}`);
+    const sum = Object.values(w).reduce((a, b) => a + b, 0);
+    L.push(`## 未解析基址**按来路**：${parts.join(' · ') || '（无）'}　（合计 ${sum} = 守恒③ 的 ${rep.cons.unresolvedBase}）`
+      + `${sum === rep.cons.unresolvedBase ? '  ✅' : '  ❌ 与守恒③ 不等'}`);
+    L.push('  ★ 五档 = `call` 返回值 / `stack` 栈出参 / `table` 表查询（索引未解出）/ `interior` `lea` 地址算术 / `arg` 从没写过的参数位；`other` 里另有 `loadchain`/`string`/`addr-imm`/`merge` 细分。');
+    L.push('  ★ 只描述**来路形态**，⛔ 不是类型判断（不许据此猜类）；处置：`call`/`stack` 要新表达方式，`table` 要索引证据，`interior` 要数组窗口声明。');
+  }
   L.push(`## 跨两级以上的指针链（**未判** —— 请用局部类型载体 kind:"local" 表达）：${rep.cons.deep} 处  ${rep.cons.deep ? '⚠ 已单列（带 EA + 路径）' : '✅ 无'}`);
   // ★ 守恒④：**解释分两档**（观测档 = 站点形状直接落在成员窗口里；推测档 = 靠**声明的视图**——
   //   算术是证明过的，但"这段字节是同一个数组、索引差 k"是模型的判断）。分不开就没法审"哪条结论是猜的"。

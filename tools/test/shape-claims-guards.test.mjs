@@ -1291,3 +1291,133 @@ test('★㉜ G17 axis 标注：stride 有已声明数组背书 ⇒ 不红；无�
   const vac = run1(mk({ stride: 4, index: 'var', why: '游标' }));
   assert.ok(vac.findings.some((f) => f.where.startsWith('G17')), `why 太短必须红：${JSON.stringify(vac.findings)}`);
 });
+
+/**
+ * ★ T4（`interior` 落进**内嵌数组**的元素）：元素的访问器只能从 `lea ecx,[obj+K]` 进来，
+ *   而 K 常常连成员偏移都不是（实例：`0x69064 = 0x68EC0 + 15×0x1C`）。
+ *   少了这一条，整族访问器没有载体 ⇒ 那个类型的成员表永远是空的 —— 而 `claims` 全绿、`census --debt` 报 0。
+ * ⛔ 四条"不猜"必须同时钉住：越界 / 不对齐 / `kind:"ptr"` 的数组 / 元素 size 未知 ⇒ 不传播。
+ */
+test('★㉝ interior 落进内嵌数组的元素 ⇒ 元素类型（`&arr[i]` 是唯一来路；越界 / 不对齐 / ptr 数组 / size 未知都不猜）', async () => {
+  const { propagate, interiorType } = await import('../lib/shape-propagate.mjs');
+  const types = {
+    T0: { size: 0x900, members: [
+      { off: '0x0', width: 4 },
+      { off: '0x100', type: 'TEL', count: 4 },                 // 元素 8 字节
+      { off: '0x200', type: 'TPTR', count: 2, kind: 'ptr' },   // 指针数组：`&arr[i]` 是**槽**地址
+      { off: '0x300', type: 'TNOSIZE', count: 2 },             // 元素 size 未知 ⇒ 跨度算不出
+      { off: '0x400', type: 'TOBJ', count: 1 },                // 内嵌子对象（既有规则，必须保持）
+    ] },
+    TEL: { size: 8, members: [{ off: '0x0', width: 4 }] },
+    TPTR: { size: 8, members: [{ off: '0x0', width: 4 }] },
+    TNOSIZE: { size: null, members: [{ off: '0x0', width: 4 }] },
+    TOBJ: { size: 8, members: [{ off: '0x0', width: 4 }] },
+  };
+  // 单元：首元素 / 第 2 个 / 第 4 个（末元素）
+  assert.equal(interiorType(types, 'T0', 0x100), 'TEL', '数组首元素');
+  assert.equal(interiorType(types, 'T0', 0x108), 'TEL', '数组第 2 个元素');
+  assert.equal(interiorType(types, 'T0', 0x118), 'TEL', '数组末元素');
+  assert.equal(interiorType(types, 'T0', 0x0), 'T0', 'k===0 ⇒ 对象本身');
+  assert.equal(interiorType(types, 'T0', 0x400), 'TOBJ', '内嵌子对象（count:1）⇒ 换类');
+  // 不猜的四类
+  assert.equal(interiorType(types, 'T0', 0x11c), null, '元素内偏移（0x1C 不对齐 8）⇒ 不猜');
+  assert.equal(interiorType(types, 'T0', 0x120), null, '数组末尾（4×8）⇒ 越界');
+  assert.equal(interiorType(types, 'T0', 0x50), null, '落在洞里的偏移');
+  assert.equal(interiorType(types, 'T0', 0x200), null, '`kind:"ptr"` 的数组 ⇒ 那是槽地址，不是被指对象');
+  assert.equal(interiorType(types, 'T0', 0x300), null, '元素 size 未知 ⇒ 跨度算不出');
+  assert.equal(interiorType(types, 'T0', 0x404), null, '精确命中却不是内嵌子对象 ⇒ 不换类');
+  assert.equal(interiorType(types, 'NOPE', 0x100), null, '未知宿主类型 ⇒ 不猜');
+
+  // 传播层：四条"不传播"必须同时成立（obj 不是 this / unusable 都是**绝对地址或未知项**，不是宿主偏移）
+  const links = {
+    sub_A: [
+      { kind: 'call', target: 'sub_E0', ea: 0xa10, args: { ecx: { k: 'interior', obj: 'this', off: 0x100 } } },
+      { kind: 'call', target: 'sub_E1', ea: 0xa11, args: { ecx: { k: 'interior', obj: 'this', off: 0x108 } } },
+      { kind: 'call', target: 'sub_X', ea: 0xa12, args: { ecx: { k: 'interior', obj: 'this', off: 0x104 } } },
+      { kind: 'call', target: 'sub_P', ea: 0xa13, args: { ecx: { k: 'interior', obj: 'this', off: 0x200 } } },
+      { kind: 'call', target: 'sub_ABS', ea: 0xa14, args: { ecx: { k: 'interior', obj: 'Engine+0x410', off: 0x408 } } },
+      { kind: 'call', target: 'sub_UNU', ea: 0xa15, args: { ecx: { k: 'interior', obj: 'this', off: 0x100, unusable: true } } },
+    ],
+  };
+  const r = propagate({
+    carriers: [{ id: 'a', kind: 'arg', fn: 'sub_A', reg: 'ecx', type: 'T0*' }],
+    types,
+    analyzeFn: (sym) => (links[sym] ? { links: links[sym] } : null),
+  });
+  assert.equal(r.inferred.get('sub_E0')?.type, 'TEL', '数组首元素 ⇒ TEL');
+  assert.equal(r.inferred.get('sub_E1')?.type, 'TEL', '数组第 2 个元素 ⇒ TEL');
+  assert.equal(r.inferred.has('sub_X'), false, '元素内偏移 ⇒ 不传播（⛔ 不猜）');
+  assert.equal(r.inferred.has('sub_P'), false, '指针数组槽地址 ⇒ 不传播');
+  assert.equal(r.inferred.has('sub_ABS'), false, '`obj` 不是 `this` ⇒ 那是绝对地址的位移，不传播');
+  assert.equal(r.inferred.has('sub_UNU'), false, '索引没解出来的 `lea` ⇒ 装的是"this + 未知项"，不传播');
+  assert.equal(r.conflicts.length, 0, '这些"不传播"不许被记成冲突');
+});
+
+/**
+ * ★ T1（`shape debt`）：把"声明了却没被任何东西约束"的类型单列 —— 这是 `census --debt`（分母 =
+ *   有载体的观察集）看不见的那一半：**零成员类型**连成员表都没有，G7 只管 `kind:"ptr"`、G1/G2 只遍历
+ *   已声明成员 ⇒ 它能一直全绿。
+ * ⛔ 不判红：零成员可能只是还没补；判红会逼出"为了变绿编成员"。
+ */
+test('★㉞ 类型欠账：零成员 / 尾部缺口 / 无人引用三档单列（⛔ 不判红；`count:null` 不判 tail）', async () => {
+  const { typeAudit, renderTypeDebt } = await import('../lib/shape-census.mjs');
+  const types = {
+    T_ZERO: { size: 16, members: [] },                                    // 有 size 却零成员（被 T_OK 引用）
+    T_OK: { size: 16, members: [
+      { off: '0x0', width: 4 },
+      { off: '0x4', type: 'T_ZERO', count: 1 },
+      { off: '0xc', width: 4 },
+    ] },                                                                  // 跨度 16 == size ⇒ 不进 tail
+    T_TAIL: { size: 20, members: [{ off: '0x0', width: 4 }, { off: '0x8', width: 4 }, { off: '0xc', width: 4 }] },
+    T_ARR: { size: 24, members: [{ off: '0x8', type: 'T_EL', count: 2 }] },
+    T_EL: { size: 8, members: [{ off: '0x0', width: 4 }, { off: '0x4', width: 4 }] },   // 被 T_ARR 引用、自己没载体
+    T_OPEN: { size: 64, members: [{ off: '0x0', type: 'T_EL', count: null, sweep: { stride: 8, index: 'i' } }] },
+    T_DEAD: { size: null, members: [{ off: '0x0', width: 4 }] },         // 既无载体、也无人引用
+  };
+  const carriers = [
+    { id: 'c1', kind: 'arg', fn: 'f1', reg: 'ecx', type: 'T_OK*' },
+    { id: 'c2', kind: 'arg', fn: 'f2', reg: 'ecx', type: 'T_ARR*' },
+    { id: 'c3', kind: 'arg', fn: 'f3', reg: 'ecx', type: 'T_TAIL*' },
+    { id: 'c4', kind: 'arg', fn: 'f4', reg: 'ecx', type: 'T_OPEN*' },
+  ];
+  const rep = { perCarrier: [
+    { c: carriers[0], explained: [{ viaView: false }, { viaView: false }, { viaView: true }] },
+    { c: carriers[1], explained: [] },
+  ] };
+  const a = typeAudit(types, carriers, rep);
+  const row = (t) => a.rows.find((r) => r.tid === t);
+  assert.deepEqual(a.zero.map((r) => r.tid), ['T_ZERO'], '零成员必须单列（哪怕它被别人引用）');
+  assert.deepEqual(a.tail.map((r) => r.tid), ['T_TAIL'], '跨度 16 < size 20 ⇒ tail');
+  assert.deepEqual(a.orphan.map((r) => r.tid), ['T_DEAD'], '既无载体也无人引用 ⇒ orphan');
+  assert.equal(a.counts.noCarrier, 1, 'T_EL 被引用但没载体 ⇒ noCarrier 一档');
+  assert.equal(a.counts.spanUnknown, 1, '`count:null` ⇒ 跨度算不出（也不许判 tail）');
+  assert.ok(!row('T_OPEN').flags.includes('tail'), '`count:null` 的窗口不许判"尾部缺口"');
+  assert.equal(row('T_OK').observed, 2, '观察档只数 `viaView:false`（视图推测档另记）');
+  assert.equal(row('T_ZERO').observed, 0);
+  assert.ok(!row('T_ZERO').flags.includes('orphan'), '三档互斥：zero 比 orphan 强');
+  const text = renderTypeDebt(a);
+  assert.match(text, /不判红/, '报告必须写明"不判红"（否则下一个人会去编成员）');
+  assert.match(text, /T_ZERO/);
+  assert.match(text, /T_TAIL/);
+  assert.match(text, /T_DEAD/);
+});
+
+/**
+ * ★ T2（claims 层）：未解析基址按**来路**五档报数，且总和恒等于守恒③ 的 `unresolvedBase`。
+ * ★ 为什么：一个总数派不了活；但分档**不许**变成第二套计数 —— 恒等式就是它的守卫。
+ */
+test('★㉟ 未解析基址按来路分档：call/stack/table/interior/arg/other，总和 == 守恒③', async () => {
+  const { renderReport, checkClaims } = await import('../lib/shape-claims.mjs');
+  const rep = checkClaims(DEF(), { lines: L, baseDir: '.', observed: OBS, roots: ROOTS });
+  const w = rep.cons.unresolvedByWhy ?? {};
+  const sum = Object.values(w).reduce((a, b) => a + b, 0);
+  assert.equal(sum, rep.cons.unresolvedBase, `来路分档之和必须等于未解析基址：${JSON.stringify(w)} vs ${rep.cons.unresolvedBase}`);
+  // 合成语料里 `mov eax,[ebx+4]` 的 ebx 从没写过 ⇒ 参数位那一档必须非零
+  assert.ok((w.arg ?? 0) >= 1, `参数位那一档必须被点到：${JSON.stringify(w)}`);
+  for (const k of Object.keys(w)) {
+    assert.ok(['call', 'stack', 'table', 'interior', 'arg', 'other'].includes(k), `分档键落在闭集合外：${k}`);
+  }
+  const text = renderReport(rep);
+  assert.match(text, /未解析基址\*\*按来路\*\*/, '报告必须给出按来路的分解（否则又退回"一个总数"）');
+  assert.match(text, /只描述\*\*来路形态\*\*/, '报告必须写明"不是类型判断"（防止据此猜类）');
+});

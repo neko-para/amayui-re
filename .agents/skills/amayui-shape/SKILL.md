@@ -45,6 +45,12 @@ pnpm tools shape depth                    # 对象层级分布（用来现跑"�
 pnpm tools shape census                   # ★ 全表普查：每个**有 handler 的 opcode** 的偏移聚类 / 索引簇 / 未解析报数 / 各层级站点数
                                           #   （`--match <sym>` 收窄 · `--json` 全量）——**族边界的依据**来自这里
 pnpm tools shape bodies                   # ★ handler 体骨架：记录槽写法 + 调用序列 ⇒ 按骨架分组（A 层唯一要判的"族边界"）
+pnpm tools shape debt                     # ★ **类型欠账**（声明 vs 用法）：零成员 / 尾部缺口 / 无人引用 三档单列
+                                          #   —— `census --debt` 的分母是"有载体的观察集"，零成员类型它看不见；这条能（⛔ 不判红）
+pnpm tools shape extents <sym>            # ★ **块搬移 / 清零的宽度**：rep movs*/stos* · memcpy · memset 的 {基址, 字节数, EA}
+                                          #   —— "一条字段访问都没有"的对象（1200B 副块 / 740B 记录 / 572B 值表）的 width 证据；⛔ 不解成员、不放宽 G4
+pnpm tools shape need <类型>[@<偏移>]     # ★ **按需补齐**：载体候选（带调用点 EA）+ 未声明偏移 + 可粘贴草稿（members / carriers 分两份）
+                                          #   —— "用到时再补一格"的入口；⛔ 不写盘、不猜宽度、不判类型；粘贴后由 `claims` 判
 pnpm tools opcodes handlers               # opcode ↔ handler 符号（"桥"；⛔ 不写进产物）
 
 # ② 写 claims（**只写判断**；JSON）——**类型与载体分两个文件**

@@ -16,7 +16,7 @@
  *       L1 副作用边界可数 = 直接调用逐个点名（它们改了 obj0 什么，**不在本层**）
  *       L2 语义 = 台账（AGENTS.md §6），本层永不自称
  */
-import { analyzeLines } from './shape-access.mjs';
+import { analyzeLines, baseWhyGroup } from './shape-access.mjs';
 
 const PREFIX = /^([A-Za-z_.][\w.]*):([0-9A-F]{8})\s+([a-z][a-z0-9]*)\s*(.*)$/;
 /** IDA 的栈变量声明行（`var_4= dword ptr -4`）—— 不是指令 */
@@ -108,14 +108,19 @@ export function coverageOf(lines, sym, span, rootReg, sites) {
     kinds.pureReg += 1;
   }
 
-  const siteStates = { explained: 0, obj0Residue: 0, unresolvedBase: 0, noLiteral: 0, partial: 0, symbol: 0 };
+  const siteStates = { explained: 0, obj0Residue: 0, unresolvedBase: 0, noLiteral: 0, partial: 0, symbol: 0, unresolvedByWhy: {} };
   // ★ 已经作为"模型之外"点过名的指令（x87/SSE、字符串）不再重复记"基址未解析"——
   //   否则同一个缺口被记两遍，判据会显得比实际更糟（也会把"修好一处"算成修好两处）
   const outsideModel = new Set([...escapes.floatMem, ...escapes.stringOps].map((x) => x.ea));
   for (const s of sites) {
     if (outsideModel.has(s.ea)) continue;
     if (s.baseKind === 'absolute') { siteStates.symbol += 1; continue; }
-    if (s.problems.includes('base')) siteStates.unresolvedBase += 1;
+    if (s.problems.includes('base')) {
+      siteStates.unresolvedBase += 1;
+      // ★ 与 `shape claims` **同一份分档**（都读站点上的 `baseWhy`；⛔ 不各写一套）
+      const g = baseWhyGroup(s.baseWhy);
+      siteStates.unresolvedByWhy[g] = (siteStates.unresolvedByWhy[g] ?? 0) + 1;
+    }
     else if (s.absDisp === null && !s.pointeePath?.length) siteStates.partial += 1;
     else if (s.absDisp === null && !(s.pointeePath?.length)) siteStates.noLiteral += 1;
   }
@@ -201,6 +206,12 @@ export function renderCoverage(cov, hex = (n) => `0x${n.toString(16)}`) {
     const { conservative: c1, calibrated: c2 } = cov.tierCompare;
     L.push(`  未解析基址：保守档 ${c1} · 校准档 ${c2}`
       + (c2 < c1 ? `　⇒ 其中 ${c1 - c2} 处只是\"call 杀了 caller-saved\"，不是模型缺口（--calibrated 看另一档）` : ''));
+  }
+  // ★ 与 `shape claims` 同一份来路分档（T2）：总数不解释清楚就派不了活
+  {
+    const w = cov.siteStates?.unresolvedByWhy ?? {};
+    const parts = ['call', 'stack', 'table', 'interior', 'arg', 'other'].filter((k) => (w[k] ?? 0) > 0).map((k) => `${k}×${w[k]}`);
+    if (parts.length) L.push(`  未解析基址**按来路**：${parts.join(' · ')}`);
   }
   if (cov.caveat) L.push(`  ${cov.caveat}`);
   return L.join('\n');

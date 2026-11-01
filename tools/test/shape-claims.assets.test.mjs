@@ -169,3 +169,42 @@ test('★ 入库的 shape 模型（data/shape/）逐族全绿 + 守恒闭合', {
   const neverObserved = [...declared.keys()].filter((k) => !observedViaView.has(k));
   assert.deepEqual(neverObserved, [], `这些视图（推测）在全库口径下零观察 ⇒ 要么补观察、要么删掉：${neverObserved.join(' ')}`);
 });
+
+/**
+ * ★ T4 在**真语料**上的验收：`interior` 落进内嵌数组的元素 ⇒ 元素类型。
+ *
+ * 判据（红了意味着什么）：计时器访问器必须由"元素窗口"规则推成 `T_FadeTimer`。
+ * 为什么钉这几个函数：它们是**唯一来路**的样本 —— 元素只能从调用点的 `lea ecx,[obj+K]` 进来，
+ * 而 K 连成员偏移都不是（`0x69064 = 0x68EC0 + 15×0x1C`）。少了这条规则，这一族**永远没有载体**，
+ * `T_FadeTimer` 的成员表也就永远是空的 —— 而 `claims` 全绿、`census --debt` 报"未声明 0"。
+ * ⛔ 这里断言的是**能力的落点**，不是"当前有几个推断"（数字会随载体批次变）。
+ */
+test('★ T4 `interior` 进内嵌数组：真语料里计时器访问器被推成 `T_FadeTimer`（否则该族永远没有载体）', { skip }, async () => {
+  const { analyzePropagation } = await import('../shape.mjs');
+  const { inferred, conflicts } = analyzePropagation({ lines: ctx.lines });
+  for (const fn of ['sub_453A60', 'sub_453AF0', 'sub_453BC0', 'sub_453BD0']) {
+    assert.equal(inferred.get(fn)?.type, 'T_FadeTimer',
+      `${fn} 必须由"interior 落进内嵌数组元素"推出 T_FadeTimer；实得 ${JSON.stringify(inferred.get(fn) ?? null)}`);
+  }
+  assert.deepEqual(conflicts, [], `新规则不许制造传播冲突：${JSON.stringify(conflicts)}`);
+});
+
+/**
+ * ★ T2 在**真语料**上的验收：未解析基址的五档来路都要真的出现，且分档之和 == 守恒③。
+ * ★ 为什么钉"五档都非零"：任何一档归零都说明产生点被改坏了（例如 `call` 杀寄存器那条被删、
+ *   或栈槽默认值又退回不带 why 的 UNK）—— 那时报告会重新变成"一个总数 + 一个 other"，
+ *   看起来仍然"有分档"，实际派不了活。
+ */
+test('★ T2 未解析基址按来路：真语料上五档俱全，且总和 == 守恒③ 的未解析基址', { skip }, () => {
+  const dir = path.join(REPO_ROOT, 'data', 'shape');
+  const model = JSON.parse(fs.readFileSync(path.join(dir, 'carriers.json'), 'utf8'));
+  const rep = checkClaims(model, { lines: ctx.lines, observed: ctx.observed, baseDir: dir });
+  const w = rep.cons.unresolvedByWhy ?? {};
+  const sum = Object.values(w).reduce((a, b) => a + b, 0);
+  assert.equal(sum, rep.cons.unresolvedBase, `五档之和必须等于守恒③：${JSON.stringify(w)} vs ${rep.cons.unresolvedBase}`);
+  for (const k of ['call', 'stack', 'table', 'interior', 'arg']) {
+    assert.ok((w[k] ?? 0) > 0, `来路 \`${k}\` 一档必须非零（归零说明产生点被改坏）：${JSON.stringify(w)}`);
+  }
+  const closed = new Set(['call', 'stack', 'table', 'interior', 'arg', 'other']);
+  for (const k of Object.keys(w)) assert.ok(closed.has(k), `分档键落在闭集合外：${k}`);
+});

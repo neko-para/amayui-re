@@ -6,7 +6,11 @@
  * ⇒ 唯一站得住的判据是**调用链**：调用方在调用点上把什么值传给被调方的根寄存器。
  *
  * 传播规则（只用已证明的）：
- *  · `this` / `interior(this+k)` ⇒ 与被调方同类（内指向量不改变类）；
+ *  · `this` ⇒ 同类；`interior(this+k)` ⇒ **看 k 落在哪个已声明成员的窗口里**（`interiorType()`）：
+ *    k===0 ⇒ 同类 · 内嵌子对象（`count:1`）⇒ 那个子类 · **内嵌数组的元素**（`(k−off) % size === 0`）⇒ 元素类型；
+ *    其余（洞 / 越界 / 不对齐 / 多义）⇒ **不传播**（⛔ 不猜）；
+ *  · `interior(非 this + k)` ⇒ **不传播**：`obj` 不是 `this` 时 k 是**绝对地址**的位移，不是宿主偏移；
+ *    索引没解出来的 `lea`（`unusable`）同理 —— 它装的是"this + 未知项"；
  *  · `member(path)` ⇒ 沿 `types` 路径解析出目标类型（可能是**另一个类**）；
  *  · `val` / `unknown` ⇒ **不传播**（⛔ 不猜）；
  *  · 只对"有函数体的直接调用"传播（间接调用目标未知 ⇒ 不传播，由闭合度点名）。
@@ -26,6 +30,51 @@ export function resolveMemberPath(types, selfType, path) {
     cur = m.type;
   }
   return cur;
+}
+
+/**
+ * `interior(this+k)` 的**类型**：k 落在哪个**已声明**成员的窗口里 ⇒ 那是什么类。
+ *
+ * 三种命中（优先级从高到低；多义 ⇒ `null`，⛔ 不猜）：
+ *  · `k === 0` ⇒ 对象本身；
+ *  · k 是**内嵌子对象**（`{type, count: 1}`、非 `ptr`）⇒ 那个子类；
+ *  · k 落在**内嵌数组**的窗口里（`{type, count: N > 1}`、非 `ptr`、元素 `size` 已知）且
+ *    `(k − off) % size === 0` ⇒ **元素类型**。
+ *
+ * ★ 为什么必须有第三条：元素的访问器只能从调用点进来 —— `lea ecx,[obj+K]` 就是它们的唯一来路，
+ *   而 K 常常**连成员偏移都不是**（实例 `0x69064 = 0x68EC0 + 15×0x1C`）。少了这一条，整族访问器
+ *   **没有载体** ⇒ 那个类型的成员表永远是空的（而 `claims` 全绿、`census --debt` 报 0）。
+ *
+ * 判据边界（每一条都是"不猜"）：只认已声明窗口 · `kind:"ptr"` 的数组**不认**（`&arr[i]` 是**槽**地址，
+ * 不是被指对象）· 元素 `size` 未知不认 · 越界 / 不对齐 / 多窗口同分 ⇒ `null`。
+ */
+export function interiorType(types, selfType, off) {
+  if (!selfType) return null;
+  if (!Number.isFinite(off) || off < 0) return null;
+  if (off === 0) return selfType;
+  const ms = types?.[selfType]?.members ?? [];
+  // ① 精确命中成员：内嵌子对象（`count:1`）直接换类；内嵌数组的**基点** = 元素 0，交给 ② 的窗口判据；
+  //    其余（标量 / 指针成员 / 洞）⇒ 没有别的窗口能同时覆盖它（G1 不许重叠）⇒ 不猜。
+  const exact = ms.find((x) => num(x.off) === off);
+  if (exact) {
+    if (exact.type && exact.kind !== 'ptr' && exact.count === 1) return exact.type;
+    const isArray = exact.type && exact.kind !== 'ptr' && typeof exact.count === 'number' && exact.count > 1;
+    if (!isArray) return null;
+  }
+  // ② 内嵌数组的元素窗口：`&arr[i]`
+  let hit = null;
+  for (const m of ms) {
+    if (!m.type || m.kind === 'ptr') continue;
+    if (typeof m.count !== 'number' || m.count <= 1) continue;
+    const base = num(m.off);
+    const size = types?.[m.type]?.size;
+    if (!Number.isFinite(size) || size <= 0) continue;
+    if (off < base || off >= base + size * m.count) continue;
+    if ((off - base) % size !== 0) continue;
+    if (hit && hit !== m.type) return null;   // 多窗口同分 ⇒ 选不出宿主（⛔ 不许靠"谁先声明"决定）
+    hit = m.type;
+  }
+  return hit;
 }
 
 /**
@@ -86,15 +135,12 @@ export function propagate({ carriers, types, analyzeFn, maxHops = 6, globals = n
       let t = null;
       if (arg.k === 'this') t = cur.type;
       else if (arg.k === 'interior') {
-        // k===0 ⇒ 对象本身；否则**只有**当 k 是已声明的**内嵌子对象**时才换类，否则不传播
+        // ★ 两条"不传播"的硬前提：
+        //   ① `obj` 不是 `this` ⇒ k 是**绝对地址**的位移，不是宿主偏移（实测 12 条：`Engine+0x410` + 0x408 …）；
+        //   ② `unusable` ⇒ 索引没解出来的 `lea`，装的是"this + 未知项"（见 shape-access 的注释）。
+        //   缺省（合成用例只给 off）按 `this` 处理。
         const off = arg.off ?? 0;
-        if (!cur.type) t = null;                 // 全局扫描种子：自己的类都不知道 ⇒ 子对象更不知道
-        else if (off === 0) t = cur.type;
-        else {
-          const self = types[cur.type];
-          const m = (self?.members ?? []).find((x) => num(x.off) === off);
-          t = (m && m.type && m.kind !== 'ptr' && m.count === 1) ? m.type : null;
-        }
+        t = (arg.unusable || (arg.obj !== undefined && arg.obj !== 'this')) ? null : interiorType(types, cur.type, off);
       } else if (arg.k === 'member') t = cur.type ? resolveMemberPath(types, cur.type, arg.path) : null;
       else if (arg.k === 'global') t = GLOB.get(arg.sym) ?? null;   // ★ 根对象的来源（见函数头注释）
       if (!t) continue;
@@ -113,7 +159,7 @@ export function propagate({ carriers, types, analyzeFn, maxHops = 6, globals = n
       if (had) continue;
       known.set(key, t);
       if (!inferred.has(l.target)) {
-        inferred.set(l.target, { type: t, hops: cur.hops + 1, via: `${cur.fn}@0x${l.ea.toString(16)} (${arg.k})` });
+        inferred.set(l.target, { type: t, hops: cur.hops + 1, via: `${cur.fn}@0x${l.ea.toString(16)} (${arg.k})`, viaEa: l.ea, viaFrom: cur.fn });
         queue.push({ fn: l.target, type: t, hops: cur.hops + 1 });
       }
     }

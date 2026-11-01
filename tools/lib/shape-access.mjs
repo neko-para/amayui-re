@@ -110,8 +110,32 @@ const NORETURN = /^_*CxxThrowException(@\d+)?$/i;
 const slotKey = (mem) => `@slot:${mem.inner.toLowerCase().replace(/\\s+/g, '')}`;
 
 // ───────────────────────────────────────────────────────────── 值模型
-const UNK = { t: 'unk' };
+/**
+ * **未知值带"为什么未知"**（`why`）。这不是语义结论，是**来路形态**：寄存器是被 `call` 杀掉的、
+ * 从没写过的参数位、从栈槽读回来的出参、索引没解出来的表项…… —— 判据与处置完全不同。
+ * ★ 为什么要有它：守恒③ 只把未解析基址报成一个**总数**（加"按寄存器分组"），派活时无法区分
+ *   "缺一个 local 载体"与"这是 call 返回值、需要新的表达方式"。`why` 只描述**来源**，⛔ 不判类型。
+ * ★ 闭集合见 `BASE_WHY`；`vkey()` 不把它算进身份（汇合判断仍只认 "unk"）⇒ 加它不改变任何既有分桶。
+ */
+const unk = (why) => ({ t: 'unk', why: why ?? null });
+const UNK = unk(null);
 const isUnk = (v) => !v || v.t === 'unk';
+/** 二元运算把未知传下去时，保住"第一个有 why 的那个"（别把 `call 返回值 + 常数` 变成"来路不明"） */
+const keepWhy = (...vs) => {
+  for (const v of vs) if (v && v.t === 'unk' && v.why) return v;
+  return UNK;
+};
+/**
+ * `baseWhy` 的闭集合 —— **未解析基址的来路形态**（⛔ 不是类型判断）。
+ * 前五档是需求单 T2 要的五类；其余四种是"解出了但没有可用值"的边角，统一归 `other`。
+ */
+export const BASE_WHY = ['call', 'stack', 'table', 'interior', 'arg', 'loadchain', 'string', 'addr-imm', 'merge', 'other'];
+export const BASE_WHY_LABEL = {
+  call: 'call 返回值', stack: '栈出参', table: '表查询', interior: '地址算术', arg: '参数位',
+  loadchain: '链式 load', string: '串指令后·保守档', 'addr-imm': '立即数地址', merge: '汇合分叉', other: '未分类',
+};
+/** 五档归并（报告只报这五档 + 其它；`other` 里保留细分计数） */
+export const baseWhyGroup = (why) => (why === 'call' || why === 'stack' || why === 'table' || why === 'interior' || why === 'arg' ? why : 'other');
 const ofThis = (off) => `Engine+0x${(off >>> 0).toString(16)}`;
 const objName = (obj, off) => (obj === 'this' ? ofThis(off) : `${obj}+0x${(off >>> 0).toString(16)}`);
 
@@ -130,13 +154,13 @@ function asAff(v) {
 function addV(a, b) {
   const x = asAff(a);
   const y = asAff(b);
-  if (!x || !y) return UNK;
+  if (!x || !y) return keepWhy(a, b);
   if (x.sym && y.sym && x.sym !== y.sym) return UNK;
   return aff(x.k + y.k, x.b + y.b, x.sym ?? y.sym);
 }
 function subV(a, b) {
   const y = asAff(b);
-  return y ? addV(a, aff(-y.k, -y.b, y.sym)) : UNK;
+  return y ? addV(a, aff(-y.k, -y.b, y.sym)) : keepWhy(a, b);
 }
 function mulImm(a, n) {
   const x = asAff(a);
@@ -239,12 +263,13 @@ class Frame {
     this.opts = opts;
     if (this.rootReg) this.r.set(this.rootReg, { t: 'this' });
   }
-  get(reg) { return this.r.get(reg) ?? UNK; }
+  get(reg) { return this.r.get(reg) ?? unk('arg'); }
   set(reg, v) { this.r.set(reg, v); if (reg === 'ecx') this.r.set('#ecxSet', { t: 'flag' }); }
   clobberCall() {
-    this.r.set('eax', UNK);
-    this.r.set('edx', UNK);
-    if (this.opts.killCallerSavedOnCall !== false) this.r.set('ecx', UNK);
+    // ★ `call` 杀掉的寄存器：来路是"被调方的返回值 / 残留" —— 这是未解析基址里最大的一档
+    this.r.set('eax', unk('call'));
+    this.r.set('edx', unk('call'));
+    if (this.opts.killCallerSavedOnCall !== false) this.r.set('ecx', unk('call'));
     this.r.delete('#ecxSet');
   }
   snapshot() { return new Map(this.r); }
@@ -272,6 +297,9 @@ function mergeState(a, b) {
   for (const [k, v] of a) {
     const w = b.get(k);
     if (w !== undefined && vkey(w) === vkey(v)) out.set(k, v);
+    // ★ 汇合点分叉 ⇒ 这个值"来路是分叉"（`merge`）：既不是参数也不是 call 返回值，
+    //   报告里必须能看出这一类，⛔ 不许当成"从没写过"（那是 `arg`）。
+    else out.set(k, unk('merge'));
   }
   return out;
 }
@@ -422,6 +450,9 @@ function siteOf(fr, mn, operands, idx, ea, line, rawLine) {
     Object.assign(row, {
       baseReg: mem.base ?? null,
       baseKind: sh.obj === 'this' ? 'this' : !sh.obj ? 'unresolved' : baseV.t === 'addr' ? 'embed' : 'memberptr',
+      // ★ **未解析基址的来路**（T2）：只描述"这个值怎么变成未知的"，⛔ 不是类型判断。
+      //   闭集合见 `BASE_WHY`；守恒③ 的 `未解析基址` = 这些档之和（报告里按五档归并）。
+      baseWhy: sh.obj ? null : (baseV?.t === 'addr' ? 'interior' : baseV?.t === 'load' ? 'loadchain' : (baseV?.why ?? 'other')),
       obj: sh.obj === 'this' ? 'Engine' : sh.obj,
       absDisp: sh.absDisp,
       stride: sh.stride,
@@ -476,13 +507,74 @@ function linkOf(fr, body, ea, line, rawLine) {
     if (!x || x.t === 'unk' || x.t === 'flag') return { k: 'unknown' };
     if (x.t === 'this') return { k: 'this' };
     if (x.t === 'glob') return { k: 'global', sym: x.sym, seg: x.seg ?? 'ds' };
-    if (x.t === 'addr') return { k: 'interior', obj: x.obj, off: x.off, path: x.path ?? [] };
+    if (x.t === 'addr') return { k: 'interior', obj: x.obj, off: x.off, path: x.path ?? [], unusable: x.unusable === true };
     if (x.t === 'load') return { k: 'member', obj: x.obj, off: x.off, path: x.path ?? [] };
     if (x.t === 'val') return { k: 'val', sym: x.sym ?? null };
     return { k: 'unknown' };
   };
   const args = Object.fromEntries(['ecx', 'eax', 'edx', 'esi', 'edi', 'ebx'].map((r) => [r, prov(r)]));
   return { ea, line, raw: rawLine, target: cs[2], kind: cs[1], cls, tail: cs[1] === 'jmp', detail, ecx: foldNote(v), args };
+}
+
+/**
+ * 一个值 → "这块内存是谁"（extent 用；⛔ 不解引用、不判类型、不判成员）。
+ * `abs` 只在"基址是 obj0 且位移可用"时给出 —— 与站点层同一套判据（`unusable` 时不给）。
+ */
+function extentOwner(v) {
+  if (!v) return null;
+  if (v.t === 'addr') return { kind: 'addr', obj: v.obj === 'this' ? 'this' : (v.obj ?? null), off: v.off ?? null, abs: v.obj === 'this' && !v.unusable ? v.off : null, unusable: !!v.unusable };
+  if (v.t === 'load') return { kind: 'load', obj: v.obj ?? null, off: v.off ?? null, path: v.path ?? [] };
+  if (v.t === 'glob') return { kind: 'global', sym: v.sym };
+  if (v.t === 'val') return { kind: 'val', value: v.b ?? null };
+  return { kind: 'unknown', why: v.why ?? null };
+}
+
+const STR_ELEM = { b: 1, w: 2, d: 4, q: 8 };
+
+/**
+ * **块搬移 / 清零的 extent**（T3）：`rep movs*` / `rep stos*` / `memcpy` / `memset` 的 `{基址, 字节数, EA}`。
+ *
+ * ★ 为什么必须有：有些对象**一条字段访问都没有**，唯一的 shape 证据就是"整块搬 0x4B0 字节"这类
+ *   （1200 字节副块、740 字节记录、572 字节值表）。没有它，这些宽度只能靠人读 `.lst`。
+ * ★ 边界：它**只给宽度**，⛔ 不解成员、⛔ 不放宽 G4；宽度的"是不是某个数组"仍要人工裁决。
+ * ★ 计数/源/目的解不出时**照记站点**并写 `why`（`count-unknown` 等），⛔ 不许静默丢 ——
+ *   "有块搬移但说不清搬多少"与"没有块搬移"是两件事。
+ */
+function extentOf(fr, rec, pushes) {
+  const op0 = (rec.operands[0] ?? '').trim().toLowerCase();
+  if (rec.mn === 'push') { pushes.push({ ea: rec.ea, line: rec.i + 1, v: evalOperand(fr, rec.operands[0] ?? '') }); return null; }
+  if (rec.mn === 'pop' || rec.mn === 'leave' || rec.mn === 'retn' || rec.mn === 'ret') { pushes.length = 0; return null; }
+  if (rec.mn === 'add' && /^esp$/i.test((rec.operands[0] ?? '').trim().toLowerCase())) { pushes.length = 0; return null; }
+  if (rec.mn === 'rep' || rec.mn === 'repe' || rec.mn === 'repne') {
+    const m = /^(movs|stos)(b|w|d|q)?$/.exec(op0);
+    if (!m) return null;
+    const size = STR_ELEM[m[2] ?? 'b'] ?? 1;
+    const n = constOf(fr.get('ecx'));
+    const movs = m[1] === 'movs';
+    return {
+      ea: rec.ea, line: rec.i + 1, kind: `rep-${m[1]}${m[2] ?? 'b'}`,
+      elemSize: size, count: n, bytes: n === null ? null : n * size,
+      dst: extentOwner(fr.get('edi')),
+      src: movs ? extentOwner(fr.get('esi')) : { kind: 'val', value: constOf(fr.get('eax')) },
+      why: n === null ? 'count-unknown' : null,
+    };
+  }
+  if (rec.mn === 'call') {
+    const t = /^_?(memcpy|memmove|memset)$/i.exec((rec.operands[0] ?? '').trim());
+    if (!t) { pushes.length = 0; return null; }   // 其它调用：栈实参不许留到下一个调用点
+    const fn = t[1].toLowerCase();
+    if (pushes.length < 3) return null;
+    const [nz, a2, a1] = pushes.slice(-3);
+    pushes.length = 0;
+    const n = constOf(nz.v);
+    return {
+      ea: rec.ea, line: rec.i + 1, kind: fn, elemSize: 1, count: n, bytes: n,
+      dst: extentOwner(a1.v),
+      src: fn === 'memset' ? { kind: 'val', value: constOf(a2.v) } : extentOwner(a2.v),
+      why: n === null ? 'count-unknown' : null,
+    };
+  }
+  return null;
 }
 
 /**
@@ -516,6 +608,8 @@ export function analyzeLines(lines, from, to, rootReg, opts = {}) {
   }
   const sites = [];
   const links = [];
+  const extents = [];
+  const pushes = [];
   for (let k = 0; k < insns.length; k += 1) {
     const rec = insns[k];
     const fr = new Frame(null, opts);
@@ -526,9 +620,11 @@ export function analyzeLines(lines, from, to, rootReg, opts = {}) {
     }
     const lk = linkOf(fr, rec.body, rec.ea, rec.i + 1, rec.raw);
     if (lk) links.push(lk);
+    const ex = extentOf(fr, rec, pushes);
+    if (ex) extents.push(ex);
     step(fr, rec.mn, rec.operands, { lines, i: rec.i, to, isEpiloguePop: epilogue });
   }
-  return { sites, links, rounds, insns: insns.length };
+  return { sites, links, extents, rounds, insns: insns.length };
 }
 
 function step(fr, mn, o, ctx) {
@@ -664,7 +760,7 @@ function step(fr, mn, o, ctx) {
     case 'repe':
     case 'repne':
       fr.clobberCall();
-      for (const rg of ['esi', 'edi', 'ecx', 'eax']) fr.set(rg, UNK);
+      for (const rg of ['esi', 'edi', 'ecx', 'eax']) fr.set(rg, unk('string'));
       return;
     case 'stos':
     case 'stosb':
@@ -681,11 +777,14 @@ function evalOperand(fr, raw) {
   const s = (raw ?? '').trim();
   const reg = s.toLowerCase();
   if (reg in REG_BYTES) return fr.get(reg);
-  let m = /^0([0-9A-Fa-f]+)h$/.exec(s);
+  // ★ 十六进制立即数：IDA 只在**以字母开头**时补前导 0（`0B9h`），以数字开头时**不补**（`12Ch` / `100h`）——
+  //   旧正则 `^0(...)h$` 因此把 `12Ch`/`100h`/`1Fh` 这类**全判成未知**（实测语料 7706 行），
+  //   连带 `rep movs*` 的计数、循环上界、`mov ebx,100h` 这类全部解不出（T3 的宽度来源就断在这里）。
+  let m = /^([0-9][0-9A-Fa-f]*)h$/i.exec(s);
   if (m) return aff(0, Number.parseInt(m[1], 16));
   m = /^(-?\d+)$/.exec(s);
   if (m) return aff(0, Number(m[1]));
-  if (/^offset\s+/i.test(s)) return UNK; // 立即数地址：不是"碰了某个偏移"
+  if (/^offset\s+/i.test(s)) return unk('addr-imm'); // 立即数地址：不是"碰了某个偏移"
   // ★ **数据段符号**（`mov ecx, ds:dword_55E1BC`）：值是"某个全局槽里装着的东西" ——
   //   既不是常量、也不是 obj0 的成员。**旧写法落到 UNK** ⇒「调用点上这个寄存器来自全局」整类消失
   //   （实测：全库 7212 个调用点里 ecx 解不出类型的有 4256 个，其中最大一撮就是这个形态）。
@@ -696,8 +795,8 @@ function evalOperand(fr, raw) {
   if (segm && !segm[2].includes('[')) return { t: 'glob', seg: segm[1].toLowerCase(), sym: segm[2].trim() };
   const mem = parseMem(s);
   if (mem && mem.stack) {
-    // ★ 栈槽**只**在"存过"的时候有值；没存过 ⇒ UNK（⛔ 不许猜成"某个对象"）
-    return fr.r.get(slotKey(mem)) ?? UNK;
+    // ★ 栈槽**只**在"存过"的时候有值；没存过 ⇒ 未知，来路是 `stack`（可能是别的函数的出参）
+    return fr.r.get(slotKey(mem)) ?? unk('stack');
   }
   if (mem && !mem.stack) {
     const sh = shapeOf(fr, mem);
@@ -717,7 +816,15 @@ function evalOperand(fr, raw) {
         path: [...basePath, sh.off],
       };
     }
-    return UNK;
+    // ★ 解不出值的三种来路必须分开（T2 的五档就从这里长出来）：
+    //   ① 索引没解出来 ⇒ 这是**表项**（`[table + idx*S]`），不是"基址坏了"；
+    //   ② 基址是 `addr`（`lea` 出来、带未知项的地址算术）⇒ `interior`；
+    //   ③ 基址本身未知 ⇒ 继承它的 why（`call` 返回值 / 栈出参 / 参数…），都没有则记为 `loadchain`。
+    const bv = mem.base ? fr.get(mem.base) : UNK;
+    if (sh.problems.includes('index')) return unk('table');
+    if (bv?.t === 'addr') return unk('interior');
+    if (bv?.t === 'unk' && bv.why) return bv;
+    return unk('loadchain');
   }
   return UNK;
 }

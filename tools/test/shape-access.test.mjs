@@ -148,3 +148,88 @@ test('★access-07 索引解不出的 `lea` ⇒ 目标寄存器是"`this`+未知
   assert.equal(offsetUnusable(hit8), null, '`esi` 就是 `this` 时不带未知项 ⇒ 仍是可用偏移');
   assert.equal(hit8.absDisp, 0xc);
 });
+/**
+ * ★ T2：未解析基址必须带**来路**（`baseWhy`）—— 四类各有明确的产生点，且落在闭集合里。
+ * ★ 为什么：守恒③ 只报一个总数（+ 按寄存器分组）⇒ `call` 返回值（要新表达方式）、`stack` 出参（要另一套证据）、
+ *   `table` 表项（要索引证据）、`arg` 参数位（要载体）在报告里长得一样，**派不了活**。
+ * ⛔ `baseWhy` 只描述"值怎么变成未知的"，**不是类型判断**（不许据此猜类）。
+ */
+test('★access-08 未解析基址的来路（call / stack / table / arg）必须分得开，且落在闭集合里', async () => {
+  const { BASE_WHY } = await import('../lib/shape-access.mjs');
+  const L8 = [
+    '.text:00403000 sub_403000 proc near',
+    '.text:00403000 mov     esi, ecx',
+    '.text:00403003 call    sub_999999',            // eax/edx/ecx 被杀 ⇒ 来路 call
+    '.text:00403008 mov     ebx, [eax+10h]',        // 基址 = call 返回值
+    '.text:0040300B mov     eax, [ebp+var_8]',      // 栈槽没存过 ⇒ 来路 stack
+    '.text:0040300E mov     dword ptr [eax+4], 1',  // 基址 = 栈出参
+    '.text:00403012 mov     eax, [esi+edx*4+200h]', // 索引 edx 未解出 ⇒ 值是"表项"
+    '.text:00403019 mov     ecx, [eax+8]',          // 基址 = 表查询结果
+    '.text:0040301C mov     eax, [edi+0Ch]',        // edi 从没写过 ⇒ 参数位
+    '.text:0040301F retn',
+    '.text:0040301F sub_403000 endp',
+  ];
+  const r = analyzeLines(L8, 0, L8.length - 1, 'ecx', {});
+  const why = (ea) => r.sites.find((s) => s.ea === ea)?.baseWhy;
+  assert.equal(why(0x403008), 'call', `call 之后用 eax 当基址 ⇒ why=call；实得 ${why(0x403008)}`);
+  assert.equal(why(0x40300e), 'stack', `从没存过的栈槽读回来当基址 ⇒ why=stack；实得 ${why(0x40300e)}`);
+  assert.equal(why(0x403019), 'table', `表项（索引未解出）当基址 ⇒ why=table；实得 ${why(0x403019)}`);
+  assert.equal(why(0x40301c), 'arg', `从没写过的寄存器当基址 ⇒ why=arg；实得 ${why(0x40301c)}`);
+  for (const s of r.sites) {
+    if (!s.problems.includes('base')) { assert.equal(s.baseWhy, null, `已解析的站点不该带 baseWhy（EA ${s.ea?.toString(16)}）`); continue; }
+    assert.ok(BASE_WHY.includes(s.baseWhy), `baseWhy 落在闭集合外：${s.baseWhy}（EA ${s.ea?.toString(16)}）`);
+  }
+});
+
+/**
+ * ★ T3：块搬移 / 清零的 **extent**（`{基址, 字节数, EA}`）—— `rep movs*` / `memcpy` / `memset`。
+ * ★ 为什么：有些对象**一条字段访问都没有**，唯一的 width 证据就是"整块搬 N 字节"；没有它，
+ *   1200 字节副块 / 740 字节记录 / 572 字节值表的宽度只能靠人读 `.lst`。
+ * ⛔ 只给宽度、不解成员、不放宽 G4；计数解不出时**照记站点**并写 `count-unknown`（⛔ 不许静默丢）。
+ */
+test('★access-09 块搬移 / 清零的 extent：字节数 / 源 / 目的都要给（含"计数判不了"照记）', () => {
+  const L9 = [
+    '.text:00404000 sub_404000 proc near',
+    '.text:00404000 mov     ebx, ecx',
+    '.text:00404002 lea     esi, [ebx+3F5Ch]',   // 源
+    '.text:00404008 lea     edi, [ebx+440Ch]',   // 目的
+    '.text:0040400E mov     ecx, 12Ch',          // 计数（IDA 不补前导 0）
+    '.text:00404013 rep movsd',                  // ⇒ 0x12C × 4 = 1200 B
+    '.text:00404015 lea     eax, [ebx+4F458h]',
+    '.text:0040401B lea     edx, [ebx+54278h]',
+    '.text:00404021 push    4E20h',              // 20000
+    '.text:00404026 push    eax',
+    '.text:00404027 push    edx',
+    '.text:00404028 call    _memcpy',
+    '.text:0040402D add     esp, 0Ch',
+    '.text:00404030 lea     eax, [ebx+54278h]',
+    '.text:00404036 push    100h',
+    '.text:0040403B push    0',
+    '.text:00404040 push    eax',
+    '.text:00404041 call    _memset',
+    '.text:00404046 add     esp, 0Ch',
+    '.text:00404049 mov     ecx, [ebx+0AA514h]', // 计数是个 load ⇒ 判不了
+    '.text:0040404F rep stosd',
+    '.text:00404051 retn',
+    '.text:00404051 sub_404000 endp',
+  ];
+  const r = analyzeLines(L9, 0, L9.length - 1, 'ecx', {});
+  const at = (ea) => r.extents.find((e) => e.ea === ea);
+  const mv = at(0x404013);
+  assert.ok(mv, `rep movsd 必须被记成 extent：${JSON.stringify(r.extents.map((e) => e.ea.toString(16)))}`);
+  assert.equal(mv.bytes, 0x4b0, `0x12C × 4 = 1200 B（实得 ${mv.bytes}）`);
+  assert.equal(mv.dst?.abs, 0x440c);
+  assert.equal(mv.src?.abs, 0x3f5c);
+  const mc = at(0x404028);
+  assert.ok(mc, 'memcpy 必须被记成 extent');
+  assert.equal(mc.bytes, 20000);
+  assert.equal(mc.dst?.abs, 0x54278);
+  assert.equal(mc.src?.abs, 0x4f458);
+  const ms = at(0x404041);
+  assert.ok(ms, 'memset 必须被记成 extent');
+  assert.equal(ms.bytes, 256);
+  const st = at(0x40404f);
+  assert.ok(st, '计数判不了的块清零也要**照记**（⛔ 不许因为它解不出就丢）');
+  assert.equal(st.bytes, null);
+  assert.equal(st.why, 'count-unknown');
+});

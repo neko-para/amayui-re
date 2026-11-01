@@ -5,7 +5,7 @@
  * ## 它回答什么（以及不回答什么）
  * * 回答：底数（多少 opcode / 多少唯一 handler 符号）· 对象根寄存器分组 · 站点按**基址类别**分类 ·
  *   `obj0` 偏移聚类（每个偏移被哪些 handler 碰、样例 EA）· 带索引的簇（`abs` / `stride` / 索引来源）·
- *   未解析三类（base / index / width）的报数与样例 EA。
+ *   未解析三类（base / index / width）的报数与样例 EA · **类型欠账**（`typeAudit()`：零成员 / 尾部缺口 / 无人引用）。
  * * ⛔ **不判定**：判定在 `lib/shape-claims.mjs`（模型 + 成员表）。本模块只报**观察**。
  * * ⛔ **不写任何文件**：产物落哪由调用方决定（本仓派生区是 `.tmp/`，不入库）。
  *
@@ -222,6 +222,7 @@ export function renderDebt(d) {
   if (d.undeclared.length > 40) L.push(`  …（另有 ${d.undeclared.length - 40} 个；用 --json 取全量）`);
   L.push('★ 三档**逐条**读：`undeclared` 才是欠账；`openWindow` 是诚实的"判不了"（口径见 `shape-census.md` §6）；');
   L.push('  ⛔ 不许为了把 `undeclared` 清零而编成员 —— 先分清"观察到了"还是"助手把位移算错了"（实测：`lea` 索引未解出那类）。');
+  L.push('★ 这只是**偏移级**欠账，分母 = "有载体的观察集" ⇒ **零成员 / 无载体的类型它看不见**。类型级看 `pnpm tools shape debt`。');
   return `${L.join('\n')}\n`;
 }
 
@@ -259,5 +260,111 @@ export function renderCensus(r, { topOffsets = 12, topIndexed = 8 } = {}) {
   L.push('  （handler 子集实测：`index` 310 = 同时缺基址 128 + **基址已解出、只是索引没解出 175** + 其它基址 7）');
   L.push('  后一类正是最容易变成**假观察**的一档：位移少了索引那一项，却被当成"偏移 0/N" ⇒ 由 `offsetUnusable()` 剔出');
   L.push('★ handler 是**按符号去重**的；"opcode 数"与"handler 数"不是一回事（有共用的）');
+  return `${L.join('\n')}\n`;
+}
+
+/**
+ * **类型欠账**（声明 vs 用法）：给每个已声明类型报"它有没有被任何东西约束"。
+ *
+ * ★ 为什么需要它（实测）：`obj0Debt` 的分母是**有载体的观察集** ⇒ 没有载体的字段永远进不了欠账表
+ *   （`census --debt` 报"未声明 0"）。而**零成员类型**（`T_FadeTimer`）连"成员表"都不存在，
+ *   任何 `shape:<类型>@<成员>` 都解析不到；它能一直全绿，因为 G7 只管 `kind:"ptr"`、G1/G2 只遍历**已声明**成员。
+ *
+ * 三档（⛔ **不判红** —— 零成员可能只是还没补，判红会逼出"为了变绿编成员"）：
+ *  · `zero` —— 有 `size` 却一个成员都没有 ⇒ 最可疑（声明了外壳、没声明内部）；
+ *  · `tail` —— 成员跨度 `< size`（有洞 / 只覆盖前缀）。4 字节缺口多半是尾填充，**逐条看**；
+ *  · `orphan` —— 既没有载体、也没有任何成员指向它 ⇒ 声明了没人用（可能是死声明）。
+ * ★ `spanUnknown`（`count:null` 的窗口 / 元素 `size` 未知）时**不判 `tail`** —— 跨度算不出来就不许下结论。
+ *
+ * @param {object} types   已解析的类型表（`{id: {size, members:[…]}}`）
+ * @param {object[]} carriers 载体清单（只用来数"谁直接声明了这个类型"）
+ * @param {object|null} rep `checkClaims()` 的返回值；给了才有"观察档站点"那一列（`observed`）
+ */
+export function typeAudit(types, carriers = [], rep = null) {
+  const carrierCount = new Map();
+  for (const c of carriers) {
+    const t = String(c?.type ?? '').replace(/\*$/, '');
+    if (!t) continue;
+    carrierCount.set(t, (carrierCount.get(t) ?? 0) + 1);
+  }
+  const refs = new Map();
+  for (const t of Object.values(types ?? {})) for (const m of t.members ?? []) if (m.type) refs.set(m.type, (refs.get(m.type) ?? 0) + 1);
+  const observed = new Map();
+  for (const p of rep?.perCarrier ?? []) {
+    const t = String(p.c?.type ?? '').replace(/\*$/, '');
+    for (const e of p.explained ?? []) if (!e.viaView) observed.set(t, (observed.get(t) ?? 0) + 1);
+  }
+  const rows = [];
+  for (const [tid, t] of Object.entries(types ?? {})) {
+    const ms = t.members ?? [];
+    let span = 0;
+    let spanUnknown = false;
+    for (const m of ms) {
+      const off = Number.parseInt(String(m.off), 16);
+      let end;
+      if (m.width) end = off + m.width;
+      else if (m.type && m.count != null) {
+        const es = types[m.type]?.size;
+        if (!Number.isFinite(es)) { spanUnknown = true; continue; }
+        end = off + es * m.count;
+      } else if (m.count === null) { spanUnknown = true; continue; }
+      else end = off + 1;   // G8 会为这种声明判红；这里只按"1 字节槽"算跨度，别让它变成 NaN
+      if (end > span) span = end;
+    }
+    const size = Number.isFinite(t.size) ? t.size : null;
+    const nc = carrierCount.get(tid) ?? 0;
+    const rf = refs.get(tid) ?? 0;
+    const flags = [];
+    // ★ 三档互斥：`zero` 比 `orphan` 强（"外壳有、内部没有"比"没人用"更可疑），同一行只报最强的那一档
+    const isZero = ms.length === 0 && size != null;
+    if (isZero) flags.push('zero');
+    if (ms.length > 0 && size != null && !spanUnknown && span < size) flags.push('tail');
+    if (!isZero) {
+      if (nc === 0 && rf === 0) flags.push('orphan');
+      else if (nc === 0) flags.push('noCarrier');
+    }
+    rows.push({ tid, members: ms.length, size, span, spanUnknown, carriers: nc, refs: rf, observed: observed.get(tid) ?? 0, flags });
+  }
+  const pick = (f) => rows.filter((r) => r.flags.includes(f));
+  const zero = pick('zero').sort((a, b) => b.observed - a.observed || a.tid.localeCompare(b.tid));
+  const tail = pick('tail').sort((a, b) => (b.size - b.span) - (a.size - a.span) || a.tid.localeCompare(b.tid));
+  const orphan = pick('orphan').sort((a, b) => a.tid.localeCompare(b.tid));
+  return {
+    rows, zero, tail, orphan,
+    counts: {
+      types: rows.length, zero: zero.length, tail: tail.length, orphan: orphan.length,
+      noCarrier: pick('noCarrier').length, spanUnknown: rows.filter((r) => r.spanUnknown).length,
+    },
+  };
+}
+
+/** 类型欠账的终端渲染（`zero` 是清单本体；⛔ 不判红，见 `typeAudit()` 的注释） */
+export function renderTypeDebt(a, { limit = 40 } = {}) {
+  const c = a.counts;
+  const L = [];
+  L.push('# 类型欠账（**声明 vs 用法**；⛔ **不判红** —— 零成员可能只是还没补，判红会逼出假声明）');
+  L.push(`底数       ${c.types} 个类型：零成员 ${c.zero} · 尾部缺口 ${c.tail} · 无人引用 ${c.orphan} · 无载体 ${c.noCarrier} · 跨度算不出 ${c.spanUnknown}`);
+  L.push('');
+  L.push(`## 零成员（有 \`size\`、却一个成员都没有 ⇒ 任何 \`shape:<类型>@<成员>\` 都解析不到）`);
+  if (!a.zero.length) L.push('  （无）');
+  for (const r of a.zero.slice(0, limit)) {
+    L.push(`  ${pad(r.tid, 28)} size ${pad(r.size, 7)} span ${pad(r.span, 7)} 载体 ${r.carriers} · 被引用 ${r.refs} · 观察 ${r.observed} 处`);
+  }
+  if (a.zero.length > limit) L.push(`  …（另有 ${a.zero.length - limit} 个）`);
+  L.push('');
+  L.push('## 成员跨度 < size（尾部 / 中间有洞；**4 字节缺口多半是尾填充** —— 逐条看，⛔ 不是自动红）');
+  if (!a.tail.length) L.push('  （无）');
+  for (const r of a.tail.slice(0, limit)) {
+    L.push(`  ${pad(r.tid, 28)} size ${pad(r.size, 7)} span ${pad(r.span, 7)} 缺 ${pad(r.size - r.span, 5)} 载体 ${r.carriers} · 被引用 ${r.refs} · 观察 ${r.observed} 处`);
+  }
+  if (a.tail.length > limit) L.push(`  …（另有 ${a.tail.length - limit} 个）`);
+  L.push('');
+  L.push(`## 无人引用（既没有载体、也没有任何成员指向它 ⇒ 声明了没人用；多半是死声明）`);
+  if (!a.orphan.length) L.push('  （无）');
+  for (const r of a.orphan) L.push(`  ${pad(r.tid, 28)} 成员 ${r.members}${r.size != null ? ` · size ${r.size}` : ''}`);
+  L.push('');
+  L.push('★ 读法：`zero` 最可疑（外壳有、内部没有）；`tail` 要先看缺口是不是 2/4 的尾填充；');
+  L.push('  `orphan` 是"声明了没人用"—— 要么补载体，要么说明它只是布局助手（`adapter:true`）。');
+  L.push('  ⛔ 不许为了清空这张表编成员 —— 先分清"没观察"与"没读者"。');
   return `${L.join('\n')}\n`;
 }

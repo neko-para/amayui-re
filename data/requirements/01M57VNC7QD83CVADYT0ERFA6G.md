@@ -2,7 +2,7 @@
 
 - id: REQ-01M57VNC7QD83CVADYT0ERFA6G
 - type: req
-- status: doing
+- status: open
 - parent: REQ-01M52F3ASMGWQXX64JSA18MP2N
 - order: 53
 - tags: [engine shape]
@@ -39,13 +39,24 @@
 * ⛔ 用"表在 `.data`/`.text` 之后"这种位置启发式代替真的读表项。
 * ⛔ 目标落在函数外时也用"跳表"糊过去 —— 那是真逃逸，必须留在未闭合档。
 
-## 复用点（已勘查，下一轮从这里起）
+## 复用点（已勘查）
 
 跳表解析**已经有了**：`tools/lib/disasm.mjs` 的 `switchTables(file, idx, ea, {fileLines})`
 （返回 `{jptAt, jumpAt, cases, targets[]}`；实测 `0x41BF50` = 14 个 case）。
 接入 `coverage` 需要两件它现在没拿的东西：**语料文件路径**（`opcodes.mjs` 的 `listingPath(repoRoot)`）与
 **索引对象 `idx`**（`spanOfFunction` 用）。⇒ 下一轮先看 `runCoverage` 能不能直接复用 `disasm.mjs` 的
-`loadIndex`/`fileLines` 缓存（⛔ 不许在 coverage 里重写第二份跳表解析）。
+`buildIndex`/`fileLines` 缓存（⛔ 不许在 coverage 里重写第二份跳表解析）。
+★ 成本实测：若每个跳转点都重解一次表（3813 个函数 / 3540 处间接跳转），**7 分钟跑不完** ⇒
+实现必须按 `jptAt` 记忆化、共享 `fileLines`。
+
+## 2026-11-01 复核：暂缓（消费者缺失）
+
+按"对象结构初稿 + 用到时补齐"的口径复核：本单是**闭合度 / 度量**项 —— 做完**不新增任何站点 / 载体 / 成员**
+（站点逐指令抽；类型传播只走直接 `call`，不走跳转）。它能让 `coverage` 的"未闭合"少一类，但当前**没有**
+"按 L0 未闭合清单派活"的消费者 ⇒ 降为 `open` 暂缓。
+
+触发条件：有人要按未闭合清单派活、或要判"某函数控制流是否已穷尽"时再开。
+替代投入：S1r · 按需补齐（`pnpm tools shape need`）。
 
 ## 怎么查
 ```bash
