@@ -1,0 +1,30 @@
+{
+  "name": "@amayui/dsh-plugin-sandbox-nomic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PoC：Windows workspace-write 只用受限令牌 + 能力 SID 的 DACL，不打 Low 完整性标签（替换 dsh-sandbox-local 的 win32 rung）",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-lazy-require": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-win32-process": "0.2.1-rc.2",
+    "koffi": "3.1.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5"
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none test/*.test.mjs",
+    "verify": "node verify.mjs"
+  }
+}

@@ -25,6 +25,9 @@ DSH 插件的源码放这里。**位置是自由的** —— 与技能不同，�
   可一次等一组 child：缺省 `mode: any_of`（**谁先结束就返回**，其余留在 `pending`），要等全部才 `all_of`。
   ★ 它不要宿主特权，但**仍然必须是插件**：要拿 `exec.agent` 的 scope context 与正在运行的事件流，
   网页视图拿不到这些。它替代的是"用 `bash sleep` 猜时长"。
+* **`sandbox-nomic`**（`plugins/sandbox-nomic/`）—— **PoC**：替换 `ctx.sandbox`，把 Windows 的
+  `workspace-write` 从「受限令牌 + 全树 Low 标签」换成「受限令牌 + 能力 SID 的 DACL」，**不打完整性标签**。
+  只在 win32 有意义；缺口（Everyone 可写 / FAT / 网络共享 / UI 隔离）在它自己的 README 里逐条写清。
 
 上面这些插件的设计 / 安全口径 / 装法见各自的 `README.md`。
 

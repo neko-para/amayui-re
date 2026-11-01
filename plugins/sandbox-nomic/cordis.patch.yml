@@ -1,0 +1,16 @@
+# plugins/sandbox-nomic 的 bundle patch。
+#
+# 两步：
+#   ① `disabled: true` 关掉出厂的 `sandbox` 行（@deepseek-ai/dsh-sandbox-local）——
+#      它在 win32 上会走 windows-acl rung，把令牌降到 Low 并给工作区打可继承标签；
+#   ② 插入本插件作为唯一的 `ctx.sandbox` 提供者。
+#
+# 注意：patch 的 `config` 是**整体替换**不是深合并；本行不需要 config。
+# 本插件只在 win32 上有意义（`confine()` 会拒绝其他平台的执行），不要在跨平台
+# profile 里无条件启用它。
+- id: sandbox
+  disabled: true
+
+- insert:
+    - id: sandbox-nomic
+      name: '@amayui/dsh-plugin-sandbox-nomic'
