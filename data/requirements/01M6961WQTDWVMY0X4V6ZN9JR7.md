@@ -2,7 +2,7 @@
 
 - id: REQ-01M6961WQTDWVMY0X4V6ZN9JR7
 - type: req
-- status: open
+- status: doing
 - parent: REQ-01M5851Z51V1MTSWH414M7WN5Q
 - tags: [spec residual, tooling]
 

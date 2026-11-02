@@ -52,7 +52,7 @@
 ## 第 3 批的三条跨通道根（各裁一次）
 
 1. **「无颜色」哨兵 → 终色唯一性**：`SCENE-202/203/322/323` + texture 消费端（SN0000 渐变就是这条）。
-2. **脏标记的消费者**：`RES-SCENE3D-DIRTY-CONSUMERS` / `-XFORM-DIRTY2` / `CORE-OPS-RENDER-FRAME-STEP`。
+2. **脏标记的消费者**：`CORE-OPS-RENDER-FRAME-STEP`（原 `RES-SCENE3D-DIRTY-CONSUMERS` / `-XFORM-DIRTY2` 已按正文闭集删除，见 `docs/02-engine/spec-audit-2026-11.md` §九）。
 3. **文本层画布键基数/撞号**：`RES-ADV-TEXT-LAYER-KEY` + `RES-TEX-LAYER-CANVAS-COLLIDE`。
 
 ## audio（**不是**范围外）

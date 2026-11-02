@@ -139,4 +139,20 @@ test('⑦ footprint 与回放共用同一组判据（只多加 --dump-footprint�
   assert.equal(valueOf('--anchor-script'), String(route.anchor.script));
   assert.ok(args.includes('--play-headless'), '足迹 dump 走无窗口播放');
   assert.throws(() => footprintEmulatorArgs(route, { outFile: 'x' }), /inputFile/);
+
+  // 覆盖"到达界面之后的稳定期"：`--steps` 只改 max-steps，`--settle` 追加收口点；
+  // ★ 判据仍是 `--expect-script`（settle 不许把它顶掉）。
+  const deep = footprintEmulatorArgs(route, {
+    inputFile: 'in.txt',
+    outFile: 'out.jsonl',
+    install: 'X',
+    maxSteps: 2500000,
+    settleSteps: 2000000,
+  });
+  const deepValue = (flag) => deep[deep.indexOf(flag) + 1];
+  assert.equal(deepValue('--expect-script'), String(route.arrive.script), 'settle 模式下判据仍必须是 --expect-script');
+  assert.equal(deepValue('--max-steps'), '2500000');
+  assert.equal(deepValue('--settle-steps'), '2000000');
+  assert.equal(footprintEmulatorArgs(route, { inputFile: 'i', outFile: 'o', settleSteps: 0 }).includes('--settle-steps'), false,
+    'settleSteps=0 时不许写 --settle-steps（缺省行为必须与加这个口之前逐字相同）');
 });

@@ -675,6 +675,11 @@ if(EMULATOR_CXX_INSTALL_DIR)
         COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-headless
                 --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/route-newgame-chapter0.txt"
                 --anchor-script 21092 --expect-script 115 --tick-ms 16 --max-steps 600000)
+    # ★ SN0000 的到达（`--settle-steps` 只用于**足迹**覆盖到达后的稳定期；本 CTest 仍只判到达）。
+    add_test(NAME emulator-core-route-sn0000
+        COMMAND emulator-cxx --install "${EMULATOR_CXX_INSTALL_DIR}" --skip-logo --play-headless
+                --input-script "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/route-sn0000.txt"
+                --anchor-script 21092 --expect-script 116 --tick-ms 16 --max-steps 600000)
     add_test(NAME emulator-core-config-toggle
         COMMAND ${CMAKE_COMMAND}
             -DEXE=$<TARGET_FILE:emulator-cxx>

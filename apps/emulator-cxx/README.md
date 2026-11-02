@@ -219,6 +219,8 @@ cmake --preset windows-x64 -DEMULATOR_CXX_WITH_BGFX=ON -DEMULATOR_CXX_WITH_TEXT=
 - `--anchor-script <id>`：时间线的 0 点 = **首次进入该脚本**的时刻；不给就以"播放开始"为 0 点。
   用处是让输入脚本与 boot 的快慢解耦（boot 到 TITLE 用了多久不影响脚本）。
 - `--expect-script <id>`：进入该脚本即算达成（退出码 0），没进 ⇒ 退出码 1 —— 这就是 CTest 的判据。
+- `--settle-steps N`：达成后**继续跑 N 步**再收口（判据仍是 `--expect-script`）。用途是让足迹覆盖
+  "到达界面之后的稳定期"（SN0000 进入后要十几秒才画出夕阳）；缺省 0 = 达成即停。
 - `--require-script <id>`：**收口时**当前脚本必须仍是它（配合 `--max-steps` 用：跑 N 步后断言"还在这个脚本里"）。
 - 未实现 / 非法 opcode / 内部错误停机 ⇒ 退出码 1（正常的 `exit` 停机不算失败）。
 - `--bmp <dir>`：每次渲染请求导出一张（`--bmp-stride` / `--bmp-limit` 限流）；达成时另存 `reached-<id>.bmp`。

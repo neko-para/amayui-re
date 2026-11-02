@@ -117,6 +117,8 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
     int dumped = 0;
     bool reached = false;
     bool settle = false;  // 达成后：跑到下一次渲染请求，给"设置界面第一帧"留一张图
+    // 达成 `--expect-script` 时的步数（`--settle-steps` 的零点；0 = 尚未达成）。
+    std::size_t reached_steps = 0;
     std::string dump_failure;
     const std::uint32_t start_clock = clock;
     machine.consume_frame_step();  // 丢掉 boot 预跑期留下的请求（与窗口路径同口径）
@@ -190,10 +192,12 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
             }
             if (!reached && options.expect_script != 0 && script == options.expect_script) {
                 reached = true;
+                reached_steps = steps;
                 std::printf("[play] reached script=%u clock=%ums steps=%zu\n", script,
                             clock - start_clock, steps);
                 settle = !options.bmp_dir.empty();
-                if (!settle) { stop = true; break; }
+                // 有 `--settle-steps` 时**不在这里收口**：继续跑，由外层按步数收口（覆盖到达后的稳定期）。
+                if (!settle && options.settle_steps == 0) { stop = true; break; }
             }
             if (machine.consume_frame_step()) {
                 requested = true;
@@ -273,6 +277,11 @@ int run_headless_play(core::Machine& machine, ScriptedInput* scripted,
             }
         }
         if (options.max_frames > 0 && presented >= options.max_frames) break;
+        // `--settle-steps`：达成后继续跑到"达成点 + N 步"再收口（诊断口；判据仍是 expect）。
+        if (reached && options.settle_steps > 0 && steps >= reached_steps + options.settle_steps) {
+            std::printf("[play] settle-steps %zu 到了（达成后继续观察）\n", options.settle_steps);
+            break;
+        }
         // 步数上限：与窗口路径不同，这里必须显式封顶（CTest 不许跑飞）。
         if (options.limit_steps > 0 && steps >= options.limit_steps) {
             std::printf("[play] 步数上限 %zu 到了（停因不是引擎的）\n", options.limit_steps);

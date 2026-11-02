@@ -86,6 +86,9 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--require-script") == 0 && i + 1 < argc) {
             options.headless_play.require_script =
                 static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (std::strcmp(argv[i], "--settle-steps") == 0 && i + 1 < argc) {
+            options.headless_play.settle_steps =
+                static_cast<std::size_t>(std::strtoull(argv[++i], nullptr, 10));
         } else if (std::strcmp(argv[i], "--tick-ms") == 0 && i + 1 < argc) {
             options.headless_play.tick_ms = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         } else if (std::strcmp(argv[i], "--bmp") == 0 && i + 1 < argc) {
@@ -155,7 +158,8 @@ int main(int argc, char** argv) {
                      "      emulator-cxx --install <dir> --render-logo-gpu <dir> "
                      "[--logo-stride N] [--logo-frames N]\n"
                      "      emulator-cxx --install <dir> --play-headless [--input-script <file>] "
-                     "[--anchor-script <id>] [--expect-script <id>] [--tick-ms N] [--bmp <dir>]\n"
+                     "[--anchor-script <id>] [--expect-script <id>] [--settle-steps N] "
+                     "[--tick-ms N] [--bmp <dir>]\n"
                      "      （诊断）--play-headless --sweep-missing：缺 handler 的 opcode 记账后跳过\n"
                      "      emulator-cxx --smoke\n"
                      "      emulator-cxx --agf <file>\n"

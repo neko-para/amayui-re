@@ -162,6 +162,10 @@ struct HeadlessPlayOptions {
     std::uint32_t anchor_script = 0; // 非 0 ⇒ 输入脚本的时刻以**首次进入该脚本**为 0 点
     int max_frames = 0;              // 0 = 不限（直到达成 / 停机 / 步数上限）
     std::size_t limit_steps = 0;     // 0 = 不限；否则到点收口并打印（不是引擎停因）
+    // 诊断（`--settle-steps N`）：达成 `expect_script` 之后**继续跑 N 步**再收口（0 = 达成即停）。
+    // 用途：让 `--dump-footprint` 覆盖"到达界面之后的稳定期"（SN0000 进入后要十几秒才画出夕阳）。
+    // ★ 仍是宿主测试装置的口径：判据还是 `--expect-script`，只是收口点往后挪。
+    std::size_t settle_steps = 0;
     std::string bmp_dir;             // 非空 ⇒ 每次渲染请求导出一张 BMP
     int bmp_stride = 1;
     int bmp_limit = 0;               // 0 = 不限

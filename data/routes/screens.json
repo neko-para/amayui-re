@@ -96,7 +96,29 @@
         "verifiedAt": "2026-10-30",
         "command": "apps/emulator-cxx/out/emulator-cxx.exe --install \"$AMAYUI_INSTALL\" --skip-logo --play-headless --input-script apps/emulator-cxx/tests/input/route-newgame-chapter0.txt --anchor-script 21092 --expect-script 115 --tick-ms 16 --max-steps 600000"
       },
-      "notes": "本 route 与 `gamestart-newgame` 的**输入完全相同**（到 20964 之后引擎自己往下走），区别只在收口的 `--expect-script`。★ 剧本内部目前还会停在缺失指令上（逐条补：0x195 → 0x229 → 0x258·0x259 → 0x90 → 0x97 → …），但**进入 115 本身是可达的**。"
+      "notes": "本 route 与 `gamestart-newgame` 的**输入完全相同**（到 20964 之后引擎自己往下走），区别只在收口的 `--expect-script`。★ 进入 115 是可达的（CTest `emulator-core-route-newgame-chapter0`）；再往后进 SN0000 由 `sn0000` route / CTest `emulator-core-route-sn0000` 覆盖。"
+    },
+    {
+      "id": "sn0000",
+      "title": "新游戏 → 序章 ADV（SN0000.BIN，夕阳）",
+      "from": "newgame-chapter0",
+      "anchor": { "script": 21092, "bin": "TITLE.BIN" },
+      "steps": [
+        "1400 move 900 622",
+        "2000 move 1174 377",
+        "2200 down 0",
+        "2300 up 0",
+        "3000 move 715 576",
+        "3200 down 0",
+        "3300 up 0"
+      ],
+      "arrive": { "script": 116, "bin": "SN0000.BIN" },
+      "observe": { "note": "INITGAME 的「ゲーム開始」按钮（(715,576)；离屏帧 0200 可见该按钮高亮）→ 引擎自动串到 SN0000.BIN（ALF id 116）。到达 116 的瞬间画面还是黑的；同一条时间线继续跑约 8–10 秒（帧 0400 前后）是整屏夕阳天空（1280×720、无 UI）" },
+      "evidence": {
+        "verifiedAt": "2026-11-02",
+        "command": "apps/emulator-cxx/out/emulator-cxx --install \"$AMAYUI_INSTALL\" --skip-logo --play-headless --input-script apps/emulator-cxx/tests/input/route-sn0000.txt --anchor-script 21092 --expect-script 116 --tick-ms 16 --max-steps 600000"
+      },
+      "notes": "★ 判据是「首次进入 116」——到达瞬间还没有可看的像素。看夕阳要**越过判据继续跑**：同一命令加 `--max-steps 2500000 --settle-steps 2000000`（足迹用 `pnpm tools routes footprint --id sn0000 --steps 2500000 --settle 2000000`）。本机（macOS 构建）实测：reached script=116 clock=5326ms steps=138662；到达后继续跑到 clock≈16.2s / 482 帧时仍是 116（脚本在 `0x21c` 等窗），此时夕阳已经画出（帧 0400 是整屏夕阳）。"
     }
   ]
 }

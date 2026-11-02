@@ -42,7 +42,7 @@ export const OPERATIONS = [
     name: 'footprint',
     argv: ['--footprint'],
     mutates: true,
-    summary: '★ 跑一条 route 并 dump **动态 + 静态足迹**（JSONL，生成物，缺省 `.cache/footprint/<id>.jsonl`）；`--twice` 再跑一次逐字节比对（确定性）；产物喂 `pnpm tools spec residuals --footprint`',
+    summary: '★ 跑一条 route 并 dump **动态 + 静态足迹**（JSONL，生成物，缺省 `.cache/footprint/<id>.jsonl`）；`--twice` 再跑一次逐字节比对（确定性）；`--steps N` 改 `--max-steps`、`--settle N` 在达成后多跑 N 步（覆盖到达后的稳定期）；产物喂 `pnpm tools spec residuals --footprint`',
   },
 ];
 
@@ -491,10 +491,12 @@ export const DEFAULT_FOOTPRINT_DIR = path.join(REPO_ROOT, '.cache', 'footprint')
  * ★ 它是**宿主测试装置**的命令行拼装：与 `replayCommand` 同一组判据（`--expect-script`），
  *   只多加 `--dump-footprint`；route id → 输入脚本由**调用方**先落盘（`emitScript` 是唯一渲染器）。
  */
-export function footprintEmulatorArgs(route, { inputFile, outFile, install } = {}) {
+export function footprintEmulatorArgs(route, { inputFile, outFile, install, maxSteps = 600000, settleSteps = 0 } = {}) {
   if (!isObj(route) || !isObj(route.arrive)) throw new Error('route 缺 arrive');
   if (typeof inputFile !== 'string' || inputFile === '') throw new Error('footprint 需要 inputFile');
   if (typeof outFile !== 'string' || outFile === '') throw new Error('footprint 需要 outFile');
+  if (!Number.isInteger(maxSteps) || maxSteps <= 0) throw new Error('maxSteps 必须是正整数');
+  if (!Number.isInteger(settleSteps) || settleSteps < 0) throw new Error('settleSteps 必须是非负整数');
   const parts = [
     '--install',
     defaultInstall(install),
@@ -510,10 +512,10 @@ export function footprintEmulatorArgs(route, { inputFile, outFile, install } = {
     '--tick-ms',
     '16',
     '--max-steps',
-    '600000',
-    '--dump-footprint',
-    outFile,
+    String(maxSteps),
   );
+  if (settleSteps > 0) parts.push('--settle-steps', String(settleSteps));
+  parts.push('--dump-footprint', outFile);
   return parts;
 }
 
@@ -607,7 +609,11 @@ const HELP = `tools/routes.mjs — 界面路径登记表（data/routes/screens.j
   node tools/routes.mjs --emit --id <id> [--out <file>]
   node tools/routes.mjs --replay --id <id> [--install <目录>]
   node tools/routes.mjs --footprint --id <id> [--out <file>] [--twice] [--install <目录>]
+                         [--steps N] [--settle N]
   pnpm tools routes <describe|list|validate|emit|replay|footprint> [args…]
+
+  footprint --steps N    播放器 --max-steps（缺省 600000；判据仍是 --expect-script）
+  footprint --settle N   达成后继续跑 N 步再收口（--settle-steps；覆盖"到达界面后的稳定期"）
 
 ★ 这份表是**宿主测试装置**的路径知识，⛔ 不是引擎 spec（引擎语义在 data/spec）。
 ★ 唯一写盘：emit --out 写派生的播放器输入脚本（写后回读复验）；screens.json 是手写真源，工具只读。
@@ -615,9 +621,9 @@ const HELP = `tools/routes.mjs — 界面路径登记表（data/routes/screens.j
 `;
 
 function parseArgs(argv) {
-  const out = { op: null, id: null, out: null, install: null, json: false, twice: false, routes: DEFAULT_ROUTES };
+  const out = { op: null, id: null, out: null, install: null, json: false, twice: false, routes: DEFAULT_ROUTES, steps: null, settle: null };
   const OPS = OPERATIONS.map((o) => o.name);
-  const takesValue = new Set(['id', 'out', 'install', 'routes']);
+  const takesValue = new Set(['id', 'out', 'install', 'routes', 'steps', 'settle']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--help' || a === '-h') out.op = 'help';
@@ -715,8 +721,22 @@ function run(argv) {
     const inputText = emitScript(route);
     fs.writeFileSync(inputAbs, inputText, 'utf8');
     if (fs.readFileSync(inputAbs, 'utf8') !== inputText) throw new Error(`回读不一致：${rel(inputAbs)}`);
+    const stepsOf = (value, name, fallback) => {
+      if (value === null || value === undefined) return fallback;
+      if (!/^\d+$/.test(String(value))) throw new Error(`${name} 必须是非负整数（实际 ${JSON.stringify(value)}）`);
+      return Number(value);
+    };
+    const maxSteps = stepsOf(args.steps, '--steps', 600000);
+    const settleSteps = stepsOf(args.settle, '--settle', 0);
+    if (maxSteps <= 0) throw new Error('--steps 必须是正整数');
     const runOnce = (outFile) => {
-      const argv = footprintEmulatorArgs(route, { inputFile: inputAbs, outFile, install: args.install });
+      const argv = footprintEmulatorArgs(route, {
+        inputFile: inputAbs,
+        outFile,
+        install: args.install,
+        maxSteps,
+        settleSteps,
+      });
       return spawnSync(EMULATOR_EXE, argv, { cwd: REPO_ROOT, stdio: 'inherit' });
     };
     const first = runOnce(outAbs);
