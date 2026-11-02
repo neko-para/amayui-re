@@ -369,6 +369,11 @@ struct PendingGlyph {
     // ★ 变体 = 换**整支字体对象**：字面名与字号、绘制模式一起进快照（`ADV-TEXT-LAYER` 的位 2）。
     std::string face;
     std::string unit;       // 一个字符的 SJIS 字节串（1~2 字节；振り仮名可能是一整串）
+    // `0x303` 逐行平移用：这一格对应的绘制项键（键 = 层键基数 + 条目序号；没有建条目 ⇒ has_item=false）。
+    std::uint32_t item_key = 0;
+    bool has_item = false;
+    // 振り仮名 / 变体支（标志字第 2 位）不参与行跨度（机器掩码 0x6000000E）；主线正文为 false。
+    bool span_exclude = false;
 };
 
 // 文本层（`0x70` / `0x79` / `0x213` / `0x71` 一起描述的那张离屏画布）的**宿主侧游标**。
@@ -378,6 +383,8 @@ struct TextLayerState {
     std::int32_t cursor_x = 0;
     std::int32_t cursor_y = 0;
     std::int32_t draw_index = 0;  // 本层已排的逐字符绘制条目数（键 = 键基数 + draw_index）
+    // ★ `0x303` 对齐**不在**这里存状态：按 spec `ADV-TEXT-DRAW-POSITION`，它是绘制期
+    //   逐行平移，Δ 现算现加到绘制项的位置上，**不写回**层记录、不跨调用留状态。
     bool texture_ready = false;
     // ── `0x300` 的**循环演示闸**（规则 `CORE-OPS-TEXT-SLOT-TIMER`）──
     // 本层已追加的字符格（样式快照同 `PendingGlyph`）+ 揭示游标：闸开时泵每 `MessageSpeed` 毫秒
@@ -2360,6 +2367,7 @@ private:
     int resolve_text_layer(int slot) const;
     bool ensure_text_layer_texture(int slot);
     void clear_text_layer(int slot);
+    void align_text_layer(int slot);
     void draw_text_layer_text(int slot, const std::string& text, const std::string& rubi);
     // 排版层追加一条 72 字节文本记录（`sub_45F090` 的最小投影；文本 / 位置 / 标志）。
     void append_text_span_record(int slot, const std::string& text, int x, int y, int x1, int y1,

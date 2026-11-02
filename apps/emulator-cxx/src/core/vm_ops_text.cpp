@@ -584,8 +584,80 @@ void Machine::clear_text_layer(int slot) {
     // 清画布同时丢掉这一层的**待画格**：引擎那边 `0x71` 清的是布局向量（源），我们的队列就是它的对应物
     // —— 不清会让"清空后紧接着的下一帧"把上一段的字补画进来（可见的串字）。
     erase_pending_glyphs(slot);
-    text_layer_state_[static_cast<std::size_t>(slot)].cursor_x = rec.f1c;
-    text_layer_state_[static_cast<std::size_t>(slot)].cursor_y = rec.f20;
+    layer.cursor_x = rec.f1c;
+    layer.cursor_y = rec.f20;
+    // ★ `0x71` **不清**层记录的 `+0x120/+0x124`（对齐对跨复位存活，见 spec `ADV-TEXT-DRAW-POSITION`）；
+    //   对齐也不再改层左 / 上（Δ 只在绘制项位置上现算），所以这里没有"还原"这一步。
+}
+
+// `0x303` 的逐行对齐（层记录 +0x120 模式 / +0x124 基准）：按 spec `ADV-TEXT-DRAW-POSITION`，
+// 它是**绘制期的平移（Δx）**，叠在绘制项自己的位置上，**不写回层记录、不跨调用留状态**。
+// 机器（行记录日志读者 `sub_4574A0`）：按行号归组；跨度 min/max 的种子分别是层宽拷贝 / 文本原点；
+// 模式 1 Δ = 基准 − trunc(跨度/2)，模式 2 Δ = 基准 − 右界 + 左界，模式 0 无 Δ，其它 Δ=0。
+// ★ 本模型的可观察面是 ADV 的**逐字绘制项**（24B 字符格 / `sub_4572A0` 那一路）：只做横向；
+//   纵向读者（`sub_4575B0` / `sub_4573A0`）是另一条绘制路径，本模型未建模（见需求单的残差）。
+void Machine::align_text_layer(int slot) {
+    if (slot < 0 || slot >= 10) return;
+    const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
+    TextLayerState& layer = text_layer_state_[static_cast<std::size_t>(slot)];
+    if (layer.cells.empty()) return;
+    // 模式 0 = 不参与（Δ=0），但仍要把**上一次的 Δ** 和层左/上的变化重算掉：
+    // 直接回到「层左 + 格」，否则 1 → 0 会残留上一次的平移（实测 110 vs 20）。
+    if (rec.f120 == 0) {
+        bool reset = false;
+        for (const PendingGlyph& cell : layer.cells) {
+            if (!cell.has_item) continue;
+            const auto it = draw_items_.find(cell.item_key);
+            if (it == draw_items_.end()) continue;
+            DrawItem& item = it->second;
+            if (item.texture_id != text_layer_texture_id(static_cast<std::size_t>(slot))) continue;
+            item.aux[0] = static_cast<float>(rec.f0c + cell.x);
+            item.aux[1] = static_cast<float>(rec.f10 + cell.y);
+            reset = true;
+        }
+        if (reset) scene_dirty_ = true;
+        return;
+    }
+    // 逐行归组：同一行的主文本格共享 y；振り仮名 / 变体支（标志字第 2 位）不参与跨度。
+    std::map<int, std::vector<std::size_t>> lines;
+    for (std::size_t i = 0; i < layer.cells.size(); ++i) {
+        const PendingGlyph& cell = layer.cells[i];
+        if (cell.span_exclude) continue;
+        lines[cell.y].push_back(i);
+    }
+    bool changed = false;
+    for (const auto& [line_y, indices] : lines) {
+        (void)line_y;
+        // 种子：min 初值 = 层宽拷贝，max 初值 = 文本原点 x（`0x4574EB` / `0x4574EE`）。
+        int min_x = rec.f24;
+        int max_x = rec.f1c;
+        for (const std::size_t i : indices) {
+            min_x = std::min(min_x, layer.cells[i].x);
+            max_x = std::max(max_x, layer.cells[i].x1);
+        }
+        int delta_x = 0;
+        if (rec.f120 == 1) {
+            delta_x = rec.f124 - (max_x - min_x) / 2;  // C++ / 向零截断
+        } else if (rec.f120 == 2) {
+            delta_x = rec.f124 - max_x + min_x;
+        } else {
+            delta_x = 0;  // ≥3：参与，但 Δ = 0
+        }
+        for (const std::size_t i : indices) {
+            const PendingGlyph& cell = layer.cells[i];
+            if (!cell.has_item) continue;
+            const auto it = draw_items_.find(cell.item_key);
+            if (it == draw_items_.end()) continue;
+            DrawItem& item = it->second;
+            if (item.texture_id != text_layer_texture_id(static_cast<std::size_t>(slot))) continue;
+            // 位置 = 层左 + 该格 x + Δx；**不写回** rec.f0c / f10。
+            // y 没有 Δy（本模型只做 ADV 可见文本的 x 读者）；但层上变了要跟着走。
+            item.aux[0] = static_cast<float>(rec.f0c + cell.x + delta_x);
+            item.aux[1] = static_cast<float>(rec.f10 + cell.y);
+            changed = true;
+        }
+    }
+    if (changed) scene_dirty_ = true;
 }
 
 TextRunFont Machine::text_run_font(std::int32_t flags) const {
@@ -672,11 +744,15 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
             }
             const int x0 = state.cursor_x;
             const int y0 = state.cursor_y;
+            const std::int32_t item_before = state.draw_index;
             create_text_layer_item(slot, x0, y0, x0 + advance, y0 + line_height);
             PendingGlyph pending;
             pending.slot = slot;
             pending.x = x0;
             pending.y = y0;
+            pending.has_item = state.draw_index > item_before;
+            pending.item_key = static_cast<std::uint32_t>(rec.f68) +
+                               static_cast<std::uint32_t>(item_before);
             // ★ 字号 / 模式 / 字面名 / 两色都是**追加当时**的快照（引擎在这里就逐字写出）：
             //   画的时候再读字体对象 ⇒ 别的行在这期间改 `0x75` 会让这一格按别人的字号画出来。
             // ★ 这一趟的支由**本段收到的标志参数**的第 2 位选（`font_text_gate_5ec7c_` 原样传下去）：
@@ -737,11 +813,16 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
                     if (!error.empty()) report_error(error);
                     continue;
                 }
+                const std::int32_t item_before = state.draw_index;
                 create_text_layer_item(slot, x, ruby_y, x + advance, ruby_y + ruby_size + 2);
                 PendingGlyph pending;
                 pending.slot = slot;
                 pending.x = x;
                 pending.y = ruby_y;
+                pending.has_item = state.draw_index > item_before;
+                pending.item_key = static_cast<std::uint32_t>(rec.f68) +
+                                   static_cast<std::uint32_t>(item_before);
+                pending.span_exclude = true;  // 振り仮名（标志字第 2 位）不参与行跨度
                 pending.size = ruby_size;
                 pending.weight = ruby_font.weight;
                 pending.draw_mode = ruby_font.draw_mode;
@@ -761,6 +842,7 @@ void Machine::draw_text_layer_text(int slot, const std::string& text, const std:
                                     ruby_y + ruby_size + 2, font_text_gate_5ec7c_ | 4);
         }
     }
+    align_text_layer(slot);
     if (TextureEntry* entry = texture_mut(id)) entry->slot.revision++;
     scene_dirty_ = true;  // 文本层画布（含振り仮名）变了
 }
@@ -843,7 +925,8 @@ void Machine::begin_text_typing_or_drain() {
 void Machine::reveal_text_layer_cell(int slot) {
     TextLayerState& state = text_layer_state_[static_cast<std::size_t>(slot)];
     if (state.reveal_cursor >= state.cells.size()) return;
-    const PendingGlyph glyph = state.cells[state.reveal_cursor];
+    PendingGlyph& glyph = state.cells[state.reveal_cursor];
+    const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
     std::string error;
     int advance = 0;
     // 与普通打字机同一个口径：用**追加当时**的样式快照画。
@@ -855,7 +938,12 @@ void Machine::reveal_text_layer_cell(int slot) {
         if (!error.empty()) report_error(error);
     }
     // 绘制条目在"揭示"这一步重建（`sub_45BE20` 把这一格交给绘制侧）；源矩形 = 追加时排好的格。
+    const std::int32_t item_before = state.draw_index;
     create_text_layer_item(slot, glyph.x, glyph.y, glyph.x1, glyph.y1);
+    glyph.has_item = state.draw_index > item_before;
+    glyph.item_key = static_cast<std::uint32_t>(rec.f68) + static_cast<std::uint32_t>(item_before);
+    // 重建的条目也要吃当前的对齐平移（否则闸层只对齐第一次建的那条，重放那条留在原位）。
+    align_text_layer(slot);
     if (TextureEntry* entry = texture_mut(text_layer_texture_id(static_cast<std::size_t>(slot)))) {
         entry->slot.revision++;
     }
@@ -1210,6 +1298,8 @@ void Machine::op_198(const Instruction& instruction) {
     ListRecord& record = list_records_[static_cast<std::size_t>(group)];
     record.f0c = left;
     record.f10 = top;
+    // 对齐是绘制期的「层左 + 格 + Δ」：层左改了要重算现有绘制项的位置（Δ 本身不变）。
+    align_text_layer(group);
     return;
 }
 

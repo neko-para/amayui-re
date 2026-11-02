@@ -1070,6 +1070,9 @@ void Machine::op_72(const Instruction& instruction) {
     if (resolved < 0 || resolved >= 10) {
         throw CoreError("text-layer-slot-out-of-range:" + std::to_string(slot));
     }
+    // ★ 跳过位（第 27 位）已置 ⇒ **整段不做**（`0x41F03D jnz loc_41F0B2`）：不写当前文本槽、
+    //   不取格数、不置第 31 / 30 位、不武装自动消息。⛔ 不是"第 31 位无条件置起"。
+    if ((state_flags_ & (1u << 27)) != 0) return;
     current_text_slot_ = slot;
     // ★ 0x72 尾段的同一批写点（`CORE-OPS-TEXT-CELL-REVEAL-1CE`）：把当前文本槽的**格数**取进「格数」格
     //   （引擎以 a3 = −1 调绘制入口，out 参数写格数）、当前格号归 0、节拍器相位重置；
@@ -1078,6 +1081,15 @@ void Machine::op_72(const Instruction& instruction) {
     reveal_cursor_ = 0;
     reveal_tick_start_ms_ = scene_clock_ms_;
     reveal_tick_counter_ = 1;
+    // ★ **起播前做一次事件并入、把输入字整字清 0**（`60-ops-input.md:872`；引擎 `0x41F04C`
+    //   `call sub_478090` + `0x41F055 mov dword ptr [ebx], 0`）。本模型没有完整的四来源并入，
+    //   但把**已经锁存的输入全部丢掉**（输入字 / 两个事件锁存 / 推进锁存）—— 与引擎「并入后
+    //   整字清 0」在等推进这一路上等价。⛔ 不是只清 `advance_input_latch_`（那会让 TITLE 的
+    //   GAMESTART 点击替 SN0000 的第一句"点一下"）。
+    input_word_ = 0;
+    latch_bits_ = 0;
+    latch_slots_ = 0;
+    advance_input_latch_ = false;
     state_flags_ |= (1u << 31);
     state_flags_ |= (1u << 30);
     // 自动消息：`0x1b7` 写的引擎格非 0 ⇒ 按"时长公式"武装计时器；到期由逐帧服务**放行**这一位

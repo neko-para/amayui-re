@@ -819,6 +819,8 @@ void Machine::op_303(const Instruction& instruction) {
     auto& rec = list_records_[static_cast<std::size_t>(group)];
     rec.f120 = second;
     rec.f124 = third;
+    // 机器在绘制期读这一对；本模型在写入后立即重算本层现有绘制项的平移（0x303 后置也生效）。
+    align_text_layer(group);
     return;
 }
 
@@ -959,6 +961,8 @@ void Machine::op_70(const Instruction& instruction) {
         }
         ensure_text_layer_texture(group);
     }
+    // 层矩形 / 原点 / 宽拷贝都变了 ⇒ 现有绘制项的逐行 Δ 要重算（0x303 已设过时）。
+    align_text_layer(group);
     return;
 }
 

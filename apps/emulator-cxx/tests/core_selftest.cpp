@@ -2870,6 +2870,179 @@ bool check_text_layer_mode_gate(const core::OpcodeTable& table) {
     return true;
 }
 
+// ── 文本层 `0x303` 对齐：逐行平移（spec `ADV-TEXT-DRAW-POSITION`） ──
+// 判据（每条都能红）：
+// ① 模式 1：行心 = 层左 + 该行起点 + 基准（层左 0 / 原点 20 / 基准 100 ⇒ 120，不是 100）；
+// ② 两行宽度不同：两行各自 120；只有整块并集中心 120 ⇒ 块级近似，必红；
+// ③ 模式 2：行右界 = 层左 + 起点 + 基准（120），不是基准 100；
+// ④ 模式 0：无平移（首字仍在原点 20）；
+// ⑤ `0x303` 写在追加之后：下一次绘制必须生效（重算后行心 120）；
+// ⑥ 模式 1 → 0：上一次的 Δ 必须被清掉（首字回到 20，不是 110）；
+// ⑦ `0x198` 移动层：x / y 都跟着走（层左 50 / 上 30 ⇒ 行心 170、行顶 50），且对齐**不写回**层记录。
+bool check_text_layer_align(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    struct LineBox {
+        int min_x = 1 << 30;
+        int max_x = -(1 << 30);
+        int min_y = 1 << 30;
+        int max_y = -(1 << 30);
+        bool any = false;
+    };
+    struct RunResult {
+        std::map<int, LineBox> lines;  // 键 = 该行绘制项的 aux.y（同一行共享）
+        int f0c = 0;
+        int f10 = 0;
+    };
+    const auto collect = [](const core::Machine& machine) {
+        std::map<int, LineBox> lines;
+        for (std::uint32_t k = 0; k < 40; ++k) {
+            const core::DrawItem* item = machine.draw_item(190000u + k);
+            if (item == nullptr) continue;
+            const int x0 = static_cast<int>(item->aux[0]);
+            const int y0 = static_cast<int>(item->aux[1]);
+            const int x1 = x0 + (item->right - item->left);
+            const int y1 = y0 + (item->bottom - item->top);
+            LineBox& line = lines[y0];
+            line.min_x = std::min(line.min_x, x0);
+            line.max_x = std::max(line.max_x, x1);
+            line.min_y = std::min(line.min_y, y0);
+            line.max_y = std::max(line.max_y, y1);
+            line.any = true;
+        }
+        return lines;
+    };
+    const auto run = [&](int mode, bool two_lines, bool late_303, int post_mode = -1,
+                         int move_x = 0, int move_y = 0) {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x80, {{0, 9}});
+        emit_instruction(script, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 0}, {0, 0}});
+        emit_instruction(script, 0x213, {{0, 9}, {0, 190000}, {0, 40}});
+        if (!late_303) emit_instruction(script, 0x303, {{0, 9}, {0, mode}, {0, 100}});
+        emit_instruction(script, 0x79, {{0, 9}, {0, 20}, {0, 20}});
+        emit_instruction(script, 0x75, {{0, 16}});
+        emit_instruction(script, 0x74, {{0, 0}});
+        emit_instruction(script, 0x71, {{0, 9}});
+        emit_instruction(script, 0x6E, {{0, 0}, {5, 0}});
+        if (two_lines) {
+            emit_instruction(script, 0x6F, {{0, 9}});
+            emit_instruction(script, 0x6E, {{0, 0}, {5, 1}});
+        }
+        if (late_303) emit_instruction(script, 0x303, {{0, 9}, {0, mode}, {0, 100}});
+        if (post_mode >= 0) emit_instruction(script, 0x303, {{0, 9}, {0, post_mode}, {0, 100}});
+        if (move_x != 0 || move_y != 0) {
+            emit_instruction(script, 0x198, {{0, 9}, {0, move_x}, {0, move_y}});
+        }
+        emit_instruction(script, 0x72, {{0, 9}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(key, table, nullptr, scene_step_config());
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.write_text(core::Operand{5, 1}, "ABCD");
+        machine.load_root(script);
+        for (int i = 0; i < 40 && !machine.halted(); ++i) machine.step();
+        return RunResult{collect(machine), machine.list_record(9).f0c, machine.list_record(9).f10};
+    };
+    const auto center = [](const LineBox& line) { return (line.min_x + line.max_x) / 2; };
+
+    // ① 单行、模式 1：行心 = 0 + 20 + 100 = 120；对齐不写回 f0c/f10。
+    {
+        const RunResult result = run(1, false, false);
+        if (result.lines.size() != 1 || !result.lines.begin()->second.any) {
+            std::fprintf(stderr, "text-layer-align: 单行模式 1 没有一条行\n");
+            return false;
+        }
+        const int cx = center(result.lines.begin()->second);
+        if (std::abs(cx - 120) > 2) {
+            std::fprintf(stderr, "text-layer-align: 单行模式 1 行心=%d，期望 120（层左 0 + 原点 20 + 基准 100）\n", cx);
+            return false;
+        }
+        if (result.f0c != 0 || result.f10 != 0) {
+            std::fprintf(stderr, "text-layer-align: 对齐写回了层记录（f0c=%d f10=%d，应为 0/0）\n",
+                         result.f0c, result.f10);
+            return false;
+        }
+    }
+    // ② 两行宽度不同、模式 1：两行各自 120；只有整块并集中心满足 ⇒ 块级近似。
+    {
+        const RunResult result = run(1, true, false);
+        if (result.lines.size() != 2) {
+            std::fprintf(stderr, "text-layer-align: 两行模式 1 只看到 %zu 行\n", result.lines.size());
+            return false;
+        }
+        for (const auto& [y, line] : result.lines) {
+            (void)y;
+            const int cx = center(line);
+            if (std::abs(cx - 120) > 2) {
+                std::fprintf(stderr, "text-layer-align: 两行模式 1 某行行心=%d，期望 120（块级近似会偏）\n", cx);
+                return false;
+            }
+        }
+    }
+    // ③ 模式 2：行右界 = 层左 + 起点 + 基准 = 120。
+    {
+        const RunResult result = run(2, false, false);
+        if (result.lines.size() != 1) {
+            std::fprintf(stderr, "text-layer-align: 模式 2 没有一条行\n");
+            return false;
+        }
+        const int right = result.lines.begin()->second.max_x;
+        if (std::abs(right - 120) > 2) {
+            std::fprintf(stderr, "text-layer-align: 模式 2 行右界=%d，期望 120\n", right);
+            return false;
+        }
+    }
+    // ④ 模式 0：无平移，首字仍在原点 20。
+    {
+        const RunResult result = run(0, false, false);
+        if (result.lines.size() != 1 || std::abs(result.lines.begin()->second.min_x - 20) > 1) {
+            std::fprintf(stderr, "text-layer-align: 模式 0 首字左端=%d，期望 20（无平移）\n",
+                         result.lines.empty() ? -1 : result.lines.begin()->second.min_x);
+            return false;
+        }
+    }
+    // ⑤ 0x303 写在追加之后：下次绘制必须生效（行心 120）。
+    {
+        const RunResult result = run(1, false, true);
+        if (result.lines.size() != 1) {
+            std::fprintf(stderr, "text-layer-align: 后置 0x303 没有一条行\n");
+            return false;
+        }
+        const int cx = center(result.lines.begin()->second);
+        if (std::abs(cx - 120) > 2) {
+            std::fprintf(stderr, "text-layer-align: 后置 0x303 行心=%d，期望 120（追加时还没设对齐）\n", cx);
+            return false;
+        }
+    }
+    // ⑥ 模式 1 → 0：上一次的 Δ 必须被清掉（首字回到 20）。
+    {
+        const RunResult result = run(1, false, false, 0);
+        if (result.lines.size() != 1 || std::abs(result.lines.begin()->second.min_x - 20) > 1) {
+            std::fprintf(stderr, "text-layer-align: 1→0 首字左端=%d，期望 20（上一次的 Δ 没清）\n",
+                         result.lines.empty() ? -1 : result.lines.begin()->second.min_x);
+            return false;
+        }
+    }
+    // ⑦ 0x198 移动层：x / y 都跟着走（行心 170、行顶 50），且不写回。
+    {
+        const RunResult result = run(1, false, false, -1, 50, 30);
+        if (result.lines.size() != 1) {
+            std::fprintf(stderr, "text-layer-align: 0x198 后没有一条行\n");
+            return false;
+        }
+        const LineBox& line = result.lines.begin()->second;
+        if (std::abs(center(line) - 170) > 2 || std::abs(line.min_y - 50) > 2) {
+            std::fprintf(stderr, "text-layer-align: 0x198 后行心=%d 行顶=%d，期望 170 / 50\n",
+                         center(line), line.min_y);
+            return false;
+        }
+        if (result.f0c != 50 || result.f10 != 30) {
+            std::fprintf(stderr, "text-layer-align: 0x198 的层左/上=%d/%d，期望 50/30\n",
+                         result.f0c, result.f10);
+            return false;
+        }
+    }
+    return true;
+}
+
 // ── 文本层位置：`0x198` **移动层**（GAMESTART 说明文字落点；2026-11-02 用户口径的缺陷） ──
 // 判据（每条都能红）：
 // ① 0x198 写的是**层记录 +0x0C/+0x10**（与 `0x70` 第 4/5 个操作数同两格）：不是"另存一对偏移"，
@@ -8094,6 +8267,116 @@ bool check_adv_wait(const core::OpcodeTable& table) {
         }
         if (!machine.step() || machine.voice_option_2f7(0) != 1) {
             std::fprintf(stderr, "放行之后没有执行下一条（opt=%d）\n", machine.voice_option_2f7(0));
+            return false;
+        }
+    }
+    // ⑤ **位 31 置起之前的点击不许锁存**（实测回归：SN0000 第一句加载完被 TITLE 的 GAMESTART 点击
+    //    直接跳过）。脚本先执行一条普通指令，再 0x72；点击发生在第一条指令那一拍（位 31 还没置起），
+    //    0x72 置位后不许用这次点击放行；松开再按才放行。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x2F7, {{0, 2}});  // 位 31 置起之前的普通指令
+        emit_instruction(script, 0x72, {{0, 9}});
+        emit_instruction(script, 0x2F7, {{0, 1}});
+        emit_instruction(script, 2, {});
+        int down = 0;
+        core::Machine machine(0x12345678u, table);
+        machine.set_mouse_button_source([&down](std::int32_t& mask) -> bool { mask = down; return true; });
+        machine.load_root(script);
+        down = 1;  // 点击发生在 0x72 之前
+        if (!machine.step()) {
+            std::fprintf(stderr, "adv-prewait：预点击那一步停机\n");
+            return false;
+        }
+        if (machine.voice_option_2f7(2) != 1 || machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-prewait：第一条普通指令没执行 / 提前置了等推进位\n");
+            return false;
+        }
+        down = 0;  // 松开，再执行 0x72
+        if (!machine.step() || !machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-prewait：0x72 没有武装\n");
+            return false;
+        }
+        if (!machine.step()) {  // 第 31 位服务体：预点击不许放行
+            std::fprintf(stderr, "adv-prewait：服务体那一步停机\n");
+            return false;
+        }
+        if (!machine.advance_waiting() || machine.voice_option_2f7(1) != 0) {
+            std::fprintf(stderr, "adv-prewait：位 31 置起之前的点击把第一条消息放行了（waiting=%d opt3=%d）\n",
+                         machine.advance_waiting() ? 1 : 0, machine.voice_option_2f7(1));
+            return false;
+        }
+        down = 1;  // 消息显示后再按：这才该放行
+        if (!machine.step() || machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-prewait：新点击没有放行（waiting=%d）\n",
+                         machine.advance_waiting() ? 1 : 0);
+            return false;
+        }
+        if (!machine.step() || machine.voice_option_2f7(1) != 1) {
+            std::fprintf(stderr, "adv-prewait：放行之后没有执行下一条（opt3=%d）\n",
+                         machine.voice_option_2f7(1));
+            return false;
+        }
+    }
+    // ⑥ 起播清的是**整字**：输入字 / 键位号锁存 / 鼠标槽锁存 / 推进锁存都必须被丢掉
+    //    （`0x41F055 mov dword ptr [ebx], 0`）。只清 `advance_input_latch_` 会让 0x101 / 0x100
+    //    在 0x72 之后仍看到 0x72 之前的事件。
+    {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x72, {{0, 9}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(0x12345678u, table);
+        machine.set_input_word(0x15u);
+        machine.push_key_down_message(0x0D);          // VK_RETURN ⇒ 键位号锁存
+        machine.push_mouse_button_message(false, true); // 槽锁存
+        if (machine.latch_bits() == 0 || machine.latch_slots() == 0) {
+            std::fprintf(stderr, "adv-prewait：测试装填失败（锁存没置起）\n");
+            return false;
+        }
+        machine.load_root(script);
+        if (!machine.step() || !machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-prewait：0x72 没有武装（清整字支）\n");
+            return false;
+        }
+        if (machine.input_word() != 0 || machine.latch_bits() != 0 || machine.latch_slots() != 0) {
+            std::fprintf(stderr, "adv-prewait：0x72 没有把整字 / 锁存清 0（word=0x%x bits=0x%x slots=0x%x）\n",
+                         machine.input_word(), machine.latch_bits(), machine.latch_slots());
+            return false;
+        }
+    }
+    // ⑦ 跳过位（第 27 位）已置 ⇒ 0x72 **整段不做**：不武装第 31 位、不清输入字。
+    //    门在 bit27 置起后不派发任何指令（服务体交回迭代头）⇒ 只能用 handler 级直派；
+    //    正控是 0x88 先清 bit27，再跑同一条 0x72。
+    {
+        core::Machine machine(0x12345678u, table);
+        machine.set_text_request_result([](std::int32_t) { return 1; });
+        machine.dispatch_for_test(core::Instruction{0, 0x71, {{0, 9}}});
+        if ((machine.state_flags() & (1u << 27)) == 0) {
+            std::fprintf(stderr, "adv-skip：0x71 没把第 27 位置起\n");
+            return false;
+        }
+        machine.set_input_word(0x15u);
+        machine.dispatch_for_test(core::Instruction{0, 0x72, {{0, 9}}});
+        if (machine.advance_waiting()) {
+            std::fprintf(stderr, "adv-skip：跳过位置起时 0x72 仍然武装了第 31 位\n");
+            return false;
+        }
+        if (machine.input_word() != 0x15u) {
+            std::fprintf(stderr, "adv-skip：跳过位置起时 0x72 把输入字清了（word=0x%x）\n",
+                         machine.input_word());
+            return false;
+        }
+        // 正控：0x88 清第 27 位后再跑 0x72 ⇒ 清整字 + 武装第 31 位。
+        machine.dispatch_for_test(core::Instruction{0, 0x88, {{0, 0}}});
+        if ((machine.state_flags() & (1u << 27)) != 0) {
+            std::fprintf(stderr, "adv-skip：0x88 没清第 27 位\n");
+            return false;
+        }
+        machine.set_input_word(0x15u);
+        machine.dispatch_for_test(core::Instruction{0, 0x72, {{0, 9}}});
+        if (!machine.advance_waiting() || machine.input_word() != 0) {
+            std::fprintf(stderr, "adv-skip：正控没有武装 / 清字（waiting=%d word=0x%x）\n",
+                         machine.advance_waiting() ? 1 : 0, machine.input_word());
             return false;
         }
     }
@@ -16194,6 +16477,7 @@ bool only_clock_monotonic = false;
     bool only_texture_set = false;
     bool only_frame_flow = false;
     bool only_text_layer_mode = false;
+    bool only_text_layer_align = false;
     bool only_text_layer_position = false;
     bool only_se_registration = false;
     bool only_se_stop = false;
@@ -16285,6 +16569,7 @@ bool only_clock_monotonic = false;
         else if (std::strcmp(argv[i], "--only-texture-set") == 0) only_texture_set = true;
         else if (std::strcmp(argv[i], "--only-frame-flow") == 0) only_frame_flow = true;
         else if (std::strcmp(argv[i], "--only-text-layer-mode") == 0) only_text_layer_mode = true;
+        else if (std::strcmp(argv[i], "--only-text-layer-align") == 0) only_text_layer_align = true;
         else if (std::strcmp(argv[i], "--only-text-layer-pos") == 0) only_text_layer_position = true;
         else if (std::strcmp(argv[i], "--only-se-registration") == 0) only_se_registration = true;
         else if (std::strcmp(argv[i], "--only-se-stop") == 0) only_se_stop = true;
@@ -16578,6 +16863,11 @@ bool only_clock_monotonic = false;
             // `0x1f9` 的读序 / 清槽时点 / 失败分档 + 颜色键的目标位宽 + BMP 位深与行序。
             if (!check_texture_set(table)) return 1;
             std::printf("core-selftest(texture-set): PASS\n");
+            return 0;
+        }
+        if (only_text_layer_align) {
+            if (!check_text_layer_align(table)) return 1;
+            std::printf("core-selftest(text-layer-align): PASS\n");
             return 0;
         }
         if (only_text_layer_mode) {

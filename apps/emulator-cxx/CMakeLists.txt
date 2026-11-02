@@ -192,6 +192,7 @@ add_test(NAME spec_adv_text_layer_mode COMMAND emulator-core-selftest --only-tex
 #   + `0x198 9 706 425` + 原点 (10,14) ⇒ 第 1 格在 (716,439)。
 #   把 0x198 当"另一对偏移"存到别处 / 把层号 0 当槽 1 / 让 0x198 改宽高 ⇒ 本条红。
 add_test(NAME spec_adv_text_layer_position COMMAND emulator-core-selftest --only-text-layer-pos)
+add_test(NAME emulator-core-text-layer-align COMMAND emulator-core-selftest --only-text-layer-align)
 # ★ 字形 AA 档（1 位 / GRAY4 / GRAY8 的**选择**与 17 / 65 级换算 ⇒ 满覆盖 240 / 251）：
 #   "设置界面文字比真机亮一档"的算术那一半。拆回 2^n（16 / 64）⇒ 满覆盖 255 ⇒ 本条红。
 add_test(NAME emulator-core-glyph-alpha COMMAND emulator-core-selftest --only-glyph)
