@@ -482,8 +482,12 @@ int Machine::resolve_text_layer(int slot) const {
 bool Machine::ensure_text_layer_texture(int slot) {
     if (slot < 0 || slot >= 10) return false;
     const ListRecord& rec = list_records_[static_cast<std::size_t>(slot)];
-    const auto width = rec.f14;
-    const auto height = rec.f18;
+    // ★ 画布尺寸取**缩放后**那两格（`0x70` 在纹理模式把 `f7c/f80` 覆写成
+    //   `trunc(宽高 × 字体适配比 + 0.5)`，见 spec `ADV-TEXT-DRAW-POSITION` 的「文本层：矩形、
+    //   原点、清空与画布」）。旧路径不覆写 ⇒ 那两格就是未缩放的层宽 / 层高；这里再回退到
+    //   `f14/f18` 只用于"没走 `0x70` 的防御路径"（正常流程不会发生）。
+    const auto width = rec.f7c > 0 ? rec.f7c : rec.f14;
+    const auto height = rec.f80 > 0 ? rec.f80 : rec.f18;
     if (width <= 0 || height <= 0) return false;
     const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
     auto it = textures_.find(id);
@@ -523,6 +527,18 @@ void Machine::create_text_layer_item(int slot, int left, int top, int right, int
     const auto id = text_layer_texture_id(static_cast<std::size_t>(slot));
     const TextureSlotObject* texture = texture_slot(id);
     if (texture == nullptr) return;
+    // ★ **源矩形 = 布局字符格 × 字体对象的显示适配比**（`0x45bf01`..`0x45bf4b`：x / x1 用横比、
+    //   y / y1 用纵比；×比 + 0.5 后向零截断）。画布本身也按同一对比预缩放，所以格 × 比正好落在
+    //   画布像素上。
+    // ★ **位置不乘这个比**：它是「层左 / 上 + 格左上」（`0x45bff2` / `0x45bffa`），由纹理消费站
+    //   按场景章的 `s` 处理（本模型不建模 `s`，恒 1）——⛔ 不要把它与源矩形合成一个比；
+    //   两比的关系是残差 `RES-ADV-TEXT-CANVAS-SCALE`。
+    const std::int32_t unit_left = left;
+    const std::int32_t unit_top = top;
+    left = scale_display(left, font_scale_width_);
+    top = scale_display(top, font_scale_height_);
+    right = scale_display(right, font_scale_width_);
+    bottom = scale_display(bottom, font_scale_height_);
     left = std::max(0, left);
     top = std::max(0, top);
     right = std::min(static_cast<int>(texture->width), right);
@@ -537,8 +553,8 @@ void Machine::create_text_layer_item(int slot, int left, int top, int right, int
     item.top = top;
     item.right = right;
     item.bottom = bottom;
-    item.aux[0] = static_cast<float>(rec.f0c + left);
-    item.aux[1] = static_cast<float>(rec.f10 + top);
+    item.aux[0] = static_cast<float>(rec.f0c + unit_left);
+    item.aux[1] = static_cast<float>(rec.f10 + unit_top);
     item.aux[2] = 0.0f;
     item.color = 0xFFFFFFFFu;
     item.target_color = 0xFFFFFFFFu;
@@ -643,6 +659,9 @@ void Machine::align_text_layer(int slot) {
         } else {
             delta_x = 0;  // ≥3：参与，但 Δ = 0
         }
+        // ★ Δ 乘**字体对象的显示适配比**（`0x45c1ed` 的 `fmul [esi+355E0h]` + 0.5 向零截断）；
+        //   位置「层左 + 格」不乘这个比（`0x45bff2` 是裸加，消费站才按场景 s 处理）。
+        const std::int32_t delta_x_scaled = scale_display(delta_x, font_scale_width_);
         for (const std::size_t i : indices) {
             const PendingGlyph& cell = layer.cells[i];
             if (!cell.has_item) continue;
@@ -650,9 +669,10 @@ void Machine::align_text_layer(int slot) {
             if (it == draw_items_.end()) continue;
             DrawItem& item = it->second;
             if (item.texture_id != text_layer_texture_id(static_cast<std::size_t>(slot))) continue;
-            // 位置 = 层左 + 该格 x + Δx；**不写回** rec.f0c / f10。
-            // y 没有 Δy（本模型只做 ADV 可见文本的 x 读者）；但层上变了要跟着走。
-            item.aux[0] = static_cast<float>(rec.f0c + cell.x + delta_x);
+            // 位置 = 层左 + 该格 x + 缩放后的 Δx；**不写回** rec.f0c / f10。
+            // y 没有 Δy：本模型走的是逐字绘制支（`sub_45BE20`），它只调横向读者 `sub_4572A0`；
+            // 纵向读者 `sub_4573A0` 挂在另一条入口 `sub_45B2B0`（层记录 +0x70 == 1，本版不展开）。
+            item.aux[0] = static_cast<float>(rec.f0c + cell.x + delta_x_scaled);
             item.aux[1] = static_cast<float>(rec.f10 + cell.y);
             changed = true;
         }

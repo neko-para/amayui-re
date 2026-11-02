@@ -6,6 +6,7 @@
 #pragma once
 
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -41,6 +42,13 @@ inline double parse_float_text(const std::string& text) {
     char* end = nullptr;
     const double value = std::strtod(begin, &end);
     return end == begin ? 0.0 : value;
+}
+
+// 显示适配比的一次换算：`(int)(值 × 比 + 0.5)`，**向零截断**（与引擎的 `__ftol2_sse` 同口径）。
+// ★ 三个消费点共用同一个口径：`0x70` 的缩放后尺寸（`0x45d6da` / `0x45d6ec`）、逐字条目的源矩形
+//   （`0x45bf01` 起）、对齐 Δ（`0x45c1ed`）。⛔ 不要三处各写一份取整。
+inline std::int32_t scale_display(double value, double ratio) {
+    return static_cast<std::int32_t>(std::trunc(value * ratio + 0.5));
 }
 
 }  // namespace core

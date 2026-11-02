@@ -27273,7 +27273,9 @@
       ],
       "storage": [],
       "evidence": [
-        "KN:01M4E5TSR928022A580P5J3216"
+        "KN:01M4E5TSR928022A580P5J3216",
+        "guard:apps/emulator-cxx/CMakeLists.txt#emulator-core-text-layer-align",
+        "guard:apps/emulator-cxx/CMakeLists.txt#spec_adv_text_draw_scale"
       ]
     }
   ]

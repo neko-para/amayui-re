@@ -193,6 +193,12 @@ add_test(NAME spec_adv_text_layer_mode COMMAND emulator-core-selftest --only-tex
 #   把 0x198 当"另一对偏移"存到别处 / 把层号 0 当槽 1 / 让 0x198 改宽高 ⇒ 本条红。
 add_test(NAME spec_adv_text_layer_position COMMAND emulator-core-selftest --only-text-layer-pos)
 add_test(NAME emulator-core-text-layer-align COMMAND emulator-core-selftest --only-text-layer-align)
+# ★ 文本层的**显示适配比**（`ADV-TEXT-DRAW-POSITION` 的「显示适配」）：比 = 视口 ÷ 配置客户区，
+#   只在窗口态 ∧ 虚拟全屏类型 = 2 时非 1。画布 = `trunc(宽高 × 比 + 0.5)`（写回层记录 f7c/f80）；
+#   逐字条目的源矩形 = 布局格 × 比（x/x1 横比、y/y1 纵比）；对齐 Δ 乘横比；
+#   位置「层左 + 格」不乘字体比（它按场景 s，本模型 s = 1）。
+#   把画布改回 f14/f18 / 源矩形不乘比 / Δ 不乘比 / 位置也乘比 ⇒ 本条红。
+add_test(NAME spec_adv_text_draw_scale COMMAND emulator-core-selftest --only-text-layer-scale)
 # ★ 字形 AA 档（1 位 / GRAY4 / GRAY8 的**选择**与 17 / 65 级换算 ⇒ 满覆盖 240 / 251）：
 #   "设置界面文字比真机亮一档"的算术那一半。拆回 2^n（16 / 64）⇒ 满覆盖 255 ⇒ 本条红。
 add_test(NAME emulator-core-glyph-alpha COMMAND emulator-core-selftest --only-glyph)

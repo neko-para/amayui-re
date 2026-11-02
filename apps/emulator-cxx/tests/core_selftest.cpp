@@ -2876,6 +2876,7 @@ bool check_text_layer_mode_gate(const core::OpcodeTable& table) {
 // ② 两行宽度不同：两行各自 120；只有整块并集中心 120 ⇒ 块级近似，必红；
 // ③ 模式 2：行右界 = 层左 + 起点 + 基准（120），不是基准 100；
 // ④ 模式 0：无平移（首字仍在原点 20）；
+// ④' 其它取值（≥ 3）：参与但 Δ = 0（首字也在 20）；
 // ⑤ `0x303` 写在追加之后：下一次绘制必须生效（重算后行心 120）；
 // ⑥ 模式 1 → 0：上一次的 Δ 必须被清掉（首字回到 20，不是 110）；
 // ⑦ `0x198` 移动层：x / y 都跟着走（层左 50 / 上 30 ⇒ 行心 170、行顶 50），且对齐**不写回**层记录。
@@ -2999,6 +3000,17 @@ bool check_text_layer_align(const core::OpcodeTable& table) {
             return false;
         }
     }
+    // ④' 其它取值（≥ 3）：**参与**，但 Δ = 0（首字也在 20）。与模式 0 的区别是"有结果"：
+    //    机器模式 0 在入口就返回失败、其它取值走完公式返回成功；实现里若把 ≥3 并回模式 0，
+    //    这条与模式 0 的表现会一样 —— 所以本块只钉"≥3 不产生平移"，不冒充能区分两者。
+    {
+        const RunResult result = run(3, false, false);
+        if (result.lines.size() != 1 || std::abs(result.lines.begin()->second.min_x - 20) > 1) {
+            std::fprintf(stderr, "text-layer-align: 模式 3 首字左端=%d，期望 20（参与但 Δ=0）\n",
+                         result.lines.empty() ? -1 : result.lines.begin()->second.min_x);
+            return false;
+        }
+    }
     // ⑤ 0x303 写在追加之后：下次绘制必须生效（行心 120）。
     {
         const RunResult result = run(1, false, true);
@@ -3039,6 +3051,153 @@ bool check_text_layer_align(const core::OpcodeTable& table) {
                          result.f0c, result.f10);
             return false;
         }
+    }
+    return true;
+}
+
+// ── 显示适配比：画布 / 源矩形 / Δ 各按方向缩放（`ADV-TEXT-DRAW-POSITION` 的「显示适配」） ──
+// 判据（每条都能红）：
+// ① `0x70` 在纹理模式把 `f7c/f80` 覆写成 `trunc(宽高 × 比 + 0.5)`，画布 = 这两格（不是 `f14/f18`）；
+// ② 逐字条目的**源矩形** = 布局格 × 比（x / x1 横比、y / y1 纵比；+0.5 向零截断）；
+// ③ 对齐 **Δ** 乘横比（`0x45c1ed`）；位置「层左 + 格」**不**乘比（它按场景 `s`，本模型 `s` 恒 1）；
+// ④ 模式 0：源矩形照样缩放，位置保持「层左 + 格」（无 Δ）。
+// ★ 不写死字宽：同一段文字跑两趟（比 1.0 / 1.28×0.72），逐项比对缩放后的值 —— 字体量度由平台决定。
+bool check_text_layer_canvas_scale(const core::OpcodeTable& table) {
+    constexpr std::uint32_t key = 0x12345678u;
+    constexpr double kScaleWidth = 1280.0 / 1000.0;   // 视口宽 ÷ 配置客户区宽
+    constexpr double kScaleHeight = 720.0 / 1000.0;   // 视口高 ÷ 配置客户区高
+    struct Item {
+        int left = 0;
+        int top = 0;
+        int right = 0;
+        int bottom = 0;
+        int aux0 = 0;
+        int aux1 = 0;
+    };
+    struct RunResult {
+        std::vector<Item> items;
+        int f7c = 0;
+        int f80 = 0;
+        int tex_w = 0;
+        int tex_h = 0;
+    };
+    const auto run = [&](int mode, bool scaled) {
+        auto script = make_script_with_body();
+        emit_instruction(script, 0x80, {{0, 9}});
+        emit_instruction(script, 0x70, {{0, 9}, {0, 1000}, {0, 1000}, {0, 0}, {0, 0}});
+        emit_instruction(script, 0x213, {{0, 9}, {0, 190000}, {0, 40}});
+        emit_instruction(script, 0x303, {{0, 9}, {0, mode}, {0, 100}});
+        emit_instruction(script, 0x79, {{0, 9}, {0, 20}, {0, 20}});
+        emit_instruction(script, 0x75, {{0, 16}});
+        emit_instruction(script, 0x74, {{0, 0}});
+        emit_instruction(script, 0x71, {{0, 9}});
+        emit_instruction(script, 0x6E, {{0, 0}, {5, 0}});
+        emit_instruction(script, 0x72, {{0, 9}});
+        emit_instruction(script, 2, {});
+        core::Machine machine(key, table, nullptr, scene_step_config());
+        if (scaled) {
+            machine.config_mut().set_int("display:ScreenMode", 1);            // 窗口态
+            machine.config_mut().set_int("display:VirtualFullScreenType", 2);  // 条件 2
+            machine.config_mut().set_int("set:WinX", 1000);
+            machine.config_mut().set_int("set:WinY", 1000);
+            machine.set_viewport_source([] { return core::Machine::Viewport{1280, 720}; });
+            machine.reapply_font_settings();
+        }
+        machine.write_text(core::Operand{5, 0}, "AB");
+        machine.load_root(script);
+        for (int i = 0; i < 40 && !machine.halted(); ++i) machine.step();
+        RunResult result;
+        result.f7c = machine.list_record(9).f7c;
+        result.f80 = machine.list_record(9).f80;
+        const core::TextureSlotObject* texture = machine.texture_slot(20u + 9u);
+        if (texture != nullptr) {
+            result.tex_w = static_cast<int>(texture->width);
+            result.tex_h = static_cast<int>(texture->height);
+        }
+        for (std::uint32_t k = 0; k < 40; ++k) {
+            const core::DrawItem* item = machine.draw_item(190000u + k);
+            if (item == nullptr) continue;
+            result.items.push_back(Item{item->left, item->top, item->right, item->bottom,
+                                        static_cast<int>(item->aux[0]),
+                                        static_cast<int>(item->aux[1])});
+        }
+        return result;
+    };
+    const auto expect = [](int value, double ratio) {
+        return static_cast<int>(std::trunc(static_cast<double>(value) * ratio + 0.5));
+    };
+
+    const RunResult unit = run(1, false);
+    const RunResult scaled = run(1, true);
+    // ① 画布 = 缩放后尺寸（不是未缩放的 1000×1000）。
+    if (unit.f7c != 1000 || unit.f80 != 1000) {
+        std::fprintf(stderr, "text-layer-scale: 比 1.0 的 f7c/f80=%d/%d，期望 1000/1000\n", unit.f7c,
+                     unit.f80);
+        return false;
+    }
+    if (scaled.f7c != 1280 || scaled.f80 != 720) {
+        std::fprintf(stderr, "text-layer-scale: 比 1.28/0.72 的 f7c/f80=%d/%d，期望 1280/720\n",
+                     scaled.f7c, scaled.f80);
+        return false;
+    }
+    if (scaled.tex_w != 1280 || scaled.tex_h != 720) {
+        std::fprintf(stderr, "text-layer-scale: 画布纹理 = %dx%d，期望 1280x720\n", scaled.tex_w,
+                     scaled.tex_h);
+        return false;
+    }
+    // ② 源矩形 = 布局格 × 比（逐项比对，不写死字宽）。
+    if (unit.items.size() != 2 || scaled.items.size() != 2) {
+        std::fprintf(stderr, "text-layer-scale: 比 1.0 / 1.28 的条目数 = %zu / %zu，期望 2 / 2\n",
+                     unit.items.size(), scaled.items.size());
+        return false;
+    }
+    for (std::size_t i = 0; i < unit.items.size(); ++i) {
+        const Item& a = unit.items[i];
+        const Item& b = scaled.items[i];
+        if (b.left != expect(a.left, kScaleWidth) || b.right != expect(a.right, kScaleWidth) ||
+            b.top != expect(a.top, kScaleHeight) || b.bottom != expect(a.bottom, kScaleHeight)) {
+            std::fprintf(stderr,
+                         "text-layer-scale: 第 %zu 条源矩形比 1.28/0.72 后 = (%d,%d)-(%d,%d)，期望 "
+                         "(%d,%d)-(%d,%d)\n",
+                         i, b.left, b.top, b.right, b.bottom, expect(a.left, kScaleWidth),
+                         expect(a.top, kScaleHeight), expect(a.right, kScaleWidth),
+                         expect(a.bottom, kScaleHeight));
+            return false;
+        }
+    }
+    // ③ Δ 乘横比；位置「层左 + 格」不乘比（层左 0 + 首格 x 20 = 20）。
+    const int raw_delta = unit.items.front().aux0 - 20;
+    const int expected_aux0 = 20 + expect(raw_delta, kScaleWidth);
+    if (scaled.items.front().aux0 != expected_aux0) {
+        std::fprintf(stderr,
+                     "text-layer-scale: 比 1.28 的首条位置 x=%d，期望 20 + trunc(%d*1.28+0.5) = %d\n",
+                     scaled.items.front().aux0, raw_delta, expected_aux0);
+        return false;
+    }
+    // 位置 y 是「层左/上 + 格」，不乘纵比：两趟都必须是 20。
+    if (unit.items.front().aux1 != 20 || scaled.items.front().aux1 != 20) {
+        std::fprintf(stderr, "text-layer-scale: 两趟的位置 y=%d/%d，期望 20/20（位置不乘字体比）\n",
+                     unit.items.front().aux1, scaled.items.front().aux1);
+        return false;
+    }
+    // ④ 模式 0：源矩形照样缩放，位置无 Δ（首格 20）。
+    const RunResult zero_unit = run(0, false);
+    const RunResult zero_scaled = run(0, true);
+    if (zero_unit.items.empty() || zero_scaled.items.empty()) {
+        std::fprintf(stderr, "text-layer-scale: 模式 0 没有条目\n");
+        return false;
+    }
+    const Item& z0 = zero_unit.items.front();
+    const Item& z1 = zero_scaled.items.front();
+    if (z1.left != expect(z0.left, kScaleWidth) || z1.top != expect(z0.top, kScaleHeight)) {
+        std::fprintf(stderr, "text-layer-scale: 模式 0 源矩形左上 = (%d,%d)，期望 (%d,%d)\n", z1.left,
+                     z1.top, expect(z0.left, kScaleWidth), expect(z0.top, kScaleHeight));
+        return false;
+    }
+    if (z1.aux0 != 20 || z1.aux1 != 20) {
+        std::fprintf(stderr, "text-layer-scale: 模式 0 位置 = (%d,%d)，期望 (20,20)（无 Δ）\n",
+                     z1.aux0, z1.aux1);
+        return false;
     }
     return true;
 }
@@ -12308,12 +12467,13 @@ bool check_text_slot_replay(const core::OpcodeTable& table) {
         std::fprintf(stderr, "text-gate: %s\n", what);
         return false;
     };
-    const auto build = [&](std::int32_t deadline, std::int32_t speed) {
+    const auto build = [&](std::int32_t deadline, std::int32_t speed, bool align_303 = false) {
         auto bytes = make_script_with_body();
         emit_instruction(bytes, 0x80, {{0, 9}});
         emit_instruction(bytes, 0x70, {{0, 9}, {0, 200}, {0, 120}, {0, 5}, {0, 5}});
         emit_instruction(bytes, 0x79, {{0, 9}, {0, 5}, {0, 5}});
         emit_instruction(bytes, 0x213, {{0, 9}, {0, 190700}, {0, 40}});
+        if (align_303) emit_instruction(bytes, 0x303, {{0, 9}, {0, 1}, {0, 100}});
         emit_instruction(bytes, 0x75, {{0, 20}});
         emit_instruction(bytes, 0x74, {{0, static_cast<std::uint32_t>(speed)}});
         emit_instruction(bytes, 0x300, {{0, 9}, {0, 1}, {0, static_cast<std::uint32_t>(deadline)}});
@@ -12390,6 +12550,36 @@ bool check_text_slot_replay(const core::OpcodeTable& table) {
         if (zero_machine.text_typing()) {
             return fail("参数格 = 0 抽干之后第 29 位没有清（泵会一直被调）");
         }
+    }
+    // ★ 重放重建的条目也要吃当前对齐（`reveal_text_layer_cell` 建完条目后调 `align_text_layer`）：
+    //   `0x303` 模式 1 + 基准 100、层左 5、原点 5 ⇒ 两格都揭示后行心 = 5 + 5 + 100 = 110。
+    //   把 `reveal_text_layer_cell` 里那次 `align_text_layer` 删掉 ⇒ 行心退到 5 + 5 + 半个跨度 ⇒ 红。
+    {
+        core::Machine aligned = text_scene_machine(key, table);
+        aligned.write_text(core::Operand{5, 0}, "AB");
+        aligned.load_root(build(100000, 20, true));  // 期限很大 ⇒ 检查前不重放
+        bool checked = false;
+        for (int i = 0; i < 600; ++i) {
+            if (!aligned.step()) break;
+            if (aligned.text_layer_revealed(9) != 2) continue;
+            int min_x = 1 << 30;
+            int max_x = -(1 << 30);
+            for (std::uint32_t k = 0; k < 40; ++k) {
+                const core::DrawItem* item = aligned.draw_item(190700u + k);
+                if (item == nullptr) continue;
+                min_x = std::min(min_x, static_cast<int>(item->aux[0]));
+                max_x = std::max(max_x, static_cast<int>(item->aux[0]) + (item->right - item->left));
+            }
+            if (min_x == (1 << 30)) return fail("重放层两格都揭示了却没有绘制条目");
+            const int center_x = (min_x + max_x) / 2;
+            if (std::abs(center_x - 110) > 2) {
+                std::fprintf(stderr, "text-gate: 重放行心=%d，期望 110（5 + 5 + 100）\n", center_x);
+                return false;
+            }
+            checked = true;
+            break;
+        }
+        if (!checked) return fail("演示闸没有在 600 拍内揭示两格（重放对齐不可观测）");
     }
     // `0x301`：立刻清本层绘制条目 + 揭示游标归 0；**不清画布像素、不删字符格**。
     const std::size_t ink_before = ink(machine);
@@ -16478,6 +16668,7 @@ bool only_clock_monotonic = false;
     bool only_frame_flow = false;
     bool only_text_layer_mode = false;
     bool only_text_layer_align = false;
+    bool only_text_layer_scale = false;
     bool only_text_layer_position = false;
     bool only_se_registration = false;
     bool only_se_stop = false;
@@ -16570,6 +16761,7 @@ bool only_clock_monotonic = false;
         else if (std::strcmp(argv[i], "--only-frame-flow") == 0) only_frame_flow = true;
         else if (std::strcmp(argv[i], "--only-text-layer-mode") == 0) only_text_layer_mode = true;
         else if (std::strcmp(argv[i], "--only-text-layer-align") == 0) only_text_layer_align = true;
+        else if (std::strcmp(argv[i], "--only-text-layer-scale") == 0) only_text_layer_scale = true;
         else if (std::strcmp(argv[i], "--only-text-layer-pos") == 0) only_text_layer_position = true;
         else if (std::strcmp(argv[i], "--only-se-registration") == 0) only_se_registration = true;
         else if (std::strcmp(argv[i], "--only-se-stop") == 0) only_se_stop = true;
@@ -16868,6 +17060,11 @@ bool only_clock_monotonic = false;
         if (only_text_layer_align) {
             if (!check_text_layer_align(table)) return 1;
             std::printf("core-selftest(text-layer-align): PASS\n");
+            return 0;
+        }
+        if (only_text_layer_scale) {
+            if (!check_text_layer_canvas_scale(table)) return 1;
+            std::printf("core-selftest(text-layer-scale): PASS\n");
             return 0;
         }
         if (only_text_layer_mode) {
