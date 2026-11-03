@@ -82,3 +82,15 @@
 | **待定项与重开条件**（别名语义 / RNG 承载面 / float 落槽宽度 / `initZero` 边界 / **文件格式与版本号**） | 需求树：`REQ-01M48ZGEJ2S8TDVC1DAY4MM0KQ`（挂在 M4-1 下） |
 
 ★ **文件格式与版本号故意还没定**（理由见上面那两处）：此刻没有"状态的第二个来源"，定格式只能靠猜。
+
+## 7. 第二条线：`apps/emulator-lift`（从 `.lst` lift 的 guest-state 模拟器）
+
+它不是本文 §2 那条"按 spec 重写"的延续，而是**执行原机器码**：
+
+- 落点 `repo:apps/emulator-lift`（CMake + SDL3；vcpkg **跨目录复用** `repo:apps/emulator-cxx/vcpkg`）；
+- **源选择**：`.lst` 是执行源，`.c` 只作阅读对照（32→64 是移植，不是机械翻译）；
+- **执行单位**：basic block（跨函数 `jmp` / chunk / 跳转表）；`sub_` 只是聚合视图；
+- **覆盖**：清单 + 块级调度表（`replace` / `stub` / `hook`），生成物不入库；
+- **决策全文**：`repo:apps/emulator-lift/README.md`；显式偏差：`repo:apps/emulator-lift/SCOPE.md`；
+  数据与方法：`repo:docs/03-emulator/platform-effort.md` §4.1、§5.5–§5.7。
+- ★ 两条线的共同点只有**平台 shim 的语义**（Win32/GDI/DDraw）；业务逻辑一个是重写、一个是原码执行。

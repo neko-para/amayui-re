@@ -624,6 +624,115 @@ renderer）还未确认 ⇒ 需要 §6 待核 1（路径命中）+ 待核 12（A
 不在「机械翻译 + 自写 shim」的假设内；把它混进来会让「工程量」与「许可」都不可比
 （Wine LGPL-2.1-or-later / DXVK zlib / MoltenVK Apache-2.0）。
 
+### 5.5 宿主层：SDL3，不直接依赖 AppKit
+
+**选择 SDL3**（与 `apps/emulator-cxx` 同一套宿主层）：
+
+- **窗口 / 输入 / 音频 / GPU 一次到位**：macOS 走 SDL_GPU 的 Metal 后端（MSL 源码），Linux 走 Vulkan，
+  Windows 走 D3D12；`apps/emulator-cxx` 的 `macos-arm64` preset 已经验证过这条路径；
+- **源码不直接调 AppKit**：lift 出来的代码 + 我们的 Win32 形状层都不出现 Cocoa 调用；
+  ⚠ 但 **SDL 的 macOS 后端内部仍然用 Cocoa/AppKit**——只要要一个原生窗口，就绕不开窗口服务器 API
+  （GLFW / Qt 也一样）。所以"不依赖 AppKit"的准确含义是**我们的代码不依赖**，不是"进程不链接 AppKit"；
+- **可移植**：同一份宿主层代码在 Linux/Windows 也能编；这是"翻译路线"相对 emulator 的额外收益；
+- **许可**：SDL3 zlib；FreeType / pl_mpeg 也已经是仓里现成的依赖。
+
+**分层**（重要）：SDL 只替换**宿主层**，不实现 Win32/GDI/DDraw 的语义。
+
+```
+lifted C（原逻辑）
+  └─ Win32/GDI/DDraw 形状层（我们自己写：消息泵 / WndProc / DC / Surface / Blt / 菜单 stub）
+       └─ SDL3（窗口 / 事件 / 音频 / SDL_GPU）
+            └─ Metal / Vulkan / D3D12
+```
+
+⇒ 不要指望 SDL 直接顶掉 `DirectDraw` / `GDI` / `WM_*`；它顶掉的是"开窗、拿事件、出声、上屏"这四件事。
+`apps/emulator-cxx` 的 `window.cpp` / `gpu_scene.cpp` / `text_alpha.h` / `pl_mpeg` 是**知识 + 库**的复用点，
+⛔ 不是把它的 core 拿来当 shim。
+
+### 5.6 源选择：`.lst` 还是 `.c`
+
+**先给数据**（AGE；`pnpm tools disasm-fn summary` 现查）：
+
+| 指标 | 值 | 含义 |
+|---|---|---|
+| `.lst` 函数 / `.c` 函数 | **3813 / 3798** | **15 个函数没有 C**；多为 0 字节尾跳/薄壳，有实体的只有 `sub_4531B0` 204 B、`sub_4B58C0` 313 B、`sub_4B87B0` 190 B、`sub_4B5660` 55 B（合计 ≈762 B） |
+| `.c` 的显式反编译产物 | `HIDWORD/LODWORD/__PAIR__` **130** 函数（3.4%）；`__ROL/__ROR` 40；`_mm_` 25；`__asm` 1；`__try/__except` **0**、`JUMPOUT` **0**、`__decompiler` **0** | C 比预期干净，但这不是 32→64 风险的全部 |
+| `.c` 的 ABI/宽度面 | `__thiscall` **7282** 处、`__stdcall` **3014** 处、`long` 100、指针截断 `(int)(…)` **631** + `(int)Name(…)` **71** | `this` 是 `char*` + 裸偏移，指针/句柄普遍存成 `int`/`_DWORD` ⇒ 编 64 位要过一遍指针宽度 / ABI / 结构布局 |
+| `.lst` 的间接面 | 21016 调用点，其中 **3124 解不出目标**；函数指针表 7743 项；被取址 4488 | 两条路都要 dispatcher；`.lst` 的 guest 状态天然处理 `call [reg]` |
+
+**两条路的本质**：
+
+| | `.lst`（guest-state / 软 CPU） | `.c`（原生 64 位） |
+|---|---|---|
+| 完整性 | 3813/3813 | 3798/3813（15 个缺 C，需从 `.lst` 补） |
+| 语义保真 | 机器码，最高 | Hex-Rays 视图，需逐处核对 |
+| **32→64** | **不撞**（guest 寄存器/内存都是 `uint32`） | **撞**（指针宽度 / `__thiscall` / `long` / 布局） |
+| 输出 | 基本块 + 运行时 = 软 CPU，难读 | 可读 C，好改 |
+| 性能 | 解释 2–10× 慢；可 JIT / 热路径替换 | 原生 |
+| 风险形状 | **集中**在 lifter 正确性 | **分散**在宽度/ABI 审计 |
+| 与现有 emulator 的关系 | 执行**原代码**，不需要 spec（spec 只作调试对照） | 编译**原视图**，同样不需要 spec；但 spec 可帮对照 |
+
+**结论（推荐）**：
+
+1. **第一版可运行目标：用 `.lst` 做执行源**（guest-state C / 解释器），`.c` 只做阅读与调试对照。
+   "软模拟器"不是降级——它和 binary translation（Wine + Box86/FEX）是同一类架构；对本作（ADV / 2D 为主、
+   Live2D 可关）性能大概率够用。
+2. **不要直接编 `.c` 成 64 位**：7282 处 `__thiscall` + 3014 处 `__stdcall` + 631/71 处指针截断
+   说明它是**32→64 的移植**，不是机械翻译。真要原生性能，就按"逐函数核对 + 宽度审计"走，不是一次性开关。
+3. **混合是现实解**：`.lst` 执行，`.c` 阅读；热路径逐个替换成"已核对的原生 64 位 C"，保留 guest-state 兜底。
+   15 个缺 C 的函数从 `.lst` 补；130 个位宽产物单独审。
+4. **源选择不改变平台成本**：Win32/GDI/DDraw shim 两条路一样要写（§3）；它只决定"guest 代码怎么跑"。
+
+### 5.7 合并呈现：生成代码 + 覆盖清单
+
+**原则**（与仓里"派生视图不入库 / 只做指针"同构）：
+
+- `.lst` 是**唯一真源**；生成代码是**确定性产物**；覆盖是**显式清单**；
+- ⛔ **不手改生成代码**——修 bug 只有两个去处：**生成器**或**覆盖清单**；
+- 生成头写 `.lst` sha256 + 生成器版本 + 清单 sha256；`pnpm tools lift check` 重算，手改即红。
+
+**三层覆盖粒度**（从便宜到贵）：
+
+| 粒度 | 做什么 | 例 | 代价 |
+|---|---|---|---|
+| **平台 shim（API 级）** | 替换某个 Win32/D3D/MF 导入的实现 | `MFCreateMediaSession` 用解码器实现 | 低；但 lifted 的 `MFSession` 包装仍在 |
+| **函数级（EA → 原生）** | 整函数替换 | 用 `video::Session` 顶掉 `sub_484760` | 中；要保住 ABI / `this` / 返回码 |
+| **子系统级（EA 范围 + 边界）** | 一组函数 + 数据一起换 | MF 会话 / 拓扑 / 回调整簇 | 高；要写边界契约 + 内部 trap |
+
+**合并机制：调度表 + 清单**
+
+- 生成器为每个 guest 函数产出 `guest_<EA>`；覆盖项产出 `ovr_<name>`；启动时 `fn[EA] = ...`。
+- 生成器读 `data/lift/overrides.json`：`{ ea | range, kind: replace | stub | hook, impl, boundary, reason }`。
+- `stub`：运行时 trap（打印 EA + 调用栈），⛔ 不静默 no-op。
+- `replace`：清单必须声明"入口 / 退出 / 共享数据 / 必须保住的返回码"。
+- `hook`：只对**平台调用点**用（如 `MFCreateMediaSession`），不在生成代码里插桩——钩子挂在 shim 上。
+
+**呈现（四个东西）**
+
+1. **代码布局**：`apps/lift/{src/runtime, src/overrides, generated/ (生成、不入库), tools/lift/}`；
+   生成物缺省走 `.cache/lift/` 或构建目录，**不入库**（确定性可重建；避免 53 万行 diff 噪声）。
+2. **清单**：`data/lift/overrides.json` + 同名 `.md`（谁拍板 / 为什么 / 可见代价 / 边界）。
+3. **报告**：`pnpm tools lift report` → 每函数 `generated / overridden / stubbed / missing` + 覆盖率（可重算）；
+   这是"合并后长什么样"的唯一真源，⛔ 不手写进度表。
+4. **运行时**：`--trace-overrides` 打一行"进入 override X（EA）"，用于确认"这条路径真的走了覆盖"。
+
+**守卫**
+
+- 生成树 = 从 `.lst` + 生成器 + 清单重算的树；不一致 ⇒ 红（手改 / 陈旧）。
+- 清单里的 EA 必须存在；`replace` 必须列边界；`stub` 必须列原因；同一 EA 同时 `generated` + `replace` ⇒ 红。
+- 覆盖项的实现文件必须存在；`report` 里 `missing` 非 0 时，构建可以过，但发布前必须为 0（或显式 `deferred`）。
+
+**视频的例子**（最可能的多函数替换）
+
+- **入口**：`sub_484760`（session / resolver / topology）、`sub_483A80`（topology / EVR）、
+  `sub_47B130` / `sub_47B200`（异步回调 / 队列）、`sub_47C910`（D3D9Ex / DXVA）。
+- **覆盖**：`video::Session`（open / play / pause / seek / close + 帧→纹理）；其余 MF 包装函数 `stub`（trap），
+  确保没有遗漏调用。
+- **边界**：`0x20F` 影片指令的入口仍由生成代码走，只把它调到的"对象操作"换成 `video::Session`；
+  清单写清"哪些 EA 换、哪些 EA 留"。
+- **呈现**：`report` 里这一簇显示为 `overridden`（5 个 EA）+ `stubbed`（其余 MF 包装），
+  覆盖率报告里单列"影片通道"。
+
 ## 6 未定 / `<待核>`
 
 每条都写「需要什么观察」——没有观察就不进结论。
@@ -665,6 +774,10 @@ renderer）还未确认 ⇒ 需要 §6 待核 1（路径命中）+ 待核 12（A
 13. **关闭窗口 / 存档命名是否走 Win32 模态**：AGE **没有** `DialogBoxParamA`/`CreateDialogParamA` 导入，
     只有 `MessageBoxA`（28 站点）；需要确认这两条是 `MessageBoxA` 还是游戏自绘 UI。若走 `MessageBoxA`，
     按 §4.1 的 stub 返回 `IDOK` 即可；若走自绘，则本来就不需要 Win32 对话框。
+14. **Live2D 开关的落点**（用户 2026-11-03 给的观察法）：emulator headless 跑到 CONFIG 第一页，
+    切换该开关后 TITLE 左侧会从 Live2D 变成固定立绘 ⇒ 可据此定位它写哪个配置键/格、gates 哪条路径。
+    这决定「关掉 Live2D」是**脚本级跳过**（SDK 仍链接但不被调用）还是**平台级不需要**（D3D9 的 L2D 子集可省）。
+    ★ 用户明说这条不重要；登记为**可选观察**，不阻塞翻译。
 
 ## 7 参考
 
