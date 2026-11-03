@@ -65,6 +65,7 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `release.mjs` | `release` | ★ **发行打包**：把「当前所有变更过的资源」（patch 的键 + ui-bake 的配方集 + AGERC/字体）算成**测试安装树**（ALF 硬链接）或**发给玩家的 zip**（见 `pnpm tools release describe` 与 `tools/release.md`） |
 | `old-repo-inventory.mjs` | `old-repo` | **只读旧仓**：重新实测 → `docs/00-origin/old-repo-inventory.md`；重建翻译参考快照 → `docs/01-translation/ref/`（资产散件 + `archive.zip`） |
 | `spec.mjs` | `spec` | ★ **引擎 + 二进制协议 spec**：Markdown 章节（可分发，不打包单文件）+ 协议数据 + manifest + 内部绑定/审计；effect 级覆盖校验、派生审计账 |
+| `platform.mjs` | `platform` | ★ **平台面普查**（只读）：导入函数（按 DLL）/ COM vtable 调用点（按 offset）/ 动态解析（`LoadLibrary`·`GetProcAddress`）三张表；只给坐标与计数，不做语义裁决（见 `pnpm tools platform describe`） |
 | `test/*.test.mjs` | —— | 基建契约测试（`node --test`） |
 
 ★ **每个自有的结构化数据文件都有一份同名说明书**（`assets.json` → `assets.md`、`samples.json` → `samples.md`）：
