@@ -624,6 +624,24 @@ renderer）还未确认 ⇒ 需要 §6 待核 1（路径命中）+ 待核 12（A
 不在「机械翻译 + 自写 shim」的假设内；把它混进来会让「工程量」与「许可」都不可比
 （Wine LGPL-2.1-or-later / DXVK zlib / MoltenVK Apache-2.0）。
 
+★ **结构对照**（帮助判断"这件事算不算在表内"）：
+Wine = 平台层语义（其上是**原生执行**）+ 跨 ISA 时**外包**（Rosetta 2 / FEX / box86）；
+`apps/emulator-lift`（`.lst` / guest-state 路线）= 平台层语义（自写）+ **执行层也自写**
+（它没有"宿主直接执行 guest 原机器码"这个前提 ⇒ 执行语义必须在自己手里，见 §5.6）。
+**两者重合的只有"Win32 形状"这一层**，其余都不重合。
+
+★ **判据（哪些事算"还在自写 shim 路线内"）**：平台层是**自写、自洽**的 Win32 形状。
+把某一簇换成 Wine 系组件（典型：D3D9 交给 wined3d / DXVK + MoltenVK，§3.7）就是**换路线**：
+要单独立项，并且**不能把它的成本记进 §2 那张表**（那张表的量级前提是"自写"）。
+
+★ **一个常被提出的捷径：把 Wine 的 DLL 当 shim。** 在「lift + 自写 shim」路线里这不成立：
+现代 Wine 的 **PE 侧模块基本是壳**，实现落在 **unix 侧的 `.so`** —— PE 模块经
+`WINE_UNIX_CALL` / `__wine_unix_call` 转到 unix 侧的 `unixlib_entry_t` 函数表
+（两侧声明见 [`include/wine/unixlib.h`](https://raw.githubusercontent.com/wine-mirror/wine/master/include/wine/unixlib.h)）。
+那是**宿主原生代码**，本项目的 guest 执行层跑不了它 ⇒ 复用 Wine 的 DLL 等于把整个 Wine 进程搬进来，
+也就退化成本节的第三条路线。（⇒ Wine 在本文件里的用途只有一处：**"这个语义有权威实现"的旁证**，
+见 §3.1–§3.9 的「Wine 先例」小节；⛔ 不是代码来源。）
+
 ### 5.5 宿主层：SDL3，不直接依赖 AppKit
 
 **选择 SDL3**（与 `apps/emulator-cxx` 同一套宿主层）：
@@ -674,22 +692,28 @@ lifted C（原逻辑）
 
 **结论（推荐）**：
 
-1. **第一版可运行目标：用 `.lst` 做执行源**（guest-state C / 解释器），`.c` 只做阅读与调试对照。
+1. **第一版可运行目标：执行原机器码**（guest-state 解释器），`.c` 只做阅读与调试对照。
+   ★ **2026-11-03 用户确认**：**执行源 = 拆壳件（清单 `binary/age-sectfix`，现已入库 LFS 为
+   `corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`）的机器码字节**；执行方式是**纯内存解释 + 块缓存，
+   默认零生成代码**。`.lst` 降为**符号 / 对照 / 覆盖**层（它提供指令边界与指令文本，用来验解码器）。
+   ★ 本表仍然成立 —— 它比的是「**执行原机器码**」vs「**把 `.c` 编成 64 位**」，不是「字节 vs 文本」；
+   语料**没有机器码字节列**、且一部分 CRT / C++ 运行时被 `COLLAPSED` 这两条事实，
+   见 `apps/emulator-lift/docs/plan-m1-cpu-base.md` §3 的 F1 / F2。
    "软模拟器"不是降级——它和 binary translation（Wine + Box86/FEX）是同一类架构；对本作（ADV / 2D 为主、
    Live2D 可关）性能大概率够用。
 2. **不要直接编 `.c` 成 64 位**：7282 处 `__thiscall` + 3014 处 `__stdcall` + 631/71 处指针截断
    说明它是**32→64 的移植**，不是机械翻译。真要原生性能，就按"逐函数核对 + 宽度审计"走，不是一次性开关。
-3. **混合是现实解**：`.lst` 执行，`.c` 阅读；热路径逐个替换成"已核对的原生 64 位 C"，保留 guest-state 兜底。
-   15 个缺 C 的函数从 `.lst` 补；130 个位宽产物单独审。
+3. **混合是现实解**：guest **字节**执行，`.c` 阅读；热路径逐个替换成"已核对的原生实现"（覆盖清单），
+   保留 guest 兜底。15 个缺 C 的函数从 `.lst` 补；130 个位宽产物单独审。
 4. **源选择不改变平台成本**：Win32/GDI/DDraw shim 两条路一样要写（§3）；它只决定"guest 代码怎么跑"。
 
-### 5.7 合并呈现：生成代码 + 覆盖清单
+### 5.7 覆盖清单（本线**不生成代码**）
 
 **原则**（与仓里"派生视图不入库 / 只做指针"同构）：
 
-- `.lst` 是**唯一真源**；生成代码是**确定性产物**；覆盖是**显式清单**；
-- ⛔ **不手改生成代码**——修 bug 只有两个去处：**生成器**或**覆盖清单**；
-- 生成头写 `.lst` sha256 + 生成器版本 + 清单 sha256；`pnpm tools lift check` 重算，手改即红。
+- 真源 = **拆壳件的字节（可执行）+ `.lst`（符号与指令边界）**；覆盖是**显式清单**；**没有生成物**（§5.6 · D2）；
+- ⛔ **不手改任何"生成代码"** —— 本线不生成；要改行为只有两个去处：**字节**（不行，只读）或**覆盖清单**；
+- 清单的字节锚 = 拆壳件 sha256（= `.lst` 头部的 `Input SHA256`）；`pnpm tools lift check` 重算，手改即红。
 
 **三层覆盖粒度**（从便宜到贵）：
 
@@ -701,25 +725,29 @@ lifted C（原逻辑）
 
 **合并机制：调度表 + 清单**
 
-- 生成器为每个 guest 函数产出 `guest_<EA>`；覆盖项产出 `ovr_<name>`；启动时 `fn[EA] = ...`。
-- 生成器读 `data/lift/overrides.json`：`{ ea | range, kind: replace | stub | hook, impl, boundary, reason }`。
+- `table[EA]`：覆盖项 → `ovr_<name>`；桩 → `stub_trap`；其余 → **运行时解码得到的块**（首次执行时填入）。
+  ★ **本线不做"生成"（2026-11-03 决定）**：执行 = **运行时解码 + 块缓存**，**默认零生成代码**
+  （判据与理由见 `apps/emulator-lift/docs/plan-m1-cpu-base.md` §4 D2）⇒ 下文凡提到"生成物 / 生成树"，
+  只对**将来**若引入离线导出时才适用（那是调试工具，不是执行前提）。
+- 清单读 `data/lift/overrides.json`：`{ ea | range, kind: replace | stub | hook, impl, boundary, reason }`。
 - `stub`：运行时 trap（打印 EA + 调用栈），⛔ 不静默 no-op。
 - `replace`：清单必须声明"入口 / 退出 / 共享数据 / 必须保住的返回码"。
-- `hook`：只对**平台调用点**用（如 `MFCreateMediaSession`），不在生成代码里插桩——钩子挂在 shim 上。
+- `hook`：只对**平台调用点**用（如 `MFCreateMediaSession`）—— 钩子挂在 shim 上，不在 guest 代码里插桩。
 
 **呈现（四个东西）**
 
-1. **代码布局**：`apps/lift/{src/runtime, src/overrides, generated/ (生成、不入库), tools/lift/}`；
-   生成物缺省走 `.cache/lift/` 或构建目录，**不入库**（确定性可重建；避免 53 万行 diff 噪声）。
+1. **代码布局**：`apps/emulator-lift/{src/runtime, src/shims, tests/}`；⚠ 原设想的 `generated/` **取消**
+   （D2 = 运行时解码，没有生成物要放）。
 2. **清单**：`data/lift/overrides.json` + 同名 `.md`（谁拍板 / 为什么 / 可见代价 / 边界）。
-3. **报告**：`pnpm tools lift report` → 每函数 `generated / overridden / stubbed / missing` + 覆盖率（可重算）；
-   这是"合并后长什么样"的唯一真源，⛔ 不手写进度表。
+3. **报告**：`pnpm tools lift report` → 每个函数的 `overridden / stubbed / guest / missing` + 覆盖率（可重算）；
+   ⛔ 不手写进度表。
 4. **运行时**：`--trace-overrides` 打一行"进入 override X（EA）"，用于确认"这条路径真的走了覆盖"。
 
 **守卫**
 
-- 生成树 = 从 `.lst` + 生成器 + 清单重算的树；不一致 ⇒ 红（手改 / 陈旧）。
-- 清单里的 EA 必须存在；`replace` 必须列边界；`stub` 必须列原因；同一 EA 同时 `generated` + `replace` ⇒ 红。
+- **解码对照**：清单里的每个 EA 必须落在镜像的可执行段、能解出指令，且与 `.lst` 在同一 EA 上的助记符一致
+  （判据 A3）；不一致 ⇒ 红。
+- 清单里的 EA 必须存在；`replace` 必须列边界；`stub` 必须列原因；同一 EA 同时 `replace` + `stub` ⇒ 红。
 - 覆盖项的实现文件必须存在；`report` 里 `missing` 非 0 时，构建可以过，但发布前必须为 0（或显式 `deferred`）。
 
 **视频的例子**（最可能的多函数替换）
@@ -728,7 +756,7 @@ lifted C（原逻辑）
   `sub_47B130` / `sub_47B200`（异步回调 / 队列）、`sub_47C910`（D3D9Ex / DXVA）。
 - **覆盖**：`video::Session`（open / play / pause / seek / close + 帧→纹理）；其余 MF 包装函数 `stub`（trap），
   确保没有遗漏调用。
-- **边界**：`0x20F` 影片指令的入口仍由生成代码走，只把它调到的"对象操作"换成 `video::Session`；
+- **边界**：`0x20F` 影片指令的入口仍**走 guest 代码**，只把它调到的"对象操作"换成 `video::Session`；
   清单写清"哪些 EA 换、哪些 EA 留"。
 - **呈现**：`report` 里这一簇显示为 `overridden`（5 个 EA）+ `stubbed`（其余 MF 包装），
   覆盖率报告里单列"影片通道"。
@@ -811,6 +839,9 @@ lifted C（原逻辑）
   <https://raw.githubusercontent.com/wine-mirror/wine/master/dlls/gdi32/Makefile.in>（§3.3）
 - `dlls/d3dx9_36`（effect / mesh / sprite / skin / xfile / math / surface / texture）：
   <https://raw.githubusercontent.com/wine-mirror/wine/master/dlls/d3dx9_36/Makefile.in>（§3.7）
+- **Wine 的 PE 侧 / unix 侧分工**（`__wine_unix_call` 与 `unixlib_entry_t` 函数表两侧的声明）：
+  <https://raw.githubusercontent.com/wine-mirror/wine/master/include/wine/unixlib.h>（§5.4）
+
 
 **D3D9 → Metal 的现成链（策略参考）**
 - DXVK：D3D8/9/10/11 → Vulkan；`dxvk-native` 用 `SDL_Window*` 代替 `HWND`（`DXVK_WSI_DRIVER=SDL3`）：

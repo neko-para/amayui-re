@@ -1,4 +1,4 @@
-# emulator-lift —— 从 `.lst` lift 的 guest-state 模拟器
+# emulator-lift —— 执行 `AGE.EXE` 原机器码的 guest-state 模拟器（`.lst` 作符号与对照）
 
 > 本文件只写**不变的口径**（源 / 执行 / 宿主 / 覆盖 / 边界），**不写进度与计数**：
 > 进度看 `pnpm tools requirements plan`（本线 `REQ-01M6GJMENJ8XEK4ZPTA768YBPW`）；
@@ -7,21 +7,69 @@
 
 ## 1. 它是什么 / 不是什么
 
-- **是**：把 `AGE.EXE` 的 `.lst` 转成"带 guest 状态的 x86 执行器" + Win32/GDI/DDraw 形状层，
+- **是**：把 `AGE.EXE`（**拆壳件**）的机器码放上"带 guest 状态的 x86 执行器" + Win32/GDI/DDraw 形状层，
   宿主用 **SDL3**（macOS Metal / Linux Vulkan / Windows D3D12）。
 - **不是**：`apps/emulator-cxx` 的延续（那是按 spec 重写）；也**不是**把 `.c` 编成 64 位原生源码
   （32→64 是移植，不是机械翻译）。
 - **边界**：`data/spec/` 只作调试对照，**不是本项目的真源**；本项目的真源是
-  **`.lst` + 覆盖清单**；⛔ 不拿 emulator-cxx 的 core 当 shim。
+  **拆壳件的字节 + `.lst`（符号与对照）+ 覆盖清单**；⛔ 不拿 emulator-cxx 的 core 当 shim。
 
-## 2. 四个已定决策
+### 1.1 与 Wine / 与 emulator 的分野（三条路线，本线是第二条）
 
-### 2.1 源：`.lst` 是执行源，`.c` 是阅读器
+`docs/03-emulator/platform-effort.md` §5.4 把"用 Wine 系组件跑 Windows 二进制"列为**第三条路线**。
+本线**不是**它，但**平台层的形状与它同类**（都要自己装 PE、自己实现 Win32 语义）。差别在两处：
+
+| | Wine（换 ISA 时 + Rosetta 2 / FEX / box86） | 本线 |
+|---|---|---|
+| PE 装载 / IAT | Wine 自己的 loader | **自写** |
+| Win32 语义 | 自己实现（在宿主的原生执行之上） | **自写**，只做 `SCOPE.md` 允许的子集 |
+| **指令执行** | **宿主直接执行 guest 的原机器码**；ISA 不同就外包 | **必须在自己手里**（Wine 没有翻译层，本线有；执行源 = 拆壳件字节，见 §2.1） |
+| 图形 / 音频 | wined3d / vkd3d → Vulkan → MoltenVK | SDL3 + 自写 DDraw / GDI 形状；D3D9 按 `platform-effort.md` §3.7 外包**或停手** |
+| 目标函数 | **兼容性面**（尽可能多的程序能跑） | **可观测 / 可复现**：虚拟时钟、确定性 trace、EA 级诊断、覆盖清单 |
+| 出界行为 | 尽量兜住 | **响亮失败**（⛔ 不静默 no-op，见 `SCOPE.md` §3） |
+
+★ 一句话：本线 ≈ **Wine 的平台层语义 + 一个 box86/FEX 那样的执行层**，两边都只覆盖"这一个 EXE
+用到的子集"，再加一件 Wine 不做的事（**可观测 / 可复现**）。
+★ 所以"这个 EXE 用不到的"一律不做，而"用得到但没实现"一律**响亮失败** —— 这与 Wine 的价值取向相反，
+是**有意的**。
+
+**★ 这条线"还是这条线"的唯一判据**：平台层是**自写、自洽的 Win32 形状**。
+一旦某一块改成"嵌入 Wine 系组件"（典型：D3D9 交给 wined3d / DXVK），那一块就归**第三条路线**：
+要单独立项、⛔ 不计入本线成本（这正是 `platform-effort.md` §3.7 把它记作"换路线"的原因）。
+
+**★ 为什么不能把 Wine 的 DLL 直接当 shim**（最容易想到的捷径）：现代 Wine 的 **PE 侧基本是壳**，
+实现在 **unix 侧的 `.so`** —— PE 模块经 `WINE_UNIX_CALL` / `__wine_unix_call` 转到 unix 侧的
+`unixlib_entry_t` 函数表（两侧声明都在 Wine 的 `include/wine/unixlib.h` 里）。
+那是**宿主原生代码，guest 执行层跑不了它** ⇒ 真要复用就等于把整个 Wine 进程搬进来 = 第三条路线。
+
+## 2. 已定决策
+
+### 2.1 源：**拆壳件的字节是执行源**；`.lst` 是符号 / 对照 / 覆盖真源；`.c` 是阅读器
+
+★ **已定（2026-11-03 用户）**：执行源 = **拆壳件 `AGE.EXE__dumped.sectfix.EXE` 的机器码字节**，**已入库（LFS）**。
+- 清单条目 **`binary/age-sectfix`**（`role: baseline` + `readOnly`）：
+  `corpus/assets/age/AGE.EXE__dumped.sectfix.EXE` —— **默认就从这个仓库内路径读**
+  （`git check-attr` 实测 `filter=lfs`；fresh clone 要 `git lfs pull`）。
+  覆盖顺序：`--exe <path>` → 环境变量 → 仓库内路径；**都找不到就拒绝启动**，
+  ⛔ 不回退到游戏目录里的原版 exe。
+- **不是**另一份拆壳件 `binary/age-original`（`AGE.EXE__dumped.EXE`，仍是 `external-only`）：它的
+  **节表未还原**（直接分析会丢数据段），且 sha256 与 `.lst` 头部的 `; Input SHA256 :` **不同**
+  （两份只差节表 24 字节）—— 用错这一份，就意味着"执行的字节"与"用来看的语料"不是同一份。
+  载入时**必须**校验这个 sha256（对上了就自证了这份对齐）。
+
+**为什么不是"按 `.lst` 文本 lift"**（证据，不是偏好）：
+- 语料**没有机器码字节列**（每行只有 `段:EA 助记符 操作数`）；
+- 且一部分 CRT / C++ 运行时代码在 `.lst` 里被 `COLLAPSED`，**一行指令都没有** —— 而 `_memcpy` / `_rand`
+  这类**被直呼**的函数就在其中 ⇒ 文本路拿不到它们的指令，执行必然断在半路。
+- 现查方法与数字：`docs/plan-m1-cpu-base.md` §3 的 F1 / F2。
+
+**`.lst` 因此仍然不可替代**：它给 `EA → 指令文本` 与**指令边界**，是解码器的**独立对照**
+（判据见 `docs/plan-m1-cpu-base.md` §5 的 A3：逐条比 `EA` 差与助记符，不一致必须为 0）
+以及所有诊断文本的来源。
 
 - `.c` 的 32→64 面（`__thiscall` / `__stdcall` / 指针截断）是**系统性移植**，不是改几个类型；
-  `.lst` 的 guest-state 不碰宿主指针。
-- `.c` 的缺函数 / 位宽产物是**小补丁 + 逐处核对**，不是主路径。
-- ⇒ 执行源 = `.lst`；`.c` 只在"这段在干嘛"时读，结论回 `.lst` 核。
+  guest-state 不碰宿主指针。`.c` 的缺函数 / 位宽产物是**小补丁 + 逐处核对**，不是主路径。
+- ⇒ 执行源 = 拆壳件字节；`.c` 只在"这段在干嘛"时读，结论回字节与 `.lst` 核。
 - 判据与现查命令：`docs/03-emulator/platform-effort.md` §5.6 · `pnpm tools disasm-fn summary`。
 
 ### 2.2 执行：按块寻址，不按函数
@@ -43,12 +91,16 @@
 
 ### 2.4 覆盖：清单 + 调度表
 
-- 生成物：`guest_<EA>` / `bb_<EA>`；覆盖：`ovr_<name>`；桩：`stub_trap`；
-  运行时 `table[EA]` 合并三者（块级表；函数级只是聚合视图）。
+- 运行时表 `table[EA]` 合并三类条目：覆盖项 `ovr_<name>` · 桩 `stub_trap` · 其余走 guest 代码；
+  函数级只是**聚合视图**（块级才是执行单位，见 §2.2）。
 - **清单** = `data/lift/overrides.json`（格式见 doc §5.7）：
   `{ ea|range, kind: replace|stub|hook, impl, boundary, reason }`。
 - 粒度：**平台 shim**（API 级）/ **函数级** / **子系统级**（视频推荐：`video::Session` + 其余 MF 包装 `stub`）。
-- 生成物**不入库**：由 `.lst` + 生成器 + 清单确定性重建；`stub` 必须 trap，不许静默 no-op。
+- `stub` 必须 **trap**（打印 EA + 调用栈），不许静默 no-op。
+- ★ **执行 = 纯内存解释（已定 2026-11-03 用户）**：运行时解码 + **块缓存**，`table[EA]` 的条目在首次执行时填入。
+  **默认零生成代码** —— 没有构建期生成物，也就没有"生成树与字节不一致"这类守卫要养。
+  `guest_<EA>` / `bb_<EA>` 因此在本线指**块缓存里的条目**，不是产物文件。
+  将来若真要"把某段块离线导出"（对照用 / 把函数固化成夹具），那属于**调试工具**，⛔ 不是执行前提。
 
 ### 2.5 线程模型：业务单线程，只有服务线程
 
@@ -95,6 +147,7 @@ apps/emulator-lift/
   vcpkg.json
   README.md          ← 本文件
   SCOPE.md           ← 显式偏差（用户拍板才改）
+  docs/              ← 计划与分析长文（索引见 docs/README.md）
   src/main.cpp       ← CLI / 入口（smoke）
   src/runtime/x86.h  ← guest 状态 + 块表接口（最小）
   src/runtime/x86.cpp
@@ -118,9 +171,11 @@ apps/emulator-lift/
 
 | 想知道 | 看哪 |
 |---|---|
+| **执行源是哪个文件**（为什么是 `age-sectfix` 而不是 `age-original` / 游戏目录里的 exe） | 本文件 §2.1 + `docs/plan-m1-cpu-base.md` §4 D1 |
 | 源选择 / 32→64 / 缺 C 的量化 | `docs/03-emulator/platform-effort.md` §5.6 |
 | 块寻址 / chunk / 跳转表 | 同文件 §5.7 + `src/runtime/x86.h` |
 | 宿主层 / 不依赖 AppKit 的口径 | 同文件 §5.5 |
 | 可接受偏差（菜单 / 音频 / 视频 / Live2D / 3D） | `SCOPE.md` + 同文件 §4.1 |
 | 覆盖清单格式 | 同文件 §5.7 |
+| 实现计划（切片 / 判据 / 决策点） | `docs/plan-m1-cpu-base.md`（索引 `docs/README.md`） |
 | 需求与进度 | `REQ-01M6GJMENJ8XEK4ZPTA768YBPW` · `pnpm tools requirements plan` |

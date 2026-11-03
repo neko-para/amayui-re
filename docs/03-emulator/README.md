@@ -83,14 +83,22 @@
 
 ★ **文件格式与版本号故意还没定**（理由见上面那两处）：此刻没有"状态的第二个来源"，定格式只能靠猜。
 
-## 7. 第二条线：`apps/emulator-lift`（从 `.lst` lift 的 guest-state 模拟器）
+## 7. 第二条线：`apps/emulator-lift`（执行拆壳件原机器码的 guest-state 模拟器）
 
-它不是本文 §2 那条"按 spec 重写"的延续，而是**执行原机器码**：
+它不是本文 §2 那条"按 spec 重写"的延续，而是**执行原机器码**；它**也不是**
+`platform-effort.md` §5.4 说的**第三条路线**（Wine 直接跑）—— 平台层仍自写，
+只是"形状"与 Wine 同类（口径见 `repo:apps/emulator-lift/README.md` §1.1）：
 
 - 落点 `repo:apps/emulator-lift`（CMake + SDL3；vcpkg **跨目录复用** `repo:apps/emulator-cxx/vcpkg`）；
-- **源选择**：`.lst` 是执行源，`.c` 只作阅读对照（32→64 是移植，不是机械翻译）；
+- **执行源**：**拆壳件 `AGE.EXE__dumped.sectfix.EXE` 的机器码字节**，已入库（LFS）为
+  `repo:corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`（`binary/age-sectfix`，清单条目 `role: baseline`）；
+  载入时按 `.lst` 头部的 `Input SHA256` 自校验。
+  `.lst` 是**符号 / 对照 / 覆盖**真源，`.c` 只作阅读对照（32→64 是移植，不是机械翻译）。
+  口径见 `repo:apps/emulator-lift/README.md` §2.1；
+- **执行方式**：**纯内存解释 + 块缓存**，默认零生成代码（2026-11-03 决定；口径见同文件 §2.4）；
 - **执行单位**：basic block（跨函数 `jmp` / chunk / 跳转表）；`sub_` 只是聚合视图；
-- **覆盖**：清单 + 块级调度表（`replace` / `stub` / `hook`），生成物不入库；
+- **覆盖**：清单 + 块级调度表（`replace` / `stub` / `hook`）；本线**不生成代码**（运行时解码 + 块缓存）；
 - **决策全文**：`repo:apps/emulator-lift/README.md`；显式偏差：`repo:apps/emulator-lift/SCOPE.md`；
-  数据与方法：`repo:docs/03-emulator/platform-effort.md` §4.1、§5.5–§5.7。
+  数据与方法：`repo:docs/03-emulator/platform-effort.md` §4.1、§5.5–§5.7；
+  实现计划（M1 = guest CPU 核心 + §3.1 基座）：`repo:apps/emulator-lift/docs/plan-m1-cpu-base.md`。
 - ★ 两条线的共同点只有**平台 shim 的语义**（Win32/GDI/DDraw）；业务逻辑一个是重写、一个是原码执行。
