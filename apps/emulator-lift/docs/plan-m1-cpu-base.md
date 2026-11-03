@@ -145,12 +145,24 @@
 本作语料里这族**合计约 10 条**（`fsin` 1 / `fcos` 2 / `fpatan` 2 / `fyl2x` 3 / `fprem` 1 / `fscale` 1）
 ⇒ 它们可以**用宿主 libm + 登记 1 ulp 偏差**，不需要软浮点。
 
-- **推荐 (a)：自写 80-bit soft 浮点**，但只覆盖算术内核（加 / 减 / 乘 / 除 / `fsqrt` / 比较 / 与
-  `double`·`int` 互转，约 400 行）；用 Linux 上的 `long double` 做**第二实现**跑差分夹具 ⇒
-  偏差是**测出来的**。超越函数按上一段走"libm + 登记"。
-- 兜底 (b)：先用 `double` 跑通、把偏差登记进 [`../SCOPE.md`](../SCOPE.md)（**需要用户点头**）+ 一条 ULP 夹具钉住上限。
-  ⛔ 不许"先用 double 混过去、以后再换"而不登记 —— 那是静默语义偏差。
-- ⛔ 否决 (c)：只在 `linux-x64` 用原生 80 位、其它平台用 `double` —— 三平台三种结果，比偏差更糟。
+- ★ **已裁决（2026-11-03 用户）：(a) 用 Berkeley SoftFloat 3e 的 `extF80` 做算术内核**，不自己写。
+  - **为什么是它**：`extF80` 就是 x86 80 位扩展；`extF80_roundingPrecision`（32 / 64 / 80 位）与
+    `softfloat_roundingMode`（`near_even` / `min` / `max` / `minMag`）正好是 x87 控制字的 **PC / RC** 两档；
+    `softfloat_exceptionFlags` 对上状态字的异常位。许可 **BSD-3-Clause**；纯整数实现 ⇒ 三平台逐位一致。
+  - **vendor，不进 vcpkg**：上游 registry 没有这个 port（本机 2887 个 port 里只有 `mpfr` / `gmp` /
+    `boost-multiprecision` / `intx` 一类），而我们依赖的是它的**逐位行为** ⇒ 必须**钉死字节**。
+    落点 `apps/emulator-lift/third_party/berkeley-softfloat/`，附 `README.md`
+    （照 `apps/emulator-cxx/third_party/pl_mpeg/README.md` 的模板：上游 / 作者 / 许可 / 本仓 sha256 /
+    为什么 vendor / 怎么升级）。
+  - **它不提供的、仍要自写**：8 寄存器栈 + tag word + TOP 指针 + `fxch` / `ffree` / `finit` +
+    栈上溢/下溢的 C1 + 条件码；以及**超越函数**（`fsin` / `fcos` / `fpatan` / `fyl2x` / `fscale`，
+    本作合计约 10 条 ⇒ 宿主 libm + 登记 1 ulp）。
+  - ⚠ **已知边界**：SoftFloat 不复现 x87 的 **pseudo-denormal / unnormal** 表示（历史怪癖）；
+    本作 x87 全在正规值路径上，命中概率极低，真要复现就在我们那层包判断。
+- **oracle 只作离线差分**：`linux-x64` 的 `long double` 本来就是 80 位 ⇒ 差分夹具零依赖；
+  只有需要**跨平台**跑差分时才考虑 MPFR（LGPL-3.0-or-later + GMP），且它只进测试、不进运行时。
+- ⛔ **否决**：(b) 全用 `double`（要登记偏差，且**比较分支**可能翻转）；(c) 只在 `linux-x64` 用原生
+  80 位、其它平台 `double`（三平台三种结果，比偏差更糟）。
 
 ★ **D3 不阻塞 M1a**：S4 在 M1b，而走到 `_WinMain` 的路径几乎不碰 x87
 （CRT 启动是整数 + 少量 `double`；18,668 条 x87 主要在渲染 / 物理 / 动画里，属 M2 / M3）。
@@ -197,6 +209,13 @@ M1 只收它的 T0 语义部分，七族：
 | **A2** | 语料里出现的**每个助记符**都能映射到规范名，或被显式判为"数据 / 伪指令"：**未映射 = 0**。（IDA 的 `retn`/`jz`/`setnz` 与规范的 `ret`/`je`/`setne` 是别名，映射表要显式） | pure |
 | **A3** | **解码对照**：⓪ 先校验 PE 的 sha256 == `.lst` 头部 `; Input SHA256 :`（对象是 `binary/age-sectfix`，见 §4 D1）；① 对 `.lst` 里每一条非 collapsed 指令行，在**同一 EA** 解码真实字节 ⇒ 长度 == 下一行的 EA 差；② 助记符 == 规范名。**不一致 = 0**；不一致时打印 EA + 两侧文本 | assets |
 | **A4** | 跑到 **L2**（`--until ea 0x4BA890`）成功；**同一条命令跑两次，trace 逐字节相同**（虚拟时钟 ⇒ 不许有真时钟进 trace） | assets |
+
+★ **A4 的"输入清单"必须显式**（2026-11-04 实测发现）：guest 的命令行就是 `"<--exe 传进来的那个路径字符串>"`，
+所以**换个路径写法就是另一条执行路径**。同一台机器上实测到达 `_WinMain@16` 的指令数：
+相对路径 **38,456** · 绝对路径 **44,184** · 测试里那种带 `../../` 的 87 字符路径 **53,134**（单调于路径长度）。
+⇒ ① "同一条命令跑两次逐字节相同"只对**固定输入**成立，这是正确的口径，但引用任何指令数时必须连路径一起给；
+② 若将来要做**跨机** trace 比较（两台机器的仓库路径不同），必须先归一化 exe 路径 / 环境块 / 时钟，
+否则比的是两件不同的事。trace 自己的输入清单应包含：exe 路径字符串 · guest 命令行 · 环境块 · 虚拟时钟起点。
 | **A5** | **基座缺口 = 0**：trace 里出现过的导入 ⊆ (实现 ∪ `stub` 带 reason)；**七族里的导入不许是 `stub`**，除非写进 `SCOPE.md` 的偏差表 | assets |
 
 ★ **A3 是整份计划里最强的一条判据**：它把"我们的解码器"钉在 30 万条**独立产出**的指令边界上
@@ -214,7 +233,7 @@ M1 只收它的 T0 语义部分，七族：
 | **S1** | GuestMemory + PE 载入 | 4 GB 预留（`PROT_NONE` / `MEM_RESERVE`）· 按需提交 · 区域表 · fault handler 打印诊断（EA + `.lst` 文本 + 寄存器 + guest 返回栈）· 节表 / 导入表 / 入口 · **sha256 对齐 `.lst` 头部** · 栈（1 MB + guard 页）· TEB / PEB | assets：段范围 / 入口 / 导入名集合与 census 一致；**越界访存打印诊断而不是静默 0**；sha256 不符 ⇒ 拒绝启动 | 1.5–2 周 |
 | **S2** | 解码 + 块缓存 + 派发 | Zydis → 自有 `Insn`（op + 操作数 + 长度）· 块缓存（懒解码，`jcc`/`jmp`/`call`/`ret`/`int` 收尾）· `.lst` 索引（`EA → 文本`，仅诊断 / 对照）· IDA→规范助记符映射表 | **A2 + A3** | 1–1.5 周 |
 | **S3** | 整数与控制流语义 | 前 40 助记符（**静态指令数的 97.4%**）：`mov` `lea` 算术 / 逻辑 / 移位 / `cmp` `test` `setcc` `jcc` `jmp` `call` `ret` `leave` `push` `pop` `mul` `div` `imul` `idiv` `cdq` `cwde` `movzx` `movsx` `rep stosd` `rep movsd` `nop` · **未实现助记符被执行 = 响亮失败**（⛔ 不许 no-op） | A1 | 2–2.5 周 |
-| **S4** | x87 + MMX/SSE | **47 个** x87 形态（`fld`/`fstp`/`fild`/`fistp`/四则/`fxch`/`fcom*`/`fnstsw`/`fldcw`/`fnstcw`/`fsqrt`/`fprem`/`fscale`/`emms` …，共 18,668 条）+ **20 个** MMX/SSE 形态（`movq` `movd` `pand` `por` `pxor` `paddw` `psubw` `pmullw` `psllw` `psrlw` `psraw` `punpcklbw` `packuswb` …，共 ≈0.94k 条）· **D3** | A1（位精确夹具）+ 与 `long double` 的差分夹具 | 2–3 周 |
+| **S4** | x87 + MMX/SSE | **算术内核 = vendor 的 Berkeley SoftFloat `extF80`**（D3）· 自写 8 寄存器栈 / tag / 控制字 / 条件码 · **47 个** x87 形态（共 18,668 条）+ **20 个** MMX/SSE 形态（共 ≈0.94k 条）· 超越函数走 libm + 登记 | A1（位精确夹具）+ 与 `long double` 的差分夹具 | 2–3 周 |
 | **S5** | shim 框架 | **每个导入一个唯一 guest 地址**（shim 桩页）⇒ `call [IAT]` 落到 dispatcher 时转成本地函数 · stdcall / cdecl / varargs 弹参与返回值 · guest↔host 字符串 helper · 句柄表 · trace（可过滤、可确定性） | pure：一条"人工 shim"夹具（guest 侧造栈 ⇒ 断言弹参、返回值、栈平衡）；`--trace-shims` 两次运行相同 | 1–1.5 周 |
 | **S6** | §3.1 T0 七族 | 按 §4 D6 的七族逐族落地；文件族含 **大小写不敏感路径解析**（`--game-dir` 是唯一根）与通配符 | A5 + 每族一组夹具 | 2.5–3.5 周 |
 | **S7** | 跑到 `_WinMain@16` | L1 → L2 的 debug；trace 与覆盖报告 | **A4** | 1–2 周 |
@@ -256,12 +275,17 @@ tools/lift.mjs                ← describe / check / report / corpus-report（�
 ★ `data/lift/overrides.json` 一落地就进 `json-docs` 守卫的管辖 ⇒ **S0 必须连 `.md` 和
 `tools/lift.mjs --describe` 一起交**，否则 `pnpm test` 当场红。
 
-### 7.1 第三方依赖（都要进 `vcpkg.json`；本机 `../emulator-cxx/vcpkg/ports` 里三个 port 都在）
+### 7.1 第三方依赖
 
-| 包 | 用途 | 许可 / 备注 |
-|---|---|---|
-| `zydis` | 指令解码（S2）——**只解码，不执行**：语义仍是我们的 | MIT。替代：`bddisasm`（Apache-2.0）/ `capstone`（BSD-3） |
-| `libiconv` | CP932 ↔ UTF-16（S6 码页族） | LGPL（静态链接要照 LGPL 的再链接义务处理）。备选：自带一份 CP932 表（零依赖，但多一份数据要守） |
+| 包 | 用途 | 引入方式 | 许可 |
+|---|---|---|---|
+| `zydis` | 指令解码（S2）——**只解码，不执行**：语义仍是我们的 | **vcpkg**（本机 `../emulator-cxx/vcpkg/ports` 里有 port） | MIT（替代：`bddisasm` Apache-2.0 / `capstone` BSD-3） |
+| `libiconv` | CP932 ↔ UTF-16（S6 码页族） | **vcpkg**（有 port） | LGPL（静态链接要照 LGPL 的再链接义务处理；备选是自带一份 CP932 表） |
+| **`berkeley-softfloat`** | x87 的 80 位算术内核（S4，见 D3） | **vendor**：`third_party/berkeley-softfloat/` + `README.md`（照 `apps/emulator-cxx/third_party/pl_mpeg/` 的模板） | BSD-3-Clause |
+| `sdl3` | 宿主层 | 已有（vcpkg） | zlib |
+
+★ **为什么 SoftFloat 不走 vcpkg**：上游 registry 没有这个 port；更要紧的是**我们依赖的是它的逐位行为**，
+包升级换了算术实现就会让位精确夹具无声失效 ⇒ 必须钉死字节（vendor + 本仓 sha256）。
 
 ★ 为什么不用宿主的码页设施（Windows 上直接用真的 `MultiByteToWideChar`）：那会让 **Windows 与 macOS
 走两套 CP932 表**，"同一份存档名在两台机器上编出不同字节"就变成可能。宁可一套表，也不要这个自由度。
@@ -326,11 +350,11 @@ tools/lift.mjs                ← describe / check / report / corpus-report（�
 ★ **已裁决**（2026-11-03 用户）：
 - **D1** = 执行源用**拆壳件的字节**（`binary/age-sectfix`，已入库 LFS）—— 见 §4 D1。
 - **D2** = **纯内存解释**，默认零生成代码（运行时解码 + 块缓存）—— 见 §4 D2。
+- **D3** = x87 算术内核用 **Berkeley SoftFloat 的 `extF80`**（vendor，不进 vcpkg）—— 见 §4 D3。
 
 余下：
 
-1. **D3**：x87 走 soft 80-bit（先 `double` 的话要写进 SCOPE）—— 选哪个？
-2. **D6**：M1 的基座口径 = T0 七族，不含 GDI32 的 7 个与 d3dx9 的 6 个 —— 同意？
-3. **切片要不要现在就进需求树**：本文件只有判据，没有状态；
+1. **D6**：M1 的基座口径 = T0 七族，不含 GDI32 的 7 个与 d3dx9 的 6 个 —— 同意？
+2. **切片要不要现在就进需求树**：本文件只有判据，没有状态；
    把 S0–S8 登记成 `data/requirements/` 的节点（挂在一个新的 "emulator-lift · M1" 下）之后，
    `pnpm tools requirements plan` 才开始回答"到哪一步了"。

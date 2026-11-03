@@ -142,29 +142,45 @@
 
 ```text
 apps/emulator-lift/
-  CMakeLists.txt
-  CMakePresets.json
-  vcpkg.json
-  README.md          ← 本文件
-  SCOPE.md           ← 显式偏差（用户拍板才改）
-  docs/              ← 计划与分析长文（索引见 docs/README.md）
-  src/main.cpp       ← CLI / 入口（smoke）
-  src/runtime/x86.h  ← guest 状态 + 块表接口（最小）
-  src/runtime/x86.cpp
-  # 后续：src/runtime/{win32,gdi,ddraw}.cpp · src/overrides/ · tools/lift/
+  CMakeLists.txt                      ← 目标 + CTest（**分级靠注册位置**，见 AGENTS.md §5）
+  CMakePresets.json / vcpkg.json      ← windows-x64 / linux-x64 / macos-arm64；依赖 sdl3 + zydis
+  README.md / SCOPE.md / docs/        ← 口径 / 用户拍板的偏差 / 计划长文
+  src/main.cpp                        ← CLI：--exe --lst --until shim|ea --trace-shims --trace-blocks
+                                        --max-insns --safe-memory --report --bench --smoke
+  src/runtime/memory.{h,cpp}          ← 4 GiB 预留 + 按需提交 + 提交位图 + 区域表 + fault 诊断
+  src/runtime/image.{h,cpp}           ← PE 节表/导入表/入口 + 映射 + 栈(1 MiB+guard) + TEB/PEB
+  src/runtime/sha256.{h,cpp}          ← SHA-256（校验"执行的字节 = 语料描述的字节"）
+  src/runtime/{regs.h,insn.h}         ← 寄存器标识 + 自有 Insn（Op / 操作数 / 块）
+  src/runtime/decode.{h,cpp}          ← Zydis 包装 → Insn + 块解码 + 0x9B/`F3 C3` 前缀合并
+  src/runtime/mnemonics.cpp           ← IDA↔规范名映射表（判据 A2 的唯一真源）+ .lst 行分类
+  src/runtime/x86.{h,cpp}             ← 寄存器/操作数/栈 helper（8/16 位合并）+ 块缓存
+  src/runtime/machine.{h,cpp}         ← 装配 + dispatcher + fault hook + 最近指令环形缓冲
+  src/runtime/exec.cpp                ← 语义分发 + 标志位公共部分 + 响亮失败
+  src/runtime/exec_{integer,control,string,fpu}.cpp  ← 按族分文件的语义（S3 / S4）
+  src/runtime/fpu_bridge.{h,cpp}      ← x87 ↔ vendor SoftFloat（extF80）
+  src/runtime/{heap.cpp,handles.cpp,shims.cpp,clock.h}  ← guest 堆 / 句柄表 / shim ABI / 虚拟时钟
+  src/corpus/lst_index.{h,cpp}        ← `.lst` 只读索引（EA→文本 + **下一行 EA**，A3 的边界来源）
+  src/shims/kernel32_*.cpp            ← 七族（一文件一族）+ bootstrap（启动路径补的）+ register.cpp
+  tests/*.cpp                         ← conformance(A1) / dispatch / shim-abi / mnemonics /
+                                        loader / decode-crosscheck(A3) / corpus-mnemonics(A2) /
+                                        boot-trace(A4) / base-coverage(A5)
+  third_party/berkeley-softfloat/     ← vendor 的 SoftFloat 3e（8086 特化）+ 清单哈希 README
 ```
 
 ## 4. 构建（vcpkg **跨目录复用**）
 
 - toolchain 指向 `../emulator-cxx/vcpkg/scripts/buildsystems/vcpkg.cmake`；本目录的 `vcpkg.json`
-  只声明自己需要的包（清单真源是 `vcpkg.json`）。
+  只声明自己需要的包（清单真源是 `vcpkg.json`：`sdl3` + `zydis`）。
 - ```bash
   cd apps/emulator-lift
-  cmake --preset macos-arm64
-  cmake --build --preset macos-arm64
+  cmake --preset windows-x64        # 或 linux-x64 / macos-arm64（同一个相对 toolchain 路径）
+  cmake --build --preset windows-x64
   ctest --test-dir out --output-on-failure
   ```
-- 其它平台预设：`windows-x64` / `linux-x64`（同一个相对 toolchain 路径）。
+- ★ **CTest 的分级判据是"注册位置"**（`AGENTS.md` §5）：顶层无条件注册 ⇒ `pure`（不需要游戏/LFS）；
+  落在 `if(...)` 里 ⇒ `assets`。默认 `ctest` 会跑前者，后者在有 `corpus/` 素材的机器上自动启用。
+  缺资产时测试返回 **77**（`SKIP_RETURN_CODE`），⛔ 不是"什么都不做然后 return 0"。
+- ★ `LIFT_SAFE_MEMORY=1`：每次 guest 访存都查提交位图（慢）。判据 A1 要求**再跑一遍这一档**。
 - 生成物（`out/`、`vcpkg_installed/`）由本目录 `.gitignore` 排除。
 
 ## 5. 真源

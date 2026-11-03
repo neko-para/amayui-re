@@ -1,0 +1,167 @@
+// emulator-lift · guest 堆实现（地址有序的块表 + 首次适配 + 合并）
+//
+// ★ 元数据放宿主侧（`std::map`），guest 只看到指针 —— 但**载荷本身在 guest 内存里**，
+//   所以 guest 的 CRT 可以直接读写它（这也是"同一个堆"的意义，README §2.6）。
+// ★ 每个块头 8 字节（size + magic），载荷 8 字节对齐。magic 用来在 free 时认出"这不是我的块"。
+// ★ 野指针 / double free ⇒ 打印 + abort（⛔ 静默忽略会让内存错误跑到别处才炸）。
+#include "runtime/heap.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+namespace lift {
+namespace {
+constexpr std::uint32_t kMagic = 0x4C494654u;  // 'LIFT'
+inline std::uint32_t alignUp(std::uint32_t v, std::uint32_t a) { return (v + a - 1u) & ~(a - 1u); }
+}  // namespace
+
+bool GuestHeap::init(GuestMemory* mem, std::uint32_t begin, std::uint32_t size) {
+    return init(mem, begin, size, Options{});
+}
+
+bool GuestHeap::init(GuestMemory* mem, std::uint32_t begin, std::uint32_t size, const Options& opt) {
+    if (!mem || size < 0x10000u) {
+        std::snprintf(last_error_, sizeof(last_error_), "堆初始化参数不合法（size=%u）", size);
+        return false;
+    }
+    mem_ = mem;
+    begin_ = begin;
+    end_ = begin + size;
+    opt_ = opt;
+    if (!mem_->commit(begin_, size, RegionKind::Heap, "guest-heap")) {
+        std::snprintf(last_error_, sizeof(last_error_), "提交堆区间失败");
+        return false;
+    }
+    blocks_.clear();
+    Block b;
+    b.off = 0;
+    b.size = size;
+    b.used = false;
+    blocks_.emplace(0, b);
+    in_use_ = 0;
+    peak_ = 0;
+    alloc_count_ = 0;
+    return true;
+}
+
+void* GuestHeap::payloadOf(std::uint32_t off) const { return mem_->host(begin_ + off + opt_.header); }
+
+bool GuestHeap::findBlock(std::uint32_t ptr, std::uint32_t* off) const {
+    if (!ready() || ptr < begin_ + opt_.header || ptr >= end_) return false;
+    const std::uint32_t o = ptr - begin_ - opt_.header;
+    const auto it = blocks_.find(o);
+    if (it == blocks_.end() || !it->second.used) return false;
+    // 额外核对块头 magic：能抓住"指针指向块中间"这类错误
+    if (mem_->rd32(begin_ + o) != kMagic) return false;
+    *off = o;
+    return true;
+}
+
+std::uint32_t GuestHeap::alloc(std::uint32_t bytes, bool zero) {
+    if (!ready()) {
+        std::snprintf(last_error_, sizeof(last_error_), "堆未初始化");
+        return 0;
+    }
+    const std::uint32_t need = alignUp(bytes + opt_.header, opt_.align);
+    for (auto it = blocks_.begin(); it != blocks_.end(); ++it) {
+        Block& b = it->second;
+        if (b.used || b.size < need) continue;
+        if (b.size - need >= opt_.min_split) {
+            Block rest;
+            rest.off = b.off + need;
+            rest.size = b.size - need;
+            rest.used = false;
+            b.size = need;
+            blocks_.emplace(rest.off, rest);
+        }
+        b.used = true;
+        b.req = bytes;
+        mem_->wr32(begin_ + b.off, kMagic);
+        mem_->wr32(begin_ + b.off + 4, bytes);
+        if (zero) std::memset(payloadOf(b.off), 0, b.size - opt_.header);
+        in_use_ += b.size;
+        if (in_use_ > peak_) peak_ = in_use_;
+        ++alloc_count_;
+        return begin_ + b.off + opt_.header;
+    }
+    std::snprintf(last_error_, sizeof(last_error_), "guest 堆耗尽（请求 %u 字节）", bytes);
+    return 0;
+}
+
+bool GuestHeap::free(std::uint32_t ptr) {
+    std::uint32_t off = 0;
+    if (!findBlock(ptr, &off)) {
+        std::fprintf(stderr,
+                     "\n=== guest heap: 非法 free ===\n  ptr = 0x%08X（不在堆区间内 / 不是块首 / magic 不对 / 已释放）\n"
+                     "  堆区间 = 0x%08X..0x%08X  in_use=%u peak=%u\n",
+                     ptr, begin_, end_, in_use_, peak_);
+        std::fflush(nullptr);
+        std::abort();
+    }
+    Block& b = blocks_[off];
+    b.used = false;
+    b.req = 0;
+    in_use_ -= b.size;
+    mem_->wr32(begin_ + off, 0);
+    mem_->wr32(begin_ + off + 4, 0);
+    coalesce();
+    return true;
+}
+
+std::uint32_t GuestHeap::realloc(std::uint32_t ptr, std::uint32_t bytes, bool zero) {
+    if (ptr == 0) return alloc(bytes, zero);
+    std::uint32_t off = 0;
+    if (!findBlock(ptr, &off)) {
+        std::fprintf(stderr, "\n=== guest heap: 非法 realloc ===\n  ptr = 0x%08X\n", ptr);
+        std::fflush(nullptr);
+        std::abort();
+    }
+    Block& b = blocks_[off];
+    const std::uint32_t need = alignUp(bytes + opt_.header, opt_.align);
+    if (need <= b.size) {
+        const std::uint32_t old_req = b.req;
+        if (zero && bytes > old_req) std::memset(mem_->host(begin_ + off + opt_.header + old_req), 0, bytes - old_req);
+        b.req = bytes;
+        mem_->wr32(begin_ + off + 4, bytes);
+        return ptr;
+    }
+    const std::uint32_t np = alloc(bytes, zero);
+    if (!np) return 0;
+    std::memcpy(mem_->host(np), mem_->host(ptr), b.req);
+    free(ptr);
+    return np;
+}
+
+std::uint32_t GuestHeap::sizeOf(std::uint32_t ptr) const {
+    std::uint32_t off = 0;
+    if (!findBlock(ptr, &off)) return 0xFFFFFFFFu;
+    return blocks_.at(off).req;
+}
+
+bool GuestHeap::owns(std::uint32_t ptr) const {
+    std::uint32_t off = 0;
+    return findBlock(ptr, &off);
+}
+
+void GuestHeap::coalesce() {
+    for (auto it = blocks_.begin(); it != blocks_.end();) {
+        if (it->second.used) {
+            ++it;
+            continue;
+        }
+        auto next = std::next(it);
+        if (next != blocks_.end() && !next->second.used && it->second.off + it->second.size == next->second.off) {
+            it->second.size += next->second.size;
+            blocks_.erase(next);
+            continue;  // 再试一次：可能还能往后并
+        }
+        ++it;
+    }
+}
+
+void GuestHeap::dumpLeak(std::uint32_t ptr, const char* api) const {
+    std::fprintf(stderr, "  [heap] %s: ptr=0x%08X 不是活动块（in_use=%u）\n", api, ptr, in_use_);
+}
+
+}  // namespace lift
