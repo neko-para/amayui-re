@@ -55,19 +55,36 @@ constexpr std::uint32_t kGroupData = 0x100;
 constexpr std::uint32_t kVersionData = 0x110;
 constexpr std::uint32_t kIconBytes = 0x140;
 constexpr std::uint32_t kGroupBytes = 0x150;
-constexpr std::uint32_t kVersionBytes = 0x180;  // 0x180 + 92 = 0x1DC，不压到名字串（0x200）
-constexpr std::uint32_t kGroupName = 0x200;
-constexpr std::uint32_t kMarker = 0x300;  // 节里一个可逐字节核对的哨兵（"LFT!"）
+constexpr std::uint32_t kVersionBytes = 0x180;  // 0x180 + 204 = 0x24C，不压到名字串（0x260）
+constexpr std::uint32_t kGroupName = 0x260;
+constexpr std::uint32_t kMarker = 0x380;  // 节里一个可逐字节核对的哨兵（"LFT!"）
 constexpr std::uint32_t kMarkerValue = 0x2154464Cu;
 
 constexpr std::uint32_t kGroupBlobSize = 6 + 14;  // GRPICONDIR + 1 个 GRPICONDIRENTRY
-constexpr std::uint32_t kVersionBlobSize = 92;    // 40（头 + key）+ 52（VS_FIXEDFILEINFO）
+// 根（40 + 52）+ StringFileInfo\041103a4\FileVersion（"39.1.0.0"）
+constexpr std::uint32_t kVersionBlobSize = 204;
 
 void put16(std::vector<std::uint8_t>& b, std::size_t off, std::uint16_t v) {
     std::memcpy(b.data() + off, &v, 2);
 }
 void put32(std::vector<std::uint8_t>& b, std::size_t off, std::uint32_t v) {
     std::memcpy(b.data() + off, &v, 4);
+}
+
+// 引擎在 0x48E6F7 用的是 `_atoi`：这里按同一口径读 guest 里的 C 串（跳过空白、可选 '-'，取连续数字）。
+// ★ 用它当判据而不是"我自己把期望写成 39"：它模拟的正是引擎**怎么读**那个串
+//   （UTF-16 串会在这里读成 3 —— 这就是 boot 卡点的直接原因）。
+std::uint32_t atoiAt(const lift::GuestMemory& mem, std::uint32_t ea) {
+    std::uint32_t p = ea;
+    while (mem.rd8(p) == ' ' || (mem.rd8(p) >= 0x09 && mem.rd8(p) <= 0x0D)) ++p;
+    const bool neg = mem.rd8(p) == '-';
+    if (neg || mem.rd8(p) == '+') ++p;
+    std::uint32_t v = 0;
+    while (mem.rd8(p) >= '0' && mem.rd8(p) <= '9') {
+        v = v * 10u + static_cast<std::uint32_t>(mem.rd8(p) - '0');
+        ++p;
+    }
+    return neg ? 0u - v : v;
 }
 
 void setDir(std::vector<std::uint8_t>& b, std::uint32_t rel, std::uint16_t named, std::uint16_t ids,
@@ -90,17 +107,32 @@ void setDataEntry(std::vector<std::uint8_t>& b, std::uint32_t rel, std::uint32_t
     put32(b, o + 12, 0);
 }
 
-// VS_VERSIONINFO 最小块：头 + szKey("VS_VERSION_INFO") + VS_FIXEDFILEINFO（签名 0xFEEF04BD）
+// VS_VERSIONINFO 块：头 + szKey("VS_VERSION_INFO") + VS_FIXEDFILEINFO（签名 0xFEEF04BD）
+//                    + StringFileInfo\041103a4\FileVersion = "39.1.0.0"
+// ★ 为什么要带字符串表：A 变体的 `VerQueryValueA` 必须交回**单字节（ANSI/CP932）**串 ——
+//   块里存的是 UTF-16LE，直接把指针交回去 ⇒ `atoi` 只读到 "3"。判据见下面的用例
+//   `verqueryvaluea-string-is-ansi`（把转换改坏 ⇒ 它当场红）。
+constexpr std::uint32_t kFfiOff = 40;          // VS_FIXEDFILEINFO 在块内的偏移
+constexpr std::uint32_t kSfiOff = 92;          // StringFileInfo 节点
+constexpr std::uint32_t kLangOff = 128;        // "041103a4" 节点
+constexpr std::uint32_t kFieldOff = 152;       // "FileVersion" 节点
+constexpr std::uint32_t kFieldValueOff = 184;  // "39.1.0.0\0"（UTF-16LE，9 个码元）
+constexpr std::uint32_t kSfiEnd = 204;         // 块总长
+
+void putWide(std::vector<std::uint8_t>& v, std::size_t off, const char* s) {
+    for (std::size_t i = 0; i <= std::strlen(s); ++i) {  // 含结尾 NUL
+        put16(v, off + i * 2, static_cast<std::uint16_t>(s[i]));
+    }
+}
+
 std::vector<std::uint8_t> makeVersionBlob() {
     std::vector<std::uint8_t> v(kVersionBlobSize, 0);
+    // ---- 根：VS_VERSION_INFO ----
     put16(v, 0, static_cast<std::uint16_t>(kVersionBlobSize));  // wLength
     put16(v, 2, 52);                                            // wValueLength = sizeof(VS_FIXEDFILEINFO)
     put16(v, 4, 0);                                             // wType = 0（binary）
-    const char* key = "VS_VERSION_INFO";
-    for (std::size_t i = 0; i < std::strlen(key); ++i) {
-        put16(v, 6 + i * 2, static_cast<std::uint16_t>(key[i]));
-    }
-    const std::size_t ffi = 40;
+    putWide(v, 6, "VS_VERSION_INFO");
+    const std::size_t ffi = kFfiOff;
     put32(v, ffi + 0, lift::kVsFixedFileInfoSignature);
     put32(v, ffi + 4, 0x00010000u);   // dwStrucVersion
     put32(v, ffi + 8, 0x00040001u);   // dwFileVersionMS = 4.1
@@ -109,6 +141,22 @@ std::vector<std::uint8_t> makeVersionBlob() {
     put32(v, ffi + 20, 0x00020003u);  // dwProductVersionLS
     put32(v, ffi + 32, 0x00040004u);  // dwFileOS = VOS_NT_WINDOWS32
     put32(v, ffi + 36, 2u);           // dwFileType = VFT_DLL
+    // ---- StringFileInfo ----
+    put16(v, kSfiOff + 0, static_cast<std::uint16_t>(kSfiEnd - kSfiOff));  // wLength
+    put16(v, kSfiOff + 2, 0);                                               // wValueLength
+    put16(v, kSfiOff + 4, 1);                                               // wType = 1（text）
+    putWide(v, kSfiOff + 6, "StringFileInfo");
+    // ---- 041103a4 ----
+    put16(v, kLangOff + 0, static_cast<std::uint16_t>(kSfiEnd - kLangOff));
+    put16(v, kLangOff + 2, 0);
+    put16(v, kLangOff + 4, 1);
+    putWide(v, kLangOff + 6, "041103a4");
+    // ---- FileVersion ----
+    put16(v, kFieldOff + 0, static_cast<std::uint16_t>(kSfiEnd - kFieldOff));
+    put16(v, kFieldOff + 2, 9);   // wValueLength = 9 个 WCHAR（含 NUL）
+    put16(v, kFieldOff + 4, 1);   // wType = 1（text）
+    putWide(v, kFieldOff + 6, "FileVersion");
+    putWide(v, kFieldValueOff, "39.1.0.0");
     return v;
 }
 
@@ -317,6 +365,46 @@ int main() {
         const std::uint32_t vsize_ea = fx.use("version", "GetFileVersionInfoSizeA");
         LIFT_CHECK(vsize_ea != 0);
         LIFT_CHECK_EQ_U32(fx.call(vsize_ea, {fx.cstr("AGERC.DLL"), 0u}), kVersionBlobSize);
+    }
+
+    // =====================================================================================
+    // ②b 版本读取的 **A 变体契约**：`VerQueryValueA` 的字符串必须是单字节（ANSI/CP932）
+    //     ★ 这条是 boot 卡点的判据（引擎在 0x4BAF26 拿 `atoi(FileVersion)` 与 `set:RCVersion` 比）：
+    //       把 ANSI 转换去掉（直接交出块内的 UTF-16 指针）⇒ `atoi` 读到 "3" ⇒ 本用例当场红。
+    // =====================================================================================
+    {
+        g_current_case = "verqueryvaluea-string-is-ansi";
+        const std::uint32_t mod_ea = fx.cstr("AGERC.DLL");
+        const std::uint32_t vsize_ea = fx.use("version", "GetFileVersionInfoSizeA");
+        const std::uint32_t vinfo_ea = fx.use("version", "GetFileVersionInfoA");
+        const std::uint32_t vquery_ea = fx.use("version", "VerQueryValueA");
+        LIFT_CHECK(vsize_ea != 0 && vinfo_ea != 0 && vquery_ea != 0);
+
+        const std::uint32_t size = fx.call(vsize_ea, {mod_ea, 0u});
+        LIFT_CHECK_EQ_U32(size, kVersionBlobSize);
+        // 引擎按 2×size 申请缓冲（0x48E66E），这里照做
+        const std::uint32_t block = fx.zeroData(static_cast<std::size_t>(size) * 2u);
+        LIFT_CHECK_NE_U32(block, 0u);
+        LIFT_CHECK_EQ_U32(fx.call(vinfo_ea, {mod_ea, 0u, size, block}), 1u);
+
+        const std::uint32_t sub_ea = fx.cstr("\\StringFileInfo\\041103a4\\FileVersion");
+        const std::uint32_t ptr_out = fx.u32data(0);
+        const std::uint32_t len_out = fx.u32data(0);
+        LIFT_CHECK_EQ_U32(fx.call(vquery_ea, {block, sub_ea, ptr_out, len_out}), 1u);
+
+        const std::uint32_t ptr = fx.m.mem().rd32(ptr_out);
+        const std::uint32_t len = fx.m.mem().rd32(len_out);
+        LIFT_CHECK_NE_U32(ptr, 0u);
+        // 真机口径：puLen = 含结尾 NUL 的**字节数**（"39.1.0.0" ⇒ 9）
+        LIFT_CHECK_EQ_U32(len, 9u);
+        // ★ 单字节串：相邻字节是 '3','9','.' …（UTF-16 那边第二个字节是 0 ⇒ 这两条会红）
+        LIFT_CHECK_EQ_U32(fx.m.mem().rd8(ptr + 0u), '3');
+        LIFT_CHECK_EQ_U32(fx.m.mem().rd8(ptr + 1u), '9');
+        LIFT_CHECK_EQ_U32(fx.m.mem().rd8(ptr + 2u), '.');
+        LIFT_CHECK_EQ_U32(fx.m.mem().rd8(ptr + 8u), 0u);
+        LIFT_CHECK(std::memcmp(fx.m.mem().host(ptr), "39.1.0.0", 9) == 0);
+        // 引擎实际判的量：`atoi` 截到第一个 ',' 再取整数 ⇒ 必须是 39（不是 3）
+        LIFT_CHECK_EQ_U32(atoiAt(fx.m.mem(), ptr), 39u);
     }
 
     // =====================================================================================

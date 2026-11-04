@@ -14,6 +14,14 @@
 //       0x4BAF26 拿它与 `set:RCVersion` 比较 ⇒ **这个检查在真机上是"AGERC 的版本"**。
 //   · 字符串子块（`\StringFileInfo\041103a4\FileVersion` 之类）已实现（P0）；AGE.EXE 的两个
 //     调用点（0x4B8E5D / 0x4B8F2D）问的也是这两种子块。
+//   · ★ **A 变体的字符串必须是单字节（ANSI/CP932）**（2026-11-05 修）：`VS_VERSIONINFO` 里的字符串
+//     一律是 UTF-16LE，而真机的 `GetFileVersionInfoA` 会把整块转成 ANSI，于是 `VerQueryValueA`
+//     交回的是**单字节串**、`puLen` 是**含结尾 NUL 的字节数**。我们保留 `lpData` 里的资源原字节
+//     （= `GetFileVersionInfoW` 的形态），转换发生在**查询点**，结果写进固定暂存页
+//     `0x7FFF0000`（1 页）⇒ 引擎看到的仍是一块合法 ANSI 串，而 lpData 的字节不被改写。
+//     ⛔ 这条不是口味问题：修之前把 UTF-16 指针直接交回去，`atoi("3\0""9\0…")` = **3**，
+//     于是 `set:RCVersion`(39, 来自 SYS4INI.BIN 的 `RCVERSION`) 与 `[RCDLL+0x14]`(3) 不等 ⇒
+//     `_WinMain` 在 0x4BAF26 判不等、弹「AGERC.DLLのバージョンが異なります．」并退出。
 //   · 其它路径：VFS 解析后 `loadPeFile` + `PeResources`；没有版本资源 ⇒ Windows 的真实回答
 //     **FALSE + ERROR_RESOURCE_TYPE_NOT_FOUND(1813)**；文件不存在 ⇒ FALSE + ERROR_FILE_NOT_FOUND(2)。
 #include <cstdint>
@@ -21,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/cp932.h"
 #include "runtime/pe_resource.h"
 #include "runtime/vfs.h"
 #include "runtime/x86.h"
@@ -35,6 +44,14 @@ constexpr std::uint32_t kErrInsufficientBuffer = 122u;
 constexpr std::uint32_t kErrResourceTypeNotFound = 1813u;
 
 constexpr const char* kVersion = "version";
+
+// `VerQueryValueA` 的字符串落点：**固定暂存页**（1 页）。
+// ★ 0x7FFF0000 在现有布局之外：桩页 ≤ 0x7FFE8000 · ddraw 设备页 0x7FFFC000 ·
+//   locale 暂存页 0x7FFFD000 · TEB/PEB/argv 0x7FFD0000..0x7FFD5000 · 栈顶 0x70000000。
+// ★ 为什么不用 guest 堆：纯档夹具没有初始化堆，而这里要的只是"一块确定的 guest 内存"
+//   （与 kernel32_string.cpp 的 locale 暂存页同一形态）；1 页足够放任何 VS_VERSIONINFO 字符串。
+constexpr std::uint32_t kAnsiScratchEa = 0x7FFF0000u;
+constexpr std::uint32_t kAnsiScratchSize = 0x1000u;
 
 // 版本块的来源（日志 / 诊断用）
 struct VersionBlock {
@@ -353,7 +370,9 @@ bool findVerChild(const std::vector<std::uint8_t>& b, const VerNode& parent, con
     return false;
 }
 
-// \StringFileInfo\<langcp>\<Field> ⇒ 块内偏移 + 字符数（不含结尾 NUL 的保守值）
+// \StringFileInfo\<langcp>\<Field> ⇒ 块内偏移 + **UTF-16 码元数**（资源里的 wValueLength，
+// 通常含结尾 NUL）。★ 注意这是**块内张量**，不是 A 变体要交回的 puLen —— 后者是同一串的
+// ANSI 字节数（含 NUL），由调用点转换后再算。
 bool findVersionString(const std::vector<std::uint8_t>& b, const std::string& sub, std::size_t* off,
                        std::uint32_t* chars, std::string* err) {
     std::vector<std::string> parts;
@@ -443,12 +462,47 @@ void shimVerQueryValueA(X86& cpu, ShimCall& call) {
             call.result = 0;
             return;
         }
-        const std::uint32_t str_ea = block_ea + static_cast<std::uint32_t>(str_off);
-        cpu.mem->wr32(buf_out_ea, str_ea);
-        cpu.mem->wr32(len_out_ea, chars);
+        // ★ A 变体：块里的值是 UTF-16LE，交回去的必须是**单字节（CP932）串**
+        //   （真机的 GetFileVersionInfoA 会把整块转 ANSI ⇒ VerQueryValueA 的字符串是 ANSI）。
+        //   ⛔ 直接把 UTF-16 指针交回去 = `atoi` 只读到第一个字节（"3\0" ⇒ 3）。
+        std::u16string wide;
+        wide.reserve(chars);
+        for (std::uint32_t i = 0; i < chars; ++i) {
+            const char16_t w =
+                static_cast<char16_t>(block[str_off + static_cast<std::size_t>(i) * 2u] |
+                                      (static_cast<std::uint16_t>(block[str_off + i * 2u + 1u]) << 8));
+            if (w == 0) break;  // 资源里的结尾 NUL（wValueLength 通常含它）
+            wide.push_back(w);
+        }
+        std::size_t bad = 0;
+        const std::string ansi = wideToCp932(wide, &bad);
+        if (ansi.size() + 1u > kAnsiScratchSize) {
+            cpu.shim.last_error = kErrInsufficientBuffer;
+            shimLog(kVersion, api,
+                    "子块 \"%s\" 的 ANSI 串 %zu 字节放不进 %u 字节的暂存页 ⇒ 返回 0 + 错误 122",
+                    sub.c_str(), ansi.size(), kAnsiScratchSize);
+            call.result = 0;
+            return;
+        }
+        if (!cpu.mem->committed(kAnsiScratchEa, kAnsiScratchSize) &&
+            !cpu.mem->commitZeroed(kAnsiScratchEa, kAnsiScratchSize, RegionKind::Other,
+                                   "version-ansi-scratch")) {
+            shimAbort(kVersion, api, "提交 ANSI 暂存页 0x%08X 失败（%s）", kAnsiScratchEa,
+                      cpu.mem->lastError());
+        }
+        if (!ansi.empty()) cpu.mem->writeBytes(kAnsiScratchEa, ansi.data(), ansi.size());
+        cpu.mem->wr8(kAnsiScratchEa + static_cast<std::uint32_t>(ansi.size()), 0);
+        cpu.mem->wr32(buf_out_ea, kAnsiScratchEa);
+        cpu.mem->wr32(len_out_ea, static_cast<std::uint32_t>(ansi.size()) + 1u);  // 含结尾 NUL
         shimLog(kVersion, api,
-                "\"%s\" 命中字符串子块（块内 +0x%zX，%u 字符）⇒ guest 指针 0x%08X",
-                sub.c_str(), str_off, chars, str_ea);
+                "\"%s\" 命中字符串子块（块内 +0x%zX，%u 个 UTF-16 码元）⇒ 转成 ANSI "
+                "\"%s\"（%zu 字节 + NUL）⇒ guest 指针 0x%08X",
+                sub.c_str(), str_off, chars, ansi.c_str(), ansi.size(), kAnsiScratchEa);
+        if (bad != 0) {
+            shimLog(kVersion, api,
+                    "\"%s\" 有 %zu 个码元编不进 CP932 ⇒ 按 Windows 的做法写成 '?'（不计静默）",
+                    sub.c_str(), bad);
+        }
         call.result = 1;
         return;
     }

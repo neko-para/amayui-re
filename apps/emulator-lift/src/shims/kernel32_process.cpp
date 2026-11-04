@@ -16,12 +16,10 @@
 //   · `GetVersion` 报 **XP 5.1.2600**（这个 EXE 的年代口径）；`GetSystemInfo` 报单核 x86。
 //
 // ⚠ 偏差（逐条）：
-//   1. **`GetCommandLineW` 返回的是 ANSI 缓冲区地址**（`cpu.shim.cmdline_ea`，与本批口径一致）。
-//      guest 若真按 UTF-16 读它，看到的是隔 1 字节的 ASCII —— 影响：走 W 版命令行的 CRT 会解析错。
-//      真机 `GetCommandLineW` 是独立的宽字符串。M1a 只保证 A 版可用（CRT 走 A 版）。
-//   2. **W 版缓冲区的宽字符是"字节 → 16 位"扩展**（ASCII 直通、非 ASCII 变 `?`）。理由：guest 的
-//      exe 路径 / 命令行来自 ANSI 缓冲，本模拟器不带 CP_ACP 转换表。影响：非 ASCII 路径（本仓
-//      的游戏目录是日文名）在 W 版里会变成 `?`；A 版逐字节原样（freetype 之外没人读 W 版）。
+//   1. ~~`GetCommandLineW` 返回 ANSI 缓冲区地址~~ **2026-11-05 已修**：现在返回**真正的 UTF-16**
+//      副本（转码页 @+0x800，见下面"guest 字符串的编码"）。
+//   2. ~~W 版缓冲区的宽字符是"字节 → 16 位"扩展~~ **2026-11-05 已修**：W 版从 UTF-8 文本
+//      **按 UTF-16 编**（非 ASCII 不再变成 `?`）。
 //   3. **`GetStartupInfoA/W` 只填 cb 与全零**：`dwFlags`/标准句柄/`lpDesktop` 都是 0。真机由
 //      loader 填。影响：guest 若检查 `STARTF_USESTDHANDLES` 会看到未设置（CRT 不需要它）。
 //   4. **`GetVersionExA` 不写 `dwOSVersionInfoSize`**（保持调用方给的值），且 `szCSDVersion` 全 0；
@@ -42,9 +40,33 @@
 //      "模块存在"并不意味着"它的每个导出都可用"：导出真源是 shim 注册表（见 `GetProcAddress`）。
 //      ★ **例外：AGERC.DLL**（2026-11-04 用户改口径）是**真实映射进 guest 的模块**：句柄 = 真实
 //        ImageBase（`cpu.shim.agerc_base`），PE 头 / 节 / 资源都在 guest 里；没有镜像就装不上（126）。
+//
+// =======================================================================================
+// ★ guest 字符串的编码（2026-11-05 缺陷单 `🐞S2 日文 guest 路径乱码`）
+//
+//   **唯一表示 = UTF-8 文本**：VFS 里的 guest 路径 / 宿主路径都是 UTF-8（`vfs.h` 文件头），
+//   `setupProcessStructures` 写进 guest 的 exe 全路径 / 命令行也是这份 **UTF-8 文本**。
+//   ⇒ **编码只发生在 API 边界**：
+//     · A 版 API 的**出口**编成 **CP932 字节**（`writeAnsiCp932`）、**入口**按 CP932 解
+//       （`ansiToUtf8`）；
+//     · W 版 API 一律 **UTF-16**（`writeWideUtf16` / `wideToUtf8Text`）。
+//   ⛔ 任何一处把 UTF-8 字节当 CP932 交给引擎（或反过来）都会让日文 guest 路径变成
+//   `螟ｩ邨申AGE.EXE`（= `天結` 的 UTF-8 字节被当 CP932 读），而引擎拿这条路径去 `CreateFileA`
+//   必然解析失败 —— 那正是"exe 版本自检 / `_.exe /FIX` 岔路"的起点。
+//
+//   ★ 两条**返回指针**的 API（`GetCommandLineA/W`）没有调用方缓冲可用 ⇒ 在 guest 里留一页
+//   **转码缓冲**（`guestTextPage()`：argv 块下面那一页；A 版 CP932 @+0、W 版 UTF-16 @+0x800），
+//   每次调用都重写（幂等、无状态）。⛔ 不要指望 `cmdline_ea` 里那份 UTF-8 文本能直接交给 A 版：
+//   它按字节原样返回过一次，就是乱码的来源。
+//
+//   10. **`GetModuleFileNameA/W` 缓冲不够时"截断 + 返回写入长度"**（真机：返回 `nSize` 并置
+//       `ERROR_INSUFFICIENT_BUFFER`）。本模拟器只保证**不写坏 guest 缓冲**并留一行日志；
+//       A 版的截断按 CP932 字符边界成对丢（⛔ 不留半个字符）。
+// =======================================================================================
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <string_view>
 
@@ -97,16 +119,31 @@ void stripExeSuffix(std::string& s) {
     }
 }
 
-std::string narrowAscii(const std::u16string& w) {
-    std::string s;
-    s.reserve(w.size());
-    for (const char16_t c : w) {
-        s.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+// guest 的 **A 版入参**（CP932 字节）→ UTF-8 文本（与 VFS 的表示一致：比较 / 日志都在这一层）
+std::string ansiToUtf8(const std::string& bytes, const char* api) {
+    if (bytes.empty()) return {};
+    std::size_t bad = 0;
+    const std::u16string w = cp932ToWide(bytes, &bad);
+    if (bad != 0) {
+        shimLog("kernel32", api, "入参里有 %u 字节不是合法 CP932 ⇒ 按 Windows 的宽松口径跳过",
+                static_cast<unsigned>(bad));
+    }
+    return utf16ToUtf8(w, nullptr);
+}
+
+// guest 的 **W 版入参**（UTF-16）→ UTF-8 文本
+std::string wideToUtf8Text(const std::u16string& w, const char* api) {
+    std::size_t bad = 0;
+    const std::string s = utf16ToUtf8(w, &bad);
+    if (bad != 0) {
+        shimLog("kernel32", api, "W 版入参里有 %u 个未配对代理 ⇒ 已写 '?'（⛔ 不静默）",
+                static_cast<unsigned>(bad));
     }
     return s;
 }
 
-// guest 里的 exe 全路径（没有 ⇒ 空串；调用方决定是失败还是打日志）
+// guest 里的 exe 全路径：**UTF-8 文本**（`setupProcessStructures` 写的就是 VFS 的那一份）。
+// ⛔ 它的字节**不是** guest 的 A 版表示 —— 交给 A 版 API 之前必须编成 CP932（见文件头"编码"）。
 std::string exePath(X86& cpu) {
     if (!cpu.mem || cpu.shim.exe_path_ea == 0) return std::string();
     return cpu.mem->readCString(cpu.shim.exe_path_ea);
@@ -141,7 +178,8 @@ void requireCommitted(X86& cpu, std::uint32_t ea, std::size_t n, const char* api
     }
 }
 
-// 把 ANSI 串写进 guest 缓冲：截断到 cap-1 并保证 0 结尾，返回**写入的字节数**（不含结尾 0）
+// 把**纯 ASCII** 串写进 guest 缓冲：截断到 cap-1 并保证 0 结尾，返回**写入的字节数**（不含结尾 0）。
+// ⚠ 只用于本来就只有 ASCII 的常量（计算机名等）。非 ASCII 的 guest 文本一律走 `writeAnsiCp932`。
 std::uint32_t writeAnsi(X86& cpu, std::uint32_t ea, std::uint32_t cap, const std::string& s) {
     const std::size_t n = std::min<std::size_t>(s.size(), static_cast<std::size_t>(cap) - 1);
     if (n > 0) cpu.mem->writeBytes(ea, s.data(), n);
@@ -149,15 +187,86 @@ std::uint32_t writeAnsi(X86& cpu, std::uint32_t ea, std::uint32_t cap, const std
     return static_cast<std::uint32_t>(n);
 }
 
-// 把 ANSI（CP932）串写进 guest 的 UTF-16 缓冲：真 CP932→UTF-16（S6 码页族；⛔ 不是字节直通）
-std::uint32_t writeWide(X86& cpu, std::uint32_t ea, std::uint32_t cap_chars, const std::string& s) {
-    const std::u16string w = cp932ToWide(s);
+// ★ 把 **UTF-8 文本**写进 guest 的 **A 版缓冲**：编成 **CP932 字节**（截断时成对丢双字节字符）。
+//   cap 是**字节数**；返回写入的字节数（不含结尾 0）。这就是这条缺陷单的主修复点：
+//   ⛔ 之前这里是把 UTF-8 字节原样写出去的（`writeAnsi(path)`），日文 guest 路径因此变成乱码。
+std::uint32_t writeAnsiCp932(X86& cpu, std::uint32_t ea, std::uint32_t cap, const std::string& utf8,
+                             const char* api) {
+    std::size_t bad = 0;
+    const std::string bytes = utf8ToCp932(utf8, &bad);
+    if (bad != 0) {
+        shimLog("kernel32", api, "有 %u 个字符不能编成 CP932（已写 '?'，见文件头的编码口径）",
+                static_cast<unsigned>(bad));
+    }
+    const std::string clipped = cp932Truncate(bytes, static_cast<std::size_t>(cap) - 1u);
+    if (clipped.size() != bytes.size()) {
+        shimLog("kernel32", api, "字符串 %u 字节超过缓冲 %u ⇒ 已截断（真机会置 ERROR_INSUFFICIENT_BUFFER）",
+                static_cast<unsigned>(bytes.size()), cap);
+    }
+    const std::size_t n = clipped.size();
+    if (n > 0) cpu.mem->writeBytes(ea, clipped.data(), n);
+    cpu.mem->wr8(ea + static_cast<std::uint32_t>(n), 0);
+    return static_cast<std::uint32_t>(n);
+}
+
+// ★ 把 **UTF-8 文本**写进 guest 的 **W 版缓冲**：**UTF-16** 码元（cap 是**字符数**）。
+//   W 版**不经过** CP932 —— 非 CP932 的字符（W 版 API 本来就该能表示）不会被换成 '?'。
+std::uint32_t writeWideUtf16(X86& cpu, std::uint32_t ea, std::uint32_t cap_chars,
+                             const std::string& utf8, const char* api) {
+    std::size_t bad = 0;
+    const std::u16string w = utf8ToUtf16(utf8, &bad);
+    if (bad != 0) {
+        shimLog("kernel32", api, "有 %u 个字节不是合法 UTF-8（已写 '?'）", static_cast<unsigned>(bad));
+    }
     const std::size_t n = std::min<std::size_t>(w.size(), static_cast<std::size_t>(cap_chars) - 1);
+    if (n != w.size()) {
+        shimLog("kernel32", api, "字符串 %u 个字符超过缓冲 %u ⇒ 已截断（真机会置 ERROR_INSUFFICIENT_BUFFER）",
+                static_cast<unsigned>(w.size()), cap_chars);
+    }
     for (std::size_t i = 0; i < n; ++i) {
         cpu.mem->wr16(ea + static_cast<std::uint32_t>(i) * 2u, static_cast<std::uint16_t>(w[i]));
     }
     cpu.mem->wr16(ea + static_cast<std::uint32_t>(n) * 2u, 0);
     return static_cast<std::uint32_t>(n);
+}
+
+// =======================================================================================
+// guest 文本转码页 —— 只服务两条**返回指针**的 API（`GetCommandLineA/W`）
+//
+//   为什么需要它：`GetCommandLineA` / `W` 没有调用方缓冲，返回的是**指针**；而 `cmdline_ea`
+//   里那份是 VFS 的 UTF-8 文本（见文件头"编码"）⇒ A 版要 CP932、W 版要 UTF-16，只能另存一份。
+//   页 = **argv 块的下面那一页**（`argv_block - 0x1000`；`GuestLayout` 里 TLS 数组正好结束在
+//   `argv_block`，所以这一页是空的 —— 见 image.h）。页地址由 `exe_path_ea` / `cmdline_ea`
+//   **反推**（⛔ 不在这里抄一份 GuestLayout 常量，抄了就会与布局漂）。
+//   每次调用都整段重写（幂等、不留状态）⇒ 两次调用拿到同一个地址、同一份内容。
+// =======================================================================================
+constexpr std::uint32_t kCmdlineACap = 0x800u;       // A 版：CP932 字节
+constexpr std::uint32_t kCmdlineWCapChars = 0x400u;  // W 版：UTF-16 码元（0x400 × 2 = 0x800 字节）
+
+// 返回转码页基址（懒提交；0 = 拿不到 argv 块基址 ⇒ 调用方如实失败 / 退回旧口径）。
+std::uint32_t guestTextPage(X86& cpu, const char* api) {
+    std::uint32_t argv = cpu.shim.exe_path_ea;
+    if (argv == 0 && cpu.shim.cmdline_ea > 0x400u) argv = cpu.shim.cmdline_ea - 0x400u;
+    if (argv <= 0x1000u) return 0;
+    const std::uint32_t page = argv - 0x1000u;
+    // ★ 这一页**只应该是我们自己的**：`GuestLayout` 把 TLS 数组放在 0x7FFD2000（+0x1000 结束）、
+    //   argv 块放在 0x7FFD4000 ⇒ 0x7FFD3000 是空页。被别人占了只有一种解释 = **布局冲突**
+    //   （例：某个要映射的模块把 ImageBase 选在这里）。那会让"写命令行"变成"写别人的镜像" ⇒
+    //   **响亮失败**，⛔ 不静默覆盖（与 vfs 的 `..` 逃逸同一口径：宁可停，不许写坏）。
+    if (cpu.mem->committed(page, 0x1000u)) {
+        const Region* r = cpu.mem->regionOf(page);
+        if (!(r && std::strcmp(r->name, "guest-text") == 0)) {
+            shimAbort("kernel32", api,
+                      "guest 文本转码页 0x%08X 已被 \"%s\" 占用（GuestLayout 里它是空页）⇒ 布局冲突",
+                      page, r ? r->name : "(未登记)");
+        }
+        return page;
+    }
+    if (!cpu.mem->commitZeroed(page, 0x1000u, RegionKind::Other, "guest-text")) {
+        shimAbort("kernel32", api, "提交 guest 文本转码页 0x%08X 失败（%s）", page,
+                  cpu.mem->lastError());
+    }
+    return page;
 }
 
 // ---- 模块表 ----
@@ -292,7 +401,10 @@ void getModuleHandle(X86& cpu, ShimCall& call, bool wide) {
         call.result = cpu.shim.module_handle;
         return;
     }
-    const std::string want = wide ? narrowAscii(call.wstr(0)) : call.str(0);
+    // ★ 入参按各自的编码解成 UTF-8 文本再比（A = CP932 字节、W = UTF-16）：⛔ 之前 A 版拿
+    //   CP932 字节直接与 UTF-8 的主模块路径逐字节比（日文全路径永远对不上），W 版则把非 ASCII
+    //   收窄成 `?`（`narrowAscii`）。两处都是"日文 guest 路径乱码"的同一根因。
+    const std::string want = wide ? wideToUtf8Text(call.wstr(0), api) : ansiToUtf8(call.str(0), api);
     const std::uint32_t handle = lookupModuleHandle(cpu, want, api);
     if (handle == 0) {
         // ★ 判据是"**已装载**"（导入表里的 + kernel32/ntdll），⛔ 不是"系统里有"：
@@ -386,7 +498,7 @@ void getModuleHandleEx(X86& cpu, ShimCall& call, bool wide) {
     } else if (name_ea == 0) {
         handle = cpu.shim.module_handle;  // 文档：lpModuleName 为 NULL ⇒ 本进程的 exe
     } else {
-        const std::string want = wide ? narrowAscii(call.wstr(1)) : call.str(1);
+        const std::string want = wide ? wideToUtf8Text(call.wstr(1), api) : ansiToUtf8(call.str(1), api);
         handle = lookupModuleHandle(cpu, want, api);
     }
 
@@ -421,45 +533,73 @@ void getModuleFileName(X86& cpu, ShimCall& call, bool wide) {
         return;
     }
     requireBuffer(cpu, buf, cap, api, "lpFilename");
-    std::string path = exePath(cpu);
+    const std::string path = exePath(cpu);  // **UTF-8 文本**（VFS 的唯一表示）
     if (path.empty()) {
         cpu.shim.last_error = kErrInvalidParameter;
         shimLog("kernel32", api, "guest 里没有 exe 全路径（exe_path_ea == 0）⇒ 返回 0");
         call.result = 0;
         return;
     }
-    // ★ S6：模块文件名的**guest 视图**由 VFS 反解（`--game-dir` 是唯一根）——
-    //   guest 看到的是它自己的路径，⛔ 不是宿主的仓库路径（那会让 guest 之后的相对路径解析错）。
-    if (cpu.vfs) {
-        std::string guest;
-        if (cpu.vfs->toGuest(path, &guest)) {
-            path = guest;
-        } else if (!cpu.vfs->guestRoot().empty()) {
-            // 执行源在 `--game-dir` 之外（本仓的 corpus/）⇒ guest 视图 = 安装根 + 文件名。
-            // 这是**主模块的位置**的确定性表述；宿主路径只留在 trace 输入清单里。
-            path = cpu.vfs->guestRoot() + "\\" + baseName(path);
-        }
-    }
-    call.result = wide ? writeWide(cpu, buf, cap, path) : writeAnsi(cpu, buf, cap, path);
+    // ★ 2026-11-05：`exe_path_ea` 里放的就是**guest 眼里的主模块路径**
+    //   （`<guest 根>\AGE.EXE`，由 `setupProcessStructures` 从 Vfs 取真源写进去）。
+    //   ⛔ 宿主 `--exe` 字符串不再出现在这里；也⛔ 不再对 guest 路径做一次 `toGuest` 反解
+    //   （那会把 guest 文本当宿主路径去解析）。
+    // ★ 出口编码（2026-11-05 缺陷单）：A 版 = **CP932 字节**、W 版 = **UTF-16**。
+    //   ⛔ 之前 A 版是把 UTF-8 字节原样写出去的（引擎于是把 `天結` 的 UTF-8 读成 `螟ｩ邨`）。
+    call.result = wide ? writeWideUtf16(cpu, buf, cap, path, api)
+                       : writeAnsiCp932(cpu, buf, cap, path, api);
 }
 
 void shimGetModuleFileNameA(X86& cpu, ShimCall& call) { getModuleFileName(cpu, call, false); }
 void shimGetModuleFileNameW(X86& cpu, ShimCall& call) { getModuleFileName(cpu, call, true); }
 
 // ---- 命令行 / 启动信息 ----
+// ★ `GetCommandLineA/W` 是**返回指针**的：调用方不给缓冲。`cmdline_ea` 里是 VFS 的 UTF-8 文本，
+//   不能直接交出去（A 版会拿 UTF-8 字节当 CP932 读 = 2026-11-05 那个乱码）⇒ 在转码页里
+//   各写一份（A = CP932 @+0、W = UTF-16 @+0x800），返回转码页里的地址。
 void shimGetCommandLineA(X86& cpu, ShimCall& call) {
+    const char* api = "GetCommandLineA";
     if (cpu.shim.cmdline_ea == 0) {
-        shimLog("kernel32", "GetCommandLineA", "guest 里没有命令行（cmdline_ea == 0）⇒ 返回 0");
+        shimLog("kernel32", api, "guest 里没有命令行（cmdline_ea == 0）⇒ 返回 0");
+        call.result = 0;
+        return;
     }
-    call.result = cpu.shim.cmdline_ea;
+    requireMem(cpu, api);
+    const std::uint32_t page = guestTextPage(cpu, api);
+    if (page == 0) {
+        // 没有 argv 块（夹具只设了 cmdline_ea）⇒ 只能退回旧口径，但**明说**拿到的不是 CP932
+        shimLog("kernel32", api,
+                "没有 argv 块（exe_path_ea / cmdline_ea 推不出转码页）⇒ 原样返回 cmdline_ea "
+                "0x%08X（⚠ 那份是 UTF-8 文本，不是 CP932）",
+                cpu.shim.cmdline_ea);
+        call.result = cpu.shim.cmdline_ea;
+        return;
+    }
+    writeAnsiCp932(cpu, page, kCmdlineACap, cpu.mem->readCString(cpu.shim.cmdline_ea), api);
+    call.result = page;
 }
 
 void shimGetCommandLineW(X86& cpu, ShimCall& call) {
-    // 偏差 1：返回的还是那个 ANSI 缓冲区（本批不生成宽字符命令行）
+    const char* api = "GetCommandLineW";
     if (cpu.shim.cmdline_ea == 0) {
-        shimLog("kernel32", "GetCommandLineW", "guest 里没有命令行（cmdline_ea == 0）⇒ 返回 0");
+        shimLog("kernel32", api, "guest 里没有命令行（cmdline_ea == 0）⇒ 返回 0");
+        call.result = 0;
+        return;
     }
-    call.result = cpu.shim.cmdline_ea;
+    requireMem(cpu, api);
+    const std::uint32_t page = guestTextPage(cpu, api);
+    if (page == 0) {
+        shimLog("kernel32", api,
+                "没有 argv 块（exe_path_ea / cmdline_ea 推不出转码页）⇒ 原样返回 cmdline_ea "
+                "0x%08X（⚠ 那份是 UTF-8 文本，不是 UTF-16）",
+                cpu.shim.cmdline_ea);
+        call.result = cpu.shim.cmdline_ea;
+        return;
+    }
+    // ★ 偏差 1 已修：返回**真正的 UTF-16** 副本（不再返回 ANSI 缓冲区）。
+    writeWideUtf16(cpu, page + kCmdlineACap, kCmdlineWCapChars,
+                   cpu.mem->readCString(cpu.shim.cmdline_ea), api);
+    call.result = page + kCmdlineACap;
 }
 
 void shimGetStartupInfoA(X86& cpu, ShimCall& call) {
@@ -823,7 +963,7 @@ void shimGetProcAddress(X86& cpu, ShimCall& call) {
 //    登记过就有，没有就 127。⚠ 偏差按 SCOPE §3 的形态登记：合理值 + 打日志。
 void loadLibrary(X86& cpu, ShimCall& call, bool wide) {
     const char* api = wide ? "LoadLibraryW" : "LoadLibraryA";
-    const std::string name = wide ? narrowAscii(call.wstr(0)) : call.str(0);
+    const std::string name = wide ? wideToUtf8Text(call.wstr(0), api) : ansiToUtf8(call.str(0), api);
     const std::string key = moduleKey(name);
     // ★ AGERC：唯一一个真实装载的模块。没有镜像 ⇒ 0 + 126（⛔ 没有假句柄兜底）。
     if (key == "agerc") {

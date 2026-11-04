@@ -34,13 +34,6 @@ void registerImportGaps(ShimRegistry& shims) {
     shims.addUnimplemented("d3dx9_43", "D3DXMatrixTranslation", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXVec3Normalize", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXVec4Transform", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
-    shims.addUnimplemented("gdi32", "CombineRgn", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "CreateEllipticRgnIndirect", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "CreatePolygonRgn", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "CreateRectRgn", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "GetRegionData", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "GetRgnBox", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "PtInRegion", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
     shims.addUnimplemented("ole32", "CoCreateInstance", "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1");
     shims.addUnimplemented("ole32", "PropVariantClear", "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1");
     shims.addUnimplemented("oleaut32", "#7", "oleaut32：M2/M3（VARIANT / 自动化），不属 M1");

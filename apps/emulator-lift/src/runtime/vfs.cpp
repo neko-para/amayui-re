@@ -419,6 +419,63 @@ std::FILE* openHostFileUtf8(const std::string& host_path, const char* mode) {
 }
 
 // =======================================================================================
+// guest 特殊目录 / 环境块（唯一文本真源；见 vfs.h 的说明）
+// =======================================================================================
+const char* guestUserProfileText() { return "C:\\Users\\Amayui"; }
+const char* guestAppDataText() { return "C:\\Users\\Amayui\\AppData\\Roaming"; }
+const char* guestLocalAppDataText() { return "C:\\Users\\Amayui\\AppData\\Local"; }
+const char* guestDocumentsText() { return "C:\\Users\\Amayui\\Documents"; }
+
+std::string guestTempDirText() {
+    std::string s = guestLocalAppDataText();
+    s += "\\Temp";
+    return s;
+}
+
+// 有序 `NAME=VALUE`（大小写不敏感的字典序 = 确定性）。⛔ 不读宿主环境：同一台机器上重跑
+// 必须逐字节相同（A4），宿主的 LOCALAPPDATA / USERNAME 一律不进 guest。
+std::vector<std::string> guestEnvironment(bool have_appdata) {
+    std::vector<std::string> out;
+    auto add = [&out](const char* name, const std::string& value) {
+        out.push_back(std::string(name) + "=" + value);
+    };
+    // AppData 派生的四项：只有 --appdata 存在时才给（两个视图说同一件事，见 vfs.h）。
+    if (have_appdata) {
+        add("APPDATA", guestAppDataText());
+    }
+    add("COMSPEC", "C:\\Windows\\System32\\cmd.exe");
+    add("HOMEDRIVE", "C:");
+    add("HOMEPATH", "\\Users\\Amayui");
+    if (have_appdata) {
+        add("LOCALAPPDATA", guestLocalAppDataText());
+    }
+    // PATH 只放 `.`：本模拟器没有 system32 / Windows 目录（所有盘符都映射到 --game-dir），
+    // 放一串宿主路径只会造出"能查但打不开"的假象。CRT 只用它找 DLL，`.` 是安全的最小值。
+    add("PATH", ".");
+    add("SystemDrive", "C:");
+    // SystemRoot / windir 是 Windows 的**同义**两项（历史原因两边都有），值必须一致；
+    // 它们指向 `C:\Windows` ⇒ 经 VFS 落到 game_dir\Windows（本模拟器没有那棵树 ⇒ 打不开是响亮的）。
+    add("SystemRoot", "C:\\Windows");
+    if (have_appdata) {
+        add("TEMP", guestTempDirText());
+        add("TMP", guestTempDirText());
+    }
+    add("USERPROFILE", guestUserProfileText());
+    add("windir", "C:\\Windows");
+    return out;
+}
+
+std::string guestEnvironmentText(bool have_appdata) {
+    const std::vector<std::string> items = guestEnvironment(have_appdata);
+    std::string out;
+    for (const std::string& s : items) {
+        if (!out.empty()) out += ';';
+        out += s;
+    }
+    return out;
+}
+
+// =======================================================================================
 // Vfs
 // =======================================================================================
 void Vfs::setGameDir(const std::string& host_dir) {
@@ -435,12 +492,51 @@ void Vfs::setGameDir(const std::string& host_dir) {
     // 去掉尾部隔离符（保留 "C:\" 这种根）
     if (p != p.root_path() && !p.has_filename()) p = p.parent_path();
     game_dir_ = pathToUtf8(p);
-    // ★ A4（逐字节可复现）：清掉上一轮的 `.lift-tmp`。`GetTempFileNameA(uUnique=0)` 从 0 起
-    //   找空号 ⇒ 若目录跨运行累积，同一条命令第二次会拿到不同序号（返回路径 / trace 都会变）。
-    //   这是本模拟器**自有**的临时目录（SCOPE §1 偏差 8），失败只影响确定性，不影响启动。
-    std::error_code tmp_ec;
-    fs::remove_all(p / ".lift-tmp", tmp_ec);
+    // ★ 2026-11-05：**不再**在这里清 `game_dir/.lift-tmp` —— 那是对 `--game-dir`（安装树）的写。
+    //   临时目录的落点已改成 `<--appdata>/Local/Temp`（见 setAppDataDir / guestTempDirText）。
 }
+
+void Vfs::setAppDataDir(const std::string& host_dir) {
+    app_data_dir_ = host_dir;
+    if (app_data_dir_.empty()) return;
+    // ★ A4（逐字节可复现）：清掉上一轮的 Temp。`GetTempFileNameA(uUnique=0)` 从 0 起找空号 ⇒
+    //   目录跨运行累积会让同一条命令第二次拿到不同序号（返回路径 / trace 都会变）。
+    //   这是本模拟器**自有**的伪造 AppData，删它不影响任何真实数据；失败只影响确定性。
+    //   ⛔ 不要把它指向真实用户目录：这里会连同 `<appdata>/Local/Temp` 一起清掉（`--appdata`
+    //   的语义就是"可丢弃的伪造根"）。
+    std::error_code ec;
+    fs::remove_all(pathFromUtf8(app_data_dir_) / "Local" / "Temp", ec);
+}
+
+std::string Vfs::guestExePath() const {
+    std::string root = guest_root_;
+    while (root.size() > 1 && (root.back() == '\\' || root.back() == '/')) root.pop_back();
+    if (root.empty()) root = "C:";
+    if (root.size() == 2 && root[1] == ':') root += '\\';  // "C:" → "C:\"
+    if (root.back() != '\\') root += '\\';
+    return root + "AGE.EXE";
+}
+
+void Vfs::setExeOverlay(const std::string& guest_path, const std::string& host_path,
+                        const std::string& sha256) {
+    overlay_guest_.clear();
+    overlay_host_.clear();
+    overlay_sha256_.clear();
+    if (guest_path.empty() || host_path.empty()) return;
+    overlay_guest_ = absoluteGuest(guest_path);
+    for (char& c : overlay_guest_) {
+        if (c == '/') c = '\\';  // guest 世界用反斜杠（日志 / toGuest 的反解都按这个形态）
+    }
+    overlay_host_ = host_path;
+    overlay_sha256_ = sha256;
+}
+
+bool Vfs::matchesOverlay(const std::string& guest_path) const {
+    if (overlay_guest_.empty()) return false;
+    const std::string canon = normalizeSeps(absoluteGuest(guest_path));
+    return !canon.empty() && asciiEqualNoCase(canon, normalizeSeps(overlay_guest_));
+}
+
 
 void Vfs::setGuestCwd(const std::string& guest_path) {
     guest_cwd_ = absoluteGuest(guest_path);
@@ -452,15 +548,19 @@ void Vfs::setGuestCwd(const std::string& guest_path) {
 
 namespace {
 // P0 的伪造 AppData 前缀：guest 看到的仍是 Windows 形状，宿主落到 --appdata。
+// ★ 文本来自 vfs.h 的**唯一真源**（与 env 块 / SHGetSpecialFolderPathA 同一份；⛔ 不再各写一份）。
 struct SpecialRoot {
-    const char* guest;
-    const char* sub;
+    std::string guest;  // 归一化成 `/` 的形式（前缀比较用）
+    const char* sub;    // --appdata 下的子目录
 };
-constexpr SpecialRoot kSpecialRoots[] = {
-    {"C:/Users/Amayui/AppData/Roaming", "Roaming"},
-    {"C:/Users/Amayui/AppData/Local", "Local"},
-    {"C:/Users/Amayui/Documents", "Documents"},
-};
+const std::vector<SpecialRoot>& specialRoots() {
+    static const std::vector<SpecialRoot> kRoots = {
+        {normalizeSeps(guestAppDataText()), "Roaming"},
+        {normalizeSeps(guestLocalAppDataText()), "Local"},
+        {normalizeSeps(guestDocumentsText()), "Documents"},
+    };
+    return kRoots;
+}
 }  // namespace
 
 bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::string* error,
@@ -475,9 +575,19 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
         if (error) *error = "[invalid] 空路径";
         return false;
     }
+    // ★ overlay（只对**一个**文件）：命中 ⇒ 宿主路径直接是真正在跑的那份字节。
+    //   命中时打一行日志：来源 + sha256 前 8 位（用户 2026-11-05 口径；这是**唯一**一条
+    //   "Vfs 自己打日志"的路径 —— 它足够罕见，而且必须能从日志里看见走的是哪一份）。
+    if (matchesOverlay(guest_path)) {
+        std::fprintf(stderr, "[vfs] overlay: guest \"%s\" ⇒ \"%s\"（来源：--exe 拆壳件；sha256 前 8 位 %s）\n",
+                     guest_path.c_str(), overlay_host_.c_str(),
+                     overlay_sha256_.empty() ? "-" : overlay_sha256_.substr(0, 8).c_str());
+        if (host_path) *host_path = overlay_host_;
+        return true;
+    }
     // ★ 特殊目录（--appdata）：匹配固定的 guest 前缀，剩余段落到 appdata/<sub>。
     const std::string special_text = normalizeSeps(guest_path);
-    for (const SpecialRoot& sr : kSpecialRoots) {
+    for (const SpecialRoot& sr : specialRoots()) {
         const std::string prefix = sr.guest;
         if (!prefixIsDir(special_text, prefix)) continue;
         if (app_data_dir_.empty()) {
@@ -584,8 +694,16 @@ bool Vfs::toGuest(const std::string& host_path, std::string* guest_path) const {
     if (guest_path) guest_path->clear();
     if (!ready() || host_path.empty()) return false;
     const fs::path p0 = pathFromUtf8(host_path).lexically_normal();
+    // ★ overlay 的反解：宿主上那份拆壳件在 guest 眼里就是 `…\AGE.EXE`
+    if (!overlay_host_.empty()) {
+        const fs::path oh = pathFromUtf8(overlay_host_).lexically_normal();
+        if (oh == p0) {
+            if (guest_path) *guest_path = overlay_guest_;
+            return true;
+        }
+    }
     if (!app_data_dir_.empty()) {
-        for (const SpecialRoot& sr : kSpecialRoots) {
+        for (const SpecialRoot& sr : specialRoots()) {
             const fs::path sroot = (pathFromUtf8(app_data_dir_) / pathFromUtf8(sr.sub)).lexically_normal();
             if (!isUnderRoot(sroot, p0)) continue;
             std::string rel;
@@ -669,6 +787,40 @@ bool Vfs::find(const std::string& guest_pattern, std::vector<HostDirEntry>* out,
         if (error) *error = "[io] 枚举 \"" + dir_host + "\" 失败：" + ec.message();
         return false;
     }
+    // ★ overlay：枚举到被覆盖的那个文件时，size / 时间 / 属性必须取**真正在跑的那份字节**
+    //   （否则 `FindFirstFileA` 与 `GetFileSize` 给出两个答案，引擎的版本 / 大小判断前后矛盾）。
+    const std::string overlay_name = hasExeOverlay() ? baseName(overlayGuestPath()) : std::string();
+    auto isOverlayEntry = [&](const std::string& name) {
+        if (overlay_name.empty() || !asciiEqualNoCase(name, overlay_name)) return false;
+        return matchesOverlay(absoluteGuest(dir_guest) + "\\" + name);
+    };
+    auto fillFromOverlayHost = [this](HostDirEntry* e) {
+        e->size = 0;
+        e->attributes = 0;
+        const fs::path hp = pathFromUtf8(overlayHostPath());
+        std::error_code c;
+        const auto sz = fs::file_size(hp, c);
+        if (!c) e->size = static_cast<std::uint64_t>(sz);
+        c.clear();
+        const fs::file_status st = fs::status(hp, c);
+        if (!c) e->attributes = attributesOfStatus(st);
+        c.clear();
+        HostFileTimes t;
+        if (hostFileTimes(overlayHostPath(), &t)) {
+            e->create_time_100ns = t.create_100ns;
+            e->access_time_100ns = t.access_100ns;
+            e->write_time_100ns = t.write_100ns;
+        } else {
+            const auto wt = fs::last_write_time(hp, c);
+            if (!c) {
+                const auto tt = static_cast<std::uint64_t>(fileTime100ns(wt));
+                e->create_time_100ns = tt;
+                e->access_time_100ns = tt;
+                e->write_time_100ns = tt;
+            }
+        }
+    };
+    bool overlay_seen = false;
     const fs::directory_iterator end;
     while (it != end) {
         const fs::path& p = it->path();
@@ -688,6 +840,19 @@ bool Vfs::find(const std::string& guest_pattern, std::vector<HostDirEntry>* out,
         ec2.clear();
         e.is_file = it->is_regular_file(ec2) && !ec2;
         if (!e.is_dir && !e.is_file) {  // 只返回文件 / 目录（FIFO / 设备 / 断链不返回）
+            it.increment(ec);
+            if (ec) {
+                if (error) *error = "[io] 枚举 \"" + dir_host + "\" 中断：" + ec.message();
+                return false;
+            }
+            continue;
+        }
+        if (isOverlayEntry(name)) {
+            e.is_dir = false;
+            e.is_file = true;
+            fillFromOverlayHost(&e);
+            overlay_seen = true;
+            if (out) out->push_back(std::move(e));
             it.increment(ec);
             if (ec) {
                 if (error) *error = "[io] 枚举 \"" + dir_host + "\" 中断：" + ec.message();
@@ -726,6 +891,18 @@ bool Vfs::find(const std::string& guest_pattern, std::vector<HostDirEntry>* out,
             if (error) *error = "[io] 枚举 \"" + dir_host + "\" 中断：" + ec.message();
             return false;
         }
+    }
+
+    // ★ overlay：`--game-dir` 下**没有**这个文件时（只有 overlay 那一份存在），枚举仍要能看见它
+    //   （否则 `FindFirstFileA("…\*.EXE")` 与 `CreateFileA("…\AGE.EXE")` 会给出相反的答案）。
+    if (!overlay_seen && !overlay_name.empty() && wildcardMatch(last, overlay_name) &&
+        matchesOverlay(absoluteGuest(dir_guest) + "\\" + overlay_name) && out) {
+        HostDirEntry e;
+        e.name = overlay_name;
+        e.is_dir = false;
+        e.is_file = true;
+        fillFromOverlayHost(&e);
+        out->push_back(std::move(e));
     }
 
     // ★ 确定性：永远排序后返回（UTF-8 字节序）；⛔ 不依赖宿主的目录顺序
@@ -836,7 +1013,7 @@ bool Vfs::makeSureDirectoryPathExists(const std::string& guest_path, std::string
     //   （plan D5：形态由实现固定）。`resolve()` 只解析、不建目录，而它要求脚手架已存在 ⇒
     //   这里先把那条映射目录建出来（否则"首次用一个新的 --appdata 就写不进 AppData"）。
     const std::string special_text = normalizeSeps(guest_path);
-    for (const SpecialRoot& sr : kSpecialRoots) {
+    for (const SpecialRoot& sr : specialRoots()) {
         if (!prefixIsDir(special_text, sr.guest)) continue;
         if (app_data_dir_.empty()) {
             if (error) {
@@ -868,7 +1045,7 @@ bool Vfs::makeSureDirectoryPathExists(const std::string& guest_path, std::string
     // "根"的集合：guest 根 + --appdata 的三个特殊目录（它们都**已经存在**）。
     std::vector<std::string> roots;
     roots.push_back(canon(guestRoot()));
-    for (const SpecialRoot& sr : kSpecialRoots) roots.push_back(canon(sr.guest));
+    for (const SpecialRoot& sr : specialRoots()) roots.push_back(canon(sr.guest));
 
     auto atOrAboveRoot = [&](const std::string& raw) {
         const std::string p = canon(raw);

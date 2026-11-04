@@ -27,6 +27,16 @@ int cp932Encode(char16_t w, std::uint8_t out[2]);
 std::u16string cp932ToWide(std::string_view bytes, std::size_t* bad = nullptr);
 std::string wideToCp932(std::u16string_view text, std::size_t* bad = nullptr);
 
+// ★ **UTF-8 文本 → CP932 字节**（"按 CP932 编回字节"的最常用一段：guest 的 A 版 API 表示）。
+//   与 `wideToCp932(utf8ToUtf16(...))` 等价；单独给一条是因为 guest 路径 / 文件名 / 环境
+//   的 A 版一侧全走它 —— 每个 shim 各拼一遍必然漂（README 的反模式：两套各说各话）。
+std::string utf8ToCp932(std::string_view utf8, std::size_t* bad = nullptr);
+
+// CP932 字节的**安全截断**：不切断一个双字节字符（末尾是首字节 0x81..0x9F / 0xE0..0xFC 就连它一起丢）。
+// 用于定长 guest 缓冲（`MAX_PATH` 的 `cFileName` / `lpFilename`）—— 半个字符写进去不是"截断"，
+// 是**非法 CP932**（Windows 的 A 版 API 也不会留下半个字符）。
+std::string cp932Truncate(const std::string& bytes, std::size_t max_bytes);
+
 // UTF-8 ↔ UTF-16（不是 CP932 的一部分，但同属"码页与字符串"的叶子设施；
 // 路径 / W 版 API 的入参都要经过它）。非法字节 / 未配对代理 ⇒ 替换字符并计 bad。
 // ★ 替换字符可换：路径 API 用 '?'，`MultiByteToWideChar(CP_UTF8)` 用 U+FFFD（与 Windows 一致）。

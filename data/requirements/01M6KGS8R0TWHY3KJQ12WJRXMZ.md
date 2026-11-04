@@ -35,8 +35,7 @@
 4. `repo:apps/emulator-lift/src/shims/user32_resource.cpp` `LoadIconA`：正常路径从镜像的 `RT_GROUP_ICON`
    （`IDI_ICON1`）→ `RT_ICON`（id 3–17，lang 1041）拼 `HICON`；伪 HICON 只在 `.rsrc` 数据项映射失败时用，
    且必须 loud log。
-5. `repo:apps/emulator-lift/src/shims/kernel32_version.cpp`：逻辑不改（已优先 `agerc_image`）；加启动日志打
-   `FileVersion`/`ProductVersion`，并保证 `LoadLibraryA` 与 `GetFileVersionInfo*` 指向**同一份字节**。
+5. `kernel32_version.cpp`：`VerQueryValueA` 的**字符串**必须交单字节 ANSI（2026-11-05 修，见文末补记）。
 
 ## 判据
 
@@ -51,3 +50,30 @@
 执行 AGERC 的对话框代码（`SCOPE.md` §1 的模态 no-op stub 不变）；改 `apps/emulator-cxx`；
 为"零售版镜像"另开分支（需要时用 `--agerc` 指 `links/raw/AGERC.DLL__dumped.DLL` 即可，但它与 `.lst`
 不是同一 build，⛔ 不能拿它的 EA 引 `.lst`）。
+
+## 2026-11-05 补记：RCVersion 检查（boot 最后一个卡点）已越过
+
+**期望值来源（EA）**：`0x4BAF26` 的两侧 = `Reg::get("set:RCVersion")` 与 `[RCDLL+0x14]`。期望值来自
+`Engine+697620` 的 `Reg`（vtable `.data:0x5297DC`，slot+4 = `sub_4904D0`）；ctor `sub_491880` 给
+`set:RCVersion` 的**默认值是 0**（`0x4BAF24` 的 `jz` 因此**跳过整个检查**）；**非 0 值只有一个来源**：
+初始化文件 `SYS4INI.BIN`（`_WinMain` `0x4BAB1A` → `sub_414AC0`；`S4IC` ⇒ 解 1,692,004 B）配置段的
+`RCVERSION` 键（`sub_494220` 的 `_stricmp(aRcversion)` → `0x494EC0` `atoi` → `Reg::set`）；**不是**注册表、**不是** ALF 里的 AGERC 条目（完整表见 `repo:apps/emulator-lift/docs/agerc-image.md` §5.1）。
+
+**差的是我们**：修复前实测 `[RCDLL+0x14] = 3`、期望 `39`；根因 = `VerQueryValueA` 把块里的 UTF-16LE
+指针交回去（引擎 `strncpy_s` 只拷到第一个 `00` ⇒ `atoi("3")=3`），而真机 A 变体的字符串是**单字节 ANSI**、
+`puLen` **含结尾 NUL**。改法：字符串子块用 `wideToCp932` 转 ANSI 写进固定暂存页 `0x7FFF0000`、
+`puLen = 字节数+1`；`lpData` 仍保留资源原字节（= W 变体形态，差异写进注释）。**没动** `advapi32` / SCOPE 口径。
+
+**守卫**：`repo:apps/emulator-lift/tests/agerc_module.cpp` 新用例 `verqueryvaluea-string-is-ansi`
+（`GetFileVersionInfoSizeA` → `GetFileVersionInfoA` → `VerQueryValueA` 全链；断言 `puLen==9`、
+`rd8(ptr+1)=='9'`、`atoi` 口径读到 39）。变异：把转换换回"交 UTF-16 指针" ⇒ 该用例 **6 条红**（含 `atoi` 读到 3）。
+
+**boot（干净 `--appdata`）**：`MessageBoxA` 归零；`stop: unimplemented @ 7FFE00AC`（`d3d9!Direct3DCreate9`，
+SCOPE §1 的 M3 缺口），`insns = 102,919,944`（两次一致）。已越过 `sub_4BA890`：`--until ea 0x4BAF3C` 命中
+⇒ `0x4BAF2C` 的 `jz` 真的跳了。下一站 = `sub_406730`（显示初始化）→ `sub_498CC0`（D3D9 设备创建，
+调用点 `0x498D0F`）；DDraw 分支 `sub_43AE30` 未走，因为 `sub_406730` 只在 `set:CreateObject & 1` 时走它。
+
+**遗留（新发现，不在本单）**：① `--appdata` 里残留 `$$AGE.TMP` ⇒ 引擎改走 exe 版本自检 / `_.exe /FIX`
+路径（insns 102,962,464 + 多一个 MessageBox）；② 那条路径上打出**乱码 guest 路径**
+`E:\Games\Eushully\螟ｩ邨申AGE.EXE`（CP932/UTF-8 混用）。⇒ 建议另开单给「文件与路径」族：boot 基线必须
+**从干净的 `--appdata` 起跑**；`GetModuleFileNameA`/VFS 的日文路径要逐字节对。

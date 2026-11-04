@@ -7,12 +7,14 @@
 //     ③ 最终寄存器 / 标志 / x87 元信息 + 已提交内存摘要的哈希。
 //   三个量两次完全相同 ⇒ 虚拟时钟与"宿主侧不许引入随机源"（plan §8.3）这两条成立。
 // ★ 如果没到 L2，本测试**红**并打印卡在哪个 EA —— 那是诚实的结果，不是"跳过"。
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -45,8 +47,7 @@ struct Outcome {
     bool ok = false;
 };
 
-std::uint64_t fnv(std::uint64_t h, const void* p, std::size_t n) {
-    const auto* b = static_cast<const std::uint8_t*>(p);
+std::uint64_t fnv(std::uint64_t h, const void* p, std::size_t n) {    const auto* b = static_cast<const std::uint8_t*>(p);
     for (std::size_t i = 0; i < n; ++i) {
         h ^= b[i];
         h *= 0x100000001B3ull;
@@ -55,8 +56,7 @@ std::uint64_t fnv(std::uint64_t h, const void* p, std::size_t n) {
 }
 
 Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std::uint64_t max_insns,
-                std::FILE* trace_out = nullptr) {
-    Outcome out;
+                std::FILE* trace_out = nullptr) {    Outcome out;
     lift::Machine m;
     std::string err;
     if (!m.init(&err) || !m.loadImage(exe, &err) || !m.loadLst(lst_path, &err) || !m.prepare(0, &err)) {
@@ -96,6 +96,63 @@ Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std
     return out;
 }
 
+// ---------------------------------------------------------------------------------------
+// ★ 安装树红线（2026-11-05）：跑完整个 boot（含两遍 trace 运行）之后，`links/install` 必须
+//   **逐项未变**（相对路径 + 文件大小 + mtime；目录的 mtime 也一起比 —— 新建/删除条目会改它）。
+//   为什么放在这里：boot_trace 是**唯一**真的把 AGE.EXE 跑起来的用例；"引擎往安装树里写"
+//   这个 bug 正是它该守住的回归。没有安装树（CI / 没装）⇒ 打印一行并**跳过这一条**（不是假绿：
+//   这条断言存在的前提是那棵树存在，其它用例仍然照跑）。
+// ---------------------------------------------------------------------------------------
+std::filesystem::path pathFromUtf8(const std::string& s) {
+    const std::u8string u(reinterpret_cast<const char8_t*>(s.data()), s.size());
+    return std::filesystem::path(u);
+}
+
+std::string pathToUtf8(const std::filesystem::path& p) {
+    const std::u8string u = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u.data()), u.size());
+}
+
+// `LIFT_AGE_EXE = <repo>/corpus/assets/age/AGE.EXE__dumped.sectfix.EXE` → `<repo>`
+std::filesystem::path repoRootOf(const char* exe) {
+    std::filesystem::path p = pathFromUtf8(exe);
+    for (int i = 0; i < 4 && p.has_parent_path(); ++i) p = p.parent_path();
+    return p;
+}
+
+std::vector<std::string> snapshotTree(const std::filesystem::path& root, bool* exists) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> out;
+    std::error_code ec;
+    *exists = fs::is_directory(root, ec) && !ec;
+    if (!*exists) return out;
+    for (fs::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            out.push_back("<enum-error> " + ec.message());
+            return out;
+        }
+        const fs::path& p = it->path();
+        std::error_code c2;
+        const fs::path rel = p.lexically_relative(root);
+        std::string line = pathToUtf8(rel);
+        if (it->is_directory(c2)) {
+            line += "|D|";
+        } else if (it->is_regular_file(c2)) {
+            line += "|F|";
+            line += std::to_string(static_cast<unsigned long long>(it->file_size(c2)));
+            line += "|";
+        } else {
+            line += "|X|";
+        }
+        c2.clear();
+        const auto wt = it->last_write_time(c2);
+        line += std::to_string(static_cast<long long>(wt.time_since_epoch().count()));
+        out.push_back(std::move(line));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 }  // namespace
 
 int main() {
@@ -108,6 +165,13 @@ int main() {
 
     const std::uint32_t kWinMain = 0x004BA890u;  // plan §6 S7 的 L2
     const std::uint64_t kMaxInsns = 200000000ull;
+
+    // ★ 安装树红线：跑之前先拍照（见 snapshotTree 的说明）
+    const std::filesystem::path install_dir = repoRootOf(exe) / "links" / "install";
+    bool install_exists = false;
+    const std::vector<std::string> install_before = snapshotTree(install_dir, &install_exists);
+    std::printf("install-tree: %s（%zu 项%s）\n", pathToUtf8(install_dir).c_str(),
+                install_before.size(), install_exists ? "" : "；不存在 ⇒ 这条断言跳过");
 
     g_current_case = "run1";
     const Outcome a = runOnce(exe, lst_path, kWinMain, kMaxInsns);
@@ -196,6 +260,25 @@ int main() {
     }
     std::remove(utf8(ta).c_str());
     std::remove(utf8(tb).c_str());
+
+    // ④ 安装树红线：整个 boot（4 次运行）之后 `links/install` 必须逐项未变。
+    g_current_case = "install-tree-untouched";
+    if (install_exists) {
+        bool still = false;
+        const std::vector<std::string> install_after = snapshotTree(install_dir, &still);
+        LIFT_CHECK(still);
+        if (install_after != install_before) {
+            std::size_t i = 0;
+            while (i < install_before.size() && i < install_after.size() && install_before[i] == install_after[i]) ++i;
+            std::fprintf(stderr,
+                         "红线：`links/install` 被写了 —— 第 %zu 项不同：\n  之前: %s\n  之后: %s\n",
+                         i,
+                         i < install_before.size() ? install_before[i].c_str() : "(少了一项)",
+                         i < install_after.size() ? install_after[i].c_str() : "(少了一项)");
+        }
+        LIFT_CHECK(install_after == install_before);
+        std::printf("install-tree: %zu 项，跑完 boot 后逐项未变\n", install_after.size());
+    }
 
     return finish("boot-trace");
 }

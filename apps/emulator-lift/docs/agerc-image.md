@@ -402,6 +402,24 @@ TimeDateStamp=0x583B94A2  ImageBase=0x10000000  EP=0x000F9001  SizeOfImage=0x157
   由 `RegisterClassExA` 生效 ⇒ 图标**不需要**在 headless 里被绘制，但 `LoadIconA` 必须真的从资源解析成功。
 - AGE.EXE 自身的版本走另一条路（`0x4B8E43` `GetModuleFileNameA(NULL)` → 读自己的 exe），不参与上面的比较。
 
+### 5.1 「期望版本」`set:RCVersion` 从哪来（2026-11-05 补测）
+
+`0x4BAF26` 那两侧**都查清了**（锚全是 EA；实测值来自 `--until ea` + 寄存器/内存探针）：
+
+| 侧 | 是什么 | EA 级证据 |
+|---|---|---|
+| 右：实际值 | `[RCDLL+0x14]`（`ebp-0x324`）= `atoi(VerQueryValueA("\\StringFileInfo\\041103a4\\FileVersion"))` | 读版本 `0x48E65E/0x48E68D/0x48E6AA` → `strchr(',')` `0x48E6DB` → `atoi` `0x48E6F7` → 存 `0x48E6FF` |
+| 左：期望值 | `Reg::get("set:RCVersion")`：`sub_418940` 之后 `mov ecx,[dword_55E1BC]+0AA514`（= `Engine+697620`）→ `mov eax,[ecx]`（`.data:0x5297DC` 的 `Reg::vftable`）→ `call [eax+4]` = `sub_4904D0`（`sub_428E00` 查表；**未命中会弹「不正なキー」并返回 0**，命中返回 `*(int*)entry`） | `0x4BAF0A`..`0x4BAF20`；vtable `.data:0x5297DC`（slot+4 → `sub_4904D0`） |
+| 跳过条件 | `cmp eax, ebx(0)` / `jz` ⇒ **期望值为 0 时整条检查跳过**；`0x4BAF2E` 起才是失败分支（`aAgercDll_0`） | `0x4BAF22` / `0x4BAF24` / `0x4BAF2C` / `0x4BAF2E` |
+| 默认值 | **0**（`Reg` 的 ctor 把每个键都塞一遍默认值，`set:RCVersion` 是 0） | `sub_491880`：`v13=0; sub_434D00(this+1, aSetRcversion, &v13)` @`0x4927EF`..`0x4927FB` |
+| 非 0 值的唯一来源 | **初始化文件 `SYS4INI.BIN`**（不是注册表、不是 ALF 里的 AGERC 条目）：`_WinMain` 打开它（`S4IC` ⇒ LZSS 解出 1,692,004 B），配置段里的 `RCVERSION` 键 → `atoi` → `Reg::set` | 打开 `0x4BAB1A`（`sub_414AC0`）；键分派 `sub_494220`（`Reg::vftable+44`）的 `_stricmp(aRcversion)` → `0x494EC0` `push aSetRcversion` |
+| 注册表不参与 | `RegQueryValueExA` 那条链（`sub_490590`/`sub_491060`）服务的是窗口位置 / 字体链接等；**配置键**走的是初始化文件。缺失即用 ctor 默认值 | `sub_4904D0` 只有"查表"一条路；`sub_494220` 是唯一的 `set:RCVersion` 写入点 |
+
+**2026-11-05 实测（`links/install`，本机 AppData 为空）**：期望值 `eax = 0x27 = 39`；修复前 `[RCDLL+0x14] = 3`、
+修复后 `= 0x27 = 39`。根因在**我们**这侧：`VerQueryValueA` 把块里的 UTF-16LE 指针直接交回，引擎
+`strncpy_s` 只拷到第一个 `00` ⇒ `atoi("3") = 3`。真机 A 变体的字符串是**单字节 ANSI**、`puLen` **含结尾 NUL**。
+
+
 ## 6. 模拟器装载口径（默认 / 回退 / 缺件）
 
 **一句话（可照做）**：默认先装 `--game-dir` 下的 `AGERC.DLL`；**若它不是可映射的 PE 或 `.rsrc` 有映射失败**
@@ -417,7 +435,7 @@ TimeDateStamp=0x583B94A2  ImageBase=0x10000000  EP=0x000F9001  SizeOfImage=0x157
 - 由 §4.1：**A 与 B 的图标 / 版本资源逐字节相同**，所以"M2 的图标/版本"这条路上，
   默认路径与回退路径**不可区分**（除非将来要读菜单/对话框资源 —— 那时才会看到汉化差异，且那是预期）。
 
-> ★ `repo:apps/emulator-lift/SCOPE.md` §1 的"模态"行仍写着"原件典型 .rsrc 虚拟尾部、文件里没有字节"，
+> ★ `repo:apps/emulator-lift/SCOPE.md` §1 的"模态"行原先写着"原件典型 .rsrc 虚拟尾部、文件里没有字节"（**2026-11-05 已按本文件的取证改正**），
 > 这是**针对加壳件的实测**被误当成通性。★ 该文件第 5 行规定"**不允许在用户没有明确要求的情况下编辑这个文件**"
 > ⇒ 本文件**不改它**；等用户明确要求时把该句替换成"正版根件是加壳件（26/40 资源无文件字节），
 > 免壳件在 `DATA1.ALF` / 安装树根上，资源可读；伪 HICON 只作应急"。
@@ -452,7 +470,7 @@ TimeDateStamp=0x583B94A2  ImageBase=0x10000000  EP=0x000F9001  SizeOfImage=0x157
   当前只有代码级证据（§5）。
 - **未测**：AsProtect 运行期解包后的内存镜像（D 是旧仓的 dump，dump 工具/参数未知；未与运行期内存比对）。
 - **未测**：A 的 10 条汉化资源与 B 的**内容级**对账（只比了 sha256 与大小；文案差异未逐条展开）。
-- **未测**：`set:RCVersion` 的默认值（只知比较目标是 `[RCDLL+0x14]`；默认值在 `SYS4INI.BIN` 尾部配置表里，
-  本次未解）。
+- **已测（2026-11-05）**：`set:RCVersion` 的默认值与唯一来源 —— 见 §5.1（默认 0 = 跳过检查；
+  非 0 值来自 `SYS4INI.BIN` 的 `RCVERSION` 键；本机期望 39，`[RCDLL+0x14]` 也是 39）。
 - **未测**：图标的实际像素渲染（headless 不渲染；`LoadIconA` 只验证"资源解析成功"）。
 - **推测**：B 是"开发者把 Debug 构建误放进 DATA1.ALF"还是"发行流程有意放一份免壳件"——无证据，不作结论。

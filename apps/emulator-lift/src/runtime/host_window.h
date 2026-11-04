@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "runtime/region.h"
+
 namespace lift {
 
 struct X86;
@@ -46,6 +48,11 @@ struct HostWindow {
     bool visible = false;
     bool dirty = false;
     bool destroyed = false;
+    // ★ M2 · P4：窗口的**无效区**（update region，**客户区坐标**）。
+    //   `dirty` 保留为它的**布尔镜像**（= `!update_region.empty()`）：`UpdateWindow` 仍按 `dirty`
+    //   决定发不发 WM_PAINT。两者只经 `WindowManager::{invalidate*,validate*}` 一起改
+    //   （⛔ 不许一处真一处假 —— 那会让 `GetUpdateRgn` 与 WM_PAINT 说两套话）。
+    GdiRegion update_region;
 };
 
 struct HostTimer {
@@ -116,6 +123,18 @@ public:
     int showCursor(bool show);                     // 显示 +1 / 隐藏 -1，返回**新**显示计数
     std::uint32_t setCapture(std::uint32_t hwnd);  // 返回**旧**捕获窗口（0 = 没有）
     std::uint32_t capture() const { return capture_; }
+
+    // =====================================================================================
+    // 无效区（update region；M2 · P4 / B7）
+    // ★ 语义（Win32 文档）：`InvalidateRect` 往无效区里**并**矩形、`ValidateRect` / `ValidateRgn`
+    //   从中**减**矩形；`GetUpdateRgn` 只读（**不**改变无效区）；`UpdateWindow` 发完 WM_PAINT 后清空。
+    // ★ `rect == nullptr` ⇒ 整个客户区（InvalidateRect / ValidateRect 的真机语义）。
+    // ★ 坐标一律**客户区**；`dirty` 是 `!update_region.empty()` 的镜像，由这三个函数统一维护。
+    // =====================================================================================
+    void invalidateRect(HostWindow& w, const RegionRect* rect);
+    void validateRect(HostWindow& w, const RegionRect* rect);
+    void validateRegion(HostWindow& w, const GdiRegion& region);  // 无效区 −= region
+    void validateAll(HostWindow& w);                          // 无效区清空
 
 private:
     std::vector<WindowClassInfo> classes_;

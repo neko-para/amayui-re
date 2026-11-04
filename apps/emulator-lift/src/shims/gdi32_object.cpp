@@ -142,7 +142,10 @@ void shimDeleteObject(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    if (entry->kind != HandleKind::GdiFont && entry->kind != HandleKind::GdiBitmap) {
+    // ★ P4：region（`Create*Rgn`）也是可删除的 GDI 对象 —— 释放走 `releasePayload` 的 destroy 回调
+    //   （`gdi32_region.cpp` 注册的 `delete GdiRegion`），本函数只放宽种类判定。
+    if (entry->kind != HandleKind::GdiFont && entry->kind != HandleKind::GdiBitmap &&
+        entry->kind != HandleKind::GdiRegion) {
         shimLog("gdi32", "DeleteObject", "0x%08X（%s）不是可删除的 GDI 对象 ⇒ FALSE", object,
                 handleKindName(entry->kind));
         call.result = 0;

@@ -587,52 +587,117 @@ void shimGetUserDefaultUILanguage(X86&, ShimCall& call) { call.result = 0x0409; 
 
 // ---------------------------------------------------------------------------------------
 // 环境块（`_setenvp` 会碰）
+//
+// ★ **唯一真源** = `lift::guestEnvironment(...)`（vfs.h）：与 `setupProcessStructures` 写进 guest
+//   的那一块、`SHGetSpecialFolderPathA` / `SHGetFolderPathA` 返回的路径**同源**。
+//   ⛔ 不许在这里再写一份 `PATH=.` / `TEMP=...`（两套文本必然漂，2026-11-05 的 bug 就是这么来的）。
 // ---------------------------------------------------------------------------------------
-void shimGetEnvironmentStringsW(X86& cpu, ShimCall& call) {
-    // ★ 环境块由 `setupProcessStructures` 在 guest 里写好（确定性最小集合；A4 输入清单的一项）。
-    //   只有它为空时才退回本地常量（纯档夹具 / 没走 prepare 的调用）。
-    if (cpu.shim.env_ea != 0) {
-        call.result = cpu.shim.env_ea;
-        return;
-    }
-    // 一块 UTF-16 的 "NAME=VALUE\0...\0" + 结尾的额外 \0
-    const std::uint32_t ea = 0x7FFD5000u;  // 已由 prepare() 预留？见下：这里按需提交
-    if (!cpu.mem->committed(ea, 0x1000)) {
-        if (!cpu.mem->commitZeroed(ea, 0x1000, RegionKind::Other, "environment")) {
-            call.result = 0;
-            return;
-        }
-    }
-    static const char kEnv[] = "PATH=.\0TEMP=E:\\TMP\0\0";
-    std::uint32_t off = 0;
-    for (std::size_t i = 0; i < sizeof(kEnv); ++i) {
-        cpu.mem->wr16(ea + off, static_cast<std::uint8_t>(kEnv[i]));
-        off += 2;
-    }
-    call.result = ea;
+std::vector<std::string> envItems(const X86& cpu) {
+    const bool have_appdata = cpu.vfs && !cpu.vfs->appDataDir().empty();
+    return lift::guestEnvironment(have_appdata);
 }
 
-void shimFreeEnvironmentStringsW(X86&, ShimCall& call) { call.result = 1; }
+// 环境块的 UTF-16 视图（`NAME=VALUE\0…\0\0`）。`ea == 0` ⇒ 从真源现造一块。
+std::uint32_t envBlockWide(X86& cpu) {
+    if (cpu.shim.env_ea != 0) return cpu.shim.env_ea;
+    // 纯档夹具 / 没走 prepare 的调用：在 0x7FFD5000 现造（与本模拟器的 argv 块相邻的保留页）
+    const std::uint32_t ea = 0x7FFD5000u;
+    if (!cpu.mem->committed(ea, 0x1000)) {
+        if (!cpu.mem->commitZeroed(ea, 0x1000, RegionKind::Other, "environment")) return 0;
+    }
+    std::uint32_t off = 0;
+    for (const std::string& item : envItems(cpu)) {
+        for (const char c : item) {
+            cpu.mem->wr16(ea + off, static_cast<std::uint16_t>(static_cast<unsigned char>(c)));
+            off += 2;
+        }
+        cpu.mem->wr16(ea + off, 0);
+        off += 2;
+    }
+    cpu.mem->wr16(ea + off, 0);
+    return ea;
+}
 
-void shimGetEnvironmentVariableA(X86& cpu, ShimCall& call) {
-    const std::string name = call.str(0);
+// 环境块的 ANSI 视图（`NAME=VALUE\0…\0\0`）。每次调用在 guest 堆上新建一块：
+// `FreeEnvironmentStringsA` 在本模拟器里是 no-op（CRT 只在启动时取一次）⇒ 会留下一个
+// 进程生命期的小块；⛔ 不缓存 EA（缓存要往 X86::ShimState 加字段，那是别人的文件）。
+std::uint32_t envBlockAnsi(X86& cpu) {
+    if (!cpu.heap) return 0;
+    std::string bytes;
+    for (const std::string& item : envItems(cpu)) {
+        bytes += item;
+        bytes.push_back('\0');
+    }
+    bytes.push_back('\0');
+    const std::uint32_t ea =
+        cpu.heap->alloc(static_cast<std::uint32_t>(bytes.size()), /*zero=*/true);
+    if (ea == 0) return 0;
+    cpu.mem->writeBytes(ea, bytes.data(), bytes.size());
+    return ea;
+}
+
+void shimGetEnvironmentStringsW(X86& cpu, ShimCall& call) { call.result = envBlockWide(cpu); }
+void shimGetEnvironmentStringsA(X86& cpu, ShimCall& call) { call.result = envBlockAnsi(cpu); }
+
+void shimFreeEnvironmentStringsW(X86&, ShimCall& call) { call.result = 1; }
+void shimFreeEnvironmentStringsA(X86&, ShimCall& call) { call.result = 1; }
+
+// 取值：从**同一份真源**里按名字查（大小写不敏感）。文档口径：
+// 缓冲够 ⇒ 返回长度（不含结尾 0）；不够 ⇒ 返回所需字节数（**含**结尾 0）；没有 ⇒ 0 + 203。
+std::uint32_t getEnvValue(X86& cpu, ShimCall& call, bool wide) {
+    // ★ A 版的名字是 CP932 字节；W 版是 UTF-16 ⇒ 两种都要读对（⛔ 不能拿 A 的 `call.str(0)` 去读 W）。
+    std::string name;
+    if (wide) {
+        for (std::uint32_t i = 0; i < 256u; ++i) {
+            const std::uint16_t w = cpu.mem->rd16(call.u32(0) + i * 2u);
+            if (w == 0) break;
+            name.push_back(w < 0x80 ? static_cast<char>(w) : '?');
+        }
+    } else {
+        name = call.str(0);
+    }
     const std::uint32_t buf = call.u32(1);
     const std::uint32_t cap = call.u32(2);
     std::string value;
-    if (equalsIgnoreCase(name, "PATH")) value = ".";
-    if (equalsIgnoreCase(name, "TEMP")) value = "E:\\TMP";
-    if (value.empty()) {
-        call.result = 0;
+    bool found = false;
+    for (const std::string& item : envItems(cpu)) {
+        const std::size_t eq = item.find('=');
+        if (eq == std::string::npos) continue;
+        if (!equalsIgnoreCase(name, item.substr(0, eq))) continue;
+        value = item.substr(eq + 1);
+        found = true;
+        break;
+    }
+    if (!found) {
         cpu.shim.last_error = 203;  // ERROR_ENVVAR_NOT_FOUND
-        return;
+        call.result = 0;
+        return 0;
     }
-    if (cap < value.size() + 1) {
-        call.result = static_cast<std::uint32_t>(value.size() + 1);
-        return;
+    const std::size_t need = value.size() + 1u;  // 字符数（本环境全是 ASCII ⇒ 字节数相同）
+    if (cap < need) {
+        call.result = static_cast<std::uint32_t>(need);
+        return call.result;
     }
-    guestWrite(*cpu.mem, buf, value);
+    if (buf == 0) {
+        cpu.shim.last_error = 87;  // ERROR_INVALID_PARAMETER（与其它"缓冲非 0 但指针为空"一致）
+        call.result = 0;
+        return 0;
+    }
+    if (wide) {
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            cpu.mem->wr16(buf + static_cast<std::uint32_t>(i) * 2u,
+                          static_cast<std::uint16_t>(static_cast<unsigned char>(value[i])));
+        }
+        cpu.mem->wr16(buf + static_cast<std::uint32_t>(value.size()) * 2u, 0);
+    } else {
+        guestWrite(*cpu.mem, buf, value);
+    }
     call.result = static_cast<std::uint32_t>(value.size());
+    return call.result;
 }
+
+void shimGetEnvironmentVariableA(X86& cpu, ShimCall& call) { getEnvValue(cpu, call, false); }
+void shimGetEnvironmentVariableW(X86& cpu, ShimCall& call) { getEnvValue(cpu, call, true); }
 
 // ---------------------------------------------------------------------------------------
 // CPU 特性 / 错误模式 / 虚拟内存查询（启动早期会碰）
@@ -765,9 +830,13 @@ void registerBootstrapShims(ShimRegistry& s) {
     s.add("kernel32", "SetThreadLocale", Conv::Stdcall, 1, &shimSetThreadLocale);
     s.add("kernel32", "GetUserDefaultUILanguage", Conv::Stdcall, 0, &shimGetUserDefaultUILanguage);
 
+    // 环境族：**同一份真源**（vfs.h 的 guestEnvironment）；A/W 两版都实现（⛔ 不各写一份字符串）
     s.add("kernel32", "GetEnvironmentStringsW", Conv::Stdcall, 0, &shimGetEnvironmentStringsW);
+    s.add("kernel32", "GetEnvironmentStringsA", Conv::Stdcall, 0, &shimGetEnvironmentStringsA);
     s.add("kernel32", "FreeEnvironmentStringsW", Conv::Stdcall, 1, &shimFreeEnvironmentStringsW);
+    s.add("kernel32", "FreeEnvironmentStringsA", Conv::Stdcall, 1, &shimFreeEnvironmentStringsA);
     s.add("kernel32", "GetEnvironmentVariableA", Conv::Stdcall, 3, &shimGetEnvironmentVariableA);
+    s.add("kernel32", "GetEnvironmentVariableW", Conv::Stdcall, 3, &shimGetEnvironmentVariableW);
 
     s.add("kernel32", "IsProcessorFeaturePresent", Conv::Stdcall, 1, &shimIsProcessorFeaturePresent);
     s.add("kernel32", "SetErrorMode", Conv::Stdcall, 1, &shimSetErrorMode);

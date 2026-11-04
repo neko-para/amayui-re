@@ -116,6 +116,39 @@ std::string wideToCp932(std::u16string_view text, std::size_t* bad) {
 }
 
 // ---------------------------------------------------------------------------------------
+// ★ UTF-8 文本 → CP932 字节 / CP932 字节的安全截断
+//   2026-11-05 缺陷单（日文 guest 路径乱码）的落点：guest 的 A 版 API 只认 CP932 字节，
+//   而 VFS / 宿主侧只有 UTF-8 文本 ⇒ 出口统一走这一条，⛔ 不再"把 UTF-8 字节原样交出去"。
+// ---------------------------------------------------------------------------------------
+std::string utf8ToCp932(std::string_view utf8, std::size_t* bad) {
+    std::size_t bad_utf8 = 0;
+    const std::u16string w = utf8ToUtf16(utf8, &bad_utf8);
+    std::size_t bad_cp932 = 0;
+    std::string out = wideToCp932(w, &bad_cp932);
+    if (bad) *bad = bad_utf8 + bad_cp932;
+    return out;
+}
+
+std::string cp932Truncate(const std::string& bytes, std::size_t max_bytes) {
+    if (bytes.size() <= max_bytes) return bytes;
+    // ★ **逐对**走（⛔ 不按"末字节像不像首字节"猜）：CP932 的 trail 字节有 0x40..0x7E / 0x80..0xFC，
+    //   与首字节范围重叠 ⇒ 只看末字节会把"边界正好落在 trail 上"的完整字符也丢掉。
+    std::string out;
+    out.reserve(max_bytes);
+    std::size_t i = 0;
+    while (i < bytes.size()) {
+        const unsigned char b = static_cast<unsigned char>(bytes[i]);
+        const bool lead = (b >= 0x81u && b <= 0x9Fu) || (b >= 0xE0u && b <= 0xFCu);
+        if (lead && i + 1u >= bytes.size()) break;  // 末尾一个孤立首字节 ⇒ 不是合法字符，丢掉
+        const std::size_t n = lead ? 2u : 1u;
+        if (out.size() + n > max_bytes) break;
+        out.append(bytes, i, n);
+        i += n;
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------
 // UTF-8 ↔ UTF-16（实现与 kernel32_file.cpp 原先的局部版本逐行相同；搬到这里是为了让
 // W 版 API 的 shim 不必各写一份）
 // ---------------------------------------------------------------------------------------

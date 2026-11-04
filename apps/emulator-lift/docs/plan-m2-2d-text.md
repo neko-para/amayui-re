@@ -56,6 +56,10 @@ cd apps/emulator-lift
   （`0x30000000`）、资源 / 版本 / `_GetInstance@0` 从镜像解析、HICON 返回确定性假句柄，boot 越过它、
   注册完窗口类，停在 `gdi32!CreateICA`（`0x0046512C`，即 `sub_464FD0` 的"建屏幕 DC"）。
   ⇒ **P2（GDI 字体）是当前启动路径的闸门**，P1（DDraw）在它之后。
+  ★ **2026-11-05 更正**：boot 已越过 `CreateICA`，现在停在 `d3d9!Direct3DCreate9`（`eip=7FFE00AC`，
+  `insns=102,919,944`，连跑两次一致）；而且 **P1（DDraw）根本不在本安装的启动路径上**
+  （`set:CreateObject = 2`，见 §F2）⇒ 第一帧的闸门是 **D3D9 设备创建**，既不是 DDraw、也不是 GDI 字体
+  （字体要的是"某个 DC"，D3D9 路径下不再是 DDraw 表面 DC）。
 - 历史口径保留：`0x4BA9A2 mov esi, LoadIconA` / `0x4BA9A8 call esi` 是**函数指针调用** ⇒
   census 的"LoadIconA 0 站点"是**下界**，不是"没调用"。**M2 必须 trace 驱动，不能按站点数排工作量。**
 - `ShowCursor` 同理（`0x4BA082 mov esi, ShowCursor`）；M2 的输入簇会撞上它。
@@ -140,13 +144,73 @@ LoadIconA（×2，函数指针）→ LoadCursorA → GetStockObject(BLACK_BRUSH)
   ⇒ shim 必须实现"看一眼不移除"的语义；只实现 `GetMessage` 会让循环每次多取一条/丢一条。
 - 主循环用 `timeGetTime` 做帧节奏、`Sleep` 让出时间片；M1 的 `Sleep` 已推进虚拟时钟。
 
-### F2 · DDraw 是**动态**入口（G1 的直接证据）
+### F2 · 显示初始化有**两条路线**；本安装走 **D3D9**（`set:CreateObject` 实测 = **2**）
+
+`sub_406730` 按 `set:CreateObject` 的**两位掩码**各走一套初始化；两段是**顺序 if，不是互斥**
+（值为 3 时两段都会跑）：
+
+| 位 | 值 | 判定 EA | 块内做什么 |
+|---|---|---|---|
+| bit0 | `1` | `0x406751 test al,1` → `0x406753 jz loc_4068A9` | **DDraw**：`sub_43AE30`（`0x40675F`，装载 `DDRAW.DLL` + 取 `DirectDrawCreate`）→ `sub_440A20`（`0x406805`，建 DDraw 对象）→ `sub_450B50`（`0x40685E`）；任一步失败 ⇒ 弹对应错误串 + `return 0` |
+| bit1 | `2` | `0x4068BF test al,2` → `0x4068C1 jz loc_406C3F` | **D3D9**：`sub_498CC0`（`0x406ADA`，`Direct3DCreate9` + `CreateDevice`）→ `sub_4A6EE0`（`0x406B37`，把渲染器挂到设备上）；失败 ⇒ 弹「DirectX…」+ `return 0` |
+
+- **不互斥**：bit0 的块没有收尾跳转，控制流**落在** `loc_4068A9`（bit1 的判定）⇒ 值 3 会先 DDraw 再 D3D9。
+- **位只有两位（就 `sub_406730` 与引擎自己的写值而言）**：全 `.lst` 共 **32** 处
+  `push offset "set:CreateObject"` —— 1 处是写入（`0x494FAE`，`Reg::set`），其余 31 处是读取。
+  这 31 处读取的用法只有四种：`test al,1`、`test al,2`、`and eax, (1<<set:DrawMode)` 后 `cmp`、
+  当 `sprintf` 的参数（`0x4178A6` 的「CreateObject=0x%x」）—— **没有一处判 `& 4` / `& 8`**。
+  ⇒ bit0 = DDraw、bit1 = D3D9；引擎自己写这个值时只会写 **3**（位 0|1）。
+- `set:DrawMode` 决定"当前是哪一位"：`sub_417800` 在 `0x4178F9` 算 `1 << set:DrawMode`，若
+  `(CreateObject & mask) != mask` 就**把 CreateObject 强制改成 3**（`0x417908 push 3` → `0x417915` `Reg::set`）
+  并打「DirectX オブジェクト作成設定が不正です」。
+- 两段都不过时不报错：直接走到公共尾巴 `loc_406C3F`（只记 `display:ScreenMode` 到 `this+0xA40D8`）并 `return 1`。
+
+**实测值：`CREATEOBJECT` = `"2"`、`DRAWMODE` = `"1"`** ⇒ bit0 = 0、bit1 = 1 ⇒ **本安装只走 D3D9**。
+`1 << 1 = 2` 与 `CreateObject = 2` 相等 ⇒ `sub_417800` 的强制改写**不触发**。
+
+- 真源是随包初始化文件，不是我们的代码：`repo:links/install/SYS4INI.BIN`（446,558 B，
+  sha256 `b6738009b593dab650db5b8e06603c3d29efe822486c7c818edbb9c7b5c9ee1f`）是 S4IC 容器
+  （`[0,300)` 头 + `[300,312)` 三个 uint32 `1,692,004 / 1,692,004 / 446,246` + LZSS 体，`sub_436A80`：
+  `N=4096 / F=18 / 阈值 2 / r0 = N-F`）⇒ 解出 **1,692,004 B** = 21,109 条 ALF TOC + 尾部初始化块。
+- 初始化块在**解压载荷偏移 1,691,024**：`uint32 953`、`uint32 51`（键值对数）、随后 51 对 `key\0value\0`；
+  `CREATEOBJECT` 的键字节在偏移 **1,691,032**，紧跟的值是 `"2"`（`DRAWMODE` 的值是 `"1"`）。
+- 读法链（EA）：`_WinMain` `0x4BAB1A push "SYS4INI.BIN"` → `0x4BAB26 call sub_414AC0`
+  （trace 里 `CreateFileA` 的返回地址 `0x414B1F`）→ Reg 装载 `sub_494220`（vtable 分派，**无直接 call**）
+  → `0x494F92 __stricmp("CREATEOBJECT")` → `0x494F9F _atoi` → `0x494FBC sub_434D00("set:CreateObject", &v)`。
+
+**怎么重跑（只看运行期，不读代码）**
+
+```bash
+cd apps/emulator-lift
+G=../../links/install
+# ① bit1 块的第一条指令：能停住 ⇒ bit1 = 1
+./out/emulator-lift --game-dir $G --agerc $G/AGERC.DLL --appdata ../../.tmp/appdata-probe \
+  --until ea 0x4068C7
+#   期望：stop      : until-ea @ eip=004068C7      （本机 insns = 102,914,704）
+# ② bit0 块的第一条指令：停不到 ⇒ bit0 = 0，一路撞到 d3d9 的未实现导入
+./out/emulator-lift ... --until ea 0x406759 --max-insns 120000000
+#   期望：stop      : unimplemented @ eip=7FFE00AC（d3d9!Direct3DCreate9），insns = 102,919,944
+# ③ ini 的键比较真的发生在启动路径上（而不是"文件里写着但没被读"）
+./out/emulator-lift ... --until ea 0x494F92
+#   期望：stop      : until-ea @ eip=00494F92      （本机 insns = 35,853,538）
+# ④ 全程没有 DDraw 装载
+./out/emulator-lift ... --trace-shims --max-insns 120000000 | grep -i ddraw   # 空
+```
+
+- ★ 三条 `--until ea` 是**运行期**证据；`--trace-shims` 全程只有
+  `LoadLibraryA` 的 `AGERC.DLL` / `KERNEL32.DLL` / `Shell32.dll` / `dwmapi.dll`（+ `GetProcAddress` 若干），
+  **没有** `DDRAW.DLL`、也没有 `DirectDrawCreate`。
+- ★ 数值的**独立**来源是上面那次 S4IC 解压：解出的字节里 `CREATEOBJECT\0 2 \0` 可逐字节核对
+  （算法照 `sub_436A80` 的 `.lst` 逐字实现，脚本是一次性的、⛔ 不入库）。
+- ★ 调用链（trap 现场栈回溯）：`0x498D14 ⇐ 0x406ADF ⇐ 0x417C20 ⇐ 0x4BB412 ⇐ 0x4EDB8B`
+  = `sub_498CC0 ⇐ sub_406730 ⇐ sub_417800 ⇐ _WinMain@16 ⇐ CRT`。
+
+#### F2.1 · DDraw 仍是**动态**入口（G1 的直接证据；本安装的启动路径不经过它）
 
 ```
-0x43AE30: LoadLibraryA("DDRAW.DLL") → GetProcAddress("DirectDrawCreate") → 存在 [this+0FA8]
-0x43C380: DirectDrawCreate(...) → QueryInterface(IID_IDirectDraw2) → Release(原对象)
-0x406730: ... → sub_43AE30 → sub_440A20(hwnd, ..., screenMode, ...)
-0x440A20: DirectDraw 的 GetAvailableVidMem(+0x5C) → GetDisplayMode(+0x30) → SetCooperativeLevel → ...
+0x43AE30（调用点 0x40675F / 0x406502）: LoadLibraryA("DDRAW.DLL") → GetProcAddress("DirectDrawCreate") → 存 [this+0FA8]
+0x43C380（调用点 0x440A6D / 0x406518）: DirectDrawCreate(...) → QueryInterface(IID_IDirectDraw2) → Release(原对象)
+0x440A20（唯一调用点 0x406805）: GetAvailableVidMem(+0x5C) → GetDisplayMode(+0x30) → SetCooperativeLevel → ...
 ```
 
 ⇒ `DirectDrawCreate` 不能只返回一个裸对象：`QueryInterface(IID_IDirectDraw2)` 必须成功（错误串
@@ -158,7 +222,29 @@ LoadIconA（×2，函数指针）→ LoadCursorA → GetStockObject(BLACK_BRUSH)
   `KERNEL32!IsDebuggerPresent` / `SetThreadExecutionState`、`COMCTL32!_TrackMouseEvent`。
   ⇒ **导出转发必须是一张表（module!name → 我们自己的 thunk），不是给 DDraw 开的特例。**
 
-### F3 · DirectDraw 的形状与用量
+#### F2.2 · DDraw 在本安装的启动路径上是 **dead**
+
+**结论：是（dead）—— 但只对"本安装的启动路径"成立，不是"二进制里不可达"。**
+
+- `sub_440A20`（DDraw 的**完整**初始化：`GetAvailableVidMem` / `GetDisplayMode` / `SetCooperativeLevel`）
+  **只有 1 个调用点 `0x406805`**，就在 bit0 块里。
+- `sub_43C380`（`DirectDrawCreate` 的封装）只有 2 个调用点：`0x440A6D`（在 `sub_440A20` 里）、
+  `0x406518`（在 `sub_4764B0` 的 chunk `0x4064E0` 里 —— 见下）。
+- `sub_43AE30`（`LoadLibraryA("DDRAW.DLL")` + `GetProcAddress`）只有 2 个调用点：`0x40675F`（bit0 块）、
+  `0x406502`（同一个 chunk）。`0x4064E0` 这个 chunk 是 `sub_4764B0` 的体外块（`0x4764B6 jmp 0x4064E0`），
+  **它不检查 `CreateObject`**，一进来就装载 DDraw 并 `DirectDrawCreate`。
+- 运行期三条证据（§F2 的 ①②④）都指向 bit0 = 0 且没有发生任何 DDRAW 装载 ⇒ 上述两条入口在 boot 上都没被走到。
+
+⚠ **未测（不许写成"DDraw 可以删掉"）**：`sub_4764B0` 在**全 `.lst` 里没有直接 `call`**
+（`disasm-fn callers sub_4764B0` = 0 个调用方 + 1 处取址证据：表 `0x526B70` 的首项；
+`0x4B5338` 处出现服务名字符串 `"AGE:IAGEService"`）⇒ 它是**动态分派**入口。
+它是否会在**别的路径**（脚本 / 服务调用 / 换分辨率）被调到 = **未测**。
+
+### F3 · DirectDraw 的形状与用量（= **另一条渲染后端**；本安装的启动路径不经过它）
+
+> ★ 定位（2026-11-05 取证，见 §F2）：本节是 **DDraw 后端**的形状。本安装 `set:CreateObject = 2`
+> ⇒ 启动路径走 D3D9，**这整节在 boot 上不发生**。它仍是同一条线上的另一条后端（P1 已交付），
+> ⛔ 不是"没用"；只是**不能拿它当第一帧的前置**。
 
 - 创建表面：`sub_43C8D0` 填 `DDSURFACEDESC`（`dwSize = 108`，`dwFlags = 7` = CAPS|HEIGHT|WIDTH），
   按 `a6` 写三档 caps（`0x840` 系统内存 / `0x4040` 显存 / `0x40` 离屏平面），再走 vtable **+24** `CreateSurface`；
@@ -210,13 +296,17 @@ LoadIconA（×2，函数指针）→ LoadCursorA → GetStockObject(BLACK_BRUSH)
 
 - `LoadIconA` 要读 PE 资源目录（`RT_GROUP_ICON` / `RT_ICON`）；`version` 3 条要读 `VS_VERSIONINFO`。
   `FindResourceA` / `SizeofResource` / `LoadResource` / `LockResource` **不在导入表、`.lst` 也没有调用点**。
-- **AGERC 的镜像是免壳的**（取证与数字见 [`agerc-image.md`](agerc-image.md)）：`DATA1.ALF` 里那份
-  （`SYS4INI.BIN` 第 21072 条，sha256 `f48d1c0f…`）是完整 PE —— 7 节 / 21 导出 / **40 条资源全部可映射** /
-  `FileVersion 39.1.0.0`；安装树根上那份（`6241de66…`）是同一 build 经**汉化替换 10 条 MENU/DIALOG 资源**
-  后的产物，`.text` 与图标/版本资源跟它逐字节相同 ⇒ 资源 / 版本 / 导出都从该镜像解析。
-  ⛔ **不需要另外的拆壳件**（ALF 条目本身就是免壳件，且是 `.lst` 语料的真前身）；⛔ 伪 HICON **不是预期路径**。
-  只有正版安装树的根件（`repo:links/raw/AGERC.DLL`，AsProtect）才资源不可读（26/40 条无文件字节）——
-  那是 D6 的"回退到 ALF 条目"分支，不是 AGERC 的通性。
+- **AGERC 的镜像来源：优先用安装目录里那份，ALF 条目只作零售树的回退**（用户 2026-11-05 裁决）。
+  取证与数字见 [`agerc-image.md`](agerc-image.md)：
+  - `repo:links/install/AGERC.DLL`（`6241de66…`，848,896 B）= **汉化版 `DATA1.ALF` 里那份被抽出来的免壳件**
+    —— 7 节 / 21 导出 / **40 条资源全部可映射** / `FileVersion 39.1.0.0`。★ **本线默认就用它**：
+    引擎自己也是按名字 `LoadLibraryA("AGERC.DLL")` 从应用目录取，取到的就是这一份。
+  - `DATA1.ALF` 的 `SYS4INI.BIN` 第 21072 条（`f48d1c0f…`）= 同一 build 的**未汉化**件：`.text` / `.data` / `.reloc`
+    与上面那份逐字节相同，只有 **10 条 MENU/DIALOG 资源**不同（图标 / 版本资源逐字节相同）。
+    ⇒ 它是"安装树里没有抽出的 AGERC.DLL 时"的回退来源，⛔ **不是**首选（用了会读到未汉化的菜单 / 对话框文案）。
+  - ⛔ **不需要拆壳件**：这两份都是免壳 PE。只有**正版**安装树的根件（`repo:links/raw/AGERC.DLL`，AsProtect 加壳，
+    335,872 B）才资源不可读（26/40 条无文件字节）—— 那是"回退链的最后一档"，不是 AGERC 的通性。
+  - ⛔ 伪 HICON **不是预期路径**：只有 `.rsrc` 映射真的失败时才允许，并且必须打日志。
 - 小族：`SHGetSpecialFolderPathA` 5 站点（我的文档 / AppData）· `PathRemoveFileSpecA` 3 · `MakeSureDirectoryPathExists` 3 ·
   `ImmAssociateContext` 1 · COM/VARIANT 5。它们归 M2，但**不一定在启动主路径上**。
 - 存档根：`data/spec/chapters/65-save.md` 写明 `set:UseAppDataFolder == 1` 时根 = 用户应用数据目录，
@@ -308,6 +398,8 @@ LoadIconA（×2，函数指针）→ LoadCursorA → GetStockObject(BLACK_BRUSH)
   ④ 都拿不到 ⇒ `LoadLibraryA` 返回 0 + 126、`GetProcAddress` 同样 126，⛔ 不假装成功。
   ★ 正版树的根件是 AsProtect 加壳件（`repo:links/raw/AGERC.DLL`，335,872 B）⇒ 走③；
   当前测试安装树 `repo:links/install` 的根件已是免壳件（848,896 B）⇒ 走②，**P0 不需要 `--agerc`**。
+  ★★ **② 是首选，③ 只是"还没抽出文件"时的回退**（用户 2026-11-05）：②那份就是**汉化过的**（10 条 MENU/DIALOG 资源
+  被替换），而 ③ 是同一 build 的未汉化件 —— 菜单 / 对话框文案会回到日文。⇒ 判定顺序不能反。
 - `LoadIconA`：`hInstance == AGE 主模块` ⇒ AGE 资源；`hInstance == agerc_base` ⇒ AGERC 资源（`IDI_ICON1`）；
   从镜像的 `RT_GROUP_ICON` → `RT_ICON` 拼图标。窗口图标在 headless 下不被绘制（无 `WM_SETICON` /
   `SetClassLong`，只有 `WNDCLASSEXA.hIcon` → `RegisterClassExA`）。**免壳件的 40/40 资源可映射 ⇒ 不需要拆壳件**；
@@ -361,6 +453,10 @@ M2b 再做 region + SDL 输入 + 光标 + `GetAsyncKeyState` 影子状态。
 | **B10** | **性能与工作量报告**：`--bench-frame N` 报指令数 / 帧时间 / MIPS；记录 DDraw+GDI 的实际投入与撞到的新语义数；**不做自动裁决**（由用户后续决定） | 报告 | M2a 出口 |
 
 ★ B4 的"没有执行到的未实现导入" = 现有 `tests/base_coverage.cpp` 的同一判据，但对象换成"到第一帧"的 trace。
+★ **B2 / B4 的"第一帧"形状是 DDraw 味道的（`Flip >= 1`、trace 里出现 `Blt`/`BltFast`）**；而本安装
+`set:CreateObject = 2` ⇒ 启动路径走 D3D9（§F2），第一条渲染指令是 `Clear`（`0x498B82`）而不是 `Flip`。
+⇒ 这两条判据**要等路线裁决（§F2 的 A/B/C）之后再按裁决改写**；在那之前它们是"DDraw 后端"的判据，
+不是本安装第一帧的判据。
 ★ B5 的"截获字符串"= 从 trace 里取 `TextOutA` / GDI 调用参数的副本，或者由夹具固定一段测试串；
   ⛔ 不要把"我看了眼截图"当判据。
 
@@ -374,11 +470,11 @@ M2b 再做 region + SDL 输入 + 光标 + `GetAsyncKeyState` 影子状态。
 | # | 切片 | 做什么 | 判据 | 量级 |
 |---|---|---|---|---|
 | **P0** | headless 窗口 + 完整消息泵 + 机制 | G1 导出转发表 · G2 COM 对象/vtable/refcount · G3 嵌套 guest 回调栈 · G4 guest surface arena · G5 `--appdata` + headless present + 帧哈希 + `--time-limit` · **headless 窗口**（句柄/类/客户区/位置）· **完整消息泵**（Get/Peek/Post/Send/Translate/Dispatch/Wait/Quit、`WM_PAINT` 合并、`WM_TIMER`、`PeekMessage(PM_NOREMOVE)`）· **启动解锁**：`LoadIconA` / `LoadCursorA` / `GetStockObject` / `RegisterClassExA` / `CreateWindowExA` / `ShowWindow` / `UpdateWindow` + `GetSystemMetrics` / `GetAsyncKeyState`（headless 固定值 / 无键）+ **AGE.EXE + 真实 AGERC 镜像**的 PE 资源 / `version` 3（D6；`--agerc` 可覆盖；缺镜像 ⇒ 126） | B1 + B6；pure 夹具；headless 下 `CreateWindowEx` → `WM_CREATE` → `WM_SIZE` → `WM_PAINT` 序列正确；boot 越过 `0x4BA9AA`（安装树根件即免壳件；正版树回退到 `DATA1.ALF` 的 `AGERC.DLL` 条目；只有两种来源都缺才停在 126） | 4–5 周 |
-| **P1** | DDraw 2D 核心 | DDraw/DirectDrawSurface 对象与 vtable（只填用到的 + 未用到的 loud trap）· `CreateSurface` / `Blt` / `BltFast` / `SetColorKey` / `Lock` / `Unlock` / `GetDC` / `ReleaseDC` / `Flip` / `Set/GetDisplayMode` / `SetCooperativeLevel` / `GetAvailableVidMem` / **`EnumDisplayModes` + guest 回调** · 颜色键 / 裁剪 / 16·32bpp · surface 在 guest 内存 | B2；到 DDraw init 不 trap；首个 surface 创建 + 首帧 present | 4–6 周 |
+| **P1** | DDraw 2D 核心 | DDraw/DirectDrawSurface 对象与 vtable（只填用到的 + 未用到的 loud trap）· `CreateSurface` / `Blt` / `BltFast` / `SetColorKey` / `Lock` / `Unlock` / `GetDC` / `ReleaseDC` / `Flip` / `Set/GetDisplayMode` / `SetCooperativeLevel` / `GetAvailableVidMem` / **`EnumDisplayModes` + guest 回调** · 颜色键 / 裁剪 / 16·32bpp · surface 在 guest 内存 | B2；到 DDraw init 不 trap；首个 surface 创建 + 首帧 present ★ **现实定位：已实现，但本安装的启动路径不经过它（见 §F2）；它是同一条线的另一条渲染后端，不是"没用"，只是不能当第一帧的前置** | 4–6 周 |
 | **P2** | GDI 字体 / 文本 | GDI 对象表 / DC（DISPLAY + surface）· `CreateFontIndirectA` / `SelectObject` / `DeleteObject` / `GetCurrentObject` / `GetStockObject` · FreeType 后端 + Amayui CN · `GetTextMetricsA` / `EnumFontFamiliesExA` / `AddFontMemResourceEx` · `GetGlyphOutlineA` 1/17/65 · `GetTextExtentPoint32A` · `TextOutA` | B3；文本自洽；到第一段文本不 trap | 3–5 周 |
 | **P3** | 真实 SDL 窗口 / 输入 | 只换**呈现与输入后端**：SDL 窗口 + 纹理上传 · SDL 键鼠 → 消息 + `GetAsyncKeyState` 影子 · 光标 / 焦点 / resize · 关闭确认（`MessageBoxA`：headless 一律 IDOK；交互只对 MB_OKCANCEL/YESNO 弹 SDL，其余记日志返回 IDOK）· **不改** P0 的窗口/消息语义 | B6 在 P3 之后仍绿；交互 smoke 能点、能关 | 2–3 周 |
 | **P4** | 其余小族 / region | `SHGetSpecialFolderPathA` / `PathRemoveFileSpecA` / `MakeSureDirectoryPathExists` · COM/VARIANT 5 · `ImmAssociateContext` · GDI region + `GetUpdateRgn` / `ValidateRgn` · B8 的例外表（M4 路径逐键列出） | B7；B8 的族内 stub 归零；存档名/特殊目录不炸 | 2–3 周 |
-| **P5a** | 第一帧集成 | 从 `_WinMain@16` 跑到 `Flip >= 1`（运行上限 **1 分钟墙钟**，`--time-limit 60`）；逐条 trace 修 gap；帧哈希 / 文本像素 / 性能数字 | B4 / B5 / B10 | 2–3 周 |
+| **P5a** | 第一帧集成 | 从 `_WinMain@16` 跑到 `Flip >= 1`（运行上限 **1 分钟墙钟**，`--time-limit 60`）；逐条 trace 修 gap；帧哈希 / 文本像素 / 性能数字 | B4 / B5 / B10 ★ **判据形状随路线裁决而变**：DDraw 的 `Flip` vs D3D9 的 `Clear`/`Present`（见 §6.1） | 2–3 周 |
 | **P5b** | 标题 / 交互集成 | 跑到标题（若影片 skip 不阻塞）；点进 / 退出；关闭确认；M2b smoke | B9 | 1–2 周 |
 | **P6** | 收口 | M2 族 stub 归零 / `lift check` / 变异条目 / 文档漂移 / 工作量报告 | B8 + 工作量报告 | 1 周 |
 
@@ -387,6 +483,30 @@ M2b 再做 region + SDL 输入 + 光标 + `GetAsyncKeyState` 影子状态。
 - **合计 ≈ 19–28 人周（4.4–6.5 人月）**；这是**评估数**，不是自动闸门（D8）。
 - 一个人做：按 P0→P1→P2→P5a→P3/P4 并行→P5b→P6。
 - 两个人做：P0 后，一人 P1+P2，一人 P3+P4；P5a 汇合。日历可压到 ~12–16 周，但**成本口径不变**。
+
+### 6.1 P5a 的前置变化（2026-11-05 取证后）
+
+★ 结论见 §F2：本安装 `set:CreateObject = 2` ⇒ **第一帧的真正前置从 DDraw 变成 D3D9 设备创建**。
+下面这份集合是"到 **第一个 D3D9 设备创建成功**"的最小面（按 EA 顺序；⛔ 这不是新切片，是给 P5a / M3 的
+**输入**，要不要按这条路走由 §F2 的裁决决定）：
+
+| # | EA | 调什么 | 需要的形状（宿主侧） |
+|---|---|---|---|
+| 1 | `0x498D0F` | `d3d9!Direct3DCreate9(0x20)` | **唯一的 d3d9 导入**；返回 IDirect3D9（现在 boot 就停在这里） |
+| 2 | `0x498D44` | IDirect3D9 **#8** `GetAdapterDisplayMode(0, &mode)` | `D3DDISPLAYMODE`（12 B：Width / Height / Format） |
+| 3 | `0x498ECA` | `sub_498BC0` →（条件）`sub_4983E0` | IDirect3D9 **#6** `GetAdapterModeCount` / **#7** `EnumAdapterModes`（只有目标模式被判无效时才走） |
+| 4 | `0x497F47`（由 `0x49904B` / `0x499067` / `0x49908C` / `0x4990A2` 调入） | IDirect3D9 **#16** `CreateDevice(0, type, hwnd, flags, &pp, &out)` | `D3DPRESENT_PARAMETERS`（**56 B**，`0x498F0A memset 0x38`；`+0/+4/+8` = 宽/高/格式、`+28` = `hDeviceWindow`、`+36` `EnableAutoDepthStencil=1`、`+40` `AutoDepthStencilFormat=75`、`+44` `Flags=1`）；引擎会重试 DeviceType ∈ {HAL, REF} × BehaviorFlags ∈ {`0x44`, `0x84`, `0x24`} |
+| 5 | `0x4990C8` | IDirect3DDevice9 **#20** `SetDialogBoxMode(TRUE)` | 错误串「ダイアログ描画モードの設定に失敗しました」 |
+| 6 | `0x499126` | IDirect3DDevice9 **#7** `GetDeviceCaps(&caps)` | 只读 `MaxTextureWidth/Height` 并与 `set:TexWidth` / `set:TexHeight` 比 |
+| 7 | `0x49918D` | IDirect3D9 **#10** `CheckDeviceFormat` | 查 A8R8G8B8 渲染目标格式（失败只记日志，不致命） |
+| 8 | `0x498B82`（由 `0x4991BF` 调入 `sub_498B60`） | IDirect3DDevice9 **#43** `Clear(0, NULL, 3, 0, 1.0f, 0)` | **第一次渲染动作**（错误串「ClearTarget エラー」） |
+| — | `0x498D05` / `0x498D7E` | `[old+8]` `Release`（旧 IDirect3D9 / 旧设备） | 只在重入（换分辨率 / Reset）时有对象；首次为空 |
+
+- 之后 `sub_406730` 还在 `0x406B37` 调 `sub_4A6EE0`（把渲染器挂到设备上、建纹理/顶点管理）—— 属"设备已建好之后"。
+- ⛔ **`Present`（IDirect3DDevice9 #17，vtable `+0x44`）不在这一段**：到第一次 Present 还差哪些
+  （`BeginScene`/`EndScene`/纹理上传/精灵）**未测** —— boot 还没到。
+- ⚠ 这套形状是 **M3 的 D3D9 簇**（`SCOPE.md` §1 现在写"3D 不做 / 走 stub"）；把它搬进 M2a 是**路线改动**，
+  不是补一个 shim。⇒ 见需求单「M2 路线取证：显示初始化走 DDraw 还是 D3D9」。
 
 ## 7. 落点与依赖
 
@@ -468,6 +588,7 @@ apps/emulator-lift/
 | R10 | **静态计数是下界**：LoadIconA/ShowCursor 0 站点但真调用 | trace 里出现 census 没记的调用 | 以 trace 为准；工作量按"撞到的"算，⛔ 不按静态站点数排 |
 | R11 | **消息重入**：WndProc 里 `SendMessage` / `DestroyWindow` 造成递归 | 栈不平衡 / 死循环 | G3 用 LIFO 栈 + 深度上限 + 诊断；窗口夹具覆盖嵌套 `SendMessage` |
 | R12 | **估时偏差**：M2a / DDraw+GDI 超出本文件的区间 | P5a 结束的实际投入 | 记录实际人周与新语义数，写进工作量报告；⛔ 不自动停手、不自动改路线（由用户决定） |
+| R13 | **路线错配**：M2a 的"第一帧"按 DDraw 排（P1 + B2/B4 的 `Flip`/`Blt` 判据），而本安装的启动路径走 D3D9（`set:CreateObject = 2`，§F2）⇒ 即使 DDraw/GDI 全做完，boot 仍停在 `d3d9!Direct3DCreate9` | boot 的 `stop` 一直是 `d3d9!Direct3DCreate9`（`eip=7FFE00AC`），`--trace-shims` 无任何 `DDRAW.DLL` 装载 | 先把路线裁决成一张单（M2 下的"路线取证"），按裁决**改 P5a 前置与 B4 判据**；⛔ 不要靠"再补几个 DDraw API"来推进 boot；也⛔ 不要把 §F2 的 D3D9 形状当成"补一条 shim"（那是 M3 的簇） |
 
 ## 10. M2 明确不做
 

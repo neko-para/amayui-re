@@ -49,6 +49,35 @@ bool hostFileTimes(const std::string& host_path, HostFileTimes* out);
 //   UTF-8（游戏目录本身是日文名）⇒ Windows 上非 ASCII 的 `--exe` / `--lst` / `--game-dir` 会打不开。
 std::FILE* openHostFileUtf8(const std::string& host_path, const char* mode);
 
+// =======================================================================================
+// ★ guest 特殊目录 / 环境块 —— **唯一文本真源**（2026-11-05 用户裁决）
+//
+//   环境块（`setupProcessStructures` 写进 guest 的那一块）、`GetEnvironmentVariableA/W`、
+//   `GetEnvironmentStringsA/W`、`SHGetSpecialFolderPathA` / `SHGetFolderPathA` 全部从这一处取。
+//   ⛔ 不许在 shim 里再写一份路径文本 —— 两套各说各话正是"引擎拿不到 LOCALAPPDATA、回退到
+//   安装目录"那个 bug 的成因。
+//
+//   · guest 文本固定为 Windows 形状（`C:\Users\Amayui\...`），由 Vfs::resolve 映射：
+//     `…\AppData\Local` → `<--appdata>/Local`、`…\AppData\Roaming` → `<--appdata>/Roaming`、
+//     `C:\Users\Amayui\Documents` → `<--appdata>/Documents`；其余（USERPROFILE 本身）留在
+//     `--game-dir` 的单一根下（⚠ 不会自动存在：那是 guest 世界的文本，不是宿主目录树）。
+//   · **没有 `--appdata` 时，AppData 派生的变量一律不提供**（与 `SHGetSpecialFolderPathA` 的
+//     FALSE + 5 一致；⛔ 绝不指向宿主真实 AppData）。理由：两个视图说同一件事比"env 有一个
+//     解析时必然失败的路径"更容易诊断 —— 失败发生在取变量处，而不是几步之后的 VFS 解析里。
+// =======================================================================================
+const char* guestUserProfileText();    // C:\Users\Amayui
+const char* guestAppDataText();        // C:\Users\Amayui\AppData\Roaming
+const char* guestLocalAppDataText();   // C:\Users\Amayui\AppData\Local
+const char* guestDocumentsText();      // C:\Users\Amayui\Documents
+// TEMP / TMP / GetTempPathA 的共同落点（`…\AppData\Local\Temp`；需要 --appdata 才可解析）
+std::string guestTempDirText();
+
+// guest 环境块：有序 `NAME=VALUE` 列表（顺序 = 大小写不敏感的字典序，**确定性**）。
+// `have_appdata=false` ⇒ 不含 APPDATA / LOCALAPPDATA / TEMP / TMP（见上面的理由）。
+std::vector<std::string> guestEnvironment(bool have_appdata);
+// 同一份内容的 `;` 连接文本：`ProcessSetup::environment_ansi` 与 A4 的 trace 输入哈希用它。
+std::string guestEnvironmentText(bool have_appdata);
+
 class Vfs {
 public:
     // 宿主根（绝对路径，UTF-8）。空 ⇒ ready() = false。
@@ -56,13 +85,33 @@ public:
     const std::string& gameDir() const { return game_dir_; }
     // ★ P0：伪造 AppData（--appdata）。只影响特殊目录（AppData / LocalAppData / Personal），
     //   不改变 --game-dir 是唯一游戏根的口径。空 = 未设置（特殊目录解析会响亮失败）。
-    void setAppDataDir(const std::string& host_dir) { app_data_dir_ = host_dir; }
+    //   ★ 设置时会清掉 `<--appdata>/Local/Temp`（A4：`GetTempFileNameA(uUnique=0)` 的序号
+    //     跨运行累积会让同一条命令第二次拿到不同名字 ⇒ trace 不再逐字节相同）。
+    void setAppDataDir(const std::string& host_dir);
     const std::string& appDataDir() const { return app_data_dir_; }
     bool ready() const { return !game_dir_.empty(); }
+    // guest 环境块的真源（= `guestEnvironment(!appDataDir().empty())`）
+    std::vector<std::string> guestEnvironment() const { return lift::guestEnvironment(!app_data_dir_.empty()); }
+    std::string guestEnvironmentText() const { return lift::guestEnvironmentText(!app_data_dir_.empty()); }
 
     // guest 根的文本形式（缺省 `E:\Games\Eushully\天結`；只用于把路径的公共前缀剥掉与日志）
     void setGuestRoot(const std::string& guest_root) { guest_root_ = guest_root; }
     const std::string& guestRoot() const { return guest_root_; }
+
+    // ★ guest 眼里的主模块路径 = **guest 根之下的 `AGE.EXE`**（用户 2026-11-05 口径：
+    //   引擎从 exe 路径推导"安装目录"时，必须得到游戏目录本身，而不是它的父目录）。
+    //   ⛔ 宿主 `--exe` 字符串不再出现在 `GetModuleFileNameA` / `GetCommandLineA` 里。
+    std::string guestExePath() const;
+
+    // ★ VFS overlay（只对**这一个文件**生效；⛔ 不是通用路径重定向）：
+    //   guest 打开 `guest_path` 时拿到的是 `host_path` 的字节（本模拟器真正在跑的拆壳件），
+    //   而不是 `--game-dir` 下那份加壳原件。匹配 = 绝对化后的 guest 路径按段大小写不敏感相等，
+    //   所以 `E:\…\AGE.EXE` / `e:\…\age.exe` / 相对路径（cwd = guest 根）都会命中。
+    //   命中时 `resolve` 打一行日志（来源 + sha256 前 8 位）。
+    void setExeOverlay(const std::string& guest_path, const std::string& host_path, const std::string& sha256);
+    bool hasExeOverlay() const { return !overlay_guest_.empty(); }
+    const std::string& overlayGuestPath() const { return overlay_guest_; }
+    const std::string& overlayHostPath() const { return overlay_host_; }
 
     // guest 当前目录（绝对 guest 路径；缺省 = guestRoot）
     void setGuestCwd(const std::string& guest_path);
@@ -110,11 +159,18 @@ public:
     static std::string baseName(const std::string& guest_path);
 
 private:
+    // ★ overlay 命中：`guest_path` 是否就是被覆盖的那一个文件（绝对化 + 大小写不敏感按段比较）
+    bool matchesOverlay(const std::string& guest_path) const;
+
     std::string game_dir_;
     std::string app_data_dir_;
     std::string guest_root_ = "E:\\Games\\Eushully\\天結";
     std::string guest_cwd_;
     bool guest_cwd_set_ = false;
+    // overlay（只允许一个文件；见 setExeOverlay）
+    std::string overlay_guest_;
+    std::string overlay_host_;
+    std::string overlay_sha256_;
 };
 
 // 跨平台 FILE_ATTRIBUTE_*（只实现本线用到的几个）

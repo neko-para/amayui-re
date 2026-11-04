@@ -311,6 +311,14 @@ set(LIFT_HOST_FONT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/fonts/A
 target_compile_definitions(emulator-lift-runtime PRIVATE
     LIFT_HOST_FONT_PATH="${LIFT_HOST_FONT_PATH}")
 
+# =====================================================================================
+# P4 · GDI region（矩形表 / 椭圆 / 多边形 + CombineRgn + RGNDATA）+ 窗口无效区
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/region.cpp
+    src/shims/gdi32_region.cpp)
+
 # ---- pure：对象表 / DC 状态 / SelectObject 旧值恢复 / GGO 格式算术 / 自洽（合成字形源）----
 add_executable(lift-gdi tests/gdi.cpp)
 target_link_libraries(lift-gdi PRIVATE emulator-lift-runtime)

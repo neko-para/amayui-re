@@ -459,5 +459,34 @@ int main() {
         LIFT_CHECK(f.ok);
     }
 
+    // ⑦ ★ 码页叶子的**方向对称**（2026-11-05 缺陷单 `🐞S2 日文 guest 路径乱码` 的单元级守卫）：
+    //    `utf8ToCp932` 是"A 版 API 出口"的唯一编码实现，`cp932ToWide` 是入口的解码实现。
+    //    判据：`天結` 的 CP932 就是 **93 56 8C 8B**（硬编码，⛔ 不用自己现算）、UTF-8 是 6 字节，
+    //    两条互逆；截断只在**字符边界**上发生。
+    {
+        g_current_case = "cp932-byte-direction";
+        const std::string utf8 = "天結";  // UTF-8: E5 A4 A9 E7 B5 90
+        const char kCp932[4] = {'\x93', '\x56', '\x8C', '\x8B'};
+        const std::string want(kCp932, sizeof(kCp932));
+        LIFT_CHECK(utf8.size() == 6u);
+        std::size_t bad = 0;
+        const std::string bytes = lift::utf8ToCp932(utf8, &bad);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(bad), 0u);
+        LIFT_CHECK(bytes == want);
+        // 反向：CP932 字节 → UTF-16（= A 版入参的解码方向）
+        LIFT_CHECK(lift::cp932ToWide(bytes) == u"天結");
+        // 截断：3 字节的预算只放得下 1 个双字节字符（⛔ 不留半个）
+        LIFT_CHECK(lift::cp932Truncate(bytes, 3) == want.substr(0, 2));
+        LIFT_CHECK(lift::cp932Truncate(bytes, 4) == want);
+        // ★ 边界正好落在**第二个字符的 trail** 上：`天` + `あ`（CP932 93 56 / 82 A0）截到 4 字节
+        //   必须两个字符都留下 —— 只看"末字节像不像首字节"的旧写法会多丢一个（trail 0xA0 也在
+        //   0x81..0xFC 里）。
+        const char kPa[4] = {'\x93', '\x56', '\x82', '\xA0'};
+        const std::string tenpa(kPa, sizeof(kPa));
+        LIFT_CHECK(lift::cp932ToWide(tenpa) == u"天あ");
+        LIFT_CHECK(lift::cp932Truncate(tenpa, 4) == tenpa);
+        LIFT_CHECK(lift::cp932Truncate(tenpa, 3) == tenpa.substr(0, 2));
+    }
+
     return finish("locale-ext");
 }

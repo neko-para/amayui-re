@@ -234,13 +234,6 @@
       "reason": "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）"
     },
     {
-      "target": "gdi32!CombineRgn",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
-    },
-    {
       "target": "gdi32!CreateCompatibleDC",
       "kind": "stub",
       "impl": "stub_trap",
@@ -255,53 +248,11 @@
       "reason": "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）"
     },
     {
-      "target": "gdi32!CreateEllipticRgnIndirect",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
-    },
-    {
-      "target": "gdi32!CreatePolygonRgn",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
-    },
-    {
-      "target": "gdi32!CreateRectRgn",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
-    },
-    {
       "target": "gdi32!GetDeviceCaps",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）"
-    },
-    {
-      "target": "gdi32!GetRegionData",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
-    },
-    {
-      "target": "gdi32!GetRgnBox",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
-    },
-    {
-      "target": "gdi32!PtInRegion",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "imm32!ImmAssociateContext",

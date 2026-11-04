@@ -377,9 +377,8 @@ bool mapPeImageAt(GuestMemory& mem, const PeImage& img, std::uint32_t base, std:
     return true;
 }
 
-bool setupProcessStructures(GuestMemory& mem, const PeImage& img, const GuestLayout& layout, ProcessSetup* out,
-                            std::string* err) {
-    (void)img;
+bool setupProcessStructures(GuestMemory& mem, const PeImage& img, const GuestLayout& layout,
+                            const Vfs& vfs, ProcessSetup* out, std::string* err) {
     out->stack_top = layout.stack_top;
     out->stack_bottom = layout.stack_top - layout.stack_size;
     out->teb = layout.teb_ea;
@@ -421,28 +420,39 @@ bool setupProcessStructures(GuestMemory& mem, const PeImage& img, const GuestLay
     mem.wr32(layout.peb_ea + 0x18, 0x00010000u);           // ProcessHeap（与 shim 的 heap_handle 一致）
 
     // ---- 命令行 / 模块路径（CRT 启动会读）----
+    // ★ 2026-11-05 用户口径：guest 眼里的 exe = **游戏目录里的 `AGE.EXE`**。
+    //   ⛔ 宿主 `--exe` 字符串不能再出现在 `GetModuleFileNameA` / `GetCommandLineA` 里：
+    //   引擎会从 exe 路径推导"安装目录"，多出来的宿主路径段会让它写错地方。
+    //   guest_exe_path 的真源是 Vfs（guest 根 + `AGE.EXE`），不是 `img.path`。
     if (!mem.commitZeroed(layout.argv_block, 0x1000, RegionKind::Other, "cmdline")) {
         if (err) *err = "提交命令行块失败";
         return false;
     }
-    const std::string exe_path = img.path;
-    const std::string cmdline = "\"" + exe_path + "\"";
-    mem.writeBytes(layout.argv_block, exe_path.c_str(), exe_path.size() + 1);
+    const std::string guest_exe_path = vfs.guestExePath();
+    const std::string cmdline = "\"" + guest_exe_path + "\"";
+    mem.writeBytes(layout.argv_block, guest_exe_path.c_str(), guest_exe_path.size() + 1);
     out->exe_path_ea = layout.argv_block;
     out->cmdline_ea = layout.argv_block + 0x400;
     mem.writeBytes(out->cmdline_ea, cmdline.c_str(), cmdline.size() + 1);
 
     // ---- 环境块（`_setenvp` / GetEnvironmentStringsW 读；也是 A4 输入清单的一项）----
-    // ★ 只放**确定性的最小集合**：宿主环境变量不进 guest（否则 trace 会随机器变）。
-    static const char kEnvAnsi[] = "PATH=.\0TEMP=E:\\TMP\0\0";
-    out->environment_ansi = "PATH=.;TEMP=E:\\TMP";
+    // ★ **唯一真源** = `Vfs::guestEnvironment()`（与 GetEnvironmentVariable* / 特殊目录同源）。
+    //   不含任何宿主环境变量（否则 trace 会随机器变）；没有 --appdata 时 AppData 派生项不提供。
+    const std::vector<std::string> env = vfs.guestEnvironment();
+    out->environment_ansi = vfs.guestEnvironmentText();
     out->env_ea = layout.argv_block + 0x800;
     std::uint32_t env_off = 0;
-    for (std::size_t i = 0; i < sizeof(kEnvAnsi); ++i) {
-        mem.wr16(out->env_ea + env_off, static_cast<std::uint16_t>(static_cast<unsigned char>(kEnvAnsi[i])));
+    for (const std::string& item : env) {
+        for (const char c : item) {
+            mem.wr16(out->env_ea + env_off, static_cast<std::uint16_t>(static_cast<unsigned char>(c)));
+            env_off += 2;
+        }
+        mem.wr16(out->env_ea + env_off, 0);  // 每项结尾的 0
         env_off += 2;
     }
-    out->exe_path = exe_path;
+    mem.wr16(out->env_ea + env_off, 0);  // 整块的额外结尾 0（Windows 环境块以双 0 结束）
+    out->exe_path = img.path;
+    out->guest_exe_path = guest_exe_path;
     out->cmdline = cmdline;
     return true;
 }

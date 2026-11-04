@@ -29,6 +29,7 @@ void registerKernel32Shims(ShimRegistry& shims) {
     registerUser32ResourceShims(shims); // user32_resource.cpp：AGE.EXE 图标 / 光标
     registerGdiBootShims(shims);       // gdi32_boot.cpp：P0 启动最小件
     registerGdiFontShims(shims);       // gdi32_object.cpp + gdi32_font.cpp：P2 GDI 对象表 / 字体 / 文本
+    registerGdiRegionShims(shims);     // gdi32_region.cpp：P4 GDI region 七条（矩形 / 椭圆 / 多边形 / 布尔 / RGNDATA）
     registerDdrawShims(shims);         // ddraw.cpp：P1 DirectDrawCreate 动态导出（G1 的通用表）
     registerShell32Shims(shims);       // shell32.cpp：特殊目录（--appdata）+ imm32（没有 IME）
     registerShlwapiShims(shims);       // shlwapi.cpp：PathRemoveFileSpecA（P4 文件 / 路径邻域）
@@ -72,6 +73,8 @@ void registerKernel32Shims(ShimRegistry& shims) {
     //   SelectObject / DeleteObject / DeleteDC / GetCurrentObject / GetStockObject / SetBkMode /
     //   SetTextColor / GetTextMetricsA / GetGlyphOutlineA / GetTextExtentPoint32A / TextOutA /
     //   EnumFontFamiliesExA / AddFontMemResourceEx / RemoveFontMemResourceEx。
+    // ★ P4 已实现（见 gdi32_region.cpp）：CreateRectRgn / CreateEllipticRgnIndirect / CreatePolygonRgn /
+    //   CombineRgn / GetRegionData / GetRgnBox / PtInRegion。
     //   仍未实现（P1 / P4）：CreateCompatibleDC / CreateDIBSection / BitBlt / GetDeviceCaps。
     const char* kGdi32 = "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）";
     shims.addUnimplemented("gdi32", "CreateCompatibleDC", kGdi32);

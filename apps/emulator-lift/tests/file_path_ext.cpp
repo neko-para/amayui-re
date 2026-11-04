@@ -10,6 +10,11 @@
 //   ④ `GetTempFileNameA` 的 `uUnique`：非 0 ⇒ 用调用方的值（低 16 位、大写十六进制）+ **不创建**
 //      + 返回原值；0 ⇒ 从前缀 + 递增序号找一个空号、**创建 0 字节文件**。前缀只取前 3 个字符、
 //      扩展名 `.TMP`（文档形态）。断言要落在**宿主盘**上（存在 / 不存在 / 长度）。
+//   ⑤ ★ **guest 的路径编码**（2026-11-05 缺陷单 `🐞S2 日文 guest 路径乱码`）：
+//      A 版 API 的入参 / 出参是 **CP932 字节**、W 版 API 是 **UTF-16**、宿主 / VFS 内部是 UTF-8。
+//      判据用**日文 guest 根**（`E:\Games\Eushully\天結` = 真实缺省值）逐字节断言：
+//      `GetModuleFileNameA` == CP932（`天結` = 93 56 8C 8B）、⛔ 不是它的 UTF-8（E5 A4 A9 E7 B5 90）、
+//      把这份字节**原样**喂回 `CreateFileA` 必须命中 VFS overlay（引擎就是这么用 exe 路径的）。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -37,8 +42,10 @@ using lift_fixture::Fixture;
 constexpr std::uint32_t kGenericRead = 0x80000000u;
 constexpr std::uint32_t kGenericWrite = 0x40000000u;
 constexpr std::uint32_t kCreateAlways = 2u;
+constexpr std::uint32_t kOpenExisting = 3u;
 constexpr std::uint32_t kInvalidHandleValue = 0xFFFFFFFFu;
 constexpr std::uint32_t kErrInvalidParameter = 87u;
+constexpr std::uint32_t kErrPathNotFound = 3u;
 
 // 2020-01-02T03:04:05Z 的 FILETIME（100 ns 自 1601）= (1577934245 + 11644473600) * 10^7
 constexpr std::uint64_t kTargetFileTime = 132224078450000000ull;
@@ -46,6 +53,12 @@ constexpr std::uint64_t kTargetFileTime = 132224078450000000ull;
 std::string pathToUtf8(const std::filesystem::path& p) {
     const std::u8string u = p.u8string();
     return std::string(reinterpret_cast<const char*>(u.data()), u.size());
+}
+
+// ★ UTF-8 文本 → 宿主 `std::filesystem::path`：⛔ 不能用 `fs::path(std::string)` —— 那在 Windows 上
+//   按**本地 ANSI 码页**（这台机器是 GBK）解释，日文名会变成另一个不存在的东西。
+std::filesystem::path pathFromUtf8(const std::string& s) {
+    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
 }
 
 std::uint32_t processId() {
@@ -65,6 +78,66 @@ std::string guestStr(lift::Machine& m, std::uint32_t ea, std::uint32_t cap = 512
         s.push_back(c);
     }
     return s;
+}
+
+// 读 guest 的 UTF-16 串（**原样**，不做 ASCII 收窄 —— 日文路径要逐码元比）
+std::u16string guestWstr(lift::Machine& m, std::uint32_t ea, std::uint32_t cap = 512) {
+    std::u16string s;
+    for (std::uint32_t i = 0; i < cap; ++i) {
+        const char16_t c = static_cast<char16_t>(m.mem().rd16(ea + i * 2u));
+        if (c == 0) break;
+        s.push_back(c);
+    }
+    return s;
+}
+
+// 红的时候要能一眼看出"实际拿到的是哪一套字节"（CP932 / UTF-8 / 别的）
+std::string hexBytes(const std::string& s) {
+    std::string out;
+    for (const unsigned char c : s) {
+        char b[4] = {};
+        std::snprintf(b, sizeof(b), "%02X ", c);
+        out += b;
+    }
+    return out;
+}
+
+// 读 guest 的 UTF-16 串（本夹具的路径 / 环境块全是 ASCII）
+std::string guestWideStr(lift::Machine& m, std::uint32_t ea, std::uint32_t cap = 512) {
+    std::string s;
+    for (std::uint32_t i = 0; i < cap; ++i) {
+        const std::uint16_t w = m.mem().rd16(ea + i * 2u);
+        if (w == 0) break;
+        s.push_back(w < 0x80 ? static_cast<char>(w) : '?');
+    }
+    return s;
+}
+
+// guest 环境块（UTF-16，`NAME=VALUE\0…\0\0`）→ 条目列表
+std::vector<std::string> envBlockItems(lift::Machine& m, std::uint32_t ea) {
+    std::vector<std::string> out;
+    std::uint32_t off = 0;
+    for (;;) {
+        std::string item;
+        bool any = false;
+        for (;;) {
+            const std::uint16_t w = m.mem().rd16(ea + off);
+            off += 2;
+            if (w == 0) break;
+            any = true;
+            item.push_back(w < 0x80 ? static_cast<char>(w) : '?');
+        }
+        if (!any) break;
+        out.push_back(item);
+    }
+    return out;
+}
+
+bool hasEnvItem(const std::vector<std::string>& items, const std::string& prefix) {
+    for (const std::string& s : items) {
+        if (s.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
 }
 
 }  // namespace
@@ -288,19 +361,23 @@ int main() {
                     (guest_dir + "AGE1234.TMP").c_str(), n1.c_str(), n2.c_str());
     }
 
-    // ④b A4：setGameDir 清掉上一轮的 `.lift-tmp`（否则 `GetTempFileNameA(uUnique=0)` 的序号
-    //     跨运行累积，同一条命令两次会得到不同名字 / 不同 trace）。
+    // ④b A4：`setAppDataDir` 清掉上一轮的 `<--appdata>/Local/Temp`（否则 `GetTempFileNameA(
+    //     uUnique=0)` 的序号跨运行累积，同一条命令两次会得到不同名字 / 不同 trace）。
+    //     ★ 2026-11-05：清理点从 `--game-dir/.lift-tmp` 移到 `--appdata`（⛔ 不再写安装树）。
     {
         g_current_case = "temp-dir-cleared";
         std::error_code tec;
-        fs::create_directories(dir / ".lift-tmp", tec);
-        std::FILE* tf = std::fopen(pathToUtf8(dir / ".lift-tmp" / "AGE0000.TMP").c_str(), "wb");
+        const fs::path tempdir = dir / "appdata" / "Local" / "Temp";
+        fs::create_directories(tempdir, tec);
+        std::FILE* tf = std::fopen(pathToUtf8(tempdir / "AGE0000.TMP").c_str(), "wb");
         LIFT_CHECK(tf != nullptr);
         if (tf) std::fclose(tf);
-        LIFT_CHECK(fs::exists(dir / ".lift-tmp" / "AGE0000.TMP", tec));
+        LIFT_CHECK(fs::exists(tempdir / "AGE0000.TMP", tec));
         Fixture g;
-        g.m.vfs().setGameDir(pathToUtf8(dir));  // 触发清理
-        LIFT_CHECK(!fs::exists(dir / ".lift-tmp" / "AGE0000.TMP", tec));
+        g.m.vfs().setGameDir(pathToUtf8(dir));  // 触发清理的是 setAppDataDir，不是 setGameDir
+        LIFT_CHECK(fs::exists(tempdir / "AGE0000.TMP", tec));  // 还没设 --appdata ⇒ 不能删
+        g.m.vfs().setAppDataDir(pathToUtf8(dir / "appdata"));
+        LIFT_CHECK(!fs::exists(tempdir / "AGE0000.TMP", tec));
     }
 
     // ⑤ shlwapi!PathRemoveFileSpecA（P4 小族）：去掉最后一段 + 一个分隔符
@@ -429,6 +506,438 @@ int main() {
         LIFT_CHECK(fs::is_directory(dir / "lift-w4-rel" / "d", ec));
 
         LIFT_CHECK(f.ok);
+    }
+
+    // ⑥b 安装树红线（2026-11-05）：**VFS 装配 / 临时目录都不许写 `--game-dir`**。
+    //    判据：① `setGameDir` 不再删 `game_dir/.lift-tmp`（旧实现会，且那就是往安装树里写）
+    //          ② 没有 `--appdata` 时 `GetTempPathA` 响亮失败（⛔ 不退回 `--game-dir/.lift-tmp`）
+    //          ③ 跑完这两步，`--game-dir` 里的东西一个都没少 / 一个都没多
+    {
+        g_current_case = "no-writes-into-game-dir";
+        std::error_code e3;
+        const fs::path sentinel = dir / ".lift-tmp" / "KEEP.TMP";
+        fs::create_directories(sentinel.parent_path(), e3);
+        std::FILE* sf = std::fopen(pathToUtf8(sentinel).c_str(), "wb");
+        LIFT_CHECK(sf != nullptr);
+        if (sf) std::fclose(sf);
+        Fixture g;
+        lift::registerFileShims(g.m.shims());
+        LIFT_CHECK(g.ok);
+        g.m.vfs().setGameDir(pathToUtf8(dir));  // 旧实现会在这一步删掉 `<game_dir>/.lift-tmp`
+        LIFT_CHECK(fs::exists(sentinel, e3));
+        const std::uint32_t gtp = g.use("GetTempPathA");
+        const std::uint32_t buf = g.zeroData(512);
+        LIFT_CHECK_EQ_U32(g.call(gtp, {512u, buf}), 0u);
+        LIFT_CHECK_EQ_U32(g.m.cpu().shim.last_error, kErrPathNotFound);
+        LIFT_CHECK(fs::exists(sentinel, e3));
+        LIFT_CHECK(!fs::exists(dir / "Temp", e3));  // 也不许在 game_dir 里造临时目录
+        fs::remove_all(dir / ".lift-tmp", e3);
+    }
+
+    // ⑦ 环境块 / 特殊目录 / 临时目录 —— **同一份真源**（任务 A 的判据）
+    //    判据：① `setupProcessStructures` 写进 guest 的那一块 == `lift::guestEnvironment()`
+    //          ② `GetEnvironmentVariableA/W` 取到的 == 那一块里的值
+    //          ③ `SHGetSpecialFolderPathA` / `SHGetFolderPathA` 的文本与 LOCALAPPDATA / APPDATA **完全一致**
+    //          ④ `TEMP` / `TMP` / `GetTempPathA` 同一处，且 VFS 真能在 `--appdata` 下建出来
+    {
+        g_current_case = "guest-env-block";
+        Fixture f;
+        lift::registerFileShims(f.m.shims());
+        lift::registerBootstrapShims(f.m.shims());
+        lift::registerProcessShims(f.m.shims());
+        lift::registerShell32Shims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));
+        f.m.vfs().setGuestRoot("D:\\GAME");
+        f.m.vfs().setAppDataDir(pathToUtf8(dir / "appdata"));
+        LIFT_CHECK(f.ok);
+
+        lift::ProcessSetup setup;
+        std::string serr;
+        LIFT_CHECK(lift::setupProcessStructures(f.m.mem(), lift::PeImage{}, f.m.layout(), f.m.vfs(),
+                                                &setup, &serr));
+        f.m.cpu().shim.env_ea = setup.env_ea;
+        const std::vector<std::string> want = lift::guestEnvironment(true);
+        LIFT_CHECK(envBlockItems(f.m, setup.env_ea) == want);
+        LIFT_CHECK(setup.environment_ansi == lift::guestEnvironmentText(true));
+
+        // 逐条点名（缺一个就红；⛔ 不是"包含某一项"就算过）
+        for (const char* need : {"APPDATA=", "COMSPEC=", "HOMEDRIVE=", "HOMEPATH=", "LOCALAPPDATA=",
+                                 "PATH=", "SystemDrive=", "SystemRoot=", "TEMP=", "TMP=",
+                                 "USERPROFILE=", "windir="}) {
+            LIFT_CHECK(hasEnvItem(want, need));
+        }
+
+        const std::uint32_t gv = f.use("GetEnvironmentVariableA");
+        const std::uint32_t gvw = f.use("GetEnvironmentVariableW");
+        const std::uint32_t buf = f.zeroData(512);
+        auto get = [&](const char* name) {
+            const std::uint32_t n = f.cstr(name);
+            const std::uint32_t r = f.call(gv, {n, buf, 512u});
+            return r == 0 ? std::string() : guestStr(f.m, buf);
+        };
+        LIFT_CHECK(get("LOCALAPPDATA") == "C:\\Users\\Amayui\\AppData\\Local");
+        LIFT_CHECK(get("APPDATA") == "C:\\Users\\Amayui\\AppData\\Roaming");
+        LIFT_CHECK(get("USERPROFILE") == "C:\\Users\\Amayui");
+        LIFT_CHECK(get("TEMP") == lift::guestTempDirText());
+        LIFT_CHECK(get("TMP") == lift::guestTempDirText());
+        LIFT_CHECK(get("SystemRoot") == "C:\\Windows");
+        LIFT_CHECK(get("windir") == "C:\\Windows");
+        LIFT_CHECK(get("COMSPEC") == "C:\\Windows\\System32\\cmd.exe");
+        LIFT_CHECK(get("HOMEDRIVE") == "C:");
+        LIFT_CHECK(get("HOMEPATH") == "\\Users\\Amayui");
+        LIFT_CHECK(get("PATH") == ".");
+        // 不存在 ⇒ 0 + 203（⛔ 不是空串也算成功）
+        LIFT_CHECK_EQ_U32(f.call(gv, {f.cstr("NOPE"), buf, 512u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 203u);
+
+        const std::uint32_t wbuf = f.zeroData(512);
+        const char16_t kLocalAppDataName[] = u"LOCALAPPDATA";
+        const std::uint32_t wname = f.wideCstr(kLocalAppDataName, 13u);
+        LIFT_CHECK_EQ_U32(f.call(gvw, {wname, wbuf, 512u}),
+                          static_cast<std::uint32_t>(std::strlen("C:\\Users\\Amayui\\AppData\\Local")));
+        LIFT_CHECK(guestWideStr(f.m, wbuf) == "C:\\Users\\Amayui\\AppData\\Local");
+
+        // 特殊目录 == env 文本（**完全一致**，⛔ 两套各说各话）
+        const std::uint32_t sf = f.use("shell32", "SHGetSpecialFolderPathA");
+        const std::uint32_t gf = f.use("shell32", "SHGetFolderPathA");
+        const std::uint32_t p1 = f.zeroData(512);
+        const std::uint32_t p2 = f.zeroData(512);
+        LIFT_CHECK_EQ_U32(f.call(sf, {0u, p1, 0x001Cu, 0u}), 1u);
+        LIFT_CHECK(guestStr(f.m, p1) == get("LOCALAPPDATA"));
+        LIFT_CHECK_EQ_U32(f.call(sf, {0u, p1, 0x001Au, 0u}), 1u);
+        LIFT_CHECK(guestStr(f.m, p1) == get("APPDATA"));
+        LIFT_CHECK_EQ_U32(f.call(sf, {0u, p1, 0x0005u, 0u}), 1u);
+        LIFT_CHECK(guestStr(f.m, p1) == lift::guestDocumentsText());
+        // SHGetFolderPathA(CSIDL_LOCAL_APPDATA|CSIDL_FLAG_CREATE) ⇒ S_OK + 同一份文本 + 建出脚手架
+        std::error_code e2;
+        fs::remove_all(dir / "appdata" / "Local", e2);
+        LIFT_CHECK_EQ_U32(f.call(gf, {0u, 0x801Cu, 0u, 0u, p2}), 0u);
+        LIFT_CHECK(guestStr(f.m, p2) == get("LOCALAPPDATA"));
+        LIFT_CHECK(fs::is_directory(dir / "appdata" / "Local", e2));
+
+        // TEMP / TMP / GetTempPathA 同一处；VFS 真能在 --appdata 下把它建出来
+        const std::uint32_t gtp = f.use("GetTempPathA");
+        LIFT_CHECK_EQ_U32(f.call(gtp, {512u, p1}),
+                          static_cast<std::uint32_t>(lift::guestTempDirText().size() + 1u));
+        LIFT_CHECK(guestStr(f.m, p1) == lift::guestTempDirText() + "\\");
+        LIFT_CHECK(fs::is_directory(dir / "appdata" / "Local" / "Temp", e2));
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑧ 没有 `--appdata`：AppData 派生的变量**一律不提供**（与 SHGetSpecialFolderPathA 的
+    //    FALSE + 5 同一口径；⛔ 不指向宿主真实 AppData，也不指向一个之后必然解析失败的 guest 路径）
+    {
+        g_current_case = "guest-env-without-appdata";
+        Fixture f;
+        lift::registerFileShims(f.m.shims());
+        lift::registerBootstrapShims(f.m.shims());
+        lift::registerProcessShims(f.m.shims());
+        lift::registerShell32Shims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));
+        f.m.vfs().setGuestRoot("D:\\GAME");
+        LIFT_CHECK(f.ok);
+        lift::ProcessSetup setup;
+        std::string serr;
+        LIFT_CHECK(lift::setupProcessStructures(f.m.mem(), lift::PeImage{}, f.m.layout(), f.m.vfs(),
+                                                &setup, &serr));
+        f.m.cpu().shim.env_ea = setup.env_ea;
+        const std::vector<std::string> want = lift::guestEnvironment(false);
+        LIFT_CHECK(envBlockItems(f.m, setup.env_ea) == want);
+        for (const char* banned : {"APPDATA=", "LOCALAPPDATA=", "TEMP=", "TMP="}) {
+            LIFT_CHECK(!hasEnvItem(want, banned));
+        }
+        LIFT_CHECK(hasEnvItem(want, "USERPROFILE="));
+        LIFT_CHECK(hasEnvItem(want, "SystemRoot="));
+
+        const std::uint32_t gv = f.use("GetEnvironmentVariableA");
+        const std::uint32_t buf = f.zeroData(512);
+        LIFT_CHECK_EQ_U32(f.call(gv, {f.cstr("LOCALAPPDATA"), buf, 512u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 203u);
+        const std::uint32_t sf = f.use("shell32", "SHGetSpecialFolderPathA");
+        const std::uint32_t gf = f.use("shell32", "SHGetFolderPathA");
+        const std::uint32_t p1 = f.zeroData(512);
+        LIFT_CHECK_EQ_U32(f.call(sf, {0u, p1, 0x001Cu, 0u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 5u);
+        LIFT_CHECK_EQ_U32(f.call(gf, {0u, 0x801Cu, 0u, 0u, p1}), 0x80070005u);
+        // 没有 --appdata ⇒ 没有临时目录（⛔ 不再退回 --game-dir/.lift-tmp）
+        const std::uint32_t gtp = f.use("GetTempPathA");
+        LIFT_CHECK_EQ_U32(f.call(gtp, {512u, p1}), 0u);
+        std::error_code e2;
+        LIFT_CHECK(!fs::exists(dir / ".lift-tmp", e2));
+    }
+
+    // ⑨ guest 眼里的主模块路径 = **游戏目录里的 `AGE.EXE`**（任务 B-1）
+    //    判据：① `ProcessSetup::guest_exe_path` / guest 内存里的 exe 路径 / 命令行都不含宿主路径
+    //          ② `GetModuleFileNameA` / `GetCommandLineA` 返回同一份 guest 文本
+    //          ③ trace 输入清单仍记宿主 `--exe` 原始串（A4 的"输入"必须可追）
+    {
+        g_current_case = "guest-exe-path";
+        Fixture f;
+        lift::registerProcessShims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));
+        f.m.vfs().setGuestRoot("D:\\GAME");
+        LIFT_CHECK(f.ok);
+        lift::PeImage img;
+        img.path = "C:\\host\\repo\\corpus\\AGE.EXE__dumped.sectfix.EXE";
+        lift::ProcessSetup setup;
+        std::string serr;
+        LIFT_CHECK(lift::setupProcessStructures(f.m.mem(), img, f.m.layout(), f.m.vfs(), &setup, &serr));
+        f.m.cpu().shim.exe_path_ea = setup.exe_path_ea;
+        f.m.cpu().shim.cmdline_ea = setup.cmdline_ea;
+
+        LIFT_CHECK(setup.guest_exe_path == "D:\\GAME\\AGE.EXE");
+        LIFT_CHECK(setup.exe_path == img.path);  // A4：宿主原始串只进 trace 输入清单
+        LIFT_CHECK(setup.cmdline == "\"D:\\GAME\\AGE.EXE\"");
+        LIFT_CHECK(guestStr(f.m, setup.exe_path_ea) == "D:\\GAME\\AGE.EXE");
+        LIFT_CHECK(setup.cmdline.find("host") == std::string::npos);
+        LIFT_CHECK(setup.cmdline.find("corpus") == std::string::npos);
+
+        const std::uint32_t gmf = f.use("GetModuleFileNameA");
+        const std::uint32_t buf = f.zeroData(512);
+        LIFT_CHECK_EQ_U32(f.call(gmf, {0u, buf, 512u}),
+                          static_cast<std::uint32_t>(std::strlen("D:\\GAME\\AGE.EXE")));
+        LIFT_CHECK(guestStr(f.m, buf) == "D:\\GAME\\AGE.EXE");
+        const std::uint32_t gcl = f.use("GetCommandLineA");
+        LIFT_CHECK(guestStr(f.m, f.call(gcl, {})) == "\"D:\\GAME\\AGE.EXE\"");
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑩ VFS overlay：guest 打开 `…\AGE.EXE` **任意大小写**都拿到我们真正在跑的那份字节；
+    //    大小 / 时间 / 属性（`FindFirstFileA` 的枚举项）与那份**同一个答案**。
+    {
+        g_current_case = "exe-overlay";
+        Fixture f;
+        lift::registerFileShims(f.m.shims());
+        lift::registerSyncShims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));
+        f.m.vfs().setGuestRoot("D:\\GAME");
+        LIFT_CHECK(f.ok);
+
+        const fs::path packed = dir / "AGE.EXE";          // 安装树里的加壳原件
+        const fs::path dumped = dir / "overlay" / "AGE.dumped.exe";  // 我们真正在跑的那份
+        fs::create_directories(dumped.parent_path(), ec);
+        auto writeFile = [](const fs::path& p, const std::string& bytes) {
+            std::FILE* fp = std::fopen(pathToUtf8(p).c_str(), "wb");
+            if (!fp) return false;
+            if (!bytes.empty()) std::fwrite(bytes.data(), 1, bytes.size(), fp);
+            std::fclose(fp);
+            return true;
+        };
+        const std::string packed_bytes = "PACKED-ORIGINAL-0";
+        const std::string dumped_bytes = "UNPACKED-BYTES-0123456789-DIFFERENT-LENGTH";
+        LIFT_CHECK(writeFile(packed, packed_bytes));
+        LIFT_CHECK(writeFile(dumped, dumped_bytes));
+        LIFT_CHECK(writeFile(dir / "OTHER.DAT", "OTHER"));
+
+        f.m.vfs().setExeOverlay("D:\\GAME\\AGE.EXE", pathToUtf8(dumped), "0123456789abcdef");
+        LIFT_CHECK_EQ_U32(f.m.vfs().overlayHostPath() == pathToUtf8(dumped) ? 1u : 0u, 1u);
+
+        const std::uint32_t create = f.use("CreateFileA");
+        const std::uint32_t readf = f.use("ReadFile");
+        const std::uint32_t getsize = f.use("GetFileSize");
+        const std::uint32_t close = f.use("CloseHandle");
+        auto readAll = [&](const char* guest_path) {
+            const std::uint32_t h = f.call(create, {f.cstr(guest_path), kGenericRead, 0u, 0u,
+                                                    kOpenExisting, 0u, 0u});
+            if (h == kInvalidHandleValue) return std::string("<open-failed>");
+            const std::uint32_t size = f.call(getsize, {h, 0u});
+            const std::uint32_t nbuf = f.zeroData(256);
+            const std::uint32_t got = f.u32data(0);
+            f.call(readf, {h, nbuf, 256u, got, 0u});
+            const std::uint32_t n = f.m.mem().rd32(got);
+            LIFT_CHECK_EQ_U32(n, size);  // 可读字节数 == GetFileSize（同一份字节）
+            const std::string s = guestStr(f.m, nbuf, n + 1u);
+            f.call(close, {h});
+            return s;
+        };
+        // ① 正常形态 / 大小写不同 / 相对路径（cwd = guest 根）都拿到拆壳件的字节
+        LIFT_CHECK(readAll("D:\\GAME\\AGE.EXE") == dumped_bytes);
+        LIFT_CHECK(readAll("d:\\game\\age.exe") == dumped_bytes);
+        LIFT_CHECK(readAll("AGE.EXE") == dumped_bytes);
+        // ② 别的文件**没有**被重定向
+        LIFT_CHECK(readAll("D:\\GAME\\OTHER.DAT") == "OTHER");
+
+        // ③ 枚举项（FindFirstFileA 的底层）也是同一份大小：不是加壳原件的 18 字节
+        std::vector<lift::HostDirEntry> entries;
+        std::string ferr;
+        LIFT_CHECK(f.m.vfs().find("D:\\GAME\\*.*", &entries, &ferr));
+        bool saw_age = false;
+        for (const lift::HostDirEntry& e : entries) {
+            if (e.name != "AGE.EXE") continue;
+            saw_age = true;
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e.size),
+                              static_cast<std::uint32_t>(dumped_bytes.size()));
+            LIFT_CHECK(e.size != packed_bytes.size());
+        }
+        LIFT_CHECK(saw_age);
+
+        // ④ 宿主上两份字节都没被改（overlay 只是路由，⛔ 不是复制 / 改写）
+        auto hostBytes = [](const fs::path& p) {
+            std::FILE* fp = std::fopen(pathToUtf8(p).c_str(), "rb");
+            if (!fp) return std::string();
+            std::string s;
+            char tmp[64];
+            std::size_t n = 0;
+            while ((n = std::fread(tmp, 1, sizeof(tmp), fp)) > 0) s.append(tmp, n);
+            std::fclose(fp);
+            return s;
+        };
+        LIFT_CHECK(hostBytes(packed) == packed_bytes);
+        LIFT_CHECK(hostBytes(dumped) == dumped_bytes);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑪ ★ 2026-11-05 缺陷单：**guest 路径的编码**
+    //    guest 根 = `E:\Games\Eushully\天結`（含日文；= `Vfs::guestRoot()` 的真实缺省值）。判据：
+    //      ① `GetModuleFileNameA` 写出的字节 == **CP932**（`天結` = 93 56 8C 8B），⛔ 不是它的 UTF-8
+    //         （`天結` = E5 A4 A9 E7 B5 90）—— 后者正是"引擎日志打出 `螟ｩ邨申AGE.EXE`"的成因；
+    //      ② `GetCommandLineA` 指向的字节同样是 CP932（带引号）；`GetCommandLineW` 是 UTF-16；
+    //      ③ `GetModuleFileNameW` 的 UTF-16 == `L"E:\Games\Eushully\天結\AGE.EXE"`（⛔ 不是把
+    //         UTF-8 字节按 CP932 解出来的乱码）；
+    //      ④ 把 ① 的**字节原样**喂回 `CreateFileA`（引擎就是这么用 exe 路径的）⇒ 命中 VFS overlay；
+    //      ⑤ `FindFirstFileA` 的 `cFileName`（日文文件名）/ `GetFullPathNameA`（相对路径）也是 CP932。
+    {
+        g_current_case = "guest-exe-path-cp932";
+        Fixture f;
+        lift::registerProcessShims(f.m.shims());
+        lift::registerFileShims(f.m.shims());
+        lift::registerSyncShims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));  // 宿主根随便；**guest 根**才是日文的
+        f.m.vfs().setGuestRoot("E:\\Games\\Eushully\\天結");
+        LIFT_CHECK(f.ok);
+
+        lift::PeImage img;
+        img.path = "C:\\host\\corpus\\AGE.EXE__dumped.sectfix.EXE";  // 宿主 `--exe` 串：⛔ 不许出现在 guest
+        lift::ProcessSetup setup;
+        std::string serr;
+        LIFT_CHECK(lift::setupProcessStructures(f.m.mem(), img, f.m.layout(), f.m.vfs(), &setup, &serr));
+        f.m.cpu().shim.exe_path_ea = setup.exe_path_ea;
+        f.m.cpu().shim.cmdline_ea = setup.cmdline_ea;
+
+        // ★ 期望的 **CP932 字节**：`天結` = 93 56 8C 8B（硬编码；与 tools/lib/cp932.mjs 的
+        //   `encodeBack('天結')` 逐字节一致）。⛔ 不用 `wideToCp932` 现算 —— 那会让"编码器坏了"
+        //   与"路径编码链坏了"两件事一起绿（自证）。
+        const char kTenketsuCp932[4] = {'\x93', '\x56', '\x8C', '\x8B'};
+        const std::string exe_cp932 = std::string("E:\\Games\\Eushully\\") +
+                                      std::string(kTenketsuCp932, sizeof(kTenketsuCp932)) + "\\AGE.EXE";
+        const std::string exe_utf8 = "E:\\Games\\Eushully\\天結\\AGE.EXE";
+        const std::u16string exe_utf16 = u"E:\\Games\\Eushully\\天結\\AGE.EXE";
+        // 两套字节真的不同（UTF-8 的 天結 是 6 字节、CP932 是 4 字节）⇒ 下面每条断言都能分开
+        LIFT_CHECK(exe_cp932.size() + 2u == exe_utf8.size());
+        LIFT_CHECK(exe_cp932 != exe_utf8);
+
+        // ① GetModuleFileNameA ⇒ CP932
+        const std::uint32_t gmf = f.use("GetModuleFileNameA");
+        const std::uint32_t gmfw = f.use("GetModuleFileNameW");
+        const std::uint32_t gcl = f.use("GetCommandLineA");
+        const std::uint32_t gclw = f.use("GetCommandLineW");
+        const std::uint32_t buf = f.zeroData(512);
+        LIFT_CHECK_EQ_U32(f.call(gmf, {0u, buf, 512u}),
+                          static_cast<std::uint32_t>(exe_cp932.size()));
+        const std::string got_a = guestStr(f.m, buf);
+        LIFT_CHECK(got_a == exe_cp932);
+        if (got_a != exe_cp932) {
+            // 红的时候要能一眼看出是"UTF-8 从 guest 内存漏出来了"
+            std::fprintf(stderr, "  GetModuleFileNameA 实际字节: %s（期望 CP932: %s）\n",
+                         hexBytes(got_a).c_str(), hexBytes(exe_cp932).c_str());
+        }
+
+        // ② GetCommandLineA（指针）/ GetCommandLineW（UTF-16）
+        const std::uint32_t cl_ea = f.call(gcl, {});
+        LIFT_CHECK(cl_ea != 0);
+        const std::string got_cmd = guestStr(f.m, cl_ea);
+        LIFT_CHECK(got_cmd == "\"" + exe_cp932 + "\"");
+        if (got_cmd != "\"" + exe_cp932 + "\"") {
+            std::fprintf(stderr, "  GetCommandLineA 实际字节: %s\n", hexBytes(got_cmd).c_str());
+        }
+        const std::uint32_t clw_ea = f.call(gclw, {});
+        LIFT_CHECK(clw_ea != 0);
+        LIFT_CHECK(guestWstr(f.m, clw_ea, 512) == u"\"" + exe_utf16 + u"\"");
+
+        // ③ GetModuleFileNameW ⇒ UTF-16（W 版**不经过** CP932；见 vfs.h / kernel32_process.cpp）
+        const std::uint32_t wbuf = f.zeroData(1024);  // 512 个 UTF-16 码元 = 1024 字节
+        LIFT_CHECK_EQ_U32(f.call(gmfw, {0u, wbuf, 512u}),
+                          static_cast<std::uint32_t>(exe_utf16.size()));
+        LIFT_CHECK(guestWstr(f.m, wbuf, 512) == exe_utf16);
+
+        // ④ 端到端：① 的字节**原样**当路径 ⇒ CreateFileA 命中 overlay（真机就是这么拿 exe 路径的）
+        const fs::path packed = dir / "AGE.EXE";                     // 安装树里的加壳原件
+        const fs::path dumped = dir / "overlay" / "AGE.dumped.exe";  // 真正在跑的那份
+        fs::create_directories(dumped.parent_path(), ec);
+        auto writeFile = [](const fs::path& p, const std::string& bytes) {
+            // ★ 宿主打开走 `openHostFileUtf8`（= `_wfopen_s`）：裸 `std::fopen` 在 Windows 上按
+            //   **本地 ANSI 码页**解释路径 ⇒ 日文文件名会落成另一个名字（本用例抓到的真事）。
+            std::FILE* fp = lift::openHostFileUtf8(pathToUtf8(p), "wb");
+            if (!fp) return false;
+            if (!bytes.empty()) std::fwrite(bytes.data(), 1, bytes.size(), fp);
+            std::fclose(fp);
+            return true;
+        };
+        const std::string packed_bytes = "PACKED-ORIGINAL-CJK-ROOT";
+        const std::string dumped_bytes = "UNPACKED-BYTES-CJK-ROOT-0123456789";
+        LIFT_CHECK(writeFile(packed, packed_bytes));
+        LIFT_CHECK(writeFile(dumped, dumped_bytes));
+        // ★ 与 `Machine::prepare` 的装配**逐字一致**：overlay 的 guest 侧 = `vfs.guestExePath()`
+        f.m.vfs().setExeOverlay(f.m.vfs().guestExePath(), pathToUtf8(dumped), "0123456789abcdef");
+
+        const std::uint32_t create = f.use("CreateFileA");
+        const std::uint32_t readf = f.use("ReadFile");
+        const std::uint32_t getsize = f.use("GetFileSize");
+        const std::uint32_t close = f.use("CloseHandle");
+        const std::uint32_t path_ea = f.data(exe_cp932.c_str(), exe_cp932.size() + 1u);
+        const std::uint32_t h = f.call(create, {path_ea, kGenericRead, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK(h != kInvalidHandleValue);
+        if (h != kInvalidHandleValue) {
+            const std::uint32_t size = f.call(getsize, {h, 0u});
+            LIFT_CHECK_EQ_U32(size, static_cast<std::uint32_t>(dumped_bytes.size()));
+            const std::uint32_t nbuf = f.zeroData(256);
+            const std::uint32_t got_ea = f.u32data(0);
+            f.call(readf, {h, nbuf, 256u, got_ea, 0u});
+            const std::uint32_t n = f.m.mem().rd32(got_ea);
+            LIFT_CHECK(guestStr(f.m, nbuf, n + 1u) == dumped_bytes);
+            f.call(close, {h});
+        }
+        // 加壳原件没被碰（overlay 只是路由）
+        LIFT_CHECK(writeFile(packed, packed_bytes));
+
+        // ⑤ 同一根因的其它面：FindFirstFileA 的 cFileName（日文文件名）+ GetFullPathNameA
+        const std::string dat_utf8 = "天結.CJK";
+        const char kTenketsuDatCp932[8] = {'\x93', '\x56', '\x8C', '\x8B', '.', 'C', 'J', 'K'};
+        const std::string dat_cp932(kTenketsuDatCp932, sizeof(kTenketsuDatCp932));
+        LIFT_CHECK(writeFile(dir / pathFromUtf8(dat_utf8), "CJK"));
+
+        const std::uint32_t find = f.use("FindFirstFileA");
+        const std::uint32_t findclose = f.use("FindClose");
+        const std::uint32_t fdata = f.zeroData(0x140u);
+        const std::string pattern_cp932 =
+            std::string("E:\\Games\\Eushully\\") +
+            std::string(kTenketsuCp932, sizeof(kTenketsuCp932)) + "\\*.CJK";
+        const std::uint32_t pat_ea = f.data(pattern_cp932.c_str(), pattern_cp932.size() + 1u);
+        const std::uint32_t fh = f.call(find, {pat_ea, fdata});
+        LIFT_CHECK(fh != kInvalidHandleValue);
+        if (fh != kInvalidHandleValue) {
+            std::string cfile;
+            for (std::uint32_t i = 0; i < 260u; ++i) {  // cFileName[260] @ WIN32_FIND_DATAA+0x2C
+                const char c = static_cast<char>(f.m.mem().rd8(fdata + 0x2Cu + i));
+                if (c == 0) break;
+                cfile.push_back(c);
+            }
+            LIFT_CHECK(cfile == dat_cp932);
+            if (cfile != dat_cp932) {
+                std::fprintf(stderr, "  FindFirstFileA 的 cFileName 实际字节: %s\n", hexBytes(cfile).c_str());
+            }
+            f.call(findclose, {fh});
+        }
+
+        // GetFullPathNameA：相对路径（cwd = guest 根）⇒ CP932 全路径
+        const std::uint32_t gfp = f.use("GetFullPathNameA");
+        const std::uint32_t rel_ea = f.cstr("AGE.EXE");
+        const std::uint32_t full_buf = f.zeroData(512);
+        LIFT_CHECK_EQ_U32(f.call(gfp, {rel_ea, 512u, full_buf, 0u}),
+                          static_cast<std::uint32_t>(exe_cp932.size()));
+        LIFT_CHECK(guestStr(f.m, full_buf) == exe_cp932);
+
+        fs::remove_all(dumped.parent_path(), ec);
     }
 
     fs::remove_all(dir, ec);

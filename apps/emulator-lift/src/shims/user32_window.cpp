@@ -12,6 +12,7 @@
 
 #include "runtime/guest_call.h"
 #include "runtime/host_window.h"
+#include "runtime/region.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
 
@@ -225,7 +226,7 @@ void shimUpdateWindow(X86& cpu, ShimCall& call) {
         return;
     }
     if (w->proc == 0) {
-        w->dirty = false;
+        cpu.windows->validateAll(*w);
         call.result = 1;
         return;
     }
@@ -233,7 +234,8 @@ void shimUpdateWindow(X86& cpu, ShimCall& call) {
     const bool started = startWndProc(
         cpu, hwnd, kWmPaint, 0, 0, 4u + call.stdcall_bytes, "UpdateWindow/WM_PAINT",
         [hwnd, &cpu](X86&, std::uint32_t, std::uint32_t* out) {
-            if (HostWindow* ww = cpu.windows->find(hwnd)) ww->dirty = false;
+            // 真机：BeginPaint/EndPaint 在 WM_PAINT 里把无效区清空。
+            if (HostWindow* ww = cpu.windows->find(hwnd)) cpu.windows->validateAll(*ww);
             *out = 1;
             return true;
         },
@@ -296,7 +298,9 @@ void shimSetWindowPos(X86& cpu, ShimCall& call) {
         w->outer_h = call.i32(4);
         WindowManager::clientSizeFor(w->style, w->outer_w, w->outer_h, &w->client_w, &w->client_h);
     }
-    w->dirty = true;
+    // ★ 真机：移动 / 改变尺寸会把整个客户区标成无效（随后由 WM_PAINT 重画）。
+    //   这里走**无效区**（`dirty` 是它的镜像），不再单独写 `dirty`（⛔ 一处真一处假）。
+    cpu.windows->invalidateRect(*w, nullptr);
     shimLog("user32", "SetWindowPos", "hwnd=%08X pos=%d,%d size=%dx%d flags=%08X（headless；不主动发 WM_SIZE）",
             w->hwnd, w->x, w->y, w->outer_w, w->outer_h, flags);
     call.result = 1;
@@ -355,27 +359,87 @@ void shimGetWindowPlacement(X86& cpu, ShimCall& call) {
 
 void shimInvalidateRect(X86& cpu, ShimCall& call) {
     HostWindow* w = requireWindow(cpu, call.u32(0), "InvalidateRect");
-    w->dirty = call.u32(1) == 0 ? true : true;
+    const std::uint32_t ea = call.u32(1);
+    RegionRect rc;
+    if (ea != 0) {
+        if (!cpu.mem->committed(ea, 16)) {
+            shimLog("user32", "InvalidateRect", "lprc 0x%08X 不可读 ⇒ FALSE（Win32 失败值）", ea);
+            call.result = 0;
+            return;
+        }
+        rc.left = static_cast<std::int32_t>(cpu.mem->rd32(ea));
+        rc.top = static_cast<std::int32_t>(cpu.mem->rd32(ea + 4));
+        rc.right = static_cast<std::int32_t>(cpu.mem->rd32(ea + 8));
+        rc.bottom = static_cast<std::int32_t>(cpu.mem->rd32(ea + 12));
+    }
+    // ★ `lpRect == NULL` ⇒ 整个客户区；否则矩形是**客户区坐标**。`bErase` 只影响 BeginPaint 的
+    //   背景擦除（本模拟器没有背景刷 ⇒ 不建模），⛔ 它**不**改变无效区本身。
+    cpu.windows->invalidateRect(*w, ea != 0 ? &rc : nullptr);
+    shimLog("user32", "InvalidateRect", "hwnd=%08X %s ⇒ 无效区 %zu 个矩形（dirty=%d）", w->hwnd,
+            ea != 0 ? "矩形" : "整客户区", w->update_region.size(), w->dirty ? 1 : 0);
     call.result = 1;
 }
 
 void shimValidateRect(X86& cpu, ShimCall& call) {
     HostWindow* w = requireWindow(cpu, call.u32(0), "ValidateRect");
-    w->dirty = false;
+    const std::uint32_t ea = call.u32(1);
+    RegionRect rc;
+    if (ea != 0) {
+        if (!cpu.mem->committed(ea, 16)) {
+            shimLog("user32", "ValidateRect", "lprc 0x%08X 不可读 ⇒ FALSE（Win32 失败值）", ea);
+            call.result = 0;
+            return;
+        }
+        rc.left = static_cast<std::int32_t>(cpu.mem->rd32(ea));
+        rc.top = static_cast<std::int32_t>(cpu.mem->rd32(ea + 4));
+        rc.right = static_cast<std::int32_t>(cpu.mem->rd32(ea + 8));
+        rc.bottom = static_cast<std::int32_t>(cpu.mem->rd32(ea + 12));
+    }
+    cpu.windows->validateRect(*w, ea != 0 ? &rc : nullptr);
+    shimLog("user32", "ValidateRect", "hwnd=%08X %s ⇒ 无效区 %zu 个矩形（dirty=%d）", w->hwnd,
+            ea != 0 ? "矩形" : "整客户区", w->update_region.size(), w->dirty ? 1 : 0);
     call.result = 1;
 }
 
+// ---- 无效区（M2 · P4 / B7）：GetUpdateRgn 只读、ValidateRgn 减掉 ----
 void shimGetUpdateRgn(X86& cpu, ShimCall& call) {
     HostWindow* w = requireWindow(cpu, call.u32(0), "GetUpdateRgn");
-    (void)w;
-    // NULLREGION = 1；region 本体在 M2b（P4）。这里只让 WM_PAINT 路径不炸。
-    call.result = 1;
+    const std::uint32_t hrgn = call.u32(1);
+    if (cpu.handles == nullptr) shimAbort("user32", "GetUpdateRgn", "cpu.handles 为空（Machine 没装配）");
+    HandleEntry* entry = cpu.handles->get(hrgn);
+    if (entry == nullptr || entry->kind != HandleKind::GdiRegion || entry->payload == nullptr) {
+        shimLog("user32", "GetUpdateRgn", "目标区域句柄 0x%08X 不是 region ⇒ ERROR", hrgn);
+        call.result = static_cast<std::uint32_t>(kRgnError);
+        return;
+    }
+    // ★ 返回的是**无效区的副本**（客户区坐标），且**不**改变窗口的无效区（真机语义）。
+    *static_cast<GdiRegion*>(entry->payload) = w->update_region;
+    // bErase（第 3 个参数）只在 BeginPaint 里生效 ⇒ 这里只记录不建模。
+    call.result = static_cast<std::uint32_t>(w->update_region.type());
+    shimLog("user32", "GetUpdateRgn", "hwnd=%08X rgn=0x%08X ⇒ %u（%zu 个矩形）", w->hwnd, hrgn,
+            call.result, w->update_region.size());
 }
 
 void shimValidateRgn(X86& cpu, ShimCall& call) {
     HostWindow* w = requireWindow(cpu, call.u32(0), "ValidateRgn");
-    w->dirty = false;
+    const std::uint32_t hrgn = call.u32(1);
+    if (hrgn == 0) {
+        // NULL ⇒ 整个窗口有效（真机语义）
+        cpu.windows->validateAll(*w);
+        call.result = 1;
+        return;
+    }
+    if (cpu.handles == nullptr) shimAbort("user32", "ValidateRgn", "cpu.handles 为空（Machine 没装配）");
+    HandleEntry* entry = cpu.handles->get(hrgn);
+    if (entry == nullptr || entry->kind != HandleKind::GdiRegion || entry->payload == nullptr) {
+        shimLog("user32", "ValidateRgn", "区域句柄 0x%08X 不是 region ⇒ FALSE（Win32 失败值）", hrgn);
+        call.result = 0;
+        return;
+    }
+    cpu.windows->validateRegion(*w, *static_cast<const GdiRegion*>(entry->payload));
     call.result = 1;
+    shimLog("user32", "ValidateRgn", "hwnd=%08X rgn=0x%08X ⇒ 无效区剩 %zu 个矩形（dirty=%d）", w->hwnd, hrgn,
+            w->update_region.size(), w->dirty ? 1 : 0);
 }
 
 void shimGetSystemMetrics(X86& cpu, ShimCall& call) {

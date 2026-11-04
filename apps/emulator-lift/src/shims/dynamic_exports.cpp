@@ -31,10 +31,11 @@ constexpr AbsentExport kAbsentExports[] = {
     {"user32", "GetGestureInfo", "XP 的 user32 没有手势 API（Vista+ 才有）⇒ 真机返回 NULL + 127"},
     {"user32", "CloseGestureInfoHandle", "XP 的 user32 没有手势 API（Vista+ 才有）⇒ 真机返回 NULL + 127"},
     {"user32", "CloseTouchInputHandle", "XP 的 user32 没有触摸 API（Vista+ 才有）⇒ 真机返回 NULL + 127"},
-    // shell32：引擎有 4 处动态解析 `SHGetFolderPathA`；本模拟器按"老 shell32"回答 ⇒
-    // 引擎回退到已实现的 `SHGetSpecialFolderPathA`（shell32.cpp）。
-    {"shell32", "SHGetFolderPathA",
-     "本模拟器模拟的 shell32 不提供 SHGetFolderPathA ⇒ 引擎回退 SHGetSpecialFolderPathA（已实现）"},
+    // shell32：引擎有 4 处动态解析 `SHGetFolderPathA` —— 本模拟器报 **XP 5.1**，而 XP 的 shell32
+    // **确实**导出它 ⇒ 已在 shell32.cpp 实现，**不在**这张"这个 OS 没有"的表里。
+    // （2026-11-05 更正：此前按"老 shell32 不提供、引擎会回退 SHGetSpecialFolderPathA"处理，
+    //  但引擎在 major>4 的分支上**只**走 SHGetFolderPathA、没有回退 ⇒ AppData 路径为空，
+    //  于是回落到配置里的相对 `set:RegFilePath` 并往安装树里写 SYS4REG.INI。）
     // comctl32：`_TrackMouseEvent` 是 comctl32 4.71+ 才有的导出；老 comctl32 没有。
     {"comctl32", "_TrackMouseEvent",
      "老 comctl32 没有 _TrackMouseEvent（4.71+ 才有）⇒ 真机返回 NULL + 127"},

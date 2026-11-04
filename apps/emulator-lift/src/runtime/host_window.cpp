@@ -201,4 +201,55 @@ std::uint32_t WindowManager::setCapture(std::uint32_t hwnd) {
     return old;
 }
 
+// ---- 无效区（update region；M2 · P4 / B7）----
+//
+// ★ 口径见 host_window.h。这里只保证两件事：
+//   ① `dirty` 永远是 `!update_region.empty()` 的镜像（两处一起改，⛔ 不许一处真一处假）；
+//   ② 结果区域**总是规范化**的（`GdiRegion::combine` 负责）⇒ `GetUpdateRgn` / `GetRgnBox` /
+//      `GetRegionData` 对同一块无效区给出同一份矩形表。
+void WindowManager::invalidateRect(HostWindow& w, const RegionRect* rect) {
+    GdiRegion add;
+    if (rect == nullptr) {
+        add.setRect(0, 0, w.client_w, w.client_h);  // NULL ⇒ 整个客户区（真机语义）
+    } else if (!rect->empty()) {
+        add.setRect(rect->left, rect->top, rect->right, rect->bottom);
+    }
+    // 空矩形 / 空客户区 ⇒ 并进空区域 = 什么都不加（真机也是空操作）。
+    if (!add.empty()) {
+        GdiRegion next;
+        next.combine(w.update_region, add, RegionCombine::Or);
+        w.update_region = next;
+    }
+    w.dirty = !w.update_region.empty();
+}
+
+void WindowManager::validateRect(HostWindow& w, const RegionRect* rect) {
+    if (rect == nullptr) {
+        validateAll(w);  // NULL ⇒ 整窗有效（真机语义）
+        return;
+    }
+    GdiRegion remove;
+    if (!rect->empty()) remove.setRect(rect->left, rect->top, rect->right, rect->bottom);
+    if (!remove.empty() && !w.update_region.empty()) {
+        GdiRegion next;
+        next.combine(w.update_region, remove, RegionCombine::Diff);
+        w.update_region = next;
+    }
+    w.dirty = !w.update_region.empty();
+}
+
+void WindowManager::validateRegion(HostWindow& w, const GdiRegion& region) {
+    if (!region.empty() && !w.update_region.empty()) {
+        GdiRegion next;
+        next.combine(w.update_region, region, RegionCombine::Diff);
+        w.update_region = next;
+    }
+    w.dirty = !w.update_region.empty();
+}
+
+void WindowManager::validateAll(HostWindow& w) {
+    w.update_region.setEmpty();
+    w.dirty = false;
+}
+
 }  // namespace lift

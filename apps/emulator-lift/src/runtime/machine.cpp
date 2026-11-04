@@ -211,7 +211,11 @@ bool Machine::prepare(std::uint32_t entry_override, std::string* err) {
         if (err) *err = "还没有载入镜像";
         return false;
     }
-    if (!setupProcessStructures(mem_, image_, layout_, &setup_, err)) return false;
+    // ★ VFS overlay（用户 2026-11-05 口径）：guest 打开 `…\AGE.EXE` 拿到的是**我们真正在跑的
+    //   那份字节**（--exe 解析出的拆壳件），而不是 `--game-dir` 下那份加壳原件。
+    //   放在 prepare 而不是 loadImage：此时 --game-dir / --guest-root 都已装配完。
+    vfs_.setExeOverlay(vfs_.guestExePath(), exe_path_, image_.sha256);
+    if (!setupProcessStructures(mem_, image_, layout_, vfs_, &setup_, err)) return false;
     if (!heap_.init(&mem_, layout_.heap_base, layout_.heap_size)) {
         if (err) *err = heap_.lastError();
         return false;
@@ -502,10 +506,13 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
     // ★ 记 `--exe` 的**原始字符串**（不是解析后的绝对路径）：plan §5 A4 实测，同一台机器上
     //   相对路径 38,456 / 绝对路径 44,184 / 87 字符路径 53,134 条指令 —— 换个写法就是另一条路径。
     t.exe_path = setup_.exe_path.empty() ? exe_path_ : setup_.exe_path;
+    t.guest_exe_path = setup_.guest_exe_path;
     t.guest_cmdline = setup_.cmdline;
     t.environment = setup_.environment_ansi;
     t.game_dir = vfs_.gameDir();
     t.appdata_dir = vfs_.appDataDir();
+    t.overlay_guest = vfs_.overlayGuestPath();
+    t.overlay_host = vfs_.overlayHostPath();
     t.agerc_path = agerc_path_;
     t.agerc_sha256 = agerc_image_.sha256;
     t.clock_start_100ns = clock_.epoch100ns();
@@ -516,10 +523,13 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
 void Machine::dumpTraceInputs(std::FILE* out) const {
     const TraceInputs t = traceInputs();
     std::fprintf(out, "trace-input exe      = %s\n", t.exe_path.c_str());
+    std::fprintf(out, "trace-input guest-exe= %s\n", t.guest_exe_path.c_str());
     std::fprintf(out, "trace-input cmdline  = %s\n", t.guest_cmdline.c_str());
     std::fprintf(out, "trace-input env      = %s\n", t.environment.c_str());
     std::fprintf(out, "trace-input game-dir = %s\n", t.game_dir.c_str());
     std::fprintf(out, "trace-input appdata  = %s\n", t.appdata_dir.c_str());
+    std::fprintf(out, "trace-input overlay  = %s ⇒ %s\n", t.overlay_guest.c_str(),
+                 t.overlay_host.c_str());
     std::fprintf(out, "trace-input agerc    = %s (sha256=%s)\n", t.agerc_path.c_str(),
                  t.agerc_sha256.empty() ? "-" : t.agerc_sha256.c_str());
     std::fprintf(out, "trace-input clock    = %s (start=%llu x100ns)\n",
@@ -539,10 +549,13 @@ std::uint64_t Machine::traceInputsHash() const {
         }
     };
     mix(t.exe_path.data(), t.exe_path.size());
+    mix(t.guest_exe_path.data(), t.guest_exe_path.size());
     mix(t.guest_cmdline.data(), t.guest_cmdline.size());
     mix(t.environment.data(), t.environment.size());
     mix(t.game_dir.data(), t.game_dir.size());
     mix(t.appdata_dir.data(), t.appdata_dir.size());
+    mix(t.overlay_guest.data(), t.overlay_guest.size());
+    mix(t.overlay_host.data(), t.overlay_host.size());
     mix(t.agerc_path.data(), t.agerc_path.size());
     mix(t.agerc_sha256.data(), t.agerc_sha256.size());
     mix(&t.clock_start_100ns, sizeof(t.clock_start_100ns));

@@ -24,6 +24,7 @@ const char* handleKindName(HandleKind kind) {
         case HandleKind::GdiFont: return "gdi-font";
         case HandleKind::GdiBitmap: return "gdi-bitmap";
         case HandleKind::GdiFontMem: return "gdi-fontmem";
+        case HandleKind::GdiRegion: return "gdi-region";
     }
     return "?";
 }

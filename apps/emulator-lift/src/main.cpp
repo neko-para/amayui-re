@@ -51,7 +51,10 @@ void usage() {
         "  --game-dir <path>   guest 文件系统的**唯一根**（S6 文件与路径族；缺省 env AMAYUI_GAME_DIR）\n"
         "  --guest-root <path> guest 眼里的安装根文本（缺省 E:\\Games\\Eushully\\天結；只用于路径前缀）\n"
         "  --appdata <path>    伪造 AppData 的宿主目录（特殊目录映射；缺省 = 不用 AppData）\n"
-        "  --agerc <path>      AGERC.DLL 的**拆壳件**（真实 guest 模块装载；缺省 = --game-dir 下的 AGERC.DLL）\n"
+        "                      ⚠ 视作**可丢弃**的伪造根：启动时会清 <path>\\Local\\Temp（A4 确定性）\n"
+        "  --agerc <path>      显式指定 AGERC.DLL（真实 guest 模块装载）。缺省 = --game-dir 下的那一份\n"
+        "                      （安装树里的是**汉化免壳件**；⛔ 不要传拆壳件也**不要**用 DATA1.ALF 里那份，\n"
+        "                       只有根件拿不到时才回退到 ALF 条目）\n"
         "  --real-time         用宿主时钟（此时 A4 的逐字节断言自动跳过并明说）\n"
         "  --trace-inputs      打印 trace 输入清单（exe 路径串 / guest 命令行 / 环境块 / 时钟起点）\n"
         "  --until shim        跑到第一次 shim 调用就停（L1）\n"
@@ -338,6 +341,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "emulator-lift: 装配 guest 进程结构失败：%s\n", err.c_str());
         return 1;
     }
+    // ★ guest 眼里的主模块路径（用户 2026-11-05 口径）：`<guest 根>\AGE.EXE`，
+    //   打开它拿到的是**我们真正在跑的那份字节**（拆壳件），不是 `--game-dir` 下的加壳原件。
+    std::printf("exe(guest): %s（VFS overlay ⇒ %s）\n", machine.vfs().overlayGuestPath().c_str(),
+                machine.vfs().overlayHostPath().c_str());
 
     // ---- AGERC.DLL：作为**真实 guest 模块**装载（用户 2026-11-04 改口径）----
     //   显式 `--agerc <path>`；否则 `--game-dir` 下的 AGERC.DLL（走 VFS 解析，大小写不敏感）。

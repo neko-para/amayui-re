@@ -58,6 +58,9 @@ void registerGdiBootShims(ShimRegistry& shims);       // gdi32_boot.cpp（P0 启
 //   `registerGdiFontShims` 是**唯一**对外入口（它内部先调 registerGdiObjectShims）。
 void registerGdiObjectShims(ShimRegistry& shims);
 void registerGdiFontShims(ShimRegistry& shims);
+// ★ P4：GDI region 七条（CreateRectRgn / CreateEllipticRgnIndirect / CreatePolygonRgn / CombineRgn /
+//   GetRegionData / GetRgnBox / PtInRegion）。区域对象走 `HandleTable`（`HandleKind::GdiRegion`）。
+void registerGdiRegionShims(ShimRegistry& shims);  // gdi32_region.cpp
 void registerShell32Shims(ShimRegistry& shims);       // shell32.cpp（特殊目录 / --appdata + imm32 没有 IME）
 // ★ P4 小族：文件/路径邻域的两条（引擎在启动路径上真调它们，`.lst` 0x0049037D / 0x004903A3）。
 void registerShlwapiShims(ShimRegistry& shims);       // shlwapi.cpp（PathRemoveFileSpecA）

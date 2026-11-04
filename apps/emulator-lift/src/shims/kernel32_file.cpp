@@ -40,7 +40,9 @@
 //      确实是大小写不敏感的）。每次调用留一行日志。
 //   7. **`CopyFileA` 用宿主 `copy_file`**：跨卷复制由宿主负责（Windows 的 `CopyFile` 也是）；
 //      文件属性 / 时间戳的复制不在本模拟器保证范围内。
-//   8. **`GetTempPathA` / `GetTempFileNameA` 缺省落在 `game_dir` 根的 `.lift-tmp\`**（不随 guest cwd 漂）。
+//   8. **`GetTempPathA` / `GetTempFileNameA` 的落点 = `<--appdata>/Local/Temp`**（guest 文本
+//      `C:\Users\Amayui\AppData\Local\Temp`，与 `TEMP` / `TMP` / 环境块**同源**；2026-11-05 改）。
+//      没有 `--appdata` ⇒ 二者都**响亮失败**（⛔ 不再退回 `--game-dir/.lift-tmp`：那是对安装树的写）。
 //      `GetTempFileNameA` 的 `uUnique != 0` 按文档**用调用方的值**（只看低 16 位、`%04X` 大写）、
 //      **不创建文件**、返回 `uUnique` 本身；`uUnique == 0` 时**有意偏差**：从 0 起找第一个空号
 //      （真机从系统时间起，这里确定性优先）并创建那个空文件。前缀一律按字节截到 **3** 个字符，
@@ -336,22 +338,19 @@ std::string pathFromWide(const std::u16string& w) {
     return utf16ToUtf8(w, &bad);
 }
 
-std::string cp932FromUtf8(const std::string& utf8, std::size_t* bad) {
-    std::size_t bad_utf8 = 0;
-    const std::u16string w = utf8ToUtf16(utf8, &bad_utf8);
-    std::size_t bad_cp932 = 0;
-    const std::string out = wideToCp932(w, &bad_cp932);
-    if (bad) *bad = bad_utf8 + bad_cp932;
-    return out;
-}
+// ★ UTF-8 文本 → CP932 字节：唯一实现在 `runtime/cp932`（`utf8ToCp932`）。
+//   本文件原有一份同义的局部 `cp932FromUtf8` —— 两处各拼一遍必然漂（2026-11-05 缺陷单：
+//   日文 guest 路径乱码就是"A 版字节 / UTF-8 文本"在某一处混用了）。
 
-// 把 CP932 字节写进 guest 缓冲：截断到 cap-1、保证 0 结尾，返回写入字节数（不含结尾 0）
+// 把 CP932 字节写进 guest 缓冲：截断到 cap-1、保证 0 结尾，返回写入字节数（不含结尾 0）。
+// ★ 截断走 `cp932Truncate`：**成对**丢双字节字符（⛔ 不留半个字符 —— 半个字符写进
+//   `lpTempFileName` / `cFileName` 这类定长字段就是非法 CP932）。
 std::uint32_t writeAnsiBuffer(X86& cpu, std::uint32_t ea, std::uint32_t cap,
                               const std::string& bytes, const char* api, const char* what) {
-    const std::size_t n =
-        std::min<std::size_t>(bytes.size(), static_cast<std::size_t>(cap) - 1u);
+    const std::string clipped = cp932Truncate(bytes, static_cast<std::size_t>(cap) - 1u);
+    const std::size_t n = clipped.size();
     requireCommitted(cpu, ea, n + 1u, api, what);
-    if (n > 0) cpu.mem->writeBytes(ea, bytes.data(), n);
+    if (n > 0) cpu.mem->writeBytes(ea, clipped.data(), n);
     cpu.mem->wr8(ea + static_cast<std::uint32_t>(n), 0);
     return static_cast<std::uint32_t>(n);
 }
@@ -1260,7 +1259,7 @@ void getCurrentDirectory(X86& cpu, ShimCall& call, bool wide) {
     }
 
     std::size_t bad = 0;
-    const std::string bytes = cp932FromUtf8(guest, &bad);
+    const std::string bytes = utf8ToCp932(guest, &bad);
     if (bad != 0) {
         shimLog("kernel32", api, "当前目录 \"%s\" 里有 %u 个字符不能编成 CP932（已写 '?'）",
                 guest.c_str(), static_cast<unsigned>(bad));
@@ -1303,34 +1302,29 @@ void shimSetCurrentDirectoryA(X86& cpu, ShimCall& call) {
 // ---------------------------------------------------------------------------------------
 // 临时目录 / 临时文件名
 // ---------------------------------------------------------------------------------------
-// `.lift-tmp` 锚在 **game_dir 根**（不随 guest cwd 漂）；返回宿主路径并确保它存在
+// ★ 2026-11-05：临时目录 = guest 的 `C:\Users\Amayui\AppData\Local\Temp`（与 `TEMP` / `TMP`
+//   环境变量、`GetTempPathA` **同源**，见 vfs.h），宿主落在 `<--appdata>/Local/Temp`。
+//   ⛔ 不再退回 `--game-dir/.lift-tmp`：那是对**安装树**的写（验收红线）。
+//   没有 `--appdata` ⇒ 响亮失败（没有 TEMP 就没有临时目录；⛔ 不指向宿主真实 Temp）。
 bool tempDirHost(X86& cpu, const char* api, std::string* host, std::string* guest) {
-    const std::string guest_root = cpu.vfs->guestRoot();
-    const std::string guest_tmp = (guest_root.empty() ? std::string("C:\\") : guest_root) + "\\.lift-tmp";
-    std::string why;
-    std::string h;
-    if (!cpu.vfs->resolve(guest_tmp, &h, &why, /*must_exist=*/false, /*resolve_case=*/true)) {
-        shimLog("kernel32", api, "解析 .lift-tmp 失败：%s", why.c_str());
+    if (!cpu.vfs || cpu.vfs->appDataDir().empty()) {
+        shimLog("kernel32", api, "没有 --appdata ⇒ 没有临时目录（⛔ 不写 --game-dir，也不指向宿主 Temp）");
         return false;
     }
-    std::error_code ec;
-    if (!fs::is_directory(pathFromUtf8(h), ec) || ec) {
-        ec.clear();
-        fs::create_directories(pathFromUtf8(h), ec);
-        if (ec) {
-            shimLog("kernel32", api, "创建 .lift-tmp 失败：%s", ec.message().c_str());
-            return false;
-        }
-        ec.clear();
-        if (!fs::is_directory(pathFromUtf8(h), ec) || ec) {
-            shimLog("kernel32", api, "创建 .lift-tmp 之后它仍不是目录");
-            return false;
-        }
+    const std::string guest_tmp = lift::guestTempDirText();
+    std::string why;
+    // 首次使用时把 `<--appdata>/Local/Temp` 建出来（`resolve` 只解析、不建目录）
+    if (!cpu.vfs->makeSureDirectoryPathExists(guest_tmp + "\\", &why)) {
+        shimLog("kernel32", api, "临时目录 \"%s\" 建不出来：%s", guest_tmp.c_str(), why.c_str());
+        return false;
     }
-    std::string g;
-    if (!cpu.vfs->toGuest(h, &g)) g = guest_tmp;
+    std::string h;
+    if (!cpu.vfs->resolve(guest_tmp, &h, &why, /*must_exist=*/true, /*resolve_case=*/true)) {
+        shimLog("kernel32", api, "临时目录 \"%s\" 解析失败：%s", guest_tmp.c_str(), why.c_str());
+        return false;
+    }
     *host = h;
-    *guest = g;
+    *guest = guest_tmp;
     return true;
 }
 
@@ -1348,7 +1342,7 @@ void shimGetTempPathA(X86& cpu, ShimCall& call) {
         return;
     }
     std::size_t bad = 0;
-    const std::string bytes = cp932FromUtf8(guest + "\\", &bad);
+    const std::string bytes = utf8ToCp932(guest + "\\", &bad);
     if (bad != 0) {
         shimLog("kernel32", api, "临时目录路径里有 %u 个字符不能编成 CP932（已写 '?'）",
                 static_cast<unsigned>(bad));
@@ -1410,8 +1404,10 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
             why = "[invalid] 空路径";
         }
         if (!used_arg) {
-            shimLog("kernel32", api, "lpPathName \"%s\" 不可用（%s）⇒ 退回 .lift-tmp",
-                    dir_arg.c_str(), why.c_str());
+            // ★ 日志写**转码后**的文本（`dir_guest`），⛔ 不把 guest 的 CP932 字节直接塞进宿主日志：
+            //   日志流是 UTF-8，塞 CP932 字节会打出乱码（2026-11-05 缺陷单的同一根因）。
+            shimLog("kernel32", api, "lpPathName \"%s\" 不可用（%s）⇒ 退回 TEMP（<--appdata>/Local/Temp）",
+                    dir_guest.empty() ? "<空>" : dir_guest.c_str(), why.c_str());
         }
     }
     if (!used_arg && !tempDirHost(cpu, api, &host_dir, &guest_dir)) {
@@ -1428,7 +1424,7 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
     const auto writeTempName = [&](const std::string& name) {
         const std::string guest_path = guest_dir + (guest_dir.empty() ? "" : "\\") + name;
         std::size_t bad = 0;
-        const std::string bytes = cp932FromUtf8(guest_path, &bad);
+        const std::string bytes = utf8ToCp932(guest_path, &bad);
         if (bad != 0) {
             shimLog("kernel32", api, "临时文件名里有 %u 个字符不能编成 CP932（已写 '?'）",
                     static_cast<unsigned>(bad));
@@ -1602,7 +1598,7 @@ void shimGetFullPathNameA(X86& cpu, ShimCall& call) {
         return;
     }
     std::size_t bad = 0;
-    const std::string bytes = cp932FromUtf8(full, &bad);
+    const std::string bytes = utf8ToCp932(full, &bad);
     if (bad != 0) {
         shimLog("kernel32", api, "\"%s\" 里有 %u 个字符编不成 CP932（已写 '?'）", full.c_str(),
                 static_cast<unsigned>(bad));
@@ -1827,20 +1823,8 @@ void shimSetFileTime(X86& cpu, ShimCall& call) {
 // ---------------------------------------------------------------------------------------
 // FindFirstFileA / FindNextFileA / FindClose
 // ---------------------------------------------------------------------------------------
-// CP932 的安全截断：不切断一个双字节字符（首字节 0x81..0x9F / 0xE0..0xFC）
-std::string truncateCp932(const std::string& bytes, std::size_t max_bytes) {
-    if (bytes.size() <= max_bytes) return bytes;
-    std::string s = bytes.substr(0, max_bytes);
-    while (!s.empty()) {
-        const unsigned char c = static_cast<unsigned char>(s.back());
-        if (c >= 0x81u && c <= 0xFCu) {
-            s.pop_back();  // 尾部是一个双字节字符的首字节 ⇒ 整对丢掉
-            continue;
-        }
-        break;
-    }
-    return s;
-}
+// ★ CP932 的安全截断只有一份实现（`runtime/cp932` 的 `cp932Truncate`）：`cFileName` 定长 260 字节，
+//   截断时必须成对丢双字节字符（⛔ 不留半个字符）。
 
 void fillFindData(X86& cpu, std::uint32_t ea, const HostDirEntry& e, const char* api) {
     requireCommitted(cpu, ea, kFindDataSize, api, "lpFindFileData");
@@ -1859,12 +1843,12 @@ void fillFindData(X86& cpu, std::uint32_t ea, const HostDirEntry& e, const char*
     cpu.mem->wr32(ea + kFdReserved1, 0u);
 
     std::size_t bad = 0;
-    const std::string bytes = cp932FromUtf8(e.name, &bad);
+    const std::string bytes = utf8ToCp932(e.name, &bad);
     if (bad != 0) {
         shimLog("kernel32", api, "文件名 \"%s\" 里有 %u 个字符不能编成 CP932（已写 '?'）",
                 e.name.c_str(), static_cast<unsigned>(bad));
     }
-    const std::string clipped = truncateCp932(bytes, kFdFileNameChars - 1u);
+    const std::string clipped = cp932Truncate(bytes, kFdFileNameChars - 1u);
     if (clipped.size() != bytes.size()) {
         shimLog("kernel32", api, "文件名 \"%s\" 超过 %u 字节 ⇒ 截断到 \"%s\"", e.name.c_str(),
                 static_cast<unsigned>(kFdFileNameChars - 1u), clipped.c_str());

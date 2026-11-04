@@ -59,11 +59,14 @@ struct RunOptions {
 
 // A4 的**输入清单**（plan §5 A4）：这几项一变，执行路径就可能变。
 struct TraceInputs {
-    std::string exe_path;       // `--exe` 的原始字符串（相对 / 绝对都原样记）
+    std::string exe_path;       // `--exe` 的原始字符串（相对 / 绝对都原样记；宿主侧输入）
+    std::string guest_exe_path; // guest 眼里的主模块路径（`<guest 根>\AGE.EXE`）
     std::string guest_cmdline;  // guest 读到的命令行
     std::string environment;    // 环境块（ANSI 视图；分隔符 ';'）
     std::string game_dir;       // `--game-dir` 原始字符串（空 = 没给）
     std::string appdata_dir;    // `--appdata` 原始字符串（空 = 没给）
+    std::string overlay_guest;  // VFS overlay 的 guest 侧（空 = 没有 overlay）
+    std::string overlay_host;   // VFS overlay 的宿主侧（= 真正在跑的拆壳件）
     std::string agerc_path;     // `--agerc` / 自动发现的原始路径（空 = 没有 AGERC 镜像）
     std::string agerc_sha256;   // AGERC 镜像的 sha256（空 = 没有镜像）
     std::uint64_t clock_start_100ns = 0;

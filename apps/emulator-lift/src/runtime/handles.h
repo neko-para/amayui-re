@@ -16,6 +16,9 @@ enum class HandleKind : std::uint8_t {
     None = 0, Event, Mutex, Semaphore, CriticalSection, File, Find, Thread, Timer, Module, Other,
     // ★ P2：GDI 对象（DC / 字体 / 位图 / AddFontMemResourceEx 的资源句柄）也走同一张表。
     GdiDc, GdiFont, GdiBitmap, GdiFontMem,
+    // ★ P4：GDI 区域（`Create*Rgn` 的 HRGN；payload = `runtime/region.h` 的 `GdiRegion`）。
+    //   `DeleteObject` 认它（见 gdi32_object.cpp）。
+    GdiRegion,
 };
 
 const char* handleKindName(HandleKind kind);

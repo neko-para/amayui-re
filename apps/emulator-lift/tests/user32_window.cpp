@@ -11,6 +11,7 @@
 
 #include "check.h"
 #include "runtime/machine.h"
+#include "runtime/region.h"
 #include "shims/register.h"
 
 namespace {
@@ -38,6 +39,31 @@ constexpr std::uint32_t kMonitorInfo = 0x00403140u;  // MONITORINFO (40)
 constexpr std::uint32_t kSpiOut = 0x00403180u;       // BOOL (4)
 constexpr std::uint32_t kRes2 = 0x00403200u;         // 结果槽（0x80 = 32 个 dword）
 constexpr std::uint32_t kCursorFile = 0x00402180u;   // "mouse.cur"
+
+// 第三阶段（M2 · P4：GDI region + 窗口无效区）用的落点。
+// ★ 刻意放在 0x405000+：与上面两段代码 / 数据（0x401000–0x403300）隔开，⛔ 不与它们重叠。
+constexpr std::uint32_t kCode3 = 0x00405000u;       // 第三段 guest 代码
+constexpr std::uint32_t kRes3 = 0x00406000u;        // 结果槽（0x100 = 64 个 dword）
+constexpr std::uint32_t kRect1 = 0x00406100u;       // RECT 输出（GetRgnBox）
+constexpr std::uint32_t kRect2 = 0x00406110u;       // RECT 输入（InvalidateRect）
+constexpr std::uint32_t kRect3 = 0x00406120u;       // RECT 输入（椭圆包围盒）
+constexpr std::uint32_t kRect4 = 0x00406130u;       // RECT 输出（无效区包围盒 #1）
+constexpr std::uint32_t kRect5 = 0x00406140u;       // RECT 输出（空区域包围盒）
+constexpr std::uint32_t kRect6 = 0x00406150u;       // RECT 输出（椭圆包围盒）
+constexpr std::uint32_t kRect7 = 0x00406160u;       // RECT 输出（多边形包围盒）
+constexpr std::uint32_t kRect8 = 0x00406170u;       // RECT 输出（Validate 之后的无效区）
+constexpr std::uint32_t kRect9 = 0x00406180u;       // RECT 输出（整客户区）
+constexpr std::uint32_t kPts = 0x004061A0u;         // POINT[6]（L 形多边形）
+constexpr std::uint32_t kRgnData = 0x00406200u;     // RGNDATA 缓冲（矩形区域）
+constexpr std::uint32_t kRgnData2 = 0x00406300u;    // RGNDATA 缓冲（多边形区域：2 个 RECT）
+constexpr std::uint32_t kHrgnA = 0x00406400u;       // HRGN 槽（矩形 0,0,10,10）
+constexpr std::uint32_t kHrgnB = 0x00406404u;       // HRGN 槽（矩形 5,0,15,10）
+constexpr std::uint32_t kHrgnDst = 0x00406408u;     // HRGN 槽（CombineRgn 的目标）
+constexpr std::uint32_t kHrgnUpd = 0x0040640Cu;     // HRGN 槽（GetUpdateRgn 的目标）
+constexpr std::uint32_t kHrgnUpd2 = 0x00406410u;    // HRGN 槽（第二次 GetUpdateRgn）
+constexpr std::uint32_t kHrgnEmpty = 0x00406414u;   // HRGN 槽（空矩形）
+constexpr std::uint32_t kHrgnEllipse = 0x00406418u; // HRGN 槽（椭圆）
+constexpr std::uint32_t kHrgnPoly = 0x0040641Cu;    // HRGN 槽（多边形）
 
 struct Asm {
     // ★ `base` = 这段机器码的装载地址（第一段是 kCode；第二阶段是 kCode2）。
@@ -95,6 +121,11 @@ int main() {
     lift::registerUser32MenuShims(m.shims());
     // ★ P4：imm32!ImmAssociateContext（SCOPE §1「完整 IME 不做」⇒ 没有 IME）走 shell32.cpp 的注册入口
     lift::registerShell32Shims(m.shims());
+    // ★ P4：GDI region 七条（CreateRectRgn / CreateEllipticRgnIndirect / CreatePolygonRgn / CombineRgn /
+    //   GetRegionData / GetRgnBox / PtInRegion）。它们与 GetUpdateRgn / ValidateRgn 共用 `GdiRegion` 类型。
+    lift::registerGdiRegionShims(m.shims());
+    // ★ DeleteObject 在 gdi32_object.cpp（P2）：本夹具要验"DeleteObject 能删 region"，所以把它也装上。
+    lift::registerGdiObjectShims(m.shims());
 
     // 给所有 user32 窗口 shim 分配 deterministic 桩地址（bare 机器没有 bind）。
     for (std::uint32_t id = 0; id < m.shims().all().size(); ++id) {
@@ -516,6 +547,460 @@ int main() {
     // ★ P4 / SCOPE §1：完整 IME 不做 ⇒ 按"没有 IME"回答（NULL），⛔ 不是假成功
     g_current_case = "imm-associate-context";
     LIFT_CHECK_EQ_U32(res(R_IMM), 0u);
+
+    // =================================================================================
+    // 第三阶段：M2 · P4 —— GDI region 七条 + 窗口无效区（GetUpdateRgn / ValidateRgn）
+    // ★ 判据（plan §5 B7 / §6 P4）：
+    //   ① 数据类型真做：矩形 / 椭圆 / 多边形（扫描线）都能 PtInRegion 与 GetRgnBox；
+    //   ② CombineRgn 的 AND / OR / DIFF / COPY（+ XOR）各自**语义不同**（DIFF 实现成 AND 会红）；
+    //   ③ GetRegionData 的 RGNDATA（头 + 矩形数组）能被解析回**同一个区域**（往返一致）；
+    //   ④ PtInRegion 的右 / 下边界**不含**（改成 <= 会红）；
+    //   ⑤ `CreateRectRgn` 的空矩形 ⇒ **合法空区域**（句柄非 0、NULLREGION、点永远不在里面）；
+    //   ⑥ InvalidateRect 之后 GetUpdateRgn 给出同一块；ValidateRgn / ValidateRect 之后为空。
+    // =================================================================================
+    constexpr std::uint32_t R_RECT_IN = 0;
+    constexpr std::uint32_t R_RECT_IN_MAX = 4;
+    constexpr std::uint32_t R_RECT_RIGHT = 8;
+    constexpr std::uint32_t R_RECT_BOTTOM = 12;
+    constexpr std::uint32_t R_RECT_NEG = 16;
+    constexpr std::uint32_t R_RECT_BOXTYPE = 20;
+    constexpr std::uint32_t R_EMPTY_BOXTYPE = 28;
+    constexpr std::uint32_t R_EMPTY_PT = 32;
+    constexpr std::uint32_t R_ELLIPSE_BOXTYPE = 40;
+    constexpr std::uint32_t R_ELLIPSE_CENTER = 44;
+    constexpr std::uint32_t R_ELLIPSE_CORNER = 48;
+    constexpr std::uint32_t R_POLY_BOXTYPE = 56;
+    constexpr std::uint32_t R_POLY_IN1 = 60;
+    constexpr std::uint32_t R_POLY_IN2 = 64;
+    constexpr std::uint32_t R_POLY_OUT = 68;
+    constexpr std::uint32_t R_POLY_IN3 = 72;
+    constexpr std::uint32_t R_POLY_WINDING = 76;
+    constexpr std::uint32_t R_AND_TYPE = 80;
+    constexpr std::uint32_t R_AND_IN = 84;
+    constexpr std::uint32_t R_AND_OUT = 88;
+    constexpr std::uint32_t R_OR_TYPE = 92;
+    constexpr std::uint32_t R_OR_LEFT = 96;
+    constexpr std::uint32_t R_OR_RIGHT = 100;
+    constexpr std::uint32_t R_OR_OUT = 104;
+    constexpr std::uint32_t R_DIFF_TYPE = 108;
+    constexpr std::uint32_t R_DIFF_IN = 112;
+    constexpr std::uint32_t R_DIFF_OUT = 116;
+    constexpr std::uint32_t R_COPY_TYPE = 120;
+    constexpr std::uint32_t R_COPY_IN = 124;
+    constexpr std::uint32_t R_COPY_OUT = 128;
+    constexpr std::uint32_t R_XOR_TYPE = 132;
+    constexpr std::uint32_t R_XOR_L = 136;
+    constexpr std::uint32_t R_XOR_M = 140;
+    constexpr std::uint32_t R_XOR_R = 144;
+    constexpr std::uint32_t R_DATA_PROBE = 148;
+    constexpr std::uint32_t R_DATA_SMALL = 152;
+    constexpr std::uint32_t R_DATA_FILL = 156;
+    constexpr std::uint32_t R_DATA_POLY_PROBE = 160;
+    constexpr std::uint32_t R_DATA_POLY_FILL = 164;
+    constexpr std::uint32_t R_UPD_INV = 168;
+    constexpr std::uint32_t R_UPD_GET = 172;
+    constexpr std::uint32_t R_UPD_BOX = 176;
+    constexpr std::uint32_t R_UPD_VALIDATE = 180;
+    constexpr std::uint32_t R_UPD_AFTER_GET = 184;
+    constexpr std::uint32_t R_UPD_AFTER_BOX = 188;
+    constexpr std::uint32_t R_UPD_FULL = 192;
+    constexpr std::uint32_t R_UPD_FULL_GET = 196;
+    constexpr std::uint32_t R_UPD_FULL_BOX = 200;
+    constexpr std::uint32_t R_UPD_CLEAR = 204;
+    constexpr std::uint32_t R_UPD_CLEARED = 208;
+    constexpr std::uint32_t R_DEL_OK = 212;
+    constexpr std::uint32_t R_DEL_PT = 216;
+
+    g_current_case = "region-setup";
+    {
+        std::vector<std::uint8_t> zero(0x100, 0);
+        LIFT_CHECK(m.placeData(kRes3, zero.data(), zero.size(), &err));
+        // 每个 GetRgnBox 的 LPRECT 落点都必须先提交（否则 shim 按不可写返回 ERROR）
+        const std::uint32_t rect_slots[] = {kRect1, kRect4, kRect5, kRect6, kRect7, kRect8, kRect9};
+        for (const std::uint32_t slot : rect_slots) {
+            LIFT_CHECK(m.placeData(slot, zero.data(), 16, &err));
+        }
+        // InvalidateRect 用的矩形：(10,20)-(30,40)（客户区坐标）
+        std::vector<std::uint8_t> rc(16, 0);
+        const std::int32_t rcv[4] = {10, 20, 30, 40};
+        for (int i = 0; i < 4; ++i) {
+            for (int k = 0; k < 4; ++k) {
+                rc[static_cast<std::size_t>(i) * 4 + static_cast<std::size_t>(k)] =
+                    static_cast<std::uint8_t>((static_cast<std::uint32_t>(rcv[i]) >> (8 * k)) & 0xFFu);
+            }
+        }
+        LIFT_CHECK(m.placeData(kRect2, rc.data(), rc.size(), &err));
+        // 椭圆包围盒 (0,0)-(20,20)
+        std::vector<std::uint8_t> eb(16, 0);
+        eb[8] = 20;
+        eb[12] = 20;
+        LIFT_CHECK(m.placeData(kRect3, eb.data(), eb.size(), &err));
+        // L 形多边形：(0,0) (10,0) (10,5) (5,5) (5,10) (0,10)
+        const std::int32_t pts[12] = {0, 0, 10, 0, 10, 5, 5, 5, 5, 10, 0, 10};
+        std::vector<std::uint8_t> pb(48, 0);
+        for (int i = 0; i < 12; ++i) {
+            for (int k = 0; k < 4; ++k) {
+                pb[static_cast<std::size_t>(i) * 4 + static_cast<std::size_t>(k)] =
+                    static_cast<std::uint8_t>((static_cast<std::uint32_t>(pts[i]) >> (8 * k)) & 0xFFu);
+            }
+        }
+        LIFT_CHECK(m.placeData(kPts, pb.data(), pb.size(), &err));
+        std::vector<std::uint8_t> nulldata(0x100, 0);
+        LIFT_CHECK(m.placeData(kRgnData, nulldata.data(), nulldata.size(), &err));
+        LIFT_CHECK(m.placeData(kRgnData2, nulldata.data(), nulldata.size(), &err));
+        std::vector<std::uint8_t> handles(0x20, 0);
+        LIFT_CHECK(m.placeData(kHrgnA, handles.data(), handles.size(), &err));
+    }
+
+    Asm c(kCode3);
+    auto gdi = [&](const char* name) { return stubOfIn(m, "gdi32", name); };
+    auto ptIn = [&](std::uint32_t hrgn_slot, std::int32_t x, std::int32_t y, std::uint32_t out) {
+        c.pushImm(static_cast<std::uint32_t>(y));
+        c.pushImm(static_cast<std::uint32_t>(x));
+        c.pushMem(hrgn_slot);
+        c.callRel(gdi("PtInRegion"));
+        c.storeEax(kRes3 + out);
+    };
+    auto createRect = [&](std::int32_t l, std::int32_t t, std::int32_t r, std::int32_t b,
+                          std::uint32_t slot) {
+        c.pushImm(static_cast<std::uint32_t>(b));
+        c.pushImm(static_cast<std::uint32_t>(r));
+        c.pushImm(static_cast<std::uint32_t>(t));
+        c.pushImm(static_cast<std::uint32_t>(l));
+        c.callRel(gdi("CreateRectRgn"));
+        c.storeEax(slot);
+    };
+    auto getBox = [&](std::uint32_t hrgn_slot, std::uint32_t rect_ea, std::uint32_t out) {
+        c.pushImm(rect_ea);
+        c.pushMem(hrgn_slot);
+        c.callRel(gdi("GetRgnBox"));
+        c.storeEax(kRes3 + out);
+    };
+
+    // ---- ① 矩形 (0,0)-(10,10)：内部 / 最大内部点 / 右边界 / 下边界 / 负坐标 ----
+    createRect(0, 0, 10, 10, kHrgnA);
+    ptIn(kHrgnA, 0, 0, R_RECT_IN);
+    ptIn(kHrgnA, 9, 9, R_RECT_IN_MAX);
+    ptIn(kHrgnA, 10, 5, R_RECT_RIGHT);
+    ptIn(kHrgnA, 5, 10, R_RECT_BOTTOM);
+    ptIn(kHrgnA, -1, 5, R_RECT_NEG);
+    getBox(kHrgnA, kRect1, R_RECT_BOXTYPE);
+
+    // ---- ② 空矩形（x1 == x2）：仍然是**合法区域**（句柄非 0、NULLREGION）----
+    createRect(5, 5, 5, 9, kHrgnEmpty);
+    getBox(kHrgnEmpty, kRect5, R_EMPTY_BOXTYPE);
+    ptIn(kHrgnEmpty, 5, 6, R_EMPTY_PT);
+
+    // ---- ③ 椭圆：包围盒 (0,0)-(20,20) ----
+    c.pushImm(kRect3);
+    c.callRel(gdi("CreateEllipticRgnIndirect"));
+    c.storeEax(kHrgnEllipse);
+    getBox(kHrgnEllipse, kRect6, R_ELLIPSE_BOXTYPE);
+    ptIn(kHrgnEllipse, 10, 10, R_ELLIPSE_CENTER);
+    ptIn(kHrgnEllipse, 0, 0, R_ELLIPSE_CORNER);
+
+    // ---- ④ 多边形（L 形，ALTERNATE 奇偶扫描线）：内点 / 缺口 / WINDING 明确失败 ----
+    c.pushImm(1);  // ALTERNATE
+    c.pushImm(6);
+    c.pushImm(kPts);
+    c.callRel(gdi("CreatePolygonRgn"));
+    c.storeEax(kHrgnPoly);
+    getBox(kHrgnPoly, kRect7, R_POLY_BOXTYPE);
+    ptIn(kHrgnPoly, 2, 2, R_POLY_IN1);
+    ptIn(kHrgnPoly, 7, 2, R_POLY_IN2);
+    ptIn(kHrgnPoly, 7, 7, R_POLY_OUT);
+    ptIn(kHrgnPoly, 2, 7, R_POLY_IN3);
+    c.pushImm(2);  // WINDING（未实现 ⇒ NULL）
+    c.pushImm(6);
+    c.pushImm(kPts);
+    c.callRel(gdi("CreatePolygonRgn"));
+    c.storeEax(kRes3 + R_POLY_WINDING);
+
+    // ---- ⑤ CombineRgn：A=(0,0,10,10)（① 已建）· B=(5,0,15,10) ----
+    createRect(5, 0, 15, 10, kHrgnB);
+    struct CombineCase {
+        std::int32_t mode;
+        std::uint32_t type_out;
+        std::int32_t in_x, in_y;
+        std::uint32_t in_out;
+        std::int32_t out_x, out_y;
+        std::uint32_t out_out;
+        std::int32_t extra_x, extra_y;  // < 0 ⇒ 不用
+        std::uint32_t extra_out;
+    };
+    const CombineCase cases[] = {
+        {1, R_AND_TYPE, 7, 5, R_AND_IN, 2, 5, R_AND_OUT, -1, -1, 0},      // RGN_AND
+        {2, R_OR_TYPE, 2, 5, R_OR_LEFT, 20, 5, R_OR_OUT, 12, 5, R_OR_RIGHT},  // RGN_OR
+        {4, R_DIFF_TYPE, 2, 5, R_DIFF_IN, 7, 5, R_DIFF_OUT, -1, -1, 0},   // RGN_DIFF
+        {5, R_COPY_TYPE, 5, 5, R_COPY_IN, 15, 5, R_COPY_OUT, -1, -1, 0},  // RGN_COPY
+        {3, R_XOR_TYPE, 2, 5, R_XOR_L, 7, 5, R_XOR_M, 12, 5, R_XOR_R},    // RGN_XOR
+    };
+    for (const CombineCase& cc : cases) {
+        createRect(100, 100, 101, 101, kHrgnDst);  // 目标区域（内容会被 combine 覆盖）
+        c.pushImm(static_cast<std::uint32_t>(cc.mode));
+        c.pushMem(kHrgnB);
+        c.pushMem(kHrgnA);
+        c.pushMem(kHrgnDst);
+        c.callRel(gdi("CombineRgn"));
+        c.storeEax(kRes3 + cc.type_out);
+        ptIn(kHrgnDst, cc.in_x, cc.in_y, cc.in_out);
+        ptIn(kHrgnDst, cc.out_x, cc.out_y, cc.out_out);
+        if (cc.extra_x >= 0) ptIn(kHrgnDst, cc.extra_x, cc.extra_y, cc.extra_out);
+    }
+
+    // ---- ⑥ GetRegionData：需要字节数 / 缓冲不足 / 写成功（矩形与多边形各一次）----
+    c.pushImm(0);
+    c.pushImm(0);
+    c.pushMem(kHrgnA);
+    c.callRel(gdi("GetRegionData"));
+    c.storeEax(kRes3 + R_DATA_PROBE);
+    c.pushImm(kRgnData);
+    c.pushImm(16);
+    c.pushMem(kHrgnA);
+    c.callRel(gdi("GetRegionData"));
+    c.storeEax(kRes3 + R_DATA_SMALL);
+    c.pushImm(kRgnData);
+    c.pushImm(80);
+    c.pushMem(kHrgnA);
+    c.callRel(gdi("GetRegionData"));
+    c.storeEax(kRes3 + R_DATA_FILL);
+    c.pushImm(0);
+    c.pushImm(0);
+    c.pushMem(kHrgnPoly);
+    c.callRel(gdi("GetRegionData"));
+    c.storeEax(kRes3 + R_DATA_POLY_PROBE);
+    c.pushImm(kRgnData2);
+    c.pushImm(96);
+    c.pushMem(kHrgnPoly);
+    c.callRel(gdi("GetRegionData"));
+    c.storeEax(kRes3 + R_DATA_POLY_FILL);
+
+    // ---- ⑦ 窗口无效区：InvalidateRect → GetUpdateRgn 是同一块；ValidateRgn 之后为空 ----
+    createRect(0, 0, 0, 0, kHrgnUpd);
+    createRect(0, 0, 0, 0, kHrgnUpd2);
+    c.pushImm(1);  // bErase
+    c.pushImm(kRect2);
+    c.pushMem(kHwndSlot);
+    c.callRel(stubOf(m, "InvalidateRect"));
+    c.storeEax(kRes3 + R_UPD_INV);
+    c.pushImm(0);
+    c.pushMem(kHrgnUpd);
+    c.pushMem(kHwndSlot);
+    c.callRel(stubOf(m, "GetUpdateRgn"));
+    c.storeEax(kRes3 + R_UPD_GET);
+    getBox(kHrgnUpd, kRect4, R_UPD_BOX);
+    c.pushMem(kHrgnUpd);
+    c.pushMem(kHwndSlot);
+    c.callRel(stubOf(m, "ValidateRgn"));
+    c.storeEax(kRes3 + R_UPD_VALIDATE);
+    c.pushImm(0);
+    c.pushMem(kHrgnUpd2);
+    c.pushMem(kHwndSlot);
+    c.callRel(stubOf(m, "GetUpdateRgn"));
+    c.storeEax(kRes3 + R_UPD_AFTER_GET);
+    getBox(kHrgnUpd2, kRect8, R_UPD_AFTER_BOX);
+    // NULL 矩形 ⇒ 整个客户区（1280×720）
+    c.pushImm(0);
+    c.pushImm(0);
+    c.pushMem(kHwndSlot);
+    c.callRel(stubOf(m, "InvalidateRect"));
+    c.storeEax(kRes3 + R_UPD_FULL);
+    c.pushImm(0);
+    c.pushMem(kHrgnUpd);
+    c.pushMem(kHwndSlot);
+    c.callRel(stubOf(m, "GetUpdateRgn"));
+    c.storeEax(kRes3 + R_UPD_FULL_GET);
+    getBox(kHrgnUpd, kRect9, R_UPD_FULL_BOX);
+    // ValidateRect(NULL) ⇒ 整窗有效
+    c.pushImm(0);
+    c.pushMem(kHwndSlot);
+    c.callRel(stubOf(m, "ValidateRect"));
+    c.storeEax(kRes3 + R_UPD_CLEAR);
+    c.pushImm(0);
+    c.pushMem(kHrgnUpd2);
+    c.pushMem(kHwndSlot);
+    c.callRel(stubOf(m, "GetUpdateRgn"));
+    c.storeEax(kRes3 + R_UPD_CLEARED);
+
+    // ---- ⑧ DeleteObject 能删 region；删完 PtInRegion 按无效句柄返回 FALSE ----
+    c.pushMem(kHrgnA);
+    c.callRel(gdi("DeleteObject"));
+    c.storeEax(kRes3 + R_DEL_OK);
+    ptIn(kHrgnA, 5, 5, R_DEL_PT);
+    c.ret();
+
+    g_current_case = "region-code-fit";
+    LIFT_CHECK(c.b.size() < 0x1000);  // 第三段代码必须落在 kCode3..kRes3 之间
+    LIFT_CHECK(m.placeCode(kCode3, c.b.data(), c.b.size(), &err));
+    LIFT_CHECK(m.prepareStack(&err));  // 第二阶段的 ret 已经用掉了哨兵 ⇒ 重新铺栈
+    m.cpu().eip = kCode3;
+
+    lift::RunOptions o3;
+    o3.until_ea = kSentinel;
+    o3.max_insns = 40000;
+    const lift::RunResult r3 = m.run(o3);
+    g_current_case = "region-run";
+    LIFT_CHECK_EQ_U32(r3.ea, kSentinel);
+
+    auto res3 = [&](std::uint32_t off) { return m.mem().rd32(kRes3 + off); };
+    auto rectField = [&](std::uint32_t ea, int index) {
+        return static_cast<std::int32_t>(m.mem().rd32(ea + static_cast<std::uint32_t>(index) * 4u));
+    };
+
+    g_current_case = "region-rect";
+    const std::uint32_t hrgn_a = m.mem().rd32(kHrgnA);
+    LIFT_CHECK_EQ_U32(res3(R_RECT_IN), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_RECT_IN_MAX), 1u);  // (9,9) 是**最后一个**内部像素
+    LIFT_CHECK_EQ_U32(res3(R_RECT_RIGHT), 0u);   // ★ 右边界不含：(10,5) 不在区域里
+    LIFT_CHECK_EQ_U32(res3(R_RECT_BOTTOM), 0u);  // ★ 下边界不含：(5,10) 不在区域里
+    LIFT_CHECK_EQ_U32(res3(R_RECT_NEG), 0u);
+    LIFT_CHECK_EQ_U32(res3(R_RECT_BOXTYPE), 2u);  // SIMPLEREGION
+    LIFT_CHECK_EQ_I64(rectField(kRect1, 0), 0);   // 包围盒 = 创建时的矩形
+    LIFT_CHECK_EQ_I64(rectField(kRect1, 1), 0);
+    LIFT_CHECK_EQ_I64(rectField(kRect1, 2), 10);
+    LIFT_CHECK_EQ_I64(rectField(kRect1, 3), 10);
+
+    g_current_case = "region-empty-rect";
+    LIFT_CHECK(m.mem().rd32(kHrgnEmpty) != 0u);   // ★ 空矩形**也是**一个句柄（不是"没创建"）
+    LIFT_CHECK_EQ_U32(res3(R_EMPTY_BOXTYPE), 1u);  // NULLREGION
+    LIFT_CHECK_EQ_U32(res3(R_EMPTY_PT), 0u);       // 空区域里没有点
+    LIFT_CHECK_EQ_I64(rectField(kRect5, 0), 0);    // 空区域包围盒 (0,0,0,0)
+    LIFT_CHECK_EQ_I64(rectField(kRect5, 2), 0);
+    LIFT_CHECK_EQ_I64(rectField(kRect5, 3), 0);
+
+    g_current_case = "region-ellipse";
+    LIFT_CHECK(m.mem().rd32(kHrgnEllipse) != 0u);
+    LIFT_CHECK_EQ_U32(res3(R_ELLIPSE_BOXTYPE), 3u);  // COMPLEXREGION（多行）
+    LIFT_CHECK_EQ_U32(res3(R_ELLIPSE_CENTER), 1u);   // 圆心在区域内
+    LIFT_CHECK_EQ_U32(res3(R_ELLIPSE_CORNER), 0u);   // 包围盒角不在内切椭圆里
+    LIFT_CHECK_EQ_I64(rectField(kRect6, 2), 20);     // 内切椭圆正好撑满包围盒
+    LIFT_CHECK_EQ_I64(rectField(kRect6, 3), 20);
+
+    g_current_case = "region-polygon";
+    LIFT_CHECK(m.mem().rd32(kHrgnPoly) != 0u);
+    LIFT_CHECK_EQ_U32(res3(R_POLY_BOXTYPE), 3u);  // L 形 = 两个矩形 ⇒ COMPLEXREGION
+    LIFT_CHECK_EQ_U32(res3(R_POLY_IN1), 1u);      // (2,2) 左竖条
+    LIFT_CHECK_EQ_U32(res3(R_POLY_IN2), 1u);      // (7,2) 上横条
+    LIFT_CHECK_EQ_U32(res3(R_POLY_OUT), 0u);      // (7,7) 缺口
+    LIFT_CHECK_EQ_U32(res3(R_POLY_IN3), 1u);      // (2,7) 左竖条
+    LIFT_CHECK_EQ_I64(rectField(kRect7, 2), 10);  // 顶点范围 = (0,0)-(10,10)
+    LIFT_CHECK_EQ_I64(rectField(kRect7, 3), 10);
+
+    g_current_case = "region-polygon-winding";
+    // ★ 未实现形态必须**响亮**：WINDING 返回 NULL（日志在 stderr），⛔ 不拿 ALTERNATE 冒充。
+    LIFT_CHECK_EQ_U32(res3(R_POLY_WINDING), 0u);
+
+    g_current_case = "combine-and";
+    LIFT_CHECK_EQ_U32(res3(R_AND_TYPE), 2u);  // [5,10)×[0,10) 一个矩形
+    LIFT_CHECK_EQ_U32(res3(R_AND_IN), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_AND_OUT), 0u);
+
+    g_current_case = "combine-or";
+    LIFT_CHECK_EQ_U32(res3(R_OR_TYPE), 2u);  // [0,15)×[0,10) 一个矩形
+    LIFT_CHECK_EQ_U32(res3(R_OR_LEFT), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_OR_RIGHT), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_OR_OUT), 0u);
+
+    g_current_case = "combine-diff";
+    // ★ RGN_DIFF = src1 − src2：只有 A 的左半。把 DIFF 实现成 AND 时 R_DIFF_IN 会变 0（红）。
+    LIFT_CHECK_EQ_U32(res3(R_DIFF_TYPE), 2u);
+    LIFT_CHECK_EQ_U32(res3(R_DIFF_IN), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_DIFF_OUT), 0u);
+
+    g_current_case = "combine-copy";
+    LIFT_CHECK_EQ_U32(res3(R_COPY_TYPE), 2u);  // 目标被 src1 整体替换（原来那块 100,100 没了）
+    LIFT_CHECK_EQ_U32(res3(R_COPY_IN), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_COPY_OUT), 0u);
+
+    g_current_case = "combine-xor";
+    // ★ RGN_XOR = 对称差：A∪B − A∩B ⇒ 两块（[0,5) 与 [10,15)）⇒ COMPLEXREGION
+    LIFT_CHECK_EQ_U32(res3(R_XOR_TYPE), 3u);
+    LIFT_CHECK_EQ_U32(res3(R_XOR_L), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_XOR_M), 0u);  // 交集里 ⇒ 不属于对称差
+    LIFT_CHECK_EQ_U32(res3(R_XOR_R), 1u);
+
+    g_current_case = "region-data";
+    LIFT_CHECK_EQ_U32(res3(R_DATA_PROBE), 48u);  // 32 字节头 + 1 个 RECT
+    LIFT_CHECK_EQ_U32(res3(R_DATA_SMALL), 48u);  // 缓冲不足 ⇒ 返回所需字节数（不是 1）
+    LIFT_CHECK_EQ_U32(res3(R_DATA_FILL), 1u);    // 缓冲够 ⇒ 返回非零
+    LIFT_CHECK_EQ_U32(m.mem().rd32(kRgnData), 48u);      // dwSize
+    LIFT_CHECK_EQ_U32(m.mem().rd32(kRgnData + 4), 1u);   // iType = RDH_RECTANGLES
+    LIFT_CHECK_EQ_I64(static_cast<std::int32_t>(m.mem().rd32(kRgnData + 8)), 0);   // rcBound
+    LIFT_CHECK_EQ_I64(static_cast<std::int32_t>(m.mem().rd32(kRgnData + 12)), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int32_t>(m.mem().rd32(kRgnData + 16)), 10);
+    LIFT_CHECK_EQ_I64(static_cast<std::int32_t>(m.mem().rd32(kRgnData + 20)), 10);
+    LIFT_CHECK_EQ_I64(static_cast<std::int32_t>(m.mem().rd32(kRgnData + 32)), 0);  // RECT[0]
+    LIFT_CHECK_EQ_I64(static_cast<std::int32_t>(m.mem().rd32(kRgnData + 40)), 10);
+    LIFT_CHECK_EQ_I64(static_cast<std::int32_t>(m.mem().rd32(kRgnData + 44)), 10);
+
+    g_current_case = "region-data-roundtrip";
+    {
+        // ① 矩形区域：GetRegionData 的字节 → 解析回区域，必须**逐矩形相同**
+        std::uint8_t buf[48] = {};
+        m.mem().readBytes(kRgnData, buf, sizeof(buf));
+        lift::GdiRegion back;
+        LIFT_CHECK(lift::GdiRegion::parseRegionData(buf, sizeof(buf), &back));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(back.size()), 1u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(back.type()), 2u);
+        LIFT_CHECK(back.contains(0, 0));
+        LIFT_CHECK(back.contains(9, 9));
+        LIFT_CHECK(!back.contains(10, 5));
+        LIFT_CHECK(!back.contains(5, 10));
+        // ② 多边形区域：往返后与原对象**完全相等**（同一份规范化矩形表）
+        const std::uint32_t hpoly = m.mem().rd32(kHrgnPoly);
+        const lift::HandleEntry* entry = m.handles().get(hpoly);
+        LIFT_CHECK(entry != nullptr && entry->kind == lift::HandleKind::GdiRegion);
+        const std::uint32_t poly_bytes = res3(R_DATA_POLY_PROBE);
+        LIFT_CHECK_EQ_U32(poly_bytes, 64u);  // 32 + 2×16
+        LIFT_CHECK_EQ_U32(res3(R_DATA_POLY_FILL), 1u);
+        std::uint8_t pbuf[64] = {};
+        m.mem().readBytes(kRgnData2, pbuf, sizeof(pbuf));
+        lift::GdiRegion pback;
+        LIFT_CHECK(lift::GdiRegion::parseRegionData(pbuf, sizeof(pbuf), &pback));
+        if (entry != nullptr && entry->payload != nullptr) {
+            const auto* orig = static_cast<const lift::GdiRegion*>(entry->payload);
+            LIFT_CHECK(pback == *orig);  // ★ 往返一致（矩形表逐项相等）
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(pback.size()), 2u);
+        }
+        // ③ 不合规的头必须被拒绝（⛔ 不"大概能读就当真"）
+        std::uint8_t bad[48] = {};
+        m.mem().readBytes(kRgnData, bad, sizeof(bad));
+        bad[4] = 0;  // iType = 0（不是 RDH_RECTANGLES）
+        lift::GdiRegion junk;
+        LIFT_CHECK(!lift::GdiRegion::parseRegionData(bad, sizeof(bad), &junk));
+    }
+
+    g_current_case = "update-region";
+    LIFT_CHECK_EQ_U32(res3(R_UPD_INV), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_UPD_GET), 2u);  // SIMPLEREGION：InvalidateRect 的那一块
+    LIFT_CHECK_EQ_U32(res3(R_UPD_BOX), 2u);
+    LIFT_CHECK_EQ_I64(rectField(kRect4, 0), 10);  // 与 InvalidateRect 的矩形**完全相同**
+    LIFT_CHECK_EQ_I64(rectField(kRect4, 1), 20);
+    LIFT_CHECK_EQ_I64(rectField(kRect4, 2), 30);
+    LIFT_CHECK_EQ_I64(rectField(kRect4, 3), 40);
+
+    g_current_case = "update-region-validated";
+    LIFT_CHECK_EQ_U32(res3(R_UPD_VALIDATE), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_UPD_AFTER_GET), 1u);  // ★ ValidateRgn 之后 ⇒ NULLREGION
+    LIFT_CHECK_EQ_U32(res3(R_UPD_AFTER_BOX), 1u);
+    LIFT_CHECK_EQ_I64(rectField(kRect8, 0), 0);  // 空区域包围盒 (0,0,0,0)
+    LIFT_CHECK_EQ_I64(rectField(kRect8, 2), 0);
+    LIFT_CHECK_EQ_I64(rectField(kRect8, 3), 0);
+
+    g_current_case = "update-region-full-client";
+    LIFT_CHECK_EQ_U32(res3(R_UPD_FULL), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_UPD_FULL_GET), 2u);
+    LIFT_CHECK_EQ_U32(res3(R_UPD_FULL_BOX), 2u);
+    LIFT_CHECK_EQ_I64(rectField(kRect9, 0), 0);
+    LIFT_CHECK_EQ_I64(rectField(kRect9, 2), 1280);  // 整个客户区
+    LIFT_CHECK_EQ_I64(rectField(kRect9, 3), 720);
+    LIFT_CHECK_EQ_U32(res3(R_UPD_CLEAR), 1u);
+    LIFT_CHECK_EQ_U32(res3(R_UPD_CLEARED), 1u);  // ValidateRect(NULL) 之后 ⇒ NULLREGION
+
+    g_current_case = "region-delete";
+    LIFT_CHECK_EQ_U32(res3(R_DEL_OK), 1u);        // DeleteObject 认 region
+    LIFT_CHECK(m.handles().get(hrgn_a) == nullptr);  // 句柄项已释放
+    LIFT_CHECK_EQ_U32(res3(R_DEL_PT), 0u);        // 之后 PtInRegion ⇒ FALSE（无效句柄）
 
     return finish("user32-window");
 }

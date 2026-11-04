@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "runtime/memory.h"
+#include "runtime/vfs.h"
 
 namespace lift {
 
@@ -98,14 +99,19 @@ struct ProcessSetup {
     std::uint32_t exe_path_ea = 0;
     std::uint32_t env_ea = 0;         // guest 里的环境块（UTF-16，NAME=VALUE\0…\0\0）
     // ★ A4 的**输入清单**（plan §5 A4）：这几项一变，执行路径就可能变 ⇒ trace 必须记下来。
-    std::string exe_path;             // `--exe` 传进来的原始路径字符串（不是规范化后的）
+    std::string exe_path;             // `--exe` 传进来的**宿主**原始路径串（只进 trace 输入清单）
+    std::string guest_exe_path;       // guest 读到的 exe 全路径（`<guest 根>\AGE.EXE`）
     std::string cmdline;              // guest 读到的命令行
     std::string environment_ansi;     // 环境块的 ANSI 视图（人读 / 哈希用；分隔符 ';'）
 };
 
-// 建栈（1 MiB + guard 页）+ TEB/PEB + 命令行块。
+// 建栈（1 MiB + guard 页）+ TEB/PEB + 命令行块 + 环境块。
 // ★ fs 段基址指向 `teb`（由 CPU 的 `fsBase` 表示；⛔ 不是宿主的 fs）。
+// ★ 2026-11-05 两个口径（都由 `vfs` 提供真源，⛔ 不在本函数里另写字符串）：
+//   ① guest 的主模块路径 = `vfs.guestExePath()`（guest 根之下的 `AGE.EXE`）——引擎从 exe 路径
+//      推导"安装目录"时必须得到游戏目录本身；宿主 `--exe` 字符串**不进 guest**。
+//   ② 环境块 = `vfs.guestEnvironment()`（与 GetEnvironmentVariable* / 特殊目录同一份）。
 bool setupProcessStructures(GuestMemory& mem, const PeImage& img, const GuestLayout& layout,
-                            ProcessSetup* out, std::string* err);
+                            const Vfs& vfs, ProcessSetup* out, std::string* err);
 
 }  // namespace lift

@@ -96,7 +96,7 @@ bool bringUpTeb(Fixture& f) {
     if (!f.ok) return false;
     lift::ProcessSetup setup;
     std::string err;
-    if (!lift::setupProcessStructures(f.m.mem(), lift::PeImage{}, f.m.layout(), &setup, &err)) {
+    if (!lift::setupProcessStructures(f.m.mem(), lift::PeImage{}, f.m.layout(), f.m.vfs(), &setup, &err)) {
         f.ok = false;
         f.err = err.empty() ? "setupProcessStructures 失败" : err;
         return false;
