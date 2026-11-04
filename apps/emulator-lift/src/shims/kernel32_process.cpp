@@ -7,8 +7,11 @@
 //   · `GetModuleHandleA/W(0)` 与"等于 exe 文件名（大小写不敏感、可省 `.exe`）"都返回主模块句柄；
 //     其余按**"此刻在进程里吗"**回答（见下面"模块表"一节）：`ntdll` / `kernel32` + 本镜像**导入表**里
 //     的模块 ⇒ 非 0 假句柄；其余 ⇒ 0 + `SetLastError(126)` + 一行日志。
-//   · `GetProcAddress` **不提供导出转发**（本模拟器不导出任何函数），恒 127 + 日志；
-//     `LoadLibraryA/W` 只回答"系统里有没有这个 DLL"（有就给假句柄），仍然不带来任何导出。
+//   · `GetProcAddress` 的导出真源 = **shim 注册表**（`ShimRegistry::find`），不是 PE 导出表：
+//     句柄 → 模块 key → `find(key, name)` ⇒ 返回桩页里的唯一地址（找不到才 127）；
+//     运行期导出（DDraw 的 `DirectDrawCreate` 之类）由 `ShimRegistry::addRuntime` 登记。
+//   · `LoadLibraryA/W` 只回答"系统里有没有这个 DLL"（有就给假句柄）；它**不带来**导出 ——
+//     某个导出能不能拿到，取决于有没有人用 `add` / `addStub` / `addRuntime` 登记过它。
 //     —— 如果 CRT 启动真的调了它们，报告里必须看得见。
 //   · `GetVersion` 报 **XP 5.1.2600**（这个 EXE 的年代口径）；`GetSystemInfo` 报单核 x86。
 //
@@ -32,11 +35,13 @@
 //      已在 S6 落地**（前者在本文件的模块段，后两者在 kernel32_file.cpp / 本文件的模块段）：
 //      系统目录是**固定的 guest 路径** `C:\WINDOWS` / `C:\WINDOWS\SYSTEM32`（⛔ 不暴露宿主路径）；
 //      `GetModuleHandleEx` 的引用计数不建模（见该函数的注释）。
-//   9. **模块句柄是确定性假值**（`0x7F000000 + 表内序号*64KiB`）：本模拟器不真的装载 DLL，
-//      但 `ntdll` / `kernel32` / 导入表里的模块在真机上**确实在进程里** ⇒ 返回 0 是假失败
+//   9. **系统模块的句柄是确定性假值**（`0x7F000000 + 表内序号*64KiB`）：本模拟器不真的装载
+//      系统 DLL，但 `ntdll` / `kernel32` / 导入表里的模块在真机上**确实在进程里** ⇒ 返回 0 是假失败
 //      （实测：CRT 的 `__scrt_initialize_fls` 因此返回 false ⇒ `_fast_error_exit` ⇒ 到不了 WinMain）。
-//      影响：句柄只能当**不透明令牌**用（比较 / 传给 `GetProcAddress`）；⛔ 不要拿它去读 PE 头。
-//      导出表仍然是空的（`GetProcAddress` 一律 127），所以"模块存在"不等于"函数可用"。
+//      影响：这些句柄只能当**不透明令牌**用（比较 / 传给 `GetProcAddress`）；⛔ 不要拿它去读 PE 头。
+//      "模块存在"并不意味着"它的每个导出都可用"：导出真源是 shim 注册表（见 `GetProcAddress`）。
+//      ★ **例外：AGERC.DLL**（2026-11-04 用户改口径）是**真实映射进 guest 的模块**：句柄 = 真实
+//        ImageBase（`cpu.shim.agerc_base`），PE 头 / 节 / 资源都在 guest 里；没有镜像就装不上（126）。
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -44,6 +49,7 @@
 #include <string_view>
 
 #include "runtime/cp932.h"
+#include "runtime/image.h"
 #include "runtime/sha256.h"
 #include "runtime/vfs.h"
 #include "runtime/x86.h"
@@ -168,8 +174,8 @@ std::uint32_t writeWide(X86& cpu, std::uint32_t ea, std::uint32_t cap_chars, con
 //   ★ 实测意义：CRT 启动的 `__scrt_initialize_fls`（0x4F0CE5）先 `GetModuleHandleW(L"KERNEL32.DLL")`
 //     （串在 .data:005303B0），拿 0 ⇒ 返回 false ⇒ `_fast_error_exit(0x10)` ⇒ `_exit(255)`
 //     ⇒ 永远跑不到 `_WinMain@16`。返回非 0 是**真机事实**，不是为了让谁过去。
-// ⛔ 导出仍然**一律不存在**：GetProcAddress 恒 127（本模拟器不导出任何函数）——
-//    "模块存在、函数不存在"是 M1 的真实边界（导出转发不在本线；归属待裁决）。
+// ⛔ 导出**不是**由"模块在不在"决定的：`GetProcAddress` 查的是 shim 注册表（可能 127）——
+//    "模块存在、这个函数没登记"是 M1/M2 的真实边界，日志必须分开说。
 constexpr std::uint32_t kFakeModuleBase = 0x7F000000u;
 constexpr std::uint32_t kFakeModuleStride = 0x10000u;
 
@@ -180,8 +186,10 @@ const char* const kLoadableModules[] = {
     "version.dll",  "imm32.dll",    "ddraw.dll",    "d3d9.dll",      "d3dx9_43.dll",
     "ws2_32.dll",   "imagehlp.dll", "dxva2.dll",    "wininet.dll",   "mscoree.dll",
     "shlwapi.dll",  "mf.dll",       "mfplat.dll",   "evr.dll",
-    // ★ AGERC.DLL：本作的设置对话框（用户裁决 = 整体 stub）。它**不在**导入表里（guest 用
-    //   LoadLibrary 动态装载），也不是真模块：句柄 = 确定性假值，导出 = 三个 stub thunk。
+    // ★ AGERC.DLL：本作的设置对话框（用户 2026-11-04 改口径：**真实 guest 模块**）。
+    //   它**不在**导入表里（guest 用 LoadLibrary 动态装载）⇒ 这里只回答"系统里能装载"；
+    //   **句柄是它真实的模块基址**（`cpu.shim.agerc_base`），⛔ 不再是 0x7F18xxxx 假句柄。
+    //   没有镜像（没给 --agerc 且 --game-dir 下没有 AGERC.DLL）⇒ LoadLibrary 返回 0 + 126。
     "agerc.dll",
 };
 
@@ -222,9 +230,13 @@ std::vector<std::string> moduleKeyTable(const X86& cpu) {
     return keys;
 }
 
-// 在表里的序号 → 句柄；0 = 不在表里
-std::uint32_t moduleHandleIn(const std::vector<std::string>& table, const std::string& name) {
+// 在表里的序号 → 句柄；0 = 不在表里 / 没有 AGERC 镜像。
+// ★ AGERC 是**唯一**一个真实装载的模块：句柄 = 真实模块基址（`cpu.shim.agerc_base`），
+//   ⛔ 不参与下面那套确定性假句柄编号；没有镜像 ⇒ 0（调用方按"不认得 / 未装载"处理）。
+std::uint32_t moduleHandleIn(const X86& cpu, const std::vector<std::string>& table,
+                             const std::string& name) {
     const std::string want = moduleKey(name);
+    if (want == "agerc") return cpu.shim.agerc_base;
     for (std::size_t i = 0; i < table.size(); ++i)
         if (table[i] == want) return moduleHandleForIndex(i);
     return 0;
@@ -240,8 +252,9 @@ bool isLoadableModule(const std::string& name) {
 // "这个模块此刻在**进程里**吗"（≠ "系统里有"）：导入表里的 + kernel32/ntdll
 bool moduleIsLoaded(const X86& cpu, const std::string& key) {
     if (key == "kernel32" || key == "ntdll") return true;
-    // AGERC 是**显式 stub 的模块**（用户裁决：不实现真装载）：只有 LoadLibrary 过才"在进程里"。
-    if (key == "agerc") return cpu.shim.agerc_loaded;
+    // AGERC 是**真实装载的 guest 模块**：镜像在（agerc_base 非 0）且 guest 调过 LoadLibrary
+    // 才"在进程里"（真机：AGERC.DLL 不在导入表里，入口前 loader 不会装它）。
+    if (key == "agerc") return cpu.shim.agerc_loaded && cpu.shim.agerc_base != 0;
     if (!cpu.shims) return false;
     for (const ShimDef& d : cpu.shims->all())
         if (d.imported && moduleKey(d.module) == key) return true;
@@ -254,12 +267,19 @@ bool moduleIsLoaded(const X86& cpu, const std::string& key) {
 std::uint32_t lookupModuleHandle(X86& cpu, const std::string& want, const char* api) {
     const std::string exe = exePath(cpu);
     if (moduleNameMatches(want, exe)) return cpu.shim.module_handle;
-    if (!moduleIsLoaded(cpu, moduleKey(want))) return 0;
-    const std::uint32_t handle = moduleHandleIn(moduleKeyTable(cpu), want);
+    const std::string key = moduleKey(want);
+    if (!moduleIsLoaded(cpu, key)) return 0;
+    const std::uint32_t handle = moduleHandleIn(cpu, moduleKeyTable(cpu), want);
     if (handle != 0) {
-        shimLog("kernel32", api,
-                "\"%s\" 已装载 ⇒ 假句柄 0x%08X（导出仍不提供，GetProcAddress 会 127）", want.c_str(),
-                handle);
+        if (key == "agerc") {
+            shimLog("kernel32", api,
+                    "\"%s\" 已装载 ⇒ **真实 AGERC 模块基址 0x%08X**（HINSTANCE；导出由 shim 注册表决定）",
+                    want.c_str(), handle);
+        } else {
+            shimLog("kernel32", api,
+                    "\"%s\" 已装载 ⇒ 假句柄 0x%08X（导出由 shim 注册表决定，见 GetProcAddress）",
+                    want.c_str(), handle);
+        }
     }
     return handle;
 }
@@ -278,9 +298,22 @@ void getModuleHandle(X86& cpu, ShimCall& call, bool wide) {
         // ★ 判据是"**已装载**"（导入表里的 + kernel32/ntdll），⛔ 不是"系统里有"：
         //   例 `mscoree.dll` 系统里有、但本进程没装载 ⇒ 真机返回 0，这里也必须返回 0。
         cpu.shim.last_error = kErrModNotFound;
-        const std::string exe = exePath(cpu);
-        shimLog("kernel32", api, "主模块是 \"%s\"；\"%s\" 未装载 ⇒ 返回 0 + 错误 126",
-                exe.empty() ? "<未设置>" : exe.c_str(), want.c_str());
+        if (moduleKey(want) == "agerc") {
+            if (cpu.shim.agerc_base == 0) {
+                shimLog("kernel32", api,
+                        "AGERC 没有装载到 guest（没有 AGERC 镜像：--agerc / --game-dir 下的 AGERC.DLL）"
+                        " ⇒ 返回 0 + 错误 126");
+            } else {
+                shimLog("kernel32", api,
+                        "AGERC 镜像已映射在 0x%08X，但 guest 还没调 LoadLibrary(\"AGERC.DLL\")"
+                        " ⇒ 返回 0 + 错误 126（真机同：入口前 loader 不装它）",
+                        cpu.shim.agerc_base);
+            }
+        } else {
+            const std::string exe = exePath(cpu);
+            shimLog("kernel32", api, "主模块是 \"%s\"；\"%s\" 未装载 ⇒ 返回 0 + 错误 126",
+                    exe.empty() ? "<未设置>" : exe.c_str(), want.c_str());
+        }
     }
     call.result = handle;
 }
@@ -335,8 +368,14 @@ void getModuleHandleEx(X86& cpu, ShimCall& call, bool wide) {
         const std::uint32_t addr = name_ea;
         const std::uint32_t base = cpu.shim.module_handle;
         const std::uint32_t size = cpu.shim.module_size;
+        // ★ AGERC 是真实映射的镜像 ⇒ 它覆盖的地址也能反查到自己的基址（真机 loader 行为）。
+        const std::uint32_t agerc_size =
+            cpu.shim.agerc_image ? cpu.shim.agerc_image->size_of_image : 0u;
         if (base != 0 && addr >= base && (size == 0 || addr < base + size)) {
             handle = base;
+        } else if (cpu.shim.agerc_base != 0 && addr >= cpu.shim.agerc_base &&
+                   (agerc_size == 0 || addr - cpu.shim.agerc_base < agerc_size)) {
+            handle = cpu.shim.agerc_base;
         } else {
             // 文档没点名"地址不在任何模块里"用哪个错误码 ⇒ 取 ERROR_MOD_NOT_FOUND（"找不到模块"）
             cpu.shim.last_error = kErrModNotFound;
@@ -677,65 +716,132 @@ void shimTerminateProcess(X86& cpu, ShimCall& call) {
 }
 
 // ---- 动态加载 / 导出 ----
-// ★ 本模拟器**不解析任何 PE 导出表**（唯一例外 = AGERC 的两个/三个显式 stub thunk）。
-//   AGERC 的口径（用户 2026-11-03 明示）：不真装载；LoadLibrary 给确定性假句柄，
-//   GetProcAddress 对它 3 个导出返回**桩页里的 thunk 地址**（SCOPE §1 模态 no-op）。
+// ★ 导出的真源 = **shim 注册表**（`ShimRegistry`），不是任何 PE 导出表：
+//   `GetProcAddress` 把模块句柄映射回模块 key，再 `shims->find(key, name)`。
+//   · 找得到且有 `stub_ea` ⇒ 返回**桩页里的那条唯一地址**（guest 的 `call eax` 于是与 `call [IAT]`
+//     走同一条 dispatcher 路径）；
+//   · **`fn == nullptr` 也照样返回**：这是"有这个导出、但我们还没实现"的**诚实形态** ——
+//     guest 真调它会在 dispatcher 里按 reason 响亮失败（⛔ 不是在这里返回 0 假装没有这个函数）；
+//   · 找不到 ⇒ 0 + `ERROR_PROC_NOT_FOUND(127)`；而"句柄根本不认得"是 `ERROR_MOD_NOT_FOUND(126)`，
+//     两者日志分开（⛔ 不要都塞进一句"找不到"）。
+// ★ 运行期添加的导出（DDraw 的 `DirectDrawCreate` 之类）走 `ShimRegistry::addRuntime`：
+//   它在 bind() 之后继续发唯一地址，所以**不需要**改 PE / 重跑 bind。
+// ★ AGERC 是**真实装载的 guest 模块**（2026-11-04 改口径）：句柄 = 真实模块基址
+//   （`cpu.shim.agerc_base`），模态 no-op 只覆盖它那 3 个导出（`addStub` 的 thunk，在通用路径里
+//   同样找得到）。额外保留"未 LoadLibrary 就没有句柄 / 没有镜像就装不上"这两条真机边界。
+//
+// 模块句柄 → 模块 key（`GetProcAddress` 用）。空串 = **不认得这个句柄**。
+// ★ 判据是"这个句柄是本模拟器发出去的吗"：假句柄表 = `moduleKeyTable` 的去重序号（见上面"模块表"）；
+//   主模块 / AGERC 的句柄是**真实基址**，单独认。⛔ 不用名字哈希（会撞）。
+std::string moduleKeyForHandle(X86& cpu, std::uint32_t handle) {
+    if (handle == 0) return {};
+    if (handle == cpu.shim.module_handle) {
+        const std::string exe = exePath(cpu);
+        return exe.empty() ? std::string("image") : moduleKey(exe);
+    }
+    // ★ AGERC 的句柄是**真实模块基址**（`cpu.shim.agerc_base`），不参与假句柄编号 ⇒ 单独认。
+    if (cpu.shim.agerc_base != 0 && handle == cpu.shim.agerc_base) return "agerc";
+    const std::vector<std::string> table = moduleKeyTable(cpu);
+    for (std::size_t i = 0; i < table.size(); ++i)
+        if (moduleHandleForIndex(i) == handle) return table[i];
+    return {};
+}
+
 void shimGetProcAddress(X86& cpu, ShimCall& call) {
     requireMem(cpu, "GetProcAddress");
     const std::uint32_t mod = call.u32(0);
     const std::uint32_t name_ea = call.u32(1);
+    // 名字：字符串指针；`< 0x10000` = MAKEINTRESOURCE 的**序号**（bind 那侧登记成 `#N`）
     std::string name;
     if (name_ea != 0 && name_ea < 0x10000u) {
-        name = "<序号 " + std::to_string(name_ea) + ">";
+        name = "#" + std::to_string(name_ea);
     } else if (name_ea != 0) {
         name = call.str(1);
     }
+    const char* shown = name.empty() ? "<null>" : name.c_str();
 
-    const std::uint32_t agerc_handle = moduleHandleIn(moduleKeyTable(cpu), "agerc.dll");
-    if (cpu.shim.agerc_loaded && agerc_handle != 0 && mod == agerc_handle) {
-        const ShimDef* def = cpu.shims ? cpu.shims->find("agerc", name.c_str()) : nullptr;
-        if (def && def->stub_ea != 0) {
-            shimLog("kernel32", "GetProcAddress",
-                    "AGERC!%s ⇒ stub thunk 0x%08X（SCOPE §1 模态 no-op；不解析 AGERC 的 PE）",
-                    name.c_str(), def->stub_ea);
-            call.result = def->stub_ea;
-            return;
-        }
-        cpu.shim.last_error = kErrProcNotFound;
-        shimLog("kernel32", "GetProcAddress", "AGERC 没有导出 \"%s\"（只有 _GetInstance@0 / _ShowDialog@12 / "
-                "_OperateMenu@16）⇒ 返回 0 + 错误 127",
-                name.empty() ? "<null>" : name.c_str());
+    // ① 句柄 → 模块 key（这一步失败就是"模块不认得"，与"模块没有这个导出"分开报）
+    const std::string key = moduleKeyForHandle(cpu, mod);
+    if (key.empty()) {
+        cpu.shim.last_error = kErrModNotFound;
+        shimLog("kernel32", "GetProcAddress",
+                "模块句柄 0x%08X 不认得（不是本进程发出去的句柄）⇒ 返回 0 + 错误 126", mod);
+        call.result = 0;
+        return;
+    }
+    // ★ AGERC：句柄只能从 LoadLibrary 来（真机事实）⇒ 没装载过就没有句柄可查。
+    if (key == "agerc" && !cpu.shim.agerc_loaded) {
+        cpu.shim.last_error = kErrModNotFound;
+        shimLog("kernel32", "GetProcAddress",
+                "AGERC 没有装载过（句柄只能来自 LoadLibraryA/W）⇒ 返回 0 + 错误 126");
         call.result = 0;
         return;
     }
 
+    // ② 查 shim 注册表（导出的**唯一**真源）
+    const ShimDef* def = cpu.shims ? cpu.shims->find(key.c_str(), shown) : nullptr;
+    if (def && def->stub_ea != 0) {
+        if (key == "agerc") {
+            shimLog("kernel32", "GetProcAddress",
+                    "AGERC!%s ⇒ stub thunk 0x%08X（真实 AGERC 镜像在 0x%08X；三个导出仍按 SCOPE §1 "
+                    "模态 no-op）",
+                    shown, def->stub_ea, cpu.shim.agerc_base);
+        } else {
+            shimLog("kernel32", "GetProcAddress", "%s!%s ⇒ thunk 0x%08X（%s）", key.c_str(), shown,
+                    def->stub_ea,
+                    def->fn ? "已实现" : "有这个导出但还没实现：调用它会在 dispatcher 里响亮失败");
+        }
+        call.result = def->stub_ea;
+        return;
+    }
+
+    // ③ 模块认得、但没有这个导出
     cpu.shim.last_error = kErrProcNotFound;
-    shimLog("kernel32", "GetProcAddress",
-            "模块 0x%08X 里找不到 \"%s\"：本模拟器不提供导出转发（导入走 IAT 桩页，见 shims.h）⇒ 返回 0",
-            mod, name.empty() ? "<null>" : name.c_str());
+    if (key == "agerc") {
+        shimLog("kernel32", "GetProcAddress",
+                "AGERC 没有导出 \"%s\"（只有 _GetInstance@0 / _ShowDialog@12 / _OperateMenu@16）⇒ "
+                "返回 0 + 错误 127",
+                shown);
+    } else {
+        shimLog("kernel32", "GetProcAddress", "模块 \"%s\" 里没有导出 \"%s\" ⇒ 返回 0 + 错误 127",
+                key.c_str(), shown);
+    }
     call.result = 0;
 }
 
 // `LoadLibraryA/W`：问的是"**系统里有这个 DLL 吗**"（有就装得上），与 `GetModuleHandle` 的
-// "此刻在进程里吗"不是同一个问题（两张表见文件上方）。返回**确定性假句柄**。
-// ⛔ 装载成功仍然**不带来任何导出**：`GetProcAddress` 对它一律 127 —— "模块存在、函数不存在"
-//    是 M1 的真实边界（导出转发不在本线；归属待裁决）。⚠ 偏差按 SCOPE §3 的形态登记：合理值 + 打日志。
+// "此刻在进程里吗"不是同一个问题（两张表见文件上方）。系统 DLL 返回**确定性假句柄**；
+// AGERC.DLL 返回**真实模块基址**（没有镜像 ⇒ 0 + 126，⛔ 不假装成功）。
+// ⛔ **装载本身不带来任何导出**：导出由 shim 注册表决定 —— 有人用 `add` / `addStub` / `addRuntime`
+//    登记过就有，没有就 127。⚠ 偏差按 SCOPE §3 的形态登记：合理值 + 打日志。
 void loadLibrary(X86& cpu, ShimCall& call, bool wide) {
     const char* api = wide ? "LoadLibraryW" : "LoadLibraryA";
     const std::string name = wide ? narrowAscii(call.wstr(0)) : call.str(0);
     const std::string key = moduleKey(name);
-    const std::uint32_t handle = isLoadableModule(name) ? moduleHandleIn(moduleKeyTable(cpu), name) : 0;
-    if (handle) {
-        if (key == "agerc") {
-            // ★ AGERC：明确 stub（用户裁决）。日志就是"它被装上了、但不会有真实现"的常亮证据。
-            cpu.shim.agerc_loaded = true;
+    // ★ AGERC：唯一一个真实装载的模块。没有镜像 ⇒ 0 + 126（⛔ 没有假句柄兜底）。
+    if (key == "agerc") {
+        if (cpu.shim.agerc_base == 0) {
+            cpu.shim.last_error = kErrModNotFound;
             shimLog("kernel32", api,
-                    "装载 \"%s\" ⇒ 确定性假句柄 0x%08X；三个导出走 stub thunk（SCOPE §1 模态 no-op）",
-                    name.c_str(), handle);
-            call.result = handle;
+                    "\"%s\" 没有装载到 guest（没有 AGERC 镜像：--agerc / --game-dir 下的 AGERC.DLL）"
+                    " ⇒ 返回 0 + 错误 126（⛔ 不假装成功）",
+                    name.empty() ? "<null>" : name.c_str());
+            call.result = 0;
             return;
         }
-        shimLog("kernel32", api, "装载 \"%s\" ⇒ 假句柄 0x%08X（本模拟器不导出任何函数，GetProcAddress 仍会 127）",
+        cpu.shim.agerc_loaded = true;
+        shimLog("kernel32", api,
+                "装载 \"%s\" ⇒ **真实模块基址 0x%08X**（PE 节已映射进 guest；三个导出仍走 stub "
+                "thunk，SCOPE §1 模态 no-op）",
+                name.c_str(), cpu.shim.agerc_base);
+        call.result = cpu.shim.agerc_base;
+        return;
+    }
+    const std::uint32_t handle =
+        isLoadableModule(name) ? moduleHandleIn(cpu, moduleKeyTable(cpu), name) : 0;
+    if (handle) {
+        shimLog("kernel32", api,
+                "装载 \"%s\" ⇒ 假句柄 0x%08X（导出由 shim 注册表决定：登记过的能查到，其余 127）",
                 name.c_str(), handle);
         call.result = handle;
         return;
@@ -801,7 +907,7 @@ void registerProcessShims(ShimRegistry& shims) {
     shims.add("kernel32", "ExitProcess", Conv::Stdcall, 1, shimExitProcess);
     shims.add("kernel32", "TerminateProcess", Conv::Stdcall, 2, shimTerminateProcess);
 
-    // ---- 动态加载 / 导出（本模拟器不提供；失败值 + 日志）----
+    // ---- 动态加载 / 导出（导出真源 = shim 注册表；见文件上方与 shimGetProcAddress）----
     shims.add("kernel32", "GetProcAddress", Conv::Stdcall, 2, shimGetProcAddress);
     shims.add("kernel32", "LoadLibraryA", Conv::Stdcall, 1, shimLoadLibraryA);
     shims.add("kernel32", "LoadLibraryW", Conv::Stdcall, 1, shimLoadLibraryW);

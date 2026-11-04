@@ -450,6 +450,19 @@ void Vfs::setGuestCwd(const std::string& guest_path) {
     (void)guest_cwd_set_;
 }
 
+namespace {
+// P0 的伪造 AppData 前缀：guest 看到的仍是 Windows 形状，宿主落到 --appdata。
+struct SpecialRoot {
+    const char* guest;
+    const char* sub;
+};
+constexpr SpecialRoot kSpecialRoots[] = {
+    {"C:/Users/Amayui/AppData/Roaming", "Roaming"},
+    {"C:/Users/Amayui/AppData/Local", "Local"},
+    {"C:/Users/Amayui/Documents", "Documents"},
+};
+}  // namespace
+
 bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::string* error,
                   bool must_exist, bool resolve_case) const {
     if (host_path) host_path->clear();
@@ -462,6 +475,62 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
         if (error) *error = "[invalid] 空路径";
         return false;
     }
+    // ★ 特殊目录（--appdata）：匹配固定的 guest 前缀，剩余段落到 appdata/<sub>。
+    const std::string special_text = normalizeSeps(guest_path);
+    for (const SpecialRoot& sr : kSpecialRoots) {
+        const std::string prefix = sr.guest;
+        if (!prefixIsDir(special_text, prefix)) continue;
+        if (app_data_dir_.empty()) {
+            if (error) *error = std::string("[appdata] 特殊目录 \"") + sr.guest +
+                                "\" 需要 --appdata，但当前为空";
+            return false;
+        }
+        const std::string rest = special_text.substr(prefix.size());
+        std::vector<std::string> ssegs;
+        std::string cur;
+        for (std::size_t i = 0; i <= rest.size(); ++i) {
+            if (i == rest.size() || rest[i] == '/') {
+                std::string seg_err;
+                if (!applySegment(cur, guest_path, &ssegs, &seg_err)) {
+                    if (error) *error = seg_err;
+                    return false;
+                }
+                cur.clear();
+            } else {
+                cur.push_back(rest[i]);
+            }
+        }
+        const fs::path sroot = (pathFromUtf8(app_data_dir_) / pathFromUtf8(sr.sub)).lexically_normal();
+        fs::path scur = sroot;
+        std::string serr;
+        for (std::size_t i = 0; i < ssegs.size(); ++i) {
+            const bool last = (i + 1 == ssegs.size());
+            std::string real;
+            const SegLookup r = lookupSegment(scur, ssegs[i], last && !resolve_case, &real, &serr);
+            if (r == SegLookup::Error) {
+                if (error) *error = serr;
+                return false;
+            }
+            if (r == SegLookup::Found) {
+                scur /= pathFromUtf8(real);
+                continue;
+            }
+            if (!last || must_exist) {
+                if (error) *error = std::string(last ? "[notfound]" : "[notdir]") + " 段 \"" + ssegs[i] +
+                                    "\" 在 \"" + pathToUtf8(scur) + "\" 里不存在";
+                return false;
+            }
+            scur /= pathFromUtf8(ssegs[i]);
+        }
+        const fs::path snorm = scur.lexically_normal();
+        if (!isUnderRoot(sroot, snorm)) {
+            if (error) *error = "[escape] AppData 解析结果不在 --appdata 之下";
+            return false;
+        }
+        if (host_path) *host_path = pathToUtf8(snorm);
+        return true;
+    }
+
     std::string err;
     std::vector<std::string> segs;
     if (!splitGuest(*this, guest_path, &segs, &err)) {
@@ -514,6 +583,25 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
 bool Vfs::toGuest(const std::string& host_path, std::string* guest_path) const {
     if (guest_path) guest_path->clear();
     if (!ready() || host_path.empty()) return false;
+    const fs::path p0 = pathFromUtf8(host_path).lexically_normal();
+    if (!app_data_dir_.empty()) {
+        for (const SpecialRoot& sr : kSpecialRoots) {
+            const fs::path sroot = (pathFromUtf8(app_data_dir_) / pathFromUtf8(sr.sub)).lexically_normal();
+            if (!isUnderRoot(sroot, p0)) continue;
+            std::string rel;
+            auto q = p0.begin();
+            for (auto r = sroot.begin(); r != sroot.end(); ++r) ++q;
+            for (; q != p0.end(); ++q) {
+                const std::string part = pathToUtf8(*q);
+                if (part.empty()) continue;
+                if (!rel.empty()) rel += '\\';
+                rel += part;
+            }
+            if (guest_path) *guest_path = rel.empty() ? std::string(sr.guest)
+                                                      : (std::string(sr.guest) + "\\" + rel);
+            return true;
+        }
+    }
     const fs::path root = pathFromUtf8(game_dir_).lexically_normal();
     const fs::path p = pathFromUtf8(host_path).lexically_normal();
     if (!isUnderRoot(root, p)) return false;

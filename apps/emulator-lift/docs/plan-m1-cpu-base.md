@@ -337,7 +337,7 @@ tools/lift.mjs                ← describe / check / report / corpus-report（�
 ⛔ 音频 / 视频（SCOPE 已判 silent / skip）· ⛔ 线程与真并发（D5）· ⛔ 完整的 SEH / C++ 展开（R1）·
 ⛔ **进程创建 / 版本资源 / shell32·shlwapi / COM·VARIANT / IME** —— 都不在 M1；归属未定（M1 单的"归属清理"在裁）。
 ★ **注册表 / 音频 / 视频**：按 `SCOPE.md` §1 整体 no-op（不是 M1 缺口，也不等 M2/M3 的实现）。
-⛔ JIT / 动态翻译（R5）· ⛔ 64 位 guest（本作是 32 位 PE）· ⛔ AGERC.DLL（独立，随时可做）·
+⛔ JIT / 动态翻译（R5）· ⛔ 64 位 guest（本作是 32 位 PE）· ⛔ AGERC.DLL（M1 不做；M2 已改为真实模块装载，见 `plan-m2-2d-text.md` §4 D6）·
 ⛔ 用 `apps/emulator-cxx` 的 core 当 shim（README §1 的边界）·
 ⛔ **把 Wine 系组件当 shim**（理由与判据见 §1.1：那会退化成第三条路线）。
 

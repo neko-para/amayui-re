@@ -32,6 +32,12 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/mnemonics.cpp
     src/runtime/decode.cpp
     src/runtime/x86.cpp
+    src/runtime/guest_call.cpp
+    src/runtime/host_window.cpp
+    src/runtime/pe_resource.cpp
+    src/runtime/surface.cpp
+    src/runtime/present.cpp
+    src/runtime/com.cpp
     src/runtime/machine.cpp
     src/runtime/exec.cpp
     src/runtime/exec_integer.cpp
@@ -57,6 +63,10 @@ add_library(emulator-lift-runtime STATIC
     src/shims/kernel32_agerc.cpp
     src/shims/kernel32_version.cpp
     src/shims/user32_menu.cpp
+    src/shims/user32_window.cpp
+    src/shims/user32_resource.cpp
+    src/shims/gdi32_boot.cpp
+    src/shims/shell32.cpp
     src/shims/advapi32_registry.cpp
     src/shims/winmm_audio.cpp
     src/shims/winmm_joystick.cpp
@@ -118,6 +128,37 @@ set_tests_properties(fault-report PROPERTIES SKIP_RETURN_CODE 77)
 add_executable(lift-shim-abi tests/shim_abi.cpp)
 target_link_libraries(lift-shim-abi PRIVATE emulator-lift-runtime)
 add_test(NAME shim-abi COMMAND lift-shim-abi)
+
+# ---- pure：P0 嵌套 guest 回调栈 + headless 窗口 / 消息队列 ----
+add_executable(lift-guest-call tests/guest_call.cpp)
+target_link_libraries(lift-guest-call PRIVATE emulator-lift-runtime)
+add_test(NAME guest-call COMMAND lift-guest-call)
+
+add_executable(lift-host-window tests/host_window.cpp)
+target_link_libraries(lift-host-window PRIVATE emulator-lift-runtime)
+add_test(NAME host-window COMMAND lift-host-window)
+
+add_executable(lift-user32-window tests/user32_window.cpp)
+target_link_libraries(lift-user32-window PRIVATE emulator-lift-runtime)
+add_test(NAME user32-window COMMAND lift-user32-window)
+
+add_executable(lift-surface-present tests/surface_present.cpp)
+target_link_libraries(lift-surface-present PRIVATE emulator-lift-runtime)
+add_test(NAME surface-present COMMAND lift-surface-present)
+
+add_executable(lift-mechanism tests/mechanism.cpp)
+target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)
+add_test(NAME mechanism COMMAND lift-mechanism)
+
+add_executable(lift-pe-resource tests/pe_resource.cpp)
+target_link_libraries(lift-pe-resource PRIVATE emulator-lift-runtime)
+add_test(NAME pe-resource COMMAND lift-pe-resource)
+set_tests_properties(pe-resource PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(lift-agerc-module tests/agerc_module.cpp)
+target_link_libraries(lift-agerc-module PRIVATE emulator-lift-runtime)
+add_test(NAME agerc-module COMMAND lift-agerc-module)
+set_tests_properties(agerc-module PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(lift-mnemonics tests/mnemonics.cpp)
 target_link_libraries(lift-mnemonics PRIVATE emulator-lift-runtime)
@@ -187,6 +228,10 @@ if(EXISTS "${AGE_SECTFIX_EXE}" OR DEFINED ENV{AMAYUI_AGE_EXE})
     add_test(NAME loader COMMAND lift-loader)
     set_tests_properties(loader PROPERTIES
         ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
+
+    # pe-resource 的 pure 部分总是跑；有资产时补 assets 部分（否则整个测试 SKIP 77）。
+    set_tests_properties(pe-resource PROPERTIES
+        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE}" SKIP_RETURN_CODE 77)
 
     add_executable(lift-boot-trace tests/boot_trace.cpp)
     target_link_libraries(lift-boot-trace PRIVATE emulator-lift-runtime)

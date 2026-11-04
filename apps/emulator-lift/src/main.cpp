@@ -49,11 +49,14 @@ void usage() {
         "  --lst <path>        .lst 语料（诊断 / A3 对照；缺省自动找 corpus/disasm/files/…）\n"
         "  --game-dir <path>   guest 文件系统的**唯一根**（S6 文件与路径族；缺省 env AMAYUI_GAME_DIR）\n"
         "  --guest-root <path> guest 眼里的安装根文本（缺省 E:\\Games\\Eushully\\天結；只用于路径前缀）\n"
+        "  --appdata <path>    伪造 AppData 的宿主目录（特殊目录映射；缺省 = 不用 AppData）\n"
+        "  --agerc <path>      AGERC.DLL 的**拆壳件**（真实 guest 模块装载；缺省 = --game-dir 下的 AGERC.DLL）\n"
         "  --real-time         用宿主时钟（此时 A4 的逐字节断言自动跳过并明说）\n"
         "  --trace-inputs      打印 trace 输入清单（exe 路径串 / guest 命令行 / 环境块 / 时钟起点）\n"
         "  --until shim        跑到第一次 shim 调用就停（L1）\n"
         "  --until ea <hex>    跑到指定 EA 就停（L2 = 0x4BA890）\n"
         "  --max-insns <N>     最多执行 N 条指令\n"
+        "  --time-limit <秒>   墙钟上限（探索用；0 = 不限，缺省）\n"
         "  --trace-shims       打印 shim 调用（确定性格式）\n"
         "  --trace-blocks      打印每条执行的指令（调试用，很慢）\n"
         "  --safe-memory       每次访存都查提交位图（A1 的第二遍）\n"
@@ -74,12 +77,15 @@ int main(int argc, char** argv) {
     bool trace_inputs = false;
     std::uint64_t bench = 0;
     std::uint32_t max_insns = 0;
+    double time_limit_sec = 0.0;
     std::uint32_t until_ea = 0;
     bool until_shim = false;
     std::string exe_path;
     std::string lst_path;
     std::string game_dir;
+    std::string appdata_dir;
     std::string guest_root;
+    std::string agerc_path;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -91,6 +97,14 @@ int main(int argc, char** argv) {
             lst_path = argv[++i];
         } else if (std::strcmp(a, "--game-dir") == 0 && i + 1 < argc) {
             game_dir = argv[++i];
+        } else if (std::strcmp(a, "--appdata") == 0 && i + 1 < argc) {
+            appdata_dir = argv[++i];
+        } else if (std::strcmp(a, "--agerc") == 0 && i + 1 < argc) {
+            agerc_path = argv[++i];
+            if (agerc_path.empty()) {
+                std::fprintf(stderr, "--agerc 需要一个非空路径\n");
+                return 2;
+            }
         } else if (std::strcmp(a, "--guest-root") == 0 && i + 1 < argc) {
             guest_root = argv[++i];
         } else if (std::strcmp(a, "--real-time") == 0) {
@@ -109,6 +123,12 @@ int main(int argc, char** argv) {
             }
         } else if (std::strcmp(a, "--max-insns") == 0 && i + 1 < argc) {
             max_insns = static_cast<std::uint32_t>(std::strtoull(argv[++i], nullptr, 10));
+        } else if (std::strcmp(a, "--time-limit") == 0 && i + 1 < argc) {
+            time_limit_sec = std::strtod(argv[++i], nullptr);
+            if (time_limit_sec <= 0.0) {
+                std::fprintf(stderr, "--time-limit 需要正数秒\n");
+                return 2;
+            }
         } else if (std::strcmp(a, "--bench") == 0 && i + 1 < argc) {
             bench = std::strtoull(argv[++i], nullptr, 10);
         } else if (std::strcmp(a, "--trace-shims") == 0) {
@@ -216,6 +236,10 @@ int main(int argc, char** argv) {
                      "emulator-lift: ⚠ 没有 --game-dir（也没有 AMAYUI_GAME_DIR）：文件与路径族会**响亮失败**\n"
                      "  （S6：guest 路径只映射到 --game-dir；⛔ 不回退到任意宿主目录）\n");
     }
+    if (!appdata_dir.empty()) {
+        machine.vfs().setAppDataDir(appdata_dir);
+        std::printf("appdata   : %s（伪造 AppData；特殊目录映射到这里）\n", appdata_dir.c_str());
+    }
     if (!guest_root.empty()) machine.vfs().setGuestRoot(guest_root);
     if (!machine.loadImage(exe_path, &err)) {
         std::fprintf(stderr, "emulator-lift: 载入 PE 失败（%s）：%s\n", exe_path.c_str(), err.c_str());
@@ -277,6 +301,41 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // ---- AGERC.DLL：作为**真实 guest 模块**装载（用户 2026-11-04 改口径）----
+    //   显式 `--agerc <path>`；否则 `--game-dir` 下的 AGERC.DLL（走 VFS 解析，大小写不敏感）。
+    //   显式给了但装载失败 ⇒ 拒绝启动（exit 2）；缺省路径失败 ⇒ 警告并继续
+    //   （降级成"没有 AGERC 镜像"：LoadLibrary 返回 0 + 126，⛔ 不假装成功）。
+    const bool agerc_explicit = !agerc_path.empty();
+    if (!agerc_explicit && machine.vfs().ready()) {
+        std::string host;
+        std::string verr;
+        if (machine.vfs().resolve("AGERC.DLL", &host, &verr, true, true)) agerc_path = host;
+    }
+    if (!agerc_path.empty()) {
+        std::string agerc_err;
+        if (!machine.loadAgercModule(agerc_path, &agerc_err)) {
+            if (agerc_explicit) {
+                std::fprintf(stderr, "emulator-lift: --agerc 装载失败，拒绝启动\n  %s\n",
+                             agerc_err.c_str());
+                return 2;
+            }
+            std::fprintf(stderr,
+                         "emulator-lift: ⚠ --game-dir 下的 AGERC.DLL 装载失败 ⇒ 继续（降级为"
+                         "\"没有 AGERC 镜像\"）\n  %s\n"
+                         "  ⇒ LoadLibrary(\"AGERC.DLL\") 会返回 0 + 错误 126\n",
+                         agerc_err.c_str());
+        } else {
+            const lift::PeImage& ai = machine.agercImage();
+            std::printf(
+                "agerc     : %s\n  base=%08X size=%08X sections=%zu imports=%zu resources=%s sha256=%s\n",
+                ai.path.c_str(), machine.agercBase(), ai.size_of_image, ai.sections.size(),
+                ai.imports.size(), ai.resource_rva ? "yes" : "no", ai.sha256.c_str());
+        }
+    } else {
+        std::printf("agerc     : （没有 AGERC 镜像：--agerc 未给，且 --game-dir 下没有 AGERC.DLL）"
+                    "⇒ LoadLibrary(\"AGERC.DLL\") 返回 0 + 错误 126\n");
+    }
+
     if (report) {
         const bool json = std::getenv("LIFT_REPORT_JSON") != nullptr;
         if (json) {
@@ -291,6 +350,7 @@ int main(int argc, char** argv) {
     opt.until_ea = until_ea;
     opt.stop_on_first_shim = until_shim;
     opt.max_insns = bench ? bench : max_insns;
+    opt.time_limit_sec = time_limit_sec;
     opt.trace_shims = trace_shims;
     opt.trace_blocks = trace_blocks;
     opt.real_time = real_time;

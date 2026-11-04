@@ -26,9 +26,13 @@
 namespace lift {
 
 struct X86;
+struct PeImage;
 class BlockCache;
 class LstIndex;
 class Vfs;
+class ComRegistry;
+class GuestCallStack;
+class WindowManager;
 
 // ★ SMC 钩子：`X86::writeMem` 在类定义之前，不能直接调 `BlockCache::noteWrite`（不完整类型）。
 //   `cache == nullptr` 时（测试里没装缓存）是 no-op。
@@ -105,8 +109,14 @@ struct ShimState {
     std::uint32_t heap_handle = 0x00010000u;      // GetProcessHeap 的返回
     std::uint32_t module_handle = 0;              // 主模块（= image_base）
     std::uint32_t module_size = 0;                // 主模块的映射长度（SizeOfImage；GetModuleHandleEx(FROM_ADDRESS) 用）
-    std::uint32_t agerc_instance = 0;             // AGERC `_GetInstance` 的假实例（非空、确定性）
-    bool agerc_loaded = false;                    // LoadLibrary("AGERC.DLL") 过吗（GetProcAddress 的前提）
+    // ★ 2026-11-04 改口径：AGERC.DLL 是**真实装载的 guest 模块**（见 `Machine::loadAgercModule`）。
+    //   `agerc_base` 是它真实的 HINSTANCE / ImageBase（节已映射进 guest）；`agerc_image` 指向
+    //   那份 `PeImage`（资源 / 版本从这里解析，⛔ 不重读宿主文件）。
+    //   两者为 0 / nullptr ⇒ **没有装载 AGERC 镜像**（LoadLibrary 返回 0 + 126，⛔ 不假装成功）。
+    const PeImage* agerc_image = nullptr;
+    std::uint32_t agerc_base = 0;
+    std::uint32_t agerc_instance = 0;             // 旧口径的假实例（2026-11-04 起不再使用；真实 HINSTANCE = agerc_base）
+    bool agerc_loaded = false;                    // guest 调过 LoadLibrary("AGERC.DLL") 吗（GetProcAddress 的前提）
     std::uint32_t cmdline_ea = 0;                 // guest 里的命令行
     std::uint32_t exe_path_ea = 0;                // guest 里的 exe 全路径
     std::uint32_t env_ea = 0;                     // guest 里的环境块（UTF-16）
@@ -153,6 +163,10 @@ struct X86 {
     Vfs* vfs = nullptr;
     BlockCache* cache = nullptr;
     LstIndex* lst = nullptr;
+    const PeImage* image = nullptr;
+    ComRegistry* com = nullptr;
+    GuestCallStack* calls = nullptr;
+    WindowManager* windows = nullptr;
 
     // ---- 最近执行过的指令（诊断用环形缓冲；停在 eip=0 这类地方时能看见"从哪来"）----
     static constexpr int kLastInsns = 24;

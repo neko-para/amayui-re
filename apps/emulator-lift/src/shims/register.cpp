@@ -24,6 +24,10 @@ void registerKernel32Shims(ShimRegistry& shims) {
     registerStringShims(shims);    // kernel32_string.cpp：wsprintfA（varargs）/ lstrlenA / 码页
     registerAgercShims(shims);     // kernel32_agerc.cpp：AGERC 三个导出（SCOPE §1 模态 no-op）
     registerUser32MenuShims(shims);  // user32_menu.cpp：菜单 / 模态 no-op（SCOPE §1）
+    registerUser32WindowShims(shims);  // user32_window.cpp：P0 窗口 / 完整消息泵
+    registerUser32ResourceShims(shims); // user32_resource.cpp：AGE.EXE 图标 / 光标
+    registerGdiBootShims(shims);       // gdi32_boot.cpp：P0 启动最小件
+    registerShell32Shims(shims);       // shell32.cpp：特殊目录（--appdata）
     registerVersionShims(shims);   // kernel32_version.cpp：版本资源查询（真实失败码 1813）
 
     // =================================================================================
@@ -48,27 +52,14 @@ void registerKernel32Shims(ShimRegistry& shims) {
     // ⚠ 菜单与模态是 SCOPE §1 点名的**可接受偏差**（将来落地时要按 stub 口径：返回合理值 + 不打桩的日志 +
     //   overrides.json 登记），但那是 M2 的窗口族，⛔ 不是本批"假装成功"。
     const char* kUser32 = "M2 窗口 / 消息族（plan D4：L3；不属 M1）";
+    // ★ P0 已实现：RegisterClassExA / CreateWindowExA / DestroyWindow / ShowWindow / UpdateWindow /
+    //   PeekMessageA / GetMessageA / TranslateMessage / DispatchMessageA / DefWindowProcA /
+    //   SendMessageA / PostMessageA / PostQuitMessage / SetTimer / KillTimer / GetSystemMetrics /
+    //   GetClientRect / GetWindowRect / ...（见 user32_window.cpp）。
+    //   仍未实现（且当前导入表里没有直呼）：RegisterClassA / GetDC / ReleaseDC / SetFocus。
     shims.addUnimplemented("user32", "RegisterClassA", kUser32);
-    shims.addUnimplemented("user32", "CreateWindowExA", kUser32);
-    shims.addUnimplemented("user32", "DestroyWindow", kUser32);
-    shims.addUnimplemented("user32", "ShowWindow", kUser32);
-    shims.addUnimplemented("user32", "UpdateWindow", kUser32);
-    shims.addUnimplemented("user32", "PeekMessageA", kUser32);
-    shims.addUnimplemented("user32", "GetMessageA", kUser32);
-    shims.addUnimplemented("user32", "TranslateMessage", kUser32);
-    shims.addUnimplemented("user32", "DispatchMessageA", kUser32);
-    shims.addUnimplemented("user32", "DefWindowProcA", kUser32);
-    shims.addUnimplemented("user32", "SendMessageA", kUser32);
-    shims.addUnimplemented("user32", "PostMessageA", kUser32);
-    shims.addUnimplemented("user32", "PostQuitMessage", kUser32);
-    shims.addUnimplemented("user32", "SetTimer", kUser32);
-    shims.addUnimplemented("user32", "KillTimer", kUser32);
-    shims.addUnimplemented("user32", "GetSystemMetrics", kUser32);
-    shims.addUnimplemented("user32", "LoadCursorA", kUser32);
-    shims.addUnimplemented("user32", "LoadIconA", kUser32);
     shims.addUnimplemented("user32", "GetDC", kUser32);
     shims.addUnimplemented("user32", "ReleaseDC", kUser32);
-    shims.addUnimplemented("user32", "GetClientRect", kUser32);
     shims.addUnimplemented("user32", "SetFocus", kUser32);
 
     // ---- gdi32：2D 图形 ----

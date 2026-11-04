@@ -54,6 +54,10 @@ public:
     // 宿主根（绝对路径，UTF-8）。空 ⇒ ready() = false。
     void setGameDir(const std::string& host_dir);
     const std::string& gameDir() const { return game_dir_; }
+    // ★ P0：伪造 AppData（--appdata）。只影响特殊目录（AppData / LocalAppData / Personal），
+    //   不改变 --game-dir 是唯一游戏根的口径。空 = 未设置（特殊目录解析会响亮失败）。
+    void setAppDataDir(const std::string& host_dir) { app_data_dir_ = host_dir; }
+    const std::string& appDataDir() const { return app_data_dir_; }
     bool ready() const { return !game_dir_.empty(); }
 
     // guest 根的文本形式（缺省 `E:\Games\Eushully\天結`；只用于把路径的公共前缀剥掉与日志）
@@ -96,6 +100,7 @@ public:
 
 private:
     std::string game_dir_;
+    std::string app_data_dir_;
     std::string guest_root_ = "E:\\Games\\Eushully\\天結";
     std::string guest_cwd_;
     bool guest_cwd_set_ = false;

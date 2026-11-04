@@ -43,6 +43,11 @@ struct PeImage {
     std::uint32_t size_of_image = 0;
     std::uint32_t size_of_headers = 0;
     std::uint32_t size_of_stack_reserve = 0;
+    // ★ 资源目录（DataDirectory[2]）的**原始值**：只记录，不在载入阶段解析。
+    //   解析归 `runtime/pe_resource.h` 的 `PeResources`（plan §4 D6 / §6 P0）。
+    //   两者都为 0 ⇒ 这个镜像没有资源目录（不是错误：无资源的镜像照样能跑）。
+    std::uint32_t resource_rva = 0;
+    std::uint32_t resource_size = 0;
     std::vector<PeSectionInfo> sections;
     std::vector<PeImportInfo> imports;
 
@@ -54,6 +59,11 @@ bool loadPeFile(const std::string& path, PeImage* out, std::string* err);
 bool parsePeImage(PeImage& img, std::string* err);
 // 把节按 `image_base + RVA` 映射进 guest（提交 + 清 .bss 部分）
 bool mapPeImage(GuestMemory& mem, const PeImage& img, std::string* err);
+// 同上，但映射到**指定的 guest 基址** `base`（不是 PE 头的 ImageBase）。
+// ★ 2026-11-04 新口径：AGERC.DLL 作为**真实 guest 模块**装载 ⇒ 它的 ImageBase 可能与主镜像 /
+//   堆 / 栈 / TEB / 桩页冲突，`Machine::loadAgercModule` 会先挑一个不冲突的 base 再调这里。
+//   `mapPeImage` 等价于 `mapPeImageAt(mem, img, img.image_base, err)`（旧行为不变）。
+bool mapPeImageAt(GuestMemory& mem, const PeImage& img, std::uint32_t base, std::string* err);
 
 // guest 的地址布局（README §2.6 的建议值，集中在结构里而不是散落成常量）
 struct GuestLayout {

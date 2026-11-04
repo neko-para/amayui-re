@@ -278,19 +278,28 @@ LoadIconA（×2，函数指针）→ LoadCursorA → GetStockObject(BLACK_BRUSH)
 ★ 这一条属于 **P0 的启动解锁**，不是 P4：`LoadIconA` 与版本检查都在 `CreateWindowEx` 之前；
 版本不符时 `MessageBox` 后直接退出（F6），会挡住整个 M2a。
 
-**用户口径（2026-11-04）**：直接读 **AGE.EXE** 的资源；如果发现**传入了 AGERC.DLL 对应的句柄**，
-**直接 hard error**，由用户决策，⛔ 不 fake。
+**用户口径（2026-11-04，更新）**：直接读 **AGE.EXE** 的资源；**AGERC 同样按真实模型装载**——
+把 AGERC.DLL 的 PE 节映射进 guest 内存，用**真实 ImageBase 作为 HINSTANCE**，资源 / 版本从该镜像解析。
+⛔ 不再用“假实例 / 假句柄 / 编造资源”。AGERC 的三个导出仍按 `SCOPE.md` §1 的模态 no-op stub 执行
+（用户没有要求执行 AGERC 的对话框代码）；`_GetInstance@0` 返回真实模块基址。
 - 在 `runtime/` 加 `PeResources`（解析 `.rsrc`：`RT_ICON` / `RT_GROUP_ICON` / `VS_VERSIONINFO`），
-  只对 **AGE.EXE 的 PE 镜像**提供资源；
-- `LoadIconA` 用 AGE.EXE 的 `RT_GROUP_ICON` 造一个 guest HICON（窗口图标不必真显示）；`LoadCursorA` 走 stock cursor；
-- `version!GetFileVersionInfo*` 读 **AGE.EXE** 的 `VS_VERSIONINFO`；
-- ★ **AGERC 资源 = hard error**：资源 API 收到 AGERC 模块句柄（或 `GetFileVersionInfo*` 的路径解析到 AGERC.DLL）时，
-  打印 `API + 句柄/路径 + 调用点 EA + “AGERC 资源读取需要用户决策”` 后**停下**（`shimAbort`），⛔ 不返回假版本/假资源。
-  这与 `SCOPE.md` 的"AGERC 整体 stub"不冲突：stub 是**不装载 AGERC**，不是**替它编造资源**。
+  对 AGE.EXE 与 AGERC.DLL 两个 `PeImage` 都可用；
+- `mapPeImageAt()`：AGERC 映射到不冲突的 guest base（优先 ImageBase，冲突则 0x30000000）；
+  `--agerc <path>` 指定拆壳件；缺省找 `--game-dir/AGERC.DLL`。没有镜像 ⇒ `LoadLibraryA` 返回 0 + 126、
+  `GetProcAddress` 同样 126，⛔ 不假装成功。
+- `LoadIconA`：`hInstance == AGE 主模块` ⇒ AGE 资源；`hInstance == agerc_base` ⇒ AGERC 资源（`IDI_ICON1`）；
+  窗口图标不渲染 ⇒ 返回确定性伪 HICON。**原件 AGERC.DLL 可直接用**（版本/HINSTANCE/导出不需要拆壳）；
+  若图标数据在 `.rsrc` 虚拟尾部、文件里没有字节（原件典型）⇒ 返回**伪 HICON + 日志**（平台偏差，SCOPE §1）；
+  `--agerc` 拆壳件可读真实图标。
+- `version!GetFileVersionInfo*`：AGE 用 `cpu.image`；AGERC 用 `cpu.shim.agerc_image`（真实镜像），
+  支持 `\` 与 `\StringFileInfo\<langcp>\<Field>`；不再对 AGERC 路径 hard error。
 - `FindResourceA` / `SizeofResource` / `LoadResource` / `LockResource` 这 4 条**删掉注册**（既不在导入表、
   也无人调用；要用等真需要时再加），走 `pnpm tools lift sync --write`。
-- **为什么**：版本检查是启动路径上的真实分支；AGE.EXE 的资源是 `LoadIconA` 的正解；AGERC 的资源必须留给用户裁决。
-- 代价：0.5–1 周；如果启动路径真的去读 AGERC 版本，M2a 会在这里**响亮停下**——这是有意的，不是缺陷。
+- **为什么**：版本检查是启动路径上的真实分支；引擎的 `LoadIconA` 实际传的是 AGERC 的 HINSTANCE
+  （`.lst` 0x4BA996 `sub_48E620` = `[RCDLL+8]` = `GetProcAddress(AGERC,"_GetInstance@0")`），
+  而 `"IDI_ICON1"` 只在 AGERC.DLL 里（AGE.EXE 只有数字 ID 138）。⇒ 只有真实装载 AGERC 才能过这一关。
+- 代价：+0.5–1 周（模块映射 / `--agerc` / HINSTANCE 统一）；本机没有 AGERC 拆壳件时，
+  P0 只能验证“缺镜像 ⇒ 126 / 版本可按 packed 文件读”；图标要在 Windows 设备上用拆壳件验。
 
 ### D7 · region / 输入：放 M2b，M2a 只保留"退出键"
 
@@ -338,7 +347,7 @@ M2b 再做 region + SDL 输入 + 光标 + `GetAsyncKeyState` 影子状态。
 
 | # | 切片 | 做什么 | 判据 | 量级 |
 |---|---|---|---|---|
-| **P0** | headless 窗口 + 完整消息泵 + 机制 | G1 导出转发表 · G2 COM 对象/vtable/refcount · G3 嵌套 guest 回调栈 · G4 guest surface arena · G5 `--appdata` + headless present + 帧哈希 + `--time-limit` · **headless 窗口**（句柄/类/客户区/位置）· **完整消息泵**（Get/Peek/Post/Send/Translate/Dispatch/Wait/Quit、`WM_PAINT` 合并、`WM_TIMER`、`PeekMessage(PM_NOREMOVE)`）· **启动解锁**：`LoadIconA` / `LoadCursorA` / `GetStockObject` / `RegisterClassExA` / `CreateWindowExA` / `ShowWindow` / `UpdateWindow` + `GetSystemMetrics` / `GetAsyncKeyState`（headless 固定值 / 无键）+ **仅 AGE.EXE** 的 PE 资源 / `version` 3（D6；AGERC 资源 ⇒ hard error） | B1 + B6；pure 夹具；headless 下 `CreateWindowEx` → `WM_CREATE` → `WM_SIZE` → `WM_PAINT` 序列正确；boot 越过 `0x4BA9AA`；版本检查若读 AGERC 资源则按 hard error 记录待裁决 | 4–5 周 |
+| **P0** | headless 窗口 + 完整消息泵 + 机制 | G1 导出转发表 · G2 COM 对象/vtable/refcount · G3 嵌套 guest 回调栈 · G4 guest surface arena · G5 `--appdata` + headless present + 帧哈希 + `--time-limit` · **headless 窗口**（句柄/类/客户区/位置）· **完整消息泵**（Get/Peek/Post/Send/Translate/Dispatch/Wait/Quit、`WM_PAINT` 合并、`WM_TIMER`、`PeekMessage(PM_NOREMOVE)`）· **启动解锁**：`LoadIconA` / `LoadCursorA` / `GetStockObject` / `RegisterClassExA` / `CreateWindowExA` / `ShowWindow` / `UpdateWindow` + `GetSystemMetrics` / `GetAsyncKeyState`（headless 固定值 / 无键）+ **AGE.EXE + 真实 AGERC 镜像**的 PE 资源 / `version` 3（D6；`--agerc`；缺镜像 ⇒ 126） | B1 + B6；pure 夹具；headless 下 `CreateWindowEx` → `WM_CREATE` → `WM_SIZE` → `WM_PAINT` 序列正确；boot 越过 `0x4BA9AA`（需要 `--agerc` 拆壳件；本机缺件时停在“缺镜像 126”） | 4–5 周 |
 | **P1** | DDraw 2D 核心 | DDraw/DirectDrawSurface 对象与 vtable（只填用到的 + 未用到的 loud trap）· `CreateSurface` / `Blt` / `BltFast` / `SetColorKey` / `Lock` / `Unlock` / `GetDC` / `ReleaseDC` / `Flip` / `Set/GetDisplayMode` / `SetCooperativeLevel` / `GetAvailableVidMem` / **`EnumDisplayModes` + guest 回调** · 颜色键 / 裁剪 / 16·32bpp · surface 在 guest 内存 | B2；到 DDraw init 不 trap；首个 surface 创建 + 首帧 present | 4–6 周 |
 | **P2** | GDI 字体 / 文本 | GDI 对象表 / DC（DISPLAY + surface）· `CreateFontIndirectA` / `SelectObject` / `DeleteObject` / `GetCurrentObject` / `GetStockObject` · FreeType 后端 + Amayui CN · `GetTextMetricsA` / `EnumFontFamiliesExA` / `AddFontMemResourceEx` · `GetGlyphOutlineA` 1/17/65 · `GetTextExtentPoint32A` · `TextOutA` | B3；文本自洽；到第一段文本不 trap | 3–5 周 |
 | **P3** | 真实 SDL 窗口 / 输入 | 只换**呈现与输入后端**：SDL 窗口 + 纹理上传 · SDL 键鼠 → 消息 + `GetAsyncKeyState` 影子 · 光标 / 焦点 / resize · 关闭确认（`MessageBoxA`：headless 一律 IDOK；交互只对 MB_OKCANCEL/YESNO 弹 SDL，其余记日志返回 IDOK）· **不改** P0 的窗口/消息语义 | B6 在 P3 之后仍绿；交互 smoke 能点、能关 | 2–3 周 |
@@ -464,8 +473,9 @@ apps/emulator-lift/
    登记为 `SCOPE.md` 的平台偏差，⛔ 不写进 spec。
 3. **D5**：新增 `--appdata <host-path>`；特殊目录（AppData / LocalAppData / Personal）映射到该路径；
    ⛔ 不引入通用 `--work-dir` 覆盖。
-4. **D6**：直接读 **AGE.EXE** 的 PE 资源（图标 / 版本）；**AGERC.DLL 的资源读取（句柄或路径）⇒ hard error**，
-   由用户在看到诊断后决策；⛔ 不 fake AGERC 版本/资源。4 条无人调用的 `FindResource*` 注册删掉。
+4. **D6**：直接读 **AGE.EXE** 的 PE 资源；**AGERC 也按真实模型**：PE 节映射 + 真实 ImageBase / HINSTANCE +
+   资源/版本从镜像解析；`--agerc <path>` 指向拆壳件。三个导出仍按 SCOPE §1 的模态 no-op stub；
+   没有镜像 ⇒ `LoadLibraryA` 0 + 126，⛔ 不 fake。4 条无人调用的 `FindResource*` 注册删掉。
 5. **D8**：**不设自动停手规则**。本文件只给工作量评估（19–28 人周，M2a 13–19 / M2b 6–9）；
    后续是否做、做多少由用户决定。
 6. **探针上限**：第一帧/文本的探索运行用 **1 分钟墙钟上限**（`--time-limit 60`）；到点即停并报告
@@ -473,6 +483,7 @@ apps/emulator-lift/
 
 **剩余（需要时再问用户）**：
 
-- 启动路径真的读到 AGERC 资源时：按 hard error 停下，等用户裁决（是"允许读 AGERC"还是"绕开/停手"）。
+- 本机没有 AGERC 拆壳件 ⇒ 先用 `--agerc <path>` 在 Windows 设备上验图标；本机只能验“缺镜像 ⇒ 126”
+  与 packed AGERC.DLL 的版本读取。
 - M2a 跑完第一帧后：是否继续 M2b（真实窗口/输入/标题）—— 由用户按工作量报告决定。
 - 是否把 P0–P6 登记成需求树子节点 / 把 M2 置 `doing` —— 由用户拍板；本文件不手写进度。

@@ -38,8 +38,12 @@ void registerProcessShims(ShimRegistry& shims);   // kernel32_process.cpp
 void registerFileShims(ShimRegistry& shims);      // kernel32_file.cpp（文件与路径族，S6）
 void registerTimeShims(ShimRegistry& shims);      // kernel32_time.cpp
 void registerStringShims(ShimRegistry& shims);    // kernel32_string.cpp（码页与字符串族）
-void registerAgercShims(ShimRegistry& shims);     // kernel32_agerc.cpp（AGERC 三个导出，整体 stub）
+void registerAgercShims(ShimRegistry& shims);     // kernel32_agerc.cpp（AGERC 真实模块 + 三个导出 stub）
 void registerUser32MenuShims(ShimRegistry& shims);  // user32_menu.cpp（菜单 / 模态 no-op，SCOPE §1）
+void registerUser32WindowShims(ShimRegistry& shims);  // user32_window.cpp（P0 窗口 / 消息泵）
+void registerUser32ResourceShims(ShimRegistry& shims); // user32_resource.cpp（AGE.EXE 图标 / 光标）
+void registerGdiBootShims(ShimRegistry& shims);       // gdi32_boot.cpp（P0 启动最小件）
+void registerShell32Shims(ShimRegistry& shims);       // shell32.cpp（特殊目录 / --appdata）
 void registerAdvapi32RegistryShims(ShimRegistry& shims);  // advapi32_registry.cpp（注册表 no-op，SCOPE §1）
 void registerWinmmAudioShims(ShimRegistry& shims);  // winmm_audio.cpp（音频 no-op，SCOPE §1）
 void registerWinmmJoystickShims(ShimRegistry& shims);  // winmm_joystick.cpp（摇杆永久不做，SCOPE §1）

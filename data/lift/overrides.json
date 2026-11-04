@@ -49,7 +49,7 @@
       "kind": "stub",
       "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
       "boundary": "import",
-      "reason": "SCOPE §1 模态 no-op：AGERC 设置对话框整块不做；_GetInstance 返回非空假指针（不透明令牌）"
+      "reason": "SCOPE §1 模态 no-op：AGERC 设置对话框整块不做；_GetInstance 返回**真实模块基址**（HINSTANCE）"
     },
     {
       "target": "agerc!_OperateMenu@16",
@@ -347,13 +347,6 @@
     },
     {
       "target": "gdi32!GetRgnBox",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
-    },
-    {
-      "target": "gdi32!GetStockObject",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
@@ -689,39 +682,11 @@
       "reason": "oleaut32：M2/M3（VARIANT / 自动化），不属 M1"
     },
     {
-      "target": "shell32!SHGetSpecialFolderPathA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "shell32：不属 M1（启动路径不需要；归属待裁决）"
-    },
-    {
       "target": "shlwapi!PathRemoveFileSpecA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "shlwapi：不属 M1（启动路径不需要；归属待裁决）"
-    },
-    {
-      "target": "user32!ClientToScreen",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!CreateWindowExA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!DefWindowProcA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!DestroyMenu",
@@ -731,39 +696,11 @@
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
-      "target": "user32!DestroyWindow",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!DispatchMessageA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
       "target": "user32!DrawMenuBar",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!GetAsyncKeyState",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!GetClientRect",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!GetCursorPos",
@@ -780,13 +717,6 @@
       "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
-      "target": "user32!GetForegroundWindow",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
       "target": "user32!GetMenu",
       "kind": "stub",
       "impl": "stub_trap",
@@ -794,28 +724,7 @@
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
-      "target": "user32!GetMessageA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
       "target": "user32!GetMonitorInfoA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!GetParent",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!GetQueueStatus",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
@@ -836,88 +745,11 @@
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
-      "target": "user32!GetSystemMetrics",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!GetUpdateRgn",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!GetWindowLongA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!GetWindowPlacement",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!GetWindowRect",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!InvalidateRect",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!IsDialogMessageA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!IsIconic",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!KillTimer",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!LoadCursorA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
       "target": "user32!LoadCursorFromFileA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!LoadIconA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!LoadMenuA",
@@ -948,53 +780,11 @@
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
-      "target": "user32!PeekMessageA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!PostMessageA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!PostQuitMessage",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!PostThreadMessageA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
       "target": "user32!RegisterClassA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!RegisterClassExA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!RegisterWindowMessageA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!ReleaseDC",
@@ -1009,20 +799,6 @@
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!ScreenToClient",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!SendMessageA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!SetCursor",
@@ -1053,53 +829,11 @@
       "reason": "SCOPE §1 菜单整体 no-op：SetMenu 返回 TRUE（没有 Win32 菜单栏）"
     },
     {
-      "target": "user32!SetRect",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!SetRectEmpty",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!SetTimer",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!SetWindowLongA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!SetWindowPos",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
       "target": "user32!ShowCursor",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!ShowWindow",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!SystemParametersInfoA",
@@ -1116,67 +850,11 @@
       "reason": "SCOPE §1 菜单整体 no-op：TrackPopupMenu 立即返回 0（不阻塞）"
     },
     {
-      "target": "user32!TranslateMessage",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
       "target": "user32!UnhookWindowsHookEx",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!UpdateWindow",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!ValidateRect",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!ValidateRgn",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "user32!WaitMessage",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
-    },
-    {
-      "target": "version!GetFileVersionInfoA",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/kernel32_version.cpp",
-      "boundary": "import",
-      "reason": "version.dll 版本资源查询：本线不解析 PE 的 .rsrc 版本资源 ⇒ 按 Windows 的\"没有版本资源\"返回 FALSE + ERROR_RESOURCE_TYPE_NOT_FOUND(1813)（不是假装成功）"
-    },
-    {
-      "target": "version!GetFileVersionInfoSizeA",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/kernel32_version.cpp",
-      "boundary": "import",
-      "reason": "version.dll 版本资源查询：本线不解析 PE 的 .rsrc 版本资源 ⇒ 按 Windows 的\"没有版本资源\"返回 FALSE + ERROR_RESOURCE_TYPE_NOT_FOUND(1813)（不是假装成功）"
-    },
-    {
-      "target": "version!VerQueryValueA",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/kernel32_version.cpp",
-      "boundary": "import",
-      "reason": "version.dll 版本资源查询：本线不解析 PE 的 .rsrc 版本资源 ⇒ 按 Windows 的\"没有版本资源\"返回 FALSE + ERROR_RESOURCE_TYPE_NOT_FOUND(1813)（不是假装成功）"
     },
     {
       "target": "winmm!joyGetDevCapsA",

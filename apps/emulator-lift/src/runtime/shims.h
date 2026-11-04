@@ -19,6 +19,7 @@ namespace lift {
 
 struct X86;
 struct PeImage;
+struct ShimDef;  // ShimCall::def（定义在下面；这里只要指针）
 class GuestMemory;
 
 enum class Conv : std::uint8_t { Stdcall = 0, Cdecl, Varargs };
@@ -38,6 +39,12 @@ struct ShimCall {
     //   `EnumSystemLocalesA` 把控制权交给 guest 回调，guest 返回后落到内部续延桩
     //   （见 kernel32_string.cpp）。⛔ 普通实现不要设它 —— 设了就绕过了调用约定。
     bool take_control = false;
+
+    // ★ 正在执行的**这一条登记**（module / name / stub_ea / id / reason）。
+    //   为什么要给 shim 看它：运行期注册的 thunk（`addRuntime` / COM vtable 槽）**共用同一个
+    //   ShimFn**，函数指针本身分不出"我是哪个槽"；靠 `def->stub_ea` 回查注册表才能路由。
+    //   ⛔ 不要在 shim 里长期保存这个指针（`defs_` 是 vector，之后的 add/addRuntime 会让它失效）。
+    const ShimDef* def = nullptr;
 
     // 读参数（i 从 0 起）
     std::uint32_t u32(int i) const;
@@ -83,6 +90,28 @@ public:
     //   `stub_ea` 在 bind() 里分配（与导入同一个桩页；它不是导入，所以 IAT 里不会出现）。
     void addStub(const char* module, const char* name, Conv conv, int argc, ShimFn fn, const char* reason);
 
+    // ---- 运行期注册（G1 动态导出 / G2 COM vtable 槽）----
+    // ★ 与 `add()` 的区别：**在 bind() 之后**才登记 ⇒ 立刻拿到桩页里下一个空闲槽作为 `stub_ea`
+    //   （bind() 结束时已把桩页起点 / 槽数 / 下一个空闲槽记下来），不需要再跑一遍 bind()。
+    // ★ 登记出来的条目：`declared = true`（host 侧显式登记过）、`imported = false`（IAT 里没有它）、
+    //   `reason = nullptr`（不是"未实现的导入"）、`id = defs_.size()`。
+    // ★ **幂等**：同 (module, name) 已登记且**已有** stub_ea ⇒ 直接返回那一条（⛔ 绝不覆盖已有 stub EA）。
+    //   这条对 COM 是必需的：同一种 iface 建第二个对象时方法名会重复，必须复用同一个 thunk。
+    // ★ 槽位耗尽 / 没有桩页（bind 没跑过、也没 configureStubPage）⇒ 打一行到 stderr + 返回 nullptr。
+    // ⚠ 返回的 `ShimDef*` 在**下一次 add/addRuntime** 之后可能失效（`defs_` 是 std::vector）；
+    //   跨多次注册持有请存 `id`，再用 `byId()` / `byStubEa()` 取。
+    // ⚠ 拿到 `stub_ea` 之后要 **`cpu.cache->installShim(def->stub_ea, def->id)`**，否则 guest 的
+    //   `call [IAT]` / `call eax` 落到这个 EA 时会去**解码桩页字节**而不是走 shim。
+    //   （`ComRegistry::createObject` 会自己装；裸 addRuntime 的调用方负责。）
+    ShimDef* addRuntime(const char* module, const char* name, Conv conv, int argc, ShimFn fn);
+
+    // 没有 PE 镜像的夹具（`Machine::initBare`）用：bind() 不会跑 ⇒ 先显式给一页桩页。
+    // ★ bind() 成功时会用**自己的**（真）桩页值覆盖它；⛔ 已经有 stub 发出去之后再调会被拒绝（只打印）。
+    void configureStubPage(std::uint32_t page, std::uint32_t slots);
+    std::uint32_t stubPage() const { return shim_page_; }
+    std::uint32_t stubSlots() const { return shim_slots_; }
+    std::uint32_t nextStubSlot() const { return next_slot_; }
+
     // ---- 绑定：给镜像里每个导入分唯一地址，并把地址写回 IAT 槽 ----
     // `shim_page` / `shim_slots`：桩页起点与槽数（GuestLayout 提供）
     bool bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim_page, std::uint32_t shim_slots,
@@ -109,6 +138,11 @@ private:
     std::vector<ShimDef> defs_;
     bool trace_ = false;
     std::FILE* trace_out_ = stdout;
+    // bind() 结束时记下来的桩页状态（`addRuntime` 从 next_slot_ 继续往后发地址）。
+    // ★ 0 / 0 = 还没配置桩页（= 既没 bind 成功，也没 configureStubPage）⇒ addRuntime 拒绝发地址。
+    std::uint32_t shim_page_ = 0;
+    std::uint32_t shim_slots_ = 0;
+    std::uint32_t next_slot_ = 0;  // 下一个空闲槽（**已发出的槽数**，也从 bind 里继承）
 };
 
 }  // namespace lift

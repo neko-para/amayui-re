@@ -6,8 +6,11 @@
 // ★ 停下来的原因全部进 `RunResult`（D4 的 L1/L2 就是 `FirstShim` / `UntilEa` 两个原因）。
 #include "runtime/machine.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 #include "runtime/exec.h"
 #include "runtime/sha256.h"
@@ -31,6 +34,7 @@ const char* stopReasonName(StopReason r) {
         case StopReason::DecodeError: return "decode-error";
         case StopReason::Stopped: return "stopped";
         case StopReason::NoCode: return "no-code";
+        case StopReason::TimeLimit: return "time-limit";
     }
     return "?";
 }
@@ -65,6 +69,10 @@ void Machine::wire() {
     cpu_.vfs = &vfs_;
     cpu_.cache = &cache_;
     cpu_.lst = &lst_;
+    cpu_.image = &image_;
+    cpu_.calls = &guest_calls_;
+    cpu_.windows = &windows_;
+    cpu_.com = &com_;
     cpu_.fpu.reset();
 }
 
@@ -74,6 +82,10 @@ bool Machine::init(std::string* err) {
         return false;
     }
     mem_.setSafeMode(GuestMemory::safeModeFromEnv());
+    if (!surfaces_.init(&mem_, 0x28000000u, 0x08000000u)) {
+        if (err) *err = std::string("surface arena 初始化失败：") + surfaces_.lastError();
+        return false;
+    }
     wire();
     setActiveMachine(this);
     setGuestFaultHook(&liftFaultHook);
@@ -101,6 +113,95 @@ bool Machine::loadImage(const std::string& exe_path, std::string* err) {
 }
 
 bool Machine::loadLst(const std::string& lst_path, std::string* err) { return lst_.load(lst_path, err); }
+
+// ★ AGERC.DLL 的真实装载（2026-11-04 用户改口径）：把它当**普通 guest 模块**——
+//   节映射进 guest、真实 ImageBase 当 HINSTANCE、资源 / 版本从这份镜像解析。
+//   ⛔ 不再造"假实例 / 假句柄"；没有镜像时 LoadLibrary 返回 0 + 126（见 kernel32_process.cpp）。
+bool Machine::loadAgercModule(const std::string& path, std::string* err) {
+    auto setErr = [err](const char* step, const std::string& why) {
+        if (err) *err = std::string("AGERC 装载失败（") + step + "）：" + why;
+    };
+    if (!initialized_) {
+        setErr("init", "Machine 未 init");
+        return false;
+    }
+    PeImage img;
+    std::string perr;
+    if (!loadPeFile(path, &img, &perr)) {
+        setErr("读/解析 PE", perr + "（路径 " + path + "）");
+        return false;
+    }
+    if (img.size_of_image == 0) {
+        setErr("校验 PE", "SizeOfImage 为 0（无法确定映射长度）");
+        return false;
+    }
+
+    // ---- 选一个不与现有 guest 布局冲突的 base ----
+    // ★ 优先用 PE 头里的 ImageBase（真机 loader 也尽量尊重它）；冲突 ⇒ 用 0x30000000。
+    //   冲突表 = 主镜像 / 堆 / 栈（含 guard）/ TEB·PEB·TLS / 命令行块 / 桩页 / VirtualAlloc 区间
+    //   + **已经提交或登记过的所有区域**（bare 夹具的 placeCode、上一份 AGERC 等）。
+    constexpr std::uint32_t kFallbackBase = 0x30000000u;
+    struct Range {
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+    };
+    std::vector<Range> used;
+    auto addRange = [&used](std::uint64_t begin, std::uint64_t end) {
+        if (end > begin) used.push_back({begin, end});
+    };
+    if (image_loaded_) addRange(image_.image_base, static_cast<std::uint64_t>(image_.image_base) + image_.size_of_image);
+    addRange(layout_.heap_base, static_cast<std::uint64_t>(layout_.heap_base) + layout_.heap_size);
+    addRange(static_cast<std::uint64_t>(layout_.stack_top) - layout_.stack_size - layout_.stack_guard,
+             layout_.stack_top);
+    addRange(layout_.teb_ea, static_cast<std::uint64_t>(layout_.teb_ea) + 0x1000u);
+    addRange(layout_.peb_ea, static_cast<std::uint64_t>(layout_.peb_ea) + 0x1000u);
+    addRange(layout_.tls_array_ea, static_cast<std::uint64_t>(layout_.tls_array_ea) + 0x1000u);
+    addRange(layout_.argv_block, static_cast<std::uint64_t>(layout_.argv_block) + 0x1000u);
+    addRange(layout_.shim_page, static_cast<std::uint64_t>(layout_.shim_page) +
+                                    static_cast<std::uint64_t>(layout_.shim_slots) * 4u);
+    addRange(cpu_.shim.va_cursor, cpu_.shim.va_limit);
+    // 假模块句柄空间（kernel32_process.cpp 的 `0x7F000000 + 序号*64KiB`）：AGERC 的 base 不能落在
+    // 里面，否则 `GetProcAddress` 的"句柄 → 模块"反查会与某个假句柄撞（同一个整数两种含义）。
+    addRange(0x7F000000u, 0x7FF00000u);
+    for (const Region& r : mem_.regions()) addRange(r.begin, r.end);
+
+    auto fits = [&](std::uint32_t base) {
+        if (base == 0) return false;
+        const std::uint64_t end = static_cast<std::uint64_t>(base) + img.size_of_image;
+        if (end > GuestMemory::kSpace) return false;  // 越界（含 uint32 回绕）
+        for (const Range& r : used) {
+            if (static_cast<std::uint64_t>(base) < r.end && r.begin < end) return false;
+        }
+        return true;
+    };
+
+    std::uint32_t base = img.image_base;
+    if (!fits(base)) {
+        std::fprintf(stderr,
+                     "[lift] AGERC 的 ImageBase 0x%08X（+0x%X）与现有 guest 布局冲突 ⇒ 改用 0x%08X\n",
+                     img.image_base, img.size_of_image, kFallbackBase);
+        base = kFallbackBase;
+        if (!fits(base)) {
+            setErr("选基址", "PE 的 ImageBase 0x... 冲突，备选 0x30000000 也冲突（没有可用的 guest 基址）");
+            return false;
+        }
+    }
+    if (!mapPeImageAt(mem_, img, base, &perr)) {
+        setErr("映射镜像", perr);
+        return false;
+    }
+
+    agerc_image_ = std::move(img);
+    agerc_path_ = path;
+    agerc_base_ = base;
+    agerc_loaded_ = true;
+    // 交给 shim 的**唯一**令牌：真实 ImageBase + 镜像指针（资源 / 版本从这里读）。
+    // `agerc_loaded` 仍是 false：只有 guest 真的调 LoadLibrary("AGERC.DLL") 才置 true。
+    cpu_.shim.agerc_image = &agerc_image_;
+    cpu_.shim.agerc_base = agerc_base_;
+    cpu_.shim.agerc_loaded = false;
+    return true;
+}
 
 bool Machine::prepare(std::uint32_t entry_override, std::string* err) {
     if (!image_loaded_) {
@@ -190,8 +291,30 @@ RunResult Machine::run(const RunOptions& opts) {
     // 诊断开关：LIFT_TRACE_FULL=1 ⇒ `--trace-blocks` 每条带操作数文本 + 寄存器快照（缺省关）
     const bool traceFull = std::getenv("LIFT_TRACE_FULL") != nullptr;
     cpu_.running = true;
+    const auto wall_start = std::chrono::steady_clock::now();
+    std::uint64_t next_time_check = 0;
 
     while (cpu_.running) {
+        if (opts.time_limit_sec > 0.0 && cpu_.insns >= next_time_check) {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(now - wall_start).count();
+            if (elapsed >= opts.time_limit_sec) {
+                r.reason = StopReason::TimeLimit;
+                r.detail = "达到 --time-limit（墙钟上限）";
+                break;
+            }
+            next_time_check = cpu_.insns + 4096u;
+        }
+        // ★ 嵌套 guest 回调的续延点（guest_call.h）：先于定时器/块解码检查。
+        if (cpu_.eip == GuestCallStack::kContinuationEa) {
+            std::string call_err;
+            if (!guest_calls_.resume(cpu_, &call_err)) {
+                r.reason = StopReason::Unimplemented;
+                r.detail = call_err;
+                break;
+            }
+            continue;
+        }
         // ★ winmm 定时器回调的返回点（协作式定时器；见 x86.h 的 kTimerCallbackReturnEa）
         if (cpu_.eip == kTimerCallbackReturnEa) {
             if (!cpu_.shim.timer_firing) {
@@ -379,6 +502,9 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
     t.guest_cmdline = setup_.cmdline;
     t.environment = setup_.environment_ansi;
     t.game_dir = vfs_.gameDir();
+    t.appdata_dir = vfs_.appDataDir();
+    t.agerc_path = agerc_path_;
+    t.agerc_sha256 = agerc_image_.sha256;
     t.clock_start_100ns = clock_.epoch100ns();
     t.real_time = clock_.realTime();
     return t;
@@ -390,6 +516,9 @@ void Machine::dumpTraceInputs(std::FILE* out) const {
     std::fprintf(out, "trace-input cmdline  = %s\n", t.guest_cmdline.c_str());
     std::fprintf(out, "trace-input env      = %s\n", t.environment.c_str());
     std::fprintf(out, "trace-input game-dir = %s\n", t.game_dir.c_str());
+    std::fprintf(out, "trace-input appdata  = %s\n", t.appdata_dir.c_str());
+    std::fprintf(out, "trace-input agerc    = %s (sha256=%s)\n", t.agerc_path.c_str(),
+                 t.agerc_sha256.empty() ? "-" : t.agerc_sha256.c_str());
     std::fprintf(out, "trace-input clock    = %s (start=%llu x100ns)\n",
                  t.real_time ? "REAL-TIME（⚠ 逐字节断言必须跳过）" : "virtual",
                  (unsigned long long)t.clock_start_100ns);
@@ -410,6 +539,9 @@ std::uint64_t Machine::traceInputsHash() const {
     mix(t.guest_cmdline.data(), t.guest_cmdline.size());
     mix(t.environment.data(), t.environment.size());
     mix(t.game_dir.data(), t.game_dir.size());
+    mix(t.appdata_dir.data(), t.appdata_dir.size());
+    mix(t.agerc_path.data(), t.agerc_path.size());
+    mix(t.agerc_sha256.data(), t.agerc_sha256.size());
     mix(&t.clock_start_100ns, sizeof(t.clock_start_100ns));
     const std::uint8_t real = t.real_time ? 1 : 0;
     mix(&real, 1);

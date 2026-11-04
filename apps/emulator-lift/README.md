@@ -145,8 +145,9 @@ apps/emulator-lift/
   CMakeLists.txt                      ← 目标 + CTest（**分级靠注册位置**，见 AGENTS.md §5）
   CMakePresets.json / vcpkg.json      ← windows-x64 / linux-x64 / macos-arm64；依赖 sdl3 + zydis
   README.md / SCOPE.md / docs/        ← 口径 / 用户拍板的偏差 / 计划长文
-  src/main.cpp                        ← CLI：--exe --lst --until shim|ea --trace-shims --trace-blocks
-                                        --max-insns --safe-memory --report --bench --smoke
+  src/main.cpp                        ← CLI：--exe --lst --game-dir --appdata --agerc
+                                        --until shim|ea --trace-shims --trace-blocks
+                                        --max-insns --time-limit --safe-memory --report --bench --smoke
   src/runtime/memory.{h,cpp}          ← 4 GiB 预留 + 按需提交 + 提交位图 + 区域表 + fault 诊断
   src/runtime/image.{h,cpp}           ← PE 节表/导入表/入口 + 映射 + 栈(1 MiB+guard) + TEB/PEB
   src/runtime/sha256.{h,cpp}          ← SHA-256（校验"执行的字节 = 语料描述的字节"）

@@ -141,8 +141,16 @@ bool parsePeImage(PeImage& img, std::string* err) {
 
     // ---- 导入表（DataDirectory[1]）----
     img.imports.clear();
+    img.resource_rva = 0;
+    img.resource_size = 0;
     const std::size_t dd = opt + 96;  // PE32 的 DataDirectory 起点
     if (!ranges(b, dd, 8 * 2)) return true;  // 没有导入表也算成功（无导入的镜像）
+    // ★ 资源目录（DataDirectory[2]）：**只记录**，解析在 `runtime/pe_resource.h`。
+    //   旧版 optional header 可能连 3 个目录项都放不下 ⇒ 缺这一项按"没有资源"处理。
+    if (ranges(b, dd + 8 * 2, 8)) {
+        img.resource_rva = rdAt<std::uint32_t>(b, dd + 8 * 2, "ResourceTable.RVA", err);
+        img.resource_size = rdAt<std::uint32_t>(b, dd + 8 * 2 + 4, "ResourceTable.Size", err);
+    }
     const std::uint32_t imp_rva = rdAt<std::uint32_t>(b, dd + 8 * 1, "ImportTable.RVA", err);
     if (imp_rva == 0) return true;
     std::uint32_t desc_off = 0;
@@ -201,18 +209,41 @@ bool parsePeImage(PeImage& img, std::string* err) {
 }
 
 bool mapPeImage(GuestMemory& mem, const PeImage& img, std::string* err) {
+    return mapPeImageAt(mem, img, img.image_base, err);
+}
+
+bool mapPeImageAt(GuestMemory& mem, const PeImage& img, std::uint32_t base, std::string* err) {
+    // ★ `base + RVA + size` 必须在 guest 的 4 GiB 空间里（旧行为用 image_base 不会触发；
+    //   AGERC 的换基址路径必须在这里挡住 uint32 回绕，⛔ 不静默截断）。
+    auto inSpace = [](std::uint64_t begin, std::uint64_t size) {
+        return begin + size <= GuestMemory::kSpace;
+    };
+    if (!inSpace(base, img.size_of_image ? img.size_of_image : 0x1000u)) {
+        if (err) *err = "映射 PE 失败：base + SizeOfImage 越过 guest 的 4 GiB 空间";
+        return false;
+    }
     // 头也映射进去（有些代码会读 PE 头；且 GetModuleHandle 的基址要能读到 MZ）
     const std::uint32_t hdr = img.size_of_headers ? img.size_of_headers : 0x400u;
-    if (hdr && !mem.commitZeroed(img.image_base, hdr, RegionKind::Image, "pe-headers")) {
+    if (hdr && !mem.commitZeroed(base, hdr, RegionKind::Image, "pe-headers")) {
         if (err) *err = "映射 PE 头失败";
         return false;
+    }
+    // ★ 2026-11-04：头的**字节**也要拷进 guest（旧实现只 commitZeroed ⇒ 基址读到的不是 MZ）。
+    //   `GetModuleHandle` 的句柄是真 image_base / AGERC base，guest 可能按 PE 头反查模块。
+    {
+        const std::uint32_t copy = hdr < img.bytes.size() ? hdr : static_cast<std::uint32_t>(img.bytes.size());
+        if (copy) mem.writeBytes(base, img.bytes.data(), copy);
     }
     for (const PeSectionInfo& s : img.sections) {
         const std::uint32_t vsize = s.vsize ? s.vsize : s.raw_size;
         if (vsize == 0) continue;
+        if (!inSpace(static_cast<std::uint64_t>(base) + s.va, vsize)) {
+            if (err) *err = std::string("映射节失败（base + RVA + vsize 越过 4 GiB）：") + s.name;
+            return false;
+        }
         char nm[64];
         std::snprintf(nm, sizeof(nm), "pe%s", s.name);
-        if (!mem.commitZeroed(img.image_base + s.va, vsize, RegionKind::Image, nm)) {
+        if (!mem.commitZeroed(base + s.va, vsize, RegionKind::Image, nm)) {
             if (err) *err = std::string("映射节失败：") + s.name;
             return false;
         }
@@ -224,7 +255,7 @@ bool mapPeImage(GuestMemory& mem, const PeImage& img, std::string* err) {
             if (err) *err = std::string("节 raw 数据越界：") + s.name;
             return false;
         }
-        if (copy) mem.writeBytes(img.image_base + s.va, img.bytes.data() + s.raw_offset, copy);
+        if (copy) mem.writeBytes(base + s.va, img.bytes.data() + s.raw_offset, copy);
     }
     return true;
 }

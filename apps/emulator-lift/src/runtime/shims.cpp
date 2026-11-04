@@ -115,6 +115,75 @@ void ShimRegistry::addStub(const char* module, const char* name, Conv conv, int 
     defs_.push_back(std::move(def));
 }
 
+void ShimRegistry::configureStubPage(std::uint32_t page, std::uint32_t slots) {
+    if (next_slot_ != 0) {
+        // ⛔ 已经发过地址了：重置槽位会让新 def 拿到**别人已占的 EA**（两个 def 抢同一个 stub）。
+        std::fprintf(stderr,
+                     "[shim] configureStubPage(%08X, %u) 被拒绝：已经有 %u 个 stub 发出去（槽位不能重置）\n",
+                     page, slots, next_slot_);
+        return;
+    }
+    if (page == 0 || slots == 0) {
+        std::fprintf(stderr, "[shim] configureStubPage(%08X, %u) 参数非法 ⇒ 忽略\n", page, slots);
+        return;
+    }
+    shim_page_ = page;
+    shim_slots_ = slots;
+}
+
+ShimDef* ShimRegistry::addRuntime(const char* module, const char* name, Conv conv, int argc, ShimFn fn) {
+    const std::string mod = module ? module : "";
+    const std::string nm = name ? name : "";
+    // ① 幂等：已经登记过、而且**已经有唯一地址** ⇒ 原样返回（⛔ 不覆盖 stub_ea、不换实现）
+    ShimDef* existing = findMutable(mod.c_str(), nm.c_str());
+    if (existing && existing->stub_ea != 0) {
+        if (existing->fn != fn || existing->argc != argc || existing->conv != conv) {
+            std::fprintf(stderr,
+                         "[shim] addRuntime: %s!%s 已登记（stub %08X）但这次的 (fn,argc,conv) 与它不同 ⇒ "
+                         "保留已有实现（幂等；⛔ 不静默换实现）\n",
+                         mod.c_str(), nm.c_str(), existing->stub_ea);
+        }
+        return existing;
+    }
+    if (shim_slots_ == 0) {
+        std::fprintf(stderr,
+                     "[shim] addRuntime(%s!%s) 失败：还没有桩页（bind() 没跑过、也没 configureStubPage）\n",
+                     mod.c_str(), nm.c_str());
+        return nullptr;
+    }
+    if (next_slot_ >= shim_slots_) {
+        // ⛔ 不覆盖别人已占的 EA（那会让两个导入共用一个 stub，trace 与弹参都错）
+        std::fprintf(stderr, "[shim] addRuntime(%s!%s) 失败：桩页槽位耗尽（%u/%u）\n", mod.c_str(), nm.c_str(),
+                     next_slot_, shim_slots_);
+        return nullptr;
+    }
+    const std::uint32_t ea = shim_page_ + next_slot_ * 4u;
+    ++next_slot_;
+    // ② bind() 之前登记过、但那时没有桩页（bind 成功后本该都有地址）⇒ 复用这一条，补上地址
+    if (existing) {
+        existing->conv = conv;
+        existing->argc = argc;
+        existing->fn = fn;
+        existing->reason = nullptr;
+        existing->declared = true;
+        existing->stub_ea = ea;
+        return existing;
+    }
+    ShimDef def;
+    def.module = mod;
+    def.name = nm;
+    def.conv = conv;
+    def.argc = argc;
+    def.fn = fn;
+    def.reason = nullptr;  // 不是"未实现的导入"（缺理由的 stub 另有 addUnimplemented）
+    def.stub_ea = ea;
+    def.id = static_cast<std::uint32_t>(defs_.size());
+    def.declared = true;   // host 侧显式登记过
+    def.imported = false;  // IAT 里没有它（动态导出 / vtable 槽）
+    defs_.push_back(std::move(def));
+    return &defs_.back();
+}
+
 const ShimDef* ShimRegistry::find(const char* module, const char* name) const {
     const std::string m = normalizeModule(module ? module : "");
     for (const ShimDef& d : defs_) {
@@ -189,6 +258,10 @@ bool ShimRegistry::bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim
         d.stub_ea = shim_page + slot * 4u;
         ++slot;
     }
+    // ★ 记下桩页状态：`addRuntime` 从这里**接着往后**发地址（⛔ 绝不覆盖 bind 已发的 EA）。
+    shim_page_ = shim_page;
+    shim_slots_ = shim_slots;
+    next_slot_ = slot;
     return true;
 }
 
@@ -224,6 +297,8 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     call.conv = def.conv;
     call.argc = def.argc;
     call.ret_ea = ret_ea;
+    // ★ 运行期注册的 thunk（COM vtable 槽）靠它认出"我是哪个槽"（见 shims.h 的 ShimCall::def）
+    call.def = &def;
     call.stdcall_bytes = (def.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(def.argc) * 4u : 0u;
 
     def.called = true;
