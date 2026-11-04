@@ -14,7 +14,9 @@
 //
 // ★ 为什么每条断言都要看宿主盘：本族最坏的失败形态是"guest 以为成功了、盘上什么都没有"
 //   （见 overrides.md 的"⛔ 没有静默 no-op 这一档"）⇒ 只断言返回值等于 1 是不够的。
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -54,17 +56,43 @@ constexpr std::uint32_t kInvalidHandleValue = 0xFFFFFFFFu;
 // Win32 常量（与 kernel32_file.cpp 的同一个名字对应）
 constexpr std::uint32_t kGenericRead = 0x80000000u;
 constexpr std::uint32_t kGenericWrite = 0x40000000u;
+constexpr std::uint32_t kGenericAll = 0x10000000u;
+constexpr std::uint32_t kFileReadData = 0x00000001u;
+constexpr std::uint32_t kFileWriteData = 0x00000002u;
+constexpr std::uint32_t kShareRead = 0x00000001u;   // FILE_SHARE_READ
+constexpr std::uint32_t kShareWrite = 0x00000002u;  // FILE_SHARE_WRITE
 constexpr std::uint32_t kCreateAlways = 2u;
 constexpr std::uint32_t kOpenExisting = 3u;
+constexpr std::uint32_t kTruncateExisting = 5u;
 constexpr std::uint32_t kAttrDirectory = 0x00000010u;
 constexpr std::uint32_t kAttrArchive = 0x00000020u;
+
+// dwMoveMethod
+constexpr std::uint32_t kFileBegin = 0u;
+constexpr std::uint32_t kFileCurrent = 1u;
+constexpr std::uint32_t kFileEnd = 2u;
+
+// 错误码（S6-1 / S6-2 / S6-6 的断言用）
+constexpr std::uint32_t kErrAccessDenied = 5u;
+constexpr std::uint32_t kErrSharingViolation = 32u;
+constexpr std::uint32_t kErrInvalidParameter = 87u;
+constexpr std::uint32_t kErrNegativeSeek = 131u;
 
 // WIN32_FIND_DATAA（x86，0x140 字节）的字段偏移
 constexpr std::uint32_t kFindDataSize = 0x140u;
 constexpr std::uint32_t kFdAttributes = 0x00u;
+constexpr std::uint32_t kFdCreationTime = 0x04u;
+constexpr std::uint32_t kFdLastAccessTime = 0x0Cu;
+constexpr std::uint32_t kFdLastWriteTime = 0x14u;
 constexpr std::uint32_t kFdSizeHigh = 0x1Cu;
 constexpr std::uint32_t kFdSizeLow = 0x20u;
+constexpr std::uint32_t kFdReserved0 = 0x24u;
+constexpr std::uint32_t kFdReserved1 = 0x28u;
 constexpr std::uint32_t kFdFileName = 0x2Cu;
+constexpr std::uint32_t kFdAltName = 0x130u;
+
+// 1601-01-01 → 1970-01-01 的 100 ns 数（与 kernel32_file.cpp:152 同一个常数）
+constexpr std::uint64_t kFileTimeEpochDelta = 116444736000000000ull;
 
 std::uint32_t processId() {
 #if defined(_WIN32)
@@ -84,6 +112,12 @@ std::string readHostFile(const fs::path& p) {
     std::ifstream in(p, std::ios::binary);
     if (!in) return std::string("<打不开>");
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// 读 guest 里的 FILETIME（lo, hi 两个 DWORD）
+std::uint64_t readFileTime(lift::Machine& m, std::uint32_t ea) {
+    return static_cast<std::uint64_t>(m.mem().rd32(ea)) |
+           (static_cast<std::uint64_t>(m.mem().rd32(ea + 4u)) << 32);
 }
 
 // 最小机器码装配器（照 tests/strfmt.cpp）
@@ -128,9 +162,10 @@ struct Fixture {
 
         const char* const names[] = {
             "CreateFileA",     "ReadFile",          "WriteFile",        "SetFilePointer",
-            "GetFileSize",     "CloseHandle",       "FindFirstFileA",   "FindNextFileA",
-            "FindClose",       "CreateDirectoryA",  "DeleteFileA",      "GetFileAttributesA",
-            "GetCurrentDirectoryA", "SetCurrentDirectoryA",
+            "SetFilePointerEx", "GetFileSize",      "CloseHandle",      "FindFirstFileA",
+            "FindNextFileA",   "FindClose",         "CreateDirectoryA", "DeleteFileA",
+            "GetFileAttributesA", "GetCurrentDirectoryA", "SetCurrentDirectoryA",
+            "GetFileTime",     "SetFileTime",
         };
         std::uint32_t ea = kStubEa;
         for (const char* name : names) {
@@ -407,6 +442,324 @@ int main() {
         std::printf("[case] delete-and-missing: SetCurrentDirectoryA(\"..\") 回到根；"
                     "DeleteFileA(\"sub\\\\b.txt\")=TRUE（宿主文件消失）；"
                     "再 GetFileAttributesA ⇒ 0xFFFFFFFF + last_error=2\n");
+    }
+
+    // ---------------- ⑦ S6-1：`dwDesiredAccess = 0` 只查属性 ⇒ 不授予读/写，也不许截断 ----------------
+    // 判据（Windows 文档）：access=0 = "neither"；`ReadFile`/`WriteFile` 必须失败（真实失败码
+    // `ERROR_ACCESS_DENIED(5)` 是对文档的自洽选择，`<待核>`：该码本身未在真机采样）。
+    // ⛔ 断言同时看**宿主盘**：最坏的失败形态是"返回 TRUE 但把文件清了"。
+    {
+        g_current_case = "access-zero-open";
+        const std::uint32_t p_file = f.cstr("sub\\a.txt");
+
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h =
+            f.call("CreateFileA", {p_file, 0u, 0u, 0u, kOpenExisting, 0x80u, 0u});
+        LIFT_CHECK_NE_U32(h, kInvalidHandleValue);
+        LIFT_CHECK(readHostFile(tmp / "sub" / "a.txt") == "hello");  // 没被顺手截断
+
+        const std::uint32_t buf = f.zeroBuf(64);
+        const std::uint32_t nread = f.zeroBuf(4);
+        LIFT_CHECK_EQ_U32(f.call("ReadFile", {h, buf, 5u, nread, 0u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAccessDenied);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(nread), 0u);
+
+        const std::uint32_t data = f.cstr("XX");
+        const std::uint32_t nwritten = f.zeroBuf(4);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call("WriteFile", {h, data, 2u, nwritten, 0u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAccessDenied);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(nwritten), 0u);
+
+        // 文档：`SetFilePointer` / `SetFilePointerEx` 的 hFile 必须带 GENERIC_READ 或 GENERIC_WRITE
+        // ⇒ access=0 的句柄不许定位（FALSE + ERROR_ACCESS_DENIED）
+        const std::uint32_t out8 = f.zeroBuf(8);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call("SetFilePointer", {h, 0u, 0u, kFileBegin}), kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAccessDenied);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call("SetFilePointerEx", {h, 0u, 0u, out8, kFileBegin}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAccessDenied);
+
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h}), 1u);
+
+        // 宿主盘：内容与长度都没变（上面两次失败的副作用为零）
+        LIFT_CHECK(readHostFile(tmp / "sub" / "a.txt") == "hello");
+        std::error_code size_ec;
+        const auto host_size = fs::file_size(tmp / "sub" / "a.txt", size_ec);
+        LIFT_CHECK(!size_ec && host_size == 5u);
+
+        // access=0 + CREATE_ALWAYS（已存在）⇒ **只保证不截断**。
+        // ⚠ `<待核>`：真机在 access=0 时是否允许 CREATE_ALWAYS 打开/创建没有采样
+        //   ⇒ 这里**不把返回码钉死**，只断言宿主内容（若将来改语义，这条仍成立）。
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h2 =
+            f.call("CreateFileA", {p_file, 0u, 0u, 0u, kCreateAlways, 0x80u, 0u});
+        LIFT_CHECK(readHostFile(tmp / "sub" / "a.txt") == "hello");
+        if (h2 != kInvalidHandleValue) LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h2}), 1u);
+
+        // 顺带把 S6-1 的另一半也钉住：具体的 FILE_*_DATA 位与 GENERIC_ALL 必须被解出来
+        const std::uint32_t p_bits = f.cstr("sub\\bits.txt");
+        const std::uint32_t hb =
+            f.call("CreateFileA", {p_bits, kGenericAll, 0u, 0u, kCreateAlways, 0u, 0u});
+        LIFT_CHECK_NE_U32(hb, kInvalidHandleValue);
+        const std::uint32_t word = f.cstr("bit");
+        const std::uint32_t nw = f.zeroBuf(4);
+        LIFT_CHECK_EQ_U32(f.call("WriteFile", {hb, word, 3u, nw, 0u}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(nw), 3u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {hb}), 1u);
+
+        const std::uint32_t hr =
+            f.call("CreateFileA", {p_bits, kFileReadData, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(hr, kInvalidHandleValue);
+        const std::uint32_t rb = f.zeroBuf(16);
+        const std::uint32_t nr = f.zeroBuf(4);
+        LIFT_CHECK_EQ_U32(f.call("ReadFile", {hr, rb, 16u, nr, 0u}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(nr), 3u);
+        LIFT_CHECK(f.m.mem().readCString(rb) == "bit");
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {hr}), 1u);
+
+        // FILE_WRITE_DATA（具体的写位）也必须被解出来
+        const std::uint32_t hw =
+            f.call("CreateFileA", {p_bits, kFileWriteData, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(hw, kInvalidHandleValue);
+        const std::uint32_t word2 = f.cstr("zip");
+        LIFT_CHECK_EQ_U32(f.call("WriteFile", {hw, word2, 3u, nw, 0u}), 1u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {hw}), 1u);
+        LIFT_CHECK(readHostFile(tmp / "sub" / "bits.txt") == "zip");  // 宿主盘真的被改写
+
+        std::printf("[case] access-zero-open: CreateFileA(\"sub\\\\a.txt\", 0, 0, OPEN_EXISTING) "
+                    "⇒ 句柄 0x%08X；ReadFile=FALSE+5、WriteFile=FALSE+5（宿主仍是 \"hello\"/5 字节）；"
+                    "access=0+CREATE_ALWAYS 后宿主内容不变；GENERIC_ALL 可写、FILE_READ_DATA 可读\n",
+                    h);
+    }
+
+    // ---------------- ⑧ S6-1：截断已有文件需要写权 ----------------
+    {
+        g_current_case = "truncate-needs-write";
+        const std::uint32_t p_file = f.cstr("sub\\a.txt");
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h = f.call("CreateFileA", {p_file, kGenericRead, 0u, 0u,
+                                                       kTruncateExisting, 0x80u, 0u});
+        LIFT_CHECK_EQ_U32(h, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAccessDenied);
+
+        // 宿主盘：长度与内容都没变（⛔ 只读意图不许把文件清空）
+        std::error_code size_ec;
+        const auto host_size = fs::file_size(tmp / "sub" / "a.txt", size_ec);
+        LIFT_CHECK(!size_ec && host_size == 5u);
+        LIFT_CHECK(readHostFile(tmp / "sub" / "a.txt") == "hello");
+        std::printf("[case] truncate-needs-write: CreateFileA(\"sub\\\\a.txt\", GENERIC_READ, "
+                    "TRUNCATE_EXISTING) ⇒ INVALID_HANDLE_VALUE + last_error=%u；宿主仍是 "
+                    "\"hello\"/5 字节（没有真截断）\n",
+                    f.m.cpu().shim.last_error);
+    }
+
+    // ---------------- ⑨ S6-2：共享冲突是**双向**的，且只由访问位定义 ----------------
+    {
+        g_current_case = "share-mode-conflict";
+        const std::uint32_t p_file = f.cstr("sub\\a.txt");
+
+        // a) 两个 access=0 / share=0 的"属性探针"必须都能开（真机口径；旧实现误报 32）
+        const std::uint32_t a1 =
+            f.call("CreateFileA", {p_file, 0u, 0u, 0u, kOpenExisting, 0x80u, 0u});
+        const std::uint32_t a2 =
+            f.call("CreateFileA", {p_file, 0u, 0u, 0u, kOpenExisting, 0x80u, 0u});
+        LIFT_CHECK_NE_U32(a1, kInvalidHandleValue);
+        LIFT_CHECK_NE_U32(a2, kInvalidHandleValue);
+        LIFT_CHECK_NE_U32(a1, a2);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {a1}), 1u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {a2}), 1u);
+
+        // b) 已有 GENERIC_READ + SHARE_READ，新请求 GENERIC_WRITE + share=0
+        //    ⇒ 新 access 撞已有 share ⇒ 32
+        const std::uint32_t b1 =
+            f.call("CreateFileA", {p_file, kGenericRead, kShareRead, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(b1, kInvalidHandleValue);
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t b2 =
+            f.call("CreateFileA", {p_file, kGenericWrite, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_EQ_U32(b2, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrSharingViolation);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {b1}), 1u);
+
+        // c) 已有 GENERIC_READ + SHARE_READ|SHARE_WRITE，新请求 GENERIC_READ + share=0
+        //    ⇒ **已有 access 撞新 share**（第二个方向；旧实现完全不看这一维）
+        const std::uint32_t c1 = f.call("CreateFileA", {p_file, kGenericRead,
+                                                        kShareRead | kShareWrite, 0u,
+                                                        kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(c1, kInvalidHandleValue);
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t c2 =
+            f.call("CreateFileA", {p_file, kGenericRead, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_EQ_U32(c2, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrSharingViolation);
+        LIFT_CHECK(readHostFile(tmp / "sub" / "a.txt") == "hello");  // 被拒的打开没有副作用
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {c1}), 1u);
+
+        // d) 判定跟着**活句柄**走（不是缓存）：关掉之后同样的打开成功
+        const std::uint32_t d =
+            f.call("CreateFileA", {p_file, kGenericRead, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(d, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {d}), 1u);
+
+        std::printf("[case] share-mode-conflict: a) 两个 access=0/share=0 都能开（0x%08X/0x%08X）；"
+                    "b) 已有 READ+SHARE_READ 后 WRITE+share=0 ⇒ 0xFFFFFFFF+%u；"
+                    "c) 已有 READ+SHARE_READ|WRITE 后 READ+share=0 ⇒ 0xFFFFFFFF+%u；"
+                    "d) 关句柄后同样的打开成功 0x%08X\n",
+                    a1, a2, kErrSharingViolation, kErrSharingViolation, d);
+    }
+
+    // ---------------- ⑩ S6-4：FIND_DATA / GetFileTime 的四个时间是宿主真值 ----------------
+    {
+        g_current_case = "find-data-times";
+        const std::uint32_t p_dir = f.cstr("timecheck");
+        LIFT_CHECK_EQ_U32(f.call("CreateDirectoryA", {p_dir, 0u}), 1u);
+        const std::uint32_t p_file = f.cstr("timecheck\\t.dat");
+        const std::uint32_t h =
+            f.call("CreateFileA", {p_file, kGenericWrite, 0u, 0u, kCreateAlways, 0u, 0u});
+        LIFT_CHECK_NE_U32(h, kInvalidHandleValue);
+
+        // 把 access / write 设成两个**不同**的过去时间 ⇒ 若实现仍拿 mtime 填三格，
+        // access == write 必然成立，下面的"两两不等"会红。
+        const std::int64_t now_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::system_clock::now().time_since_epoch())
+                                             .count();
+        const std::int64_t want_access = now_seconds - 3000;
+        const std::int64_t want_write = now_seconds - 1000;
+        auto putFileTime = [&](std::uint32_t ea, std::int64_t unix_seconds) {
+            const auto v = static_cast<std::uint64_t>(
+                unix_seconds * 10000000ll + static_cast<std::int64_t>(kFileTimeEpochDelta));
+            f.m.mem().wr32(ea, static_cast<std::uint32_t>(v & 0xFFFFFFFFull));
+            f.m.mem().wr32(ea + 4u, static_cast<std::uint32_t>(v >> 32));
+        };
+        const std::uint32_t at = f.zeroBuf(8);
+        const std::uint32_t wt = f.zeroBuf(8);
+        putFileTime(at, want_access);
+        putFileTime(wt, want_write);
+        LIFT_CHECK_EQ_U32(f.call("SetFileTime", {h, 0u, at, wt}), 1u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h}), 1u);
+        LIFT_CHECK(fs::exists(tmp / "timecheck" / "t.dat"));
+
+        const std::uint32_t pat = f.cstr("timecheck\\*.*");
+        const std::uint32_t fd = f.zeroBuf(kFindDataSize);
+        const std::uint32_t fh = f.call("FindFirstFileA", {pat, fd});
+        LIFT_CHECK_NE_U32(fh, kInvalidHandleValue);
+        LIFT_CHECK(f.m.mem().readCString(fd + kFdFileName) == "t.dat");
+
+        const std::uint64_t creation = readFileTime(f.m, fd + kFdCreationTime);
+        const std::uint64_t access = readFileTime(f.m, fd + kFdLastAccessTime);
+        const std::uint64_t write = readFileTime(f.m, fd + kFdLastWriteTime);
+        auto unixOf = [](std::uint64_t ft) {
+            return (static_cast<std::int64_t>(ft) - static_cast<std::int64_t>(kFileTimeEpochDelta)) /
+                   10000000ll;
+        };
+        // ① 两个被 SetFileTime 设过的值必须真的落盘（±2s 容忍 100ns → 秒的截断）
+        LIFT_CHECK(std::llabs(unixOf(access) - want_access) <= 2);
+        LIFT_CHECK(std::llabs(unixOf(write) - want_write) <= 2);
+        // ② 三格不是同一个投影：creation 是"刚建"（now 附近），与两个过去值不同
+        LIFT_CHECK(creation != access);
+        LIFT_CHECK(creation != write);
+        LIFT_CHECK(unixOf(creation) > now_seconds - 600);
+        LIFT_CHECK(unixOf(creation) < now_seconds + 600);
+        // ③ 不是"文件系统不支持 ⇒ 填 0"
+        LIFT_CHECK(creation != 0u);
+
+        // ④ GetFileTime 与 FIND_DATA 是**同一份**宿主真值（两处各算一次，结果应逐值相等）
+        const std::uint32_t h2 =
+            f.call("CreateFileA", {p_file, kGenericRead, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(h2, kInvalidHandleValue);
+        const std::uint32_t gfc = f.zeroBuf(8);
+        const std::uint32_t gfa = f.zeroBuf(8);
+        const std::uint32_t gfw = f.zeroBuf(8);
+        LIFT_CHECK_EQ_U32(f.call("GetFileTime", {h2, gfc, gfa, gfw}), 1u);
+        LIFT_CHECK_EQ_U32(readFileTime(f.m, gfc), creation);
+        LIFT_CHECK_EQ_U32(readFileTime(f.m, gfa), access);
+        LIFT_CHECK_EQ_U32(readFileTime(f.m, gfw), write);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h2}), 1u);
+
+        // 另外两条：dwReserved0/1 恒 0；8.3 短名（cAlternateFileName）不模拟
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(fd + kFdReserved0), 0u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(fd + kFdReserved1), 0u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd8(fd + kFdAltName), 0u);
+        LIFT_CHECK_EQ_U32(f.call("FindClose", {fh}), 1u);
+
+        std::printf("[case] find-data-times: creation=%lld access=%lld write=%lld（Unix 秒；"
+                    "access/write 由 SetFileTime 设成两个不同过去值，creation 仍是 now 附近）；"
+                    "GetFileTime 与 FIND_DATA 逐值相等；dwReserved0/1=0；cAlternateFileName 为空\n",
+                    static_cast<long long>(unixOf(creation)), static_cast<long long>(unixOf(access)),
+                    static_cast<long long>(unixOf(write)));
+    }
+
+    // ---------------- ⑪ S6-6：SetFilePointerEx 七条（正/负/相对/越界/131/失败不动指针/87） ----------------
+    {
+        g_current_case = "set-file-pointer-ex";
+        const std::uint32_t p_file = f.cstr("sub\\a.txt");
+        const std::uint32_t h = f.call("CreateFileA", {p_file, kGenericRead | kGenericWrite, 0u,
+                                                       0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(h, kInvalidHandleValue);
+        const std::uint32_t out = f.zeroBuf(8);
+        const std::uint32_t hi_size = f.zeroBuf(4);
+        const std::uint32_t buf = f.zeroBuf(64);
+        const std::uint32_t nread = f.zeroBuf(4);
+
+        // ① 0 / FILE_BEGIN ⇒ 新位置 0
+        LIFT_CHECK_EQ_U32(f.call("SetFilePointerEx", {h, 0u, 0u, out, kFileBegin}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(out), 0u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(out + 4u), 0u);
+
+        // ② 2 / FILE_BEGIN ⇒ 2；随后读到 "llo"
+        LIFT_CHECK_EQ_U32(f.call("SetFilePointerEx", {h, 2u, 0u, out, kFileBegin}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(out), 2u);
+        f.m.mem().fillBytes(buf, 0, 64);
+        LIFT_CHECK_EQ_U32(f.call("ReadFile", {h, buf, 3u, nread, 0u}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(nread), 3u);
+        LIFT_CHECK(f.m.mem().readCString(buf) == "llo");
+
+        // ③ -1 / FILE_CURRENT ⇒ 4（负相对移动）；随后读到 "o"
+        LIFT_CHECK_EQ_U32(
+            f.call("SetFilePointerEx", {h, 0xFFFFFFFFu, 0xFFFFFFFFu, out, kFileCurrent}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(out), 4u);
+        f.m.mem().fillBytes(buf, 0, 64);
+        LIFT_CHECK_EQ_U32(f.call("ReadFile", {h, buf, 1u, nread, 0u}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(nread), 1u);
+        LIFT_CHECK(f.m.mem().readCString(buf) == "o");
+
+        // ④ 0 / FILE_END ⇒ 5，且等于 GetFileSize 的低 32 位（两者配合）
+        LIFT_CHECK_EQ_U32(f.call("SetFilePointerEx", {h, 0u, 0u, out, kFileEnd}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(out), 5u);
+        LIFT_CHECK_EQ_U32(f.call("GetFileSize", {h, hi_size}), 5u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(hi_size), 0u);
+
+        // ⑤ 100 / FILE_BEGIN ⇒ 100（越界不是错误），文件没有变大
+        LIFT_CHECK_EQ_U32(f.call("SetFilePointerEx", {h, 100u, 0u, out, kFileBegin}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(out), 100u);
+        LIFT_CHECK_EQ_U32(f.call("GetFileSize", {h, hi_size}), 5u);
+        std::error_code pos_ec;
+        const auto pos_size = fs::file_size(tmp / "sub" / "a.txt", pos_ec);
+        LIFT_CHECK(!pos_ec && pos_size == 5u);  // 宿主盘：越界 seek 没有把文件变大
+
+        // ⑥ 回到 0，再 -100 / FILE_CURRENT ⇒ FALSE + ERROR_NEGATIVE_SEEK(131)，**指针不动**
+        LIFT_CHECK_EQ_U32(f.call("SetFilePointerEx", {h, 0u, 0u, out, kFileBegin}), 1u);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(
+            f.call("SetFilePointerEx", {h, 0xFFFFFF9Cu, 0xFFFFFFFFu, out, kFileCurrent}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrNegativeSeek);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(out), 0u);  // 失败不写出参
+        f.m.mem().fillBytes(buf, 0, 64);
+        LIFT_CHECK_EQ_U32(f.call("ReadFile", {h, buf, 5u, nread, 0u}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(nread), 5u);
+        LIFT_CHECK(f.m.mem().readCString(buf) == "hello");  // 位置仍在 0
+
+        // ⑦ 非法 dwMoveMethod ⇒ FALSE + ERROR_INVALID_PARAMETER(87)
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call("SetFilePointerEx", {h, 0u, 0u, out, 3u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h}), 1u);
+        std::printf("[case] set-file-pointer-ex: ① 0/BEGIN=0 ② 2/BEGIN=2→\"llo\" "
+                    "③ -1/CURRENT=4→\"o\" ④ 0/END=5==GetFileSize ⑤ 100/BEGIN=100（大小仍 5）"
+                    " ⑥ -100/CURRENT=FALSE+131（仍读到 \"hello\"）⑦ method=3 ⇒ FALSE+87\n");
     }
 
     std::printf("[case] tmp = %s\n", game.c_str());

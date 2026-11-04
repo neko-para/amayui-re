@@ -45,7 +45,11 @@
 //      `DUPLICATE_CLOSE_SOURCE`）。复制的句柄与源句柄**共享 payload**（文档："重复的句柄指向同一个
 //      对象 … 文件位置对两个句柄始终相同"），生命周期由 `releasePayload()` 的"还有别的活句柄吗"
 //      判定（最后一个关闭时才销毁 —— ⛔ 不用引用计数，见 handles.h）。
-//      ⛔ 不做访问权限降级校验（没有安全描述符）：`dwDesiredAccess` 被记录，不与源句柄的权限比较。
+//      **伪句柄会被实体化**：源是 `GetCurrentThread()`(0xFFFFFFFE) / `GetCurrentProcess()`
+//      (0xFFFFFFFF) 时按文档造一条**真**句柄表项（`payload = nullptr`、**没有 destroy**，
+//      访问位 `DUPLICATE_SAME_ACCESS ⇒ THREAD_ALL_ACCESS / PROCESS_ALL_ACCESS`，否则取
+//      `dwDesiredAccess`）。⛔ 仍不做"新句柄权限不得超过源句柄"的校验（没有安全描述符）：
+//      `dwDesiredAccess` 只被记录，不与源句柄比较。
 //   10. **`GetThreadPriority`**：本模拟器只有一个线程（`GetCurrentThread()` 的伪句柄
 //      `0xFFFFFFFE`），恒返回 `THREAD_PRIORITY_NORMAL(0)`；其它句柄 ⇒ `THREAD_PRIORITY_ERROR_RETURN`
 //      (0x7FFFFFFF) + `ERROR_INVALID_HANDLE`。写入侧（`SetThreadPriority`）仍按 D5 留 stub。
@@ -91,6 +95,10 @@ constexpr std::uint32_t kSemaphoreAllAccess = kStandardRightsRequired | kSynchro
 // DuplicateHandle 的 dwOptions
 constexpr std::uint32_t kDuplicateCloseSource = 0x00000001u;
 constexpr std::uint32_t kDuplicateSameAccess = 0x00000002u;
+
+// 伪句柄实体化时 `DUPLICATE_SAME_ACCESS` 用的"全权"值（winnt.h 的 x86 数值）
+constexpr std::uint32_t kThreadAllAccess = 0x001F03FFu;   // THREAD_ALL_ACCESS
+constexpr std::uint32_t kProcessAllAccess = 0x001F0FFFu;  // PROCESS_ALL_ACCESS
 
 // GetThreadPriority
 constexpr std::uint32_t kThreadPriorityNormal = 0u;
@@ -180,10 +188,18 @@ SyncObj* syncOf(X86& cpu, std::uint32_t h, std::uint32_t want, const char* api) 
 }
 
 // 修改类 API 的访问位检查（文档：事件要 EVENT_MODIFY_STATE，信号量/互斥量要 *_MODIFY_STATE）
+// ⛔ 没有 "access == 0 ⇒ true" 的短路：`Open*` 与 `DuplicateHandle` 都能给出**零访问位**的句柄，
+//   那种句柄按文档就是**不许**改状态的（`Create*` 记的是 *_ALL_ACCESS，不受影响）。
 bool hasModifyAccess(X86& cpu, std::uint32_t h, std::uint32_t mask, const char* api) {
-    HandleEntry* e = cpu.handles->get(h);
+    const HandleEntry* e = cpu.handles->get(h);
     if (!e || !e->used) return false;
-    if (e->access == 0) return true;  // 不是本族建的句柄（上面的 syncOf 已经会拒绝）
+    if (e->aux < kSyncEvent || e->aux > kSyncMutex) {
+        // 防御：调用点都在 `syncOf()` 之后（它已经拒绝非本族句柄）⇒ 走到这里说明调用顺序错了
+        cpu.shim.last_error = kErrInvalidHandle;
+        shimLog("kernel32", api, "句柄 0x%08X 不是本族的同步对象（aux=%u）⇒ FALSE + 错误 6", h,
+                e->aux);
+        return false;
+    }
     if ((e->access & mask) != 0) return true;
     cpu.shim.last_error = kErrAccessDenied;
     shimLog("kernel32", api,
@@ -874,6 +890,44 @@ void shimDuplicateHandle(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // 文档：`hSourceHandle` 是 `GetCurrentThread()` / `GetCurrentProcess()` 的**伪句柄**时，
+    // DuplicateHandle 把它**转化成一个真句柄**（线程 / 进程）。本模拟器没有真的内核对象 ⇒
+    // 实体化成一条 `payload = nullptr`、**没有 destroy** 的句柄表项。
+    // ⛔ 绝不能给 destroy：`releasePayload` 会在最后一个句柄关闭时拿它去 free 一个不存在的对象。
+    const bool pseudo_thread = (src == cpu.shim.thread_handle);
+    const bool pseudo_process = (src == cpu.shim.process_handle);
+    if (pseudo_thread || pseudo_process) {
+        const char* what = pseudo_thread ? "GetCurrentThread()" : "GetCurrentProcess()";
+        const HandleKind kind = pseudo_thread ? HandleKind::Thread : HandleKind::Other;
+        const std::uint32_t all = pseudo_thread ? kThreadAllAccess : kProcessAllAccess;
+        if (dst_proc == 0) {
+            // 文档：hTargetProcessHandle 为 NULL 只允许配 DUPLICATE_CLOSE_SOURCE ⇒ 只关源、不复制。
+            // 伪句柄本来就不在句柄表里（文档也不允许 CloseHandle 它）⇒ 没有可关的实体。
+            shimLog("kernel32", api,
+                    "%s 伪句柄 + hTargetProcessHandle=NULL + CLOSE_SOURCE ⇒ 不复制（伪句柄无可关实体）",
+                    what);
+            call.result = 1;
+            return;
+        }
+        const std::uint32_t dup_pseudo = cpu.handles->add(kind, what, nullptr, 0);
+        if (HandleEntry* ne = cpu.handles->get(dup_pseudo)) {
+            ne->destroy = nullptr;  // 不是真对象（见上）
+            ne->access = same_access ? all : desired_access;
+            ne->inherit = inherit != 0;
+        }
+        // 文档：lpTargetHandle 可为 NULL（句柄照样被复制，只是不回传值）
+        if (target_ptr != 0) {
+            requireCommitted(cpu, target_ptr, 4, api, "lpTargetHandle");
+            cpu.mem->wr32(target_ptr, dup_pseudo);
+        }
+        shimLog("kernel32", api,
+                "%s 伪句柄 ⇒ 实体化成真句柄 0x%08X（kind=%s，访问位 0x%08X%s）",
+                what, dup_pseudo, handleKindName(kind),
+                same_access ? all : desired_access, same_access ? " SAME_ACCESS" : "");
+        call.result = 1;
+        return;
+    }
+
     HandleEntry* e = cpu.handles->get(src);
     if (!e || !e->used) {
         cpu.shim.last_error = kErrInvalidHandle;

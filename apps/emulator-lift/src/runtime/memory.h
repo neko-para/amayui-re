@@ -48,6 +48,17 @@ using FaultHook = void (*)(const AccessSite& site);
 void setGuestFaultHook(FaultHook hook);
 [[noreturn]] void guestFault(const AccessSite& site, const char* why);
 
+// ---- fault 归因（两个平台的 handler 共用；纯函数，便于单测）----
+// ★ 判据是**异常地址**：落在 guest 空间 `[guest_base, guest_base + GuestMemory::kSpace)` 内 ⇒ guest fault
+//   （EA / 宽度 / 方向 + `_Exit(3)`，行为不变）；不在 ⇒ 宿主自己的 bug ⇒ `hostFault`。
+// ⛔ 不要拿 `g_access.size != 0` 当"这次是不是 guest 访存"的判据：`g_access` 记的是**最近一次** guest 访存，
+//   宿主 AV 时它可能是完全无关的陈旧值（REQ-01M6JCBYBW8DV0920T28337ACF 的成因）。
+// `guest_base` 为 nullptr（没有预留的 guest 空间）⇒ 一律 false。
+bool inGuestSpace(const void* guest_base, std::uintptr_t fault_addr);
+// 宿主自身的 fault：打印**与 guest fault 不同**的诊断（不含 `access     :` 行），`_Exit(4)`。
+// ★ 退出码 4 与 guest fault 的 3 区分开；最近一次 guest 访存只作"可能无关"的附注打印。
+[[noreturn]] void hostFault(std::uintptr_t fault_addr, const char* why);
+
 // 打印一条区域表（诊断 / 报告用）
 void dumpRegions(const std::vector<Region>& regions, std::FILE* out);
 const char* regionKindName(RegionKind kind);

@@ -14,6 +14,10 @@
 - **§3.2 窗口 / 消息 / region**：USER32 60 导入 / 261 站点 / 102 caller。菜单栏与模态按 `SCOPE.md` 整体 no-op（`LoadMenuA` 返非空假句柄、`SetMenu` TRUE、`MessageBoxA` IDOK、`TrackPopupMenu` 立即返回 0）；**窗口创建 / 消息泵 / 输入 / region / 计时器必须真做**。
 - **§3.4 DirectDraw 2D 表面**：`CreateSurface` / `Blt` / `BltFast` / `Flip` / `Lock` / `Unlock` / `GetDC` / `ReleaseDC` / `SetDisplayMode` / `SetCooperativeLevel`；颜色键、越界裁剪、`Lock` 的 pitch 与通道掩码。
 - **§3.3 GDI 字体**：`SelectObject` / `GetTextMetricsA` / `GetGlyphOutlineA`（`GGO_BITMAP` 1 位 / `GGO_GRAY4` 17 级 / `GGO_GRAY8` 65 级）/ `GetTextExtentPoint32A` / `TextOutA`。
+- **资源族（4 条）也归 M2**（用户 2026-11-04：资源等 M2）：`FindResourceA` / `SizeofResource` / `LoadResource` / `LockResource`。
+  ★ 实测它们**不在 PE 导入表、`.lst` 里也没有调用点** —— guest 从不直呼它们；入口卡点 `USER32!LoadIconA`（EA `0x004BA9AA`）要的是
+  **读 PE 资源目录**（`RT_GROUP_ICON` / `RT_ICON`），那可以由 `LoadIconA` 的实现直接做。⇒ M2 开工时二选一：把四条真做出来给内部用，
+  或删掉这四条"没人调用"的注册（删要走 `pnpm tools lift sync --write`）。M1 期间它们保持 `addUnimplemented`（不判红）。
 - 可复用的是**知识**不是代码：`repo:apps/emulator-cxx/src/core/text_alpha.h`（17/65 级量化）、`repo:apps/emulator-cxx/SCOPE.md` §1.1（基线补偿实测值）。
 
 ## 依赖与硬约束

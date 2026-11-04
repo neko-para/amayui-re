@@ -23,9 +23,11 @@
 //      占两个栈槽 ⇒ 真机导出是 `SetFilePointerEx@20`（hFile / lo / hi / lpNew / method）。
 //      写 4 会让**每次调用漏弹 4 字节栈**（几百次后炸在别处）。同样地，
 //      `GetFileTime`/`SetFileTime` 的 4 个参数都是指针 ⇒ argc=4 没问题。
-//   2. **`dwShareMode` 只做"能判就判"的那一半**：`share == 0`（独占）时，若同一宿主路径已被
-//      另一个本族句柄打开 ⇒ `ERROR_SHARING_VIOLATION(32)`；其余共享组合不检查（没有别的进程，
-//      也没有真文件锁）。**不实现真共享锁**。
+//   2. **`dwShareMode` 按"每一对同路径句柄双向"判定**：新请求的 access 位撞已有句柄的 share、
+//      已有句柄的 access 位撞新请求的 share ⇒ `ERROR_SHARING_VIOLATION(32)`；冲突**只由访问位
+//      定义**，`access = 0` 的打开（只查属性的探针）不请求任何访问位 ⇒ 两个方向都不参与冲突。
+//      ⛔ 仍**不实现真共享锁**，也**不建模** `FILE_SHARE_DELETE` 与 `DELETE` 访问位
+//      （`0x00010000`；本模拟器只有一个进程、没有别的进程能删/锁文件）—— 请求了 DELETE 会留日志。
 //   3. **`dwFlagsAndAttributes` 基本忽略**：`FILE_FLAG_BACKUP_SEMANTICS`（开目录）/
 //      `FILE_FLAG_DELETE_ON_CLOSE` / `FILE_ATTRIBUTE_TEMPORARY` / `FILE_FLAG_OVERLAPPED` 都不建模；
 //      请求了 `FILE_FLAG_BACKUP_SEMANTICS` 就留一行日志。**目录仍然打不开**（真机不带这个标志也打不开）。
@@ -37,11 +39,14 @@
 //      确实是大小写不敏感的）。每次调用留一行日志。
 //   7. **`CopyFileA` 用宿主 `copy_file`**：跨卷复制由宿主负责（Windows 的 `CopyFile` 也是）；
 //      文件属性 / 时间戳的复制不在本模拟器保证范围内。
-//   8. **`GetTempPathA` / `GetTempFileNameA` 落在 `game_dir` 根的 `.lift-tmp\`**（不随 guest cwd 漂）。
-//      `GetTempFileNameA` 的 `uUnique` 入参**被忽略**：从 0 起找第一个不存在的序号（确定性优先）；
-//      文件名 4 位大写十六进制（与 Windows 的形态一致）。
+//   8. **`GetTempPathA` / `GetTempFileNameA` 缺省落在 `game_dir` 根的 `.lift-tmp\`**（不随 guest cwd 漂）。
+//      `GetTempFileNameA` 的 `uUnique != 0` 按文档**用调用方的值**（只看低 16 位、`%04X` 大写）、
+//      **不创建文件**、返回 `uUnique` 本身；`uUnique == 0` 时**有意偏差**：从 0 起找第一个空号
+//      （真机从系统时间起，这里确定性优先）并创建那个空文件。前缀一律按字节截到 **3** 个字符，
+//      扩展名 `.TMP`（文档形态，大写）。
 //   9. **`FindFirstFileA` 的 `cAlternateFileName`（8.3 短名）恒为 0**（plan §9 R2 点名不做）。
-//      `WIN32_FIND_DATAA` 的 creation / access 时间 = write 时间（同一个近似值）。
+//      `WIN32_FIND_DATAA` / `GetFileTime` 的三个时间是**宿主真值**（vfs 的 `hostFileTimes` 走
+//      SDL3 `SDL_GetPathInfo`，含创建 / 访问时间）；只有 SDL 失败时才三值一起退回 mtime 近似。
 //  10. **`SetFileTime` 真写宿主时间戳**（Windows 走 `CreateFileW(FILE_WRITE_ATTRIBUTES)` +
 //      `::SetFileTime`，三个时间都能写；POSIX 走 `utimensat`，只有 access / write 能写，
 //      **creation time 不可移植** ⇒ 写不了就留一行日志（文档也明说"not all file systems can
@@ -119,7 +124,17 @@ constexpr std::uint32_t kInvalidSetFilePointer = 0xFFFFFFFFu;
 // 访问位 / disposition / seek method（Win32 常量）
 constexpr std::uint32_t kGenericRead = 0x80000000u;
 constexpr std::uint32_t kGenericWrite = 0x40000000u;
+constexpr std::uint32_t kGenericAll = 0x10000000u;
+constexpr std::uint32_t kFileReadData = 0x00000001u;
+constexpr std::uint32_t kFileWriteData = 0x00000002u;
 constexpr std::uint32_t kFileAppendData = 0x00000004u;
+constexpr std::uint32_t kFileDelete = 0x00010000u;  // DELETE：不建模（见文件头偏差 2）
+
+// 本族内部的"读 / 写"两位：数值**故意**与 FILE_SHARE_READ / FILE_SHARE_WRITE 对齐，
+// 这样共享冲突可以直接按位比（`access & ~share`），不需要再做一次映射。
+constexpr std::uint32_t kAccessRead = 0x00000001u;   // FILE_SHARE_READ
+constexpr std::uint32_t kAccessWrite = 0x00000002u;  // FILE_SHARE_WRITE
+constexpr std::uint32_t kAccessMask = kAccessRead | kAccessWrite;
 
 constexpr std::uint32_t kCreateNew = 1u;
 constexpr std::uint32_t kCreateAlways = 2u;
@@ -343,6 +358,10 @@ struct FileState {
     std::string host_path;
     std::string guest_path;
     std::uint32_t share_mode = 0;
+    // ★ 打开时 `dwDesiredAccess` 归一出来的读/写位（kAccessRead / kAccessWrite）。
+    //   `access = 0`（只查属性的探针）⇒ 0：既不授予读/写，也不参与共享冲突。
+    std::uint32_t access_mask = 0;
+    // 下面两位是 access_mask 的缓存（ReadFile / WriteFile 的唯一判据；创建后不再改）
     bool readable = false;
     bool writable = false;
 };
@@ -389,7 +408,7 @@ FindState* findOf(X86& cpu, std::uint32_t h, const char* api) {
 }
 
 // 当前大小（不改文件指针）
-bool sizeOfFile(FileState& st, std::uint64_t* size) {
+bool sizeOfFile(const FileState& st, std::uint64_t* size) {
     if (!st.fp) return false;
     const std::int64_t cur = tellFile64(st.fp);
     if (cur < 0) return false;
@@ -413,9 +432,13 @@ bool resolveGuest(X86& cpu, const std::string& guest_path, std::string* host, st
     return cpu.vfs->resolve(guest_path, host, why, must_exist, resolve_case);
 }
 
-// ① share==0（独占）时，同一宿主路径已被本族别的句柄打开 ⇒ 共享冲突。
-//   ⛔ 只做这一半（没有别的进程、也没有真文件锁；见文件头偏差 2）。
-bool shareViolation(X86& cpu, const std::string& host, std::uint32_t skip_handle) {
+// 共享冲突判定（Windows 文档：**两个方向**都要看，且**只由访问位定义**）：
+//   ① 新请求的 access 位里有哪一位是**已有句柄**的 share_mode 不允许的；
+//   ② 已有句柄的 access 位里有哪一位是**新请求的** share_mode 不允许的。
+// `access = 0` 的打开不请求任何访问位 ⇒ 两个方向都不产生冲突（真机里"只查属性"的探针可以并开）。
+// ⚠ 只比**本族句柄表**里同宿主路径的活句柄：没有别的进程、也没有真文件锁；DELETE 位不建模。
+bool shareViolation(X86& cpu, const std::string& host, std::uint32_t new_access,
+                    std::uint32_t new_share, std::uint32_t skip_handle) {
     // 句柄值 = kFirst + kStep*下标 ⇒ 上界由 entries 数量给出（**已关闭**的槽也会被 get 成 nullptr，
     // 所以不能"碰到 nullptr 就 break"）。
     const std::uint32_t end =
@@ -426,7 +449,11 @@ bool shareViolation(X86& cpu, const std::string& host, std::uint32_t skip_handle
         if (!e || !e->used) continue;
         if (e->kind != HandleKind::File || !e->payload) continue;
         const auto* other = static_cast<const FileState*>(e->payload);
-        if (other->host_path == host) return true;
+        if (other->host_path != host) continue;
+        // ① 新 access × 已有 share
+        if ((new_access & ~other->share_mode & kAccessMask) != 0) return true;
+        // ② 已有 access × 新 share
+        if ((other->access_mask & ~new_share & kAccessMask) != 0) return true;
     }
     return false;
 }
@@ -469,9 +496,20 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
                 flags);
     }
 
+    // dwDesiredAccess 的完整解码：GENERIC_* 与具体的 FILE_*_DATA 位都要认。
+    // ★ 文档："read, write, both or 0 to indicate neither" ⇒ `access = 0` 的句柄**什么都不授予**
+    //   （只允许查询元数据），⛔ 不许再"按可读处理"。
     const bool want_append = (access & kFileAppendData) != 0;
-    const bool want_write = ((access & kGenericWrite) != 0) || want_append;
-    const bool want_read = (access & kGenericRead) != 0;
+    const bool want_read = (access & (kGenericRead | kGenericAll | kFileReadData)) != 0;
+    const bool want_write =
+        (access & (kGenericWrite | kGenericAll | kFileWriteData | kFileAppendData)) != 0;
+    const std::uint32_t access_mask =
+        (want_read ? kAccessRead : 0u) | (want_write ? kAccessWrite : 0u);
+    if ((access & kFileDelete) != 0) {
+        // 偏差 2：DELETE 访问位不建模（没有别的进程能删文件）
+        shimLog("kernel32", api, "dwDesiredAccess=0x%08X 含 DELETE(0x%08X)：不建模（见文件头偏差 2）",
+                access, kFileDelete);
+    }
     const bool must_exist = (disposition == kOpenExisting || disposition == kTruncateExisting);
 
     std::string host;
@@ -529,21 +567,38 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
             break;
     }
 
-    if (share == 0 && shareViolation(cpu, host, 0)) {
-        pathFailure(cpu, api, kErrSharingViolation, guest, "dwShareMode=0 而同一路径已被本进程打开");
+    // 文档：`TRUNCATE_EXISTING` 要求 `dwDesiredAccess` 含 `GENERIC_WRITE`；`CREATE_ALWAYS` 命中
+    // **已存在**的文件也是"截断"，同样要求写权 ⇒ 只读意图不许把文件清空。
+    // ⚠ `<待核>`：`access = 0` × {CREATE_ALWAYS 且文件不存在, CREATE_NEW, OPEN_ALWAYS} 的真机行为
+    //   没有采样 ⇒ 这里只在"**真的会截断已有数据**"时拒绝（新建/不存在的分支不拦），
+    //   夹具也只钉"宿主内容不变"，不把这个返回码当成真机语义。
+    const bool truncates_existing = truncate && exists;
+    if (truncates_existing && !want_write) {
+        pathFailure(cpu, api, kErrAccessDenied, guest,
+                    "要截断已有文件但 dwDesiredAccess 没有写权（需要 GENERIC_WRITE）");
         call.result = kInvalidHandleValue;
         return;
     }
 
+    // 共享冲突：**双向**判定，且 `access = 0` 不参与（见 shareViolation 的说明与偏差 2）
+    if (shareViolation(cpu, host, access_mask, share, 0)) {
+        pathFailure(cpu, api, kErrSharingViolation, guest,
+                    "新请求的访问位/共享位与同一路径上已打开句柄的共享模式冲突（双向判定）");
+        call.result = kInvalidHandleValue;
+        return;
+    }
+
+    // ★ 宿主 `FILE*` **一律用可读模式**打开：`GetFileSize` / `GetFileTime` / `SetFilePointer(Ex)`
+    //   都要靠它 seek/tell；guest 可见的读/写权限由 `access_mask` 卡（见 readFile / writeFile）。
     const char* mode = nullptr;
     if (want_append) {
-        mode = want_read ? "a+b" : "ab";
+        mode = "a+b";
     } else if (truncate) {
-        mode = want_read ? "w+b" : "wb";
+        mode = "w+b";
     } else if (want_write) {
         mode = "r+b";
     } else {
-        mode = "rb";  // 连 GENERIC_READ 都没要：只查询属性，按只读打开
+        mode = "rb";  // 只查属性（access=0）或只读：宿主侧可读即可
     }
     std::FILE* fp = openHostFile(host, mode);
     if (!fp) {
@@ -559,7 +614,8 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     st->host_path = host;
     st->guest_path = guestFormOf(cpu, host, guest);
     st->share_mode = share;
-    st->readable = want_read || (!want_write);  // 只查属性的句柄按可读处理
+    st->access_mask = access_mask;
+    st->readable = want_read;  // ⛔ 不再有 "|| (!want_write)"：access=0 不授予读
     st->writable = want_write;
 
     const std::uint32_t h = cpu.handles->add(HandleKind::File, st->guest_path.c_str(), st);
@@ -610,8 +666,9 @@ void readFile(X86& cpu, ShimCall& call) {
     }
     if (!st->readable) {
         cpu.shim.last_error = kErrAccessDenied;
-        shimLog("kernel32", api, "句柄 0x%08X 没有读权限（打开时没给 GENERIC_READ）⇒ 失败",
-                call.u32(0));
+        shimLog("kernel32", api,
+                "句柄 0x%08X 的访问位 0x%08X 不含读位（access=0 的只查属性句柄也不许读）⇒ 失败",
+                call.u32(0), st->access_mask);
         call.result = 0;
         return;
     }
@@ -664,8 +721,9 @@ void writeFile(X86& cpu, ShimCall& call) {
     }
     if (!st->writable) {
         cpu.shim.last_error = kErrAccessDenied;
-        shimLog("kernel32", api, "句柄 0x%08X 没有写权限（打开时没给 GENERIC_WRITE）⇒ 失败",
-                call.u32(0));
+        shimLog("kernel32", api,
+                "句柄 0x%08X 的访问位 0x%08X 不含写位（access=0 的只查属性句柄也不许写）⇒ 失败",
+                call.u32(0), st->access_mask);
         call.result = 0;
         return;
     }
@@ -718,13 +776,65 @@ void shimFlushFileBuffers(X86& cpu, ShimCall& call) {
 // ---------------------------------------------------------------------------------------
 // SetFilePointer / SetFilePointerEx / GetFileSize
 // ---------------------------------------------------------------------------------------
-bool seekMethodToWhence(std::uint32_t method, int* whence) {
-    switch (method) {
-        case kFileBegin: *whence = SEEK_SET; return true;
-        case kFileCurrent: *whence = SEEK_CUR; return true;
-        case kFileEnd: *whence = SEEK_END; return true;
-        default: return false;
+// 自己算"基准 + distance"（⛔ 不靠宿主 `fseeko` 的 `errno == EINVAL` 判定负位置：
+// POSIX 的 EINVAL 只在部分实现上覆盖"结果为负"，Windows 的 `_fseeki64` 没有承诺）。
+//   返回 false ⇒ `why` 是给日志的理由，失败码由 `error` 带回（131 = 负位置，87 = 其它）。
+// ★ 失败时**不调用宿主 seek** ⇒ 文件指针一定不动（与 `SetFilePointer` 文档的"not moved"一致）。
+bool seekTarget(const FileState& st, std::int64_t distance, std::uint32_t method,
+                std::int64_t* target, std::uint32_t* error, const char** why) {
+    std::int64_t base = 0;
+    if (method == kFileBegin) {
+        base = 0;  // 文档把 liDistanceToMove 当 unsigned；本实现按二补码还原（与真机实现一致）
+    } else if (method == kFileCurrent) {
+        base = tellFile64(st.fp);
+        if (base < 0) {
+            *error = kErrInvalidParameter;
+            *why = "宿主 tell 失败";
+            return false;
+        }
+    } else if (method == kFileEnd) {
+        std::uint64_t size = 0;
+        if (!sizeOfFile(st, &size)) {
+            *error = kErrInvalidParameter;
+            *why = "宿主取文件大小失败（FILE_END 的基准拿不到）";
+            return false;
+        }
+        base = static_cast<std::int64_t>(size);
+    } else {
+        *error = kErrInvalidParameter;
+        *why = "dwMoveMethod 非法";
+        return false;
     }
+    // 溢出守卫：正负两个方向都先判，避免 `base + distance` 有符号溢出（UB）
+    if (distance > 0 && base > INT64_MAX - distance) {
+        *error = kErrInvalidParameter;
+        *why = "目标位置溢出 64 位";
+        return false;
+    }
+    if (distance < 0 && base < INT64_MIN - distance) {
+        *error = kErrInvalidParameter;
+        *why = "目标位置溢出 64 位";
+        return false;
+    }
+    const std::int64_t want = base + distance;
+    if (want < 0) {
+        // 文档（SetFilePointer）："If a new file pointer is a negative value, the function fails,
+        // the file pointer is not moved" ⇒ ERROR_NEGATIVE_SEEK(131)
+        *error = kErrNegativeSeek;
+        *why = "目标位置为负";
+        return false;
+    }
+    *target = want;
+    return true;
+}
+
+// 文档（SetFilePointer / SetFilePointerEx）：hFile 必须是带 `GENERIC_READ` 或 `GENERIC_WRITE` 的句柄。
+// `access = 0` 的"只查属性"句柄不授予任何访问位 ⇒ 不许定位（FALSE + ERROR_ACCESS_DENIED(5)）。
+bool seekAccessDenied(X86& cpu, const FileState* st, std::uint32_t h, const char* api) {
+    if (st->access_mask != 0) return false;
+    cpu.shim.last_error = kErrAccessDenied;
+    shimLog("kernel32", api, "句柄 0x%08X 的访问位为 0（只查属性）⇒ 不许定位（错误 5）", h);
+    return true;
 }
 
 void shimSetFilePointer(X86& cpu, ShimCall& call) {
@@ -735,11 +845,14 @@ void shimSetFilePointer(X86& cpu, ShimCall& call) {
         call.result = kInvalidSetFilePointer;
         return;
     }
+    if (seekAccessDenied(cpu, st, call.u32(0), api)) {
+        call.result = kInvalidSetFilePointer;
+        return;
+    }
     const std::uint32_t lo = call.u32(1);
     const std::uint32_t hi_ea = call.u32(2);
     const std::uint32_t method = call.u32(3);
-    int whence = SEEK_SET;
-    if (!seekMethodToWhence(method, &whence)) {
+    if (method > kFileEnd) {
         cpu.shim.last_error = kErrInvalidParameter;
         shimLog("kernel32", api, "dwMoveMethod=%u 非法（只支持 0/1/2）⇒ 返回 0xFFFFFFFF", method);
         call.result = kInvalidSetFilePointer;
@@ -755,19 +868,24 @@ void shimSetFilePointer(X86& cpu, ShimCall& call) {
         distance = static_cast<std::int64_t>((static_cast<std::uint64_t>(hi) << 32) |
                                             static_cast<std::uint64_t>(lo));
     }
-    errno = 0;
-    if (seekFile64(st->fp, distance, whence) != 0) {
-        const int e = errno;
-        cpu.shim.last_error = (e == EINVAL) ? kErrNegativeSeek : kErrInvalidParameter;
-        shimLog("kernel32", api, "宿主定位失败（偏移 %lld，method=%u，errno=%d）⇒ 返回 0xFFFFFFFF",
-                static_cast<long long>(distance), method, e);
+    std::int64_t pos = 0;
+    std::uint32_t err = kErrInvalidParameter;
+    const char* why = "";
+    if (!seekTarget(*st, distance, method, &pos, &err, &why)) {
+        cpu.shim.last_error = err;
+        shimLog("kernel32", api, "偏移 %lld（method=%u）不可用：%s ⇒ 返回 0xFFFFFFFF（指针不动）",
+                static_cast<long long>(distance), method, why);
         call.result = kInvalidSetFilePointer;
         return;
     }
-    const std::int64_t pos = tellFile64(st->fp);
-    if (pos < 0) {
-        cpu.shim.last_error = kErrInvalidParameter;
-        shimLog("kernel32", api, "宿主 tell 失败 ⇒ 返回 0xFFFFFFFF");
+    // 目标位置已由自己算好且非负：宿主 seek 只负责落位（失败仍按 errno 兜底，见下）
+    errno = 0;
+    if (seekFile64(st->fp, pos, SEEK_SET) != 0) {
+        const int e = errno;
+        cpu.shim.last_error = (e == EINVAL) ? kErrNegativeSeek : kErrInvalidParameter;
+        shimLog("kernel32", api,
+                "宿主定位失败（目标 %lld，method=%u，errno=%d）⇒ 返回 0xFFFFFFFF（宿主兜底判定）",
+                static_cast<long long>(pos), method, e);
         call.result = kInvalidSetFilePointer;
         return;
     }
@@ -779,6 +897,8 @@ void shimSetFilePointer(X86& cpu, ShimCall& call) {
 
 // ★ argc = 5（偏差 1）：x86 stdcall 下 LARGE_INTEGER 占两个栈槽，真机是 `SetFilePointerEx@20`。
 //   栈布局：[0] hFile [1] li.lo [2] li.hi [3] lpNewFilePointer [4] dwMoveMethod
+// ★ 文档要求 hFile 带 `GENERIC_READ` 或 `GENERIC_WRITE`：`access = 0` 的只查属性句柄 ⇒
+//   FALSE + ERROR_ACCESS_DENIED(5)（与 `SetFilePointer` 共用 `seekAccessDenied`）。
 void shimSetFilePointerEx(X86& cpu, ShimCall& call) {
     const char* api = "SetFilePointerEx";
     requireHandles(cpu, api);
@@ -787,12 +907,15 @@ void shimSetFilePointerEx(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    if (seekAccessDenied(cpu, st, call.u32(0), api)) {
+        call.result = 0;
+        return;
+    }
     const std::uint32_t lo = call.u32(1);
     const std::uint32_t hi = call.u32(2);
     const std::uint32_t new_ptr = call.u32(3);
     const std::uint32_t method = call.u32(4);
-    int whence = SEEK_SET;
-    if (!seekMethodToWhence(method, &whence)) {
+    if (method > kFileEnd) {
         cpu.shim.last_error = kErrInvalidParameter;
         shimLog("kernel32", api, "dwMoveMethod=%u 非法（只支持 0/1/2）⇒ 返回 FALSE", method);
         call.result = 0;
@@ -801,19 +924,23 @@ void shimSetFilePointerEx(X86& cpu, ShimCall& call) {
     if (new_ptr != 0) requireCommitted(cpu, new_ptr, 8, api, "lpNewFilePointer");
     const auto distance = static_cast<std::int64_t>((static_cast<std::uint64_t>(hi) << 32) |
                                                      static_cast<std::uint64_t>(lo));
-    errno = 0;
-    if (seekFile64(st->fp, distance, whence) != 0) {
-        const int e = errno;
-        cpu.shim.last_error = (e == EINVAL) ? kErrNegativeSeek : kErrInvalidParameter;
-        shimLog("kernel32", api, "宿主定位失败（偏移 %lld，method=%u，errno=%d）⇒ 返回 FALSE",
-                static_cast<long long>(distance), method, e);
+    std::int64_t pos = 0;
+    std::uint32_t err = kErrInvalidParameter;
+    const char* why = "";
+    if (!seekTarget(*st, distance, method, &pos, &err, &why)) {
+        cpu.shim.last_error = err;
+        shimLog("kernel32", api, "偏移 %lld（method=%u）不可用：%s ⇒ 返回 FALSE（指针不动）",
+                static_cast<long long>(distance), method, why);
         call.result = 0;
         return;
     }
-    const std::int64_t pos = tellFile64(st->fp);
-    if (pos < 0) {
-        cpu.shim.last_error = kErrInvalidParameter;
-        shimLog("kernel32", api, "宿主 tell 失败 ⇒ 返回 FALSE");
+    errno = 0;
+    if (seekFile64(st->fp, pos, SEEK_SET) != 0) {
+        const int e = errno;
+        cpu.shim.last_error = (e == EINVAL) ? kErrNegativeSeek : kErrInvalidParameter;
+        shimLog("kernel32", api,
+                "宿主定位失败（目标 %lld，method=%u，errno=%d）⇒ 返回 FALSE（宿主兜底判定）",
+                static_cast<long long>(pos), method, e);
         call.result = 0;
         return;
     }
@@ -1207,9 +1334,16 @@ void shimGetTempPathA(X86& cpu, ShimCall& call) {
     }
     const std::uint32_t need = static_cast<std::uint32_t>(bytes.size()) + 1u;
     if (buf == 0) {
+        // 两个参数分开看：`nBufferLength == 0` 是文档认可的"问大小"形态（返回值 > nBufferLength ⇒
+        // 所需长度），`nBufferLength != 0` 而 `lpBuffer == NULL` 在真机上是写空指针（AV）；
+        // 本模拟器按宿主安全口径改成 0 + ERROR_INVALID_PARAMETER（与 GetFullPathNameA 一致）。
+        if (cap == 0) {
+            call.result = need;
+            return;
+        }
         cpu.shim.last_error = kErrInvalidParameter;
-        shimLog("kernel32", api, "lpBuffer 为 NULL ⇒ 返回所需长度 %u", need);
-        call.result = need;  // 真机在 lpBuffer==NULL 时是崩；这里按"给所需长度"的形态响亮一点
+        shimLog("kernel32", api, "lpBuffer 为 NULL 但 nBufferLength=%u ≠ 0 ⇒ 返回 0 + 错误 87", cap);
+        call.result = 0;
         return;
     }
     if (cap < need) {
@@ -1228,8 +1362,10 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
     requireVfs(cpu, api);
     const std::uint32_t dir_ea = call.u32(0);
     const std::string prefix = pathFromCp932(call.str(1), api);
+    // ★ uUnique 是**入参语义**（不是"忽略"）：非 0 ⇒ 用调用方的值、不创建、返回原值。
+    //   uUnique == 0 才有"从空号里找一个"的行为（起点 0 是本模拟器的**有意偏差**，见文件头偏差 8）。
+    const std::uint32_t u_unique = call.u32(2);
     const std::uint32_t out_ea = call.u32(3);
-    // arg2 = uUnique：偏差 8 ⇒ 忽略（从 0 起找第一个不存在的序号，确定性优先）
     requireCommitted(cpu, out_ea, kFdFileNameChars, api, "lpTempFileName");
 
     // lpPathName 能用就用（通常是 GetTempPathA 的返回值）；不能就退回 .lift-tmp
@@ -1264,23 +1400,11 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
     }
     if (guest_dir.empty() && !cpu.vfs->toGuest(host_dir, &guest_dir)) guest_dir = cpu.vfs->guestRoot();
 
-    const std::string safe_prefix = prefix.empty() ? std::string("tmp") : prefix;
-    for (std::uint32_t i = 0; i <= 0xFFFFu; ++i) {
-        char num[8] = {};
-        std::snprintf(num, sizeof(num), "%04X", static_cast<unsigned>(i));
-        const std::string name = safe_prefix + num + ".tmp";
-        const fs::path hp = pathFromUtf8(host_dir) / pathFromUtf8(name);
-        std::error_code ec;
-        if (fs::exists(hp, ec) && !ec) continue;
-        // 真机 GetTempFileName 会**创建**这个空文件
-        std::FILE* fp = openHostFile(pathToUtf8(hp), "wb");
-        if (!fp) {
-            cpu.shim.last_error = errnoToWin32(errno);
-            shimLog("kernel32", api, "创建 \"%s\" 失败（errno=%d）⇒ 返回 0", name.c_str(), errno);
-            call.result = 0;
-            return;
-        }
-        std::fclose(fp);
+    // 文档：`<pre>` 只取 lpPrefixString 的**前 3 个字符**；空前缀给 "tmp"
+    const std::string safe_prefix = (prefix.empty() ? std::string("tmp") : prefix).substr(0, 3);
+
+    // 把 `<guest_dir>\<name>` 写进 lpTempFileName（CP932，超过 MAX_PATH 留日志）
+    const auto writeTempName = [&](const std::string& name) {
         const std::string guest_path = guest_dir + (guest_dir.empty() ? "" : "\\") + name;
         std::size_t bad = 0;
         const std::string bytes = cp932FromUtf8(guest_path, &bad);
@@ -1293,6 +1417,40 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
                     static_cast<unsigned>(bytes.size()));
         }
         writeAnsiBuffer(cpu, out_ea, kFdFileNameChars, bytes, api, "lpTempFileName");
+    };
+
+    if (u_unique != 0) {
+        // 文档：uUnique != 0 ⇒ **只生成名字、不创建文件**（"GetTempFileName is not able to
+        // guarantee that the file name is unique"），返回 uUnique 本身；只有低 16 位进名字。
+        char num[8] = {};
+        std::snprintf(num, sizeof(num), "%04X", static_cast<unsigned>(u_unique & 0xFFFFu));
+        const std::string name = safe_prefix + num + ".TMP";
+        writeTempName(name);
+        shimLog("kernel32", api,
+                "uUnique=0x%08X != 0 ⇒ 名字 \"%s\"（不创建文件）、返回原值（低 16 位进名字）",
+                u_unique, name.c_str());
+        call.result = u_unique;
+        return;
+    }
+
+    // uUnique == 0：从 0 起找第一个空号（**有意偏差**：真机从系统时间起），并创建那个空文件
+    for (std::uint32_t i = 0; i <= 0xFFFFu; ++i) {
+        char num[8] = {};
+        std::snprintf(num, sizeof(num), "%04X", static_cast<unsigned>(i));
+        const std::string name = safe_prefix + num + ".TMP";
+        const fs::path hp = pathFromUtf8(host_dir) / pathFromUtf8(name);
+        std::error_code ec;
+        if (fs::exists(hp, ec) && !ec) continue;
+        // 真机 GetTempFileName 在 uUnique==0 时**创建**这个空文件
+        std::FILE* fp = openHostFile(pathToUtf8(hp), "wb");
+        if (!fp) {
+            cpu.shim.last_error = errnoToWin32(errno);
+            shimLog("kernel32", api, "创建 \"%s\" 失败（errno=%d）⇒ 返回 0", name.c_str(), errno);
+            call.result = 0;
+            return;
+        }
+        std::fclose(fp);
+        writeTempName(name);
         call.result = i;
         return;
     }
@@ -1480,22 +1638,30 @@ void shimGetFileTime(X86& cpu, ShimCall& call) {
     if (access_ea != 0) requireCommitted(cpu, access_ea, 8, api, "lpLastAccessTime");
     if (write_ea != 0) requireCommitted(cpu, write_ea, 8, api, "lpLastWriteTime");
 
-    std::error_code ec;
-    const auto wt = fs::last_write_time(pathFromUtf8(st->host_path), ec);
-    if (ec) {
-        pathFailure(cpu, api, kErrFileNotFound, st->guest_path,
-                    "[io] 宿主取 mtime 失败：" + ec.message());
-        call.result = 0;
-        return;
+    // 三个时间取宿主真值（SDL_GetPathInfo；见 vfs 的 hostFileTimes）。SDL 失败才退回 mtime 近似
+    // （三值相同）——那是**退路**，不是默认口径。
+    HostFileTimes times;
+    if (!hostFileTimes(st->host_path, &times)) {
+        std::error_code ec;
+        const auto wt = fs::last_write_time(pathFromUtf8(st->host_path), ec);
+        if (ec) {
+            pathFailure(cpu, api, kErrFileNotFound, st->guest_path,
+                        "[io] 宿主取文件时间失败：" + ec.message());
+            call.result = 0;
+            return;
+        }
+        const auto t = static_cast<std::uint64_t>(fileTime100ns(wt));
+        times.create_100ns = t;
+        times.access_100ns = t;
+        times.write_100ns = t;
+        shimLog("kernel32", api, "SDL_GetPathInfo 失败 ⇒ creation/access/write 退回宿主 mtime 近似");
     }
-    const std::uint64_t t = static_cast<std::uint64_t>(fileTime100ns(wt));
-    shimLog("kernel32", api,
-            "时间戳是近似：creation = access = write = 宿主 mtime（本模拟器不追踪创建/访问时间）");
+    const std::uint64_t values[3] = {times.create_100ns, times.access_100ns, times.write_100ns};
     const std::uint32_t slots[3] = {creation_ea, access_ea, write_ea};
-    for (const std::uint32_t ea : slots) {
-        if (ea == 0) continue;  // 三个出参都可为 NULL（真机允许）
-        cpu.mem->wr32(ea, static_cast<std::uint32_t>(t & 0xFFFFFFFFull));
-        cpu.mem->wr32(ea + 4u, static_cast<std::uint32_t>(t >> 32));
+    for (int i = 0; i < 3; ++i) {
+        if (slots[i] == 0) continue;  // 三个出参都可为 NULL（真机允许）
+        cpu.mem->wr32(slots[i], static_cast<std::uint32_t>(values[i] & 0xFFFFFFFFull));
+        cpu.mem->wr32(slots[i] + 4u, static_cast<std::uint32_t>(values[i] >> 32));
     }
     call.result = 1;
 }
@@ -1640,11 +1806,12 @@ void fillFindData(X86& cpu, std::uint32_t ea, const HostDirEntry& e, const char*
     requireCommitted(cpu, ea, kFindDataSize, api, "lpFindFileData");
     cpu.mem->fillBytes(ea, 0, kFindDataSize);
     cpu.mem->wr32(ea + kFdAttributes, e.attributes);
-    const std::uint64_t t = static_cast<std::uint64_t>(e.write_time_100ns);
-    // 偏差 9：creation / access 都用 write 的近似值（本模拟器不追踪它们）
-    for (const std::uint32_t off : {kFdCreationTime, kFdLastAccessTime, kFdLastWriteTime}) {
-        cpu.mem->wr32(ea + off, static_cast<std::uint32_t>(t & 0xFFFFFFFFull));
-        cpu.mem->wr32(ea + off + 4u, static_cast<std::uint32_t>(t >> 32));
+    // 三个时间各写各的（宿主真值；见 vfs 的 hostFileTimes）
+    const std::uint64_t times[3] = {e.create_time_100ns, e.access_time_100ns, e.write_time_100ns};
+    const std::uint32_t offs[3] = {kFdCreationTime, kFdLastAccessTime, kFdLastWriteTime};
+    for (int i = 0; i < 3; ++i) {
+        cpu.mem->wr32(ea + offs[i], static_cast<std::uint32_t>(times[i] & 0xFFFFFFFFull));
+        cpu.mem->wr32(ea + offs[i] + 4u, static_cast<std::uint32_t>(times[i] >> 32));
     }
     cpu.mem->wr32(ea + kFdSizeHigh, static_cast<std::uint32_t>(e.size >> 32));
     cpu.mem->wr32(ea + kFdSizeLow, static_cast<std::uint32_t>(e.size & 0xFFFFFFFFull));

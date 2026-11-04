@@ -4,6 +4,8 @@
 //   POSIX 用 mmap(PROT_NONE) / mprotect + sigaction(SIGSEGV)。
 // ★ 未提交页被碰 ⇒ **平台 fault** → 打印诊断 → `_Exit(3)`。
 //   ⛔ 绝不"返回 0 当作读到 0"：那会让越界读变成静默数据损坏（骨架里的 16 MiB 缓冲就是这样）。
+// ★ 宿主自己的 AV（异常地址**不在** guest 空间）不是 guest fault：走 hostFault 的独立诊断 + `_Exit(4)`
+//   （归因判据 inGuestSpace；见下方"归因"一节）。
 #include "runtime/memory.h"
 
 #include <atomic>
@@ -29,6 +31,21 @@ FaultHook g_hook = nullptr;
 GuestMemory* g_memory = nullptr;  // 当前活动实例（guest 是单线程的，见 README §2.5）
 
 std::uint64_t g_fault_count = 0;
+
+// ★ 宿主页大小（guest 页恒为 4 KiB，见 memory.h 的 kPage）。Windows 上提交粒度就是 4 KiB；
+//   Apple Silicon macOS 的宿主页是 **16 KiB** ⇒ `mprotect` 只接受宿主页对齐的起始地址（否则 EINVAL），
+//   所以提交/退回都要按宿主页对齐（见 platformCommit / GuestMemory::decommit）。
+std::uint32_t hostPageSize() {
+#if defined(_WIN32)
+    return 0x1000u;
+#else
+    static const std::uint32_t size = [] {
+        const long n = ::sysconf(_SC_PAGESIZE);
+        return n > 0 ? static_cast<std::uint32_t>(n) : 0x1000u;
+    }();
+    return size;
+#endif
+}
 }  // namespace
 
 void setGuestFaultHook(FaultHook hook) { g_hook = hook; }
@@ -76,6 +93,45 @@ void dumpRegions(const std::vector<Region>& regions, std::FILE* out) {
 }
 
 // ---------------------------------------------------------------------------------------
+// 归因：异常地址在不在 guest 空间（纯函数；两个平台的 handler 都只走这一条判据）
+// ---------------------------------------------------------------------------------------
+bool inGuestSpace(const void* guest_base, std::uintptr_t fault_addr) {
+    if (!guest_base) return false;  // 没有预留的 guest 空间 ⇒ 没有可归因给 guest 的地址
+    const std::uint64_t base = reinterpret_cast<std::uintptr_t>(guest_base);
+    const std::uint64_t addr = fault_addr;
+    // 用减法判区间：base + kSpace 在 32 位宿主上会溢出，减法不会。
+    return addr >= base && (addr - base) < GuestMemory::kSpace;
+}
+
+// ---------------------------------------------------------------------------------------
+// 宿主 fault：**不是** guest 访存引起的（异常地址不在 guest 空间）⇒ 换一份诊断 + 不同的退出码。
+// ★ 判据见 inGuestSpace；这里刻意**不打** `access     :` 行（那是 guest fault 的行，打了就会把
+//   排查方向带回上一条无关的 guest 指令）；最近一次 guest 访存只作附注，并显式标注可能无关。
+// ---------------------------------------------------------------------------------------
+[[noreturn]] void hostFault(std::uintptr_t fault_addr, const char* why) {
+    std::fprintf(stderr, "\n=== host fault（宿主自身的异常，不是 guest 访存）===\n");
+    std::fprintf(stderr, "  why        : %s\n", why ? why : "(unspecified)");
+    std::fprintf(stderr, "  host addr  : 0x%llX\n", static_cast<unsigned long long>(fault_addr));
+    if (g_memory && g_memory->reserved()) {
+        const std::uint64_t base = reinterpret_cast<std::uintptr_t>(g_memory->host(0));
+        std::fprintf(stderr, "  guest range: 0x%llX-0x%llX（本次异常地址**不在**其中）\n",
+                     static_cast<unsigned long long>(base),
+                     static_cast<unsigned long long>(base + GuestMemory::kSpace));
+    } else {
+        std::fprintf(stderr, "  guest range: (guest 空间未预留)\n");
+    }
+    if (g_access.size != 0) {
+        std::fprintf(stderr,
+                     "  last guest : %s 0x%08X  size=%u  ← **最近一次** guest 访存，与本次 fault 可能无关\n",
+                     g_access.write ? "WRITE" : "READ", g_access.ea, static_cast<unsigned>(g_access.size));
+    }
+    std::fflush(nullptr);
+    // ★ 4 而不是 3：`3` 是 guest fault 的判据（有测试与人工排查都靠它区分）；也不 return 给平台
+    //   （POSIX 上返回会回到同一条 fault 指令 ⇒ 无限重入）。
+    std::_Exit(4);
+}
+
+// ---------------------------------------------------------------------------------------
 // 平台 handler
 // ---------------------------------------------------------------------------------------
 #if defined(_WIN32)
@@ -91,18 +147,20 @@ LONG CALLBACK vectoredHandler(EXCEPTION_POINTERS* info) {
     const std::uintptr_t fault_addr =
         (info->ExceptionRecord->NumberParameters >= 2) ? static_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionInformation[1])
                                                       : 0;
-    // 只有"落在 guest 空间里"的才当 guest fault 处理；否则交回系统（那是宿主自己的 bug）
-    bool in_guest = false;
-    if (g_memory && g_memory->reserved()) {
-        const auto base = reinterpret_cast<std::uintptr_t>(g_memory->host(0));
-        in_guest = fault_addr >= base && fault_addr < base + GuestMemory::kSpace;
+    // ★ 归因看**异常地址**（每平台同一条判据 inGuestSpace），不看 `g_access`（宿主 AV 时那是陈旧值）。
+    const void* guest_base = (g_memory && g_memory->reserved()) ? static_cast<const void*>(g_memory->host(0)) : nullptr;
+    char why[200];
+    if (inGuestSpace(guest_base, fault_addr)) {
+        std::snprintf(why, sizeof(why), "平台异常 0x%08lX @ host 0x%llX（guest 空间内未提交页）",
+                      static_cast<unsigned long>(code), static_cast<unsigned long long>(fault_addr));
+        guestFault(g_access, why);
     }
-    if (!in_guest && g_access.size == 0) return EXCEPTION_CONTINUE_SEARCH;
-    char why[160];
-    std::snprintf(why, sizeof(why), "平台异常 0x%08lX @ host 0x%llX（%s 未提交页）",
-                  static_cast<unsigned long>(code), static_cast<unsigned long long>(fault_addr),
-                  in_guest ? "guest 空间内" : "guest 空间外");
-    guestFault(g_access, why);
+    // 不在 guest 空间 ⇒ 宿主自己的 bug：走 host 诊断并 `_Exit(4)`。
+    // ⛔ 不 return EXCEPTION_CONTINUE_SEARCH：那等于把 AV 再抛回系统（与本 handler 的语义不一致），
+    //   也⛔ 不套用 `g_access`（会把排查方向带到上一条无关的 guest 指令）。
+    std::snprintf(why, sizeof(why), "平台异常 0x%08lX @ host 0x%llX（不在 guest 空间）",
+                  static_cast<unsigned long>(code), static_cast<unsigned long long>(fault_addr));
+    hostFault(fault_addr, why);
 }
 }  // namespace
 
@@ -131,9 +189,20 @@ void platformRelease(void* base) { ::VirtualFree(base, 0, MEM_RELEASE); }
 namespace {
 void segvHandler(int sig, siginfo_t* info, void*) {
     (void)sig;
-    char why[160];
-    std::snprintf(why, sizeof(why), "SIGSEGV @ host %p", info ? info->si_addr : nullptr);
-    guestFault(g_access, why);
+    const std::uintptr_t fault_addr = info ? reinterpret_cast<std::uintptr_t>(info->si_addr) : 0;
+    // ★ 归因看**异常地址**（与 Windows 同一条判据 inGuestSpace），不看 `g_access`（宿主 AV 时那是陈旧值）。
+    const void* guest_base = (g_memory && g_memory->reserved()) ? static_cast<const void*>(g_memory->host(0)) : nullptr;
+    char why[200];
+    if (inGuestSpace(guest_base, fault_addr)) {
+        std::snprintf(why, sizeof(why), "SIGSEGV @ host %p（guest 空间内未提交页）",
+                      reinterpret_cast<const void*>(fault_addr));
+        guestFault(g_access, why);
+    }
+    // 不在 guest 空间 ⇒ 宿主自己的 bug：走 host 诊断并 `_Exit(4)`。
+    // ⛔ 不 return（返回会回到同一条 fault 指令 ⇒ 无限重入）。
+    std::snprintf(why, sizeof(why), "SIGSEGV @ host %p（不在 guest 空间）",
+                  reinterpret_cast<const void*>(fault_addr));
+    hostFault(fault_addr, why);
 }
 }  // namespace
 
@@ -157,10 +226,17 @@ void* platformReserve(std::size_t size) {
     return ::mmap(nullptr, size, PROT_NONE, flags, -1, 0);
 }
 bool platformCommit(void* base, std::size_t off, std::size_t size) {
-    auto* p = static_cast<std::uint8_t*>(base) + off;
-    return ::mprotect(p, size, PROT_READ | PROT_WRITE) == 0;
+    // ★ 范围扩到**宿主页**：16 KiB 宿主上，4 KiB 的 guest 页只能整页提交 ⇒ 同宿主页里的邻页会一起变得可读写
+    //   （提交位图仍是 4 KiB 粒度，safe 模式照旧逐页判定；非 safe 模式的保护粒度 = 宿主页）。
+    const std::size_t hp = hostPageSize();
+    const std::size_t begin = off / hp * hp;
+    const std::size_t end = (off + size + hp - 1) / hp * hp;
+    auto* p = static_cast<std::uint8_t*>(base) + begin;
+    return ::mprotect(p, end - begin, PROT_READ | PROT_WRITE) == 0;
 }
 bool platformDecommit(void* base, std::size_t off, std::size_t size) {
+    // ★ off / size 由调用方保证已按宿主页对齐（GuestMemory::decommit 只退"被请求范围完整覆盖"的宿主页）：
+    //   否则 PROT_NONE 会把同宿主页里的**已提交邻页**一起打掉，那些页的位图仍为已提交 ⇒ 后续访问直接 SIGSEGV。
     auto* p = static_cast<std::uint8_t*>(base) + off;
     ::madvise(p, size, MADV_DONTNEED);
     return ::mprotect(p, size, PROT_NONE) == 0;
@@ -292,8 +368,15 @@ void GuestMemory::decommit(std::uint32_t ea, std::size_t size) {
     const std::uint64_t end64 = (static_cast<std::uint64_t>(ea) + size + kPageMask) & ~static_cast<std::uint64_t>(kPageMask);
     if (end64 > kSpace) return;
     const std::uint32_t end = static_cast<std::uint32_t>(end64);
-    if (begin < end) platformDecommit(base_, begin, end - begin);
-    for (std::uint32_t p = begin / kPage; p < end / kPage; ++p) setBit(p, false);
+    if (begin >= end) return;
+    // ★ 宿主页可能大于 guest 页（Apple Silicon = 16 KiB）：只有**被 [begin,end) 完整覆盖**的宿主页才能真退。
+    //   边缘不足一个宿主页的 guest 页**保持已提交**（宁可多留，也不能 PROT_NONE 打掉同宿主页的邻页）。
+    const std::uint32_t hp = hostPageSize();
+    const std::uint32_t hostBegin = (begin + hp - 1) / hp * hp;
+    const std::uint32_t hostEnd = end / hp * hp;
+    if (hostBegin >= hostEnd) return;
+    platformDecommit(base_, hostBegin, static_cast<std::size_t>(hostEnd - hostBegin));
+    for (std::uint32_t p = hostBegin / kPage; p < hostEnd / kPage; ++p) setBit(p, false);
 }
 
 void GuestMemory::annotate(std::uint32_t ea, std::size_t size, RegionKind kind, const char* name) {

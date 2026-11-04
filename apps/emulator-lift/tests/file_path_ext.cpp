@@ -6,7 +6,10 @@
 //      `lpFilePart` 的"目录形态 ⇒ 0"规则；
 //   ② `GetSystemDirectoryA` / `GetWindowsDirectoryA` 是**固定的 guest 路径**
 //      （⛔ 不含宿主路径的任何片段），返回值口径同上；
-//   ③ `SetFileTime` **真的写宿主时间戳**（写完 `GetFileTime` 读回来对得上，而不是"返回 TRUE 什么都没做"）。
+//   ③ `SetFileTime` **真的写宿主时间戳**（写完 `GetFileTime` 读回来对得上，而不是"返回 TRUE 什么都没做"）；
+//   ④ `GetTempFileNameA` 的 `uUnique`：非 0 ⇒ 用调用方的值（低 16 位、大写十六进制）+ **不创建**
+//      + 返回原值；0 ⇒ 从前缀 + 递增序号找一个空号、**创建 0 字节文件**。前缀只取前 3 个字符、
+//      扩展名 `.TMP`（文档形态）。断言要落在**宿主盘**上（存在 / 不存在 / 长度）。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -217,6 +220,72 @@ int main() {
         LIFT_CHECK(!ec);
         LIFT_CHECK(before_time != after_time);
         LIFT_CHECK(f.ok);
+    }
+
+    // ④ GetTempFileNameA：uUnique != 0 ⇒ 原值 + 不创建；uUnique == 0 ⇒ 递增 + 创建 0 字节文件
+    {
+        g_current_case = "temp-file-name";
+        Fixture f;
+        lift::registerFileShims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));
+        f.m.vfs().setGuestRoot("D:\\GAME");
+        f.m.vfs().setGuestCwd("D:\\GAME");
+        LIFT_CHECK(f.ok);
+        const std::uint32_t gtn = f.use("GetTempFileNameA");
+        const std::uint32_t p_dir = f.cstr("D:\\GAME");
+        const std::uint32_t p_age = f.cstr("AGE");
+        const std::uint32_t p_long = f.cstr("AGELONG");  // 前缀必须截到 3 个字符
+        const std::uint32_t buf = f.zeroData(512);
+        const std::string guest_dir = "D:\\GAME\\";
+        std::error_code ec2;
+        fs::remove(dir / "AGE1234.TMP", ec2);
+
+        // a) uUnique = 0x1234 ⇒ 返回原值、名字 AGE1234.TMP、**宿主上不存在这个文件**
+        LIFT_CHECK_EQ_U32(f.call(gtn, {p_dir, p_age, 0x1234u, buf}), 0x1234u);
+        LIFT_CHECK(guestStr(f.m, buf) == "D:\\GAME\\AGE1234.TMP");
+        LIFT_CHECK(!fs::exists(dir / "AGE1234.TMP", ec2));
+
+        // b) uUnique = 0 + 长前缀 ⇒ 前缀截 3、序号 4 位大写十六进制、扩展名 .TMP、
+        //    而且**真的创建**了那个 0 字节文件
+        const std::uint32_t r1 = f.call(gtn, {p_dir, p_long, 0u, buf});
+        const std::string n1 = guestStr(f.m, buf);
+        LIFT_CHECK(n1.size() == guest_dir.size() + 11u);  // "AGE" + 4 + ".TMP"
+        LIFT_CHECK(n1.rfind(guest_dir + "AGE", 0) == 0);
+        LIFT_CHECK(n1.compare(n1.size() - 4u, 4u, ".TMP") == 0);
+        // 返回的序号必须就是名字里的那 4 位十六进制（⛔ 不钉"一定从 0 起"：那是本模拟器的
+        // **有意偏差**——真机从系统时间起；这里只钉"与名字一致"）
+        const std::string num1 = n1.substr(guest_dir.size() + 3u, 4u);
+        LIFT_CHECK_EQ_U32(r1, static_cast<std::uint32_t>(std::stoul(num1, nullptr, 16)));
+        for (std::size_t i = 0; i < 4u; ++i) {  // 序号是大写十六进制
+            const char c = n1[n1.size() - 8u + i];
+            LIFT_CHECK((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'));
+        }
+        const fs::path host1 = dir / n1.substr(guest_dir.size());
+        LIFT_CHECK(fs::exists(host1, ec2));
+        std::error_code sz1;
+        const auto size1 = fs::file_size(host1, sz1);
+        LIFT_CHECK(!sz1 && size1 == 0u);  // 建出来的是**空**文件
+
+        // c) 再调一次 uUnique = 0 ⇒ 名字不同（序号递增），同样创建 0 字节文件
+        const std::uint32_t r2 = f.call(gtn, {p_dir, p_long, 0u, buf});
+        const std::string n2 = guestStr(f.m, buf);
+        LIFT_CHECK(n2 != n1);
+        LIFT_CHECK_EQ_U32(r2, r1 + 1u);  // 序号递增（同一个 uUnique=0 循环的下一个空号）
+        LIFT_CHECK(n2.rfind(guest_dir + "AGE", 0) == 0);
+        LIFT_CHECK(n2.compare(n2.size() - 4u, 4u, ".TMP") == 0);
+        const fs::path host2 = dir / n2.substr(guest_dir.size());
+        LIFT_CHECK(fs::exists(host2, ec2));
+        std::error_code sz2;
+        const auto size2 = fs::file_size(host2, sz2);
+        LIFT_CHECK(!sz2 && size2 == 0u);
+
+        // 清掉本用例的产物（dir 会被后面的运行复用）
+        fs::remove(host1, ec2);
+        fs::remove(host2, ec2);
+        std::printf("[case] temp-file-name: uUnique=0x1234 ⇒ 返回 0x1234、\"%s\"、宿主不存在；"
+                    "uUnique=0（前缀 \"AGELONG\"）⇒ \"%s\"（截到 AGE、4 位大写十六进制、.TMP）、"
+                    "宿主存在且 0 字节；再调 ⇒ \"%s\"（序号递增）\n",
+                    (guest_dir + "AGE1234.TMP").c_str(), n1.c_str(), n2.c_str());
     }
 
     fs::remove_all(dir, ec);

@@ -332,9 +332,8 @@ void shimLstrlenA(X86& cpu, ShimCall& call) {
 //      （⇒ 回调次数是确定的 2 次，且每个被枚举的 LCID 都能被 GetLocaleInfoW 回答）。
 //   2. **locale 的值是 XP 年代的文档值**（日期/时间模式、分隔符、代码页…）；不做用户的区域设置覆写
 //      （`SetLocaleInfo` 未导入）。
-//   3. **`GetLocaleInfoA` 不在本文件**：它仍是 `kernel32_bootstrap.cpp` 里的 CRT 兼容 shim
-//      （对所有 LCType 都回 "0409"）。本文件只做 W 版；两者的差异是**已知**的（A 版不按文档，
-//      因为改它会影响 CRT 启动路径；留待后续批次统一）。
+//   3. **`GetLocaleInfoA` 与 W 同表同口径**（2026-11-04 起，见本段末的实现说明）：文本按 CP932 编码、
+//      `cchData` 按**字节**计、`LOCALE_RETURN_NUMBER` 返回 4；不再是从前的常量 "0409" shim。
 //   4. `LCID_ALTERNATE_SORTS` 不建模：只用它时按基础集合枚举并留一行日志（不假装有交替排序）。
 // =======================================================================================
 constexpr std::uint32_t kLcidEnUs = 0x0409u;
@@ -598,6 +597,100 @@ void shimGetLocaleInfoW(X86& cpu, ShimCall& call) {
 }
 
 // ---------------------------------------------------------------------------------------
+// GetLocaleInfoA：**与 W 同一张表、同一套错误码**，差别只在"TCHAR = 字节"和编码
+//
+// ★ 文档口径（2026-11-04 按 MSDN 核过）：
+//   · `cchData` 是 **TCHAR 数** ⇒ A 版是**字节数**（字符串含结尾 0）；
+//   · `LOCALE_RETURN_NUMBER`：A 版把 DWORD 写进缓冲，返回 **4**（W 版返回 2 = 2 个 WCHAR）；
+//   · 文本按"该 LCID 的 ANSI 代码页"翻译（en-US=1252 / ja-JP=932）。本模拟器只有 CP932 一张表，
+//     而 en-US 的串全是 ASCII ⇒ 用 CP932 编码与文档等价（非 ASCII 只出现在 ja-JP，其 ACP 就是 932）；
+//   · `LOCALE_USE_CP_ACP`(0x40000000) 是 **A 版专属** flag（改用系统 ACP=932）：接受并清位；
+//   · 未定义字符按文档替换为 '?'（`wideToCp932` 已如此）。
+//   ⚠ 与 W 保持一致的**故意**选择：`cchData>0` 但 `lpLCData==NULL` ⇒ 0 + ERROR_INVALID_PARAMETER(87)
+//     （文档把这种情况列在 ERROR_INSUFFICIENT_BUFFER 下；要改就 A/W 一起改，别只改一侧）。
+// ---------------------------------------------------------------------------------------
+constexpr std::uint32_t kLocaleUseCpAcp = 0x40000000u;
+
+void shimGetLocaleInfoA(X86& cpu, ShimCall& call) {
+    const char* api = "GetLocaleInfoA";
+    requireMem(cpu, api);
+    std::uint32_t lcid = call.u32(0);
+    std::uint32_t type = call.u32(1);
+    const std::uint32_t buf = call.u32(2);
+    const std::uint32_t cap = call.u32(3);
+    const bool want_number = (type & kLocaleReturnNumber) != 0;
+    type &= ~kLocaleReturnNumber;
+    type &= ~kLocaleUseCpAcp;  // A 版专属：本机系统 ACP 就是 932，与 locale ACP 在 ja-JP 上相同
+    if ((type & 0xFF000000u) != 0) {  // 未知高位 flag（与 W 同口径）
+        cpu.shim.last_error = kErrInvalidFlags;
+        shimLog("kernel32", api, "LCType=0x%08X 带未知 flag ⇒ 返回 0 + 错误 1008", type);
+        call.result = 0;
+        return;
+    }
+    const LocaleDef* def = findLocale(lcid);
+    LocaleValue v;
+    if (!def || !lookupLocaleInfo(*def, type, &v)) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", api, "LCID=0x%04X / LCType=0x%08X 不在本模拟器的 locale 表里 ⇒ 返回 0 + 错误 87",
+                lcid, type);
+        call.result = 0;
+        return;
+    }
+    if (want_number) {
+        if (!v.is_number) {
+            cpu.shim.last_error = kErrInvalidParameter;
+            shimLog("kernel32", api, "LCType=0x%08X 是字符串类型，不能配 LOCALE_RETURN_NUMBER ⇒ 返回 0 + 错误 87",
+                    type);
+            call.result = 0;
+            return;
+        }
+        constexpr std::uint32_t kNumberBytes = sizeof(std::uint32_t);  // = 4
+        if (cap == 0) {
+            call.result = kNumberBytes;  // 文档：所需大小（数值没有结尾 0）
+            return;
+        }
+        if (buf == 0) {
+            cpu.shim.last_error = kErrInvalidParameter;
+            shimLog("kernel32", api, "lpLCData 为 NULL 但 cchData=%u ⇒ 返回 0 + 错误 87", cap);
+            call.result = 0;
+            return;
+        }
+        if (cap < kNumberBytes) {
+            cpu.shim.last_error = kErrInsufficientBuffer;
+            shimLog("kernel32", api, "cchData=%u 小于数值所需的 %u 字节 ⇒ 返回 0 + 错误 122", cap,
+                    kNumberBytes);
+            call.result = 0;
+            return;
+        }
+        cpu.mem->wr32(buf, v.number);
+        call.result = kNumberBytes;  // 文档：A 版返回值 = 4（W 版 = 2）
+        return;
+    }
+
+    const std::string text = wideToCp932(v.text);
+    const std::uint32_t need = static_cast<std::uint32_t>(text.size()) + 1u;  // A：字节数（含结尾 0）
+    if (cap == 0) {
+        call.result = need;
+        return;
+    }
+    if (buf == 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", api, "lpLCData 为 NULL 但 cchData=%u ⇒ 返回 0 + 错误 87", cap);
+        call.result = 0;
+        return;
+    }
+    if (cap < need) {
+        cpu.shim.last_error = kErrInsufficientBuffer;
+        shimLog("kernel32", api, "cchData=%u 小于所需的 %u 字节（含结尾 0）⇒ 返回 0 + 错误 122", cap, need);
+        call.result = 0;
+        return;
+    }
+    cpu.mem->writeBytes(buf, text.data(), text.size());
+    cpu.mem->wr8(buf + static_cast<std::uint32_t>(text.size()), 0);
+    call.result = need;
+}
+
+// ---------------------------------------------------------------------------------------
 // guest 回调的续延桩（`EnumSystemLocalesA` 用；机制见 x86.h 的 GuestCallbackState）
 // ---------------------------------------------------------------------------------------
 // ★ 固定落点：桩页是 0x7FFE0000..0x7FFE7FFF（0x2000 槽 × 4 字节），栈顶在 0x70000000
@@ -760,6 +853,7 @@ void registerStringShims(ShimRegistry& s) {
     s.add("user32", "wsprintfA", Conv::Varargs, 2, &shimWsprintfA);
     s.add("kernel32", "lstrlenA", Conv::Stdcall, 1, &shimLstrlenA);
     s.add("kernel32", "GetLocaleInfoW", Conv::Stdcall, 4, &shimGetLocaleInfoW);
+    s.add("kernel32", "GetLocaleInfoA", Conv::Stdcall, 4, &shimGetLocaleInfoA);
     s.add("kernel32", "EnumSystemLocalesA", Conv::Stdcall, 2, &shimEnumSystemLocalesA);
     // ★ 内部续延桩（**不是导入**：不进 IAT、不进 overrides；只有 EnumSystemLocalesA 会用它）
     s.add("lift", kCallbackContinuationName, Conv::Stdcall, 0, &shimGuestCallbackReturn);

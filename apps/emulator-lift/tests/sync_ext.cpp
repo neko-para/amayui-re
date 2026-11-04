@@ -32,12 +32,14 @@ constexpr std::uint32_t kSentinel = lift_fixture::kSentinel;
 constexpr std::uint32_t kWaitObject0 = 0u;
 constexpr std::uint32_t kWaitTimeout = 258u;
 constexpr std::uint32_t kErrFileNotFound = 2u;
+constexpr std::uint32_t kErrAccessDenied = 5u;
 constexpr std::uint32_t kErrInvalidHandle = 6u;
 constexpr std::uint32_t kErrAlreadyExists = 183u;
 
 // 访问位（与 kernel32_sync.cpp 同一组 Win32 数值）
 constexpr std::uint32_t kEventModifyState = 0x0002u;
 constexpr std::uint32_t kSynchronize = 0x00100000u;
+constexpr std::uint32_t kDuplicateCloseSource = 0x00000001u;
 constexpr std::uint32_t kDuplicateSameAccess = 0x00000002u;
 constexpr std::uint32_t kCurrentProcess = 0xFFFFFFFFu;
 
@@ -303,6 +305,94 @@ int main() {
         LIFT_CHECK_EQ_U32(f.call(prio, {0x00001234u}), 0x7FFFFFFFu);  // ERROR_RETURN
         LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidHandle);
         LIFT_CHECK(f.ok);
+    }
+
+    // ⑧ DuplicateHandle：`dwDesiredAccess` 降级 + 伪句柄（S6-5）
+    //
+    // 判据（Windows 文档）：
+    //   ① `dwDesiredAccess` 是**新句柄**的访问位；不带 DUPLICATE_SAME_ACCESS 时按它授予
+    //      ⇒ 复制成 0 的句柄**不许**改状态（旧实现的 `access == 0 ⇒ 放行` 短路是错的）；
+    //   ② 源是 `GetCurrentThread()` / `GetCurrentProcess()` 伪句柄时，DuplicateHandle 会把它
+    //      **转成真句柄**（旧实现直接 FALSE + 6）；
+    //   ③ `hTargetProcessHandle` 为 NULL 只允许配 DUPLICATE_CLOSE_SOURCE；带它时源句柄总被关。
+    {
+        g_current_case = "duplicate-access-and-pseudo";
+        Fixture f;
+        lift::registerSyncShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t create = f.use("CreateEventA");
+        const std::uint32_t dup = f.use("DuplicateHandle");
+        const std::uint32_t set = f.use("SetEvent");
+        const std::uint32_t close = f.use("CloseHandle");
+        const std::uint32_t out = f.u32data(0xDEADBEEFu);
+        const std::uint32_t kCurrentThread = 0xFFFFFFFEu;
+
+        // a) 复制成 dwDesiredAccess=0（不带 SAME_ACCESS）⇒ 句柄存在、但不许改状态；源句柄不受影响
+        const std::uint32_t h1 = f.call(create, {0u, 1u, 0u, 0u});  // 手动复位事件
+        LIFT_CHECK_NE_U32(h1, 0u);
+        LIFT_CHECK_EQ_U32(f.call(dup, {kCurrentProcess, h1, kCurrentProcess, out, 0u, 0u, 0u}),
+                          1u);
+        const std::uint32_t h2 = f.m.mem().rd32(out);
+        LIFT_CHECK_NE_U32(h2, 0u);
+        LIFT_CHECK_NE_U32(h2, h1);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(set, {h2}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAccessDenied);
+        LIFT_CHECK_EQ_U32(f.call(set, {h1}), 1u);  // 源句柄仍是 *_ALL_ACCESS
+        LIFT_CHECK_EQ_U32(f.call(close, {h1}), 1u);
+        LIFT_CHECK_EQ_U32(f.call(close, {h2}), 1u);
+
+        // b) 伪句柄：GetCurrentThread() / GetCurrentProcess() 可复制成**真**句柄
+        f.m.mem().wr32(out, 0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(f.call(dup, {kCurrentProcess, kCurrentThread, kCurrentProcess, out, 0u,
+                                       0u, kDuplicateSameAccess}),
+                          1u);
+        const std::uint32_t h3 = f.m.mem().rd32(out);
+        LIFT_CHECK_NE_U32(h3, 0u);
+        LIFT_CHECK_NE_U32(h3, 0xDEADBEEFu);
+        f.m.mem().wr32(out, 0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(f.call(dup, {kCurrentProcess, kCurrentProcess, kCurrentProcess, out, 0u,
+                                       0u, kDuplicateSameAccess}),
+                          1u);
+        const std::uint32_t h4 = f.m.mem().rd32(out);
+        LIFT_CHECK_NE_U32(h4, 0u);
+        LIFT_CHECK_NE_U32(h4, h3);
+
+        // c) 跨/伪进程句柄 ⇒ FALSE + ERROR_INVALID_HANDLE(6)（两个方向都拒；原来没有夹具）
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(dup, {0x12345678u, h3, kCurrentProcess, out, 0u, 0u,
+                                       kDuplicateSameAccess}),
+                          0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidHandle);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(dup, {kCurrentProcess, h3, 0x12345678u, out, 0u, 0u,
+                                       kDuplicateSameAccess}),
+                          0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidHandle);
+
+        // d) hTargetProcessHandle=NULL：无 CLOSE_SOURCE ⇒ FALSE + 87；带它 ⇒ 成功且源句柄被关
+        const std::uint32_t h5 = f.call(create, {0u, 1u, 0u, 0u});
+        LIFT_CHECK_NE_U32(h5, 0u);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(
+            f.call(dup, {kCurrentProcess, h5, 0u, out, 0u, 0u, kDuplicateSameAccess}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 87u);
+        LIFT_CHECK_EQ_U32(f.call(set, {h5}), 1u);  // 失败的调用没有关掉源句柄
+        LIFT_CHECK_EQ_U32(
+            f.call(dup, {kCurrentProcess, h5, 0u, out, 0u, 0u,
+                         kDuplicateSameAccess | kDuplicateCloseSource}),
+            1u);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(close, {h5}), 0u);  // 源句柄已被 CLOSE_SOURCE 关掉
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidHandle);
+
+        LIFT_CHECK_EQ_U32(f.call(close, {h3}), 1u);
+        LIFT_CHECK_EQ_U32(f.call(close, {h4}), 1u);
+        std::printf("[case] duplicate-access-and-pseudo: a) 复制成 access=0 后 SetEvent(h2)=FALSE+%u、"
+                    "SetEvent(h1)=TRUE；b) 伪句柄线程 ⇒ 0x%08X、进程 ⇒ 0x%08X；"
+                    "c) 跨进程两个方向都 FALSE+%u；d) dst=NULL 无 CLOSE_SOURCE ⇒ FALSE+87，"
+                    "带它 ⇒ TRUE 且源句柄不可再关（GLE=%u）\n",
+                    kErrAccessDenied, h3, h4, kErrInvalidHandle, f.m.cpu().shim.last_error);
     }
 
     return finish("sync-ext");

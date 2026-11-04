@@ -14,10 +14,21 @@
  * 3. 任何一步不符就**立刻中止**并报告，不继续跑下一个变异（避免"半坏的工作树"）。
  * 4. 不联网、不写别的文件、不改旧仓。
  *
+ * ## 崩溃安全：预写日志（journal）+ 启动自愈
+ * `finally` 只兜得住"进程还能跑"的路径。SIGKILL / 休眠 / 断电会绕过它，把**变异态文件**
+ * 留在工作树里 —— 下一次启动毫无察觉，于是"跑绿了"可能是"在变异态上跑绿了"。所以：
+ * 1. **动任何文件之前**，把 `{file, before, mutated, guard?}` 原子写进
+ *    `.tmp/mutate-check/journal.json`（临时文件 + `rename`；gitignored）。
+ * 2. **每次启动**（含 `--list`）先做自愈：盘上是 `before` ⇒ 无需恢复；是 `mutated` ⇒ 写回
+ *    `before`；**两者都不是** ⇒ 拒绝运行（退出码 3，保留 journal），因为那可能是别人改的。
+ * 3. 带 CTest 守卫信息的条目在恢复后**重建构建目录**（否则 exe 仍是变异版）。
+ * 4. `SIGINT` / `SIGTERM` 装同步恢复（把当前已施加的变异写回原文再退出）；`SIGKILL` 靠 journal。
+ * 5. 逐条还原并比对通过后条目才从 journal 移除；全部清空时删除 journal。
+ * 恢复/判定逻辑抽成导出函数（`recoverMutationJournal` 等），守卫在 `tools/test/mutate-journal.test.mjs`。
+ *
  * 用法：`pnpm test:mutation`（也可 `node tools/mutate-check.mjs --list` 只看变异清单）
  */
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
@@ -62,6 +73,258 @@ function runCtestGuard(name, logFd, buildDir = CTEST_BUILD_DIR) {
   return { status: run.status };
 }
 
+/* ───────────────────── 崩溃安全：预写日志（journal）与启动自愈 ───────────────────── */
+
+/**
+ * journal 的位置（相对仓库根；`/.tmp` 已在 `.gitignore` 里）。
+ * ★ `AMAYUI_MUTATE_JOURNAL=<绝对路径>` 只给守卫测试注入用：让测试把 journal 指到
+ *   `.tmp/` 下的临时目录，而**不碰真实工作树**。生产环境不要设置 —— 否则自愈盯的是另一个文件。
+ */
+export const JOURNAL_REL = '.tmp/mutate-check/journal.json';
+
+/** journal 的绝对路径：`root` 下的缺省位置，或被 `AMAYUI_MUTATE_JOURNAL` 覆盖 */
+export function resolveJournalPath(root = ROOT) {
+  const override = process.env.AMAYUI_MUTATE_JOURNAL;
+  return override ? path.resolve(override) : path.join(root, JOURNAL_REL);
+}
+
+/** 原子写：同目录临时文件 + `rename`（rename 在同一文件系统上是原子的） */
+function atomicWriteFile(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text, 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * 读 + 校验 journal。
+ * @returns {{ok:true, exists:boolean, entries:object[]} | {ok:false, exists:boolean, why:string, entries:object[]}}
+ *   ★ `exists:false` = 没有 journal（正常：上次跑完 / 从没跑过）—— 不是错误。
+ *   ★ `ok:false` = **拒绝运行**的一类：非法 JSON / 形态不对 / 条目指向仓库外。
+ */
+export function readMutationJournal(journalPath, root = ROOT) {
+  let text;
+  try {
+    text = fs.readFileSync(journalPath, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return { ok: true, exists: false, entries: [] };
+    return { ok: false, exists: true, why: `读不了 journal（${err.message}）`, entries: [] };
+  }
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, exists: true, why: `journal 不是合法 JSON（${err.message}）`, entries: [] };
+  }
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { ok: false, exists: true, why: 'journal 顶层不是对象', entries: [] };
+  }
+  if (doc.version !== 1) {
+    return { ok: false, exists: true, why: `journal 版本不认识：${JSON.stringify(doc.version)}（本工具只认 1）`, entries: [] };
+  }
+  if (!Array.isArray(doc.entries)) {
+    return { ok: false, exists: true, why: 'journal 的 `entries` 不是数组', entries: [] };
+  }
+  const entries = [];
+  for (let i = 0; i < doc.entries.length; i += 1) {
+    const e = doc.entries[i];
+    const at = `entries[${i}]`;
+    if (e === null || typeof e !== 'object' || Array.isArray(e)) return { ok: false, exists: true, why: `${at} 不是对象`, entries: [] };
+    if (typeof e.file !== 'string' || e.file === '') return { ok: false, exists: true, why: `${at}.file 不是非空字符串`, entries: [] };
+    if (typeof e.before !== 'string') return { ok: false, exists: true, why: `${at}.before 不是字符串`, entries: [] };
+    if (typeof e.mutated !== 'string') return { ok: false, exists: true, why: `${at}.mutated 不是字符串`, entries: [] };
+    if (e.guard !== undefined && typeof e.guard !== 'string') return { ok: false, exists: true, why: `${at}.guard 不是字符串`, entries: [] };
+    if (e.ctest !== undefined && typeof e.ctest !== 'string') return { ok: false, exists: true, why: `${at}.ctest 不是字符串`, entries: [] };
+    if (e.buildDir !== undefined && typeof e.buildDir !== 'string') return { ok: false, exists: true, why: `${at}.buildDir 不是字符串`, entries: [] };
+    const rel = path.relative(root, path.resolve(root, e.file));
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+      return { ok: false, exists: true, why: `${at}.file 不在仓库根内（${e.file}）`, entries: [] };
+    }
+    entries.push(e);
+  }
+  return { ok: true, exists: true, entries };
+}
+
+/**
+ * 原子写 journal（条目为空 ⇒ 删除文件，恢复"跑完/没跑过"的正常状态）。
+ * ★ 调用点必须保证：**写盘成功之后**才去动被变异的文件（预写日志的意义就在这里）。
+ */
+export function writeMutationJournal(journalPath, entries) {
+  if (!entries.length) {
+    fs.rmSync(journalPath, { force: true });
+    return;
+  }
+  atomicWriteFile(
+    journalPath,
+    `${JSON.stringify(
+      { version: 1, tool: 'tools/mutate-check.mjs', pid: process.pid, updatedAt: new Date().toISOString(), entries },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+/**
+ * 判定一个条目与磁盘现状的关系（**只读，不写**）。
+ * @returns {{state:'before'} | {state:'mutated'} | {state:'conflict', why:string}}
+ *   - `before`  ⇒ 无需恢复（也许上次已还原、没来得及删 journal）；
+ *   - `mutated` ⇒ 这就是上次没复原的变异态，要写回 `before`；
+ *   - `conflict`⇒ **第三种内容**（人改过 / 文件没了）⇒ 不能安全恢复。
+ */
+export function classifyJournalEntry(root, entry) {
+  const abs = path.join(root, entry.file);
+  let cur;
+  try {
+    cur = fs.readFileSync(abs, 'utf8');
+  } catch (err) {
+    return { state: 'conflict', why: err.code === 'ENOENT' ? '文件不存在' : `读不了（${err.message}）` };
+  }
+  if (cur === entry.before) return { state: 'before' };
+  if (cur === entry.mutated) return { state: 'mutated' };
+  return { state: 'conflict', why: '内容既不是 before 也不是 mutated（可能被别人改过）' };
+}
+
+/**
+ * **启动自愈**：发现上次未复原的变异就恢复；判不了就拒绝运行（一个字节也不写）。
+ *
+ * 判据（按顺序）：
+ * 1. 没有 journal ⇒ 幂等无操作（`{ok:true, existed:false}`）；
+ * 2. journal 读不了 / 非法 / 形态不对 ⇒ **拒绝运行**（`reason:'invalid'`，journal 保留）；
+ * 3. 先对**全部**条目做判定：任一条是第三种内容 ⇒ **拒绝运行**（`reason:'conflict'`，
+ *    **不写任何文件**、journal 保留）—— 部分恢复比不恢复更危险；
+ * 4. 全部可判 ⇒ 逐条写回 `before`；有 CTest 守卫信息的条目再**重建构建目录**
+ *    （源文件还原 ≠ exe 还原）。重建失败 ⇒ journal 保留、`reason:'rebuild-failed'`；
+ * 5. 全部成功 ⇒ 删除 journal，打印 `已从上次中断恢复 N 个文件`。
+ *
+ * @param {object} opts
+ * @param {string} [opts.root]         仓库根（测试用临时目录）
+ * @param {string} [opts.journalPath]  journal 路径（缺省 `resolveJournalPath(root)`）
+ * @param {(line:string)=>void} [opts.log] 报告出口（缺省 stderr）
+ * @param {typeof buildCtestTargets} [opts.build] 构建入口（测试注入假实现，避免真跑 cmake）
+ */
+export function recoverMutationJournal({
+  root = ROOT,
+  journalPath = resolveJournalPath(root),
+  log = (line) => console.error(line),
+  build = buildCtestTargets,
+} = {}) {
+  const loaded = readMutationJournal(journalPath, root);
+  if (!loaded.ok) {
+    log(`✗ 拒绝运行：${loaded.why}（journal：${journalPath}，已保留）。`);
+    return { ok: false, reason: 'invalid', restored: 0, journalKept: true, why: loaded.why };
+  }
+  if (!loaded.exists) return { ok: true, existed: false, restored: 0, rebuilt: 0 };
+
+  // ① 全部判定完再动手：任一条判不了 ⇒ 一个字节也不写
+  const plan = [];
+  const conflicts = [];
+  for (const entry of loaded.entries) {
+    const c = classifyJournalEntry(root, entry);
+    if (c.state === 'conflict') conflicts.push({ file: entry.file, why: c.why });
+    else plan.push({ entry, state: c.state });
+  }
+  if (conflicts.length) {
+    log(
+      `✗ 工作树内容与 journal 不符，不能安全恢复（journal 保留：${journalPath}）：\n` +
+        conflicts.map((c) => `  - ${c.file}：${c.why}`).join('\n'),
+    );
+    return { ok: false, reason: 'conflict', restored: 0, journalKept: true, conflicts };
+  }
+
+  // ② 只写回"盘上确实是变异文"的那些（`before` 的属于"已还原、没来得及删 journal"）
+  let restored = 0;
+  for (const { entry, state } of plan) {
+    if (state !== 'mutated') continue;
+    fs.writeFileSync(path.join(root, entry.file), entry.before, 'utf8');
+    restored += 1;
+  }
+
+  // ③ CTest 守卫：源文件还原了，exe 里可能还是变异版 ⇒ 按条目重建（去重）
+  const buildDirs = [...new Set(loaded.entries.filter((e) => e.ctest).map((e) => e.buildDir ?? CTEST_BUILD_DIR))];
+  for (const dir of buildDirs) {
+    const r = build(null, dir);
+    if (r?.error || r?.status !== 0) {
+      log(
+        `✗ 恢复后重建失败（${dir}，${r?.error ? r.error.message : `退出码 ${r?.status}`}）` +
+          '：exe 可能仍是变异版 ⇒ journal 保留，下次启动会再试。',
+      );
+      return { ok: false, reason: 'rebuild-failed', restored, rebuilt: 0, journalKept: true, buildDir: dir };
+    }
+  }
+
+  fs.rmSync(journalPath, { force: true });
+  log(`已从上次中断恢复 ${restored} 个文件${buildDirs.length ? `，并重建了 ${buildDirs.length} 个构建目录` : ''}。`);
+  return { ok: true, existed: true, restored, rebuilt: buildDirs.length };
+}
+
+/* ─────────────────── 运行期：journal 维护 + 信号恢复（SIGINT / SIGTERM） ─────────────────── */
+
+/** 当前已施加、尚未（确认）还原的条目 —— 信号恢复读它 */
+let appliedEntries = [];
+/** 当前这次运行的 journal 路径（信号恢复用它清理） */
+let activeJournalPath = null;
+/** 只安装一次，避免重复 main() 时堆监听器 */
+let signalGuardsInstalled = false;
+/** 防止两个信号重入恢复 */
+let restoringFromSignal = false;
+
+/** 把 `entry` 记进 journal（★ 必须在动文件**之前**调用） */
+function journalAdd(journalPath, entries, entry) {
+  entries.push(entry);
+  writeMutationJournal(journalPath, entries);
+  appliedEntries.push(entry);
+}
+
+/** 还原并比对通过之后，把条目从 journal 移除（清空时删除文件） */
+function journalDrop(journalPath, entries, entry) {
+  const i = entries.indexOf(entry);
+  if (i >= 0) entries.splice(i, 1);
+  appliedEntries = appliedEntries.filter((e) => e !== entry);
+  writeMutationJournal(journalPath, entries);
+}
+
+/**
+ * 信号恢复：把当前已施加的变异**同步**写回原文（只在盘上仍是变异文时写，⛔ 不覆盖别人的改动），
+ * CTest 条目重建构建目录，然后删 journal 并退出。
+ * ★ `SIGKILL` / 断电走不到这里 —— 那一档由下次启动的 `recoverMutationJournal` 兜底。
+ */
+function restoreOnSignal(signal) {
+  if (restoringFromSignal) return;
+  restoringFromSignal = true;
+  const code = signal === 'SIGINT' ? 130 : 143;
+  const n = appliedEntries.length;
+  try {
+    for (const entry of appliedEntries) {
+      const abs = path.join(ROOT, entry.file);
+      let cur = null;
+      try {
+        cur = fs.readFileSync(abs, 'utf8');
+      } catch {
+        /* 文件没了 ⇒ 不写（交给了 journal 的下次自愈） */
+      }
+      if (cur === entry.mutated) fs.writeFileSync(abs, entry.before, 'utf8');
+    }
+    const dirs = [...new Set(appliedEntries.filter((e) => e.ctest).map((e) => e.buildDir ?? CTEST_BUILD_DIR))];
+    for (const dir of dirs) buildCtestTargets(null, dir);
+    if (activeJournalPath) fs.rmSync(activeJournalPath, { force: true });
+    appliedEntries = [];
+    console.error(`\n✗ 收到 ${signal}：已把 ${n} 个已施加的变异写回原文并退出（journal 已清理）。`);
+  } catch (err) {
+    console.error(
+      `\n✗ 收到 ${signal}：同步恢复失败（${err.message}）—— journal 保留在 ${activeJournalPath}，下次启动会自愈。`,
+    );
+  }
+  process.exit(code);
+}
+
+function installSignalGuards(journalPath) {
+  activeJournalPath = journalPath;
+  if (signalGuardsInstalled) return;
+  signalGuardsInstalled = true;
+  process.on('SIGINT', () => restoreOnSignal('SIGINT'));
+  process.on('SIGTERM', () => restoreOnSignal('SIGTERM'));
+}
+
 export const DOMAIN = {
   id: 'mutate',
   title: '守卫自检（变异测试）：改坏一处关键常量 ⇒ 确认指定守卫**当场红**',
@@ -69,14 +332,15 @@ export const DOMAIN = {
     '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.ts` · `apps/emulator-new/src/**` · `apps/emulator-cxx/src/core/*.cpp`）—— ★ **临时改写后必还原**',
     '`tools/mutate-check.mjs` 里的**变异清单**（本工具的真源：一处破坏 + 该抓它的守卫）',
     '**CTest 类条目**（`guard: \'ctest:<名字>\'`）额外依赖 `apps/emulator-cxx/out` 已配置：会重建 + 跑那一条 CTest（还原后也重建成基线）',
+    '**预写日志** `.tmp/mutate-check/journal.json`（gitignored；动文件前原子落盘，逐条还原后移除，全清时删除）—— 中途被 SIGKILL / 断电打断后，下次启动靠它自愈或拒绝运行',
   ],
-  access: 'r（读原文进内存）→ rw（写入变异）→ **w（还原，且比对全文）**；CTest 类条目额外重建 `apps/emulator-cxx/out`（生成物，已 gitignore）；★ 不碰旧仓',
+  access: 'r（读原文进内存）→ **w journal（预写日志，原子：临时文件 + rename）**→ rw（写入变异）→ **w（还原，且比对全文）**；CTest 类条目额外重建 `apps/emulator-cxx/out`（生成物，已 gitignore）；★ 启动时先自愈 journal（判不了就拒绝运行，退出码 3，journal 保留）；★ 不碰旧仓',
   tool: 'tools/mutate-check.mjs',
 };
 
 export const OPERATIONS = [
-  { name: 'check', argv: [], mutates: true, summary: '★ 逐条施加变异 ⇒ 跑指定守卫（`node --test` 用例，或 `ctest:<名字>` 的 CTest）⇒ 要求退出码非 0，最后**逐条还原并比对全文**' },
-  { name: 'list', argv: ['--list'], mutates: false, summary: '只列变异清单（不动任何文件）' },
+  { name: 'check', argv: [], mutates: true, summary: '★ 逐条施加变异 ⇒ 跑指定守卫（`node --test` 用例，或 `ctest:<名字>` 的 CTest）⇒ 要求退出码非 0，最后**逐条还原并比对全文**（会同步恢复 SIGINT/SIGTERM；SIGKILL 后下次启动靠 journal 自愈）' },
+  { name: 'list', argv: ['--list'], mutates: false, summary: '只列变异清单（不动任何变异文件；但**启动时仍会先自愈 journal** —— 上次留下的变异态不该因为"只看清单"而继续存在）' },
 ];
 
 export { MUTATIONS };
@@ -4182,11 +4446,66 @@ const MUTATIONS = [
     buildDir: 'apps/emulator-lift/out',
     what: 'wsprintfA 的 0 填充失效 ⇒ %08X 变成空格填充 ⇒ strfmt 的宽度断言红',
   },
+  {
+    file: 'apps/emulator-lift/src/runtime/memory.cpp',
+    from: '    return addr >= base && (addr - base) < GuestMemory::kSpace;',
+    to: '    return true;  // 变异：永远当 guest fault',
+    guard: 'ctest:fault-report',
+    ctest: 'fault-report',
+    buildDir: 'apps/emulator-lift/out',
+    what: '归因恒为 guest ⇒ 宿主 AV 又被报成上一条 guest 访存（`access :` 行回来了）⇒ fault-report 红',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_string.cpp',
+    from: '    cpu.mem->writeBytes(buf, text.data(), text.size());',
+    to: '    (void)text;  // 变异：A 版只回长度、不写字节',
+    guard: 'ctest:locale-ext',
+    ctest: 'locale-ext',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'GetLocaleInfoA 不写字节 ⇒ A 的空串 != W 的 CP932 投影 ⇒ locale-ext 的 get-locale-info-a 红',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_file.cpp',
+    from: '    st->readable = want_read;  // ⛔ 不再有 "|| (!want_write)"：access=0 不授予读',
+    to: '    st->readable = want_read || (!want_write);  // 变异：access=0 又按可读处理',
+    guard: 'ctest:file-io',
+    ctest: 'file-io',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'access=0 又按可读处理 ⇒ 只查属性的句柄能读 ⇒ file-io 的 access-zero-open 红',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_sync.cpp',
+    from: '    if ((e->access & mask) != 0) return true;',
+    to: '    if (true) return true;  // 变异：访问位检查失效',
+    guard: 'ctest:sync-ext',
+    ctest: 'sync-ext',
+    buildDir: 'apps/emulator-lift/out',
+    what: '同步对象访问位检查失效 ⇒ 零访问位句柄也能改状态 ⇒ sync-ext 的 duplicate-access-and-pseudo 红',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/vfs.cpp',
+    from: '            e.create_time_100ns = times.create_100ns;\n            e.access_time_100ns = times.access_100ns;',
+    to: '            e.create_time_100ns = times.write_100ns;  // 变异：退回 mtime 近似\n            e.access_time_100ns = times.write_100ns;',
+    guard: 'ctest:file-io',
+    ctest: 'file-io',
+    buildDir: 'apps/emulator-lift/out',
+    what: '三个时间又退回同一个 mtime ⇒ file-io 的 find-data-times 红（SetFileTime 设的两个不同过去值不再区分）',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_file.cpp',
+    from: '    if (seekAccessDenied(cpu, st, call.u32(0), api)) {\n        call.result = 0;\n        return;\n    }',
+    to: '    if (false) {  // 变异：不校验 seek 的访问位\n        call.result = 0;\n        return;\n    }',
+    guard: 'ctest:file-io',
+    ctest: 'file-io',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'SetFilePointerEx 不校验访问位 ⇒ access=0 的句柄也能 seek ⇒ file-io 的 access-zero-open 红',
+  },
 ];
 
 /**
  * 入口（派发器 `tools/cli.mjs` 与直接运行都走这里）。
- * @returns {number} 退出码：0 = 全部按预期变红；1 = 有守卫没抓住破坏；2 = 还原失败（已中止）
+ * @returns {number} 退出码：0 = 全部按预期变红；1 = 有守卫没抓住破坏；2 = 还原失败（已中止）；
+ *   3 = 启动自愈拒绝运行（journal 非法 / 工作树内容与 journal 不符 ⇒ journal 保留）
  */
 export function main(argv = process.argv.slice(2)) {
   // ★ `--match <子串>`：只跑匹配的变异（匹配 `file` / `what` / `guard`）。
@@ -4204,10 +4523,24 @@ export function main(argv = process.argv.slice(2)) {
       '用法：node tools/mutate-check.mjs [--list] [--match <子串>]\n\n' +
         '  不带参数 = 逐条施加变异 ⇒ 跑对应守卫 ⇒ 要求退出码非 0（最后逐条还原并比对全文）。\n' +
         '  ⛔ **它会临时改写工作树里的文件** ⇒ 有别的进程正在编辑本仓时**不要**跑（还原会覆盖别人的改动）。\n' +
-        '  --list 只列清单（不动任何文件）。\n' +
-        '  --match <子串> 只跑 file / what / guard 里含该子串的变异（例：--match shape）。',
+        '  --list 只列清单（不动任何变异文件；但每次启动都会先自愈上次中断留下的 journal）。\n' +
+        '  --match <子串> 只跑 file / what / guard 里含该子串的变异（例：--match shape）。\n\n' +
+        '  崩溃安全：动文件前把 {file,before,mutated,guard?} 原子写进 .tmp/mutate-check/journal.json；\n' +
+        '  SIGINT/SIGTERM 同步恢复；SIGKILL/断电后下次启动自己恢复。判不了（盘上是第三种内容）⇒\n' +
+        '  拒绝运行、退出码 3、journal 保留。',
     );
     return 0;
+  }
+  // ★ 启动自愈（--list 也做）：上次若是被 SIGKILL / 休眠 / 断电打断，工作树里可能还留着变异态。
+  //   ⛔ 不先处理就继续跑 = 可能"在变异态上跑绿"；判不了就拒绝运行（一个字节也不写）。
+  const journalPath = resolveJournalPath(ROOT);
+  const recovery = recoverMutationJournal({ root: ROOT, journalPath });
+  if (!recovery.ok) {
+    console.error(
+      `✗ 拒绝运行：启动自愈未完成（${recovery.reason}）。journal 保留在 ${journalPath}。\n` +
+        '  修法：人工确认那些文件当前内容后，把 journal 里的 before/mutated 改对（或确认工作树已是原文再删掉 journal）后重试。',
+    );
+    return 3;
   }
   if (argv.includes('--list')) {
     for (const m of selected) console.log(`${m.what}\n    ${m.file}  ⇒ 守卫 ${m.guard}`);
@@ -4219,6 +4552,9 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   const results = [];
+  // ★ 信号恢复要看的"当前已施加"清单 + journal 里的条目（两者同源，顺序一致）
+  const journalEntries = [];
+  installSignalGuards(journalPath);
   for (const m of selected) {
     const abs = path.join(ROOT, m.file);
     const before = fs.readFileSync(abs, 'utf8');
@@ -4244,12 +4580,26 @@ export function main(argv = process.argv.slice(2)) {
         continue;
       }
     }
-    fs.writeFileSync(abs, before.replace(m.from, m.to));
+    // ★ **先写 journal 再动文件**（原子：临时文件 + rename）。这一条就是"崩溃安全"的全部：
+    //   进程在下一行之后被 SIGKILL / 断电打断时，下一次启动能从 journal 里认出"盘上是变异文"
+    //   并把原文写回去，而不是把变异态当成正常起点继续跑。
+    const mutated = before.replace(m.from, m.to);
+    const entry = { file: m.file, before, mutated, guard: m.guard };
+    if (m.ctest) {
+      // CTest 类条目：恢复源文件 ≠ 恢复 exe ⇒ 把重建所需的信息也记下来
+      entry.ctest = m.ctest;
+      entry.buildDir = m.buildDir ?? CTEST_BUILD_DIR;
+    }
+    journalAdd(journalPath, journalEntries, entry);
+    fs.writeFileSync(abs, mutated);
     let code = null;
     let ran = null; // {pass, fail, skipped, skipReason}
     let unavailable = null; // CTest 条目：构建/ctest 跑不起来
     let restoreProblem = null;
-    const log = path.join(os.tmpdir(), `amayui-mutate-${process.pid}.log`);
+    // ★ 子进程输出落 `.tmp/`（gitignored）—— ⛔ 不写系统临时目录：沙箱里那可能是唯一写不进去的地方
+    const LOG_DIR = path.join(ROOT, '.tmp', 'mutate-check', 'logs');
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    const log = path.join(LOG_DIR, `mutate-${process.pid}-${results.length}.log`);
     try {
       // ★ 沙箱里不能**捕获**子进程输出（管道要命名管道 ⇒ EPERM）⇒ 用**文件描述符重定向**拿同一份答案
       //   （`tools/corpus.mjs` 的 `runCapture()` 就是这么绕的）。为什么要这份输出：
@@ -4294,6 +4644,7 @@ export function main(argv = process.argv.slice(2)) {
       }
     }
     if (restoreProblem) {
+      // ★ journal 条目**故意留着**：源文件或 exe 还没回到基线 ⇒ 下次启动靠它继续/拒绝
       console.error(`\n✗ **还原失败**：${m.file} —— ${restoreProblem}。已中止（工作树可能被污染，请查 git diff）`);
       return 2;
     }
@@ -4301,6 +4652,8 @@ export function main(argv = process.argv.slice(2)) {
       console.error(`\n✗ **还原失败**：${m.file} 与施加前不一致 —— 已中止（工作树可能被污染，请查 git diff）`);
       return 2;
     }
+    // ★ 只有"还原 + 全文比对通过"之后才把条目移出 journal（顺序反了就等于"以为还原了"）
+    journalDrop(journalPath, journalEntries, entry);
     if (m.ctest) {
       results.push({
         ...m,

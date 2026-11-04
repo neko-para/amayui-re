@@ -88,6 +88,18 @@ add_executable(lift-dispatch tests/dispatch.cpp)
 target_link_libraries(lift-dispatch PRIVATE emulator-lift-runtime)
 add_test(NAME dispatch COMMAND lift-dispatch)
 
+# ---- pure：guest 页提交 / 退回（宿主页可能大于 guest 页；Apple Silicon = 16 KiB）----
+add_executable(lift-memory-pages tests/memory_pages.cpp)
+target_link_libraries(lift-memory-pages PRIVATE emulator-lift-runtime)
+add_test(NAME memory-pages COMMAND lift-memory-pages)
+
+# ---- pure：fault 归因（宿主 AV 不许被报成"上一次 guest 访存"）----
+# ★ 集成用例用 fork + 管道（POSIX）；Windows 只跑纯函数并 LIFT_SKIP ⇒ 77。
+add_executable(lift-fault-report tests/fault_report.cpp)
+target_link_libraries(lift-fault-report PRIVATE emulator-lift-runtime)
+add_test(NAME fault-report COMMAND lift-fault-report)
+set_tests_properties(fault-report PROPERTIES SKIP_RETURN_CODE 77)
+
 add_executable(lift-shim-abi tests/shim_abi.cpp)
 target_link_libraries(lift-shim-abi PRIVATE emulator-lift-runtime)
 add_test(NAME shim-abi COMMAND lift-shim-abi)

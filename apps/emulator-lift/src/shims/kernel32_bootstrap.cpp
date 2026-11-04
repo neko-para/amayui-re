@@ -255,17 +255,7 @@ void shimLCMapStringW(X86& cpu, ShimCall& call) {
 }
 
 void shimIsValidLocale(X86&, ShimCall& call) { call.result = 1; }
-void shimGetLocaleInfoA(X86& cpu, ShimCall& call) {
-    const std::uint32_t dst = call.u32(2);
-    const int cap = call.i32(3);
-    const std::string s = "0409";  // en-US：只回一个良构的 LCID 名字，避免 CRT 认为 locale 无效
-    if (!dst || cap < static_cast<int>(s.size()) + 1) {
-        call.result = static_cast<std::uint32_t>(s.size() + 1);
-        return;
-    }
-    guestWrite(*cpu.mem, dst, s);
-    call.result = static_cast<std::uint32_t>(s.size() + 1);
-}
+// ★ `GetLocaleInfoA` 已搬到 `kernel32_string.cpp`（与 W 共用一张 locale 表；2026-11-04）。
 void shimGetUserDefaultLCID(X86&, ShimCall& call) { call.result = 0x0409; }
 void shimGetSystemDefaultLCID(X86&, ShimCall& call) { call.result = 0x0409; }
 void shimGetThreadLocale(X86&, ShimCall& call) { call.result = 0x0409; }
@@ -420,7 +410,6 @@ void registerBootstrapShims(ShimRegistry& s) {
     s.add("kernel32", "GetStringTypeW", Conv::Stdcall, 4, &shimGetStringTypeW);
     s.add("kernel32", "LCMapStringW", Conv::Stdcall, 6, &shimLCMapStringW);
     s.add("kernel32", "IsValidLocale", Conv::Stdcall, 2, &shimIsValidLocale);
-    s.add("kernel32", "GetLocaleInfoA", Conv::Stdcall, 4, &shimGetLocaleInfoA);
     s.add("kernel32", "GetUserDefaultLCID", Conv::Stdcall, 0, &shimGetUserDefaultLCID);
     s.add("kernel32", "GetSystemDefaultLCID", Conv::Stdcall, 0, &shimGetSystemDefaultLCID);
     s.add("kernel32", "GetThreadLocale", Conv::Stdcall, 0, &shimGetThreadLocale);

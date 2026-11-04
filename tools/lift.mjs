@@ -167,7 +167,7 @@ export const D6_FAMILIES = [
   ] },
 ];
 
-// ★ 七族之外、按族列出（不进 A5 的七族判据；D5 线程族与 R1 SEH 族等 SCOPE 批准）
+// ★ 七族之外、按族列出（不进 A5 的七族判据；D5 线程族与 R1 SEH 族均已 SCOPE 批准，见 FAMILY_STUB_APPROVED）
 /** 七族**之外**、按族列出以便看见进度的族（不进 A5 的七族判据） */
 export const EXTRA_FAMILIES = [
   { id: 'thread', title: '线程 / 定时器队列', names: [
@@ -182,8 +182,26 @@ export const EXTRA_FAMILIES = [
   ] },
 ];
 
-/** 已获 SCOPE 批准的"允许继续是 stub"的键（白名单；现在留空，批准后填 `module!name`） */
-export const FAMILY_STUB_APPROVED = [];
+/**
+ * 已获 SCOPE 批准的"允许继续是 stub"的键（白名单；`SCOPE.md` §1「线程 / 定时器队列」+「SEH / C++ 异常」，
+ * 用户 2026-11-04）。
+ * ★ 只列 **PE 导入表里真实出现** 的键：`CreateRemoteThread` / `_beginthreadex` 不在导入表 ⇒ 不进这里
+ *   （否则下面"白名单漂了"那条判定会红）。
+ */
+export const FAMILY_STUB_APPROVED = [
+  'kernel32!CreateThread',
+  'kernel32!ExitThread',
+  'kernel32!ResumeThread',
+  'kernel32!SetThreadPriority',
+  'kernel32!SetThreadAffinityMask',
+  'kernel32!GetProcessAffinityMask',
+  'kernel32!FreeLibraryAndExitThread',
+  'kernel32!CreateTimerQueue',
+  'kernel32!CreateTimerQueueTimer',
+  'kernel32!DeleteTimerQueueTimer',
+  'kernel32!RaiseException',
+  'kernel32!RtlUnwind',
+];
 
 const rel = (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/');
 const abs = (p) => path.join(REPO_ROOT, p);

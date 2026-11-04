@@ -3,6 +3,8 @@
 // 判据（plan §5 A5 / §4 D6 "码页与字符串族"）：
 //   ① `GetLocaleInfoW` 按**表**回答：常用 LCType 的字符串 / 数值形态、`LOCALE_RETURN_NUMBER`、
 //      `cchData==0` 问大小、缓冲太小 ⇒ 0 + ERROR_INSUFFICIENT_BUFFER、不支持的类型 / LCID ⇒ 0 + 87；
+//   ①' `GetLocaleInfoA` 与 W **同表同口径**（差别只在字节数 / CP932 编码 / 数值返回 4）：
+//      A 的字节串 == W 的 UTF-16 结果的 CP932 投影；`LOCALE_USE_CP_ACP` 被接受；
 //   ② `EnumSystemLocalesA` 的**回调语义**：guest 回调真的被调用（不是"登记了就算"）、
 //      参数是 8 位十六进制 LCID 串、顺序确定、回调返回 FALSE 时**停止**后续回调。
 //      ★ 这条同时是**框架能力**的判据：shim 里把控制权交回 guest（`ShimCall::take_control` +
@@ -15,6 +17,7 @@
 
 #include "check.h"
 #include "fixture.h"
+#include "runtime/cp932.h"
 #include "runtime/machine.h"
 #include "shims/register.h"
 
@@ -25,12 +28,16 @@ using lift_fixture::Fixture;
 
 constexpr std::uint32_t kErrInvalidParameter = 87u;
 constexpr std::uint32_t kErrInsufficientBuffer = 122u;
+constexpr std::uint32_t kErrInvalidFlags = 1008u;
 
 // LCType（与 kernel32_string.cpp 的常量同一组 Win32 数值）
 constexpr std::uint32_t kLocaleSISO639LangName = 0x00000059u;
 constexpr std::uint32_t kLocaleSName = 0x0000005cu;
+constexpr std::uint32_t kLocaleSNativeLangName = 0x00000004u;
+constexpr std::uint32_t kLocaleSShortDate = 0x0000001fu;
 constexpr std::uint32_t kLocaleIDefaultAnsiCodePage = 0x00001004u;
 constexpr std::uint32_t kLocaleReturnNumber = 0x20000000u;
+constexpr std::uint32_t kLocaleUseCpAcp = 0x40000000u;
 constexpr std::uint32_t kLocaleUserDefault = 0x00000400u;
 constexpr std::uint32_t kLocaleJaJp = 0x00000411u;
 
@@ -38,6 +45,17 @@ std::u16string guestWstr(lift::Machine& m, std::uint32_t ea, std::uint32_t cap =
     std::u16string s;
     for (std::uint32_t i = 0; i < cap; ++i) {
         const char16_t c = static_cast<char16_t>(m.mem().rd16(ea + i * 2u));
+        if (c == 0) break;
+        s.push_back(c);
+    }
+    return s;
+}
+
+// A 版结果：以结尾 0 为止的字节串
+std::string guestAstr(lift::Machine& m, std::uint32_t ea, std::uint32_t cap = 256) {
+    std::string s;
+    for (std::uint32_t i = 0; i < cap; ++i) {
+        const char c = static_cast<char>(m.mem().rd8(ea + i));
         if (c == 0) break;
         s.push_back(c);
     }
@@ -101,6 +119,76 @@ int main() {
         LIFT_CHECK_EQ_U32(f.call(gli, {kLocaleUserDefault, kLocaleSName | kLocaleReturnNumber, numbuf,
                                        4u}),
                           0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ①' GetLocaleInfoA：与 W 同表同口径（字节数 / CP932 / 数值返回 4）
+    {
+        g_current_case = "get-locale-info-a";
+        Fixture f;
+        lift::registerStringShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t gliw = f.use("GetLocaleInfoW");
+        const std::uint32_t glia = f.use("GetLocaleInfoA");
+        const std::uint32_t wbuf = f.zeroData(256);
+        const std::uint32_t abuf = f.zeroData(256);
+
+        struct Pair {
+            std::uint32_t lcid;
+            std::uint32_t type;
+        };
+        const Pair pairs[] = {
+            {kLocaleUserDefault, kLocaleSName},
+            {kLocaleJaJp, kLocaleSName},
+            {kLocaleJaJp, kLocaleSNativeLangName},  // 日本語（CP932 多字节）
+            {kLocaleJaJp, kLocaleSShortDate},       // yy/MM/dd
+            {kLocaleUserDefault, kLocaleSISO639LangName},
+        };
+        for (const Pair& p : pairs) {
+            LIFT_CHECK(f.call(gliw, {p.lcid, p.type, wbuf, 256u}) != 0u);
+            const std::string expect = lift::wideToCp932(guestWstr(f.m, wbuf));
+            // A 的字节串 == W 的 UTF-16 结果的 CP932 投影；返回值 = 字节数（含结尾 0）
+            LIFT_CHECK_EQ_U32(f.call(glia, {p.lcid, p.type, abuf, 256u}),
+                              static_cast<std::uint32_t>(expect.size() + 1));
+            LIFT_CHECK(guestAstr(f.m, abuf) == expect);
+            // cchData==0 ⇒ 所需字节数（含结尾 0）—— 与 W 的"字符数"是**不同**的量
+            LIFT_CHECK_EQ_U32(f.call(glia, {p.lcid, p.type, 0u, 0u}),
+                              static_cast<std::uint32_t>(expect.size() + 1));
+        }
+
+        // `LOCALE_USE_CP_ACP` 是 A 版专属 flag：接受、结果不变（本机系统 ACP 与 ja-JP 的 locale ACP 都是 932）
+        LIFT_CHECK_EQ_U32(
+            f.call(glia, {kLocaleJaJp, kLocaleSNativeLangName | kLocaleUseCpAcp, abuf, 256u}),
+            static_cast<std::uint32_t>(lift::wideToCp932(u"日本語").size() + 1));
+        LIFT_CHECK(guestAstr(f.m, abuf) == lift::wideToCp932(u"日本語"));
+
+        // 缓冲太小 ⇒ 0 + ERROR_INSUFFICIENT_BUFFER（⛔ 不截断）
+        LIFT_CHECK_EQ_U32(f.call(glia, {kLocaleUserDefault, kLocaleSName, abuf, 3u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInsufficientBuffer);
+
+        // 数值形态：返回 4（A 版 = sizeof(DWORD)）；cchData==0 ⇒ 4；cap<4 ⇒ 0 + 122
+        const std::uint32_t numbuf = f.u32data(0u);
+        LIFT_CHECK_EQ_U32(f.call(glia, {kLocaleJaJp,
+                                        kLocaleIDefaultAnsiCodePage | kLocaleReturnNumber, numbuf, 4u}),
+                          4u);
+        LIFT_CHECK_MEM_U32(f.m.mem(), numbuf, 932u);
+        LIFT_CHECK_EQ_U32(f.call(glia, {kLocaleJaJp,
+                                        kLocaleIDefaultAnsiCodePage | kLocaleReturnNumber, 0u, 0u}),
+                          4u);
+        LIFT_CHECK_EQ_U32(f.call(glia, {kLocaleJaJp,
+                                        kLocaleIDefaultAnsiCodePage | kLocaleReturnNumber, numbuf, 3u}),
+                          0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInsufficientBuffer);
+
+        // 非法 LCID / LCType / flag / NULL 缓冲 ⇒ 与 W **同一套**错误码
+        LIFT_CHECK_EQ_U32(f.call(glia, {0x00000407u, kLocaleSName, abuf, 256u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK_EQ_U32(f.call(glia, {kLocaleUserDefault, 0x00000099u, abuf, 256u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK_EQ_U32(f.call(glia, {kLocaleUserDefault, kLocaleSName | 0x01000000u, abuf, 256u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidFlags);
+        LIFT_CHECK_EQ_U32(f.call(glia, {kLocaleUserDefault, kLocaleSName, 0u, 8u}), 0u);
         LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
         LIFT_CHECK(f.ok);
     }

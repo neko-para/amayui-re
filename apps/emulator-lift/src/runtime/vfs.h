@@ -24,8 +24,24 @@ struct HostDirEntry {
     bool is_file = false;
     std::uint64_t size = 0;
     std::uint32_t attributes = 0;  // FILE_ATTRIBUTE_* 的跨平台近似
-    std::int64_t write_time_100ns = 0;  // 自 1601-01-01 起的 100ns（Windows FILETIME）
+    // 三个宿主时间（自 1601-01-01 起的 100ns = Windows FILETIME）；取不到时回退成 write、
+    // 或按文档留 0（"文件系统不支持"）。
+    std::uint64_t create_time_100ns = 0;
+    std::uint64_t access_time_100ns = 0;
+    std::uint64_t write_time_100ns = 0;
 };
+
+// 一个宿主路径的三个时间（FILETIME 100ns）。
+struct HostFileTimes {
+    std::uint64_t create_100ns = 0;
+    std::uint64_t access_100ns = 0;
+    std::uint64_t write_100ns = 0;
+};
+
+// 取宿主文件的三个时间。★ 平台抽象走 **SDL3 的 `SDL_GetPathInfo`**（Windows / APFS / Linux 都实现，
+// 含创建时间与访问时间；`std::filesystem` 只有 mtime），实现里**不写 `#ifdef` 平台分支**。
+// 失败（路径不存在 / SDL 不可用）⇒ false，调用方回退到 `std::filesystem::last_write_time`。
+bool hostFileTimes(const std::string& host_path, HostFileTimes* out);
 
 class Vfs {
 public:

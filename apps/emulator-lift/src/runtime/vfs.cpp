@@ -14,8 +14,9 @@
 //   · **通配符**只实现游戏实际用到的形态：`*`（任意串）/ `?`（**一个 UTF-8 码点**）/ `*.*`（匹配全部），
 //     另按 Windows 语义补一条"尾部 `.*` 可省"（`foo.*` 也匹配 `foo`）。非法形态（`**` / 模式段为空
 //     或以分隔符结尾 / 模式段是 `.` 或 `..`）⇒ 失败 + error，⛔ 不静默忽略。
-//   · **时间**：`std::filesystem::file_time_type` → FILETIME 的转换用"**此刻**两个钟的差值"做近似
-//     ⇒ 同一次运行内确定、单调，但**不追求跨机器 / 跨时刻精确**（见 fileTime100ns 的注释）。
+//   · **时间**：三个时间（创建 / 访问 / 修改）走 **SDL3 `SDL_GetPathInfo`**（平台真值，实现里没有
+//     `#ifdef`）；只有 SDL 失败时才退回 `std::filesystem::last_write_time`，并用
+//     `fileTime100ns` 的"此刻两钟差值"近似 ⇒ 三值相同、只在同一次运行内单调。
 //   · **宿主路径一律 UTF-8 字符串**。C++20 下用 `char8_t` 构造/取出 `fs::path`（与已弃用的
 //     `u8path` 语义相同，但不触发弃用警告）；Windows 上 `fs::path` 内部是 wchar_t。
 //   · 这是**叶子设施**：不缓存、不碰 guest 内存、不打日志（shim 负责这些）。
@@ -29,6 +30,9 @@
 //   4. **`..` 的折叠只看文本**：不做符号链接感知（不 realpath）。宿主目录里若放了目录符号链接，
 //      穿过它之后的路径仍按文本判定"在根下"；⛔ 这不是安全边界，只是路径映射。
 #include "runtime/vfs.h"
+
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_time.h>
 
 #include <algorithm>
 #include <chrono>
@@ -359,6 +363,28 @@ bool wildcardMatch(const std::string& pat, const std::string& name) {
 }  // namespace
 
 // =======================================================================================
+// 宿主文件时间（平台抽象 = SDL3；⛔ 这里没有 `#ifdef` 平台分支）
+// =======================================================================================
+bool hostFileTimes(const std::string& host_path, HostFileTimes* out) {
+    if (!out) return false;
+    SDL_PathInfo info{};
+    if (!SDL_GetPathInfo(host_path.c_str(), &info)) return false;
+    // SDL_Time = 自 1970 起的**纳秒**；`SDL_TimeToWindows` 转成 FILETIME（100ns 自 1601）。
+    // ★ 0 表示"这个文件系统不提供该时间" ⇒ 按 Windows 文档留 FILETIME 0，⛔ 不编一个 1970。
+    auto toWindows100ns = [](SDL_Time t) -> std::uint64_t {
+        if (t <= 0) return 0;
+        Uint32 lo = 0;
+        Uint32 hi = 0;
+        SDL_TimeToWindows(t, &lo, &hi);
+        return (static_cast<std::uint64_t>(hi) << 32) | lo;
+    };
+    out->create_100ns = toWindows100ns(info.create_time);
+    out->access_100ns = toWindows100ns(info.access_time);
+    out->write_100ns = toWindows100ns(info.modify_time);
+    return true;
+}
+
+// =======================================================================================
 // Vfs
 // =======================================================================================
 void Vfs::setGameDir(const std::string& host_dir) {
@@ -551,8 +577,21 @@ bool Vfs::find(const std::string& guest_pattern, std::vector<HostDirEntry>* out,
         const fs::file_status st = it->status(ec4);
         if (!ec4) e.attributes = attributesOfStatus(st);
         ec4.clear();
-        const auto wt = it->last_write_time(ec4);
-        if (!ec4) e.write_time_100ns = fileTime100ns(wt);
+        // 三个时间取宿主真值（SDL3）；失败才退回 mtime 近似（三值相同）
+        HostFileTimes times;
+        if (hostFileTimes(pathToUtf8(p), &times)) {
+            e.create_time_100ns = times.create_100ns;
+            e.access_time_100ns = times.access_100ns;
+            e.write_time_100ns = times.write_100ns;
+        } else {
+            const auto wt = it->last_write_time(ec4);
+            if (!ec4) {
+                const auto t = static_cast<std::uint64_t>(fileTime100ns(wt));
+                e.create_time_100ns = t;
+                e.access_time_100ns = t;
+                e.write_time_100ns = t;
+            }
+        }
         if (out) out->push_back(std::move(e));
 
         it.increment(ec);
