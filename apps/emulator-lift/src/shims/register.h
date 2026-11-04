@@ -21,6 +21,11 @@ namespace lift {
 // S7 启动路径上补的 shim（见 kernel32_bootstrap.cpp）
 void registerBootstrapShims(ShimRegistry& shims);
 
+// ★ 派生文件（`pnpm tools lift sync --write` 生成，⛔ 不要手改）：
+//   PE 导入表里有、但既没实现也没登记的条目 ⇒ 全部 addUnimplemented（带 reason）。
+//   它让"静态缺口 = 0 条无理由"可机械判定（`pnpm tools lift check`）。
+void registerImportGaps(ShimRegistry& shims);
+
 
 // 七族的唯一入口（Machine 装配时调一次）。定义在 register.cpp。
 void registerKernel32Shims(ShimRegistry& shims);
@@ -30,7 +35,11 @@ void registerErrorTlsShims(ShimRegistry& shims);  // kernel32_error_tls.cpp
 void registerMemShims(ShimRegistry& shims);       // kernel32_mem.cpp
 void registerSyncShims(ShimRegistry& shims);      // kernel32_sync.cpp
 void registerProcessShims(ShimRegistry& shims);   // kernel32_process.cpp
+void registerFileShims(ShimRegistry& shims);      // kernel32_file.cpp（文件与路径族，S6）
 void registerTimeShims(ShimRegistry& shims);      // kernel32_time.cpp
+void registerStringShims(ShimRegistry& shims);    // kernel32_string.cpp（码页与字符串族）
+void registerAgercShims(ShimRegistry& shims);     // kernel32_agerc.cpp（AGERC 三个导出，整体 stub）
+void registerVersionShims(ShimRegistry& shims);   // kernel32_version.cpp（版本资源查询：真实失败码）
 
 // ---- 共用的诊断打印（一行一条，stderr；不受 --trace 影响 —— 缺口感必须是常亮的）----
 inline void shimVPrint(const char* module, const char* name, const char* fmt, va_list ap) {

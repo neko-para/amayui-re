@@ -45,6 +45,10 @@ void usage() {
         "emulator-lift —— 在 guest-state x86 上执行 AGE.EXE 的机器码（M1a）\n"
         "  --exe <path>        执行源（缺省：env LIFT_AGE_EXE → 仓库内 corpus/assets/age/…sectfix.EXE）\n"
         "  --lst <path>        .lst 语料（诊断 / A3 对照；缺省自动找 corpus/disasm/files/…）\n"
+        "  --game-dir <path>   guest 文件系统的**唯一根**（S6 文件与路径族；缺省 env AMAYUI_GAME_DIR）\n"
+        "  --guest-root <path> guest 眼里的安装根文本（缺省 E:\\Games\\Eushully\\天結；只用于路径前缀）\n"
+        "  --real-time         用宿主时钟（此时 A4 的逐字节断言自动跳过并明说）\n"
+        "  --trace-inputs      打印 trace 输入清单（exe 路径串 / guest 命令行 / 环境块 / 时钟起点）\n"
         "  --until shim        跑到第一次 shim 调用就停（L1）\n"
         "  --until ea <hex>    跑到指定 EA 就停（L2 = 0x4BA890）\n"
         "  --max-insns <N>     最多执行 N 条指令\n"
@@ -64,12 +68,16 @@ int main(int argc, char** argv) {
     bool trace_blocks = false;
     bool safe_memory = false;
     bool report = false;
+    bool real_time = false;
+    bool trace_inputs = false;
     std::uint64_t bench = 0;
     std::uint32_t max_insns = 0;
     std::uint32_t until_ea = 0;
     bool until_shim = false;
     std::string exe_path;
     std::string lst_path;
+    std::string game_dir;
+    std::string guest_root;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -79,6 +87,14 @@ int main(int argc, char** argv) {
             exe_path = argv[++i];
         } else if (std::strcmp(a, "--lst") == 0 && i + 1 < argc) {
             lst_path = argv[++i];
+        } else if (std::strcmp(a, "--game-dir") == 0 && i + 1 < argc) {
+            game_dir = argv[++i];
+        } else if (std::strcmp(a, "--guest-root") == 0 && i + 1 < argc) {
+            guest_root = argv[++i];
+        } else if (std::strcmp(a, "--real-time") == 0) {
+            real_time = true;
+        } else if (std::strcmp(a, "--trace-inputs") == 0) {
+            trace_inputs = true;
         } else if (std::strcmp(a, "--until") == 0 && i + 1 < argc) {
             const char* what = argv[++i];
             if (std::strcmp(what, "shim") == 0) {
@@ -184,6 +200,21 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "emulator-lift: 建 guest 地址空间失败：%s\n", err.c_str());
         return 1;
     }
+    if (game_dir.empty()) game_dir = envOr("AMAYUI_GAME_DIR");
+    if (game_dir.empty()) game_dir = envOr("AMAYUI_INSTALL");
+    if (game_dir.empty()) {
+        const char* fallback = "E:\\Games\\Eushully\\天結";
+        if (fileExists(std::string(fallback) + "\\AGE.EXE")) game_dir = fallback;
+    }
+    if (!game_dir.empty()) {
+        machine.vfs().setGameDir(game_dir);
+        std::printf("game-dir  : %s\n", game_dir.c_str());
+    } else {
+        std::fprintf(stderr,
+                     "emulator-lift: ⚠ 没有 --game-dir（也没有 AMAYUI_GAME_DIR）：文件与路径族会**响亮失败**\n"
+                     "  （S6：guest 路径只映射到 --game-dir；⛔ 不回退到任意宿主目录）\n");
+    }
+    if (!guest_root.empty()) machine.vfs().setGuestRoot(guest_root);
     if (!machine.loadImage(exe_path, &err)) {
         std::fprintf(stderr, "emulator-lift: 载入 PE 失败（%s）：%s\n", exe_path.c_str(), err.c_str());
         return 1;
@@ -245,7 +276,12 @@ int main(int argc, char** argv) {
     }
 
     if (report) {
-        machine.reportBaseGaps(stdout);
+        const bool json = std::getenv("LIFT_REPORT_JSON") != nullptr;
+        if (json) {
+            machine.reportCoverageJson(stdout);
+        } else {
+            machine.reportBaseGaps(stdout);
+        }
         return 0;
     }
 
@@ -255,6 +291,13 @@ int main(int argc, char** argv) {
     opt.max_insns = bench ? bench : max_insns;
     opt.trace_shims = trace_shims;
     opt.trace_blocks = trace_blocks;
+    opt.real_time = real_time;
+    opt.trace_inputs = trace_inputs || trace_shims;
+    if (real_time) {
+        std::fprintf(stderr,
+                     "emulator-lift: ⚠ --real-time：宿主时钟进 guest ⇒ **A4 的逐字节可复现断言自动跳过**"
+                     "（trace 输入清单里的 clock=REAL-TIME）\n");
+    }
 
     const std::uint64_t t0 = SDL_GetTicksNS();
     const lift::RunResult r = machine.run(opt);

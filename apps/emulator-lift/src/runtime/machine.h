@@ -19,6 +19,7 @@
 #include "runtime/image.h"
 #include "runtime/memory.h"
 #include "runtime/shims.h"
+#include "runtime/vfs.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -41,6 +42,18 @@ struct RunOptions {
     bool stop_on_first_shim = false; // L1
     bool trace_shims = false;        // 打进 stdout（确定性）
     bool trace_blocks = false;       // 块级 trace（调试）
+    // ★ A4 口径：默认虚拟时钟；`real_time=true` 才接宿主时钟 —— 此时逐字节断言必须由调用方跳过并明说。
+    bool real_time = false;
+    bool trace_inputs = false;       // 打印输入清单（exe 路径串 / guest 命令行 / 环境块 / 时钟起点）
+};
+
+// A4 的**输入清单**（plan §5 A4）：这几项一变，执行路径就可能变。
+struct TraceInputs {
+    std::string exe_path;       // `--exe` 的原始字符串（相对 / 绝对都原样记）
+    std::string guest_cmdline;  // guest 读到的命令行
+    std::string environment;    // 环境块（ANSI 视图；分隔符 ';'）
+    std::uint64_t clock_start_100ns = 0;
+    bool real_time = false;
 };
 
 struct RunResult {
@@ -91,6 +104,8 @@ public:
     VirtualClock& clock() { return clock_; }
     GuestHeap& heap() { return heap_; }
     HandleTable& handles() { return handles_; }
+    Vfs& vfs() { return vfs_; }
+    const Vfs& vfs() const { return vfs_; }
     LstIndex& lst() { return lst_; }
     const LstIndex& lst() const { return lst_; }
     const PeImage& image() const { return image_; }
@@ -101,10 +116,19 @@ public:
 
     // 诊断
     void reportBaseGaps(std::FILE* out) const;
+    // A4 输入清单（plan §5 A4）：trace 的"输入"必须显式 —— 换个 --exe 路径写法就是另一条执行路径。
+    TraceInputs traceInputs() const;
+    void dumpTraceInputs(std::FILE* out) const;
+    std::uint64_t traceInputsHash() const;  // 输入归一化后的指纹（两次运行必须相同）
+    // 机器可读的缺口/覆盖快照（给 `tools/lift.mjs report` 用；⛔ 人读输出不要靠它）
+    void reportCoverageJson(std::FILE* out) const;
     void dumpRunSummary(const RunResult& r, std::FILE* out) const;
 
 private:
     void wire();
+    // winmm 定时器：找到期最早的一个并把控制权交给 guest 回调（协作式；见 x86.h 的 GuestTimer）。
+    // 返回 true = 已铺好回调帧（调用方应 continue）；false = 没有到期项或铺帧失败（后者设 r）。
+    bool fireDueTimer(RunResult& r);
     friend void liftFaultHook(const AccessSite& site);
 
     GuestMemory mem_;
@@ -112,6 +136,7 @@ private:
     BlockCache cache_;
     ShimRegistry shims_;
     VirtualClock clock_;
+    Vfs vfs_;
     GuestHeap heap_;
     HandleTable handles_;
     LstIndex lst_;

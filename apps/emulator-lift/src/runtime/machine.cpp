@@ -62,6 +62,7 @@ void Machine::wire() {
     cpu_.handles = &handles_;
     cpu_.clock = &clock_;
     cpu_.shims = &shims_;
+    cpu_.vfs = &vfs_;
     cpu_.cache = &cache_;
     cpu_.lst = &lst_;
     cpu_.fpu.reset();
@@ -95,6 +96,7 @@ bool Machine::loadImage(const std::string& exe_path, std::string* err) {
     if (!mapPeImage(mem_, image_, err)) return false;
     image_loaded_ = true;
     cpu_.shim.module_handle = image_.image_base;
+    cpu_.shim.module_size = image_.size_of_image;
     return true;
 }
 
@@ -129,6 +131,7 @@ bool Machine::prepare(std::uint32_t entry_override, std::string* err) {
     mem_.wr32(cpu_.esp(), 0xFFFFFFFFu);  // 栈顶的返回地址哨兵：真回到它就停
     cpu_.shim.cmdline_ea = setup_.cmdline_ea;
     cpu_.shim.exe_path_ea = setup_.exe_path_ea;
+    cpu_.shim.env_ea = setup_.env_ea;
     cpu_.shim.va_cursor = 0x20000000u;
     cpu_.shim.va_limit = 0x28000000u;
     return true;
@@ -182,11 +185,25 @@ bool Machine::prepareStack(std::string* err) {
 RunResult Machine::run(const RunOptions& opts) {
     RunResult r;
     shims_.setTrace(opts.trace_shims, stdout);
+    if (opts.real_time) clock_.setRealTime(true);
+    if (opts.trace_inputs) dumpTraceInputs(stdout);
     // 诊断开关：LIFT_TRACE_FULL=1 ⇒ `--trace-blocks` 每条带操作数文本 + 寄存器快照（缺省关）
     const bool traceFull = std::getenv("LIFT_TRACE_FULL") != nullptr;
     cpu_.running = true;
 
     while (cpu_.running) {
+        // ★ winmm 定时器回调的返回点（协作式定时器；见 x86.h 的 kTimerCallbackReturnEa）
+        if (cpu_.eip == kTimerCallbackReturnEa) {
+            if (!cpu_.shim.timer_firing) {
+                r.reason = StopReason::Unimplemented;
+                r.detail = "定时器续延点被调到，但没有正在跑的定时器回调";
+                break;
+            }
+            cpu_.esp() = cpu_.shim.timer_saved_esp;
+            cpu_.eip = cpu_.shim.timer_resume_ea;
+            cpu_.shim.timer_firing = false;
+            continue;
+        }
         if (opts.until_ea && cpu_.eip == opts.until_ea) {
             r.reason = StopReason::UntilEa;
             break;
@@ -194,6 +211,12 @@ RunResult Machine::run(const RunOptions& opts) {
         if (opts.max_insns && cpu_.insns >= opts.max_insns) {
             r.reason = StopReason::MaxInsns;
             break;
+        }
+        // ★ 到期的 winmm 定时器在**块边界**触发（D5：没有定时器服务线程）。
+        //   ⛔ 不嵌套：一个回调没跑完就不再触发下一个（与真机的单线程回调串行一致）。
+        if (!cpu_.shim.timer_firing && !cpu_.shim.timers.empty() && !cpu_.shim.callback.active) {
+            if (fireDueTimer(r)) continue;
+            if (r.reason != StopReason::None) break;
         }
 
         Block* b = cache_.get(cpu_.eip);
@@ -301,6 +324,95 @@ RunResult Machine::run(const RunOptions& opts) {
     return r;
 }
 
+bool Machine::fireDueTimer(RunResult& r) {
+    const std::uint64_t now = clock_.now100ns();
+    std::vector<GuestTimer>& timers = cpu_.shim.timers;
+    std::size_t best = timers.size();
+    for (std::size_t i = 0; i < timers.size(); ++i) {
+        if (timers[i].due_100ns > now) continue;
+        // 确定性：同刻到期时取 id 最小的（⛔ 不依赖 vector 的插入顺序）
+        if (best == timers.size() || timers[i].due_100ns < timers[best].due_100ns ||
+            (timers[i].due_100ns == timers[best].due_100ns && timers[i].id < timers[best].id)) {
+            best = i;
+        }
+    }
+    if (best == timers.size()) return false;
+
+    const GuestTimer t = timers[best];
+    if (t.oneshot) {
+        timers.erase(timers.begin() + static_cast<std::ptrdiff_t>(best));
+    } else {
+        // 周期定时器先续约（回调里 timeKillEvent 仍能按 id 杀掉它）
+        timers[best].due_100ns += static_cast<std::uint64_t>(t.period_ms) * 10000ull;
+    }
+    if (t.callback == 0) {
+        std::fprintf(stderr, "[lift] 定时器 %u 的回调为 NULL ⇒ 丢弃\n", t.id);
+        return false;
+    }
+    // 回调帧：TimeProc(uID, uMsg, dwUser, dw1, dw2)（stdcall，5 个参数 = 20 字节 + 返回地址）
+    constexpr std::uint32_t kFrame = 4u + 5u * 4u;
+    const std::uint32_t base = cpu_.esp();
+    if (base < kFrame || !mem_.committed(base - kFrame, kFrame)) {
+        r.reason = StopReason::Unimplemented;
+        r.detail = "guest 栈不够铺定时器回调帧（esp=" + std::to_string(base) + "）";
+        return false;
+    }
+    cpu_.shim.timer_resume_ea = cpu_.eip;
+    cpu_.shim.timer_saved_esp = base;
+    cpu_.shim.timer_firing = true;
+    cpu_.shim.timer_firing_id = t.id;
+    cpu_.esp() = base - kFrame;
+    mem_.wr32(base - 24u, kTimerCallbackReturnEa);
+    mem_.wr32(base - 20u, t.id);
+    mem_.wr32(base - 16u, 0u);  // uMsg（文档：保留，不用）
+    mem_.wr32(base - 12u, t.user);
+    mem_.wr32(base - 8u, 0u);   // dw1（保留）
+    mem_.wr32(base - 4u, 0u);   // dw2（保留）
+    cpu_.eip = t.callback;
+    return true;
+}
+
+TraceInputs Machine::traceInputs() const {    TraceInputs t;
+    // ★ 记 `--exe` 的**原始字符串**（不是解析后的绝对路径）：plan §5 A4 实测，同一台机器上
+    //   相对路径 38,456 / 绝对路径 44,184 / 87 字符路径 53,134 条指令 —— 换个写法就是另一条路径。
+    t.exe_path = setup_.exe_path.empty() ? exe_path_ : setup_.exe_path;
+    t.guest_cmdline = setup_.cmdline;
+    t.environment = setup_.environment_ansi;
+    t.clock_start_100ns = clock_.epoch100ns();
+    t.real_time = clock_.realTime();
+    return t;
+}
+
+void Machine::dumpTraceInputs(std::FILE* out) const {
+    const TraceInputs t = traceInputs();
+    std::fprintf(out, "trace-input exe      = %s\n", t.exe_path.c_str());
+    std::fprintf(out, "trace-input cmdline  = %s\n", t.guest_cmdline.c_str());
+    std::fprintf(out, "trace-input env      = %s\n", t.environment.c_str());
+    std::fprintf(out, "trace-input clock    = %s (start=%llu x100ns)\n",
+                 t.real_time ? "REAL-TIME（⚠ 逐字节断言必须跳过）" : "virtual",
+                 (unsigned long long)t.clock_start_100ns);
+    std::fprintf(out, "trace-input hash     = %016llX\n", (unsigned long long)traceInputsHash());
+}
+
+std::uint64_t Machine::traceInputsHash() const {
+    const TraceInputs t = traceInputs();
+    std::uint64_t h = 0xCBF29CE484222325ull;
+    auto mix = [&h](const void* p, std::size_t n) {
+        const auto* b = static_cast<const std::uint8_t*>(p);
+        for (std::size_t i = 0; i < n; ++i) {
+            h ^= b[i];
+            h *= 0x100000001B3ull;
+        }
+    };
+    mix(t.exe_path.data(), t.exe_path.size());
+    mix(t.guest_cmdline.data(), t.guest_cmdline.size());
+    mix(t.environment.data(), t.environment.size());
+    mix(&t.clock_start_100ns, sizeof(t.clock_start_100ns));
+    const std::uint8_t real = t.real_time ? 1 : 0;
+    mix(&real, 1);
+    return h;
+}
+
 void Machine::reportBaseGaps(std::FILE* out) const {
     const std::vector<const ShimDef*> gaps = shims_.importedButUnimplemented();
     std::fprintf(out, "导入总数 = %zu, 已实现 = %zu, 缺口 = %zu\n", shims_.importedCount(),
@@ -311,7 +423,30 @@ void Machine::reportBaseGaps(std::FILE* out) const {
     }
 }
 
+void Machine::reportCoverageJson(std::FILE* out) const {
+    // 三类分开数（plan 的 A5 要能回答"缺口是什么"）：
+    //   implemented  : 有实现（fn != nullptr）
+    //   stub         : 显式登记过 stub（declared && !fn）—— 必须有 reason
+    //   bare         : 导入表里有、连登记都没有（!declared && !fn）—— **裸缺口**
+    // 另加 imported 标志，让调用方能把"声明了但没被导入"的条目筛掉。
+    std::fprintf(out, "{\n  \"entries\": [\n");
+    bool first = true;
+    for (const ShimDef& d : shims_.all()) {
+        std::fprintf(out,
+                     "%s    {\"module\": \"%s\", \"name\": \"%s\", \"imported\": %s, \"implemented\": %s, "
+                     "\"declared\": %s, \"reason\": \"%s\"}",
+                     first ? "" : ",\n", d.module.c_str(), d.name.c_str(), d.imported ? "true" : "false",
+                     d.fn ? "true" : "false", d.declared ? "true" : "false",
+                     d.reason ? d.reason : "");
+        first = false;
+    }
+    std::fprintf(out, "\n  ]\n}\n");
+}
+
 void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
+    const TraceInputs ti = traceInputs();
+    std::fprintf(out, "trace-in  : exe=%s | clock=%s | hash=%016llX\n", ti.exe_path.c_str(),
+                 ti.real_time ? "REAL-TIME" : "virtual", (unsigned long long)traceInputsHash());
     if (r.reason != StopReason::UntilEa && r.reason != StopReason::MaxInsns && cpu_.last_count > 0) {
         std::fprintf(out, "--- 最近执行的指令（最新在前）---\n");
         for (int i = 0; i < cpu_.last_count && i < 12; ++i) {

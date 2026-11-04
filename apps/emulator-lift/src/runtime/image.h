@@ -78,6 +78,11 @@ struct ProcessSetup {
     std::uint32_t peb = 0;
     std::uint32_t cmdline_ea = 0;     // guest 里的命令行字符串
     std::uint32_t exe_path_ea = 0;
+    std::uint32_t env_ea = 0;         // guest 里的环境块（UTF-16，NAME=VALUE\0…\0\0）
+    // ★ A4 的**输入清单**（plan §5 A4）：这几项一变，执行路径就可能变 ⇒ trace 必须记下来。
+    std::string exe_path;             // `--exe` 传进来的原始路径字符串（不是规范化后的）
+    std::string cmdline;              // guest 读到的命令行
+    std::string environment_ansi;     // 环境块的 ANSI 视图（人读 / 哈希用；分隔符 ';'）
 };
 
 // 建栈（1 MiB + guard 页）+ TEB/PEB + 命令行块。

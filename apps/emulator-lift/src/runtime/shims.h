@@ -33,6 +33,11 @@ struct ShimCall {
     std::uint32_t result = 0;     // 返回值（EAX）
     std::uint32_t ret_ea = 0;     // 返回地址（dispatcher 在调用前弹出）
     std::uint32_t stdcall_bytes = 0;  // 0 ⇒ argc*4
+    // ★ `take_control = true` ⇒ **shim 自己接管下一条 esp / eip**，invoke 不再弹参、不再写 eip
+    //   （返回值仍照常写 EAX）。只有"在 shim 里调用 guest 回调"这一种情形需要它：
+    //   `EnumSystemLocalesA` 把控制权交给 guest 回调，guest 返回后落到内部续延桩
+    //   （见 kernel32_string.cpp）。⛔ 普通实现不要设它 —— 设了就绕过了调用约定。
+    bool take_control = false;
 
     // 读参数（i 从 0 起）
     std::uint32_t u32(int i) const;
@@ -59,6 +64,8 @@ struct ShimDef {
     std::uint32_t stub_ea = 0;      // 唯一 guest 地址
     std::uint32_t id = 0;           // 从 0 起的稳定序号（trace 用）
     bool imported = false;          // 这个导入在本镜像的导入表里出现过
+    bool declared = false;          // true = host 侧**显式**登记过（add / addUnimplemented）
+                                    // false = 导入表里有、但我们连一行登记都没有（bind 现场补的）
     bool called = false;
     std::uint64_t call_count = 0;
 };
@@ -71,6 +78,10 @@ public:
     // ---- host 侧声明 ----
     void add(const char* module, const char* name, Conv conv, int argc, ShimFn fn);
     void addUnimplemented(const char* module, const char* name, const char* reason);
+    // ★ 有实现、但**按 SCOPE 的偏差整体 stub**（例：AGERC 的三个导出 thunk）。
+    //   `fn` 非空（会返回合理值 + 打一行日志），`reason` 非空（覆盖清单里 kind=stub）。
+    //   `stub_ea` 在 bind() 里分配（与导入同一个桩页；它不是导入，所以 IAT 里不会出现）。
+    void addStub(const char* module, const char* name, Conv conv, int argc, ShimFn fn, const char* reason);
 
     // ---- 绑定：给镜像里每个导入分唯一地址，并把地址写回 IAT 槽 ----
     // `shim_page` / `shim_slots`：桩页起点与槽数（GuestLayout 提供）

@@ -84,6 +84,7 @@ void ShimRegistry::add(const char* module, const char* name, Conv conv, int argc
     def.argc = argc;
     def.fn = fn;
     def.id = static_cast<std::uint32_t>(defs_.size());
+    def.declared = true;
     defs_.push_back(std::move(def));
 }
 
@@ -96,6 +97,21 @@ void ShimRegistry::addUnimplemented(const char* module, const char* name, const 
     def.fn = nullptr;
     def.reason = reason;
     def.id = static_cast<std::uint32_t>(defs_.size());
+    def.declared = true;
+    defs_.push_back(std::move(def));
+}
+
+void ShimRegistry::addStub(const char* module, const char* name, Conv conv, int argc, ShimFn fn,
+                           const char* reason) {
+    ShimDef def;
+    def.module = module ? module : "";
+    def.name = name ? name : "";
+    def.conv = conv;
+    def.argc = argc;
+    def.fn = fn;
+    def.reason = reason;
+    def.id = static_cast<std::uint32_t>(defs_.size());
+    def.declared = true;
     defs_.push_back(std::move(def));
 }
 
@@ -139,6 +155,7 @@ bool ShimRegistry::bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim
             d.argc = 0;
             d.fn = nullptr;
             d.reason = "导入表里有，但既没有实现也没有 addUnimplemented 登记";
+            d.declared = false;  // 连一行登记都没有 ⇒ 这是"裸缺口"
             d.id = static_cast<std::uint32_t>(defs_.size());
             defs_.push_back(std::move(d));
             def = &defs_.back();
@@ -160,6 +177,18 @@ bool ShimRegistry::bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim
         mem.wr32(iat_ea, def->stub_ea);
     }
     (void)unresolved;
+    // ★ 非导入的显式桩（addStub / addUnimplemented，但 IAT 里没有它）：同样分到唯一地址。
+    //   典型：`GetProcAddress` 对 AGERC 导出返回的 thunk（guest 侧 `call eax` 落到 dispatcher）。
+    //   它们不进 IAT，所以不影响导入槽位；顺序 = 注册顺序（确定性）。
+    for (ShimDef& d : defs_) {
+        if (d.stub_ea != 0 || !d.declared) continue;
+        if (slot >= shim_slots) {
+            if (err) *err = "shim 桩页槽位不够（extras 也要唯一地址，shim_slots=" + std::to_string(shim_slots) + "）";
+            return false;
+        }
+        d.stub_ea = shim_page + slot * 4u;
+        ++slot;
+    }
     return true;
 }
 
@@ -226,6 +255,10 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
         }
         std::fprintf(trace_out_, ") -> %08X  ret=%08X\n", call.result, ret_ea);
     }
+
+    // ★ shim 接管了控制流（guest 回调 / 续延）：esp 与 eip 由它自己安排好，
+    //   这里**不许**再弹参或改写 eip（否则回调还没跑就被 return 掉了）。
+    if (call.take_control) return;
 
     // `ret N`（stdcall）或 `ret`（cdecl）：先弹返回地址，再抬 argc*4
     cpu.esp() += 4u + call.stdcall_bytes;

@@ -55,6 +55,26 @@ void x87Abs(Ext80 v);
 int x87Compare(const Ext80 a, const Ext80 b);
 bool x87IsNan(const Ext80 a);
 bool x87IsZero(const Ext80 a);
+bool x87IsInf(const Ext80 a);
+bool x87SignBit(const Ext80 a);
+
+// `fxam` 的分类（Empty 由调用方按 tag word 先判掉 —— 桥这层看不见 tag）
+enum class X87Class : std::uint8_t { Nan = 0, Infinity, Zero, Denormal, Normal };
+X87Class x87Classify(const Ext80 a);
+
+// `fxtract`：significand = [1,2) 的尾数（指数域 = bias），exponent = 带符号整数（extF80 表示）
+void x87Extract(const Ext80 a, Ext80 significand, Ext80 exponent);
+// `fprem`：**商截断**的余数（IEEE 的 `extF80_rem` 是商取最近偶数 ⇒ 那是 `fprem1`）
+void x87RemTrunc(const Ext80 a, const Ext80 b, Ext80 out);
+
+// 超越函数 / 宿主 libm 的唯一进出口（见 .cpp 顶部的 1 ulp 登记）
+double x87ToDouble(const Ext80 a);
+void x87FromDouble(double d, Ext80 out);
+
+// 异常标志（`extF80_*` 只置 `softfloat_exceptionFlags`；取走 / 清空由我们这层做）
+std::uint8_t x87PeekExceptionFlags();
+void x87ClearExceptionFlags();
+void x87RaiseInvalid();
 
 // 控制字 / 状态字的映射（PC = 精度控制，RC = 舍入控制）
 void x87ApplyControlWord(std::uint16_t control);

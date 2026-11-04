@@ -28,6 +28,7 @@ namespace lift {
 struct X86;
 class BlockCache;
 class LstIndex;
+class Vfs;
 
 // x87 状态（8 寄存器栈 + 控制/状态字 + TOP + tag）
 struct X87State {
@@ -46,6 +47,50 @@ struct X87State {
     void reset();
 };
 
+// guest 回调的续延状态（目前只有 `EnumSystemLocalesA` 用；一台 Machine 一份 ⇒ 放进 ShimState）
+//
+// ★ 机制（为什么需要它）：shim 是"被 dispatcher 调用的宿主函数"，它**不能**在栈里直接调 guest
+//   代码。所以把控制权交回去：
+//     ① shim 把 guest 栈铺成回调帧（`[esp]` = 续延桩地址，`[esp+4..]` = 参数），把 `cpu.eip`
+//        指向 guest 回调，并置 `ShimCall::take_control` ⇒ `invoke()` 不再改写 esp/eip；
+//     ② 回调 `ret` 落到**续延桩**（一块 `BlockCache::installShim` 出来的块），它的 shim 读这份状态，
+//        决定"下一个回调"还是"恢复原始 esp/eip 返回调用点"。
+//   ⛔ 不要用它做"通用异步"：本模拟器没有线程 / APC，这里只是"同步枚举回调"的一条受控通道。
+struct GuestCallbackState {
+    bool active = false;             // 有未完成的枚举
+    std::uint32_t ret_ea = 0;        // 原始调用点的返回地址
+    std::uint32_t saved_esp = 0;     // 原始调用点的 esp（指向 ret_ea）
+    std::uint32_t cleanup_bytes = 0; // 收尾时要抬的栈字节（= 4 + argc*4，原本由 invoke() 做）
+    std::uint32_t callback_ea = 0;   // guest 回调地址
+    std::uint32_t scratch_ea = 0;    // 参数缓冲区（guest 堆；由发起方分配）
+    std::uint32_t scratch_len = 0;
+    std::vector<std::uint32_t> args; // 每次回调的第 0 个参数（指向 scratch 里的一个串）
+    std::size_t next = 0;            // 下一个要传的参数下标
+    const char* api = nullptr;       // 诊断用（"EnumSystemLocalesA"）
+};
+
+// ★ winmm 多媒体定时器的**协作式**实现（D5 单线程：没有定时器服务线程）
+//
+// 机制：`timeSetEvent` 只把定时器登记进 `ShimState::timers`（到期时刻用**虚拟时钟**算）。
+// dispatcher 在**块边界**检查"有没有到期的"；到期就把 guest 栈铺成回调帧、把 eip 指向回调：
+//     [esp]     = kTimerCallbackReturnEa（回调的返回地址）
+//     [esp+4..] = uID / uMsg(0) / dwUser / dw1(0) / dw2(0)     ← 文档的 TimeProc 五个参数
+// 回调 `ret 20` 回到 `kTimerCallbackReturnEa` ⇒ dispatcher 认出它、恢复被打断的 esp/eip，
+// 周期定时器重新排队。
+// ★ 与真机的差别只有一条：**回调不会抢占一条 basic block**（真机由 winmm 的线程抢占）。
+//   在块边界触发 ⇒ 同一个虚拟时钟输入下**结果确定**（A4 的前提），且比"永不触发"诚实。
+constexpr std::uint32_t kTimerCallbackReturnEa = 0x7FFEF004u;
+
+struct GuestTimer {
+    std::uint32_t id = 0;
+    std::uint64_t due_100ns = 0;     // 虚拟时钟的到期时刻
+    std::uint32_t period_ms = 0;     // 0 = 一次性
+    std::uint32_t callback = 0;      // guest TimeProc
+    std::uint32_t user = 0;          // dwUser
+    std::uint32_t resolution = 0;
+    bool oneshot = true;
+};
+
 // shim 需要跨调用保存的**进程级**状态（⛔ 不要用 C++ 静态变量：一台机器一份）。
 struct ShimState {
     std::uint32_t last_error = 0;        // GetLastError / SetLastError
@@ -55,13 +100,27 @@ struct ShimState {
     std::uint32_t thread_handle = 0xFFFFFFFEu;
     std::uint32_t heap_handle = 0x00010000u;      // GetProcessHeap 的返回
     std::uint32_t module_handle = 0;              // 主模块（= image_base）
+    std::uint32_t module_size = 0;                // 主模块的映射长度（SizeOfImage；GetModuleHandleEx(FROM_ADDRESS) 用）
+    std::uint32_t agerc_instance = 0;             // AGERC `_GetInstance` 的假实例（非空、确定性）
+    bool agerc_loaded = false;                    // LoadLibrary("AGERC.DLL") 过吗（GetProcAddress 的前提）
     std::uint32_t cmdline_ea = 0;                 // guest 里的命令行
     std::uint32_t exe_path_ea = 0;                // guest 里的 exe 全路径
+    std::uint32_t env_ea = 0;                     // guest 里的环境块（UTF-16）
     std::uint32_t va_cursor = 0;                  // VirtualAlloc 的 bump 指针
     std::uint32_t va_limit = 0;
     std::uint32_t exit_code = 0;
     std::uint32_t critical_section_count = 0;      // 统计用
     std::uint32_t unimplemented_calls = 0;         // 缺口计数（A5）
+    // ★ alertable 等待的语义缺口只提示一次（无 APC 队列 ⇒ 永不返回 WAIT_IO_COMPLETION）
+    bool warned_alertable = false;
+    GuestCallbackState callback;                   // guest 回调续延（EnumSystemLocalesA）
+    // ★ winmm 定时器（协作式；见上面的 GuestTimer / kTimerCallbackReturnEa）
+    std::vector<GuestTimer> timers;
+    std::uint32_t next_timer_id = 1;
+    bool timer_firing = false;                     // 正在跑某个定时器回调（不嵌套触发）
+    std::uint32_t timer_resume_ea = 0;             // 被打断的 eip
+    std::uint32_t timer_saved_esp = 0;             // 被打断的 esp
+    std::uint32_t timer_firing_id = 0;
 };
 
 struct X86 {
@@ -73,6 +132,12 @@ struct X86 {
     std::uint32_t fs_base = 0;      // guest TEB（⛔ 不是宿主 fs）
     std::uint32_t gs_base = 0;
     X87State fpu;
+    // MMX 复用 x87 寄存器槽的**低 64 位**（Intel：MMX 与 x87 共用同一组物理寄存器）；
+    // SSE 的 XMM 是独立寄存器文件（32 位 guest 只有 xmm0..7）。按 32 位小端 lane 存：
+    // `xmm[i][0]` = 最低 dword。⛔ 不要动已有寄存器 / 内存接口。
+    std::uint32_t xmm[8][4] = {};
+    std::uint8_t* xmmBytes(int i) { return reinterpret_cast<std::uint8_t*>(xmm[i & 7]); }
+    const std::uint8_t* xmmBytes(int i) const { return reinterpret_cast<const std::uint8_t*>(xmm[i & 7]); }
     ShimState shim;
 
     // ---- 服务（由 Machine 装配；shim 直接从这里取）----
@@ -81,6 +146,7 @@ struct X86 {
     HandleTable* handles = nullptr;
     VirtualClock* clock = nullptr;
     ShimRegistry* shims = nullptr;
+    Vfs* vfs = nullptr;
     BlockCache* cache = nullptr;
     LstIndex* lst = nullptr;
 

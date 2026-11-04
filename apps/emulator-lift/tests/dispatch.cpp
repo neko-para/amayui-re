@@ -93,11 +93,11 @@ int main() {
         LIFT_CHECK_EQ_U32(m.cpu().esp(), esp_expected);  // 栈平衡
     }
 
-    // ④ 未实现指令（emms = 0F 77）⇒ 响亮失败，不是 no-op
+    // ④ 未实现指令（ADDPS xmm0,xmm0 = 0F 58 C0；浮点 SSE 语料为 0 ⇒ 仍未实现）⇒ 响亮失败
     {
         g_current_case = "unimplemented-is-loud";
         lift::Machine m;
-        const std::vector<std::uint8_t> code = {0x0F, 0x77, 0xC3};  // emms; ret
+        const std::vector<std::uint8_t> code = {0x0F, 0x58, 0xC0, 0xC3};  // addps xmm0,xmm0; ret
         LIFT_CHECK(boot(m, code));
         const lift::RunResult r = run(m);
         LIFT_CHECK(r.reason == lift::StopReason::Unimplemented);

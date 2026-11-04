@@ -508,6 +508,33 @@ void shimVirtualProtect(X86& cpu, ShimCall& call) {
     call.result = 1;
 }
 
+// ---- VirtualLock ----
+// 文档：把一段虚拟地址锁进物理内存；**区内的每一页都必须已提交**（PAGE_NOACCESS 不能锁）。
+// 本模拟器的 guest 内存永远是宿主常驻的（没有换页），所以"锁"没有额外动作 —— 这不是 no-op
+// 假成功，而是**契约本来就已满足**。仍然按文档做那一项可判的前提检查：整段必须已提交。
+constexpr std::uint32_t kErrInvalidAddress = 487u;
+
+void shimVirtualLock(X86& cpu, ShimCall& call) {
+    const char* api = "VirtualLock";
+    requireMem(cpu, api);
+    const std::uint32_t addr = call.u32(0);
+    const std::uint32_t size = call.u32(1);
+    if (size == 0) {
+        // 文档没说 0 长度是否合法；给 TRUE（没有页需要锁）但留一行，避免静默猜
+        shimLog("kernel32", api, "dwSize=0 ⇒ 没有页需要锁，返回 TRUE");
+        call.result = 1;
+        return;
+    }
+    if (!cpu.mem->committed(addr, size)) {
+        cpu.shim.last_error = kErrInvalidAddress;
+        shimLog("kernel32", api, "0x%08X 起 %u 字节不是全部已提交 ⇒ 返回 0（ERROR_INVALID_ADDRESS）",
+                addr, size);
+        call.result = 0;
+        return;
+    }
+    call.result = 1;
+}
+
 }  // namespace
 
 void registerMemShims(ShimRegistry& shims) {
@@ -544,6 +571,7 @@ void registerMemShims(ShimRegistry& shims) {
     shims.add("kernel32", "VirtualAlloc", Conv::Stdcall, 4, shimVirtualAlloc);
     shims.add("kernel32", "VirtualFree", Conv::Stdcall, 3, shimVirtualFree);
     shims.add("kernel32", "VirtualProtect", Conv::Stdcall, 4, shimVirtualProtect);
+    shims.add("kernel32", "VirtualLock", Conv::Stdcall, 2, shimVirtualLock);
 }
 
 }  // namespace lift

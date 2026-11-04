@@ -19,10 +19,13 @@ bool execInsn(X86& cpu, const Insn& in);
 bool execInteger(X86& cpu, const Insn& in);   // 数据搬运 / 算术 / 逻辑 / 移位 / 乘除 / 位
 bool execControl(X86& cpu, const Insn& in);   // jcc / jmp / call / ret / setcc / cmovcc / 中断
 bool execString(X86& cpu, const Insn& in);    // movs / stos / lods / scas / cmps + rep
-bool execFpu(X86& cpu, const Insn& in);       // x87（M1a 最小子集）
+bool execFpu(X86& cpu, const Insn& in);       // x87（S4：语料里 47 个形态）
+bool execPacked(X86& cpu, const Insn& in);    // MMX / SSE 整数打包（`Op::Packed`，实现落在 exec_fpu.cpp）
 
 // 控制流指令（块在这里收尾）
 bool opIsControl(Op op);
+// x87 家族（`Op::Fld .. Op::F2xm1` 的连续区间）
+bool opIsX87(Op op);
 // 是否已实现（`Op::Other` 与 M1b 的族返回 false）
 bool opImplemented(Op op);
 

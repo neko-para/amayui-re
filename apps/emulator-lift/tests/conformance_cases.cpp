@@ -1168,6 +1168,740 @@ void verify_x87_ffree(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().ebx(), 1u);
 }
 
+// =====================================================================================
+// ⑦ S4：x87 补齐（47 个形态）
+// ★ 每个新助记符至少一条；断言都落在"与初值不同的槽"上（内存 / 寄存器 / x87 元信息）。
+// ★ 超越函数族（fsin/fcos/fsincos/fptan/fpatan/fyl2x/fyl2xp1/f2xm1）走宿主 libm，
+//   已登记 1 ulp 偏差（见 exec_fpu.cpp 文件头）⇒ 这里只用**精确可表示**的点（0 / 1 / 2 的幂）。
+// =====================================================================================
+void setup_x87_ftst(Fixture& f) {
+    f.codeHex(kCodeEa, "D9 EE D9 E4 DF E0 C3");  // fldz; ftst; fnstsw ax
+}
+void verify_x87_ftst(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax() & 0x4700u, 0x4000u);  // ST0 == 0 ⇒ C3=1
+}
+
+void setup_x87_fprem(Fixture& f) {
+    // ST0=7.5、ST1=2.0；fprem ⇒ 7.5 mod 2 = 1.5（商 3 朝零截断）
+    f.dataHex(kDataEa, "0000F040");          // 7.5f
+    f.dataHex(kDataEa + 0x10u, "00000040");  // 2.0f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 10 00 48 00 D9 05 00 00 48 00 D9 F8 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fprem(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3FC00000u);  // 1.5f
+}
+
+void setup_x87_fprem1(Fixture& f) {
+    // ST0=8.0、ST1=3.0；fprem1 ⇒ IEEE 余数 = 8 − 3×3 = −1.0（商取最近偶数）
+    f.dataHex(kDataEa, "00000041");          // 8.0f
+    f.dataHex(kDataEa + 0x10u, "00004040");  // 3.0f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 10 00 48 00 D9 05 00 00 48 00 D9 F5 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fprem1(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0xBF800000u);  // -1.0f
+}
+
+void setup_x87_fyl2x(Fixture& f) {
+    // ST0=2.0、ST1=8.0；fyl2x ⇒ 8·log2(2) = 8.0，然后 pop
+    f.dataHex(kDataEa, "00000041");          // 8.0f
+    f.dataHex(kDataEa + 0x10u, "00000040");  // 2.0f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 D9 F1 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fyl2x(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x41000000u);  // 8.0f
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fyl2xp1(Fixture& f) {
+    // ST0=1.0、ST1=3.0；fyl2xp1 ⇒ 3·log2(1+1) = 3.0
+    f.dataHex(kDataEa, "00004040");          // 3.0f
+    f.dataHex(kDataEa + 0x10u, "0000803F");  // 1.0f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 D9 F9 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fyl2xp1(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40400000u);  // 3.0f
+}
+
+void setup_x87_fpatan(Fixture& f) {
+    // ST0=1.0、ST1=1.0；fpatan ⇒ atan(1/1) = π/4（float 最近值 0x3F490FDB）
+    f.dataHex(kDataEa, "0000803F");          // 1.0f
+    f.dataHex(kDataEa + 0x10u, "0000803F");  // 1.0f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 D9 F3 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fpatan(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F490FDBu);  // π/4
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fptan(Fixture& f) {
+    // ST0=0；fptan ⇒ tan(0)=0 留在 ST(1)，再压 1.0 ⇒ ST(0)=1.0
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa, "D9 EE D9 F2 D9 1D 10 00 48 00 C3");  // fldz; fptan; fstp [0x480010]
+}
+void verify_x87_fptan(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x3F800000u);  // 1.0f
+    // fldz 把 top 变成 7；fptan 再压 1.0 ⇒ 6；fstp 弹掉 ⇒ 回到 7（不是 0）
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);
+}
+
+void setup_x87_fsin(Fixture& f) {
+    // ST0 = π/2（double）⇒ fsin 精确得 1.0
+    f.dataHex(kDataEa, "182D4454FB21F93F");  // 1.5707963267948966
+    f.dataHex(kDataEa + 0x10u, "0000000000000000");
+    f.codeHex(kCodeEa, "DD 05 00 00 48 00 D9 FE DD 1D 10 00 48 00 C3");
+}
+void verify_x87_fsin(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0x3FF00000u);  // 1.0（double）
+}
+
+void setup_x87_fcos(Fixture& f) {
+    // ST0=0 ⇒ cos(0)=1.0
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa, "D9 EE D9 FF D9 1D 10 00 48 00 C3");
+}
+void verify_x87_fcos(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x3F800000u);
+}
+
+void setup_x87_fsincos(Fixture& f) {
+    // ST0=0 ⇒ sin=0 写 ST(0)，再压 cos=1.0 ⇒ 最终 ST(0)=1.0
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa, "D9 EE D9 FB D9 1D 10 00 48 00 C3");
+}
+void verify_x87_fsincos(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x3F800000u);  // 1.0f = cos(0)
+    // 同上：fldz(7) → fsincos 压 cos(6) → fstp(7)
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);
+}
+
+void setup_x87_f2xm1(Fixture& f) {
+    // ST0=1.0 ⇒ 2^1 − 1 = 1.0（精确可表示，避免 1 ulp 干扰）
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa, "D9 E8 D9 F0 D9 1D 10 00 48 00 C3");  // fld1; f2xm1; fstp
+}
+void verify_x87_f2xm1(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x3F800000u);
+}
+
+void setup_x87_fscale(Fixture& f) {
+    // ST0=2.0、ST1=3.0 ⇒ 2·2^3 = 16.0
+    f.dataHex(kDataEa, "00004040");          // 3.0f（指数）
+    f.dataHex(kDataEa + 0x10u, "00000040");  // 2.0f（值）
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 D9 FD D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fscale(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x41800000u);  // 16.0f
+}
+
+void setup_x87_fxam(Fixture& f) {
+    f.codeHex(kCodeEa, "D9 EE D9 E5 DF E0 C3");  // fldz; fxam; fnstsw ax
+}
+void verify_x87_fxam(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax() & 0x4700u, 0x4000u);  // Zero ⇒ C3=1（C2=C0=0）
+}
+
+void setup_x87_fxtract(Fixture& f) {
+    // ST0=8.0 ⇒ ST(0)=指数 3.0、ST(1)=尾数 1.0
+    f.dataHex(kDataEa, "00000041");  // 8.0f
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 F4 D9 1D 10 00 48 00 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fxtract(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x40400000u);  // 3.0f（指数）
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F800000u);  // 1.0f（尾数）
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fdecstp(Fixture& f) {
+    f.codeHex(kCodeEa, "D9 E8 D9 F6 C3");  // fld1; fdecstp
+}
+void verify_x87_fdecstp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 6u);  // fld1 后 top=7，fdecstp 再退一格
+    LIFT_CHECK(!f.cpu().fpu.empty(7));       // 值还在（只是 TOP 挪了）
+}
+
+void setup_x87_fincstp(Fixture& f) {
+    f.codeHex(kCodeEa, "D9 E8 D9 F7 C3");  // fld1; fincstp
+}
+void verify_x87_fincstp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);  // fld1 后 top=7，fincstp 回绕到 0
+}
+
+void setup_x87_fnop(Fixture& f) {
+    // fnop 本身不改任何可见状态 ⇒ 后面接一条真指令，证明它没被当成"未实现"停住
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa, "D9 D0 D9 E8 D9 1D 10 00 48 00 C3");  // fnop; fld1; fstp
+}
+void verify_x87_fnop(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x3F800000u);
+}
+
+void setup_x87_fclex(Fixture& f) {
+    // 1/0 ⇒ ZE 置位；fnclex 清掉；fnstsw ax 读回 ⇒ 异常位必须全 0
+    f.cpu().eax() = 0u;
+    f.codeHex(kCodeEa, "D9 E8 D9 EE DE F9 DB E2 DF E0 C3");
+}
+void verify_x87_fclex(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax() & 0x003Fu, 0u);  // IE/DE/ZE/OE/UE/PE 全清
+}
+
+void setup_x87_fclex_wait(Fixture& f) {
+    // `9B DB E2` = FCLEX（wait + fnclex 的合并形态）：同样要清掉异常位
+    f.cpu().eax() = 0u;
+    f.codeHex(kCodeEa, "D9 E8 D9 EE DE F9 9B DB E2 DF E0 C3");
+}
+void verify_x87_fclex_wait(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax() & 0x003Fu, 0u);
+}
+
+void setup_x87_fcmovb(Fixture& f) {
+    // CF=1 ⇒ fcmovb st0, st1 取 ST(1)=1.0（不取则会是 2.0）
+    f.cpu().setCf(true);
+    f.dataHex(kDataEa, "0000803F");          // 1.0f
+    f.dataHex(kDataEa + 0x10u, "00000040");  // 2.0f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa,
+              "D9 05 00 00 48 00"   // fld 1.0
+              "D9 05 10 00 48 00"   // fld 2.0
+              "DA C1"               // fcmovb st(0), st(1)
+              "D9 1D 20 00 48 00"   // fstp [0x480020]
+              "C3");
+}
+void verify_x87_fcmovb(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F800000u);  // 1.0f
+}
+
+void setup_x87_fcmovne(Fixture& f) {
+    // ZF=1 ⇒ fcmovne **不**取 ⇒ 结果仍是 2.0（反例分支）
+    f.cpu().setZf(true);
+    f.dataHex(kDataEa, "0000803F");
+    f.dataHex(kDataEa + 0x10u, "00000040");
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa,
+              "D9 05 00 00 48 00"
+              "D9 05 10 00 48 00"
+              "DB C9"               // fcmovne st(0), st(1)
+              "D9 1D 20 00 48 00"
+              "C3");
+}
+void verify_x87_fcmovne(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40000000u);  // 2.0f
+}
+
+// fcmov 族剩下 6 个形态：ST0=2.0、ST1=1.0；条件成立 ⇒ 1.0，否则留 2.0。
+// ★ 两条极性都覆盖（取 / 不取），免得"实现成无条件移动"也能绿。
+void x87_fcmov_setup(Fixture& f, const char* op_bytes, bool cf, bool zf, bool pf) {
+    f.cpu().setCf(cf);
+    f.cpu().setZf(zf);
+    f.cpu().setPf(pf);
+    f.dataHex(kDataEa, "0000803F");          // 1.0f（ST1）
+    f.dataHex(kDataEa + 0x10u, "00000040");  // 2.0f（ST0）
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    std::string code = "D9 05 00 00 48 00 D9 05 10 00 48 00 ";
+    code += op_bytes;
+    code += " D9 1D 20 00 48 00 C3";
+    f.codeHex(kCodeEa, code.c_str());
+}
+
+void setup_x87_fcmove(Fixture& f) { x87_fcmov_setup(f, "DA C9", false, true, false); }
+void verify_x87_fcmove(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F800000u); }
+
+void setup_x87_fcmovbe(Fixture& f) { x87_fcmov_setup(f, "DA D1", true, false, false); }
+void verify_x87_fcmovbe(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F800000u); }
+
+void setup_x87_fcmovu(Fixture& f) { x87_fcmov_setup(f, "DA D9", false, false, true); }
+void verify_x87_fcmovu(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F800000u); }
+
+void setup_x87_fcmovnb(Fixture& f) { x87_fcmov_setup(f, "DB C1", true, false, false); }
+void verify_x87_fcmovnb(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40000000u); }
+
+void setup_x87_fcmovnbe(Fixture& f) { x87_fcmov_setup(f, "DB D1", false, true, false); }
+void verify_x87_fcmovnbe(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40000000u); }
+
+void setup_x87_fcmovnu(Fixture& f) { x87_fcmov_setup(f, "DB D9", false, false, true); }
+void verify_x87_fcmovnu(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40000000u); }
+
+void setup_x87_fcomi(Fixture& f) {
+    // ST0=1.0 < ST1=2.0 ⇒ CF=1、ZF=0、PF=0
+    f.dataHex(kDataEa, "00000040");          // 2.0f
+    f.dataHex(kDataEa + 0x10u, "0000803F");  // 1.0f
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 DB F1 C3");  // fcomi st0, st1
+}
+void verify_x87_fcomi(Fixture& f) {
+    LIFT_CHECK(f.cpu().cf());
+    LIFT_CHECK(!f.cpu().zf());
+    LIFT_CHECK(!f.cpu().pf());
+}
+
+void setup_x87_fcomip(Fixture& f) {
+    f.dataHex(kDataEa, "00000040");
+    f.dataHex(kDataEa + 0x10u, "0000803F");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 DF F1 C3");  // fcomip st0, st1
+}
+void verify_x87_fcomip(Fixture& f) {
+    LIFT_CHECK(f.cpu().cf());
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);  // 两次 fld(6) 再 pop ⇒ 7
+}
+
+void setup_x87_fucomi(Fixture& f) {
+    // 相等 ⇒ ZF=1、PF=0、CF=0
+    f.dataHex(kDataEa, "0000803F");
+    f.dataHex(kDataEa + 0x10u, "0000803F");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 DB E9 C3");  // fucomi st0, st1
+}
+void verify_x87_fucomi(Fixture& f) {
+    LIFT_CHECK(f.cpu().zf());
+    LIFT_CHECK(!f.cpu().cf());
+}
+
+void setup_x87_fucomip(Fixture& f) {
+    f.dataHex(kDataEa, "0000803F");
+    f.dataHex(kDataEa + 0x10u, "0000803F");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 DF E9 C3");  // fucomip st0, st1
+}
+void verify_x87_fucomip(Fixture& f) {
+    LIFT_CHECK(f.cpu().zf());
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);
+}
+
+void setup_x87_fisttp(Fixture& f) {
+    // 2.5 ⇒ fisttp（朝零截断）= 2，与 fistp 的"最近偶数"不同
+    f.dataHex(kDataEa, "00002040");  // 2.5f
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 DB 0D 10 00 48 00 C3");
+}
+void verify_x87_fisttp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 2u);
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fistp_half(Fixture& f) {
+    // .5 边界：缺省 RC = 最近偶数 ⇒ 2.5→2、3.5→4
+    f.dataHex(kDataEa, "00002040");          // 2.5f
+    f.dataHex(kDataEa + 0x10u, "00006040");  // 3.5f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.dataHex(kDataEa + 0x30u, "00000000");
+    f.codeHex(kCodeEa,
+              "D9 05 00 00 48 00"   // fld 2.5
+              "DB 1D 20 00 48 00"   // fistp dword [0x480020]
+              "D9 05 10 00 48 00"   // fld 3.5
+              "DB 1D 30 00 48 00"   // fistp dword [0x480030]
+              "C3");
+}
+void verify_x87_fistp_half(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 2u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x30u), 4u);
+}
+
+void setup_x87_fldenv(Fixture& f) {
+    // 28 字节环境：cw=0x027F（PC=53 位）、sw=0、tag=0xFFFF，其余 0
+    f.dataHex(kDataEa, "7F020000" "00000000" "FFFF0000" "00000000000000000000000000000000");
+    f.dataHex(kDataEa + 0x20u, "0000");
+    f.codeHex(kCodeEa,
+              "D9 25 00 00 48 00"   // fldenv [0x480000]
+              "D9 3D 20 00 48 00"   // fnstcw [0x480020]
+              "C3");
+}
+void verify_x87_fldenv(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.control, 0x027Fu);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x20u), 0x027Fu);
+}
+
+void setup_x87_fnstenv(Fixture& f) {
+    f.dataHex(kDataEa, "7F02");
+    f.dataHex(kDataEa + 0x10u, "00000000" "00000000" "00000000" "00000000" "00000000" "00000000" "00000000");
+    f.codeHex(kCodeEa,
+              "D9 2D 00 00 48 00"   // fldcw [0x480000] = 0x027F
+              "D9 35 10 00 48 00"   // fnstenv [0x480010]
+              "C3");
+}
+void verify_x87_fnstenv(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x10u), 0x027Fu);  // FCW
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0xFFFFu);  // FTW（空栈）
+}
+
+void setup_x87_fnsave(Fixture& f) {
+    f.dataHex(kDataEa, "7F02");
+    f.dataHex(kDataEa + 0x10u, "00000000000000000000000000000000");
+    f.codeHex(kCodeEa,
+              "D9 2D 00 00 48 00"   // fldcw 0x027F
+              "DD 35 10 00 48 00"   // fnsave [0x480010]
+              "C3");
+}
+void verify_x87_fnsave(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x10u), 0x027Fu);  // 存下去的是改过的控制字
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.control, 0x037Fu);            // FNSAVE 之后 FPU 回到 init
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fsave(Fixture& f) {
+    // `9B DD 35 …` = FSAVE（wait + fnsave 的合并形态）
+    f.dataHex(kDataEa, "7F02");
+    f.dataHex(kDataEa + 0x10u, "00000000000000000000000000000000");
+    f.codeHex(kCodeEa,
+              "D9 2D 00 00 48 00"   // fldcw 0x027F
+              "9B DD 35 10 00 48 00"  // fsave [0x480010]
+              "C3");
+}
+void verify_x87_fsave(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x10u), 0x027Fu);
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.control, 0x037Fu);
+}
+
+void setup_x87_frstor(Fixture& f) {
+    // fnsave 镜像：28 字节环境（cw=0x027F、sw=0、tag=0xFFFF）+ 80 字节寄存器栈（全 0）
+    f.dataHex(kDataEa,
+              "7F020000" "00000000" "FFFF0000" "00000000000000000000000000000000"
+              "00000000000000000000" "00000000000000000000" "00000000000000000000"
+              "00000000000000000000" "00000000000000000000" "00000000000000000000"
+              "00000000000000000000" "00000000000000000000");
+    f.dataHex(kDataEa + 0x70u, "0000");
+    f.codeHex(kCodeEa,
+              "DD 25 00 00 48 00"   // frstor [0x480000]
+              "D9 3D 70 00 48 00"   // fnstcw [0x480070]
+              "C3");
+}
+void verify_x87_frstor(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.control, 0x027Fu);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x70u), 0x027Fu);
+}
+
+void setup_x87_fstsw(Fixture& f) {
+    f.cpu().eax() = 0u;
+    f.codeHex(kCodeEa, "D9 E8 9B DF E0 C3");  // fld1; fstsw ax（9B 前缀要与 FNSTSW 合并）
+}
+void verify_x87_fstsw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax() & 0x3800u, 0x3800u);  // TOP=7
+    LIFT_CHECK_EQ_U32(f.cpu().eax() & 0x4700u, 0u);       // 条件码全 0
+}
+
+void setup_x87_finit(Fixture& f) {
+    f.dataHex(kDataEa, "7F02");
+    f.codeHex(kCodeEa, "D9 2D 00 00 48 00 9B DB E3 C3");  // fldcw 0x027F; finit
+}
+void verify_x87_finit(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.control, 0x037Fu);  // 回到缺省控制字
+}
+
+void setup_x87_fstcw(Fixture& f) {
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa, "9B D9 3D 10 00 48 00 C3");  // fstcw [0x480010]
+}
+void verify_x87_fstcw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x10u), 0x037Fu);
+}
+
+void setup_x87_fxch(Fixture& f) {
+    // ST0=2.0、ST1=1.0；fxch st(1) ⇒ ST0=1.0
+    f.dataHex(kDataEa, "0000803F");          // 1.0f
+    f.dataHex(kDataEa + 0x10u, "00000040");  // 2.0f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa,
+              "D9 05 00 00 48 00"
+              "D9 05 10 00 48 00"
+              "D9 C9"               // fxch st(1)
+              "D9 1D 20 00 48 00"
+              "C3");
+}
+void verify_x87_fxch(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F800000u);  // 1.0f
+}
+
+void setup_x87_fcom_unordered(Fixture& f) {
+    // 0/0 ⇒ NaN；再 fld1 后 fcom st(1) ⇒ 无序 ⇒ C3=C2=C0=1（0x4500）
+    f.codeHex(kCodeEa,
+              "D9 EE"               // fldz
+              "D9 EE"               // fldz
+              "DE F9"               // fdivp st(1), st(0) ⇒ 0/0 = NaN
+              "D9 E8"               // fld1
+              "D8 D1"               // fcom st(1)
+              "C3");
+}
+void verify_x87_fcom_unordered(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.status & 0x4700u, 0x4500u);
+}
+
+void setup_x87_fcom_less(Fixture& f) {
+    // ST0=1.0 < ST1=2.0 ⇒ C0=1（0x0100）
+    f.dataHex(kDataEa, "00000040");          // 2.0f
+    f.dataHex(kDataEa + 0x10u, "0000803F");  // 1.0f
+    f.codeHex(kCodeEa,
+              "D9 05 00 00 48 00"
+              "D9 05 10 00 48 00"
+              "D8 D1"               // fcom st(1)
+              "C3");
+}
+void verify_x87_fcom_less(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.status & 0x4700u, 0x0100u);
+}
+
+// =====================================================================================
+// ⑧ S4：MMX / SSE 整数打包
+// ★ MMX 复用 x87 物理槽的低 64 位；`emms` 把 tag word 置全 empty。
+// ★ SSE 只做整数形态（语料里没有 SSE 浮点 ⇒ 那些仍是 `Op::Other` 的响亮失败）。
+// =====================================================================================
+
+// 公共小程序：mm0 ← [0x480000]，做一步运算（操作数 [0x480010]），再存到 [0x480020]
+void mmx_apply(Fixture& f, const char* op_bytes) {
+    std::string code = "0F 6F 05 00 00 48 00 ";
+    code += op_bytes;
+    code += " 05 10 00 48 00 0F 7F 05 20 00 48 00 C3";
+    f.codeHex(kCodeEa, code.c_str());
+}
+
+void setup_mmx_movq(Fixture& f) {
+    f.dataHex(kDataEa, "1122334455667788");
+    f.dataHex(kDataEa + 0x10u, "0000000000000000");
+    f.codeHex(kCodeEa,
+              "0F 6F 05 00 00 48 00"   // movq mm0, [0x480000]
+              "0F 7F 05 10 00 48 00"   // movq [0x480010], mm0
+              "C3");
+}
+void verify_mmx_movq(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x44332211u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0x88776655u);
+}
+
+void setup_mmx_movd(Fixture& f) {
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa,
+              "B8 78 56 34 12"         // mov eax, 0x12345678
+              "0F 6E C0"               // movd mm0, eax
+              "0F 7E 05 10 00 48 00"   // movd [0x480010], mm0
+              "C3");
+}
+void verify_mmx_movd(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x12345678u);
+}
+
+void setup_mmx_paddw(Fixture& f) {
+    f.dataHex(kDataEa, "0100020003000400");
+    f.dataHex(kDataEa + 0x10u, "0A000B000C000D00");
+    mmx_apply(f, "0F FD");
+}
+void verify_mmx_paddw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x20u), 11u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x22u), 13u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x26u), 17u);
+}
+
+void setup_mmx_paddusw(Fixture& f) {
+    f.dataHex(kDataEa, "FFFF000000000000");          // 0xFFFF
+    f.dataHex(kDataEa + 0x10u, "0100000000000000");  // +1 ⇒ 无符号饱和到 0xFFFF
+    mmx_apply(f, "0F DD");
+}
+void verify_mmx_paddusw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x20u), 0xFFFFu);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x22u), 0u);
+}
+
+void setup_mmx_psubw(Fixture& f) {
+    f.dataHex(kDataEa, "0500010000000000");          // 5, 1
+    f.dataHex(kDataEa + 0x10u, "0300020000000000");  // 3, 2
+    mmx_apply(f, "0F F9");
+}
+void verify_mmx_psubw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x20u), 2u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x22u), 0xFFFFu);  // 1-2 回绕
+}
+
+void setup_mmx_psubsw(Fixture& f) {
+    f.dataHex(kDataEa, "0080000000000000");          // 0x8000（-32768）
+    f.dataHex(kDataEa + 0x10u, "0100000000000000");  // - 1 ⇒ 有符号饱和留在 0x8000
+    mmx_apply(f, "0F E9");
+}
+void verify_mmx_psubsw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x20u), 0x8000u);
+}
+
+void setup_mmx_pand(Fixture& f) {
+    f.dataHex(kDataEa, "F0F0F0F0F0F0F0F0");
+    f.dataHex(kDataEa + 0x10u, "FF00FF00FF00FF00");
+    mmx_apply(f, "0F DB");
+}
+void verify_mmx_pand(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x00F000F0u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x24u), 0x00F000F0u);
+}
+
+void setup_mmx_pandn(Fixture& f) {
+    f.dataHex(kDataEa, "0F0F0F0F0F0F0F0F");
+    f.dataHex(kDataEa + 0x10u, "FFFFFFFFFFFFFFFF");
+    mmx_apply(f, "0F DF");
+}
+void verify_mmx_pandn(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0xF0F0F0F0u);  // ~a & b
+}
+
+void setup_mmx_por(Fixture& f) {
+    f.dataHex(kDataEa, "F0F0F0F0F0F0F0F0");
+    f.dataHex(kDataEa + 0x10u, "0F0F0F0F0F0F0F0F");
+    mmx_apply(f, "0F EB");
+}
+void verify_mmx_por(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0xFFFFFFFFu);
+}
+
+void setup_mmx_pxor(Fixture& f) {
+    f.dataHex(kDataEa, "FFFFFFFFFFFFFFFF");
+    f.dataHex(kDataEa + 0x10u, "0F0F0F0F0F0F0F0F");
+    mmx_apply(f, "0F EF");
+}
+void verify_mmx_pxor(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0xF0F0F0F0u);
+}
+
+void setup_mmx_pcmpeqw(Fixture& f) {
+    f.dataHex(kDataEa, "0100020003000400");
+    f.dataHex(kDataEa + 0x10u, "0100090003000900");
+    mmx_apply(f, "0F 75");
+}
+void verify_mmx_pcmpeqw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x20u), 0xFFFFu);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x22u), 0u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x24u), 0xFFFFu);
+}
+
+void setup_mmx_pmullw(Fixture& f) {
+    f.dataHex(kDataEa, "0001FFFF00000000");          // 0x0100, 0xFFFF
+    f.dataHex(kDataEa + 0x10u, "0200020000000000");  // 2, 2
+    mmx_apply(f, "0F D5");
+}
+void verify_mmx_pmullw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x20u), 0x0200u);  // 0x0100*2
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x22u), 0xFFFEu);  // 0xFFFF*2 取低 16 位
+}
+
+void setup_mmx_psllw(Fixture& f) {
+    f.dataHex(kDataEa, "0100020003000400");
+    f.dataHex(kDataEa + 0x10u, "0000000000000000");
+    // psllw mm0, 4 = 0F 71 /6 ib ⇒ ModRM F0
+    f.codeHex(kCodeEa,
+              "0F 6F 05 00 00 48 00"
+              "0F 71 F0 04"
+              "0F 7F 05 10 00 48 00"
+              "C3");
+}
+void verify_mmx_psllw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x10u), 16u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x12u), 32u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x16u), 64u);
+}
+
+void setup_mmx_psrlw(Fixture& f) {
+    f.dataHex(kDataEa, "1000000100000000");  // 小端：word0=0x0010, word1=0x0100
+    f.dataHex(kDataEa + 0x10u, "0000000000000000");
+    f.codeHex(kCodeEa,
+              "0F 6F 05 00 00 48 00"
+              "0F 71 D0 04"           // psrlw mm0, 4
+              "0F 7F 05 10 00 48 00"
+              "C3");
+}
+void verify_mmx_psrlw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x10u), 1u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x12u), 0x10u);
+}
+
+void setup_mmx_psraw(Fixture& f) {
+    f.dataHex(kDataEa, "0080FF7F00000000");  // 0x8000（负）, 0x7FFF
+    f.dataHex(kDataEa + 0x10u, "0000000000000000");
+    f.codeHex(kCodeEa,
+              "0F 6F 05 00 00 48 00"
+              "0F 71 E0 04"           // psraw mm0, 4（算术右移）
+              "0F 7F 05 10 00 48 00"
+              "C3");
+}
+void verify_mmx_psraw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x10u), 0xF800u);  // 0x8000 >> 4 符号填充
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x12u), 0x07FFu);
+}
+
+void setup_mmx_psrlq(Fixture& f) {
+    f.dataHex(kDataEa, "8877665544332211");
+    f.dataHex(kDataEa + 0x10u, "0000000000000000");
+    f.codeHex(kCodeEa,
+              "0F 6F 05 00 00 48 00"
+              "0F 73 D0 08"           // psrlq mm0, 8
+              "0F 7F 05 10 00 48 00"
+              "C3");
+}
+void verify_mmx_psrlq(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x44556677u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0x00112233u);
+}
+
+void setup_mmx_punpcklbw(Fixture& f) {
+    f.dataHex(kDataEa, "1122334455667788");
+    f.dataHex(kDataEa + 0x10u, "AABBCCDDEEFF0011");
+    mmx_apply(f, "0F 60");
+}
+void verify_mmx_punpcklbw(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0xBB22AA11u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x24u), 0xDD44CC33u);
+}
+
+void setup_mmx_packuswb(Fixture& f) {
+    f.dataHex(kDataEa, "2301FFFF FF008000");  // 291, -1, 255, 128
+    f.dataHex(kDataEa + 0x10u, "0000010002000300");
+    mmx_apply(f, "0F 67");
+}
+void verify_mmx_packuswb(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x80FF00FFu);  // 255,0,255,128
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x24u), 0x03020100u);
+}
+
+void setup_mmx_emms(Fixture& f) {
+    f.codeHex(kCodeEa, "D9 E8 0F 77 C3");  // fld1; emms
+}
+void verify_mmx_emms(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.tag, 0xFFFFu);  // 全 empty
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);       // EMMS 不动 TOP
+}
+
+// ---- SSE（xmm 寄存器文件）----
+void setup_sse_movd_xmm(Fixture& f) {
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa,
+              "B8 78 56 34 12"         // mov eax, 0x12345678
+              "66 0F 6E C0"            // movd xmm0, eax
+              "66 0F 7E 05 10 00 48 00"  // movd [0x480010], xmm0
+              "C3");
+}
+void verify_sse_movd_xmm(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x12345678u);
+}
+
+void setup_sse_paddd(Fixture& f) {
+    f.codeHex(kCodeEa,
+              "B8 01 00 00 00"         // mov eax, 1
+              "66 0F 6E C0"            // movd xmm0, eax
+              "B8 02 00 00 00"         // mov eax, 2
+              "66 0F 6E C8"            // movd xmm1, eax
+              "66 0F FE C1"            // paddd xmm0, xmm1
+              "66 0F 7E C0"            // movd eax, xmm0
+              "C3");
+}
+void verify_sse_paddd(Fixture& f) { LIFT_CHECK_EQ_U32(f.cpu().eax(), 3u); }
+
+void setup_sse_psrad_32(Fixture& f) {
+    // ★ 计数 > 31：整 lane 填符号位（不是"计数取低 5 位"）
+    f.codeHex(kCodeEa,
+              "B8 00 00 00 80"         // mov eax, 0x80000000
+              "66 0F 6E C0"            // movd xmm0, eax
+              "66 0F 72 E0 20"         // psrad xmm0, 32
+              "66 0F 7E C0"            // movd eax, xmm0
+              "C3");
+}
+void verify_sse_psrad_32(Fixture& f) { LIFT_CHECK_EQ_U32(f.cpu().eax(), 0xFFFFFFFFu); }
+
 }  // namespace
 
 const Case* conformanceCases(std::size_t* count) {
@@ -1292,6 +2026,74 @@ const Case* conformanceCases(std::size_t* count) {
         {"x87-fsqrt", setup_x87_fsqrt, verify_x87_fsqrt},
         {"x87-frndint", setup_x87_frndint, verify_x87_frndint},
         {"x87-ffree", setup_x87_ffree, verify_x87_ffree},
+        // ---- S4：⑦ x87 补齐 ----
+        {"x87-ftst", setup_x87_ftst, verify_x87_ftst},
+        {"x87-fprem", setup_x87_fprem, verify_x87_fprem},
+        {"x87-fprem1", setup_x87_fprem1, verify_x87_fprem1},
+        {"x87-fyl2x", setup_x87_fyl2x, verify_x87_fyl2x},
+        {"x87-fyl2xp1", setup_x87_fyl2xp1, verify_x87_fyl2xp1},
+        {"x87-fpatan", setup_x87_fpatan, verify_x87_fpatan},
+        {"x87-fptan", setup_x87_fptan, verify_x87_fptan},
+        {"x87-fsin", setup_x87_fsin, verify_x87_fsin},
+        {"x87-fcos", setup_x87_fcos, verify_x87_fcos},
+        {"x87-fsincos", setup_x87_fsincos, verify_x87_fsincos},
+        {"x87-f2xm1", setup_x87_f2xm1, verify_x87_f2xm1},
+        {"x87-fscale", setup_x87_fscale, verify_x87_fscale},
+        {"x87-fxam", setup_x87_fxam, verify_x87_fxam},
+        {"x87-fxtract", setup_x87_fxtract, verify_x87_fxtract},
+        {"x87-fdecstp", setup_x87_fdecstp, verify_x87_fdecstp},
+        {"x87-fincstp", setup_x87_fincstp, verify_x87_fincstp},
+        {"x87-fnop", setup_x87_fnop, verify_x87_fnop},
+        {"x87-fclex", setup_x87_fclex, verify_x87_fclex},
+        {"x87-fcmovb", setup_x87_fcmovb, verify_x87_fcmovb},
+        {"x87-fcmove", setup_x87_fcmove, verify_x87_fcmove},
+        {"x87-fcmovbe", setup_x87_fcmovbe, verify_x87_fcmovbe},
+        {"x87-fcmovu", setup_x87_fcmovu, verify_x87_fcmovu},
+        {"x87-fcmovnb-not-taken", setup_x87_fcmovnb, verify_x87_fcmovnb},
+        {"x87-fcmovne-not-taken", setup_x87_fcmovne, verify_x87_fcmovne},
+        {"x87-fcmovnbe-not-taken", setup_x87_fcmovnbe, verify_x87_fcmovnbe},
+        {"x87-fcmovnu-not-taken", setup_x87_fcmovnu, verify_x87_fcmovnu},
+        {"x87-fclex-wait", setup_x87_fclex_wait, verify_x87_fclex_wait},
+        {"x87-fsave", setup_x87_fsave, verify_x87_fsave},
+        {"x87-fcomi", setup_x87_fcomi, verify_x87_fcomi},
+        {"x87-fcomip", setup_x87_fcomip, verify_x87_fcomip},
+        {"x87-fucomi", setup_x87_fucomi, verify_x87_fucomi},
+        {"x87-fucomip", setup_x87_fucomip, verify_x87_fucomip},
+        {"x87-fisttp", setup_x87_fisttp, verify_x87_fisttp},
+        {"x87-fistp-half", setup_x87_fistp_half, verify_x87_fistp_half},
+        {"x87-fldenv", setup_x87_fldenv, verify_x87_fldenv},
+        {"x87-fnstenv", setup_x87_fnstenv, verify_x87_fnstenv},
+        {"x87-fnsave", setup_x87_fnsave, verify_x87_fnsave},
+        {"x87-frstor", setup_x87_frstor, verify_x87_frstor},
+        {"x87-fstsw", setup_x87_fstsw, verify_x87_fstsw},
+        {"x87-finit", setup_x87_finit, verify_x87_finit},
+        {"x87-fstcw", setup_x87_fstcw, verify_x87_fstcw},
+        {"x87-fxch", setup_x87_fxch, verify_x87_fxch},
+        {"x87-fcom-unordered", setup_x87_fcom_unordered, verify_x87_fcom_unordered},
+        {"x87-fcom-less", setup_x87_fcom_less, verify_x87_fcom_less},
+        // ---- S4：⑧ MMX / SSE ----
+        {"mmx-movq", setup_mmx_movq, verify_mmx_movq},
+        {"mmx-movd", setup_mmx_movd, verify_mmx_movd},
+        {"mmx-paddw", setup_mmx_paddw, verify_mmx_paddw},
+        {"mmx-paddusw", setup_mmx_paddusw, verify_mmx_paddusw},
+        {"mmx-psubw", setup_mmx_psubw, verify_mmx_psubw},
+        {"mmx-psubsw", setup_mmx_psubsw, verify_mmx_psubsw},
+        {"mmx-pand", setup_mmx_pand, verify_mmx_pand},
+        {"mmx-pandn", setup_mmx_pandn, verify_mmx_pandn},
+        {"mmx-por", setup_mmx_por, verify_mmx_por},
+        {"mmx-pxor", setup_mmx_pxor, verify_mmx_pxor},
+        {"mmx-pcmpeqw", setup_mmx_pcmpeqw, verify_mmx_pcmpeqw},
+        {"mmx-pmullw", setup_mmx_pmullw, verify_mmx_pmullw},
+        {"mmx-psllw", setup_mmx_psllw, verify_mmx_psllw},
+        {"mmx-psrlw", setup_mmx_psrlw, verify_mmx_psrlw},
+        {"mmx-psraw", setup_mmx_psraw, verify_mmx_psraw},
+        {"mmx-psrlq", setup_mmx_psrlq, verify_mmx_psrlq},
+        {"mmx-punpcklbw", setup_mmx_punpcklbw, verify_mmx_punpcklbw},
+        {"mmx-packuswb", setup_mmx_packuswb, verify_mmx_packuswb},
+        {"mmx-emms", setup_mmx_emms, verify_mmx_emms},
+        {"sse-movd-xmm", setup_sse_movd_xmm, verify_sse_movd_xmm},
+        {"sse-paddd", setup_sse_paddd, verify_sse_paddd},
+        {"sse-psrad-count-32", setup_sse_psrad_32, verify_sse_psrad_32},
     };
     *count = sizeof(kCases) / sizeof(kCases[0]);
     return kCases;

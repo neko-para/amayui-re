@@ -276,6 +276,12 @@ void shimGetUserDefaultUILanguage(X86&, ShimCall& call) { call.result = 0x0409; 
 // 环境块（`_setenvp` 会碰）
 // ---------------------------------------------------------------------------------------
 void shimGetEnvironmentStringsW(X86& cpu, ShimCall& call) {
+    // ★ 环境块由 `setupProcessStructures` 在 guest 里写好（确定性最小集合；A4 输入清单的一项）。
+    //   只有它为空时才退回本地常量（纯档夹具 / 没走 prepare 的调用）。
+    if (cpu.shim.env_ea != 0) {
+        call.result = cpu.shim.env_ea;
+        return;
+    }
     // 一块 UTF-16 的 "NAME=VALUE\0...\0" + 结尾的额外 \0
     const std::uint32_t ea = 0x7FFD5000u;  // 已由 prepare() 预留？见下：这里按需提交
     if (!cpu.mem->committed(ea, 0x1000)) {
@@ -355,12 +361,6 @@ void shimVirtualQuery(X86& cpu, ShimCall& call) {
     call.result = 28;
 }
 
-void shimInitializeSListHead(X86& cpu, ShimCall& call) {
-    const std::uint32_t ea = call.u32(0);
-    if (ea) cpu.mem->wr32(ea, 0);
-    call.result = 0;
-}
-
 void shimGetSystemTimePreciseAsFileTime(X86& cpu, ShimCall& call) {
     const std::uint32_t ea = call.u32(0);
     const std::uint64_t ft = cpu.clock->now100ns() + 0x019DB1DED53E8000ull;  // 1601→1970 的偏移
@@ -434,7 +434,7 @@ void registerBootstrapShims(ShimRegistry& s) {
     s.add("kernel32", "IsProcessorFeaturePresent", Conv::Stdcall, 1, &shimIsProcessorFeaturePresent);
     s.add("kernel32", "SetErrorMode", Conv::Stdcall, 1, &shimSetErrorMode);
     s.add("kernel32", "VirtualQuery", Conv::Stdcall, 3, &shimVirtualQuery);
-    s.add("kernel32", "InitializeSListHead", Conv::Stdcall, 1, &shimInitializeSListHead);
+    // ★ `InitializeSListHead` 已挪到 kernel32_sync.cpp（SList 属同步族；那里按 x86 布局清 8 字节）
     s.add("kernel32", "GetSystemTimePreciseAsFileTime", Conv::Stdcall, 1, &shimGetSystemTimePreciseAsFileTime);
     s.add("kernel32", "SetConsoleCtrlHandler", Conv::Stdcall, 2, &shimSetConsoleCtrlHandler);
     s.add("kernel32", "GetConsoleMode", Conv::Stdcall, 2, &shimGetConsoleMode);

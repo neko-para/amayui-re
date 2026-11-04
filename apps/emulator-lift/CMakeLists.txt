@@ -39,16 +39,23 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/exec_string.cpp
     src/runtime/exec_fpu.cpp
     src/runtime/fpu_bridge.cpp
+    src/runtime/cp932.cpp
+    src/runtime/vfs.cpp
     src/runtime/handles.cpp
     src/runtime/heap.cpp
     src/runtime/shims.cpp
     src/corpus/lst_index.cpp
     src/shims/register.cpp
+    src/shims/register_import_gaps.cpp
     src/shims/kernel32_sync.cpp
     src/shims/kernel32_mem.cpp
     src/shims/kernel32_error_tls.cpp
     src/shims/kernel32_process.cpp
+    src/shims/kernel32_file.cpp
     src/shims/kernel32_time.cpp
+    src/shims/kernel32_string.cpp
+    src/shims/kernel32_agerc.cpp
+    src/shims/kernel32_version.cpp
     src/shims/kernel32_bootstrap.cpp)
 target_include_directories(emulator-lift-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(emulator-lift-runtime
@@ -87,6 +94,43 @@ add_test(NAME shim-abi COMMAND lift-shim-abi)
 add_executable(lift-mnemonics tests/mnemonics.cpp)
 target_link_libraries(lift-mnemonics PRIVATE emulator-lift-runtime)
 add_test(NAME mnemonics COMMAND lift-mnemonics)
+
+# ---- pure：码页 / 字符串（wsprintfA varargs + CP932 表）----
+add_executable(lift-strfmt tests/strfmt.cpp)
+target_link_libraries(lift-strfmt PRIVATE emulator-lift-runtime)
+add_test(NAME strfmt COMMAND lift-strfmt)
+
+# ---- pure：文件与路径族（S6；临时目录，不碰游戏）----
+add_executable(lift-file-io tests/file_io.cpp)
+target_link_libraries(lift-file-io PRIVATE emulator-lift-runtime)
+add_test(NAME file-io COMMAND lift-file-io)
+
+# ---- pure：本轮从 stub 变真实现的四族（M1c）----
+# ★ 判据是 A5（七族内的导入不许是 stub）：每族一组行为夹具，见 tests/*_ext.cpp 的文件头。
+add_executable(lift-sync-ext tests/sync_ext.cpp)
+target_link_libraries(lift-sync-ext PRIVATE emulator-lift-runtime)
+add_test(NAME sync-ext COMMAND lift-sync-ext)
+
+add_executable(lift-file-path-ext tests/file_path_ext.cpp)
+target_link_libraries(lift-file-path-ext PRIVATE emulator-lift-runtime)
+add_test(NAME file-path-ext COMMAND lift-file-path-ext)
+
+add_executable(lift-locale-ext tests/locale_ext.cpp)
+target_link_libraries(lift-locale-ext PRIVATE emulator-lift-runtime)
+add_test(NAME locale-ext COMMAND lift-locale-ext)
+
+add_executable(lift-process-ext tests/process_ext.cpp)
+target_link_libraries(lift-process-ext PRIVATE emulator-lift-runtime)
+add_test(NAME process-ext COMMAND lift-process-ext)
+
+add_executable(lift-timer-ext tests/timer_ext.cpp)
+target_link_libraries(lift-timer-ext PRIVATE emulator-lift-runtime)
+add_test(NAME timer-ext COMMAND lift-timer-ext)
+
+# ---- pure：吞吐基准（S8；只测解释器分发，不设性能门槛 ⇒ 数字进 tools/lift.mjs report）----
+add_executable(lift-bench tests/bench.cpp)
+target_link_libraries(lift-bench PRIVATE emulator-lift-runtime)
+add_test(NAME bench COMMAND lift-bench)
 
 # ---- assets：要 corpus 里的二进制 / `.lst`（不在仓库里，见 .gitignore）----
 set(AGE_SECTFIX_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")

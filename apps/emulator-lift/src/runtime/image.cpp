@@ -258,6 +258,19 @@ bool setupProcessStructures(GuestMemory& mem, const PeImage& img, const GuestLay
     out->exe_path_ea = layout.argv_block;
     out->cmdline_ea = layout.argv_block + 0x400;
     mem.writeBytes(out->cmdline_ea, cmdline.c_str(), cmdline.size() + 1);
+
+    // ---- 环境块（`_setenvp` / GetEnvironmentStringsW 读；也是 A4 输入清单的一项）----
+    // ★ 只放**确定性的最小集合**：宿主环境变量不进 guest（否则 trace 会随机器变）。
+    static const char kEnvAnsi[] = "PATH=.\0TEMP=E:\\TMP\0\0";
+    out->environment_ansi = "PATH=.;TEMP=E:\\TMP";
+    out->env_ea = layout.argv_block + 0x800;
+    std::uint32_t env_off = 0;
+    for (std::size_t i = 0; i < sizeof(kEnvAnsi); ++i) {
+        mem.wr16(out->env_ea + env_off, static_cast<std::uint16_t>(static_cast<unsigned char>(kEnvAnsi[i])));
+        env_off += 2;
+    }
+    out->exe_path = exe_path;
+    out->cmdline = cmdline;
     return true;
 }
 

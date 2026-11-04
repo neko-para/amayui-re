@@ -1,10 +1,24 @@
-// emulator-lift · x87 最小子集（M1a 只要"能跑通启动路径"，不做全量 47 个形态）
+// emulator-lift · x87（S4：语料里 47 个形态）+ MMX/SSE 整数打包
 //
-// ★ 范围（用户口径）：`fld` / `fst` / `fstp` / `fild` / `fist` / `fistp` / 四则（含 pop 形式）/
-//   `fcom` 族 / `fnstsw` / `fxch` / 控制字读写 / 常量 / `fchs` `fabs` `fninit` `fwait` `ftst` `fsqrt`。
-// ★ 算术全部转给 SoftFloat（D3）；这里只做**栈 / tag / 条件码 / 控制字**。
-// ⛔ 超越函数（`fsin` `fcos` `fptan` `fpatan` `fyl2x` `f2xm1`）留给 M1b：执行到就**响亮失败**
-//   （它们在本作语料里合计约 10 条，且启动路径不碰）。
+// ★ 算术内核 = SoftFloat `extF80`（plan §4 D3）：四则 / 开方 / 取余 / 取整 / 比较全部转给它；
+//   这里只做**寄存器栈 / tag / 控制字 / 状态字 / 条件码**（8 寄存器栈 + TOP + tag word）。
+//   80 位精度：寄存器槽是 16 字节的 `extFloat80_t`（见 X87State），PC / RC 来自控制字
+//   （`extF80_roundingPrecision` / `softfloat_roundingMode`），异常位写状态字。
+//
+// ★ **1 ulp 偏差登记**（Intel SDM 明说这些助记符是 *implementation defined* ⇒ 任何实现都拿不到
+//   逐位，真机之间也不保证一致）。以下走**宿主 libm**，路径 = extF80 → double → libm →
+//   double → extF80（double 只有 53 位尾数，真机 x87 是 64 位尾数）：
+//       `fsin` `fcos` `fsincos` `fptan` `fpatan` `fyl2x` `fyl2xp1` `f2xm1`
+//   ⇒ 与真机结果**可能差 1 ulp**（真实值边界：|结果| 在 [1,2) 的正规值区间内的最后一位；
+//   输入绝对值 ≥ 2^63 时 `fsin`/`fcos` 按 Intel 语义置 C2=1 并**不改** ST(0)）。
+//   `fscale` 也用 double 读指数（指数是整数 ⇒ 只有 |e| > 2^53 才有差；实际永远命中不了）。
+//   ⛔ 本作语料这族合计约 10 条，且不在启动路径上；不要为它引入第三方库（plan §4 D3）。
+//   `fprem` / `fprem1` **不在此列**：走 SoftFloat 的精确整数余数路径（见 fpu_bridge.cpp）。
+//
+// ★ MMX 复用 x87 寄存器槽的**低 64 位**（Intel：MMX 与 x87 共用物理寄存器）；SSE 的 XMM
+//   在 `X86::xmm[8][4]`。`emms` 把 tag word 置全 empty（Intel 语义）。
+// ⛔ 未实现形态（例如语料里没有的 SSE 浮点）仍然走 `unimplemented()` 响亮失败。
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -15,8 +29,56 @@
 namespace lift {
 namespace {
 
+// ---- x87 状态字位（Intel SDM Vol.1 §8.1.4）----
+enum : std::uint16_t {
+    SW_IE = 0x0001,  // invalid
+    SW_DE = 0x0002,  // denormal
+    SW_ZE = 0x0004,  // divide-by-zero
+    SW_OE = 0x0008,  // overflow
+    SW_UE = 0x0010,  // underflow
+    SW_PE = 0x0020,  // precision
+    SW_SF = 0x0040,  // stack fault
+    SW_ES = 0x0080,  // exception summary
+    SW_C0 = 0x0100,
+    SW_C1 = 0x0200,
+    SW_C2 = 0x0400,
+    SW_C3 = 0x4000,
+    SW_CC = 0x4700,  // C0 | C1 | C2 | C3
+    SW_TOP = 0x3800,
+};
+
 std::uint8_t* stSlot(X86& cpu, int i) { return cpu.fpu.regs[cpu.fpu.phys(i)]; }
 const std::uint8_t* stConst(const X86& cpu, int i) { return cpu.fpu.regs[cpu.fpu.phys(i)]; }
+
+int stIndex(const Operand& op, int def) {
+    return (op.kind == OpKind::Reg) ? static_cast<int>(regSpec(op.reg).index) : def;
+}
+
+void setCC(X86& cpu, bool c0, bool c1, bool c2, bool c3) {
+    std::uint16_t s = cpu.fpu.status;
+    s = static_cast<std::uint16_t>(s & ~SW_CC);
+    if (c0) s |= SW_C0;
+    if (c1) s |= SW_C1;
+    if (c2) s |= SW_C2;
+    if (c3) s |= SW_C3;
+    cpu.fpu.status = s;
+}
+
+// SoftFloat 的异常标志 → x87 状态字（取走并清空；对应"读状态字"这一步）
+void syncStatus(X86& cpu) {
+    const std::uint8_t f = x87TakeExceptionFlags();
+    std::uint16_t s = cpu.fpu.status;
+    if (f & 1) s |= SW_PE;
+    if (f & 2) s |= SW_UE;
+    if (f & 4) s |= SW_OE;
+    if (f & 8) s |= SW_ZE;
+    if (f & 16) s |= SW_IE;
+    // ES：有**未屏蔽**异常时为 1。控制字掩码没逐位复现（本仓没有依赖 ES 的分支），
+    // 这里按"只要有一位异常置了就汇总"简化 —— 已在 S4 报告里点名。
+    if (s & 0x003Fu) s |= SW_ES;
+    s = static_cast<std::uint16_t>((s & ~SW_TOP) | ((cpu.fpu.top & 7u) << 11));
+    cpu.fpu.status = s;
+}
 
 void markValid(X86& cpu, int physical) {
     cpu.fpu.setValid(physical);
@@ -26,8 +88,9 @@ void markValid(X86& cpu, int physical) {
 void push(X86& cpu, const Ext80 v) {
     const int next = (cpu.fpu.top - 1) & 7;
     if (!cpu.fpu.empty(next)) {
-        // 栈上溢：x87 会置 C1 并产生 invalid
-        cpu.fpu.status |= 0x0200u;
+        // 栈上溢：置 C1 + invalid（Intel：x87 报 stack overflow 后退回原状）
+        x87RaiseInvalid();
+        setCC(cpu, false, true, false, false);
         return;
     }
     cpu.fpu.top = static_cast<std::uint8_t>(next);
@@ -40,26 +103,10 @@ void pop(X86& cpu) {
     cpu.fpu.top = static_cast<std::uint8_t>((cpu.fpu.top + 1) & 7);
 }
 
-void setCC(X86& cpu, bool c0, bool c1, bool c2, bool c3) {
-    std::uint16_t s = cpu.fpu.status;
-    s = static_cast<std::uint16_t>(s & ~0x4700u);  // 清 C0(8) C1(9) C2(10) C3(14)
-    if (c0) s |= 0x0100u;
-    if (c1) s |= 0x0200u;
-    if (c2) s |= 0x0400u;
-    if (c3) s |= 0x4000u;
-    cpu.fpu.status = s;
-}
-
-void syncStatus(X86& cpu) {
-    const std::uint8_t f = x87TakeExceptionFlags();
-    std::uint16_t s = cpu.fpu.status;
-    if (f & 1) s |= 0x0020u;   // PE 精度
-    if (f & 2) s |= 0x0010u;   // UE 下溢
-    if (f & 4) s |= 0x0008u;   // OE 上溢
-    if (f & 8) s |= 0x0004u;   // ZE 除零
-    if (f & 16) s |= 0x0001u;  // IE 非法
-    s = static_cast<std::uint16_t>((s & ~0x3800u) | ((cpu.fpu.top & 7u) << 11));  // TOP
-    cpu.fpu.status = s;
+void storeSt0(X86& cpu, const Ext80 v) {
+    std::memcpy(stSlot(cpu, 0), v, 16);
+    markValid(cpu, cpu.fpu.phys(0));
+    syncStatus(cpu);
 }
 
 // 取内存操作数（按它的宽度）；返回 false ⇒ 不支持
@@ -68,19 +115,19 @@ bool loadMemValue(X86& cpu, const MemOperand& m, Ext80 out) {
     switch (m.size) {
         case 4: {
             std::uint8_t b[4];
-            for (int i = 0; i < 4; ++i) b[i] = cpu.mem->rd8(ea + i);
+            for (int i = 0; i < 4; ++i) b[i] = cpu.mem->rd8(ea + static_cast<std::uint32_t>(i));
             x87MemToReg(b, out, 4);
             return true;
         }
         case 8: {
             std::uint8_t b[8];
-            for (int i = 0; i < 8; ++i) b[i] = cpu.mem->rd8(ea + i);
+            for (int i = 0; i < 8; ++i) b[i] = cpu.mem->rd8(ea + static_cast<std::uint32_t>(i));
             x87MemToReg(b, out, 8);
             return true;
         }
         case 10: {
             std::uint8_t b[10];
-            for (int i = 0; i < 10; ++i) b[i] = cpu.mem->rd8(ea + i);
+            for (int i = 0; i < 10; ++i) b[i] = cpu.mem->rd8(ea + static_cast<std::uint32_t>(i));
             x87MemToReg(b, out, 10);
             return true;
         }
@@ -103,15 +150,15 @@ void storeMemValue(X86& cpu, const MemOperand& m, const Ext80 v) {
     std::uint8_t b[10] = {};
     const std::uint8_t size = m.size ? m.size : 4;
     x87RegToMem(v, b, size);
-    cpu.mem->writeBytes(ea, b, size);
+    for (int i = 0; i < size; ++i) cpu.mem->wr8(ea + static_cast<std::uint32_t>(i), b[i]);
 }
 
-void storeIntMem(X86& cpu, const MemOperand& m, const Ext80 v) {
+void storeIntMem(X86& cpu, const MemOperand& m, const Ext80 v, bool truncate = false) {
     const std::uint32_t ea = cpu.eaOf(m);
     switch (m.size) {
-        case 2: cpu.mem->wr16(ea, static_cast<std::uint16_t>(x87ToI32(v, false))); break;
-        case 4: cpu.mem->wr32(ea, static_cast<std::uint32_t>(x87ToI32(v, false))); break;
-        case 8: cpu.mem->wr64(ea, static_cast<std::uint64_t>(x87ToI64(v, false))); break;
+        case 2: cpu.mem->wr16(ea, static_cast<std::uint16_t>(x87ToI32(v, truncate))); break;
+        case 4: cpu.mem->wr32(ea, static_cast<std::uint32_t>(x87ToI32(v, truncate))); break;
+        case 8: cpu.mem->wr64(ea, static_cast<std::uint64_t>(x87ToI64(v, truncate))); break;
         default: break;
     }
 }
@@ -180,21 +227,19 @@ bool integerArith(X86& cpu, const Insn& in, Op op) {
 }
 
 bool compare(X86& cpu, const Insn& in, bool pop_after, bool quiet) {
-    (void)quiet;
     Ext80 b;
     if (in.op0().kind == OpKind::Reg) {
-        const int i = static_cast<int>(regSpec(in.op0().reg).index);
-        std::memcpy(b, stConst(cpu, i), 16);
+        std::memcpy(b, stConst(cpu, stIndex(in.op0(), 1)), 16);
     } else if (in.op0().kind == OpKind::Mem) {
         if (!loadMemValue(cpu, in.op0().mem, b)) return unimplemented(cpu, in, "fcom 的内存操作数宽度不支持");
     } else {
         // ★ **无显式操作数**的 `fcom` / `fcomp` / `fucom` / `fucomp` / `fcompp` / `fucompp`
         //   比的是 **ST(1)**，不是 ST(0)（Intel SDM：隐式源操作数是 ST(1)）。
-        //   先前取 ST(0) ⇒ 变成"ST0 与自己比"，恒相等、C3 恒 0 —— 那会让依赖比较结果的分支走错，
-        //   也是 conformance `x87-fcompp` / `x87-fucompp` 红的原因。
         std::memcpy(b, stConst(cpu, 1), 16);
     }
     x87ApplyControlWord(cpu.fpu.control);
+    // FCOM 对 QNaN 也要报 invalid；FUCOM 是 quiet（只有 SNaN 报）。
+    if (!quiet && (x87IsNan(stConst(cpu, 0)) || x87IsNan(b))) x87RaiseInvalid();
     const int cmp = x87Compare(stConst(cpu, 0), b);
     if (cmp == 2) {
         setCC(cpu, true, false, true, true);  // 无序：C3=C2=C0=1
@@ -210,21 +255,656 @@ bool compare(X86& cpu, const Insn& in, bool pop_after, bool quiet) {
     return true;
 }
 
+// `fcomi` / `fcomip` / `fucomi` / `fucomip`：结果进 **EFLAGS**（ZF/PF/CF），不动 C0..C3
+bool compareEflags(X86& cpu, const Insn& in, bool pop_after, bool quiet) {
+    const int i = (in.op1().kind == OpKind::Reg) ? stIndex(in.op1(), 0) : stIndex(in.op0(), 1);
+    Ext80 b;
+    std::memcpy(b, stConst(cpu, i), 16);
+    x87ApplyControlWord(cpu.fpu.control);
+    if (!quiet && (x87IsNan(stConst(cpu, 0)) || x87IsNan(b))) x87RaiseInvalid();
+    const int cmp = x87Compare(stConst(cpu, 0), b);
+    cpu.setOf(false);
+    cpu.setSf(false);
+    cpu.setAf(false);
+    if (cmp == 2) {  // 无序：ZF=PF=CF=1
+        cpu.setZf(true);
+        cpu.setPf(true);
+        cpu.setCf(true);
+    } else if (cmp == 0) {
+        cpu.setZf(true);
+        cpu.setPf(false);
+        cpu.setCf(false);
+    } else if (cmp < 0) {
+        cpu.setZf(false);
+        cpu.setPf(false);
+        cpu.setCf(true);
+    } else {
+        cpu.setZf(false);
+        cpu.setPf(false);
+        cpu.setCf(false);
+    }
+    syncStatus(cpu);
+    if (pop_after) pop(cpu);
+    return true;
+}
+
+bool fcmov(X86& cpu, const Insn& in) {
+    bool take = false;
+    switch (in.op) {
+        case Op::Fcmovb: take = cpu.cf(); break;
+        case Op::Fcmove: take = cpu.zf(); break;
+        case Op::Fcmovbe: take = cpu.cf() || cpu.zf(); break;
+        case Op::Fcmovu: take = cpu.pf(); break;
+        case Op::Fcmovnb: take = !cpu.cf(); break;
+        case Op::Fcmovne: take = !cpu.zf(); break;
+        case Op::Fcmovnbe: take = !cpu.cf() && !cpu.zf(); break;
+        case Op::Fcmovnu: take = !cpu.pf(); break;
+        default: return unimplemented(cpu, in, "fcmov 族没有这条条件");
+    }
+    const int i = (in.op1().kind == OpKind::Reg) ? stIndex(in.op1(), 1) : stIndex(in.op0(), 1);
+    if (take) {
+        std::memcpy(stSlot(cpu, 0), stConst(cpu, i), 16);
+        markValid(cpu, cpu.fpu.phys(0));
+    }
+    return true;
+}
+
 void doFninit(X86& cpu) {
     cpu.fpu.reset();
     x87ApplyControlWord(cpu.fpu.control);
     x87TakeExceptionFlags();
 }
 
+// ---- 环境 / 状态保存区（32 位保护模式：28 字节环境 + 8×10 字节寄存器栈）----
+void doSaveEnv(X86& cpu, std::uint32_t ea) {
+    cpu.mem->wr32(ea + 0, cpu.fpu.control);            // FCW（低 16 位有效）
+    cpu.mem->wr32(ea + 4, cpu.fpu.status);             // FSW（低 16 位有效）
+    cpu.mem->wr32(ea + 8, cpu.fpu.tag);                // FTW（低 16 位有效）
+    cpu.mem->wr32(ea + 12, 0);                         // FIP（本仓不跟踪指令指针）
+    cpu.mem->wr32(ea + 16, 0);                         // FCS + FOP
+    cpu.mem->wr32(ea + 20, 0);                         // FDP
+    cpu.mem->wr32(ea + 24, 0);                         // FDS + 填充
+}
+
+void doLoadEnv(X86& cpu, std::uint32_t ea) {
+    cpu.fpu.control = cpu.mem->rd16(ea + 0);
+    cpu.fpu.status = cpu.mem->rd16(ea + 4);
+    cpu.fpu.tag = cpu.mem->rd16(ea + 8);
+    cpu.fpu.top = static_cast<std::uint8_t>((cpu.fpu.status >> 11) & 7u);
+    x87ApplyControlWord(cpu.fpu.control);
+}
+
+void doFnsave(X86& cpu, std::uint32_t ea) {
+    doSaveEnv(cpu, ea);
+    for (int i = 0; i < 8; ++i) {
+        const std::uint8_t* p = cpu.fpu.regs[cpu.fpu.phys(i)];
+        for (int k = 0; k < 10; ++k) {
+            cpu.mem->wr8(ea + 28u + static_cast<std::uint32_t>(i) * 10u + static_cast<std::uint32_t>(k), p[k]);
+        }
+    }
+    doFninit(cpu);  // INTEL：FNSAVE 之后 FPU 处于 init 状态
+}
+
+void doFrstor(X86& cpu, std::uint32_t ea) {
+    doLoadEnv(cpu, ea);
+    for (int i = 0; i < 8; ++i) {
+        std::uint8_t b[16] = {};
+        for (int k = 0; k < 10; ++k) {
+            b[k] = cpu.mem->rd8(ea + 28u + static_cast<std::uint32_t>(i) * 10u + static_cast<std::uint32_t>(k));
+        }
+        std::memcpy(cpu.fpu.regs[cpu.fpu.phys(i)], b, 16);
+    }
+    cpu.fpu.top = static_cast<std::uint8_t>((cpu.fpu.status >> 11) & 7u);
+}
+
+void doFxam(X86& cpu) {
+    bool c0 = false;
+    bool c2 = false;
+    bool c3 = false;
+    bool sign = false;
+    if (cpu.fpu.empty(cpu.fpu.phys(0))) {
+        c3 = true;
+        c0 = true;
+    } else {
+        sign = x87SignBit(stConst(cpu, 0));
+        switch (x87Classify(stConst(cpu, 0))) {
+            case X87Class::Nan: c0 = true; break;
+            case X87Class::Normal: c2 = true; break;
+            case X87Class::Infinity: c2 = true; c0 = true; break;
+            case X87Class::Zero: c3 = true; break;
+            case X87Class::Denormal: c3 = true; c2 = true; break;
+        }
+    }
+    setCC(cpu, c0, sign, c2, c3);  // C1 = 符号位
+}
+
+// 超越函数 / 实现定义族：extF80 → double → libm → extF80（见文件头的 1 ulp 登记）
+bool transcendental(X86& cpu, const Insn& in) {
+    x87ApplyControlWord(cpu.fpu.control);
+    const double x = x87ToDouble(stConst(cpu, 0));
+    Ext80 r;
+    switch (in.op) {
+        case Op::Fsin:
+        case Op::Fcos: {
+            // Intel：|ST(0)| >= 2^63 ⇒ C2=1，ST(0) 不变
+            if (!(std::fabs(x) < 9223372036854775808.0)) {
+                setCC(cpu, false, false, true, false);
+                syncStatus(cpu);
+                return true;
+            }
+            x87FromDouble(in.op == Op::Fsin ? std::sin(x) : std::cos(x), r);
+            storeSt0(cpu, r);
+            setCC(cpu, false, false, false, false);
+            return true;
+        }
+        case Op::Fsincos: {
+            if (!(std::fabs(x) < 9223372036854775808.0)) {
+                setCC(cpu, false, false, true, false);
+                syncStatus(cpu);
+                return true;
+            }
+            // Intel：正弦写 ST(0)，**再把余弦压栈** ⇒ 最终 ST(0)=cos、ST(1)=sin
+            x87FromDouble(std::sin(x), r);
+            std::memcpy(stSlot(cpu, 0), r, 16);
+            markValid(cpu, cpu.fpu.phys(0));
+            Ext80 c;
+            x87FromDouble(std::cos(x), c);
+            push(cpu, c);
+            setCC(cpu, false, false, false, false);
+            syncStatus(cpu);
+            return true;
+        }
+        case Op::Fptan: {
+            x87FromDouble(std::tan(x), r);
+            storeSt0(cpu, r);
+            Ext80 one;
+            x87One(one);
+            push(cpu, one);  // Intel：结果留在 ST(1)，再把 1.0 压栈
+            setCC(cpu, false, false, false, false);
+            syncStatus(cpu);
+            return true;
+        }
+        case Op::Fpatan: {
+            const double y = x87ToDouble(stConst(cpu, 1));
+            x87FromDouble(std::atan2(y, x), r);
+            std::memcpy(stSlot(cpu, 1), r, 16);  // 写 ST(1)，然后 pop ⇒ 结果落到 ST(0)
+            markValid(cpu, cpu.fpu.phys(1));
+            pop(cpu);
+            setCC(cpu, false, false, false, false);
+            syncStatus(cpu);
+            return true;
+        }
+        case Op::Fyl2x:
+        case Op::Fyl2xp1: {
+            const double y = x87ToDouble(stConst(cpu, 1));
+            const double v = (in.op == Op::Fyl2x) ? std::log2(x) : std::log2(x + 1.0);
+            x87FromDouble(y * v, r);
+            std::memcpy(stSlot(cpu, 1), r, 16);
+            markValid(cpu, cpu.fpu.phys(1));
+            pop(cpu);
+            setCC(cpu, false, false, false, false);
+            syncStatus(cpu);
+            return true;
+        }
+        case Op::F2xm1: {
+            x87FromDouble(std::exp2(x) - 1.0, r);
+            storeSt0(cpu, r);
+            setCC(cpu, false, false, false, false);
+            return true;
+        }
+        default: return unimplemented(cpu, in, "超越函数族没有这条语义");
+    }
+}
+
+// =====================================================================================
+// MMX / SSE：整数打包（`Op::Packed`）
+// ★ 执行宽度 = 目的操作数的宽度：MM 寄存器 / m64 = 8 字节，XMM = 16 字节；两种形态共用同一套
+//   按 lane 写的代码。⛔ 浮点 SSE（addps / movaps 这类）语料里没有 ⇒ 不解码 ⇒ 响亮失败。
+// =====================================================================================
+struct PackVec {
+    std::uint8_t b[16] = {};
+};
+
+std::uint16_t pkRd16(const std::uint8_t* p, int i) {
+    return static_cast<std::uint16_t>(static_cast<std::uint16_t>(p[i]) |
+                                      static_cast<std::uint16_t>(static_cast<std::uint16_t>(p[i + 1]) << 8));
+}
+void pkWr16(std::uint8_t* p, int i, std::uint16_t v) {
+    p[i] = static_cast<std::uint8_t>(v & 0xFFu);
+    p[i + 1] = static_cast<std::uint8_t>((v >> 8) & 0xFFu);
+}
+std::uint32_t pkRd32(const std::uint8_t* p, int i) {
+    return static_cast<std::uint32_t>(p[i]) | (static_cast<std::uint32_t>(p[i + 1]) << 8) |
+           (static_cast<std::uint32_t>(p[i + 2]) << 16) | (static_cast<std::uint32_t>(p[i + 3]) << 24);
+}
+void pkWr32(std::uint8_t* p, int i, std::uint32_t v) {
+    for (int k = 0; k < 4; ++k) p[i + k] = static_cast<std::uint8_t>((v >> (8 * k)) & 0xFFu);
+}
+std::uint64_t pkRd64(const std::uint8_t* p, int i) {
+    std::uint64_t v = 0;
+    for (int k = 0; k < 8; ++k) v |= static_cast<std::uint64_t>(p[i + k]) << (8 * k);
+    return v;
+}
+void pkWr64(std::uint8_t* p, int i, std::uint64_t v) {
+    for (int k = 0; k < 8; ++k) p[i + k] = static_cast<std::uint8_t>((v >> (8 * k)) & 0xFFu);
+}
+
+std::int64_t pkClamp(std::int64_t v, std::int64_t lo, std::int64_t hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+bool pkIsMm(const Operand& op) {
+    return op.kind == OpKind::Reg && regSpec(op.reg).cls == RegClass::X87;
+}
+bool pkIsVec(const Operand& op) { return pkIsMm(op) || op.kind == OpKind::Xmm; }
+
+bool pkLoad(X86& cpu, const Operand& op, PackVec& v, int* bytes) {
+    std::memset(v.b, 0, sizeof(v.b));
+    switch (op.kind) {
+        case OpKind::Reg: {
+            const RegSpec sp = regSpec(op.reg);
+            if (sp.cls == RegClass::X87) {
+                // MMX 复用 x87 物理槽的低 64 位（小端 ⇒ 低 8 字节）
+                std::memcpy(v.b, cpu.fpu.regs[cpu.fpu.phys(sp.index)], 8);
+                *bytes = 8;
+                return true;
+            }
+            if (sp.cls == RegClass::Gpr32 || sp.cls == RegClass::Gpr16 || sp.cls == RegClass::Gpr8) {
+                const std::uint32_t d = cpu.readReg(op.reg);
+                pkWr32(v.b, 0, d);
+                *bytes = 4;
+                return true;
+            }
+            return false;
+        }
+        case OpKind::Xmm: {
+            if (op.vec >= 8) return false;
+            std::memcpy(v.b, cpu.xmm[op.vec], 16);
+            *bytes = 16;
+            return true;
+        }
+        case OpKind::Mem: {
+            const int n = op.mem.size;
+            if (n != 4 && n != 8 && n != 16) return false;
+            const std::uint32_t ea = cpu.eaOf(op.mem);
+            for (int i = 0; i < n; ++i) v.b[i] = cpu.mem->rd8(ea + static_cast<std::uint32_t>(i));
+            *bytes = n;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+bool pkStore(X86& cpu, const Operand& op, const PackVec& v, int bytes) {
+    switch (op.kind) {
+        case OpKind::Reg: {
+            const RegSpec sp = regSpec(op.reg);
+            if (sp.cls != RegClass::X87) return false;
+            // MMX 写只覆盖低 64 位；★ 不动 tag word（Intel：MMX 指令不影响 x87 tag word）
+            std::memcpy(cpu.fpu.regs[cpu.fpu.phys(sp.index)], v.b, 8);
+            return true;
+        }
+        case OpKind::Xmm: {
+            if (op.vec >= 8) return false;
+            std::memcpy(cpu.xmm[op.vec], v.b, 16);
+            return true;
+        }
+        case OpKind::Mem: {
+            const std::uint32_t ea = cpu.eaOf(op.mem);
+            for (int i = 0; i < bytes; ++i) cpu.mem->wr8(ea + static_cast<std::uint32_t>(i), v.b[i]);
+            return true;
+        }
+        default: return false;
+    }
+}
+
+void pkUnpack(std::uint8_t* d, const std::uint8_t* s, int bytes, int elem, bool high) {
+    std::uint8_t a[16];
+    std::uint8_t b[16];
+    std::memcpy(a, d, static_cast<std::size_t>(bytes));
+    std::memcpy(b, s, static_cast<std::size_t>(bytes));
+    const int half = bytes / 2;
+    const int elems = half / elem;
+    const int off = high ? half : 0;
+    for (int i = 0; i < elems; ++i) {
+        std::memcpy(d + (2 * i) * elem, a + off + i * elem, static_cast<std::size_t>(elem));
+        std::memcpy(d + (2 * i + 1) * elem, b + off + i * elem, static_cast<std::size_t>(elem));
+    }
+}
+
+void pkPack(PkOp op, std::uint8_t* d, const std::uint8_t* s, int bytes) {
+    std::uint8_t a[16];
+    std::uint8_t b[16];
+    std::memcpy(a, d, static_cast<std::size_t>(bytes));
+    std::memcpy(b, s, static_cast<std::size_t>(bytes));
+    if (op == PkOp::Packsswb || op == PkOp::Packuswb) {  // 源：8/16 位词 → 8 位字节
+        const int n = bytes / 2;
+        for (int i = 0; i < n; ++i) {
+            const std::int64_t va = static_cast<std::int16_t>(pkRd16(a, i * 2));
+            const std::int64_t vb = static_cast<std::int16_t>(pkRd16(b, i * 2));
+            if (op == PkOp::Packsswb) {
+                d[i] = static_cast<std::uint8_t>(static_cast<std::int8_t>(pkClamp(va, -128, 127)));
+                d[n + i] = static_cast<std::uint8_t>(static_cast<std::int8_t>(pkClamp(vb, -128, 127)));
+            } else {
+                d[i] = static_cast<std::uint8_t>(pkClamp(va, 0, 255));
+                d[n + i] = static_cast<std::uint8_t>(pkClamp(vb, 0, 255));
+            }
+        }
+    } else {  // Packssdw：源 32 位双字 → 16 位词
+        const int n = bytes / 4;
+        for (int i = 0; i < n; ++i) {
+            const std::int64_t va = static_cast<std::int32_t>(pkRd32(a, i * 4));
+            const std::int64_t vb = static_cast<std::int32_t>(pkRd32(b, i * 4));
+            pkWr16(d, (i) * 2, static_cast<std::uint16_t>(pkClamp(va, -32768, 32767)));
+            pkWr16(d, (n + i) * 2, static_cast<std::uint16_t>(pkClamp(vb, -32768, 32767)));
+        }
+    }
+}
+
+void pkShift(PkOp op, std::uint8_t* d, int bytes, std::uint32_t count) {
+    switch (op) {
+        case PkOp::Psllw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                pkWr16(d, i * 2, count > 15 ? 0 : static_cast<std::uint16_t>(pkRd16(d, i * 2) << count));
+            }
+            break;
+        case PkOp::Pslld:
+            for (int i = 0; i < bytes / 4; ++i) {
+                pkWr32(d, i * 4, count > 31 ? 0 : pkRd32(d, i * 4) << count);
+            }
+            break;
+        case PkOp::Psllq:
+            for (int i = 0; i < bytes / 8; ++i) {
+                pkWr64(d, i * 8, count > 63 ? 0 : pkRd64(d, i * 8) << count);
+            }
+            break;
+        case PkOp::Psrlw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                pkWr16(d, i * 2, count > 15 ? 0 : static_cast<std::uint16_t>(pkRd16(d, i * 2) >> count));
+            }
+            break;
+        case PkOp::Psrld:
+            for (int i = 0; i < bytes / 4; ++i) {
+                pkWr32(d, i * 4, count > 31 ? 0 : pkRd32(d, i * 4) >> count);
+            }
+            break;
+        case PkOp::Psrlq:
+            for (int i = 0; i < bytes / 8; ++i) {
+                pkWr64(d, i * 8, count > 63 ? 0 : pkRd64(d, i * 8) >> count);
+            }
+            break;
+        case PkOp::Psraw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                const std::int32_t v = static_cast<std::int16_t>(pkRd16(d, i * 2));
+                pkWr16(d, i * 2, count > 15 ? static_cast<std::uint16_t>(v < 0 ? 0xFFFF : 0)
+                                            : static_cast<std::uint16_t>(v >> count));
+            }
+            break;
+        case PkOp::Psrad:
+            for (int i = 0; i < bytes / 4; ++i) {
+                const std::int32_t v = static_cast<std::int32_t>(pkRd32(d, i * 4));
+                // ★ 计数 > 31：整 lane 填符号位（不是"计数取低 5 位"）
+                pkWr32(d, i * 4, count > 31 ? static_cast<std::uint32_t>(v >> 31) : static_cast<std::uint32_t>(v >> count));
+            }
+            break;
+        default: break;
+    }
+}
+
+void pkBinary(PkOp op, std::uint8_t* d, const std::uint8_t* s, int bytes) {
+    switch (op) {
+        case PkOp::Pand: for (int i = 0; i < bytes; ++i) d[i] = static_cast<std::uint8_t>(d[i] & s[i]); break;
+        case PkOp::Pandn: for (int i = 0; i < bytes; ++i) d[i] = static_cast<std::uint8_t>(~d[i] & s[i]); break;
+        case PkOp::Por: for (int i = 0; i < bytes; ++i) d[i] = static_cast<std::uint8_t>(d[i] | s[i]); break;
+        case PkOp::Pxor: for (int i = 0; i < bytes; ++i) d[i] = static_cast<std::uint8_t>(d[i] ^ s[i]); break;
+
+        case PkOp::PaddB:
+            for (int i = 0; i < bytes; ++i) d[i] = static_cast<std::uint8_t>(d[i] + s[i]);
+            break;
+        case PkOp::PaddW:
+            for (int i = 0; i < bytes / 2; ++i)
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(pkRd16(d, i * 2) + pkRd16(s, i * 2)));
+            break;
+        case PkOp::PaddD:
+            for (int i = 0; i < bytes / 4; ++i) pkWr32(d, i * 4, pkRd32(d, i * 4) + pkRd32(s, i * 4));
+            break;
+        case PkOp::PaddQ:
+            for (int i = 0; i < bytes / 8; ++i) pkWr64(d, i * 8, pkRd64(d, i * 8) + pkRd64(s, i * 8));
+            break;
+        case PkOp::PsubB:
+            for (int i = 0; i < bytes; ++i) d[i] = static_cast<std::uint8_t>(d[i] - s[i]);
+            break;
+        case PkOp::PsubW:
+            for (int i = 0; i < bytes / 2; ++i)
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(pkRd16(d, i * 2) - pkRd16(s, i * 2)));
+            break;
+        case PkOp::PsubD:
+            for (int i = 0; i < bytes / 4; ++i) pkWr32(d, i * 4, pkRd32(d, i * 4) - pkRd32(s, i * 4));
+            break;
+        case PkOp::PsubQ:
+            for (int i = 0; i < bytes / 8; ++i) pkWr64(d, i * 8, pkRd64(d, i * 8) - pkRd64(s, i * 8));
+            break;
+
+        case PkOp::PaddSb:
+            for (int i = 0; i < bytes; ++i) {
+                const std::int64_t v = static_cast<std::int8_t>(d[i]) + static_cast<std::int8_t>(s[i]);
+                d[i] = static_cast<std::uint8_t>(static_cast<std::int8_t>(pkClamp(v, -128, 127)));
+            }
+            break;
+        case PkOp::PaddSw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                const std::int64_t v = static_cast<std::int16_t>(pkRd16(d, i * 2)) +
+                                       static_cast<std::int16_t>(pkRd16(s, i * 2));
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(pkClamp(v, -32768, 32767)));
+            }
+            break;
+        case PkOp::PaddUsb:
+            for (int i = 0; i < bytes; ++i) {
+                const int v = d[i] + s[i];
+                d[i] = static_cast<std::uint8_t>(v > 255 ? 255 : v);
+            }
+            break;
+        case PkOp::PaddUsw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                const std::uint32_t v = static_cast<std::uint32_t>(pkRd16(d, i * 2)) + pkRd16(s, i * 2);
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(v > 0xFFFFu ? 0xFFFFu : v));
+            }
+            break;
+
+        case PkOp::PsubSb:
+            for (int i = 0; i < bytes; ++i) {
+                const std::int64_t v = static_cast<std::int8_t>(d[i]) - static_cast<std::int8_t>(s[i]);
+                d[i] = static_cast<std::uint8_t>(static_cast<std::int8_t>(pkClamp(v, -128, 127)));
+            }
+            break;
+        case PkOp::PsubSw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                const std::int64_t v = static_cast<std::int16_t>(pkRd16(d, i * 2)) -
+                                       static_cast<std::int16_t>(pkRd16(s, i * 2));
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(pkClamp(v, -32768, 32767)));
+            }
+            break;
+        case PkOp::PsubUsb:
+            for (int i = 0; i < bytes; ++i) {
+                const int v = static_cast<int>(d[i]) - static_cast<int>(s[i]);
+                d[i] = static_cast<std::uint8_t>(v < 0 ? 0 : v);
+            }
+            break;
+        case PkOp::PsubUsw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                const std::int32_t v =
+                    static_cast<std::int32_t>(pkRd16(d, i * 2)) - static_cast<std::int32_t>(pkRd16(s, i * 2));
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(v < 0 ? 0 : v));
+            }
+            break;
+
+        case PkOp::PcmpeqB:
+            for (int i = 0; i < bytes; ++i) d[i] = (d[i] == s[i]) ? 0xFFu : 0x00u;
+            break;
+        case PkOp::PcmpeqW:
+            for (int i = 0; i < bytes / 2; ++i)
+                pkWr16(d, i * 2, pkRd16(d, i * 2) == pkRd16(s, i * 2) ? 0xFFFFu : 0x0000u);
+            break;
+        case PkOp::PcmpeqD:
+            for (int i = 0; i < bytes / 4; ++i)
+                pkWr32(d, i * 4, pkRd32(d, i * 4) == pkRd32(s, i * 4) ? 0xFFFFFFFFu : 0u);
+            break;
+        case PkOp::PcmpgtB:
+            for (int i = 0; i < bytes; ++i)
+                d[i] = (static_cast<std::int8_t>(d[i]) > static_cast<std::int8_t>(s[i])) ? 0xFFu : 0x00u;
+            break;
+        case PkOp::PcmpgtW:
+            for (int i = 0; i < bytes / 2; ++i)
+                pkWr16(d, i * 2, static_cast<std::int16_t>(pkRd16(d, i * 2)) >
+                                          static_cast<std::int16_t>(pkRd16(s, i * 2))
+                                      ? 0xFFFFu
+                                      : 0x0000u);
+            break;
+        case PkOp::PcmpgtD:
+            for (int i = 0; i < bytes / 4; ++i)
+                pkWr32(d, i * 4, static_cast<std::int32_t>(pkRd32(d, i * 4)) >
+                                          static_cast<std::int32_t>(pkRd32(s, i * 4))
+                                      ? 0xFFFFFFFFu
+                                      : 0u);
+            break;
+
+        case PkOp::Punpcklbw: pkUnpack(d, s, bytes, 1, false); break;
+        case PkOp::Punpcklwd: pkUnpack(d, s, bytes, 2, false); break;
+        case PkOp::Punpckldq: pkUnpack(d, s, bytes, 4, false); break;
+        case PkOp::Punpcklqdq: pkUnpack(d, s, bytes, 8, false); break;
+        case PkOp::Punpckhbw: pkUnpack(d, s, bytes, 1, true); break;
+        case PkOp::Punpckhwd: pkUnpack(d, s, bytes, 2, true); break;
+        case PkOp::Punpckhdq: pkUnpack(d, s, bytes, 4, true); break;
+        case PkOp::Punpckhqdq: pkUnpack(d, s, bytes, 8, true); break;
+
+        case PkOp::Packsswb:
+        case PkOp::Packssdw:
+        case PkOp::Packuswb: pkPack(op, d, s, bytes); break;
+
+        case PkOp::Pmullw:
+            for (int i = 0; i < bytes / 2; ++i)
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(
+                                      (static_cast<std::uint32_t>(pkRd16(d, i * 2)) * pkRd16(s, i * 2)) & 0xFFFFu));
+            break;
+        case PkOp::Pmulhw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                const std::int32_t p = static_cast<std::int32_t>(static_cast<std::int16_t>(pkRd16(d, i * 2))) *
+                                       static_cast<std::int32_t>(static_cast<std::int16_t>(pkRd16(s, i * 2)));
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(static_cast<std::uint32_t>(p) >> 16));
+            }
+            break;
+        case PkOp::Pmulhuw:
+            for (int i = 0; i < bytes / 2; ++i) {
+                const std::uint32_t p = static_cast<std::uint32_t>(pkRd16(d, i * 2)) * pkRd16(s, i * 2);
+                pkWr16(d, i * 2, static_cast<std::uint16_t>(p >> 16));
+            }
+            break;
+        case PkOp::Pmuludq:
+            for (int i = 0; i < bytes / 4; i += 2) {
+                const std::uint64_t p = static_cast<std::uint64_t>(pkRd32(d, i * 4)) *
+                                        static_cast<std::uint64_t>(pkRd32(s, i * 4));
+                pkWr64(d, i * 4, p);
+            }
+            break;
+        case PkOp::Pmaddwd:
+            for (int i = 0; i < bytes / 4; ++i) {
+                const std::int32_t v = static_cast<std::int32_t>(static_cast<std::int16_t>(pkRd16(d, i * 4))) *
+                                           static_cast<std::int32_t>(static_cast<std::int16_t>(pkRd16(s, i * 4))) +
+                                       static_cast<std::int32_t>(static_cast<std::int16_t>(pkRd16(d, i * 4 + 2))) *
+                                           static_cast<std::int32_t>(static_cast<std::int16_t>(pkRd16(s, i * 4 + 2)));
+                pkWr32(d, i * 4, static_cast<std::uint32_t>(v));
+            }
+            break;
+
+        default: break;
+    }
+}
+
 }  // namespace
 
+// =====================================================================================
+// MMX / SSE 的执行入口（`Op::Packed`）
+// =====================================================================================
+bool execPacked(X86& cpu, const Insn& in) {
+    switch (in.pk) {
+        case PkOp::None:
+            return unimplemented(cpu, in, "Packed 指令没有子语义（解码器漏了映射）");
+        case PkOp::Ems:
+            // Intel：EMMS 把 x87 tag word 置全 empty（ST 栈变空），TOP 不动
+            cpu.fpu.tag = 0xFFFFu;
+            return true;
+        case PkOp::Movd:
+        case PkOp::Movq: {
+            const bool q = (in.pk == PkOp::Movq);
+            const int width = q ? 8 : 4;
+            const Operand& dst = in.op0();
+            const Operand& src = in.op1();
+            PackVec v;
+            int nb = 0;
+            if (!pkLoad(cpu, src, v, &nb)) return unimplemented(cpu, in, "movd/movq 的源操作数形态不支持");
+            (void)nb;
+            if (pkIsVec(dst)) {
+                // 写进 mm / xmm 都是**零扩展**：高 (16 − width) 字节清零
+                for (int i = width; i < 16; ++i) v.b[i] = 0;
+                if (!pkStore(cpu, dst, v, width)) return unimplemented(cpu, in, "movd/movq 的目标操作数形态不支持");
+                return true;
+            }
+            if (dst.kind == OpKind::Reg) {
+                if (q) return unimplemented(cpu, in, "32 位 guest 里没有 movq 到通用寄存器");
+                cpu.writeReg(dst.reg, pkRd32(v.b, 0));
+                return true;
+            }
+            if (dst.kind == OpKind::Mem) {
+                if (!pkStore(cpu, dst, v, width)) return unimplemented(cpu, in, "movd/movq 的内存目标写失败");
+                return true;
+            }
+            return unimplemented(cpu, in, "movd/movq 的目标操作数形态不支持");
+        }
+        default: break;
+    }
+
+    if (!pkIsVec(in.op0())) return unimplemented(cpu, in, "MMX/SSE 的打包指令要求目标是 mm / xmm 寄存器");
+    PackVec a;
+    int an = 0;
+    if (!pkLoad(cpu, in.op0(), a, &an)) return unimplemented(cpu, in, "MMX/SSE 的目标操作数读不出来");
+    const int bytes = (an == 16) ? 16 : 8;
+
+    if (in.pk >= PkOp::Psllw && in.pk <= PkOp::Psrad) {
+        std::uint32_t count = 0;
+        if (in.op1().kind == OpKind::Imm) {
+            count = static_cast<std::uint32_t>(in.op1().imm & 0xFFu);
+        } else {
+            PackVec b;
+            int bn = 0;
+            if (!pkLoad(cpu, in.op1(), b, &bn)) return unimplemented(cpu, in, "MMX/SSE 的移位计数操作数不支持");
+            count = static_cast<std::uint32_t>(pkRd64(b.b, 0) & 0xFFu);
+        }
+        pkShift(in.pk, a.b, bytes, count);
+        if (!pkStore(cpu, in.op0(), a, bytes)) return unimplemented(cpu, in, "MMX/SSE 的目标写失败");
+        return true;
+    }
+
+    PackVec b;
+    int bn = 0;
+    if (!pkLoad(cpu, in.op1(), b, &bn)) return unimplemented(cpu, in, "MMX/SSE 的源操作数形态不支持");
+    const bool low_unpack = in.pk == PkOp::Punpcklbw || in.pk == PkOp::Punpcklwd || in.pk == PkOp::Punpckldq;
+    if (bn != 8 && bn != 16 && !(low_unpack && bn == 4)) {
+        return unimplemented(cpu, in, "MMX/SSE 的源宽度必须是 64 / 128 位（punpckl* 允许 m32）");
+    }
+    pkBinary(in.pk, a.b, b.b, bytes);
+    if (!pkStore(cpu, in.op0(), a, bytes)) return unimplemented(cpu, in, "MMX/SSE 的目标写失败");
+    return true;
+}
+
+// =====================================================================================
+// x87 执行入口
+// =====================================================================================
 bool execFpu(X86& cpu, const Insn& in) {
     switch (in.op) {
         case Op::Fld: {
             Ext80 v;
             if (in.op0().kind == OpKind::Reg) {
-                const int i = static_cast<int>(regSpec(in.op0().reg).index);
-                std::memcpy(v, stConst(cpu, i), 16);
+                std::memcpy(v, stConst(cpu, stIndex(in.op0(), 0)), 16);
             } else if (in.op0().kind == OpKind::Mem) {
                 if (!loadMemValue(cpu, in.op0().mem, v)) return unimplemented(cpu, in, "fld 的宽度不支持");
             } else {
@@ -246,9 +926,11 @@ bool execFpu(X86& cpu, const Insn& in) {
         case Op::Fstp: {
             const std::uint8_t* v = stConst(cpu, 0);
             if (in.op0().kind == OpKind::Reg) {
-                const int i = static_cast<int>(regSpec(in.op0().reg).index);
-                std::memcpy(stSlot(cpu, i), v, 16);
-                markValid(cpu, cpu.fpu.phys(i));
+                const int i = stIndex(in.op0(), 0);
+                if (i != 0) {  // `fst st(0)` 是空操作（也避开 memcpy 自拷贝）
+                    std::memcpy(stSlot(cpu, i), v, 16);
+                    markValid(cpu, cpu.fpu.phys(i));
+                }
             } else if (in.op0().kind == OpKind::Mem) {
                 x87ApplyControlWord(cpu.fpu.control);
                 storeMemValue(cpu, in.op0().mem, v);
@@ -265,6 +947,14 @@ bool execFpu(X86& cpu, const Insn& in) {
             x87ApplyControlWord(cpu.fpu.control);
             storeIntMem(cpu, in.op0().mem, stConst(cpu, 0));
             if (in.op == Op::Fistp) pop(cpu);
+            syncStatus(cpu);
+            return true;
+        }
+        case Op::Fisttp: {
+            if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fisttp 只支持内存操作数");
+            x87ApplyControlWord(cpu.fpu.control);
+            storeIntMem(cpu, in.op0().mem, stConst(cpu, 0), true);  // 朝零截断（不看 RC）
+            pop(cpu);
             syncStatus(cpu);
             return true;
         }
@@ -323,6 +1013,19 @@ bool execFpu(X86& cpu, const Insn& in) {
             }
             return ok;
         }
+        case Op::Fcomi: return compareEflags(cpu, in, false, false);
+        case Op::Fcomip: return compareEflags(cpu, in, true, false);
+        case Op::Fucomi: return compareEflags(cpu, in, false, true);
+        case Op::Fucomip: return compareEflags(cpu, in, true, true);
+        case Op::Fcmovb:
+        case Op::Fcmove:
+        case Op::Fcmovbe:
+        case Op::Fcmovu:
+        case Op::Fcmovnb:
+        case Op::Fcmovne:
+        case Op::Fcmovnbe:
+        case Op::Fcmovnu:
+            return fcmov(cpu, in);
         case Op::Fnstsw: {
             x87ApplyControlWord(cpu.fpu.control);
             syncStatus(cpu);
@@ -348,6 +1051,28 @@ bool execFpu(X86& cpu, const Insn& in) {
             cpu.mem->wr16(cpu.eaOf(in.op0().mem), cpu.fpu.control);
             return true;
         }
+        case Op::Fldenv: {
+            if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fldenv 只支持内存操作数");
+            doLoadEnv(cpu, cpu.eaOf(in.op0().mem));
+            return true;
+        }
+        case Op::Fnstenv: {
+            if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fnstenv 只支持内存操作数");
+            syncStatus(cpu);
+            doSaveEnv(cpu, cpu.eaOf(in.op0().mem));
+            return true;
+        }
+        case Op::Fnsave: {
+            if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fnsave 只支持内存操作数");
+            syncStatus(cpu);
+            doFnsave(cpu, cpu.eaOf(in.op0().mem));
+            return true;
+        }
+        case Op::Frstor: {
+            if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "frstor 只支持内存操作数");
+            doFrstor(cpu, cpu.eaOf(in.op0().mem));
+            return true;
+        }
         case Op::Fxch: {
             const int i = (in.op0().kind == OpKind::Reg) ? static_cast<int>(regSpec(in.op0().reg).index) : 1;
             const int p0 = cpu.fpu.phys(0);
@@ -363,13 +1088,23 @@ bool execFpu(X86& cpu, const Insn& in) {
             cpu.fpu.setEmpty(cpu.fpu.phys(i));
             return true;
         }
-        case Op::Fld1: { Ext80 v; x87One(v); push(cpu, v); return true; }
-        case Op::Fldz: { Ext80 v; x87Zero(v); push(cpu, v); return true; }
-        case Op::Fldpi: { Ext80 v; x87Pi(v); push(cpu, v); return true; }
-        case Op::Fldln2: { Ext80 v; x87Ln2(v); push(cpu, v); return true; }
-        case Op::Fldlg2: { Ext80 v; x87Lg2(v); push(cpu, v); return true; }
-        case Op::Fldl2e: { Ext80 v; x87L2e(v); push(cpu, v); return true; }
-        case Op::Fldl2t: { Ext80 v; x87L2t(v); push(cpu, v); return true; }
+        case Op::Fdecstp:
+            cpu.fpu.top = static_cast<std::uint8_t>((cpu.fpu.top + 7) & 7);
+            syncStatus(cpu);
+            return true;
+        case Op::Fincstp:
+            cpu.fpu.top = static_cast<std::uint8_t>((cpu.fpu.top + 1) & 7);
+            syncStatus(cpu);
+            return true;
+        case Op::Fnop:
+            return true;
+        case Op::Fld1: { Ext80 v; x87One(v); push(cpu, v); syncStatus(cpu); return true; }
+        case Op::Fldz: { Ext80 v; x87Zero(v); push(cpu, v); syncStatus(cpu); return true; }
+        case Op::Fldpi: { Ext80 v; x87Pi(v); push(cpu, v); syncStatus(cpu); return true; }
+        case Op::Fldln2: { Ext80 v; x87Ln2(v); push(cpu, v); syncStatus(cpu); return true; }
+        case Op::Fldlg2: { Ext80 v; x87Lg2(v); push(cpu, v); syncStatus(cpu); return true; }
+        case Op::Fldl2e: { Ext80 v; x87L2e(v); push(cpu, v); syncStatus(cpu); return true; }
+        case Op::Fldl2t: { Ext80 v; x87L2t(v); push(cpu, v); syncStatus(cpu); return true; }
         case Op::Fchs:
             x87ChangeSign(stSlot(cpu, 0));
             markValid(cpu, cpu.fpu.phys(0));
@@ -381,6 +1116,11 @@ bool execFpu(X86& cpu, const Insn& in) {
         case Op::Fninit:
             doFninit(cpu);
             return true;
+        case Op::Fclex:
+            x87TakeExceptionFlags();
+            cpu.fpu.status = static_cast<std::uint16_t>(
+                cpu.fpu.status & ~(SW_IE | SW_DE | SW_ZE | SW_OE | SW_UE | SW_PE | SW_SF | SW_ES));
+            return true;
         case Op::Fwait:
             return true;
         case Op::Ftst: {
@@ -391,47 +1131,93 @@ bool execFpu(X86& cpu, const Insn& in) {
             else if (cmp == 0) setCC(cpu, false, false, false, true);
             else if (cmp < 0) setCC(cpu, true, false, false, false);
             else setCC(cpu, false, false, false, false);
+            syncStatus(cpu);
             return true;
         }
         case Op::Fsqrt: {
             x87ApplyControlWord(cpu.fpu.control);
             Ext80 r;
             x87Sqrt(stConst(cpu, 0), r);
-            std::memcpy(stSlot(cpu, 0), r, 16);
-            markValid(cpu, cpu.fpu.phys(0));
-            syncStatus(cpu);
+            storeSt0(cpu, r);
             return true;
         }
         case Op::Frndint: {
             x87ApplyControlWord(cpu.fpu.control);
             Ext80 r;
             x87RoundToInt(stConst(cpu, 0), r);
-            std::memcpy(stSlot(cpu, 0), r, 16);
-            markValid(cpu, cpu.fpu.phys(0));
-            syncStatus(cpu);
+            storeSt0(cpu, r);
             return true;
         }
-        case Op::Fprem: {
+        case Op::Fprem:
+        case Op::Fprem1: {
             x87ApplyControlWord(cpu.fpu.control);
             Ext80 r;
-            x87Rem(stConst(cpu, 0), stConst(cpu, 1), r);
+            if (in.op == Op::Fprem) {
+                x87RemTrunc(stConst(cpu, 0), stConst(cpu, 1), r);
+            } else {
+                x87Rem(stConst(cpu, 0), stConst(cpu, 1), r);
+            }
+            syncStatus(cpu);  // 真运算的异常位先落账
+            // 商的低 3 位 → C0(bit2) / C3(bit1) / C1(bit0)；C2=1 表示"没算完"
+            bool c0 = false;
+            bool c1 = false;
+            bool c2 = false;
+            bool c3 = false;
+            Ext80 diff = {};
+            Ext80 qv = {};
+            x87Sub(stConst(cpu, 0), r, diff);
+            x87Div(diff, stConst(cpu, 1), qv);
+            Ext80 lim = {};
+            x87FromI64(static_cast<std::int64_t>(1) << 62, lim);
+            Ext80 aq = {};
+            std::memcpy(aq, qv, 16);
+            x87Abs(aq);
+            if (x87Compare(aq, lim) < 0) {
+                const std::int64_t q = x87ToI64(qv, true);
+                c0 = ((q >> 2) & 1) != 0;
+                c3 = ((q >> 1) & 1) != 0;
+                c1 = (q & 1) != 0;
+            } else {
+                c2 = true;
+            }
+            x87TakeExceptionFlags();  // 丢弃"算商位"产生的 inexact
             std::memcpy(stSlot(cpu, 0), r, 16);
             markValid(cpu, cpu.fpu.phys(0));
-            // C2=1 表示没算完（需要再执行一次）；SoftFloat 的 rem 一次算完 ⇒ C2=0
-            setCC(cpu, false, false, false, false);
-            syncStatus(cpu);
+            setCC(cpu, c0, c1, c2, c3);
             return true;
         }
         case Op::Fscale: {
+            x87ApplyControlWord(cpu.fpu.control);
             Ext80 r;
             x87Scale(stConst(cpu, 0), stConst(cpu, 1), r);
-            std::memcpy(stSlot(cpu, 0), r, 16);
+            storeSt0(cpu, r);
+            return true;
+        }
+        case Op::Fxam:
+            doFxam(cpu);
+            syncStatus(cpu);
+            return true;
+        case Op::Fxtract: {
+            Ext80 sig = {};
+            Ext80 exp = {};
+            x87Extract(stConst(cpu, 0), sig, exp);
+            std::memcpy(stSlot(cpu, 0), sig, 16);
             markValid(cpu, cpu.fpu.phys(0));
+            push(cpu, exp);  // 指数压栈 ⇒ 最终 ST(0)=指数、ST(1)=尾数
             syncStatus(cpu);
             return true;
         }
+        case Op::Fsin:
+        case Op::Fcos:
+        case Op::Fsincos:
+        case Op::Fptan:
+        case Op::Fpatan:
+        case Op::Fyl2x:
+        case Op::Fyl2xp1:
+        case Op::F2xm1:
+            return transcendental(cpu, in);
         default:
-            return unimplemented(cpu, in, "x87 超越函数留给 M1b（plan §4 D3 的边界）");
+            return unimplemented(cpu, in, "x87 族没有这条语义（S4 的闭集合里没登记）");
     }
 }
 

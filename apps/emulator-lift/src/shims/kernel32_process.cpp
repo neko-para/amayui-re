@@ -28,9 +28,10 @@
 //   6. **`TerminateProcess` 不区分目标进程**：任何句柄都让 guest 停下（本模拟器只有一个进程）。
 //   7. **`FreeLibrary` 恒 TRUE、`DisableThreadLibraryCalls` 恒 TRUE**：本模拟器没有真模块加载，
 //      这两个调用没有可撤销的状态（不是"没做却假装"——它们是幂等的无害操作）。
-//   8. **文件 / 路径 / 注册表族不在本批**：`GetSystemDirectoryA` / `GetWindowsDirectoryA` /
-//      `GetTempPathA` / `GetCurrentDirectoryA` / `SetCurrentDirectoryA` / `GetModuleHandleExA`
-//      用 `addUnimplemented` 登记（S6 文件与路径族不在 M1a 这一批），执行到就响亮失败。
+//   8. **`GetSystemDirectoryA` / `GetWindowsDirectoryA` / `GetFullPathNameA` / `GetModuleHandleExA/W`
+//      已在 S6 落地**（前者在本文件的模块段，后两者在 kernel32_file.cpp / 本文件的模块段）：
+//      系统目录是**固定的 guest 路径** `C:\WINDOWS` / `C:\WINDOWS\SYSTEM32`（⛔ 不暴露宿主路径）；
+//      `GetModuleHandleEx` 的引用计数不建模（见该函数的注释）。
 //   9. **模块句柄是确定性假值**（`0x7F000000 + 表内序号*64KiB`）：本模拟器不真的装载 DLL，
 //      但 `ntdll` / `kernel32` / 导入表里的模块在真机上**确实在进程里** ⇒ 返回 0 是假失败
 //      （实测：CRT 的 `__scrt_initialize_fls` 因此返回 false ⇒ `_fast_error_exit` ⇒ 到不了 WinMain）。
@@ -38,17 +39,22 @@
 //      导出表仍然是空的（`GetProcAddress` 一律 127），所以"模块存在"不等于"函数可用"。
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <string_view>
 
+#include "runtime/cp932.h"
 #include "runtime/sha256.h"
+#include "runtime/vfs.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
 
 namespace lift {
 namespace {
 
+constexpr std::uint32_t kErrInvalidHandle = 6u;
 constexpr std::uint32_t kErrInvalidParameter = 87u;
+constexpr std::uint32_t kErrBufferOverflow = 111u;
 constexpr std::uint32_t kErrInsufficientBuffer = 122u;
 constexpr std::uint32_t kErrModNotFound = 126u;
 constexpr std::uint32_t kErrProcNotFound = 127u;
@@ -119,6 +125,16 @@ void requireBuffer(X86& cpu, std::uint32_t ea, std::uint32_t cap, const char* ap
     (void)cpu;
 }
 
+// 出参缓冲区必须是**已提交**的 guest 内存（⛔ 不静默写坏）
+void requireCommitted(X86& cpu, std::uint32_t ea, std::size_t n, const char* api, const char* what) {
+    if (ea == 0) shimAbort("kernel32", api, "%s 为 NULL", what);
+    if (n == 0) return;
+    if (!cpu.mem->committed(ea, n)) {
+        shimAbort("kernel32", api, "%s = 0x%08X 起 %u 字节未提交（guest 缓冲区非法）", what, ea,
+                  static_cast<unsigned>(n));
+    }
+}
+
 // 把 ANSI 串写进 guest 缓冲：截断到 cap-1 并保证 0 结尾，返回**写入的字节数**（不含结尾 0）
 std::uint32_t writeAnsi(X86& cpu, std::uint32_t ea, std::uint32_t cap, const std::string& s) {
     const std::size_t n = std::min<std::size_t>(s.size(), static_cast<std::size_t>(cap) - 1);
@@ -127,13 +143,12 @@ std::uint32_t writeAnsi(X86& cpu, std::uint32_t ea, std::uint32_t cap, const std
     return static_cast<std::uint32_t>(n);
 }
 
-// 把 ANSI 串按"字节 → 16 位"扩展写进 guest 缓冲（偏差 2）
+// 把 ANSI（CP932）串写进 guest 的 UTF-16 缓冲：真 CP932→UTF-16（S6 码页族；⛔ 不是字节直通）
 std::uint32_t writeWide(X86& cpu, std::uint32_t ea, std::uint32_t cap_chars, const std::string& s) {
-    const std::size_t n =
-        std::min<std::size_t>(s.size(), static_cast<std::size_t>(cap_chars) - 1);
+    const std::u16string w = cp932ToWide(s);
+    const std::size_t n = std::min<std::size_t>(w.size(), static_cast<std::size_t>(cap_chars) - 1);
     for (std::size_t i = 0; i < n; ++i) {
-        const auto ch = static_cast<std::uint16_t>(static_cast<unsigned char>(s[i]));
-        cpu.mem->wr16(ea + static_cast<std::uint32_t>(i) * 2u, ch);
+        cpu.mem->wr16(ea + static_cast<std::uint32_t>(i) * 2u, static_cast<std::uint16_t>(w[i]));
     }
     cpu.mem->wr16(ea + static_cast<std::uint32_t>(n) * 2u, 0);
     return static_cast<std::uint32_t>(n);
@@ -165,6 +180,9 @@ const char* const kLoadableModules[] = {
     "version.dll",  "imm32.dll",    "ddraw.dll",    "d3d9.dll",      "d3dx9_43.dll",
     "ws2_32.dll",   "imagehlp.dll", "dxva2.dll",    "wininet.dll",   "mscoree.dll",
     "shlwapi.dll",  "mf.dll",       "mfplat.dll",   "evr.dll",
+    // ★ AGERC.DLL：本作的设置对话框（用户裁决 = 整体 stub）。它**不在**导入表里（guest 用
+    //   LoadLibrary 动态装载），也不是真模块：句柄 = 确定性假值，导出 = 三个 stub thunk。
+    "agerc.dll",
 };
 
 // 模块名归一化：去路径 + 小写 + 去尾部 `.dll`（`KERNEL32.DLL` / `kernel32` 归一化后相等）
@@ -222,6 +240,8 @@ bool isLoadableModule(const std::string& name) {
 // "这个模块此刻在**进程里**吗"（≠ "系统里有"）：导入表里的 + kernel32/ntdll
 bool moduleIsLoaded(const X86& cpu, const std::string& key) {
     if (key == "kernel32" || key == "ntdll") return true;
+    // AGERC 是**显式 stub 的模块**（用户裁决：不实现真装载）：只有 LoadLibrary 过才"在进程里"。
+    if (key == "agerc") return cpu.shim.agerc_loaded;
     if (!cpu.shims) return false;
     for (const ShimDef& d : cpu.shims->all())
         if (d.imported && moduleKey(d.module) == key) return true;
@@ -229,6 +249,21 @@ bool moduleIsLoaded(const X86& cpu, const std::string& key) {
 }
 
 // ---- 模块 ----
+// 名字 → 模块句柄（0 = 没装载）。`GetModuleHandle*` 与 `GetModuleHandleEx*` 共用这一份判据
+// （"**此刻在进程里吗**"，⛔ 不是"系统里有"）。
+std::uint32_t lookupModuleHandle(X86& cpu, const std::string& want, const char* api) {
+    const std::string exe = exePath(cpu);
+    if (moduleNameMatches(want, exe)) return cpu.shim.module_handle;
+    if (!moduleIsLoaded(cpu, moduleKey(want))) return 0;
+    const std::uint32_t handle = moduleHandleIn(moduleKeyTable(cpu), want);
+    if (handle != 0) {
+        shimLog("kernel32", api,
+                "\"%s\" 已装载 ⇒ 假句柄 0x%08X（导出仍不提供，GetProcAddress 会 127）", want.c_str(),
+                handle);
+    }
+    return handle;
+}
+
 void getModuleHandle(X86& cpu, ShimCall& call, bool wide) {
     const char* api = wide ? "GetModuleHandleW" : "GetModuleHandleA";
     requireMem(cpu, api);
@@ -238,29 +273,100 @@ void getModuleHandle(X86& cpu, ShimCall& call, bool wide) {
         return;
     }
     const std::string want = wide ? narrowAscii(call.wstr(0)) : call.str(0);
-    const std::string exe = exePath(cpu);
-    if (!moduleNameMatches(want, exe)) {
+    const std::uint32_t handle = lookupModuleHandle(cpu, want, api);
+    if (handle == 0) {
         // ★ 判据是"**已装载**"（导入表里的 + kernel32/ntdll），⛔ 不是"系统里有"：
         //   例 `mscoree.dll` 系统里有、但本进程没装载 ⇒ 真机返回 0，这里也必须返回 0。
-        if (moduleIsLoaded(cpu, moduleKey(want))) {
-            const std::uint32_t handle = moduleHandleIn(moduleKeyTable(cpu), want);
-            shimLog("kernel32", api,
-                    "\"%s\" 已装载 ⇒ 假句柄 0x%08X（导出仍不提供，GetProcAddress 会 127）", want.c_str(),
-                    handle);
-            call.result = handle;
-            return;
-        }
         cpu.shim.last_error = kErrModNotFound;
+        const std::string exe = exePath(cpu);
         shimLog("kernel32", api, "主模块是 \"%s\"；\"%s\" 未装载 ⇒ 返回 0 + 错误 126",
                 exe.empty() ? "<未设置>" : exe.c_str(), want.c_str());
-        call.result = 0;
-        return;
     }
-    call.result = cpu.shim.module_handle;
+    call.result = handle;
 }
 
 void shimGetModuleHandleA(X86& cpu, ShimCall& call) { getModuleHandle(cpu, call, false); }
 void shimGetModuleHandleW(X86& cpu, ShimCall& call) { getModuleHandle(cpu, call, true); }
+
+// GetModuleHandleExA/W：文档的三个 flag 与两条硬约束
+//   · FROM_ADDRESS(0x4)：lpModuleName 是**模块内的一个地址** ⇒ 反查主模块（本模拟器只给主模块
+//     真实的地址范围；其它模块是确定性假句柄，没有映射）；
+//   · PIN(0x1) 与 UNCHANGED_REFCOUNT(0x2) **不能同时用** ⇒ ERROR_INVALID_PARAMETER；
+//   · UNCHANGED_REFCOUNT ⇒ 行为等价于 GetModuleHandle（不取引用）；
+//   · 其它情况"增加引用计数" —— 本模拟器**不建模引用计数**（FreeLibrary 恒 TRUE），只记一行。
+void getModuleHandleEx(X86& cpu, ShimCall& call, bool wide) {
+    const char* api = wide ? "GetModuleHandleExW" : "GetModuleHandleExA";
+    requireMem(cpu, api);
+    constexpr std::uint32_t kPin = 0x00000001u;
+    constexpr std::uint32_t kUnchangedRefcount = 0x00000002u;
+    constexpr std::uint32_t kFromAddress = 0x00000004u;
+    const std::uint32_t flags = call.u32(0);
+    const std::uint32_t name_ea = call.u32(1);
+    const std::uint32_t out_ea = call.u32(2);
+    if (out_ea == 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", api, "phModule 为 NULL ⇒ 返回 0 + 错误 87");
+        call.result = 0;
+        return;
+    }
+    requireCommitted(cpu, out_ea, 4, api, "phModule");
+    cpu.mem->wr32(out_ea, 0);  // 文档：失败时 *phModule 为 NULL
+    if ((flags & (kPin | kUnchangedRefcount)) == (kPin | kUnchangedRefcount)) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", api, "PIN 与 UNCHANGED_REFCOUNT 不能同时用 ⇒ 返回 0 + 错误 87");
+        call.result = 0;
+        return;
+    }
+    if ((flags & ~(kPin | kUnchangedRefcount | kFromAddress)) != 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", api, "未知 flag 0x%08X ⇒ 返回 0 + 错误 87", flags);
+        call.result = 0;
+        return;
+    }
+
+    std::uint32_t handle = 0;
+    if ((flags & kFromAddress) != 0) {
+        if (name_ea == 0) {
+            cpu.shim.last_error = kErrInvalidParameter;
+            shimLog("kernel32", api, "FROM_ADDRESS 但 lpModuleName 为 NULL ⇒ 返回 0 + 错误 87");
+            call.result = 0;
+            return;
+        }
+        const std::uint32_t addr = name_ea;
+        const std::uint32_t base = cpu.shim.module_handle;
+        const std::uint32_t size = cpu.shim.module_size;
+        if (base != 0 && addr >= base && (size == 0 || addr < base + size)) {
+            handle = base;
+        } else {
+            // 文档没点名"地址不在任何模块里"用哪个错误码 ⇒ 取 ERROR_MOD_NOT_FOUND（"找不到模块"）
+            cpu.shim.last_error = kErrModNotFound;
+            shimLog("kernel32", api, "地址 0x%08X 不在任何已装载模块里 ⇒ 返回 0 + 错误 126", addr);
+            call.result = 0;
+            return;
+        }
+    } else if (name_ea == 0) {
+        handle = cpu.shim.module_handle;  // 文档：lpModuleName 为 NULL ⇒ 本进程的 exe
+    } else {
+        const std::string want = wide ? narrowAscii(call.wstr(1)) : call.str(1);
+        handle = lookupModuleHandle(cpu, want, api);
+    }
+
+    if (handle == 0) {
+        cpu.shim.last_error = kErrModNotFound;
+        shimLog("kernel32", api, "找不到模块 ⇒ 返回 0 + 错误 126");
+        call.result = 0;
+        return;
+    }
+    if ((flags & kUnchangedRefcount) == 0) {
+        shimLog("kernel32", api,
+                "模块 0x%08X 的引用计数不建模（FreeLibrary 恒 TRUE）⇒ 只回句柄", handle);
+    }
+    cpu.mem->wr32(out_ea, handle);
+    call.result = 1;
+}
+
+void shimGetModuleHandleExA(X86& cpu, ShimCall& call) { getModuleHandleEx(cpu, call, false); }
+void shimGetModuleHandleExW(X86& cpu, ShimCall& call) { getModuleHandleEx(cpu, call, true); }
 
 void getModuleFileName(X86& cpu, ShimCall& call, bool wide) {
     const char* api = wide ? "GetModuleFileNameW" : "GetModuleFileNameA";
@@ -276,12 +382,24 @@ void getModuleFileName(X86& cpu, ShimCall& call, bool wide) {
         return;
     }
     requireBuffer(cpu, buf, cap, api, "lpFilename");
-    const std::string path = exePath(cpu);
+    std::string path = exePath(cpu);
     if (path.empty()) {
         cpu.shim.last_error = kErrInvalidParameter;
         shimLog("kernel32", api, "guest 里没有 exe 全路径（exe_path_ea == 0）⇒ 返回 0");
         call.result = 0;
         return;
+    }
+    // ★ S6：模块文件名的**guest 视图**由 VFS 反解（`--game-dir` 是唯一根）——
+    //   guest 看到的是它自己的路径，⛔ 不是宿主的仓库路径（那会让 guest 之后的相对路径解析错）。
+    if (cpu.vfs) {
+        std::string guest;
+        if (cpu.vfs->toGuest(path, &guest)) {
+            path = guest;
+        } else if (!cpu.vfs->guestRoot().empty()) {
+            // 执行源在 `--game-dir` 之外（本仓的 corpus/）⇒ guest 视图 = 安装根 + 文件名。
+            // 这是**主模块的位置**的确定性表述；宿主路径只留在 trace 输入清单里。
+            path = cpu.vfs->guestRoot() + "\\" + baseName(path);
+        }
     }
     call.result = wide ? writeWide(cpu, buf, cap, path) : writeAnsi(cpu, buf, cap, path);
 }
@@ -330,25 +448,178 @@ void shimGetVersion(X86& cpu, ShimCall& call) {
     call.result = 0x0A280105u;
 }
 
-void shimGetVersionExA(X86& cpu, ShimCall& call) {
-    requireMem(cpu, "GetVersionExA");
+// ★ `GetVersionExA` 与 `GetVersionExW` **同一份实现**（任务书点名"与 A 版同源"）。
+//   理由：OSVERSIONINFOW 与 OSVERSIONINFOA 的**字段布局完全相同**（三个 DWORD + 平台 DWORD +
+//   TCHAR[128]；A/W 只差字符串元素的宽度），而 szCSDVersion 在我们的实现里恒为全 0
+//   ⇒ 两者的写入逐字节相同。⛔ 不要另抄一份（抄了必然漂）。
+void getVersionEx(X86& cpu, ShimCall& call, const char* api) {
+    requireMem(cpu, api);
     const std::uint32_t ea = call.u32(0);
-    if (ea == 0) shimAbort("kernel32", "GetVersionExA", "lpVersionInformation 为 NULL");
+    if (ea == 0) shimAbort("kernel32", api, "lpVersionInformation 为 NULL");
     const std::uint32_t size = cpu.mem->rd32(ea);  // 保持调用方给的值（不覆盖）
     if (size < 0x14) {
         cpu.shim.last_error = kErrInsufficientBuffer;
-        shimLog("kernel32", "GetVersionExA", "dwOSVersionInfoSize=%u 太小（< 0x14）⇒ 返回 0", size);
+        shimLog("kernel32", api, "dwOSVersionInfoSize=%u 太小（< 0x14）⇒ 返回 0", size);
         call.result = 0;
         return;
     }
-    cpu.mem->wr32(ea + 0x04, 5u);      // dwMajorVersion
-    cpu.mem->wr32(ea + 0x08, 1u);      // dwMinorVersion
-    cpu.mem->wr32(ea + 0x0C, 2600u);   // dwBuildNumber
+    cpu.mem->wr32(ea + 0x04, 5u);        // dwMajorVersion
+    cpu.mem->wr32(ea + 0x08, 1u);        // dwMinorVersion
+    cpu.mem->wr32(ea + 0x0C, 2600u);     // dwBuildNumber
     cpu.mem->wr32(ea + 0x10, kWin32Nt);  // dwPlatformId
-    // szCSDVersion[128]：清零（最多到调用方给的长度）
-    const std::uint32_t csd_bytes = std::min<std::uint32_t>(size - 0x14, 0x80u);
-    cpu.mem->fillBytes(ea + 0x14, 0, csd_bytes);
+    // szCSDVersion[128] +（若调用方给的是 OSVERSIONINFOEX 大小的结构）扩展字段：
+    // 把 [0x14, min(size, 0x11C)) 全清 0 ⇒ CSD 串为空、wServicePackMajor..wSuiteMask 全 0。
+    // ⛔ 不越过调用方声明的 size（那是 guest 的栈/堆）。
+    const std::uint32_t clear_end = std::min<std::uint32_t>(size, 0x11Cu);
+    if (clear_end > 0x14u) cpu.mem->fillBytes(ea + 0x14, 0, clear_end - 0x14u);
     call.result = 1;
+}
+
+void shimGetVersionExA(X86& cpu, ShimCall& call) { getVersionEx(cpu, call, "GetVersionExA"); }
+void shimGetVersionExW(X86& cpu, ShimCall& call) { getVersionEx(cpu, call, "GetVersionExW"); }
+
+// ---- 计算机名（固定值；⛔ 不暴露宿主名）----
+// 文档：成功 ⇒ *nSize = 拷贝的字符数（**不含**结尾 0）；缓冲太小 ⇒ FALSE +
+// ERROR_BUFFER_OVERFLOW(111)，*nSize = 所需大小（**含**结尾 0）。
+constexpr const char* kGuestComputerName = "AGE-LIFT";
+
+void shimGetComputerNameA(X86& cpu, ShimCall& call) {
+    const char* api = "GetComputerNameA";
+    requireMem(cpu, api);
+    const std::uint32_t buf = call.u32(0);
+    const std::uint32_t size_ea = call.u32(1);
+    if (buf == 0 || size_ea == 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", api, "lpBuffer / nSize 为 NULL ⇒ 返回 0 + 错误 87");
+        call.result = 0;
+        return;
+    }
+    requireCommitted(cpu, size_ea, 4, api, "nSize");
+    const std::uint32_t cap = cpu.mem->rd32(size_ea);
+    const std::string name = kGuestComputerName;
+    const std::uint32_t need = static_cast<std::uint32_t>(name.size()) + 1u;
+    if (cap < need) {
+        cpu.mem->wr32(size_ea, need);  // 文档：告诉调用方需要多大（含结尾 0）
+        cpu.shim.last_error = kErrBufferOverflow;
+        shimLog("kernel32", api, "缓冲 %u 字节太小（需要 %u）⇒ 返回 0 + 错误 111", cap, need);
+        call.result = 0;
+        return;
+    }
+    writeAnsi(cpu, buf, cap, name);
+    cpu.mem->wr32(size_ea, static_cast<std::uint32_t>(name.size()));  // 不含结尾 0
+    call.result = 1;
+}
+
+// ---- 整数乘除（MulDiv）----
+// 文档：64 位乘积 / 第三个参数，结果**四舍五入**（正半整数向上、负半整数向下 ⇒ 远离零）；
+//       溢出或分母为 0 ⇒ 返回 -1。⛔ 不要用浮点（53 位尾数会在 |乘积| > 2^53 时错位）。
+void shimMulDiv(X86& cpu, ShimCall& call) {
+    (void)cpu;
+    const std::int32_t number = call.i32(0);
+    const std::int32_t numerator = call.i32(1);
+    const std::int32_t denominator = call.i32(2);
+    if (denominator == 0) {
+        call.result = 0xFFFFFFFFu;  // -1
+        return;
+    }
+    const std::int64_t product = static_cast<std::int64_t>(number) * static_cast<std::int64_t>(numerator);
+    const std::int64_t den = static_cast<std::int64_t>(denominator);
+    std::int64_t result = product / den;      // 截断
+    const std::int64_t rem = product % den;   // 符号随 product
+    if (rem != 0) {
+        // |rem|/|den| >= 0.5 ⇒ 向**远离零**的方向进一位
+        const std::int64_t abs_rem = rem < 0 ? -rem : rem;
+        const std::int64_t abs_den = den < 0 ? -den : den;
+        if (2 * abs_rem >= abs_den) {
+            result += ((product < 0) == (den < 0)) ? 1 : -1;
+        }
+    }
+    if (result < -2147483647ll - 1ll || result > 2147483647ll) {
+        call.result = 0xFFFFFFFFu;  // 溢出 ⇒ -1
+        return;
+    }
+    call.result = static_cast<std::uint32_t>(static_cast<std::int32_t>(result));
+}
+
+// ---- 控制台 / 调试输出 ----
+// 本模拟器的"控制台"只有 `GetStdHandle` 给的那三个伪句柄（见 kernel32_bootstrap.cpp）
+constexpr std::uint32_t kStdInHandle = 0x0000000Cu;
+constexpr std::uint32_t kStdOutHandle = 0x00000010u;
+constexpr std::uint32_t kStdErrHandle = 0x00000014u;
+
+bool isConsoleHandle(std::uint32_t h) {
+    return h == kStdInHandle || h == kStdOutHandle || h == kStdErrHandle;
+}
+
+void shimGetConsoleCP(X86& cpu, ShimCall& call) {
+    (void)cpu;
+    // 控制台输入码页：与 GetACP 同源（本作是 CP932）
+    call.result = 932u;
+}
+
+void shimWriteConsoleW(X86& cpu, ShimCall& call) {
+    const char* api = "WriteConsoleW";
+    requireMem(cpu, api);
+    const std::uint32_t h = call.u32(0);
+    const std::uint32_t buf = call.u32(1);
+    const std::uint32_t nchars = call.u32(2);
+    const std::uint32_t written_ea = call.u32(3);
+    const std::uint32_t reserved = call.u32(4);
+    if (reserved != 0) {
+        // 文档：lpReserved 必须为 NULL
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", api, "lpReserved 非 NULL ⇒ 返回 0 + 错误 87");
+        call.result = 0;
+        return;
+    }
+    if (!isConsoleHandle(h)) {
+        // 文档：句柄不是控制台句柄 ⇒ ERROR_INVALID_HANDLE
+        cpu.shim.last_error = 6u;
+        shimLog("kernel32", api, "0x%08X 不是控制台句柄（只有 GetStdHandle 的三个伪句柄）⇒ 返回 0", h);
+        call.result = 0;
+        return;
+    }
+    if (nchars > 0 && buf == 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", api, "lpBuffer 为 NULL 但长度 %u > 0 ⇒ 返回 0 + 错误 87", nchars);
+        call.result = 0;
+        return;
+    }
+    if (nchars > 0) {
+        requireCommitted(cpu, buf, static_cast<std::size_t>(nchars) * 2u, api, "lpBuffer");
+        std::u16string w;
+        w.reserve(nchars);
+        for (std::uint32_t i = 0; i < nchars; ++i) {
+            w.push_back(static_cast<char16_t>(cpu.mem->rd16(buf + i * 2u)));
+        }
+        std::size_t bad = 0;
+        const std::string utf8 = utf16ToUtf8(w, &bad);
+        if (bad != 0) {
+            shimLog("kernel32", api, "有 %u 个未配对代理字符（已写 '?'）", static_cast<unsigned>(bad));
+        }
+        // 真机写到控制台屏幕缓冲区；这里落到宿主 stdout（确定性的字节序列，不带时间戳）
+        if (!utf8.empty()) std::fwrite(utf8.data(), 1, utf8.size(), stdout);
+        std::fflush(stdout);
+    }
+    if (written_ea != 0) {
+        requireCommitted(cpu, written_ea, 4, api, "lpNumberOfCharsWritten");
+        cpu.mem->wr32(written_ea, nchars);
+    }
+    call.result = 1;
+}
+
+// 文档：VOID，把字符串送给调试器；没有调试器时什么都不做。
+// 本模拟器把它送进宿主日志（一行一条；⛔ 不改变 guest 可见状态）。
+void shimOutputDebugStringA(X86& cpu, ShimCall& call) {
+    (void)cpu;
+    const std::uint32_t ea = call.u32(0);
+    if (ea == 0) {
+        call.result = 0;  // 文档：lpOutputString 可选 ⇒ NULL 时什么也不做
+        return;
+    }
+    const std::string text = cpu.mem->readCString(ea);
+    shimLog("kernel32", "OutputDebugStringA", "%s", text.c_str());
+    call.result = 0;
 }
 
 void shimGetSystemInfo(X86& cpu, ShimCall& call) {
@@ -405,7 +676,10 @@ void shimTerminateProcess(X86& cpu, ShimCall& call) {
     call.result = 1;
 }
 
-// ---- 动态加载 / 导出（本模拟器不提供）----
+// ---- 动态加载 / 导出 ----
+// ★ 本模拟器**不解析任何 PE 导出表**（唯一例外 = AGERC 的两个/三个显式 stub thunk）。
+//   AGERC 的口径（用户 2026-11-03 明示）：不真装载；LoadLibrary 给确定性假句柄，
+//   GetProcAddress 对它 3 个导出返回**桩页里的 thunk 地址**（SCOPE §1 模态 no-op）。
 void shimGetProcAddress(X86& cpu, ShimCall& call) {
     requireMem(cpu, "GetProcAddress");
     const std::uint32_t mod = call.u32(0);
@@ -416,6 +690,25 @@ void shimGetProcAddress(X86& cpu, ShimCall& call) {
     } else if (name_ea != 0) {
         name = call.str(1);
     }
+
+    const std::uint32_t agerc_handle = moduleHandleIn(moduleKeyTable(cpu), "agerc.dll");
+    if (cpu.shim.agerc_loaded && agerc_handle != 0 && mod == agerc_handle) {
+        const ShimDef* def = cpu.shims ? cpu.shims->find("agerc", name.c_str()) : nullptr;
+        if (def && def->stub_ea != 0) {
+            shimLog("kernel32", "GetProcAddress",
+                    "AGERC!%s ⇒ stub thunk 0x%08X（SCOPE §1 模态 no-op；不解析 AGERC 的 PE）",
+                    name.c_str(), def->stub_ea);
+            call.result = def->stub_ea;
+            return;
+        }
+        cpu.shim.last_error = kErrProcNotFound;
+        shimLog("kernel32", "GetProcAddress", "AGERC 没有导出 \"%s\"（只有 _GetInstance@0 / _ShowDialog@12 / "
+                "_OperateMenu@16）⇒ 返回 0 + 错误 127",
+                name.empty() ? "<null>" : name.c_str());
+        call.result = 0;
+        return;
+    }
+
     cpu.shim.last_error = kErrProcNotFound;
     shimLog("kernel32", "GetProcAddress",
             "模块 0x%08X 里找不到 \"%s\"：本模拟器不提供导出转发（导入走 IAT 桩页，见 shims.h）⇒ 返回 0",
@@ -430,8 +723,18 @@ void shimGetProcAddress(X86& cpu, ShimCall& call) {
 void loadLibrary(X86& cpu, ShimCall& call, bool wide) {
     const char* api = wide ? "LoadLibraryW" : "LoadLibraryA";
     const std::string name = wide ? narrowAscii(call.wstr(0)) : call.str(0);
+    const std::string key = moduleKey(name);
     const std::uint32_t handle = isLoadableModule(name) ? moduleHandleIn(moduleKeyTable(cpu), name) : 0;
     if (handle) {
+        if (key == "agerc") {
+            // ★ AGERC：明确 stub（用户裁决）。日志就是"它被装上了、但不会有真实现"的常亮证据。
+            cpu.shim.agerc_loaded = true;
+            shimLog("kernel32", api,
+                    "装载 \"%s\" ⇒ 确定性假句柄 0x%08X；三个导出走 stub thunk（SCOPE §1 模态 no-op）",
+                    name.c_str(), handle);
+            call.result = handle;
+            return;
+        }
         shimLog("kernel32", api, "装载 \"%s\" ⇒ 假句柄 0x%08X（本模拟器不导出任何函数，GetProcAddress 仍会 127）",
                 name.c_str(), handle);
         call.result = handle;
@@ -464,6 +767,8 @@ void registerProcessShims(ShimRegistry& shims) {
     // ---- 模块 ----
     shims.add("kernel32", "GetModuleHandleA", Conv::Stdcall, 1, shimGetModuleHandleA);
     shims.add("kernel32", "GetModuleHandleW", Conv::Stdcall, 1, shimGetModuleHandleW);
+    shims.add("kernel32", "GetModuleHandleExA", Conv::Stdcall, 3, shimGetModuleHandleExA);
+    shims.add("kernel32", "GetModuleHandleExW", Conv::Stdcall, 3, shimGetModuleHandleExW);
     shims.add("kernel32", "GetModuleFileNameA", Conv::Stdcall, 3, shimGetModuleFileNameA);
     shims.add("kernel32", "GetModuleFileNameW", Conv::Stdcall, 3, shimGetModuleFileNameW);
 
@@ -473,10 +778,18 @@ void registerProcessShims(ShimRegistry& shims) {
     shims.add("kernel32", "GetStartupInfoA", Conv::Stdcall, 1, shimGetStartupInfoA);
     shims.add("kernel32", "GetStartupInfoW", Conv::Stdcall, 1, shimGetStartupInfoW);
 
-    // ---- 版本 / 系统信息 ----
+    // ---- 版本 / 系统信息 / 计算机名 ----
     shims.add("kernel32", "GetVersion", Conv::Stdcall, 0, shimGetVersion);
     shims.add("kernel32", "GetVersionExA", Conv::Stdcall, 1, shimGetVersionExA);
+    shims.add("kernel32", "GetVersionExW", Conv::Stdcall, 1, shimGetVersionExW);
     shims.add("kernel32", "GetSystemInfo", Conv::Stdcall, 1, shimGetSystemInfo);
+    shims.add("kernel32", "GetComputerNameA", Conv::Stdcall, 2, shimGetComputerNameA);
+
+    // ---- 整数运算 / 控制台 / 调试输出 ----
+    shims.add("kernel32", "MulDiv", Conv::Stdcall, 3, shimMulDiv);
+    shims.add("kernel32", "GetConsoleCP", Conv::Stdcall, 0, shimGetConsoleCP);
+    shims.add("kernel32", "WriteConsoleW", Conv::Stdcall, 5, shimWriteConsoleW);
+    shims.add("kernel32", "OutputDebugStringA", Conv::Stdcall, 1, shimOutputDebugStringA);
 
     // ---- 调试 / 异常过滤 ----
     shims.add("kernel32", "IsDebuggerPresent", Conv::Stdcall, 0, shimIsDebuggerPresent);
@@ -495,14 +808,9 @@ void registerProcessShims(ShimRegistry& shims) {
     shims.add("kernel32", "FreeLibrary", Conv::Stdcall, 1, shimFreeLibrary);
     shims.add("kernel32", "DisableThreadLibraryCalls", Conv::Stdcall, 1, shimDisableThreadLibraryCalls);
 
-    // ---- 文件 / 路径 / 模块枚举：S6 文件与路径族不在 M1a 这一批 ⇒ 登记为未实现 ----
-    shims.addUnimplemented("kernel32", "GetSystemDirectoryA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetWindowsDirectoryA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetTempPathA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetCurrentDirectoryA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "SetCurrentDirectoryA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetModuleHandleExA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetModuleHandleExW", "S6 文件与路径族不在 M1a 这一批");
+    // ---- 进程创建：guest 单线程 / 单进程（README §2.5）⇒ 显式缺口 ----
+    shims.addUnimplemented("kernel32", "CreateProcessA",
+                           "guest 单线程 / 单进程（README §2.5）；M1a 不做进程创建");
 }
 
 }  // namespace lift

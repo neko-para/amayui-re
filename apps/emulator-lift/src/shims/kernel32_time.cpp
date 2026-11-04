@@ -20,12 +20,17 @@
 //      低 32 位在 EAX、高 32 位在 EDX。这是本 shim 层约定的 64 位返回形态。
 //   4. **`timeBeginPeriod` / `timeEndPeriod` 恒返回 TIMERR_NOERROR(0)** 且什么也不改：本模拟器
 //      的定时分辨率由虚拟时钟决定，没有"系统定时器精度"这回事。影响：无（调用方只检查返回值）。
-//   5. **`timeSetEvent` / `timeKillEvent` 不做**（多媒体定时器 = 服务线程，README §2.5 / D5），
-//      用 `addUnimplemented` 登记，执行到就响亮失败。
+//   5. **`timeSetEvent` / `timeKillEvent` / `timeGetDevCaps` 是**协作式**实现**（不是 stub）：
+//      定时器登记进 `cpu.shim.timers`，到期的回调由 **dispatcher 在块边界**按虚拟时钟触发
+//      （机制见 x86.h 的 GuestTimer / kTimerCallbackReturnEa）。与真机的唯一差别：回调不会抢占
+//      一条 basic block（真机由 winmm 的服务线程抢占）。`TIME_CALLBACK_EVENT_SET/PULSE` 两种
+//      回调类型不支持（要求 dwUser 是事件句柄）⇒ 按文档的失败值返回 0。
 //   6. `GetSystemTimeAsFileTime` / `QueryPerformanceCounter` / `QueryPerformanceFrequency` /
 //      `GetSystemTime` / `GetLocalTime` 的**空指针**按参数非法处理（打印 + abort）；
 //      真机会崩在 guest 里，我们提前响亮失败。
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "runtime/x86.h"
 #include "shims/register.h"
@@ -217,6 +222,99 @@ void shimTimeEndPeriod(X86& cpu, ShimCall& call) {
     call.result = 0;  // TIMERR_NOERROR
 }
 
+// ---- 多媒体定时器（协作式；机制见 x86.h 的 GuestTimer / kTimerCallbackReturnEa）----
+// ★ 口径（D5 单线程）：没有 winmm 的定时器服务线程 ⇒ 到期的回调由 **dispatcher 在块边界**触发
+//   （按虚拟时钟判定）。回调收到文档规定的五个参数；`TIME_KILL_SYNCHRONOUS` 无意义（不存在异步）。
+//   与真机唯一的差别：回调**不会抢占一条 basic block**（真机才会）。
+constexpr std::uint32_t kTimePeriodic = 0x0001u;
+constexpr std::uint32_t kTimeCallbackEventSet = 0x0010u;
+constexpr std::uint32_t kTimeCallbackEventPulse = 0x0020u;
+constexpr std::uint32_t kTimeKillSynchronous = 0x0100u;
+constexpr std::uint32_t kMmsyserrNoError = 0u;
+constexpr std::uint32_t kMmsyserrInvalidParam = 11u;
+constexpr std::uint32_t kMmsyserrError = 12u;
+
+void shimTimeSetEvent(X86& cpu, ShimCall& call) {
+    const char* api = "timeSetEvent";
+    requireClock(cpu, api);
+    const std::uint32_t delay = call.u32(0);
+    const std::uint32_t resolution = call.u32(1);
+    const std::uint32_t proc = call.u32(2);
+    const std::uint32_t user = call.u32(3);
+    const std::uint32_t event = call.u32(4);
+    // 文档：失败 ⇒ 返回 0（不是 -1）
+    if (proc == 0 || delay == 0) {
+        shimLog("winmm", api, "lpTimeProc=%u / uDelay=%u 非法 ⇒ 返回 0", proc, delay);
+        call.result = 0;
+        return;
+    }
+    if ((event & ~(kTimePeriodic | kTimeCallbackEventSet | kTimeCallbackEventPulse |
+                   kTimeKillSynchronous)) != 0) {
+        shimLog("winmm", api, "fuEvent=0x%X 含未知位 ⇒ 返回 0", event);
+        call.result = 0;
+        return;
+    }
+    if ((event & (kTimeCallbackEventSet | kTimeCallbackEventPulse)) != 0) {
+        // 这两种回调类型要求 dwUser 是**事件句柄**、由 winmm 去 SetEvent/PulseEvent；
+        // 本模拟器不支持（需要跨族访问同步对象）⇒ 按文档的失败值返回，⛔ 不假装登记成功。
+        shimLog("winmm", api,
+                "TIME_CALLBACK_EVENT_SET/PULSE 不实现（dwUser 是事件句柄；本模拟器只支持"
+                " TIME_CALLBACK_FUNCTION）⇒ 返回 0");
+        call.result = 0;
+        return;
+    }
+    GuestTimer t;
+    t.id = cpu.shim.next_timer_id++;
+    t.due_100ns = cpu.clock->now100ns() + static_cast<std::uint64_t>(delay) * 10000ull;
+    t.oneshot = (event & kTimePeriodic) == 0;
+    t.period_ms = t.oneshot ? 0u : delay;
+    t.callback = proc;
+    t.user = user;
+    t.resolution = resolution;
+    cpu.shim.timers.push_back(t);
+    shimLog("winmm", api,
+            "登记%s定时器 id=%u：%u ms 后触发（协作式：dispatcher 在块边界按虚拟时钟触发回调）",
+            t.oneshot ? "一次性" : "周期", t.id, delay);
+    call.result = t.id;
+}
+
+void shimTimeKillEvent(X86& cpu, ShimCall& call) {
+    const char* api = "timeKillEvent";
+    const std::uint32_t id = call.u32(0);
+    std::vector<GuestTimer>& timers = cpu.shim.timers;
+    for (std::size_t i = 0; i < timers.size(); ++i) {
+        if (timers[i].id != id) continue;
+        timers.erase(timers.begin() + static_cast<std::ptrdiff_t>(i));
+        call.result = kMmsyserrNoError;
+        return;
+    }
+    // 文档：未知 id ⇒ MMSYSERR_INVALPARAM（11）
+    shimLog("winmm", api, "定时器 id=%u 不存在（可能已经一次性触发过）⇒ 返回 11", id);
+    call.result = kMmsyserrInvalidParam;
+}
+
+void shimTimeGetDevCaps(X86& cpu, ShimCall& call) {
+    const char* api = "timeGetDevCaps";
+    requireMem(cpu, api);
+    const std::uint32_t caps_ea = call.u32(0);
+    const std::uint32_t size = call.u32(1);
+    // TIMECAPS { UINT wPeriodMin; UINT wPeriodMax; } = 8 字节（x86）
+    if (caps_ea == 0 || size < 8u) {
+        shimLog("winmm", api, "ptc=0x%08X / cbtc=%u 非法（需要 8 字节 TIMECAPS）⇒ 返回 11", caps_ea,
+                size);
+        call.result = kMmsyserrInvalidParam;
+        return;
+    }
+    if (!cpu.mem->committed(caps_ea, 8)) {
+        shimAbort("winmm", api, "ptc=0x%08X 未提交（guest 缓冲区非法）", caps_ea);
+    }
+    // 分辨率范围是**宿主能力**；本模拟器的时钟由虚拟时钟决定 ⇒ 报一个宽而确定的范围。
+    cpu.mem->wr32(caps_ea, 1u);          // wPeriodMin = 1 ms
+    cpu.mem->wr32(caps_ea + 4u, 1000000u);  // wPeriodMax = 1e6 ms
+    shimLog("winmm", api, "报告固定分辨率范围 1..1000000 ms（虚拟时钟；不接宿主定时器）");
+    call.result = kMmsyserrNoError;
+}
+
 }  // namespace
 
 void registerTimeShims(ShimRegistry& shims) {
@@ -235,11 +333,10 @@ void registerTimeShims(ShimRegistry& shims) {
     shims.add("winmm", "timeBeginPeriod", Conv::Stdcall, 1, shimTimeBeginPeriod);
     shims.add("winmm", "timeEndPeriod", Conv::Stdcall, 1, shimTimeEndPeriod);
 
-    // ---- 多媒体定时器 = 服务线程（README §2.5 / D5）⇒ 登记为未实现 ----
-    shims.addUnimplemented("winmm", "timeSetEvent",
-                           "多媒体定时器 = 服务线程（README §2.5 / D5）；M1 不做");
-    shims.addUnimplemented("winmm", "timeKillEvent",
-                           "配套 timeSetEvent 的定时器线程（README §2.5 / D5）；M1 不做");
+    // ---- 多媒体定时器（协作式：登记进 cpu.shim.timers，由 dispatcher 在块边界触发）----
+    shims.add("winmm", "timeSetEvent", Conv::Stdcall, 5, shimTimeSetEvent);
+    shims.add("winmm", "timeKillEvent", Conv::Stdcall, 1, shimTimeKillEvent);
+    shims.add("winmm", "timeGetDevCaps", Conv::Stdcall, 2, shimTimeGetDevCaps);
 }
 
 }  // namespace lift

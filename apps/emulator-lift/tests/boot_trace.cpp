@@ -23,6 +23,8 @@ struct Outcome {
     std::uint32_t ea = 0;
     std::uint64_t insns = 0;
     std::uint64_t hash = 0;
+    std::uint64_t inputs_hash = 0;  // A4 输入清单的指纹（与"执行结果"分开记）
+    bool real_time = false;
     std::string detail;
     bool ok = false;
 };
@@ -67,6 +69,10 @@ Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std
     h = fnv(h, &heap_used, sizeof(heap_used));
     h = fnv(h, &heap_peak, sizeof(heap_peak));
     out.hash = h;
+    // ★ A4 的输入清单（plan §5 A4）：exe 路径串 / guest 命令行 / 环境块 / 时钟起点。
+    //   "同一条命令跑两次逐字节相同"只对**固定输入**成立 ⇒ 输入清单自己也要可比。
+    out.inputs_hash = m.traceInputsHash();
+    out.real_time = m.clock().realTime();
     out.ok = true;
     return out;
 }
@@ -90,14 +96,19 @@ int main() {
         std::fprintf(stderr, "setup 失败：%s\n", a.detail.c_str());
         return 1;
     }
-    std::printf("run1: reason=%s eip=%08X insns=%llu hash=%016llX\n", lift::stopReasonName(a.reason), a.ea,
-                (unsigned long long)a.insns, (unsigned long long)a.hash);
+    std::printf("run1: reason=%s eip=%08X insns=%llu hash=%016llX inputs=%016llX\n", lift::stopReasonName(a.reason),
+                a.ea, (unsigned long long)a.insns, (unsigned long long)a.hash, (unsigned long long)a.inputs_hash);
     if (!a.detail.empty()) std::printf("run1: detail=%s\n", a.detail.c_str());
 
     g_current_case = "run2";
     const Outcome b = runOnce(exe, lst_path, kWinMain, kMaxInsns);
-    std::printf("run2: reason=%s eip=%08X insns=%llu hash=%016llX\n", lift::stopReasonName(b.reason), b.ea,
-                (unsigned long long)b.insns, (unsigned long long)b.hash);
+    std::printf("run2: reason=%s eip=%08X insns=%llu hash=%016llX inputs=%016llX\n", lift::stopReasonName(b.reason),
+                b.ea, (unsigned long long)b.insns, (unsigned long long)b.hash, (unsigned long long)b.inputs_hash);
+
+    // ★ A4 输入清单：两次运行必须看到同一组输入（`--exe` 的路径串 / 命令行 / 环境块 / 时钟起点）
+    g_current_case = "same-inputs";
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(a.inputs_hash), static_cast<std::int64_t>(b.inputs_hash));
+    LIFT_CHECK(!a.real_time);  // 默认必须是虚拟时钟（真时钟 ⇒ 逐字节断言自动跳过）
 
     // ① 可复现（这一条与环境无关，永远该绿）
     g_current_case = "determinism";

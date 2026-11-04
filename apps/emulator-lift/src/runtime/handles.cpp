@@ -51,6 +51,38 @@ const HandleEntry* HandleTable::get(std::uint32_t h) const {
     return nullptr;
 }
 
+bool releasePayload(HandleTable& table, std::uint32_t h) {
+    HandleEntry* entry = table.get(h);
+    if (!entry) return false;
+    if (!entry->payload) return true;
+    // ★ 判据是"还有没有**别的活句柄**指着同一个 payload"（不是引用计数：两个句柄各自不知道对方）。
+    bool shared = false;
+    const std::uint32_t end =
+        HandleTable::kFirst + HandleTable::kStep * static_cast<std::uint32_t>(table.size());
+    for (std::uint32_t other = HandleTable::kFirst; other < end; other += HandleTable::kStep) {
+        if (other == h) continue;
+        if (const HandleEntry* o = table.get(other)) {
+            if (o->payload == entry->payload) {
+                shared = true;
+                break;
+            }
+        }
+    }
+    if (!shared && entry->destroy) entry->destroy(entry->payload);
+    entry->payload = nullptr;
+    entry->destroy = nullptr;
+    return true;
+}
+
+std::uint32_t HandleTable::findNamed(HandleKind kind, const std::string& name) const {
+    if (name.empty()) return 0;
+    for (const Slot& s : entries_) {
+        if (!s.entry.used || s.entry.kind != kind) continue;
+        if (s.entry.name == name) return s.value;
+    }
+    return 0;
+}
+
 bool HandleTable::close(std::uint32_t h) {
     for (Slot& s : entries_) {
         if (s.value == h && s.entry.used) {

@@ -133,28 +133,40 @@ void x87Rem(const Ext80 a, const Ext80 b, Ext80 out) {
     store(extF80_rem(as(a), as(b)), out);
 }
 void x87Scale(const Ext80 a, const Ext80 b, Ext80 out) {
-    // fscale：ST0 * 2^trunc(ST1)。上游这版没有 scalbn ⇒ 直接改 80 位编码的指数域
-    // （x87 的 fscale 本来就是这个语义；这里只处理正规值 / 零，溢出按饱和处理）。
-    extFloat80_t r = as(a);
-    const std::int64_t e = static_cast<std::int64_t>(extF80_to_i64(as(b), softfloat_round_minMag, false));
-    const std::uint16_t sign = static_cast<std::uint16_t>(r.signExp & 0x8000u);
-    std::int32_t exp = static_cast<std::int32_t>(r.signExp & 0x7FFFu);
-    const bool is_zero_or_denormal = (r.signif == 0) || (exp == 0 && r.signif != 0);
-    if (!is_zero_or_denormal) {
-        const std::int64_t ne = static_cast<std::int64_t>(exp) + e;
-        if (ne <= 0) {
-            exp = 0;
-            r.signif = 0;
-        } else if (ne >= 0x7FFF) {
-            exp = 0x7FFF;
-            r.signif = 0x8000000000000000ull;
-            softfloat_raiseFlags(softfloat_flag_overflow);
-        } else {
-            exp = static_cast<std::int32_t>(ne);
-        }
+    // fscale：ST0 * 2^trunc(ST1)。★ 不再手改指数域（那会把下溢做成 pseudo-denormal）——
+    // 而是**构造 2^e** 再走 `extF80_mul`：溢出 / 下溢 / 精度标志全部由 SoftFloat 给，
+    // 乘 2 的幂本身是精确的（不会误置 inexact）。
+    const double d = x87ToDouble(b);
+    std::int64_t e = 0;
+    if (std::isnan(d)) {
+        store(as(a), out);  // fscale 的 NaN 语义不在本仓关键路径上：原样返回，别静默改值
+        return;
     }
-    r.signExp = static_cast<std::uint16_t>(sign | static_cast<std::uint16_t>(exp));
-    store(r, out);
+    if (d > 20000.0) e = 20000;
+    else if (d < -20000.0) e = -20000;
+    else e = static_cast<std::int64_t>(d < 0 ? -std::floor(-d) : std::floor(d));
+
+    extFloat80_t p{};
+    const std::uint16_t sign = static_cast<std::uint16_t>(as(a).signExp & 0x8000u);
+    if (e > 16383) {
+        // 结果必然上溢：交给 mul 之前的饱和（置 OE 后返回 inf）
+        p.signExp = 0x7FFF;
+        p.signif = 0x8000000000000000ull;
+        softfloat_raiseFlags(softfloat_flag_overflow);
+    } else if (e >= -16382) {
+        p.signExp = static_cast<std::uint16_t>(16383 + e);
+        p.signif = 0x8000000000000000ull;
+    } else if (e >= -16445) {
+        // 次正规的 2^e（signif 的整数位放在 bit63 ⇒ 值 = signif * 2^-16445）
+        p.signExp = 0;
+        p.signif = 1ull << static_cast<unsigned>(e + 16445);
+    } else {
+        p.signExp = 0;
+        p.signif = 0;
+        softfloat_raiseFlags(softfloat_flag_underflow);
+    }
+    if (sign) p.signExp = static_cast<std::uint16_t>(p.signExp | 0x8000u);
+    store(extF80_mul(as(a), p), out);
 }
 void x87ChangeSign(Ext80 v) { as(v).signExp ^= 0x8000u; }
 void x87Abs(Ext80 v) { as(v).signExp &= 0x7FFFu; }
@@ -166,6 +178,9 @@ int x87Compare(const Ext80 a, const Ext80 b) {
         softfloat_raiseFlags(softfloat_flag_invalid);
         return 2;
     }
+    // ★ 无序（quiet NaN）也是 `cmp == 2`：`extF80_eq/lt` 对 QNaN 都是 false，
+    //   不先判 NaN 会把它读成 "greater" ⇒ fcom 的 C3/C2/C0 全错（实测夹具 x87-fcom-unordered）。
+    if (x87IsNan(a) || x87IsNan(b)) return 2;
     if (extF80_eq(av, bv)) return 0;
     if (extF80_lt(av, bv)) return -1;
     return 1;
@@ -179,6 +194,97 @@ bool x87IsZero(const Ext80 a) {
     const extFloat80_t v = as(a);
     return (v.signExp & 0x7FFFu) == 0 && v.signif == 0;
 }
+
+bool x87IsInf(const Ext80 a) {
+    const extFloat80_t v = as(a);
+    return (v.signExp & 0x7FFFu) == 0x7FFFu && (v.signif << 1) == 0;
+}
+bool x87SignBit(const Ext80 a) { return (as(a).signExp & 0x8000u) != 0; }
+
+X87Class x87Classify(const Ext80 a) {
+    const extFloat80_t v = as(a);
+    const std::uint16_t e = static_cast<std::uint16_t>(v.signExp & 0x7FFFu);
+    if (e == 0x7FFFu) return (v.signif << 1) != 0 ? X87Class::Nan : X87Class::Infinity;
+    if (e == 0) return v.signif == 0 ? X87Class::Zero : X87Class::Denormal;
+    return X87Class::Normal;
+}
+
+void x87Extract(const Ext80 a, Ext80 significand, Ext80 exponent) {
+    // FXTTRACT：ST(0) = 尾数（[1,2)，指数域 = bias），ST(1) = 指数（带符号整数，extF80 表示）
+    const extFloat80_t v = as(a);
+    const std::uint16_t sign = static_cast<std::uint16_t>(v.signExp & 0x8000u);
+    const std::uint16_t e = static_cast<std::uint16_t>(v.signExp & 0x7FFFu);
+    extFloat80_t s{};
+    extFloat80_t x{};
+    if (e == 0 && v.signif == 0) {
+        // ±0 ⇒ 尾数 ±0、指数 −∞（Intel：不置 invalid）
+        s.signExp = sign;
+        s.signif = 0;
+        x.signExp = static_cast<std::uint16_t>(0x7FFFu | sign);
+        x.signif = 0x8000000000000000ull;
+    } else if (e == 0x7FFFu) {
+        s = v;  // inf / NaN 原样穿过（本仓不作伪值）
+        x = v;
+    } else {
+        std::uint64_t m = v.signif;
+        std::int32_t biased = e;
+        if (e == 0) {  // 次正规：先规格化，指数随之下降
+            int sh = 0;
+            while ((m & 0x8000000000000000ull) == 0) {
+                m <<= 1;
+                ++sh;
+            }
+            biased = static_cast<std::int32_t>(1 - sh);
+        }
+        s.signExp = static_cast<std::uint16_t>(0x3FFFu | sign);
+        s.signif = m;
+        x = i32_to_extF80(static_cast<std::int32_t>(biased) - 16383);
+    }
+    store(s, significand);
+    store(x, exponent);
+}
+
+void x87RemTrunc(const Ext80 a, const Ext80 b, Ext80 out) {
+    // x87 的 FPREM 是**商朝零截断**的余数（fmod 语义）；SoftFloat 的 `extF80_rem` 是
+    // IEEE 余数（商取最近偶数，= FPREM1）。两者只在商的奇偶性上差一个 |b|：
+    //   令 r = a − n·b（n = 最近偶数商）。若 sign(r) 与 sign(a) 相同（或 r = 0），
+    //   则 trunc(a/b) 就是 n ⇒ 结果 = r；否则 trunc(a/b) = n ∓ 1 ⇒ 结果 = r + sign(a)·|b|。
+    // ★ 这一步是**精确**的：真余数的有效位不超过 64 位，SoftFloat 的加减不会引入舍入。
+    const extFloat80_t av = as(a);
+    const extFloat80_t bv = as(b);
+    extFloat80_t r = extF80_rem(av, bv);
+    const std::uint16_t re = static_cast<std::uint16_t>(r.signExp & 0x7FFFu);
+    if (re == 0x7FFFu) {  // NaN / inf：rem 已经给出结果（并置了 invalid）
+        store(r, out);
+        return;
+    }
+    if (r.signif == 0 && re == 0) {
+        store(r, out);
+        return;
+    }
+    const bool sa = (av.signExp & 0x8000u) != 0;
+    const bool sr = (r.signExp & 0x8000u) != 0;
+    if (sa == sr) {
+        store(r, out);
+        return;
+    }
+    extFloat80_t shift = bv;
+    shift.signExp = static_cast<std::uint16_t>(shift.signExp & 0x7FFFu);  // |b|
+    if (sa) shift.signExp = static_cast<std::uint16_t>(shift.signExp | 0x8000u);  // sign(a)·|b|
+    store(extF80_add(r, shift), out);
+}
+
+double x87ToDouble(const Ext80 a) {
+    const float64_t f = extF80_to_f64(as(a));
+    double d = 0;
+    std::memcpy(&d, &f.v, 8);
+    return d;
+}
+void x87FromDouble(double d, Ext80 out) { store(f64_to_extF80(f64FromDouble(d)), out); }
+
+std::uint8_t x87PeekExceptionFlags() { return softfloat_exceptionFlags; }
+void x87ClearExceptionFlags() { softfloat_exceptionFlags = 0; }
+void x87RaiseInvalid() { softfloat_raiseFlags(softfloat_flag_invalid); }
 
 void x87ApplyControlWord(std::uint16_t control) {
     switch ((control >> 10) & 3u) {

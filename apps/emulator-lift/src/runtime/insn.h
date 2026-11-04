@@ -41,17 +41,47 @@ enum class Op : std::uint16_t {
     // ---- 串操作（`rep` 前缀见 Insn::rep）----
     Movs, Stos, Lods, Scas, Cmps,
 
-    // ---- x87（M1a 只做最小子集；其余 M1b）----
-    Fld, Fst, Fstp, Fild, Fist, Fistp,
+    // ---- x87（S4：语料里 47 个形态；算术全部走 SoftFloat `extF80`，见 plan §4 D3）----
+    Fld, Fst, Fstp, Fild, Fist, Fistp, Fisttp,
     Fadd, Fsub, Fsubr, Fmul, Fdiv, Fdivr,
     Faddp, Fsubp, Fsubrp, Fmulp, Fdivp, Fdivrp,
     Fiadd, Fisub, Fisubr, Fimul, Fidiv, Fidivr,
     Fcom, Fcomp, Fucom, Fucomp, Fcompp, Fucompp,
-    Fnstsw, Fldcw, Fnstcw, Fxch, Ffree, Fld1, Fldz, Fchs, Fabs, Fninit, Fwait,
-    Ftst, Fsqrt, Frndint, Fprem, Fscale, Fsin, Fcos, Fptan, Fpatan, Fyl2x,
-    Fldln2, Fldl2e, Fldlg2, Fldl2t, Fldpi, F2xm1,
+    Fcomi, Fcomip, Fucomi, Fucomip,
+    Fcmovb, Fcmove, Fcmovbe, Fcmovu, Fcmovnb, Fcmovne, Fcmovnbe, Fcmovnu,
+    Fnstsw, Fldcw, Fnstcw, Fldenv, Fnstenv, Fsave, Fnsave, Frstor,
+    Fxch, Ffree, Fdecstp, Fincstp, Fnop,
+    Fld1, Fldz, Fldpi, Fldl2e, Fldl2t, Fldlg2, Fldln2,
+    Fchs, Fabs, Fninit, Fclex, Fwait,
+    Ftst, Fsqrt, Frndint, Fprem, Fprem1, Fscale, Fxam, Fxtract,
+    Fsin, Fcos, Fsincos, Fptan, Fpatan, Fyl2x, Fyl2xp1, F2xm1,
+    //  ↑ x87 到此为止（`exec.cpp` 的 `opIsX87` 用这段连续区间判定；新 x87 形态必须加在这条线以上）
+
+    // ---- MMX / SSE（整数打包；子语义见 `PkOp`）----
+    // ★ 语料里只有 MMX 形态（≈0.94k 条）；SSE 浮点形态语料没有 ⇒ 不解码 ⇒ `Op::Other` 响亮失败。
+    Packed,
 
     Other,  // 解出来了但没实现 —— 执行必须响亮失败
+};
+
+// `Op::Packed` 的子语义（Intel SDM Vol.2 的家族名；MMX 与 SSE2 整数形态共用一套实现，
+// 区别只在执行宽度：MM 寄存器/内存 = 8 字节，XMM = 16 字节）。
+enum class PkOp : std::uint8_t {
+    None = 0,
+    Movd, Movq,  // mm/xmm ↔ r/m32 / r/m64（写进向量寄存器时**零扩展**）
+    Pand, Pandn, Por, Pxor,
+    PaddB, PaddW, PaddD, PaddQ,
+    PaddSb, PaddSw, PaddUsb, PaddUsw,
+    PsubB, PsubW, PsubD, PsubQ,
+    PsubSb, PsubSw, PsubUsb, PsubUsw,
+    PcmpeqB, PcmpeqW, PcmpeqD,
+    PcmpgtB, PcmpgtW, PcmpgtD,
+    Punpcklbw, Punpcklwd, Punpckldq, Punpcklqdq,
+    Punpckhbw, Punpckhwd, Punpckhdq, Punpckhqdq,
+    Packsswb, Packssdw, Packuswb,
+    Pmullw, Pmulhw, Pmulhuw, Pmuludq, Pmaddwd,
+    Psllw, Pslld, Psllq, Psrlw, Psrld, Psrlq, Psraw, Psrad,
+    Ems,
 };
 
 // 条件码（Jcc / Setcc / Cmovcc）。别名（jz/je、jnb/jae/jnc …）**在解码时**归一到这里。
@@ -75,7 +105,9 @@ enum class Cond : std::uint8_t {
     G,   // jg / jnle
 };
 
-enum class OpKind : std::uint8_t { None = 0, Reg, Imm, Mem };
+// ★ `Xmm` 是**独立**的一类：`Reg` 枚举里没有 XMM（那是 `regs.h` 的既有接口，S4 不改它），
+//   所以 XMM 操作数用 `Operand::vec`（0..7）承载下标。
+enum class OpKind : std::uint8_t { None = 0, Reg, Imm, Mem, Xmm };
 
 // 内存操作数：有效地址 = base + index*scale + disp（没有 base/index 时用 disp 作绝对地址）
 struct MemOperand {
@@ -92,8 +124,9 @@ struct MemOperand {
 struct Operand {
     OpKind kind = OpKind::None;
     Reg reg = Reg::None;
-    std::uint8_t size = 0;  // 字节宽度（1/2/4/8/10）
+    std::uint8_t size = 0;  // 字节宽度（1/2/4/8/10/16）
     std::uint64_t imm = 0;  // 立即数（已按操作数宽度截断）
+    std::uint8_t vec = 0;   // `OpKind::Xmm` 用：xmm 下标 0..15（32 位 guest 只会有 0..7）
     MemOperand mem;
 };
 
@@ -105,6 +138,7 @@ struct Insn {
     bool lock = false;
     bool operand16 = false;    // 0x66 前缀
     Op op = Op::Invalid;
+    PkOp pk = PkOp::None;      // `Op::Packed` 的子语义
     Cond cc = Cond::None;      // Jcc / Setcc / Cmovcc 用
     Operand ops[3];
     const char* mnemonic = ""; // 规范助记符（静态字符串，与 .lst 对照用）

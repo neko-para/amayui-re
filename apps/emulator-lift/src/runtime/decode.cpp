@@ -68,6 +68,16 @@ Reg mapReg(ZydisRegister r) {
         case ZYDIS_REGISTER_ST5: return Reg::ST5;
         case ZYDIS_REGISTER_ST6: return Reg::ST6;
         case ZYDIS_REGISTER_ST7: return Reg::ST7;
+        // ★ MMX 寄存器**复用 x87 的物理槽**（Intel：两者共用同一组寄存器）⇒ 映射到 ST0..ST7，
+        //   语义层用操作数宽度（8 = MMX / 10 = x87）区分。
+        case ZYDIS_REGISTER_MM0: return Reg::ST0;
+        case ZYDIS_REGISTER_MM1: return Reg::ST1;
+        case ZYDIS_REGISTER_MM2: return Reg::ST2;
+        case ZYDIS_REGISTER_MM3: return Reg::ST3;
+        case ZYDIS_REGISTER_MM4: return Reg::ST4;
+        case ZYDIS_REGISTER_MM5: return Reg::ST5;
+        case ZYDIS_REGISTER_MM6: return Reg::ST6;
+        case ZYDIS_REGISTER_MM7: return Reg::ST7;
         case ZYDIS_REGISTER_ES: return Reg::ES;
         case ZYDIS_REGISTER_CS: return Reg::CS;
         case ZYDIS_REGISTER_SS: return Reg::SS;
@@ -75,6 +85,21 @@ Reg mapReg(ZydisRegister r) {
         case ZYDIS_REGISTER_FS: return Reg::FS;
         case ZYDIS_REGISTER_GS: return Reg::GS;
         default: return Reg::None;
+    }
+}
+
+// XMM 不在 `Reg` 枚举里（`regs.h` 是既有接口，S4 不动）⇒ 用 `OpKind::Xmm` + 下标承载。
+int xmmIndex(ZydisRegister r) {
+    switch (r) {
+        case ZYDIS_REGISTER_XMM0: return 0;
+        case ZYDIS_REGISTER_XMM1: return 1;
+        case ZYDIS_REGISTER_XMM2: return 2;
+        case ZYDIS_REGISTER_XMM3: return 3;
+        case ZYDIS_REGISTER_XMM4: return 4;
+        case ZYDIS_REGISTER_XMM5: return 5;
+        case ZYDIS_REGISTER_XMM6: return 6;
+        case ZYDIS_REGISTER_XMM7: return 7;
+        default: return -1;
     }
 }
 
@@ -143,7 +168,52 @@ const OpRow kOpMap[] = {
     {"fptan", Op::Fptan}, {"fpatan", Op::Fpatan}, {"fyl2x", Op::Fyl2x},   {"fldln2", Op::Fldln2},
     {"fldl2e", Op::Fldl2e},{"fldlg2", Op::Fldlg2},{"fldl2t", Op::Fldl2t}, {"fldpi", Op::Fldpi},
     {"f2xm1", Op::F2xm1},
+    // ---- x87（S4 补齐：语料里 47 个形态之外，指令集里常见的那几个也登记成本）----
+    {"fisttp", Op::Fisttp},
+    {"fcomi", Op::Fcomi},   {"fcomip", Op::Fcomip},   {"fucomi", Op::Fucomi}, {"fucomip", Op::Fucomip},
+    {"fcmovb", Op::Fcmovb}, {"fcmove", Op::Fcmove},   {"fcmovbe", Op::Fcmovbe}, {"fcmovu", Op::Fcmovu},
+    {"fcmovnb", Op::Fcmovnb}, {"fcmovne", Op::Fcmovne}, {"fcmovnbe", Op::Fcmovnbe}, {"fcmovnu", Op::Fcmovnu},
+    {"fldenv", Op::Fldenv}, {"fnstenv", Op::Fnstenv}, {"fnsave", Op::Fnsave}, {"frstor", Op::Frstor},
+    {"fdecstp", Op::Fdecstp}, {"fincstp", Op::Fincstp}, {"fnop", Op::Fnop},
+    {"fclex", Op::Fclex},   {"fnclex", Op::Fclex},
+    {"fprem1", Op::Fprem1}, {"fyl2xp1", Op::Fyl2xp1}, {"fsincos", Op::Fsincos},
+    {"fxam", Op::Fxam},     {"fxtract", Op::Fxtract},
 };
+
+// ---- MMX / SSE 的整数打包（`Op::Packed` + `PkOp` 子码）----
+// ★ 只登记**语料里真的出现过**的 MMX 形态 + 同族的整数 SSE2 形态；浮点 SSE（addps / movaps …）
+//   语料里没有 ⇒ 不登记 ⇒ 落 `Op::Other` ⇒ 执行时**响亮失败**（plan §6 S4 的口径）。
+struct PkRow {
+    const char* name;
+    PkOp pk;
+};
+const PkRow kPkMap[] = {
+    {"movd", PkOp::Movd}, {"movq", PkOp::Movq},
+    {"pand", PkOp::Pand}, {"pandn", PkOp::Pandn}, {"por", PkOp::Por}, {"pxor", PkOp::Pxor},
+    {"paddb", PkOp::PaddB}, {"paddw", PkOp::PaddW}, {"paddd", PkOp::PaddD}, {"paddq", PkOp::PaddQ},
+    {"paddsb", PkOp::PaddSb}, {"paddsw", PkOp::PaddSw}, {"paddusb", PkOp::PaddUsb}, {"paddusw", PkOp::PaddUsw},
+    {"psubb", PkOp::PsubB}, {"psubw", PkOp::PsubW}, {"psubd", PkOp::PsubD}, {"psubq", PkOp::PsubQ},
+    {"psubsb", PkOp::PsubSb}, {"psubsw", PkOp::PsubSw}, {"psubusb", PkOp::PsubUsb}, {"psubusw", PkOp::PsubUsw},
+    {"pcmpeqb", PkOp::PcmpeqB}, {"pcmpeqw", PkOp::PcmpeqW}, {"pcmpeqd", PkOp::PcmpeqD},
+    {"pcmpgtb", PkOp::PcmpgtB}, {"pcmpgtw", PkOp::PcmpgtW}, {"pcmpgtd", PkOp::PcmpgtD},
+    {"punpcklbw", PkOp::Punpcklbw}, {"punpcklwd", PkOp::Punpcklwd}, {"punpckldq", PkOp::Punpckldq},
+    {"punpcklqdq", PkOp::Punpcklqdq}, {"punpckhbw", PkOp::Punpckhbw}, {"punpckhwd", PkOp::Punpckhwd},
+    {"punpckhdq", PkOp::Punpckhdq}, {"punpckhqdq", PkOp::Punpckhqdq},
+    {"packsswb", PkOp::Packsswb}, {"packssdw", PkOp::Packssdw}, {"packuswb", PkOp::Packuswb},
+    {"pmullw", PkOp::Pmullw}, {"pmulhw", PkOp::Pmulhw}, {"pmulhuw", PkOp::Pmulhuw},
+    {"pmuludq", PkOp::Pmuludq}, {"pmaddwd", PkOp::Pmaddwd},
+    {"psllw", PkOp::Psllw}, {"pslld", PkOp::Pslld}, {"psllq", PkOp::Psllq},
+    {"psrlw", PkOp::Psrlw}, {"psrld", PkOp::Psrld}, {"psrlq", PkOp::Psrlq},
+    {"psraw", PkOp::Psraw}, {"psrad", PkOp::Psrad},
+    {"emms", PkOp::Ems},
+};
+
+PkOp pkFromMnemonic(const char* name) {
+    if (!name) return PkOp::None;
+    for (const PkRow& r : kPkMap)
+        if (std::strcmp(name, r.name) == 0) return r.pk;
+    return PkOp::None;
+}
 
 // `rep` / `lock` 前缀后的规范名（A3 要跟 `.lst` 的 `rep movsd` / `lock xadd` 对上）
 const char* prefixedName(const char* base, std::uint8_t rep, bool lock) {
@@ -254,15 +324,25 @@ bool Decoder::decode(const GuestMemory& mem, std::uint32_t ea, Insn* out, std::s
     ins.lock = (zi.attributes & ZYDIS_ATTRIB_HAS_LOCK) != 0;
 
     const char* raw = ZydisMnemonicGetString(zi.mnemonic);
-    const char* canon = canonicalFromZydis(raw ? raw : "");
-    ins.mnemonic = prefixedName(canon ? canon : (raw ? raw : "?"), ins.rep, ins.lock);
-    ins.op = opFromCanonical(canon);
+    if (!raw) raw = "?";
+    const char* canon = canonicalFromZydis(raw);
+    // ★ 别名表里有就用规范名；没有就退回 Zydis 的原名（`fcmovb` 一族 / 部分 MMX 名没进别名表，
+    //   但 Zydis 给的名字本身就是 Intel 规范名）。A2 的口径不变：`.lst` 里的助记符必须全在别名表。
+    const char* key = canon ? canon : raw;
+    ins.mnemonic = prefixedName(key, ins.rep, ins.lock);
+    const PkOp pk = pkFromMnemonic(key);
+    if (pk != PkOp::None) {
+        ins.op = Op::Packed;
+        ins.pk = pk;
+    } else {
+        ins.op = opFromCanonical(key);
+    }
     // `F3 C3`（rep ret）：Zydis 把 F3 当"对 RET 无意义的前缀"吃掉、不置 REP 属性，
     // 所以按**字节**补一次（IDA 写 `rep retn`）。
     if (buf[0] == 0xF3 && ins.op == Op::Ret) ins.mnemonic = "rep ret";
-    if (ins.op == Op::Jcc) ins.cc = condFromSuffix(canon + 1);
-    if (ins.op == Op::Setcc) ins.cc = condFromSuffix(canon + 3);
-    if (ins.op == Op::Cmovcc) ins.cc = condFromSuffix(canon + 4);
+    if (ins.op == Op::Jcc) ins.cc = condFromSuffix(key + 1);
+    if (ins.op == Op::Setcc) ins.cc = condFromSuffix(key + 3);
+    if (ins.op == Op::Cmovcc) ins.cc = condFromSuffix(key + 4);
 
     const std::uint8_t visible = zi.operand_count_visible;
     for (std::uint8_t i = 0; i < visible && i < 3; ++i) {
@@ -270,10 +350,17 @@ bool Decoder::decode(const GuestMemory& mem, std::uint32_t ea, Insn* out, std::s
         Operand& op = ins.ops[i];
         op.size = static_cast<std::uint8_t>(zo.size / 8);
         switch (zo.type) {
-            case ZYDIS_OPERAND_TYPE_REGISTER:
-                op.kind = OpKind::Reg;
-                op.reg = mapReg(zo.reg.value);
+            case ZYDIS_OPERAND_TYPE_REGISTER: {
+                const int xi = xmmIndex(zo.reg.value);
+                if (xi >= 0) {
+                    op.kind = OpKind::Xmm;
+                    op.vec = static_cast<std::uint8_t>(xi);
+                } else {
+                    op.kind = OpKind::Reg;
+                    op.reg = mapReg(zo.reg.value);
+                }
                 break;
+            }
             case ZYDIS_OPERAND_TYPE_MEMORY: {
                 op.kind = OpKind::Mem;
                 op.mem.size = static_cast<std::uint8_t>(zo.size / 8);
@@ -321,6 +408,9 @@ bool Decoder::decode(const GuestMemory& mem, std::uint32_t ea, Insn* out, std::s
                 case Op::Fnstsw: merged = "fstsw"; break;
                 case Op::Fnstcw: merged = "fstcw"; break;
                 case Op::Fninit: merged = "finit"; break;
+                case Op::Fnstenv: merged = "fstenv"; break;
+                case Op::Fnsave: merged = "fsave"; break;
+                case Op::Fclex: merged = "fclex"; break;
                 default: break;
             }
             if (merged) {

@@ -19,31 +19,26 @@ void registerKernel32Shims(ShimRegistry& shims) {
     registerMemShims(shims);       // kernel32_mem.cpp：Heap* / Local* / Global* / Virtual*
     registerSyncShims(shims);      // kernel32_sync.cpp：临界区 / 事件 / 信号量 / 互斥量 / 等待
     registerProcessShims(shims);   // kernel32_process.cpp：模块 / 命令行 / 版本 / 退出
+    registerFileShims(shims);      // kernel32_file.cpp：文件 / 路径 / 目录 / Find*（S6）
     registerTimeShims(shims);      // kernel32_time.cpp：tick / FILETIME / SYSTEMTIME / winmm
+    registerStringShims(shims);    // kernel32_string.cpp：wsprintfA（varargs）/ lstrlenA / 码页
+    registerAgercShims(shims);     // kernel32_agerc.cpp：AGERC 三个导出（SCOPE §1 模态 no-op）
+    registerVersionShims(shims);   // kernel32_version.cpp：版本资源查询（真实失败码 1813）
 
     // =================================================================================
     // 已知但 M1a 不做（A5 缺口清单）—— 模块名一律小写（查表大小写不敏感）
     // =================================================================================
 
     // ---- kernel32：文件 / 路径 / 进程创建 / 环境 ----
-    // 理由统一：S6 的文件与路径族**不在 M1a 这一批**（本批只到进程/模块/计时/内存/同步/错误/TLS）。
-    shims.addUnimplemented("kernel32", "CreateFileA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "CreateFileW", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "ReadFile", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "WriteFile", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "SetFilePointer", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetFileSize", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "FindFirstFileA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "FindNextFileA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "FindClose", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "DeleteFileA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetFileAttributesA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetFullPathNameA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "CreateDirectoryA", "S6 文件与路径族不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "GetEnvironmentVariableA",
-                           "环境块读取（S6 文件与路径族）不在 M1a 这一批");
-    shims.addUnimplemented("kernel32", "CreateProcessA",
-                           "guest 单线程 / 单进程（README §2.5）；M1a 不做进程创建");
+    // ★ S6 的文件与路径族已由 kernel32_file.cpp 实现（CreateFileA/W · Read/WriteFile ·
+    //   SetFilePointer(Ex) · GetFileSize · FindFirst/NextFileA/FindClose · 目录/属性/删除/改名/复制 ·
+    //   GetCurrentDirectoryA/SetCurrentDirectoryA · GetTempPathA/GetTempFileNameA ·
+    //   GetFullPathNameA / GetSystemDirectoryA / GetWindowsDirectoryA · SetFileTime …）。
+    // ★ 注意：`GetEnvironmentVariableA` 已由 kernel32_bootstrap.cpp **实现**（env 块读取）。
+    //   它曾在这里又被登记成"未实现" ⇒ register.cpp 先注册、bootstrap 后注册 ⇒ find() 命中的是
+    //   未实现那条，实现了也永远用不上。`pnpm tools lift check` 的 no-dup-registration 守这条。
+    //
+    // ★ `CreateProcessA` 的登记已挪到 kernel32_process.cpp（与"进程 / 模块信息族"同文件）。
 
     // ---- advapi32：注册表 ----
     shims.addUnimplemented("advapi32", "RegOpenKeyExA", "注册表族不在 M1a 这一批（配置读写属 S6 之后）");
@@ -100,6 +95,10 @@ void registerKernel32Shims(ShimRegistry& shims) {
     // ---- d3d9：3D ----
     shims.addUnimplemented("d3d9", "Direct3DCreate9",
                            "3D 不在本项目范围（SCOPE §1：D3D9 走 stub / 外包或停手）");
+
+    // ---- 派生缺口（**最后**）：导入表里有、上面既没实现也没登记的条目 ----
+    // 由 `pnpm tools lift sync --write` 生成；理由按模块分组（见 tools/lift.mjs 的 MODULE_REASONS）。
+    registerImportGaps(shims);
 }
 
 }  // namespace lift

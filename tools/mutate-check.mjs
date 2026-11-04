@@ -31,30 +31,31 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CTEST_BUILD_DIR = 'apps/emulator-cxx/out';
 const ctestStdio = (logFd) => (logFd === null ? 'ignore' : ['ignore', logFd, logFd]);
 
-function buildCtestTargets(logFd) {
-  return spawnSync('cmake', ['--build', CTEST_BUILD_DIR], { cwd: ROOT, stdio: ctestStdio(logFd) });
+function buildCtestTargets(logFd, buildDir = CTEST_BUILD_DIR) {
+  return spawnSync('cmake', ['--build', buildDir], { cwd: ROOT, stdio: ctestStdio(logFd) });
 }
 
 /**
  * 构建 + 跑**一条** CTest。
+ * ★ `buildDir` 可按条目覆盖（`apps/emulator-lift/out` 与 `apps/emulator-cxx/out` 是两个独立工程）。
  * @returns {{status:number}|{unavailable:string}} `unavailable` = 本机跑不起来（没配置构建目录 / 没 cmake）。
  */
-function runCtestGuard(name, logFd) {
+function runCtestGuard(name, logFd, buildDir = CTEST_BUILD_DIR) {
   // ★ 先看构建目录有没有**配置过**：没有 CMakeCache.txt 时 `cmake --build` 只会给一句笼统的
   //   "not a build directory"，那不是"守卫没红"，而是"这台机器上跑不了"（原因要写进输出）。
-  if (!fs.existsSync(path.join(ROOT, CTEST_BUILD_DIR, 'CMakeCache.txt'))) {
+  if (!fs.existsSync(path.join(ROOT, buildDir, 'CMakeCache.txt'))) {
     return {
-      unavailable: `构建目录未配置：${CTEST_BUILD_DIR} 里没有 CMakeCache.txt（先 \`cmake --preset windows-x64\`）`,
+      unavailable: `构建目录未配置：${buildDir} 里没有 CMakeCache.txt（先 \`cmake --preset windows-x64\`）`,
     };
   }
-  const build = buildCtestTargets(logFd);
+  const build = buildCtestTargets(logFd, buildDir);
   if (build.error) return { unavailable: `cmake 不可用：${build.error.message}` };
   if (build.status !== 0) {
-    return { unavailable: `构建失败（cmake --build ${CTEST_BUILD_DIR}，退出码 ${build.status}）` };
+    return { unavailable: `构建失败（cmake --build ${buildDir}，退出码 ${build.status}）` };
   }
   const run = spawnSync(
     'ctest',
-    ['--test-dir', CTEST_BUILD_DIR, '-R', `^${name}$`, '--output-on-failure'],
+    ['--test-dir', buildDir, '-R', `^${name}$`, '--output-on-failure'],
     { cwd: ROOT, stdio: ctestStdio(logFd) },
   );
   if (run.error) return { unavailable: `ctest 不可用：${run.error.message}` };
@@ -4144,6 +4145,43 @@ const MUTATIONS = [
       '优先族命中之后的推进量 3 → 0 ⇒ 换脚本那条指令不会被跳过（正文：推进 3 个字）' +
       '⇒ CTest `spec_ops_ae_save_layout1_restore` 当场红',
   },
+  // ── emulator-lift（★ 新命令类型：`buildDir` 指到它自己的 out/；判据在它自己的 CTest 里）──
+  {
+    file: 'apps/emulator-lift/src/runtime/exec_integer.cpp',
+    from: '                case Op::Add: {\n                    const std::uint32_t r = a + b;',
+    to: '                case Op::Add: {\n                    const std::uint32_t r = a + b + 1u;',
+    guard: 'ctest:conformance',
+    ctest: 'conformance',
+    buildDir: 'apps/emulator-lift/out',
+    what: '整数 add 变成 a+b+1 ⇒ conformance 的加法用例当场红（判据在 exe 里 ⇒ 必须先重建）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/shims.cpp',
+    from: 'call.stdcall_bytes = (def.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(def.argc) * 4u : 0u;',
+    to: 'call.stdcall_bytes = (def.conv == Conv::Stdcall) ? 0u : 0u;',
+    guard: 'ctest:shim-abi',
+    ctest: 'shim-abi',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'stdcall 不再弹参 ⇒ 栈每次调用涨 argc*4 ⇒ shim-abi 的 esp 平衡断言红',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/cp932.cpp',
+    from: 'if (b0 < 0x80 || (b0 >= 0xA1 && b0 <= 0xDF) || b0 == 0x80 || b0 == 0xA0 || (b0 >= 0xFD)) {',
+    to: 'if (b0 < 0x80) {',
+    guard: 'ctest:strfmt',
+    ctest: 'strfmt',
+    buildDir: 'apps/emulator-lift/out',
+    what: '半角片假名 / 8 个单字节例外不再走单字节表 ⇒ strfmt 的 CP932 定点断言红（说明那张表真的被用）',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_string.cpp',
+    from: '} else if (sp.zero && numeric && sp.prec < 0) {',
+    to: '} else if (false) {',
+    guard: 'ctest:strfmt',
+    ctest: 'strfmt',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'wsprintfA 的 0 填充失效 ⇒ %08X 变成空格填充 ⇒ strfmt 的宽度断言红',
+  },
 ];
 
 /**
@@ -4193,7 +4231,7 @@ export function main(argv = process.argv.slice(2)) {
     // ★ CTest 条目在**施加变异之前**先验基线：构建目录没配置 / 用例不存在 / 基线本来就红 ⇒
     //   这次变异什么都证明不了 ⇒ 记"无法判定"，⛔ 不记成"守卫没红"。
     if (m.ctest) {
-      const pre = runCtestGuard(m.ctest, null);
+      const pre = runCtestGuard(m.ctest, null, m.buildDir ?? CTEST_BUILD_DIR);
       if (pre.unavailable || pre.status !== 0) {
         const why = pre.unavailable ?? `\`${m.ctest}\` 基线退出码 ${pre.status}`;
         results.push({
@@ -4220,7 +4258,7 @@ export function main(argv = process.argv.slice(2)) {
       const fd = fs.openSync(log, 'w');
       try {
         if (m.ctest) {
-          const r = runCtestGuard(m.ctest, fd);
+          const r = runCtestGuard(m.ctest, fd, m.buildDir ?? CTEST_BUILD_DIR);
           code = r.status ?? null;
           unavailable = r.unavailable ?? null;
         } else {
@@ -4243,11 +4281,11 @@ export function main(argv = process.argv.slice(2)) {
       if (m.ctest) {
         // ★ 还原只还原了**源文件**；判据在 exe 里 ⇒ 必须重建回基线，否则下一次 ctest 会假红。
         //   顺手把「还原 ⇒ 再跑必须绿」也机械化：不绿就中止（退出码 2）。
-        const build = buildCtestTargets(null);
+        const build = buildCtestTargets(null, m.buildDir ?? CTEST_BUILD_DIR);
         if (build.error || build.status !== 0) {
           restoreProblem = '还原后重建失败（exe 仍是变异版）';
         } else {
-          const run = spawnSync('ctest', ['--test-dir', CTEST_BUILD_DIR, '-R', `^${m.ctest}$`],
+          const run = spawnSync('ctest', ['--test-dir', m.buildDir ?? CTEST_BUILD_DIR, '-R', `^${m.ctest}$`],
                                 { cwd: ROOT, stdio: 'ignore' });
           if (run.error || run.status !== 0) {
             restoreProblem = `还原后 \`${m.ctest}\` 仍红（基线没有恢复）`;

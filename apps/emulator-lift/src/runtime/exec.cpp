@@ -120,6 +120,8 @@ bool opIsControl(Op op) {
     }
 }
 
+bool opIsX87(Op op) { return op >= Op::Fld && op <= Op::F2xm1; }
+
 bool opImplemented(Op op) {
     switch (op) {
         case Op::Invalid:
@@ -151,17 +153,24 @@ const char* opName(Op op) {
         LIFT_OP_CASE(Cmovcc) LIFT_OP_CASE(Cpuid) LIFT_OP_CASE(Sahf) LIFT_OP_CASE(Lahf) LIFT_OP_CASE(Pause)
         LIFT_OP_CASE(Movs) LIFT_OP_CASE(Stos) LIFT_OP_CASE(Lods) LIFT_OP_CASE(Scas) LIFT_OP_CASE(Cmps)
         LIFT_OP_CASE(Fld) LIFT_OP_CASE(Fst) LIFT_OP_CASE(Fstp) LIFT_OP_CASE(Fild) LIFT_OP_CASE(Fist)
-        LIFT_OP_CASE(Fistp) LIFT_OP_CASE(Fadd) LIFT_OP_CASE(Fsub) LIFT_OP_CASE(Fsubr) LIFT_OP_CASE(Fmul)
-        LIFT_OP_CASE(Fdiv) LIFT_OP_CASE(Fdivr) LIFT_OP_CASE(Faddp) LIFT_OP_CASE(Fsubp) LIFT_OP_CASE(Fsubrp)
-        LIFT_OP_CASE(Fmulp) LIFT_OP_CASE(Fdivp) LIFT_OP_CASE(Fdivrp) LIFT_OP_CASE(Fiadd) LIFT_OP_CASE(Fisub)
-        LIFT_OP_CASE(Fisubr) LIFT_OP_CASE(Fimul) LIFT_OP_CASE(Fidiv) LIFT_OP_CASE(Fidivr)
+        LIFT_OP_CASE(Fistp) LIFT_OP_CASE(Fisttp) LIFT_OP_CASE(Fadd) LIFT_OP_CASE(Fsub) LIFT_OP_CASE(Fsubr)
+        LIFT_OP_CASE(Fmul) LIFT_OP_CASE(Fdiv) LIFT_OP_CASE(Fdivr) LIFT_OP_CASE(Faddp) LIFT_OP_CASE(Fsubp)
+        LIFT_OP_CASE(Fsubrp) LIFT_OP_CASE(Fmulp) LIFT_OP_CASE(Fdivp) LIFT_OP_CASE(Fdivrp) LIFT_OP_CASE(Fiadd)
+        LIFT_OP_CASE(Fisub) LIFT_OP_CASE(Fisubr) LIFT_OP_CASE(Fimul) LIFT_OP_CASE(Fidiv) LIFT_OP_CASE(Fidivr)
         LIFT_OP_CASE(Fcom) LIFT_OP_CASE(Fcomp) LIFT_OP_CASE(Fcompp) LIFT_OP_CASE(Fucom) LIFT_OP_CASE(Fucomp)
-        LIFT_OP_CASE(Fucompp) LIFT_OP_CASE(Fnstsw) LIFT_OP_CASE(Fldcw) LIFT_OP_CASE(Fnstcw)
-        LIFT_OP_CASE(Fxch) LIFT_OP_CASE(Ffree) LIFT_OP_CASE(Fld1) LIFT_OP_CASE(Fldz) LIFT_OP_CASE(Fchs)
-        LIFT_OP_CASE(Fabs) LIFT_OP_CASE(Fninit) LIFT_OP_CASE(Fwait) LIFT_OP_CASE(Ftst) LIFT_OP_CASE(Fsqrt)
-        LIFT_OP_CASE(Frndint) LIFT_OP_CASE(Fprem) LIFT_OP_CASE(Fscale) LIFT_OP_CASE(Fsin) LIFT_OP_CASE(Fcos)
-        LIFT_OP_CASE(Fptan) LIFT_OP_CASE(Fpatan) LIFT_OP_CASE(Fyl2x) LIFT_OP_CASE(Fldln2) LIFT_OP_CASE(Fldl2e)
-        LIFT_OP_CASE(Fldlg2) LIFT_OP_CASE(Fldl2t) LIFT_OP_CASE(Fldpi) LIFT_OP_CASE(F2xm1)
+        LIFT_OP_CASE(Fucompp) LIFT_OP_CASE(Fcomi) LIFT_OP_CASE(Fcomip) LIFT_OP_CASE(Fucomi) LIFT_OP_CASE(Fucomip)
+        LIFT_OP_CASE(Fcmovb) LIFT_OP_CASE(Fcmove) LIFT_OP_CASE(Fcmovbe) LIFT_OP_CASE(Fcmovu)
+        LIFT_OP_CASE(Fcmovnb) LIFT_OP_CASE(Fcmovne) LIFT_OP_CASE(Fcmovnbe) LIFT_OP_CASE(Fcmovnu)
+        LIFT_OP_CASE(Fnstsw) LIFT_OP_CASE(Fldcw) LIFT_OP_CASE(Fnstcw) LIFT_OP_CASE(Fldenv)
+        LIFT_OP_CASE(Fnstenv) LIFT_OP_CASE(Fsave) LIFT_OP_CASE(Fnsave) LIFT_OP_CASE(Frstor)
+        LIFT_OP_CASE(Fxch) LIFT_OP_CASE(Ffree) LIFT_OP_CASE(Fdecstp) LIFT_OP_CASE(Fincstp) LIFT_OP_CASE(Fnop)
+        LIFT_OP_CASE(Fld1) LIFT_OP_CASE(Fldz) LIFT_OP_CASE(Fldpi) LIFT_OP_CASE(Fldl2e) LIFT_OP_CASE(Fldl2t)
+        LIFT_OP_CASE(Fldlg2) LIFT_OP_CASE(Fldln2) LIFT_OP_CASE(Fchs) LIFT_OP_CASE(Fabs) LIFT_OP_CASE(Fninit)
+        LIFT_OP_CASE(Fclex) LIFT_OP_CASE(Fwait) LIFT_OP_CASE(Ftst) LIFT_OP_CASE(Fsqrt) LIFT_OP_CASE(Frndint)
+        LIFT_OP_CASE(Fprem) LIFT_OP_CASE(Fprem1) LIFT_OP_CASE(Fscale) LIFT_OP_CASE(Fxam) LIFT_OP_CASE(Fxtract)
+        LIFT_OP_CASE(Fsin) LIFT_OP_CASE(Fcos) LIFT_OP_CASE(Fsincos) LIFT_OP_CASE(Fptan) LIFT_OP_CASE(Fpatan)
+        LIFT_OP_CASE(Fyl2x) LIFT_OP_CASE(Fyl2xp1) LIFT_OP_CASE(F2xm1)
+        LIFT_OP_CASE(Packed)
         LIFT_OP_CASE(Other)
 #undef LIFT_OP_CASE
         default: return "?";
@@ -205,7 +214,8 @@ bool execInsn(X86& cpu, const Insn& in) {
         default:
             break;
     }
-    if (in.op >= Op::Fld && in.op <= Op::F2xm1) return execFpu(cpu, in);
+    if (opIsX87(in.op)) return execFpu(cpu, in);
+    if (in.op == Op::Packed) return execPacked(cpu, in);
     return execInteger(cpu, in);
 }
 
