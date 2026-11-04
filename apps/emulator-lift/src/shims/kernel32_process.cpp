@@ -169,7 +169,7 @@ std::uint32_t writeWide(X86& cpu, std::uint32_t ea, std::uint32_t cap_chars, con
 //     （串在 .data:005303B0），拿 0 ⇒ 返回 false ⇒ `_fast_error_exit(0x10)` ⇒ `_exit(255)`
 //     ⇒ 永远跑不到 `_WinMain@16`。返回非 0 是**真机事实**，不是为了让谁过去。
 // ⛔ 导出仍然**一律不存在**：GetProcAddress 恒 127（本模拟器不导出任何函数）——
-//    "模块存在、函数不存在"是 M1a 的真实边界（plan §6 S6 后四族）。
+//    "模块存在、函数不存在"是 M1 的真实边界（导出转发不在本线；归属待裁决）。
 constexpr std::uint32_t kFakeModuleBase = 0x7F000000u;
 constexpr std::uint32_t kFakeModuleStride = 0x10000u;
 
@@ -719,7 +719,7 @@ void shimGetProcAddress(X86& cpu, ShimCall& call) {
 // `LoadLibraryA/W`：问的是"**系统里有这个 DLL 吗**"（有就装得上），与 `GetModuleHandle` 的
 // "此刻在进程里吗"不是同一个问题（两张表见文件上方）。返回**确定性假句柄**。
 // ⛔ 装载成功仍然**不带来任何导出**：`GetProcAddress` 对它一律 127 —— "模块存在、函数不存在"
-//    是 M1a 的真实边界（plan §6 S6 后四族）。⚠ 偏差按 SCOPE §3 的形态登记：合理值 + 打日志。
+//    是 M1 的真实边界（导出转发不在本线；归属待裁决）。⚠ 偏差按 SCOPE §3 的形态登记：合理值 + 打日志。
 void loadLibrary(X86& cpu, ShimCall& call, bool wide) {
     const char* api = wide ? "LoadLibraryW" : "LoadLibraryA";
     const std::string name = wide ? narrowAscii(call.wstr(0)) : call.str(0);
@@ -810,7 +810,7 @@ void registerProcessShims(ShimRegistry& shims) {
 
     // ---- 进程创建：guest 单线程 / 单进程（README §2.5）⇒ 显式缺口 ----
     shims.addUnimplemented("kernel32", "CreateProcessA",
-                           "guest 单线程 / 单进程（README §2.5）；M1a 不做进程创建");
+                           "不属 M1（自替换 / 重启路径；3 处调用，执行源已是拆壳后 exe）⇒ 本线不实现，命中即 trap");
 }
 
 }  // namespace lift

@@ -65,27 +65,27 @@ export const DOC_POINTER =
 
 /** 逐模块的缺口理由（生成 `register_import_gaps.cpp` 用；改这里 ⇒ `sync --write` 后重生成） */
 export const MODULE_REASONS = {
-  kernel32: 'M1b 尚未覆盖的 kernel32 导入（S0 显式登记：导入表里有、但既没实现也没登记）',
-  user32: 'S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）',
-  gdi32: 'M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）',
-  advapi32: '注册表族：M1b 之后（配置读写走 S6 之后的批次）',
-  winmm: 'winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）',
-  version: '版本信息族：M1 未实现（启动路径不需要）',
-  shell32: 'shell32：M1 未实现（CRT / 启动路径不需要）',
-  shlwapi: 'shlwapi：M1 未实现（CRT / 启动路径不需要）',
-  imagehlp: 'imagehlp：M1 未实现（崩溃转储不在本线）',
-  imm32: '输入法族：M2（窗口 / 输入）',
-  ole32: 'COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3',
-  oleaut32: 'oleaut32：M2/M3（VARIANT / 自动化）',
-  ddraw: 'M2 DirectDraw 簇',
-  d3d9: 'M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub）',
-  d3dx9_43: 'M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）',
-  mf: 'M3 视频簇（SCOPE §1：skip，只保留影片 opcode 推进）',
-  mfplat: 'M3 视频簇（SCOPE §1：skip）',
-  evr: 'M3 视频簇（SCOPE §1：skip）',
-  dxva2: 'M3 视频簇（SCOPE §1：skip）',
+  kernel32: '未实现（S0 显式登记：导入表里有、但既没实现也没登记）',
+  user32: 'M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）',
+  gdi32: 'M2 GDI 字体 / 2D 图形簇（不属 M1）',
+  advapi32: '注册表族：不属 M1（L3 = M2 起点；归属待裁决）',
+  winmm: 'winmm 其余导入：摇杆永久 no-op、音频延后（SCOPE §1）；计时族已实现',
+  version: '版本信息族：不属 M1（启动路径不需要；归属待裁决）',
+  shell32: 'shell32：不属 M1（启动路径不需要；归属待裁决）',
+  shlwapi: 'shlwapi：不属 M1（启动路径不需要；归属待裁决）',
+  imagehlp: 'imagehlp：不属 M1（崩溃转储不在本线；归属待裁决）',
+  imm32: '输入法族：M2（窗口 / 输入），不属 M1',
+  ole32: 'COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1',
+  oleaut32: 'oleaut32：M2/M3（VARIANT / 自动化），不属 M1',
+  ddraw: 'M2 DirectDraw 簇（不属 M1）',
+  d3d9: 'M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）',
+  d3dx9_43: 'M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）',
+  mf: 'M3 视频簇（SCOPE §1：skip；不属 M1；归属待裁决）',
+  mfplat: 'M3 视频簇（SCOPE §1：skip；不属 M1；归属待裁决）',
+  evr: 'M3 视频簇（SCOPE §1：skip；不属 M1；归属待裁决）',
+  dxva2: 'M3 视频簇（SCOPE §1：skip；不属 M1；归属待裁决）',
 };
-export const DEFAULT_GAP_REASON = 'M1 未实现（S0 显式登记：导入表里有、但既没实现也没登记）';
+export const DEFAULT_GAP_REASON = '未实现（S0 显式登记：导入表里有、但既没实现也没登记）';
 
 // ---------------------------------------------------------------------------------------
 // D6 七族（A5 的判据数据）

@@ -119,7 +119,7 @@ std::string wideToCp932(std::u16string_view text, std::size_t* bad) {
 // UTF-8 ↔ UTF-16（实现与 kernel32_file.cpp 原先的局部版本逐行相同；搬到这里是为了让
 // W 版 API 的 shim 不必各写一份）
 // ---------------------------------------------------------------------------------------
-std::u16string utf8ToUtf16(std::string_view s, std::size_t* bad) {
+std::u16string utf8ToUtf16(std::string_view s, std::size_t* bad, char16_t replacement) {
     std::u16string out;
     out.reserve(s.size());
     std::size_t bad_count = 0;
@@ -142,13 +142,13 @@ std::u16string utf8ToUtf16(std::string_view s, std::size_t* bad) {
             len = 4;
         } else {
             ++bad_count;
-            out.push_back(u'?');
+            out.push_back(replacement);
             ++i;
             continue;
         }
         if (i + len > s.size()) {
             ++bad_count;
-            out.push_back(u'?');
+            out.push_back(replacement);
             ++i;
             continue;
         }
@@ -164,7 +164,7 @@ std::u16string utf8ToUtf16(std::string_view s, std::size_t* bad) {
         const std::uint32_t min_cp = (len == 1) ? 0u : (len == 2) ? 0x80u : (len == 3) ? 0x800u : 0x10000u;
         if (!ok || cp < min_cp || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) {
             ++bad_count;
-            out.push_back(u'?');
+            out.push_back(replacement);
             ++i;
             continue;
         }
@@ -181,7 +181,7 @@ std::u16string utf8ToUtf16(std::string_view s, std::size_t* bad) {
     return out;
 }
 
-std::string utf16ToUtf8(std::u16string_view w, std::size_t* bad) {
+std::string utf16ToUtf8(std::u16string_view w, std::size_t* bad, char32_t replacement) {
     std::string out;
     out.reserve(w.size());
     std::size_t bad_count = 0;
@@ -193,7 +193,7 @@ std::string utf16ToUtf8(std::u16string_view w, std::size_t* bad) {
             ++i;
         } else if (cp >= 0xD800u && cp <= 0xDFFFu) {
             ++bad_count;
-            cp = '?';
+            cp = replacement;
         }
         if (cp < 0x80u) {
             out.push_back(static_cast<char>(cp));

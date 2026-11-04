@@ -28,8 +28,9 @@ std::u16string cp932ToWide(std::string_view bytes, std::size_t* bad = nullptr);
 std::string wideToCp932(std::u16string_view text, std::size_t* bad = nullptr);
 
 // UTF-8 ↔ UTF-16（不是 CP932 的一部分，但同属"码页与字符串"的叶子设施；
-// 路径 / W 版 API 的入参都要经过它）。非法字节 / 未配对代理 ⇒ '?' 并计 bad。
-std::u16string utf8ToUtf16(std::string_view s, std::size_t* bad = nullptr);
-std::string utf16ToUtf8(std::u16string_view w, std::size_t* bad = nullptr);
+// 路径 / W 版 API 的入参都要经过它）。非法字节 / 未配对代理 ⇒ 替换字符并计 bad。
+// ★ 替换字符可换：路径 API 用 '?'，`MultiByteToWideChar(CP_UTF8)` 用 U+FFFD（与 Windows 一致）。
+std::u16string utf8ToUtf16(std::string_view s, std::size_t* bad = nullptr, char16_t replacement = u'?');
+std::string utf16ToUtf8(std::u16string_view w, std::size_t* bad = nullptr, char32_t replacement = U'?');
 
 }  // namespace lift

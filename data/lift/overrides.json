@@ -5,44 +5,44 @@
     {
       "target": "advapi32!RegCloseKey",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
-      "reason": "注册表族不在 M1a 这一批（配置读写属 S6 之后）"
+      "reason": "SCOPE §1 注册表整体 no-op：RegCloseKey 返回成功"
     },
     {
       "target": "advapi32!RegCreateKeyExA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
-      "reason": "注册表族不在 M1a 这一批（配置读写属 S6 之后）"
+      "reason": "SCOPE §1 注册表整体 no-op：RegCreateKeyExA 返回成功 + 假句柄（不写真实注册表）"
     },
     {
       "target": "advapi32!RegEnumValueA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
-      "reason": "注册表族：M1b 之后（配置读写走 S6 之后的批次）"
+      "reason": "SCOPE §1 注册表整体 no-op：RegEnumValueA 恒返回 ERROR_NO_MORE_ITEMS(259)（空枚举）"
     },
     {
       "target": "advapi32!RegOpenKeyExA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
-      "reason": "注册表族不在 M1a 这一批（配置读写属 S6 之后）"
+      "reason": "SCOPE §1 注册表整体 no-op：RegOpenKeyExA 返回 ERROR_SUCCESS + 非空假句柄（不读真实注册表）"
     },
     {
       "target": "advapi32!RegQueryValueExA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
-      "reason": "注册表族不在 M1a 这一批（配置读写属 S6 之后）"
+      "reason": "SCOPE §1 注册表整体 no-op：RegQueryValueExA 恒返回 ERROR_FILE_NOT_FOUND(2)，调用方回落默认值"
     },
     {
       "target": "advapi32!RegSetValueExA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
-      "reason": "注册表族不在 M1a 这一批（配置读写属 S6 之后）"
+      "reason": "SCOPE §1 注册表整体 no-op：RegSetValueExA 返回成功但不落盘"
     },
     {
       "target": "agerc!_GetInstance@0",
@@ -70,364 +70,364 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "3D 不在本项目范围（SCOPE §1：D3D9 走 stub / 外包或停手）"
+      "reason": "M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3d9!Direct3DCreate9Ex",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXComputeNormals",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXCreateEffectFromResourceA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXCreateSprite",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXCreateTexture",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXCreateTextureFromFileInMemory",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXFrameFind",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXLoadMeshHierarchyFromXInMemory",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXLoadSurfaceFromSurface",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixDecompose",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixLookAtLH",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixMultiply",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixOrthoLH",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixPerspectiveFovLH",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixRotationAxis",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixRotationYawPitchRoll",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixScaling",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixTranslation",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXVec3Normalize",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXVec4Transform",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub）"
+      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "dxva2!DXVA2CreateDirect3DDeviceManager9",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip）"
+      "reason": "SCOPE §1 视频延期：DXVA2CreateDirect3DDeviceManager9 返回 E_FAIL + 空输出"
     },
     {
       "target": "evr!MFCreateVideoSampleFromSurface",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip）"
+      "reason": "SCOPE §1 视频延期：MFCreateVideoSampleFromSurface 返回 E_FAIL + 空输出"
     },
     {
       "target": "gdi32!AddFontMemResourceEx",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!BitBlt",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!CombineRgn",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!CreateCompatibleDC",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!CreateDIBSection",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!CreateEllipticRgnIndirect",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!CreateFontIndirectA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!CreateICA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!CreatePolygonRgn",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!CreateRectRgn",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!DeleteDC",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!DeleteObject",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!EnumFontFamiliesExA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!GetCurrentObject",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!GetDeviceCaps",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!GetGlyphOutlineA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!GetRegionData",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!GetRgnBox",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!GetStockObject",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!GetTextExtentPoint32A",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!GetTextMetricsA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!PtInRegion",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!RemoveFontMemResourceEx",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "gdi32!SelectObject",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!SetBkMode",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!SetTextColor",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "gdi32 图形族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 GDI / 2D 图形族（不属 M1）"
     },
     {
       "target": "gdi32!TextOutA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "M2 字体 / 2D 图形簇（plan §4 D6：GDI32 的 7 条不在 T0 七族）"
+      "reason": "M2 GDI 字体 / 2D 图形簇（不属 M1）"
     },
     {
       "target": "imagehlp!MakeSureDirectoryPathExists",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "imagehlp：M1 未实现（崩溃转储不在本线）"
+      "reason": "imagehlp：不属 M1（崩溃转储不在本线；归属待裁决）"
     },
     {
       "target": "imm32!ImmAssociateContext",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "输入法族：M2（窗口 / 输入）"
+      "reason": "输入法族：M2（窗口 / 输入），不属 M1"
     },
     {
       "target": "kernel32!_beginthreadex",
@@ -441,7 +441,7 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "guest 单线程 / 单进程（README §2.5）；M1a 不做进程创建"
+      "reason": "不属 M1（自替换 / 重启路径；3 处调用，执行源已是拆壳后 exe）⇒ 本线不实现，命中即 trap"
     },
     {
       "target": "kernel32!CreateRemoteThread",
@@ -490,7 +490,7 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "资源族属 S6 后续（M1a 不做）"
+      "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
     },
     {
       "target": "kernel32!FreeLibraryAndExitThread",
@@ -511,14 +511,14 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "资源族属 S6 后续（M1a 不做）"
+      "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
     },
     {
       "target": "kernel32!LockResource",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "资源族属 S6 后续（M1a 不做）"
+      "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
     },
     {
       "target": "kernel32!RaiseException",
@@ -560,364 +560,364 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "资源族属 S6 后续（M1a 不做）"
+      "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
     },
     {
       "target": "mf!MFCreateAudioRendererActivate",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip，只保留影片 opcode 推进）"
+      "reason": "SCOPE §1 音频 / 视频延期：MFCreateAudioRendererActivate 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateMediaSession",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip，只保留影片 opcode 推进）"
+      "reason": "SCOPE §1 视频延期：MFCreateMediaSession 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateSourceResolver",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip，只保留影片 opcode 推进）"
+      "reason": "SCOPE §1 视频延期：MFCreateSourceResolver 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateTopology",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip，只保留影片 opcode 推进）"
+      "reason": "SCOPE §1 视频延期：MFCreateTopology 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateTopologyNode",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip，只保留影片 opcode 推进）"
+      "reason": "SCOPE §1 视频延期：MFCreateTopologyNode 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateVideoRendererActivate",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip，只保留影片 opcode 推进）"
+      "reason": "SCOPE §1 视频延期：MFCreateVideoRendererActivate 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFGetService",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip，只保留影片 opcode 推进）"
+      "reason": "SCOPE §1 视频延期：MFGetService 返回 E_FAIL + 空输出"
     },
     {
       "target": "mfplat!MFCreateAsyncResult",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip）"
+      "reason": "SCOPE §1 视频 / 媒体延期：MFCreateAsyncResult 返回 E_FAIL + 空输出"
     },
     {
       "target": "mfplat!MFCreateAttributes",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip）"
+      "reason": "SCOPE §1 视频 / 媒体延期：MFCreateAttributes 返回 E_FAIL + 空输出（⛔ 不返回假 COM 对象）"
     },
     {
       "target": "mfplat!MFCreateMediaType",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip）"
+      "reason": "SCOPE §1 视频 / 媒体延期：MFCreateMediaType 返回 E_FAIL + 空输出"
     },
     {
       "target": "mfplat!MFInvokeCallback",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip）"
+      "reason": "SCOPE §1 视频 / 媒体延期：MFInvokeCallback 返回 S_OK（没有异步结果）"
     },
     {
       "target": "mfplat!MFShutdown",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip）"
+      "reason": "SCOPE §1 视频 / 媒体延期：MFShutdown 返回 S_OK"
     },
     {
       "target": "mfplat!MFStartup",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
-      "reason": "M3 视频簇（SCOPE §1：skip）"
+      "reason": "SCOPE §1 视频 / 媒体延期：MFStartup 返回 S_OK（不初始化真实媒体栈）"
     },
     {
       "target": "ole32!CoCreateInstance",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3"
+      "reason": "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1"
     },
     {
       "target": "ole32!PropVariantClear",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3"
+      "reason": "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1"
     },
     {
       "target": "oleaut32!#7",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "oleaut32：M2/M3（VARIANT / 自动化）"
+      "reason": "oleaut32：M2/M3（VARIANT / 自动化），不属 M1"
     },
     {
       "target": "oleaut32!#8",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "oleaut32：M2/M3（VARIANT / 自动化）"
+      "reason": "oleaut32：M2/M3（VARIANT / 自动化），不属 M1"
     },
     {
       "target": "oleaut32!#9",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "oleaut32：M2/M3（VARIANT / 自动化）"
+      "reason": "oleaut32：M2/M3（VARIANT / 自动化），不属 M1"
     },
     {
       "target": "shell32!SHGetSpecialFolderPathA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "shell32：M1 未实现（CRT / 启动路径不需要）"
+      "reason": "shell32：不属 M1（启动路径不需要；归属待裁决）"
     },
     {
       "target": "shlwapi!PathRemoveFileSpecA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "shlwapi：M1 未实现（CRT / 启动路径不需要）"
+      "reason": "shlwapi：不属 M1（启动路径不需要；归属待裁决）"
     },
     {
       "target": "user32!ClientToScreen",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!CreateWindowExA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!DefWindowProcA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!DestroyMenu",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!DestroyWindow",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!DispatchMessageA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!DrawMenuBar",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetAsyncKeyState",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetClientRect",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!GetCursorPos",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetDC",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!GetForegroundWindow",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetMenu",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetMessageA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!GetMonitorInfoA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetParent",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetQueueStatus",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetSubMenu",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetSystemMenu",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetSystemMetrics",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!GetUpdateRgn",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetWindowLongA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetWindowPlacement",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!GetWindowRect",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!InvalidateRect",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!IsDialogMessageA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!IsIconic",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!KillTimer",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!LoadCursorA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!LoadCursorFromFileA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!LoadIconA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!LoadMenuA",
@@ -938,112 +938,112 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!MsgWaitForMultipleObjects",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!PeekMessageA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!PostMessageA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!PostQuitMessage",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!PostThreadMessageA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!RegisterClassA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!RegisterClassExA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!RegisterWindowMessageA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!ReleaseDC",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!RemoveMenu",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!ScreenToClient",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!SendMessageA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!SetCursor",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!SetCursorPos",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!SetFocus",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!SetMenu",
@@ -1057,56 +1057,56 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!SetRectEmpty",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!SetTimer",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!SetWindowLongA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!SetWindowPos",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!ShowCursor",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!ShowWindow",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!SystemParametersInfoA",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!TrackPopupMenu",
@@ -1120,42 +1120,42 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!UnhookWindowsHookEx",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!UpdateWindow",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）"
+      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
     },
     {
       "target": "user32!ValidateRect",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!ValidateRgn",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "user32!WaitMessage",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "S6 窗口 / 消息族（M1b 后续；菜单 / 模态按 SCOPE §1 另记 stub）"
+      "reason": "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）"
     },
     {
       "target": "version!GetFileVersionInfoA",
@@ -1181,100 +1181,100 @@
     {
       "target": "winmm!joyGetDevCapsA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_joystick.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 摇杆永久不做：joyGetDevCapsA 返回 MMSYSERR_NODRIVER(6)"
     },
     {
       "target": "winmm!joyGetNumDevs",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_joystick.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 摇杆永久不做：joyGetNumDevs 返回 0（系统里没有摇杆）"
     },
     {
       "target": "winmm!joyGetPosEx",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_joystick.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 摇杆永久不做：joyGetPosEx 返回 JOYERR_UNPLUGGED(167)"
     },
     {
       "target": "winmm!mciGetErrorStringA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mciGetErrorStringA 返回 FALSE（没有错误串）"
     },
     {
       "target": "winmm!mciSendCommandA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mciSendCommandA 接受命令并返回成功（不打开设备、不播放）"
     },
     {
       "target": "winmm!mciSendStringA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mciSendStringA 接受命令并返回成功、返回串为空"
     },
     {
       "target": "winmm!mixerClose",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mixerClose 返回成功"
     },
     {
       "target": "winmm!mixerOpen",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mixerOpen 返回成功 + 非空假句柄"
     },
     {
       "target": "winmm!mixerSetControlDetails",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mixerSetControlDetails 接受音量 / 控制设置但不作用于宿主"
     },
     {
       "target": "winmm!mmioAscend",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mmioAscend 返回成功"
     },
     {
       "target": "winmm!mmioClose",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mmioClose 返回成功"
     },
     {
       "target": "winmm!mmioDescend",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mmioDescend 返回成功（空流没有 chunk）"
     },
     {
       "target": "winmm!mmioOpenA",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mmioOpenA 返回非空假 HMMIO（空流）"
     },
     {
       "target": "winmm!mmioRead",
       "kind": "stub",
-      "impl": "stub_trap",
+      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
-      "reason": "winmm 的非计时导入（摇杆 / MCI / mixer / mmio）：M2/M3 的输入·音频·多媒体文件 IO，M1 不做（计时族的 timeGetTime / timeSetEvent / timeKillEvent / timeGetDevCaps 已实现）"
+      "reason": "SCOPE §1 音频 no-op：mmioRead 返回 0 字节（空流）"
     }
   ]
 }

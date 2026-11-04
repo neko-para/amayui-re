@@ -57,6 +57,10 @@ add_library(emulator-lift-runtime STATIC
     src/shims/kernel32_agerc.cpp
     src/shims/kernel32_version.cpp
     src/shims/user32_menu.cpp
+    src/shims/advapi32_registry.cpp
+    src/shims/winmm_audio.cpp
+    src/shims/winmm_joystick.cpp
+    src/shims/mf_video.cpp
     src/shims/kernel32_bootstrap.cpp)
 target_include_directories(emulator-lift-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(emulator-lift-runtime
@@ -123,6 +127,16 @@ add_test(NAME mnemonics COMMAND lift-mnemonics)
 add_executable(lift-strfmt tests/strfmt.cpp)
 target_link_libraries(lift-strfmt PRIVATE emulator-lift-runtime)
 add_test(NAME strfmt COMMAND lift-strfmt)
+
+# ---- pure：码页族（MultiByteToWideChar / WideCharToMultiByte 走真 CP932 表）----
+add_executable(lift-codepage tests/codepage.cpp)
+target_link_libraries(lift-codepage PRIVATE emulator-lift-runtime)
+add_test(NAME codepage COMMAND lift-codepage)
+
+# ---- pure：明确 no-op 的三族（注册表 / 音频 / 视频；SCOPE §1）----
+add_executable(lift-noop tests/noop_shims.cpp)
+target_link_libraries(lift-noop PRIVATE emulator-lift-runtime)
+add_test(NAME noop COMMAND lift-noop)
 
 # ---- pure：文件与路径族（S6；临时目录，不碰游戏）----
 add_executable(lift-file-io tests/file_io.cpp)

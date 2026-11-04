@@ -10,23 +10,28 @@
 **本节 > 本文件其余各节 > `data/spec/`**。与 spec 冲突时按本节取舍；
 被跳过的 spec 条款在 §2 点名，⛔ 不写进 spec 正文冒充引擎语义。
 
-## 1. 可接受偏差（用户 2026-11-03；临时文件名序号 / 执行源 exe / 平台偏差 2026-11-04）
+## 1. 可接受偏差（用户 2026-11-03；临时文件名序号 / 执行源 exe / 平台偏差 / 注册表 / 音频·视频 no-op 2026-11-04）
 
-| 偏差 | 做法 | 用户可见代价 | 仍必须保留 |
-|---|---|---|---|
-| **菜单** | 整体 no-op：`LoadMenuA` 返回非空假句柄、`SetMenu` 返回 TRUE、`TrackPopupMenu` 立即返回 0 | 无 Win32 菜单栏（游戏标题菜单不是它） | 窗口创建 / 消息泵 / 输入 / region / 计时器 |
-| **模态** | no-op：`MessageBoxA` 返回 `IDOK`；AGERC 设置对话框整块不做 | 无"设置"对话框；关闭确认 / 存档命名直接继续 | 配置读写（INI/注册表）、存档本身 |
-| **音频** | silent：播放 / 停止 / 音量接受调用并返回成功 | 无 BGM / 语音 / SE | `timeGetTime` / `timeSetEvent`、音频状态机的返回码 |
-| **视频** | skip：影片 opcode 必须**推进**，不许挂起 | 无影片（LOGO/OP/剧情影片） | 影片 opcode 的状态推进与结束通知 |
-| **线程 / 定时器队列** | **guest 单线程**：`CreateThread` / `ExitThread` / `ResumeThread` / `SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask` / `FreeLibraryAndExitThread` / `CreateTimerQueue` / `CreateTimerQueueTimer` / `DeleteTimerQueueTimer` 一律**响亮失败**（`addUnimplemented`，执行到就 trap） | 无（业务线程不存在；服务线程被音频 silent / 视频 skip 消化） | 主线程的同步原语 / 等待 / 临界区、单实例信号量、`timeSetEvent` 的计时语义 |
-| **SEH / C++ 异常** | **不展开**：`RaiseException` / `RtlUnwind` 一律**响亮失败**（`addUnimplemented`，执行到就 trap）；`_CxxThrowException` 走同一条"未处理异常"路 | 异常路径**不恢复**（进程终止并留下诊断） | 失败诊断（EA / 访问类型 / 区域）——异常发生在成功路径上会**当场暴露**，不静默 |
-| **Live2D** | 关闭（游戏内开关）作为第一可交付状态 | 模型不显示（固定立绘） | 如果开关只是脚本级跳过，SDK 仍链接但不被调用 |
-| **3D** | 不做（若主线允许）：D3D9/D3DX 走 stub | 无 3D 战斗/场景 | 2D/ADV 主路径（DDraw + GDI） |
-| **临时文件名序号** | `GetTempFileNameA(uUnique=0)` 从 **0** 起递增找空号（真机从系统时间起）；`uUnique!=0` 按文档用调用方的值、**不创建**文件 | 具体序号与真机不同（可复现优先于逐值一致） | 名字形态 `<pre><uuuu>.TMP`（前缀只取 3 字符）、`uUnique!=0` 返回原值且不创建 |
-| **文件时间（POSIX）** | creation 用 **birthtime**（macOS `stat` 的 `st_birthtimespec`）；文件系统不提供 birthtime 时**回退 ctime**；`SetFileTime` 的 creation 在能写的平台写（Windows `::SetFileTime`、macOS `setattrlist(ATTR_CMN_CRTIME)`），写不了就跳过并留日志 | 非 Apple POSIX 上 creation 可能是 ctime / 改不了；不影响 access / write | access / write 始终真写；`GetFileTime` / `WIN32_FIND_DATAA` 三个时间各写各的 |
-| **超越函数** | `fsin` / `fcos` / `fsincos` / `fptan` / `fpatan` / `fyl2x` / `fyl2xp1` / `f2xm1` / `fscale` 走宿主 `libm`，允许 **1 ulp** 偏差 | 极端值可能与真机差 1 ulp（跨平台也可能不同） | 其余 x87 走 Berkeley SoftFloat（逐位一致） |
-| **宿主页保护粒度** | 16 KiB 宿主页上，提交 / 退提交按**宿主页对齐**；非 safe 模式下同宿主页的邻页也可读写 | 越界访问可能不触发 fault（业务不应依赖越界 fault） | `LIFT_SAFE_MEMORY=1` 仍按 4 KiB guest 页逐页检查；guest 自己的越界由诊断路径暴露 |
-| **等待（未 signaled）** | `WaitForSingleObject(Ex)` / `WaitForMultipleObjects(Ex)` / `SignalObjectAndWait` 命中"需要等待"（对象未 signaled 且 `dwMilliseconds != 0`，含 `INFINITE`）⇒ **硬错误**：`shimAbort` 打印 API / handle / timeout 后终止，⛔ 不返回 `WAIT_TIMEOUT` | 游戏若真依赖等待会在这里停下；需要人工检查该调用场景并设计等待方案 | `dwMilliseconds == 0` 的轮询仍返回 `WAIT_TIMEOUT`；signaled 路径不变；`bWaitAll=TRUE` 且全部 signaled ⇒ `WAIT_OBJECT_0` |
+| 类别 | 偏差 | 做法 | 用户可见代价 | 仍必须保留 |
+|---|---|---|---|---|
+| **永久 no-op**（大概率一直不做） | **菜单** | 整体 no-op：`LoadMenuA` 返回非空假句柄、`SetMenu` 返回 TRUE、`TrackPopupMenu` 立即返回 0 | 无 Win32 菜单栏（游戏标题菜单不是它） | 窗口创建 / 消息泵 / 输入 / region / 计时器 |
+| 延后实现 | **模态**（有限） | 延后实现：只做**关闭窗口的二次确认**（`MessageBoxA` 的 OK / Cancel 语义）；⛔ 不做 AGERC 提供的复杂设置对话框（AGERC 整体仍按 stub） | 当前仍是 `IDOK` no-op；关闭确认直接继续 | 配置读写的**文件**路径（INI / SYS4REG.INI）、存档本身 |
+| 永久 no-op | **注册表** | 整体 no-op：`RegOpenKeyExA` / `RegCreateKeyExA` 成功 + 非空假句柄；`RegQueryValueExA` 恒 `ERROR_FILE_NOT_FOUND(2)`（调用方回落默认值）；`RegSetValueExA` 成功但不落盘；`RegEnumValueA` 恒 `ERROR_NO_MORE_ITEMS(259)`；`RegCloseKey` 成功 | 注册表里的设置**不持久**；每次按默认值启动 | 句柄形态与错误码（成功 / 2 / 259）；配置读写的**文件**路径（INI / SYS4REG.INI）仍真写 |
+| 永久 no-op | **摇杆** | 无设备：`joyGetNumDevs` 返回 0、`joyGetPosEx` 返回 `JOYERR_UNPLUGGED(167)`、`joyGetDevCapsA` 返回 `MMSYSERR_NODRIVER(6)` | 游戏若必须用摇杆则不可用（键盘 / 鼠标不受影响） | 键盘 / 鼠标输入（M2）；摇杆枚举的返回码 |
+| **延后实现**（最终要做） | **音频** | silent（延后实现）：MCI（`mciSendCommandA` / `mciSendStringA` / `mciGetErrorStringA`）接受命令并返回成功、返回串为空；mixer 成功 + 假句柄；mmio 返回假句柄 + 空流（0 字节） | 无 BGM / 语音 / SE；音频文件读出来是空流 | `timeGetTime` / `timeSetEvent` / `timeKillEvent` / `timeGetDevCaps`、音频状态机的返回码 |
+| 延后实现（**M4**） | **视频** | skip（延后实现）：影片 opcode 必须**推进**，不许挂起；媒体 API（`MFStartup` / `MFShutdown` 成功；`MFCreate*` / `MFGetService` / DXVA2 返回 `E_FAIL` + 空输出，⛔ 不返回假 COM 对象） | 无影片（LOGO/OP/剧情影片）；媒体初始化失败后走"没有视频"的降级路径 | 影片 opcode 的状态推进与结束通知 |
+| 延后实现 | **Live2D** | 关闭（游戏内开关）作为第一可交付状态 | 模型不显示（固定立绘） | 如果开关只是脚本级跳过，SDK 仍链接但不被调用 |
+| 延后实现 | **3D** | 不做（若主线允许）：D3D9/D3DX 走 stub | 无 3D 战斗/场景 | 2D/ADV 主路径（DDraw + GDI） |
+| **硬错误**（不静默） | **线程 / 定时器队列** | **guest 单线程**：`CreateThread` / `ExitThread` / `ResumeThread` / `SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask` / `FreeLibraryAndExitThread` / `CreateTimerQueue` / `CreateTimerQueueTimer` / `DeleteTimerQueueTimer` 一律**响亮失败**（`addUnimplemented`，执行到就 trap） | 无（业务线程不存在；服务线程被音频 silent / 视频 skip 消化） | 主线程的同步原语 / 等待 / 临界区、单实例信号量、`timeSetEvent` 的计时语义 |
+| 硬错误 | **SEH / C++ 异常** | **不展开**：`RaiseException` / `RtlUnwind` 一律**响亮失败**（`addUnimplemented`，执行到就 trap）；`_CxxThrowException` 走同一条"未处理异常"路 | 异常路径**不恢复**（进程终止并留下诊断） | 失败诊断（EA / 访问类型 / 区域）——异常发生在成功路径上会**当场暴露**，不静默 |
+| 硬错误 | **等待（未 signaled）** | `WaitForSingleObject(Ex)` / `WaitForMultipleObjects(Ex)` / `SignalObjectAndWait` 命中"需要等待"（对象未 signaled 且 `dwMilliseconds != 0`，含 `INFINITE`）⇒ **硬错误**：`shimAbort` 打印 API / handle / timeout 后终止，⛔ 不返回 `WAIT_TIMEOUT` | 游戏若真依赖等待会在这里停下；需要人工检查该调用场景并设计等待方案 | `dwMilliseconds == 0` 的轮询仍返回 `WAIT_TIMEOUT`；signaled 路径不变；`bWaitAll=TRUE` 且全部 signaled ⇒ `WAIT_OBJECT_0` |
+| **平台偏差** | **临时文件名序号** | `GetTempFileNameA(uUnique=0)` 从 **0** 起递增找空号（真机从系统时间起）；`uUnique!=0` 按文档用调用方的值、**不创建**文件 | 具体序号与真机不同（可复现优先于逐值一致） | 名字形态 `<pre><uuuu>.TMP`（前缀只取 3 字符）、`uUnique!=0` 返回原值且不创建 |
+| 平台偏差 | **文件时间（POSIX）** | creation 用 **birthtime**（macOS `stat` 的 `st_birthtimespec`）；文件系统不提供 birthtime 时**回退 ctime**；`SetFileTime` 的 creation 在能写的平台写（Windows `::SetFileTime`、macOS `setattrlist(ATTR_CMN_CRTIME)`），写不了就跳过并留日志 | 非 Apple POSIX 上 creation 可能是 ctime / 改不了；不影响 access / write | access / write 始终真写；`GetFileTime` / `WIN32_FIND_DATAA` 三个时间各写各的 |
+| 平台偏差 | **超越函数** | `fsin` / `fcos` / `fsincos` / `fptan` / `fpatan` / `fyl2x` / `fyl2xp1` / `f2xm1` / `fscale` 走宿主 `libm`，允许 **1 ulp** 偏差 | 极端值可能与真机差 1 ulp（跨平台也可能不同） | 其余 x87 走 Berkeley SoftFloat（逐位一致） |
+| 平台偏差 | **宿主页保护粒度** | 16 KiB 宿主页上，提交 / 退提交按**宿主页对齐**；非 safe 模式下同宿主页的邻页也可读写 | 越界访问可能不触发 fault（业务不应依赖越界 fault） | `LIFT_SAFE_MEMORY=1` 仍按 4 KiB guest 页逐页检查；guest 自己的越界由诊断路径暴露 |
+
+★ **四类不要混**：**永久 no-op**（大概率一直不做：菜单 / 注册表 / 摇杆）· **延后实现**（最终要做：模态〔仅关闭窗口二次确认〕/ 音频 / 视频 / Live2D / 3D）· **硬错误**（⛔ 不静默失败：线程 / SEH / 等待）· **平台偏差**（实现细节的显式取舍）。新加偏差时必须先归到其中一类。
+★ **音频 / 视频的里程碑 = M4**（`REQ-01M6K84KHPA1XF3B1HSHXME6W0`）；用户 2026-11-04 口径：音频大概率更靠前，具体顺序在做 M2 时再调。
 
 ★ **3D 的前提**：若 Live2D 走 D3D 后端（`doc §6-2`），D3D9 不能砍；"3D 不做"与"保留 Live2D"互斥。
 

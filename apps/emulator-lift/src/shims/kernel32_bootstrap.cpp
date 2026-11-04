@@ -5,15 +5,15 @@
 //   （`_heap_init` / `_ioinit` / `_setenvp` / `_setlocale` 一路会碰的 API），
 //   以及 S6 后四族里被启动路径**实际用到**的最小一块（进程/模块、计时、码页）。
 //   ⛔ 它们不是 stub：每条都按 Win32 的真实语义实现（做不到的点在注释与本文件末尾点名）。
-// ★ 码页：本作是 CP932，但**真正的 CP932 表**属 S6 码页族（M1b，要引 libiconv 或自带表）。
-//   M1a 只保证 ASCII（0x00–0x7F）逐字节正确，非 ASCII 记一次日志 —— 这是显式缺口，
-//   ⛔ 不是"看起来能跑"。
+// ★ 码页：本作是 CP932；真表在 `runtime/cp932`（S6 码页族，自带表、三平台同一份）。
+//   932 / 65001 走真表；其余码页退回"ASCII 正确 + 非 ASCII 字节直通"并记一次日志（显式缺口）。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "runtime/cp932.h"
 #include "runtime/machine.h"
 #include "runtime/sha256.h"
 #include "runtime/x86.h"
@@ -83,9 +83,11 @@ void shimSetHandleCount(X86&, ShimCall& call) { call.result = call.u32(0); }
 
 // ---------------------------------------------------------------------------------------
 // 码页 / locale（`_setlocale` / `_setenvp` 会碰）
-//    ⚠ M1a 的边界：只保证 ASCII；CP932 的真表在 M1b（S6 码页族）。
+//    932 / 65001 走 `runtime/cp932` 的真表；其余码页只保证 ASCII（见下面的 shim）。
 // ---------------------------------------------------------------------------------------
 constexpr std::uint32_t kAcp = 932;  // 日语 Shift-JIS（README §2.6 的 GetACP(=932)）
+// CP_ACP(0) / CP_OEMCP(1) / CP_THREAD_ACP(3) 都落到本机的 ACP（本作是 932）
+bool isCp932Family(std::uint32_t cp) { return cp == 0 || cp == 1 || cp == 3 || cp == kAcp; }
 
 void shimGetACP(X86&, ShimCall& call) { call.result = kAcp; }
 void shimGetOEMCP(X86&, ShimCall& call) { call.result = kAcp; }
@@ -103,7 +105,7 @@ void shimGetCPInfo(X86& cpu, ShimCall& call) {
     }
     // CPINFO: MaxCharSize(4) + DefaultChar[2] + LeadByte[12] = 18 字节
     std::uint8_t buf[18] = {};
-    const bool is932 = (cp == 932 || cp == 0 || cp == 1);
+    const bool is932 = isCp932Family(cp);
     buf[0] = is932 ? 2 : 1;  // MaxCharSize
     if (is932) {
         buf[4] = 0x81;  // LeadByte[0] = 0x81
@@ -115,88 +117,205 @@ void shimGetCPInfo(X86& cpu, ShimCall& call) {
     call.result = 1;
 }
 
-// 只做 ASCII：非 ASCII 字节按"字节值 → 同一个 16 位值"映射（不是 CP932 的真映射）
-std::string g_codepage_warned;
+// 码页真表在 `runtime/cp932`（S6 码页族的落点）：932 / 65001 走真表，其余码页第一次用时记一行
+// 日志并退回"字节值直通"（ASCII 正确）。⛔ 不再把 932 的每个字节糊成同一个 16 位值 —— 那会让
+// 非 ASCII 字符串悄悄变成 U+00XX，而 A/W 之间往返恰好还能对齐，缺陷只能等到比较 / 排版时才炸。
+constexpr std::uint32_t kCpUtf8 = 65001;
+constexpr std::uint32_t kErrInvalidParameter = 87;
+constexpr std::uint32_t kErrInsufficientBuffer = 122;
+constexpr std::uint32_t kErrNoUnicodeTranslation = 1113;
+constexpr std::uint32_t kMbErrInvalidChars = 0x00000008;
+constexpr std::uint32_t kWcErrInvalidChars = 0x00000080;
+constexpr char16_t kReplacement = 0xFFFD;  // MultiByteToWideChar 的非法序列替换字符
 
-void warnCodepageOnce(const char* api) {
-    if (g_codepage_warned.find(api) != std::string::npos) return;
-    g_codepage_warned += api;
+void warnCodePageOnce(const char* api, std::uint32_t cp) {
+    static std::string seen;
+    const std::string key = std::string(api) + ":" + std::to_string(cp);
+    if (seen.find(key) != std::string::npos) return;
+    seen += key + ";";
     std::fprintf(stderr,
-                 "[shim] kernel32!%s: CP932 真表属 S6 码页族（M1b）；M1a 只保证 ASCII 逐字节正确，"
-                 "非 ASCII 按字节值直通\n",
-                 api);
+                 "[shim] kernel32!%s: 码页 %u 没有真表（只有 CP932 / 65001）；ASCII 之外按字节值直通\n",
+                 api, cp);
+}
+
+std::string readGuestBytes(GuestMemory& mem, std::uint32_t ea, int len) {
+    std::size_t n = 0;
+    if (len < 0) {
+        while (mem.rd8(ea + static_cast<std::uint32_t>(n)) != 0) ++n;
+        ++n;  // 含结尾 0
+    } else {
+        n = static_cast<std::size_t>(len);
+    }
+    std::string s(n, '\0');
+    for (std::size_t i = 0; i < n; ++i) s[i] = static_cast<char>(mem.rd8(ea + static_cast<std::uint32_t>(i)));
+    return s;
+}
+
+std::u16string readGuestWide(GuestMemory& mem, std::uint32_t ea, int len) {
+    std::u16string s;
+    std::size_t n = 0;
+    if (len < 0) {
+        for (;;) {
+            const char16_t c = static_cast<char16_t>(mem.rd16(ea + static_cast<std::uint32_t>(n) * 2u));
+            s.push_back(c);
+            ++n;
+            if (c == 0) break;
+        }
+    } else {
+        n = static_cast<std::size_t>(len);
+        s.resize(n);
+        for (std::size_t i = 0; i < n; ++i)
+            s[i] = static_cast<char16_t>(mem.rd16(ea + static_cast<std::uint32_t>(i) * 2u));
+    }
+    return s;
 }
 
 void shimMultiByteToWideChar(X86& cpu, ShimCall& call) {
     const std::uint32_t cp = call.u32(0);
+    const std::uint32_t flags = call.u32(1);
     const std::uint32_t src_ea = call.u32(2);
     const int src_len = call.i32(3);
     const std::uint32_t dst_ea = call.u32(4);
     const int dst_len = call.i32(5);
-    (void)cp;
-    warnCodepageOnce("MultiByteToWideChar");
-    std::int64_t count = 0;
-    if (src_len < 0) {
-        // -1 ⇒ 含结尾 0，一直读到 0
-        if (src_ea == 0) {
-            call.result = 0;
-            return;
-        }
-        while (cpu.mem->rd8(src_ea + static_cast<std::uint32_t>(count)) != 0) ++count;
-        ++count;
-    } else {
-        count = src_len;
-    }
-    if (dst_ea == 0 || dst_len == 0) {
-        call.result = static_cast<std::uint32_t>(count);
-        return;
-    }
-    if (dst_len < count) {
-        call.cpu->shim.last_error = 122;  // ERROR_INSUFFICIENT_BUFFER
+    // Win32：cbMultiByte == 0 或源指针为空 ⇒ 失败（不是"转换出 0 个字符"）
+    if (src_len == 0 || src_ea == 0) {
+        call.cpu->shim.last_error = kErrInvalidParameter;
         call.result = 0;
         return;
     }
-    for (std::int64_t i = 0; i < count; ++i) {
-        const std::uint8_t b = cpu.mem->rd8(src_ea + static_cast<std::uint32_t>(i));
-        cpu.mem->wr16(dst_ea + static_cast<std::uint32_t>(i) * 2u, b);
+    const std::string bytes = readGuestBytes(*cpu.mem, src_ea, src_len);
+    std::u16string wide;
+    wide.reserve(bytes.size());
+    if (isCp932Family(cp)) {
+        const auto* p = reinterpret_cast<const std::uint8_t*>(bytes.data());
+        std::size_t i = 0;
+        while (i < bytes.size()) {
+            char16_t u = 0;
+            const int n = cp932Decode(p + i, bytes.size() - i, &u);
+            if (n == 0) {
+                if ((flags & kMbErrInvalidChars) != 0) {
+                    call.cpu->shim.last_error = kErrNoUnicodeTranslation;
+                    call.result = 0;
+                    return;
+                }
+                // 与 Windows 一致：非法字节 ⇒ U+FFFD，并只前进 1 字节
+                wide.push_back(kReplacement);
+                ++i;
+                continue;
+            }
+            wide.push_back(u);
+            i += static_cast<std::size_t>(n);
+        }
+    } else if (cp == kCpUtf8) {
+        std::size_t bad = 0;
+        wide = utf8ToUtf16(bytes, &bad, kReplacement);
+        if (bad != 0 && (flags & kMbErrInvalidChars) != 0) {
+            call.cpu->shim.last_error = kErrNoUnicodeTranslation;
+            call.result = 0;
+            return;
+        }
+    } else {
+        warnCodePageOnce("MultiByteToWideChar", cp);
+        for (const char c : bytes) wide.push_back(static_cast<char16_t>(static_cast<unsigned char>(c)));
     }
-    call.result = static_cast<std::uint32_t>(count);
+    // ★ 返回值 / 缓冲大小都是**字符数**，不是字节数（旧实现直接拿字节数糊过去）
+    const std::size_t chars = wide.size();
+    if (dst_ea == 0 || dst_len == 0) {
+        call.result = static_cast<std::uint32_t>(chars);
+        return;
+    }
+    if (dst_len < 0 || static_cast<std::size_t>(dst_len) < chars) {
+        call.cpu->shim.last_error = kErrInsufficientBuffer;
+        call.result = 0;
+        return;
+    }
+    for (std::size_t i = 0; i < chars; ++i)
+        cpu.mem->wr16(dst_ea + static_cast<std::uint32_t>(i) * 2u, wide[i]);
+    call.result = static_cast<std::uint32_t>(chars);
 }
 
 void shimWideCharToMultiByte(X86& cpu, ShimCall& call) {
     const std::uint32_t cp = call.u32(0);
+    const std::uint32_t flags = call.u32(1);
     const std::uint32_t src_ea = call.u32(2);
     const int src_len = call.i32(3);
     const std::uint32_t dst_ea = call.u32(4);
     const int dst_len = call.i32(5);
-    (void)cp;
-    warnCodepageOnce("WideCharToMultiByte");
-    std::int64_t count = 0;
-    if (src_len < 0) {
-        if (src_ea == 0) {
-            call.result = 0;
-            return;
-        }
-        while (cpu.mem->rd16(src_ea + static_cast<std::uint32_t>(count) * 2u) != 0) ++count;
-        ++count;
-    } else {
-        count = src_len;
-    }
-    if (dst_ea == 0 || dst_len == 0) {
-        call.result = static_cast<std::uint32_t>(count);
-        return;
-    }
-    if (dst_len < count) {
-        call.cpu->shim.last_error = 122;
+    const std::uint32_t default_char_ea = call.u32(6);
+    const std::uint32_t used_default_ea = call.u32(7);
+    if (src_len == 0 || src_ea == 0) {
+        call.cpu->shim.last_error = kErrInvalidParameter;
         call.result = 0;
         return;
     }
-    for (std::int64_t i = 0; i < count; ++i) {
-        const std::uint16_t w = cpu.mem->rd16(src_ea + static_cast<std::uint32_t>(i) * 2u);
-        cpu.mem->wr8(dst_ea + static_cast<std::uint32_t>(i), w > 0xFF ? static_cast<std::uint8_t>('?')
-                                                                     : static_cast<std::uint8_t>(w));
+    std::uint8_t default_byte = static_cast<std::uint8_t>('?');
+    if (default_char_ea != 0) default_byte = cpu.mem->rd8(default_char_ea);
+    const std::u16string text = readGuestWide(*cpu.mem, src_ea, src_len);
+    std::string out;
+    out.reserve(text.size() * 2u);
+    bool used_default = false;
+    if (isCp932Family(cp)) {
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            const char16_t w = text[i];
+            std::uint8_t b[2] = {};
+            int n = 0;
+            if (w >= 0xD800 && w <= 0xDFFF) {
+                // 代理对（CP932 没有增补面字符）/ 孤立代理：都是一个替换字符
+                const bool pair = w <= 0xDBFF && i + 1 < text.size() && text[i + 1] >= 0xDC00 &&
+                                  text[i + 1] <= 0xDFFF;
+                if ((flags & kWcErrInvalidChars) != 0) {
+                    call.cpu->shim.last_error = kErrNoUnicodeTranslation;
+                    call.result = 0;
+                    return;
+                }
+                if (pair) ++i;
+                n = 0;
+            } else {
+                n = cp932Encode(w, b);
+            }
+            if (n == 0) {
+                used_default = true;
+                out.push_back(static_cast<char>(default_byte));
+            } else {
+                out.append(reinterpret_cast<const char*>(b), static_cast<std::size_t>(n));
+            }
+        }
+    } else if (cp == kCpUtf8) {
+        std::size_t bad = 0;
+        out = utf16ToUtf8(text, &bad, kReplacement);
+        if (bad != 0) {
+            if ((flags & kWcErrInvalidChars) != 0) {
+                call.cpu->shim.last_error = kErrNoUnicodeTranslation;
+                call.result = 0;
+                return;
+            }
+            used_default = true;  // 替换字符已由 utf16ToUtf8 写进 out
+        }
+    } else {
+        warnCodePageOnce("WideCharToMultiByte", cp);
+        for (const char16_t w : text) {
+            if (w > 0xFF) {
+                used_default = true;
+                out.push_back(static_cast<char>(default_byte));
+            } else {
+                out.push_back(static_cast<char>(w & 0xFF));
+            }
+        }
     }
-    call.result = static_cast<std::uint32_t>(count);
+    const std::size_t bytes = out.size();
+    if (dst_ea == 0 || dst_len == 0) {
+        call.result = static_cast<std::uint32_t>(bytes);
+        return;
+    }
+    if (dst_len < 0 || static_cast<std::size_t>(dst_len) < bytes) {
+        call.cpu->shim.last_error = kErrInsufficientBuffer;
+        call.result = 0;
+        return;
+    }
+    for (std::size_t i = 0; i < bytes; ++i)
+        cpu.mem->wr8(dst_ea + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(out[i]));
+    if (used_default_ea != 0) cpu.mem->wr32(used_default_ea, used_default ? 1u : 0u);
+    call.result = static_cast<std::uint32_t>(bytes);
 }
 
 void shimGetStringTypeW(X86& cpu, ShimCall& call) {
@@ -443,10 +562,10 @@ void registerBootstrapShims(ShimRegistry& s) {
     // 明确登记为缺口（⛔ 不假装成功）
     s.addUnimplemented("kernel32", "RaiseException", "SEH 展开不在 M1（plan §9 R1）");
     s.addUnimplemented("kernel32", "RtlUnwind", "SEH 展开不在 M1（plan §9 R1）");
-    s.addUnimplemented("kernel32", "FindResourceA", "资源族属 S6 后续（M1a 不做）");
-    s.addUnimplemented("kernel32", "SizeofResource", "资源族属 S6 后续（M1a 不做）");
-    s.addUnimplemented("kernel32", "LoadResource", "资源族属 S6 后续（M1a 不做）");
-    s.addUnimplemented("kernel32", "LockResource", "资源族属 S6 后续（M1a 不做）");
+    s.addUnimplemented("kernel32", "FindResourceA", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
+    s.addUnimplemented("kernel32", "SizeofResource", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
+    s.addUnimplemented("kernel32", "LoadResource", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
+    s.addUnimplemented("kernel32", "LockResource", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
 }
 
 }  // namespace lift

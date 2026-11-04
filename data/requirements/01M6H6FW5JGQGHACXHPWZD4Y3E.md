@@ -35,25 +35,40 @@
 - A5 动态缺口 **0**；静态缺口 213/310
 - 仓库侧 `pnpm test` 1148 pass；`SCOPE.md` / 语料 / 旧仓未越界
 
-## 现查（2026-11-04 审计后，引用时用这一节）
-- `ctest` **22/22**（含 `conformance-safe` / `pe-loader`）；`LIFT_SAFE_MEMORY=1 ctest` **22/22**。
+## 现查（2026-11-04 工作树 · macOS arm64；数字变了就重跑同一组命令）
+- `ctest` **25/25**（含 `codepage` / `noop`）；`LIFT_SAFE_MEMORY=1 ctest` **25/25**。
 - A1 `conformance` **183 cases / 383 checks / 0 failures**；A2 `136/136` 未映射 0。
 - A3 `entries=298299`、`len_checked=298299`、`decode_fail/len/mnem = 0/0/0`；collapsed 1805。
-- A4 到达 `eip=0x004BA890`；`insns=60652 hash=E0379BF37C2DFAF3`（PF 修正后；insns 不变）；
+- A4 到达 `eip=0x004BA890`；`insns=60660 hash=E0379BF37C2DFAF3`（`LIFT_AGE_EXE` 为相对路径）；
   两份 shim trace 各 108,914 字节且逐字节相同。
-- A5 动态缺口 0；静态缺口 **164/310**（含派生缺口文件）。
+- A5 静态缺口 **164/310**（其中 34 条已按 `SCOPE.md` §1 no-op）、七族内 stub **0**。★ "动态缺口 0" 在裸缺口=0 时近乎恒真 ——
+  独立证据是 **boot 到 L2 期间没有命中任何 stub**（命中即 trap）。
+- 覆盖质量（2026-11-04 审计）：146 实现 = **100 real / 26 thin-legit / 20 thin-suspect**；
+  reason 里的"S6 后续 / M1b 之后"等错误批次词已统一（归属见 `REQ-01M6K68YRBG3GB9ETF2P478VS1`）。
 - `pnpm test` 1159 pass / 0 fail；`pnpm tools lift check` 绿。
 
-## 剩余（M1 收口前，2026-11-04 重算）
-- **M1a 审计后的活单**：S6 三族夹具（`REQ-01M6JFZ73GTZE9F6967RRSH6CE`）、平台 / win32 证据（`REQ-01M6JFZFN15MBPG7Y89WNZACFW`）；
-  文档漂移单 `REQ-01M6JFZG5RY4GMZQCAA7HKNP1T` 本轮已收口。
-- **S4 剩余逐项复核**（x87 / MMX / SSE 的实际缺口）—— 不在 M1a 审计范围，未做。
-- 原「剩余」里的 1（S0 覆盖清单）/ 2（静态缺口分类）/ 3（S6 后四族）/ 4（S8）/ 6（A4 输入归一化）
-  **均已完成**（见 `git log` 与对应子节点），不再是待办。
+## 剩余（M1 收口前，2026-11-04 审计后重算）
+- **open**：PE 载入静默跳过（`REQ-01M6JFZFCQ956CBFMKKQ37PCYK`）· Virtual* 三处
+  （`REQ-01M6JJ6ZYNT6FP5ESHRTFG9HA4`）· 码页族三条质量缺陷
+  （`REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ` / `REQ-01M6K69K28AT5VNKZAJXT6PZJ4` / `REQ-01M6K69K9HM3ETCDNMJWPHGXJC`）。
+- **blocked**：平台 / VEH 证据（`REQ-01M6JFZFN15MBPG7Y89WNZACFW`，需 Windows 机器）。
+- **S4 剩余逐项复核**（x87 / MMX / SSE 的实际缺口）—— 见 `REQ-01M6K7PQK23EGJDJBQ6XKKE4HR`。
+- **已收口**：S6 三族夹具（`REQ-01M6JFZ73GTZE9F6967RRSH6CE`）· 码页 A/W（`REQ-01M6K4VCMVGT95RRBRRK9Q22PA`）
+  · 文档漂移（`REQ-01M6JFZG5RY4GMZQCAA7HKNP1T`）· S0 覆盖清单 / S6 后四族 / S8 / A4 输入归一化。
 
 ## 已知边界（不阻塞收口，要点名）
 - `--until` 之外曾停在 `USER32!wsprintfA`（`LoadLibraryA("AGERC.DLL")` 的失败分支）⇒ 由 AGERC stub + `wsprintfA` 解决。
-- 码页现状只有 ASCII 直通（非 ASCII 按字节直通 + 一行日志）。
+- 码页：932 / CP_UTF8 的 A/W 转换走 `runtime/cp932` 真表（`REQ-01M6K4VCMVGT95RRBRRK9Q22PA`）；
+  **1252 / 437 等其它码页**仍只有 ASCII（首次用记一行日志，本作 `GetACP()=932` 未观察到使用）。
+- `GetStringTypeW` 的 CT_CTYPE1 位抄错、`LCMapStringW` 的 `cchSrc=-1` 只映射 1 字符
+  （两张缺陷单已开：`REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ` / `REQ-01M6K69K28AT5VNKZAJXT6PZJ4`）；
+  标准句柄三元组也是空实现（`REQ-01M6K69K9HM3ETCDNMJWPHGXJC`）。启动路径不依赖，但**不能再声称"七族全部实现"**——
+  七族内 stub 为 0，质量分层是 17 条 thin-suspect。
+- 164 条静态缺口里：注册表 5 / 音频 11 / 视频 15 / 摇杆 3 已按 `SCOPE.md` §1 no-op
+  （`advapi32_registry.cpp` / `winmm_audio.cpp` / `mf_video.cpp` / `winmm_joystick.cpp`，`ctest:noop`）；
+  version / shell32 / shlwapi / imagehlp / imm32 + COM / VARIANT 5 条归 M2；音频 / 视频归
+  **M4**（`REQ-01M6K84KHPA1XF3B1HSHXME6W0`）；模态（仅关闭窗口二次确认）归 M2。
+  ⇒ 164 条已逐组有主（归属清理单 `REQ-01M6K68YRBG3GB9ETF2P478VS1` 已收口）。
 - MMX/SSE 与部分 x87 形态执行即**响亮失败**（可见缺口，不是静默 no-op）。
 - A4 的指令数**依赖 `--exe` 的路径写法**（guest 命令行 = 该字符串）：实测 38,456 / 44,184 / 53,134 ⇒ 引用必须连路径一起给。
 

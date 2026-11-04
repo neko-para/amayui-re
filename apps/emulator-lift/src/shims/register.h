@@ -40,6 +40,10 @@ void registerTimeShims(ShimRegistry& shims);      // kernel32_time.cpp
 void registerStringShims(ShimRegistry& shims);    // kernel32_string.cpp（码页与字符串族）
 void registerAgercShims(ShimRegistry& shims);     // kernel32_agerc.cpp（AGERC 三个导出，整体 stub）
 void registerUser32MenuShims(ShimRegistry& shims);  // user32_menu.cpp（菜单 / 模态 no-op，SCOPE §1）
+void registerAdvapi32RegistryShims(ShimRegistry& shims);  // advapi32_registry.cpp（注册表 no-op，SCOPE §1）
+void registerWinmmAudioShims(ShimRegistry& shims);  // winmm_audio.cpp（音频 no-op，SCOPE §1）
+void registerWinmmJoystickShims(ShimRegistry& shims);  // winmm_joystick.cpp（摇杆永久不做，SCOPE §1）
+void registerVideoShims(ShimRegistry& shims);     // mf_video.cpp（视频 / 媒体 no-op，SCOPE §1）
 void registerVersionShims(ShimRegistry& shims);   // kernel32_version.cpp（版本资源查询：真实失败码）
 
 // ---- 共用的诊断打印（一行一条，stderr；不受 --trace 影响 —— 缺口感必须是常亮的）----

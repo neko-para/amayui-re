@@ -41,17 +41,13 @@ void registerKernel32Shims(ShimRegistry& shims) {
     //
     // ★ `CreateProcessA` 的登记已挪到 kernel32_process.cpp（与"进程 / 模块信息族"同文件）。
 
-    // ---- advapi32：注册表 ----
-    shims.addUnimplemented("advapi32", "RegOpenKeyExA", "注册表族不在 M1a 这一批（配置读写属 S6 之后）");
-    shims.addUnimplemented("advapi32", "RegQueryValueExA", "注册表族不在 M1a 这一批（配置读写属 S6 之后）");
-    shims.addUnimplemented("advapi32", "RegSetValueExA", "注册表族不在 M1a 这一批（配置读写属 S6 之后）");
-    shims.addUnimplemented("advapi32", "RegCreateKeyExA", "注册表族不在 M1a 这一批（配置读写属 S6 之后）");
-    shims.addUnimplemented("advapi32", "RegCloseKey", "注册表族不在 M1a 这一批（配置读写属 S6 之后）");
+    // ---- advapi32：注册表（用户 2026-11-04：与菜单 / 模态一样 no-op，见 SCOPE §1）----
+    registerAdvapi32RegistryShims(shims);
 
     // ---- user32：窗口 / 消息 / 菜单 ----
     // ⚠ 菜单与模态是 SCOPE §1 点名的**可接受偏差**（将来落地时要按 stub 口径：返回合理值 + 不打桩的日志 +
-    //   overrides.json 登记），但那是 S6 的窗口族，⛔ 不是本批"假装成功"。
-    const char* kUser32 = "user32 窗口 / 消息族不在 M1a 这一批（S6 后续）";
+    //   overrides.json 登记），但那是 M2 的窗口族，⛔ 不是本批"假装成功"。
+    const char* kUser32 = "M2 窗口 / 消息族（plan D4：L3；不属 M1）";
     shims.addUnimplemented("user32", "RegisterClassA", kUser32);
     shims.addUnimplemented("user32", "CreateWindowExA", kUser32);
     shims.addUnimplemented("user32", "DestroyWindow", kUser32);
@@ -76,7 +72,7 @@ void registerKernel32Shims(ShimRegistry& shims) {
     shims.addUnimplemented("user32", "SetFocus", kUser32);
 
     // ---- gdi32：2D 图形 ----
-    const char* kGdi32 = "gdi32 图形族不在 M1a 这一批（S6 后续）";
+    const char* kGdi32 = "M2 GDI / 2D 图形族（不属 M1）";
     shims.addUnimplemented("gdi32", "CreateCompatibleDC", kGdi32);
     shims.addUnimplemented("gdi32", "CreateDIBSection", kGdi32);
     shims.addUnimplemented("gdi32", "SelectObject", kGdi32);
@@ -89,7 +85,12 @@ void registerKernel32Shims(ShimRegistry& shims) {
 
     // ---- d3d9：3D ----
     shims.addUnimplemented("d3d9", "Direct3DCreate9",
-                           "3D 不在本项目范围（SCOPE §1：D3D9 走 stub / 外包或停手）");
+                           "M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
+
+    // ---- 音频 / 视频：用户 2026-11-04 裁决"延后实现，当前 no-op"（SCOPE §1）----
+    registerWinmmAudioShims(shims);
+    registerWinmmJoystickShims(shims);
+    registerVideoShims(shims);
 
     // ---- 派生缺口（**最后**）：导入表里有、上面既没实现也没登记的条目 ----
     // 由 `pnpm tools lift sync --write` 生成；理由按模块分组（见 tools/lift.mjs 的 MODULE_REASONS）。

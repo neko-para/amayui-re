@@ -180,7 +180,8 @@
 ### D5 · 线程：guest 单线程
 
 `../README.md` §2.5 已定；`SCOPE.md` 把音频判 silent、视频判 skip ⇒ 两条服务线程都不该被创建。
-M1 里 `CreateThread` / `CreateTimerQueueTimer` / `SignalObjectAndWait` 一律**登记 stub**（打日志、返回失败或空句柄）。
+M1 里 `CreateThread` / `CreateTimerQueueTimer` 一律**响亮失败**（`addUnimplemented`，SCOPE §1），
+`SignalObjectAndWait` 已按"未 signaled ⇒ 硬错误"实现（SCOPE §1 等待条目）。
 若 CRT 启动真去起线程 ⇒ **记录并开单**，不在 M1 里做线程（那会推翻 §2.5 的单线程口径，得先有证据）。
 
 ### D6 · "§3.1 基座"的口径 = **T0 语义七族**
@@ -196,7 +197,7 @@ M1 只收它的 T0 语义部分，七族：
 | 文件与路径 | `CreateFile` / `ReadFile` / `SetFilePointer` / `FindFirstFile` 族 / 目录 / 临时文件 / 模块文件名 | "能读配置、能读存档"的最小前提 |
 | 计时 | `timeGetTime` / `QueryPerformanceCounter` / `GetLocalTime` / `timeSetEvent` | **要可复现 ⇒ 虚拟时钟**（§8.3 的确定性判据靠它） |
 | 错误码与 TLS | `GetLastError` / `SetLastError`（线程局部）/ `Tls*` / `Encode/DecodePointer` | §3.1 驱动因素 2 |
-| 码页与字符串 | `MultiByteToWideChar` / `WideCharToMultiByte` / `GetACP(=932)` / `LCMapStringW` / `wsprintfA`（varargs） | 引擎全是 CP932 路径；**这是唯一要引第三方码表的地方**（`libiconv`，见 §8） |
+| 码页与字符串 | `MultiByteToWideChar` / `WideCharToMultiByte` / `GetACP(=932)` / `LCMapStringW` / `wsprintfA`（varargs） | 引擎全是 CP932 路径；**自带表 `runtime/cp932`**（S6 已落地；不再引 `libiconv`，见 §7.1） |
 | 进程 / 模块信息 | `GetModuleHandle` / `GetProcAddress` / `LoadLibrary` / `GetCommandLineA` / `GetStartupInfoA` / `GetVersionExA` / `GetSystemInfo` | 静态 CRT 启动的直接依赖 |
 
 **不含**：GDI32 的 7 个与 d3dx9 的 6 个（留给 M2 字体簇 / M3 D3D 簇）。
@@ -283,7 +284,7 @@ tools/lift.mjs                ← describe / check / report / corpus-report（�
 | 包 | 用途 | 引入方式 | 许可 |
 |---|---|---|---|
 | `zydis` | 指令解码（S2）——**只解码，不执行**：语义仍是我们的 | **vcpkg**（本机 `../emulator-cxx/vcpkg/ports` 里有 port） | MIT（替代：`bddisasm` Apache-2.0 / `capstone` BSD-3） |
-| `libiconv` | CP932 ↔ UTF-16（S6 码页族） | **vcpkg**（有 port） | LGPL（静态链接要照 LGPL 的再链接义务处理；备选是自带一份 CP932 表） |
+| ~~`libiconv`~~ | ~~CP932 ↔ UTF-16（S6 码页族）~~ | **未采用**：S6 改为自带表 `runtime/cp932`（`tools/lift-cp932-gen.mjs` 派生、入库） | — |
 | **`berkeley-softfloat`** | x87 的 80 位算术内核（S4，见 D3） | **vendor**：`third_party/berkeley-softfloat/` + `README.md`（照 `apps/emulator-cxx/third_party/pl_mpeg/` 的模板） | BSD-3-Clause |
 | `sdl3` | 宿主层 | 已有（vcpkg） | zlib |
 
@@ -334,6 +335,8 @@ tools/lift.mjs                ← describe / check / report / corpus-report（�
 
 ⛔ 窗口 / 消息泵 / 菜单（M2）· ⛔ DirectDraw / GDI 字体（M2）· ⛔ D3D9 / D3DX / Live2D（M3）·
 ⛔ 音频 / 视频（SCOPE 已判 silent / skip）· ⛔ 线程与真并发（D5）· ⛔ 完整的 SEH / C++ 展开（R1）·
+⛔ **进程创建 / 版本资源 / shell32·shlwapi / COM·VARIANT / IME** —— 都不在 M1；归属未定（M1 单的"归属清理"在裁）。
+★ **注册表 / 音频 / 视频**：按 `SCOPE.md` §1 整体 no-op（不是 M1 缺口，也不等 M2/M3 的实现）。
 ⛔ JIT / 动态翻译（R5）· ⛔ 64 位 guest（本作是 32 位 PE）· ⛔ AGERC.DLL（独立，随时可做）·
 ⛔ 用 `apps/emulator-cxx` 的 core 当 shim（README §1 的边界）·
 ⛔ **把 Wine 系组件当 shim**（理由与判据见 §1.1：那会退化成第三条路线）。
