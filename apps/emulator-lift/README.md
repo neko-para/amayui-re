@@ -194,5 +194,5 @@ apps/emulator-lift/
 | 宿主层 / 不依赖 AppKit 的口径 | 同文件 §5.5 |
 | 可接受偏差（菜单 / 音频 / 视频 / Live2D / 3D） | `SCOPE.md` + 同文件 §4.1 |
 | 覆盖清单格式 | 同文件 §5.7 |
-| 实现计划（切片 / 判据 / 决策点） | `docs/plan-m1-cpu-base.md`（索引 `docs/README.md`） |
+| 实现计划（切片 / 判据 / 决策点） | M1 `docs/plan-m1-cpu-base.md` · M2 `docs/plan-m2-2d-text.md`（索引 `docs/README.md`） |
 | 需求与进度 | `REQ-01M6GJMENJ8XEK4ZPTA768YBPW` · `pnpm tools requirements plan` |

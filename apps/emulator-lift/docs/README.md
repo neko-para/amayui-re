@@ -9,6 +9,7 @@
 | **与 Wine 的三条路线分野**（"还是这条线"的判据 / 为什么不能拿 Wine 的 DLL 当 shim） | 同文件 **§1.1** |
 | 用户拍板的可接受偏差（菜单 / 模态 / 音频 / 视频 / 3D） | [`../SCOPE.md`](../SCOPE.md) |
 | **M1 = guest CPU 核心 + §3.1 共享底座** 的完整计划与判据 | [`plan-m1-cpu-base.md`](plan-m1-cpu-base.md) |
+| **M2 = 2D 画面 + 文本（窗口/消息 · DirectDraw · GDI 字体·停手点 A）** 的计划、切片与 go/no-go | [`plan-m2-2d-text.md`](plan-m2-2d-text.md) |
 | 平台面十簇的复杂度 / 工程量 / 切分顺序（上游分析） | [`../../../docs/03-emulator/platform-effort.md`](../../../docs/03-emulator/platform-effort.md) |
 | 还要做什么、到哪一步了 | `pnpm tools requirements plan` |
 
