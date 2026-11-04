@@ -76,11 +76,19 @@ constexpr std::uint32_t kFileEnd = 2u;
 
 // 错误码（S6-1 / S6-2 / S6-6 的断言用）
 constexpr std::uint32_t kErrAccessDenied = 5u;
+constexpr std::uint32_t kErrInvalidHandle = 6u;
 constexpr std::uint32_t kErrSharingViolation = 32u;
 constexpr std::uint32_t kErrFileExists = 80u;
 constexpr std::uint32_t kErrInvalidParameter = 87u;
 constexpr std::uint32_t kErrNegativeSeek = 131u;
 constexpr std::uint32_t kErrAlreadyExists = 183u;
+
+// 标准句柄三元组（GetFileType / GetConsoleMode / SetStdHandle）
+constexpr std::uint32_t kFileTypeDisk = 1u;     // FILE_TYPE_DISK
+constexpr std::uint32_t kFileTypeChar = 2u;     // FILE_TYPE_CHAR
+constexpr std::uint32_t kStdInput = 0xFFFFFFF6u;   // (DWORD)-10
+constexpr std::uint32_t kStdOutput = 0xFFFFFFF5u;  // (DWORD)-11
+constexpr std::uint32_t kStdError = 0xFFFFFFF4u;   // (DWORD)-12
 
 // WIN32_FIND_DATAA（x86，0x140 字节）的字段偏移
 constexpr std::uint32_t kFindDataSize = 0x140u;
@@ -163,6 +171,9 @@ struct Fixture {
         if (!ok) return;
         lift::registerFileShims(m.shims());
         lift::registerSyncShims(m.shims());  // CloseHandle（文件句柄由它调 destroy 回收）
+        // ★ 标准句柄三元组（GetStdHandle / SetStdHandle / GetFileType / GetConsoleMode）在
+        //   bootstrap 那一族里注册（REQ-01M6K69K9HM3ETCDNMJWPHGXJC 的新用例要用）
+        lift::registerBootstrapShims(m.shims());
 
         const char* const names[] = {
             "CreateFileA",     "ReadFile",          "WriteFile",        "SetFilePointer",
@@ -170,6 +181,7 @@ struct Fixture {
             "FindNextFileA",   "FindClose",         "CreateDirectoryA", "DeleteFileA",
             "GetFileAttributesA", "GetCurrentDirectoryA", "SetCurrentDirectoryA",
             "GetFileTime",     "SetFileTime",
+            "GetStdHandle",    "SetStdHandle",      "GetFileType",      "GetConsoleMode",
         };
         std::uint32_t ea = kStubEa;
         for (const char* name : names) {
@@ -862,6 +874,69 @@ int main() {
                     "④ OPEN_ALWAYS(不存在) ⇒ 新建空文件 + 非 183；"
                     "⑤ OPEN_EXISTING / TRUNCATE_EXISTING 均非 183；⑥ CREATE_NEW(存在) ⇒ 0xFFFFFFFF+%u\n",
                     h1, h2, kErrAlreadyExists, h3, kErrAlreadyExists, kErrFileExists);
+    }
+
+    // ---------------- ⑬ 标准句柄三元组：SetStdHandle 存值 / GetFileType 按真实种类 / GetConsoleMode 只认控制台 ----------------
+    // 判据（REQ-01M6K69K9HM3ETCDNMJWPHGXJC，文档 = MSDN 的 GetFileType / GetConsoleMode / SetStdHandle）：
+    //   · `CreateFileA` 打开的真文件 ⇒ `GetFileType` = FILE_TYPE_DISK(1)（⛔ 旧实现恒 2）；
+    //   · 同一个文件句柄 ⇒ `GetConsoleMode` = 0 + ERROR_INVALID_HANDLE(6)（⛔ 旧实现恒成功）；
+    //   · `SetStdHandle(STD_OUTPUT, h)` 之后 `GetStdHandle(STD_OUTPUT)` 返回 h；恢复原值也成立；
+    //   · 没动过的标准槽仍是"字符设备"（启动路径现状：`GetFileType` = 2、`GetConsoleMode` 成功）。
+    {
+        g_current_case = "std-handles-triple";
+        const std::uint32_t p_file = f.cstr("sub\\a.txt");
+        const std::uint32_t h =
+            f.call("CreateFileA", {p_file, kGenericRead, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(h, kInvalidHandleValue);
+
+        // ① 真文件 ≠ 字符设备；也不是控制台
+        LIFT_CHECK_EQ_U32(f.call("GetFileType", {h}), kFileTypeDisk);
+        const std::uint32_t mode = f.zeroBuf(4);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call("GetConsoleMode", {h, mode}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidHandle);
+
+        // ② 没动过的标准槽：字符设备 + 控制台模式（启动路径的现状，⛔ 不许因为这次修正而改变）
+        const std::uint32_t in = f.call("GetStdHandle", {kStdInput});
+        const std::uint32_t out = f.call("GetStdHandle", {kStdOutput});
+        const std::uint32_t err = f.call("GetStdHandle", {kStdError});
+        LIFT_CHECK_NE_U32(in, 0u);
+        LIFT_CHECK_NE_U32(out, 0u);
+        LIFT_CHECK_NE_U32(err, 0u);
+        LIFT_CHECK_EQ_U32(f.call("GetFileType", {in}), kFileTypeChar);
+        LIFT_CHECK_EQ_U32(f.call("GetFileType", {out}), kFileTypeChar);
+        LIFT_CHECK_EQ_U32(f.call("GetFileType", {err}), kFileTypeChar);
+        LIFT_CHECK_EQ_U32(f.call("GetConsoleMode", {out, mode}), 1u);
+
+        // ③ SetStdHandle 真的存值（⛔ 旧实现只返回 1、什么都不存）
+        LIFT_CHECK_EQ_U32(f.call("SetStdHandle", {kStdOutput, h}), 1u);
+        LIFT_CHECK_EQ_U32(f.call("GetStdHandle", {kStdOutput}), h);
+        // 换到那一槽的仍是**文件**句柄 ⇒ 类型跟着句柄走（不是"标准槽就一定是字符设备"）
+        LIFT_CHECK_EQ_U32(f.call("GetFileType", {h}), kFileTypeDisk);
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call("GetConsoleMode", {h, mode}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidHandle);
+        // 别的槽不受影响
+        LIFT_CHECK_EQ_U32(f.call("GetStdHandle", {kStdInput}), in);
+        LIFT_CHECK_EQ_U32(f.call("GetStdHandle", {kStdError}), err);
+
+        // ④ 恢复原值也成立（进程级表就是"最后一次写的值"）
+        LIFT_CHECK_EQ_U32(f.call("SetStdHandle", {kStdOutput, out}), 1u);
+        LIFT_CHECK_EQ_U32(f.call("GetStdHandle", {kStdOutput}), out);
+        LIFT_CHECK_EQ_U32(f.call("GetFileType", {out}), kFileTypeChar);
+        LIFT_CHECK_EQ_U32(f.call("GetConsoleMode", {out, mode}), 1u);
+
+        // ⑤ 非法 nStdHandle ⇒ 0（真实失败值 + 错误码），⛔ 不是静默成功
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call("GetStdHandle", {kStdOutput + 100u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidHandle);
+
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h}), 1u);
+        std::printf("[case] std-handles-triple: CreateFileA ⇒ 0x%08X；GetFileType=1"
+                    "（FILE_TYPE_DISK）、GetConsoleMode=FALSE+%u；默认标准槽 0x%08X/0x%08X/0x%08X "
+                    "⇒ GetFileType=2 且 GetConsoleMode=TRUE；SetStdHandle(STD_OUTPUT, h) 后 "
+                    "GetStdHandle 返回 h，恢复后回到 0x%08X\n",
+                    h, kErrInvalidHandle, in, out, err, out);
     }
 
     std::printf("[case] tmp = %s\n", game.c_str());

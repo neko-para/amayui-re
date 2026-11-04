@@ -34,6 +34,9 @@ constexpr std::uint32_t kMaxVtableSlots = 1024u;
 // 对象头：`obj+0` = vtable EA，`obj+4` = refcount
 constexpr std::uint32_t kObjectBytes = 8u;
 constexpr std::uint32_t kRefcountOffset = 4u;
+// ★ 追加式扩展（P1 DDraw）：`obj+8` = 调用方的 guest 扩展块 EA。只有 non-zero 时对象才是 12 字节。
+constexpr std::uint32_t kUserOffset = 8u;
+constexpr std::uint32_t kObjectBytesWithUser = 12u;
 
 void comLog(const char* iface, const char* fmt, ...) {
     // 形状与 `shimLog` 一致（`[shim] <module>!<name>: ...`），但 runtime/ 不依赖 shims/ 目录
@@ -103,7 +106,8 @@ std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, cons
     return stub;
 }
 
-std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods) {
+std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
+                                       std::uint32_t user) {
     const std::string face = iface ? iface : "";
     if (face.empty()) {
         comLog("?", "createObject 的 iface 为空（日志 / 注册名都要靠它）");
@@ -202,24 +206,34 @@ std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::
         cpu.mem->wr32(vtable + slot * 4u, slot_ea[slot]);
     }
 
-    // ③ 分配对象头（[0] = vtable，[4] = refcount = 1）
-    const std::uint32_t obj = cpu.heap->alloc(kObjectBytes, /*zero=*/true);
+    // ③ 分配对象头（[0] = vtable，[4] = refcount = 1；挂了扩展块再加 [8] = user）
+    const std::uint32_t obj_bytes = user != 0 ? kObjectBytesWithUser : kObjectBytes;
+    const std::uint32_t obj = cpu.heap->alloc(obj_bytes, /*zero=*/true);
     if (obj == 0) {
-        comLog(face.c_str(), "guest 堆分配对象（%u 字节）失败：%s", kObjectBytes, cpu.heap->lastError());
+        comLog(face.c_str(), "guest 堆分配对象（%u 字节）失败：%s", obj_bytes, cpu.heap->lastError());
         cpu.heap->free(vtable);
         return 0;
     }
     cpu.mem->wr32(obj, vtable);
     cpu.mem->wr32(obj + kRefcountOffset, 1u);
+    if (user != 0) cpu.mem->wr32(obj + kUserOffset, user);
 
     Object o;
     o.vtable = vtable;
     o.slots = slots;
     o.refcount = 1;
+    o.bytes = obj_bytes;
+    o.user = user;
     o.iface = face;
     objects_.emplace(obj, std::move(o));
-    comLog(face.c_str(), "建对象 0x%08X（vtable 0x%08X，%u 槽，refcount=1）", obj, vtable, slots);
+    comLog(face.c_str(), "建对象 0x%08X（vtable 0x%08X，%u 槽，refcount=1%s）", obj, vtable, slots,
+           user != 0 ? "，带扩展块" : "");
     return obj;
+}
+
+std::uint32_t ComRegistry::userOf(std::uint32_t obj) const {
+    const auto it = objects_.find(obj);
+    return it == objects_.end() ? 0u : it->second.user;
 }
 
 bool ComRegistry::addRef(X86& cpu, std::uint32_t obj) {
@@ -253,6 +267,7 @@ bool ComRegistry::release(X86& cpu, std::uint32_t obj) {
     // ④ 到 0：释放 vtable + 对象（guest 堆），并从表里删掉
     const std::uint32_t vtable = it->second.vtable;
     const std::uint32_t slots = it->second.slots;
+    const std::uint32_t obj_bytes = it->second.bytes;
     const std::string iface = it->second.iface;
     objects_.erase(it);
     if (!cpu.heap) {
@@ -263,6 +278,7 @@ bool ComRegistry::release(X86& cpu, std::uint32_t obj) {
     if (cpu.mem) {
         cpu.mem->wr32(obj, 0);
         cpu.mem->wr32(obj + kRefcountOffset, 0);
+        if (obj_bytes > kObjectBytes) cpu.mem->wr32(obj + kUserOffset, 0);
     }
     const bool ok_vtable = cpu.heap->free(vtable);
     const bool ok_obj = cpu.heap->free(obj);

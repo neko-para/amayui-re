@@ -12,6 +12,8 @@
 //      `LocalAlloc`/`LocalFree`/`LocalSize`、`GlobalAlloc`/`GlobalLock`/`GlobalUnlock`/
 //      `GlobalSize`/`GlobalFree`；`VirtualAlloc(MEM_RESERVE|MEM_COMMIT)` → 写读 →
 //      `VirtualFree(MEM_RELEASE)`；`MEM_DECOMMIT` 之后重新 `MEM_COMMIT`（新提交的页必须清零）；
+//      ★ 与文档冲突的三条（REQ-01M6JJ6ZYNT6FP5ESHRTFG9HA4）：hint+COMMIT 必须先 RESERVE（487）、
+//      MEM_RELEASE 只认 LIFO（非 LIFO ⇒ 87 且后一块不受影响）、`MEM_DECOMMIT(dwSize=0)` 退整段；
 //   ② 错误码 / TLS：`GetLastError`/`SetLastError` 往返、`TlsAlloc` 非 `0xFFFFFFFF`、
 //      `TlsSetValue`/`TlsGetValue` 往返、`TlsFree`（含非法槽）、`Fls*` 一条、
 //      `GetCurrentThreadId`/`GetCurrentProcessId` 非 0 且稳定；
@@ -35,6 +37,7 @@
 //   ⛔ 不测线程创建（SCOPE §1 硬 trap）；⛔ 不测 `WaitForMultipleObjects` 的阻塞行为（T1 待裁决）。
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #if !defined(_WIN32)
@@ -58,6 +61,7 @@ constexpr std::uint32_t kWaitObject0 = 0u;
 constexpr std::uint32_t kWaitTimeout = 0x102u;  // WAIT_TIMEOUT 258
 constexpr std::uint32_t kErrInvalidParameter = 87u;
 constexpr std::uint32_t kErrNotEnoughMemory = 8u;
+constexpr std::uint32_t kErrInvalidAddress = 487u;
 constexpr std::uint32_t kErrNotOwner = 288u;
 constexpr std::uint32_t kErrTooManyPosts = 298u;
 
@@ -288,10 +292,11 @@ int main() {
 
         LIFT_CHECK_EQ_U32(f.call(vf, {ea, 0u, kMemRelease}), 1u);
         LIFT_CHECK(!f.m.mem().committed(ea, 0x4000u));  // 宿主可见：页真的退掉了
-        // 再释放一次 ⇒ 0 + 87（游标已退回，这个地址不再是 bump 出来的块基址）
+        // 再释放一次 ⇒ 0 + ERROR_INVALID_ADDRESS(487)：这个地址已不是任何活区域的**基址**
+        // （★ 2026-11-05：文档里 487 就是"lpAddress 不是预留区基址"那条；87 只用于 dwSize 非法）
         f.m.cpu().shim.last_error = 0;
         LIFT_CHECK_EQ_U32(f.call(vf, {ea, 0u, kMemRelease}), 0u);
-        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidAddress);
         LIFT_CHECK(f.ok);
     }
 
@@ -320,6 +325,141 @@ int main() {
         LIFT_CHECK(f.m.mem().committed(ea, kSpan));
         LIFT_CHECK_MEM_U32(f.m.mem(), ea, 0u);
         LIFT_CHECK_EQ_U32(f.call(vf, {ea, 0u, kMemRelease}), 1u);
+        LIFT_CHECK(!f.m.mem().committed(ea, kSpan));
+        LIFT_CHECK(f.ok);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Virtual* 与文档的冲突（REQ-01M6JJ6ZYNT6FP5ESHRTFG9HA4）
+    // -------------------------------------------------------------------------------------
+    //
+    // ① hint + MEM_COMMIT 不校验 reserve（文档：未预留的显式地址 COMMIT ⇒ ERROR_INVALID_ADDRESS）
+    //    ★ 反例的判据是"宿主内存**没被清零**"：旧实现直接 commitZeroed 任意地址 ⇒ 这条红。
+    {
+        g_current_case = "virtual-commit-hint-needs-reserve";
+        Fixture f;
+        lift::registerMemShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t va = f.use("VirtualAlloc");
+        constexpr std::uint32_t kSpan = 0x00010000u;
+        constexpr std::uint32_t kProbe = 0x50000000u;  // 一页已提交、但**没经** VirtualAlloc 预留
+        constexpr std::uint32_t kUntouched = 0x51000000u;  // 完全没碰过
+
+        // 探针页先由 GuestMemory 直接提交并写哨兵（⛔ 不往未提交页写：那会 fault）
+        LIFT_CHECK(f.m.mem().commit(kProbe, 0x1000, lift::RegionKind::Other, "probe"));
+        f.m.mem().wr32(kProbe, 0xA5A5A5A5u);
+        LIFT_CHECK(f.m.mem().committed(kProbe, 0x1000));
+        LIFT_CHECK(!f.m.mem().committed(kUntouched, kSpan));
+
+        // ① 未先 MEM_RESERVE 的 hint + MEM_COMMIT ⇒ 0 + 487
+        //    ★ 反面判据：旧实现会在这条路上 `commitZeroed(0x50000000, …)` —— 既返回成功，
+        //      又把哨兵清成 0（下面两行同时钉住这两个后果）。
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(va, {kProbe, kSpan, kMemCommit, kPageReadWrite}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidAddress);
+        LIFT_CHECK_MEM_U32(f.m.mem(), kProbe, 0xA5A5A5A5u);  // 宿主内存没被清零
+        // 完全没碰过的地址同一个结果，且**没有**留下提交
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(va, {kUntouched, kSpan, kMemCommit, kPageReadWrite}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidAddress);
+        LIFT_CHECK(!f.m.mem().committed(kUntouched, kSpan));
+
+        // ② 文档的正常路径：先 MEM_RESERVE，再对**同一地址** MEM_COMMIT ⇒ 成功
+        constexpr std::uint32_t kFresh = 0x52000000u;
+        LIFT_CHECK_EQ_U32(f.call(va, {kFresh, kSpan, kMemReserve, kPageReadWrite}), kFresh);
+        LIFT_CHECK(!f.m.mem().committed(kFresh, kSpan));  // 只预留 = 还没提交
+        LIFT_CHECK_EQ_U32(f.call(va, {kFresh, kSpan, kMemCommit, kPageReadWrite}), kFresh);
+        LIFT_CHECK(f.m.mem().committed(kFresh, kSpan));
+        LIFT_CHECK_MEM_U32(f.m.mem(), kFresh, 0u);  // 新提交的页清零
+
+        // ③ 对**已提交**的页再 COMMIT：成功，且内容**不变**（文档：已提交的页不动）
+        f.m.mem().wr32(kFresh, 0x11223344u);
+        LIFT_CHECK_EQ_U32(f.call(va, {kFresh, kSpan, kMemCommit, kPageReadWrite}), kFresh);
+        LIFT_CHECK_MEM_U32(f.m.mem(), kFresh, 0x11223344u);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ② MEM_RELEASE 的**任意顺序**整段释放
+    //   ★ 2026-11-05 语义修正（实测驱动）：真实 Windows 允许按任意顺序 MEM_RELEASE 每个独立预留区。
+    //     旧实现（以及旧用例）要求"必须是最后一块 bump 块"，结果被测引擎在窗口建立后连续释放
+    //     5 个**显式预留**区时五条全被拒成 ERROR_INVALID_PARAMETER（boot 日志实证）⇒ 内存永不回收。
+    //     现在的判据是 Win32 那条：lpAddress 必须是**预留区的基址**，否则 ERROR_INVALID_ADDRESS(487)。
+    {
+        g_current_case = "virtual-release-any-order";
+        Fixture f;
+        lift::registerMemShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t va = f.use("VirtualAlloc");
+        const std::uint32_t vf = f.use("VirtualFree");
+        constexpr std::uint32_t kSpan = 0x4000u;
+
+        const std::uint32_t a = f.call(va, {0u, kSpan, kMemReserve | kMemCommit, kPageReadWrite});
+        const std::uint32_t b = f.call(va, {0u, kSpan, kMemReserve | kMemCommit, kPageReadWrite});
+        LIFT_CHECK_NE_U32(a, 0u);
+        LIFT_CHECK_NE_U32(b, 0u);
+        LIFT_CHECK_NE_U32(b, a);
+        f.m.mem().wr32(a, 0xAAAAAAAAu);
+        f.m.mem().wr32(b, 0xBBBBBBBBu);
+
+        // 释放**前**一块 ⇒ 成功，且**只**退它（后一块仍已提交、内容不变）
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(vf, {a, 0u, kMemRelease}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 0u);
+        LIFT_CHECK(!f.m.mem().committed(a, kSpan));
+        LIFT_CHECK(f.m.mem().committed(b, kSpan));
+        LIFT_CHECK_MEM_U32(f.m.mem(), b, 0xBBBBBBBBu);
+
+        // 重复释放同一基址 ⇒ 0 + ERROR_INVALID_ADDRESS（它已不是活区域基址）
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(vf, {a, 0u, kMemRelease}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidAddress);
+
+        // 释放**中间地址**（不是任何预留区基址）⇒ 0 + 487，区域原样
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(vf, {b + 0x1000u, 0u, kMemRelease}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidAddress);
+        LIFT_CHECK(f.m.mem().committed(b, kSpan));
+
+        // 再释放 b ⇒ 成功
+        LIFT_CHECK_EQ_U32(f.call(vf, {b, 0u, kMemRelease}), 1u);
+        LIFT_CHECK(!f.m.mem().committed(b, kSpan));
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(vf, {b, 0u, kMemRelease}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidAddress);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ③ MEM_DECOMMIT 的 dwSize == 0（文档：从 lpAddress 退到该区域末尾）
+    {
+        g_current_case = "virtual-decommit-zero-size";
+        Fixture f;
+        lift::registerMemShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t va = f.use("VirtualAlloc");
+        const std::uint32_t vf = f.use("VirtualFree");
+        constexpr std::uint32_t kSpan = 0x00010000u;
+
+        const std::uint32_t ea = f.call(va, {0u, kSpan, kMemReserve | kMemCommit, kPageReadWrite});
+        LIFT_CHECK_NE_U32(ea, 0u);
+        f.m.mem().wr32(ea, 0xCAFEBABEu);
+        LIFT_CHECK(f.m.mem().committed(ea, kSpan));
+
+        // dwSize==0 + 块基址 ⇒ 成功，整段变未提交（⛔ 旧实现直接拒收 ⇒ 返回 0）
+        LIFT_CHECK_EQ_U32(f.call(vf, {ea, 0u, kMemDecommit}), 1u);
+        LIFT_CHECK(!f.m.mem().committed(ea, kSpan));
+
+        // 重新提交：还是同一个地址，且内容清零
+        LIFT_CHECK_EQ_U32(f.call(va, {ea, kSpan, kMemCommit, kPageReadWrite}), ea);
+        LIFT_CHECK(f.m.mem().committed(ea, kSpan));
+        LIFT_CHECK_MEM_U32(f.m.mem(), ea, 0u);
+
+        // 不在任何保留区里的地址 ⇒ 0 + 487（文档：lpAddress 必须在已保留区域里）
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(vf, {0x60000000u, 0u, kMemDecommit}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidAddress);
+
+        // 显式大小的路径仍在（不回归）
+        LIFT_CHECK_EQ_U32(f.call(vf, {ea, kSpan, kMemDecommit}), 1u);
         LIFT_CHECK(!f.m.mem().committed(ea, kSpan));
         LIFT_CHECK(f.ok);
     }

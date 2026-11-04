@@ -521,6 +521,12 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     std::string host;
     std::string why;
     if (!resolveGuest(cpu, guest, &host, &why, must_exist, /*resolve_case=*/true)) {
+        // ★ 把 dwCreationDisposition 一起打出来（2026-11-05）：引擎的"探测临时文件"与"真的要建文件"
+        //   在日志里长得一模一样（都是 `[notfound] 段 ... 里不存在`），只凭路径判断不出是哪种意图
+        //   ⇒ 定位"引擎为什么放弃并 MessageBox+ExitProcess"时会被引到错的方向。
+        shimLog("kernel32", api, "%s 解析失败：dwCreationDisposition=%u（%s）", guest.c_str(),
+                static_cast<unsigned>(disposition),
+                must_exist ? "必须已存在" : "允许不存在（可新建）");
         pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
         call.result = kInvalidHandleValue;
         return;

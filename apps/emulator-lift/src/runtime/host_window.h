@@ -79,6 +79,9 @@ public:
     // 消息队列（不弹 SDL；P3 由后端往同一个队列里 post）
     void post(const WinMessage& msg);
     bool peek(WinMessage* out, bool remove);
+    // 只看第 index 条（0 = 队首），**不取走**。`MsgWaitForMultipleObjects` 要"扫描整个队列找匹配
+    // 唤醒掩码的消息"，只看队首会让"不匹配的消息挡在前面"时误报 WAIT_TIMEOUT。
+    bool peekAt(std::size_t index, WinMessage* out) const;
     bool get(X86& cpu, WinMessage* out);  // headless：先 pump 计时器；无消息 ⇒ false（调用方报错）
     void postQuit(std::uint32_t code);
     bool quitPosted() const { return quit_; }
@@ -93,6 +96,27 @@ public:
     // 非客户区扣除（客户区 = 外层 - 边框 - 标题栏 - 菜单）；样式里没有 WS_CAPTION 就不扣标题栏。
     static void clientSizeFor(std::uint32_t style, int outer_w, int outer_h, int* client_w, int* client_h);
 
+    // =====================================================================================
+    // 光标 / 捕获（M2 · 输入族；**headless 虚拟状态**）
+    // ★ 口径（2026-11-04）：不建 SDL 光标、不读 .cur；句柄 / 位置 / 显示计数 / 捕获都是
+    //   **确定性宿主状态**，语义按 Win32 文档照做（返回旧句柄 / 新显示计数 / TRUE），
+    //   ⛔ 不返回随机值、⛔ 不假装成功却什么都不记。
+    // ★ 虚拟光标位置初值 = **(0,0)**：headless 没有鼠标输入，屏幕原点是"还没有输入"的
+    //   中性状态（选它而不是客户区中心：后者会让 `ScreenToClient` 在上窗口之前给出负坐标）。
+    // ★ `ShowCursor` 的语义是**显示计数**（真机初值 0，`>= 0` 才显示）：显示 +1 / 隐藏 -1，
+    //   返回值 = **新计数**（不是布尔、不是旧值）。
+    // =====================================================================================
+    std::uint32_t setCursor(std::uint32_t hcursor);  // 返回**旧** HCURSOR（Win32 语义）
+    std::uint32_t cursor() const { return cursor_; }
+    void setCursorPos(int x, int y);
+    void getCursorPos(int* x, int* y) const {
+        if (x) *x = cursor_x_;
+        if (y) *y = cursor_y_;
+    }
+    int showCursor(bool show);                     // 显示 +1 / 隐藏 -1，返回**新**显示计数
+    std::uint32_t setCapture(std::uint32_t hwnd);  // 返回**旧**捕获窗口（0 = 没有）
+    std::uint32_t capture() const { return capture_; }
+
 private:
     std::vector<WindowClassInfo> classes_;
     std::map<std::uint32_t, HostWindow> windows_;
@@ -103,6 +127,12 @@ private:
     std::uint32_t next_timer_ = 1;
     bool quit_ = false;
     std::uint32_t quit_code_ = 0;
+    // 光标 / 捕获（见上面的方法注释）
+    std::uint32_t cursor_ = 0;
+    std::uint32_t capture_ = 0;
+    std::int32_t cursor_x_ = 0;
+    std::int32_t cursor_y_ = 0;
+    int cursor_show_count_ = 0;
 };
 
 }  // namespace lift

@@ -25,9 +25,14 @@ void registerKernel32Shims(ShimRegistry& shims) {
     registerAgercShims(shims);     // kernel32_agerc.cpp：AGERC 三个导出（SCOPE §1 模态 no-op）
     registerUser32MenuShims(shims);  // user32_menu.cpp：菜单 / 模态 no-op（SCOPE §1）
     registerUser32WindowShims(shims);  // user32_window.cpp：P0 窗口 / 完整消息泵
+    registerUser32InputShims(shims);   // user32_input.cpp：M2 输入 / 光标族（headless 真语义）
     registerUser32ResourceShims(shims); // user32_resource.cpp：AGE.EXE 图标 / 光标
     registerGdiBootShims(shims);       // gdi32_boot.cpp：P0 启动最小件
-    registerShell32Shims(shims);       // shell32.cpp：特殊目录（--appdata）
+    registerGdiFontShims(shims);       // gdi32_object.cpp + gdi32_font.cpp：P2 GDI 对象表 / 字体 / 文本
+    registerDdrawShims(shims);         // ddraw.cpp：P1 DirectDrawCreate 动态导出（G1 的通用表）
+    registerShell32Shims(shims);       // shell32.cpp：特殊目录（--appdata）+ imm32（没有 IME）
+    registerShlwapiShims(shims);       // shlwapi.cpp：PathRemoveFileSpecA（P4 文件 / 路径邻域）
+    registerImagehlpShims(shims);      // imagehlp.cpp：MakeSureDirectoryPathExists（P4 递归建目录）
     registerVersionShims(shims);   // kernel32_version.cpp：版本资源查询（真实失败码 1813）
 
     // =================================================================================
@@ -63,16 +68,16 @@ void registerKernel32Shims(ShimRegistry& shims) {
     shims.addUnimplemented("user32", "SetFocus", kUser32);
 
     // ---- gdi32：2D 图形 ----
-    const char* kGdi32 = "M2 GDI / 2D 图形族（不属 M1）";
+    // ★ P2 已实现（见 gdi32_object.cpp / gdi32_font.cpp）：CreateICA / CreateFontIndirectA /
+    //   SelectObject / DeleteObject / DeleteDC / GetCurrentObject / GetStockObject / SetBkMode /
+    //   SetTextColor / GetTextMetricsA / GetGlyphOutlineA / GetTextExtentPoint32A / TextOutA /
+    //   EnumFontFamiliesExA / AddFontMemResourceEx / RemoveFontMemResourceEx。
+    //   仍未实现（P1 / P4）：CreateCompatibleDC / CreateDIBSection / BitBlt / GetDeviceCaps。
+    const char* kGdi32 = "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）";
     shims.addUnimplemented("gdi32", "CreateCompatibleDC", kGdi32);
     shims.addUnimplemented("gdi32", "CreateDIBSection", kGdi32);
-    shims.addUnimplemented("gdi32", "SelectObject", kGdi32);
-    shims.addUnimplemented("gdi32", "DeleteDC", kGdi32);
-    shims.addUnimplemented("gdi32", "DeleteObject", kGdi32);
     shims.addUnimplemented("gdi32", "BitBlt", kGdi32);
     shims.addUnimplemented("gdi32", "GetDeviceCaps", kGdi32);
-    shims.addUnimplemented("gdi32", "SetBkMode", kGdi32);
-    shims.addUnimplemented("gdi32", "SetTextColor", kGdi32);
 
     // ---- d3d9：3D ----
     shims.addUnimplemented("d3d9", "Direct3DCreate9",

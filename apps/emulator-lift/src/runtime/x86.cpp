@@ -157,6 +157,12 @@ Block* BlockCache::get(std::uint32_t ea) {
     // ★ 上次执行期间 guest 写过已解码的代码页：在这里（当前块已经执行完、回到 dispatcher）
     //   才真正丢块，避免执行循环拿着被 free 的 `Block*`。
     if (stale_) dropBlocks();
+    // ★ shim 块先查：它**不参与 SMC 失效**（见 x86.h 的两张表）。⛔ 顺序不能反 ——
+    //   一旦走下面的解码路径，就会把桩页字节当指令解出来。
+    if (const auto sit = shim_blocks_.find(ea); sit != shim_blocks_.end()) {
+        ++hits_;
+        return sit->second.get();
+    }
     const auto it = blocks_.find(ea);
     if (it != blocks_.end()) {
         ++hits_;
@@ -182,30 +188,41 @@ Block* BlockCache::get(std::uint32_t ea) {
 }
 
 Block* BlockCache::installShim(std::uint32_t ea, std::uint32_t shim_id) {
-    if (const auto it = blocks_.find(ea); it != blocks_.end()) return it->second.get();
+    if (const auto it = shim_blocks_.find(ea); it != shim_blocks_.end()) return it->second.get();
+    // ★ 同一个 EA 上如果已经躺着一条**解出来的 guest 块**（桩页字节被当代码解过：SMC 缺陷的后遗症，
+    //   或调用方先执行到桩地址再登记），必须换掉它。否则 dispatcher 会把桩当 guest 代码跑，
+    //   而这张 guest 块还会被 SMC 反复丢掉。"这个 EA 是 shim"以 installShim 为准。
+    blocks_.erase(ea);
     auto block = std::make_unique<Block>();
     block->ea = ea;
     block->is_shim = true;
     block->shim_id = shim_id;
     block->terminated = true;
     Block* raw = block.get();
-    blocks_.emplace(ea, std::move(block));
+    shim_blocks_.emplace(ea, std::move(block));
     return raw;
 }
 
 Block* BlockCache::peek(std::uint32_t ea) const {
+    if (const auto sit = shim_blocks_.find(ea); sit != shim_blocks_.end()) return sit->second.get();
     const auto it = blocks_.find(ea);
     return it == blocks_.end() ? nullptr : it->second.get();
 }
 
 void BlockCache::clear() {
+    // ★ 这是**显式全清**（夹具换一段机器码时用），不是 SMC 失效 ⇒ shim 块也一起清。
+    //   SMC 走的是 dropBlocks()：只清 guest 指令块。
     dropBlocks();
+    shim_blocks_.clear();
     insn_count_ = 0;
     hits_ = 0;
     misses_ = 0;
 }
 
 void BlockCache::dropBlocks() {
+    // ★ 只清 **guest 指令块**。⛔ 这里曾经是 `blocks_.clear()` —— 当 shim 块与 guest 块混在一张表里时，
+    //   guest 写一个已解码的代码页就会把 shim 块一起丢掉；随后 `call 桩地址` 找不到 shim 记录，
+    //   解码器去解桩页字节 ⇒ decode-error（看着像"解码器不认识这条指令"）或静默把数据当代码跑。
     blocks_.clear();
     // 位图保留分配（避免每次 clear 重新分配 128 KiB）；内容清零即可
     if (!code_page_bits_.empty()) code_page_bits_.assign(code_page_bits_.size(), 0);

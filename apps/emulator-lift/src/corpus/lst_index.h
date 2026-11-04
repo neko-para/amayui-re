@@ -30,7 +30,16 @@ public:
     // EA → 行（同一 EA 出现多次时取**第一条指令行**）
     const LstEntry* find(std::uint32_t ea) const;
     // 诊断用文本：找不到 ⇒ 空串
+    // ⚠ 返回 `std::string` ⇒ **会分配**。只许用在非 fault 路径（如 `dumpAtEa`）；
+    //   fault hook 在异常上下文里跑，必须用下面的 `textPtr`。
     std::string textAt(std::uint32_t ea) const;
+    // 诊断用文本的**零分配**形态（2026-11-04 / REQ-01M6JFZFN15MBPG7Y89WNZACFW #4）：
+    //   返回指向内部字符串的指针（生命周期 = 本索引，`load` 之后不再变），找不到 ⇒ nullptr。
+    //   ★ fault hook 在异常上下文里跑：⛔ 不许 new / 不许增长容器 ⇒ 这里只给内部指针，不做任何拷贝。
+    const char* textPtr(std::uint32_t ea) const {
+        const LstEntry* e = find(ea);
+        return e ? e->text.c_str() : nullptr;
+    }
 
     const std::vector<LstEntry>& entries() const { return entries_; }
     // 既不是指令、也判不成数据/伪指令的 token（A2 的失败清单；空 = A2 绿）

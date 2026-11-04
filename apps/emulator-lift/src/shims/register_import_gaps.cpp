@@ -34,47 +34,18 @@ void registerImportGaps(ShimRegistry& shims) {
     shims.addUnimplemented("d3dx9_43", "D3DXMatrixTranslation", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXVec3Normalize", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXVec4Transform", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
-    shims.addUnimplemented("gdi32", "AddFontMemResourceEx", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
     shims.addUnimplemented("gdi32", "CombineRgn", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
     shims.addUnimplemented("gdi32", "CreateEllipticRgnIndirect", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "CreateFontIndirectA", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "CreateICA", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
     shims.addUnimplemented("gdi32", "CreatePolygonRgn", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
     shims.addUnimplemented("gdi32", "CreateRectRgn", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "EnumFontFamiliesExA", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "GetCurrentObject", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "GetGlyphOutlineA", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
     shims.addUnimplemented("gdi32", "GetRegionData", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
     shims.addUnimplemented("gdi32", "GetRgnBox", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "GetTextExtentPoint32A", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "GetTextMetricsA", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
     shims.addUnimplemented("gdi32", "PtInRegion", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "RemoveFontMemResourceEx", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("gdi32", "TextOutA", "M2 GDI 字体 / 2D 图形簇（不属 M1）");
-    shims.addUnimplemented("imagehlp", "MakeSureDirectoryPathExists", "imagehlp：不属 M1（崩溃转储不在本线；归属待裁决）");
-    shims.addUnimplemented("imm32", "ImmAssociateContext", "输入法族：M2（窗口 / 输入），不属 M1");
     shims.addUnimplemented("ole32", "CoCreateInstance", "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1");
     shims.addUnimplemented("ole32", "PropVariantClear", "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1");
     shims.addUnimplemented("oleaut32", "#7", "oleaut32：M2/M3（VARIANT / 自动化），不属 M1");
     shims.addUnimplemented("oleaut32", "#8", "oleaut32：M2/M3（VARIANT / 自动化），不属 M1");
     shims.addUnimplemented("oleaut32", "#9", "oleaut32：M2/M3（VARIANT / 自动化），不属 M1");
-    shims.addUnimplemented("shlwapi", "PathRemoveFileSpecA", "shlwapi：不属 M1（启动路径不需要；归属待裁决）");
-    shims.addUnimplemented("user32", "DestroyMenu", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "DrawMenuBar", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "GetCursorPos", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "GetMenu", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "GetMonitorInfoA", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "GetSubMenu", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "GetSystemMenu", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "LoadCursorFromFileA", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "MonitorFromWindow", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "MsgWaitForMultipleObjects", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "RemoveMenu", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "SetCursor", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "SetCursorPos", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "ShowCursor", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "SystemParametersInfoA", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
-    shims.addUnimplemented("user32", "UnhookWindowsHookEx", "M2 窗口 / 消息族（不属 M1；菜单 / 模态按 SCOPE §1 另记 stub）");
 }
 
 }  // namespace lift

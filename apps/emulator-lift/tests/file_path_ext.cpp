@@ -303,6 +303,134 @@ int main() {
         LIFT_CHECK(!fs::exists(dir / ".lift-tmp" / "AGE0000.TMP", tec));
     }
 
+    // ⑤ shlwapi!PathRemoveFileSpecA（P4 小族）：去掉最后一段 + 一个分隔符
+    //    判据 = ① 结果串（四个边界逐条）② 返回值 = **是否真的移除了东西**
+    //           ③ 只写回"新串 + 结尾 0"，旧串尾巴不清（真机也不清；调用方常紧跟 strcat_s）。
+    {
+        g_current_case = "path-remove-file-spec";
+        Fixture f;
+        lift::registerShlwapiShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t prfs = f.use("shlwapi", "PathRemoveFileSpecA");
+        LIFT_CHECK_NE_U32(prfs, 0u);
+
+        struct Case {
+            const char* in;
+            const char* out;
+            std::uint32_t ret;
+        };
+        const Case cases[] = {
+            // 文件名 + 它前面那个分隔符一起去掉
+            {"D:\\GAME\\save\\file.dat", "D:\\GAME\\save", 1},
+            // 结尾是分隔符 ⇒ 只去掉那个分隔符（最后一段本来就是目录）
+            {"D:\\GAME\\save\\", "D:\\GAME\\save", 1},
+            // 一级路径 ⇒ 保留**根的**尾部反斜杠
+            {"D:\\GAME", "D:\\", 1},
+            // 根目录保持原样 + FALSE（⛔ 不把根的 `\` 也啃掉）
+            {"D:\\", "D:\\", 0},
+            {"\\", "\\", 0},
+            // 没有分隔符 ⇒ 变空串 + FALSE（整串就是一个文件名）
+            {"file.dat", "", 0},
+            {"", "", 0},
+            // `/` 也是分隔符
+            {"D:/GAME/save/file.dat", "D:/GAME/save", 1},
+            // 多级
+            {"D:\\a\\b\\c", "D:\\a\\b", 1},
+            // 盘符根下的一级
+            {"\\a", "\\", 1},
+        };
+        for (const Case& c : cases) {
+            const std::size_t in_len = std::strlen(c.in);
+            const std::size_t out_len = std::strlen(c.out);
+            std::vector<std::uint8_t> blob(0x40, 0xAA);  // 尾部是哨兵
+            std::memcpy(blob.data(), c.in, in_len + 1u);
+            const std::uint32_t p = f.data(blob.data(), blob.size());
+            LIFT_CHECK_EQ_U32(f.call(prfs, {p}), c.ret);
+            LIFT_CHECK(guestStr(f.m, p) == c.out);
+            // 新 NUL 之后的那一个字节必须**原样**（只写了 out_len+1 个字节）
+            const std::size_t probe = out_len + 1u;
+            std::uint8_t expect = 0xAAu;  // 哨兵：既不是输入的一部分、也没被写过
+            if (probe < in_len) {
+                expect = static_cast<std::uint8_t>(c.in[probe]);  // 输入里原本的字节
+            } else if (probe == in_len) {
+                expect = 0x00u;  // 输入自己的结尾 0（那一格本来就在字符串里）
+            }
+            LIFT_CHECK_EQ_U32(f.m.mem().rd8(p + static_cast<std::uint32_t>(probe)), expect);
+        }
+
+        // NULL 指针：不崩、也不假装成功（真机在这里会解引用 NULL）
+        LIFT_CHECK_EQ_U32(f.call(prfs, {0u}), 0u);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑥ imagehlp!MakeSureDirectoryPathExists（P4 小族）：递归建目录，**落盘只经 VFS**
+    //    判据 = ① 宿主盘上真的出现了那几层目录（`\` / `/` 都认、已存在算成功）
+    //           ② 末尾分隔符 ⇒ 最后一段也是目录；**没有**末尾分隔符 ⇒ 最后一段按文件名处理，⛔ 不建
+    //           ③ guest 根 / `--appdata` 前缀不被建成宿主目录（否则安装树旁边会多出一棵假树）
+    //           ④ 逃出根 ⇒ FALSE（⛔ 不建到 game_dir 外面）
+    {
+        g_current_case = "make-sure-directory-path-exists";
+        Fixture f;
+        lift::registerImagehlpShims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));
+        f.m.vfs().setGuestRoot("D:\\GAME");
+        f.m.vfs().setAppDataDir(pathToUtf8(dir / "appdata"));
+        LIFT_CHECK(f.ok);
+        const std::uint32_t msdpe = f.use("imagehlp", "MakeSureDirectoryPathExists");
+        LIFT_CHECK_NE_U32(msdpe, 0u);
+        auto call_msdpe = [&](const char* guest_path) {
+            const std::uint32_t p = f.cstr(guest_path);
+            return f.call(msdpe, {p});
+        };
+
+        // a) 逐段建（`\\` 结尾 = 最后一段也是目录）
+        LIFT_CHECK_EQ_U32(call_msdpe("D:\\GAME\\lift-w4-msdpe\\a\\b\\"), 1u);
+        LIFT_CHECK(fs::is_directory(dir / "lift-w4-msdpe" / "a" / "b", ec));
+        // ★ 关键回归：guest 根的前缀（`D:\GAME`）在 guest 世界里本来就存在 ⇒ ⛔ 不许在宿主上
+        //   造出 `game_dir/GAME`（那会让第一次启动就写脏安装树）
+        LIFT_CHECK(!fs::exists(dir / "GAME", ec));
+
+        // b) 已存在算成功（与 CreateDirectoryA 的"已存在即失败"相反）
+        LIFT_CHECK_EQ_U32(call_msdpe("D:\\GAME\\lift-w4-msdpe\\a\\b\\"), 1u);
+
+        // c) 没有末尾分隔符 ⇒ 最后一段是**文件名**，只建到它的父目录
+        LIFT_CHECK_EQ_U32(call_msdpe("D:\\GAME\\lift-w4-msdpe2\\a\\file.txt"), 1u);
+        LIFT_CHECK(fs::is_directory(dir / "lift-w4-msdpe2" / "a", ec));
+        LIFT_CHECK(!fs::exists(dir / "lift-w4-msdpe2" / "a" / "file.txt", ec));
+
+        // d) 根 ⇒ TRUE（没有要建的段）
+        LIFT_CHECK_EQ_U32(call_msdpe("D:\\"), 1u);
+
+        // e) 空串 / NULL ⇒ FALSE + ERROR_INVALID_PARAMETER
+        LIFT_CHECK_EQ_U32(call_msdpe(""), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK_EQ_U32(f.call(msdpe, {0u}), 0u);
+
+        // f) `/` 也是分隔符
+        LIFT_CHECK_EQ_U32(call_msdpe("D:/GAME/lift-w4-fwd/x/y/"), 1u);
+        LIFT_CHECK(fs::is_directory(dir / "lift-w4-fwd" / "x" / "y", ec));
+
+        // g) `\\` 前缀（UNC 形态）：与所有其它路径 API 走**同一条** VFS 单一根映射
+        //    （⛔ 不假装能建网络共享；`\\server\share` 之后的部分落到 --game-dir）
+        LIFT_CHECK_EQ_U32(call_msdpe("\\\\server\\share\\lift-w4-unc\\z\\"), 1u);
+        LIFT_CHECK(fs::is_directory(dir / "server" / "share" / "lift-w4-unc" / "z", ec));
+
+        // h) 逃出 guest 根 ⇒ FALSE，且 game_dir 外面什么都没建
+        LIFT_CHECK_EQ_U32(call_msdpe("D:\\GAME\\..\\..\\lift-w4-escape\\"), 0u);
+        LIFT_CHECK(!fs::exists(dir.parent_path() / "lift-w4-escape", ec));
+
+        // i) `--appdata` 的特殊目录：映射到 `<appdata>/Roaming`，**不**落到 game_dir 的 `Users` 下
+        LIFT_CHECK_EQ_U32(call_msdpe("C:\\Users\\Amayui\\AppData\\Roaming\\lift-w4-appdata\\sub\\"), 1u);
+        LIFT_CHECK(fs::is_directory(dir / "appdata" / "Roaming" / "lift-w4-appdata" / "sub", ec));
+        LIFT_CHECK(!fs::exists(dir / "Users", ec));
+
+        // j) 相对路径（相对 guest cwd = guestRoot）
+        LIFT_CHECK_EQ_U32(call_msdpe("lift-w4-rel\\d\\"), 1u);
+        LIFT_CHECK(fs::is_directory(dir / "lift-w4-rel" / "d", ec));
+
+        LIFT_CHECK(f.ok);
+    }
+
     fs::remove_all(dir, ec);
     return finish("file-path-ext");
 }

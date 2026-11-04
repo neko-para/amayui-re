@@ -4,6 +4,7 @@
   "description": "Lift AGE.EXE .lst into a guest-state x86 emulator (SDL3 host, Win32/GDI/DDraw shim)",
   "dependencies": [
     "sdl3",
-    "zydis"
+    "zydis",
+    "freetype"
   ]
 }

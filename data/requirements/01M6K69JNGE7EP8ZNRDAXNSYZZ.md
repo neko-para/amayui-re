@@ -2,37 +2,38 @@
 
 - id: REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6FW5JGQGHACXHPWZD4Y3E
+- verify: apps/emulator-lift/tests/locale_ext.cpp#get-string-type-w-ctype1
 - repro: apps/emulator-lift/src/shims/kernel32_bootstrap.cpp#shimGetStringTypeW
 - severity: S2
 - tags: [emulator-lift, m1, s6]
 
 ## 一句话
-`GetStringTypeW(CT_CTYPE1)` 的位值抄错，且 `dwInfoType` 被 `(void)type` 丢弃：CRT 的宽字符分类（`iswalpha` / `iswspace` / `iswdigit` …）会**静默**得到错结果。
+`GetStringTypeW(CT_CTYPE1)` 的位值抄错、`dwInfoType` 被 `(void)type` 丢弃 ⇒ CRT 的宽字符分类
+（`iswalpha` / `iswspace` / `iswdigit`）**静默**得到错结果。**已修 ASCII 部分**。
 
-## 现状（2026-11-04 审计）
-`apps/emulator-lift/src/shims/kernel32_bootstrap.cpp` 的 `shimGetStringTypeW`：
-```cpp
-if (w == 0) flags |= 0x0001;                       // 0x0001 = C1_UPPER（不是"NULL"）
-if (w < 0x20) flags |= 0x0020;                     // C1_CNTRL（对）
-else if (w == 0x20) flags |= 0x0020 | 0x0008;      // 空格被标成 CNTRL|SPACE
-else if (w >= 0x30 && w <= 0x39) flags |= 0x0004 | 0x0080;  // DIGIT|XDIGIT（对）
-else if (A-Z / a-z) flags |= 0x0004 | 0x0100;      // 字母被标成 DIGIT|ALPHA
-```
-- CT_CTYPE1 的正确位：`C1_UPPER 0x0001` · `C1_LOWER 0x0002` · `C1_DIGIT 0x0004` · `C1_SPACE 0x0008` · `C1_PUNCT 0x0010` · `C1_CNTRL 0x0020` · `C1_BLANK 0x0040` · `C1_XDIGIT 0x0080` · `C1_ALPHA 0x0100`。
-- 按 MSDN：`'A'` = `UPPER|ALPHA|XDIGIT` = `0x0181`；`'a'` = `LOWER|ALPHA|XDIGIT` = `0x0182`；`'G'` = `0x0101`；`'0'` = `0x0084`；`' '` = `SPACE|BLANK` = `0x0048`；`'!'` = `0x0010`。
-- `dwInfoType` 只接受 CT_CTYPE1（1）；CT_CTYPE2/3（5/6? 具体值按 Win32）目前会**假装成功**并按 CT_CTYPE1 写错位。
+## 改了什么
+`src/shims/kernel32_bootstrap.cpp#shimGetStringTypeW`：
+- CT_CTYPE1 位按 MSDN 表：UPPER 0x1 / LOWER 0x2 / DIGIT 0x4 / SPACE 0x8 / PUNCT 0x10 / CNTRL 0x20 /
+  BLANK 0x40 / XDIGIT 0x80 / ALPHA 0x100。定点：`'A'=0x0181`、`'a'=0x0182`、`'G'=0x0101`、
+  `'0'=0x0084`、`' '=0x0048`、`'!'=0x0010`；`U+0000` / `U+000D` = CNTRL(0x20)
+  （旧实现给 NUL `0x0001` = C1_UPPER）。
+- `dwInfoType != CT_CTYPE1` ⇒ `0` + `ERROR_INVALID_PARAMETER(87)` + 一行 `shimLog`。
+- `cchSrc == -1`（NUL 结尾）现在真的按 NUL 扫（旧实现直接失败）；`cchSrc == 0` / `< -1` ⇒ 0 + 87。
+- **非 ASCII**：位给 0 + 一次日志（⛔ 不拿 `w < 0x80` 猜）。实测启动路径就会碰到 84 个非 ASCII 字符，
+  所以这条缺口是**真缺口**，已另开 `REQ-01M6KH7EPPNWJDHPDQ6REV2RRM`（同级单）做字符类表。
 
-## 影响（为什么不是"已知边界"）
-- 它属于 D6 的"码页与字符串"族，且**登记为 implemented**；审计把它列为 20 条 thin-suspect 之一。
-- 启动到 L2 不依赖（A4 仍绿），但 M2 的文本 / 字符串比较会直接踩；错误是静默的（返回 1）。
+## 与单里写法的两处更正
+- `CT_CTYPE2 / CT_CTYPE3` 的值是 **2 / 4**（单里写"5/6? 具体值按 Win32"，`<待核>`）。
+- 这两个值在**真机上合法**（会成功）。本单按判据要求返回 87 = "本模拟器没实现"的**明确失败**，
+  ⛔ 不是文档行为 —— 将来实现它们时这条要改。
 
-## 判据（落地时写成 CTest）
-- ASCII 定点：`A/a/G/0/9/!/空格` 逐位相等（含 XDIGIT 的边界）；
-- `dwInfoType` 不支持的类别 ⇒ `0 + ERROR_INVALID_PARAMETER(87)`，⛔ 不许静默按 CT_CTYPE1 处理；
-- 非 ASCII（CP932 假名 / 全角）单列 `<待核>`：需要一张字符类表，不能拿 `w < 0x80` 猜；
-- 加一条变异（把 `C1_ALPHA` 位写错 ⇒ 新用例红）。
+## 判据（已落成 CTest）
+- `apps/emulator-lift/tests/locale_ext.cpp#get-string-type-w-ctype1`
+  A/a/G/0/9/!/空格 逐位相等 + NUL/CR = CNTRL + `cchSrc=-1` + 非 ASCII = 0（缺口钉住，实现表后要改）。
+- `apps/emulator-lift/tests/locale_ext.cpp#get-string-type-w-info-type`
+  `dwInfoType ∈ {0,2,4,3}` ⇒ 0 + 87；空指针 / `cchSrc=0` / `cchSrc=-2` ⇒ 0 + 87。
 
-## 边界
-- 本单只保证 **ASCII 的 CT_CTYPE1 位正确 + 不支持的 info type 明确失败**；CP932 的字符分类另开（若 M2 需要）。
+## 证据
+- 变异实测：`kC1Alpha` 改成 `0x0800` ⇒ `get-string-type-w-ctype1` 红（`0x0181` 变成 `0x0881`）。

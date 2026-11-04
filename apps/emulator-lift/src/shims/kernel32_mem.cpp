@@ -19,9 +19,19 @@
 //      对齐切（128 MiB 上限；这些常量是本文件的口径，`vcpkg`/layout 都拿不到 layout）。
 //      第一次调用时懒初始化（`va_cursor==0` ⇒ 置 0x20000000、`va_limit` 置 0x28000000）。
 //      影响：**不可能**预留 1 GiB 以上的单块；超过 128 MiB 直接 OOM（返回 0 + 错误 8）。
-//   4. **`VirtualFree(MEM_RELEASE)` 只支持 LIFO / 整段**：要求 `dwSize==0`、`lpAddress` 是本
-//      模拟器发出的**块基址**（`regionOf(ea)->begin == ea`），然后 `decommit [ea, va_cursor)`
-//      并把游标退回 `ea`。其它形态打印一行 + 返回 FALSE + 错误 87。非 LIFO 释放不支持。
+//      ★ 与文档的对齐（2026-11-04 收口 REQ-01M6JJ6ZYNT6FP5ESHRTFG9HA4）：`MEM_COMMIT` 必须落在
+//      **已预留**的区域里（显式地址不先 `MEM_RESERVE` ⇒ 0 + `ERROR_INVALID_ADDRESS(487)`，
+//      ⛔ 不再"顺手把任意地址清零"）；bump 出来的块自动进区域账本（`GuestMemory::vaRanges()`），
+//      所以"先 `MEM_RESERVE`、再对同一地址 `MEM_COMMIT`"成立。**仍然保留**的偏差：
+//      `addr==0` 且只给 `MEM_COMMIT` 时按新块处理（文档要求先预留；这是 bump 口径的让步）。
+//   4. **`VirtualFree(MEM_RELEASE)` 支持任意顺序的整段释放**（★ 2026-11-05 语义修正）：
+//      要求 `dwSize==0`，`lpAddress` 必须是**某个活预留区的基址**（bump 出来的与显式地址预留的都算），
+//      然后 `decommit [ea, 区域末尾)` 并把该区域从账本里摘掉。基址不对 / 重复释放 ⇒ 0 +
+//      `ERROR_INVALID_ADDRESS(487)`，**别的区域不受影响**。
+//      ★ 为什么改：旧实现（以及旧用例）只认"最后一块 bump 块"（LIFO），而实测**被测引擎**在窗口建立后
+//      连续释放 5 个显式预留区（`0x3E000000` / `0x4D000000` / `0x4B000000` / `0x3D000000` / `0x31000000`），
+//      五条全被拒成 `ERROR_INVALID_PARAMETER(87)` ⇒ 内存永远不回收。真实 Windows 允许任意顺序释放。
+//      `MEM_DECOMMIT` 认 `dwSize==0`（文档：从 lpAddress 退到该区域末尾）——⛔ 旧实现直接拒收。
 //   5. **`VirtualProtect` 不真的改保护**：本模拟器所有已提交页都是 RW，旧保护一律写回
 //      `PAGE_READWRITE`(4)。请求值不是 PAGE_READWRITE 时打一行（否则每帧都要刷屏）。
 //      影响：guest 靠"写只读页触发异常"做自检 / 自修改代码检测时不会触发 —— 这是本模拟器
@@ -39,6 +49,7 @@ namespace {
 
 constexpr std::uint32_t kErrNotEnoughMemory = 8u;
 constexpr std::uint32_t kErrInvalidParameter = 87u;
+constexpr std::uint32_t kErrInvalidAddress = 487u;  // ERROR_INVALID_ADDRESS
 
 constexpr std::uint32_t kHeapZeroMemory = 0x00000008u;  // HEAP_ZERO_MEMORY
 constexpr std::uint32_t kLmemZeroInit = 0x00000040u;    // LMEM_ZEROINIT
@@ -360,6 +371,20 @@ void shimCoTaskMemRealloc(X86& cpu, ShimCall& call) {
 }
 
 // ---- Virtual* ----
+// `MEM_COMMIT` 只把**未提交**的页变成已提交：文档说已提交的页**内容不变** ⇒ 不清零那一部分
+// （⛔ 旧实现无条件 `commitZeroed` ⇒ "对已提交的地址再 COMMIT"会静默清掉调用方的数据）。
+bool commitZeroedUncommitted(X86& cpu, std::uint32_t ea, std::uint32_t span) {
+    if (cpu.mem->committed(ea, span)) return true;  // 整段都已提交：成功，且不动内容
+    std::uint32_t first = ea;
+    while (first < ea + span &&
+           cpu.mem->committed(first, GuestMemory::kPage)) {
+        first += GuestMemory::kPage;
+    }
+    if (first >= ea + span) return true;
+    return cpu.mem->commitZeroed(first, static_cast<std::size_t>(ea + span - first), RegionKind::Other,
+                                 "VirtualAlloc");
+}
+
 void shimVirtualAlloc(X86& cpu, ShimCall& call) {
     requireMem(cpu, "VirtualAlloc");
     const std::uint32_t want = call.u32(0);
@@ -381,6 +406,7 @@ void shimVirtualAlloc(X86& cpu, ShimCall& call) {
         return;
     }
     const std::uint32_t page_span = alignUp(bytes, GuestMemory::kPage);
+    const std::uint32_t reserve_span = alignUp(bytes, kAllocGranularity);
 
     if (want != 0) {  // 指定地址：不动 bump 游标
         if ((want & GuestMemory::kPageMask) != 0) {
@@ -389,17 +415,50 @@ void shimVirtualAlloc(X86& cpu, ShimCall& call) {
             call.result = 0;
             return;
         }
-        if (do_commit) {
-            if (!cpu.mem->commitZeroed(want, page_span, RegionKind::Other, "VirtualAlloc")) {
+        VaRangeTable& va = cpu.mem->vaRanges();
+        if (do_reserve) {
+            // 文档：同一段不能**重复预留** ⇒ ERROR_INVALID_ADDRESS
+            if (va.overlapsLive(want, reserve_span)) {
+                cpu.shim.last_error = kErrInvalidAddress;
+                shimLog("kernel32", "VirtualAlloc",
+                        "0x%08X 起 0x%X 字节已经在保留区里 ⇒ 返回 0（ERROR_INVALID_ADDRESS）", want,
+                        reserve_span);
+                call.result = 0;
+                return;
+            }
+            if (do_commit && !commitZeroedUncommitted(cpu, want, page_span)) {
                 cpu.shim.last_error = kErrNotEnoughMemory;
                 shimLog("kernel32", "VirtualAlloc", "提交 [0x%08X,+0x%X) 失败：%s ⇒ 返回 0", want,
                         page_span, cpu.mem->lastError());
                 call.result = 0;
                 return;
             }
+            cpu.mem->annotate(want, reserve_span, RegionKind::Other,
+                              do_commit ? "VirtualAlloc(hint,reserve|commit)" : "VirtualAlloc(hint,reserve)");
+            va.add(want, want + reserve_span, do_commit ? page_span : 0u, /*bump=*/false);
         } else {
-            cpu.mem->annotate(want, alignUp(bytes, kAllocGranularity), RegionKind::Other,
-                              "VirtualAlloc(reserve)");
+            // 文档（VirtualAlloc 的 Remarks / MEM_COMMIT）：**只有已保留的页**才能提交，
+            // 否则失败 + ERROR_INVALID_ADDRESS(487)。⛔ 不许对任意地址 `commitZeroed`。
+            if (!va.covers(want, page_span)) {
+                cpu.shim.last_error = kErrInvalidAddress;
+                shimLog("kernel32", "VirtualAlloc",
+                        "0x%08X 起 0x%X 字节没有先 MEM_RESERVE ⇒ 返回 0（ERROR_INVALID_ADDRESS）", want,
+                        page_span);
+                call.result = 0;
+                return;
+            }
+            if (!commitZeroedUncommitted(cpu, want, page_span)) {
+                cpu.shim.last_error = kErrNotEnoughMemory;
+                shimLog("kernel32", "VirtualAlloc", "提交 [0x%08X,+0x%X) 失败：%s ⇒ 返回 0", want,
+                        page_span, cpu.mem->lastError());
+                call.result = 0;
+                return;
+            }
+            if (VaRange* r = va.find(want)) {
+                const std::uint32_t end_committed =
+                    want + page_span > r->begin + r->committed ? want + page_span - r->begin : r->committed;
+                r->committed = end_committed;
+            }
         }
         call.result = want;
         return;
@@ -410,7 +469,7 @@ void shimVirtualAlloc(X86& cpu, ShimCall& call) {
         cpu.shim.va_cursor = kVaBase;
         cpu.shim.va_limit = kVaEnd;
     }
-    const std::uint32_t span = alignUp(bytes, kAllocGranularity);
+    const std::uint32_t span = reserve_span;
     if (span == 0 || cpu.shim.va_cursor >= cpu.shim.va_limit ||
         span > cpu.shim.va_limit - cpu.shim.va_cursor) {
         cpu.shim.last_error = kErrNotEnoughMemory;
@@ -422,7 +481,7 @@ void shimVirtualAlloc(X86& cpu, ShimCall& call) {
     }
     const std::uint32_t ea = cpu.shim.va_cursor;
     if (do_commit) {
-        if (!cpu.mem->commitZeroed(ea, page_span, RegionKind::Other, "VirtualAlloc")) {
+        if (!commitZeroedUncommitted(cpu, ea, page_span)) {
             cpu.shim.last_error = kErrNotEnoughMemory;
             shimLog("kernel32", "VirtualAlloc", "提交 [0x%08X,+0x%X) 失败：%s ⇒ 返回 0", ea,
                     page_span, cpu.mem->lastError());
@@ -430,8 +489,9 @@ void shimVirtualAlloc(X86& cpu, ShimCall& call) {
             return;
         }
     } else {
-        cpu.mem->annotate(ea, span, RegionKind::Other, "VirtualAlloc(reserve)");
+        cpu.mem->annotate(ea, span, RegionKind::Other, "VirtualAlloc(bump,reserve)");
     }
+    cpu.mem->vaRanges().add(ea, ea + span, do_commit ? page_span : 0u, /*bump=*/true);
     cpu.shim.va_cursor += span;  // 只有成功才推进（失败不留洞）
     call.result = ea;
 }
@@ -450,38 +510,60 @@ void shimVirtualFree(X86& cpu, ShimCall& call) {
             call.result = 0;
             return;
         }
-        if (cpu.shim.va_cursor == 0 || ea < kVaBase || ea >= cpu.shim.va_cursor) {
-            cpu.shim.last_error = kErrInvalidParameter;
-            shimLog("kernel32", "VirtualFree", "0x%08X 不是本模拟器 bump 出来的地址（游标 0x%08X）⇒ 返回 0",
-                    ea, cpu.shim.va_cursor);
-            call.result = 0;
-            return;
-        }
-        const Region* r = cpu.mem->regionOf(ea);
-        if (!r || r->begin != ea) {
-            cpu.shim.last_error = kErrInvalidParameter;
+        // ★ 任意顺序的整段释放（2026-11-05 修正，实测驱动）：
+        //   真实 Windows 允许**按任意顺序** `MEM_RELEASE` 每一个独立预留区。旧实现只认
+        //   "最后一块 bump 块"（LIFO），而实测引擎在窗口建立后连续释放 5 个**显式预留**区
+        //   （`0x3E000000` / `0x4D000000` / `0x4B000000` / `0x3D000000` / `0x31000000`）
+        //   ⇒ 五条全被拒成 `ERROR_INVALID_PARAMETER`，内存永远不回收（boot 里可见）。
+        //   判据仍是 Win32 的：lpAddress 必须是**预留区的基址**，否则 `ERROR_INVALID_ADDRESS(487)`。
+        VaRange* r = cpu.mem->vaRanges().findBegin(ea);
+        if (!r) {
+            cpu.shim.last_error = kErrInvalidAddress;
             shimLog("kernel32", "VirtualFree",
-                    "0x%08X 不是块基址（区域起点 0x%08X）—— 只支持 LIFO 整段释放 ⇒ 返回 0", ea,
-                    r ? r->begin : 0u);
+                    "0x%08X 不是任何活预留区的基址（重复释放 / 未预留）⇒ 返回 0（ERROR_INVALID_ADDRESS）",
+                    ea);
             call.result = 0;
             return;
         }
-        // 偏差 4：LIFO 整段归还 —— decommit [ea, 游标) 并把游标退回 ea
-        cpu.mem->decommit(ea, cpu.shim.va_cursor - ea);
-        cpu.shim.va_cursor = ea;
+        // 整段归还：decommit [ea, 区域末尾) 并把它从活区域里摘掉。
+        const std::uint32_t span = r->end - r->begin;
+        cpu.mem->decommit(ea, span);
+        const bool was_bump = r->bump;
+        cpu.mem->vaRanges().release(ea);
+        // bump 块若正好是游标所在的位置，游标退回去（否则保留高水位：中间挖洞是合法的，
+        // 真实 Windows 也不保证再分配的连续性）。
+        if (was_bump && cpu.shim.va_cursor == ea) cpu.shim.va_cursor = ea;
         call.result = 1;
         return;
     }
 
     if ((type & kMemDecommit) != 0) {
-        if (bytes == 0 || (ea & GuestMemory::kPageMask) != 0) {
+        if ((ea & GuestMemory::kPageMask) != 0) {
             cpu.shim.last_error = kErrInvalidParameter;
-            shimLog("kernel32", "VirtualFree", "MEM_DECOMMIT 需要非 0 且页对齐的地址/大小 "
-                                               "(0x%08X, %u) ⇒ 返回 0", ea, bytes);
+            shimLog("kernel32", "VirtualFree", "MEM_DECOMMIT 需要页对齐的地址 (0x%08X) ⇒ 返回 0", ea);
             call.result = 0;
             return;
         }
-        cpu.mem->decommit(ea, alignUp(bytes, GuestMemory::kPage));
+        VaRange* r = cpu.mem->vaRanges().find(ea);
+        if (!r) {
+            // 文档：MEM_DECOMMIT 的 lpAddress 必须在**已保留**的区域里（否则 ERROR_INVALID_ADDRESS）
+            cpu.shim.last_error = kErrInvalidAddress;
+            shimLog("kernel32", "VirtualFree",
+                    "0x%08X 不在任何保留区里 ⇒ 返回 0（ERROR_INVALID_ADDRESS）", ea);
+            call.result = 0;
+            return;
+        }
+        if (bytes == 0) {
+            // 文档：dwSize==0 ⇒ 从 lpAddress **退到该区域末尾**（整段）
+            cpu.mem->decommit(ea, r->end - ea);
+            r->committed = ea > r->begin ? (r->committed > ea - r->begin ? ea - r->begin : r->committed) : 0u;
+            call.result = 1;
+            return;
+        }
+        const std::uint32_t span = alignUp(bytes, GuestMemory::kPage);
+        cpu.mem->decommit(ea, span);
+        // 记账：只有"退到尾部"的 decommit 才会让已提交前缀变短
+        if (ea + span >= r->begin + r->committed) r->committed = ea - r->begin;
         call.result = 1;
         return;
     }
@@ -512,8 +594,7 @@ void shimVirtualProtect(X86& cpu, ShimCall& call) {
 // 文档：把一段虚拟地址锁进物理内存；**区内的每一页都必须已提交**（PAGE_NOACCESS 不能锁）。
 // 本模拟器的 guest 内存永远是宿主常驻的（没有换页），所以"锁"没有额外动作 —— 这不是 no-op
 // 假成功，而是**契约本来就已满足**。仍然按文档做那一项可判的前提检查：整段必须已提交。
-constexpr std::uint32_t kErrInvalidAddress = 487u;
-
+// ★ `ERROR_INVALID_ADDRESS(487)` 的常量已在文件顶部（Virtual* 与 VirtualLock 共用）。
 void shimVirtualLock(X86& cpu, ShimCall& call) {
     const char* api = "VirtualLock";
     requireMem(cpu, api);

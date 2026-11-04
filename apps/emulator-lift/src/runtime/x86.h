@@ -33,6 +33,7 @@ class Vfs;
 class ComRegistry;
 class GuestCallStack;
 class WindowManager;
+class FontEngine;
 
 // ★ SMC 钩子：`X86::writeMem` 在类定义之前，不能直接调 `BlockCache::noteWrite`（不完整类型）。
 //   `cache == nullptr` 时（测试里没装缓存）是 no-op。
@@ -167,6 +168,8 @@ struct X86 {
     ComRegistry* com = nullptr;
     GuestCallStack* calls = nullptr;
     WindowManager* windows = nullptr;
+    // ★ P2：宿主字体层（FreeType 桥 + 合成字形接缝）；gdi32 的字体 / 文本 shim 从这里取。
+    FontEngine* fonts = nullptr;
 
     // ---- 最近执行过的指令（诊断用环形缓冲；停在 eip=0 这类地方时能看见"从哪来"）----
     static constexpr int kLastInsns = 24;
@@ -262,16 +265,17 @@ public:
     // 是否已缓存
     Block* peek(std::uint32_t ea) const;
 
-    std::size_t blockCount() const { return blocks_.size(); }
+    std::size_t blockCount() const { return blocks_.size() + shim_blocks_.size(); }
     std::size_t insnCount() const { return insn_count_; }
     std::size_t hits() const { return hits_; }
     std::size_t misses() const { return misses_; }
     const char* lastError() const { return last_error_; }
     std::uint32_t lastErrorEa() const { return last_error_ea_; }
     void clear();
-    // ★ SMC（自修改代码）：guest 写到"已解码过的代码页"时清空块缓存，下一次从新字节重新解码。
+    // ★ SMC（自修改代码）：guest 写到"已解码过的代码页"时清空**guest 指令块**，下一次从新字节重新解码。
     //   `X86::writeMem` 每写一次调一次；实现是**一次位图查询**（最多 0x100000 位 = 128 KiB），
     //   堆 / 栈的写会落在"未标记"分支 ⇒ 不影响热路径的量级。
+    //   ⛔ shim 块不参与失效（它不在 `blocks_` 里，是导入的唯一地址、不是解出来的代码）。
     void noteWrite(std::uint32_t ea, std::size_t n);
 
 private:
@@ -281,8 +285,12 @@ private:
 
     Decoder* dec_ = nullptr;
     GuestMemory* mem_ = nullptr;
+    // ★ 两类块**分开两张表**（2026-11-04 修 P0）：`blocks_` = 从 guest 字节解出来的指令块，
+    //   可以被 SMC 整张丢掉；`shim_blocks_` = `installShim` 声明的 shim 块，与"哪一页被写过"无关。
+    //   放进同一张表就必须在失效时逐条挑出来（O(n)），而且一漏就静默丢 shim（decode-error 误归因）。
     std::unordered_map<std::uint32_t, std::unique_ptr<Block>> blocks_;
-    bool stale_ = false;  // 有代码页被写过 ⇒ 下一个 get 先清缓存（不能当场清：当前块还在执行）
+    std::unordered_map<std::uint32_t, std::unique_ptr<Block>> shim_blocks_;
+    bool stale_ = false;  // 有代码页被写过 ⇒ 下一个 get 先清 guest 块（不能当场清：当前块还在执行）
     std::vector<std::uint64_t> code_page_bits_;  // 已解码块覆盖的 guest 页（4 KiB 粒度）
     std::size_t insn_count_ = 0;
     std::size_t hits_ = 0;

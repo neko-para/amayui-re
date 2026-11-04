@@ -87,6 +87,17 @@ public:
     bool isDirectory(const std::string& guest_path) const;
     bool isFile(const std::string& guest_path) const;
 
+    // ★ P4：`imagehlp!MakeSureDirectoryPathExists` 的落点（递归建目录）。
+    //   口径（照 Win32 文档 + 引擎的实际用法，见 imagehlp.cpp 的文件头）：
+    //   · 路径里**每个分隔符（`\` / `/`）之前**的段都是目录 ⇒ 必须存在；
+    //   · **末尾分隔符**把最后一段也标成目录（引擎就是这么调的：`.lst` 0x00490383 先补 `\`）；
+    //   · **没有**末尾分隔符时最后一段按**文件名**处理，⛔ 不建它；
+    //   · 连续分隔符（`\\`）没有段 ⇒ 跳过；盘符 / guest 根 / `--appdata` 特殊目录这些"根"不创建
+    //     （它们本来就在，⛔ 不许为 `E:\Games` 这种根前缀在宿主上造出一棵假目录树）；
+    //   · **已存在算成功**（这是它与 `CreateDirectoryA` 的关键区别）。
+    //   返回 false 时 `error` 写清是哪一段 / 为什么（调用方映射成 Win32 失败值）。
+    bool makeSureDirectoryPathExists(const std::string& guest_path, std::string* error) const;
+
     // 常用：把 guest 路径规范化成"绝对 guest 路径"（不改大小写；用于日志 / 当前目录）
     std::string absoluteGuest(const std::string& guest_path) const;
     // ★ `GetFullPathNameA` 用：**纯文本**规范化（相对路径相对 guest cwd；折叠 `.` / `..`；

@@ -398,6 +398,9 @@ void shimGetSystemMetrics(X86& cpu, ShimCall& call) {
         case 13: call.result = 32; break;                       // SM_CXCURSOR
         case 14: call.result = 32; break;                       // SM_CYCURSOR
         case 15: call.result = WindowManager::kMenu; break;     // SM_CYMENU
+        // ★ SM_SWAPBUTTON(23)：引擎真的问过（`.lst` 0x0040876B 附近 / boot 实测）。
+        //   0 = 左右键没交换（真机默认值；headless 没有"用户设置"⇒ 用默认）。
+        case 23: call.result = 0; break;
         case 28: call.result = 112; break;                      // SM_CXMIN
         case 29: call.result = 27; break;                       // SM_CYMIN
         default:

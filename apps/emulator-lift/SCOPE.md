@@ -78,3 +78,31 @@
 - 宿主 = SDL3；Win32/GDI/DDraw 形状层自己写（`doc §5.5`）。
 - 宿主 fault 归因**分平台实现**（POSIX `sigaction` / Windows VEH）；这不是 guest 可见语义，不做抽象层。
 - 覆盖 = 清单 + 块级调度表；生成物不入库（`doc §5.7`）。
+
+## 5. 字体 / 文本的宿主策略与登记偏差（P2 · 2026-11-04）
+
+> ★ 这一节是**用户 2026-11-04 的 D3 裁决在 lift 里的落地**（真源：`apps/emulator-cxx/SCOPE.md` §0 第 1 条 / §1.1 / §1.2）。
+> 它登记的是**宿主视觉策略**，⛔ 不是引擎语义，⛔ 不写进 `data/spec/`。
+> 实现：`src/runtime/font.{h,cpp}`（FreeType 桥 + GDI 对象状态）+ `src/shims/gdi32_object.cpp` /
+> `src/shims/gdi32_font.cpp`（Win32 形状）；判据：`tests/gdi.cpp`（pure）/ `tests/gdi_font.cpp`（assets）。
+
+| 类别 | 偏差 | 做法 | 用户可见代价 | 仍必须保留 |
+|---|---|---|---|---|
+| **平台偏差（用户裁决）** | **字体来源 = 宿主 Amayui CN** | 一律取 `corpus/assets/fonts/Amayui-CN_cnjp.ttf`（粗体同目录 `-Bold.ttf`，CMake 注入 `LIFT_HOST_FONT_PATH`；`--font` 只是调试覆盖）。`CreateFontIndirectA` 的**字面名忽略**；`AddFontMemResourceEx` 送进来的**内存忽略**（仍返回非 0 句柄 + `*pNumFonts = 1`：宿主字体确实可用，但**不是**这段内存加进去的，日志会明说）。`--font-engine-name` 是显式 A/B 对照档 | 与真机（= 引擎字面名那份 MS Gothic）字形不同；简体字形由 Amayui 覆盖 | 字体对象的 `lfHeight` / `lfWeight` / 斜体等**请求形态**；`GetTextMetricsA` 的各格由 FT face 的 `size` 算；`SelectObject` / `DeleteObject` / `GetCurrentObject` 的对象语义 |
+| 平台偏差 | **A/B 对照档只到"上报族名"为止** | `--font-engine-name` 打开时，`EnumFontFamiliesExA` 上报引擎字面名；字形仍来自宿主文件（lift 没有"按系统族名查字"的平台入口；⛔ 不造第二条取字路径） | 对照档不能真的画出 MS Gothic | 默认档完全不受影响 |
+| **平台偏差（宿主视觉策略）** | **基线补偿 +2px** | 画字前把基线抬 `--baseline-lift`（缺省 **2**；`0` = 关）。理由：Amayui 的 ascent 比引擎的参考字体「ＭＳ ゴシック」大（emulator-cxx 实测 20px 20 / 28px 28 vs 17 / 24），墨迹整体偏低 | 行高 / 基线与真机可能差 1–2px | `tmAscent` 仍是 FT 的真值（补偿**不**写进度量）；`GetTextExtentPoint32A` / GGO 的 advance 与补偿无关 |
+| 平台偏差 | **GGO 位图布局按 Wine 的实测口径** | `GGO_BITMAP`：1bpp、行 = `((w+31)>>5)<<2`（DWORD 对齐）、覆盖率 ≥ 128 置位；`GGO_GRAY4/8`：**每像素 1 字节**、行 = `(w+3)&~3`、值域 0..16 / 0..64（17 / 65 级，满覆盖 = 16 / 64）；`cbBuffer == 0` ⇒ 返回所需字节数 | 灰度档的字节布局与"4bpp"的常见误解不同（按 Wine `win32u/freetype.c` 的 `max_level` 口径，见 ops-forensics §35） | 行对齐 / 值域 / 返回字节数 / `gmBlackBoxX·Y` / `gmptGlyphOrigin` / `gmCellIncX` 的自洽（`tests/gdi.cpp` 逐条钉住） |
+| 平台偏差 | **`TextOutA` 用 FT 连续覆盖率混合** | 屏幕 DC 只记账（不写宿主窗口）；表面 DC 写 guest surface 的像素（通道掩码解码 + 裁剪 + 文字色 + bk mode） | GDI 自己的文字默认是 1 位（`font_smoothing = GGO_BITMAP`）；1px 级栅格差按平台 discard | 文字色 / 背景模式 / 裁剪 / 推进（`advance` = `Σ gmCellIncX`） |
+| **未做 / loud 失败** | **未实现的字形形态** | `GGO_NATIVE` / `GGO_GRAY2` / `GGO_LCD` ⇒ `GDI_ERROR` + 一行日志；**非单位 MAT2** ⇒ 拒绝（`GDI_ERROR` + 日志）；`GGO_UNHINTED` 位剥掉后按正常字形（hinting 差属平台 discard） | 引擎若真发这些形态会看到"字形取不到"（不会画错） | `GGO_METRICS`(0) / `GGO_BITMAP`(1) / `GGO_GRAY4`(5) / `GGO_GRAY8`(6) |
+| 未做 | **DC 位图 / Blt / 设备能力** | `CreateCompatibleDC` / `CreateDIBSection` / `BitBlt` / `GetDeviceCaps` 仍是 `addUnimplemented`（P1 / P4 的落点） | 依调用方 | 表面 DC 的 `GetDC`/`ReleaseDC` 由 P1 接（见下） |
+| 未做 | **调色板 / 8bpp 表面** | `TextOutA` 只按通道掩码写 16 / 24 / 32bpp；8bpp 索引色不建模（遇到会写不进去，像素数照实记） | 8bpp 下的文字不出现 | 32 / 16bpp 的像素写入 |
+| 平台偏差 | **缺宿主字体 ⇒ 明确失败** | `GetTextMetricsA` / `GetGlyphOutlineA` / `GetTextExtentPoint32A` / `TextOutA` 返回 0 或 `GDI_ERROR` + 一行日志（⛔ 不画空白冒充成功）；assets 夹具缺字体时 `LIFT_SKIP`（77） | 没字体就没有文本 | 失败值本身（调用方可以走自己的降级） |
+
+★ **与 P1 的接缝**（DDraw 表面 DC）：
+`bool lift::fontAttachDcSurface(std::uint32_t hdc, std::uint32_t surface_ea, SurfaceArena* arena)`
+（`src/runtime/font.h`）。P1 在 **`IDirectDrawSurface::GetDC`（vtable +68，十进制）返回 HDC 之前**调用它，
+在 `ReleaseDC`（vtable +104）里调 `fontDetachDc(hdc)`；`TextOutA` 于是直接写进那块 guest surface 的像素。
+绑定后 arena 里找不到表面 ⇒ `TextOutA` **loud trap**（P1 的拼装错误，不静默跳过）。
+
+★ **测试档位**：`tests/gdi.cpp` 顶层注册（pure，合成字形源）；`tests/gdi_font.cpp` 在
+`if(EXISTS "${LIFT_HOST_FONT_PATH}")` 里（assets，`SKIP_RETURN_CODE 77`）。

@@ -20,6 +20,10 @@ const char* handleKindName(HandleKind kind) {
         case HandleKind::Timer: return "timer";
         case HandleKind::Module: return "module";
         case HandleKind::Other: return "other";
+        case HandleKind::GdiDc: return "gdi-dc";
+        case HandleKind::GdiFont: return "gdi-font";
+        case HandleKind::GdiBitmap: return "gdi-bitmap";
+        case HandleKind::GdiFontMem: return "gdi-fontmem";
     }
     return "?";
 }

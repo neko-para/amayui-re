@@ -70,7 +70,17 @@ public:
     // ★ 没填的槽（0..max_offset 之间没有 ComMethod 的偏移）写 `comUnsupported`（loud trap）。
     // ★ 依赖：`cpu.shims` / `cpu.heap`（ready）/ `cpu.cache` 都得在，且 ShimRegistry 已经有桩页
     //   （`Machine::prepare()` 的 bind() 或夹具的 `configureStubPage`）。
-    std::uint32_t createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods);
+    //
+    // ★ `user`（**追加式扩展**，P1 DDraw 起的）：对象在 guest 里多挂一个 DWORD `obj+8`，
+    //   放调用方自己的 **guest 扩展块 EA**（DDraw 的 surface 用它放 arena EA / 色键 / caps）。
+    //   `user == 0` ⇒ 对象仍是 P0 的 8 字节布局（⛔ 既有语义一字不改）；非 0 ⇒ 12 字节。
+    //   为什么要有它：对象的宿主侧状态若放在 ComRegistry 之外，就会撞上"一台机器一份 + 生命周期"
+    //   的问题（测试里 Machine 反复建在同一栈地址）；放进 guest 块则由对象的 refcount 生命周期管。
+    std::uint32_t createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
+                               std::uint32_t user = 0);
+
+    // 对象的扩展块 EA（**宿主编表里的权威值**，不读 guest 内存）；未知对象 / 没挂扩展 ⇒ 0。
+    std::uint32_t userOf(std::uint32_t obj) const;
 
     // refcount +1 / -1；未知对象 ⇒ false + 一行日志。
     bool addRef(X86& cpu, std::uint32_t obj);
@@ -94,6 +104,8 @@ private:
         std::uint32_t vtable = 0;
         std::uint32_t slots = 0;     // vtable 里的槽数（释放时要知道大小）
         std::uint32_t refcount = 0;  // 权威值（同步写 obj+4）
+        std::uint32_t bytes = 8;     // 对象头大小（8 = P0 布局；12 = 挂了扩展块 EA）
+        std::uint32_t user = 0;      // 扩展块 EA（obj+8；0 = 没有）
         std::string iface;
     };
     struct MethodEntry {

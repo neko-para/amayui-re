@@ -43,7 +43,10 @@ struct AccessSite {
 extern thread_local AccessSite g_access;
 
 // fault 诊断钩子：由 Machine 安装，负责打印 EA + `.lst` 文本 + 寄存器 + guest 返回栈。
-// ★ 它会在**平台异常 / 信号上下文**里被调用 ⇒ 不许抛异常；只许 fprintf / 写预格式化缓冲。
+// ★ 它会在**平台异常 / 信号上下文**里被调用 ⇒ 不许抛异常，**不许分配**（`std::string` / `new` /
+//   任何会增长缓冲的容器都不行）：只许 fprintf / 写**调用方给的**定长缓冲 / 读已加载的只读表。
+//   ⚠ 2026-11-04 的实测教训：`LstIndex::textAt` 原来返回 `std::string`（每次调用都分配）⇒
+//   钩子一进异常上下文就分配。fault 侧改用 `LstIndex::textPtr`（返回内部指针，零分配）。
 using FaultHook = void (*)(const AccessSite& site);
 void setGuestFaultHook(FaultHook hook);
 [[noreturn]] void guestFault(const AccessSite& site, const char* why);
@@ -62,6 +65,103 @@ bool inGuestSpace(const void* guest_base, std::uintptr_t fault_addr);
 // 打印一条区域表（诊断 / 报告用）
 void dumpRegions(const std::vector<Region>& regions, std::FILE* out);
 const char* regionKindName(RegionKind kind);
+
+// ---- VirtualAlloc 的**区域账本**（`kernel32_mem.cpp` 的 Virtual* 语义靠它）----
+// 记的是"`VirtualAlloc` 真的发出过哪些区域、提交到哪、释放了没有"。
+// ★ 为什么不复用 `regions_`：区域表只服务**诊断**，它 append-only、**永不删除**；而下面三件事
+//   都必须能回答"这块还活着吗"，否则：
+//   · `VirtualFree(MEM_RELEASE)` 同一块释放两次都会成功（`shims-core#virtual-alloc-commit-release` 就靠它变红）；
+//   · `VirtualAlloc(hint, …, MEM_COMMIT)` 无法判断该地址是否**先** `MEM_RESERVE` 过（文档：⇒ 487）；
+//   · `VirtualFree(MEM_DECOMMIT, dwSize=0)` 找不到"整段"的边界（文档：退到该区域末尾）。
+// ★ 语义（与 `kernel32_mem.cpp` 文件头偏差 3/4 一致）：`addr==0` 的 bump 块 `bump=true`；
+//   `MEM_RELEASE` **按任意顺序**整段释放（2026-11-05 修正：判据是"lpAddress 等于某个活区域的基址"，
+//   ⛔ 不再是"必须是最后一块 bump 块"—— 那条会拒掉引擎真实的 5 次释放）。
+struct VaRange {
+    std::uint32_t begin = 0;
+    std::uint32_t end = 0;        // 预留上界（bump 块 = 64 KiB 对齐后的跨度）
+    std::uint32_t committed = 0;  // [begin, begin+committed) 已提交；0 = 只预留
+    bool bump = false;            // true = addr==0 的 bump 块
+    bool live = true;             // MEM_RELEASE 之后置 false（条目留着，供诊断 / 重复释放判据）
+};
+
+class VaRangeTable {
+public:
+    VaRange& add(std::uint32_t begin, std::uint32_t end, std::uint32_t committed, bool bump) {
+        ranges_.push_back(VaRange{begin, end, committed, bump, true});
+        return ranges_.back();
+    }
+
+    // 包含 ea 的**活**区域（新→旧；bump 块之间不重叠，显式地址区域也不重叠）
+    VaRange* find(std::uint32_t ea) {
+        for (auto it = ranges_.rbegin(); it != ranges_.rend(); ++it) {
+            if (it->live && ea >= it->begin && ea < it->end) return &*it;
+        }
+        return nullptr;
+    }
+    const VaRange* find(std::uint32_t ea) const {
+        for (auto it = ranges_.rbegin(); it != ranges_.rend(); ++it) {
+            if (it->live && ea >= it->begin && ea < it->end) return &*it;
+        }
+        return nullptr;
+    }
+
+    // [ea, ea+size) **完整**落在某个活区域里吗（MEM_COMMIT-only 的前提）
+    bool covers(std::uint32_t ea, std::uint32_t size) const {
+        if (size == 0) return true;
+        const std::uint64_t last = static_cast<std::uint64_t>(ea) + size - 1u;
+        for (const VaRange& r : ranges_) {
+            if (!r.live) continue;
+            if (ea >= r.begin && last < r.end) return true;
+        }
+        return false;
+    }
+
+    // 与任何活区域**重叠**吗（MEM_RESERVE 的前提：不能重复预留）
+    bool overlapsLive(std::uint32_t ea, std::uint32_t size) const {
+        if (size == 0) return false;
+        const std::uint64_t last = static_cast<std::uint64_t>(ea) + size - 1u;
+        for (const VaRange& r : ranges_) {
+            if (!r.live) continue;
+            if (ea < r.end && last >= r.begin) return true;
+        }
+        return false;
+    }
+
+    // **最后一块**活着的 bump 块（LIFO 判据）；nullptr = 没有
+    const VaRange* lastBump() const {
+        for (auto it = ranges_.rbegin(); it != ranges_.rend(); ++it) {
+            if (it->live && it->bump) return &*it;
+        }
+        return nullptr;
+    }
+
+    // 基址**正好等于** ea 的活区域（`MEM_RELEASE` 的判据：Win32 要求 lpAddress 是预留的基址）。
+    // ★ 2026-11-05 新增：`find()` 是"包含"，而释放必须认基址，否则释放中间地址会被当成合法。
+    VaRange* findBegin(std::uint32_t ea) {
+        for (auto it = ranges_.rbegin(); it != ranges_.rend(); ++it) {
+            if (it->live && it->begin == ea) return &*it;
+        }
+        return nullptr;
+    }
+    const VaRange* findBegin(std::uint32_t ea) const {
+        for (auto it = ranges_.rbegin(); it != ranges_.rend(); ++it) {
+            if (it->live && it->begin == ea) return &*it;
+        }
+        return nullptr;
+    }
+
+    void release(std::uint32_t begin) {
+        for (VaRange& r : ranges_) {
+            if (r.live && r.begin == begin) r.live = false;
+        }
+    }
+
+    void clear() { ranges_.clear(); }
+    const std::vector<VaRange>& all() const { return ranges_; }
+
+private:
+    std::vector<VaRange> ranges_;
+};
 
 class GuestMemory {
 public:
@@ -88,6 +188,10 @@ public:
     void annotate(std::uint32_t ea, std::size_t size, RegionKind kind, const char* name);
     const Region* regionOf(std::uint32_t ea) const;
     const std::vector<Region>& regions() const { return regions_; }
+
+    // VirtualAlloc 的区域账本（见上面的 VaRange 说明；由 kernel32_mem.cpp 维护）
+    VaRangeTable& vaRanges() { return va_ranges_; }
+    const VaRangeTable& vaRanges() const { return va_ranges_; }
 
     bool safeMode() const { return safe_; }
     void setSafeMode(bool on) { safe_ = on; }
@@ -166,11 +270,28 @@ private:
     std::uint8_t* base_ = nullptr;
     std::vector<std::uint64_t> commit_bits_;
     std::vector<Region> regions_;
+    VaRangeTable va_ranges_;
     bool safe_ = false;
     char last_error_[160] = {};
 };
 
+// 宿主页大小（guest 页恒为 4 KiB，见 GuestMemory::kPage）。
+// ★ Windows = `GetSystemInfo().dwPageSize`，POSIX = `sysconf(_SC_PAGESIZE)`（失败回退 4 KiB）。
+// ⛔ 不许硬编码 0x1000：Apple Silicon macOS 是 16 KiB；Windows 的页大小也属于**系统事实**，
+//   不该由本仓替它写死（REQ-01M6JFZFN15MBPG7Y89WNZACFW #2；16 KiB 宿主页踩过
+//   REQ-01M6JBQ05P1QF56DQX5B9YJ4V8）。
+std::uint32_t hostPageSize();
+
 // 安装平台 fault handler（Windows: AddVectoredExceptionHandler；POSIX: sigaction）
 void installPlatformFaultHandler();
+
+// ★ Windows 上关掉 CRT 的 abort 行为与 WER/GPF 弹框（幂等；POSIX 上是空操作）。
+//   为什么放在 runtime 而不是只放 `shims/register.h`（2026-11-04 用户实测踩了两次）：
+//   本仓有**多处**直接 `std::abort()`（`heap.cpp` 的非法 free / `handles.cpp` 的句柄校验 /
+//   `shims/register.h` 的 `shimAbort`）。只修 `shimAbort` 那一条，其余路径照样弹**模态框**
+//   ⇒ 无人值守的流水线整轮挂死在对话框上（而且 stdout 还没 flush，连日志都看不到）。
+//   `_set_abort_behavior` 是**进程级**的 ⇒ 在 `main()` 最前面调一次就覆盖所有 abort 点。
+//   ⛔ 这不是"把错误藏起来"：日志照旧打到 stderr，退出码照旧非 0。
+void suppressCrashDialogsOnce();
 
 }  // namespace lift

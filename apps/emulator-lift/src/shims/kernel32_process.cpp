@@ -797,6 +797,13 @@ void shimGetProcAddress(X86& cpu, ShimCall& call) {
 
     // ③ 模块认得、但没有这个导出
     cpu.shim.last_error = kErrProcNotFound;
+    // ★ G1：动态解析点里的"**这个 OS 没有这个导出**"（P1；表见 dynamic_exports.cpp）——
+    //   真机返回 NULL + 127，引擎据此走回退分支；这里把日志说清是"OS 没有"而不是"名字写错"。
+    if (const char* absent = dynamicExportAbsentReason(key.c_str(), shown)) {
+        shimLog("kernel32", "GetProcAddress", "%s!%s ⇒ 0 + 错误 127（%s）", key.c_str(), shown, absent);
+        call.result = 0;
+        return;
+    }
     if (key == "agerc") {
         shimLog("kernel32", "GetProcAddress",
                 "AGERC 没有导出 \"%s\"（只有 _GetInstance@0 / _ShowDialog@12 / _OperateMenu@16）⇒ "

@@ -14,7 +14,12 @@
 #include <cstring>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #include <signal.h>
@@ -31,13 +36,37 @@ FaultHook g_hook = nullptr;
 GuestMemory* g_memory = nullptr;  // 当前活动实例（guest 是单线程的，见 README §2.5）
 
 std::uint64_t g_fault_count = 0;
+}  // namespace
 
-// ★ 宿主页大小（guest 页恒为 4 KiB，见 memory.h 的 kPage）。Windows 上提交粒度就是 4 KiB；
-//   Apple Silicon macOS 的宿主页是 **16 KiB** ⇒ `mprotect` 只接受宿主页对齐的起始地址（否则 EINVAL），
-//   所以提交/退回都要按宿主页对齐（见 platformCommit / GuestMemory::decommit）。
+// ★ 进程级关掉"崩了就弹窗"（见 memory.h 的注释）。幂等；POSIX 上是空操作。
+//   ★ 关键：`_set_abort_behavior(0, …)` 关的是**整个进程**的 abort 行为 ⇒ 只调一次就覆盖
+//   `heap.cpp` / `handles.cpp` / `shims/register.h` 那几处直接 `std::abort()`。
+//   ⛔ 不要为了"安静"把 abort 改成 exit(0)：日志照旧打 stderr、退出码照旧非 0，那才是判据。
+void suppressCrashDialogsOnce() {
+#if defined(_WIN32)
+    static const bool once = [] {
+        ::_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+        ::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+        return true;
+    }();
+    (void)once;
+#endif
+}
+
+// ★ 宿主页大小（guest 页恒为 4 KiB，见 memory.h 的 kPage）。**以系统为准，⛔ 不硬编码**：
+//   · Windows：`GetSystemInfo().dwPageSize`（提交 / 退回的对齐粒度就是它）；
+//   · Apple Silicon macOS：宿主页是 **16 KiB** ⇒ `mprotect` 只接受宿主页对齐的起始地址（否则 EINVAL），
+//     所以提交/退回都要按宿主页对齐（见 platformCommit / GuestMemory::decommit）。
+//   ★ 为什么不在 Windows 写 0x1000：那是"这台机器恰好如此"，不是平台契约 —— 换成 16 KiB 宿主页的
+//     机器（或 ARM64 的 64 KiB 配置）就会把对齐算错，而那正是 REQ-01M6JBQ05P1QF56DQX5B9YJ4V8 踩过的坑。
 std::uint32_t hostPageSize() {
 #if defined(_WIN32)
-    return 0x1000u;
+    static const std::uint32_t size = [] {
+        SYSTEM_INFO si{};
+        ::GetSystemInfo(&si);
+        return si.dwPageSize != 0 ? static_cast<std::uint32_t>(si.dwPageSize) : 0x1000u;
+    }();
+    return size;
 #else
     static const std::uint32_t size = [] {
         const long n = ::sysconf(_SC_PAGESIZE);
@@ -46,7 +75,6 @@ std::uint32_t hostPageSize() {
     return size;
 #endif
 }
-}  // namespace
 
 void setGuestFaultHook(FaultHook hook) { g_hook = hook; }
 

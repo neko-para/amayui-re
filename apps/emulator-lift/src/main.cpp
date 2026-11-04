@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "corpus/lst_index.h"
+#include "runtime/font.h"
 #include "runtime/machine.h"
 #include "runtime/sha256.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
@@ -62,12 +63,19 @@ void usage() {
         "  --safe-memory       每次访存都查提交位图（A1 的第二遍）\n"
         "  --report            打印基座缺口（A5）后退出\n"
         "  --bench <N>         跑 N 条指令并报 MIPS\n"
+        "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
+        "  --baseline-lift <N> 宿主基线补偿像素（缺省 2；0 = 关；★ 宿主视觉策略，不是引擎语义）\n"
+        "  --font-engine-name  字体 A/B 对照档：上报引擎字面名（字形仍来自宿主 Amayui CN）\n"
         "  --smoke             只验证宿主层可链接（不建窗口、不需要游戏）\n");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+    // ★ 第一件事：关掉 Windows 上"崩了就弹模态框"的默认行为（见 runtime/memory.h）。
+    //   本仓有多处 `std::abort()`（heap 非法 free / 句柄校验 / shimAbort），只关其中一条不够 ——
+    //   对话框会把无人值守的整轮挂死，而且 stdout 还没 flush ⇒ 连日志都看不到。
+    lift::suppressCrashDialogsOnce();
     bool smoke = false;
     bool trace_shims = false;
     bool trace_blocks = false;
@@ -86,6 +94,9 @@ int main(int argc, char** argv) {
     std::string appdata_dir;
     std::string guest_root;
     std::string agerc_path;
+    std::string font_path;
+    int baseline_lift = 2;
+    bool font_engine_name = false;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -137,6 +148,16 @@ int main(int argc, char** argv) {
             trace_blocks = true;
         } else if (std::strcmp(a, "--safe-memory") == 0) {
             safe_memory = true;
+        } else if (std::strcmp(a, "--font") == 0 && i + 1 < argc) {
+            font_path = argv[++i];
+        } else if (std::strcmp(a, "--baseline-lift") == 0 && i + 1 < argc) {
+            baseline_lift = std::atoi(argv[++i]);
+            if (baseline_lift < 0 || baseline_lift > 64) {
+                std::fprintf(stderr, "--baseline-lift 需要 0..64（收到 %d）\n", baseline_lift);
+                return 2;
+            }
+        } else if (std::strcmp(a, "--font-engine-name") == 0) {
+            font_engine_name = true;
         } else if (std::strcmp(a, "--report") == 0) {
             report = true;
         } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
@@ -168,6 +189,23 @@ int main(int argc, char** argv) {
 #else
         setenv("LIFT_SAFE_MEMORY", "1", 1);
 #endif
+    }
+
+    // ---- 宿主字体策略（P2 / SCOPE）：默认 Amayui CN；CLI 只做调试覆盖 ----
+    {
+        lift::FontConfig font = lift::fontDefaultConfig();
+        if (!font_path.empty()) {
+            font.regular_path = font_path;
+            font.bold_path.clear();  // 由 regular_path 派生 `-Bold.ttf`
+        }
+        font.baseline_lift = baseline_lift;
+        font.use_engine_name = font_engine_name;
+        lift::fontSetConfig(font);
+        std::printf("font      : %s（baseline-lift=%d%s）\n",
+                    lift::fontConfig().regular_path.empty() ? "(未配置 ⇒ 文本 API 会明确失败)"
+                                                           : lift::fontConfig().regular_path.c_str(),
+                    lift::fontConfig().baseline_lift,
+                    lift::fontConfig().use_engine_name ? "；A/B 对照档（只影响上报族名）" : "");
     }
 
     // ---- 定位执行源（四处，顺序固定；都不在 ⇒ 拒绝启动）----

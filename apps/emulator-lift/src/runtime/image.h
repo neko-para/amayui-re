@@ -56,8 +56,16 @@ struct PeImage {
 
 bool loadPeFile(const std::string& path, PeImage* out, std::string* err);
 // 解析已经读进 `bytes` 的镜像（`loadPeFile` 内部调它；测试可以直接构造字节后用）
+// ★ 坏输入一律**带原因返回 false**（⛔ 不许静默跳过：少读一条导入 ⇒ A5 的"静态缺口 = 0"假绿，
+//   见 REQ-01M6JFZFCQ956CBFMKKQ37PCYK）。拒绝的形态：导入表 / thunk 表 RVA 解不出文件偏移、
+//   thunk 表或描述符表没有 0 终止项、模块名 / 函数名读不到或没有 NUL 终止、FirstThunk 为 0、
+//   IAT 槽位不落在任何节的虚拟范围里。
 bool parsePeImage(PeImage& img, std::string* err);
 // 把节按 `image_base + RVA` 映射进 guest（提交 + 清 .bss 部分）
+// ★ "半载入"是不允许的：先**全量校验**（4 GiB 空间 / 头长度 / 每节 `PointerToRawData + 要拷的字节`
+//   是否越出文件），再提交与拷贝 ⇒ 返回 false 时 guest 里**一个字节都没写**。
+// ★ 要拷的字节 = `min(SizeOfRawData, VirtualSize)`（调用方自己填的结构也一样）：
+//   `SizeOfRawData < VirtualSize` 是**合法的正常形态**（BSS 尾巴 / 资源虚拟尾部），⛔ 不是坏节。
 bool mapPeImage(GuestMemory& mem, const PeImage& img, std::string* err);
 // 同上，但映射到**指定的 guest 基址** `base`（不是 PE 头的 ImageBase）。
 // ★ 2026-11-04 新口径：AGERC.DLL 作为**真实 guest 模块**装载 ⇒ 它的 ImageBase 可能与主镜像 /

@@ -110,14 +110,30 @@ std::int64_t x87ToI64(const Ext80 in, bool truncate) {
         extF80_to_i64(as(in), truncate ? softfloat_round_minMag : softfloat_roundingMode, false));
 }
 
+// ★ x87 的"超越常数"（FLD1/FLDZ/FLDPI/FLDL2E/FLDL2T/FLDLG2/FLDLN2）压栈的是**64 位有效位**的
+//   扩展精度常数，不是 double（53 位）舍入值（Intel SDM Vol.2 对每条 FLD 常数都写明"该常数按
+//   扩展精度四舍五入到 64 位有效位"）。旧实现走 `f64_to_extF80(字面量)` ⇒ 低 11 位恒为 0，
+//   与真机**逐位不同**（差 ~2^-64 相对，肉眼看不见，但"逐位"这句话就不成立了）。
+//   ⇒ 这里直接写 64 位有效位的位模式，值由一次独立的 BigInt 定点（2^-400）推导得到：
+//        π    = 16·atan(1/5) − 4·atan(1/239)（Machin）
+//        ln2  = 2·atanh(1/3)        ln5 = 2·ln2 + 2·atanh(1/9)      ln10 = ln2 + ln5
+//        log2(e) = 1/ln2            log10(2) = ln2/ln10              log2(10) = ln10/ln2
+//     再按"最近偶数"取 64 位有效位。求法与判据写在 `docs/s4-fpu-audit.md`（含 10 字节位模式），
+//     守卫逐字节钉住：`x87-fldpi` / `x87-fldln2` / `x87-fldlg2` / `x87-fldl2e` / `x87-fldl2t`。
+static void x87Const(std::uint16_t signExp, std::uint64_t signif, Ext80 out) {
+    std::memset(out, 0, 16);
+    // 小端：`extFloat80_t` = {uint64 signif; uint16 signExp}，前 10 字节就是 x86 的内存格式
+    std::memcpy(out, &signif, 8);
+    std::memcpy(out + 8, &signExp, 2);
+}
 void x87One(Ext80 out) { store(i32_to_extF80(1), out); }
 void x87Zero(Ext80 out) { store(i32_to_extF80(0), out); }
-void x87Pi(Ext80 out) { store(f64_to_extF80(f64FromDouble(3.14159265358979323846)), out); }
-void x87Ln2(Ext80 out) { store(f64_to_extF80(f64FromDouble(0.69314718055994530942)), out); }
-void x87Lg2(Ext80 out) { store(f64_to_extF80(f64FromDouble(0.30102999566398119521)), out); }
-void x87L2e(Ext80 out) { store(f64_to_extF80(f64FromDouble(1.44269504088896340736)), out); }
-void x87L2t(Ext80 out) { store(f64_to_extF80(f64FromDouble(3.32192809488736234787)), out); }
-void x87Ln10(Ext80 out) { store(f64_to_extF80(f64FromDouble(2.30258509299404568402)), out); }
+void x87Pi(Ext80 out) { x87Const(0x4000u, 0xC90FDAA22168C235ull, out); }
+void x87Ln2(Ext80 out) { x87Const(0x3FFEu, 0xB17217F7D1CF79ACull, out); }
+void x87Lg2(Ext80 out) { x87Const(0x3FFDu, 0x9A209A84FBCFF799ull, out); }
+void x87L2e(Ext80 out) { x87Const(0x3FFFu, 0xB8AA3B295C17F0BCull, out); }
+void x87L2t(Ext80 out) { x87Const(0x4000u, 0xD49A784BCD1B8AFEull, out); }
+void x87Ln10(Ext80 out) { x87Const(0x4000u, 0x935D8DDDAAA8AC17ull, out); }
 
 void x87Add(const Ext80 a, const Ext80 b, Ext80 out) { store(extF80_add(as(a), as(b)), out); }
 void x87Sub(const Ext80 a, const Ext80 b, Ext80 out) { store(extF80_sub(as(a), as(b)), out); }

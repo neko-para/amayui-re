@@ -14,6 +14,7 @@
 #include "corpus/lst_index.h"
 #include "runtime/clock.h"
 #include "runtime/com.h"
+#include "runtime/font.h"
 #include "runtime/present.h"
 #include "runtime/surface.h"
 #include "runtime/decode.h"
@@ -129,6 +130,9 @@ public:
     const Vfs& vfs() const { return vfs_; }
     SurfaceArena& surfaces() { return surfaces_; }
     const SurfaceArena& surfaces() const { return surfaces_; }
+    // ★ P2：宿主字体层（FreeType 桥 / 合成字形接缝）；gdi32 的字体 shim 与夹具都从这里取。
+    FontEngine& fonts() { return fonts_; }
+    const FontEngine& fonts() const { return fonts_; }
     HeadlessPresenter& presenter() { return presenter_; }
     const HeadlessPresenter& presenter() const { return presenter_; }
     LstIndex& lst() { return lst_; }
@@ -172,6 +176,7 @@ private:
     WindowManager windows_;
     ComRegistry com_;
     SurfaceArena surfaces_;
+    FontEngine fonts_;
     HeadlessPresenter presenter_;
     LstIndex lst_;
     X86 cpu_;

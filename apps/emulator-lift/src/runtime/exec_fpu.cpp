@@ -228,7 +228,15 @@ bool integerArith(X86& cpu, const Insn& in, Op op) {
 
 bool compare(X86& cpu, const Insn& in, bool pop_after, bool quiet) {
     Ext80 b;
-    if (in.op0().kind == OpKind::Reg) {
+    // ★ **操作数形态在这里不统一**（实测 Zydis，见 `tests/conformance_cases.cpp` 的 `x87-fucomp`）：
+    //     `fcom st(i)`  / `fcomp st(i)`  ⇒ **一个**操作数（就是源）；
+    //     `fucom st(i)` / `fucomp st(i)` ⇒ **两个**操作数 `st0, st(i)`（Zydis 把隐含的 ST(0) 也列出来）；
+    //     `fcompp` / `fucompp`           ⇒ **零个**操作数（隐含 ST(1)）。
+    //   旧实现只看 `op0` ⇒ 对 `fucom`/`fucomp` 拿到的源是 **ST(0) 自己**（永远"相等"，C3=1），
+    //   是**静默算错**（语料里 fucomp 11 条 / fucom 1 条）。⇒ 先看 `op1` 是不是寄存器。
+    if (in.op1().kind == OpKind::Reg) {
+        std::memcpy(b, stConst(cpu, stIndex(in.op1(), 1)), 16);
+    } else if (in.op0().kind == OpKind::Reg) {
         std::memcpy(b, stConst(cpu, stIndex(in.op0(), 1)), 16);
     } else if (in.op0().kind == OpKind::Mem) {
         if (!loadMemValue(cpu, in.op0().mem, b)) return unimplemented(cpu, in, "fcom 的内存操作数宽度不支持");
@@ -504,8 +512,13 @@ bool pkLoad(X86& cpu, const Operand& op, PackVec& v, int* bytes) {
         case OpKind::Reg: {
             const RegSpec sp = regSpec(op.reg);
             if (sp.cls == RegClass::X87) {
-                // MMX 复用 x87 物理槽的低 64 位（小端 ⇒ 低 8 字节）
-                std::memcpy(v.b, cpu.fpu.regs[cpu.fpu.phys(sp.index)], 8);
+                // MMX 复用 x87 物理槽的低 64 位（小端 ⇒ 低 8 字节）。
+                // ★ **不能过 `phys()`**：`ST(i) = phys(TOP+i)` 是 x87 的栈旋转，而 MM0..MM7 是
+                //   **固定的物理槽 R0..R7**（Intel SDM Vol.1 §8.1.2 / §9.2：MMX 寄存器别名的是
+                //   8 个 x87 数据寄存器本身，与 TOP 无关）。用 `phys()` 会让 TOP≠0 时的 MMX
+                //   读写落到别的槽上 —— 那是**静默算错**（同一份 phys() 既写又读会自洽地掩盖它，
+                //   所以 `mmx-*` 那几条从 TOP=0 开始的夹具都照不到）。守卫：`mmx-top-rotated`。
+                std::memcpy(v.b, cpu.fpu.regs[sp.index], 8);
                 *bytes = 8;
                 return true;
             }
@@ -540,8 +553,9 @@ bool pkStore(X86& cpu, const Operand& op, const PackVec& v, int bytes) {
         case OpKind::Reg: {
             const RegSpec sp = regSpec(op.reg);
             if (sp.cls != RegClass::X87) return false;
-            // MMX 写只覆盖低 64 位；★ 不动 tag word（Intel：MMX 指令不影响 x87 tag word）
-            std::memcpy(cpu.fpu.regs[cpu.fpu.phys(sp.index)], v.b, 8);
+            // MMX 写只覆盖低 64 位；★ 不动 tag word（Intel：MMX 指令不影响 x87 tag word）。
+            // ★ 同样**不能过 `phys()`**（理由见 `pkLoad`）：MM0..MM7 = 固定物理槽 R0..R7。
+            std::memcpy(cpu.fpu.regs[sp.index], v.b, 8);
             return true;
         }
         case OpKind::Xmm: {
@@ -872,12 +886,19 @@ bool execPacked(X86& cpu, const Insn& in) {
     if (in.pk >= PkOp::Psllw && in.pk <= PkOp::Psrad) {
         std::uint32_t count = 0;
         if (in.op1().kind == OpKind::Imm) {
+            // `psllw mm, imm8`：计数就是 imm8（零扩展；解码器可能把它符号扩成 32 位 ⇒ 取低 8 位）
             count = static_cast<std::uint32_t>(in.op1().imm & 0xFFu);
         } else {
             PackVec b;
             int bn = 0;
             if (!pkLoad(cpu, in.op1(), b, &bn)) return unimplemented(cpu, in, "MMX/SSE 的移位计数操作数不支持");
-            count = static_cast<std::uint32_t>(pkRd64(b.b, 0) & 0xFFu);
+            // ★ 寄存器 / 内存形态的计数是**完整的 64 位值**（Intel SDM Vol.2 PSLLW…PSRAD：
+            //   "If the source operand is a register or a 64-bit memory operand, the full 64-bit value
+            //    is used"），只有 imm8 形态才被编码宽度限制成 8 位。
+            //   旧实现一律 `& 0xFF` ⇒ 计数 256 被读成 0（本该整 lane 清 0 / 填符号位），是**静默算错**。
+            //   这里只饱和到 uint32（`pkShift` 的判据是 `> 15 / > 31 / > 63`，饱和不影响判定）。
+            const std::uint64_t full = pkRd64(b.b, 0);
+            count = full > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<std::uint32_t>(full);
         }
         pkShift(in.pk, a.b, bytes, count);
         if (!pkStore(cpu, in.op0(), a, bytes)) return unimplemented(cpu, in, "MMX/SSE 的目标写失败");

@@ -12,7 +12,28 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace lift_test {
+
+// ★ 测试进程**绝不许弹模态框**（2026-11-04 实测：Windows 上 `abort()` 默认弹断言框 / WER 框，
+//   无人值守的流水线会**整轮挂死在对话框上**，而且 stdout 还没 flush ⇒ 连日志都看不到）。
+//   这个静态初始化让**每个**包含 check.h 的测试进程一启动就关掉它，不需要各 main 自己调。
+inline void suppressCrashDialogs() {
+#ifdef _WIN32
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    ::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#endif
+}
+inline const int g_no_crash_dialogs = (suppressCrashDialogs(), 0);
 
 inline int g_failures = 0;
 inline int g_checks = 0;
@@ -25,11 +46,13 @@ inline void failf(const char* file, int line, const char* fmt, ...) {
     std::vfprintf(stderr, fmt, ap);
     va_end(ap);
     std::fprintf(stderr, "\n");
+    std::fflush(stderr);
     ++g_failures;
 }
 
 inline int finish(const char* suite) {
     std::printf("%s: %d checks, %d failures\n", suite, g_checks, g_failures);
+    std::fflush(stdout);  // ★ 崩在 return 之前也要能看见这一行（管道是块缓冲的）
     if (g_checks == 0) {
         // ★ 0 条断言不许算绿：`LIFT_CHECK` 一条都没跑到时，旧实现返回 0（和"跑绿了"一样）。
         std::fprintf(stderr, "%s: 0 checks ⇒ 失败（空夹具不能算通过）\n", suite);

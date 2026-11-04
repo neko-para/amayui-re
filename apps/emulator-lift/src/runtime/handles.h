@@ -14,6 +14,8 @@ namespace lift {
 
 enum class HandleKind : std::uint8_t {
     None = 0, Event, Mutex, Semaphore, CriticalSection, File, Find, Thread, Timer, Module, Other,
+    // ★ P2：GDI 对象（DC / 字体 / 位图 / AddFontMemResourceEx 的资源句柄）也走同一张表。
+    GdiDc, GdiFont, GdiBitmap, GdiFontMem,
 };
 
 const char* handleKindName(HandleKind kind);
@@ -57,6 +59,36 @@ public:
     std::size_t size() const { return entries_.size(); }
     void clear() { entries_.clear(); }
 
+    // ---- 标准句柄三元组（`GetStdHandle` / `SetStdHandle` 的**进程级表**）----
+    // ★ 文档：`SetStdHandle` 改的是进程级表，之后 `GetStdHandle` 要返回它；`GetFileType` /
+    //   `GetConsoleMode` 要按句柄的真实种类回答（REQ-01M6K69K9HM3ETCDNMJWPHGXJC）。
+    // ★ 默认值是本模拟器的三个**假句柄**（0x0C / 0x10 / 0x14）：CRT 只用它们算 `isatty` /
+    //   `GetFileType`，不真的读写；⛔ 它们**不占**句柄表的槽（`CloseHandle` 对它们会按
+    //   "无效句柄"响亮失败 —— 与真机对伪标准句柄的行为一致）。
+    // ★ 为什么挂在句柄表上而不是静态变量：**一台机器一份** ⇒ 同一个测试进程里两个 Fixture
+    //   不会互相污染（`ShimState` 在 `x86.h`，本轮的文件清单不动它）。
+    static constexpr int kStdSlots = 3;  // 0 = STD_INPUT / 1 = STD_OUTPUT / 2 = STD_ERROR
+    static constexpr std::uint32_t kStdDefault[kStdSlots] = {0x0000000Cu, 0x00000010u, 0x00000014u};
+
+    std::uint32_t stdHandle(int slot) const {
+        return (slot >= 0 && slot < kStdSlots) ? std_handles_[slot] : 0u;
+    }
+    bool setStdHandle(int slot, std::uint32_t h) {
+        if (slot < 0 || slot >= kStdSlots) return false;
+        std_handles_[slot] = h;
+        return true;
+    }
+    // h 命中某个标准槽的**当前值** ⇒ 槽号；否则 -1
+    int stdSlotOf(std::uint32_t h) const {
+        for (int i = 0; i < kStdSlots; ++i) {
+            if (std_handles_[i] == h) return i;
+        }
+        return -1;
+    }
+    void resetStdHandles() {
+        for (int i = 0; i < kStdSlots; ++i) std_handles_[i] = kStdDefault[i];
+    }
+
     // 无效句柄的诊断（由 shim 调用；打印 kind/值 + 已分配的句柄范围后停止）
     [[noreturn]] void invalidHandle(std::uint32_t h, const char* api) const;
 
@@ -66,6 +98,7 @@ private:
         HandleEntry entry;
     };
     std::vector<Slot> entries_;
+    std::uint32_t std_handles_[kStdSlots] = {kStdDefault[0], kStdDefault[1], kStdDefault[2]};
 };
 
 }  // namespace lift

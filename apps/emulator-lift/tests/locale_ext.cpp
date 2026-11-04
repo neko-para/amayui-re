@@ -9,6 +9,9 @@
 //      参数是 8 位十六进制 LCID 串、顺序确定、回调返回 FALSE 时**停止**后续回调。
 //      ★ 这条同时是**框架能力**的判据：shim 里把控制权交回 guest（`ShimCall::take_control` +
 //      续延桩）这条路只有这里跑得到 —— 它坏了，这里一定红。
+//   ③ `GetStringTypeW`（CT_CTYPE1 的位值 + dwInfoType 不被丢弃）与 `LCMapStringW`
+//      （cchSrc=-1 映射整串 / cchDest=0 问大小 / 未实现的 dwMapFlags ⇒ ERROR_INVALID_FLAGS）：
+//      REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ / REQ-01M6K69K28AT5VNKZAJXT6PZJ4。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -29,6 +32,11 @@ using lift_fixture::Fixture;
 constexpr std::uint32_t kErrInvalidParameter = 87u;
 constexpr std::uint32_t kErrInsufficientBuffer = 122u;
 constexpr std::uint32_t kErrInvalidFlags = 1008u;
+
+// GetStringTypeW 的 dwInfoType + LCMapStringW 的 dwMapFlags（Win32 数值）
+constexpr std::uint32_t kCtCtype1 = 1u;      // CT_CTYPE1
+constexpr std::uint32_t kLcmapLowercase = 0x00000100u;
+constexpr std::uint32_t kLcmapUppercase = 0x00000200u;
 
 // LCType（与 kernel32_string.cpp 的常量同一组 Win32 数值）
 constexpr std::uint32_t kLocaleSISO639LangName = 0x00000059u;
@@ -289,6 +297,165 @@ int main() {
         LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 1008u);
         LIFT_CHECK_EQ_U32(f.call(enum_loc, {cb, 3u}), 0u);  // INSTALLED|SUPPORTED 互斥
         LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 1008u);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑤ GetStringTypeW：CT_CTYPE1 的**位值**（REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ）
+    //
+    // 判据是 MSDN 的 C1_* 表 + 它给的定点：'A'=0x0181、'a'=0x0182、'G'=0x0101、'0'=0x0084、
+    // ' '=0x0048、'!'=0x0010。旧实现：'A' 被标成 DIGIT|ALPHA(0x0104)、空格被标成 CNTRL|SPACE(0x0028)、
+    // NUL 被标成 C1_UPPER(0x0001) ⇒ 这条会红。
+    {
+        g_current_case = "get-string-type-w-ctype1";
+        Fixture f;
+        lift::registerStringShims(f.m.shims());
+        lift::registerBootstrapShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t gst = f.use("GetStringTypeW");
+        const std::uint32_t dst = f.zeroData(64);
+
+        // 显式长度路径（cchSrc = 字符数，不含结尾 0）
+        const std::u16string s = u"AaG09! ";
+        const std::uint32_t src = f.data(s.data(), s.size() * 2u);
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, src, static_cast<std::uint32_t>(s.size()), dst}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 0u), 0x0181u);  // 'A' = UPPER|ALPHA|XDIGIT
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 2u), 0x0182u);  // 'a' = LOWER|ALPHA|XDIGIT
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 4u), 0x0101u);  // 'G' = UPPER|ALPHA（G 之后不是 XDIGIT）
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 6u), 0x0084u);  // '0' = DIGIT|XDIGIT
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 8u), 0x0084u);  // '9'
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 10u), 0x0010u); // '!' = PUNCT
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 12u), 0x0048u); // ' ' = SPACE|BLANK
+
+        // 控制字符：NUL / CR 都是 C1_CNTRL（旧实现给 NUL 0x0001 = C1_UPPER！）
+        // ★ 不能用 u"\0\r"：`std::u16string` 从字面量构造会在第一个 0 处停下 ⇒ 逐字符 push
+        std::u16string ctl;
+        ctl.push_back(static_cast<char16_t>(0x0000));
+        ctl.push_back(static_cast<char16_t>(0x000D));
+        const std::uint32_t ctl_ea = f.data(ctl.data(), ctl.size() * 2u);
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, ctl_ea, 2u, dst}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 0u), 0x0020u);  // U+0000 = CNTRL
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 2u), 0x0020u);  // U+000D = CNTRL
+
+        // cchSrc == -1：NUL 结尾（结尾的 0 不参与分类）
+        const std::u16string two = u"Az";
+        const std::uint32_t two_ea = f.data(two.data(), (two.size() + 1) * 2u);
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, two_ea, 0xFFFFFFFFu, dst}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 0u), 0x0181u);  // 'A' = UPPER|ALPHA|XDIGIT
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 2u), 0x0102u);  // 'z' = LOWER|ALPHA（z 不是十六进制位）
+
+        // 非 ASCII：**本单的显式缺口**（另开单做字符类表；⛔ 不拿 w<0x80 猜分类）⇒ 位全 0。
+        // ★ 将来那张表进来时这条要跟着改成真实位值 —— 这是有意的"缺口警示"，不是判据。
+        const std::u16string kana = u"\u3042";
+        const std::uint32_t kana_ea = f.data(kana.data(), 2u);
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, kana_ea, 1u, dst}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst), 0x0000u);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑤' dwInfoType 不被丢弃：只支持 CT_CTYPE1，其余 ⇒ 0 + ERROR_INVALID_PARAMETER（⛔ 不许假装成功）
+    {
+        g_current_case = "get-string-type-w-info-type";
+        Fixture f;
+        lift::registerStringShims(f.m.shims());
+        lift::registerBootstrapShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t gst = f.use("GetStringTypeW");
+        const std::uint32_t dst = f.zeroData(64);
+        const std::u16string s = u"A";
+        const std::uint32_t src = f.data(s.data(), 2u);
+
+        // CT_CTYPE2(2) / CT_CTYPE3(4) / CT_CTYPE1|CT_CTYPE2(3) / 0：都不是本模拟器做的
+        for (std::uint32_t type : {0u, 2u, 4u, 3u}) {
+            f.m.cpu().shim.last_error = 0;
+            LIFT_CHECK_EQ_U32(f.call(gst, {type, src, 1u, dst}), 0u);
+            LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        }
+        // 参数非法：lpSrcStr = 0 / lpCharType = 0 / cchSrc = 0 / cchSrc = -2
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, 0u, 1u, dst}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, src, 1u, 0u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, src, 0u, dst}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, src, 0xFFFFFFFEu, dst}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑥ LCMapStringW 的 cchSrc == -1（REQ-01M6K69K28AT5VNKZAJXT6PZJ4）
+    //
+    // 判据：`"AbC"` + LCMAP_LOWERCASE + cchSrc=-1 ⇒ 返回 4（**含**结尾 0）、dst = L"abc\0"；
+    // cchDest==0 是"问大小"（同一数值）；缓冲不足 ⇒ 0 + 122；显式 cchSrc=3 不回归。
+    // ★ 旧实现 cchSrc<0 只映射 1 个字符并返回 1 ⇒ 这条会红。
+    {
+        g_current_case = "lcmap-string-null-terminated";
+        Fixture f;
+        lift::registerStringShims(f.m.shims());
+        lift::registerBootstrapShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t lcm = f.use("LCMapStringW");
+        const std::uint32_t dst = f.zeroData(64);
+
+        const std::u16string abc = u"AbC";
+        const std::uint32_t src = f.data(abc.data(), (abc.size() + 1) * 2u);
+        LIFT_CHECK_EQ_U32(
+            f.call(lcm, {kLocaleUserDefault, kLcmapLowercase, src, 0xFFFFFFFFu, dst, 64u}), 4u);
+        LIFT_CHECK(guestWstr(f.m, dst) == u"abc");
+        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 6u), 0u);  // 结尾 0 也写进去了
+
+        // cchDest == 0：只问大小，返回同一数值（旧实现返回 1）
+        LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, kLcmapLowercase, src, 0xFFFFFFFFu, dst, 0u}), 4u);
+        LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, kLcmapLowercase, src, 0xFFFFFFFFu, 0u, 0u}), 4u);
+
+        // 缓冲不足：需要 4 个字符，只给 3 ⇒ 0 + ERROR_INSUFFICIENT_BUFFER
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(
+            f.call(lcm, {kLocaleUserDefault, kLcmapLowercase, src, 0xFFFFFFFFu, dst, 3u}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInsufficientBuffer);
+        LIFT_CHECK(guestWstr(f.m, dst) == u"abc");  // 失败不写坏已有内容
+
+        // 显式 cchSrc = 3（不回归）：3 个字符全映射、返回 3
+        LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, kLcmapLowercase, src, 3u, dst, 64u}), 3u);
+        LIFT_CHECK(guestWstr(f.m, dst) == u"abc");
+
+        // UPPERCASE 同口径
+        const std::u16string mixed = u"aBc";
+        const std::uint32_t up = f.data(mixed.data(), (mixed.size() + 1) * 2u);
+        LIFT_CHECK_EQ_U32(
+            f.call(lcm, {kLocaleUserDefault, kLcmapUppercase, up, 0xFFFFFFFFu, dst, 64u}), 4u);
+        LIFT_CHECK(guestWstr(f.m, dst) == u"ABC");
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑥' 未实现的 dwMapFlags ⇒ 0 + ERROR_INVALID_FLAGS（⛔ 旧实现静默按"无映射"成功）
+    {
+        g_current_case = "lcmap-string-invalid-flags";
+        Fixture f;
+        lift::registerStringShims(f.m.shims());
+        lift::registerBootstrapShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t lcm = f.use("LCMapStringW");
+        const std::uint32_t dst = f.zeroData(64);
+        const std::u16string abc = u"AbC";
+        const std::uint32_t src = f.data(abc.data(), (abc.size() + 1) * 2u);
+
+        // LCMAP_SORTKEY(0x400) / LCMAP_BYTEREV(0x800) / LCMAP_HIRAGANA(0x100000)
+        for (std::uint32_t flags : {0x400u, 0x800u, 0x100000u}) {
+            f.m.cpu().shim.last_error = 0;
+            LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, flags, src, 0xFFFFFFFFu, dst, 64u}), 0u);
+            LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidFlags);
+        }
+        // LOWERCASE | UPPERCASE 同时给 = 非法组合
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, kLcmapLowercase | kLcmapUppercase, src,
+                                       0xFFFFFFFFu, dst, 64u}),
+                          0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidFlags);
+
+        // dwMapFlags = 0 是合法的"不映射"（原样复制 + 同一个返回值）
+        LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, 0u, src, 0xFFFFFFFFu, dst, 64u}), 4u);
+        LIFT_CHECK(guestWstr(f.m, dst) == u"AbC");
         LIFT_CHECK(f.ok);
     }
 

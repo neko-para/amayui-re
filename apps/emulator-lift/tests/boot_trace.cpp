@@ -14,6 +14,18 @@
 #include <iterator>
 #include <string>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "check.h"
 #include "corpus/lst_index.h"
 #include "runtime/machine.h"
@@ -138,8 +150,19 @@ int main() {
     // ③ A4 的**逐字节**判据：同一次初始化的 shim trace 写两份文件后逐字节比较。
     //   旧实现只哈希寄存器 / FPU 元信息 / heap 计数 —— trace 本身一条都没比过（M1a 审计 T2）。
     g_current_case = "trace-bytes-identical";
-    const std::filesystem::path ta = std::filesystem::temp_directory_path() / "lift-boot-trace-a.log";
-    const std::filesystem::path tb = std::filesystem::temp_directory_path() / "lift-boot-trace-b.log";
+    // ★ 文件名必须带进程号（2026-11-04 实测）：固定名 `lift-boot-trace-a.log` 在两份 ctest
+    //   （并行构建目录 / 两个代理同时跑）**互相撞名** ⇒ 一个 `fopen` 失败 ⇒ 假红。
+    //   `file_io.cpp` 早就是这么做的（`-<pid>`），这里跟上。
+#ifdef _WIN32
+    const unsigned long pid = static_cast<unsigned long>(::GetCurrentProcessId());
+#else
+    const unsigned long pid = static_cast<unsigned long>(::getpid());
+#endif
+    const std::string suffix = "-" + std::to_string(pid) + ".log";
+    const std::filesystem::path ta =
+        std::filesystem::temp_directory_path() / ("lift-boot-trace-a" + suffix);
+    const std::filesystem::path tb =
+        std::filesystem::temp_directory_path() / ("lift-boot-trace-b" + suffix);
     auto utf8 = [](const std::filesystem::path& p) {
         const std::u8string s = p.u8string();
         return std::string(reinterpret_cast<const char*>(s.data()), s.size());

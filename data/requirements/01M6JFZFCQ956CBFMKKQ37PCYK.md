@@ -2,8 +2,9 @@
 
 - id: REQ-01M6JFZFCQ956CBFMKKQ37PCYK
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6FW5JGQGHACXHPWZD4Y3E
+- verify: apps/emulator-lift/tests/pe_loader.cpp#section-raw-out-of-range
 - repro: apps/emulator-lift/tests/pe_loader.cpp#section-raw-out-of-range
 - severity: S2
 - tags: [emulator-lift, m1, loader]

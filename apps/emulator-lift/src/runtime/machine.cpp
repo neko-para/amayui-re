@@ -39,14 +39,16 @@ const char* stopReasonName(StopReason r) {
     return "?";
 }
 
-// fault 诊断钩子：只读**符号表/字符串**（不反汇编 —— 反汇编要读内存，可能再 fault）
+// fault 诊断钩子：只读**符号表/字符串**（不反汇编 —— 反汇编要读内存，可能再 fault）。
+// ★ **零分配**（REQ-01M6JFZFN15MBPG7Y89WNZACFW #4）：本函数在平台异常 / 信号上下文里被调用，
+//   `std::string` 的分配在那里不安全 ⇒ 文本走 `LstIndex::textPtr`（内部指针），不拷不建。
 void liftFaultHook(const AccessSite& site) {
     Machine* m = g_active;
     if (!m) return;
     const X86& cpu = m->cpu();
     std::fprintf(stderr, "  eip        : %08X\n", cpu.eip);
-    const std::string text = m->lst().textAt(cpu.eip);
-    std::fprintf(stderr, "  instr      : %s\n", text.empty() ? "(不在 .lst 索引里)" : text.c_str());
+    const char* const text = m->lst().textPtr(cpu.eip);
+    std::fprintf(stderr, "  instr      : %s\n", (text && text[0]) ? text : "(不在 .lst 索引里)");
     if (m->mem().regionOf(site.ea)) {
         const Region* r = m->mem().regionOf(site.ea);
         std::fprintf(stderr, "  region     : %s %08X-%08X %s\n", regionKindName(r->kind), r->begin, r->end, r->name);
@@ -73,6 +75,7 @@ void Machine::wire() {
     cpu_.calls = &guest_calls_;
     cpu_.windows = &windows_;
     cpu_.com = &com_;
+    cpu_.fonts = &fonts_;
     cpu_.fpu.reset();
 }
 

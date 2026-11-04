@@ -37,6 +37,7 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/pe_resource.cpp
     src/runtime/surface.cpp
     src/runtime/present.cpp
+    src/runtime/ddraw_surface.cpp
     src/runtime/com.cpp
     src/runtime/machine.cpp
     src/runtime/exec.cpp
@@ -64,9 +65,15 @@ add_library(emulator-lift-runtime STATIC
     src/shims/kernel32_version.cpp
     src/shims/user32_menu.cpp
     src/shims/user32_window.cpp
+    src/shims/user32_input.cpp
     src/shims/user32_resource.cpp
     src/shims/gdi32_boot.cpp
+    src/shims/ddraw.cpp
+    src/shims/dynamic_exports.cpp
     src/shims/shell32.cpp
+    # ★ P4 小族（只追加源文件）：shlwapi 路径族 + imagehlp 递归建目录
+    src/shims/shlwapi.cpp
+    src/shims/imagehlp.cpp
     src/shims/advapi32_registry.cpp
     src/shims/winmm_audio.cpp
     src/shims/winmm_joystick.cpp
@@ -77,7 +84,29 @@ target_link_libraries(emulator-lift-runtime
     PUBLIC SDL3::SDL3
     PRIVATE Zydis::Zydis berkeley-softfloat)
 target_compile_features(emulator-lift-runtime PUBLIC cxx_std_20)
-target_compile_options(emulator-lift-runtime PRIVATE -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-const-variable)
+
+# ---- 警告即错误：按**驱动**分档，⛔ 不能写一行 `-Wall -Wextra -Werror` 了事 ----
+# ★ 为什么（2026-11-04 实测 + 用户确认）：mac 侧那批**更强的警告**是靠 GNU 驱动的 `-Wall -Wextra` 表达的；
+#   而 **clang-cl 把 `-Wall` 当 MSVC 的 `/Wall`**，那等于 `-Weverything`（`-Wc++98-compat` /
+#   `-Wold-style-cast` / `-Wdeprecated-declarations` 全开）⇒ 同一行 flag 在 Windows 上把整棵树编挂。
+# ★ 于是：MSVC 口径（`cl` 与 `clang-cl`）用 `/W4 /WX`（等价档，且 `/WX` 是真的"警告即错误"，
+#   不像 `-Werror` 会被 `cl` 当 D9002 静默忽略）；GNU 口径仍 `-Wall -Wextra -Werror`。
+#   ⛔ 不要为了"能编过"把 `-WX` / `-Werror` 删掉 —— 那会让 `chore: enable werror` 的意图归零。
+if(MSVC)
+    # `/utf-8`：源码里有中日文注释；MSVC 默认按本地码页读，会把它们读坏（clang-cl 同理）
+    # `_CRT_SECURE_NO_WARNINGS`：`getenv` / `fopen` 这类**可移植**用法在 MSVC 里被标成 deprecated；
+    #   这不是本仓要治的问题，显式关掉比逐个加 pragma 干净。
+    target_compile_options(emulator-lift-runtime PRIVATE /W4 /WX /permissive- /utf-8)
+    target_compile_definitions(emulator-lift-runtime PRIVATE _CRT_SECURE_NO_WARNINGS)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        # clang-cl 认 GNU 形态的 `-Wno-*`：把 GNU 那行**原本就关着**的两条照旧关掉（口径对齐，不是放宽）
+        target_compile_options(emulator-lift-runtime PRIVATE
+            -Wno-unused-variable -Wno-unused-const-variable)
+    endif()
+else()
+    target_compile_options(emulator-lift-runtime PRIVATE -Wall -Wextra -Werror
+        -Wno-unused-variable -Wno-unused-const-variable)
+endif()
 
 add_executable(emulator-lift src/main.cpp)
 target_link_libraries(emulator-lift PRIVATE emulator-lift-runtime)
@@ -119,11 +148,12 @@ target_link_libraries(lift-pe-loader PRIVATE emulator-lift-runtime)
 add_test(NAME pe-loader COMMAND lift-pe-loader)
 
 # ---- pure：fault 归因（宿主 AV 不许被报成"上一次 guest 访存"）----
-# ★ 集成用例用 fork + 管道（POSIX）；Windows 只跑纯函数并 LIFT_SKIP ⇒ 77。
+# ★ 顶层无条件注册 ⇒ pure 档；两平台都**真跑**（POSIX = fork + 管道，Windows = 同一个 exe 再启动一次
+#   + 临时文件，平台差异在 tests/fault_report.cpp 内部用 `#ifdef` 处理）。
+#   ⛔ 不 LIFT_SKIP、⛔ 不因为平台差异把它降成 assets（REQ-01M6JFZFN15MBPG7Y89WNZACFW #1）。
 add_executable(lift-fault-report tests/fault_report.cpp)
 target_link_libraries(lift-fault-report PRIVATE emulator-lift-runtime)
 add_test(NAME fault-report COMMAND lift-fault-report)
-set_tests_properties(fault-report PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(lift-shim-abi tests/shim_abi.cpp)
 target_link_libraries(lift-shim-abi PRIVATE emulator-lift-runtime)
@@ -149,6 +179,11 @@ add_test(NAME surface-present COMMAND lift-surface-present)
 add_executable(lift-mechanism tests/mechanism.cpp)
 target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)
 add_test(NAME mechanism COMMAND lift-mechanism)
+
+# ---- pure：P1 / B2 —— DirectDraw 2D 核心（动态导出 + COM 对象 + surface/Blt/Lock/Flip/枚举）----
+add_executable(lift-ddraw tests/ddraw.cpp)
+target_link_libraries(lift-ddraw PRIVATE emulator-lift-runtime)
+add_test(NAME ddraw COMMAND lift-ddraw)
 
 add_executable(lift-pe-resource tests/pe_resource.cpp)
 target_link_libraries(lift-pe-resource PRIVATE emulator-lift-runtime)
@@ -258,4 +293,33 @@ if(EXISTS "${AGE_LST}")
     add_test(NAME base-coverage COMMAND lift-base-coverage)
     set_tests_properties(base-coverage PROPERTIES
         ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
+endif()
+
+# =====================================================================================
+# P2 · GDI 字体 / 文本（宿主 Amayui CN + 三档 GGO + 自洽）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# =====================================================================================
+find_package(Freetype REQUIRED)
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/font.cpp
+    src/shims/gdi32_object.cpp
+    src/shims/gdi32_font.cpp)
+target_link_libraries(emulator-lift-runtime PRIVATE Freetype::Freetype)
+# 宿主字体路径由 CMake 注入（照 emulator-cxx 的 EMULATOR_CXX_FONT_PATH）：
+#   ⛔ 源码里不硬写相对路径；CLI 的 `--font` 是调试覆盖。
+set(LIFT_HOST_FONT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/fonts/Amayui-CN_cnjp.ttf")
+target_compile_definitions(emulator-lift-runtime PRIVATE
+    LIFT_HOST_FONT_PATH="${LIFT_HOST_FONT_PATH}")
+
+# ---- pure：对象表 / DC 状态 / SelectObject 旧值恢复 / GGO 格式算术 / 自洽（合成字形源）----
+add_executable(lift-gdi tests/gdi.cpp)
+target_link_libraries(lift-gdi PRIVATE emulator-lift-runtime)
+add_test(NAME gdi COMMAND lift-gdi)
+
+# ---- assets：真 Amayui CN（缺字体文件时整个测试不注册 ⇒ ⛔ 不假绿）----
+if(EXISTS "${LIFT_HOST_FONT_PATH}")
+    add_executable(lift-gdi-font tests/gdi_font.cpp)
+    target_link_libraries(lift-gdi-font PRIVATE emulator-lift-runtime)
+    add_test(NAME gdi-font COMMAND lift-gdi-font)
+    set_tests_properties(gdi-font PROPERTIES SKIP_RETURN_CODE 77)
 endif()

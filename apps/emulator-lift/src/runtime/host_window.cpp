@@ -104,6 +104,22 @@ bool WindowManager::peek(WinMessage* out, bool remove) {
     return true;
 }
 
+bool WindowManager::peekAt(std::size_t index, WinMessage* out) const {
+    if (index < queue_.size()) {
+        if (out) *out = queue_[index];
+        return true;
+    }
+    // 队列之外：`WM_QUIT` 是"队列里的一条虚拟消息"（真机也是 post 队列里的一项），排在最后。
+    if (quit_ && index == queue_.size()) {
+        WinMessage q;
+        q.message = kWmQuit;
+        q.wparam = quit_code_;
+        if (out) *out = q;
+        return true;
+    }
+    return false;
+}
+
 bool WindowManager::get(X86& cpu, WinMessage* out) {
     pumpTimers(cpu);
     return peek(out, true);
@@ -158,6 +174,31 @@ bool WindowManager::killTimer(std::uint32_t hwnd, std::uint32_t id) {
                                  [hwnd, id](const HostTimer& t) { return t.hwnd == hwnd && t.id == id; }),
                   timers_.end());
     return timers_.size() != before;
+}
+
+// ---- 光标 / 捕获（headless 虚拟状态；语义见 host_window.h 的注释）----
+
+std::uint32_t WindowManager::setCursor(std::uint32_t hcursor) {
+    const std::uint32_t old = cursor_;
+    cursor_ = hcursor;
+    return old;
+}
+
+void WindowManager::setCursorPos(int x, int y) {
+    cursor_x_ = x;
+    cursor_y_ = y;
+}
+
+int WindowManager::showCursor(bool show) {
+    // 真机实现：显示计数 +1 / -1；计数 < 0 ⇒ 光标不可见。返回值是**新计数**。
+    cursor_show_count_ += show ? 1 : -1;
+    return cursor_show_count_;
+}
+
+std::uint32_t WindowManager::setCapture(std::uint32_t hwnd) {
+    const std::uint32_t old = capture_;
+    capture_ = hwnd;
+    return old;
 }
 
 }  // namespace lift

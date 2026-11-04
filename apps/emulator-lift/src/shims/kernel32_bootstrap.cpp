@@ -63,22 +63,91 @@ void shimGetProcessHeaps(X86& cpu, ShimCall& call) {
 
 // ---------------------------------------------------------------------------------------
 // 标准句柄 / 文件类型（`_ioinit` 会碰）
+//
+// ★ 2026-11-04 收口 REQ-01M6K69K9HM3ETCDNMJWPHGXJC：这三条此前是**互相矛盾的空实现**
+//   （`SetStdHandle` 不存值 / `GetFileType` 恒报字符设备 / `GetConsoleMode` 恒成功）。
+//   现在三者读的是**同一份事实**：
+//     · `SetStdHandle` 存进句柄表的进程级标准槽（`HandleTable::setStdHandle`），`GetStdHandle` 读回；
+//     · `GetFileType` 先看句柄表里的**真实种类**（File ⇒ FILE_TYPE_DISK(1)），再看标准槽
+//       （默认的三个假句柄 ⇒ FILE_TYPE_CHAR(2)），其余 ⇒ FILE_TYPE_UNKNOWN(0) + 错误；
+//     · `GetConsoleMode` 只对**标准槽里的假句柄**成功（启动路径的现状），真句柄 ⇒ 0 + 6。
+// ⛔ 边界（本单不做）：管道 / 真控制台设备；只要求"文件句柄 ≠ 字符设备"与"标准槽真的存值"。
 // ---------------------------------------------------------------------------------------
-void shimGetStdHandle(X86&, ShimCall& call) {
-    const std::uint32_t which = call.u32(0);
-    // STD_INPUT=-10 / STD_OUTPUT=-11 / STD_ERROR=-12
-    if (which == 0xFFFFFFF6u) call.result = 0x0000000Cu;  // stdin（假句柄）
-    else if (which == 0xFFFFFFF5u) call.result = 0x00000010u;  // stdout
-    else if (which == 0xFFFFFFF4u) call.result = 0x00000014u;  // stderr
-    else {
-        call.result = 0;
-        call.cpu->shim.last_error = 6;
+constexpr std::uint32_t kFileTypeUnknown = 0;  // FILE_TYPE_UNKNOWN
+constexpr std::uint32_t kFileTypeDisk = 1;     // FILE_TYPE_DISK
+constexpr std::uint32_t kFileTypeChar = 2;     // FILE_TYPE_CHAR
+constexpr std::uint32_t kErrInvalidHandle = 6;
+constexpr std::uint32_t kErrInvalidParameter = 87;
+
+// STD_INPUT(-10) / STD_OUTPUT(-11) / STD_ERROR(-12) ⇒ 标准槽号；其余 ⇒ -1
+int stdSlotFromNStdHandle(std::uint32_t which) {
+    switch (which) {
+        case 0xFFFFFFF6u: return 0;  // STD_INPUT_HANDLE
+        case 0xFFFFFFF5u: return 1;  // STD_OUTPUT_HANDLE
+        case 0xFFFFFFF4u: return 2;  // STD_ERROR_HANDLE
+        default: return -1;
     }
 }
 
-void shimSetStdHandle(X86&, ShimCall& call) { call.result = 1; }
-// FILE_TYPE_CHAR = 2：让 CRT 认为标准句柄是字符设备（不是磁盘文件）⇒ 不做缓冲/寻址
-void shimGetFileType(X86&, ShimCall& call) { call.result = 2; }
+void shimGetStdHandle(X86& cpu, ShimCall& call) {
+    const std::uint32_t which = call.u32(0);
+    const int slot = stdSlotFromNStdHandle(which);
+    if (slot < 0 || !cpu.handles) {
+        cpu.shim.last_error = kErrInvalidHandle;
+        shimLog("kernel32", "GetStdHandle", "nStdHandle=0x%08X 不是 STD_INPUT/OUTPUT/ERROR ⇒ 返回 0",
+                which);
+        call.result = 0;
+        return;
+    }
+    call.result = cpu.handles->stdHandle(slot);
+}
+
+// 文档：改的是**进程级**表（之后 `GetStdHandle` 返回它）。h 可以为 0（清掉该槽）。
+void shimSetStdHandle(X86& cpu, ShimCall& call) {
+    const std::uint32_t which = call.u32(0);
+    const std::uint32_t h = call.u32(1);
+    const int slot = stdSlotFromNStdHandle(which);
+    if (slot < 0 || !cpu.handles) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "SetStdHandle", "nStdHandle=0x%08X 不是 STD_INPUT/OUTPUT/ERROR ⇒ 返回 0",
+                which);
+        call.result = 0;
+        return;
+    }
+    cpu.handles->setStdHandle(slot, h);
+    call.result = 1;
+}
+
+// 文档（GetFileType）：按**句柄的真实种类**回答 —— 磁盘文件 FILE_TYPE_DISK(1)、字符设备
+// FILE_TYPE_CHAR(2)、管道 FILE_TYPE_PIPE(3)、其余 / 无效句柄 FILE_TYPE_UNKNOWN(0)。
+// ★ 旧实现恒返回 2 ⇒ CRT 会把 `CreateFileA` 打开的文件当控制台（缓冲 / 定位走错分支）。
+void shimGetFileType(X86& cpu, ShimCall& call) {
+    const std::uint32_t h = call.u32(0);
+    if (cpu.handles) {
+        // ① 真句柄：按句柄表的种类回答
+        if (const HandleEntry* e = cpu.handles->get(h)) {
+            if (e->kind == HandleKind::File) {
+                call.result = kFileTypeDisk;
+                return;
+            }
+            // 事件 / 互斥量 / 查找句柄…都不是文件对象：文档的失败值就是 FILE_TYPE_UNKNOWN(0)
+            shimLog("kernel32", "GetFileType", "0x%08X 是 %s 句柄（不是文件对象）⇒ FILE_TYPE_UNKNOWN",
+                    h, handleKindName(e->kind));
+            call.result = kFileTypeUnknown;
+            return;
+        }
+        // ② 标准槽里的假句柄（默认 0x0C/0x10/0x14，或 SetStdHandle 存进来的）：字符设备
+        if (cpu.handles->stdSlotOf(h) >= 0) {
+            call.result = kFileTypeChar;
+            return;
+        }
+    }
+    // ③ 其余 = 无效句柄 ⇒ FILE_TYPE_UNKNOWN + ERROR_INVALID_HANDLE
+    cpu.shim.last_error = kErrInvalidHandle;
+    shimLog("kernel32", "GetFileType", "0x%08X 不是活着的句柄 ⇒ FILE_TYPE_UNKNOWN(0) + 错误 6", h);
+    call.result = kFileTypeUnknown;
+}
+
 void shimSetHandleCount(X86&, ShimCall& call) { call.result = call.u32(0); }
 
 // ---------------------------------------------------------------------------------------
@@ -121,9 +190,10 @@ void shimGetCPInfo(X86& cpu, ShimCall& call) {
 // 日志并退回"字节值直通"（ASCII 正确）。⛔ 不再把 932 的每个字节糊成同一个 16 位值 —— 那会让
 // 非 ASCII 字符串悄悄变成 U+00XX，而 A/W 之间往返恰好还能对齐，缺陷只能等到比较 / 排版时才炸。
 constexpr std::uint32_t kCpUtf8 = 65001;
-constexpr std::uint32_t kErrInvalidParameter = 87;
+// ★ `kErrInvalidParameter(87)` 已在文件顶部（标准句柄那一节）定义 —— 全文件一份。
 constexpr std::uint32_t kErrInsufficientBuffer = 122;
 constexpr std::uint32_t kErrNoUnicodeTranslation = 1113;
+constexpr std::uint32_t kErrInvalidFlags = 1008;  // ERROR_INVALID_FLAGS（LCMapStringW 用）
 constexpr std::uint32_t kMbErrInvalidChars = 0x00000008;
 constexpr std::uint32_t kWcErrInvalidChars = 0x00000080;
 constexpr char16_t kReplacement = 0xFFFD;  // MultiByteToWideChar 的非法序列替换字符
@@ -318,59 +388,193 @@ void shimWideCharToMultiByte(X86& cpu, ShimCall& call) {
     call.result = static_cast<std::uint32_t>(bytes);
 }
 
+// ---------------------------------------------------------------------------------------
+// 字符分类（`GetStringTypeW`，CRT 的 `iswalpha` / `iswspace` / `iswdigit` 一路会碰）
+//
+// ★ 2026-11-04 收口 REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ：旧实现的**位值抄错**（'A' 被标成
+//   DIGIT|ALPHA、空格被标成 CNTRL|SPACE、NUL 被标成 C1_UPPER），而且 `dwInfoType` 被
+//   `(void)type` 丢弃 ⇒ 任何 info type 都按 CT_CTYPE1 **假装成功**。现在：
+//     · 位值按 MSDN 的 C1_* 表（见下）；
+//     · `dwInfoType != CT_CTYPE1` ⇒ 0 + ERROR_INVALID_PARAMETER(87) + 一行日志（⛔ 不静默）。
+// ⛔ 本单的边界（后续单 REQ-01M6KH7EPPNWJDHPDQ6REV2RRM）：**只保证 ASCII**。非 ASCII 的
+//   CT_CTYPE1 需要一张字符类表（CP932 假名 / 全角 / CJK），这里**不拿 `w < 0x80` 猜**：
+//   非 ASCII 位给 0 + 一次日志，真正的分类等那张表进来再做。
+// ---------------------------------------------------------------------------------------
+// CT_CTYPE1 位（MSDN「GetStringTypeW」的 C1_* 表）
+constexpr std::uint16_t kC1Upper = 0x0001;
+constexpr std::uint16_t kC1Lower = 0x0002;
+constexpr std::uint16_t kC1Digit = 0x0004;
+constexpr std::uint16_t kC1Space = 0x0008;
+constexpr std::uint16_t kC1Punct = 0x0010;
+constexpr std::uint16_t kC1Cntrl = 0x0020;
+constexpr std::uint16_t kC1Blank = 0x0040;
+constexpr std::uint16_t kC1Xdigit = 0x0080;
+constexpr std::uint16_t kC1Alpha = 0x0100;
+
+constexpr std::uint32_t kCtCtype1 = 1;  // CT_CTYPE1
+constexpr std::uint32_t kCtCtype2 = 2;  // CT_CTYPE2（未实现）
+constexpr std::uint32_t kCtCtype3 = 4;  // CT_CTYPE3（未实现）
+
+// ASCII 的 CT_CTYPE1 位（0x00–0x7F）。文档给的定点：'A'=0x0181、'a'=0x0182、'G'=0x0101、
+// '0'=0x0084、' '=0x0048、'!'=0x0010。
+std::uint16_t ctype1Ascii(std::uint16_t w) {
+    if (w < 0x20 || w == 0x7F) {
+        // 控制字符（含 NUL / CR / LF / DEL）。TAB 同时是 blank（C99 / Unicode 的 blank = 空格 + TAB）
+        return static_cast<std::uint16_t>(kC1Cntrl | (w == 0x09 ? kC1Blank : 0));
+    }
+    if (w == 0x20) return static_cast<std::uint16_t>(kC1Space | kC1Blank);
+    if (w >= '0' && w <= '9') return static_cast<std::uint16_t>(kC1Digit | kC1Xdigit);
+    if (w >= 'A' && w <= 'F') return static_cast<std::uint16_t>(kC1Upper | kC1Alpha | kC1Xdigit);
+    if (w >= 'G' && w <= 'Z') return static_cast<std::uint16_t>(kC1Upper | kC1Alpha);
+    if (w >= 'a' && w <= 'f') return static_cast<std::uint16_t>(kC1Lower | kC1Alpha | kC1Xdigit);
+    if (w >= 'g' && w <= 'z') return static_cast<std::uint16_t>(kC1Lower | kC1Alpha);
+    return kC1Punct;  // 0x21–0x2F / 0x3A–0x40 / 0x5B–0x60 / 0x7B–0x7E
+}
+
 void shimGetStringTypeW(X86& cpu, ShimCall& call) {
     const std::uint32_t type = call.u32(0);
     const std::uint32_t src = call.u32(1);
-    const int n = call.i32(2);
+    const std::int32_t n = call.i32(2);
     const std::uint32_t dst = call.u32(3);
-    (void)type;
-    if (!src || !dst || n <= 0) {
+    if (type != kCtCtype1) {
+        // CT_CTYPE2 / CT_CTYPE3 在真机上是**合法**值（这里没实现）⇒ 明确失败而不是按 CT_CTYPE1 假装成功
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "GetStringTypeW",
+                "dwInfoType=%u 未实现（本模拟器只做 CT_CTYPE1=%u / 不做 CT_CTYPE2=%u、CT_CTYPE3=%u）"
+                " ⇒ 返回 0（ERROR_INVALID_PARAMETER）",
+                type, kCtCtype1, kCtCtype2, kCtCtype3);
         call.result = 0;
         return;
     }
-    for (int i = 0; i < n; ++i) {
-        const std::uint16_t w = cpu.mem->rd16(src + static_cast<std::uint32_t>(i) * 2u);
+    if (!src || !dst || n == 0 || n < -1) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "GetStringTypeW", "参数非法（lpSrcStr=0x%08X lpCharType=0x%08X cchSrc=%d）"
+                                               " ⇒ 返回 0（ERROR_INVALID_PARAMETER）",
+                src, dst, n);
+        call.result = 0;
+        return;
+    }
+    // cchSrc = -1 ⇒ NUL 结尾（结尾的那个 0 **不**参与分类，与文档一致）
+    std::uint32_t count = 0;
+    if (n < 0) {
+        while (cpu.mem->rd16(src + count * 2u) != 0) ++count;
+    } else {
+        count = static_cast<std::uint32_t>(n);
+    }
+    std::uint32_t unclassified = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint16_t w = cpu.mem->rd16(src + i * 2u);
         std::uint16_t flags = 0;
-        if (w == 0) flags |= 0x0001;                       // C1_NULL? 实际 CT_CTYPE1 的 C1_SPACE 等不同
-        if (w < 0x20) flags |= 0x0020;                     // C1_CNTRL
-        else if (w == 0x20) flags |= 0x0020 | 0x0008;      // 空白
-        else if (w >= 0x30 && w <= 0x39) flags |= 0x0004 | 0x0080;  // 数字 + 十六进制
-        else if ((w >= 'A' && w <= 'Z') || (w >= 'a' && w <= 'z')) flags |= 0x0004 | 0x0100;  // 字母
-        cpu.mem->wr16(dst + static_cast<std::uint32_t>(i) * 2u, flags);
+        if (w < 0x80) {
+            flags = ctype1Ascii(w);
+        } else {
+            ++unclassified;  // 非 ASCII：见上面的边界（⛔ 不猜）
+        }
+        cpu.mem->wr16(dst + i * 2u, flags);
+    }
+    if (unclassified != 0) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            shimLog("kernel32", "GetStringTypeW",
+                    "非 ASCII 的 CT_CTYPE1 分类未实现（需要一张字符类表；本次 %u 个字符按 0 位返回）",
+                    unclassified);
+        }
     }
     call.result = 1;
 }
 
+// ---------------------------------------------------------------------------------------
+// 大小写映射（`LCMapStringW`，CRT 的 `_wcsicmp` / `towlower` 一路会碰）
+//
+// ★ 2026-11-04 收口 REQ-01M6K69K28AT5VNKZAJXT6PZJ4：旧实现 `cchSrc=-1` 只映射 **1** 个字符
+//   （返回 1）⇒ 调用方按返回值认为"整串已转换"，静默截断。现在：
+//     · `cchSrc=-1` 扫到 NUL，**含**结尾 0 计数（文档：cchSrc<0 时返回值含结尾 0）；
+//     · `cchDest==0` 是"问大小"（返回同一数值）；缓冲不足 ⇒ 0 + 122；cchDest<0 / lpDestStr=0
+//       而 cchDest>0 ⇒ 0 + 87；
+//     · 未实现的 `dwMapFlags`（SORTKEY / BYTEREV / HIRAGANA / KATAKANA / HALFWIDTH / FULLWIDTH …）
+//       ⇒ 0 + ERROR_INVALID_FLAGS(1008)（⛔ 旧实现静默按"无映射"成功）；LOWERCASE 与 UPPERCASE
+//       同时给是非法组合 ⇒ 同样是 1008。
+// ⛔ 本单的边界（后续单 REQ-01M6KH7HC3ZP3M5RS8EJ3813WC）：只做 ASCII 的大小写；
+//   CP932 假名 / 全角的映射要另一张表。
+// ---------------------------------------------------------------------------------------
+constexpr std::uint32_t kLcmapLowercase = 0x00000100;
+constexpr std::uint32_t kLcmapUppercase = 0x00000200;
+constexpr std::uint32_t kLcmapDoable = kLcmapLowercase | kLcmapUppercase;
+
 void shimLCMapStringW(X86& cpu, ShimCall& call) {
+    // lcid：本模拟器只有 en-US 一个 locale（GetUserDefaultLCID），不参与映射
+    const std::uint32_t lcid = call.u32(0);
+    (void)lcid;
     const std::uint32_t flags = call.u32(1);
     const std::uint32_t src = call.u32(2);
-    const int n = call.i32(3);
+    const std::int32_t n = call.i32(3);
     const std::uint32_t dst = call.u32(4);
-    const int cap = call.i32(5);
-    if (!src || n == 0) {
+    const std::int32_t cap = call.i32(5);
+
+    if (!src || n == 0 || n < -1) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "LCMapStringW", "参数非法（lpSrcStr=0x%08X cchSrc=%d）⇒ 返回 0"
+                                               "（ERROR_INVALID_PARAMETER）",
+                src, n);
         call.result = 0;
         return;
     }
-    const std::int64_t count = n < 0 ? 1 : n;  // 只支持显式长度的路径（-1 记日志）
-    if (n < 0) shimLog("kernel32", "LCMapStringW", "只支持显式长度（n>0）；n<0 的路径未实现");
-    if (!dst || cap == 0) {
-        call.result = static_cast<std::uint32_t>(count);
-        return;
-    }
-    if (cap < count) {
-        call.cpu->shim.last_error = 122;
+    const std::uint32_t unsupported = flags & ~kLcmapDoable;
+    if (unsupported != 0 ||
+        (flags & kLcmapDoable) == kLcmapDoable) {
+        cpu.shim.last_error = kErrInvalidFlags;  // ERROR_INVALID_FLAGS
+        shimLog("kernel32", "LCMapStringW",
+                "dwMapFlags=0x%08X 里有未实现的位（0x%08X）或 LOWERCASE|UPPERCASE 同时给 ⇒ 返回 0"
+                "（ERROR_INVALID_FLAGS）",
+                flags, unsupported);
         call.result = 0;
         return;
     }
-    const bool lower = (flags & 0x100) != 0;  // LCMAP_LOWERCASE
-    const bool upper = (flags & 0x200) != 0;  // LCMAP_UPPERCASE
-    for (std::int64_t i = 0; i < count; ++i) {
-        std::uint16_t w = cpu.mem->rd16(src + static_cast<std::uint32_t>(i) * 2u);
+    // 要映射的字符数：cchSrc<0 ⇒ 扫到 NUL，**含**结尾 0（文档：cchSrc=-1 时返回值含结尾 0）
+    std::uint32_t count = 0;
+    if (n < 0) {
+        while (cpu.mem->rd16(src + count * 2u) != 0) ++count;
+        ++count;
+    } else {
+        count = static_cast<std::uint32_t>(n);
+    }
+    if (cap < 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "LCMapStringW", "cchDest=%d < 0 ⇒ 返回 0（ERROR_INVALID_PARAMETER）", cap);
+        call.result = 0;
+        return;
+    }
+    if (cap == 0) {  // 文档：问大小 —— 返回所需的字符数（cchSrc<0 时含结尾 0），不碰 lpDestStr
+        call.result = count;
+        return;
+    }
+    if (!dst) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "LCMapStringW", "cchDest=%d 但 lpDestStr 为空 ⇒ 返回 0"
+                                               "（ERROR_INVALID_PARAMETER）",
+                cap);
+        call.result = 0;
+        return;
+    }
+    if (static_cast<std::uint32_t>(cap) < count) {
+        cpu.shim.last_error = kErrInsufficientBuffer;
+        shimLog("kernel32", "LCMapStringW", "缓冲不足（需要 %u 个字符，cchDest=%d）⇒ 返回 0"
+                                               "（ERROR_INSUFFICIENT_BUFFER）",
+                count, cap);
+        call.result = 0;
+        return;
+    }
+    const bool lower = (flags & kLcmapLowercase) != 0;
+    const bool upper = (flags & kLcmapUppercase) != 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint16_t w = cpu.mem->rd16(src + i * 2u);
         if (lower && w >= 'A' && w <= 'Z') w = static_cast<std::uint16_t>(w - 'A' + 'a');
-        if (upper && w >= 'a' && w <= 'z') w = static_cast<std::uint16_t>(w - 'a' + 'A');
-        cpu.mem->wr16(dst + static_cast<std::uint32_t>(i) * 2u, w);
+        else if (upper && w >= 'a' && w <= 'z') w = static_cast<std::uint16_t>(w - 'a' + 'A');
+        cpu.mem->wr16(dst + i * 2u, w);
     }
-    call.result = 1;
+    // 文档：返回值 = 映射后字符串的字符数（cchSrc<0 时含结尾 0）
+    call.result = count;
 }
 
 void shimIsValidLocale(X86&, ShimCall& call) { call.result = 1; }
@@ -478,10 +682,36 @@ void shimGetSystemTimePreciseAsFileTime(X86& cpu, ShimCall& call) {
 }
 
 void shimSetConsoleCtrlHandler(X86&, ShimCall& call) { call.result = 1; }
+// 文档（GetConsoleMode）：lpMode 是**控制台**句柄的模式；非控制台句柄 ⇒ 0 + ERROR_INVALID_HANDLE(6)。
+// ★ 旧实现对所有句柄都成功（还一律填输入模式）⇒ CRT / guest 无法区分"控制台"与"磁盘文件"。
+// 本模拟器没有真控制台：**只有标准槽里的三个假句柄**算控制台（保持启动路径现状）。
 void shimGetConsoleMode(X86& cpu, ShimCall& call) {
+    const std::uint32_t h = call.u32(0);
     const std::uint32_t out = call.u32(1);
-    if (out) cpu.mem->wr32(out, 0x0003u);  // ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT
-    call.result = 1;
+    if (out == 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "GetConsoleMode", "lpMode 为空 ⇒ 返回 0（ERROR_INVALID_PARAMETER）");
+        call.result = 0;
+        return;
+    }
+    if (cpu.handles) {
+        if (const HandleEntry* e = cpu.handles->get(h)) {
+            cpu.shim.last_error = kErrInvalidHandle;
+            shimLog("kernel32", "GetConsoleMode",
+                    "0x%08X 是 %s 句柄，不是控制台 ⇒ 返回 0（ERROR_INVALID_HANDLE）", h,
+                    handleKindName(e->kind));
+            call.result = 0;
+            return;
+        }
+        if (cpu.handles->stdSlotOf(h) >= 0) {
+            cpu.mem->wr32(out, 0x0003u);  // ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT
+            call.result = 1;
+            return;
+        }
+    }
+    cpu.shim.last_error = kErrInvalidHandle;
+    shimLog("kernel32", "GetConsoleMode", "0x%08X 不是控制台句柄 ⇒ 返回 0（ERROR_INVALID_HANDLE）", h);
+    call.result = 0;
 }
 void shimGetConsoleOutputCP(X86&, ShimCall& call) { call.result = 932; }
 void shimSetConsoleOutputCP(X86&, ShimCall& call) { call.result = 1; }

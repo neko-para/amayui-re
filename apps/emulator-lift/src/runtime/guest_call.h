@@ -9,6 +9,11 @@
 //   ② 回调 `ret n` 落到续延桩（`kContinuationEa`，不是普通块）；dispatcher 认出它，
 //      调 `resume()`：取 EAX、恢复 shim 的 esp/eip、执行 shim 的宿主续延；
 //   ③ 续延可以再次 `start()`（嵌套 SendMessage / 多回调枚举），形成 LIFO 栈。
+// ★ **多回调枚举**（P1 的 DDraw `EnumDisplayModes`）：续延在 `resume()` 里**再调一次 `start()`**
+//   并返回 false ⇒ 控制权又交给下一个 guest 回调；该回调返回后会**再进同一个续延**
+//   （收到的 `callback_result` 是这一次的 EAX），直到续延返回 true 收尾。
+//   ⛔ 返回 false 却**没有** start() 新回调 = 编程错误（resume 会明确报错，⛔ 不静默）。
+//   子回调帧（`nested`）的返回点是**父帧的续延**，不是 guest 的调用点。
 // ★ 只支持 **stdcall 回调**（Win32 的 WndProc / COM 方法 / 枚举回调都是 stdcall）；
 //   回调的 `ret n` 必须由 guest 自己弹参，`resume()` 只负责回到 shim 的调用点。
 #pragma once
@@ -23,7 +28,7 @@ namespace lift {
 struct X86;
 
 // 返回值：true = 这个 shim 调用已经完成（*shim_result 是它的 EAX）；
-//         false = 又启动了一次 guest 回调（栈上多了一帧），dispatcher 继续跑 guest。
+//         false = 续延自己又 `start()` 了一个 guest 回调（多回调枚举），dispatcher 继续跑 guest。
 using GuestContinuation = std::function<bool(X86&, std::uint32_t callback_result, std::uint32_t* shim_result)>;
 
 class GuestCallStack {
@@ -34,6 +39,7 @@ public:
     // 开始一次 guest 回调。
     // `cleanup_bytes` = 原 shim 返回时要抬的栈字节（stdcall 的 4 + argc*4；由调用方从 ShimCall 取）。
     // 返回 false + err ⇒ 栈不够 / 已有帧状态坏。
+    // ★ 在**续延里**调用 = 多回调枚举的下一次回调：压一个 `nested` 子帧（它的返回点是父帧续延）。
     bool start(X86& cpu, std::uint32_t fn, const std::vector<std::uint32_t>& args,
                std::uint32_t cleanup_bytes, const char* api, GuestContinuation cont, std::string* err);
 
@@ -51,17 +57,17 @@ public:
 
 private:
     struct Frame {
-        std::uint32_t ret_ea = 0;       // 原 shim 的返回地址
+        std::uint32_t ret_ea = 0;       // 原 shim 的返回地址（`nested` 帧不用它）
         std::uint32_t saved_esp = 0;    // 原 shim 入口的 esp（指向 ret_ea）
         std::uint32_t cleanup_bytes = 0;// 原 shim 完成后要抬的栈字节
         std::uint32_t fn = 0;           // guest 回调
         const char* api = nullptr;      // 诊断（字符串字面量；保持生命周期）
         GuestContinuation cont;         // 宿主续延
+        // ★ true = 这个帧是在**续延里**压的（多回调枚举的第 2..N 次回调）：
+        //   它返回时先把结果交回父帧的同一份续延，而不是恢复 guest 的调用点。
+        bool nested = false;
     };
     std::vector<Frame> frames_;
-    // ★ P0 限制：continuation 里**不能**再 start 一次回调（多回调枚举要用 P1 的
-    //   “从 continuation 继续”机制；见 plan P1 EnumDisplayModes）。这里显式拒绝，
-    //   ⛔ 不让它静默压一个 ret 指向 guest 的错帧。
     bool in_continuation_ = false;
 };
 

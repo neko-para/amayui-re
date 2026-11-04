@@ -12,6 +12,7 @@
 #include "runtime/surface.h"
 
 int main() {
+  try {
     using namespace lift_test;
     lift::Machine m;
     std::string err;
@@ -58,7 +59,14 @@ int main() {
         f.read(reinterpret_cast<char*>(hdr.data()), static_cast<std::streamsize>(hdr.size()));
         LIFT_CHECK(hdr.size() == 54 && hdr[0] == 'B' && hdr[1] == 'M');
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hdr[28]), 32);  // biBitCount
-        fs::remove(out);
+        // ★ 必须先关文件再删（2026-11-04 实测）：POSIX 上 unlink 打开中的文件没问题，
+        //   **Windows 上是共享冲突** ⇒ `fs::remove` 抛 `filesystem_error` ⇒ 未捕获 ⇒ std::terminate
+        //   ⇒ abort（无输出、退出码 3，mt 上曾被当成"卡死"）。同理 `fs::remove` 用 error_code 重载，
+        //   让"清理失败"只记一条日志、⛔ 不许把整洁性变成整轮挂掉。
+        f.close();
+        std::error_code rmec;
+        fs::remove(out, rmec);
+        if (rmec) std::fprintf(stderr, "note: 临时 BMP 没删掉：%s\n", rmec.message().c_str());
     }
 
     g_current_case = "present";
@@ -94,4 +102,11 @@ int main() {
     LIFT_CHECK(arena.destroy(0x12345678u) == false);
 
     return finish("surface-present");
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());
+    return 1;
+  } catch (...) {
+    std::fprintf(stderr, "DIAG uncaught non-std exception\n");
+    return 1;
+  }
 }

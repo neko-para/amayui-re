@@ -804,4 +804,113 @@ std::string Vfs::baseName(const std::string& guest_path) {
     return pos == std::string::npos ? s : s.substr(pos + 1);
 }
 
+// =======================================================================================
+// ★ P4：`imagehlp!MakeSureDirectoryPathExists`（递归建目录）
+//
+// 语义（Win32 的文档口径，`.` 见 imagehlp.cpp 文件头）：
+//   · "creates all the directories in the specified DirPath, beginning with the root"；
+//     每个分隔符（`\` 或 `/`）**之前**的那一段都是目录；**末尾分隔符**把最后一段也标成目录；
+//     没有末尾分隔符 ⇒ 最后一段是**文件名**，⛔ 不建它（文档明说：最后一段是目录时必须以分隔符结尾）。
+//   · **已存在算成功**（与 CreateDirectoryA 的"已存在即失败"相反）—— 这是真机语义。
+//   · 只经本类落盘 ⇒ guest 看到的仍是 Windows 形状，宿主路径不泄漏。
+//
+// ★ 为什么前缀要过"是不是根"这一关：`E:\Games\Eushully\天結\save\` 的前缀依次是
+//   `E:` / `E:\Games` / `E:\Games\Eushully` / … / `…\天結` / `…\天結\save`。前几个**在 guest 世界里
+//   本来就存在**（它们是 guest 根的一段），而 `resolve` 只能看到"guest 根之下的段"⇒ 前缀
+//   `E:\Games` 会被解析成 `game_dir/Games`。不拦的话第一次启动就会在安装树旁边造出一棵
+//   `Games/Eushully/天結` 假树（实测过：`--game-dir` 是唯一根，那棵树**不在**任何真机上存在）。
+//   ⇒ 凡是"等于根 / 是根的祖先"的前缀一律跳过（根不创建）。
+// =======================================================================================
+bool Vfs::makeSureDirectoryPathExists(const std::string& guest_path, std::string* error) const {
+    if (error) error->clear();
+    if (!ready()) {
+        if (error) *error = "[ready] game_dir 未设置（--game-dir 是唯一根）";
+        return false;
+    }
+    if (guest_path.empty()) {
+        if (error) *error = "[invalid] 空路径";
+        return false;
+    }
+
+    // ★ `--appdata` 的映射脚手架（`<appdata>/Roaming` / `Local` / `Documents`）是**宿主侧**的形态
+    //   （plan D5：形态由实现固定）。`resolve()` 只解析、不建目录，而它要求脚手架已存在 ⇒
+    //   这里先把那条映射目录建出来（否则"首次用一个新的 --appdata 就写不进 AppData"）。
+    const std::string special_text = normalizeSeps(guest_path);
+    for (const SpecialRoot& sr : kSpecialRoots) {
+        if (!prefixIsDir(special_text, sr.guest)) continue;
+        if (app_data_dir_.empty()) {
+            if (error) {
+                *error = std::string("[appdata] 特殊目录 \"") + sr.guest + "\" 需要 --appdata，但当前为空";
+            }
+            return false;
+        }
+        const fs::path scaffold = (pathFromUtf8(app_data_dir_) / pathFromUtf8(sr.sub)).lexically_normal();
+        std::error_code sec;
+        if (!fs::is_directory(scaffold, sec)) {
+            sec.clear();
+            if (!fs::create_directories(scaffold, sec) || sec) {
+                if (error) {
+                    *error = "AppData 映射目录建不出来：" + (sec ? sec.message() : std::string("宿主拒绝"));
+                }
+                return false;
+            }
+        }
+        break;
+    }
+
+    // 比较用的规范形：`\` → `/`、去盘符、去前导 / 尾部分隔符（"E:\Games" ⇒ "Games"）。
+    auto canon = [](std::string s) {
+        s = normalizeSeps(std::move(s));
+        if (hasDrive(s)) s.erase(0, 2);
+        trimLeadingSeps(s);
+        return trimTrailingSeps(std::move(s));
+    };
+    // "根"的集合：guest 根 + --appdata 的三个特殊目录（它们都**已经存在**）。
+    std::vector<std::string> roots;
+    roots.push_back(canon(guestRoot()));
+    for (const SpecialRoot& sr : kSpecialRoots) roots.push_back(canon(sr.guest));
+
+    auto atOrAboveRoot = [&](const std::string& raw) {
+        const std::string p = canon(raw);
+        if (p.empty()) return true;  // 只有盘符 / 只有分隔符 ⇒ 根
+        for (const std::string& r : roots) {
+            if (r.empty()) continue;
+            if (asciiEqualNoCase(r, p)) return true;
+            if (r.size() > p.size() && r.compare(0, p.size(), p) == 0 && r[p.size()] == '/') return true;
+        }
+        return false;
+    };
+
+    // 盘符不是目录（`C:` 由 splitGuest 统一剥掉）
+    const std::size_t start = hasDrive(guest_path) ? 2u : 0u;
+    for (std::size_t i = start; i < guest_path.size(); ++i) {
+        const char c = guest_path[i];
+        if (c != '\\' && c != '/') continue;
+        const std::string dir = guest_path.substr(0, i);
+        if (atOrAboveRoot(dir)) continue;  // 根（或根的祖先）不创建
+        std::string host;
+        std::string why;
+        if (!resolve(dir, &host, &why, /*must_exist=*/false, /*resolve_case=*/true)) {
+            if (error) *error = "段 \"" + dir + "\" 解析失败：" + why;
+            return false;
+        }
+        const fs::path hp = pathFromUtf8(host);
+        std::error_code ec;
+        if (fs::is_directory(hp, ec) && !ec) continue;  // ★ 已存在算成功
+        ec.clear();
+        // ★ 用 create_directories（不是 create_directory）：宿主侧的**映射脚手架**不属于 guest 路径
+        //   —— `--appdata` 下的 `Roaming` / `Local` / `Documents` 是本模拟器的落点形态（plan D5），
+        //   guest 只写 `C:\Users\Amayui\AppData\Roaming\…`，那条路径里根本没有 `Roaming` 这一段。
+        //   ⇒ 首次写 AppData 时必须能把脚手架一起建出来，否则引擎第一次存档 / 写配置就失败。
+        if (!fs::create_directories(hp, ec) || ec) {
+            if (error) {
+                *error = "建目录 \"" + dir + "\" 失败：" +
+                         (ec ? ec.message() : std::string("宿主拒绝"));
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace lift

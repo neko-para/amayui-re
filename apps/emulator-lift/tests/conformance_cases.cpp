@@ -1942,6 +1942,299 @@ void setup_sse_psrad_32(Fixture& f) {
 }
 void verify_sse_psrad_32(Fixture& f) { LIFT_CHECK_EQ_U32(f.cpu().eax(), 0xFFFFFFFFu); }
 
+// =====================================================================================
+// ⑨ S4 复核补齐：语料里**有**、实现里**有**、但当时**没有夹具**的 x87 形态
+//
+// ★ 为什么补这些：`docs/s4-fpu-audit.md` 的"形态 → 状态"表要求每条"已实现"都挂一条
+//   **改坏就会红**的守卫。下面这些形态在 `.lst` 里合计上万条（`fst` 1558 / `faddp` 430 /
+//   `fmulp` 283 …），但此前一条用例都没有 —— 也就是"改坏了没人知道"。
+// ★ 断言的取值全部选成**精确可表示**的（1 / 2 的幂 / .5 / .25），这样 expected 与
+//   SoftFloat 的舍入方式无关：红了就是语义错了，不是"差 1 ulp"。
+// =====================================================================================
+void setup_x87_fst(Fixture& f) {
+    // `fst`（D9 /2，**不弹栈**）与 `fstp` 的区别是这次复核最容易写错的一处：
+    // 1558 条语料里绝大多数是 `fst dword ptr [...]`，弹错了会让 ST 栈整体错位。
+    f.dataHex(kDataEa, "0000C03F");          // 1.5f
+    f.dataHex(kDataEa + 0x10u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 15 10 00 48 00 C3");  // fld [0]；fst [0x10]
+}
+void verify_x87_fst(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x3FC00000u);  // 1.5f
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);                         // fst 不弹栈
+}
+
+// `faddp` / `fmulp` / `fsubp` / `fsubrp` / `fdivp` / `fdivrp`：ST(i) = ST(i) op ST0，然后 pop。
+// ★ 数据统一取 ST(1)=1.0、ST(0)=4.0 —— 结果与"反向"形态（1−4 vs 4−1 / 1/4 vs 4/1）能一眼分开。
+void x87_p_form(Fixture& f, const char* op_hex) {
+    f.dataHex(kDataEa, "0000803F");          // 1.0f  ← 压栈后是 ST(1)
+    f.dataHex(kDataEa + 0x10u, "00008040");  // 4.0f  ← 压栈后是 ST(0)
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    const std::string code = std::string("D9 05 00 00 48 00 D9 05 10 00 48 00 ") + op_hex +
+                             " D9 1D 20 00 48 00 C3";
+    f.codeHex(kCodeEa, code.c_str());
+}
+
+void setup_x87_faddp(Fixture& f) {
+    // ★ 用 **st(2)** 而不是缺省的 st(1)：`faddp` 的 430 条语料全是 `st(i), st`，
+    //   而 `execFpu` 的 p 形态要按操作数下标重写源/目的 ⇒ 下标算错只有非 1 的 i 会红。
+    f.dataHex(kDataEa, "0000C03F");          // 1.5f ← ST(2)
+    f.dataHex(kDataEa + 0x10u, "00008040");  // 4.0f ← ST(1)
+    f.dataHex(kDataEa + 0x20u, "00000040");  // 2.0f ← ST(0)
+    f.dataHex(kDataEa + 0x30u, "00000000");
+    f.dataHex(kDataEa + 0x34u, "00000000");
+    f.codeHex(kCodeEa,
+              "D9 05 00 00 48 00"        // fld [0]      ⇒ ST0=1.5
+              "D9 05 10 00 48 00"        // fld [0x10]   ⇒ ST0=4.0, ST1=1.5
+              "D9 05 20 00 48 00"        // fld [0x20]   ⇒ ST0=2.0, ST1=4.0, ST2=1.5
+              "DE C2"                    // faddp st(2), st ⇒ ST2=3.5，pop
+              "D9 1D 30 00 48 00"        // fstp [0x30]  ⇒ 4.0（原 ST0，pop 后还在栈顶）
+              "D9 1D 34 00 48 00"        // fstp [0x34]  ⇒ 3.5（被加过的 ST2）
+              "C3");
+}
+void verify_x87_faddp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x30u), 0x40800000u);  // 4.0f
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x34u), 0x40600000u);  // 3.5f = 1.5 + 2.0
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fmulp(Fixture& f) { x87_p_form(f, "DE C9"); }  // fmulp st(1), st
+void verify_x87_fmulp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40800000u);  // 1.0 × 4.0 = 4.0
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fsubp(Fixture& f) { x87_p_form(f, "DE E9"); }  // fsubp st(1), st
+void verify_x87_fsubp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0xC0400000u);  // 1.0 − 4.0 = −3.0
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fsubrp(Fixture& f) { x87_p_form(f, "DE E1"); }  // fsubrp st(1), st
+void verify_x87_fsubrp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40400000u);  // 4.0 − 1.0 = 3.0
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fdivp(Fixture& f) { x87_p_form(f, "DE F9"); }  // fdivp st(1), st
+void verify_x87_fdivp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3E800000u);  // 1.0 / 4.0 = 0.25
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+void setup_x87_fdivrp(Fixture& f) { x87_p_form(f, "DE F1"); }  // fdivrp st(1), st
+void verify_x87_fdivrp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40800000u);  // 4.0 / 1.0 = 4.0
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+// `fsubr` / `fdivr` 的**内存**形态（D8 /5 与 D8 /7）：ST(0) = mem op ST(0)。
+// ★ 语料里 59 / 29 条大部分是 dword 内存操作数（另有 `st, st(i)` 形态走同一条 `arith`）。
+void setup_x87_fsubr(Fixture& f) {
+    f.dataHex(kDataEa, "0000C03F");          // 1.5f ← ST(0)
+    f.dataHex(kDataEa + 0x10u, "00008040");  // 4.0f ← 内存
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D8 2D 10 00 48 00 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fsubr(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40200000u);  // 4.0 − 1.5 = 2.5
+}
+
+void setup_x87_fdivr(Fixture& f) {
+    f.dataHex(kDataEa, "00000041");          // 8.0f ← ST(0)
+    f.dataHex(kDataEa + 0x10u, "00008040");  // 4.0f ← 内存
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D8 3D 10 00 48 00 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fdivr(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F000000u);  // 4.0 / 8.0 = 0.5
+}
+
+// `fiadd` / `fisub` / `fisubr` / `fimul` / `fidiv` / `fidivr`：整数内存操作数（DA /0../7）。
+// ★ 这些是 x87 里**唯一**要经过 `loadIntMem`（i32 → extF80）的一族，走错路会静默算出浮点垃圾。
+void x87_i_form(Fixture& f, const char* op_hex, const char* st0_float_hex) {
+    f.dataHex(kDataEa, st0_float_hex);
+    f.dataHex(kDataEa + 0x10u, "04000000");  // int32 4
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    const std::string code = std::string("D9 05 00 00 48 00 DA ") + op_hex +
+                             " 10 00 48 00 D9 1D 20 00 48 00 C3";
+    f.codeHex(kCodeEa, code.c_str());
+}
+
+void setup_x87_fiadd(Fixture& f) { x87_i_form(f, "05", "0000C03F"); }  // 1.5 + 4
+void verify_x87_fiadd(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40B00000u); }
+
+void setup_x87_fisub(Fixture& f) { x87_i_form(f, "25", "0000C03F"); }  // 1.5 − 4
+void verify_x87_fisub(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0xC0200000u); }
+
+void setup_x87_fisubr(Fixture& f) { x87_i_form(f, "2D", "0000C03F"); }  // 4 − 1.5
+void verify_x87_fisubr(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40200000u); }
+
+void setup_x87_fimul(Fixture& f) { x87_i_form(f, "0D", "0000C03F"); }  // 1.5 × 4
+void verify_x87_fimul(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40C00000u); }
+
+void setup_x87_fidiv(Fixture& f) { x87_i_form(f, "35", "00000041"); }  // 8 / 4
+void verify_x87_fidiv(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40000000u); }
+
+void setup_x87_fidivr(Fixture& f) { x87_i_form(f, "3D", "00000041"); }  // 4 / 8
+void verify_x87_fidivr(Fixture& f) { LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x3F000000u); }
+
+// `fcomp` / `fucomp`（带 pop 的比较）：语料里 129 / 11 条，全部是 `st(i)` 形态。
+void x87_comp_pop(Fixture& f, const char* op_hex) {
+    f.dataHex(kDataEa, "00000040");          // 4.0f ← ST(1)
+    f.dataHex(kDataEa + 0x10u, "0000C03F");  // 1.5f ← ST(0)
+    const std::string code = std::string("D9 05 00 00 48 00 D9 05 10 00 48 00 ") + op_hex + " C3";
+    f.codeHex(kCodeEa, code.c_str());
+}
+void setup_x87_fcomp(Fixture& f) { x87_comp_pop(f, "D8 D9"); }  // fcomp st(1)
+void verify_x87_fcomp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.status & 0x4700u, 0x0100u);  // ST0 < ST1 ⇒ C0=1
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);                    // 先 fld 两次（top=6），再弹一次
+}
+void setup_x87_fucomp(Fixture& f) { x87_comp_pop(f, "DD E9"); }  // fucomp st(1)：Zydis 给的是 st0, st1 两操作数
+void verify_x87_fucomp(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.status & 0x4700u, 0x0100u);
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);
+}
+
+// `fucom`（**不弹栈**的版本，语料里 1 条）：与 `fucomp` 同一个操作数形态坑，只差 pop。
+void setup_x87_fucom(Fixture& f) {
+    f.dataHex(kDataEa, "00000040");          // 2.0f ← ST(1)
+    f.dataHex(kDataEa + 0x10u, "0000C03F");  // 1.5f ← ST(0)
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 DD E1 C3");  // fucom st(1)
+}
+void verify_x87_fucom(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.status & 0x4700u, 0x0100u);  // ST0 < ST1 ⇒ C0=1
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 6u);                    // 不弹栈
+}
+
+// ---- `fld1` / `fldz` / 五个超越常数 ----
+// ★ 常数这条是**逐位**判据：x87 压栈的是 64 位有效位的扩展精度常数，不是 double 舍入值。
+//   旧实现走 `f64_to_extF80(字面量)`，低 11 位恒为 0 ⇒ 这三条会红（fldl2e/fldlg2/fldln2
+//   在语料里各有 1–2 条；fldpi/fldl2t 语料里没有，但同一条代码路径，一并钉住）。
+//   10 字节位模式来自 `fpu_bridge.cpp` 的推导说明（Machin / atanh 级数 + 64 位有效位）。
+void x87_const_case(Fixture& f, const char* op_hex) {
+    f.dataHex(kDataEa + 0x10u, "00000000" "00000000" "0000" "0000");
+    const std::string code = std::string(op_hex) + " DB 3D 10 00 48 00 C3";  // fld 常数；fstp tbyte [0x10]
+    f.codeHex(kCodeEa, code.c_str());
+}
+void setup_x87_fld1(Fixture& f) { x87_const_case(f, "D9 E8"); }
+void verify_x87_fld1(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0u);           // 1.0：signif 低 32 位 = 0
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0x80000000u);  //      signif 高 32 位 = 0x8000_0000
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x3FFFu);
+}
+void setup_x87_fldz(Fixture& f) {
+    f.dataHex(kDataEa + 0x10u, "FFFFFFFF" "FFFFFFFF" "FFFF" "FFFF");
+    f.codeHex(kCodeEa, "D9 EE DB 3D 10 00 48 00 C3");  // fldz；fstp tbyte
+}
+void verify_x87_fldz(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0u);  // +0.0（不是伪零）
+}
+void setup_x87_fldpi(Fixture& f) { x87_const_case(f, "D9 EB"); }
+void verify_x87_fldpi(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x2168C235u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0xC90FDAA2u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x4000u);
+}
+void setup_x87_fldln2(Fixture& f) { x87_const_case(f, "D9 ED"); }
+void verify_x87_fldln2(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xD1CF79ACu);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0xB17217F7u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x3FFEu);
+}
+void setup_x87_fldl2e(Fixture& f) { x87_const_case(f, "D9 EA"); }
+void verify_x87_fldl2e(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x5C17F0BCu);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0xB8AA3B29u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x3FFFu);
+}
+void setup_x87_fldlg2(Fixture& f) { x87_const_case(f, "D9 EC"); }
+void verify_x87_fldlg2(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xFBCFF799u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0x9A209A84u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x3FFDu);
+}
+void setup_x87_fldl2t(Fixture& f) { x87_const_case(f, "D9 E9"); }
+void verify_x87_fldl2t(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xCD1B8AFEu);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0xD49A784Bu);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x4000u);
+}
+
+// ---- 寄存器操作数形态：语料里高频、但此前只有内存形态被钉住的两条 ----
+void setup_x87_fsub_st_sti(Fixture& f) {
+    // `fsub st, st(1)`（D8 E1）：语料里 `fsub st, st(i)` 有 100 条 / `fmul st, st(i)` 755 条。
+    // ★ 与 p 形态（ST(i) = ST(i) − ST0）的**操作数方向相反**；用 fsub 而不是 fadd，
+    //   因为加法可交换、写反了也看不出来（减法/除法才区分方向）。
+    f.dataHex(kDataEa, "00008040");          // 4.0f ← ST(1)
+    f.dataHex(kDataEa + 0x10u, "0000C03F");  // 1.5f ← ST(0)
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa, "D9 05 00 00 48 00 D9 05 10 00 48 00 D8 E1 D9 1D 20 00 48 00 C3");
+}
+void verify_x87_fsub_st_sti(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0xC0200000u);  // 1.5 − 4.0 = −2.5（反向会给 +2.5）
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);  // 两次 fld ⇒ TOP=6；fsub 不弹栈；最后一次 fstp 弹回 7
+}
+
+void setup_x87_fstp_st_i(Fixture& f) {
+    // `fstp st(1)`（DD D9）：语料里 `fstp st` 409 条 + `fstp st(i)` 221 条 ⇒ 第二高频的形态。
+    // 语义：ST(1) = ST(0)，然后 pop ⇒ 弹完之后 ST(0) 是**刚写进去的** 2.0（不是原来的 1.5）。
+    f.dataHex(kDataEa, "0000C03F");          // 1.5f
+    f.dataHex(kDataEa + 0x10u, "00000040");  // 2.0f
+    f.dataHex(kDataEa + 0x20u, "00000000");
+    f.codeHex(kCodeEa,
+              "D9 05 00 00 48 00"        // fld [0]     ⇒ ST0=1.5, TOP=7
+              "D9 05 10 00 48 00"        // fld [0x10]  ⇒ ST0=2.0, ST1=1.5, TOP=6
+              "DD D9"                    // fstp st(1)  ⇒ ST1=2.0，pop ⇒ TOP=7
+              "D9 1D 20 00 48 00"        // fstp [0x20] ⇒ 2.0（若只 pop 不写 ST1，这里会是 1.5）
+              "C3");
+}
+void verify_x87_fstp_st_i(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0x40000000u);  // 2.0f
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 0u);
+}
+
+// ---- MMX：两条**静默算错**的回归夹具（S4 复核时修掉，详见 docs/s4-fpu-audit.md §3）----
+void setup_mmx_top_rotated(Fixture& f) {    // ★ MM0..MM7 是**固定的物理槽 R0..R7**，与 x87 的 TOP 无关（Intel SDM Vol.1 §9.2）。
+    //   旧实现按 `phys(TOP+i)` 取槽 ⇒ TOP≠0 时 MMX 读写落到别的槽上，是静默算错。
+    //   这里用 x87 把 TOP 推到 6，再 `movd mm0, eax`；随后 `fstp tbyte` 读的正是 TOP=6 那个槽：
+    //     修好 ⇒ 它还是 fldz 压进去的 +0（10 字节全 0）；没修 ⇒ 被 mm0 的 0x3F800000 覆盖。
+    //   ⚠ 必须用 `fstp tbyte`（10 字节原样搬）：MMX 那 8 字节当成 ext80 是个**次正规**，
+    //     用 `fstp dword` 转 f32 会下溢成 0 —— 两条路径都是 0，夹具就成了恒等的（实测踩过）。
+    f.dataHex(kDataEa + 0x10u, "FFFFFFFF" "FFFFFFFF" "FFFF" "FFFF");
+    f.codeHex(kCodeEa,
+              "D9 EE"                    // fldz  ⇒ TOP=7
+              "D9 EE"                    // fldz  ⇒ TOP=6（ST0 的物理槽 = 6）
+              "B8 00 00 80 3F"           // mov eax, 0x3F800000（1.0f 的位模式）
+              "0F 6E C0"                 // movd mm0, eax
+              "DB 3D 10 00 48 00"        // fstp tbyte [0x480010]（弹的仍是 TOP=6 那格）
+              "C3");
+}
+void verify_mmx_top_rotated(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0u);  // 低 32 位：没被 mm0 写进来
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0u);
+    LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0u);  // signExp = +0
+}
+
+void setup_mmx_psllw_count_256(Fixture& f) {
+    // ★ 寄存器形态的移位计数是**完整 64 位值**（Intel SDM Vol.2 PSLLW）⇒ 256 > 15 ⇒ 整 lane 清 0。
+    //   旧实现先 `& 0xFF` ⇒ 256 被读成 0 ⇒ mm0 原样不变，是静默算错。
+    f.dataHex(kDataEa, "FFFFFFFFFFFFFFFF");        // mm0 = 全 1
+    f.dataHex(kDataEa + 0x10u, "0001000000000000");  // mm1 = 0x100 = 256（计数）
+    f.dataHex(kDataEa + 0x20u, "0000000000000000");
+    f.codeHex(kCodeEa,
+              "0F 6F 05 00 00 48 00"     // movq mm0, [0x480000]
+              "0F 6F 0D 10 00 48 00"     // movq mm1, [0x480010]
+              "0F F1 C1"                 // psllw mm0, mm1
+              "0F 7F 05 20 00 48 00"     // movq [0x480020], mm0
+              "C3");
+}
+void verify_mmx_psllw_count_256(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x20u), 0u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x24u), 0u);
+}
+
 }  // namespace
 
 const Case* conformanceCases(std::size_t* count) {
@@ -2137,6 +2430,37 @@ const Case* conformanceCases(std::size_t* count) {
         {"sse-movd-xmm", setup_sse_movd_xmm, verify_sse_movd_xmm},
         {"sse-paddd", setup_sse_paddd, verify_sse_paddd},
         {"sse-psrad-count-32", setup_sse_psrad_32, verify_sse_psrad_32},
+        // ---- S4 复核补齐：语料里有、实现里有、但此前没有夹具的 x87 形态 ----
+        {"x87-fst", setup_x87_fst, verify_x87_fst},
+        {"x87-fstp-st-i", setup_x87_fstp_st_i, verify_x87_fstp_st_i},
+        {"x87-fsub-st-sti", setup_x87_fsub_st_sti, verify_x87_fsub_st_sti},
+        {"x87-faddp", setup_x87_faddp, verify_x87_faddp},
+        {"x87-fmulp", setup_x87_fmulp, verify_x87_fmulp},
+        {"x87-fsubp", setup_x87_fsubp, verify_x87_fsubp},
+        {"x87-fsubrp", setup_x87_fsubrp, verify_x87_fsubrp},
+        {"x87-fdivp", setup_x87_fdivp, verify_x87_fdivp},
+        {"x87-fdivrp", setup_x87_fdivrp, verify_x87_fdivrp},
+        {"x87-fsubr", setup_x87_fsubr, verify_x87_fsubr},
+        {"x87-fdivr", setup_x87_fdivr, verify_x87_fdivr},
+        {"x87-fiadd", setup_x87_fiadd, verify_x87_fiadd},
+        {"x87-fisub", setup_x87_fisub, verify_x87_fisub},
+        {"x87-fisubr", setup_x87_fisubr, verify_x87_fisubr},
+        {"x87-fimul", setup_x87_fimul, verify_x87_fimul},
+        {"x87-fidiv", setup_x87_fidiv, verify_x87_fidiv},
+        {"x87-fidivr", setup_x87_fidivr, verify_x87_fidivr},
+        {"x87-fcomp", setup_x87_fcomp, verify_x87_fcomp},
+        {"x87-fucom", setup_x87_fucom, verify_x87_fucom},
+        {"x87-fucomp", setup_x87_fucomp, verify_x87_fucomp},
+        {"x87-fld1", setup_x87_fld1, verify_x87_fld1},
+        {"x87-fldz", setup_x87_fldz, verify_x87_fldz},
+        {"x87-fldpi", setup_x87_fldpi, verify_x87_fldpi},
+        {"x87-fldln2", setup_x87_fldln2, verify_x87_fldln2},
+        {"x87-fldl2e", setup_x87_fldl2e, verify_x87_fldl2e},
+        {"x87-fldlg2", setup_x87_fldlg2, verify_x87_fldlg2},
+        {"x87-fldl2t", setup_x87_fldl2t, verify_x87_fldl2t},
+        // ---- S4 复核时修掉的两处静默算错（回归夹具）----
+        {"mmx-top-rotated", setup_mmx_top_rotated, verify_mmx_top_rotated},
+        {"mmx-psllw-count-256", setup_mmx_psllw_count_256, verify_mmx_psllw_count_256},
     };
     *count = sizeof(kCases) / sizeof(kCases[0]);
     return kCases;
