@@ -61,8 +61,10 @@ constexpr std::uint32_t kFileReadData = 0x00000001u;
 constexpr std::uint32_t kFileWriteData = 0x00000002u;
 constexpr std::uint32_t kShareRead = 0x00000001u;   // FILE_SHARE_READ
 constexpr std::uint32_t kShareWrite = 0x00000002u;  // FILE_SHARE_WRITE
+constexpr std::uint32_t kCreateNew = 1u;
 constexpr std::uint32_t kCreateAlways = 2u;
 constexpr std::uint32_t kOpenExisting = 3u;
+constexpr std::uint32_t kOpenAlways = 4u;
 constexpr std::uint32_t kTruncateExisting = 5u;
 constexpr std::uint32_t kAttrDirectory = 0x00000010u;
 constexpr std::uint32_t kAttrArchive = 0x00000020u;
@@ -75,8 +77,10 @@ constexpr std::uint32_t kFileEnd = 2u;
 // 错误码（S6-1 / S6-2 / S6-6 的断言用）
 constexpr std::uint32_t kErrAccessDenied = 5u;
 constexpr std::uint32_t kErrSharingViolation = 32u;
+constexpr std::uint32_t kErrFileExists = 80u;
 constexpr std::uint32_t kErrInvalidParameter = 87u;
 constexpr std::uint32_t kErrNegativeSeek = 131u;
+constexpr std::uint32_t kErrAlreadyExists = 183u;
 
 // WIN32_FIND_DATAA（x86，0x140 字节）的字段偏移
 constexpr std::uint32_t kFindDataSize = 0x140u;
@@ -625,6 +629,7 @@ int main() {
         const std::int64_t now_seconds = std::chrono::duration_cast<std::chrono::seconds>(
                                              std::chrono::system_clock::now().time_since_epoch())
                                              .count();
+        const std::int64_t want_creation = now_seconds - 5000;
         const std::int64_t want_access = now_seconds - 3000;
         const std::int64_t want_write = now_seconds - 1000;
         auto putFileTime = [&](std::uint32_t ea, std::int64_t unix_seconds) {
@@ -633,11 +638,13 @@ int main() {
             f.m.mem().wr32(ea, static_cast<std::uint32_t>(v & 0xFFFFFFFFull));
             f.m.mem().wr32(ea + 4u, static_cast<std::uint32_t>(v >> 32));
         };
+        const std::uint32_t ct = f.zeroBuf(8);
         const std::uint32_t at = f.zeroBuf(8);
         const std::uint32_t wt = f.zeroBuf(8);
+        putFileTime(ct, want_creation);
         putFileTime(at, want_access);
         putFileTime(wt, want_write);
-        LIFT_CHECK_EQ_U32(f.call("SetFileTime", {h, 0u, at, wt}), 1u);
+        LIFT_CHECK_EQ_U32(f.call("SetFileTime", {h, ct, at, wt}), 1u);
         LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h}), 1u);
         LIFT_CHECK(fs::exists(tmp / "timecheck" / "t.dat"));
 
@@ -654,14 +661,20 @@ int main() {
             return (static_cast<std::int64_t>(ft) - static_cast<std::int64_t>(kFileTimeEpochDelta)) /
                    10000000ll;
         };
-        // ① 两个被 SetFileTime 设过的值必须真的落盘（±2s 容忍 100ns → 秒的截断）
-        LIFT_CHECK(std::llabs(unixOf(access) - want_access) <= 2);
-        LIFT_CHECK(std::llabs(unixOf(write) - want_write) <= 2);
-        // ② 三格不是同一个投影：creation 是"刚建"（now 附近），与两个过去值不同
-        LIFT_CHECK(creation != access);
-        LIFT_CHECK(creation != write);
+        // ① 三个被 SetFileTime 设过的值必须真的落盘（±2s 容忍 100ns → 秒的截断）。
+        //   ★ creation：Windows 用 ftCreationTime，macOS 用 setattrlist(ATTR_CMN_CRTIME)；
+        //     其它 POSIX 写不了 birthtime ⇒ 保持"刚建"的值（只断言非 0 / 附近）。
+#if defined(_WIN32) || defined(__APPLE__)
+        LIFT_CHECK(std::llabs(unixOf(creation) - want_creation) <= 2);
+#else
         LIFT_CHECK(unixOf(creation) > now_seconds - 600);
         LIFT_CHECK(unixOf(creation) < now_seconds + 600);
+#endif
+        LIFT_CHECK(std::llabs(unixOf(access) - want_access) <= 2);
+        LIFT_CHECK(std::llabs(unixOf(write) - want_write) <= 2);
+        // ② 三格不是同一个投影（creation / access / write 三个不同过去值）
+        LIFT_CHECK(creation != access);
+        LIFT_CHECK(creation != write);
         // ③ 不是"文件系统不支持 ⇒ 填 0"
         LIFT_CHECK(creation != 0u);
 
@@ -760,6 +773,95 @@ int main() {
         std::printf("[case] set-file-pointer-ex: ① 0/BEGIN=0 ② 2/BEGIN=2→\"llo\" "
                     "③ -1/CURRENT=4→\"o\" ④ 0/END=5==GetFileSize ⑤ 100/BEGIN=100（大小仍 5）"
                     " ⑥ -100/CURRENT=FALSE+131（仍读到 \"hello\"）⑦ method=3 ⇒ FALSE+87\n");
+    }
+
+    // ---------------- ⑫ CREATE_ALWAYS / OPEN_ALWAYS 命中已存在 ⇒ 成功 + last_error=183 ----------------
+    // 文档（CreateFileA `dwCreationDisposition` 表）：这两个 disposition 在"文件已存在"时
+    // **函数成功**，同时 last-error = ERROR_ALREADY_EXISTS(183)；其余 disposition 不置。
+    // ⛔ 断言同时看**宿主盘**：183 只改 last_error，不许改变截断 / 不截断的既定语义。
+    {
+        g_current_case = "create-always-last-error";
+        const std::uint32_t p_file = f.cstr("sub\\reuse.txt");
+        const std::uint32_t nwritten = f.zeroBuf(4);
+
+        // ① 首次 CREATE_ALWAYS（文件不存在）⇒ 句柄有效，且 last_error **没有**被写成 183
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h1 =
+            f.call("CreateFileA", {p_file, kGenericWrite, 0u, 0u, kCreateAlways, 0x80u, 0u});
+        LIFT_CHECK_NE_U32(h1, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 0u);
+        const std::uint32_t first = f.cstr("first");
+        LIFT_CHECK_EQ_U32(f.call("WriteFile", {h1, first, 5u, nwritten, 0u}), 1u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h1}), 1u);
+        LIFT_CHECK(readHostFile(tmp / "sub" / "reuse.txt") == "first");
+
+        // ② 第二次 CREATE_ALWAYS（已存在）⇒ 句柄有效 + 183；并按 disposition 语义**截断**
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h2 =
+            f.call("CreateFileA", {p_file, kGenericWrite, 0u, 0u, kCreateAlways, 0x80u, 0u});
+        LIFT_CHECK_NE_U32(h2, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAlreadyExists);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h2}), 1u);
+        LIFT_CHECK(readHostFile(tmp / "sub" / "reuse.txt").empty());
+        {
+            std::error_code size_ec;
+            const auto host_size = fs::file_size(tmp / "sub" / "reuse.txt", size_ec);
+            LIFT_CHECK(!size_ec && host_size == 0u);
+        }
+
+        // ③ OPEN_ALWAYS（已存在）⇒ 句柄有效 + 183；但**不**截断（写进去的内容留下）
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h3 =
+            f.call("CreateFileA", {p_file, kGenericWrite, 0u, 0u, kOpenAlways, 0x80u, 0u});
+        LIFT_CHECK_NE_U32(h3, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAlreadyExists);
+        const std::uint32_t keep = f.cstr("keep");
+        LIFT_CHECK_EQ_U32(f.call("WriteFile", {h3, keep, 4u, nwritten, 0u}), 1u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h3}), 1u);
+        LIFT_CHECK(readHostFile(tmp / "sub" / "reuse.txt") == "keep");
+
+        // ④ OPEN_ALWAYS（不存在）⇒ 句柄有效，last_error **不是** 183（新建空文件）
+        const std::uint32_t p_fresh = f.cstr("sub\\fresh.txt");
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h4 =
+            f.call("CreateFileA", {p_fresh, kGenericWrite, 0u, 0u, kOpenAlways, 0x80u, 0u});
+        LIFT_CHECK_NE_U32(h4, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 0u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h4}), 1u);
+        {
+            std::error_code size_ec;
+            const auto host_size = fs::file_size(tmp / "sub" / "fresh.txt", size_ec);
+            LIFT_CHECK(!size_ec && host_size == 0u);
+        }
+
+        // ⑤ 其余 disposition 命中已存在文件**不置** 183（OPEN_EXISTING / TRUNCATE_EXISTING）
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h5 =
+            f.call("CreateFileA", {p_file, kGenericRead, 0u, 0u, kOpenExisting, 0u, 0u});
+        LIFT_CHECK_NE_U32(h5, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 0u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h5}), 1u);
+
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h6 =
+            f.call("CreateFileA", {p_file, kGenericWrite, 0u, 0u, kTruncateExisting, 0x80u, 0u});
+        LIFT_CHECK_NE_U32(h6, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 0u);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h6}), 1u);
+
+        // ⑥ 失败的 disposition 也不许"顺手"写成 183：CREATE_NEW 命中已存在 ⇒ 80
+        f.m.cpu().shim.last_error = 0;
+        const std::uint32_t h7 =
+            f.call("CreateFileA", {p_file, kGenericWrite, 0u, 0u, kCreateNew, 0x80u, 0u});
+        LIFT_CHECK_EQ_U32(h7, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrFileExists);
+
+        std::printf("[case] create-always-last-error: ① 首次 CREATE_ALWAYS ⇒ 0x%08X + last_error=0；"
+                    "② 再次 CREATE_ALWAYS ⇒ 0x%08X + last_error=%u（宿主被截断成 0 字节）；"
+                    "③ OPEN_ALWAYS(存在) ⇒ 0x%08X + %u 且内容保留 \"keep\"；"
+                    "④ OPEN_ALWAYS(不存在) ⇒ 新建空文件 + 非 183；"
+                    "⑤ OPEN_EXISTING / TRUNCATE_EXISTING 均非 183；⑥ CREATE_NEW(存在) ⇒ 0xFFFFFFFF+%u\n",
+                    h1, h2, kErrAlreadyExists, h3, kErrAlreadyExists, kErrFileExists);
     }
 
     std::printf("[case] tmp = %s\n", game.c_str());

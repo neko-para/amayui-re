@@ -445,8 +445,12 @@ bool Decoder::decodeBlock(const GuestMemory& mem, std::uint32_t ea, Block* out, 
             return true;
         }
     }
-    if (why) *why = "块超过 256 条指令仍未见控制流（可能落在了数据里）";
-    return false;
+    // ★ 上限不是"错误"，只是**一次解码多少**的分片边界：语料里存在 554 条无分支的单块
+    //   （`0x415DF6..0x417359` 的 vtable 初始化）。旧实现到 256 条就 `return false`
+    //   ⇒ 运行循环拿到 nullptr ⇒ 误报 DecodeError（detail 还误诊成"落在数据里"）。
+    //   返回**部分块**（terminated=false）：run 执行完这 256 条后会从 eip 继续取下一片
+    //   （machine.cpp 里 `left_block == false` 的续跑路径）。
+    return true;
 }
 
 std::string Decoder::text(const GuestMemory& mem, std::uint32_t ea, std::uint8_t* length) const {

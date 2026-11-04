@@ -12,6 +12,7 @@
 
 #include "runtime/decode.h"
 #include "runtime/sha256.h"
+#include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
 
 namespace lift {
 namespace {
@@ -53,7 +54,7 @@ void splitTokens(std::string_view text, std::string_view* t0, std::string_view* 
 }  // namespace
 
 bool readLstHeaderSha256(const std::string& lst_path, std::string* out_hex, std::string* err) {
-    std::FILE* f = std::fopen(lst_path.c_str(), "rb");
+    std::FILE* f = openHostFileUtf8(lst_path, "rb");
     if (!f) {
         if (err) *err = "打不开 .lst：" + lst_path;
         return false;
@@ -85,7 +86,7 @@ bool readLstHeaderSha256(const std::string& lst_path, std::string* out_hex, std:
 }
 
 bool LstIndex::load(const std::string& path, std::string* err) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
+    std::FILE* f = openHostFileUtf8(path, "rb");
     if (!f) {
         std::snprintf(error_, sizeof(error_), "打不开 .lst：%s", path.c_str());
         if (err) *err = error_;

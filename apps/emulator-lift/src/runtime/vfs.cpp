@@ -37,12 +37,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <sys/stat.h>  // st_birthtimespec（SDL_GetPathInfo 在 POSIX 给的是 ctime）
+#endif
 
 namespace lift {
 namespace {
@@ -363,12 +368,14 @@ bool wildcardMatch(const std::string& pat, const std::string& name) {
 }  // namespace
 
 // =======================================================================================
-// 宿主文件时间（平台抽象 = SDL3；⛔ 这里没有 `#ifdef` 平台分支）
+// 宿主文件时间
+//   · Windows：SDL_GetPathInfo 的 create_time 就是 ftCreationTime；
+//   · macOS：SDL 的 POSIX 实现把 **ctime** 当 create_time（实测 3.4.18：create == ctime == mtime），
+//     所以这里用 `stat` 的 `st_birthtimespec`（用户 2026-11-04 口径：有 birthtime 就用，否则回退 ctime）；
+//   · 其它 POSIX：没有可移植的 birthtime ⇒ 接受 SDL 的 ctime 回退。
 // =======================================================================================
 bool hostFileTimes(const std::string& host_path, HostFileTimes* out) {
     if (!out) return false;
-    SDL_PathInfo info{};
-    if (!SDL_GetPathInfo(host_path.c_str(), &info)) return false;
     // SDL_Time = 自 1970 起的**纳秒**；`SDL_TimeToWindows` 转成 FILETIME（100ns 自 1601）。
     // ★ 0 表示"这个文件系统不提供该时间" ⇒ 按 Windows 文档留 FILETIME 0，⛔ 不编一个 1970。
     auto toWindows100ns = [](SDL_Time t) -> std::uint64_t {
@@ -378,10 +385,37 @@ bool hostFileTimes(const std::string& host_path, HostFileTimes* out) {
         SDL_TimeToWindows(t, &lo, &hi);
         return (static_cast<std::uint64_t>(hi) << 32) | lo;
     };
+#if defined(__APPLE__)
+    struct stat st{};
+    if (::stat(host_path.c_str(), &st) != 0) return false;
+    auto nsOf = [](const struct timespec& t) -> SDL_Time {
+        return static_cast<SDL_Time>(t.tv_sec) * 1000000000ll + static_cast<SDL_Time>(t.tv_nsec);
+    };
+    out->create_100ns = toWindows100ns(nsOf(st.st_birthtimespec));
+    out->access_100ns = toWindows100ns(nsOf(st.st_atimespec));
+    out->write_100ns = toWindows100ns(nsOf(st.st_mtimespec));
+    return true;
+#else
+    SDL_PathInfo info{};
+    if (!SDL_GetPathInfo(host_path.c_str(), &info)) return false;
     out->create_100ns = toWindows100ns(info.create_time);
     out->access_100ns = toWindows100ns(info.access_time);
     out->write_100ns = toWindows100ns(info.modify_time);
     return true;
+#endif
+}
+
+// 宿主 UTF-8 路径 → FILE*。Windows 必须走宽字符版（见 vfs.h 的说明）。
+std::FILE* openHostFileUtf8(const std::string& host_path, const char* mode) {
+#if defined(_WIN32)
+    const std::wstring wp = pathFromUtf8(host_path).wstring();
+    const std::wstring wm(mode, mode + std::strlen(mode));
+    std::FILE* fp = nullptr;
+    if (::_wfopen_s(&fp, wp.c_str(), wm.c_str()) != 0) return nullptr;
+    return fp;
+#else
+    return std::fopen(host_path.c_str(), mode);
+#endif
 }
 
 // =======================================================================================
@@ -401,6 +435,11 @@ void Vfs::setGameDir(const std::string& host_dir) {
     // 去掉尾部隔离符（保留 "C:\" 这种根）
     if (p != p.root_path() && !p.has_filename()) p = p.parent_path();
     game_dir_ = pathToUtf8(p);
+    // ★ A4（逐字节可复现）：清掉上一轮的 `.lift-tmp`。`GetTempFileNameA(uUnique=0)` 从 0 起
+    //   找空号 ⇒ 若目录跨运行累积，同一条命令第二次会拿到不同序号（返回路径 / trace 都会变）。
+    //   这是本模拟器**自有**的临时目录（SCOPE §1 偏差 8），失败只影响确定性，不影响启动。
+    std::error_code tmp_ec;
+    fs::remove_all(p / ".lift-tmp", tmp_ec);
 }
 
 void Vfs::setGuestCwd(const std::string& guest_path) {

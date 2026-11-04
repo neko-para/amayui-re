@@ -316,12 +316,13 @@ std::uint64_t GuestMemory::committedBytes() const {
     return pages * kPage;
 }
 
-bool GuestMemory::commitPages(std::uint32_t begin, std::uint32_t end) {
+bool GuestMemory::commitPages(std::uint32_t begin, std::uint64_t end) {
     if (begin >= end) return true;
+    // ★ `end` 可以等于 4 GiB（提交最后一页时）⇒ 用 64 位接；页号最大 0x100000，uint32 够。
     // if (end > kSpace) return false;
     // 找连续未提交的段，一次系统调用提交一段
     std::uint32_t p = begin / kPage;
-    const std::uint32_t last = (end + kPage - 1) / kPage;
+    const std::uint32_t last = static_cast<std::uint32_t>(end / kPage);
     while (p < last) {
         if (bit(p)) {
             ++p;
@@ -350,9 +351,10 @@ bool GuestMemory::commit(std::uint32_t ea, std::size_t size, RegionKind kind, co
         return false;
     }
     const std::uint32_t begin = ea & ~kPageMask;
-    const std::uint32_t end = static_cast<std::uint32_t>((end64 + kPageMask) & ~static_cast<std::uint64_t>(kPageMask));
+    const std::uint64_t end = (end64 + kPageMask) & ~static_cast<std::uint64_t>(kPageMask);
     if (!commitPages(begin, end)) return false;
-    if (kind != RegionKind::Other || (name && name[0])) annotate(begin, end - begin, kind, name);
+    if (kind != RegionKind::Other || (name && name[0]))
+        annotate(begin, static_cast<std::size_t>(end - begin), kind, name);
     return true;
 }
 
@@ -367,16 +369,21 @@ void GuestMemory::decommit(std::uint32_t ea, std::size_t size) {
     const std::uint32_t begin = ea & ~kPageMask;
     const std::uint64_t end64 = (static_cast<std::uint64_t>(ea) + size + kPageMask) & ~static_cast<std::uint64_t>(kPageMask);
     if (end64 > kSpace) return;
-    const std::uint32_t end = static_cast<std::uint32_t>(end64);
-    if (begin >= end) return;
+    if (static_cast<std::uint64_t>(begin) >= end64) return;
     // ★ 宿主页可能大于 guest 页（Apple Silicon = 16 KiB）：只有**被 [begin,end) 完整覆盖**的宿主页才能真退。
     //   边缘不足一个宿主页的 guest 页**保持已提交**（宁可多留，也不能 PROT_NONE 打掉同宿主页的邻页）。
-    const std::uint32_t hp = hostPageSize();
-    const std::uint32_t hostBegin = (begin + hp - 1) / hp * hp;
-    const std::uint32_t hostEnd = end / hp * hp;
+    // ★ 对齐算术用 64 位：上界可以等于 4 GiB（最后一页），uint32 在这里会回绕成 0
+    //   ⇒ `begin >= end` 直接返回，位图永远清不掉（Windows 4 KiB 页上就是"退提交静默失败"）。
+    const std::uint64_t hp = hostPageSize();
+    const std::uint64_t hostBegin = (static_cast<std::uint64_t>(begin) + hp - 1) / hp * hp;
+    const std::uint64_t hostEnd = end64 / hp * hp;
     if (hostBegin >= hostEnd) return;
-    platformDecommit(base_, hostBegin, static_cast<std::size_t>(hostEnd - hostBegin));
-    for (std::uint32_t p = hostBegin / kPage; p < hostEnd / kPage; ++p) setBit(p, false);
+    platformDecommit(base_, static_cast<std::size_t>(hostBegin),
+                     static_cast<std::size_t>(hostEnd - hostBegin));
+    for (std::uint32_t p = static_cast<std::uint32_t>(hostBegin / kPage);
+         p < static_cast<std::uint32_t>(hostEnd / kPage); ++p) {
+        setBit(p, false);
+    }
 }
 
 void GuestMemory::annotate(std::uint32_t ea, std::size_t size, RegionKind kind, const char* name) {

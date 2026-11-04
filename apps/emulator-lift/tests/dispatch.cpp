@@ -121,5 +121,43 @@ int main() {
         LIFT_CHECK(m.cache().hits() >= 1);
     }
 
+    // ⑥ 长块分片：>256 条无控制流的直路（语料里有 554 条的 vtable 初始化块）
+    //   ⇒ 解码返回**部分块**，run 从下一片继续，⛔ 不是 DecodeError。
+    //   旧实现到第 256 条就 return false ⇒ 这条会红在 reason/insns。
+    {
+        g_current_case = "long-block-splits";
+        lift::Machine m;
+        std::vector<std::uint8_t> code(300, 0x90);  // 300 × nop
+        code.push_back(0xC3);                        // ret
+        LIFT_CHECK(boot(m, code));
+        const lift::RunResult r = run(m, 100000);
+        LIFT_CHECK(r.reason == lift::StopReason::UntilEa);
+        LIFT_CHECK_EQ_I64(r.insns, 301);
+        LIFT_CHECK(m.cache().blockCount() >= 2);  // 256 + 45
+    }
+
+    // ⑦ SMC：先缓存 target，再由 guest **写** target 的立即数，第二次调用必须看到新字节。
+    //   布局（0x401000）：
+    //     call target        ; 第一次调用把 target 块缓存下来（eax=0）
+    //     mov byte [0x401013], 7
+    //     call target        ; 第二次调用：有失效 ⇒ eax=7；无失效 ⇒ 旧 Insn 里 imm=0 ⇒ eax=0
+    //     ret
+    //   target（0x401012）: mov eax, 0 ; ret
+    {
+        g_current_case = "smc-invalidates-block";
+        lift::Machine m;
+        const std::vector<std::uint8_t> code = {
+            0xE8, 0x0D, 0x00, 0x00, 0x00,              // call 0x401012
+            0xC6, 0x05, 0x13, 0x10, 0x40, 0x00, 0x07,  // mov byte [0x401013], 7
+            0xE8, 0x01, 0x00, 0x00, 0x00,              // call 0x401012
+            0xC3,                                      // ret
+            0xB8, 0x00, 0x00, 0x00, 0x00,              // mov eax, 0
+            0xC3};                                     // ret
+        LIFT_CHECK(boot(m, code));
+        const lift::RunResult r = run(m);
+        LIFT_CHECK(r.reason == lift::StopReason::UntilEa);
+        LIFT_CHECK_EQ_U32(m.cpu().eax(), 7u);  // 旧实现会是 0（缓存的 imm 没更新）
+    }
+
     return finish("dispatch");
 }

@@ -88,6 +88,7 @@ int main() {
     std::size_t length_mismatch = 0;
     std::size_t mnemonic_mismatch = 0;
     std::size_t decode_failed = 0;
+    std::size_t len_checked = 0;  // 真正比过"长度 == 下一行 EA 差"的行
     const std::size_t kMaxPrint = 25;
     std::size_t printed = 0;
 
@@ -119,6 +120,7 @@ int main() {
         }
         // ① 长度 == 下一行 EA 差
         if (e.next_ea != 0 && e.next_ea > e.ea) {
+            ++len_checked;
             const std::uint32_t expect = e.next_ea - e.ea;
             if (expect != in.length) {
                 ++length_mismatch;
@@ -142,12 +144,18 @@ int main() {
         }
     }
 
-    std::printf("A3: entries=%zu checked=%zu skipped(不在镜像里)=%zu decode_fail=%zu len_mismatch=%zu mnem_mismatch=%zu\n",
-                m.lst().entries().size(), checked, skipped_not_in_image, decode_failed, length_mismatch,
-                mnemonic_mismatch);
+    std::printf("A3: entries=%zu checked=%zu len_checked=%zu skipped(不在镜像里)=%zu decode_fail=%zu "
+                "len_mismatch=%zu mnem_mismatch=%zu\n",
+                m.lst().entries().size(), checked, len_checked, skipped_not_in_image, decode_failed,
+                length_mismatch, mnemonic_mismatch);
     std::printf("A3: collapsed 行 = %zu（不参与对照，见 plan §3 F2）\n", m.lst().collapsedCount());
+    // ★ plan §3 F5 的 299,249 是 2026-11-03 那次导出的经验值；当前 `.lst` 的严格分类是 298,299
+    //   （差 950 未解释）。本测试只认**当前 `.lst`** 的分类结果，不拿旧数字当断言。
+    std::printf("A3: plan §3 F5 的 299,249 与当前 entries 差 %lld（旧导出经验值；不参与断言）\n",
+                static_cast<long long>(299249) - static_cast<long long>(m.lst().entries().size()));
 
     LIFT_CHECK_EQ_I64(checked > 200000 ? 1 : 0, 1);  // 语料量级哨兵：跑空了的"全绿"没有意义
+    LIFT_CHECK_EQ_I64(len_checked, checked);         // 每条 entry 都真的比过长度（不许静默跳过）
     LIFT_CHECK_EQ_I64(decode_failed, 0);
     LIFT_CHECK_EQ_I64(length_mismatch, 0);
     LIFT_CHECK_EQ_I64(mnemonic_mismatch, 0);

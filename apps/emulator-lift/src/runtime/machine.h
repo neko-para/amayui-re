@@ -40,7 +40,8 @@ struct RunOptions {
     std::uint32_t until_ea = 0;      // 非 0 ⇒ 到达即停
     std::uint64_t max_insns = 0;     // 非 0 ⇒ 执行到该条数即停
     bool stop_on_first_shim = false; // L1
-    bool trace_shims = false;        // 打进 stdout（确定性）
+    bool trace_shims = false;        // 打进 trace_out（缺省 stdout；确定性）
+    std::FILE* trace_out = nullptr;  // A4 逐字节比对用：两次运行各写一个文件再比（缺省 stdout）
     bool trace_blocks = false;       // 块级 trace（调试）
     // ★ A4 口径：默认虚拟时钟；`real_time=true` 才接宿主时钟 —— 此时逐字节断言必须由调用方跳过并明说。
     bool real_time = false;
@@ -52,6 +53,7 @@ struct TraceInputs {
     std::string exe_path;       // `--exe` 的原始字符串（相对 / 绝对都原样记）
     std::string guest_cmdline;  // guest 读到的命令行
     std::string environment;    // 环境块（ANSI 视图；分隔符 ';'）
+    std::string game_dir;       // `--game-dir` 原始字符串（空 = 没给）
     std::uint64_t clock_start_100ns = 0;
     bool real_time = false;
 };

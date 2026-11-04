@@ -13,8 +13,9 @@
 //   · **`ReadFile` / `WriteFile` 走 `std::fread` / `std::fwrite`**；每次传输前做一次
 //     `fseek(0, SEEK_CUR)`（C 标准要求"输出→输入"之间有一个定位函数，否则是未定义行为）。
 //   · **枚举顺序 = `Vfs::find` 排序后的顺序**（plan §8.3-4 的确定性要求），⛔ 不用宿主目录顺序。
-//   · **时间**：`GetFileTime` 用宿主 `last_write_time` + "此刻两个钟差值"的近似（⛔ 不追求跨机器精确，
-//     见 vfs.cpp 的 fileTime100ns）；`WIN32_FIND_DATAA` 的三个时间字段都填同一个近似值。
+//   · **时间**：`GetFileTime` / `WIN32_FIND_DATAA` 的三个时间都是**宿主真值**（vfs 的
+//     `hostFileTimes` 走 SDL3 `SDL_GetPathInfo`，含创建 / 访问时间）；只有 SDL 失败时才退回
+//     `last_write_time` + "此刻两钟差值"的近似（三值相同、同一次运行内单调）。
 //   · **日志**：每一次"成功但不真做"（卷信息 / 时间近似 / 不建模的 FILE_FLAG_*）留一行 `shimLog`；
 //     参数非法 / 未提交缓冲区 / 无效句柄 ⇒ `shimAbort` / `HandleTable::invalidHandle`（响亮失败）。
 //
@@ -45,12 +46,14 @@
 //      （真机从系统时间起，这里确定性优先）并创建那个空文件。前缀一律按字节截到 **3** 个字符，
 //      扩展名 `.TMP`（文档形态，大写）。
 //   9. **`FindFirstFileA` 的 `cAlternateFileName`（8.3 短名）恒为 0**（plan §9 R2 点名不做）。
-//      `WIN32_FIND_DATAA` / `GetFileTime` 的三个时间是**宿主真值**（vfs 的 `hostFileTimes` 走
-//      SDL3 `SDL_GetPathInfo`，含创建 / 访问时间）；只有 SDL 失败时才三值一起退回 mtime 近似。
+//      `WIN32_FIND_DATAA` / `GetFileTime` 的三个时间是**宿主真值**（vfs 的 `hostFileTimes`：
+//      Windows 走 SDL3 `SDL_GetPathInfo`；macOS 走 `stat` 的 `st_birthtimespec`（SDL 在 POSIX 给的是
+//      ctime）；其它 POSIX 接受 ctime 回退）；只有取时间失败时才三值一起退回 mtime 近似。
 //  10. **`SetFileTime` 真写宿主时间戳**（Windows 走 `CreateFileW(FILE_WRITE_ATTRIBUTES)` +
-//      `::SetFileTime`，三个时间都能写；POSIX 走 `utimensat`，只有 access / write 能写，
-//      **creation time 不可移植** ⇒ 写不了就留一行日志（文档也明说"not all file systems can
-//      record creation and last access times"）。`lpXxxTime` 为 NULL 或两个 DWORD 全 0 ⇒ 不改那一个；
+//      `::SetFileTime`，三个时间都能写；macOS 走 `utimensat`（access/write）+
+//      `setattrlist(ATTR_CMN_CRTIME)`（creation）；其它 POSIX 走 `utimensat`，creation 写不了 ⇒
+//      留一行日志（文档也明说"not all file systems can record creation and last access times"）。
+//      `lpXxxTime` 为 NULL 或两个 DWORD 全 0 ⇒ 不改那一个；
 //      两个 DWORD 全 0xFFFFFFFF（文档的"禁止后续更新"哨兵）⇒ 只记日志、不改（宿主时间戳没有这个
 //      开关）。⛔ 不再"返回成功但什么都不做"。
 //  11. **`GetCurrentDirectoryW` 是 W 版里唯一多做的一条**（`GetCurrentDirectoryA/W` 同一份实现），
@@ -84,6 +87,9 @@
 #else
 #include <fcntl.h>      // AT_FDCWD
 #include <sys/stat.h>   // utimensat / timespec
+#if defined(__APPLE__)
+#include <sys/attr.h>   // setattrlist / ATTR_CMN_CRTIME（macOS 的 birthtime 写入口）
+#endif
 #endif
 
 #include "runtime/cp932.h"
@@ -232,8 +238,8 @@ std::int64_t tellFile64(std::FILE* fp) {
 #endif
 }
 
-// `file_time_type` → FILETIME 100 ns（近似口径同 vfs.cpp 的 fileTime100ns；本族只用它填
-// GetFileTime 与 WIN32_FIND_DATAA 的三个时间戳）
+// `file_time_type` → FILETIME 100 ns：**只在 SDL 取不到真值时**兜底（近似口径同 vfs.cpp 的
+// fileTime100ns；三值相同、同一次运行内单调），不是默认路径。
 std::int64_t fileTime100ns(fs::file_time_type t) {
     using hundred_ns = std::chrono::duration<std::int64_t, std::ratio<1, 10000000>>;
     const auto now_file = fs::file_time_type::clock::now();
@@ -567,6 +573,12 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
             break;
     }
 
+    // 文档：`CREATE_ALWAYS` / `OPEN_ALWAYS` 命中**已存在**的文件 ⇒ 函数仍**成功**，但
+    // last-error 置 `ERROR_ALREADY_EXISTS(183)`（guest 用 `GetLastError()` 区分"首次运行 / 已有存档"；
+    // 本作有 8 处 CREATE_ALWAYS + 1 处 OPEN_ALWAYS）。⛔ 其余 disposition 不置 183。
+    const bool already_existed =
+        exists && (disposition == kCreateAlways || disposition == kOpenAlways);
+
     // 文档：`TRUNCATE_EXISTING` 要求 `dwDesiredAccess` 含 `GENERIC_WRITE`；`CREATE_ALWAYS` 命中
     // **已存在**的文件也是"截断"，同样要求写权 ⇒ 只读意图不许把文件清空。
     // ⚠ `<待核>`：`access = 0` × {CREATE_ALWAYS 且文件不存在, CREATE_NEW, OPEN_ALWAYS} 的真机行为
@@ -627,6 +639,9 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     }
     entry->destroy = &destroyFile;
     call.result = h;
+    // ★ 成功路径上**唯一**写 last_error 的地方：文档明写这两个 disposition 命中已存在文件时置 183。
+    //   其余情况**不碰** `last_error`（Win32 成功时也不清零，guest 见到的仍是上一次的遗留值）。
+    if (already_existed) cpu.shim.last_error = kErrAlreadyExists;
     if (cpu.shims && cpu.shims->trace()) {
         // trace 已由 shim 框架打；这里只补一句"落到了哪个宿主文件"（确定性：宿主路径在 trace 里有意义）
         shimLog("kernel32", api, "0x%08X ⇒ \"%s\"（mode=%s）", h, host.c_str(), mode);
@@ -1751,8 +1766,8 @@ void shimSetFileTime(X86& cpu, ShimCall& call) {
         return;
     }
 #else
-    // POSIX：最接近的等价物是 utimensat（atime + mtime）。creation time 没有可移植写法
-    // ⇒ 写了 atime/mtime 之后留一行（文档也承认不是所有文件系统都记录 creation / access time）。
+    // POSIX：`utimensat` 写 atime/mtime；macOS 额外用 `setattrlist(ATTR_CMN_CRTIME)` 写 birthtime。
+    // 其它 POSIX / 文件系统不支持 birthtime ⇒ 只留一行日志（用户 2026-11-04 口径：能改就改，不能就算了）。
     const std::string& host = st->host_path;
     timespec ts[2];
     ts[0].tv_nsec = has_access ? 0 : UTIME_OMIT;
@@ -1775,11 +1790,30 @@ void shimSetFileTime(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+#if defined(__APPLE__)
+    if (has_creation) {
+        struct attrlist al{};
+        al.bitmapcount = ATTR_BIT_MAP_COUNT;
+        al.commonattr = ATTR_CMN_CRTIME;
+        struct timespec birth{};
+        const std::int64_t ns = static_cast<std::int64_t>((creation - kFileTimeEpochDelta) * 100ull);
+        birth.tv_sec = static_cast<time_t>(ns / 1000000000ll);
+        birth.tv_nsec = static_cast<long>(ns % 1000000000ll);
+        if (::setattrlist(host.c_str(), &al, &birth, sizeof(birth), 0) != 0) {
+            const int e = errno;
+            // 不是失败路径：atime/mtime 已经写成功，creation 是"能改就改"的额外项。
+            shimLog("kernel32", api,
+                    "\"%s\" 的 creation time 写入失败（setattrlist errno=%d %s）⇒ 跳过，其余时间已写",
+                    st->guest_path.c_str(), e, errnoText(e).c_str());
+        }
+    }
+#else
     if (has_creation) {
         shimLog("kernel32", api,
                 "\"%s\" 的 creation time 在 POSIX 上不可移植 ⇒ 未写入（文档允许文件系统不记录它）",
                 st->guest_path.c_str());
     }
+#endif
 #endif
     call.result = 1;
 }
@@ -1853,8 +1887,9 @@ void shimFindFirstFileA(X86& cpu, ShimCall& call) {
         call.result = kInvalidHandleValue;
         return;
     }
-    // 时间戳近似：每次 FindFirst 留一行（plan 的"不许静默"；见文件头偏差 9）
-    shimLog("kernel32", api, "枚举顺序 = Vfs::find 排序后的顺序（%u 条）；时间戳用宿主 mtime 近似",
+    // 时间戳来源：每次 FindFirst 留一行（plan 的"不许静默"；见文件头偏差 9）
+    shimLog("kernel32", api,
+            "枚举顺序 = Vfs::find 排序后的顺序（%u 条）；时间戳走 hostFileTimes（SDL 真值，失败才回退 mtime）",
             static_cast<unsigned>(entries.size()));
 
     auto* fs_state = new FindState{};

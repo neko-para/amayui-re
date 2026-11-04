@@ -433,13 +433,53 @@ void setup_sub_af(Fixture& f) {
     // 半借位：0x10 - 0x01 从 bit4 借到 bit3 ⇒ AF=1（AF 先清 0）
     f.cpu().eax() = 0x10u;
     f.cpu().ebx() = 0x01u;
-    f.cpu().setAf(false);
-    f.codeHex(kCodeEa, "29 D8 C3");  // sub eax, ebx
+    f.cpu().setAf(false);    f.codeHex(kCodeEa, "29 D8 C3");  // sub eax, ebx
 }
 void verify_sub_af(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 0x0Fu);
     LIFT_CHECK(f.cpu().af());
     LIFT_CHECK(!f.cpu().cf());
+}
+
+// ★ 审计 T7：PF 原先一条整数断言都没有（唯一 pf 断言在 x87 fcomi）；DF=1 分支从未执行过。
+void setup_test_pf_even(Fixture& f) {
+    // test eax,eax：低字节 0x03 有 2 个 1（偶）⇒ PF=1；先清 PF，避免"没算也绿"
+    f.cpu().eax() = 0x03u;
+    f.cpu().setPf(false);
+    f.codeHex(kCodeEa, "85 C0 C3");  // test eax, eax
+}
+void verify_test_pf_even(Fixture& f) {
+    LIFT_CHECK(f.cpu().pf());
+    LIFT_CHECK(!f.cpu().cf());
+    LIFT_CHECK(!f.cpu().of());
+    LIFT_CHECK(!f.cpu().zf());
+}
+void setup_or_pf_odd(Fixture& f) {
+    // or eax,0：低字节 0x02 有 1 个 1（奇）⇒ PF=0；先置 PF，避免"没算也绿"
+    f.cpu().eax() = 0x02u;
+    f.cpu().setPf(true);
+    f.codeHex(kCodeEa, "83 C8 00 C3");  // or eax, 0
+}
+void verify_or_pf_odd(Fixture& f) {
+    LIFT_CHECK(!f.cpu().pf());
+    LIFT_CHECK(!f.cpu().cf());
+    LIFT_CHECK(!f.cpu().of());
+}
+
+void setup_rep_movsd_df(Fixture& f) {
+    // DF=1 的方向：rep movsd 从高地址往低地址搬（源 [esi] → 目标 [edi]，然后两者各 -4）
+    f.dataHex(kDataEa, "112233445566778899AABBCCDDEEFF00");
+    f.cpu().esi() = kDataEa + 4u;   // [0x88776655]
+    f.cpu().edi() = kDataEa + 0x0Cu;  // 目标写在 edi（= +0x0C），随后 edi -= 4
+    f.cpu().ecx() = 1u;
+    f.cpu().eflags |= 0x400u;  // DF=1
+    f.codeHex(kCodeEa, "F3 A5 C3");  // rep movsd
+}
+void verify_rep_movsd_df(Fixture& f) {
+    LIFT_CHECK(f.cpu().df());
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x0Cu), 0x88776655u);
+    LIFT_CHECK_EQ_U32(f.cpu().esi(), kDataEa);         // +4 → 0（减 4）
+    LIFT_CHECK_EQ_U32(f.cpu().edi(), kDataEa + 8u);   // +0x0C → +8
 }
 
 void setup_adc_carry_in(Fixture& f) {
@@ -1952,6 +1992,9 @@ const Case* conformanceCases(std::size_t* count) {
         {"dec-of-sf-boundary", setup_dec_of_sf, verify_dec_of_sf},
         {"add-af", setup_add_af, verify_add_af},
         {"sub-af", setup_sub_af, verify_sub_af},
+        {"test-pf-even", setup_test_pf_even, verify_test_pf_even},
+        {"or-pf-odd", setup_or_pf_odd, verify_or_pf_odd},
+        {"rep-movsd-df", setup_rep_movsd_df, verify_rep_movsd_df},
         {"adc-carry-in", setup_adc_carry_in, verify_adc_carry_in},
         {"adc-carry-out", setup_adc_carry_out, verify_adc_carry_out},
         {"sbb-borrow-in", setup_sbb_borrow_in, verify_sbb_borrow_in},

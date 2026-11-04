@@ -21,6 +21,8 @@ std::uint32_t readElem(X86& cpu, std::uint32_t ea, std::uint8_t size) {
 }
 
 void writeElem(X86& cpu, std::uint32_t ea, std::uint8_t size, std::uint32_t v) {
+    // 串操作也可能写到代码页（`rep movs` 到 .text）⇒ 与 `writeMem` 同一条 SMC 钩子。
+    noteGuestWrite(cpu.cache, ea, size);
     switch (size) {
         case 1: cpu.mem->wr8(ea, static_cast<std::uint8_t>(v & 0xFFu)); break;
         case 2: cpu.mem->wr16(ea, static_cast<std::uint16_t>(v & 0xFFFFu)); break;

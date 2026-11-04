@@ -257,6 +257,7 @@ int main() {
         const std::uint32_t create = f.use("CreateEventA");
         const std::uint32_t wait1 = f.use("WaitForSingleObjectEx");
         const std::uint32_t waitn = f.use("WaitForMultipleObjectsEx");
+        const std::uint32_t set = f.use("SetEvent");
         const std::uint32_t sleep = f.use("SleepEx");
         const std::uint32_t close = f.use("CloseHandle");
 
@@ -272,8 +273,11 @@ int main() {
         f.m.mem().wr32(arr, a);
         f.m.mem().wr32(arr + 4u, b);
         LIFT_CHECK_EQ_U32(f.call(waitn, {2u, arr, 0u, 0u, 0u}), kWaitObject0 + 1u);
-        // bWaitAll=TRUE 不实现 ⇒ WAIT_TIMEOUT（⛔ 不假装成功）
+        // bWaitAll=TRUE：a 未 signaled ⇒ 轮询（timeout=0）⇒ WAIT_TIMEOUT
         LIFT_CHECK_EQ_U32(f.call(waitn, {2u, arr, 1u, 0u, 0u}), kWaitTimeout);
+        // 把 a 也置位 ⇒ 全部 signaled ⇒ WAIT_OBJECT_0（并逐个消费）
+        LIFT_CHECK_EQ_U32(f.call(set, {a}), 1u);
+        LIFT_CHECK_EQ_U32(f.call(waitn, {2u, arr, 1u, 0u, 0u}), kWaitObject0);
         // ⚠ 无效句柄按设计**响亮失败**（HandleTable::invalidHandle → abort），所以这里不测
         //   "invalid handle ⇒ WAIT_FAILED"：那条路径是进程级的，测它等于杀掉夹具。
 

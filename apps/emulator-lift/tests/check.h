@@ -30,6 +30,11 @@ inline void failf(const char* file, int line, const char* fmt, ...) {
 
 inline int finish(const char* suite) {
     std::printf("%s: %d checks, %d failures\n", suite, g_checks, g_failures);
+    if (g_checks == 0) {
+        // ★ 0 条断言不许算绿：`LIFT_CHECK` 一条都没跑到时，旧实现返回 0（和"跑绿了"一样）。
+        std::fprintf(stderr, "%s: 0 checks ⇒ 失败（空夹具不能算通过）\n", suite);
+        return 1;
+    }
     return g_failures == 0 ? 0 : 1;
 }
 
@@ -80,8 +85,13 @@ inline int finish(const char* suite) {
     } while (0)
 
 // 缺资产：跳过（CTest 侧靠 SKIP_RETURN_CODE 77 认）
-#define LIFT_SKIP(why)                                  \
-    do {                                                \
-        std::printf("SKIP: %s\n", (why));               \
-        return 77;                                      \
+#define LIFT_SKIP(why)                                                                      \
+    do {                                                                                    \
+        std::printf("SKIP: %s\n", (why));                                                   \
+        if (::lift_test::g_failures > 0) {                                                  \
+            std::fprintf(stderr, "FAIL: SKIP 之前已有 %d 个失败 ⇒ 不能当 skipped\n",         \
+                         ::lift_test::g_failures);                                          \
+            return 1;                                                                       \
+        }                                                                                   \
+        return 77;                                                                          \
     } while (0)

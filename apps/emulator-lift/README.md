@@ -179,7 +179,8 @@ apps/emulator-lift/
   ```
 - ★ **CTest 的分级判据是"注册位置"**（`AGENTS.md` §5）：顶层无条件注册 ⇒ `pure`（不需要游戏/LFS）；
   落在 `if(...)` 里 ⇒ `assets`。默认 `ctest` 会跑前者，后者在有 `corpus/` 素材的机器上自动启用。
-  缺资产时测试返回 **77**（`SKIP_RETURN_CODE`），⛔ 不是"什么都不做然后 return 0"。
+  缺资产时这 5 条**不注册**（`ctest` 的用例数会变少，不是"跑绿了"）；已注册但 env 缺失时测试返回 **77**
+  （`SKIP_RETURN_CODE`），⛔ 不是"什么都不做然后 return 0"。
 - ★ `LIFT_SAFE_MEMORY=1`：每次 guest 访存都查提交位图（慢）。判据 A1 要求**再跑一遍这一档**。
 - 生成物（`out/`、`vcpkg_installed/`）由本目录 `.gitignore` 排除。
 

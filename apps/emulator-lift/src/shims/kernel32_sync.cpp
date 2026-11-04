@@ -28,9 +28,12 @@
 //      guest 没有等待者），后者是内核句柄。影响：直接读这两个字段的 guest 代码看到 0
 //      （Win32 文档说它们是不透明的，⛔ 不该被读）。
 //   3. **`TryEnterCriticalSection` 永远成功**（单线程 guest 没有竞争）—— 返回 TRUE 并真的进入。
-//   4. **`WaitForSingleObject` / `WaitForMultipleObjects` 永不阻塞**：未 signaled 时返回
-//      `WAIT_TIMEOUT` 并打日志。**`bWaitAll==TRUE` 同样返回 `WAIT_TIMEOUT`**（即使全部 signaled
-//      也不假装成功 —— 见 WaitForMultipleObjects 的实现）。
+//   4. **等待命中"需要等待" = 硬错误**（用户 2026-11-04）：`WaitForSingleObject` / `Ex` /
+//      `SignalObjectAndWait` 在未 signaled 且 `dwMilliseconds != 0`（含 INFINITE）时 `shimAbort`
+//      （打印 handle / timeout 后终止）；`WaitForMultipleObjects` / `Ex` 在"没有任何对象 signaled"
+//      或"`bWaitAll=TRUE` 且至少一个未 signaled"且 `dwMilliseconds != 0` 时同样 abort。
+//      ⛔ 不再返回 `WAIT_TIMEOUT`。`dwMilliseconds == 0` 的轮询仍返回 `WAIT_TIMEOUT`；
+//      `bWaitAll=TRUE` 且全部 signaled ⇒ 返回 `WAIT_OBJECT_0` 并逐个消费。
 //   5. **`PulseEvent` 不做"唤醒等待者再复位"**：先把 signaled 置真、**立刻**置假（单线程无等待者
 //      ⇒ 这次脉冲等于丢失，与真机对空列表的行为一致）。
 //   6. **`Sleep(INFINITE)` / `SleepEx(INFINITE)`** 不阻塞：按 1 秒推进虚拟时钟并打印一行。
@@ -634,9 +637,14 @@ std::uint32_t waitOne(X86& cpu, std::uint32_t h, std::uint32_t timeout, const ch
         consumeSignal(cpu, *obj);
         return kWaitObject0;
     }
-    if (timeout == 0) return kWaitTimeout;  // dwMilliseconds==0 ⇒ 只是轮询，不是阻塞 ⇒ 不必打日志
-    shimLog("kernel32", api, "阻塞等待在本模拟器里不实现（单线程 guest），返回 WAIT_TIMEOUT");
-    return kWaitTimeout;
+    if (timeout == 0) return kWaitTimeout;  // dwMilliseconds==0 ⇒ 只是轮询，不是阻塞 ⇒ 不硬错
+    // ★ 用户 2026-11-04 裁决：命中"需要等待"的场景 ⇒ **硬错误**（不是返回 WAIT_TIMEOUT）。
+    //   单线程 guest 里真阻塞会死锁；返回 TIMEOUT 又会给出 INFINITE 下不可能的值、且不取得对象
+    //   ⇒ 停下来让人检查具体调用场景并设计等待方案。
+    shimAbort("kernel32", api,
+              "需要等待：hHandle=0x%08X 未 signaled，dwMilliseconds=%u（0x%08X）⇒ 本模拟器不阻塞；"
+              "请人工检查该调用场景并设计等待方案（SCOPE §1 等待条目）",
+              h, timeout, timeout);
 }
 
 void shimWaitForSingleObject(X86& cpu, ShimCall& call) {
@@ -658,18 +666,42 @@ std::uint32_t waitMultiple(X86& cpu, std::uint32_t count, std::uint32_t handles_
         shimLog("kernel32", api, "nCount=%u / lpHandles=0x%08X 非法 ⇒ WAIT_FAILED", count, handles_ea);
         return kWaitFailed;
     }
-    if (wait_all != 0) {
-        // 偏差 4：bWaitAll==TRUE 不支持 —— 打印 + WAIT_TIMEOUT（⛔ 不假装成功）
-        shimLog("kernel32", api,
-                "bWaitAll=TRUE 在本模拟器里不实现（只支持 FALSE 且任一 signaled），返回 WAIT_TIMEOUT");
-        return kWaitTimeout;
-    }
     // 先校验全部句柄（无效句柄要响亮失败，而不是被"前面那个先 signaled"掩盖）
     SyncObj* objs[64] = {};
     for (std::uint32_t i = 0; i < count; ++i) {
         const std::uint32_t h = cpu.mem->rd32(handles_ea + 4u * i);
         objs[i] = syncOf(cpu, h, 0, api);
         if (!objs[i]) return kWaitFailed;
+    }
+    if (wait_all != 0) {
+        // bWaitAll=TRUE：全部 signaled 才返回 WAIT_OBJECT_0（并逐个消费）；
+        // 有未 signaled ⇒ 需要等待（timeout=0 轮询 258；否则硬错误，见下）。
+        bool all_ready = true;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const SyncObj* obj = objs[i];
+            const bool ready = (obj->marker == kSyncMutex && obj->owner == cpu.shim.thread_id && obj->count > 0) ||
+                               obj->signaled;
+            if (!ready) {
+                all_ready = false;
+                break;
+            }
+        }
+        if (all_ready) {
+            for (std::uint32_t i = 0; i < count; ++i) {
+                SyncObj* obj = objs[i];
+                if (obj->marker == kSyncMutex && obj->owner == cpu.shim.thread_id && obj->count > 0) {
+                    ++obj->count;
+                } else {
+                    consumeSignal(cpu, *obj);
+                }
+            }
+            return kWaitObject0;
+        }
+        if (timeout == 0) return kWaitTimeout;
+        shimAbort("kernel32", api,
+                  "需要等待：bWaitAll=TRUE 且至少一个对象未 signaled，dwMilliseconds=%u（0x%08X）⇒ "
+                  "本模拟器不阻塞；请人工检查该调用场景并设计等待方案（SCOPE §1 等待条目）",
+                  timeout, timeout);
     }
     for (std::uint32_t i = 0; i < count; ++i) {
         SyncObj* obj = objs[i];
@@ -682,10 +714,11 @@ std::uint32_t waitMultiple(X86& cpu, std::uint32_t count, std::uint32_t handles_
             return kWaitObject0 + i;
         }
     }
-    if (timeout != 0) {
-        shimLog("kernel32", api, "阻塞等待在本模拟器里不实现（单线程 guest），返回 WAIT_TIMEOUT");
-    }
-    return kWaitTimeout;
+    if (timeout == 0) return kWaitTimeout;
+    shimAbort("kernel32", api,
+              "需要等待：nCount=%u 里没有任何对象 signaled，dwMilliseconds=%u（0x%08X）⇒ "
+              "本模拟器不阻塞；请人工检查该调用场景并设计等待方案（SCOPE §1 等待条目）",
+              count, timeout, timeout);
 }
 
 void shimWaitForMultipleObjects(X86& cpu, ShimCall& call) {

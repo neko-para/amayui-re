@@ -28,20 +28,28 @@
 | A4 | 到 `_WinMain@16`；同一命令两次 trace 逐字节相同；**输入清单固定**（路径 / 命令行 / 环境块 / 时钟起点） | assets |
 | A5 | trace 里出现的导入 ⊆ 实现 ∪ 登记 stub；**七族内不许是 stub**（除非写进 `SCOPE.md`） | assets |
 
-## 验收（2026-11-04 · M1a，审查者独立复跑）
+## 验收（2026-11-04 · M1a，审查者独立复跑 —— **历史快照**，当前数值见下）
 - `ctest` **10/10 通过**；A1 `114 cases / 267 checks / 0 failures`
 - A2 `136/136`（未映射 0）；A3 `entries=298299 checked=298299`，`decode_fail / len / mnem = 0 / 0 / 0`
 - A4 到达 `eip=0x004BA890`，两次运行 hash 相同
 - A5 动态缺口 **0**；静态缺口 213/310
 - 仓库侧 `pnpm test` 1148 pass；`SCOPE.md` / 语料 / 旧仓未越界
 
-## 剩余（M1 收口前必须做完）
-1. **S0 覆盖清单**：`data/lift/overrides.{json,md}` + `tools/lift.mjs`（`describe` / `check` / `report` / `corpus-report`），进 `tools/cli.mjs` 域地图；`json-docs` 守卫绿。
-2. **澄清「静态缺口 213 vs `addUnimplemented` 83」**：摊成「已登记 stub / 导入表里有但未登记 / 从未被引用」三类，进 `lift check`。
-3. **S6 后四族**：文件与路径（大小写不敏感 + 通配符，映射 `--game-dir`）、**真 CP932**、计时、完整进程/模块信息；`wsprintfA` 真实现。
-4. **S8**：变异清单固化 + `bench` 吞吐入报告。
-5. **S4 剩余**：x87 缺的形态（47 中的余项）+ 20 个 MMX/SSE 形态；超越函数走宿主 libm + 登记 1 ulp。
-6. **A4 输入归一化**：把路径字符串 / 命令行 / 环境块 / 时钟起点列入 trace 输入；`--real-time` 接 CLI（用了真时钟则逐字节断言自动跳过并明说）。
+## 现查（2026-11-04 审计后，引用时用这一节）
+- `ctest` **22/22**（含 `conformance-safe` / `pe-loader`）；`LIFT_SAFE_MEMORY=1 ctest` **22/22**。
+- A1 `conformance` **183 cases / 383 checks / 0 failures**；A2 `136/136` 未映射 0。
+- A3 `entries=298299`、`len_checked=298299`、`decode_fail/len/mnem = 0/0/0`；collapsed 1805。
+- A4 到达 `eip=0x004BA890`；`insns=60652 hash=E0379BF37C2DFAF3`（PF 修正后；insns 不变）；
+  两份 shim trace 各 108,914 字节且逐字节相同。
+- A5 动态缺口 0；静态缺口 **164/310**（含派生缺口文件）。
+- `pnpm test` 1159 pass / 0 fail；`pnpm tools lift check` 绿。
+
+## 剩余（M1 收口前，2026-11-04 重算）
+- **M1a 审计后的活单**：S6 三族夹具（`REQ-01M6JFZ73GTZE9F6967RRSH6CE`）、平台 / win32 证据（`REQ-01M6JFZFN15MBPG7Y89WNZACFW`）；
+  文档漂移单 `REQ-01M6JFZG5RY4GMZQCAA7HKNP1T` 本轮已收口。
+- **S4 剩余逐项复核**（x87 / MMX / SSE 的实际缺口）—— 不在 M1a 审计范围，未做。
+- 原「剩余」里的 1（S0 覆盖清单）/ 2（静态缺口分类）/ 3（S6 后四族）/ 4（S8）/ 6（A4 输入归一化）
+  **均已完成**（见 `git log` 与对应子节点），不再是待办。
 
 ## 已知边界（不阻塞收口，要点名）
 - `--until` 之外曾停在 `USER32!wsprintfA`（`LoadLibraryA("AGERC.DLL")` 的失败分支）⇒ 由 AGERC stub + `wsprintfA` 解决。

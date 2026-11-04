@@ -20,6 +20,9 @@
     "emulator": "node apps/emulator/frontends/headless/main.ts",
     "emulator-new": "node apps/emulator-new/src/main.ts",
     "test:mutation": "node tools/mutate-check.mjs",
+    "test:mutation:active": "node tools/mutate-check.mjs --tier active",
+    "test:mutation:lift": "node tools/mutate-check.mjs --tier lift",
+    "test:mutation:js": "node tools/mutate-check.mjs --tier js",
     "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.core.json --noEmit && tsc -p apps/emulator-new/tsconfig.renderer.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit"
   },
   "devDependencies": {

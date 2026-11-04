@@ -157,7 +157,9 @@ public:
     std::string readCString(std::uint32_t ea, std::size_t max_len = 4096);
 
 private:
-    bool commitPages(std::uint32_t begin, std::uint32_t end);
+    // ★ `end` 是**排他**上界，允许等于 4 GiB（0x1_0000_0000）⇒ 参数必须是 64 位：
+    //   用 uint32 接会在"提交最后一页"时截断成 0，`begin >= end` 直接返回 true（什么都没提交）。
+    bool commitPages(std::uint32_t begin, std::uint64_t end);
     void setBit(std::uint32_t page, bool on);
     bool bit(std::uint32_t page) const;
 

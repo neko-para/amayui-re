@@ -18,7 +18,9 @@ namespace {
 bool parityEven(std::uint8_t v) {
     v ^= static_cast<std::uint8_t>(v >> 4);
     v &= 0x0F;
-    return ((0x6996u >> v) & 1u) != 0;  // 偶校验查表
+    // 0x6996 的位 = **奇校验**（popcount 为奇 ⇒ 1）⇒ PF（偶校验）要取反。
+    // 旧实现直接返回该位 ⇒ PF 全部反了（审计 T7 的 PF 夹具暴露）。
+    return ((0x6996u >> v) & 1u) == 0;
 }
 
 }  // namespace

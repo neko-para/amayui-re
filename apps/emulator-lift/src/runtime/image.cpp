@@ -11,6 +11,7 @@
 #include <string>
 
 #include "runtime/sha256.h"
+#include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
 
 namespace lift {
 namespace {
@@ -63,7 +64,7 @@ const PeSectionInfo* PeImage::sectionOfRva(std::uint32_t rva) const {
 }
 
 bool loadPeFile(const std::string& path, PeImage* out, std::string* err) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
+    std::FILE* f = openHostFileUtf8(path, "rb");
     if (!f) {
         if (err) *err = "打不开文件：" + path;
         return false;
@@ -151,18 +152,33 @@ bool parsePeImage(PeImage& img, std::string* err) {
     }
     for (std::size_t i = 0; i < 4096; ++i) {
         const std::size_t o = desc_off + i * 20;
-        if (!ranges(b, o, 20)) break;
+        // ★ 没有 0 终止项说明表被截断 ⇒ 拒绝启动（旧实现 break，把后面的导入静默吞掉，
+        //   A5 的"缺口=0"会因此假绿）。
+        if (!ranges(b, o, 20)) {
+            if (err) *err = "导入描述符表没有 0 终止项（越界）";
+            return false;
+        }
         const std::uint32_t orig_thunk = rdAt<std::uint32_t>(b, o + 0, "OriginalFirstThunk", err);
         const std::uint32_t name_rva = rdAt<std::uint32_t>(b, o + 12, "Name", err);
         const std::uint32_t first_thunk = rdAt<std::uint32_t>(b, o + 16, "FirstThunk", err);
         if (orig_thunk == 0 && name_rva == 0 && first_thunk == 0) break;
         const std::string module = readAscii(img, name_rva);
+        if (module.empty()) {
+            if (err) *err = "导入描述符的模块名为空 / Name RVA 无效";
+            return false;
+        }
         const std::uint32_t thunk_rva = orig_thunk ? orig_thunk : first_thunk;
         std::uint32_t thunk_off = 0;
-        if (!rvaToOffset(img, thunk_rva, &thunk_off)) continue;
+        if (!rvaToOffset(img, thunk_rva, &thunk_off)) {
+            if (err) *err = "导入 thunk 表 RVA 不落在任何节里（模块 " + module + "）";
+            return false;
+        }
         for (std::size_t k = 0; k < 4096; ++k) {
             const std::size_t to = thunk_off + k * 4;
-            if (!ranges(b, to, 4)) break;
+            if (!ranges(b, to, 4)) {
+                if (err) *err = "导入 thunk 表没有 0 终止项（模块 " + module + "）";
+                return false;
+            }
             const std::uint32_t entry = rdAt<std::uint32_t>(b, to, "thunk", err);
             if (entry == 0) break;
             PeImportInfo imp;
@@ -173,6 +189,10 @@ bool parsePeImage(PeImage& img, std::string* err) {
                 imp.ordinal = static_cast<std::uint16_t>(entry & 0xFFFFu);
             } else {
                 imp.name = readAscii(img, entry + 2);  // 跳过 2 字节 hint
+                if (imp.name.empty()) {
+                    if (err) *err = "导入函数名为空 / hint-name RVA 无效（模块 " + module + "）";
+                    return false;
+                }
             }
             img.imports.push_back(imp);
         }
@@ -197,9 +217,14 @@ bool mapPeImage(GuestMemory& mem, const PeImage& img, std::string* err) {
             return false;
         }
         const std::uint32_t copy = s.raw_size < vsize ? s.raw_size : vsize;
-        if (copy && s.raw_offset + copy <= img.bytes.size()) {
-            mem.writeBytes(img.image_base + s.va, img.bytes.data() + s.raw_offset, copy);
+        // ★ 旧实现：越界就**静默不拷贝**（半载入仍返回 true）；`raw_offset+copy` 还会 uint32 回绕。
+        //   现在一律拒绝启动（与 sha256 不符同档）。
+        const std::uint64_t raw_end = static_cast<std::uint64_t>(s.raw_offset) + copy;
+        if (copy && raw_end > img.bytes.size()) {
+            if (err) *err = std::string("节 raw 数据越界：") + s.name;
+            return false;
         }
+        if (copy) mem.writeBytes(img.image_base + s.va, img.bytes.data() + s.raw_offset, copy);
     }
     return true;
 }

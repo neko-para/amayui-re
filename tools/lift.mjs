@@ -718,26 +718,31 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
     }
 
     // ③ 派生缺口文件必须与"导入表 − 实现 − 登记"逐字节一致
+    // ★ ④ 的 "裸缺口" 必须相对**盘上的派生文件**算：`gapByKey`（期望缺口）覆盖所有未实现导入，
+    //   拿它算 bare 会构造上恒为 0（审计 C1）。盘上缺文件 / 过期 ⇒ gapFileKeys 为空 ⇒ bare 真的 >0。
+    const gapFileKeys = new Set();
     if (exists(GAP_FILE)) {
       const expected = renderGapFile(gaps);
       const actual = readText(GAP_FILE);
       if (actual !== expected) {
         problems.push(`${GAP_FILE} 过期（与导入表/注册表不一致）—— 重跑 \`pnpm tools lift sync --write\``);
+      } else {
+        for (const g of gaps) gapFileKeys.add(g.key);
       }
     } else if (gaps.length > 0) {
       problems.push(`缺派生缺口文件 ${GAP_FILE}（有 ${gaps.length} 条未登记导入）—— 跑 \`pnpm tools lift sync --write\``);
     }
 
-    // ④ bare gap 必须是 0（每条导入要么实现、要么显式 stub）
+    // ④ bare gap 必须是 0（实现 / 显式 stub / 派生缺口文件三者必居其一）
     let implementedImported = 0;
     let stubImported = 0;
     let bare = 0;
     for (const [key, imp] of pe.imports) {
       if (regs.implemented.has(key)) ++implementedImported;
-      else if (regs.stubs.has(key) || gapByKey.has(key)) ++stubImported;
+      else if (regs.stubs.has(key) || gapFileKeys.has(key)) ++stubImported;
       else {
         ++bare;
-        problems.push(`裸缺口（导入表里有、既没实现也没登记）：${key}`);
+        problems.push(`裸缺口（导入表里有、既没实现也没登记，且派生缺口文件里也没有）：${key}`);
       }
       void imp;
     }
@@ -750,7 +755,7 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
       staticGap: pe.imports.size - implementedImported,
       registeredStubTotal: regs.stubs.size,
       neverImported,
-      gapFileEntries: gaps.length,
+      gapFileEntries: gapFileKeys.size,
     };
     // 静态缺口的恒等式：static = stub + bare；stub 总数 = 导入的 stub + 从未被引用的
     if (counts.staticGap !== counts.stubImported + counts.bare) {
@@ -858,10 +863,16 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
   return { problems, counts: null, regs, pe: null, data };
 }
 
-export function reportCoverage({ exePath = EXE_FILE } = {}) {  const regs = readRegistrations({ skipGapFile: true });
+export function reportCoverage({ exePath = EXE_FILE } = {}) {
+  const regs = readRegistrations({ skipGapFile: true });
   const pe = readPeImports(exePath);
   const gaps = expectedGapKeys(pe.imports, regs);
-  const gapByKey = new Set(gaps.map((g) => g.key));
+  // ★ 与 check ④ 同一口径：只有**盘上的派生文件**与期望一致时，缺口才算"已登记"；
+  //   否则报告里的 bare 会像旧实现那样恒为 0（审计 C1）。
+  const gapByKey = new Set();
+  if (exists(GAP_FILE) && readText(GAP_FILE) === renderGapFile(gaps)) {
+    for (const g of gaps) gapByKey.add(g.key);
+  }
   const rows = [];
   for (const [key, imp] of pe.imports) {
     let status;

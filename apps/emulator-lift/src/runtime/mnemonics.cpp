@@ -279,9 +279,12 @@ bool isPseudoToken(std::string_view t) {
         "db", "dw", "dd", "dq", "dt", "df", "do", "dy", "dz", "text", "unicode", "align", "even",
         "assume", "public", "extrn", "extern", "proc", "endp", "segment", "ends", "org", "include",
         "end", "dup", "struc", "struct", "ends", "equ", "=", "low", "high", "offset", "short",
-        "near", "far", "ptr", "byte", "word", "dword", "qword", "tbyte", "type", "record", "label",
+        "near", "far", "ptr", "byte", "word", "dword", "qword", "tbyte", "xmmword", "ymmword",
+        "zmmword", "type", "record", "label",
         "title", "subtitle", "page", "name", "comment", "group", "rec", "macro", "endm", "local",
         "purge", "if", "ifdef", "ifndef", "else", "endif", "while", "endw", "repeat", "until",
+        // IDA `.lst` 头部的汇编器指令（`.686p` / `.mmx` 等）：不是指令，也不是数据项。
+        ".386", ".486", ".586", ".686", ".686p", ".mmx", ".xmm", ".model", ".code", ".data", ".stack",
     };
     for (const char* p : kPseudo) {
         if (t == p) return true;
@@ -377,9 +380,14 @@ LstKind classifyLstLine(std::string_view first, std::string_view second) {
             if (second == "proc" || second == "segment" || second == "struct" || second == "ends") {
                 return LstKind::DataOrPseudo;
             }
+            // `ExceptionInfo _EXCEPTION_POINTERS <offset …>`：名字 + **类型名** + 值 ⇒ 数据。
+            // 与"裸标识符"区分开：裸标识符（如未映射的 `cld`）必须报 Unknown，⛔ 不许吞成数据。
+            if (looksLikeIdentifier(second)) return LstKind::DataOrPseudo;
         }
-        // 单独一个标识符（标签 / 结构名）—— IDA 的 .lst 里只可能是定义行
-        return LstKind::DataOrPseudo;
+        // ★ 单独一个标识符**不能**默认判数据：IDA 的标签带 ':'（上面已处理），
+        //   数据 / 结构定义带 `proc/segment/struct/ends` 或数据伪指令（上面已处理）。
+        //   裸标识符若不在助记符表里 ⇒ 诚实报 Unknown，让 A2 看见（审计 T4 的假绿口子）。
+        return LstKind::Unknown;
     }
     if (!second.empty() && second.front() == '<') return LstKind::DataOrPseudo;
     return LstKind::Unknown;

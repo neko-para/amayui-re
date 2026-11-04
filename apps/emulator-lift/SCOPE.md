@@ -10,7 +10,7 @@
 **本节 > 本文件其余各节 > `data/spec/`**。与 spec 冲突时按本节取舍；
 被跳过的 spec 条款在 §2 点名，⛔ 不写进 spec 正文冒充引擎语义。
 
-## 1. 可接受偏差（用户 2026-11-03；临时文件名序号 2026-11-04）
+## 1. 可接受偏差（用户 2026-11-03；临时文件名序号 / 执行源 exe / 平台偏差 2026-11-04）
 
 | 偏差 | 做法 | 用户可见代价 | 仍必须保留 |
 |---|---|---|---|
@@ -23,6 +23,10 @@
 | **Live2D** | 关闭（游戏内开关）作为第一可交付状态 | 模型不显示（固定立绘） | 如果开关只是脚本级跳过，SDK 仍链接但不被调用 |
 | **3D** | 不做（若主线允许）：D3D9/D3DX 走 stub | 无 3D 战斗/场景 | 2D/ADV 主路径（DDraw + GDI） |
 | **临时文件名序号** | `GetTempFileNameA(uUnique=0)` 从 **0** 起递增找空号（真机从系统时间起）；`uUnique!=0` 按文档用调用方的值、**不创建**文件 | 具体序号与真机不同（可复现优先于逐值一致） | 名字形态 `<pre><uuuu>.TMP`（前缀只取 3 字符）、`uUnique!=0` 返回原值且不创建 |
+| **文件时间（POSIX）** | creation 用 **birthtime**（macOS `stat` 的 `st_birthtimespec`）；文件系统不提供 birthtime 时**回退 ctime**；`SetFileTime` 的 creation 在能写的平台写（Windows `::SetFileTime`、macOS `setattrlist(ATTR_CMN_CRTIME)`），写不了就跳过并留日志 | 非 Apple POSIX 上 creation 可能是 ctime / 改不了；不影响 access / write | access / write 始终真写；`GetFileTime` / `WIN32_FIND_DATAA` 三个时间各写各的 |
+| **超越函数** | `fsin` / `fcos` / `fsincos` / `fptan` / `fpatan` / `fyl2x` / `fyl2xp1` / `f2xm1` / `fscale` 走宿主 `libm`，允许 **1 ulp** 偏差 | 极端值可能与真机差 1 ulp（跨平台也可能不同） | 其余 x87 走 Berkeley SoftFloat（逐位一致） |
+| **宿主页保护粒度** | 16 KiB 宿主页上，提交 / 退提交按**宿主页对齐**；非 safe 模式下同宿主页的邻页也可读写 | 越界访问可能不触发 fault（业务不应依赖越界 fault） | `LIFT_SAFE_MEMORY=1` 仍按 4 KiB guest 页逐页检查；guest 自己的越界由诊断路径暴露 |
+| **等待（未 signaled）** | `WaitForSingleObject(Ex)` / `WaitForMultipleObjects(Ex)` / `SignalObjectAndWait` 命中"需要等待"（对象未 signaled 且 `dwMilliseconds != 0`，含 `INFINITE`）⇒ **硬错误**：`shimAbort` 打印 API / handle / timeout 后终止，⛔ 不返回 `WAIT_TIMEOUT` | 游戏若真依赖等待会在这里停下；需要人工检查该调用场景并设计等待方案 | `dwMilliseconds == 0` 的轮询仍返回 `WAIT_TIMEOUT`；signaled 路径不变；`bWaitAll=TRUE` 且全部 signaled ⇒ `WAIT_OBJECT_0` |
 
 ★ **3D 的前提**：若 Live2D 走 D3D 后端（`doc §6-2`），D3D9 不能砍；"3D 不做"与"保留 Live2D"互斥。
 
@@ -64,7 +68,8 @@
 
 ## 4. 实现策略（不是偏差）
 
-- 执行源 = `.lst`（guest-state）；`.c` 只作阅读对照（`doc §5.6`）。
+- 执行源 = **拆壳件 exe**（D1：`corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`，执行它的字节）；`.lst` 只作符号 / 对照 / 覆盖（`doc §5.6`）。
 - 执行单位 = basic block；`jmp/call/ret` 只改 `eip` 回 dispatcher（`doc §5.7`）。
 - 宿主 = SDL3；Win32/GDI/DDraw 形状层自己写（`doc §5.5`）。
+- 宿主 fault 归因**分平台实现**（POSIX `sigaction` / Windows VEH）；这不是 guest 可见语义，不做抽象层。
 - 覆盖 = 清单 + 块级调度表；生成物不入库（`doc §5.7`）。

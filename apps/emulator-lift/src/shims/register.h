@@ -39,6 +39,7 @@ void registerFileShims(ShimRegistry& shims);      // kernel32_file.cpp（文件�
 void registerTimeShims(ShimRegistry& shims);      // kernel32_time.cpp
 void registerStringShims(ShimRegistry& shims);    // kernel32_string.cpp（码页与字符串族）
 void registerAgercShims(ShimRegistry& shims);     // kernel32_agerc.cpp（AGERC 三个导出，整体 stub）
+void registerUser32MenuShims(ShimRegistry& shims);  // user32_menu.cpp（菜单 / 模态 no-op，SCOPE §1）
 void registerVersionShims(ShimRegistry& shims);   // kernel32_version.cpp（版本资源查询：真实失败码）
 
 // ---- 共用的诊断打印（一行一条，stderr；不受 --trace 影响 —— 缺口感必须是常亮的）----

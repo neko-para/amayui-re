@@ -2,8 +2,9 @@
 
 - id: REQ-01M6JCZYJWVER06R6CQJ1N0ADC
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6FW5JGQGHACXHPWZD4Y3E
+- verify: apps/emulator-lift/tests/file_io.cpp#create-always-last-error
 - repro: apps/emulator-lift/src/shims/kernel32_file.cpp#createFile
 - severity: S2
 - tags: [emulator-lift, m1, s6]
@@ -26,13 +27,27 @@
 `0x4355DA` / `0x438C95` / `0x45478B` / `0x49F63A`；`disposition=4`（OPEN_ALWAYS）1 处：`0x4547CB`。
 ⇒ **可能改变游戏分支**（这正是它不并入 S6 那批"低风险夹具"的原因）。
 
-## 判据（待写实）
-- 第二次 `CREATE_ALWAYS` 打开已存在文件 ⇒ 句柄有效 + `last_error == 183`；
-- 首次（文件不存在）`CREATE_ALWAYS` ⇒ 句柄有效 + `last_error != 183`（先清零再调，断言未被写成 183）；
-- `OPEN_ALWAYS` 存在 ⇒ 183；不存在 ⇒ 新建且非 183；
-- 宿主盘断言：文件内容按 disposition 的既定语义处理（CREATE_ALWAYS 截断）。
-- 夹具落 `tests/file_io.cpp`，用例名建议 `create-always-last-error`（顶层 pure CTest `file-io` 已注册，无需改 CMake）。
+## 落地（2026-11-04）
+- `kernel32_file.cpp` 的 `createFile()`：在 `exists` / `disposition` 都解析完之后、任何失败返回之前算
+  `already_existed = exists && (CREATE_ALWAYS || OPEN_ALWAYS)`；**只在句柄建成功之后**写
+  `cpu.shim.last_error = 183`。其余情况**不碰** `last_error`（Win32 成功时也不清零）。
+- 截断语义不变：`CREATE_ALWAYS` 仍截断，`OPEN_ALWAYS` 命中已存在仍**不**截断 ⇒ 183 只影响 last_error。
+- 失败路径（共享冲突 / 无写权 / 宿主打开失败）不会顺带写成 183。
 
-## 风险 / 验收要求
-- 改完必须**单独**跑一次 assets 档 `boot-trace` 并对照 A4 的 `insns/hash/inputs`；变了就停下来分析（说明游戏走了 183 分支）。
-- 与 `REQ-01M6JCC22PHPC24ZQN4P65Z1K5`（S6）是同一族的**另一条**：不要混在一起改。
+## 判据（已落实为 `file-io#create-always-last-error`）
+- 首次（文件不存在）`CREATE_ALWAYS` ⇒ 句柄有效 + 清 0 之后 `last_error == 0`（不是 183）；
+- 第二次 `CREATE_ALWAYS`（已存在）⇒ 句柄有效 + `last_error == 183` + 宿主文件被截断成 0 字节；
+- `OPEN_ALWAYS` 存在 ⇒ 183 且内容保留（写 `"keep"` 后仍是 `"keep"`）；不存在 ⇒ 新建空文件、非 183；
+- `OPEN_EXISTING` / `TRUNCATE_EXISTING` 命中已存在 ⇒ 非 183；`CREATE_NEW` 命中已存在 ⇒ `INVALID_HANDLE_VALUE + 80`。
+
+## 门禁（本机 macOS arm64）
+- `ctest` **20/20**；`LIFT_SAFE_MEMORY=1 ctest` **20/20**。
+- A4 `boot-trace`（CTest 环境、与记录基线同一命令）改后 = 改前：
+  `insns=60652 hash=D06091AF5DD19647 inputs=35CB9281F6D0881B`（run1/run2 相同，`eip=004BA890`）。
+  另做了一次独立 A/B（短相对路径）：`insns=38456` 在开/关 183 两个构建下逐值相同
+  ⇒ 本次改动的 last_error **没有改变游戏在 L2 之前的分支**。
+- 变异自检：`pnpm tools mutate check --match 183` ⇒ `ctest:file-io` 退出码 8（`create-always-last-error` 红）。
+
+## 保留 / 边界
+- 本单只改"成功 + 已存在"这一格；`CREATE_ALWAYS` 命中已存在且 `access=0` 的真机返回码仍属 S6 的 `<待核>` 清单。
+- A4 的指令数依赖 `--exe` 的路径写法（38,456 / 44,184 / 53,134 / 60,652 四种输入），引用必须连命令一起给。

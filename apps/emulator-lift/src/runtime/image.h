@@ -67,7 +67,7 @@ struct GuestLayout {
     std::uint32_t peb_ea = 0x7FFD1000u;
     std::uint32_t tls_array_ea = 0x7FFD2000u;  // TEB+0x2C 指向它（64 个槽）
     std::uint32_t shim_page = 0x7FFE0000u;     // 导入桩页（每个导入一个唯一地址）
-    std::uint32_t shim_slots = 0x2000u;        // 最多 2048 个导入（4 字节步进 = 8 KiB）
+    std::uint32_t shim_slots = 0x2000u;        // 0x2000 = 8192 个槽（4 字节步进 = 32 KiB）
     std::uint32_t argv_block = 0x7FFD4000u;    // 命令行 / 环境块（CRT 启动读它）
 };
 

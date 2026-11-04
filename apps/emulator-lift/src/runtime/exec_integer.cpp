@@ -286,6 +286,9 @@ bool doDiv(X86& cpu, const Insn& in, bool sign) {
             const std::int32_t dividend = static_cast<std::int32_t>(
                 (static_cast<std::uint32_t>(cpu.edx() & 0xFFFFu) << 16) | (cpu.eax() & 0xFFFFu));
             const std::int32_t divisor = static_cast<std::int16_t>(src & 0xFFFFu);
+            // ★ `INT32_MIN / -1` 在 C++ 里是 UB（x86-64 宿主会出硬件 #DE，不是这里的三个异常码）；
+            //   商溢出必须在**除法之前**判，否则"范围检查在除法之后"永远看不到它。
+            if (dividend == INT32_MIN && divisor == -1) return cpuFault(cpu, in, "idiv 商溢出（#DE）");
             const std::int32_t q = dividend / divisor;
             const std::int32_t r = dividend % divisor;
             if (q < -32768 || q > 32767) return cpuFault(cpu, in, "idiv 商溢出（#DE）");
@@ -295,6 +298,7 @@ bool doDiv(X86& cpu, const Insn& in, bool sign) {
             const std::int64_t dividend = static_cast<std::int64_t>(
                 (static_cast<std::uint64_t>(cpu.edx()) << 32) | cpu.eax());
             const std::int64_t divisor = static_cast<std::int32_t>(src);
+            if (dividend == INT64_MIN && divisor == -1) return cpuFault(cpu, in, "idiv 商溢出（#DE）");
             const std::int64_t q = dividend / divisor;
             const std::int64_t r = dividend % divisor;
             if (q < INT32_MIN || q > INT32_MAX) return cpuFault(cpu, in, "idiv 商溢出（#DE）");

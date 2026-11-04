@@ -23,6 +23,7 @@ void registerKernel32Shims(ShimRegistry& shims) {
     registerTimeShims(shims);      // kernel32_time.cpp：tick / FILETIME / SYSTEMTIME / winmm
     registerStringShims(shims);    // kernel32_string.cpp：wsprintfA（varargs）/ lstrlenA / 码页
     registerAgercShims(shims);     // kernel32_agerc.cpp：AGERC 三个导出（SCOPE §1 模态 no-op）
+    registerUser32MenuShims(shims);  // user32_menu.cpp：菜单 / 模态 no-op（SCOPE §1）
     registerVersionShims(shims);   // kernel32_version.cpp：版本资源查询（真实失败码 1813）
 
     // =================================================================================
@@ -73,12 +74,6 @@ void registerKernel32Shims(ShimRegistry& shims) {
     shims.addUnimplemented("user32", "ReleaseDC", kUser32);
     shims.addUnimplemented("user32", "GetClientRect", kUser32);
     shims.addUnimplemented("user32", "SetFocus", kUser32);
-    // ← 菜单 / 模态按 SCOPE §1 走 stub（LoadMenuA 非空假句柄 / SetMenu TRUE / MessageBoxA IDOK /
-    //   TrackPopupMenu 0），M1a 未做，所以这里先按"未实现"登记而不是假装成功。
-    shims.addUnimplemented("user32", "LoadMenuA", "SCOPE §1 菜单整体 no-op，属 S6 窗口族");
-    shims.addUnimplemented("user32", "SetMenu", "SCOPE §1 菜单整体 no-op，属 S6 窗口族");
-    shims.addUnimplemented("user32", "TrackPopupMenu", "SCOPE §1 菜单整体 no-op，属 S6 窗口族");
-    shims.addUnimplemented("user32", "MessageBoxA", "SCOPE §1 模态整体 no-op，属 S6 窗口族");
 
     // ---- gdi32：2D 图形 ----
     const char* kGdi32 = "gdi32 图形族不在 M1a 这一批（S6 后续）";

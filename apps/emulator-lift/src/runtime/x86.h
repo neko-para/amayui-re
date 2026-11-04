@@ -30,6 +30,10 @@ class BlockCache;
 class LstIndex;
 class Vfs;
 
+// ★ SMC 钩子：`X86::writeMem` 在类定义之前，不能直接调 `BlockCache::noteWrite`（不完整类型）。
+//   `cache == nullptr` 时（测试里没装缓存）是 no-op。
+void noteGuestWrite(BlockCache* cache, std::uint32_t ea, std::size_t n);
+
 // x87 状态（8 寄存器栈 + 控制/状态字 + TOP + tag）
 struct X87State {
     // 每个寄存器 16 字节：softfloat `extFloat80_t`（signExp 2 字节 + significand 8 字节）原位放
@@ -251,11 +255,21 @@ public:
     const char* lastError() const { return last_error_; }
     std::uint32_t lastErrorEa() const { return last_error_ea_; }
     void clear();
+    // ★ SMC（自修改代码）：guest 写到"已解码过的代码页"时清空块缓存，下一次从新字节重新解码。
+    //   `X86::writeMem` 每写一次调一次；实现是**一次位图查询**（最多 0x100000 位 = 128 KiB），
+    //   堆 / 栈的写会落在"未标记"分支 ⇒ 不影响热路径的量级。
+    void noteWrite(std::uint32_t ea, std::size_t n);
 
 private:
+    void markCodePage(std::uint32_t page);
+    bool codePageMarked(std::uint32_t page) const;
+    void dropBlocks();
+
     Decoder* dec_ = nullptr;
     GuestMemory* mem_ = nullptr;
     std::unordered_map<std::uint32_t, std::unique_ptr<Block>> blocks_;
+    bool stale_ = false;  // 有代码页被写过 ⇒ 下一个 get 先清缓存（不能当场清：当前块还在执行）
+    std::vector<std::uint64_t> code_page_bits_;  // 已解码块覆盖的 guest 页（4 KiB 粒度）
     std::size_t insn_count_ = 0;
     std::size_t hits_ = 0;
     std::size_t misses_ = 0;

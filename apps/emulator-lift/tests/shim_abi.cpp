@@ -11,6 +11,7 @@
 
 #include "check.h"
 #include "runtime/machine.h"
+#include "shims/register.h"
 
 namespace {
 
@@ -188,6 +189,49 @@ int main() {
         LIFT_CHECK(r.reason == lift::StopReason::UntilEa);
         LIFT_CHECK_EQ_U32(g_arg0, 0xBBBB6666u);
         LIFT_CHECK_EQ_U32(g_arg1, 0xAAAA5555u);
+    }
+
+    // ⑥ SCOPE §1 菜单 / 模态 no-op：返回合理值 + stdcall 栈平衡，⛔ 不是硬 trap。
+    //   判据：真跑注册表里的 user32 stub（不是本文件自造的），所以 `find` 必须拿到 `fn` 非空的那条。
+    {
+        g_current_case = "menu-modal-noop";
+        auto runStub = [&](const char* mod, const char* name, const std::vector<std::uint32_t>& args,
+                           std::uint32_t expected, bool nonzero) {
+            lift::Machine m;
+            std::string err;
+            LIFT_CHECK(m.initBare(&err));
+            LIFT_CHECK(m.prepareStack(&err));
+            // 真跑注册表里的 user32 stub（fixture 的 initBare 不装配 shim）
+            lift::registerUser32MenuShims(m.shims());
+            lift::ShimDef* d = m.shims().findMutable(mod, name);
+            LIFT_CHECK(d != nullptr);
+            LIFT_CHECK(d && d->fn != nullptr);  // 不是 addUnimplemented（那会是硬 trap）
+            if (!d) return;
+            d->stub_ea = 0x7FFE0100u;
+            m.cache().installShim(d->stub_ea, d->id);
+            Asm a;
+            for (auto it = args.rbegin(); it != args.rend(); ++it) a.pushImm(*it);
+            a.callRel(d->stub_ea);
+            a.ret();
+            LIFT_CHECK(m.placeCode(kCodeEa, a.b.data(), a.b.size(), &err));
+            m.cpu().eip = kCodeEa;
+            const lift::RunResult r = run(m);
+            LIFT_CHECK(r.reason == lift::StopReason::UntilEa);
+            if (nonzero) {
+                LIFT_CHECK_NE_U32(m.cpu().eax(), 0u);
+            } else {
+                LIFT_CHECK_EQ_U32(m.cpu().eax(), expected);
+            }
+            LIFT_CHECK_EQ_U32(m.cpu().esp(), m.layout().stack_top);  // 被调方弹参 + ret 弹哨兵
+        };
+        // LoadMenuA(hInstance, lpMenuName) ⇒ 非空假句柄
+        runStub("user32", "LoadMenuA", {0u, 0u}, 0u, /*nonzero=*/true);
+        // SetMenu(hWnd, hMenu) ⇒ TRUE
+        runStub("user32", "SetMenu", {1u, 0x00010001u}, 1u, false);
+        // TrackPopupMenu(7 参数) ⇒ 0
+        runStub("user32", "TrackPopupMenu", {0u, 0u, 0u, 0u, 0u, 0u, 0u}, 0u, false);
+        // MessageBoxA(hWnd, text, caption, type) ⇒ IDOK(1)
+        runStub("user32", "MessageBoxA", {0u, 0u, 0u, 0u}, 1u, false);
     }
 
     return finish("shim-abi");

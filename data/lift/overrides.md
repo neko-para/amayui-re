@@ -16,10 +16,12 @@
 | 函数级（EA → 原生） | `replace` / `hook` | `ea: "0x00401234"` | 尚无（M2/M3 才出现） |
 | 子系统级（EA 范围） | `replace` / `hook` | `range: [start, end]` | 尚无 |
 
-★ **M1 的 stub 不是"假装成功"**：它们分到唯一 guest 桩地址，执行到就打印
+★ **M1 的 stub 不是"假装成功"**：`addUnimplemented` 的条目分到唯一 guest 桩地址，执行到就打印
 `module!name` + reason + 返回地址 + 寄存器 + guest 返回栈并**停下**（`SCOPE.md` §3）。
-唯一的例外是 `addStub` 那几条（菜单 / 模态 / AGERC 设置对话框）：按 `SCOPE.md` §1 返回**合理值**
-并打一行日志，同时在这里登记 `kind: stub` + reason。
+`addStub` 的条目按 `SCOPE.md` §1 返回**合理值**并打一行日志，同时在这里登记 `kind: stub` + reason：
+当前共 **10 条** = AGERC 3（`_GetInstance@0` / `_ShowDialog@12` / `_OperateMenu@16`）+
+version 3（`GetFileVersionInfoSizeA` / `GetFileVersionInfoA` / `VerQueryValueA`）+
+user32_menu 4（`LoadMenuA` / `SetMenu` / `TrackPopupMenu` / `MessageBoxA`）。
 
 ## 为什么清单不是手写的（两条真源如何保持一致）
 

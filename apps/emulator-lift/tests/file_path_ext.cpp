@@ -288,6 +288,21 @@ int main() {
                     (guest_dir + "AGE1234.TMP").c_str(), n1.c_str(), n2.c_str());
     }
 
+    // ④b A4：setGameDir 清掉上一轮的 `.lift-tmp`（否则 `GetTempFileNameA(uUnique=0)` 的序号
+    //     跨运行累积，同一条命令两次会得到不同名字 / 不同 trace）。
+    {
+        g_current_case = "temp-dir-cleared";
+        std::error_code tec;
+        fs::create_directories(dir / ".lift-tmp", tec);
+        std::FILE* tf = std::fopen(pathToUtf8(dir / ".lift-tmp" / "AGE0000.TMP").c_str(), "wb");
+        LIFT_CHECK(tf != nullptr);
+        if (tf) std::fclose(tf);
+        LIFT_CHECK(fs::exists(dir / ".lift-tmp" / "AGE0000.TMP", tec));
+        Fixture g;
+        g.m.vfs().setGameDir(pathToUtf8(dir));  // 触发清理
+        LIFT_CHECK(!fs::exists(dir / ".lift-tmp" / "AGE0000.TMP", tec));
+    }
+
     fs::remove_all(dir, ec);
     return finish("file-path-ext");
 }

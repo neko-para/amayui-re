@@ -1725,7 +1725,7 @@ const MUTATIONS = [
   },
   {
     file: 'tools/lib/shape-access.mjs',
-    from: "      for (const rg of ['esi', 'edi', 'ecx', 'eax']) fr.set(rg, UNK);",
+    from: "      for (const rg of ['esi', 'edi', 'ecx', 'eax']) fr.set(rg, unk('string'));",
     to: '      // 变异：串指令不再失效寄存器',
     guard: 'tools/test/shape-access.test.mjs',
     what: '★ 串指令（rep movs*/stos*）不再让 esi/edi 失效 ⇒ rep 之后 [esi+disp] 被当成对象相对位移 = 假解释（实测 795 处）',
@@ -4440,7 +4440,7 @@ const MUTATIONS = [
   {
     file: 'apps/emulator-lift/src/shims/kernel32_string.cpp',
     from: '} else if (sp.zero && numeric && sp.prec < 0) {',
-    to: '} else if (false) {',
+    to: '} else if ((sp.zero && numeric && sp.prec < 0) && false) {',
     guard: 'ctest:strfmt',
     ctest: 'strfmt',
     buildDir: 'apps/emulator-lift/out',
@@ -4483,6 +4483,35 @@ const MUTATIONS = [
     what: '同步对象访问位检查失效 ⇒ 零访问位句柄也能改状态 ⇒ sync-ext 的 duplicate-access-and-pseudo 红',
   },
   {
+    file: 'apps/emulator-lift/src/shims/kernel32_sync.cpp',
+    from: '        shimAbort("kernel32", api,\n                  "需要等待：bWaitAll=TRUE 且至少一个对象未 signaled，dwMilliseconds=%u（0x%08X）⇒ "\n                  "本模拟器不阻塞；请人工检查该调用场景并设计等待方案（SCOPE §1 等待条目）",\n                  timeout, timeout);',
+    to: '        return kWaitTimeout;  // 变异：bWaitAll 的等待退回 TIMEOUT',
+    guard: 'ctest:shims-core',
+    ctest: 'shims-core',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'bWaitAll=TRUE 的未 signaled 等待又静默返回 WAIT_TIMEOUT ⇒ shims-core 的多对象子进程没有 abort',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_sync.cpp',
+    from: '    shimAbort("kernel32", api,\n              "需要等待：hHandle=0x%08X 未 signaled，dwMilliseconds=%u（0x%08X）⇒ 本模拟器不阻塞；"\n              "请人工检查该调用场景并设计等待方案（SCOPE §1 等待条目）",\n              h, timeout, timeout);',
+    to: '    return kWaitTimeout;  // 变异：退回 WAIT_TIMEOUT',
+    guard: 'ctest:shims-core',
+    ctest: 'shims-core',
+    buildDir: 'apps/emulator-lift/out',
+    what: '未 signaled 的等待又静默返回 WAIT_TIMEOUT ⇒ shims-core 的 unsignaled-wait-traps 红（子进程没有 abort）',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_sync.cpp',
+    from: '    if (obj->count == 0 || obj->owner != cpu.shim.thread_id) {\n        cpu.shim.last_error = kErrNotOwner;\n        shimLog("kernel32", "ReleaseMutex",',
+    to: '    if (false) {  // 变异：非持有者释放也放行\n        cpu.shim.last_error = kErrNotOwner;\n        shimLog("kernel32", "ReleaseMutex",',
+    guard: 'ctest:shims-core',
+    ctest: 'shims-core',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'ReleaseMutex 不再校验持有者 ⇒ 未持有的互斥量也返回 TRUE（不再 FALSE + ERROR_NOT_OWNER(288)）' +
+      '⇒ shims-core 的 mutex-release-owner 红',
+  },
+  {
     file: 'apps/emulator-lift/src/runtime/vfs.cpp',
     from: '            e.create_time_100ns = times.create_100ns;\n            e.access_time_100ns = times.access_100ns;',
     to: '            e.create_time_100ns = times.write_100ns;  // 变异：退回 mtime 近似\n            e.access_time_100ns = times.write_100ns;',
@@ -4490,6 +4519,15 @@ const MUTATIONS = [
     ctest: 'file-io',
     buildDir: 'apps/emulator-lift/out',
     what: '三个时间又退回同一个 mtime ⇒ file-io 的 find-data-times 红（SetFileTime 设的两个不同过去值不再区分）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/vfs.cpp',
+    from: '    out->create_100ns = toWindows100ns(nsOf(st.st_birthtimespec));',
+    to: '    out->create_100ns = toWindows100ns(nsOf(st.st_ctimespec));  // 变异：退回 ctime',
+    guard: 'ctest:file-io',
+    ctest: 'file-io',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'macOS 的 creation 又退回 ctime ⇒ file-io 的 find-data-times 红（SetFileTime 设的 creation 读不回来）',
   },
   {
     file: 'apps/emulator-lift/src/shims/kernel32_file.cpp',
@@ -4500,12 +4538,139 @@ const MUTATIONS = [
     buildDir: 'apps/emulator-lift/out',
     what: 'SetFilePointerEx 不校验访问位 ⇒ access=0 的句柄也能 seek ⇒ file-io 的 access-zero-open 红',
   },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_file.cpp',
+    from: '        exists && (disposition == kCreateAlways || disposition == kOpenAlways);',
+    to: '        false && (disposition == kCreateAlways || disposition == kOpenAlways);  // 变异：不置 183',
+    guard: 'ctest:file-io',
+    ctest: 'file-io',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'CREATE_ALWAYS / OPEN_ALWAYS 命中已存在文件不置 last_error=183 ⇒ file-io 的 create-always-last-error 红',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/heap.cpp',
+    from: '    const std::uint64_t need64 = static_cast<std::uint64_t>(bytes) + opt_.header;\n    if (need64 > 0xFFFFFFFFull) {',
+    to: '    const std::uint32_t need64 = bytes + opt_.header;  // 变异：退回 32 位算\n    if (false) {',
+    guard: 'ctest:memory-pages',
+    ctest: 'memory-pages',
+    buildDir: 'apps/emulator-lift/out',
+    what: '堆请求的 bytes+header 退回 32 位 ⇒ 0xFFFFFFF8 请求切出 size=0 的块并返回非空指针 ⇒ memory-pages 的 heap-request-overflow 红',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/memory.cpp',
+    from: '    const std::uint64_t end = (end64 + kPageMask) & ~static_cast<std::uint64_t>(kPageMask);',
+    to: '    const std::uint32_t end = static_cast<std::uint32_t>((end64 + kPageMask) & ~static_cast<std::uint64_t>(kPageMask));  // 变异：退回 32 位',
+    guard: 'ctest:memory-pages',
+    ctest: 'memory-pages',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'commit 的排他上界退回 uint32 ⇒ 最后一页（end=4 GiB）截断成 0 ⇒ memory-pages 的 commit-last-page 红',
+  },
+  {
+    file: 'apps/emulator-lift/tests/base_coverage.cpp',
+    from: '    o.until_ea = 0x004BA890u;',
+    to: '    o.until_ea = 0x00401000u;  // 变异：提前停（没走到 L2）',
+    guard: 'ctest:base-coverage',
+    ctest: 'base-coverage',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'A5 只判"动态缺口为空"在跑空时恒真 ⇒ 本变异把运行提前停在入口附近 ⇒ base-coverage 的 reached-L2/insns 哨兵红',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/decode.cpp',
+    from: '    //   （machine.cpp 里 `left_block == false` 的续跑路径）。\n    return true;',
+    to: '    //   （machine.cpp 里 `left_block == false` 的续跑路径）。\n    return false;  // 变异：长块分片当错误',
+    guard: 'ctest:dispatch',
+    ctest: 'dispatch',
+    buildDir: 'apps/emulator-lift/out',
+    what: '>256 条无控制流的直路又当成 DecodeError ⇒ dispatch 的 long-block-splits 红（语料里 0x415DF6 的 554 条块）',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/user32_menu.cpp',
+    from: '    shimLog("user32", "SetMenu", "菜单整体 no-op ⇒ 返回 TRUE（SCOPE §1；没有 Win32 菜单栏）");\n    call.result = 1;',
+    to: '    shimLog("user32", "SetMenu", "菜单整体 no-op ⇒ 返回 TRUE（SCOPE §1；没有 Win32 菜单栏）");\n    call.result = 0;  // 变异：菜单 no-op 返回值错',
+    guard: 'ctest:shim-abi',
+    ctest: 'shim-abi',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'SetMenu 的 no-op 返回 FALSE ⇒ shim-abi 的 menu-modal-noop 红（SCOPE §1 要求 TRUE）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/machine.cpp',
+    from: '    shims_.setTrace(opts.trace_shims, opts.trace_out ? opts.trace_out : stdout);',
+    to: '    shims_.setTrace(opts.trace_shims, stdout);  // 变异：忽略 trace_out',
+    guard: 'ctest:boot-trace',
+    ctest: 'boot-trace',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'trace_out 被忽略 ⇒ A4 的两份 trace 文件都是空 ⇒ boot-trace 的 trace-bytes-identical 红（不允许"两边都空"假绿）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/vfs.cpp',
+    from: '    std::error_code tmp_ec;\n    fs::remove_all(p / ".lift-tmp", tmp_ec);',
+    to: '    std::error_code tmp_ec;\n    (void)tmp_ec;  // 变异：不清理 .lift-tmp',
+    guard: 'ctest:file-path-ext',
+    ctest: 'file-path-ext',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'setGameDir 不清理 .lift-tmp ⇒ file-path-ext 的 temp-dir-cleared 红（GetTempFileNameA 序号会跨运行累积）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/mnemonics.cpp',
+    from: '        //   裸标识符若不在助记符表里 ⇒ 诚实报 Unknown，让 A2 看见（审计 T4 的假绿口子）。\n        return LstKind::Unknown;',
+    to: '        //   裸标识符若不在助记符表里 ⇒ 诚实报 Unknown，让 A2 看见（审计 T4 的假绿口子）。\n        return LstKind::DataOrPseudo;  // 变异：裸标识符默认判数据',
+    guard: 'ctest:mnemonics',
+    ctest: 'mnemonics',
+    buildDir: 'apps/emulator-lift/out',
+    what: '裸标识符（如未映射的 cld）又默认判数据 ⇒ mnemonics 的 lst-classify 红（A2 的假绿口子回来了）',
+  },
+  {
+    file: 'apps/emulator-lift/tests/decode_crosscheck.cpp',
+    from: '            ++len_checked;\n            const std::uint32_t expect = e.next_ea - e.ea;',
+    to: '            const std::uint32_t expect = e.next_ea - e.ea;  // 变异：不统计真正比过长度的行',
+    guard: 'ctest:decode-crosscheck',
+    ctest: 'decode-crosscheck',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'A3 的 len_checked 不计数 ⇒ 断言 len_checked==checked 红（防止"只比助记符、不静默跳过长度"）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/x86.cpp',
+    from: '    noteGuestWrite(cache, a, m.size);',
+    to: '    (void)0;  // 变异：不通知块缓存（SMC 失效失效）',
+    guard: 'ctest:dispatch',
+    ctest: 'dispatch',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'guest 写代码页不失效块缓存 ⇒ dispatch 的 smc-invalidates-block 红（第二次调用读到旧 immediate）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/image.cpp',
+    from: '        if (copy && raw_end > img.bytes.size()) {',
+    to: '        if (false) {  // 变异：节 raw 越界静默跳过',
+    guard: 'ctest:pe-loader',
+    ctest: 'pe-loader',
+    buildDir: 'apps/emulator-lift/out',
+    what: '节 raw 范围越界又静默不拷贝 ⇒ pe-loader 的 section-raw-out-of-range 红（半载入仍返回 true）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/exec.cpp',
+    from: '    return ((0x6996u >> v) & 1u) == 0;',
+    to: '    return ((0x6996u >> v) & 1u) != 0;  // 变异：PF 又反了',
+    guard: 'ctest:conformance',
+    ctest: 'conformance',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'PF 的偶校验查表又取反 ⇒ conformance 的 test-pf-even / or-pf-odd 红（PF 原先一条整数断言都没有）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/exec_string.cpp',
+    from: '        if (cpu.df()) {\n            reg -= step;',
+    to: '        if (false) {  // 变异：忽略 DF\n            reg -= step;',
+    guard: 'ctest:conformance',
+    ctest: 'conformance',
+    buildDir: 'apps/emulator-lift/out',
+    what: '串操作忽略 DF ⇒ conformance 的 rep-movsd-df 红（DF=1 分支以前从未执行过）',
+  },
 ];
 
 /**
  * 入口（派发器 `tools/cli.mjs` 与直接运行都走这里）。
- * @returns {number} 退出码：0 = 全部按预期变红；1 = 有守卫没抓住破坏；2 = 还原失败（已中止）；
- *   3 = 启动自愈拒绝运行（journal 非法 / 工作树内容与 journal 不符 ⇒ journal 保留）
+ * @returns {number} 退出码：0 = 全部按预期变红；1 = 有守卫没抓住破坏 / 清单过期；
+ *   2 = 还原失败（已中止）；3 = 启动自愈拒绝运行（journal 非法 / 工作树内容与 journal 不符）；
+ *   4 = **全部条目都无法判定**（本机没有可跑的守卫 ⇒ 不能算通过）
  */
 export function main(argv = process.argv.slice(2)) {
   // ★ `--match <子串>`：只跑匹配的变异（匹配 `file` / `what` / `guard`）。
@@ -4514,14 +4679,29 @@ export function main(argv = process.argv.slice(2)) {
   //     `pnpm tools mutate check --match shape` 原先**只是个不存在的 flag**（被静默忽略 ⇒ 跑全套）。
   const mi = argv.indexOf('--match');
   const match = mi >= 0 ? (argv[mi + 1] ?? null) : null;
-  const selected = match ? MUTATIONS.filter((m) => `${m.file} ${m.what} ${m.guard}`.includes(match)) : MUTATIONS;
+  // ★ `--tier <all|active|frozen|lift|js>`：全量 504 条里约一半是**冻结件**（`apps/emulator-new`
+  //   与已废弃的 `apps/emulator`），跑它们只证明"冻结件没被改"；日常用 active / lift / js 分档，
+  //   全量留给收口。缺省 all（不改变原有语义）。
+  const ti = argv.indexOf('--tier');
+  const tier = ti >= 0 ? (argv[ti + 1] ?? '') : 'all';
+  if (!['all', 'active', 'frozen', 'lift', 'js'].includes(tier)) {
+    console.error(`--tier 只认 all / active / frozen / lift / js（给的是 ${JSON.stringify(tier)}）`);
+    return 1;
+  }
+  const isFrozen = (m) => m.file.startsWith('apps/emulator-new/') || m.file.startsWith('apps/emulator/');
+  let selected = match ? MUTATIONS.filter((m) => `${m.file} ${m.what} ${m.guard}`.includes(match)) : MUTATIONS;
+  if (tier === 'active') selected = selected.filter((m) => !isFrozen(m));
+  else if (tier === 'frozen') selected = selected.filter(isFrozen);
+  else if (tier === 'lift') selected = selected.filter((m) => m.file.startsWith('apps/emulator-lift/'));
+  else if (tier === 'js') selected = selected.filter((m) => !m.guard.startsWith('ctest:'));
   // ★ `--help` 必须**只打用法就走**：它原先落到"跑全套变异"那条路（实测踩过一次）——
   //   而本工具**会临时改写工作树里的文件**，在有别的进程（人或 agent）正在编辑时跑，
   //   还原那一步可能把别人的改动一起写回去。
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(
-      '用法：node tools/mutate-check.mjs [--list] [--match <子串>]\n\n' +
+      '用法：node tools/mutate-check.mjs [--list] [--match <子串>] [--tier all|active|frozen|lift|js]\n\n' +
         '  不带参数 = 逐条施加变异 ⇒ 跑对应守卫 ⇒ 要求退出码非 0（最后逐条还原并比对全文）。\n' +
+        '  --tier active 跳过冻结件（emulator-new / 已废弃 emulator）；lift 只跑 emulator-lift；js 跳过 CTest。\n' +
         '  ⛔ **它会临时改写工作树里的文件** ⇒ 有别的进程正在编辑本仓时**不要**跑（还原会覆盖别人的改动）。\n' +
         '  --list 只列清单（不动任何变异文件；但每次启动都会先自愈上次中断留下的 journal）。\n' +
         '  --match <子串> 只跑 file / what / guard 里含该子串的变异（例：--match shape）。\n\n' +
@@ -4707,6 +4887,15 @@ export function main(argv = process.argv.slice(2)) {
     console.error('★ 这些守卫**没抓住**已知的破坏 ⇒ 它们不是"会红的守卫"（断言恒真？或压根没验那个常量）：');
     for (const f of failed) console.error(`  - ${f.what}（${f.guard}）`);
     return 1;
+  }
+  if (unver.length && unver.length === results.length) {
+    // ★ 全部条目都"无法判定"（构建目录不存在 / 资产缺失）≠ 通过：旧实现这里仍 exit 0，
+    //   在没建 out/ 的机器上 `pnpm test:mutation` 会被读成"全部红了"。
+    console.error(
+      '✗ 全部 %d 条变异都无法判定（本机没有可跑的守卫）⇒ 不能算通过；先构建对应域 / 备齐资产再跑。',
+      results.length,
+    );
+    return 4;
   }
   return stale.length ? 1 : 0;
 }

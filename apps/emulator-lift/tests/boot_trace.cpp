@@ -9,12 +9,16 @@
 // ★ 如果没到 L2，本测试**红**并打印卡在哪个 EA —— 那是诚实的结果，不是"跳过"。
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 #include "check.h"
 #include "corpus/lst_index.h"
 #include "runtime/machine.h"
 #include "runtime/sha256.h"
+#include "runtime/vfs.h"
 
 namespace {
 
@@ -38,7 +42,8 @@ std::uint64_t fnv(std::uint64_t h, const void* p, std::size_t n) {
     return h;
 }
 
-Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std::uint64_t max_insns) {
+Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std::uint64_t max_insns,
+                std::FILE* trace_out = nullptr) {
     Outcome out;
     lift::Machine m;
     std::string err;
@@ -49,6 +54,8 @@ Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std
     lift::RunOptions o;
     o.until_ea = target;
     o.max_insns = max_insns;
+    o.trace_shims = trace_out != nullptr;
+    o.trace_out = trace_out;
     const lift::RunResult r = m.run(o);
     out.reason = r.reason;
     out.ea = r.ea;
@@ -127,6 +134,45 @@ int main() {
     }
     LIFT_CHECK(a.reason == lift::StopReason::UntilEa);
     LIFT_CHECK_EQ_U32(a.ea, kWinMain);
+
+    // ③ A4 的**逐字节**判据：同一次初始化的 shim trace 写两份文件后逐字节比较。
+    //   旧实现只哈希寄存器 / FPU 元信息 / heap 计数 —— trace 本身一条都没比过（M1a 审计 T2）。
+    g_current_case = "trace-bytes-identical";
+    const std::filesystem::path ta = std::filesystem::temp_directory_path() / "lift-boot-trace-a.log";
+    const std::filesystem::path tb = std::filesystem::temp_directory_path() / "lift-boot-trace-b.log";
+    auto utf8 = [](const std::filesystem::path& p) {
+        const std::u8string s = p.u8string();
+        return std::string(reinterpret_cast<const char*>(s.data()), s.size());
+    };
+    std::FILE* fa = lift::openHostFileUtf8(utf8(ta), "wb");
+    std::FILE* fb = lift::openHostFileUtf8(utf8(tb), "wb");
+    LIFT_CHECK(fa != nullptr);
+    LIFT_CHECK(fb != nullptr);
+    Outcome t1;
+    Outcome t2;
+    if (fa && fb) {
+        t1 = runOnce(exe, lst_path, kWinMain, kMaxInsns, fa);
+        std::fclose(fa);
+        t2 = runOnce(exe, lst_path, kWinMain, kMaxInsns, fb);
+        std::fclose(fb);
+        LIFT_CHECK(t1.ok && t1.reason == lift::StopReason::UntilEa && t1.ea == kWinMain);
+        LIFT_CHECK(t2.ok && t2.reason == lift::StopReason::UntilEa && t2.ea == kWinMain);
+        std::ifstream in_a(ta, std::ios::binary);
+        std::ifstream in_b(tb, std::ios::binary);
+        const std::string sa((std::istreambuf_iterator<char>(in_a)), std::istreambuf_iterator<char>());
+        const std::string sb((std::istreambuf_iterator<char>(in_b)), std::istreambuf_iterator<char>());
+        std::printf("trace: run1=%zu bytes run2=%zu bytes\n", sa.size(), sb.size());
+        LIFT_CHECK(!sa.empty());  // 空 trace 不能因为"两边都空"而假绿
+        if (sa != sb) {
+            std::size_t i = 0;
+            while (i < sa.size() && i < sb.size() && sa[i] == sb[i]) ++i;
+            std::fprintf(stderr, "A4 红：trace 第 %zu 字节不同（a=%zu 字节，b=%zu 字节）\n", i, sa.size(),
+                         sb.size());
+        }
+        LIFT_CHECK(sa == sb);
+    }
+    std::remove(utf8(ta).c_str());
+    std::remove(utf8(tb).c_str());
 
     return finish("boot-trace");
 }

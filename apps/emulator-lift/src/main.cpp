@@ -19,11 +19,13 @@
 #include "corpus/lst_index.h"
 #include "runtime/machine.h"
 #include "runtime/sha256.h"
+#include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
 
 namespace {
 
 bool fileExists(const std::string& p) {
-    std::FILE* f = std::fopen(p.c_str(), "rb");
+    // ★ UTF-8 路径：Windows 上必须走宽字符版（窄 fopen 按 ANSI 代码页解释 ⇒ 日文目录打不开）。
+    std::FILE* f = lift::openHostFileUtf8(p, "rb");
     if (!f) return false;
     std::fclose(f);
     return true;

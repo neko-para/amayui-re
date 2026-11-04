@@ -73,6 +73,14 @@ int main() {
         // 既不是助记符、也不是标识符 / 数字 / 数据片段 ⇒ 必须报 Unknown（A2 的红点）
         LIFT_CHECK(lift::classifyLstLine("###", "") == lift::LstKind::Unknown);
         LIFT_CHECK(lift::classifyLstLine("%", "") == lift::LstKind::Unknown);
+        // ★ 审计 T4：**裸标识符**（不在助记符表里的 `cld`）必须报 Unknown，⛔ 不许默认判数据；
+        //   而"名字 + 类型 + 值"的数据项 / IDA 头部汇编器指令必须仍判数据。
+        LIFT_CHECK(lift::classifyLstLine("cld", "") == lift::LstKind::Unknown);
+        LIFT_CHECK(lift::classifyLstLine("xmmword_530230", "xmmword") == lift::LstKind::DataOrPseudo);
+        LIFT_CHECK(lift::classifyLstLine("ExceptionInfo", "_EXCEPTION_POINTERS") ==
+                   lift::LstKind::DataOrPseudo);
+        LIFT_CHECK(lift::classifyLstLine(".686p", "") == lift::LstKind::DataOrPseudo);
+        LIFT_CHECK(lift::classifyLstLine(".mmx", "") == lift::LstKind::DataOrPseudo);
     }
 
     // ⑤ 前缀识别（A3 组合助记符时用）

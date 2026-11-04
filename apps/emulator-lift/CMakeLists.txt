@@ -56,6 +56,7 @@ add_library(emulator-lift-runtime STATIC
     src/shims/kernel32_string.cpp
     src/shims/kernel32_agerc.cpp
     src/shims/kernel32_version.cpp
+    src/shims/user32_menu.cpp
     src/shims/kernel32_bootstrap.cpp)
 target_include_directories(emulator-lift-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(emulator-lift-runtime
@@ -84,6 +85,11 @@ add_executable(lift-conformance tests/conformance.cpp tests/conformance_cases.cp
 target_link_libraries(lift-conformance PRIVATE emulator-lift-runtime)
 add_test(NAME conformance COMMAND lift-conformance)
 
+# ---- pure：A1 的第二遍 —— 同一批语义夹具在 LIFT_SAFE_MEMORY=1（逐页提交检查）下重跑 ----
+# ★ 以前只有 README 里一句人工命令 ⇒ 这一档没有门禁（plan §5 A1 要求"复跑全绿"）。
+add_test(NAME conformance-safe COMMAND lift-conformance)
+set_tests_properties(conformance-safe PROPERTIES ENVIRONMENT "LIFT_SAFE_MEMORY=1")
+
 add_executable(lift-dispatch tests/dispatch.cpp)
 target_link_libraries(lift-dispatch PRIVATE emulator-lift-runtime)
 add_test(NAME dispatch COMMAND lift-dispatch)
@@ -92,6 +98,11 @@ add_test(NAME dispatch COMMAND lift-dispatch)
 add_executable(lift-memory-pages tests/memory_pages.cpp)
 target_link_libraries(lift-memory-pages PRIVATE emulator-lift-runtime)
 add_test(NAME memory-pages COMMAND lift-memory-pages)
+
+# ---- pure：PE 载入的坏输入（自造最小 PE；坏节 / 坏导入必须拒绝启动）----
+add_executable(lift-pe-loader tests/pe_loader.cpp)
+target_link_libraries(lift-pe-loader PRIVATE emulator-lift-runtime)
+add_test(NAME pe-loader COMMAND lift-pe-loader)
 
 # ---- pure：fault 归因（宿主 AV 不许被报成"上一次 guest 访存"）----
 # ★ 集成用例用 fork + 管道（POSIX）；Windows 只跑纯函数并 LIFT_SKIP ⇒ 77。
@@ -139,6 +150,13 @@ add_test(NAME process-ext COMMAND lift-process-ext)
 add_executable(lift-timer-ext tests/timer_ext.cpp)
 target_link_libraries(lift-timer-ext PRIVATE emulator-lift-runtime)
 add_test(NAME timer-ext COMMAND lift-timer-ext)
+
+# ---- pure：S6 前三族的**核心行为**（内存 / 错误码·TLS / 同步）----
+# ★ 补的是"最常走的那条路"没有可再校验观察的缺口（审计单 REQ-01M6JFZ73GTZE9F6967RRSH6CE）；
+#   判据见 tests/shims_core.cpp 的文件头（每条至少两个断言，含宿主可见状态）。
+add_executable(lift-shims-core tests/shims_core.cpp)
+target_link_libraries(lift-shims-core PRIVATE emulator-lift-runtime)
+add_test(NAME shims-core COMMAND lift-shims-core)
 
 # ---- pure：吞吐基准（S8；只测解释器分发，不设性能门槛 ⇒ 数字进 tools/lift.mjs report）----
 add_executable(lift-bench tests/bench.cpp)

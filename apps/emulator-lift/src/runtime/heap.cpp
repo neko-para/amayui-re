@@ -21,8 +21,9 @@ bool GuestHeap::init(GuestMemory* mem, std::uint32_t begin, std::uint32_t size) 
 }
 
 bool GuestHeap::init(GuestMemory* mem, std::uint32_t begin, std::uint32_t size, const Options& opt) {
-    if (!mem || size < 0x10000u) {
-        std::snprintf(last_error_, sizeof(last_error_), "堆初始化参数不合法（size=%u）", size);
+    if (!mem || size < 0x10000u || begin > 0xFFFFFFFFu - size) {
+        std::snprintf(last_error_, sizeof(last_error_), "堆初始化参数不合法（begin=%u size=%u）", begin,
+                      size);
         return false;
     }
     mem_ = mem;
@@ -63,7 +64,19 @@ std::uint32_t GuestHeap::alloc(std::uint32_t bytes, bool zero) {
         std::snprintf(last_error_, sizeof(last_error_), "堆未初始化");
         return 0;
     }
-    const std::uint32_t need = alignUp(bytes + opt_.header, opt_.align);
+    // ★ `bytes + header` 必须用 64 位算：32 位回绕时（例如 0xFFFFFFF8 + 8）`need` 会变成 0，
+    //   切出一个 size=0 的块并**返回非空指针**；带 ZERO_MEMORY 时 `b.size - header` 还会回绕成
+    //   0xFFFFFFF8 ⇒ 4 GiB memset（先踩到 PROT_NONE 就是一次假 guest fault）。
+    const std::uint64_t need64 = static_cast<std::uint64_t>(bytes) + opt_.header;
+    if (need64 > 0xFFFFFFFFull) {
+        std::snprintf(last_error_, sizeof(last_error_), "guest 堆请求过大（%u 字节 + 块头）", bytes);
+        return 0;
+    }
+    const std::uint32_t need = alignUp(static_cast<std::uint32_t>(need64), opt_.align);
+    if (static_cast<std::uint64_t>(need) < need64) {  // alignUp 自己回绕（对齐 > 1 时）
+        std::snprintf(last_error_, sizeof(last_error_), "guest 堆请求对齐后溢出（%u 字节）", bytes);
+        return 0;
+    }
     for (auto it = blocks_.begin(); it != blocks_.end(); ++it) {
         Block& b = it->second;
         if (b.used || b.size < need) continue;
@@ -118,7 +131,18 @@ std::uint32_t GuestHeap::realloc(std::uint32_t ptr, std::uint32_t bytes, bool ze
         std::abort();
     }
     Block& b = blocks_[off];
-    const std::uint32_t need = alignUp(bytes + opt_.header, opt_.align);
+    // 与 alloc 同一条溢出检查：`bytes + header` 回绕会算出 need=0 ⇒ 误判"现有块够大"，
+    // 随后的 ZERO_MEMORY 清零按 `bytes - old_req` 一路写成 4 GiB。
+    const std::uint64_t need64 = static_cast<std::uint64_t>(bytes) + opt_.header;
+    if (need64 > 0xFFFFFFFFull) {
+        std::snprintf(last_error_, sizeof(last_error_), "guest 堆 realloc 请求过大（%u 字节）", bytes);
+        return 0;
+    }
+    const std::uint32_t need = alignUp(static_cast<std::uint32_t>(need64), opt_.align);
+    if (static_cast<std::uint64_t>(need) < need64) {
+        std::snprintf(last_error_, sizeof(last_error_), "guest 堆 realloc 对齐后溢出（%u 字节）", bytes);
+        return 0;
+    }
     if (need <= b.size) {
         const std::uint32_t old_req = b.req;
         if (zero && bytes > old_req) std::memset(mem_->host(begin_ + off + opt_.header + old_req), 0, bytes - old_req);

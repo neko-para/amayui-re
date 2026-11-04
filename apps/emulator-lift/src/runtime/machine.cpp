@@ -184,7 +184,7 @@ bool Machine::prepareStack(std::string* err) {
 
 RunResult Machine::run(const RunOptions& opts) {
     RunResult r;
-    shims_.setTrace(opts.trace_shims, stdout);
+    shims_.setTrace(opts.trace_shims, opts.trace_out ? opts.trace_out : stdout);
     if (opts.real_time) clock_.setRealTime(true);
     if (opts.trace_inputs) dumpTraceInputs(stdout);
     // 诊断开关：LIFT_TRACE_FULL=1 ⇒ `--trace-blocks` 每条带操作数文本 + 寄存器快照（缺省关）
@@ -378,6 +378,7 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
     t.exe_path = setup_.exe_path.empty() ? exe_path_ : setup_.exe_path;
     t.guest_cmdline = setup_.cmdline;
     t.environment = setup_.environment_ansi;
+    t.game_dir = vfs_.gameDir();
     t.clock_start_100ns = clock_.epoch100ns();
     t.real_time = clock_.realTime();
     return t;
@@ -388,6 +389,7 @@ void Machine::dumpTraceInputs(std::FILE* out) const {
     std::fprintf(out, "trace-input exe      = %s\n", t.exe_path.c_str());
     std::fprintf(out, "trace-input cmdline  = %s\n", t.guest_cmdline.c_str());
     std::fprintf(out, "trace-input env      = %s\n", t.environment.c_str());
+    std::fprintf(out, "trace-input game-dir = %s\n", t.game_dir.c_str());
     std::fprintf(out, "trace-input clock    = %s (start=%llu x100ns)\n",
                  t.real_time ? "REAL-TIME（⚠ 逐字节断言必须跳过）" : "virtual",
                  (unsigned long long)t.clock_start_100ns);
@@ -407,6 +409,7 @@ std::uint64_t Machine::traceInputsHash() const {
     mix(t.exe_path.data(), t.exe_path.size());
     mix(t.guest_cmdline.data(), t.guest_cmdline.size());
     mix(t.environment.data(), t.environment.size());
+    mix(t.game_dir.data(), t.game_dir.size());
     mix(&t.clock_start_100ns, sizeof(t.clock_start_100ns));
     const std::uint8_t real = t.real_time ? 1 : 0;
     mix(&real, 1);

@@ -86,6 +86,9 @@ std::uint32_t X86::readMem(const MemOperand& m) const {
 
 void X86::writeMem(const MemOperand& m, std::uint32_t value) {
     const std::uint32_t a = eaOf(m);
+    // ★ SMC：写之前先问块缓存"这一页有没有已解码的块"（定义在 BlockCache 之后，
+    //   这里用自由函数避免在类定义之前调用不完整类型的方法）。
+    noteGuestWrite(cache, a, m.size);
     switch (m.size) {
         case 1: mem->wr8(a, static_cast<std::uint8_t>(value & 0xFFu)); break;
         case 2: mem->wr16(a, static_cast<std::uint16_t>(value & 0xFFFFu)); break;
@@ -151,6 +154,9 @@ void X86::popFlags() { eflags = pop32() | FLAG_IF; }
 // BlockCache
 // ---------------------------------------------------------------------------------------
 Block* BlockCache::get(std::uint32_t ea) {
+    // ★ 上次执行期间 guest 写过已解码的代码页：在这里（当前块已经执行完、回到 dispatcher）
+    //   才真正丢块，避免执行循环拿着被 free 的 `Block*`。
+    if (stale_) dropBlocks();
     const auto it = blocks_.find(ea);
     if (it != blocks_.end()) {
         ++hits_;
@@ -165,6 +171,11 @@ Block* BlockCache::get(std::uint32_t ea) {
         return nullptr;
     }
     insn_count_ += block->insns.size();
+    // ★ 记下这个块覆盖的 guest 页（SMC 失效用；跨页指令两端都记）
+    for (const Insn& in : block->insns) {
+        markCodePage(in.ea / GuestMemory::kPage);
+        markCodePage((in.ea + static_cast<std::uint32_t>(in.length) - 1u) / GuestMemory::kPage);
+    }
     Block* raw = block.get();
     blocks_.emplace(ea, std::move(block));
     return raw;
@@ -188,10 +199,52 @@ Block* BlockCache::peek(std::uint32_t ea) const {
 }
 
 void BlockCache::clear() {
-    blocks_.clear();
+    dropBlocks();
     insn_count_ = 0;
     hits_ = 0;
     misses_ = 0;
+}
+
+void BlockCache::dropBlocks() {
+    blocks_.clear();
+    // 位图保留分配（避免每次 clear 重新分配 128 KiB）；内容清零即可
+    if (!code_page_bits_.empty()) code_page_bits_.assign(code_page_bits_.size(), 0);
+    stale_ = false;
+}
+
+void BlockCache::markCodePage(std::uint32_t page) {
+    if (code_page_bits_.empty()) {
+        constexpr std::uint64_t kPages = GuestMemory::kSpace / GuestMemory::kPage;
+        code_page_bits_.assign(static_cast<std::size_t>((kPages + 63u) / 64u), 0);
+    }
+    const std::size_t word = page / 64u;
+    if (word < code_page_bits_.size()) code_page_bits_[word] |= (1ull << (page % 64u));
+}
+
+bool BlockCache::codePageMarked(std::uint32_t page) const {
+    const std::size_t word = page / 64u;
+    if (word >= code_page_bits_.size()) return false;
+    return ((code_page_bits_[word] >> (page % 64u)) & 1u) != 0;
+}
+
+void BlockCache::noteWrite(std::uint32_t ea, std::size_t n) {
+    if (n == 0 || code_page_bits_.empty()) return;
+    const std::uint64_t first = static_cast<std::uint64_t>(ea) + n - 1u;
+    if (first >= GuestMemory::kSpace) return;  // 越界写由内存层 fault，这里不处理
+    const std::uint32_t p0 = ea / GuestMemory::kPage;
+    const std::uint32_t p1 = static_cast<std::uint32_t>(first / GuestMemory::kPage);
+    for (std::uint32_t p = p0; p <= p1; ++p) {
+        if (codePageMarked(p)) {
+            // ⛔ 不能当场 dropBlocks：当前块还在 `machine.cpp` 的 for 里执行（会拿到悬垂指针）。
+            //   置脏，由下一次 `get()` 在 dispatcher 边界清。
+            stale_ = true;
+            return;
+        }
+    }
+}
+
+void noteGuestWrite(BlockCache* cache, std::uint32_t ea, std::size_t n) {
+    if (cache) cache->noteWrite(ea, n);
 }
 
 }  // namespace lift

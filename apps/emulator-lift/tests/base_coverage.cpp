@@ -34,6 +34,13 @@ int main() {
     const lift::RunResult r = m.run(o);
     m.dumpRunSummary(r, stdout);
 
+    // ★ 先钉"真的跑到了 L2"：只判"动态缺口为空"在**一条导入都没执行**时恒真
+    //   （跑空 ⇒ called.empty() ⇒ 假绿）。同 corpus-mnemonics / decode-crosscheck 的量级哨兵。
+    //   指令数依赖 `--exe` 的路径写法（38,456 / 44,184 / 53,134 / 60,652），这里只取最保守的量级下界。
+    LIFT_CHECK(r.reason == lift::StopReason::UntilEa);
+    LIFT_CHECK_EQ_U32(r.ea, 0x004BA890u);
+    LIFT_CHECK(r.insns >= 30000ull);
+
     // 静态缺口（导入表里有、但没实现）
     const std::vector<const lift::ShimDef*> gaps = m.shims().importedButUnimplemented();
     std::printf("静态缺口（导入表里有但未实现）= %zu / 导入 %zu\n", gaps.size(), m.shims().importedCount());

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,11 @@ struct HostFileTimes {
 // 含创建时间与访问时间；`std::filesystem` 只有 mtime），实现里**不写 `#ifdef` 平台分支**。
 // 失败（路径不存在 / SDL 不可用）⇒ false，调用方回退到 `std::filesystem::last_write_time`。
 bool hostFileTimes(const std::string& host_path, HostFileTimes* out);
+
+// 按 **UTF-8 宿主路径**打开文件（Windows 上走 `_wfopen_s`）。
+// ★ 为什么不能直接用 `std::fopen`：MSVC 的窄 `fopen` 按 **ANSI 代码页**解释路径，而本仓路径一律
+//   UTF-8（游戏目录本身是日文名）⇒ Windows 上非 ASCII 的 `--exe` / `--lst` / `--game-dir` 会打不开。
+std::FILE* openHostFileUtf8(const std::string& host_path, const char* mode);
 
 class Vfs {
 public:
