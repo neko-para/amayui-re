@@ -39,6 +39,6 @@ set_target_properties(berkeley-softfloat PROPERTIES
     C_STANDARD_REQUIRED ON)
 
 # 第三方代码不接管本仓的警告口径（不改它一行，也不为它压警告改源码）
-if(MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if (WIN32)
     target_compile_options(berkeley-softfloat PRIVATE /w)
 endif()

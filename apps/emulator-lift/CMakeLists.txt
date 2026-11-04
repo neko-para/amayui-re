@@ -62,6 +62,7 @@ target_link_libraries(emulator-lift-runtime
     PUBLIC SDL3::SDL3
     PRIVATE Zydis::Zydis berkeley-softfloat)
 target_compile_features(emulator-lift-runtime PUBLIC cxx_std_20)
+target_compile_options(emulator-lift-runtime PRIVATE -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-const-variable)
 
 add_executable(emulator-lift src/main.cpp)
 target_link_libraries(emulator-lift PRIVATE emulator-lift-runtime)

@@ -242,7 +242,7 @@ std::uint64_t GuestMemory::committedBytes() const {
 
 bool GuestMemory::commitPages(std::uint32_t begin, std::uint32_t end) {
     if (begin >= end) return true;
-    if (end > kSpace) return false;
+    // if (end > kSpace) return false;
     // 找连续未提交的段，一次系统调用提交一段
     std::uint32_t p = begin / kPage;
     const std::uint32_t last = (end + kPage - 1) / kPage;
