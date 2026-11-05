@@ -658,16 +658,19 @@ void caseTextureDraw() {
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 30, 30), 0x00804020u);
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 31, 30), 0x00FF0000u);
 
-    // ---- 未实现的槽（+0x48 GetSurfaceLevel）⇒ loud trap ----
-    const std::uint32_t vtbl = r.f.m.mem().rd32(tex);
-    const std::uint32_t stub = r.f.m.mem().rd32(vtbl + 0x48u);
-    const lift::ShimDef* def = r.f.m.shims().byStubEa(stub);
-    LIFT_CHECK(def != nullptr);
-    if (def) {
-        LIFT_CHECK(def->name.find("IDirect3DTexture9") != std::string::npos);
-        LIFT_CHECK(def->name.find("+0x48") != std::string::npos);
-        LIFT_CHECK(def->fn == &lift::comUnsupported);
-    }
+    // ---- +0x48 GetSurfaceLevel：返回 IDirect3DSurface9；GetDesc 复用纹理的 level 0 描述 ----
+    const std::uint32_t surf_out = r.f.placeU32(0xDEADBEEFu);
+    const std::uint32_t surf_desc = r.f.placeData(std::vector<std::uint8_t>(32u, 0).data(), 32u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x48u, {0u, surf_out}), lift::d3d9::kOk);
+    const std::uint32_t surf = r.f.m.mem().rd32(surf_out);
+    LIFT_CHECK_NE_U32(surf, 0u);
+    LIFT_CHECK_NE_U32(surf, 0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x30u, {surf_desc}), lift::d3d9::kOk);
+    LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(surf_desc + 0u), 21u);  // Format = D3DFMT_A8R8G8B8
+    LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(surf_desc + 0x18u), 4u);  // Width
+    LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(surf_desc + 0x1Cu), 4u);  // Height
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x08u, {}), 0u);         // Release ⇒ 0
+    LIFT_CHECK(!r.f.m.cpu().com->find(surf));
 
     // Release 到 0（refcount 2 ⇒ 两次）⇒ 像素块一起回收
     LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 1u);

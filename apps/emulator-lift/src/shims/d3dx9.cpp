@@ -32,6 +32,7 @@
 #include "runtime/math.h"
 #include "runtime/memory.h"
 #include "runtime/x86.h"
+#include "shims/d3dx9_surface.h"
 #include "shims/register.h"
 
 namespace lift {
@@ -321,12 +322,17 @@ void shimSpriteOnResetDevice(X86& cpu, ShimCall& call) {
 // ★ 取证：`.lst` 0x48AD18 `mov edx,[eax+44h]` → 0x48AD22 call（this, Level=0, pDesc），
 //   desc+0x18/+0x1C 被当宽/高读（0x48AD2A / 0x48AD2D）⇒ +0x44 = GetLevelDesc，与 SDK 逐槽一致。
 // ★ 本线只实现**引擎会走到的**几个槽；其余（SetPrivateData / SetLOD / SetAutoGenFilterType /
-//   GenerateMipSubLevels / GetSurfaceLevel / AddDirtyRect …）= comUnsupported 的 loud trap。
+//   GenerateMipSubLevels / AddDirtyRect …）= comUnsupported 的 loud trap。
+// ★ GetSurfaceLevel(+0x48) 是 2026-11-05 boot 的新卡点（0x004A7755，ReadFrameTex 取渲染目标）。
+//   surface 的状态直接复用纹理状态块（本线只有 level 0）⇒ 不另建一块 guest 状态。
 // ---------------------------------------------------------------------------------------
 constexpr std::uint8_t kIidDirect3DTexture9[16] = {0x27, 0x12, 0xC3, 0x85, 0xE5, 0x3D, 0x00, 0x4F,
                                                    0x9B, 0x3A, 0xF1, 0x1A, 0xC3, 0x8C, 0x18, 0xB5};
+constexpr std::uint8_t kIidDirect3DSurface9[16] = {0x3A, 0xAF, 0xFB, 0x0C, 0xF6, 0x9F, 0x99, 0x42,
+                                                   0x96, 0x74, 0x1D, 0x1A, 0x4A, 0x8F, 0x0F, 0xDD};
 
 const std::vector<ComMethod>& textureMethods();
+const std::vector<ComMethod>& surfaceMethods();
 
 std::uint32_t requireTexture(X86& cpu, ShimCall& call, const char* method) {
     const std::uint32_t self = call.u32(0);
@@ -512,6 +518,238 @@ void shimTextureUnlockRect(X86& cpu, ShimCall& call) {
     call.result = d3d9::kOk;
 }
 
+void shimTextureGetSurfaceLevel(X86& cpu, ShimCall& call) {
+    const std::uint32_t state =
+        requireTexture(cpu, call, "IDirect3DTexture9::GetSurfaceLevel(+0x48)");
+    if (state == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t level = call.u32(1);
+    const std::uint32_t out_ea = call.u32(2);
+    if (level != 0) {
+        d3dxTrap(cpu, "IDirect3DTexture9::GetSurfaceLevel(+0x48)",
+                 "Level=%u（本线只有 level 0）⇒ D3DERR_INVALIDCALL", level);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        d3dxTrap(cpu, "IDirect3DTexture9::GetSurfaceLevel(+0x48)",
+                 "ppSurfaceLevel=0x%08X 为 NULL / 未提交", out_ea);
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    cpu.mem->wr32(out_ea, 0);
+    if (!cpu.com) {
+        d3dxTrap(cpu, "IDirect3DTexture9::GetSurfaceLevel(+0x48)", "cpu.com 为空（装配问题）");
+        call.result = d3d9::kFail;
+        return;
+    }
+    const std::uint32_t surface = createD3dxSurfaceObject(cpu, state);
+    if (surface == 0) {
+        d3dxTrap(cpu, "IDirect3DTexture9::GetSurfaceLevel(+0x48)", "在 guest 内存里建 surface 对象失败");
+        call.result = d3d9::kFail;
+        return;
+    }
+    cpu.mem->wr32(out_ea, surface);
+    d3dxLog("IDirect3DTexture9::GetSurfaceLevel", "Level=0 ⇒ IDirect3DSurface9 对象 0x%08X（复用纹理状态块 0x%08X）",
+            surface, state);
+    call.result = d3d9::kOk;
+}
+
+// ---------------------------------------------------------------------------------------
+// IDirect3DSurface9（纹理表面；状态 = 纹理状态块，level 恒 0）
+// ---------------------------------------------------------------------------------------
+std::uint32_t requireSurfaceState(X86& cpu, ShimCall& call, const char* method) {
+    const std::uint32_t self = call.u32(0);
+    const char* iface = cpu.com ? cpu.com->ifaceOf(self) : nullptr;
+    if (iface == nullptr || std::strcmp(iface, "IDirect3DSurface9") != 0) {
+        d3dxTrap(cpu, method, "this=0x%08X 不是本模块建的 IDirect3DSurface9 对象", self);
+        return 0;
+    }
+    const std::uint32_t state = cpu.com->userOf(self);
+    if (state == 0) {
+        d3dxTrap(cpu, method, "surface 对象 0x%08X 的 obj+8 没有纹理状态块", self);
+        return 0;
+    }
+    return state;
+}
+
+void shimSurfaceQueryInterface(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    const std::uint32_t riid = call.u32(1);
+    const std::uint32_t ppv = call.u32(2);
+    if (ppv == 0 || !cpu.mem->committed(ppv, 4)) {
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    cpu.mem->wr32(ppv, 0);
+    if (riid == 0 || !cpu.mem->committed(riid, 16)) {
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    if (!sameGuid(cpu, riid, kIidDirect3DSurface9) && !sameGuid(cpu, riid, kIidUnknown)) {
+        call.result = d3d9::kNoInterface;
+        return;
+    }
+    if (!cpu.com || !cpu.com->addRef(cpu, self)) {
+        call.result = d3d9::kNoInterface;
+        return;
+    }
+    cpu.mem->wr32(ppv, self);
+    call.result = d3d9::kOk;
+}
+
+void shimSurfaceAddRef(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->addRef(cpu, self)) {
+        call.result = 0;
+        return;
+    }
+    call.result = cpu.com->refCount(self);
+}
+
+void shimSurfaceRelease(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->find(self)) {
+        d3dxLog("IDirect3DSurface9::Release", "this=0x%08X 不是本模块的 COM 对象（重复 Release / 野指针）⇒ 0",
+                self);
+        call.result = 0;
+        return;
+    }
+    const bool last = cpu.com->refCount(self) == 1u;
+    if (!cpu.com->release(cpu, self)) {
+        call.result = 0;
+        return;
+    }
+    call.result = last ? 0u : cpu.com->refCount(self);
+}
+
+void shimSurfaceGetDevice(X86& cpu, ShimCall& call) {
+    const std::uint32_t state = requireSurfaceState(cpu, call, "IDirect3DSurface9::GetDevice(+0x0C)");
+    if (state == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    d3d9::TextureInfo ti;
+    std::string why;
+    if (!d3d9::surfaceInfoOfState(cpu, state, &ti, &why)) {
+        d3dxTrap(cpu, "IDirect3DSurface9::GetDevice(+0x0C)", "%s", why.c_str());
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t out_ea = call.u32(1);
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    cpu.mem->wr32(out_ea, ti.device);
+    call.result = d3d9::kOk;
+}
+
+void shimSurfaceGetType(X86& cpu, ShimCall& call) {
+    const std::uint32_t state = requireSurfaceState(cpu, call, "IDirect3DSurface9::GetType(+0x28)");
+    if (state == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    call.result = d3d9::kRTypeSurface;
+}
+
+void shimSurfaceGetDesc(X86& cpu, ShimCall& call) {
+    const std::uint32_t state = requireSurfaceState(cpu, call, "IDirect3DSurface9::GetDesc(+0x30)");
+    if (state == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    d3d9::TextureInfo ti;
+    std::string why;
+    if (!d3d9::surfaceInfoOfState(cpu, state, &ti, &why)) {
+        d3dxTrap(cpu, "IDirect3DSurface9::GetDesc(+0x30)", "%s", why.c_str());
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (!d3d9::writeTextureDesc(cpu, ti, 0, call.u32(1), &why)) {
+        d3dxTrap(cpu, "IDirect3DSurface9::GetDesc(+0x30)", "%s", why.c_str());
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    call.result = d3d9::kOk;
+}
+
+void shimSurfaceLockRect(X86& cpu, ShimCall& call) {
+    const std::uint32_t state = requireSurfaceState(cpu, call, "IDirect3DSurface9::LockRect(+0x34)");
+    if (state == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    d3d9::DeviceInfo dev;
+    if (d3d9::deviceInfoOfState(cpu, state, &dev, nullptr)) {
+        // 后缓冲 surface 的 state 就是设备状态块；⛔ 不能按纹理锁字段去写（会改坏设备状态）。
+        d3dxTrap(cpu, "IDirect3DSurface9::LockRect(+0x34)",
+                 "后缓冲 surface 的 LockRect 尚未实现（⛔ 不把锁字段写进设备状态块）");
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    d3d9::TextureInfo ti;
+    std::string why;
+    if (!d3d9::surfaceInfoOfState(cpu, state, &ti, &why)) {
+        d3dxTrap(cpu, "IDirect3DSurface9::LockRect(+0x34)", "%s", why.c_str());
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (!d3d9::lockRect(cpu, ti, 0, call.u32(1), call.u32(2), call.u32(3), &why)) {
+        d3dxTrap(cpu, "IDirect3DSurface9::LockRect(+0x34)", "%s", why.c_str());
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    call.result = d3d9::kOk;
+}
+
+void shimSurfaceUnlockRect(X86& cpu, ShimCall& call) {
+    const std::uint32_t state = requireSurfaceState(cpu, call, "IDirect3DSurface9::UnlockRect(+0x38)");
+    if (state == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    d3d9::DeviceInfo dev;
+    if (d3d9::deviceInfoOfState(cpu, state, &dev, nullptr)) {
+        d3dxTrap(cpu, "IDirect3DSurface9::UnlockRect(+0x38)",
+                 "后缓冲 surface 的 UnlockRect 尚未实现（⛔ 不把锁字段写进设备状态块）");
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    d3d9::TextureInfo ti;
+    std::string why;
+    if (!d3d9::surfaceInfoOfState(cpu, state, &ti, &why)) {
+        d3dxTrap(cpu, "IDirect3DSurface9::UnlockRect(+0x38)", "%s", why.c_str());
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (!d3d9::unlockRect(cpu, ti, 0, &why)) {
+        d3dxTrap(cpu, "IDirect3DSurface9::UnlockRect(+0x38)", "%s", why.c_str());
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    call.result = d3d9::kOk;
+}
+
+const std::vector<ComMethod>& surfaceMethods() {
+    static const std::vector<ComMethod> methods = {
+        {0x00u, "QueryInterface", Conv::Stdcall, 2, &shimSurfaceQueryInterface},
+        {0x04u, "AddRef", Conv::Stdcall, 0, &shimSurfaceAddRef},
+        {0x08u, "Release", Conv::Stdcall, 0, &shimSurfaceRelease},
+        {0x0Cu, "GetDevice", Conv::Stdcall, 1, &shimSurfaceGetDevice},
+        {0x28u, "GetType", Conv::Stdcall, 0, &shimSurfaceGetType},
+        {0x30u, "GetDesc", Conv::Stdcall, 1, &shimSurfaceGetDesc},
+        {0x34u, "LockRect", Conv::Stdcall, 3, &shimSurfaceLockRect},
+        {0x38u, "UnlockRect", Conv::Stdcall, 0, &shimSurfaceUnlockRect},
+        // 哨兵：IDirect3DSurface9 最后一个方法 ReleaseDC 在 +0x40（17 槽）
+        {0x40u, "ReleaseDC", Conv::Stdcall, 1, nullptr},
+    };
+    return methods;
+}
+
 const std::vector<ComMethod>& textureMethods() {
     static const std::vector<ComMethod> methods = {
         {0x00u, "QueryInterface", Conv::Stdcall, 2, &shimTextureQueryInterface},
@@ -521,7 +759,8 @@ const std::vector<ComMethod>& textureMethods() {
         {0x28u, "GetType", Conv::Stdcall, 0, &shimTextureGetType},            // #10
         {0x34u, "GetLevelCount", Conv::Stdcall, 0, &shimTextureGetLevelCount},  // #13
         {0x44u, "GetLevelDesc", Conv::Stdcall, 2, &shimTextureGetLevelDesc},  // #18 ★ 0x48AD18
-        {0x4Cu, "LockRect", Conv::Stdcall, 4, &shimTextureLockRect},          // #19
+        {0x48u, "GetSurfaceLevel", Conv::Stdcall, 2, &shimTextureGetSurfaceLevel},  // #19 ★ 0x4A7755
+        {0x4Cu, "LockRect", Conv::Stdcall, 4, &shimTextureLockRect},          // #20
         {0x50u, "UnlockRect", Conv::Stdcall, 1, &shimTextureUnlockRect},      // #20
         // ★ 哨兵：把 vtable 撑到 22 槽（最后一个 AddDirtyRect 在 +0x54）
         {0x54u, "AddDirtyRect", Conv::Stdcall, 1, nullptr},                   // #21 未取证 ⇒ loud trap
@@ -850,6 +1089,11 @@ const std::vector<ComMethod>& spriteMethods() {
 }
 
 }  // namespace
+
+std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user) {
+    if (!cpu.com) return 0;
+    return cpu.com->createObject(cpu, "IDirect3DSurface9", surfaceMethods(), user);
+}
 
 void registerD3DX9Shims(ShimRegistry& shims) {
     // 本安装的 d3dx9 导入表（`.data` 0x51D498 起 19 条）：本簇实现下面这些。

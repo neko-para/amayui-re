@@ -189,12 +189,9 @@ export const EXTRA_FAMILIES = [
  *   （否则下面"白名单漂了"那条判定会红）。
  */
 export const FAMILY_STUB_APPROVED = [
-  'kernel32!CreateThread',
+  // ★ 2026-11-05：CreateThread / ResumeThread / SetThreadPriority / SetThreadAffinityMask /
+  //   GetProcessAffinityMask 已改成**伪线程实现**（SCOPE §1），不再属于"允许继续是 stub"。
   'kernel32!ExitThread',
-  'kernel32!ResumeThread',
-  'kernel32!SetThreadPriority',
-  'kernel32!SetThreadAffinityMask',
-  'kernel32!GetProcessAffinityMask',
   'kernel32!FreeLibraryAndExitThread',
   'kernel32!CreateTimerQueue',
   'kernel32!CreateTimerQueueTimer',

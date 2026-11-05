@@ -53,13 +53,16 @@
 //      访问位 `DUPLICATE_SAME_ACCESS ⇒ THREAD_ALL_ACCESS / PROCESS_ALL_ACCESS`，否则取
 //      `dwDesiredAccess`）。⛔ 仍不做"新句柄权限不得超过源句柄"的校验（没有安全描述符）：
 //      `dwDesiredAccess` 只被记录，不与源句柄比较。
-//   10. **`GetThreadPriority`**：本模拟器只有一个线程（`GetCurrentThread()` 的伪句柄
-//      `0xFFFFFFFE`），恒返回 `THREAD_PRIORITY_NORMAL(0)`；其它句柄 ⇒ `THREAD_PRIORITY_ERROR_RETURN`
-//      (0x7FFFFFFF) + `ERROR_INVALID_HANDLE`。写入侧（`SetThreadPriority`）仍按 D5 留 stub。
-//   11. **线程 / 定时器队列整族不做**：`CreateThread` / `CreateRemoteThread` / `_beginthreadex` /
-//      `CreateTimerQueue*` / `DeleteTimerQueueTimer` / `ExitThread` / `FreeLibraryAndExitThread` /
-//      `ResumeThread` / `SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask`
-//      用 `addUnimplemented` 登记（README §2.5 / D5），执行到就响亮失败。
+//   10. **伪线程**（用户 2026-11-05 裁决）：`CreateThread` **只发一个线程句柄**，
+//      **不执行 `lpStartAddress`**。`ResumeThread` 递减挂起计数并返回旧值；
+//      `SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask` 按单核单线程
+//      返回成功值；`GetThreadPriority` 对当前线程与伪线程都返回 `THREAD_PRIORITY_NORMAL(0)`。
+//      ⇒ boot 路径上的声音线程 / 服务线程被"空转"掉，但它们的 start routine 一次都不会跑
+//      （音频 silent / 视频 skip 已由 SCOPE 判掉）。⛔ 这不是真线程：不要用它承载必须执行的 guest 代码。
+//   11. **仍未做的线程边角**：`CreateRemoteThread` / `_beginthreadex` / `ExitThread` /
+//      `FreeLibraryAndExitThread` / `CreateTimerQueue*` / `DeleteTimerQueueTimer` 保持
+//      `addUnimplemented`（执行到就响亮失败）。伪线程不执行 start routine ⇒ 这些通常不会被触发；
+//      真触发 = 有 guest 代码依赖线程体，需人工检查后再补。
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -107,6 +110,10 @@ constexpr std::uint32_t kProcessAllAccess = 0x001F0FFFu;  // PROCESS_ALL_ACCESS
 constexpr std::uint32_t kThreadPriorityNormal = 0u;
 constexpr std::uint32_t kThreadPriorityErrorReturn = 0x7FFFFFFFu;
 
+// CreateThread 的 dwCreationFlags：只有这一位对伪线程有意义（初始挂起计数）
+constexpr std::uint32_t kCreateSuspended = 0x00000004u;
+constexpr std::uint32_t kThreadAffinityMask = 0x00000001u;  // 单核：只有 0 号 CPU
+
 // CRITICAL_SECTION（x86，0x18 字节；见文件头偏差 1）
 constexpr std::uint32_t kCsSize = 0x18u;
 constexpr std::uint32_t kCsRecursionCount = 0x08u;
@@ -133,6 +140,17 @@ struct SyncObj {
 };
 
 void destroySyncObj(void* p) { delete static_cast<SyncObj*>(p); }
+
+// 伪线程的宿主侧记录（payload 挂在 `HandleKind::Thread` 的句柄上）。
+// ★ 不保存 guest 栈 / 上下文：start routine 不会被调用，这里只记录可诊断的身份与挂起计数。
+struct PseudoThread {
+    std::uint32_t id = 0;
+    std::uint32_t start = 0;
+    std::uint32_t param = 0;
+    std::uint32_t suspend_count = 0;
+};
+
+void destroyPseudoThread(void* p) { delete static_cast<PseudoThread*>(p); }
 
 std::string narrowAscii(const std::u16string& w) {
     std::string s;
@@ -165,6 +183,17 @@ HandleEntry* entryOf(X86& cpu, std::uint32_t h, const char* api) {
         cpu.handles->invalidHandle(h, api);  // [[noreturn]]：打印 kind/值 + 已分配范围后停止
     }
     return e;
+}
+
+PseudoThread* pseudoThreadOf(X86& cpu, std::uint32_t h, const char* api) {
+    HandleEntry* e = entryOf(cpu, h, api);
+    if (e->kind != HandleKind::Thread || e->payload == nullptr) {
+        cpu.shim.last_error = kErrInvalidHandle;
+        shimLog("kernel32", api, "0x%08X 不是本模拟器建的伪线程句柄（kind=%s）⇒ 失败", h,
+                handleKindName(e->kind));
+        return nullptr;
+    }
+    return static_cast<PseudoThread*>(e->payload);
 }
 
 // 取同步对象；`want` 非 0 ⇒ 还要求种类匹配（种类不符按 Windows 返回 FALSE + 错误 6）
@@ -1046,6 +1075,126 @@ void shimGetThreadPriority(X86& cpu, ShimCall& call) {
     call.result = kThreadPriorityNormal;  // 单线程 ⇒ 恒 THREAD_PRIORITY_NORMAL
 }
 
+// =======================================================================================
+// 伪线程（用户 2026-11-05 裁决：只发句柄，不执行 start routine）
+// =======================================================================================
+void shimCreateThread(X86& cpu, ShimCall& call) {
+    requireHandles(cpu, "CreateThread");
+    const std::uint32_t start = call.u32(2);
+    const std::uint32_t param = call.u32(3);
+    const std::uint32_t flags = call.u32(4);
+    const std::uint32_t id_out = call.u32(5);
+    if (start == 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "CreateThread", "lpStartAddress 为 NULL ⇒ 0 + ERROR_INVALID_PARAMETER(87)");
+        call.result = 0;
+        return;
+    }
+    if (id_out != 0 && !cpu.mem->committed(id_out, 4)) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "CreateThread", "lpThreadId=0x%08X 未提交 ⇒ 0 + ERROR_INVALID_PARAMETER(87)",
+                id_out);
+        call.result = 0;
+        return;
+    }
+    auto* thread = new PseudoThread();
+    thread->id = cpu.shim.next_pseudo_thread_id;
+    cpu.shim.next_pseudo_thread_id += 4u;
+    thread->start = start;
+    thread->param = param;
+    thread->suspend_count = (flags & kCreateSuspended) != 0 ? 1u : 0u;
+    const std::uint32_t h = cpu.handles->add(HandleKind::Thread, "pseudo-thread", thread, thread->id);
+    HandleEntry* entry = cpu.handles->get(h);
+    if (entry == nullptr) shimAbort("kernel32", "CreateThread", "句柄表拒绝登记伪线程");
+    entry->access = kThreadAllAccess;
+    entry->destroy = &destroyPseudoThread;
+    if (id_out != 0) cpu.mem->wr32(id_out, thread->id);
+    shimLog("kernel32", "CreateThread",
+            "伪线程 #%u（start=0x%08X param=0x%08X flags=0x%08X）⇒ 句柄 0x%08X；"
+            "**不执行 start routine**（SCOPE §1 伪线程；音频 silent / 视频 skip）",
+            thread->id, start, param, flags, h);
+    call.result = h;
+}
+
+void shimResumeThread(X86& cpu, ShimCall& call) {
+    requireHandles(cpu, "ResumeThread");
+    const std::uint32_t h = call.u32(0);
+    if (h == cpu.shim.thread_handle) {
+        shimLog("kernel32", "ResumeThread", "当前（唯一主）线程 0x%08X 未被挂起 ⇒ 返回 0", h);
+        call.result = 0;
+        return;
+    }
+    PseudoThread* thread = pseudoThreadOf(cpu, h, "ResumeThread");
+    if (thread == nullptr) {
+        call.result = 0xFFFFFFFFu;  // (DWORD)-1
+        return;
+    }
+    const std::uint32_t previous = thread->suspend_count;
+    if (thread->suspend_count > 0) --thread->suspend_count;
+    shimLog("kernel32", "ResumeThread", "伪线程 #%u 的挂起计数 %u ⇒ %u（start routine 仍不执行）",
+            thread->id, previous, thread->suspend_count);
+    call.result = previous;
+}
+
+void shimSetThreadPriority(X86& cpu, ShimCall& call) {
+    requireHandles(cpu, "SetThreadPriority");
+    const std::uint32_t h = call.u32(0);
+    const int priority = call.i32(1);
+    if (h == cpu.shim.thread_handle) {
+        shimLog("kernel32", "SetThreadPriority", "当前线程优先级设为 %d（单线程实现，仅记账）", priority);
+        call.result = 1;
+        return;
+    }
+    PseudoThread* thread = pseudoThreadOf(cpu, h, "SetThreadPriority");
+    if (thread == nullptr) {
+        call.result = 0;
+        return;
+    }
+    shimLog("kernel32", "SetThreadPriority", "伪线程 #%u 优先级设为 %d（仅记账）", thread->id, priority);
+    call.result = 1;
+}
+
+void shimSetThreadAffinityMask(X86& cpu, ShimCall& call) {
+    requireHandles(cpu, "SetThreadAffinityMask");
+    const std::uint32_t h = call.u32(0);
+    const std::uint32_t mask = call.u32(1);
+    if (mask == 0) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "SetThreadAffinityMask", "dwThreadAffinityMask=0 ⇒ 0 + "
+                                                     "ERROR_INVALID_PARAMETER(87)");
+        call.result = 0;
+        return;
+    }
+    if (h != cpu.shim.thread_handle && pseudoThreadOf(cpu, h, "SetThreadAffinityMask") == nullptr) {
+        call.result = 0;
+        return;
+    }
+    // 本模拟器只有 0 号 CPU；前一个掩码恒为 1（伪线程也共用这一颗核）
+    shimLog("kernel32", "SetThreadAffinityMask", "0x%08X 的亲和性掩码 ⇒ 0x%08X（前一个 0x%08X）", h,
+            mask, kThreadAffinityMask);
+    call.result = kThreadAffinityMask;
+}
+
+void shimGetProcessAffinityMask(X86& cpu, ShimCall& call) {
+    requireHandles(cpu, "GetProcessAffinityMask");
+    const std::uint32_t process_out = call.u32(1);
+    const std::uint32_t system_out = call.u32(2);
+    if (process_out == 0 || system_out == 0 || !cpu.mem->committed(process_out, 4) ||
+        !cpu.mem->committed(system_out, 4)) {
+        cpu.shim.last_error = kErrInvalidParameter;
+        shimLog("kernel32", "GetProcessAffinityMask",
+                "输出指针无效（process=0x%08X system=0x%08X）⇒ 0 + ERROR_INVALID_PARAMETER(87)",
+                process_out, system_out);
+        call.result = 0;
+        return;
+    }
+    cpu.mem->wr32(process_out, kThreadAffinityMask);
+    cpu.mem->wr32(system_out, kThreadAffinityMask);
+    shimLog("kernel32", "GetProcessAffinityMask", "单核模拟器 ⇒ 进程/系统掩码都是 0x%08X",
+            kThreadAffinityMask);
+    call.result = 1;
+}
+
 // ---- Sleep（不睡，只推虚拟时钟）----
 void shimSleep(X86& cpu, ShimCall& call) {
     if (!cpu.clock) shimAbort("kernel32", "Sleep", "cpu.clock 为空（Machine 没装配虚拟时钟）");
@@ -1116,25 +1265,22 @@ void registerSyncShims(ShimRegistry& shims) {
     shims.add("kernel32", "InterlockedFlushSList", Conv::Stdcall, 1, shimInterlockedFlushSList);
     shims.add("kernel32", "QueryDepthSList", Conv::Stdcall, 1, shimQueryDepthSList);
 
-    // ---- 线程 / 定时器队列：整族不做（README §2.5 / D5）⇒ 登记为未实现，执行到就响亮失败 ----
-    shims.addUnimplemented("kernel32", "CreateThread",
-                           "guest 单线程（README §2.5 / D5）；M1 不做线程");
+    // ---- 伪线程（用户 2026-11-05 裁决）：只发句柄，不执行 start routine；见文件头偏差 10 ----
+    shims.add("kernel32", "CreateThread", Conv::Stdcall, 6, shimCreateThread);
+    shims.add("kernel32", "ResumeThread", Conv::Stdcall, 1, shimResumeThread);
+    shims.add("kernel32", "SetThreadPriority", Conv::Stdcall, 2, shimSetThreadPriority);
+    shims.add("kernel32", "SetThreadAffinityMask", Conv::Stdcall, 2, shimSetThreadAffinityMask);
+    shims.add("kernel32", "GetProcessAffinityMask", Conv::Stdcall, 3, shimGetProcessAffinityMask);
+
+    // ---- 仍未做的线程边角 / 定时器队列 ⇒ 保持响亮失败（伪线程不跑 start routine，通常不会触发）----
     shims.addUnimplemented("kernel32", "CreateRemoteThread",
-                           "guest 单线程（README §2.5 / D5）；M1 不做线程");
+                           "伪线程只覆盖本进程的 CreateThread；远程线程不做");
     shims.addUnimplemented("kernel32", "_beginthreadex",
-                           "CRT 线程（README §2.5 / D5）；M1 不做线程");
+                           "CRT 线程入口（伪线程不执行 start routine；触发 = 有代码依赖线程体）");
     shims.addUnimplemented("kernel32", "ExitThread",
-                           "guest 单线程（README §2.5 / D5）；M1 不做线程");
-    shims.addUnimplemented("kernel32", "ResumeThread",
-                           "guest 单线程（README §2.5 / D5）；M1 不做线程");
-    shims.addUnimplemented("kernel32", "SetThreadPriority",
-                           "guest 单线程（README §2.5 / D5）；M1 不做线程");
-    shims.addUnimplemented("kernel32", "SetThreadAffinityMask",
-                           "guest 单线程（README §2.5 / D5）；M1 不做线程");
-    shims.addUnimplemented("kernel32", "GetProcessAffinityMask",
-                           "guest 单线程（README §2.5 / D5）；M1 不做线程");
+                           "伪线程不执行 start routine；主线程 ExitThread 需单独裁决");
     shims.addUnimplemented("kernel32", "FreeLibraryAndExitThread",
-                           "CRT 卸载并退出线程（README §2.5 / D5）；M1 不做线程");
+                           "CRT 卸载并退出线程（伪线程不执行 start routine）");
     shims.addUnimplemented("kernel32", "CreateTimerQueue",
                            "定时器队列 = 服务线程（README §2.5 / D5）；M1 不做");
     shims.addUnimplemented("kernel32", "CreateTimerQueueTimer",

@@ -311,7 +311,44 @@ int main() {
         LIFT_CHECK(f.ok);
     }
 
-    // ⑧ DuplicateHandle：`dwDesiredAccess` 降级 + 伪句柄（S6-5）
+    // ⑧ 伪线程（用户 2026-11-05 裁决）：CreateThread 只发句柄，不执行 start routine；
+    //    ResumeThread 返回旧挂起计数，SetThreadPriority / 亲和性按单核单线程成功。
+    {
+        g_current_case = "pseudo-thread";
+        Fixture f;
+        lift::registerSyncShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t create = f.use("CreateThread");
+        const std::uint32_t resume = f.use("ResumeThread");
+        const std::uint32_t set_prio = f.use("SetThreadPriority");
+        const std::uint32_t get_prio = f.use("GetThreadPriority");
+        const std::uint32_t set_aff = f.use("SetThreadAffinityMask");
+        const std::uint32_t get_aff = f.use("GetProcessAffinityMask");
+        const std::uint32_t close = f.use("CloseHandle");
+        const std::uint32_t id_out = f.u32data(0xDEADBEEFu);
+        const std::uint32_t proc_mask = f.u32data(0xDEADBEEFu);
+        const std::uint32_t sys_mask = f.u32data(0xDEADBEEFu);
+        const std::uint32_t start_ea = 0x00402000u;  // 不会被调用；若被调用会停在没有代码的 EA
+        const std::uint32_t param = 0x00ABCDEFu;
+
+        const std::uint32_t h = f.call(create, {0u, 0u, start_ea, param, 4u, id_out});
+        LIFT_CHECK_NE_U32(h, 0u);
+        LIFT_CHECK_NE_U32(f.m.mem().rd32(id_out), 0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(id_out), 0x00001008u);
+        // CREATE_SUSPENDED ⇒ 旧计数 1；再 resume ⇒ 0
+        LIFT_CHECK_EQ_U32(f.call(resume, {h}), 1u);
+        LIFT_CHECK_EQ_U32(f.call(resume, {h}), 0u);
+        LIFT_CHECK_EQ_U32(f.call(set_prio, {h, 2u}), 1u);
+        LIFT_CHECK_EQ_U32(f.call(get_prio, {h}), 0u);
+        LIFT_CHECK_EQ_U32(f.call(set_aff, {h, 1u}), 1u);
+        LIFT_CHECK_EQ_U32(f.call(get_aff, {0xFFFFFFFFu, proc_mask, sys_mask}), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(proc_mask), 1u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(sys_mask), 1u);
+        LIFT_CHECK_EQ_U32(f.call(close, {h}), 1u);
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑨ DuplicateHandle：`dwDesiredAccess` 降级 + 伪句柄（S6-5）
     //
     // 判据（Windows 文档）：
     //   ① `dwDesiredAccess` 是**新句柄**的访问位；不带 DUPLICATE_SAME_ACCESS 时按它授予

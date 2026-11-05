@@ -223,8 +223,13 @@ struct CreateRequest {
 // ★ 后缓冲尺寸 / 像素格式来自 present params（Width/Height 为 0 ⇒ 用当前显示模式，真机同义）。
 std::uint32_t createDeviceState(X86& cpu, const CreateRequest& req, std::string* why);
 
+// 设备状态块 +60：IDirect3DDevice9 对象 EA（后缓冲 surface 的 GetDevice 要回答它）。
+// 状态块共 64 B；+56 是流水线状态 EA，+60 原先是空的。
+constexpr std::uint32_t kDeviceStateObjectOff = 60u;
+
 struct DeviceInfo {
     std::uint32_t state = 0;   // 'D9D1' 状态块 EA
+    std::uint32_t object = 0;  // IDirect3DDevice9 对象 EA（+60；0 = 尚未绑定）
     std::uint32_t arena = 0;   // 后缓冲像素块 EA（SurfaceArena）
     std::uint32_t pipeline = 0;  // 'DL01' 流水线状态块 EA（runtime/d3d9_pipeline.{h,cpp}；0 = 没有）
     int width = 0;
@@ -341,6 +346,9 @@ std::uint32_t createTextureState(X86& cpu, std::uint32_t device_object, std::uin
                                  std::uint32_t format, std::uint32_t pool, std::string* why);
 bool textureInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::string* why);
 bool textureInfo(X86& cpu, std::uint32_t object, TextureInfo* out, std::string* why);
+// IDirect3DSurface9 的状态块：纹理表面（'TEX1'）或后缓冲（'D9D1'）。
+// 返回的 TextureInfo 只填 surface 需要的字段（state 是原状态块；后缓冲的 device = 设备状态块 +60）。
+bool surfaceInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::string* why);
 void destroyTextureState(X86& cpu, std::uint32_t state);
 
 // GetLevelDesc：写 32 B 的 D3DSURFACE_DESC（level != 0 / 越界 ⇒ false + why）

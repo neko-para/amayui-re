@@ -21,8 +21,8 @@
 | **延后实现**（最终要做） | **音频** | silent（延后实现）：MCI（`mciSendCommandA` / `mciSendStringA` / `mciGetErrorStringA`）接受命令并返回成功、返回串为空；mixer 成功 + 假句柄；mmio 返回假句柄 + 空流（0 字节） | 无 BGM / 语音 / SE；音频文件读出来是空流 | `timeGetTime` / `timeSetEvent` / `timeKillEvent` / `timeGetDevCaps`、音频状态机的返回码 |
 | 延后实现（**M4**） | **视频** | skip（延后实现）：影片 opcode 必须**推进**，不许挂起；媒体 API（`MFStartup` / `MFShutdown` 成功；`MFCreate*` / `MFGetService` / DXVA2 返回 `E_FAIL` + 空输出，⛔ 不返回假 COM 对象） | 无影片（LOGO/OP/剧情影片）；媒体初始化失败后走"没有视频"的降级路径 | 影片 opcode 的状态推进与结束通知 |
 | 延后实现 | **Live2D** | 关闭（游戏内开关）作为第一可交付状态 | 模型不显示（固定立绘） | 如果开关只是脚本级跳过，SDK 仍链接但不被调用 |
-| 延后实现 | **3D** | **D3D9 最小设备簇已落地**（`REQ-01M6MH5M975Q63AH85F03RVQFD`：`Direct3DCreate9` / `GetAdapterDisplayMode` / `EnumAdapterModes` / `CreateDevice` / `GetDeviceCaps` / `CheckDeviceFormat` / `SetDialogBoxMode` / `Clear` / `Present`，其余槽 = loud trap）；**D3DX 仍 stub**（`D3DXCreateSprite` 一族是当前 boot 卡点）；D3D9 设备状态机 / D3DX effect / `.x` 层级仍不做 | 无 3D 战斗/场景；`d3dx9_43` 撞上即响亮失败 | 2D/ADV 主路径（D3D9 + GDI；DDraw 只作备用后端） |
-| **硬错误**（不静默） | **线程 / 定时器队列** | **guest 单线程**：`CreateThread` / `ExitThread` / `ResumeThread` / `SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask` / `FreeLibraryAndExitThread` / `CreateTimerQueue` / `CreateTimerQueueTimer` / `DeleteTimerQueueTimer` 一律**响亮失败**（`addUnimplemented`，执行到就 trap） | 无（业务线程不存在；服务线程被音频 silent / 视频 skip 消化） | 主线程的同步原语 / 等待 / 临界区、单实例信号量、`timeSetEvent` 的计时语义 |
+| 延后实现 | **3D** | **D3D9 最小设备簇 + D3DX Sprite/纹理 + fixed-function 流水线已落地**（`REQ-01M6MH5M975Q63AH85F03RVQFD` / `REQ-01M6MJRC587XWXR325K4N2JXMF` / `REQ-01M6MNR9M7S5M5711J79F9K32A`：`Direct3DCreate9` / `CreateDevice` / `Clear` / `Present` / `GetBackBuffer` / `SetRenderTarget`，`D3DXCreateSprite` 的 Begin/Draw/End、`D3DXCreateTexture`、纹理 surface、`D3DXMatrix*`、软件光栅）；**已到 Present 第一帧**；D3DX effect / `.x` 层级 / 完整 3D 战斗场景仍不做，未取证槽 = loud trap | 无 3D 战斗/场景；未取证的 D3DX effect / `.x` / 3D 状态仍会在命中时响亮失败 | 2D/ADV 主路径（D3D9 + GDI；DDraw 只作备用后端） |
+| **延后实现（伪线程，2026-11-05 用户批准）** | **线程 / 定时器队列** | **guest 单线程 + 伪线程**：`CreateThread` **只发线程句柄、不执行 start routine**；`ResumeThread` 按挂起计数返回旧值；`SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask` 按单核单线程返回成功值；`GetThreadPriority` 对当前线程与伪线程返回 `THREAD_PRIORITY_NORMAL`。`ExitThread` / `FreeLibraryAndExitThread` / `CreateRemoteThread` / `_beginthreadex` / `CreateTimerQueue*` / `DeleteTimerQueueTimer` 仍**响亮失败**（伪线程不跑 start routine ⇒ 通常不会触发；触发 = 有代码依赖线程体，需人工检查） | 无真正后台线程；声音 / DirectShow / MF 的服务线程被音频 silent / 视频 skip 消化；如果某条路径依赖 start routine 的副作用，会停在对应 trap，而不是静默继续 | 主线程的同步原语 / 等待 / 临界区、单实例信号量、`timeSetEvent` 的计时语义；伪线程句柄的 AddRef / Release / 优先级 / 亲和性**返回形态** |
 | 硬错误 | **SEH / C++ 异常** | **不展开**：`RaiseException` / `RtlUnwind` 一律**响亮失败**（`addUnimplemented`，执行到就 trap）；`_CxxThrowException` 走同一条"未处理异常"路 | 异常路径**不恢复**（进程终止并留下诊断） | 失败诊断（EA / 访问类型 / 区域）——异常发生在成功路径上会**当场暴露**，不静默 |
 | 硬错误 | **等待（未 signaled）** | `WaitForSingleObject(Ex)` / `WaitForMultipleObjects(Ex)` / `SignalObjectAndWait` 命中"需要等待"（对象未 signaled 且 `dwMilliseconds != 0`，含 `INFINITE`）⇒ **硬错误**：`shimAbort` 打印 API / handle / timeout 后终止，⛔ 不返回 `WAIT_TIMEOUT` | 游戏若真依赖等待会在这里停下；需要人工检查该调用场景并设计等待方案 | `dwMilliseconds == 0` 的轮询仍返回 `WAIT_TIMEOUT`；signaled 路径不变；`bWaitAll=TRUE` 且全部 signaled ⇒ `WAIT_OBJECT_0` |
 | **平台偏差** | **临时文件名序号** | `GetTempFileNameA(uUnique=0)` 从 **0** 起递增找空号（真机从系统时间起）；`uUnique!=0` 按文档用调用方的值、**不创建**文件 | 具体序号与真机不同（可复现优先于逐值一致） | 名字形态 `<pre><uuuu>.TMP`（前缀只取 3 字符）、`uUnique!=0` 返回原值且不创建 |
@@ -35,15 +35,17 @@
 
 ★ **3D 的前提**：若 Live2D 走 D3D 后端（`doc §6-2`），D3D9 不能砍；"3D 不做"与"保留 Live2D"互斥。
 
-★ **线程整族不做的依据与退路**（2026-11-04 用户批准记入本文件）：`README.md` §2.5 已定 guest 单线程；
-`.lst` 里的线程全是**服务线程**（DirectShow 读文件 / 声音 / MF 回调 / 多媒体定时器），而本文件已把
-音频判 silent、视频判 skip ⇒ 它们**不该被创建**。判据与退路见 `docs/plan-m1-cpu-base.md` §4 D5 / §9 R4：
-**若成功路径真的创建线程 ⇒ 记录并开单**，⛔ 不在本线直接开并发（那要先有证据、再改 §2.5 的单线程口径）。
-白名单落点：`tools/lift.mjs` 的 `FAMILY_STUB_APPROVED` **只列 PE 导入表里真出现的键**
-（`CreateRemoteThread` / `_beginthreadex` 不在导入表 ⇒ 不进白名单，否则 `lift check` 会报"白名单漂了"）。
-★ **档位**：现行实现是 `addUnimplemented`（**硬 trap**：打印 `module!name` + 最近指令后停下）；plan §4 D5 的括注写的是
-"打日志、返回失败或空句柄"（软 stub）—— 两者对 guest 的后果不同（继续跑 / 停下）。本行登记的**是硬 trap**；
-若改成软 stub 属新裁决，不在本次登记范围内。
+★ **线程 = 伪线程的依据与退路**（2026-11-04 用户先批准"整族不做"，2026-11-05 改为伪线程）：`README.md` §2.5
+已定 guest 单线程；`.lst` 里的线程全是**服务线程**（DirectShow 读文件 / 声音 / MF 回调 / 多媒体定时器），
+而本文件已把音频判 silent、视频判 skip ⇒ 它们的 start routine **不需要被执行**。伪线程只让创建 / 恢复 /
+优先级 / 亲和性这组**控制面**成功返回，避免 boot 在"服务线程创建"上硬停；线程体本身仍绝不执行。
+判据与退路见 `docs/plan-m1-cpu-base.md` §4 D5 / §9 R4：**若成功路径真的依赖 start routine ⇒ 记录并开单**，
+⛔ 不在本线直接开并发（那要先有证据、再改 §2.5 的单线程口径）。
+白名单落点：`tools/lift.mjs` 的 `FAMILY_STUB_APPROVED` **只列 PE 导入表里真出现的键**，且只列**仍是 stub** 的键
+（`CreateThread` / `ResumeThread` / `SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask`
+已改成实现 ⇒ 2026-11-05 从白名单移除）。
+★ **档位**：`CreateThread` 等是**实现**（`add`），不是 stub；`ExitThread` / `FreeLibraryAndExitThread` /
+`CreateRemoteThread` / `_beginthreadex` / 定时器队列仍是 `addUnimplemented`（**硬 trap**）。
 
 ★ **异常也按"发生即失败"登记**（2026-11-04 用户）：`RaiseException` / `RtlUnwind` 不做 SEH 展开，执行到就 trap
 （plan §9 R1：M1 只做"未处理异常 = 响亮失败 + 完整诊断"）。**若成功路径也用异常做流程控制** ⇒ 单独开单再议，
@@ -54,7 +56,8 @@
 - 菜单 / 模态：Win32 菜单与对话框族（`WM_COMMAND` 的菜单命令、`DialogBoxParamA` 等）。
 - 音频：MCI CD-DA / MIDI / DirectSound 的设备语义；保留的是"请求 + 返回码"。
 - 视频：MF 的 session / topology / EVR / DXVA2 内部；只保留影片 opcode 的状态推进。
-- 线程 / 定时器队列：线程创建 / 线程调度 / 亲和性与优先级 / 定时器队列的线程语义；
+- 线程 / 定时器队列：线程体执行 / 线程调度 / 定时器队列的线程语义
+  （控制面的 `CreateThread` 等按 §1 的伪线程返回形态保留）；
   保留主线程的同步原语与等待、`timeSetEvent` 的计时。
 - 异常：SEH 展开 / `.xdata` handler / C++ 异常展开的语义；保留"未处理异常 = 响亮失败 + 完整诊断"。
 - Live2D：模型 / 动作 / 渲染接口（SDK 内部）；若走游戏 renderer，则不在平台层。

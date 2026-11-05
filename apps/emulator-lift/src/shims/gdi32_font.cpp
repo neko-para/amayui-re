@@ -319,6 +319,7 @@ void shimTextOutA(X86& cpu, ShimCall& call) {
 // =====================================================================================
 void shimEnumFontFamiliesExA(X86& cpu, ShimCall& call) {
     const std::uint32_t hdc = call.u32(0);
+    const std::uint32_t logfont_in = call.u32(1);
     const std::uint32_t proc = call.u32(2);
     const std::uint32_t lparam = call.u32(3);
     GdiDcObject* dc = requireDc(cpu, hdc, "EnumFontFamiliesExA");
@@ -345,6 +346,14 @@ void shimEnumFontFamiliesExA(X86& cpu, ShimCall& call) {
         shimAbort("gdi32", "EnumFontFamiliesExA", "guest 堆分配 LOGFONT/TEXTMETRIC 失败");
     }
     const GdiFontDesc desc = gdiEffectiveFont(dc->state);
+    // ★ 枚举的 LOGFONT 是**过滤器**：引擎按 lfCharSet=SHIFTJIS_CHARSET(0x80) 收集日文字体。
+    //   宿主替换后字形恒为 Amayui CN；族名固定报 "Amayui CN"，但 **charset 必须回显请求的
+    //   Shift-JIS**，否则引擎的回调（0x0045EB02 的 `[lf+17] == 0x80`）会把这一条丢掉，
+    //   枚举结果为空 ⇒ 后续在 0x0040C131 空字符串对象上崩。
+    std::uint8_t reported_charset = desc.charset;
+    if (logfont_in != 0 && cpu.mem->committed(logfont_in, kLogFontSize)) {
+        reported_charset = cpu.mem->rd8(logfont_in + 23);
+    }
     cpu.mem->wr32(lf_ea + 0, static_cast<std::uint32_t>(desc.height));
     cpu.mem->wr32(lf_ea + 4, static_cast<std::uint32_t>(desc.width));
     cpu.mem->wr32(lf_ea + 8, static_cast<std::uint32_t>(desc.escapement));
@@ -353,7 +362,7 @@ void shimEnumFontFamiliesExA(X86& cpu, ShimCall& call) {
     cpu.mem->wr8(lf_ea + 20, desc.italic);
     cpu.mem->wr8(lf_ea + 21, desc.underline);
     cpu.mem->wr8(lf_ea + 22, desc.strike_out);
-    cpu.mem->wr8(lf_ea + 23, desc.charset);
+    cpu.mem->wr8(lf_ea + 23, reported_charset);
     cpu.mem->wr8(lf_ea + 24, desc.out_precision);
     cpu.mem->wr8(lf_ea + 25, desc.clip_precision);
     cpu.mem->wr8(lf_ea + 26, desc.quality);
@@ -387,8 +396,9 @@ void shimEnumFontFamiliesExA(X86& cpu, ShimCall& call) {
         shimAbort("gdi32", "EnumFontFamiliesExA", "启动 guest 回调失败：%s", err.c_str());
     }
     call.take_control = true;  // 控制权已交给 guest 回调（续延桩会恢复）
-    shimLog("gdi32", "EnumFontFamiliesExA", "回调宿主字体 \"%s\" 一条（guest 回调返回非 0 即停止）",
-            family.c_str());
+    shimLog("gdi32", "EnumFontFamiliesExA",
+            "回调宿主字体 \"%s\"（charset=0x%02X）一条（guest 回调返回非 0 即停止）", family.c_str(),
+            reported_charset);
 }
 
 // =====================================================================================

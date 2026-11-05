@@ -36,6 +36,7 @@
 #include "runtime/exec.h"
 #include "runtime/memory.h"
 #include "runtime/x86.h"
+#include "shims/d3dx9_surface.h"
 #include "shims/register.h"
 
 namespace lift {
@@ -355,6 +356,8 @@ void shimCreateDevice(X86& cpu, ShimCall& call) {
         return;
     }
     cpu.mem->wr32(out_ea, obj);
+    // 后缓冲 surface（GetBackBuffer）的 GetDevice 要回答这个对象；状态块 +60 原先是空的。
+    cpu.mem->wr32(state + d3d9::kDeviceStateObjectOff, obj);
     d3d9Log("CreateDevice",
             "Adapter=0 DeviceType=%u hFocusWindow=0x%08X BehaviorFlags=0x%X ⇒ S_OK，IDirect3DDevice9 对象 "
             "0x%08X（状态块 0x%08X）",
@@ -419,6 +422,42 @@ void shimClear(X86& cpu, ShimCall& call) {
         d3d9Log("Clear", "失败：%s ⇒ 0x%08X", why.c_str(), hr);
     }
     call.result = hr;
+}
+
+void shimGetBackBuffer(X86& cpu, ShimCall& call) {
+    d3d9::DeviceInfo dev;
+    if (!requireDevice(cpu, call, "IDirect3DDevice9::GetBackBuffer(+0x48)", &dev)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t swap_chain = call.u32(1);
+    const std::uint32_t back_buffer = call.u32(2);
+    const std::uint32_t type = call.u32(3);
+    const std::uint32_t out_ea = call.u32(4);
+    if (swap_chain != 0 || back_buffer != 0 || type != 0) {
+        // 本线只建一个隐式 swap chain / 一个后缓冲；其它索引是真机的 INVALIDCALL。
+        d3d9Log("GetBackBuffer",
+                "SwapChain=%u BackBuffer=%u Type=%u（本线只有隐式链 / 后缓冲 0 / MONO）⇒ D3DERR_INVALIDCALL",
+                swap_chain, back_buffer, type);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        d3d9Log("GetBackBuffer", "ppBackBuffer=0x%08X 为 NULL / 未提交 ⇒ D3DERR_INVALIDCALL", out_ea);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    cpu.mem->wr32(out_ea, 0);
+    const std::uint32_t surface = createD3dxSurfaceObject(cpu, dev.state);
+    if (surface == 0) {
+        d3d9Log("GetBackBuffer", "建 IDirect3DSurface9 失败");
+        call.result = d3d9::kFail;
+        return;
+    }
+    cpu.mem->wr32(out_ea, surface);
+    d3d9Log("GetBackBuffer", "SwapChain=0 BackBuffer=0 ⇒ IDirect3DSurface9 对象 0x%08X（状态 = 设备后缓冲 0x%08X）",
+            surface, dev.state);
+    call.result = d3d9::kOk;
 }
 
 void shimPresent(X86& cpu, ShimCall& call) {
@@ -616,6 +655,18 @@ void shimGetTextureStageState(X86& cpu, ShimCall& call) {
     }
     std::string why;
     call.result = d3d9::getTextureStageState(cpu, dev.state, call.u32(1), call.u32(2), call.u32(3), &why);
+}
+
+void shimSetRenderTarget(X86& cpu, ShimCall& call) {
+    d3d9::DeviceInfo dev;
+    if (!requireDevice(cpu, call, "IDirect3DDevice9::SetRenderTarget(+0x94)", &dev)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    std::string why;
+    const std::uint32_t hr = d3d9::setRenderTarget(cpu, dev.state, call.u32(1), call.u32(2), &why);
+    if (hr != d3d9::kOk) d3d9Log("SetRenderTarget", "失败：%s", why.c_str());
+    call.result = hr;
 }
 
 void shimSetTexture(X86& cpu, ShimCall& call) {
@@ -1215,7 +1266,9 @@ const std::vector<ComMethod>& device9Methods() {
         {0x08u, "Release", Conv::Stdcall, 0, &shimRelease},
         {0x1Cu, "GetDeviceCaps", Conv::Stdcall, 1, &shimGetDeviceCaps},           // #7
         {0x44u, "Present", Conv::Stdcall, 4, &shimPresent},                       // #17 第一帧判据
+        {0x48u, "GetBackBuffer", Conv::Stdcall, 4, &shimGetBackBuffer},           // #18 ★ 0x4A51DF
         {0x50u, "SetDialogBoxMode", Conv::Stdcall, 1, &shimSetDialogBoxMode},     // #20
+        {0x94u, "SetRenderTarget", Conv::Stdcall, 2, &shimSetRenderTarget},       // #37 ★ 0x4A778B
         {0x68u, "CreateVertexBuffer", Conv::Stdcall, 6, &shimCreateVertexBuffer},  // #26
         {0x6Cu, "CreateIndexBuffer", Conv::Stdcall, 6, &shimCreateIndexBuffer},    // #27
         {0xA4u, "BeginScene", Conv::Stdcall, 0, &shimBeginScene},                 // #41

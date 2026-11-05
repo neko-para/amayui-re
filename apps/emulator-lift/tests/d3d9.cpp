@@ -27,6 +27,7 @@
 
 #include "check.h"
 #include "runtime/d3d9.h"
+#include "runtime/d3d9_pipeline.h"
 #include "runtime/ddraw_surface.h"
 #include "runtime/machine.h"
 #include "runtime/surface.h"
@@ -530,7 +531,53 @@ void casePresent() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ⑥ 未实现的槽 ⇒ loud trap（机器停 + 报 iface/偏移），⛔ 不许返回 0 继续跑
+// ⑥ GetBackBuffer + SetRenderTarget：后缓冲 surface 可取得，SetRenderTarget(0) 恢复后缓冲
+// ---------------------------------------------------------------------------------------
+void caseGetBackBufferAndRenderTarget() {
+    lift_test::g_current_case = "d3d9/backbuffer-and-render-target";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t obj = f.createDirect3D();
+    LIFT_CHECK_NE_U32(obj, 0u);
+    if (obj == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(obj, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    // GetBackBuffer(this, SwapChain=0, BackBuffer=0, Type=MONO(0), ppSurface)
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x48u, {0u, 0u, 0u, out}), 0u);
+    const std::uint32_t surf = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(surf, 0u);
+    LIFT_CHECK_NE_U32(surf, 0xDEADBEEFu);
+
+    // 后缓冲 surface 的 GetDevice / GetDesc：设备对象与宽高都与设备一致
+    const std::uint32_t dev_out = f.placeU32(0);
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x0Cu, {dev_out}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(dev_out), dev.object);
+    const std::uint32_t desc = f.placeBytes(std::vector<std::uint8_t>(32u, 0));
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x30u, {desc}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x18u), 1280u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x1Cu), 720u);
+
+    // SetRenderTarget(backbuffer_surface, 0) 成功；再恢复到后缓冲（0,0）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {surf, 0u}), 0u);
+    lift::d3d9::PipelineInfo pi;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfState(f.m.cpu(), dev.info.pipeline, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_arena, dev.info.arena);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {0u, 0u}), 0u);
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfState(f.m.cpu(), dev.info.pipeline, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_arena, 0u);
+    LIFT_CHECK_EQ_U32(pi.color_surface, 0u);
+
+    // 不是 surface 的对象 ⇒ D3DERR_INVALIDCALL（⛔ 不静默接受）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {dev.object, 0u}), 0x8876086Cu);
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x08u, {}), 0u);  // Release
+    LIFT_CHECK(!f.m.cpu().com->find(surf));
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑦ 未实现的槽 ⇒ loud trap（机器停 + 报 iface/偏移），⛔ 不许返回 0 继续跑
 // ---------------------------------------------------------------------------------------
 void caseUnimplementedSlotTraps() {
     // (a) IDirect3DDevice9 的未实现槽 #3 TestCooperativeLevel（+0x0C）
@@ -610,6 +657,7 @@ int main() {
         caseCreateDeviceAndCaps();
         caseClear();
         casePresent();
+        caseGetBackBufferAndRenderTarget();
         caseUnimplementedSlotTraps();
         return finish("d3d9");
     } catch (const std::exception& e) {

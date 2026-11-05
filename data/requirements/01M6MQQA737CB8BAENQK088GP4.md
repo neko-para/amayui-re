@@ -2,8 +2,10 @@
 
 - id: REQ-01M6MQQA737CB8BAENQK088GP4
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/sync_ext.cpp#pseudo-thread
+- done_reason: 用户 2026-11-05 裁决走伪线程：CreateThread 只发句柄、不执行 start routine；ResumeThread / SetThreadPriority / SetThreadAffinityMask / GetProcessAffinityMask 按单核单线程返回；GetThreadPriority 接受伪线程。boot 越过 0x004B5FE4，随后修 EnumFontFamiliesExA 的 Shift-JIS filter + GetSurfaceLevel / GetBackBuffer / SetRenderTarget，1.2e9 指令内到达 Present 第 1 帧（hash=0xB04C136E75952CDE，非背景 895368/921600，330 色；随后同 hash 稳定到第 494 帧）。SCOPE §1 已从「硬错误」改为「伪线程」；lift check 绿，ctest 41/41 绿。
 - tags: [emulator-lift, m2, audio, thread]
 
 ## 现场（2026-11-05 实测，DSOUND silent 层落地之后）

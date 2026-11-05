@@ -78,7 +78,9 @@ constexpr std::uint32_t kPlPixels = kPlRasterized + 8u;   // uint64
 constexpr std::uint32_t kPlBegins = kPlPixels + 8u;
 constexpr std::uint32_t kPlEnds = kPlBegins + 4u;
 constexpr std::uint32_t kPlDepthArena = kPlEnds + 4u;
-constexpr std::uint32_t kPlUnsupported = kPlDepthArena + 4u;  // 未支持状态的位图（诊断）
+constexpr std::uint32_t kPlColorArena = kPlDepthArena + 4u;    // 0 = 设备后缓冲
+constexpr std::uint32_t kPlColorSurface = kPlColorArena + 4u;  // IDirect3DSurface9 对象 EA（0 = 后缓冲）
+constexpr std::uint32_t kPlUnsupported = kPlColorSurface + 4u;  // 未支持状态的位图（诊断）
 constexpr std::uint32_t kPlBytes = kPlUnsupported + 32u;
 constexpr std::uint32_t kPlMagicValue = 0x31304C44u;  // 'DL01'（写成可读：'D','L','0','1'）
 
@@ -1453,12 +1455,14 @@ void destroyForDevice(X86& cpu, std::uint32_t device_state) {
     const std::uint32_t pe = pipeEaOf(cpu, device_state);
     if (pe == 0 || !cpu.mem->committed(pe, kPlBytes)) return;
     if (cpu.mem->rd32(pe + kPlMagic) != kPlMagicValue) return;
-    // 绑定的纹理在 SetTexture 时 AddRef 过 ⇒ 这里对称释放
+    // 绑定的纹理在 SetTexture 时 AddRef 过 ⇒ 这里对称释放；渲染目标同理。
     if (cpu.com) {
         for (std::uint32_t s = 0; s < kMaxSamplers; ++s) {
             const std::uint32_t t = plGet(cpu, pe, kPlTextures + s * 4u);
             if (t != 0) cpu.com->release(cpu, t);
         }
+        const std::uint32_t rt = plGet(cpu, pe, kPlColorSurface);
+        if (rt != 0) cpu.com->release(cpu, rt);
     }
     const std::uint32_t depth = plGet(cpu, pe, kPlDepthArena);
     cpu.mem->wr32(pe + kPlMagic, 0u);
@@ -1485,6 +1489,8 @@ bool pipelineInfoOfState(X86& cpu, std::uint32_t state, PipelineInfo* out, std::
     i.fvf = plGet(cpu, state, kPlFvf);
     i.vertex_decl = plGet(cpu, state, kPlVertexDecl);
     i.depth_arena = plGet(cpu, state, kPlDepthArena);
+    i.color_arena = plGet(cpu, state, kPlColorArena);
+    i.color_surface = plGet(cpu, state, kPlColorSurface);
     i.begins = plGet(cpu, state, kPlBegins);
     i.ends = plGet(cpu, state, kPlEnds);
     i.draws = plGet(cpu, state, kPlDraws);
@@ -1505,6 +1511,56 @@ bool pipelineInfoOfDevice(X86& cpu, std::uint32_t device_state, PipelineInfo* ou
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, device_state, &pe, why)) return false;
     return pipelineInfoOfState(cpu, pe, out, why);
+}
+
+// =====================================================================================
+// 渲染目标（SetRenderTarget）
+// =====================================================================================
+std::uint32_t renderTargetArena(X86& cpu, std::uint32_t pipeline_state) {
+    if (pipeline_state == 0 || !cpu.mem->committed(pipeline_state, kPlBytes) ||
+        cpu.mem->rd32(pipeline_state + kPlMagic) != kPlMagicValue) {
+        return 0;
+    }
+    return plGet(cpu, pipeline_state, kPlColorArena);
+}
+
+std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target, std::uint32_t zstencil,
+                              std::string* why) {
+    std::uint32_t pe = 0;
+    if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
+    const std::uint32_t old_surface = plGet(cpu, pe, kPlColorSurface);
+    if (target == 0) {
+        if (old_surface != 0 && cpu.com) cpu.com->release(cpu, old_surface);
+        plSet(cpu, pe, kPlColorArena, 0u);
+        plSet(cpu, pe, kPlColorSurface, 0u);
+        pipeLog("SetRenderTarget", "目标 = 后缓冲（0）");
+        return kOk;
+    }
+    const char* iface = cpu.com ? cpu.com->ifaceOf(target) : nullptr;
+    if (iface == nullptr || std::strcmp(iface, "IDirect3DSurface9") != 0) {
+        if (why) *why = "D3D9 流水线：SetRenderTarget 的 pRenderTarget 不是本模块的 IDirect3DSurface9";
+        return kInvalidCall;
+    }
+    const std::uint32_t tex_state = cpu.com->userOf(target);
+    TextureInfo ti;
+    if (!surfaceInfoOfState(cpu, tex_state, &ti, why)) return kInvalidCall;
+    if (zstencil != 0) {
+        // 本线只有一个设备深度缓冲；纹理与后缓冲同尺寸时共用它。不同尺寸会错，但不静默。
+        pipeLog("SetRenderTarget", "pNewZStencil=0x%08X **被忽略**（本线共用设备深度缓冲；⛔ 不静默）",
+                zstencil);
+    }
+    if (old_surface != target) {
+        if (!cpu.com->addRef(cpu, target)) {
+            if (why) *why = "D3D9 流水线：SetRenderTarget AddRef 失败";
+            return kInvalidCall;
+        }
+        if (old_surface != 0) cpu.com->release(cpu, old_surface);
+        plSet(cpu, pe, kPlColorSurface, target);
+        plSet(cpu, pe, kPlColorArena, ti.arena);
+    }
+    pipeLog("SetRenderTarget", "目标 = 纹理表面 0x%08X（%ux%u，像素块 0x%08X）", target, ti.width,
+            ti.height, ti.arena);
+    return kOk;
 }
 
 // =====================================================================================
@@ -2224,9 +2280,11 @@ bool prepareContext(X86& cpu, std::uint32_t dev, std::uint32_t pe, DrawContext* 
     if (!requireMachine(cpu, &m, why)) return false;
     DeviceInfo dev_info;
     if (!deviceInfoOfState(cpu, dev, &dev_info, why)) return false;
-    GuestSurface* gs = m->surfaces().find(dev_info.arena);
+    const std::uint32_t color_arena = plGet(cpu, pe, kPlColorArena);
+    GuestSurface* gs = m->surfaces().find(color_arena != 0 ? color_arena : dev_info.arena);
     if (!gs) {
-        if (why) *why = "D3D9 流水线：后缓冲像素不在 arena 里";
+        if (why) *why = color_arena != 0 ? "D3D9 流水线：渲染目标像素不在 arena 里"
+                                         : "D3D9 流水线：后缓冲像素不在 arena 里";
         return false;
     }
     const std::uint32_t depth = plGet(cpu, pe, kPlDepthArena);

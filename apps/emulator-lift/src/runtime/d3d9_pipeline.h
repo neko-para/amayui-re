@@ -249,6 +249,8 @@ struct PipelineInfo {
     std::uint32_t fvf = 0;        // SetFVF 的当前值
     std::uint32_t vertex_decl = 0;  // SetVertexDeclaration 的对象 EA（0 = FVF 路）
     std::uint32_t depth_arena = 0;  // 深度缓冲（SurfaceArena 的 32bpp 表面，像素存 float 位模式）
+    std::uint32_t color_arena = 0;  // 当前渲染目标像素块（0 = 设备后缓冲）
+    std::uint32_t color_surface = 0;  // 当前渲染目标的 IDirect3DSurface9 对象（0 = 后缓冲）
     bool in_scene = false;
     std::uint32_t begins = 0;     // BeginScene 成功次数
     std::uint32_t ends = 0;       // EndScene 成功次数
@@ -285,6 +287,11 @@ bool pipelineInfoOfDevice(X86& cpu, std::uint32_t device_state, PipelineInfo* ou
 // 方法语义（返回 HRESULT；`dev` 是设备状态块 EA）
 // ⚠ 每个函数都先自己校验参数（真机的失败码），失败**不**改状态。
 // =====================================================================================
+// 当前渲染目标像素块（0 = 设备后缓冲）。Clear / Draw / 夹具都读这一份。
+std::uint32_t renderTargetArena(X86& cpu, std::uint32_t pipeline_state);
+// SetRenderTarget：target=0 ⇒ 后缓冲；否则必须是本模块的 IDirect3DSurface9。
+std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target, std::uint32_t zstencil,
+                              std::string* why);
 std::uint32_t beginScene(X86& cpu, std::uint32_t dev, std::string* why);
 std::uint32_t endScene(X86& cpu, std::uint32_t dev, std::string* why);
 std::uint32_t setTransform(X86& cpu, std::uint32_t dev, std::uint32_t state, std::uint32_t matrix_ea,

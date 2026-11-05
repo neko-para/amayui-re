@@ -105,6 +105,9 @@ struct ShimState {
     std::uint32_t last_error = 0;        // GetLastError / SetLastError
     std::uint32_t process_id = 0x00001000u;
     std::uint32_t thread_id = 0x00001004u;
+    // ★ 伪线程（SCOPE §1）：CreateThread 只发句柄、不执行 start routine。
+    //   id 从 0x1008 起递增，保证 trace 确定且不同伪线程可区分。
+    std::uint32_t next_pseudo_thread_id = 0x00001008u;
     std::uint32_t process_handle = 0xFFFFFFFFu;   // 伪句柄
     std::uint32_t thread_handle = 0xFFFFFFFEu;
     std::uint32_t heap_handle = 0x00010000u;      // GetProcessHeap 的返回

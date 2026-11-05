@@ -2,8 +2,10 @@
 
 - id: REQ-01M6MJRC587XWXR325K4N2JXMF
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/d3dx9.cpp#texture+draw
+- done_reason: Sprite 簇已到第一帧：2026-11-05 补了 IDirect3DTexture9::GetSurfaceLevel(+0x48) 与 IDirect3DSurface9（GetDevice/GetType/GetDesc/LockRect/UnlockRect），配合 D3D9 的 SetRenderTarget 走通渲染目标路径；Present 第 1 帧 hash=0xB04C136E75952CDE、非背景 895368/921600、330 色（1.2e9 指令内，稳定到第 494 帧）。d3dx9 夹具 303 checks 绿；SetWorldViewRH/LH 等未取证槽仍是 loud trap（不属第一帧判据）。
 - tags: [emulator-lift, m2, d3dx9]
 
 `d3dx9_43!D3DXCreateSprite` 从 stub 变**真实现**（guest 可见 `ID3DXSprite`：vtable + refcount 在 guest 堆，
@@ -61,13 +63,14 @@
 ## 绿
 `ctest` **37/37**（原 36 + d3dx9）· `lift --check` 绿（310 导入 = 实现 **239** / stub **71** / 裸缺口 **0**；
 本单前 227/83/0，`sync --write` 重生派生文件）· `requirements --validate` 0 红。
-## 当前卡点（保持 doing）
-**没到第一帧。** 下一缺口 = `IDirect3DDevice9::SetTransform(+0xB0)`（`.lst` 0x4A1D79 `mov edx,[ecx+0B0h]`
-→ 0x4A1D89 call，紧接 State=2/0x100），矩阵来自 `[edi+0A388h]`/`[edi+0A3C8h]`/`[edi+0A408h]` ⇒
-**3D fixed-function 流水线**（世界/视图/投影 + 渲染状态 + 纹理采样 + DrawPrimitive）= 新的大子系统，不在本单；
-到 Present 还差设备 #41/#42 BeginScene/EndScene 与整条 3D 绘制路径（未测）。
+## 收口
+`IDirect3DDevice9::SetTransform(+0xB0)` 之后的 3D fixed-function 流水线由
+`REQ-01M6MNR9M7S5M5711J79F9K32A` 落地；2026-11-05 boot 已到 Present 第 1 帧
+（hash=`0xB04C136E75952CDE`、非背景 895368/921600、330 色，稳定到第 494 帧）。
+本单另补了 `IDirect3DTexture9::GetSurfaceLevel(+0x48)` 与 `IDirect3DSurface9` 的
+GetDevice / GetType / GetDesc / LockRect / UnlockRect，供渲染目标路径使用。
 ## 没做 / 原因
 - `D3DXCreateTextureFromFileInMemory`：没做（需要图像解码；安装树无独立图片，纹素在 `.ALF/.AGF` 里，格式待取证）。
   本单纹理像素由 `D3DXCreateTexture`+`LockRect` 提供；引入 `SDL3_image`/PNG 解码前先问收益，且它不是第一帧前必经点。
-- SetWorldViewRH/LH、纹理 GetSurfaceLevel 等：loud trap。3D 路径：没做（见卡点）。
+- SetWorldViewRH/LH 等未取证槽：仍是 loud trap；3D 路径不属本单。
 - `docs/plan-m2-2d-text.md` / `SCOPE.md` 归上游，未动。

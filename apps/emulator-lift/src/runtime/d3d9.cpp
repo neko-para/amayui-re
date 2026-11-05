@@ -352,6 +352,7 @@ bool deviceInfoOfState(X86& cpu, std::uint32_t state, DeviceInfo* out, std::stri
     }
     DeviceInfo d;
     d.state = state;
+    d.object = cpu.mem->rd32(state + kDeviceStateObjectOff);
     d.arena = cpu.mem->rd32(state + kDvArena);
     d.pipeline = cpu.mem->rd32(state + 56u);  // 流水线状态块（'DL01'；见 d3d9_pipeline.h）
     d.width = static_cast<int>(cpu.mem->rd32(state + kDvWidth));
@@ -491,9 +492,11 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
         if (why) *why = buf;
         return kInvalidCall;
     }
-    GuestSurface* gs = m->surfaces().find(dev.arena);
+    const std::uint32_t color_arena = dev.pipeline != 0 ? renderTargetArena(cpu, dev.pipeline) : 0u;
+    GuestSurface* gs = m->surfaces().find(color_arena != 0 ? color_arena : dev.arena);
     if (!gs) {
-        if (why) *why = "D3D9：Clear 的后缓冲像素不在 arena 里（设备状态与 arena 不一致）";
+        if (why) *why = color_arena != 0 ? "D3D9：Clear 的渲染目标像素不在 arena 里"
+                                         : "D3D9：Clear 的后缓冲像素不在 arena 里（设备状态与 arena 不一致）";
         return kInvalidCall;
     }
     if ((flags & kClearTarget) == 0) {
@@ -747,6 +750,30 @@ bool textureInfo(X86& cpu, std::uint32_t object, TextureInfo* out, std::string* 
         return false;
     }
     return textureInfoOfState(cpu, state, out, why);
+}
+
+bool surfaceInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::string* why) {
+    TextureInfo tex;
+    if (textureInfoOfState(cpu, state, &tex, nullptr)) {
+        *out = tex;
+        return true;
+    }
+    DeviceInfo dev;
+    if (!deviceInfoOfState(cpu, state, &dev, why)) return false;
+    TextureInfo t;
+    t.state = state;
+    t.device = dev.object;  // 后缓冲 surface 的 GetDevice 回答设备对象（+60）
+    t.arena = dev.arena;
+    t.width = static_cast<std::uint32_t>(dev.width);
+    t.height = static_cast<std::uint32_t>(dev.height);
+    t.format = dev.format;
+    t.bpp = dev.bpp;
+    t.pitch = dev.pitch;
+    t.levels = 1;
+    t.usage = 0;
+    t.pool = 0;
+    *out = t;
+    return true;
 }
 
 void destroyTextureState(X86& cpu, std::uint32_t state) {

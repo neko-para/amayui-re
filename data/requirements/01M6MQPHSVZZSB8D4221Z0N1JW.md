@@ -2,8 +2,10 @@
 
 - id: REQ-01M6MQPHSVZZSB8D4221Z0N1JW
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/dsound.cpp#dsound-edge-lock-write-unlock-play-accounting
+- done_reason: 音频 silent 层 + MessageBoxA 文本已落地；原卡点混音线程由 REQ-01M6MQQA737CB8BAENQK088GP4 的伪线程裁决解决（CreateThread 只发句柄、不跑 start routine）。DSOUND 的 176400 字节 PCM 账本、Play/Stop/游标、MessageBoxA CP932 文本都有会红的夹具；boot 越过 0x004B5FE4 并到达 Present 第一帧。音频仍按 SCOPE 不出声，position-notify / 真宿主音频设备不在本单。
 - tags: [emulator-lift, m2, audio]
 
 ## 修前现场（实测）

@@ -175,7 +175,7 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "CRT 线程（README §2.5 / D5）；M1 不做线程"
+      "reason": "CRT 线程入口（伪线程不执行 start routine；触发 = 有代码依赖线程体）"
     },
     {
       "target": "kernel32!CreateProcessA",
@@ -189,14 +189,7 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "guest 单线程（README §2.5 / D5）；M1 不做线程"
-    },
-    {
-      "target": "kernel32!CreateThread",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "guest 单线程（README §2.5 / D5）；M1 不做线程"
+      "reason": "伪线程只覆盖本进程的 CreateThread；远程线程不做"
     },
     {
       "target": "kernel32!CreateTimerQueue",
@@ -224,7 +217,7 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "guest 单线程（README §2.5 / D5）；M1 不做线程"
+      "reason": "伪线程不执行 start routine；主线程 ExitThread 需单独裁决"
     },
     {
       "target": "kernel32!FindResourceA",
@@ -238,14 +231,7 @@
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
-      "reason": "CRT 卸载并退出线程（README §2.5 / D5）；M1 不做线程"
-    },
-    {
-      "target": "kernel32!GetProcessAffinityMask",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "guest 单线程（README §2.5 / D5）；M1 不做线程"
+      "reason": "CRT 卸载并退出线程（伪线程不执行 start routine）"
     },
     {
       "target": "kernel32!LoadResource",
@@ -269,32 +255,11 @@
       "reason": "SEH 展开不在 M1（plan §9 R1）"
     },
     {
-      "target": "kernel32!ResumeThread",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "guest 单线程（README §2.5 / D5）；M1 不做线程"
-    },
-    {
       "target": "kernel32!RtlUnwind",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "SEH 展开不在 M1（plan §9 R1）"
-    },
-    {
-      "target": "kernel32!SetThreadAffinityMask",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "guest 单线程（README §2.5 / D5）；M1 不做线程"
-    },
-    {
-      "target": "kernel32!SetThreadPriority",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "guest 单线程（README §2.5 / D5）；M1 不做线程"
     },
     {
       "target": "kernel32!SizeofResource",
