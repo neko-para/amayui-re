@@ -270,6 +270,10 @@ bool parsePeImage(PeImage& img, std::string* err) {
             PeImportInfo imp;
             imp.module = module;
             imp.iat_rva = iat_rva;
+            // ★ 原始 RVA 原样保留（⛔ 不换算成文件偏移）：A5 的诊断要能打印 descriptor 身份。
+            imp.original_first_thunk = orig_thunk;
+            imp.first_thunk = first_thunk;
+            imp.descriptor_index = static_cast<std::uint32_t>(i);
             if (entry & 0x80000000u) {
                 imp.by_ordinal = true;
                 imp.ordinal = static_cast<std::uint16_t>(entry & 0xFFFFu);
@@ -336,14 +340,35 @@ bool mapPeImageAt(GuestMemory& mem, const PeImage& img, std::uint32_t base, std:
         // ★ **要拷的字节 = min(SizeOfRawData, VirtualSize)**，⛔ 不是 SizeOfRawData。
         //   `SizeOfRawData < VirtualSize` 是**合法的正常形态**（BSS 尾巴 / 资源虚拟尾部 ——
         //   尾部的字节在文件里根本不存在，载入后是 0）。把它当坏节会把正常镜像拒掉。
-        //   只有"文件里声明要拷的那些字节超出文件长度"才是坏（`raw_offset + copy` 还会 uint32 回绕，
-        //   所以用 64 位算）。
+        //   `SizeOfRawData > VirtualSize`（文件内对齐填充）也合法：只拷 min，填充不进 guest。
+        //   `raw_offset + size` 在 uint32 里会回绕，所以这里一律用 64 位算。
         const std::uint32_t copy = s.raw_size < vsize ? s.raw_size : vsize;
-        const std::uint64_t raw_end = static_cast<std::uint64_t>(s.raw_offset) + copy;
-        if (copy && raw_end > img.bytes.size()) {
+        const std::uint64_t copy_end = static_cast<std::uint64_t>(s.raw_offset) + copy;
+        if (copy && copy_end > img.bytes.size()) {
             if (err) *err = std::string("节 raw 数据越界：") + s.name + "（RVA " + hex32(s.va) + "，PointerToRawData " +
-                             hex32(s.raw_offset) + " + 要拷的 " + hex32(copy) + " = " + hex64(raw_end) +
+                             hex32(s.raw_offset) + " + 要拷的 " + hex32(copy) + " = " + hex64(copy_end) +
                              " > 文件长度 " + hex64(img.bytes.size()) + "）";
+            return false;
+        }
+        // ★ 2026-11-05 加严（REQ-01M6KK2C6TKBA88M6EXG1H7E5B）：**整个 raw 声明区间**必须落在文件里。
+        //   旧判据只查 `min(SizeOfRawData, VirtualSize)` ⇒ `SizeOfRawData` 声称到文件外、但越界部分
+        //   全在 VirtualSize 之后的"纯填充"会被静默接受（那些字节反正不会被拷）。
+        //   为什么不误杀：只读扫过 `links/install` 的 12 份 PE32 / 67 个节（2026-11-05，
+        //   脚本读 PE 头、不改安装树）——`PointerToRawData + SizeOfRawData > 文件长度` 的节 **0 个**；
+        //   其中 26 节 raw_size > vsize（文件内对齐填充）、38 节 vsize > raw_size（虚拟尾部）、
+        //   10 节 raw 恰好止于文件尾（其中 7 节是 raw_size > vsize 的文件内填充 ⇒ 边界必须是 `>` 不是 `>=`）。
+        //   ⇒ 按"节头声称的区间必须整个在文件里"加严，对这份安装树零误杀；
+        //   `tests/pe_loader.cpp` 的 `raw-range-at-eof-ok` 钉住"虚拟尾部 / 文件内填充 + raw 恰好止于 EOF"
+        //   仍然接受。⛔ 不要退回"只看要拷的字节"：那是本单要消掉的静默接受。
+        const std::uint64_t declared_end = static_cast<std::uint64_t>(s.raw_offset) + s.raw_size;
+        if (s.raw_size && declared_end > img.bytes.size()) {
+            const std::uint64_t overrun = declared_end - img.bytes.size();
+            if (err) *err = std::string("节 raw 声明区间越过文件末尾（纯填充越界也拒绝）：") + s.name + "（RVA " +
+                             hex32(s.va) + "，PointerToRawData " + hex32(s.raw_offset) + " + SizeOfRawData " +
+                             hex32(s.raw_size) + " = " + hex64(declared_end) + " > 文件长度 " +
+                             hex64(img.bytes.size()) + "，越界 " + hex64(overrun) + " 字节；要拷的 " +
+                             hex32(copy) + " 字节未越界，多出的部分在 VirtualSize " + hex32(vsize) +
+                             " 之后、文件里不存在）";
             return false;
         }
     }

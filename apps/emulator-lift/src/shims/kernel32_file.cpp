@@ -60,6 +60,15 @@
 //      开关）。⛔ 不再"返回成功但什么都不做"。
 //  11. **`GetCurrentDirectoryW` 是 W 版里唯一多做的一条**（`GetCurrentDirectoryA/W` 同一份实现），
 //      其余 W 版只做任务点名的 `CreateFileW`。
+//  12. **写覆盖层（2026-11-05，`REQ-01M6KNBE5FP87DAC93ZRQ1K1DK`）：`--game-dir` 只读。**
+//      有 `--appdata` 时，"落点本来在 `--game-dir`"的写改到 `<--appdata>/Game/…`（影子目录，
+//      见 `runtime/vfs.h` 文件上方）；写打开已有文件先 **copy-up**（读改写不丢内容）；读先影子、
+//      再安装树。**没有 `--appdata` 时保持旧行为**（写仍落 `--game-dir`），但每次写都打一行
+//      `⚠` 警告 —— ⛔ 不静默写安装树。⚠ **没有 whiteout**：`DeleteFileA` / `MoveFileA` /
+//      `RemoveDirectoryA` / `SetFileAttributesA` 对"只在安装树里"的路径**响亮失败**（`5`），
+//      ⛔ 绝不改安装树；引擎自己写出来的东西在影子里，照常可删 / 可改。
+//      ⚠ `createFile` 的"会新建"分支**按需建影子父目录**（engine 的形态见 vfs.h）：父目录在
+//      guest 世界里不存在也可能成功 —— 这是覆盖层的有意偏差，`CreateDirectoryA` 仍要求父目录存在。
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -320,6 +329,26 @@ void pathFailure(X86& cpu, const char* api, std::uint32_t code, const std::strin
             why.c_str());
 }
 
+// ★ 写覆盖层（2026-11-05，`REQ-01M6KNBE5FP87DAC93ZRQ1K1DK`；口径见 runtime/vfs.h 文件上方）：
+//   每一次**写**都把落点打进日志，⛔ 不做"静默写安装树"。
+//   · 有 `--appdata` ⇒ 非特殊目录的写应落 `<--appdata>/Game/…`（`host_path` 在影子下）；
+//     `install_tree` 为真 = 这条路径**只在安装树里**（只读）⇒ 调用方必须按"已存在 / 响亮失败"
+//     处理，⛔ 不许写它。
+//   · 没有 `--appdata` ⇒ **保持旧行为**（写仍落 `--game-dir`），但每次写都要**响亮**。
+void logWriteTarget(X86& cpu, const char* api, const std::string& guest_path,
+                    const std::string& host_path, bool install_tree) {
+    if (!cpu.vfs->writeOverlayEnabled()) {
+        shimLog("kernel32", api,
+                "⚠ 没有 --appdata ⇒ 写仍落到 --game-dir（\"%s\"）：安装树只读的口径不成立",
+                guestPathForLog(guest_path).c_str());
+        return;
+    }
+    if (!install_tree && cpu.vfs->isWriteOverlayPath(host_path)) {
+        shimLog("kernel32", api, "写 \"%s\" ⇒ 影子目录 \"%s\"（--game-dir 只读）",
+                guestPathForLog(guest_path).c_str(), host_path.c_str());
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // 路径入参（A 版 = CP932 字节；W 版 = UTF-16）⇒ UTF-8
 // ---------------------------------------------------------------------------------------
@@ -440,6 +469,27 @@ bool resolveGuest(X86& cpu, const std::string& guest_path, std::string* host, st
     return cpu.vfs->resolve(guest_path, host, why, must_exist, resolve_case);
 }
 
+// ★ 写目标的解析（`--game-dir` 只读的接缝；口径见 runtime/vfs.h 文件上方）：
+//   · 有 `--appdata` ⇒ VFS 的写覆盖层（影子目录；已在安装树里的文件先 copy-up）；
+//   · 没有 `--appdata` ⇒ **保持旧行为**（老 `resolve`，`legacy_must_exist` / `legacy_resolve_case`
+//     按各 API 原来的口径传），`install_tree=true` 只用来提示"落点是安装树"（调用方打警告）。
+bool resolveWriteTarget(X86& cpu, const std::string& guest_path, std::string* host,
+                        bool* install_tree, std::string* why, const lift::VfsWriteOptions& opts,
+                        bool legacy_must_exist) {
+    host->clear();
+    why->clear();
+    *install_tree = false;
+    if (guest_path.empty()) {
+        *why = "[invalid] 空路径";
+        return false;
+    }
+    if (cpu.vfs->writeOverlayEnabled()) {
+        return cpu.vfs->resolveForWrite(guest_path, host, install_tree, why, opts);
+    }
+    *install_tree = true;
+    return cpu.vfs->resolve(guest_path, host, why, legacy_must_exist, /*resolve_case=*/true);
+}
+
 // 共享冲突判定（Windows 文档：**两个方向**都要看，且**只由访问位定义**）：
 //   ① 新请求的 access 位里有哪一位是**已有句柄**的 share_mode 不允许的；
 //   ② 已有句柄的 access 位里有哪一位是**新请求的** share_mode 不允许的。
@@ -520,9 +570,24 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     }
     const bool must_exist = (disposition == kOpenExisting || disposition == kTruncateExisting);
 
+    // ★ 写覆盖层（`--game-dir` 只读）：**写请求**走 `resolveForWrite` —— 有 `--appdata` 时落到
+    //   影子目录（已有文件先 copy-up），没有时保持旧行为（安装树，下面 `logWriteTarget` 打警告）。
+    //   写意图 = 要写位，或 disposition 会创建 / 截断文件；`OPEN_EXISTING` + 只读 = 纯读。
+    const bool write_intent = want_write || disposition != kOpenExisting;
     std::string host;
     std::string why;
-    if (!resolveGuest(cpu, guest, &host, &why, must_exist, /*resolve_case=*/true)) {
+    bool install_tree = false;
+    bool resolved = false;
+    if (write_intent) {
+        lift::VfsWriteOptions opts;
+        opts.copy_up = want_write;  // 读改写（OPEN_ALWAYS / r+b）不丢安装树里的原内容
+        opts.create_parents =
+            (disposition == kCreateNew || disposition == kCreateAlways || disposition == kOpenAlways);
+        resolved = cpu.vfs->resolveForWrite(guest, &host, &install_tree, &why, opts);
+    } else {
+        resolved = resolveGuest(cpu, guest, &host, &why, must_exist, /*resolve_case=*/true);
+    }
+    if (!resolved) {
         // ★ 把 dwCreationDisposition 一起打出来（2026-11-05）：引擎的"探测临时文件"与"真的要建文件"
         //   在日志里长得一模一样（都是 `[notfound] 段 ... 里不存在`），只凭路径判断不出是哪种意图
         //   ⇒ 定位"引擎为什么放弃并 MessageBox+ExitProcess"时会被引到错的方向。
@@ -545,6 +610,17 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
         call.result = kInvalidHandleValue;
         return;
     }
+    if (write_intent && want_write && install_tree && cpu.vfs->writeOverlayEnabled()) {
+        // ★ 防御（VFS 的合同见 vfs.h）：**有写权**的目标必须已经 copy-up 到影子；能走到这里说明
+        //   合同被破坏 ⇒ 响亮失败，⛔ 绝不把写落进安装树（旧行为会直接写 --game-dir）。
+        pathFailure(cpu, api, kErrAccessDenied, guest,
+                    "[overlay] 写目标仍是只读安装树（VFS 合同被破坏）⇒ 不打开");
+        call.result = kInvalidHandleValue;
+        return;
+    }
+    // ★ 写落点进日志（有 --appdata ⇒ 影子；没有 ⇒ 响亮警告）。放这里：目录 / 非法参数这些
+    //   还没到"真的写"的分支不刷屏。
+    if (write_intent) logWriteTarget(cpu, api, guest, host, install_tree);
 
     bool truncate = false;
     switch (disposition) {
@@ -1027,11 +1103,27 @@ void shimSetFileAttributesA(X86& cpu, ShimCall& call) {
     const std::uint32_t attrs = call.u32(1);
     std::string host;
     std::string why;
-    if (!resolveGuest(cpu, guest, &host, &why, /*must_exist=*/true, /*resolve_case=*/true)) {
+    bool install_tree = false;
+    const bool overlay_on = cpu.vfs->writeOverlayEnabled();
+    // ★ 改属性是**写**：有 --appdata 时先 copy-up（只改影子那份，⛔ 不改安装树）；
+    //   没有 --appdata 时保持旧行为（安装树 + 警告）。
+    lift::VfsWriteOptions opts;
+    opts.copy_up = true;
+    opts.create_parents = true;
+    if (!resolveWriteTarget(cpu, guest, &host, &install_tree, &why, opts,
+                            /*legacy_must_exist=*/true)) {
         pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
         call.result = 0;
         return;
     }
+    if (overlay_on && install_tree) {
+        // 目录没法 copy-up ⇒ 安装树里的目录是只读的；⛔ 不改安装树
+        pathFailure(cpu, api, kErrAccessDenied, guest,
+                    "[overlay] 安装树是只读的（目标是目录 / 无法 copy-up）⇒ 不改属性");
+        call.result = 0;
+        return;
+    }
+    logWriteTarget(cpu, api, guest, host, install_tree);
     const fs::path hp = pathFromUtf8(host);
     std::error_code ec;
     fs::file_status st = fs::status(hp, ec);
@@ -1069,11 +1161,24 @@ void shimDeleteFileA(X86& cpu, ShimCall& call) {
     const std::string guest = pathFromCp932(call.str(0), api);
     std::string host;
     std::string why;
-    if (!resolveGuest(cpu, guest, &host, &why, /*must_exist=*/true, /*resolve_case=*/true)) {
+    bool install_tree = false;
+    const bool overlay_on = cpu.vfs->writeOverlayEnabled();
+    lift::VfsWriteOptions opts;  // 删：不 copy-up、不建目录
+    if (!resolveWriteTarget(cpu, guest, &host, &install_tree, &why, opts,
+                            /*legacy_must_exist=*/true)) {
         pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
         call.result = 0;
         return;
     }
+    if (overlay_on && install_tree) {
+        // ⛔ 安装树只读 + 没有 whiteout ⇒ 删除"只在安装树里"的文件必须响亮失败（不删安装树）
+        const bool exists = cpu.vfs->isFile(guest) || cpu.vfs->isDirectory(guest);
+        pathFailure(cpu, api, exists ? kErrAccessDenied : kErrFileNotFound, guest,
+                    "[overlay] 安装树只读；影子目录里没有这条路径（没有 whiteout）⇒ 不删除");
+        call.result = 0;
+        return;
+    }
+    logWriteTarget(cpu, api, guest, host, install_tree);
     const fs::path hp = pathFromUtf8(host);
     std::error_code ec;
     if (fs::is_directory(hp, ec) && !ec) {
@@ -1101,17 +1206,39 @@ void shimMoveFileA(X86& cpu, ShimCall& call) {
     std::string src;
     std::string dst;
     std::string why;
-    if (!resolveGuest(cpu, src_guest, &src, &why, /*must_exist=*/true, /*resolve_case=*/true)) {
+    bool src_install = false;
+    bool dst_install = false;
+    const bool overlay_on = cpu.vfs->writeOverlayEnabled();
+    lift::VfsWriteOptions opts;  // 改名：不 copy-up、不建目录（源 / 目标都必须在影子里）
+    if (!resolveWriteTarget(cpu, src_guest, &src, &src_install, &why, opts,
+                            /*legacy_must_exist=*/true)) {
         pathFailure(cpu, api, vfsErrorToWin32(why), src_guest, why);
         call.result = 0;
         return;
     }
+    if (overlay_on && src_install) {
+        // ⛔ 安装树只读：没有 whiteout ⇒ 不能把"只在安装树里"的文件搬走
+        const bool exists = cpu.vfs->isFile(src_guest) || cpu.vfs->isDirectory(src_guest);
+        pathFailure(cpu, api, exists ? kErrAccessDenied : kErrFileNotFound, src_guest,
+                    "[overlay] 安装树只读；影子目录里没有源文件（没有 whiteout）⇒ 不改名");
+        call.result = 0;
+        return;
+    }
     // 目标：可以不存在（不存在时 vfs 保留调用方拼写 = 创建语义）；已存在时按大小写不敏感命中
-    if (!resolveGuest(cpu, dst_guest, &dst, &why, /*must_exist=*/false, /*resolve_case=*/true)) {
+    if (!resolveWriteTarget(cpu, dst_guest, &dst, &dst_install, &why, opts,
+                            /*legacy_must_exist=*/false)) {
         pathFailure(cpu, api, vfsErrorToWin32(why), dst_guest, why);
         call.result = 0;
         return;
     }
+    if (overlay_on && dst_install) {
+        // 安装树里已有同名目标 ⇒ MoveFile 不覆盖（真机也返回 ERROR_ALREADY_EXISTS）
+        pathFailure(cpu, api, kErrAlreadyExists, dst_guest,
+                    "目标已存在（MoveFile 不覆盖；安装树只读，不落盘）");
+        call.result = 0;
+        return;
+    }
+    logWriteTarget(cpu, api, dst_guest, dst, dst_install);
     std::error_code ec;
     if (fs::exists(pathFromUtf8(dst), ec) && !ec) {
         pathFailure(cpu, api, kErrAlreadyExists, dst_guest, "目标已存在（MoveFile 不覆盖）");
@@ -1137,17 +1264,33 @@ void shimCopyFileA(X86& cpu, ShimCall& call) {
     std::string src;
     std::string dst;
     std::string why;
+    bool dst_install = false;
+    const bool overlay_on = cpu.vfs->writeOverlayEnabled();
     if (!resolveGuest(cpu, src_guest, &src, &why, /*must_exist=*/true, /*resolve_case=*/true)) {
         pathFailure(cpu, api, vfsErrorToWin32(why), src_guest, why);
         call.result = 0;
         return;
     }
     // 目标：可以不存在（不存在时 vfs 保留调用方拼写 = 创建语义）；已存在时按大小写不敏感命中
-    if (!resolveGuest(cpu, dst_guest, &dst, &why, /*must_exist=*/false, /*resolve_case=*/true)) {
+    // ★ 写覆盖层：目标走写目标解析 —— 安装树里已有同名文件时先 copy-up（复制到影子再覆盖），
+    //   ⛔ 安装树本身一个字节都不改。
+    lift::VfsWriteOptions opts;
+    opts.copy_up = true;         // 覆盖已有文件：先 materialize 到影子
+    opts.create_parents = true;  // 目标父目录按需镜像
+    if (!resolveWriteTarget(cpu, dst_guest, &dst, &dst_install, &why, opts,
+                            /*legacy_must_exist=*/false)) {
         pathFailure(cpu, api, vfsErrorToWin32(why), dst_guest, why);
         call.result = 0;
         return;
     }
+    if (overlay_on && dst_install) {
+        // 安装树里是目录 / 无法 copy-up 的东西 ⇒ CopyFile 也不能往它上面写
+        pathFailure(cpu, api, kErrAccessDenied, dst_guest,
+                    "[overlay] 目标是安装树里的只读对象（目录 / 不可 copy-up）⇒ 不复制");
+        call.result = 0;
+        return;
+    }
+    logWriteTarget(cpu, api, dst_guest, dst, dst_install);
     if (!cpu.vfs->isFile(src_guest)) {
         pathFailure(cpu, api, kErrFileNotFound, src_guest, "[notfound] 源不是文件");
         call.result = 0;
@@ -1173,12 +1316,36 @@ void shimCreateDirectoryA(X86& cpu, ShimCall& call) {
     const std::string guest = pathFromCp932(call.str(0), api);
     std::string host;
     std::string why;
+    bool install_tree = false;
+    const bool overlay_on = cpu.vfs->writeOverlayEnabled();
+    if (overlay_on) {
+        // ★ 覆盖层只在"会新建"的路径上镜像父目录 —— 父目录必须**在 guest 世界里**存在
+        //   （影子 ∪ 安装树）；否则真机语义是 ERROR_PATH_NOT_FOUND(3)，⛔ 不凭覆盖层凭空造出
+        //   整条链（那会把"引擎拼错路径"变成"悄悄成功"）。
+        const std::string parent = lift::Vfs::parentGuest(guest);
+        if (!parent.empty() && !cpu.vfs->isDirectory(parent)) {
+            pathFailure(cpu, api, kErrPathNotFound, guest, "[notdir] 父目录不存在");
+            call.result = 0;
+            return;
+        }
+    }
     // 目录名：可以不存在（不存在时 vfs 保留调用方拼写 = 创建语义）；已存在时按大小写不敏感命中
-    if (!resolveGuest(cpu, guest, &host, &why, /*must_exist=*/false, /*resolve_case=*/true)) {
+    lift::VfsWriteOptions opts;
+    opts.create_parents = true;  // 影子侧镜像父目录
+    if (!resolveWriteTarget(cpu, guest, &host, &install_tree, &why, opts,
+                            /*legacy_must_exist=*/false)) {
         pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
         call.result = 0;
         return;
     }
+    if (overlay_on && install_tree) {
+        // 安装树里已有同名的东西（文件 / 目录）⇒ 真机语义 = ERROR_ALREADY_EXISTS；⛔ 不动安装树
+        pathFailure(cpu, api, kErrAlreadyExists, guest,
+                    "目标已存在于安装树（CreateDirectory 不覆盖；安装树只读）");
+        call.result = 0;
+        return;
+    }
+    logWriteTarget(cpu, api, guest, host, install_tree);
     const fs::path hp = pathFromUtf8(host);
     std::error_code ec;
     if (fs::exists(hp, ec) && !ec) {
@@ -1202,11 +1369,23 @@ void shimRemoveDirectoryA(X86& cpu, ShimCall& call) {
     const std::string guest = pathFromCp932(call.str(0), api);
     std::string host;
     std::string why;
-    if (!resolveGuest(cpu, guest, &host, &why, /*must_exist=*/true, /*resolve_case=*/true)) {
+    bool install_tree = false;
+    const bool overlay_on = cpu.vfs->writeOverlayEnabled();
+    lift::VfsWriteOptions opts;  // 删目录：不 copy-up、不建目录
+    if (!resolveWriteTarget(cpu, guest, &host, &install_tree, &why, opts,
+                            /*legacy_must_exist=*/true)) {
         pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
         call.result = 0;
         return;
     }
+    if (overlay_on && install_tree) {
+        // ⛔ 安装树只读：只能在影子里存在 / 空的目录才能删（没有 whiteout）
+        pathFailure(cpu, api, kErrAccessDenied, guest,
+                    "[overlay] 安装树是只读的；影子目录里没有这个目录（没有 whiteout）⇒ 不删除");
+        call.result = 0;
+        return;
+    }
+    logWriteTarget(cpu, api, guest, host, install_tree);
     const fs::path hp = pathFromUtf8(host);
     std::error_code ec;
     if (!fs::is_directory(hp, ec) || ec) {
@@ -1453,16 +1632,46 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
         return;
     }
 
+    if (!cpu.vfs->writeOverlayEnabled()) {
+        shimLog("kernel32", api,
+                "⚠ 没有 --appdata ⇒ 临时文件仍落到 --game-dir（安装树只读的口径不成立）");
+    }
     // uUnique == 0：从 0 起找第一个空号（**有意偏差**：真机从系统时间起），并创建那个空文件
     for (std::uint32_t i = 0; i <= 0xFFFFu; ++i) {
         char num[8] = {};
         std::snprintf(num, sizeof(num), "%04X", static_cast<unsigned>(i));
         const std::string name = safe_prefix + num + ".TMP";
-        const fs::path hp = pathFromUtf8(host_dir) / pathFromUtf8(name);
+        fs::path target = pathFromUtf8(host_dir) / pathFromUtf8(name);
+        std::string shadow_guest;  // 非空 = 这一轮创建会落到影子目录（成功后打一行）
+        std::string shadow_host;
+        // ★ 写覆盖层：临时文件也是**写** —— 落点本来在安装树时改到影子（⛔ 不写安装树）。
+        //   AppData 的 TEMP（`<--appdata>/Local/Temp`）走原映射，不受影响。
+        if (cpu.vfs->writeOverlayEnabled()) {
+            const std::string candidate_guest =
+                guest_dir.empty() ? name : (guest_dir + "\\" + name);
+            std::string target_host;
+            std::string why;
+            bool install_tree = false;
+            lift::VfsWriteOptions wopts;
+            wopts.create_parents = true;
+            if (!cpu.vfs->resolveForWrite(candidate_guest, &target_host, &install_tree, &why, wopts)) {
+                cpu.shim.last_error = vfsErrorToWin32(why);
+                shimLog("kernel32", api, "候选 \"%s\" 的写目标解析失败（%s）⇒ 返回 0",
+                        candidate_guest.c_str(), why.c_str());
+                call.result = 0;
+                return;
+            }
+            if (install_tree) continue;  // 安装树里已有同名（只读）⇒ 当作"这个名字被占用"
+            target = pathFromUtf8(target_host);
+            if (cpu.vfs->isWriteOverlayPath(target_host)) {
+                shadow_guest = candidate_guest;
+                shadow_host = target_host;
+            }
+        }
         std::error_code ec;
-        if (fs::exists(hp, ec) && !ec) continue;
+        if (fs::exists(target, ec) && !ec) continue;
         // 真机 GetTempFileName 在 uUnique==0 时**创建**这个空文件
-        std::FILE* fp = openHostFile(pathToUtf8(hp), "wb");
+        std::FILE* fp = openHostFile(pathToUtf8(target), "wb");
         if (!fp) {
             cpu.shim.last_error = errnoToWin32(errno);
             shimLog("kernel32", api, "创建 \"%s\" 失败（errno=%d）⇒ 返回 0", name.c_str(), errno);
@@ -1470,6 +1679,10 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
             return;
         }
         std::fclose(fp);
+        if (!shadow_guest.empty()) {
+            shimLog("kernel32", api, "写 \"%s\" ⇒ 影子目录 \"%s\"（--game-dir 只读）",
+                    shadow_guest.c_str(), shadow_host.c_str());
+        }
         writeTempName(name);
         call.result = i;
         return;
@@ -1729,6 +1942,14 @@ void shimSetFileTime(X86& cpu, ShimCall& call) {
     if (!has_creation && !has_access && !has_write) {
         // 文档：三个都可以不改（NULL / 全 0）⇒ 成功返回
         call.result = 1;
+        return;
+    }
+    // ★ 写覆盖层（`--game-dir` 只读）：句柄指向安装树 ⇒ 这是**读打开**出来的句柄（写打开的
+    //   目标已经在影子里，见 `createFile`）⇒ 不写宿主时间戳。⛔ 不改安装树（连元数据也不改）。
+    if (cpu.vfs && cpu.vfs->writeOverlayEnabled() && cpu.vfs->isInstallTreePath(st->host_path)) {
+        pathFailure(cpu, api, kErrAccessDenied, st->guest_path,
+                    "[overlay] 安装树只读：这条句柄指向安装树（读打开），⛔ 不写时间戳");
+        call.result = 0;
         return;
     }
 

@@ -219,6 +219,9 @@ bool reserveBatch(X86& cpu, const State& s, std::uint32_t need, std::string* why
 }
 
 // 8 位通道的舍入乘法（只此一处；掩码换算 / load·store 走 runtime/pixel_format.h）
+// ★ 它**不是** pixel_format 的 mask/expand 助手：这是 ALPHABLEND 的 8 位舍入乘法；流水线的
+//   `blendFactors8`/`applyBlendOp` 是 D3DBLEND/D3DBLENDOP 的设备混合状态语义（另一套公式）。
+//   ⛔ 不把它们并成一份 —— 并了会改像素结果（口径不同，不是"看起来重复"）。
 std::uint8_t mul255(unsigned a, unsigned b) {
     return static_cast<std::uint8_t>((a * b + 127u) / 255u);
 }
@@ -611,11 +614,9 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             releaseEntry(ea);
             continue;
         }
-        // 调制色（D3D 的 MODULATE：源 × 漫反射色）
-        const unsigned sa = (color >> 24) & 0xFFu;
-        const unsigned sr = (color >> 16) & 0xFFu;
-        const unsigned sg = (color >> 8) & 0xFFu;
-        const unsigned sb = color & 0xFFu;
+        // 调制色（D3D 的 MODULATE：源 × 漫反射色）。D3DCOLOR 的位序只在 pixel_format 里有一份。
+        unsigned sa = 0, sr = 0, sg = 0, sb = 0;
+        pixel_format::unpackColor(color, sa, sr, sg, sb);
         // ---- 源：白色（pTexture=0）或真纹理 ----
         const std::uint32_t texture = cpu.mem->rd32(ea + kBeTexture);
         const std::uint8_t* tbase = nullptr;
@@ -683,7 +684,8 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     tex_r = pixel_format::expandChannel(raw, tfmt.rmask);
                     tex_g = pixel_format::expandChannel(raw, tfmt.gmask);
                     tex_b = pixel_format::expandChannel(raw, tfmt.bmask);
-                    tex_a = tfmt.amask != 0 ? pixel_format::expandChannel(raw, tfmt.amask) : 255u;
+                    // mask==0（无 alpha 通道）⇒ expandChannel 返回 255（不透明），语义见 pixel_format.h
+                    tex_a = pixel_format::expandChannel(raw, tfmt.amask);
                 }
                 const unsigned src_r = mul255(tex_r, sr);
                 const unsigned src_g = mul255(tex_g, sg);

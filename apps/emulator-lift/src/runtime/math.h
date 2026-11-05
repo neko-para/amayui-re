@@ -41,6 +41,8 @@ using Vec4T = glm::tvec4<T, glm::defaultp>;
 static_assert(sizeof(Mat4) == 16 * sizeof(float), "glm::mat4 必须是 16 个 float");
 
 // 单位阵（GLM 的默认构造**不**初始化 ⇒ 所有生成器都显式写这一行）
+// ★ 这是 D3DX 单位阵的唯一来源：`d3d9_pipeline` 的 writeIdentity 与 `d3dx9_sprite` 的
+//   writeIdentityMatrix 都走它（⛔ 不再各写一遍 `i % 5`）。
 template <typename T>
 inline Mat4T<T> identity() {
     return Mat4T<T>(T(1));

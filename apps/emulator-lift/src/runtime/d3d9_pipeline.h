@@ -2,9 +2,19 @@
 //
 // ★ 范围（用户 2026-11-05 裁决"确认需要实现 D3D 接口"之后的第一帧判据）：
 //     设备状态机（变换 / 渲染状态 / 采样器 / 纹理级状态 / 流 / 材质 / 灯光 / 视口 / 裁剪矩形）
-//     → 固定功能 T&L（WORLD→VIEW→PROJECTION、近平面裁剪、视口映射）
+//     → 固定功能 T&L（WORLD→VIEW→PROJECTION、**六平面裁剪**、视口映射）
 //     → 软件光栅（重心坐标 + 左上填充规则、Z 测试/写、纹理采样、纹理级运算、alpha test、混合）
 //   ⛔ 不是"返回 S_OK 就算画了"：真值落在**设备后缓冲的 guest 像素**上（与 `d3d9::clear` 同一块 SurfaceArena）。
+//
+// ★ 每像素状态读（2026-11-05 消除的偏差 #4）：纹理级 / 采样器状态**每次 Draw 只读一遍**
+//   （`prepareContext` 里快照进 `DrawContext`），像素循环只读快照。可观察量：
+//   `PipelineInfo::stage_snapshots`（= 完成准备的 Draw 次数；⛔ 不随三角形/像素增长）。
+//
+// ★ 裁剪（2026-11-05 消除的偏差 #5）：XYZ/XYZW 顶点在**齐次裁剪空间**对 6 个面裁剪
+//   （近 `z>=0` / 远 `w-z>=0` / 左 `x+w>=0` / 右 `w-x>=0` / 下 `y+w>=0` / 上 `w-y>=0`）；
+//   XYZRHW 顶点的 x/y 已是屏幕坐标 ⇒ 改为裁**视口矩形**（z 仍是 [0,1]）。未做的面**不静默**：
+//   用户裁剪面（`D3DRS_CLIPPLANEENABLE`）仍只记录（`recordUnsupported`）；`D3DRS_CLIPPING=0`
+//   （真机关裁剪）同样记录 —— 本线**总是**裁剪。
 //
 // ★ 与 `runtime/d3d9.{h,cpp}` 的分工：那边是"设备簇的叶子语义"（适配器 / caps / Clear / Present /
 //   纹理状态块）；本文件是"**状态机 + 流水线**"（追加式，不改那边既有语义）。
@@ -256,6 +266,7 @@ struct PipelineInfo {
     std::uint32_t ends = 0;       // EndScene 成功次数
     std::uint32_t draws = 0;      // 通过前置检查的 Draw 次数
     std::uint32_t draw_calls = 0; // 进入 Draw 的次数（含失败）
+    std::uint32_t stage_snapshots = 0;  // 纹理级/采样器状态快照次数（每次 Draw 一次；见文件头）
     std::uint32_t triangles = 0;  // 进入光栅的三角形数（含被裁掉的）
     std::uint32_t rasterized = 0; // 真正光栅化（过了背面剔除）的三角形数
     std::uint64_t pixels = 0;     // 通过深度/alpha 测试并写进后缓冲的像素数

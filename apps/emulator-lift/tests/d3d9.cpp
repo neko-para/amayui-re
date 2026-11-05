@@ -11,7 +11,9 @@
 //      caps 的 0xD4 字节**全部被写**（两块不同初值的缓冲得到逐字节相同的结果）+ 0xD4 外不被写。
 //   ⑤ `Clear(0,NULL,3,0,1.0f,0)`（以及带 D3DRECT 的 Clear）**真的**改后缓冲像素：颜色对、矩形外不变。
 //   ⑥ `Present` 之后 `frameCount()==1`、`lastHash()` 与 arena 哈希一致；**两台新机器同输入 ⇒ 同帧哈希**。
-//   ⑦ 未实现的槽 ⇒ **loud trap**（机器停 + `stop_why`）且日志输入里带 iface + 偏移（`r.detail` 里就有）
+//   ⑦ GetBackBuffer / SetRenderTarget / 后缓冲 surface 的 GetDesc 可回查；`--dump-frame` 的
+//      `{frame}` 模板真的写出 BMP（头两字节 BM）。
+//   ⑧ 未实现的槽 ⇒ **loud trap**（机器停 + `stop_why`）且日志输入里带 iface + 偏移（`r.detail` 里就有）
 //      —— ⛔ 不许返回 0 继续跑。
 //
 // ★ 所有方法调用都从 **guest 代码** 经 vtable 调（`mov eax,[vtbl]; push …; call [eax+off]`），
@@ -531,7 +533,39 @@ void casePresent() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ⑥ GetBackBuffer + SetRenderTarget：后缓冲 surface 可取得，SetRenderTarget(0) 恢复后缓冲
+// ⑥ 帧导出：`{frame}` 替换成 4 位帧号，BMP 真落盘（头两字节 BM）
+// ---------------------------------------------------------------------------------------
+void caseFrameDump() {
+    lift_test::g_current_case = "d3d9/frame-dump";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t obj = f.createDirect3D();
+    LIFT_CHECK_NE_U32(obj, 0u);
+    if (obj == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(obj, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    const char* path = "lift-frame-{frame}.bmp";
+    std::remove("lift-frame-0001.bmp");
+    f.m.cpu().shim.frame_dump = path;
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x44u, {0u, 0u, 0u, 0u}), 0u);  // Present
+    std::FILE* fp = std::fopen("lift-frame-0001.bmp", "rb");
+    LIFT_CHECK(fp != nullptr);
+    if (fp) {
+        unsigned char hdr[2] = {0, 0};
+        const std::size_t n = std::fread(hdr, 1, sizeof(hdr), fp);
+        std::fclose(fp);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(n), 2u);
+        LIFT_CHECK_EQ_U32(hdr[0], 'B');
+        LIFT_CHECK_EQ_U32(hdr[1], 'M');
+    }
+    std::remove("lift-frame-0001.bmp");
+    f.m.cpu().shim.frame_dump.clear();
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑦ GetBackBuffer + SetRenderTarget：后缓冲 surface 可取得，SetRenderTarget(0) 恢复后缓冲
 // ---------------------------------------------------------------------------------------
 void caseGetBackBufferAndRenderTarget() {
     lift_test::g_current_case = "d3d9/backbuffer-and-render-target";
@@ -577,7 +611,7 @@ void caseGetBackBufferAndRenderTarget() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ⑦ 未实现的槽 ⇒ loud trap（机器停 + 报 iface/偏移），⛔ 不许返回 0 继续跑
+// ⑧ 未实现的槽 ⇒ loud trap（机器停 + 报 iface/偏移），⛔ 不许返回 0 继续跑
 // ---------------------------------------------------------------------------------------
 void caseUnimplementedSlotTraps() {
     // (a) IDirect3DDevice9 的未实现槽 #3 TestCooperativeLevel（+0x0C）
@@ -657,6 +691,7 @@ int main() {
         caseCreateDeviceAndCaps();
         caseClear();
         casePresent();
+        caseFrameDump();
         caseGetBackBufferAndRenderTarget();
         caseUnimplementedSlotTraps();
         return finish("d3d9");

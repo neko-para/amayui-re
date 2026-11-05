@@ -10,7 +10,7 @@
 **本节 > 本文件其余各节 > `data/spec/`**。与 spec 冲突时按本节取舍；
 被跳过的 spec 条款在 §2 点名，⛔ 不写进 spec 正文冒充引擎语义。
 
-## 1. 可接受偏差（用户 2026-11-03；临时文件名序号 / 执行源 exe / 平台偏差 / 注册表 / 音频·视频 no-op 2026-11-04）
+## 1. 可接受偏差（用户 2026-11-03；临时文件名序号 / 执行源 exe / 平台偏差 / 注册表 / 音频·视频 no-op 2026-11-04；伪线程 / 影子写入 2026-11-05）
 
 | 类别 | 偏差 | 做法 | 用户可见代价 | 仍必须保留 |
 |---|---|---|---|---|
@@ -25,6 +25,7 @@
 | **延后实现（伪线程，2026-11-05 用户批准）** | **线程 / 定时器队列** | **guest 单线程 + 伪线程**：`CreateThread` **只发线程句柄、不执行 start routine**；`ResumeThread` 按挂起计数返回旧值；`SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask` 按单核单线程返回成功值；`GetThreadPriority` 对当前线程与伪线程返回 `THREAD_PRIORITY_NORMAL`。`ExitThread` / `FreeLibraryAndExitThread` / `CreateRemoteThread` / `_beginthreadex` / `CreateTimerQueue*` / `DeleteTimerQueueTimer` 仍**响亮失败**（伪线程不跑 start routine ⇒ 通常不会触发；触发 = 有代码依赖线程体，需人工检查） | 无真正后台线程；声音 / DirectShow / MF 的服务线程被音频 silent / 视频 skip 消化；如果某条路径依赖 start routine 的副作用，会停在对应 trap，而不是静默继续 | 主线程的同步原语 / 等待 / 临界区、单实例信号量、`timeSetEvent` 的计时语义；伪线程句柄的 AddRef / Release / 优先级 / 亲和性**返回形态** |
 | 硬错误 | **SEH / C++ 异常** | **不展开**：`RaiseException` / `RtlUnwind` 一律**响亮失败**（`addUnimplemented`，执行到就 trap）；`_CxxThrowException` 走同一条"未处理异常"路 | 异常路径**不恢复**（进程终止并留下诊断） | 失败诊断（EA / 访问类型 / 区域）——异常发生在成功路径上会**当场暴露**，不静默 |
 | 硬错误 | **等待（未 signaled）** | `WaitForSingleObject(Ex)` / `WaitForMultipleObjects(Ex)` / `SignalObjectAndWait` 命中"需要等待"（对象未 signaled 且 `dwMilliseconds != 0`，含 `INFINITE`）⇒ **硬错误**：`shimAbort` 打印 API / handle / timeout 后终止，⛔ 不返回 `WAIT_TIMEOUT` | 游戏若真依赖等待会在这里停下；需要人工检查该调用场景并设计等待方案 | `dwMilliseconds == 0` 的轮询仍返回 `WAIT_TIMEOUT`；signaled 路径不变；`bWaitAll=TRUE` 且全部 signaled ⇒ `WAIT_OBJECT_0` |
+| **平台偏差（2026-11-05）** | **游戏目录写入 = 影子覆盖层** | `--appdata` 非空时，落点原本在 `--game-dir` 的**写**改到 `<--appdata>/Game/<guest 相对路径>`；读先影子、再安装树；已有文件在写打开前 copy-up；`MakeSureDirectoryPathExists` 建影子目录。**没有 whiteout**：只在安装树里存在的文件 / 目录，删除 / 改名 / 改属性一律响亮失败（不改安装树）。无 `--appdata` 时保持旧行为（写安装树）并每次打警告 | 存档 / 配置 / 临时文件写进 appdata 影子而不是安装树；首次覆盖已有文件会 copy-up（不保时间戳）；安装树里的删除 / 改名不生效 | 游戏目录只读；读先影子；copy-up；安装树字节不变；无 appdata 的旧行为仍可用 |
 | **平台偏差** | **临时文件名序号** | `GetTempFileNameA(uUnique=0)` 从 **0** 起递增找空号（真机从系统时间起）；`uUnique!=0` 按文档用调用方的值、**不创建**文件 | 具体序号与真机不同（可复现优先于逐值一致） | 名字形态 `<pre><uuuu>.TMP`（前缀只取 3 字符）、`uUnique!=0` 返回原值且不创建 |
 | 平台偏差 | **文件时间（POSIX）** | creation 用 **birthtime**（macOS `stat` 的 `st_birthtimespec`）；文件系统不提供 birthtime 时**回退 ctime**；`SetFileTime` 的 creation 在能写的平台写（Windows `::SetFileTime`、macOS `setattrlist(ATTR_CMN_CRTIME)`），写不了就跳过并留日志 | 非 Apple POSIX 上 creation 可能是 ctime / 改不了；不影响 access / write | access / write 始终真写；`GetFileTime` / `WIN32_FIND_DATAA` 三个时间各写各的 |
 | 平台偏差 | **超越函数** | `fsin` / `fcos` / `fsincos` / `fptan` / `fpatan` / `fyl2x` / `fyl2xp1` / `f2xm1` / `fscale` 走宿主 `libm`，允许 **1 ulp** 偏差 | 极端值可能与真机差 1 ulp（跨平台也可能不同） | 其余 x87 走 Berkeley SoftFloat（逐位一致） |

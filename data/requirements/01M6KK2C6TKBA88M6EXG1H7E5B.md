@@ -2,8 +2,10 @@
 
 - id: REQ-01M6KK2C6TKBA88M6EXG1H7E5B
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/pe_loader.cpp#raw-padding-beyond-eof
+- done_reason: ① 对 links/install 的 12 份 PE32 / 67 节只读取证：PointerToRawData+SizeOfRawData>文件长度的节为 0；改用“整个 raw 声明区间必须 <= 文件长度”的严格规则（== EOF 接受），对安装树零误杀；新增 raw-range-at-eof-ok / raw-padding-beyond-eof 两向夹具与可机械断言的诊断。② PeImportInfo 保留 OriginalFirstThunk/FirstThunk 原始 RVA + descriptor_index；loader/base-coverage 打印 descriptor #i (OFT/FT/module)，并对真镜像逐字段回读。ctest 41/41、pnpm test 1159/1159、lift check 绿。
 - tags: [emulator-lift, m2, loader]
 
 ## 一句话

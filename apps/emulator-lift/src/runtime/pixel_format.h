@@ -1,4 +1,4 @@
-// emulator-lift · **像素格式的唯一实现**（掩码换算 + load/store + D3DCOLOR 打包）
+// emulator-lift · **像素格式的唯一实现**（掩码换算 + load/store + D3DCOLOR 打包/解包）
 //
 // ★ 为什么单列一份：font / d3d9 / d3d9_pipeline / d3dx9_sprite / ddraw_surface 各自抄过一套
 //   `maskShift/maskBits/expandChannel/packChannel`，五份的舍入与 mask==0 语义还**不一致**
@@ -87,9 +87,20 @@ inline std::uint32_t packColor(const SurfaceFormat& fmt, unsigned r, unsigned g,
            packChannel(a, fmt.amask);
 }
 
+// D3DCOLOR（0xAARRGGBB）→ 四个 8 位通道。★ 这是**位序的唯一一份**：
+//   `pixelFromColor` / 流水线的顶点色与纹理级常量 / Sprite 的调制色都调它（⛔ 不再各写一遍移位）。
+constexpr void unpackColor(std::uint32_t argb, unsigned& a, unsigned& r, unsigned& g, unsigned& b) {
+    a = (argb >> 24) & 0xFFu;
+    r = (argb >> 16) & 0xFFu;
+    g = (argb >> 8) & 0xFFu;
+    b = argb & 0xFFu;
+}
+
 // D3DCOLOR（0xAARRGGBB）→ 目标格式的像素位（按掩码，⛔ 不按 bpp 猜 565/8888）
 inline std::uint32_t pixelFromColor(const SurfaceFormat& fmt, std::uint32_t argb) {
-    return packColor(fmt, (argb >> 16) & 0xFFu, (argb >> 8) & 0xFFu, argb & 0xFFu, (argb >> 24) & 0xFFu);
+    unsigned a = 0, r = 0, g = 0, b = 0;
+    unpackColor(argb, a, r, g, b);
+    return packColor(fmt, r, g, b, a);
 }
 
 // 像素读写（宿主侧直接改 guest 像素；bpp 只支持 16 / 32）

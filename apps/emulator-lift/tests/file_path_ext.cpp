@@ -50,6 +50,13 @@ constexpr std::uint32_t kOpenExisting = 3u;
 constexpr std::uint32_t kInvalidHandleValue = 0xFFFFFFFFu;
 constexpr std::uint32_t kErrInvalidParameter = 87u;
 constexpr std::uint32_t kErrPathNotFound = 3u;
+constexpr std::uint32_t kErrNoMoreFiles = 18u;
+
+// WIN32_FIND_DATAA（x86，0x140 字节）的字段偏移（与 kernel32_file.cpp 的常量同值）
+constexpr std::uint32_t kFindDataSize = 0x140u;
+constexpr std::uint32_t kFdSizeHigh = 0x1Cu;
+constexpr std::uint32_t kFdSizeLow = 0x20u;
+constexpr std::uint32_t kFdFileName = 0x2Cu;
 
 // 2020-01-02T03:04:05Z 的 FILETIME（100 ns 自 1601）= (1577934245 + 11644473600) * 10^7
 constexpr std::uint64_t kTargetFileTime = 132224078450000000ull;
@@ -449,6 +456,9 @@ int main() {
     //           ② 末尾分隔符 ⇒ 最后一段也是目录；**没有**末尾分隔符 ⇒ 最后一段按文件名处理，⛔ 不建
     //           ③ guest 根 / `--appdata` 前缀不被建成宿主目录（否则安装树旁边会多出一棵假树）
     //           ④ 逃出根 ⇒ FALSE（⛔ 不建到 game_dir 外面）
+    //   ★ 2026-11-05 写覆盖层（`REQ-01M6KNBE5FP87DAC93ZRQ1K1DK`）：有 `--appdata` 时游戏树的目录
+    //     建在**影子** `<--appdata>/Game/…` 里，`--game-dir` **一个目录都不许多**；AppData 特殊
+    //     目录仍走原映射（`<--appdata>/Roaming`）。
     {
         g_current_case = "make-sure-directory-path-exists";
         Fixture f;
@@ -463,21 +473,26 @@ int main() {
             const std::uint32_t p = f.cstr(guest_path);
             return f.call(msdpe, {p});
         };
+        // 影子根：`<--appdata>/Game`（vfs.h 的唯一落点；⛔ 不是 Roaming / Local）
+        const fs::path shadow = dir / "appdata" / "Game";
 
         // a) 逐段建（`\\` 结尾 = 最后一段也是目录）
         LIFT_CHECK_EQ_U32(call_msdpe("D:\\GAME\\lift-w4-msdpe\\a\\b\\"), 1u);
-        LIFT_CHECK(fs::is_directory(dir / "lift-w4-msdpe" / "a" / "b", ec));
+        LIFT_CHECK(fs::is_directory(shadow / "lift-w4-msdpe" / "a" / "b", ec));
         // ★ 关键回归：guest 根的前缀（`D:\GAME`）在 guest 世界里本来就存在 ⇒ ⛔ 不许在宿主上
         //   造出 `game_dir/GAME`（那会让第一次启动就写脏安装树）
         LIFT_CHECK(!fs::exists(dir / "GAME", ec));
+        // ★ 安装树只读：这次建目录**一个字节都不许**落到 --game-dir
+        LIFT_CHECK(!fs::exists(dir / "lift-w4-msdpe", ec));
 
         // b) 已存在算成功（与 CreateDirectoryA 的"已存在即失败"相反）
         LIFT_CHECK_EQ_U32(call_msdpe("D:\\GAME\\lift-w4-msdpe\\a\\b\\"), 1u);
 
         // c) 没有末尾分隔符 ⇒ 最后一段是**文件名**，只建到它的父目录
         LIFT_CHECK_EQ_U32(call_msdpe("D:\\GAME\\lift-w4-msdpe2\\a\\file.txt"), 1u);
-        LIFT_CHECK(fs::is_directory(dir / "lift-w4-msdpe2" / "a", ec));
-        LIFT_CHECK(!fs::exists(dir / "lift-w4-msdpe2" / "a" / "file.txt", ec));
+        LIFT_CHECK(fs::is_directory(shadow / "lift-w4-msdpe2" / "a", ec));
+        LIFT_CHECK(!fs::exists(shadow / "lift-w4-msdpe2" / "a" / "file.txt", ec));
+        LIFT_CHECK(!fs::exists(dir / "lift-w4-msdpe2", ec));
 
         // d) 根 ⇒ TRUE（没有要建的段）
         LIFT_CHECK_EQ_U32(call_msdpe("D:\\"), 1u);
@@ -489,12 +504,14 @@ int main() {
 
         // f) `/` 也是分隔符
         LIFT_CHECK_EQ_U32(call_msdpe("D:/GAME/lift-w4-fwd/x/y/"), 1u);
-        LIFT_CHECK(fs::is_directory(dir / "lift-w4-fwd" / "x" / "y", ec));
+        LIFT_CHECK(fs::is_directory(shadow / "lift-w4-fwd" / "x" / "y", ec));
+        LIFT_CHECK(!fs::exists(dir / "lift-w4-fwd", ec));
 
         // g) `\\` 前缀（UNC 形态）：与所有其它路径 API 走**同一条** VFS 单一根映射
-        //    （⛔ 不假装能建网络共享；`\\server\share` 之后的部分落到 --game-dir）
+        //    （⛔ 不假装能建网络共享；`\\server\share` 之后的部分落到影子）
         LIFT_CHECK_EQ_U32(call_msdpe("\\\\server\\share\\lift-w4-unc\\z\\"), 1u);
-        LIFT_CHECK(fs::is_directory(dir / "server" / "share" / "lift-w4-unc" / "z", ec));
+        LIFT_CHECK(fs::is_directory(shadow / "server" / "share" / "lift-w4-unc" / "z", ec));
+        LIFT_CHECK(!fs::exists(dir / "server", ec));
 
         // h) 逃出 guest 根 ⇒ FALSE，且 game_dir 外面什么都没建
         LIFT_CHECK_EQ_U32(call_msdpe("D:\\GAME\\..\\..\\lift-w4-escape\\"), 0u);
@@ -507,7 +524,8 @@ int main() {
 
         // j) 相对路径（相对 guest cwd = guestRoot）
         LIFT_CHECK_EQ_U32(call_msdpe("lift-w4-rel\\d\\"), 1u);
-        LIFT_CHECK(fs::is_directory(dir / "lift-w4-rel" / "d", ec));
+        LIFT_CHECK(fs::is_directory(shadow / "lift-w4-rel" / "d", ec));
+        LIFT_CHECK(!fs::exists(dir / "lift-w4-rel", ec));
 
         LIFT_CHECK(f.ok);
     }
@@ -1032,6 +1050,162 @@ int main() {
         // ⑦ 反例：`..` 越出 guest 根 ⇒ 仍是 `[escape]`
         LIFT_CHECK(!v.resolve("..\\..\\escape", &host, &why));
         LIFT_CHECK(why.rfind("[escape]", 0) == 0);
+    }
+
+    // ⑬ ★ 2026-11-05 `REQ-01M6KNBE5FP87DAC93ZRQ1K1DK`：**写覆盖层** —— `--game-dir` 只读
+    //
+    //   repro（修前）：boot 跑到 104.5M 条指令时引擎写 `Eushully\天結…\$$AGE.TMP`（相对路径）+
+    //   `MakeSureDirectoryPathExists` 准备目录；旧实现直接落进安装树（实测在
+    //   `links/install/Eushully/…` 建过 `SAVE`）。本用例钉住新口径：
+    //     ① `CreateFileA(CREATE_ALWAYS)` 对 `--game-dir` 相对路径写成功 ⇒ 字节落在
+    //        `<--appdata>/Game/…`（影子目录），安装树里**没有**这个文件 / 目录；
+    //     ② 同一 guest 路径随后 `OPEN_EXISTING` 读 ⇒ 读回**影子**内容（先影子、再安装树）；
+    //     ③ `MakeSureDirectoryPathExists` 在影子目录建出目录（安装树里没有）；
+    //     ④ 只读回归：安装树里本来就有的文件照常读；改写它 = copy-up 到影子（安装树字节不变）；
+    //     ⑤ 影子 ∪ 安装树合并枚举（`FindFirstFileA` 两边都看得见、同名影子优先且只出现一次）；
+    //     ⑥ 没有 whiteout：`DeleteFileA` 对"只在安装树里"的文件响亮失败（5），安装树文件还在。
+    {
+        g_current_case = "game-dir-write-overlay";
+        Fixture f;
+        lift::registerFileShims(f.m.shims());
+        lift::registerSyncShims(f.m.shims());
+        lift::registerImagehlpShims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));
+        f.m.vfs().setGuestRoot("D:\\GAME");
+        f.m.vfs().setAppDataDir(pathToUtf8(dir / "appdata"));
+        LIFT_CHECK(f.ok);
+
+        const fs::path shadow = dir / "appdata" / "Game";  // vfs.h 的唯一落点
+        const fs::path game = dir;
+        auto readHost = [](const fs::path& p) -> std::string {
+            std::FILE* fp = lift::openHostFileUtf8(pathToUtf8(p), "rb");
+            if (!fp) return "<missing>";
+            std::string s;
+            char tmp[64];
+            std::size_t n = 0;
+            while ((n = std::fread(tmp, 1, sizeof(tmp), fp)) > 0) s.append(tmp, n);
+            std::fclose(fp);
+            return s;
+        };
+        auto writeHost = [](const fs::path& p, const std::string& bytes) -> bool {
+            std::FILE* fp = lift::openHostFileUtf8(pathToUtf8(p), "wb");
+            if (!fp) return false;
+            if (!bytes.empty()) std::fwrite(bytes.data(), 1, bytes.size(), fp);
+            std::fclose(fp);
+            return true;
+        };
+
+        // 安装树里的既有文件（引擎"先读再改"的形态）：字节必须保持不变
+        LIFT_CHECK(writeHost(game / "config.ini", "ORIGINAL-CONFIG"));
+        LIFT_CHECK(writeHost(game / "install-only.dat", "INSTALL-ONLY"));
+
+        const std::uint32_t create = f.use("CreateFileA");
+        const std::uint32_t writef = f.use("WriteFile");
+        const std::uint32_t readf = f.use("ReadFile");
+        const std::uint32_t close = f.use("CloseHandle");
+        const std::uint32_t msdpe = f.use("imagehlp", "MakeSureDirectoryPathExists");
+        const std::uint32_t find = f.use("FindFirstFileA");
+        const std::uint32_t findnext = f.use("FindNextFileA");
+        const std::uint32_t findclose = f.use("FindClose");
+        const std::uint32_t del = f.use("DeleteFileA");
+        LIFT_CHECK_NE_U32(msdpe, 0u);
+
+        auto readGuest = [&](const char* guest_path) -> std::string {
+            const std::uint32_t h = f.call(create, {f.cstr(guest_path), kGenericRead, 0u, 0u,
+                                                    kOpenExisting, 0u, 0u});
+            if (h == kInvalidHandleValue) return "<open-failed>";
+            const std::uint32_t buf = f.zeroData(256);
+            const std::uint32_t got = f.u32data(0);
+            f.call(readf, {h, buf, 256u, got, 0u});
+            const std::uint32_t n = f.m.mem().rd32(got);
+            std::string s = guestStr(f.m, buf, n + 1u);
+            f.call(close, {h});
+            return s;
+        };
+        auto writeGuest = [&](const char* guest_path, const std::string& bytes) -> std::uint32_t {
+            const std::uint32_t h = f.call(create, {f.cstr(guest_path), kGenericWrite, 0u, 0u,
+                                                    kCreateAlways, 0u, 0u});
+            if (h == kInvalidHandleValue) return h;
+            const std::uint32_t data = f.data(bytes.data(), bytes.size());
+            const std::uint32_t written = f.u32data(0);
+            f.call(writef, {h, data, static_cast<std::uint32_t>(bytes.size()), written, 0u});
+            f.call(close, {h});
+            return h;
+        };
+
+        // ① 引擎的形态：**相对路径**（cwd = guest 根）+ 两段安装树里不存在的目录
+        const char* kTempGuest = "Eushully\\Tenketsu\\$$AGE.TMP";
+        LIFT_CHECK_NE_U32(writeGuest(kTempGuest, "SHADOW-TEMP"), kInvalidHandleValue);
+        LIFT_CHECK(fs::exists(shadow / "Eushully" / "Tenketsu" / "$$AGE.TMP", ec));
+        LIFT_CHECK(!fs::exists(game / "Eushully", ec));  // 安装树里一个目录都不许多
+        LIFT_CHECK(readHost(shadow / "Eushully" / "Tenketsu" / "$$AGE.TMP") == "SHADOW-TEMP");
+
+        // ② 同一 guest 路径随后读 ⇒ 影子内容（先影子、再安装树）
+        LIFT_CHECK(readGuest(kTempGuest) == "SHADOW-TEMP");
+
+        // ③ MakeSureDirectoryPathExists 在影子目录建目录（安装树里没有）
+        LIFT_CHECK_EQ_U32(f.call(msdpe, {f.cstr("D:\\GAME\\Eushully\\Tenketsu\\SAVE\\")}), 1u);
+        LIFT_CHECK(fs::is_directory(shadow / "Eushully" / "Tenketsu" / "SAVE", ec));
+        LIFT_CHECK(!fs::exists(game / "Eushully", ec));
+
+        // ④ 只读回归 + copy-up：安装树里已有的 `config.ini` 覆盖写 ⇒ 只改**影子副本**，
+        //    安装树字节不变；随后读回影子内容
+        LIFT_CHECK_NE_U32(writeGuest("config.ini", "SHADOW-CONFIG"), kInvalidHandleValue);
+        LIFT_CHECK(readHost(game / "config.ini") == "ORIGINAL-CONFIG");  // 安装树不变
+        LIFT_CHECK(readHost(shadow / "config.ini") == "SHADOW-CONFIG");
+        LIFT_CHECK(readGuest("config.ini") == "SHADOW-CONFIG");
+
+        // ⑤ 影子 ∪ 安装树：枚举根目录同时看得见 `install-only.dat`（安装树）与影子项；
+        //    同名的 `config.ini` 只出现一次、大小取影子那份
+        {
+            std::vector<std::string> names;
+            std::uint64_t config_size = 0;
+            bool saw_install_only = false;
+            std::uint32_t config_hits = 0;
+            const std::uint32_t fd = f.zeroData(kFindDataSize);
+            const std::uint32_t h = f.call(find, {f.cstr("D:\\GAME\\*.*"), fd});
+            LIFT_CHECK(h != kInvalidHandleValue);
+            if (h != kInvalidHandleValue) {
+                for (;;) {
+                    std::string cfile;
+                    for (std::uint32_t i = 0; i < 260u; ++i) {
+                        const char c = static_cast<char>(f.m.mem().rd8(fd + kFdFileName + i));
+                        if (c == 0) break;
+                        cfile.push_back(c);
+                    }
+                    names.push_back(cfile);
+                    if (cfile == "config.ini") {
+                        config_size =
+                            (static_cast<std::uint64_t>(f.m.mem().rd32(fd + kFdSizeHigh)) << 32) |
+                            f.m.mem().rd32(fd + kFdSizeLow);
+                    }
+                    if (f.call(findnext, {h, fd}) == 0) {
+                        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrNoMoreFiles);
+                        break;
+                    }
+                }
+                f.call(findclose, {h});
+            }
+            for (const std::string& n : names) {
+                if (n == "install-only.dat") saw_install_only = true;
+                if (n == "config.ini") ++config_hits;
+            }
+            LIFT_CHECK(saw_install_only);
+            LIFT_CHECK_EQ_U32(config_hits, 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(config_size),
+                              static_cast<std::uint32_t>(std::strlen("SHADOW-CONFIG")));
+        }
+
+        // ⑥ 没有 whiteout：只在安装树里的文件删不掉（响亮失败 5，安装树文件还在）
+        f.m.cpu().shim.last_error = 0;
+        LIFT_CHECK_EQ_U32(f.call(del, {f.cstr("install-only.dat")}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 5u);
+        LIFT_CHECK(readHost(game / "install-only.dat") == "INSTALL-ONLY");
+        LIFT_CHECK(!fs::exists(shadow / "install-only.dat", ec));
+
+        // 收尾：清掉本用例写出来的影子目录（`dir` 会被后面的运行复用）
+        fs::remove_all(shadow, ec);
+        LIFT_CHECK(f.ok);
     }
 
     fs::remove_all(dir, ec);

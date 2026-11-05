@@ -80,7 +80,8 @@ constexpr std::uint32_t kPlEnds = kPlBegins + 4u;
 constexpr std::uint32_t kPlDepthArena = kPlEnds + 4u;
 constexpr std::uint32_t kPlColorArena = kPlDepthArena + 4u;    // 0 = 设备后缓冲
 constexpr std::uint32_t kPlColorSurface = kPlColorArena + 4u;  // IDirect3DSurface9 对象 EA（0 = 后缓冲）
-constexpr std::uint32_t kPlUnsupported = kPlColorSurface + 4u;  // 未支持状态的位图（诊断）
+constexpr std::uint32_t kPlStageSnapshots = kPlColorSurface + 4u;  // 纹理级/采样器状态快照次数（诊断）
+constexpr std::uint32_t kPlUnsupported = kPlStageSnapshots + 4u;  // 未支持状态的位图（诊断）
 constexpr std::uint32_t kPlBytes = kPlUnsupported + 32u;
 constexpr std::uint32_t kPlMagicValue = 0x31304C44u;  // 'DL01'（写成可读：'D','L','0','1'）
 
@@ -160,8 +161,12 @@ void wrF32(X86& cpu, std::uint32_t ea, float v) {
 
 bool finite(double v) { return v == v && v > -1.0e30 && v < 1.0e30; }
 
+// 单位阵：走 runtime/math 的唯一适配点（与 d3dx9_sprite 的 writeIdentityMatrix 同一份；
+// ⛔ 这里不再手写 `i % 5` 的 D3DX 布局）。
 void writeIdentity(X86& cpu, std::uint32_t ea) {
-    for (int i = 0; i < 16; ++i) wrF32(cpu, ea + static_cast<std::uint32_t>(i) * 4u, (i % 5 == 0) ? 1.0f : 0.0f);
+    float d3d[16];
+    math::toD3DLayout(math::identity<float>(), d3d);
+    for (int i = 0; i < 16; ++i) wrF32(cpu, ea + static_cast<std::uint32_t>(i) * 4u, d3d[i]);
 }
 
 // ---- 状态块读取（内部；magic 校验后直接用）----
@@ -457,7 +462,7 @@ FvfLayout parseFvf(std::uint32_t fvf, std::string* why) {
 // =====================================================================================
 // 顶点：读 + 变换 + 光照
 // =====================================================================================
-constexpr std::uint32_t kMaxClipVerts = 16u;   // 三角形 + 近平面裁剪后最多 4 个
+constexpr std::uint32_t kMaxClipVerts = 16u;   // 三角形过 6 个裁剪面后最多 3+6=9 个（留余量）
 constexpr std::uint32_t kMaxTexCoords = 8u;
 
 struct CVertex {
@@ -542,12 +547,14 @@ void readLight(X86& cpu, std::uint32_t pe, std::uint32_t index, LightState* out)
     out->atten2 = static_cast<double>(rdF32(cpu, base + 92u));
 }
 
-// 顶点颜色（D3DCOLOR 0xAARRGGBB → 0..255）
+// 顶点颜色（D3DCOLOR 0xAARRGGBB → 0..255）：位序走 pixel_format 的唯一一份 `unpackColor`
 void splitColor(std::uint32_t color, double* a, double* r, double* g, double* b) {
-    *a = static_cast<double>((color >> 24) & 0xFFu);
-    *r = static_cast<double>((color >> 16) & 0xFFu);
-    *g = static_cast<double>((color >> 8) & 0xFFu);
-    *b = static_cast<double>(color & 0xFFu);
+    unsigned ua = 0, ur = 0, ug = 0, ub = 0;
+    pixel_format::unpackColor(color, ua, ur, ug, ub);
+    *a = static_cast<double>(ua);
+    *r = static_cast<double>(ur);
+    *g = static_cast<double>(ug);
+    *b = static_cast<double>(ub);
 }
 
 // 固定功能光照（Gouraud；只在 LIGHTING=1 且顶点有法线时做）
@@ -622,8 +629,30 @@ void applyLighting(X86& cpu, std::uint32_t pe, const math::Vec3d& world_pos,
 }
 
 // =====================================================================================
-// 光栅化上下文
+// 光栅化上下文（含**每次 Draw 的状态快照**）
+// ★ 消除偏差 #4：像素循环不再逐像素读 guest —— guest 在 Draw 期间不会执行（本线不做嵌套回调），
+//   所以纹理级 / 采样器状态在 Draw 入口读一遍就定型，像素循环只读 DrawContext 里的副本
+//   （⛔ 不再调 texStageOf/samplerOf）。
 // =====================================================================================
+struct TextureStageSnapshot {
+    std::uint32_t color_op = kTopDisable;
+    std::uint32_t alpha_op = kTopDisable;
+    std::uint32_t color_arg0 = 0;
+    std::uint32_t color_arg1 = 0;
+    std::uint32_t color_arg2 = 0;
+    std::uint32_t alpha_arg1 = 0;
+    std::uint32_t alpha_arg2 = 0;
+    std::uint32_t constant = 0;         // D3DCOLOR（TFactor 之外的另一份常量）
+    std::uint32_t tex_coord_index = 0;  // D3DTSS_TEXCOORDINDEX
+};
+
+struct SamplerSnapshot {
+    std::uint32_t address_u = kAddressWrap;
+    std::uint32_t address_v = kAddressWrap;
+    std::uint32_t mag_filter = kTexfPoint;
+    std::uint32_t min_filter = kTexfPoint;
+};
+
 struct DrawContext {
     X86* cpu = nullptr;
     Machine* machine = nullptr;
@@ -657,11 +686,17 @@ struct DrawContext {
     std::uint32_t color_write = 0xF;
     std::uint32_t texture_factor = 0xFFFFFFFFu;
     TextureView textures[kMaxTextureStages];
+    // ★ 每次 Draw 的快照（prepareContext 里一次读完；像素循环只读这里）
+    TextureStageSnapshot stages[kMaxTextureStages];
+    SamplerSnapshot samplers[kMaxTextureStages];
     std::uint64_t pixels_written = 0;
     int serial = 0;
 };
 
 // 8 位通道的混合因子
+// ★ 这一族（blendFactors8 / applyBlendOp）是**设备混合状态**（D3DBLEND / D3DBLENDOP）的语义，
+//   ⛔ 与 pixel_format 的 mask/expand 或 Sprite 的 ALPHABLEND `mul255` 不是同一件事
+//   （公式不同；合并会改像素结果）—— 审计结论：只保留各自一份，不强行收敛。
 void blendFactors8(std::uint32_t factor, unsigned sr, unsigned sg, unsigned sb, unsigned sa, unsigned dr,
                    unsigned dg, unsigned db, unsigned da, unsigned* fr, unsigned* fg, unsigned* fb,
                    unsigned* fa) {
@@ -758,7 +793,8 @@ void sampleTexture(const TextureView& t, const std::uint32_t address_u, const st
         rgba[0] = pixel_format::expandChannel(raw, t.format.rmask);
         rgba[1] = pixel_format::expandChannel(raw, t.format.gmask);
         rgba[2] = pixel_format::expandChannel(raw, t.format.bmask);
-        rgba[3] = t.format.amask != 0 ? pixel_format::expandChannel(raw, t.format.amask) : 255u;
+        // ★ mask==0（无 alpha 通道）⇒ expandChannel 返回 255（= 不透明）；这份语义只在 pixel_format 里
+        rgba[3] = pixel_format::expandChannel(raw, t.format.amask);
     };
     // ★ MIN 与 MAG 都参与（MIN 不再被忽略）；没有 mip/LOD ⇒ 这是明确记录的近似。
     const bool linear = samplerUsesLinear(mag_filter, min_filter);
@@ -846,31 +882,30 @@ void stageArg(X86& cpu, const DrawContext& ctx, std::uint32_t arg, const StageCo
 void applyTextureOp(X86& cpu, const DrawContext& ctx, std::uint32_t stage, const StageColor& diffuse,
                     const StageColor& specular, const StageColor& texture, const StageColor& current_in,
                     StageColor* color_out, StageColor* alpha_out) {
+    // ★ 状态全部来自 Draw 入口的快照（⛔ 不在像素循环里 texStageOf）
+    //   唯一还会碰 guest 的是"不支持的纹理级 OP"的 `recordUnsupported`（幂等、只在真出现时）；
+    //   本线支持的 OP 集合内，像素循环零 guest 读。
+    const TextureStageSnapshot& ts = ctx.stages[stage];
     const StageColor temp;  // 本线没有 TEMP 寄存器：全 0（记录见下）
     StageColor constant;
     {
-        const std::uint32_t argb = texStageOf(cpu, ctx.pe, stage, kTssConstant);
         double a = 1.0, r = 1.0, g = 1.0, b = 1.0;
-        splitColor(argb, &a, &r, &g, &b);
+        splitColor(ts.constant, &a, &r, &g, &b);
         constant.c[0] = r;
         constant.c[1] = g;
         constant.c[2] = b;
         constant.c[3] = a;
     }
-    const std::uint32_t color_op = texStageOf(cpu, ctx.pe, stage, kTssColorOp);
-    const std::uint32_t alpha_op = texStageOf(cpu, ctx.pe, stage, kTssAlphaOp);
-    const std::uint32_t arg0 = texStageOf(cpu, ctx.pe, stage, kTssColorArg0);
+    const std::uint32_t color_op = ts.color_op;
+    const std::uint32_t alpha_op = ts.alpha_op;
+    const std::uint32_t arg0 = ts.color_arg0;
     double a1[4], a2[4], a0[4];
-    stageArg(cpu, ctx, texStageOf(cpu, ctx.pe, stage, kTssColorArg1), current_in, diffuse, specular, texture,
-             temp, constant, a1);
-    stageArg(cpu, ctx, texStageOf(cpu, ctx.pe, stage, kTssColorArg2), current_in, diffuse, specular, texture,
-             temp, constant, a2);
+    stageArg(cpu, ctx, ts.color_arg1, current_in, diffuse, specular, texture, temp, constant, a1);
+    stageArg(cpu, ctx, ts.color_arg2, current_in, diffuse, specular, texture, temp, constant, a2);
     stageArg(cpu, ctx, arg0, current_in, diffuse, specular, texture, temp, constant, a0);
     double aa1[4], aa2[4];
-    stageArg(cpu, ctx, texStageOf(cpu, ctx.pe, stage, kTssAlphaArg1), current_in, diffuse, specular, texture,
-             temp, constant, aa1);
-    stageArg(cpu, ctx, texStageOf(cpu, ctx.pe, stage, kTssAlphaArg2), current_in, diffuse, specular, texture,
-             temp, constant, aa2);
+    stageArg(cpu, ctx, ts.alpha_arg1, current_in, diffuse, specular, texture, temp, constant, aa1);
+    stageArg(cpu, ctx, ts.alpha_arg2, current_in, diffuse, specular, texture, temp, constant, aa2);
     // 颜色通道的 op（alpha 通道单独走下面那段：D3D 的 alpha op 只作用在 alpha 分量上）
     auto run = [&](std::uint32_t code, const double x[4], const double y[4], const double z[4], double out[3]) {
         std::uint32_t unsupported = 0;
@@ -1146,26 +1181,21 @@ void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, cons
                     v[t] = p0->v[t] / (p0->invw != 0.0 ? p0->invw : 1.0);
                 }
             }
-            // 纹理级链
+            // 纹理级链（★ 状态全来自 Draw 快照；⛔ 不再每像素读 guest）
             StageColor current = diffuse;
             for (std::uint32_t stage = 0; stage < kMaxTextureStages; ++stage) {
-                const std::uint32_t color_op = texStageOf(cpu, ctx.pe, stage, kTssColorOp);
-                const std::uint32_t alpha_op = texStageOf(cpu, ctx.pe, stage, kTssAlphaOp);
-                if (color_op == kTopDisable && alpha_op == kTopDisable) break;
+                const TextureStageSnapshot& ts = ctx.stages[stage];
+                if (ts.color_op == kTopDisable && ts.alpha_op == kTopDisable) break;
                 StageColor texture;
                 texture.c[0] = texture.c[1] = texture.c[2] = texture.c[3] = 255.0;
-                const std::uint32_t tex_stage_index =
-                    texStageOf(cpu, ctx.pe, stage, kTssTexCoordIndex) & 0xFFFFu;
-                std::uint32_t coord = tex_stage_index & 0xFFFFu;
+                std::uint32_t coord = ts.tex_coord_index & 0xFFFFu;
                 if (coord >= kMaxTexCoords) coord = 0;
                 const TextureView& tv = ctx.textures[stage];
                 if (tv.present) {
-                    const std::uint32_t addr_u = samplerOf(cpu, ctx.pe, stage, kSampAddressU);
-                    const std::uint32_t addr_v = samplerOf(cpu, ctx.pe, stage, kSampAddressV);
-                    const std::uint32_t mag = samplerOf(cpu, ctx.pe, stage, kSampMagFilter);
-                    const std::uint32_t minf = samplerOf(cpu, ctx.pe, stage, kSampMinFilter);
+                    const SamplerSnapshot& ss = ctx.samplers[stage];
                     unsigned rgba[4];
-                    sampleTexture(tv, addr_u, addr_v, mag, minf, u[coord], v[coord], rgba);
+                    sampleTexture(tv, ss.address_u, ss.address_v, ss.mag_filter, ss.min_filter, u[coord], v[coord],
+                                  rgba);
                     texture.c[0] = static_cast<double>(rgba[0]);
                     texture.c[1] = static_cast<double>(rgba[1]);
                     texture.c[2] = static_cast<double>(rgba[2]);
@@ -1208,7 +1238,7 @@ void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, cons
                 const unsigned dr = pixel_format::expandChannel(dst_raw, ctx.color_fmt.rmask);
                 const unsigned dg = pixel_format::expandChannel(dst_raw, ctx.color_fmt.gmask);
                 const unsigned db = pixel_format::expandChannel(dst_raw, ctx.color_fmt.bmask);
-                const unsigned da = ctx.color_fmt.amask != 0 ? pixel_format::expandChannel(dst_raw, ctx.color_fmt.amask) : 255u;
+                const unsigned da = pixel_format::expandChannel(dst_raw, ctx.color_fmt.amask);
                 unsigned sr_f = 0, sg_f = 0, sb_f = 0, sa_f = 0;
                 blendFactors8(ctx.src_blend, fr, fg, fb, fa, dr, dg, db, da, &sr_f, &sg_f, &sb_f, &sa_f);
                 unsigned dr_f = 0, dg_f = 0, db_f = 0, da_f = 0;
@@ -1232,10 +1262,9 @@ void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, cons
             if ((mask & 0x1u) == 0) out_r = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.rmask);
             if ((mask & 0x2u) == 0) out_g = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.gmask);
             if ((mask & 0x4u) == 0) out_b = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.bmask);
-            if ((mask & 0x8u) == 0) out_a = ctx.color_fmt.amask != 0
-                                             ? pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp),
-                                                             ctx.color_fmt.amask)
-                                             : 255u;
+            if ((mask & 0x8u) == 0)
+                out_a = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp),
+                                                    ctx.color_fmt.amask);
             if (mask != 0u) {
                 pixel_format::storePixel(dst, ctx.color_fmt.bpp,
                                   pixel_format::packColor(ctx.color_fmt, out_r, out_g, out_b, out_a));
@@ -1305,40 +1334,107 @@ bool readVertex(X86& cpu, const FvfLayout& fvf, const std::uint8_t* base, std::u
     return true;
 }
 
-// 近平面裁剪（z >= 0）——D3D 的裁剪空间约定：0 <= z <= w
-std::uint32_t clipNear(const CVertex* in, std::uint32_t n, CVertex* out) {
+// =====================================================================================
+// 裁剪（偏差 #5：⛔ 不再只有近平面）
+//
+// D3D 的**齐次裁剪空间**约定：0 <= z <= w、-w <= x <= w、-w <= y <= w。
+//   · XYZ / XYZW 顶点：对 6 个半空间做 Sutherland–Hodgman 裁剪（保持绕序）：
+//       近 z>=0 · 远 w-z>=0 · 左 x+w>=0 · 右 w-x>=0 · 下 y+w>=0 · 上 w-y>=0。
+//     `w<0`（相机背后）的点必然落在远/左/右…之外 ⇒ 整体被裁掉（旧实现只裁近平面时
+//     会拿负 w 做投影，落到错误位置）。
+//   · XYZRHW 顶点：x/y **已经是屏幕坐标**，齐次面在数学上不适用（`w=1/rhw` 与屏幕 x/y 无关）；
+//     真机对预变换顶点是在**屏幕空间裁到视口矩形**，这里照做；z 仍是 [0,1] 深度
+//     （`toScreen` 不对预变换顶点缩放 MinZ/MaxZ，所以远平面就是 z<=1）。
+//
+// ⚠ 明确未做（⛔ 不静默）：用户裁剪面（D3DRS_CLIPPLANEENABLE）仍由 `recordUnsupported` 记录；
+//   guard band 没有单独实现（精确裁剪已经让屏幕外几何不进光栅，效果等价）。
+// =====================================================================================
+CVertex lerpVertex(const CVertex& a, const CVertex& b, double t) {
+    CVertex m;
+    m.pretransformed = a.pretransformed;  // 同一批顶点同为预变换（FVF 是每次 Draw 一份）
+    m.x = a.x + (b.x - a.x) * t;
+    m.y = a.y + (b.y - a.y) * t;
+    m.z = a.z + (b.z - a.z) * t;
+    m.w = a.w + (b.w - a.w) * t;
+    for (std::uint32_t k = 0; k < kMaxTexCoords; ++k) {
+        m.u[k] = a.u[k] + (b.u[k] - a.u[k]) * t;
+        m.v[k] = a.v[k] + (b.v[k] - a.v[k]) * t;
+    }
+    m.r = a.r + (b.r - a.r) * t;
+    m.g = a.g + (b.g - a.g) * t;
+    m.b = a.b + (b.b - a.b) * t;
+    m.a = a.a + (b.a - a.a) * t;
+    m.sr = a.sr + (b.sr - a.sr) * t;
+    m.sg = a.sg + (b.sg - a.sg) * t;
+    m.sb = a.sb + (b.sb - a.sb) * t;
+    m.sa = a.sa + (b.sa - a.sa) * t;
+    return m;
+}
+
+// 单个半空间：dist(v) >= 0 为内侧。`in` / `out` 不得别名。
+template <typename Dist>
+std::uint32_t clipHalfSpace(const CVertex* in, std::uint32_t n, Dist dist, CVertex* out) {
     std::uint32_t count = 0;
     for (std::uint32_t i = 0; i < n; ++i) {
         const CVertex& a = in[i];
         const CVertex& b = in[(i + 1u) % n];
-        const double da = a.z;
-        const double db = b.z;
+        const double da = dist(a);
+        const double db = dist(b);
         if (da >= 0.0) {
             if (count < kMaxClipVerts) out[count++] = a;
         }
         if ((da >= 0.0) != (db >= 0.0)) {
             const double t = da / (da - db);
-            CVertex m;
-            m.x = a.x + (b.x - a.x) * t;
-            m.y = a.y + (b.y - a.y) * t;
-            m.z = a.z + (b.z - a.z) * t;
-            m.w = a.w + (b.w - a.w) * t;
-            for (std::uint32_t k = 0; k < kMaxTexCoords; ++k) {
-                m.u[k] = a.u[k] + (b.u[k] - a.u[k]) * t;
-                m.v[k] = a.v[k] + (b.v[k] - a.v[k]) * t;
-            }
-            m.r = a.r + (b.r - a.r) * t;
-            m.g = a.g + (b.g - a.g) * t;
-            m.b = a.b + (b.b - a.b) * t;
-            m.a = a.a + (b.a - a.a) * t;
-            m.sr = a.sr + (b.sr - a.sr) * t;
-            m.sg = a.sg + (b.sg - a.sg) * t;
-            m.sb = a.sb + (b.sb - a.sb) * t;
-            m.sa = a.sa + (b.sa - a.sa) * t;
-            if (count < kMaxClipVerts) out[count++] = m;
+            if (count < kMaxClipVerts) out[count++] = lerpVertex(a, b, t);
         }
     }
     return count;
+}
+
+// 凸多边形过一串平面。三角形最多变成 3+6=9 个顶点（< kMaxClipVerts=16）。
+template <typename... Dist>
+std::uint32_t clipAgainst(const CVertex* in, std::uint32_t n, CVertex* out, Dist... dists) {
+    CVertex buf_a[kMaxClipVerts];
+    CVertex buf_b[kMaxClipVerts];
+    CVertex* cur = buf_a;
+    CVertex* next = buf_b;
+    const std::uint32_t start = n < kMaxClipVerts ? n : kMaxClipVerts;
+    for (std::uint32_t i = 0; i < start; ++i) cur[i] = in[i];
+    n = start;
+    auto pass = [&](auto dist) {
+        n = clipHalfSpace(cur, n, dist, next);
+        CVertex* tmp = cur;
+        cur = next;
+        next = tmp;
+    };
+    (pass(dists), ...);
+    for (std::uint32_t i = 0; i < n; ++i) out[i] = cur[i];
+    return n;
+}
+
+// XYZ / XYZW：齐次裁剪空间 6 个面
+std::uint32_t clipHomogeneous(const CVertex* in, std::uint32_t n, CVertex* out) {
+    return clipAgainst(in, n, out, [](const CVertex& v) { return v.z; },        // 近
+                       [](const CVertex& v) { return v.w - v.z; },              // 远
+                       [](const CVertex& v) { return v.x + v.w; },              // 左
+                       [](const CVertex& v) { return v.w - v.x; },              // 右
+                       [](const CVertex& v) { return v.y + v.w; },              // 下
+                       [](const CVertex& v) { return v.w - v.y; });             // 上
+}
+
+// XYZRHW：屏幕空间裁到**视口矩形**（x/y）+ 深度 [0,1]（z）
+std::uint32_t clipScreen(const CVertex* in, std::uint32_t n, const DrawContext& ctx, CVertex* out) {
+    if (ctx.viewport_w <= 0 || ctx.viewport_h <= 0) return 0;
+    const double x0 = static_cast<double>(ctx.viewport_x);
+    const double y0 = static_cast<double>(ctx.viewport_y);
+    const double x1 = x0 + static_cast<double>(ctx.viewport_w);
+    const double y1 = y0 + static_cast<double>(ctx.viewport_h);
+    return clipAgainst(in, n, out, [x0](const CVertex& v) { return v.x - x0; },
+                       [x1](const CVertex& v) { return x1 - v.x; },
+                       [y0](const CVertex& v) { return v.y - y0; },
+                       [y1](const CVertex& v) { return y1 - v.y; },
+                       [](const CVertex& v) { return v.z; },        // 近
+                       [](const CVertex& v) { return 1.0 - v.z; }); // 远
 }
 
 bool toScreen(const CVertex& v, const DrawContext& ctx, SVertex* out) {
@@ -1406,12 +1502,8 @@ std::uint32_t createForDevice(X86& cpu, std::uint32_t device_state, int width, i
     }
     initDefaults(cpu, pe, width, height);
     // 深度缓冲：SurfaceArena 里的 32bpp 表面（像素存 float 位模式）。清成 1.0f（远平面）。
-    SurfaceFormat depth_fmt;
-    depth_fmt.bpp = 32;
-    depth_fmt.rmask = 0x00FF0000u;
-    depth_fmt.gmask = 0x0000FF00u;
-    depth_fmt.bmask = 0x000000FFu;
-    depth_fmt.amask = 0xFF000000u;
+    // ★ 格式走 pixel_format 的唯一一份（⛔ 不再在这里手抄 BGRA8888 的四个掩码）
+    const SurfaceFormat depth_fmt = pixel_format::formatForBpp(32);
     const std::uint32_t depth = m->surfaces().create(width, height, depth_fmt);
     if (depth == 0) {
         cpu.heap->free(pe);
@@ -1495,6 +1587,7 @@ bool pipelineInfoOfState(X86& cpu, std::uint32_t state, PipelineInfo* out, std::
     i.ends = plGet(cpu, state, kPlEnds);
     i.draws = plGet(cpu, state, kPlDraws);
     i.draw_calls = plGet(cpu, state, kPlDrawCalls);
+    i.stage_snapshots = plGet(cpu, state, kPlStageSnapshots);
     i.triangles = plGet(cpu, state, kPlTriangles);
     i.rasterized = plGet(cpu, state, kPlRasterized);
     i.pixels = (static_cast<std::uint64_t>(plGet(cpu, state, kPlPixels + 4u)) << 32) |
@@ -1721,6 +1814,11 @@ std::uint32_t setRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
             break;
         case kRsClipPlaneEnable:
             if (value != 0u) recordUnsupported(cpu, pe, 7u, "D3DRS_CLIPPLANEENABLE（本线不做用户裁剪面）", value);
+            break;
+        case kRsClipping:
+            // 本线**总是**做裁剪（齐次 6 面 / 预变换视口矩形）。真机 CLIPPING=0 会关掉落屏外的裁剪，
+            // ⛔ 不静默：记录，行为仍是"总是裁剪"（与既有近平面裁剪的口径一致）。
+            if (value == 0u) recordUnsupported(cpu, pe, 18u, "D3DRS_CLIPPING=0（本线总是裁剪）", value);
             break;
         case kRsTweenFactor:
             if (value != 0u) recordUnsupported(cpu, pe, 8u, "D3DRS_TWEENFACTOR", value);
@@ -2361,6 +2459,27 @@ bool prepareContext(X86& cpu, std::uint32_t dev, std::uint32_t pe, DrawContext* 
             return false;
         }
     }
+    // ★ 偏差 #4 的消除点：纹理级 / 采样器状态在这里**读一遍**（guest 在 Draw 期间不执行，
+    //   所以这份快照就是整个光栅阶段看到的全部状态）。像素循环只读 ctx->stages / ctx->samplers。
+    //   可观察量：kPlStageSnapshots 每次 Draw 只 +1（⛔ 不随三角形/像素增长）。
+    for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
+        TextureStageSnapshot& ts = ctx->stages[s];
+        ts.color_op = texStageOf(cpu, pe, s, kTssColorOp);
+        ts.alpha_op = texStageOf(cpu, pe, s, kTssAlphaOp);
+        ts.color_arg0 = texStageOf(cpu, pe, s, kTssColorArg0);
+        ts.color_arg1 = texStageOf(cpu, pe, s, kTssColorArg1);
+        ts.color_arg2 = texStageOf(cpu, pe, s, kTssColorArg2);
+        ts.alpha_arg1 = texStageOf(cpu, pe, s, kTssAlphaArg1);
+        ts.alpha_arg2 = texStageOf(cpu, pe, s, kTssAlphaArg2);
+        ts.constant = texStageOf(cpu, pe, s, kTssConstant);
+        ts.tex_coord_index = texStageOf(cpu, pe, s, kTssTexCoordIndex);
+        SamplerSnapshot& ss = ctx->samplers[s];
+        ss.address_u = samplerOf(cpu, pe, s, kSampAddressU);
+        ss.address_v = samplerOf(cpu, pe, s, kSampAddressV);
+        ss.mag_filter = samplerOf(cpu, pe, s, kSampMagFilter);
+        ss.min_filter = samplerOf(cpu, pe, s, kSampMinFilter);
+    }
+    plSet(cpu, pe, kPlStageSnapshots, plGet(cpu, pe, kPlStageSnapshots) + 1u);
     return true;
 }
 
@@ -2423,7 +2542,9 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         ++triangles;
         CVertex poly[3] = {a, b, c};
         CVertex clipped[kMaxClipVerts];
-        std::uint32_t n = clipNear(poly, 3, clipped);
+        // ★ 预变换顶点裁屏幕空间（视口矩形），其余裁齐次裁剪空间 6 个面；语义见 clipHomogeneous 上方
+        const std::uint32_t n = poly[0].pretransformed ? clipScreen(poly, 3, ctx, clipped)
+                                                       : clipHomogeneous(poly, 3, clipped);
         if (n < 3) return;
         SVertex sv[kMaxClipVerts];
         for (std::uint32_t i = 0; i < n; ++i) {

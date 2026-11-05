@@ -30,6 +30,13 @@ struct PeImportInfo {
     std::string module;    // 大写还是原样？保持 PE 里的原样（对照 census 用原样）
     std::string name;      // 按名字导入时非空
     std::uint32_t iat_rva = 0;
+    // ★ 2026-11-05（REQ-01M6KK2C6TKBA88M6EXG1H7E5B）：导入描述符的身份 = PE 里的**原始 RVA**，
+    //   ⛔ 不是换算后的文件偏移。`original_first_thunk == 0` 是合法形态（部分链接器只填 FirstThunk），
+    //   这时要**如实保留 0**，不能拿 FirstThunk 冒名顶替（A5 的诊断要能说清"坏在哪张表"）。
+    std::uint32_t original_first_thunk = 0;  // 描述符 +0x00 OriginalFirstThunk
+    std::uint32_t first_thunk = 0;           // 描述符 +0x10 FirstThunk
+    // 描述符在导入表里的序号（0 起）。同一描述符的多个函数共用同一个序号 ⇒ 诊断能回查"是哪一张表"。
+    std::uint32_t descriptor_index = 0;
     std::uint16_t ordinal = 0;
     bool by_ordinal = false;
 };
@@ -63,10 +70,13 @@ bool loadPeFile(const std::string& path, PeImage* out, std::string* err);
 //   IAT 槽位不落在任何节的虚拟范围里。
 bool parsePeImage(PeImage& img, std::string* err);
 // 把节按 `image_base + RVA` 映射进 guest（提交 + 清 .bss 部分）
-// ★ "半载入"是不允许的：先**全量校验**（4 GiB 空间 / 头长度 / 每节 `PointerToRawData + 要拷的字节`
-//   是否越出文件），再提交与拷贝 ⇒ 返回 false 时 guest 里**一个字节都没写**。
+// ★ "半载入"是不允许的：先**全量校验**（4 GiB 空间 / 头长度 / 每节的
+//   `PointerToRawData + SizeOfRawData` 是否越出文件），再提交与拷贝 ⇒ 返回 false 时 guest 里**一个字节都没写**。
 // ★ 要拷的字节 = `min(SizeOfRawData, VirtualSize)`（调用方自己填的结构也一样）：
 //   `SizeOfRawData < VirtualSize` 是**合法的正常形态**（BSS 尾巴 / 资源虚拟尾部），⛔ 不是坏节。
+// ★ 2026-11-05 加严：节头声明的**整个 raw 区间**必须落在文件里 —— 即使 `SizeOfRawData > VirtualSize`
+//   的那段只是对齐填充、根本不会被拷进 guest，`PointerToRawData + SizeOfRawData > 文件长度` 也要拒绝。
+//   取证与"为什么不会误杀真实 DLL"见 `image.cpp` 的 `mapPeImageAt` 第一遍注释。
 bool mapPeImage(GuestMemory& mem, const PeImage& img, std::string* err);
 // 同上，但映射到**指定的 guest 基址** `base`（不是 PE 头的 ImageBase）。
 // ★ 2026-11-04 新口径：AGERC.DLL 作为**真实 guest 模块**装载 ⇒ 它的 ImageBase 可能与主镜像 /

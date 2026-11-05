@@ -12,6 +12,10 @@
 //   ⑥ `ZENABLE` / `ZWRITEENABLE`：近的先画、远的后画 ⇒ 遮挡（远的不覆盖）/ 不遮挡（覆盖）各一条；
 //      `ZWRITEENABLE=0` 时近的不写深度 ⇒ 远的仍然覆盖。
 //   ⑦ `ALPHABLENDENABLE` + `SRCBLEND=SRCALPHA` / `DESTBLEND=INVSRCALPHA` ⇒ 逐通道精确混合值。
+//   ⑧ **每次 Draw 的状态快照**（偏差 #4）：纹理级/采样器状态只读一遍 ⇒ `stage_snapshots == draws`，
+//      ⛔ 不随三角形/像素增长；像素结果与逐像素读 guest 时完全一致。
+//   ⑨ **六平面裁剪**（偏差 #5）：远平面 / 左 / 右 / 上 / 下平面外的三角形一个像素都不写，
+//      完全在内的三角形像素不变；预变换（XYZRHW）顶点按视口矩形裁 x/y。
 //
 // ★ 所有方法调用都从 **guest 代码** 经 vtable 调（`mov eax,[vtbl]; push …; call [eax+off]`），
 //   测的是"guest 可见的设备"，不是宿主直接调函数。
@@ -64,6 +68,7 @@ constexpr std::uint32_t kOffSetFVF = 0x164u;
 constexpr std::uint32_t kOffSetStreamSource = 0x190u;
 constexpr std::uint32_t kOffTextureLockRect = 0x4Cu;
 constexpr std::uint32_t kOffTextureUnlockRect = 0x50u;
+constexpr std::uint32_t kOffSetViewport = 0xBCu;
 
 constexpr std::uint32_t kFvfXyzDiffuse = 0x0042u;              // D3DFVF_XYZ | D3DFVF_DIFFUSE
 constexpr std::uint32_t kFvfXyzRhwDiffuse = 0x0044u;           // D3DFVF_XYZRHW | D3DFVF_DIFFUSE
@@ -256,6 +261,24 @@ struct Fixture {
     std::uint32_t setFvf(std::uint32_t fvf) { return method(device.object, kOffSetFVF, {fvf}); }
     std::uint32_t setSampler(std::uint32_t stage, std::uint32_t type, std::uint32_t value) {
         return method(device.object, kOffSetSamplerState, {stage, type, value});
+    }
+    std::uint32_t setTextureStage(std::uint32_t stage, std::uint32_t type, std::uint32_t value) {
+        return method(device.object, kOffSetTextureStageState, {stage, type, value});
+    }
+    // D3DVIEWPORT9：X/Y/Width/Height 是 DWORD，MinZ/MaxZ 是 float（共 24 B）
+    std::uint32_t setViewport(std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h) {
+        std::vector<std::uint8_t> vp(24, 0);
+        auto wr = [&vp](std::uint32_t off, std::uint32_t v) {
+            for (int i = 0; i < 4; ++i)
+                vp[off + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF);
+        };
+        wr(0u, x);
+        wr(4u, y);
+        wr(8u, w);
+        wr(12u, h);
+        wr(16u, 0x00000000u);  // MinZ = 0.0f
+        wr(20u, 0x3F800000u);  // MaxZ = 1.0f
+        return method(device.object, kOffSetViewport, {placeBytes(vp)});
     }
     std::uint32_t setTexture(std::uint32_t stage, std::uint32_t tex) {
         return method(device.object, kOffSetTexture, {stage, tex});
@@ -748,6 +771,172 @@ void caseAlphaBlend() {
     LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsDestBlend, 0u), lift::d3d9::kInvalidCall);
 }
 
+// ---------------------------------------------------------------------------------------
+// ⑧ 每像素读 guest 的消除：纹理级/采样器状态每次 Draw 快照一次（偏差 #4）
+// ---------------------------------------------------------------------------------------
+void caseDrawStateSnapshot() {
+    lift_test::g_current_case = "d3d9p/draw-state-snapshot";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    // 让像素循环里真的有两级纹理状态：级 1 也开 MODULATE(CURRENT × TEX)。没有绑定纹理 ⇒
+    // TEX 是白色 ⇒ 结果 = CURRENT，**像素结果不变**；但旧实现会为每个像素读多次 texStageOf/samplerOf。
+    LIFT_CHECK_EQ_U32(r.f.setTextureStage(1u, lift::d3d9::kTssColorOp, lift::d3d9::kTopModulate), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTextureStage(1u, lift::d3d9::kTssAlphaOp, lift::d3d9::kTopModulate), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTextureStage(1u, lift::d3d9::kTssColorArg1, lift::d3d9::kTaCurrent), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTextureStage(1u, lift::d3d9::kTssColorArg2, lift::d3d9::kTaTexture), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTextureStage(1u, lift::d3d9::kTssAlphaArg1, lift::d3d9::kTaCurrent), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTextureStage(1u, lift::d3d9::kTssAlphaArg2, lift::d3d9::kTaTexture), 0u);
+
+    // 16 个三角形 / 48 个顶点（一次 Draw）：4×4 网格，每个格子画左下直角三角形
+    const std::uint32_t tri_color = 0xFF00FF00u;
+    const std::uint32_t tri_pixel = 0x0000FF00u;
+    std::vector<std::array<float, 4>> verts;
+    for (int t = 0; t < 16; ++t) {
+        const float x = static_cast<float>((t % 4) * 8);
+        const float y = static_cast<float>((t / 4) * 8);
+        verts.push_back({x, y, 0.0f, 1.0f});
+        verts.push_back({x + 4.0f, y, 0.0f, 1.0f});
+        verts.push_back({x, y + 4.0f, 0.0f, 1.0f});
+    }
+    const std::uint32_t data = r.f.placeRhwDiffuse(verts, std::vector<std::uint32_t>(verts.size(), tri_color));
+
+    auto drawAll = [&]() {
+        LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+        LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 16u, data, 20u), 0u);
+        LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    };
+    drawAll();
+
+    lift::d3d9::PipelineInfo info;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &info, nullptr));
+    // ★ 结构判据：快照次数 == Draw 次数（⛔ 不随三角形/像素增长）。
+    //   把像素循环改回 texStageOf/samplerOf（删掉 prepareContext 里的快照）⇒ 这里恒 0 ⇒ 红。
+    LIFT_CHECK_EQ_U32(info.draws, 1u);
+    LIFT_CHECK_EQ_U32(info.triangles, 16u);
+    LIFT_CHECK_EQ_U32(info.stage_snapshots, 1u);
+    // 快照没有改像素结果：三角形内部 = 顶点色，对角边另一侧 / 格子外 = 清屏色
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), tri_pixel);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(9, 9), tri_pixel);   // (9.5,9.5)：格子 (8,8) 的三角形内（x+y=19 < 20）
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(2, 6), kClearPixel);  // 同一格子的 (2.5,6.5)：x+y=9 > 4 ⇒ 三角形外
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(6, 2), kClearPixel);
+
+    // 第二次 Draw ⇒ 快照再 +1（失败/未进入光栅的调用不会假装快照过 —— 这里两次都成功）
+    drawAll();
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &info, nullptr));
+    LIFT_CHECK_EQ_U32(info.draws, 2u);
+    LIFT_CHECK_EQ_U32(info.triangles, 32u);
+    LIFT_CHECK_EQ_U32(info.stage_snapshots, 2u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(9, 9), tri_pixel);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑨ 六平面裁剪（偏差 #5）：远 / 左 / 右 / 上 / 下平面外的三角形不写像素；
+//    完全在内的三角形像素不变；预变换顶点的 x/y 裁剪 = 视口矩形。
+//    ★ 视口故意设成 32×32 @ (16,16)、后缓冲仍是 64×64 ⇒ 被侧平面裁掉的几何**落在后缓冲内**，
+//      旧实现（只裁近平面 + scissor 兜底）会写像素；新实现必须一个像素都不写。
+// ---------------------------------------------------------------------------------------
+void drawXyzTri(Rig& r, const std::array<std::array<float, 3>, 3>& xyz, std::uint32_t color) {
+    const std::uint32_t data = r.f.placeXyzDiffuse({xyz[0], xyz[1], xyz[2]}, color);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzDiffuse), 0u);
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 1u, data, 16u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+}
+
+void caseClipPlanes() {
+    lift_test::g_current_case = "d3d9p/clip-planes";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);  // 远平面要能"本来会画"才可观测
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setViewport(16u, 16u, 32u, 32u), 0u);
+
+    const std::uint32_t in_color = 0xFF00FF00u;   // 绿：完全在内的三角形
+    const std::uint32_t out_color = 0xFFFF0000u;  // 红：被裁掉的三角形（只要画了就能看出来）
+    const std::uint32_t in_px = 0x0000FF00u;
+    const std::uint32_t out_px = 0x00FF0000u;
+    // 完全在内：x,y ∈ [-0.5,0.5] ⇒ 屏幕 (24,40)-(40,40)-(40,24)（视口内）
+    const std::array<std::array<float, 3>, 3> inside = {
+        {{-0.5f, -0.5f, 0.0f}, {0.5f, -0.5f, 0.0f}, {0.5f, 0.5f, 0.0f}}};
+
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    drawXyzTri(r, inside, in_color);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(38, 26), in_px);   // (38.5,26.5)：x+y=65 > 64 ⇒ 斜边内侧
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(39, 39), in_px);   // (39.5,39.5)：直角附近
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(30, 30), kClearPixel);  // (30.5,30.5)：x+y=61 < 64 ⇒ 三角形外
+
+    // ① 远平面：z=1.5（w=1）⇒ w-z=-0.5。ZENABLE=0 时旧实现会把它画在**同一个位置**（红色）。
+    drawXyzTri(r, {{{-0.5f, -0.5f, 1.5f}, {0.5f, -0.5f, 1.5f}, {0.5f, 0.5f, 1.5f}}}, out_color);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(38, 26), in_px);  // 绿还在 ⇒ 远平面外的三角形连像素都没写
+    // ② 右平面：x/w ∈ [1.2,1.8] ⇒ 屏幕 x≈51..61（后缓冲内、视口外）
+    drawXyzTri(r, {{{1.2f, -0.2f, 0.0f}, {1.8f, -0.2f, 0.0f}, {1.2f, 0.2f, 0.0f}}}, out_color);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(53, 32), kClearPixel);
+    // ③ 左平面：x/w ∈ [-1.8,-1.2] ⇒ 屏幕 x≈3..13
+    drawXyzTri(r, {{{-1.8f, -0.2f, 0.0f}, {-1.2f, -0.2f, 0.0f}, {-1.8f, 0.2f, 0.0f}}}, out_color);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(6, 32), kClearPixel);
+    // ④ 上平面：y/w ∈ [1.2,1.8] ⇒ 屏幕 y≈3..13
+    drawXyzTri(r, {{{-0.2f, 1.2f, 0.0f}, {0.2f, 1.2f, 0.0f}, {-0.2f, 1.8f, 0.0f}}}, out_color);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(32, 6), kClearPixel);
+    // ⑤ 下平面：y/w ∈ [-1.8,-1.2] ⇒ 屏幕 y≈51..61
+    drawXyzTri(r, {{{-0.2f, -1.8f, 0.0f}, {0.2f, -1.8f, 0.0f}, {-0.2f, -1.2f, 0.0f}}}, out_color);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(32, 56), kClearPixel);
+
+    // 计数器：6 个三角形进装配，只有"在内的那个"真的进入光栅化（旧实现会是 6 ⇒ 红）
+    lift::d3d9::PipelineInfo info;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &info, nullptr));
+    LIFT_CHECK_EQ_U32(info.triangles, 6u);
+    LIFT_CHECK_EQ_U32(info.rasterized, 1u);
+
+    // ⑥ 部分越界：右平面把三角形**切开**（不是整块丢）—— 屏幕 x 40..48 的可见部分仍画，
+    //    48..56 的被裁掉。视口内 (44,36) = 红；(52,38) 旧实现会画、新实现必须不画。
+    drawXyzTri(r, {{{0.5f, -0.5f, 0.0f}, {1.5f, -0.5f, 0.0f}, {0.5f, 0.5f, 0.0f}}}, out_color);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(44, 36), out_px);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(52, 38), kClearPixel);
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &info, nullptr));
+    LIFT_CHECK_EQ_U32(info.triangles, 7u);
+    LIFT_CHECK_EQ_U32(info.rasterized, 2u);  // 切开的三角形仍算"进入了光栅化"（只多了顶点）
+
+    // ⑦ XYZRHW 的 x/y 裁剪 = **视口矩形**（齐次面不适用）：屏幕 x=52..60 在视口 16..48 外、
+    //    后缓冲（64）内 ⇒ 旧实现会写红色；新实现必须裁掉。
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    std::vector<std::array<float, 4>> outside_quad = {
+        {52.0f, 20.0f, 0.0f, 1.0f}, {60.0f, 20.0f, 0.0f, 1.0f}, {52.0f, 28.0f, 0.0f, 1.0f},
+        {60.0f, 20.0f, 0.0f, 1.0f}, {60.0f, 28.0f, 0.0f, 1.0f}, {52.0f, 28.0f, 0.0f, 1.0f}};
+    const std::uint32_t outside_data =
+        r.f.placeRhwDiffuse(outside_quad, std::vector<std::uint32_t>(outside_quad.size(), out_color));
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 2u, outside_data, 20u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(55, 24), kClearPixel);
+
+    // 视口内的同一块四边形仍然照画（证明挡住的是"视口外的部分"，不是整条预变换路径）
+    std::vector<std::array<float, 4>> inside_quad = {
+        {20.0f, 20.0f, 0.0f, 1.0f}, {28.0f, 20.0f, 0.0f, 1.0f}, {20.0f, 28.0f, 0.0f, 1.0f},
+        {28.0f, 20.0f, 0.0f, 1.0f}, {28.0f, 28.0f, 0.0f, 1.0f}, {20.0f, 28.0f, 0.0f, 1.0f}};
+    const std::uint32_t inside_data =
+        r.f.placeRhwDiffuse(inside_quad, std::vector<std::uint32_t>(inside_quad.size(), out_color));
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 2u, inside_data, 20u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(24, 24), out_px);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(55, 24), kClearPixel);
+
+    // 11 个三角形进装配；光栅化的 = 在内的 XYZ 三角形 1 + 部分越界（切开的）1 + 视口内四边形的 2
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &info, nullptr));
+    LIFT_CHECK_EQ_U32(info.triangles, 11u);
+    LIFT_CHECK_EQ_U32(info.rasterized, 4u);
+}
+
 }  // namespace
 
 int main() {
@@ -760,6 +949,8 @@ int main() {
         caseMinFilterSampling();
         caseZBuffer();
         caseAlphaBlend();
+        caseDrawStateSnapshot();
+        caseClipPlanes();
         return finish("d3d9-pipeline");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());

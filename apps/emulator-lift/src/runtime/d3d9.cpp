@@ -579,11 +579,25 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
         if (why) *why = "D3D9：Present 的后缓冲像素不在 arena 里（设备状态与 arena 不一致）";
         return kInvalidCall;
     }
+    // ★ 帧导出（宿主诊断）：路径里的 `{frame}` 换成**即将呈现**的帧号（4 位）。
+    //   不含占位符时每次覆盖同一文件；配合 --max-frames 1 就能稳定拿第一帧。
+    std::string dump_path = cpu.shim.frame_dump;
+    if (!dump_path.empty()) {
+        char frame_buf[16];
+        std::snprintf(frame_buf, sizeof(frame_buf), "%04llu",
+                      static_cast<unsigned long long>(m->presenter().frameCount() + 1u));
+        const std::string token = "{frame}";
+        for (std::size_t pos = dump_path.find(token); pos != std::string::npos;
+             pos = dump_path.find(token, pos + std::strlen(frame_buf))) {
+            dump_path.replace(pos, token.size(), frame_buf);
+        }
+    }
     std::string err;
-    if (!m->presenter().present(m->surfaces(), *gs, std::string(), &err)) {
+    if (!m->presenter().present(m->surfaces(), *gs, dump_path, &err)) {
         if (why) *why = "D3D9：HeadlessPresenter.present 失败：" + err;
         return kFail;
     }
+    if (!dump_path.empty()) d3d9Log("Present", "帧 BMP 已写入 %s", dump_path.c_str());
     cpu.mem->wr32(dev.state + kDvPresents, dev.presents + 1u);
     // ★ 第一帧的**像素判据**：后缓冲里"非背景像素数"（背景 = 出现次数最多的那个像素值）。
     //   ⛔ 不是猜，也不是"看截图"：直接数 guest 后缓冲的像素（确定性；同一份输入两次跑同值）。
@@ -600,6 +614,12 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
         d3d9Log("Present", "第 %llu 帧 hash=0x%016llX（像素统计失败：后缓冲指针/尺寸非法）",
                 static_cast<unsigned long long>(m->presenter().frameCount()),
                 static_cast<unsigned long long>(m->presenter().lastHash()));
+    }
+    if (cpu.shim.max_frames != 0 && m->presenter().frameCount() >= cpu.shim.max_frames) {
+        // 帧数上限是宿主侧控制；停止原因走既有的 StopReason::Stopped。
+        cpu.running = false;
+        cpu.stop_why = "max-frames";
+        d3d9Log("Present", "已到 --max-frames %u ⇒ 主动停", cpu.shim.max_frames);
     }
     return kOk;
 }

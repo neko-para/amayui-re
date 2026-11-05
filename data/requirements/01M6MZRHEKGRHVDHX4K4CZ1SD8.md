@@ -2,8 +2,10 @@
 
 - id: REQ-01M6MZRHEKGRHVDHX4K4CZ1SD8
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/d3d9_pipeline.cpp#d3d9p/clip-planes
+- done_reason: A/B 已落地（GLM 1.0.3 + math.*；pixel_format.* 消除重复；min_filter 不再被忽略）；A/B 后遗留的三类具体偏差也已消除：#4 每 Draw 快照纹理/采样器状态（PipelineInfo.stage_snapshots，d3d9p/draw-state-snapshot 会红）、#5 六平面齐次裁剪 + XYZRHW 视口裁剪（d3d9p/clip-planes 会红）、#3 重复助手收敛（identity/unpackColor/formatForBpp）。C Unicorn POC 按用户 2026-11-05 裁决停在 feat/unicorn，不并入 main；CPU 固定为 interp。ctest 41/41、pnpm test 1159/1159、lift check 绿。
 - tags: [emulator-lift, infra, cpu]
 
 ## 一句话

@@ -129,6 +129,10 @@ struct ShimState {
     std::uint32_t exit_code = 0;
     std::uint32_t critical_section_count = 0;      // 统计用
     std::uint32_t unimplemented_calls = 0;         // 缺口计数（A5）
+    // ★ 帧导出（宿主诊断，不参与 guest 语义）：`{frame}` 替换成 4 位帧号；
+    //   为空 = 不导出。`max_frames != 0` 时 Present 到该帧数后主动停（--max-frames）。
+    std::string frame_dump;
+    std::uint32_t max_frames = 0;
     // ★ alertable 等待的语义缺口只提示一次（无 APC 队列 ⇒ 永不返回 WAIT_IO_COMPLETION）
     bool warned_alertable = false;
     GuestCallbackState callback;                   // guest 回调续延（EnumSystemLocalesA）

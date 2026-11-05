@@ -77,6 +77,12 @@ void caseMultiplyOrder() {
     float back[16];
     lift::math::toD3DLayout(lift::math::fromD3DLayout(probe), back);
     for (int i = 0; i < 16; ++i) LIFT_CHECK(back[i] == probe[i]);
+
+    // ★ 单位阵：D3DX 布局必须是 1/0（这是 d3d9_pipeline 的 writeIdentity 与 d3dx9_sprite 的
+    //   writeIdentityMatrix 的**同一个**来源；改成别的布局/顺序时这里红，而不是靠人眼审计两份手写）
+    float id[16];
+    lift::math::toD3DLayout(lift::math::identity<float>(), id);
+    for (int i = 0; i < 16; ++i) LIFT_CHECK(id[i] == ((i % 5 == 0) ? 1.0f : 0.0f));
 }
 
 // ---------------------------------------------------------------------------------------

@@ -2,8 +2,10 @@
 
 - id: REQ-01M6KNBE5FP87DAC93ZRQ1K1DK
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/file_path_ext.cpp#game-dir-write-overlay
+- done_reason: 写入落点按 plan D5 的“--game-dir 只读”落地为写覆盖层：影子目录 = <--appdata>/Game/<guest 相对路径>；读先影子再安装树，写只落影子（已存在文件先 copy-up），MakeSureDirectoryPathExists 建影子目录；无 --appdata 时保持旧行为并每次写警告。新增 game-dir-write-overlay（写/读回/建目录/copy-up/Find 合并/安装树删除拒绝）并更新 make-sure-directory-path-exists；ctest 41/41、pnpm test 1159/1159、lift check 绿。未做 whiteout（记录为有意边界）。
 - tags: [emulator-lift, m2]
 
 ## 一句话

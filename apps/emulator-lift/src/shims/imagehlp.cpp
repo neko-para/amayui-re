@@ -17,6 +17,11 @@
 // ★ 落盘只经 VFS（`--appdata` / `--game-dir` 的映射集中在 `runtime/vfs.cpp` 一处）：
 //   ⛔ 不在这里直接 `std::filesystem::create_directory` 宿主路径 —— 那会绕过 VFS，
 //   把 guest 路径的语义（根 / 大小写 / 逃逸检查）全部丢掉。
+//
+// ★ 2026-11-05 写覆盖层（`REQ-01M6KNBE5FP87DAC93ZRQ1K1DK`）：`--game-dir` 只读 ⇒ 这条
+//   "准备安装树相对目录"的调用（引擎启动路径上的 `0x004903A3`）在有 `--appdata` 时建到
+//   `<--appdata>/Game/…`（影子目录），⛔ 不在安装树里建目录；没有 `--appdata` 时保持旧行为
+//   并在日志里**响亮**提示（⛔ 不静默写安装树）。
 #include <cstdint>
 #include <string>
 
@@ -74,7 +79,19 @@ void shimMakeSureDirectoryPathExists(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    shimLog("imagehlp", api, "\"%s\" ⇒ TRUE（逐段建目录；已存在算成功）", guest.c_str());
+    // ★ 写覆盖层（`--game-dir` 只读，口径见 runtime/vfs.h 文件上方）：有 `--appdata` 时
+    //   这些目录建在影子 `<--appdata>/Game/…` 里（AppData 特殊目录仍走原映射）；
+    //   没有 `--appdata` 时保持旧行为（安装树），但必须**响亮** —— ⛔ 不静默写安装树。
+    if (cpu.vfs->writeOverlayEnabled()) {
+        const std::string shadow = cpu.vfs->writeOverlayDir();
+        shimLog("imagehlp", api,
+                "\"%s\" ⇒ TRUE（逐段建目录；已存在算成功；游戏树落点 = 影子目录 \"%s\"，AppData 特殊目录走原映射）",
+                guest.c_str(), shadow.c_str());
+    } else {
+        shimLog("imagehlp", api,
+                "\"%s\" ⇒ TRUE（逐段建目录；已存在算成功；⚠ 没有 --appdata ⇒ 落点仍是 --game-dir）",
+                guest.c_str());
+    }
     call.result = 1;
 }
 

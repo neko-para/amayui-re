@@ -61,6 +61,9 @@ void usage() {
         "  --until shim        跑到第一次 shim 调用就停（L1）\n"
         "  --until ea <hex>    跑到指定 EA 就停（L2 = 0x4BA890）\n"
         "  --max-insns <N>     最多执行 N 条指令\n"
+        "  --max-frames <N>    最多呈现 N 帧后停（0 = 不限；D3D9 Present 计数）\n"
+        "  --dump-frame <path> 每次 Present 导出 BMP；路径里的 {frame} 换成 4 位帧号\n"
+        "                      （不含 {frame} 时同一文件会被覆盖；配合 --max-frames 1 取第一帧）\n"
         "  --time-limit <秒>   墙钟上限（探索用；0 = 不限，缺省）\n"
         "  --trace-shims       打印 shim 调用（确定性格式）\n"
         "  --trace-blocks      打印每条执行的指令（调试用，很慢）\n"
@@ -89,6 +92,8 @@ int main(int argc, char** argv) {
     bool trace_inputs = false;
     std::uint64_t bench = 0;
     std::uint32_t max_insns = 0;
+    std::uint32_t max_frames = 0;
+    std::string frame_dump;
     double time_limit_sec = 0.0;
     std::uint32_t until_ea = 0;
     bool until_shim = false;
@@ -138,6 +143,14 @@ int main(int argc, char** argv) {
             }
         } else if (std::strcmp(a, "--max-insns") == 0 && i + 1 < argc) {
             max_insns = static_cast<std::uint32_t>(std::strtoull(argv[++i], nullptr, 10));
+        } else if (std::strcmp(a, "--max-frames") == 0 && i + 1 < argc) {
+            max_frames = static_cast<std::uint32_t>(std::strtoull(argv[++i], nullptr, 10));
+        } else if (std::strcmp(a, "--dump-frame") == 0 && i + 1 < argc) {
+            frame_dump = argv[++i];
+            if (frame_dump.empty()) {
+                std::fprintf(stderr, "--dump-frame 需要一个非空路径\n");
+                return 2;
+            }
         } else if (std::strcmp(a, "--time-limit") == 0 && i + 1 < argc) {
             time_limit_sec = std::strtod(argv[++i], nullptr);
             if (time_limit_sec <= 0.0) {
@@ -391,6 +404,14 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
+
+    // 帧导出 / 帧数上限是**宿主诊断配置**（不进 guest 语义）；只有 D3D9 Present 消费。
+    machine.cpu().shim.frame_dump = frame_dump;
+    machine.cpu().shim.max_frames = max_frames;
+    if (!frame_dump.empty()) {
+        std::printf("frame-dump: %s（每次 Present 导出 BMP；{frame} = 4 位帧号）\n", frame_dump.c_str());
+    }
+    if (max_frames != 0) std::printf("max-frames: %u（D3D9 Present 到达后停）\n", max_frames);
 
     lift::RunOptions opt;
     opt.until_ea = until_ea;

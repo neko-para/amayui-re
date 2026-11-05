@@ -4,6 +4,10 @@
 //   · **唯一根**：guest 绝对路径按 `resolve` 的顺序匹配（见 vfs.h：overlay → guest 根前缀 →
 //     `--appdata` 前缀 → 相对路径）；`guest 根前缀` 剥掉之后的余下部分**照旧**走分段解析；
 //     `..` 越出根 ⇒ **失败**（⛔ 不夹回根里）。
+//   · **写覆盖层**（2026-11-05，`REQ-01M6KNBE5FP87DAC93ZRQ1K1DK`，口径见 vfs.h 文件上方）：
+//     `--game-dir` 只读 ⇒ 非特殊目录的**写**落到 `<--appdata>/Game/…`；**读先影子、再安装树**；
+//     枚举合并两边（同名影子优先）。`installPathForSegments` 是旧解析的唯一实现（读 / 写共用），
+//     影子那边只有 `shadowPathForSegments` / `shadowExistingForSegments` 两份 —— ⛔ shim 不拼路径。
 //   · **guest 路径文本的编码**（2026-11-05 缺陷单 `🐞S2`）：入口用 `guestPathForLog` 归一成
 //     UTF-8（guest 内存里的 A 版字节是 CP932）；规则只有一条，见 vfs.h。
 //   · **错误串带 tag 前缀**（`[notfound]` / `[notdir]` / `[escape]` / `[ambiguous]` / `[invalid]`
@@ -61,6 +65,11 @@ namespace fs = std::filesystem;
 
 // 1601-01-01 → 1970-01-01 的 100 ns 数（与 kernel32_time.cpp 的 kFiletimeEpochDelta 同一个常数）
 constexpr std::int64_t kFileTimeEpochDelta = 116444736000000000ll;
+
+// ★ 写覆盖层的影子目录：`<--appdata>/Game`（口径见 vfs.h 文件上方）。
+//   ⛔ 不要把它挪到 `Roaming` / `Local` / `Documents` 里：那三个是 guest 特殊目录的映射脚手架，
+//   语义是"guest 的 AppData 视图"；影子目录是"安装树的写落点"，两件事分开才不会互相污染。
+constexpr const char* kWriteOverlaySubdir = "Game";
 
 // ---------------------------------------------------------------------------------------
 // 编码：UTF-8 字符串 ↔ fs::path
@@ -582,8 +591,30 @@ void Vfs::setAppDataDir(const std::string& host_dir) {
     //   这是本模拟器**自有**的伪造 AppData，删它不影响任何真实数据；失败只影响确定性。
     //   ⛔ 不要把它指向真实用户目录：这里会连同 `<appdata>/Local/Temp` 一起清掉（`--appdata`
     //   的语义就是"可丢弃的伪造根"）。
+    //   ★ **不动** `<--appdata>/Game`（写覆盖层的影子目录）：那里是引擎写出来的存档 / 配置，
+    //   与 Temp 的"可丢弃"正相反 —— 清掉它等于每次启动丢存档。
     std::error_code ec;
     fs::remove_all(pathFromUtf8(app_data_dir_) / "Local" / "Temp", ec);
+}
+
+std::string Vfs::shadowRoot() const {
+    if (app_data_dir_.empty()) return std::string();
+    return pathToUtf8((pathFromUtf8(app_data_dir_) / pathFromUtf8(kWriteOverlaySubdir)).lexically_normal());
+}
+
+std::string Vfs::writeOverlayDir() const { return shadowRoot(); }
+
+bool Vfs::isWriteOverlayPath(const std::string& host_path) const {
+    const std::string root = shadowRoot();
+    if (root.empty() || host_path.empty()) return false;
+    const fs::path sroot = pathFromUtf8(root);
+    return isUnderRoot(sroot, pathFromUtf8(host_path).lexically_normal());
+}
+
+bool Vfs::isInstallTreePath(const std::string& host_path) const {
+    if (game_dir_.empty() || host_path.empty()) return false;
+    return isUnderRoot(pathFromUtf8(game_dir_).lexically_normal(),
+                       pathFromUtf8(host_path).lexically_normal());
 }
 
 std::string Vfs::guestExePath() const {
@@ -641,105 +672,32 @@ const std::vector<SpecialRoot>& specialRoots() {
 }
 }  // namespace
 
-bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::string* error,
-                  bool must_exist, bool resolve_case) const {
-    if (host_path) host_path->clear();
-    if (error) error->clear();
-    if (!ready()) {
-        if (error) *error = "[ready] game_dir 未设置（--game-dir 是唯一根）";
-        return false;
-    }
-    if (guest_path.empty()) {
-        if (error) *error = "[invalid] 空路径";
-        return false;
-    }
-    // ★ 入口归一（规则见 vfs.h）：guest 内存里的 A 版路径是 CP932 字节 ⇒ 变成 UTF-8 文本。
-    //   从这里往下只有**一套字节**（UTF-8）在比较 / 打印 —— 这既让 `E:\Games\Eushully\天結\…`
-    //   的根前缀能剥（2026-11-05 缺陷单：CP932 与 UTF-8 的 `天結` 字节不同 ⇒ 剥不掉 ⇒
-    //   `[notdir] 段 "Games"`），也让日志不再把 CP932 字节写进 UTF-8 流。
-    const std::string guest = guestPathForLog(guest_path);
-    // ★ ① overlay（只对**一个**文件）：命中 ⇒ 宿主路径直接是真正在跑的那份字节。
-    //   命中时打一行日志：来源 + sha256 前 8 位（用户 2026-11-05 口径；这是**唯一**一条
-    //   "Vfs 自己打日志"的路径 —— 它足够罕见，而且必须能从日志里看见走的是哪一份）。
-    if (matchesOverlay(guest)) {
-        std::fprintf(stderr, "[vfs] overlay: guest \"%s\" ⇒ \"%s\"（来源：--exe 拆壳件；sha256 前 8 位 %s）\n",
-                     guest.c_str(), overlay_host_.c_str(),
-                     overlay_sha256_.empty() ? "-" : overlay_sha256_.substr(0, 8).c_str());
-        if (host_path) *host_path = overlay_host_;
+// =======================================================================================
+// 写覆盖层的脚手架（口径见 vfs.h 文件上方）
+//   ★ `installPathForSegments` 是**旧的唯一解析**（resolve / resolveForWrite / find 共用）；
+//     `shadowPathForSegments` / `shadowExistingForSegments` 是影子的解析。
+//   ⛔ shim 不许自己拼宿主路径 —— 影子目录的落点只在这里决定。
+// =======================================================================================
+bool Vfs::matchSpecialDir(const std::string& guest, std::string* sub, std::string* rest,
+                          std::string* guest_form) const {
+    const std::string text = normalizeSeps(guest);
+    for (const SpecialRoot& sr : specialRoots()) {
+        if (!prefixIsDir(text, sr.guest)) continue;
+        if (sub) *sub = sr.sub;
+        if (rest) *rest = text.substr(sr.guest.size());
+        if (guest_form) *guest_form = sr.guest;
         return true;
     }
+    return false;
+}
 
-    std::string err;
-    std::vector<std::string> segs;
-
-    // ★ ② guest 根前缀（**最具体**，先于 appdata 与相对路径）：`<guest_root>\…` ⇒ `--game-dir` 根。
-    //   ★ 剥完之后**必须**再走一遍分段解析（大小写不敏感 / `..` 归一化 / overlay / `[escape]`）——
-    //     这里只把"根之后的余下文本"交给 splitRelativeText，⛔ 不直接拼宿主路径。
-    std::string root_rel;
-    const bool rooted = stripGuestRootPrefix(*this, guest, &root_rel);
-    if (rooted) {
-        if (!splitRelativeText(root_rel, guest, &segs, &err, /*clamp_escape=*/false)) {
-            if (error) *error = err;
-            return false;
-        }
-    } else {
-        // ★ ③ 特殊目录（--appdata）：匹配固定的 guest 前缀，剩余段落到 appdata/<sub>。
-        const std::string special_text = normalizeSeps(guest);
-        for (const SpecialRoot& sr : specialRoots()) {
-            const std::string prefix = sr.guest;
-            if (!prefixIsDir(special_text, prefix)) continue;
-            if (app_data_dir_.empty()) {
-                if (error) *error = std::string("[appdata] 特殊目录 \"") + sr.guest +
-                                    "\" 需要 --appdata，但当前为空";
-                return false;
-            }
-            const std::string rest = special_text.substr(prefix.size());
-            std::vector<std::string> ssegs;
-            std::string seg_err;
-            if (!splitRelativeText(rest, guest, &ssegs, &seg_err, /*clamp_escape=*/false)) {
-                if (error) *error = seg_err;
-                return false;
-            }
-            const fs::path sroot = (pathFromUtf8(app_data_dir_) / pathFromUtf8(sr.sub)).lexically_normal();
-            fs::path scur = sroot;
-            std::string serr;
-            for (std::size_t i = 0; i < ssegs.size(); ++i) {
-                const bool last = (i + 1 == ssegs.size());
-                std::string real;
-                const SegLookup r = lookupSegment(scur, ssegs[i], last && !resolve_case, &real, &serr);
-                if (r == SegLookup::Error) {
-                    if (error) *error = serr;
-                    return false;
-                }
-                if (r == SegLookup::Found) {
-                    scur /= pathFromUtf8(real);
-                    continue;
-                }
-                if (!last || must_exist) {
-                    if (error) *error = std::string(last ? "[notfound]" : "[notdir]") + " 段 \"" + ssegs[i] +
-                                        "\" 在 \"" + pathToUtf8(scur) + "\" 里不存在";
-                    return false;
-                }
-                scur /= pathFromUtf8(ssegs[i]);
-            }
-            const fs::path snorm = scur.lexically_normal();
-            if (!isUnderRoot(sroot, snorm)) {
-                if (error) *error = "[escape] AppData 解析结果不在 --appdata 之下";
-                return false;
-            }
-            if (host_path) *host_path = pathToUtf8(snorm);
-            return true;
-        }
-
-        // ★ ④ 相对路径（相对 guest cwd；缺省 = guest 根）。
-        if (!splitGuest(*this, guest, &segs, &err)) {
-            if (error) *error = err;
-            return false;
-        }
-    }
-
+bool Vfs::installPathForSegments(const std::vector<std::string>& segs, bool must_exist,
+                                 bool resolve_case, std::string* host_path,
+                                 std::string* error) const {
+    if (host_path) host_path->clear();
     const fs::path root = pathFromUtf8(game_dir_);
     fs::path cur = root;
+    std::string err;
     for (std::size_t i = 0; i < segs.size(); ++i) {
         const bool last = (i + 1 == segs.size());
         // `resolve_case == false` 只影响**最后一段**（父目录仍要做大小写匹配）
@@ -780,6 +738,326 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
     return true;
 }
 
+bool Vfs::shadowPathForSegments(const std::vector<std::string>& segs, bool create_dirs,
+                                std::string* host_path, std::string* error) const {
+    if (host_path) host_path->clear();
+    const std::string root_text = shadowRoot();
+    if (root_text.empty()) {
+        if (error) *error = "[appdata] 写覆盖层需要 --appdata，但当前为空";
+        return false;
+    }
+    const fs::path sroot = pathFromUtf8(root_text);
+    fs::path cur = sroot;
+    std::error_code ec;
+    if (create_dirs) {
+        if (!fs::is_directory(cur, ec)) {
+            ec.clear();
+            if (!fs::create_directories(cur, ec) || ec) {
+                if (error) {
+                    *error = "[io] 影子目录 \"" + root_text + "\" 建不出来：" +
+                             (ec ? ec.message() : std::string("宿主拒绝"));
+                }
+                return false;
+            }
+        }
+    }
+    fs::path install_cur = pathFromUtf8(game_dir_).lexically_normal();
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+        const bool last = (i + 1 == segs.size());
+        ec.clear();
+        if (!fs::is_directory(cur, ec)) {
+            // 影子这边这条路径还没有（create_dirs=false 的删 / 改名 / 改属性）：
+            // 余下段按调用方拼写直接拼上，交给调用方判存在性（⛔ 这里不建目录）。
+            for (; i < segs.size(); ++i) cur /= pathFromUtf8(segs[i]);
+            break;
+        }
+        std::string real;
+        std::string err;
+        const SegLookup r = lookupSegment(cur, segs[i], /*exact_only=*/false, &real, &err);
+        if (r == SegLookup::Error) {
+            if (error) *error = err;
+            return false;
+        }
+        std::string name;
+        if (r == SegLookup::Found) {
+            name = real;
+        } else if (!last) {
+            // 目录按需创建：名字优先沿用安装树那边的实际拼写（Windows 大小写不敏感；这样
+            // `find()` 里影子项与安装树项不会变成两个名字），安装树也没有才用调用方拼写。
+            name = segs[i];
+            std::string ireal;
+            std::string ierr;
+            if (lookupSegment(install_cur, segs[i], /*exact_only=*/false, &ireal, &ierr) == SegLookup::Found) {
+                name = ireal;
+            }
+        } else {
+            name = segs[i];  // 新文件：保留调用方拼写
+        }
+        cur /= pathFromUtf8(name);
+        if (!last) {
+            install_cur /= pathFromUtf8(name);
+            if (create_dirs) {
+                ec.clear();
+                if (!fs::is_directory(cur, ec)) {
+                    ec.clear();
+                    if (!fs::create_directory(cur, ec) || ec) {
+                        if (error) {
+                            *error = "[io] 影子子目录 \"" + pathToUtf8(cur) + "\" 建不出来：" +
+                                     (ec ? ec.message() : std::string("宿主拒绝"));
+                        }
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    const fs::path normalized = cur.lexically_normal();
+    if (!isUnderRoot(sroot.lexically_normal(), normalized)) {
+        if (error) *error = "[escape] 影子解析结果不在 --appdata 之下";
+        return false;
+    }
+    if (host_path) *host_path = pathToUtf8(normalized);
+    return true;
+}
+
+bool Vfs::shadowExistingForSegments(const std::vector<std::string>& segs, std::string* host_path,
+                                    std::string* error) const {
+    if (host_path) host_path->clear();
+    const std::string root_text = shadowRoot();
+    if (root_text.empty()) return false;
+    fs::path cur = pathFromUtf8(root_text);
+    std::error_code ec;
+    if (!fs::is_directory(cur, ec)) return false;  // 影子目录还不存在 ⇒ 影子这边没有
+    for (const std::string& seg : segs) {
+        if (!fs::is_directory(cur, ec)) return false;  // 中间是文件 ⇒ 影子这边没有这条路径
+        std::string real;
+        std::string err;
+        const SegLookup r = lookupSegment(cur, seg, /*exact_only=*/false, &real, &err);
+        if (r == SegLookup::Error) {
+            if (error) *error = err;
+            return false;
+        }
+        if (r == SegLookup::Missing) return false;
+        cur /= pathFromUtf8(real);
+    }
+    if (host_path) *host_path = pathToUtf8(cur.lexically_normal());
+    return true;
+}
+
+bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::string* error,
+                  bool must_exist, bool resolve_case, VfsAccess access) const {
+    if (host_path) host_path->clear();
+    if (error) error->clear();
+    if (!ready()) {
+        if (error) *error = "[ready] game_dir 未设置（--game-dir 是唯一根）";
+        return false;
+    }
+    if (guest_path.empty()) {
+        if (error) *error = "[invalid] 空路径";
+        return false;
+    }
+    // ★ 入口归一（规则见 vfs.h）：guest 内存里的 A 版路径是 CP932 字节 ⇒ 变成 UTF-8 文本。
+    //   从这里往下只有**一套字节**（UTF-8）在比较 / 打印 —— 这既让 `E:\Games\Eushully\天結\…`
+    //   的根前缀能剥（2026-11-05 缺陷单：CP932 与 UTF-8 的 `天結` 字节不同 ⇒ 剥不掉 ⇒
+    //   `[notdir] 段 "Games"`），也让日志不再把 CP932 字节写进 UTF-8 流。
+    const std::string guest = guestPathForLog(guest_path);
+    // ★ ① overlay（只对**一个**文件）：命中 ⇒ 宿主路径直接是真正在跑的那份字节。
+    //   命中时打一行日志：来源 + sha256 前 8 位（用户 2026-11-05 口径；这是**唯一**一条
+    //   "Vfs 自己打日志"的路径 —— 它足够罕见，而且必须能从日志里看见走的是哪一份）。
+    //   ★ 写覆盖层上线后：**只有读**走这里 —— 写要进影子（⛔ 绝不让写把正在跑的拆壳件换掉）。
+    if (access == VfsAccess::Read && matchesOverlay(guest)) {
+        std::fprintf(stderr, "[vfs] overlay: guest \"%s\" ⇒ \"%s\"（来源：--exe 拆壳件；sha256 前 8 位 %s）\n",
+                     guest.c_str(), overlay_host_.c_str(),
+                     overlay_sha256_.empty() ? "-" : overlay_sha256_.substr(0, 8).c_str());
+        if (host_path) *host_path = overlay_host_;
+        return true;
+    }
+
+    std::string err;
+    std::vector<std::string> segs;
+
+    // ★ ② guest 根前缀（**最具体**，先于 appdata 与相对路径）：`<guest_root>\…` ⇒ `--game-dir` 根。
+    //   ★ 剥完之后**必须**再走一遍分段解析（大小写不敏感 / `..` 归一化 / overlay / `[escape]`）——
+    //     这里只把"根之后的余下文本"交给 splitRelativeText，⛔ 不直接拼宿主路径。
+    std::string root_rel;
+    const bool rooted = stripGuestRootPrefix(*this, guest, &root_rel);
+    std::string special_sub;
+    std::string special_rest;
+    std::string special_form;
+    if (!rooted && matchSpecialDir(guest, &special_sub, &special_rest, &special_form)) {
+        // ★ ③ 特殊目录（--appdata）：匹配固定的 guest 前缀，剩余段落到 appdata/<sub>。
+        if (app_data_dir_.empty()) {
+            if (error) *error = std::string("[appdata] 特殊目录 \"") + special_form +
+                                "\" 需要 --appdata，但当前为空";
+            return false;
+        }
+        std::vector<std::string> ssegs;
+        std::string seg_err;
+        if (!splitRelativeText(special_rest, guest, &ssegs, &seg_err, /*clamp_escape=*/false)) {
+            if (error) *error = seg_err;
+            return false;
+        }
+        const fs::path sroot = (pathFromUtf8(app_data_dir_) / pathFromUtf8(special_sub)).lexically_normal();
+        fs::path scur = sroot;
+        std::string serr;
+        for (std::size_t i = 0; i < ssegs.size(); ++i) {
+            const bool last = (i + 1 == ssegs.size());
+            std::string real;
+            const SegLookup r = lookupSegment(scur, ssegs[i], last && !resolve_case, &real, &serr);
+            if (r == SegLookup::Error) {
+                if (error) *error = serr;
+                return false;
+            }
+            if (r == SegLookup::Found) {
+                scur /= pathFromUtf8(real);
+                continue;
+            }
+            if (!last || must_exist) {
+                if (error) *error = std::string(last ? "[notfound]" : "[notdir]") + " 段 \"" + ssegs[i] +
+                                    "\" 在 \"" + pathToUtf8(scur) + "\" 里不存在";
+                return false;
+            }
+            scur /= pathFromUtf8(ssegs[i]);
+        }
+        const fs::path snorm = scur.lexically_normal();
+        if (!isUnderRoot(sroot, snorm)) {
+            if (error) *error = "[escape] AppData 解析结果不在 --appdata 之下";
+            return false;
+        }
+        if (host_path) *host_path = pathToUtf8(snorm);
+        return true;
+    }
+    if (rooted) {
+        if (!splitRelativeText(root_rel, guest, &segs, &err, /*clamp_escape=*/false)) {
+            if (error) *error = err;
+            return false;
+        }
+    } else if (!splitGuest(*this, guest, &segs, &err)) {
+        // ★ ④ 相对路径（相对 guest cwd；缺省 = guest 根）。
+        if (error) *error = err;
+        return false;
+    }
+
+    // ★ 写覆盖层（vfs.h 文件上方）：写 ⇒ 影子（父目录按需创建）；读 ⇒ **整条**影子路径存在才命中。
+    //   ★ 空段（guest 根本身）不查影子：根目录是"影子 ∪ 安装树"的合并视图，不是一张宿主目录；
+    //     它的合并由 `find()` 做，单个路径读（属性 / 是否是目录）用安装树根就够了。
+    if (writeOverlayEnabled() && !segs.empty()) {
+        if (access == VfsAccess::Write) {
+            return shadowPathForSegments(segs, /*create_dirs=*/true, host_path, error);
+        }
+        std::string shadow_host;
+        std::string shadow_err;
+        if (shadowExistingForSegments(segs, &shadow_host, &shadow_err)) {
+            if (host_path) *host_path = shadow_host;
+            return true;
+        }
+        if (!shadow_err.empty()) {
+            if (error) *error = shadow_err;
+            return false;
+        }
+    }
+
+    return installPathForSegments(segs, must_exist, resolve_case, host_path, error);
+}
+
+bool Vfs::resolveForWrite(const std::string& guest_path, std::string* host_path,
+                          bool* install_tree, std::string* error, const VfsWriteOptions& opts) const {
+    if (host_path) host_path->clear();
+    if (install_tree) *install_tree = false;
+    if (error) error->clear();
+    if (!ready()) {
+        if (error) *error = "[ready] game_dir 未设置（--game-dir 是唯一根）";
+        return false;
+    }
+    if (guest_path.empty()) {
+        if (error) *error = "[invalid] 空路径";
+        return false;
+    }
+    const std::string guest = guestPathForLog(guest_path);
+
+    std::string root_rel;
+    const bool rooted = stripGuestRootPrefix(*this, guest, &root_rel);
+    std::string special_sub;
+    std::string special_rest;
+    std::string special_form;
+    if (!rooted && matchSpecialDir(guest, &special_sub, &special_rest, &special_form)) {
+        // AppData 特殊目录：本来就写 `--appdata` ⇒ 走原映射（没有 --appdata 会响亮失败）。
+        // `install_tree=false`：那是**可写**的 appdata，不是只读安装树。
+        return resolve(guest, host_path, error, /*must_exist=*/false, /*resolve_case=*/true);
+    }
+
+    std::vector<std::string> segs;
+    std::string err;
+    if (rooted) {
+        if (!splitRelativeText(root_rel, guest, &segs, &err, /*clamp_escape=*/false)) {
+            if (error) *error = err;
+            return false;
+        }
+    } else if (!splitGuest(*this, guest, &segs, &err)) {
+        if (error) *error = err;
+        return false;
+    }
+
+    if (!writeOverlayEnabled()) {
+        // ★ 没有 `--appdata`：**保持旧行为**（写仍落安装树）。`install_tree=true` 让调用方知道
+        //   "这是只读来源"，并按 vfs.h 的口径**每次写打一行警告**（⛔ 不静默写安装树）。
+        if (install_tree) *install_tree = true;
+        return resolve(guest, host_path, error, /*must_exist=*/false, /*resolve_case=*/true);
+    }
+
+    std::string shadow;
+    if (!shadowPathForSegments(segs, opts.create_parents, &shadow, &err)) {
+        if (error) *error = err;
+        return false;
+    }
+    std::error_code ec;
+    const bool shadow_exists = fs::exists(pathFromUtf8(shadow), ec) && !ec;
+
+    if (!shadow_exists) {
+        // 影子里还没有 ⇒ 看安装树那边有什么：
+        //   · 目录 ⇒ 返回安装树路径 + install_tree（调用方按"目标是目录 / 已存在"处理）；
+        //   · 文件 + copy_up ⇒ 复制进影子（读改写不丢内容；安装树一个字节都不动）；
+        //   · 文件 + 不 copy_up ⇒ 返回安装树路径 + install_tree（只在安装树里 ⇒ 只读）。
+        std::string install;
+        std::string ierr;
+        if (installPathForSegments(segs, /*must_exist=*/false, /*resolve_case=*/true, &install, &ierr)) {
+            std::error_code sec;
+            const fs::path ip = pathFromUtf8(install);
+            const bool install_is_dir = fs::is_directory(ip, sec) && !sec;
+            sec.clear();
+            const bool install_is_file = fs::is_regular_file(ip, sec) && !sec;
+            if (install_is_dir) {
+                if (install_tree) *install_tree = true;
+                if (host_path) *host_path = install;
+                return true;
+            }
+            if (install_is_file && opts.copy_up) {
+                if (!opts.create_parents) {
+                    // copy-up 自己需要父目录（`OPEN_EXISTING` 的写打开不会要求 create_parents）
+                    if (!shadowPathForSegments(segs, /*create_dirs=*/true, &shadow, &err)) {
+                        if (error) *error = err;
+                        return false;
+                    }
+                }
+                std::error_code cec;
+                fs::copy_file(ip, pathFromUtf8(shadow), fs::copy_options::overwrite_existing, cec);
+                if (cec) {
+                    if (error) {
+                        *error = "[io] copy-up 到影子失败（\"" + shadow + "\"）：" + cec.message();
+                    }
+                    return false;
+                }
+            } else if (install_is_file) {
+                if (install_tree) *install_tree = true;
+                if (host_path) *host_path = install;
+                return true;
+            }
+        }
+    }
+    if (host_path) *host_path = shadow;
+    return true;
+}
+
 bool Vfs::toGuest(const std::string& host_path, std::string* guest_path) const {
     if (guest_path) guest_path->clear();
     if (!ready() || host_path.empty()) return false;
@@ -792,7 +1070,25 @@ bool Vfs::toGuest(const std::string& host_path, std::string* guest_path) const {
             return true;
         }
     }
+    // ★ 写覆盖层的反解：影子里写出来的文件，在 guest 眼里仍是 `<guest 根>\<相对路径>`。
+    //   放在 appdata 特殊目录之前（影子是 `<--appdata>/Game`，不属于 Roaming/Local/Documents 三档，
+    //   但先比更直观：Guest 世界只有"游戏目录"这一种解释）。
     if (!app_data_dir_.empty()) {
+        const fs::path sroot = pathFromUtf8(shadowRoot());
+        if (isUnderRoot(sroot, p0)) {
+            std::string rel;
+            auto q = p0.begin();
+            for (auto r = sroot.begin(); r != sroot.end(); ++r) ++q;
+            for (; q != p0.end(); ++q) {
+                const std::string part = pathToUtf8(*q);
+                if (part.empty()) continue;
+                if (!rel.empty()) rel += '\\';
+                rel += part;
+            }
+            const std::string base = guestRoot().empty() ? std::string("C:\\") : guestRoot();
+            if (guest_path) *guest_path = rel.empty() ? base : (trimTrailingSeps(base) + "\\" + rel);
+            return true;
+        }
         for (const SpecialRoot& sr : specialRoots()) {
             const fs::path sroot = (pathFromUtf8(app_data_dir_) / pathFromUtf8(sr.sub)).lexically_normal();
             if (!isUnderRoot(sroot, p0)) continue;
@@ -861,24 +1157,75 @@ bool Vfs::find(const std::string& guest_pattern, std::vector<HostDirEntry>* out,
 
     // 目录部分必须存在（相对路径相对 guest cwd）
     const std::string dir_guest = dir_part.empty() ? cwdOf(*this) : dir_part;
-    std::string dir_host;
     std::string err;
-    if (!resolve(dir_guest, &dir_host, &err, /*must_exist=*/true, /*resolve_case=*/true)) {
-        if (error) *error = err;
-        return false;
-    }
-    const fs::path dir = pathFromUtf8(dir_host);
+
+    // ★ 写覆盖层（vfs.h 文件上方）：读目录 = **影子 ∪ 安装树**（同名影子优先）。
+    //   只有"非 AppData 特殊目录"的游戏树路径才合并 —— AppData 本来就只落 --appdata。
+    const std::string dir_text = guestPathForLog(dir_guest);
+    std::string special_sub;
+    std::string special_rest;
+    std::string special_form;
+    const bool shadow_merge =
+        writeOverlayEnabled() && !matchSpecialDir(dir_text, &special_sub, &special_rest, &special_form);
+
+    std::string dir_host;      // 安装树里的同一目录（可能不存在 ⇒ 空）
+    std::string shadow_dir;    // 影子里的同一目录（可能不存在 ⇒ 空）
+    std::string install_err;
     std::error_code ec;
-    if (!fs::is_directory(dir, ec) || ec) {
-        if (error) *error = "[notdir] \"" + dir_host + "\" 不是目录";
-        return false;
+    if (shadow_merge) {
+        std::vector<std::string> dir_segs;
+        std::string root_rel;
+        bool segs_ok = true;
+        if (stripGuestRootPrefix(*this, dir_text, &root_rel)) {
+            segs_ok = splitRelativeText(root_rel, dir_text, &dir_segs, &err, /*clamp_escape=*/false);
+        } else {
+            segs_ok = splitGuest(*this, dir_text, &dir_segs, &err);
+        }
+        if (!segs_ok) {
+            if (error) *error = err;
+            return false;
+        }
+        if (dir_segs.empty()) {
+            const std::string sroot = shadowRoot();
+            std::error_code sec;
+            if (!sroot.empty() && fs::is_directory(pathFromUtf8(sroot), sec) && !sec) shadow_dir = sroot;
+        } else {
+            std::string serr;
+            if (shadowExistingForSegments(dir_segs, &shadow_dir, &serr)) {
+                std::error_code sec;
+                if (!fs::is_directory(pathFromUtf8(shadow_dir), sec) || sec) shadow_dir.clear();
+            } else if (!serr.empty()) {
+                if (error) *error = serr;
+                return false;
+            }
+        }
+        if (installPathForSegments(dir_segs, /*must_exist=*/true, /*resolve_case=*/true, &dir_host,
+                                   &install_err)) {
+            std::error_code iec;
+            if (!fs::is_directory(pathFromUtf8(dir_host), iec) || iec) dir_host.clear();
+        } else {
+            dir_host.clear();
+        }
+        if (dir_host.empty() && shadow_dir.empty()) {
+            // 两边都没有这个目录：沿用旧口径的错误（安装树的 tag / 哪一段）
+            if (error) {
+                *error = !install_err.empty()
+                             ? install_err
+                             : ("[notdir] 目录 \"" + dir_text + "\" 在影子与安装树里都不存在");
+            }
+            return false;
+        }
+    } else {
+        if (!resolve(dir_guest, &dir_host, &err, /*must_exist=*/true, /*resolve_case=*/true)) {
+            if (error) *error = err;
+            return false;
+        }
+        if (!fs::is_directory(pathFromUtf8(dir_host), ec) || ec) {
+            if (error) *error = "[notdir] \"" + dir_host + "\" 不是目录";
+            return false;
+        }
     }
 
-    fs::directory_iterator it(dir, ec);
-    if (ec) {
-        if (error) *error = "[io] 枚举 \"" + dir_host + "\" 失败：" + ec.message();
-        return false;
-    }
     // ★ overlay：枚举到被覆盖的那个文件时，size / 时间 / 属性必须取**真正在跑的那份字节**
     //   （否则 `FindFirstFileA` 与 `GetFileSize` 给出两个答案，引擎的版本 / 大小判断前后矛盾）。
     const std::string overlay_name = hasExeOverlay() ? baseName(overlayGuestPath()) : std::string();
@@ -913,95 +1260,121 @@ bool Vfs::find(const std::string& guest_pattern, std::vector<HostDirEntry>* out,
         }
     };
     bool overlay_seen = false;
-    const fs::directory_iterator end;
-    while (it != end) {
-        const fs::path& p = it->path();
-        const std::string name = pathToUtf8(p.filename());
-        if (!wildcardMatch(last, name)) {
-            it.increment(ec);
-            if (ec) {
-                if (error) *error = "[io] 枚举 \"" + dir_host + "\" 中断：" + ec.message();
-                return false;
-            }
-            continue;
-        }
-        std::error_code ec2;
-        HostDirEntry e;
-        e.name = name;
-        e.is_dir = it->is_directory(ec2) && !ec2;
-        ec2.clear();
-        e.is_file = it->is_regular_file(ec2) && !ec2;
-        if (!e.is_dir && !e.is_file) {  // 只返回文件 / 目录（FIFO / 设备 / 断链不返回）
-            it.increment(ec);
-            if (ec) {
-                if (error) *error = "[io] 枚举 \"" + dir_host + "\" 中断：" + ec.message();
-                return false;
-            }
-            continue;
-        }
-        if (isOverlayEntry(name)) {
-            e.is_dir = false;
-            e.is_file = true;
-            fillFromOverlayHost(&e);
-            overlay_seen = true;
-            if (out) out->push_back(std::move(e));
-            it.increment(ec);
-            if (ec) {
-                if (error) *error = "[io] 枚举 \"" + dir_host + "\" 中断：" + ec.message();
-                return false;
-            }
-            continue;
-        }
-        if (e.is_file) {
-            std::error_code ec3;
-            const auto sz = it->file_size(ec3);
-            if (!ec3) e.size = static_cast<std::uint64_t>(sz);
-        }
-        std::error_code ec4;
-        const fs::file_status st = it->status(ec4);
-        if (!ec4) e.attributes = attributesOfStatus(st);
-        ec4.clear();
-        // 三个时间取宿主真值（SDL3）；失败才退回 mtime 近似（三值相同）
-        HostFileTimes times;
-        if (hostFileTimes(pathToUtf8(p), &times)) {
-            e.create_time_100ns = times.create_100ns;
-            e.access_time_100ns = times.access_100ns;
-            e.write_time_100ns = times.write_100ns;
-        } else {
-            const auto wt = it->last_write_time(ec4);
-            if (!ec4) {
-                const auto t = static_cast<std::uint64_t>(fileTime100ns(wt));
-                e.create_time_100ns = t;
-                e.access_time_100ns = t;
-                e.write_time_100ns = t;
-            }
-        }
-        if (out) out->push_back(std::move(e));
 
-        it.increment(ec);
-        if (ec) {
-            if (error) *error = "[io] 枚举 \"" + dir_host + "\" 中断：" + ec.message();
+    // 枚举一个宿主目录（`install_side` 才处理 exe overlay 的"读真字节"规则）
+    auto enumerate = [&](const std::string& host_dir, bool install_side,
+                         std::vector<HostDirEntry>* dst) -> bool {
+        if (host_dir.empty()) return true;
+        std::error_code e0;
+        fs::directory_iterator it(pathFromUtf8(host_dir), e0);
+        if (e0) {
+            if (error) *error = "[io] 枚举 \"" + host_dir + "\" 失败：" + e0.message();
             return false;
         }
-    }
+        const fs::directory_iterator end;
+        auto next = [&]() -> bool {
+            it.increment(e0);
+            if (e0) {
+                if (error) *error = "[io] 枚举 \"" + host_dir + "\" 中断：" + e0.message();
+                return false;
+            }
+            return true;
+        };
+        while (it != end) {
+            const fs::path& p = it->path();
+            const std::string name = pathToUtf8(p.filename());
+            if (!wildcardMatch(last, name)) {
+                if (!next()) return false;
+                continue;
+            }
+            std::error_code ec2;
+            HostDirEntry e;
+            e.name = name;
+            e.is_dir = it->is_directory(ec2) && !ec2;
+            ec2.clear();
+            e.is_file = it->is_regular_file(ec2) && !ec2;
+            if (!e.is_dir && !e.is_file) {  // 只返回文件 / 目录（FIFO / 设备 / 断链不返回）
+                if (!next()) return false;
+                continue;
+            }
+            if (install_side && isOverlayEntry(name)) {
+                e.is_dir = false;
+                e.is_file = true;
+                fillFromOverlayHost(&e);
+                overlay_seen = true;
+                dst->push_back(std::move(e));
+                if (!next()) return false;
+                continue;
+            }
+            if (e.is_file) {
+                std::error_code ec3;
+                const auto sz = it->file_size(ec3);
+                if (!ec3) e.size = static_cast<std::uint64_t>(sz);
+            }
+            std::error_code ec4;
+            const fs::file_status st = it->status(ec4);
+            if (!ec4) e.attributes = attributesOfStatus(st);
+            ec4.clear();
+            // 三个时间取宿主真值（SDL3）；失败才退回 mtime 近似（三值相同）
+            HostFileTimes times;
+            if (hostFileTimes(pathToUtf8(p), &times)) {
+                e.create_time_100ns = times.create_100ns;
+                e.access_time_100ns = times.access_100ns;
+                e.write_time_100ns = times.write_100ns;
+            } else {
+                const auto wt = it->last_write_time(ec4);
+                if (!ec4) {
+                    const auto t = static_cast<std::uint64_t>(fileTime100ns(wt));
+                    e.create_time_100ns = t;
+                    e.access_time_100ns = t;
+                    e.write_time_100ns = t;
+                }
+            }
+            dst->push_back(std::move(e));
+            if (!next()) return false;
+        }
+        return true;
+    };
+
+    std::vector<HostDirEntry> merged;
+    std::vector<HostDirEntry> install_entries;
+    std::vector<HostDirEntry> shadow_entries;
+    if (!enumerate(dir_host, /*install_side=*/true, &install_entries)) return false;
 
     // ★ overlay：`--game-dir` 下**没有**这个文件时（只有 overlay 那一份存在），枚举仍要能看见它
     //   （否则 `FindFirstFileA("…\*.EXE")` 与 `CreateFileA("…\AGE.EXE")` 会给出相反的答案）。
     if (!overlay_seen && !overlay_name.empty() && wildcardMatch(last, overlay_name) &&
-        matchesOverlay(absoluteGuest(dir_guest) + "\\" + overlay_name) && out) {
+        matchesOverlay(absoluteGuest(dir_guest) + "\\" + overlay_name)) {
         HostDirEntry e;
         e.name = overlay_name;
         e.is_dir = false;
         e.is_file = true;
         fillFromOverlayHost(&e);
-        out->push_back(std::move(e));
+        install_entries.push_back(std::move(e));
+    }
+
+    if (shadow_merge) {
+        if (!enumerate(shadow_dir, /*install_side=*/false, &shadow_entries)) return false;
+        // ★ 合并：**同名（ASCII 大小写不敏感）影子优先** —— 影子项替掉安装树里的那一条。
+        //   ⛔ 不按宿主目录顺序拼（plan §8.3-4：枚举必须确定性）。
+        auto sameName = [](const std::string& a, const std::string& b) {
+            return a.size() == b.size() && asciiEqualNoCase(a, b);
+        };
+        merged = std::move(install_entries);
+        for (HostDirEntry& se : shadow_entries) {
+            merged.erase(std::remove_if(merged.begin(), merged.end(),
+                                        [&](const HostDirEntry& ie) { return sameName(ie.name, se.name); }),
+                         merged.end());
+            merged.push_back(std::move(se));
+        }
+    } else {
+        merged = std::move(install_entries);
     }
 
     // ★ 确定性：永远排序后返回（UTF-8 字节序）；⛔ 不依赖宿主的目录顺序
-    if (out) {
-        std::sort(out->begin(), out->end(),
-                  [](const HostDirEntry& a, const HostDirEntry& b) { return a.name < b.name; });
-    }
+    std::sort(merged.begin(), merged.end(),
+              [](const HostDirEntry& a, const HostDirEntry& b) { return a.name < b.name; });
+    if (out) *out = std::move(merged);
     return true;
 }
 
@@ -1082,6 +1455,9 @@ std::string Vfs::baseName(const std::string& guest_path) {
 //     没有末尾分隔符 ⇒ 最后一段是**文件名**，⛔ 不建它（文档明说：最后一段是目录时必须以分隔符结尾）。
 //   · **已存在算成功**（与 CreateDirectoryA 的"已存在即失败"相反）—— 这是真机语义。
 //   · 只经本类落盘 ⇒ guest 看到的仍是 Windows 形状，宿主路径不泄漏。
+//   · ★ 2026-11-05 写覆盖层：有 `--appdata` 时这些目录建在**影子** `<--appdata>/Game/…` 里
+//     （引擎启动路径上就是这么准备 `Eushully\天結…\` 的），⛔ 安装树里一个目录都不建；
+//     没有 `--appdata` 时保持旧行为（安装树），由调用方（imagehlp.cpp）打警告。
 //
 // ★ 为什么前缀要过"是不是根"这一关：`E:\Games\Eushully\天結\save\` 的前缀依次是
 //   `E:` / `E:\Games` / `E:\Games\Eushully` / … / `…\天結` / `…\天結\save`。前几个**在 guest 世界里
@@ -1159,7 +1535,10 @@ bool Vfs::makeSureDirectoryPathExists(const std::string& guest_path, std::string
         if (atOrAboveRoot(dir)) continue;  // 根（或根的祖先）不创建
         std::string host;
         std::string why;
-        if (!resolve(dir, &host, &why, /*must_exist=*/false, /*resolve_case=*/true)) {
+        // ★ 建目录是**写**：有 `--appdata` 时落到影子 `<--appdata>/Game/…`（父目录按需创建），
+        //   ⛔ 不在安装树里造目录；没有 `--appdata` 时 resolve(Write) 与旧行为相同（安装树）。
+        if (!resolve(dir, &host, &why, /*must_exist=*/false, /*resolve_case=*/true,
+                     VfsAccess::Write)) {
             if (error) *error = "段 \"" + dir + "\" 解析失败：" + why;
             return false;
         }

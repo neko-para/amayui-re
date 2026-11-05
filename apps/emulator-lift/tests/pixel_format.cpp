@@ -4,7 +4,8 @@
 //   ① 掩码换算：pack→expand 往返回到满量程；5/6 位与 8 位的舍入规则固定；
 //   ② load/store：16bpp 只动 2 字节、32bpp 只动 4 字节（⛔ 不越界写）；
 //   ③ pixelFromColor：按掩码打包（A8R8G8B8 / X8R8G8B8 / R5G6B5 三种）；既有 565 期望值不变；
-//   ④ sampler 的 MIN/MAG **都参与**决策：`(POINT, LINEAR)` 必须走线性 —— 旧实现只看 MAG，
+//   ④ D3DCOLOR 解包只有一份（`unpackColor`）：位序错一位这里红；
+//   ⑤ sampler 的 MIN/MAG **都参与**决策：`(POINT, LINEAR)` 必须走线性 —— 旧实现只看 MAG，
 //      这条会红。
 #include <cstdint>
 #include <cstring>
@@ -26,6 +27,7 @@ using lift::pixel_format::packChannelGdi;
 using lift::pixel_format::packColor;
 using lift::pixel_format::pixelFromColor;
 using lift::pixel_format::storePixel;
+using lift::pixel_format::unpackColor;
 
 // ---------------------------------------------------------------------------------------
 // ① 掩码算术
@@ -141,7 +143,27 @@ void casePixelFromColor() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ④ MIN/MAG 都参与采样决策（旧实现只看 MAG）
+// ④ D3DCOLOR 的解包（位序只此一份：pixelFromColor / 顶点色 / 纹理级常量 / Sprite 调制色都走它）
+// ---------------------------------------------------------------------------------------
+void caseUnpackColor() {
+    lift_test::g_current_case = "pixel-format/unpack-color";
+
+    unsigned a = 0, r = 0, g = 0, b = 0;
+    unpackColor(0xAABBCCDDu, a, r, g, b);
+    LIFT_CHECK_EQ_U32(a, 0xAAu);
+    LIFT_CHECK_EQ_U32(r, 0xBBu);
+    LIFT_CHECK_EQ_U32(g, 0xCCu);
+    LIFT_CHECK_EQ_U32(b, 0xDDu);
+
+    // 与 packColor 的位序一致：A8R8G8B8 上 pixelFromColor 必须逐位等于原 D3DCOLOR，
+    // 且 unpack→pack 往返回来（漂了任何一位这里都红）。
+    const lift::SurfaceFormat argb = formatForBpp(32);
+    LIFT_CHECK_EQ_U32(pixelFromColor(argb, 0xAABBCCDDu), 0xAABBCCDDu);
+    LIFT_CHECK_EQ_U32(packColor(argb, r, g, b, a), 0xAABBCCDDu);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑤ MIN/MAG 都参与采样决策（旧实现只看 MAG）
 // ---------------------------------------------------------------------------------------
 void caseSamplerDecision() {
     lift_test::g_current_case = "pixel-format/sampler-min-filter";
@@ -168,6 +190,7 @@ int main() {
     caseMaskArithmetic();
     caseLoadStore();
     casePixelFromColor();
+    caseUnpackColor();
     caseSamplerDecision();
     return finish("pixel-format");
 }

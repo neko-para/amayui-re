@@ -150,7 +150,8 @@ apps/emulator-lift/
   README.md / SCOPE.md / docs/        ← 口径 / 用户拍板的偏差 / 计划长文
   src/main.cpp                        ← CLI：--exe --lst --game-dir --appdata --agerc
                                         --until shim|ea --trace-shims --trace-blocks
-                                        --max-insns --time-limit --safe-memory --report --bench --smoke
+                                        --max-insns --max-frames --dump-frame --time-limit
+                                        --safe-memory --report --bench --smoke
   src/runtime/memory.{h,cpp}          ← 4 GiB 预留 + 按需提交 + 提交位图 + 区域表 + fault 诊断
   src/runtime/image.{h,cpp}           ← PE 节表/导入表/入口 + 映射 + 栈(1 MiB+guard) + TEB/PEB
   src/runtime/sha256.{h,cpp}          ← SHA-256（校验"执行的字节 = 语料描述的字节"）
@@ -189,6 +190,25 @@ apps/emulator-lift/
   （`SKIP_RETURN_CODE`），⛔ 不是"什么都不做然后 return 0"。
 - ★ `LIFT_SAFE_MEMORY=1`：每次 guest 访存都查提交位图（慢）。判据 A1 要求**再跑一遍这一档**。
 - 生成物（`out/`、`vcpkg_installed/`）由本目录 `.gitignore` 排除。
+
+## 4.1 渲染产物导出
+
+D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena::dumpBmp`，支持 16/32bpp）：
+
+```bash
+# 第一帧
+./out/emulator-lift --game-dir <install> --appdata <tmp> \
+  --max-frames 1 --dump-frame ../../.tmp/frame-{frame}.bmp
+
+# 覆盖同一文件，拿第 N 帧（重跑时每次覆盖；最后留下的是第 N 帧）
+./out/emulator-lift ... --max-frames 100 --dump-frame ../../.tmp/frame-last.bmp
+```
+
+- `{frame}` 会替换成 **4 位帧号**；不含占位符时同一路径被覆盖。
+- `--max-frames N` 在 D3D9 `Present` 计数到 N 后主动停（日志里有 `已到 --max-frames`）。
+- 这是**宿主诊断输出**，不参与 guest 语义；DDraw 的 `Flip` 目前仍走同一 presenter，但本开关只在
+  D3D9 的 `Present` 上消费。
+- BMP 只是当前实现的零依赖格式；⛔ 不声称它等于真机像素。
 
 ## 5. 真源
 

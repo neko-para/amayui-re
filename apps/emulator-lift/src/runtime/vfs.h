@@ -100,6 +100,36 @@ std::vector<std::string> guestEnvironment(bool have_appdata);
 // 同一份内容的 `;` 连接文本：`ProcessSetup::environment_ansi` 与 A4 的 trace 输入哈希用它。
 std::string guestEnvironmentText(bool have_appdata);
 
+// ★ 2026-11-05（`REQ-01M6KNBE5FP87DAC93ZRQ1K1DK`）：**写覆盖层** —— `--game-dir` 只读
+//
+//   引擎把安装树当成可写目录（`CreateFileA(CREATE_ALWAYS)` / `MakeSureDirectoryPathExists` 写
+//   `Eushully\天結…\$$AGE.TMP` / `SAVE\…`）。`--game-dir` 是**只读**来源 ⇒ 写不许落到那里。
+//   规则（**只有这一条接缝**；⛔ 不是通用 `--work-dir`，plan D5 不变）：
+//     · 有 `--appdata`：**落点本来在 --game-dir 的写**改到 `<--appdata>/Game/<相对路径>`（影子目录）。
+//       guest 路径 / guest 根不变；影子目录按需创建（⛔ 不在安装树里造目录）。
+//     · **读先影子、再安装树**：整条影子路径存在就用影子，否则回落到安装树
+//       （"引擎先写、再读自己写的文件"能读到）；`find()` 把两边**合并**（同名影子优先）。
+//     · `createFile` 的写打开会 **copy-up**（安装树 → 影子）：`OPEN_ALWAYS` / `r+b` 读改写不丢内容。
+//     · ⚠ 有意偏差：`createFile` 的"会新建"分支允许**父目录按需创建** ⇒ 即使 guest 世界里那条
+//       父目录还不存在也会成功（引擎的形态：先 `MakeSureDirectoryPathExists` 再写；覆盖层不能
+//       反过来要求安装树里先有目录）。`CreateDirectoryA` 仍然要求父目录（影子 ∪ 安装树）存在。
+//     · 没有 `--appdata`：**保持旧行为**（写仍落 `--game-dir`），但 shim 每次写都打一行警告 ——
+//       ⛔ 不静默写安装树（`tests/file_io.cpp` 的夹具就是无 `--appdata` 的形态）。
+//   ⚠ 已知边界（本轮只做接缝，**不是**完整 overlay）：**没有 whiteout** —— 只在安装树里存在的
+//     文件 / 目录，`DeleteFileA` / `MoveFileA` / `RemoveDirectoryA` / `SetFileAttributesA` 会
+//     **响亮失败**（⛔ 不动安装树）；引擎自己写出来的东西在影子里，照常可删 / 可改。
+//   ⚠ 读侧优先级：**exe overlay（①）仍高于影子** —— 写 AGE.EXE 会进影子，但读仍读 `--exe` 拆壳件
+//     （⛔ 绝不让写把正在跑的那份字节换掉）。
+enum class VfsAccess { Read, Write };
+
+// `resolveForWrite` 的选项（两个开关分开：**读改写**与**新建**要的东西不一样）
+struct VfsWriteOptions {
+    // 安装树里已有同名**文件**、而影子里还没有它 ⇒ 先复制进影子（否则 `r+b` 打开会失败 / 内容丢）。
+    bool copy_up = false;
+    // 影子的父目录按需创建（只有"会新建文件 / 目录"的调用方才开；删 / 改名 / 改属性不开）。
+    bool create_parents = false;
+};
+
 class Vfs {
 public:
     // 宿主根（绝对路径，UTF-8）。空 ⇒ ready() = false。
@@ -109,6 +139,8 @@ public:
     //   不改变 --game-dir 是唯一游戏根的口径。空 = 未设置（特殊目录解析会响亮失败）。
     //   ★ 设置时会清掉 `<--appdata>/Local/Temp`（A4：`GetTempFileNameA(uUnique=0)` 的序号
     //     跨运行累积会让同一条命令第二次拿到不同名字 ⇒ trace 不再逐字节相同）。
+    //   ★ 非空时同时启用**写覆盖层**（见文件上方的规则）；影子目录 `<--appdata>/Game`
+    //     **不清理**（它是存档 / 配置的状态，不是可丢弃的临时区 —— 与 `Local/Temp` 相反）。
     void setAppDataDir(const std::string& host_dir);
     const std::string& appDataDir() const { return app_data_dir_; }
     bool ready() const { return !game_dir_.empty(); }
@@ -150,11 +182,38 @@ public:
     //   ④ **相对路径**：相对 guest cwd（缺省 = guest 根），剥盘符 / 前导分隔符后落到 `--game-dir`。
     //   ⛔ ② 只认**完整段前缀**：`…\Eushully\…` / `…\天結X` 不算根（不是"包含某一段就剥"）。
     //
+    // ★ 写覆盖层（`access == Write`，见文件上方）：非特殊目录的路径**不落安装树** —— 落到
+    //   `<--appdata>/Game/…`（父目录按需创建）；没有 `--appdata` 时退回旧行为（安装树路径，
+    //   调用方负责打警告）。读侧先查影子（整条路径存在才算），再回落安装树。
+    //
     // `must_exist` = false 时最后一段可以不存在（CreateFile(CREATE_NEW) / 写文件）。
     // `resolve_case` = true 时逐段做大小写不敏感匹配；false 时最后一段允许保留调用方大小写
     // （用于创建新文件：父目录仍然要做大小写匹配）。
     bool resolve(const std::string& guest_path, std::string* host_path, std::string* error,
-                 bool must_exist = false, bool resolve_case = true) const;
+                 bool must_exist = false, bool resolve_case = true,
+                 VfsAccess access = VfsAccess::Read) const;
+
+    // ★ 写覆盖层的**唯一入口**（`--game-dir` 只读的接缝；`kernel32_file.cpp` / `imagehlp.cpp` 用）：
+    //   返回这条 guest 路径在宿主上的**写目标**。`install_tree` = 返回的宿主路径落在 `--game-dir`
+    //   里（**只读**：调用方⛔ 不许写它；只应该按"它已存在"或"响亮失败"处理）。
+    //   · 有 `--appdata`、落点是安装树 ⇒ 影子路径 `<--appdata>/Game/…`，`install_tree=false`；
+    //   · 影子还没有、安装树里有同名**文件**且 `copy_up` ⇒ 先复制进影子（读改写不丢内容）；
+    //   · 安装树里是**目录** ⇒ 返回安装树路径 + `install_tree=true`（调用方按"目标是目录 /
+    //     已存在"处理，⛔ 不改它）；
+    //   · 没有 `--appdata` ⇒ 旧行为（安装树路径）+ `install_tree=true`（调用方打警告后照旧写）；
+    //   · AppData 特殊目录 ⇒ 原映射（本来就写 `--appdata`）+ `install_tree=false`。
+    bool resolveForWrite(const std::string& guest_path, std::string* host_path, bool* install_tree,
+                         std::string* error, const VfsWriteOptions& opts) const;
+
+    // 写覆盖层是否启用（= `--appdata` 非空）。空 ⇒ shim 走旧行为 + 每次写打一行警告。
+    bool writeOverlayEnabled() const { return !app_data_dir_.empty(); }
+    // 影子目录的宿主路径 `<--appdata>/Game`（UTF-8；未启用 ⇒ 空串）。日志 / 诊断用。
+    std::string writeOverlayDir() const;
+    // `host_path` 是否在影子目录下（日志 / toGuest 用）
+    bool isWriteOverlayPath(const std::string& host_path) const;
+    // `host_path` 是否在 `--game-dir`（安装树）之下 = **只读来源**（写路径的防御性判定：
+    // 句柄类写 API —— `SetFileTime` / `WriteFile` 的宿主侧 —— 靠它挡住"写回安装树"）。
+    bool isInstallTreePath(const std::string& host_path) const;
 
     // 反解：宿主路径 → guest 路径（用于 GetCurrentDirectory / GetModuleFileName；
     // 不在根下 ⇒ false）。
@@ -193,6 +252,23 @@ public:
 private:
     // ★ overlay 命中：`guest_path` 是否就是被覆盖的那一个文件（绝对化 + 大小写不敏感按段比较）
     bool matchesOverlay(const std::string& guest_path) const;
+
+    // ---- 写覆盖层的内部脚手架（解析规则见文件上方；两份实现只在这里，⛔ shim 不自己拼宿主路径）----
+    // guest 路径命中 `--appdata` 特殊目录 ⇒ true；`sub` = Roaming / Local / Documents，
+    // `rest` = 前缀之后的文本（`/` 形态），`guest_form` = 命中的 guest 前缀（错误信息用）。
+    bool matchSpecialDir(const std::string& guest, std::string* sub, std::string* rest,
+                         std::string* guest_form) const;
+    // 段 → 安装树（`--game-dir`）宿主路径。**resolve / resolveForWrite / find 共用这一份**。
+    bool installPathForSegments(const std::vector<std::string>& segs, bool must_exist,
+                                bool resolve_case, std::string* host_path, std::string* error) const;
+    // 段 → 影子宿主路径。`create_dirs` = **中间**目录按需创建（最后一段永远不建：它可能是文件）。
+    bool shadowPathForSegments(const std::vector<std::string>& segs, bool create_dirs,
+                               std::string* host_path, std::string* error) const;
+    // 段在影子里**整条都存在** ⇒ true + 宿主路径；不存在 ⇒ false（`error` 只在真错误时非空）。
+    bool shadowExistingForSegments(const std::vector<std::string>& segs, std::string* host_path,
+                                   std::string* error) const;
+    // 影子根 `<--appdata>/Game` 的宿主路径（未启用 / 未设置 ⇒ 空串）
+    std::string shadowRoot() const;
 
     std::string game_dir_;
     std::string app_data_dir_;
