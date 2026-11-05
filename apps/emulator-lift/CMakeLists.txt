@@ -21,6 +21,47 @@ find_package(SDL3 CONFIG REQUIRED)
 # Zydis 只**解码**，语义是我们自己的（plan §7.1）。
 find_package(Zydis CONFIG REQUIRED)
 
+# =====================================================================================
+# 实验性 CPU 后端：Unicorn（QEMU TCG）——**默认 OFF**，解释器仍是 reference。
+# ★ 现在**只有一个构建目录 `out`**（`macos-arm64` preset）：它打开 Unicorn 后端，同时保留解释器；
+#   `--cpu interp` 与 `--cpu unicorn` 都从同一个 `out/emulator-lift` 跑，便于同机对比。
+# ★ vcpkg feature 名 = `unicorn`（见 vcpkg.json 的 features）：`macos-arm64` 的 manifest
+#   features 带上 `unicorn` 才会拉 2.1.4；Windows/Linux preset 仍不装。
+# ★ 发现顺序：先试上游 CMake config（将来若提供），否则退回 find_path/find_library ——
+#   2.1.4 的 vcpkg 端口只装 pkg-config（`lib/pkgconfig/unicorn.pc`），没有 CMake config。
+# =====================================================================================
+option(LIFT_ENABLE_UNICORN "Build the experimental Unicorn (QEMU TCG) CPU backend" OFF)
+if(LIFT_ENABLE_UNICORN)
+    find_package(unicorn CONFIG QUIET)
+    if(TARGET unicorn::unicorn)
+        set(LIFT_UNICORN_TARGET unicorn::unicorn)
+    elseif(TARGET unicorn)
+        set(LIFT_UNICORN_TARGET unicorn)
+    else()
+        find_path(LIFT_UNICORN_INCLUDE_DIR
+            NAMES unicorn/unicorn.h
+            HINTS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include"
+                  "$ENV{UNICORN_ROOT}/include")
+        find_library(LIFT_UNICORN_LIBRARY
+            NAMES unicorn libunicorn
+            HINTS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib"
+                  "$ENV{UNICORN_ROOT}/lib")
+        if(NOT LIFT_UNICORN_INCLUDE_DIR OR NOT LIFT_UNICORN_LIBRARY)
+            message(FATAL_ERROR
+                "LIFT_ENABLE_UNICORN=ON，但找不到 unicorn（试过 find_package(unicorn CONFIG)、"
+                "find_path/find_library + vcpkg installed tree）。\n"
+                "  请用 `cmake --preset macos-arm64`（VCPKG_MANIFEST_FEATURES=unicorn），"
+                "或用 -DLIFT_UNICORN_INCLUDE_DIR=… -DLIFT_UNICORN_LIBRARY=… 显式指定。")
+        endif()
+        add_library(lift_unicorn_external UNKNOWN IMPORTED)
+        set_target_properties(lift_unicorn_external PROPERTIES
+            IMPORTED_LOCATION "${LIFT_UNICORN_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${LIFT_UNICORN_INCLUDE_DIR}")
+        set(LIFT_UNICORN_TARGET lift_unicorn_external)
+        message(STATUS "Unicorn 后端：ON（imported target，include=${LIFT_UNICORN_INCLUDE_DIR}，lib=${LIFT_UNICORN_LIBRARY}）")
+    endif()
+endif()
+
 # ---- 第三方：Berkeley SoftFloat 3e（D3；vendor，不进 vcpkg）----
 add_subdirectory(third_party/berkeley-softfloat)
 
@@ -408,3 +449,25 @@ add_test(NAME math COMMAND lift-math)
 add_executable(lift-pixel-format tests/pixel_format.cpp)
 target_link_libraries(lift-pixel-format PRIVATE emulator-lift-runtime)
 add_test(NAME pixel-format COMMAND lift-pixel-format)
+
+# =====================================================================================
+# POC · Unicorn（QEMU TCG）CPU 后端（任务 3；**默认不参与构建**）
+# ★ 纯追加块：不改上面任何一行。
+# ★ 注册位置在 `if(LIFT_ENABLE_UNICORN)` 里 ⇒ 只有 `out`（macOS 统一构建）有这些 target；
+#   `ctest` 因此是 42 条（41 + unicorn），不是"默认 41 条"的旧基线。
+# ★ `cpu_unicorn.cpp` 是**唯一** include `<unicorn/unicorn.h>` 的翻译单元；解释器路径
+#   （exec*.cpp / machine.cpp 的 run 主体）一个字都不改 —— 只有 `Machine::run` 按
+#   `RunOptions::cpu` 分派。
+# =====================================================================================
+if(LIFT_ENABLE_UNICORN)
+    target_sources(emulator-lift-runtime PRIVATE src/runtime/cpu_unicorn.cpp)
+    target_link_libraries(emulator-lift-runtime PRIVATE ${LIFT_UNICORN_TARGET})
+    # PUBLIC：machine.h 的条件声明、main.cpp 的 `--cpu` 校验、测试都靠它编译期判断。
+    target_compile_definitions(emulator-lift-runtime PUBLIC LIFT_WITH_UNICORN=1)
+
+    # ★ 只有这条构建里才存在；默认构建的 41 条测试不受影响（AGENTS §5：if() 里 = assets 档，
+    #   因为"没有 unicorn 的机器上它不是 pure"——缺后端就整条不注册，⛔ 不静默当绿）。
+    add_executable(lift-unicorn tests/unicorn_backend.cpp)
+    target_link_libraries(lift-unicorn PRIVATE emulator-lift-runtime)
+    add_test(NAME unicorn COMMAND lift-unicorn)
+endif()

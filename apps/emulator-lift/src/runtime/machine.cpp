@@ -35,9 +35,40 @@ const char* stopReasonName(StopReason r) {
         case StopReason::Stopped: return "stopped";
         case StopReason::NoCode: return "no-code";
         case StopReason::TimeLimit: return "time-limit";
+        case StopReason::MemoryFault: return "memory-fault";
     }
     return "?";
 }
+
+const char* cpuBackendName(CpuBackend b) {
+    switch (b) {
+        case CpuBackend::Interp: return "interp";
+        case CpuBackend::Unicorn: return "unicorn";
+    }
+    return "?";
+}
+
+bool unicornAvailable() {
+#if defined(LIFT_WITH_UNICORN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+// ★ 没有 Unicorn 的构建：`runUnicorn` 仍然有定义（可读的失败，而不是链接错误）。
+//   ⛔ 它**不会**回退到解释器 —— "选了 unicorn 却跑了 interp" 是最坏的静默失败。
+#if !defined(LIFT_WITH_UNICORN)
+RunResult Machine::runUnicorn(const RunOptions& opts) {
+    (void)opts;
+    RunResult r;
+    r.reason = StopReason::Unimplemented;
+    r.ea = cpu_.eip;
+    r.insns_counted = false;
+    r.detail = "本构建没有编译 Unicorn 后端（需 -DLIFT_ENABLE_UNICORN=ON + vcpkg feature unicorn）";
+    return r;
+}
+#endif
 
 // fault 诊断钩子：只读**符号表/字符串**（不反汇编 —— 反汇编要读内存，可能再 fault）。
 // ★ **零分配**（REQ-01M6JFZFN15MBPG7Y89WNZACFW #4）：本函数在平台异常 / 信号上下文里被调用，
@@ -290,7 +321,14 @@ bool Machine::prepareStack(std::string* err) {
     return true;
 }
 
+// ★ 入口分派（任务 3）：`opts.cpu` 缺省 = Interp ⇒ 走下面这个**原样保留**的解释器主体。
+//   ⛔ 默认路径的行为一个字节都没变：runInterpreter 就是从前的 `Machine::run`，只是改了名。
 RunResult Machine::run(const RunOptions& opts) {
+    if (opts.cpu == CpuBackend::Unicorn) return runUnicorn(opts);
+    return runInterpreter(opts);
+}
+
+RunResult Machine::runInterpreter(const RunOptions& opts) {
     RunResult r;
     shims_.setTrace(opts.trace_shims, opts.trace_out ? opts.trace_out : stdout);
     if (opts.real_time) clock_.setRealTime(true);
@@ -605,9 +643,15 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
             std::fprintf(out, "  %08X %s\n", cpu_.last_eip[idx], cpu_.last_mnemonic[idx] ? cpu_.last_mnemonic[idx] : "?");
         }
     }
+    std::fprintf(out, "cpu       : %s\n", cpuBackendName(r.cpu));
     std::fprintf(out, "stop      : %s @ eip=%08X\n", stopReasonName(r.reason), r.ea);
     if (!r.detail.empty()) std::fprintf(out, "detail    : %s\n", r.detail.c_str());
-    std::fprintf(out, "insns     : %llu\n", (unsigned long long)r.insns);
+    if (r.insns_counted) {
+        std::fprintf(out, "insns     : %llu\n", (unsigned long long)r.insns);
+    } else {
+        // ★ Unicorn 后端在没装逐指令计数 hook 时不伪造指令数（见 machine.h 的 insns_counted）。
+        std::fprintf(out, "insns     : (未计数：该后端没装计数 hook；给 --max-insns 才精确)\n");
+    }
     std::fprintf(out, "blocks    : %zu (insns cached %zu, hits %zu, misses %zu)\n", cache_.blockCount(),
                  cache_.insnCount(), cache_.hits(), cache_.misses());
     std::fprintf(out, "committed : %llu KiB\n", (unsigned long long)(mem_.committedBytes() / 1024));

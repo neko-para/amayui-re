@@ -57,6 +57,8 @@ void usage() {
         "                      返回 0 + 126。⛔ 不回退 DATA1.ALF 的条目（引擎本身也不回退；\n"
         "                      那条约仅供取证对照，不是装载来源）\n"
         "  --real-time         用宿主时钟（此时 A4 的逐字节断言自动跳过并明说）\n"
+        "  --cpu <backend>     CPU 后端：interp（缺省 = 现有解释器，reference）| unicorn（实验 POC；\n"
+        "                      只有用 -DLIFT_ENABLE_UNICORN=ON 构建的二进制支持，否则退出码 2）\n"
         "  --trace-inputs      打印 trace 输入清单（exe 路径串 / guest 命令行 / 环境块 / 时钟起点）\n"
         "  --until shim        跑到第一次 shim 调用就停（L1）\n"
         "  --until ea <hex>    跑到指定 EA 就停（L2 = 0x4BA890）\n"
@@ -101,10 +103,21 @@ int main(int argc, char** argv) {
     std::string font_path;
     int baseline_lift = 2;
     bool font_engine_name = false;
+    lift::CpuBackend cpu_backend = lift::CpuBackend::Interp;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
-        if (std::strcmp(a, "--smoke") == 0) {
+        if (std::strcmp(a, "--cpu") == 0 && i + 1 < argc) {
+            const char* what = argv[++i];
+            if (std::strcmp(what, "interp") == 0) {
+                cpu_backend = lift::CpuBackend::Interp;
+            } else if (std::strcmp(what, "unicorn") == 0) {
+                cpu_backend = lift::CpuBackend::Unicorn;
+            } else {
+                std::fprintf(stderr, "--cpu 需要 interp 或 unicorn（收到 %s）\n", what);
+                return 2;
+            }
+        } else if (std::strcmp(a, "--smoke") == 0) {
             smoke = true;
         } else if (std::strcmp(a, "--exe") == 0 && i + 1 < argc) {
             exe_path = argv[++i];
@@ -174,6 +187,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ★ `--cpu unicorn` 的编译期判据：没有 Unicorn 的构建**明确报错退出 2**（⛔ 不回退到解释器 ——
+    //   "选了 unicorn 却跑了 interp" 是最坏的静默失败）。
+    if (cpu_backend == lift::CpuBackend::Unicorn && !lift::unicornAvailable()) {
+        std::fprintf(stderr,
+                     "emulator-lift: --cpu unicorn 需要 Unicorn 后端，但本二进制没有编译它\n"
+                     "  构建方式：cmake --preset macos-arm64"
+                     "（-DLIFT_ENABLE_UNICORN=ON + VCPKG_MANIFEST_FEATURES=unicorn）\n"
+                     "  默认构建（out）只有解释器：--cpu interp\n");
+        return 2;
+    }
+
     if (smoke) {
         if (!SDL_Init(0)) {
             std::fprintf(stderr, "emulator-lift: SDL_Init failed: %s\n", SDL_GetError());
@@ -211,6 +235,10 @@ int main(int argc, char** argv) {
                     lift::fontConfig().baseline_lift,
                     lift::fontConfig().use_engine_name ? "；A/B 对照档（只影响上报族名）" : "");
     }
+    std::printf("cpu       : %s%s\n", lift::cpuBackendName(cpu_backend),
+                cpu_backend == lift::CpuBackend::Unicorn
+                    ? "（实验 POC；解释器仍是 reference：--cpu interp）"
+                    : "（reference 解释器）");
 
     // ---- 定位执行源（四处，顺序固定；都不在 ⇒ 拒绝启动）----
     std::vector<std::string> tried;
@@ -393,6 +421,7 @@ int main(int argc, char** argv) {
     }
 
     lift::RunOptions opt;
+    opt.cpu = cpu_backend;
     opt.until_ea = until_ea;
     opt.stop_on_first_shim = until_shim;
     opt.max_insns = bench ? bench : max_insns;

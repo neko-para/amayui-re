@@ -199,6 +199,10 @@ public:
 
     bool committed(std::uint32_t ea, std::size_t size = 1) const;
     std::uint64_t committedBytes() const;
+    // ★ 提交位图的**版本号**：每次 commit / decommit 成功就 +1（只增不减）。
+    //   给 Unicorn 后端做 O(1) 的"映射要不要复核"判据 —— 否则每个切片都要跑一遍
+    //   `committedBytes()`（O(已提交页数)，实测是 shim 密集 boot 的主要开销之一）。
+    std::uint64_t commitEpoch() const { return commit_epoch_; }
 
     std::uint8_t* host(std::uint32_t ea) { return base_ + ea; }
     const std::uint8_t* host(std::uint32_t ea) const { return base_ + ea; }
@@ -272,6 +276,7 @@ private:
     std::vector<Region> regions_;
     VaRangeTable va_ranges_;
     bool safe_ = false;
+    std::uint64_t commit_epoch_ = 0;  // 见 commitEpoch()（commit / decommit 时 +1）
     char last_error_[160] = {};
 };
 

@@ -367,6 +367,8 @@ bool GuestMemory::commitPages(std::uint32_t begin, std::uint64_t end) {
         for (std::uint32_t i = p; i < q; ++i) setBit(i, true);
         p = q;
     }
+    // 提交位图变了 ⇒ 版本号 +1（Unicorn 后端靠它做 O(1) 的映射复核判据，见 memory.h 的 commitEpoch）
+    ++commit_epoch_;
     return true;
 }
 
@@ -412,6 +414,8 @@ void GuestMemory::decommit(std::uint32_t ea, std::size_t size) {
          p < static_cast<std::uint32_t>(hostEnd / kPage); ++p) {
         setBit(p, false);
     }
+    // 提交位图变了 ⇒ 版本号 +1（见 commitEpoch；Unicorn 后端据此把"被退掉的页"从映射里摘掉）
+    ++commit_epoch_;
 }
 
 void GuestMemory::annotate(std::uint32_t ea, std::size_t size, RegionKind kind, const char* name) {

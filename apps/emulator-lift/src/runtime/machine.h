@@ -40,10 +40,21 @@ enum class StopReason : std::uint8_t {
     Stopped,       // guest 自己停（hlt / 停机）
     NoCode,        // eip 落在没有代码的地方
     TimeLimit,     // 墙钟上限（--time-limit；探索用，不用于确定性比对）
+    // ★ 只有 Unicorn 后端会产出它：UC_ERR_READ/WRITE/FETCH_UNMAPPED（或我们的
+    //   UC_HOOK_MEM_UNMAPPED 判定"未提交"）—— 解释器里的同类情形是**平台 fault**（进程退出 3），
+    //   而 Unicorn 把它变成一个**可诊断的停机**（detail 带 EA + 读写方向）。追加在末尾，
+    //   已有枚举值一个都不动（默认路径的行为/数值不变）。
+    MemoryFault,
 };
 const char* stopReasonName(StopReason r);
 
+// CPU 后端选择（`--cpu`）：默认 `Interp` = 现有解释器（reference）。
+// ⛔ 只有显式选 `Unicorn` 才走新后端；默认路径一个字节都不变。
+enum class CpuBackend : std::uint8_t { Interp = 0, Unicorn };
+const char* cpuBackendName(CpuBackend b);
+
 struct RunOptions {
+    CpuBackend cpu = CpuBackend::Interp;  // `--cpu interp|unicorn`（缺省 interp）
     std::uint32_t until_ea = 0;      // 非 0 ⇒ 到达即停
     std::uint64_t max_insns = 0;     // 非 0 ⇒ 执行到该条数即停
     bool stop_on_first_shim = false; // L1
@@ -77,6 +88,11 @@ struct RunResult {
     StopReason reason = StopReason::None;
     std::uint32_t ea = 0;        // 停下来的 eip
     std::uint64_t insns = 0;
+    // ★ false = 这个后端**没有计数**（`insns` 无意义）。当前两个后端都计数：解释器逐指令循环里计，
+    //   Unicorn 后端用一个逐指令计数 hook 计（虚拟时钟 / `--max-insns` 与解释器同语义）。
+    //   ⛔ 不许拿 `uc_emu_start(count)` 的近似冒充指令数。
+    bool insns_counted = true;
+    CpuBackend cpu = CpuBackend::Interp;  // 这次跑用的是哪个后端（summary 用）
     std::string detail;
     bool ok() const { return reason == StopReason::UntilEa || reason == StopReason::MaxInsns ||
                              reason == StopReason::FirstShim || reason == StopReason::Stopped ||
@@ -115,7 +131,17 @@ public:
     // 给夹具用的平坦栈（1 MiB @ layout.stack_top 下）+ 返回地址 0xFFFFFFFF（执行到就停）
     bool prepareStack(std::string* err);
 
+    // `opts.cpu` 分派：`Interp`（缺省）= 原解释器（reference，行为一个字节不改）；
+    //                     `Unicorn` = 实验后端（只有 LIFT_WITH_UNICORN 构建里有真实现）。
     RunResult run(const RunOptions& opts);
+
+    // ---- 两个后端（分开命名，便于对照；⛔ 默认路径只走 runInterpreter）----
+    // 原 `run` 的主体（解释器）；`Machine::run` 在 `cpu == Interp` 时原样调它。
+    RunResult runInterpreter(const RunOptions& opts);
+    // 实验后端（POC）：切片执行 guest 指令，shim 仍走 `shims_.invoke`（实现见 cpu_unicorn.cpp）。
+    // ★ 没有 LIFT_WITH_UNICORN 的构建里它**存在**（返回 Unimplemented + 可读 detail），
+    //   这样 `--cpu unicorn` 是"明确报错退出 2"，而不是链接失败。
+    RunResult runUnicorn(const RunOptions& opts);
 
     // ---- 访问器 ----
     GuestMemory& mem() { return mem_; }
@@ -200,5 +226,8 @@ private:
 // 纯档夹具用：`Machine` 的全局实例指针（fault 诊断要拿到寄存器与 `.lst`）
 Machine* activeMachine();
 void setActiveMachine(Machine* m);
+
+// 本构建有没有编译 Unicorn 后端（`--cpu unicorn` 的编译期判据；main.cpp 用它决定退出码）。
+bool unicornAvailable();
 
 }  // namespace lift

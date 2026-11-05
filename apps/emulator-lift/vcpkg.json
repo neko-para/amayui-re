@@ -7,5 +7,13 @@
     "zydis",
     "freetype",
     "glm"
-  ]
+  ],
+  "features": {
+    "unicorn": {
+      "description": "实验性 CPU 后端：Unicorn 2.1.4（QEMU TCG）的 x86 执行器。默认 OFF；只有 LIFT_ENABLE_UNICORN=ON 的构建才装它。",
+      "dependencies": [
+        "unicorn"
+      ]
+    }
+  }
 }

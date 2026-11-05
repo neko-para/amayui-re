@@ -68,7 +68,11 @@
 - **性能实测（Release，同一二进制）**：到 `CreateThread` 的整段 boot：interp **2.13–2.23 s**，Unicorn **10.02–11.09 s**（Unicorn 更慢）；紧循环 15M 指令：interp ~90 MIPS，Unicorn ~170 MIPS（约 1.85×）。结论：当前“切片 + 每次 shim 往返”的结构在 shim 密集的 boot 上是负收益，不能据此固定 CPU 架构。
 - **两个决定性坑**：Unicorn 静态库 `crc32` 与 zlib 同名不同算法（用动态 triplet 隔离）；Unicorn 32 位模式不能写 FS_BASE/GS_BASE（用 GDT/选择子 + flat SS）。
 - **未完成**：CreateThread 之后、GPU/窗口、Unicorn 切片开销优化、MMX/MXCSR/SEH/SMC；需用户决定是否投入优化或保留解释器。
-
+## 2026-11-05 追加：单 out 构建 + hook/stable-stub 性能
+- 已按用户要求统一到**唯一 `out`**：RelWithDebInfo + Unicorn 后端 ON；`ctest` 42/42（41 + `unicorn` 85 checks）。不再有 `out-unicorn` / `macos-arm64-unicorn`。
+- boot 到 `CreateThread`（同一 `out` 二进制，`--cpu` 切换）：interp **3.27 s**；unicorn 基线 **18.05 s**；关全局计数 hook **5.90 s**；inline shim（保留计数）**15.73 s**；inline + 关计数 **5.63 s**。
+- `LIFT_UC_PROFILE=1`：基线 slices=2359 / emu=18064 ms / invoke=51 ms；关计数 slices=2264 / emu=5834 ms / invoke=38 ms ⇒ **主要成本是逐指令计数 hook + TCG/内存，不是 stop/restart**；stable stub/direct-invoke 单独只省约 5%（关计数时）。
+- 结论：stable stub 必须是**每 API 唯一地址**（现有 `ShimRegistry` 已如此，`tests/mechanism` 的 `addRuntime-unique-stub` 守着）；Unicorn 没有“把多个 API 映射成同一个函数指针”的魔法。当前 POC 即使关计数仍比 interp 慢约 1.8×，需要继续 profile TCG/内存，不能据此固定架构。
 ## 需要用户后续裁决
 - 线程：伪线程（音频 silent）还是真线程。
 - CPU 后端最终固定到哪一条（现有解释器 / Unicorn / 其他），需在双后端性能对比后决定。
