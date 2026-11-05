@@ -5,6 +5,7 @@
   "dependencies": [
     "sdl3",
     "zydis",
-    "freetype"
+    "freetype",
+    "glm"
   ]
 }

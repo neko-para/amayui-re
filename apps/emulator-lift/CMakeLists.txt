@@ -387,3 +387,24 @@ target_sources(emulator-lift-runtime PRIVATE
 add_executable(lift-d3d9-pipeline tests/d3d9_pipeline.cpp)
 target_link_libraries(lift-d3d9-pipeline PRIVATE emulator-lift-runtime)
 add_test(NAME d3d9-pipeline COMMAND lift-d3d9-pipeline)
+
+# =====================================================================================
+# M2 · 公共数学层（D3DX 行主序/行向量 ↔ GLM 列主序/列向量 的唯一适配点）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+#   `runtime/math.h` 把 `<glm/glm.hpp>` 带进公开头，所以 include dir 必须 PUBLIC。
+# =====================================================================================
+find_package(glm CONFIG REQUIRED)
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/math.cpp
+    src/runtime/pixel_format.cpp)
+target_link_libraries(emulator-lift-runtime PUBLIC glm::glm)
+
+# ---- pure：数学适配（行/列主序乘法顺序、LH 投影/视图、零向量归一化）----
+add_executable(lift-math tests/math.cpp)
+target_link_libraries(lift-math PRIVATE emulator-lift-runtime)
+add_test(NAME math COMMAND lift-math)
+
+# ---- pure：像素格式（掩码往返、16/32bpp load/store、颜色打包、min_filter 决策）----
+add_executable(lift-pixel-format tests/pixel_format.cpp)
+target_link_libraries(lift-pixel-format PRIVATE emulator-lift-runtime)
+add_test(NAME pixel-format COMMAND lift-pixel-format)

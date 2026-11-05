@@ -18,6 +18,7 @@
 #include "runtime/heap.h"
 #include "runtime/machine.h"
 #include "runtime/memory.h"
+#include "runtime/pixel_format.h"
 #include "runtime/present.h"
 
 namespace lift {
@@ -459,43 +460,16 @@ bool fillModeDesc(X86& cpu, std::uint32_t desc_ea, int width, int height, unsign
 // ---------------------------------------------------------------------------------------
 // 像素路径
 // ---------------------------------------------------------------------------------------
+// ★ 实现在 runtime/pixel_format（唯一一份）；这里只留**薄转发**，既有调用/API 不变。
 std::uint32_t loadPixel(const std::uint8_t* p, unsigned bpp) {
-    if (bpp == 32) {
-        std::uint32_t v = 0;
-        std::memcpy(&v, p, 4);
-        return v;
-    }
-    std::uint16_t v = 0;
-    std::memcpy(&v, p, 2);
-    return v;
+    return pixel_format::loadPixel(p, bpp);
 }
 
 void storePixel(std::uint8_t* p, unsigned bpp, std::uint32_t v) {
-    if (bpp == 32) {
-        std::memcpy(p, &v, 4);
-        return;
-    }
-    const std::uint16_t v16 = static_cast<std::uint16_t>(v & 0xFFFFu);
-    std::memcpy(p, &v16, 2);
+    pixel_format::storePixel(p, bpp, v);
 }
 
-SurfaceFormat formatForBpp(unsigned bpp) {
-    SurfaceFormat f;
-    if (bpp == 16) {
-        f.bpp = 16;
-        f.rmask = 0xF800u;  // 565（plan D4）
-        f.gmask = 0x07E0u;
-        f.bmask = 0x001Fu;
-        f.amask = 0u;
-    } else {
-        f.bpp = 32;
-        f.rmask = 0x00FF0000u;
-        f.gmask = 0x0000FF00u;
-        f.bmask = 0x000000FFu;
-        f.amask = 0xFF000000u;
-    }
-    return f;
-}
+SurfaceFormat formatForBpp(unsigned bpp) { return pixel_format::formatForBpp(bpp); }
 
 std::uint32_t blt(X86& cpu, const SurfaceInfo& dst, const Rect* dst_rect, const SurfaceInfo& src,
                   const Rect* src_rect, std::uint32_t flags, std::string* why) {

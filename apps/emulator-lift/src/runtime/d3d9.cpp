@@ -18,6 +18,7 @@
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/ddraw_surface.h"
 #include "runtime/heap.h"
+#include "runtime/pixel_format.h"
 #include "runtime/machine.h"
 #include "runtime/memory.h"
 #include "runtime/present.h"
@@ -472,31 +473,9 @@ bool checkFormatQueryAt(std::size_t newest, CheckFormatQuery* out) {
 // ---------------------------------------------------------------------------------------
 // 渲染动作
 // ---------------------------------------------------------------------------------------
+// ★ 实现在 runtime/pixel_format（唯一一份掩码换算）；这里只留**薄转发**，既有 API 不变。
 std::uint32_t pixelFromColor(const SurfaceFormat& fmt, std::uint32_t argb) {
-    const std::uint32_t a = (argb >> 24) & 0xFFu;
-    const std::uint32_t r = (argb >> 16) & 0xFFu;
-    const std::uint32_t g = (argb >> 8) & 0xFFu;
-    const std::uint32_t b = argb & 0xFFu;
-    // ★ 按**像素格式的掩码**换算（⛔ 不按"32bpp = 8888 / 16bpp = 565"猜：D3DFMT_R5G6B5 是 5-6-5、
-    //   X1R5G5B5 / A1R5G5B5 是 5-5-5、A4R4G4B4 是 4-4-4-4 ⇒ 只有掩码能同时说对三种）。
-    auto place = [](std::uint32_t mask, std::uint32_t v8) -> std::uint32_t {
-        if (mask == 0) return 0;
-        unsigned shift = 0;
-        std::uint32_t m = mask;
-        while ((m & 1u) == 0) {
-            m >>= 1;
-            ++shift;
-        }
-        unsigned bits = 0;
-        while ((m & 1u) != 0) {
-            m >>= 1;
-            ++bits;
-        }
-        if (bits == 0 || bits > 8) return 0;
-        const std::uint32_t v = (bits == 8) ? v8 : (v8 >> (8 - bits));
-        return (v << shift) & mask;
-    };
-    return place(fmt.rmask, r) | place(fmt.gmask, g) | place(fmt.bmask, b) | place(fmt.amask, a);
+    return pixel_format::pixelFromColor(fmt, argb);
 }
 
 std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::uint32_t rects_ea,

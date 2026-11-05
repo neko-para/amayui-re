@@ -13,7 +13,9 @@
 //   · 光照：Gouraud per-vertex；支持 DIRECTIONAL / POINT（SPOT 按 POINT+falloff 近似）；
 //     法线只做 world/view 线性变换后归一化（真机用逆转置 ⇒ 非等比缩放下会偏）。
 //   · 雾：**不实现**（FOGENABLE=1 时记录 + 一行日志，颜色不参与雾化）。
-//   · 纹理过滤：MIN/MAG 支持 POINT / LINEAR（各向异性按 LINEAR 近似，MIP 链本线没有）。
+//   · 纹理过滤：MIN/MAG **都参与**决策（任一要求 LINEAR ⇒ 双线性；各向异性按 LINEAR 近似）。
+//     本线没有 mip 链 / LOD / 导数 ⇒ 不按 LOD 在 MIN/MAG 之间选，这是**明确记录的近似**
+//     （决策见 `samplerUsesLinear`，⛔ 不是"参数传了却不用"）。
 //   · 采样器 MIPFILTER / MAXMIPLEVEL / LODBIAS：本线只有 level 0 ⇒ 记录、不影响像素。
 //   · 多重采样 / 抗锯齿 / 线框 / patch / 顶点混合 / 顶点声明（D3DVERTEXELEMENT9）：
 //     不支持 ⇒ 记录 + 一行日志；顶点声明**有**对象时 Draw 会响亮失败（不猜格式）。
@@ -32,10 +34,11 @@
 
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
-#include "runtime/ddraw_surface.h"
 #include "runtime/heap.h"
 #include "runtime/machine.h"
+#include "runtime/math.h"
 #include "runtime/memory.h"
+#include "runtime/pixel_format.h"
 #include "runtime/surface.h"
 #include "runtime/x86.h"
 
@@ -346,45 +349,7 @@ bool resolveTexture(X86& cpu, Machine* m, std::uint32_t object_ea, TextureView* 
     return true;
 }
 
-// ---- 颜色换算（⛔ 不猜 bpp：按掩码）----
-unsigned maskShift(std::uint32_t mask) {
-    unsigned shift = 0;
-    while (mask != 0 && (mask & 1u) == 0) {
-        mask >>= 1;
-        ++shift;
-    }
-    return shift;
-}
-unsigned maskBits(std::uint32_t mask) {
-    // ⚠ 数**所有**置位（掩码不一定是 LSB 对齐的连续段：0x00FF0000 也要数出 8）
-    unsigned bits = 0;
-    while (mask != 0) {
-        if ((mask & 1u) != 0) ++bits;
-        mask >>= 1;
-    }
-    return bits;
-}
-unsigned expandChannel(std::uint32_t raw, std::uint32_t mask) {
-    if (mask == 0) return 255u;
-    const unsigned bits = maskBits(mask);
-    if (bits == 0 || bits > 8) return 255u;
-    const std::uint32_t v = (raw & mask) >> maskShift(mask);
-    if (bits == 8) return v;
-    const unsigned maxv = (1u << bits) - 1u;
-    return (v * 255u + maxv / 2u) / maxv;
-}
-std::uint32_t packChannel(unsigned v8, std::uint32_t mask) {
-    if (mask == 0) return 0;
-    const unsigned bits = maskBits(mask);
-    if (bits == 0 || bits > 8) return 0;
-    unsigned v = v8 > 255u ? 255u : v8;
-    if (bits < 8) v = v >> (8 - bits);
-    return (v << maskShift(mask)) & mask;
-}
-std::uint32_t packColor(const SurfaceFormat& fmt, unsigned r, unsigned g, unsigned b, unsigned a) {
-    return packChannel(r, fmt.rmask) | packChannel(g, fmt.gmask) | packChannel(b, fmt.bmask) |
-           packChannel(a, fmt.amask);
-}
+// ---- 颜色换算：实现只在 runtime/pixel_format.h（唯一一份）----
 
 // =====================================================================================
 // FVF 解析
@@ -512,30 +477,17 @@ struct SVertex {
     double sr = 0, sg = 0, sb = 0, sa = 0;
 };
 
-void readMatrix(X86& cpu, std::uint32_t ea, double m[16]) {
-    for (int i = 0; i < 16; ++i) m[i] = static_cast<double>(rdF32(cpu, ea + static_cast<std::uint32_t>(i) * 4u));
+// ---- 变换：统一走 runtime/math 的 D3DX↔GLM 适配（⛔ 这里不再有行/列主序的手写展开）----
+math::Mat4d readMatrix(X86& cpu, std::uint32_t ea) {
+    double d3d[16];
+    for (int i = 0; i < 16; ++i) d3d[i] = static_cast<double>(rdF32(cpu, ea + static_cast<std::uint32_t>(i) * 4u));
+    return math::fromD3DLayout(d3d);
 }
 
-void mulMatrix(const double a[16], const double b[16], double out[16]) {
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            double s = 0.0;
-            for (int k = 0; k < 4; ++k) s += a[i * 4 + k] * b[k * 4 + j];
-            out[i * 4 + j] = s;
-        }
-    }
-}
-
-void transformVec4(const double m[16], const double v[4], double out[4]) {
-    for (int j = 0; j < 4; ++j) {
-        double s = 0.0;
-        for (int k = 0; k < 4; ++k) s += v[k] * m[k * 4 + j];
-        out[j] = s;
-    }
-}
-
-void transformVec3(const double m[16], const double v[3], double out[3]) {
-    for (int j = 0; j < 3; ++j) out[j] = v[0] * m[0 * 4 + j] + v[1] * m[1 * 4 + j] + v[2] * m[2 * 4 + j];
+void writeMatrix(X86& cpu, std::uint32_t ea, const math::Mat4d& m) {
+    double d3d[16];
+    math::toD3DLayout(m, d3d);
+    for (int i = 0; i < 16; ++i) wrF32(cpu, ea + static_cast<std::uint32_t>(i) * 4u, static_cast<float>(d3d[i]));
 }
 
 struct LightState {
@@ -588,15 +540,6 @@ void readLight(X86& cpu, std::uint32_t pe, std::uint32_t index, LightState* out)
     out->atten2 = static_cast<double>(rdF32(cpu, base + 92u));
 }
 
-void normalize3(double v[3]) {
-    const double len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (len > 1e-12) {
-        v[0] /= len;
-        v[1] /= len;
-        v[2] /= len;
-    }
-}
-
 // 顶点颜色（D3DCOLOR 0xAARRGGBB → 0..255）
 void splitColor(std::uint32_t color, double* a, double* r, double* g, double* b) {
     *a = static_cast<double>((color >> 24) & 0xFFu);
@@ -606,31 +549,14 @@ void splitColor(std::uint32_t color, double* a, double* r, double* g, double* b)
 }
 
 // 固定功能光照（Gouraud；只在 LIGHTING=1 且顶点有法线时做）
-void applyLighting(X86& cpu, std::uint32_t pe, const double world_pos[3], const double world_normal[3],
-                   const double view[16], double lit[4]) {
+void applyLighting(X86& cpu, std::uint32_t pe, const math::Vec3d& world_pos,
+                   const math::Vec3d& world_normal, const math::Mat4d& view, double lit[4]) {
     MaterialState mat;
     readMaterial(cpu, pe, &mat);
     // 材质来源（diffuse/ambient）——COLORVERTEX 为真有顶点色时用顶点色（在 Draw 里覆盖）
-    double cam_pos[3];
-    {
-        const double p[4] = {world_pos[0], world_pos[1], world_pos[2], 1.0};
-        double out[4];
-        transformVec4(view, p, out);
-        cam_pos[0] = out[0];
-        cam_pos[1] = out[1];
-        cam_pos[2] = out[2];
-    }
-    double n[3];
-    {
-        double wn[3] = {world_normal[0], world_normal[1], world_normal[2]};
-        normalize3(wn);
-        double tmp[3];
-        transformVec3(view, wn, tmp);
-        n[0] = tmp[0];
-        n[1] = tmp[1];
-        n[2] = tmp[2];
-        normalize3(n);
-    }
+    const math::Vec3d cam_pos = math::transformPoint3D3D(view, world_pos);
+    const math::Vec3d n =
+        math::normalized3D3D(math::transformVector3D3D(view, math::normalized3D3D(world_normal)));
     const std::uint32_t ambient_argb = rsOf(cpu, pe, kRsAmbient);
     double ga = 0, gr = 0, gg = 0, gb = 0;
     splitColor(ambient_argb, &ga, &gr, &gg, &gb);
@@ -642,38 +568,23 @@ void applyLighting(X86& cpu, std::uint32_t pe, const double world_pos[3], const 
         if (plGet(cpu, pe, kPlLightEnabled + i * 4u) == 0) continue;
         LightState ls;
         readLight(cpu, pe, i, &ls);
-        double ldir[3] = {0, 0, 0};   // 从顶点指向光源
+        math::Vec3d ldir(0.0);  // 从顶点指向光源
         double atten = 1.0;
         switch (ls.type) {
-            case kLightDirectional: {
-                const double d[3] = {-ls.direction[0], -ls.direction[1], -ls.direction[2]};
-                double dl[3] = {d[0], d[1], d[2]};
-                normalize3(dl);
-                ldir[0] = dl[0];
-                ldir[1] = dl[1];
-                ldir[2] = dl[2];
+            case kLightDirectional:
+                ldir = math::normalized3D3D(math::Vec3d(-ls.direction[0], -ls.direction[1], -ls.direction[2]));
                 break;
-            }
             case kLightPoint:
             case kLightSpot: {
-                double pos[3];
-                {
-                    const double p[4] = {ls.position[0], ls.position[1], ls.position[2], 1.0};
-                    double out[4];
-                    transformVec4(view, p, out);
-                    pos[0] = out[0];
-                    pos[1] = out[1];
-                    pos[2] = out[2];
-                }
-                ldir[0] = pos[0] - cam_pos[0];
-                ldir[1] = pos[1] - cam_pos[1];
-                ldir[2] = pos[2] - cam_pos[2];
-                const double dist = std::sqrt(ldir[0] * ldir[0] + ldir[1] * ldir[1] + ldir[2] * ldir[2]);
+                const math::Vec3d pos =
+                    math::transformPoint3D3D(view, math::Vec3d(ls.position[0], ls.position[1], ls.position[2]));
+                ldir = pos - cam_pos;
+                const double dist = glm::length(ldir);
                 if (ls.range > 0.0 && dist > ls.range) continue;
                 const double denom = ls.atten0 + ls.atten1 * dist + ls.atten2 * dist * dist;
                 atten = denom > 1e-12 ? 1.0 / denom : 1.0;
                 if (atten > 1.0) atten = 1.0;
-                normalize3(ldir);
+                ldir = math::normalized3D3D(ldir);
                 if (ls.type == kLightSpot) {
                     // 本线把 SPOT 按 POINT + falloff 近似（⛔ 没做锥角）
                     atten *= 1.0;
@@ -683,7 +594,7 @@ void applyLighting(X86& cpu, std::uint32_t pe, const double world_pos[3], const 
             default:
                 continue;
         }
-        double ndl = n[0] * ldir[0] + n[1] * ldir[1] + n[2] * ldir[2];
+        double ndl = glm::dot(n, ldir);
         if (ndl < 0.0) ndl = 0.0;
         if (ndl > 0.0) {
             r += ls.diffuse[0] * mat.diffuse[0] * ndl * atten;
@@ -692,11 +603,9 @@ void applyLighting(X86& cpu, std::uint32_t pe, const double world_pos[3], const 
         }
         // 镜面：LOCALVIEWER=FALSE 时 D3D 用 (0,0,-1)；这里统一用"顶点 → 眼"（更接近 LOCALVIEWER=TRUE）
         if (mat.power > 0.0 && rsOf(cpu, pe, kRsSpecularEnable) != 0) {
-            double vdir[3] = {-cam_pos[0], -cam_pos[1], -cam_pos[2]};
-            normalize3(vdir);
-            double h[3] = {ldir[0] + vdir[0], ldir[1] + vdir[1], ldir[2] + vdir[2]};
-            normalize3(h);
-            double ndh = n[0] * h[0] + n[1] * h[1] + n[2] * h[2];
+            const math::Vec3d vdir = math::normalized3D3D(-cam_pos);
+            const math::Vec3d h = math::normalized3D3D(ldir + vdir);
+            double ndh = glm::dot(n, h);
             if (ndh < 0.0) ndh = 0.0;
             const double spec = std::pow(ndh, mat.power) * atten;
             r += ls.specular[0] * mat.specular[0] * spec;
@@ -794,7 +703,9 @@ unsigned clamp255(double v) {
     return static_cast<unsigned>(v + 0.5);
 }
 
-// 采样：POINT / LINEAR（MIP 链不存在 ⇒ 只用 level 0；各向异性按 LINEAR 近似）
+// 采样：本线只有 level 0（没有 mip/LOD/导数）⇒ MIN/MAG 合成一条决策：
+//   任一要求 LINEAR（ANISOTROPIC 也按 LINEAR 近似）⇒ 双线性；否则 POINT。
+//   ★ 这是**近似**：真机会按 LOD 在 MIN 与 MAG 之间选，本线没有足迹信息，无法区分。
 void sampleTexture(const TextureView& t, const std::uint32_t address_u, const std::uint32_t address_v,
                    const std::uint32_t mag_filter, const std::uint32_t min_filter, double u, double v,
                    unsigned out[4]) {
@@ -841,15 +752,16 @@ void sampleTexture(const TextureView& t, const std::uint32_t address_u, const st
         }
         const std::uint8_t* p =
             t.pixels + static_cast<std::size_t>(y) * t.pitch + static_cast<std::size_t>(x) * bpp;
-        const std::uint32_t raw = ddraw::loadPixel(p, t.format.bpp);
-        rgba[0] = expandChannel(raw, t.format.rmask);
-        rgba[1] = expandChannel(raw, t.format.gmask);
-        rgba[2] = expandChannel(raw, t.format.bmask);
-        rgba[3] = t.format.amask != 0 ? expandChannel(raw, t.format.amask) : 255u;
+        const std::uint32_t raw = pixel_format::loadPixel(p, t.format.bpp);
+        rgba[0] = pixel_format::expandChannel(raw, t.format.rmask);
+        rgba[1] = pixel_format::expandChannel(raw, t.format.gmask);
+        rgba[2] = pixel_format::expandChannel(raw, t.format.bmask);
+        rgba[3] = t.format.amask != 0 ? pixel_format::expandChannel(raw, t.format.amask) : 255u;
     };
-    const bool linear = mag_filter == kTexfLinear || mag_filter == kTexfAnisotropic;
-    if (min_filter == kTexfNone && mag_filter == kTexfNone) {
-        // 不可见过滤组合：D3D 不会这样用；按 POINT 处理但不静默
+    // ★ MIN 与 MAG 都参与（MIN 不再被忽略）；没有 mip/LOD ⇒ 这是明确记录的近似。
+    const bool linear = samplerUsesLinear(mag_filter, min_filter);
+    if (mag_filter == kTexfNone && min_filter == kTexfNone) {
+        // 不可见组合（D3D 不会这样用）：不猜像素 ⇒ 透明黑；SetSamplerState 已 recordUnsupported。
         out[0] = out[1] = out[2] = out[3] = 0u;
         return;
     }
@@ -1290,11 +1202,11 @@ void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, cons
                                 static_cast<std::size_t>(px) * ctx.color_fmt.bytesPerPixel();
             std::uint32_t out_r = fr, out_g = fg, out_b = fb, out_a = fa;
             if (ctx.blend) {
-                const std::uint32_t dst_raw = ddraw::loadPixel(dst, ctx.color_fmt.bpp);
-                const unsigned dr = expandChannel(dst_raw, ctx.color_fmt.rmask);
-                const unsigned dg = expandChannel(dst_raw, ctx.color_fmt.gmask);
-                const unsigned db = expandChannel(dst_raw, ctx.color_fmt.bmask);
-                const unsigned da = ctx.color_fmt.amask != 0 ? expandChannel(dst_raw, ctx.color_fmt.amask) : 255u;
+                const std::uint32_t dst_raw = pixel_format::loadPixel(dst, ctx.color_fmt.bpp);
+                const unsigned dr = pixel_format::expandChannel(dst_raw, ctx.color_fmt.rmask);
+                const unsigned dg = pixel_format::expandChannel(dst_raw, ctx.color_fmt.gmask);
+                const unsigned db = pixel_format::expandChannel(dst_raw, ctx.color_fmt.bmask);
+                const unsigned da = ctx.color_fmt.amask != 0 ? pixel_format::expandChannel(dst_raw, ctx.color_fmt.amask) : 255u;
                 unsigned sr_f = 0, sg_f = 0, sb_f = 0, sa_f = 0;
                 blendFactors8(ctx.src_blend, fr, fg, fb, fa, dr, dg, db, da, &sr_f, &sg_f, &sb_f, &sa_f);
                 unsigned dr_f = 0, dg_f = 0, db_f = 0, da_f = 0;
@@ -1315,16 +1227,16 @@ void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, cons
                 }
             }
             const std::uint32_t mask = ctx.color_write & 0xFu;
-            if ((mask & 0x1u) == 0) out_r = expandChannel(ddraw::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.rmask);
-            if ((mask & 0x2u) == 0) out_g = expandChannel(ddraw::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.gmask);
-            if ((mask & 0x4u) == 0) out_b = expandChannel(ddraw::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.bmask);
+            if ((mask & 0x1u) == 0) out_r = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.rmask);
+            if ((mask & 0x2u) == 0) out_g = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.gmask);
+            if ((mask & 0x4u) == 0) out_b = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.bmask);
             if ((mask & 0x8u) == 0) out_a = ctx.color_fmt.amask != 0
-                                             ? expandChannel(ddraw::loadPixel(dst, ctx.color_fmt.bpp),
+                                             ? pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp),
                                                              ctx.color_fmt.amask)
                                              : 255u;
             if (mask != 0u) {
-                ddraw::storePixel(dst, ctx.color_fmt.bpp,
-                                  packColor(ctx.color_fmt, out_r, out_g, out_b, out_a));
+                pixel_format::storePixel(dst, ctx.color_fmt.bpp,
+                                  pixel_format::packColor(ctx.color_fmt, out_r, out_g, out_b, out_a));
             }
             if (z_enable && z_write) ctx.depth_base[depth_off] = static_cast<float>(z);
             ++ctx.pixels_written;
@@ -1668,13 +1580,10 @@ std::uint32_t multiplyTransform(X86& cpu, std::uint32_t dev, std::uint32_t state
         return kInvalidCall;
     }
     if (!committed(cpu, matrix_ea, 64u, "MultiplyTransform 的 pMatrix", why)) return kInvalidCall;
-    double cur[16];
-    double mul[16];
-    double out[16];
-    readMatrix(cpu, pe + kPlTransforms + state * 64u, cur);
-    readMatrix(cpu, matrix_ea, mul);
-    mulMatrix(cur, mul, out);
-    for (unsigned i = 0; i < 16; ++i) wrF32(cpu, pe + kPlTransforms + state * 64u + i * 4u, static_cast<float>(out[i]));
+    // D3DX 语义：state = state * pMatrix（行向量 v' = v*state*pMatrix ⇒ 先 state 后 pMatrix）
+    const math::Mat4d cur = readMatrix(cpu, pe + kPlTransforms + state * 64u);
+    const math::Mat4d mul = readMatrix(cpu, matrix_ea);
+    writeMatrix(cpu, pe + kPlTransforms + state * 64u, math::multiplyD3D(cur, mul));
     return kOk;
 }
 
@@ -1811,6 +1720,8 @@ std::uint32_t setSamplerState(X86& cpu, std::uint32_t dev, std::uint32_t stage, 
                 return kInvalidCall;
             }
             if (value == kTexfAnisotropic) recordUnsupported(cpu, pe, 10u, "各向异性过滤（按 LINEAR 近似）", value);
+            if (value == kTexfNone)
+                recordUnsupported(cpu, pe, 17u, "D3DTEXF_NONE（MIN/MAG 无过滤；两侧都 NONE 时按透明黑）", value);
             break;
         case kSampMipFilter:
             if (value != 0u) recordUnsupported(cpu, pe, 11u, "MIPFILTER（本线没有 mip 链）", value);
@@ -2397,22 +2308,21 @@ bool prepareContext(X86& cpu, std::uint32_t dev, std::uint32_t pe, DrawContext* 
 
 // 顶点变换（XYZ 路：WORLD → VIEW → PROJECTION；XYZRHW 路：已经是屏幕坐标）
 void transformVertex(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std::uint8_t* base,
-                     std::uint32_t vertex_index, const double world[16], const double view[16],
-                     const double proj[16], CVertex* out) {
+                     std::uint32_t vertex_index, const math::Mat4d& world, const math::Mat4d& view,
+                     const math::Mat4d& proj, CVertex* out) {
     readVertex(cpu, fvf, base, 0, out, nullptr);
     if (out->pretransformed) return;
     // 光照（先做：需要世界空间位置与法线）
     if (rsOf(cpu, pe, kRsLighting) != 0u && fvf.has_normal) {
-        double local[3] = {out->x, out->y, out->z};
-        double wpos[3];
-        transformVec3(world, local, wpos);
+        const math::Vec3d local(out->x, out->y, out->z);
+        const math::Vec3d wpos = math::transformPoint3D3D(world, local);
         const std::uint8_t* np = base + fvf.normal_offset;
         float nf[3];
         std::memcpy(nf, np, sizeof(nf));
-        const double localn[3] = {static_cast<double>(nf[0]), static_cast<double>(nf[1]),
-                                  static_cast<double>(nf[2])};
-        double n[3];
-        transformVec3(world, localn, n);  // ⚠ 近似：真机用 world 的逆转置（非等比缩放下会偏）
+        const math::Vec3d localn(static_cast<double>(nf[0]), static_cast<double>(nf[1]),
+                                 static_cast<double>(nf[2]));
+        // ⚠ 近似：真机用 world 的逆转置（非等比缩放下会偏）
+        const math::Vec3d n = math::transformVector3D3D(world, localn);
         double lit[4];
         applyLighting(cpu, pe, wpos, n, view, lit);
         const std::uint32_t diffuse_src = rsOf(cpu, pe, kRsDiffuseMaterialSource);
@@ -2435,16 +2345,13 @@ void transformVertex(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std
         out->b = mat.diffuse[2] * 255.0;
         out->a = mat.diffuse[3] * 255.0;
     }
-    double p[4] = {out->x, out->y, out->z, 1.0};
-    double tmp[4];
-    double m[16];
-    mulMatrix(world, view, m);
-    mulMatrix(m, proj, m);
-    transformVec4(m, p, tmp);
-    out->x = tmp[0];
-    out->y = tmp[1];
-    out->z = tmp[2];
-    out->w = tmp[3];
+    // WORLD → VIEW → PROJECTION 走**同一个** multiplyD3D（行向量顺序在 math 里反转）
+    const math::Mat4d m = math::multiplyD3D(math::multiplyD3D(world, view), proj);
+    const math::Vec4d clip = math::transformVec4D3D(m, math::Vec4d(out->x, out->y, out->z, 1.0));
+    out->x = clip.x;
+    out->y = clip.y;
+    out->z = clip.z;
+    out->w = clip.w;
     (void)vertex_index;
 }
 
@@ -2541,8 +2448,9 @@ bool drawPrecheck(X86& cpu, const char* method, std::uint32_t dev, std::uint32_t
 
 // 读一批顶点（从 guest 内存的 base 起，按 stride 走）
 bool gatherVertices(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std::uint8_t* base,
-                    std::uint32_t stride, std::uint32_t first, std::uint32_t count, const double world[16],
-                    const double view[16], const double proj[16], std::vector<CVertex>* out, std::string* why) {
+                    std::uint32_t stride, std::uint32_t first, std::uint32_t count,
+                    const math::Mat4d& world, const math::Mat4d& view, const math::Mat4d& proj,
+                    std::vector<CVertex>* out, std::string* why) {
     if (base == nullptr) {
         if (why) *why = "D3D9 流水线：顶点数据指针为空";
         return false;
@@ -2566,6 +2474,12 @@ bool gatherVertices(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std:
 }
 
 }  // namespace
+
+bool samplerUsesLinear(std::uint32_t mag_filter, std::uint32_t min_filter) {
+    // 定义放匿名 namespace 外面：头文件里是公开 API（夹具直接调，证明 MIN 不再被忽略）
+    auto linear = [](std::uint32_t f) { return f == kTexfLinear || f == kTexfAnisotropic; };
+    return linear(mag_filter) || linear(min_filter);
+}
 
 std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std::uint32_t start_vertex,
                             std::uint32_t prim_count, std::string* why) {
@@ -2625,12 +2539,9 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
             return kInvalidCall;
         }
     }
-    double world[16];
-    double view[16];
-    double proj[16];
-    readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u, world);
-    readMatrix(cpu, pe + kPlTransforms + kTsView * 64u, view);
-    readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u, proj);
+    const math::Mat4d world = readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u);
+    const math::Mat4d view = readMatrix(cpu, pe + kPlTransforms + kTsView * 64u);
+    const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
     // 顶点偏移按字节：offset 是流偏移，start_vertex 是顶点序号
     std::vector<CVertex> verts;
     if (!gatherVertices(cpu, pe, fvf, base + offset, stride, start_vertex, vertex_count, world, view, proj, &verts,
@@ -2695,12 +2606,9 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
         if (why) *why = "D3D9 流水线：顶点 / 索引缓冲的宿主映射为空";
         return kInvalidCall;
     }
-    double world[16];
-    double view[16];
-    double proj[16];
-    readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u, world);
-    readMatrix(cpu, pe + kPlTransforms + kTsView * 64u, view);
-    readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u, proj);
+    const math::Mat4d world = readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u);
+    const math::Mat4d view = readMatrix(cpu, pe + kPlTransforms + kTsView * 64u);
+    const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
     const std::uint32_t offset = plGet(cpu, pe, kPlStreams + 4u);
     std::vector<CVertex> verts;
     verts.reserve(index_count);
@@ -2781,12 +2689,9 @@ std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, s
         if (why) *why = "D3D9 流水线：UP 顶点数据的宿主映射为空";
         return kInvalidCall;
     }
-    double world[16];
-    double view[16];
-    double proj[16];
-    readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u, world);
-    readMatrix(cpu, pe + kPlTransforms + kTsView * 64u, view);
-    readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u, proj);
+    const math::Mat4d world = readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u);
+    const math::Mat4d view = readMatrix(cpu, pe + kPlTransforms + kTsView * 64u);
+    const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
     std::vector<CVertex> verts;
     if (!gatherVertices(cpu, pe, fvf, base, stride, 0u, vertex_count, world, view, proj, &verts, why)) {
         return kInvalidCall;
@@ -2848,12 +2753,9 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
         if (why) *why = "D3D9 流水线：UP 顶点 / 索引数据的宿主映射为空";
         return kInvalidCall;
     }
-    double world[16];
-    double view[16];
-    double proj[16];
-    readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u, world);
-    readMatrix(cpu, pe + kPlTransforms + kTsView * 64u, view);
-    readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u, proj);
+    const math::Mat4d world = readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u);
+    const math::Mat4d view = readMatrix(cpu, pe + kPlTransforms + kTsView * 64u);
+    const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
     std::vector<CVertex> verts;
     verts.reserve(index_count);
     for (std::uint32_t i = 0; i < index_count; ++i) {
@@ -2923,7 +2825,7 @@ bool frameStats(const SurfaceFormat& fmt, const std::uint8_t* base, std::uint32_
         const std::uint8_t* row = base + static_cast<std::size_t>(y) * pitch;
         for (int x = 0; x < width; ++x) {
             const std::uint8_t* p = row + static_cast<std::size_t>(x) * bpp;
-            const std::uint32_t raw = ddraw::loadPixel(p, fmt.bpp);
+            const std::uint32_t raw = pixel_format::loadPixel(p, fmt.bpp);
             ++histogram[raw];
             hash ^= raw;
             hash *= 1099511628211ull;

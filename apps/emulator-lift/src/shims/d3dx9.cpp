@@ -19,7 +19,6 @@
 //   D3DXMatrixMultiply/Scaling/Translation/RotationAxis/RotationYawPitchRoll/OrthoLH/
 //   PerspectiveFovLH/LookAtLH + D3DXVec4Transform/Vec3Normalize（公式见各自函数头）。
 #include <cstdarg>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +29,7 @@
 #include "runtime/d3d9.h"
 #include "runtime/d3dx9_sprite.h"
 #include "runtime/exec.h"
+#include "runtime/math.h"
 #include "runtime/memory.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
@@ -590,6 +590,17 @@ void wrF(X86& cpu, std::uint32_t ea, float v) {
     std::memcpy(&bits, &v, sizeof(bits));
     cpu.mem->wr32(ea, bits);
 }
+// 把 GLM 矩阵按 D3DX 的 16-float 布局写回 guest（⛔ guest ABI 不变）
+void wrMat(X86& cpu, std::uint32_t ea, const math::Mat4& m) {
+    float d3d[16];
+    math::toD3DLayout(m, d3d);
+    for (int i = 0; i < 16; ++i) wrF(cpu, ea + static_cast<std::uint32_t>(i) * 4u, d3d[i]);
+}
+float u32ToFloat(std::uint32_t bits) {
+    float f = 0.0f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
 
 void shimD3DXMatrixMultiply(X86& cpu, ShimCall& call) {
     const std::uint32_t out_ea = call.u32(0);
@@ -601,19 +612,15 @@ void shimD3DXMatrixMultiply(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    float a[16];
-    float b[16];
+    float a_in[16];
+    float b_in[16];
     for (int i = 0; i < 16; ++i) {
-        a[i] = rdF(cpu, a_ea + static_cast<std::uint32_t>(i) * 4u);
-        b[i] = rdF(cpu, b_ea + static_cast<std::uint32_t>(i) * 4u);
+        a_in[i] = rdF(cpu, a_ea + static_cast<std::uint32_t>(i) * 4u);
+        b_in[i] = rdF(cpu, b_ea + static_cast<std::uint32_t>(i) * 4u);
     }
-    for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 4; ++c) {
-            float sum = 0.0f;
-            for (int k = 0; k < 4; ++k) sum += a[r * 4 + k] * b[k * 4 + c];
-            wrF(cpu, out_ea + static_cast<std::uint32_t>(r * 4 + c) * 4u, sum);
-        }
-    }
+    // ★ 唯一的适配点：D3DX 的 A*B（行向量）在 GLM 里是 B^T*A^T ⇒ multiplyD3D 内部反转顺序。
+    const math::Mat4 product = math::multiplyD3D(math::fromD3DLayout(a_in), math::fromD3DLayout(b_in));
+    wrMat(cpu, out_ea, product);
     call.result = out_ea;
 }
 
@@ -624,30 +631,11 @@ void shimD3DXMatrixScaling(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    for (int i = 0; i < 16; ++i) wrF(cpu, out_ea + static_cast<std::uint32_t>(i) * 4u, 0.0f);
     // 参数是 3 个 float：sx / sy / sz（按 stdcall 的 4 字节栈槽原样读）
-    const float sx = [&] {
-        const std::uint32_t bits = call.u32(1);
-        float f = 0.0f;
-        std::memcpy(&f, &bits, 4);
-        return f;
-    }();
-    const float sy = [&] {
-        const std::uint32_t bits = call.u32(2);
-        float f = 0.0f;
-        std::memcpy(&f, &bits, 4);
-        return f;
-    }();
-    const float sz = [&] {
-        const std::uint32_t bits = call.u32(3);
-        float f = 0.0f;
-        std::memcpy(&f, &bits, 4);
-        return f;
-    }();
-    wrF(cpu, out_ea + 0u, sx);
-    wrF(cpu, out_ea + 20u, sy);
-    wrF(cpu, out_ea + 40u, sz);
-    wrF(cpu, out_ea + 60u, 1.0f);
+    const float sx = u32ToFloat(call.u32(1));
+    const float sy = u32ToFloat(call.u32(2));
+    const float sz = u32ToFloat(call.u32(3));
+    wrMat(cpu, out_ea, math::scaling(sx, sy, sz));
     call.result = out_ea;
 }
 
@@ -658,29 +646,10 @@ void shimD3DXMatrixTranslation(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    for (int i = 0; i < 16; ++i) wrF(cpu, out_ea + static_cast<std::uint32_t>(i) * 4u, 0.0f);
-    wrF(cpu, out_ea + 0u, 1.0f);
-    wrF(cpu, out_ea + 20u, 1.0f);
-    wrF(cpu, out_ea + 40u, 1.0f);
-    wrF(cpu, out_ea + 60u, 1.0f);
-    wrF(cpu, out_ea + 48u, [&] {  // m[12] = x
-        const std::uint32_t bits = call.u32(1);
-        float f = 0.0f;
-        std::memcpy(&f, &bits, 4);
-        return f;
-    }());
-    wrF(cpu, out_ea + 52u, [&] {  // m[13] = y
-        const std::uint32_t bits = call.u32(2);
-        float f = 0.0f;
-        std::memcpy(&f, &bits, 4);
-        return f;
-    }());
-    wrF(cpu, out_ea + 56u, [&] {  // m[14] = z
-        const std::uint32_t bits = call.u32(3);
-        float f = 0.0f;
-        std::memcpy(&f, &bits, 4);
-        return f;
-    }());
+    const float x = u32ToFloat(call.u32(1));
+    const float y = u32ToFloat(call.u32(2));
+    const float z = u32ToFloat(call.u32(3));
+    wrMat(cpu, out_ea, math::translation(x, y, z));
     call.result = out_ea;
 }
 
@@ -696,62 +665,18 @@ void shimD3DXVec4Transform(X86& cpu, ShimCall& call) {
     }
     float v[4];
     for (int i = 0; i < 4; ++i) v[i] = rdF(cpu, v_ea + static_cast<std::uint32_t>(i) * 4u);
-    for (int c = 0; c < 4; ++c) {
-        float sum = 0.0f;
-        for (int r = 0; r < 4; ++r) sum += v[r] * rdF(cpu, m_ea + static_cast<std::uint32_t>(r * 4 + c) * 4u);
-        wrF(cpu, out_ea + static_cast<std::uint32_t>(c) * 4u, sum);
-    }
+    float m_in[16];
+    for (int i = 0; i < 16; ++i) m_in[i] = rdF(cpu, m_ea + static_cast<std::uint32_t>(i) * 4u);
+    // v' = v*M（行向量）⇒ GLM 的 M^T * v；同一个适配点也供内部 T&L / Sprite 用。
+    const math::Vec4 out = math::transformVec4D3D(math::fromD3DLayout(m_in), math::Vec4(v[0], v[1], v[2], v[3]));
+    for (int i = 0; i < 4; ++i) wrF(cpu, out_ea + static_cast<std::uint32_t>(i) * 4u, out[i]);
     call.result = out_ea;
 }
 
-// ---- 3D 相机 / 投影矩阵（D3DX 的**左手**坐标系；行向量约定，v' = v * M）----
-// ★ 每个公式都写成"从定义直接可算"的形式（不做记忆式展开），理由见交付说明：
-//   D3DXMatrixPerspectiveFovLH / LookAtLH 是标准定义；RotationAxis 与 D3DXMatrixRotationZ
-//   的 [c,s,0;-s,c,0;0,0,1] 自洽（用 (0,0,1) 轴可复核）；YawPitchRoll 用已复核的
-//   RotZ*RotX*RotY 复合（D3DX 文档：roll → pitch → yaw，行向量下即 Rz*Rx*Ry）。
-void matMul4(float out[16], const float a[16], const float b[16]) {
-    for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c) {
-            float sum = 0.0f;
-            for (int k = 0; k < 4; ++k) sum += a[r * 4 + k] * b[k * 4 + c];
-            out[r * 4 + c] = sum;
-        }
-}
-void matIdentity(float m[16]) {
-    for (int i = 0; i < 16; ++i) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
-}
-void matRotX(float m[16], float a) {
-    matIdentity(m);
-    const float c = std::cos(a), s = std::sin(a);
-    m[5] = c;
-    m[6] = s;
-    m[9] = -s;
-    m[10] = c;
-}
-void matRotY(float m[16], float a) {
-    matIdentity(m);
-    const float c = std::cos(a), s = std::sin(a);
-    m[0] = c;
-    m[2] = -s;
-    m[8] = s;
-    m[10] = c;
-}
-void matRotZ(float m[16], float a) {
-    matIdentity(m);
-    const float c = std::cos(a), s = std::sin(a);
-    m[0] = c;
-    m[1] = s;
-    m[4] = -s;
-    m[5] = c;
-}
-void wrMat(X86& cpu, std::uint32_t ea, const float m[16]) {
-    for (int i = 0; i < 16; ++i) wrF(cpu, ea + static_cast<std::uint32_t>(i) * 4u, m[i]);
-}
-float u32ToFloat(std::uint32_t bits) {
-    float f = 0.0f;
-    std::memcpy(&f, &bits, 4);
-    return f;
-}
+// ---- 3D 相机 / 投影矩阵（D3DX 的**左手**坐标系；行向量约定 v' = v * M）----
+// ★ 公式只在 `runtime/math.cpp` 里存在一份；这里只负责读 guest 参数 / 把结果写回 D3DXMATRIX。
+//   D3DXMatrixMultiply / Vec4Transform / RotationAxis / YawPitchRoll / PerspectiveFovLH /
+//   LookAtLH / OrthoLH 全部走 `math::` 的同一套适配（见 runtime/math.h 文件头）。
 
 void shimD3DXMatrixPerspectiveFovLH(X86& cpu, ShimCall& call) {
     const std::uint32_t out_ea = call.u32(0);
@@ -764,17 +689,7 @@ void shimD3DXMatrixPerspectiveFovLH(X86& cpu, ShimCall& call) {
     const float aspect = u32ToFloat(call.u32(2));
     const float zn = u32ToFloat(call.u32(3));
     const float zf = u32ToFloat(call.u32(4));
-    float m[16];
-    matIdentity(m);
-    const double h = 1.0 / std::tan(static_cast<double>(fovy) / 2.0);
-    const double w = h / static_cast<double>(aspect);
-    m[0] = static_cast<float>(w);
-    m[5] = static_cast<float>(h);
-    m[10] = zf / (zf - zn);
-    m[11] = 1.0f;
-    m[14] = -zn * zf / (zf - zn);
-    m[15] = 0.0f;
-    wrMat(cpu, out_ea, m);
+    wrMat(cpu, out_ea, math::perspectiveFovLH(fovy, aspect, zn, zf));
     call.result = out_ea;
 }
 
@@ -790,43 +705,13 @@ void shimD3DXMatrixLookAtLH(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    const double ex = rdF(cpu, eye_ea + 0), ey = rdF(cpu, eye_ea + 4), ez = rdF(cpu, eye_ea + 8);
-    const double ax = rdF(cpu, at_ea + 0), ay = rdF(cpu, at_ea + 4), az = rdF(cpu, at_ea + 8);
-    const double ux = rdF(cpu, up_ea + 0), uy = rdF(cpu, up_ea + 4), uz = rdF(cpu, up_ea + 8);
-    double zx = ax - ex, zy = ay - ey, zz = az - ez;
-    double zl = std::sqrt(zx * zx + zy * zy + zz * zz);
-    if (zl == 0.0) zl = 1.0;
-    zx /= zl;
-    zy /= zl;
-    zz /= zl;
-    // xaxis = normalize(cross(up, zaxis))
-    double xx = uy * zz - uz * zy;
-    double xy = uz * zx - ux * zz;
-    double xz = ux * zy - uy * zx;
-    double xl = std::sqrt(xx * xx + xy * xy + xz * xz);
-    if (xl == 0.0) xl = 1.0;
-    xx /= xl;
-    xy /= xl;
-    xz /= xl;
-    // yaxis = cross(zaxis, xaxis)
-    const double yx = zy * xz - zz * xy;
-    const double yy = zz * xx - zx * xz;
-    const double yz = zx * xy - zy * xx;
-    float m[16];
-    matIdentity(m);
-    m[0] = static_cast<float>(xx);
-    m[1] = static_cast<float>(yx);
-    m[2] = static_cast<float>(zx);
-    m[4] = static_cast<float>(xy);
-    m[5] = static_cast<float>(yy);
-    m[6] = static_cast<float>(zy);
-    m[8] = static_cast<float>(xz);
-    m[9] = static_cast<float>(yz);
-    m[10] = static_cast<float>(zz);
-    m[12] = static_cast<float>(-(xx * ex + xy * ey + xz * ez));
-    m[13] = static_cast<float>(-(yx * ex + yy * ey + yz * ez));
-    m[14] = static_cast<float>(-(zx * ex + zy * ey + zz * ez));
-    wrMat(cpu, out_ea, m);
+    float eye[3], at[3], up[3];
+    for (int i = 0; i < 3; ++i) {
+        eye[i] = rdF(cpu, eye_ea + static_cast<std::uint32_t>(i) * 4u);
+        at[i] = rdF(cpu, at_ea + static_cast<std::uint32_t>(i) * 4u);
+        up[i] = rdF(cpu, up_ea + static_cast<std::uint32_t>(i) * 4u);
+    }
+    wrMat(cpu, out_ea, math::lookAtLH(eye, at, up));
     call.result = out_ea;
 }
 
@@ -841,13 +726,7 @@ void shimD3DXMatrixOrthoLH(X86& cpu, ShimCall& call) {
     const float h = u32ToFloat(call.u32(2));
     const float zn = u32ToFloat(call.u32(3));
     const float zf = u32ToFloat(call.u32(4));
-    float m[16];
-    matIdentity(m);
-    m[0] = 2.0f / w;
-    m[5] = 2.0f / h;
-    m[10] = 1.0f / (zf - zn);
-    m[14] = -zn / (zf - zn);
-    wrMat(cpu, out_ea, m);
+    wrMat(cpu, out_ea, math::orthoLH(w, h, zn, zf));
     call.result = out_ea;
 }
 
@@ -860,27 +739,10 @@ void shimD3DXMatrixRotationAxis(X86& cpu, ShimCall& call) {
         return;
     }
     const float angle = u32ToFloat(call.u32(2));
-    double x = rdF(cpu, axis_ea + 0), y = rdF(cpu, axis_ea + 4), z = rdF(cpu, axis_ea + 8);
-    double len = std::sqrt(x * x + y * y + z * z);
-    if (len == 0.0) len = 1.0;
-    x /= len;
-    y /= len;
-    z /= len;
-    const double c = std::cos(static_cast<double>(angle));
-    const double s = std::sin(static_cast<double>(angle));
-    const double t = 1.0 - c;
-    float m[16];
-    matIdentity(m);
-    m[0] = static_cast<float>(t * x * x + c);
-    m[1] = static_cast<float>(t * x * y + s * z);
-    m[2] = static_cast<float>(t * x * z - s * y);
-    m[4] = static_cast<float>(t * x * y - s * z);
-    m[5] = static_cast<float>(t * y * y + c);
-    m[6] = static_cast<float>(t * y * z + s * x);
-    m[8] = static_cast<float>(t * x * z + s * y);
-    m[9] = static_cast<float>(t * y * z - s * x);
-    m[10] = static_cast<float>(t * z * z + c);
-    wrMat(cpu, out_ea, m);
+    const float x = rdF(cpu, axis_ea + 0);
+    const float y = rdF(cpu, axis_ea + 4);
+    const float z = rdF(cpu, axis_ea + 8);
+    wrMat(cpu, out_ea, math::rotationAxis(x, y, z, angle));
     call.result = out_ea;
 }
 
@@ -894,14 +756,7 @@ void shimD3DXMatrixRotationYawPitchRoll(X86& cpu, ShimCall& call) {
     const float yaw = u32ToFloat(call.u32(1));
     const float pitch = u32ToFloat(call.u32(2));
     const float roll = u32ToFloat(call.u32(3));
-    float rz[16], rx[16], ry[16], tmp[16], out[16];
-    matRotZ(rz, roll);
-    matRotX(rx, pitch);
-    matRotY(ry, yaw);
-    // D3DX 文档：roll → pitch → yaw；行向量下 v' = v * Rz * Rx * Ry
-    matMul4(tmp, rz, rx);
-    matMul4(out, tmp, ry);
-    wrMat(cpu, out_ea, out);
+    wrMat(cpu, out_ea, math::rotationYawPitchRoll(yaw, pitch, roll));
     call.result = out_ea;
 }
 
@@ -913,24 +768,14 @@ void shimD3DXVec3Normalize(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    const float x = rdF(cpu, v_ea + 0u);
-    const float y = rdF(cpu, v_ea + 4u);
-    const float z = rdF(cpu, v_ea + 8u);
-    float len = std::sqrt(x * x + y * y + z * z);
-    if (len == 0.0f) len = 1.0f;  // D3DX 的零向量归一化：返回 (0,0,0)、长度 0（下面分开写）
-    if (x == 0.0f && y == 0.0f && z == 0.0f) {
-        wrF(cpu, out_ea + 0u, 0.0f);
-        wrF(cpu, out_ea + 4u, 0.0f);
-        wrF(cpu, out_ea + 8u, 0.0f);
-        call.result = 0;  // 返回长度 0 的位模式
-        return;
-    }
-    wrF(cpu, out_ea + 0u, x / len);
-    wrF(cpu, out_ea + 4u, y / len);
-    wrF(cpu, out_ea + 8u, z / len);
+    const float in[3] = {rdF(cpu, v_ea + 0u), rdF(cpu, v_ea + 4u), rdF(cpu, v_ea + 8u)};
+    float out[3];
+    const float len = math::normalize3(in, out);  // 零向量 ⇒ (0,0,0)、长度 0（政策在 math 里唯一）
+    wrF(cpu, out_ea + 0u, out[0]);
+    wrF(cpu, out_ea + 4u, out[1]);
+    wrF(cpu, out_ea + 8u, out[2]);
     std::uint32_t bits = 0;
-    const float ret = len;
-    std::memcpy(&bits, &ret, 4);
+    std::memcpy(&bits, &len, 4);
     call.result = bits;
 }
 

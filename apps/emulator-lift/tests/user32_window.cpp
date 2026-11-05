@@ -149,7 +149,7 @@ struct StderrCapture {
         std::fflush(stderr);
         saved = dupFd(2);
         if (saved < 0) return false;
-        if (dup2Fd(filenoOf(tmp), 2) != 0) return false;
+        if (dup2Fd(filenoOf(tmp), 2) < 0) return false;  // POSIX dup2 成功返回目标 fd（2），不是 0
         active = true;
         return true;
     }

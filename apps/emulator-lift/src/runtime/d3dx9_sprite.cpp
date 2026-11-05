@@ -16,10 +16,11 @@
 
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
-#include "runtime/ddraw_surface.h"
 #include "runtime/heap.h"
 #include "runtime/machine.h"
+#include "runtime/math.h"
 #include "runtime/memory.h"
+#include "runtime/pixel_format.h"
 #include "runtime/surface.h"
 #include "runtime/x86.h"
 
@@ -106,7 +107,10 @@ void wrFloat(X86& cpu, std::uint32_t ea, float v) {
 }
 
 void writeIdentityMatrix(X86& cpu, std::uint32_t ea) {
-    for (int i = 0; i < 16; ++i) wrFloat(cpu, ea + static_cast<std::uint32_t>(i) * 4u, i % 5 == 0 ? 1.0f : 0.0f);
+    // 单位阵也走 math 的唯一适配点（⛔ 不再手写 i%5 的 D3DX 布局）
+    float d3d[16];
+    math::toD3DLayout(math::identity<float>(), d3d);
+    for (int i = 0; i < 16; ++i) wrFloat(cpu, ea + static_cast<std::uint32_t>(i) * 4u, d3d[i]);
 }
 
 // 状态块（读一次拿全；内部用）
@@ -214,33 +218,7 @@ bool reserveBatch(X86& cpu, const State& s, std::uint32_t need, std::string* why
     return true;
 }
 
-// 8 位通道 ↔ 像素格式掩码（16bpp 的 5/6/4 位用位复制展开）
-unsigned maskShift(std::uint32_t mask) {
-    unsigned shift = 0;
-    while (mask != 0 && (mask & 1u) == 0) {
-        mask >>= 1;
-        ++shift;
-    }
-    return shift;
-}
-unsigned maskBits(std::uint32_t mask) {
-    unsigned bits = 0;
-    while (mask != 0) {
-        if (mask & 1u) ++bits;
-        mask >>= 1;
-    }
-    return bits;
-}
-unsigned expandChannel(std::uint32_t v, std::uint32_t mask) {
-    if (mask == 0) return 0;
-    const unsigned shift = maskShift(mask);
-    const unsigned bits = maskBits(mask);
-    const std::uint32_t raw = (v & mask) >> shift;
-    if (bits == 8) return raw;
-    if (bits == 0) return 0;
-    const std::uint32_t max = (1u << bits) - 1u;
-    return (raw * 255u + max / 2u) / max;
-}
+// 8 位通道的舍入乘法（只此一处；掩码换算 / load·store 走 runtime/pixel_format.h）
 std::uint8_t mul255(unsigned a, unsigned b) {
     return static_cast<std::uint8_t>((a * b + 127u) / 255u);
 }
@@ -481,10 +459,7 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
         for (int i = 0; i < 3; ++i) in.position[i] = rdFloat(cpu, position_ea + static_cast<std::uint32_t>(i) * 4u);
     }
     // ★ 变换在 **Draw 时**应用到四角：D3DX 的顶点是 Draw 时生成的，之后 SetTransform 不追溯改批次。
-    //   屏幕空间公式（D3DX 的行向量约定，D3DXVec4Transform）：v' = v * M
-    //     X = ax*m[0] + ay*m[4] + az*m[8]  + m[12]
-    //     Y = ax*m[1] + ay*m[5] + az*m[9]  + m[13]
-    //   ax = position.x - center.x（四边形的左上角），u 轴 = m[0]/m[1]，v 轴 = m[4]/m[5]。
+    //   屏幕空间语义：D3DX 的行向量约定 `v' = v * M`（具体适配见 runtime/math.h，⛔ 不在这里展开公式）。
     const float* m = s.matrix;
     // 非仿射（最后一行不是 0,0,0,1）⇒ 本线不建模透视；记录并**按仿射部分**算（⛔ 不静默）
     if (m[3] != 0.0f || m[7] != 0.0f || m[11] != 0.0f || m[15] != 1.0f) {
@@ -496,16 +471,24 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
     const double ax = static_cast<double>(in.position[0]) - static_cast<double>(in.center[0]);
     const double ay = static_cast<double>(in.position[1]) - static_cast<double>(in.center[1]);
     const double az = static_cast<double>(in.position[2]) - static_cast<double>(in.center[2]);
-    const double x0 = ax * m[0] + ay * m[4] + az * m[8] + m[12];
-    const double y0 = ax * m[1] + ay * m[5] + az * m[9] + m[13];
     const double w = static_cast<double>(in.right - in.left);
     const double h = static_cast<double>(in.bottom - in.top);
-    const double x1 = x0 + w * m[0];
-    const double y1 = y0 + w * m[1];
-    const double x2 = x0 + h * m[4];
-    const double y2 = y0 + h * m[5];
-    const double x3 = x1 + h * m[4];
-    const double y3 = y1 + h * m[5];
+    // ★ Sprite 四角变换与 D3DXMatrixMultiply / 内部 T&L 走**同一个**适配点（runtime/math.h）：
+    //   四角 = 左上角点（w=1）+ 宽×u 轴（w=0）+ 高×v 轴（w=0）。
+    double md[16];
+    for (int i = 0; i < 16; ++i) md[i] = static_cast<double>(m[i]);
+    const math::Mat4d M = math::fromD3DLayout(md);
+    const math::Vec4d p0 = math::transformVec4D3D(M, math::Vec4d(ax, ay, az, 1.0));
+    const math::Vec4d uaxis = math::transformVec4D3D(M, math::Vec4d(w, 0.0, 0.0, 0.0));
+    const math::Vec4d vaxis = math::transformVec4D3D(M, math::Vec4d(0.0, h, 0.0, 0.0));
+    const double x0 = p0.x;
+    const double y0 = p0.y;
+    const double x1 = x0 + uaxis.x;
+    const double y1 = y0 + uaxis.y;
+    const double x2 = x0 + vaxis.x;
+    const double y2 = y0 + vaxis.y;
+    const double x3 = x1 + vaxis.x;
+    const double y3 = y1 + vaxis.y;
     // 排队
     if (!reserveBatch(cpu, s, s.count + 1u, why)) {
         if (take_ref && cpu.com) cpu.com->release(cpu, texture);
@@ -696,11 +679,11 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     const int srcy = top + static_cast<int>(std::floor(v));
                     const std::uint8_t* tp = tbase + static_cast<std::size_t>(srcy) * tpitch +
                                              static_cast<std::size_t>(srcx) * tbpp;
-                    const std::uint32_t raw = ddraw::loadPixel(tp, tfmt.bpp);
-                    tex_r = expandChannel(raw, tfmt.rmask);
-                    tex_g = expandChannel(raw, tfmt.gmask);
-                    tex_b = expandChannel(raw, tfmt.bmask);
-                    tex_a = tfmt.amask != 0 ? expandChannel(raw, tfmt.amask) : 255u;
+                    const std::uint32_t raw = pixel_format::loadPixel(tp, tfmt.bpp);
+                    tex_r = pixel_format::expandChannel(raw, tfmt.rmask);
+                    tex_g = pixel_format::expandChannel(raw, tfmt.gmask);
+                    tex_b = pixel_format::expandChannel(raw, tfmt.bmask);
+                    tex_a = tfmt.amask != 0 ? pixel_format::expandChannel(raw, tfmt.amask) : 255u;
                 }
                 const unsigned src_r = mul255(tex_r, sr);
                 const unsigned src_g = mul255(tex_g, sg);
@@ -713,11 +696,11 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     // 无 ALPHABLEND：真机的默认渲染状态是"不混合" ⇒ 覆盖（含 alpha 通道）
                     argb = (src_a << 24) | (src_r << 16) | (src_g << 8) | src_b;
                 } else {
-                    const std::uint32_t dst_raw = ddraw::loadPixel(p, fmt.bpp);
-                    const unsigned dr = expandChannel(dst_raw, fmt.rmask);
-                    const unsigned dg = expandChannel(dst_raw, fmt.gmask);
-                    const unsigned db = expandChannel(dst_raw, fmt.bmask);
-                    const unsigned da = expandChannel(dst_raw, fmt.amask);
+                    const std::uint32_t dst_raw = pixel_format::loadPixel(p, fmt.bpp);
+                    const unsigned dr = pixel_format::expandChannel(dst_raw, fmt.rmask);
+                    const unsigned dg = pixel_format::expandChannel(dst_raw, fmt.gmask);
+                    const unsigned db = pixel_format::expandChannel(dst_raw, fmt.bmask);
+                    const unsigned da = pixel_format::expandChannel(dst_raw, fmt.amask);
                     // SRCALPHA / INVSRCALPHA（D3DXSPRITE_ALPHABLEND 的固定功能状态）
                     const unsigned ia = 255u - src_a;
                     const unsigned r = (src_r * src_a + dr * ia + 127u) / 255u;
@@ -727,7 +710,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     const unsigned a = (src_a * src_a + da * ia + 127u) / 255u;
                     argb = (a << 24) | (r << 16) | (g << 8) | b;
                 }
-                ddraw::storePixel(p, fmt.bpp, d3d9::pixelFromColor(fmt, argb));
+                pixel_format::storePixel(p, fmt.bpp, pixel_format::pixelFromColor(fmt, argb));
                 ++written;
             }
         }

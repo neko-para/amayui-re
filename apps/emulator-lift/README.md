@@ -143,7 +143,7 @@
 ```text
 apps/emulator-lift/
   CMakeLists.txt                      ← 目标 + CTest（**分级靠注册位置**，见 AGENTS.md §5）
-  CMakePresets.json / vcpkg.json      ← windows-x64 / linux-x64 / macos-arm64；依赖 sdl3 + zydis
+  CMakePresets.json / vcpkg.json      ← windows-x64 / linux-x64 / macos-arm64；依赖 sdl3 + zydis + freetype + glm
   README.md / SCOPE.md / docs/        ← 口径 / 用户拍板的偏差 / 计划长文
   src/main.cpp                        ← CLI：--exe --lst --game-dir --appdata --agerc
                                         --until shim|ea --trace-shims --trace-blocks
@@ -154,6 +154,8 @@ apps/emulator-lift/
   src/runtime/{regs.h,insn.h}         ← 寄存器标识 + 自有 Insn（Op / 操作数 / 块）
   src/runtime/decode.{h,cpp}          ← Zydis 包装 → Insn + 块解码 + 0x9B/`F3 C3` 前缀合并
   src/runtime/mnemonics.cpp           ← IDA↔规范名映射表（判据 A2 的唯一真源）+ .lst 行分类
+  src/runtime/math.{h,cpp}             ← D3DX 行主序/行向量 ↔ GLM 的唯一适配点
+  src/runtime/pixel_format.{h,cpp}     ← 掩码换算 / load/store / D3DCOLOR 打包的唯一实现
   src/runtime/x86.{h,cpp}             ← 寄存器/操作数/栈 helper（8/16 位合并）+ 块缓存
   src/runtime/machine.{h,cpp}         ← 装配 + dispatcher + fault hook + 最近指令环形缓冲
   src/runtime/exec.cpp                ← 语义分发 + 标志位公共部分 + 响亮失败
@@ -171,7 +173,7 @@ apps/emulator-lift/
 ## 4. 构建（vcpkg **跨目录复用**）
 
 - toolchain 指向 `../emulator-cxx/vcpkg/scripts/buildsystems/vcpkg.cmake`；本目录的 `vcpkg.json`
-  只声明自己需要的包（清单真源是 `vcpkg.json`：`sdl3` + `zydis`）。
+  只声明自己需要的包（清单真源是 `vcpkg.json`：`sdl3` + `zydis` + `freetype` + `glm`）。
 - ```bash
   cd apps/emulator-lift
   cmake --preset windows-x64        # 或 linux-x64 / macos-arm64（同一个相对 toolchain 路径）

@@ -22,6 +22,7 @@
 
 #include "runtime/cp932.h"
 #include "runtime/machine.h"
+#include "runtime/pixel_format.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
 
 namespace lift {
@@ -72,43 +73,7 @@ Rgb decodeColor(std::uint32_t colorref) {
     return c;
 }
 
-int maskShift(std::uint32_t mask) {
-    for (int i = 0; i < 32; ++i) {
-        if (((mask >> i) & 1u) != 0) return i;
-    }
-    return 0;
-}
-
-int maskBits(std::uint32_t mask) {
-    int n = 0;
-    for (int i = 0; i < 32; ++i) {
-        if (((mask >> i) & 1u) != 0) ++n;
-    }
-    return n;
-}
-
-std::uint64_t maskMax(std::uint32_t mask) {
-    const int bits = maskBits(mask);
-    if (bits <= 0) return 1;
-    if (bits >= 32) return 0xFFFFFFFFull;
-    return (1ull << bits) - 1ull;
-}
-
-int extractChannel(std::uint32_t pixel, std::uint32_t mask) {
-    if (mask == 0) return 0;
-    const std::uint64_t v = (static_cast<std::uint64_t>(pixel & mask)) >> maskShift(mask);
-    const std::uint64_t max = maskMax(mask);
-    return static_cast<int>(v * 255ull / max);
-}
-
-std::uint32_t composeChannel(int value, std::uint32_t mask) {
-    if (mask == 0) return 0;
-    if (value < 0) value = 0;
-    if (value > 255) value = 255;
-    const std::uint64_t max = maskMax(mask);
-    const std::uint64_t v = (static_cast<std::uint64_t>(value) * max + 127ull) / 255ull;
-    return (static_cast<std::uint32_t>(v) << maskShift(mask)) & mask;
-}
+// 通道换算走 runtime/pixel_format（唯一一份，⛔ 这里不再保留 maskShift/maskBits 的副本）
 
 std::uint32_t readSurfacePixel(const GuestSurface& s, const std::uint8_t* base, int x, int y) {
     const std::size_t off = static_cast<std::size_t>(y) * s.pitch +
@@ -131,26 +96,26 @@ void blendSurfacePixel(GuestSurface& s, std::uint8_t* base, int x, int y, const 
     if (coverage <= 0) return;
     if (coverage > 255) coverage = 255;
     const std::uint32_t before = readSurfacePixel(s, base, x, y);
-    const int dr = extractChannel(before, s.format.rmask);
-    const int dg = extractChannel(before, s.format.gmask);
-    const int db = extractChannel(before, s.format.bmask);
+    const int dr = pixel_format::expandChannelGdi(before, s.format.rmask);
+    const int dg = pixel_format::expandChannelGdi(before, s.format.gmask);
+    const int db = pixel_format::expandChannelGdi(before, s.format.bmask);
     const int keep = 255 - coverage;
     const int r = (color.r * coverage + dr * keep) / 255;
     const int g = (color.g * coverage + dg * keep) / 255;
     const int b = (color.b * coverage + db * keep) / 255;
     std::uint32_t out = before & ~(s.format.rmask | s.format.gmask | s.format.bmask);
-    out |= composeChannel(r, s.format.rmask);
-    out |= composeChannel(g, s.format.gmask);
-    out |= composeChannel(b, s.format.bmask);
+    out |= pixel_format::packChannelGdi(r, s.format.rmask);
+    out |= pixel_format::packChannelGdi(g, s.format.gmask);
+    out |= pixel_format::packChannelGdi(b, s.format.bmask);
     storeSurfacePixel(s, base, x, y, out);
     if (written) ++*written;
 }
 
 void fillSurfaceRect(GuestSurface& s, std::uint8_t* base, int x0, int y0, int w, int h,
                      const Rgb& color) {
-    const std::uint32_t solid = composeChannel(color.r, s.format.rmask) |
-                                composeChannel(color.g, s.format.gmask) |
-                                composeChannel(color.b, s.format.bmask);
+    const std::uint32_t solid = pixel_format::packChannelGdi(color.r, s.format.rmask) |
+                                pixel_format::packChannelGdi(color.g, s.format.gmask) |
+                                pixel_format::packChannelGdi(color.b, s.format.bmask);
     for (int row = 0; row < h; ++row) {
         const int y = y0 + row;
         if (y < 0 || y >= s.height) continue;

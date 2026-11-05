@@ -575,6 +575,80 @@ void caseTexturedQuad() {
 }
 
 // ---------------------------------------------------------------------------------------
+// ④b MIN filter 真的参与采样（旧实现只看 MAG ⇒ 本用例会红）
+// ---------------------------------------------------------------------------------------
+void caseMinFilterSampling() {
+    lift_test::g_current_case = "d3d9p/min-filter";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    // 2×2 纹理：左上红 / 右上绿 / 左下蓝 / 右下白（与 caseTexturedQuad 同一组颜色）
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8, 0));
+    LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureLockRect, {0u, locked, 0u, 0u}), 0u);
+    const std::uint32_t pitch = r.f.m.mem().rd32(locked + 0u);
+    const std::uint32_t bits = r.f.m.mem().rd32(locked + 4u);
+    LIFT_CHECK_NE_U32(bits, 0u);
+    const std::uint32_t texels[4] = {0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFFFFu};
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch + static_cast<std::uint32_t>(x) * 4u,
+                             texels[y * 2 + x]);
+        }
+    }
+    LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureUnlockRect, {0u}), 0u);
+
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, tex), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressU, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressV, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuseTex1), 0u);
+
+    const std::uint32_t white = 0xFFFFFFFFu;
+    const std::vector<Fixture::TexVertex> quad = {
+        {0.0f, 0.0f, 0.0f, 1.0f, white, 0.0f, 0.0f},
+        {8.0f, 0.0f, 0.0f, 1.0f, white, 1.0f, 0.0f},
+        {0.0f, 8.0f, 0.0f, 1.0f, white, 0.0f, 1.0f},
+        {8.0f, 0.0f, 0.0f, 1.0f, white, 1.0f, 0.0f},
+        {8.0f, 8.0f, 0.0f, 1.0f, white, 1.0f, 1.0f},
+        {0.0f, 8.0f, 0.0f, 1.0f, white, 0.0f, 1.0f},
+    };
+    const std::uint32_t data = r.f.placeTexVertices(quad);
+
+    auto drawQuad = [&]() {
+        LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+        LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 2u, data, 28u), 0u);
+        LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    };
+
+    // (a) MAG=POINT、MIN=LINEAR：像素 (2,2) 的中心 u=v=0.3125（texel 0.125 处）⇒ 双线性混合。
+    //     旧实现只看 MAG ⇒ 会取 (0,0) 纯红；下面这条就是"MIN 不再被忽略"的像素级证据。
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfLinear), 0u);
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    drawQuad();
+    // 手算：tx=ty=0.125
+    //   r = 255*(0.875*0.875) + 255*(0.125*0.125) = 199.2 ⇒ 199 (0xC7)
+    //   g = b = 255*(0.125*0.875) + 255*(0.125*0.125) = 31.9 ⇒ 32 (0x20)
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(2, 2), 0x00C72020u);
+
+    // (b) 两档都 POINT：同一像素回到纯红（证明 (a) 的差异确实来自 MIN，而不是别的东西）
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    drawQuad();
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(2, 2), 0x00FF0000u);
+
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
 // ⑤ ZENABLE / ZWRITEENABLE：遮挡与不遮挡
 // ---------------------------------------------------------------------------------------
 void drawQuadAtScreen(Rig& r, float x0, float y0, float x1, float y1, float z, std::uint32_t color) {
@@ -683,6 +757,7 @@ int main() {
         caseScenePairing();
         caseSolidTriangle();
         caseTexturedQuad();
+        caseMinFilterSampling();
         caseZBuffer();
         caseAlphaBlend();
         return finish("d3d9-pipeline");
