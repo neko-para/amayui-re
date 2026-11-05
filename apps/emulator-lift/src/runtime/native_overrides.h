@@ -80,5 +80,10 @@ bool nativeMemset(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // 不是字节差。`_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节）⇒ 暂不覆盖。
 bool nativeSignMemcmp(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 bool nativeStrlen(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// `sub_436A80`：S4IC / LZSS 解压（profile 选出的 boot 第一热点）。
+bool nativeLzss436A80(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// 纯解码核（测试直接用；src/comp = 输入，dst/out = 输出，ring = 4096 B 字典）。
+bool lzssDecode(const std::uint8_t* src, std::uint32_t comp_size, std::uint8_t* dst, std::uint32_t out_size,
+                std::uint8_t ring[4096]);
 
 }  // namespace lift

@@ -314,5 +314,28 @@ int main() {
         LIFT_CHECK_EQ_U32(table.find(0x00403000u)->fallbacks, 1u);
     }
 
+    // ---- ④ sub_436A80 的 LZSS 核：literal / match / 非压缩拷贝 ----
+    {
+        std::uint8_t ring[4096] = {};
+        const std::uint8_t lit[] = {0x07, 'A', 'B', 'C'};  // 3 个 literal 位（LSB first）
+        std::uint8_t out3[3] = {};
+        LIFT_CHECK(lift::lzssDecode(lit, sizeof(lit), out3, sizeof(out3), ring));
+        LIFT_CHECK(std::memcmp(out3, "ABC", 3) == 0);
+
+        const std::uint8_t match[] = {0x01, 'A', 0x00, 0x00, 0x00};  // literal A，然后 offset=0 count=3
+        std::uint8_t out4[4] = {};
+        std::uint8_t ring2[4096] = {};
+        LIFT_CHECK(lift::lzssDecode(match, sizeof(match), out4, sizeof(out4), ring2));
+        LIFT_CHECK_EQ_U32(out4[0], 'A');
+        LIFT_CHECK_EQ_U32(out4[1], 0u);
+        LIFT_CHECK_EQ_U32(out4[2], 0u);
+        LIFT_CHECK_EQ_U32(out4[3], 0u);
+
+        const std::uint8_t raw[] = {'W', 'X', 'Y', 'Z'};
+        std::uint8_t copy[4] = {};
+        LIFT_CHECK(lift::lzssDecode(raw, sizeof(raw), copy, sizeof(copy), ring));
+        LIFT_CHECK(std::memcmp(copy, raw, 4) == 0);
+    }
+
     return lift_test::finish("native-override");
 }
