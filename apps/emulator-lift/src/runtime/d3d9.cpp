@@ -506,6 +506,13 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
         cpu.mem->wr32(dev.state + kDvClears, dev.clears + 1u);
         return kOk;
     }
+    // GPU 光栅化：CPU 即将改写 guest 像素，先把 GPU 未读回的绘制落回 guest。
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+        std::string gerr;
+        if (!gpu->rasterSyncToGuest(m->surfaces().pixels(*gs), gs->pitch, gs->width, gs->height, &gerr)) {
+            d3d9Log("Clear", "GPU 光栅化读回失败：%s", gerr.c_str());
+        }
+    }
     const std::uint32_t pixel = pixelFromColor(gs->format, color);
     const std::uint32_t bytes_per_pixel = gs->format.bytesPerPixel();
     std::uint8_t* base = m->surfaces().pixels(*gs);
@@ -593,6 +600,13 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
         }
     }
     std::string err;
+    // ★ GPU 光栅化：先把镜像读回 guest，再走 presenter 的 hash / frameStats / dump。
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+        std::string gerr;
+        if (!gpu->rasterSyncToGuest(m->surfaces().pixels(*gs), gs->pitch, gs->width, gs->height, &gerr)) {
+            d3d9Log("Present", "GPU 光栅化读回失败：%s", gerr.c_str());
+        }
+    }
     if (!m->presenter().present(m->surfaces(), *gs, dump_path, &err)) {
         if (why) *why = "D3D9：HeadlessPresenter.present 失败：" + err;
         return kFail;

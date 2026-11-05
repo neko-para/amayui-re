@@ -28,6 +28,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+
+#include "runtime/gpu_raster.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -44,6 +46,8 @@
 
 namespace lift {
 namespace d3d9 {
+std::uint64_t g_gpu_draws = 0;
+std::uint64_t g_gpu_triangles = 0;
 namespace {
 
 // =====================================================================================
@@ -656,12 +660,14 @@ struct SamplerSnapshot {
 struct DrawContext {
     X86* cpu = nullptr;
     Machine* machine = nullptr;
+    GpuRaster* gpu = nullptr;  // --raster gpu 且 sink 提供时非空
     std::uint32_t pe = 0;
     std::uint8_t* color_base = nullptr;
     SurfaceFormat color_fmt;
     int color_width = 0;
     int color_height = 0;
     std::uint32_t color_pitch = 0;
+    std::uint32_t color_surface = 0;  // 0 = 设备后缓冲
     float* depth_base = nullptr;  // 后缓冲尺寸的 float 深度
     std::uint32_t depth_pitch_floats = 0;
     int viewport_x = 0, viewport_y = 0, viewport_w = 0, viewport_h = 0;
@@ -2411,12 +2417,14 @@ bool prepareContext(X86& cpu, std::uint32_t dev, std::uint32_t pe, DrawContext* 
     }
     ctx->cpu = &cpu;
     ctx->machine = m;
+    ctx->gpu = m->gpuRaster();
     ctx->pe = pe;
     ctx->color_base = m->surfaces().pixels(*gs);
     ctx->color_fmt = gs->format;
     ctx->color_width = gs->width;
     ctx->color_height = gs->height;
     ctx->color_pitch = gs->pitch;
+    ctx->color_surface = plGet(cpu, pe, kPlColorSurface);
     ctx->depth_base = reinterpret_cast<float*>(m->surfaces().pixels(*dgs));
     ctx->depth_pitch_floats = dgs->pitch / 4u;
     if (!ctx->color_base || !ctx->depth_base) {
@@ -2550,12 +2558,113 @@ void transformVertex(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std
     (void)vertex_index;
 }
 
+bool gpuEligible(const DrawContext& ctx, std::string* why) {
+    if (ctx.gpu == nullptr || !ctx.gpu->rasterActive()) {
+        if (why) *why = "没有 GPU 光栅化后端";
+        return false;
+    }
+    if (ctx.color_surface != 0 || ctx.color_fmt.bpp != 32) {
+        if (why) *why = "GPU phase 1 只支持 32bpp 默认后缓冲";
+        return false;
+    }
+    if (ctx.alpha_test) {
+        if (why) *why = "GPU phase 1 不支持 alpha test";
+        return false;
+    }
+    if (ctx.color_write != 0xF) {
+        if (why) *why = "GPU phase 1 只支持完整 color write";
+        return false;
+    }
+    if (ctx.shade != kShadeGouraud) {
+        if (why) *why = "GPU phase 1 只支持 GOURAUD";
+        return false;
+    }
+    if (ctx.separate_alpha_blend) {
+        if (why) *why = "GPU phase 1 不支持 separate alpha blend";
+        return false;
+    }
+    if (ctx.blend) {
+        const bool replace = ctx.src_blend == kBlendOne && ctx.dst_blend == kBlendZero;
+        const bool src_alpha = ctx.src_blend == kBlendSrcAlpha && ctx.dst_blend == kBlendInvSrcAlpha;
+        if (!replace && !src_alpha) {
+            if (why) *why = "GPU phase 1 只支持 ONE/ZERO 或 SRCALPHA/INVSRCALPHA 混合";
+            return false;
+        }
+    }
+    for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
+        if (ctx.textures[s].present) {
+            if (why) *why = "GPU phase 1 不支持纹理";
+            return false;
+        }
+        // 未绑定纹理 ⇒ CPU 采样是白色（identity）。stage 0 的默认 MODULATE / SELECTARG1
+        // 在这里是恒等；其余运算（ADD 等）会改变结果 ⇒ 回退 CPU。
+        const std::uint32_t cop = ctx.stages[s].color_op;
+        const std::uint32_t aop = ctx.stages[s].alpha_op;
+        const bool cop_ok = cop == kTopDisable || cop == kTopModulate || cop == kTopSelectArg1;
+        const bool aop_ok = aop == kTopDisable || aop == kTopModulate || aop == kTopSelectArg1;
+        if (!cop_ok || !aop_ok) {
+            if (why) *why = "GPU phase 1 不支持该纹理级运算（无纹理时只允许 identity）";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std::vector<CVertex>& verts,
                       std::uint32_t prim_count, DrawContext& ctx, std::uint32_t* triangles_out,
                       std::uint32_t* rasterized_out, std::string* why) {
     // 顶点已经是**变换后**的 CVertex（由调用方喂），这里只做裁剪 + 屏幕映射 + 光栅
     std::uint32_t triangles = 0;
     std::uint32_t rasterized = 0;
+    std::string gpu_why;
+    const bool gpu_ok = gpuEligible(ctx, &gpu_why);
+    if (!gpu_ok && ctx.gpu != nullptr && ctx.gpu->rasterDirty()) {
+        // 上一批走 GPU、这一批要回 CPU：先把 GPU 像素落回 guest，CPU 才能接着画。
+        std::string sync_err;
+        ctx.gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
+    }
+    std::vector<GpuRasterVertex> gpu_vertices;
+    bool gpu_invw_ok = true;
+    struct SavedTri {
+        SVertex a, b, c;
+    };
+    std::vector<SavedTri> saved_tris;
+    GpuRaster* gpu = gpu_ok ? ctx.gpu : nullptr;
+
+    auto push_tri = [&](const SVertex& a, const SVertex& b, const SVertex& c) {
+        const double area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        if (!finite(area) || std::fabs(area) < 1e-12) return;
+        if (area > 0.0) {
+            if (ctx.cull == kCullCw) return;
+        } else if (ctx.cull == kCullCcw) {
+            return;
+        }
+        if (gpu == nullptr) {
+            rasterTriangle(ctx, a, b, c);
+            return;
+        }
+        // SVertex 的颜色/uv 已经乘过 invw；SDL_RenderGeometry 是线性插值，只有 invw==1 才等价。
+        if (std::fabs(a.invw - 1.0) > 1e-9 || std::fabs(b.invw - 1.0) > 1e-9 ||
+            std::fabs(c.invw - 1.0) > 1e-9) {
+            gpu_invw_ok = false;
+        }
+        saved_tris.push_back({a, b, c});
+        const auto add = [&](const SVertex& v) {
+            GpuRasterVertex g;
+            g.x = static_cast<float>(v.x);
+            g.y = static_cast<float>(v.y);
+            g.z = static_cast<float>(v.z);
+            g.r = static_cast<float>(v.r / 255.0);
+            g.g = static_cast<float>(v.g / 255.0);
+            g.b = static_cast<float>(v.b / 255.0);
+            g.a = static_cast<float>(v.a / 255.0);
+            gpu_vertices.push_back(g);
+        };
+        add(a);
+        add(b);
+        add(c);
+    };
+
     auto emit = [&](const CVertex& a, const CVertex& b, const CVertex& c) {
         ++triangles;
         CVertex poly[3] = {a, b, c};
@@ -2569,7 +2678,7 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             if (!toScreen(clipped[i], ctx, &sv[i])) return;
         }
         ++rasterized;
-        for (std::uint32_t i = 1; i + 1 < n; ++i) rasterTriangle(ctx, sv[0], sv[i], sv[i + 1]);
+        for (std::uint32_t i = 1; i + 1 < n; ++i) push_tri(sv[0], sv[i], sv[i + 1]);
     };
     const std::uint32_t n = static_cast<std::uint32_t>(verts.size());
     switch (prim) {
@@ -2594,6 +2703,59 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             if (why) *why = "D3D9 流水线：未知图元类型";
             return false;
     }
+
+    if (gpu != nullptr && !gpu_invw_ok) {
+        for (const SavedTri& t : saved_tris) rasterTriangle(ctx, t.a, t.b, t.c);
+        gpu_vertices.clear();
+    } else if (gpu != nullptr) {
+        std::string gerr;
+        bool ok = gpu->rasterPrepare(ctx.color_fmt, ctx.color_width, ctx.color_height, &gerr);
+        if (ok && !gpu->rasterDirty()) {
+            ok = gpu->rasterSyncFromGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &gerr);
+        }
+        GpuRasterState gs;
+        gs.viewport_x = ctx.viewport_x;
+        gs.viewport_y = ctx.viewport_y;
+        gs.viewport_w = ctx.viewport_w;
+        gs.viewport_h = ctx.viewport_h;
+        gs.scissor_x0 = ctx.scissor_x0;
+        gs.scissor_y0 = ctx.scissor_y0;
+        gs.scissor_x1 = ctx.scissor_x1;
+        gs.scissor_y1 = ctx.scissor_y1;
+        gs.scissor_enabled = ctx.scissor_x0 != 0 || ctx.scissor_y0 != 0 || ctx.scissor_x1 != ctx.color_width ||
+                             ctx.scissor_y1 != ctx.color_height;
+        gs.blend = ctx.blend && ctx.src_blend == kBlendSrcAlpha && ctx.dst_blend == kBlendInvSrcAlpha;
+        gs.depth_test = ctx.z_enable;
+        gs.depth_write = ctx.z_write;
+        gs.depth_func = ctx.z_func;
+        if (ok && !gpu_vertices.empty()) ok = gpu->rasterDraw(gpu_vertices.data(), gpu_vertices.size(), gs, &gerr);
+        if (ok) {
+            ++g_gpu_draws;
+            g_gpu_triangles += saved_tris.size();
+            static bool logged = false;
+            if (!logged && !saved_tris.empty()) {
+                logged = true;
+                const SavedTri& t = saved_tris.front();
+                pipeLog("GPU", "首个 GPU 光栅 Draw：%zu 三角形（后端 %s）z=%.3f/%.3f/%.3f depth=%d/%d/%u blend=%d src=%u dst=%u",
+                        saved_tris.size(), gpu->rasterName(), t.a.z, t.b.z, t.c.z, static_cast<int>(gs.depth_test),
+                        static_cast<int>(gs.depth_write), gs.depth_func, static_cast<int>(gs.blend), ctx.src_blend,
+                        ctx.dst_blend);
+            }
+        }
+        if (!ok) {
+            // GPU 本批失败：先让 guest 看到已经画出的部分，再用 CPU 重放这一批。
+            std::string sync_err;
+            gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
+            for (const SavedTri& t : saved_tris) rasterTriangle(ctx, t.a, t.b, t.c);
+            gpu->rasterSyncFromGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                pipeLog("GPU", "光栅化失败，已回退 CPU：%s", gerr.c_str());
+            }
+        }
+    }
+
     (void)prim_count;
     plSet(cpu, pe, kPlTriangles, plGet(cpu, pe, kPlTriangles) + triangles);
     plSet(cpu, pe, kPlRasterized, plGet(cpu, pe, kPlRasterized) + rasterized);
@@ -3044,6 +3206,9 @@ bool frameStats(const SurfaceFormat& fmt, const std::uint8_t* base, std::uint32_
     out->hash = hash;
     return true;
 }
+
+std::uint64_t gpuDrawCount() { return g_gpu_draws; }
+std::uint64_t gpuTriangleCount() { return g_gpu_triangles; }
 
 }  // namespace d3d9
 }  // namespace lift

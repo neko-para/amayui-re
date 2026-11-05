@@ -30,6 +30,7 @@
 | 平台偏差 | **文件时间（POSIX）** | creation 用 **birthtime**（macOS `stat` 的 `st_birthtimespec`）；文件系统不提供 birthtime 时**回退 ctime**；`SetFileTime` 的 creation 在能写的平台写（Windows `::SetFileTime`、macOS `setattrlist(ATTR_CMN_CRTIME)`），写不了就跳过并留日志 | 非 Apple POSIX 上 creation 可能是 ctime / 改不了；不影响 access / write | access / write 始终真写；`GetFileTime` / `WIN32_FIND_DATAA` 三个时间各写各的 |
 | 平台偏差 | **超越函数** | `fsin` / `fcos` / `fsincos` / `fptan` / `fpatan` / `fyl2x` / `fyl2xp1` / `f2xm1` / `fscale` 走宿主 `libm`，允许 **1 ulp** 偏差 | 极端值可能与真机差 1 ulp（跨平台也可能不同） | 其余 x87 走 Berkeley SoftFloat（逐位一致） |
 | 平台偏差 | **宿主页保护粒度** | 16 KiB 宿主页上，提交 / 退提交按**宿主页对齐**；非 safe 模式下同宿主页的邻页也可读写 | 越界访问可能不触发 fault（业务不应依赖越界 fault） | `LIFT_SAFE_MEMORY=1` 仍按 4 KiB guest 页逐页检查；guest 自己的越界由诊断路径暴露 |
+| 平台偏差 | **GPU 光栅化 blend 舍入** | `--raster gpu` 允许 GPU 与 CPU 每通道 **≤1 LSB** 的差异（GPU 浮点 blend vs CPU 8-bit 舍入）；不把 `frameStats` 的单一 hash 当唯一判据，用逐像素 max-diff。CPU 缺省不受影响 | GPU 模式下与 CPU 输出可能差 1 LSB；不影响 CPU 逐字节判据 | CPU 路径逐字节不变；GPU 第 1 帧与 CPU 一致；差异超过 1 LSB 仍是 bug |
 
 ★ **四类不要混**：**永久 no-op**（大概率一直不做：菜单 / 注册表 / 摇杆）· **延后实现**（最终要做：模态〔仅关闭窗口二次确认〕/ 音频 / 视频 / Live2D / 3D）· **硬错误**（⛔ 不静默失败：线程 / SEH / 等待）· **平台偏差**（实现细节的显式取舍）。新加偏差时必须先归到其中一类。
 ★ **音频 / 视频的里程碑 = M4**（`REQ-01M6K84KHPA1XF3B1HSHXME6W0`）；用户 2026-11-04 口径：音频大概率更靠前，具体顺序在做 M2 时再调。

@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/d3d9_pipeline.h"
 #include "runtime/exec.h"
 #include "runtime/sha256.h"
 #include "shims/register.h"
@@ -678,6 +679,12 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      (unsigned long long)presenter_.sinkFailures(),
                      presenter_.lastSinkError().empty() ? "-" : presenter_.lastSinkError().c_str());
     }
+    if (d3d9::gpuDrawCount() != 0) {
+        std::fprintf(out, "raster    : GPU Draw %llu / 三角形 %llu（sink %s）\n",
+                     (unsigned long long)d3d9::gpuDrawCount(),
+                     (unsigned long long)d3d9::gpuTriangleCount(),
+                     presenter_.sinkDescription().empty() ? "-" : presenter_.sinkDescription().c_str());
+    }
     if (!overrides_.empty()) {
         std::uint64_t hits = 0;
         std::uint64_t fallbacks = 0;
@@ -839,6 +846,18 @@ bool Machine::configureNativeOverrides(const std::string& list, std::string* err
         return false;
     }
     return true;
+}
+
+GpuRaster* Machine::gpuRaster() {
+    if (gpu_raster_ != nullptr) return gpu_raster_;
+    PresentSink* s = presenter_.sink();
+    return s != nullptr ? s->gpuRaster() : nullptr;
+}
+
+const GpuRaster* Machine::gpuRaster() const {
+    if (gpu_raster_ != nullptr) return gpu_raster_;
+    const PresentSink* s = presenter_.sink();
+    return s != nullptr ? const_cast<PresentSink*>(s)->gpuRaster() : nullptr;
 }
 
 }  // namespace lift

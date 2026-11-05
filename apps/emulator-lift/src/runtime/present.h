@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 
+#include "runtime/gpu_raster.h"
 #include "runtime/surface.h"
 
 namespace lift {
@@ -26,6 +27,8 @@ public:
     virtual bool stopRequested() const { return false; }
     // 诊断一行（driver / video / gpu），可空。
     virtual std::string describe() const { return {}; }
+    // 可选：同一 SDL renderer 上的 GPU 光栅化后端（--raster gpu 时才非空）。
+    virtual GpuRaster* gpuRaster() { return nullptr; }
 };
 
 class HeadlessPresenter {

@@ -389,6 +389,10 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
 // Clear(D3DCLEAR_ZBUFFER) 的深度清（把深度缓冲写成 z；没有流水线状态块 ⇒ false）
 bool clearDepth(X86& cpu, std::uint32_t pipeline_ea, float z, std::string* why);
 
+// GPU 光栅化诊断（static 计数；CPU 模式恒为 0）。供 dumpRunSummary / CTest 断言。
+std::uint64_t gpuDrawCount();
+std::uint64_t gpuTriangleCount();
+
 // Present 的像素统计（"非背景像素数"的判据；用后缓冲像素算，⛔ 不是猜）
 struct FrameStats {
     std::uint32_t total_pixels = 0;

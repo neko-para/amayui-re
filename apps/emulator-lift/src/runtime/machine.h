@@ -151,6 +151,10 @@ public:
     const FontEngine& fonts() const { return fonts_; }
     HeadlessPresenter& presenter() { return presenter_; }
     const HeadlessPresenter& presenter() const { return presenter_; }
+    // 可选 GPU 光栅化后端（由 PresentSink 或 main 的离屏 raster window 提供）。
+    void setGpuRaster(GpuRaster* gpu) { gpu_raster_ = gpu; }
+    GpuRaster* gpuRaster();
+    const GpuRaster* gpuRaster() const;
     LstIndex& lst() { return lst_; }
     const LstIndex& lst() const { return lst_; }
     const PeImage& image() const { return image_; }
@@ -197,6 +201,7 @@ private:
     SurfaceArena surfaces_;
     FontEngine fonts_;
     HeadlessPresenter presenter_;
+    GpuRaster* gpu_raster_ = nullptr;
     LstIndex lst_;
     X86 cpu_;
     PeImage image_;

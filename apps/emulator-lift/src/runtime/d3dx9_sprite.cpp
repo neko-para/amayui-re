@@ -27,6 +27,15 @@
 namespace lift {
 namespace d3dx9 {
 namespace {
+SurfaceFormat formatWhite() {
+    SurfaceFormat f;
+    f.bpp = 32;
+    f.rmask = 0x00FF0000u;
+    f.gmask = 0x0000FF00u;
+    f.bmask = 0x000000FFu;
+    f.amask = 0xFF000000u;
+    return f;
+}
 
 // 状态块布局（**我们自己的**；⛔ 不是 Win32 结构体）
 enum SpriteOff : std::uint32_t {
@@ -551,6 +560,16 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
     }
     const SurfaceFormat fmt = gs->format;
     const bool blend = (s.flags & kSpriteAlphaBlend) != 0;
+    // ★ 混合帧：如果 D3D9 的 GPU 光栅还有未读回的像素，先落回 guest；否则 CPU 精灵
+    //   会合成在**过期的**后缓冲上（这是 frame 2+ 背景大面积错的根因）。
+    if (GpuRaster* gpu = m->gpuRaster();
+        gpu != nullptr && gpu->rasterActive() && !gpu->rasterSpritesEnabled() && gpu->rasterDirty()) {
+        std::string sync_err;
+        if (!gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err)) {
+            if (why) *why = std::string("D3DX9：GPU 像素读回失败：") + sync_err;
+            return false;
+        }
+    }
     std::uint64_t written = 0;
     std::uint32_t entries_done = 0;
     // 条目级收尾：Draw 时 AddRef 过的纹理必须**每条路径**都还回去（含 continue 的早退分支）
@@ -661,6 +680,86 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                 continue;
             }
         }
+        // ---- GPU 光栅化：D3DXSprite 的全屏纹理四边形（nearest + 顶点色调制）----
+        bool gpu_done = false;
+        const bool has_texture = texture != 0;
+        if (GpuRaster* gpu = m->gpuRaster();
+            gpu != nullptr && gpu->rasterActive() && gpu->rasterSpritesEnabled() && fmt.bpp == 32 &&
+            (!has_texture || (tbpp == 4 && left >= 0 && top >= 0 && right <= static_cast<std::int32_t>(tw) &&
+                              bottom <= static_cast<std::int32_t>(th)))) {            std::string gerr;
+            bool ok = gpu->rasterPrepare(fmt, gs->width, gs->height, &gerr);
+            if (ok && !gpu->rasterDirty()) {
+                ok = gpu->rasterSyncFromGuest(base, gs->pitch, gs->width, gs->height, &gerr);
+            }
+            if (ok) {
+                const float r = static_cast<float>(sr) / 255.0f;
+                const float g = static_cast<float>(sg) / 255.0f;
+                const float b = static_cast<float>(sb) / 255.0f;
+                const float a = static_cast<float>(sa) / 255.0f;
+                const float u0f = static_cast<float>(left) / static_cast<float>(tw);
+                const float u1f = static_cast<float>(right) / static_cast<float>(tw);
+                const float v0f = static_cast<float>(top) / static_cast<float>(th);
+                const float v1f = static_cast<float>(bottom) / static_cast<float>(th);
+                GpuRasterVertex v[6];
+                auto set = [&](int n, double x, double y, float u, float vv) {
+                    v[n].x = static_cast<float>(x);
+                    v[n].y = static_cast<float>(y);
+                    v[n].z = 0.0f;
+                    v[n].r = r;
+                    v[n].g = g;
+                    v[n].b = b;
+                    v[n].a = a;
+                    v[n].u = u;
+                    v[n].v = vv;
+                };
+                set(0, q[0], q[1], u0f, v0f);
+                set(1, q[2], q[3], u1f, v0f);
+                set(2, q[4], q[5], u0f, v1f);
+                set(3, q[2], q[3], u1f, v0f);
+                set(4, q[6], q[7], u1f, v1f);
+                set(5, q[4], q[5], u0f, v1f);
+                GpuRasterState gs_state;
+                gs_state.viewport_w = gs->width;
+                gs_state.viewport_h = gs->height;
+                gs_state.scissor_x1 = gs->width;
+                gs_state.scissor_y1 = gs->height;
+                gs_state.blend = blend;
+                GpuRasterTexture gt;
+                if (has_texture) {
+                    gt.pixels = tbase;
+                    gt.pitch = tpitch;
+                    gt.width = static_cast<int>(tw);
+                    gt.height = static_cast<int>(th);
+                    gt.format = tfmt;
+                    gt.key = tbase;
+                } else {
+                    // pTexture=0 的 D3DX 语义 = 白色源；GPU 用 1×1 白纹理 + 顶点色。
+                    gt.pixels = nullptr;
+                    gt.pitch = 0;
+                    gt.width = 1;
+                    gt.height = 1;
+                    gt.format = formatWhite();
+                    gt.key = nullptr;
+                }
+                ok = gpu->rasterDrawTextured(v, 6, gt, gs_state, &gerr);
+            }
+            if (ok) {
+                gpu_done = true;
+                written += static_cast<std::uint64_t>(ix1 - ix0) * static_cast<std::uint64_t>(iy1 - iy0);
+                static bool logged_ok = false;
+                if (!logged_ok) {
+                    logged_ok = true;
+                    spriteLog("End", "GPU sprite 成功：%ux%u → %d,%d %dx%d", tw, th, ix0, iy0,
+                              ix1 - ix0, iy1 - iy0);
+                }
+            } else {
+                // GPU 失败：把已经画出的部分落回 guest，本条回退 CPU。
+                spriteLog("End", "第 %u 条 Draw 的 GPU 纹理路径失败：%s ⇒ 回退 CPU", i, gerr.c_str());
+                std::string sync_err;
+                gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err);
+            }
+        }
+        if (!gpu_done) {
         for (int y = iy0; y < iy1; ++y) {
             for (int x = ix0; x < ix1; ++x) {
                 // 像素中心采样（D3D 的光栅化规则）
@@ -716,6 +815,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                 ++written;
             }
         }
+        }  // !gpu_done
         // Draw 时 AddRef 的纹理在这里对称 Release（与 D3DX 的批次生命周期一致）
         releaseEntry(ea);
         ++entries_done;

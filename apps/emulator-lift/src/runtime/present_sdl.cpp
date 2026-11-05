@@ -57,9 +57,24 @@ struct SdlWindow::Impl {
     std::string renderer_name;
     std::string video_driver;
     std::string gpu_driver;
+    std::string raster_name;
     std::vector<std::uint32_t> capture_argb;
     int capture_w = 0;
     int capture_h = 0;
+    // GPU 光栅化镜像（与窗口 renderer 共用；--raster gpu）
+    bool raster_gpu = false;
+    bool raster_sprites = true;
+    std::unique_ptr<GpuRaster> gpu_raster;
+    SDL_Texture* raster_target = nullptr;
+    int raster_w = 0;
+    int raster_h = 0;
+    frame_blit::HostPixelFormat raster_fmt = frame_blit::HostPixelFormat::Unsupported;
+    bool raster_dirty = false;
+    SDL_Texture* raster_tex = nullptr;
+    const void* raster_tex_key = nullptr;
+    int raster_tex_w = 0;
+    int raster_tex_h = 0;
+    frame_blit::HostPixelFormat raster_tex_fmt = frame_blit::HostPixelFormat::Unsupported;
 };
 
 SdlWindow::SdlWindow() : impl_(std::make_unique<Impl>()) {}
@@ -68,12 +83,24 @@ SdlWindow::~SdlWindow() { shutdown(); }
 bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     if (impl_->renderer != nullptr) return true;
     impl_->screenshot_path = options.screenshot_path;
+    impl_->raster_gpu = options.raster_gpu;
+    impl_->raster_sprites = options.raster_sprites;
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         if (err) *err = std::string("SDL_Init(VIDEO) 失败：") + SDL_GetError();
         return false;
     }
     impl_->sdl_inited = true;
+    if (options.raster_gpu) {
+        std::string gerr;
+        impl_->gpu_raster = createSdlGpuRaster(&gerr);
+        if (impl_->gpu_raster == nullptr) {
+            if (err) *err = "GPU 光栅化后端创建失败：" + gerr;
+            shutdown();
+            return false;
+        }
+        impl_->raster_name = impl_->gpu_raster->rasterName();
+    }
     impl_->video_driver = SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "(unknown)";
 
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE;
@@ -106,6 +133,7 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     SDL_GPUDevice* gpu = nullptr;
     if (impl_->renderer_name == "gpu") gpu = SDL_GetGPURendererDevice(impl_->renderer);
     impl_->gpu_driver = (gpu != nullptr && SDL_GetGPUDeviceDriver(gpu) != nullptr) ? SDL_GetGPUDeviceDriver(gpu) : "";
+    impl_->raster_name = "sdl-renderer/" + impl_->renderer_name;
 
     if (!SDL_SetRenderVSync(impl_->renderer, options.vsync ? 1 : 0)) {
         std::fprintf(stderr, "[present] SDL_SetRenderVSync(%d) 失败：%s\n", options.vsync ? 1 : 0, SDL_GetError());
@@ -116,6 +144,24 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
 
 void SdlWindow::shutdown() {
     if (impl_ == nullptr) return;
+    if (impl_->raster_target != nullptr) {
+        SDL_DestroyTexture(impl_->raster_target);
+        impl_->raster_target = nullptr;
+    }
+    if (impl_->raster_tex != nullptr) {
+        SDL_DestroyTexture(impl_->raster_tex);
+        impl_->raster_tex = nullptr;
+    }
+    impl_->raster_tex_key = nullptr;
+    impl_->raster_tex_w = 0;
+    impl_->raster_tex_h = 0;
+    impl_->raster_tex_fmt = frame_blit::HostPixelFormat::Unsupported;
+    impl_->raster_w = 0;
+    impl_->raster_h = 0;
+    impl_->raster_fmt = frame_blit::HostPixelFormat::Unsupported;
+    impl_->raster_dirty = false;
+    impl_->raster_gpu = false;
+    impl_->raster_name.clear();
     if (impl_->texture != nullptr) {
         SDL_DestroyTexture(impl_->texture);
         impl_->texture = nullptr;
@@ -158,6 +204,10 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
         if (err) *err = "SDL 渲染设备已丢失";
         return false;
     }
+    // GPU 光栅化可能把 render target 留在离屏纹理上；呈现前必须回到窗口。
+    SDL_SetRenderTarget(impl_->renderer, nullptr);
+    SDL_SetRenderViewport(impl_->renderer, nullptr);
+    SDL_SetRenderClipRect(impl_->renderer, nullptr);
     const int w = surface.width;
     const int h = surface.height;
     if (w <= 0 || h <= 0) {
@@ -303,5 +353,45 @@ bool SdlWindow::readbackPixel(int x, int y, std::uint32_t* argb, std::string* er
     *argb = impl_->capture_argb[static_cast<std::size_t>(y) * impl_->capture_w + x];
     return true;
 }
+
+// ---------------------------------------------------------------------------------------
+// GPU 光栅化（--raster gpu）：同一 SDL renderer 上的离屏 target + SDL_RenderGeometry
+// ---------------------------------------------------------------------------------------
+GpuRaster* SdlWindow::gpuRaster() { return impl_->gpu_raster.get(); }
+
+bool SdlWindow::rasterActive() const { return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterActive(); }
+
+const char* SdlWindow::rasterName() const { return impl_->raster_name.c_str(); }
+
+bool SdlWindow::rasterSpritesEnabled() const {
+    return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterSpritesEnabled();
+}
+
+bool SdlWindow::rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err) {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterPrepare(format, width, height, err) : false;
+}
+bool SdlWindow::rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
+                                    std::string* err) {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterSyncFromGuest(pixels, pitch, width, height, err) : false;
+}
+bool SdlWindow::rasterSyncToGuest(std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
+                                  std::string* err) {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterSyncToGuest(pixels, pitch, width, height, err) : false;
+}
+bool SdlWindow::rasterDraw(const GpuRasterVertex* vertices, std::size_t count, const GpuRasterState& state,
+                           std::string* err) {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterDraw(vertices, count, state, err) : false;
+}
+bool SdlWindow::rasterDrawTextured(const GpuRasterVertex* vertices, std::size_t count,
+                                   const GpuRasterTexture& texture, const GpuRasterState& state,
+                                   std::string* err) {
+    (void)vertices;
+    (void)count;
+    (void)texture;
+    (void)state;
+    if (err) *err = "SDL_GPU phase 1 不支持 sprite 纹理";
+    return false;
+}
+bool SdlWindow::rasterDirty() const { return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterDirty(); }
 
 }  // namespace lift

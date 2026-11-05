@@ -21,10 +21,12 @@ struct SdlWindowOptions {
     std::string driver_list = "gpu,direct3d12,direct3d11,vulkan,metal,opengl";
     bool vsync = false;
     bool hidden = false;
+    bool raster_gpu = false;  // 同一 SDL renderer 上启用 GPU 光栅化镜像
+    bool raster_sprites = true;  // D3DXSprite 也走 GPU（A/B 可关）
     std::string screenshot_path;  // 支持 {frame}
 };
 
-class SdlWindow final : public PresentSink {
+class SdlWindow final : public PresentSink, public GpuRaster {
 public:
     SdlWindow();
     ~SdlWindow() override;
@@ -38,6 +40,23 @@ public:
     void pumpHostEvents() override;
     bool stopRequested() const override;
     std::string describe() const override;
+    GpuRaster* gpuRaster() override;
+
+    // GpuRaster
+    bool rasterActive() const override;
+    const char* rasterName() const override;
+    bool rasterSpritesEnabled() const override;
+    bool rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err) override;
+    bool rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
+                             std::string* err) override;
+    bool rasterSyncToGuest(std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
+                           std::string* err) override;
+    bool rasterDraw(const GpuRasterVertex* vertices, std::size_t count, const GpuRasterState& state,
+                    std::string* err) override;
+    bool rasterDrawTextured(const GpuRasterVertex* vertices, std::size_t count,
+                            const GpuRasterTexture& texture, const GpuRasterState& state,
+                            std::string* err) override;
+    bool rasterDirty() const override;
 
     // 诊断 / 测试
     bool isGpuRenderer() const;          // SDL_GetGPURendererDevice() != NULL
@@ -49,5 +68,8 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// 用 SDL_GPU 设备创建真正的 GPU 光栅化后端（需要 SDL_Init(VIDEO)；Windows/DXBC）。
+std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err);
 
 }  // namespace lift

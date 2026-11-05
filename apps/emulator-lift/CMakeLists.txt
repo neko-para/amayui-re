@@ -48,6 +48,7 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/present.cpp
     src/runtime/present_sdl.cpp
     src/runtime/frame_blit.cpp
+    src/runtime/d3d9_gpu.cpp
     src/runtime/ddraw_surface.cpp
     src/runtime/com.cpp
     src/runtime/machine.cpp
@@ -103,6 +104,8 @@ target_link_libraries(emulator-lift-runtime
 if(WIN32)
     # host_encoding.cpp 的 CommandLineToArgvW（argv 的 UTF-8 重建）
     target_link_libraries(emulator-lift-runtime PRIVATE shell32)
+    # d3d9_gpu.cpp 用 D3DCompile 在运行时把 HLSL 编成 DXBC
+    target_link_libraries(emulator-lift-runtime PRIVATE d3dcompiler)
 endif()
 target_compile_features(emulator-lift-runtime PUBLIC cxx_std_20)
 
@@ -238,6 +241,15 @@ set_tests_properties(present-window PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
 add_test(NAME present-window-gpu COMMAND lift-present-window --gpu)
 set_tests_properties(present-window-gpu PROPERTIES SKIP_RETURN_CODE 77)
+
+# ---- GPU 光栅化（--raster gpu）：SDL renderer target + SDL_RenderGeometry ----
+add_executable(lift-gpu-raster tests/gpu_raster.cpp)
+target_link_libraries(lift-gpu-raster PRIVATE emulator-lift-runtime)
+add_test(NAME gpu-raster COMMAND lift-gpu-raster)
+set_tests_properties(gpu-raster PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
+add_test(NAME gpu-raster-gpu COMMAND lift-gpu-raster --gpu)
+set_tests_properties(gpu-raster-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(lift-mechanism tests/mechanism.cpp)
 target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)

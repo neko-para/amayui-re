@@ -80,6 +80,8 @@ void usage() {
         "  --present-vsync 0|1       窗口垂直同步（缺省 0；1 会改变墙钟）\n"
         "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
         "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
+        "  --raster <mode>    cpu（缺省）/ gpu：D3D9 fixed-function 光栅化后端；gpu 需要 --present window\n"
+        "  --raster-sprites 0|1      D3DXSprite 是否也走 GPU（缺省 1；A/B 用）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
         "  --native-overrides <list>  逗号分隔的 guest 函数名（或 all）：函数级 native override（缺省关）\n"
         "  --baseline-lift <N> 宿主基线补偿像素（缺省 2；0 = 关；★ 宿主视觉策略，不是引擎语义）\n"
@@ -134,6 +136,8 @@ int main(int argc, char** argv) {
     bool present_driver_set = false;
     bool present_vsync_set = false;
     bool present_screenshot_set = false;
+    std::string raster_mode = "cpu";
+    bool raster_sprites = true;
     int baseline_lift = 2;
     bool font_engine_name = false;
 
@@ -225,6 +229,10 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "--present-screenshot 需要一个非空路径\n");
                 return 2;
             }
+        } else if (std::strcmp(a, "--raster") == 0 && i + 1 < arg_count) {
+            raster_mode = args[++i];
+        } else if (std::strcmp(a, "--raster-sprites") == 0 && i + 1 < arg_count) {
+            raster_sprites = std::atoi(args[++i].c_str()) != 0;
         } else if (std::strcmp(a, "--trace-shims") == 0) {
             trace_shims = true;
         } else if (std::strcmp(a, "--trace-blocks") == 0) {
@@ -282,6 +290,10 @@ int main(int argc, char** argv) {
     }
     if (present_mode != "headless" && report) {
         std::fprintf(stderr, "--report 只打印基座缺口；不要同时给 --present window/auto\n");
+        return 2;
+    }
+    if (raster_mode != "cpu" && raster_mode != "gpu") {
+        std::fprintf(stderr, "--raster 只能是 cpu / gpu（收到 %s）\n", raster_mode.c_str());
         return 2;
     }
 
@@ -546,6 +558,8 @@ int main(int argc, char** argv) {
         wopt.vsync = present_vsync != 0;
         wopt.hidden = present_hidden;
         wopt.screenshot_path = present_screenshot;
+        wopt.raster_gpu = raster_mode == "gpu";
+        wopt.raster_sprites = raster_sprites;
         auto sdl = std::make_unique<lift::SdlWindow>();
         std::string werr;
         if (!sdl->init(wopt, &werr)) {
@@ -561,6 +575,7 @@ int main(int argc, char** argv) {
             }
         } else {
             std::printf("present   : %s\n", sdl->describe().c_str());
+            if (raster_mode == "gpu") std::printf("raster    : %s\n", sdl->rasterName());
             if (!sdl->isGpuRenderer()) {
                 std::printf("present   : 注意：driver=%s 是 GPU API 路径，但不是 SDL_GPU（gpu driver）\n",
                             sdl->rendererName());
@@ -568,6 +583,25 @@ int main(int argc, char** argv) {
             machine.presenter().setSink(std::move(sdl));
             present_window_active = true;
         }
+    }
+
+    std::unique_ptr<lift::SdlWindow> raster_only;
+    if (raster_mode == "gpu" && present_mode == "headless") {
+        auto win = std::make_unique<lift::SdlWindow>();
+        lift::SdlWindowOptions ropt;
+        ropt.title = "emulator-lift raster (offscreen)";
+        ropt.driver_list = present_driver;
+        ropt.hidden = true;
+        ropt.raster_gpu = true;
+        ropt.raster_sprites = raster_sprites;
+        std::string rerr;
+        if (!win->init(ropt, &rerr)) {
+            std::fprintf(stderr, "emulator-lift: --raster gpu（headless）失败：%s\n", rerr.c_str());
+            return 2;
+        }
+        std::printf("raster    : %s（headless 离屏；SDL 视频已初始化）\n", win->rasterName());
+        machine.setGpuRaster(win->gpuRaster());
+        raster_only = std::move(win);
     }
 
     lift::RunOptions opt;

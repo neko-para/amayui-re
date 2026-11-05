@@ -248,6 +248,32 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
   仍会按现有语义 abort（交互主循环另开单）。看画面用 `--real-time` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
 
+## 4.2b GPU 光栅化（`--raster gpu`）
+
+缺省 `--raster cpu`。`--raster gpu` 用独立 `SDL_GPUDevice` 把 D3D9 的屏幕空间三角形与
+D3DXSprite 的纹理四边形画到 1280×720 BGRA8 + D32 离屏 target，再在 Present 前读回 guest
+后缓冲；T&L / 裁剪 / 状态机 / 失败码仍全在 CPU。headless 也可用
+（`--raster gpu --present headless`，dummy 视频 + 离屏），窗口模式共用同一后端。
+
+支持面：无纹理 XYZRHW+DIFFUSE、D3DXSprite 纹理四边形（NEAREST / 顶点色调制 /
+ALPHABLEND，`pTexture=0` 用 1×1 白纹理）、GOURAUD、ONE/ZERO 或 SRCALPHA/INVSRCALPHA、
+深度测试/写/比较、scissor/viewport；纹理 stage 链、alpha test、多 stage、FLAT、16bpp、
+BORDER/MIRROR_ONCE、`BOTH*` 混合 ⇒ 回退 CPU。
+
+```bash
+# 离屏 GPU 光栅（不建可见窗口；A/B 用）
+./out/emulator-lift ... --max-frames 4 --raster gpu
+# 可见窗口 + GPU 光栅
+./out/emulator-lift ... --max-frames 300 --present window --raster gpu
+# 对照：同一帧的 CPU 输出
+./out/emulator-lift ... --max-frames 4 --raster cpu --dump-frame ...
+```
+
+评估口径：GPU 与 CPU 的 blend 舍入允许 **每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
+用 `--dump-frame` 做逐像素 max-diff。CPU 缺省仍逐字节可复现；`--raster gpu` 的
+`--present headless` 会初始化 SDL 视频（否则 `SDL_CreateGPUDevice` 失败），这不影响
+`--raster cpu` 的“headless 不碰 SDL 视频”承诺。
+
 ## 4.3 热点 profile 与 guest 函数级 native override（试点）
 
 ```bash
