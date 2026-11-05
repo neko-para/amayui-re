@@ -5,6 +5,13 @@ project(emulator-lift
     DESCRIPTION "Run AGE.EXE's real machine code on a guest-state x86 interpreter (SDL3 host)"
     LANGUAGES C CXX)
 
+# ★ **目录级** `/utf-8`：源码里有中日文注释 / 字面量；MSVC 默认按本地码页（中文 Windows = 936）
+#   读源文件并生成窄字符串字面量 ⇒ 输出双重乱码。放在 `project()` 之后、任何 target / 子目录之前，
+#   这样以后新增的 target（以及 vendored C）都不会漏；只加 `/utf-8`，不动 `/W4 /WX`。
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -50,6 +57,8 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/vfs.cpp
     src/runtime/handles.cpp
     src/runtime/heap.cpp
+    src/runtime/host_encoding.cpp
+    src/runtime/native_overrides.cpp
     src/runtime/shims.cpp
     src/corpus/lst_index.cpp
     src/shims/register.cpp
@@ -87,6 +96,10 @@ target_include_directories(emulator-lift-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(emulator-lift-runtime
     PUBLIC SDL3::SDL3
     PRIVATE Zydis::Zydis berkeley-softfloat)
+if(WIN32)
+    # host_encoding.cpp 的 CommandLineToArgvW（argv 的 UTF-8 重建）
+    target_link_libraries(emulator-lift-runtime PRIVATE shell32)
+endif()
 target_compile_features(emulator-lift-runtime PUBLIC cxx_std_20)
 
 # ---- 警告即错误：按**驱动**分档，⛔ 不能写一行 `-Wall -Wextra -Werror` 了事 ----
@@ -100,8 +113,10 @@ if(MSVC)
     # `/utf-8`：源码里有中日文注释；MSVC 默认按本地码页读，会把它们读坏（clang-cl 同理）
     # `_CRT_SECURE_NO_WARNINGS`：`getenv` / `fopen` 这类**可移植**用法在 MSVC 里被标成 deprecated；
     #   这不是本仓要治的问题，显式关掉比逐个加 pragma 干净。
-    target_compile_options(emulator-lift-runtime PRIVATE /W4 /WX /permissive- /utf-8)
+    target_compile_options(emulator-lift-runtime PRIVATE /W4 /WX /permissive-)
     target_compile_definitions(emulator-lift-runtime PRIVATE _CRT_SECURE_NO_WARNINGS)
+    # ★ `/utf-8` 已在 `project()` 之后用目录级 `add_compile_options` 覆盖所有 target
+    #   （见文件顶部）；这里不再重复，也不动 `/W4 /WX`（那是另一条口径）。
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         # clang-cl 认 GNU 形态的 `-Wno-*`：把 GNU 那行**原本就关着**的两条照旧关掉（口径对齐，不是放宽）
         target_compile_options(emulator-lift-runtime PRIVATE
@@ -119,6 +134,25 @@ enable_testing()
 
 # ---- pure：宿主层 smoke（不建窗口、不需要游戏）----
 add_test(NAME emulator-lift-smoke COMMAND emulator-lift --smoke)
+
+# ---- pure：guest 函数级 native override（差分 / 回退 / ABI）----
+add_executable(lift-native-override tests/native_override.cpp)
+target_link_libraries(lift-native-override PRIVATE emulator-lift-runtime)
+add_test(NAME native-override COMMAND lift-native-override)
+
+# ---- Windows 宿主编码契约（argv = UTF-8 / 输出字节 = UTF-8）----
+# ★ 子进程用**文件**重定向（不走管道：受限沙箱里捕获管道会 EPERM）。
+# ★ 起子进程时 cwd = 源码目录 ⇒ 默认的 `../../corpus/...` 执行源 / `.lst` 能按相对路径找到。
+# ★ 测试要真的启动 emulator-lift（它会载入执行源）⇒ 属于 **assets** 档：缺 LFS 资产时
+#   **不注册**（与 loader / boot-trace 同一判据；⛔ 不能让它挂成"pure 却红"）。
+add_executable(lift-host-encoding tests/host_encoding.cpp)
+target_link_libraries(lift-host-encoding PRIVATE emulator-lift-runtime)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
+    add_test(NAME host-encoding COMMAND lift-host-encoding $<TARGET_FILE:emulator-lift>)
+    set_tests_properties(host-encoding PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77)
+endif()
 
 # =====================================================================================
 # 测试分级（AGENTS.md §5「CTest 那一档不写 pragma，判据是注册位置」）：

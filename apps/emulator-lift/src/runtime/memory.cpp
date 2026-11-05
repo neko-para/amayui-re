@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "runtime/host_encoding.h"
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -116,6 +118,7 @@ void dumpRegions(const std::vector<Region>& regions, std::FILE* out) {
     }
     if (g_hook) g_hook(site);
     std::fflush(nullptr);
+    restoreConsoleUtf8();  // _Exit 不跑析构；控制台码页必须显式恢复
     // 用 _Exit 而不是 abort：不弹调试器对话框、不留半写的宿主缓冲（诊断已经 flush）
     std::_Exit(3);
 }
@@ -154,6 +157,7 @@ bool inGuestSpace(const void* guest_base, std::uintptr_t fault_addr) {
                      g_access.write ? "WRITE" : "READ", g_access.ea, static_cast<unsigned>(g_access.size));
     }
     std::fflush(nullptr);
+    restoreConsoleUtf8();
     // ★ 4 而不是 3：`3` 是 guest fault 的判据（有测试与人工排查都靠它区分）；也不 return 给平台
     //   （POSIX 上返回会回到同一条 fault 指令 ⇒ 无限重入）。
     std::_Exit(4);

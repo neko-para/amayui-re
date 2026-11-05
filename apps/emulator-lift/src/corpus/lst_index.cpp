@@ -6,6 +6,7 @@
 // ★ ⛔ 不写回语料：这里全部是内存视图（AGENTS.md §1.5）。
 #include "corpus/lst_index.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string_view>
@@ -94,6 +95,7 @@ bool LstIndex::load(const std::string& path, std::string* err) {
     }
     path_ = path;
     entries_.clear();
+    functions_.clear();
     unknown_.clear();
     by_ea_.clear();
     segments_.clear();
@@ -104,6 +106,9 @@ bool LstIndex::load(const std::string& path, std::string* err) {
     std::size_t pending_next[64] = {};      // 需要回填 next_ea 的条目下标
     bool has_pending[64] = {};
     std::vector<std::size_t> seg_of_entry;
+    // 函数入口：IDA 在 `sub_XXXX proc near` 的**紧邻上一行**给签名注释（同一 EA）。
+    std::string last_comment;
+    std::uint32_t last_comment_ea = 0;
 
     while (std::fgets(buf, sizeof(buf), f)) {
         std::string_view line(buf);
@@ -139,10 +144,30 @@ bool LstIndex::load(const std::string& path, std::string* err) {
         //   所以只参与 `next_ea` 的回填，不进 `entries_`。
         const bool collapsed = rest.find("COLLAPSED") != std::string_view::npos;
         if (collapsed) ++collapsed_;
+        // ★ CRT 函数在 `.lst` 里常常是 `; [N BYTES: COLLAPSED FUNCTION _memcpy. …]`：
+        //   没有 `proc near` 行，但这一行的 EA **就是函数入口**。profile 的归属需要它，
+        //   否则 `_memcpy` 的权重会被算到上一个 `sub_` 头上（实测：24% 被记成 sub_4E73EB）。
+        std::string collapsed_fn;
+        if (collapsed) {
+            constexpr std::string_view kKey = "COLLAPSED FUNCTION ";
+            const std::size_t k = rest.find(kKey);
+            if (k != std::string_view::npos) {
+                std::string_view v = rest.substr(k + kKey.size());
+                // 名字可能含空格（C++ 模板名）；截到 IDA 的后缀 `. PRESS` / `]` 为止。
+                const std::size_t stop = v.find(". PRESS");
+                if (stop != std::string_view::npos) v = v.substr(0, stop);
+                while (!v.empty() && (v.back() == '.' || v.back() == ' ')) v.remove_suffix(1);
+                if (!v.empty()) collapsed_fn = std::string(v);
+            }
+        }
         std::string_view t0;
         std::string_view t1;
         splitTokens(rest, &t0, &t1);
         if (t0.empty()) continue;
+        if (rest.front() == ';') {
+            last_comment = std::string(rest);
+            last_comment_ea = ea;
+        }
 
         const LstKind kind = classifyLstLine(t0, t1);
 
@@ -160,6 +185,28 @@ bool LstIndex::load(const std::string& path, std::string* err) {
             if (segments_.size() >= 64) continue;
             seg_index = segments_.size();
             segments_.emplace_back(seg);
+        }
+
+        // 函数入口（`sub_XXXX proc near` / `COLLAPSED FUNCTION name`）：只做聚合视图
+        // （README §2.2），不是执行单位。
+        if (!collapsed_fn.empty() && (functions_.empty() || functions_.back().ea != ea)) {
+            LstFunction fn;
+            fn.ea = ea;
+            fn.seg = static_cast<std::uint32_t>(seg_index);
+            fn.name = std::move(collapsed_fn);
+            functions_.push_back(std::move(fn));
+        }
+        if (t1 == "proc" && (functions_.empty() || functions_.back().ea != ea)) {
+            LstFunction fn;
+            fn.ea = ea;
+            fn.seg = static_cast<std::uint32_t>(seg_index);
+            fn.name = std::string(t0);
+            if (last_comment_ea == ea) {
+                std::string_view sig = last_comment;
+                while (!sig.empty() && (sig.front() == ';' || sig.front() == ' ')) sig.remove_prefix(1);
+                fn.signature = std::string(sig);
+            }
+            functions_.push_back(std::move(fn));
         }
 
         // ★ `next_ea` = **下一行（任何行）** 的 EA —— 这是 A3 判据的字面口径：
@@ -199,6 +246,8 @@ bool LstIndex::load(const std::string& path, std::string* err) {
     }
     std::fclose(f);
     (void)last_ea_by_seg;
+    std::sort(functions_.begin(), functions_.end(),
+              [](const LstFunction& a, const LstFunction& b) { return a.ea < b.ea; });
     loaded_ = true;
     if (err) err->clear();
     return true;
@@ -213,6 +262,27 @@ const LstEntry* LstIndex::find(std::uint32_t ea) const {
 std::string LstIndex::textAt(std::uint32_t ea) const {
     const LstEntry* e = find(ea);
     return e ? e->text : std::string();
+}
+
+const LstFunction* LstIndex::functionAt(std::uint32_t ea) const {
+    if (functions_.empty()) return nullptr;
+    // ★ 段约束：不同段之间没有"函数范围"关系（数据段的 EA 不该继承 .text 的最后一个函数）。
+    //   找不到该 EA 的指令行时（例如运行时才出现的代码）退回"最近入口"的旧行为。
+    const LstEntry* entry = find(ea);
+    const std::uint32_t want_seg = entry ? entry->seg : 0xFFFFFFFFu;
+    auto it = std::upper_bound(functions_.begin(), functions_.end(), ea,
+                               [](std::uint32_t v, const LstFunction& f) { return v < f.ea; });
+    while (it != functions_.begin()) {
+        --it;
+        if (want_seg == 0xFFFFFFFFu || it->seg == want_seg) return &*it;
+    }
+    return nullptr;
+}
+
+const LstFunction* LstIndex::findFunction(std::string_view name) const {
+    for (const LstFunction& f : functions_)
+        if (f.name == name) return &f;
+    return nullptr;
 }
 
 }  // namespace lift

@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -20,6 +21,15 @@ struct LstEntry {
     std::uint32_t seg = 0;       // 段下标（segments()）
     std::string text;            // 去掉 `段:EA ` 前缀后的整行
     std::string mnemonic;        // 第一个 token（IDA 的助记符，原样）
+};
+
+// `.lst` 里的函数入口（`sub_XXXX proc near`）。★ 只用于**报告 / 归属**，不是执行单位
+// （README §2.2：执行单位是 basic block；函数是聚合视图）。
+struct LstFunction {
+    std::uint32_t ea = 0;
+    std::uint32_t seg = 0;
+    std::string name;       // `sub_401000` / `nullsub_1` / …
+    std::string signature;  // 紧挨着的 `; int __cdecl sub_401000(...)`（可能为空）
 };
 
 class LstIndex {
@@ -42,6 +52,13 @@ public:
     }
 
     const std::vector<LstEntry>& entries() const { return entries_; }
+    // 函数入口（按 EA 升序；来自 `proc near` 行；签名来自紧邻的注释行，可能为空）
+    const std::vector<LstFunction>& functions() const { return functions_; }
+    // EA 所属函数（EA 之前最近的函数入口；没有 ⇒ nullptr）。★ 近似：chunk / 交错函数会归错，
+    // 只用于 profile 的**聚合视图**；逐块坐标仍以 block EA 为准。
+    const LstFunction* functionAt(std::uint32_t ea) const;
+    // 按名字找函数入口（`_memcpy` / `sub_401000` / …）；同名多入口时取第一个（IDA 下不会）。
+    const LstFunction* findFunction(std::string_view name) const;
     // 既不是指令、也判不成数据/伪指令的 token（A2 的失败清单；空 = A2 绿）
     const std::vector<LstEntry>& unknownLines() const { return unknown_; }
     const std::vector<std::string>& segments() const { return segments_; }
@@ -55,6 +72,7 @@ private:
     std::string header_sha256_;
     std::vector<std::string> segments_;
     std::vector<LstEntry> entries_;
+    std::vector<LstFunction> functions_;
     std::vector<LstEntry> unknown_;
     std::unordered_map<std::uint32_t, std::size_t> by_ea_;
     std::size_t collapsed_ = 0;

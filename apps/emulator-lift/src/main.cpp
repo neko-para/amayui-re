@@ -18,6 +18,7 @@
 
 #include "corpus/lst_index.h"
 #include "runtime/font.h"
+#include "runtime/host_encoding.h"
 #include "runtime/machine.h"
 #include "runtime/sha256.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
@@ -70,7 +71,10 @@ void usage() {
         "  --safe-memory       每次访存都查提交位图（A1 的第二遍）\n"
         "  --report            打印基座缺口（A5）后退出\n"
         "  --bench <N>         跑 N 条指令并报 MIPS\n"
+        "  --profile           跑完后打印 guest 热点（块级 + 按 .lst 函数入口聚合）\n"
+        "  --profile-top <N>   profile 每张表打印前 N 项（缺省 30）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
+        "  --native-overrides <list>  逗号分隔的 guest 函数名（或 all）：函数级 native override（缺省关）\n"
         "  --baseline-lift <N> 宿主基线补偿像素（缺省 2；0 = 关；★ 宿主视觉策略，不是引擎语义）\n"
         "  --font-engine-name  字体 A/B 对照档：上报引擎字面名（字形仍来自宿主 Amayui CN）\n"
         "  --smoke             只验证宿主层可链接（不建窗口、不需要游戏）\n");
@@ -82,7 +86,15 @@ int main(int argc, char** argv) {
     // ★ 第一件事：关掉 Windows 上"崩了就弹模态框"的默认行为（见 runtime/memory.h）。
     //   本仓有多处 `std::abort()`（heap 非法 free / 句柄校验 / shimAbort），只关其中一条不够 ——
     //   对话框会把无人值守的整轮挂死，而且 stdout 还没 flush ⇒ 连日志都看不到。
+    //   ★ 必须在 argvUtf8() 的分配之前：OOM 也属于"崩了"。
     lift::suppressCrashDialogsOnce();
+    // ★ 第二件事：Windows 控制台输出码页 → UTF-8（见 host_encoding.h）。
+    //   必须在任何 printf 之前 —— 否则 usage / 诊断文本会按 936 显示成乱码。
+    lift::initConsoleUtf8();
+    // ★ 第三件事：argv 一律按 UTF-8 取（Windows 的 CRT char** 是 ANSI 码页，日文 --game-dir
+    //   会被当成 GBK 字节再按 UTF-8 解析 ⇒ fs::path 抛异常、进程 abort）。
+    const std::vector<std::string> args = lift::argvUtf8(argc, argv);
+    const int arg_count = static_cast<int>(args.size());
     bool smoke = false;
     bool trace_shims = false;
     bool trace_blocks = false;
@@ -91,6 +103,8 @@ int main(int argc, char** argv) {
     bool real_time = false;
     bool trace_inputs = false;
     std::uint64_t bench = 0;
+    bool profile = false;
+    std::size_t profile_top = 30;
     std::uint32_t max_insns = 0;
     std::uint32_t max_frames = 0;
     std::string frame_dump;
@@ -104,71 +118,86 @@ int main(int argc, char** argv) {
     std::string guest_root;
     std::string agerc_path;
     std::string font_path;
+    std::string native_overrides;
     int baseline_lift = 2;
     bool font_engine_name = false;
 
-    for (int i = 1; i < argc; ++i) {
-        const char* a = argv[i];
+    for (int i = 1; i < arg_count; ++i) {
+        const char* a = args[static_cast<std::size_t>(i)].c_str();
         if (std::strcmp(a, "--smoke") == 0) {
             smoke = true;
-        } else if (std::strcmp(a, "--exe") == 0 && i + 1 < argc) {
-            exe_path = argv[++i];
-        } else if (std::strcmp(a, "--lst") == 0 && i + 1 < argc) {
-            lst_path = argv[++i];
-        } else if (std::strcmp(a, "--game-dir") == 0 && i + 1 < argc) {
-            game_dir = argv[++i];
-        } else if (std::strcmp(a, "--appdata") == 0 && i + 1 < argc) {
-            appdata_dir = argv[++i];
-        } else if (std::strcmp(a, "--agerc") == 0 && i + 1 < argc) {
-            agerc_path = argv[++i];
+        } else if (std::strcmp(a, "--exe") == 0 && i + 1 < arg_count) {
+            exe_path = args[++i];
+        } else if (std::strcmp(a, "--lst") == 0 && i + 1 < arg_count) {
+            lst_path = args[++i];
+        } else if (std::strcmp(a, "--game-dir") == 0 && i + 1 < arg_count) {
+            game_dir = args[++i];
+        } else if (std::strcmp(a, "--appdata") == 0 && i + 1 < arg_count) {
+            appdata_dir = args[++i];
+        } else if (std::strcmp(a, "--agerc") == 0 && i + 1 < arg_count) {
+            agerc_path = args[++i];
             if (agerc_path.empty()) {
                 std::fprintf(stderr, "--agerc 需要一个非空路径\n");
                 return 2;
             }
-        } else if (std::strcmp(a, "--guest-root") == 0 && i + 1 < argc) {
-            guest_root = argv[++i];
+        } else if (std::strcmp(a, "--guest-root") == 0 && i + 1 < arg_count) {
+            guest_root = args[++i];
         } else if (std::strcmp(a, "--real-time") == 0) {
             real_time = true;
         } else if (std::strcmp(a, "--trace-inputs") == 0) {
             trace_inputs = true;
-        } else if (std::strcmp(a, "--until") == 0 && i + 1 < argc) {
-            const char* what = argv[++i];
+        } else if (std::strcmp(a, "--until") == 0 && i + 1 < arg_count) {
+            const char* what = args[++i].c_str();
             if (std::strcmp(what, "shim") == 0) {
                 until_shim = true;
-            } else if (std::strcmp(what, "ea") == 0 && i + 1 < argc) {
-                until_ea = parseHex(argv[++i]);
+            } else if (std::strcmp(what, "ea") == 0 && i + 1 < arg_count) {
+                until_ea = parseHex(args[++i].c_str());
             } else {
                 std::fprintf(stderr, "--until 需要 shim 或 ea <hex>\n");
                 return 2;
             }
-        } else if (std::strcmp(a, "--max-insns") == 0 && i + 1 < argc) {
-            max_insns = static_cast<std::uint32_t>(std::strtoull(argv[++i], nullptr, 10));
-        } else if (std::strcmp(a, "--max-frames") == 0 && i + 1 < argc) {
-            max_frames = static_cast<std::uint32_t>(std::strtoull(argv[++i], nullptr, 10));
-        } else if (std::strcmp(a, "--dump-frame") == 0 && i + 1 < argc) {
-            frame_dump = argv[++i];
+        } else if (std::strcmp(a, "--max-insns") == 0 && i + 1 < arg_count) {
+            max_insns = static_cast<std::uint32_t>(std::strtoull(args[++i].c_str(), nullptr, 10));
+        } else if (std::strcmp(a, "--max-frames") == 0 && i + 1 < arg_count) {
+            max_frames = static_cast<std::uint32_t>(std::strtoull(args[++i].c_str(), nullptr, 10));
+        } else if (std::strcmp(a, "--dump-frame") == 0 && i + 1 < arg_count) {
+            frame_dump = args[++i];
             if (frame_dump.empty()) {
                 std::fprintf(stderr, "--dump-frame 需要一个非空路径\n");
                 return 2;
             }
-        } else if (std::strcmp(a, "--time-limit") == 0 && i + 1 < argc) {
-            time_limit_sec = std::strtod(argv[++i], nullptr);
+        } else if (std::strcmp(a, "--time-limit") == 0 && i + 1 < arg_count) {
+            time_limit_sec = std::strtod(args[++i].c_str(), nullptr);
             if (time_limit_sec <= 0.0) {
                 std::fprintf(stderr, "--time-limit 需要正数秒\n");
                 return 2;
             }
-        } else if (std::strcmp(a, "--bench") == 0 && i + 1 < argc) {
-            bench = std::strtoull(argv[++i], nullptr, 10);
+        } else if (std::strcmp(a, "--bench") == 0 && i + 1 < arg_count) {
+            bench = std::strtoull(args[++i].c_str(), nullptr, 10);
+        } else if (std::strcmp(a, "--profile") == 0) {
+            profile = true;
+        } else if (std::strcmp(a, "--profile-top") == 0 && i + 1 < arg_count) {
+            profile_top = static_cast<std::size_t>(std::strtoull(args[++i].c_str(), nullptr, 10));
+            if (profile_top == 0) {
+                std::fprintf(stderr, "--profile-top 需要正整数\n");
+                return 2;
+            }
         } else if (std::strcmp(a, "--trace-shims") == 0) {
             trace_shims = true;
         } else if (std::strcmp(a, "--trace-blocks") == 0) {
             trace_blocks = true;
         } else if (std::strcmp(a, "--safe-memory") == 0) {
             safe_memory = true;
-        } else if (std::strcmp(a, "--font") == 0 && i + 1 < argc) {
-            font_path = argv[++i];
-        } else if (std::strcmp(a, "--baseline-lift") == 0 && i + 1 < argc) {
-            baseline_lift = std::atoi(argv[++i]);
+        } else if (std::strcmp(a, "--font") == 0 && i + 1 < arg_count) {
+            font_path = args[++i];
+        } else if (std::strcmp(a, "--native-overrides") == 0 && i + 1 < arg_count) {
+            native_overrides = args[++i];
+            if (native_overrides.empty()) {
+                std::fprintf(stderr, "--native-overrides 需要非空列表（关掉就整个参数都不要给）\n");
+                return 2;
+            }
+        } else if (std::strcmp(a, "--baseline-lift") == 0 && i + 1 < arg_count) {
+            baseline_lift = std::atoi(args[++i].c_str());
             if (baseline_lift < 0 || baseline_lift > 64) {
                 std::fprintf(stderr, "--baseline-lift 需要 0..64（收到 %d）\n", baseline_lift);
                 return 2;
@@ -328,6 +357,32 @@ int main(int argc, char** argv) {
                      "诊断里也不会有指令文本。\n");
     }
 
+    // ---- guest 函数级 native override（试点；默认关）----
+    if (!native_overrides.empty()) {
+        std::string ov_err;
+        if (!machine.configureNativeOverrides(native_overrides, &ov_err)) {
+            std::fprintf(stderr, "emulator-lift: --native-overrides 配置失败：%s\n", ov_err.c_str());
+            return 2;
+        }
+        std::printf("native-ovr: %zu 项（--native-overrides=%s）\n", machine.overrides().size(),
+                    native_overrides.c_str());
+        for (std::size_t i = 0; i < machine.overrides().size(); ++i) {
+            const lift::NativeOverride* e = machine.overrides().at(i);
+            std::printf("  %-12s @ %08X %s(%uB)\n", e->name.c_str(), e->ea, lift::guestConvName(e->conv),
+                        e->arg_bytes);
+        }
+        if (until_ea != 0) {
+            std::fprintf(stderr,
+                         "emulator-lift: ⚠ --until ea 与被 override 的函数体不兼容："
+                         "函数体会整段被 native 实现替代，内部 EA 不会逐条命中。\n");
+        }
+        if (bench != 0) {
+            std::fprintf(stderr,
+                         "emulator-lift: ⚠ --bench + native override：insns / MIPS 按"
+                         "\"一次 override = 1 条\"计，不是解释器绝对吞吐。\n");
+        }
+    }
+
     if (const char* dump = std::getenv("LIFT_DUMP_EA")) {
         const std::uint32_t ea = parseHex(dump);
         std::printf("[dump] mem[%08X] = %08X (region %s)\n", ea, machine.mem().rd32(ea),
@@ -422,6 +477,8 @@ int main(int argc, char** argv) {
     opt.trace_blocks = trace_blocks;
     opt.real_time = real_time;
     opt.trace_inputs = trace_inputs || trace_shims;
+    opt.profile = profile;
+    opt.profile_top = profile_top;
     if (real_time) {
         std::fprintf(stderr,
                      "emulator-lift: ⚠ --real-time：宿主时钟进 guest ⇒ **A4 的逐字节可复现断言自动跳过**"
@@ -433,6 +490,7 @@ int main(int argc, char** argv) {
     const std::uint64_t t1 = SDL_GetTicksNS();
 
     machine.dumpRunSummary(r, stdout);
+    if (profile) machine.dumpProfile(stdout, profile_top);
     if (bench) {
         const double secs = static_cast<double>(t1 - t0) / 1e9;
         std::printf("bench     : %llu insns in %.3f s = %.2f MIPS\n", (unsigned long long)r.insns, secs,

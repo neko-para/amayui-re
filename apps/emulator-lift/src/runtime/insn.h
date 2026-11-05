@@ -163,6 +163,9 @@ struct Block {
     // shim 块：这个 EA 是导入桩页里的一个唯一地址（S5），执行时不走指令
     bool is_shim = false;
     std::uint32_t shim_id = 0;
+    // ★ profile（默认 0；只有 `--profile` 才累加）：本块被 dispatcher 取到的次数。
+    //   块级计数是"零查找"的：加在缓存实体上，热路径只多一次自增（⛔ 不做 EA→map 查找）。
+    std::uint64_t hits = 0;
 };
 
 }  // namespace lift

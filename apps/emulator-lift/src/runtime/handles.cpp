@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "runtime/host_encoding.h"
+
 namespace lift {
 
 const char* handleKindName(HandleKind kind) {
@@ -115,6 +117,7 @@ void HandleTable::invalidHandle(std::uint32_t h, const char* api) const {
     if (n == 0) std::fprintf(stderr, "(空表)");
     std::fprintf(stderr, "\n");
     std::fflush(nullptr);
+    restoreConsoleUtf8();
     std::abort();  // ⛔ 句柄校验失败 = 响亮失败（S8 变异清单的一条）
 }
 

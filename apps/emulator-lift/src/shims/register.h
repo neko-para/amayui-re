@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "runtime/host_encoding.h"
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -117,6 +119,7 @@ inline void suppressCrashDialogs() {
     shimVPrint(module, name, fmt, ap);
     va_end(ap);
     suppressCrashDialogs();
+    restoreConsoleUtf8();  // abort 不跑析构；控制台码页必须显式恢复
     std::abort();
 }
 

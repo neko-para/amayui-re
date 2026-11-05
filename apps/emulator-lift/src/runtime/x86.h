@@ -271,6 +271,8 @@ public:
     Block* installShim(std::uint32_t ea, std::uint32_t shim_id);
     // 是否已缓存
     Block* peek(std::uint32_t ea) const;
+    // profile 用：guest 指令块（不含 shim 块；块实体生命周期 = 缓存，SMC 清空后失效）
+    const std::unordered_map<std::uint32_t, std::unique_ptr<Block>>& guestBlocks() const { return blocks_; }
 
     std::size_t blockCount() const { return blocks_.size() + shim_blocks_.size(); }
     std::size_t insnCount() const { return insn_count_; }

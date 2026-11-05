@@ -74,6 +74,12 @@ struct Asm {
         u8(0xC2);
         u16(n);
     }
+    // add esp, imm8（cdecl 调用方清栈；只用于 ≤127 字节）
+    void addEspImm8(std::uint8_t n) {
+        u8(0x83);
+        u8(0xC4);
+        u8(n);
+    }
 };
 
 struct Fixture {

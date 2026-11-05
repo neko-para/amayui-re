@@ -152,6 +152,9 @@ apps/emulator-lift/
                                         --until shim|ea --trace-shims --trace-blocks
                                         --max-insns --max-frames --dump-frame --time-limit
                                         --safe-memory --report --bench --smoke
+                                        --profile --profile-top --native-overrides
+  src/runtime/host_encoding.{h,cpp}   ← 进程入口编码契约：UTF-8 argv（GetCommandLineW）/ 控制台码页
+  src/runtime/native_overrides.{h,cpp}← guest 函数级 native override（试点；默认关）
   src/runtime/memory.{h,cpp}          ← 4 GiB 预留 + 按需提交 + 提交位图 + 区域表 + fault 诊断
   src/runtime/image.{h,cpp}           ← PE 节表/导入表/入口 + 映射 + 栈(1 MiB+guard) + TEB/PEB
   src/runtime/sha256.{h,cpp}          ← SHA-256（校验"执行的字节 = 语料描述的字节"）
@@ -170,7 +173,7 @@ apps/emulator-lift/
   src/shims/kernel32_*.cpp            ← 七族（一文件一族）+ bootstrap（启动路径补的）+ register.cpp
   tests/*.cpp                         ← conformance(A1) / dispatch / shim-abi / mnemonics /
                                         loader / decode-crosscheck(A3) / corpus-mnemonics(A2) /
-                                        boot-trace(A4) / base-coverage(A5)
+                                        boot-trace(A4) / base-coverage(A5) / native-override
   third_party/berkeley-softfloat/     ← vendor 的 SoftFloat 3e（8086 特化）+ 清单哈希 README
 ```
 
@@ -192,7 +195,6 @@ apps/emulator-lift/
 - 生成物（`out/`、`vcpkg_installed/`）由本目录 `.gitignore` 排除。
 
 ## 4.1 渲染产物导出
-
 D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena::dumpBmp`，支持 16/32bpp）：
 
 ```bash
@@ -210,6 +212,27 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
   D3D9 的 `Present` 上消费。
 - BMP 只是当前实现的零依赖格式；⛔ 不声称它等于真机像素。
 
+## 4.2 热点 profile 与 guest 函数级 native override（试点）
+
+```bash
+# 找热点（块级 + 按 .lst 函数入口聚合；不改变执行结果）
+./out/emulator-lift ... --max-frames 1 --profile --profile-top 40
+
+# 显式启用（默认关；名字来自 .lst 的 `proc near` / `COLLAPSED FUNCTION` 行）
+./out/emulator-lift ... --max-frames 1 --native-overrides _memcpy
+./out/emulator-lift ... --native-overrides all
+```
+
+- 拦截点 = **dispatcher 的 block 入口**（不 patch guest 字节）；命中后按 ABI 设 `EAX / ESP / EIP`，
+  失败（例如 safe mode 下参数越界）就**回退解释器**；摘要里能看每一项的 hits / fallbacks。
+- 候选必须由 `--profile` 选出，⛔ 不先猜。`--profile` 的权重是"块命中 × 块内指令数"；
+  函数归属是**近似**（chunk 会归到相邻函数，见 `src/corpus/lst_index.h`）。
+- 当前试点只覆盖 CRT 叶子（`_memcpy` / `_memcpy_0` / `_memset` / `_strlen` / 自定义 `sub_401000`）。
+  `_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节，返回约定未核）⇒ 暂不覆盖。
+- ⚠ `--until ea` 指向被 override 的函数体内部时**不会生效**（函数体不再逐条执行）；
+  `--bench` 的 insns / MIPS 也按"一次 override = 1 条"计 —— 不要拿它们做解释器吞吐的绝对比较。
+- 是否继续扩展、以及 A/B 数字见需求单（§5）。
+
 ## 5. 真源
 
 | 想知道 | 看哪 |
@@ -221,4 +244,5 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
 | 可接受偏差（菜单 / 音频 / 视频 / Live2D / 3D） | `SCOPE.md` + 同文件 §4.1 |
 | 覆盖清单格式 | 同文件 §5.7 |
 | 实现计划（切片 / 判据 / 决策点） | M1 `docs/plan-m1-cpu-base.md` · M2 `docs/plan-m2-2d-text.md`（索引 `docs/README.md`） |
+| 热点 profile / native override 的开关与 ABI | 本文件 §4.2 + `src/runtime/native_overrides.h` |
 | 需求与进度 | `REQ-01M6GJMENJ8XEK4ZPTA768YBPW` · `pnpm tools requirements plan` |

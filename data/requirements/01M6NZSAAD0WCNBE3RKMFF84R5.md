@@ -2,8 +2,9 @@
 
 - id: REQ-01M6NZSAAD0WCNBE3RKMFF84R5
 - type: spike
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- done_reason: 结论：值得继续（限定 CRT 叶子）。交错 A/B（各 3 次，首帧中位数）：基线 35.396s → 仅 _memcpy 26.303s（-25.7%）→ all 5 项 24.568s（-30.6%）；首帧像素哈希不变 0xEBF024FEBE998B05；insns 781.8M → 600.1M / 586.3M。候选由 profile 选出（_memcpy 占 23.99% 指令权重；_memset/_strlen 冷；_memcmp 的 CRT 体是 COLLAPSED、返回约定未核 ⇒ 暂不覆盖）。all 的 32 次回退全部是 _memcpy_0 的重叠区间（解释器执行，结果仍一致）。sub_436A80(29.31%)/sub_48B090(23.15%) 是复杂函数，不在本试点范围；继续扩展需另立单。差分/回退/ABI/jmp 夹具 native-override 105 checks、ctest 43/43 绿。
 - tags: [emulator-lift, performance, native-override, spike]
 
 ## 一句话

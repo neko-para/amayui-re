@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "runtime/host_encoding.h"
+
 namespace lift {
 namespace {
 constexpr std::uint32_t kMagic = 0x4C494654u;  // 'LIFT'
@@ -110,6 +112,7 @@ bool GuestHeap::free(std::uint32_t ptr) {
                      "  堆区间 = 0x%08X..0x%08X  in_use=%u peak=%u\n",
                      ptr, begin_, end_, in_use_, peak_);
         std::fflush(nullptr);
+        restoreConsoleUtf8();  // _Exit / abort 不跑析构：控制台码页必须显式恢复
         std::abort();
     }
     Block& b = blocks_[off];
@@ -128,6 +131,7 @@ std::uint32_t GuestHeap::realloc(std::uint32_t ptr, std::uint32_t bytes, bool ze
     if (!findBlock(ptr, &off)) {
         std::fprintf(stderr, "\n=== guest heap: 非法 realloc ===\n  ptr = 0x%08X\n", ptr);
         std::fflush(nullptr);
+        restoreConsoleUtf8();
         std::abort();
     }
     Block& b = blocks_[off];

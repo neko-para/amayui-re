@@ -6,9 +6,11 @@
 // ★ 停下来的原因全部进 `RunResult`（D4 的 L1/L2 就是 `FirstShim` / `UntilEa` 两个原因）。
 #include "runtime/machine.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -300,8 +302,14 @@ RunResult Machine::run(const RunOptions& opts) {
     cpu_.running = true;
     const auto wall_start = std::chrono::steady_clock::now();
     std::uint64_t next_time_check = 0;
+    // ★ native override 的入口判据：**上一条执行的是 `call`**，且目标就是当前 eip。
+    //   只按 EA 拦会把 `jmp`/尾调用也当成函数入口（那时栈上没有本次调用的返回地址，
+    //   抬栈 + 弹返回地址 = 静默改坏控制流）。所以 call 目标只对**下一次** dispatcher 迭代有效。
+    std::uint32_t next_call_target = 0;
 
     while (cpu_.running) {
+        const std::uint32_t call_target = next_call_target;
+        next_call_target = 0;
         if (opts.time_limit_sec > 0.0 && cpu_.insns >= next_time_check) {
             const auto now = std::chrono::steady_clock::now();
             const double elapsed = std::chrono::duration<double>(now - wall_start).count();
@@ -349,6 +357,28 @@ RunResult Machine::run(const RunOptions& opts) {
             if (r.reason != StopReason::None) break;
         }
 
+        // ★ guest 函数级 native override：只在**函数入口**（block 入口）按 EA 拦截。
+        //   成功 ⇒ 按 ABI 设好 EAX/ESP/EIP 并直接回 dispatcher；失败 ⇒ 落回解释器执行原字节。
+        //   ⛔ 不 patch guest 字节（SMC / 代码页保护都不用管）。
+        //   ⛔ 只认"上一条是 call 且目标 = 当前 eip"：jmp / 尾调用 / 定时器和回调的合成帧
+        //      都不是 call 帧，必须回退解释器（否则会弹掉一个不存在的返回地址）。
+        if (!overrides_.empty() && call_target != 0 && cpu_.eip == call_target) {
+            if (NativeOverride* ov = overrides_.find(cpu_.eip)) {
+                const char* why = nullptr;
+                const std::uint64_t before = ov->fallbacks;
+                if (overrides_.invoke(*ov, cpu_, mem_, &why)) {
+                    if (opts.trace_blocks) std::fprintf(stdout, "[native] %08X %s\n", ov->ea, ov->name.c_str());
+                    cpu_.noteInsn(ov->ea, "[native]");
+                    ++cpu_.insns;
+                    clock_.tick();
+                    continue;
+                }
+                if (ov->fallbacks != before && ov->fallbacks == 1 && why) {
+                    std::fprintf(stderr, "[native] %s @ %08X 回退解释器：%s\n", ov->name.c_str(), ov->ea, why);
+                }
+            }
+        }
+
         Block* b = cache_.get(cpu_.eip);
         if (!b) {
             r.reason = StopReason::DecodeError;
@@ -371,6 +401,8 @@ RunResult Machine::run(const RunOptions& opts) {
             r.detail = "空块（解码没有产出任何指令）";
             break;
         }
+        // ★ profile：块级命中（零查找；只在 --profile 时多一次自增）。
+        if (opts.profile && !b->is_shim) ++b->hits;
         if (b->is_shim) {
             if (opts.stop_on_first_shim) {
                 r.reason = StopReason::FirstShim;
@@ -440,6 +472,7 @@ RunResult Machine::run(const RunOptions& opts) {
             ++cpu_.insns;
             clock_.tick();
             if (control) {
+                next_call_target = (in.op == Op::Call) ? cpu_.eip : 0;
                 left_block = true;
                 break;
             }
@@ -515,6 +548,15 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
     t.overlay_host = vfs_.overlayHostPath();
     t.agerc_path = agerc_path_;
     t.agerc_sha256 = agerc_image_.sha256;
+    // ★ override 集也是**输入**：同一份 exe / 同一串参数，换一组 override 就是另一条执行路径。
+    for (std::size_t i = 0; i < overrides_.size(); ++i) {
+        const NativeOverride* e = overrides_.at(i);
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%s@%08X/%s/%u", e->name.c_str(), e->ea, guestConvName(e->conv),
+                      e->arg_bytes);
+        if (!t.native_overrides.empty()) t.native_overrides += ';';
+        t.native_overrides += buf;
+    }
     t.clock_start_100ns = clock_.epoch100ns();
     t.real_time = clock_.realTime();
     return t;
@@ -532,6 +574,8 @@ void Machine::dumpTraceInputs(std::FILE* out) const {
                  t.overlay_host.c_str());
     std::fprintf(out, "trace-input agerc    = %s (sha256=%s)\n", t.agerc_path.c_str(),
                  t.agerc_sha256.empty() ? "-" : t.agerc_sha256.c_str());
+    std::fprintf(out, "trace-input override = %s\n",
+                 t.native_overrides.empty() ? "(none)" : t.native_overrides.c_str());
     std::fprintf(out, "trace-input clock    = %s (start=%llu x100ns)\n",
                  t.real_time ? "REAL-TIME（⚠ 逐字节断言必须跳过）" : "virtual",
                  (unsigned long long)t.clock_start_100ns);
@@ -558,6 +602,7 @@ std::uint64_t Machine::traceInputsHash() const {
     mix(t.overlay_host.data(), t.overlay_host.size());
     mix(t.agerc_path.data(), t.agerc_path.size());
     mix(t.agerc_sha256.data(), t.agerc_sha256.size());
+    mix(t.native_overrides.data(), t.native_overrides.size());
     mix(&t.clock_start_100ns, sizeof(t.clock_start_100ns));
     const std::uint8_t real = t.real_time ? 1 : 0;
     mix(&real, 1);
@@ -615,6 +660,167 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                  shims_.calledUnimplemented().size());
     std::fprintf(out, "heap      : in_use %u peak %u allocs %u\n", heap_.bytesInUse(), heap_.peak(),
                  heap_.allocCount());
+    if (!overrides_.empty()) {
+        std::uint64_t hits = 0;
+        std::uint64_t fallbacks = 0;
+        for (std::size_t i = 0; i < overrides_.size(); ++i) {
+            const NativeOverride* e = overrides_.at(i);
+            hits += e->hits;
+            fallbacks += e->fallbacks;
+        }
+        std::fprintf(out, "native-ovr: entries=%zu hits=%llu fallbacks=%llu\n", overrides_.size(),
+                     (unsigned long long)hits, (unsigned long long)fallbacks);
+        for (std::size_t i = 0; i < overrides_.size(); ++i) {
+            const NativeOverride* e = overrides_.at(i);
+            std::fprintf(out, "  %-12s @ %08X %s(%uB) hits=%llu fallbacks=%llu\n", e->name.c_str(), e->ea,
+                         guestConvName(e->conv), e->arg_bytes, (unsigned long long)e->hits,
+                         (unsigned long long)e->fallbacks);
+        }
+    }
+}
+
+void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
+    struct Row {
+        std::uint32_t ea = 0;
+        std::uint64_t hits = 0;
+        std::uint64_t weight = 0;
+        const LstFunction* fn = nullptr;
+    };
+    std::vector<Row> rows;
+    rows.reserve(cache_.guestBlocks().size());
+    std::uint64_t total = 0;
+    for (const auto& kv : cache_.guestBlocks()) {
+        const Block& b = *kv.second;
+        if (b.hits == 0) continue;
+        Row row;
+        row.ea = b.ea;
+        row.hits = b.hits;
+        row.weight = b.hits * static_cast<std::uint64_t>(b.insns.size());
+        row.fn = lst_.loaded() ? lst_.functionAt(b.ea) : nullptr;
+        total += row.weight;
+        rows.push_back(row);
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.weight != b.weight ? a.weight > b.weight : a.ea < b.ea; });
+    std::fprintf(out, "\n=== profile: guest blocks（weight = hits × 块内指令数）===\n");
+    std::fprintf(out, "total weight = %llu（块 %zu 个；按 weight 降序，前 %zu）\n",
+                 (unsigned long long)total, rows.size(), top);
+    // ★ 对账：正常（无 override / 无 SMC 清块）时 total weight 应等于 cpu_.insns。
+    //   不等 ⇒ 有块被 SMC 丢掉 / 有 override 绕过了块 / 执行到一半停了 —— 不要把 profile 当精确账本。
+    std::fprintf(out, "insns=%llu，差=%lld（override / SMC 清块 / 最后一个块只执行一部分时不为 0 是正常的）\n",
+                 (unsigned long long)cpu_.insns,
+                 (long long)cpu_.insns - (long long)total);
+    for (std::size_t i = 0; i < rows.size() && i < top; ++i) {
+        const Row& r = rows[i];
+        const double pct = total ? 100.0 * static_cast<double>(r.weight) / static_cast<double>(total) : 0.0;
+        if (r.fn) {
+            std::fprintf(out, "  %2zu. %08X %7.2f%% hits=%-10llu w=%-12llu | %s+0x%X | %s\n", i + 1, r.ea, pct,
+                         (unsigned long long)r.hits, (unsigned long long)r.weight, r.fn->name.c_str(),
+                         r.ea - r.fn->ea, lst_.textAt(r.ea).c_str());
+        } else {
+            std::fprintf(out, "  %2zu. %08X %7.2f%% hits=%-10llu w=%-12llu | ? | %s\n", i + 1, r.ea, pct,
+                         (unsigned long long)r.hits, (unsigned long long)r.weight, lst_.textAt(r.ea).c_str());
+        }
+    }
+
+    // 函数聚合：按 `.lst` 的 proc 入口归并（⚠ 近似；chunk 会归到相邻函数，见 lst_index.h）。
+    struct FuncRow {
+        std::uint32_t key = 0;
+        const LstFunction* fn = nullptr;
+        std::uint64_t hits = 0;
+        std::uint64_t weight = 0;
+        std::size_t blocks = 0;
+    };
+    std::unordered_map<std::uint32_t, FuncRow> by_func;
+    for (const Row& r : rows) {
+        const std::uint32_t key = r.fn ? r.fn->ea : r.ea;
+        FuncRow& f = by_func[key];
+        f.key = key;
+        f.fn = r.fn;
+        f.hits += r.hits;
+        f.weight += r.weight;
+        ++f.blocks;
+    }
+    std::vector<FuncRow> funcs;
+    funcs.reserve(by_func.size());
+    for (const auto& kv : by_func) funcs.push_back(kv.second);
+    std::sort(funcs.begin(), funcs.end(), [](const FuncRow& a, const FuncRow& b) {
+        if (a.weight != b.weight) return a.weight > b.weight;
+        return a.key < b.key;  // ★ 同权重也要确定性（无 .lst 时 fn 为 null，不能全按 0）
+    });
+    std::fprintf(out, "\n=== profile: functions（按函数入口聚合；前 %zu）===\n", top);
+    for (std::size_t i = 0; i < funcs.size() && i < top; ++i) {
+        const FuncRow& f = funcs[i];
+        const double pct = total ? 100.0 * static_cast<double>(f.weight) / static_cast<double>(total) : 0.0;
+        std::fprintf(out, "  %2zu. %08X %7.2f%% hits=%-10llu w=%-12llu blocks=%-4zu %s%s%s\n", i + 1,
+                     f.fn ? f.fn->ea : 0u, pct, (unsigned long long)f.hits, (unsigned long long)f.weight, f.blocks,
+                     f.fn ? f.fn->name.c_str() : "(no .lst)",
+                     (f.fn && !f.fn->signature.empty()) ? "  " : "", f.fn ? f.fn->signature.c_str() : "");
+    }
+    // ★ override 的函数体**不会**进块 profile（被宿主实现整段替代）⇒ 显式说明，否则 profile 会误导
+    //   "这个热点已经不在"。
+    if (!overrides_.empty()) {
+        std::fprintf(out, "\n注意：以下函数被 native override 替代，其函数体不计入上面的块 profile：\n");
+        for (std::size_t i = 0; i < overrides_.size(); ++i) {
+            const NativeOverride* e = overrides_.at(i);
+            std::fprintf(out, "  %-12s @ %08X hits=%llu\n", e->name.c_str(), e->ea,
+                         (unsigned long long)e->hits);
+        }
+    }
+}
+
+bool Machine::configureNativeOverrides(const std::string& list, std::string* err) {
+    overrides_.clear();
+    if (list.empty()) return true;
+    if (!lst_.loaded()) {
+        if (err) *err = "--native-overrides 需要 --lst（按函数名解析 EA；⛔ 不硬编码 EA）";
+        return false;
+    }
+    auto knownNames = []() {
+        std::string s;
+        for (std::size_t i = 0; i < knownNativeCount(); ++i) {
+            if (i) s += ", ";
+            s += knownNativeAt(i).name;
+        }
+        return s;
+    };
+    auto addName = [&](const std::string& name, bool required) -> bool {
+        const KnownNative* k = findKnownNative(name);
+        if (!k) {
+            if (required && err) *err = "未知的 native override：" + name + "（已知：" + knownNames() + "）";
+            return !required;
+        }
+        const LstFunction* f = lst_.findFunction(name);
+        if (!f) {
+            if (required && err) *err = "在 .lst 里找不到函数入口：" + name;
+            return !required;
+        }
+        // 别名（两个名字指向同一个 EA）只加一次：`all` 不该因为别名而硬失败。
+        if (overrides_.find(f->ea) != nullptr) return true;
+        return overrides_.add(f->ea, name, k->conv, k->arg_bytes, k->fn, err);
+    };
+
+    std::size_t start = 0;
+    while (start <= list.size()) {
+        const std::size_t comma = list.find(',', start);
+        std::string name = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.erase(name.begin());
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+        if (!name.empty()) {
+            if (name == "all") {
+                for (std::size_t i = 0; i < knownNativeCount(); ++i)
+                    if (!addName(knownNativeAt(i).name, false)) return false;
+            } else if (!addName(name, true)) {
+                return false;
+            }
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    if (overrides_.empty()) {
+        if (err) *err = "没有解析到任何 native override（检查名字 / .lst）";
+        return false;
+    }
+    return true;
 }
 
 }  // namespace lift

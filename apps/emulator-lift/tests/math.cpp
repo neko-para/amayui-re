@@ -18,8 +18,8 @@
 
 namespace {
 
-bool near(float a, float b, float eps = 1e-5f) { return std::fabs(a - b) <= eps; }
-bool near(double a, double b, double eps = 1e-9) { return std::fabs(a - b) <= eps; }
+bool near_(float a, float b, float eps = 1e-5f) { return std::fabs(a - b) <= eps; }
+bool near_(double a, double b, double eps = 1e-9) { return std::fabs(a - b) <= eps; }
 
 // D3DXMATRIX 的 guest 布局 = 16 个 float（行主序）；这里用宿主数组模拟同一份布局。
 float d3dOf(const lift::math::Mat4& m, int r, int c) {
@@ -49,27 +49,27 @@ void caseMultiplyOrder() {
     const lift::math::Mat4 st = lift::math::multiplyD3D(s, t);
 
     // 平铺布局也必须是 D3DX 语义（row3 = 平移，不受 scale 影响）
-    LIFT_CHECK(near(d3dOf(st, 0, 0), 2.0f));
-    LIFT_CHECK(near(d3dOf(st, 1, 1), 3.0f));
-    LIFT_CHECK(near(d3dOf(st, 2, 2), 4.0f));
-    LIFT_CHECK(near(d3dOf(st, 3, 0), 10.0f));
-    LIFT_CHECK(near(d3dOf(st, 3, 1), 20.0f));
-    LIFT_CHECK(near(d3dOf(st, 3, 2), 30.0f));
-    LIFT_CHECK(near(d3dOf(st, 3, 3), 1.0f));
+    LIFT_CHECK(near_(d3dOf(st, 0, 0), 2.0f));
+    LIFT_CHECK(near_(d3dOf(st, 1, 1), 3.0f));
+    LIFT_CHECK(near_(d3dOf(st, 2, 2), 4.0f));
+    LIFT_CHECK(near_(d3dOf(st, 3, 0), 10.0f));
+    LIFT_CHECK(near_(d3dOf(st, 3, 1), 20.0f));
+    LIFT_CHECK(near_(d3dOf(st, 3, 2), 30.0f));
+    LIFT_CHECK(near_(d3dOf(st, 3, 3), 1.0f));
 
     const lift::math::Vec4 v(1.0f, 2.0f, 3.0f, 1.0f);
     const lift::math::Vec4 got = lift::math::transformVec4D3D(st, v);
-    LIFT_CHECK(near(got.x, 12.0f));  // 2*1 + 10
-    LIFT_CHECK(near(got.y, 26.0f));  // 3*2 + 20
-    LIFT_CHECK(near(got.z, 42.0f));  // 4*3 + 30
-    LIFT_CHECK(near(got.w, 1.0f));
+    LIFT_CHECK(near_(got.x, 12.0f));  // 2*1 + 10
+    LIFT_CHECK(near_(got.y, 26.0f));  // 3*2 + 20
+    LIFT_CHECK(near_(got.z, 42.0f));  // 4*3 + 30
+    LIFT_CHECK(near_(got.w, 1.0f));
 
     // ★ 守卫：如果误写成 GLM 的 `a * b`（不反转顺序），得到的是 D3DX 的 T*S ⇒ (22,66,132)。
     //   这条断言让"不小心把 multiplyD3D 改成 a*b"当场红。
     const lift::math::Vec4 wrong_order =
         lift::math::transformVec4D3D(s * t, v);  // 故意绕开 multiplyD3D
-    LIFT_CHECK(near(wrong_order.x, 22.0f));
-    LIFT_CHECK(!near(wrong_order.x, got.x));
+    LIFT_CHECK(near_(wrong_order.x, 22.0f));
+    LIFT_CHECK(!near_(wrong_order.x, got.x));
 
     // 适配器往返：任意 16 个 float 经过 from→to 必须**逐字节**回到原布局
     float probe[16];
@@ -93,12 +93,12 @@ void caseLeftHandedCamera() {
 
     const double h = 1.0 / std::tan(0.5);
     const lift::math::Mat4 p = lift::math::perspectiveFovLH(1.0f, 2.0f, 1.0f, 1001.0f);
-    LIFT_CHECK(near(d3dOf(p, 0, 0), static_cast<float>(h / 2.0), 1e-5f));
-    LIFT_CHECK(near(d3dOf(p, 1, 1), static_cast<float>(h), 1e-5f));
-    LIFT_CHECK(near(d3dOf(p, 2, 2), 1001.0f / 1000.0f, 1e-5f));
-    LIFT_CHECK(near(d3dOf(p, 2, 3), 1.0f));  // D3DX 布局 m[11] = 1
-    LIFT_CHECK(near(d3dOf(p, 3, 2), -1001.0f / 1000.0f, 1e-5f));
-    LIFT_CHECK(near(d3dOf(p, 3, 3), 0.0f));
+    LIFT_CHECK(near_(d3dOf(p, 0, 0), static_cast<float>(h / 2.0), 1e-5f));
+    LIFT_CHECK(near_(d3dOf(p, 1, 1), static_cast<float>(h), 1e-5f));
+    LIFT_CHECK(near_(d3dOf(p, 2, 2), 1001.0f / 1000.0f, 1e-5f));
+    LIFT_CHECK(near_(d3dOf(p, 2, 3), 1.0f));  // D3DX 布局 m[11] = 1
+    LIFT_CHECK(near_(d3dOf(p, 3, 2), -1001.0f / 1000.0f, 1e-5f));
+    LIFT_CHECK(near_(d3dOf(p, 3, 3), 0.0f));
 
     // D3D 的深度范围是 [0,1]：zn ⇒ 0、zf ⇒ 1（⛔ 不是 OpenGL 的 [-1,1]）
     const std::array<double, 16> pd_raw =
@@ -109,38 +109,38 @@ void caseLeftHandedCamera() {
         return c.z / c.w;
     };
     // 矩阵是 float（D3DXMATRIX）⇒ 用 1e-6 的容差；语义是"zn 映到 0、zf 映到 1"
-    LIFT_CHECK(near(clipZ(1.0), 0.0, 1e-6));
-    LIFT_CHECK(near(clipZ(1001.0), 1.0, 1e-6));
+    LIFT_CHECK(near_(clipZ(1.0), 0.0, 1e-6));
+    LIFT_CHECK(near_(clipZ(1001.0), 1.0, 1e-6));
 
     // LookAtLH：eye=(0,0,-10) at 原点 up=+y ⇒ 旋转为单位阵、平移 z=+10
     const float eye[3] = {0.0f, 0.0f, -10.0f};
     const float at[3] = {0.0f, 0.0f, 0.0f};
     const float up[3] = {0.0f, 1.0f, 0.0f};
     const lift::math::Mat4 view = lift::math::lookAtLH(eye, at, up);
-    LIFT_CHECK(near(d3dOf(view, 0, 0), 1.0f));
-    LIFT_CHECK(near(d3dOf(view, 1, 1), 1.0f));
-    LIFT_CHECK(near(d3dOf(view, 2, 2), 1.0f));
-    LIFT_CHECK(near(d3dOf(view, 3, 2), 10.0f));
-    LIFT_CHECK(near(d3dOf(view, 3, 0), 0.0f));
-    LIFT_CHECK(near(d3dOf(view, 3, 1), 0.0f));
+    LIFT_CHECK(near_(d3dOf(view, 0, 0), 1.0f));
+    LIFT_CHECK(near_(d3dOf(view, 1, 1), 1.0f));
+    LIFT_CHECK(near_(d3dOf(view, 2, 2), 1.0f));
+    LIFT_CHECK(near_(d3dOf(view, 3, 2), 10.0f));
+    LIFT_CHECK(near_(d3dOf(view, 3, 0), 0.0f));
+    LIFT_CHECK(near_(d3dOf(view, 3, 1), 0.0f));
 
     // 视图变换：eye ⇒ 原点；at ⇒ (0,0,+10)（左手 +z 朝前）
     const std::array<double, 16> view_raw = d3dDouble(view);
     const lift::math::Mat4d viewd = lift::math::fromD3DLayout(view_raw.data());
     const lift::math::Vec3d eye_v =
         lift::math::transformPoint3D3D(viewd, lift::math::Vec3d(0.0, 0.0, -10.0));
-    LIFT_CHECK(near(eye_v.x, 0.0));
-    LIFT_CHECK(near(eye_v.y, 0.0));
-    LIFT_CHECK(near(eye_v.z, 0.0));
+    LIFT_CHECK(near_(eye_v.x, 0.0));
+    LIFT_CHECK(near_(eye_v.y, 0.0));
+    LIFT_CHECK(near_(eye_v.z, 0.0));
     const lift::math::Vec3d at_v = lift::math::transformPoint3D3D(viewd, lift::math::Vec3d(0.0, 0.0, 0.0));
-    LIFT_CHECK(near(at_v.z, 10.0));
+    LIFT_CHECK(near_(at_v.z, 10.0));
 
     // 正交：2/w、2/h、1/(zf-zn)、-zn/(zf-zn)
     const lift::math::Mat4 o = lift::math::orthoLH(2.0f, 4.0f, 1.0f, 101.0f);
-    LIFT_CHECK(near(d3dOf(o, 0, 0), 1.0f));
-    LIFT_CHECK(near(d3dOf(o, 1, 1), 0.5f));
-    LIFT_CHECK(near(d3dOf(o, 2, 2), 0.01f, 1e-7f));
-    LIFT_CHECK(near(d3dOf(o, 3, 2), -0.01f, 1e-7f));
+    LIFT_CHECK(near_(d3dOf(o, 0, 0), 1.0f));
+    LIFT_CHECK(near_(d3dOf(o, 1, 1), 0.5f));
+    LIFT_CHECK(near_(d3dOf(o, 2, 2), 0.01f, 1e-7f));
+    LIFT_CHECK(near_(d3dOf(o, 3, 2), -0.01f, 1e-7f));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -155,10 +155,10 @@ void caseZeroNormalize() {
     LIFT_CHECK(out.x == 0.0 && out.y == 0.0 && out.z == 0.0);  // ⛔ 不是 NaN
 
     const double len = lift::math::normalize3D3D(lift::math::Vec3d(3.0, 4.0, 0.0), &out);
-    LIFT_CHECK(near(len, 5.0));
-    LIFT_CHECK(near(out.x, 0.6));
-    LIFT_CHECK(near(out.y, 0.8));
-    LIFT_CHECK(near(out.z, 0.0));
+    LIFT_CHECK(near_(len, 5.0));
+    LIFT_CHECK(near_(out.x, 0.6));
+    LIFT_CHECK(near_(out.y, 0.8));
+    LIFT_CHECK(near_(out.z, 0.0));
 
     // float 便捷版（D3DXVec3Normalize 用的就是它）
     const float in[3] = {0.0f, 0.0f, 0.0f};
@@ -167,9 +167,9 @@ void caseZeroNormalize() {
     LIFT_CHECK(o[0] == 0.0f && o[1] == 0.0f && o[2] == 0.0f);
 
     const float in2[3] = {3.0f, 4.0f, 0.0f};
-    LIFT_CHECK(near(lift::math::normalize3(in2, o), 5.0f));
-    LIFT_CHECK(near(o[0], 0.6f, 1e-6f));
-    LIFT_CHECK(near(o[1], 0.8f, 1e-6f));
+    LIFT_CHECK(near_(lift::math::normalize3(in2, o), 5.0f));
+    LIFT_CHECK(near_(o[0], 0.6f, 1e-6f));
+    LIFT_CHECK(near_(o[1], 0.8f, 1e-6f));
 }
 
 }  // namespace

@@ -24,6 +24,7 @@
 #include "runtime/heap.h"
 #include "runtime/image.h"
 #include "runtime/memory.h"
+#include "runtime/native_overrides.h"
 #include "runtime/shims.h"
 #include "runtime/vfs.h"
 #include "runtime/x86.h"
@@ -55,6 +56,10 @@ struct RunOptions {
     bool trace_inputs = false;       // 打印输入清单（exe 路径串 / 命令行 / 环境块 / 时钟起点）
     // 探索用墙钟上限（秒，0 = 不限）。不是确定性判据：确定性比对用 max_insns / max_frames。
     double time_limit_sec = 0.0;
+    // ★ guest 热点 profile（诊断；默认关）：块命中数记在 Block 实体上，跑完按"命中 × 块内指令数"排序。
+    //   ⛔ 这不是性能判据本身：A/B 用墙钟，profile 只回答"热点在哪"。
+    bool profile = false;
+    std::size_t profile_top = 30;
 };
 
 // A4 的**输入清单**（plan §5 A4）：这几项一变，执行路径就可能变。
@@ -69,6 +74,7 @@ struct TraceInputs {
     std::string overlay_host;   // VFS overlay 的宿主侧（= 真正在跑的拆壳件）
     std::string agerc_path;     // `--agerc` / 自动发现的原始路径（空 = 没有 AGERC 镜像）
     std::string agerc_sha256;   // AGERC 镜像的 sha256（空 = 没有镜像）
+    std::string native_overrides;  // 解析后的 override 集（name@EA/conv/argB；空 = 全关）
     std::uint64_t clock_start_100ns = 0;
     bool real_time = false;
 };
@@ -117,6 +123,13 @@ public:
 
     RunResult run(const RunOptions& opts);
 
+    // ★ guest 函数级 native override（试点）：按名字从 `.lst` 解析 EA（`_memcpy` / `_memset` / …），
+    //   列表用逗号分隔；`all` = 所有能在 `.lst` 里找到的已知叶子。失败 ⇒ false + err（⛔ 不静默跳过）。
+    //   必须在 `loadLst()` 之后调用。默认空 = 全关。
+    bool configureNativeOverrides(const std::string& list, std::string* err);
+    NativeOverrideTable& overrides() { return overrides_; }
+    const NativeOverrideTable& overrides() const { return overrides_; }
+
     // ---- 访问器 ----
     GuestMemory& mem() { return mem_; }
     const GuestMemory& mem() const { return mem_; }
@@ -159,6 +172,8 @@ public:
     // 机器可读的缺口/覆盖快照（给 `tools/lift.mjs report` 用；⛔ 人读输出不要靠它）
     void reportCoverageJson(std::FILE* out) const;
     void dumpRunSummary(const RunResult& r, std::FILE* out) const;
+    // guest 热点（块级 + 函数聚合）。没有 `.lst` 时函数列是 `?`（⛔ 不猜）。
+    void dumpProfile(std::FILE* out, std::size_t top) const;
 
 private:
     void wire();
@@ -176,6 +191,7 @@ private:
     GuestHeap heap_;
     HandleTable handles_;
     GuestCallStack guest_calls_;
+    NativeOverrideTable overrides_;
     WindowManager windows_;
     ComRegistry com_;
     SurfaceArena surfaces_;
