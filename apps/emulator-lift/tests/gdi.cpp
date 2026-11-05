@@ -63,6 +63,7 @@ constexpr std::uint32_t kBkOld = 0x00402744u;
 constexpr std::uint32_t kTextColorOld = 0x00402748u;
 constexpr std::uint32_t kStockBrush = 0x0040274Cu;
 constexpr std::uint32_t kNeed1 = 0x00402750u;
+constexpr std::uint32_t kSelectDeleted = 0x00402754u;
 constexpr std::uint32_t kStubBase = 0x7FF80000u;
 constexpr std::uint32_t kSentinel = 0xFFFFFFFFu;
 constexpr std::uint32_t kFixtureHeap = 0x00100000u;
@@ -278,7 +279,7 @@ int main() {
     for (const std::uint32_t slot : {kHdc, kFont, kCurrentFont, kOldObject, kOldObject2, kNeeded, kGot,
                                      kDelSelected, kRestored, kDelFree, kDelAgain, kDelDc, kDelDcObject,
                                      kBkOld, kTextColorOld, kStockBrush, kEnumResult, kEnumSeen,
-                                     kEnumFaceFirst, kEnumLparam, kNeed1}) {
+                                     kEnumFaceFirst, kEnumLparam, kNeed1, kSelectDeleted}) {
         LIFT_CHECK(m.placeData(slot, zeros.data(), 4, &err));
     }
 
@@ -513,6 +514,11 @@ int main() {
         b.pushMem(kFont);
         b.callRel(stubOf(m, "DeleteObject"));
         b.storeEax(kDelAgain);
+        // ★ 删除后再 SelectObject：Windows 返回 NULL，且**不改 DC 当前对象**（不能“复活”已删对象）。
+        b.pushMem(kFont);
+        b.pushMem(kHdc);
+        b.callRel(stubOf(m, "SelectObject"));
+        b.storeEax(kSelectDeleted);
         b.pushMem(kHdc);
         b.callRel(stubOf(m, "DeleteDC"));
         b.storeEax(kDelDc);
@@ -531,6 +537,7 @@ int main() {
         LIFT_CHECK_EQ_U32(m.mem().rd32(kDelFree), 1u);  // 选回旧对象后可以删
         LIFT_CHECK(lift::gdiAsFont(m.handles(), hfont) == nullptr);
         LIFT_CHECK_EQ_U32(m.mem().rd32(kDelAgain), 0u);        // 重复删除 ⇒ FALSE
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kSelectDeleted), 0u);   // 删除后再选 ⇒ NULL（不复活）
         LIFT_CHECK_EQ_U32(m.mem().rd32(kDelDc), 1u);           // DeleteDC 成功
         LIFT_CHECK(lift::gdiAsDc(m.handles(), hdc) == nullptr);
         LIFT_CHECK_EQ_U32(m.mem().rd32(kDelDcObject), 0u);     // DeleteObject(DC) ⇒ FALSE

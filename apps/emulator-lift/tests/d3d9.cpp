@@ -11,9 +11,10 @@
 //      caps 的 0xD4 字节**全部被写**（两块不同初值的缓冲得到逐字节相同的结果）+ 0xD4 外不被写。
 //   ⑤ `Clear(0,NULL,3,0,1.0f,0)`（以及带 D3DRECT 的 Clear）**真的**改后缓冲像素：颜色对、矩形外不变。
 //   ⑥ `Present` 之后 `frameCount()==1`、`lastHash()` 与 arena 哈希一致；**两台新机器同输入 ⇒ 同帧哈希**。
-//   ⑦ GetBackBuffer / SetRenderTarget / 后缓冲 surface 的 GetDesc 可回查；`--dump-frame` 的
+//   ⑦ CreateVertexBuffer 返回对象，SetStreamSource 接收同一对象（内部换算成状态块）。
+//   ⑧ GetBackBuffer / SetRenderTarget / 后缓冲 surface 的 GetDesc 可回查；`--dump-frame` 的
 //      `{frame}` 模板真的写出 BMP（头两字节 BM）。
-//   ⑧ 未实现的槽 ⇒ **loud trap**（机器停 + `stop_why`）且日志输入里带 iface + 偏移（`r.detail` 里就有）
+//   ⑨ 未实现的槽 ⇒ **loud trap**（机器停 + `stop_why`）且日志输入里带 iface + 偏移（`r.detail` 里就有）
 //      —— ⛔ 不许返回 0 继续跑。
 //
 // ★ 所有方法调用都从 **guest 代码** 经 vtable 调（`mov eax,[vtbl]; push …; call [eax+off]`），
@@ -565,7 +566,34 @@ void caseFrameDump() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ⑦ GetBackBuffer + SetRenderTarget：后缓冲 surface 可取得，SetRenderTarget(0) 恢复后缓冲
+// ⑦ CreateVertexBuffer 返回对象，SetStreamSource 接收的也是**对象**（内部换算成状态块）
+// ---------------------------------------------------------------------------------------
+void caseVertexStreamBinding() {
+    lift_test::g_current_case = "d3d9/vertex-stream-binding";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t obj = f.createDirect3D();
+    LIFT_CHECK_NE_U32(obj, 0u);
+    if (obj == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(obj, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    // CreateVertexBuffer(this, Length, Usage, FVF, Pool, ppVB)
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x68u, {12u, 8u, 0x0044u, 1u, out, 0u}), 0u);
+    const std::uint32_t vb = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(vb, 0u);
+    LIFT_CHECK_NE_U32(vb, 0xDEADBEEFu);
+    // 旧实现把对象 EA 当状态块 EA ⇒ 这里会 D3DERR_INVALIDCALL；修复后应 S_OK。
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x190u, {0u, vb, 0u, 12u}), 0u);
+    // 非本模块对象仍必须拒绝
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x190u, {0u, 0xDEADBEEFu, 0u, 12u}), 0x8876086Cu);
+    LIFT_CHECK_EQ_U32(f.method(vb, 0x08u, {}), 0u);  // Release VB
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑧ GetBackBuffer + SetRenderTarget：后缓冲 surface 可取得，SetRenderTarget(0) 恢复后缓冲
 // ---------------------------------------------------------------------------------------
 void caseGetBackBufferAndRenderTarget() {
     lift_test::g_current_case = "d3d9/backbuffer-and-render-target";
@@ -611,7 +639,7 @@ void caseGetBackBufferAndRenderTarget() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ⑧ 未实现的槽 ⇒ loud trap（机器停 + 报 iface/偏移），⛔ 不许返回 0 继续跑
+// ⑨ 未实现的槽 ⇒ loud trap（机器停 + 报 iface/偏移），⛔ 不许返回 0 继续跑
 // ---------------------------------------------------------------------------------------
 void caseUnimplementedSlotTraps() {
     // (a) IDirect3DDevice9 的未实现槽 #3 TestCooperativeLevel（+0x0C）
@@ -692,6 +720,7 @@ int main() {
         caseClear();
         casePresent();
         caseFrameDump();
+        caseVertexStreamBinding();
         caseGetBackBufferAndRenderTarget();
         caseUnimplementedSlotTraps();
         return finish("d3d9");

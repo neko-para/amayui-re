@@ -2334,8 +2334,17 @@ std::uint32_t setStreamSource(X86& cpu, std::uint32_t dev, std::uint32_t stream,
         return kInvalidCall;
     }
     if (vb != 0) {
+        // ★ 入参是 guest 可见的 **IDirect3DVertexBuffer9 对象**；流水线内部存的是它的状态块。
+        //   旧实现把对象 EA 直接交给 `vertexBufferInfoOfState` ⇒ 每个真实 SetStreamSource 都失败，
+        //   Draw 于是永远报“没有 SetStreamSource(0)”（boot 日志可见）。这里只做一次对象 → 状态换算。
+        if (!cpu.com) {
+            if (why) *why = "D3D9 流水线：SetStreamSource 需要 cpu.com 来解析顶点缓冲对象";
+            return kInvalidCall;
+        }
+        const std::uint32_t vb_state = cpu.com->userOf(vb);
         std::uint32_t length = 0;
-        if (!vertexBufferInfoOfState(cpu, vb, &length, nullptr, nullptr, why)) {
+        if (vb_state == 0 ||
+            !vertexBufferInfoOfState(cpu, vb_state, &length, nullptr, nullptr, why)) {
             pipeLog("SetStreamSource", "0x%08X 不是本模块建的顶点缓冲 ⇒ D3DERR_INVALIDCALL", vb);
             return kInvalidCall;
         }
@@ -2343,6 +2352,7 @@ std::uint32_t setStreamSource(X86& cpu, std::uint32_t dev, std::uint32_t stream,
             pipeLog("SetStreamSource", "OffsetInBytes=%u 超过缓冲长度 %u ⇒ D3DERR_INVALIDCALL", offset, length);
             return kInvalidCall;
         }
+        vb = vb_state;  // 后续只存状态块（Draw 用同一个口径）
     }
     plSet(cpu, pe, kPlStreams + stream * 16u + 0u, vb);
     plSet(cpu, pe, kPlStreams + stream * 16u + 4u, offset);
@@ -2354,11 +2364,19 @@ std::uint32_t setIndices(X86& cpu, std::uint32_t dev, std::uint32_t ib, std::str
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
     if (ib != 0) {
+        // 同 SetStreamSource：入参是对象 EA，流水线内部存状态块 EA。
+        if (!cpu.com) {
+            if (why) *why = "D3D9 流水线：SetIndices 需要 cpu.com 来解析索引缓冲对象";
+            return kInvalidCall;
+        }
+        const std::uint32_t ib_state = cpu.com->userOf(ib);
         std::uint32_t length = 0;
-        if (!indexBufferInfoOfState(cpu, ib, &length, nullptr, nullptr, why)) {
+        if (ib_state == 0 ||
+            !indexBufferInfoOfState(cpu, ib_state, &length, nullptr, nullptr, why)) {
             pipeLog("SetIndices", "0x%08X 不是本模块建的索引缓冲 ⇒ D3DERR_INVALIDCALL", ib);
             return kInvalidCall;
         }
+        ib = ib_state;
     }
     plSet(cpu, pe, kPlIndices, ib);
     return kOk;

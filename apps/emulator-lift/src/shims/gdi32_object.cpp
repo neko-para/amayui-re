@@ -96,7 +96,18 @@ void shimSelectObject(X86& cpu, ShimCall& call) {
 
     HandleEntry* entry = cpu.handles->get(object);
     if (entry == nullptr) {
-        shimLog("gdi32", "SelectObject", "未知对象 0x%08X ⇒ 0（Win32 失败值；⛔ 不写坏 DC）", object);
+        if (object == 0) {
+            shimLog("gdi32", "SelectObject",
+                    "hdc=0x%08X ← NULL ⇒ 0（Win32 失败值；DC 当前对象不变）", hdc);
+        } else {
+            // ★ 已观测到的 guest 形态（vertical-font cache，0x0045A0F1..0x0045A104）：
+            //   SelectObject(hdc, stock) → DeleteObject(cached) → SelectObject(hdc, **cached**)
+            //   ⇒ 第二次 select 的是刚删掉的字形（vertical `@ＭＳ ゴシック`）。Win32 同样返回 NULL；
+            //   ⛔ 这里不复活已删对象（那会掩盖 guest 的 use-after-delete，并把句柄生命周期变成假的）。
+            shimLog("gdi32", "SelectObject",
+                    "hdc=0x%08X ← 未知 / 已删除对象 0x%08X ⇒ 0（Win32 失败值；DC 当前对象不变）",
+                    hdc, object);
+        }
         call.result = 0;
         return;
     }
