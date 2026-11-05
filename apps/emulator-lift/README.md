@@ -153,8 +153,13 @@ apps/emulator-lift/
                                         --max-insns --max-frames --dump-frame --time-limit
                                         --safe-memory --report --bench --smoke
                                         --profile --profile-top --native-overrides
+                                        --present headless|window|auto --present-driver
+                                        --present-vsync --present-hidden --present-screenshot
   src/runtime/host_encoding.{h,cpp}   ← 进程入口编码契约：UTF-8 argv（GetCommandLineW）/ 控制台码页
   src/runtime/native_overrides.{h,cpp}← guest 函数级 native override（试点；默认关）
+  src/runtime/present.{h,cpp}         ← 唯一记录点（hash / frameCount / BMP）+ 可选 PresentSink
+  src/runtime/present_sdl.{h,cpp}     ← 真实 SDL 窗口 + GPU API 呈现（pimpl；头文件不暴露 SDL 类型）
+  src/runtime/frame_blit.{h,cpp}      ← guest 后缓冲 masks → 宿主纹理格式（六种；纯函数）
   src/runtime/memory.{h,cpp}          ← 4 GiB 预留 + 按需提交 + 提交位图 + 区域表 + fault 诊断
   src/runtime/image.{h,cpp}           ← PE 节表/导入表/入口 + 映射 + 栈(1 MiB+guard) + TEB/PEB
   src/runtime/sha256.{h,cpp}          ← SHA-256（校验"执行的字节 = 语料描述的字节"）
@@ -173,7 +178,8 @@ apps/emulator-lift/
   src/shims/kernel32_*.cpp            ← 七族（一文件一族）+ bootstrap（启动路径补的）+ register.cpp
   tests/*.cpp                         ← conformance(A1) / dispatch / shim-abi / mnemonics /
                                         loader / decode-crosscheck(A3) / corpus-mnemonics(A2) /
-                                        boot-trace(A4) / base-coverage(A5) / native-override
+                                        boot-trace(A4) / base-coverage(A5) / native-override /
+                                        present-sink / frame-blit / present-window
   third_party/berkeley-softfloat/     ← vendor 的 SoftFloat 3e（8086 特化）+ 清单哈希 README
 ```
 
@@ -212,7 +218,37 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
   D3D9 的 `Present` 上消费。
 - BMP 只是当前实现的零依赖格式；⛔ 不声称它等于真机像素。
 
-## 4.2 热点 profile 与 guest 函数级 native override（试点）
+## 4.2 可切换呈现后端（`--present`）
+
+**缺省 `--present headless`**：与今天逐字节一致（hash / frameCount / `--dump-frame` / `--max-frames`；
+不初始化 SDL 视频）。**`--present window`** 打开真实 SDL 窗口并走 **GPU API 路径**：
+
+```bash
+# 看得见的窗口（真 SDL 窗口；自动 real-time）
+./out/emulator-lift ... --max-frames 300 --present window
+# 无人值守 / CTest：隐藏窗口 + 宿主回读截图
+./out/emulator-lift ... --max-frames 1 --present window --present-hidden \
+  --present-screenshot ../../.tmp/window-{frame}.bmp
+```
+
+- 驱动列表 `--present-driver`（逗号分隔，缺省 `gpu,direct3d12,direct3d11,vulkan,metal,opengl`）：
+  `gpu` 命中时日志 `present: driver=gpu gpu=direct3d12`，且 `SDL_GetGPURendererDevice()!=NULL`
+  —— 这是"确实走 SDL_GPU"的正证据。其它驱动是 GPU API 路径，但可能是 WARP/GDI，日志如实打。
+  缺省列表**不含 software**；显式 `--present-driver software` 只用于测试，会打"不是 GPU 路径"警告。
+- 像素格式按 **masks** 选（六种 D3D9 后缓冲格式）；纹理 blend=NONE（`A8R8G8B8` / DDraw 的 32bpp
+  带真实 alpha，alpha=0 的帧在默认混合下会整窗黑；`X8R8G8B8` 没有 alpha，不受影响）；
+  逻辑呈现尺寸按当前帧，resize 用 letterbox。
+- `--present-screenshot` 是**窗口回读**（present 前），与 `--dump-frame` 的 **guest 后缓冲** 是两份独立
+  产物：1:1 时可逐像素对照，缩放/letterbox 下只比内容矩形。
+- 显式 `--present window` 打不开 ⇒ **exit 2**；运行期失败 ⇒ 记录 + 3 次后回退 headless（guest 的
+  Present 结果不受影响）。`--present auto` 仅调试用：失败回 headless。
+- DDraw **不在本次验收内**（用户口径：AGE 默认不走 DDraw）；`Flip` 复用同一 sink 只是副作用，
+  `--dump-frame` 仍只在 D3D9 Present 消费。
+- ⚠ 本阶段**没有**做输入映射 / `GetMessageA` 宿主事件泵：如果 guest 走到空队列 `GetMessageA`，
+  仍会按现有语义 abort（交互主循环另开单）。看画面用 `--real-time` / `--max-frames`；
+  `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
+
+## 4.3 热点 profile 与 guest 函数级 native override（试点）
 
 ```bash
 # 找热点（块级 + 按 .lst 函数入口聚合；不改变执行结果）
@@ -242,7 +278,8 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
 | 块寻址 / chunk / 跳转表 | 同文件 §5.7 + `src/runtime/x86.h` |
 | 宿主层 / 不依赖 AppKit 的口径 | 同文件 §5.5 |
 | 可接受偏差（菜单 / 音频 / 视频 / Live2D / 3D） | `SCOPE.md` + 同文件 §4.1 |
+| 可切换呈现后端（headless/CPU ↔ SDL/GPU） | 本文件 §4.2 + `src/runtime/present_sdl.h` |
 | 覆盖清单格式 | 同文件 §5.7 |
 | 实现计划（切片 / 判据 / 决策点） | M1 `docs/plan-m1-cpu-base.md` · M2 `docs/plan-m2-2d-text.md`（索引 `docs/README.md`） |
-| 热点 profile / native override 的开关与 ABI | 本文件 §4.2 + `src/runtime/native_overrides.h` |
+| 热点 profile / native override 的开关与 ABI | 本文件 §4.3 + `src/runtime/native_overrides.h` |
 | 需求与进度 | `REQ-01M6GJMENJ8XEK4ZPTA768YBPW` · `pnpm tools requirements plan` |

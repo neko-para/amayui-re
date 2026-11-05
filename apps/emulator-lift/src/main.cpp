@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,7 @@
 #include "runtime/font.h"
 #include "runtime/host_encoding.h"
 #include "runtime/machine.h"
+#include "runtime/present_sdl.h"
 #include "runtime/sha256.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
 
@@ -73,6 +75,11 @@ void usage() {
         "  --bench <N>         跑 N 条指令并报 MIPS\n"
         "  --profile           跑完后打印 guest 热点（块级 + 按 .lst 函数入口聚合）\n"
         "  --profile-top <N>   profile 每张表打印前 N 项（缺省 30）\n"
+        "  --present <mode>    headless（缺省）/ window / auto：呈现后端；window = SDL 窗口 + GPU API 路径\n"
+        "  --present-driver <list>  逗号列表（缺省 gpu,direct3d12,direct3d11,vulkan,metal,opengl）\n"
+        "  --present-vsync 0|1       窗口垂直同步（缺省 0；1 会改变墙钟）\n"
+        "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
+        "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
         "  --native-overrides <list>  逗号分隔的 guest 函数名（或 all）：函数级 native override（缺省关）\n"
         "  --baseline-lift <N> 宿主基线补偿像素（缺省 2；0 = 关；★ 宿主视觉策略，不是引擎语义）\n"
@@ -119,6 +126,14 @@ int main(int argc, char** argv) {
     std::string agerc_path;
     std::string font_path;
     std::string native_overrides;
+    std::string present_mode = "headless";
+    std::string present_driver = lift::SdlWindowOptions{}.driver_list;
+    std::string present_screenshot;
+    int present_vsync = 0;
+    bool present_hidden = false;
+    bool present_driver_set = false;
+    bool present_vsync_set = false;
+    bool present_screenshot_set = false;
     int baseline_lift = 2;
     bool font_engine_name = false;
 
@@ -182,6 +197,34 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "--profile-top 需要正整数\n");
                 return 2;
             }
+        } else if (std::strcmp(a, "--present") == 0 && i + 1 < arg_count) {
+            present_mode = args[++i];
+        } else if (std::strcmp(a, "--present-driver") == 0 && i + 1 < arg_count) {
+            present_driver = args[++i];
+            present_driver_set = true;
+            if (present_driver.empty()) {
+                std::fprintf(stderr, "--present-driver 需要非空列表\n");
+                return 2;
+            }
+        } else if (std::strcmp(a, "--present-vsync") == 0 && i + 1 < arg_count) {
+            const char* text = args[++i].c_str();
+            char* end = nullptr;
+            const long value = std::strtol(text, &end, 10);
+            present_vsync_set = true;
+            if (end == text || *end != '\0' || (value != 0 && value != 1)) {
+                std::fprintf(stderr, "--present-vsync 只能是 0 或 1（收到 %s）\n", text);
+                return 2;
+            }
+            present_vsync = static_cast<int>(value);
+        } else if (std::strcmp(a, "--present-hidden") == 0) {
+            present_hidden = true;
+        } else if (std::strcmp(a, "--present-screenshot") == 0 && i + 1 < arg_count) {
+            present_screenshot = args[++i];
+            present_screenshot_set = true;
+            if (present_screenshot.empty()) {
+                std::fprintf(stderr, "--present-screenshot 需要一个非空路径\n");
+                return 2;
+            }
         } else if (std::strcmp(a, "--trace-shims") == 0) {
             trace_shims = true;
         } else if (std::strcmp(a, "--trace-blocks") == 0) {
@@ -214,6 +257,32 @@ int main(int argc, char** argv) {
             usage();
             return 2;
         }
+    }
+
+    // ---- 呈现后端参数校验（缺省 headless；窗口参数给了就必须显式 --present window/auto）----
+    if (present_mode != "headless" && present_mode != "window" && present_mode != "auto") {
+        std::fprintf(stderr, "--present 只能是 headless / window / auto（收到 %s）\n", present_mode.c_str());
+        return 2;
+    }
+    const bool present_window_flag =
+        present_driver_set || present_vsync_set || present_hidden || present_screenshot_set;
+    if (present_mode == "headless" && present_window_flag) {
+        std::fprintf(stderr, "--present headless 不接受窗口参数（--present-driver / --present-vsync / "
+                             "--present-hidden / --present-screenshot）\n");
+        return 2;
+    }
+    if (present_mode != "headless" && present_driver.find("software") != std::string::npos) {
+        std::fprintf(stderr,
+                     "emulator-lift: ⚠ --present-driver 含 software ⇒ 这是**软件渲染**，不是 GPU 路径"
+                     "（只用于测试 / 诊断）\n");
+    }
+    if (present_mode != "headless" && smoke) {
+        std::fprintf(stderr, "--smoke 不建窗口；不要同时给 --present window/auto\n");
+        return 2;
+    }
+    if (present_mode != "headless" && report) {
+        std::fprintf(stderr, "--report 只打印基座缺口；不要同时给 --present window/auto\n");
+        return 2;
     }
 
     if (smoke) {
@@ -468,6 +537,39 @@ int main(int argc, char** argv) {
     }
     if (max_frames != 0) std::printf("max-frames: %u（D3D9 Present 到达后停）\n", max_frames);
 
+    // ---- 可选显示后端（缺省 headless：不初始化 SDL 视频，行为与今天逐字节一致）----
+    bool present_window_active = false;
+    if (present_mode != "headless") {
+        lift::SdlWindowOptions wopt;
+        wopt.title = "emulator-lift";
+        wopt.driver_list = present_driver;
+        wopt.vsync = present_vsync != 0;
+        wopt.hidden = present_hidden;
+        wopt.screenshot_path = present_screenshot;
+        auto sdl = std::make_unique<lift::SdlWindow>();
+        std::string werr;
+        if (!sdl->init(wopt, &werr)) {
+            if (present_mode == "auto") {
+                std::fprintf(stderr, "emulator-lift: --present auto：窗口打开失败，回退 headless：%s\n",
+                             werr.c_str());
+                if (!present_screenshot.empty()) {
+                    std::fprintf(stderr, "  ⚠ --present-screenshot 不会产出（headless 没有窗口像素）\n");
+                }
+            } else {
+                std::fprintf(stderr, "emulator-lift: --present window 失败：%s\n", werr.c_str());
+                return 2;
+            }
+        } else {
+            std::printf("present   : %s\n", sdl->describe().c_str());
+            if (!sdl->isGpuRenderer()) {
+                std::printf("present   : 注意：driver=%s 是 GPU API 路径，但不是 SDL_GPU（gpu driver）\n",
+                            sdl->rendererName());
+            }
+            machine.presenter().setSink(std::move(sdl));
+            present_window_active = true;
+        }
+    }
+
     lift::RunOptions opt;
     opt.until_ea = until_ea;
     opt.stop_on_first_shim = until_shim;
@@ -475,14 +577,19 @@ int main(int argc, char** argv) {
     opt.time_limit_sec = time_limit_sec;
     opt.trace_shims = trace_shims;
     opt.trace_blocks = trace_blocks;
-    opt.real_time = real_time;
+    opt.real_time = real_time || present_window_active;
     opt.trace_inputs = trace_inputs || trace_shims;
     opt.profile = profile;
     opt.profile_top = profile_top;
-    if (real_time) {
+    if (opt.real_time) {
         std::fprintf(stderr,
-                     "emulator-lift: ⚠ --real-time：宿主时钟进 guest ⇒ **A4 的逐字节可复现断言自动跳过**"
-                     "（trace 输入清单里的 clock=REAL-TIME）\n");
+                     "emulator-lift: ⚠ %s：宿主时钟进 guest ⇒ **A4 的逐字节可复现断言自动跳过**"
+                     "（trace 输入清单里的 clock=REAL-TIME）\n",
+                     present_window_active ? "窗口模式（自动 real-time）" : "--real-time");
+    }
+    if (bench && present_window_active) {
+        std::fprintf(stderr,
+                     "emulator-lift: ⚠ --bench + 窗口呈现：MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐\n");
     }
 
     const std::uint64_t t0 = SDL_GetTicksNS();

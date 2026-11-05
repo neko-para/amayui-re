@@ -24,7 +24,9 @@ if(NOT DEFINED VCPKG_TARGET_TRIPLET AND NOT DEFINED ENV{VCPKG_ROOT})
         "或用 -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake。")
 endif()
 
-find_package(SDL3 CONFIG REQUIRED)
+# SDL_GetGPURendererDevice / SDL_CreateRenderer("gpu") 需要 SDL >= 3.4；
+# vcpkg baseline 当前 pin 3.4.18；这里显式写版本下限，换 baseline 时不会静默退回 3.2/3.3。
+find_package(SDL3 3.4 CONFIG REQUIRED)
 # Zydis 只**解码**，语义是我们自己的（plan §7.1）。
 find_package(Zydis CONFIG REQUIRED)
 
@@ -44,6 +46,8 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/pe_resource.cpp
     src/runtime/surface.cpp
     src/runtime/present.cpp
+    src/runtime/present_sdl.cpp
+    src/runtime/frame_blit.cpp
     src/runtime/ddraw_surface.cpp
     src/runtime/com.cpp
     src/runtime/machine.cpp
@@ -213,6 +217,27 @@ add_test(NAME user32-window COMMAND lift-user32-window)
 add_executable(lift-surface-present tests/surface_present.cpp)
 target_link_libraries(lift-surface-present PRIVATE emulator-lift-runtime)
 add_test(NAME surface-present COMMAND lift-surface-present)
+
+# ---- pure：PresentSink 契约（headless 默认不变 / sink 失败不污染 guest）----
+add_executable(lift-present-sink tests/present_sink.cpp)
+target_link_libraries(lift-present-sink PRIVATE emulator-lift-runtime)
+add_test(NAME present-sink COMMAND lift-present-sink)
+
+# ---- pure：guest 后缓冲格式选择（六种 masks，不按 bpp 猜）----
+add_executable(lift-frame-blit tests/frame_blit.cpp)
+target_link_libraries(lift-frame-blit PRIVATE emulator-lift-runtime)
+add_test(NAME frame-blit COMMAND lift-frame-blit)
+
+# ---- SDL 窗口 / 呈现（需要窗口系统；无桌面 ⇒ SKIP 77）----
+# dummy + software：测窗口/纹理/上传/渲染/回读的机械正确性（明确打印“不是 GPU”）。
+# --gpu：默认 GPU 驱动列表；必须 SDL_GetGPURendererDevice()!=NULL 才算通过（不许 software 假绿）。
+add_executable(lift-present-window tests/present_window.cpp)
+target_link_libraries(lift-present-window PRIVATE emulator-lift-runtime)
+add_test(NAME present-window COMMAND lift-present-window)
+set_tests_properties(present-window PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
+add_test(NAME present-window-gpu COMMAND lift-present-window --gpu)
+set_tests_properties(present-window-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(lift-mechanism tests/mechanism.cpp)
 target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)

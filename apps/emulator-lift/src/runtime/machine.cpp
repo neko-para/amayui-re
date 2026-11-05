@@ -302,6 +302,7 @@ RunResult Machine::run(const RunOptions& opts) {
     cpu_.running = true;
     const auto wall_start = std::chrono::steady_clock::now();
     std::uint64_t next_time_check = 0;
+    std::uint64_t next_present_check = 0;
     // ★ native override 的入口判据：**上一条执行的是 `call`**，且目标就是当前 eip。
     //   只按 EA 拦会把 `jmp`/尾调用也当成函数入口（那时栈上没有本次调用的返回地址，
     //   抬栈 + 弹返回地址 = 静默改坏控制流）。所以 call 目标只对**下一次** dispatcher 迭代有效。
@@ -319,6 +320,18 @@ RunResult Machine::run(const RunOptions& opts) {
                 break;
             }
             next_time_check = cpu_.insns + 4096u;
+        }
+        // ★ 显示后端：块边界也要 pump（否则两次 Present 之间窗口假死）。无 sink ⇒ 零成本。
+        //   关窗必须设 r.reason（只把 cpu_.running 置 false 会落成 StopReason::None ⇒ exit 2）。
+        if (presenter_.hasSink() && cpu_.insns >= next_present_check) {
+            presenter_.pumpHostEvents();
+            if (presenter_.stopRequested()) {
+                r.reason = StopReason::Stopped;
+                r.detail = "present: 窗口关闭";
+                cpu_.running = false;
+                break;
+            }
+            next_present_check = cpu_.insns + 4096u;
         }
         // ★ 嵌套 guest 回调的续延点（guest_call.h）：先于定时器/块解码检查。
         if (cpu_.eip == GuestCallStack::kContinuationEa) {
@@ -660,6 +673,11 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                  shims_.calledUnimplemented().size());
     std::fprintf(out, "heap      : in_use %u peak %u allocs %u\n", heap_.bytesInUse(), heap_.peak(),
                  heap_.allocCount());
+    if (presenter_.sinkFailures() != 0) {
+        std::fprintf(out, "present   : sink 失败 %llu 次（最后：%s）\n",
+                     (unsigned long long)presenter_.sinkFailures(),
+                     presenter_.lastSinkError().empty() ? "-" : presenter_.lastSinkError().c_str());
+    }
     if (!overrides_.empty()) {
         std::uint64_t hits = 0;
         std::uint64_t fallbacks = 0;

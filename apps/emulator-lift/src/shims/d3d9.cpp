@@ -397,8 +397,9 @@ void shimSetDialogBoxMode(X86& cpu, ShimCall& call) {
         return;
     }
     const std::uint32_t enable = call.u32(1);
-    // headless：没有真窗口，D3D9 的对话框模式没有可观察效果 ⇒ 接受并记录（不是"假装做了"）
-    d3d9Log("SetDialogBoxMode", "bEnableDialogs=%u（headless：没有真窗口 ⇒ 只记录）", enable);
+    // 当前 presenter 不提供真窗口语义（可选 SDL 窗口只是显示目标）⇒ 对话框模式没有可观察效果
+    // ⇒ 接受并记录（不是"假装做了"）
+    d3d9Log("SetDialogBoxMode", "bEnableDialogs=%u（presenter 没有真窗口语义 ⇒ 只记录）", enable);
     call.result = d3d9::kOk;
 }
 
@@ -477,7 +478,7 @@ void shimPresent(X86& cpu, ShimCall& call) {
                 src_rect, dst_rect, dirty);
     }
     if (window_override != 0 && window_override != dev.hwnd) {
-        d3d9Log("Present", "hDestWindowOverride=0x%08X 被忽略（headless 只有一台虚拟显示）", window_override);
+        d3d9Log("Present", "hDestWindowOverride=0x%08X 被忽略（presenter 只有一台显示目标）", window_override);
     }
     std::string why;
     const std::uint32_t hr = d3d9::present(cpu, dev, &why);
