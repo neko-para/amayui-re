@@ -66,13 +66,6 @@
       "reason": "SCOPE §1 模态 no-op：AGERC 设置对话框整块不做 ⇒ 返回 IDOK(1)（\"用户没改设置\"）"
     },
     {
-      "target": "d3d9!Direct3DCreate9",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
       "target": "d3d9!Direct3DCreate9Ex",
       "kind": "stub",
       "impl": "stub_trap",
@@ -88,20 +81,6 @@
     },
     {
       "target": "d3dx9_43!D3DXCreateEffectFromResourceA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXCreateSprite",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXCreateTexture",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",
@@ -137,76 +116,6 @@
     },
     {
       "target": "d3dx9_43!D3DXMatrixDecompose",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXMatrixLookAtLH",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXMatrixMultiply",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXMatrixOrthoLH",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXMatrixPerspectiveFovLH",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXMatrixRotationAxis",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXMatrixRotationYawPitchRoll",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXMatrixScaling",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXMatrixTranslation",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXVec3Normalize",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
-      "target": "d3dx9_43!D3DXVec4Transform",
       "kind": "stub",
       "impl": "stub_trap",
       "boundary": "import",

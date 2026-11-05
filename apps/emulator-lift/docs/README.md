@@ -10,7 +10,7 @@
 | 用户拍板的可接受偏差（菜单 / 模态 / 音频 / 视频 / 3D） | [`../SCOPE.md`](../SCOPE.md) |
 | **M1 = guest CPU 核心 + §3.1 共享底座** 的完整计划与判据 | [`plan-m1-cpu-base.md`](plan-m1-cpu-base.md) |
 | **M2 = 2D 画面 + 文本（窗口/消息 · DirectDraw · GDI 字体·停手点 A）** 的计划、切片与 go/no-go | [`plan-m2-2d-text.md`](plan-m2-2d-text.md) |
-| **AGERC.DLL 该装哪一份字节**（ALF 条目 / 安装树根件 / 正版加壳件；各自 sha256 / 节表 / 资源映射失败数 / 版本；引擎按名字加载的 `.lst` 证据） | [`agerc-image.md`](agerc-image.md) |
+| **AGERC.DLL 的取证**（ALF 条目 / 安装树根件 / 正版加壳件；各自 sha256 / 节表 / 资源映射失败数 / 版本；引擎按名字加载的 `.lst` 证据）**与装载口径**（只有 `--game-dir/AGERC.DLL` 一条来源，`--agerc` 可显式覆盖；ALF 条目只作取证对照，⛔ 不是装载来源） | [`agerc-image.md`](agerc-image.md) |
 | **S4 的形态 → 状态事实表**（x87 / MMX / SSE 每条形态：语料条数 / 是否实现 / 哪条守卫 / 缺口去了哪） | [`s4-fpu-audit.md`](s4-fpu-audit.md) |
 | 平台面十簇的复杂度 / 工程量 / 切分顺序（上游分析） | [`../../../docs/03-emulator/platform-effort.md`](../../../docs/03-emulator/platform-effort.md) |
 | 还要做什么、到哪一步了 | `pnpm tools requirements plan` |

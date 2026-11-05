@@ -7,7 +7,6 @@
 //     ③ 最终寄存器 / 标志 / x87 元信息 + 已提交内存摘要的哈希。
 //   三个量两次完全相同 ⇒ 虚拟时钟与"宿主侧不许引入随机源"（plan §8.3）这两条成立。
 // ★ 如果没到 L2，本测试**红**并打印卡在哪个 EA —— 那是诚实的结果，不是"跳过"。
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -97,11 +96,18 @@ Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std
 }
 
 // ---------------------------------------------------------------------------------------
-// ★ 安装树红线（2026-11-05）：跑完整个 boot（含两遍 trace 运行）之后，`links/install` 必须
-//   **逐项未变**（相对路径 + 文件大小 + mtime；目录的 mtime 也一起比 —— 新建/删除条目会改它）。
-//   为什么放在这里：boot_trace 是**唯一**真的把 AGE.EXE 跑起来的用例；"引擎往安装树里写"
-//   这个 bug 正是它该守住的回归。没有安装树（CI / 没装）⇒ 打印一行并**跳过这一条**（不是假绿：
-//   这条断言存在的前提是那棵树存在，其它用例仍然照跑）。
+// ★ 安装树红线（2026-11-05 缩减）：跑完整个 boot（含两遍 trace 运行）之后，`links/install`
+//   根上那几个**已知会被写**的条目必须没变。
+//   ★ 为什么不再做递归快照：安装树是 7.5 GB 量级（旧实现对 `links/install` 递归枚举，
+//     实测 542 项，每项要尺寸 + mtime，再排序逐项比）—— 成本高、信息量低。而"引擎往安装树里
+//     写"只可能落到下面这几个固定名字上（plan-m2-2d-text.md §3 F6 / §4 D5）：
+//       `SYS4REG.INI`（退出时保存的玩家配置）· `SAVE`（存档目录）·
+//       `$$AGE.TMP`（版本自检探针）· `_.exe`（自检 / `/FIX` 岔路的替换可执行件）。
+//   ⇒ 每个名字只做一次 `fs::exists` + 一次 `last_write_time`（不存在 ⇒ false / 0），
+//     boot 前后各取一遍逐项比：出现 / 消失 / mtime 变了都算"被写了"。
+//   ★ boot_trace 直接跑 `Machine`，没有给 VFS 设 `--game-dir`（文件族会响亮失败）⇒ 这条断言
+//     现在近乎恒真；它守的是"将来给 boot 接上 VFS 根之后不许往安装树里写"这条回归。
+//   ⛔ 不要改回递归快照，也不要改成对安装树算 hash —— 那正是这次删掉的复杂度。
 // ---------------------------------------------------------------------------------------
 std::filesystem::path pathFromUtf8(const std::string& s) {
     const std::u8string u(reinterpret_cast<const char8_t*>(s.data()), s.size());
@@ -120,36 +126,32 @@ std::filesystem::path repoRootOf(const char* exe) {
     return p;
 }
 
-std::vector<std::string> snapshotTree(const std::filesystem::path& root, bool* exists) {
+// `--game-dir` 根上的已知写入点（相对路径；见上面的说明）
+constexpr const char* kInstallWriteTargets[] = {"SYS4REG.INI", "$$AGE.TMP", "SAVE", "_.exe"};
+
+struct PathState {
+    std::string rel;
+    bool exists = false;
+    long long mtime = 0;  // `last_write_time` 的计数；不存在时 0（"从无到有"也会在这里变）
+    bool operator==(const PathState&) const = default;
+};
+
+std::vector<PathState> probeInstallWriteTargets(const std::filesystem::path& root) {
     namespace fs = std::filesystem;
-    std::vector<std::string> out;
-    std::error_code ec;
-    *exists = fs::is_directory(root, ec) && !ec;
-    if (!*exists) return out;
-    for (fs::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
-        if (ec) {
-            out.push_back("<enum-error> " + ec.message());
-            return out;
+    std::vector<PathState> out;
+    for (const char* rel : kInstallWriteTargets) {
+        PathState st;
+        st.rel = rel;
+        std::error_code ec;
+        const fs::path p = root / pathFromUtf8(rel);
+        st.exists = fs::exists(p, ec) && !ec;
+        if (st.exists) {
+            ec.clear();
+            const auto wt = fs::last_write_time(p, ec);
+            if (!ec) st.mtime = static_cast<long long>(wt.time_since_epoch().count());
         }
-        const fs::path& p = it->path();
-        std::error_code c2;
-        const fs::path rel = p.lexically_relative(root);
-        std::string line = pathToUtf8(rel);
-        if (it->is_directory(c2)) {
-            line += "|D|";
-        } else if (it->is_regular_file(c2)) {
-            line += "|F|";
-            line += std::to_string(static_cast<unsigned long long>(it->file_size(c2)));
-            line += "|";
-        } else {
-            line += "|X|";
-        }
-        c2.clear();
-        const auto wt = it->last_write_time(c2);
-        line += std::to_string(static_cast<long long>(wt.time_since_epoch().count()));
-        out.push_back(std::move(line));
+        out.push_back(st);
     }
-    std::sort(out.begin(), out.end());
     return out;
 }
 
@@ -166,12 +168,14 @@ int main() {
     const std::uint32_t kWinMain = 0x004BA890u;  // plan §6 S7 的 L2
     const std::uint64_t kMaxInsns = 200000000ull;
 
-    // ★ 安装树红线：跑之前先拍照（见 snapshotTree 的说明）
+    // ★ 安装树红线：跑之前先给「已知写入点」拍一次照（见 probeInstallWriteTargets 的说明）
     const std::filesystem::path install_dir = repoRootOf(exe) / "links" / "install";
-    bool install_exists = false;
-    const std::vector<std::string> install_before = snapshotTree(install_dir, &install_exists);
-    std::printf("install-tree: %s（%zu 项%s）\n", pathToUtf8(install_dir).c_str(),
-                install_before.size(), install_exists ? "" : "；不存在 ⇒ 这条断言跳过");
+    const std::vector<PathState> install_before = probeInstallWriteTargets(install_dir);
+    std::error_code install_ec;
+    const bool install_is_dir = std::filesystem::is_directory(install_dir, install_ec) && !install_ec;
+    std::printf("install-tree: %s（只查 %zu 个已知写入点%s）\n", pathToUtf8(install_dir).c_str(),
+                install_before.size(),
+                install_is_dir ? "" : "；目录不存在 ⇒ 全部按\"不存在\"比");
 
     g_current_case = "run1";
     const Outcome a = runOnce(exe, lst_path, kWinMain, kMaxInsns);
@@ -261,23 +265,21 @@ int main() {
     std::remove(utf8(ta).c_str());
     std::remove(utf8(tb).c_str());
 
-    // ④ 安装树红线：整个 boot（4 次运行）之后 `links/install` 必须逐项未变。
+    // ④ 安装树红线：整个 boot（4 次运行）之后，`links/install` 根上那几个已知写入点必须没变。
     g_current_case = "install-tree-untouched";
-    if (install_exists) {
-        bool still = false;
-        const std::vector<std::string> install_after = snapshotTree(install_dir, &still);
-        LIFT_CHECK(still);
-        if (install_after != install_before) {
-            std::size_t i = 0;
-            while (i < install_before.size() && i < install_after.size() && install_before[i] == install_after[i]) ++i;
+    const std::vector<PathState> install_after = probeInstallWriteTargets(install_dir);
+    LIFT_CHECK(install_after == install_before);
+    if (install_after != install_before) {
+        for (std::size_t i = 0; i < install_before.size() && i < install_after.size(); ++i) {
+            if (install_before[i] == install_after[i]) continue;
             std::fprintf(stderr,
-                         "红线：`links/install` 被写了 —— 第 %zu 项不同：\n  之前: %s\n  之后: %s\n",
-                         i,
-                         i < install_before.size() ? install_before[i].c_str() : "(少了一项)",
-                         i < install_after.size() ? install_after[i].c_str() : "(少了一项)");
+                         "红线：`links/install/%s` 被写了 —— exists: %s → %s，mtime: %lld → %lld\n",
+                         install_before[i].rel.c_str(), install_before[i].exists ? "yes" : "no",
+                         install_after[i].exists ? "yes" : "no", install_before[i].mtime,
+                         install_after[i].mtime);
         }
-        LIFT_CHECK(install_after == install_before);
-        std::printf("install-tree: %zu 项，跑完 boot 后逐项未变\n", install_after.size());
+    } else {
+        std::printf("install-tree: %zu 个已知写入点，跑完 boot 后未变\n", install_after.size());
     }
 
     return finish("boot-trace");

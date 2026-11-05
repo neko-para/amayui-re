@@ -311,10 +311,13 @@ void requireCommitted(X86& cpu, std::uint32_t ea, std::size_t n, const char* api
 }
 
 // 路径类失败：设 last_error + 一行日志（返回值由调用方给）
+// ★ 日志文本走 `guestPathForLog`（vfs.h 的唯一规则）：guest 内存里的 A 版路径是 CP932，
+//   直接写进 UTF-8 的 stderr 会变成 `?V??`（2026-11-05 缺陷单）；已是 UTF-8 的文本原样。
 void pathFailure(X86& cpu, const char* api, std::uint32_t code, const std::string& guest_path,
                  const std::string& why) {
     cpu.shim.last_error = code;
-    shimLog("kernel32", api, "\"%s\" ⇒ 失败 %u（%s）", guest_path.c_str(), code, why.c_str());
+    shimLog("kernel32", api, "\"%s\" ⇒ 失败 %u（%s）", guestPathForLog(guest_path).c_str(), code,
+            why.c_str());
 }
 
 // ---------------------------------------------------------------------------------------

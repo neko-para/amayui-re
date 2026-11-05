@@ -67,10 +67,23 @@ void registerShlwapiShims(ShimRegistry& shims);       // shlwapi.cpp（PathRemov
 void registerImagehlpShims(ShimRegistry& shims);      // imagehlp.cpp（MakeSureDirectoryPathExists）
 void registerAdvapi32RegistryShims(ShimRegistry& shims);  // advapi32_registry.cpp（注册表 no-op，SCOPE §1）
 void registerWinmmAudioShims(ShimRegistry& shims);  // winmm_audio.cpp（音频 no-op，SCOPE §1）
+// ★ M2 · DirectSound silent 层（SCOPE §1「音频 = 延后实现（silent）」）：
+//   `LoadLibraryA("DSOUND.DLL")` 的假模块句柄（表在 kernel32_process.cpp 的 `kLoadableModules`）
+//   + `GetProcAddress("DirectSoundCreate")` 的**动态导出** + IDirectSound8 / IDirectSoundBuffer8 的
+//   取证槽（`Lock` 给**真 guest 内存**，`Play` / `Set*` 记账）。未实现的槽 = loud trap。
+void registerDsoundShims(ShimRegistry& shims);      // dsound.cpp
 void registerWinmmJoystickShims(ShimRegistry& shims);  // winmm_joystick.cpp（摇杆永久不做，SCOPE §1）
 void registerVideoShims(ShimRegistry& shims);     // mf_video.cpp（视频 / 媒体 no-op，SCOPE §1）
 void registerVersionShims(ShimRegistry& shims);   // kernel32_version.cpp（版本资源查询：真实失败码）
 void registerDdrawShims(ShimRegistry& shims);     // ddraw.cpp（P1：DirectDrawCreate 动态导出 + COM 方法表）
+// ★ M2 · D3D9 最小设备簇（用户 2026-11-05 裁决"确认需要实现 D3D 接口"）：
+//   `d3d9!Direct3DCreate9` 静态导入 + IDirect3D9 / IDirect3DDevice9 的取证槽（其余槽 = loud trap）。
+//   状态 / 像素层在 runtime/d3d9.{h,cpp}，导出 + vtable 在 shims/d3d9.cpp。
+void registerD3D9Shims(ShimRegistry& shims);      // d3d9.cpp
+// ★ M2 · D3DX9 Sprite 簇（第一帧的直接缺口）：`d3dx9_43!D3DXCreateSprite` 静态导入 +
+//   ID3DXSprite 的取证槽（+0x18/+0x1C = loud trap）。状态 / 批次 / 合成在 runtime/d3dx9_sprite.{h,cpp}，
+//   导出 + vtable 在 shims/d3dx9.cpp。
+void registerD3DX9Shims(ShimRegistry& shims);     // d3dx9.cpp
 // P1 / G1 的"**本 OS 没有这个导出**"表：`GetProcAddress`（kernel32_process.cpp）查它来给出比
 // "模块里没有这个导出"更准确的日志（⛔ 不注册成 shim —— 真机对这些名字返回 NULL，
 // 引擎据此走回退分支；注册成 thunk 会让引擎以为"这个 OS 有它"）。

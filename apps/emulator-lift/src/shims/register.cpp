@@ -31,6 +31,8 @@ void registerKernel32Shims(ShimRegistry& shims) {
     registerGdiFontShims(shims);       // gdi32_object.cpp + gdi32_font.cpp：P2 GDI 对象表 / 字体 / 文本
     registerGdiRegionShims(shims);     // gdi32_region.cpp：P4 GDI region 七条（矩形 / 椭圆 / 多边形 / 布尔 / RGNDATA）
     registerDdrawShims(shims);         // ddraw.cpp：P1 DirectDrawCreate 动态导出（G1 的通用表）
+    registerD3D9Shims(shims);          // d3d9.cpp：M2 D3D9 最小设备簇（Direct3DCreate9 + 取证到的 vtable 槽）
+    registerD3DX9Shims(shims);         // d3dx9.cpp：M2 D3DX9 Sprite 簇（D3DXCreateSprite + ID3DXSprite）
     registerShell32Shims(shims);       // shell32.cpp：特殊目录（--appdata）+ imm32（没有 IME）
     registerShlwapiShims(shims);       // shlwapi.cpp：PathRemoveFileSpecA（P4 文件 / 路径邻域）
     registerImagehlpShims(shims);      // imagehlp.cpp：MakeSureDirectoryPathExists（P4 递归建目录）
@@ -83,13 +85,20 @@ void registerKernel32Shims(ShimRegistry& shims) {
     shims.addUnimplemented("gdi32", "GetDeviceCaps", kGdi32);
 
     // ---- d3d9：3D ----
-    shims.addUnimplemented("d3d9", "Direct3DCreate9",
-                           "M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
+    // ★ M2：`Direct3DCreate9` **已实现**（用户 2026-11-05 裁决"确认需要实现 D3D 接口"）
+    //   ⇒ 它的登记挪到 registerD3D9Shims（d3d9.cpp）里，⛔ 这里不要再 addUnimplemented 一遍
+    //   （一处名字只能注册一次：实现 + 未实现并存会让 find() 命中的那条不可预期）。
+    //   仍然缺的：`Direct3DCreate9Ex`（派生缺口文件里，导入表有、本线不实现）。
 
     // ---- 音频 / 视频：用户 2026-11-04 裁决"延后实现，当前 no-op"（SCOPE §1）----
     registerWinmmAudioShims(shims);
     registerWinmmJoystickShims(shims);
     registerVideoShims(shims);
+    // ★ M2 · DirectSound silent 层：`.lst` 0x00406D25 → sub_4B5C50 = LoadLibraryA("DSOUND.DLL")
+    //   + GetProcAddress("DirectSoundCreate")。它是 winmm 之外**另一条**音频路径（DirectSound），
+    //   口径同为 SCOPE §1「音频 = silent」：设备/缓冲**真建**、`Lock` 给真内存、`Play` 记账，
+    //   ⛔ 不返回"成功但什么都没做"而不留痕。
+    registerDsoundShims(shims);
 
     // ---- 派生缺口（**最后**）：导入表里有、上面既没实现也没登记的条目 ----
     // 由 `pnpm tools lift sync --write` 生成；理由按模块分组（见 tools/lift.mjs 的 MODULE_REASONS）。

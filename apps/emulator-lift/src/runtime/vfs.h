@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lift {
@@ -48,6 +49,27 @@ bool hostFileTimes(const std::string& host_path, HostFileTimes* out);
 // ★ 为什么不能直接用 `std::fopen`：MSVC 的窄 `fopen` 按 **ANSI 代码页**解释路径，而本仓路径一律
 //   UTF-8（游戏目录本身是日文名）⇒ Windows 上非 ASCII 的 `--exe` / `--lst` / `--game-dir` 会打不开。
 std::FILE* openHostFileUtf8(const std::string& host_path, const char* mode);
+
+// =======================================================================================
+// ★ guest 路径文本的编码 —— **唯一规则**（2026-11-05 缺陷单 `🐞S2 VFS 不认 guest 根前缀`）
+//
+//   guest 内存里的路径：A 版 = **CP932 字节**、W 版 = **UTF-16**；Vfs 内部 / 宿主 = **UTF-8**。
+//
+//   实测（2026-11-05 boot）：`version!GetFileVersionInfoSizeA` 把 guest 内存里的 CP932 字节**原样**
+//   交给了 `Vfs::resolve`（版本族是唯一没经过 A 版解码的调用方）⇒ 缺省 guest 根
+//   `E:\Games\Eushully\天結` 里的 `天結` 在两侧是**两套字节**（CP932 `93 56 8C 8B` / UTF-8
+//   `E5 A4 A9 E7 B5 90`）⇒ 根前缀剥不掉 ⇒ `[notdir] 段 "Games"` ⇒ 版本读不到 ⇒ 引擎弹框后
+//   `ExitProcess(0)`。同一件事在日志里表现为 `天結` 打成 `?V??`（CP932 字节直接进 UTF-8 流）。
+//
+//   ⇒ 规则只有一条，**解析入口与日志打印共用**（同一条规则、不是两套：只给日志用的话，解析侧
+//     还得再写一遍同样的判断，两份迟早漂——本仓已经因为"A 版字节 / UTF-8 文本混用"红过一次）：
+//        合法 UTF-8 ⇒ 原样返回；否则按 **CP932** 解码（guest 内存里的 A 版字节）。
+//   ★ 为什么不按调用方区分：guest 只有 CP932 这一种 A 版码页（`GetACP()=932`，见 runtime/cp932.h）。
+//     UTF-8 优先是因为 Vfs 内部与宿主路径都是 UTF-8，而纯 ASCII 在两种编码下逐字节相同。
+//   ⚠ 诚实项（边界）：CP932 字节**碰巧**也是合法 UTF-8 的极少数组合会被当成 UTF-8 读 ——
+//     只可能出现在非法 / 控制字符段上，那种输入在真机上本来也不是一条有效路径。
+// =======================================================================================
+std::string guestPathForLog(std::string_view guest_path);
 
 // =======================================================================================
 // ★ guest 特殊目录 / 环境块 —— **唯一文本真源**（2026-11-05 用户裁决）
@@ -118,6 +140,16 @@ public:
     const std::string& guestCwd() const { return guest_cwd_; }
 
     // 解析：guest 路径 → 宿主绝对路径。失败 ⇒ false，error 写清"哪一段 / 为什么"。
+    //
+    // ★ 匹配顺序（**最具体 → 最泛**；改这个顺序 = 改语义，改之前先想清楚）：
+    //   ① **overlay**：就是 `setExeOverlay` 的那一个文件（绝对化 + 按段大小写不敏感比较）；
+    //   ② **guest 根前缀**：`<guest_root>\…`（大小写 / `\`·`/` / 末尾分隔符变体全认）⇒
+    //      余下部分**相对 `--game-dir` 根**，再走**同一套**分段解析（大小写不敏感、`..` 归一化、
+    //      overlay、越界 `[escape]` 检查）——⛔ 剥完前缀直接拼宿主路径；
+    //   ③ **`--appdata` 前缀**：`C:\Users\Amayui\AppData\{Roaming,Local}` 与 `…\Documents`；
+    //   ④ **相对路径**：相对 guest cwd（缺省 = guest 根），剥盘符 / 前导分隔符后落到 `--game-dir`。
+    //   ⛔ ② 只认**完整段前缀**：`…\Eushully\…` / `…\天結X` 不算根（不是"包含某一段就剥"）。
+    //
     // `must_exist` = false 时最后一段可以不存在（CreateFile(CREATE_NEW) / 写文件）。
     // `resolve_case` = true 时逐段做大小写不敏感匹配；false 时最后一段允许保留调用方大小写
     // （用于创建新文件：父目录仍然要做大小写匹配）。

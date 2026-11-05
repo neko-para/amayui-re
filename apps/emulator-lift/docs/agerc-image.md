@@ -420,20 +420,23 @@ TimeDateStamp=0x583B94A2  ImageBase=0x10000000  EP=0x000F9001  SizeOfImage=0x157
 `strncpy_s` 只拷到第一个 `00` ⇒ `atoi("3") = 3`。真机 A 变体的字符串是**单字节 ANSI**、`puLen` **含结尾 NUL**。
 
 
-## 6. 模拟器装载口径（默认 / 回退 / 缺件）
+## 6. 模拟器装载口径（两段 + 缺件）
 
-**一句话（可照做）**：默认先装 `--game-dir` 下的 `AGERC.DLL`；**若它不是可映射的 PE 或 `.rsrc` 有映射失败**
-（正版树里那份 C 就是这种），就回退到"用 `--game-dir/SYS4INI.BIN` 的 TOC 找 `AGERC.DLL` 条目、
-按 `(archiveIndex, offset, length)` 从同目录 `DATA1.ALF` **直读**那一段"作为镜像；`--agerc <path>` 覆盖以上两步；
-两步都拿不到 ⇒ `LoadLibraryA("AGERC.DLL")` 返回 0 + 错误 126，⛔ 不伪造句柄 / 不伪造资源。
+**一句话（可照做）**：`--agerc <path>`（显式覆盖）→ `--game-dir/AGERC.DLL`（走 VFS 解析，大小写不敏感）；
+**两段都拿不到 ⇒ `LoadLibraryA("AGERC.DLL")` 返回 0 + 错误 126**，⛔ 不伪造句柄 / 不伪造资源。
+⛔ **不回退 `DATA1.ALF` 的条目**（用户 2026-11-05 裁决：引擎本身也不回退；§5 已证它只按名字
+`LoadLibraryA` 应用目录那份）。§1–§4 里 **ALF 条目 B 的取证全部保留**：它是"免壳"这个结论的证据，
+也是与正版加壳件 C 对照的材料 —— **不是装载来源**，不给它写读取分支。
 
-- 当前测试安装树（`links/install`）走**默认路径**就是 A：免壳、40/40 可映射 ⇒ **P0 不需要 `--agerc`**。
-- 正版树（`links/raw`）走**回退路径**得到 B：免壳、40/40 可映射 ⇒ **不需要额外找拆壳件**。
-- 这不是"引擎会从 ALF 装载"（§5 已否证），而是**在拿不到可映射的原件时，用同一模块的免壳构建代替**：
-  ① B 就是 `.lst` 语料的真前身（§1）；② B 与 A 的**图标与版本资源逐字节相同**，与 C 的**导出名与版本字符串
-  相同**（C 的图标字节不可读，见 §4.3）；③ 三个导出按 `SCOPE.md` §1 仍是 no-op stub，代码字节不参与行为。
-- 由 §4.1：**A 与 B 的图标 / 版本资源逐字节相同**，所以"M2 的图标/版本"这条路上，
-  默认路径与回退路径**不可区分**（除非将来要读菜单/对话框资源 —— 那时才会看到汉化差异，且那是预期）。
+- 当前测试安装树（`links/install`）走默认路径就是 A：免壳、40/40 可映射 ⇒ **P0 不需要 `--agerc`**。
+- 正版树（`links/raw`）的根件是 C（AsProtect 加壳，26/40 资源在文件里没有字节）⇒ 默认路径**拿不到可映射的
+  PE ⇒ 停在 0 + 126**；要跑就显式 `--agerc` 指一份免壳件（`links/raw/AGERC.DLL__dumped.DLL`，或本仓
+  `corpus/assets/agerc/AGERC.DLL`）。⛔ 不要靠"从 ALF 自动回退"来救 —— 那正是这次删掉的复杂度。
+- ★ 显式 `--agerc` 用 B 代替 C 是可接受的（这是**显式覆盖**，不是自动回退）：① B 就是 `.lst` 语料的
+  真前身（§1）；② B 与 A 的**图标与版本资源逐字节相同**，与 C 的**导出名与版本字符串**相同
+  （C 的图标字节不可读，见 §4.3）；③ 三个导出按 `SCOPE.md` §1 仍是 no-op stub，代码字节不参与行为。
+- 由 §4.1：**A 与 B 的图标 / 版本资源逐字节相同** ⇒ 若把 ALF 条目 B 落盘后用 `--agerc` 显式指过去，
+  M2 的图标/版本两条路与 A **不可区分**（菜单 / 对话框资源才会看到汉化差异，且那是预期）。
 
 > ★ `repo:apps/emulator-lift/SCOPE.md` §1 的"模态"行原先写着"原件典型 .rsrc 虚拟尾部、文件里没有字节"（**2026-11-05 已按本文件的取证改正**），
 > 这是**针对加壳件的实测**被误当成通性。★ 该文件第 5 行规定"**不允许在用户没有明确要求的情况下编辑这个文件**"
@@ -442,24 +445,20 @@ TimeDateStamp=0x583B94A2  ImageBase=0x10000000  EP=0x000F9001  SizeOfImage=0x157
 
 ## 7. 实施建议（给后面写 DDraw / 字体 / 资源代理；一行一条）
 
-1. `apps/emulator-lift/src/main.cpp`（`main()` 里"AGERC.DLL：作为真实 guest 模块装载"段）：
-   把"显式 `--agerc` → `--game-dir/AGERC.DLL`"改成三步（显式 → 根件 → ALF 条目），
-   并把**来源标签**（`root` / `alf:SYS4INI.BIN#21072`）与 sha256 一起传给 `Machine::loadAgercModule`。
-2. 新增 `apps/emulator-lift/src/runtime/alf_index.{h,cpp}`：只解析索引头（`S4IC`/`S5IC` + LZSS 段 + TOC）、
-   `findEntry(name)`、`readPayload(dir, entry)`（`openHostFileUtf8` + `fseek/fread`，**按需读**，⛔ 不把 1 GB 读进内存）。
-   ⛔ 不要搬 `apps/emulator-cxx/src/core/alf.*`（那是另一套 core；读法可参考）。
-3. `apps/emulator-lift/src/runtime/machine.cpp` `Machine::loadAgercModule`：接受 `(bytes, origin_label)`，
+1. `apps/emulator-lift/src/runtime/machine.cpp` `Machine::loadAgercModule`：保持**按路径**装载（`--agerc` /
+   `--game-dir/AGERC.DLL` 已在 `main()` 里解析成宿主路径），⛔ 不需要"字节 + 来源标签"那种 ALF 形状；
    保留 `sha256` 与 `agerc_base = 真实 ImageBase`；`cpu.shim.agerc_image` / `agerc_base` 语义不变；
-   启动日志打 `agerc: <origin> sha256=<...> base=... resources=yes`。
-4. `apps/emulator-lift/src/shims/user32_resource.cpp` `LoadIconA`：把"伪 HICON"从**预期路径**降级为
+   启动日志已有 `agerc: <path> ... sha256=<...> base=... resources=yes`。
+2. `apps/emulator-lift/src/shims/user32_resource.cpp` `LoadIconA`：把"伪 HICON"从**预期路径**降级为
    **应急**（只有 `.rsrc` 数据项映射失败时才用，且必须 loud log）；正常路径从 `cpu.shim.agerc_image`
    读 `RT_GROUP_ICON`（`IDI_ICON1`）→ 逐个 `RT_ICON`（id 3–17，lang 1041）拼 `HICON`。
    A 与 B 的图标字节相同 ⇒ 不需要按来源分支。
-5. `apps/emulator-lift/src/shims/kernel32_version.cpp`：逻辑不用改（已优先 `agerc_image`）；
+3. `apps/emulator-lift/src/shims/kernel32_version.cpp`：逻辑不用改（已优先 `agerc_image`）；
    加一条启动日志打 `FileVersion/ProductVersion`（期望 `39.1.0.0`），并保证
    `LoadLibraryA` 与 `GetFileVersionInfo*` **指向同一份字节**（否则"镜像版本"与"文件版本"会分叉）。
-6. 守卫：加一条 `assets` 级测试（`tools/test/…` 或 `apps/emulator-lift/tests/agerc_module.cpp`）——
-   从 `links/install` 按 §2.4 切出的 `AGERC.DLL` 必须 sha256 = `f48d1c0f…`，
+4. 守卫：**装载**由 `apps/emulator-lift/tests/agerc_module.cpp` 守（`loadlibrary-without-image`：没有镜像 ⇒
+   `LoadLibraryA` 0 + 126；`load-maps-image` / `handles-are-the-real-base` 守真实装载）。
+   **取证对照**（不是装载路径）：从 `links/install` 按 §2.4 切出的 ALF 条目必须 sha256 = `f48d1c0f…`，
    `RT_GROUP_ICON/IDI_ICON1` 216 B 的 sha256 = `a49cb23c…`；安装树根件的对应值 = `6241de66…` / `a49cb23c…`
    （**图标相同是预期**，不是 bug）。
 

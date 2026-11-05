@@ -2,7 +2,7 @@
 
 - id: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - type: req
-- status: open
+- status: doing
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
 - tags: [emulator-lift m2]
 

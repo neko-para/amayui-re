@@ -76,6 +76,10 @@ add_library(emulator-lift-runtime STATIC
     src/shims/imagehlp.cpp
     src/shims/advapi32_registry.cpp
     src/shims/winmm_audio.cpp
+    # ★ M2 · DirectSound silent 层（SCOPE §1「音频 = 延后实现（silent）」）：
+    #   `LoadLibraryA("DSOUND.DLL")` 的假句柄 + `DirectSoundCreate` 动态导出 + IDirectSound8 /
+    #   IDirectSoundBuffer8（`Lock` 给真 guest 内存，`Play`/`Set*` 记账）。⛔ 不静默 no-op。
+    src/shims/dsound.cpp
     src/shims/winmm_joystick.cpp
     src/shims/mf_video.cpp
     src/shims/kernel32_bootstrap.cpp)
@@ -184,6 +188,14 @@ add_test(NAME mechanism COMMAND lift-mechanism)
 add_executable(lift-ddraw tests/ddraw.cpp)
 target_link_libraries(lift-ddraw PRIVATE emulator-lift-runtime)
 add_test(NAME ddraw COMMAND lift-ddraw)
+
+# ---- pure：M2 —— DirectSound **silent 层**（SCOPE §1「音频 = 延后实现（silent）」）----
+# 判据：`LoadLibraryA("DSOUND.DLL")` + `GetProcAddress("DirectSoundCreate")` → 假模块句柄 + 动态导出；
+#       IDirectSound8 / IDirectSoundBuffer8 的取证槽；`Lock` 给**真 guest 内存**（引擎往里写 PCM）、
+#       `Unlock` / `Play` 记账，日志里能断言"累计 PCM 字节 / Play 了几次"（见 tests/dsound.cpp）。
+add_executable(lift-dsound tests/dsound.cpp)
+target_link_libraries(lift-dsound PRIVATE emulator-lift-runtime)
+add_test(NAME dsound COMMAND lift-dsound)
 
 add_executable(lift-pe-resource tests/pe_resource.cpp)
 target_link_libraries(lift-pe-resource PRIVATE emulator-lift-runtime)
@@ -331,3 +343,47 @@ if(EXISTS "${LIFT_HOST_FONT_PATH}")
     add_test(NAME gdi-font COMMAND lift-gdi-font)
     set_tests_properties(gdi-font PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+# =====================================================================================
+# M2 · D3D9 最小设备簇（用户 2026-11-05 裁决"确认需要实现 D3D 接口"）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+#   `d3d9!Direct3DCreate9` 从 stub 变真实现（register.cpp 里的 addUnimplemented 已删）；
+#   IDirect3D9 / IDirect3DDevice9 只填**取证到的那几个槽**，其余 = comUnsupported 的 loud trap。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/d3d9.cpp
+    src/shims/d3d9.cpp)
+
+# ---- pure：D3D9 设备簇（自造 guest 代码经 vtable 调；不碰游戏 / LFS）----
+add_executable(lift-d3d9 tests/d3d9.cpp)
+target_link_libraries(lift-d3d9 PRIVATE emulator-lift-runtime)
+add_test(NAME d3d9 COMMAND lift-d3d9)
+
+# =====================================================================================
+# M2 · D3DX9 Sprite 簇（D3DXCreateSprite → 第一帧；用户 2026-11-05 裁决"确认需要实现 D3D 接口"）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+#   `d3dx9_43!D3DXCreateSprite` 从 stub 变真实现（register_import_gaps.cpp 里那一行随
+#   `pnpm tools lift sync --write` 消失）；ID3DXSprite 的 14 槽里 +0x18/+0x1C = loud trap。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/d3dx9_sprite.cpp
+    src/shims/d3dx9.cpp)
+
+# ---- pure：D3DX9 Sprite（像素级：调制色 / ALPHABLEND / 裁剪 / 变换 / End 幂等）----
+add_executable(lift-d3dx9 tests/d3dx9.cpp)
+target_link_libraries(lift-d3dx9 PRIVATE emulator-lift-runtime)
+add_test(NAME d3dx9 COMMAND lift-d3dx9)
+
+# =====================================================================================
+# M2 · D3D9 fixed-function 流水线（设备状态机 + 软件光栅 → 第一帧）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+#   `runtime/d3d9_pipeline.{h,cpp}` = 变换 / 渲染状态 / 顶点缓冲 / 光栅 / 深度 / 纹理采样；
+#   `shims/d3d9.cpp` 里补的槽见那边的注释（每条都带 `.lst` 站点 EA）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/d3d9_pipeline.cpp)
+
+# ---- pure：fixed-function 流水线（像素精确：纯色三角形 / 纹理四边形 / Z / 混合 / 状态存取）----
+add_executable(lift-d3d9-pipeline tests/d3d9_pipeline.cpp)
+target_link_libraries(lift-d3d9-pipeline PRIVATE emulator-lift-runtime)
+add_test(NAME d3d9-pipeline COMMAND lift-d3d9-pipeline)

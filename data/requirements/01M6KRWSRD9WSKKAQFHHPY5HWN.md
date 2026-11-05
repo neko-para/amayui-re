@@ -46,7 +46,8 @@
   别的文件不重定向；宿主上两份字节都没被改。
 - 同文件 `#no-writes-into-game-dir`：`setGameDir` 不删 `<game_dir>/.lift-tmp`；无 `--appdata` 时
   `GetTempPathA` 失败且 `--game-dir` 里没多出临时目录。
-- `apps/emulator-lift/tests/boot_trace.cpp#install-tree-untouched`：boot 跑完后 `links/install` 逐项未变。
+- `apps/emulator-lift/tests/boot_trace.cpp#install-tree-untouched`：boot 跑完后 `links/install` 根上那几个
+  已知写入点（`SYS4REG.INI` / `SAVE` / `$$AGE.TMP` / `_.exe`）未变（2026-11-05 缩减：不再递归快照全树）。
 
 ## 验证（实测）
 - 变异①（删掉 `LOCALAPPDATA`）⇒ `guest-env-block` 红（6 条断言）。

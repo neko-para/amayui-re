@@ -18,8 +18,11 @@
 #include <vector>
 
 #include "check.h"
+#include "fixture.h"
 #include "runtime/image.h"
+#include "runtime/machine.h"
 #include "runtime/pe_resource.h"
+#include "shims/register.h"
 
 namespace {
 
@@ -489,6 +492,80 @@ int main() {
                                   static_cast<std::int64_t>(ids.size()));
             }
         }
+    }
+
+    // ---- ③ ★ 端到端（2026-11-05 缺陷单 S2）：`version!GetFileVersionInfoSizeA` 走 VFS 认
+    //      **guest 根前缀** ⇒ 自然命中 overlay（= `--exe` 拆壳件）⇒ 拿到 **DEBUG 件**的版本资源。
+    //
+    //      这就是 boot 停在 112,255,445 条指令的那一步：guest 把 `GetModuleFileNameA` 的返回值
+    //      （**CP932 字节** `E:\Games\Eushully\93 56 8C 8B\AGE.EXE`）直接当路径交给版本 API；
+    //      修前 `Vfs::resolve` 把它按 UTF-8 读 ⇒ 根前缀剥不掉 ⇒ `[notdir] 段 "Games"`
+    //      ⇒ 返回 0 + 错误 2 ⇒ 引擎 MessageBox 后 ExitProcess(0)。
+    //
+    //      判据（三条都是**机械**的）：
+    //        ① 返回值 > 0（修前 = 0），且 lpdwHandle 被写 0（文档：保留参数）；
+    //        ② 返回的字节数 == 直接从这份拆壳件解析出的 RT_VERSION 大小（⇒ 拿到的是 DEBUG 件的资源，
+    //           而 `--game-dir` 下**没有** AGE.EXE ⇒ 只有 overlay 这一条路能成功）；
+    //        ③ `GetFileVersionInfoA` + `VerQueryValueA("\\")` ⇒ 块里真有签名正确的 VS_FIXEDFILEINFO。
+    {
+        g_current_case = "age-version-vfs-guest-root";
+        const std::string exe_file = exe;
+        const std::size_t slash = exe_file.find_last_of("\\/");
+        LIFT_CHECK(slash != std::string::npos);
+        const std::string exe_dir = slash == std::string::npos ? std::string() : exe_file.substr(0, slash);
+        LIFT_CHECK(!exe_dir.empty());
+
+        lift_fixture::Fixture f;
+        lift::registerVersionShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        // `--game-dir` = **语料目录**：里面没有 AGE.EXE ⇒ 能不成功只可能是 overlay 那条路。
+        f.m.vfs().setGameDir(exe_dir);
+        LIFT_CHECK(f.m.vfs().ready());
+        // ★ 缺省 guest 根 = `E:\Games\Eushully\天結`（真机 boot 不传 --guest-root）——
+        //   逐字断言，别让这条用例在"根被改过"时假装绿。
+        LIFT_CHECK(f.m.vfs().guestRoot() == "E:\\Games\\Eushully\\天結");
+        const std::string guest_exe = f.m.vfs().guestExePath();
+        LIFT_CHECK(guest_exe == "E:\\Games\\Eushully\\天結\\AGE.EXE");
+        f.m.vfs().setExeOverlay(guest_exe, exe_file, "0123456789abcdef");
+        // ★ overlay 的 guest 侧文本 == 根 + `AGE.EXE`（⛔ 不能被解析器重复拼一次根 ——
+        //   根前缀剥不掉时 absoluteGuest 会给出 `…\天結\Games\Eushully\天結\AGE.EXE`）。
+        LIFT_CHECK(f.m.vfs().overlayGuestPath() == "E:\\Games\\Eushully\\天結\\AGE.EXE");
+
+        // guest 内存里的路径是 **CP932 字节**（`天結` = 93 56 8C 8B；⛔ 不拿编码器现算，那会自证）
+        const char kTenketsuCp932[4] = {'\x93', '\x56', '\x8C', '\x8B'};
+        const std::string guest_path =
+            std::string("E:\\Games\\Eushully\\") + std::string(kTenketsuCp932, 4) + "\\AGE.EXE";
+        LIFT_CHECK(guest_path.size() + 2u == guest_exe.size());
+
+        const std::uint32_t gv_size = f.use("version", "GetFileVersionInfoSizeA");
+        const std::uint32_t gv_info = f.use("version", "GetFileVersionInfoA");
+        const std::uint32_t vq_value = f.use("version", "VerQueryValueA");
+        LIFT_CHECK(gv_size != 0 && gv_info != 0 && vq_value != 0);
+
+        const std::uint32_t path_ea = f.data(guest_path.c_str(), guest_path.size() + 1u);
+        const std::uint32_t handle_ea = f.u32data(0xDEADBEEFu);
+        const std::uint32_t size = f.call(gv_size, {path_ea, handle_ea});
+        LIFT_CHECK(size > 0);  // ★ 修前这里 = 0（+ 错误 2）
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(handle_ea), 0u);
+
+        // ② 与直接解析拆壳件得到的 RT_VERSION 同长（= DEBUG 件的资源）
+        std::vector<std::uint8_t> want;
+        LIFT_CHECK(res.versionInfo(&want, &err));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(size), static_cast<std::int64_t>(want.size()));
+
+        // ③ 块可查询：`\` ⇒ VS_FIXEDFILEINFO（签名 + 52 字节）
+        const std::uint32_t data_ea = f.zeroData(static_cast<std::size_t>(size) + 64u);
+        LIFT_CHECK_EQ_U32(f.call(gv_info, {path_ea, 0u, size, data_ea}), 1u);
+        const std::uint32_t ptr_ea = f.u32data(0);
+        const std::uint32_t len_ea = f.u32data(0);
+        const std::uint32_t sub_ea = f.cstr("\\");
+        LIFT_CHECK_EQ_U32(f.call(vq_value, {data_ea, sub_ea, ptr_ea, len_ea}), 1u);
+        const std::uint32_t ffi_ea = f.m.mem().rd32(ptr_ea);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(len_ea), lift::kVsFixedFileInfoSize);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(ffi_ea), lift::kVsFixedFileInfoSignature);
+        std::printf("version!GetFileVersionInfoSizeA(CP932 guest root) = %u 字节（= 拆壳件的 RT_VERSION）\n",
+                    size);
+        LIFT_CHECK(f.ok);
     }
 
     return finish("pe-resource");

@@ -55,15 +55,22 @@ cd apps/emulator-lift
 - **现查（2026-11-04，P0 之后）**：`LoadIconA`（`0x004BA9AA`）**已经不是卡点** —— P0 把 AGERC 真实镜像装进 guest
   （`0x30000000`）、资源 / 版本 / `_GetInstance@0` 从镜像解析、HICON 返回确定性假句柄，boot 越过它、
   注册完窗口类，停在 `gdi32!CreateICA`（`0x0046512C`，即 `sub_464FD0` 的"建屏幕 DC"）。
-  ⇒ **P2（GDI 字体）是当前启动路径的闸门**，P1（DDraw）在它之后。
-  ★ **2026-11-05 更正**：boot 已越过 `CreateICA`，现在停在 `d3d9!Direct3DCreate9`（`eip=7FFE00AC`，
-  `insns=102,919,944`，连跑两次一致）；而且 **P1（DDraw）根本不在本安装的启动路径上**
-  （`set:CreateObject = 2`，见 §F2）⇒ 第一帧的闸门是 **D3D9 设备创建**，既不是 DDraw、也不是 GDI 字体
-  （字体要的是"某个 DC"，D3D9 路径下不再是 DDraw 表面 DC）。
+- ★ **2026-11-05 现查（已走得更远，以此为准）**：
+  ```bash
+  ./out/emulator-lift --game-dir ../../links/install --appdata ../../.tmp/appdata --max-insns 600000000
+  ```
+  已越过的站：`LoadIconA` → `CreateICA` → `SetCursor` → `shlwapi!PathRemoveFileSpecA` / `imagehlp!MakeSureDirectoryPathExists`
+  → **`sub_4BA890` 的 RCVersion 检查**（曾卡在这里：`VerQueryValueA` 交回 UTF-16 指针 ⇒ `atoi` 读到 3 而不是 39）
+  → `d3d9!Direct3DCreate9` → `d3dx9_43!D3DXCreateSprite` → 纹理 / D3DX 矩阵 → 现在停在
+  **`IDirect3DDevice9::SetTransform(+0xB0)`**（fixed-function 流水线，属"新的大子系统"）。
+  ⇒ 第一帧的闸门 = **D3D9 设备 + D3DX Sprite/纹理 + fixed-function 流水线**；既不是 DDraw、也不是 GDI 字体。
+  ⚠ **P1（DDraw）不在本安装的启动路径上**（`set:CreateObject = 2`，见 §F2），但代码保留（另有一条不检查
+  `CreateObject` 的服务分派入口可能调到它）。
 - 历史口径保留：`0x4BA9A2 mov esi, LoadIconA` / `0x4BA9A8 call esi` 是**函数指针调用** ⇒
   census 的"LoadIconA 0 站点"是**下界**，不是"没调用"。**M2 必须 trace 驱动，不能按站点数排工作量。**
 - `ShowCursor` 同理（`0x4BA082 mov esi, ShowCursor`）；M2 的输入簇会撞上它。
-- ★ **跑 boot 的两个卫生要求**：`--appdata` 必须指向一次性临时目录；⛔ 不许写安装树（实测这几次运行没写）。
+- ★ **跑 boot 的三个卫生要求**：`--appdata` 指向一次性临时目录（**跑前清空**：残留 `$$AGE.TMP` 会让引擎走
+  "上次没正常退出 / exe 版本自检"的岔路）；⛔ 不许写安装树；⛔ 不传 `--agerc`（默认就取 `--game-dir/AGERC.DLL`）。
 
 ### 2.3 M2 的"完成分母"与"启动路径"不是同一个数
 
@@ -296,16 +303,20 @@ G=../../links/install
 
 - `LoadIconA` 要读 PE 资源目录（`RT_GROUP_ICON` / `RT_ICON`）；`version` 3 条要读 `VS_VERSIONINFO`。
   `FindResourceA` / `SizeofResource` / `LoadResource` / `LockResource` **不在导入表、`.lst` 也没有调用点**。
-- **AGERC 的镜像来源：优先用安装目录里那份，ALF 条目只作零售树的回退**（用户 2026-11-05 裁决）。
-  取证与数字见 [`agerc-image.md`](agerc-image.md)：
+- **AGERC 的镜像来源只有两段**（用户 2026-11-05 裁决）：① `--agerc <path>`（显式覆盖）；
+  ② `--game-dir/AGERC.DLL`；**拿不到 ⇒ `LoadLibraryA` 返回 0 + 126**（⛔ 不假装成功、⛔ 不回退 `DATA1.ALF`）。
+  引擎本身也不回退：它是**按名字** `LoadLibraryA("AGERC.DLL")` 从**应用目录**取（`.lst` `0x48E74B`，
+  字面量 `.data:005292D8`）。取证与数字见 [`agerc-image.md`](agerc-image.md)：
   - `repo:links/install/AGERC.DLL`（`6241de66…`，848,896 B）= **汉化版 `DATA1.ALF` 里那份被抽出来的免壳件**
     —— 7 节 / 21 导出 / **40 条资源全部可映射** / `FileVersion 39.1.0.0`。★ **本线默认就用它**：
-    引擎自己也是按名字 `LoadLibraryA("AGERC.DLL")` 从应用目录取，取到的就是这一份。
+    引擎自己也是按名字从应用目录取，取到的就是这一份。
   - `DATA1.ALF` 的 `SYS4INI.BIN` 第 21072 条（`f48d1c0f…`）= 同一 build 的**未汉化**件：`.text` / `.data` / `.reloc`
     与上面那份逐字节相同，只有 **10 条 MENU/DIALOG 资源**不同（图标 / 版本资源逐字节相同）。
-    ⇒ 它是"安装树里没有抽出的 AGERC.DLL 时"的回退来源，⛔ **不是**首选（用了会读到未汉化的菜单 / 对话框文案）。
+    ⇒ **它不是装载来源，只是取证对照**（"免壳"这个结论的证据，也是与正版加壳件对照的材料）；
+    ⛔ 不为它写读取分支（用它还会读到未汉化的菜单 / 对话框文案）。
   - ⛔ **不需要拆壳件**：这两份都是免壳 PE。只有**正版**安装树的根件（`repo:links/raw/AGERC.DLL`，AsProtect 加壳，
-    335,872 B）才资源不可读（26/40 条无文件字节）—— 那是"回退链的最后一档"，不是 AGERC 的通性。
+    335,872 B）才资源不可读（26/40 条无文件字节）—— 那是"正版树拿不到可映射根件 ⇒ 0 + 126"那一档，
+    不是 AGERC 的通性（需要时用 `--agerc` 显式指一份免壳件）。
   - ⛔ 伪 HICON **不是预期路径**：只有 `.rsrc` 映射真的失败时才允许，并且必须打日志。
 - 小族：`SHGetSpecialFolderPathA` 5 站点（我的文档 / AppData）· `PathRemoveFileSpecA` 3 · `MakeSureDirectoryPathExists` 3 ·
   `ImmAssociateContext` 1 · COM/VARIANT 5。它们归 M2，但**不一定在启动主路径上**。
@@ -392,14 +403,14 @@ G=../../links/install
 - 在 `runtime/` 加 `PeResources`（解析 `.rsrc`：`RT_ICON` / `RT_GROUP_ICON` / `VS_VERSIONINFO`），
   对 AGE.EXE 与 AGERC.DLL 两个 `PeImage` 都可用；
 - `mapPeImageAt()`：AGERC 映射到不冲突的 guest base（优先 ImageBase，冲突则 0x30000000）。
-- **镜像来源（默认 → 回退 → 缺件）**：① `--agerc <path>`（显式覆盖）；② `--game-dir/AGERC.DLL`；
-  ③ 若②不是可映射 PE 或 `.rsrc` 有映射失败，则从 `--game-dir/SYS4INI.BIN` 的 TOC 查 `AGERC.DLL` 条目、
-  按 `(archiveIndex, offset, length)` 从同目录 `DATA1.ALF` **直读**那一段作镜像（不落盘、不整份读归档）；
-  ④ 都拿不到 ⇒ `LoadLibraryA` 返回 0 + 126、`GetProcAddress` 同样 126，⛔ 不假装成功。
-  ★ 正版树的根件是 AsProtect 加壳件（`repo:links/raw/AGERC.DLL`，335,872 B）⇒ 走③；
-  当前测试安装树 `repo:links/install` 的根件已是免壳件（848,896 B）⇒ 走②，**P0 不需要 `--agerc`**。
-  ★★ **② 是首选，③ 只是"还没抽出文件"时的回退**（用户 2026-11-05）：②那份就是**汉化过的**（10 条 MENU/DIALOG 资源
-  被替换），而 ③ 是同一 build 的未汉化件 —— 菜单 / 对话框文案会回到日文。⇒ 判定顺序不能反。
+- **镜像来源只有两段（用户 2026-11-05 裁决）**：① `--agerc <path>`（显式覆盖）；
+  ② `--game-dir/AGERC.DLL`（走 VFS 解析，大小写不敏感）；**都拿不到 ⇒ `LoadLibraryA` 返回 0 + 126、
+  `GetProcAddress` 同样 126，⛔ 不假装成功、⛔ 不回退 `DATA1.ALF` 条目**（引擎本身也不回退：它按名字
+  `LoadLibraryA("AGERC.DLL")` 从应用目录取，见下面"为什么"）。
+  ★ 当前测试安装树 `repo:links/install` 的根件就是免壳件（848,896 B）⇒ 走②，**P0 不需要 `--agerc`**。
+  ★ 正版树的根件是 AsProtect 加壳件（`repo:links/raw/AGERC.DLL`，335,872 B，资源不可映射）⇒ 走②拿不到，
+  **就停在 0 + 126**；需要时用 `--agerc` 显式指一份免壳件（`DATA1.ALF` 的条目只作取证对照，不是装载来源）。
+  ★ ②那份是**汉化过的**（10 条 MENU/DIALOG 资源被替换）⇒ 菜单 / 对话框文案是中文；这是默认路径的预期行为。
 - `LoadIconA`：`hInstance == AGE 主模块` ⇒ AGE 资源；`hInstance == agerc_base` ⇒ AGERC 资源（`IDI_ICON1`）；
   从镜像的 `RT_GROUP_ICON` → `RT_ICON` 拼图标。窗口图标在 headless 下不被绘制（无 `WM_SETICON` /
   `SetClassLong`，只有 `WNDCLASSEXA.hIcon` → `RegisterClassExA`）。**免壳件的 40/40 资源可映射 ⇒ 不需要拆壳件**；
@@ -414,7 +425,7 @@ G=../../links/install
   是 5 字节 `jmp 0x10034D50`）。`LoadIconA` 的 `hInstance` 就是它（`0x4BA99C` → `0x4BA9A1 push eax`），
   而 `"IDI_ICON1"` 只在 AGERC.DLL 里（AGE.EXE 只有数字 ID 138）⇒ 只有真实装载 AGERC 才能过这一关。
   版本比较在 `0x4BAF26`：`set:RCVersion` 对 `[RCDLL+0x14]`（= AGERC `FileVersion` 经 `atoi`，`0x48E6FF`）。
-- 代价：+0.5–1 周（模块映射 / 三种来源 / HINSTANCE 统一）。★ **本机就有免壳件**：ALF 条目 =
+- 代价：+0.5–1 周（模块映射 / 两段来源 / HINSTANCE 统一）。★ **本机就有免壳件**：ALF 条目 =
   `corpus/assets.json` 的 `binary/agerc-debug-unpacked`（`.lst` 语料的真前身），安装树根件是它的汉化派生
   ⇒ 图标 / 版本可在本机验，不必等 Windows 设备；未测的只剩"真机改名实验"与"AsProtect 运行期解包镜像"，
   见 [`agerc-image.md`](agerc-image.md) §8。
@@ -469,7 +480,7 @@ M2b 再做 region + SDL 输入 + 光标 + `GetAsyncKeyState` 影子状态。
 
 | # | 切片 | 做什么 | 判据 | 量级 |
 |---|---|---|---|---|
-| **P0** | headless 窗口 + 完整消息泵 + 机制 | G1 导出转发表 · G2 COM 对象/vtable/refcount · G3 嵌套 guest 回调栈 · G4 guest surface arena · G5 `--appdata` + headless present + 帧哈希 + `--time-limit` · **headless 窗口**（句柄/类/客户区/位置）· **完整消息泵**（Get/Peek/Post/Send/Translate/Dispatch/Wait/Quit、`WM_PAINT` 合并、`WM_TIMER`、`PeekMessage(PM_NOREMOVE)`）· **启动解锁**：`LoadIconA` / `LoadCursorA` / `GetStockObject` / `RegisterClassExA` / `CreateWindowExA` / `ShowWindow` / `UpdateWindow` + `GetSystemMetrics` / `GetAsyncKeyState`（headless 固定值 / 无键）+ **AGE.EXE + 真实 AGERC 镜像**的 PE 资源 / `version` 3（D6；`--agerc` 可覆盖；缺镜像 ⇒ 126） | B1 + B6；pure 夹具；headless 下 `CreateWindowEx` → `WM_CREATE` → `WM_SIZE` → `WM_PAINT` 序列正确；boot 越过 `0x4BA9AA`（安装树根件即免壳件；正版树回退到 `DATA1.ALF` 的 `AGERC.DLL` 条目；只有两种来源都缺才停在 126） | 4–5 周 |
+| **P0** | headless 窗口 + 完整消息泵 + 机制 | G1 导出转发表 · G2 COM 对象/vtable/refcount · G3 嵌套 guest 回调栈 · G4 guest surface arena · G5 `--appdata` + headless present + 帧哈希 + `--time-limit` · **headless 窗口**（句柄/类/客户区/位置）· **完整消息泵**（Get/Peek/Post/Send/Translate/Dispatch/Wait/Quit、`WM_PAINT` 合并、`WM_TIMER`、`PeekMessage(PM_NOREMOVE)`）· **启动解锁**：`LoadIconA` / `LoadCursorA` / `GetStockObject` / `RegisterClassExA` / `CreateWindowExA` / `ShowWindow` / `UpdateWindow` + `GetSystemMetrics` / `GetAsyncKeyState`（headless 固定值 / 无键）+ **AGE.EXE + 真实 AGERC 镜像**的 PE 资源 / `version` 3（D6；`--agerc` 可覆盖；缺镜像 ⇒ 126） | B1 + B6；pure 夹具；headless 下 `CreateWindowEx` → `WM_CREATE` → `WM_SIZE` → `WM_PAINT` 序列正确；boot 越过 `0x4BA9AA`（安装树根件即免壳件；⛔ 不回退 `DATA1.ALF` —— 拿不到根件就停在 0 + 126） | 4–5 周 |
 | **P1** | DDraw 2D 核心 | DDraw/DirectDrawSurface 对象与 vtable（只填用到的 + 未用到的 loud trap）· `CreateSurface` / `Blt` / `BltFast` / `SetColorKey` / `Lock` / `Unlock` / `GetDC` / `ReleaseDC` / `Flip` / `Set/GetDisplayMode` / `SetCooperativeLevel` / `GetAvailableVidMem` / **`EnumDisplayModes` + guest 回调** · 颜色键 / 裁剪 / 16·32bpp · surface 在 guest 内存 | B2；到 DDraw init 不 trap；首个 surface 创建 + 首帧 present ★ **现实定位：已实现，但本安装的启动路径不经过它（见 §F2）；它是同一条线的另一条渲染后端，不是"没用"，只是不能当第一帧的前置** | 4–6 周 |
 | **P2** | GDI 字体 / 文本 | GDI 对象表 / DC（DISPLAY + surface）· `CreateFontIndirectA` / `SelectObject` / `DeleteObject` / `GetCurrentObject` / `GetStockObject` · FreeType 后端 + Amayui CN · `GetTextMetricsA` / `EnumFontFamiliesExA` / `AddFontMemResourceEx` · `GetGlyphOutlineA` 1/17/65 · `GetTextExtentPoint32A` · `TextOutA` | B3；文本自洽；到第一段文本不 trap | 3–5 周 |
 | **P3** | 真实 SDL 窗口 / 输入 | 只换**呈现与输入后端**：SDL 窗口 + 纹理上传 · SDL 键鼠 → 消息 + `GetAsyncKeyState` 影子 · 光标 / 焦点 / resize · 关闭确认（`MessageBoxA`：headless 一律 IDOK；交互只对 MB_OKCANCEL/YESNO 弹 SDL，其余记日志返回 IDOK）· **不改** P0 的窗口/消息语义 | B6 在 P3 之后仍绿；交互 smoke 能点、能关 | 2–3 周 |
@@ -493,7 +504,7 @@ M2b 再做 region + SDL 输入 + 光标 + `GetAsyncKeyState` 影子状态。
 | # | EA | 调什么 | 需要的形状（宿主侧） |
 |---|---|---|---|
 | 1 | `0x498D0F` | `d3d9!Direct3DCreate9(0x20)` | **唯一的 d3d9 导入**；返回 IDirect3D9（现在 boot 就停在这里） |
-| 2 | `0x498D44` | IDirect3D9 **#8** `GetAdapterDisplayMode(0, &mode)` | `D3DDISPLAYMODE`（12 B：Width / Height / Format） |
+| 2 | `0x498D44` | IDirect3D9 **#8** `GetAdapterDisplayMode(0, &mode)` | `D3DDISPLAYMODE`（**16 B**：Width **+0** / Height **+4** / RefreshRate **+8** / Format **+0xC**；★ 2026-11-05 实测纠正，原写"12 B / Width·Height·Format"是错的：`0x498C71` 读 +0xC 当 `D3DFORMAT`） |
 | 3 | `0x498ECA` | `sub_498BC0` →（条件）`sub_4983E0` | IDirect3D9 **#6** `GetAdapterModeCount` / **#7** `EnumAdapterModes`（只有目标模式被判无效时才走） |
 | 4 | `0x497F47`（由 `0x49904B` / `0x499067` / `0x49908C` / `0x4990A2` 调入） | IDirect3D9 **#16** `CreateDevice(0, type, hwnd, flags, &pp, &out)` | `D3DPRESENT_PARAMETERS`（**56 B**，`0x498F0A memset 0x38`；`+0/+4/+8` = 宽/高/格式、`+28` = `hDeviceWindow`、`+36` `EnableAutoDepthStencil=1`、`+40` `AutoDepthStencilFormat=75`、`+44` `Flags=1`）；引擎会重试 DeviceType ∈ {HAL, REF} × BehaviorFlags ∈ {`0x44`, `0x84`, `0x24`} |
 | 5 | `0x4990C8` | IDirect3DDevice9 **#20** `SetDialogBoxMode(TRUE)` | 错误串「ダイアログ描画モードの設定に失敗しました」 |
@@ -507,6 +518,35 @@ M2b 再做 region + SDL 输入 + 光标 + `GetAsyncKeyState` 影子状态。
   （`BeginScene`/`EndScene`/纹理上传/精灵）**未测** —— boot 还没到。
 - ⚠ 这套形状是 **M3 的 D3D9 簇**（`SCOPE.md` §1 现在写"3D 不做 / 走 stub"）；把它搬进 M2a 是**路线改动**，
   不是补一个 shim。⇒ 见需求单「M2 路线取证：显示初始化走 DDraw 还是 D3D9」。
+
+#### 6.1.1 实测接着往下走的三段（2026-11-05；上表之后）
+
+用户 2026-11-05 裁决"确认需要实现 D3D 接口"（`REQ-01M6KTYX5ZYENMPFHHNQTET254`，done）⇒ 上表 8 条已全部落地
+（`REQ-01M6MH5M975Q63AH85F03RVQFD`，`src/runtime/d3d9.*` + `src/shims/d3d9.cpp` + `tests/d3d9.cpp`）。
+之后 boot 又往前退了两站，各有单：
+
+1. **`d3dx9_43!D3DXCreateSprite`**（`0x4A2BD0`，`sub_4A2BA0`）⇒ `ID3DXSprite`（Begin/Draw/End 真合成：调制色 × 纹理、
+   包围盒与源矩形双向裁剪、`ALPHABLEND` 走 `src*a + dst*(1-a)`），顺带 `D3DXCreateTexture` + `IDirect3DTexture9` 的
+   `GetLevelDesc`/`LockRect`（纹理像素在 `SurfaceArena`）+ 7 条 `D3DXMatrix*`。单：`REQ-01M6MJRC587XWXR325K4N2JXMF`。
+2. **`IDirect3DDevice9` 的 fixed-function 流水线**：`SetTransform(+0xB0)` / `SetRenderState` / `SetTexture` /
+   `SetSamplerState` / `SetFVF` / `BeginScene`+`EndScene` / `DrawPrimitive*` / `Present` —— **已落地**
+   （`REQ-01M6MNR9M7S5M5711J79F9K32A`，`src/runtime/d3d9_pipeline.*` + `tests/d3d9_pipeline.cpp`）。
+   ★ 这一段不是"3D 内容"，而是**任何一帧都要走的渲染管线**（引擎用 WORLD/VIEW/PROJECTION 三个矩阵摆 2D 精灵）。
+   光栅口径：重心坐标 + 边界规则、视图体裁剪、最近点采样、`ALPHABLEND` 线性混合、Z 按状态开关 —— **自洽近似，⛔ 不冒充真机**。
+3. **2026-11-05 已过：`Vfs::resolve` 的 guest 根前缀**（`REQ-01M6MPJ147RF41GJECZECXKC20`）。原来版本读取
+   `version!GetFileVersionInfoSizeA("<guest根>\AGE.EXE")` 因为 guest 内存是 CP932、Vfs 内部是 UTF-8 而解析失败
+   ⇒ `MessageBox` ⇒ 退出。现在 `resolve` 的匹配顺序是**四档**（overlay → guest 根前缀 → `--appdata` → 相对路径），
+   前缀只认**完整段**（`…\天結X` / 根只出现在中间 ⇒ 不命中），路径日志统一走 `guestPathForLog()`（CP932 → UTF-8）。
+4. **2026-11-05 已过：音频 silent 层**（`REQ-01M6MQPHSVZZSB8D4221Z0N1JW`）。`DSOUND.DLL` 用假模块 + `GetProcAddress`
+   只认引擎真取的 `DirectSoundCreate`（`.lst` `0x4B5C9F` / `0x4B5CA6`；整份语料没有 `DirectSoundCreate8` / `EnumerateA`），
+   `IDirectSound8` / `IDirectSoundBuffer8` 的静音实现**记账**（PCM 字节 176400、Play 次数、`WAVEFORMATEX` 原值），
+   `Lock` 给真 guest 内存。顺带 `MessageBoxA` 现在把 caption/text 按 CP932 → UTF-8 打出来（定位 fatal 弹框不再靠反查 `.lst`）。
+5. **★ 现卡点 = 线程（需裁决）**：`sub_4B5CF0` 尾部 `0x004B5FE4 call CreateThread`（DirectSound 的混音线程，
+   线程体 `sub_4B5AA0`，随后 `ResumeThread` / `SetThreadPriority`，**无 NULL 检查、无分支**）⇒ boot 停在
+   `unimplemented @ eip=7FFE01CC`，`insns = 109,536,868`，**0 条 MessageBoxA**。
+   按 `SCOPE.md` §1 / `README.md` §2.5（guest 单线程，线程族 = 硬错误）这一族**不能顺手做** ⇒
+   裁决单 `REQ-01M6MQQA737CB8BAENQK088GP4`（伪线程 vs 真线程两个方向 + 判据）。
+6. 再往后若撞到图像文件解码（`D3DXCreateTextureFromFileInMemory` 一族）或 effect 编译 ⇒ 单独评估（⛔ 不猜像素）。
 
 ## 7. 落点与依赖
 
@@ -621,9 +661,10 @@ apps/emulator-lift/
 3. **D5**：新增 `--appdata <host-path>`；特殊目录（AppData / LocalAppData / Personal）映射到该路径；
    ⛔ 不引入通用 `--work-dir` 覆盖。
 4. **D6**：直接读 **AGE.EXE** 的 PE 资源；**AGERC 也按真实模型**：PE 节映射 + 真实 ImageBase / HINSTANCE +
-   资源/版本从镜像解析。镜像来源：`--agerc` → `--game-dir/AGERC.DLL` → 从 `SYS4INI.BIN`+`DATA1.ALF`
-   切 `AGERC.DLL` 条目；三者都拿不到才 0 + 126。**免壳件本机就有**（ALF 条目 sha256 `f48d1c0f…`；
-   安装树根件 `6241de66…`，是它的汉化派生）⇒ ⛔ 不需要另外的拆壳件、⛔ 伪 HICON 只作应急。
+   资源/版本从镜像解析。镜像来源**只有两段**：`--agerc`（显式覆盖）→ `--game-dir/AGERC.DLL`；
+   **拿不到 ⇒ 0 + 126**（⛔ 不回退 `DATA1.ALF`：引擎本身也不回退）。**免壳件本机就有**
+   （安装树根件 `6241de66…`，是 ALF 条目 `f48d1c0f…` 的汉化派生；ALF 条目只作取证对照、不是装载来源）
+   ⇒ ⛔ 不需要另外的拆壳件、⛔ 伪 HICON 只作应急。
    三个导出仍按 `SCOPE.md` §1 的模态 no-op stub；4 条无人调用的 `FindResource*` 注册删掉。
    取证见 [`agerc-image.md`](agerc-image.md)。
 5. **D8**：**不设自动停手规则**。本文件只给工作量评估（19–28 人周，M2a 13–19 / M2b 6–9）；
@@ -634,7 +675,9 @@ apps/emulator-lift/
 **剩余（需要时再问用户）**：
 
 - ~~本机没有 AGERC 拆壳件~~（**已否证**，见 [`agerc-image.md`](agerc-image.md)）：免壳件就在 `DATA1.ALF`
-  第 21072 条，安装树根件是它的汉化派生（图标/版本逐字节相同）。本机**可以**验图标解析与版本读取；
+  第 21072 条，安装树根件是它的汉化派生（图标/版本逐字节相同）。★ 这条**只是取证对照** —— 装载来源只有
+  `--game-dir/AGERC.DLL`（或 `--agerc`），⛔ 不为 ALF 条目写读取分支（用户 2026-11-05 裁决）。
+  本机**可以**验图标解析与版本读取；
   仍**未测**的是运行期闭合（正版机上把根目录 `AGERC.DLL` 改名看是否报「AGERC.DLLを読み込み出来ません」）
   与 AsProtect 运行期解包后的内存镜像。
 - M2a 跑完第一帧后：是否继续 M2b（真实窗口/输入/标题）—— 由用户按工作量报告决定。

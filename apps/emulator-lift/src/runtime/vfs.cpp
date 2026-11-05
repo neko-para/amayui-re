@@ -1,8 +1,11 @@
 // emulator-lift · VFS 实现：Win32 guest 路径 ↔ 宿主路径（唯一根 = `--game-dir`）
 //
 // ★ 合同在 `vfs.h`（本文件只是它的实现）。口径与风险点（plan §6 S6 / §9 R2）：
-//   · **唯一根**：guest 绝对路径先剥盘符 `X:`、再剥 `guestRoot()` 前缀，然后拼到 game_dir；
+//   · **唯一根**：guest 绝对路径按 `resolve` 的顺序匹配（见 vfs.h：overlay → guest 根前缀 →
+//     `--appdata` 前缀 → 相对路径）；`guest 根前缀` 剥掉之后的余下部分**照旧**走分段解析；
 //     `..` 越出根 ⇒ **失败**（⛔ 不夹回根里）。
+//   · **guest 路径文本的编码**（2026-11-05 缺陷单 `🐞S2`）：入口用 `guestPathForLog` 归一成
+//     UTF-8（guest 内存里的 A 版字节是 CP932）；规则只有一条，见 vfs.h。
 //   · **错误串带 tag 前缀**（`[notfound]` / `[notdir]` / `[escape]` / `[ambiguous]` / `[invalid]`
 //     / `[io]` / `[ready]`）：shim 侧靠 tag 映射成 Win32 错误码（映射表在 kernel32_file.cpp）。
 //     ⛔ 别改 tag 文本而不改那张映射表。
@@ -44,6 +47,8 @@
 #include <string_view>
 #include <system_error>
 #include <vector>
+
+#include "runtime/cp932.h"
 
 #if defined(__APPLE__)
 #include <sys/stat.h>  // st_birthtimespec（SDL_GetPathInfo 在 POSIX 给的是 ctime）
@@ -90,6 +95,43 @@ bool isAscii(std::string_view s) {
     return true;
 }
 
+// UTF-8 合法性（整串；strict：过短编码 / 代理项 / > U+10FFFF 都不算）。
+// ★ 只用来**选解码器**（见 guestPathForLog）——它不是安全校验，也不改变任何解析语义。
+bool isValidUtf8(std::string_view s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80u) {
+            ++i;
+            continue;
+        }
+        std::size_t n = 0;  // 续字节个数
+        std::uint32_t cp = 0;
+        if ((c & 0xE0u) == 0xC0u) {
+            n = 1;
+            cp = c & 0x1Fu;
+        } else if ((c & 0xF0u) == 0xE0u) {
+            n = 2;
+            cp = c & 0x0Fu;
+        } else if ((c & 0xF8u) == 0xF0u) {
+            n = 3;
+            cp = c & 0x07u;
+        } else {
+            return false;  // 0x80..0xBF 的孤立续字节 / 0xF8.. 的非法首字节
+        }
+        if (i + n >= s.size()) return false;  // 截断
+        for (std::size_t k = 1; k <= n; ++k) {
+            const unsigned char cc = static_cast<unsigned char>(s[i + k]);
+            if ((cc & 0xC0u) != 0x80u) return false;
+            cp = (cp << 6) | (cc & 0x3Fu);
+        }
+        if ((n == 1 && cp < 0x80u) || (n == 2 && cp < 0x800u) || (n == 3 && cp < 0x10000u)) return false;
+        if (cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return false;
+        i += n + 1;
+    }
+    return true;
+}
+
 std::string normalizeSeps(std::string s) {
     for (char& c : s) {
         if (c == '\\') c = '/';
@@ -128,18 +170,6 @@ std::string cwdOf(const Vfs& v) {
     return std::string("C:\\");
 }
 
-// 根前缀的"无盘符"形式集合（`E:\Games\Eushully\天結` → `Games/Eushully/天結`；`天結` 这类
-// 不带盘符的根也照样成立）。比较用 ASCII 大小写不敏感。
-std::vector<std::string> rootNoDriveForms(const Vfs& v) {
-    std::vector<std::string> out;
-    std::string raw = trimTrailingSeps(normalizeSeps(v.guestRoot()));
-    if (raw.empty()) return out;
-    std::string nod = stripDrive(raw);
-    trimLeadingSeps(nod);
-    if (!nod.empty()) out.push_back(nod);
-    return out;
-}
-
 // `text` 是否以目录形式 `form` 开头（form 之后必须是 '/' 或结尾）
 bool prefixIsDir(std::string_view text, std::string_view form) {
     if (form.empty() || text.size() < form.size()) return false;
@@ -147,20 +177,44 @@ bool prefixIsDir(std::string_view text, std::string_view form) {
     return text.size() == form.size() || text[form.size()] == '/';
 }
 
-bool isAbsoluteText(const Vfs& v, const std::string& text) {
-    if (hasDrive(text)) return true;
-    if (!text.empty() && text[0] == '/') return true;
-    for (const std::string& form : rootNoDriveForms(v)) {
-        if (prefixIsDir(text, form)) return true;
-    }
-    return false;
-}
-
 std::string joinGuest(const std::string& dir, const std::string& rel) {
     if (rel.empty()) return dir;
     std::string base = trimTrailingSeps(dir);
     if (base.empty()) return rel;
     return base + "/" + rel;
+}
+
+// =======================================================================================
+// ★ guest 根前缀这一档（**唯一**的"剥壳"实现：`isAbsoluteText` / `splitGuestImpl` /
+//   `Vfs::resolve` 共用）
+//
+//   `E:\Games\Eushully\天結\AGE.EXE` ⇒ 余下 `AGE.EXE`（相对 `--game-dir` 根）。
+//   · 变体全认：`\` 与 `/`、ASCII 大小写、末尾可有分隔符、盘符可有可无（本模拟器只有一张"盘"，
+//     见文件头的边界 3）；
+//   · **只认完整段前缀**：`…\Eushully\…` / `…\天結X` / 根的文本只出现在中间（`C:\backup\…`）
+//     一律**不**命中 —— ⛔ 不是"路径里含根的某一段就剥"（那会把备份路径 / 中间段当成根）；
+//   · ★ 剥出来的余下部分**不是**宿主路径：它还要走 `splitRelativeText`（`..` 归一化 + `[escape]`）
+//     与 resolve 的分段解析（大小写不敏感 / overlay / 越界检查）。
+// =======================================================================================
+bool stripGuestRootPrefix(const Vfs& v, const std::string& text_in, std::string* rest) {
+    rest->clear();
+    std::string text = stripDrive(normalizeSeps(text_in));
+    trimLeadingSeps(text);
+    std::string root = stripDrive(trimTrailingSeps(normalizeSeps(v.guestRoot())));
+    trimLeadingSeps(root);
+    if (root.empty() || !prefixIsDir(text, root)) return false;
+    *rest = text.substr(root.size());
+    trimLeadingSeps(*rest);
+    return true;
+}
+
+// guest 文本是不是"绝对路径"（盘符 / 前导分隔符 / guest 根前缀）。
+// ★ 复用 stripGuestRootPrefix：根前缀只有这一份实现（两份必然漂）。
+bool isAbsoluteText(const Vfs& v, const std::string& text) {
+    if (hasDrive(text)) return true;
+    if (!text.empty() && text[0] == '/') return true;
+    std::string rest;
+    return stripGuestRootPrefix(v, text, &rest);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -173,7 +227,9 @@ bool applySegment(const std::string& seg, const std::string& original, std::vect
         if (segs->empty()) {
             // clamp_escape：`..` 已经在根上 ⇒ 停在根（GetFullPathName 的文本语义），不是错误
             if (clamp_escape) return true;
-            *error = "[escape] 路径 `" + original + "` 里的 `..` 越出 guest 根（唯一根是 game_dir）";
+            // ★ 日志文本走 guestPathForLog：guest 内存里的 A 版字节是 CP932，
+            //   直接写进 UTF-8 的 stderr 会变成 `?V??`（2026-11-05 缺陷单）。
+            *error = "[escape] 路径 `" + guestPathForLog(original) + "` 里的 `..` 越出 guest 根（唯一根是 game_dir）";
             return false;
         }
         segs->pop_back();
@@ -183,36 +239,46 @@ bool applySegment(const std::string& seg, const std::string& original, std::vect
     return true;
 }
 
-bool splitGuestImpl(const Vfs& v, const std::string& guest_path, std::vector<std::string>* segs,
-                    std::string* error, bool clamp_escape) {
+// 把一段**相对 / 已剥掉根前缀**的文本切成段（折叠 `.` / `..`；`..` 越界 ⇒ `[escape]`）。
+// ★ guest 根前缀那一档剥完之后走的就是这里 —— 与相对路径**同一条**代码路径，
+//   ⛔ 不许"剥完前缀直接拼宿主路径"。
+bool splitRelativeText(const std::string& text, const std::string& original,
+                       std::vector<std::string>* segs, std::string* error, bool clamp_escape) {
     segs->clear();
-    std::string text = normalizeSeps(guest_path);
-    if (text.empty()) text = cwdOf(v);
-    if (!isAbsoluteText(v, text)) text = joinGuest(cwdOf(v), text);
-    // ★ 拼过 cwd 之后必须再规范化一次：`guestRoot()` / `guestCwd()` 的**文本形式用的是 `\`**
-    //   （vfs.h 的缺省根是 `E:\Games\Eushully\天結`）⇒ 不重规范化会得到混合隔离符，
-    //   与 rootNoDriveForms 的 `/` 形式比不中，整条相对路径会解析到 game_dir/Games/... 下面。
-    text = normalizeSeps(text);
-    text = stripDrive(text);
-    trimLeadingSeps(text);
-    for (const std::string& form : rootNoDriveForms(v)) {
-        if (prefixIsDir(text, form)) {
-            text = text.substr(form.size());
-            trimLeadingSeps(text);
-            break;
-        }
-    }
-
     std::string cur;
     for (std::size_t i = 0; i <= text.size(); ++i) {
         if (i == text.size() || text[i] == '/') {
-            if (!applySegment(cur, guest_path, segs, error, clamp_escape)) return false;
+            if (!applySegment(cur, original, segs, error, clamp_escape)) return false;
             cur.clear();
         } else {
             cur.push_back(text[i]);
         }
     }
     return true;
+}
+
+bool splitGuestImpl(const Vfs& v, const std::string& guest_path, std::vector<std::string>* segs,
+                    std::string* error, bool clamp_escape) {
+    segs->clear();
+    // ★ 入口归一（规则见 vfs.h）：guest 内存里的 A 版路径是 CP932 ⇒ 先变成 UTF-8 文本。
+    //   之后的所有比较（guest 根前缀 / 大小写 / overlay）都在同一套字节上做。
+    const std::string guest = guestPathForLog(guest_path);
+    std::string text = normalizeSeps(guest);
+    if (text.empty()) text = cwdOf(v);
+    if (!isAbsoluteText(v, text)) text = joinGuest(cwdOf(v), text);
+    // ★ 拼过 cwd 之后必须再规范化一次：`guestRoot()` / `guestCwd()` 的**文本形式用的是 `\`**
+    //   （vfs.h 的缺省根是 `E:\Games\Eushully\天結`）⇒ 不重规范化会得到混合隔离符，
+    //   与根前缀的形式比不中，整条相对路径会解析到 game_dir/Games/... 下面。
+    text = normalizeSeps(text);
+    // ★ ② guest 根前缀（最具体）：`E:\Games\Eushully\天結\A\B` ⇒ `A/B`
+    std::string rest;
+    if (stripGuestRootPrefix(v, text, &rest)) {
+        return splitRelativeText(rest, guest, segs, error, clamp_escape);
+    }
+    // ④ 相对路径：剥盘符与前导分隔符（本模拟器只有一张"盘"）
+    text = stripDrive(text);
+    trimLeadingSeps(text);
+    return splitRelativeText(text, guest, segs, error, clamp_escape);
 }
 
 bool splitGuest(const Vfs& v, const std::string& guest_path, std::vector<std::string>* segs,
@@ -366,6 +432,18 @@ bool wildcardMatch(const std::string& pat, const std::string& name) {
 }
 
 }  // namespace
+
+// =======================================================================================
+// guest 路径文本的编码归一（规则见 vfs.h；**解析入口与日志共用这一条规则**）
+// =======================================================================================
+std::string guestPathForLog(std::string_view guest_path) {
+    if (guest_path.empty()) return std::string();
+    // 已经是 UTF-8（Vfs 内部口径 / 宿主侧文本，含纯 ASCII）⇒ 原样。
+    if (isValidUtf8(guest_path)) return std::string(guest_path);
+    // 否则按 guest 内存里的 A 版字节（CP932）解；非法字节按 Windows 的宽松口径跳过
+    // （"跳过并计数"在解码器里做；这里只要一行可读的日志文本 ⇒ 不另记）。
+    return utf16ToUtf8(cp932ToWide(guest_path));
+}
 
 // =======================================================================================
 // 宿主文件时间
@@ -575,77 +653,89 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
         if (error) *error = "[invalid] 空路径";
         return false;
     }
-    // ★ overlay（只对**一个**文件）：命中 ⇒ 宿主路径直接是真正在跑的那份字节。
+    // ★ 入口归一（规则见 vfs.h）：guest 内存里的 A 版路径是 CP932 字节 ⇒ 变成 UTF-8 文本。
+    //   从这里往下只有**一套字节**（UTF-8）在比较 / 打印 —— 这既让 `E:\Games\Eushully\天結\…`
+    //   的根前缀能剥（2026-11-05 缺陷单：CP932 与 UTF-8 的 `天結` 字节不同 ⇒ 剥不掉 ⇒
+    //   `[notdir] 段 "Games"`），也让日志不再把 CP932 字节写进 UTF-8 流。
+    const std::string guest = guestPathForLog(guest_path);
+    // ★ ① overlay（只对**一个**文件）：命中 ⇒ 宿主路径直接是真正在跑的那份字节。
     //   命中时打一行日志：来源 + sha256 前 8 位（用户 2026-11-05 口径；这是**唯一**一条
     //   "Vfs 自己打日志"的路径 —— 它足够罕见，而且必须能从日志里看见走的是哪一份）。
-    if (matchesOverlay(guest_path)) {
+    if (matchesOverlay(guest)) {
         std::fprintf(stderr, "[vfs] overlay: guest \"%s\" ⇒ \"%s\"（来源：--exe 拆壳件；sha256 前 8 位 %s）\n",
-                     guest_path.c_str(), overlay_host_.c_str(),
+                     guest.c_str(), overlay_host_.c_str(),
                      overlay_sha256_.empty() ? "-" : overlay_sha256_.substr(0, 8).c_str());
         if (host_path) *host_path = overlay_host_;
-        return true;
-    }
-    // ★ 特殊目录（--appdata）：匹配固定的 guest 前缀，剩余段落到 appdata/<sub>。
-    const std::string special_text = normalizeSeps(guest_path);
-    for (const SpecialRoot& sr : specialRoots()) {
-        const std::string prefix = sr.guest;
-        if (!prefixIsDir(special_text, prefix)) continue;
-        if (app_data_dir_.empty()) {
-            if (error) *error = std::string("[appdata] 特殊目录 \"") + sr.guest +
-                                "\" 需要 --appdata，但当前为空";
-            return false;
-        }
-        const std::string rest = special_text.substr(prefix.size());
-        std::vector<std::string> ssegs;
-        std::string cur;
-        for (std::size_t i = 0; i <= rest.size(); ++i) {
-            if (i == rest.size() || rest[i] == '/') {
-                std::string seg_err;
-                if (!applySegment(cur, guest_path, &ssegs, &seg_err)) {
-                    if (error) *error = seg_err;
-                    return false;
-                }
-                cur.clear();
-            } else {
-                cur.push_back(rest[i]);
-            }
-        }
-        const fs::path sroot = (pathFromUtf8(app_data_dir_) / pathFromUtf8(sr.sub)).lexically_normal();
-        fs::path scur = sroot;
-        std::string serr;
-        for (std::size_t i = 0; i < ssegs.size(); ++i) {
-            const bool last = (i + 1 == ssegs.size());
-            std::string real;
-            const SegLookup r = lookupSegment(scur, ssegs[i], last && !resolve_case, &real, &serr);
-            if (r == SegLookup::Error) {
-                if (error) *error = serr;
-                return false;
-            }
-            if (r == SegLookup::Found) {
-                scur /= pathFromUtf8(real);
-                continue;
-            }
-            if (!last || must_exist) {
-                if (error) *error = std::string(last ? "[notfound]" : "[notdir]") + " 段 \"" + ssegs[i] +
-                                    "\" 在 \"" + pathToUtf8(scur) + "\" 里不存在";
-                return false;
-            }
-            scur /= pathFromUtf8(ssegs[i]);
-        }
-        const fs::path snorm = scur.lexically_normal();
-        if (!isUnderRoot(sroot, snorm)) {
-            if (error) *error = "[escape] AppData 解析结果不在 --appdata 之下";
-            return false;
-        }
-        if (host_path) *host_path = pathToUtf8(snorm);
         return true;
     }
 
     std::string err;
     std::vector<std::string> segs;
-    if (!splitGuest(*this, guest_path, &segs, &err)) {
-        if (error) *error = err;
-        return false;
+
+    // ★ ② guest 根前缀（**最具体**，先于 appdata 与相对路径）：`<guest_root>\…` ⇒ `--game-dir` 根。
+    //   ★ 剥完之后**必须**再走一遍分段解析（大小写不敏感 / `..` 归一化 / overlay / `[escape]`）——
+    //     这里只把"根之后的余下文本"交给 splitRelativeText，⛔ 不直接拼宿主路径。
+    std::string root_rel;
+    const bool rooted = stripGuestRootPrefix(*this, guest, &root_rel);
+    if (rooted) {
+        if (!splitRelativeText(root_rel, guest, &segs, &err, /*clamp_escape=*/false)) {
+            if (error) *error = err;
+            return false;
+        }
+    } else {
+        // ★ ③ 特殊目录（--appdata）：匹配固定的 guest 前缀，剩余段落到 appdata/<sub>。
+        const std::string special_text = normalizeSeps(guest);
+        for (const SpecialRoot& sr : specialRoots()) {
+            const std::string prefix = sr.guest;
+            if (!prefixIsDir(special_text, prefix)) continue;
+            if (app_data_dir_.empty()) {
+                if (error) *error = std::string("[appdata] 特殊目录 \"") + sr.guest +
+                                    "\" 需要 --appdata，但当前为空";
+                return false;
+            }
+            const std::string rest = special_text.substr(prefix.size());
+            std::vector<std::string> ssegs;
+            std::string seg_err;
+            if (!splitRelativeText(rest, guest, &ssegs, &seg_err, /*clamp_escape=*/false)) {
+                if (error) *error = seg_err;
+                return false;
+            }
+            const fs::path sroot = (pathFromUtf8(app_data_dir_) / pathFromUtf8(sr.sub)).lexically_normal();
+            fs::path scur = sroot;
+            std::string serr;
+            for (std::size_t i = 0; i < ssegs.size(); ++i) {
+                const bool last = (i + 1 == ssegs.size());
+                std::string real;
+                const SegLookup r = lookupSegment(scur, ssegs[i], last && !resolve_case, &real, &serr);
+                if (r == SegLookup::Error) {
+                    if (error) *error = serr;
+                    return false;
+                }
+                if (r == SegLookup::Found) {
+                    scur /= pathFromUtf8(real);
+                    continue;
+                }
+                if (!last || must_exist) {
+                    if (error) *error = std::string(last ? "[notfound]" : "[notdir]") + " 段 \"" + ssegs[i] +
+                                        "\" 在 \"" + pathToUtf8(scur) + "\" 里不存在";
+                    return false;
+                }
+                scur /= pathFromUtf8(ssegs[i]);
+            }
+            const fs::path snorm = scur.lexically_normal();
+            if (!isUnderRoot(sroot, snorm)) {
+                if (error) *error = "[escape] AppData 解析结果不在 --appdata 之下";
+                return false;
+            }
+            if (host_path) *host_path = pathToUtf8(snorm);
+            return true;
+        }
+
+        // ★ ④ 相对路径（相对 guest cwd；缺省 = guest 根）。
+        if (!splitGuest(*this, guest, &segs, &err)) {
+            if (error) *error = err;
+            return false;
+        }
     }
 
     const fs::path root = pathFromUtf8(game_dir_);
@@ -746,7 +836,9 @@ bool Vfs::find(const std::string& guest_pattern, std::vector<HostDirEntry>* out,
         if (error) *error = "[ready] game_dir 未设置（--game-dir 是唯一根）";
         return false;
     }
-    const std::string pat = normalizeSeps(guest_pattern);
+    // ★ 入口归一（规则见 vfs.h）：A 版字节（CP932）⇒ UTF-8；日志也用它 ⇒ 不会把 CP932 打进 stderr。
+    const std::string shown_pattern = guestPathForLog(guest_pattern);
+    const std::string pat = normalizeSeps(shown_pattern);
     if (pat.empty()) {
         if (error) *error = "[invalid] 空的通配符模式";
         return false;
@@ -755,15 +847,15 @@ bool Vfs::find(const std::string& guest_pattern, std::vector<HostDirEntry>* out,
     const std::string dir_part = (slash == std::string::npos) ? std::string() : pat.substr(0, slash);
     const std::string last = (slash == std::string::npos) ? pat : pat.substr(slash + 1);
     if (last.empty()) {
-        if (error) *error = "[invalid] 通配符模式 \"" + guest_pattern + "\" 以路径分隔符结尾";
+        if (error) *error = "[invalid] 通配符模式 \"" + shown_pattern + "\" 以路径分隔符结尾";
         return false;
     }
     if (last == "." || last == "..") {
-        if (error) *error = "[invalid] 通配符模式段不能是 \".\" / \"..\"（\"" + guest_pattern + "\"）";
+        if (error) *error = "[invalid] 通配符模式段不能是 \".\" / \"..\"（\"" + shown_pattern + "\"）";
         return false;
     }
     if (last.find("**") != std::string::npos) {
-        if (error) *error = "[invalid] 不支持 `**`（只实现 `*` / `?` / `*.*`）：\"" + guest_pattern + "\"";
+        if (error) *error = "[invalid] 不支持 `**`（只实现 `*` / `?` / `*.*`）：\"" + shown_pattern + "\"";
         return false;
     }
 

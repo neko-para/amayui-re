@@ -15,6 +15,10 @@
 //      判据用**日文 guest 根**（`E:\Games\Eushully\天結` = 真实缺省值）逐字节断言：
 //      `GetModuleFileNameA` == CP932（`天結` = 93 56 8C 8B）、⛔ 不是它的 UTF-8（E5 A4 A9 E7 B5 90）、
 //      把这份字节**原样**喂回 `CreateFileA` 必须命中 VFS overlay（引擎就是这么用 exe 路径的）。
+//   ⑥ ★ **`Vfs::resolve` 认 guest 根前缀**（2026-11-05 缺陷单
+//      `🐞S2 VFS 不认 guest 根前缀：引擎读自己的版本失败 ⇒ MessageBox ⇒ ExitProcess(0)`）：
+//      `<guest_root>\…`（UTF-8 / CP932 两种字节、大小写 / 分隔符变体）⇒ `--game-dir` 根并命中
+//      overlay；不是根 / 根只出现在中间 / `..` 越界 ⇒ **失败**。用例 `guest-root-absolute`。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -938,6 +942,96 @@ int main() {
         LIFT_CHECK(guestStr(f.m, full_buf) == exe_cp932);
 
         fs::remove_all(dumped.parent_path(), ec);
+    }
+
+    // ⑫ ★ 2026-11-05 缺陷单（S2）：`Vfs::resolve` 认 **guest 根前缀**
+    //
+    //   repro（修前红）：boot 跑到 112,255,445 条指令时 `version!GetFileVersionInfoSizeA` 拿着
+    //   guest 内存里的路径 `E:\Games\Eushully\天結\AGE.EXE` 解析失败（`[notdir] 段 "Games"`）
+    //   ⇒ 引擎读不到自己的版本 ⇒ MessageBox ⇒ ExitProcess(0)。
+    //
+    //   判据：
+    //     ① `<guest 根>\AGE.EXE` 的 UTF-8 文本 ⇒ 命中 overlay（= `setExeOverlay` 的那份，⛔ 不是壳里的）；
+    //     ② 大小写 / 分隔符变体（`e:/games/eushully/天結/age.exe`）⇒ **同一个**宿主路径；
+    //     ③ **CP932 字节**形态（guest 内存里就是 `93 56 8C 8B`）⇒ 同样命中 —— 修前这一条红：
+    //        它被按 UTF-8 读 ⇒ `天結` 与根文本比不中 ⇒ `[notdir] 段 "Games"`；顺带断言
+    //        `guestPathForLog` 把这条字节串还原成可读的 UTF-8（日志不再 `?V??`）；
+    //     ④ `<guest 根>\SAVE\X.DAT` ⇒ `<game-dir>\SAVE\X.DAT`（根之后**照旧**走分段解析）；
+    //     ⑤ 反例：`E:\Games\Other\x` ⇒ 失败（不是 guest 根，⛔ 不许剥成 `Other\x` / `Games\Other\x` 去猜）；
+    //     ⑥ 反例：根的文本只出现在**中间**（`C:\backup\…\天結\AGE.EXE`）⇒ 失败
+    //        （⛔ 不是"路径里含根就剥"——那正是把备份路径 / 中间段当根的模糊匹配）；
+    //     ⑦ 反例：`..\..\escape` 仍被 `[escape]` 拦（剥前缀这条路**不**放宽安全检查）。
+    {
+        g_current_case = "guest-root-absolute";
+        lift::Vfs v;
+        v.setGameDir(pathToUtf8(dir));
+        // ★ 不 `setGuestRoot`：判据必须覆盖**缺省根**（vfs.h 的 `E:\Games\Eushully\天結`）——
+        //   真机 boot 就是没传 `--guest-root` 的那条路。
+        LIFT_CHECK(v.ready());
+        LIFT_CHECK(v.guestRoot() == "E:\\Games\\Eushully\\天結");
+
+        auto writeFile = [](const fs::path& p, const std::string& bytes) {
+            // ★ 宿主打开走 `openHostFileUtf8`（= `_wfopen_s`）：裸 `std::fopen` 在 Windows 上按
+            //   **本地 ANSI 码页**解释日文名（见本文件 ⑪ 的实测）。
+            std::FILE* fp = lift::openHostFileUtf8(pathToUtf8(p), "wb");
+            if (!fp) return false;
+            if (!bytes.empty()) std::fwrite(bytes.data(), 1, bytes.size(), fp);
+            std::fclose(fp);
+            return true;
+        };
+        const fs::path packed = dir / "AGE.EXE";                    // 安装树里的加壳原件
+        const fs::path dumped = dir / "overlay" / "AGE.dumped.exe";  // 真正在跑的那份（DEBUG 件）
+        fs::create_directories(dumped.parent_path(), ec);
+        LIFT_CHECK(writeFile(packed, "PACKED-ORIGINAL-0"));
+        LIFT_CHECK(writeFile(dumped, "UNPACKED-DEBUG-BUILD-0123456789"));
+        v.setExeOverlay(v.guestExePath(), pathToUtf8(dumped), "0123456789abcdef");
+        const std::string dumped_host = pathToUtf8(dumped);
+
+        std::string host;
+        std::string why;
+
+        // ① UTF-8 文本（= guest 根的缺省文本形态）
+        LIFT_CHECK(v.resolve("E:\\Games\\Eushully\\天結\\AGE.EXE", &host, &why, true));
+        LIFT_CHECK(host == dumped_host);
+        LIFT_CHECK(v.overlayHostPath() == dumped_host);
+
+        // ② 大小写 / 分隔符变体 ⇒ 同一个宿主路径
+        LIFT_CHECK(v.resolve("e:/games/eushully/天結/age.exe", &host, &why, true));
+        LIFT_CHECK(host == dumped_host);
+        LIFT_CHECK(v.resolve("e:\\GAMES\\eushully\\天結\\AGE.exe", &host, &why, true));
+        LIFT_CHECK(host == dumped_host);
+
+        // 根**本身**（末尾带分隔符）⇒ `--game-dir` 根
+        LIFT_CHECK(v.resolve("E:\\Games\\Eushully\\天結\\", &host, &why, true));
+        LIFT_CHECK(host == pathToUtf8(dir));
+
+        // ③ CP932 字节（guest 内存里的真实形态；`天結` = 93 56 8C 8B）
+        const char kTenketsuCp932[4] = {'\x93', '\x56', '\x8C', '\x8B'};
+        const std::string root_utf8 = "E:\\Games\\Eushully\\天結";
+        const std::string cp932_exe = "E:\\Games\\Eushully\\" + std::string(kTenketsuCp932, 4) + "\\AGE.EXE";
+        LIFT_CHECK(cp932_exe.size() + 2u == (root_utf8 + "\\AGE.EXE").size());  // 两套字节真的不同
+        LIFT_CHECK(cp932_exe != root_utf8 + "\\AGE.EXE");
+        LIFT_CHECK(lift::guestPathForLog(cp932_exe) == root_utf8 + "\\AGE.EXE");
+        LIFT_CHECK(v.resolve(cp932_exe, &host, &why, true));
+        LIFT_CHECK(host == dumped_host);
+
+        // ④ 根之后的段照旧走分段解析（SAVE 目录存在 ⇒ 文件可以不存在）
+        fs::create_directories(dir / "SAVE", ec);
+        LIFT_CHECK(v.resolve("E:\\Games\\Eushully\\天結\\SAVE\\X.DAT", &host, &why));
+        LIFT_CHECK(host == pathToUtf8(dir / "SAVE" / "X.DAT"));
+
+        // ⑤ 反例：不是 guest 根 ⇒ 失败（不许把 `E:\Games\Other\x` 剥成 `Other\x` / `Games\Other\x`）
+        LIFT_CHECK(!v.resolve("E:\\Games\\Other\\x", &host, &why));
+        LIFT_CHECK(host.empty());
+        LIFT_CHECK(why.rfind("[", 0) == 0);  // 带 tag 前缀（shim 靠它映射错误码）
+
+        // ⑥ 反例：根的文本只出现在**中间** ⇒ 不许剥（"任意包含"的模糊匹配会在这里绿）
+        LIFT_CHECK(!v.resolve("C:\\backup\\Games\\Eushully\\天結\\AGE.EXE", &host, &why, true));
+        LIFT_CHECK(host.empty());
+
+        // ⑦ 反例：`..` 越出 guest 根 ⇒ 仍是 `[escape]`
+        LIFT_CHECK(!v.resolve("..\\..\\escape", &host, &why));
+        LIFT_CHECK(why.rfind("[escape]", 0) == 0);
     }
 
     fs::remove_all(dir, ec);

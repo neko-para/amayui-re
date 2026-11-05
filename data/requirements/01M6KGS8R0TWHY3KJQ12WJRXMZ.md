@@ -1,15 +1,17 @@
-# AGERC 装载：用免壳 PE 镜像（ALF 条目 / 安装树根件），拆壳件与伪 HICON 降为应急
+# AGERC 装载：用安装目录的免壳 PE 镜像（--game-dir/AGERC.DLL），拆壳件与伪 HICON 降为应急
 
 - id: REQ-01M6KGS8R0TWHY3KJQ12WJRXMZ
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- done_reason: 用户 2026-11-05 裁决：AGERC 只从 --game-dir/AGERC.DLL 取（引擎本身也不回退），ALF 条目不作为装载来源、只留作取证对照；实现与文档已按两段式收敛（--agerc 显式覆盖 → --game-dir/AGERC.DLL，拿不到 ⇒ LoadLibraryA 0 + 126）。原计划的 ALF 回退（runtime/alf_index + loadAgercModule(bytes, origin_label)）取消。
 - tags: [emulator-lift, m2]
 
 ## 一句话
 
-把 AGERC 的装载口径改成"**免壳 PE 镜像**"：`--agerc` → `--game-dir/AGERC.DLL` → 从
-`SYS4INI.BIN` + `DATA1.ALF` 切 `AGERC.DLL` 条目；把"拆壳件 / 伪 HICON"从**预期路径**降为**应急**。
+AGERC 的装载口径收敛为**两段**（用户 2026-11-05 裁决）：`--agerc`（显式覆盖）→ `--game-dir/AGERC.DLL`；
+**拿不到 ⇒ `LoadLibraryA` 返回 0 + 126**。⛔ 不回退 `DATA1.ALF` 条目（引擎本身也不回退）；
+ALF 条目不作为装载来源，只留作取证对照。
 
 ## 现状（取证：`repo:apps/emulator-lift/docs/agerc-image.md`）
 
@@ -19,37 +21,34 @@
 - 测试安装树根件（sha256 `6241de66…`，848,896 B）是它的**汉化派生**：`.text` 逐字节相同；
   10 条 `RT_MENU`/`RT_DIALOG` 被替换；**图标与版本资源逐字节相同** ⇒ M2 的图标/版本两条路不可区分。
 - 只有正版安装树根件（sha256 `5f3189…`，335,872 B，AsProtect）资源不可读（**26/40** 条无文件字节；
-  另 14 条能映射，其中 13 条字节不是真资源，`RT_MANIFEST` 恰好相同）⇒ 需要"回退到 ALF 条目"的分支。
+  另 14 条能映射，其中 13 条字节不是真资源，`RT_MANIFEST` 恰好相同）⇒ 正版树默认路径拿不到可映射的 PE
+  ⇒ 停在 0 + 126（要跑就显式 `--agerc` 指一份免壳件）。
 - 引擎是**按名字** `LoadLibraryA("AGERC.DLL")`（`.lst` EA `0x48E74B`；`"AGERC.DLL"` 全语料仅 3 处代码引用）
-  ⇒ 真机加载的是**应用目录**那份；"从 ALF 装载"是**模拟器的替代策略**，不是引擎行为。
+  ⇒ 真机加载的是**应用目录**那份；"从 ALF 装载"是**模拟器的替代策略**，不是引擎行为，且按裁决不做。
 
-## 要做什么
+## 做成什么（两段，已落地）
 
-1. **新增** `apps/emulator-lift/src/runtime/alf_index.{h,cpp}`：
-   解析 `S4IC`/`S5IC` 索引头 + LZSS 段 + TOC；`findEntry(name)`；`readPayload(dir, entry)` 按
-   `(archiveIndex, offset, length)` **按需**读（⛔ 不整份读 1 GB；⛔ 不搬 `apps/emulator-cxx/src/core/alf.*` 的 core）。
-2. `repo:apps/emulator-lift/src/main.cpp`（`main()` 的 AGERC 段）：三步来源（显式 `--agerc` → 根件 → ALF 条目），
-   把**来源标签**（`root` / `alf:SYS4INI.BIN#21072`）与 sha256 传给 `Machine::loadAgercModule` 并打日志。
-3. `repo:apps/emulator-lift/src/runtime/machine.cpp` `Machine::loadAgercModule`：接受 `(bytes, origin_label)`；
-   保持 `agerc_base = 真实 ImageBase`、`cpu.shim.agerc_image` 语义不变。
-4. `repo:apps/emulator-lift/src/shims/user32_resource.cpp` `LoadIconA`：正常路径从镜像的 `RT_GROUP_ICON`
-   （`IDI_ICON1`）→ `RT_ICON`（id 3–17，lang 1041）拼 `HICON`；伪 HICON 只在 `.rsrc` 数据项映射失败时用，
-   且必须 loud log。
-5. `kernel32_version.cpp`：`VerQueryValueA` 的**字符串**必须交单字节 ANSI（2026-11-05 修，见文末补记）。
+1. `repo:apps/emulator-lift/src/main.cpp`：显式 `--agerc` → `--game-dir/AGERC.DLL`（VFS 解析）；
+   都没有 ⇒ 留空，`LoadLibraryA("AGERC.DLL")` 走 0 + 126。⛔ 没有 ALF 分支、⛔ 不读 `SYS4INI.BIN`。
+2. 真实 guest 模块装载（PE 节映射 + 真实 ImageBase/HINSTANCE；资源 / 版本从镜像解析）已落地；
+   `LoadIconA` 从镜像的 `RT_GROUP_ICON`（`IDI_ICON1`）拼 `HICON`，伪 HICON 只在 `.rsrc` 映射失败时作应急。
+3. `kernel32_version.cpp`：`VerQueryValueA` 的字符串交**单字节 ANSI**（2026-11-05 修，见文末补记）。
 
-## 判据
+## 判据（已达成）
 
-- 从 `links/install` 切出的 `AGERC.DLL` 条目 sha256 = `f48d1c0f…`；`RT_GROUP_ICON/IDI_ICON1`（216 B）=
-  `a49cb23c…`；安装树根件 = `6241de66…`，图标 sha 相同（**相同是预期**）。
-- 正版树（`links/raw`）走回退路径后 `LoadLibraryA("AGERC.DLL")` 成功、`LoadIconA` 返回非空；
-  只有"根件不可用且索引/条目缺失"才 0 + 126。
-- 不写 `--game-dir`；`--agerc` 显式给错仍拒绝启动（现状保留）。
+- `--agerc` 显式给错仍拒绝启动（现状保留）；没有镜像 ⇒ `LoadLibraryA` = 0、`last_error` = 126
+  （`tests/agerc_module.cpp#loadlibrary-without-image`）。
+- 安装树根件装载后：`agerc_base` = 真实 ImageBase、`LoadIconA` 非空、`FileVersion` = 39
+  （`tests/agerc_module.cpp` 的 `load-maps-image` / `handles-are-the-real-base` / `verqueryvaluea-string-is-ansi`）。
+- 正版树（`links/raw`）**不在本单判据内**：按裁决不回退 ALF ⇒ 根件不可映射就 0 + 126。
 
-## 不做
+## 不做（2026-11-05 裁决）
 
-执行 AGERC 的对话框代码（`SCOPE.md` §1 的模态 no-op stub 不变）；改 `apps/emulator-cxx`；
-为"零售版镜像"另开分支（需要时用 `--agerc` 指 `links/raw/AGERC.DLL__dumped.DLL` 即可，但它与 `.lst`
-不是同一 build，⛔ 不能拿它的 EA 引 `.lst`）。
+- ⛔ 不实现 `DATA1.ALF` 回退（原计划的 `runtime/alf_index.{h,cpp}` 与 `loadAgercModule(bytes, origin_label)`
+  形状一起取消）：引擎本身也不回退，ALF 条目只留作取证对照。
+- 执行 AGERC 的对话框代码（`SCOPE.md` §1 的模态 no-op stub 不变）；改 `apps/emulator-cxx`；
+  为"零售版镜像"另开分支（需要时用 `--agerc` 指 `links/raw/AGERC.DLL__dumped.DLL` 即可，但它与 `.lst`
+  不是同一 build，⛔ 不能拿它的 EA 引 `.lst`）。
 
 ## 2026-11-05 补记：RCVersion 检查（boot 最后一个卡点）已越过
 

@@ -106,6 +106,11 @@ bool sameImageFile(const std::string& a, const std::string& b) {
     return !sa.empty() && sa == sb;
 }
 
+// 路径入参（A 版 = CP932 字节）⇒ UTF-8 文本 —— **只给日志 / 诊断用**。
+// ★ 解析侧的编码归一是 `Vfs::resolve` 的入口（vfs.h 的 `guestPathForLog`：同一条规则）；
+//   这里不另写一份解码，避免"日志显示一套、解析走另一套"。
+std::string shownPath(const std::string& guest_path) { return guestPathForLog(guest_path); }
+
 // guest 路径 → 版本块。失败时**自己设好 last_error 并打日志**（调用方只管返回 0）。
 bool loadVersionBlock(X86& cpu, const std::string& guest_path, const char* api, std::uint32_t call_ea,
                       VersionBlock* out) {
@@ -117,6 +122,9 @@ bool loadVersionBlock(X86& cpu, const std::string& guest_path, const char* api, 
         shimLog(kVersion, api, "lptstrFilename 为 NULL / 空串 ⇒ 返回 0 + 错误 87");
         return false;
     }
+    // ★ 2026-11-05 缺陷单（VFS 不认 guest 根前缀）的日志面：`lptstrFilename` 是 **CP932 字节**
+    //   （guest 内存里的 A 版路径），直接写进 UTF-8 的 stderr 会把 `天結` 打成 `?V??`。
+    const std::string shown = shownPath(guest_path);
     // ★ 2026-11-04 改口径：AGERC.DLL 是**真实装载的 guest 模块**。
     //   有镜像 ⇒ 直接读它的 `.rsrc / RT_VERSION`（⛔ 不重读宿主）；没有镜像 ⇒ 按路径走 VFS/文件读。
     //   读不到 ⇒ 1813；文件不存在 ⇒ 2。⛔ 不再 hard error。
@@ -129,7 +137,7 @@ bool loadVersionBlock(X86& cpu, const std::string& guest_path, const char* api, 
                 shimLog(kVersion, api,
                         "\"%s\" 解析到**真实装载的 AGERC 镜像**（base=0x%08X），但读不到 RT_VERSION（%s）"
                         " ⇒ 返回 0 + 错误 1813",
-                        guest_path.c_str(), cpu.shim.agerc_base, err.c_str());
+                        shown.c_str(), cpu.shim.agerc_base, err.c_str());
                 return false;
             }
             out->source = "AGERC.DLL（cpu.shim.agerc_image，真实装载，不重读宿主）";
@@ -153,7 +161,7 @@ bool loadVersionBlock(X86& cpu, const std::string& guest_path, const char* api, 
             cpu.shim.last_error = kErrResourceTypeNotFound;
             shimLog(kVersion, api,
                     "\"%s\" 解析到主镜像 AGE.EXE，但它没有可用的 RT_VERSION（%s）⇒ 返回 0 + 错误 1813",
-                    guest_path.c_str(), err.c_str());
+                    shown.c_str(), err.c_str());
             return false;
         }
         out->source = "AGE.EXE（cpu.image，不重读）";
@@ -163,7 +171,7 @@ bool loadVersionBlock(X86& cpu, const std::string& guest_path, const char* api, 
     // ② 其它路径：VFS 解析到宿主，再按 PE 读
     if (!cpu.vfs) {
         shimAbort(kVersion, api, "Machine 没有装配 VFS，无法把 guest 路径 \"%s\" 映射到宿主",
-                  guest_path.c_str());
+                  shown.c_str());
     }
     std::string host;
     std::string verr;
@@ -173,7 +181,7 @@ bool loadVersionBlock(X86& cpu, const std::string& guest_path, const char* api, 
         cpu.shim.last_error = kErrFileNotFound;
         shimLog(kVersion, api,
                 "VFS 解析不了 \"%s\"（%s）⇒ 返回 0 + 错误 2（ERROR_FILE_NOT_FOUND；真机同样失败）",
-                guest_path.c_str(), verr.c_str());
+                shown.c_str(), verr.c_str());
         return false;
     }
     // 解析出来的宿主路径如果就是主镜像（例如 GetModuleFileNameA 给的是安装树里的 AGE.EXE）
@@ -184,7 +192,7 @@ bool loadVersionBlock(X86& cpu, const std::string& guest_path, const char* api, 
         if (!res.init(*cpu.image, &err) || !res.versionInfo(&out->bytes, &err)) {
             cpu.shim.last_error = kErrResourceTypeNotFound;
             shimLog(kVersion, api, "\"%s\" → \"%s\" 是主镜像，但读不到 RT_VERSION（%s）⇒ 返回 0 + 错误 1813",
-                    guest_path.c_str(), host.c_str(), err.c_str());
+                    shown.c_str(), host.c_str(), err.c_str());
             return false;
         }
         out->source = "AGE.EXE（cpu.image，宿主路径命中主镜像）";
@@ -196,7 +204,7 @@ bool loadVersionBlock(X86& cpu, const std::string& guest_path, const char* api, 
     if (!loadPeFile(host, &img, &lerr)) {
         cpu.shim.last_error = kErrResourceTypeNotFound;
         shimLog(kVersion, api, "\"%s\" → \"%s\" 不是可解析的 PE（%s）⇒ 返回 0 + 错误 1813",
-                guest_path.c_str(), host.c_str(), lerr.c_str());
+                shown.c_str(), host.c_str(), lerr.c_str());
         return false;
     }
     PeResources res;
@@ -235,8 +243,8 @@ void shimGetFileVersionInfoSizeA(X86& cpu, ShimCall& call) {
         cpu.mem->wr32(handle_ea, 0);  // 文档：保留参数，填 0
     }
     shimLog(kVersion, api,
-            "\"%s\" → VS_VERSIONINFO = %zu 字节（来源：%s；D6：读镜像自己的资源）", path.c_str(),
-            vb.bytes.size(), vb.source.c_str());
+            "\"%s\" → VS_VERSIONINFO = %zu 字节（来源：%s；D6：读镜像自己的资源）",
+            shownPath(path).c_str(), vb.bytes.size(), vb.source.c_str());
     call.result = static_cast<std::uint32_t>(vb.bytes.size());
 }
 
@@ -276,7 +284,7 @@ void shimGetFileVersionInfoA(X86& cpu, ShimCall& call) {
         shimLog(kVersion, api, "dwHandle=0x%08X 被忽略（文档：这个参数保留）", dw_handle);
     }
     shimLog(kVersion, api, "把 \"%s\" 的 VS_VERSIONINFO（%zu 字节，来源：%s）拷进 guest 0x%08X（dwLen=%u）",
-            path.c_str(), need, vb.source.c_str(), data_ea, dw_len);
+            shownPath(path).c_str(), need, vb.source.c_str(), data_ea, dw_len);
     call.result = 1;
 }
 

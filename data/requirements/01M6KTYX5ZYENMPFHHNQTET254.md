@@ -2,8 +2,9 @@
 
 - id: REQ-01M6KTYX5ZYENMPFHHNQTET254
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- done_reason: 用户 2026-11-05 裁决：确认需要实现 D3D 接口（选项 B）。按实测，本安装 set:CreateObject=2 ⇒ 显示初始化走 D3D9，DDraw 在启动路径上 dead（但 DDraw 代码保留：sub_4764B0 有一条不检查 CreateObject 的服务分派入口）。后续实现见 REQ-01M6MH5M975Q63AH85F03RVQFD（D3D9 最小设备簇，已落地）与 D3DX9 Sprite 单。
 - tags: [emulator-lift, m2, route]
 
 ## 一句话

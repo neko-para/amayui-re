@@ -9,7 +9,14 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "check.h"
+#include "runtime/cp932.h"
 #include "runtime/machine.h"
 #include "runtime/region.h"
 #include "shims/register.h"
@@ -65,9 +72,15 @@ constexpr std::uint32_t kHrgnEmpty = 0x00406414u;   // HRGN 槽（空矩形）
 constexpr std::uint32_t kHrgnEllipse = 0x00406418u; // HRGN 槽（椭圆）
 constexpr std::uint32_t kHrgnPoly = 0x0040641Cu;    // HRGN 槽（多边形）
 
+// 第四阶段（2026-11-05 追加）：MessageBoxA 的 caption / text 必须按 **CP932 → UTF-8** 进日志。
+// ★ 落点同样隔开（0x407000+），⛔ 不与前三段重叠。
+constexpr std::uint32_t kCode4 = 0x00407000u;        // 第四段 guest 代码（只有一条 MessageBoxA 调用）
+constexpr std::uint32_t kMBCaption = 0x00407100u;    // CP932 字节的 caption（NUL 结尾）
+constexpr std::uint32_t kMBText = 0x00407200u;       // CP932 字节的 text（NUL 结尾）
+constexpr std::uint32_t kMBResult = 0x00407300u;     // 返回值槽
+
 struct Asm {
-    // ★ `base` = 这段机器码的装载地址（第一段是 kCode；第二阶段是 kCode2）。
-    //   `callRel` 的位移必须相对**本段**的地址算 —— 早先写死 kCode 时，第二段的 call 全偏了 0x300。
+    // ★ `base` = 这段机器码的装载地址（第一段是 kCode；第二阶段是 kCode2）。    //   `callRel` 的位移必须相对**本段**的地址算 —— 早先写死 kCode 时，第二段的 call 全偏了 0x300。
     explicit Asm(std::uint32_t base = kCode) : base_(base) {}
     std::uint32_t base_;
     std::vector<std::uint8_t> b;
@@ -105,6 +118,60 @@ std::uint32_t stubOfIn(lift::Machine& m, const char* module, const char* name) {
     }
     return d->stub_ea;
 }
+
+}  // namespace
+
+// ---- stderr 捕获（只给 `MessageBoxA` 的日志判据用；Windows 走 `_dup/_dup2`，POSIX 走 `dup/dup2`）----
+// ★ 为什么要捕获：`MessageBoxA` 的行为里**唯一**新增的、可验收的东西就是那行日志（caption / text
+//   的 CP932 → UTF-8 转码）。返回值仍是 IDOK(1)，不捕获就没法把"转码对"变成会红的断言。
+namespace {
+
+#ifdef _WIN32
+int dupFd(int fd) { return _dup(fd); }
+int dup2Fd(int src, int dst) { return _dup2(src, dst); }
+int filenoOf(std::FILE* f) { return _fileno(f); }
+void closeFd(int fd) { _close(fd); }
+#else
+int dupFd(int fd) { return ::dup(fd); }
+int dup2Fd(int src, int dst) { return ::dup2(src, dst); }
+int filenoOf(std::FILE* f) { return ::fileno(f); }
+void closeFd(int fd) { ::close(fd); }
+#endif
+
+struct StderrCapture {
+    std::FILE* tmp = nullptr;
+    int saved = -1;
+    bool active = false;
+
+    bool begin() {
+        tmp = std::tmpfile();
+        if (!tmp) return false;
+        std::fflush(stderr);
+        saved = dupFd(2);
+        if (saved < 0) return false;
+        if (dup2Fd(filenoOf(tmp), 2) != 0) return false;
+        active = true;
+        return true;
+    }
+    std::string end() {
+        if (!active) return std::string();
+        std::fflush(stderr);
+        dup2Fd(saved, 2);
+        closeFd(saved);
+        active = false;
+        std::fseek(tmp, 0, SEEK_END);
+        const long n = std::ftell(tmp);
+        std::fseek(tmp, 0, SEEK_SET);
+        std::string out(n > 0 ? static_cast<std::size_t>(n) : 0u, '\0');
+        if (n > 0) {
+            const std::size_t got = std::fread(&out[0], 1, static_cast<std::size_t>(n), tmp);
+            out.resize(got);
+        }
+        std::fclose(tmp);
+        tmp = nullptr;
+        return out;
+    }
+};
 
 }  // namespace
 
@@ -1001,6 +1068,81 @@ int main() {
     LIFT_CHECK_EQ_U32(res3(R_DEL_OK), 1u);        // DeleteObject 认 region
     LIFT_CHECK(m.handles().get(hrgn_a) == nullptr);  // 句柄项已释放
     LIFT_CHECK_EQ_U32(res3(R_DEL_PT), 0u);        // 之后 PtInRegion ⇒ FALSE（无效句柄）
+
+    // =================================================================================
+    // 第四阶段（2026-11-05 追加）：`MessageBoxA` 的 caption / text 必须按 CP932 → UTF-8 进日志。
+    // 判据（会红）：
+    //   ① 返回值**一字未改**：仍是 IDOK(1)（SCOPE §1 模态 no-op）；
+    //   ② 日志里出现**转码后**的真实日文（不是 `?`、不是 CP932 原始字节）；
+    //   ③ 正文里的 CRLF 被转义成 `\r\n` ⇒ 一行日志（否则多行日志没法 grep）。
+    // ★ CP932 字节由**本仓的码表**编出来（⛔ 不手写编码事实；码表本身由 tests/codepage.cpp 守）。
+    // =================================================================================
+    g_current_case = "message-box-cp932-log";
+    {
+        const std::u16string cap_w = u"エラー：DirectSound";
+        const std::u16string txt_w = u"DirectSoundが使用できません\r\n音を出力出来ません";
+        const std::string cap_bytes = lift::wideToCp932(cap_w);
+        const std::string txt_bytes = lift::wideToCp932(txt_w);
+        // 含非 ASCII ⇒ 这条用例真的在走 CP932（纯 ASCII 会让"没转码"也蒙混过关）
+        auto hasHighByte = [](const std::string& s) {
+            for (const char ch : s)
+                if ((static_cast<unsigned char>(ch) & 0x80u) != 0) return true;
+            return false;
+        };
+        LIFT_CHECK(hasHighByte(cap_bytes));
+        LIFT_CHECK(hasHighByte(txt_bytes));
+        // 而且 CP932 是**双字节**：解码后字节数必须与原 UTF-16 码元数不同（窄字符 → 宽字节）
+        LIFT_CHECK_NE_U32(static_cast<std::uint32_t>(txt_bytes.size()),
+                          static_cast<std::uint32_t>(txt_w.size()));
+
+        std::vector<std::uint8_t> capb(cap_bytes.begin(), cap_bytes.end());
+        capb.push_back(0);
+        std::vector<std::uint8_t> txtb(txt_bytes.begin(), txt_bytes.end());
+        txtb.push_back(0);
+        LIFT_CHECK(m.placeData(kMBCaption, capb.data(), capb.size(), &err));
+        LIFT_CHECK(m.placeData(kMBText, txtb.data(), txtb.size(), &err));
+        const std::uint8_t zeros4[4] = {};
+        LIFT_CHECK(m.placeData(kMBResult, zeros4, sizeof(zeros4), &err));
+
+        // 引擎 0x00406D90 的压栈次序：uType, lpCaption, lpText, hWnd
+        Asm d(kCode4);
+        d.pushImm(0x41u);  // uType（MB_OK | MB_ICONINFORMATION —— 引擎那里就是 0x41）
+        d.pushImm(kMBCaption);
+        d.pushImm(kMBText);
+        d.pushImm(0x00020004u);  // hWnd（headless 里没有窗口；MessageBoxA 不会去查它）
+        d.callRel(stubOf(m, "MessageBoxA"));
+        d.storeEax(kMBResult);
+        d.ret();
+        LIFT_CHECK(m.placeCode(kCode4, d.b.data(), d.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+
+        StderrCapture cc;
+        LIFT_CHECK(cc.begin());
+        m.cpu().eip = kCode4;
+        lift::RunOptions o4;
+        o4.until_ea = kSentinel;
+        o4.max_insns = 2000;
+        const lift::RunResult r4 = m.run(o4);
+        const std::string log = cc.end();
+
+        g_current_case = "message-box-cp932-log-run";
+        // ★ 把捕获到的那一行**回显**出来：它本身就是这条用例的证据（真机上它是弹给人看的），
+        //   ctest 只在失败时显示它，直接跑二进制时能当场看见转码结果。
+        std::fputs(log.c_str(), stderr);
+        LIFT_CHECK_EQ_U32(r4.ea, kSentinel);
+        // ① 语义不变
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMBResult), 1u);
+        // ② 转码后的真实文本（UTF-8）+ 原始 type
+        const std::string want_caption = std::string("caption=\"") + "エラー：DirectSound" + "\"";
+        LIFT_CHECK(log.find(want_caption) != std::string::npos);
+        const std::string want_text =
+            std::string("text=\"") + "DirectSoundが使用できません\\r\\n音を出力出来ません" + "\"";
+        LIFT_CHECK(log.find(want_text) != std::string::npos);
+        LIFT_CHECK(log.find("type=0x00000041") != std::string::npos);
+        LIFT_CHECK(log.find("⇒ 返回 IDOK(1)（headless 不建窗口）") != std::string::npos);
+        // ③ 一行一条：正文里的 CRLF 被转义 ⇒ 日志里没有裸的 CRLF 跑进那行
+        LIFT_CHECK(log.find("DirectSoundが使用できません\r\n") == std::string::npos);
+    }
 
     return finish("user32-window");
 }

@@ -9,6 +9,11 @@
 //   · `RemoveMenu` / `DestroyMenu` / `DrawMenuBar` → TRUE；
 //   · `TrackPopupMenu` → 0（立即返回，不阻塞、不等待）；
 //   · `MessageBoxA`  → IDOK(1)（"用户没改 / 直接继续"）。
+//   ★ 2026-11-05 追加：`MessageBoxA` 的 **caption / text 要进日志**（CP932 → UTF-8）。
+//     理由：boot 上它是唯一能看见"引擎为什么停 / 为什么走错分支"的手段（真机上是弹给人看的）；
+//     `.lst` 0x00406D38 的「DSOUND.DLLの読み込みに失敗しました…」就是这么被看见的。
+//     ⛔ 返回语义不变（仍是 1 = IDOK）。转码走自带的 `runtime/cp932.cpp`（与 `vfs.cpp` 的
+//     `guestPathForLog` 同一条规则），⛔ 不借宿主的 MultiByteToWideChar。
 // ★ 每一条都打一行 `[shim]`（SCOPE §3 第 3 条：⛔ 不许静默 no-op），经 `addStub` 登记
 //   `data/lift/overrides.json`（`lift sync` 自动进清单）。
 // ★ 它们**不属于** D6 七族（user32 窗口 / 消息族），所以不触发 `seven-family-no-stub`。
@@ -20,8 +25,12 @@
 //     （WM_SYSCOMMAND 里去掉"最大化"项）；
 //   · `0x004BB0ED GetMenu(hwnd)` → `SetMenu`（经函数指针）→ `0x004BB0FE DrawMenuBar(hwnd)`
 //     （`display:ScreenMode` 分支）；另有 `0x004B9A35 / 0x00414239 DrawMenuBar`。
+//   · `MessageBoxA`：`0x00406D38`（DSOUND 装载失败）· `0x00406D93`（DirectSound 不可用）·
+//     另有 `j_MessageBoxA_4` 这条跳板的多处调用点。
 #include <cstdint>
+#include <string>
 
+#include "runtime/cp932.h"
 #include "runtime/host_window.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
@@ -129,10 +138,67 @@ void shimTrackPopupMenu(X86& cpu, ShimCall& call) {
     call.result = 0;
 }
 
+// ★ MessageBoxA 的文本入参是 **A 版 API** ⇒ guest 内存里是 **CP932 字节**（日文工程）。
+//   日志要能读 ⇒ 按 CP932 解成 UTF-16 再编成 UTF-8（与 `vfs.cpp` 的 `guestPathForLog` 同一条规则；
+//   码表是自带的 `cp932.cpp`，⛔ 不借宿主的 MultiByteToWideChar —— 那会让两台机器各有一套表）。
+//   ⛔ **不做"已经是 UTF-8 就原样"的猜测**：MessageBoxA 的字节只可能来自 guest 的 A 版表示，
+//   而"合法 UTF-8"与"合法 CP932"有交集 ⇒ 猜错会把日文打成乱码（`guestPathForLog` 那样猜是因为
+//   VFS 还会收到宿主侧的 UTF-8 路径；这里没有那一侧）。纯 ASCII 是 CP932 的子集，不受影响。
+//   非法字节按 Windows 的宽松口径跳过，并**另起一行**报是哪一侧、多少字节（⛔ 不静默吞掉）。
+std::string cp932TextToUtf8(const std::string& bytes, std::size_t* bad) {
+    if (bytes.empty()) return std::string();
+    return utf16ToUtf8(cp932ToWide(bytes, bad));
+}
+
+// 日志里的文本必须**留在一行内**：引擎的正文本身带 `\r\n`（例 `.lst` .data:0051E488 那条
+// 「DSOUND.DLLの読み込みに失敗しました．\r\nDirectXを…」）⇒ 原样打会把一行日志撕成多行，
+// 既难 grep 也看不出"这属于同一个框"。所以把控制字符转义成 `\r` / `\n` / `\t` / `\xNN`。
+// ★ 只是**显示**层面的转义：guest 收到的返回值 / 任何写回都不受影响。
+std::string escapeLogText(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (const char ch : s) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        switch (c) {
+            case '\r': out += "\\r"; break;
+            case '\n': out += "\\n"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20 || c == 0x7F) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\x%02X", static_cast<unsigned>(c));
+                    out += buf;
+                } else {
+                    out.push_back(ch);
+                }
+        }
+    }
+    return out;
+}
+
 void shimMessageBoxA(X86& cpu, ShimCall& call) {
-    (void)cpu;
     // 参数：hWnd / lpText / lpCaption / uType
-    shimLog("user32", "MessageBoxA", "模态 no-op ⇒ 返回 IDOK(1)（SCOPE §1；关闭确认 / 存档命名直接继续）");
+    // ★ 为什么要把文本打出来（2026-11-05 用户口径）：boot 上**唯一**能看见"引擎为什么停 / 为什么
+    //   走错分支"的手段就是这个模态框的正文（真机上它是弹给人看的）⇒ 必须进日志。
+    //   ⛔ 返回语义一字不改：仍是模态 no-op ⇒ 立即 IDOK(1)、不建窗口、不阻塞（SCOPE §1）。
+    (void)cpu;
+    const std::uint32_t hwnd = call.u32(0);
+    const std::uint32_t text_ea = call.u32(1);
+    const std::uint32_t cap_ea = call.u32(2);
+    const std::uint32_t type = call.u32(3);
+    std::size_t bad_text = 0;
+    std::size_t bad_cap = 0;
+    const std::string text = escapeLogText(cp932TextToUtf8(call.str(1), &bad_text));
+    const std::string caption = escapeLogText(cp932TextToUtf8(call.str(2), &bad_cap));
+    shimLog("user32", "MessageBoxA",
+            "type=0x%08X caption=\"%s\" text=\"%s\" ⇒ 返回 IDOK(1)（headless 不建窗口）", type,
+            caption.c_str(), text.c_str());
+    if (bad_text != 0 || bad_cap != 0) {
+        shimLog("user32", "MessageBoxA",
+                "⚠ 文本里有非法 CP932（caption %u 字节 / text %u 字节）⇒ 已按 Windows 的宽松口径跳过；"
+                "上面那行可能少字符（text@0x%08X caption@0x%08X hwnd=0x%08X）",
+                static_cast<unsigned>(bad_cap), static_cast<unsigned>(bad_text), text_ea, cap_ea, hwnd);
+    }
     call.result = 1;
 }
 

@@ -300,6 +300,11 @@ const char* const kLoadableModules[] = {
     //   **句柄是它真实的模块基址**（`cpu.shim.agerc_base`），⛔ 不再是 0x7F18xxxx 假句柄。
     //   没有镜像（没给 --agerc 且 --game-dir 下没有 AGERC.DLL）⇒ LoadLibrary 返回 0 + 126。
     "agerc.dll",
+    // ★ DSOUND.DLL：`.lst` 0x004B5C64 `LoadLibraryA("DSOUND.DLL")`（sub_4B5C50 = LoadDLL，
+    //   调用方 0x00406CE0）。它**不在**导入表里（引擎动态装载）⇒ 这里只回答"系统里能装载"，
+    //   拿到**确定性假句柄**；导出真源仍是 shim 注册表（`dsound!DirectSoundCreate`，见 dsound.cpp）。
+    //   ⛔ 追加在**表尾**：假句柄 = `0x7F000000 + 表内序号 * 64 KiB`，插在中间会平移后面所有模块的句柄。
+    "dsound.dll",
 };
 
 // 模块名归一化：去路径 + 小写 + 去尾部 `.dll`（`KERNEL32.DLL` / `kernel32` 归一化后相等）
