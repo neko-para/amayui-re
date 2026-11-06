@@ -234,6 +234,11 @@ add_executable(lift-window-events tests/window_events.cpp)
 target_link_libraries(lift-window-events PRIVATE emulator-lift-runtime)
 add_test(NAME window-events COMMAND lift-window-events)
 
+# ---- pure：`--skip-logo` 的字段写入（T_Command+0x5EB5C；锚 0x004BAA37）----
+add_executable(lift-skip-logo tests/skip_logo.cpp)
+target_link_libraries(lift-skip-logo PRIVATE emulator-lift-runtime)
+add_test(NAME skip-logo COMMAND lift-skip-logo)
+
 add_executable(lift-surface-present tests/surface_present.cpp)
 target_link_libraries(lift-surface-present PRIVATE emulator-lift-runtime)
 add_test(NAME surface-present COMMAND lift-surface-present)

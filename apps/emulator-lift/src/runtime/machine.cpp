@@ -23,7 +23,15 @@
 namespace lift {
 namespace {
 Machine* g_active = nullptr;
-}
+
+// ★ `--skip-logo` 的机器级锚点（EA 来自 `.lst`；字段 offset 来自 shape 的 T_Command 成员）：
+//   - 0x004BAA37：`sub_415640`（T_Command 构造）返回之后、`mov ds:dword_55E1BC, eax` 之前。
+//     EAX = 新对象；构造器已在 0x00415AE0 把 show-logo 写成 1。
+//   - 0x0005EB5C：T_Command 的 show-logo 标志（`0x130` 在 0x0042F7B8 读它；`0x9` 在 0x00428A75 清 0）。
+//   ⛔ 这不是"跳过 boot"：root script 仍从 dword 0 执行，只是 0x130 读到 0，不走 call-script LOGO。
+constexpr std::uint32_t kShowLogoInitEa = 0x004BAA37u;
+constexpr std::uint32_t kShowLogoFieldOffset = 0x0005EB5Cu;
+}  // namespace
 
 Machine* activeMachine() { return g_active; }
 void setActiveMachine(Machine* m) { g_active = m; }
@@ -513,6 +521,31 @@ RunResult Machine::run(const RunOptions& opts) {
             r.reason = StopReason::MaxInsns;
             break;
         }
+        // ★ `--skip-logo`：T_Command 已构造、show-logo 已初始化为 1，且指针尚未发布。
+        //   在这里把引擎自己的字段写 0 —— 之后 `mov ds:dword_55E1BC, eax` 发布的就是
+        //   "show-logo=0" 的对象；root script 的 `0x130` 因而跳过 `call-script 5262`。
+        //   ⛔ 不跳过 boot、不改 root script、不按帧号猜 LOGO。
+        if (skip_logo_ && !skip_logo_checked_ && cpu_.eip == kShowLogoInitEa) {
+            skip_logo_checked_ = true;
+            const std::uint32_t object = cpu_.eax();
+            if (object != 0 && mem_.committed(object + kShowLogoFieldOffset, 4)) {
+                const std::uint32_t before = mem_.rd32(object + kShowLogoFieldOffset);
+                mem_.wr32(object + kShowLogoFieldOffset, 0);
+                skip_logo_applied_ = true;
+                skip_logo_object_ = object;
+                std::printf("[skip-logo] T_Command=0x%08X show-logo(+0x%05X): %u -> 0\n", object,
+                            kShowLogoFieldOffset, before);
+                if (before != 1) {
+                    std::fprintf(stderr,
+                                 "[skip-logo] ⚠ 初值不是 1（读到 %u）：写 0 仍执行，但钩子/字段可能已漂\n",
+                                 before);
+                }
+            } else {
+                std::fprintf(stderr,
+                             "[skip-logo] 钩子 @ %08X 命中，但对象指针 0x%08X 不可写（+0x%05X）⇒ 未应用\n",
+                             kShowLogoInitEa, object, kShowLogoFieldOffset);
+            }
+        }
         // ★ 到期的 winmm 定时器在**块边界**触发（D5：没有定时器服务线程）。
         //   ⛔ 不嵌套：一个回调没跑完就不再触发下一个（与真机的单线程回调串行一致）。
         if (!cpu_.shim.timer_firing && !cpu_.shim.timers.empty() && !cpu_.shim.callback.active) {
@@ -745,6 +778,7 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
     }
     t.clock_start_100ns = clock_.epoch100ns();
     t.real_time = clock_.realTime();
+    t.skip_logo = skip_logo_;
     return t;
 }
 
@@ -765,6 +799,7 @@ void Machine::dumpTraceInputs(std::FILE* out) const {
     std::fprintf(out, "trace-input clock    = %s (start=%llu x100ns)\n",
                  t.real_time ? "REAL-TIME（⚠ 逐字节断言必须跳过）" : "virtual",
                  (unsigned long long)t.clock_start_100ns);
+    if (t.skip_logo) std::fprintf(out, "trace-input skip-logo= 1（写引擎 show-logo 标志；不改 root script）\n");
     std::fprintf(out, "trace-input hash     = %016llX\n", (unsigned long long)traceInputsHash());
 }
 
@@ -792,6 +827,12 @@ std::uint64_t Machine::traceInputsHash() const {
     mix(&t.clock_start_100ns, sizeof(t.clock_start_100ns));
     const std::uint8_t real = t.real_time ? 1 : 0;
     mix(&real, 1);
+    // ★ 只有真的开了 `--skip-logo` 才混入：默认路径的 trace hash 与旧基线保持不变
+    //   （开关一变就是另一条执行路径，必须能看出差异）。
+    if (t.skip_logo) {
+        const std::uint8_t skip_logo = 1;
+        mix(&skip_logo, 1);
+    }
     return h;
 }
 
@@ -839,6 +880,16 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
     std::fprintf(out, "stop      : %s @ eip=%08X\n", stopReasonName(r.reason), r.ea);
     if (!r.detail.empty()) std::fprintf(out, "detail    : %s\n", r.detail.c_str());
     std::fprintf(out, "insns     : %llu\n", (unsigned long long)r.insns);
+    if (skip_logo_) {
+        if (skip_logo_applied_) {
+            std::fprintf(out, "skip-logo : applied @ T_Command=0x%08X (+0x%05X=0)\n", skip_logo_object_,
+                         kShowLogoFieldOffset);
+        } else if (skip_logo_checked_) {
+            std::fprintf(out, "skip-logo : NOT applied（钩子命中但对象/字段不可写）\n");
+        } else {
+            std::fprintf(out, "skip-logo : 未命中（run 在 T_Command 构造前结束）\n");
+        }
+    }
     std::fprintf(out, "blocks    : %zu (insns cached %zu, hits %zu, misses %zu)\n", cache_.blockCount(),
                  cache_.insnCount(), cache_.hits(), cache_.misses());
     std::fprintf(out, "committed : %llu KiB\n", (unsigned long long)(mem_.committedBytes() / 1024));

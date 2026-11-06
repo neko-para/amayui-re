@@ -131,6 +131,10 @@ public:
     std::uint32_t setCursor(std::uint32_t hcursor);  // 返回**旧** HCURSOR（Win32 语义）
     std::uint32_t cursor() const { return cursor_; }
     void setCursorPos(int x, int y);
+    // ★ P3：SDL 的鼠标事件给的是**客户区**坐标，而 `GetCursorPos` / `SetCursorPos` 的 Win32
+    //   口径是**屏幕**坐标 ⇒ 这里加上窗口原点再落进同一格。⛔ 不要把客户区坐标直接写进
+    //   `cursor_x_`：guest 随后还会 `ScreenToClient` 一次，会再减一遍原点。
+    void setCursorClientPos(std::uint32_t hwnd, int x, int y);
     void getCursorPos(int* x, int* y) const {
         if (x) *x = cursor_x_;
         if (y) *y = cursor_y_;

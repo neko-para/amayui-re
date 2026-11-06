@@ -78,6 +78,7 @@ struct TraceInputs {
     std::string agerc_path;     // `--agerc` / 自动发现的原始路径（空 = 没有 AGERC 镜像）
     std::string agerc_sha256;   // AGERC 镜像的 sha256（空 = 没有镜像）
     std::string native_overrides;  // 解析后的 override 集（name@EA/conv/argB；空 = 全关）
+    bool skip_logo = false;        // `--skip-logo`（写引擎 show-logo 标志；不是输入路径变更）
     std::uint64_t clock_start_100ns = 0;
     bool real_time = false;
 };
@@ -132,6 +133,13 @@ public:
     bool configureNativeOverrides(const std::string& list, std::string* err);
     NativeOverrideTable& overrides() { return overrides_; }
     const NativeOverrideTable& overrides() const { return overrides_; }
+
+    // ★ `--skip-logo`：**不跳过 boot**，只在 T_Command 构造完成、指针发布前把引擎自己的
+    //   show-logo 标志（T_Command + 0x5EB5C）写 0；根脚本的 0x130 因而走"不 call-script LOGO"分支。
+    //   钩子点见 machine.cpp（`kShowLogoInitEa`）；⛔ 不是"直接跳到 TITLE"的宿主捷径。
+    void setSkipLogo(bool on) { skip_logo_ = on; }
+    bool skipLogo() const { return skip_logo_; }
+    bool skipLogoApplied() const { return skip_logo_applied_; }
 
     // ---- 访问器 ----
     GuestMemory& mem() { return mem_; }
@@ -221,6 +229,10 @@ private:
     bool initialized_ = false;
     bool image_loaded_ = false;
     bool bare_ = false;
+    bool skip_logo_ = false;
+    bool skip_logo_checked_ = false;  // 钩子点已过（成功 / 失败都算，避免反复尝试）
+    bool skip_logo_applied_ = false;
+    std::uint32_t skip_logo_object_ = 0;
     std::string exe_path_;
     // ★ 诊断状态（`LIFT_FRAME_TRACE=1`）；默认全不参与执行。
     bool frame_trace_ = false;

@@ -384,6 +384,94 @@ int main(int argc, char** argv) {
         LIFT_CHECK(win->stopRequested());
     }
 
+    // ---- P3：鼠标移动必须同时更新 guest 的**屏幕**光标位置（TITLE hover 依赖 0x109）----
+    //   判据：SDL motion 是客户区坐标；`GetCursorPos` 返回屏幕坐标（客户区 + 窗口原点）。
+    //   ⛔ 只 post WM_MOUSEMOVE 而不更新虚拟光标 ⇒ TITLE 的命中查找永远读到 (0,0)。
+    {
+        lift::Machine m;
+        std::string err;
+        LIFT_CHECK(m.initBare(&err));
+        LIFT_CHECK(m.prepareStack(&err));
+        auto win = std::make_unique<lift::SdlWindow>();
+        std::string werr;
+        if (!requireWindow(*win, gpu, &werr)) {
+            if (gpu) LIFT_SKIP(werr.c_str());
+            LIFT_CHECK(false);
+            return lift_test::finish("present-window");
+        }
+        const std::uint32_t hwnd =
+            m.cpu().windows->createWindow("MouseTest", 0x00C00000u, 0, 100, 50, 1280, 720, 0);
+        LIFT_CHECK_NE_U32(hwnd, 0u);
+        const lift::HostWindow* w = m.cpu().windows->find(hwnd);
+        LIFT_CHECK(w != nullptr);
+        win->attachWindowManager(m.cpu().windows);
+        SDL_Event motion{};
+        motion.type = SDL_EVENT_MOUSE_MOTION;
+        motion.motion.windowID = win->windowIdForTest();
+        motion.motion.x = 1165.0f;
+        motion.motion.y = 365.0f;
+        LIFT_CHECK(SDL_PushEvent(&motion));
+        win->pumpHostEvents(0);
+        int cx = -1;
+        int cy = -1;
+        m.cpu().windows->getCursorPos(&cx, &cy);
+        if (w != nullptr) {
+            LIFT_CHECK_EQ_I64(cx, static_cast<std::int64_t>(w->x) + 1165);
+            LIFT_CHECK_EQ_I64(cy, static_cast<std::int64_t>(w->y) + 365);
+        }
+        bool saw_move = false;
+        for (std::size_t i = 0; i < m.cpu().windows->queueSize(); ++i) {
+            lift::WinMessage msg;
+            if (m.cpu().windows->peekAt(i, &msg) && msg.message == 0x0200u) {
+                saw_move = true;
+                LIFT_CHECK_EQ_U32(msg.lparam & 0xFFFFu, 1165u);
+                LIFT_CHECK_EQ_U32((msg.lparam >> 16) & 0xFFFFu, 365u);
+            }
+        }
+        LIFT_CHECK(saw_move);
+
+        // 按键：同样更新虚拟光标 + 队列里是 WM_LBUTTONDOWN。
+        SDL_Event button{};
+        button.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+        button.button.windowID = win->windowIdForTest();
+        button.button.button = SDL_BUTTON_LEFT;
+        button.button.x = 200.0f;
+        button.button.y = 300.0f;
+        LIFT_CHECK(SDL_PushEvent(&button));
+        win->pumpHostEvents(0);
+        m.cpu().windows->getCursorPos(&cx, &cy);
+        if (w != nullptr) {
+            LIFT_CHECK_EQ_I64(cx, static_cast<std::int64_t>(w->x) + 200);
+            LIFT_CHECK_EQ_I64(cy, static_cast<std::int64_t>(w->y) + 300);
+        }
+        bool saw_button = false;
+        for (std::size_t i = 0; i < m.cpu().windows->queueSize(); ++i) {
+            lift::WinMessage msg;
+            if (m.cpu().windows->peekAt(i, &msg) && msg.message == 0x0201u) {
+                saw_button = true;
+                LIFT_CHECK_EQ_U32(msg.lparam & 0xFFFFu, 200u);
+                LIFT_CHECK_EQ_U32((msg.lparam >> 16) & 0xFFFFu, 300u);
+            }
+        }
+        LIFT_CHECK(saw_button);
+
+        // 滚轮：光标位置也要更新（lParam 的屏幕/客户区口径是既有问题，不在本断言范围）。
+        SDL_Event wheel{};
+        wheel.type = SDL_EVENT_MOUSE_WHEEL;
+        wheel.wheel.windowID = win->windowIdForTest();
+        wheel.wheel.mouse_x = 400.0f;
+        wheel.wheel.mouse_y = 500.0f;
+        wheel.wheel.y = 1.0f;
+        LIFT_CHECK(SDL_PushEvent(&wheel));
+        win->pumpHostEvents(0);
+        m.cpu().windows->getCursorPos(&cx, &cy);
+        if (w != nullptr) {
+            LIFT_CHECK_EQ_I64(cx, static_cast<std::int64_t>(w->x) + 400);
+            LIFT_CHECK_EQ_I64(cy, static_cast<std::int64_t>(w->y) + 500);
+        }
+        win->shutdown();
+    }
+
     LIFT_CHECK_EQ_U32(SDL_WasInit(SDL_INIT_VIDEO), 0u);
     return lift_test::finish("present-window");
 }

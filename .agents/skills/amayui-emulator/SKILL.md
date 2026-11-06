@@ -5,10 +5,10 @@ description: 在本仓推进《天結いキャッスルマイスター》引擎*
 
 # Amayui Emulator（模拟器开发：**观测驱动**的闭环）
 
-> ★ **范围（2026-10-31 用户口径）**：**唯一在维护的是 `apps/emulator-cxx`**。
-> `apps/emulator` 与 `apps/emulator-new` **都已废弃**（同级只读遗产）：⛔ 不新增功能、不补守卫、
-> ⛔ 不为它们改 spec、⛔ 不因为"另一套实现没同步"去改它们。
-> ⇒ 下面提到"三条线"时，只有第一条是活的；提到"两条线各有各的门"时，只有 CTest 那条是活的。
+> ★ **范围（2026-11 用户口径）**：**当前唯一在维护的实现是 `apps/emulator-lift`**（执行 `AGE.EXE` 原机器码的
+> guest-state 模拟器）。`apps/emulator-cxx` 是按 spec 重写的**对照实现**（仍可跑、可作语义对照，
+> 但**新功能不落那里**）；`apps/emulator` 与 `apps/emulator-new` **都已废弃**（同级只读遗产）：
+> ⛔ 不新增功能、不补守卫、⛔ 不为它们改 spec、⛔ 不因为"另一套实现没同步"去改它们。
 > 判据与为什么：`AGENTS.md` §11 · `docs/00-origin/decisions.md` §8.1。
 
 ## 0. 三条最常踩的
@@ -36,22 +36,20 @@ pnpm tools opcodes handlers                  # opcode → handler EA（表基址
 # ② 取证（**下一层**，可 subagent 扇出）—— 拿到"取证包"（§2.1）
 #    交 `amayui-re-engine`：`pnpm tools disasm-fn show sub_XXXXXX` → C 体 + .lst 窗口 + 参数/全局/调用关系
 
-# ③ 实现：**三条线各有一个落点**（★ 先确认你要改哪条，别在废弃的那条上干活）
-#    · apps/emulator-cxx/src/core/   原生 C++（SDL_GPU 呈现）；`vm.cpp` 只做分派（一个 opcode 一行），
-#      handler 按族分在 `vm_ops_*.cpp`（影片 0x20F 在 `vm_movie.cpp`，值/池原语在 `vm_value.cpp`）
-#    · apps/emulator-new/src/core/   只读 data/spec 的参考实现（handlers.ts / machine.ts）
-#    · apps/emulator/src/model/      最早的 TS 模型（**已废弃**，只剩 `@env assets` 守卫还 import 它）
+# ③ 实现：**落点 = apps/emulator-lift**（★ 先确认，别在对照/废弃线上干活）
+#    · apps/emulator-lift/src/runtime/   执行器 / dispatcher / 平台形状层（memory / image / present …）
+#    · apps/emulator-lift/src/shims/     Win32 / D3D9 / DDraw / 文件系统等 API 形状
+#    · apps/emulator-cxx/src/core/       按 spec 重写的**对照实现**（可读、可跑，⛔ 新功能不落这里）
+#    · apps/emulator-new / apps/emulator 已废弃，只作历史参考
 #    ★ 硬口径：**语义层不写偏移/EA**（那是 packages/age-format/src/engine/layout.mts）。
 #      C++ 侧允许在注释里写 EA 当锚，但⛔ 不许把 EA 当数据（不要建"按 EA 分派"的表）
 #    ★ 池值：int 族读必过 DEC、写必过 ENC（value-codec）；越界不 clamp、要留痕
 
-# ④ 守卫 + 变异条目（两条线各有各的门）：
-#    · TS：tools/test/emulator-*.test.mjs（@env pure|assets）+ tools/mutate-check.mjs 加一条
-#    · C++：apps/emulator-cxx/tests/core_selftest.cpp（CTest `emulator-core-selftest`），
-#      以及 CMakeLists 里"要真安装"的 CTest（title / logo 影片 …）
+# ④ 守卫 + 变异条目（落点 = lift 的 CTest）：
+#    · C++：apps/emulator-lift/tests/*.cpp（CTest；注册位置决定 pure / assets）
 #      ★ mutate 清单**不覆盖 C++** ⇒ 自己施加一处破坏、确认 CTest 会红、再撤销（判据一样）
 pnpm test:assets && pnpm test:mutation       # ★ 判据是"它会红"，不是"它绿"
-ctest --test-dir apps/emulator-cxx/out/build/windows-x64 --output-on-failure
+ctest --test-dir apps/emulator-lift/out --output-on-failure
 
 # ⑤ 登记：data/ledger/（一条 observation；锚 = EA / 守卫用例 id）
 ```
@@ -74,7 +72,8 @@ ctest --test-dir apps/emulator-cxx/out/build/windows-x64 --output-on-failure
 
 | 观测面 | 能看见什么 | 怎么跑 |
 |---|---|---|
-| `apps/emulator-cxx`（原生）**← 唯一在维护的** | **像素**（GPU 场景批次 / 离屏 BMP 导出）+ 真窗口节奏 + CTest | 默认 = boot 窗口（`--install <dir>`，`--play-frames N` 无人值守）· `--render-logo-gpu`（影片逐帧离屏 BMP）· `ctest` |
+| `apps/emulator-lift`（guest-state）**← 当前实现线** | **像素**（D3D9 / DDraw / GPU 直出）+ 真窗口 + 键鼠消息 + CTest | `--present window --raster gpu`（自动 real-time）· `--dump-frame` · `--max-frames` · `ctest --test-dir apps/emulator-lift/out` |
+| `apps/emulator-cxx`（原生）**对照实现** | **像素**（GPU 场景批次 / 离屏 BMP 导出）+ 真窗口节奏 + CTest | `--install <dir> --play-frames N` 无人值守 · `--render-logo-gpu`（影片逐帧离屏 BMP）· `ctest` |
 | `apps/emulator-new`（headless）**已废弃 / 冻结** | 只作**历史参考**；⛔ 不再用它做新观测、⛔ 拿它的测试当新规则唯一证据 | `node apps/emulator-new/src/main.ts …`（能跑，但冻结） |
 
 ⛔ 两条边界：**"能跑"≠"有 oracle"**（"看起来对"不是证据）；**没有真机 trace** ⇒ 引擎内部时序仍只能靠静态读 + 残差。

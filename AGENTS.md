@@ -174,6 +174,12 @@ pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
 pnpm test:mutation              # ★ **守卫自检**：改坏一处关键常量 ⇒ 确认对应守卫**当场红**（红得有意义）
 pnpm typecheck                  # ★ `tsc --noEmit`，**六个工程**（`packages/age-format` + `apps/emulator` 核心 + `apps/emulator` 前端 + `apps/emulator-new` 核心 + `apps/emulator-new` 渲染进程 + `apps/emulator-new` 整个 app）；不产出 ⇒ Node 侧 main / preload / CLI 仍无构建步骤（core 随 renderer 一起打包）
+
+# ★ 当前实现线：apps/emulator-lift（C++/CMake，CTest）
+cd apps/emulator-lift
+cmake --preset windows-x64      # 或 linux-x64 / macos-arm64
+cmake --build --preset windows-x64
+ctest --test-dir out --output-on-failure
 ```
 
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`
@@ -198,7 +204,7 @@ pnpm typecheck                  # ★ `tsc --noEmit`，**六个工程**（`packa
 
 `@kind` ∈ `gate`（不变量/清单/约定）· `contract`（领域能力行为）· `safety`（写路径不写坏数据）· `product`（产出物不变量）。
 
-★ **CTest 那一档不写 pragma，判据是「注册位置」**：`apps/emulator-cxx` 的守卫是 CTest（`add_test`），
+★ **CTest 那一档不写 pragma，判据是「注册位置」**：`apps/emulator-cxx` / `apps/emulator-lift` 的守卫是 CTest（`add_test`），
 它的档位 = **是否顶层无条件注册** —— 顶层 ⇒ 默认 `ctest` 就会跑（免安装）⇒ `pure`；
 落在 `if` / `foreach` / `function` / `macro` / `while` / `block` 里 ⇒ `assets`。
 解析在同一处（`tools/lib/ledger.mjs` 的 `cmakeTestTier()`，判据不建清单），两侧守卫见
@@ -309,13 +315,15 @@ pnpm typecheck                  # ★ `tsc --noEmit`，**六个工程**（`packa
 
 * 主交付物是 **spec（引擎规范）**（落点 `data/spec/`，工具 `pnpm tools spec`）；**emulator 是示范与测试项目**（cleanroom rewrite，类比 Wine —— 但这里的界面是**未文档化**的私有语义 ⇒ 理解是唯一路径）。
   ⇒ ⛔ **emulator 不许当 spec 的真源**；spec 也不许依赖 emulator 的实现细节（shape 已按此守：`⛔ 不读 apps/emulator`）。
-* **唯一在维护的模拟器是 `apps/emulator-cxx`**；`apps/emulator` 与 **`apps/emulator-new` 都已废弃**（只读遗产，同级）：
+* **当前唯一在维护的模拟器实现是 `apps/emulator-lift`**（执行 AGE.EXE 原机器码的 guest-state 模拟器）。
+  `apps/emulator-cxx` 是按 spec 重写的对照实现：保持可执行、可作语义对照，但**新功能不落那里**；
+  `apps/emulator` 与 **`apps/emulator-new` 都已废弃**（只读遗产，同级）：
   ⛔ 不新增功能、不补守卫、**不为它们改 spec**、不因为"另一套实现没同步"去改它们。
-  判据：新工作（实现 / 守卫 / CTest / 变异）只落 `apps/emulator-cxx`；新规则的 `evidence` **优先挂它的顶层 CTest**，
+  判据：新工作（实现 / 守卫 / CTest / 变异）只落 `apps/emulator-lift`；新规则的 `evidence` **优先挂它的顶层 CTest**，
   `tools/test/emulator-new-*.test.mjs` 只能当**辅助**证据、不许当唯一证据（那是冻结件，改它等于解冻）。
-  ★ **既有**挂在它上面的证据保持原样（冻结件仍可执行、`spec validate` 仍绿）；要迁移是**单独一条单**
-  （`pnpm tools requirements plan` 里标题含 "spec 证据去 emulator-new 化" 的那条），⛔ 不顺手删证据。
-  ★ 它们仍留在 `pnpm typecheck` / `pnpm test` 里，是为了**发现"冻结件被无意改动"**，不是为了让它继续演进。
+  ★ `apps/emulator-cxx` 的既有 CTest / spec 证据照旧保留（仍可执行、`spec validate` 仍绿）；
+  要迁移是**单独一条单**，⛔ 不顺手删证据。
+  ★ 冻结件仍留在 `pnpm typecheck` / `pnpm test` 里，是为了**发现"冻结件被无意改动"**，不是为了让它继续演进。
   为什么与边界：`docs/00-origin/decisions.md` §8.1。
 * **两层本体，之间只走指针**：偏移 / 布局 / 宽度 / 数组 / 池基点 / 步长 = **机器本体（shape，实现细节）**；
   实体 / 状态 / 操作 / 规则 = **领域本体（spec）**。两者之间只允许 `storage` 这类**指针**，⛔ 不许把布局内联进 spec。

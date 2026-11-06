@@ -223,6 +223,12 @@ void WindowManager::setCursorPos(int x, int y) {
     cursor_y_ = y;
 }
 
+void WindowManager::setCursorClientPos(std::uint32_t hwnd, int x, int y) {
+    const HostWindow* w = find(hwnd);
+    cursor_x_ = x + (w ? w->x : 0);
+    cursor_y_ = y + (w ? w->y : 0);
+}
+
 int WindowManager::showCursor(bool show) {
     // 真机实现：显示计数 +1 / -1；计数 < 0 ⇒ 光标不可见。返回值是**新计数**。
     cursor_show_count_ += show ? 1 : -1;

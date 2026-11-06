@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -265,6 +266,11 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.motion.x, event.motion.y, &x, &y);
+            if (windows != nullptr) windows->setCursorClientPos(windows->primaryWindow(), x, y);
+            if (std::getenv("LIFT_TRACE_INPUT") != nullptr) {
+                std::fprintf(stderr, "[input] motion sdl=(%.1f,%.1f) -> guest=(%d,%d)\n",
+                             event.motion.x, event.motion.y, x, y);
+            }
             postMessage(kWmMouseMove, mouse_buttons,
                         (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
             break;
@@ -279,6 +285,7 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.button.x, event.button.y, &x, &y);
+            if (windows != nullptr) windows->setCursorClientPos(windows->primaryWindow(), x, y);
             postMessage(win32MouseMessage(event.button.button, down), mouse_buttons,
                         (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
             break;
@@ -288,6 +295,7 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.wheel.mouse_x, event.wheel.mouse_y, &x, &y);
+            if (windows != nullptr) windows->setCursorClientPos(windows->primaryWindow(), x, y);
             const std::uint32_t wp = (static_cast<std::uint32_t>(delta) << 16) | mouse_buttons;
             postMessage(kWmMouseWheel, wp,
                         (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));

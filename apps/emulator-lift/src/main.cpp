@@ -7,7 +7,7 @@
 // ★ 用法：
 //     emulator-lift --smoke
 //     emulator-lift [--exe <path>] [--lst <path>] [--until shim | --until ea <hex>]
-//                   [--max-insns N] [--trace-shims] [--trace-blocks] [--safe-memory] [--bench N]
+//                   [--skip-logo] [--max-insns N] [--trace-shims] [--trace-blocks] [--safe-memory] [--bench N]
 #include <SDL3/SDL.h>
 
 #include <cstdio>
@@ -62,6 +62,8 @@ void usage() {
         "                      返回 0 + 126。⛔ 不回退 DATA1.ALF 的条目（引擎本身也不回退；\n"
         "                      那条约仅供取证对照，不是装载来源）\n"
         "  --real-time         用宿主时钟（此时 A4 的逐字节断言自动跳过并明说）\n"
+        "  --skip-logo         把引擎自己的 show-logo 标志置 0（根脚本 0x130 因而不 call LOGO；\n"
+        "                      仍走完整 boot 到 TITLE，⛔ 不是直接跳到 TITLE 的宿主捷径）\n"
         "  --trace-inputs      打印 trace 输入清单（exe 路径串 / guest 命令行 / 环境块 / 时钟起点）\n"
         "  --until shim        跑到第一次 shim 调用就停（L1）\n"
         "  --until ea <hex>    跑到指定 EA 就停（L2 = 0x4BA890）\n"
@@ -120,6 +122,7 @@ int main(int argc, char** argv) {
     bool safe_memory = false;
     bool report = false;
     bool real_time = false;
+    bool skip_logo = false;
     bool trace_inputs = false;
     std::string log_level = "warn";
     std::string log_cats;
@@ -177,6 +180,8 @@ int main(int argc, char** argv) {
             guest_root = args[++i];
         } else if (std::strcmp(a, "--real-time") == 0) {
             real_time = true;
+        } else if (std::strcmp(a, "--skip-logo") == 0) {
+            skip_logo = true;
         } else if (std::strcmp(a, "--trace-inputs") == 0) {
             trace_inputs = true;
         } else if (std::strcmp(a, "--until") == 0 && i + 1 < arg_count) {
@@ -572,6 +577,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "emulator-lift: 装配 guest 进程结构失败：%s\n", err.c_str());
         return 1;
     }
+    machine.setSkipLogo(skip_logo);
     // ★ guest 眼里的主模块路径（用户 2026-11-05 口径）：`<guest 根>\AGE.EXE`，
     //   打开它拿到的是**我们真正在跑的那份字节**（拆壳件），不是 `--game-dir` 下的加壳原件。
     std::printf("exe(guest): %s（VFS overlay ⇒ %s）\n", machine.vfs().overlayGuestPath().c_str(),

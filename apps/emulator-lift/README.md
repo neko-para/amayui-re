@@ -148,7 +148,7 @@ apps/emulator-lift/
   CMakeLists.txt                      ← 目标 + CTest（**分级靠注册位置**，见 AGENTS.md §5）
   CMakePresets.json / vcpkg.json      ← windows-x64 / linux-x64 / macos-arm64；依赖 sdl3 + zydis + freetype + glm
   README.md / SCOPE.md / docs/        ← 口径 / 用户拍板的偏差 / 计划长文
-  src/main.cpp                        ← CLI：--exe --lst --game-dir --appdata --agerc
+  src/main.cpp                        ← CLI：--exe --lst --game-dir --appdata --agerc --skip-logo
                                         --until shim|ea --trace-shims --trace-blocks
                                         --max-insns --max-frames --dump-frame --time-limit
                                         --safe-memory --report --bench --smoke
@@ -220,6 +220,21 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
   D3D9 的 `Present` 上消费。
 - BMP 只是当前实现的零依赖格式；⛔ 不声称它等于真机像素。
 
+## 4.1b 跳过 LOGO（`--skip-logo`）
+
+`--skip-logo` **不跳过 boot**，也不改 root script：它在 `T_Command` 构造完成、指针发布之前
+（EA `0x004BAA37`，`EAX` = 新对象）把引擎自己的 show-logo 字段 `T_Command + 0x5EB5C` 写 0。
+root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO），其余 boot 照旧到 TITLE。
+
+- 字段初值由构造器 `sub_415640` 在 `0x00415AE0` 写成 1；复位例程 `sub_428A60` 在 `0x00428A75` 清 0
+  （本线不依赖它）。
+- 只写这一格；⛔ 不按帧号猜 LOGO、⛔ 不直接跳到 TITLE。
+- `--skip-logo` 会进 trace 输入清单（同一个 exe + 不同开关 = 另一条执行路径）。
+- **真实 boot 观测**（未自动化，需人看）：带 `--skip-logo` 的首帧 draw 签名是 TITLE
+  （`sep_alpha=1 tex=1`）；不带是 LOGO（`sep_alpha=0 tex=0`）。
+- CTest `skip-logo` 只守**字段写 / 邻居字节 / 关闭时不写 / 空对象不崩**；它不跑 boot、
+  不看 draw 签名。⛔ 不要把“CTest 绿”当成“TITLE 首帧已验证”。
+
 ## 4.2 可切换呈现后端（`--present`）
 
 **缺省 `--present headless`**：与今天逐字节一致（hash / frameCount / `--dump-frame` / `--max-frames`；
@@ -255,6 +270,9 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
   `--dump-frame` 仍只在 D3D9 Present 消费。直出路径下 DDraw Flip 会先把 guest 上传到 target 再
   blit（见 §4.2b），⛔ 不会把上一帧当这一帧。
 - 窗口模式把 SDL 事件接到 guest 消息队列：键盘 / 鼠标移动与按键 / 滚轮 → `WM_KEY*` / `WM_MOUSE*`；
+  鼠标移动 / 按键 / 滚轮同时更新 guest 的**虚拟光标位置**（屏幕坐标 = 客户区 + 窗口原点）——
+  `GetCursorPos` / `0x109` 读到的是当前位置，不是常量；⛔ 不建 OS 光标。
+  调试：`LIFT_TRACE_INPUT=1` 打印每个 SDL 鼠标 motion 的窗口坐标与换算后的 guest 坐标。
   关窗（或 ESC）先发 `WM_CLOSE`，宽限 3 帧 / 500ms 后 `StopReason::Stopped`（`detail="present: 窗口关闭"`）。
   headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。

@@ -10,7 +10,8 @@
 //   · **确定性伪句柄 + 日志**（本线不建真光标，照 P0 `LoadCursorA` 的口径）：
 //       `LoadCursorFromFileA` —— ⛔ **不读 .cur 文件**。
 //   · `UnhookWindowsHookEx`：本线没有 `SetWindowsHookEx` 导入 ⇒ 没有可解的钩子；返回 TRUE + 日志。
-//   · ⛔ 不建 SDL 光标 / 不做真实鼠标输入（P3 才接 SDL 事件源）；⛔ 不返回随机值。
+//   · ⛔ 不建 OS 光标；P3 起由 SDL 事件源更新**虚拟光标位置**（`present_sdl` 的
+//     `setCursorClientPos`，客户区 + 窗口原点 = 屏幕坐标）；headless 没有事件源 ⇒ 保持确定性初值。
 //
 // ★ 实现落点：光标 / 捕获状态在 `WindowManager`（host_window.h/.cpp 的"光标 / 捕获"段）。
 // ★ 实测调用点（`.lst`，锚 EA）：
@@ -82,7 +83,8 @@ void shimSetCursor(X86& cpu, ShimCall& call) {
 
 // ---- GetCursorPos(LPPOINT) → BOOL ----
 // ★ Win32：lpPoint==NULL ⇒ FALSE + ERROR_INVALID_PARAMETER(87)。
-//   本线单线程、无宿主鼠标 ⇒ 恒成功，写虚拟位置（初值 (0,0)，SetCursorPos 之后就是它设的值）。
+//   有 SDL 事件源时由 `SdlWindow` 在鼠标移动 / 按键 / 滚轮时更新（屏幕坐标 = 客户区 + 窗口原点）；
+//   headless 没有鼠标 ⇒ 恒成功，写虚拟位置（初值 (0,0)，`SetCursorPos` 之后就是它设的值）。
 void shimGetCursorPos(X86& cpu, ShimCall& call) {
     WindowManager* wm = requireWindows(cpu, "GetCursorPos");
     const std::uint32_t ea = call.u32(0);
@@ -96,7 +98,7 @@ void shimGetCursorPos(X86& cpu, ShimCall& call) {
     wm->getCursorPos(&x, &y);
     cpu.mem->wr32(ea, static_cast<std::uint32_t>(x));
     cpu.mem->wr32(ea + 4, static_cast<std::uint32_t>(y));
-    shimLog("user32", "GetCursorPos", "lpPoint=(%d,%d)（headless 虚拟光标位置）", x, y);
+    shimLog("user32", "GetCursorPos", "lpPoint=(%d,%d)（虚拟光标位置 / 屏幕坐标）", x, y);
     call.result = 1;
 }
 
@@ -108,7 +110,7 @@ void shimSetCursorPos(X86& cpu, ShimCall& call) {
     const int x = call.i32(0);
     const int y = call.i32(1);
     wm->setCursorPos(x, y);
-    shimLog("user32", "SetCursorPos", "(%d,%d)（headless 虚拟光标位置）", x, y);
+    shimLog("user32", "SetCursorPos", "(%d,%d)（虚拟光标位置 / 屏幕坐标）", x, y);
     call.result = 1;
 }
 
