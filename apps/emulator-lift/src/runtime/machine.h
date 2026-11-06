@@ -7,9 +7,12 @@
 //   每一步检查 `--until ea` / 最大指令数 / 第一个 shim（D4 的 L1 / L2）。
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "corpus/lst_index.h"
 #include "runtime/clock.h"
@@ -181,6 +184,9 @@ public:
 
 private:
     void wire();
+    // ★ 诊断（`LIFT_FRAME_TRACE=1`）：每次 presenter 帧号变化时打一行"这一帧的墙钟去哪了"。
+    //   只读：不改变执行结果；shim 计时由 `shims_.setTiming(true)` 打开。
+    void flushFrameTrace();
     // winmm 定时器：找到期最早的一个并把控制权交给 guest 回调（协作式；见 x86.h 的 GuestTimer）。
     // 返回 true = 已铺好回调帧（调用方应 continue）；false = 没有到期项或铺帧失败（后者设 r）。
     bool fireDueTimer(RunResult& r);
@@ -216,6 +222,18 @@ private:
     bool image_loaded_ = false;
     bool bare_ = false;
     std::string exe_path_;
+    // ★ 诊断状态（`LIFT_FRAME_TRACE=1`）；默认全不参与执行。
+    bool frame_trace_ = false;
+    std::chrono::steady_clock::time_point frame_trace_last_{};
+    std::uint64_t frame_trace_last_insns_ = 0;
+    std::vector<std::uint64_t> frame_trace_prev_shim_ns_;
+    std::unordered_map<std::uint32_t, std::uint64_t> frame_trace_prev_block_ns_;
+    // ★ 逐帧 GPU 覆盖增量（`LIFT_FRAME_TRACE=1`）：与 summary 的累计值分开记，⛔ 不复位全局账本。
+    std::uint64_t frame_trace_prev_gpu_draws_ = 0;
+    std::uint64_t frame_trace_prev_gpu_fallback_ = 0;
+    std::uint64_t frame_trace_prev_gpu_fallback_px_ = 0;
+    std::uint64_t frame_trace_prev_sprite_total_ = 0;
+    std::uint64_t frame_trace_prev_sprite_fallback_ = 0;
 };
 
 // 纯档夹具用：`Machine` 的全局实例指针（fault 诊断要拿到寄存器与 `.lst`）

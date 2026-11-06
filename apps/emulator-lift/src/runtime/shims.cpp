@@ -7,6 +7,7 @@
 #include "runtime/shims.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 #include "runtime/exec.h"
@@ -327,7 +328,16 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
         return;
     }
 
+    const bool timing_on = timing_;
+    const auto time_begin = timing_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     def.fn(cpu, call);
+    if (timing_on) {
+        // ★ `fn` 可能 addRuntime 让 `def` 悬垂；id 是稳定序号，按 id 回查。
+        const std::uint64_t ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - time_begin)
+                .count());
+        if (trace_id < defs_.size()) defs_[trace_id].ns += ns;
+    }
     cpu.eax() = call.result;
 
     if (trace_on) {

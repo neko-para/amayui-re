@@ -38,9 +38,11 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 
-#include "runtime/surface.h"  // SurfaceFormat（后缓冲 / 纹理的像素布局）
+#include "runtime/gpu_raster.h"  // GpuRasterState / GpuTexMode（GPU 准入的映射目标）
+#include "runtime/surface.h"     // SurfaceFormat（后缓冲 / 纹理的像素布局）
 
 namespace lift {
 
@@ -392,6 +394,71 @@ bool clearDepth(X86& cpu, std::uint32_t pipeline_ea, float z, std::string* why);
 // GPU 光栅化诊断（static 计数；CPU 模式恒为 0）。供 dumpRunSummary / CTest 断言。
 std::uint64_t gpuDrawCount();
 std::uint64_t gpuTriangleCount();
+
+// =====================================================================================
+// GPU 准入 / 状态映射（**纯函数**；夹具直接调，⛔ 不建机器）
+//
+// ★ 把 D3D9 的混合状态映射到 `GpuRasterState` 的 color/alpha 两段。
+//   · 返回 false = 这个组合**不能**用 SDL_GPU 等价表达 ⇒ 调用方必须回退 CPU 并记账。
+//   · 未开启 `blend` 时忽略 factor/op（真机语义：ALPHABLENDENABLE=0 不用它们）。
+//   · separate alpha 只有在 `blend` 为真时才生效（与真机一致），但映射本身照做。
+// ★ 纯函数：不读 guest、不碰 SDL；守卫 `tests/gpu_mapping.cpp` 用 TITLE 的 5/6 + 2/6 做像素级
+//   期望，另一个用例用 DESTCOLOR 证明"不支持的组合会红"。
+// =====================================================================================
+bool gpuBlendStateFor(std::uint32_t src_color, std::uint32_t dst_color, std::uint32_t color_op,
+                      bool separate_alpha, std::uint32_t src_alpha, std::uint32_t dst_alpha,
+                      std::uint32_t alpha_op, bool blend_enabled, GpuRasterState* out, std::string* why);
+
+// 纹理 stage 0 的 (color op/args, alpha op/args) → GpuTexMode。
+// `tex_coord_index` 是 D3DTSS_TEXCOORDINDEX 的值（TITLE 用它选 FVF 坐标，⛔ 不硬编码 TEXCOORD0）：
+// 只接受 0..7（本线的 FVF 纹理坐标上限），越界 ⇒ false。
+// 只接受 TEXTURE / DIFFUSE（stage 0 的 CURRENT 等价于 DIFFUSE）/ TFACTOR 的原样选择
+// （⛔ 不处理 COMPLEMENT / ALPHAREPLICATE / TEMP）。TFACTOR 是**每次 Draw 的常量色**：
+// 需要它时 `*color_from_tfactor=true`，调用方把 GPU 顶点色整批替换成 TFACTOR
+// （TITLE 实测就是 MODULATE(TEXTURE, TFACTOR) 的 color+alpha）。
+bool gpuTextureModeFor(std::uint32_t color_op, std::uint32_t color_arg1, std::uint32_t color_arg2,
+                       std::uint32_t alpha_op, std::uint32_t alpha_arg1, std::uint32_t alpha_arg2,
+                       bool texture_present, std::uint32_t tex_coord_index, GpuTexMode* mode,
+                       bool* color_from_tfactor, std::string* why);
+
+// 无纹理（CPU 采样=白色）时，stage 0 的 op/arg 是否**恒等于顶点色**（GPU 无纹理着色器只输出顶点色）。
+// `DISABLE` 按 CPU 语义取 arg1（⛔ 不是无条件 DIFFUSE）——所以 DISABLE(arg1=TEXTURE) 必须 false。
+bool gpuUntexturedIsIdentity(std::uint32_t op, std::uint32_t arg1, std::uint32_t arg2);
+
+// =====================================================================================
+// GPU 覆盖账本（每帧 / 每次 Draw；⛔ 不把回退清零冒充覆盖）
+//
+// · `draw_calls` / `gpu_draws` / `fallback_draws` = D3D9 `Draw*` 的**批次数**
+//   （一次 Draw* 可能产生多个三角形/多批，仍算一次调用）。
+// · `fallback_pixels` = 这一批真的由 CPU 软光栅写进后缓冲的像素数（不是包围盒估计）。
+// · `sprite_*` = D3DXSprite 的每个批次条目（TITLE 的 Sprite 路径单独可见）；
+//   `sprite_skipped` = 被裁剪掉的条目（空源矩形 / 屏外 / 退化），**不是** fallback。
+// · `fallback_reasons` 按**原因字符串**聚合；`gpuNoteFallback` 在进程内首次出现某原因时
+//   打印一行 `[gpu] fallback ...` 到 stderr（同原因不刷屏）。
+// =====================================================================================
+struct GpuCoverage {
+    std::uint64_t draw_calls = 0;
+    std::uint64_t gpu_draws = 0;
+    std::uint64_t fallback_draws = 0;
+    std::uint64_t fallback_pixels = 0;
+    std::uint64_t gpu_failures = 0;  // 准入通过、但 GPU 后端真的画失败了（已 CPU 重放）
+    std::uint64_t sprite_draws = 0;
+    std::uint64_t sprite_gpu_draws = 0;
+    std::uint64_t sprite_fallback_draws = 0;
+    std::uint64_t sprite_fallback_pixels = 0;
+    // sprite 条目被**裁剪掉**（空源矩形 / 退化 / 完全屏外 / 源矩形在纹理外）而没画：不是回退，
+    // 但覆盖账要可见（否则"没画"与"没走 GPU"分不清）。
+    std::uint64_t sprite_skipped = 0;
+    std::map<std::string, std::uint64_t> fallback_reasons;
+};
+const GpuCoverage& gpuCoverage();
+void gpuCoverageReset();
+// 记一次 CPU 回退（reason 是稳定文本；pixels 是这一批 CPU 写出的像素数）。
+void gpuNoteFallback(const std::string& reason, std::uint64_t pixels);
+// 记一次 D3DXSprite 条目的 GPU / CPU 结果（CPU 时 reason 必填）。
+void gpuNoteSpriteResult(bool gpu, std::uint64_t pixels, const std::string& reason);
+// 记一次 D3DXSprite 条目被裁剪（不计 fallback、不计 GPU）。
+void gpuNoteSpriteSkipped();
 
 // Present 的像素统计（"非背景像素数"的判据；用后缓冲像素算，⛔ 不是猜）
 struct FrameStats {

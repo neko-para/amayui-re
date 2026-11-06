@@ -335,6 +335,12 @@ struct TextureInfo {
     std::uint32_t pool = 0;
     std::uint32_t locks = 0;
     bool locked = false;
+    // 内容版本：每次 UnlockRect +1（Lock 期间 guest 可能改像素）。GPU 纹理缓存用它判断
+    // "像素未变 ⇒ 不重传"；0 = 还没发生过 Unlock（未知，调用方退回内容哈希）。
+    std::uint32_t version = 0;
+    // 进程级纹理身份（createTextureState 分配的单调 serial，永不复用；0 = 不是本模块的纹理）。
+    // ★ 缓存键必须用它：guest 指针 / 状态块 EA 都可能被 arena·堆复用，只有 serial 不会。
+    std::uint32_t serial = 0;
 };
 
 // D3DFORMAT → SurfaceFormat（= Clear / Sprite 用的同一份换算；⛔ 不另写一份）

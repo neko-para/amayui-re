@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "corpus/lst_index.h"
+#include "runtime/d3d9_pipeline.h"  // GPU 覆盖账本（--gpu-strict 的机械判据）
 #include "runtime/font.h"
 #include "runtime/host_encoding.h"
 #include "runtime/log.h"
@@ -85,7 +86,10 @@ void usage() {
         "  --present-vsync 0|1       窗口垂直同步（缺省 0；1 会改变墙钟）\n"
         "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
         "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
-        "  --raster <mode>    cpu（缺省）/ gpu：D3D9 fixed-function 光栅化后端（window 或 headless 离屏都可用）\n"
+        "  --raster <mode>    auto（缺省）/ cpu / gpu：D3D9 fixed-function 光栅化后端\n"
+        "                      auto = headless⇒cpu、window⇒gpu；window 下 GPU 初始化失败 ⇒ exit 2\n"
+        "  --gpu-strict       GPU 启用时，运行结束若仍有 Draw/ sprite 回退 CPU ⇒ 打印错误并 exit 3\n"
+        "                      （先打印 summary；需要 GPU 光栅化模式，--raster cpu 会被拒绝）\n"
         "  --raster-sprites 0|1      D3DXSprite 是否也走 GPU（缺省 1；A/B 用）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
         "  --native-overrides <list>  逗号分隔的 guest 函数名；all = 已验证项；-名字 = 排除该项；\n"
@@ -145,8 +149,9 @@ int main(int argc, char** argv) {
     bool present_driver_set = false;
     bool present_vsync_set = false;
     bool present_screenshot_set = false;
-    std::string raster_mode = "cpu";
+    std::string raster_mode = "auto";
     bool raster_sprites = true;
+    bool gpu_strict = false;
     int baseline_lift = 2;
     bool font_engine_name = false;
 
@@ -242,6 +247,8 @@ int main(int argc, char** argv) {
             raster_mode = args[++i];
         } else if (std::strcmp(a, "--raster-sprites") == 0 && i + 1 < arg_count) {
             raster_sprites = std::atoi(args[++i].c_str()) != 0;
+        } else if (std::strcmp(a, "--gpu-strict") == 0) {
+            gpu_strict = true;
         } else if (std::strcmp(a, "--trace-shims") == 0) {
             trace_shims = true;
         } else if (std::strcmp(a, "--trace-blocks") == 0) {
@@ -332,9 +339,36 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--report 只打印基座缺口；不要同时给 --present window/auto\n");
         return 2;
     }
-    if (raster_mode != "cpu" && raster_mode != "gpu") {
-        std::fprintf(stderr, "--raster 只能是 cpu / gpu（收到 %s）\n", raster_mode.c_str());
+    if (raster_mode != "auto" && raster_mode != "cpu" && raster_mode != "gpu") {
+        std::fprintf(stderr, "--raster 只能是 auto / cpu / gpu（收到 %s）\n", raster_mode.c_str());
         return 2;
+    }
+    // ★ auto（缺省）：headless ⇒ CPU（保持 headless 确定性 / CTest 口径）；
+    //   window / auto ⇒ GPU。显式 cpu 是参考后端；显式 gpu 仍可配 headless 离屏。
+    const bool raster_wants_gpu = raster_mode == "gpu" || (raster_mode == "auto" && present_mode != "headless");
+    if (raster_mode == "auto") {
+        std::printf("raster    : auto ⇒ %s（present=%s）\n", raster_wants_gpu ? "gpu" : "cpu",
+                    present_mode.c_str());
+    }
+    if (gpu_strict) {
+        if (raster_mode == "cpu") {
+            std::fprintf(stderr, "--gpu-strict 与 --raster cpu 矛盾（CPU 是参考后端，没有 GPU 覆盖可判）\n");
+            return 2;
+        }
+        if (!raster_wants_gpu) {
+            std::fprintf(stderr, "--gpu-strict 需要 GPU 光栅化（--present window，或 --raster gpu）\n");
+            return 2;
+        }
+        if (raster_mode == "auto" && present_mode != "window") {
+            std::fprintf(stderr, "--gpu-strict + --raster auto 需要 --present window（否则 auto 会选 CPU）\n");
+            return 2;
+        }
+        if (!raster_sprites) {
+            // sprite 是覆盖的一部分；显式关掉然后再声称 strict 通过 = 自欺。
+            std::fprintf(stderr,
+                         "--gpu-strict 与 --raster-sprites 0 矛盾（sprite 全部走 CPU，GPU 覆盖不完整）\n");
+            return 2;
+        }
     }
 
     if (smoke) {
@@ -605,7 +639,7 @@ int main(int argc, char** argv) {
         wopt.vsync = present_vsync != 0;
         wopt.hidden = present_hidden;
         wopt.screenshot_path = present_screenshot;
-        wopt.raster_gpu = raster_mode == "gpu";
+        wopt.raster_gpu = raster_wants_gpu;
         wopt.raster_sprites = raster_sprites;
         auto sdl = std::make_unique<lift::SdlWindow>();
         std::string werr;
@@ -616,13 +650,22 @@ int main(int argc, char** argv) {
                 if (!present_screenshot.empty()) {
                     std::fprintf(stderr, "  ⚠ --present-screenshot 不会产出（headless 没有窗口像素）\n");
                 }
+                if (raster_wants_gpu) {
+                    std::fprintf(stderr,
+                                 "  ⚠ --raster auto/gpu：GPU 光栅化后端也随之不可用 ⇒ 本轮是 CPU 光栅化\n");
+                }
             } else {
                 std::fprintf(stderr, "emulator-lift: --present window 失败：%s\n", werr.c_str());
                 return 2;
             }
         } else {
             std::printf("present   : %s\n", sdl->describe().c_str());
-            if (raster_mode == "gpu") std::printf("raster    : %s\n", sdl->rasterName());
+            if (raster_wants_gpu) std::printf("raster    : %s\n", sdl->rasterName());
+            if (raster_wants_gpu && !sdl->rasterActive()) {
+                // `--present window` 下 GPU 光栅化是 first-class 路径：不能静默退回 CPU。
+                std::fprintf(stderr, "emulator-lift: --present window 要求 GPU 光栅化，但后端未激活（拒绝退回 CPU）\n");
+                return 2;
+            }
             if (!sdl->isGpuRenderer()) {
                 std::printf("present   : 注意：driver=%s 是 GPU API 路径，但不是 SDL_GPU（gpu driver）\n",
                             sdl->rendererName());
@@ -691,5 +734,33 @@ int main(int argc, char** argv) {
                     secs > 0 ? static_cast<double>(r.insns) / secs / 1e6 : 0.0);
     }
     machine.reportBaseGaps(stdout);
+    if (gpu_strict) {
+        // ★ `--gpu-strict`：给 CTest / 真实 boot 用的**机械判据**（summary 已先打印）。
+        if (!r.ok()) return 2;
+        lift::GpuRaster* gpu = machine.gpuRaster();
+        const lift::d3d9::GpuCoverage& cov = lift::d3d9::gpuCoverage();
+        const std::uint64_t fallback = cov.fallback_draws + cov.sprite_fallback_draws;
+        if (gpu == nullptr || !gpu->rasterActive()) {
+            std::fprintf(stderr,
+                         "emulator-lift: --gpu-strict FAIL：GPU 光栅化后端没有启用（不能把 CPU 路径当成覆盖）\n");
+            return 3;
+        }
+        if (fallback != 0) {
+            std::fprintf(stderr,
+                         "emulator-lift: --gpu-strict FAIL：%llu 批 Draw 回退 CPU"
+                         "（draw=%llu, sprite=%llu；fallback_pixels=%llu；gpu_failures=%llu）\n",
+                         (unsigned long long)fallback, (unsigned long long)cov.fallback_draws,
+                         (unsigned long long)cov.sprite_fallback_draws,
+                         (unsigned long long)cov.fallback_pixels,
+                         (unsigned long long)cov.gpu_failures);
+            for (const auto& kv : cov.fallback_reasons) {
+                std::fprintf(stderr, "  [%llu×] %s\n", (unsigned long long)kv.second, kv.first.c_str());
+            }
+            return 3;
+        }
+        std::printf("gpu-strict: OK（draws=%llu gpu=%llu fallback=0 sprite=%llu/%llu）\n",
+                    (unsigned long long)cov.draw_calls, (unsigned long long)cov.gpu_draws,
+                    (unsigned long long)cov.sprite_gpu_draws, (unsigned long long)cov.sprite_draws);
+    }
     return r.ok() ? 0 : 2;
 }

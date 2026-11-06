@@ -251,34 +251,88 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
   headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
 
-## 4.2b GPU 光栅化（`--raster gpu`）
+## 4.2b GPU 光栅化（`--raster auto|cpu|gpu`）
 
-缺省 `--raster cpu`。`--raster gpu` 用独立 `SDL_GPUDevice` 把 D3D9 的屏幕空间三角形与
-D3DXSprite 的纹理四边形画到 1280×720 BGRA8 + D32 离屏 target，再在 Present 前读回 guest
-后缓冲；T&L / 裁剪 / 状态机 / 失败码仍全在 CPU。headless 也可用
-（`--raster gpu --present headless`，dummy 视频 + 离屏），窗口模式共用同一后端。
+缺省 `--raster auto`：**`--present headless` ⇒ CPU**（保持 headless 逐字节确定性 / CTest 口径），
+**`--present window` ⇒ GPU**。显式 `--raster cpu` 是参考/测试后端；显式 `--raster gpu` 仍可用
+（headless 时建一个隐藏的离屏 raster 窗口）。`--present window` 下 GPU 后端初始化失败 ⇒ **exit 2**
+（⛔ 不静默退回 CPU）。`--present auto` 窗口打不开会回退 headless，此时 GPU 光栅化也随之不可用，
+日志会明说"本轮是 CPU 光栅化"。
 
-shader 后端按 **SDL_GPU 的原生格式**选平台：**Windows = D3DCompile → DXBC**，
-**macOS = MSL 源码（Metal）**；其它平台明确失败（⛔ 不静默回退 CPU、不把 DXBC 带进 Metal）。
+后端 = 独立 `SDL_GPUDevice`（Windows DXBC / macOS MSL），把 D3D9 的屏幕空间三角形与 D3DXSprite
+纹理四边形画到 1280×720 BGRA8 + D32 离屏 target，Present 前读回 guest 后缓冲；T&L / 裁剪 / 状态机 /
+失败码仍全在 CPU。
 
-支持面：无纹理 XYZRHW+DIFFUSE、D3DXSprite 纹理四边形（NEAREST / 顶点色调制 /
-ALPHABLEND，`pTexture=0` 用 1×1 白纹理）、GOURAUD、ONE/ZERO 或 SRCALPHA/INVSRCALPHA、
-深度测试/写/比较、scissor/viewport；纹理 stage 链、alpha test、多 stage、FLAT、16bpp、
-BORDER/MIRROR_ONCE、`BOTH*` 混合 ⇒ 回退 CPU。
+### 能力范围（准入在 `d3d9::gpuEligible`，映射是纯函数；守卫 `tests/gpu_mapping.cpp`）
+
+明确支持（TITLE 的黑场渐变全屏四边形就在这一类）：
+- 32bpp 默认后缓冲、GOURAUD、无 alpha test；color write mask 任意 4 位组合；
+- 任意可映射的 blend，**含 separate alpha**：color/alpha 两段各自的 factor/op 映射到
+  `SDL_GPUColorTargetBlendState`；不能表达（如 `D3DBLEND_BOTHSRCALPHA`）⇒ 回退并记账；
+- stage 0 **单级** 32bpp 纹理；color/alpha op 限 `SELECTARG1` / `SELECTARG2` / `MODULATE` /
+  `DISABLE`（`DISABLE` 按 CPU 的语义取 **arg1**；两个 op 都 `DISABLE` 时 CPU 直接 break ⇒ 顶点色），
+  操作数限 `TEXTURE` / `DIFFUSE`（stage 0 的 `CURRENT` 等价于 `DIFFUSE`）/ `TFACTOR`。
+  `TFACTOR` 是每批 Draw 的常量色，GPU 路径把它整批写进顶点色（⛔ 不逐像素读状态）；
+- sampler：POINT/LINEAR × WRAP/CLAMP/MIRROR；
+- 纹理坐标取 stage 0 的 `D3DTSS_TEXCOORDINDEX`（⛔ 不硬编码 TEXCOORD0）；
+- 顶点已由 CPU 做完 T&L / 裁剪 / 屏幕映射，且 `invw==1`（屏幕空间线性插值与 CPU 的透视校正等价）。
+
+仍回退 CPU（每次记账；首次出现打印 `[gpu] fallback ...`）：多 stage / 纹理非 32bpp / alpha test /
+FLAT / 16bpp / BORDER 或 MIRROR_ONCE / `BOTH*` blend / 渲染目标是纹理 / `invw!=1` /
+D3DXSprite 源矩形越界 / GPU 后端绘制失败。D3DXSprite 的纹理上传按
+`(纹理 serial, 尺寸, alpha 语义, UnlockRect 版本)` 缓存：像素没变就不重传
+（⛔ 不再每次 draw 完整 upload）。键用 `createTextureState` 分配的**进程级单调 serial**，
+⛔ 不用 guest 像素指针 / 状态块 EA —— 二者都会被 arena / guest 堆复用，会把新纹理读成旧像素。
+空批 / 全被裁掉的批（CPU 一个像素都没写）**不计 fallback**（`draw_calls` 照记）。
+
+深度口径：GPU 的 D32 target 从 1.0 起，**不镜像 guest 深度缓冲**；D3DXSprite 的 GPU 路径直接关掉
+深度测试/写（与 CPU sprite 一致）。因此非 1.0 的 `Clear(ZBUFFER)`、或 CPU/GPU 交替写同一块深度的
+场景，像素结果可能与 CPU 参考不一致 —— 判据仍以 `--dump-frame` 的逐像素对照为准。
+
+### 怎么查（口径，不是进度）
+
+`Machine::dumpRunSummary` 固定打印：
+
+```text
+gpu       : draws=N gpu=N fallback=N fallback_pixels=N
+            sprite: draws=N gpu=N fallback=N fallback_pixels=N skipped=N
+            fallback top: [N×] <原因> ; ...
+```
+
+`--raster cpu` 时这些计数全 0 —— CPU 是**显式参考后端**，不算 fallback。GPU 启用后：
+- 默认（不设环境变量）第一次出现每种回退原因就打印一行
+  `[gpu] fallback: <原因>（该原因只打印一次）` 到 stderr；
+- `--gpu-strict`：运行结束后若 `fallback Draw + sprite 回退 > 0` ⇒ 打印错误 + 原因清单并 **exit 3**
+  （summary 仍先打印）。它需要 GPU 光栅化模式（`--present window`，或 `--raster gpu`）；
+  与 `--raster cpu` 或 `--raster-sprites 0` 矛盾 ⇒ exit 2；后端根本没启用也按 FAIL
+  （⛔ 不能把 CPU 当覆盖）。sprite 的 `skipped=`（源矩形空 / 屏外 / 退化）是裁剪，不是回退，
+  不计入 strict。
+- `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS`）的 `[draw]` 行扩了
+  `fvf= / coord= / stage0= / samp= / texfmt=`：`why=` 是"这批为什么没走 GPU"，其余是当时的状态值。
+- `LIFT_GPU_VERIFY=1`（诊断，默认关）：对每个 GPU 走纹理的 `Draw*` 批，在**同一批 / 同一状态**上
+  先对后缓冲副本跑一次 CPU 参考光栅（不影响 guest 结果），再读回 GPU 结果逐像素对照，打印
+  `[gpu-verify] textured batch tris=… diff_pixels=… max_channel_diff=…`。它不依赖两次运行的时间轴，
+  是"同一帧"的 GPU ↔ CPU 对照；代价是这批 CPU 软光栅的墙钟（只在排障时开）。
 
 ```bash
 # 离屏 GPU 光栅（不建可见窗口；A/B 用）
 ./out/emulator-lift ... --max-frames 4 --raster gpu
-# 可见窗口 + GPU 光栅
-./out/emulator-lift ... --max-frames 300 --present window --raster gpu
+# 可见窗口 + GPU 光栅（auto 的缺省行为，显式写出来便于对照）
+./out/emulator-lift ... --max-frames 300 --present window --raster auto
 # 对照：同一帧的 CPU 输出
 ./out/emulator-lift ... --max-frames 4 --raster cpu --dump-frame ...
+# 机械判据：GPU 覆盖必须 100%（TITLE 段也一样）
+./out/emulator-lift ... --max-frames 80 --present window --present-hidden --gpu-strict
 ```
 
-评估口径：GPU 与 CPU 的 blend 舍入允许 **每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
-用 `--dump-frame` 做逐像素 max-diff。CPU 缺省仍逐字节可复现；`--raster gpu` 的
-`--present headless` 会初始化 SDL 视频（否则 `SDL_CreateGPUDevice` 失败），这不影响
-`--raster cpu` 的“headless 不碰 SDL 视频”承诺。
+评估口径：GPU 与 CPU 的 blend / 采样舍入允许**每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
+用 `--dump-frame`（guest 后缓冲）或 `--present-screenshot`（窗口像素）做逐像素 max-diff。
+CPU 缺省仍逐字节可复现；`--raster gpu` 的 `--present headless` 会初始化 SDL 视频
+（否则 `SDL_CreateGPUDevice` 失败），这不影响 `--raster cpu` 的"headless 不碰 SDL 视频"承诺。
+
+现状口径：TITLE 段**仍未达 33 ms**（也不把验收阈值改绿）。剩余成本是 Present（GPU→guest 读回 +
+SDL 呈现）与每帧多次 sprite 提交；要再往下需要"直接从 GPU target 呈现"与 sprite 合批，
+本次没有做。逐帧数字见 `LIFT_FRAME_TRACE=1`（§4.3.1），不是 README 里手写的常量。
 
 ## 4.3 热点 profile 与 guest 函数级 native override（试点）
 
@@ -318,6 +372,37 @@ BORDER/MIRROR_ONCE、`BOTH*` 混合 ⇒ 回退 CPU。
 - ⚠ `--until ea` 指向被 override 的函数体内部时**不会生效**（函数体不再逐条执行）；
   `--bench` 的 insns / MIPS 也按"一次 override = 1 条"计 —— 不要拿它们做解释器吞吐的绝对比较。
 - 是否继续扩展、以及 A/B 数字见需求单（§5）。
+
+### 4.3.1 一帧的墙钟去哪了（逐帧诊断）
+
+`--profile` 只回答"guest 热点在哪"；它**看不见**宿主 shim / Present / 软件光栅的耗时。
+要看"这一帧为什么慢"，用逐帧墙钟拆分（默认关；开窗时必须加 `--real-time`，否则虚拟时钟会先卡住）：
+
+```bash
+LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
+  --present window --raster auto --native-overrides all --profile
+```
+
+每次 `Present` 打四行：
+
+```text
+[frame] n=NNN wall=…ms insns=… guest=…ms shim=…ms other=…ms
+        guest: sub_XXXXXX=…ms ...
+        shim : com!IDirect3DDevice9::Present=…ms ...
+        gpu  : draws=… fallback=… fallback_pixels=… sprite_gpu=… sprite_fallback=…
+```
+
+- `wall` = 两次 Present 之间的宿主墙钟；`guest` = `--profile` 的块执行时间之和；
+  `shim` = shim 实现自身的时间（**含** Present / D3DXSprite / 固定功能流水线的软件光栅）；
+  `other` = `wall - guest - shim`（dispatcher / native override / 事件泵等）。
+- 只有 shim 慢、guest 不慢 ⇒ 不要再到 `--profile` 的 guest 函数表里找热点。
+- `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS=<ms>`，缺省 20）会为每次慢 `Draw*` 打一行
+  `[draw] prim=… pixels=… gpu=… why=… sep_alpha=… tex=… blend=…/… op=… cw=… fvf=… coord=… stage0=… samp=… texfmt=… submit=…ms`：
+  `gpu=0` 与 `why=` 就是"这一批为什么回退 CPU"的**第一原因**（不是猜测）；`stage0=` 是
+  color/alpha op 与 arg1/arg1，`samp=` 是 address U/V 与 MAG/MIN，`texfmt=` 是 bpp/amask 与尺寸。
+- 回退原因还按字符串聚合进 `dumpRunSummary` 的 `gpu       :` / `fallback top:` 行
+  （见 §4.2b）；`--gpu-strict` 把"还有回退"变成 exit 3，而不是靠读日志判断。
+- 两个环境变量都只读、默认关；⛔ 不改变执行结果，也不进 A4 的逐字节基线。
 
 ## 5. 真源
 

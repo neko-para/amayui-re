@@ -658,7 +658,9 @@ enum TexOff : std::uint32_t {
     kTxPool = 40,
     kTxLocks = 44,
     kTxLocked = 48,
-    kTxBytes = 56,
+    kTxVersion = 52,  // UnlockRect 次数（GPU 纹理上传缓存的内容版本）
+    kTxSerial = 56,   // 进程级单调纹理身份（GPU 缓存键；⛔ 不复用 guest 指针/状态块 EA）
+    kTxBytes = 60,
 };
 constexpr std::uint32_t kTxMagicValue = 0x31584554u;  // 'TEX1'
 
@@ -729,6 +731,11 @@ std::uint32_t createTextureState(X86& cpu, std::uint32_t device_object, std::uin
     cpu.mem->wr32(state + kTxLevels, levels);
     cpu.mem->wr32(state + kTxUsage, usage);
     cpu.mem->wr32(state + kTxPool, pool);
+    // ★ 进程级单调纹理身份：⛔ 不用指针 / 状态块 EA（arena 与 guest 堆都会复用）。
+    static std::uint32_t next_texture_serial = 0;
+    std::uint32_t serial = ++next_texture_serial;
+    if (serial == 0) serial = ++next_texture_serial;  // 跳过 0（0 = "没有身份"）
+    cpu.mem->wr32(state + kTxSerial, serial);
     d3d9Log("CreateTexture",
             "%ux%u D3DFORMAT=%u（%ubpp，pitch=%u）· MipLevels=%u · Usage=0x%X · Pool=%u · 设备 0x%08X"
             " ⇒ 像素块 0x%08X / 状态块 0x%08X",
@@ -767,6 +774,8 @@ bool textureInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::st
     t.pool = cpu.mem->rd32(state + kTxPool);
     t.locks = cpu.mem->rd32(state + kTxLocks);
     t.locked = cpu.mem->rd32(state + kTxLocked) != 0;
+    t.version = cpu.mem->rd32(state + kTxVersion);
+    t.serial = cpu.mem->rd32(state + kTxSerial);
     *out = t;
     return true;
 }
@@ -907,6 +916,8 @@ bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::stri
         return false;
     }
     cpu.mem->wr32(tex.state + kTxLocked, 0u);
+    // 内容版本 +1：Lock 期间 guest 可能改了像素；GPU 纹理缓存据此决定是否重传。
+    cpu.mem->wr32(tex.state + kTxVersion, cpu.mem->rd32(tex.state + kTxVersion) + 1u);
     return true;
 }
 

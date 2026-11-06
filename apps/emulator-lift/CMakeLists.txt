@@ -144,6 +144,16 @@ enable_testing()
 # ---- pure：宿主层 smoke（不建窗口、不需要游戏）----
 add_test(NAME emulator-lift-smoke COMMAND emulator-lift --smoke)
 
+# ---- pure：`--gpu-strict` 的机械判据自检（不需要游戏）----
+# `--gpu-strict` 与显式 CPU 参考后端矛盾 ⇒ 必须在载入执行源之前就拒绝（非 0）。
+# 真正的 fallback>0 ⇒ exit 3 需要真实 boot，见 README §4.2b / 报告里的真机验收。
+add_test(NAME gpu-strict-requires-gpu COMMAND emulator-lift --raster cpu --gpu-strict)
+set_tests_properties(gpu-strict-requires-gpu PROPERTIES WILL_FAIL TRUE)
+# strict 要求 sprite 也走 GPU：显式 `--raster-sprites 0` 与 strict 自相矛盾 ⇒ 必须拒绝。
+add_test(NAME gpu-strict-rejects-no-sprites
+    COMMAND emulator-lift --present window --raster gpu --raster-sprites 0 --gpu-strict)
+set_tests_properties(gpu-strict-rejects-no-sprites PROPERTIES WILL_FAIL TRUE)
+
 # ---- pure：guest 函数级 native override（差分 / 回退 / ABI）----
 add_executable(lift-native-override tests/native_override.cpp)
 target_link_libraries(lift-native-override PRIVATE emulator-lift-runtime)
@@ -258,6 +268,12 @@ set_tests_properties(gpu-raster PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
 add_test(NAME gpu-raster-gpu COMMAND lift-gpu-raster --gpu)
 set_tests_properties(gpu-raster-gpu PROPERTIES SKIP_RETURN_CODE 77)
+
+# ---- pure：GPU 准入 / 状态映射（TITLE 的 blend 5/6 + separate 2/6、stage0 MODULATE(TEX,TFACTOR)）----
+# 不建机器、不碰 SDL：只是 d3d9::gpuBlendStateFor / gpuTextureModeFor 的期望值。
+add_executable(lift-gpu-mapping tests/gpu_mapping.cpp)
+target_link_libraries(lift-gpu-mapping PRIVATE emulator-lift-runtime)
+add_test(NAME gpu-mapping COMMAND lift-gpu-mapping)
 
 add_executable(lift-mechanism tests/mechanism.cpp)
 target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)

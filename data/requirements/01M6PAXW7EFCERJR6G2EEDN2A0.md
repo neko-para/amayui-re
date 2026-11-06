@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - verify: apps/emulator-lift/CMakeLists.txt#gpu-raster-gpu
-- done_reason: GPU 光栅化真路径（SDL_GPU + D32 深度）已接 D3D9 submitPrimitives 与 D3DXSprite 纹理四边形；真实 boot 100 帧：CPU 103.7s / GPU 31.8s = 3.26×，GPU Draw 200、GPU sprite 成功；第 1 帧 hash 0xEBF024FEBE998B05 完全一致，第 2 帧起 max 1 LSB（141521/921600，blend 舍入，用户 2026-11-06 口径先不管一致性）；gpu-raster/gpu-raster-gpu 各 14 checks，ctest 49/49，CPU 缺省逐字节不变。
+- done_reason: GPU 光栅 phase 1（无纹理 XYZRHW + D3DXSprite）已接；真实 boot 100 帧 CPU 103.7s→31.8s。注意：当时没有 fallback 计数，“GPU 覆盖全部 D3D9 Draw”不成立；TITLE 的全屏纹理 + separate alpha 直到 REQ-01M6RH9CDPM8PG2SFEG0PYT46T 才走 GPU（2026-11-06）。
 - tags: [emulator-lift d3d9 gpu raster]
 
 ## 目标

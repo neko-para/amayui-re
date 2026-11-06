@@ -293,9 +293,135 @@ bool Machine::prepareStack(std::string* err) {
     return true;
 }
 
+void Machine::flushFrameTrace() {
+    if (!frame_trace_) return;
+    const auto now = std::chrono::steady_clock::now();
+    const double wall_ms = std::chrono::duration<double, std::milli>(now - frame_trace_last_).count();
+    frame_trace_last_ = now;
+    const std::uint64_t insns = cpu_.insns - frame_trace_last_insns_;
+    frame_trace_last_insns_ = cpu_.insns;
+
+    // ---- 宿主 shim（含 Present / Sprite 的像素循环 / GPU submit）----
+    const std::vector<ShimDef>& defs = shims_.all();
+    if (frame_trace_prev_shim_ns_.size() < defs.size()) frame_trace_prev_shim_ns_.resize(defs.size(), 0);
+    struct ShimRow {
+        const ShimDef* def = nullptr;
+        std::uint64_t ns = 0;
+    };
+    std::vector<ShimRow> shim_rows;
+    std::uint64_t shim_ns = 0;
+    for (std::size_t i = 0; i < defs.size(); ++i) {
+        const std::uint64_t total = defs[i].ns;
+        const std::uint64_t prev = frame_trace_prev_shim_ns_[i];
+        frame_trace_prev_shim_ns_[i] = total;
+        if (total < prev) continue;
+        const std::uint64_t delta = total - prev;
+        if (delta == 0) continue;
+        shim_ns += delta;
+        shim_rows.push_back({&defs[i], delta});
+    }
+    std::sort(shim_rows.begin(), shim_rows.end(), [](const ShimRow& a, const ShimRow& b) {
+        if (a.ns != b.ns) return a.ns > b.ns;
+        if (a.def->module != b.def->module) return a.def->module < b.def->module;
+        return a.def->name < b.def->name;
+    });
+
+    // ---- guest 块（只有 `--profile` 才累计 b.ns；否则这一栏是 0）----
+    struct GuestRow {
+        std::uint32_t fn_ea = 0;
+        const LstFunction* fn = nullptr;
+        std::uint64_t ns = 0;
+    };
+    std::unordered_map<std::uint32_t, GuestRow> guest_by_fn;
+    std::uint64_t guest_ns = 0;
+    for (const auto& kv : cache_.guestBlocks()) {
+        const Block& b = *kv.second;
+        const std::uint64_t prev = frame_trace_prev_block_ns_[b.ea];
+        frame_trace_prev_block_ns_[b.ea] = b.ns;
+        if (b.ns < prev) continue;
+        const std::uint64_t delta = b.ns - prev;
+        if (delta == 0) continue;
+        guest_ns += delta;
+        const LstFunction* fn = lst_.loaded() ? lst_.functionAt(b.ea) : nullptr;
+        const std::uint32_t key = fn ? fn->ea : b.ea;
+        GuestRow& row = guest_by_fn[key];
+        row.fn_ea = key;
+        row.fn = fn;
+        row.ns += delta;
+    }
+    std::vector<GuestRow> guest_rows;
+    guest_rows.reserve(guest_by_fn.size());
+    for (const auto& kv : guest_by_fn) guest_rows.push_back(kv.second);
+    std::sort(guest_rows.begin(), guest_rows.end(), [](const GuestRow& a, const GuestRow& b) {
+        if (a.ns != b.ns) return a.ns > b.ns;
+        return a.fn_ea < b.fn_ea;
+    });
+
+    std::fprintf(stdout, "[frame] n=%llu wall=%.1fms insns=%llu guest=%.1fms shim=%.1fms other=%.1fms\n",
+                 (unsigned long long)presenter_.frameCount(), wall_ms, (unsigned long long)insns,
+                 (double)guest_ns / 1e6, (double)shim_ns / 1e6,
+                 (double)(static_cast<long long>(wall_ms * 1e6) - static_cast<long long>(guest_ns) -
+                          static_cast<long long>(shim_ns)) /
+                     1e6);
+    if (!guest_rows.empty()) {
+        std::fputs("        guest:", stdout);
+        for (std::size_t i = 0; i < guest_rows.size() && i < 5; ++i) {
+            const GuestRow& r = guest_rows[i];
+            std::fprintf(stdout, " %s=%.1fms", r.fn ? r.fn->name.c_str() : "?", (double)r.ns / 1e6);
+        }
+        std::fputc('\n', stdout);
+    }
+    if (!shim_rows.empty()) {
+        std::fputs("        shim :", stdout);
+        for (std::size_t i = 0; i < shim_rows.size() && i < 5; ++i) {
+            const ShimRow& r = shim_rows[i];
+            std::fprintf(stdout, " %s!%s=%.1fms", r.def->module.c_str(), r.def->name.c_str(),
+                         (double)r.ns / 1e6);
+        }
+        std::fputc('\n', stdout);
+    }
+    // ★ 逐帧 GPU 覆盖增量：一眼看出"这一帧有没有回退"，不必等 summary。
+    {
+        const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
+        auto delta = [](std::uint64_t now, std::uint64_t prev) { return now >= prev ? now - prev : 0ull; };
+        const std::uint64_t gd = delta(cov.gpu_draws, frame_trace_prev_gpu_draws_);
+        const std::uint64_t fb = delta(cov.fallback_draws, frame_trace_prev_gpu_fallback_);
+        const std::uint64_t fbp = delta(cov.fallback_pixels, frame_trace_prev_gpu_fallback_px_);
+        const std::uint64_t sp = delta(cov.sprite_gpu_draws, frame_trace_prev_sprite_total_);
+        const std::uint64_t sf = delta(cov.sprite_fallback_draws, frame_trace_prev_sprite_fallback_);
+        frame_trace_prev_gpu_draws_ = cov.gpu_draws;
+        frame_trace_prev_gpu_fallback_ = cov.fallback_draws;
+        frame_trace_prev_gpu_fallback_px_ = cov.fallback_pixels;
+        frame_trace_prev_sprite_total_ = cov.sprite_gpu_draws;
+        frame_trace_prev_sprite_fallback_ = cov.sprite_fallback_draws;
+        std::fprintf(stdout, "        gpu  : draws=%llu fallback=%llu fallback_pixels=%llu sprite_gpu=%llu sprite_fallback=%llu\n",
+                     (unsigned long long)gd, (unsigned long long)fb, (unsigned long long)fbp,
+                     (unsigned long long)sp, (unsigned long long)sf);
+    }
+    std::fflush(stdout);
+}
+
 RunResult Machine::run(const RunOptions& opts) {
     RunResult r;
+    // ★ GPU 覆盖账本按**这一轮**重算（`--gpu-strict` / dumpRunSummary 读的就是它）。
+    d3d9::gpuCoverageReset();
     shims_.setTrace(opts.trace_shims, opts.trace_out ? opts.trace_out : stdout);
+    // ★ 诊断：`LIFT_FRAME_TRACE=1` ⇒ 每次 Present 后打"这一帧墙钟去哪了"。
+    //   只读、默认关；shim 计时只在打开时才有 steady_clock 开销。
+    frame_trace_ = std::getenv("LIFT_FRAME_TRACE") != nullptr;
+    shims_.setTiming(frame_trace_);
+    if (frame_trace_) {
+        frame_trace_last_ = std::chrono::steady_clock::now();
+        frame_trace_last_insns_ = cpu_.insns;
+        frame_trace_prev_shim_ns_.assign(shims_.all().size(), 0);
+        frame_trace_prev_block_ns_.clear();
+        const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
+        frame_trace_prev_gpu_draws_ = cov.gpu_draws;
+        frame_trace_prev_gpu_fallback_ = cov.fallback_draws;
+        frame_trace_prev_gpu_fallback_px_ = cov.fallback_pixels;
+        frame_trace_prev_sprite_total_ = cov.sprite_gpu_draws;
+        frame_trace_prev_sprite_fallback_ = cov.sprite_fallback_draws;
+    }
     if (opts.real_time) clock_.setRealTime(true);
     if (opts.trace_inputs) dumpTraceInputs(stdout);
     // 诊断开关：LIFT_TRACE_FULL=1 ⇒ `--trace-blocks` 每条带操作数文本 + 寄存器快照（缺省关）
@@ -443,7 +569,9 @@ RunResult Machine::run(const RunOptions& opts) {
                 break;
             }
             const bool had_impl = def->fn != nullptr;
+            const std::uint64_t frame_before = presenter_.frameCount();
             shims_.invoke(cpu_, *def);
+            if (frame_trace_ && presenter_.frameCount() != frame_before) flushFrameTrace();
             if (!cpu_.running) {
                 // ★ 两种"停"要分清：**未实现**是缺口（红），**实现里主动停**（ExitProcess / ExitThread）
                 //   是正常结局。混在一起会让 ExitProcess 看起来像缺 shim。
@@ -717,6 +845,39 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      (unsigned long long)d3d9::gpuDrawCount(),
                      (unsigned long long)d3d9::gpuTriangleCount(),
                      presenter_.sinkDescription().empty() ? "-" : presenter_.sinkDescription().c_str());
+    }
+    // ★ 固定打印 GPU 覆盖账（`--raster cpu` 时全 0；GPU 启用后回退必须可见，⛔ 不静默）。
+    {
+        const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
+        std::fprintf(out, "gpu       : draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu\n",
+                     (unsigned long long)cov.draw_calls, (unsigned long long)cov.gpu_draws,
+                     (unsigned long long)cov.fallback_draws, (unsigned long long)cov.fallback_pixels);
+        if (cov.sprite_draws != 0 || cov.sprite_fallback_draws != 0 || cov.sprite_skipped != 0) {
+            std::fprintf(out,
+                         "            sprite: draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu skipped=%llu\n",
+                         (unsigned long long)cov.sprite_draws, (unsigned long long)cov.sprite_gpu_draws,
+                         (unsigned long long)cov.sprite_fallback_draws,
+                         (unsigned long long)cov.sprite_fallback_pixels,
+                         (unsigned long long)cov.sprite_skipped);
+        }
+        if (!cov.fallback_reasons.empty()) {
+            std::vector<std::pair<const std::string*, std::uint64_t>> rows;
+            rows.reserve(cov.fallback_reasons.size());
+            for (const auto& kv : cov.fallback_reasons) rows.emplace_back(&kv.first, kv.second);
+            std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+                return a.second != b.second ? a.second > b.second : *a.first < *b.first;
+            });
+            std::fprintf(out, "            fallback top:");
+            const std::size_t top = rows.size() < 5 ? rows.size() : 5;
+            for (std::size_t i = 0; i < top; ++i) {
+                std::fprintf(out, " [%llu×] %s ;", (unsigned long long)rows[i].second, rows[i].first->c_str());
+            }
+            std::fprintf(out, "\n");
+        }
+        if (cov.gpu_failures != 0) {
+            std::fprintf(out, "            gpu_failures=%llu（准入通过但后端绘制失败，已 CPU 重放）\n",
+                         (unsigned long long)cov.gpu_failures);
+        }
     }
     if (!overrides_.empty()) {
         std::uint64_t hits = 0;

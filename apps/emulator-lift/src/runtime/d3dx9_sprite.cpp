@@ -16,6 +16,7 @@
 
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
+#include "runtime/d3d9_pipeline.h"  // GPU 覆盖账本（sprite 也记账）
 #include "runtime/heap.h"
 #include "runtime/machine.h"
 #include "runtime/math.h"
@@ -572,6 +573,11 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
     }
     std::uint64_t written = 0;
     std::uint32_t entries_done = 0;
+    // ★ GPU 覆盖统计只统计"GPU 已启用、但这条 sprite 回退 CPU"的情况。
+    //   `--raster cpu`（没有后端）与 `--raster-sprites 0`（显式 A/B）都**不算 fallback**。
+    GpuRaster* gpu_backend = m->gpuRaster();
+    const bool sprite_gpu_active =
+        gpu_backend != nullptr && gpu_backend->rasterActive() && gpu_backend->rasterSpritesEnabled();
     // 条目级收尾：Draw 时 AddRef 过的纹理必须**每条路径**都还回去（含 continue 的早退分支）
     auto releaseEntry = [&](std::uint32_t ea) {
         if (!cpu.com) return;
@@ -585,6 +591,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         const std::uint32_t color = cpu.mem->rd32(ea + kBeColor);
         const std::uint32_t eflags = cpu.mem->rd32(ea + kBeFlags);
         if ((eflags & kBeHasSrcRect) == 0) {  // 排不进来的条目（防御）
+            if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
             releaseEntry(ea);
             continue;
         }
@@ -595,6 +602,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         const double w = static_cast<double>(right - left);
         const double h = static_cast<double>(bottom - top);
         if (w <= 0 || h <= 0) {  // 空矩形（Draw 已经记过；这里只是防御）
+            if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
             releaseEntry(ea);
             continue;
         }
@@ -608,6 +616,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         const double det = ux * vy - vx * uy;
         if (std::fabs(det) < 1e-12) {
             spriteLog("End", "第 %u 条 Draw 的四边形退化（det≈0）⇒ 跳过", i);
+            if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
             releaseEntry(ea);
             continue;
         }
@@ -628,8 +637,9 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         if (ix1 > gs->width) ix1 = gs->width;
         if (iy1 > gs->height) iy1 = gs->height;
         if (ix1 <= ix0 || iy1 <= iy0) {
-            // 完全在屏幕外：真机也不会画（不是错误）
+            // 完全在屏幕外：真机也不会画（不是错误，也不是回退）
             ++entries_done;
+            if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
             releaseEntry(ea);
             continue;
         }
@@ -644,12 +654,16 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         std::uint32_t th = 0;
         std::uint32_t tpitch = 0;
         std::uint32_t tbpp = 0;
+        std::uint32_t tversion = 0;  // 纹理内容版本（GPU 上传缓存用）
+        std::uint32_t tserial = 0;   // 纹理身份（GPU 缓存键用）
         if (texture != 0) {
             d3d9::TextureInfo ti;
             if (!d3d9::textureInfo(cpu, texture, &ti, why)) {
                 if (why) *why = std::string("D3DX9：合成时纹理无效（被提前 Release？）：") + *why;
                 return false;
             }
+            tversion = ti.version;
+            tserial = ti.serial;
             GuestSurface* tgs = m->surfaces().find(ti.arena);
             if (!tgs) {
                 if (why) *why = "D3DX9：合成时纹理像素不在 arena 里";
@@ -675,18 +689,33 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             if (bottom > static_cast<std::int32_t>(th)) v1 = static_cast<double>(static_cast<std::int32_t>(th) - top);
             if (u1 <= u0 || v1 <= v0) {
                 spriteLog("End", "第 %u 条 Draw 的源矩形完全在纹理外 ⇒ 跳过", i);
+                if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
                 releaseEntry(ea);
                 ++entries_done;
                 continue;
             }
         }
-        // ---- GPU 光栅化：D3DXSprite 的全屏纹理四边形（nearest + 顶点色调制）----
+        // ---- GPU 光栅化：D3DXSprite 纹理四边形（sampler 用 stage 默认 NEAREST+CLAMP，⛔ 不改）----
         bool gpu_done = false;
+        std::string sprite_fallback_reason;
+        const std::uint64_t written_before = written;
         const bool has_texture = texture != 0;
-        if (GpuRaster* gpu = m->gpuRaster();
-            gpu != nullptr && gpu->rasterActive() && gpu->rasterSpritesEnabled() && fmt.bpp == 32 &&
-            (!has_texture || (tbpp == 4 && left >= 0 && top >= 0 && right <= static_cast<std::int32_t>(tw) &&
-                              bottom <= static_cast<std::int32_t>(th)))) {            std::string gerr;
+        GpuRaster* gpu = sprite_gpu_active ? gpu_backend : nullptr;
+        if (gpu != nullptr) {
+            if (fmt.bpp != 32) {
+                sprite_fallback_reason = "sprite: 后缓冲不是 32bpp";
+                gpu = nullptr;
+            } else if (has_texture && tbpp != 4) {
+                sprite_fallback_reason = "sprite: 纹理不是 32bpp";
+                gpu = nullptr;
+            } else if (has_texture && (left < 0 || top < 0 || right > static_cast<std::int32_t>(tw) ||
+                                       bottom > static_cast<std::int32_t>(th))) {
+                sprite_fallback_reason = "sprite: 源矩形越界（GPU 路径不做逐像素裁剪）";
+                gpu = nullptr;
+            }
+        }
+        if (gpu != nullptr) {
+            std::string gerr;
             bool ok = gpu->rasterPrepare(fmt, gs->width, gs->height, &gerr);
             if (ok && !gpu->rasterDirty()) {
                 ok = gpu->rasterSyncFromGuest(base, gs->pitch, gs->width, gs->height, &gerr);
@@ -696,10 +725,10 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                 const float g = static_cast<float>(sg) / 255.0f;
                 const float b = static_cast<float>(sb) / 255.0f;
                 const float a = static_cast<float>(sa) / 255.0f;
-                const float u0f = static_cast<float>(left) / static_cast<float>(tw);
-                const float u1f = static_cast<float>(right) / static_cast<float>(tw);
-                const float v0f = static_cast<float>(top) / static_cast<float>(th);
-                const float v1f = static_cast<float>(bottom) / static_cast<float>(th);
+                const float u0f = has_texture ? static_cast<float>(left) / static_cast<float>(tw) : 0.0f;
+                const float u1f = has_texture ? static_cast<float>(right) / static_cast<float>(tw) : 1.0f;
+                const float v0f = has_texture ? static_cast<float>(top) / static_cast<float>(th) : 0.0f;
+                const float v1f = has_texture ? static_cast<float>(bottom) / static_cast<float>(th) : 1.0f;
                 GpuRasterVertex v[6];
                 auto set = [&](int n, double x, double y, float u, float vv) {
                     v[n].x = static_cast<float>(x);
@@ -724,6 +753,9 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                 gs_state.scissor_x1 = gs->width;
                 gs_state.scissor_y1 = gs->height;
                 gs_state.blend = blend;
+                // CPU 的 sprite 合成不看深度 ⇒ GPU 这条也要关掉，否则两边语义不等价。
+                gs_state.depth_test = false;
+                gs_state.depth_write = false;
                 GpuRasterTexture gt;
                 if (has_texture) {
                     gt.pixels = tbase;
@@ -732,6 +764,8 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     gt.height = static_cast<int>(th);
                     gt.format = tfmt;
                     gt.key = tbase;
+                    gt.generation = tversion;
+                    gt.serial = tserial;
                 } else {
                     // pTexture=0 的 D3DX 语义 = 白色源；GPU 用 1×1 白纹理 + 顶点色。
                     gt.pixels = nullptr;
@@ -740,6 +774,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     gt.height = 1;
                     gt.format = formatWhite();
                     gt.key = nullptr;
+                    gt.generation = 0;
                 }
                 ok = gpu->rasterDrawTextured(v, 6, gt, gs_state, &gerr);
             }
@@ -753,8 +788,9 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                               ix1 - ix0, iy1 - iy0);
                 }
             } else {
-                // GPU 失败：把已经画出的部分落回 guest，本条回退 CPU。
+                // GPU 失败：把已经画出的部分落回 guest，本条回退 CPU（记账 + 首次打印）。
                 spriteLog("End", "第 %u 条 Draw 的 GPU 纹理路径失败：%s ⇒ 回退 CPU", i, gerr.c_str());
+                sprite_fallback_reason = "sprite: GPU 后端失败：" + gerr;
                 std::string sync_err;
                 gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err);
             }
@@ -816,6 +852,10 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             }
         }
         }  // !gpu_done
+        // ★ sprite 的 GPU 覆盖账：只有在 GPU 已启用（且 sprite 路径开着）时才记。
+        if (sprite_gpu_active) {
+            d3d9::gpuNoteSpriteResult(gpu_done, written - written_before, sprite_fallback_reason);
+        }
         // Draw 时 AddRef 的纹理在这里对称 Release（与 D3DX 的批次生命周期一致）
         releaseEntry(ea);
         ++entries_done;

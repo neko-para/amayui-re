@@ -25,9 +25,11 @@
 //   · 光栅：像素中心采样 + 左上填充规则（顶点顺序 = 屏幕空间顺时针 = D3D 正面）。
 #include "runtime/d3d9_pipeline.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "runtime/gpu_raster.h"
@@ -51,6 +53,18 @@ namespace d3d9 {
 std::uint64_t g_gpu_draws = 0;
 std::uint64_t g_gpu_triangles = 0;
 namespace {
+// GPU 覆盖账本（定义放最前：submitPrimitives / d3dx9_sprite 都写它；dumpRunSummary 读它）。
+GpuCoverage g_gpu_coverage;
+
+void noteFallbackReason(const std::string& reason) {
+    std::uint64_t& n = g_gpu_coverage.fallback_reasons[reason];
+    ++n;
+    if (n == 1) {
+        // ★ 默认（不设环境变量）也打印：第一次出现每种回退原因就明说，⛔ 不"悄悄 fallback"。
+        std::fprintf(stderr, "[gpu] fallback: %s（该原因只打印一次）\n", reason.c_str());
+        std::fflush(stderr);
+    }
+}
 
 // =====================================================================================
 // 状态块布局（**我们自己的**；⛔ 不是 Win32 结构体）
@@ -340,6 +354,8 @@ struct TextureView {
     int width = 0;
     int height = 0;
     std::uint32_t pitch = 0;
+    std::uint32_t version = 0;  // 内容版本（TextureInfo::version）；GPU 上传缓存用
+    std::uint32_t serial = 0;   // 纹理身份（TextureInfo::serial）；GPU 缓存键用
 };
 
 bool resolveTexture(X86& cpu, Machine* m, std::uint32_t object_ea, TextureView* out, std::string* why) {
@@ -357,6 +373,8 @@ bool resolveTexture(X86& cpu, Machine* m, std::uint32_t object_ea, TextureView* 
     out->width = gs->width;
     out->height = gs->height;
     out->pitch = gs->pitch;
+    out->version = ti.version;
+    out->serial = ti.serial;
     out->present = out->pixels != nullptr && out->format.bytesPerPixel() != 0;
     return true;
 }
@@ -663,6 +681,7 @@ struct DrawContext {
     Machine* machine = nullptr;
     GpuRaster* gpu = nullptr;  // --raster gpu 且 sink 提供时非空
     std::uint32_t pe = 0;
+    std::uint32_t fvf = 0;  // 当前 SetFVF（诊断用）
     std::uint8_t* color_base = nullptr;
     SurfaceFormat color_fmt;
     int color_width = 0;
@@ -2426,6 +2445,7 @@ bool prepareContext(X86& cpu, std::uint32_t dev, std::uint32_t pe, DrawContext* 
     ctx->machine = m;
     ctx->gpu = m->gpuRaster();
     ctx->pe = pe;
+    ctx->fvf = plGet(cpu, pe, kPlFvf);
     ctx->color_base = m->surfaces().pixels(*gs);
     ctx->color_fmt = gs->format;
     ctx->color_width = gs->width;
@@ -2565,67 +2585,223 @@ void transformVertex(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std
     (void)vertex_index;
 }
 
-bool gpuEligible(const DrawContext& ctx, std::string* why) {
-    if (ctx.gpu == nullptr || !ctx.gpu->rasterActive()) {
-        if (why) *why = "没有 GPU 光栅化后端";
+// GPU 一批的完整描述：状态 + 可选的 stage 0 纹理（准入通过后由 submitPrimitives 直接消费）。
+struct GpuBatchPlan {
+    GpuRasterState state;
+    bool textured = false;
+    // stage 0 用了 TFACTOR ⇒ 顶点色整批替换成 D3DRS_TEXTUREFACTOR（常量色，不依赖插值）。
+    bool tex_color_from_tfactor = false;
+    GpuRasterTexture texture;
+};
+
+bool gpuAddressFor(std::uint32_t mode, GpuAddress* out) {
+    switch (mode) {
+        case kAddressWrap: *out = GpuAddress::Wrap; return true;
+        case kAddressClamp: *out = GpuAddress::Clamp; return true;
+        case kAddressMirror: *out = GpuAddress::Mirror; return true;
+        // BORDER / MIRROR_ONCE：SDL_GPU 的 sampler address mode 没有对应（BORDER 要 border color，
+        // MIRROR_ONCE 语义不同）⇒ 回退 CPU 并记账。
+        default: return false;
+    }
+}
+
+bool gpuFilterFor(std::uint32_t f, GpuFilter* out) {
+    switch (f) {
+        case kTexfPoint: *out = GpuFilter::Point; return true;
+        case kTexfLinear: *out = GpuFilter::Linear; return true;
+        // ANISOTROPIC：CPU 侧 `samplerUsesLinear` 已按 LINEAR 近似；GPU 这边用同一条近似。
+        case kTexfAnisotropic: *out = GpuFilter::Linear; return true;
+        default: return false;  // NONE（不可见组合）⇒ 不猜像素
+    }
+}
+
+// 无纹理时 CPU 的采样结果是白色 (255,255,255,255)：只有"结果恒等于顶点色"的 op 组合能由
+// 无纹理 GPU 着色器（输出顶点色）等价表达。⛔ 不把 SELECTARG1(TEXTURE)=white 当成顶点色。
+bool untexturedResolvesToDiffuse(std::uint32_t op, std::uint32_t arg1, std::uint32_t arg2) {
+    auto diffuse = [](std::uint32_t a) { return a == kTaDiffuse || a == kTaCurrent; };
+    auto texture = [](std::uint32_t a) { return a == kTaTexture; };
+    switch (op) {
+        // ★ CPU 的 applyTextureOp 对 DISABLE 落 default 分支、取 **arg1**；⛔ 不是无条件 DIFFUSE。
+        //   无纹理 + DISABLE(arg1=TEXTURE) 时 CPU 得到白色，不能用"顶点色"冒充 ⇒ 必须 false。
+        case kTopDisable: return untexturedResolvesToDiffuse(kTopSelectArg1, arg1, arg2);
+        case kTopSelectArg1: return diffuse(arg1);
+        case kTopSelectArg2: return diffuse(arg2);
+        case kTopModulate:
+            // MODULATE(TEXTURE(white), DIFFUSE) / MODULATE(DIFFUSE, TEXTURE(white)) = DIFFUSE
+            return (texture(arg1) && diffuse(arg2)) || (diffuse(arg1) && texture(arg2));
+        default: return false;
+    }
+}
+
+// ★ 准入条件精确到"能等价表达"的状态；其余全部**显式回退**（reason 会进 fallback 账本）。
+//   覆盖的 draw 类别（TITLE 的全屏渐变四边形就在里面）：
+//     32bpp 默认后缓冲、GOURAUD、无 alpha test、完整/部分 color write、
+//     任意可在 SDL_GPU 表达的 blend（含 separate alpha，TITLE = color 5/6 + alpha 2/6）、
+//     stage 0 单级纹理（32bpp；SELECTARG1/MODULATE 的 TEXTURE/DIFFUSE 组合）、
+//     sampler = POINT/LINEAR × WRAP/CLAMP/MIRROR、纹理坐标取 stage 0 的 TEXCOORDINDEX。
+bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
+    if (plan == nullptr) {
+        if (why) *why = "GPU 准入：plan 为空";
         return false;
     }
-    if (ctx.color_surface != 0 || ctx.color_fmt.bpp != 32) {
-        if (why) *why = "GPU phase 1 只支持 32bpp 默认后缓冲";
+    if (ctx.gpu == nullptr || !ctx.gpu->rasterActive()) {
+        if (why) *why = "没有 GPU 光栅化后端（raster=cpu 或 GPU 设备创建失败）";
+        return false;
+    }
+    if (ctx.color_surface != 0) {
+        if (why) *why = "GPU 只支持默认后缓冲（当前渲染目标是 IDirect3DSurface9）";
+        return false;
+    }
+    if (ctx.color_fmt.bpp != 32) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "GPU 只支持 32bpp 后缓冲（当前 %u bpp）",
+                      static_cast<unsigned>(ctx.color_fmt.bpp));
+        if (why) *why = buf;
         return false;
     }
     if (ctx.alpha_test) {
-        if (why) *why = "GPU phase 1 不支持 alpha test";
-        return false;
-    }
-    if (ctx.color_write != 0xF) {
-        if (why) *why = "GPU phase 1 只支持完整 color write";
+        if (why) *why = "GPU 不支持 alpha test（ALPHATESTENABLE=1）";
         return false;
     }
     if (ctx.shade != kShadeGouraud) {
-        if (why) *why = "GPU phase 1 只支持 GOURAUD";
+        if (why) *why = "GPU 只支持 GOURAUD 着色（FLAT 会改变 provoking vertex 语义）";
         return false;
     }
-    if (ctx.separate_alpha_blend) {
-        if (why) *why = "GPU phase 1 不支持 separate alpha blend";
+    if ((ctx.color_write & ~0xFu) != 0) {
+        char buf[112];
+        std::snprintf(buf, sizeof(buf), "GPU 不认识的 color write mask 0x%X", ctx.color_write);
+        if (why) *why = buf;
         return false;
     }
-    if (ctx.blend) {
-        const bool replace = ctx.src_blend == kBlendOne && ctx.dst_blend == kBlendZero;
-        const bool src_alpha = ctx.src_blend == kBlendSrcAlpha && ctx.dst_blend == kBlendInvSrcAlpha;
-        if (!replace && !src_alpha) {
-            if (why) *why = "GPU phase 1 只支持 ONE/ZERO 或 SRCALPHA/INVSRCALPHA 混合";
-            return false;
-        }
-    }
-    for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
+    // ---- 纹理级：只接受 stage 0；其余级必须 DISABLE；不允许 stage 1.. 的纹理 ----
+    for (std::uint32_t s = 1; s < kMaxTextureStages; ++s) {
         if (ctx.textures[s].present) {
-            if (why) *why = "GPU phase 1 不支持纹理";
+            char buf[112];
+            std::snprintf(buf, sizeof(buf), "GPU 只支持 stage 0 单级纹理（stage %u 绑定了纹理）", s);
+            if (why) *why = buf;
             return false;
         }
-        // 未绑定纹理 ⇒ CPU 采样是白色（identity）。stage 0 的默认 MODULATE / SELECTARG1
-        // 在这里是恒等；其余运算（ADD 等）会改变结果 ⇒ 回退 CPU。
-        const std::uint32_t cop = ctx.stages[s].color_op;
-        const std::uint32_t aop = ctx.stages[s].alpha_op;
-        const bool cop_ok = cop == kTopDisable || cop == kTopModulate || cop == kTopSelectArg1;
-        const bool aop_ok = aop == kTopDisable || aop == kTopModulate || aop == kTopSelectArg1;
-        if (!cop_ok || !aop_ok) {
-            if (why) *why = "GPU phase 1 不支持该纹理级运算（无纹理时只允许 identity）";
+        if (ctx.stages[s].color_op != kTopDisable || ctx.stages[s].alpha_op != kTopDisable) {
+            char buf[144];
+            std::snprintf(buf, sizeof(buf), "GPU 只支持 stage 0（stage %u 的 color/alpha op 未 DISABLE）", s);
+            if (why) *why = buf;
             return false;
         }
     }
+    GpuBatchPlan p;
+    p.state.viewport_x = ctx.viewport_x;
+    p.state.viewport_y = ctx.viewport_y;
+    p.state.viewport_w = ctx.viewport_w;
+    p.state.viewport_h = ctx.viewport_h;
+    p.state.scissor_x0 = ctx.scissor_x0;
+    p.state.scissor_y0 = ctx.scissor_y0;
+    p.state.scissor_x1 = ctx.scissor_x1;
+    p.state.scissor_y1 = ctx.scissor_y1;
+    p.state.scissor_enabled = ctx.scissor_x0 != 0 || ctx.scissor_y0 != 0 || ctx.scissor_x1 != ctx.color_width ||
+                              ctx.scissor_y1 != ctx.color_height;
+    p.state.depth_test = ctx.z_enable;
+    p.state.depth_write = ctx.z_write;
+    p.state.depth_func = ctx.z_func;
+    p.state.color_write = static_cast<std::uint8_t>(ctx.color_write & 0xFu);
+    // ---- 混合（color + separate alpha；映射失败 ⇒ 回退，⛔ 不近似）----
+    if (!gpuBlendStateFor(ctx.src_blend, ctx.dst_blend, ctx.blend_op, ctx.separate_alpha_blend, ctx.src_blend_a,
+                          ctx.dst_blend_a, ctx.blend_op_a, ctx.blend, &p.state, why)) {
+        return false;
+    }
+    // ---- stage 0 ----
+    const TextureView& tv = ctx.textures[0];
+    const TextureStageSnapshot& ts = ctx.stages[0];
+    const SamplerSnapshot& ss = ctx.samplers[0];
+    const std::uint32_t coord = ts.tex_coord_index & 0xFFFFu;
+    // ★ CPU 的像素循环在 stage0 的 color/alpha 两个 op **都** DISABLE 时直接 break（连纹理都不采样）
+    //   ⇒ 结果恒等于顶点色。这一档不能按 arg 判，否则会把"被 DISABLE 忽略的纹理"当成有效输入。
+    const bool stage0_ignored = ts.color_op == kTopDisable && ts.alpha_op == kTopDisable;
+    if (tv.present && !stage0_ignored) {
+        bool from_tfactor = false;
+        if (!gpuTextureModeFor(ts.color_op, ts.color_arg1, ts.color_arg2, ts.alpha_op, ts.alpha_arg1,
+                               ts.alpha_arg2, true, coord, &p.state.tex_mode, &from_tfactor, why)) {
+            return false;
+        }
+        p.tex_color_from_tfactor = from_tfactor;
+        if (tv.format.bpp != 32) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "GPU 只支持 32bpp 纹理（stage 0 是 %u bpp）",
+                          static_cast<unsigned>(tv.format.bpp));
+            if (why) *why = buf;
+            return false;
+        }
+        if (tv.width <= 0 || tv.height <= 0 || tv.pixels == nullptr) {
+            if (why) *why = "GPU 准入：stage 0 纹理的像素/尺寸非法";
+            return false;
+        }
+        if (!gpuAddressFor(ss.address_u, &p.texture.sampler.address_u) ||
+            !gpuAddressFor(ss.address_v, &p.texture.sampler.address_v)) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "GPU 不支持该采样器寻址模式（U=%u V=%u；只支持 WRAP/CLAMP/MIRROR）",
+                          ss.address_u, ss.address_v);
+            if (why) *why = buf;
+            return false;
+        }
+        if (!gpuFilterFor(ss.mag_filter, &p.texture.sampler.mag_filter) ||
+            !gpuFilterFor(ss.min_filter, &p.texture.sampler.min_filter)) {
+            char buf[144];
+            std::snprintf(buf, sizeof(buf), "GPU 不支持该采样过滤（MAG=%u MIN=%u）", ss.mag_filter,
+                          ss.min_filter);
+            if (why) *why = buf;
+            return false;
+        }
+        p.textured = true;
+        p.texture.pixels = tv.pixels;
+        p.texture.pitch = tv.pitch;
+        p.texture.width = tv.width;
+        p.texture.height = tv.height;
+        p.texture.format = tv.format;
+        p.texture.key = tv.pixels;
+        p.texture.generation = tv.version;
+        p.texture.serial = tv.serial;
+    } else {
+        // 无纹理（CPU 采样为白色），或 stage0 两 op 都 DISABLE（CPU 直接 break ⇒ 顶点色）：
+        // 只接受"结果恒等于顶点色"的组合（见 untexturedResolvesToDiffuse）。
+        if (!stage0_ignored && (!untexturedResolvesToDiffuse(ts.color_op, ts.color_arg1, ts.color_arg2) ||
+                                !untexturedResolvesToDiffuse(ts.alpha_op, ts.alpha_arg1, ts.alpha_arg2))) {
+            char buf[208];
+            std::snprintf(buf,
+                          sizeof(buf),
+                          "无纹理时 stage 0 的 op/arg 不等于顶点色（color op=%u arg=%u/%u，alpha op=%u arg=%u/%u）",
+                          ts.color_op, ts.color_arg1, ts.color_arg2, ts.alpha_op, ts.alpha_arg1,
+                          ts.alpha_arg2);
+            if (why) *why = buf;
+            return false;
+        }
+    }
+    *plan = p;
     return true;
 }
+
 
 bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std::vector<CVertex>& verts,
                       std::uint32_t prim_count, DrawContext& ctx, std::uint32_t* triangles_out,
                       std::uint32_t* rasterized_out, std::string* why) {
+    // ★ 诊断（`LIFT_SLOW_DRAW=1`）：只在这一批**慢**时打一行；默认零输出。
+    static const bool slow_draw_trace = std::getenv("LIFT_SLOW_DRAW") != nullptr;
+    // ★ 诊断（默认关）：GPU 与 CPU 参考在同一批/同一状态上逐像素对照（见下面 `[gpu-verify]`）。
+    static const bool gpu_verify = std::getenv("LIFT_GPU_VERIFY") != nullptr;
+    static const double slow_draw_ms = [] {
+        const char* text = std::getenv("LIFT_SLOW_DRAW_MS");
+        return text ? std::atof(text) : 20.0;
+    }();
+    const auto slow_draw_begin = slow_draw_trace ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
     // 顶点已经是**变换后**的 CVertex（由调用方喂），这里只做裁剪 + 屏幕映射 + 光栅
     std::uint32_t triangles = 0;
     std::uint32_t rasterized = 0;
+    // ★ `--raster cpu`（ctx.gpu == nullptr）是**显式参考后端**：⛔ 不计 fallback、⛔ 不打印
+    //   `[gpu] fallback`。只有 GPU 已启用、本批因能力/后端失败而回退 CPU 时才记账。
+    const bool have_gpu_backend = ctx.gpu != nullptr && ctx.gpu->rasterActive();
+    GpuBatchPlan plan;
     std::string gpu_why;
-    const bool gpu_ok = gpuEligible(ctx, &gpu_why);
-    if (!gpu_ok && ctx.gpu != nullptr && ctx.gpu->rasterDirty()) {
+    const bool gpu_ok = have_gpu_backend && gpuEligible(ctx, &plan, &gpu_why);
+    if (!gpu_ok && have_gpu_backend && ctx.gpu->rasterDirty()) {
         // 上一批走 GPU、这一批要回 CPU：先把 GPU 像素落回 guest，CPU 才能接着画。
         std::string sync_err;
         ctx.gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
@@ -2637,6 +2813,18 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     };
     std::vector<SavedTri> saved_tris;
     GpuRaster* gpu = gpu_ok ? ctx.gpu : nullptr;
+    // 纹理坐标按 **stage 0 的 D3DTSS_TEXCOORDINDEX** 取（⛔ 不硬编码 TEXCOORD0）
+    const std::uint32_t gpu_tex_coord = plan.textured ? (ctx.stages[0].tex_coord_index & 0xFFFFu) : 0u;
+    // TFACTOR（D3DRS_TEXTUREFACTOR）是每批 Draw 的常量色：GPU 顶点色整批替换成它。
+    float tf_r = 1.0f, tf_g = 1.0f, tf_b = 1.0f, tf_a = 1.0f;
+    if (plan.textured && plan.tex_color_from_tfactor) {
+        double ta = 255.0, tr = 255.0, tg = 255.0, tb = 255.0;
+        splitColor(ctx.texture_factor, &ta, &tr, &tg, &tb);
+        tf_r = static_cast<float>(tr / 255.0);
+        tf_g = static_cast<float>(tg / 255.0);
+        tf_b = static_cast<float>(tb / 255.0);
+        tf_a = static_cast<float>(ta / 255.0);
+    }
 
     auto push_tri = [&](const SVertex& a, const SVertex& b, const SVertex& c) {
         const double area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
@@ -2650,7 +2838,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             rasterTriangle(ctx, a, b, c);
             return;
         }
-        // SVertex 的颜色/uv 已经乘过 invw；SDL_RenderGeometry 是线性插值，只有 invw==1 才等价。
+        // SVertex 的颜色/uv 已经乘过 invw；GPU 的顶点着色器输出 w=1 ⇒ 屏幕空间线性插值，
+        // 只有 invw==1 才与 CPU 的透视校正插值等价。
         if (std::fabs(a.invw - 1.0) > 1e-9 || std::fabs(b.invw - 1.0) > 1e-9 ||
             std::fabs(c.invw - 1.0) > 1e-9) {
             gpu_invw_ok = false;
@@ -2661,10 +2850,19 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             g.x = static_cast<float>(v.x);
             g.y = static_cast<float>(v.y);
             g.z = static_cast<float>(v.z);
-            g.r = static_cast<float>(v.r / 255.0);
-            g.g = static_cast<float>(v.g / 255.0);
-            g.b = static_cast<float>(v.b / 255.0);
-            g.a = static_cast<float>(v.a / 255.0);
+            if (plan.textured && plan.tex_color_from_tfactor) {
+                g.r = tf_r;
+                g.g = tf_g;
+                g.b = tf_b;
+                g.a = tf_a;
+            } else {
+                g.r = static_cast<float>(v.r / 255.0);
+                g.g = static_cast<float>(v.g / 255.0);
+                g.b = static_cast<float>(v.b / 255.0);
+                g.a = static_cast<float>(v.a / 255.0);
+            }
+            g.u = static_cast<float>(v.u[gpu_tex_coord]);
+            g.v = static_cast<float>(v.v[gpu_tex_coord]);
             gpu_vertices.push_back(g);
         };
         add(a);
@@ -2711,55 +2909,149 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             return false;
     }
 
+    bool gpu_done = false;
+    std::string fallback_reason;
     if (gpu != nullptr && !gpu_invw_ok) {
+        // GPU 已启用，但这批顶点的 invw != 1：屏幕空间插值会与 CPU 的透视校正产生像素差 ⇒
+        // 明确回退（记账 + 首次打印），⛔ 不静默。
         for (const SavedTri& t : saved_tris) rasterTriangle(ctx, t.a, t.b, t.c);
         gpu_vertices.clear();
+        fallback_reason = "顶点 invw!=1（屏幕空间 GPU 插值不能等价替代透视校正）";
     } else if (gpu != nullptr) {
         std::string gerr;
         bool ok = gpu->rasterPrepare(ctx.color_fmt, ctx.color_width, ctx.color_height, &gerr);
         if (ok && !gpu->rasterDirty()) {
             ok = gpu->rasterSyncFromGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &gerr);
         }
-        GpuRasterState gs;
-        gs.viewport_x = ctx.viewport_x;
-        gs.viewport_y = ctx.viewport_y;
-        gs.viewport_w = ctx.viewport_w;
-        gs.viewport_h = ctx.viewport_h;
-        gs.scissor_x0 = ctx.scissor_x0;
-        gs.scissor_y0 = ctx.scissor_y0;
-        gs.scissor_x1 = ctx.scissor_x1;
-        gs.scissor_y1 = ctx.scissor_y1;
-        gs.scissor_enabled = ctx.scissor_x0 != 0 || ctx.scissor_y0 != 0 || ctx.scissor_x1 != ctx.color_width ||
-                             ctx.scissor_y1 != ctx.color_height;
-        gs.blend = ctx.blend && ctx.src_blend == kBlendSrcAlpha && ctx.dst_blend == kBlendInvSrcAlpha;
-        gs.depth_test = ctx.z_enable;
-        gs.depth_write = ctx.z_write;
-        gs.depth_func = ctx.z_func;
-        if (ok && !gpu_vertices.empty()) ok = gpu->rasterDraw(gpu_vertices.data(), gpu_vertices.size(), gs, &gerr);
+        // ★ 诊断（`LIFT_GPU_VERIFY=1`）：同一批、同一状态，CPU 参考光栅 vs GPU 读回逐像素对照。
+        //   只在 GPU 镜像与 guest 同步干净（!dirty）时做 —— 否则 CPU 起点会比 GPU 少一批像素。
+        std::vector<std::uint8_t> ref_color;
+        std::vector<float> ref_depth;
+        bool ref_valid = false;
+        if (gpu_verify && plan.textured && !saved_tris.empty() && ok && !gpu->rasterDirty()) {
+            const std::uint32_t bpp = ctx.color_fmt.bytesPerPixel();
+            const std::size_t cw = static_cast<std::size_t>(ctx.color_width);
+            const std::size_t ch = static_cast<std::size_t>(ctx.color_height);
+            ref_color.resize(cw * ch * bpp);
+            for (std::size_t y = 0; y < ch; ++y) {
+                std::memcpy(ref_color.data() + y * cw * bpp, ctx.color_base + y * ctx.color_pitch, cw * bpp);
+            }
+            ref_depth.resize(static_cast<std::size_t>(ctx.depth_pitch_floats) * ch);
+            for (std::size_t y = 0; y < ch; ++y) {
+                std::memcpy(ref_depth.data() + y * ctx.depth_pitch_floats,
+                            ctx.depth_base + y * ctx.depth_pitch_floats,
+                            static_cast<std::size_t>(ctx.depth_pitch_floats) * sizeof(float));
+            }
+            DrawContext ref = ctx;
+            ref.gpu = nullptr;  // ⛔ CPU 参考不碰 GPU 后端
+            ref.color_base = ref_color.data();
+            ref.color_pitch = static_cast<std::uint32_t>(cw * bpp);
+            ref.depth_base = ref_depth.data();
+            ref.pixels_written = 0;
+            for (const SavedTri& t : saved_tris) rasterTriangle(ref, t.a, t.b, t.c);
+            ref_valid = true;
+        }
+        if (ok && !gpu_vertices.empty()) {
+            if (plan.textured) {
+                ok = gpu->rasterDrawTextured(gpu_vertices.data(), gpu_vertices.size(), plan.texture, plan.state,
+                                             &gerr);
+            } else {
+                ok = gpu->rasterDraw(gpu_vertices.data(), gpu_vertices.size(), plan.state, &gerr);
+            }
+        }
+        if (ok && ref_valid) {
+            std::string verr;
+            if (!gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &verr)) {
+                std::fprintf(stderr, "[gpu-verify] 读回失败：%s\n", verr.c_str());
+            } else {
+                const std::uint32_t bpp = ctx.color_fmt.bytesPerPixel();
+                const bool alpha = ctx.color_fmt.amask != 0;
+                std::uint64_t diff_pixels = 0;
+                unsigned max_diff = 0;
+                for (int y = 0; y < ctx.color_height; ++y) {
+                    const std::uint8_t* pa = ref_color.data() + static_cast<std::size_t>(y) * ctx.color_width * bpp;
+                    const std::uint8_t* pb = ctx.color_base + static_cast<std::size_t>(y) * ctx.color_pitch;
+                    for (int x = 0; x < ctx.color_width; ++x) {
+                        const std::uint32_t ra = pixel_format::loadPixel(pa + static_cast<std::size_t>(x) * bpp,
+                                                                         ctx.color_fmt.bpp);
+                        const std::uint32_t rb = pixel_format::loadPixel(pb + static_cast<std::size_t>(x) * bpp,
+                                                                         ctx.color_fmt.bpp);
+                        const unsigned va[4] = {pixel_format::expandChannel(ra, ctx.color_fmt.rmask),
+                                                pixel_format::expandChannel(ra, ctx.color_fmt.gmask),
+                                                pixel_format::expandChannel(ra, ctx.color_fmt.bmask),
+                                                pixel_format::expandChannel(ra, ctx.color_fmt.amask)};
+                        const unsigned vb[4] = {pixel_format::expandChannel(rb, ctx.color_fmt.rmask),
+                                                pixel_format::expandChannel(rb, ctx.color_fmt.gmask),
+                                                pixel_format::expandChannel(rb, ctx.color_fmt.bmask),
+                                                pixel_format::expandChannel(rb, ctx.color_fmt.amask)};
+                        unsigned d = 0;
+                        const int channels = alpha ? 4 : 3;
+                        for (int c = 0; c < channels; ++c) {
+                            const unsigned diff = va[c] > vb[c] ? va[c] - vb[c] : vb[c] - va[c];
+                            if (diff > d) d = diff;
+                        }
+                        if (d != 0) {
+                            ++diff_pixels;
+                            if (d > max_diff) max_diff = d;
+                        }
+                    }
+                }
+                std::fprintf(stderr,
+                             "[gpu-verify] textured batch tris=%zu pixels=%dx%d diff_pixels=%llu max_channel_diff=%u%s\n",
+                             saved_tris.size(), ctx.color_width, ctx.color_height,
+                             (unsigned long long)diff_pixels, max_diff,
+                             alpha ? "" : "（X8 后缓冲：只比 RGB）");
+                std::fflush(stderr);
+            }
+        }
         if (ok) {
+            gpu_done = true;
             ++g_gpu_draws;
             g_gpu_triangles += saved_tris.size();
             static bool logged = false;
             if (!logged && !saved_tris.empty()) {
                 logged = true;
                 const SavedTri& t = saved_tris.front();
-                pipeLog("GPU", "首个 GPU 光栅 Draw：%zu 三角形（后端 %s）z=%.3f/%.3f/%.3f depth=%d/%d/%u blend=%d src=%u dst=%u",
-                        saved_tris.size(), gpu->rasterName(), t.a.z, t.b.z, t.c.z, static_cast<int>(gs.depth_test),
-                        static_cast<int>(gs.depth_write), gs.depth_func, static_cast<int>(gs.blend), ctx.src_blend,
-                        ctx.dst_blend);
+                pipeLog("GPU",
+                        "首个 GPU 光栅 Draw：%zu 三角形（后端 %s）textured=%d mode=%u z=%.3f/%.3f/%.3f "
+                        "depth=%d/%d/%u blend=%d src=%u dst=%u sep=%d srcA=%u dstA=%u cw=%X",
+                        saved_tris.size(), gpu->rasterName(), plan.textured ? 1 : 0,
+                        static_cast<unsigned>(plan.state.tex_mode), t.a.z, t.b.z, t.c.z,
+                        static_cast<int>(plan.state.depth_test), static_cast<int>(plan.state.depth_write),
+                        plan.state.depth_func, static_cast<int>(plan.state.blend),
+                        static_cast<unsigned>(plan.state.src_blend), static_cast<unsigned>(plan.state.dst_blend),
+                        static_cast<int>(plan.state.separate_alpha_blend),
+                        static_cast<unsigned>(plan.state.src_blend_alpha),
+                        static_cast<unsigned>(plan.state.dst_blend_alpha), ctx.color_write);
             }
         }
         if (!ok) {
+            ++g_gpu_coverage.gpu_failures;
             // GPU 本批失败：先让 guest 看到已经画出的部分，再用 CPU 重放这一批。
             std::string sync_err;
             gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
             for (const SavedTri& t : saved_tris) rasterTriangle(ctx, t.a, t.b, t.c);
             gpu->rasterSyncFromGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
+            fallback_reason = "GPU 后端绘制失败：" + gerr;
             static bool logged = false;
             if (!logged) {
                 logged = true;
                 pipeLog("GPU", "光栅化失败，已回退 CPU：%s", gerr.c_str());
             }
+        }
+    }
+    // GPU 已启用时的账：每一批 Draw* 都算一次；没画到 GPU 的一定有原因。
+    // ★ 空批 / 全被裁掉（CPU 一个像素都没写）**不算 fallback**：它们不是"回退"，也没有像素差；
+    //   `draw_calls` 照记（可见性），`fallback_pixels` 只在真的由 CPU 写了像素时加。
+    if (have_gpu_backend) {
+        ++g_gpu_coverage.draw_calls;
+        if (gpu_done) {
+            ++g_gpu_coverage.gpu_draws;
+        } else if (ctx.pixels_written > 0) {
+            gpuNoteFallback(fallback_reason.empty()
+                                ? (gpu_why.empty() ? std::string("GPU 不可用（原因未登记）") : gpu_why)
+                                : fallback_reason,
+                            ctx.pixels_written);
         }
     }
 
@@ -2773,6 +3065,31 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     pixels += ctx.pixels_written;
     cpu.mem->wr32(pe + kPlPixels, static_cast<std::uint32_t>(pixels & 0xFFFFFFFFu));
     cpu.mem->wr32(pe + kPlPixels + 4u, static_cast<std::uint32_t>(pixels >> 32));
+    if (slow_draw_trace) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                    slow_draw_begin)
+                              .count();
+        if (ms >= slow_draw_ms) {
+            std::uint32_t tex_present = 0;
+            for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
+                if (ctx.textures[s].present) ++tex_present;
+            }
+            std::fprintf(stderr,
+                         "[draw] prim=%u verts=%zu tris=%u rast=%u pixels=%llu gpu=%d why=%s "
+                         "sep_alpha=%d tex=%u blend=%u/%u op=%u cw=%X fvf=%X coord=%u "
+                         "stage0=%u/%u(%u/%u) samp=U%uV%u M%u%u texfmt=%u/%X %dx%d submit=%.1fms\n",
+                         prim, verts.size(), triangles, rasterized,
+                         (unsigned long long)ctx.pixels_written, gpu_done ? 1 : 0,
+                         gpu_why.empty() ? "-" : gpu_why.c_str(), ctx.separate_alpha_blend ? 1 : 0,
+                         tex_present, ctx.src_blend, ctx.dst_blend, ctx.blend_op, ctx.color_write, ctx.fvf,
+                         ctx.stages[0].tex_coord_index & 0xFFFFu, ctx.stages[0].color_op, ctx.stages[0].alpha_op,
+                         ctx.stages[0].color_arg1, ctx.stages[0].alpha_arg1, ctx.samplers[0].address_u,
+                         ctx.samplers[0].address_v, ctx.samplers[0].mag_filter, ctx.samplers[0].min_filter,
+                         static_cast<unsigned>(ctx.textures[0].format.bpp),
+                         ctx.textures[0].format.amask, ctx.textures[0].width, ctx.textures[0].height, ms);
+            std::fflush(stderr);
+        }
+    }
     return true;
 }
 
@@ -3216,6 +3533,267 @@ bool frameStats(const SurfaceFormat& fmt, const std::uint8_t* base, std::uint32_
 
 std::uint64_t gpuDrawCount() { return g_gpu_draws; }
 std::uint64_t gpuTriangleCount() { return g_gpu_triangles; }
+
+// =====================================================================================
+// GPU 覆盖账本
+// =====================================================================================
+const GpuCoverage& gpuCoverage() { return g_gpu_coverage; }
+
+void gpuCoverageReset() {
+    g_gpu_coverage = GpuCoverage{};
+    g_gpu_draws = 0;
+    g_gpu_triangles = 0;
+}
+
+void gpuNoteFallback(const std::string& reason, std::uint64_t pixels) {
+    ++g_gpu_coverage.fallback_draws;
+    g_gpu_coverage.fallback_pixels += pixels;
+    noteFallbackReason(reason);
+}
+
+void gpuNoteSpriteResult(bool gpu, std::uint64_t pixels, const std::string& reason) {
+    ++g_gpu_coverage.sprite_draws;
+    if (gpu) {
+        ++g_gpu_coverage.sprite_gpu_draws;
+        return;
+    }
+    ++g_gpu_coverage.sprite_fallback_draws;
+    g_gpu_coverage.sprite_fallback_pixels += pixels;
+    noteFallbackReason(reason.empty() ? std::string("sprite: 未知原因") : reason);
+}
+
+void gpuNoteSpriteSkipped() { ++g_gpu_coverage.sprite_skipped; }
+
+// =====================================================================================
+// GPU 准入 / 状态映射（纯函数）
+// =====================================================================================
+namespace {
+bool blendFactorFor(std::uint32_t f, GpuBlendFactor* out) {
+    switch (f) {
+        case kBlendZero: *out = GpuBlendFactor::Zero; return true;
+        case kBlendOne: *out = GpuBlendFactor::One; return true;
+        case kBlendSrcColor: *out = GpuBlendFactor::SrcColor; return true;
+        case kBlendInvSrcColor: *out = GpuBlendFactor::InvSrcColor; return true;
+        case kBlendSrcAlpha: *out = GpuBlendFactor::SrcAlpha; return true;
+        case kBlendInvSrcAlpha: *out = GpuBlendFactor::InvSrcAlpha; return true;
+        case kBlendDestAlpha: *out = GpuBlendFactor::DstAlpha; return true;
+        case kBlendInvDestAlpha: *out = GpuBlendFactor::InvDstAlpha; return true;
+        case kBlendDestColor: *out = GpuBlendFactor::DstColor; return true;
+        case kBlendInvDestColor: *out = GpuBlendFactor::InvDstColor; return true;
+        case kBlendSrcAlphaSat: *out = GpuBlendFactor::SrcAlphaSaturate; return true;
+        // D3DBLEND_BOTHSRCALPHA / BOTHINVSRCALPHA 是"同时改源和目标的因子"，
+        // SDL_GPU 的固定 blend state 表达不了 ⇒ 明确拒绝（调用方回退 CPU 并记账）。
+        default: return false;
+    }
+}
+
+bool blendOpFor(std::uint32_t op, GpuBlendOp* out) {
+    switch (op) {
+        case kBlendOpAdd: *out = GpuBlendOp::Add; return true;
+        case kBlendOpSubtract: *out = GpuBlendOp::Subtract; return true;
+        case kBlendOpRevSubtract: *out = GpuBlendOp::ReverseSubtract; return true;
+        case kBlendOpMin: *out = GpuBlendOp::Min; return true;
+        case kBlendOpMax: *out = GpuBlendOp::Max; return true;
+        default: return false;
+    }
+}
+}  // namespace
+
+bool gpuUntexturedIsIdentity(std::uint32_t op, std::uint32_t arg1, std::uint32_t arg2) {
+    // 无纹理时 CPU 采样是白色；只有结果恒等于顶点色的组合才能由无纹理 GPU 着色器表达。
+    return untexturedResolvesToDiffuse(op, arg1, arg2);
+}
+
+bool gpuBlendStateFor(std::uint32_t src_color, std::uint32_t dst_color, std::uint32_t color_op,
+                      bool separate_alpha, std::uint32_t src_alpha, std::uint32_t dst_alpha,
+                      std::uint32_t alpha_op, bool blend_enabled, GpuRasterState* out, std::string* why) {
+    if (out == nullptr) {
+        if (why) *why = "gpuBlendStateFor: out 为空";
+        return false;
+    }
+    if (!blend_enabled) {
+        out->blend = false;
+        out->separate_alpha_blend = false;
+        return true;
+    }
+    GpuBlendFactor sc = GpuBlendFactor::One;
+    GpuBlendFactor dc = GpuBlendFactor::Zero;
+    GpuBlendOp cop = GpuBlendOp::Add;
+    if (!blendFactorFor(src_color, &sc) || !blendFactorFor(dst_color, &dc) || !blendOpFor(color_op, &cop)) {
+        if (why) {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "blend 不能映射到 SDL_GPU（color src=%u dst=%u op=%u）", src_color, dst_color, color_op);
+            *why = buf;
+        }
+        return false;
+    }
+    out->blend = true;
+    out->src_blend = sc;
+    out->dst_blend = dc;
+    out->blend_op = cop;
+    out->separate_alpha_blend = separate_alpha;
+    if (separate_alpha) {
+        GpuBlendFactor sa = GpuBlendFactor::One;
+        GpuBlendFactor da = GpuBlendFactor::Zero;
+        GpuBlendOp aop = GpuBlendOp::Add;
+        if (!blendFactorFor(src_alpha, &sa) || !blendFactorFor(dst_alpha, &da) || !blendOpFor(alpha_op, &aop)) {
+            if (why) {
+                char buf[224];
+                std::snprintf(buf, sizeof(buf),
+                              "separate alpha blend 不能映射到 SDL_GPU（alpha src=%u dst=%u op=%u）", src_alpha,
+                              dst_alpha, alpha_op);
+                *why = buf;
+            }
+            return false;
+        }
+        out->src_blend_alpha = sa;
+        out->dst_blend_alpha = da;
+        out->blend_op_alpha = aop;
+    } else {
+        // D3D 语义：SEPARATEALPHABLENDENABLE=0 时 alpha 用 color 的因子/op。
+        out->src_blend_alpha = sc;
+        out->dst_blend_alpha = dc;
+        out->blend_op_alpha = cop;
+    }
+    return true;
+}
+
+namespace {
+// stage 0 的 CURRENT 就是 DIFFUSE（纹理级链的输入 = 顶点色）；TFACTOR 是整批 Draw 的常量色。
+enum class ConstSrc : std::uint8_t { None = 0, Diffuse, TFactor };
+bool constArgAtStage0(std::uint32_t arg, ConstSrc* out) {
+    if (arg == kTaDiffuse || arg == kTaCurrent) {
+        *out = ConstSrc::Diffuse;
+        return true;
+    }
+    if (arg == kTaTFactor) {
+        *out = ConstSrc::TFactor;
+        return true;
+    }
+    return false;
+}
+bool argIsTexture(std::uint32_t arg) { return arg == kTaTexture; }
+
+enum class ExprKind : std::uint8_t { Const = 0, Texture, ModulateTextureConst, Unsupported };
+struct StageExpr {
+    ExprKind kind = ExprKind::Unsupported;
+    ConstSrc ck = ConstSrc::None;  // kind==Const / ModulateTextureConst 时有效
+};
+
+StageExpr stageExprFor(std::uint32_t op, std::uint32_t arg1, std::uint32_t arg2) {
+    StageExpr e;
+    ConstSrc ck = ConstSrc::None;
+    switch (op) {
+        case kTopDisable:
+            // ★ CPU 的 applyTextureOp 对 DISABLE 落到 default 分支：取 **arg1**（不是“恒等于 DIFFUSE”）。
+            //   所以这里按 SELECTARG1(arg1) 判 —— 有纹理 + arg1=TEXTURE 时 CPU 取的是纹理。
+            return stageExprFor(kTopSelectArg1, arg1, 0u);
+        case kTopSelectArg1:
+            if (argIsTexture(arg1)) { e.kind = ExprKind::Texture; return e; }
+            if (constArgAtStage0(arg1, &ck)) { e.kind = ExprKind::Const; e.ck = ck; return e; }
+            return e;
+        case kTopSelectArg2:
+            if (argIsTexture(arg2)) { e.kind = ExprKind::Texture; return e; }
+            if (constArgAtStage0(arg2, &ck)) { e.kind = ExprKind::Const; e.ck = ck; return e; }
+            return e;
+        case kTopModulate: {
+            ConstSrc c1 = ConstSrc::None;
+            ConstSrc c2 = ConstSrc::None;
+            if (argIsTexture(arg1) && constArgAtStage0(arg2, &c2)) {
+                e.kind = ExprKind::ModulateTextureConst;
+                e.ck = c2;
+                return e;
+            }
+            if (constArgAtStage0(arg1, &c1) && argIsTexture(arg2)) {
+                e.kind = ExprKind::ModulateTextureConst;
+                e.ck = c1;
+                return e;
+            }
+            return e;
+        }
+        default: return e;
+    }
+}
+
+void noteConst(ConstSrc ck, bool* has_diffuse, bool* has_tfactor) {
+    if (ck == ConstSrc::Diffuse) *has_diffuse = true;
+    else if (ck == ConstSrc::TFactor) *has_tfactor = true;
+}
+}  // namespace
+
+bool gpuTextureModeFor(std::uint32_t color_op, std::uint32_t color_arg1, std::uint32_t color_arg2,
+                       std::uint32_t alpha_op, std::uint32_t alpha_arg1, std::uint32_t alpha_arg2,
+                       bool texture_present, std::uint32_t tex_coord_index, GpuTexMode* mode,
+                       bool* color_from_tfactor, std::string* why) {
+    if (mode == nullptr) {
+        if (why) *why = "gpuTextureModeFor: mode 为空";
+        return false;
+    }
+    if (color_from_tfactor != nullptr) *color_from_tfactor = false;
+    if (tex_coord_index >= kMaxTextureStages) {
+        if (why) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "D3DTSS_TEXCOORDINDEX=%u 超出本线的纹理坐标上限（0..7）",
+                          tex_coord_index);
+            *why = buf;
+        }
+        return false;
+    }
+    const StageExpr cs = stageExprFor(color_op, color_arg1, color_arg2);
+    const StageExpr as = stageExprFor(alpha_op, alpha_arg1, alpha_arg2);
+    if (cs.kind == ExprKind::Unsupported || as.kind == ExprKind::Unsupported) {
+        if (why) {
+            char buf[224];
+            std::snprintf(buf, sizeof(buf),
+                          "纹理级 0 的 op/arg 不能等价表达（color op=%u arg=%u/%u，alpha op=%u arg=%u/%u）",
+                          color_op, color_arg1, color_arg2, alpha_op, alpha_arg1, alpha_arg2);
+            *why = buf;
+        }
+        return false;
+    }
+    // 无纹理时 CPU 采样是白色（1,1,1,1）⇒ 纹理参与等于恒等；但 SELECTARG1(TEXTURE) 会得到白色，
+    // 不能用一个"顶点色"着色器冒充 ⇒ 明确拒绝（有纹理时才走本函数）。
+    (void)texture_present;
+    // GPU 片元着色器只有一个"顶点色"输入槽：DIFFUSE 与 TFACTOR 不能同时出现（否则无法区分）。
+    bool has_diffuse = false;
+    bool has_tfactor = false;
+    noteConst(cs.ck, &has_diffuse, &has_tfactor);
+    noteConst(as.ck, &has_diffuse, &has_tfactor);
+    if (has_diffuse && has_tfactor) {
+        if (why) *why = "纹理级 0 同时用了 DIFFUSE 与 TFACTOR（GPU 只有一个顶点色输入槽）";
+        return false;
+    }
+    const bool use_tfactor = has_tfactor;
+    // 组合 → 片元置换（Const 槽在 GPU 上由顶点色承载：DIFFUSE 原样，TFACTOR 整批替换）
+    auto pair = [](ExprKind c, ExprKind a) { return static_cast<int>(c) * 8 + static_cast<int>(a); };
+    const int key = pair(cs.kind, as.kind);
+    switch (key) {
+        case pair(ExprKind::ModulateTextureConst, ExprKind::ModulateTextureConst):
+            *mode = GpuTexMode::ModulateBoth;
+            break;
+        case pair(ExprKind::Texture, ExprKind::Texture):
+            *mode = GpuTexMode::SelectTextureBoth;
+            break;
+        case pair(ExprKind::ModulateTextureConst, ExprKind::Texture):
+            *mode = GpuTexMode::ModulateColorSelectAlpha;
+            break;
+        case pair(ExprKind::Texture, ExprKind::ModulateTextureConst):
+            *mode = GpuTexMode::SelectColorModulateAlpha;
+            break;
+        case pair(ExprKind::ModulateTextureConst, ExprKind::Const):
+            *mode = GpuTexMode::ModulateColorDiffuseAlpha;
+            break;
+        case pair(ExprKind::Texture, ExprKind::Const):
+            *mode = GpuTexMode::SelectColorDiffuseAlpha;
+            break;
+        default:
+            if (why) *why = "纹理级 0 的组合（Const/Const 或 Const 在颜色侧）没有 GPU 片元置换";
+            return false;
+    }
+    if (color_from_tfactor != nullptr) *color_from_tfactor = use_tfactor;
+    return true;
+}
 
 }  // namespace d3d9
 }  // namespace lift
