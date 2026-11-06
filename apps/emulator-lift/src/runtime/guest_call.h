@@ -38,10 +38,12 @@ public:
 
     // 开始一次 guest 回调。
     // `cleanup_bytes` = 原 shim 返回时要抬的栈字节（stdcall 的 4 + argc*4；由调用方从 ShimCall 取）。
+    // `callee_ecx` = 进入 callee 之前要写进 ECX 的值（thiscall 的 `this`）；0 = 不动 ECX。
     // 返回 false + err ⇒ 栈不够 / 已有帧状态坏。
     // ★ 在**续延里**调用 = 多回调枚举的下一次回调：压一个 `nested` 子帧（它的返回点是父帧续延）。
     bool start(X86& cpu, std::uint32_t fn, const std::vector<std::uint32_t>& args,
-               std::uint32_t cleanup_bytes, const char* api, GuestContinuation cont, std::string* err);
+               std::uint32_t cleanup_bytes, const char* api, GuestContinuation cont, std::string* err,
+               std::uint32_t callee_ecx = 0);
 
     // dispatcher 在 eip == kContinuationEa 时调用。
     // 返回 false + err ⇒ 没有活动帧 / 栈状态坏（调用方应停下并报错）。
@@ -66,6 +68,13 @@ private:
         // ★ true = 这个帧是在**续延里**压的（多回调枚举的第 2..N 次回调）：
         //   它返回时先把结果交回父帧的同一份续延，而不是恢复 guest 的调用点。
         bool nested = false;
+        // ★ thiscall 的 `this`（ECX）**是帧的一部分**，不是"铺完帧顺手写一下"：
+        //   铺帧之后本类立刻把控制权交回 dispatcher（native 实现返回 false ⇒ suspended），
+        //   下一个 block 边界上可能插入一个 **winmm 定时器回调**（真机上它跑在另一个线程）。
+        //   只写一次 ECX 就会被那个回调改坏 ⇒ 这里把"callee 该看到的 ECX"记在帧上，
+        //   `start()` 在交控制权之前写进去；`resume()` 再把**调用方**的 ECX 还给续延。
+        std::uint32_t caller_ecx = 0;  // start() 时的 ECX（宿主 / native 调用的上下文）
+        std::uint32_t callee_ecx = 0;  // 0 = 不动 ECX；否则 = 进入 callee 前的 ECX（thiscall 的 this）
     };
     std::vector<Frame> frames_;
     bool in_continuation_ = false;

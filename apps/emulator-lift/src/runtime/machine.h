@@ -124,8 +124,8 @@ public:
     RunResult run(const RunOptions& opts);
 
     // ★ guest 函数级 native override（试点）：按名字从 `.lst` 解析 EA（`_memcpy` / `_memset` / …），
-    //   列表用逗号分隔；`all` = 所有能在 `.lst` 里找到的已知叶子。失败 ⇒ false + err（⛔ 不静默跳过）。
-    //   必须在 `loadLst()` 之后调用。默认空 = 全关。
+    //   列表用逗号分隔；`all` = 已验证项；`-名字` = 排除（排除优先，如 `all,-sub_48B090`）。
+    //   失败 ⇒ false + err（⛔ 不静默跳过）；必须在 `loadLst()` 之后调用。默认空 = 全关。
     bool configureNativeOverrides(const std::string& list, std::string* err);
     NativeOverrideTable& overrides() { return overrides_; }
     const NativeOverrideTable& overrides() const { return overrides_; }

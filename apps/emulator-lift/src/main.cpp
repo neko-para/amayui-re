@@ -83,7 +83,8 @@ void usage() {
         "  --raster <mode>    cpu（缺省）/ gpu：D3D9 fixed-function 光栅化后端（window 或 headless 离屏都可用）\n"
         "  --raster-sprites 0|1      D3DXSprite 是否也走 GPU（缺省 1；A/B 用）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
-        "  --native-overrides <list>  逗号分隔的 guest 函数名（或 all）：函数级 native override（缺省关）\n"
+        "  --native-overrides <list>  逗号分隔的 guest 函数名；all = 已验证项；-名字 = 排除该项；\n"
+        "                            如 all,-sub_48B090；也可显式叠加调试项（缺省关）\n"
         "  --baseline-lift <N> 宿主基线补偿像素（缺省 2；0 = 关；★ 宿主视觉策略，不是引擎语义）\n"
         "  --font-engine-name  字体 A/B 对照档：上报引擎字面名（字形仍来自宿主 Amayui CN）\n"
         "  --smoke             只验证宿主层可链接（不建窗口、不需要游戏）\n");
@@ -449,8 +450,15 @@ int main(int argc, char** argv) {
                     native_overrides.c_str());
         for (std::size_t i = 0; i < machine.overrides().size(); ++i) {
             const lift::NativeOverride* e = machine.overrides().at(i);
-            std::printf("  %-12s @ %08X %s(%uB)\n", e->name.c_str(), e->ea, lift::guestConvName(e->conv),
-                        e->arg_bytes);
+            const lift::KnownNative* k = lift::findKnownNative(e->name);
+            std::printf("  %-12s @ %08X %s(%uB)%s\n", e->name.c_str(), e->ea, lift::guestConvName(e->conv),
+                        e->arg_bytes, (k != nullptr && k->debug) ? " [debug]" : "");
+            if (k != nullptr && k->debug) {
+                std::fprintf(stderr,
+                             "emulator-lift: ⚠ debug native override %s：已知未收口，仅用于复现/调试；"
+                             "不要把它当作 A4 逐字节基线\n",
+                             e->name.c_str());
+            }
         }
         if (until_ea != 0) {
             std::fprintf(stderr,

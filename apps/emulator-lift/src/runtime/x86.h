@@ -100,6 +100,24 @@ struct GuestTimer {
     bool oneshot = true;
 };
 
+// 定时器回调**打断**的那份通用寄存器组。
+// ★ 为什么必须整份存：真机上 `timeSetEvent` 的回调跑在 winmm 的**另一个线程**里，被打断线程的
+//   寄存器组由 OS 的上下文切换保住；本线是单线程的协作式回调（在块边界插入），只保住 EIP/ESP
+//   不足以让插入点继续正确执行 —— 回调（MSVC stdcall：只保 ebx/esi/edi/ebp，eax/ecx/edx 随便改）
+//   会把插入点仍然活着的值改坏。实测形态：native override 刚把 `this` 写进 ECX 就交出控制权，
+//   定时器回调把它改掉 ⇒ `sub_48AC40` 拿到错的 this。
+// ⛔ 这不是时钟语义（到期判定 / tick 仍是 `VirtualClock` 那一份），只是上下文保存。
+struct TimerSavedRegs {
+    std::uint32_t eax = 0;
+    std::uint32_t ebx = 0;
+    std::uint32_t ecx = 0;
+    std::uint32_t edx = 0;
+    std::uint32_t esi = 0;
+    std::uint32_t edi = 0;
+    std::uint32_t ebp = 0;
+    std::uint32_t eflags = 0;
+};
+
 // shim 需要跨调用保存的**进程级**状态（⛔ 不要用 C++ 静态变量：一台机器一份）。
 struct ShimState {
     std::uint32_t last_error = 0;        // GetLastError / SetLastError
@@ -143,6 +161,7 @@ struct ShimState {
     std::uint32_t timer_resume_ea = 0;             // 被打断的 eip
     std::uint32_t timer_saved_esp = 0;             // 被打断的 esp
     std::uint32_t timer_firing_id = 0;
+    TimerSavedRegs timer_saved_regs;               // 被打断的通用寄存器（见 TimerSavedRegs）
 };
 
 struct X86 {

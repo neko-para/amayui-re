@@ -353,6 +353,18 @@ RunResult Machine::run(const RunOptions& opts) {
             }
             cpu_.esp() = cpu_.shim.timer_saved_esp;
             cpu_.eip = cpu_.shim.timer_resume_ea;
+            // ★ 整份通用寄存器都要还回去：真机上回调在另一个线程，被打断线程的寄存器组由 OS 保住。
+            //   只还 EIP/ESP 的话，回调随手改掉的 EAX/ECX/EDX 会漏进被插入点的后续指令
+            //   （实测形态：thiscall 的 this（ECX）在 `call` 与 callee 第一条指令之间被改坏）。
+            const TimerSavedRegs& sr = cpu_.shim.timer_saved_regs;
+            cpu_.eax() = sr.eax;
+            cpu_.ebx() = sr.ebx;
+            cpu_.ecx() = sr.ecx;
+            cpu_.edx() = sr.edx;
+            cpu_.esi() = sr.esi;
+            cpu_.edi() = sr.edi;
+            cpu_.ebp() = sr.ebp;
+            cpu_.eflags = sr.eflags;
             cpu_.shim.timer_firing = false;
             continue;
         }
@@ -546,6 +558,19 @@ bool Machine::fireDueTimer(RunResult& r) {
     cpu_.shim.timer_saved_esp = base;
     cpu_.shim.timer_firing = true;
     cpu_.shim.timer_firing_id = t.id;
+    // ★ 被打断的通用寄存器整份存下来（返回点在 kTimerCallbackReturnEa 那一段还回去）。
+    //   ⛔ 不改时钟语义：这里不碰 clock_，只是"协作式回调"的上下文保存。
+    {
+        TimerSavedRegs& sr = cpu_.shim.timer_saved_regs;
+        sr.eax = cpu_.eax();
+        sr.ebx = cpu_.ebx();
+        sr.ecx = cpu_.ecx();
+        sr.edx = cpu_.edx();
+        sr.esi = cpu_.esi();
+        sr.edi = cpu_.edi();
+        sr.ebp = cpu_.ebp();
+        sr.eflags = cpu_.eflags;
+    }
     cpu_.esp() = base - kFrame;
     mem_.wr32(base - 24u, kTimerCallbackReturnEa);
     mem_.wr32(base - 20u, t.id);
@@ -834,10 +859,48 @@ bool Machine::configureNativeOverrides(const std::string& list, std::string* err
         for (std::size_t i = 0; i < knownNativeCount(); ++i) {
             if (i) s += ", ";
             s += knownNativeAt(i).name;
+            if (knownNativeAt(i).debug) s += "(debug)";
         }
         return s;
     };
+    auto trim = [](std::string s) {
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+        return s;
+    };
+    std::vector<std::string> tokens;
+    {
+        std::size_t start = 0;
+        while (start <= list.size()) {
+            const std::size_t comma = list.find(',', start);
+            tokens.push_back(trim(list.substr(start, comma == std::string::npos ? std::string::npos : comma - start)));
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    }
+
+    // `-name` = 排除。排除项**优先于**启用项（与出现顺序无关）：
+    // `all,-sub_48B090` 与 `-sub_48B090,all` 都表示“all 但不含 sub_48B090”。
+    // ⛔ `-` 后面必须跟一个已知名字；拼错就报错，不静默忽略。
+    std::vector<std::string> disabled;
+    for (const std::string& token : tokens) {
+        if (token.empty() || token.front() != '-') continue;
+        const std::string name = trim(token.substr(1));
+        if (name.empty()) {
+            if (err) *err = "`-` 后面需要一个 native override 名字";
+            return false;
+        }
+        if (findKnownNative(name) == nullptr) {
+            if (err) *err = "未知的 native override 排除项：" + name + "（已知：" + knownNames() + "）";
+            return false;
+        }
+        disabled.push_back(name);
+    }
+    auto isDisabled = [&](const std::string& name) {
+        return std::find(disabled.begin(), disabled.end(), name) != disabled.end();
+    };
     auto addName = [&](const std::string& name, bool required) -> bool {
+        if (isDisabled(name)) return true;
         const KnownNative* k = findKnownNative(name);
         if (!k) {
             if (required && err) *err = "未知的 native override：" + name + "（已知：" + knownNames() + "）";
@@ -853,22 +916,17 @@ bool Machine::configureNativeOverrides(const std::string& list, std::string* err
         return overrides_.add(f->ea, name, k->conv, k->arg_bytes, k->fn, err);
     };
 
-    std::size_t start = 0;
-    while (start <= list.size()) {
-        const std::size_t comma = list.find(',', start);
-        std::string name = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-        while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.erase(name.begin());
-        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
-        if (!name.empty()) {
-            if (name == "all") {
-                for (std::size_t i = 0; i < knownNativeCount(); ++i)
-                    if (!addName(knownNativeAt(i).name, false)) return false;
-            } else if (!addName(name, true)) {
-                return false;
+    for (const std::string& token : tokens) {
+        if (token.empty() || token.front() == '-') continue;
+        if (token == "all") {
+            // ★ `all` = 只开**已验证**项；debug 项必须显式点名；排除项优先。
+            for (std::size_t i = 0; i < knownNativeCount(); ++i) {
+                if (knownNativeAt(i).debug) continue;
+                if (!addName(knownNativeAt(i).name, false)) return false;
             }
+        } else if (!addName(token, true)) {
+            return false;
         }
-        if (comma == std::string::npos) break;
-        start = comma + 1;
     }
     if (overrides_.empty()) {
         if (err) *err = "没有解析到任何 native override（检查名字 / .lst）";

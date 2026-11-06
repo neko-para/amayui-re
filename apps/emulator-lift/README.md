@@ -285,7 +285,12 @@ BORDER/MIRROR_ONCE、`BOTH*` 混合 ⇒ 回退 CPU。
 
 # 显式启用（默认关；名字来自 .lst 的 `proc near` / `COLLAPSED FUNCTION` 行）
 ./out/emulator-lift ... --max-frames 1 --native-overrides _memcpy
+# all = 稳定层（包含 sub_48B090；其已知风险见下）
 ./out/emulator-lift ... --native-overrides all
+# all 但排除某一项（`-名字`，排除项优先于启用项）
+./out/emulator-lift ... --native-overrides all,-sub_48B090
+# 也可显式叠加 debug 项（debug 项不会被 all 带进来）
+./out/emulator-lift ... --native-overrides all,某个debug项
 # boot 加速的已取证集合（CRT 叶子 + S4IC/LZSS）
 ./out/emulator-lift ... --max-frames 1 --native-overrides \
   _memcpy,_memcpy_0,_memset,_strlen,sub_401000,sub_436A80
@@ -295,11 +300,17 @@ BORDER/MIRROR_ONCE、`BOTH*` 混合 ⇒ 回退 CPU。
   失败（例如 safe mode 下参数越界）就**回退解释器**；摘要里能看每一项的 hits / fallbacks。
 - 候选必须由 `--profile` 选出，⛔ 不先猜。`--profile` 的权重是"块命中 × 块内指令数"；
   函数归属是**近似**（chunk 会归到相邻函数，见 `src/corpus/lst_index.h`）。
-- 当前覆盖 CRT 叶子（`_memcpy` / `_memcpy_0` / `_memset` / `_strlen` / 自定义 `sub_401000`）与
-  S4IC/LZSS `sub_436A80`（`__thiscall`，`info[0]=输出大小`、`info[2]=压缩大小`）。
-  `sub_48B090`（`NormalTexture::UploadImage`）的 native 原型**未注册**：它会破坏后续帧纹理；
-  缺陷单 `data/requirements/01M6PGQEXZYPYE3Y07C8JCH7HT.md`，修复前不要加入 known 表。
-  `_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节，返回约定未核）⇒ 暂不覆盖；
+- **选择策略**：`--native-overrides all` 开 `KnownNative::debug == false` 的**稳定**项；
+  `debug == true` 的项必须显式点名（日志带 `[debug]` 与警告）。`-名字` 表示**排除**，
+  排除项优先于启用项，且与出现顺序无关：`all,-sub_48B090` 与 `-sub_48B090,all` 等价。
+  稳定层当前是 CRT 叶子（`_memcpy` / `_memcpy_0` / `_memset` / `_strlen` / `sub_401000`）、
+  S4IC/LZSS `sub_436A80`（`__thiscall`，`info[0]=输出大小`、`info[2]=压缩大小`）与
+  `sub_48B090`（`NormalTexture::UploadImage`）。
+- `sub_48B090` 的 8/24/32bpp 与 alpha 路径已按 `.lst` 核；4/1bpp 源、16bpp 目标与色键≠0
+  仍**显式回退解释器**。锁走 `d3d9::lockRect`/`unlockRect`，失败不留半状态。
+  **虚拟时钟相位**没有做补偿（明确不在当前范围）；Windows 侧曾观察到异常、macOS 未复现，
+  可随时用 `all,-sub_48B090` 做隔离 A/B。⛔ 不要把它当作 A4 逐字节基线。
+- `_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节，返回约定未核）⇒ 暂不覆盖；
   `sub_414AC0`（SYS4INI 初始化）不做整函数 native（文件 I/O + guest 容器/堆语义）。
 - ⚠ `--until ea` 指向被 override 的函数体内部时**不会生效**（函数体不再逐条执行）；
   `--bench` 的 insns / MIPS 也按"一次 override = 1 条"计 —— 不要拿它们做解释器吞吐的绝对比较。

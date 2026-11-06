@@ -10,7 +10,7 @@ namespace lift {
 
 bool GuestCallStack::start(X86& cpu, std::uint32_t fn, const std::vector<std::uint32_t>& args,
                            std::uint32_t cleanup_bytes, const char* api, GuestContinuation cont,
-                           std::string* err) {
+                           std::string* err, std::uint32_t callee_ecx) {
     if (!cpu.mem) {
         if (err) *err = std::string(api ? api : "guest-call") + ": cpu.mem 为空";
         return false;
@@ -38,6 +38,11 @@ bool GuestCallStack::start(X86& cpu, std::uint32_t fn, const std::vector<std::ui
     f.fn = fn;
     f.api = api;
     f.cont = std::move(cont);
+    // ★ ECX 也是帧状态：`start()` 之后控制权立刻交回 dispatcher，中间可能插入定时器回调 /
+    //   宿主消息泵（两者都会跑 guest 回调并改 ECX）。所以"callee 该看到的 this"记在帧上，
+    //   由这里写进去；`resume()` 再把调用方的 ECX 还给续延。
+    f.caller_ecx = cpu.ecx();
+    f.callee_ecx = callee_ecx;
     // ★ 在续延里 start = 多回调枚举的第 2..N 次回调：子帧的“返回点”是父帧的续延，
     //   不是 guest 的调用点 ⇒ 打上 nested（resume() 会先把结果交回父帧续延）。
     f.nested = in_continuation_;
@@ -49,6 +54,7 @@ bool GuestCallStack::start(X86& cpu, std::uint32_t fn, const std::vector<std::ui
         cpu.mem->wr32(frame_esp + 4u + static_cast<std::uint32_t>(i) * 4u, args[i]);
     cpu.esp() = frame_esp;
     cpu.eip = fn;
+    if (callee_ecx != 0) cpu.ecx() = callee_ecx;
     return true;
 }
 
@@ -76,6 +82,9 @@ bool GuestCallStack::resume(X86& cpu, std::string* err) {
     const std::size_t depth_before = frames_.size();
     // 回调按 stdcall 弹完参后应回到 saved_esp；这里强制归位，防止 guest 畸形 ret 把栈留歪。
     cpu.esp() = f.saved_esp;
+    // ★ 续延是**宿主 / native 代码**，它看到的 ECX 必须是 `start()` 之前的那一个
+    //   （callee 只被允许改自己的 ECX）。这也让 resume 之后返回调用点的 guest 看到一个确定的 ECX。
+    cpu.ecx() = f.caller_ecx;
 
     std::uint32_t shim_result = 0;
     in_continuation_ = true;
