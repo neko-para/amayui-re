@@ -577,6 +577,44 @@ RunResult Machine::run(const RunOptions& opts) {
             }
         }
 
+        // ★ 段级 override（**函数中段**的固定 EA）：在每个 block 入口按 EIP 查表 —— 与上面的
+        //   函数级不同，这里**没有** call 帧语义：fn 自己写 EIP（段出口）/ 寄存器 / EFLAGS。
+        //   ★ insns / 虚拟时钟按 fn 报告的**被替代指令数**补账：不补的话 `timeGetTime` 会少走一截，
+        //     首帧内容可能偏离解释器路径（A4 / 首帧 hash 的硬要求）。见 README §4.3。
+        if (!block_overrides_.empty()) {
+            if (NativeBlockOverride* bo = block_overrides_.find(cpu_.eip)) {
+                const std::uint32_t entry = cpu_.eip;
+                std::uint64_t replaced = 0;
+                const BlockOverrideOutcome outcome = bo->fn(cpu_, mem_, &replaced);
+                if (outcome == BlockOverrideOutcome::Replaced) {
+                    if (opts.trace_blocks)
+                        std::fprintf(stdout, "[native-block] %08X %s\n", entry, bo->name.c_str());
+                    cpu_.noteInsn(entry, "[native-block]");
+                    ++bo->hits;
+                    const std::uint64_t n = replaced != 0 ? replaced : 1ull;
+                    cpu_.insns += n;
+                    clock_.tick(n);
+                    continue;
+                }
+                if (outcome == BlockOverrideOutcome::Declined) {
+                    // 前置条件不匹配 ⇒ 一次就够：段级项的前提是静态的（同一 EA / 同一段代码），
+                    // 继续每迭代重试只是把成本加回热路径。首次打印一行，之后不再尝试。
+                    if (!bo->disabled) {
+                        ++bo->declines;
+                        bo->disabled = true;
+                        std::fprintf(stderr,
+                                     "[native] 段级 %s @ %08X 前置条件不匹配 ⇒ 本次运行停用该项（回退解释器）\n",
+                                     bo->name.c_str(), entry);
+                    }
+                } else {
+                    if (bo->fallbacks == 0)
+                        std::fprintf(stderr, "[native] 段级 %s @ %08X 执行失败 ⇒ 回退解释器\n",
+                                     bo->name.c_str(), entry);
+                    ++bo->fallbacks;
+                }
+            }
+        }
+
         Block* b = cache_.get(cpu_.eip);
         if (!b) {
             r.reason = StopReason::DecodeError;
@@ -776,6 +814,14 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
         if (!t.native_overrides.empty()) t.native_overrides += ';';
         t.native_overrides += buf;
     }
+    // ★ 段级项也是输入：同一个名字意味着"中段固定 EA 被替换"，与函数级不是一回事（`blk:` 前缀）。
+    for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
+        const NativeBlockOverride* e = block_overrides_.at(i);
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "blk:%s@%08X..%08X", e->name.c_str(), e->entry_ea, e->resume_ea);
+        if (!t.native_overrides.empty()) t.native_overrides += ';';
+        t.native_overrides += buf;
+    }
     t.clock_start_100ns = clock_.epoch100ns();
     t.real_time = clock_.realTime();
     t.skip_logo = skip_logo_;
@@ -941,7 +987,7 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                          (unsigned long long)cov.gpu_failures);
         }
     }
-    if (!overrides_.empty()) {
+    if (!overrides_.empty() || !block_overrides_.empty()) {
         std::uint64_t hits = 0;
         std::uint64_t fallbacks = 0;
         for (std::size_t i = 0; i < overrides_.size(); ++i) {
@@ -949,13 +995,25 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
             hits += e->hits;
             fallbacks += e->fallbacks;
         }
-        std::fprintf(out, "native-ovr: entries=%zu hits=%llu fallbacks=%llu\n", overrides_.size(),
-                     (unsigned long long)hits, (unsigned long long)fallbacks);
+        for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
+            const NativeBlockOverride* e = block_overrides_.at(i);
+            hits += e->hits;
+            fallbacks += e->fallbacks;
+        }
+        std::fprintf(out, "native-ovr: entries=%zu blocks=%zu hits=%llu fallbacks=%llu\n", overrides_.size(),
+                     block_overrides_.size(), (unsigned long long)hits, (unsigned long long)fallbacks);
         for (std::size_t i = 0; i < overrides_.size(); ++i) {
             const NativeOverride* e = overrides_.at(i);
             std::fprintf(out, "  %-12s @ %08X %s(%uB) hits=%llu fallbacks=%llu\n", e->name.c_str(), e->ea,
                          guestConvName(e->conv), e->arg_bytes, (unsigned long long)e->hits,
                          (unsigned long long)e->fallbacks);
+        }
+        for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
+            const NativeBlockOverride* e = block_overrides_.at(i);
+            std::fprintf(out, "  %-12s @ %08X..%08X 段级 hits=%llu declines=%llu fallbacks=%llu%s\n",
+                         e->name.c_str(), e->entry_ea, e->resume_ea, (unsigned long long)e->hits,
+                         (unsigned long long)e->declines, (unsigned long long)e->fallbacks,
+                         e->disabled ? "（已停用）" : "");
         }
     }
 }
@@ -1060,29 +1118,41 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
     }
     // ★ override 的函数体**不会**进块 profile（被宿主实现整段替代）⇒ 显式说明，否则 profile 会误导
     //   "这个热点已经不在"。
-    if (!overrides_.empty()) {
-        std::fprintf(out, "\n注意：以下函数被 native override 替代，其函数体不计入上面的块 profile：\n");
+    if (!overrides_.empty() || !block_overrides_.empty()) {
+        std::fprintf(out, "\n注意：以下函数/代码段被 native override 替代，其函数体不计入上面的块 profile：\n");
         for (std::size_t i = 0; i < overrides_.size(); ++i) {
             const NativeOverride* e = overrides_.at(i);
             std::fprintf(out, "  %-12s @ %08X hits=%llu\n", e->name.c_str(), e->ea,
                          (unsigned long long)e->hits);
+        }
+        for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
+            const NativeBlockOverride* e = block_overrides_.at(i);
+            std::fprintf(out, "  %-12s @ %08X..%08X（段级）hits=%llu%s\n", e->name.c_str(), e->entry_ea,
+                         e->resume_ea, (unsigned long long)e->hits, e->disabled ? "（已停用）" : "");
         }
     }
 }
 
 bool Machine::configureNativeOverrides(const std::string& list, std::string* err) {
     overrides_.clear();
+    block_overrides_.clear();
     if (list.empty()) return true;
     if (!lst_.loaded()) {
-        if (err) *err = "--native-overrides 需要 --lst（按函数名解析 EA；⛔ 不硬编码 EA）";
+        if (err) *err = "--native-overrides 需要 --lst（函数级按名字解析 EA、段级按 `.lst` 锚校验；⛔ 不硬编码 EA）";
         return false;
     }
     auto knownNames = []() {
         std::string s;
         for (std::size_t i = 0; i < knownNativeCount(); ++i) {
-            if (i) s += ", ";
+            if (!s.empty()) s += ", ";
             s += knownNativeAt(i).name;
             if (knownNativeAt(i).debug) s += "(debug)";
+        }
+        for (std::size_t i = 0; i < knownBlockNativeCount(); ++i) {
+            if (!s.empty()) s += ", ";
+            s += knownBlockNativeAt(i).name;
+            s += "(段级)";
+            if (knownBlockNativeAt(i).debug) s += "(debug)";
         }
         return s;
     };
@@ -1104,7 +1174,10 @@ bool Machine::configureNativeOverrides(const std::string& list, std::string* err
 
     // `-name` = 排除。排除项**优先于**启用项（与出现顺序无关）：
     // `all,-sub_48B090` 与 `-sub_48B090,all` 都表示“all 但不含 sub_48B090”。
-    // ⛔ `-` 后面必须跟一个已知名字；拼错就报错，不静默忽略。
+    // ⛔ `-` 后面必须跟一个已知名字；拼错就报错，不静默忽略。函数级 / 段级同名都在同一个命名空间里。
+    auto knownAny = [](const std::string& n) {
+        return findKnownNative(n) != nullptr || findKnownBlockNative(n) != nullptr;
+    };
     std::vector<std::string> disabled;
     for (const std::string& token : tokens) {
         if (token.empty() || token.front() != '-') continue;
@@ -1113,7 +1186,7 @@ bool Machine::configureNativeOverrides(const std::string& list, std::string* err
             if (err) *err = "`-` 后面需要一个 native override 名字";
             return false;
         }
-        if (findKnownNative(name) == nullptr) {
+        if (!knownAny(name)) {
             if (err) *err = "未知的 native override 排除项：" + name + "（已知：" + knownNames() + "）";
             return false;
         }
@@ -1122,8 +1195,25 @@ bool Machine::configureNativeOverrides(const std::string& list, std::string* err
     auto isDisabled = [&](const std::string& name) {
         return std::find(disabled.begin(), disabled.end(), name) != disabled.end();
     };
+    // 段级项：先做锚校验（entry 必须是 `.lst` 里的那条指令、且属于声明的函数），再入表。
+    // ★ 校验失败**一定打一行**（即使 `all` 里只是跳过）—— 否则"优化没生效"在日志里看不出来。
+    auto addBlock = [&](const KnownBlockNative& k, bool required) -> bool {
+        if (isDisabled(k.name)) return true;
+        std::string why;
+        if (!verifyKnownBlockAnchor(lst_, k, &why)) {
+            std::fprintf(stderr, "[native] %s\n", why.c_str());
+            if (required) {
+                if (err) *err = why;
+                return false;
+            }
+            return true;
+        }
+        if (block_overrides_.find(k.entry_ea) != nullptr) return true;
+        return block_overrides_.add(k.entry_ea, k.resume_ea, k.name, k.fn, err);
+    };
     auto addName = [&](const std::string& name, bool required) -> bool {
         if (isDisabled(name)) return true;
+        if (const KnownBlockNative* kb = findKnownBlockNative(name)) return addBlock(*kb, required);
         const KnownNative* k = findKnownNative(name);
         if (!k) {
             if (required && err) *err = "未知的 native override：" + name + "（已知：" + knownNames() + "）";
@@ -1142,16 +1232,20 @@ bool Machine::configureNativeOverrides(const std::string& list, std::string* err
     for (const std::string& token : tokens) {
         if (token.empty() || token.front() == '-') continue;
         if (token == "all") {
-            // ★ `all` = 只开**已验证**项；debug 项必须显式点名；排除项优先。
+            // ★ `all` = 只开**已验证**项；debug 项必须显式点名；排除项优先。函数级 + 段级都在 `all` 里。
             for (std::size_t i = 0; i < knownNativeCount(); ++i) {
                 if (knownNativeAt(i).debug) continue;
                 if (!addName(knownNativeAt(i).name, false)) return false;
+            }
+            for (std::size_t i = 0; i < knownBlockNativeCount(); ++i) {
+                if (knownBlockNativeAt(i).debug) continue;
+                if (!addName(knownBlockNativeAt(i).name, false)) return false;
             }
         } else if (!addName(token, true)) {
             return false;
         }
     }
-    if (overrides_.empty()) {
+    if (overrides_.empty() && block_overrides_.empty()) {
         if (err) *err = "没有解析到任何 native override（检查名字 / .lst）";
         return false;
     }

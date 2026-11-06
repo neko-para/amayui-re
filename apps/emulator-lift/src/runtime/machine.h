@@ -133,6 +133,10 @@ public:
     bool configureNativeOverrides(const std::string& list, std::string* err);
     NativeOverrideTable& overrides() { return overrides_; }
     const NativeOverrideTable& overrides() const { return overrides_; }
+    // ★ 段级 override（函数中段；固定 EA）—— 与函数级分开两张表，语义不同：
+    //   函数级 = "call 目标 + 返回地址 + 只写 EAX"；段级 = "block 入口 + 跳到出口 + 可写任意寄存器"。
+    NativeBlockTable& blockOverrides() { return block_overrides_; }
+    const NativeBlockTable& blockOverrides() const { return block_overrides_; }
 
     // ★ `--skip-logo`：**不跳过 boot**，只在 T_Command 构造完成、指针发布前把引擎自己的
     //   show-logo 标志（T_Command + 0x5EB5C）写 0；根脚本的 0x130 因而走"不 call-script LOGO"分支。
@@ -210,6 +214,7 @@ private:
     HandleTable handles_;
     GuestCallStack guest_calls_;
     NativeOverrideTable overrides_;
+    NativeBlockTable block_overrides_;
     WindowManager windows_;
     ComRegistry com_;
     SurfaceArena surfaces_;

@@ -9,6 +9,7 @@
 #include "runtime/d3d9.h"
 #include "runtime/ddraw_surface.h"
 #include "runtime/machine.h"
+#include "corpus/lst_index.h"
 
 namespace lift {
 namespace {
@@ -566,6 +567,438 @@ bool nativeUpload48B090(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
 }
 
 // ---------------------------------------------------------------------------------------
+// 段级 override 表（函数中段；见头文件的口径）
+// ---------------------------------------------------------------------------------------
+
+bool NativeBlockTable::add(std::uint32_t entry_ea, std::uint32_t resume_ea, const std::string& name,
+                           NativeBlockFn fn, std::string* err) {
+    if (count_ >= kMax) {
+        if (err) *err = "段级 native override 表已满（kMax=" + std::to_string(kMax) + "）";
+        return false;
+    }
+    if (fn == nullptr) {
+        if (err) *err = "段级 native override 没有实现：" + name;
+        return false;
+    }
+    if (entry_ea == 0 || resume_ea == 0) {
+        if (err) *err = "段级 native override 的 entry/resume EA 为 0：" + name;
+        return false;
+    }
+    if (entry_ea == resume_ea) {
+        if (err) *err = "段级 native override 的 entry == resume（会原地打转）：" + name;
+        return false;
+    }
+    for (std::size_t i = 0; i < count_; ++i) {
+        if (entries_[i].entry_ea == entry_ea) {
+            if (err) *err = "段级 native override 重复 entry EA：" + name;
+            return false;
+        }
+    }
+    NativeBlockOverride& e = entries_[count_++];
+    e.entry_ea = entry_ea;
+    e.resume_ea = resume_ea;
+    e.name = name;
+    e.fn = fn;
+    e.hits = 0;
+    e.declines = 0;
+    e.fallbacks = 0;
+    e.disabled = false;
+    return true;
+}
+
+void NativeBlockTable::clear() {
+    for (std::size_t i = 0; i < count_; ++i) entries_[i] = NativeBlockOverride{};
+    count_ = 0;
+}
+
+NativeBlockOverride* NativeBlockTable::find(std::uint32_t eip) {
+    for (std::size_t i = 0; i < count_; ++i) {
+        if (entries_[i].entry_ea == eip && !entries_[i].disabled) return &entries_[i];
+    }
+    return nullptr;
+}
+
+const NativeBlockOverride* NativeBlockTable::find(std::uint32_t eip) const {
+    for (std::size_t i = 0; i < count_; ++i) {
+        if (entries_[i].entry_ea == eip && !entries_[i].disabled) return &entries_[i];
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------------------
+// `sub_429020`：Map::findIndex(hash, key)
+//
+// ★ 逐字依据（`.lst` 0x429020..0x4290EC；`functionAt` = sub_429020，thiscall retn 8）：
+//   · 0x42902D `mov ecx,[ecx+18h]` ⇒ 表**指针**在 `[this+0x18]`（不是"表在 this+0x18"）；
+//     容量在 `[this+8]`（0x4290A5 `div dword ptr [ecx+8]`）。
+//   · 槽大小 28 B：0x429030 `lea eax,ds:0[ebx*8]; sub eax,ebx` = 7*index，再 `[ecx+eax*4]`。
+//   · 空槽判据 `[slot+0x10] == 0`（0x429039 / 0x4290B6）⇒ **先**判空再算 strlen。
+//   · 字符串数据：`cmp [slot+0x14],10h; jb` ⇒ cap<16 用**槽内**（SSO），否则 `[slot]` 是堆指针。
+//   · 命中：先 `sub_401000(slot_data, key, min(len,keylen))`（0x429084），再
+//     `cmp esi,edi; setnz` ⇒ **memcmp 为 0 且 len==keylen** 才算命中（0x429090..0x4290E4）；
+//     否则 `index=(index+1)%capacity`（0x4290A2 `lea eax,[ebx+1]; div [ecx+8]`）。
+//   · 返回：空槽 / 探测到空槽 ⇒ `-1`（0x429046 / 0x4290DA `or eax,-1`）；命中 ⇒ index（`mov eax,ebx`）。
+// ★ 优化点（语义不变）：guest 在**每一次探测**都重算 `strlen(a3)`（0x429057 / 0x4290C6），
+//   而 a3 在这段时间里不会被写 ⇒ 宿主只算一次。
+// ---------------------------------------------------------------------------------------
+namespace {
+
+// 槽 28 B = MSVC std::string：0x00..0x0F = SSO 缓冲，+0x10 = len，+0x14 = cap。
+constexpr std::uint32_t kStringSlotBytes = 28u;
+constexpr std::uint32_t kStringLenOff = 0x10u;
+constexpr std::uint32_t kStringCapOff = 0x14u;
+constexpr std::uint32_t kStringSsoCap = 0x10u;
+
+// guest 侧 strlen（不越过 4 GiB；safe mode 按页查提交位）。
+// ⛔ 不用宿主 strlen：理由同 nativeStrlen（非 safe 模式可能越过 4 GiB 预留）。
+bool guestCStringLength(GuestMemory& mem, std::uint32_t ea, std::uint32_t* out) {
+    if (ea == 0) return false;
+    const std::uint8_t* h = mem.host(ea);
+    const std::uint64_t remaining = GuestMemory::kSpace - static_cast<std::uint64_t>(ea);
+    std::uint32_t n = 0;
+    if (mem.safeMode()) {
+        while (n < remaining) {
+            if ((n & GuestMemory::kPageMask) == 0u && !mem.committed(ea + n, 1u)) return false;
+            if (h[n] == 0) {
+                *out = n;
+                return true;
+            }
+            ++n;
+        }
+        return false;
+    }
+    while (n < remaining) {
+        if (h[n] == 0) {
+            *out = n;
+            return true;
+        }
+        ++n;
+    }
+    return false;
+}
+
+// 读一个槽的 (data, len, cap)。cap>=16 时 data 来自 `[slot]`；否则 data = 槽本身（SSO）。
+// 返回 false = 越界 / 未提交（调用方回退解释器）。⛔ 不在这里编造 -1。
+// ★ 提交检查只在 **safe mode** 下做（与 nativeMemcpy / nativeStrlen 同一口径）：非 safe 模式下
+//   读未提交的槽 / 字符串会走平台 fault（与 guest 自己的访存**同一结局**），而不是静默读到 0。
+//   ⇒ 本实现不替 guest 兜底"表里有未提交指针"的情况，也不因此编造结果。
+bool readStringSlot(GuestMemory& mem, std::uint32_t slot, std::uint32_t* data, std::uint32_t* len,
+                    std::uint32_t* cap) {
+    if (static_cast<std::uint64_t>(slot) + kStringSlotBytes > GuestMemory::kSpace) return false;
+    if (mem.safeMode() && !mem.committed(slot, kStringSlotBytes)) return false;
+    *len = mem.rd32(slot + kStringLenOff);
+    *cap = mem.rd32(slot + kStringCapOff);
+    if (*cap >= kStringSsoCap) {
+        const std::uint32_t p = mem.rd32(slot);
+        if (p == 0) return false;
+        *data = p;
+    } else {
+        *data = slot;
+    }
+    return true;
+}
+
+}  // namespace
+
+bool nativeFindIndex429020(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
+    const std::uint32_t self = cpu.ecx();
+    const std::uint32_t index0 = cpu.arg(0);
+    const std::uint32_t key_ea = cpu.arg(1);
+    *result = 0xFFFFFFFFu;
+    if (self == 0 || key_ea == 0) return false;
+    if (static_cast<std::uint64_t>(self) + 0x1Cu > GuestMemory::kSpace) return false;
+    if (mem.safeMode() && (!mem.committed(self + 0x18u, 4u) || !mem.committed(self + 8u, 4u))) return false;
+    const std::uint32_t table = mem.rd32(self + 0x18u);
+    if (table == 0) return false;
+    // ① 容量：guest 只在**探测下一次**时才 div；这里提前读 —— 0 / index 越界 ⇒ 回退解释器。
+    //    ★ 回退（而不是编造 -1）保证语义：guest 自己会按 `.lst` 的顺序给出同样的结果。
+    const std::uint32_t capacity = mem.rd32(self + 8u);
+    if (capacity == 0 || index0 >= capacity) return false;
+    // ② 判**第一个槽**是否空（guest 0x429039 在 strlen 之前就这么做）：
+    //    空槽 ⇒ -1，且**根本不读 key**（key 指针非法时也必须返回 -1 而不是回退）。
+    {
+        const std::uint64_t slot64 = static_cast<std::uint64_t>(table) + kStringSlotBytes * index0;
+        if (slot64 + kStringSlotBytes > GuestMemory::kSpace) return false;
+        const std::uint32_t slot = static_cast<std::uint32_t>(slot64);
+        if (mem.safeMode() && !mem.committed(slot, kStringSlotBytes)) return false;
+        if (mem.rd32(slot + kStringLenOff) == 0u) {
+            *result = 0xFFFFFFFFu;
+            return true;
+        }
+    }
+    // ③ key 长度只算一次（guest 每个探测都重算）
+    std::uint32_t key_len = 0;
+    if (!guestCStringLength(mem, key_ea, &key_len)) return false;
+    const std::uint8_t* key = mem.host(key_ea);
+    std::uint32_t index = index0;
+    for (std::uint32_t probe = 0; probe < capacity; ++probe) {
+        std::uint32_t data = 0;
+        std::uint32_t len = 0;
+        std::uint32_t cap = 0;
+        const std::uint64_t slot64 = static_cast<std::uint64_t>(table) + kStringSlotBytes * index;
+        if (slot64 + kStringSlotBytes > GuestMemory::kSpace) return false;
+        if (!readStringSlot(mem, static_cast<std::uint32_t>(slot64), &data, &len, &cap)) return false;
+        (void)cap;
+        // 空槽 ⇒ -1（探测到这里就结束）
+        if (len == 0) {
+            *result = 0xFFFFFFFFu;
+            return true;
+        }
+        // ★ 逐字照 guest：先比 min(len,keylen) 字节（**长度不等也要比** —— guest 就是这么做的，
+        //   这样 slot 数据指针非法时的 fault 行为与 guest 一致），再比长度。
+        const std::uint32_t n = len < key_len ? len : key_len;
+        bool equal = true;
+        if (n != 0) {
+            if (static_cast<std::uint64_t>(data) + n > GuestMemory::kSpace) return false;
+            if (mem.safeMode() && !mem.committed(data, n)) return false;
+            equal = std::memcmp(mem.host(data), key, n) == 0;
+        }
+        if (equal && len == key_len) {
+            *result = index;
+            return true;
+        }
+        index = (index + 1u) % capacity;
+    }
+    // 整张表没有空槽 ⇒ guest 会**无限循环**。⛔ 不编造 -1；回退解释器（让 guest 自己表现）。
+    return false;
+}
+
+// ---------------------------------------------------------------------------------------
+// `sub_48AE90`：NormalTexture 虚表第 6 项 = Fill(rect, color888, alpha)
+//
+// ★ 逐字依据（`.lst` 0x48AE90..0x48B087；thiscall retn 0Ch）：
+//   · 0x48AE96 `mov eax,[ecx+40Ch]` ⇒ 纹理对象；0x48AEAF `mov eax,[ecx+4Ch]` 是 **vtable +0x4C**，
+//     参数 (this=纹理, Level=0, &D3DLOCKED_RECT, pRect=a2, Flags=0) ⇒ `LockRect(rect)`；
+//     0x48AEB4 `test eax,eax; jnz` ⇒ LockRect 失败时**原样返回 HRESULT**（本线回退让 guest 自己做）。
+//   · 0x48AEBC `cmp ds:dword_5518C0,10h` ⇒ 虚拟显示器 16bpp 走 A4R4G4B4 分支，否则 32bpp 分支。
+//   · 16bpp：0x48AECB..0x48AEF1 把 color888 折成 `R4<<8|G4<<4|B4`；`a4>=0` 时
+//     `0x48AF59: and ecx,0FFF0h; shl ecx,8; or ecx,eax` ⇒ A4 = a4 高 4 位；
+//     `a4<0` 时 `0x48AF35..0x48AF3D: and dx,0F000h; or dx,arg_4` ⇒ **保留**原有 A4。
+//     ★ 行首偏移：`a4>=0` 是 `2*((pitch*row)/2)`（0x48AF76），`a4<0` 是 `2*((pitch*row)/4)`
+//       （0x48AF16）—— 后者等于 pitch 的一半，**与 32bpp 同形但不是 pitch 步进**。
+//       ⛔ 这是 guest 的真实写法，逐字照抄；不要"顺手修正"。
+//   · 32bpp：`4*((pitch*row)/4)`（0x48AFE0 / 0x48B037）；`a4>=0` ⇒ `(a4<<24)|(color&0xFFFFFF)`，
+//     `a4<0` ⇒ `(color&0xFFFFFF)|(old&0xFF000000)`（0x48B052）。
+//   · 0x48B06C 起 `UnlockRect`（vtable +0x50），然后 `xor eax,eax` ⇒ **返回 0**（不检查 unlock 结果）。
+// ★ 宽 / 高 = rect.right-left / rect.bottom-top；rect 由调用方保证（LockRect 先校验，失败即返回）。
+// ---------------------------------------------------------------------------------------
+namespace {
+
+// guest 的 `imul` 是 32 位回绕；`cdq; and edx,N; add; sar` 是 C 的**向 0 截断**除法。
+std::int32_t wrapMul(std::int32_t a, std::int32_t b) {
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) * static_cast<std::uint32_t>(b));
+}
+std::int32_t cDiv(std::int32_t v, std::int32_t d) { return v / d; }  // C++11：向 0 截断
+
+std::uint16_t rgb888ToA4R4G4B4(std::uint32_t color888) {
+    // 0x48AED2..0x48AEF1：((c>>12)&0xF00) | ((c>>8)&0xF0) | ((c>>4)&0x0F)
+    return static_cast<std::uint16_t>(((color888 >> 12) & 0xF00u) | ((color888 >> 8) & 0xF0u) |
+                                      ((color888 >> 4) & 0x0Fu));
+}
+
+// 一个分支的行首字节偏移（= guest 的 `lea eax,[edx+eax*N]`），逐字照 `.lst`。
+std::int32_t rowOffset16(std::int32_t pitch, std::int32_t row, bool preserve_alpha) {
+    const std::int32_t mul = wrapMul(pitch, row);
+    return 2 * (preserve_alpha ? cDiv(mul, 4) : cDiv(mul, 2));
+}
+std::int32_t rowOffset32(std::int32_t pitch, std::int32_t row) { return 4 * cDiv(wrapMul(pitch, row), 4); }
+
+}  // namespace
+
+void fillRect16(std::uint8_t* base, std::int32_t pitch, std::int32_t width, std::int32_t height,
+                std::uint32_t color888, std::int32_t alpha) {
+    if (base == nullptr || width <= 0 || height <= 0) return;
+    const std::uint16_t rgb = rgb888ToA4R4G4B4(color888);
+    if (alpha >= 0) {
+        const std::uint16_t word =
+            static_cast<std::uint16_t>(rgb | (static_cast<std::uint32_t>(alpha & 0xFFF0) << 8));
+        for (std::int32_t row = 0; row < height; ++row) {
+            std::uint8_t* p = base + rowOffset16(pitch, row, /*preserve_alpha=*/false);
+            for (std::int32_t col = 0; col < width; ++col) std::memcpy(p + 2 * col, &word, 2);
+        }
+    } else {
+        for (std::int32_t row = 0; row < height; ++row) {
+            std::uint8_t* p = base + rowOffset16(pitch, row, /*preserve_alpha=*/true);
+            for (std::int32_t col = 0; col < width; ++col) {
+                std::uint16_t v = 0;
+                std::memcpy(&v, p + 2 * col, 2);
+                v = static_cast<std::uint16_t>((v & 0xF000u) | rgb);  // 0x48AF35..0x48AF3D
+                std::memcpy(p + 2 * col, &v, 2);
+            }
+        }
+    }
+}
+
+void fillRect32(std::uint8_t* base, std::int32_t pitch, std::int32_t width, std::int32_t height,
+                std::uint32_t color888, std::int32_t alpha) {
+    if (base == nullptr || width <= 0 || height <= 0) return;
+    const std::uint32_t rgb = color888 & 0xFFFFFFu;
+    if (alpha >= 0) {
+        const std::uint32_t word = (static_cast<std::uint32_t>(alpha) << 24) | rgb;
+        for (std::int32_t row = 0; row < height; ++row) {
+            std::uint8_t* p = base + rowOffset32(pitch, row);
+            for (std::int32_t col = 0; col < width; ++col) std::memcpy(p + 4 * col, &word, 4);
+        }
+    } else {
+        for (std::int32_t row = 0; row < height; ++row) {
+            std::uint8_t* p = base + rowOffset32(pitch, row);
+            for (std::int32_t col = 0; col < width; ++col) {
+                std::uint32_t v = 0;
+                std::memcpy(&v, p + 4 * col, 4);
+                v = (v & 0xFF000000u) | rgb;
+                std::memcpy(p + 4 * col, &v, 4);
+            }
+        }
+    }
+}
+
+bool nativeFill48AE90(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
+    const std::uint32_t self = cpu.ecx();
+    const std::uint32_t rect_ea = cpu.arg(0);
+    const std::uint32_t color = cpu.arg(1);
+    const std::int32_t alpha = static_cast<std::int32_t>(cpu.arg(2));
+    *result = 0;
+    if (self == 0 || rect_ea == 0) return false;
+    if (static_cast<std::uint64_t>(self) + 0x410u > GuestMemory::kSpace) return false;
+    if (!mem.committed(self + 0x40Cu, 4u)) return false;
+    const std::uint32_t tex_obj = mem.rd32(self + 0x40Cu);
+    if (tex_obj == 0) return false;
+    // ── ① 全部前置条件在**加锁之前**判完（加锁后失败会留下 locks/version 的额外增量）─────
+    d3d9::TextureInfo ti;
+    std::string why;
+    if (!d3d9::textureInfo(cpu, tex_obj, &ti, &why)) return false;
+    if (ti.bpp != 16 && ti.bpp != 32) return false;
+    if (ti.pitch == 0) return false;
+    if (!mem.committed(rect_ea, 16u)) return false;
+    const std::int32_t left = static_cast<std::int32_t>(mem.rd32(rect_ea + 0u));
+    const std::int32_t top = static_cast<std::int32_t>(mem.rd32(rect_ea + 4u));
+    const std::int32_t right = static_cast<std::int32_t>(mem.rd32(rect_ea + 8u));
+    const std::int32_t bottom = static_cast<std::int32_t>(mem.rd32(rect_ea + 12u));
+    // 与 d3d9::lockRect 同一套矩形校验：不合法 ⇒ 回退（guest 自己会拿到 HRESULT 并原样返回）。
+    if (left < 0 || top < 0 || right > static_cast<std::int32_t>(ti.width) ||
+        bottom > static_cast<std::int32_t>(ti.height) || right <= left || bottom <= top)
+        return false;
+    // 显示/纹理位深 = guest 的 `ds:dword_5518C0`。★ 它**不是** DDraw 的显示 bpp：
+    //   `.lst` 0x406B14 是**唯一**写点（`mov ds:dword_5518C0, eax`，值来自配置
+    //   `display:TextureBit`），0x48AEBC 这里读它。⛔ 不要换成 ddraw::displayMode ——
+    //   那是另一件事（本线曾按它实现，A/B 恰好同值时看不出来）。
+    constexpr std::uint32_t kTextureBitEa = 0x005518C0u;
+    if (!mem.committed(kTextureBitEa, 4u)) return false;
+    const std::uint32_t display_bpp = mem.rd32(kTextureBitEa);
+    if (display_bpp != 16 && display_bpp != 32) return false;
+    const std::int32_t width = right - left;
+    const std::int32_t height = bottom - top;
+    const std::int32_t pixel_bytes = static_cast<std::int32_t>(display_bpp / 8u);  // guest 的 store 宽度
+    // pBits 的 left 偏移用**纹理**的 bpp（= `d3d9::lockRect` 里的 `gs->format.bytesPerPixel()`；
+    // `createTextureState` 用同一个 D3DFORMAT 建 arena 与 `kTxBpp`，所以 `ti.bpp/8` 与它逐字相等）。
+    const std::int32_t tex_pixel_bytes = static_cast<std::int32_t>(ti.bpp / 8u);
+    // 预测 LockRect 会返回的 pBits（与 d3d9::lockRect 的公式逐字一致），先校验范围。
+    const std::uint64_t predicted_bits = static_cast<std::uint64_t>(ti.arena) +
+                                         static_cast<std::uint64_t>(static_cast<std::uint32_t>(top)) * ti.pitch +
+                                         static_cast<std::uint64_t>(static_cast<std::uint32_t>(left)) *
+                                             static_cast<std::uint32_t>(tex_pixel_bytes);
+    if (predicted_bits > GuestMemory::kSpace) return false;
+    const std::int32_t last_off =
+        display_bpp == 16 ? rowOffset16(static_cast<std::int32_t>(ti.pitch), height - 1, alpha < 0)
+                          : rowOffset32(static_cast<std::int32_t>(ti.pitch), height - 1);
+    if (last_off < 0) return false;
+    const std::uint64_t span = static_cast<std::uint64_t>(last_off) +
+                               static_cast<std::uint64_t>(pixel_bytes) * static_cast<std::uint64_t>(width);
+    if (predicted_bits + span > GuestMemory::kSpace) return false;
+    if (!mem.committed(static_cast<std::uint32_t>(predicted_bits), static_cast<std::size_t>(span))) return false;
+    // ── ② 加锁（D3DLOCKED_RECT 放在 esp 之下 8 B：guest 的序言从不执行）────────────────────
+    const std::uint32_t esp = cpu.esp();
+    if (esp < 8u || !mem.committed(esp - 8u, 8u)) return false;
+    const std::uint32_t locked_rect_ea = esp - 8u;
+    if (!d3d9::lockRect(cpu, ti, 0u, locked_rect_ea, rect_ea, 0u, &why)) return false;
+    const std::uint32_t pitch = mem.rd32(locked_rect_ea + 0u);
+    const std::uint32_t bits = mem.rd32(locked_rect_ea + 4u);
+    auto unlock = [&]() {
+        d3d9::TextureInfo fresh;
+        if (d3d9::textureInfo(cpu, tex_obj, &fresh, nullptr)) {
+            std::string ignored;
+            d3d9::unlockRect(cpu, fresh, 0u, &ignored);
+        }
+    };
+    // LockRect 的返回**必须**与预测一致（d3d9::lockRect 的 pitch/pBits 就是 ti.pitch / 上面的公式；
+    // 不一致 = 状态块与预测漂了 ⇒ 解锁后回退）。★ 解锁仍会让 locks/version +1（这条路径不该出现）。
+    if (pitch != ti.pitch || bits != static_cast<std::uint32_t>(predicted_bits)) {
+        unlock();
+        std::fprintf(stderr,
+                     "[native] sub_48AE90：LockRect 返回 pitch/pBits 与预测不一致（%u/%u · %08X/%08X）⇒ 回退\n",
+                     pitch, ti.pitch, bits, static_cast<std::uint32_t>(predicted_bits));
+        return false;
+    }
+    // ── ③ 像素核（纯函数；同一份代码也在测试里直接跑）────────────────────────────────────
+    if (display_bpp == 16) {
+        fillRect16(mem.host(bits), static_cast<std::int32_t>(pitch), width, height, color, alpha);
+    } else {
+        fillRect32(mem.host(bits), static_cast<std::int32_t>(pitch), width, height, color, alpha);
+    }
+    unlock();
+    *result = 0;
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------
+// 段级：`sub_414AC0` 的填池循环（`.lst` 0x415384..0x41539D）
+//
+// ★ 逐字依据（`pnpm tools disasm-at at --ea 0x415340 --lines 45`）：
+//     xor  eax,eax                 ; 0x41537E 循环前
+//     test edx,edx / jle 0x41539F  ; 0x415380（count<=0 时整段跳过）
+//   loc_415384:
+//     mov  ecx,[esi-10h]           ; 目标数组（前面 VirtualAlloc 的结果）
+//     mov  edx,[ebx+5EC90h]        ; 填充值
+//     mov  [ecx+eax*4],edx
+//     mov  ecx,[ebx+5D7E8h]
+//     inc  eax
+//     lea  edx,[ecx+edi+1]         ; count = [ebx+5D7E8] + edi + 1
+//     cmp  eax,edx
+//     jl   loc_415384              ; **唯一**回边（全语料只有这里引用 0x415384）
+//   loc_41539F:
+//     mov  eax,[ebx+5D7ECh]        ; 循环后不读 EFLAGS
+// ★ `0x415384` 只被 `sub_414AC0` 的这次循环引用（`Select-String 415384` 只有 1 条 `jl`），
+//   而 `sub_414AC0` 只有一个调用方 `_WinMain@16` ⇒ 按 EIP 拦是安全的（用户前提：guest 代码只读）。
+// ---------------------------------------------------------------------------------------
+BlockOverrideOutcome nativeFillPool414AC0(X86& cpu, GuestMemory& mem, std::uint64_t* replaced_insns) {
+    *replaced_insns = 0;
+    // 段入口判据：`xor eax,eax` 之后才是 0；回边（`jl`）进来时 EAX>=1 ⇒ 只尝试一次。
+    if (cpu.eax() != 0) return BlockOverrideOutcome::Declined;
+    const std::uint32_t esi = cpu.esi();
+    const std::uint32_t ebx = cpu.ebx();
+    const std::uint32_t edi = cpu.edi();
+    if (esi < 0x10u) return BlockOverrideOutcome::Declined;
+    if (static_cast<std::uint64_t>(ebx) + 0x5EC94u > GuestMemory::kSpace) return BlockOverrideOutcome::Declined;
+    if (!mem.committed(esi - 0x10u, 4u) || !mem.committed(ebx + 0x5D7E8u, 4u) ||
+        !mem.committed(ebx + 0x5EC90u, 4u))
+        return BlockOverrideOutcome::Declined;
+    const std::uint32_t target = mem.rd32(esi - 0x10u);
+    const std::uint32_t value = mem.rd32(ebx + 0x5EC90u);
+    const std::uint32_t base = mem.rd32(ebx + 0x5D7E8u);
+    const std::uint32_t count_u = base + edi + 1u;  // guest 的 `lea edx,[ecx+edi+1]` 是 32 位回绕
+    const std::int32_t count = static_cast<std::int32_t>(count_u);
+    if (count <= 0) return BlockOverrideOutcome::Declined;  // `test edx,edx; jle 0x41539F` ⇒ 不执行循环
+    const std::uint64_t bytes = static_cast<std::uint64_t>(static_cast<std::uint32_t>(count)) * 4u;
+    if (target == 0) return BlockOverrideOutcome::Failed;
+    if (static_cast<std::uint64_t>(target) + bytes > GuestMemory::kSpace) return BlockOverrideOutcome::Failed;
+    if (!mem.committed(target, static_cast<std::size_t>(bytes))) return BlockOverrideOutcome::Failed;
+    std::uint8_t* p = mem.host(target);
+    for (std::int32_t i = 0; i < count; ++i) {
+        std::memcpy(p + 4ull * static_cast<std::uint32_t>(i), &value, 4);
+    }
+    // 循环尾的 guest 状态（EAX=EDX=count，ECX=[ebx+5D7E8]；EFLAGS = `cmp eax,edx` 相等：
+    // ZF=1 / PF=1 / CF=AF=SF=OF=0；0x41539F 之后不读标志，但差分测试会逐位比）。
+    cpu.eax() = count_u;
+    cpu.edx() = count_u;
+    cpu.ecx() = base;
+    cpu.eflags = (cpu.eflags & ~(FLAG_CF | FLAG_PF | FLAG_AF | FLAG_ZF | FLAG_SF | FLAG_OF)) | FLAG_PF | FLAG_ZF;
+    cpu.eip = 0x0041539Fu;
+    // 每次迭代 = 8 条指令（mov/mov/mov/mov/inc/lea/cmp/jl，最后那次 jl 不跳也算执行）
+    *replaced_insns = 8ull * static_cast<std::uint64_t>(count_u);
+    return BlockOverrideOutcome::Replaced;
+}
+
+// ---------------------------------------------------------------------------------------
 // 已知名字表：名字 → ABI + 实现（EA 由 `.lst` 解析，⛔ 不硬编码）
 // ---------------------------------------------------------------------------------------
 
@@ -586,8 +1019,19 @@ const KnownNative kKnown[] = {
     //   ECX/this、cols/pitch、目标格式从设备状态判断、bpp/src 在 Create 后重读。
     //   仍显式回退：4/1bpp 源、16bpp 目标、色键≠0；时间补偿不在本轮范围。
     {"sub_48B090", GuestConv::Thiscall, 12, nativeUpload48B090},
+    // ★ 2026-11-07：boot profile 第 2 热点（`sub_429020` Map::findIndex，thiscall retn 8）。
+    {"sub_429020", GuestConv::Thiscall, 8, nativeFindIndex429020},
+    // ★ 2026-11-07：boot profile 第 3 热点（`sub_48AE90` NormalTexture 纯色填充，thiscall retn 0Ch）。
+    {"sub_48AE90", GuestConv::Thiscall, 12, nativeFill48AE90},
 };
 constexpr std::size_t kKnownCount = sizeof(kKnown) / sizeof(kKnown[0]);
+
+// ★ 段级项（函数中段）：entry/resume 是固定的 `.lst` EA（中段没有符号），启用前用 `.lst` 校验锚。
+//   `name` 就是 `--native-overrides` 里写的名字（与函数级同名不会冲突：函数级表里没有 sub_414AC0）。
+const KnownBlockNative kKnownBlocks[] = {
+    {"sub_414AC0", "sub_414AC0", 0x00415384u, 0x0041539Fu, nativeFillPool414AC0},
+};
+constexpr std::size_t kKnownBlockCount = sizeof(kKnownBlocks) / sizeof(kKnownBlocks[0]);
 }  // namespace
 
 const KnownNative* findKnownNative(const std::string& name) {
@@ -599,5 +1043,56 @@ const KnownNative* findKnownNative(const std::string& name) {
 std::size_t knownNativeCount() { return kKnownCount; }
 
 const KnownNative& knownNativeAt(std::size_t i) { return kKnown[i]; }
+
+const KnownBlockNative* findKnownBlockNative(const std::string& name) {
+    for (std::size_t i = 0; i < kKnownBlockCount; ++i)
+        if (name == kKnownBlocks[i].name) return &kKnownBlocks[i];
+    return nullptr;
+}
+
+std::size_t knownBlockNativeCount() { return kKnownBlockCount; }
+
+const KnownBlockNative& knownBlockNativeAt(std::size_t i) { return kKnownBlocks[i]; }
+
+namespace {
+// 把 `.lst` 的指令文本归一化（列宽对齐的连续空白压成一个空格）。
+std::string normalizeAsm(const std::string& s) {
+    std::string out;
+    bool space = false;
+    for (char c : s) {
+        if (c == ' ' || c == '\t') {
+            space = true;
+            continue;
+        }
+        if (space && !out.empty()) out.push_back(' ');
+        space = false;
+        out.push_back(c);
+    }
+    return out;
+}
+}  // namespace
+
+bool verifyKnownBlockAnchor(const LstIndex& lst, const KnownBlockNative& k, std::string* err) {
+    auto bad = [&](const std::string& msg) {
+        if (err) *err = std::string("段级 override ") + k.name + " 的锚校验失败：" + msg;
+        return false;
+    };
+    if (!lst.loaded()) return bad("没有 .lst（段级 EA 无法核验）");
+    const LstFunction* fn = lst.findFunction(k.enclosing_fn);
+    if (fn == nullptr) return bad(std::string("`.lst` 里找不到函数 ") + k.enclosing_fn);
+    const LstFunction* owner = lst.functionAt(k.entry_ea);
+    if (owner == nullptr || owner->ea != fn->ea)
+        return bad("entry EA 不在 " + std::string(k.enclosing_fn) + " 里");
+    const LstEntry* entry = lst.find(k.entry_ea);
+    if (entry == nullptr) return bad("entry EA 不是 `.lst` 里的一条指令");
+    // 首指令必须是我们取证到的那条（换镜像 / 换 EA ⇒ 拒绝启用，⛔ 不静默换一个 EA）。
+    if (normalizeAsm(entry->text) != "mov ecx, [esi-10h]")
+        return bad("entry EA 的首指令不是 `mov ecx, [esi-10h]`（读到：" + normalizeAsm(entry->text) + "）");
+    const LstEntry* resume = lst.find(k.resume_ea);
+    if (resume == nullptr) return bad("resume EA 不是 `.lst` 里的一条指令");
+    if (normalizeAsm(resume->text) != "mov eax, [ebx+5D7ECh]")
+        return bad("resume EA 的首指令不是 `mov eax, [ebx+5D7ECh]`（读到：" + normalizeAsm(resume->text) + "）");
+    return true;
+}
 
 }  // namespace lift

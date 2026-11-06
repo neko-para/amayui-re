@@ -385,23 +385,21 @@ CPU 缺省仍逐字节可复现；`--raster gpu` 的 `--present headless` 会初
 （逐像素 `std::map`）与 guest 像素哈希，其次才是 GPU 读回；再往下要动的是 sprite 合批与
 那条直方图的算法。⛔ 不把逐帧数字写进 README —— 看 `LIFT_FRAME_TRACE=1`（§4.3.1）。
 
-## 4.3 热点 profile 与 guest 函数级 native override（试点）
+## 4.3 热点 profile 与 native override（函数级 + 段级）
 
 ```bash
 # 找热点（块级 + 按 .lst 函数入口聚合；不改变执行结果）
 ./out/emulator-lift ... --max-frames 1 --profile --profile-top 40
 
-# 显式启用（默认关；名字来自 .lst 的 `proc near` / `COLLAPSED FUNCTION` 行）
+# 显式启用（默认关；函数级名字来自 .lst 的 `proc near` / `COLLAPSED FUNCTION` 行）
 ./out/emulator-lift ... --max-frames 1 --native-overrides _memcpy
-# all = 稳定层（包含 sub_48B090；其已知风险见下）
+# all = 稳定层（含 sub_429020 / sub_48AE90 / 段级 sub_414AC0；已知风险见下）
 ./out/emulator-lift ... --native-overrides all
-# all 但排除某一项（`-名字`，排除项优先于启用项）
+# all 但排除某一项（`-名字`，排除项优先于启用项；函数级与段级在同一个命名空间里）
 ./out/emulator-lift ... --native-overrides all,-sub_48B090
+./out/emulator-lift ... --native-overrides all,-sub_414AC0
 # 也可显式叠加 debug 项（debug 项不会被 all 带进来）
 ./out/emulator-lift ... --native-overrides all,某个debug项
-# boot 加速的已取证集合（CRT 叶子 + S4IC/LZSS）
-./out/emulator-lift ... --max-frames 1 --native-overrides \
-  _memcpy,_memcpy_0,_memset,_strlen,sub_401000,sub_436A80
 ```
 
 - 拦截点 = **dispatcher 的 block 入口**（不 patch guest 字节）；命中后按 ABI 设 `EAX / ESP / EIP`，
@@ -412,16 +410,43 @@ CPU 缺省仍逐字节可复现；`--raster gpu` 的 `--present headless` 会初
   `debug == true` 的项必须显式点名（日志带 `[debug]` 与警告）。`-名字` 表示**排除**，
   排除项优先于启用项，且与出现顺序无关：`all,-sub_48B090` 与 `-sub_48B090,all` 等价。
   稳定层当前是 CRT 叶子（`_memcpy` / `_memcpy_0` / `_memset` / `_strlen` / `sub_401000`）、
-  S4IC/LZSS `sub_436A80`（`__thiscall`，`info[0]=输出大小`、`info[2]=压缩大小`）与
-  `sub_48B090`（`NormalTexture::UploadImage`）。
+  S4IC/LZSS `sub_436A80`（`__thiscall`，`info[0]=输出大小`、`info[2]=压缩大小`）、
+  `sub_48B090`（`NormalTexture::UploadImage`）、`sub_429020`（`Map::findIndex`）、
+  `sub_48AE90`（`NormalTexture` 虚表第 6 项 = 纯色填充），以及**段级** `sub_414AC0`
+  （SYS4INI 装载器的中段填池循环；不是整函数）。
 - `sub_48B090` 的 8/24/32bpp 与 alpha 路径已按 `.lst` 核；4/1bpp 源、16bpp 目标与色键≠0
   仍**显式回退解释器**。锁走 `d3d9::lockRect`/`unlockRect`，失败不留半状态。
   **虚拟时钟相位**没有做补偿（明确不在当前范围）；Windows 侧曾观察到异常、macOS 未复现，
   可随时用 `all,-sub_48B090` 做隔离 A/B。⛔ 不要把它当作 A4 逐字节基线。
-- `_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节，返回约定未核）⇒ 暂不覆盖；
-  `sub_414AC0`（SYS4INI 初始化）不做整函数 native（文件 I/O + guest 容器/堆语义）。
-- ⚠ `--until ea` 指向被 override 的函数体内部时**不会生效**（函数体不再逐条执行）；
-  `--bench` 的 insns / MIPS 也按"一次 override = 1 条"计 —— 不要拿它们做解释器吞吐的绝对比较。
+- `sub_429020`（`__thiscall retn 8`）：表指针在 `[this+0x18]`、容量 `[this+8]`、槽 28 B 的
+  MSVC `std::string`（`len@+0x10` / `cap@+0x14`，cap<16 用槽内 SSO）；空槽 ⇒ `-1`；
+  命中 = 先比 `min(len)` 字节、再比长度；不中线性探测。**只读** guest 内存。
+  优化点（语义不变）：guest **每个探测**都重算 `strlen(key)`，宿主只算一次。
+  编码非法（`this`/表/容量 0、`index>=capacity`、4 GiB 越界）⇒ 回退；safe mode 下未提交 ⇒ 回退。
+  **整表没有空槽**时 guest 会死循环 ⇒ 本实现回退（⛔ 不编造 `-1`）。
+- `sub_48AE90`（虚表 `??_7NormalTexture@@6B@` @0x528c00 第 6 项）：`Fill(rect, color888, alpha)` ⇒
+  对 `[self+0x40C]` 的纹理 `LockRect(rect)`（vtable +0x4C）→ 16bpp（A4R4G4B4）或 32bpp
+  （`alpha<0` 时**保留**原 alpha）→ `UnlockRect`（+0x50），返回 0。位深取
+  `ds:dword_5518C0`（`.lst` 0x406B14 是唯一写点，值来自配置 `display:TextureBit`），
+  ⛔ **不是** DDraw 的显示 bpp。像素核是纯函数（`fillRect16` / `fillRect32`），锁走
+  `d3d9::lockRect`/`unlockRect`（与 guest 同一条路径，失败不留锁/半状态）。
+  ⚠ 16bpp 的 `alpha<0` 分支行步进是 `2*((pitch*row)/4)`（= pitch/2，**不是** pitch）——
+  这是 guest 的真实写法（`.lst` 0x48AF16），逐字照抄；⛔ 不要"顺手修正"。
+- `sub_414AC0`（SYS4INI 装载器）**不做整函数 native**（文件 I/O + guest 容器/堆语义）；
+  但它的 1.18 s 热段是函数**中段**的填池循环（`.lst` 0x415384，7.37M 次迭代），现在用**段级**
+  override 覆盖：block 入口按固定 EA 拦一次，native 填 `count = [ebx+0x5D7E8]+edi+1` 个 dword，
+  按 guest 语义设 `EAX=EDX=count / ECX=[ebx+0x5D7E8] / EFLAGS(=cmp eax,edx 相等) / EIP=0x41539F`。
+  - 入口判据 `EAX==0`（`0x41537E xor eax,eax` 之后；回边进来时 EAX≥1）⇒ 一次调用只拦一次；
+  - 前置条件（目标/范围/计数/提交状态）不匹配 ⇒ `Declined`，**本次运行永久停用**该项并回退解释器
+    （段级项的前提是静态的，继续每迭代重试只会把成本加回热路径）；
+  - `insns` 与虚拟时钟按**被替代的 guest 指令数**（`8*count`）补账 —— 不补的话 `timeGetTime`
+    会少走一截虚拟时间，首帧可能与解释器路径不同；
+  - 启用前用 `.lst` 校验锚（entry 必须属于 `sub_414AC0`、且首指令逐字匹配）⇒ 换镜像/改 EA 会当场拒绝。
+- `_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节，返回约定未核）⇒ 暂不覆盖。
+- ⚠ `--until ea` 指向被 override 的函数体内部时**不会生效**（函数体/代码段不再逐条执行）；
+  `--bench` 的 insns / MIPS：函数级按"一次 override = 1 条"计（不要拿它做解释器吞吐的绝对比较），
+  **段级**按被替代的 guest 指令数计（与解释器同口径）。`--profile` 里被判为"被替代"的块/函数
+  不计入上面的表 —— 摘要会显式列出每一项的 hits / declines / fallbacks。
 - 是否继续扩展、以及 A/B 数字见需求单（§5）。
 
 ### 4.3.1 一帧的墙钟去哪了（逐帧诊断）

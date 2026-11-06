@@ -2,49 +2,52 @@
 
 - id: REQ-01M6PDSMKDBNW46Q8SEMAFF14S
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - verify: apps/emulator-lift/tests/native_override.cpp#native-override
+- done_reason: 2026-11-07：本单一共 5 个 >1s 热点全部落地（48B090 / 436A80 / 429020 / 48AE90 函数级 + 414AC0 段级）。真实 boot（max-frames=1 + skip-logo，fresh appdata）：关 33.26 s / guest-block 24,149 ms → all 7.39 s / 3,416 ms；首帧 hash 0xD64F5548CAFE92E9、像素哈希 0x3FD4EB9B0441484C、BMP SHA256 两边逐位相同；启用 all 后 guest 墙钟表无 >1s 函数（最大 226.9 ms）。ctest 58/58 全绿。
 - tags: [emulator-lift native-override boot profile]
 
 ## 目标
 
 用**墙钟**（不是只看指令权重）列出 boot 首帧累计 >1s 的 guest 函数，逐个 native override；
-每个都保持解释器回退、有 pure 守卫、默认关闭，并用真实 boot A/B 验证。
+每个都保持解释器回退、有守卫、默认关闭，并用真实 boot A/B 验证首帧逐位不变。
 
-## 实测（`--profile` 墙钟表；启用 LZSS/CRT override，max-frames=1）
+## 现状（2026-11-07）
 
-| 函数 | 墙钟 | 结论 |
-|---|---:|---|
-| `0x48B090` | 6016.7 ms | `NormalTexture::UploadImage`；已进入 `all`；Windows 侧曾观察到纹理异常、macOS 未复现；用 `all,-sub_48B090` 可隔离 |
-| `0x414AC0` | 1251.5 ms | **不整函数 native**：文件 I/O + guest 可见 `vector<string>`/索引容器 + `VirtualAlloc` 池；替代路径是其插入子路径 |
-| 其余 | <1.0 s | 不在本单 |
+| 函数 | 关 override 的墙钟 | 做法 | 子单 |
+|---|---:|---|---|
+| `0x48B090` | 5586.9 ms | 函数级 override（`NormalTexture::UploadImage`） | 本单（2026-11-06） |
+| `0x436A80` | 4399.7 ms | 函数级 override（S4IC/LZSS） | `REQ-01M6PCDA64HJV9RG149MHWMGRJ` |
+| `0x414AC0` | 1196.7 ms | **段级** override（中段填池循环 0x415384；不是整函数） | `REQ-01M6RVTSSTQ7DEB1GYCK4NYCN8` |
+| `0x429020` | 750.0 ms | 函数级 override（`Map::findIndex`） | `REQ-01M6RVTK7D681GX90C5C99JP1Z` |
+| `0x48AE90` | 663.4 ms | 函数级 override（`NormalTexture` 纯色填充） | `REQ-01M6RVTK7D681GX90C5C99JP1Z` |
 
-- `sub_48B090` 的 8/24/32bpp + 嵌套 guest Create 原型：8bpp/24/32 与 alpha 已按 `.lst` 修；
-  4/1bpp 源、16bpp 目标、色键≠0 仍显式回退。
-  `--native-overrides all` **包含它**；需要排除时用 `all,-sub_48B090`（`-名字` 优先）。
-- 现有可用档：真实 boot 首帧 **25.35 s → 12.68 s（2.00×）**，首帧 hash
-  `0xEBF024FEBE998B05` 不变，4 帧逐帧 hash 与 CPU 一致。
-- `sub_414AC0` 的停止理由：热段是 82k 条容器构建 + 文件 I/O，整函数覆盖需要克隆 guest
-  容器/堆语义；不做整函数 native。
-- 2026-11-06 复核：用户实测 Windows + `--native-overrides all` 渲染正确；此前 300 帧 A/B
-  的分歧是**未补偿的虚拟时钟相位**（native 第 2/3 帧 = 基线第 3/5 帧，时间差 ≈2.3 s），
-  不是纹理内容错误；时间补偿明确不做。对应缺陷单已按“不是缺陷”dropped。
+★ `sub_414AC0` 的旧结论“热段是 82k 条容器构建 + 文件 I/O”**是错的**：块级拆解显示
+7.39M hits 里约 7.37M 来自单个块 `0x415384`（填池循环）。整函数（文件 I/O + guest 容器/堆）
+仍然不做 native；被替换的只是那一段 —— 见 `REQ-01M6RVTSSTQ7DEB1GYCK4NYCN8`。
 
-## 实现要点（保留给修复）
+## 实测（真实 boot，headless，`--max-frames 1 --skip-logo`，每次 fresh `--appdata`）
 
-- `Block::ns` + `profile: functions by wall time`（按块计时；shim/override 不计）。
-- `startNestedGuestCall()` + `NativeOverrideTable::invoke(..., suspended)`：native 可铺一个 guest
-  回调帧；`Machine::run` 在 suspended 时直接继续。
-- `nativeUpload48B090()` / 像素核：8/24/32bpp + alpha 目标行序；锁走
-  `d3d9::lockRect`/`unlockRect`；目标函数从 vtable 取；bpp/src 在 Create 后重读。
-- `native-override` 196 checks / `guest-call` 27 checks；当前 `debug=false` 进入 `all`，
-  可用 `-名字` 排除。
-- **时间补偿明确不做**（用户裁决）；headless A4 不以这些 override 作基线。
+- 关 `--native-overrides`：wall **33.26 s** · guest-block **24,149 ms** · insns 768,559,249。
+- `--native-overrides all`：wall **7.39 s** · guest-block **3,416 ms** · insns 174,445,008。
+- 首帧 d3d9 hash `0xD64F5548CAFE92E9`、像素哈希 `0x3FD4EB9B0441484C`、`--dump-frame` BMP 的
+  SHA256 两边**完全相同**。
+- 启用 `all` 后 guest 墙钟表里**没有 >1s 的函数**（最大 226.9 ms / `sub_4E0760`）。
+
+## 实现要点（保留给后续）
+
+- `NativeOverrideTable`（函数级：call 目标 + 只写 EAX）与 `NativeBlockTable`（段级：block 入口 +
+  可写任意寄存器 + 跳到出口 + `replaced_insns` 补账）是**两张表、两种语义**。
+- 段级项第一次 `Declined` 就永久停用（前提是静态的；继续每迭代重试只会把成本加回热路径）。
+- 函数级项仍是“一次 override = 1 条”的 insns/时钟口径（虚拟时钟相位**明确不做补偿**，用户裁决）；
+  段级项按被替代的 guest 指令数补账（否则首帧可能偏）。
+- 每项都必须能 `--native-overrides all,-名字` 单独排除；`-名字` 优先于启用项。
+- 48AE90 的位深来源是 `ds:dword_5518C0`（配置 `display:TextureBit`），⛔ 不是 DDraw 显示 bpp。
 
 ## 验收
 
-1. 非时钟缺陷已修（对应缺陷单 dropped：确认不是缺陷）；8bpp alpha 0/非 0、24bpp、
-   32bpp 有 pure fixture 与 arena 逐字节；4/1/16bpp 与色键显式回退。
-2. `sub_414AC0` 保持“不整函数 native”的结论；若要 1.25 s 另开插入路径单。
-3. ctest/现有 golden 全绿；override 默认关闭；`all,-sub_48B090` 选择正确。
+1. 上述 5 个函数都有默认进 `all` 的 override（`debug=false`），且都有守卫 + 真实 boot A/B。
+2. 首帧像素/hash 与关 override 逐位一致；回退路径不留下锁/半状态；safe mode 未提交 ⇒ 回退。
+3. `ctest --test-dir apps/emulator-lift/out --output-on-failure` 全绿（58/58）；新项各有会红的守卫
+   （已做变异验证：16bpp 行步进 / flags PF / 段级 insns 补偿）。

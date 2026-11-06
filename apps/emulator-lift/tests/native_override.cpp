@@ -17,6 +17,7 @@
 #include "fixture.h"
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
+#include "runtime/ddraw_surface.h"
 #include "runtime/native_overrides.h"
 #include "runtime/surface.h"
 
@@ -687,6 +688,660 @@ int main() {
                 LIFT_CHECK(!wide_why.empty());
             }
         }
+    }
+
+    // =====================================================================================
+    // ⑪ sub_429020（Map::findIndex）：**golden model 差分**
+    //
+    // 判据：同一份 guest 表夹具，native 实现 vs 一个独立写的 C++ 参考模型（按 `.lst` 的
+    // 控制流重写：空槽 -1 / 先比 min(len) 字节再比长度 / 线性探测 / index=(index+1)%cap）。
+    // ★ 全表没有空槽时 guest 会**死循环**（不是返回 -1）⇒ 期望 native 回退（返回 false）。
+    // ★ 每个用例都比对"guest 内存未被写"（native 只读）。
+    // ★ 这里不经过解释器：真 guest 字节的差分在 `tests/native_override_assets.cpp`
+    //   （assets 档，从 AGE.EXE 取 sub_429020 的真字节，解释器 vs override）。
+    // =====================================================================================
+    {
+        // guest 表夹具：28 B/槽，SSO 与堆串两种都覆盖。
+        struct MapFixture {
+            lift::Machine m;
+            std::string err;
+            std::uint32_t self = 0x00420000u;
+            std::uint32_t table = 0x00450000u;
+            std::uint32_t heap_str = 0x00460000u;
+            std::vector<std::string> slots;
+            std::uint32_t capacity = 0;
+
+            bool build(const std::vector<std::string>& want) {
+                if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
+                slots = want;
+                capacity = static_cast<std::uint32_t>(want.size());
+                const std::size_t table_bytes = static_cast<std::size_t>(capacity) * 28u;
+                std::vector<std::uint8_t> zeros(table_bytes + 32u, 0);
+                if (!m.placeData(self, zeros.data(), 32u, &err)) return false;
+                if (!m.placeData(table, zeros.data(), table_bytes, &err)) return false;
+                if (!m.placeData(heap_str, zeros.data(), zeros.size(), &err)) return false;
+                m.mem().wr32(self + 0x18u, table);
+                m.mem().wr32(self + 8u, capacity);
+                std::uint32_t heap_cursor = heap_str;
+                for (std::uint32_t i = 0; i < capacity; ++i) {
+                    const std::uint32_t slot = table + i * 28u;
+                    const std::string& s = want[i];
+                    m.mem().wr32(slot + 0x10u, static_cast<std::uint32_t>(s.size()));
+                    if (s.size() < 16u) {
+                        for (std::size_t k = 0; k < s.size(); ++k)
+                            m.mem().wr8(slot + static_cast<std::uint32_t>(k), static_cast<std::uint8_t>(s[k]));
+                        m.mem().wr32(slot + 0x14u, 15u);  // MSVC SSO 的 cap
+                    } else {
+                        for (std::size_t k = 0; k < s.size(); ++k)
+                            m.mem().wr8(heap_cursor + static_cast<std::uint32_t>(k), static_cast<std::uint8_t>(s[k]));
+                        m.mem().wr32(slot + 0x00u, heap_cursor);
+                        m.mem().wr32(slot + 0x14u, static_cast<std::uint32_t>(s.size()));
+                        heap_cursor += static_cast<std::uint32_t>(s.size()) + 1u;
+                    }
+                }
+                return true;
+            }
+            // 调用 native 实现（直接铺栈帧：返回地址 + 2 个参数；thiscall 的 ECX = this）
+            bool call(std::uint32_t index, std::uint32_t key_ea, std::uint32_t* out) {
+                auto& cpu = m.cpu();
+                auto& mem = m.mem();
+                const std::uint32_t esp = m.layout().stack_top - 0x40u;
+                cpu.esp() = esp;
+                cpu.ecx() = self;
+                mem.wr32(esp, lift_fixture::kSentinel);
+                mem.wr32(esp + 4u, index);
+                mem.wr32(esp + 8u, key_ea);
+                return lift::nativeFindIndex429020(cpu, mem, out);
+            }
+            std::uint32_t placeKey(const std::string& s) {
+                static std::uint32_t cursor = 0x00470000u;
+                const std::uint32_t ea = cursor;
+                cursor += 0x40u;
+                std::vector<std::uint8_t> b(s.begin(), s.end());
+                b.push_back(0);
+                m.placeData(ea, b.data(), b.size(), &err);
+                return ea;
+            }
+            std::vector<std::uint8_t> snapshot(std::size_t n) const {
+                const std::uint8_t* p = m.mem().host(table);
+                return std::vector<std::uint8_t>(p, p + n);
+            }
+        };
+        auto refFind = [](const std::vector<std::string>& slots, std::uint32_t index0,
+                          const std::string& key) -> int {
+            const std::uint32_t cap = static_cast<std::uint32_t>(slots.size());
+            if (index0 >= cap) return -2;
+            if (slots[index0].empty()) return -1;  // 0x429039：**先**判空（不读 key）
+            std::uint32_t idx = index0;
+            for (std::uint32_t probe = 0; probe < cap; ++probe) {
+                const std::string& s = slots[idx];
+                if (s.empty()) return -1;
+                const std::size_t n = s.size() < key.size() ? s.size() : key.size();
+                const bool eq = n == 0 || std::memcmp(s.data(), key.data(), n) == 0;
+                if (eq && s.size() == key.size()) return static_cast<int>(idx);
+                idx = (idx + 1u) % cap;
+            }
+            return -2;  // 整表没有空槽 ⇒ guest 死循环（期望 native 回退）
+        };
+
+        struct Case {
+            std::vector<std::string> slots;
+            std::vector<std::string> keys;
+        };
+        const std::vector<Case> cases = {
+            // 无冲突：index 0 直接命中 / 空槽 miss
+            {{"alpha", "", "", ""}, {"alpha", "beta", ""}},
+            // 冲突链：index0 冲突后线性探测到 2
+            {{"zero", "one", "two", ""}, {"two", "zero", "one"}},
+            // 长度不同但前缀相同（memcmp(min) 相等也不算命中）
+            {{"abcd", "", "", ""}, {"ab", "abcd", "abcde"}},
+            // 20 字节堆串（cap>=16 ⇒ 数据在 [slot] 指针处）
+            {{"0123456789abcdefghij", "", "", ""}, {"0123456789abcdefghij", "0123456789abcdefghi"}},
+            // 空 key：任何非空槽都不命中 ⇒ 探测到空槽 -1
+            {{"x", "y", ""}, {""}},
+            // 整表满（4/4 非空且 key 不存在）⇒ guest 死循环 ⇒ 期望回退
+            {{"a", "b", "c", "d"}, {"zzz"}},
+        };
+        for (std::size_t ci = 0; ci < cases.size(); ++ci) {
+            for (const std::string& key : cases[ci].keys) {
+                for (std::uint32_t index0 = 0; index0 < cases[ci].slots.size(); ++index0) {
+                    MapFixture fx;
+                    LIFT_CHECK(fx.build(cases[ci].slots));
+                    const std::uint32_t key_ea = fx.placeKey(key);
+                    const std::size_t table_bytes = cases[ci].slots.size() * 28u;
+                    const std::vector<std::uint8_t> before = fx.snapshot(table_bytes);
+                    std::uint32_t r = 0xDEADBEEFu;
+                    const bool ok = fx.call(index0, key_ea, &r);
+                    const int expect = refFind(cases[ci].slots, index0, key);
+                    if (expect == -2) {
+                        LIFT_CHECK(!ok);  // 回退（⛔ 不编造 -1）
+                    } else {
+                        LIFT_CHECK(ok);
+                        LIFT_CHECK_EQ_U32(r, static_cast<std::uint32_t>(expect));
+                    }
+                    // native 只读：表字节一字未改
+                    LIFT_CHECK(fx.snapshot(table_bytes) == before);
+                }
+            }
+        }
+        // 第一个槽空 ⇒ 返回 -1 且**根本不读 key**（guest 0x429039 在 strlen 之前就返回）
+        {
+            MapFixture fx;
+            LIFT_CHECK(fx.build({"", "a", "", ""}));
+            std::uint32_t r = 0;
+            LIFT_CHECK(fx.call(0, 0xFFFFFFF0u, &r));  // key 指针在 4 GiB 附近 / 未提交
+            LIFT_CHECK_EQ_U32(r, 0xFFFFFFFFu);
+        }
+        // 回退闸：this / 表 / 容量 / index / 提交状态
+        {
+            MapFixture fx;
+            LIFT_CHECK(fx.build({"a", "b", "", ""}));
+            std::uint32_t r = 0;
+            const std::uint32_t key_ea = fx.placeKey("a");
+            LIFT_CHECK(!fx.call(0, 0u, &r));  // key=0
+            fx.m.mem().wr32(fx.self + 8u, 0u);
+            LIFT_CHECK(!fx.call(0, key_ea, &r));  // capacity=0
+            fx.m.mem().wr32(fx.self + 8u, fx.capacity);
+            LIFT_CHECK(!fx.call(fx.capacity, key_ea, &r));  // index >= capacity（调用方本应先 %）
+            fx.m.mem().wr32(fx.self + 0x18u, 0u);
+            LIFT_CHECK(!fx.call(0, key_ea, &r));  // table=0
+            // ★ "未提交的表"只在 safe mode 下判（非 safe 模式与 guest 一样走平台 fault 路径，
+            //   不会"静默读到 0"——native 实现不替它兜底，见 nativeFindIndex429020 的注释）。
+            // safe mode：未提交的表 ⇒ 明确拒绝（而不是宿主越界读）
+            lift::Machine sm;
+            std::string serr;
+            LIFT_CHECK(sm.initBare(&serr));
+            LIFT_CHECK(sm.prepareStack(&serr));
+            sm.mem().setSafeMode(true);
+            std::vector<std::uint8_t> blk(0x40, 0);
+            LIFT_CHECK(sm.placeData(0x00420000u, blk.data(), blk.size(), &serr));
+            sm.mem().wr32(0x00420000u + 0x18u, 0x00001000u);  // 表指针未提交
+            sm.mem().wr32(0x00420000u + 8u, 4u);
+            auto& scpu = sm.cpu();
+            const std::uint32_t sesp = sm.layout().stack_top - 0x40u;
+            scpu.esp() = sesp;
+            scpu.ecx() = 0x00420000u;
+            sm.mem().wr32(sesp, lift_fixture::kSentinel);
+            sm.mem().wr32(sesp + 4u, 0u);
+            sm.mem().wr32(sesp + 8u, 0x00420010u);
+            std::uint32_t sr = 0;
+            LIFT_CHECK(!lift::nativeFindIndex429020(scpu, sm.mem(), &sr));
+        }
+    }
+
+    // =====================================================================================
+    // ⑫ sub_48AE90 的像素核：四个分支的**逐字节**期望值（手算）
+    //   ★ 16bpp 的 `alpha<0` 分支行步进是 `2*((pitch*row)/4)`（= pitch/2，不是 pitch）——
+    //     这是 guest 的真实写法（`.lst` 0x48AF16），这条用例专门把它钉住。
+    // =====================================================================================
+    {
+        // 16bpp · alpha>=0：rgb(0x123456) ⇒ R4=1/G4=3/B4=5 ⇒ 0x135；alpha=0x80 ⇒ 0x8000
+        std::uint8_t a16[32];
+        std::memset(a16, 0xCC, sizeof(a16));
+        lift::fillRect16(a16, /*pitch=*/8, /*w=*/2, /*h=*/2, 0x00123456u, 0x80);
+        const std::uint16_t w16 = 0x8135u;
+        for (int row = 0; row < 2; ++row) {
+            for (int col = 0; col < 2; ++col) {
+                std::uint16_t v = 0;
+                std::memcpy(&v, a16 + row * 8 + col * 2, 2);
+                LIFT_CHECK_EQ_U32(v, w16);
+            }
+        }
+        LIFT_CHECK_EQ_U32(a16[4], 0xCCu);  // row0 只写 2 像素（4 B），pitch 8 ⇒ 中间不碰
+        // 16bpp · alpha<0：保留目标 A4（`& 0xF000`）；行步进 = 2*((8*row)/4) = 4*row（**不是** 8）
+        std::uint8_t b16[32];
+        std::memset(b16, 0x00, sizeof(b16));
+        for (int i = 0; i < 32; i += 2) std::memcpy(b16 + i, "\x23\xF1", 2);  // A4=0xF, 其余 0x123
+        lift::fillRect16(b16, /*pitch=*/8, /*w=*/2, /*h=*/2, 0x00123456u, -1);
+        for (int row = 0; row < 2; ++row) {
+            for (int col = 0; col < 2; ++col) {
+                std::uint16_t v = 0;
+                std::memcpy(&v, b16 + row * 4 + col * 2, 2);  // ★ 4*row
+                LIFT_CHECK_EQ_U32(v, 0xF135u);
+            }
+        }
+        LIFT_CHECK_EQ_U32(b16[8], 0x23u);  // 8.. 没被写（行步进是 4 而不是 8）
+
+        // 32bpp · alpha>=0：0x40<<24 | 0x112233；行步进 4*((12*row)/4)=12*row
+        std::uint8_t a32[48];
+        std::memset(a32, 0xCC, sizeof(a32));
+        lift::fillRect32(a32, /*pitch=*/12, 2, 2, 0x00112233u, 0x40);
+        for (int row = 0; row < 2; ++row) {
+            for (int col = 0; col < 2; ++col) {
+                std::uint32_t v = 0;
+                std::memcpy(&v, a32 + row * 12 + col * 4, 4);
+                LIFT_CHECK_EQ_U32(v, 0x40112233u);
+            }
+        }
+        LIFT_CHECK_EQ_U32(a32[8], 0xCCu);
+        // 32bpp · alpha<0：保留旧 A 字节
+        std::uint8_t b32[48];
+        std::memset(b32, 0x00, sizeof(b32));
+        for (int i = 0; i < 48; i += 4) std::memcpy(b32 + i, "\x11\x22\x33\xAB", 4);
+        lift::fillRect32(b32, 12, 2, 2, 0x00112233u, -1);
+        for (int row = 0; row < 2; ++row) {
+            for (int col = 0; col < 2; ++col) {
+                std::uint32_t v = 0;
+                std::memcpy(&v, b32 + row * 12 + col * 4, 4);
+                LIFT_CHECK_EQ_U32(v, 0xAB112233u);
+            }
+        }
+        // 越界/空矩形：核不写（调用方已拒绝，这里钉住"核自己不乱写"）
+        std::uint8_t guard[16];
+        std::memset(guard, 0x77, sizeof(guard));
+        lift::fillRect16(guard, 4, 0, 2, 0, 0);
+        lift::fillRect32(guard, 4, 2, 0, 0, 0);
+        for (int i = 0; i < 16; ++i) LIFT_CHECK_EQ_U32(guard[i], 0x77u);
+    }
+
+    // =====================================================================================
+    // ⑬ sub_48AE90 的**整函数 override**（真纹理夹具）：整张纹理逐字节 + 锁记账 + 回退无半状态
+    //   ★ 判据不是"返回 0"，而是 arena **逐字节**等于手算期望（抓"整张纹理错一位/错一行"）。
+    // =====================================================================================
+    {
+        // 铺一个 this 块（self+0x40C = 纹理对象）；函数体不需要存在：call 目标被 override 拦下。
+        // ★ `ds:dword_5518C0`（`display:TextureBit` 的值；`.lst` 0x406B14 是唯一写点）必须在
+        //   guest 内存里且是 16 / 32 —— 本线**不**拿 ddraw 的显示 bpp 冒充它。
+        auto armTextureBit = [](TextureRig& rig, std::uint32_t bits) {
+            std::vector<std::uint8_t> b(4, 0);
+            LIFT_CHECK(rig.m.placeData(0x005518C0u, b.data(), b.size(), &rig.err));
+            rig.m.mem().wr32(0x005518C0u, bits);
+        };
+        auto runFill = [](TextureRig& rig, std::uint32_t rect_ea, std::uint32_t color, std::int32_t alpha,
+                          std::vector<std::uint8_t>* before) {
+            lift::X86& cpu = rig.m.cpu();
+            std::string err;
+            LIFT_CHECK(rig.m.overrides().add(0x0048AE90u, "ref_fill", lift::GuestConv::Thiscall, 12,
+                                             lift::nativeFill48AE90, &err));
+            const std::uint32_t self = 0x00420000u;
+            std::vector<std::uint8_t> self_blk(0x410, 0);
+            LIFT_CHECK(rig.m.placeData(self, self_blk.data(), self_blk.size(), &err));
+            rig.m.mem().wr32(self + 0x40Cu, rig.texture);
+            if (before != nullptr) *before = std::vector<std::uint8_t>(0, 0);
+            const std::uint32_t code_ea = 0x00401000u;
+            lift_fixture::Asm a(code_ea);
+            a.u8(0xB9);  // mov ecx, self
+            a.u32(self);
+            a.pushImm(static_cast<std::uint32_t>(alpha));
+            a.pushImm(color);
+            a.pushImm(rect_ea);
+            a.callRel(0x0048AE90u);
+            a.ret();
+            LIFT_CHECK(rig.m.placeCode(code_ea, a.b.data(), a.b.size(), &err));
+            rig.m.cpu().esp() = rig.m.layout().stack_top - 4u;
+            rig.m.mem().wr32(rig.m.cpu().esp(), lift_fixture::kSentinel);
+            lift::RunOptions o;
+            o.until_ea = lift_fixture::kSentinel;
+            const lift::RunResult r = rig.m.run(o);
+            LIFT_CHECK(r.reason == lift::StopReason::UntilEa);
+        };
+        auto fillArena = [](TextureRig& rig, std::uint8_t v) {
+            lift::d3d9::TextureInfo ti;
+            LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &ti, nullptr));
+            const std::size_t n = static_cast<std::size_t>(ti.pitch) * ti.height;
+            std::memset(rig.m.mem().host(ti.arena), v, n);
+            return ti;
+        };
+
+        // ---- 32bpp × alpha>=0（A8R8G8B8，4×3；rect=(1,1,3,3)）----
+        {
+            TextureRig rig;
+            LIFT_CHECK(rig.boot(4, 3, lift::d3d9::kFmtA8R8G8B8));
+            if (rig.ok) {
+                armTextureBit(rig, 32u);
+                const lift::d3d9::TextureInfo ti = fillArena(rig, 0xEE);
+                const std::uint32_t rect_ea = 0x00430000u;
+                std::vector<std::uint8_t> rect(16, 0);
+                LIFT_CHECK(rig.m.placeData(rect_ea, rect.data(), rect.size(), &rig.err));
+                rig.m.mem().wr32(rect_ea + 0, 1u);
+                rig.m.mem().wr32(rect_ea + 4, 1u);
+                rig.m.mem().wr32(rect_ea + 8, 3u);
+                rig.m.mem().wr32(rect_ea + 12, 3u);
+                // 期望：先复制原 arena，再把 2×2 矩形逐字节改成 0x40112233
+                const std::size_t n = static_cast<std::size_t>(ti.pitch) * ti.height;
+                std::vector<std::uint8_t> want(rig.m.mem().host(ti.arena), rig.m.mem().host(ti.arena) + n);
+                for (std::uint32_t y = 1; y < 3; ++y) {
+                    for (std::uint32_t x = 1; x < 3; ++x) {
+                        const std::uint32_t v = 0x40112233u;
+                        std::memcpy(want.data() + y * ti.pitch + x * 4u, &v, 4);
+                    }
+                }
+                runFill(rig, rect_ea, 0x00112233u, 0x40, nullptr);
+                LIFT_CHECK(std::memcmp(rig.m.mem().host(ti.arena), want.data(), n) == 0);
+                lift::d3d9::TextureInfo after;
+                LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &after, nullptr));
+                LIFT_CHECK_EQ_U32(after.locks, 1u);
+                LIFT_CHECK_EQ_U32(after.version, 1u);
+                LIFT_CHECK(!after.locked);
+                LIFT_CHECK_EQ_U32(rig.m.overrides().at(0)->hits, 1u);
+                LIFT_CHECK_EQ_U32(rig.m.overrides().at(0)->fallbacks, 0u);
+            }
+        }
+        // ---- 16bpp × alpha>=0（A4R4G4B4，4×3；pitch=8；rect=(1,0,3,3)）----
+        {
+            TextureRig rig;
+            LIFT_CHECK(rig.boot(4, 3, lift::d3d9::kFmtA4R4G4B4));
+            if (rig.ok) {
+                armTextureBit(rig, 16u);
+                const lift::d3d9::TextureInfo ti = fillArena(rig, 0x5A);
+                LIFT_CHECK_EQ_U32(ti.bpp, 16u);
+                const std::uint32_t rect_ea = 0x00430000u;
+                std::vector<std::uint8_t> rect(16, 0);
+                LIFT_CHECK(rig.m.placeData(rect_ea, rect.data(), rect.size(), &rig.err));
+                rig.m.mem().wr32(rect_ea + 0, 1u);
+                rig.m.mem().wr32(rect_ea + 4, 0u);
+                rig.m.mem().wr32(rect_ea + 8, 3u);
+                rig.m.mem().wr32(rect_ea + 12, 3u);
+                const std::size_t n = static_cast<std::size_t>(ti.pitch) * ti.height;
+                std::vector<std::uint8_t> want(rig.m.mem().host(ti.arena), rig.m.mem().host(ti.arena) + n);
+                // color=0x123456 ⇒ 0x135；alpha=0xF0 ⇒ A4=0xF ⇒ 0xF135
+                const std::uint16_t word = 0xF135u;
+                for (std::uint32_t y = 0; y < 3; ++y)
+                    for (std::uint32_t x = 1; x < 3; ++x)
+                        std::memcpy(want.data() + y * ti.pitch + x * 2u, &word, 2);
+                runFill(rig, rect_ea, 0x00123456u, 0xF0, nullptr);
+                LIFT_CHECK(std::memcmp(rig.m.mem().host(ti.arena), want.data(), n) == 0);
+                lift::d3d9::TextureInfo after;
+                LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &after, nullptr));
+                LIFT_CHECK_EQ_U32(after.locks, 1u);
+                LIFT_CHECK(!after.locked);
+            }
+        }
+        // ---- 回退闸：不合法矩形 / 已锁 / 纹理对象为 0 ⇒ 明确回退，且**无半状态** ----
+        {
+            TextureRig rig;
+            LIFT_CHECK(rig.boot(4, 3, lift::d3d9::kFmtA8R8G8B8));
+            if (rig.ok) {
+                armTextureBit(rig, 32u);
+                const lift::d3d9::TextureInfo ti = fillArena(rig, 0xEE);
+                const std::size_t n = static_cast<std::size_t>(ti.pitch) * ti.height;
+                std::vector<std::uint8_t> frozen(rig.m.mem().host(ti.arena), rig.m.mem().host(ti.arena) + n);
+                const std::uint32_t self = 0x00420000u;
+                std::vector<std::uint8_t> self_blk(0x410, 0);
+                LIFT_CHECK(rig.m.placeData(self, self_blk.data(), self_blk.size(), &rig.err));
+                rig.m.mem().wr32(self + 0x40Cu, rig.texture);
+                const std::uint32_t rect_ea = 0x00430000u;
+                std::vector<std::uint8_t> rect(16, 0);
+                LIFT_CHECK(rig.m.placeData(rect_ea, rect.data(), rect.size(), &rig.err));
+                auto& cpu = rig.m.cpu();
+                auto& mem = rig.m.mem();
+                const std::uint32_t esp = rig.m.layout().stack_top - 0x40u;
+                cpu.esp() = esp;
+                cpu.ecx() = self;
+                mem.wr32(esp, lift_fixture::kSentinel);
+                auto call_native = [&](std::uint32_t r_ea, std::uint32_t a, std::int32_t al) {
+                    mem.wr32(esp + 4u, r_ea);
+                    mem.wr32(esp + 8u, a);
+                    mem.wr32(esp + 12u, static_cast<std::uint32_t>(al));
+                    std::uint32_t r = 0xDEADBEEFu;
+                    return lift::nativeFill48AE90(cpu, mem, &r);
+                };
+                auto expect_fallback = [&](const char* what) {
+                    const lift::d3d9::TextureInfo before = [&] {
+                        lift::d3d9::TextureInfo t;
+                        lift::d3d9::textureInfo(cpu, rig.texture, &t, nullptr);
+                        return t;
+                    }();
+                    LIFT_CHECK(!call_native(rect_ea, 0x00112233u, 0x40));
+                    const lift::d3d9::TextureInfo after = [&] {
+                        lift::d3d9::TextureInfo t;
+                        lift::d3d9::textureInfo(cpu, rig.texture, &t, nullptr);
+                        return t;
+                    }();
+                    LIFT_CHECK_EQ_U32(after.locks, before.locks);
+                    LIFT_CHECK_EQ_U32(after.version, before.version);
+                    LIFT_CHECK(after.locked == before.locked);
+                    LIFT_CHECK(std::memcmp(rig.m.mem().host(ti.arena), frozen.data(), n) == 0);
+                    (void)what;
+                };
+                // ① 空矩形 / 越界矩形（LockRect 会拒绝；native 在加锁前回退）
+                expect_fallback("empty-rect");
+                mem.wr32(rect_ea + 0, 3u);
+                mem.wr32(rect_ea + 4, 3u);
+                mem.wr32(rect_ea + 8, 1u);
+                mem.wr32(rect_ea + 12, 1u);
+                expect_fallback("inverted-rect");
+                mem.wr32(rect_ea + 0, 0u);
+                mem.wr32(rect_ea + 4, 0u);
+                mem.wr32(rect_ea + 8, 5u);  // > 纹理宽
+                mem.wr32(rect_ea + 12, 1u);
+                expect_fallback("oob-rect");
+                // ② 纹理对象为 0
+                mem.wr32(rect_ea + 0, 0u);
+                mem.wr32(rect_ea + 4, 0u);
+                mem.wr32(rect_ea + 8, 1u);
+                mem.wr32(rect_ea + 12, 1u);
+                mem.wr32(self + 0x40Cu, 0u);
+                expect_fallback("texture=0");
+                mem.wr32(self + 0x40Cu, rig.texture);
+                // ③ 已锁：guest 先锁住 ⇒ native 必须拒绝（不抢锁、不写像素）
+                const std::uint32_t lr = 0x00440000u;
+                std::vector<std::uint8_t> lrb(8, 0);
+                LIFT_CHECK(rig.m.placeData(lr, lrb.data(), lrb.size(), &rig.err));
+                lift::d3d9::TextureInfo fresh;
+                LIFT_CHECK(lift::d3d9::textureInfo(cpu, rig.texture, &fresh, nullptr));
+                std::string why;
+                LIFT_CHECK(lift::d3d9::lockRect(cpu, fresh, 0u, lr, 0u, 0u, &why));
+                expect_fallback("already-locked");
+                lift::d3d9::TextureInfo held;
+                LIFT_CHECK(lift::d3d9::textureInfo(cpu, rig.texture, &held, nullptr));
+                LIFT_CHECK(held.locked);  // 别人的锁还在
+                LIFT_CHECK(lift::d3d9::unlockRect(cpu, held, 0u, &why));
+            }
+        }
+    }
+
+    // =====================================================================================
+    // ⑭ sub_414AC0 的**填池循环段**（段级 override）：合成最小循环夹具，解释器 vs override
+    //
+    // 夹具 = `.lst` 0x41537E..0x41539F 的**同一段指令**（手写编码，逐条与反汇编对齐）：
+    //   xor eax,eax / test edx,edx / jle 0x41539F
+    //   loc_415384: mov ecx,[esi-10h] / mov edx,[ebx+5EC90h] / mov [ecx+eax*4],edx /
+    //               mov ecx,[ebx+5D7E8h] / inc eax / lea edx,[ecx+edi+1] / cmp eax,edx /
+    //               jl loc_415384
+    //   loc_41539F: mov eax,[ebx+5D7ECh] / mov edx,[esi-8] / add eax,edi /
+    //               mov [0x004F0000],eax / ret      ← 用来看循环后的寄存器/内存，并回到哨兵
+    // ★ 判据：目标数组 / 结果 dword / EAX,EBX,ECX,EDX,ESI,EDI,EBP,ESP,EIP,EFLAGS / **insns**
+    //   全部逐位相同（insns 相同 ⇒ `replaced_insns` 的补偿数对了）。
+    // =====================================================================================
+    {
+        const std::uint8_t kPoolLoop[] = {
+            0x31, 0xC0,                          // 0x41537E xor eax,eax
+            0x85, 0xD2,                          // 0x415380 test edx,edx
+            0x7E, 0x1B,                          // 0x415382 jle 0x41539F
+            0x8B, 0x4E, 0xF0,                    // 0x415384 mov ecx,[esi-10h]
+            0x8B, 0x93, 0x90, 0xEC, 0x05, 0x00,  // 0x415387 mov edx,[ebx+5EC90h]
+            0x89, 0x14, 0x81,                    // 0x41538D mov [ecx+eax*4],edx
+            0x8B, 0x8B, 0xE8, 0xD7, 0x05, 0x00,  // 0x415390 mov ecx,[ebx+5D7E8h]
+            0x40,                                // 0x415396 inc eax
+            0x8D, 0x54, 0x39, 0x01,              // 0x415397 lea edx,[ecx+edi+1]
+            0x3B, 0xC2,                          // 0x41539B cmp eax,edx
+            0x7C, 0xE5,                          // 0x41539D jl 0x415384
+            0x8B, 0x83, 0xEC, 0xD7, 0x05, 0x00,  // 0x41539F mov eax,[ebx+5D7ECh]
+            0x8B, 0x56, 0xF8,                    // 0x4153A5 mov edx,[esi-8]
+            0x03, 0xC7,                          // 0x4153A8 add eax,edi
+            0xA3, 0x00, 0x00, 0x4F, 0x00,        // 0x4153AA mov [0x004F0000],eax
+            0xC3,                                // 0x4153AF ret
+        };
+        const std::uint32_t kContinuationResultEa = 0x004F0000u;
+        struct PoolSnapshot {
+            std::vector<std::uint8_t> target;
+            std::uint32_t result = 0;
+            std::uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0, esi = 0, edi = 0, ebp = 0, esp = 0, eip = 0,
+                          eflags = 0;
+            std::uint64_t insns = 0;
+            std::uint64_t hits = 0, declines = 0, fallbacks = 0;
+        };
+        // `start_ea` = 0x41537E（正常入口）或 0x415384（用于测"EAX!=0 ⇒ Declined"）
+        // `stop_at_resume` = true ⇒ 在**段出口 0x41539F** 就停（不跑续延）⇒ 比较的 EFLAGS 就是
+        //   循环尾 `cmp eax,edx` 留下的那组（否则续延里的 `add` 会把标志覆盖掉，等于没比）。
+        auto runPool = [&](bool with_override, std::uint32_t count, std::uint32_t start_ea,
+                           std::uint32_t eax0, bool stop_at_resume) {
+            lift_fixture::Fixture fx;
+            LIFT_CHECK(fx.ok);
+            const std::uint32_t ebx = 0x00410000u;
+            const std::uint32_t esi = 0x00470100u;
+            const std::uint32_t target = 0x00480000u;
+            std::vector<std::uint8_t> zeros(static_cast<std::size_t>(count) * 4u + 64u, 0);
+            LIFT_CHECK(fx.m.placeData(ebx + 0x5D7E8u, zeros.data(), 16u, &fx.err));
+            LIFT_CHECK(fx.m.placeData(ebx + 0x5EC90u, zeros.data(), 8u, &fx.err));
+            LIFT_CHECK(fx.m.placeData(esi - 0x10u, zeros.data(), 16u, &fx.err));
+            LIFT_CHECK(fx.m.placeData(target, zeros.data(), static_cast<std::size_t>(count) * 4u, &fx.err));
+            LIFT_CHECK(fx.m.placeData(kContinuationResultEa, zeros.data(), 4u, &fx.err));
+            fx.m.mem().wr32(ebx + 0x5D7E8u, count - 1u);  // count = [ebx+5D7E8] + edi + 1（edi=0）
+            fx.m.mem().wr32(ebx + 0x5D7ECu, 0x1234u);
+            fx.m.mem().wr32(ebx + 0x5EC90u, 0xDEADBEEFu);
+            fx.m.mem().wr32(esi - 0x10u, target);
+            fx.m.mem().wr32(esi - 8u, 0x99u);
+            LIFT_CHECK(fx.m.placeCode(0x0041537Eu, kPoolLoop, sizeof(kPoolLoop), &fx.err));
+            if (with_override) {
+                std::string err;
+                LIFT_CHECK(fx.m.blockOverrides().add(0x00415384u, 0x0041539Fu, "ref_pool",
+                                                     lift::nativeFillPool414AC0, &err));
+            }
+            lift::X86& cpu = fx.m.cpu();
+            fx.rearmStack();
+            cpu.eax() = eax0;
+            cpu.ebx() = ebx;
+            cpu.esi() = esi;
+            cpu.edi() = 0;
+            cpu.edx() = count;
+            cpu.eflags = 0x202u;
+            if (stop_at_resume) {
+                cpu.eip = start_ea;
+                lift::RunOptions o;
+                o.until_ea = 0x0041539Fu;
+                const lift::RunResult r = fx.m.run(o);
+                if (r.reason != lift::StopReason::UntilEa) {
+                    fx.ok = false;
+                    fx.err = std::string("意外停机：") + lift::stopReasonName(r.reason) + " — " + r.detail;
+                }
+            } else {
+                fx.runCode(start_ea);
+            }
+            LIFT_CHECK(fx.ok);
+            PoolSnapshot s;
+            s.eax = cpu.eax();
+            s.ebx = cpu.ebx();
+            s.ecx = cpu.ecx();
+            s.edx = cpu.edx();
+            s.esi = cpu.esi();
+            s.edi = cpu.edi();
+            s.ebp = cpu.ebp();
+            s.esp = cpu.esp();
+            s.eip = cpu.eip;
+            s.eflags = cpu.eflags;
+            s.insns = cpu.insns;
+            s.result = fx.m.mem().rd32(kContinuationResultEa);
+            const std::uint8_t* p = fx.m.mem().host(target);
+            s.target.assign(p, p + static_cast<std::size_t>(count) * 4u);
+            if (with_override) {
+                const lift::NativeBlockOverride* e = fx.m.blockOverrides().at(0);
+                s.hits = e->hits;
+                s.declines = e->declines;
+                s.fallbacks = e->fallbacks;
+            }
+            return s;
+        };
+        auto comparePool = [&](const PoolSnapshot& base, const PoolSnapshot& ovr, const char* what) {
+            LIFT_CHECK(base.eax == ovr.eax);
+            LIFT_CHECK(base.ebx == ovr.ebx);
+            LIFT_CHECK(base.ecx == ovr.ecx);
+            LIFT_CHECK(base.edx == ovr.edx);
+            LIFT_CHECK(base.esi == ovr.esi);
+            LIFT_CHECK(base.edi == ovr.edi);
+            LIFT_CHECK(base.ebp == ovr.ebp);
+            LIFT_CHECK(base.esp == ovr.esp);
+            LIFT_CHECK(base.eip == ovr.eip);
+            LIFT_CHECK(base.eflags == ovr.eflags);
+            LIFT_CHECK(base.insns == ovr.insns);
+            LIFT_CHECK(base.result == ovr.result);
+            LIFT_CHECK(base.target == ovr.target);
+            if (base.eax != ovr.eax || base.eflags != ovr.eflags || base.insns != ovr.insns ||
+                base.target != ovr.target) {
+                std::fprintf(stderr, "  [pool compare failed: %s] eax=%08X/%08X eflags=%08X/%08X insns=%llu/%llu\n",
+                             what, base.eax, ovr.eax, base.eflags, ovr.eflags,
+                             (unsigned long long)base.insns, (unsigned long long)ovr.insns);
+            }
+        };
+        // ★ 段出口的 EFLAGS 逐位比：在 0x41539F **就停**（不跑续延）⇒ 比的是 `cmp eax,edx` 留下的
+        //   那一组。`cmp` 相等时**差 = 0** ⇒ PF 恒 1（parity of 0x00 = even），与 count 的奇偶无关；
+        //   这里用奇/偶/跨字节的 count 把这条钉住。
+        for (std::uint32_t count : {1u, 2u, 3u, 5u, 17u, 255u, 256u, 257u, 4097u}) {
+            const PoolSnapshot base = runPool(false, count, 0x0041537Eu, 0u, true);
+            const PoolSnapshot ovr = runPool(true, count, 0x0041537Eu, 0u, true);
+            comparePool(base, ovr, "flags@resume");
+            LIFT_CHECK_EQ_U32(ovr.hits, 1u);
+            LIFT_CHECK_EQ_U32(ovr.eip, 0x0041539Fu);
+            // 显式点名 ZF/PF（比较失败时 comparePool 只报整数，这里给出语义）
+            LIFT_CHECK((ovr.eflags & 0x40u) != 0u);  // ZF
+            LIFT_CHECK((ovr.eflags & 0x04u) != 0u);  // PF
+            LIFT_CHECK((ovr.eflags & (0x01u | 0x10u | 0x80u | 0x800u)) == 0u);  // CF/AF/SF/OF
+        }
+        for (std::uint32_t count : {1u, 5u, 17u, 4097u}) {
+            const PoolSnapshot base = runPool(false, count, 0x0041537Eu, 0u, false);
+            const PoolSnapshot ovr = runPool(true, count, 0x0041537Eu, 0u, false);
+            comparePool(base, ovr, "loop");
+            LIFT_CHECK_EQ_U32(ovr.hits, 1u);
+            LIFT_CHECK_EQ_U32(ovr.declines, 0u);
+            LIFT_CHECK_EQ_U32(ovr.fallbacks, 0u);
+            LIFT_CHECK_EQ_U32(ovr.result, 0x1234u);  // [ebx+5D7EC] + edi
+            LIFT_CHECK_EQ_U32(ovr.ecx, count - 1u);  // 循环尾 ECX = [ebx+5D7E8]
+        }
+        // 回边进入（EAX!=0）⇒ **Declined**，回退解释器；结果仍与解释器逐位一致，且之后该项停用。
+        {
+            const PoolSnapshot base = runPool(false, 9u, 0x00415384u, 3u, false);
+            const PoolSnapshot ovr = runPool(true, 9u, 0x00415384u, 3u, false);
+            comparePool(base, ovr, "declined");
+            LIFT_CHECK_EQ_U32(ovr.hits, 0u);
+            LIFT_CHECK_EQ_U32(ovr.declines, 1u);
+            LIFT_CHECK_EQ_U32(ovr.fallbacks, 0u);
+        }
+        // 直接调 fn：失败路径（目标未提交 ⇒ Failed；EAX!=0 / count<=0 ⇒ Declined）
+        {
+            lift::Machine m;
+            std::string err;
+            LIFT_CHECK(m.initBare(&err));
+            LIFT_CHECK(m.prepareStack(&err));
+            std::vector<std::uint8_t> blk(0x100, 0);
+            LIFT_CHECK(m.placeData(0x00410000u, blk.data(), blk.size(), &err));
+            LIFT_CHECK(m.placeData(0x00410000u + 0x5D7E8u, blk.data(), 16u, &err));
+            LIFT_CHECK(m.placeData(0x00410000u + 0x5EC90u, blk.data(), 8u, &err));
+            auto& cpu = m.cpu();
+            auto& mem = m.mem();
+            cpu.ebx() = 0x00410000u;
+            cpu.esi() = 0x00410080u;
+            cpu.edi() = 0u;
+            mem.wr32(0x00410080u - 0x10u, 0x00001000u);  // 未提交的目标
+            mem.wr32(0x00410000u + 0x5D7E8u, 3u);
+            mem.wr32(0x00410000u + 0x5EC90u, 0xAAu);
+            cpu.eax() = 0u;
+            std::uint64_t replaced = 99;
+            LIFT_CHECK(lift::nativeFillPool414AC0(cpu, mem, &replaced) ==
+                       lift::BlockOverrideOutcome::Failed);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(replaced), 0u);
+            cpu.eax() = 7u;
+            LIFT_CHECK(lift::nativeFillPool414AC0(cpu, mem, &replaced) ==
+                       lift::BlockOverrideOutcome::Declined);
+            cpu.eax() = 0u;
+            mem.wr32(0x00410000u + 0x5D7E8u, 0xFFFFFFFFu);  // count = 0（回绕）
+            LIFT_CHECK(lift::nativeFillPool414AC0(cpu, mem, &replaced) ==
+                       lift::BlockOverrideOutcome::Declined);
+        }
+    }
+
+    // ---- ⑮ known 表：新项的默认分层（全部 debug=false ⇒ 都在 all 里）+ kMax 容得下 ----
+    {
+        LIFT_CHECK(lift::findKnownNative("sub_429020") != nullptr);
+        LIFT_CHECK(lift::findKnownNative("sub_48AE90") != nullptr);
+        LIFT_CHECK(!lift::findKnownNative("sub_429020")->debug);
+        LIFT_CHECK(!lift::findKnownNative("sub_48AE90")->debug);
+        const lift::KnownBlockNative* pool = lift::findKnownBlockNative("sub_414AC0");
+        LIFT_CHECK(pool != nullptr && !pool->debug);
+        LIFT_CHECK_EQ_U32(pool->entry_ea, 0x00415384u);
+        LIFT_CHECK_EQ_U32(pool->resume_ea, 0x0041539Fu);
+        LIFT_CHECK(lift::NativeOverrideTable::kMax >= 10);
+        LIFT_CHECK(lift::NativeBlockTable::kMax >= 1);
     }
 
     return lift_test::finish("native-override");

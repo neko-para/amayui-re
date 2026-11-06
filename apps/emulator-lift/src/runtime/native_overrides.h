@@ -19,6 +19,7 @@ namespace lift {
 
 struct X86;
 class GuestMemory;
+class LstIndex;
 
 enum class GuestConv : std::uint8_t {
     Cdecl = 0,    // 调用方清栈
@@ -30,6 +31,8 @@ const char* guestConvName(GuestConv c);
 
 // native 实现：读参数（cpu.arg(i) / cpu.ecx()），经 mem 访存，写 *result（= 返回 EAX）。
 // 返回 false ⇒ 本次**不做** override，由 dispatcher 回退解释器（例如 safe mode 下参数越界）。
+// ⚠ 只有 EAX 一条返回通路：EDX/ECX/ST0 等 call-clobbered 寄存器不会按 guest 语义被改写
+//   （调用方按 ABI 也不该依赖它们）；需要额外寄存器/EFLAGS 的段级替换走 NativeBlockFn。
 using NativeFn = bool (*)(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 
 struct NativeOverride {
@@ -44,7 +47,8 @@ struct NativeOverride {
 
 class NativeOverrideTable {
 public:
-    static constexpr std::size_t kMax = 8;
+    // ★ 2026-11-07：8 → 12（BOOT profile 选出的 sub_429020 / sub_48AE90 两项 + 给后续留坑）。
+    static constexpr std::size_t kMax = 12;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
              std::string* err);
@@ -67,6 +71,65 @@ private:
     std::size_t count_ = 0;
 };
 
+// ---------------------------------------------------------------------------------------
+// 段级 override（**函数中段**的固定 EA，不是函数入口）
+//
+// ★ 为什么现有机制够不着：函数级 override 只在 `call` 目标（= 下一条 EIP）拦，所以只覆盖
+//   "整个函数被一次调用替换"。`sub_414AC0` 的 1.18 s 全在函数中段的填池循环（`.lst` 0x415384，
+//   ~7.37M 次迭代）—— 入口进去也没用，克隆整函数（文件 I/O + guest 容器/堆）不值得。
+// ★ 前提（用户口径）：**guest 代码只读** ⇒ 某个固定 EA 处的代码是固定的，可以按 EA 拦。
+//   ⛔ 不 patch guest 字节；⛔ 不每迭代拦一次 —— 一次调用只拦一次，然后跳到段的出口。
+// ★ 命中点：dispatcher 在**每个 block 入口**按 EIP 查表（不是只在 call 目标）。
+// ★ 语义契约（fn 必须自己保证）：
+//   · 先判断"现在是不是段入口"（例如循环入口的 `xor eax,eax` ⇒ EAX==0）；不匹配 ⇒ Declined；
+//   · 只在**所有前置条件**（参数 / 范围 / 计数 / 提交状态）匹配时才替 guest 执行；
+//   · Replaced 时必须已经写好 **EIP（= 段出口）/ EAX / EDX / ECX / EFLAGS** 等 guest 可观察状态；
+//     `replaced_insns` 报告被替代的 guest 指令数（dispatcher 用它补 `insns` 与虚拟时钟，
+//     见 README §4.3 —— 否则 `timeGetTime` 会少走一截，首帧可能与解释器路径不同）。
+// ---------------------------------------------------------------------------------------
+enum class BlockOverrideOutcome : std::uint8_t {
+    Replaced = 0,  // 已整段替换：fn 写好了 EIP / 寄存器 / EFLAGS
+    Declined = 1,  // 前置条件不匹配（例如不是段入口）⇒ 回退解释器；不计 fallback
+    Failed = 2,    // 前置条件匹配但执行失败 ⇒ 回退解释器；计 fallback + 打一行诊断
+};
+
+using NativeBlockFn = BlockOverrideOutcome (*)(X86& cpu, GuestMemory& mem, std::uint64_t* replaced_insns);
+
+struct NativeBlockOverride {
+    std::uint32_t entry_ea = 0;   // 固定 EA（`.lst` 锚；必须是一条指令的起点）
+    std::uint32_t resume_ea = 0;  // 段的出口 EA（Replaced 后 EIP 落到这里）
+    std::string name;
+    NativeBlockFn fn = nullptr;
+    std::uint64_t hits = 0;
+    std::uint64_t declines = 0;
+    std::uint64_t fallbacks = 0;
+    // ★ 第一次 Declined 之后**永久停用**（本进程内）：段级 override 的前提是静态的
+    //   （同一个 EA + 同一段代码），一次不匹配就说明这次运行的形状不是我们认得的那种；
+    //   继续尝试只会在热路径上每迭代白付一次函数调用。
+    bool disabled = false;
+};
+
+class NativeBlockTable {
+public:
+    static constexpr std::size_t kMax = 4;
+
+    bool add(std::uint32_t entry_ea, std::uint32_t resume_ea, const std::string& name, NativeBlockFn fn,
+             std::string* err);
+    void clear();
+    bool empty() const { return count_ == 0; }
+    std::size_t size() const { return count_; }
+    NativeBlockOverride* at(std::size_t i) { return i < count_ ? &entries_[i] : nullptr; }
+    const NativeBlockOverride* at(std::size_t i) const { return i < count_ ? &entries_[i] : nullptr; }
+
+    // 按 EIP 找**仍然启用**的项（disabled 的项不返回 ⇒ dispatcher 走解释器）。
+    NativeBlockOverride* find(std::uint32_t eip);
+    const NativeBlockOverride* find(std::uint32_t eip) const;
+
+private:
+    std::array<NativeBlockOverride, kMax> entries_{};
+    std::size_t count_ = 0;
+};
+
 // 已知的 CRT 叶子（按名字解析 EA；EA 来自 `.lst` 的 `proc near` / `COLLAPSED FUNCTION` 行）。
 // ★ 分层：`debug == false` 是**稳定**项，`--native-overrides all` 只含这一层；
 //   `debug == true` 是保留用于复现/调试的原型，必须**显式点名**才能启用
@@ -82,6 +145,24 @@ const KnownNative* findKnownNative(const std::string& name);
 std::size_t knownNativeCount();
 const KnownNative& knownNativeAt(std::size_t i);
 
+// ★ 段级项（函数中段）的已知表：`name` 同时是 `--native-overrides` 里写的名字。
+//   `enclosing_fn` 只用于**启用时的锚校验**（EA 必须落在这个函数里）——EA 是固定的 `.lst` 锚，
+//   ⛔ 不从名字推 EA（中段没有符号）；校验失败 ⇒ 拒绝启用（⛔ 不静默换一个 EA）。
+struct KnownBlockNative {
+    const char* name;
+    const char* enclosing_fn;
+    std::uint32_t entry_ea;
+    std::uint32_t resume_ea;
+    NativeBlockFn fn;
+    bool debug = false;
+};
+const KnownBlockNative* findKnownBlockNative(const std::string& name);
+std::size_t knownBlockNativeCount();
+const KnownBlockNative& knownBlockNativeAt(std::size_t i);
+// 用 `.lst` 校验段级项的锚（entry 是一条真实指令、属于 `enclosing_fn`、出口也是一条指令）。
+// 失败 ⇒ false + err（点名哪一条校验没过）。
+bool verifyKnownBlockAnchor(const LstIndex& lst, const KnownBlockNative& k, std::string* err);
+
 // 具体实现（也直接给测试用）
 bool nativeMemcpy(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 bool nativeMemset(X86& cpu, GuestMemory& mem, std::uint32_t* result);
@@ -94,6 +175,28 @@ bool nativeLzss436A80(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_48B090`（NormalTexture::UploadImage）：thiscall（ECX = NormalTexture），栈参数 (img, alpha, key)。
 // 准入失败（不支持的源格式 / 色键未实现 / 目标函数认不出）⇒ 返回 false，dispatcher 回退解释器。
 bool nativeUpload48B090(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// `sub_429020`（Map::findIndex(hash, key)）：thiscall `retn 8`。开放寻址表；槽 28 B = MSVC
+// `std::string`（16 B SSO + len@+0x10 + cap@+0x14）；表指针 = `[this+0x18]`、容量 = `[this+8]`；
+// 空槽判据 `len==0`；命中 = 先比 `min(len)` 字节、再比长度；不中线性探测；返回 index / -1。
+// ★ 只读 guest 内存；所有前置条件（this / 表 / 容量 / index / 提交状态）不成立 ⇒ 返回 false 回退。
+bool nativeFindIndex429020(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// `sub_48AE90`（NormalTexture 虚表第 6 项 = 纯色填充 Fill(rect, color888, alpha)）：thiscall `retn 0Ch`。
+// 对 `[self+0x40C]` 的纹理 `LockRect(rect)`（vtable +0x4C）→ 按**虚拟显示器 bpp**（`dword_5518C0`，
+// 本线读 `ddraw::displayMode`）走 16bpp（A4R4G4B4）或 32bpp → `UnlockRect`（+0x50）；返回 0。
+bool nativeFill48AE90(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// 纯像素核（只碰宿主缓冲；测试可直接用）。`base` = LockRect 返回的 pBits（**已按 rect.left/top
+// 偏移**），`pitch` = LockRect 返回的 Pitch。语义逐字照 `.lst` 的四个分支 —— 包括 16bpp
+// `alpha<0` 分支里 `2*(pitch*row/4)`（= pitch 的一半）这个**与 32bpp 同形、但不是 pitch 步进**的
+// 写法：⛔ 不要"顺手修正"，那是与 guest 不一致。
+void fillRect16(std::uint8_t* base, std::int32_t pitch, std::int32_t width, std::int32_t height,
+                std::uint32_t color888, std::int32_t alpha);
+void fillRect32(std::uint8_t* base, std::int32_t pitch, std::int32_t width, std::int32_t height,
+                std::uint32_t color888, std::int32_t alpha);
+// 段级：`sub_414AC0` 中段填池循环（entry 0x415384 / resume 0x41539F）。
+// 语义（`.lst` 0x41537E..0x41539D）：`ecx=[esi-0x10]`（目标数组）、`edx=[ebx+0x5EC90]`（填充值）、
+// count = `[ebx+0x5D7E8]+edi+1`、EAX 从 0 起每次写 `[ecx+eax*4]`。完成后 guest 状态：
+// EAX=EDX=count、ECX=[ebx+0x5D7E8]、EFLAGS = `cmp eax,edx` 相等的结果（ZF=1/PF=1，其余状态位 0）。
+BlockOverrideOutcome nativeFillPool414AC0(X86& cpu, GuestMemory& mem, std::uint64_t* replaced_insns);
 // 纯解码核（测试直接用；src/comp = 输入，dst/out = 输出，ring = 4096 B 字典）。
 bool lzssDecode(const std::uint8_t* src, std::uint32_t comp_size, std::uint8_t* dst, std::uint32_t out_size,
                 std::uint8_t ring[4096]);

@@ -405,6 +405,15 @@ if(EXISTS "${AGE_SECTFIX_EXE}" OR DEFINED ENV{AMAYUI_AGE_EXE})
 endif()
 
 if(EXISTS "${AGE_LST}")
+    # ---- assets：**真 guest 字节**的 native override 差分（解释器 vs override；缺资产 ⇒ SKIP 77）----
+    # 判据见 tests/native_override_assets.cpp 文件头：同一份夹具，真字节跑解释器 vs native 实现，
+    # 比较内存 / EAX / ESP / 标号寄存器 / EIP（48AE90 还比整张纹理逐字节 + 锁记账）。
+    add_executable(lift-native-override-assets tests/native_override_assets.cpp)
+    target_link_libraries(lift-native-override-assets PRIVATE emulator-lift-runtime)
+    add_test(NAME native-override-assets COMMAND lift-native-override-assets)
+    set_tests_properties(native-override-assets PROPERTIES
+        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE}" SKIP_RETURN_CODE 77)
+
     add_executable(lift-decode-crosscheck tests/decode_crosscheck.cpp)
     target_link_libraries(lift-decode-crosscheck PRIVATE emulator-lift-runtime)
     add_test(NAME decode-crosscheck COMMAND lift-decode-crosscheck)
