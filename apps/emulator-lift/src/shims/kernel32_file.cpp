@@ -106,6 +106,7 @@
 #include "runtime/cp932.h"
 #include "runtime/vfs.h"   // HostDirEntry / kAttr* / Vfs 的完整定义（x86.h 只前置声明 Vfs）
 #include "runtime/x86.h"
+#include "shims/kernel32_file.h"
 #include "shims/register.h"
 
 namespace lift {
@@ -2166,6 +2167,13 @@ void shimFindClose(X86& cpu, ShimCall& call) {
 }
 
 }  // namespace
+
+std::FILE* liftFileStream(X86& cpu, std::uint32_t handle) {
+    if (!cpu.handles) return nullptr;
+    HandleEntry* e = cpu.handles->get(handle);
+    if (!e || !e->used || e->kind != HandleKind::File || !e->payload) return nullptr;
+    return static_cast<FileState*>(e->payload)->fp;
+}
 
 // =======================================================================================
 // 注册（唯一导出，见 register.h）

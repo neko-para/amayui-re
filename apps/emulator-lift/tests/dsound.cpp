@@ -56,6 +56,9 @@ constexpr std::uint32_t kFixtureHeapBytes = 0x00400000u;
 // IID_IDirectSound8 = {C50A7E93-F395-4834-9EF6-7FA99DE50966}（内存字节序）
 const std::uint8_t kIidDirectSound8[16] = {0x93, 0x7E, 0x0A, 0xC5, 0xF3, 0x95, 0x48, 0x34,
                                            0x9E, 0xF6, 0x7F, 0xA9, 0x9D, 0xE5, 0x09, 0x66};
+// IID_IDirectSoundNotify = {B0210783-89CD-11D0-AF08-00A0C925CD16}
+const std::uint8_t kIidDirectSoundNotify[16] = {0x83, 0x07, 0x21, 0xB0, 0xCD, 0x89, 0xD0, 0x11,
+                                                0xAF, 0x08, 0x00, 0xA0, 0xC9, 0x25, 0xCD, 0x16};
 // 一个跟 DirectSound 无关的 IID（{00000000-0000-0000-C000-000000000046} = IUnknown 之外的垃圾值）
 const std::uint8_t kIidBogus[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
                                     0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01};
@@ -471,6 +474,17 @@ int main() {
         LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps + 0), 20u);
         LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps + 4), kStreamFlags);
         LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps + 8), kStreamBytes);
+
+        // IDirectSoundNotify：`sub_4B71C0` 在 CreateSoundBuffer 之后 QI 它；缺了会让 WAV 加载失败。
+        const std::uint32_t notify_iid = f.placeBytes(
+            std::vector<std::uint8_t>(kIidDirectSoundNotify, kIidDirectSoundNotify + 16));
+        const std::uint32_t notify_ppv = f.placeU32(0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(f.method(f.stream, 0u, {notify_iid, notify_ppv}), 0u);
+        const std::uint32_t notify = f.m.mem().rd32(notify_ppv);
+        LIFT_CHECK_NE_U32(notify, 0u);
+        const std::uint32_t positions = f.placeBytes(std::vector<std::uint8_t>(32, 0));
+        LIFT_CHECK_EQ_U32(f.method(notify, 12u, {4u, positions}), 0u);  // SetNotificationPositions
+        LIFT_CHECK_EQ_U32(f.method(notify, 8u, {}), 0u);                // Release
     }
 
     cap.pump();

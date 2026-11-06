@@ -72,6 +72,9 @@ constexpr std::uint8_t kIidDirectSoundBuffer8[16] = {0x49, 0xA4, 0x25, 0x68, 0x2
 // IID_IDirectSoundBuffer = {279AFA85-4981-11CE-A521-0020AF0BE560}
 constexpr std::uint8_t kIidDirectSoundBuffer[16] = {0x85, 0xFA, 0x9A, 0x27, 0x81, 0x49, 0xCE, 0x11,
                                                     0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60};
+// IID_IDirectSoundNotify = {B0210783-89CD-11D0-AF08-00A0C925CD16}
+constexpr std::uint8_t kIidDirectSoundNotify[16] = {0x83, 0x07, 0x21, 0xB0, 0xCD, 0x89, 0xD0, 0x11,
+                                                    0xAF, 0x08, 0x00, 0xA0, 0xC9, 0x25, 0xCD, 0x16};
 // IID_IUnknown = {00000000-0000-0000-C000-000000000046}
 constexpr std::uint8_t kIidUnknown[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                           0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46};
@@ -296,6 +299,7 @@ constexpr std::uint32_t kPlayLooping = 0x00000001u;
 // ---------------------------------------------------------------------------------------
 const std::vector<ComMethod>& deviceMethods();
 const std::vector<ComMethod>& bufferMethods();
+const std::vector<ComMethod>& notifyMethods();
 
 // 对象 → 状态块 EA（设备与缓冲都挂 `obj+8`）
 std::uint32_t stateOf(X86& cpu, std::uint32_t obj) { return cpu.com ? cpu.com->userOf(obj) : 0u; }
@@ -306,6 +310,35 @@ void destroyBufferBlocks(X86& cpu, std::uint32_t st) {
     const std::uint32_t data = stateU32(cpu, st, kBufOffData);
     if (data != 0 && cpu.heap) cpu.heap->free(data);
     if (cpu.heap) cpu.heap->free(st);
+}
+
+// ---------------------------------------------------------------------------------------
+// IDirectSoundNotify（`sub_4B71C0` 在 CreateSoundBuffer 之后 QI 它；缺了会让 WAV 加载失败）
+// ---------------------------------------------------------------------------------------
+void shimNotifyQueryInterface(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    const std::uint32_t riid = call.u32(1);
+    const std::uint32_t ppv = call.u32(2);
+    if (ppv == 0 || !cpu.mem->committed(ppv, 4) || riid == 0 || !cpu.mem->committed(riid, 16)) {
+        call.result = kEInvalidArg;
+        return;
+    }
+    cpu.mem->wr32(ppv, 0);
+    if (!sameGuid(cpu, riid, kIidDirectSoundNotify) && !sameGuid(cpu, riid, kIidUnknown)) {
+        call.result = kENoInterface;
+        return;
+    }
+    if (!cpu.com || !cpu.com->addRef(cpu, self)) {
+        call.result = kENoInterface;
+        return;
+    }
+    cpu.mem->wr32(ppv, self);
+    call.result = kDsOk;
+}
+
+void shimNotifySetNotificationPositions(X86&, ShimCall& call) {
+    // `sub_4B71C0` 传 4 个 DSBPOSITIONNOTIFY；静音设备只记账，不投递事件。
+    call.result = kDsOk;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -327,6 +360,26 @@ void shimQueryInterface(X86& cpu, ShimCall& call, bool buffer) {
         call.result = kEInvalidArg;
         return;
     }
+    // ★ 缓冲要支持 IDirectSoundNotify：`sub_4B71C0` 在 CreateSoundBuffer 之后 QI 它，
+    //   非零失败会让 `sub_4B6570` 返回 0 → WAV 加载失败 → Command_ShowMessage_Exception。
+    if (buffer && sameGuid(cpu, riid, kIidDirectSoundNotify)) {
+        if (!cpu.com) {
+            call.result = kENoInterface;
+            return;
+        }
+        const std::uint32_t obj = cpu.com->createObject(cpu, "IDirectSoundNotify", notifyMethods(), 0);
+        if (!obj) {
+            call.result = 0x8007000Eu;  // E_OUTOFMEMORY
+            return;
+        }
+        cpu.mem->wr32(ppv, obj);
+        if (firstTime(cpu, stateOf(cpu, self), kSeenQi, kBufOffSeen)) {
+            dsLog(method, "QI IDirectSoundNotify 成功 ⇒ 新对象 0x%08X（SetNotificationPositions 静音）", obj);
+        }
+        call.result = kDsOk;
+        return;
+    }
+
     const bool wanted = buffer
                             ? (sameGuid(cpu, riid, kIidDirectSoundBuffer8) ||
                                sameGuid(cpu, riid, kIidDirectSoundBuffer) || sameGuid(cpu, riid, kIidUnknown))
@@ -1236,6 +1289,16 @@ const std::vector<ComMethod>& deviceMethods() {
         {32u, "SetSpeakerConfig", Conv::Stdcall, 1, &shimSetSpeakerConfig},
         {36u, "Initialize", Conv::Stdcall, 1, nullptr},
         {40u, "VerifyCertification", Conv::Stdcall, 1, nullptr},
+    };
+    return methods;
+}
+
+const std::vector<ComMethod>& notifyMethods() {
+    static const std::vector<ComMethod> methods = {
+        {0u, "QueryInterface", Conv::Stdcall, 2, &shimNotifyQueryInterface},
+        {4u, "AddRef", Conv::Stdcall, 0, &shimAddRef},
+        {8u, "Release", Conv::Stdcall, 0, &shimRelease},
+        {12u, "SetNotificationPositions", Conv::Stdcall, 2, &shimNotifySetNotificationPositions},
     };
     return methods;
 }

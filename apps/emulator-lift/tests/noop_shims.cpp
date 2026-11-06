@@ -102,13 +102,15 @@ int main() {
         LIFT_CHECK_EQ_U32(f.call(mix_close, {kFakeMixer}), 0u);
         LIFT_CHECK_EQ_U32(f.call(mix_set, {kFakeMixer, 0u, 0u}), 0u);
 
+        // ★ mmio 已不再是 no-op：WAV 头解析（sub_4BBEF0）要求它沿 guest 文件句柄真读 RIFF。
+        //   这里没有有效的 lpmmioinfo.adwInfo[0] ⇒ 真实失败（NULL / 0 字节 / 265），不是假句柄。
         const std::uint32_t name = f.cstr("track1.wav");
-        LIFT_CHECK_EQ_U32(f.call(mmio_open, {name, 0u, 0u}), kFakeMmio);
+        LIFT_CHECK_EQ_U32(f.call(mmio_open, {name, 0u, 0u}), 0u);
         const std::uint32_t buf = f.zeroData(16);
         LIFT_CHECK_EQ_U32(f.call(mmio_read, {kFakeMmio, buf, 16u}), 0u);
         LIFT_CHECK_EQ_U32(f.call(mmio_close, {kFakeMmio, 0u}), 0u);
         LIFT_CHECK_EQ_U32(f.call(mmio_asc, {kFakeMmio, 0u, 0u}), 0u);
-        LIFT_CHECK_EQ_U32(f.call(mmio_desc, {kFakeMmio, 0u, 0u, 0u}), 0u);
+        LIFT_CHECK_EQ_U32(f.call(mmio_desc, {kFakeMmio, 0u, 0u, 0u}), 265u);  // MMIOERR_CHUNKNOTFOUND
     }
 
     // ②' 摇杆：永久不做（SCOPE §1）
