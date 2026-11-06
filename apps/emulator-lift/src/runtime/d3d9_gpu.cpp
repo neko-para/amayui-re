@@ -1,9 +1,12 @@
 // emulator-lift · SDL_GPU 光栅化后端
-//（屏幕空间三角形 + D3DXSprite 四边形 + D3D9 stage 0 纹理）
+//（屏幕空间三角形 + D3DXSprite 四边形 + D3D9 stage 0 纹理 + 窗口直出）
 //
 // ★ 与 SDL_Renderer 呈现解耦：自己的 SDL_GPUDevice + BGRA8 颜色 target + D32 深度 target。
 // ★ 顶点由 CPU 做完 T&L/裁剪/屏幕映射；这里转成 NDC 后画 triangle list。
 // ★ 读回只在 Present（或 CPU 回退）发生；A8R8G8B8 的 A 字节按 guest X8 语义归一化为 0。
+// ★ `--present window` 时窗口被 claim 给同一台 device：呈现 = target → swapchain 的
+//   `SDL_BlitGPUTexture`（letterbox 用 load_op=CLEAR 画黑边），**不再** `SDL_UpdateTexture`。
+//   claim 失败（dummy 视频 / 驱动不支持）⇒ 调用方回退 SDL_Renderer 上传路径并打印实测错误。
 // ★ shader 后端按 **SDL_GPU 的原生 shader 格式**分平台：
 //   Windows = D3DCompile → DXBC；macOS = MSL 源码（Metal）。⛔ 不把 DXBC 带进 Metal。
 //
@@ -22,12 +25,16 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "runtime/gpu_raster.h"
+#include "runtime/pixel_format.h"
 
 namespace lift {
 namespace {
@@ -227,7 +234,7 @@ SDL_GPUColorComponentFlags sdlColorMask(std::uint8_t mask) {
     return out;
 }
 
-class SdlGpuRaster final : public GpuRaster {
+class SdlGpuRaster final : public GpuRaster, public GpuDirectPresenter {
 public:
     ~SdlGpuRaster() override { shutdown(); }
 
@@ -283,51 +290,17 @@ public:
         }
         need_depth_clear_ = true;
         dirty_ = false;
+        // 新 target 的内容是未定义的 ⇒ 不能声称"本帧已经在 target 里"
+        target_current_ = false;
         return true;
     }
 
     bool rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
                              std::string* err) override {
-        if (target_ == nullptr || width != width_ || height != height_) {
-            if (err) *err = "SDL_GPU target 未准备";
-            return false;
-        }
-        SDL_GPUTransferBufferCreateInfo ti{};
-        ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        ti.size = static_cast<Uint32>(static_cast<std::size_t>(width) * 4u * height);
-        SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &ti);
-        if (tb == nullptr) {
-            if (err) *err = std::string("SDL_CreateGPUTransferBuffer(upload) 失败：") + SDL_GetError();
-            return false;
-        }
-        void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
-        if (mapped == nullptr) {
-            SDL_ReleaseGPUTransferBuffer(device_, tb);
-            if (err) *err = "SDL_MapGPUTransferBuffer(upload) 失败";
-            return false;
-        }
-        for (int y = 0; y < height; ++y) {
-            std::memcpy(static_cast<std::uint8_t*>(mapped) + static_cast<std::size_t>(y) * width * 4,
-                        pixels + static_cast<std::size_t>(y) * pitch, static_cast<std::size_t>(width) * 4);
-        }
-        SDL_UnmapGPUTransferBuffer(device_, tb);
-        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
-        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
-        SDL_GPUTextureTransferInfo src{};
-        src.transfer_buffer = tb;
-        src.pixels_per_row = static_cast<Uint32>(width);
-        src.rows_per_layer = static_cast<Uint32>(height);
-        SDL_GPUTextureRegion dst{};
-        dst.texture = target_;
-        dst.w = static_cast<Uint32>(width);
-        dst.h = static_cast<Uint32>(height);
-        dst.d = 1;
-        SDL_UploadToGPUTexture(copy, &src, &dst, true);
-        SDL_EndGPUCopyPass(copy);
-        SDL_SubmitGPUCommandBuffer(cmd);
-        SDL_ReleaseGPUTransferBuffer(device_, tb);
+        if (!uploadGuest(pixels, pitch, width, height, err)) return false;
         need_depth_clear_ = true;
         dirty_ = false;
+        target_current_ = true;
         return true;
     }
 
@@ -398,7 +371,362 @@ public:
 
     bool rasterDirty() const override { return dirty_; }
 
+    GpuDirectPresenter* directPresenter() override { return device_ != nullptr ? this : nullptr; }
+
+    // -----------------------------------------------------------------------------------
+    // GPU 直出：窗口 swapchain（`--present window` 时由 SdlWindow 在创建窗口之后调用 attach）
+    // -----------------------------------------------------------------------------------
+    bool directAttachWindow(void* sdl_window, bool vsync, std::string* err) override {
+        if (device_ == nullptr) {
+            if (err) *err = "SDL_GPU device 未建";
+            return false;
+        }
+        if (sdl_window == nullptr) {
+            if (err) *err = "窗口指针为空";
+            return false;
+        }
+        if (claimed_ && window_ == sdl_window) return true;
+        directDetachWindow();
+        window_ = static_cast<SDL_Window*>(sdl_window);
+        // ★ 这是"直出到底有没有成立"的唯一判据：claim 成功才算。失败就如实交出 SDL 错误串，
+        //   调用方回退 SDL_Renderer 上传路径（⛔ 不假装直出）。
+        if (!SDL_ClaimWindowForGPUDevice(device_, window_)) {
+            if (err) *err = std::string("SDL_ClaimWindowForGPUDevice 失败：") + SDL_GetError();
+            window_ = nullptr;
+            return false;
+        }
+        claimed_ = true;
+        const SDL_GPUTextureFormat fmt = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+        if (fmt != SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM && fmt != SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM) {
+            if (err) {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), "swapchain 格式 %d 不是 8 位 UNORM（无法从 BGRA8 target blit）",
+                              static_cast<int>(fmt));
+                *err = buf;
+            }
+            directDetachWindow();
+            return false;
+        }
+        swapchain_format_ = fmt;
+        // present mode：vsync=1 用 VSYNC；vsync=0 优先 IMMEDIATE，不支持再退 MAILBOX / VSYNC（并打印实际值）。
+        SDL_GPUPresentMode want = vsync ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE;
+        if (!SDL_WindowSupportsGPUPresentMode(device_, window_, want)) {
+            std::fprintf(stderr, "[present] GPU 直出：%s 不受支持 ⇒ ",
+                         vsync ? "VSYNC" : "IMMEDIATE");
+            if (!vsync && SDL_WindowSupportsGPUPresentMode(device_, window_, SDL_GPU_PRESENTMODE_MAILBOX)) {
+                want = SDL_GPU_PRESENTMODE_MAILBOX;
+                std::fprintf(stderr, "退到 MAILBOX\n");
+            } else {
+                want = SDL_GPU_PRESENTMODE_VSYNC;
+                std::fprintf(stderr, "退到 VSYNC\n");
+            }
+        }
+        if (!SDL_SetGPUSwapchainParameters(device_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, want)) {
+            // SDR+VSYNC 是规范里"永远支持"的组合；连它也失败 ⇒ 这块窗口不能直出。
+            if (err) *err = std::string("SDL_SetGPUSwapchainParameters 失败：") + SDL_GetError();
+            directDetachWindow();
+            return false;
+        }
+        present_mode_ = want;
+        switch (want) {
+            case SDL_GPU_PRESENTMODE_IMMEDIATE: present_mode_name_ = "immediate"; break;
+            case SDL_GPU_PRESENTMODE_MAILBOX: present_mode_name_ = "mailbox"; break;
+            case SDL_GPU_PRESENTMODE_VSYNC:
+            default: present_mode_name_ = "vsync"; break;
+        }
+        return true;
+    }
+
+    void directDetachWindow() override {
+        if (claimed_ && device_ != nullptr && window_ != nullptr) SDL_ReleaseWindowFromGPUDevice(device_, window_);
+        claimed_ = false;
+        window_ = nullptr;
+        swapchain_format_ = SDL_GPU_TEXTUREFORMAT_INVALID;
+    }
+
+    bool directActive() const override {
+        return device_ != nullptr && claimed_ && window_ != nullptr &&
+               swapchain_format_ != SDL_GPU_TEXTUREFORMAT_INVALID;
+    }
+    const char* directDriverName() const override {
+        const char* drv = device_ != nullptr ? SDL_GetGPUDeviceDriver(device_) : nullptr;
+        return drv != nullptr ? drv : "(unknown)";
+    }
+    const char* directPresentMode() const override { return present_mode_name_; }
+
+    bool directUploadGuest(const SurfaceFormat& format, const std::uint8_t* pixels, std::uint32_t pitch, int width,
+                           int height, std::string* err) override {
+        if (pixels == nullptr) {
+            if (err) *err = "guest 后缓冲指针为空";
+            return false;
+        }
+        // ★ target 固定是 BGRA8（GPU 光栅化只认 32bpp）。guest 后缓冲是 16bpp / 非 BGRA8 的
+        //   32bpp 时，按**同一份掩码语义**（pixel_format）转成 BGRA8 再上传 —— ⛔ 不让"直出"
+        //   在这种后缓冲上退化成"窗口停在上一帧"。常规 32bpp 后缓冲走 verbatim 快路径。
+        SurfaceFormat target_fmt = format;
+        const bool same_bgra = format.bpp == 32 && format.rmask == 0x00FF0000u && format.gmask == 0x0000FF00u &&
+                               format.bmask == 0x000000FFu;
+        if (!same_bgra) {
+            target_fmt = SurfaceFormat{};
+            target_fmt.bpp = 32;
+            target_fmt.rmask = 0x00FF0000u;
+            target_fmt.gmask = 0x0000FF00u;
+            target_fmt.bmask = 0x000000FFu;
+            target_fmt.amask = 0u;
+        }
+        if (!rasterPrepare(target_fmt, width, height, err)) return false;
+        if (same_bgra) {
+            if (!uploadGuest(pixels, pitch, width, height, err)) return false;
+        } else {
+            std::vector<std::uint8_t> bgra(static_cast<std::size_t>(width) * 4u * static_cast<std::size_t>(height));
+            const unsigned bpp = format.bytesPerPixel();
+            for (int y = 0; y < height; ++y) {
+                const std::uint8_t* row = pixels + static_cast<std::size_t>(y) * pitch;
+                std::uint8_t* out = bgra.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 4u;
+                for (int x = 0; x < width; ++x) {
+                    const std::uint32_t raw =
+                        pixel_format::loadPixel(row + static_cast<std::size_t>(x) * bpp, bpp);
+                    out[x * 4 + 0] = static_cast<std::uint8_t>(pixel_format::expandChannel(raw, format.bmask));
+                    out[x * 4 + 1] = static_cast<std::uint8_t>(pixel_format::expandChannel(raw, format.gmask));
+                    out[x * 4 + 2] = static_cast<std::uint8_t>(pixel_format::expandChannel(raw, format.rmask));
+                    out[x * 4 + 3] = 255;
+                }
+            }
+            if (!uploadGuest(bgra.data(), static_cast<std::uint32_t>(width) * 4u, width, height, err)) return false;
+        }
+        need_depth_clear_ = true;
+        dirty_ = false;
+        target_current_ = true;  // 上传完 target == guest
+        return true;
+    }
+
+    void directSetTargetCurrent(bool current) override { target_current_ = current; }
+    bool directTargetCurrent() const override { return target_current_; }
+
+    bool directPresent(std::string* err) override {
+        if (!directActive()) {
+            if (err) *err = "GPU 直出未建立（窗口没有 claim）";
+            return false;
+        }
+        if (target_ == nullptr || width_ <= 0 || height_ <= 0) {
+            if (err) *err = "SDL_GPU target 未准备";
+            return false;
+        }
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        if (cmd == nullptr) {
+            if (err) *err = std::string("SDL_AcquireGPUCommandBuffer 失败：") + SDL_GetError();
+            return false;
+        }
+        SDL_GPUTexture* swap = nullptr;
+        Uint32 sw = 0;
+        Uint32 sh = 0;
+        if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &swap, &sw, &sh)) {
+            std::string why = std::string("SDL_WaitAndAcquireGPUSwapchainTexture 失败：") + SDL_GetError();
+            SDL_SubmitGPUCommandBuffer(cmd);  // 不 Cancel：Cancel 与 swapchain 的状态机容易踩边界
+            if (err) *err = why;
+            return false;
+        }
+        if (swap == nullptr || sw == 0 || sh == 0) {
+            // 最小化 / 隐藏到零尺寸：这一帧没有可呈现的目标。⛔ 不算失败，也不冒充"画上去了"。
+            SDL_SubmitGPUCommandBuffer(cmd);
+            ++present_skipped_;
+            return true;
+        }
+        SDL_GPUBlitInfo info{};
+        info.source.texture = target_;
+        info.source.w = static_cast<Uint32>(width_);
+        info.source.h = static_cast<Uint32>(height_);
+        info.destination.texture = swap;
+        info.destination.w = static_cast<Uint32>(width_);
+        info.destination.h = static_cast<Uint32>(height_);
+        info.destination.x = 0;
+        info.destination.y = 0;
+        // ★ letterbox：窗口不一定与 target 同尺寸。整张 swapchain 先清成黑（= SDL 逻辑呈现的
+        //   LETTERBOX 行为），再把目标矩形按整数像素缩放置中。过滤用 NEAREST —— 与 CPU 路径
+        //   `SDL_SetTextureScaleMode(NEAREST)` 一致，⛔ 不在这里引入第二条缩放口径。
+        info.load_op = SDL_GPU_LOADOP_CLEAR;
+        info.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f};
+        info.flip_mode = SDL_FLIP_NONE;
+        info.filter = SDL_GPU_FILTER_NEAREST;
+        info.cycle = false;
+        layoutLetterbox(static_cast<int>(sw), static_cast<int>(sh), &info.destination);
+        SDL_BlitGPUTexture(cmd, &info);
+        if (!SDL_SubmitGPUCommandBuffer(cmd)) {
+            if (err) *err = std::string("SDL_SubmitGPUCommandBuffer 失败：") + SDL_GetError();
+            return false;
+        }
+        ++presented_;
+        return true;
+    }
+
+    bool directReadback(std::vector<std::uint8_t>* xrgb, int* width, int* height, std::string* err) override {
+        if (!directActive()) {
+            if (err) *err = "GPU 直出未建立（窗口没有 claim）";
+            return false;
+        }
+        if (target_ == nullptr || width_ <= 0 || height_ <= 0) {
+            if (err) *err = "SDL_GPU target 未准备";
+            return false;
+        }
+        int sw = 0;
+        int sh = 0;
+        SDL_GetWindowSizeInPixels(window_, &sw, &sh);
+        if (sw <= 0 || sh <= 0) {
+            if (err) *err = "窗口像素尺寸为 0（最小化？）";
+            return false;
+        }
+        // ★ swapchain 纹理是 write-only（SDL 明确禁止读回），所以窗口像素来自**同一份 target**
+        //   再做一次同样的 letterbox —— 呈现路径没画别的东西，这个等价关系是可核对的。
+        std::vector<std::uint8_t> src;
+        if (!downloadTarget(&src, err)) return false;
+        xrgb->assign(static_cast<std::size_t>(sw) * static_cast<std::size_t>(sh) * 4u, 0);
+        SDL_GPUBlitRegion rect{};
+        rect.w = static_cast<Uint32>(width_);
+        rect.h = static_cast<Uint32>(height_);
+        layoutLetterbox(sw, sh, &rect);
+        for (int y = 0; y < sh; ++y) {
+            std::uint8_t* dst = xrgb->data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(sw) * 4u;
+            const bool row_in = y >= static_cast<int>(rect.y) && y < static_cast<int>(rect.y + rect.h);
+            for (int x = 0; x < sw; ++x) {
+                std::uint8_t* d = dst + static_cast<std::size_t>(x) * 4u;
+                if (!row_in || x < static_cast<int>(rect.x) || x >= static_cast<int>(rect.x + rect.w)) {
+                    d[0] = 0;
+                    d[1] = 0;
+                    d[2] = 0;
+                    d[3] = 0;  // letterbox 黑边（与 present 的 clear_color 同值）
+                    continue;
+                }
+                // NEAREST：整像素映射回 target（1:1 时就是 x,y 本身）
+                int sx = static_cast<int>((static_cast<long long>(x) - rect.x) * width_ / static_cast<int>(rect.w));
+                int sy = static_cast<int>((static_cast<long long>(y) - rect.y) * height_ / static_cast<int>(rect.h));
+                sx = std::clamp(sx, 0, width_ - 1);
+                sy = std::clamp(sy, 0, height_ - 1);
+                std::memcpy(d, src.data() + (static_cast<std::size_t>(sy) * width_ + sx) * 4u, 4u);
+                d[3] = 0;  // XRGB 的 X 字节没有语义（guest X8 的归一化口径见 rasterSyncToGuest）
+            }
+        }
+        if (width != nullptr) *width = sw;
+        if (height != nullptr) *height = sh;
+        return true;
+    }
+
 private:
+    // 整张 swapchain 里"目标矩形"的尺寸/居中偏移（letterbox）。present 与 readback 共用同一份算术。
+    void layoutLetterbox(int sw, int sh, SDL_GPUBlitRegion* out) const {
+        const double sx = static_cast<double>(sw) / static_cast<double>(width_);
+        const double sy = static_cast<double>(sh) / static_cast<double>(height_);
+        // ⛔ 不要写 `std::min`：<windows.h> 的 min 宏会把它撑坏（本文件经 SDL.h 间接包含）
+        const double scale = (sx < sy) ? sx : sy;
+        int dw = static_cast<int>(std::lround(static_cast<double>(width_) * scale));
+        int dh = static_cast<int>(std::lround(static_cast<double>(height_) * scale));
+        dw = std::clamp(dw, 1, sw);
+        dh = std::clamp(dh, 1, sh);
+        out->x = static_cast<Uint32>((sw - dw) / 2);
+        out->y = static_cast<Uint32>((sh - dh) / 2);
+        out->w = static_cast<Uint32>(dw);
+        out->h = static_cast<Uint32>(dh);
+    }
+
+    // guest 后缓冲 → target（逐行 verbatim；X8 的 X 字节按 guest 原样，与 rasterSyncToGuest 的归一化对称）
+    bool uploadGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height, std::string* err) {
+        if (target_ == nullptr || width != width_ || height != height_) {
+            if (err) *err = "SDL_GPU target 未准备";
+            return false;
+        }
+        if (pixels == nullptr) {
+            if (err) *err = "guest 后缓冲指针为空";
+            return false;
+        }
+        SDL_GPUTransferBufferCreateInfo ti{};
+        ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        ti.size = static_cast<Uint32>(static_cast<std::size_t>(width) * 4u * height);
+        SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &ti);
+        if (tb == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUTransferBuffer(upload) 失败：") + SDL_GetError();
+            return false;
+        }
+        void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
+        if (mapped == nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device_, tb);
+            if (err) *err = "SDL_MapGPUTransferBuffer(upload) 失败";
+            return false;
+        }
+        for (int y = 0; y < height; ++y) {
+            std::memcpy(static_cast<std::uint8_t*>(mapped) + static_cast<std::size_t>(y) * width * 4,
+                        pixels + static_cast<std::size_t>(y) * pitch, static_cast<std::size_t>(width) * 4);
+        }
+        SDL_UnmapGPUTransferBuffer(device_, tb);
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTextureTransferInfo src{};
+        src.transfer_buffer = tb;
+        src.pixels_per_row = static_cast<Uint32>(width);
+        src.rows_per_layer = static_cast<Uint32>(height);
+        SDL_GPUTextureRegion dst{};
+        dst.texture = target_;
+        dst.w = static_cast<Uint32>(width);
+        dst.h = static_cast<Uint32>(height);
+        dst.d = 1;
+        SDL_UploadToGPUTexture(copy, &src, &dst, true);
+        SDL_EndGPUCopyPass(copy);
+        SDL_SubmitGPUCommandBuffer(cmd);
+        SDL_ReleaseGPUTransferBuffer(device_, tb);
+        return true;
+    }
+
+    // target → CPU（BGRA8；A 字节按 guest X8 语义归一化）。给 `--present-screenshot` 用。
+    bool downloadTarget(std::vector<std::uint8_t>* out, std::string* err) {
+        const int width = width_;
+        const int height = height_;
+        SDL_GPUTransferBufferCreateInfo ti{};
+        ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+        ti.size = static_cast<Uint32>(static_cast<std::size_t>(width) * 4u * height);
+        SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &ti);
+        if (tb == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUTransferBuffer(download) 失败：") + SDL_GetError();
+            return false;
+        }
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTextureRegion src{};
+        src.texture = target_;
+        src.w = static_cast<Uint32>(width);
+        src.h = static_cast<Uint32>(height);
+        src.d = 1;
+        SDL_GPUTextureTransferInfo dst{};
+        dst.transfer_buffer = tb;
+        dst.pixels_per_row = static_cast<Uint32>(width);
+        dst.rows_per_layer = static_cast<Uint32>(height);
+        SDL_DownloadFromGPUTexture(copy, &src, &dst);
+        SDL_EndGPUCopyPass(copy);
+        SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+        if (fence == nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device_, tb);
+            if (err) *err = "SDL_SubmitGPUCommandBufferAndAcquireFence 失败";
+            return false;
+        }
+        SDL_WaitForGPUFences(device_, true, &fence, 1);
+        SDL_ReleaseGPUFence(device_, fence);
+        const void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
+        if (mapped == nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device_, tb);
+            if (err) *err = "SDL_MapGPUTransferBuffer(download) 失败";
+            return false;
+        }
+        out->resize(static_cast<std::size_t>(width) * 4u * height);
+        for (int y = 0; y < height; ++y) {
+            std::uint8_t* row = out->data() + static_cast<std::size_t>(y) * width * 4u;
+            std::memcpy(row, static_cast<const std::uint8_t*>(mapped) + static_cast<std::size_t>(y) * width * 4u,
+                        static_cast<std::size_t>(width) * 4u);
+            if (!alpha_) {
+                for (int x = 0; x < width; ++x) row[x * 4 + 3] = 0;
+            }
+        }
+        SDL_UnmapGPUTransferBuffer(device_, tb);
+        SDL_ReleaseGPUTransferBuffer(device_, tb);
+        return true;
+    }
+
     struct Vertex {
         float x, y, z;
         float r, g, b, a;
@@ -922,6 +1250,9 @@ private:
 
     void shutdown() {
         if (device_ == nullptr) return;
+        // ★ 窗口 claim 必须在 SDL_DestroyWindow 之前释放（调用方保证这个顺序）；
+        //   设备销毁也必须在 release 之后。
+        directDetachWindow();
         destroyTargets();
         if (vertex_buffer_ != nullptr) SDL_ReleaseGPUBuffer(device_, vertex_buffer_);
         vertex_buffer_ = nullptr;
@@ -963,6 +1294,16 @@ private:
     bool need_depth_clear_ = true;
     bool dirty_ = false;
     std::string name_;
+    // ---- GPU 直出（窗口 swapchain）----
+    SDL_Window* window_ = nullptr;
+    bool claimed_ = false;
+    // 本帧的最新像素是否已经在 target 里（d3d9::Present 在读回/同步之后声明；见 gpu_raster.h）
+    bool target_current_ = false;
+    SDL_GPUTextureFormat swapchain_format_ = SDL_GPU_TEXTUREFORMAT_INVALID;
+    SDL_GPUPresentMode present_mode_ = SDL_GPU_PRESENTMODE_VSYNC;
+    const char* present_mode_name_ = "vsync";
+    std::uint64_t presented_ = 0;
+    std::uint64_t present_skipped_ = 0;
 };
 
 }  // namespace

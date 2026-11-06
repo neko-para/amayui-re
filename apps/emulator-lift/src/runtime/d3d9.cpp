@@ -9,6 +9,7 @@
 //   ⛔ 不是"返回 S_OK 就算做了"。
 #include "runtime/d3d9.h"
 
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +18,7 @@
 #include "runtime/com.h"
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/ddraw_surface.h"
+#include "runtime/gpu_raster.h"
 #include "runtime/heap.h"
 #include "runtime/pixel_format.h"
 #include "runtime/machine.h"
@@ -28,6 +30,14 @@
 
 namespace lift {
 namespace d3d9 {
+
+namespace {
+std::uint64_t steadyNowNs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+}  // namespace
 namespace {
 
 // 设备状态块布局（**我们自己的**布局；⛔ 不是 Win32 结构体）
@@ -600,13 +610,34 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
         }
     }
     std::string err;
-    // ★ GPU 光栅化：先把镜像读回 guest，再走 presenter 的 hash / frameStats / dump。
-    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+    // ★ GPU 光栅化 + 呈现。两种情形分清（决定窗口能不能直接用 GPU target 的像素）：
+    //   ① `dirty` = target 里有尚未落回 guest 的绘制 ⇒ target 才是最新的。
+    //      先读回 guest（hash / frameStats / --dump-frame / 后缓冲语义都读 guest，⛔ 不砍），
+    //      读回后 target == guest，直出可以直接 blit。
+    //   ② `!dirty` = 本帧没有 GPU 绘制（`Clear` / CPU 回退 / sprite 的 CPU 路径都先同步过）
+    //      ⇒ **guest 才是最新的**，target 可能是上一帧 ⇒ 由呈现汇点在 blit 之前把 guest 上传
+    //      （`directSetTargetCurrent(false)`；见 present_sdl.cpp 的 submitDirect）。
+    PresentBreakdown& pb = presentBreakdown();
+    pb = PresentBreakdown{};
+    GpuRaster* gpu = m->gpuRaster();
+    const bool gpu_active = gpu != nullptr && gpu->rasterActive();
+    GpuDirectPresenter* direct = gpu_active ? gpu->directPresenter() : nullptr;
+    const bool direct_active = direct != nullptr && direct->directActive();
+    const bool gpu_dirty = gpu_active && gpu->rasterDirty();
+    pb.direct = direct_active;
+    const std::uint64_t readback_begin = steadyNowNs();
+    if (gpu_dirty) {
         std::string gerr;
         if (!gpu->rasterSyncToGuest(m->surfaces().pixels(*gs), gs->pitch, gs->width, gs->height, &gerr)) {
             d3d9Log("Present", "GPU 光栅化读回失败：%s", gerr.c_str());
         }
     }
+    pb.readback_ns = steadyNowNs() - readback_begin;
+    // ★ 告诉呈现汇点"本帧的像素在哪儿"：
+    //   · 刚读过回 ⇒ target == guest（target 就是最新内容）⇒ 直出可以直接 blit；
+    //   · 没读过回（本帧没有 GPU 绘制）⇒ target 可能是上一帧 ⇒ 由 sink 在呈现前把 guest 上传。
+    //   ⛔ 这是"直出"唯一可能静默出错的点，所以状态显式传给 sink，而不是让 sink 猜。
+    if (direct_active) direct->directSetTargetCurrent(gpu_dirty);
     if (!m->presenter().present(m->surfaces(), *gs, dump_path, &err)) {
         if (why) *why = "D3D9：HeadlessPresenter.present 失败：" + err;
         return kFail;
@@ -615,19 +646,30 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
     cpu.mem->wr32(dev.state + kDvPresents, dev.presents + 1u);
     // ★ 第一帧的**像素判据**：后缓冲里"非背景像素数"（背景 = 出现次数最多的那个像素值）。
     //   ⛔ 不是猜，也不是"看截图"：直接数 guest 后缓冲的像素（确定性；同一份输入两次跑同值）。
-    FrameStats st;
-    if (frameStats(gs->format, m->surfaces().pixels(*gs), gs->pitch, gs->width, gs->height, &st)) {
-        d3d9Log("Present",
-                "第 %llu 帧 hash=0x%016llX（%dx%d %ubpp）· 背景像素值 0x%08X（%u 个）· 非背景 %u / %u · "
-                "不同颜色 %u · 像素哈希 0x%016llX",
-                static_cast<unsigned long long>(m->presenter().frameCount()),
-                static_cast<unsigned long long>(m->presenter().lastHash()), dev.width, dev.height, dev.bpp,
-                st.background_color, st.background_pixels, st.non_background_pixels, st.total_pixels,
-                st.distinct_colors, static_cast<unsigned long long>(st.hash));
-    } else {
-        d3d9Log("Present", "第 %llu 帧 hash=0x%016llX（像素统计失败：后缓冲指针/尺寸非法）",
-                static_cast<unsigned long long>(m->presenter().frameCount()),
-                static_cast<unsigned long long>(m->presenter().lastHash()));
+    // ★ 这个直方图只喂下面那条 **Info** 日志（缺省 `warn` 级别根本看不到它），但它是逐像素
+    //   `std::map` ⇒ 1280×720 的 TITLE 帧实测 ~54 ms（比整条呈现路径还贵）。
+    //   ⇒ 按**日志可见性**门控：`--log-level info` / `--verbose` 时算法与输出逐字不变，
+    //   默认级别下不再为一个看不见的行付一次全帧直方图。⛔ 这不是"删功能"，也不是跳过 guest 语义
+    //   （hash / frameCount / dump 都在别处，照旧每帧算）。
+    if (logVisible(LogLevel::Info, LogD3d9)) {
+        FrameStats st;
+        const std::uint64_t stats_begin = steadyNowNs();
+        const bool stats_ok =
+            frameStats(gs->format, m->surfaces().pixels(*gs), gs->pitch, gs->width, gs->height, &st);
+        presentBreakdown().stats_ns = steadyNowNs() - stats_begin;
+        if (stats_ok) {
+            d3d9Log("Present",
+                    "第 %llu 帧 hash=0x%016llX（%dx%d %ubpp）· 背景像素值 0x%08X（%u 个）· 非背景 %u / %u · "
+                    "不同颜色 %u · 像素哈希 0x%016llX",
+                    static_cast<unsigned long long>(m->presenter().frameCount()),
+                    static_cast<unsigned long long>(m->presenter().lastHash()), dev.width, dev.height, dev.bpp,
+                    st.background_color, st.background_pixels, st.non_background_pixels, st.total_pixels,
+                    st.distinct_colors, static_cast<unsigned long long>(st.hash));
+        } else {
+            d3d9Log("Present", "第 %llu 帧 hash=0x%016llX（像素统计失败：后缓冲指针/尺寸非法）",
+                    static_cast<unsigned long long>(m->presenter().frameCount()),
+                    static_cast<unsigned long long>(m->presenter().lastHash()));
+        }
     }
     if (cpu.shim.max_frames != 0 && m->presenter().frameCount() >= cpu.shim.max_frames) {
         // 帧数上限是宿主侧控制；停止原因走既有的 StopReason::Stopped。

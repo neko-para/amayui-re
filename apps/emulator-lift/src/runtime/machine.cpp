@@ -16,6 +16,7 @@
 
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/exec.h"
+#include "runtime/present.h"
 #include "runtime/sha256.h"
 #include "shims/register.h"
 
@@ -397,6 +398,16 @@ void Machine::flushFrameTrace() {
         std::fprintf(stdout, "        gpu  : draws=%llu fallback=%llu fallback_pixels=%llu sprite_gpu=%llu sprite_fallback=%llu\n",
                      (unsigned long long)gd, (unsigned long long)fb, (unsigned long long)fbp,
                      (unsigned long long)sp, (unsigned long long)sf);
+    }
+    // ★ Present 拆解（§4.3.1）：4 段加起来 ≈ shim 里的 `com!IDirect3DDevice9::Present`。
+    //   `direct=1` = 本帧呈现走 GPU 直出（target → swapchain，没有 SDL_UpdateTexture）。
+    {
+        const PresentBreakdown& pb = presentBreakdown();
+        std::fprintf(stdout,
+                     "        pres : readback=%.1fms hash=%.1fms stats=%.1fms sink=%.1fms direct=%d\n",
+                     static_cast<double>(pb.readback_ns) / 1e6, static_cast<double>(pb.hash_ns) / 1e6,
+                     static_cast<double>(pb.stats_ns) / 1e6, static_cast<double>(pb.sink_ns) / 1e6,
+                     pb.direct ? 1 : 0);
     }
     std::fflush(stdout);
 }

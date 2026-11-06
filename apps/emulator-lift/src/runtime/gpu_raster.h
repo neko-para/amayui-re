@@ -4,6 +4,9 @@
 //   这里接收屏幕空间三角形 + 状态，由宿主 GPU 画到 guest 后缓冲的镜像纹理。
 // ★ 缺省是 CPU 后端；`--raster auto` 在窗口模式下选 GPU，`--raster gpu` 强制 GPU。
 // ★ 后端实现负责：镜像纹理、绘制、把像素读回 guest（Present / 回退时）。
+// ★ 另外可选地暴露 `GpuDirectPresenter`（`--present window` + `--raster gpu`）：
+//   把**同一份** target blit 到窗口 swapchain，呈现不再经过 `SDL_UpdateTexture`。
+//   光栅化与呈现仍是两件事：`directPresenter()==nullptr` 时呈现走 SDL_Renderer / headless。
 //
 // ★ 状态口径（`GpuRasterState`）：只表达**后端能画**的 D3D9 固定功能状态子集。
 //   准入判定在 `d3d9::gpuEligible()` / `d3d9::gpuBlendStateFor()`（纯函数，夹具可测）；
@@ -13,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "runtime/surface.h"
 
@@ -146,6 +150,47 @@ inline std::uint64_t gpuTextureCacheKey(const GpuRasterTexture& t, int width, in
     return k & ~(1ull << 63);
 }
 
+// ---------------------------------------------------------------------------------------
+// GPU 直出（`--present window --raster gpu`）：把 GPU target 直接 blit 到窗口 swapchain
+// ---------------------------------------------------------------------------------------
+// ★ 只有真的拿到 `SDL_ClaimWindowForGPUDevice` 的后端才提供本接口；CPU 后端 / headless /
+//   直出不可用而回退 SDL_Renderer 上传路径时，`GpuRaster::directPresenter()` 返回 nullptr
+//   ⇒ 呈现语义与今天逐字节一致。
+// ★ 为什么单列一个接口：claim / present mode / 窗口回读都**不属于光栅化**；塞进 `GpuRaster`
+//   会让 CPU 后端也被迫实现一堆空函数，也会让"有没有直出"变成隐式状态。
+// ★ 本头文件仍然 **SDL-free**：窗口用 `void*` 传（真类型只有 present_sdl.cpp / d3d9_gpu.cpp 知道）。
+class GpuDirectPresenter {
+public:
+    virtual ~GpuDirectPresenter() = default;
+
+    // 窗口创建后 claim swapchain（`SDL_ClaimWindowForGPUDevice`）+ 设 present mode。
+    // 失败 ⇒ 调用方回退 SDL_Renderer 上传路径（⛔ 不假装直出）；`err` 必须带 SDL 的错误串。
+    virtual bool directAttachWindow(void* sdl_window, bool vsync, std::string* err) = 0;
+    // 释放 claim（**必须**在 `SDL_DestroyWindow` 之前调用）。
+    virtual void directDetachWindow() = 0;
+    // 已 claim 且 swapchain 格式可 blit ⇒ 呈现可以走直出。
+    virtual bool directActive() const = 0;
+    virtual const char* directDriverName() const = 0;   // 例 "direct3d12"
+    virtual const char* directPresentMode() const = 0;  // 实际生效的 present mode（回退后也算实际值）
+
+    // 本帧没有 GPU 绘制（guest 才是最新的）⇒ 呈现前把 guest 后缓冲上传到 target。
+    // ⛔ 不会在读回之后调用（那时 guest 与 target 已经一致）。
+    // 内部按需 `rasterPrepare(format, w, h)`（首帧可能还没有 target）。
+    virtual bool directUploadGuest(const SurfaceFormat& format, const std::uint8_t* pixels, std::uint32_t pitch,
+                                   int width, int height, std::string* err) = 0;
+    // 「本帧的最新像素已经在 target 里」——由 `d3d9::Present` 在读回/同步之后置 true（它保证
+    // target == guest）。缺省 false ⇒ 呈现前 sink 必须把 guest 上传，⛔ 不会把上一帧当这一帧
+    // （DDraw Flip / 测试里直接 submitFrame 都走这条）。
+    virtual void directSetTargetCurrent(bool current) = 0;
+    virtual bool directTargetCurrent() const = 0;
+    // target → swapchain（letterbox 缩放；窗口尺寸与 target 不同也支持）。
+    // 最小化 / 零尺寸的帧返回 true 但什么都不呈现（⛔ 不当失败）。
+    virtual bool directPresent(std::string* err) = 0;
+    // 窗口像素回读（`--present-screenshot` / 捕获测试）：XRGB8888 字节序（B,G,R,X），含 letterbox 黑边。
+    virtual bool directReadback(std::vector<std::uint8_t>* xrgb, int* width, int* height,
+                               std::string* err) = 0;
+};
+
 class GpuRaster {
 public:
     virtual ~GpuRaster() = default;
@@ -172,6 +217,9 @@ public:
                                     std::string* err) = 0;
     // GPU 镜像里是否有尚未读回 guest 的绘制。
     virtual bool rasterDirty() const = 0;
+
+    // 可选：GPU 直出接口。nullptr = 没有 swapchain（CPU 后端 / 直出不适用 / 已回退 renderer）。
+    virtual GpuDirectPresenter* directPresenter() { return nullptr; }
 };
 
 }  // namespace lift

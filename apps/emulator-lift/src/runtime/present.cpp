@@ -1,5 +1,6 @@
 #include "runtime/present.h"
 
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <utility>
@@ -7,6 +8,17 @@
 namespace lift {
 namespace {
 constexpr std::uint64_t kLatchAfterFailures = 3;
+
+std::uint64_t nowNs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+}  // namespace
+
+PresentBreakdown& presentBreakdown() {
+    static PresentBreakdown breakdown;
+    return breakdown;
 }
 
 HeadlessPresenter::HeadlessPresenter() = default;
@@ -35,13 +47,17 @@ void HeadlessPresenter::noteSinkFailure(const std::string& why) {
 bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& surface,
                                 const std::string& dump_path, std::string* err) {
     // ★ 先记录（与今天完全一致）：显示失败不能改变 frameCount / lastHash / dump。
+    PresentBreakdown& pb = presentBreakdown();
+    const std::uint64_t hash_begin = nowNs();
     last_hash_ = arena.hash(surface);
+    pb.hash_ns = nowNs() - hash_begin;
     ++frame_count_;
     last_dump_.clear();
 
     if (sink_ && !sink_latched_) {
         std::string sink_err;
         bool ok = false;
+        const std::uint64_t sink_begin = nowNs();
         try {
             ok = sink_->submitFrame(arena, surface, &sink_err);
         } catch (const std::exception& e) {
@@ -49,7 +65,10 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
         } catch (...) {
             sink_err = "sink 异常（非 std）";
         }
+        pb.sink_ns = nowNs() - sink_begin;
         if (!ok) noteSinkFailure(sink_err);
+    } else {
+        pb.sink_ns = 0;
     }
 
     if (!dump_path.empty()) {

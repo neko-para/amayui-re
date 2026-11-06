@@ -27,9 +27,23 @@ public:
     virtual bool stopRequested() const { return false; }
     // 诊断一行（driver / video / gpu），可空。
     virtual std::string describe() const { return {}; }
-    // 可选：同一 SDL renderer 上的 GPU 光栅化后端（--raster gpu 时才非空）。
+    // 可选：同一 SDL_GPUDevice 上的 GPU 光栅化后端（--raster gpu 时才非空）。
     virtual GpuRaster* gpuRaster() { return nullptr; }
 };
+
+// ---------------------------------------------------------------------------------------
+// 一次 D3D9 Present 的墙钟拆解（`LIFT_FRAME_TRACE=1` 打印；默认关，但**计时始终开着**：
+// 每帧 4 次 steady_clock ≈ 几十 ns，可以忽略，换来"Present 还剩在哪一段"是数字不是猜）。
+// ★ 只由 `d3d9::present` / `HeadlessPresenter::present` 写、只由 `Machine::flushFrameTrace` 读。
+// ---------------------------------------------------------------------------------------
+struct PresentBreakdown {
+    std::uint64_t readback_ns = 0;  // GPU target → guest 后缓冲（直出且本帧无 GPU 绘制时是 guest → target）
+    std::uint64_t hash_ns = 0;      // guest 像素哈希（HeadlessPresenter）
+    std::uint64_t sink_ns = 0;      // sink->submitFrame（SDL 上传+RenderPresent / GPU 直出 blit+submit）
+    std::uint64_t stats_ns = 0;     // frameStats 直方图（d3d9 Present 的诊断行）
+    bool direct = false;            // 本帧的呈现是否走 GPU 直出（swapchain blit）
+};
+PresentBreakdown& presentBreakdown();
 
 class HeadlessPresenter {
 public:

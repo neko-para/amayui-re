@@ -223,7 +223,8 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
 ## 4.2 可切换呈现后端（`--present`）
 
 **缺省 `--present headless`**：与今天逐字节一致（hash / frameCount / `--dump-frame` / `--max-frames`；
-不初始化 SDL 视频）。**`--present window`** 打开真实 SDL 窗口并走 **GPU API 路径**：
+不初始化 SDL 视频）。**`--present window`** 打开真实 SDL 窗口，呈现路径按**实测**二选一
+（见 §4.2b 的"直出"）：
 
 ```bash
 # 看得见的窗口（真 SDL 窗口；自动 real-time）
@@ -234,18 +235,25 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
 ```
 
 - 驱动列表 `--present-driver`（逗号分隔，缺省 `gpu,direct3d12,direct3d11,vulkan,metal,opengl`）：
-  `gpu` 命中时日志 `present: driver=gpu gpu=direct3d12`，且 `SDL_GetGPURendererDevice()!=NULL`
-  —— 这是"确实走 SDL_GPU"的正证据。其它驱动是 GPU API 路径，但可能是 WARP/GDI，日志如实打。
-  缺省列表**不含 software**；显式 `--present-driver software` 只用于测试，会打"不是 GPU 路径"警告。
-- 像素格式按 **masks** 选（六种 D3D9 后缓冲格式）；纹理 blend=NONE（`A8R8G8B8` / DDraw 的 32bpp
-  带真实 alpha，alpha=0 的帧在默认混合下会整窗黑；`X8R8G8B8` 没有 alpha，不受影响）；
-  逻辑呈现尺寸按当前帧，resize 用 letterbox。
-- `--present-screenshot` 是**窗口回读**（present 前），与 `--dump-frame` 的 **guest 后缓冲** 是两份独立
-  产物：1:1 时可逐像素对照，缩放/letterbox 下只比内容矩形。
+  只在 **SDL_Renderer 路径**上生效；GPU 直出成立时没有 renderer，这个开关不参与（日志会打
+  `present=direct/<mode>`）。`gpu` 命中时日志 `present: driver=gpu gpu=direct3d12`，且
+  `SDL_GetGPURendererDevice()!=NULL` —— 这是"确实走 SDL_GPU"的正证据。
+  其它驱动是 GPU API 路径，但可能是 WARP/GDI，日志如实打。缺省列表**不含 software**；
+  显式 `--present-driver software` 只用于测试，会打"不是 GPU 路径"警告。
+- 像素格式按 **masks** 选（六种 D3D9 后缓冲格式）；SDL_Renderer 路径的纹理 blend=NONE
+  （`A8R8G8B8` / DDraw 的 32bpp 带真实 alpha，alpha=0 的帧在默认混合下会整窗黑；
+  `X8R8G8B8` 没有 alpha，不受影响）；逻辑呈现尺寸按当前帧，resize 用 letterbox。
+  GPU 直出路径不做混合（swapchain 不透明），letterbox 是"清黑 + 按整数像素缩放置中"（NEAREST，
+  与 renderer 路径的 `SDL_SetTextureScaleMode(NEAREST)` 同口径）。
+- `--present-screenshot` 是**窗口回读**（present 前）：renderer 路径走 `SDL_RenderReadPixels`；
+  直出路径走"target → 下载缓冲 → 同一份 letterbox"（swapchain 是 write-only，SDLR 明确不许读回）。
+  它与 `--dump-frame` 的 **guest 后缓冲** 是两份独立产物：1:1 时可逐像素对照（实测 0 diff），
+  缩放/letterbox 下只比内容矩形。
 - 显式 `--present window` 打不开 ⇒ **exit 2**；运行期失败 ⇒ 记录 + 3 次后回退 headless（guest 的
   Present 结果不受影响）。`--present auto` 仅调试用：失败回 headless。
 - DDraw **不在本次验收内**（用户口径：AGE 默认不走 DDraw）；`Flip` 复用同一 sink 只是副作用，
-  `--dump-frame` 仍只在 D3D9 Present 消费。
+  `--dump-frame` 仍只在 D3D9 Present 消费。直出路径下 DDraw Flip 会先把 guest 上传到 target 再
+  blit（见 §4.2b），⛔ 不会把上一帧当这一帧。
 - 窗口模式把 SDL 事件接到 guest 消息队列：键盘 / 鼠标移动与按键 / 滚轮 → `WM_KEY*` / `WM_MOUSE*`；
   关窗（或 ESC）先发 `WM_CLOSE`，宽限 3 帧 / 500ms 后 `StopReason::Stopped`（`detail="present: 窗口关闭"`）。
   headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
@@ -260,8 +268,28 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
 日志会明说"本轮是 CPU 光栅化"。
 
 后端 = 独立 `SDL_GPUDevice`（Windows DXBC / macOS MSL），把 D3D9 的屏幕空间三角形与 D3DXSprite
-纹理四边形画到 1280×720 BGRA8 + D32 离屏 target，Present 前读回 guest 后缓冲；T&L / 裁剪 / 状态机 /
-失败码仍全在 CPU。
+纹理四边形画到 1280×720 BGRA8 + D32 离屏 target；T&L / 裁剪 / 状态机 / 失败码仍全在 CPU。
+
+### 直出（`--present window` + `--raster gpu`）：target → swapchain，不走 CPU 上传
+
+窗口创建**之后**把窗口 claim 给同一台 device（`SDL_ClaimWindowForGPUDevice`），每帧
+`SDL_WaitAndAcquireGPUSwapchainTexture` + `SDL_BlitGPUTexture`（source = 同一份 target）+
+`SDL_SubmitGPUCommandBuffer`。要点与边界：
+
+- **同一个窗口不能既 claim 给 GPU device 又 `SDL_CreateRenderer`** ⇒ 直出成立时**不建 SDL_Renderer**；
+  事件泵 / 截图 / capture / 关窗语义都在 `SdlWindow` 上，不依赖 renderer。CPU 光栅化
+  （`--raster cpu`）与直出不可用时仍走 renderer 路径，行为不变。
+- claim 失败（dummy 视频 / 没有 HWND / 驱动不支持）⇒ **打印 SDL 的实测错误并回退 SDL_Renderer
+  上传路径**，⛔ 不假装直出。判据是 `describe()` 里的 `present=direct/<mode>`。
+- `--present-vsync 1` ⇒ `SDL_GPU_PRESENTMODE_VSYNC`；`0` ⇒ 优先 `IMMEDIATE`，不支持退 `MAILBOX`
+  再退 `VSYNC`（每次回退都打印实际生效的模式）。窗口隐藏 / 最小化导致的"没有 swapchain 纹理"帧
+  只计跳过，⛔ 不当失败。
+- **本帧像素在哪儿是要显式传的**：`d3d9::Present` 读过回 ⇒ target 就是最新内容（直接 blit）；
+  没读过回（本帧没有 GPU 绘制 / 不是 D3D9 Present，例如 DDraw `Flip`）⇒ sink 在 blit 之前先把
+  guest 后缓冲上传到 target（16bpp / 非 BGRA8 的 32bpp 按同一份掩码语义转成 BGRA8）。
+  ⛔ 不靠"target 里大概是对的"来猜 —— 猜错的表现就是窗口停在上一帧。
+- 直出只换**呈现**：`d3d9::Present` 的 guest 回读（hash / frameCount / `--dump-frame` / 后缓冲语义）
+  照旧每帧做，`--present-screenshot` 从 target 回读（swapchain 是 write-only）。
 
 ### 能力范围（准入在 `d3d9::gpuEligible`，映射是纯函数；守卫 `tests/gpu_mapping.cpp`）
 
@@ -319,6 +347,8 @@ gpu       : draws=N gpu=N fallback=N fallback_pixels=N
 ./out/emulator-lift ... --max-frames 4 --raster gpu
 # 可见窗口 + GPU 光栅（auto 的缺省行为，显式写出来便于对照）
 ./out/emulator-lift ... --max-frames 300 --present window --raster auto
+# 同一条命令的"直出"正证据：日志里 present=direct/<mode>（VSYNC/IMMEDIATE/MAILBOX）
+./out/emulator-lift ... --max-frames 300 --present window --present-hidden --raster gpu
 # 对照：同一帧的 CPU 输出
 ./out/emulator-lift ... --max-frames 4 --raster cpu --dump-frame ...
 # 机械判据：GPU 覆盖必须 100%（TITLE 段也一样）
@@ -327,12 +357,15 @@ gpu       : draws=N gpu=N fallback=N fallback_pixels=N
 
 评估口径：GPU 与 CPU 的 blend / 采样舍入允许**每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
 用 `--dump-frame`（guest 后缓冲）或 `--present-screenshot`（窗口像素）做逐像素 max-diff。
+直出成立时这两者 1:1 下应当**逐像素相等**（窗口像素 = target = 读过回的 guest）；
+CTest `gpu-direct-present` 把这条做成守卫（含 16bpp 转换 / 尺寸变化 / 连续两帧）。
 CPU 缺省仍逐字节可复现；`--raster gpu` 的 `--present headless` 会初始化 SDL 视频
 （否则 `SDL_CreateGPUDevice` 失败），这不影响 `--raster cpu` 的"headless 不碰 SDL 视频"承诺。
 
-现状口径：TITLE 段**仍未达 33 ms**（也不把验收阈值改绿）。剩余成本是 Present（GPU→guest 读回 +
-SDL 呈现）与每帧多次 sprite 提交；要再往下需要"直接从 GPU target 呈现"与 sprite 合批，
-本次没有做。逐帧数字见 `LIFT_FRAME_TRACE=1`（§4.3.1），不是 README 里手写的常量。
+现状口径：TITLE 段**仍未达 33 ms**（也不把验收阈值改绿）。直出去掉了"GPU→guest 读回之外的
+两次全帧搬运"之后，Present 的大头是 `d3d9::Present` 里那条 Info 日志的**全帧像素直方图**
+（逐像素 `std::map`）与 guest 像素哈希，其次才是 GPU 读回；再往下要动的是 sprite 合批与
+那条直方图的算法。⛔ 不把逐帧数字写进 README —— 看 `LIFT_FRAME_TRACE=1`（§4.3.1）。
 
 ## 4.3 热点 profile 与 guest 函数级 native override（试点）
 
@@ -383,18 +416,27 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   --present window --raster auto --native-overrides all --profile
 ```
 
-每次 `Present` 打四行：
+每次 `Present` 打五行：
 
 ```text
 [frame] n=NNN wall=…ms insns=… guest=…ms shim=…ms other=…ms
         guest: sub_XXXXXX=…ms ...
         shim : com!IDirect3DDevice9::Present=…ms ...
         gpu  : draws=… fallback=… fallback_pixels=… sprite_gpu=… sprite_fallback=…
+        pres : readback=…ms hash=…ms stats=…ms sink=…ms direct=0/1
 ```
 
 - `wall` = 两次 Present 之间的宿主墙钟；`guest` = `--profile` 的块执行时间之和；
   `shim` = shim 实现自身的时间（**含** Present / D3DXSprite / 固定功能流水线的软件光栅）；
   `other` = `wall - guest - shim`（dispatcher / native override / 事件泵等）。
+- `pres :` 是 `com!IDirect3DDevice9::Present` 的拆解（四段之和 ≈ 上面那一项）：
+  `readback` = GPU target ↔ guest（读过回才有；没读回 ≈ 0）、`hash` = guest 像素哈希、
+  `stats` = 全帧像素直方图、`sink` = 呈现汇点（renderer 上传+`RenderPresent`，或直出 blit+submit）。
+  `direct=1` ⇒ 这一帧呈现走 GPU 直出。**排序不是重点，数字才是** —— 别拿 shim 总时间猜瓶颈。
+- `stats` 是 `d3d9!Present` 那条 **Info** 日志（"第 N 帧 hash=… 背景像素…"）的输入，逐像素
+  `std::map` 很贵 ⇒ 按**日志可见性**门控：缺省 `warn` 级别下不计算（`stats=0.0ms`），
+  `--log-level info`（或 `--log-cat d3d9 --log-level info`）时照旧计算并逐字打印同一行。
+  ⛔ 这不是删功能：hash / frameCount / `--dump-frame` 都在别处，照旧每帧算。
 - 只有 shim 慢、guest 不慢 ⇒ 不要再到 `--profile` 的 guest 函数表里找热点。
 - `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS=<ms>`，缺省 20）会为每次慢 `Draw*` 打一行
   `[draw] prim=… pixels=… gpu=… why=… sep_alpha=… tex=… blend=…/… op=… cw=… fvf=… coord=… stage0=… samp=… texfmt=… submit=…ms`：

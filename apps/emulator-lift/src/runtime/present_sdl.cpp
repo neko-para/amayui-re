@@ -131,6 +131,14 @@ struct SdlWindow::Impl {
     std::vector<std::uint32_t> capture_argb;
     int capture_w = 0;
     int capture_h = 0;
+    // ---- GPU 呈现路径 ----
+    // ★ 直出成立时 renderer == nullptr（同一个窗口不能既 claim 给 GPU device 又建 SDL_Renderer，
+    //   见 init 的实测注释）。`direct == nullptr` ⇒ 走 SDL_Renderer 上传路径。
+    GpuDirectPresenter* direct = nullptr;
+    bool direct_present = false;
+    std::string direct_error;  // claim 失败的实测错误串（回退 renderer 时打出来，不吞）
+    int direct_w = 0;          // 直出时上一次同步给窗口的后缓冲尺寸
+    int direct_h = 0;
     // GPU 光栅化镜像（与窗口 renderer 共用；--raster gpu）
     bool raster_gpu = false;
     bool raster_sprites = true;
@@ -159,6 +167,10 @@ struct SdlWindow::Impl {
     void handleEvent(const SDL_Event& event);
     void pumpEvents(int wait_ms);
     void mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const;
+    // 截图 + 捕获（两条呈现路径共用；`shot` 归调用方销毁）。frame_no 必须已经自增。
+    bool saveShot(SDL_Surface* shot, std::string* err);
+    // GPU 直出的一帧（不经过 SDL_UpdateTexture / SDL_Renderer）。
+    bool submitDirect(const SurfaceArena& arena, const GuestSurface& surface, std::string* err);
 };
 
 void SdlWindow::Impl::postMessage(std::uint32_t message, std::uint32_t wparam, std::uint32_t lparam) {
@@ -310,7 +322,7 @@ SdlWindow::SdlWindow() : impl_(std::make_unique<Impl>()) {}
 SdlWindow::~SdlWindow() { shutdown(); }
 
 bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
-    if (impl_->renderer != nullptr) return true;
+    if (impl_->window != nullptr) return true;
     impl_->screenshot_path = options.screenshot_path;
     impl_->raster_gpu = options.raster_gpu;
     impl_->raster_sprites = options.raster_sprites;
@@ -320,6 +332,7 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
         return false;
     }
     impl_->sdl_inited = true;
+    // ★ GPU device 先建（不需要窗口）：`--raster gpu` 的后端失败必须在开窗之前就是硬失败。
     if (options.raster_gpu) {
         std::string gerr;
         impl_->gpu_raster = createSdlGpuRaster(&gerr);
@@ -341,40 +354,81 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
         return false;
     }
 
-    const char* driver = options.driver_list.empty() ? nullptr : options.driver_list.c_str();
-    impl_->renderer = SDL_CreateRenderer(impl_->window, driver);
-    if (impl_->renderer == nullptr) {
-        if (err) *err = std::string("SDL_CreateRenderer(") + (driver ? driver : "default") + ") 失败：" +
-                        SDL_GetError();
-        shutdown();
-        return false;
+    // ★ 窗口创建之后才可能 claim swapchain ⇒ GPU 直出的 attach 必须在这里，不能在 init 开头。
+    //   ★ 实测口径：窗口一旦 claim 给 GPU device，就不能再对它 `SDL_CreateRenderer`
+    //   （同一窗口的 swapchain 只能有一个主人）——所以直出成立时**不建 renderer**；
+    //   claim 失败（dummy 视频 / 驱动不支持）才回退 SDL_Renderer 上传路径，并把 SDL 的错误打出来。
+    if (impl_->gpu_raster != nullptr) {
+        GpuDirectPresenter* dp = impl_->gpu_raster->directPresenter();
+        if (dp != nullptr) {
+            std::string derr;
+            if (dp->directAttachWindow(impl_->window, options.vsync, &derr)) {
+                impl_->direct = dp;
+                impl_->direct_present = true;
+                impl_->renderer_name = "gpu-direct";
+                impl_->gpu_driver = dp->directDriverName();
+            } else {
+                impl_->direct_error = derr;
+                std::fprintf(stderr,
+                             "[present] GPU 直出不可用：%s\n"
+                             "  ⇒ 回退 SDL_Renderer 上传呈现路径（光栅化仍是 --raster gpu；"
+                             "只是每帧多一次 CPU→GPU 上传）\n",
+                             derr.c_str());
+            }
+        }
     }
-    const char* name = SDL_GetRendererName(impl_->renderer);
-    impl_->renderer_name = name ? name : "(unknown)";
-    if (impl_->renderer_name == "software" && !hasDriver(options.driver_list, "software")) {
-        if (err) *err = "SDL 只给出了 software 渲染器（不是 GPU API 路径）；"
-                        "需要显式 --present-driver software 才接受";
-        shutdown();
-        return false;
-    }
-    // ★ 只有 renderer 名字是 "gpu" 才问 GPU 设备：非 GPU renderer 上 SDL_GetGPURendererDevice
-    //   会**设置** SDL error（"Renderer isn't a GPU renderer"），污染后面的 SDL_GetError()。
-    SDL_GPUDevice* gpu = nullptr;
-    if (impl_->renderer_name == "gpu") gpu = SDL_GetGPURendererDevice(impl_->renderer);
-    impl_->gpu_driver = (gpu != nullptr && SDL_GetGPUDeviceDriver(gpu) != nullptr) ? SDL_GetGPUDeviceDriver(gpu) : "";
-    // ⛔ 不要覆盖 GPU 光栅化后端的名字：`--raster gpu` 时它才是真正的执行者
-    //   （`sdl-gpu/<driver>/<shader format>`），renderer 只是像素上传/呈现的 sink。
-    if (!options.raster_gpu) impl_->raster_name = "sdl-renderer/" + impl_->renderer_name;
 
-    if (!SDL_SetRenderVSync(impl_->renderer, options.vsync ? 1 : 0)) {
-        std::fprintf(stderr, "[present] SDL_SetRenderVSync(%d) 失败：%s\n", options.vsync ? 1 : 0, SDL_GetError());
+    if (!impl_->direct_present) {
+        const char* driver = options.driver_list.empty() ? nullptr : options.driver_list.c_str();
+        impl_->renderer = SDL_CreateRenderer(impl_->window, driver);
+        if (impl_->renderer == nullptr) {
+            if (err) {
+                *err = std::string("SDL_CreateRenderer(") + (driver ? driver : "default") + ") 失败：" +
+                       SDL_GetError();
+                // 直出也失败过时把两条原因都带上（否则 SKIP/报错只说 renderer，看不出直出为什么没成立）
+                if (!impl_->direct_error.empty()) *err += "；GPU 直出也不可用：" + impl_->direct_error;
+            }
+            shutdown();
+            return false;
+        }
+        const char* name = SDL_GetRendererName(impl_->renderer);
+        impl_->renderer_name = name ? name : "(unknown)";
+        if (impl_->renderer_name == "software" && !hasDriver(options.driver_list, "software")) {
+            if (err) *err = "SDL 只给出了 software 渲染器（不是 GPU API 路径）；"
+                            "需要显式 --present-driver software 才接受";
+            shutdown();
+            return false;
+        }
+        // ★ 只有 renderer 名字是 "gpu" 才问 GPU 设备：非 GPU renderer 上 SDL_GetGPURendererDevice
+        //   会**设置** SDL error（"Renderer isn't a GPU renderer"），污染后面的 SDL_GetError()。
+        SDL_GPUDevice* gpu = nullptr;
+        if (impl_->renderer_name == "gpu") gpu = SDL_GetGPURendererDevice(impl_->renderer);
+        impl_->gpu_driver =
+            (gpu != nullptr && SDL_GetGPUDeviceDriver(gpu) != nullptr) ? SDL_GetGPUDeviceDriver(gpu) : "";
+        // ⛔ 不要覆盖 GPU 光栅化后端的名字：`--raster gpu` 时它才是真正的执行者
+        //   （`sdl-gpu/<driver>/<shader format>`），renderer 只是像素上传/呈现的 sink。
+        if (!options.raster_gpu) impl_->raster_name = "sdl-renderer/" + impl_->renderer_name;
+
+        if (!SDL_SetRenderVSync(impl_->renderer, options.vsync ? 1 : 0)) {
+            std::fprintf(stderr, "[present] SDL_SetRenderVSync(%d) 失败：%s\n", options.vsync ? 1 : 0,
+                         SDL_GetError());
+        }
+        SDL_SetRenderDrawColor(impl_->renderer, 0, 0, 0, 255);
     }
-    SDL_SetRenderDrawColor(impl_->renderer, 0, 0, 0, 255);
     return true;
 }
 
 void SdlWindow::shutdown() {
     if (impl_ == nullptr) return;
+    // ★ claim 必须**先于** SDL_DestroyWindow 释放（swapchain 绑定在窗口上）。
+    if (impl_->direct != nullptr) {
+        impl_->direct->directDetachWindow();
+        impl_->direct = nullptr;
+    }
+    impl_->direct_present = false;
+    impl_->direct_error.clear();
+    impl_->direct_w = 0;
+    impl_->direct_h = 0;
     if (impl_->raster_target != nullptr) {
         SDL_DestroyTexture(impl_->raster_target);
         impl_->raster_target = nullptr;
@@ -436,12 +490,15 @@ void SdlWindow::shutdown() {
 bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) {
     // 关窗宽限按**呈现帧**计：WM_CLOSE 在上一帧末尾入队，本帧开始才消耗一格。
     impl_->advanceCloseFrame();
-    if (impl_->renderer == nullptr) {
-        if (err) *err = "SDL 窗口未初始化";
-        return false;
-    }
     if (impl_->device_lost) {
         if (err) *err = "SDL 渲染设备已丢失";
+        return false;
+    }
+    // ★ GPU 直出：target 已经是最新的（GPU 画完 / d3d9::present 上传过 guest）⇒ 直接 blit 到
+    //   swapchain。这条路上没有 SDL_UpdateTexture，也没有 SDL_Renderer。
+    if (impl_->direct_present && impl_->direct != nullptr) return impl_->submitDirect(arena, surface, err);
+    if (impl_->renderer == nullptr) {
+        if (err) *err = "SDL 窗口未初始化";
         return false;
     }
     // GPU 光栅化可能把 render target 留在离屏纹理上；呈现前必须回到窗口。
@@ -512,29 +569,9 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
             if (err) *err = std::string("SDL_RenderReadPixels 失败：") + SDL_GetError();
             return false;
         }
-        if (!impl_->screenshot_path.empty()) {
-            const std::string path = replaceFrameToken(impl_->screenshot_path, impl_->frame_no);
-            if (!SDL_SaveBMP(shot, path.c_str())) {
-                if (err) *err = std::string("SDL_SaveBMP(") + path + ") 失败：" + SDL_GetError();
-                SDL_DestroySurface(shot);
-                return false;
-            }
-        }
-        if (impl_->capture) {
-            SDL_Surface* conv = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_ARGB8888);
-            if (conv != nullptr) {
-                impl_->capture_w = conv->w;
-                impl_->capture_h = conv->h;
-                impl_->capture_argb.assign(static_cast<std::size_t>(conv->w) * conv->h, 0);
-                for (int y = 0; y < conv->h; ++y) {
-                    std::memcpy(impl_->capture_argb.data() + static_cast<std::size_t>(y) * conv->w,
-                                static_cast<const std::uint8_t*>(conv->pixels) + static_cast<std::size_t>(y) * conv->pitch,
-                                static_cast<std::size_t>(conv->w) * 4);
-                }
-                SDL_DestroySurface(conv);
-            }
-        }
+        const bool shot_ok = impl_->saveShot(shot, err);
         SDL_DestroySurface(shot);
+        if (!shot_ok) return false;
     }
 
     if (!SDL_RenderPresent(impl_->renderer)) {
@@ -542,6 +579,88 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
         return false;
     }
     pumpHostEvents();
+    return true;
+}
+
+// 截图（`--present-screenshot`，`{frame}` = 已自增的帧号）+ 测试捕获缓冲。
+// 两条呈现路径共用同一份写盘 / ARGB 转换口径 ⇒ 产物可比。
+bool SdlWindow::Impl::saveShot(SDL_Surface* shot, std::string* err) {
+    if (shot == nullptr) {
+        if (err) *err = "截图 surface 为空";
+        return false;
+    }
+    if (!screenshot_path.empty()) {
+        const std::string path = replaceFrameToken(screenshot_path, frame_no);
+        if (!SDL_SaveBMP(shot, path.c_str())) {
+            if (err) *err = std::string("SDL_SaveBMP(") + path + ") 失败：" + SDL_GetError();
+            return false;
+        }
+    }
+    if (capture) {
+        SDL_Surface* conv = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_ARGB8888);
+        if (conv != nullptr) {
+            capture_w = conv->w;
+            capture_h = conv->h;
+            capture_argb.assign(static_cast<std::size_t>(conv->w) * conv->h, 0);
+            for (int y = 0; y < conv->h; ++y) {
+                std::memcpy(capture_argb.data() + static_cast<std::size_t>(y) * conv->w,
+                            static_cast<const std::uint8_t*>(conv->pixels) + static_cast<std::size_t>(y) * conv->pitch,
+                            static_cast<std::size_t>(conv->w) * 4);
+            }
+            SDL_DestroySurface(conv);
+        }
+    }
+    return true;
+}
+
+// GPU 直出的一帧：窗口尺寸跟随后缓冲 → target → swapchain（letterbox）→（可选）窗口回读。
+bool SdlWindow::Impl::submitDirect(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) {
+    const int w = surface.width;
+    const int h = surface.height;
+    if (w <= 0 || h <= 0) {
+        if (err) *err = "surface 尺寸非法";
+        return false;
+    }
+    if (arena.pixels(surface) == nullptr) {
+        if (err) *err = "arena.pixels(surface) == nullptr";
+        return false;
+    }
+    // ★ 本帧的最新像素在哪儿：`directTargetCurrent()` 由 `d3d9::Present` 在读回之后声明。
+    //   false ⇒ 本帧没有 GPU 绘制 / 不是 D3D9 Present（DDraw Flip、测试直接 submitFrame）⇒
+    //   呈现前必须把 guest 后缓冲上传到 target，否则窗口会停在上一帧。
+    if (!direct->directTargetCurrent()) {
+        if (!direct->directUploadGuest(surface.format, arena.pixels(surface), surface.pitch, w, h, err)) return false;
+    }
+    // 与 SDL_Renderer 路径一致：首帧 / 尺寸变化把窗口尺寸跟到后缓冲。
+    if (!sized || direct_w != w || direct_h != h) {
+        if (!SDL_SetWindowSize(window, w, h)) {
+            if (err) *err = std::string("SDL_SetWindowSize 失败：") + SDL_GetError();
+            return false;
+        }
+        direct_w = w;
+        direct_h = h;
+        sized = true;
+    }
+    ++frame_no;
+    if (!direct->directPresent(err)) return false;
+    // 一帧用过就消费掉：下一位调用方（DDraw Flip / 直接 submitFrame）仍然会先上传 guest。
+    direct->directSetTargetCurrent(false);
+    if (!screenshot_path.empty() || capture) {
+        // ★ swapchain 是 write-only ⇒ 窗口像素从**同一份 target** 回读，再套同一份 letterbox。
+        std::vector<std::uint8_t> xrgb;
+        int rw = 0;
+        int rh = 0;
+        if (!direct->directReadback(&xrgb, &rw, &rh, err)) return false;
+        SDL_Surface* shot = SDL_CreateSurfaceFrom(rw, rh, SDL_PIXELFORMAT_XRGB8888, xrgb.data(), rw * 4);
+        if (shot == nullptr) {
+            if (err) *err = std::string("SDL_CreateSurfaceFrom 失败：") + SDL_GetError();
+            return false;
+        }
+        const bool shot_ok = saveShot(shot, err);
+        SDL_DestroySurface(shot);
+        if (!shot_ok) return false;
+    }
+    pumpEvents(0);
     return true;
 }
 
@@ -563,10 +682,21 @@ bool SdlWindow::stopRequested() const { return impl_->stop; }
 std::string SdlWindow::describe() const {
     std::string out = "driver=" + impl_->renderer_name + " video=" + impl_->video_driver;
     out += " gpu=" + (impl_->gpu_driver.empty() ? std::string("-") : impl_->gpu_driver);
+    if (impl_->direct_present && impl_->direct != nullptr) {
+        out += std::string(" present=direct/") + impl_->direct->directPresentMode();
+    } else if (!impl_->direct_error.empty()) {
+        out += " present=renderer(直出不可用)";
+    }
     return out;
 }
 
 bool SdlWindow::isGpuRenderer() const { return !impl_->gpu_driver.empty(); }
+
+bool SdlWindow::directPresentActive() const { return impl_->direct_present && impl_->direct != nullptr; }
+
+const char* SdlWindow::directPresentMode() const {
+    return (impl_->direct_present && impl_->direct != nullptr) ? impl_->direct->directPresentMode() : "";
+}
 
 const char* SdlWindow::rendererName() const { return impl_->renderer_name.c_str(); }
 
@@ -616,5 +746,9 @@ bool SdlWindow::rasterDrawTextured(const GpuRasterVertex* vertices, std::size_t 
     return impl_->gpu_raster ? impl_->gpu_raster->rasterDrawTextured(vertices, count, texture, state, err) : false;
 }
 bool SdlWindow::rasterDirty() const { return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterDirty(); }
+
+GpuDirectPresenter* SdlWindow::directPresenter() {
+    return impl_->gpu_raster ? impl_->gpu_raster->directPresenter() : nullptr;
+}
 
 }  // namespace lift

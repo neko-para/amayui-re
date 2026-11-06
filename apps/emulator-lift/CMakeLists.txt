@@ -269,6 +269,15 @@ set_tests_properties(gpu-raster PROPERTIES
 add_test(NAME gpu-raster-gpu COMMAND lift-gpu-raster --gpu)
 set_tests_properties(gpu-raster-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
+# ---- GPU 直出（`--present window --raster gpu`）：窗口 claim + target→swapchain ----
+# 判据是**窗口像素 == 送进去的后缓冲**（含 16bpp 转换 / 尺寸变化 / 连续两帧）。
+# 窗口 claim 不成立（dummy 视频 / 无桌面）⇒ SKIP 77：⛔ 不拿 renderer 路径冒充直出。
+# ★ 顶层无条件注册（不需要游戏 / LFS）⇒ pure 档；缺窗口系统时按 SKIP 处理。
+add_executable(lift-gpu-direct-present tests/gpu_direct_present.cpp)
+target_link_libraries(lift-gpu-direct-present PRIVATE emulator-lift-runtime)
+add_test(NAME gpu-direct-present COMMAND lift-gpu-direct-present)
+set_tests_properties(gpu-direct-present PROPERTIES SKIP_RETURN_CODE 77)
+
 # ---- pure：GPU 准入 / 状态映射（TITLE 的 blend 5/6 + separate 2/6、stage0 MODULATE(TEX,TFACTOR)）----
 # 不建机器、不碰 SDL：只是 d3d9::gpuBlendStateFor / gpuTextureModeFor 的期望值。
 add_executable(lift-gpu-mapping tests/gpu_mapping.cpp)
