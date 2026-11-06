@@ -255,6 +255,9 @@ D3DXSprite 的纹理四边形画到 1280×720 BGRA8 + D32 离屏 target，再在
 后缓冲；T&L / 裁剪 / 状态机 / 失败码仍全在 CPU。headless 也可用
 （`--raster gpu --present headless`，dummy 视频 + 离屏），窗口模式共用同一后端。
 
+shader 后端按 **SDL_GPU 的原生格式**选平台：**Windows = D3DCompile → DXBC**，
+**macOS = MSL 源码（Metal）**；其它平台明确失败（⛔ 不静默回退 CPU、不把 DXBC 带进 Metal）。
+
 支持面：无纹理 XYZRHW+DIFFUSE、D3DXSprite 纹理四边形（NEAREST / 顶点色调制 /
 ALPHABLEND，`pTexture=0` 用 1×1 白纹理）、GOURAUD、ONE/ZERO 或 SRCALPHA/INVSRCALPHA、
 深度测试/写/比较、scissor/viewport；纹理 stage 链、alpha test、多 stage、FLAT、16bpp、

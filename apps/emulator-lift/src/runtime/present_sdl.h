@@ -69,7 +69,8 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// 用 SDL_GPU 设备创建真正的 GPU 光栅化后端（需要 SDL_Init(VIDEO)；Windows/DXBC）。
+// 用 SDL_GPU 设备创建真正的 GPU 光栅化后端（需要 SDL_Init(VIDEO)；
+// Windows = DXBC，macOS = MSL/Metal，其它平台明确失败）。
 std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err);
 
 }  // namespace lift

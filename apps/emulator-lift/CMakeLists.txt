@@ -242,7 +242,8 @@ set_tests_properties(present-window PROPERTIES
 add_test(NAME present-window-gpu COMMAND lift-present-window --gpu)
 set_tests_properties(present-window-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
-# ---- GPU 光栅化（--raster gpu）：SDL renderer target + SDL_RenderGeometry ----
+# ---- GPU 光栅化（--raster gpu）：独立 SDL_GPUDevice + 离屏 target + 读回 ----
+# 两档都要求真的 GPU 设备：dummy 视频下建不出设备 ⇒ 返回 77（SKIP），⛔ 不是"跑绿"。
 add_executable(lift-gpu-raster tests/gpu_raster.cpp)
 target_link_libraries(lift-gpu-raster PRIVATE emulator-lift-runtime)
 add_test(NAME gpu-raster COMMAND lift-gpu-raster)

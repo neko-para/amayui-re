@@ -1,8 +1,10 @@
-// emulator-lift · SDL_GPU 光栅化后端（phase 1a：无纹理、XYZRHW、RGBA 顶点色）
+// emulator-lift · SDL_GPU 光栅化后端（屏幕空间三角形 + D3DXSprite 纹理四边形）
 //
 // ★ 与 SDL_Renderer 呈现解耦：自己的 SDL_GPUDevice + BGRA8 颜色 target + D32 深度 target。
 // ★ 顶点由 CPU 做完 T&L/裁剪/屏幕映射；这里转成 NDC 后画 triangle list。
 // ★ 读回只在 Present（或 CPU 回退）发生；A8R8G8B8 的 A 字节按 guest X8 语义归一化为 0。
+// ★ shader 后端按 **SDL_GPU 的原生 shader 格式**分平台：
+//   Windows = D3DCompile → DXBC；macOS = MSL 源码（Metal）。⛔ 不把 DXBC 带进 Metal。
 #include "runtime/present_sdl.h"
 
 #if defined(_WIN32)
@@ -31,6 +33,54 @@ Texture2D g_tex : register(t0, space2);
 SamplerState g_samp : register(s0, space2);
 float4 PSMainTex(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv) * i.color; }
 )";
+constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_DXBC;
+constexpr const char* kShaderFormatName = "DXBC";
+#elif defined(__APPLE__)
+// SDL_GPU 的 Metal 后端直接吃 MSL 源码：
+// · 顶点属性走 [[stage_in]]（location 与 pipeline 的 vertex attributes 对齐）；
+// · 片段插值走 [[user(locnN)]]（与 HLSL 的 TEXCOORD0/1 对齐）；
+// · 纹理/采样器 = [[texture(0)]] / [[sampler(0)]]（SDL 的 MSL 绑定约定）。
+const char* kShaderSource = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSIn {
+    float3 pos [[attribute(0)]];
+    float4 color [[attribute(1)]];
+    float2 uv [[attribute(2)]];
+};
+
+struct VSOut {
+    float4 pos [[position]];
+    float4 color [[user(locn0)]];
+    float2 uv [[user(locn1)]];
+};
+
+vertex VSOut VSMain(VSIn in [[stage_in]]) {
+    VSOut out;
+    out.pos = float4(in.pos, 1.0);
+    out.color = in.color;
+    out.uv = in.uv;
+    return out;
+}
+
+struct FSIn {
+    float4 color [[user(locn0)]];
+    float2 uv [[user(locn1)]];
+};
+
+fragment float4 PSMain(FSIn in [[stage_in]]) {
+    return in.color;
+}
+
+fragment float4 PSMainTex(FSIn in [[stage_in]],
+                          texture2d<float> tex [[texture(0)]],
+                          sampler samp [[sampler(0)]]) {
+    return tex.sample(samp, in.uv) * in.color;
+}
+)MSL";
+constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_MSL;
+constexpr const char* kShaderFormatName = "MSL";
 #endif
 
 class SdlGpuRaster final : public GpuRaster {
@@ -38,18 +88,19 @@ public:
     ~SdlGpuRaster() override { shutdown(); }
 
     bool init(std::string* err) {
-#if defined(_WIN32)
-        device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXBC, true, nullptr);
+#if defined(_WIN32) || defined(__APPLE__)
+        device_ = SDL_CreateGPUDevice(kShaderFormat, true, nullptr);
         if (device_ == nullptr) {
-            if (err) *err = std::string("SDL_CreateGPUDevice(DXBC) 失败：") + SDL_GetError();
+            if (err) *err = std::string("SDL_CreateGPUDevice(") + kShaderFormatName + ") 失败：" + SDL_GetError();
             return false;
         }
         const char* drv = SDL_GetGPUDeviceDriver(device_);
-        name_ = std::string("sdl-gpu/") + (drv ? drv : "?");
+        name_ = std::string("sdl-gpu/") + (drv ? drv : "?") + "/" + kShaderFormatName;
         if (!createShaders(err)) return false;
+        if (!createSampler(err)) return false;
         return true;
 #else
-        if (err) *err = "SDL_GPU 光栅化 phase 1 只在 Windows/DXBC 上提供";
+        if (err) *err = "SDL_GPU 光栅化后端：当前平台没有内置 shader 后端（Windows=DXBC / macOS=MSL）";
         return false;
 #endif
     }
@@ -485,7 +536,7 @@ private:
             ci.code = static_cast<const Uint8*>(b->GetBufferPointer());
             ci.code_size = b->GetBufferSize();
             ci.entrypoint = entry;
-            ci.format = SDL_GPU_SHADERFORMAT_DXBC;
+            ci.format = kShaderFormat;
             ci.stage = stage;
             ci.num_samplers = samplers;
             return SDL_CreateGPUShader(device_, &ci);
@@ -506,10 +557,38 @@ private:
         if (errors) errors->Release();
         pixel_shader_tex_ = make(pst, SDL_GPU_SHADERSTAGE_FRAGMENT, "PSMainTex", 1);
         pst->Release();
-        if (pixel_shader_tex_ == nullptr) {
-            if (err) *err = std::string("SDL_CreateGPUShader(texture) 失败：") + SDL_GetError();
+        if (vertex_shader_ == nullptr || pixel_shader_ == nullptr || pixel_shader_tex_ == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUShader(DXBC) 失败：") + SDL_GetError();
             return false;
         }
+        return true;
+    }
+#elif defined(__APPLE__)
+    bool createShaders(std::string* err) {
+        auto make = [&](const char* entry, SDL_GPUShaderStage stage, Uint32 samplers) -> SDL_GPUShader* {
+            SDL_GPUShaderCreateInfo ci{};
+            ci.code = reinterpret_cast<const Uint8*>(kShaderSource);
+            ci.code_size = std::strlen(kShaderSource);
+            ci.entrypoint = entry;
+            ci.format = kShaderFormat;
+            ci.stage = stage;
+            ci.num_samplers = samplers;
+            return SDL_CreateGPUShader(device_, &ci);
+        };
+        vertex_shader_ = make("VSMain", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        pixel_shader_ = make("PSMain", SDL_GPU_SHADERSTAGE_FRAGMENT, 0);
+        pixel_shader_tex_ = make("PSMainTex", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+        if (vertex_shader_ == nullptr || pixel_shader_ == nullptr || pixel_shader_tex_ == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUShader(MSL) 失败：") + SDL_GetError();
+            return false;
+        }
+        return true;
+    }
+#else
+    bool createShaders(std::string*) { return false; }
+#endif
+
+    bool createSampler(std::string* err) {
         SDL_GPUSamplerCreateInfo si{};
         si.min_filter = SDL_GPU_FILTER_NEAREST;
         si.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -518,15 +597,12 @@ private:
         si.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
         si.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
         sampler_ = SDL_CreateGPUSampler(device_, &si);
-        if (vertex_shader_ == nullptr || pixel_shader_ == nullptr || sampler_ == nullptr) {
-            if (err) *err = std::string("SDL 创建 shader/sampler 失败：") + SDL_GetError();
+        if (sampler_ == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUSampler 失败：") + SDL_GetError();
             return false;
         }
         return true;
     }
-#else
-    bool createShaders(std::string*) { return false; }
-#endif
 
     void shutdown() {
         if (device_ == nullptr) return;

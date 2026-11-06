@@ -80,7 +80,7 @@ void usage() {
         "  --present-vsync 0|1       窗口垂直同步（缺省 0；1 会改变墙钟）\n"
         "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
         "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
-        "  --raster <mode>    cpu（缺省）/ gpu：D3D9 fixed-function 光栅化后端；gpu 需要 --present window\n"
+        "  --raster <mode>    cpu（缺省）/ gpu：D3D9 fixed-function 光栅化后端（window 或 headless 离屏都可用）\n"
         "  --raster-sprites 0|1      D3DXSprite 是否也走 GPU（缺省 1；A/B 用）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
         "  --native-overrides <list>  逗号分隔的 guest 函数名（或 all）：函数级 native override（缺省关）\n"

@@ -133,7 +133,9 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     SDL_GPUDevice* gpu = nullptr;
     if (impl_->renderer_name == "gpu") gpu = SDL_GetGPURendererDevice(impl_->renderer);
     impl_->gpu_driver = (gpu != nullptr && SDL_GetGPUDeviceDriver(gpu) != nullptr) ? SDL_GetGPUDeviceDriver(gpu) : "";
-    impl_->raster_name = "sdl-renderer/" + impl_->renderer_name;
+    // ⛔ 不要覆盖 GPU 光栅化后端的名字：`--raster gpu` 时它才是真正的执行者
+    //   （`sdl-gpu/<driver>/<shader format>`），renderer 只是像素上传/呈现的 sink。
+    if (!options.raster_gpu) impl_->raster_name = "sdl-renderer/" + impl_->renderer_name;
 
     if (!SDL_SetRenderVSync(impl_->renderer, options.vsync ? 1 : 0)) {
         std::fprintf(stderr, "[present] SDL_SetRenderVSync(%d) 失败：%s\n", options.vsync ? 1 : 0, SDL_GetError());
@@ -174,6 +176,8 @@ void SdlWindow::shutdown() {
         SDL_DestroyWindow(impl_->window);
         impl_->window = nullptr;
     }
+    // GPU 光栅化持有自己的 SDL_GPUDevice：必须在 SDL_Quit 之前释放（Metal 后端尤其如此）。
+    impl_->gpu_raster.reset();
     if (impl_->sdl_inited) {
         SDL_Quit();
         impl_->sdl_inited = false;
@@ -355,16 +359,17 @@ bool SdlWindow::readbackPixel(int x, int y, std::uint32_t* argb, std::string* er
 }
 
 // ---------------------------------------------------------------------------------------
-// GPU 光栅化（--raster gpu）：同一 SDL renderer 上的离屏 target + SDL_RenderGeometry
+// GPU 光栅化（--raster gpu）：独立 SDL_GPUDevice 的离屏 target（后端在 d3d9_gpu.cpp）
 // ---------------------------------------------------------------------------------------
-GpuRaster* SdlWindow::gpuRaster() { return impl_->gpu_raster.get(); }
+GpuRaster* SdlWindow::gpuRaster() { return impl_->gpu_raster ? this : nullptr; }
 
 bool SdlWindow::rasterActive() const { return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterActive(); }
 
 const char* SdlWindow::rasterName() const { return impl_->raster_name.c_str(); }
 
 bool SdlWindow::rasterSpritesEnabled() const {
-    return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterSpritesEnabled();
+    // `--raster-sprites 0` 是 A/B 开关：即使后端本身支持 sprite，也必须能退回 CPU 路径。
+    return impl_->raster_sprites && impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterSpritesEnabled();
 }
 
 bool SdlWindow::rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err) {
@@ -385,12 +390,7 @@ bool SdlWindow::rasterDraw(const GpuRasterVertex* vertices, std::size_t count, c
 bool SdlWindow::rasterDrawTextured(const GpuRasterVertex* vertices, std::size_t count,
                                    const GpuRasterTexture& texture, const GpuRasterState& state,
                                    std::string* err) {
-    (void)vertices;
-    (void)count;
-    (void)texture;
-    (void)state;
-    if (err) *err = "SDL_GPU phase 1 不支持 sprite 纹理";
-    return false;
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterDrawTextured(vertices, count, texture, state, err) : false;
 }
 bool SdlWindow::rasterDirty() const { return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterDirty(); }
 
