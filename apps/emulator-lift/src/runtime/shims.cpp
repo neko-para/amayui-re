@@ -301,6 +301,14 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     call.def = &def;
     call.stdcall_bytes = (def.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(def.argc) * 4u : 0u;
 
+    // ★ 下面 `fn` 可能调用 `addRuntime`（COM 方法 / 运行期导出）⇒ `defs_` 可能重新分配，
+    //   `def` 引用随时失效。trace 需要的字段**先拷出来**（trace 只在 shim 返回后使用）。
+    const std::uint32_t trace_id = def.id;
+    const std::string trace_module = def.module;
+    const std::string trace_name = def.name;
+    const int trace_argc = def.argc;
+    const bool trace_on = trace_;
+
     def.called = true;
     ++def.call_count;
 
@@ -322,10 +330,11 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     def.fn(cpu, call);
     cpu.eax() = call.result;
 
-    if (trace_) {
+    if (trace_on) {
         // ★ 确定性：只打参数原始字 + 返回值，不打时间、不打宿主地址
-        std::fprintf(trace_out_, "[shim] %3u %s!%s(", def.id, def.module.c_str(), def.name.c_str());
-        for (int i = 0; i < def.argc; ++i) {
+        // ★ 用**已拷贝**的 id/module/name/argc：`fn` 里 addRuntime 可能让 `def` 悬垂。
+        std::fprintf(trace_out_, "[shim] %3u %s!%s(", trace_id, trace_module.c_str(), trace_name.c_str());
+        for (int i = 0; i < trace_argc; ++i) {
             std::fprintf(trace_out_, "%s%08X", i ? "," : "", call.u32(i));
         }
         std::fprintf(trace_out_, ") -> %08X  ret=%08X\n", call.result, ret_ea);

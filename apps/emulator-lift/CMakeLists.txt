@@ -96,6 +96,8 @@ add_library(emulator-lift-runtime STATIC
     src/shims/dsound.cpp
     src/shims/winmm_joystick.cpp
     src/shims/mf_video.cpp
+    # ★ M4 起步：DirectShow / AMultiMediaStream 形状层（CoCreateInstance 不再 loud trap）
+    src/shims/quartz_video.cpp
     src/shims/kernel32_bootstrap.cpp)
 target_include_directories(emulator-lift-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(emulator-lift-runtime
@@ -294,6 +296,10 @@ target_link_libraries(lift-codepage PRIVATE emulator-lift-runtime)
 add_test(NAME codepage COMMAND lift-codepage)
 
 # ---- pure：明确 no-op 的三族（注册表 / 音频 / 视频；SCOPE §1）----
+add_executable(lift-quartz-video tests/quartz_video.cpp)
+target_link_libraries(lift-quartz-video PRIVATE emulator-lift-runtime)
+add_test(NAME quartz-video COMMAND lift-quartz-video)
+
 add_executable(lift-noop tests/noop_shims.cpp)
 target_link_libraries(lift-noop PRIVATE emulator-lift-runtime)
 add_test(NAME noop COMMAND lift-noop)

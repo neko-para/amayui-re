@@ -76,6 +76,9 @@ void registerWinmmAudioShims(ShimRegistry& shims);  // winmm_audio.cpp（音频 
 void registerDsoundShims(ShimRegistry& shims);      // dsound.cpp
 void registerWinmmJoystickShims(ShimRegistry& shims);  // winmm_joystick.cpp（摇杆永久不做，SCOPE §1）
 void registerVideoShims(ShimRegistry& shims);     // mf_video.cpp（视频 / 媒体 no-op，SCOPE §1）
+// ★ M4 起步：DirectShow / AMultiMediaStream 的**形状层**（CoCreateInstance + 影片接口立即完成）。
+//   目标不是解码，而是让"准备播放视频"不再停在 ole32!CoCreateInstance。
+void registerQuartzVideoShims(ShimRegistry& shims);  // quartz_video.cpp
 void registerVersionShims(ShimRegistry& shims);   // kernel32_version.cpp（版本资源查询：真实失败码）
 void registerDdrawShims(ShimRegistry& shims);     // ddraw.cpp（P1：DirectDrawCreate 动态导出 + COM 方法表）
 // ★ M2 · D3D9 最小设备簇（用户 2026-11-05 裁决"确认需要实现 D3D 接口"）：

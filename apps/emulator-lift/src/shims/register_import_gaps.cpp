@@ -22,11 +22,6 @@ void registerImportGaps(ShimRegistry& shims) {
     shims.addUnimplemented("d3dx9_43", "D3DXLoadMeshHierarchyFromXInMemory", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXLoadSurfaceFromSurface", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXMatrixDecompose", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
-    shims.addUnimplemented("ole32", "CoCreateInstance", "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1");
-    shims.addUnimplemented("ole32", "PropVariantClear", "COM 内存族已实现（同一个 guest 堆）；其余 ole32 导入属 M2/M3，不属 M1");
-    shims.addUnimplemented("oleaut32", "#7", "oleaut32：M2/M3（VARIANT / 自动化），不属 M1");
-    shims.addUnimplemented("oleaut32", "#8", "oleaut32：M2/M3（VARIANT / 自动化），不属 M1");
-    shims.addUnimplemented("oleaut32", "#9", "oleaut32：M2/M3（VARIANT / 自动化），不属 M1");
 }
 
 }  // namespace lift

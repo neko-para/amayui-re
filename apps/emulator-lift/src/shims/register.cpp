@@ -94,6 +94,7 @@ void registerKernel32Shims(ShimRegistry& shims) {
     registerWinmmAudioShims(shims);
     registerWinmmJoystickShims(shims);
     registerVideoShims(shims);
+    registerQuartzVideoShims(shims);  // M4 起步：DirectShow / AMultiMediaStream 形状层（CoCreateInstance 不再 trap）
     // ★ M2 · DirectSound silent 层：`.lst` 0x00406D25 → sub_4B5C50 = LoadLibraryA("DSOUND.DLL")
     //   + GetProcAddress("DirectSoundCreate")。它是 winmm 之外**另一条**音频路径（DirectSound），
     //   口径同为 SCOPE §1「音频 = silent」：设备/缓冲**真建**、`Lock` 给真内存、`Play` 记账，
