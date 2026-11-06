@@ -283,7 +283,7 @@ BORDER/MIRROR_ONCE、`BOTH*` 混合 ⇒ 回退 CPU。
 # 显式启用（默认关；名字来自 .lst 的 `proc near` / `COLLAPSED FUNCTION` 行）
 ./out/emulator-lift ... --max-frames 1 --native-overrides _memcpy
 ./out/emulator-lift ... --native-overrides all
-# boot 加速的已取证集合（CRT 叶子 + S4IC/LZSS sub_436A80）
+# boot 加速的已取证集合（CRT 叶子 + S4IC/LZSS）
 ./out/emulator-lift ... --max-frames 1 --native-overrides \
   _memcpy,_memcpy_0,_memset,_strlen,sub_401000,sub_436A80
 ```
@@ -294,8 +294,10 @@ BORDER/MIRROR_ONCE、`BOTH*` 混合 ⇒ 回退 CPU。
   函数归属是**近似**（chunk 会归到相邻函数，见 `src/corpus/lst_index.h`）。
 - 当前覆盖 CRT 叶子（`_memcpy` / `_memcpy_0` / `_memset` / `_strlen` / 自定义 `sub_401000`）与
   S4IC/LZSS `sub_436A80`（`__thiscall`，`info[0]=输出大小`、`info[2]=压缩大小`）。
+  `sub_48B090`（`NormalTexture::UploadImage`）的 native 原型**未注册**：它会破坏后续帧纹理；
+  缺陷单 `data/requirements/01M6PGQEXZYPYE3Y07C8JCH7HT.md`，修复前不要加入 known 表。
   `_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节，返回约定未核）⇒ 暂不覆盖；
-  `sub_48B090`（1/4/8bpp 调色板转换）语义面更大，未覆盖。
+  `sub_414AC0`（SYS4INI 初始化）不做整函数 native（文件 I/O + guest 容器/堆语义）。
 - ⚠ `--until ea` 指向被 override 的函数体内部时**不会生效**（函数体不再逐条执行）；
   `--bench` 的 insns / MIPS 也按"一次 override = 1 条"计 —— 不要拿它们做解释器吞吐的绝对比较。
 - 是否继续扩展、以及 A/B 数字见需求单（§5）。

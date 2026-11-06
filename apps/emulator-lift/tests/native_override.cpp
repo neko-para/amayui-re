@@ -33,6 +33,32 @@ const std::uint8_t kMemcpyRef[] = {0x55, 0x8B, 0xEC, 0x56, 0x57, 0x8B, 0x7D, 0x0
 const std::uint8_t kMemsetRef[] = {0x55, 0x8B, 0xEC, 0x57, 0x8B, 0x7D, 0x08, 0x8B, 0x45, 0x0C,
                                    0x8B, 0x4D, 0x10, 0xF3, 0xAA, 0x8B, 0x45, 0x08, 0x5F, 0x5D, 0xC3};
 
+std::uint32_t g_nested_fn_ea = 0;
+
+bool nestedCallNative(lift::X86& cpu, lift::GuestMemory&, std::uint32_t* result) {
+    *result = 0;
+    lift::startNestedGuestCall(
+        cpu, g_nested_fn_ea, {0x11u, 0x22u}, 4u, "test:nested",
+        [](lift::X86&, std::uint32_t callback_result, std::uint32_t* out) {
+            *out = callback_result + 1u;
+            return true;
+        },
+        nullptr);
+    return false;  // invoke() 通过 g_nested_started 识别“已铺帧”
+}
+
+bool nestedThisNative(lift::X86& cpu, lift::GuestMemory&, std::uint32_t* result) {
+    *result = 0;
+    lift::startNestedGuestCall(
+        cpu, g_nested_fn_ea, {0x11u, 0x22u}, 16u, "test:nested-thiscall",
+        [](lift::X86&, std::uint32_t callback_result, std::uint32_t* out) {
+            *out = callback_result;
+            return true;
+        },
+        nullptr);
+    return false;
+}
+
 bool rejectNative(lift::X86&, lift::GuestMemory&, std::uint32_t*) { return false; }
 
 // 调一个 **guest cdecl 函数**：push 参数 → call → add esp,N → ret（哨兵）。
@@ -335,6 +361,76 @@ int main() {
         std::uint8_t copy[4] = {};
         LIFT_CHECK(lift::lzssDecode(raw, sizeof(raw), copy, sizeof(copy), ring));
         LIFT_CHECK(std::memcmp(copy, raw, 4) == 0);
+    }
+
+    // ---- ⑤ sub_48B090 的 8bpp→32bpp 核：bottom-up 源、top-down 目标、alpha 可选 ----
+    {
+        std::uint8_t pal[8] = {0, 0, 0, 0, 0x10, 0x20, 0x30, 0};
+        std::uint8_t src[2][8] = {};  // stride 8，2x2；内存 row0 是目标最后一行
+        src[0][0] = 0;
+        src[0][1] = 1;
+        src[1][0] = 1;
+        src[1][1] = 0;
+        std::uint32_t dst[2][2] = {};
+        lift::convertPal8To32(&src[0][0], 8, 2, 2, pal, reinterpret_cast<std::uint8_t*>(&dst[0][0]), 8, nullptr);
+        LIFT_CHECK_EQ_U32(dst[0][0], 0xFF302010u);
+        LIFT_CHECK_EQ_U32(dst[0][1], 0xFF000000u);
+        LIFT_CHECK_EQ_U32(dst[1][0], 0xFF000000u);
+        LIFT_CHECK_EQ_U32(dst[1][1], 0xFF302010u);
+
+        const std::uint8_t alpha[4] = {0x00, 0x7F, 0xFF, 0xAA};
+        std::uint32_t dst2[2][2] = {};
+        lift::convertPal8To32(&src[0][0], 8, 2, 2, pal, reinterpret_cast<std::uint8_t*>(&dst2[0][0]), 8, alpha);
+        LIFT_CHECK_EQ_U32(dst2[0][0], 0xFF302010u);  // source row1 col0 -> alpha[2]
+        LIFT_CHECK_EQ_U32(dst2[0][1], 0xAA000000u);  // source row1 col1 -> alpha[3]
+        LIFT_CHECK_EQ_U32(dst2[1][0], 0x00000000u);  // source row0 col0 -> alpha[0]
+        LIFT_CHECK_EQ_U32(dst2[1][1], 0x7F302010u);  // source row0 col1 -> alpha[1]
+    }
+
+    // ---- ⑥ native override 的嵌套 guest 调用：native → guest → native → 原返回 ----
+    {
+        lift_fixture::Fixture fx;
+        LIFT_CHECK(fx.ok);
+        // guest 回调：[esp+4] 是第一个参数；retn 8 弹掉两个参数，EAX=0x11。
+        const std::uint8_t nested_ref[] = {0x8B, 0x44, 0x24, 0x04, 0xC2, 0x08, 0x00};
+        LIFT_CHECK(fx.m.placeCode(kOtherFnEa, nested_ref, sizeof(nested_ref), &fx.err));
+        g_nested_fn_ea = kOtherFnEa;
+        std::string err;
+        LIFT_CHECK(fx.m.overrides().add(kFnEa, "nested_call", lift::GuestConv::Cdecl, 0, nestedCallNative, &err));
+        const std::uint32_t ret = callCdecl(fx, kFnEa, {});
+        LIFT_CHECK(fx.ok);
+        LIFT_CHECK_EQ_U32(ret, 0x12u);
+        LIFT_CHECK_EQ_U32(fx.m.overrides().at(0)->hits, 1u);
+        LIFT_CHECK_EQ_U32(fx.m.overrides().at(0)->fallbacks, 0u);
+    }
+
+    // ---- ⑦ thiscall 的嵌套调用：native 帧 cleanup = 4 + 12，模拟 sub_48B090 ----
+    {
+        lift_fixture::Fixture fx;
+        LIFT_CHECK(fx.ok);
+        // guest 回调: mov eax,[esp+4]; add eax,[esp+8]; retn 8
+        const std::uint8_t sum_ref[] = {0x8B, 0x44, 0x24, 0x04, 0x03, 0x44, 0x24, 0x08, 0xC2, 0x08, 0x00};
+        LIFT_CHECK(fx.m.placeCode(kOtherFnEa, sum_ref, sizeof(sum_ref), &fx.err));
+        g_nested_fn_ea = kOtherFnEa;
+        std::string err;
+        LIFT_CHECK(fx.m.overrides().add(kFnEa, "nested_this", lift::GuestConv::Thiscall, 12, nestedThisNative, &err));
+        const std::uint32_t code_ea = fx.code_cursor;
+        fx.code_cursor += 0x100u;
+        lift_fixture::Asm a(code_ea);
+        a.u8(0xB9);
+        a.u32(0x44u);  // mov ecx, 0x44
+        a.pushImm(0x33u);
+        a.pushImm(0x22u);
+        a.pushImm(0x11u);
+        a.callRel(kFnEa);
+        // thiscall：被调用方（override 的 cleanup=16）弹返回地址 + 12 参数；调用方不再 add esp。
+        a.ret();
+        LIFT_CHECK(fx.m.placeCode(code_ea, a.b.data(), a.b.size(), &fx.err));
+        fx.rearmStack();
+        fx.runCode(code_ea);
+        LIFT_CHECK_EQ_U32(fx.m.cpu().eax(), 0x33u);
+        LIFT_CHECK_EQ_U32(fx.m.overrides().at(0)->hits, 1u);
+        LIFT_CHECK_EQ_U32(fx.m.overrides().at(0)->fallbacks, 0u);
     }
 
     return lift_test::finish("native-override");

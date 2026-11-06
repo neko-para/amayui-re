@@ -380,7 +380,9 @@ RunResult Machine::run(const RunOptions& opts) {
             if (NativeOverride* ov = overrides_.find(cpu_.eip)) {
                 const char* why = nullptr;
                 const std::uint64_t before = ov->fallbacks;
-                if (overrides_.invoke(*ov, cpu_, mem_, &why)) {
+                bool suspended = false;
+                if (overrides_.invoke(*ov, cpu_, mem_, &why, &suspended)) {
+                    if (suspended) continue;
                     if (opts.trace_blocks) std::fprintf(stdout, "[native] %08X %s\n", ov->ea, ov->name.c_str());
                     cpu_.noteInsn(ov->ea, "[native]");
                     ++cpu_.insns;
@@ -446,6 +448,7 @@ RunResult Machine::run(const RunOptions& opts) {
         }
 
         bool left_block = false;
+        const auto block_start = std::chrono::steady_clock::now();
         for (const Insn& in : b->insns) {
             if (opts.until_ea && in.ea == opts.until_ea) {
                 r.reason = StopReason::UntilEa;
@@ -490,6 +493,11 @@ RunResult Machine::run(const RunOptions& opts) {
                 left_block = true;
                 break;
             }
+        }
+        if (opts.profile) {
+            b->ns += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - block_start)
+                    .count());
         }
         if (left_block) continue;
     }
@@ -709,11 +717,13 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
         std::uint32_t ea = 0;
         std::uint64_t hits = 0;
         std::uint64_t weight = 0;
+        std::uint64_t ns = 0;
         const LstFunction* fn = nullptr;
     };
     std::vector<Row> rows;
     rows.reserve(cache_.guestBlocks().size());
     std::uint64_t total = 0;
+    std::uint64_t total_ns = 0;
     for (const auto& kv : cache_.guestBlocks()) {
         const Block& b = *kv.second;
         if (b.hits == 0) continue;
@@ -721,8 +731,10 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
         row.ea = b.ea;
         row.hits = b.hits;
         row.weight = b.hits * static_cast<std::uint64_t>(b.insns.size());
+        row.ns = b.ns;
         row.fn = lst_.loaded() ? lst_.functionAt(b.ea) : nullptr;
         total += row.weight;
+        total_ns += row.ns;
         rows.push_back(row);
     }
     std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.weight != b.weight ? a.weight > b.weight : a.ea < b.ea; });
@@ -753,6 +765,7 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
         const LstFunction* fn = nullptr;
         std::uint64_t hits = 0;
         std::uint64_t weight = 0;
+        std::uint64_t ns = 0;
         std::size_t blocks = 0;
     };
     std::unordered_map<std::uint32_t, FuncRow> by_func;
@@ -763,6 +776,7 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
         f.fn = r.fn;
         f.hits += r.hits;
         f.weight += r.weight;
+        f.ns += r.ns;
         ++f.blocks;
     }
     std::vector<FuncRow> funcs;
@@ -780,6 +794,21 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
                      f.fn ? f.fn->ea : 0u, pct, (unsigned long long)f.hits, (unsigned long long)f.weight, f.blocks,
                      f.fn ? f.fn->name.c_str() : "(no .lst)",
                      (f.fn && !f.fn->signature.empty()) ? "  " : "", f.fn ? f.fn->signature.c_str() : "");
+    }
+    // ★ 墙钟表：只统计划 guest 块的执行时间（shim / native override 不在内）。
+    std::vector<FuncRow> by_time = funcs;
+    std::sort(by_time.begin(), by_time.end(), [](const FuncRow& a, const FuncRow& b) {
+        if (a.ns != b.ns) return a.ns > b.ns;
+        return a.key < b.key;
+    });
+    std::fprintf(out, "\n=== profile: functions by wall time（guest 块执行时间；前 %zu）===\n", top);
+    std::fprintf(out, "total guest-block wall = %.1f ms\n", static_cast<double>(total_ns) / 1e6);
+    for (std::size_t i = 0; i < by_time.size() && i < top; ++i) {
+        const FuncRow& f = by_time[i];
+        const double pct = total_ns ? 100.0 * static_cast<double>(f.ns) / static_cast<double>(total_ns) : 0.0;
+        std::fprintf(out, "  %2zu. %08X %7.1f ms %6.2f%% hits=%-10llu blocks=%-4zu %s\n", i + 1,
+                     f.fn ? f.fn->ea : 0u, static_cast<double>(f.ns) / 1e6, pct, (unsigned long long)f.hits, f.blocks,
+                     f.fn ? f.fn->name.c_str() : "(no .lst)");
     }
     // ★ override 的函数体**不会**进块 profile（被宿主实现整段替代）⇒ 显式说明，否则 profile 会误导
     //   "这个热点已经不在"。

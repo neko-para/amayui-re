@@ -11,6 +11,9 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
+
+#include "runtime/guest_call.h"
 
 namespace lift {
 
@@ -55,7 +58,9 @@ public:
     const NativeOverride* find(std::uint32_t ea) const;
 
     // 执行一次命中：成功 ⇒ 设好 EAX / EIP / ESP 并返回 true；false ⇒ 原因写进 *why（调用方回退解释器）。
-    bool invoke(NativeOverride& ov, X86& cpu, GuestMemory& mem, const char** why);
+    // suspended=true ⇒ native 实现已经用 startNestedGuestCall() 铺了一个 guest 回调帧，
+    //   EIP/ESP 已由 GuestCallStack 设置，调用方必须直接 continue（⛔ 不要回退解释器）。
+    bool invoke(NativeOverride& ov, X86& cpu, GuestMemory& mem, const char** why, bool* suspended = nullptr);
 
 private:
     std::array<NativeOverride, kMax> entries_{};
@@ -85,5 +90,13 @@ bool nativeLzss436A80(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // 纯解码核（测试直接用；src/comp = 输入，dst/out = 输出，ring = 4096 B 字典）。
 bool lzssDecode(const std::uint8_t* src, std::uint32_t comp_size, std::uint8_t* dst, std::uint32_t out_size,
                 std::uint8_t ring[4096]);
+// sub_48B090 的 8bpp→32bpp 纯转换核（源 bottom-up，目标 top-down；alpha 可为空）。
+void convertPal8To32(const std::uint8_t* src, std::uint32_t stride, std::uint32_t w, std::uint32_t h,
+                     const std::uint8_t* pal, std::uint8_t* dst, std::uint32_t pitch, const std::uint8_t* alpha);
+void convert24To32(const std::uint8_t* src, std::uint32_t stride, std::uint32_t w, std::uint32_t h,
+                   std::uint8_t* dst, std::uint32_t pitch, const std::uint8_t* alpha);
+// 从 native override 里铺一个 guest 回调帧（必须由 NativeOverrideTable::invoke 的 suspended 机制接住）。
+bool startNestedGuestCall(X86& cpu, std::uint32_t fn, const std::vector<std::uint32_t>& args,
+                          std::uint32_t cleanup_bytes, const char* api, GuestContinuation cont, std::string* err);
 
 }  // namespace lift

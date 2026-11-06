@@ -166,6 +166,8 @@ struct Block {
     // ★ profile（默认 0；只有 `--profile` 才累加）：本块被 dispatcher 取到的次数。
     //   块级计数是"零查找"的：加在缓存实体上，热路径只多一次自增（⛔ 不做 EA→map 查找）。
     std::uint64_t hits = 0;
+    // ★ 墙钟（只有 --profile 才累加）：块执行耗时，供"总耗时 >1s 的函数"排序。
+    std::uint64_t ns = 0;
 };
 
 }  // namespace lift
