@@ -17,8 +17,9 @@
 //     本线没有 mip 链 / LOD / 导数 ⇒ 不按 LOD 在 MIN/MAG 之间选，这是**明确记录的近似**
 //     （决策见 `samplerUsesLinear`，⛔ 不是"参数传了却不用"）。
 //   · 采样器 MIPFILTER / MAXMIPLEVEL / LODBIAS：本线只有 level 0 ⇒ 记录、不影响像素。
-//   · 多重采样 / 抗锯齿 / 线框 / patch / 顶点混合 / 顶点声明（D3DVERTEXELEMENT9）：
-//     不支持 ⇒ 记录 + 一行日志；顶点声明**有**对象时 Draw 会响亮失败（不猜格式）。
+//   · 多重采样 / 抗锯齿 / 线框 / patch / 顶点混合：不支持 ⇒ 记录 + 一行日志。
+//   · 顶点声明（D3DVERTEXELEMENT9）：`CreateVertexDeclaration` / `SetVertexDeclaration` 已接对象形状，
+//     但 Draw 仍只认 FVF ⇒ 有声明时响亮失败（⛔ 不猜两个 stream 的语义）。
 //   · 纹理级运算：支持 DISABLE/SELECTARG1/2/MODULATE(2X/4X)/ADD/ADDSIGNED(2X)/SUBTRACT/
 //     ADDSMOOTH/BLEND*ALPHA/MULTIPLYADD/LERP；其余 ⇒ 记录一次 + 退回 SELECTARG1。
 //   · 光栅：像素中心采样 + 左上填充规则（顶点顺序 = 屏幕空间顺时针 = D3D 正面）。
@@ -2030,13 +2031,19 @@ std::uint32_t setVertexDeclaration(X86& cpu, std::uint32_t dev, std::uint32_t de
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
     if (decl != 0) {
-        // 本线没有 IDirect3DVertexDeclaration9（CreateVertexDeclaration 未实现）⇒ 任何非空对象都
-        // 不可能是我们的 ⇒ 这是"用声明代替 FVF"的路径，本线不做（⛔ 不猜顶点格式）
-        pipeLog("SetVertexDeclaration",
-                "pDecl=0x%08X：本线不支持顶点声明（只支持 SetFVF）⇒ D3DERR_INVALIDCALL（⛔ 不猜格式）",
-                decl);
-        if (why) *why = "D3D9 流水线：本线不支持顶点声明";
-        return kInvalidCall;
+        // 只接受**本模块建的** IDirect3DVertexDeclaration9。用声明代替 FVF 是合法路径；本线的
+        // Draw 仍只认 FVF（`drawPrecheck` 会 D3DERR_INVALIDCALL），但 Set 本身不该拦。
+        const char* iface = cpu.com ? cpu.com->ifaceOf(decl) : nullptr;
+        if (!cpu.com || !cpu.com->find(decl) || !iface ||
+            std::strcmp(iface, "IDirect3DVertexDeclaration9") != 0) {
+            pipeLog("SetVertexDeclaration", "pDecl=0x%08X 不是本模块的 IDirect3DVertexDeclaration9 ⇒ D3DERR_INVALIDCALL",
+                    decl);
+            if (why) *why = "D3D9 流水线：SetVertexDeclaration 收到非顶点声明对象";
+            return kInvalidCall;
+        }
+        plSet(cpu, pe, kPlVertexDecl, decl);
+        plSet(cpu, pe, kPlFvf, 0u);  // 用声明就清掉 FVF（D3D 二选一）
+        return kOk;
     }
     plSet(cpu, pe, kPlVertexDecl, 0u);
     return kOk;

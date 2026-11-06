@@ -17,7 +17,6 @@ void registerImportGaps(ShimRegistry& shims) {
     shims.addUnimplemented("d3d9", "Direct3DCreate9Ex", "M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXComputeNormals", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXCreateEffectFromResourceA", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
-    shims.addUnimplemented("d3dx9_43", "D3DXCreateTextureFromFileInMemory", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXFrameFind", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXLoadMeshHierarchyFromXInMemory", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");
     shims.addUnimplemented("d3dx9_43", "D3DXLoadSurfaceFromSurface", "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）");

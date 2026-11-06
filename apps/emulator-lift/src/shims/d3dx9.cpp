@@ -49,6 +49,15 @@ constexpr std::uint8_t kIidID3DXSprite[16] = {0x2D, 0x76, 0x0B, 0xBA, 0x28, 0x7D
 constexpr std::uint8_t kIidUnknown[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                           0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46};
 
+void d3dxWarn(const char* method, const char* fmt, ...) {
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", method ? method : "?");
+    va_list ap;
+    va_start(ap, fmt);
+    logV(LogLevel::Warn, LogD3dx9, prefix, fmt, ap);
+    va_end(ap);
+}
+
 void d3dxLog(const char* method, const char* fmt, ...) {
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", method ? method : "?");
@@ -768,6 +777,208 @@ const std::vector<ComMethod>& textureMethods() {
     return methods;
 }
 
+// ---------------------------------------------------------------------------------------
+// D3DXCreateTextureFromFileInMemory：只**读文件头**建一张同尺寸的纹理（stub 级）
+//
+// ★ 为什么先做到这里：TITLE 的 Live2D 纹理走这条导出（`.lst` 0x478398，调用点
+//   `sub_478370`；参数 = pDevice / pSrcData / SrcDataSize / ppTexture）。此前它是导入缺口，
+//   游戏在 `0x47839D test eax,eax; jns` 之后拿到失败 ⇒ 走不到模型 draw。
+//   现在返回一张**尺寸正确、像素清零**的 IDirect3DTexture9：足以让调用方继续、足以枚举
+//   后续接口；纹理内容解码是下一层（`runtime/d3dx9*` 里目前没有 PNG 解码器）。
+// ★ 支持的容器：PNG / BMP / DDS（仅未压缩 16/24/32bpp）。其它格式返回 E_FAIL（调用方本来
+//   就会处理 HRESULT 失败），并且 Warn 里点名首 8 字节 —— ⛔ 不猜尺寸。
+// ★ 像素为零 ⇒ 若后续有 draw，模型会透明/黑；这是**故意的 stub**，不是"以为画对了"。
+// ---------------------------------------------------------------------------------------
+struct ImageInfo {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t format = 0;
+    const char* kind = "?";
+};
+
+std::uint32_t rdBe32(const std::uint8_t* p) {
+    return (static_cast<std::uint32_t>(p[0]) << 24) | (static_cast<std::uint32_t>(p[1]) << 16) |
+           (static_cast<std::uint32_t>(p[2]) << 8) | static_cast<std::uint32_t>(p[3]);
+}
+std::uint32_t rdLe32(const std::uint8_t* p) {
+    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+           (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+}
+std::uint16_t rdLe16(const std::uint8_t* p) {
+    return static_cast<std::uint16_t>(p[0] | (static_cast<std::uint16_t>(p[1]) << 8));
+}
+
+bool parseImageHeader(const std::uint8_t* b, std::size_t n, ImageInfo* out, std::string* why) {
+    static const std::uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    if (n >= 8 && std::memcmp(b, kPngSig, 8) == 0) {
+        if (n < 33 || std::memcmp(b + 12, "IHDR", 4) != 0) {
+            if (why) *why = "PNG：缺 IHDR（或文件 < 33 B）";
+            return false;
+        }
+        const std::uint32_t w = rdBe32(b + 16);
+        const std::uint32_t h = rdBe32(b + 20);
+        if (w == 0 || h == 0) {
+            if (why) *why = "PNG：IHDR 的宽/高为 0";
+            return false;
+        }
+        // D3DX 对 PNG 走 32bpp；带 alpha 的模型贴图必须有 alpha 通道，否则整张图会被当成不透明。
+        out->kind = "PNG";
+        out->width = w;
+        out->height = h;
+        out->format = d3d9::kFmtA8R8G8B8;
+        return true;
+    }
+    if (n >= 34 && b[0] == 'B' && b[1] == 'M') {
+        const std::uint16_t bpp = rdLe16(b + 28);
+        const std::uint32_t compression = rdLe32(b + 30);
+        std::int32_t h = static_cast<std::int32_t>(rdLe32(b + 22));
+        if (h < 0) h = -h;
+        const std::uint32_t w = rdLe32(b + 18);
+        if (w == 0 || h == 0) {
+            if (why) *why = "BMP：宽/高为 0";
+            return false;
+        }
+        if (compression != 0) {
+            if (why) *why = "BMP：只支持 BI_RGB（compression=0）";
+            return false;
+        }
+        std::uint32_t fmt = 0;
+        if (bpp == 32) fmt = d3d9::kFmtX8R8G8B8;       // BI_RGB 的 alpha 字节通常无定义
+        else if (bpp == 24) fmt = d3d9::kFmtX8R8G8B8;  // D3DX 会补成 32bpp
+        else if (bpp == 16) fmt = d3d9::kFmtR5G6B5;
+        else {
+            if (why) *why = "BMP：只支持 16/24/32bpp";
+            return false;
+        }
+        out->kind = "BMP";
+        out->width = w;
+        out->height = static_cast<std::uint32_t>(h);
+        out->format = fmt;
+        return true;
+    }
+    if (n >= 128 && std::memcmp(b, "DDS ", 4) == 0) {
+        if (rdLe32(b + 4) != 124) {
+            if (why) *why = "DDS：header size != 124";
+            return false;
+        }
+        const std::uint32_t h = rdLe32(b + 12);
+        const std::uint32_t w = rdLe32(b + 16);
+        const std::uint32_t pf_size = rdLe32(b + 76);
+        const std::uint32_t pf_flags = rdLe32(b + 80);
+        const std::uint32_t fourcc = rdLe32(b + 84);
+        const std::uint32_t bitcount = rdLe32(b + 88);
+        const std::uint32_t amask = rdLe32(b + 104);
+        if (pf_size != 32) {
+            if (why) *why = "DDS：pixel format size != 32";
+            return false;
+        }
+        if (fourcc != 0) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "DDS：压缩格式 FourCC=0x%08X 本线不支持", fourcc);
+            if (why) *why = buf;
+            return false;
+        }
+        if ((pf_flags & 0x40u) == 0) {  // DDPF_RGB
+            if (why) *why = "DDS：pixel format 不是 RGB";
+            return false;
+        }
+        std::uint32_t fmt = 0;
+        if (bitcount == 32) fmt = amask ? d3d9::kFmtA8R8G8B8 : d3d9::kFmtX8R8G8B8;
+        else if (bitcount == 24) fmt = d3d9::kFmtX8R8G8B8;
+        else if (bitcount == 16) fmt = d3d9::kFmtR5G6B5;
+        else {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "DDS：%u bpp 本线不支持", bitcount);
+            if (why) *why = buf;
+            return false;
+        }
+        if (w == 0 || h == 0) {
+            if (why) *why = "DDS：宽/高为 0";
+            return false;
+        }
+        out->kind = "DDS";
+        out->width = w;
+        out->height = h;
+        out->format = fmt;
+        return true;
+    }
+    if (why) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "未知图像容器（首 8 字节 %02X %02X %02X %02X %02X %02X %02X %02X）",
+                      n > 0 ? b[0] : 0, n > 1 ? b[1] : 0, n > 2 ? b[2] : 0, n > 3 ? b[3] : 0,
+                      n > 4 ? b[4] : 0, n > 5 ? b[5] : 0, n > 6 ? b[6] : 0, n > 7 ? b[7] : 0);
+        *why = buf;
+    }
+    return false;
+}
+
+void shimD3DXCreateTextureFromFileInMemory(X86& cpu, ShimCall& call) {
+    const std::uint32_t device = call.u32(0);
+    const std::uint32_t src_ea = call.u32(1);
+    const std::uint32_t src_size = call.u32(2);
+    const std::uint32_t out_ea = call.u32(3);
+    if (!cpu.com) {
+        d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory", "cpu.com 为空（装配问题）");
+        call.result = d3d9::kFail;
+        return;
+    }
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory", "ppTexture=0x%08X 为 NULL / 未提交", out_ea);
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    cpu.mem->wr32(out_ea, 0);
+    if (device == 0) {
+        d3dxLog("D3DXCreateTextureFromFileInMemory", "pDevice=NULL ⇒ E_INVALIDARG");
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    if (src_ea == 0 || src_size < 8 || !cpu.mem->committed(src_ea, 8)) {
+        d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory",
+                 "pSrcData=0x%08X SrcDataSize=%u 为 NULL / 太小 / 未提交", src_ea, src_size);
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    const std::size_t probe = src_size < 128u ? static_cast<std::size_t>(src_size) : 128u;
+    if (!cpu.mem->committed(src_ea, probe)) {
+        d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory", "pSrcData=0x%08X 起 %zu 字节未提交", src_ea, probe);
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    std::uint8_t header[128] = {};
+    cpu.mem->readBytes(src_ea, header, probe);
+    ImageInfo info;
+    std::string why;
+    if (!parseImageHeader(header, probe, &info, &why)) {
+        // 调用方对 HRESULT 失败有分支（0x47839D / 0x47992D / 0x479EF4），所以这里返回 E_FAIL 是
+        // **可继续**的失败；⛔ 不 trap，也⛔ 不假装成功建一张尺寸未知的纹理。
+        d3dxWarn("D3DXCreateTextureFromFileInMemory", "%s（SrcDataSize=%u）⇒ E_FAIL", why.c_str(), src_size);
+        call.result = d3d9::kFail;
+        return;
+    }
+    std::string make_why;
+    const std::uint32_t state = d3d9::createTextureState(cpu, device, info.width, info.height, 1u, 0u,
+                                                         info.format, 1u /*D3DPOOL_MANAGED*/, &make_why);
+    if (state == 0) {
+        d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory", "%s %ux%u：%s", info.kind, info.width, info.height,
+                 make_why.c_str());
+        call.result = d3d9::kFail;
+        return;
+    }
+    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DTexture9", textureMethods(), state);
+    if (obj == 0) {
+        d3d9::destroyTextureState(cpu, state);
+        d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory", "在 guest 内存里建 IDirect3DTexture9 对象失败");
+        call.result = d3d9::kFail;
+        return;
+    }
+    cpu.mem->wr32(out_ea, obj);
+    d3dxLog("D3DXCreateTextureFromFileInMemory",
+            "%s %ux%u（SrcDataSize=%u）⇒ S_OK，IDirect3DTexture9 对象 0x%08X（stub：像素未解码）", info.kind,
+            info.width, info.height, src_size, obj);
+    call.result = d3d9::kOk;
+}
+
 void shimD3DXCreateTexture(X86& cpu, ShimCall& call) {
     const std::uint32_t device = call.u32(0);
     const std::uint32_t width = call.u32(1);
@@ -1102,6 +1313,9 @@ void registerD3DX9Shims(ShimRegistry& shims) {
     shims.add("d3dx9_43", "D3DXCreateSprite", Conv::Stdcall, 2, &shimD3DXCreateSprite);
     // ---- 纹理簇（M2；boot 越过 sprite 后的下一条 unimplemented）----
     shims.add("d3dx9_43", "D3DXCreateTexture", Conv::Stdcall, 8, &shimD3DXCreateTexture);
+    // TITLE Live2D 纹理（`.lst` 0x478398）走这条；先做 header 级 stub，后续再解码像素。
+    shims.add("d3dx9_43", "D3DXCreateTextureFromFileInMemory", Conv::Stdcall, 4,
+              &shimD3DXCreateTextureFromFileInMemory);
     // ---- D3DX math：只登记**确定写对**的几条（行向量约定）；其余仍是派生缺口 ----
     shims.add("d3dx9_43", "D3DXMatrixMultiply", Conv::Stdcall, 3, &shimD3DXMatrixMultiply);
     shims.add("d3dx9_43", "D3DXMatrixScaling", Conv::Stdcall, 4, &shimD3DXMatrixScaling);

@@ -87,13 +87,6 @@
       "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
-      "target": "d3dx9_43!D3DXCreateTextureFromFileInMemory",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
-    },
-    {
       "target": "d3dx9_43!D3DXFrameFind",
       "kind": "stub",
       "impl": "stub_trap",

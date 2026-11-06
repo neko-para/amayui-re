@@ -909,6 +909,325 @@ void shimDrawIndexedPrimitiveUP(X86& cpu, ShimCall& call) {
     call.result = hr;
 }
 
+// ---------------------------------------------------------------------------------------
+// IDirect3DStateBlock9（`sub_4783D0` 在 Live2D draw 前用 `CreateStateBlock` 取它）
+//
+// ★ 实测调用形态（`.lst` 0x47843A–0x47847B）：
+//     device->vtbl[+0x0EC](device, D3DSBT_ALL=1, &block);   // CreateStateBlock
+//     model->vtbl[+8](); model->vtbl[+0xC]();               // SDK 的 update / draw（thiscall）
+//     block->vtbl[+0x14](block);                            // Apply
+//     block->vtbl[+8](block);                               // Release
+//   ⇒ 这一条不是可选装饰：`var_4` 为 0 时 0x47846A 直接 `[eax]` 取 vtable ⇒ guest AV。
+// ★ 本层只做**形状**：Capture / Apply 返回 S_OK，不真的快照/恢复设备状态。TITLE 的单模型
+//   draw 不依赖恢复；后续若要接 UI 混合，再把 DeviceInfo 的 render state 真正快照进来。
+// ★ QueryInterface 只认 IUnknown：本作不 QI 状态块；IID_IDirect3DStateBlock9 未取证，
+//   ⛔ 不按记忆编 GUID（真要 QI 时先取证）。
+// ---------------------------------------------------------------------------------------
+void d3d9LogDebug(const char* method, const char* fmt, ...) {
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", method ? method : "?");
+    va_list ap;
+    va_start(ap, fmt);
+    logV(LogLevel::Debug, LogD3d9, prefix, fmt, ap);
+    va_end(ap);
+}
+
+void shimStateBlockQueryInterface(X86& cpu, ShimCall& call) {
+    shimQueryInterface(cpu, call, kIidUnknown, "IDirect3DStateBlock9");
+}
+
+void shimStateBlockGetDevice(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->find(self)) {
+        d3d9Trap(cpu, "IDirect3DStateBlock9::GetDevice(+0x0C)", "this=0x%08X 不是本模块建的对象", self);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t out_ea = call.u32(1);
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        d3d9Trap(cpu, "IDirect3DStateBlock9::GetDevice(+0x0C)", "ppDevice=0x%08X 为 NULL / 未提交", out_ea);
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    cpu.mem->wr32(out_ea, cpu.com->userOf(self));
+    call.result = d3d9::kOk;
+}
+
+void shimStateBlockCapture(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->find(self)) {
+        d3d9Trap(cpu, "IDirect3DStateBlock9::Capture(+0x10)", "this=0x%08X 不是本模块建的对象", self);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    d3d9LogDebug("StateBlock::Capture", "0x%08X（stub：不快照状态）", self);
+    call.result = d3d9::kOk;
+}
+
+void shimStateBlockApply(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->find(self)) {
+        d3d9Trap(cpu, "IDirect3DStateBlock9::Apply(+0x14)", "this=0x%08X 不是本模块建的对象", self);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    d3d9LogDebug("StateBlock::Apply", "0x%08X（stub：不恢复状态）", self);
+    call.result = d3d9::kOk;
+}
+
+// 前置声明：定义在文件后半（顶点/索引缓冲共用同一个 Release 实现）。
+void shimResourceRelease(X86& cpu, ShimCall& call);
+
+const std::vector<ComMethod>& stateBlockMethods() {
+    static const std::vector<ComMethod> methods = {
+        {0x00u, "QueryInterface", Conv::Stdcall, 2, &shimStateBlockQueryInterface},
+        {0x04u, "AddRef", Conv::Stdcall, 0, &shimAddRef},
+        {0x08u, "Release", Conv::Stdcall, 0, &shimResourceRelease},
+        {0x0Cu, "GetDevice", Conv::Stdcall, 1, &shimStateBlockGetDevice},
+        {0x10u, "Capture", Conv::Stdcall, 0, &shimStateBlockCapture},
+        {0x14u, "Apply", Conv::Stdcall, 0, &shimStateBlockApply},
+    };
+    return methods;
+}
+
+void shimCreateStateBlock(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    const std::uint32_t type = call.u32(1);
+    const std::uint32_t out_ea = call.u32(2);
+    d3d9::DeviceInfo dev;
+    if (!requireDevice(cpu, call, "IDirect3DDevice9::CreateStateBlock(+0xEC)", &dev)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateStateBlock(+0xEC)", "ppStateBlock=0x%08X 为 NULL / 未提交",
+                 out_ea);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    cpu.mem->wr32(out_ea, 0);
+    if (type < 1u || type > 3u) {  // D3DSBT_ALL=1 / PIXELSTATE=2 / VERTEXSTATE=3
+        d3d9Log("CreateStateBlock", "Type=%u 非法（只认 1/2/3）⇒ D3DERR_INVALIDCALL", type);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (!cpu.com) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateStateBlock(+0xEC)", "cpu.com 为空（装配问题）");
+        call.result = d3d9::kFail;
+        return;
+    }
+    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DStateBlock9", stateBlockMethods(), self);
+    if (obj == 0) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateStateBlock(+0xEC)",
+                 "在 guest 内存里建 IDirect3DStateBlock9 对象失败");
+        call.result = d3d9::kFail;
+        return;
+    }
+    cpu.mem->wr32(out_ea, obj);
+    d3d9LogDebug("CreateStateBlock",
+                 "Type=%u ⇒ S_OK，IDirect3DStateBlock9 对象 0x%08X（stub：Capture/Apply 为空）", type, obj);
+    call.result = d3d9::kOk;
+}
+
+// ---------------------------------------------------------------------------------------
+// IDirect3DVertexDeclaration9（Live2D 在 `sub_4C1BE5` 用 +0x158 建它，随后 +0x15C 绑定）
+//
+// ★ 实测声明（`.data` 0x551FF0，`.lst` 段 seg002 的字节）：
+//     元素 0: Stream=0 Offset=0 Type=2(D3DDECLTYPE_FLOAT3) Usage=0(POSITION)
+//     元素 1: Stream=1 Offset=0 Type=1(D3DDECLTYPE_FLOAT2) Usage=5(TEXCOORD0)
+//     结束:   Stream=0xFF
+//   ⇒ 位置在流 0、UV 在流 1，两套顶点缓冲分开。本层先把**对象形状**补齐；
+//     流水线的 Draw 仍只认 FVF（`d3d9_pipeline.cpp` 的 `drawPrecheck` 会响亮失败），
+//     所以这里只是"让 Create/Set 不再炸"，不是"已经能画 Live2D"。
+// ★ 声明内容按字节复制到 guest 堆（调用方的 `unk_551FF0` 在 .data，生命周期长；复制更稳）。
+// ---------------------------------------------------------------------------------------
+constexpr std::uint32_t kVdMagicValue = 0x4C434456u;  // 'VDCL'
+constexpr std::uint32_t kVdDevice = 4;
+constexpr std::uint32_t kVdBytes = 8;
+constexpr std::uint32_t kVdData = 12;
+constexpr std::uint32_t kVdHeader = 12;
+
+void shimVertexDeclarationQueryInterface(X86& cpu, ShimCall& call) {
+    shimQueryInterface(cpu, call, kIidUnknown, "IDirect3DVertexDeclaration9");
+}
+
+void shimVertexDeclarationRelease(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->find(self)) {
+        d3d9Log("Release", "IDirect3DVertexDeclaration9 this=0x%08X 不是本对象（重复 Release / 野指针）⇒ 0",
+                self);
+        call.result = 0;
+        return;
+    }
+    const std::uint32_t user = cpu.com->userOf(self);
+    const bool last = cpu.com->refCount(self) == 1u;
+    if (!cpu.com->release(cpu, self)) {
+        call.result = 0;
+        return;
+    }
+    if (last && user != 0 && cpu.mem->committed(user, kVdHeader) &&
+        cpu.mem->rd32(user) == kVdMagicValue && cpu.heap) {
+        cpu.heap->free(user);
+    }
+    call.result = last ? 0u : cpu.com->refCount(self);
+}
+
+void shimVertexDeclarationGetDevice(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->find(self)) {
+        d3d9Trap(cpu, "IDirect3DVertexDeclaration9::GetDevice(+0x0C)", "this=0x%08X 不是本对象", self);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t out_ea = call.u32(1);
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        d3d9Trap(cpu, "IDirect3DVertexDeclaration9::GetDevice(+0x0C)", "ppDevice=0x%08X 为 NULL / 未提交",
+                 out_ea);
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    const std::uint32_t state = cpu.com->userOf(self);
+    cpu.mem->wr32(out_ea, state != 0 && cpu.mem->committed(state, kVdHeader) ? cpu.mem->rd32(state + kVdDevice)
+                                                                           : 0u);
+    call.result = d3d9::kOk;
+}
+
+void shimVertexDeclarationGetDeclaration(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->find(self)) {
+        d3d9Trap(cpu, "IDirect3DVertexDeclaration9::GetDeclaration(+0x10)", "this=0x%08X 不是本对象", self);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t state = cpu.com->userOf(self);
+    if (state == 0 || !cpu.mem->committed(state, kVdHeader) || cpu.mem->rd32(state) != kVdMagicValue) {
+        d3d9Trap(cpu, "IDirect3DVertexDeclaration9::GetDeclaration(+0x10)", "状态块 0x%08X 不是 'VDCL'",
+                 state);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t bytes = cpu.mem->rd32(state + kVdBytes);
+    const std::uint32_t out_ea = call.u32(1);
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, bytes)) {
+        d3d9Trap(cpu, "IDirect3DVertexDeclaration9::GetDeclaration(+0x10)",
+                 "pElement=0x%08X 为 NULL / 未提交 %u 字节", out_ea, bytes);
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    std::memcpy(cpu.mem->host(out_ea), cpu.mem->host(state + kVdData), bytes);
+    call.result = d3d9::kOk;
+}
+
+const std::vector<ComMethod>& vertexDeclarationMethods() {
+    static const std::vector<ComMethod> methods = {
+        {0x00u, "QueryInterface", Conv::Stdcall, 2, &shimVertexDeclarationQueryInterface},
+        {0x04u, "AddRef", Conv::Stdcall, 0, &shimAddRef},
+        {0x08u, "Release", Conv::Stdcall, 0, &shimVertexDeclarationRelease},
+        {0x0Cu, "GetDevice", Conv::Stdcall, 1, &shimVertexDeclarationGetDevice},
+        {0x10u, "GetDeclaration", Conv::Stdcall, 1, &shimVertexDeclarationGetDeclaration},
+    };
+    return methods;
+}
+
+// 扫到 D3DDECL_END（Stream=0xFF）为止；返回字节数（含结束元素），最多 64 个元素。
+bool scanVertexDeclaration(X86& cpu, std::uint32_t ea, std::uint32_t* bytes, std::string* why) {
+    for (std::uint32_t i = 0; i < 64u; ++i) {
+        const std::uint32_t at = ea + i * 8u;
+        if (!cpu.mem->committed(at, 8)) {
+            if (why) {
+                char buf[128];
+                std::snprintf(buf, sizeof(buf), "顶点声明在元素 %u（0x%08X）处越界", i, at);
+                *why = buf;
+            }
+            return false;
+        }
+        if (cpu.mem->rd16(at) == 0x00FFu) {
+            *bytes = (i + 1u) * 8u;
+            return true;
+        }
+    }
+    if (why) *why = "顶点声明 64 个元素内没有 D3DDECL_END（Stream=0xFF）";
+    return false;
+}
+
+void shimCreateVertexDeclaration(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    const std::uint32_t elements_ea = call.u32(1);
+    const std::uint32_t out_ea = call.u32(2);
+    d3d9::DeviceInfo dev;
+    if (!requireDevice(cpu, call, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)", &dev)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)",
+                 "ppDecl=0x%08X 为 NULL / 未提交", out_ea);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    cpu.mem->wr32(out_ea, 0);
+    if (elements_ea == 0) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)", "pVertexElements=NULL");
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    std::uint32_t bytes = 0;
+    std::string why;
+    if (!scanVertexDeclaration(cpu, elements_ea, &bytes, &why)) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)", "%s", why.c_str());
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (bytes > 512u) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)", "声明过大（%u 字节）", bytes);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (!cpu.heap || !cpu.heap->ready()) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)", "guest 堆未就绪");
+        call.result = d3d9::kFail;
+        return;
+    }
+    const std::uint32_t state = cpu.heap->alloc(kVdHeader + bytes, /*zero=*/true);
+    if (state == 0) {
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)", "guest 堆分配失败：%s",
+                 cpu.heap->lastError());
+        call.result = d3d9::kFail;
+        return;
+    }
+    cpu.mem->wr32(state, kVdMagicValue);
+    cpu.mem->wr32(state + kVdDevice, self);
+    cpu.mem->wr32(state + kVdBytes, bytes);
+    std::memcpy(cpu.mem->host(state + kVdData), cpu.mem->host(elements_ea), bytes);
+    const std::uint32_t obj =
+        cpu.com->createObject(cpu, "IDirect3DVertexDeclaration9", vertexDeclarationMethods(), state);
+    if (obj == 0) {
+        cpu.heap->free(state);
+        d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)",
+                 "在 guest 内存里建 IDirect3DVertexDeclaration9 对象失败");
+        call.result = d3d9::kFail;
+        return;
+    }
+    cpu.mem->wr32(out_ea, obj);
+    // 把每个元素摘要打出来：位置/UV 流与类型是后续流水线要不要支持声明的判据。
+    std::string summary;
+    for (std::uint32_t at = elements_ea, i = 0; i * 8u < bytes; at += 8u, ++i) {
+        const std::uint16_t stream = cpu.mem->rd16(at);
+        const std::uint16_t offset = cpu.mem->rd16(at + 2);
+        const std::uint8_t type = static_cast<std::uint8_t>(cpu.mem->rd8(at + 4));
+        const std::uint8_t method = static_cast<std::uint8_t>(cpu.mem->rd8(at + 5));
+        const std::uint8_t usage = static_cast<std::uint8_t>(cpu.mem->rd8(at + 6));
+        const std::uint8_t usage_index = static_cast<std::uint8_t>(cpu.mem->rd8(at + 7));
+        char one[96];
+        std::snprintf(one, sizeof(one), "%s[%u:%u t%u m%u u%u i%u]", summary.empty() ? "" : " ", stream,
+                      offset, type, method, usage, usage_index);
+        summary += one;
+    }
+    d3d9Log("CreateVertexDeclaration", "元素 %u 个（%u B）⇒ 对象 0x%08X：%s", bytes / 8u, bytes, obj,
+            summary.c_str());
+    call.result = d3d9::kOk;
+}
+
 // ---- CreateVertexBuffer / CreateIndexBuffer（对象 + 方法表）----
 void shimCreateVertexBuffer(X86& cpu, ShimCall& call) {
     d3d9::DeviceInfo dev;
@@ -1285,6 +1604,7 @@ const std::vector<ComMethod>& device9Methods() {
         {0xD4u, "LightEnable", Conv::Stdcall, 2, &shimLightEnable},               // #53
         {0xE4u, "SetRenderState", Conv::Stdcall, 2, &shimSetRenderState},         // #57
         {0xE8u, "GetRenderState", Conv::Stdcall, 2, &shimGetRenderState},         // #58
+        {0xECu, "CreateStateBlock", Conv::Stdcall, 2, &shimCreateStateBlock},     // #59 ★0x478446
         {0x104u, "SetTexture", Conv::Stdcall, 2, &shimSetTexture},                // #65
         {0x108u, "GetTexture", Conv::Stdcall, 2, &shimGetTexture},                // #66
         {0x10Cu, "SetTextureStageState", Conv::Stdcall, 3, &shimSetTextureStageState},  // #67
@@ -1298,6 +1618,7 @@ const std::vector<ComMethod>& device9Methods() {
         {0x148u, "DrawIndexedPrimitive", Conv::Stdcall, 6, &shimDrawIndexedPrimitive},  // #82
         {0x14Cu, "DrawPrimitiveUP", Conv::Stdcall, 4, &shimDrawPrimitiveUP},      // #83
         {0x150u, "DrawIndexedPrimitiveUP", Conv::Stdcall, 8, &shimDrawIndexedPrimitiveUP},  // #84
+        {0x158u, "CreateVertexDeclaration", Conv::Stdcall, 2, &shimCreateVertexDeclaration},  // #86 ★0x4C1BF2
         {0x15Cu, "SetVertexDeclaration", Conv::Stdcall, 1, &shimSetVertexDeclaration},  // #87
         {0x160u, "GetVertexDeclaration", Conv::Stdcall, 1, &shimGetVertexDeclaration},  // #88
         {0x164u, "SetFVF", Conv::Stdcall, 1, &shimSetFVF},                        // #89 ★0x4A3610

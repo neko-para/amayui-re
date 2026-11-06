@@ -15,6 +15,8 @@
 //      （`comUnsupported`：机器停 + 名字带 iface/偏移）。`Draw` 给一个**不是**本模块纹理的指针
 //      ⇒ loud trap；`Draw(NULL,NULL)` 无尺寸来源 ⇒ trap。
 //   ④ 反例：`Draw` 在 `Begin` 之外 / `Begin` 嵌套 ⇒ D3DERR_INVALIDCALL（⛔ 不静默吞掉）。
+//   ②a `D3DXCreateTextureFromFileInMemory`（TITLE Live2D 的真实入口）：PNG 头 → 同尺寸纹理；
+//      未知容器 ⇒ E_FAIL + 出参 0（不 trap）。
 //   ⑤ 纹理簇（`D3DXCreateTexture` → IDirect3DTexture9）：GetLevelDesc 的 D3DSURFACE_DESC 字段
 //      与 `.lst` 0x48AD2A/0x48AD2D 的读法一致；LockRect 给出 guest 指针；**纹理 × 调制色**
 //      的像素级断言；源矩形越界裁剪；纹理在批次里 AddRef / 合成后对称 Release。
@@ -65,6 +67,7 @@ constexpr std::uint32_t kProcD3DXMatrixLookAtLH = 0x7FF81120u;
 constexpr std::uint32_t kProcD3DXMatrixRotationAxis = 0x7FF81140u;
 constexpr std::uint32_t kProcD3DXMatrixRotationYawPitchRoll = 0x7FF81160u;
 constexpr std::uint32_t kProcD3DXMatrixOrthoLH = 0x7FF81180u;
+constexpr std::uint32_t kProcD3DXCreateTextureFromFileInMemory = 0x7FF811A0u;
 constexpr std::uint32_t kSentinel = 0xFFFFFFFFu;
 constexpr std::uint32_t kFixtureHeapBytes = 0x00100000u;
 
@@ -140,6 +143,9 @@ struct Fixture {
         if (!fixStub("d3dx9_43", "D3DXMatrixRotationYawPitchRoll", kProcD3DXMatrixRotationYawPitchRoll))
             return false;
         if (!fixStub("d3dx9_43", "D3DXMatrixOrthoLH", kProcD3DXMatrixOrthoLH)) return false;
+        if (!fixStub("d3dx9_43", "D3DXCreateTextureFromFileInMemory",
+                     kProcD3DXCreateTextureFromFileInMemory))
+            return false;
         return true;
     }
 
@@ -554,6 +560,62 @@ void caseDrawEndPixels() {
 }
 
 // ---------------------------------------------------------------------------------------
+// ②a D3DXCreateTextureFromFileInMemory（TITLE Live2D 纹理的真实入口；`.lst` 0x478398）
+//   本层只读文件头：PNG 2048×2048 ×3 在实跑里会出现；这里用 7×5 的合成 PNG 断言尺寸/格式。
+//   ★ 像素仍未解码（stub）⇒ 不在这里断言颜色；下一层接 PNG 解码时再加像素级用例。
+// ---------------------------------------------------------------------------------------
+void caseTextureFromMemory() {
+    lift_test::g_current_case = "d3dx9/texture-from-memory";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    if (!f.boot()) return;
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    std::vector<std::uint8_t> png(33u, 0u);
+    const std::uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    std::memcpy(png.data(), sig, 8);
+    png[12] = 'I'; png[13] = 'H'; png[14] = 'D'; png[15] = 'R';
+    png[16] = 0; png[17] = 0; png[18] = 0; png[19] = 7;   // width 7
+    png[20] = 0; png[21] = 0; png[22] = 0; png[23] = 5;   // height 5
+    png[24] = 8;   // bit depth
+    png[25] = 6;   // color type RGBA
+    const std::uint32_t png_ea = f.placeBytes(png);
+    const std::size_t surfaces_before = f.m.surfaces().surfaceCount();
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(
+        f.callExport(kProcD3DXCreateTextureFromFileInMemory, {dev.object, png_ea, 33u, out}), 0u);
+    const std::uint32_t tex = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_before + 1);
+
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x34u, {}), 1u);  // GetLevelCount
+    const std::uint32_t desc = f.placeBytes(std::vector<std::uint8_t>(32u, 0xEE));
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x44u, {0u, desc}), 0u);  // GetLevelDesc
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x00), lift::d3d9::kFmtA8R8G8B8);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x18), 7u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x1C), 5u);
+
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(tex));
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_before);
+
+    // 未知容器 ⇒ E_FAIL + 出参归零（调用方 `0x47839D jns` 会走失败分支；不 trap）
+    const std::vector<std::uint8_t> junk(32u, 0x5A);
+    const std::uint32_t junk_ea = f.placeBytes(junk);
+    const std::uint32_t out2 = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(
+        f.callExport(kProcD3DXCreateTextureFromFileInMemory, {dev.object, junk_ea, 32u, out2}),
+        lift::d3d9::kFail);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(out2), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
 // ②b 纹理簇：D3DXCreateTexture + GetLevelDesc + LockRect/UnlockRect + 纹理 × 调制色
 // ---------------------------------------------------------------------------------------
 void caseTextureDraw() {
@@ -907,6 +969,7 @@ int main() {
     try {
         caseCreateQueryRelease();
         caseDrawEndPixels();
+        caseTextureFromMemory();
         caseTextureDraw();
         caseMatrix();
         caseTraps();

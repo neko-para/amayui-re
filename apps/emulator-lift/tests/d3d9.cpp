@@ -12,6 +12,8 @@
 //   ⑤ `Clear(0,NULL,3,0,1.0f,0)`（以及带 D3DRECT 的 Clear）**真的**改后缓冲像素：颜色对、矩形外不变。
 //   ⑥ `Present` 之后 `frameCount()==1`、`lastHash()` 与 arena 哈希一致；**两台新机器同输入 ⇒ 同帧哈希**。
 //   ⑦ CreateVertexBuffer 返回对象，SetStreamSource 接收同一对象（内部换算成状态块）。
+//   ⑦b CreateVertexDeclaration / IDirect3DVertexDeclaration9（Live2D 的 3 元素声明）：GetDeclaration
+//      逐字节回读、Set/Get 往返、非本对象拒绝、SetFVF 清声明、Release 回堆基线。
 //   ⑧ GetBackBuffer / SetRenderTarget / 后缓冲 surface 的 GetDesc 可回查；`--dump-frame` 的
 //      `{frame}` 模板真的写出 BMP（头两字节 BM）。
 //   ⑨ 未实现的槽 ⇒ **loud trap**（机器停 + `stop_why`）且日志输入里带 iface + 偏移（`r.detail` 里就有）
@@ -593,6 +595,79 @@ void caseVertexStreamBinding() {
 }
 
 // ---------------------------------------------------------------------------------------
+// ⑦b CreateVertexDeclaration / IDirect3DVertexDeclaration9（Live2D 在 `sub_4C1BE5` 用）
+//   声明 = 元素 0: Stream=0 Offset=0 Type=FLOAT3(2) Usage=POSITION(0)
+//          元素 1: Stream=1 Offset=0 Type=FLOAT2(1) Usage=TEXCOORD(5)
+//          结束:   Stream=0xFF
+// ---------------------------------------------------------------------------------------
+void caseVertexDeclaration() {
+    lift_test::g_current_case = "d3d9/vertex-declaration";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t obj = f.createDirect3D();
+    LIFT_CHECK_NE_U32(obj, 0u);
+    if (obj == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(obj, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    std::vector<std::uint8_t> decl(24u, 0u);
+    auto set = [&decl](std::size_t off, std::uint32_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) decl[off + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF);
+    };
+    set(0u, 0u, 2);   // Stream 0
+    set(2u, 0u, 2);   // Offset 0
+    set(4u, 2u, 1);   // D3DDECLTYPE_FLOAT3
+    set(6u, 0u, 1);   // Usage POSITION
+    set(8u, 1u, 2);   // Stream 1
+    set(10u, 0u, 2);  // Offset 0
+    set(12u, 1u, 1);  // D3DDECLTYPE_FLOAT2
+    set(14u, 5u, 1);  // Usage TEXCOORD
+    set(16u, 0xFFu, 2);  // D3DDECL_END().Stream
+    const std::uint32_t decl_ea = f.placeBytes(decl);
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    const std::uint32_t heap_before = f.m.heap().bytesInUse();
+
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out}), 0u);
+    const std::uint32_t vdecl = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(vdecl, 0u);
+    LIFT_CHECK_NE_U32(vdecl, 0xDEADBEEFu);
+    if (vdecl == 0) return;
+
+    // GetDevice(+0x0C)：返回同一台设备（不 AddRef）
+    const std::uint32_t dev_out = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x0Cu, {dev_out}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(dev_out), dev.object);
+
+    // GetDeclaration(+0x10)：逐字节回读（含结束元素）
+    const std::uint32_t copy = f.placeBytes(std::vector<std::uint8_t>(24u, 0xEE));
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x10u, {copy}), 0u);
+    LIFT_CHECK(f.m.mem().rd16(copy + 0u) == 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd16(copy + 2u), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd8(copy + 4u), 2u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd16(copy + 8u), 1u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd8(copy + 12u), 1u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd16(copy + 16u), 0x00FFu);
+
+    // SetVertexDeclaration(+0x15C) / GetVertexDeclaration(+0x160)
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {vdecl}), 0u);
+    const std::uint32_t got = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x160u, {got}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(got), vdecl);
+    // 非本模块对象必须拒绝
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {0xDEADBEEFu}), 0x8876086Cu);
+    // SetFVF 会清掉声明（D3D 二选一）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x164u, {0x0044u}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x160u, {got}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(got), 0u);
+
+    // Release 到 0 ⇒ 对象与声明状态块都回收
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(vdecl));
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_before);
+}
+
+// ---------------------------------------------------------------------------------------
 // ⑧ GetBackBuffer + SetRenderTarget：后缓冲 surface 可取得，SetRenderTarget(0) 恢复后缓冲
 // ---------------------------------------------------------------------------------------
 void caseGetBackBufferAndRenderTarget() {
@@ -721,6 +796,7 @@ int main() {
         casePresent();
         caseFrameDump();
         caseVertexStreamBinding();
+        caseVertexDeclaration();
         caseGetBackBufferAndRenderTarget();
         caseUnimplementedSlotTraps();
         return finish("d3d9");
