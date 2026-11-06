@@ -42,6 +42,7 @@
 #include "runtime/memory.h"
 #include "runtime/pixel_format.h"
 #include "runtime/surface.h"
+#include "runtime/log.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -111,13 +112,12 @@ constexpr std::uint32_t kIbMagicValue = 0x30394249u;  // 'IB09'
 constexpr std::uint32_t kMaxBufferBytes = 64u * 1024u * 1024u;
 
 void pipeLog(const char* what, const char* fmt, ...) {
-    std::fprintf(stderr, "[d3d9] %s: ", what);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", what ? what : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogD3d9, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 bool requireMachine(X86& cpu, Machine** out, std::string* why) {

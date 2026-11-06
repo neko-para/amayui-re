@@ -22,6 +22,7 @@
 #include "runtime/memory.h"
 #include "runtime/pixel_format.h"
 #include "runtime/surface.h"
+#include "runtime/log.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -66,13 +67,12 @@ constexpr std::uint32_t kVec3Bytes = 12u;              // D3DXVECTOR3 = 3 个 fl
 constexpr std::uint32_t kMatrixBytes = 64u;            // D3DXMATRIX = 16 个 float
 
 void spriteLog(const char* what, const char* fmt, ...) {
-    std::fprintf(stderr, "[d3dx9] %s: ", what);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", what ? what : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogD3dx9, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 bool requireMachine(X86& cpu, Machine** out, std::string* why) {

@@ -152,9 +152,11 @@ apps/emulator-lift/
                                         --until shim|ea --trace-shims --trace-blocks
                                         --max-insns --max-frames --dump-frame --time-limit
                                         --safe-memory --report --bench --smoke
+                                        --log-level --log-cat --verbose
                                         --profile --profile-top --native-overrides
                                         --present headless|window|auto --present-driver
                                         --present-vsync --present-hidden --present-screenshot
+  src/runtime/log.h                   ← 日志分级 / 分类 / 模式（默认 warn；Error 永远显示）
   src/runtime/host_encoding.{h,cpp}   ← 进程入口编码契约：UTF-8 argv（GetCommandLineW）/ 控制台码页
   src/runtime/native_overrides.{h,cpp}← guest 函数级 native override（试点；默认关）
   src/runtime/present.{h,cpp}         ← 唯一记录点（hash / frameCount / BMP）+ 可选 PresentSink

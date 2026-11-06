@@ -296,6 +296,10 @@ target_link_libraries(lift-codepage PRIVATE emulator-lift-runtime)
 add_test(NAME codepage COMMAND lift-codepage)
 
 # ---- pure：明确 no-op 的三族（注册表 / 音频 / 视频；SCOPE §1）----
+add_executable(lift-log-policy tests/log_policy.cpp)
+target_link_libraries(lift-log-policy PRIVATE emulator-lift-runtime)
+add_test(NAME log-policy COMMAND lift-log-policy)
+
 add_executable(lift-quartz-video tests/quartz_video.cpp)
 target_link_libraries(lift-quartz-video PRIVATE emulator-lift-runtime)
 add_test(NAME quartz-video COMMAND lift-quartz-video)

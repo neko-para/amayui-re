@@ -23,6 +23,7 @@
 #include "runtime/memory.h"
 #include "runtime/present.h"
 #include "runtime/surface.h"
+#include "runtime/log.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -50,13 +51,12 @@ enum DevOff : std::uint32_t {
 constexpr std::uint32_t kDvMagicValue = 0x31443944u;  // 'D9D1'
 
 void d3d9Log(const char* what, const char* fmt, ...) {
-    std::fprintf(stderr, "[d3d9] %s: ", what);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", what ? what : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogD3d9, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 // 与 DDraw 的 requireMachine 同形（同一条装配口径：activeMachine 必须是这台 cpu 的 Machine）

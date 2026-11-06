@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+
+#include "runtime/log.h"
 #include <cstring>
 
 #include "runtime/com.h"
@@ -82,13 +84,12 @@ constexpr std::uint32_t kSfMagicValue = 0x31534444u;  // 'DDS1'
 // P1→P2 的字体 DC 接缝：GetDC 直接用 P2 的 `gdiCreateDc` 建 DC、`fontAttachDcSurface` 绑像素
 // （runtime/font.h 的合同：hdc 必须是 GDI DC 句柄，否则 attach 会明确失败并打日志）。
 void ddrawLog(const char* what, const char* fmt, ...) {
-    std::fprintf(stderr, "[ddraw] %s: ", what);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[ddraw] %s: ", what ? what : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogGeneral, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 bool requireMachine(X86& cpu, Machine** out, std::string* why) {

@@ -22,6 +22,7 @@
 #include "runtime/exec.h"
 #include "runtime/heap.h"
 #include "runtime/memory.h"
+#include "runtime/log.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -39,15 +40,12 @@ constexpr std::uint32_t kUserOffset = 8u;
 constexpr std::uint32_t kObjectBytesWithUser = 12u;
 
 void comLog(const char* iface, const char* fmt, ...) {
-    // 形状与 `shimLog` 一致（`[shim] <module>!<name>: ...`），但 runtime/ 不依赖 shims/ 目录
-    // ⇒ 这里直接落 stderr。⛔ 不要改成静默返回。
-    std::fprintf(stderr, "[shim] com!%s: ", iface ? iface : "?");
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[shim] com!%s: ", iface ? iface : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogCom, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 }  // namespace

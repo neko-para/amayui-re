@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "runtime/com.h"
+#include "runtime/log.h"
 #include "runtime/d3d9.h"
 #include "runtime/d3dx9_sprite.h"
 #include "runtime/exec.h"
@@ -49,13 +50,12 @@ constexpr std::uint8_t kIidUnknown[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x
                                           0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46};
 
 void d3dxLog(const char* method, const char* fmt, ...) {
-    std::fprintf(stderr, "[d3dx9] %s: ", method);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", method ? method : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogD3dx9, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 // loud trap：参数形态 / 状态崩坏 ⇒ 打印现场并停机器（与 d3d9 的 d3d9Trap 同形）

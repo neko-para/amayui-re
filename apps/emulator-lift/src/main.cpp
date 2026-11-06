@@ -20,6 +20,7 @@
 #include "corpus/lst_index.h"
 #include "runtime/font.h"
 #include "runtime/host_encoding.h"
+#include "runtime/log.h"
 #include "runtime/machine.h"
 #include "runtime/present_sdl.h"
 #include "runtime/sha256.h"
@@ -68,7 +69,11 @@ void usage() {
         "  --dump-frame <path> 每次 Present 导出 BMP；路径里的 {frame} 换成 4 位帧号\n"
         "                      （不含 {frame} 时同一文件会被覆盖；配合 --max-frames 1 取第一帧）\n"
         "  --time-limit <秒>   墙钟上限（探索用；0 = 不限，缺省）\n"
-        "  --trace-shims       打印 shim 调用（确定性格式）\n"
+        "  --log-level <lvl>   quiet|error|warn|info|debug|trace（缺省 warn；Error 永远显示）\n"
+        "  --log-cat <list>    只显示这些分类（all,general,shim,file,vfs,com,d3d9,d3dx9,dsound,\n"
+        "                      winmm,video,loader,native,report；缺省 all）\n"
+        "  --verbose           = --log-level info\n"
+        "  --trace-shims       打印 shim 调用（确定性格式；仍受 --log-cat 过滤）\n"
         "  --trace-blocks      打印每条执行的指令（调试用，很慢）\n"
         "  --safe-memory       每次访存都查提交位图（A1 的第二遍）\n"
         "  --report            打印基座缺口（A5）后退出\n"
@@ -112,6 +117,9 @@ int main(int argc, char** argv) {
     bool report = false;
     bool real_time = false;
     bool trace_inputs = false;
+    std::string log_level = "warn";
+    std::string log_cats;
+    bool log_level_set = false;
     std::uint64_t bench = 0;
     bool profile = false;
     std::size_t profile_top = 30;
@@ -238,6 +246,21 @@ int main(int argc, char** argv) {
             trace_shims = true;
         } else if (std::strcmp(a, "--trace-blocks") == 0) {
             trace_blocks = true;
+        } else if (std::strcmp(a, "--log-level") == 0 && i + 1 < arg_count) {
+            log_level = args[++i];
+            log_level_set = true;
+            if (!lift::logSetLevel(log_level.c_str())) {
+                std::fprintf(stderr, "--log-level 只能是 quiet/error/warn/info/debug/trace（收到 %s）\n",
+                             log_level.c_str());
+                return 2;
+            }
+        } else if (std::strcmp(a, "--log-cat") == 0 && i + 1 < arg_count) {
+            log_cats = args[++i];
+            if (!lift::logSetCategories(log_cats.c_str())) return 2;
+        } else if (std::strcmp(a, "--verbose") == 0) {
+            log_level = "info";
+            log_level_set = true;
+            lift::logSetLevel("info");
         } else if (std::strcmp(a, "--safe-memory") == 0) {
             safe_memory = true;
         } else if (std::strcmp(a, "--font") == 0 && i + 1 < arg_count) {
@@ -268,6 +291,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- 日志配置（CLI 优先；env 只在 CLI 没给时生效）----
+    if (!log_level_set) {
+        if (const char* env = std::getenv("LIFT_LOG")) {
+            log_level = env;
+            if (!lift::logSetLevel(log_level.c_str())) {
+                std::fprintf(stderr, "LIFT_LOG=%s 非法（quiet/error/warn/info/debug/trace）\n", env);
+                return 2;
+            }
+        }
+    }
+    if (log_cats.empty()) {
+        if (const char* env = std::getenv("LIFT_LOG_CAT")) {
+            log_cats = env;
+            if (!lift::logSetCategories(log_cats.c_str())) return 2;
+        }
+    }
     // ---- 呈现后端参数校验（缺省 headless；窗口参数给了就必须显式 --present window/auto）----
     if (present_mode != "headless" && present_mode != "window" && present_mode != "auto") {
         std::fprintf(stderr, "--present 只能是 headless / window / auto（收到 %s）\n", present_mode.c_str());

@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "runtime/com.h"
+#include "runtime/log.h"
 #include "runtime/exec.h"
 #include "runtime/heap.h"
 #include "runtime/memory.h"
@@ -157,13 +158,12 @@ enum : std::uint32_t {
 constexpr std::uint32_t kMaxDetailedBuffers = 32u;  // 超过这个数只记账、不再逐条打格式
 
 void dsLog(const char* method, const char* fmt, ...) {
-    std::fprintf(stderr, "[dsound] %s: ", method);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[dsound] %s: ", method ? method : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogDsound, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 // loud trap：状态崩坏 / 参数形态没实现 ⇒ 打印现场并停机器（⛔ 不静默返回 0）。

@@ -324,10 +324,10 @@ void requireCommitted(X86& cpu, std::uint32_t ea, std::size_t n, const char* api
 // ★ 日志文本走 `guestPathForLog`（vfs.h 的唯一规则）：guest 内存里的 A 版路径是 CP932，
 //   直接写进 UTF-8 的 stderr 会变成 `?V??`（2026-11-05 缺陷单）；已是 UTF-8 的文本原样。
 void pathFailure(X86& cpu, const char* api, std::uint32_t code, const std::string& guest_path,
-                 const std::string& why) {
+                 const std::string& why, LogLevel level = LogLevel::Warn) {
     cpu.shim.last_error = code;
-    shimLog("kernel32", api, "\"%s\" ⇒ 失败 %u（%s）", guestPathForLog(guest_path).c_str(), code,
-            why.c_str());
+    shimLogAt(level, LogFile, "kernel32", api, "\"%s\" ⇒ 失败 %u（%s）",
+              guestPathForLog(guest_path).c_str(), code, why.c_str());
 }
 
 // ★ 写覆盖层（2026-11-05，`REQ-01M6KNBE5FP87DAC93ZRQ1K1DK`；口径见 runtime/vfs.h 文件上方）：
@@ -339,13 +339,13 @@ void pathFailure(X86& cpu, const char* api, std::uint32_t code, const std::strin
 void logWriteTarget(X86& cpu, const char* api, const std::string& guest_path,
                     const std::string& host_path, bool install_tree) {
     if (!cpu.vfs->writeOverlayEnabled()) {
-        shimLog("kernel32", api,
+        shimLogWarn("kernel32", api,
                 "⚠ 没有 --appdata ⇒ 写仍落到 --game-dir（\"%s\"）：安装树只读的口径不成立",
                 guestPathForLog(guest_path).c_str());
         return;
     }
     if (!install_tree && cpu.vfs->isWriteOverlayPath(host_path)) {
-        shimLog("kernel32", api, "写 \"%s\" ⇒ 影子目录 \"%s\"（--game-dir 只读）",
+        shimLogDebug("kernel32", api, "写 \"%s\" ⇒ 影子目录 \"%s\"（--game-dir 只读）",
                 guestPathForLog(guest_path).c_str(), host_path.c_str());
     }
 }
@@ -544,13 +544,13 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     }
     if (disposition < kCreateNew || disposition > kTruncateExisting) {
         cpu.shim.last_error = kErrInvalidParameter;
-        shimLog("kernel32", api, "dwCreationDisposition=%u 非法 ⇒ 返回 INVALID_HANDLE_VALUE",
+        shimLogWarn("kernel32", api, "dwCreationDisposition=%u 非法 ⇒ 返回 INVALID_HANDLE_VALUE",
                 disposition);
         call.result = kInvalidHandleValue;
         return;
     }
     if ((flags & kFileFlagBackupSemantics) != 0) {
-        shimLog("kernel32", api,
+        shimLogDebug("kernel32", api,
                 "dwFlagsAndAttributes=0x%08X 里的 FILE_FLAG_BACKUP_SEMANTICS 不建模：目录仍然打不开",
                 flags);
     }
@@ -566,7 +566,7 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
         (want_read ? kAccessRead : 0u) | (want_write ? kAccessWrite : 0u);
     if ((access & kFileDelete) != 0) {
         // 偏差 2：DELETE 访问位不建模（没有别的进程能删文件）
-        shimLog("kernel32", api, "dwDesiredAccess=0x%08X 含 DELETE(0x%08X)：不建模（见文件头偏差 2）",
+        shimLogDebug("kernel32", api, "dwDesiredAccess=0x%08X 含 DELETE(0x%08X)：不建模（见文件头偏差 2）",
                 access, kFileDelete);
     }
     const bool must_exist = (disposition == kOpenExisting || disposition == kTruncateExisting);
@@ -589,13 +589,12 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
         resolved = resolveGuest(cpu, guest, &host, &why, must_exist, /*resolve_case=*/true);
     }
     if (!resolved) {
-        // ★ 把 dwCreationDisposition 一起打出来（2026-11-05）：引擎的"探测临时文件"与"真的要建文件"
-        //   在日志里长得一模一样（都是 `[notfound] 段 ... 里不存在`），只凭路径判断不出是哪种意图
-        //   ⇒ 定位"引擎为什么放弃并 MessageBox+ExitProcess"时会被引到错的方向。
-        shimLog("kernel32", api, "%s 解析失败：dwCreationDisposition=%u（%s）", guest.c_str(),
-                static_cast<unsigned>(disposition),
-                must_exist ? "必须已存在" : "允许不存在（可新建）");
-        pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
+        // ★ 这是**探测**（引擎先试外围文件，失败后再从 ALF 取）⇒ 只打一条 Debug。
+        //   默认 `warn` 模式完全看不到；`--log-level debug` / `--log-cat file` 才看。
+        //   真正的"所有回退都失败"由引擎后续的异常 / shimAbort 暴露，不靠这条。
+        std::string reason = "dwCreationDisposition=" + std::to_string(disposition) + "（" +
+                             (must_exist ? "必须已存在" : "允许不存在（可新建）") + "）；" + why;
+        pathFailure(cpu, api, vfsErrorToWin32(why), guest, reason, LogLevel::Debug);
         call.result = kInvalidHandleValue;
         return;
     }
@@ -1083,14 +1082,14 @@ void shimGetFileAttributesA(X86& cpu, ShimCall& call) {
     std::string host;
     std::string why;
     if (!resolveGuest(cpu, guest, &host, &why, /*must_exist=*/true, /*resolve_case=*/true)) {
-        pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
+        pathFailure(cpu, api, vfsErrorToWin32(why), guest, why, LogLevel::Debug);
         call.result = kInvalidHandleValue;
         return;
     }
     std::error_code ec;
     const fs::file_status st = fs::status(pathFromUtf8(host), ec);
     if (ec || !fs::exists(st)) {
-        pathFailure(cpu, api, kErrFileNotFound, guest, "[notfound] 宿主查状态失败或不存在");
+        pathFailure(cpu, api, kErrFileNotFound, guest, "[notfound] 宿主查状态失败或不存在", LogLevel::Debug);
         call.result = kInvalidHandleValue;
         return;
     }
@@ -1167,7 +1166,9 @@ void shimDeleteFileA(X86& cpu, ShimCall& call) {
     lift::VfsWriteOptions opts;  // 删：不 copy-up、不建目录
     if (!resolveWriteTarget(cpu, guest, &host, &install_tree, &why, opts,
                             /*legacy_must_exist=*/true)) {
-        pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
+        const std::uint32_t code = vfsErrorToWin32(why);
+        // "本来就不存在"是清理路径（引擎删临时文件 / 上次残留）⇒ 探测级；权限 / IO 仍 Warn。
+        pathFailure(cpu, api, code, guest, why, code == kErrFileNotFound ? LogLevel::Debug : LogLevel::Warn);
         call.result = 0;
         return;
     }
@@ -1192,7 +1193,8 @@ void shimDeleteFileA(X86& cpu, ShimCall& call) {
         const std::uint32_t code = ec ? kErrAccessDenied : kErrFileNotFound;
         const std::string detail =
             ec ? ("[io] 宿主删除失败：" + ec.message()) : "[notfound] 什么都没删掉";
-        pathFailure(cpu, api, code, guest, detail);
+        pathFailure(cpu, api, code, guest, detail,
+                    code == kErrFileNotFound ? LogLevel::Debug : LogLevel::Warn);
         call.result = 0;
         return;
     }
@@ -1681,7 +1683,7 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
         }
         std::fclose(fp);
         if (!shadow_guest.empty()) {
-            shimLog("kernel32", api, "写 \"%s\" ⇒ 影子目录 \"%s\"（--game-dir 只读）",
+            shimLogDebug("kernel32", api, "写 \"%s\" ⇒ 影子目录 \"%s\"（--game-dir 只读）",
                     shadow_guest.c_str(), shadow_host.c_str());
         }
         writeTempName(name);
@@ -2093,12 +2095,12 @@ void shimFindFirstFileA(X86& cpu, ShimCall& call) {
     std::vector<HostDirEntry> entries;
     std::string why;
     if (!cpu.vfs->find(guest, &entries, &why)) {
-        pathFailure(cpu, api, vfsErrorToWin32(why), guest, why);
+        pathFailure(cpu, api, vfsErrorToWin32(why), guest, why, LogLevel::Debug);
         call.result = kInvalidHandleValue;
         return;
     }
     if (entries.empty()) {
-        pathFailure(cpu, api, kErrFileNotFound, guest, "[notfound] 没有匹配的条目");
+        pathFailure(cpu, api, kErrFileNotFound, guest, "[notfound] 没有匹配的条目", LogLevel::Debug);
         call.result = kInvalidHandleValue;
         return;
     }

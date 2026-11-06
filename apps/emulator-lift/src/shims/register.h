@@ -26,6 +26,7 @@
 #endif
 
 #include "runtime/handles.h"
+#include "runtime/log.h"
 #include "runtime/shims.h"
 
 namespace lift {
@@ -94,12 +95,20 @@ void registerD3DX9Shims(ShimRegistry& shims);     // d3dx9.cpp
 // 引擎据此走回退分支；注册成 thunk 会让引擎以为"这个 OS 有它"）。
 const char* dynamicExportAbsentReason(const char* module, const char* name);
 
-// ---- 共用的诊断打印（一行一条，stderr；不受 --trace 影响 —— 缺口感必须是常亮的）----
+// ---- 共用的诊断打印（分级 / 分类见 runtime/log.h）----
+// ★ 默认 `warn`：`shimLog`（Info）默认**不显示**；`shimLogWarn` / `shimLogDebug` 明确选级别。
+//   `shimAbort` 永远显示（Error 不受闸门影响），因为它是"该实现却做不到"的硬失败。
+inline void shimVPrintAt(LogLevel level, std::uint32_t category, const char* module, const char* name,
+                         const char* fmt, va_list ap) {
+    char prefix[320];
+    std::snprintf(prefix, sizeof(prefix), "[shim] %s!%s: ", module ? module : "?",
+                  name ? name : "?");
+    lift::logV(level, category, prefix, fmt, ap);
+}
+
+// 兼容旧调用：Info / shim 分类。
 inline void shimVPrint(const char* module, const char* name, const char* fmt, va_list ap) {
-    std::fprintf(stderr, "[shim] %s!%s: ", module, name);
-    std::vfprintf(stderr, fmt, ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
+    shimVPrintAt(LogLevel::Info, LogShim, module, name, fmt, ap);
 }
 
 // "这条做不到" ⇒ 打一行然后**停**（参数非法 / 无效句柄 / 该实现却没实现）。
@@ -119,18 +128,47 @@ inline void suppressCrashDialogs() {
 [[noreturn]] inline void shimAbort(const char* module, const char* name, const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    shimVPrint(module, name, fmt, ap);
+    shimVPrintAt(LogLevel::Error, LogShim, module, name, fmt, ap);
     va_end(ap);
     suppressCrashDialogs();
     restoreConsoleUtf8();  // abort 不跑析构；控制台码页必须显式恢复
     std::abort();
 }
 
-// "这条按 Windows 的真实失败值返回" ⇒ 打一行但不中止（缺 DLL / 名字找不到 / 点名过的偏差）。
+// 默认正常事件（Info / shim 分类）；默认 `warn` 模式下不显示。
 inline void shimLog(const char* module, const char* name, const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    shimVPrint(module, name, fmt, ap);
+    shimVPrintAt(LogLevel::Info, LogShim, module, name, fmt, ap);
+    va_end(ap);
+}
+
+inline void shimLogAt(LogLevel level, std::uint32_t category, const char* module, const char* name,
+                      const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    shimVPrintAt(level, category, module, name, fmt, ap);
+    va_end(ap);
+}
+
+inline void shimLogWarn(const char* module, const char* name, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    shimVPrintAt(LogLevel::Warn, LogShim, module, name, fmt, ap);
+    va_end(ap);
+}
+
+inline void shimLogDebug(const char* module, const char* name, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    shimVPrintAt(LogLevel::Debug, LogShim, module, name, fmt, ap);
+    va_end(ap);
+}
+
+inline void shimLogError(const char* module, const char* name, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    shimVPrintAt(LogLevel::Error, LogShim, module, name, fmt, ap);
     va_end(ap);
 }
 

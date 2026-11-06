@@ -199,13 +199,12 @@ bool firstTime(X86& cpu, std::uint32_t st, int bit) {
 }
 
 void vlog(const char* what, const char* fmt, ...) {
-    std::fprintf(stderr, "[shim] quartz!%s: ", what);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[shim] quartz!%s: ", what ? what : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogVideo, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 const char* roleName(Role::Kind r) {

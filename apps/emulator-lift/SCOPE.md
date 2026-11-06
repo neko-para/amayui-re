@@ -71,10 +71,20 @@
 
 1. 返回**合理值**（`HMENU` 非空、`SetMenu` TRUE、`MessageBoxA` IDOK、`HRESULT` 成功）；
 2. **不阻塞、不等待**（`TrackPopupMenu` 立即返回；影片 opcode 推进）；
-3. 打一行日志（可回查）；
+3. **留一条可回查的记录**（`runtime/log.h` 分级）：默认 `warn` 下 `Info` / `Debug` 可能不打印，
+   但调用点必须存在，`--log-level info|debug` / `--log-cat` 可查；⛔ 不是"没有记录"。
 4. 在覆盖清单 `data/lift/overrides.json` 里登记 `kind: stub` + `reason`。
 
 ⛔ 不许静默 no-op；⛔ 不许用 stub 掩盖"该实现的路径"。
+
+### 3.1 日志分级（2026-11-06）
+
+`src/runtime/log.h` 是唯一口径：`quiet < error < warn < info < debug < trace`；默认 **`warn`**，
+`Error` 永远显示（`quiet` 也不压），`shimAbort` / 未实现导入 / fault 不经过滤。分类由 `--log-cat`
+（`file` / `vfs` / `shim` / `com` / `d3d9` / `d3dx9` / `dsound` / `winmm` / `video` / `loader` /
+`native` / `report`）过滤。**引擎的只读探测失败**（先试外围文件、再走自己的归档）是 `Debug`，
+默认看不到；真正的失败（写 / 权限 / 共享冲突 / 所有回退都失败 / 未实现）仍是 `Warn` / `Error`。
+`--trace-shims` / `--trace-blocks` 的 trace 字节流不经过本闸门（A4 可复现性不变）。
 
 ## 4. 实现策略（不是偏差）
 

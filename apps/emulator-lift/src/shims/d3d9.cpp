@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "runtime/com.h"
+#include "runtime/log.h"
 #include "runtime/d3d9.h"
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/exec.h"
@@ -68,13 +69,12 @@ constexpr std::uint8_t kIidIndexBuffer9[16] = {0x5E, 0xD6, 0x9D, 0x7C, 0xF7, 0xD
 constexpr std::uint32_t kLastDeviceSlotOffset = 0x1D8u;
 
 void d3d9Log(const char* method, const char* fmt, ...) {
-    std::fprintf(stderr, "[d3d9] %s: ", method);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", method ? method : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogD3d9, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 // ★ loud trap：状态崩坏 / 参数形态没实现 ⇒ 打印现场并停机器（⛔ 不静默返回 0）。

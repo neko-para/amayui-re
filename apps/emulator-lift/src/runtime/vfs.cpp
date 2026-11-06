@@ -36,6 +36,7 @@
 //   3. **一个盘符对多个根**：所有盘符都剥掉并映射到 game_dir（本模拟器只有一张"盘"）。
 //   4. **`..` 的折叠只看文本**：不做符号链接感知（不 realpath）。宿主目录里若放了目录符号链接，
 //      穿过它之后的路径仍按文本判定"在根下"；⛔ 这不是安全边界，只是路径映射。
+#include "runtime/log.h"
 #include "runtime/vfs.h"
 
 #include <SDL3/SDL_filesystem.h>
@@ -866,9 +867,11 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
     //   "Vfs 自己打日志"的路径 —— 它足够罕见，而且必须能从日志里看见走的是哪一份）。
     //   ★ 写覆盖层上线后：**只有读**走这里 —— 写要进影子（⛔ 绝不让写把正在跑的拆壳件换掉）。
     if (access == VfsAccess::Read && matchesOverlay(guest)) {
-        std::fprintf(stderr, "[vfs] overlay: guest \"%s\" ⇒ \"%s\"（来源：--exe 拆壳件；sha256 前 8 位 %s）\n",
-                     guest.c_str(), overlay_host_.c_str(),
-                     overlay_sha256_.empty() ? "-" : overlay_sha256_.substr(0, 8).c_str());
+        char prefix[] = "[vfs] overlay: ";
+        logAt(LogLevel::Info, LogVfs, prefix,
+              "guest \"%s\" ⇒ \"%s\"（来源：--exe 拆壳件；sha256 前 8 位 %s）",
+              guest.c_str(), overlay_host_.c_str(),
+              overlay_sha256_.empty() ? "-" : overlay_sha256_.substr(0, 8).c_str());
         if (host_path) *host_path = overlay_host_;
         return true;
     }

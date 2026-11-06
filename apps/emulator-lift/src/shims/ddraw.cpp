@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "runtime/com.h"
+#include "runtime/log.h"
 #include "runtime/ddraw_surface.h"
 #include "runtime/exec.h"
 #include "runtime/guest_call.h"
@@ -86,13 +87,12 @@ constexpr std::uint32_t kDdedmRefreshRates = 0x00000001u;
 constexpr std::uint32_t kDescBytes2 = 124;
 
 void ddrawLog(const char* method, const char* fmt, ...) {
-    std::fprintf(stderr, "[ddraw] %s: ", method);
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[ddraw] %s: ", method ? method : "?");
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    logV(LogLevel::Info, LogGeneral, prefix, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
 }
 
 // ★ loud trap：未实现的 flag / 结构体 / 方法形态 ⇒ 打印现场并停机器（⛔ 不静默返回 0）。

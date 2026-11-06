@@ -129,7 +129,7 @@ void shimMmioOpenA(X86& cpu, ShimCall& call) {
     }
     std::FILE* fp = guest_handle ? liftFileStream(cpu, guest_handle) : nullptr;
     if (!fp) {
-        shimLog("winmm", "mmioOpenA",
+        shimLogAt(LogLevel::Debug, LogWinmm, "winmm", "mmioOpenA",
                 "lpmmioinfo.adwInfo[0]=0x%08X 不是有效 guest 文件句柄 ⇒ 返回 NULL（真实失败）",
                 guest_handle);
         call.result = 0;
@@ -138,7 +138,7 @@ void shimMmioOpenA(X86& cpu, ShimCall& call) {
     const std::uint32_t h = g_next_mmio;
     g_next_mmio += 4u;
     mmioMap()[h] = MmioState{fp, guest_handle};
-    shimLog("winmm", "mmioOpenA",
+    shimLogAt(LogLevel::Debug, LogWinmm, "winmm", "mmioOpenA",
             "guest 文件句柄 0x%08X ⇒ HMMIO 0x%08X（沿同一个 FILE* 读 RIFF；mmioClose 不关宿主文件）",
             guest_handle, h);
     call.result = h;
@@ -158,14 +158,14 @@ void shimMmioRead(X86& cpu, ShimCall& call) {
         return;
     }
     if (!dst || !cpu.mem->committed(dst, n)) {
-        shimLog("winmm", "mmioRead", "目标缓冲区 0x%08X/%u 未提交 ⇒ 返回 0", dst, n);
+        shimLogAt(LogLevel::Debug, LogWinmm, "winmm", "mmioRead", "目标缓冲区 0x%08X/%u 未提交 ⇒ 返回 0", dst, n);
         call.result = 0;
         return;
     }
     std::vector<unsigned char> buf(n);
     const std::size_t got = std::fread(buf.data(), 1, n, it->second.fp);
     if (got) cpu.mem->writeBytes(dst, buf.data(), got);
-    shimLog("winmm", "mmioRead", "hmmio=0x%08X 请求 %u 字节 ⇒ %u 字节", h, n, static_cast<unsigned>(got));
+    shimLogAt(LogLevel::Debug, LogWinmm, "winmm", "mmioRead", "hmmio=0x%08X 请求 %u 字节 ⇒ %u 字节", h, n, static_cast<unsigned>(got));
     call.result = static_cast<std::uint32_t>(got);
 }
 
@@ -235,12 +235,12 @@ void shimMmioDescend(X86& cpu, ShimCall& call) {
     }
 
     if (!found) {
-        shimLog("winmm", "mmioDescend", "hmmio=0x%08X flags=0x%08X 未找到 chunk（want ckid=0x%08X type=0x%08X）⇒ 265",
+        shimLogAt(LogLevel::Debug, LogWinmm, "winmm", "mmioDescend", "hmmio=0x%08X flags=0x%08X 未找到 chunk（want ckid=0x%08X type=0x%08X）⇒ 265",
                 h, flags, want_ckid, want_type);
         call.result = kMmioErrChunkNotFound;
         return;
     }
-    shimLog("winmm", "mmioDescend", "hmmio=0x%08X flags=0x%08X ⇒ ckid=0x%08X size=%u dataOff=%u",
+    shimLogAt(LogLevel::Debug, LogWinmm, "winmm", "mmioDescend", "hmmio=0x%08X flags=0x%08X ⇒ ckid=0x%08X size=%u dataOff=%u",
             h, flags, ckid, data_size, data_off);
     writeU32At(cpu, lpck + 0, ckid);
     writeU32At(cpu, lpck + 4, data_size);

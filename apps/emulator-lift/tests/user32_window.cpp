@@ -176,6 +176,7 @@ struct StderrCapture {
 }  // namespace
 
 int main() {
+    lift::logSetLevel("info");  // 本夹具断言日志行；默认 warn 会隐藏 Info
     using namespace lift_test;
     lift::Machine m;
     std::string err;
