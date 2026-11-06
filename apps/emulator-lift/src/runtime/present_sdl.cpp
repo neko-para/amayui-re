@@ -2,11 +2,14 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
 #include "runtime/frame_blit.h"
+#include "runtime/host_window.h"
 
 namespace lift {
 namespace {
@@ -36,6 +39,73 @@ std::string replaceFrameToken(std::string path, std::uint64_t frame) {
 
 bool hasDriver(const std::string& list, const char* name) {
     return list.find(name) != std::string::npos;
+}
+
+// ---- SDL → Win32 消息（P3 输入泵）----
+constexpr std::uint32_t kWmClose = 0x0010u;
+constexpr std::uint32_t kWmKeyDown = 0x0100u;
+constexpr std::uint32_t kWmKeyUp = 0x0101u;
+constexpr std::uint32_t kWmMouseMove = 0x0200u;
+constexpr std::uint32_t kWmLButtonDown = 0x0201u;
+constexpr std::uint32_t kWmLButtonUp = 0x0202u;
+constexpr std::uint32_t kWmRButtonDown = 0x0204u;
+constexpr std::uint32_t kWmRButtonUp = 0x0205u;
+constexpr std::uint32_t kWmMButtonDown = 0x0207u;
+constexpr std::uint32_t kWmMButtonUp = 0x0208u;
+constexpr std::uint32_t kWmMouseWheel = 0x020Au;
+constexpr std::uint32_t kMkLButton = 0x0001u;
+constexpr std::uint32_t kMkRButton = 0x0002u;
+constexpr std::uint32_t kMkMButton = 0x0010u;
+constexpr int kCloseGraceFrames = 3;
+constexpr std::uint64_t kCloseGraceNs = 500ull * 1000ull * 1000ull;
+
+std::uint32_t vkFromSdlKey(SDL_Keycode key) {
+    if (key >= SDLK_A && key <= SDLK_Z) return 0x41u + static_cast<std::uint32_t>(key - SDLK_A);
+    if (key >= SDLK_0 && key <= SDLK_9) return 0x30u + static_cast<std::uint32_t>(key - SDLK_0);
+    if (key >= SDLK_F1 && key <= SDLK_F12) return 0x70u + static_cast<std::uint32_t>(key - SDLK_F1);
+    switch (key) {
+        case SDLK_ESCAPE: return 0x1B;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER: return 0x0D;
+        case SDLK_TAB: return 0x09;
+        case SDLK_BACKSPACE: return 0x08;
+        case SDLK_SPACE: return 0x20;
+        case SDLK_LEFT: return 0x25;
+        case SDLK_UP: return 0x26;
+        case SDLK_RIGHT: return 0x27;
+        case SDLK_DOWN: return 0x28;
+        case SDLK_INSERT: return 0x2D;
+        case SDLK_DELETE: return 0x2E;
+        case SDLK_HOME: return 0x24;
+        case SDLK_END: return 0x23;
+        case SDLK_PAGEUP: return 0x21;
+        case SDLK_PAGEDOWN: return 0x22;
+        case SDLK_LSHIFT:
+        case SDLK_RSHIFT: return 0x10;
+        case SDLK_LCTRL:
+        case SDLK_RCTRL: return 0x11;
+        case SDLK_LALT:
+        case SDLK_RALT: return 0x12;
+        default: return 0;
+    }
+}
+
+std::uint32_t mouseBit(Uint8 button) {
+    switch (button) {
+        case SDL_BUTTON_LEFT: return kMkLButton;
+        case SDL_BUTTON_RIGHT: return kMkRButton;
+        case SDL_BUTTON_MIDDLE: return kMkMButton;
+        default: return 0;
+    }
+}
+
+std::uint32_t win32MouseMessage(Uint8 button, bool down) {
+    switch (button) {
+        case SDL_BUTTON_LEFT: return down ? kWmLButtonDown : kWmLButtonUp;
+        case SDL_BUTTON_RIGHT: return down ? kWmRButtonDown : kWmRButtonUp;
+        case SDL_BUTTON_MIDDLE: return down ? kWmMButtonDown : kWmMButtonUp;
+        default: return 0;
+    }
 }
 
 }  // namespace
@@ -75,7 +145,166 @@ struct SdlWindow::Impl {
     int raster_tex_w = 0;
     int raster_tex_h = 0;
     frame_blit::HostPixelFormat raster_tex_fmt = frame_blit::HostPixelFormat::Unsupported;
+    // P3：guest 消息泵 / 键鼠状态 / 关窗宽限
+    WindowManager* windows = nullptr;
+    std::uint32_t mouse_buttons = 0;
+    bool close_pending = false;
+    int close_frames_left = 0;
+    std::uint64_t close_deadline_ns = 0;
+
+    void postMessage(std::uint32_t message, std::uint32_t wparam, std::uint32_t lparam);
+    void requestStop();
+    void requestClose();
+    void advanceCloseFrame();
+    void handleEvent(const SDL_Event& event);
+    void pumpEvents(int wait_ms);
+    void mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const;
 };
+
+void SdlWindow::Impl::postMessage(std::uint32_t message, std::uint32_t wparam, std::uint32_t lparam) {
+    if (windows == nullptr) return;
+    WinMessage m;
+    m.hwnd = windows->primaryWindow();
+    m.message = message;
+    m.wparam = wparam;
+    m.lparam = lparam;
+    m.time = static_cast<std::uint32_t>(SDL_GetTicks());
+    windows->post(m);
+}
+
+void SdlWindow::Impl::requestStop() {
+    if (stop) return;
+    stop = true;
+    // 唤醒可能正阻塞在 GetMessageA 里的 guest：WM_QUIT 是队列尾的虚拟项。
+    if (windows != nullptr) windows->postQuit(0);
+}
+
+void SdlWindow::Impl::requestClose() {
+    if (stop || close_pending) return;
+    if (windows == nullptr || windows->primaryWindow() == 0) {
+        // 还没有 guest 窗口（或没有消息泵）⇒ 没有可确认的对象，直接收口。
+        requestStop();
+        return;
+    }
+    close_pending = true;
+    close_frames_left = kCloseGraceFrames;
+    close_deadline_ns = SDL_GetTicksNS() + kCloseGraceNs;
+    postMessage(kWmClose, 0, 0);
+}
+
+void SdlWindow::Impl::advanceCloseFrame() {
+    if (!close_pending || stop) return;
+    if (close_frames_left > 0) --close_frames_left;
+    if (close_frames_left <= 0 || SDL_GetTicksNS() >= close_deadline_ns) requestStop();
+}
+
+void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const {
+    int ww = 1280;
+    int wh = 720;
+    if (window != nullptr) SDL_GetWindowSize(window, &ww, &wh);
+    if (ww <= 0) ww = 1280;
+    if (wh <= 0) wh = 720;
+    // 与 present 的 SDL_LOGICAL_PRESENTATION_LETTERBOX 同一套映射：窗口像素 → 虚拟 1280x720。
+    const float scale = std::min(static_cast<float>(ww) / 1280.0f, static_cast<float>(wh) / 720.0f);
+    if (scale <= 0.0f) {
+        *gx = static_cast<std::int32_t>(mx);
+        *gy = static_cast<std::int32_t>(my);
+        return;
+    }
+    const float dw = 1280.0f * scale;
+    const float dh = 720.0f * scale;
+    const float ox = (static_cast<float>(ww) - dw) * 0.5f;
+    const float oy = (static_cast<float>(wh) - dh) * 0.5f;
+    int x = static_cast<int>(std::lround((mx - ox) / scale));
+    int y = static_cast<int>(std::lround((my - oy) / scale));
+    x = std::clamp(x, 0, 1279);
+    y = std::clamp(y, 0, 719);
+    *gx = x;
+    *gy = y;
+}
+
+void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
+    switch (event.type) {
+        case SDL_EVENT_QUIT:
+            // 应用级退出：直接 post WM_QUIT（不再走 guest 的 WM_CLOSE 确认）。
+            requestStop();
+            break;
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            if (window != nullptr && event.window.windowID == SDL_GetWindowID(window)) requestClose();
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            mouse_buttons = 0;
+            if (windows != nullptr) windows->clearKeys();
+            break;
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP: {
+            const bool down = event.type == SDL_EVENT_KEY_DOWN;
+            const std::uint32_t vk = vkFromSdlKey(event.key.key);
+            if (vk == 0) break;
+            if (windows != nullptr) windows->setKeyDown(vk, down);
+            const std::uint32_t scan = event.key.scancode ? static_cast<std::uint32_t>(event.key.scancode) : 0u;
+            std::uint32_t lparam = 1u | (scan << 16);
+            if (!down) lparam |= 0xC0000000u;  // previous state + transition
+            postMessage(down ? kWmKeyDown : kWmKeyUp, vk, lparam);
+            if (down && vk == 0x1B) requestClose();  // ESC = 用户要退出（与旧行为一致）
+            break;
+        }
+        case SDL_EVENT_MOUSE_MOTION: {
+            std::int32_t x = 0;
+            std::int32_t y = 0;
+            mapMouse(event.motion.x, event.motion.y, &x, &y);
+            postMessage(kWmMouseMove, mouse_buttons,
+                        (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
+            break;
+        }
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP: {
+            const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+            const std::uint32_t bit = mouseBit(event.button.button);
+            if (bit == 0) break;
+            if (down) mouse_buttons |= bit;
+            else mouse_buttons &= ~bit;
+            std::int32_t x = 0;
+            std::int32_t y = 0;
+            mapMouse(event.button.x, event.button.y, &x, &y);
+            postMessage(win32MouseMessage(event.button.button, down), mouse_buttons,
+                        (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
+            break;
+        }
+        case SDL_EVENT_MOUSE_WHEEL: {
+            const int delta = static_cast<int>(std::lround(event.wheel.y * 120.0f));
+            std::int32_t x = 0;
+            std::int32_t y = 0;
+            mapMouse(event.wheel.mouse_x, event.wheel.mouse_y, &x, &y);
+            const std::uint32_t wp = (static_cast<std::uint32_t>(delta) << 16) | mouse_buttons;
+            postMessage(kWmMouseWheel, wp,
+                        (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
+            break;
+        }
+        case SDL_EVENT_RENDER_DEVICE_LOST:
+            if (!device_lost) {
+                device_lost = true;
+                std::fprintf(stderr, "[present] SDL 渲染设备丢失（不会自动重建；后续帧会回退 headless）\n");
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void SdlWindow::Impl::pumpEvents(int wait_ms) {
+    if (stop) return;
+    SDL_Event event;
+    if (wait_ms > 0) {
+        if (SDL_WaitEventTimeout(&event, wait_ms)) {
+            handleEvent(event);
+            while (SDL_PollEvent(&event)) handleEvent(event);
+        }
+    } else {
+        while (SDL_PollEvent(&event)) handleEvent(event);
+    }
+    if (close_pending && !stop && SDL_GetTicksNS() >= close_deadline_ns) requestStop();
+}
 
 SdlWindow::SdlWindow() : impl_(std::make_unique<Impl>()) {}
 SdlWindow::~SdlWindow() { shutdown(); }
@@ -189,6 +418,11 @@ void SdlWindow::shutdown() {
     impl_->stop = false;
     impl_->device_lost = false;
     impl_->capture = false;
+    impl_->windows = nullptr;
+    impl_->mouse_buttons = 0;
+    impl_->close_pending = false;
+    impl_->close_frames_left = 0;
+    impl_->close_deadline_ns = 0;
     impl_->frame_no = 0;
     impl_->screenshot_path.clear();
     impl_->renderer_name.clear();
@@ -200,6 +434,8 @@ void SdlWindow::shutdown() {
 }
 
 bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) {
+    // 关窗宽限按**呈现帧**计：WM_CLOSE 在上一帧末尾入队，本帧开始才消耗一格。
+    impl_->advanceCloseFrame();
     if (impl_->renderer == nullptr) {
         if (err) *err = "SDL 窗口未初始化";
         return false;
@@ -309,30 +545,17 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
     return true;
 }
 
-void SdlWindow::pumpHostEvents() {
+void SdlWindow::pumpHostEvents() { pumpHostEvents(0); }
+
+void SdlWindow::pumpHostEvents(int wait_ms) {
     if (impl_->window == nullptr) return;
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-        switch (event.type) {
-            case SDL_EVENT_QUIT:
-                impl_->stop = true;
-                break;
-            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-                if (event.window.windowID == SDL_GetWindowID(impl_->window)) impl_->stop = true;
-                break;
-            case SDL_EVENT_KEY_DOWN:
-                if (event.key.key == SDLK_ESCAPE) impl_->stop = true;
-                break;
-            case SDL_EVENT_RENDER_DEVICE_LOST:
-                if (!impl_->device_lost) {
-                    impl_->device_lost = true;
-                    std::fprintf(stderr, "[present] SDL 渲染设备丢失（不会自动重建；后续帧会回退 headless）\n");
-                }
-                break;
-            default:
-                break;
-        }
-    }
+    impl_->pumpEvents(wait_ms);
+}
+
+void SdlWindow::attachWindowManager(WindowManager* windows) { impl_->windows = windows; }
+
+std::uint32_t SdlWindow::windowIdForTest() const {
+    return impl_->window != nullptr ? SDL_GetWindowID(impl_->window) : 0u;
 }
 
 bool SdlWindow::stopRequested() const { return impl_->stop; }

@@ -2,42 +2,45 @@
 
 - id: REQ-01M6P7DPEGRRBCRPXTE3F1GZ6Q
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/window_events.cpp#window-events
 - tags: [emulator-lift present sdl input]
 
 ## 背景
+`REQ-01M6P6YSTMC3MCDTHS7RSQYRRE` 交付了 headless/CPU 与 SDL/GPU 呈现，但只把像素送进窗口；
+`GetMessageA` 在空队列时仍 `shimAbort`，键鼠/关窗没有进 guest 消息队列。本单把 SDL 事件接进
+`WindowManager` 的同一个消息队列。
 
-`REQ-01M6P6YSTMC3MCDTHS7RSQYRRE` 已交付可切换的 **headless/CPU（缺省）** 与 **SDL/GPU（显式）** 呈现；
-但本阶段只做“像素送进窗口”，没有把 SDL 事件接进 guest 消息队列。
-
-现有事实：`shimGetMessageA` 在队列为空时 `shimAbort`（`apps/emulator-lift/src/shims/user32_window.cpp`），
-而引擎主循环是 `PeekMessageA(PM_NOREMOVE) → GetMessageA → TranslateMessage → DispatchMessageA`。
-⇒ 窗口能看到第一帧，但 guest 一旦在空队列上等消息就会 abort；交互（键鼠 / 关窗确认）不可用。
-
-## 目标
-
-- `WindowManager` 增加**可选宿主事件源**（`std::function`）；未安装 ⇒ 保持今天的语义（含 abort）。
-- 安装后 `GetMessageA`：先 pump SDL（`SDL_PollEvent`）→ 仍空则 `SDL_WaitEventTimeout(1..10ms)` +
-  `pumpTimers`，直到有消息或窗口关闭。
-- `SdlWindow` 把 SDL 事件翻译成 Win32 消息：`WM_CLOSE` / `WM_QUIT` / `WM_KEYDOWN/UP` /
-  `WM_MOUSEMOVE` / 鼠标键 / 滚轮；坐标按虚拟 1280x720 换算（不把宿主 DPI/尺寸泄漏给 guest）。
-- 关窗：先 `WM_CLOSE`（走 guest 自己的确认）；宽限 K 帧后仍不退出 ⇒ `presenter().stopRequested()`，
-  `Machine::run` 以 `StopReason::Stopped` 收口（`detail="present: 窗口关闭"`）。
-
-## 非目标
-
-- 不做多窗口 / 全屏 / IME / 摇杆。
-- 不改 guest 的固定虚拟屏（1280x720）与确定性 trace。
+## 实现
+- `WindowManager` 新增可选 `HostEventPump`（`std::function<void(X86&)>`）：
+  - 未安装 ⇒ `get()` 保持旧语义（pump 计时器后空队列返回 false，`GetMessageA` 仍 abort）。
+  - 安装 ⇒ `get()` 在队列空时反复调用事件源，阻塞到有消息或窗口关闭。
+  - 新增 `primaryWindow()`（关窗消息的 hwnd）与 256 项影子键状态（`setKeyDown/keyDown/clearKeys`）。
+- `SdlWindow` 新增 `attachWindowManager()` / `pumpHostEvents(wait_ms)`：
+  - `SDL_PollEvent` → `SDL_WaitEventTimeout(5ms)` → 再 poll；`PresentSink` 的 0ms 轮询语义不变。
+  - 键盘：`WM_KEYDOWN/UP`（ESC 同时触发关窗）；`GetAsyncKeyState` 读同一份影子状态。
+  - 鼠标：`WM_MOUSEMOVE` / 左中右键 / `WM_MOUSEWHEEL`；坐标按虚拟 1280x720 + letterbox 反算。
+  - 关窗：`SDL_EVENT_WINDOW_CLOSE_REQUESTED` 先发 `WM_CLOSE`；宽限 **3 个 Present 帧 / 500ms**，
+    到点仍不退出 ⇒ `stopRequested()` + `postQuit(0)`；`Machine::run` 以
+    `StopReason::Stopped` / `detail="present: 窗口关闭"` 收口（exit 0）。
+  - `SDL_EVENT_QUIT` 走立即 `WM_QUIT`；`WINDOW_FOCUS_LOST` 清键鼠状态。
+- `main.cpp`：窗口 sink 装配后把 `SdlWindow*` 挂到 `machine.cpu().windows` 并安装事件源；
+  运行结束清掉事件源（避免悬空）。
 
 ## 验收
+- `window-events`（pure，28 checks）：假事件源注入 `WM_KEYDOWN`/`WM_MOUSEMOVE`/`WM_CLOSE`，
+  guest 的 `GetMessageA` 依次收到；第 4 次 `postQuit` 返回 0；`GetAsyncKeyState('A')=0x8000`；
+  未装事件源的 `WindowManager::get` 仍返回 false。
+- `present-window`（74 checks）：dummy SDL 窗口上注入键/鼠标/滚轮，断言消息与坐标；
+  注入 `WINDOW_CLOSE_REQUESTED` ⇒ 先 `WM_CLOSE`，3 帧后 `stopRequested`；
+  另有一条 `Machine::run` + SDL sink 的关窗用例，断言 `StopReason::Stopped` / detail / `r.ok()`。
+- headless：没有事件源时事件泵路径不执行，`GetMessageA` 行为与旧版一致。
 
-- `user32-window` 或新增 pure 夹具：假事件源注入 `WM_KEYDOWN`/`WM_CLOSE`，断言 guest 消息队列顺序、
-  `GetMessageA` 不再 abort、关窗走 `WM_CLOSE`。
-- `present-window` 场景：真实窗口按 ESC / 关闭 ⇒ 进程 exit 0（`StopReason::Stopped`），不是 abort/2。
-- headless（无事件源）行为逐字节不变；现有 CTest 全绿。
+## 已知限制
+- `PeekMessageA` 仍只 pump 计时器；阻塞等待由 `GetMessageA` 承担（引擎主循环在 Peek 空后调用它）。
+- `TranslateMessage` 仍未生成 `WM_CHAR`（本单只要求键消息；文本输入另开）。
+- 不做 IME / 摇杆 / 多窗口；关窗宽限的 500ms 是墙钟兜底，窗口模式本来就是 `--real-time`。
 
-## 风险
-
-- 输入翻译必须与 `user32_input` 的影子键盘状态同源，否则 `GetAsyncKeyState` 与 `WM_KEYDOWN` 打架。
-- `GetMessageA` 的等待会让虚拟时钟/真实时钟切换更敏感；窗口模式已自动 real_time，需单独核对节奏。
+## 复现 / 验证
+`ctest --test-dir apps/emulator-lift/out -R 'window-events|present-window' --output-on-failure`

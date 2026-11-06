@@ -627,7 +627,12 @@ int main(int argc, char** argv) {
                 std::printf("present   : 注意：driver=%s 是 GPU API 路径，但不是 SDL_GPU（gpu driver）\n",
                             sdl->rendererName());
             }
+            // ★ P3：把 SDL 事件源接到 WindowManager。GetMessageA 在空队列时会调用它
+            //   （SDL_PollEvent → SDL_WaitEventTimeout(5ms)），把键鼠/关窗翻译成 guest 消息。
+            lift::SdlWindow* sdl_raw = sdl.get();
             machine.presenter().setSink(std::move(sdl));
+            sdl_raw->attachWindowManager(machine.cpu().windows);
+            machine.cpu().windows->setHostEventPump([sdl_raw](lift::X86&) { sdl_raw->pumpHostEvents(5); });
             present_window_active = true;
         }
     }
@@ -676,6 +681,7 @@ int main(int argc, char** argv) {
     const std::uint64_t t0 = SDL_GetTicksNS();
     const lift::RunResult r = machine.run(opt);
     const std::uint64_t t1 = SDL_GetTicksNS();
+    if (present_window_active) machine.cpu().windows->clearHostEventPump();
 
     machine.dumpRunSummary(r, stdout);
     if (profile) machine.dumpProfile(stdout, profile_top);

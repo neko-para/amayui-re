@@ -475,9 +475,14 @@ void shimGetSystemMetrics(X86& cpu, ShimCall& call) {
 }
 
 void shimGetAsyncKeyState(X86& cpu, ShimCall& call) {
-    (void)cpu;
-    (void)call.u32(0);
-    call.result = 0;  // headless：没有键按下（P3 接 SDL 影子状态）
+    // ★ 与 WM_KEYDOWN/UP 同源：SDL 事件源把键状态写进 WindowManager，这里只读同一份影子状态。
+    //   Win32 返回 SHORT：最高位 = 当前按下；低字节 = 自上次查询后按过（本线暂不建模低字节）。
+    if (!cpu.windows) {
+        call.result = 0;
+        return;
+    }
+    const std::uint32_t vk = call.u32(0) & 0xFFu;
+    call.result = cpu.windows->keyDown(vk) ? 0x8000u : 0u;
 }
 
 void shimGetForegroundWindow(X86& cpu, ShimCall& call) {
@@ -566,8 +571,7 @@ void shimGetMessageA(X86& cpu, ShimCall& call) {
     WinMessage m;
     if (!cpu.windows->get(cpu, &m)) {
         shimAbort("user32", "GetMessageA",
-                  "headless 下没有消息可等（P0 只由 Peek 驱动；P3 接 SDL 后端）；"
-                  "若要阻塞等待，需要在后端补事件源");
+                  "没有消息可等：headless 没有宿主事件源（只有 --present window 才装 SDL 事件源）");
     }
     if (m.message == kWmQuit) {
         call.result = 0;

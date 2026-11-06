@@ -8,8 +8,10 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "runtime/region.h"
@@ -90,6 +92,19 @@ public:
     // 唤醒掩码的消息"，只看队首会让"不匹配的消息挡在前面"时误报 WAIT_TIMEOUT。
     bool peekAt(std::size_t index, WinMessage* out) const;
     bool get(X86& cpu, WinMessage* out);  // headless：先 pump 计时器；无消息 ⇒ false（调用方报错）
+    // ★ P3 宿主事件源（SDL 窗口）：队列空时调用它；它负责把 SDL 事件翻译成 WinMessage 并 post。
+    //   未安装 ⇒ `get` 保持旧语义（返回 false，调用方 abort）；安装后 ⇒ 阻塞到有消息或窗口关闭。
+    //   回调必须自己限时（SDL_WaitEventTimeout(1..10ms)），⛔ 不许永久阻塞宿主。
+    using HostEventPump = std::function<void(X86&)>;
+    void setHostEventPump(HostEventPump pump);
+    void clearHostEventPump();
+    bool hasHostEventPump() const { return static_cast<bool>(host_event_pump_); }
+    // 主窗口（第一个未销毁；本作单窗口；0 = 还没有窗口）。关窗消息的 hwnd 用它。
+    std::uint32_t primaryWindow() const;
+    // 影子键盘状态：WM_KEYDOWN/UP 与 GetAsyncKeyState 同源（⛔ 两套状态会打架）。
+    void setKeyDown(std::uint32_t vk, bool down);
+    bool keyDown(std::uint32_t vk) const;
+    void clearKeys();
     void postQuit(std::uint32_t code);
     bool quitPosted() const { return quit_; }
     std::uint32_t quitCode() const { return quit_code_; }
@@ -146,6 +161,8 @@ private:
     std::uint32_t next_timer_ = 1;
     bool quit_ = false;
     std::uint32_t quit_code_ = 0;
+    HostEventPump host_event_pump_;
+    std::uint8_t key_down_[256] = {};
     // 光标 / 捕获（见上面的方法注释）
     std::uint32_t cursor_ = 0;
     std::uint32_t capture_ = 0;

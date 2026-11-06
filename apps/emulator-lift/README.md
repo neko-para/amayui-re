@@ -246,8 +246,9 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
   Present 结果不受影响）。`--present auto` 仅调试用：失败回 headless。
 - DDraw **不在本次验收内**（用户口径：AGE 默认不走 DDraw）；`Flip` 复用同一 sink 只是副作用，
   `--dump-frame` 仍只在 D3D9 Present 消费。
-- ⚠ 本阶段**没有**做输入映射 / `GetMessageA` 宿主事件泵：如果 guest 走到空队列 `GetMessageA`，
-  仍会按现有语义 abort（交互主循环另开单）。看画面用 `--real-time` / `--max-frames`；
+- 窗口模式把 SDL 事件接到 guest 消息队列：键盘 / 鼠标移动与按键 / 滚轮 → `WM_KEY*` / `WM_MOUSE*`；
+  关窗（或 ESC）先发 `WM_CLOSE`，宽限 3 帧 / 500ms 后 `StopReason::Stopped`（`detail="present: 窗口关闭"`）。
+  headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
 
 ## 4.2b GPU 光栅化（`--raster gpu`）

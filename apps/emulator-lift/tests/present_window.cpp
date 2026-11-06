@@ -11,6 +11,8 @@
 #include <string>
 
 #include "check.h"
+#include "runtime/host_window.h"
+#include "runtime/machine.h"
 #include "runtime/memory.h"
 #include "runtime/present_sdl.h"
 #include "runtime/surface.h"
@@ -137,6 +139,98 @@ int main(int argc, char** argv) {
         win.shutdown();
     }
 
+    // ---- P3：SDL 事件 → guest Win32 消息（键鼠 / 滚轮 / 关窗宽限）----
+    {
+        Fx f;
+        LIFT_CHECK(make(f, 64, 48, format32(0)));
+        lift::SdlWindow win;
+        std::string err;
+        if (!requireWindow(win, gpu, &err)) {
+            if (gpu) LIFT_SKIP(err.c_str());
+            LIFT_CHECK(false);
+            return lift_test::finish("present-window");
+        }
+        lift::WindowManager wm;
+        const std::uint32_t hwnd = wm.createWindow("EventTest", 0x10000000u, 0, 0, 0, 1280, 720, 0);
+        LIFT_CHECK_NE_U32(hwnd, 0u);
+        win.attachWindowManager(&wm);
+        const SDL_WindowID wid = win.windowIdForTest();
+
+        SDL_Event e{};
+        e.type = SDL_EVENT_KEY_DOWN;
+        e.key.windowID = wid;
+        e.key.key = SDLK_A;
+        e.key.scancode = SDL_SCANCODE_A;
+        e.key.down = true;
+        LIFT_CHECK(SDL_PushEvent(&e));
+        e = SDL_Event{};
+        e.type = SDL_EVENT_MOUSE_MOTION;
+        e.motion.windowID = wid;
+        e.motion.x = 640.0f;
+        e.motion.y = 360.0f;
+        LIFT_CHECK(SDL_PushEvent(&e));
+        e = SDL_Event{};
+        e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+        e.button.windowID = wid;
+        e.button.button = SDL_BUTTON_LEFT;
+        e.button.x = 100.0f;
+        e.button.y = 200.0f;
+        e.button.down = true;
+        LIFT_CHECK(SDL_PushEvent(&e));
+        e = SDL_Event{};
+        e.type = SDL_EVENT_MOUSE_WHEEL;
+        e.wheel.windowID = wid;
+        e.wheel.y = 1.0f;
+        e.wheel.mouse_x = 640.0f;
+        e.wheel.mouse_y = 360.0f;
+        LIFT_CHECK(SDL_PushEvent(&e));
+        win.pumpHostEvents();
+
+        lift::WinMessage msg;
+        auto take = [&](std::uint32_t expected) {
+            LIFT_CHECK(wm.peek(&msg, true));
+            LIFT_CHECK_EQ_U32(msg.message, expected);
+            return msg;
+        };
+        const lift::WinMessage key = take(0x0100u);
+        LIFT_CHECK_EQ_U32(key.wparam, 0x41u);
+        LIFT_CHECK(wm.keyDown(0x41u));
+        const lift::WinMessage move = take(0x0200u);
+        LIFT_CHECK_EQ_U32(move.lparam, (360u << 16) | 640u);
+        const lift::WinMessage down = take(0x0201u);
+        LIFT_CHECK_EQ_U32(down.wparam & 0x0001u, 0x0001u);
+        const lift::WinMessage wheel = take(0x020Au);
+        LIFT_CHECK_EQ_U32((wheel.wparam >> 16) & 0xFFFFu, 120u);
+
+        e = SDL_Event{};
+        e.type = SDL_EVENT_KEY_UP;
+        e.key.windowID = wid;
+        e.key.key = SDLK_A;
+        e.key.scancode = SDL_SCANCODE_A;
+        e.key.down = false;
+        LIFT_CHECK(SDL_PushEvent(&e));
+        win.pumpHostEvents();
+        take(0x0101u);
+        LIFT_CHECK(!wm.keyDown(0x41u));
+
+        // 关窗先发 WM_CLOSE；两帧宽限后才 stopRequested（guest 有机会自己确认）。
+        e = SDL_Event{};
+        e.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+        e.window.windowID = wid;
+        LIFT_CHECK(SDL_PushEvent(&e));
+        win.pumpHostEvents();
+        take(0x0010u);
+        LIFT_CHECK(!win.stopRequested());
+        LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+        LIFT_CHECK(!win.stopRequested());
+        LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+        LIFT_CHECK(!win.stopRequested());
+        LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+        LIFT_CHECK(win.stopRequested());
+        LIFT_CHECK(wm.quitPosted());
+        win.shutdown();
+    }
+
     // ---- 565 ----
     {
         Fx f;
@@ -254,6 +348,40 @@ int main(int argc, char** argv) {
         LIFT_CHECK(win.submitFrame(f.arena, *s3, &err));  // 尺寸变化 ⇒ 重建 + 重设窗口
         LIFT_CHECK(expectRgb(win, 1, 1, 0xFF0000u, "recreate 33x17"));
         win.shutdown();
+    }
+
+    // ---- P3：窗口关闭 → Machine::run 以 StopReason::Stopped 收口（exit 0 的判据）----
+    {
+        lift::Machine m;
+        std::string err;
+        LIFT_CHECK(m.initBare(&err));
+        LIFT_CHECK(m.prepareStack(&err));
+        const std::uint8_t loop[] = {0xEB, 0xFE};  // jmp $
+        LIFT_CHECK(m.placeCode(0x00401000u, loop, sizeof(loop), &err));
+        auto sink = std::make_unique<lift::SdlWindow>();
+        std::string werr;
+        if (!requireWindow(*sink, gpu, &werr)) {
+            if (gpu) LIFT_SKIP(werr.c_str());
+            LIFT_CHECK(false);
+            return lift_test::finish("present-window");
+        }
+        lift::SdlWindow* win = sink.get();
+        const std::uint32_t hwnd = m.cpu().windows->createWindow("CloseTest", 0x10000000u, 0, 0, 0, 1280, 720, 0);
+        LIFT_CHECK_NE_U32(hwnd, 0u);
+        win->attachWindowManager(m.cpu().windows);
+        m.cpu().windows->setHostEventPump([win](lift::X86&) { win->pumpHostEvents(1); });
+        m.presenter().setSink(std::move(sink));
+        SDL_Event quit{};
+        quit.type = SDL_EVENT_QUIT;
+        LIFT_CHECK(SDL_PushEvent(&quit));
+        m.cpu().eip = 0x00401000u;
+        lift::RunOptions opt;
+        opt.max_insns = 200000u;
+        const lift::RunResult r = m.run(opt);
+        LIFT_CHECK(r.reason == lift::StopReason::Stopped);
+        LIFT_CHECK(r.detail.find("窗口关闭") != std::string::npos);
+        LIFT_CHECK(r.ok());
+        LIFT_CHECK(win->stopRequested());
     }
 
     LIFT_CHECK_EQ_U32(SDL_WasInit(SDL_INIT_VIDEO), 0u);

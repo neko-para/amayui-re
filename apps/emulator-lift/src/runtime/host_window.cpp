@@ -121,8 +121,42 @@ bool WindowManager::peekAt(std::size_t index, WinMessage* out) const {
 }
 
 bool WindowManager::get(X86& cpu, WinMessage* out) {
-    pumpTimers(cpu);
-    return peek(out, true);
+    // ★ headless（没有事件源）：保持 P0 语义 —— 只 pump 计时器，空队列返回 false。
+    // ★ 装了 SDL 事件源：GetMessageA 必须**阻塞**到有消息或窗口关闭；事件源自己限时等待
+    //   （SDL_WaitEventTimeout），这里只负责反复 pump，直到队列里出现消息（含 WM_QUIT 虚拟项）。
+    for (;;) {
+        pumpTimers(cpu);
+        if (peek(out, true)) return true;
+        if (!host_event_pump_) return false;
+        host_event_pump_(cpu);
+    }
+}
+
+void WindowManager::setHostEventPump(HostEventPump pump) {
+    host_event_pump_ = std::move(pump);
+}
+
+void WindowManager::clearHostEventPump() {
+    host_event_pump_ = nullptr;
+}
+
+std::uint32_t WindowManager::primaryWindow() const {
+    for (const auto& entry : windows_) {
+        if (!entry.second.destroyed) return entry.first;
+    }
+    return 0;
+}
+
+void WindowManager::setKeyDown(std::uint32_t vk, bool down) {
+    if (vk < 256u) key_down_[vk] = down ? 1u : 0u;
+}
+
+bool WindowManager::keyDown(std::uint32_t vk) const {
+    return vk < 256u && key_down_[vk] != 0;
+}
+
+void WindowManager::clearKeys() {
+    for (std::uint8_t& k : key_down_) k = 0;
 }
 
 void WindowManager::postQuit(std::uint32_t code) {

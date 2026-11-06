@@ -219,6 +219,11 @@ add_executable(lift-user32-window tests/user32_window.cpp)
 target_link_libraries(lift-user32-window PRIVATE emulator-lift-runtime)
 add_test(NAME user32-window COMMAND lift-user32-window)
 
+# ---- pure：GetMessageA + 宿主事件源（P3；假事件源，不建 SDL 窗口）----
+add_executable(lift-window-events tests/window_events.cpp)
+target_link_libraries(lift-window-events PRIVATE emulator-lift-runtime)
+add_test(NAME window-events COMMAND lift-window-events)
+
 add_executable(lift-surface-present tests/surface_present.cpp)
 target_link_libraries(lift-surface-present PRIVATE emulator-lift-runtime)
 add_test(NAME surface-present COMMAND lift-surface-present)

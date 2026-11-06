@@ -16,6 +16,8 @@
 
 namespace lift {
 
+class WindowManager;
+
 struct SdlWindowOptions {
     std::string title = "emulator-lift";
     std::string driver_list = "gpu,direct3d12,direct3d11,vulkan,metal,opengl";
@@ -38,7 +40,14 @@ public:
 
     bool submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) override;
     void pumpHostEvents() override;
+    // ★ P3：GetMessageA 的事件源。wait_ms>0 时用 SDL_WaitEventTimeout(≈1..10ms) 等一个事件；
+    //   没有事件源时 PresentSink 的 0ms 轮询语义不变。
+    void pumpHostEvents(int wait_ms);
     bool stopRequested() const override;
+    // 把 SDL 事件翻译成 guest 的 Win32 消息（WM_CLOSE / 键鼠 / 滚轮）；窗口关掉后置 stop。
+    void attachWindowManager(WindowManager* windows);
+    // 测试用：拿 SDL 窗口 ID 构造 WINDOW_CLOSE_REQUESTED。
+    std::uint32_t windowIdForTest() const;
     std::string describe() const override;
     GpuRaster* gpuRaster() override;
 
