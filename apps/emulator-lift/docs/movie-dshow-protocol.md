@@ -327,3 +327,16 @@
      再 `writeBytes`，不逐像素进 guest）。
    - 守卫：`tests/dshow_graph.cpp` 的假帧源改成**三通道不同**（R=v、G=v+1、B=v+2），断言样本缓冲第
      0/1/2 字节 = B/G/R。把交换去掉 ⇒ `dshow-pump-frames` 立刻红（149 checks）。
+
+15. **`DoRenderSample` 的 native override（2026-11-07，性能）**
+   - profile 证据（用户实测，RelWithDebInfo）：`sub_487C60` = **77.5% / 4980.8 ms / 44.25M 块**
+     —— 全是引擎逐像素把 BGR(A) 搬进 A8R8G8B8 纹理的 guest 循环；解码（pl_mpeg，宿主）不在块 profile 里。
+   - 实现：`native_overrides.cpp` 的 `nativeRender487C60`，注册名 **`sub_487C60`**（已进 `all`，稳定层）。
+     只覆盖影片主路径：`D3DFORMAT==21`(A8R8G8B8)、`[+0x588]==0`（无 alpha 面）、`[+0x590]==0`
+     （无 alpha 拷贝）、源 3/4 字节/像素；其余一律返回 false 回退解释器。裁剪、自底向上行序、
+     色键（`[+0x584]`）、`s[3]<<24` 的 alpha、`[+0x5B4]=1` 都按 `.lst` 逐条复刻；锁走
+     `d3d9::lockRect/unlockRect`（自动 bump 纹理版本 ⇒ GPU 上传不会冻帧）。
+   - 实测（LOGO 1280×720，`--real-time`）：解释器路径 **41 帧**、override 路径 **259 帧**（满 30fps）；
+     profile 里 `sub_487C60` 从 77.5% 消失（`hits=259 fallbacks=0`）。
+   - 差分守卫：`tests/movie_logo.cpp` 跑两遍（`all` vs `all,-sub_487C60`），断言 **`tex movie #1` 的
+     w/h/nonzero/sampled/hash 逐字节一致**，且 override 路径的 `samples` 明显更多（30 vs 240）。

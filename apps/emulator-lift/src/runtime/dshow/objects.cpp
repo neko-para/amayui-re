@@ -963,4 +963,13 @@ std::uint32_t HostObjects::takeDropped(X86 &cpu) {
     return n;
 }
 
+// native override 用：从样本对象 EA 取像素缓冲 EA（0 = 不是我们的样本 / 未分配）。
+std::uint32_t sampleBufferEa(X86 &cpu, std::uint32_t sample_ea) {
+    if (cpu.com == nullptr || sample_ea == 0) return 0;
+    const std::uint32_t state = cpu.com->userOf(sample_ea);
+    if (state == 0) return 0;
+    if (!cpu.mem->committed(state + smp::kPointer, 4u)) return 0;
+    return cpu.mem->rd32(state + smp::kPointer);
+}
+
 } // namespace lift::dshow

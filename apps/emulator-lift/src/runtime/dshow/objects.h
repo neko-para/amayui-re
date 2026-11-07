@@ -117,4 +117,7 @@ class HostObjects {
     std::uint32_t buffer_bytes_ = 0;
 };
 
+// native override 用：从样本对象 EA 取像素缓冲 EA（0 = 不是我们的样本 / 未分配）。
+std::uint32_t sampleBufferEa(X86 &cpu, std::uint32_t sample_ea);
+
 } // namespace lift::dshow

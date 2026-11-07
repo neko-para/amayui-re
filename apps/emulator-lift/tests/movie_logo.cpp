@@ -277,6 +277,41 @@ int main(int argc, char** argv) {
     LIFT_CHECK(distinct_hashes >= 2);          // 帧间内容在变（不是一张静止图）
     LIFT_CHECK(tex_movie_after_first_frame);   // 像素出现在"首帧已送渲染器"之后 ⇒ 与影片时间绑定
 
+    // ---- ⑧ native override 差分（doc §8.15）：开/关 `sub_487C60`，第一帧纹理必须**逐字节一致** ----
+    //   只比 `tex movie #1`（pts=0 的第一帧内容确定）；同时用 `samples` 证明 override 真的把影片
+    //   拉回了 30fps（解释器路径在 `--real-time` 下会大量丢帧）。
+    std::wstring cmd_b = cmd;
+    const std::wstring nv_a = L"--native-overrides all";
+    const std::wstring nv_b = L"--native-overrides all,-sub_487C60";
+    const std::size_t nv_pos = cmd_b.find(nv_a);
+    LIFT_CHECK(nv_pos != std::wstring::npos);
+    if (nv_pos != std::wstring::npos) cmd_b.replace(nv_pos, nv_a.size(), nv_b);
+    // ★ 第二次跑用**独立的 appdata**：引擎可能把"看过 LOGO"写进配置，复用会直接跳过影片。
+    const fs::path appdata_b = work_dir / "appdata-b";
+    fs::create_directories(appdata_b, ec);
+    const std::wstring appdata_a_arg = quoteArg(appdata.wstring());
+    const std::size_t ad_pos = cmd_b.find(appdata_a_arg);
+    LIFT_CHECK(ad_pos != std::wstring::npos);
+    if (ad_pos != std::wstring::npos) cmd_b.replace(ad_pos, appdata_a_arg.size(), quoteArg(appdata_b.wstring()));
+    const fs::path log_b = work_dir / "movie-logo-nooverride.log";
+    const ChildResult rb = runChild(exe, cmd_b, log_b);
+    const std::string logb = readAllBytes(log_b);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rb.exit_code), 0u);
+    auto texMovie1 = [](const std::string& text) -> std::string {
+        const std::size_t at = text.find("tex movie #1 ");
+        if (at == std::string::npos) return {};
+        const std::size_t eol = text.find('\n', at);
+        return text.substr(at + 13, (eol == std::string::npos ? text.size() : eol) - at - 13);
+    };
+    const std::string t1_a = texMovie1(log);
+    const std::string t1_b = texMovie1(logb);
+    std::printf("movie-logo: tex#1 override=[%s]\n", t1_a.c_str());
+    std::printf("movie-logo: tex#1 interpret=[%s]\n", t1_b.c_str());
+    LIFT_CHECK(!t1_a.empty() && t1_a == t1_b);  // 逐字节一致（w/h/nonzero/sampled/hash 全同）
+    const long samples_b = lastSamples(logb);
+    std::printf("movie-logo: samples override=%ld interpret=%ld\n", samples, samples_b);
+    LIFT_CHECK(samples > samples_b);  // 覆盖后跟得上 30fps（解释器路径会丢帧）
+
     return lift_test::finish("movie-logo");
 #endif
 }
