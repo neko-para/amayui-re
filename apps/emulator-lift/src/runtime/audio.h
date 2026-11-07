@@ -122,6 +122,13 @@ public:
     // `GetCurrentPosition` 用；没有这个 buffer ⇒ 0。
     std::uint32_t playedCursor(std::uint32_t state_ea) const;
 
+    // ---- 影片音频（宿主 PCM 源；由 dshow 的 AudioRenderer 调）----
+    // 追加一段 **48k / S16 / 2ch** 的宿主 PCM，从当前生成点尾部顺序混进设备输出。
+    // 同步（什么时候推）由 quartz 侧的 `dshow::AudioRenderer` 决定，这里只负责混音。
+    void pushHostPcm(const std::int16_t* interleaved, std::uint32_t frames);
+    void clearHostPcm();
+    bool hostPcmActive() const { return !host_pcm_.empty(); }
+
     // ---- 喂料线程控制（由 kernel32_sync 调）----
     bool shouldOwnThread(std::uint32_t start_ea) const;
     bool registerFeeder(std::uint32_t start_ea, std::uint32_t param, std::uint32_t thread_id, std::uint32_t handle);
@@ -234,6 +241,9 @@ private:
 
     // 全局时间线（单位都是"混音输出字节"；44.1k/16/2 ⇒ 4 B/frame）
     std::uint64_t played_ = 0;     // 设备已经消费的字节
+    // 影片音频：宿主 PCM（48k/S16/2ch）+ 它在输出帧轴上的起点。
+    std::vector<std::int16_t> host_pcm_;
+    std::uint64_t host_start_frame_ = 0;
     std::uint64_t generated_ = 0;  // 已经混好并交给 sink/dump 的字节
     std::uint64_t pushed_ = 0;     // 已推给 SDL 的字节
     std::uint64_t queued_ = 0;     // SDL 队列里还没被设备取走的字节

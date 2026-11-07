@@ -182,6 +182,14 @@ using Now100ns = std::function<std::int64_t()>;
 // 由上层用 `video::MovieDecoder` 实现（本模块只消费）。
 // ★ `at()` 是**时间寻址**的：给 `now` ⇒ 返回「该显示的那一帧」（`pts <= now` 里最新的一帧）。
 //   与 `MovieDecoder::decodeTo` 的语义一致（同一帧不重复返回 ⇒ 返回 false）。
+// 一段解码好的音频（宿主侧播放；同步在 `AudioRenderer` 里，见 audio_render.h）。
+struct AudioChunk {
+    std::int64_t pts_100ns = 0;  // 相对影片开头
+    std::uint32_t samplerate = 0;
+    std::uint32_t channels = 0;  // 1 / 2
+    std::vector<std::int16_t> pcm;  // 交织（单声道时只有一个通道）
+};
+
 struct FrameFeed {
     virtual ~FrameFeed() = default;
     virtual bool info(std::uint32_t *w, std::uint32_t *h, std::int64_t *duration_100ns) = 0;
@@ -190,6 +198,12 @@ struct FrameFeed {
                     std::int64_t *pts_100ns, bool *ended) = 0;
     virtual bool seek(std::int64_t t_100ns) = 0;
     virtual void rewind() = 0;
+    // 音频（可选；默认"没有音频"）。到结尾 ⇒ false 且 `*ended = true`。
+    virtual bool nextAudio(AudioChunk *out, bool *ended) {
+        (void)out;
+        if (ended) *ended = false;
+        return false;
+    }
 };
 
 // =====================================================================================
@@ -237,6 +251,8 @@ class HostObjects; // objects.h（实现细节：宿主 IPin / IMemAllocator / I
 // ★ 线程 / 生命周期：单线程，被 shim 调。**Graph 必须活到所有在飞的 guest 调用链结束**
 //   （链的续延捕获了 `this`）；每次 `run/stop/pause/render/currentPosition` 之后
 //   shim 必须检查 `suspended()`。
+class AudioRenderer;
+
 class Graph {
   public:
     Graph(X86 &cpu, Now100ns now, FrameFeed *feed);
@@ -333,6 +349,7 @@ class Graph {
     bool copyFrame(const std::uint8_t *rgb, std::uint32_t src_stride, std::int64_t pts);
     void complete();
     void releaseAll();
+void pumpAudio(std::int64_t now_100ns);
     void releaseSource();
     // 读 guest 侧 LPCWSTR（只用于识别/日志；⛔ 不是引擎对象偏移）
     std::string readName(std::uint32_t name_ea) const;
@@ -399,7 +416,9 @@ class Graph {
     std::uint32_t iid_mem_input_ = 0; // 16 字节（IID_IMemInputPin）
     std::uint32_t media_type_ = 0;
     std::uint32_t video_info_ = 0;
-    std::unique_ptr<HostObjects> objs_;
+    std::unique_ptr<AudioRenderer> audio_;  // 影片音频支路（同步在它里面，见 audio_render.h）
+
+std::unique_ptr<HostObjects> objs_;
 };
 
 // =====================================================================================

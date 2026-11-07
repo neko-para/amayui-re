@@ -61,6 +61,26 @@ class DecoderFeed final : public FrameFeed {
     bool seek(std::int64_t t_100ns) override {
         return decoder_.seek(t_100ns);
     }
+    bool nextAudio(AudioChunk *out, bool *ended) override {
+        if (ended) *ended = false;
+        video::AudioFrame af;
+        bool e = false;
+        std::string err;
+        if (!decoder_.nextAudio(&af, &e, &err)) {
+            if (!err.empty())
+                dshowLog(LogLevel::Warn, "MovieDecoder::nextAudio 失败：%s", err.c_str());
+            if (ended) *ended = e;
+            return false;
+        }
+        if (af.samples == nullptr || af.frames == 0 || af.channels == 0)
+            return false;
+        out->pts_100ns = af.pts_100ns;
+        out->samplerate = af.samplerate;
+        out->channels = af.channels;
+        out->pcm.assign(af.samples, af.samples + static_cast<std::size_t>(af.frames) * af.channels);
+        return true;
+    }
+
     void rewind() override {
         decoder_.rewind();
     }

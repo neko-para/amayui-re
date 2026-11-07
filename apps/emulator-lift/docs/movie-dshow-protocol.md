@@ -340,3 +340,42 @@
      profile 里 `sub_487C60` 从 77.5% 消失（`hits=259 fallbacks=0`）。
    - 差分守卫：`tests/movie_logo.cpp` 跑两遍（`all` vs `all,-sub_487C60`），断言 **`tex movie #1` 的
      w/h/nonzero/sampled/hash 逐字节一致**，且 override 路径的 `samples` 明显更多（30 vs 240）。
+
+16. **影片音频：当前**丢弃**（SCOPE §1 视频行明确"影片音频仍不做"）**
+   - 实测探针（`movie_decoder` 打开时打一行 `[video] movie: 音频流：N 个，samplerate=…`）：
+     LOGO 的 MPEG-PS **有 1 条 44.1 kHz 音频流**（`音频流：1 个，samplerate=44100`）。
+   - 但解码与输出都被关掉：`plm_set_audio_enabled(plm_, 0)`（探测读一次头就关）⇒ **音频被丢弃**。
+   - 引擎侧：DirectShow 路径**从不创建音频渲染器**（`.lst` 里没有 `CLSID_AudioRender`，只有 MF 分支的
+     `MFCreateAudioRendererActivate`），图里只加了 2 个 filter（纹理渲染器 + 源），也没有对音频 pin 调 `Render`。
+     ⇒ 要么这份 MPEG 的音频在原版就没被播，要么走的是我们还没找到的另一条路径（待 RE）。
+   - 若要补上，最便宜的落点是**宿主侧**：`plm_decode_audio` → 现有 `AudioEngine`（有真 feeder 线程）按影片时钟
+     推 PCM；引擎侧的 `IBasicAudio` 只影响音量。⚠ 先确认原版确实播这段音频，否则是"加了原版没有的声音"。
+
+17. **IID 常量互串（已修，2026-11-07）**：`quartz_video.cpp` 的 `kIidMediaSeeking` 原来写成 `56A868B3`
+   （那其实是 **IBasicAudio**），`kIidBasicAudio` 写成 `56A868B9`（引擎未引用）。后果：引擎 QI
+   （`.data:0x52FB98`=56A868B3）命中 Seeking 角色，随后 `put_Volume(+0x1C)` 被派发成 Seeking 的方法
+   ⇒ **音量一次都没记到**、且 QI 返回 S_OK 完全静默（日志现场：`QueryInterface: IGraphBuilder -> IMediaSeeking`
+   紧跟 `IMediaSeeking: GetTimeFormat`）。修法：MediaSeeking = `36B73880-C2C8-11CF-8B46-00805F6CEF60`、
+   BasicAudio = `56A868B3-0AD4-11CE-B03A-0020AF0BA770`。修后实测 `IBasicAudio::put_Volume(0.000 dB) ⇒ 记账 0`
+   （`sound:Movie=1` 的默认 ⇒ 0 dB）。
+
+18. **影片音频（2026-11-07 实现，方案 A 的补全）**
+   - **原版路径**（取证）：引擎把整段 MPEG-PS 当 `MEDIATYPE_Stream` 交给 quartz，`IGraphBuilder::Render`
+     的智能连接同时建「视频→`CMovieTextureRenderer`」与「音频→默认音频渲染器」；引擎只在 graph 上 QI
+     `IBasicAudio` 调音量。`sound:Movie`/`DependMovieSound` 只决定音量（0 dB / −100 dB）。
+   - **我们的实现**：`dshow::AudioRenderer`（`src/runtime/dshow/audio_render.*`）就是那条音频支路的输出端，
+     **同步机制在它里面**（quartz 的职责）：
+     · 时间 = `cpu.clock`（与视频同一份；窗口=墙钟、headless=虚拟钟）；
+     · 解码出的 PCM 带流时间 pts；`pump(流now)` 把 `pts <= 流now + 200 ms` 的块交给设备，
+       `pts < 流now − 300 ms` 的块直接丢（计数），队列空而时间在走记 underrun；
+     · 音量 = `IBasicAudio::put_Volume` 的 dB（−100 dB ⇒ 静音），在交给设备前乘进样本；
+     · 输出统一 **48 kHz / S16 / 立体声**（非 48k 源线性重采样、单声道复制）。
+   - **解码**：`MovieDecoder` 常开音频（`plm_set_audio_enabled(1)`），`nextAudio()` 把 pl_mpeg 的 float
+     交织样本转成 int16；`FrameFeed` 新增 `nextAudio()` 转发；泵每拍最多解 8 段（≈208 ms 前导）。
+   - **混音**：`AudioEngine::pushHostPcm()` 把宿主 PCM 顺序混进设备输出（与游戏 BGM/SE 同一条 SDL 流）。
+   - **实测（LOGO 8.642 s，out RelWithDebInfo）**：`音频渲染器：Stop（fed=383616 frames, pushed=417582
+     frames, dropped_chunks=0, underruns=0）` ⇒ 整条音轨解完并推给设备（44.1k→48k 后 417582 帧 ≈ 8.7 s）。
+   - **守卫**：`tests/movie_audio.cpp`（pure，14 checks：前导 / 迟到丢弃 / underrun / 音量 / 重采样）；
+     `tests/movie_logo.cpp` 断言 `音频渲染器：Stop` 的 `fed > 200000`（至少 4.5 s 真的解出来并推出去）。
+   - **未定 / 已知限制**：无逐帧漂移校正（只靠 200 ms 前导 + 迟到丢弃）；循环/seek 会清队列重排；
+     pl_mpeg 只解 MPEG-1 Layer II；`SetVolume` 的 −100 dB 是静音门限。

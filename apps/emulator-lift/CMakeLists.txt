@@ -590,6 +590,11 @@ add_executable(lift-movie-decoder tests/movie_decoder.cpp)
 target_link_libraries(lift-movie-decoder PRIVATE emulator-lift-runtime)
 add_test(NAME movie-decoder COMMAND lift-movie-decoder)
 
+# ---- pure：影片音频的同步机制（前导 / 迟到丢弃 / underrun / 音量 / 重采样）----
+add_executable(lift-movie-audio tests/movie_audio.cpp)
+target_link_libraries(lift-movie-audio PRIVATE emulator-lift-runtime)
+add_test(NAME movie-audio COMMAND lift-movie-audio)
+
 # =====================================================================================
 # M4 · 纹理影片 = 真 DirectShow 服务端的**协议核心**（契约：docs/movie-dshow-protocol.md）
 # ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
@@ -599,6 +604,7 @@ add_test(NAME movie-decoder COMMAND lift-movie-decoder)
 #   IPin / IMemAllocator / IMediaSample 的 guest 可见 COM 对象 + AM_MEDIA_TYPE 构造。
 # =====================================================================================
 target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/dshow/audio_render.cpp
     src/runtime/dshow/graph.cpp
     src/runtime/dshow/media_type.cpp
     src/runtime/dshow/objects.cpp

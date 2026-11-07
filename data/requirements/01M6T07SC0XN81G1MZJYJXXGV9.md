@@ -21,7 +21,7 @@
 - **MF / EVR / DXVA2**：名字含 `WMV`/`MP4` 才可达（`0x487A80`）；发行影片是 MPEG-1 PS ⇒ 维持 `E_FAIL`。
 - **窗口影片族**（`0x1c0` / `0x1c6` → `MovieIVideoWindow` + `IVideoWindow`）：延后；spec 侧仍是
   `RES-MOVIE-WINDOW-FAMILY`。
-- **影片音频（MP2）**：延后；`set:DependMovieSound` / `sound:Movie` 的语义不动。
+- **影片音频（MP2）**：已接（2026-11-07）。原版由 quartz 智能连接建出「音频→默认渲染器」支路；我们是 quartz ⇒ 宿主侧 `dshow::AudioRenderer` 承担同步（`cpu.clock` 同一份时钟；`pts <= 流now + 200 ms` 交设备、迟到 300 ms 丢弃、队列空记 underrun），`pl_mpeg` 解 MP2 → 44.1k→48k 重采样 → `AudioEngine::pushHostPcm` 混进同一路 SDL 输出；音量走 `IBasicAudio::put_Volume`（−100 dB = 静音）。`set:DependMovieSound` / `sound:Movie` 的语义未动（只影响音量）。
 - **宿主解析 ALF**：**已否决**（见下「否决记录」）。
 - **不新增宿主线程**：v1 用主线程协作泵（引擎每拍会问位置）。若实测证明取字节必须阻塞，再按音频
   feeder 的先例单开一张单，不顺手做。

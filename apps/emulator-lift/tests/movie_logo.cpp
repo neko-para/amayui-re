@@ -312,6 +312,17 @@ int main(int argc, char** argv) {
     std::printf("movie-logo: samples override=%ld interpret=%ld\n", samples, samples_b);
     LIFT_CHECK(samples > samples_b);  // 覆盖后跟得上 30fps（解释器路径会丢帧）
 
+    // ---- ⑨ 影片音频（doc §8.18）：必须真的解码并推给设备（同步在 dshow::AudioRenderer）----
+    const std::size_t audio_at = log.find("音频渲染器：Stop");
+    long audio_fed = -1;
+    if (audio_at != std::string::npos) {
+        const std::size_t fed_at = log.find("fed=", audio_at);
+        if (fed_at != std::string::npos) audio_fed = std::strtol(log.c_str() + fed_at + 4, nullptr, 10);
+    }
+    std::printf("movie-logo: audio_fed_frames=%ld\n", audio_fed);
+    // 8.642 s × 44100 ≈ 381k 帧；至少 4.5 s 的解码与推送才算"音频真的接上了"。
+    LIFT_CHECK(audio_fed > 200000);
+
     return lift_test::finish("movie-logo");
 #endif
 }

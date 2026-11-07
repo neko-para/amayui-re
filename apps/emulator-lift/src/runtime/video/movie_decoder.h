@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace lift::video {
 
@@ -28,6 +29,16 @@ struct Frame {
     std::uint32_t height = 0;
     std::uint32_t stride = 0;  // 一行多少字节（本实现恒为 width * 3）
     std::int64_t pts_100ns = 0;  // 相对影片开头
+};
+
+// 一段已解码音频：**16-bit 交织**（单声道只有 1 个通道；pl_mpeg 内部是 float 立体声）。
+// `pts_100ns` 相对影片开头（pl_mpeg 的 `samples->time` → 四舍五入到 100ns）。
+struct AudioFrame {
+    const std::int16_t* samples = nullptr;  // 交织；只在下次 nextAudio() 之前有效
+    std::uint32_t frames = 0;               // 每声道采样数
+    std::uint32_t samplerate = 0;
+    std::uint32_t channels = 0;
+    std::int64_t pts_100ns = 0;
 };
 
 struct Info {
@@ -53,6 +64,15 @@ public:
     virtual bool next(std::int64_t* pts_100ns, Frame* frame, bool* ended, std::string* err) = 0;
     virtual void rewind() = 0;
     virtual bool seek(std::int64_t t_100ns, std::string* err) = 0;
+
+    // 音频（可选）：默认"没有音频"（fake 源不实现也能编译）。
+    // 返回 false：`*ended=true` ⇒ 到结尾；否则无音频 / 出错（`err` 可选）。
+    virtual bool nextAudio(AudioFrame* out, bool* ended, std::string* err) {
+        (void)out;
+        (void)err;
+        if (ended) *ended = false;
+        return false;
+    }
 };
 
 // MPEG-1 program stream 解码器。
@@ -112,6 +132,10 @@ public:
     // 未 open / 源不支持 ⇒ false（`*err` 非空，若传了）。
     bool seek(std::int64_t t_100ns, std::string* err = nullptr);
 
+    // 解下一段音频（宿主侧播放用）。到结尾 ⇒ false 且 `*ended=true`；无音频流 / 出错 ⇒ false（`err`）。
+    // 成功时 `AudioFrame::samples` 指向解码器自有缓冲，**下次 nextAudio/decodeTo/seek/close 之前有效**。
+    bool nextAudio(AudioFrame* out, bool* ended, std::string* err);
+
     // 回到影片开头（清掉「已返回帧 / 已报结束」状态）。
     void rewind();
 
@@ -135,6 +159,10 @@ private:
     Info info_{};
 
     // 自持的 RGB24 双缓冲：返回给调用方的 pixels 指向这里（A/B 轮换，见类注释）。
+    // 音频：解码器自持的 16-bit 交织缓冲（由 pl_mpeg 的 float 转换而来）。
+    std::vector<std::int16_t> audio_pcm_;
+    bool audio_ended_ = false;
+
     std::unique_ptr<std::uint8_t[]> frame_bytes_[2];
     std::size_t frame_capacity_[2] = {0, 0};
     int next_slot_ = 0;

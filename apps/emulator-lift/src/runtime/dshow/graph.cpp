@@ -8,6 +8,8 @@
 // ★ 线程：单线程；本文件不建线程、不 sleep、不等待（SCOPE §1）。
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
+#include "runtime/dshow/audio_render.h"
+#include "runtime/audio.h"
 #include "runtime/dshow/decoder_feed.h"
 #include "runtime/dshow/dshow.h"
 #include "runtime/dshow/guest_invoke.h"
@@ -167,6 +169,12 @@ void dshowLog(LogLevel level, const char *fmt, ...) {
 Graph::Graph(X86 &cpu, Now100ns now, FrameFeed *feed) : cpu_(cpu), now_(std::move(now)), feed_(feed) {
     if (!now_)
         now_ = [] { return std::int64_t{0}; };
+    // ★ 影片音频支路：同步机制在 AudioRenderer 里（quartz 的职责，见 audio_render.h）。
+    //   sink 在调用时才看 `cpu_.audio`（AudioEngine 可能晚于 Graph 装配 / 未启用）。
+    audio_ = std::make_unique<AudioRenderer>();
+    audio_->bind([this] { return now_(); }, [this](const std::int16_t *pcm, std::uint32_t frames) {
+        if (cpu_.audio != nullptr) cpu_.audio->pushHostPcm(pcm, frames);
+    });
     feed_injected_ = feed != nullptr;
     dshowLog(LogLevel::Info, "Graph 建（now100ns=%s；帧源=%s）", now_ ? "cpu.clock 换算" : "无",
              feed_injected_ ? "注入（pure 测试，不碰源 pin）" : "真 IAsyncReader");
@@ -179,6 +187,11 @@ Graph::~Graph() {
     releaseAll();
 }
 void Graph::releaseAll() {
+    if (audio_) {
+        audio_->stop();
+        audio_->unbind();
+        audio_.reset();
+    }
     releaseSource();
     owned_feed_.reset();
     if (objs_) {
@@ -1186,9 +1199,23 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
 // =====================================================================================
 // 控制：run / pause / stop
 // =====================================================================================
+void Graph::pumpAudio(std::int64_t now_100ns) {
+    if (!audio_ || feed_ == nullptr || state_ != 2) return;
+    const std::int64_t stream_now = now_100ns - start_100ns_;
+    // 每次泵最多解 8 段（8 × 26 ms ≈ 208 ms 前导），别让一次调用解完整部影片。
+    for (int i = 0; i < 8 && audio_->queueChunks() < 8; ++i) {
+        AudioChunk chunk;
+        bool ended = false;
+        if (!feed_->nextAudio(&chunk, &ended)) break;
+        audio_->feed(std::move(chunk));
+    }
+    audio_->pump(stream_now);
+}
+
 bool Graph::endRunChain() {
     // ★ 计时从链尾开始（Pause/Run 都走完之后）：引擎每拍读的就是"相对 Run 的偏移"。
     start_100ns_ = now_();
+    if (audio_) audio_->begin(start_100ns_);
     last_pump_100ns_ = 0;
     frozen_100ns_ = 0;
     completed_ = false;
@@ -1206,6 +1233,7 @@ bool Graph::endPauseChain() {
         if (duration_100ns_ > 0 && frozen_100ns_ > duration_100ns_)
             frozen_100ns_ = duration_100ns_;
     }
+    if (audio_) audio_->pause();
     state_ = 1; // State_Paused
     dshowLog(LogLevel::Info, "IMediaControl::Pause：两个 filter 已 Pause；冻结位置 %.3f s",
              static_cast<double>(frozen_100ns_) / kTicksPerSecond);
@@ -1223,6 +1251,11 @@ bool Graph::endStopChain() {
         objs_->releaseBuffer(cpu_);
     if (feed_ != nullptr)
         feed_->rewind(); // 循环播放：引擎会 Stop → SetPosition(0) → Run
+    if (audio_) {
+        audio_->stop();
+        audio_->rewind();
+    }
+    if (cpu_.audio != nullptr) cpu_.audio->clearHostPcm();
     dshowLog(LogLevel::Info, "IMediaControl::Stop：两个 filter 已 Stop；播放位置归零");
     return finishChain();
 }
@@ -1290,7 +1323,8 @@ void Graph::setVolumeDb(double db) {
     volume_db_ = db;
     // IBasicAudio::put_Volume 的入参是**百分之一分贝**（LONG）：`sub_4879E0` / `0x487A2F`（doc §0-2）。
     volume_db100_ = static_cast<int>(db * 100.0);
-    dshowLog(LogLevel::Info, "IBasicAudio::put_Volume(%.3f dB) ⇒ 记账 %d（⛔ 不碰真设备）", db,
+    if (audio_) audio_->setVolumeDb(db);
+    dshowLog(LogLevel::Info, "IBasicAudio::put_Volume(%.3f dB) ⇒ 记账 %d（设备侧：AudioRenderer 增益）", db,
              volume_db100_);
 }
 // =====================================================================================
@@ -1317,6 +1351,8 @@ double Graph::currentPosition() {
     return sec;
 }
 void Graph::pump() {
+    pumpAudio(now_());
+
     if (state_ != 2 || suspended_)
         return;
     // ★ 接线没成功就**绝不**送帧：`ReceiveConnection` 失败时渲染器的输入 pin 没有 media type /

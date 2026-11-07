@@ -591,6 +591,20 @@ void AudioEngine::fireCrossings(std::uint64_t old_played, std::uint64_t new_play
     }
 }
 
+void AudioEngine::pushHostPcm(const std::int16_t* interleaved, std::uint32_t frames) {
+    if (interleaved == nullptr || frames == 0) return;
+    if (host_pcm_.empty()) {
+        // 从"当前已经生成到的输出帧"开始顺序播（生成点之后 = 设备队列的尾部）。
+        host_start_frame_ = generated_ / kBlockAlign;
+    }
+    host_pcm_.insert(host_pcm_.end(), interleaved, interleaved + static_cast<std::size_t>(frames) * 2u);
+}
+
+void AudioEngine::clearHostPcm() {
+    host_pcm_.clear();
+    host_start_frame_ = 0;
+}
+
 void AudioEngine::generateTo(std::uint64_t target) {
     if (target <= generated_) return;
     std::uint64_t n = target - generated_;
@@ -662,6 +676,25 @@ void AudioEngine::generateTo(std::uint64_t target) {
             acc[static_cast<std::size_t>(o) * 2u + 0] += (static_cast<std::int64_t>(l) * gl) >> 16;
             acc[static_cast<std::size_t>(o) * 2u + 1] += (static_cast<std::int64_t>(r) * gr) >> 16;
             pos += step_q16;
+        }
+    }
+
+    // ★ 影片音频（宿主 PCM 源）：按输出帧序号从 `host_pcm_` 混入（48k/S16/2ch，已含音量）。
+    if (!host_pcm_.empty()) {
+        for (std::uint32_t o = 0; o < out_frames; ++o) {
+            const std::uint64_t f = out_start_frame + o;
+            if (f < host_start_frame_) continue;
+            const std::uint64_t idx = (f - host_start_frame_) * 2u;
+            if (idx + 1u >= host_pcm_.size()) break;
+            acc[static_cast<std::size_t>(o) * 2u + 0] += host_pcm_[idx + 0u];
+            acc[static_cast<std::size_t>(o) * 2u + 1] += host_pcm_[idx + 1u];
+        }
+        if (out_start_frame + out_frames > host_start_frame_) {
+            const std::uint64_t consumed_frames = out_start_frame + out_frames - host_start_frame_;
+            const std::uint64_t consumed =
+                std::min<std::uint64_t>(consumed_frames * 2u, static_cast<std::uint64_t>(host_pcm_.size()));
+            host_pcm_.erase(host_pcm_.begin(), host_pcm_.begin() + static_cast<std::ptrdiff_t>(consumed));
+            host_start_frame_ += consumed / 2u;
         }
     }
 

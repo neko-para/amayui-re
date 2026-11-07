@@ -75,7 +75,8 @@ public:
         }
         // 规范不要求音频输出（`data/spec/chapters/60-ops-wait.md` 的「成立条件」）：
         // 关掉以后 demux 不再把 MP2 packet 写进音频缓冲，也不会有 MP2 解码。
-        plm_set_audio_enabled(plm_, 0);
+        // ★ 影片音频：**常开**（宿主侧播放；同步在 dshow::AudioRenderer 里，见 doc §8.18）。
+        plm_set_audio_enabled(plm_, 1);
         plm_set_loop(plm_, 0);  // 循环由调用方决定（本模块不接管）
 
         if (!plm_has_headers(plm_)) {
@@ -135,6 +136,37 @@ public:
         return convert(decoded, pts_100ns, frame, err);
     }
 
+    bool nextAudio(AudioFrame* out, bool* ended, std::string* err) override {
+        if (plm_ == nullptr) {
+            setError(err, "未打开");
+            return false;
+        }
+        plm_samples_t* s = plm_decode_audio(plm_);
+        if (s == nullptr) {
+            if (plm_has_ended(plm_)) {
+                if (ended) *ended = true;
+                return false;
+            }
+            if (ended) *ended = false;
+            return false;  // 没有音频流 / 数据还没到：不是错误
+        }
+        if (ended) *ended = false;
+        audio_i16_.resize(static_cast<std::size_t>(s->count) * 2u);
+        for (std::uint32_t i = 0; i < s->count * 2u; ++i) {
+            float v = s->interleaved[i];
+            if (v > 1.0f) v = 1.0f;
+            if (v < -1.0f) v = -1.0f;
+            audio_i16_[i] = static_cast<std::int16_t>(std::lround(v * 32767.0f));
+        }
+        out->samples = audio_i16_.data();
+        out->frames = s->count;
+        out->samplerate = static_cast<std::uint32_t>(plm_get_samplerate(plm_));
+        if (out->samplerate == 0) out->samplerate = 44100;
+        out->channels = 2;  // pl_mpeg 默认输出交织立体声（单声道源会复制到两声道）
+        out->pts_100ns = static_cast<std::int64_t>(std::llround(s->time * 1e7));
+        return true;
+    }
+
     void rewind() override {
         has_pending_ = false;
         if (plm_ != nullptr) plm_rewind(plm_);
@@ -161,6 +193,12 @@ public:
 
 private:
     bool convert(plm_frame_t* decoded, std::int64_t* pts_100ns, Frame* frame, std::string* err) {
+        if (!audio_logged_) {
+            audio_logged_ = true;
+            const int n = plm_get_num_audio_streams(plm_);
+            const int rate = plm_get_samplerate(plm_);
+            vlog(LogLevel::Info, "音频流：%d 个，samplerate=%d（宿主侧播放，同步见 audio_render.h）", n, rate);
+        }
         const std::uint32_t width = decoded->width;
         const std::uint32_t height = decoded->height;
         const std::size_t packed = static_cast<std::size_t>(width) * height * 3u;
@@ -186,6 +224,8 @@ private:
     std::vector<std::uint8_t> rgb_;  // 单帧暂存；上层会立刻拷进它自己的双缓冲
     Frame pending_{};
     bool has_pending_ = false;
+    bool audio_logged_ = false;
+    std::vector<std::int16_t> audio_i16_;
 };
 
 }  // namespace
@@ -382,6 +422,24 @@ bool MovieDecoder::seek(std::int64_t t_100ns, std::string* err) {
     }
     // 源里已经排好「seek 帧」；这里清掉上层的 lookahead/current/已返回/已报结束。
     resetPlaybackState();
+    return true;
+}
+
+bool MovieDecoder::nextAudio(AudioFrame* out, bool* ended, std::string* err) {
+    if (err) err->clear();
+    if (ended) *ended = false;
+    if (!opened_ || source_ == nullptr) {
+        setError(err, "未打开");
+        return false;
+    }
+    bool e = false;
+    if (!source_->nextAudio(out, &e, err)) {
+        if (e) {
+            audio_ended_ = true;
+            if (ended) *ended = true;
+        }
+        return false;
+    }
     return true;
 }
 
