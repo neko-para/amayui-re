@@ -254,6 +254,8 @@ private:
     std::chrono::steady_clock::time_point frame_trace_last_{};
     std::uint64_t frame_trace_last_insns_ = 0;
     std::vector<std::uint64_t> frame_trace_prev_shim_ns_;
+    // ★ 逐帧 shim **调用次数**增量（与 ns 同源）：只看墙钟会把"一次很慢"和"很多次很快"混为一谈。
+    std::vector<std::uint64_t> frame_trace_prev_shim_calls_;
     std::unordered_map<std::uint32_t, std::uint64_t> frame_trace_prev_block_ns_;
     // ★ 逐帧 GPU 覆盖增量（`LIFT_FRAME_TRACE=1`）：与 summary 的累计值分开记，⛔ 不复位全局账本。
     std::uint64_t frame_trace_prev_gpu_draws_ = 0;

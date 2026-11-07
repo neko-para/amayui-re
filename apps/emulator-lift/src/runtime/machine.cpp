@@ -319,9 +319,11 @@ void Machine::flushFrameTrace() {
     // ---- 宿主 shim（含 Present / Sprite 的像素循环 / GPU submit）----
     const std::vector<ShimDef>& defs = shims_.all();
     if (frame_trace_prev_shim_ns_.size() < defs.size()) frame_trace_prev_shim_ns_.resize(defs.size(), 0);
+    if (frame_trace_prev_shim_calls_.size() < defs.size()) frame_trace_prev_shim_calls_.resize(defs.size(), 0);
     struct ShimRow {
         const ShimDef* def = nullptr;
         std::uint64_t ns = 0;
+        std::uint64_t calls = 0;
     };
     std::vector<ShimRow> shim_rows;
     std::uint64_t shim_ns = 0;
@@ -329,11 +331,16 @@ void Machine::flushFrameTrace() {
         const std::uint64_t total = defs[i].ns;
         const std::uint64_t prev = frame_trace_prev_shim_ns_[i];
         frame_trace_prev_shim_ns_[i] = total;
+        // ★ 调用次数增量：墙钟高但次数少 ⇒ 单次很慢（找实现）；次数多 ⇒ 调用点太密（找 guest 路径）。
+        const std::uint64_t calls_total = defs[i].call_count;
+        const std::uint64_t calls_prev = frame_trace_prev_shim_calls_[i];
+        frame_trace_prev_shim_calls_[i] = calls_total;
+        const std::uint64_t calls = calls_total >= calls_prev ? calls_total - calls_prev : 0;
         if (total < prev) continue;
         const std::uint64_t delta = total - prev;
         if (delta == 0) continue;
         shim_ns += delta;
-        shim_rows.push_back({&defs[i], delta});
+        shim_rows.push_back({&defs[i], delta, calls});
     }
     std::sort(shim_rows.begin(), shim_rows.end(), [](const ShimRow& a, const ShimRow& b) {
         if (a.ns != b.ns) return a.ns > b.ns;
@@ -390,8 +397,8 @@ void Machine::flushFrameTrace() {
         std::fputs("        shim :", stdout);
         for (std::size_t i = 0; i < shim_rows.size() && i < 5; ++i) {
             const ShimRow& r = shim_rows[i];
-            std::fprintf(stdout, " %s!%s=%.1fms", r.def->module.c_str(), r.def->name.c_str(),
-                         (double)r.ns / 1e6);
+            std::fprintf(stdout, " %s!%s=%.1fms×%llu", r.def->module.c_str(), r.def->name.c_str(),
+                         (double)r.ns / 1e6, (unsigned long long)r.calls);
         }
         std::fputc('\n', stdout);
     }

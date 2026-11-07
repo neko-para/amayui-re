@@ -483,7 +483,7 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 ```text
 [frame] n=NNN wall=…ms insns=… guest=…ms shim=…ms other=…ms
         guest: sub_XXXXXX=…ms ...
-        shim : com!IDirect3DDevice9::Present=…ms ...
+        shim : com!IDirect3DDevice9::Present=…ms×… …
         gpu  : draws=… fallback=… fallback_pixels=… sprite_gpu=… sprite_fallback=…
         pres : readback=…ms hash=…ms stats=…ms sink=…ms direct=0/1
 ```
@@ -491,6 +491,8 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 - `wall` = 两次 Present 之间的宿主墙钟；`guest` = `--profile` 的块执行时间之和；
   `shim` = shim 实现自身的时间（**含** Present / D3DXSprite / 固定功能流水线的软件光栅）；
   `other` = `wall - guest - shim`（dispatcher / native override / 事件泵等）。
+- `shim :` 每项带 **`×调用次数`**：同样的墙钟可能是"一次很慢"或"很多次很快"，
+  这两者的下一步完全不同（前者查实现，后者查 guest 调用点）。
 - `pres :` 是 `com!IDirect3DDevice9::Present` 的拆解（四段之和 ≈ 上面那一项）：
   `readback` = GPU target ↔ guest（读过回才有；没读回 ≈ 0）、`hash` = guest 像素哈希、
   `stats` = 全帧像素直方图、`sink` = 呈现汇点（renderer 上传+`RenderPresent`，或直出 blit+submit）。

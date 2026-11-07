@@ -44,18 +44,31 @@ std::uint32_t HandleTable::add(HandleKind kind, const char* name, void* payload,
 }
 
 HandleEntry* HandleTable::get(std::uint32_t h) {
-    // 句柄密集且数量小 ⇒ 线性查找足够；按值找而不是按下标算（关闭后不复用 ⇒ 不会歧义）
-    for (Slot& s : entries_) {
-        if (s.value == h && s.entry.used) return &s.entry;
-    }
-    return nullptr;
+    // ★ 下标查找（O(1)），**不是**线性扫描：值 = kFirst + kStep*下标，且槽位从不删除
+    //   （`close()` 只把 `used` 置 false，`entries_` 只增不减）⇒ 下标可由句柄值反算。
+    //   ⛔ 为什么必须这样：`DeleteObject` 每次调用里既跑 `selectedAnywhere` 又跑 `releasePayload`，
+    //   两者都按"句柄值 × get()"扫；get() 若是线性扫描 ⇒ 每次 O(N²)。实测 TITLE→OPTION 那一帧
+    //   984 次 DeleteObject = 1.32 s（N=1602 槽）；改下标后同帧 <21 ms。
+    //   ★ 语义等价：旧判据是"存在 value==h 且 used 的槽"，值唯一且**下标=位置** ⇒ 同一条。
+    if (h < kFirst) return nullptr;
+    const std::uint32_t off = h - kFirst;
+    if (off % kStep != 0) return nullptr;
+    const std::size_t idx = off / kStep;
+    if (idx >= entries_.size()) return nullptr;
+    Slot& s = entries_[idx];
+    if (s.value != h || !s.entry.used) return nullptr;
+    return &s.entry;
 }
 
 const HandleEntry* HandleTable::get(std::uint32_t h) const {
-    for (const Slot& s : entries_) {
-        if (s.value == h && s.entry.used) return &s.entry;
-    }
-    return nullptr;
+    if (h < kFirst) return nullptr;
+    const std::uint32_t off = h - kFirst;
+    if (off % kStep != 0) return nullptr;
+    const std::size_t idx = off / kStep;
+    if (idx >= entries_.size()) return nullptr;
+    const Slot& s = entries_[idx];
+    if (s.value != h || !s.entry.used) return nullptr;
+    return &s.entry;
 }
 
 bool releasePayload(HandleTable& table, std::uint32_t h) {

@@ -20,6 +20,7 @@
 
 #include "check.h"
 #include "runtime/com.h"
+#include "runtime/handles.h"
 #include "runtime/machine.h"
 #include "shims/register.h"
 
@@ -550,6 +551,46 @@ int main() {
         LIFT_CHECK(run(m).reason == lift::StopReason::UntilEa);
         LIFT_CHECK_EQ_U32(m.cpu().eax(), 0u);
         LIFT_CHECK_EQ_U32(m.cpu().shim.last_error, 126u);
+    }
+
+    // ---- ④ 句柄表：**下标查找的语义**（值 = kFirst + kStep*下标；槽位只增不减）----
+    //   ★ 为什么这条要存在：`get()` 从"线性扫描"改成"按下标反算"是性能修复（DeleteObject 的
+    //     O(N²) 热点），但**判据是行为等价** —— 合法 / 已关闭 / 非法形状 / 越界 四类句柄必须
+    //     与旧实现给出同一答案。⛔ 这条不测快慢（墙钟断言会变成 flaky）。
+    {
+        g_current_case = "handle-table-index-lookup";
+        lift::HandleTable table;
+        const std::uint32_t a = table.add(lift::HandleKind::Event, "a", nullptr);
+        const std::uint32_t b = table.add(lift::HandleKind::File, "b", nullptr);
+        const std::uint32_t c = table.add(lift::HandleKind::Timer, "c", nullptr);
+        LIFT_CHECK_EQ_U32(lift::HandleTable::kFirst, 0x100u);
+        LIFT_CHECK_EQ_U32(a, 0x100u);
+        LIFT_CHECK_EQ_U32(b, 0x104u);
+        LIFT_CHECK_EQ_U32(c, 0x108u);
+        LIFT_CHECK(table.get(a) != nullptr);
+        LIFT_CHECK(table.get(b) != nullptr);
+        LIFT_CHECK(table.get(c) != nullptr);
+        LIFT_CHECK(table.get(a)->kind == lift::HandleKind::Event);
+        LIFT_CHECK(table.get(c)->kind == lift::HandleKind::Timer);
+        LIFT_CHECK(table.get(b)->name == "b");
+        // 关闭一个 ⇒ 只有它消失，别的槽仍是它自己的那一条（下标反算不许串号）
+        LIFT_CHECK(table.close(b));
+        LIFT_CHECK(table.get(b) == nullptr);
+        LIFT_CHECK(table.get(a) != nullptr);
+        LIFT_CHECK(table.get(c) != nullptr);
+        // 非法形状：kFirst 以下 / 不是 kStep 的整数倍 / 超出已分配槽数 ⇒ 一律 nullptr
+        LIFT_CHECK(table.get(0u) == nullptr);
+        LIFT_CHECK(table.get(lift::HandleTable::kFirst - 4u) == nullptr);
+        LIFT_CHECK(table.get(lift::HandleTable::kFirst + 1u) == nullptr);
+        LIFT_CHECK(table.get(c + 4u) == nullptr);
+        LIFT_CHECK(table.get(0xFFFFFFFCu) == nullptr);  // 不因为 (h - kFirst) 溢出而回绕进表
+        // 新加的槽接在末尾，旧下标仍然命中自己那一条
+        const std::uint32_t d = table.add(lift::HandleKind::Mutex, "d", nullptr);
+        LIFT_CHECK_EQ_U32(d, 0x10Cu);
+        LIFT_CHECK(table.get(a)->kind == lift::HandleKind::Event);
+        LIFT_CHECK(table.get(c)->kind == lift::HandleKind::Timer);
+        LIFT_CHECK(table.get(d)->kind == lift::HandleKind::Mutex);
+        LIFT_CHECK(table.get(b) == nullptr);
     }
 
     return finish("mechanism");
