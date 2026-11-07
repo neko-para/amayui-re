@@ -478,6 +478,9 @@ void shimTextureGetLevelDesc(X86& cpu, ShimCall& call) {
         call.result = d3d9::kInvalidCall;
         return;
     }
+    // ★ 取证用（Debug）：影片渲染器 `0x488A80` 用 `desc.Format` 判 21/26，否则 VFW_E_TYPE_NOT_ACCEPTED。
+    d3dxLog("IDirect3DTexture9::GetLevelDesc", "texture=0x%08X level=%u ⇒ %ux%u D3DFORMAT=%u（desc=0x%08X）",
+            call.u32(0), level, ti.width, ti.height, ti.format, desc_ea);
     call.result = d3d9::kOk;
 }
 

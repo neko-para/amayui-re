@@ -61,6 +61,7 @@ private:
     struct Frame {
         std::uint32_t ret_ea = 0;       // 原 shim 的返回地址（`nested` 帧不用它）
         std::uint32_t saved_esp = 0;    // 原 shim 入口的 esp（指向 ret_ea）
+        std::uint32_t frame_esp = 0;    // 回调帧的 [esp]（= kContinuationEa 所在槽；诊断用）
         std::uint32_t cleanup_bytes = 0;// 原 shim 完成后要抬的栈字节
         std::uint32_t fn = 0;           // guest 回调
         const char* api = nullptr;      // 诊断（字符串字面量；保持生命周期）

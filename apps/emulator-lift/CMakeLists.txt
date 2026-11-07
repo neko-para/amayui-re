@@ -174,9 +174,29 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.s
         SKIP_RETURN_CODE 77)
 endif()
 
+# ---- assets：真机安装上的 LOGO 影片必须"真的放完"（首帧 / ≥240 帧 / completed / 堆平稳）----
+# 判据见 tests/movie_logo.cpp 的头注释。缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；
+# GPU 不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
+add_executable(lift-movie-logo tests/movie_logo.cpp)
+target_link_libraries(lift-movie-logo PRIVATE emulator-lift-runtime)
+# ★ 真机影片只在 RelWithDebInfo 树里跑（用户口径：Debug 解释器慢到无法使用）；
+#   Debug 树里测试自己 `LIFT_SKIP`(77)，canonical 是 `ctest --test-dir out-rel -R movie-logo`。
+target_compile_definitions(lift-movie-logo PRIVATE
+    LIFT_MOVIE_LOGO_IS_DEBUG=$<IF:$<CONFIG:Debug>,1,0>)
+if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN")
+    add_test(NAME movie-logo COMMAND lift-movie-logo $<TARGET_FILE:emulator-lift>
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE"
+        "E:/Games/Eushully/天結/install"
+        "${CMAKE_CURRENT_BINARY_DIR}/movie-logo-work")
+    set_tests_properties(movie-logo PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        # 子进程自带上限 45 s（boot + 8.6 s 影片）；墙钟上限留余量。
+        TIMEOUT 180)
+endif()
+
 # =====================================================================================
-# 测试分级（AGENTS.md §5「CTest 那一档不写 pragma，判据是注册位置」）：
-#   - **顶层无条件注册** ⇒ 默认 ctest 就跑（不需要游戏 / LFS）⇒ pure
+# 测试分级（AGENTS.md §5「CTest 那一档不写 pragma，判据是注册位置」）：#   - **顶层无条件注册** ⇒ 默认 ctest 就跑（不需要游戏 / LFS）⇒ pure
 #   - 落在 if(...) / foreach / function 里 ⇒ 需要 LFS 资产或游戏安装 ⇒ assets
 # ⛔ 不要把 pure 的测试塞进 if()：那会让"没跑"与"跑绿了"在输出里长得一样。
 # =====================================================================================
@@ -540,3 +560,55 @@ add_test(NAME math COMMAND lift-math)
 add_executable(lift-pixel-format tests/pixel_format.cpp)
 target_link_libraries(lift-pixel-format PRIVATE emulator-lift-runtime)
 add_test(NAME pixel-format COMMAND lift-pixel-format)
+
+# =====================================================================================
+# 宿主侧 MPEG-1 影片解码（vendor pl_mpeg；无 COM / 无 guest / 无 SDL / 无线程）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ pl_mpeg 是单文件库：`third_party/pl_mpeg/pl_mpeg_impl.cpp` 是**唯一**定义
+#   PL_MPEG_IMPLEMENTATION 的 TU；其余代码只看见 `src/runtime/video/movie_decoder.h`
+#   （公共头不含 pl_mpeg.h，见那边注释）。
+# ★ 三处 pl_mpeg.h 必须逐字节相同（本处 + emulator-cxx + emulator-new），
+#   守卫：`tools/test/emulator-cxx-pl-mpeg-sync.test.mjs`。
+# =====================================================================================
+add_library(lift-pl-mpeg STATIC third_party/pl_mpeg/pl_mpeg_impl.cpp)
+target_include_directories(lift-pl-mpeg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pl_mpeg)
+# 解码是第三方代码、且是热点：Debug 构建也对它开优化（与 emulator-cxx 的 movie.cpp 同一口径）。
+if(MSVC)
+    target_compile_options(lift-pl-mpeg PRIVATE /O2)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(lift-pl-mpeg PRIVATE -O2)
+endif()
+
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/video/movie_decoder.cpp)
+target_link_libraries(emulator-lift-runtime PRIVATE lift-pl-mpeg)
+
+# ---- pure：影片解码器（自造字节 + fake 帧源；不碰游戏 / LFS）----
+# 判据见 tests/movie_decoder.cpp 文件头：坏输入不崩、时间推进单调/不重复、ended 只报一次、
+# Frame 指针在下一次 decode 前稳定、seek/rewind 后重新起解。
+add_executable(lift-movie-decoder tests/movie_decoder.cpp)
+target_link_libraries(lift-movie-decoder PRIVATE emulator-lift-runtime)
+add_test(NAME movie-decoder COMMAND lift-movie-decoder)
+
+# =====================================================================================
+# M4 · 纹理影片 = 真 DirectShow 服务端的**协议核心**（契约：docs/movie-dshow-protocol.md）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 本段只落**新模块 + pure 测试**：⛔ 还没接 `src/shims/quartz_video.cpp`
+#   （下一段才把 IGraphBuilder / IMediaControl / IMediaPosition 的槽接过来）。
+#   `runtime/dshow/` = 图状态机（filter 表 / 接线 / 控制 / 位置 / 泵）+ 宿主侧
+#   IPin / IMemAllocator / IMediaSample 的 guest 可见 COM 对象 + AM_MEDIA_TYPE 构造。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/dshow/graph.cpp
+    src/runtime/dshow/media_type.cpp
+    src/runtime/dshow/objects.cpp
+    src/runtime/dshow/guest_invoke.cpp
+    src/runtime/dshow/decoder_feed.cpp)
+
+# ---- pure：协议核心（假引擎 filter + 假帧源 + 假时钟；不碰游戏 / LFS）----
+# 判据见 tests/dshow_graph.cpp 文件头：D1 接线（含 QI/NotifyAllocator）、媒体类型逐字段、
+# 控制顺序（先 Pause 后 Run；渲染器保持 Paused）、泵的 33/66 ms 与自底向上、分配器忙不阻塞、
+# 以及「会红」自检（坏接线 + 逐字段改坏都必红）。
+add_executable(lift-dshow-graph tests/dshow_graph.cpp)
+target_link_libraries(lift-dshow-graph PRIVATE emulator-lift-runtime)
+add_test(NAME dshow-graph COMMAND lift-dshow-graph)

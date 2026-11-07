@@ -40,6 +40,29 @@ std::uint64_t steadyNowNs() {
 }  // namespace
 namespace {
 
+// 抽样统计：每 64 个像素取一个（1280×720 ⇒ 14400 个），返回非黑个数 / 采样数 / FNV-1a hash。
+void samplePixels(X86& cpu, std::uint32_t arena, std::uint32_t w, std::uint32_t h, std::uint32_t pitch,
+                  std::uint32_t bpp, std::uint32_t* nonzero, std::uint32_t* sampled, std::uint64_t* hash) {
+    std::uint64_t hs = 1469598103934665603ull;
+    std::uint32_t nz = 0;
+    std::uint32_t ns = 0;
+    const std::uint64_t total = static_cast<std::uint64_t>(w) * h;
+    for (std::uint64_t i = 0; i < total; i += 64u) {
+        const std::uint32_t y = static_cast<std::uint32_t>(i / w);
+        const std::uint32_t x = static_cast<std::uint32_t>(i % w);
+        const std::uint32_t ea = arena + y * pitch + x * bpp;
+        if (!cpu.mem->committed(ea, bpp)) continue;
+        const std::uint32_t px = (bpp == 2u) ? cpu.mem->rd16(ea) : cpu.mem->rd32(ea);
+        ++ns;
+        if ((px & (bpp == 2u ? 0x0FFFu : 0x00FFFFFFu)) != 0u) ++nz;
+        hs ^= px;
+        hs *= 1099511628211ull;
+    }
+    if (nonzero) *nonzero = nz;
+    if (sampled) *sampled = ns;
+    if (hash) *hash = hs;
+}
+
 // 设备状态块布局（**我们自己的**布局；⛔ 不是 Win32 结构体）
 enum DevOff : std::uint32_t {
     kDvMagic = 0,       // 'D9D1'
@@ -837,6 +860,26 @@ bool textureInfo(X86& cpu, std::uint32_t object, TextureInfo* out, std::string* 
     return textureInfoOfState(cpu, state, out, why);
 }
 
+// 纹理像素抽样（**只读**；`tests/movie_logo.cpp` 的像素判据用）。
+// 每 64 个像素取一个（1280×720 ⇒ 14400 个），只支持 4bpp（影片纹理 = A8R8G8B8）。
+bool sampleTexture(X86& cpu, std::uint32_t object, TexturePixels* out) {
+    if (out == nullptr) return false;
+    *out = TexturePixels{};
+    TextureInfo tex;
+    if (!textureInfo(cpu, object, &tex, nullptr)) return false;
+    // ★ `TextureInfo::bpp` 是**位**（A8R8G8B8 ⇒ 32）；`samplePixels` 要的是**字节/像素**。
+    const std::uint32_t bytes_per_pixel = tex.bpp / 8u;
+    if ((bytes_per_pixel != 4u && bytes_per_pixel != 2u) || tex.width == 0 || tex.height == 0 ||
+        tex.arena == 0) {
+        return false;
+    }
+    out->width = tex.width;
+    out->height = tex.height;
+    samplePixels(cpu, tex.arena, tex.width, tex.height, tex.pitch, bytes_per_pixel, &out->nonzero,
+                 &out->sampled, &out->hash);
+    return out->sampled != 0;
+}
+
 bool surfaceInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::string* why) {
     TextureInfo tex;
     if (textureInfoOfState(cpu, state, &tex, nullptr)) {
@@ -960,6 +1003,7 @@ bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::stri
     cpu.mem->wr32(tex.state + kTxLocked, 0u);
     // 内容版本 +1：Lock 期间 guest 可能改了像素；GPU 纹理缓存据此决定是否重传。
     cpu.mem->wr32(tex.state + kTxVersion, cpu.mem->rd32(tex.state + kTxVersion) + 1u);
+
     return true;
 }
 

@@ -122,6 +122,16 @@ void shimHeapAlloc(X86& cpu, ShimCall& call) {
     requireHeap(cpu, "HeapAlloc");
     const std::uint32_t flags = call.u32(1);
     const std::uint32_t bytes = call.u32(2);
+    // ★ 诊断（`--log-cat shim`）：≥ 900000 字节的大块 = 一平面 1280×720（921600）。
+    //   曾经每帧都申请这种块却不释放 ⇒ 128 MiB guest 堆在 ~130 帧耗尽 + 引擎 `RaiseException`。
+    //   根因是 `IMediaSample2::GetProperties` 把 `pMediaType` 给了非 0（`PrepareReceive` 于是每帧
+    //   ApplyMediaType ⇒ 渲染器 `operator new[](w*h)` 不释放）。保留这行便于回归时一眼看出。
+    if (bytes >= 900000u) {
+        static unsigned big_count = 0;
+        ++big_count;
+        shimLog("kernel32", "HeapAlloc", "大块 #%u：%u 字节，调用点 0x%08X（in_use=%u）", big_count, bytes,
+                cpu.mem ? cpu.mem->rd32(cpu.esp()) : 0u, cpu.heap->bytesInUse());
+    }
     const std::uint32_t ptr = cpu.heap->alloc(saneBytes(bytes), (flags & kHeapZeroMemory) != 0);
     if (ptr == 0) {
         outOfMemory(cpu, call, "HeapAlloc", bytes);

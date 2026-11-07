@@ -1,9 +1,11 @@
 #include "runtime/guest_call.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <utility>
 
 #include "runtime/memory.h"
+#include "runtime/watch.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -34,6 +36,7 @@ bool GuestCallStack::start(X86& cpu, std::uint32_t fn, const std::vector<std::ui
     Frame f;
     f.ret_ea = cpu.mem->rd32(cpu.esp());
     f.saved_esp = cpu.esp();
+    f.frame_esp = frame_esp;
     f.cleanup_bytes = cleanup_bytes;
     f.fn = fn;
     f.api = api;
@@ -52,6 +55,9 @@ bool GuestCallStack::start(X86& cpu, std::uint32_t fn, const std::vector<std::ui
     cpu.mem->wr32(frame_esp, kContinuationEa);
     for (std::size_t i = 0; i < args.size(); ++i)
         cpu.mem->wr32(frame_esp + 4u + static_cast<std::uint32_t>(i) * 4u, args[i]);
+    // ★ 观察口（`LIFT_WATCH_SAMPLE=1`）：把 watch 指向**本次回调帧的返回地址槽**，
+    //   guest 调用期间任何改写都会在 `Machine::run` 的 block 边界被记下（含写者 shim 名）。
+    if (std::getenv("LIFT_WATCH_SAMPLE") != nullptr) setWatchEa(frame_esp);
     cpu.esp() = frame_esp;
     cpu.eip = fn;
     if (callee_ecx != 0) cpu.ecx() = callee_ecx;
@@ -62,6 +68,18 @@ bool GuestCallStack::resume(X86& cpu, std::string* err) {
     if (frames_.empty()) {
         if (err) *err = "guest-call 续延桩被调到，但没有活动帧";
         return false;
+    }
+    // ★ 诊断：回调帧的返回地址槽（= kContinuationEa）是否还在。
+    //   注意：帧下 4 字节在"续延里再 start"（嵌套帧）时属于父帧的参数区，**不能**当哨兵用。
+    {
+        const Frame& top = frames_.back();
+        if (cpu.mem && top.frame_esp != 0) {
+            const std::uint32_t slot = cpu.mem->rd32(top.frame_esp);
+            if (slot != kContinuationEa) {
+                std::fprintf(stderr, "[error] callback ret slot 0x%08X 被改成 0x%08X（api=%s）\n", top.frame_esp,
+                             slot, top.api ? top.api : "?");
+            }
+        }
     }
     const std::uint32_t callback_result = cpu.eax();
     // ★ 子帧（nested）返回：弹出它，把这次结果交回**父帧的同一份续延**（多回调枚举）。
@@ -110,6 +128,10 @@ bool GuestCallStack::resume(X86& cpu, std::string* err) {
     cpu.esp() = f.saved_esp + f.cleanup_bytes;
     cpu.eip = f.ret_ea;
     cpu.eax() = shim_result;
+    // ★ 观察口落点跟着"在飞的帧"走：链收尾/回落到父帧后，旧帧槽会被引擎自己的普通 call 复用 —— 
+    //   继续盯着它只会得到一堆无关的 push/call 改写。
+    if (std::getenv("LIFT_WATCH_SAMPLE") != nullptr)
+        setWatchEa(frames_.empty() ? 0u : frames_.back().frame_esp);
     return true;
 }
 

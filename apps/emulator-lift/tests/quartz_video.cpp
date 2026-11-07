@@ -1,15 +1,18 @@
-// emulator-lift · DirectShow / AMultiMediaStream 视频形状层夹具（pure：guest 侧自造，不碰游戏）
+// emulator-lift · DirectShow / AMultiMediaStream 的**形状层**夹具（pure：guest 侧自造，不碰游戏）
 //
-// 判据（用户 2026-11-06：「准备播放视频时停在 ole32!CoCreateInstance」）：
-//   ① `CoCreateInstance(CLSID_FilterGraph, IID_IGraphBuilder)` ⇒ S_OK + guest 可见的 IGraphBuilder；
-//   ② 图上的 QI 能拿到 IMediaControl / IMediaEvent / IMediaSeeking；
-//   ③ `IMediaControl::Run(+0x1C)` ⇒ S_OK、`GetState(+0x28)` = 2、`Stop(+0x24)` = 0；
-//   ④ `IMediaEvent::WaitForCompletion(+0x24)` **立即**返回 S_OK 且事件码 = EC_COMPLETE(1)；
-//   ⑤ `IMediaSeeking::GetDuration(+0x28)` / `GetCurrentPosition(+0x30)` = 0；
-//   ⑥ `CoCreateInstance(CLSID_AMMultiMediaStream, IID_IAMMultiMediaStream)` ⇒ S_OK；
-//      `Initialize(+0x30)` / `GetFilterGraph(+0x34)` / `AddMediaStream(+0x3C)` 不失败；
-//   ⑦ 未知 CLSID ⇒ CLASS_E_CLASSNOTAVAILABLE(0x80040111) 且输出置 0；未知 IID ⇒ E_NOINTERFACE。
-//   ⛔ 这些不是"真解码正确"；它们只证明"影片准备不再 loud trap，且按零长影片立即完成"。
+// ★ 口径（2026-11-07 收窄）：`CLSID_FilterGraph` 现在是**真图**（`runtime/dshow/`：AddFilter / Render /
+//   IMediaControl / IMediaPosition 都走它）。所以本文件**不再**断言"影片零长" ——
+//   零长 / 解码 / 接线 / 泵的判据已迁到 `tests/dshow_graph.cpp`（那里有假引擎 filter + 假 IAsyncReader）。
+//   这里只测**仍成立的形状层契约**：
+//   ① `CoCreateInstance(CLSID_FilterGraph)` ⇒ S_OK + guest 可见对象；
+//   ② 图上的 QI 能拿到 IMediaControl / IMediaEvent / IMediaSeeking / IMediaPosition；
+//   ③ `IMediaControl::Run/Pause/Stop/GetState` 不失败、状态码正确（没有 filter 时只记状态）；
+//   ④ `IMediaEvent::WaitForCompletion` **立即** EC_COMPLETE（**窗口影片路径才用**；DShow 路径 0 调用点）；
+//   ⑤ `IMediaSeeking`（Movie 路径）的形状槽不失败；
+//   ⑥ `IMediaPosition`（+0x24 get_CurrentPosition / +0x28 get_StopTime）写 `double` 出参、没有影片时是 0；
+//   ⑦ `CoCreateInstance(CLSID_AMMultiMediaStream)` 形状对象；未知 CLSID ⇒ CLASS_E_CLASSNOTAVAILABLE；
+//      未知 IID ⇒ E_NOINTERFACE；`AddFilter(NULL)` ⇒ **E_FAIL**（记账：不静默成功）。
+//   ⛔ 这些都不是"真解码正确"；真影片的判据在 dshow-graph + 真机 `[dshow]` 日志。
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -48,6 +51,9 @@ const std::uint8_t kIidMediaControl[16] = {0xB1, 0x68, 0xA8, 0x56, 0xD4, 0x0A, 0
 // IID_IMediaEvent {56A868B6-...}
 const std::uint8_t kIidMediaEvent[16] = {0xB6, 0x68, 0xA8, 0x56, 0xD4, 0x0A, 0xCE, 0x11,
                                          0xB0, 0x3A, 0x00, 0x20, 0xAF, 0x0B, 0xA7, 0x70};
+// IID_IMediaPosition {56A868B2-...}
+const std::uint8_t kIidMediaPosition[16] = {0xB2, 0x68, 0xA8, 0x56, 0xD4, 0x0A, 0xCE, 0x11,
+                                            0xB0, 0x3A, 0x00, 0x20, 0xAF, 0x0B, 0xA7, 0x70};
 // IID_IBasicVideo {56A868B5-...}
 const std::uint8_t kIidBasicVideo[16] = {0xB5, 0x68, 0xA8, 0x56, 0xD4, 0x0A, 0xCE, 0x11,
                                          0xB0, 0x3A, 0x00, 0x20, 0xAF, 0x0B, 0xA7, 0x70};
@@ -117,7 +123,8 @@ int main() {
     }
 
     // ①' AddFilter 的 guest 形状是 this+2（`.lst` 0x487726 / 0x486E75 / 0x4893A2）
-    LIFT_CHECK_EQ_U32(invoke(methodEa(f, graph, 0x0Cu), {graph, 0u, 0u}), kSOk);
+    // ★ 真图会校验 pFilter：NULL ⇒ E_FAIL（**不静默成功**）。合法 filter 的行为在 dshow-graph。
+    LIFT_CHECK_EQ_U32(invoke(methodEa(f, graph, 0x0Cu), {graph, 0u, 0u}), 0x80004005u);
 
     // ② QI IMediaControl
     const std::uint32_t iid_control = f.data(kIidMediaControl, 16);
@@ -156,11 +163,11 @@ int main() {
         LIFT_CHECK_EQ_U32(invoke(methodEa(f, event, 0x34u), {event, 0u, 0u, 0u}), kSOk);
     }
 
-    // ⑤ QI IMediaSeeking + GetDuration / GetCurrentPosition = 0
+    // ⑤ QI IMediaSeeking（**Movie 路径**的形状层：不接真影片，只保证槽不失败）
     const std::uint32_t iid_seeking = f.data(kIidMediaSeeking, 16);
     const std::uint32_t seek_ppv = f.zeroData(4);
     {
-        g_current_case = "quartz-qi-mediaseeking-zero";
+        g_current_case = "quartz-qi-mediaseeking-shape";
         LIFT_CHECK_EQ_U32(invoke(methodEa(f, graph, 0x00u), {graph, iid_seeking, seek_ppv}), kSOk);
         const std::uint32_t seeking = f.m.mem().rd32(seek_ppv);
         LIFT_CHECK_NE_U32(seeking, 0u);
@@ -168,22 +175,38 @@ int main() {
         const std::uint32_t position = f.zeroData(8);
         LIFT_CHECK_EQ_U32(invoke(methodEa(f, seeking, 0x28u), {seeking, duration}), kSOk);
         LIFT_CHECK_EQ_U32(invoke(methodEa(f, seeking, 0x30u), {seeking, position}), kSOk);
-        LIFT_CHECK_EQ_U32(f.m.mem().rd32(duration), 0u);
-        LIFT_CHECK_EQ_U32(f.m.mem().rd32(duration + 4u), 0u);
-        LIFT_CHECK_EQ_U32(f.m.mem().rd32(position), 0u);
-        LIFT_CHECK_EQ_U32(f.m.mem().rd32(position + 4u), 0u);
         // GetAvailable(2 out ptrs)
         const std::uint32_t avail1 = f.zeroData(8);
         const std::uint32_t avail2 = f.zeroData(8);
         LIFT_CHECK_EQ_U32(invoke(methodEa(f, seeking, 0x40u), {seeking, avail1, avail2}), kSOk);
-        LIFT_CHECK_EQ_U32(f.m.mem().rd32(avail1), 0u);
-        LIFT_CHECK_EQ_U32(f.m.mem().rd32(avail2), 0u);
         // ConvertTimeFormat(3 ptr + by-value LONGLONG + ptr = 5 DWORD 栈)
         const std::uint32_t target = f.zeroData(8);
         LIFT_CHECK_EQ_U32(invoke(methodEa(f, seeking, 0x34u), {seeking, target, 0u, 0u, 0u, 0u}), kSOk);
-        LIFT_CHECK_EQ_U32(f.m.mem().rd32(target), 0u);
         // SetPositions(4 args)
         LIFT_CHECK_EQ_U32(invoke(methodEa(f, seeking, 0x38u), {seeking, 0u, 1u, 0u, 0u}), kSOk);
+    }
+
+    // ⑤'' IMediaPosition：**+0x24 get_CurrentPosition / +0x28 get_StopTime 写 double**（引擎的读法）。
+    //   没有影片 ⇒ 0.0（真影片的位置/时长判据在 dshow-graph + 真机日志）。
+    {
+        g_current_case = "quartz-imediaposition-double";
+        const std::uint32_t iid_pos = f.data(kIidMediaPosition, 16);
+        const std::uint32_t pos_ppv = f.zeroData(4);
+        LIFT_CHECK_EQ_U32(invoke(methodEa(f, graph, 0x00u), {graph, iid_pos, pos_ppv}), kSOk);
+        const std::uint32_t pos = f.m.mem().rd32(pos_ppv);
+        LIFT_CHECK_NE_U32(pos, 0u);
+        const std::uint32_t cur = f.data("\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA", 8);  // 非 0 初值
+        const std::uint32_t stop = f.data("\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA", 8);
+        LIFT_CHECK_EQ_U32(invoke(methodEa(f, pos, 0x24u), {pos, cur}), kSOk);
+        LIFT_CHECK_EQ_U32(invoke(methodEa(f, pos, 0x28u), {pos, stop}), kSOk);
+        const std::uint32_t cur_lo = f.m.mem().rd32(cur);
+        const std::uint32_t cur_hi = f.m.mem().rd32(cur + 4u);
+        const std::uint32_t stop_lo = f.m.mem().rd32(stop);
+        const std::uint32_t stop_hi = f.m.mem().rd32(stop + 4u);
+        LIFT_CHECK_EQ_U32(cur_lo, 0u);
+        LIFT_CHECK_EQ_U32(cur_hi, 0u);
+        LIFT_CHECK_EQ_U32(stop_lo, 0u);
+        LIFT_CHECK_EQ_U32(stop_hi, 0u);
     }
 
     // ⑤' IBasicVideo：get_AvgTimePerFrame(8 字节) / GetVideoPaletteEntries(4 参)

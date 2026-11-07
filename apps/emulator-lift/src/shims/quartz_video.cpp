@@ -38,10 +38,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include "runtime/clock.h"
 #include "runtime/com.h"
+#include "runtime/dshow/dshow.h"
 #include "runtime/exec.h"
 #include "runtime/heap.h"
 #include "runtime/memory.h"
@@ -122,6 +126,12 @@ constexpr std::uint8_t kClsidFilterGraphNoThread[16] = {0xB2, 0xEB, 0x36, 0xE4, 
 // CLSID_AMMultiMediaStream {49C47CE5-9BA4-11D0-8212-00C04FC32C45}
 constexpr std::uint8_t kClsidAmMultiMediaStream[16] = {0xE5, 0x7C, 0xC4, 0x49, 0xA4, 0x9B, 0xD0, 0x11,
                                                        0x82, 0x12, 0x00, 0xC0, 0x4F, 0xC3, 0x2C, 0x45};
+// CLSID_MemoryAllocator {1E651CC0-B199-11D0-8212-00C04FC32C45}
+// ★ 取证：`.data:0x52FB38`（doc §2-A 的 `0x4CFB95` 站点 = `CBaseInputPin::GetAllocator`）。
+//   宿主先 `NotifyAllocator(ours)` 成功之后它**不该**被请求；若仍被请求 ⇒
+//   `CLASS_E_CLASSNOTAVAILABLE` + Warn（⛔ 不返回假对象：假分配器会让引擎在 GetBuffer 里等信号量）。
+constexpr std::uint8_t kClsidMemoryAllocator[16] = {0xC0, 0x1C, 0x65, 0x1E, 0x99, 0xB1, 0xD0, 0x11,
+                                                    0x82, 0x12, 0x00, 0xC0, 0x4F, 0xC3, 0x2C, 0x45};
 
 // ---------------------------------------------------------------------------------------
 // 共享状态块（guest 堆；每个图一个；所有接口对象用 `ComRegistry::userOf` 指回它）
@@ -205,6 +215,72 @@ void vlog(const char* what, const char* fmt, ...) {
     va_start(ap, fmt);
     logV(LogLevel::Info, LogVideo, prefix, fmt, ap);
     va_end(ap);
+}
+
+void vwarn(const char* what, const char* fmt, ...) {
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[shim] quartz!%s: ", what ? what : "?");
+    va_list ap;
+    va_start(ap, fmt);
+    logV(LogLevel::Warn, LogVideo, prefix, fmt, ap);
+    va_end(ap);
+}
+
+// ---------------------------------------------------------------------------------------
+// `dshow::Graph` 的宿主侧表（key = (X86* 身份, 共享状态块 EA)）
+// ★ 为什么要带机器身份：本表的 static 生命周期长于单台 Machine；两轮测试 / 两次装配时
+//   guest 堆会把同一个 EA 再发一次 ⇒ 只按 EA 会拿到**上一台机器**的 Graph（`X86&` 悬垂）。
+// ★ 生命周期 = **保留到进程结束**：
+//   ① 状态槽自己持一份 IGraphBuilder 引用（`ensureInterface` 的 cache 引用）⇒ 图对象的
+//      Release 永远到不了 0，所以"最后一个接口 Release 时擦除"这个事件**不会发生**；
+//   ② 链的续延捕获了 `Graph*`：在飞时擦除/销毁 = 野指针（`Graph::suspended()`）；
+//   ③ 销毁 Graph 要用 guest 堆（HostObjects / scratch / IAsyncReader 的 Release 是 guest 调用），
+//      进程退出时这些设施的顺序不可保证。
+//   ⇒ **故意泄漏**：`Graph` 用 `new` 建、表里存**裸指针**、从不 delete。
+//     ⚠ 不能用 `std::unique_ptr`：那个 static map 会在**进程退出时**销毁值 ⇒ `~Graph` 会去碰
+//       已经销毁的 Machine（X86/ComRegistry/guest 堆）⇒ 宿主 0xC0000005（实测过）。
+//     取不到就 Warn + E_FAIL（⛔ 不碰悬垂指针）。代价 = 每个实例常驻（含该影片字节）；游戏里影片数是个位数。
+// ---------------------------------------------------------------------------------------
+using GraphKey = std::pair<const void*, std::uint32_t>;
+
+std::map<GraphKey, lift::dshow::Graph*>& graphs() {
+    static std::map<GraphKey, lift::dshow::Graph*> m;
+    return m;
+}
+
+lift::dshow::Graph* graphOf(const X86& cpu, std::uint32_t st) {
+    if (st == 0) return nullptr;
+    auto it = graphs().find(GraphKey{&cpu, st});
+    return it == graphs().end() ? nullptr : it->second;
+}
+
+// 每个 CLSID_FilterGraph 实例一个 Graph（Now100ns 来自 `cpu.clock`，⛔ 不读 steady_clock）。
+void ensureGraphOfState(X86& cpu, std::uint32_t st, std::uint32_t graph_ea) {
+    if (st == 0) return;
+    auto it = graphs().find(GraphKey{&cpu, st});
+    if (it != graphs().end()) {
+        it->second->setGraphUnknown(graph_ea);
+        return;
+    }
+    auto* g = new lift::dshow::Graph(
+        cpu, [&cpu]() { return static_cast<std::int64_t>(cpu.clock ? cpu.clock->now100ns() : 0); },
+        /*feed=*/nullptr);
+    g->setGraphUnknown(graph_ea);
+    graphs().emplace(GraphKey{&cpu, st}, g);
+}
+
+// 调完 Graph 方法之后：链在飞 ⇒ 把控制权交回 dispatcher（`invoke()` 不再弹参/改 eip）。
+void finishGraphCall(const lift::dshow::Graph* g, ShimCall& call) {
+    if (g != nullptr && g->suspended()) call.take_control = true;
+}
+
+// `IMediaPosition` / `IMediaPosition::get_*` 的 `double` 出参（REFTIME，秒）。
+void writeDouble(X86& cpu, std::uint32_t ea, double v) {
+    if (ea == 0 || cpu.mem == nullptr || !cpu.mem->committed(ea, 8u)) return;
+    std::uint64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(v), "double 必须是 8 字节");
+    std::memcpy(&bits, &v, sizeof(bits));
+    cpu.mem->wr64(ea, bits);
 }
 
 const char* roleName(Role::Kind r) {
@@ -613,25 +689,34 @@ std::uint32_t createGraph(X86& cpu) {
         cpu.heap->free(st);
         return 0;
     }
+    // ★ 每个 CLSID_FilterGraph 实例一个真 `dshow::Graph`（AddFilter / Render / Run / Position 都走它）。
+    ensureGraphOfState(cpu, st, graph);
     return st;
 }
 
 std::uint32_t ensureGraphOf(X86& cpu, std::uint32_t st) {
     bool created = false;
     std::uint32_t graph = stateU32(cpu, st, kOffGraph);
-    if (graph && cpu.com && cpu.com->find(graph)) return graph;
+    if (graph && cpu.com && cpu.com->find(graph)) {
+        ensureGraphOfState(cpu, st, graph);
+        return graph;
+    }
     graph = ensureInterface(cpu, st, Role::Graph, &created);
     // `ensureInterface` 给了 cache + creation 两份引用；这里只要 cache 的那份，
     // **出参**由调用方再 AddRef（否则 guest 的第一次 Release 只掉到 2，缓存/创建引用混在一起）。
     if (graph && created) cpu.com->release(cpu, graph);
+    ensureGraphOfState(cpu, st, graph);
     return graph;
 }
 
 void releaseStateIfOwned(X86& cpu, std::uint32_t st) {
-    // 状态块是所有接口共享的；接口按引用计数释放。这里只在"图对象本身"释放到 0 时
-    // **不**回收状态（接口可能比图晚释放），避免悬垂；0x40 字节的 guest 堆开销可以接受。
+    // 状态块是所有接口共享的；接口按引用计数释放。这里**不**回收状态（接口可能比图晚释放），
+    // 也**不**擦 `graphs()`（见那边的三条约束；且状态槽自己的 cache 引用让这个分支基本到不了）。
+    // ⛔ 只留一行：真要有人看到它，说明"图对象真被释放到 0"了 —— 值得知道。
+    if (graphOf(cpu, st) != nullptr) {
+        vlog("IGraphBuilder::Release", "图对象（state=0x%08X）释放到 0；dshow::Graph 仍常驻到进程结束", st);
+    }
     (void)cpu;
-    (void)st;
 }
 
 void doQueryInterface(X86& cpu, ShimCall& call, Role::Kind self_role, std::uint32_t self, std::uint32_t st) {
@@ -741,8 +826,10 @@ void videoDispatch(X86& cpu, ShimCall& call) {
         return;
     }
     if (firstTime(cpu, st, static_cast<int>(role) * 8 + 1)) {
-        vlog(iface.c_str(), "%s: 形状层 ⇒ 立即完成（不建真实滤镜 / 不解码）", name.c_str());
+        vlog(iface.c_str(), "%s: 真 DShow 图（未取证的槽仍按形状层立即完成）", name.c_str());
     }
+    // 这个状态块的 dshow::Graph（CLSID_FilterGraph 实例）；没建 ⇒ 下面按形状层兜底并在日志点名。
+    lift::dshow::Graph* dg = graphOf(cpu, st);
 
     // ---- IDispatch：形状层不提供自动化 ----
     if (name == "GetTypeInfoCount") { writeU32(cpu, call.u32(1), 0); call.result = kSOk; return; }
@@ -752,6 +839,36 @@ void videoDispatch(X86& cpu, ShimCall& call) {
 
     // ---- IGraphBuilder ----
     if (role == Role::Graph) {
+        // ★ AddFilter / Render 走**真图**（doc §2-A / §2-D）：引擎会查 AddFilter 的 HRESULT；
+        //   Render 的 HRESULT 被丢弃（`0x489647` 直接 Release）⇒ 成败只看 stats() 与 [dshow] 日志。
+        if (name == "AddFilter") {
+            if (dg == nullptr) {
+                vwarn("IGraphBuilder::AddFilter", "没有 dshow::Graph（state=0x%08X）⇒ E_FAIL", st);
+                call.result = kEfail;
+                return;
+            }
+            dg->setHostCallCleanup(4u + call.stdcall_bytes);
+            std::string err;
+            const bool ok = dg->addFilter(call.u32(1), call.u32(2), &err);
+            if (!ok) vwarn("IGraphBuilder::AddFilter", "拒绝：%s", err.c_str());
+            call.result = ok ? kSOk : kEfail;
+            finishGraphCall(dg, call);
+            return;
+        }
+        if (name == "Render") {
+            if (dg == nullptr) {
+                vwarn("IGraphBuilder::Render", "没有 dshow::Graph（state=0x%08X）⇒ E_FAIL", st);
+                call.result = kEfail;
+                return;
+            }
+            dg->setHostCallCleanup(4u + call.stdcall_bytes);
+            std::string err;
+            const bool ok = dg->render(call.u32(1), &err);
+            if (!ok) vwarn("IGraphBuilder::Render", "未完成：%s", err.c_str());
+            call.result = ok ? kSOk : kEfail;
+            finishGraphCall(dg, call);
+            return;
+        }
         if (name == "EnumFilters" || name == "FindFilterByName" || name == "AddSourceFilter") {
             if (name == "FindFilterByName") writeU32(cpu, call.u32(2), 0);
             if (name == "AddSourceFilter") writeU32(cpu, call.u32(3), 0);
@@ -760,20 +877,31 @@ void videoDispatch(X86& cpu, ShimCall& call) {
             return;
         }
         if (name == "ShouldOperationContinue") { call.result = kSOk; return; }
-        // AddFilter / RemoveFilter / Connect* / Reconnect / Disconnect / SetDefaultSyncSource /
-        // Render / RenderFile / SetLogFile / Abort ⇒ S_OK
+        // RemoveFilter / Connect* / Reconnect / Disconnect / SetDefaultSyncSource /
+        // RenderFile / SetLogFile / Abort ⇒ S_OK（DShow 路径无调用点）
         call.result = kSOk;
         return;
     }
 
     // ---- IMediaControl ----
     if (role == Role::Control) {
-        if (name == "Run") { stateWr32(cpu, st, kOffRunState, 2); stateWr32(cpu, st, kOffCompleted, 0); call.result = kSOk; return; }
-        if (name == "Pause") { stateWr32(cpu, st, kOffRunState, 1); call.result = kSOk; return; }
-        if (name == "Stop") { stateWr32(cpu, st, kOffRunState, 0); call.result = kSOk; return; }
-        if (name == "GetState") {
-            writeU32(cpu, call.u32(2), stateU32(cpu, st, kOffRunState));
+        if (name == "Run" || name == "Pause" || name == "Stop" || name == "GetState") {
+            if (dg == nullptr) {
+                // 没有真图（Movie 路径的 FilterGraph 或未建成）⇒ 保持旧的形状层状态机。
+                if (name == "Run") { stateWr32(cpu, st, kOffRunState, 2); stateWr32(cpu, st, kOffCompleted, 0); }
+                else if (name == "Pause") stateWr32(cpu, st, kOffRunState, 1);
+                else if (name == "Stop") stateWr32(cpu, st, kOffRunState, 0);
+                else writeU32(cpu, call.u32(2), stateU32(cpu, st, kOffRunState));
+                call.result = kSOk;
+                return;
+            }
+            dg->setHostCallCleanup(4u + call.stdcall_bytes);
+            if (name == "Run") dg->run();
+            else if (name == "Pause") dg->pause();
+            else if (name == "Stop") dg->stop();
+            else writeU32(cpu, call.u32(2), static_cast<std::uint32_t>(dg->state()));
             call.result = kSOk;
+            finishGraphCall(dg, call);
             return;
         }
         if (name == "GetFilterGraph") {
@@ -794,6 +922,9 @@ void videoDispatch(X86& cpu, ShimCall& call) {
     }
 
     // ---- IMediaEvent ----
+    // ★ **DShow 路径不使用它**（doc §2-A：`0x418` 只被存、0 个调用点）；只有
+    //   `Movie`/`MovieIVideoWindow`（AMultiMediaStream）路径才用 `WaitForCompletion`。
+    //   因此这里保留"立即 EC_COMPLETE"的形状（⛔ 不要改成真等待：SCOPE §1）。
     if (role == Role::Event) {
         if (name == "GetEventHandle") { writeU32(cpu, call.u32(1), 0); call.result = kSOk; return; }
         if (name == "GetEvent") {
@@ -849,13 +980,39 @@ void videoDispatch(X86& cpu, ShimCall& call) {
     // ---- IMediaPosition ----
     if (role == Role::Position) {
         const std::string n = name;
-        if (n == "get_Duration" || n == "get_CurrentPosition" || n == "get_StopTime" ||
-            n == "get_PrerollTime") {
-            writeU64(cpu, call.u32(1), 0);
+        // ★ 引擎按 `(this, double* out)` 调 **+0x24**（get_CurrentPosition）与 **+0x28**（引擎当作
+        //   "结束位置"读；doc §2-A 的 `+0x28` ABI 告警）。两处都写 `REFTIME`（double 秒）。
+        //   `currentPosition()` 会推进泵（可能发起一次 guest `Receive`）⇒ 必须检查 suspended()。
+        if (n == "get_CurrentPosition" || n == "get_StopTime") {
+            if (dg != nullptr) {
+                // ★ 出参 EA **必须**在 `currentPosition()` 之前取：它会推进泵、可能发起 guest `Receive`
+                //   （`GuestCallStack::start` 会把 `cpu.esp()` 压到回调帧上）⇒ 之后再 `call.u32(1)` 读的是
+                //   帧里的 `args[1]`（= 样本 EA），`writeDouble` 就把 double 写进样本对象头 —— 实测正是
+                //   `PrepareReceive` 读到野 vtable 的原因。
+                const std::uint32_t out_ea = call.u32(1);
+                dg->setHostCallCleanup(4u + call.stdcall_bytes);
+                const double v = (n == "get_CurrentPosition") ? dg->currentPosition() : dg->stopPosition();
+                writeDouble(cpu, out_ea, v);
+                call.result = kSOk;
+                finishGraphCall(dg, call);
+                return;
+            }
+            writeDouble(cpu, call.u32(1), 0.0);
             call.result = kSOk;
             return;
         }
-        if (n == "get_Rate") { writeU64(cpu, call.u32(1), 0x3FF0000000000000ull); call.result = kSOk; return; }
+        if (n == "get_Duration" || n == "get_PrerollTime") {
+            if (dg != nullptr) {
+                writeDouble(cpu, call.u32(1), dg->duration());
+                call.result = kSOk;
+                finishGraphCall(dg, call);
+                return;
+            }
+            writeDouble(cpu, call.u32(1), 0.0);
+            call.result = kSOk;
+            return;
+        }
+        if (n == "get_Rate") { writeDouble(cpu, call.u32(1), 1.0); call.result = kSOk; return; }
         if (n == "CanSeekForward" || n == "CanSeekBackward") { writeU32(cpu, call.u32(1), 0); call.result = kSOk; return; }
         // put_* ⇒ S_OK
         call.result = kSOk;
@@ -888,6 +1045,20 @@ void videoDispatch(X86& cpu, ShimCall& call) {
 
     // ---- IBasicAudio ----
     if (role == Role::BasicAudio) {
+        // ★ `put_Volume(+0x1C)` 的入参是**百分之一分贝**（LONG）：`sub_4879E0` 算、`0x487A2F` 调
+        //   （doc §0-2）。只记账（⛔ 不碰真设备）。
+        if (name == "put_Volume") {
+            const std::int32_t v = static_cast<std::int32_t>(call.u32(1));
+            if (dg != nullptr) {
+                dg->setHostCallCleanup(4u + call.stdcall_bytes);
+                dg->setVolumeDb(static_cast<double>(v) / 100.0);
+                finishGraphCall(dg, call);
+            } else {
+                vlog("IBasicAudio::put_Volume", "没有 dshow::Graph ⇒ 只记 %d（百分之一分贝）", v);
+            }
+            call.result = kSOk;
+            return;
+        }
         if (name == "get_Volume" || name == "get_Balance") { writeU32(cpu, call.u32(1), 0); call.result = kSOk; return; }
         call.result = kSOk;
         return;
@@ -1141,7 +1312,7 @@ void shimCoCreateInstance(X86& cpu, ShimCall& call) {
         }
         if (addref) cpu.com->addRef(cpu, obj);
         writeU32(cpu, ppv, obj);
-        vlog("CoCreateInstance", "FilterGraph/NoThread ⇒ %s 对象 0x%08X（形状层：影片立即完成）",
+        vlog("CoCreateInstance", "FilterGraph/NoThread ⇒ %s 对象 0x%08X（真 DShow 图：AddFilter/Render/控制/位置走 runtime/dshow）",
              roleName(role == Role::Self ? Role::Graph : role), obj);
         call.result = kSOk;
         return;
@@ -1163,6 +1334,19 @@ void shimCoCreateInstance(X86& cpu, ShimCall& call) {
         writeU32(cpu, ppv, stream);
         vlog("CoCreateInstance", "CLSID_AMMultiMediaStream ⇒ IAMMultiMediaStream 对象 0x%08X（形状层）", stream);
         call.result = kSOk;
+        return;
+    }
+
+    // ★ `CLSID_MemoryAllocator`（doc §6-5）：宿主先 `NotifyAllocator(ours)` 成功 ⇒ 引擎**不该**来要它
+    //   （`CBaseInputPin::GetAllocator` 只在 m_pAllocator 为空时才 `CoCreateInstance`）。
+    //   若仍被请求：**不返回假对象**（假分配器会让引擎在 `GetBuffer` 里等信号量 = SCOPE §1 硬错误），
+    //   返回 CLASS_E_CLASSNOTAVAILABLE 并 Warn。引擎随后会用自己的分配器（那条路会撞 WaitForSingleObject，
+    //   所以这条 Warn 是"接线没成功"的强信号，必须显式）。
+    if (guidEq(clsid, kClsidMemoryAllocator)) {
+        vwarn("CoCreateInstance",
+              "CLSID_MemoryAllocator 被请求 ⇒ CLASS_E_CLASSNOTAVAILABLE（说明 NotifyAllocator(ours) 没成功；"
+              "⛔ 不返回假分配器，否则引擎会在 GetBuffer 里等信号量）");
+        call.result = kClassEClassNotAvailable;
         return;
     }
 
@@ -1220,10 +1404,11 @@ void shimVariantClear(X86& cpu, ShimCall& call) {
 }  // namespace
 
 void registerQuartzVideoShims(ShimRegistry& s) {
-    // ★ 用户 2026-11-06 口径：视频**不再是硬 trap**；先做"形状层 + 立即完成"，
-    //   让 boot / 标题前的影片准备不再停在 ole32!CoCreateInstance。真解码是 M4 的后续。
-    s.addStub("ole32", "CoCreateInstance", Conv::Stdcall, 5, &shimCoCreateInstance,
-              "M4 视频形状层：CLSID_FilterGraph / CLSID_AMMultiMediaStream 返回立即完成的形状对象；其余 CLSID ⇒ CLASS_E_CLASSNOTAVAILABLE（不冒充支持）");
+    // ★ 2026-11-07：视频**不再是形状层**（DirectShow 路径）：`CLSID_FilterGraph` 返回真 IGraphBuilder，
+    //   AddFilter / Render / IMediaControl / IMediaPosition 走 `runtime/dshow/`（真源 pin 读取 + 真解码）。
+    //   `CLSID_AMMultiMediaStream`（Movie 路径）仍是形状对象 + 立即 EC_COMPLETE。
+    //   其它 CLSID（含 CLSID_MemoryAllocator）⇒ CLASS_E_CLASSNOTAVAILABLE + Warn（⛔ 不冒充支持）。
+    s.add("ole32", "CoCreateInstance", Conv::Stdcall, 5, &shimCoCreateInstance);
     s.addStub("ole32", "PropVariantClear", Conv::Stdcall, 1, &shimPropVariantClear,
               "M2/M4：PROPVARIANT 清零（复杂类型只记一行，不冒充释放）");
     s.addStub("oleaut32", "#7", Conv::Stdcall, 1, &shimSysStringLen,

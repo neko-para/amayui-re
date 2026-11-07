@@ -353,13 +353,6 @@
       "reason": "SCOPE §1 视频 / 媒体延期：MFStartup 返回 S_OK（不初始化真实媒体栈）"
     },
     {
-      "target": "ole32!CoCreateInstance",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/quartz_video.cpp",
-      "boundary": "import",
-      "reason": "M4 视频形状层：CLSID_FilterGraph / CLSID_AMMultiMediaStream 返回立即完成的形状对象；其余 CLSID ⇒ CLASS_E_CLASSNOTAVAILABLE（不冒充支持）"
-    },
-    {
       "target": "ole32!PropVariantClear",
       "kind": "stub",
       "impl": "apps/emulator-lift/src/shims/quartz_video.cpp",

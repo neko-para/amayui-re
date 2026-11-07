@@ -49,6 +49,7 @@ const SKIP_DIRS = new Set([
   'dist',
   'tmp',
   'out',
+  'out-rel',
   '.cache',
   '.vscode',
   // 第三方依赖树（vcpkg submodule）：里面的 JSON 不属于本仓自有结构化数据。

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 #include <utility>
@@ -18,6 +19,7 @@
 #include "runtime/exec.h"
 #include "runtime/present.h"
 #include "runtime/sha256.h"
+#include "runtime/watch.h"
 #include "shims/register.h"
 
 namespace lift {
@@ -645,6 +647,50 @@ RunResult Machine::run(const RunOptions& opts) {
                 r.detail = audio_.lastError();
                 break;
             }
+        }
+
+        // ★ 调试观察口（默认关）：`LIFT_WATCH_SAMPLE=1` 时，每个 block 入口读一次
+        //   `HostObjects` 登记的样本对象头 `[sample]`；值变了 ⇒ 打一行（含当前/上一个 block 起点）。
+        //   只观察、不改语义；不设环境变量时零成本。
+        {
+            static const bool watch_on = std::getenv("LIFT_WATCH_SAMPLE") != nullptr;
+            static std::uint32_t watch_prev_entry = 0;
+            static std::uint32_t watch_last_val = 0;
+            static std::uint32_t watch_last_ea = 0;
+            static bool watch_seeded = false;
+            if (watch_on && lift::watchSampleEa() != 0) {
+                const std::uint32_t watch_ea = lift::watchSampleEa();
+                if (watch_ea != watch_last_ea) {
+                    // 观察点换了（`GuestCallStack::start` 每次把 watch 指向新的回调帧返回槽）⇒ 重新播种；
+                    // 否则会把"新帧的初始值"误报成一次改写。
+                    watch_last_ea = watch_ea;
+                    watch_seeded = false;
+                }
+                if (mem_.committed(watch_ea, 4u)) {
+                    const std::uint32_t v = mem_.rd32(watch_ea);
+                    if (!watch_seeded) {
+                        watch_last_val = v;
+                        watch_seeded = true;
+                    } else if (v != watch_last_val) {
+                        // 解析"上一个 block"是谁：shim 块 ⇒ module!name（写者就是它）。
+                        char who[160];
+                        std::snprintf(who, sizeof(who), "?");
+                        if (Block* pb = cache_.get(watch_prev_entry)) {
+                            if (pb->is_shim) {
+                                if (const ShimDef* d = shims_.byId(pb->shim_id)) {
+                                    std::snprintf(who, sizeof(who), "%s!%s", d->module.c_str(), d->name.c_str());
+                                }
+                            }
+                        }
+                        std::fprintf(stderr,
+                                     "[watch] ea=0x%08X old=0x%08X new=0x%08X at block 0x%08X "
+                                     "(prev block 0x%08X = %s)\n",
+                                     watch_ea, watch_last_val, v, cpu_.eip, watch_prev_entry, who);
+                        watch_last_val = v;
+                    }
+                }
+            }
+            watch_prev_entry = cpu_.eip;
         }
 
         Block* b = cache_.get(cpu_.eip);

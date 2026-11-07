@@ -780,6 +780,39 @@ std::uint32_t waitMultiple(X86& cpu, std::uint32_t count, std::uint32_t handles_
         }
     }
     if (timeout == 0) return kWaitTimeout;
+    // ★ **已获用户授权（方案 A）**：影片渲染器的**服务线程事件由宿主合成**。默认生效，可用
+    //   `LIFT_DSHOW_NO_SIGNAL=1` 关掉做 A/B 对照。适用范围极窄：只认 `sub_4D5710`（0x4D5710..0x4D57FF）
+    //   发起的 `WaitForMultipleObjects(2, …, 10000)` —— 它对 `[this+0x58]`/`[this+0x54]` 两个匿名 Event
+    //   做 10 s 重试等待（本模拟器是伪线程模型，引擎的服务线程体从不运行 ⇒ 没人 signal）。
+    //   处理：把 **#1 句柄**（`[this+0x54]`）当作已 signaled ⇒ 返回 `WAIT_OBJECT_0+1` ⇒ 走
+    //   `sub_4D3E40(this)`（只 `this[26]=0`）的成功分支；`v7==0`（#0）反而是错误码 0x80040223。
+    //   ★ 偏差登记见 `apps/emulator-lift/SCOPE.md` §1「视频」与 doc §8.11/§8.12。
+    {
+        static const bool disabled = std::getenv("LIFT_DSHOW_NO_SIGNAL") != nullptr;
+        if (!disabled && count == 2 && timeout == 10000) {
+            const std::uint32_t caller = cpu.mem->rd32(cpu.esp());
+            if (caller >= 0x4D5710u && caller <= 0x4D57FFu) {
+                static bool logged = false;
+                if (!logged) {
+                    logged = true;
+                    shimLog("kernel32", api,
+                            "渲染器服务线程事件：宿主合成（sub_4D5710 的 #1 句柄；调用点 0x%08X）", caller);
+                }
+                return kWaitObject0 + 1;
+            }
+        }
+    }
+    // ★ 诊断（`--log-cat shim`）：把"等谁"打出来 —— 句柄归属 + 是否 signaled。
+    //   真机影片路径实测会卡在 `sub_4D5710` 的 `WaitForMultipleObjects(2, …, 10000)`（每 10 s 重试），
+    //   这两个句柄的归属（render event / thread event？）必须靠这行确认，⛔ 不猜。
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t h = cpu.mem->rd32(handles_ea + 4u * i);
+        const HandleEntry* e = cpu.handles ? cpu.handles->get(h) : nullptr;
+        const HandleKind kind = e ? e->kind : HandleKind::None;
+        const char* name = e ? e->name.c_str() : "";
+        shimLog("kernel32", api, "  等待对象 #%u：handle=0x%08X kind=%s signaled=%d name=\"%s\"", i, h,
+                handleKindName(kind), objs[i]->signaled ? 1 : 0, name);
+    }
     shimAbort("kernel32", api,
               "需要等待：nCount=%u 里没有任何对象 signaled，dwMilliseconds=%u（0x%08X）⇒ "
               "本模拟器不阻塞；请人工检查该调用场景并设计等待方案（SCOPE §1 等待条目）",

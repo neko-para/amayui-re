@@ -352,6 +352,16 @@ std::uint32_t createTextureState(X86& cpu, std::uint32_t device_object, std::uin
                                  std::uint32_t format, std::uint32_t pool, std::string* why);
 bool textureInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::string* why);
 bool textureInfo(X86& cpu, std::uint32_t object, TextureInfo* out, std::string* why);
+
+// 纹理像素抽样（**只读**；像素判据用）。每 64 个像素取一个；只支持 4bpp（影片纹理 = A8R8G8B8）。
+struct TexturePixels {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t nonzero = 0;  // 抽样里 (RGB != 0) 的个数
+    std::uint32_t sampled = 0;  // 实际采样到的像素数
+    std::uint64_t hash = 0;     // FNV-1a over sampled pixels
+};
+bool sampleTexture(X86& cpu, std::uint32_t object, TexturePixels* out);
 // IDirect3DSurface9 的状态块：纹理表面（'TEX1'）或后缓冲（'D9D1'）。
 // 返回的 TextureInfo 只填 surface 需要的字段（state 是原状态块；后缓冲的 device = 设备状态块 +60）。
 bool surfaceInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::string* why);

@@ -122,6 +122,13 @@
     纯 CTest）自动回退到方案 D 的主线程泵，保持确定性。
 - 其余服务线程（DirectShow 读文件 / MF 回调）仍是**伪线程**：`CreateThread` 只发线程句柄，
   **不执行 start routine**；`ResumeThread` / `SetThreadPriority` / 亲和性只返回形态值。
+  ★ 例外：**纹理影片**（DirectShow 模式）的渲染器服务线程等待由**宿主合成**——它等的是
+  `sub_4D5710` 里 `[this+0x58]/[this+0x54]` 两个匿名 Event（10 s 重试），shim 把 #1 句柄当成已
+  signaled（`WAIT_OBJECT_0+1`），默认生效、`LIFT_DSHOW_NO_SIGNAL=1` 可关（A/B 对照）。见 `SCOPE.md` §1 视频行。
+- **视频（纹理影片）**：`CoCreateInstance(CLSID_FilterGraph)` 建真宿主图；帧从引擎**自己的源 pin**
+  （`IAsyncReader`）分块读、宿主解 MPEG-1，`IMemInputPin::Receive` 逐帧送渲染器；`IMemAllocator` /
+  `IMediaSample(2)` / `IReferenceClock` 都是宿主 COM 对象。`--log-cat video` 能看到 `[dshow]` 日志
+  （接线 / 首帧 / `samples=` / `completed`）。⛔ 不做 MF/EVR/DXVA2、窗口影片族、影片音频。
 - ⛔ **不是通用多线程 VM**：只有音频 feeder/mixer 两条宿主线程；游戏 VM/脚本/存档仍主线程。
   x86 TSO 没有做全局软模拟 —— 音频的并发只依赖引擎自己的每槽 CS 协议 + 环形缓冲"读当前圈 /
   写刚放完圈"的不重叠；`Interlocked` 的在飞计数在 CS 内。arm64 上这条窄路径由宿主锁的
