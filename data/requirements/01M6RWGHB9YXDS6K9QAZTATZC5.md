@@ -4,7 +4,7 @@
 - type: spike
 - status: done
 - parent: REQ-01M6K84KHPA1XF3B1HSHXME6W0
-- done_reason: 直接 std::thread 不可行：等待/临界区/Interlocked/线程句柄/裸指针并发均缺同步层。推荐 D（完全 native override 喂料线程，11–17 人日）：sub_4B5AA0 只有 0x4B5B03 一处 guest 调用可搬回主线程；D 的三条硬要求与 C/A/B 对比见报告 repo:apps/emulator-lift/docs/thread-model-feasibility.md。需裁决 V1 路线 D/C。
+- done_reason: 直接 std::thread 不可行：等待/临界区/Interlocked/线程句柄/裸指针并发均缺同步层。推荐 D（完全 native override 喂料线程，11–17 人日）：sub_4B5AA0 只有 0x4B5B03 一处 guest 调用可搬回主线程；D 的三条硬要求与 C/A/B 对比见报告 repo:apps/emulator-lift/docs/thread-model-feasibility.md。用户 2026-11-07 裁决 V1=D；D 已落地（REQ-01M6RXQ0A1B2C3D4E5F6G7H8J9，实测 fill ≈370 ms / 0.5 s，lead 600 ms，underruns=0）。
 - tags: [emulator-lift thread audio arm64 spike]
 
 ## 结论

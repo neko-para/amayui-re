@@ -110,11 +110,17 @@
   `CMemAllocator` 的信号量是 DirectShow 分配器；`Concurrency::...LoadLibraryAndCreateThread` 只有定义、无调用引用。
 - **游戏逻辑（VM / 脚本 / 场景 / 存档）在主线程**；音频线程会改音频状态（临界区），
   视频线程只处理样本 / 缓冲。
-- ⇒ guest VM 保持**单线程**；服务线程要么宿主化（音频回调 / 视频解码），要么串行化；
-  ⛔ 不把 guest 代码放多线程。音频 silent（`SCOPE.md`）时，声音线程可整条省掉。
-- ★ **实现口径 = 伪线程**（用户 2026-11-05；详见 `SCOPE.md` §1）：`CreateThread` 只发线程句柄，
+- ★ **实现口径（2026-11-07 音频方案 D；用户裁决）**：guest VM 仍**单线程**；音频喂料线程
+  `CreateThread(sub_4B5AA0)` 被 `AudioEngine` 接管 —— **不执行 guest 线程体**，而是把线程体里的
+  12 段 native + 唯一的 `0x4B5B03 call sub_4B6C30` 在 dispatcher 的**块边界**重排成泵。
+  ⛔ 不建第二宿主线程、不建第二 guest 栈；泵进入/退出 `sub_4B6C30` 时做整份 guest 上下文交换
+  （GPR / EFLAGS / x87 / XMM / 段 / fs/gs / thread_id / last_error）。音频设备模型（游标 / 4 个位置
+  通知 / 混音 / SDL3 输出）在宿主；**PCM 仍由 guest 解码器产生**（见 §4.4）。
+- 其余服务线程（DirectShow 读文件 / MF 回调）仍是**伪线程**：`CreateThread` 只发线程句柄，
   **不执行 start routine**；`ResumeThread` / `SetThreadPriority` / 亲和性只返回形态值。
   因此"创建了服务线程"不等于"线程体在跑" —— 需要线程体副作用的路径会停在对应 trap，⛔ 不静默假装。
+- ⛔ **仍不把 guest 代码放多线程**：真并行需要的 x86 TSO 软模拟与同步对象层没有做（见
+  `docs/thread-model-feasibility.md`）；方案 D 刻意绕开这一整层。
 
 ### 2.6 内存模型：静态镜像 + guest 堆
 
@@ -489,6 +495,45 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   （见 §4.2b）；`--gpu-strict` 把"还有回退"变成 exit 3，而不是靠读日志判断。
 - 两个环境变量都只读、默认关；⛔ 不改变执行结果，也不进 A4 的逐字节基线。
 
+## 4.4 音频（方案 D：设备模型 + native 喂料泵）
+
+```bash
+# 默认 = SDL3 真设备（能听到）；--audio=off 回到旧 silent；--audio=virtual 用虚拟设备时钟
+emulator-lift --game-dir <install> --skip-logo --native-overrides all --present window
+emulator-lift --game-dir <install> --skip-logo --native-overrides all --present headless \
+              --audio virtual --audio-dump .tmp/title.wav --max-insns 400000000
+```
+
+口径（`docs/audio-implementation.md` 是唯一真源）：
+
+- **谁产 PCM**：guest 解码器（WAV / Ogg / 逐流格式）。宿主只做"设备游标 + 位置通知 + 逐缓冲格式转换 +
+  混音 + SDL3 输出"；⛔ 宿主不重写解码器、不伪造 `sub_4B6C30` 的语义。
+- **谁执行喂料**：`CreateThread(0x4B5AA0)` 登记成 `AudioEngine` 的泵；`ResumeThread` 置 runnable；
+  泵在 dispatcher 块边界处理"设备游标越过通知点"的待办，用 `startNestedGuestCall(0x4B6C30, {quarter}, ecx=stream)`
+  调 guest。线程体（12 段 native）不执行。
+- **单执行流纪律**：一次 fill 期间**不混音、不 pump 窗口消息、不触发 winmm 定时器**（否则会读 guest 环
+  正在写的区间 / 改坏 fill 的 x87 活值）。fill 结束后的块边界再推进设备并启动下一次 fill。
+- **时钟档**：`sdl` = 设备已消费字节（真出声；窗口模式同时 `--real-time`）；`virtual` = `VirtualClock`
+  的 100ns（确定性；CTest / dump）。**`virtual` 不适合当实时吞吐判据**：解释器每条指令走 100ns，
+  一次 fill 的虚拟时间可能远大于它产出的音频时长。窗口模式会强制 `--real-time`（因此 `virtual`
+  在窗口下也走宿主时钟，不再是确定性的）。
+- **输出格式固定 48k / 16 bit / 2 ch**；每条缓冲按自己的 `WAVEFORMATEX` 做采样率/声道转换
+  （实测引擎会建 44.1k mono SE、48k stereo BGM、44.1k stereo 静音垫）。
+- **通知/游标**：每条缓冲的 `played` 以它自己的 `nAvgBytesPerSec` 折算；通知按位置排序后入队
+  （一次推进跨多个点时，⛔ 不能按 quarter 序号入队，否则回绕 0 会排在 3/4 前）。
+- **lead = 600ms**：D 的 fill 期间暂停混音，实测一次 fill ≈ 360ms（RelWithDebInfo），所以队列必须
+  留够一个通知周期；代价是 SE 也有 ~600ms 延迟。`--audio=off` 时零成本。
+- **硬约束**：`lead + fill_wall < L - L/4`（当前 600+370 < 1500ms）。fill 明显变慢或把 lead 调到
+  >1.1s，混音器就会读到 guest 下一圈要覆盖的 1/4 圈；要改 lead 必须同时重测 fill。
+- **join**：`WaitForSingleObject(喂料线程句柄)` 由泵表达（先 SetEvent(quit) 再 wait 的关机路径）；
+  返回 `WAIT_OBJECT_0` 并置 exited，之后不再写 guest 环（防 `Release pDS` 后的 UAF）。
+- **单次 run**：同一 `Machine` 第二次 `run()` 会拒绝音频并报错（guest DS 对象仍在；⛔ 不静默清空
+  设备模型）。需要第二次 run 就新建 `Machine`。
+- **fill 中停止**：`--time-limit` / `--max-insns` 落在 `sub_4B6C30` 中间时 `abortFill()` 回滚
+  `[esp]` / CS / 在飞计数；`r.ea` 仍是真实停点。
+- **CTest**：`audio-device`（`tests/audio.cpp`）覆盖逐缓冲格式 / 通知次序 / dump 逐字节 / 泵的整份
+  上下文交换 / CS 与在飞计数成对收尾。⛔ 它不打开 SDL 设备（pure 档）。
+
 ## 5. 真源
 
 | 想知道 | 看哪 |
@@ -497,7 +542,7 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 | 源选择 / 32→64 / 缺 C 的量化 | `docs/03-emulator/platform-effort.md` §5.6 |
 | 块寻址 / chunk / 跳转表 | 同文件 §5.7 + `src/runtime/x86.h` |
 | 宿主层 / 不依赖 AppKit 的口径 | 同文件 §5.5 |
-| 可接受偏差（菜单 / 音频 / 视频 / Live2D / 3D） | `SCOPE.md` + 同文件 §4.1 |
+| 可接受偏差（菜单 / 视频 / Live2D / 3D；音频已实现，见 §4.4） | `SCOPE.md` + 同文件 §4.1 |
 | 可切换呈现后端（headless/CPU ↔ SDL/GPU） | 本文件 §4.2 + `src/runtime/present_sdl.h` |
 | 覆盖清单格式 | 同文件 §5.7 |
 | 实现计划（切片 / 判据 / 决策点） | M1 `docs/plan-m1-cpu-base.md` · M2 `docs/plan-m2-2d-text.md`（索引 `docs/README.md`） |

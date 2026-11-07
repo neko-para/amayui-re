@@ -16,6 +16,7 @@
 
 #include "corpus/lst_index.h"
 #include "runtime/clock.h"
+#include "runtime/audio.h"
 #include "runtime/com.h"
 #include "runtime/font.h"
 #include "runtime/present.h"
@@ -133,6 +134,11 @@ public:
     bool configureNativeOverrides(const std::string& list, std::string* err);
     NativeOverrideTable& overrides() { return overrides_; }
     const NativeOverrideTable& overrides() const { return overrides_; }
+    // ★ 方案 D（docs/thread-model-feasibility.md §5.1）：音频设备模型 + 喂料泵。
+    //   `mode=Off` = 旧 silent 口径；`Sdl` = 真设备（默认 CLI）；`Virtual` = 确定性时钟（CTest/dump）。
+    bool configureAudio(AudioMode mode, const std::string& dump_path, std::string* err);
+    AudioEngine& audio() { return audio_; }
+    const AudioEngine& audio() const { return audio_; }
     // ★ 段级 override（函数中段；固定 EA）—— 与函数级分开两张表，语义不同：
     //   函数级 = "call 目标 + 返回地址 + 只写 EAX"；段级 = "block 入口 + 跳到出口 + 可写任意寄存器"。
     NativeBlockTable& blockOverrides() { return block_overrides_; }
@@ -220,6 +226,8 @@ private:
     SurfaceArena surfaces_;
     FontEngine fonts_;
     HeadlessPresenter presenter_;
+    // ★ 声明在 presenter 之后 ⇒ 析构先于 presenter（AudioEngine 必须在 SDL_Quit 之前关流）。
+    AudioEngine audio_;
     GpuRaster* gpu_raster_ = nullptr;
     LstIndex lst_;
     X86 cpu_;

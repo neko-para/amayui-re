@@ -182,6 +182,9 @@ cmake --build --preset windows-x64
 ctest --test-dir out --output-on-failure
 ```
 
+★ **性能 / 音频验收固定用 RelWithDebInfo**（`windows-x64` 预设的缺省）：Debug 下解释器慢到 boot
+skip-logo > 30 s，音频 fill 会必然 underrun。⛔ 不要用 Debug 的墙钟/音频结论做判据。
+
 ★ **`pnpm test:mutation` 为什么存在**："写了守卫"与"守卫真的会红"是两件事 —— 恒真断言、把 `expected` 抄成 `actual`
 的断言都能"一直绿"。它按 `tools/mutate-check.mjs` 里的清单，对每个关键常量施加**一处已知破坏**，
 要求指定守卫**退出码非 0**。⇒ 加新守卫时**顺手往清单里加一条**，否则"它会红"只是个声称。

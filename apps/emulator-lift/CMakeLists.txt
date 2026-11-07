@@ -42,6 +42,7 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/decode.cpp
     src/runtime/x86.cpp
     src/runtime/guest_call.cpp
+    src/runtime/audio.cpp
     src/runtime/host_window.cpp
     src/runtime/pe_resource.cpp
     src/runtime/surface.cpp
@@ -305,6 +306,11 @@ add_test(NAME ddraw COMMAND lift-ddraw)
 add_executable(lift-dsound tests/dsound.cpp)
 target_link_libraries(lift-dsound PRIVATE emulator-lift-runtime)
 add_test(NAME dsound COMMAND lift-dsound)
+
+# ---- pure：方案 D 的音频设备模型（逐缓冲格式 / 通知次序 / dump / 喂料身份；不碰 SDL 设备）----
+add_executable(lift-audio tests/audio.cpp)
+target_link_libraries(lift-audio PRIVATE emulator-lift-runtime)
+add_test(NAME audio-device COMMAND lift-audio)
 
 add_executable(lift-pe-resource tests/pe_resource.cpp)
 target_link_libraries(lift-pe-resource PRIVATE emulator-lift-runtime)

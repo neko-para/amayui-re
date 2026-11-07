@@ -88,6 +88,8 @@ void Machine::wire() {
     cpu_.windows = &windows_;
     cpu_.com = &com_;
     cpu_.fonts = &fonts_;
+    audio_.attach(&cpu_, &mem_, &clock_);
+    cpu_.audio = &audio_;
     cpu_.fpu.reset();
 }
 
@@ -443,6 +445,13 @@ RunResult Machine::run(const RunOptions& opts) {
     }
     if (opts.real_time) clock_.setRealTime(true);
     if (opts.trace_inputs) dumpTraceInputs(stdout);
+    // ★ 方案 D：打开音频设备 / dump（Off ⇒ 零成本）。begin 失败只降级，不阻止 boot。
+    {
+        std::string audio_err;
+        if (!audio_.begin(&audio_err) && !audio_err.empty()) {
+            std::fprintf(stderr, "[audio] begin 失败：%s\n", audio_err.c_str());
+        }
+    }
     // 诊断开关：LIFT_TRACE_FULL=1 ⇒ `--trace-blocks` 每条带操作数文本 + 寄存器快照（缺省关）
     const bool traceFull = std::getenv("LIFT_TRACE_FULL") != nullptr;
     cpu_.running = true;
@@ -468,8 +477,10 @@ RunResult Machine::run(const RunOptions& opts) {
             next_time_check = cpu_.insns + 4096u;
         }
         // ★ 显示后端：块边界也要 pump（否则两次 Present 之间窗口假死）。无 sink ⇒ 零成本。
-        //   关窗必须设 r.reason（只把 cpu_.running 置 false 会落成 StopReason::None ⇒ exit 2）。
-        if (presenter_.hasSink() && cpu_.insns >= next_present_check) {
+        //   ⛔ 嵌套 guest 调用进行中不 pump：音频 fill（或任何 native 嵌套调用）正在跑 guest
+        //   代码，这时再铺一个 WndProc 帧会改坏它仍活着的 x87/XMM 上下文（真机上它们是两个线程）。
+        const bool nested_guest_active = guest_calls_.active();
+        if (!nested_guest_active && presenter_.hasSink() && cpu_.insns >= next_present_check) {
             presenter_.pumpHostEvents();
             if (presenter_.stopRequested()) {
                 r.reason = StopReason::Stopped;
@@ -487,6 +498,8 @@ RunResult Machine::run(const RunOptions& opts) {
                 r.detail = call_err;
                 break;
             }
+            // ★ 音频泵借用了 [esp] 作为 sub_4B6C30 的返回点；续延完成后必须还回原返回地址。
+            audio_.afterGuestCall();
             continue;
         }
         // ★ winmm 定时器回调的返回点（协作式定时器；见 x86.h 的 kTimerCallbackReturnEa）
@@ -548,7 +561,10 @@ RunResult Machine::run(const RunOptions& opts) {
         }
         // ★ 到期的 winmm 定时器在**块边界**触发（D5：没有定时器服务线程）。
         //   ⛔ 不嵌套：一个回调没跑完就不再触发下一个（与真机的单线程回调串行一致）。
-        if (!cpu_.shim.timer_firing && !cpu_.shim.timers.empty() && !cpu_.shim.callback.active) {
+        //   ⛔ 嵌套 guest 调用（音频 fill / native 回调）进行中也不触发：定时器只保 GPR，
+        //      在 fill 的 x87 活值中间插入回调会静默改坏 ST0..ST7。
+        if (!guest_calls_.active() && !cpu_.shim.timer_firing && !cpu_.shim.timers.empty() &&
+            !cpu_.shim.callback.active) {
             if (fireDueTimer(r)) continue;
             if (r.reason != StopReason::None) break;
         }
@@ -612,6 +628,20 @@ RunResult Machine::run(const RunOptions& opts) {
                                      bo->name.c_str(), entry);
                     ++bo->fallbacks;
                 }
+            }
+        }
+
+        // ★ 方案 D：音频设备推进 + 喂料泵。`pump()` 可能铺一个 sub_4B6C30 帧（返回 Suspended）；
+        //   之后 guest 自己跑到续延点，`afterGuestCall()` 再还 [esp]。⛔ 不建线程 / 不建第二栈。
+        //   ⛔ 放在函数级/段级 override **之后**：否则会吞掉 `call_target`，让本次 native override
+        //      被跳过（性能退化，不是语义错，但没必要）。
+        if (audio_.enabled() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
+            const AudioPump ap = audio_.pump();
+            if (ap == AudioPump::Suspended) continue;
+            if (ap == AudioPump::Error) {
+                r.reason = StopReason::Unimplemented;
+                r.detail = audio_.lastError();
+                break;
             }
         }
 
@@ -728,6 +758,7 @@ RunResult Machine::run(const RunOptions& opts) {
     }
     r.ea = cpu_.eip;
     r.insns = cpu_.insns;
+    audio_.end();  // 关闭 SDL / 回填 WAV；此后不再写 guest
     return r;
 }
 
@@ -943,6 +974,7 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                  shims_.calledUnimplemented().size());
     std::fprintf(out, "heap      : in_use %u peak %u allocs %u\n", heap_.bytesInUse(), heap_.peak(),
                  heap_.allocCount());
+    if (audio_.enabled()) audio_.dumpSummary(out);
     if (presenter_.sinkFailures() != 0) {
         std::fprintf(out, "present   : sink 失败 %llu 次（最后：%s）\n",
                      (unsigned long long)presenter_.sinkFailures(),
@@ -1131,6 +1163,10 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
                          e->resume_ea, (unsigned long long)e->hits, e->disabled ? "（已停用）" : "");
         }
     }
+}
+
+bool Machine::configureAudio(AudioMode mode, const std::string& dump_path, std::string* err) {
+    return audio_.configure(mode, dump_path, err);
 }
 
 bool Machine::configureNativeOverrides(const std::string& list, std::string* err) {

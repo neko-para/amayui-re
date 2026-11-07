@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/audio.h"
 #include "runtime/com.h"
 #include "runtime/log.h"
 #include "runtime/exec.h"
@@ -87,6 +88,17 @@ constexpr std::uint32_t kDevMagic = 0x38445344u;  // 'DSD8'
 constexpr std::uint32_t kBufMagic = 0x38425344u;  // 'DSB8'
 constexpr std::uint32_t kDevBytes = 0x20u;
 constexpr std::uint32_t kBufBytes = 0x80u;
+
+// IDirectSoundNotify 的状态块（`obj+8` 指向它）。QI 时由缓冲对象新建；释放时单独回收。
+// 字段：owner = 所属 buffer 的状态块 EA；count / positions 由 SetNotificationPositions 填。
+constexpr std::uint32_t kNotifyMagic = 0x384E5344u;  // 'DSN8'
+constexpr std::uint32_t kNotifyBytes = 0x60u;
+constexpr std::uint32_t kNotifyOffMagic = 0x00;
+constexpr std::uint32_t kNotifyOffOwner = 0x04;
+constexpr std::uint32_t kNotifyOffCount = 0x08;
+constexpr std::uint32_t kNotifyOffPositions = 0x0C;  // 4 × {DWORD offset, HANDLE event} = 32 B
+constexpr std::uint32_t kNotifyOffSeen = 0x2C;
+constexpr std::uint32_t kMaxNotifyPositions = 4u;
 
 // 设备状态块
 constexpr std::uint32_t kDevOffMagic = 0x00;
@@ -274,6 +286,21 @@ Wfx loadWfx(X86& cpu, std::uint32_t st) {
     return w;
 }
 
+// WAVEFORMATEX → AudioEngine 的逐缓冲格式。没有 fmt（primary）时给 44.1k/16/2 占位；
+// 它的 bytes=0，不参与混音。
+AudioFormat audioFormatOf(const Wfx& w) {
+    AudioFormat f;
+    if (!w.present) return f;
+    f.sample_rate = w.samples ? w.samples : 44100u;
+    f.channels = w.channels ? w.channels : 2u;
+    f.bits = w.bits ? w.bits : 16u;
+    f.block_align = w.block_align ? w.block_align : (f.bits / 8u) * f.channels;
+    f.avg_bytes = w.avg_bytes ? w.avg_bytes : f.sample_rate * f.block_align;
+    if (f.block_align == 0) f.block_align = 4;
+    if (f.avg_bytes == 0) f.avg_bytes = f.sample_rate * f.block_align;
+    return f;
+}
+
 // DSBUFFERDESC（32 位布局；dwSize = 36 时 guid3DAlgorithm 也在结构体里）
 constexpr std::uint32_t kDsBufferDescBytes = 36u;
 constexpr std::uint32_t kDbOffSize = 0;
@@ -285,7 +312,7 @@ constexpr std::uint32_t kDbOffFormat = 16;
 constexpr std::uint32_t kCapsPrimary = 0x00000001u;
 constexpr std::uint32_t kCapsCtrlVolume = 0x00000080u;
 constexpr std::uint32_t kCapsCtrlPan = 0x00000040u;
-constexpr std::uint32_t kCapsCtrlFrequency = 0x00000008u;
+constexpr std::uint32_t kCapsCtrlFrequency = 0x00000020u;  // DSBCAPS_CTRLFREQUENCY（0x08 是 LOCSOFTWARE）
 constexpr std::uint32_t kCapsCtrlPositionNotify = 0x00000100u;
 constexpr std::uint32_t kCapsGlobalFocus = 0x00008000u;
 constexpr std::uint32_t kCapsGetCurrentPosition2 = 0x00010000u;
@@ -304,11 +331,29 @@ const std::vector<ComMethod>& notifyMethods();
 // 对象 → 状态块 EA（设备与缓冲都挂 `obj+8`）
 std::uint32_t stateOf(X86& cpu, std::uint32_t obj) { return cpu.com ? cpu.com->userOf(obj) : 0u; }
 
+// "首次调用"位图在状态块的哪个偏移：设备 / 缓冲 / notify 三种状态块布局不同。
+std::uint32_t seenOffsetFor(const char* iface) {
+    if (iface == nullptr) return kDevOffSeen;
+    if (std::strstr(iface, "Notify") != nullptr) return kNotifyOffSeen;
+    if (std::strstr(iface, "Buffer") != nullptr) return kBufOffSeen;
+    return kDevOffSeen;
+}
+
 // 缓冲对象释放时回收独立分配的两块 guest 内存（数据块 + 状态块）
 void destroyBufferBlocks(X86& cpu, std::uint32_t st) {
     if (st == 0) return;
+    // ★ 先让音频设备模型忘掉这条流（停止参与混音 / 丢掉 pending 通知），再回收 guest 内存。
+    if (cpu.audio) cpu.audio->removeBuffer(st);
     const std::uint32_t data = stateU32(cpu, st, kBufOffData);
     if (data != 0 && cpu.heap) cpu.heap->free(data);
+    if (cpu.heap) cpu.heap->free(st);
+}
+
+void destroyNotifyBlock(X86& cpu, std::uint32_t st) {
+    if (st == 0) return;
+    // ★ 真 DS 的**位置通知属于 buffer**，不属于 notify 接口对象：`Release(IDirectSoundNotify)`
+    //   只释放接口，不会清掉 buffer 上已经设置的 4 个位置。这里保留 AudioEngine 里的
+    //   notify_count/offsets（由 buffer 的 removeBuffer 统一清），⛔ 不要 clearNotify。
     if (cpu.heap) cpu.heap->free(st);
 }
 
@@ -336,8 +381,46 @@ void shimNotifyQueryInterface(X86& cpu, ShimCall& call) {
     call.result = kDsOk;
 }
 
-void shimNotifySetNotificationPositions(X86&, ShimCall& call) {
-    // `sub_4B71C0` 传 4 个 DSBPOSITIONNOTIFY；静音设备只记账，不投递事件。
+void shimNotifySetNotificationPositions(X86& cpu, ShimCall& call) {
+    // `sub_4B71C0` 传 4 个 DSBPOSITIONNOTIFY（{dwOffset, hEventNotify}）。真 DS 的语义：
+    // 设备游标越过 dwOffset 时 SetEvent(hEventNotify)。方案 D 里事件由 AudioEngine 排进
+    // "泵的待办队列"，由泵以事件触发 sub_4B6C30（⛔ 不再只记账）。
+    const std::uint32_t self = call.u32(0);
+    const std::uint32_t count = call.u32(1);
+    const std::uint32_t positions = call.u32(2);
+    const std::uint32_t st = stateOf(cpu, self);
+    if (st == 0 || !cpu.mem->committed(st, kNotifyBytes) || stateU32(cpu, st, kNotifyOffMagic) != kNotifyMagic) {
+        dsLog("SetNotificationPositions", "this=0x%08X 不是本模拟器建的 notify 对象 ⇒ DSERR_INVALIDPARAM", self);
+        call.result = kEInvalidArg;
+        return;
+    }
+    if (count > kMaxNotifyPositions) {
+        dsLog("SetNotificationPositions", "cPositions=%u > %u（DSBPOSITIONNOTIFY 上限）⇒ DSERR_INVALIDPARAM",
+              static_cast<unsigned>(count), static_cast<unsigned>(kMaxNotifyPositions));
+        call.result = kEInvalidArg;
+        return;
+    }
+    if (count != 0 && (positions == 0 || !cpu.mem->committed(positions, count * 8u))) {
+        dsLog("SetNotificationPositions", "pPositions=0x%08X 未提交 %u 项 ⇒ DSERR_INVALIDPARAM",
+              positions, static_cast<unsigned>(count));
+        call.result = kEInvalidArg;
+        return;
+    }
+    std::uint32_t offsets[kMaxNotifyPositions] = {};
+    for (std::uint32_t i = 0; i < count; ++i) {
+        offsets[i] = cpu.mem->rd32(positions + 8u * i);
+        // 事件句柄也要真存（诊断 / 以后若让宿主侧也投递）；泵只用 quarter 序号。
+        setStateU32(cpu, st, kNotifyOffPositions + 8u * i, offsets[i]);
+        setStateU32(cpu, st, kNotifyOffPositions + 8u * i + 4u, cpu.mem->rd32(positions + 8u * i + 4u));
+    }
+    setStateU32(cpu, st, kNotifyOffCount, count);
+    const std::uint32_t owner = stateU32(cpu, st, kNotifyOffOwner);
+    if (cpu.audio && owner != 0) cpu.audio->setNotify(owner, count, offsets);
+    if (firstTime(cpu, st, kSeenQi, kNotifyOffSeen)) {
+        dsLog("SetNotificationPositions", "count=%u offsets=%u,%u,%u,%u ⇒ DS_OK（真存；由 AudioEngine 按游标投递）",
+              static_cast<unsigned>(count), count > 0 ? offsets[0] : 0u, count > 1 ? offsets[1] : 0u,
+              count > 2 ? offsets[2] : 0u, count > 3 ? offsets[3] : 0u);
+    }
     call.result = kDsOk;
 }
 
@@ -363,18 +446,28 @@ void shimQueryInterface(X86& cpu, ShimCall& call, bool buffer) {
     // ★ 缓冲要支持 IDirectSoundNotify：`sub_4B71C0` 在 CreateSoundBuffer 之后 QI 它，
     //   非零失败会让 `sub_4B6570` 返回 0 → WAV 加载失败 → Command_ShowMessage_Exception。
     if (buffer && sameGuid(cpu, riid, kIidDirectSoundNotify)) {
-        if (!cpu.com) {
+        if (!cpu.com || !cpu.heap) {
             call.result = kENoInterface;
             return;
         }
-        const std::uint32_t obj = cpu.com->createObject(cpu, "IDirectSoundNotify", notifyMethods(), 0);
+        // ★ notify 对象需要知道"它属于哪个 buffer"：SetNotificationPositions 的 this 是 notify，
+        //   参数里没有 buffer。这里给它一份状态块，owner = buffer 的状态块 EA。
+        const std::uint32_t nst = cpu.heap->alloc(kNotifyBytes, /*zero=*/true);
+        if (nst == 0) {
+            call.result = 0x8007000Eu;  // E_OUTOFMEMORY
+            return;
+        }
+        setStateU32(cpu, nst, kNotifyOffMagic, kNotifyMagic);
+        setStateU32(cpu, nst, kNotifyOffOwner, stateOf(cpu, self));
+        const std::uint32_t obj = cpu.com->createObject(cpu, "IDirectSoundNotify", notifyMethods(), nst);
         if (!obj) {
+            cpu.heap->free(nst);
             call.result = 0x8007000Eu;  // E_OUTOFMEMORY
             return;
         }
         cpu.mem->wr32(ppv, obj);
         if (firstTime(cpu, stateOf(cpu, self), kSeenQi, kBufOffSeen)) {
-            dsLog(method, "QI IDirectSoundNotify 成功 ⇒ 新对象 0x%08X（SetNotificationPositions 静音）", obj);
+            dsLog(method, "QI IDirectSoundNotify 成功 ⇒ 新对象 0x%08X（SetNotificationPositions 真存 + 真投递）", obj);
         }
         call.result = kDsOk;
         return;
@@ -418,9 +511,7 @@ void shimAddRef(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    if (firstTime(cpu, stateOf(cpu, self), kSeenAddRef,
-                  cpu.com->ifaceOf(self) && std::strstr(cpu.com->ifaceOf(self), "Buffer") ? kBufOffSeen
-                                                                                        : kDevOffSeen)) {
+    if (firstTime(cpu, stateOf(cpu, self), kSeenAddRef, seenOffsetFor(cpu.com->ifaceOf(self)))) {
         dsLog("AddRef", "this=0x%08X ⇒ refcount=%u", self, cpu.com->refCount(self));
     }
     call.result = cpu.com->refCount(self);
@@ -435,10 +526,15 @@ void shimRelease(X86& cpu, ShimCall& call) {
         return;
     }
     const char* iface = cpu.com->ifaceOf(self);
-    const bool buffer = iface && std::strstr(iface, "Buffer") != nullptr;
+    const bool notify = iface && std::strstr(iface, "Notify") != nullptr;
+    const bool buffer = !notify && iface && std::strstr(iface, "Buffer") != nullptr;
     const std::uint32_t st = stateOf(cpu, self);
     const bool last = cpu.com->refCount(self) == 1u;
-    if (last && buffer && st != 0) {
+    if (last && notify) {
+        // notify 没有账本；它只负责让 SetNotificationPositions 找得到所属 buffer。
+        dsLog("Release", "IDirectSoundNotify 0x%08X 释放（count=%u）", self,
+              static_cast<unsigned>(st ? stateU32(cpu, st, kNotifyOffCount) : 0u));
+    } else if (last && buffer && st != 0) {
         // ★ 这个对象的最终账本（"silent 但记账"的可断言落点）
         dsLog("Release",
               "IDirectSoundBuffer8 最终账本：bytes=%u flags=0x%08X %s pcmBytes=%u nonzeroBytes=%u "
@@ -455,7 +551,7 @@ void shimRelease(X86& cpu, ShimCall& call) {
               static_cast<int>(static_cast<std::int32_t>(stateU32(cpu, st, kBufOffVolume))),
               static_cast<unsigned>(stateU32(cpu, st, kBufOffFrequency)),
               static_cast<int>(static_cast<std::int32_t>(stateU32(cpu, st, kBufOffPan))));
-    } else if (last && !buffer && st != 0) {
+    } else if (last && !buffer && !notify && st != 0) {
         dsLog("Release",
               "IDirectSound8 最终账本：creates=%u cooperativeLevel=%u hwnd=0x%08X buffers=%u "
               "speakerConfig=0x%08X（silent：不出声、不报错，全部记账）",
@@ -470,6 +566,7 @@ void shimRelease(X86& cpu, ShimCall& call) {
         return;
     }
     if (last && buffer) destroyBufferBlocks(cpu, st);
+    if (last && notify) destroyNotifyBlock(cpu, st);
     call.result = last ? 0u : cpu.com->refCount(self);
 }
 
@@ -622,6 +719,7 @@ std::uint32_t createBufferObject(X86& cpu, std::uint32_t device_obj, std::uint32
         return 0;
     }
     if (out_state) *out_state = st;
+    if (cpu.audio) cpu.audio->addBuffer(st, obj, data, bytes, flags, audioFormatOf(wfx));
     // 设备侧计数
     const std::uint32_t dst = stateOf(cpu, device_obj);
     bumpState(cpu, dst, kDevOffBuffers);
@@ -725,6 +823,7 @@ void shimDuplicateSoundBuffer(X86& cpu, ShimCall& call) {
         return;
     }
     bumpState(cpu, stateOf(cpu, self), kDevOffBuffers);
+    if (cpu.audio) cpu.audio->addBuffer(st, obj, data, src_bytes, flags, audioFormatOf(wfx));
     if (firstTime(cpu, stateOf(cpu, self), kSeenDuplicate, kDevOffSeen)) {
         dsLog("DuplicateSoundBuffer",
               "源 0x%08X ⇒ 新对象 0x%08X（**独立**的一份 %u 字节 PCM 块 0x%08X，内容已拷贝；%s）",
@@ -782,14 +881,15 @@ void shimBufGetCurrentPosition(X86& cpu, ShimCall& call) {
     }
     const std::uint32_t play_out = call.u32(1);
     const std::uint32_t write_out = call.u32(2);
-    const std::uint32_t cursor = stateU32(cpu, st, kBufOffCursor);
+    // ★ 有真设备模型时游标由设备消费推进（%bytes）；silent 口径才用"累计 Unlock 字节"。
+    const std::uint32_t cursor =
+        (cpu.audio && cpu.audio->enabled()) ? cpu.audio->playedCursor(st) : stateU32(cpu, st, kBufOffCursor);
     if (play_out != 0 && cpu.mem->committed(play_out, 4)) cpu.mem->wr32(play_out, cursor);
     if (write_out != 0 && cpu.mem->committed(write_out, 4)) cpu.mem->wr32(write_out, cursor);
     if (firstTime(cpu, st, kSeenGetPos, kBufOffSeen)) {
         dsLog("GetCurrentPosition",
-              "⇒ DS_OK play=%u write=%u（静音设备：游标 = 已 Unlock 交给设备的字节数；"
-              "⛔ 不产生 position-notify 事件 —— 没有混音线程）",
-              static_cast<unsigned>(cursor), static_cast<unsigned>(cursor));
+              "⇒ DS_OK play=%u write=%u（%s）", static_cast<unsigned>(cursor), static_cast<unsigned>(cursor),
+              (cpu.audio && cpu.audio->enabled()) ? "设备游标（%bytes）" : "静音设备：累计 Unlock 字节");
     }
     call.result = kDsOk;
 }
@@ -845,6 +945,7 @@ void shimBufSetFormat(X86& cpu, ShimCall& call) {
     }
     storeWfx(cpu, st, w);
     setStateU32(cpu, st, kBufOffFrequency, w.samples);
+    if (cpu.audio) cpu.audio->setFormat(st, audioFormatOf(w));
     if (firstTime(cpu, st, kSeenSetFormat, kBufOffSeen)) {
         dsLog("SetFormat", "⇒ DS_OK %s（如实记录；不改宿主任何东西）", wfxText(w).c_str());
     }
@@ -895,6 +996,7 @@ void shimBufSetVolume(X86& cpu, ShimCall& call) {
     }
     const std::int32_t v = call.i32(1);  // 1/100 dB（0 = 满音量，负 = 衰减）
     setStateU32(cpu, st, kBufOffVolume, static_cast<std::uint32_t>(v));
+    if (cpu.audio) cpu.audio->setVolume(st, v);
     if (firstTime(cpu, st, kSeenSetVolume, kBufOffSeen)) {
         dsLog("SetVolume", "%d（1/100 dB）⇒ DS_OK（记账；静音设备不改宿主音量）", static_cast<int>(v));
     }
@@ -924,6 +1026,7 @@ void shimBufSetPan(X86& cpu, ShimCall& call) {
     }
     const std::int32_t v = call.i32(1);
     setStateU32(cpu, st, kBufOffPan, static_cast<std::uint32_t>(v));
+    if (cpu.audio) cpu.audio->setPan(st, v);
     if (firstTime(cpu, st, kSeenSetPan, kBufOffSeen)) {
         dsLog("SetPan", "%d（1/100 dB 的左右偏置）⇒ DS_OK（记账）", static_cast<int>(v));
     }
@@ -975,17 +1078,29 @@ void shimBufLock(X86& cpu, ShimCall& call) {
     const std::uint32_t flags_arg = call.u32(7);
     const std::uint32_t bytes = stateU32(cpu, st, kBufOffBytes);
     const std::uint32_t data = stateU32(cpu, st, kBufOffData);
-    if (offset > bytes) {
-        dsLog("Lock", "offset=%u 越过缓冲 %u 字节 ⇒ DSERR_INVALIDPARAM", static_cast<unsigned>(offset),
+    if (bytes != 0 && offset >= bytes) {
+        dsLog("Lock", "offset=%u 到达/越过缓冲 %u 字节 ⇒ DSERR_INVALIDPARAM", static_cast<unsigned>(offset),
               static_cast<unsigned>(bytes));
         call.result = kEInvalidArg;
         return;
     }
+    if (want != 0xFFFFFFFFu && want > bytes) {
+        dsLog("Lock", "dwBytes=%u > 缓冲 %u 字节 ⇒ DSERR_INVALIDPARAM（⛔ 不许越界窗口）",
+              static_cast<unsigned>(want), static_cast<unsigned>(bytes));
+        call.result = kEInvalidArg;
+        return;
+    }
     if (want == 0xFFFFFFFFu) {  // DSBLOCK_ENTIREBUFFER
-        // 整块锁：由我们改写 want
+        // 整块锁：真 DS 忽略 dwBytes，锁整个缓冲；offset 必须为 0（否则会给出越界窗口）。
+        if (offset != 0) {
+            dsLog("Lock", "DSBLOCK_ENTIREBUFFER 只支持 offset=0（收到 %u）⇒ DSERR_INVALIDPARAM",
+                  static_cast<unsigned>(offset));
+            call.result = kEInvalidArg;
+            return;
+        }
         const std::uint32_t whole = bytes;
         const std::uint32_t n1 = whole;
-        const std::uint32_t ptr1 = data + offset;
+        const std::uint32_t ptr1 = data;
         if (p1 == 0 || b1 == 0 || !cpu.mem->committed(p1, 4) || !cpu.mem->committed(b1, 4)) {
             dsLog("Lock", "DSBLOCK_ENTIREBUFFER：ppvAudioPtr1 / pdwAudioBytes1 为 NULL / 未提交");
             call.result = kEInvalidArg;
@@ -1078,6 +1193,15 @@ void shimBufUnlock(X86& cpu, ShimCall& call) {
         call.result = kEInvalidArg;
         return;
     }
+    const std::uint32_t locked2 = stateU32(cpu, st, kBufOffLock2);
+    const std::uint32_t locked2_bytes = stateU32(cpu, st, kBufOffLock2Bytes);
+    if ((n2 != 0 && (p2 != locked2 || n2 != locked2_bytes)) || (n2 == 0 && locked2_bytes != 0)) {
+        dsLog("Unlock",
+              "p2=0x%08X n2=%u 与 Lock 记下的 p2=0x%08X n2=%u 不一致 ⇒ DSERR_INVALIDPARAM",
+              p2, static_cast<unsigned>(n2), locked2, static_cast<unsigned>(locked2_bytes));
+        call.result = kEInvalidArg;
+        return;
+    }
     // ★ 记账：这段窗口就是"引擎交给设备的 PCM"。顺手数一下里面有多少**非 0** 字节 ——
     //   这是"引擎真的写过这块内存"的唯一可用证据（引擎 0x4B5F83 是 memset(0)，所以这里读到 0）。
     std::uint32_t nonzero = 0;
@@ -1093,7 +1217,11 @@ void shimBufUnlock(X86& cpu, ShimCall& call) {
     bumpState(cpu, st, kBufOffNonZero, nonzero);
     // ★ 静音设备**没有时钟** ⇒ 游标 = "已交给设备的字节数"（pcmBytes）。真机上它随时钟走，
     //   这里给的是可断言、可复现的账本值（⛔ 不编一个假的时间推进）。
-    setStateU32(cpu, st, kBufOffCursor, stateU32(cpu, st, kBufOffPcmBytes));
+    //   ★ 有 AudioEngine 时游标由设备消费推进（GetCurrentPosition 直接问它），
+    //   ⛔ 不要用累计 Unlock 字节覆盖设备游标。
+    if (!(cpu.audio && cpu.audio->enabled())) {
+        setStateU32(cpu, st, kBufOffCursor, stateU32(cpu, st, kBufOffPcmBytes));
+    }
     setStateU32(cpu, st, kBufOffLockDepth, 0);
     setStateU32(cpu, st, kBufOffLock1, 0);
     setStateU32(cpu, st, kBufOffLock1Bytes, 0);
@@ -1125,9 +1253,11 @@ void shimBufPlay(X86& cpu, ShimCall& call) {
     setStateU32(cpu, st, kBufOffPlaying, 1u);
     setStateU32(cpu, st, kBufOffLooping, (flags_arg & kPlayLooping) != 0 ? 1u : 0u);
     bumpState(cpu, st, kBufOffPlays);
+    if (cpu.audio) cpu.audio->play(st, (flags_arg & kPlayLooping) != 0);
     if (firstTime(cpu, st, kSeenPlay, kBufOffSeen)) {
-        dsLog("Play", "dwFlags=0x%08X（LOOPING=%d）⇒ DS_OK（**不出声**；这是第 %u 次 Play）",
+        dsLog("Play", "dwFlags=0x%08X（LOOPING=%d）⇒ DS_OK（%s；这是第 %u 次 Play）",
               static_cast<unsigned>(flags_arg), (flags_arg & kPlayLooping) != 0 ? 1 : 0,
+              (cpu.audio && cpu.audio->enabled()) ? "设备模型混音" : "**不出声**",
               static_cast<unsigned>(stateU32(cpu, st, kBufOffPlays)));
     }
     call.result = kDsOk;
@@ -1142,6 +1272,7 @@ void shimBufStop(X86& cpu, ShimCall& call) {
     setStateU32(cpu, st, kBufOffPlaying, 0u);
     setStateU32(cpu, st, kBufOffLooping, 0u);
     bumpState(cpu, st, kBufOffStops);
+    if (cpu.audio) cpu.audio->stop(st);
     if (firstTime(cpu, st, kSeenStop, kBufOffSeen)) {
         dsLog("Stop", "⇒ DS_OK（第 %u 次 Stop；游标停在 %u 字节）",
               static_cast<unsigned>(stateU32(cpu, st, kBufOffStops)),
@@ -1165,6 +1296,7 @@ void shimBufSetCurrentPosition(X86& cpu, ShimCall& call) {
         return;
     }
     setStateU32(cpu, st, kBufOffCursor, pos);
+    if (cpu.audio) cpu.audio->setPosition(st, pos);
     if (firstTime(cpu, st, kSeenSetPos, kBufOffSeen)) {
         dsLog("SetCurrentPosition", "%u ⇒ DS_OK（游标记账；静音设备没有真正的播放位置）",
               static_cast<unsigned>(pos));

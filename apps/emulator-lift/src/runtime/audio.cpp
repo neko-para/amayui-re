@@ -1,0 +1,938 @@
+#include "runtime/audio.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdarg>
+#include <cstdlib>
+#include <cstring>
+
+#include <SDL3/SDL.h>
+
+#include "runtime/clock.h"
+#include "runtime/guest_call.h"
+#include "runtime/log.h"
+#include "runtime/memory.h"
+#include "runtime/native_overrides.h"
+#include "runtime/sync_guest.h"
+
+namespace lift {
+namespace {
+constexpr std::uint32_t kSampleRate = 48000u;
+constexpr std::uint32_t kBlockAlign = 4u;  // 16 bit / 2 ch
+constexpr std::uint32_t kBytesPerSec = kSampleRate * kBlockAlign;  // 192000
+// 设备时钟的单位换算：VirtualClock 每 10,000,000 tick = 1 s。
+constexpr std::uint64_t kTicksPerSec = 10'000'000ull;
+
+// ★ 预读 lead：D 在一次 fill 期间**暂停混音**（单执行流，fill 写 guest 环时不能同时读它）。
+//   实测（RelWithDebInfo，48k 立体声 BGM、`--native-overrides all`）：一次 fill ≈ 360 ms 墙钟。
+//   fill 之后到下一个通知点还有 500ms - 360ms = 140ms，所以 lead 必须 > 500ms 才能保证
+//   "fill 开始时队列里的音频撑得过整个 fill"；这里取 600ms（≈100ms 余量）。
+//   ⛔ 这不是设备延迟，是 D 的吞吐代价；代价是 SE 也有 ~600ms 延迟。
+constexpr std::uint64_t kLeadBytes = (kBytesPerSec * 600ull) / 1000ull;  // 115200 B
+
+// 引擎写死的线程体入口（`.lst` 0x004B5AA0；见 docs/thread-model-feasibility.md §2.1）。
+constexpr std::uint32_t kFeederStartEa = 0x004B5AA0u;
+constexpr std::uint32_t kSoundSlots = 0x654u;       // [Sound+0x654+4*s] = SoundBuffer*
+constexpr std::uint32_t kSoundCsBase = 0x690u;      // [Sound+0x690+24*s] = CRITICAL_SECTION
+constexpr std::uint32_t kSoundInflight = 0x7F8u;    // [Sound+0x7F8+4*s] = 在飞计数
+constexpr std::uint32_t kSoundQuitEvent = 0x514u;   // 事件 #60
+constexpr std::uint32_t kSlotCount = 15u;
+constexpr std::uint32_t kStreamDsBuffer = 0x40Cu;   // SoundBuffer +0x40C = IDirectSoundBuffer8
+constexpr std::uint32_t kStreamBytes = 0x444u;      // SoundBuffer +0x444 = 环长度 L
+constexpr std::uint32_t kSub4B6C30 = 0x004B6C30u;
+
+std::int32_t gainQ16(double amp) {
+    if (!(amp > 0.0)) return 0;
+    const double q = amp * 65536.0;
+    if (q >= 2147483000.0) return 2147483000;
+    return static_cast<std::int32_t>(q + 0.5);
+}
+
+void putLe16(std::uint8_t* p, std::uint16_t v) {
+    p[0] = static_cast<std::uint8_t>(v & 0xFF);
+    p[1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
+}
+void putLe32(std::uint8_t* p, std::uint32_t v) {
+    p[0] = static_cast<std::uint8_t>(v & 0xFF);
+    p[1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
+    p[2] = static_cast<std::uint8_t>((v >> 16) & 0xFF);
+    p[3] = static_cast<std::uint8_t>((v >> 24) & 0xFF);
+}
+}  // namespace
+
+const char* audioModeName(AudioMode m) {
+    switch (m) {
+        case AudioMode::Off: return "off";
+        case AudioMode::Virtual: return "virtual";
+        case AudioMode::Sdl: return "sdl";
+    }
+    return "?";
+}
+
+AudioEngine::AudioEngine() = default;
+
+AudioEngine::~AudioEngine() { end(); }
+
+void AudioEngine::attach(X86* cpu, GuestMemory* mem, VirtualClock* clock) {
+    cpu_ = cpu;
+    mem_ = mem;
+    clock_ = clock;
+}
+
+void AudioEngine::logAt(lift::LogLevel level, const char* fmt, ...) const {
+    va_list ap;
+    va_start(ap, fmt);
+    lift::logV(level, LogDsound, "[audio] ", fmt, ap);
+    va_end(ap);
+}
+
+bool AudioEngine::configure(AudioMode mode, const std::string& dump_path, std::string* err) {
+    if (begun_) {
+        if (err) *err = "音频已 begin，不能再改配置";
+        return false;
+    }
+    configured_mode_ = mode;
+    dump_path_ = dump_path;
+    // `--audio-dump` 是机械判据入口：即使没给 `--audio`，也要有虚拟设备时钟才能产出 PCM。
+    if (configured_mode_ == AudioMode::Off && !dump_path_.empty()) configured_mode_ = AudioMode::Virtual;
+    return true;
+}
+
+bool AudioEngine::begin(std::string* err) {
+    if (begun_) return true;
+    mode_ = configured_mode_;
+    if (mode_ == AudioMode::Off) {
+        begun_ = true;
+        return true;
+    }
+    // ★ 音频与"同一个 Machine 跑第二轮"不兼容：guest 的 DS 对象 / Sound 槽 / 喂料线程身份
+    //   还活着，而宿主时间线要从 0 重来。⛔ 不要静默清空设备模型（那会让第二轮完全没声）；
+    //   明确拒绝，调用方新建 Machine。
+    if (feeder_.registered || !buffers_.empty()) {
+        if (err) *err = "音频不支持同一 Machine 的第二次 run（guest DS 对象仍在；请新建 Machine）";
+        return false;
+    }
+    // 同一台 Machine 可以 run 多次：上一轮结束后把时间线 / 缓冲 / 喂料身份清掉。
+    // ⛔ 不清 `configured_mode_` / `dump_path_`（那是配置）。
+    buffers_.clear();
+    pending_.clear();
+    feeder_ = Feeder{};
+    played_ = generated_ = pushed_ = queued_ = 0;
+    stats_ = AudioStats{};
+    in_fill_ = false;
+    borrowed_ret_ = false;
+    if (!cpu_ || !mem_ || !clock_) {
+        if (err) *err = "AudioEngine 没有 attach（cpu/mem/clock）";
+        return false;
+    }
+    if (!dump_path_.empty() && !openDump()) {
+        logAt(LogLevel::Warn, "dump 打不开：%s（继续，只是没有 WAV）", dump_path_.c_str());
+    }
+    if (mode_ == AudioMode::Sdl) {
+        if (!openSdl()) {
+            logAt(LogLevel::Warn, "SDL3 音频设备打不开（%s）⇒ 退回 virtual（不出声，仍可 dump）",
+                  SDL_GetError());
+            mode_ = AudioMode::Virtual;
+        }
+    }
+    begun_ = true;
+    if (mode_ != AudioMode::Off) {
+        logAt(LogLevel::Info,
+              "mode=%s %u Hz / 16 bit / 2 ch（lead=%llu B）；游标=%s；PCM 由 guest 解码器产生，"
+              "宿主只做混音与输出",
+              audioModeName(mode_), kSampleRate, static_cast<unsigned long long>(kLeadBytes),
+              mode_ == AudioMode::Sdl ? "SDL 设备已消费字节" : "VirtualClock");
+    }
+    return true;
+}
+
+bool AudioEngine::openSdl() {
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        logAt(LogLevel::Warn, "SDL_InitSubSystem(AUDIO) 失败：%s", SDL_GetError());
+        return false;
+    }
+    sdl_inited_ = true;
+    SDL_AudioSpec spec{};
+    spec.format = SDL_AUDIO_S16LE;
+    spec.channels = 2;
+    spec.freq = static_cast<int>(kSampleRate);
+    SDL_AudioStream* stream =
+        SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+    if (stream == nullptr) {
+        logAt(LogLevel::Warn, "SDL_OpenAudioDeviceStream 失败：%s", SDL_GetError());
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        sdl_inited_ = false;
+        return false;
+    }
+    if (!SDL_ResumeAudioStreamDevice(stream)) {
+        logAt(LogLevel::Warn, "SDL_ResumeAudioStreamDevice 失败：%s", SDL_GetError());
+        SDL_DestroyAudioStream(stream);
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        sdl_inited_ = false;
+        return false;
+    }
+    stream_ = stream;
+    sdl_ok_ = true;
+    const char* name = SDL_GetAudioDeviceName(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK);
+    logAt(LogLevel::Info, "SDL 音频设备：%s", name ? name : "（默认设备，名字不可用）");
+    return true;
+}
+
+void AudioEngine::closeSdl() {
+    if (stream_) {
+        SDL_DestroyAudioStream(static_cast<SDL_AudioStream*>(stream_));
+        stream_ = nullptr;
+    }
+    sdl_ok_ = false;
+    if (sdl_inited_) {
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        sdl_inited_ = false;
+    }
+}
+
+bool AudioEngine::openDump() {
+    dump_ = std::fopen(dump_path_.c_str(), "wb");
+    if (!dump_ ) return false;
+    std::uint8_t hdr[44] = {};
+    std::memcpy(hdr + 0, "RIFF", 4);
+    putLe32(hdr + 4, 36u);  // 回填
+    std::memcpy(hdr + 8, "WAVEfmt ", 8);
+    putLe32(hdr + 16, 16u);
+    putLe16(hdr + 20, 1u);  // PCM
+    putLe16(hdr + 22, 2u);  // channels
+    putLe32(hdr + 24, kSampleRate);
+    putLe32(hdr + 28, kBytesPerSec);
+    putLe16(hdr + 32, static_cast<std::uint16_t>(kBlockAlign));
+    putLe16(hdr + 34, 16u);
+    std::memcpy(hdr + 36, "data", 4);
+    putLe32(hdr + 40, 0u);  // 回填
+    dump_ok_ = std::fwrite(hdr, 1, sizeof(hdr), dump_) == sizeof(hdr);
+    dump_bytes_ = 0;
+    if (!dump_ok_) {
+        std::fclose(dump_);
+        dump_ = nullptr;
+    }
+    return dump_ok_;
+}
+
+void AudioEngine::closeDump() {
+    if (!dump_) return;
+    const std::uint64_t data = dump_bytes_;
+    std::uint8_t patch[4];
+    std::fseek(dump_, 4, SEEK_SET);
+    putLe32(patch, static_cast<std::uint32_t>(36ull + data));
+    std::fwrite(patch, 1, 4, dump_);
+    std::fseek(dump_, 40, SEEK_SET);
+    putLe32(patch, static_cast<std::uint32_t>(data));
+    std::fwrite(patch, 1, 4, dump_);
+    std::fclose(dump_);
+    dump_ = nullptr;
+    dump_ok_ = false;
+}
+
+void AudioEngine::writeDump(const std::uint8_t* pcm, std::size_t n) {
+    if (!dump_ || !dump_ok_ || n == 0) return;
+    if (std::fwrite(pcm, 1, n, dump_) != n) {
+        logAt(LogLevel::Warn, "dump 写失败（已写 %llu B）⇒ 停止 dump",
+              static_cast<unsigned long long>(dump_bytes_));
+        dump_ok_ = false;
+        closeDump();
+        return;
+    }
+    dump_bytes_ += n;
+}
+
+void AudioEngine::abortFill() {
+    if (!in_fill_ && !borrowed_ret_) return;
+    if (!cpu_ || !mem_) {
+        in_fill_ = false;
+        borrowed_ret_ = false;
+        return;
+    }
+    logAt(LogLevel::Warn, "run 在音频 fill 中结束（time-limit / max-insns / 停止）⇒ 回滚 [esp] / CS / 在飞计数");
+    if (borrowed_ret_) {
+        if (mem_->committed(borrowed_esp_, 4)) mem_->wr32(borrowed_esp_, saved_ret_);
+        borrowed_ret_ = false;
+    }
+    if (in_fill_) {
+        if (mem_->committed(fill_inf_ea_, 4)) {
+            const std::uint32_t cur = mem_->rd32(fill_inf_ea_);
+            if (cur > 0) mem_->wr32(fill_inf_ea_, cur - 1u);
+        }
+        // fill 可能自己又递归进同一个 CS（例如 sub_4B6B60 的 stop 路径）；回滚时把以 feeder
+        // 身份持有的层数全部退掉（最多 8 层），否则 owner 会留在 guest 结构里。
+        for (int i = 0; i < 8 && fill_cs_ != 0; ++i) {
+            if (guestCriticalSectionOwner(*cpu_, fill_cs_) != feeder_.thread_id) break;
+            std::string leave_err;
+            if (!guestLeaveCriticalSectionAs(*cpu_, fill_cs_, feeder_.thread_id, &leave_err)) {
+                std::fprintf(stderr, "[audio] abortFill：离开 CS 失败：%s\n", leave_err.c_str());
+                break;
+            }
+        }
+        std::uint32_t ignored = 0;
+        restore(snapshot_, &ignored);
+        if (cpu_->calls) cpu_->calls->reset();
+        in_fill_ = false;
+    }
+    feeder_.exited = true;
+    feeder_.runnable = false;
+    feeder_.exit_requested = false;
+    pending_.clear();
+}
+
+void AudioEngine::end() {
+    if (!begun_ && !dump_ && !stream_) return;
+    abortFill();
+    if (feeder_.registered && !feeder_.exited) {
+        logAt(LogLevel::Info, "运行结束：喂料泵仍在运行（fills=%llu）⇒ 直接关闭（不再写 guest）",
+              static_cast<unsigned long long>(stats_.fills));
+    }
+    closeSdl();
+    closeDump();
+    if (mode_ != AudioMode::Off) {
+        logAt(LogLevel::Info,
+              "统计：played=%llu mixed=%llu pushed=%llu notify=%llu fills=%llu deferred=%llu "
+              "dropped=%llu underruns=%llu",
+              static_cast<unsigned long long>(stats_.played_bytes),
+              static_cast<unsigned long long>(stats_.mixed_bytes),
+              static_cast<unsigned long long>(stats_.pushed_bytes),
+              static_cast<unsigned long long>(stats_.notifications),
+              static_cast<unsigned long long>(stats_.fills),
+              static_cast<unsigned long long>(stats_.deferred),
+              static_cast<unsigned long long>(stats_.dropped),
+              static_cast<unsigned long long>(stats_.underruns));
+        if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
+            for (const auto& b : buffers_) {
+                logAt(LogLevel::Info,
+                      "buffer state=0x%08X obj=0x%08X bytes=%u %uch/%uHz/%ubit playing=%d notify=%u "
+                      "start=%llu initial=%u vol=%d pan=%d",
+                      b.state_ea, b.obj_ea, b.bytes, b.fmt.channels, b.fmt.sample_rate, b.fmt.bits,
+                      b.playing ? 1 : 0, b.notify_count, static_cast<unsigned long long>(b.start_mixed),
+                      b.initial_pos, b.volume, b.pan);
+            }
+        }
+    }
+    begun_ = false;
+}
+
+AudioEngine::Buffer* AudioEngine::find(std::uint32_t state_ea) {
+    for (auto& b : buffers_)
+        if (b.state_ea == state_ea) return &b;
+    return nullptr;
+}
+
+const AudioEngine::Buffer* AudioEngine::find(std::uint32_t state_ea) const {
+    for (const auto& b : buffers_)
+        if (b.state_ea == state_ea) return &b;
+    return nullptr;
+}
+
+void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::uint32_t data_ea,
+                            std::uint32_t bytes, std::uint32_t flags, const AudioFormat& fmt) {
+    if (!enabled() || state_ea == 0) return;
+    Buffer* b = find(state_ea);
+    if (b == nullptr) {
+        buffers_.push_back(Buffer{});
+        b = &buffers_.back();
+        b->state_ea = state_ea;
+    }
+    b->obj_ea = obj_ea;
+    b->data_ea = data_ea;
+    b->bytes = bytes;
+    b->flags = flags;
+    b->fmt = fmt;
+    if (b->fmt.block_align == 0) b->fmt.block_align = (b->fmt.bits / 8u) * b->fmt.channels;
+    if (b->fmt.block_align == 0) b->fmt.block_align = 4;
+    if (b->fmt.avg_bytes == 0) b->fmt.avg_bytes = b->fmt.sample_rate * b->fmt.block_align;
+    b->playing = false;
+    b->looping = false;
+    b->initial_pos = 0;
+    b->start_mixed = generated_;
+    b->notify_count = 0;
+    b->volume = 0;
+    b->pan = 0;
+    stats_.max_buffers = std::max(stats_.max_buffers, static_cast<std::uint32_t>(buffers_.size()));
+}
+
+void AudioEngine::setFormat(std::uint32_t state_ea, const AudioFormat& fmt) {
+    Buffer* b = find(state_ea);
+    if (b) b->fmt = fmt;
+}
+
+void AudioEngine::removeBuffer(std::uint32_t state_ea) {
+    for (auto it = buffers_.begin(); it != buffers_.end(); ++it) {
+        if (it->state_ea != state_ea) continue;
+        const std::uint32_t obj = it->obj_ea;
+        buffers_.erase(it);
+        pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
+                                      [obj](const AudioNotifyEvent& e) { return e.obj == obj; }),
+                       pending_.end());
+        return;
+    }
+}
+
+void AudioEngine::setNotify(std::uint32_t state_ea, std::uint32_t count, const std::uint32_t* offsets) {
+    Buffer* b = find(state_ea);
+    if (b == nullptr) return;
+    b->notify_count = std::min<std::uint32_t>(count, 4u);
+    for (std::uint32_t i = 0; i < b->notify_count; ++i) b->notify_off[i] = offsets ? offsets[i] : 0u;
+    for (std::uint32_t i = b->notify_count; i < 4u; ++i) b->notify_off[i] = 0u;
+}
+
+void AudioEngine::clearNotify(std::uint32_t state_ea) {
+    Buffer* b = find(state_ea);
+    if (b) b->notify_count = 0;
+}
+
+void AudioEngine::play(std::uint32_t state_ea, bool looping) {
+    Buffer* b = find(state_ea);
+    if (b == nullptr) return;
+    b->playing = true;
+    b->looping = looping;
+    b->start_mixed = generated_;
+    if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
+        logAt(LogLevel::Info, "play state=0x%08X obj=0x%08X bytes=%u %uch/%uHz/%ubit loop=%d",
+              state_ea, b->obj_ea, b->bytes, b->fmt.channels, b->fmt.sample_rate, b->fmt.bits,
+              looping ? 1 : 0);
+    }
+    // ★ 真 DS：Play 时游标从 `initial_pos` 开始；若某个通知点正好等于它，该点立即满足。
+    //   （引擎只 SetCurrentPosition(0)，所以通常只命中 offset 0。）
+    for (std::uint32_t i = 0; i < b->notify_count; ++i) {
+        if (b->notify_off[i] == b->initial_pos) enqueue(b->obj_ea, i);
+    }
+}
+
+void AudioEngine::stop(std::uint32_t state_ea) {
+    Buffer* b = find(state_ea);
+    if (b == nullptr) return;
+    // 真 DS：Stop 冻结当前播放位置；再 Play 从冻结处继续（不是回到 initial_pos）。
+    b->initial_pos = playedCursor(state_ea);
+    b->playing = false;
+    if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
+        logAt(LogLevel::Info, "stop state=0x%08X obj=0x%08X cursor=%u", state_ea, b->obj_ea, b->initial_pos);
+    }
+}
+
+void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
+    Buffer* b = find(state_ea);
+    if (b == nullptr) return;
+    b->initial_pos = b->bytes ? (pos % b->bytes) : 0u;
+    const std::uint32_t align = b->fmt.block_align ? b->fmt.block_align : 4u;
+    b->initial_pos -= b->initial_pos % align;  // 按**该缓冲**的帧对齐（mono 是 2，不是 4）
+    if (b->playing) {
+        // 真机 SetCurrentPosition 会让游标跳到新位置；引擎只在 Play 前调它，这里按同一时间线重排。
+        b->start_mixed = generated_;
+        for (std::uint32_t i = 0; i < b->notify_count; ++i) {
+            if (b->notify_off[i] == b->initial_pos) enqueue(b->obj_ea, i);
+        }
+    }
+}
+
+void AudioEngine::setVolume(std::uint32_t state_ea, std::int32_t centibel) {
+    Buffer* b = find(state_ea);
+    if (b) b->volume = std::clamp<std::int32_t>(centibel, -10000, 0);
+}
+
+void AudioEngine::setPan(std::uint32_t state_ea, std::int32_t pan) {
+    Buffer* b = find(state_ea);
+    // DSBPAN_LEFT/RIGHT = ±10000（1/100 dB 的左右偏置）。
+    if (b) b->pan = std::clamp<std::int32_t>(pan, -10000, 10000);
+}
+
+std::uint32_t AudioEngine::playedCursor(std::uint32_t state_ea) const {
+    const Buffer* b = find(state_ea);
+    if (b == nullptr || b->bytes == 0) return 0;
+    if (!b->playing) return b->initial_pos % b->bytes;
+    const std::uint64_t start_frame = b->start_mixed / kBlockAlign;
+    const std::uint64_t played_frame = played_ / kBlockAlign;
+    if (played_frame <= start_frame) return b->initial_pos % b->bytes;
+    const std::uint64_t src_elapsed = (played_frame - start_frame) * b->fmt.avg_bytes / kSampleRate;
+    return static_cast<std::uint32_t>((b->initial_pos + src_elapsed) % b->bytes);
+}
+
+bool AudioEngine::findSlot(std::uint32_t obj_ea, std::uint32_t* slot, std::uint32_t* stream) const {
+    if (feeder_.sound == 0 || obj_ea == 0 || mem_ == nullptr) return false;
+    for (std::uint32_t s = 0; s < kSlotCount; ++s) {
+        const std::uint32_t stream_ea = mem_->rd32(feeder_.sound + kSoundSlots + 4u * s);
+        if (stream_ea == 0 || !mem_->committed(stream_ea + kStreamDsBuffer, 4)) continue;
+        if (mem_->rd32(stream_ea + kStreamDsBuffer) != obj_ea) continue;
+        if (slot) *slot = s;
+        if (stream) *stream = stream_ea;
+        return true;
+    }
+    return false;
+}
+
+AudioEngine::Context AudioEngine::capture() const {
+    Context c;
+    for (int i = 0; i < 8; ++i) c.r[i] = cpu_->r[i];
+    c.eip = cpu_->eip;
+    c.eflags = cpu_->eflags;
+    for (int i = 0; i < 6; ++i) c.seg[i] = cpu_->seg[i];
+    c.fs_base = cpu_->fs_base;
+    c.gs_base = cpu_->gs_base;
+    c.fpu = cpu_->fpu;
+    std::memcpy(c.xmm, cpu_->xmm, sizeof(c.xmm));
+    c.thread_id = cpu_->shim.thread_id;
+    c.last_error = cpu_->shim.last_error;
+    return c;
+}
+
+void AudioEngine::restore(const Context& c, std::uint32_t* shim_result) {
+    for (int i = 0; i < 8; ++i) cpu_->r[i] = c.r[i];
+    cpu_->eip = c.eip;
+    cpu_->eflags = c.eflags;
+    for (int i = 0; i < 6; ++i) cpu_->seg[i] = c.seg[i];
+    cpu_->fs_base = c.fs_base;
+    cpu_->gs_base = c.gs_base;
+    cpu_->fpu = c.fpu;
+    std::memcpy(cpu_->xmm, c.xmm, sizeof(c.xmm));
+    cpu_->shim.thread_id = c.thread_id;
+    cpu_->shim.last_error = c.last_error;
+    // `GuestCallStack::resume()` 在续延返回之后写 eip/esp/eax；把 eax 通过 *shim_result 交回，
+    // eip/esp 由"借用 [esp] = snapshot.eip + cleanup=0"那套保证（见 pump()）。
+    *shim_result = c.r[kEax];
+}
+
+void AudioEngine::enqueue(std::uint32_t obj_ea, std::uint32_t quarter) {
+    if (obj_ea == 0 || quarter > 3) return;
+    for (const auto& e : pending_)
+        if (e.obj == obj_ea && e.quarter == quarter) return;  // 自动复位事件语义：重复 SetEvent 合并
+    if (pending_.size() >= 256) {
+        pending_.pop_front();
+        ++stats_.dropped;
+    }
+    pending_.push_back(AudioNotifyEvent{obj_ea, quarter});
+    ++stats_.notifications;
+}
+
+void AudioEngine::fireCrossings(std::uint64_t old_played, std::uint64_t new_played) {
+    if (new_played <= old_played) return;
+    const std::uint64_t old_frame = old_played / kBlockAlign;
+    const std::uint64_t new_frame = new_played / kBlockAlign;
+    for (auto& b : buffers_) {
+        if (!b.playing || b.bytes == 0 || b.notify_count == 0) continue;
+        if (new_played <= b.start_mixed) continue;
+        const std::uint64_t start_frame = b.start_mixed / kBlockAlign;
+        // 缓冲自己的字节时间线：offset 是**这条缓冲**的字节偏移，不能拿 48k 立体声输出字节直接比。
+        // ★ 必须加 `initial_pos`（SetCurrentPosition 的起点）；否则非 0 起播时通知会晚一整圈。
+        const std::uint64_t rel_old = b.initial_pos +
+                                      (old_frame > start_frame
+                                           ? (old_frame - start_frame) * b.fmt.avg_bytes / kSampleRate
+                                           : 0ull);
+        const std::uint64_t rel_new = b.initial_pos +
+                                      (new_frame > start_frame
+                                           ? (new_frame - start_frame) * b.fmt.avg_bytes / kSampleRate
+                                           : 0ull);
+        if (rel_new <= rel_old) continue;
+        // ★ 一次推进可能跨过多个通知点（fill 期间虚拟时钟仍在走）。必须按**位置**排序后再入队：
+        //   按 quarter 序号入队会把"回绕 0"排在"3/4"之前（实测错序：0,1,2,0,3…）。
+        std::vector<std::pair<std::uint64_t, std::uint32_t>> crosses;
+        for (std::uint32_t i = 0; i < b.notify_count; ++i) {
+            const std::uint64_t off = b.notify_off[i];
+            if (off >= b.bytes) continue;
+            const std::int64_t base = static_cast<std::int64_t>(rel_old) - static_cast<std::int64_t>(off);
+            std::int64_t k = base >= 0 ? base / static_cast<std::int64_t>(b.bytes) + 1 : 0;
+            if (k < 0) k = 0;
+            std::uint64_t pos = off + static_cast<std::uint64_t>(k) * b.bytes;
+            std::uint32_t guard = 0;
+            bool truncated = false;
+            while (pos <= rel_new) {
+                if (guard++ >= 64u) {
+                    truncated = true;
+                    break;
+                }
+                crosses.emplace_back(pos, i);
+                pos += b.bytes;
+            }
+            if (truncated) ++stats_.dropped;
+        }
+        std::sort(crosses.begin(), crosses.end(),
+                  [](const std::pair<std::uint64_t, std::uint32_t>& a,
+                     const std::pair<std::uint64_t, std::uint32_t>& c) {
+                      return a.first != c.first ? a.first < c.first : a.second < c.second;
+                  });
+        for (const auto& c : crosses) enqueue(b.obj_ea, c.second);
+    }
+}
+
+void AudioEngine::generateTo(std::uint64_t target) {
+    if (target <= generated_) return;
+    std::uint64_t n = target - generated_;
+    n &= ~static_cast<std::uint64_t>(kBlockAlign - 1);  // 输出帧对齐（48k / S16 / 2ch）
+    if (n == 0) return;
+    const std::uint64_t out_frames64 = n / kBlockAlign;
+    if (out_frames64 > 0xFFFFFFFFull) return;
+    const std::uint32_t out_frames = static_cast<std::uint32_t>(out_frames64);
+    std::vector<std::int64_t> acc(static_cast<std::size_t>(out_frames) * 2u, 0);
+    const std::uint64_t out_start_frame = generated_ / kBlockAlign;
+
+    for (const auto& b : buffers_) {
+        if (!b.playing || b.bytes < b.fmt.block_align || b.fmt.block_align == 0) continue;
+        if (b.fmt.bits != 16 && b.fmt.bits != 8) continue;
+        if (b.fmt.channels == 0 || b.fmt.sample_rate == 0) continue;
+        if (generated_ < b.start_mixed) continue;
+        const std::uint32_t bpf = b.fmt.block_align;
+        const std::uint32_t sample_bytes = b.fmt.bits / 8u;
+        // 防御畸形 WAVEFORMATEX：block_align 必须至少容纳实际读取的 L/R 样本，否则会读越界。
+        if (bpf < sample_bytes * std::min<std::uint32_t>(b.fmt.channels, 2u)) continue;
+        const std::uint32_t total_frames = b.bytes / bpf;
+        if (total_frames == 0) continue;
+        if (!mem_->committed(b.data_ea, b.bytes)) continue;
+
+        // 这条流的源位置（源帧，16.16 定点）：initial_pos + 已输出时间 * 源采样率 / 48000。
+        const std::uint64_t elapsed_out = out_start_frame - b.start_mixed / kBlockAlign;
+        const std::uint64_t init_frame = b.initial_pos / bpf;
+        const std::uint64_t num = elapsed_out * b.fmt.sample_rate;
+        std::uint64_t pos_q16 = (init_frame << 16) + ((num << 16) / kSampleRate);
+        const std::uint64_t step_q16 = (static_cast<std::uint64_t>(b.fmt.sample_rate) * 65536ull + kSampleRate / 2) /
+                                       kSampleRate;
+
+        // 1/100 dB → 幅度；DS 的 0 dB = 1.0，-10000 = -100 dB。pan 是线性左右衰减。
+        const double amp = std::pow(10.0, static_cast<double>(b.volume) / 2000.0);
+        const double pl = b.pan <= 0 ? 1.0 : (10000 - b.pan) / 10000.0;
+        const double pr = b.pan >= 0 ? 1.0 : (10000 + b.pan) / 10000.0;
+        const std::int32_t gl = gainQ16(amp * pl);
+        const std::int32_t gr = gainQ16(amp * pr);
+
+        auto readFrame = [&](std::uint32_t idx, std::int32_t* l, std::int32_t* r) {
+            const std::uint8_t* p = mem_->host(b.data_ea + idx * bpf);
+            if (b.fmt.bits == 16) {
+                *l = static_cast<std::int16_t>(p[0] | (p[1] << 8));
+                if (b.fmt.channels >= 2) {
+                    *r = static_cast<std::int16_t>(p[2] | (p[3] << 8));
+                } else {
+                    *r = *l;
+                }
+            } else {
+                *l = (static_cast<std::int32_t>(p[0]) - 128) << 8;
+                if (b.fmt.channels >= 2) {
+                    *r = (static_cast<std::int32_t>(p[1]) - 128) << 8;
+                } else {
+                    *r = *l;
+                }
+            }
+        };
+
+        std::uint64_t pos = pos_q16;
+        for (std::uint32_t o = 0; o < out_frames; ++o) {
+            const std::uint32_t idx = static_cast<std::uint32_t>((pos >> 16) % total_frames);
+            const std::uint32_t frac = static_cast<std::uint32_t>(pos & 0xFFFFu);
+            const std::uint32_t idx2 = (idx + 1u) % total_frames;
+            std::int32_t l0 = 0, r0 = 0, l1 = 0, r1 = 0;
+            readFrame(idx, &l0, &r0);
+            if (frac != 0) readFrame(idx2, &l1, &r1);
+            const std::int32_t l = l0 + static_cast<std::int32_t>((static_cast<std::int64_t>(l1 - l0) * frac) >> 16);
+            const std::int32_t r = r0 + static_cast<std::int32_t>((static_cast<std::int64_t>(r1 - r0) * frac) >> 16);
+            acc[static_cast<std::size_t>(o) * 2u + 0] += (static_cast<std::int64_t>(l) * gl) >> 16;
+            acc[static_cast<std::size_t>(o) * 2u + 1] += (static_cast<std::int64_t>(r) * gr) >> 16;
+            pos += step_q16;
+        }
+    }
+
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(n), 0);
+    for (std::uint32_t o = 0; o < out_frames; ++o) {
+        std::int64_t l = acc[static_cast<std::size_t>(o) * 2u + 0];
+        std::int64_t r = acc[static_cast<std::size_t>(o) * 2u + 1];
+        if (l > 32767) l = 32767;
+        if (l < -32768) l = -32768;
+        if (r > 32767) r = 32767;
+        if (r < -32768) r = -32768;
+        const std::uint16_t ul = static_cast<std::uint16_t>(static_cast<std::int16_t>(l));
+        const std::uint16_t ur = static_cast<std::uint16_t>(static_cast<std::int16_t>(r));
+        const std::size_t off = static_cast<std::size_t>(o) * 4u;
+        out[off + 0] = static_cast<std::uint8_t>(ul & 0xFF);
+        out[off + 1] = static_cast<std::uint8_t>(ul >> 8);
+        out[off + 2] = static_cast<std::uint8_t>(ur & 0xFF);
+        out[off + 3] = static_cast<std::uint8_t>(ur >> 8);
+    }
+    generated_ += n;
+    stats_.mixed_bytes += n;
+    pushMixed(out.data(), static_cast<std::size_t>(n));
+}
+
+void AudioEngine::pushMixed(const std::uint8_t* pcm, std::size_t n) {
+    if (n == 0) return;
+    if (sdl_ok_ && stream_) {
+        if (SDL_PutAudioStreamData(static_cast<SDL_AudioStream*>(stream_), pcm, static_cast<int>(n))) {
+            pushed_ += n;
+            stats_.pushed_bytes = pushed_;
+        } else {
+            if (!logged_sdl_fail_) {
+                logged_sdl_fail_ = true;
+                logAt(LogLevel::Warn, "SDL_PutAudioStreamData 失败：%s ⇒ 之后只写 dump", SDL_GetError());
+            }
+            sdl_ok_ = false;
+        }
+    }
+    writeDump(pcm, n);
+}
+
+void AudioEngine::advanceDevice() {
+    if (mode_ == AudioMode::Sdl && sdl_ok_ && stream_) {
+        const int q = SDL_GetAudioStreamQueued(static_cast<SDL_AudioStream*>(stream_));
+        if (q >= 0) {
+            queued_ = static_cast<std::uint64_t>(q);
+        } else if (!logged_sdl_fail_) {
+            logged_sdl_fail_ = true;
+            logAt(LogLevel::Warn, "SDL_GetAudioStreamQueued 失败：%s", SDL_GetError());
+        }
+        const std::uint64_t new_played = pushed_ >= queued_ ? pushed_ - queued_ : 0ull;
+        if (new_played > played_) {
+            fireCrossings(played_, new_played);
+            played_ = new_played;
+        }
+    } else {
+        const std::uint64_t now = clock_->now100ns();
+        const std::uint64_t new_played = now * kBytesPerSec / kTicksPerSec;
+        if (new_played > played_) {
+            fireCrossings(played_, new_played);
+            played_ = new_played;
+        }
+    }
+    stats_.played_bytes = played_;
+}
+
+AudioPump AudioEngine::pump() {
+    if (!enabled() || !begun_ || !cpu_ || !mem_) return AudioPump::Idle;
+    // ★ 单执行流纪律：任何嵌套 guest 调用进行中都不混音、不铺新帧。
+    //   fill 自己会写 guest 环；此时读环 = 真机上"另一个线程正在写"的竞态，D 里必须避免。
+    if (in_fill_) return AudioPump::Idle;
+    if (cpu_->calls && cpu_->calls->active()) return AudioPump::Idle;
+    if (cpu_->shim.callback.active) return AudioPump::Idle;
+    if (cpu_->shim.timer_firing) return AudioPump::Idle;
+
+    advanceDevice();
+
+    if (mode_ == AudioMode::Sdl && sdl_ok_) {
+        const std::uint64_t target = played_ + kLeadBytes;
+        if (target > generated_) generateTo(target);
+        // 队列彻底空了但还有流在播 ⇒ underrun（只在进入 underrun 时记一次，不刷屏）。
+        bool playing = false;
+        for (const auto& b : buffers_)
+            if (b.playing && b.bytes != 0) playing = true;
+        if (queued_ == 0 && playing) {
+            if (!underrun_active_) {
+                ++stats_.underruns;
+                underrun_active_ = true;
+            }
+        } else {
+            underrun_active_ = false;
+        }
+    } else if (dump_ok_) {
+        if (played_ > generated_) generateTo(played_);
+    } else {
+        // 没有 sink / dump：只推进通知时间线，不白混音。
+        generated_ = played_;
+    }
+
+    if (!feeder_.registered || !feeder_.runnable || feeder_.exited) return AudioPump::Idle;
+    if (feeder_.exit_requested) {
+        feeder_.exited = true;
+        feeder_.runnable = false;
+        feeder_.exit_requested = false;
+        pending_.clear();
+        logAt(LogLevel::Info, "喂料泵收到退出事件（#60）⇒ 退出；fills=%llu",
+              static_cast<unsigned long long>(stats_.fills));
+        return AudioPump::Idle;
+    }
+
+    while (!pending_.empty()) {
+        const AudioNotifyEvent ev = pending_.front();
+        std::uint32_t slot = 0;
+        std::uint32_t stream = 0;
+        if (!findSlot(ev.obj, &slot, &stream)) {
+            if (!warned_slot_mismatch_) {
+                warned_slot_mismatch_ = true;
+                logAt(LogLevel::Warn,
+                      "通知的 obj=0x%08X 在 Sound+0x654 的 15 个槽里找不到（[stream+0x40C] 不匹配）⇒ "
+                      "丢掉该通知；音频布局可能已漂（fills 会停）",
+                      ev.obj);
+            }
+            pending_.pop_front();
+            ++stats_.dropped;
+            continue;
+        }
+        const std::uint32_t cs = feeder_.sound + kSoundCsBase + 24u * slot;
+        if (!mem_->committed(cs, 0x18)) {
+            pending_.pop_front();
+            ++stats_.dropped;
+            continue;
+        }
+        const std::uint32_t owner = guestCriticalSectionOwner(*cpu_, cs);
+        if (owner != 0 && owner != feeder_.thread_id) {
+            // ★ D.4-③：主线程正持有这个槽的 CS（真机上 feeder 会阻塞）。本次不填，
+            //   保留在队首，下一个块边界再试。⛔ 不插进"主线程正在改这个槽"的中途。
+            ++stats_.deferred;
+            return AudioPump::Idle;
+        }
+        const std::uint32_t slot_obj = mem_->rd32(feeder_.sound + kSoundSlots + 4u * slot);
+        if (slot_obj == 0 || slot_obj != stream) {
+            if (!warned_slot_mismatch_) {
+                warned_slot_mismatch_ = true;
+                logAt(LogLevel::Warn,
+                      "槽 %u 的 SoundBuffer*=0x%08X 与通知的 obj=0x%08X 不一致 ⇒ 丢掉该通知", slot,
+                      slot_obj, ev.obj);
+            }
+            pending_.pop_front();
+            ++stats_.dropped;
+            continue;
+        }
+        std::string err;
+        if (!guestEnterCriticalSectionAs(*cpu_, cs, feeder_.thread_id, &err)) {
+            last_error_ = "音频泵进入临界区失败：" + err;
+            return AudioPump::Error;
+        }
+        const std::uint32_t inf_ea = feeder_.sound + kSoundInflight + 4u * slot;
+        const std::uint32_t inf = mem_->committed(inf_ea, 4) ? mem_->rd32(inf_ea) : 0u;
+        if (mem_->committed(inf_ea, 4)) mem_->wr32(inf_ea, inf + 1u);
+        pending_.pop_front();
+
+        // ---- 保存整份 guest 上下文，借用 [esp] 作为"返回点" ----
+        snapshot_ = capture();
+        if (!mem_->committed(snapshot_.r[kEsp], 4)) {
+            if (mem_->committed(inf_ea, 4)) mem_->wr32(inf_ea, inf);
+            guestLeaveCriticalSectionAs(*cpu_, cs, feeder_.thread_id, nullptr);
+            last_error_ = "音频泵：guest esp 不在已提交栈上";
+            return AudioPump::Error;
+        }
+        borrowed_esp_ = snapshot_.r[kEsp];
+        saved_ret_ = mem_->rd32(borrowed_esp_);
+        borrowed_ret_ = true;
+        mem_->wr32(borrowed_esp_, snapshot_.eip);  // `start()` 会把它当作 ret_ea 读走
+        cpu_->shim.thread_id = feeder_.thread_id;
+        cpu_->shim.last_error = 0;
+        in_fill_ = true;
+        fill_cs_ = cs;
+        fill_inf_ea_ = inf_ea;
+
+        AudioEngine* self = this;
+        const std::uint32_t quarter = ev.quarter;
+        const auto fill_start = std::chrono::steady_clock::now();
+        const bool started = startNestedGuestCall(
+            *cpu_, kSub4B6C30, {quarter}, 0u, "audio:feeder",
+            [self, slot, quarter, stream, cs, inf_ea, fill_start](X86& c, std::uint32_t cb_result,
+                                                                  std::uint32_t* out) {
+                if (c.mem->committed(inf_ea, 4)) {
+                    const std::uint32_t cur = c.mem->rd32(inf_ea);
+                    if (cur > 0) c.mem->wr32(inf_ea, cur - 1u);
+                }
+                std::string leave_err;
+                if (!guestLeaveCriticalSectionAs(c, cs, self->feeder_.thread_id, &leave_err)) {
+                    std::fprintf(stderr, "[audio] 离开槽临界区失败：%s\n", leave_err.c_str());
+                }
+                self->restore(self->snapshot_, out);
+                self->in_fill_ = false;
+                ++self->stats_.fills;
+                if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
+                    const double ms =
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fill_start)
+                            .count();
+                    std::fprintf(stderr,
+                                 "[audio] fill slot=%u quarter=%u ret=%u state=%u wrote=%u L=%u %.2f ms\n",
+                                 slot, quarter, cb_result,
+                                 c.mem->committed(stream + 0x2458, 4) ? c.mem->rd32(stream + 0x2458) : 0u,
+                                 c.mem->committed(stream + 0x2468, 4) ? c.mem->rd32(stream + 0x2468) : 0u,
+                                 c.mem->committed(stream + kStreamBytes, 4) ? c.mem->rd32(stream + kStreamBytes) : 0u,
+                                 ms);
+                }
+                return true;
+            },
+            &err, /*callee_ecx=*/stream);
+        if (!started) {
+            in_fill_ = false;
+            if (borrowed_ret_) {
+                if (mem_->committed(borrowed_esp_, 4)) mem_->wr32(borrowed_esp_, saved_ret_);
+                borrowed_ret_ = false;
+            }
+            // 铺帧阶段已经改过线程身份 / last_error；失败时也要还回去（否则主线程带着 0x1008 继续跑）。
+            cpu_->shim.thread_id = snapshot_.thread_id;
+            cpu_->shim.last_error = snapshot_.last_error;
+            if (mem_->committed(inf_ea, 4)) mem_->wr32(inf_ea, inf);
+            guestLeaveCriticalSectionAs(*cpu_, cs, feeder_.thread_id, nullptr);
+            last_error_ = "音频泵铺 sub_4B6C30 帧失败：" + err;
+            return AudioPump::Error;
+        }
+        return AudioPump::Suspended;
+    }
+    return AudioPump::Idle;
+}
+
+void AudioEngine::afterGuestCall() {
+    if (borrowed_ret_) {
+        if (mem_ && mem_->committed(borrowed_esp_, 4)) mem_->wr32(borrowed_esp_, saved_ret_);
+        borrowed_ret_ = false;
+    }
+}
+
+bool AudioEngine::shouldOwnThread(std::uint32_t start_ea) const {
+    return enabled() && start_ea == kFeederStartEa && !feeder_.registered;
+}
+
+bool AudioEngine::registerFeeder(std::uint32_t start_ea, std::uint32_t param, std::uint32_t thread_id,
+                                 std::uint32_t handle) {
+    if (!enabled() || start_ea != kFeederStartEa || feeder_.registered) return false;
+    if (param == 0 || !mem_->committed(param, 4) || !mem_->committed(param + kSoundSlots, kSlotCount * 4u) ||
+        !mem_->committed(param + kSoundCsBase, kSlotCount * 24u) ||
+        !mem_->committed(param + kSoundInflight, kSlotCount * 4u)) {
+        logAt(LogLevel::Warn, "音频喂料线程的 param=0x%08X 不是可读的 Sound 对象 ⇒ 不接管", param);
+        return false;
+    }
+    feeder_.registered = true;
+    feeder_.runnable = false;
+    feeder_.exited = false;
+    feeder_.exit_requested = false;
+    feeder_.start_ea = start_ea;
+    feeder_.sound = param;
+    feeder_.thread_id = thread_id;
+    feeder_.handle = handle;
+    feeder_.quit_event = mem_->committed(param + kSoundQuitEvent, 4) ? mem_->rd32(param + kSoundQuitEvent) : 0u;
+    logAt(LogLevel::Info,
+          "登记喂料泵：Sound=0x%08X thread=0x%08X handle=0x%08X quitEvent=0x%08X；"
+          "start routine 不执行（12 段 native + 0x4B6C30 由泵调）",
+          param, thread_id, handle, feeder_.quit_event);
+    return true;
+}
+
+void AudioEngine::resumeFeeder() {
+    if (!feeder_.registered || feeder_.exited) return;
+    feeder_.runnable = true;
+    logAt(LogLevel::Info, "喂料泵已启动（runnable）；等待设备游标越过通知点");
+}
+
+bool AudioEngine::isFeederHandle(std::uint32_t handle) const {
+    return feeder_.registered && handle != 0 && handle == feeder_.handle;
+}
+
+void AudioEngine::noteEventSet(std::uint32_t handle) {
+    if (!feeder_.registered || handle == 0 || handle != feeder_.quit_event) return;
+    feeder_.exit_requested = true;
+    logAt(LogLevel::Info, "SetEvent(quit=0x%08X) ⇒ 喂料泵将在下一个块边界退出", handle);
+}
+
+void AudioEngine::joinFeeder() {
+    if (!feeder_.registered) return;
+    if (!feeder_.exited) {
+        feeder_.exited = true;
+        feeder_.runnable = false;
+        feeder_.exit_requested = false;
+        pending_.clear();
+        logAt(LogLevel::Info, "WaitForSingleObject(喂料线程) ⇒ 泵标记退出（fills=%llu）；此后不再写 guest 环",
+              static_cast<unsigned long long>(stats_.fills));
+    }
+}
+
+void AudioEngine::dumpSummary(std::FILE* out) const {
+    if (!out) return;
+    std::fprintf(out, "audio     : mode=%s played=%llu mixed=%llu notify=%llu fills=%llu deferred=%llu dropped=%llu%s\n",
+                 audioModeName(mode_), static_cast<unsigned long long>(stats_.played_bytes),
+                 static_cast<unsigned long long>(stats_.mixed_bytes),
+                 static_cast<unsigned long long>(stats_.notifications),
+                 static_cast<unsigned long long>(stats_.fills),
+                 static_cast<unsigned long long>(stats_.deferred),
+                 static_cast<unsigned long long>(stats_.dropped),
+                 dump_path_.empty() ? "" : (" dump=" + dump_path_).c_str());
+}
+
+}  // namespace lift

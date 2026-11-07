@@ -9,6 +9,10 @@
 > `0x4B5B03 call sub_4B6C30` 给 guest），**不需要第二个 guest 栈**；详见
 > `thread-model-feasibility.md` §5.1 的**方案 D**。本文下面的“协作式 guest 线程”是 D 的
 > **后备**（B），不是唯一路线；D 优先，但仍需用户裁决（V1 路线）。
+>
+> **2026-11-07 实施记录**：V1 已裁决为 **D** 并落地，见 `docs/audio-implementation.md`。
+> 实跑纠正了本文 §2.1(4) 的“只有 44.1k/16/2”：BGM 会建 **48k stereo**，SE 会建 **44.1k mono**
+> ⇒ 逐缓冲格式转换是必需的。§3.5 的 P3-D 已完成（不建第二栈）；实测 fill ≈ 370 ms / 0.5 s。
 
 ---
 

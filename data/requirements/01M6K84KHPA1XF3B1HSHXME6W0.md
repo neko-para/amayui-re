@@ -33,3 +33,9 @@ mmio 只用于 WAV 头解析；⇒ 上面的“范围”不能当成音频实现
 连续 BGM / 语音受“伪线程不跑 start routine”限制：环里只有 Play 前预填的 3/4 圈（最多 1.5 s），
 要先裁决是否允许**协作式 guest 线程**。完整报告（含证据 EA / 第一刀 / 3 个裁决项）见
 repo:apps/emulator-lift/docs/audio-feasibility.md。
+
+## 2026-11-07 音频已落地（方案 D）
+
+用户裁决 **V1 = D**；实现 / 实测 / 偏差见 `REQ-01M6RXQ0A1B2C3D4E5F6G7H8J9` 与
+repo:apps/emulator-lift/docs/audio-implementation.md 。TITLE BGM 已连续可听；SE 走同一条
+`Play → notify → fill → 混音` 路径。M4 仍 open **只为视频**（MF / EVR / DXVA2 / 影片 opcode）。

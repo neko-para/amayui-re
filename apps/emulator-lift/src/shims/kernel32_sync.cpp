@@ -67,6 +67,8 @@
 #include <string>
 #include <vector>
 
+#include "runtime/audio.h"
+#include "runtime/sync_guest.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
 
@@ -446,6 +448,9 @@ void shimSetEvent(X86& cpu, ShimCall& call) {
         return;
     }
     obj->signaled = true;
+    // ★ 方案 D：音频喂料线程的"退出事件"（Sound+0x514 = 事件 #60）被 SetEvent 时，
+    //   泵必须像真线程一样醒来并退出。这里只记一个意图；真正退出发生在下一个块边界。
+    if (cpu.audio) cpu.audio->noteEventSet(h);
     call.result = 1;
 }
 
@@ -655,6 +660,14 @@ void noteAlertable(X86& cpu, const char* api, bool alertable) {
 // 单个对象的一次等待（WaitForSingleObject / *Ex / SignalObjectAndWait 共用）。
 // ⛔ 不阻塞：未 signaled 且 timeout != 0 ⇒ WAIT_TIMEOUT + 一行日志（偏差 4 / 7）。
 std::uint32_t waitOne(X86& cpu, std::uint32_t h, std::uint32_t timeout, const char* api) {
+    // ★ 方案 D：音频喂料线程的句柄由泵表达，不是 SyncObj。真机这里会阻塞到线程退出；
+    //   泵是单执行流，join 的语义 = "把退出事件消费掉、此后不再写 guest 环"（见 audio.h）。
+    //   引擎的关机路径先 SetEvent(quit) 再 WaitForSingleObject(thread,3000)，所以这里不需要
+    //   再跑 fill；直接置 exited 并返回 WAIT_OBJECT_0，避免 Release pDS 之后泵还写（UAF）。
+    if (cpu.audio && cpu.audio->isFeederHandle(h)) {
+        cpu.audio->joinFeeder();
+        return kWaitObject0;
+    }
     SyncObj* obj = syncOf(cpu, h, 0, api);
     if (!obj) return kWaitFailed;
     // 互斥量的递归获取：已经由本线程持有时不必等（真机同样立即成功）
@@ -1109,10 +1122,21 @@ void shimCreateThread(X86& cpu, ShimCall& call) {
     entry->access = kThreadAllAccess;
     entry->destroy = &destroyPseudoThread;
     if (id_out != 0) cpu.mem->wr32(id_out, thread->id);
-    shimLog("kernel32", "CreateThread",
-            "伪线程 #%u（start=0x%08X param=0x%08X flags=0x%08X）⇒ 句柄 0x%08X；"
-            "**不执行 start routine**（SCOPE §1 伪线程；音频 silent / 视频 skip）",
-            thread->id, start, param, flags, h);
+    // ★ 方案 D：音频喂料线程 `sub_4B5AA0` 不执行 guest 线程体，而是登记成"泵"：
+    //   start routine 里的 12 段 native + 1 段 guest（0x4B5B03 call sub_4B6C30）由
+    //   AudioEngine 在块边界重排。⛔ 不建第二栈 / 第二宿主线程。
+    const bool audio_owned = cpu.audio && cpu.audio->registerFeeder(start, param, thread->id, h);
+    if (audio_owned) {
+        shimLog("kernel32", "CreateThread",
+                "音频喂料线程 #%u（start=0x%08X param=0x%08X flags=0x%08X）⇒ 句柄 0x%08X；"
+                "**方案 D：不执行 guest 线程体，由 AudioEngine 泵接管**（见 audio.h）",
+                thread->id, start, param, flags, h);
+    } else {
+        shimLog("kernel32", "CreateThread",
+                "伪线程 #%u（start=0x%08X param=0x%08X flags=0x%08X）⇒ 句柄 0x%08X；"
+                "**不执行 start routine**（SCOPE §1 伪线程；音频 silent / 视频 skip）",
+                thread->id, start, param, flags, h);
+    }
     call.result = h;
 }
 
@@ -1131,6 +1155,14 @@ void shimResumeThread(X86& cpu, ShimCall& call) {
     }
     const std::uint32_t previous = thread->suspend_count;
     if (thread->suspend_count > 0) --thread->suspend_count;
+    if (cpu.audio && cpu.audio->isFeederHandle(h)) {
+        // ★ 方案 D：ResumeThread 的语义 = 泵从"登记"变成"可处理通知"。
+        if (thread->suspend_count == 0) cpu.audio->resumeFeeder();
+        shimLog("kernel32", "ResumeThread", "音频喂料线程 #%u 的挂起计数 %u ⇒ %u（泵 %s）", thread->id,
+                previous, thread->suspend_count, thread->suspend_count == 0 ? "已启动" : "仍挂起");
+        call.result = previous;
+        return;
+    }
     shimLog("kernel32", "ResumeThread", "伪线程 #%u 的挂起计数 %u ⇒ %u（start routine 仍不执行）",
             thread->id, previous, thread->suspend_count);
     call.result = previous;
@@ -1209,6 +1241,54 @@ void shimSleep(X86& cpu, ShimCall& call) {
 }
 
 }  // namespace
+
+// =======================================================================================
+// 以指定 guest 线程身份进入 / 离开临界区（方案 D 的音频泵专用；见 runtime/sync_guest.h）
+// =======================================================================================
+std::uint32_t guestCriticalSectionOwner(X86& cpu, std::uint32_t ea) {
+    if (!cpu.mem || !cpu.mem->committed(ea + kCsOwningThread, 4)) return 0;
+    return cpu.mem->rd32(ea + kCsOwningThread);
+}
+
+bool guestEnterCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err) {
+    if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) {
+        if (err) *err = "临界区不在已提交内存里";
+        return false;
+    }
+    const std::uint32_t rc = cpu.mem->rd32(ea + kCsRecursionCount);
+    if (rc == 0) {
+        cpu.mem->wr32(ea + kCsOwningThread, owner_thread);
+        cpu.mem->wr32(ea + kCsRecursionCount, 1);
+        return true;
+    }
+    const std::uint32_t owner = cpu.mem->rd32(ea + kCsOwningThread);
+    if (owner != owner_thread) {
+        if (err) *err = "临界区已被 thread 0x" + std::to_string(owner) + " 持有";
+        return false;
+    }
+    cpu.mem->wr32(ea + kCsRecursionCount, rc + 1);
+    return true;
+}
+
+bool guestLeaveCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err) {
+    if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) {
+        if (err) *err = "临界区不在已提交内存里";
+        return false;
+    }
+    const std::uint32_t rc = cpu.mem->rd32(ea + kCsRecursionCount);
+    if (rc == 0) {
+        if (err) *err = "RecursionCount 已经是 0（Leave 没有配对的 Enter）";
+        return false;
+    }
+    const std::uint32_t owner = cpu.mem->rd32(ea + kCsOwningThread);
+    if (owner != owner_thread) {
+        if (err) *err = "临界区的拥有者是 0x" + std::to_string(owner) + "，不是 0x" + std::to_string(owner_thread);
+        return false;
+    }
+    cpu.mem->wr32(ea + kCsRecursionCount, rc - 1);
+    if (rc - 1 == 0) cpu.mem->wr32(ea + kCsOwningThread, 0);
+    return true;
+}
 
 void registerSyncShims(ShimRegistry& shims) {
     // ---- 临界区（可重入；SpinCount @ +0x14，见偏差 1）----

@@ -88,6 +88,8 @@ void usage() {
         "  --present-vsync 0|1       窗口垂直同步（缺省 0；1 会改变墙钟）\n"
         "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
         "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
+        "  --audio off|sdl|virtual  音频后端（缺省 sdl = 真设备；virtual = 确定性设备时钟；off = silent）\n"
+        "  --audio-dump <path>  把混音结果写成 WAV（44.1k/16/2；与 sdl 同时用 = tee）\n"
         "  --raster <mode>    auto（缺省）/ cpu / gpu：D3D9 fixed-function 光栅化后端\n"
         "                      auto = headless⇒cpu、window⇒gpu；window 下 GPU 初始化失败 ⇒ exit 2\n"
         "  --gpu-strict       GPU 启用时，运行结束若仍有 Draw/ sprite 回退 CPU ⇒ 打印错误并 exit 3\n"
@@ -147,6 +149,10 @@ int main(int argc, char** argv) {
     std::string present_mode = "headless";
     std::string present_driver = lift::SdlWindowOptions{}.driver_list;
     std::string present_screenshot;
+    // ★ 方案 D：默认开 SDL 音频（能听到）；`--audio=virtual` = 确定性设备时钟（CTest / dump）；
+    //   `--audio=off` = 旧 silent 口径。`--audio-dump` 与真输出可同时用（tee）。
+    std::string audio_mode = "sdl";
+    std::string audio_dump;
     int present_vsync = 0;
     bool present_hidden = false;
     bool present_driver_set = false;
@@ -246,6 +252,18 @@ int main(int argc, char** argv) {
             present_screenshot_set = true;
             if (present_screenshot.empty()) {
                 std::fprintf(stderr, "--present-screenshot 需要一个非空路径\n");
+                return 2;
+            }
+        } else if (std::strcmp(a, "--audio") == 0 && i + 1 < arg_count) {
+            audio_mode = args[++i];
+            if (audio_mode != "off" && audio_mode != "sdl" && audio_mode != "virtual") {
+                std::fprintf(stderr, "--audio 只能是 off / sdl / virtual（收到 %s）\n", audio_mode.c_str());
+                return 2;
+            }
+        } else if (std::strcmp(a, "--audio-dump") == 0 && i + 1 < arg_count) {
+            audio_dump = args[++i];
+            if (audio_dump.empty()) {
+                std::fprintf(stderr, "--audio-dump 需要一个非空路径\n");
                 return 2;
             }
         } else if (std::strcmp(a, "--raster") == 0 && i + 1 < arg_count) {
@@ -466,7 +484,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "emulator-lift: 建 guest 地址空间失败：%s\n", err.c_str());
         return 1;
     }
-    if (game_dir.empty()) game_dir = envOr("AMAYUI_GAME_DIR");
+    {
+        const lift::AudioMode am = audio_mode == "off" ? lift::AudioMode::Off
+                                  : audio_mode == "virtual" ? lift::AudioMode::Virtual
+                                                            : lift::AudioMode::Sdl;
+        if (!machine.configureAudio(am, audio_dump, &err)) {
+            std::fprintf(stderr, "emulator-lift: 音频配置失败：%s\n", err.c_str());
+            return 2;
+        }
+    }    if (game_dir.empty()) game_dir = envOr("AMAYUI_GAME_DIR");
     if (game_dir.empty()) game_dir = envOr("AMAYUI_INSTALL");
     if (game_dir.empty()) {
         const char* fallback = "E:\\Games\\Eushully\\天結";

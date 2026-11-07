@@ -34,6 +34,7 @@ class ComRegistry;
 class GuestCallStack;
 class WindowManager;
 class FontEngine;
+class AudioEngine;
 
 // ★ SMC 钩子：`X86::writeMem` 在类定义之前，不能直接调 `BlockCache::noteWrite`（不完整类型）。
 //   `cache == nullptr` 时（测试里没装缓存）是 no-op。
@@ -196,6 +197,10 @@ struct X86 {
     WindowManager* windows = nullptr;
     // ★ P2：宿主字体层（FreeType 桥 + 合成字形接缝）；gdi32 的字体 / 文本 shim 从这里取。
     FontEngine* fonts = nullptr;
+    // ★ 方案 D（docs/thread-model-feasibility.md §5.1）：音频设备模型 + 喂料泵。
+    //   nullptr / mode=Off ⇒ 旧 silent 口径；kernel32_sync 的 CreateThread/SetEvent/Wait 钩子
+    //   只在 `audio->enabled()` 时接管音频喂料线程。
+    AudioEngine* audio = nullptr;
 
     // ---- 最近执行过的指令（诊断用环形缓冲；停在 eip=0 这类地方时能看见"从哪来"）----
     static constexpr int kLastInsns = 24;
