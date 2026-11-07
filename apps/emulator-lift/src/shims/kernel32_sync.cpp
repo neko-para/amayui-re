@@ -68,6 +68,7 @@
 #include <vector>
 
 #include "runtime/audio.h"
+#include "runtime/critical_sections.h"
 #include "runtime/sync_guest.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
@@ -287,11 +288,19 @@ void initCriticalSection(X86& cpu, ShimCall& call, std::uint32_t spin, const cha
     if (ea == 0) shimAbort("kernel32", api, "lpCriticalSection 为 NULL");
     cpu.mem->fillBytes(ea, 0, kCsSize);                 // 前 0x18 字节清零
     cpu.mem->wr32(ea + kCsSpinCount, spin);              // SpinCount @ +0x14（偏差 1）
+    if (cpu.cs_table) cpu.cs_table->ensure(ea);
     ++cpu.shim.critical_section_count;                   // 统计（Machine 诊断用）
     call.result = 1;                                     // InitializeCriticalSection* 返回 BOOL
 }
 
 void enterCriticalSection(X86& cpu, std::uint32_t ea, const char* api) {
+    if (cpu.cs_table) {
+        std::string err;
+        if (!cpu.cs_table->enter(cpu, ea, cpu.shim.thread_id, /*blocking=*/true, &err)) {
+            shimAbort("kernel32", api, "0x%08X 进入失败：%s", ea, err.c_str());
+        }
+        return;
+    }
     const std::uint32_t rc = cpu.mem->rd32(ea + kCsRecursionCount);
     if (rc == 0) {
         cpu.mem->wr32(ea + kCsOwningThread, cpu.shim.thread_id);
@@ -331,6 +340,14 @@ void shimLeaveCriticalSection(X86& cpu, ShimCall& call) {
     requireMem(cpu, "LeaveCriticalSection");
     const std::uint32_t ea = call.u32(0);
     if (ea == 0) shimAbort("kernel32", "LeaveCriticalSection", "lpCriticalSection 为 NULL");
+    if (cpu.cs_table) {
+        std::string err;
+        if (!cpu.cs_table->leave(cpu, ea, cpu.shim.thread_id, &err)) {
+            shimAbort("kernel32", "LeaveCriticalSection", "0x%08X 离开失败：%s", ea, err.c_str());
+        }
+        call.result = 0;
+        return;
+    }
     const std::uint32_t rc = cpu.mem->rd32(ea + kCsRecursionCount);
     if (rc == 0) {
         shimAbort("kernel32", "LeaveCriticalSection",
@@ -353,6 +370,11 @@ void shimTryEnterCriticalSection(X86& cpu, ShimCall& call) {
     requireMem(cpu, "TryEnterCriticalSection");
     const std::uint32_t ea = call.u32(0);
     if (ea == 0) shimAbort("kernel32", "TryEnterCriticalSection", "lpCriticalSection 为 NULL");
+    if (cpu.cs_table) {
+        std::string err;
+        call.result = cpu.cs_table->enter(cpu, ea, cpu.shim.thread_id, /*blocking=*/false, &err) ? 1u : 0u;
+        return;
+    }
     enterCriticalSection(cpu, ea, "TryEnterCriticalSection");
     call.result = 1;  // 偏差 3：单线程 guest ⇒ 永远能进（真的进了，状态与 Enter 一致）
 }
@@ -362,6 +384,7 @@ void shimDeleteCriticalSection(X86& cpu, ShimCall& call) {
     const std::uint32_t ea = call.u32(0);
     if (ea == 0) shimAbort("kernel32", "DeleteCriticalSection", "lpCriticalSection 为 NULL");
     cpu.mem->fillBytes(ea, 0, kCsSize);
+    if (cpu.cs_table) cpu.cs_table->erase(ea);
     if (cpu.shim.critical_section_count > 0) --cpu.shim.critical_section_count;
     call.result = 0;
 }
@@ -1127,6 +1150,7 @@ void shimCreateThread(X86& cpu, ShimCall& call) {
     //   AudioEngine 在块边界重排。⛔ 不建第二栈 / 第二宿主线程。
     const bool audio_owned = cpu.audio && cpu.audio->registerFeeder(start, param, thread->id, h);
     if (audio_owned) {
+        if (thread->suspend_count == 0) cpu.audio->resumeFeeder();
         shimLog("kernel32", "CreateThread",
                 "音频喂料线程 #%u（start=0x%08X param=0x%08X flags=0x%08X）⇒ 句柄 0x%08X；"
                 "**方案 D：不执行 guest 线程体，由 AudioEngine 泵接管**（见 audio.h）",
@@ -1243,7 +1267,104 @@ void shimSleep(X86& cpu, ShimCall& call) {
 }  // namespace
 
 // =======================================================================================
-// 以指定 guest 线程身份进入 / 离开临界区（方案 D 的音频泵专用；见 runtime/sync_guest.h）
+// CriticalSectionTable：guest CRITICAL_SECTION 的宿主递归锁（方案 C）
+// =======================================================================================
+void CriticalSectionTable::ensure(std::uint32_t ea) {
+    std::lock_guard<std::mutex> g(map_mutex_);
+    if (locks_.find(ea) == locks_.end()) locks_.emplace(ea, std::make_shared<std::recursive_mutex>());
+}
+
+void CriticalSectionTable::erase(std::uint32_t ea) {
+    std::lock_guard<std::mutex> g(map_mutex_);
+    locks_.erase(ea);
+}
+
+std::shared_ptr<std::recursive_mutex> CriticalSectionTable::lockFor(std::uint32_t ea) {
+    std::lock_guard<std::mutex> g(map_mutex_);
+    auto it = locks_.find(ea);
+    if (it != locks_.end()) return it->second;
+    auto created = std::make_shared<std::recursive_mutex>();
+    locks_.emplace(ea, created);
+    return created;
+}
+
+bool CriticalSectionTable::enter(X86& cpu, std::uint32_t ea, std::uint32_t thread_id, bool blocking,
+                                 std::string* err) {
+    if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) {
+        if (err) *err = "临界区不在已提交内存里";
+        return false;
+    }
+    auto m = lockFor(ea);
+    if (blocking) {
+        m->lock();
+    } else if (!m->try_lock()) {
+        return false;  // TryEnter：被别人持有 ⇒ FALSE（不写 guest 字段）
+    }
+    const std::uint32_t rc = cpu.mem->rd32(ea + kCsRecursionCount);
+    if (rc == 0) {
+        cpu.mem->wr32(ea + kCsOwningThread, thread_id);
+        cpu.mem->wr32(ea + kCsRecursionCount, 1);
+        return true;
+    }
+    const std::uint32_t owner = cpu.mem->rd32(ea + kCsOwningThread);
+    if (owner != thread_id) {
+        m->unlock();
+        if (err) *err = "临界区的 guest 账本与宿主锁不一致（owner=0x" + std::to_string(owner) + "）";
+        return false;
+    }
+    cpu.mem->wr32(ea + kCsRecursionCount, rc + 1);
+    return true;
+}
+
+void CriticalSectionTable::releaseAll(X86& cpu, std::uint32_t thread_id) {
+    std::vector<std::pair<std::uint32_t, std::shared_ptr<std::recursive_mutex>>> held;
+    {
+        std::lock_guard<std::mutex> g(map_mutex_);
+        for (const auto& kv : locks_) held.emplace_back(kv.first, kv.second);
+    }
+    for (const auto& kv : held) {
+        const std::uint32_t ea = kv.first;
+        if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) continue;
+        if (cpu.mem->rd32(ea + kCsOwningThread) != thread_id) continue;
+        const std::uint32_t rc = cpu.mem->rd32(ea + kCsRecursionCount);
+        cpu.mem->wr32(ea + kCsRecursionCount, 0);
+        cpu.mem->wr32(ea + kCsOwningThread, 0);
+        for (std::uint32_t i = 0; i < rc; ++i) kv.second->unlock();
+    }
+}
+
+bool CriticalSectionTable::leave(X86& cpu, std::uint32_t ea, std::uint32_t thread_id, std::string* err) {    if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) {
+        if (err) *err = "临界区不在已提交内存里";
+        return false;
+    }
+    const std::uint32_t rc = cpu.mem->rd32(ea + kCsRecursionCount);
+    if (rc == 0) {
+        if (err) *err = "RecursionCount 已经是 0（Leave 没有配对的 Enter）";
+        return false;
+    }
+    const std::uint32_t owner = cpu.mem->rd32(ea + kCsOwningThread);
+    if (owner != thread_id) {
+        if (err) *err = "临界区的拥有者是 0x" + std::to_string(owner) + "，不是 0x" + std::to_string(thread_id);
+        return false;
+    }
+    std::shared_ptr<std::recursive_mutex> m;
+    {
+        std::lock_guard<std::mutex> g(map_mutex_);
+        auto it = locks_.find(ea);
+        if (it == locks_.end()) {
+            if (err) *err = "临界区没有对应的宿主锁";
+            return false;
+        }
+        m = it->second;
+    }
+    cpu.mem->wr32(ea + kCsRecursionCount, rc - 1);
+    if (rc - 1 == 0) cpu.mem->wr32(ea + kCsOwningThread, 0);
+    m->unlock();
+    return true;
+}
+
+// =======================================================================================
+// 以指定 guest 线程身份进入 / 离开临界区（方案 D 的音频泵 / 方案 C 的 feeder 共用）
 // =======================================================================================
 std::uint32_t guestCriticalSectionOwner(X86& cpu, std::uint32_t ea) {
     if (!cpu.mem || !cpu.mem->committed(ea + kCsOwningThread, 4)) return 0;
@@ -1251,6 +1372,7 @@ std::uint32_t guestCriticalSectionOwner(X86& cpu, std::uint32_t ea) {
 }
 
 bool guestEnterCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err) {
+    if (cpu.cs_table) return cpu.cs_table->enter(cpu, ea, owner_thread, /*blocking=*/true, err);
     if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) {
         if (err) *err = "临界区不在已提交内存里";
         return false;
@@ -1271,6 +1393,7 @@ bool guestEnterCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner
 }
 
 bool guestLeaveCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err) {
+    if (cpu.cs_table) return cpu.cs_table->leave(cpu, ea, owner_thread, err);
     if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) {
         if (err) *err = "临界区不在已提交内存里";
         return false;

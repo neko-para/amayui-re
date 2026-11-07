@@ -90,6 +90,8 @@ void Machine::wire() {
     cpu_.fonts = &fonts_;
     audio_.attach(&cpu_, &mem_, &clock_);
     cpu_.audio = &audio_;
+    cpu_.cs_table = &critical_sections_;
+    cpu_.native_overrides = &overrides_;
     cpu_.fpu.reset();
 }
 

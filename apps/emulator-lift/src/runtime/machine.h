@@ -18,6 +18,7 @@
 #include "runtime/clock.h"
 #include "runtime/audio.h"
 #include "runtime/com.h"
+#include "runtime/critical_sections.h"
 #include "runtime/font.h"
 #include "runtime/present.h"
 #include "runtime/surface.h"
@@ -219,6 +220,7 @@ private:
     GuestHeap heap_;
     HandleTable handles_;
     GuestCallStack guest_calls_;
+    CriticalSectionTable critical_sections_;
     NativeOverrideTable overrides_;
     NativeBlockTable block_overrides_;
     WindowManager windows_;

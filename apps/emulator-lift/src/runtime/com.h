@@ -33,6 +33,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -96,8 +97,8 @@ public:
     std::uint32_t refCount(std::uint32_t obj) const;  // 未知对象 ⇒ 0
     std::uint32_t vtableOf(std::uint32_t obj) const;
     const char* ifaceOf(std::uint32_t obj) const;  // 未知对象 ⇒ nullptr
-    std::size_t objectCount() const { return objects_.size(); }
-    std::size_t methodCount() const { return methods_.size(); }
+    std::size_t objectCount() const;
+    std::size_t methodCount() const;
 
 private:
     struct Object {
@@ -127,6 +128,9 @@ private:
 
     std::unordered_map<std::uint32_t, Object> objects_;        // key = obj guest EA
     std::unordered_map<std::uint32_t, MethodEntry> methods_;   // key = stub EA（桩页地址）
+    // ★ 方案 C：feeder 线程与主线程都会查/建 COM 对象（主线程建 SE、feeder 查 buffer 状态）。
+    //   宿主表必须真互斥；dispatch 里会重入 userOf/release ⇒ recursive。
+    mutable std::recursive_mutex mutex_;
 };
 
 }  // namespace lift

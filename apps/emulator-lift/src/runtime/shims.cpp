@@ -78,6 +78,7 @@ std::string normalizeModule(std::string_view s) {
 }  // namespace
 
 void ShimRegistry::add(const char* module, const char* name, Conv conv, int argc, ShimFn fn) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     ShimDef def;
     def.module = module ? module : "";
     def.name = name ? name : "";
@@ -90,6 +91,7 @@ void ShimRegistry::add(const char* module, const char* name, Conv conv, int argc
 }
 
 void ShimRegistry::addUnimplemented(const char* module, const char* name, const char* reason) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     ShimDef def;
     def.module = module ? module : "";
     def.name = name ? name : "";
@@ -104,6 +106,7 @@ void ShimRegistry::addUnimplemented(const char* module, const char* name, const 
 
 void ShimRegistry::addStub(const char* module, const char* name, Conv conv, int argc, ShimFn fn,
                            const char* reason) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     ShimDef def;
     def.module = module ? module : "";
     def.name = name ? name : "";
@@ -117,6 +120,7 @@ void ShimRegistry::addStub(const char* module, const char* name, Conv conv, int 
 }
 
 void ShimRegistry::configureStubPage(std::uint32_t page, std::uint32_t slots) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (next_slot_ != 0) {
         // ⛔ 已经发过地址了：重置槽位会让新 def 拿到**别人已占的 EA**（两个 def 抢同一个 stub）。
         std::fprintf(stderr,
@@ -133,6 +137,7 @@ void ShimRegistry::configureStubPage(std::uint32_t page, std::uint32_t slots) {
 }
 
 ShimDef* ShimRegistry::addRuntime(const char* module, const char* name, Conv conv, int argc, ShimFn fn) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::string mod = module ? module : "";
     const std::string nm = name ? name : "";
     // ① 幂等：已经登记过、而且**已经有唯一地址** ⇒ 原样返回（⛔ 不覆盖 stub_ea、不换实现）
@@ -186,6 +191,7 @@ ShimDef* ShimRegistry::addRuntime(const char* module, const char* name, Conv con
 }
 
 const ShimDef* ShimRegistry::find(const char* module, const char* name) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::string m = normalizeModule(module ? module : "");
     for (const ShimDef& d : defs_) {
         if (normalizeModule(d.module) == m && equalsIgnoreCase(d.name, name ? name : "")) return &d;
@@ -194,6 +200,7 @@ const ShimDef* ShimRegistry::find(const char* module, const char* name) const {
 }
 
 ShimDef* ShimRegistry::findMutable(const char* module, const char* name) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::string m = normalizeModule(module ? module : "");
     for (ShimDef& d : defs_) {
         if (normalizeModule(d.module) == m && equalsIgnoreCase(d.name, name ? name : "")) return &d;
@@ -202,15 +209,37 @@ ShimDef* ShimRegistry::findMutable(const char* module, const char* name) {
 }
 
 const ShimDef* ShimRegistry::byStubEa(std::uint32_t ea) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (const ShimDef& d : defs_)
         if (d.stub_ea == ea && ea != 0) return &d;
     return nullptr;
 }
 
-const ShimDef* ShimRegistry::byId(std::uint32_t id) const { return id < defs_.size() ? &defs_[id] : nullptr; }
+std::uint32_t ShimRegistry::idForStub(std::uint32_t ea) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (const ShimDef& d : defs_)
+        if (d.stub_ea == ea && ea != 0) return d.id;
+    return 0;
+}
+
+const ShimDef* ShimRegistry::byId(std::uint32_t id) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return id < defs_.size() ? &defs_[id] : nullptr;
+}
+
+std::vector<ShimDef> ShimRegistry::snapshot() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return defs_;
+}
+
+std::size_t ShimRegistry::size() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return defs_.size();
+}
 
 bool ShimRegistry::bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim_page, std::uint32_t shim_slots,
                         std::string* err) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::uint32_t slot = 0;
     std::size_t unresolved = 0;
     for (const PeImportInfo& imp : img.imports) {
@@ -267,6 +296,7 @@ bool ShimRegistry::bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim
 }
 
 std::vector<const ShimDef*> ShimRegistry::importedButUnimplemented() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<const ShimDef*> out;
     for (const ShimDef& d : defs_)
         if (d.imported && !d.fn) out.push_back(&d);
@@ -278,6 +308,7 @@ std::vector<const ShimDef*> ShimRegistry::importedButUnimplemented() const {
 }
 
 std::vector<const ShimDef*> ShimRegistry::calledUnimplemented() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<const ShimDef*> out;
     for (const ShimDef& d : defs_)
         if (d.called && !d.fn) out.push_back(&d);
@@ -285,40 +316,62 @@ std::vector<const ShimDef*> ShimRegistry::calledUnimplemented() const {
 }
 
 std::size_t ShimRegistry::importedCount() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::size_t n = 0;
     for (const ShimDef& d : defs_)
         if (d.imported) ++n;
     return n;
 }
 
+bool ShimRegistry::invokeById(X86& cpu, std::uint32_t id) {
+    ShimDef copy;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (id >= defs_.size()) return false;
+        copy = defs_[id];
+    }
+    invoke(cpu, copy);
+    return true;
+}
+
 void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
+    // ★ 方案 C：**不要**在 fn 执行期间持有 shims 锁（主线程的 Present/D3D shim 可能很长，
+    //   feeder 的 Lock/Unlock 会被它卡住）。只锁住"拷贝 def + 计数"，fn 在锁外跑。
+    ShimDef local;
+    bool trace_on = false;
+    bool timing_on = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        local = def;
+        trace_on = trace_;
+        timing_on = timing_;
+        if (local.id < defs_.size()) {
+            defs_[local.id].called = true;
+            ++defs_[local.id].call_count;
+        }
+    }
     const std::uint32_t ret_ea = cpu.mem->rd32(cpu.esp());
     ShimCall call;
     call.cpu = &cpu;
-    call.conv = def.conv;
-    call.argc = def.argc;
+    call.conv = local.conv;
+    call.argc = local.argc;
     call.ret_ea = ret_ea;
-    // ★ 运行期注册的 thunk（COM vtable 槽）靠它认出"我是哪个槽"（见 shims.h 的 ShimCall::def）
-    call.def = &def;
-    call.stdcall_bytes = (def.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(def.argc) * 4u : 0u;
+    // ★ 运行期注册的 thunk（COM vtable 槽）靠它认出"我是哪个槽"（见 shims.h 的 ShimCall::def）。
+    //   指向**栈上的拷贝**：fn 执行期间不会因为 addRuntime 扩容而悬垂。
+    call.def = &local;
+    call.stdcall_bytes = (local.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(local.argc) * 4u : 0u;
 
-    // ★ 下面 `fn` 可能调用 `addRuntime`（COM 方法 / 运行期导出）⇒ `defs_` 可能重新分配，
-    //   `def` 引用随时失效。trace 需要的字段**先拷出来**（trace 只在 shim 返回后使用）。
-    const std::uint32_t trace_id = def.id;
-    const std::string trace_module = def.module;
-    const std::string trace_name = def.name;
-    const int trace_argc = def.argc;
-    const bool trace_on = trace_;
+    const std::uint32_t trace_id = local.id;
+    const std::string trace_module = local.module;
+    const std::string trace_name = local.name;
+    const int trace_argc = local.argc;
 
-    def.called = true;
-    ++def.call_count;
-
-    if (!def.fn) {
+    if (!local.fn) {
         // **响亮失败**：未实现的导入。这里是 A5 缺口的执行期落点。
         std::fprintf(stderr, "\n=== unimplemented import (base gap) ===\n");
-        std::fprintf(stderr, "  %s!%s  (stub 0x%08X, conv=%s, argc=%d)\n", def.module.c_str(), def.name.c_str(),
-                     def.stub_ea, convName(def.conv), def.argc);
-        std::fprintf(stderr, "  reason: %s\n", def.reason ? def.reason : "(未登记理由)");
+        std::fprintf(stderr, "  %s!%s  (stub 0x%08X, conv=%s, argc=%d)\n", local.module.c_str(), local.name.c_str(),
+                     local.stub_ea, convName(local.conv), local.argc);
+        std::fprintf(stderr, "  reason: %s\n", local.reason ? local.reason : "(未登记理由)");
         std::fprintf(stderr, "  返回地址 = 0x%08X\n", ret_ea);
         dumpRegisters(cpu, stderr);
         dumpGuestStack(cpu, stderr, 24);
@@ -328,21 +381,19 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
         return;
     }
 
-    const bool timing_on = timing_;
     const auto time_begin = timing_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    def.fn(cpu, call);
+    local.fn(cpu, call);
     if (timing_on) {
-        // ★ `fn` 可能 addRuntime 让 `def` 悬垂；id 是稳定序号，按 id 回查。
         const std::uint64_t ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - time_begin)
                 .count());
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (trace_id < defs_.size()) defs_[trace_id].ns += ns;
     }
     cpu.eax() = call.result;
 
     if (trace_on) {
         // ★ 确定性：只打参数原始字 + 返回值，不打时间、不打宿主地址
-        // ★ 用**已拷贝**的 id/module/name/argc：`fn` 里 addRuntime 可能让 `def` 悬垂。
         std::fprintf(trace_out_, "[shim] %3u %s!%s(", trace_id, trace_module.c_str(), trace_name.c_str());
         for (int i = 0; i < trace_argc; ++i) {
             std::fprintf(trace_out_, "%s%08X", i ? "," : "", call.u32(i));

@@ -35,6 +35,8 @@ class GuestCallStack;
 class WindowManager;
 class FontEngine;
 class AudioEngine;
+class CriticalSectionTable;
+class NativeOverrideTable;
 
 // ★ SMC 钩子：`X86::writeMem` 在类定义之前，不能直接调 `BlockCache::noteWrite`（不完整类型）。
 //   `cache == nullptr` 时（测试里没装缓存）是 no-op。
@@ -201,6 +203,12 @@ struct X86 {
     //   nullptr / mode=Off ⇒ 旧 silent 口径；kernel32_sync 的 CreateThread/SetEvent/Wait 钩子
     //   只在 `audio->enabled()` 时接管音频喂料线程。
     AudioEngine* audio = nullptr;
+    // ★ 方案 C：guest CRITICAL_SECTION 的宿主递归锁（真线程 feeder 与主线程共用）。
+    //   nullptr ⇒ 旧的单线程账本口径（纯档夹具 / 未装配）。
+    CriticalSectionTable* cs_table = nullptr;
+    // ★ 方案 C：feeder 的私有 dispatcher 也要跑 `--native-overrides`（_memcpy/_memset 在
+    //   Ogg 解码里是热路径）；指向 Machine 的只读表，AudioEngine 在启动线程时**拷贝**一份。
+    const NativeOverrideTable* native_overrides = nullptr;
 
     // ---- 最近执行过的指令（诊断用环形缓冲；停在 eip=0 这类地方时能看见"从哪来"）----
     static constexpr int kLastInsns = 24;

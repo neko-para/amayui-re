@@ -110,17 +110,23 @@
   `CMemAllocator` 的信号量是 DirectShow 分配器；`Concurrency::...LoadLibraryAndCreateThread` 只有定义、无调用引用。
 - **游戏逻辑（VM / 脚本 / 场景 / 存档）在主线程**；音频线程会改音频状态（临界区），
   视频线程只处理样本 / 缓冲。
-- ★ **实现口径（2026-11-07 音频方案 D；用户裁决）**：guest VM 仍**单线程**；音频喂料线程
-  `CreateThread(sub_4B5AA0)` 被 `AudioEngine` 接管 —— **不执行 guest 线程体**，而是把线程体里的
-  12 段 native + 唯一的 `0x4B5B03 call sub_4B6C30` 在 dispatcher 的**块边界**重排成泵。
-  ⛔ 不建第二宿主线程、不建第二 guest 栈；泵进入/退出 `sub_4B6C30` 时做整份 guest 上下文交换
-  （GPR / EFLAGS / x87 / XMM / 段 / fs/gs / thread_id / last_error）。音频设备模型（游标 / 4 个位置
-  通知 / 混音 / SDL3 输出）在宿主；**PCM 仍由 guest 解码器产生**（见 §4.4）。
+- ★ **实现口径（2026-11-07 音频方案 C；用户裁决）**：guest VM 的游戏逻辑仍在**主线程**；
+  音频喂料线程 `CreateThread(sub_4B5AA0)` 被 `AudioEngine` 接管成**真宿主线程**：
+  - **feeder 线程**有自己的 `X86`（GPR/x87/XMM/EIP/ESP/FS/thread_id）、专用 guest 栈、
+    私有 `BlockCache`/`Decoder`，直接在自己的线程里跑 `sub_4B6C30`；
+  - **mixer 线程**独立按设备游标读 guest 环并推 SDL，主线程卡在 Present/长 shim 也不会断音频；
+  - 同步边界就是引擎自己的**每槽 `CRITICAL_SECTION`**：guest 的 `Enter/LeaveCriticalSection`
+    现在映射到宿主 per-EA 递归锁（`CriticalSectionTable`），feeder 会**真的阻塞**；
+    `ComRegistry` / `ShimRegistry` 的宿主表加锁；设备模型用 `AudioEngine::mutex_`。
+  - `--audio=sdl` 且宿主时钟（窗口模式/`--real-time`）⇒ 方案 C；否则（`--audio=virtual`、
+    纯 CTest）自动回退到方案 D 的主线程泵，保持确定性。
 - 其余服务线程（DirectShow 读文件 / MF 回调）仍是**伪线程**：`CreateThread` 只发线程句柄，
   **不执行 start routine**；`ResumeThread` / `SetThreadPriority` / 亲和性只返回形态值。
-  因此"创建了服务线程"不等于"线程体在跑" —— 需要线程体副作用的路径会停在对应 trap，⛔ 不静默假装。
-- ⛔ **仍不把 guest 代码放多线程**：真并行需要的 x86 TSO 软模拟与同步对象层没有做（见
-  `docs/thread-model-feasibility.md`）；方案 D 刻意绕开这一整层。
+- ⛔ **不是通用多线程 VM**：只有音频 feeder/mixer 两条宿主线程；游戏 VM/脚本/存档仍主线程。
+  x86 TSO 没有做全局软模拟 —— 音频的并发只依赖引擎自己的每槽 CS 协议 + 环形缓冲"读当前圈 /
+  写刚放完圈"的不重叠；`Interlocked` 的在飞计数在 CS 内。arm64 上这条窄路径由宿主锁的
+  acquire/release 提供顺序；若将来把更多 guest 代码放线程，才需要完整 TSO 层。
+  （`fs_base` 仍指向主线程 TEB；fill 内 `TlsSetValue` / `fs:[0]` SEH 的偏差见音频文档。）
 
 ### 2.6 内存模型：静态镜像 + guest 堆
 
@@ -495,7 +501,7 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   （见 §4.2b）；`--gpu-strict` 把"还有回退"变成 exit 3，而不是靠读日志判断。
 - 两个环境变量都只读、默认关；⛔ 不改变执行结果，也不进 A4 的逐字节基线。
 
-## 4.4 音频（方案 D：设备模型 + native 喂料泵）
+## 4.4 音频（方案 C：真 feeder 线程 + 独立 mixer）
 
 ```bash
 # 默认 = SDL3 真设备（能听到）；--audio=off 回到旧 silent；--audio=virtual 用虚拟设备时钟
@@ -508,31 +514,31 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
 
 - **谁产 PCM**：guest 解码器（WAV / Ogg / 逐流格式）。宿主只做"设备游标 + 位置通知 + 逐缓冲格式转换 +
   混音 + SDL3 输出"；⛔ 宿主不重写解码器、不伪造 `sub_4B6C30` 的语义。
-- **谁执行喂料**：`CreateThread(0x4B5AA0)` 登记成 `AudioEngine` 的泵；`ResumeThread` 置 runnable；
-  泵在 dispatcher 块边界处理"设备游标越过通知点"的待办，用 `startNestedGuestCall(0x4B6C30, {quarter}, ecx=stream)`
-  调 guest。线程体（12 段 native）不执行。
-- **单执行流纪律**：一次 fill 期间**不混音、不 pump 窗口消息、不触发 winmm 定时器**（否则会读 guest 环
-  正在写的区间 / 改坏 fill 的 x87 活值）。fill 结束后的块边界再推进设备并启动下一次 fill。
-- **时钟档**：`sdl` = 设备已消费字节（真出声；窗口模式同时 `--real-time`）；`virtual` = `VirtualClock`
-  的 100ns（确定性；CTest / dump）。**`virtual` 不适合当实时吞吐判据**：解释器每条指令走 100ns，
-  一次 fill 的虚拟时间可能远大于它产出的音频时长。窗口模式会强制 `--real-time`（因此 `virtual`
-  在窗口下也走宿主时钟，不再是确定性的）。
+- **谁执行喂料**：`CreateThread(0x4B5AA0)` 登记后，`ResumeThread` 启动**真宿主 feeder 线程**。
+  它有自己的 `X86` / 专用 guest 栈 / 私有 `BlockCache` + `Decoder`，在自己的线程里调
+  `sub_4B6C30`；`--native-overrides` 的 `_memcpy/_memset` 也在 feeder 私有一份。
+- **谁混音**：独立 `mixer` 线程按设备游标读 guest 环并推 `SDL_PutAudioStreamData`。主线程卡在
+  Present / 长 shim 不再导致音频断裂。
+- **同步边界**：引擎自己的**每槽 `CRITICAL_SECTION`** —— guest `Enter/LeaveCriticalSection`
+  映射到宿主 per-EA 递归锁（`CriticalSectionTable`），feeder 会真的阻塞；`ComRegistry` /
+  `ShimRegistry` 的宿主表加锁；设备模型用 `AudioEngine::mutex_`。⛔ 不是全局单令牌：fill 期间
+  mixer / 主线程仍可运行。
+- **时钟档**：`sdl` + 宿主时钟（窗口模式/`--real-time`）= **方案 C 真线程**；`virtual` 或没有
+  `--real-time` 的 sdl = **方案 D 主线程泵**（确定性回退，CTest 用）。窗口模式会强制 `--real-time`。
 - **输出格式固定 48k / 16 bit / 2 ch**；每条缓冲按自己的 `WAVEFORMATEX` 做采样率/声道转换
   （实测引擎会建 44.1k mono SE、48k stereo BGM、44.1k stereo 静音垫）。
 - **通知/游标**：每条缓冲的 `played` 以它自己的 `nAvgBytesPerSec` 折算；通知按位置排序后入队
   （一次推进跨多个点时，⛔ 不能按 quarter 序号入队，否则回绕 0 会排在 3/4 前）。
-- **lead = 600ms**：D 的 fill 期间暂停混音，实测一次 fill ≈ 360ms（RelWithDebInfo），所以队列必须
-  留够一个通知周期；代价是 SE 也有 ~600ms 延迟。`--audio=off` 时零成本。
-- **硬约束**：`lead + fill_wall < L - L/4`（当前 600+370 < 1500ms）。fill 明显变慢或把 lead 调到
-  >1.1s，混音器就会读到 guest 下一圈要覆盖的 1/4 圈；要改 lead 必须同时重测 fill。
-- **join**：`WaitForSingleObject(喂料线程句柄)` 由泵表达（先 SetEvent(quit) 再 wait 的关机路径）；
-  返回 `WAIT_OBJECT_0` 并置 exited，之后不再写 guest 环（防 `Release pDS` 后的 UAF）。
+- **lead**：真线程 **100ms**（mixer 线程独立，fill ≈400ms 不再需要覆盖它）；泵回退 **600ms**。
+  `--audio=off` 时零成本。
+- **join**：`WaitForSingleObject(喂料线程句柄)` = `SetEvent(quit)` + 真 `std::thread::join()`；
+  join 前会 `releaseAll` 主线程持有的 guest CS（防止 feeder 永久阻塞）。返回 `WAIT_OBJECT_0` 后
+  不再写 guest 环（防 `Release pDS` 后的 UAF）。
 - **单次 run**：同一 `Machine` 第二次 `run()` 会拒绝音频并报错（guest DS 对象仍在；⛔ 不静默清空
   设备模型）。需要第二次 run 就新建 `Machine`。
-- **fill 中停止**：`--time-limit` / `--max-insns` 落在 `sub_4B6C30` 中间时 `abortFill()` 回滚
-  `[esp]` / CS / 在飞计数；`r.ea` 仍是真实停点。
 - **CTest**：`audio-device`（`tests/audio.cpp`）覆盖逐缓冲格式 / 通知次序 / dump 逐字节 / 泵的整份
-  上下文交换 / CS 与在飞计数成对收尾。⛔ 它不打开 SDL 设备（pure 档）。
+  上下文交换 / CS 与在飞计数成对收尾。⛔ 它不打开 SDL 设备（pure 档）；真线程路径由真实运行验收
+  （`LIFT_AUDIO_TRACE=1` 打每次 feeder fill 的墙钟）。
 
 ## 5. 真源
 

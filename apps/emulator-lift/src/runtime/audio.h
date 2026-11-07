@@ -1,4 +1,4 @@
-// emulator-lift · 音频设备模型 + 喂料线程 native override（方案 D）
+// emulator-lift · 音频设备模型 + 真 feeder 线程（方案 C；virtual/无 real-time 回退方案 D 泵）
 //
 // ★ 口径（docs/thread-model-feasibility.md §5.1 / docs/audio-feasibility.md）：
 //   - 引擎的音频喂料线程 `sub_4B5AA0` **不真跑**：`CreateThread(0x4B5AA0)` 只登记身份，
@@ -19,18 +19,27 @@
 //   自己的队列，**从不读 guest 内存** ⇒ 即使 arm64 也不需要为音频做内存序模拟。
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "runtime/guest_call.h"
+#include "runtime/native_overrides.h"
 #include "runtime/x86.h"
 
 namespace lift {
 
 class GuestMemory;
 class VirtualClock;
+class Decoder;
+class BlockCache;
 enum class LogLevel : int;
 
 enum class AudioMode : std::uint8_t {
@@ -94,6 +103,7 @@ public:
     void end();                    // 关闭设备、回填 WAV 大小；幂等
     bool enabled() const { return mode_ != AudioMode::Off; }
     AudioMode mode() const { return mode_; }
+    bool threadMode() const { return thread_mode_; }
     const AudioStats& stats() const { return stats_; }
     const std::string& lastError() const { return last_error_; }
 
@@ -132,6 +142,8 @@ public:
     const std::deque<AudioNotifyEvent>& pending() const { return pending_; }
 
     void dumpSummary(std::FILE* out) const;
+    // 真线程 feeder 的 shim 块按需装进私有 cache（ComRegistry 新建 vtable 时会调）。
+    void installFeederShim(std::uint32_t stub_ea, std::uint32_t shim_id);
 
     // ---- 仅供夹具（不参与运行）----
     std::uint64_t playedBytes() const { return stats_.played_bytes; }
@@ -244,6 +256,45 @@ private:
     std::uint32_t fill_inf_ea_ = 0;
 
     AudioStats stats_;
+    // ★ 方案 C 的 feeder（真宿主线程）：自己的 guest CPU / 栈 / 私有块缓存 / 私有回调栈。
+    //   ⛔ 不与主线程共用 `X86` / `BlockCache` / `GuestCallStack`。
+    bool thread_mode_ = false;
+    std::thread feeder_thread_;
+    std::condition_variable feeder_cv_;
+    std::mutex pending_mutex_;
+    bool stop_requested_ = false;
+    std::atomic<bool> feeder_error_{false};
+    std::string feeder_error_text_;
+    // 独立 mixer 线程（方案 C）：主线程卡在 Present/长 shim 时仍持续把 guest 环送设备。
+    std::thread mix_thread_;
+    std::mutex mix_wait_mutex_;
+    std::condition_variable mix_cv_;
+    bool mix_stop_ = false;
+    X86 audio_cpu_;
+    GuestCallStack audio_calls_;
+    NativeOverrideTable audio_overrides_;
+    std::unique_ptr<Decoder> audio_decoder_;
+    std::unique_ptr<BlockCache> audio_cache_;
+    // 只保护私有 cache 的装/取；⛔ 不要用设备模型的 mutex_（主线程混音会长时间持有它）。
+    std::mutex feeder_cache_mutex_;
+    std::uint32_t audio_stack_top_ = 0;
+    static constexpr std::uint32_t kAudioStackSize = 0x00100000u;
+
+    void startFeederThread();
+    void feederThreadMain();
+    void feederEvent(const AudioNotifyEvent& ev);
+    bool runFeederGuest(std::string* err);
+    bool setupFeederContext(std::string* err);
+    // 混音一步（调用方持有 mutex_）：推进设备游标 / 生成 / 投递通知。主线程泵与独立 mixer
+    // 线程共用；真线程模式下只由 mixer 线程调（主线程不再因 Present/长 shim 断音频）。
+    void mixStep();
+    void mixLoop();
+    void startMixThread();
+    void stopMixThread();
+
+    // ★ 方案 C：feeder 线程会调 `stop`（sub_4B6C30 的状态 0 分支），主线程在 pump 里混音；
+    //   设备模型/时间线必须互斥。递归：pump 内可能经 startNestedGuestCall 再进 stop（方案 D）。
+    mutable std::recursive_mutex mutex_;
 };
 
 }  // namespace lift

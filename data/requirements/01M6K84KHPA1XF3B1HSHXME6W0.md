@@ -34,8 +34,9 @@ mmio 只用于 WAV 头解析；⇒ 上面的“范围”不能当成音频实现
 要先裁决是否允许**协作式 guest 线程**。完整报告（含证据 EA / 第一刀 / 3 个裁决项）见
 repo:apps/emulator-lift/docs/audio-feasibility.md。
 
-## 2026-11-07 音频已落地（方案 D）
+## 2026-11-07 音频已落地（方案 C）
 
-用户裁决 **V1 = D**；实现 / 实测 / 偏差见 `REQ-01M6RXQ0A1B2C3D4E5F6G7H8J9` 与
+用户先裁决 **V1 = D**，实测后澄清要真线程入口，已升级为 **C（真 feeder + 独立 mixer）**；
+实现 / 实测 / 偏差见 `REQ-01M6RXQ0A1B2C3D4E5F6G7H8J9` 与
 repo:apps/emulator-lift/docs/audio-implementation.md 。TITLE BGM 已连续可听；SE 走同一条
-`Play → notify → fill → 混音` 路径。M4 仍 open **只为视频**（MF / EVR / DXVA2 / 影片 opcode）。
+`Play → notify → fill → 混音` 路径，延迟 ≈100 ms。M4 仍 open **只为视频**（MF / EVR / DXVA2 / 影片 opcode）。

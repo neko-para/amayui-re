@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -128,8 +129,12 @@ public:
     ShimDef* findMutable(const char* module, const char* name);
     const ShimDef* byStubEa(std::uint32_t ea) const;
     const ShimDef* byId(std::uint32_t id) const;
+    // ★ 方案 C：返回 id 而不是指针（feeder 线程不能被主线程的 addRuntime 扩容弄成悬垂）。
+    std::uint32_t idForStub(std::uint32_t ea) const;  // 0 = 没有
     const std::vector<ShimDef>& all() const { return defs_; }
-    std::size_t size() const { return defs_.size(); }
+    // ★ 方案 C：给 feeder 的私有 BlockCache 预装 shim 块时用（拷贝，避免 defs_ 并发扩容）。
+    std::vector<ShimDef> snapshot() const;
+    std::size_t size() const;
 
     // ---- 缺口报告（A5）----
     std::vector<const ShimDef*> importedButUnimplemented() const;
@@ -139,6 +144,8 @@ public:
     // ---- 执行（dispatcher 调用）----
     // 走进一个 shim 块：弹返回地址 → 调用实现（或响亮失败）→ 按约定弹参
     void invoke(X86& cpu, ShimDef& def);
+    // 按 id 调（内部持锁取 def）——feeder 线程专用；返回 false = id 不存在。
+    bool invokeById(X86& cpu, std::uint32_t id);
 
 private:
     std::vector<ShimDef> defs_;
@@ -150,6 +157,9 @@ private:
     std::uint32_t shim_page_ = 0;
     std::uint32_t shim_slots_ = 0;
     std::uint32_t next_slot_ = 0;  // 下一个空闲槽（**已发出的槽数**，也从 bind 里继承）
+    // ★ 方案 C：feeder 线程也会 invoke shim（Lock/Unlock/Stop/COM trampoline），defs_ 可能被
+    //   主线程 addRuntime 扩容 ⇒ 所有注册/查询/invoke 都走这把递归锁（invoke 期间不允许扩容）。
+    mutable std::recursive_mutex mutex_;
 };
 
 }  // namespace lift

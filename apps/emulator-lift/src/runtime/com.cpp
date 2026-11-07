@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/audio.h"
 #include "runtime/exec.h"
 #include "runtime/heap.h"
 #include "runtime/memory.h"
@@ -101,11 +102,14 @@ std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, cons
         return 0;
     }
     cpu.cache->installShim(stub, def_id);
+    // ★ 方案 C：feeder 的私有 BlockCache 也要有这条 vtable stub（它会在自己的线程里 call 它）。
+    if (cpu.audio) cpu.audio->installFeederShim(stub, def_id);
     return stub;
 }
 
 std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
                                        std::uint32_t user) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::string face = iface ? iface : "";
     if (face.empty()) {
         comLog("?", "createObject 的 iface 为空（日志 / 注册名都要靠它）");
@@ -230,11 +234,13 @@ std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::
 }
 
 std::uint32_t ComRegistry::userOf(std::uint32_t obj) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = objects_.find(obj);
     return it == objects_.end() ? 0u : it->second.user;
 }
 
 bool ComRegistry::addRef(X86& cpu, std::uint32_t obj) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = objects_.find(obj);
     if (it == objects_.end()) {
         comLog("?", "addRef(0x%08X)：不是 ComRegistry 建出来的对象（野指针？）⇒ 返回 false", obj);
@@ -246,6 +252,7 @@ bool ComRegistry::addRef(X86& cpu, std::uint32_t obj) {
 }
 
 bool ComRegistry::release(X86& cpu, std::uint32_t obj) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = objects_.find(obj);
     if (it == objects_.end()) {
         // ★ 重复 release / 未知对象**必须出声**：静默 false 会让"释放两次"看起来像"正常释放"。
@@ -290,27 +297,62 @@ bool ComRegistry::release(X86& cpu, std::uint32_t obj) {
     return true;
 }
 
-bool ComRegistry::find(std::uint32_t obj) const { return objects_.find(obj) != objects_.end(); }
+bool ComRegistry::find(std::uint32_t obj) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return objects_.find(obj) != objects_.end();
+}
+
+std::size_t ComRegistry::objectCount() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return objects_.size();
+}
+
+std::size_t ComRegistry::methodCount() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return methods_.size();
+}
 
 std::uint32_t ComRegistry::refCount(std::uint32_t obj) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = objects_.find(obj);
     return it == objects_.end() ? 0u : it->second.refcount;
 }
 
 std::uint32_t ComRegistry::vtableOf(std::uint32_t obj) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = objects_.find(obj);
     return it == objects_.end() ? 0u : it->second.vtable;
 }
 
 const char* ComRegistry::ifaceOf(std::uint32_t obj) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = objects_.find(obj);
     return it == objects_.end() ? nullptr : it->second.iface.c_str();
 }
 
 void ComRegistry::dispatch(X86& cpu, ShimCall& call) {
     const std::uint32_t stub = call.def ? call.def->stub_ea : 0;
-    const auto it = methods_.find(stub);
-    if (it == methods_.end()) {
+    ShimFn fn = nullptr;
+    std::string iface;
+    std::string name;
+    std::uint32_t offset = 0;
+    bool known_this = false;
+    bool missing = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto it = methods_.find(stub);
+        if (it == methods_.end()) {
+            missing = true;
+        } else {
+            const MethodEntry& e = it->second;
+            fn = e.fn;
+            iface = e.iface;
+            name = e.name;
+            offset = e.offset;
+            known_this = objects_.find(call.u32(0)) != objects_.end();
+        }
+    }
+    if (missing) {
         // ⛔ 不静默：能走到这里说明 vtable 里有一条我们不认识的地址（或 registry 不是同一个实例）
         std::fprintf(stderr,
                      "\n=== COM thunk 不在路由表里 ===\n"
@@ -327,20 +369,19 @@ void ComRegistry::dispatch(X86& cpu, ShimCall& call) {
         ++cpu.shim.unimplemented_calls;
         return;
     }
-    const MethodEntry& e = it->second;
-    if (!e.fn) {
+    if (!fn) {
         // 未实现的槽：走到这里就是 loud trap（见下面的 comUnsupported）
         comUnsupported(cpu, call);
         return;
     }
     // 诊断（不改变行为）：`this` 应该是我们建出来的对象 —— vtable 只可能从 createObject 流出去。
-    const std::uint32_t self = call.u32(0);
-    if (objects_.find(self) == objects_.end()) {
-        comLog(e.iface.c_str(),
+    if (!known_this) {
+        comLog(iface.c_str(),
                "%s(+0x%X) 的 this=0x%08X 不是 ComRegistry 建出来的对象 —— 仍转发（可能是 guest 自己造的 vtable）",
-               e.name.c_str(), e.offset, self);
+               name.c_str(), offset, call.u32(0));
     }
-    e.fn(cpu, call);
+    // ★ fn 在锁外执行：主线程的 D3D/DDraw 方法可能很长，feeder 的 DS Lock/Unlock 不能排在它后面。
+    fn(cpu, call);
 }
 
 // 方法槽共用的入口：路由到真正的实现（见 com.h 的说明）

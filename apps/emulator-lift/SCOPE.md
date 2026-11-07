@@ -18,7 +18,7 @@
 | 延后实现 | **模态**（有限） | 延后实现：只做**关闭窗口的二次确认**（`MessageBoxA` 的 OK / Cancel 语义）；⛔ 不做 AGERC 提供的复杂设置对话框。**AGERC.DLL 按真实 guest 模块装载**（PE 节映射进 guest / 真实 HINSTANCE=ImageBase / 资源与版本从该镜像解析）；它的三个导出（`_GetInstance@0` / `_ShowDialog@12` / `_OperateMenu@16`）仍按本文 §1 的模态 no-op stub；镜像不存在 ⇒ `LoadLibrary` 返回 0 + 126（⛔ 不造假句柄），未实现的 AGERC 代码被执行 = **loud failure**（未实现导入 / fault 诊断，⛔ 不静默）。**镜像来源只有两段：默认 `--game-dir/AGERC.DLL`（安装树里那份=汉化免壳件，40/40 资源可映射），`--agerc` 可显式覆盖；两段都拿不到 ⇒ `LoadLibrary` 0 + 126**（⛔ 不造假句柄、⛔ 不回退 `DATA1.ALF` 的条目 —— 引擎本身也不回退，那条约只作取证对照）。**不需要拆壳件** —— 加壳只发生在正版根件（AsProtect，26/40 条资源在文件里没有字节）。伪 HICON 只作 `.rsrc` 映射真的失败时的**应急**（loud log），⛔ 不是预期路径、⛔ 不 fake 资源内容 | 当前仍是 `IDOK` no-op；关闭确认直接继续；设置对话框不生效；窗口图标可能是伪 HICON（不显示在客户区） | 配置读写的**文件**路径（INI / SYS4REG.INI）、存档本身；`_GetInstance` 的返回值 = **真实模块基址**（可当 HINSTANCE 传给 `LoadIconA`） |
 | 永久 no-op | **注册表** | 整体 no-op：`RegOpenKeyExA` / `RegCreateKeyExA` 成功 + 非空假句柄；`RegQueryValueExA` 恒 `ERROR_FILE_NOT_FOUND(2)`（调用方回落默认值）；`RegSetValueExA` 成功但不落盘；`RegEnumValueA` 恒 `ERROR_NO_MORE_ITEMS(259)`；`RegCloseKey` 成功 | 注册表里的设置**不持久**；每次按默认值启动 | 句柄形态与错误码（成功 / 2 / 259）；配置读写的**文件**路径（INI / SYS4REG.INI）仍真写 |
 | 永久 no-op | **摇杆** | 无设备：`joyGetNumDevs` 返回 0、`joyGetPosEx` 返回 `JOYERR_UNPLUGGED(167)`、`joyGetDevCapsA` 返回 `MMSYSERR_NODRIVER(6)` | 游戏若必须用摇杆则不可用（键盘 / 鼠标不受影响） | 键盘 / 鼠标输入（M2）；摇杆枚举的返回码 |
-| **已实现（方案 D，2026-11-07）** | **音频** | **设备模型 + native 喂料泵**：`AudioEngine` 实现游标 / 4 个位置通知 / 状态机 / 逐缓冲 `WAVEFORMATEX` 转换 / 混音 / SDL3 输出；`CreateThread(sub_4B5AA0)` 不执行 guest 线程体，由 dispatcher 块边界的泵调 `sub_4B6C30`（PCM 仍由 guest 解码器产生）。**WAV 头 / 缓冲层是真的**（`REQ-01M6QSVR5NJDQVFHY6RX3934DN`）：`mmio*` 沿 guest 文件句柄真解析 RIFF；`IDirectSoundBuffer8` 的 `QI(IDirectSoundNotify)` / `SetNotificationPositions` 真存真投递。MCI / mixer 仍是成功 stub。默认 `--audio=sdl`；`--audio=off` 回到旧 silent。 | 能听到 BGM / SE / 语音；fill 期间主线程 ~370 ms / 0.5 s 音频（D 的吞吐代价）；SE 延迟 ≈ lead 600 ms | 设备游标 / 通知次序 / 逐缓冲格式 / 混音 PCM；`timeGetTime` / `timeSetEvent` / `timeKillEvent` / `timeGetDevCaps` 不变 |
+| **已实现（方案 C，2026-11-07）** | **音频** | **真 feeder 线程 + 独立 mixer 线程**：`AudioEngine` 实现游标 / 4 个位置通知 / 状态机 / 逐缓冲 `WAVEFORMATEX` 转换 / 混音 / SDL3 输出；`CreateThread(sub_4B5AA0)` 由 `ResumeThread` 启动真宿主线程，feeder 有自己的 `X86` / guest 栈 / 私有块缓存并执行 `sub_4B6C30`（PCM 仍由 guest 解码器产生）；guest 的每槽 `CRITICAL_SECTION` 映射到宿主递归锁。`--audio=virtual`/无 `--real-time` 时回退到方案 D 的主线程泵。**WAV 头 / 缓冲层是真的**（`REQ-01M6QSVR5NJDQVFHY6RX3934DN`）：`mmio*` 沿 guest 文件句柄真解析 RIFF；`IDirectSoundBuffer8` 的 `QI(IDirectSoundNotify)` / `SetNotificationPositions` 真存真投递。MCI / mixer 仍是成功 stub。默认 `--audio=sdl`；`--audio=off` 回到旧 silent。 | 能听到 BGM / SE / 语音；SE 延迟 ≈ 100 ms；主线程不再被 fill 卡住 | 设备游标 / 通知次序 / 逐缓冲格式 / 混音 PCM；`timeGetTime` / `timeSetEvent` / `timeKillEvent` / `timeGetDevCaps` 不变 |
 | 延后实现（**M4**） | **视频** | skip（延后实现）：影片 opcode 必须**推进**，不许挂起。**DirectShow / AMultiMediaStream 形状层已落地**（`REQ-01M6QPYG431WK2M3C76F6H1XBZ`）：`ole32!CoCreateInstance` 对 `CLSID_FilterGraph` / `CLSID_AMMultiMediaStream` 返回 guest 可见的形状对象；`IGraphBuilder` / `IMediaControl` / `IMediaEvent` / `IMediaSeeking` / `IMediaPosition` / `IVideoWindow` 的取证槽返回成功；`Run` 后 `WaitForCompletion` **立即** `EC_COMPLETE`（零长影片）；时长 / 位置恒 0。MF 仍 no-op（`MFStartup` / `MFShutdown` 成功；`MFCreate*` / `MFGetService` / DXVA2 返回 `E_FAIL` + 空输出，⛔ 不返回假 COM 对象） | 无真实画面 / 声音；影片按零长立即结束（LOGO/OP/剧情影片被跳过） | 影片 opcode 的状态推进与结束通知；**不是**解码正确性 |
 | 延后实现 | **Live2D** | 关闭（游戏内开关）作为第一可交付状态 | 模型不显示（固定立绘） | 如果开关只是脚本级跳过，SDK 仍链接但不被调用 |
 | 延后实现 | **3D** | **D3D9 最小设备簇 + D3DX Sprite/纹理 + fixed-function 流水线已落地**（`REQ-01M6MH5M975Q63AH85F03RVQFD` / `REQ-01M6MJRC587XWXR325K4N2JXMF` / `REQ-01M6MNR9M7S5M5711J79F9K32A`：`Direct3DCreate9` / `CreateDevice` / `Clear` / `Present` / `GetBackBuffer` / `SetRenderTarget`，`D3DXCreateSprite` 的 Begin/Draw/End、`D3DXCreateTexture`、纹理 surface、`D3DXMatrix*`、软件光栅）；**已到 Present 第一帧**；D3DX effect / `.x` 层级 / 完整 3D 战斗场景仍不做，未取证槽 = loud trap | 无 3D 战斗/场景；未取证的 D3DX effect / `.x` / 3D 状态仍会在命中时响亮失败 | 2D/ADV 主路径（D3D9 + GDI；DDraw 只作备用后端） |
@@ -37,14 +37,13 @@
 
 ★ **3D 的前提**：若 Live2D 走 D3D 后端（`doc §6-2`），D3D9 不能砍；"3D 不做"与"保留 Live2D"互斥。
 
-★ **线程 = 伪线程的依据与退路**（2026-11-04 用户先批准"整族不做"，2026-11-05 改为伪线程；2026-11-07 音频改方案 D）：`README.md` §2.5
+★ **线程 = 伪线程的依据与退路**（2026-11-04 用户先批准"整族不做"，2026-11-05 改为伪线程；2026-11-07 音频改方案 C）：`README.md` §2.5
 已定 guest 单线程；`.lst` 里的线程全是**服务线程**（DirectShow 读文件 / 声音 / MF 回调 / 多媒体定时器），
-视频仍 skip；**音频喂料线程**不再靠 silent 消化，而是由 `AudioEngine` 在块边界 native 化
-（`sub_4B5AA0` 的 12 段 native + 唯一 guest 调用 `sub_4B6C30`）。其余服务线程仍只让创建 / 恢复 /
-优先级 / 亲和性这组**控制面**成功返回，避免 boot 在"服务线程创建"上硬停；线程体本身仍绝不执行。
-判据与退路见 `docs/thread-model-feasibility.md` §5.1 / `docs/audio-implementation.md`：**音频 fill 的
-吞吐（实测 ~370 ms / 0.5 s）是 D 的已知代价**；⛔ 不在本线直接开并发（真并行要先有 TSO/同步层证据、
-再改 §2.5 的单线程口径）。
+视频仍 skip；**音频喂料线程**不再靠 silent 消化，而是由 `AudioEngine` 启动**真宿主 feeder 线程**
+（自己的 `X86` / guest 栈 / 私有块缓存，执行 `sub_4B6C30`）+ 独立 mixer 线程。其余服务线程仍只让
+创建 / 恢复 / 优先级 / 亲和性这组**控制面**成功返回，避免 boot 在"服务线程创建"上硬停；线程体本身仍绝不执行。
+判据与退路见 `docs/thread-model-feasibility.md` §5.2 / `docs/audio-implementation.md`：音频只依赖
+引擎自己的每槽 CS 协议 + 环形缓冲不重叠；⛔ 不把游戏 VM/脚本放多线程，也不做通用 TSO。
 白名单落点：`tools/lift.mjs` 的 `FAMILY_STUB_APPROVED` **只列 PE 导入表里真出现的键**，且只列**仍是 stub** 的键
 （`CreateThread` / `ResumeThread` / `SetThreadPriority` / `SetThreadAffinityMask` / `GetProcessAffinityMask`
 已改成实现 ⇒ 2026-11-05 从白名单移除）。
@@ -58,8 +57,8 @@
 ## 2. 被跳过的 spec 条款（点名）
 
 - 菜单 / 模态：Win32 菜单与对话框族（`WM_COMMAND` 的菜单命令、`DialogBoxParamA` 等）。
-- 音频：MCI CD-DA / MIDI 仍是成功 stub；**DirectSound 设备语义已按方案 D 实现**（游标 / 通知 / 混音 /
-  逐缓冲格式），PCM 仍由 guest 解码器产生。保留的是"请求 + 返回码"这一层不再用于 DS 的 silent 路径。
+- 音频：MCI CD-DA / MIDI 仍是成功 stub；**DirectSound 设备语义已按方案 C 实现**（游标 / 通知 / 混音 /
+  逐缓冲格式 / 真 feeder 线程），PCM 仍由 guest 解码器产生。
 - 视频：MF 的 session / topology / EVR / DXVA2 内部；只保留影片 opcode 的状态推进。
 - 线程 / 定时器队列：线程体执行 / 线程调度 / 定时器队列的线程语义
   （控制面的 `CreateThread` 等按 §1 的伪线程返回形态保留）；

@@ -10,10 +10,14 @@
 #include <SDL3/SDL.h>
 
 #include "runtime/clock.h"
+#include "runtime/critical_sections.h"
+#include "runtime/decode.h"
+#include "runtime/exec.h"
 #include "runtime/guest_call.h"
 #include "runtime/log.h"
 #include "runtime/memory.h"
 #include "runtime/native_overrides.h"
+#include "runtime/shims.h"
 #include "runtime/sync_guest.h"
 
 namespace lift {
@@ -29,7 +33,10 @@ constexpr std::uint64_t kTicksPerSec = 10'000'000ull;
 //   fill 之后到下一个通知点还有 500ms - 360ms = 140ms，所以 lead 必须 > 500ms 才能保证
 //   "fill 开始时队列里的音频撑得过整个 fill"；这里取 600ms（≈100ms 余量）。
 //   ⛔ 这不是设备延迟，是 D 的吞吐代价；代价是 SE 也有 ~600ms 延迟。
-constexpr std::uint64_t kLeadBytes = (kBytesPerSec * 600ull) / 1000ull;  // 115200 B
+constexpr std::uint64_t kLeadBytes = (kBytesPerSec * 600ull) / 1000ull;  // 115200 B（泵模式）
+// 真线程模式：feeder 与 mixer 都在自己的线程，主线程卡在 Present/长 shim 不再断音频。
+// 独立 mixer 实测 fill ≈ 400 ms 也不影响设备队列；100 ms 足以覆盖 5 ms mixer 周期 + 抖动。
+constexpr std::uint64_t kThreadLeadBytes = (kBytesPerSec * 100ull) / 1000ull;  // 19200 B
 
 // 引擎写死的线程体入口（`.lst` 0x004B5AA0；见 docs/thread-model-feasibility.md §2.1）。
 constexpr std::uint32_t kFeederStartEa = 0x004B5AA0u;
@@ -41,6 +48,9 @@ constexpr std::uint32_t kSlotCount = 15u;
 constexpr std::uint32_t kStreamDsBuffer = 0x40Cu;   // SoundBuffer +0x40C = IDirectSoundBuffer8
 constexpr std::uint32_t kStreamBytes = 0x444u;      // SoundBuffer +0x444 = 环长度 L
 constexpr std::uint32_t kSub4B6C30 = 0x004B6C30u;
+// feeder 真线程的"返回哨兵"：sub_4B6C30 的 `retn 4` 会弹到这里，循环随即结束。
+// 与 GuestCallStack 的 0x7FFEF008 / winmm 的 0x7FFEF004 错开。
+constexpr std::uint32_t kFeederReturnEa = 0x7FFEF00Cu;
 
 std::int32_t gainQ16(double amp) {
     if (!(amp > 0.0)) return 0;
@@ -136,13 +146,19 @@ bool AudioEngine::begin(std::string* err) {
             mode_ = AudioMode::Virtual;
         }
     }
+    // ★ 真线程只在"真设备 + 宿主时钟"下启用：虚拟时钟的 tick 是主线程的确定性账本，
+    //   不能由第二条 guest 执行流并发推进。窗口模式本来就会 `--real-time`。
+    thread_mode_ = (mode_ == AudioMode::Sdl && clock_ && clock_->realTime());
     begun_ = true;
+    if (thread_mode_) startMixThread();
     if (mode_ != AudioMode::Off) {
         logAt(LogLevel::Info,
-              "mode=%s %u Hz / 16 bit / 2 ch（lead=%llu B）；游标=%s；PCM 由 guest 解码器产生，"
-              "宿主只做混音与输出",
-              audioModeName(mode_), kSampleRate, static_cast<unsigned long long>(kLeadBytes),
-              mode_ == AudioMode::Sdl ? "SDL 设备已消费字节" : "VirtualClock");
+              "mode=%s %u Hz / 16 bit / 2 ch（lead=%llu B）；游标=%s；feeder=%s；"
+              "PCM 由 guest 解码器产生，宿主只做混音与输出",
+              audioModeName(mode_), kSampleRate,
+              static_cast<unsigned long long>(thread_mode_ ? kThreadLeadBytes : kLeadBytes),
+              mode_ == AudioMode::Sdl ? "SDL 设备已消费字节" : "VirtualClock",
+              thread_mode_ ? "host-thread（方案 C）" : "主线程泵（方案 D）");
     }
     return true;
 }
@@ -283,6 +299,8 @@ void AudioEngine::abortFill() {
 
 void AudioEngine::end() {
     if (!begun_ && !dump_ && !stream_) return;
+    stopMixThread();
+    if (thread_mode_ && feeder_thread_.joinable()) joinFeeder();
     abortFill();
     if (feeder_.registered && !feeder_.exited) {
         logAt(LogLevel::Info, "运行结束：喂料泵仍在运行（fills=%llu）⇒ 直接关闭（不再写 guest）",
@@ -330,6 +348,7 @@ const AudioEngine::Buffer* AudioEngine::find(std::uint32_t state_ea) const {
 
 void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::uint32_t data_ea,
                             std::uint32_t bytes, std::uint32_t flags, const AudioFormat& fmt) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!enabled() || state_ea == 0) return;
     Buffer* b = find(state_ea);
     if (b == nullptr) {
@@ -356,11 +375,13 @@ void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::u
 }
 
 void AudioEngine::setFormat(std::uint32_t state_ea, const AudioFormat& fmt) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b) b->fmt = fmt;
 }
 
 void AudioEngine::removeBuffer(std::uint32_t state_ea) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (auto it = buffers_.begin(); it != buffers_.end(); ++it) {
         if (it->state_ea != state_ea) continue;
         const std::uint32_t obj = it->obj_ea;
@@ -373,6 +394,7 @@ void AudioEngine::removeBuffer(std::uint32_t state_ea) {
 }
 
 void AudioEngine::setNotify(std::uint32_t state_ea, std::uint32_t count, const std::uint32_t* offsets) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
     b->notify_count = std::min<std::uint32_t>(count, 4u);
@@ -381,11 +403,13 @@ void AudioEngine::setNotify(std::uint32_t state_ea, std::uint32_t count, const s
 }
 
 void AudioEngine::clearNotify(std::uint32_t state_ea) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b) b->notify_count = 0;
 }
 
 void AudioEngine::play(std::uint32_t state_ea, bool looping) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
     b->playing = true;
@@ -404,6 +428,7 @@ void AudioEngine::play(std::uint32_t state_ea, bool looping) {
 }
 
 void AudioEngine::stop(std::uint32_t state_ea) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
     // 真 DS：Stop 冻结当前播放位置；再 Play 从冻结处继续（不是回到 initial_pos）。
@@ -415,6 +440,7 @@ void AudioEngine::stop(std::uint32_t state_ea) {
 }
 
 void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
     b->initial_pos = b->bytes ? (pos % b->bytes) : 0u;
@@ -430,17 +456,20 @@ void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
 }
 
 void AudioEngine::setVolume(std::uint32_t state_ea, std::int32_t centibel) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b) b->volume = std::clamp<std::int32_t>(centibel, -10000, 0);
 }
 
 void AudioEngine::setPan(std::uint32_t state_ea, std::int32_t pan) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     // DSBPAN_LEFT/RIGHT = ±10000（1/100 dB 的左右偏置）。
     if (b) b->pan = std::clamp<std::int32_t>(pan, -10000, 10000);
 }
 
 std::uint32_t AudioEngine::playedCursor(std::uint32_t state_ea) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const Buffer* b = find(state_ea);
     if (b == nullptr || b->bytes == 0) return 0;
     if (!b->playing) return b->initial_pos % b->bytes;
@@ -497,14 +526,19 @@ void AudioEngine::restore(const Context& c, std::uint32_t* shim_result) {
 
 void AudioEngine::enqueue(std::uint32_t obj_ea, std::uint32_t quarter) {
     if (obj_ea == 0 || quarter > 3) return;
-    for (const auto& e : pending_)
-        if (e.obj == obj_ea && e.quarter == quarter) return;  // 自动复位事件语义：重复 SetEvent 合并
-    if (pending_.size() >= 256) {
-        pending_.pop_front();
-        ++stats_.dropped;
+    {
+        std::lock_guard<std::mutex> lk(pending_mutex_);
+        for (const auto& e : pending_)
+            if (e.obj == obj_ea && e.quarter == quarter) return;  // 自动复位事件语义：重复 SetEvent 合并
+        if (pending_.size() >= 256) {
+            pending_.pop_front();
+            ++stats_.dropped;
+        }
+        pending_.push_back(AudioNotifyEvent{obj_ea, quarter});
+        ++stats_.notifications;
     }
-    pending_.push_back(AudioNotifyEvent{obj_ea, quarter});
-    ++stats_.notifications;
+    // 真线程模式：唤醒 feeder；泵模式没有等待者，notify 无害。
+    feeder_cv_.notify_one();
 }
 
 void AudioEngine::fireCrossings(std::uint64_t old_played, std::uint64_t new_played) {
@@ -694,21 +728,13 @@ void AudioEngine::advanceDevice() {
     stats_.played_bytes = played_;
 }
 
-AudioPump AudioEngine::pump() {
-    if (!enabled() || !begun_ || !cpu_ || !mem_) return AudioPump::Idle;
-    // ★ 单执行流纪律：任何嵌套 guest 调用进行中都不混音、不铺新帧。
-    //   fill 自己会写 guest 环；此时读环 = 真机上"另一个线程正在写"的竞态，D 里必须避免。
-    if (in_fill_) return AudioPump::Idle;
-    if (cpu_->calls && cpu_->calls->active()) return AudioPump::Idle;
-    if (cpu_->shim.callback.active) return AudioPump::Idle;
-    if (cpu_->shim.timer_firing) return AudioPump::Idle;
-
+void AudioEngine::mixStep() {
+    // 调用方持有 mutex_。
     advanceDevice();
-
     if (mode_ == AudioMode::Sdl && sdl_ok_) {
-        const std::uint64_t target = played_ + kLeadBytes;
+        const std::uint64_t lead = thread_mode_ ? kThreadLeadBytes : kLeadBytes;
+        const std::uint64_t target = played_ + lead;
         if (target > generated_) generateTo(target);
-        // 队列彻底空了但还有流在播 ⇒ underrun（只在进入 underrun 时记一次，不刷屏）。
         bool playing = false;
         for (const auto& b : buffers_)
             if (b.playing && b.bytes != 0) playing = true;
@@ -723,9 +749,58 @@ AudioPump AudioEngine::pump() {
     } else if (dump_ok_) {
         if (played_ > generated_) generateTo(played_);
     } else {
-        // 没有 sink / dump：只推进通知时间线，不白混音。
         generated_ = played_;
     }
+}
+
+void AudioEngine::mixLoop() {
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(mix_wait_mutex_);
+            mix_cv_.wait_for(lk, std::chrono::milliseconds(5), [this] { return mix_stop_; });
+            if (mix_stop_) break;
+        }
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!begun_) break;
+        mixStep();
+    }
+}
+
+void AudioEngine::startMixThread() {
+    if (mix_thread_.joinable()) return;
+    mix_stop_ = false;
+    mix_thread_ = std::thread(&AudioEngine::mixLoop, this);
+}
+
+void AudioEngine::stopMixThread() {
+    {
+        std::lock_guard<std::mutex> lk(mix_wait_mutex_);
+        mix_stop_ = true;
+    }
+    mix_cv_.notify_all();
+    if (mix_thread_.joinable()) mix_thread_.join();
+}
+
+AudioPump AudioEngine::pump() {
+    if (!enabled() || !begun_ || !cpu_ || !mem_) return AudioPump::Idle;
+    // ★ 真线程模式：主线程**不要**每块都去抢 audio mutex（那会和 mixer/feeder 形成
+    //   cache-line ping-pong，实测把 fill 从 400ms 拖到 650ms）。直接无锁返回。
+    if (thread_mode_) {
+        if (feeder_error_.load()) {
+            last_error_ = "音频 feeder 线程失败（详见 stderr）";
+            return AudioPump::Error;
+        }
+        return AudioPump::Idle;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // ★ 单执行流纪律：任何嵌套 guest 调用进行中都不混音、不铺新帧。
+    //   fill 自己会写 guest 环；此时读环 = 真机上"另一个线程正在写"的竞态，D 里必须避免。
+    if (in_fill_) return AudioPump::Idle;
+    if (cpu_->calls && cpu_->calls->active()) return AudioPump::Idle;
+    if (cpu_->shim.callback.active) return AudioPump::Idle;
+    if (cpu_->shim.timer_firing) return AudioPump::Idle;
+
+    mixStep();
 
     if (!feeder_.registered || !feeder_.runnable || feeder_.exited) return AudioPump::Idle;
     if (feeder_.exit_requested) {
@@ -898,6 +973,11 @@ bool AudioEngine::registerFeeder(std::uint32_t start_ea, std::uint32_t param, st
 void AudioEngine::resumeFeeder() {
     if (!feeder_.registered || feeder_.exited) return;
     feeder_.runnable = true;
+    if (thread_mode_) {
+        startFeederThread();
+        logAt(LogLevel::Info, "喂料泵已启动（host-thread）；等待设备游标越过通知点");
+        return;
+    }
     logAt(LogLevel::Info, "喂料泵已启动（runnable）；等待设备游标越过通知点");
 }
 
@@ -907,12 +987,41 @@ bool AudioEngine::isFeederHandle(std::uint32_t handle) const {
 
 void AudioEngine::noteEventSet(std::uint32_t handle) {
     if (!feeder_.registered || handle == 0 || handle != feeder_.quit_event) return;
+    if (thread_mode_) {
+        {
+            std::lock_guard<std::mutex> lk(pending_mutex_);
+            stop_requested_ = true;
+        }
+        feeder_cv_.notify_all();
+        logAt(LogLevel::Info, "SetEvent(quit=0x%08X) ⇒ feeder 线程退出", handle);
+        return;
+    }
     feeder_.exit_requested = true;
     logAt(LogLevel::Info, "SetEvent(quit=0x%08X) ⇒ 喂料泵将在下一个块边界退出", handle);
 }
 
 void AudioEngine::joinFeeder() {
     if (!feeder_.registered) return;
+    if (thread_mode_) {
+        // 主线程可能正持有某个槽 CS 停在 run 里；feeder 会永久阻塞在 Enter 上 ⇒ 先放开本线程的锁。
+        if (cpu_ && cpu_->cs_table) cpu_->cs_table->releaseAll(*cpu_, cpu_->shim.thread_id);
+        {
+            std::lock_guard<std::mutex> lk(pending_mutex_);
+            stop_requested_ = true;
+        }
+        feeder_cv_.notify_all();
+        if (feeder_thread_.joinable()) feeder_thread_.join();
+        feeder_.exited = true;
+        feeder_.runnable = false;
+        feeder_.exit_requested = false;
+        {
+            std::lock_guard<std::mutex> lk(pending_mutex_);
+            pending_.clear();
+        }
+        logAt(LogLevel::Info, "WaitForSingleObject(喂料线程) ⇒ feeder 线程已 join（fills=%llu）",
+              static_cast<unsigned long long>(stats_.fills));
+        return;
+    }
     if (!feeder_.exited) {
         feeder_.exited = true;
         feeder_.runnable = false;
@@ -923,8 +1032,240 @@ void AudioEngine::joinFeeder() {
     }
 }
 
+void AudioEngine::installFeederShim(std::uint32_t stub_ea, std::uint32_t shim_id) {
+    std::lock_guard<std::mutex> lock(feeder_cache_mutex_);
+    if (audio_cache_) audio_cache_->installShim(stub_ea, shim_id);
+}
+
+bool AudioEngine::setupFeederContext(std::string* err) {
+    // 专用 guest 栈：主栈在 0x6FF00000..0x70000000；feeder 用下面 1 MiB（0x6FD00000..0x6FE00000）。
+    audio_stack_top_ = 0x6FE00000u;
+    if (!mem_->commitZeroed(audio_stack_top_ - kAudioStackSize, kAudioStackSize, RegionKind::Stack,
+                            "audio-feeder-stack")) {
+        if (err) *err = std::string("feeder 栈提交失败：") + mem_->lastError();
+        return false;
+    }
+    audio_decoder_ = std::make_unique<Decoder>();
+    if (!audio_decoder_->ok()) {
+        if (err) *err = std::string("feeder Decoder 初始化失败：") + audio_decoder_->lastError();
+        return false;
+    }
+    audio_cache_ = std::make_unique<BlockCache>(audio_decoder_.get(), mem_);
+    audio_cpu_ = *cpu_;
+    if (cpu_->native_overrides) audio_overrides_ = *cpu_->native_overrides;
+    audio_cpu_.cache = audio_cache_.get();
+    audio_cpu_.calls = &audio_calls_;
+    audio_calls_.reset();
+    audio_cpu_.audio = this;
+    audio_cpu_.shim.thread_id = feeder_.thread_id;
+    audio_cpu_.shim.last_error = 0;
+    audio_cpu_.shim.timers.clear();
+    audio_cpu_.shim.callback = GuestCallbackState{};
+    audio_cpu_.shim.timer_firing = false;
+    audio_cpu_.shim.frame_dump.clear();
+    audio_cpu_.shim.max_frames = 0;
+    audio_cpu_.insns = 0;
+    audio_cpu_.running = true;
+    audio_cpu_.stop_why = nullptr;
+    audio_cpu_.fpu.reset();
+    std::memset(audio_cpu_.xmm, 0, sizeof(audio_cpu_.xmm));
+    // 预装启动时已有的 shim 块；运行期新增的由 `installFeederShim` / 按需 range 检查补齐。
+    for (const ShimDef& d : cpu_->shims->snapshot()) {
+        if (d.stub_ea != 0) audio_cache_->installShim(d.stub_ea, d.id);
+    }
+    return true;
+}
+
+void AudioEngine::startFeederThread() {
+    if (feeder_thread_.joinable()) return;
+    std::string err;
+    if (!setupFeederContext(&err)) {
+        logAt(LogLevel::Warn, "feeder 真线程启动失败（%s）⇒ 退回主线程泵", err.c_str());
+        thread_mode_ = false;
+        stopMixThread();
+        return;
+    }
+    stop_requested_ = false;
+    feeder_error_ = false;
+    feeder_error_text_.clear();
+    feeder_thread_ = std::thread(&AudioEngine::feederThreadMain, this);
+}
+
+void AudioEngine::feederThreadMain() {
+    for (;;) {
+        AudioNotifyEvent ev;
+        {
+            std::unique_lock<std::mutex> lk(pending_mutex_);
+            feeder_cv_.wait(lk, [this] { return stop_requested_ || !pending_.empty(); });
+            if (stop_requested_) break;
+            ev = pending_.front();
+            pending_.pop_front();
+        }
+        feederEvent(ev);
+        if (feeder_error_.load()) break;
+    }
+}
+
+void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
+    std::uint32_t slot = 0;
+    std::uint32_t stream = 0;
+    if (!findSlot(ev.obj, &slot, &stream)) return;
+    const std::uint32_t cs = feeder_.sound + kSoundCsBase + 24u * slot;
+    std::string err;
+    // ★ 这里会**阻塞**（真机 feeder 在 EnterCriticalSection 上等待主线程离开同一槽 CS）。
+    if (!guestEnterCriticalSectionAs(audio_cpu_, cs, feeder_.thread_id, &err)) {
+        feeder_error_ = true;
+        feeder_error_text_ = "feeder 进入槽 CS 失败：" + err;
+        logAt(LogLevel::Warn, "%s", feeder_error_text_.c_str());
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(pending_mutex_);
+        if (stop_requested_) {
+            // 已经被要求退出：不要再填这一圈（joinFeeder 正在等我放锁）。
+            std::string leave_err;
+            guestLeaveCriticalSectionAs(audio_cpu_, cs, feeder_.thread_id, &leave_err);
+            return;
+        }
+    }
+    // ★ 上面的 findSlot 是**进 CS 之前**的扫描；主线程可能刚换了槽。拿到 CS 后必须重验，
+    //   否则会填到已经换掉的 stream（真机上 feeder 是拿到 CS 后才读槽指针的）。
+    if (mem_->rd32(feeder_.sound + kSoundSlots + 4u * slot) != stream ||
+        mem_->rd32(stream + kStreamDsBuffer) != ev.obj) {
+        std::string leave_err;
+        guestLeaveCriticalSectionAs(audio_cpu_, cs, feeder_.thread_id, &leave_err);
+        return;
+    }
+    const std::uint32_t inf_ea = feeder_.sound + kSoundInflight + 4u * slot;
+    const std::uint32_t inf = mem_->committed(inf_ea, 4) ? mem_->rd32(inf_ea) : 0u;
+    if (mem_->committed(inf_ea, 4)) mem_->wr32(inf_ea, inf + 1u);
+
+    std::memset(audio_cpu_.r, 0, sizeof(audio_cpu_.r));
+    audio_cpu_.esp() = audio_stack_top_ - 8u;
+    mem_->wr32(audio_cpu_.esp(), kFeederReturnEa);
+    mem_->wr32(audio_cpu_.esp() + 4u, ev.quarter);
+    audio_cpu_.ecx() = stream;
+    audio_cpu_.eip = kSub4B6C30;
+    audio_cpu_.eflags = 0x202u;
+    audio_cpu_.fpu.reset();
+    std::memset(audio_cpu_.xmm, 0, sizeof(audio_cpu_.xmm));
+    audio_cpu_.shim.thread_id = feeder_.thread_id;
+    audio_cpu_.shim.last_error = 0;
+    audio_cpu_.running = true;
+    audio_cpu_.stop_why = nullptr;
+
+    std::string run_err;
+    const auto fill_start = std::chrono::steady_clock::now();
+    const bool ok = runFeederGuest(&run_err);
+    if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fill_start).count();
+        std::uint64_t ov_hits = 0;
+        for (std::size_t i = 0; i < audio_overrides_.size(); ++i) {
+            if (const NativeOverride* ov = audio_overrides_.at(i)) ov_hits += ov->hits;
+        }
+        std::fprintf(stderr, "[audio] feeder fill slot=%u quarter=%u %.2f ms ov=%llu%s\n", slot, ev.quarter, ms,
+                     static_cast<unsigned long long>(ov_hits), ok ? "" : " (FAILED)");
+    }
+    if (mem_->committed(inf_ea, 4)) {
+        const std::uint32_t cur = mem_->rd32(inf_ea);
+        if (cur > 0) mem_->wr32(inf_ea, cur - 1u);
+    }
+    std::string leave_err;
+    if (!guestLeaveCriticalSectionAs(audio_cpu_, cs, feeder_.thread_id, &leave_err)) {
+        feeder_error_ = true;
+        feeder_error_text_ = "feeder 离开槽 CS 失败：" + leave_err;
+        return;
+    }
+    if (!ok) {
+        feeder_error_ = true;
+        feeder_error_text_ = "feeder guest 执行失败：" + run_err;
+        logAt(LogLevel::Warn, "%s", feeder_error_text_.c_str());
+        return;
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lk(mutex_);
+        ++stats_.fills;
+        if (mem_->committed(stream + kStreamBytes, 4)) stats_.fill_bytes += mem_->rd32(stream + kStreamBytes) / 4u;
+    }
+}
+
+bool AudioEngine::runFeederGuest(std::string* err) {
+    const std::uint32_t page = audio_cpu_.shims ? audio_cpu_.shims->stubPage() : 0u;
+    const std::uint32_t slots = audio_cpu_.shims ? audio_cpu_.shims->stubSlots() : 0u;
+    std::uint32_t next_call_target = 0;
+    for (;;) {
+        if (audio_cpu_.eip == kFeederReturnEa) return true;
+        if (!audio_cpu_.running) {
+            if (err) *err = audio_cpu_.stop_why ? audio_cpu_.stop_why : "guest 主动停止";
+            return false;
+        }
+        // 函数级 native override（feeder 有私有副本；_memcpy/_memset 是 Ogg 解码的热路径）。
+        if (next_call_target != 0 && audio_cpu_.eip == next_call_target) {
+            next_call_target = 0;
+            if (NativeOverride* ov = audio_overrides_.find(audio_cpu_.eip)) {
+                const char* why = nullptr;
+                bool suspended = false;
+                if (audio_overrides_.invoke(*ov, audio_cpu_, *mem_, &why, &suspended)) {
+                    if (suspended) {
+                        if (err) *err = "feeder 里的 native override 试图再铺 guest 帧（不支持）";
+                        return false;
+                    }
+                    continue;
+                }
+            }
+        }
+        // 运行期新增的 COM/DS vtable stub：第一次落到它时补进私有 cache。
+        if (page != 0 && audio_cpu_.eip >= page && audio_cpu_.eip < page + slots * 4u) {
+            bool missing = false;
+            {
+                std::lock_guard<std::mutex> lock(feeder_cache_mutex_);
+                missing = audio_cache_->peek(audio_cpu_.eip) == nullptr;
+            }
+            if (missing) {
+                const std::uint32_t id = audio_cpu_.shims->idForStub(audio_cpu_.eip);
+                if (id != 0) {
+                    std::lock_guard<std::mutex> lock(feeder_cache_mutex_);
+                    audio_cache_->installShim(audio_cpu_.eip, id);
+                }
+            }
+        }
+        Block* b = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(feeder_cache_mutex_);
+            b = audio_cache_->get(audio_cpu_.eip);
+        }
+        if (b == nullptr) {
+            if (err) *err = audio_cache_->lastError();
+            return false;
+        }
+        if (b->is_shim) {
+            if (!audio_cpu_.shims->invokeById(audio_cpu_, b->shim_id)) {
+                if (err) *err = "shim 块指向不存在的 id";
+                return false;
+            }
+            continue;
+        }
+        for (const Insn& in : b->insns) {
+            const bool control = opIsControl(in.op);
+            audio_cpu_.eip = in.ea;
+            if (!control) audio_cpu_.eip = in.ea + in.length;
+            if (!execInsn(audio_cpu_, in)) {
+                if (err) *err = audio_cpu_.stop_why ? audio_cpu_.stop_why : "指令执行失败";
+                return false;
+            }
+            ++audio_cpu_.insns;
+            if (control) {
+                next_call_target = (in.op == Op::Call) ? audio_cpu_.eip : 0;
+                break;
+            }
+        }
+    }
+}
+
 void AudioEngine::dumpSummary(std::FILE* out) const {
     if (!out) return;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::fprintf(out, "audio     : mode=%s played=%llu mixed=%llu notify=%llu fills=%llu deferred=%llu dropped=%llu%s\n",
                  audioModeName(mode_), static_cast<unsigned long long>(stats_.played_bytes),
                  static_cast<unsigned long long>(stats_.mixed_bytes),

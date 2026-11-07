@@ -6,10 +6,12 @@
 - **行号 = 快照，不是锚**：`machine.cpp` / `machine.h` / `main.cpp` / `native_overrides.*` 在 2026-11-07 评估期间**被并发编辑**（`git diff --stat` 已达 +1300 行）⇒ 行号会漂。**稳定锚是符号名**（`fireDueTimer` / `startNestedGuestCall` / `traceInputsHash` / `opt.real_time` / `Machine::cpu_`）；文中行号只作跳转提示，遇到漂移请按符号找。（与本仓"锚 EA、不锚行号"同一条纪律。）
 - 本文不写引擎语义结论（那走 `AGENTS.md` §6 与 `data/spec/`），只写"线程模型这一层的缺口与代价"。
 - 承接：`SCOPE.md` §1（伪线程）· `README.md` §2.5（业务单线程）· `docs/audio-feasibility.md`（音频侧卡点）。
-- **实施记录（2026-11-07）**：用户裁决 **V1 = D**，已落地并实测；设备模型 / 通知 / 混音 / SDL3 输出 /
-  整份上下文交换 / CS defer / join 的实现口径与偏差见 **`docs/audio-implementation.md`**。
-  实测实时档：一次 fill ≈ 344–425 ms（产 0.5 s 音频，48k stereo BGM），lead 600 ms ⇒ 20 s 内
-  `underruns=0`；SE 延迟 ≈ 600 ms。⛔ 本文仍是**评估**（尤其 §2/§3 的真线程与 TSO 部分未实施）。
+- **实施记录（2026-11-07）**：用户先裁决 **V1 = D** 并落地；随后实测 D 的 SE 延迟 ~600 ms /
+  主线程 Present 期间断裂，用户澄清"完全 override"是要**真线程入口** ⇒ 已升级为 **C（真 feeder
+  线程 + 独立 mixer）**：feeder 有自己的 `X86` / guest 栈 / 私有块缓存，引擎每槽 CS 映射到宿主
+  递归锁；实测 fill 381–462 ms，lead 100 ms，30 s `underruns=0`。实现口径与偏差见
+  **`docs/audio-implementation.md`**；D 仍作为 `--audio=virtual` / 无 `--real-time` 的回退泵。
+  ⛔ 本文 §2/§3 的"通用真线程 / TSO"仍未实施 —— C 只开了音频两条线程，游戏 VM 仍单线程。
 
 ---
 
