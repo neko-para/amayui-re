@@ -179,8 +179,8 @@ endif()
 # GPU 不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
 add_executable(lift-movie-logo tests/movie_logo.cpp)
 target_link_libraries(lift-movie-logo PRIVATE emulator-lift-runtime)
-# ★ 真机影片只在 RelWithDebInfo 树里跑（用户口径：Debug 解释器慢到无法使用）；
-#   Debug 树里测试自己 `LIFT_SKIP`(77)，canonical 是 `ctest --test-dir out-rel -R movie-logo`。
+# ★ 真机影片只在 RelWithDebInfo 树里跑（用户口径：Debug 解释器慢到无法使用；
+#   2026-11-07 起 preset 只有 RelWithDebInfo）。万一有人手工配 Debug，测试自己 `LIFT_SKIP`(77)。
 target_compile_definitions(lift-movie-logo PRIVATE
     LIFT_MOVIE_LOGO_IS_DEBUG=$<IF:$<CONFIG:Debug>,1,0>)
 if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN")

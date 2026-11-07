@@ -13,9 +13,9 @@
 //
 // ★ 子进程输出走**文件重定向**（不走管道：受限沙箱里捕获管道会 EPERM）。
 // ★ 命令行**不含 `--skip-logo`**（本测试专门守"影片真的跑"，跳过模式会让它失去意义）。
-// ★ **必须在 RelWithDebInfo 树（`out-rel/`，预设 `windows-x64-rel`）里跑**：`out/` 是 Debug，
+// ★ **必须在 RelWithDebInfo 树里跑**（2026-11-07 起 `windows-x64` preset 就是 RelWithDebInfo；
 //   解释器慢到 boot 到影片就要几分钟，`--time-limit` 会把影片截断 ⇒ 这条会假红。测试用
-//   `$<TARGET_FILE:emulator-lift>`，跟着所在构建树走；CI 请 `ctest --test-dir out-rel -R movie-logo`。
+//   没有 Debug preset）。测试用 `$<TARGET_FILE:emulator-lift>`，跟着所在构建树走。
 //   ★ Debug 树里本测试**自己 `LIFT_SKIP`(77)**（`LIFT_MOVIE_LOGO_IS_DEBUG`）—— 不跑，免得占 5 分钟。
 // ★ 缺游戏安装 ⇒ CMake 侧不注册；GPU 不可用（raster 行不是 sdl-gpu）⇒ `LIFT_SKIP`(77) 并打印原因。
 #include <cstdio>
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
     //   而这条测试要 boot 到 LOGO 再放完 8.6 s 影片 —— 在 Debug 里会撞 `--time-limit` 假红/假绿。
     //   canonical：`ctest --test-dir out-rel -R movie-logo`（预设 `windows-x64-rel`）。
 #if defined(LIFT_MOVIE_LOGO_IS_DEBUG) && LIFT_MOVIE_LOGO_IS_DEBUG
-    LIFT_SKIP("movie-logo 只在 RelWithDebInfo 树里跑（Debug 解释器太慢；用 `ctest --test-dir out-rel`）");
+    LIFT_SKIP("movie-logo 只在 RelWithDebInfo 树里跑（Debug 解释器太慢；用默认 preset）");
 #endif
     const std::vector<std::string> args = lift::argvUtf8(argc, argv);
     if (args.size() < 5) {

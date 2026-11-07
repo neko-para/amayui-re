@@ -593,6 +593,12 @@ public:
     static std::uint8_t value(int frame_index, int y) {
         return static_cast<std::uint8_t>(0x10 * (frame_index + 1) + y);
     }
+    // 每个像素三通道**不同**（R=value+0、G=+1、B=+2），这样"通道序写错"才会红：
+    // 样本缓冲要求 **BGR**（Windows BI_RGB 24bpp），读成 DWORD = (v+2)<<16 | (v+1)<<8 | v。
+    static std::uint32_t bgrPixels(int frame_index, int y) {
+        const std::uint32_t v = value(frame_index, y);
+        return ((v + 2u) << 16) | ((v + 1u) << 8) | v;
+    }
 
 private:
     void fill(int idx) {
@@ -600,7 +606,7 @@ private:
         for (std::uint32_t y = 0; y < kH; ++y)
             for (std::uint32_t x = 0; x < kW; ++x)
                 for (std::uint32_t c = 0; c < 3u; ++c)
-                    frame_[(y * kW + x) * 3u + c] = value(idx, static_cast<int>(y));
+                    frame_[(y * kW + x) * 3u + c] = static_cast<std::uint8_t>(value(idx, static_cast<int>(y)) + c);
     }
     std::vector<std::uint8_t> frame_;
     int last_index_ = -1;
@@ -838,8 +844,11 @@ int main() {
         LIFT_CHECK(readSamplePixels(h, graph.stats().sample_ea, 12u, 2u, &px));
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(px.size()), 24u);
         // ★ 自底向上：缓冲第 0 行 = 源的第 h-1 行；第 1 行 = 源的第 0 行
-        LIFT_CHECK_EQ_U32(px[0], FakeFeed::value(1, 1));
-        LIFT_CHECK_EQ_U32(px[12], FakeFeed::value(1, 0));
+        // ★ 通道序：样本缓冲是 **BGR**（Windows BI_RGB 24bpp）⇒ 第 0 字节 = B = v+2。
+        LIFT_CHECK_EQ_U32(px[0], static_cast<std::uint32_t>(FakeFeed::value(1, 1) + 2));   // B
+        LIFT_CHECK_EQ_U32(px[1], static_cast<std::uint32_t>(FakeFeed::value(1, 1) + 1));   // G
+        LIFT_CHECK_EQ_U32(px[2], static_cast<std::uint32_t>(FakeFeed::value(1, 1)));       // R
+        LIFT_CHECK_EQ_U32(px[12], static_cast<std::uint32_t>(FakeFeed::value(1, 0) + 2));  // 下一行 B
         LIFT_CHECK_EQ_U32(h.callMethod(graph.stats().sample_ea, 0x10, {}), 24u);  // GetSize
         LIFT_CHECK_EQ_U32(h.callMethod(graph.stats().sample_ea, 0x2C, {}), 24u);  // GetActualDataLength
         const std::uint32_t t0 = h.f.zeroData(8);
@@ -865,8 +874,8 @@ int main() {
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(graph.stats().samples_delivered), 2u);
         LIFT_CHECK_EQ_I64(graph.stats().last_pts_100ns, 666666);
         LIFT_CHECK(readSamplePixels(h, graph.stats().sample_ea, 12u, 2u, &px));
-        LIFT_CHECK_EQ_U32(px[0], FakeFeed::value(2, 1));  // 换到第 3 帧
-        LIFT_CHECK_EQ_U32(px[12], FakeFeed::value(2, 0));
+        LIFT_CHECK_EQ_U32(px[0], static_cast<std::uint32_t>(FakeFeed::value(2, 1) + 2));  // 换到第 3 帧
+        LIFT_CHECK_EQ_U32(px[12], static_cast<std::uint32_t>(FakeFeed::value(2, 0) + 2));
         const std::uint32_t m2 = h.f.zeroData(8);
         LIFT_CHECK_EQ_U32(h.callMethod(graph.stats().sample_ea, 0x34, {m2, h.f.zeroData(8)}), kSOk);
         const std::int64_t pts2 = static_cast<std::int64_t>(h.f.m.mem().rd64(m2));

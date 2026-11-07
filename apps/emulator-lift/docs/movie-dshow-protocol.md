@@ -318,3 +318,12 @@
    - **assets 守卫**：`tests/movie_logo.cpp` 断言 `tex movie` 的 1280×720 / `nonzero>0` / ≥2 个不同
      hash / 出现在 `首帧已送渲染器` 之后。★ `--real-time` 下渲染慢会**丢帧**（实测 43/259 帧，与真机
      一致）⇒ 测试只要求 `samples ≥ 20`，"播完"由 `completed=true` 守。
+
+14. **样本缓冲的通道序 = BGR（2026-11-07 用户实测纠正）**
+   - 现象：LOGO 后半段的**粉色**渲染成**紫色**（R/B 对调）。
+   - 根因：Windows 的 `BI_RGB` 24bpp 在内存里是 **BGR**（`[0]=B,[1]=G,[2]=R`）；渲染器按
+     `src[2]<<16 | src[1]<<8 | src[0]` 组 D3DCOLOR（§3-3 的 `0x487E55..0x487E73`），所以样本必须是
+     BGR。解码器给的是 **RGB24** ⇒ `Graph::copyFrame` 现在**逐像素交换 R/B**（逐行先换到宿主行缓冲，
+     再 `writeBytes`，不逐像素进 guest）。
+   - 守卫：`tests/dshow_graph.cpp` 的假帧源改成**三通道不同**（R=v、G=v+1、B=v+2），断言样本缓冲第
+     0/1/2 字节 = B/G/R。把交换去掉 ⇒ `dshow-pump-frames` 立刻红（149 checks）。

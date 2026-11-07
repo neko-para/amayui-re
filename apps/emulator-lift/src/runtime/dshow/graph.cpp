@@ -1429,11 +1429,21 @@ bool Graph::copyFrame(const std::uint8_t *rgb, std::uint32_t src_stride, std::in
                  use_stride, row_bytes, use_stride);
     }
     const std::uint32_t copy_bytes = use_stride < row_bytes ? use_stride : row_bytes;
+    // ★ **通道序**：Windows 的 `BI_RGB` 24bpp 是 **BGR** 字节序（[0]=B、[1]=G、[2]=R）；
+    //   渲染器按 `src[2]<<16 | src[1]<<8 | src[0]` 组 D3DCOLOR（doc §3-3 `0x487E55..0x487E73`），
+    //   所以样本缓冲必须是 BGR。解码器给 RGB24 ⇒ **逐像素交换 R/B**。
+    //   实测（2026-11-07）：不换会把 LOGO 的粉色渲染成紫色（R/B 对调）。
     // ★ **自底向上**：渲染器按 `base + (h-1-y)*stride` 读（doc §3-3 `0x487E3D`），
     //   而 `FrameFeed::at` 给的是**顶朝下** RGB24 ⇒ 目标行 y 取源行 (h-1-y)。
+    std::vector<std::uint8_t> row(static_cast<std::size_t>(row_bytes));
     for (std::uint32_t y = 0; y < height_; ++y) {
         const std::uint8_t *src = rgb + static_cast<std::size_t>(height_ - 1u - y) * use_stride;
-        cpu_.mem->writeBytes(buf + y * stride_, src, copy_bytes);
+        for (std::uint32_t x = 0; x < width_; ++x) {
+            row[x * 3u + 0u] = src[x * 3u + 2u];  // B
+            row[x * 3u + 1u] = src[x * 3u + 1u];  // G
+            row[x * 3u + 2u] = src[x * 3u + 0u];  // R
+        }
+        cpu_.mem->writeBytes(buf + y * stride_, row.data(), copy_bytes);
     }
     objs_->setSampleLength(cpu_, stride_ * height_);
     // ★ 时间基（**关键，别改成绝对时钟**）：渲染器算"何时该渲染"用的是
