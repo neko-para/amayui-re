@@ -100,6 +100,20 @@ std::uint32_t mouseBit(Uint8 button) {
     }
 }
 
+// SDL 鼠标键 → VK_LBUTTON/VK_RBUTTON/VK_MBUTTON/VK_XBUTTON1/2。
+// ★ 与键盘共用**同一份**影子键状态（`WindowManager::key_down_`）：引擎的
+//   `GetAsyncKeyState(1/2)` 轮询（`.lst` 0x47716D/0x477195/0x477241）只认这一份。
+std::uint32_t vkFromMouseButton(Uint8 button) {
+    switch (button) {
+        case SDL_BUTTON_LEFT: return 0x01u;   // VK_LBUTTON
+        case SDL_BUTTON_RIGHT: return 0x02u;  // VK_RBUTTON
+        case SDL_BUTTON_MIDDLE: return 0x04u; // VK_MBUTTON
+        case SDL_BUTTON_X1: return 0x05u;     // VK_XBUTTON1
+        case SDL_BUTTON_X2: return 0x06u;     // VK_XBUTTON2
+        default: return 0;
+    }
+}
+
 std::uint32_t win32MouseMessage(Uint8 button, bool down) {
     switch (button) {
         case SDL_BUTTON_LEFT: return down ? kWmLButtonDown : kWmLButtonUp;
@@ -285,7 +299,13 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.button.x, event.button.y, &x, &y);
-            if (windows != nullptr) windows->setCursorClientPos(windows->primaryWindow(), x, y);
+            if (windows != nullptr) {
+                windows->setCursorClientPos(windows->primaryWindow(), x, y);
+                // ★ 按键电平：引擎 `GetAsyncKeyState(VK_LBUTTON/VK_RBUTTON)` 只读影子键状态，
+                //   不写这里 ⇒ 轮询恒 0（实测 1827 次全 0）。消息通道照旧。
+                const std::uint32_t vk = vkFromMouseButton(event.button.button);
+                if (vk != 0) windows->setKeyDown(vk, down);
+            }
             postMessage(win32MouseMessage(event.button.button, down), mouse_buttons,
                         (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
             break;

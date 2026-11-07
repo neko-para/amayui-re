@@ -199,6 +199,9 @@ int main(int argc, char** argv) {
         LIFT_CHECK_EQ_U32(move.lparam, (360u << 16) | 640u);
         const lift::WinMessage down = take(0x0201u);
         LIFT_CHECK_EQ_U32(down.wparam & 0x0001u, 0x0001u);
+        // ★ 按键电平：引擎 `GetAsyncKeyState(VK_LBUTTON)` 只读影子键状态（`host_window.h` 的
+        //   同一份 `key_down_`）；SDL 的 DOWN 必须写进去，否则轮询恒 0（实测 1827 次全 0）。
+        LIFT_CHECK(wm.keyDown(0x01u));
         const lift::WinMessage wheel = take(0x020Au);
         LIFT_CHECK_EQ_U32((wheel.wparam >> 16) & 0xFFFFu, 120u);
 
@@ -212,6 +215,18 @@ int main(int argc, char** argv) {
         win.pumpHostEvents();
         take(0x0101u);
         LIFT_CHECK(!wm.keyDown(0x41u));
+
+        // 左键抬起：消息与电平都要回到"未按下"。
+        e = SDL_Event{};
+        e.type = SDL_EVENT_MOUSE_BUTTON_UP;
+        e.button.windowID = wid;
+        e.button.button = SDL_BUTTON_LEFT;
+        e.button.x = 640.0f;
+        e.button.y = 360.0f;
+        LIFT_CHECK(SDL_PushEvent(&e));
+        win.pumpHostEvents();
+        take(0x0202u);
+        LIFT_CHECK(!wm.keyDown(0x01u));
 
         // 关窗先发 WM_CLOSE；两帧宽限后才 stopRequested（guest 有机会自己确认）。
         e = SDL_Event{};
