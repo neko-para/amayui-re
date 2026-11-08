@@ -81,6 +81,7 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/native_map.cpp
     src/runtime/native_movie.cpp
     src/runtime/native_block.cpp
+    src/runtime/native_affine.cpp
     src/runtime/shims.cpp
     src/corpus/lst_index.cpp
     src/shims/register.cpp

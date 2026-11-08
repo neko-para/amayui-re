@@ -229,6 +229,11 @@ const KnownNative kKnown[] = {
     //   纯像素核 = `blendGlyph46D9F0`（G1 直接跑）；帧级 A/B 见需求单
     //   REQ-01M6V1KDFTE933AD3YB5P6XJK2（`all` vs `all,-sub_46D9F0` 逐帧逐字节相同）。
     {"sub_46D9F0", GuestConv::Thiscall, 32, nativeBlend46D9F0},
+    // ★ 2026-11-08：Live2D `BDAffine` 逐顶点仿射（stdcall `retn 1Ch` = 28 B；虚表第 6 项 @0x52F0C0）。
+    //   `.lst` 0x4CCC60..0x4CCD34；x87 逐位（SoftFloat 四则 + transcendental 同路径）。
+    //   ★ 首版 `debug = true`（⛔ 不进 `all`）：真字节差分见 tests/native_override_assets.cpp
+    //   （解释器 vs override，比 dst / 寄存器 / x87 ST 与状态字）。进 `all` 前要补帧级 A/B。
+    {"sub_4CCC60", GuestConv::Stdcall, 28, nativeAffine4CCC60, /*debug=*/true},
 };
 constexpr std::size_t kKnownCount = sizeof(kKnown) / sizeof(kKnown[0]);
 // ★ 表容量是**硬约束**：`--native-overrides=all` 会把每个 `debug == false` 的项都 `add()` 一遍

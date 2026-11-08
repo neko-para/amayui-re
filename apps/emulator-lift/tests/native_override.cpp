@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
 #include "runtime/ddraw_surface.h"
+#include "runtime/native_affine.h"
 #include "runtime/native_overrides.h"
 #include "runtime/surface.h"
 
@@ -2044,6 +2046,74 @@ int main() {
         }
     }
 
+    // ---- ⑰b sub_4CCC60 的仿射纯核：符号 / 零的符号位 / 单点的 faddp 顺序 ----
+    //   ★ 逐位判据在 assets 档（真机器码 vs override）；这里钉住能静态判死的部分：
+    //     θ=0 ⇒ sin=+0 / cos=1（精确）⇒ A=r*sx、B=-(r*sy*+0)、C=r*sy、D=sx*r*+0；
+    //     以及 `out0 = iy*B + ix*A + add4` / `out1 = iy*C + ix*D + add8` 的乘加顺序。
+    {
+        lift::x87ApplyControlWord(0x037Fu);  // 默认控制字（64 位尾数 / 最近偶数）
+        auto extFromFloat = [](float f, lift::Ext80 out) {
+            std::uint8_t b[4];
+            std::memcpy(b, &f, 4);
+            lift::x87MemToReg(b, out, 4);
+        };
+
+        LIFT_CHECK(lift::affineAngleInRange(0.0f, 0.017453292f));
+        LIFT_CHECK(lift::affineAngleInRange(359.0f, 0.017453292f));
+        LIFT_CHECK(!lift::affineAngleInRange(1.0e30f, 0.017453292f));  // |θ| >= 2^63 ⇒ 交解释器
+        LIFT_CHECK(!lift::affineAngleInRange(std::nanf(""), 1.0f));
+
+        lift::Ext80 angle, scale, radius;
+        extFromFloat(0.0f, angle);
+        extFromFloat(1.0f, scale);
+        extFromFloat(2.0f, radius);
+        lift::AffineCoeffs k;
+        LIFT_CHECK(lift::affineCoeffs(angle, scale, radius, false, false, &k));
+        lift::Ext80 two, minusTwo;
+        lift::x87FromI32(2, two);
+        lift::x87FromI32(-2, minusTwo);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, two)), 0u);  // A = +2
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, two)), 0u);  // C = +2
+        LIFT_CHECK(lift::x87IsZero(k.b) && lift::x87SignBit(k.b));    // B = -(r*1*+0) = -0
+        LIFT_CHECK(lift::x87IsZero(k.d) && !lift::x87SignBit(k.d));   // D = +0*sx*r = +0
+
+        // flip_x ⇒ sx=-1：A/D 反号；B 的零符号只由 sy 决定（θ=0 时 sin=+0）⇒ 仍是 -0。
+        LIFT_CHECK(lift::affineCoeffs(angle, scale, radius, true, false, &k));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, minusTwo)), 0u);
+        LIFT_CHECK(lift::x87IsZero(k.b) && lift::x87SignBit(k.b));  // -(r*1*+0) = -0
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, two)), 0u);
+        LIFT_CHECK(lift::x87IsZero(k.d) && lift::x87SignBit(k.d));  // +0 * (sx*r) = -0
+        // flip_y ⇒ sy=-1：C 反号；`-(r*(-1)*+0)` 先得 -0、fchs 后是 **+0**。
+        LIFT_CHECK(lift::affineCoeffs(angle, scale, radius, false, true, &k));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, two)), 0u);
+        LIFT_CHECK(lift::x87IsZero(k.b) && !lift::x87SignBit(k.b));  // +0
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, minusTwo)), 0u);
+        LIFT_CHECK(lift::x87IsZero(k.d) && !lift::x87SignBit(k.d));  // +0
+
+        // 单点：A=1 B=10 C=100 D=1000（整数在 ext80 精确）⇒
+        //   out0 = 3*10 + 2*1 + 7 = 39；out1 = 3*100 + 2*1000 + 8 = 2308。
+        //   ⛔ 把 ix/iy 或两个平移对调，这两条会当场红。
+        lift::AffineCoeffs m;
+        lift::x87FromI32(1, m.a);
+        lift::x87FromI32(10, m.b);
+        lift::x87FromI32(100, m.c);
+        lift::x87FromI32(1000, m.d);
+        lift::Ext80 ix, iy, add4, add8, o0, o1;
+        lift::x87FromI32(2, ix);
+        lift::x87FromI32(3, iy);
+        lift::x87FromI32(7, add4);
+        lift::x87FromI32(8, add8);
+        lift::affinePoint(m, ix, iy, add4, add8, o0, o1);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87ToI32(o0, false)), 39u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87ToI32(o1, false)), 2308u);
+
+        // 进入 fsin 的 C2 区（|θ| >= 2^63）⇒ 核本身也要防御性返回 false。
+        lift::Ext80 huge, one;
+        extFromFloat(1.0e30f, huge);
+        extFromFloat(1.0f, one);
+        LIFT_CHECK(!lift::affineCoeffs(huge, one, radius, false, false, &k));
+    }
+
     // ---- ⑱ known 表：新项的默认分层（全部 debug=false ⇒ 都在 all 里）+ kMax 容得下 ----
     {
         LIFT_CHECK(lift::findKnownNative("sub_429020") != nullptr);
@@ -2062,6 +2132,14 @@ int main() {
         LIFT_CHECK(pool != nullptr && !pool->debug);
         LIFT_CHECK_EQ_U32(pool->entry_ea, 0x00415384u);
         LIFT_CHECK_EQ_U32(pool->resume_ea, 0x0041539Fu);
+        // ★ sub_4CCC60：stdcall `retn 1Ch` = 28 B；**debug 层**（不进 all ⇒ 必须显式点名）。
+        const lift::KnownNative* affine = lift::findKnownNative("sub_4CCC60");
+        LIFT_CHECK(affine != nullptr);
+        if (affine != nullptr) {
+            LIFT_CHECK(affine->debug);
+            LIFT_CHECK(affine->conv == lift::GuestConv::Stdcall);
+            LIFT_CHECK_EQ_U32(affine->arg_bytes, 28u);
+        }
         // ★ 表容量：`all` 会把每个已知项都 add() 一遍 ⇒ kMax 必须装得下**所有**已知项，
         //   否则 configureNativeOverrides 会硬失败（模拟器拒绝启动）。⛔ 不写死数字。
         LIFT_CHECK(lift::NativeOverrideTable::kMax >= lift::knownNativeCount());

@@ -550,11 +550,13 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
 - **选择策略**：`--native-overrides all` 开 `KnownNative::debug == false` 的**稳定**项；
   `debug == true` 的项必须显式点名（日志带 `[debug]` 与警告）。`-名字` 表示**排除**，
   排除项优先于启用项，且与出现顺序无关：`all,-sub_48B090` 与 `-sub_48B090,all` 等价。
-  稳定层当前是 CRT 叶子（`_memcpy` / `_memcpy_0` / `_memset` / `_strlen` / `sub_401000`）、
+  稳定层 / debug 层的**完整清单以启动行 `native-ovr: ...` 为准**（⛔ 本节不复述全部名字，它随加项而变）。
+  稳定层目前含 CRT 叶子（`_memcpy` / `_memcpy_0` / `_memset` / `_strlen` / `sub_401000`）、
   S4IC/LZSS `sub_436A80`（`__thiscall`，`info[0]=输出大小`、`info[2]=压缩大小`）、
-  `sub_48B090`（`NormalTexture::UploadImage`）、`sub_429020`（`Map::findIndex`）、
-  `sub_48AE90`（`NormalTexture` 虚表第 6 项 = 纯色填充），以及**段级** `sub_414AC0`
-  （SYS4INI 装载器的中段填池循环；不是整函数）。
+  `NormalTexture` 的三项 `sub_48B090` / `sub_429020` / `sub_48AE90`、影片 `sub_487C60`、
+  字形 `sub_46D9F0`，以及**段级** `sub_414AC0`（SYS4INI 装载器的中段填池循环；不是整函数）。
+  **debug 层**（必须显式点名）：`sub_4CCC60`（Live2D `BDAffine` 逐顶点仿射；本线**第一项 x87** override，
+  逐位判据 = 真字节差分 `tests/native_override_assets.cpp`，含 `fpu.status`；⛔ G3 帧级 A/B 之前不进 `all`）。
 - `sub_48B090` 的 8/24/32bpp 与 alpha 路径已按 `.lst` 核；4/1bpp 源、16bpp 目标与色键≠0
   仍**显式回退解释器**。锁走 `d3d9::lockRect`/`unlockRect`，失败不留半状态。
   **虚拟时钟相位**没有做补偿（明确不在当前范围）；Windows 侧曾观察到异常、macOS 未复现，

@@ -50,6 +50,8 @@ struct NativeOverride {
 class NativeOverrideTable {
 public:
     // ★ 2026-11-07：8 → 12（BOOT profile 选出的 sub_429020 / sub_48AE90 两项 + 给后续留坑）。
+    // ★ 2026-11-08：sub_4CCC60 用掉最后一格 ⇒ **表已满**；再加项必须同时抬高 kMax
+    //   （下面的 static_assert 会先红，别等到 `all` 起不来）。
     static constexpr std::size_t kMax = 12;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
@@ -201,6 +203,9 @@ bool nativeUpload48B090(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // 空槽判据 `len==0`；命中 = 先比 `min(len)` 字节、再比长度；不中线性探测；返回 index / -1。
 // ★ 只读 guest 内存；所有前置条件（this / 表 / 容量 / index / 提交状态）不成立 ⇒ 返回 false 回退。
 bool nativeFindIndex429020(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// `sub_4CCC60`（Live2D `BDAffine` 虚表第 6 项，`__stdcall retn 1Ch` = 28 B）：逐顶点仿射变换。
+// 纯核在 `native_affine.h`；首版 `debug = true`（x87 逐位判据见 tests/native_override_assets.cpp）。
+bool nativeAffine4CCC60(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_487C60`（CMovieTextureRenderer::DoRenderSample，thiscall `retn 4`）：影片样本 → A8R8G8B8 纹理。
 // 只覆盖主路径（无 alpha 面 / 无 alpha 拷贝 / 3 或 4 字节源）；其余回退解释器。
 bool nativeRender487C60(X86& cpu, GuestMemory& mem, std::uint32_t* result);

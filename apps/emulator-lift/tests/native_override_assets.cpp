@@ -19,6 +19,7 @@
 #include "fixture.h"
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
+#include "runtime/native_affine.h"
 #include "runtime/native_overrides.h"
 
 namespace {
@@ -392,6 +393,127 @@ GlyphResult runGlyph(const std::vector<std::uint8_t>& code46CE20, const std::vec
     return out;
 }
 
+// ---- sub_4CCC60 的仿射夹具（state / inner 对象 / src / dst / flt_52F1B0 全是合成内存）----
+struct AffineCase {
+    float angle_deg = 30.0f;
+    float angle_scale = 0.017453292f;
+    float radius = 1.0f;
+    std::uint8_t flip_x = 0;
+    std::uint8_t flip_y = 0;
+    float add4 = 0.0f;
+    float add8 = 0.0f;
+    std::int32_t count = 2;
+    std::int32_t i0 = 0;
+    std::int32_t stride = 2;
+    std::vector<float> src;
+    bool alias = false;       // src == dst（原地）
+    bool pick_o24 = false;    // state+0x24 非 0 ⇒ 走第二个 inner 对象
+    std::uint32_t dst_fill = 0xCCCCCCCCu;
+    bool fpu_noise = false;   // 调用前 fld1（x87 栈非空 ⇒ override 必须 Declined）
+};
+
+struct AffineResult {
+    bool valid = false;
+    std::uint32_t eax = 0, esp = 0, eip = 0, ebx = 0, esi = 0, edi = 0, ebp = 0;
+    std::uint16_t fpu_status = 0, fpu_control = 0, fpu_tag = 0;
+    std::uint8_t fpu_top = 0;
+    std::vector<std::uint8_t> buf;
+    std::uint64_t hits = 0, fallbacks = 0;
+};
+
+AffineResult runAffine(const std::vector<std::uint8_t>& code4CCC60, const AffineCase& c, bool with_override) {
+    AffineResult out;
+    lift_fixture::Fixture fx;
+    if (!fx.ok) return out;
+    const std::uint32_t state_ea = 0x00420000u;
+    const std::uint32_t obj_ea = 0x00430000u;
+    const std::uint32_t obj2_ea = 0x00440000u;
+    const std::uint32_t src_ea = 0x00480000u;
+    const std::uint32_t dst_ea = 0x00490000u;
+    const std::uint32_t scale_ea = 0x0052F1B0u;
+    constexpr std::size_t kFloats = 64u;
+    auto putF32 = [](std::uint8_t* p, float v) { std::memcpy(p, &v, 4); };
+    auto putU32 = [](std::uint8_t* p, std::uint32_t v) { std::memcpy(p, &v, 4); };
+
+    std::vector<std::uint8_t> state(0x28u, 0), obj(0x20u, 0), obj2(0x20u, 0);
+    putF32(state.data() + 0x10u, c.radius);
+    putU32(state.data() + 0x20u, obj_ea);
+    putU32(state.data() + 0x24u, c.pick_o24 ? obj2_ea : 0u);
+    putF32(obj.data() + 0x04u, c.add4);
+    putF32(obj.data() + 0x08u, c.add8);
+    putF32(obj.data() + 0x14u, c.angle_deg);
+    obj[0x18] = c.flip_x;
+    obj[0x19] = c.flip_y;
+    obj2 = obj;
+    putF32(obj2.data() + 0x04u, c.add4 + 100.0f);
+    putF32(obj2.data() + 0x08u, c.add8 + 200.0f);
+    putF32(obj2.data() + 0x14u, c.angle_deg + 45.0f);
+
+    std::vector<std::uint8_t> srcbuf(kFloats * 4u, 0), dstbuf(kFloats * 4u, 0);
+    for (std::size_t i = 0; i < kFloats; ++i) {
+        const float v = i < c.src.size() ? c.src[i] : 0.0f;
+        std::memcpy(srcbuf.data() + i * 4u, &v, 4);
+    }
+    for (std::size_t i = 0; i + 4u <= dstbuf.size(); i += 4u) std::memcpy(dstbuf.data() + i, &c.dst_fill, 4);
+    std::uint32_t scale_bits = 0;
+    std::memcpy(&scale_bits, &c.angle_scale, 4);
+
+    if (!fx.m.placeData(state_ea, state.data(), state.size(), &fx.err)) return out;
+    if (!fx.m.placeData(obj_ea, obj.data(), obj.size(), &fx.err)) return out;
+    if (!fx.m.placeData(obj2_ea, obj2.data(), obj2.size(), &fx.err)) return out;
+    if (!fx.m.placeData(scale_ea, &scale_bits, 4u, &fx.err)) return out;
+    if (!fx.m.placeData(src_ea, srcbuf.data(), srcbuf.size(), &fx.err)) return out;
+    if (!fx.m.placeData(dst_ea, dstbuf.data(), dstbuf.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x004CCC60u, code4CCC60.data(), code4CCC60.size(), &fx.err)) return out;
+
+    if (with_override) {
+        std::string err;
+        if (!fx.m.overrides().add(0x004CCC60u, "ref_affine", lift::GuestConv::Stdcall, 28,
+                                  lift::nativeAffine4CCC60, &err))
+            return out;
+    }
+    const std::uint32_t dst_ptr = c.alias ? src_ea : dst_ea;
+    const std::uint32_t call_ea = 0x00402000u;
+    lift_fixture::Asm a(call_ea);
+    if (c.fpu_noise) {
+        a.u8(0xD9);
+        a.u8(0xE8);  // fld1
+    }
+    a.pushImm(static_cast<std::uint32_t>(c.stride));  // a7
+    a.pushImm(static_cast<std::uint32_t>(c.i0));      // a6
+    a.pushImm(static_cast<std::uint32_t>(c.count));   // a5
+    a.pushImm(dst_ptr);                               // a4
+    a.pushImm(src_ea);                                // a3
+    a.pushImm(state_ea);                              // a2
+    a.pushImm(0u);                                    // a1：guest 全程未读
+    a.callRel(0x004CCC60u);
+    a.ret();
+    if (!fx.m.placeCode(call_ea, a.b.data(), a.b.size(), &fx.err)) return out;
+    fx.rearmStack();
+    fx.runCode(call_ea);
+    if (!fx.ok) return out;
+    out.valid = true;
+    out.eax = fx.m.cpu().eax();
+    out.esp = fx.m.cpu().esp();
+    out.eip = fx.m.cpu().eip;
+    out.ebx = fx.m.cpu().ebx();
+    out.esi = fx.m.cpu().esi();
+    out.edi = fx.m.cpu().edi();
+    out.ebp = fx.m.cpu().ebp();
+    out.fpu_status = fx.m.cpu().fpu.status;
+    out.fpu_control = fx.m.cpu().fpu.control;
+    out.fpu_tag = fx.m.cpu().fpu.tag;
+    out.fpu_top = fx.m.cpu().fpu.top;
+    const std::uint8_t* p = fx.m.mem().host(c.alias ? src_ea : dst_ea);
+    out.buf.assign(p, p + kFloats * 4u);
+    if (with_override) {
+        const lift::NativeOverride* e = fx.m.overrides().at(0);
+        out.hits = e->hits;
+        out.fallbacks = e->fallbacks;
+    }
+    return out;
+}
+
 int main() {
     const std::string exe = envValue("LIFT_AGE_EXE");
     if (exe.empty()) LIFT_SKIP("没有 LIFT_AGE_EXE（CMake 的 assets 档会设它）");
@@ -618,6 +740,130 @@ int main() {
                     }
                 std::fprintf(stderr, "  [46D9F0 %s] dst 首个差异 @%zu: %02X vs %02X（eax %08X/%08X）\n",
                              nc.name, diff, base.dst[diff], ovr.dst[diff], base.eax, ovr.eax);
+            }
+        }
+    }
+
+    // ---- ④ sub_4CCC60：真字节，解释器 vs override；dst 逐字节 + 寄存器 + **x87 状态字** ----
+    // ★ 这是本线**第一项 x87 override**：除目的内存/寄存器外，还要比 `fpu.status` / `tag` / `top` /
+    //   `control` —— 算术顺序或 `fsin`/`fcos` 路径一偏，status 的 PE 位或顶层槽就会露馅。
+    // ★ 纯核的静态判据在 pure 档（tests/native_override.cpp）；这里只做"同一份真字节两遍"。
+    {
+        const std::vector<std::uint8_t> code4CCC60 = img.at(0x004CCC60u, 0xD4u);
+        struct NamedAffineCase {
+            const char* name;
+            AffineCase c;
+            bool decline;
+        };
+        std::vector<NamedAffineCase> cases;
+        auto addCase = [&](const char* name, const AffineCase& c, bool decline = false) {
+            cases.push_back({name, c, decline});
+        };
+
+        AffineCase base;
+        base.src = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        addCase("30/stride2", base);
+
+        AffineCase offset = base;
+        offset.angle_deg = -45.5f;
+        offset.radius = 0.75f;
+        offset.flip_x = 1;
+        offset.add4 = -3.25f;
+        offset.add8 = 7.5f;
+        offset.i0 = 1;
+        offset.count = 4;
+        offset.stride = 3;
+        offset.src = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        addCase("-45.5/stride3/i0=1", offset);
+
+        AffineCase stride1 = base;
+        stride1.angle_deg = 90.0f;
+        stride1.radius = 2.0f;
+        stride1.flip_y = 1;
+        stride1.count = 5;
+        stride1.stride = 1;  // 相邻两点重叠：后写赢
+        addCase("90/stride1", stride1);
+
+        AffineCase alias1 = stride1;
+        alias1.alias = true;
+        addCase("alias/stride1", alias1);
+
+        AffineCase alias2 = base;
+        alias2.alias = true;
+        addCase("alias/stride2", alias2);
+
+        AffineCase flags = base;
+        flags.flip_x = 1;
+        flags.flip_y = 1;
+        flags.radius = -1.5f;
+        flags.count = 3;
+        flags.stride = 2;
+        flags.src = {-1, 2.5f, -3.25f, 4.5f, -5, 6};
+        addCase("flags-both/r<0", flags);
+
+        AffineCase empty = base;
+        empty.count = 2;
+        empty.stride = 2;
+        empty.i0 = 4;  // bound = 4 <= i0 ⇒ 空循环（EAX = inner 对象）
+        empty.src = {1, 2, 3, 4};
+        addCase("empty-loop", empty);
+
+        AffineCase pick = base;
+        pick.pick_o24 = true;  // `[state+0x24] ?: [state+0x20]` 的非零分支
+        addCase("pick-o24", pick);
+
+        AffineCase zero = base;
+        zero.angle_deg = 0.0f;
+        zero.radius = 2.0f;
+        zero.add4 = 10.0f;
+        zero.add8 = 20.0f;
+        zero.count = 2;
+        zero.stride = 2;
+        zero.src = {2, 1, 3, 4};
+        addCase("angle0", zero);
+
+        AffineCase huge = base;
+        huge.angle_deg = 1.0e30f;  // |θ| >= 2^63 ⇒ fsin 的 C2 分支 ⇒ override 必须 Declined
+        addCase("huge-angle", huge, true);
+
+        AffineCase noise = base;
+        noise.fpu_noise = true;  // x87 栈非空 ⇒ guest 会走 push 溢出 ⇒ override 必须 Declined
+        addCase("fpu-nonempty", noise, true);
+
+        for (const NamedAffineCase& nc : cases) {
+            lift_test::g_current_case = nc.name;
+            const AffineResult b = runAffine(code4CCC60, nc.c, false);
+            const AffineResult o = runAffine(code4CCC60, nc.c, true);
+            LIFT_CHECK(b.valid && o.valid);
+            if (!b.valid || !o.valid) continue;
+            LIFT_CHECK_EQ_U32(o.eax, b.eax);
+            LIFT_CHECK_EQ_U32(o.esp, b.esp);
+            LIFT_CHECK_EQ_U32(o.eip, b.eip);
+            LIFT_CHECK_EQ_U32(o.ebx, b.ebx);
+            LIFT_CHECK_EQ_U32(o.esi, b.esi);
+            LIFT_CHECK_EQ_U32(o.edi, b.edi);
+            LIFT_CHECK_EQ_U32(o.ebp, b.ebp);
+            LIFT_CHECK(o.fpu_control == b.fpu_control);
+            LIFT_CHECK(o.fpu_tag == b.fpu_tag);
+            LIFT_CHECK(o.fpu_top == b.fpu_top);
+            LIFT_CHECK(o.fpu_status == b.fpu_status);
+            LIFT_CHECK(o.buf == b.buf);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.hits), nc.decline ? 0u : 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.fallbacks), nc.decline ? 1u : 0u);
+            if (o.buf != b.buf) {
+                std::size_t diff = 0;
+                for (std::size_t k = 0; k < o.buf.size() && k < b.buf.size(); ++k)
+                    if (o.buf[k] != b.buf[k]) {
+                        diff = k;
+                        break;
+                    }
+                std::fprintf(stderr, "  [4CCC60 %s] dst 首个差异 @%zu: %02X vs %02X（eax %08X/%08X）\n",
+                             nc.name, diff, b.buf[diff], o.buf[diff], b.eax, o.eax);
+            }
+            if (o.fpu_status != b.fpu_status) {
+                std::fprintf(stderr, "  [4CCC60 %s] fpu.status %04X vs %04X（tag %04X/%04X top %u/%u）\n",
+                             nc.name, b.fpu_status, o.fpu_status, b.fpu_tag, o.fpu_tag,
+                             static_cast<unsigned>(b.fpu_top), static_cast<unsigned>(o.fpu_top));
             }
         }
     }
