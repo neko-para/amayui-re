@@ -1366,18 +1366,706 @@ int main() {
         }
     }
 
-    // ---- ⑮ known 表：新项的默认分层（全部 debug=false ⇒ 都在 all 里）+ kMax 容得下 ----
+    // =====================================================================================
+    // ⑯ `sub_46D9F0` 的字形混合核（**G1：纯算术**；不建机器、不碰游戏 / LFS）
+    //
+    // 判据（红了意味着什么）：
+    //   ① 覆盖值 = 0 ⇒ 一个字节都不写；覆盖值 = 满值 ⇒ 整像素覆写；目标自身 A = 0 ⇒ 覆写；
+    //      其余 ⇒ 逐通道 `(目标×(满-覆盖) + 源×覆盖) ÷ 满`，输出 A = `max(目标, 覆盖)`。
+    //   ② 两条支路（16 位 满=15 / 32 位 满=255）与两种源格式（1bpp 掩码 / 8bpp 级数）都走同一套判据。
+    //   ③ 覆盖值量表：65 级的满覆盖 = **251**、17 级 = **240**（⛔ 不是 255）—— 32 位支能直接观察 A。
+    //   ④ 裁剪：left 含、right/bottom 不含；被裁掉的像素一个字节都不写。
+    //   ⑤ EAX = `(a4[1] > 0) ? a5 : 0`。
+    // ★ 变异自检（需求单 G1，另在构建上手工施加过一次）：`sar 4`→`sar 3` · ÷17→÷16 · `max`→`+`
+    //   三条都必须让本节的断言当场红（见报告）。
+    // ★ 这里**不测**准入层（那是宿主侧判据）；准入在下面 ⑳ 用合成 guest 内存逐条钉。
+    // =====================================================================================
+    {
+        lift_test::g_current_case = "glyph-blend-46D9F0";
+        struct BlitResult {
+            std::vector<std::uint8_t> pixels;
+            std::uint32_t eax = 0;
+        };
+        // 宿主缓冲上一次跑纯核：4 px/行 × 2 行（16 位 = 16 B、32 位 = 32 B），初值 0x5A。
+        auto runBlit = [](const lift::GlyphBlit& b, std::size_t bytes) {
+            std::vector<std::uint8_t> buf(bytes, 0x5A);
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            BlitResult r;
+            r.eax = lift::blendGlyph46D9F0(args);
+            r.pixels = buf;
+            return r;
+        };
+        auto px16 = [](const BlitResult& r, int x, int y) {
+            std::uint16_t v = 0;
+            std::memcpy(&v, r.pixels.data() + static_cast<std::size_t>(y) * 8u + static_cast<std::size_t>(x) * 2u, 2);
+            return static_cast<std::uint32_t>(v);
+        };
+        auto px32 = [](const BlitResult& r, int x, int y) {
+            std::uint32_t v = 0;
+            std::memcpy(&v, r.pixels.data() + static_cast<std::size_t>(y) * 8u + static_cast<std::size_t>(x) * 4u, 4);
+            return v;
+        };
+        // color = 0x00804020（COLORREF：R=0x20 / G=0x40 / B=0x80）
+        //   32 位支：flat = (R<<16)|(G<<8)|B = 0x00204080
+        //   16 位支：R4=2 / G4=4 / B4=8 ⇒ flat = 0x0248（A4R4G4B4 的 R/G/B）
+        const std::uint32_t kColor = 0x00804020u;
+        const std::uint32_t kFlat16 = 0x0248u;
+        const std::uint32_t kFlat32 = 0x00204080u;
+        const std::uint16_t kUnchanged16 = 0x5A5Au;
+        const std::uint32_t kUnchanged32 = 0x5A5A5A5Au;
+        lift::GlyphBlit base;
+        base.dst_pitch = 8;  // 16 位：4 px/行；32 位：2 px/行
+        base.width = 2;
+        base.height = 2;
+        base.origin_x = 0;
+        base.origin_y = 0;
+        base.src_stride = 4;
+        base.dst_x = 1;
+        base.dst_y = 0;
+        base.color = kColor;
+        base.clip_left = 0;
+        base.clip_top = 0;
+        base.clip_right = 4;
+        base.clip_bottom = 2;
+        base.sixteen_bpp = true;
+        base.source = lift::GlyphMaskSource::BitMask1;
+        base.levels = lift::GlyphLevels::Levels17;
+
+        // ---- ① 16 位 × 1bpp 掩码：置位 ⇒ 满覆盖 15 ⇒ 整像素覆写；位 = 0 ⇒ 一个字节都不写 ----
+        {
+            const std::uint8_t src[8] = {0x80, 0, 0, 0, 0x80, 0, 0, 0};  // 每行只有 col0 置位
+            lift::GlyphBlit b = base;
+            b.src = src;
+            const BlitResult r = runBlit(b, 16);
+            LIFT_CHECK_EQ_U32(r.eax, 4u);  // EAX = a5（0x46DC55）
+            LIFT_CHECK_EQ_U32(px16(r, 1, 0), (0xFu << 12) | kFlat16);
+            LIFT_CHECK_EQ_U32(px16(r, 1, 1), (0xFu << 12) | kFlat16);
+            LIFT_CHECK_EQ_U32(px16(r, 2, 0), kUnchanged16);  // 位 = 0 ⇒ 不写
+            LIFT_CHECK_EQ_U32(px16(r, 2, 1), kUnchanged16);
+            LIFT_CHECK_EQ_U32(px16(r, 0, 0), kUnchanged16);  // 裁剪外
+            LIFT_CHECK_EQ_U32(px16(r, 3, 0), kUnchanged16);
+        }
+        // ---- ② 16 位 × 65 级：raw=64 ⇒ 覆盖值 251 ⇒ `sar 4` = 15 ⇒ 整像素覆写 ----
+        //   ★ `sar 4` → `sar 3` 的变异在这里红（251>>3 = 31 ≠ 15 ⇒ 走加权而不是覆写）。
+        {
+            const std::uint8_t src[8] = {64, 64, 64, 64, 64, 64, 64, 64};
+            lift::GlyphBlit b = base;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            const BlitResult r = runBlit(b, 16);
+            LIFT_CHECK_EQ_U32(px16(r, 1, 0), (0xFu << 12) | kFlat16);
+            LIFT_CHECK_EQ_U32(px16(r, 2, 0), (0xFu << 12) | kFlat16);
+            LIFT_CHECK_EQ_U32(px16(r, 1, 1), (0xFu << 12) | kFlat16);
+            LIFT_CHECK_EQ_U32(px16(r, 2, 1), (0xFu << 12) | kFlat16);
+            LIFT_CHECK_EQ_U32(px16(r, 0, 0), kUnchanged16);
+            LIFT_CHECK_EQ_U32(r.eax, 4u);
+        }
+        // ---- ③ 16 位 × 17 级：raw=16 ⇒ 覆盖值 240 ⇒ `sar 4` = 15 ⇒ 同样是覆写 ----
+        {
+            const std::uint8_t src[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+            lift::GlyphBlit b = base;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels17;
+            b.src = src;
+            const BlitResult r = runBlit(b, 16);
+            LIFT_CHECK_EQ_U32(px16(r, 1, 0), (0xFu << 12) | kFlat16);
+            LIFT_CHECK_EQ_U32(px16(r, 2, 1), (0xFu << 12) | kFlat16);
+        }
+        // ---- ④ 16 位 × 中覆盖（raw=32 ⇒ 覆盖值 125 ⇒ `sar 4` = 7）：逐通道加权 + A = max ----
+        //   dst = 0xFA5C（A=0xF / ch8=0xA / ch4=0x5 / ch0=0xC），cov=7、k=8：
+        //     ch8: (0xA*8 + 7*2)/15 = 94/15 = 6   ch4: (0x5*8 + 7*4)/15 = 68/15 = 4
+        //     ch0: (0xC*8 + 7*8)/15 = 152/15 = 10  ⇒ 0xF64A
+        //   ★ `sar 4` → `sar 3` 会变成 125>>3 = 15 ⇒ 覆写 0xF248（与 0xF64A 不同 ⇒ 红）。
+        {
+            const std::uint8_t src[8] = {32, 32, 32, 32, 32, 32, 32, 32};
+            lift::GlyphBlit b = base;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            std::vector<std::uint8_t> buf(16, 0);
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    const std::uint16_t v = 0xFA5Cu;
+                    std::memcpy(buf.data() + static_cast<std::size_t>(y) * 8u + static_cast<std::size_t>(x) * 2u, &v, 2);
+                }
+            }
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            LIFT_CHECK_EQ_U32(lift::blendGlyph46D9F0(args), 4u);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px16(r, 1, 0), 0xF64Au);
+            LIFT_CHECK_EQ_U32(px16(r, 2, 1), 0xF64Au);
+            LIFT_CHECK_EQ_U32(px16(r, 0, 0), 0xFA5Cu);
+        }
+        // ---- ⑤ 16 位 × 目标 A = 0 ⇒ 整像素覆写（值 = 覆盖值<<12 | 源 RGB，**不读目标**）----
+        {
+            const std::uint8_t src[8] = {32, 32, 32, 32, 32, 32, 32, 32};
+            lift::GlyphBlit b = base;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            std::vector<std::uint8_t> buf(16, 0);
+            for (std::size_t i = 0; i < buf.size(); i += 2) {
+                const std::uint16_t v = 0x0A5Cu;  // A = 0
+                std::memcpy(buf.data() + i, &v, 2);
+            }
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            (void)lift::blendGlyph46D9F0(args);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px16(r, 1, 0), (7u << 12) | kFlat16);  // 0x7248
+        }
+        // ---- ⑥ 16 位 × 目标 A > 覆盖值：输出 A = max（`max` → `+` 的变异在这里红）----
+        //   dst = 0xDA5C（A=0xD）、cov=7 ⇒ A 应为 0xD；`+` 会给出 (0xD+7)&0xF = 4。
+        {
+            const std::uint8_t src[8] = {32, 32, 32, 32, 32, 32, 32, 32};
+            lift::GlyphBlit b = base;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            std::vector<std::uint8_t> buf(16, 0);
+            for (std::size_t i = 0; i < buf.size(); i += 2) {
+                const std::uint16_t v = 0xDA5Cu;
+                std::memcpy(buf.data() + i, &v, 2);
+            }
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            (void)lift::blendGlyph46D9F0(args);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px16(r, 1, 0), 0xD64Au);
+        }
+        // ---- ⑦ 覆盖值 = 0（raw = 0）⇒ 一个字节都不写 ----
+        {
+            const std::uint8_t src[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            const BlitResult r = runBlit(b, 16);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 4; ++x) LIFT_CHECK_EQ_U32(px16(r, x, y), kUnchanged16);
+            LIFT_CHECK_EQ_U32(r.eax, 4u);
+        }
+        // ---- ⑧ 裁剪：左越界 / 右越界 / 下越界 ⇒ 一个字节都不写；上越界只写回来那行 ----
+        {
+            const std::uint8_t src[8] = {0x80, 0, 0, 0, 0x80, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.src = src;
+            b.dst_x = -3;  // x = -3, -2 ⇒ 全在 left=0 之外
+            BlitResult r = runBlit(b, 16);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 4; ++x) LIFT_CHECK_EQ_U32(px16(r, x, y), kUnchanged16);
+            b = base;
+            b.src = src;
+            b.dst_x = 4;  // x = 4, 5 ⇒ 全在 right=4 之外（right 不含）
+            r = runBlit(b, 16);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 4; ++x) LIFT_CHECK_EQ_U32(px16(r, x, y), kUnchanged16);
+            b = base;
+            b.src = src;
+            b.dst_y = 2;  // y = 2, 3 ⇒ 全在 bottom=2 之外
+            r = runBlit(b, 16);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 4; ++x) LIFT_CHECK_EQ_U32(px16(r, x, y), kUnchanged16);
+            b = base;
+            b.src = src;
+            b.dst_y = -1;  // y = -1（裁掉）, 0（写）
+            r = runBlit(b, 16);
+            LIFT_CHECK_EQ_U32(px16(r, 1, 0), (0xFu << 12) | kFlat16);
+            LIFT_CHECK_EQ_U32(px16(r, 1, 1), kUnchanged16);
+        }
+        // ---- ⑨ 32 位 × 1bpp 掩码：置位 ⇒ 覆盖值 255 ⇒ 整像素覆写 ----
+        {
+            const std::uint8_t src[8] = {0xC0, 0, 0, 0, 0xC0, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.dst_x = 0;  // 32 位支只有 2 px/行
+            b.sixteen_bpp = false;
+            b.src = src;
+            const BlitResult r = runBlit(b, 32);
+            LIFT_CHECK_EQ_U32(px32(r, 0, 0), 0xFF000000u | kFlat32);
+            LIFT_CHECK_EQ_U32(px32(r, 1, 0), 0xFF000000u | kFlat32);
+            LIFT_CHECK_EQ_U32(px32(r, 0, 1), 0xFF000000u | kFlat32);
+            LIFT_CHECK_EQ_U32(r.eax, 4u);
+            LIFT_CHECK_EQ_U32(px32(r, 0, 0), 0xFF204080u);  // 字节反序口径落位
+        }
+        // ---- ⑩ 32 位 × 65 级满（raw=64 ⇒ 251）：**不**等于 255 ⇒ 走加权（目标 A=0 ⇒ 覆写，A=251）----
+        //   ★ 这条同时钉住"满覆盖 251 不是 255"（spec 侧的口径）；÷65 → ÷17 的变异不影响它。
+        {
+            const std::uint8_t src[8] = {64, 0, 0, 0, 0, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.dst_x = 0;
+            b.sixteen_bpp = false;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            std::vector<std::uint8_t> buf(32, 0);  // 目标 A = 0 ⇒ 覆写
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            (void)lift::blendGlyph46D9F0(args);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px32(r, 0, 0), 0xFB204080u);  // A = 251
+        }
+        // ---- ⑪ 32 位 × 17 级满（raw=16 ⇒ 240）⇒ A = 240；÷17 → ÷16 的变异在这里红 ----
+        //   目标 A = 0x40 ⇒ 走加权：outA = max(0x40,240) = 240
+        //     R: (0x10*15 + 240*0x20)/255 = 7920/255  = 31  (0x1F)
+        //     G: (0x20*15 + 240*0x40)/255 = 15840/255 = 62  (0x3E)
+        //     B: (0x30*15 + 240*0x80)/255 = 31440/255 = 123 (0x7B)
+        //   ★ ÷17 → ÷16 会让覆盖值变 255 ⇒ 整像素覆写 0xFF204080（不同 ⇒ 红）。
+        {
+            const std::uint8_t src[8] = {16, 0, 0, 0, 0, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.dst_x = 0;
+            b.sixteen_bpp = false;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels17;
+            b.src = src;
+            std::vector<std::uint8_t> buf(32, 0);
+            for (std::size_t i = 0; i < buf.size(); i += 4) {
+                const std::uint32_t v = 0x40102030u;  // A=0x40 R=0x10 G=0x20 B=0x30
+                std::memcpy(buf.data() + i, &v, 4);
+            }
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            (void)lift::blendGlyph46D9F0(args);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px32(r, 0, 0), 0xF01F3E7Bu);
+            LIFT_CHECK_EQ_U32(px32(r, 1, 0), 0x40102030u);  // 覆盖值 0 的列不写
+        }
+        // ---- ⑫ 32 位 × 中覆盖（raw=32 ⇒ 125）：加权 + A = max（`max` → `+` 的变异在这里红）----
+        //   dst A=0xC0 > 125 ⇒ A 应为 0xC0；`+` 会给出 (0xC0+125) = 0xFD。
+        //     R: (0x10*130 + 125*0x20)/255 = 6080/255  = 23  (0x17)
+        //     G: (0x20*130 + 125*0x40)/255 = 12160/255 = 47  (0x2F)
+        //     B: (0x30*130 + 125*0x80)/255 = 22240/255 = 87  (0x57)
+        {
+            const std::uint8_t src[8] = {32, 0, 0, 0, 0, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.dst_x = 0;
+            b.sixteen_bpp = false;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            std::vector<std::uint8_t> buf(32, 0);
+            for (std::size_t i = 0; i < buf.size(); i += 4) {
+                const std::uint32_t v = 0xC0102030u;
+                std::memcpy(buf.data() + i, &v, 4);
+            }
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            (void)lift::blendGlyph46D9F0(args);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px32(r, 0, 0), 0xC0172F57u);
+        }
+        // ---- ⑬ 32 位 × 目标 A = 0 ⇒ 覆写（A = 覆盖值）----
+        {
+            const std::uint8_t src[8] = {32, 0, 0, 0, 0, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.dst_x = 0;
+            b.sixteen_bpp = false;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            std::vector<std::uint8_t> buf(32, 0);
+            for (std::size_t i = 0; i < buf.size(); i += 4) {
+                const std::uint32_t v = 0x00102030u;  // A = 0
+                std::memcpy(buf.data() + i, &v, 4);
+            }
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            (void)lift::blendGlyph46D9F0(args);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px32(r, 0, 0), 0x7D204080u);  // A = 125
+        }
+        // ---- ⑭ 返回值：h <= 0 的出口 EAX = 0（0x46DA50 / 0x46DC9D）；w <= 0 不影响返回值 ----
+        {
+            const std::uint8_t src[8] = {0x80, 0, 0, 0, 0x80, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.src = src;
+            b.height = 0;
+            LIFT_CHECK_EQ_U32(runBlit(b, 16).eax, 0u);
+            b = base;
+            b.src = src;
+            b.width = 0;
+            const BlitResult r = runBlit(b, 16);
+            LIFT_CHECK_EQ_U32(r.eax, 4u);  // h > 0 ⇒ EAX = a5
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 4; ++x) LIFT_CHECK_EQ_U32(px16(r, x, y), kUnchanged16);
+            // 32 位支同样：w = 0 / h = 0 一个字节都不写，EAX 分别是 a5 / 0
+            b = base;
+            b.sixteen_bpp = false;
+            b.dst_x = 0;
+            b.src = src;
+            b.width = 0;
+            const BlitResult r32 = runBlit(b, 32);
+            LIFT_CHECK_EQ_U32(r32.eax, 4u);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 2; ++x) LIFT_CHECK_EQ_U32(px32(r32, x, y), kUnchanged32);
+            b.height = 0;
+            LIFT_CHECK_EQ_U32(runBlit(b, 32).eax, 0u);
+        }
+        // ---- ⑮ 覆盖值 = 1 档（级数 = 1）：16 位被 `sar 4` 吃成 0 ⇒ **不写**；32 位得 3 ⇒ 写 ----
+        //   65 级：1×255 = 255，÷65 = 3（255/65 = 3.92 ⇒ 3）⇒ 16 位 `>>4` = 0；32 位 = 3。
+        //   ★ 这就是 spec 侧记的"最低一档灰度被降位吃掉"（`docs/02-engine/spec-audit-2026-10.md` §94）。
+        //   ⚠ 覆盖值**恰好 = 1** 在本函数里不可达（除数是 65 / 17 ⇒ 最小非零档是 3 / 15）——
+        //     需求单写的"0 / 1 / 中 / 满"里的"1"按"最低非零档"理解，这里钉的是它。
+        {
+            const std::uint8_t src[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+            lift::GlyphBlit b = base;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            const BlitResult r16 = runBlit(b, 16);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 4; ++x) LIFT_CHECK_EQ_U32(px16(r16, x, y), kUnchanged16);
+            lift::GlyphBlit b32 = b;
+            b32.sixteen_bpp = false;
+            b32.dst_x = 0;
+            std::vector<std::uint8_t> buf(32, 0);  // 目标 A = 0 ⇒ 覆写，A = 覆盖值 3
+            lift::GlyphBlit args = b32;
+            args.dst = buf.data();
+            (void)lift::blendGlyph46D9F0(args);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px32(r, 0, 0), 0x03204080u);  // (3<<24) | flat
+            LIFT_CHECK_EQ_U32(px32(r, 1, 0), 0x03204080u);
+        }
+        // ---- ⑯ 16 位 × 覆盖值(7) > 目标 A(5) ⇒ 输出 A = 覆盖值（cov>dstA 的 max 侧）----
+        //   dst = 0x5A5C（A=5）⇒ A 应为 7；`max` → `+` 会给出 (5+7)&0xF = 0xC。
+        {
+            const std::uint8_t src[8] = {32, 32, 32, 32, 32, 32, 32, 32};
+            lift::GlyphBlit b = base;
+            b.source = lift::GlyphMaskSource::Level8;
+            b.levels = lift::GlyphLevels::Levels65;
+            b.src = src;
+            std::vector<std::uint8_t> buf(16, 0);
+            for (std::size_t i = 0; i < buf.size(); i += 2) {
+                const std::uint16_t v = 0x5A5Cu;
+                std::memcpy(buf.data() + i, &v, 2);
+            }
+            lift::GlyphBlit args = b;
+            args.dst = buf.data();
+            (void)lift::blendGlyph46D9F0(args);
+            BlitResult r;
+            r.pixels = buf;
+            LIFT_CHECK_EQ_U32(px16(r, 1, 0), 0x764Au);
+        }
+        // ---- ⑰ 32 位 × 裁剪（左 / 右 / 下越界）⇒ 一个字节都不写 ----
+        {
+            const std::uint8_t src[8] = {0xC0, 0, 0, 0, 0xC0, 0, 0, 0};
+            lift::GlyphBlit b = base;
+            b.sixteen_bpp = false;
+            b.src = src;
+            b.dst_x = -3;
+            BlitResult r = runBlit(b, 32);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 2; ++x) LIFT_CHECK_EQ_U32(px32(r, x, y), kUnchanged32);
+            b = base;
+            b.sixteen_bpp = false;
+            b.src = src;
+            b.dst_x = 4;
+            r = runBlit(b, 32);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 2; ++x) LIFT_CHECK_EQ_U32(px32(r, x, y), kUnchanged32);
+            b = base;
+            b.sixteen_bpp = false;
+            b.src = src;
+            b.dst_y = 2;
+            r = runBlit(b, 32);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 2; ++x) LIFT_CHECK_EQ_U32(px32(r, x, y), kUnchanged32);
+            b = base;
+            b.sixteen_bpp = false;
+            b.src = src;
+            b.dst_y = -1;  // y = -1（裁掉）, 0（写）
+            r = runBlit(b, 32);
+            LIFT_CHECK_EQ_U32(px32(r, 1, 0), 0xFF000000u | kFlat32);
+            LIFT_CHECK_EQ_U32(px32(r, 1, 1), kUnchanged32);
+        }
+    }
+
+    // =====================================================================================
+    // ⑳ `sub_46D9F0` 的**准入层**：合成 guest 内存（Font / mgr / 纹理槽 / 裁剪对象 / 参数 / 表面）
+    //
+    // 判据：① 正常路径写出来的字节与纯核一致、EAX 对；② 每一条 Declined 判据都**明确回退**，
+    //       且一个字节都不改（失败不留半状态）；③ 这些判据全部在写第一个像素之前判完。
+    // =====================================================================================
+    {
+        lift_test::g_current_case = "glyph-blend-admit-46D9F0";
+        constexpr std::uint32_t kFontEa = 0x00420000u;
+        constexpr std::uint32_t kMgrEa = 0x00460000u;
+        constexpr std::uint32_t kClipEa = 0x00470000u;
+        constexpr std::uint32_t kSrcEa = 0x00480000u;
+        constexpr std::uint32_t kDstEa = 0x00490000u;
+        constexpr std::uint32_t kMetricsEa = 0x004A0000u;
+        constexpr std::uint32_t kTextureBit = 0x005518C0u;
+        auto bootRig = [&](lift::Machine& m, std::string& err, std::uint32_t texid, std::uint32_t display_bpp) {
+            if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
+            const std::vector<std::uint8_t> zero(0x420, 0);
+            if (!m.placeData(kFontEa, zero.data(), zero.size(), &err)) return false;
+            if (!m.placeData(kFontEa + 0x548u, zero.data(), 4u, &err)) return false;
+            if (!m.placeData(kFontEa + 0x35584u, zero.data(), 4u, &err)) return false;
+            const std::vector<std::uint8_t> mgr_zero(0x10, 0);
+            if (!m.placeData(kMgrEa + 0xA5D8u + 4u * texid, mgr_zero.data(), 4u, &err)) return false;
+            if (!m.placeData(kMgrEa + 0xB648u, mgr_zero.data(), 4u, &err)) return false;
+            if (!m.placeData(kClipEa + 0x41Cu, mgr_zero.data(), 16u, &err)) return false;
+            if (!m.placeData(kMetricsEa, mgr_zero.data(), 16u, &err)) return false;
+            if (!m.placeData(kTextureBit, mgr_zero.data(), 4u, &err)) return false;
+            const std::vector<std::uint8_t> dst(16, 0x5A);
+            if (!m.placeData(kDstEa, dst.data(), dst.size(), &err)) return false;
+            const std::uint8_t src_bytes[8] = {0x80, 0, 0, 0, 0x80, 0, 0, 0};
+            if (!m.placeData(kSrcEa, src_bytes, sizeof(src_bytes), &err)) return false;
+            auto& mem = m.mem();
+            mem.wr32(kFontEa + 0x410u, kMgrEa);
+            mem.wr32(kFontEa + 0x548u, 0u);    // 1bpp 掩码
+            mem.wr32(kFontEa + 0x35584u, 0u);  // 17 级
+            mem.wr32(kMgrEa + 0xB648u, texid);
+            mem.wr32(kMgrEa + 0xA5D8u + 4u * texid, kClipEa);
+            mem.wr32(kClipEa + 0x41Cu, 0u);
+            mem.wr32(kClipEa + 0x420u, 0u);
+            mem.wr32(kClipEa + 0x424u, 4u);
+            mem.wr32(kClipEa + 0x428u, 2u);
+            mem.wr32(kMetricsEa + 0u, 2u);   // 宽
+            mem.wr32(kMetricsEa + 4u, 2u);   // 高
+            mem.wr32(kMetricsEa + 8u, 0u);   // 原点 x
+            mem.wr32(kMetricsEa + 12u, 0u);  // 原点 y
+            mem.wr32(kTextureBit, display_bpp);
+            return true;
+        };
+        // 8 个栈参数（pitch / bits / a4 / stride / src / x / y / color）+ 哨兵返回地址
+        auto arm = [&](lift::Machine& m, std::uint32_t pitch, std::uint32_t bits, std::uint32_t src,
+                       std::uint32_t x, std::uint32_t y) {
+            auto& cpu = m.cpu();
+            auto& mem = m.mem();
+            const std::uint32_t esp = m.layout().stack_top - 0x40u;
+            cpu.esp() = esp;
+            cpu.ecx() = kFontEa;
+            mem.wr32(esp, lift_fixture::kSentinel);
+            mem.wr32(esp + 4u, pitch);
+            mem.wr32(esp + 8u, bits);
+            mem.wr32(esp + 12u, kMetricsEa);
+            mem.wr32(esp + 16u, 4u);
+            mem.wr32(esp + 20u, src);
+            mem.wr32(esp + 24u, x);
+            mem.wr32(esp + 28u, y);
+            mem.wr32(esp + 32u, 0x00804020u);
+        };
+        auto dstBytes = [&](lift::Machine& m) {
+            std::vector<std::uint8_t> v(16);
+            std::memcpy(v.data(), m.mem().host(kDstEa), v.size());
+            return v;
+        };
+        {
+            lift::Machine m;
+            std::string err;
+            LIFT_CHECK(bootRig(m, err, 0u, 16u));
+            arm(m, 8u, kDstEa, kSrcEa, 1u, 0u);
+            std::uint32_t r = 0xDEADBEEFu;
+            LIFT_CHECK(lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+            LIFT_CHECK_EQ_U32(r, 4u);  // EAX = a5
+            const std::vector<std::uint8_t> dst = dstBytes(m);
+            auto word = [&](int x, int y) {
+                std::uint16_t v = 0;
+                std::memcpy(&v, dst.data() + static_cast<std::size_t>(y) * 8u + static_cast<std::size_t>(x) * 2u, 2);
+                return static_cast<std::uint32_t>(v);
+            };
+            LIFT_CHECK_EQ_U32(word(1, 0), (0xFu << 12) | 0x0248u);
+            LIFT_CHECK_EQ_U32(word(1, 1), (0xFu << 12) | 0x0248u);
+            LIFT_CHECK_EQ_U32(word(2, 0), 0x5A5Au);
+        }
+        // 逐条 Declined：返回值 false + 目标缓冲一个字节都没改
+        {
+            const std::vector<std::uint8_t> frozen(16, 0x5A);
+            // ① this = 0
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, kDstEa, kSrcEa, 1u, 0u);
+                m.cpu().ecx() = 0u;
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ② mgr = 0
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, kDstEa, kSrcEa, 1u, 0u);
+                m.mem().wr32(kFontEa + 0x410u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ③ texid 越界（1000 = 槽表容量）
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, kDstEa, kSrcEa, 1u, 0u);
+                m.mem().wr32(kMgrEa + 0xB648u, 1000u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ④ 纹理槽指针 = 0（guest 会走 sprintf_s 错误路径 ⇒ 不许接手）
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, kDstEa, kSrcEa, 1u, 0u);
+                m.mem().wr32(kMgrEa + 0xA5D8u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑤ a4（GLYPHMETRICS）未提交
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                auto& mem = m.mem();
+                const std::uint32_t esp = m.layout().stack_top - 0x40u;
+                arm(m, 8u, kDstEa, kSrcEa, 1u, 0u);
+                mem.wr32(esp + 12u, 0x00A00000u);  // 没 placeData 过 ⇒ 未提交
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑥ pitch 的元素数 <= 0（16 位 pitch=1 ⇒ pe=0）
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 1u, kDstEa, kSrcEa, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑦ 源基址 = 0
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, kDstEa, 0u, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑧ 目标基址 = 0
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, 0u, kSrcEa, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑨ 显示位深不是 16/32
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 24u));
+                arm(m, 8u, kDstEa, kSrcEa, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑩ 源跨距越过 4 GiB（src = 0xFFFFFFF0）
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, kDstEa, 0xFFFFFFF0u, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑪ 8bpp 级数越界（raw = 200 > 65 级的满值 64）
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                m.mem().wr32(kFontEa + 0x548u, 1u);  // 8bpp
+                m.mem().wr32(kFontEa + 0x35584u, 1u);  // 65 级
+                for (std::uint32_t i = 0; i < 8u; ++i) m.mem().wr8(kSrcEa + i, 200u);
+                arm(m, 8u, kDstEa, kSrcEa, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑫ 目标跨度未提交（bits 指向没 placeData 过的页）⇒ **先判后碰**，不许撞宿主指针
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, 0x00B00000u, kSrcEa, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑬ 32 位 × pitch 元素 <= 0（pitch = 3 ⇒ truncDiv4 = 0）
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 32u));
+                arm(m, 3u, kDstEa, kSrcEa, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+            }
+            // ⑭ 源跨度未提交（src 指向没 placeData 过的页）：1bpp 与 8bpp（后者要预扫级数）都必须干净回退
+            //   ★ 8bpp 这一条钉的是"先算跨度 + 提交检查，**再**碰源字节"（否则会撞宿主 fault 而不是回退）。
+            {
+                lift::Machine m;
+                std::string err;
+                LIFT_CHECK(bootRig(m, err, 0u, 16u));
+                arm(m, 8u, kDstEa, 0x00C00000u, 1u, 0u);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+                lift::Machine m8;
+                LIFT_CHECK(bootRig(m8, err, 0u, 16u));
+                m8.mem().wr32(kFontEa + 0x548u, 1u);  // 8bpp ⇒ 预扫会碰源字节
+                arm(m8, 8u, kDstEa, 0x00C00000u, 1u, 0u);
+                r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeBlend46D9F0(m8.cpu(), m8.mem(), &r));
+                LIFT_CHECK(dstBytes(m8) == frozen);
+            }
+        }
+    }
+
+    // ---- ⑱ known 表：新项的默认分层（全部 debug=false ⇒ 都在 all 里）+ kMax 容得下 ----
     {
         LIFT_CHECK(lift::findKnownNative("sub_429020") != nullptr);
         LIFT_CHECK(lift::findKnownNative("sub_48AE90") != nullptr);
         LIFT_CHECK(!lift::findKnownNative("sub_429020")->debug);
         LIFT_CHECK(!lift::findKnownNative("sub_48AE90")->debug);
+        // ★ sub_46D9F0：thiscall `retn 20h` = 8 个栈参数 = 32 B；debug 层不进（`all` 必须带上它）。
+        const lift::KnownNative* glyph = lift::findKnownNative("sub_46D9F0");
+        LIFT_CHECK(glyph != nullptr);
+        if (glyph != nullptr) {
+            LIFT_CHECK(!glyph->debug);
+            LIFT_CHECK(glyph->conv == lift::GuestConv::Thiscall);
+            LIFT_CHECK_EQ_U32(glyph->arg_bytes, 32u);
+        }
         const lift::KnownBlockNative* pool = lift::findKnownBlockNative("sub_414AC0");
         LIFT_CHECK(pool != nullptr && !pool->debug);
         LIFT_CHECK_EQ_U32(pool->entry_ea, 0x00415384u);
         LIFT_CHECK_EQ_U32(pool->resume_ea, 0x0041539Fu);
-        LIFT_CHECK(lift::NativeOverrideTable::kMax >= 10);
-        LIFT_CHECK(lift::NativeBlockTable::kMax >= 1);
+        // ★ 表容量：`all` 会把每个已知项都 add() 一遍 ⇒ kMax 必须装得下**所有**已知项，
+        //   否则 configureNativeOverrides 会硬失败（模拟器拒绝启动）。⛔ 不写死数字。
+        LIFT_CHECK(lift::NativeOverrideTable::kMax >= lift::knownNativeCount());
+        LIFT_CHECK(lift::NativeBlockTable::kMax >= lift::knownBlockNativeCount());
     }
 
     return lift_test::finish("native-override");

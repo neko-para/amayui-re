@@ -277,6 +277,121 @@ FillResult runFill(const std::vector<std::uint8_t>& code48AE90, const std::strin
 
 }  // namespace
 
+// ---- sub_46D9F0 的字形夹具（Font / mgr / 纹理槽 / 裁剪对象 / a4 / 源 / 目标表面全是合成内存）----
+struct GlyphCase {
+    std::uint32_t tex_bit = 16u;  // ds:0x5518C0（16 / 32）
+    bool level8 = false;          // [Font+0x548] != 0 ⇒ 8bpp 级数
+    bool levels65 = false;        // [Font+0x35584] == 1 ⇒ 65 级
+    std::uint32_t w = 2u;
+    std::uint32_t h = 2u;
+    std::int32_t ox = 0;
+    std::int32_t oy = 0;
+    std::uint32_t stride = 4u;
+    std::vector<std::uint8_t> src;  // h*stride 字节（不足补 0）
+    std::int32_t x = 1;
+    std::int32_t y = 0;
+    std::int32_t l = 0, t = 0, r = 4, b = 2;
+    std::uint32_t pitch = 8u;
+    std::uint32_t color = 0x00804020u;
+    std::uint32_t dst_fill = 0x5A5A5A5Au;  // 按 4 字节重复
+    std::uint32_t dst_bytes = 16u;
+};
+
+struct GlyphResult {
+    bool valid = false;
+    std::uint32_t eax = 0, esp = 0, eip = 0, ebx = 0, esi = 0, edi = 0, ebp = 0;
+    std::vector<std::uint8_t> dst;
+    std::uint64_t hits = 0, fallbacks = 0;
+};
+
+GlyphResult runGlyph(const std::vector<std::uint8_t>& code46CE20, const std::vector<std::uint8_t>& code46D9F0,
+                     const GlyphCase& c, bool with_override) {
+    GlyphResult out;
+    lift_fixture::Fixture fx;
+    if (!fx.ok) return out;
+    const std::uint32_t font = 0x00420000u;
+    const std::uint32_t mgr = 0x00460000u;
+    const std::uint32_t clip = 0x00470000u;
+    const std::uint32_t src_ea = 0x00480000u;
+    const std::uint32_t dst_ea = 0x00490000u;
+    const std::uint32_t metrics = 0x004A0000u;
+    const std::uint32_t texbit = 0x005518C0u;
+    std::vector<std::uint8_t> zeros(0x420, 0);
+    if (!fx.m.placeData(font, zeros.data(), zeros.size(), &fx.err)) return out;
+    if (!fx.m.placeData(font + 0x548u, zeros.data(), 4u, &fx.err)) return out;
+    if (!fx.m.placeData(font + 0x35584u, zeros.data(), 4u, &fx.err)) return out;
+    if (!fx.m.placeData(mgr + 0xA5D8u, zeros.data(), 4u, &fx.err)) return out;
+    if (!fx.m.placeData(mgr + 0xB648u, zeros.data(), 4u, &fx.err)) return out;
+    if (!fx.m.placeData(clip + 0x41Cu, zeros.data(), 16u, &fx.err)) return out;
+    if (!fx.m.placeData(metrics, zeros.data(), 16u, &fx.err)) return out;
+    if (!fx.m.placeData(texbit, zeros.data(), 4u, &fx.err)) return out;
+    std::vector<std::uint8_t> dst(c.dst_bytes, 0);
+    for (std::size_t i = 0; i + 4u <= dst.size(); i += 4u)
+        std::memcpy(dst.data() + i, &c.dst_fill, 4);
+    if (!fx.m.placeData(dst_ea, dst.data(), dst.size(), &fx.err)) return out;
+    const std::size_t src_bytes = static_cast<std::size_t>(c.h) * c.stride + 8u;
+    std::vector<std::uint8_t> srcpad(src_bytes, 0);
+    if (!c.src.empty()) std::memcpy(srcpad.data(), c.src.data(), c.src.size() < srcpad.size() ? c.src.size() : srcpad.size());
+    if (!fx.m.placeData(src_ea, srcpad.data(), srcpad.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x0046CE20u, code46CE20.data(), code46CE20.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x0046D9F0u, code46D9F0.data(), code46D9F0.size(), &fx.err)) return out;
+    auto& mem = fx.m.mem();
+    mem.wr32(font + 0x410u, mgr);
+    mem.wr32(font + 0x548u, c.level8 ? 1u : 0u);
+    mem.wr32(font + 0x35584u, c.levels65 ? 1u : 0u);
+    mem.wr32(mgr + 0xB648u, 0u);    // texid = 0
+    mem.wr32(mgr + 0xA5D8u, clip);  // 槽 0 = 裁剪对象
+    mem.wr32(clip + 0x41Cu, static_cast<std::uint32_t>(c.l));
+    mem.wr32(clip + 0x420u, static_cast<std::uint32_t>(c.t));
+    mem.wr32(clip + 0x424u, static_cast<std::uint32_t>(c.r));
+    mem.wr32(clip + 0x428u, static_cast<std::uint32_t>(c.b));
+    mem.wr32(texbit, c.tex_bit);
+    mem.wr32(metrics + 0u, c.w);
+    mem.wr32(metrics + 4u, c.h);
+    mem.wr32(metrics + 8u, static_cast<std::uint32_t>(c.ox));
+    mem.wr32(metrics + 12u, static_cast<std::uint32_t>(c.oy));
+    if (with_override) {
+        std::string err;
+        if (!fx.m.overrides().add(0x0046D9F0u, "ref_glyph", lift::GuestConv::Thiscall, 32,
+                                  lift::nativeBlend46D9F0, &err))
+            return out;
+    }
+    const std::uint32_t call_ea = 0x00402000u;
+    lift_fixture::Asm a(call_ea);
+    a.u8(0xB9);  // mov ecx, font
+    a.u32(font);
+    a.pushImm(c.color);
+    a.pushImm(static_cast<std::uint32_t>(c.y));
+    a.pushImm(static_cast<std::uint32_t>(c.x));
+    a.pushImm(src_ea);
+    a.pushImm(c.stride);
+    a.pushImm(metrics);
+    a.pushImm(dst_ea);
+    a.pushImm(c.pitch);
+    a.callRel(0x0046D9F0u);
+    a.ret();
+    if (!fx.m.placeCode(call_ea, a.b.data(), a.b.size(), &fx.err)) return out;
+    fx.rearmStack();
+    fx.runCode(call_ea);
+    if (!fx.ok) return out;
+    out.valid = true;
+    out.eax = fx.m.cpu().eax();
+    out.esp = fx.m.cpu().esp();
+    out.eip = fx.m.cpu().eip;
+    out.ebx = fx.m.cpu().ebx();
+    out.esi = fx.m.cpu().esi();
+    out.edi = fx.m.cpu().edi();
+    out.ebp = fx.m.cpu().ebp();
+    const std::uint8_t* p = fx.m.mem().host(dst_ea);
+    out.dst.assign(p, p + c.dst_bytes);
+    if (with_override) {
+        const lift::NativeOverride* e = fx.m.overrides().at(0);
+        out.hits = e->hits;
+        out.fallbacks = e->fallbacks;
+    }
+    return out;
+}
+
 int main() {
     const std::string exe = envValue("LIFT_AGE_EXE");
     if (exe.empty()) LIFT_SKIP("没有 LIFT_AGE_EXE（CMake 的 assets 档会设它）");
@@ -361,6 +476,148 @@ int main() {
                     }
                 std::fprintf(stderr, "  [48AE90 %s] arena 首个差异 @%zu: %02X vs %02X\n", name, diff,
                              base.arena[diff], ovr.arena[diff]);
+            }
+        }
+    }
+
+    // ---- ③ sub_46D9F0：真字节，解释器 vs override；目标表面逐字节 + EAX/ESP/寄存器 ----
+    // ★ 这是 G1（纯算术）之外的**外部 oracle**：同一份合成 guest 内存，让**真机器码**跑一遍，
+    //   再让 native 实现跑一遍 —— 覆盖 16/32 位 × 1bpp/8bpp × 65/17 级 × 覆写/加权/裁剪。
+    //   纯核自己算错（例如整数取整顺序、半字节落位、字节反序）在这里会当场红。
+    {
+        const std::vector<std::uint8_t> code46CE20 = img.at(0x0046CE20u, 0x80u);
+        const std::vector<std::uint8_t> code46D9F0 = img.at(0x0046D9F0u, 0x4E0u);
+        struct NamedGlyphCase {
+            const char* name;
+            GlyphCase c;
+        };
+        std::vector<NamedGlyphCase> cases;
+        auto add = [&](const char* name, const GlyphCase& c) { cases.push_back({name, c}); };
+        // 16 位 × 1bpp 掩码（每行只有 col0 置位）
+        {
+            GlyphCase c;
+            c.src = {0x80, 0, 0, 0, 0x80, 0, 0, 0};
+            add("16/mask1", c);
+        }
+        // 16 位 × 8bpp 65 级（0 / 1 / 32 / 64 四档，含"最低一档被 >>4 吃掉"）
+        {
+            GlyphCase c;
+            c.level8 = true;
+            c.levels65 = true;
+            c.src = {0, 1, 32, 64, 0, 1, 32, 64};
+            add("16/gray8-l65", c);
+        }
+        // 16 位 × 8bpp 17 级（0 / 1 / 3 / 16）
+        {
+            GlyphCase c;
+            c.level8 = true;
+            c.levels65 = false;
+            c.src = {0, 1, 3, 16, 0, 1, 3, 16};
+            add("16/gray4-l17", c);
+        }
+        // 16 位 × 目标 A = 0（覆写）与 A > 覆盖值（max）
+        {
+            GlyphCase c;
+            c.level8 = true;
+            c.levels65 = true;
+            c.src = {32, 32, 32, 32, 32, 32, 32, 32};
+            c.dst_fill = 0x0A5C0A5Cu;  // A = 0
+            add("16/dstA0", c);
+            c.dst_fill = 0xDA5CDA5Cu;  // A = 0xD
+            add("16/dstAmax", c);
+        }
+        // 16 位 × 裁剪（左 / 右 / 下 越界；原点偏移）
+        {
+            GlyphCase c;
+            c.src = {0x80, 0, 0, 0, 0x80, 0, 0, 0};
+            c.x = -3;
+            add("16/clip-left", c);
+            c.x = 4;
+            add("16/clip-right", c);
+            c.x = 1;
+            c.y = 2;
+            add("16/clip-bottom", c);
+            c.y = -1;
+            add("16/clip-top", c);
+            c.x = 0;
+            c.y = 0;
+            c.ox = 2;
+            c.oy = 1;
+            add("16/origin", c);
+        }
+        // 16 位 × 空字形（w=0 / h=0）与空裁剪矩形
+        {
+            GlyphCase c;
+            c.src = {0, 0, 0, 0};
+            c.w = 0;
+            add("16/w0", c);
+            c.w = 2;
+            c.h = 0;
+            add("16/h0", c);
+            c.h = 2;
+            c.src = {0x80, 0, 0, 0, 0x80, 0, 0, 0};
+            c.r = 0;
+            c.b = 0;
+            add("16/empty-clip", c);
+        }
+        // 32 位 × 1bpp / 8bpp 65 级 / 17 级（2 px/行）
+        {
+            GlyphCase c;
+            c.tex_bit = 32u;
+            c.stride = 4u;
+            c.dst_bytes = 32u;
+            c.src = {0xC0, 0, 0, 0, 0xC0, 0, 0, 0};
+            add("32/mask1", c);
+            c.level8 = true;
+            c.levels65 = true;
+            c.src = {0, 32, 64, 64, 0, 32, 64, 64};
+            add("32/gray8-l65", c);
+            c.levels65 = false;
+            c.src = {0, 9, 16, 16, 0, 9, 16, 16};
+            add("32/gray4-l17", c);
+            c.levels65 = true;         // 下面是"中覆盖"档：raw=32 只在 65 级里合法（17 级满值 = 16）
+            c.dst_fill = 0x40102030u;  // A = 0x40 ⇒ 加权 + max
+            c.src = {32, 32, 32, 32, 32, 32, 32, 32};
+            add("32/dstAmax", c);
+            c.dst_fill = 0x00102030u;  // A = 0 ⇒ 覆写
+            add("32/dstA0", c);
+            c.dst_fill = 0xC0102030u;  // A = 0xC0 > 覆盖值 ⇒ max 才是 0xC0
+            add("32/dstAover", c);
+        }
+        // 级数越界（raw = 200 > 65 级的满值 64）⇒ override 必须 **Declined**（回退解释器，结果仍一致）
+        {
+            GlyphCase c;
+            c.level8 = true;
+            c.levels65 = true;
+            c.src = {200, 200, 200, 200, 200, 200, 200, 200};
+            add("16/level-oob", c);
+        }
+        for (const NamedGlyphCase& nc : cases) {
+            lift_test::g_current_case = nc.name;
+            const GlyphResult base = runGlyph(code46CE20, code46D9F0, nc.c, false);
+            const GlyphResult ovr = runGlyph(code46CE20, code46D9F0, nc.c, true);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            LIFT_CHECK_EQ_U32(ovr.eax, base.eax);
+            LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+            LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+            LIFT_CHECK_EQ_U32(ovr.ebx, base.ebx);
+            LIFT_CHECK_EQ_U32(ovr.esi, base.esi);
+            LIFT_CHECK_EQ_U32(ovr.edi, base.edi);
+            LIFT_CHECK_EQ_U32(ovr.ebp, base.ebp);
+            LIFT_CHECK(ovr.dst == base.dst);
+            const bool oob = std::strcmp(nc.name, "16/level-oob") == 0;
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), oob ? 0u : 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), oob ? 1u : 0u);
+            if (ovr.dst != base.dst) {
+                std::size_t diff = 0;
+                for (std::size_t k = 0; k < ovr.dst.size() && k < base.dst.size(); ++k)
+                    if (ovr.dst[k] != base.dst[k]) {
+                        diff = k;
+                        break;
+                    }
+                std::fprintf(stderr, "  [46D9F0 %s] dst 首个差异 @%zu: %02X vs %02X（eax %08X/%08X）\n",
+                             nc.name, diff, base.dst[diff], ovr.dst[diff], base.eax, ovr.eax);
             }
         }
     }

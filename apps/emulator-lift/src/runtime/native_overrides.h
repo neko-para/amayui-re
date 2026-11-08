@@ -163,6 +163,25 @@ const KnownBlockNative& knownBlockNativeAt(std::size_t i);
 // 失败 ⇒ false + err（点名哪一条校验没过）。
 bool verifyKnownBlockAnchor(const LstIndex& lst, const KnownBlockNative& k, std::string* err);
 
+// ---------------------------------------------------------------------------------------
+// thiscall 原语（MSVC x86）：`ECX = this`，栈参数从返回地址之后按 **0 基** 展开。
+//
+// ★ 为什么单独抽出来：本文件的 thiscall 项越来越多（`sub_436A80` / `sub_48B090` / `sub_429020` /
+//   `sub_48AE90` / `sub_487C60` / `sub_46D9F0`）。每个实现各写一遍 `cpu.ecx()` + `cpu.arg(i)` 的话，
+//   "第几个 arg 对应第几个形参"就散落在各处、没有一处可复核；顺序错一位不会编译报错，只会在
+//   某个分支上静默读错参数。⇒ 把"读参数的顺序"钉在一处：`self` 之后是 `a[0..arg_count-1]`，
+//   与 `retn N` 的字节数无关（栈帧的提交状态由 `NativeOverrideTable::invoke()` 统一校验）。
+// ★ 只**读**：不改栈、不弹参、不判 ABI。⛔ 不要在这里做安全判断（那是各实现的事）。
+// ---------------------------------------------------------------------------------------
+struct ThisCallArgs {
+    static constexpr std::size_t kMax = 8;  // 本线 thiscall 项最多的栈参数数（sub_46D9F0 = 8）
+    std::uint32_t self = 0;                 // ECX
+    std::uint32_t a[kMax] = {};             // 栈参数（0 基，`a[0]` = 返回地址之后的第一个 dword）
+    std::uint32_t operator[](std::size_t i) const { return i < kMax ? a[i] : 0u; }
+};
+// `arg_count` 超过 `ThisCallArgs::kMax` 时**截断**（不会越界读；调用方自己保证够用）。
+ThisCallArgs thisCall(const X86& cpu, std::size_t arg_count);
+
 // 具体实现（也直接给测试用）
 bool nativeMemcpy(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 bool nativeMemset(X86& cpu, GuestMemory& mem, std::uint32_t* result);
@@ -192,6 +211,49 @@ void fillRect16(std::uint8_t* base, std::int32_t pitch, std::int32_t width, std:
                 std::uint32_t color888, std::int32_t alpha);
 void fillRect32(std::uint8_t* base, std::int32_t pitch, std::int32_t width, std::int32_t height,
                 std::uint32_t color888, std::int32_t alpha);
+// `sub_46D9F0`：字形位图 → **已锁定**纹理表面的逐像素混合叶子（thiscall `retn 20h`，8 个栈参数 = 32 B）。
+// 参数：ECX = T_Font*；a2 = 目标 pitch（字节）· a3 = 目标像素基址（调用方已 Lock）· a4 = 4 个 dword
+// （宽/高/原点 x/原点 y）· a5 = 源行跨度 · a6 = 源基址（GetGlyphOutlineA 的字形缓冲）· a7/a8 = 目标 x/y ·
+// a9 = 颜色（**低字节是第一通道**，与 `.lst` 0x46DC76 的字节反转一致）。返回 EAX = `(a4[1] > 0) ? a5 : 0`。
+// ★ 语义逐字照 `.lst` 0x46D9F0..0x46DEC2（16bpp / 32bpp 两支）；裁剪矩形 = guest `sub_46CE20` 的成功路径
+//   （`[mgr+0xA5D8+4*texid]+0x41C..0x428`，mgr=`[Font+0x410]`、texid=`[mgr+0xB648]`）。
+// ★ 准入失败（this/mgr/texid/裁剪对象/参数跨度/级数越界…）⇒ 返回 false，dispatcher 回退解释器。
+bool nativeBlend46D9F0(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// 源字形格式的选择来自 Font 的两个字段（⛔ 不是宿主"抗锯齿开关"）：
+//   `[Font+0x548] == 0` ⇒ 1bpp 位图；非 0 ⇒ 8bpp 级数（每像素 1 字节）。
+enum class GlyphMaskSource : std::uint8_t {
+    BitMask1 = 0,  // 0x46DAC2..0x46DB08：位序 `7 - col%8`，置位 ⇒ 255
+    Level8 = 1,    // 0x46DA89..0x46DAC0：字节 × 255 后除 65 / 17
+};
+// `[Font+0x35584]`：== 1 ⇒ 65 级（除 65，满覆盖 251）；否则 17 级（除 17，满覆盖 240）。
+enum class GlyphLevels : std::uint8_t { Levels17 = 0, Levels65 = 1 };
+// 纯像素核的入参（`sub_46D9F0` 的 8 个栈参数 + 裁剪矩形 + 两个格式位）。
+// ★ 契约：调用方保证 `[dst, dst + 最后一行偏移 + 像素)` 与 `[src, src + 最后一行偏移 + 行字节)`
+//   都在**同一段不回绕**的地址里（`nativeBlend46D9F0` 已经逐行校验过）；核里只做 guest 的
+//   32 位地址算术（回绕），不做准入、不做提交检查。
+struct GlyphBlit {
+    std::uint8_t* dst = nullptr;        // a3（已按 pitch/bits 定位的像素基址，**不**预先偏移 x/y）
+    std::int32_t dst_pitch = 0;         // a2（字节）
+    std::int32_t width = 0;             // a4[0]
+    std::int32_t height = 0;            // a4[1]
+    std::int32_t origin_x = 0;          // a4[2]
+    std::int32_t origin_y = 0;          // a4[3]
+    const std::uint8_t* src = nullptr;  // a6
+    std::int32_t src_stride = 0;        // a5（字节；guest 逐行 `add`，可为负）
+    std::int32_t dst_x = 0;             // a7
+    std::int32_t dst_y = 0;             // a8
+    std::uint32_t color = 0;            // a9
+    std::int32_t clip_left = 0;         // sub_46CE20 的 rect[0..3]
+    std::int32_t clip_top = 0;
+    std::int32_t clip_right = 0;
+    std::int32_t clip_bottom = 0;
+    bool sixteen_bpp = true;            // `ds:dword_5518C0 == 0x10`
+    GlyphMaskSource source = GlyphMaskSource::BitMask1;
+    GlyphLevels levels = GlyphLevels::Levels17;
+};
+// 返回 guest 的 EAX（= `(height > 0) ? src_stride : 0`）。⛔ 不做 clamp：`.lst` 里没有 clamp。
+std::uint32_t blendGlyph46D9F0(const GlyphBlit& b);
+
 // 段级：`sub_414AC0` 中段填池循环（entry 0x415384 / resume 0x41539F）。
 // 语义（`.lst` 0x41537E..0x41539D）：`ecx=[esi-0x10]`（目标数组）、`edx=[ebx+0x5EC90]`（填充值）、
 // count = `[ebx+0x5D7E8]+edi+1`、EAX 从 0 起每次写 `[ecx+eax*4]`。完成后 guest 状态：

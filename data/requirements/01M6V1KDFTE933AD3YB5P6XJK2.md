@@ -2,8 +2,10 @@
 
 - id: REQ-01M6V1KDFTE933AD3YB5P6XJK2
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/native_override.cpp#native-override
+- done_reason: 已实现并收口：落点 apps/emulator-lift/src/runtime/native_overrides.{h,cpp}（纯核 + 准入层 + kKnown[] 注册）；G1 apps/emulator-lift/tests/native_override.cpp（pure）· G2 apps/emulator-lift/tests/native_override_assets.cpp（assets）。守卫全绿：ctest 65/65 · native-override 1192 checks / 0 fail · native-override-assets 340 checks / 0 fail。变异自检（手工施加后恢复）：sar 4→3 ⇒ 16 failures · ÷17→÷16 ⇒ 1 · max→+ ⇒ 4。像素：OPTION 装载帧及其后 3 帧，--native-overrides all 与 all,-sub_46D9F0 逐字节相同；摘要 hits=276 fallbacks=0。性能（装载帧）：wall 1179.1 → 940.8 ms（−20.2%）· guest 632.7 → 466.4 ms · 指令数 27,780,805 → 19,635,425（−8.15M）· 本函数 179.8 ms → 0。已知偏差：①装载帧之后帧序 ±N 帧相位差（虚拟时钟不补偿，README §4.3，内容等价、非像素语义差）；②无机械化 G3（窗口+点击天然 flaky，目前手工 A/B）。更正：原文把 w<=0 / h<=0 列为 Declined 不成立 —— .lst 0x46DA75 / 0x46DCC5 只跳整行、不写字节、EAX 仍可判 ⇒ 实现按接手，正文已 append 更正。
 - tags: [emulator-lift, native-override, text-render, performance]
 
 ## 一句话
@@ -65,3 +67,12 @@
 
 - `repo:apps/emulator-lift/src/runtime/native_overrides.cpp`（纯核 + `native*` 包装）
 - `repo:apps/emulator-lift/tests/native_override.cpp`（G1 / G3 夹具）· `repo:apps/emulator-lift/tests/native_override_assets.cpp`（G2）
+
+## 实现记录（2026-11-08）
+
+- **落点**：`repo:apps/emulator-lift/src/runtime/native_overrides.h` + `repo:apps/emulator-lift/src/runtime/native_overrides.cpp`（纯核 + 准入层 + `kKnown[]` 注册）；G1 `repo:apps/emulator-lift/tests/native_override.cpp`（pure 档）· G2 `repo:apps/emulator-lift/tests/native_override_assets.cpp`（assets 档）。★ 上文「尚未实现」「落点（实现时再动）」的口径由本段取代（原文保留）。
+- **守卫 + 变异**：`ctest --test-dir apps/emulator-lift/out` **65/65**；`native-override` **1192 checks / 0 fail**、`native-override-assets` **340 checks / 0 fail**。变异自检（手工施加后恢复）：`sar 4→3` ⇒ **16 failures** · `÷17→÷16` ⇒ **1** · `max→+` ⇒ **4**。
+- **像素**：OPTION 装载帧及其后 3 帧，`--native-overrides all` 与 `all,-sub_46D9F0` **逐字节相同**；摘要 `hits=276 fallbacks=0`。
+- **性能**（装载帧）：wall **1179.1 → 940.8 ms（−20.2%）** · guest **632.7 → 466.4 ms** · 指令数 **27,780,805 → 19,635,425（−8.15M）** · 本函数 **179.8 ms → 0**。
+- **已知偏差（两条）**：① **相位差** —— 装载帧之后的帧序有 ±N 帧相位差（OPTION 底部 ADV 循环文字按虚拟时钟推进；函数级 override 每调用只 `clock_.tick()` 1 条，本帧本应走 8.15M 条 ⇒ 约 0.8 s 虚拟时间），**内容等价、不是像素语义差**，README §4.3 已声明不补偿；② **没有机械化 G3** —— 帧级 A/B 要窗口 + 点击、天然 flaky，目前是**手工 A/B**（G3 草案仍留在上方「守卫草案」，未实现）。
+- **2026-11-08 实现更正 · `w<=0` / `h<=0`**：本单原文把这两条列进 **Declined** 清单；实现里是**接手** —— `.lst` `0x46DA75` / `0x46DCC5` 只跳过整行、不写字节、`EAX` 仍可判 ⇒ 它们**不是** Declined（若算 fallback 会让 `fallbacks=0` 的判据失真）。⛔ 原文保留，**以此条为准**。
