@@ -215,11 +215,42 @@ apps/emulator-lift/
   ctest --test-dir out --output-on-failure
   ```
 - ★ **CTest 的分级判据是"注册位置"**（`AGENTS.md` §5）：顶层无条件注册 ⇒ `pure`（不需要游戏/LFS）；
-  落在 `if(...)` 里 ⇒ `assets`。默认 `ctest` 会跑前者，后者在有 `corpus/` 素材的机器上自动启用。
-  缺资产时这 5 条**不注册**（`ctest` 的用例数会变少，不是"跑绿了"）；已注册但 env 缺失时测试返回 **77**
+  落在 `if(...)` 里 ⇒ `assets`。默认 `ctest` 只跑前者；后者在资产在场时自动注册
+  （`movie-logo` 例外，见 §4.0：它要真放影片，是 opt-in）。
+  缺资产时这些用例**不注册**（`ctest` 的用例数会变少，不是"跑绿了"）；已注册但 env 缺失时测试返回 **77**
   （`SKIP_RETURN_CODE`），⛔ 不是"什么都不做然后 return 0"。
 - ★ `LIFT_SAFE_MEMORY=1`：每次 guest 访存都查提交位图（慢）。判据 A1 要求**再跑一遍这一档**。
 - 生成物（`out/`、`vcpkg_installed/`）由本目录 `.gitignore` 排除。
+
+## 4.0 需要真机安装的用例：`LIFT_ASSETS` / `LIFT_STOP_AFTER_MOVIE`
+
+`assets` 档里有一条**不跟默认门禁走**：`movie-logo`（`tests/movie_logo.cpp`）。它真启模拟器、真放
+LOGO 影片（子进程按**墙钟秒**计），默认**不注册**（`add_executable` 也在同一个 `if` 里 ⇒ 纯构建环境
+连这个 target 都不编）。注册条件是**两条同时成立**：本机存在
+`E:/Games/Eushully/天結/install/SYS4INI.BIN`，且设了 `LIFT_ASSETS`（换机器没装游戏 ⇒ 设了也不会出现）。
+判据见 `tests/movie_logo.cpp` 的文件头。
+
+```powershell
+# ① 显式注册 / 跑这条 assets 用例
+$env:LIFT_ASSETS = "1"
+cmake --preset windows-x64            # ★ DEFINED ENV{...} 是**配置期**求值 ⇒ 必须重新 configure
+cmake --build --preset windows-x64
+ctest --test-dir out -N               # 这时才会列出 movie-logo
+ctest --test-dir out -R movie-logo --output-on-failure
+Remove-Item Env:LIFT_ASSETS           # 想回到默认门禁：取消变量后再 configure 一次
+
+# ② 手工跑（不经 CTest）时让"影片放完即停" —— CTest 已自动注入这一条
+$env:LIFT_STOP_AFTER_MOVIE = "1"
+```
+
+- `LIFT_STOP_AFTER_MOVIE=1`：DirectShow 图的停机链看到"影片已放完"（`completed_`）就结束本次运行，
+  不再空转到 `--time-limit`；`--time-limit` 仍保留作**兜底**。**缺省关** ⇒ 行为与不设它时一致。
+  它是**模拟器级**开关（不是测试专属）：手工玩时 export 了它，会在第一个影片放完后退出。
+- `movie-logo` 在 `ctest` 里**总是**带 `LIFT_STOP_AFTER_MOVIE=1`（`set_tests_properties(... ENVIRONMENT ...)`，
+  分号分隔的列表），并由 `add_test` 传 `--expect-early-stop`。要验证"关掉时与旧行为逐字一致"，直接跑
+  `out/lift-movie-logo.exe`（参数见 `CMakeLists.txt` 的 `add_test`）而不设该变量、也不传那个开关。
+- 测试据此断言钩子生效（两个子进程的 run summary 都得是 `stop      : stopped`）—— 钩子失效时它不会
+  静默退回"变慢但仍绿"。判据挂在 CMake 传的那个参数上，**不挂在环境变量**上（env 被删掉时也要红）。
 
 ## 4.1 渲染产物导出
 D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena::dumpBmp`，支持 16/32bpp）：
@@ -401,13 +432,14 @@ CPU 缺省仍逐字节可复现；`--raster gpu` 的 `--present headless` 会初
 
 现状口径：TITLE 段**仍未达 33 ms**（也不把验收阈值改绿）。直出去掉了"GPU→guest 读回之外的
 两次全帧搬运"之后，Present 的大头是 `d3d9::Present` 里那条 Info 日志的**全帧像素直方图**
-（逐像素 `std::map`）与 guest 像素哈希，其次才是 GPU 读回；再往下要动的是 sprite 合批与
-那条直方图的算法。⛔ 不把逐帧数字写进 README —— 看 `LIFT_FRAME_TRACE=1`（§4.3.1）。
+（逐像素 `std::map`），其次才是 GPU 读回；guest 像素哈希（`SurfaceArena::hash`，按 8 字节字 +
+末尾 finalizer）与直方图各自的耗时看 `LIFT_FRAME_TRACE=1` 的 `pres :` 行（§4.3.1）。再往下要动的是
+sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README。
 
 ## 4.3 热点 profile 与 native override（函数级 + 段级）
 
 ```bash
-# 找热点（块级 + 按 .lst 函数入口聚合；不改变执行结果）
+# 找热点（guest 块级 + 按 .lst 函数入口聚合 + 宿主 shim 墙钟；不改变执行结果）
 ./out/emulator-lift ... --max-frames 1 --profile --profile-top 40
 
 # 显式启用（默认关；函数级名字来自 .lst 的 `proc near` / `COLLAPSED FUNCTION` 行）
@@ -470,8 +502,10 @@ CPU 缺省仍逐字节可复现；`--raster gpu` 的 `--present headless` 会初
 
 ### 4.3.1 一帧的墙钟去哪了（逐帧诊断）
 
-`--profile` 只回答"guest 热点在哪"；它**看不见**宿主 shim / Present / 软件光栅的耗时。
-要看"这一帧为什么慢"，用逐帧墙钟拆分（默认关；开窗时必须加 `--real-time`，否则虚拟时钟会先卡住）：
+`--profile` 回答两类热点：**guest**（块级 + 按 `.lst` 函数入口聚合）与**宿主 shim 实现自身**的墙钟
+（`=== profile: shims`）。shim 表只包 `ShimRegistry::invoke` 里的 `fn`，**不含** dispatcher 弹参 /
+native override / 事件泵；它与 guest 块表**不可相加**（两表各自的口径见下）。要看"这一帧为什么慢"，
+用逐帧墙钟拆分（默认关；开窗时必须加 `--real-time`，否则虚拟时钟会先卡住）：
 
 ```bash
 LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
@@ -501,7 +535,8 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   `std::map` 很贵 ⇒ 按**日志可见性**门控：缺省 `warn` 级别下不计算（`stats=0.0ms`），
   `--log-level info`（或 `--log-cat d3d9 --log-level info`）时照旧计算并逐字打印同一行。
   ⛔ 这不是删功能：hash / frameCount / `--dump-frame` 都在别处，照旧每帧算。
-- 只有 shim 慢、guest 不慢 ⇒ 不要再到 `--profile` 的 guest 函数表里找热点。
+- 只有 shim 慢、guest 不慢 ⇒ 先看 `--profile` 的 `=== profile: shims` 表（哪一项、调用几次、平均多少），
+  不要再到 guest 函数表里找热点；`shim :` 行仍用于"这一帧"的归因。
 - `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS=<ms>`，缺省 20）会为每次慢 `Draw*` 打一行
   `[draw] prim=… pixels=… gpu=… why=… sep_alpha=… tex=… blend=…/… op=… cw=… fvf=… coord=… stage0=… samp=… texfmt=… submit=…ms`：
   `gpu=0` 与 `why=` 就是"这一批为什么回退 CPU"的**第一原因**（不是猜测）；`stage0=` 是

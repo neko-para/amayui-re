@@ -42,6 +42,12 @@ int main() {
         const std::uint64_t h1 = arena.hash(*s);
         LIFT_CHECK(h1 != 0);
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(h1 == arena.hash(*s)), 1u);
+        // ★ 内容敏感：改 1 个字节的值 ⇒ 哈希必变；改回 ⇒ 同值。
+        //   （换哈希算法时这条会红在"丢了位置/长度语义"上；⛔ 不钉具体数值。）
+        px[0] = static_cast<std::uint8_t>(px[0] ^ 0xFFu);
+        LIFT_CHECK(arena.hash(*s) != h1);
+        px[0] = static_cast<std::uint8_t>(px[0] ^ 0xFFu);
+        LIFT_CHECK(arena.hash(*s) == h1);
         LIFT_CHECK(arena.lock(s32));
         LIFT_CHECK(arena.lock(s32));
         LIFT_CHECK_EQ_U32(s->lock_count, 2u);

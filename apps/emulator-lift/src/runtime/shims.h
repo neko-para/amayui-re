@@ -76,7 +76,7 @@ struct ShimDef {
                                     // false = 导入表里有、但我们连一行登记都没有（bind 现场补的）
     bool called = false;
     std::uint64_t call_count = 0;
-    // ★ 诊断（`LIFT_FRAME_TRACE=1`）：宿主实现自身的墙钟累计（ns）。
+    // ★ 诊断（`LIFT_FRAME_TRACE=1` / `--profile`）：宿主实现自身的墙钟累计（ns）。
     //   ⛔ 不是 guest 块 profile 的一部分；默认 0、默认不计时。
     std::uint64_t ns = 0;
 };
@@ -85,7 +85,7 @@ class ShimRegistry {
 public:
     void setTrace(bool on, std::FILE* out) { trace_ = on; trace_out_ = out ? out : stdout; }
     bool trace() const { return trace_; }
-    // ★ 诊断：只在 `LIFT_FRAME_TRACE=1` 时打开；逐次调用 steady_clock，默认零开销。
+    // ★ 诊断：`LIFT_FRAME_TRACE=1` 或 `--profile` 时打开；逐次调用 steady_clock，默认零开销。
     void setTiming(bool on) { timing_ = on; }
     bool timing() const { return timing_; }
 

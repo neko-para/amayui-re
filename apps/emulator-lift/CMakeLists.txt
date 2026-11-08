@@ -174,24 +174,39 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.s
         SKIP_RETURN_CODE 77)
 endif()
 
-# ---- assets：真机安装上的 LOGO 影片必须"真的放完"（首帧 / ≥240 帧 / completed / 堆平稳）----
+# ---- assets：真机安装上的 LOGO 影片必须"真的放完"（首帧 / completed / 堆平稳 / tex#1 差分）----
 # 判据见 tests/movie_logo.cpp 的头注释。缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；
 # GPU 不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
-add_executable(lift-movie-logo tests/movie_logo.cpp)
-target_link_libraries(lift-movie-logo PRIVATE emulator-lift-runtime)
-# ★ 真机影片只在 RelWithDebInfo 树里跑（用户口径：Debug 解释器慢到无法使用；
-#   2026-11-07 起 preset 只有 RelWithDebInfo）。万一有人手工配 Debug，测试自己 `LIFT_SKIP`(77)。
-target_compile_definitions(lift-movie-logo PRIVATE
-    LIFT_MOVIE_LOGO_IS_DEBUG=$<IF:$<CONFIG:Debug>,1,0>)
-if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN")
+# ★ **opt-in**：这条要真启模拟器、真放 LOGO 影片（子进程按**墙钟秒**计），是**全部用例里最贵**的
+#   一条 ⇒ 默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_ASSETS}`）：
+#     $env:LIFT_ASSETS=1; ctest --test-dir out -R movie-logo --output-on-failure
+#   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
+#   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
+# ★ `add_executable` 也在同一个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连这个 target 都不编。
+# ★ 不改测试名与文件路径（需求单 `01M6T07SC0XN81G1MZJYJXXGV9` 的 verify 指向它们）。
+if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+    add_executable(lift-movie-logo tests/movie_logo.cpp)
+    target_link_libraries(lift-movie-logo PRIVATE emulator-lift-runtime)
+    # ★ 真机影片只在 RelWithDebInfo 树里跑（用户口径：Debug 解释器慢到无法使用；
+    #   2026-11-07 起 preset 只有 RelWithDebInfo）。万一有人手工配 Debug，测试自己 `LIFT_SKIP`(77)。
+    target_compile_definitions(lift-movie-logo PRIVATE
+        LIFT_MOVIE_LOGO_IS_DEBUG=$<IF:$<CONFIG:Debug>,1,0>)
+    # ★ 第 5 个参数 `--expect-early-stop`：把"钩子必须生效"钉在 **CMake 侧**（与上面的 ENVIRONMENT
+    #   成对）—— 若只让测试拿 env 变量自证，将来删掉 ENVIRONMENT 就会静默退回 45 s 仍然绿。
     add_test(NAME movie-logo COMMAND lift-movie-logo $<TARGET_FILE:emulator-lift>
         "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE"
         "E:/Games/Eushully/天結/install"
-        "${CMAKE_CURRENT_BINARY_DIR}/movie-logo-work")
+        "${CMAKE_CURRENT_BINARY_DIR}/movie-logo-work"
+        --expect-early-stop)
     set_tests_properties(movie-logo PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
-        # 子进程自带上限 45 s（boot + 8.6 s 影片）；墙钟上限留余量。
+        # ★ **事件驱动提前停**（缺省关；这里显式打开）：影片放完（图停机链看到 `completed_`）就结束
+        #   本次运行，不再空转到 `--time-limit`。`--time-limit` 仍保留作**兜底**（⛔ 不要改小）。
+        # ★ ENVIRONMENT 是**分号分隔的列表**：这里只有一项；要加别的写成 "A=1;B=2"，
+        #   ⛔ 不要用第二个 `set_tests_properties` 把它覆盖掉（那会盖掉整条属性）。
+        ENVIRONMENT "LIFT_STOP_AFTER_MOVIE=1"
+        # 子进程自带 `--time-limit` 兜底（boot + 影片）；墙钟上限留余量。
         TIMEOUT 180)
 endif()
 
@@ -309,6 +324,19 @@ set_tests_properties(gpu-direct-present PROPERTIES SKIP_RETURN_CODE 77)
 add_executable(lift-gpu-mapping tests/gpu_mapping.cpp)
 target_link_libraries(lift-gpu-mapping PRIVATE emulator-lift-runtime)
 add_test(NAME gpu-mapping COMMAND lift-gpu-mapping)
+
+# ---- GPU 合批（入队 + 一次 flush）：pure 档（Mock 后端，不碰 SDL / GPU）----
+# 判据：N 次 Draw 只 flush 1 次；Clear(TARGET) / Present / 换 target 各触发 flush + syncToGuest 1 次，
+# 且 syncFromGuest 在队列非空时被拒绝（⛔ 静默覆盖）。去掉 flush ⇒ 队列不清空 ⇒ 当场红。
+add_executable(lift-gpu-batch tests/gpu_batch.cpp)
+target_link_libraries(lift-gpu-batch PRIVATE emulator-lift-runtime)
+add_test(NAME gpu-batch-order COMMAND lift-gpu-batch)
+
+# ---- 同一份夹具的真后端判据：Clear / 纹理 LockRect / SetRenderTarget 之后像素对、队列空 ----
+# dummy 视频下建不出 SDL_GPU 设备 ⇒ SKIP 77（⛔ 不拿 pure 档冒充真后端绿）。
+add_test(NAME gpu-batch-barrier COMMAND lift-gpu-batch --gpu)
+set_tests_properties(gpu-batch-barrier PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
 
 add_executable(lift-mechanism tests/mechanism.cpp)
 target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)
@@ -560,6 +588,16 @@ add_test(NAME math COMMAND lift-math)
 add_executable(lift-pixel-format tests/pixel_format.cpp)
 target_link_libraries(lift-pixel-format PRIVATE emulator-lift-runtime)
 add_test(NAME pixel-format COMMAND lift-pixel-format)
+
+# =====================================================================================
+# `--profile` 的宿主 shim 墙钟表（pure：裸 Machine + 一个已知 shim；不碰游戏 / LFS / SDL）
+# ★ 判据见 tests/profile_shims.cpp 文件头：`RunOptions{profile=true}` ⇒ `=== profile: shims`
+#   表里出现 `test!slow` 且 `calls=1`；删掉 `machine.cpp` 的 `|| opts.profile` ⇒ 该行消失 ⇒ 红。
+# ★ 顶层无条件注册 ⇒ pure 档。
+# =====================================================================================
+add_executable(lift-profile-shims tests/profile_shims.cpp)
+target_link_libraries(lift-profile-shims PRIVATE emulator-lift-runtime)
+add_test(NAME profile-shims COMMAND lift-profile-shims)
 
 # =====================================================================================
 # 宿主侧 MPEG-1 影片解码（vendor pl_mpeg；无 COM / 无 guest / 无 SDL / 无线程）

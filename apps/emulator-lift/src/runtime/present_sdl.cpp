@@ -753,8 +753,9 @@ bool SdlWindow::rasterSpritesEnabled() const {
     return impl_->raster_sprites && impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterSpritesEnabled();
 }
 
-bool SdlWindow::rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err) {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterPrepare(format, width, height, err) : false;
+bool SdlWindow::rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err,
+                              const std::uint8_t* color_base) {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterPrepare(format, width, height, err, color_base) : false;
 }
 bool SdlWindow::rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
                                     std::string* err) {
@@ -772,6 +773,22 @@ bool SdlWindow::rasterDrawTextured(const GpuRasterVertex* vertices, std::size_t 
                                    const GpuRasterTexture& texture, const GpuRasterState& state,
                                    std::string* err) {
     return impl_->gpu_raster ? impl_->gpu_raster->rasterDrawTextured(vertices, count, texture, state, err) : false;
+}
+bool SdlWindow::rasterQueue(const GpuRasterVertex* vertices, std::size_t count,
+                            const GpuRasterTexture* texture, const GpuRasterState& state, std::string* err) {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterQueue(vertices, count, texture, state, err) : false;
+}
+bool SdlWindow::rasterFlush(std::string* err) {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterFlush(err) : true;
+}
+const void* SdlWindow::rasterTargetBase() const {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterTargetBase() : nullptr;
+}
+std::size_t SdlWindow::rasterQueuedDraws() const {
+    return impl_->gpu_raster ? impl_->gpu_raster->rasterQueuedDraws() : 0;
+}
+void SdlWindow::rasterDiscardTarget() {
+    if (impl_->gpu_raster) impl_->gpu_raster->rasterDiscardTarget();
 }
 bool SdlWindow::rasterDirty() const { return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterDirty(); }
 

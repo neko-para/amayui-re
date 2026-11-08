@@ -102,14 +102,29 @@ bool SurfaceArena::unlock(std::uint32_t ea) {
 }
 
 std::uint64_t SurfaceArena::hash(const GuestSurface& s) const {
+    // ★ 全帧像素指纹（Present 的 `hash=` / DDraw Flip / `--dump-frame` 判据都用它）。
+    //   判据不变：**确定性 · 内容敏感（改 1 字节就变）· 非 0**；同内容同值、跨机同值。
+    //   实现要点（常数优化，不改语义）：
+    //     · 按 8 字节字读（小端假设：本线三个目标平台 x64/arm64 都是小端）；
+    //     · 长度先混进去（否则"末尾补零"与"不加"会撞成同一个值）；
+    //     · 末尾做一次 finalizer（乘法 + 异或右移），让高位也参与 —— 旧实现是逐字节 FNV，
+    //       在没有 finalizer 时低位雪崩很好、高位很差。
+    //   ⛔ 不要拿它当"顺序无关"的集合哈希：它有位置语义（同一帧、同一字节序才可比）。
     const std::uint8_t* p = pixels(s);
     if (!p) return 0;
-    std::uint64_t h = 0xCBF29CE484222325ull;
     const std::uint64_t n = static_cast<std::uint64_t>(s.pitch) * static_cast<std::uint64_t>(s.height);
-    for (std::uint64_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= 0x100000001B3ull;
+    std::uint64_t h = 0xCBF29CE484222325ull ^ (n * 0x9E3779B97F4A7C15ull);
+    std::uint64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        std::uint64_t w = 0;
+        std::memcpy(&w, p + i, sizeof(w));
+        h = (h ^ w) * 0x100000001B3ull;
+        h ^= h >> 29;
     }
+    for (; i < n; ++i) h = (h ^ p[i]) * 0x100000001B3ull;
+    h ^= h >> 33;
+    h *= 0xFF51AFD7ED558CCDull;
+    h ^= h >> 33;
     return h;
 }
 

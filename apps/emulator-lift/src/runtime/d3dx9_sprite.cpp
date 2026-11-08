@@ -716,7 +716,8 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         }
         if (gpu != nullptr) {
             std::string gerr;
-            bool ok = gpu->rasterPrepare(fmt, gs->width, gs->height, &gerr);
+            // ★ 目标身份带 guest 后缓冲像素基址（同尺寸换 surface 必须能判出来）。
+            bool ok = gpu->rasterPrepare(fmt, gs->width, gs->height, &gerr, base);
             if (ok && !gpu->rasterDirty()) {
                 ok = gpu->rasterSyncFromGuest(base, gs->pitch, gs->width, gs->height, &gerr);
             }
@@ -776,7 +777,9 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     gt.key = nullptr;
                     gt.generation = 0;
                 }
-                ok = gpu->rasterDrawTextured(v, 6, gt, gs_state, &gerr);
+                // ★ 合批：这里只入队（End 不再逐条提交）；Present / Clear / 换 target 才 flush。
+                //   纹理像素已在 rasterQueue 内部拷走后端 staging（⛔ 不保存 guest 指针，见下条注释）。
+                ok = gpu->rasterQueue(v, 6, &gt, gs_state, &gerr);
             }
             if (ok) {
                 gpu_done = true;
@@ -796,6 +799,18 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             }
         }
         if (!gpu_done) {
+        // ★ 合批后的新屏障：这条 sprite 要由 CPU 直接写 guest，而队列里可能还有**更早**的 sprite
+        //   没提交。必须先把它们画进镜像并回读 guest，否则 Present 读回时会把这条 CPU 像素盖掉。
+        // ★ 用 `gpu_backend` 而不是局部 `gpu`：上面已因本条的回退原因把局部 `gpu` 置空，但队列
+        //   在 `gpu_backend` 里 —— 这条屏障不能随"本条为什么回退"一起失效。
+        if (sprite_gpu_active && gpu_backend != nullptr && gpu_backend->rasterDirty()) {
+            std::string sync_err;
+            if (!gpu_backend->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err)) {
+                if (why) *why = std::string("D3DX9：CPU 回退前 GPU 像素读回失败：") + sync_err;
+                releaseEntry(ea);
+                return false;
+            }
+        }
         for (int y = iy0; y < iy1; ++y) {
             for (int x = ix0; x < ix1; ++x) {
                 // 像素中心采样（D3D 的光栅化规则）
@@ -939,6 +954,16 @@ std::uint32_t onLostDevice(X86& cpu, std::uint32_t state, std::string* why) {
     if (!readState(cpu, state, &s, why)) return kInvalidCall;
     // headless：没有"设备丢失"这回事（后缓冲在 guest 内存里）⇒ 记录，丢弃未提交批次（与真机一致：
     // 设备丢失后旧批次不能再用，它 AddRef 的纹理也要还掉）。
+    // ★ 但**更早的 End 已经入队**的 GPU draw 不属于这个未提交批次（CPU 路径下它们早画完了）⇒
+    //   先 flush，别让"设备丢失"把已经提交过的画面一起丢掉。
+    if (Machine* m = activeMachine(); m != nullptr && &m->cpu() == &cpu) {
+        if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive()) {
+            std::string flush_err;
+            if (!gpu->rasterFlush(&flush_err)) {
+                spriteLog("OnLostDevice", "GPU 队列 flush 失败：%s", flush_err.c_str());
+            }
+        }
+    }
     releaseQueuedTextures(cpu, s);
     cpu.mem->wr32(state + kSpLost, s.lost + 1u);
     cpu.mem->wr32(state + kSpCount, 0u);

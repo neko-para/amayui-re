@@ -20,6 +20,7 @@
 #include "runtime/x86.h"
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 namespace lift::dshow {
@@ -1240,6 +1241,11 @@ bool Graph::endPauseChain() {
     return finishChain();
 }
 bool Graph::endStopChain() {
+    // ★ `LIFT_STOP_AFTER_MOVIE=1`（缺省**关** ⇒ 行为与今天逐字一致）：影片放完后的这次 Stop 就是
+    //   本次 run 的终点 —— 不必再空转到 `--time-limit`。`completed_` 下面会被清 ⇒ **先存下来**。
+    //   ⚠ 判据只有 `completed_`（= 到达片长），**不区分循环播放**：循环片也会在第一次到达片长时
+    //     结束本次 run（这就是本开关的语义）；缺省关时整段不执行，循环/重播行为完全照旧。
+    const bool movie_finished = completed_;
     state_ = 0; // State_Stopped
     completed_ = false;
     has_pts_ = false;
@@ -1257,6 +1263,18 @@ bool Graph::endStopChain() {
     }
     if (cpu_.audio != nullptr) cpu_.audio->clearHostPcm();
     dshowLog(LogLevel::Info, "IMediaControl::Stop：两个 filter 已 Stop；播放位置归零");
+    if (movie_finished && std::getenv("LIFT_STOP_AFTER_MOVIE") != nullptr) {
+        // ★ 与 `--max-frames`（d3d9.cpp 的 Present 分支）同形：只置 cpu 状态，仍走
+        //   `Machine::run` 的**正常收尾** ⇒ `dumpRunSummary` 照常打印（tests/movie_logo.cpp
+        //   的堆断言读它）。停止原因由 `Machine::run` 的续延分支（`!cpu_.running`）落成
+        //   `StopReason::Stopped` —— 否则循环条件退出时 reason 仍是 None（main 会返回 2）。
+        // ★ `音频渲染器：Stop（fed=…）` 已在上面 `audio_->stop()` 里打印（测试读它）。
+        // ⛔ 这条日志的文案不要出现 in_use / samples= / fed= / completed= / "tex movie " /
+        //    "HeapAlloc 大块" 这些子串：测试用**整份日志**做子串判据（见 tests/movie_logo.cpp）。
+        cpu_.running = false;
+        cpu_.stop_why = "stop-after-movie";
+        dshowLog(LogLevel::Info, "LIFT_STOP_AFTER_MOVIE=1：影片已放完 ⇒ 结束本次运行（不等 --time-limit）");
+    }
     return finishChain();
 }
 void Graph::run() {

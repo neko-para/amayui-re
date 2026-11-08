@@ -440,8 +440,10 @@ RunResult Machine::run(const RunOptions& opts) {
     shims_.setTrace(opts.trace_shims, opts.trace_out ? opts.trace_out : stdout);
     // ★ 诊断：`LIFT_FRAME_TRACE=1` ⇒ 每次 Present 后打"这一帧墙钟去哪了"。
     //   只读、默认关；shim 计时只在打开时才有 steady_clock 开销。
+    // ★ `--profile` 也要 shim 墙钟：`dumpProfile` 里的 shim 表读的就是这份累计（否则恒 0）。
+    //   代价 = 每次 shim 调用多两次 steady_clock（`--bench --profile` 同用时 MIPS 不可当基准）。
     frame_trace_ = std::getenv("LIFT_FRAME_TRACE") != nullptr;
-    shims_.setTiming(frame_trace_);
+    shims_.setTiming(frame_trace_ || opts.profile);
     if (frame_trace_) {
         frame_trace_last_ = std::chrono::steady_clock::now();
         frame_trace_last_insns_ = cpu_.insns;
@@ -511,6 +513,16 @@ RunResult Machine::run(const RunOptions& opts) {
             }
             // ★ 音频泵借用了 [esp] 作为 sub_4B6C30 的返回点；续延完成后必须还回原返回地址。
             audio_.afterGuestCall();
+            // ★ 续延里也可能**主动结束运行**（如 `LIFT_STOP_AFTER_MOVIE` 在 DirectShow 图的
+            //   停机链里置 `cpu.running=false`）。它不在 `shims_.invoke` 那条路上 ⇒ 不会经过
+            //   本循环末尾"shim 返回后"的 `!cpu_.running` 检查；而 `while (cpu_.running)` 直接
+            //   退出会让 `r.reason` 停在 `None`（`RunResult::ok()` 为假 ⇒ main 返回 2）。
+            //   这里补上停止原因，口径与那条分支一致：这是"实现里主动停"，不是缺口。
+            if (!cpu_.running) {
+                r.reason = StopReason::Stopped;
+                r.detail = cpu_.stop_why ? cpu_.stop_why : "guest 调用续延里主动结束运行";
+                break;
+            }
             continue;
         }
         // ★ winmm 定时器回调的返回点（协作式定时器；见 x86.h 的 kTimerCallbackReturnEa）
@@ -1202,6 +1214,46 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
         std::fprintf(out, "  %2zu. %08X %7.1f ms %6.2f%% hits=%-10llu blocks=%-4zu %s\n", i + 1,
                      f.fn ? f.fn->ea : 0u, static_cast<double>(f.ns) / 1e6, pct, (unsigned long long)f.hits, f.blocks,
                      f.fn ? f.fn->name.c_str() : "(no .lst)");
+    }
+    // ★ 宿主 shim 表（`--profile` 现在也会打开 shim 计时，见 run() 的 setTiming）。
+    //   口径：只统计 **shim 实现自身**（`ShimRegistry::invoke` 只包 `local.fn`，见 shims.cpp），
+    //   不含 dispatcher 弹参、native override、事件泵；与 guest 块表**不可相加**（两段墙钟不重叠，
+    //   但也不覆盖同一段时间）。只列 `ns > 0` 的项：没被调用过的 shim 恒 0，没有解释价值。
+    {
+        struct ShimRow {
+            const ShimDef* def = nullptr;
+            std::uint64_t ns = 0;
+            std::uint64_t calls = 0;
+        };
+        std::vector<ShimRow> shim_rows;
+        shim_rows.reserve(shims_.all().size());
+        std::uint64_t shim_total_ns = 0;
+        for (const ShimDef& d : shims_.all()) {
+            if (d.ns == 0) continue;
+            shim_rows.push_back(ShimRow{&d, d.ns, d.call_count});
+            shim_total_ns += d.ns;
+        }
+        // 排序：ns desc → calls desc → module asc → name asc（同分也要确定性，⛔ 不按注册顺序）。
+        std::sort(shim_rows.begin(), shim_rows.end(), [](const ShimRow& a, const ShimRow& b) {
+            if (a.ns != b.ns) return a.ns > b.ns;
+            if (a.calls != b.calls) return a.calls > b.calls;
+            if (a.def->module != b.def->module) return a.def->module < b.def->module;
+            return a.def->name < b.def->name;
+        });
+        std::fprintf(out, "\n=== profile: shims（宿主实现自身墙钟；前 %zu）===\n", top);
+        std::fprintf(out, "total shim wall = %.1f ms（guest-block wall = %.1f ms；两表不可相加）\n",
+                     static_cast<double>(shim_total_ns) / 1e6, static_cast<double>(total_ns) / 1e6);
+        for (std::size_t i = 0; i < shim_rows.size() && i < top; ++i) {
+            const ShimRow& r = shim_rows[i];
+            const double pct =
+                shim_total_ns ? 100.0 * static_cast<double>(r.ns) / static_cast<double>(shim_total_ns) : 0.0;
+            const double avg_us = r.calls ? static_cast<double>(r.ns) / static_cast<double>(r.calls) / 1e3 : 0.0;
+            // ★ 先拼成 std::string 再用 %-46s 定宽（`%s!%s` 两段拼宽度要分别算，必错）。
+            const std::string label = r.def->module + "!" + r.def->name;
+            std::fprintf(out, "  %2zu. %-46s %9.1f ms %6.2f%% calls=%-10llu avg=%9.1f us\n", i + 1,
+                         label.c_str(), static_cast<double>(r.ns) / 1e6, pct,
+                         (unsigned long long)r.calls, avg_us);
+        }
     }
     // ★ override 的函数体**不会**进块 profile（被宿主实现整段替代）⇒ 显式说明，否则 profile 会误导
     //   "这个热点已经不在"。

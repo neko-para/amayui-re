@@ -424,6 +424,10 @@ void destroyDeviceState(X86& cpu, std::uint32_t state) {
     if (cpu.mem->rd32(state + kDvMagic) != kDvMagicValue) return;
     d3d9::destroyForDevice(cpu, state);  // 流水线状态块 + 深度缓冲（含 SetTexture AddRef 的纹理）
     const std::uint32_t arena = cpu.mem->rd32(state + kDvArena);
+    // ★ 设备销毁：GPU 队列与镜像指向即将释放的 guest 像素 ⇒ 丢掉（⛔ 不回读到已释放/复用的 arena）。
+    if (Machine* m = activeMachine(); m && &m->cpu() == &cpu) {
+        if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr) gpu->rasterDiscardTarget();
+    }
     cpu.mem->wr32(state + kDvMagic, 0);
     if (Machine* m = activeMachine(); m && &m->cpu() == &cpu && arena != 0) m->surfaces().destroy(arena);
     if (cpu.heap) cpu.heap->free(state);
@@ -540,9 +544,15 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
         return kOk;
     }
     // GPU 光栅化：CPU 即将改写 guest 像素，先把 GPU 未读回的绘制落回 guest。
+    // ★ 合批后 `rasterDirty()` 含"队列非空" ⇒ 这条屏障同时完成 flush + 读回。
+    // ★ 但只有**这块 guest 像素就是当前镜像的目标**时才回读：同尺寸纹理当 RT 时，把后缓冲镜像
+    //   写进纹理是错的（⛔ 静默写错 surface）。不是目标就只 flush，让队列落到它自己的 target。
     if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
         std::string gerr;
-        if (!gpu->rasterSyncToGuest(m->surfaces().pixels(*gs), gs->pitch, gs->width, gs->height, &gerr)) {
+        std::uint8_t* base = m->surfaces().pixels(*gs);
+        if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() != base) {
+            if (!gpu->rasterFlush(&gerr)) d3d9Log("Clear", "GPU 队列 flush 失败：%s", gerr.c_str());
+        } else if (!gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &gerr)) {
             d3d9Log("Clear", "GPU 光栅化读回失败：%s", gerr.c_str());
         }
     }
@@ -646,12 +656,18 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
     const bool gpu_active = gpu != nullptr && gpu->rasterActive();
     GpuDirectPresenter* direct = gpu_active ? gpu->directPresenter() : nullptr;
     const bool direct_active = direct != nullptr && direct->directActive();
-    const bool gpu_dirty = gpu_active && gpu->rasterDirty();
+    bool gpu_dirty = gpu_active && gpu->rasterDirty();
     pb.direct = direct_active;
     const std::uint64_t readback_begin = steadyNowNs();
     if (gpu_dirty) {
         std::string gerr;
-        if (!gpu->rasterSyncToGuest(m->surfaces().pixels(*gs), gs->pitch, gs->width, gs->height, &gerr)) {
+        std::uint8_t* back = m->surfaces().pixels(*gs);
+        // ★ 镜像身份必须是后缓冲：同尺寸纹理当 RT 且没切回来时，把镜像读进后缓冲是错的。
+        //   这种情况下先 flush（队列落到它自己的 target），并按"guest 才是后缓冲最新内容"处理。
+        if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() != back) {
+            if (!gpu->rasterFlush(&gerr)) d3d9Log("Present", "GPU 队列 flush 失败：%s", gerr.c_str());
+            gpu_dirty = false;
+        } else if (!gpu->rasterSyncToGuest(back, gs->pitch, gs->width, gs->height, &gerr)) {
             d3d9Log("Present", "GPU 光栅化读回失败：%s", gerr.c_str());
         }
     }
@@ -723,9 +739,12 @@ enum TexOff : std::uint32_t {
     kTxPool = 40,
     kTxLocks = 44,
     kTxLocked = 48,
-    kTxVersion = 52,  // UnlockRect 次数（GPU 纹理上传缓存的内容版本）
-    kTxSerial = 56,   // 进程级单调纹理身份（GPU 缓存键；⛔ 不复用 guest 指针/状态块 EA）
-    kTxBytes = 60,
+    // ★ 内容版本（GPU 纹理上传缓存）：0 = 未知；非 0 = 已知内容的**单调序列号**。
+    //   112 行附近的 `TextureInfo::version` 注释是口径真源；这里只放布局。
+    kTxVersion = 52,
+    kTxVersionSeq = 56,  // 下一个可发的序列号（⛔ 永不复用已发过的号；0 保留给"未知"）
+    kTxSerial = 60,      // 进程级单调纹理身份（GPU 缓存键；⛔ 不复用 guest 指针/状态块 EA）
+    kTxBytes = 64,
 };
 constexpr std::uint32_t kTxMagicValue = 0x31584554u;  // 'TEX1'
 
@@ -801,6 +820,11 @@ std::uint32_t createTextureState(X86& cpu, std::uint32_t device_object, std::uin
     std::uint32_t serial = ++next_texture_serial;
     if (serial == 0) serial = ++next_texture_serial;  // 跳过 0（0 = "没有身份"）
     cpu.mem->wr32(state + kTxSerial, serial);
+    // ★ 内容版本：像素块是 `SurfaceArena::create` 分配的（`GuestHeap::alloc(bytes, zero=true)` ⇒
+    //   整块清零，回收复用的块也一样）⇒ **建完的内容就是已知的全 0**，版本可以从 1 起。
+    //   序列号从 2 起：1 已经用给初值，下一次"已知"写（UnlockRect）必须是一个**没出现过**的号。
+    cpu.mem->wr32(state + kTxVersion, 1u);
+    cpu.mem->wr32(state + kTxVersionSeq, 2u);
     d3d9Log("CreateTexture",
             "%ux%u D3DFORMAT=%u（%ubpp，pitch=%u）· MipLevels=%u · Usage=0x%X · Pool=%u · 设备 0x%08X"
             " ⇒ 像素块 0x%08X / 状态块 0x%08X",
@@ -954,6 +978,18 @@ bool lockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::uint32
         if (why) *why = "D3D9：纹理像素不在 arena 里（纹理状态与 arena 不一致）";
         return false;
     }
+    // ★ 屏障（屏障清单「LockRect」）：如果这块纹理正是当前 GPU 镜像的目标（纹理当 RT），
+    //   guest 像素是过期的 ⇒ 先 flush + 读回。不是目标就不热路径（⛔ 不把别的 target 读进来）。
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+        std::uint8_t* base = m->surfaces().pixels(*gs);
+        if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() == base) {
+            std::string sync_err;
+            if (!gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err)) {
+                if (why) *why = "D3D9：LockRect 前 GPU 像素读回失败：" + sync_err;
+                return false;
+            }
+        }
+    }
     const int bpp = static_cast<int>(gs->format.bytesPerPixel());
     int left = 0;
     int top = 0;
@@ -980,6 +1016,9 @@ bool lockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::uint32
     cpu.mem->wr32(locked_rect_ea + 4, bits);
     cpu.mem->wr32(tex.state + kTxLocks, tex.locks + 1u);
     cpu.mem->wr32(tex.state + kTxLocked, 1u);
+    // ★ 锁期间内容 = "未知"：guest 拿到 pBits 之后可能随时改像素，而它**不一定**会 Unlock 再被采样。
+    //   置 0 ⇒ 采样退回内容哈希（未优化前的行为）。⛔ 不要留旧版本号：那会让"锁内写"被缓存跳过。
+    cpu.mem->wr32(tex.state + kTxVersion, 0u);
     if (flags != 0) {
         // DISCARD/NOOVERWRITE/READONLY 对"guest 内存里的像素"没有可观察差异 ⇒ 只记录（不静默）
         d3d9Log("LockRect", "Flags=0x%08X 被记录（guest 像素没有 DISCARD/READONLY 语义）", flags);
@@ -1001,10 +1040,41 @@ bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::stri
         return false;
     }
     cpu.mem->wr32(tex.state + kTxLocked, 0u);
-    // 内容版本 +1：Lock 期间 guest 可能改了像素；GPU 纹理缓存据此决定是否重传。
-    cpu.mem->wr32(tex.state + kTxVersion, cpu.mem->rd32(tex.state + kTxVersion) + 1u);
+    // ★ 解锁 ⇒ 内容**已知**（guest 内存此刻就是真值），发一个**没出现过**的序列号。
+    //   为什么不是 `version + 1`：version 可能被 lock（或 RT 降级）置成 0，加 1 会回落到 1/旧号，
+    //   撞上 GPU 缓存里同号 generation ⇒ 静默用旧纹理。序列号只增不复用 ⇒ 不可能撞。
+    //
+    // ★ 例外：这块纹理**正被当成 render target**（`SetRenderTarget` 绑的就是它的表面）。
+    //   那种情况下解锁之后宿主仍会往同一块像素写（Clear / CPU 光栅回退 / GPU 读回），
+    //   而它们都不经过 unlockRect ⇒ 版本号不能再声称"已知"。保持 0（未知）。
+    //   （不做这条的话：bind 置 0 → 解锁赋新号 → 再写 RT → 采样时快路径命中 ⇒ 旧图。）
+    std::uint32_t version = 0;  // 0 = 保持"未知"
+    // 判"这块纹理是不是当前 render target"。判不出来（设备状态块不在了）也按"未知"处理：
+    // 宁可多哈希（慢），也不要发一个可能错的"已知"号（静默旧图）。
+    const bool is_render_target = [&] {
+        DeviceInfo dev;
+        if (!deviceInfo(cpu, tex.device, &dev, nullptr)) return true;
+        return dev.pipeline != 0 && renderTargetArena(cpu, dev.pipeline) == tex.arena;
+    }();
+    if (!is_render_target) {
+        std::uint32_t seq = cpu.mem->rd32(tex.state + kTxVersionSeq);
+        if (seq == 0) seq = 2u;  // 序列号回绕保护（0 是"未知"哨兵，⛔ 不能发出去）
+        version = seq;
+        // 4e9 次 unlock 之后才会回绕到 0；那时重新从 2 起发号 —— 实际上不可达，写在这里只是
+        // 让"0 永不作为版本值"这条不变量成立（真到那一步，理论上可能撞旧号）。
+        cpu.mem->wr32(tex.state + kTxVersionSeq, seq + 1u);
+    }
+    cpu.mem->wr32(tex.state + kTxVersion, version);
 
     return true;
+}
+
+void markTextureContentUnknown(X86& cpu, std::uint32_t state) {
+    // ★ 判据必须是 `'TEX1'` magic（`textureInfoOfState`）：`surfaceInfoOfState` 对后缓冲的
+    //   `'D9D1'` 设备状态也返回 true，按它写会踩坏设备状态块（+52 = Clear 计数、+56/60 = 设备字段）。
+    TextureInfo ti;
+    if (!textureInfoOfState(cpu, state, &ti, nullptr)) return;
+    cpu.mem->wr32(state + kTxVersion, 0u);
 }
 
 }  // namespace d3d9

@@ -1011,10 +1011,46 @@ int main() {
                 lift::d3d9::TextureInfo after;
                 LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &after, nullptr));
                 LIFT_CHECK_EQ_U32(after.locks, 1u);
-                LIFT_CHECK_EQ_U32(after.version, 1u);
+                // ★ 内容版本语义（2026-11 改）：0 = 未知；建纹理 = 1（像素全 0，已知）；
+                //   每次 UnlockRect 赋**下一个单调序列号**（序列从 2 起），不再等于 "UnlockRect 次数"。
+                //   所以一次 Lock/Unlock 之后是 2，而不是旧的 1。
+                LIFT_CHECK_EQ_U32(after.version, 2u);
                 LIFT_CHECK(!after.locked);
                 LIFT_CHECK_EQ_U32(rig.m.overrides().at(0)->hits, 1u);
                 LIFT_CHECK_EQ_U32(rig.m.overrides().at(0)->fallbacks, 0u);
+            }
+        }
+        // ---- 纹理内容版本语义（GPU 纹理上传缓存"跳过重传"的判据；纯 CPU 侧，不建窗口）----
+        // ★ 判据：建纹理 = 1（像素块 zero=true ⇒ 全 0、内容已知）；Lock = 0（未知）；
+        //   Unlock 发**单调序列号**（第一次 = 2，⛔ 不是 `version+1`）；RT 降级 = 0（未知）；
+        //   再 Unlock = 3 ⇒ 序列**不复用**（回到 1/2 会让缓存命中旧 generation ⇒ 静默旧纹理）。
+        {
+            lift_test::g_current_case = "texture-content-version";
+            TextureRig rig;
+            LIFT_CHECK(rig.boot(8, 8, lift::d3d9::kFmtA8R8G8B8));
+            if (rig.ok) {
+                lift::d3d9::TextureInfo ti;
+                LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &ti, nullptr));
+                LIFT_CHECK_EQ_U32(ti.version, 1u);
+                const std::uint32_t lr_ea = 0x00430000u;
+                std::vector<std::uint8_t> lr(8, 0);
+                LIFT_CHECK(rig.m.placeData(lr_ea, lr.data(), lr.size(), &rig.err));
+                LIFT_CHECK(lift::d3d9::lockRect(rig.m.cpu(), ti, 0u, lr_ea, 0u, 0u, nullptr));
+                LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &ti, nullptr));
+                LIFT_CHECK_EQ_U32(ti.version, 0u);
+                LIFT_CHECK(lift::d3d9::unlockRect(rig.m.cpu(), ti, 0u, nullptr));
+                LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &ti, nullptr));
+                LIFT_CHECK_EQ_U32(ti.version, 2u);
+                // RT 降级（SetRenderTarget 绑到纹理表面时走同一个函数）⇒ 未知。
+                lift::d3d9::markTextureContentUnknown(rig.m.cpu(), ti.state);
+                LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &ti, nullptr));
+                LIFT_CHECK_EQ_U32(ti.version, 0u);
+                LIFT_CHECK(lift::d3d9::lockRect(rig.m.cpu(), ti, 0u, lr_ea, 0u, 0u, nullptr));
+                // ★ 必须重新读状态块：`ti.locked` 是**调用前**的快照，unlockRect 会按它判 D3DERR_INVALIDCALL。
+                LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &ti, nullptr));
+                LIFT_CHECK(lift::d3d9::unlockRect(rig.m.cpu(), ti, 0u, nullptr));
+                LIFT_CHECK(lift::d3d9::textureInfo(rig.m.cpu(), rig.texture, &ti, nullptr));
+                LIFT_CHECK_EQ_U32(ti.version, 3u);
             }
         }
         // ---- 16bpp × alpha>=0（A4R4G4B4，4×3；pitch=8；rect=(1,0,3,3)）----

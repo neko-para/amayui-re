@@ -62,7 +62,8 @@ public:
     bool rasterActive() const override;
     const char* rasterName() const override;
     bool rasterSpritesEnabled() const override;
-    bool rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err) override;
+    bool rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err,
+                       const std::uint8_t* color_base = nullptr) override;
     bool rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
                              std::string* err) override;
     bool rasterSyncToGuest(std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
@@ -72,6 +73,14 @@ public:
     bool rasterDrawTextured(const GpuRasterVertex* vertices, std::size_t count,
                             const GpuRasterTexture& texture, const GpuRasterState& state,
                             std::string* err) override;
+    // ★ 合批：必须显式转发（基类默认实现走**虚** rasterDraw ⇒ 每条 draw 各自提交，
+    //   批处理会"实现了但没生效"，而且测试全绿）。
+    bool rasterQueue(const GpuRasterVertex* vertices, std::size_t count,
+                     const GpuRasterTexture* texture, const GpuRasterState& state, std::string* err) override;
+    bool rasterFlush(std::string* err) override;
+    const void* rasterTargetBase() const override;
+    std::size_t rasterQueuedDraws() const override;
+    void rasterDiscardTarget() override;
     bool rasterDirty() const override;
     // GPU 直出接口转发到真正的后端（`--raster gpu` 的后端在 d3d9_gpu.cpp）。
     GpuDirectPresenter* directPresenter() override;

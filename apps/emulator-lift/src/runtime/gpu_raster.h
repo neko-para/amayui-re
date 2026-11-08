@@ -8,6 +8,10 @@
 //   把**同一份** target blit 到窗口 swapchain，呈现不再经过 `SDL_UpdateTexture`。
 //   光栅化与呈现仍是两件事：`directPresenter()==nullptr` 时呈现走 SDL_Renderer / headless。
 //
+// ★ 合批口径（2026-11）：一次 draw 不再各自提交一次 —— `rasterQueue` 入队，`rasterFlush` 把
+//   一帧（或一段直到下一个屏障点）的 draw 合成**一个** command buffer / 一个 render pass。
+//   ⛔ 只合并提交，不合并 draw：每条 draw 的 pipeline/blend/ztest/viewport/scissor/sampler/纹理
+//   都逐条保留、顺序不变。屏障清单见 `d3d9_gpu.cpp` 文件头。
 // ★ 状态口径（`GpuRasterState`）：只表达**后端能画**的 D3D9 固定功能状态子集。
 //   准入判定在 `d3d9::gpuEligible()` / `d3d9::gpuBlendStateFor()`（纯函数，夹具可测）；
 //   ⛔ 这里不猜"近似等价"——映射不了的状态由调用方回退 CPU 并记账。
@@ -119,8 +123,9 @@ struct GpuRasterTexture {
     int height = 0;
     SurfaceFormat format;
     const void* key = nullptr;  // guest 纹理像素指针（缓存键）
-    // guest 纹理内容版本（D3D9 的 UnlockRect 次数）。非 0 且与缓存一致 ⇒ 不重传、也不做内容哈希；
-    // 0 = 未知（还没 Unlock 过）⇒ 后端退回内容哈希比较。
+    // guest 纹理内容版本（`TextureInfo::version`：0 = 未知，非 0 = 已知内容的单调序列号）。
+    // 非 0 且与缓存一致 ⇒ 不重传、也不做内容哈希；0 = 未知（刚 Lock / 当过 render target）
+    // ⇒ 后端退回内容哈希比较。
     std::uint32_t generation = 0;
     // guest 纹理身份（进程级单调 serial）。★ 缓存键用它：guest 指针 / 尺寸 / alpha / generation
     // 都可能撞车（arena 复用 + 新对象 generation 也从 0/1 起）。0 = 夹具/白纹理 ⇒ 退回指针键。
@@ -201,7 +206,12 @@ public:
     virtual bool rasterSpritesEnabled() const { return true; }
 
     // 目标纹理（尺寸/格式变化时重建）。
-    virtual bool rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err) = 0;
+    // ★ `color_base` = 这块 GPU 镜像对应的 guest 像素基址（后缓冲 / 渲染目标 surface 的像素）。
+    //   D3D9 允许「换成另一张同尺寸 surface」⇒ 只看尺寸/格式**判不出来**；基址变化必须视为
+    //   换 target（先 flush + 回读旧目标，再重建镜像），见 d3d9_gpu.cpp 的 rasterPrepare。
+    //   nullptr = 调用方不提供身份（夹具 / 离屏上传）⇒ 退回旧的"只看尺寸/格式"口径。
+    virtual bool rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err,
+                               const std::uint8_t* color_base = nullptr) = 0;
     // 用 guest 后缓冲的当前内容初始化/同步 GPU 镜像（CPU Clear / CPU 回退之后）。
     virtual bool rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
                                      std::string* err) = 0;
@@ -215,7 +225,46 @@ public:
     virtual bool rasterDrawTextured(const GpuRasterVertex* vertices, std::size_t count,
                                     const GpuRasterTexture& texture, const GpuRasterState& state,
                                     std::string* err) = 0;
+
+    // -----------------------------------------------------------------------------------
+    // 合批：入队 + 一次 flush（「一次 draw = 一次提交」→「一帧的 draw 合到一次提交」）
+    // -----------------------------------------------------------------------------------
+    // ★ 旧接口（rasterDraw / rasterDrawTextured）语义**不变** = 入队 + **立即** flush：
+    //   夹具、`--gpu-verify`（判据要求"画完立刻能读"）都还走它。
+    // ★ `rasterQueue` 的契约：
+    //   · 顶点由后端**拷贝**（调用方返回后可以释放自己的数组）；
+    //   · 纹理必须在**入队时**就交给后端：`GpuRasterTexture::pixels` 是 guest 指针，
+    //     D3DXSprite 在 End 末尾就 Release 那条纹理（AddRef 只保到 End）⇒ ⛔ 后端不许保存
+    //     这个指针、也不许拖到 flush 再读；
+    //   · 状态（pipeline/blend/ztest/viewport/scissor/sampler/纹理）逐条保留，⛔ 不合并两条不同的 draw。
+    // ★ 默认实现 = 旧的整批路径（入队 + 立即 flush）⇒ CPU 后端 / 测试替身不用改。
+    virtual bool rasterQueue(const GpuRasterVertex* vertices, std::size_t count,
+                             const GpuRasterTexture* texture,  // nullptr = 无纹理
+                             const GpuRasterState& state, std::string* err) {
+        if (texture != nullptr) return rasterDrawTextured(vertices, count, *texture, state, err);
+        return rasterDraw(vertices, count, state, err);
+    }
+    // 把队列里的 draw 一次提交（SDL_GPU 后端 = 一个 command buffer / 一个 render pass）。
+    // ★ 队列为空 ⇒ 立刻返回 true（零成本，⛔ 不提交空 command buffer）。
+    // ★ 屏障：读 target 前必须先 flush（`rasterSyncToGuest` 内部会做）；换 target / Clear /
+    //   LockRect / Present / directPresent 也要先 flush（清单见 d3d9_gpu.cpp 文件头）。
+    // 默认实现 true = 「没有队列的后端」。
+    virtual bool rasterFlush(std::string* err) {
+        (void)err;
+        return true;
+    }
+    // 当前 GPU 镜像对应的 guest 像素基址（nullptr = 未准备 / 不参与判断）。
+    // Clear / LockRect / Present 用它判「这块 guest 像素是不是镜像的目标」。
+    virtual const void* rasterTargetBase() const { return nullptr; }
+    // 诊断：尚未 flush 的 draw 条数（默认 0 = 没有队列）。测试用它证明合批真的生效。
+    virtual std::size_t rasterQueuedDraws() const { return 0; }
+    // 设备 / target 销毁前丢掉队列与镜像（⛔ 不要往即将释放的 guest 像素回读）。默认 no-op。
+    virtual void rasterDiscardTarget() {}
+
     // GPU 镜像里是否有尚未读回 guest 的绘制。
+    // ★ 语义（合批后）= **队列非空 或 已提交但尚未读回** —— 即「镜像 != guest」。
+    //   调用方的 `if (!rasterDirty()) rasterSyncFromGuest(...)` 因此不会在下一个 sprite 时
+    //   把 guest 后缓冲重新上传、擦掉已入队但还没提交的上一条 draw。
     virtual bool rasterDirty() const = 0;
 
     // 可选：GPU 直出接口。nullptr = 没有 swapchain（CPU 后端 / 直出不适用 / 已回退 renderer）。

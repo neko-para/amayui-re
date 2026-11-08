@@ -13,12 +13,17 @@
 //
 // ★ 子进程输出走**文件重定向**（不走管道：受限沙箱里捕获管道会 EPERM）。
 // ★ 命令行**不含 `--skip-logo`**（本测试专门守"影片真的跑"，跳过模式会让它失去意义）。
-// ★ **必须在 RelWithDebInfo 树里跑**（2026-11-07 起 `windows-x64` preset 就是 RelWithDebInfo；
-//   解释器慢到 boot 到影片就要几分钟，`--time-limit` 会把影片截断 ⇒ 这条会假红。测试用
-//   没有 Debug preset）。测试用 `$<TARGET_FILE:emulator-lift>`，跟着所在构建树走。
-//   ★ Debug 树里本测试**自己 `LIFT_SKIP`(77)**（`LIFT_MOVIE_LOGO_IS_DEBUG`）—— 不跑，免得占 5 分钟。
+// ★ **必须在 RelWithDebInfo 树里跑**（`windows-x64` preset 的缺省就是它；Debug 下解释器慢到
+//   boot 到影片就要几分钟，`--time-limit` 会把影片截断 ⇒ 这条会假红）。测试用
+//   `$<TARGET_FILE:emulator-lift>`，跟着所在构建树走。
+//   ★ Debug 树里本测试**自己 `LIFT_SKIP`(77)**（`LIFT_MOVIE_LOGO_IS_DEBUG`）—— 不跑，免得白等。
+// ★ CMake 侧是 **opt-in**：默认不注册，`LIFT_ASSETS=1` 才注册（`add_executable` 也在同一个 `if`
+//   里）。CTest 给它注入 `LIFT_STOP_AFTER_MOVIE=1`（影片放完即停，不再空转到 `--time-limit`），
+//   并传第 5 个参数 `--expect-early-stop`；本测试据此**断言钩子真的生效**（判据不挂在环境变量上：
+//   否则钩子失效时只会变慢、仍然绿）。
 // ★ 缺游戏安装 ⇒ CMake 侧不注册；GPU 不可用（raster 行不是 sdl-gpu）⇒ `LIFT_SKIP`(77) 并打印原因。
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -147,8 +152,8 @@ int main(int argc, char** argv) {
     LIFT_SKIP("movie-logo 只在 Windows 宿主上跑（CreateProcessW + 真机安装）");
 #else
     // ★ Debug 树里**不跑**（`LIFT_SKIP` 77）：用户口径是"Debug 解释器慢到无法使用"，
-    //   而这条测试要 boot 到 LOGO 再放完 8.6 s 影片 —— 在 Debug 里会撞 `--time-limit` 假红/假绿。
-    //   canonical：`ctest --test-dir out-rel -R movie-logo`（预设 `windows-x64-rel`）。
+    //   而这条测试要 boot 到 LOGO 再放完影片 —— 在 Debug 里会撞 `--time-limit` 假红/假绿。
+    //   canonical：默认 preset `windows-x64`（RelWithDebInfo）的 `out/`。
 #if defined(LIFT_MOVIE_LOGO_IS_DEBUG) && LIFT_MOVIE_LOGO_IS_DEBUG
     LIFT_SKIP("movie-logo 只在 RelWithDebInfo 树里跑（Debug 解释器太慢；用默认 preset）");
 #endif
@@ -160,6 +165,8 @@ int main(int argc, char** argv) {
     const fs::path corpus = fs::path(lift::utf8ToWide(args[2]));
     const fs::path game_dir = fs::path(lift::utf8ToWide(args[3]));
     const fs::path work_dir = fs::path(lift::utf8ToWide(args[4]));
+    // 第 5 个参数（可选）= `--expect-early-stop`：与 CTest 注入的 `LIFT_STOP_AFTER_MOVIE=1` 成对。
+    const bool expect_early_stop = args.size() > 5 && args[5] == "--expect-early-stop";
     std::error_code ec;
     fs::create_directories(work_dir, ec);
     const fs::path log_path = work_dir / "movie-logo.log";
@@ -214,6 +221,11 @@ int main(int argc, char** argv) {
     }
 
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 0u);
+    // ★ 钩子自检（`--expect-early-stop`）：影片放完即停 ⇒ run summary 的停止原因是 `stopped`
+    //   而不是 `time-limit`。没有这一条，钩子失效时本测试只会"变慢但仍然绿"—— 那正是本任务要治的白等。
+    if (expect_early_stop) {
+        LIFT_CHECK(log.find("stop      : stopped") != std::string::npos);
+    }
     LIFT_CHECK(log.find("首帧已送渲染器") != std::string::npos);
     const long samples = lastSamples(log);
     // 帧数：`--real-time` 下引擎按墙钟走，渲染慢就**丢帧**（与真机一致）⇒ 只要求"确实在推进"，
@@ -297,6 +309,10 @@ int main(int argc, char** argv) {
     const ChildResult rb = runChild(exe, cmd_b, log_b);
     const std::string logb = readAllBytes(log_b);
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rb.exit_code), 0u);
+    // ★ 第二个子进程走**同一条**停机链 ⇒ 也必须提前停（否则整条测试只慢一半、照样绿）。
+    if (expect_early_stop) {
+        LIFT_CHECK(logb.find("stop      : stopped") != std::string::npos);
+    }
     auto texMovie1 = [](const std::string& text) -> std::string {
         const std::size_t at = text.find("tex movie #1 ");
         if (at == std::string::npos) return {};

@@ -1648,6 +1648,41 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
     const std::uint32_t old_surface = plGet(cpu, pe, kPlColorSurface);
+    // ★ 屏障（屏障清单「换 target」）：切换前先把已入队的 draw 画进**旧**目标并回读旧目标的
+    //   guest 像素。理由：D3D9 允许换成另一张同尺寸 surface，后端只看尺寸/格式认不出来；
+    //   而且切完之后即使一条 draw 都没有，Present 也不能把旧镜像的内容读进新后缓冲。
+    // ★ 只回读"镜像真的对应该旧目标"的情况：`rasterSyncToGuest` 会按基址校验，若镜像属于另一块
+    //   surface（例如纹理 RT 走了 CPU 回退、镜像仍是后缓冲），这里**不能**整帧往回读。
+    //   `target == old_surface`（重复设同一个目标）也不是换 target，⛔ 不做整帧读回。
+    if (target != old_surface) {
+        if (Machine* m = activeMachine(); m != nullptr && &m->cpu() == &cpu) {
+            if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+                DeviceInfo di;
+                if (deviceInfoOfState(cpu, dev, &di, nullptr)) {
+                    // 旧目标 = 旧 RT surface（arena）或 0 ⇒ 设备后缓冲
+                    const std::uint32_t old_arena = old_surface != 0 ? plGet(cpu, pe, kPlColorArena) : 0u;
+                    GuestSurface* ogs = m->surfaces().find(old_arena != 0 ? old_arena : di.arena);
+                    if (ogs != nullptr) {
+                        std::uint8_t* old_base = m->surfaces().pixels(*ogs);
+                        const bool is_mirror_target =
+                            gpu->rasterTargetBase() == nullptr || gpu->rasterTargetBase() == old_base;
+                        if (is_mirror_target) {
+                            std::string sync_err;
+                            if (!gpu->rasterSyncToGuest(old_base, ogs->pitch, ogs->width, ogs->height, &sync_err)) {
+                                pipeLog("SetRenderTarget", "切换前 GPU 像素读回失败：%s", sync_err.c_str());
+                            }
+                        } else {
+                            // 镜像属于别的 surface：只把队列落进它自己的 target（不回读、不静默写错）。
+                            std::string flush_err;
+                            if (!gpu->rasterFlush(&flush_err)) {
+                                pipeLog("SetRenderTarget", "切换前 GPU 队列 flush 失败：%s", flush_err.c_str());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if (target == 0) {
         if (old_surface != 0 && cpu.com) cpu.com->release(cpu, old_surface);
         plSet(cpu, pe, kPlColorArena, 0u);
@@ -1679,6 +1714,11 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
     }
     pipeLog("SetRenderTarget", "目标 = 纹理表面 0x%08X（%ux%u，像素块 0x%08X）", target, ti.width,
             ti.height, ti.arena);
+    // ★ 纹理当 render target ⇒ 内容版本降级为"未知"（0）：之后 Clear(TARGET) / CPU 光栅回退 /
+    //   GPU 读回都会往这块 guest 像素写而不经过 `unlockRect`，版本号不能再声称"已知"。
+    //   ⛔ 判据在 `markTextureContentUnknown` 里是 `'TEX1'` magic —— 不要在这里改成
+    //   `surfaceInfoOfState` 的返回值（它对后缓冲的 `'D9D1'` 也返回 true）。
+    d3d9::markTextureContentUnknown(cpu, tex_state);
     return kOk;
 }
 
@@ -2914,12 +2954,19 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     if (gpu != nullptr && !gpu_invw_ok) {
         // GPU 已启用，但这批顶点的 invw != 1：屏幕空间插值会与 CPU 的透视校正产生像素差 ⇒
         // 明确回退（记账 + 首次打印），⛔ 不静默。
+        // ★ 合批屏障：这一批要由 CPU 直接写 guest，而**更早**的批可能还在 GPU 队列里 ⇒ 先 flush +
+        //   读回，否则它们在 Present 读回时会盖掉这些 CPU 像素。
+        if (gpu->rasterDirty()) {
+            std::string sync_err;
+            gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
+        }
         for (const SavedTri& t : saved_tris) rasterTriangle(ctx, t.a, t.b, t.c);
         gpu_vertices.clear();
         fallback_reason = "顶点 invw!=1（屏幕空间 GPU 插值不能等价替代透视校正）";
     } else if (gpu != nullptr) {
         std::string gerr;
-        bool ok = gpu->rasterPrepare(ctx.color_fmt, ctx.color_width, ctx.color_height, &gerr);
+        // ★ 目标身份必须带 guest 像素基址：同尺寸换 surface 只看尺寸/格式判不出来（见 gpu_raster.h）。
+        bool ok = gpu->rasterPrepare(ctx.color_fmt, ctx.color_width, ctx.color_height, &gerr, ctx.color_base);
         if (ok && !gpu->rasterDirty()) {
             ok = gpu->rasterSyncFromGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &gerr);
         }
@@ -2952,11 +2999,19 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             ref_valid = true;
         }
         if (ok && !gpu_vertices.empty()) {
-            if (plan.textured) {
-                ok = gpu->rasterDrawTextured(gpu_vertices.data(), gpu_vertices.size(), plan.texture, plan.state,
-                                             &gerr);
+            // ★ 合批：正常路径**只入队**（End/Present/Clear 才 flush）。`LIFT_GPU_VERIFY=1` 的判据
+            //   要求"画完立刻能读"，所以诊断模式仍走会立即 flush 的旧接口（⛔ 不改判据）。
+            if (gpu_verify) {
+                if (plan.textured) {
+                    ok = gpu->rasterDrawTextured(gpu_vertices.data(), gpu_vertices.size(), plan.texture, plan.state,
+                                                 &gerr);
+                } else {
+                    ok = gpu->rasterDraw(gpu_vertices.data(), gpu_vertices.size(), plan.state, &gerr);
+                }
+            } else if (plan.textured) {
+                ok = gpu->rasterQueue(gpu_vertices.data(), gpu_vertices.size(), &plan.texture, plan.state, &gerr);
             } else {
-                ok = gpu->rasterDraw(gpu_vertices.data(), gpu_vertices.size(), plan.state, &gerr);
+                ok = gpu->rasterQueue(gpu_vertices.data(), gpu_vertices.size(), nullptr, plan.state, &gerr);
             }
         }
         if (ok && ref_valid) {

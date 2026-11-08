@@ -335,8 +335,17 @@ struct TextureInfo {
     std::uint32_t pool = 0;
     std::uint32_t locks = 0;
     bool locked = false;
-    // 内容版本：每次 UnlockRect +1（Lock 期间 guest 可能改像素）。GPU 纹理缓存用它判断
-    // "像素未变 ⇒ 不重传"；0 = 还没发生过 Unlock（未知，调用方退回内容哈希）。
+    // 内容版本（GPU 纹理上传缓存的"跳过重传"判据）：**0 = 未知**，非 0 = 已知内容的单调序列号。
+    //   · 建纹理 = 1（像素块由 `SurfaceArena::create` 分配 ⇒ guest 堆按 zero=true 清零 ⇒ 内容已知 = 全 0）；
+    //   · `LockRect` 立刻置 0（锁期间 guest 可能改像素 ⇒ 未知）；
+    //   · `UnlockRect` 赋**下一个序列号**（此刻 guest 内存就是内容真值）；
+    //   · 纹理当 render target ⇒ `markTextureContentUnknown` 置 0（宿主写像素的路径太多，
+    //     逐条归因不值得；退回"每次采样做内容哈希" = 未优化前的行为，⛔ 不会静默用旧纹理）。
+    // ⛔ 必须单调且**不复用**：0 → 已知时若用 `version+1`，会撞上缓存里旧的同号 generation。
+    // ⚠ 本线的**不变量**：纹理像素只在 `LockRect` 期间由 guest 写（未 Lock 的直写是 D3D9 API 契约外的
+    //   未定义行为）；宿主写像素的路径（`Clear(TARGET)` / CPU 光栅 / GPU 读回）都发生在"纹理当
+    //   render target"期间 ⇒ 已被 `markTextureContentUnknown` 降级覆盖。将来若新增别的写像素路径，
+    //   必须同样把版本降级为 0（否则就是"静默用旧纹理"）。
     std::uint32_t version = 0;
     // 进程级纹理身份（createTextureState 分配的单调 serial，永不复用；0 = 不是本模块的纹理）。
     // ★ 缓存键必须用它：guest 指针 / 状态块 EA 都可能被 arena·堆复用，只有 serial 不会。
@@ -376,6 +385,14 @@ bool writeTextureDesc(X86& cpu, const TextureInfo& tex, std::uint32_t level, std
 bool lockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::uint32_t locked_rect_ea,
               std::uint32_t rect_ea, std::uint32_t flags, std::string* why);
 bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::string* why);
+
+// ★ 把一块状态块的**内容版本降级为"未知"**（0）：它被当成了 render target（`SetRenderTarget`
+//   绑到纹理表面），之后宿主可能经 Clear / CPU 光栅回退 / GPU 读回写它的像素 —— 这些路径不经过
+//   `unlockRect`，无法逐条归因。降级 = 退回"每次采样做内容哈希"（未优化前的行为）。
+// ★ 判据是状态块的 `'TEX1'` magic（`textureInfoOfState`），**不是** `surfaceInfoOfState`：
+//   后者对后缓冲的 `'D9D1'` 设备状态也返回 true，按它写版本会踩坏设备状态块。
+// ★ 不是纹理状态块 / 未提交 ⇒ 静默 no-op（调用方不必先自己判）。
+void markTextureContentUnknown(X86& cpu, std::uint32_t state);
 
 }  // namespace d3d9
 }  // namespace lift
