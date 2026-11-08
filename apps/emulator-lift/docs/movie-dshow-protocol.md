@@ -331,7 +331,7 @@
 15. **`DoRenderSample` 的 native override（2026-11-07，性能）**
    - profile 证据（用户实测，RelWithDebInfo）：`sub_487C60` = **77.5% / 4980.8 ms / 44.25M 块**
      —— 全是引擎逐像素把 BGR(A) 搬进 A8R8G8B8 纹理的 guest 循环；解码（pl_mpeg，宿主）不在块 profile 里。
-   - 实现：`native_overrides.cpp` 的 `nativeRender487C60`，注册名 **`sub_487C60`**（已进 `all`，稳定层）。
+   - 实现：`native_movie.cpp` 的 `nativeRender487C60`，注册名 **`sub_487C60`**（已进 `all`，稳定层）。
      只覆盖影片主路径：`D3DFORMAT==21`(A8R8G8B8)、`[+0x588]==0`（无 alpha 面）、`[+0x590]==0`
      （无 alpha 拷贝）、源 3/4 字节/像素；其余一律返回 false 回退解释器。裁剪、自底向上行序、
      色键（`[+0x584]`）、`s[3]<<24` 的 alpha、`[+0x5B4]=1` 都按 `.lst` 逐条复刻；锁走

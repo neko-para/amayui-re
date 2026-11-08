@@ -70,7 +70,17 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/handles.cpp
     src/runtime/heap.cpp
     src/runtime/host_encoding.cpp
+    # ★ native override：机制 / 已知表在 `native_overrides.cpp`；各热点实现按域拆在 `native_*.cpp`
+    #   （2026-11-08，纯搬运；契约见 native_overrides.h）
     src/runtime/native_overrides.cpp
+    src/runtime/native_crt.cpp
+    src/runtime/native_lzss.cpp
+    src/runtime/native_image_upload.cpp
+    src/runtime/native_texture_fill.cpp
+    src/runtime/native_glyph.cpp
+    src/runtime/native_map.cpp
+    src/runtime/native_movie.cpp
+    src/runtime/native_block.cpp
     src/runtime/shims.cpp
     src/corpus/lst_index.cpp
     src/shims/register.cpp

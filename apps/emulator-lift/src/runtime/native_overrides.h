@@ -5,7 +5,9 @@
 //   - native 实现只能经 `GuestMemory` 读写 guest；⛔ 宿主指针不进 guest 状态；
 //   - 返回后由本框架按 ABI 设置 `EAX` / `ESP` / `EIP`，未覆盖路径照旧走解释器；
 //   - 每一项都**默认关闭**，由 `--native-overrides=<list>` 显式启用。
-// ★ 这里只放"机制 + 少量 CRT 叶子"；候选由 profile 选出，不先猜（见 requirement 的测试计划）。
+// ★ 本文件 = **契约**（机制 + 纯核声明）；实现按域拆在 `src/runtime/native_*.cpp`（2026-11-08，
+//   纯搬运）—— `native_overrides.cpp` 只留机制 / 已知表 / 段级锚校验。
+// ★ 候选由 profile 选出，不先猜（见 requirement 的测试计划）。
 #pragma once
 
 #include <array>
@@ -199,9 +201,13 @@ bool nativeUpload48B090(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // 空槽判据 `len==0`；命中 = 先比 `min(len)` 字节、再比长度；不中线性探测；返回 index / -1。
 // ★ 只读 guest 内存；所有前置条件（this / 表 / 容量 / index / 提交状态）不成立 ⇒ 返回 false 回退。
 bool nativeFindIndex429020(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// `sub_487C60`（CMovieTextureRenderer::DoRenderSample，thiscall `retn 4`）：影片样本 → A8R8G8B8 纹理。
+// 只覆盖主路径（无 alpha 面 / 无 alpha 拷贝 / 3 或 4 字节源）；其余回退解释器。
+bool nativeRender487C60(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_48AE90`（NormalTexture 虚表第 6 项 = 纯色填充 Fill(rect, color888, alpha)）：thiscall `retn 0Ch`。
-// 对 `[self+0x40C]` 的纹理 `LockRect(rect)`（vtable +0x4C）→ 按**虚拟显示器 bpp**（`dword_5518C0`，
-// 本线读 `ddraw::displayMode`）走 16bpp（A4R4G4B4）或 32bpp → `UnlockRect`（+0x50）；返回 0。
+// 对 `[self+0x40C]` 的纹理 `LockRect(rect)`（vtable +0x4C）→ 按**虚拟显示器 bpp**（guest 全局
+// `ds:dword_5518C0`，⛔ **不是** `ddraw::displayMode`）走 16bpp（A4R4G4B4）或 32bpp →
+// `UnlockRect`（+0x50）；返回 0。
 bool nativeFill48AE90(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // 纯像素核（只碰宿主缓冲；测试可直接用）。`base` = LockRect 返回的 pBits（**已按 rect.left/top
 // 偏移**），`pitch` = LockRect 返回的 Pitch。语义逐字照 `.lst` 的四个分支 —— 包括 16bpp

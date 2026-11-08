@@ -285,7 +285,7 @@ main-only  : WindowManager, D3D9 设备/GPU 光栅/SDL 呈现, FontEngine
 - 另外 guest 里还有 **20 条 `lock` 前缀指令**（全在 CRT/STL 区：`0x480038`…`0x483668`、`0x4EC80C`…`0x512B54`，**没有一个在 `0x4B5xxx–0x4B7xxx`**）【实测】——这些同样是 `lock xadd`，我们的 `exec_integer.cpp:406-414` 照样会丢更新。
 
 **S3 · 多字搬运被对面看见一半**
-- 路径：`Lock` 拿到 guest 指针后引擎 `memcpy` PCM（`.lst 0x4B6FBD` 一带的 `memset`/`memcpy`；native override 里也有 `memcpy`，`native_overrides.cpp:189`），另一侧（宿主音频回调或另一 guest 线程）按"整段已就绪"去读。
+- 路径：`Lock` 拿到 guest 指针后引擎 `memcpy` PCM（`.lst 0x4B6FBD` 一带的 `memset`/`memcpy`；native override 里也有 `memcpy`，见 `native_crt.cpp` 的 `nativeMemcpy`），另一侧（宿主音频回调或另一 guest 线程）按"整段已就绪"去读。
 - 在 x86 宿主上：4 字节对齐 store 原子 + store 保序 ⇒ 通常不会看到撕裂；**arm64 上**：编译器可以把 `memcpy` 展开成多条 `str` 并在中间插入别的访存，硬件也可以乱序可见 ⇒ 读到**半新半旧**的 PCM/结构体。
 - 后果：波形轻微失真 / 结构体字段互相矛盾——**最难复现**的一类。
 
@@ -377,7 +377,7 @@ main-only  : WindowManager, D3D9 设备/GPU 光栅/SDL 呈现, FontEngine
 | 在飞计数 ++ | `0x4B5AE7–0x4B5AF2` | `InterlockedIncrement(Sound+0x7F8+4*slot)` | **native**（单执行流下就是 `+1`；但必须与 `--` 成对、且在 CS 内） |
 | 取 stream | `0x4B5AF8` | `ecx = [Sound+0x654+4*slot]` | **native** |
 | 季度号 | `0x4B5AFF` | `esi &= 3` | **native** |
-| **真正的活** | `0x4B5B03` | `call sub_4B6C30`（thiscall：ECX=stream，栈 1 个参数） | **必须 guest** ⇒ 用现成的 `startNestedGuestCall(cpu, 0x4B6C30, {quarter}, 4, "audio:feeder", cont, &err, /*callee_ecx=*/stream)`（`native_overrides.h:242`、`native_overrides.cpp:19-29`） |
+| **真正的活** | `0x4B5B03` | `call sub_4B6C30`（thiscall：ECX=stream，栈 1 个参数） | **必须 guest** ⇒ 用现成的 `startNestedGuestCall(cpu, 0x4B6C30, {quarter}, 4, "audio:feeder", cont, &err, /*callee_ecx=*/stream)`（`native_overrides.h` 的声明 + `native_overrides.cpp` 的实现） |
 | 在飞计数 -- | `0x4B5B08–0x4B5B0C` | `InterlockedDecrement` | **native** |
 | 出临界区 | `0x4B5B12–0x4B5B16` | `LeaveCriticalSection` | **native** |
 | 循环 / 退出 | `0x4B5B1C–0x4B5B3E` | 回到等待 / `xor eax,eax; retn 4` | **native**（退出 = 句柄 signaled，`ExitCode=0`） |
@@ -729,7 +729,7 @@ guest 代码（不用 PE、不用引擎）：
 | **A13** | 通知表 = `[stream+0x424 + 8*i]` 的 `{offset, event}` 四对，offset = `0 / L/4 / L/2 / 3L/4`（`L = [stream+0x444]`）；`SetNotificationPositions` 在 `0x4B7369` 经 vtable **+0x0C** 调用 | `.lst 0x4B72DE-0x4B7369`【实测】 |
 | **A14** | 引擎 `CreateThread(lpThreadAttributes=0, dwStackSize=**0**, lpStartAddress=sub_4B5AA0, lpParameter=Sound*, flags=**4**(SUSPENDED), &ThreadId)` | `.lst 0x4B5FD6-0x4B5FE4`【实测】 |
 | **A15** | 关机序 = `SetEvent([Sound+0x514])` → `WaitForSingleObject([Sound+0x518], 3000)` → `Release pDS`（⇒ 线程句柄 signaling 与 join 是**必需**的） | `.lst 0x4B6509-0x4B6534`【实测】 |
-| **A16** | `startNestedGuestCall(...)` **已经存在**且支持 thiscall 的 `callee_ecx` | `native_overrides.h:242`、`native_overrides.cpp:19-29`【实测】 |
+| **A16** | `startNestedGuestCall(...)` **已经存在**且支持 thiscall 的 `callee_ecx` | `native_overrides.h` / `native_overrides.cpp` 的 `startNestedGuestCall`【实测】 |
 | **A17** | 主线程在起播时**已经**同步调 `sub_4B6C30` 三次（1.5 s 音频）⇒ 可以直接量它的开销，不必写代码 | `.lst 0x4B74B4-0x4B74C0`【实测】 |
 
 ## 附录 B · 改动面清单
