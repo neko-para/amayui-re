@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/clock.h"  // GetAsyncKeyState 的采样计数要 guest 时钟（noteInputSample）
 #include "runtime/guest_call.h"
 #include "runtime/host_window.h"
 #include "runtime/region.h"
@@ -481,6 +482,11 @@ void shimGetAsyncKeyState(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // ★ 采样计数（见 `host_window.h` 的 `inputSampleCount`）：这里是**唯一的电平读点** ——
+    //   guest 从这一刻起真的"看见"了按下状态。⛔ 不改返回值。
+    //   ⚠ 口径：`PeekMessageA` **不**计数（它在这条实现线里 219,164 次 / 400M 条 ⇒ 算进去等于没等；
+    //   而且消息在队列里不会丢）。理由写在 `host_window.h`。
+    cpu.windows->noteInputSample(cpu.clock ? cpu.clock->nowMs() : 0u);
     const std::uint32_t vk = call.u32(0) & 0xFFu;
     call.result = cpu.windows->keyDown(vk) ? 0x8000u : 0u;
 }

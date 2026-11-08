@@ -96,6 +96,10 @@ void shimGetCursorPos(X86& cpu, ShimCall& call) {
     }
     int x = 0, y = 0;
     wm->getCursorPos(&x, &y);
+    // ★ 采样计数（见 `host_window.h` 的 `inputSampleCount`）：`GetCursorPos` 是**引擎每迭代的
+    //   位置采样**（实测这条实现线 20 Hz）⇒ 它就是"guest 的输入迭代跑过一次"的心跳。
+    //   ⛔ 不改返回值：这行只是注入层的观测点。
+    wm->noteInputSample(cpu.clock ? cpu.clock->nowMs() : 0u);
     cpu.mem->wr32(ea, static_cast<std::uint32_t>(x));
     cpu.mem->wr32(ea + 4, static_cast<std::uint32_t>(y));
     shimLog("user32", "GetCursorPos", "lpPoint=(%d,%d)（虚拟光标位置 / 屏幕坐标）", x, y);

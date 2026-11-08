@@ -38,11 +38,22 @@ namespace {
 
 constexpr std::uint32_t kCode = 0x00401000u;  // guest 主循环体
 constexpr std::uint32_t kProc = 0x00401800u;  // guest WndProc
+constexpr std::uint32_t kConsumer = 0x00403000u;  // 伪造的"每 50 ms 采样一次"的 guest 输入消费者
+// ★ 不采样的 guest 放**另一个**地址：`placeCode` 不失效块缓存（同一 EA 重放会跑旧块），
+//   两个夹具共用地址会让"不采样"的用例偷偷跑成"采样"的（实测过）。
+constexpr std::uint32_t kSpinner = 0x00404000u;
 constexpr std::uint32_t kMsg = 0x00402000u;   // MSG（28 字节）
 constexpr std::uint32_t kPoint = 0x00402100u; // POINT（8 字节）
 constexpr std::uint32_t kRes = 0x00402200u;   // 观测槽
 constexpr std::uint32_t kStubBase = 0x7FF80000u;
 constexpr std::uint32_t kSentinel = 0xFFFFFFFFu;
+// ★ 自动 hold 的守卫夹具（`click-spans-sample` / `click-bounded-without-sampling`）：
+//   guest 时钟是虚拟时钟（每条指令 100 ns）⇒ `kSampleBurn` 次 `dec/jnz`（= 2×kSampleBurn 条指令）
+//   ≈ 500k 条 = **50 ms guest 时间** = 实测房间的采样周期（`GetCursorPos` 880 次 / 43.96 s）。
+constexpr std::uint32_t kSampleBurn = 250000u;
+constexpr std::uint32_t kDownSeenPolls = kRes + 0u;  // guest 侧：看到"鼠标按下"的采样次数
+constexpr std::uint32_t kPollCount = kRes + 4u;      // guest 侧：采样次数
+constexpr std::uint32_t kKeyDownSeenPolls = kRes + 8u;  // guest 侧：看到 VK_RETURN 按下的采样次数
 
 // 观测槽（guest 写的）
 constexpr std::uint32_t kLastX = kRes + 0u;
@@ -102,6 +113,16 @@ struct Asm {
     void movEaxImm(std::uint32_t v) {
         u8(0xB8);
         u32(v);
+    }
+    void movEcxImm(std::uint32_t v) {
+        u8(0xB9);
+        u32(v);
+    }
+    void decEcx() { u8(0x49); }
+    void jmp32(int l) {
+        u8(0xE9);
+        fixups.emplace_back(static_cast<std::uint32_t>(b.size()), l);
+        u32(0);
     }
     void movEaxMem(std::uint32_t addr) {
         u8(0xA1);
@@ -339,6 +360,83 @@ bool buildWndProc(std::vector<std::uint8_t>* out, std::string* err) {
 
 void resetObservation(lift::Machine& m) {
     for (std::uint32_t off = 0; off < kResBytes; off += 4u) m.mem().wr32(kRes + off, 0u);
+}
+
+// ★ **伪造的 guest 输入消费者**（`click-spans-sample` / `key-up-waits-sample` 用）：每 `burn*2` 条指令
+//   （≈ 50 ms guest 时间）做一次**电平采样** —— `GetAsyncKeyState(VK_LBUTTON)` / `GetAsyncKeyState(VK_RETURN)`
+//   （真的按下才 +1 计数）＋ `GetCursorPos`。⇒ 它把"注入层是否等到 guest 采样"变成 guest 内存里的
+//   三个可数事实：`kDownSeenPolls` / `kKeyDownSeenPolls` / `kPollCount`。
+bool buildConsumerBody(std::vector<std::uint8_t>* out, std::uint32_t get_cursor, std::uint32_t get_async,
+                       std::uint32_t burn, std::string* err) {
+    Asm a(kConsumer);
+    const int top = a.newLabel();
+    const int inner = a.newLabel();
+    const int no_down = a.newLabel();
+    a.label(top);
+    a.movEcxImm(burn);
+    a.label(inner);
+    a.decEcx();
+    a.jnz(inner);  // 烧掉 2*burn 条指令（≈ 一个采样周期）
+    // GetAsyncKeyState(VK_LBUTTON) —— 电平采样点 ①
+    a.pushImm(0x01u);
+    a.callRel(get_async);
+    a.testEaxImm(0x8000u);
+    a.jz(no_down);
+    a.movEaxMem(kDownSeenPolls);
+    a.addEaxImm(1u);
+    a.movMemEax(kDownSeenPolls);
+    a.label(no_down);
+    // GetAsyncKeyState(VK_RETURN) —— 电平采样点 ②（键盘同理）
+    a.pushImm(0x0Du);
+    a.callRel(get_async);
+    a.testEaxImm(0x8000u);
+    const int no_key = a.newLabel();
+    a.jz(no_key);
+    a.movEaxMem(kKeyDownSeenPolls);
+    a.addEaxImm(1u);
+    a.movMemEax(kKeyDownSeenPolls);
+    a.label(no_key);
+    // GetCursorPos(&pt) —— 采样点 ③（引擎每迭代的位置采样；实测 20 Hz）
+    a.pushImm(kPoint);
+    a.callRel(get_cursor);
+    a.movEaxMem(kPollCount);
+    a.addEaxImm(1u);
+    a.movMemEax(kPollCount);
+    a.jmp32(top);  // 永不返回 ⇒ 测试用 `max_insns` 分块推进
+    if (!a.patch(err)) return false;
+    *out = std::move(a.b);
+    return true;
+}
+
+// ★ **完全不采样**的 guest（`click-bounded-without-sampling` / `click-honors-explicit-hold` 用）：
+//   只烧指令，一次输入 API 也不调 ⇒ 采样计数**不动**。用来钉"到上限仍然抬起 + 告警"与
+//   "显式 hold 不看采样"。
+bool buildSpinnerBody(std::vector<std::uint8_t>* out, std::uint32_t burn, std::string* err) {
+    Asm a(kSpinner);
+    const int top = a.newLabel();
+    const int inner = a.newLabel();
+    a.label(top);
+    a.movEcxImm(burn);
+    a.label(inner);
+    a.decEcx();
+    a.jnz(inner);
+    a.jmp32(top);
+    if (!a.patch(err)) return false;
+    *out = std::move(a.b);
+    return true;
+}
+
+// 推进一块 guest 执行（`max_insns` 是**累计值** ⇒ 这里传"再跑多少条"）。
+bool runChunk(lift::Machine& m, std::uint64_t insns) {
+    lift::RunOptions opt;
+    opt.max_insns = m.cpu().insns + insns;
+    opt.time_limit_sec = 60.0;  // 兜底：⛔ 守卫不许挂死
+    const lift::RunResult r = m.run(opt);
+    if (!r.ok()) {
+        std::fprintf(stderr, "chunk 停在 %s：%s\n", lift::stopReasonName(r.reason), r.detail.c_str());
+        return false;
+    }
+    return true;
 }
 
 // 脚本用**绝对帧号**触发（每段用例起点的 frameCount 不同，⛔ 不要写死 frame 1）。
@@ -720,7 +818,265 @@ int main() {
     }
 
     // =================================================================================
-    // ⑦ 解析失败必须响亮
+    // ⑦ `input-injection/click-spans-sample`：一次 `click` 的 down 与 up 之间**至少跨过一个
+    //    guest 采样点**（且 up 的时刻 ≥ 那个采样点 + 一个采样周期）。
+    // ★ 夹具：一个**每 50 ms guest 时间采样一次**的伪造消费者（= 实测房间的 20 Hz）。
+    //   红了意味着：`click` 又退回"同一 tick 内 down+up"⇒ 按下被漏掉（用户实测的那个 bug）。
+    // =================================================================================
+    g_current_case = "input-injection/click-spans-sample";
+    {
+        wm->clearKeys();
+        wm->setCursorPos(0, 0);
+        drainMessages(*wm);
+        resetObservation(m);
+        std::vector<std::uint8_t> consumer;
+        LIFT_CHECK(buildConsumerBody(&consumer, get_cursor, get_async, kSampleBurn, &aerr));
+        if (consumer.empty()) {
+            LIFT_CHECK(false);
+        } else {
+            LIFT_CHECK(m.placeCode(kConsumer, consumer.data(), consumer.size(), &err));
+            // ★ 虚拟时钟是**累计**的（前面几段用例已经跑掉一大截）⇒ 触发时刻按"现在 + 偏移"写，
+            //   ⛔ 不要写死 `at guest_ms 100`（那在过去 ⇒ 第一个 tick 就触发）。
+            const std::uint64_t base_ms = m.clock().nowMs();
+            const std::string script =
+                "# 伪造 50 ms 周期的 guest 输入消费者：一次 click 必须跨过它的采样点\n"
+                "at guest_ms " + std::to_string(base_ms + 120ull) + "\n"
+                "click 300 400\n"
+                "at guest_ms " + std::to_string(base_ms + 900ull) + "\n"
+                "quit\n";
+            LIFT_CHECK(m.inputScript().loadText(script, "inline:click-spans-sample", &err));
+            const std::uint64_t samples_before = wm->inputSampleCount();
+            m.cpu().eip = kConsumer;
+            // 每块 500k 条 = 50 ms guest 时间；脚本到 900 ms 就 quit ⇒ 20 块足够，40 块是兜底。
+            bool stopped = false;
+            for (int chunk = 0; chunk < 40; ++chunk) {
+                if (!runChunk(m, 500000ull)) {
+                    LIFT_CHECK(false);
+                    break;
+                }
+                if (m.inputScript().quitRequested()) {
+                    stopped = true;
+                    break;
+                }
+            }
+            LIFT_CHECK(stopped);
+            LIFT_CHECK(m.inputScript().quitRequested());
+            const lift::InputScript::ReleaseStats& rs = m.inputScript().releaseStats();
+            const lift::InputScript::ReleaseInfo& lr = m.inputScript().lastRelease();
+            LIFT_CHECK(lr.valid);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.releases), 1);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.auto_releases), 1);   // 走的是自动 hold
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.explicit_releases), 0);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.bounded_no_sample), 0);
+            LIFT_CHECK(lr.auto_hold);
+            // ① down 与 up 之间至少跨过一个采样点（计数 +1）
+            LIFT_CHECK(lr.release_samples > lr.press_samples);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lr.release_samples - lr.press_samples),
+                              static_cast<std::int64_t>(rs.waited_samples_max));
+            // ② up 的时刻 ≥ 那个采样点 + 一个采样周期（夹具周期 = 50 ms ⇒ 40 ms 留测量余量）
+            LIFT_CHECK(lr.observe_ms >= lr.press_ms);
+            LIFT_CHECK(lr.release_ms >= lr.observe_ms);
+            LIFT_CHECK(lr.release_ms - lr.observe_ms >= 40);
+            LIFT_CHECK(lr.release_ms > lr.press_ms);
+            // ③ guest 侧**真的看见了按下**（这才是"没漏"的判据，不是"我们等了"）
+            LIFT_CHECK(m.mem().rd32(kDownSeenPolls) >= 1u);
+            LIFT_CHECK(m.mem().rd32(kPollCount) >= 3u);
+            LIFT_CHECK(wm->inputSampleCount() > samples_before);
+            LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);  // 已抬起
+            LIFT_CHECK(!wm->keyDown(0x01u));
+            std::printf("click-spans-sample: polls=%u down-seen=%u press_samples=%llu release_samples=%llu "
+                        "hold_ms=%llu post_sample_ms=%llu\n",
+                        m.mem().rd32(kPollCount), m.mem().rd32(kDownSeenPolls),
+                        (unsigned long long)lr.press_samples, (unsigned long long)lr.release_samples,
+                        (unsigned long long)(lr.release_ms - lr.press_ms),
+                        (unsigned long long)(lr.release_ms - lr.observe_ms));
+        }
+    }
+
+    // =================================================================================
+    // ⑧ `input-injection/key-up-waits-sample`：**键盘同理** —— 同一 tick 里的 `key_down` + `key_up`
+    //   不许把 `key_up` 立刻落地：它必须等到 guest 采样过"按下"之后。
+    // ★ 判据与 `click-spans-sample` 同一条（电平轮询 = `GetAsyncKeyState`）。
+    // =================================================================================
+    g_current_case = "input-injection/key-up-waits-sample";
+    {
+        wm->clearKeys();
+        wm->setCursorPos(0, 0);
+        drainMessages(*wm);
+        resetObservation(m);
+        std::vector<std::uint8_t> consumer;
+        LIFT_CHECK(buildConsumerBody(&consumer, get_cursor, get_async, kSampleBurn, &aerr));
+        if (consumer.empty()) {
+            LIFT_CHECK(false);
+        } else {
+            LIFT_CHECK(m.placeCode(kConsumer, consumer.data(), consumer.size(), &err));
+            const std::uint64_t base_ms = m.clock().nowMs();
+            const std::string script =
+                "at guest_ms " + std::to_string(base_ms + 120ull) + "\n"
+                "key_down 0x0D\n"
+                "key_up 0x0D\n"  // 与 down 同一个触发条件 ⇒ 同一 tick
+                "at guest_ms " + std::to_string(base_ms + 900ull) + "\n"
+                "quit\n";
+            LIFT_CHECK(m.inputScript().loadText(script, "inline:key-up-waits-sample", &err));
+            m.cpu().eip = kConsumer;
+            bool stopped = false;
+            for (int chunk = 0; chunk < 40; ++chunk) {
+                if (!runChunk(m, 500000ull)) {
+                    LIFT_CHECK(false);
+                    break;
+                }
+                if (m.inputScript().quitRequested()) {
+                    stopped = true;
+                    break;
+                }
+            }
+            LIFT_CHECK(stopped);
+            const lift::InputScript::ReleaseStats& rs = m.inputScript().releaseStats();
+            const lift::InputScript::ReleaseInfo& lr = m.inputScript().lastRelease();
+            LIFT_CHECK(lr.valid);
+            LIFT_CHECK(lr.is_key);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lr.vk), 0x0Du);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.deferred_ups), 1);  // key_up 被推迟过
+            LIFT_CHECK(lr.auto_hold);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.bounded_no_sample), 0);
+            // 抬起之前 guest 至少采样过一次，且又等了一个周期
+            LIFT_CHECK(lr.release_samples > lr.press_samples);
+            LIFT_CHECK(lr.release_ms - lr.observe_ms >= 40);
+            // guest 侧真的看见了"键按着"
+            LIFT_CHECK(m.mem().rd32(kKeyDownSeenPolls) >= 1u);
+            LIFT_CHECK(!wm->keyDown(0x0Du));
+            std::printf("key-up-waits-sample: key-down-seen=%u deferred=%llu press_samples=%llu "
+                        "release_samples=%llu\n",
+                        m.mem().rd32(kKeyDownSeenPolls), (unsigned long long)rs.deferred_ups,
+                        (unsigned long long)lr.press_samples, (unsigned long long)lr.release_samples);
+        }
+    }
+
+    // =================================================================================
+    // ⑨ `input-injection/click-honors-explicit-hold`：显式 `hold N` **不**采用自动值。
+    // ★ 夹具：guest **完全不采样**（只烧指令）⇒ 自动 hold 会一直等到上限；
+    //   而显式 `hold 2` 必须在第 +2 帧抬起（帧号 / 采样计数两个断言同时钉住）。
+    // =================================================================================
+    g_current_case = "input-injection/click-honors-explicit-hold";
+    {
+        wm->clearKeys();
+        wm->setCursorPos(0, 0);
+        drainMessages(*wm);
+        resetObservation(m);
+        std::vector<std::uint8_t> spinner;
+        LIFT_CHECK(buildSpinnerBody(&spinner, kSampleBurn, &aerr));
+        if (spinner.empty()) {
+            LIFT_CHECK(false);
+        } else {
+            LIFT_CHECK(m.placeCode(kSpinner, spinner.data(), spinner.size(), &err));
+            const std::uint64_t f = nextFrame(m);
+            const std::string script = "at frame " + std::to_string(f) +
+                                       "\nclick 100 200 hold 2\nwait 3 frames\nquit\n";
+            LIFT_CHECK(m.inputScript().loadText(script, "inline:click-honors-explicit-hold", &err));
+            m.cpu().eip = kSpinner;
+            LIFT_CHECK(m.presenter().present(m.surfaces(), *gs, "", &err));
+            LIFT_CHECK(runChunk(m, 200000ull));
+            LIFT_CHECK(wm->keyDown(0x01u));
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(m.inputScript().releaseStats().releases), 0);
+            // 帧 f+1：仍按着（显式 hold = 2 帧，不是"同一帧 down+up"）
+            LIFT_CHECK(m.presenter().present(m.surfaces(), *gs, "", &err));
+            LIFT_CHECK(runChunk(m, 200000ull));
+            LIFT_CHECK(wm->keyDown(0x01u));
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(m.inputScript().releaseStats().releases), 0);
+            // 帧 f+2：抬起
+            LIFT_CHECK(m.presenter().present(m.surfaces(), *gs, "", &err));
+            LIFT_CHECK(runChunk(m, 200000ull));
+            LIFT_CHECK(!wm->keyDown(0x01u));
+            const lift::InputScript::ReleaseStats& rs = m.inputScript().releaseStats();
+            const lift::InputScript::ReleaseInfo& lr = m.inputScript().lastRelease();
+            LIFT_CHECK(lr.valid);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.explicit_releases), 1);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.auto_releases), 0);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.bounded_no_sample), 0);  // 不是"等到上限"
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.deferred_ups), 0);
+            LIFT_CHECK(!lr.auto_hold);                                             // 显式路径
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lr.press_frame), static_cast<std::int64_t>(f));
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lr.release_frame), static_cast<std::int64_t>(f + 2));
+            // ★ 关键：guest 一次也没采样，up 仍然按帧落地 ⇒ 自动值**没有**顶掉用户意图。
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lr.press_samples),
+                              static_cast<std::int64_t>(lr.release_samples));
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lr.observe_ms), 0);
+            // 继续到 `wait 3 frames` 的 quit（f+3）
+            LIFT_CHECK(m.presenter().present(m.surfaces(), *gs, "", &err));
+            LIFT_CHECK(runChunk(m, 200000ull));
+            LIFT_CHECK(m.inputScript().quitRequested());
+            std::printf("click-honors-explicit-hold: press_frame=%llu release_frame=%llu samples=%llu\n",
+                        (unsigned long long)lr.press_frame, (unsigned long long)lr.release_frame,
+                        (unsigned long long)lr.press_samples);
+        }
+    }
+
+    // =================================================================================
+    // ⑨ `input-injection/click-bounded-without-sampling`：guest 完全不采样 ⇒ 到上限后**仍然抬起**
+    //    + 告警 + 脚本继续（⛔ 不挂死）。
+    // =================================================================================
+    g_current_case = "input-injection/click-bounded-without-sampling";
+    {
+        wm->clearKeys();
+        wm->setCursorPos(0, 0);
+        drainMessages(*wm);
+        resetObservation(m);
+        std::vector<std::uint8_t> spinner;
+        LIFT_CHECK(buildSpinnerBody(&spinner, kSampleBurn, &aerr));
+        if (spinner.empty()) {
+            LIFT_CHECK(false);
+        } else {
+            LIFT_CHECK(m.placeCode(kSpinner, spinner.data(), spinner.size(), &err));
+            // 同 ⑦：虚拟时钟累计 ⇒ 触发时刻 = 现在 + 偏移。
+            const std::uint64_t base_ms = m.clock().nowMs();
+            const std::string script =
+                "at guest_ms " + std::to_string(base_ms + 10ull) + "\n"
+                "click 100 200\n"
+                "at guest_ms " + std::to_string(base_ms + 2000ull) + "\n"
+                "quit\n";
+            LIFT_CHECK(m.inputScript().loadText(script, "inline:click-bounded-without-sampling", &err));
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(m.inputScript().maxAutoHoldMs()), 1000);  // 缺省上限
+            m.cpu().eip = kSpinner;
+            // 每块 2M 条 = 200 ms guest 时间；脚本到 2000 ms ⇒ 12 块足够。
+            bool stopped = false;
+            for (int chunk = 0; chunk < 20; ++chunk) {
+                if (!runChunk(m, 2000000ull)) {
+                    LIFT_CHECK(false);
+                    break;
+                }
+                if (m.inputScript().quitRequested()) {
+                    stopped = true;
+                    break;
+                }
+            }
+            LIFT_CHECK(stopped);  // ⛔ 不挂死
+            const lift::InputScript::ReleaseStats& rs = m.inputScript().releaseStats();
+            const lift::InputScript::ReleaseInfo& lr = m.inputScript().lastRelease();
+            LIFT_CHECK(lr.valid);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.bounded_no_sample), 1);  // 触发上限（并告警）
+            LIFT_CHECK(lr.bounded);
+            LIFT_CHECK(lr.auto_hold);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lr.press_samples),
+                              static_cast<std::int64_t>(lr.release_samples));  // guest 一次也没采样
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lr.observe_ms), 0);
+            const std::int64_t hold = static_cast<std::int64_t>(lr.release_ms - lr.press_ms);
+            LIFT_CHECK(hold >= 1000);  // 到上限才抬
+            LIFT_CHECK(hold <= 1200);  // 但不是无界等待
+            LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);  // 抬起真的落地
+            // 脚本**继续**到 quit（动作集全部应用）⇒ 不是"挂在那条 click 上"
+            LIFT_CHECK(m.inputScript().quitRequested());
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(m.inputScript().appliedCount()),
+                              static_cast<std::int64_t>(m.inputScript().actionCount()));
+            std::printf("click-bounded-without-sampling: press_ms=%llu release_ms=%llu observe_ms=%llu "
+                        "press_samples=%llu release_samples=%llu hold_ms=%lld bounded=%d\n",
+                        (unsigned long long)lr.press_ms, (unsigned long long)lr.release_ms,
+                        (unsigned long long)lr.observe_ms, (unsigned long long)lr.press_samples,
+                        (unsigned long long)lr.release_samples, (long long)hold, lr.bounded ? 1 : 0);
+        }
+    }
+
+    // =================================================================================
+    // ⑩ 解析失败必须响亮
     // =================================================================================
     g_current_case = "parse-errors";
     {

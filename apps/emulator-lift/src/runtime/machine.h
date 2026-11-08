@@ -33,6 +33,7 @@
 #include "runtime/native_overrides.h"
 #include "runtime/shims.h"
 #include "runtime/vfs.h"
+#include "runtime/window_profile.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -157,8 +158,17 @@ public:
     // ★ 指令式输入时间线（`--input-script`）：见 `runtime/input_script.h`。
     //   加载失败 ⇒ false + err（带行号）；⛔ 不静默跳过。可以在 run 之前 / 两次 run 之间替换。
     bool loadInputScript(const std::string& path, std::string* err);
+    // 直接给文本（测试 / 内嵌用）：与 `loadInputScript` 走同一个解析器（⛔ 没有第二套语法）。
+    bool loadInputScriptText(const std::string& text, const std::string& origin, std::string* err);
     InputScript& inputScript() { return input_script_; }
     const InputScript& inputScript() const { return input_script_; }
+    // ★ 帧停滞兜底阈值（`--input-stall-ms`；0 = 关闭）。必须在 `run()` 之前设。
+    void setInputStallMs(std::uint64_t ms) { input_script_.setDefaultStallMs(ms); }
+    // 还没出现第一帧时的宽限（`--input-stall-boot-ms`；boot 期间没有 Present 不算停滞）。
+    void setInputStallBootGraceMs(std::uint64_t ms) { input_script_.setDefaultBootGraceMs(ms); }
+    // ★ 自动 hold 的上限（`--input-max-hold`，guest ms；0 = 不设限）。必须在 `run()` 之前设。
+    //   到上限仍未采样 ⇒ 抬起 + 告警（见 `runtime/input_script.h`）；⛔ 不挂死。
+    void setInputMaxHoldMs(std::uint64_t ms) { input_script_.setMaxAutoHoldMs(ms); }
     // 每个块边界推进一次注入时间线（`Machine::run` 内部调用；`GetMessageA` 阻塞时的宿主事件泵
     // 也调用它，否则 guest 卡在等消息时脚本永远不触发）。
     void tickInputScript(X86& cpu);
@@ -214,6 +224,13 @@ public:
 
 private:
     void wire();
+    // ★ 区间 profiler（`profile_begin` / `profile_end`；见 runtime/window_profile.h）。
+    //   窗口边界 = 脚本动作被触发的那一个 **block 边界**（帧内也能切：`at insn N`）。
+    //   这里负责四件事：① 在迭代边界开/关窗口；② 分段记账；③ 结束就打印一次；④ 未闭合告警收口。
+    void applyPendingProfileWindow();
+    void closeProfileWindow(const char* why);
+    void printWindowReport(const WindowReport& r) const;
+    std::uint32_t fnKeyOf(std::uint32_t ea) const;
     // ★ 诊断（`LIFT_FRAME_TRACE=1`）：每次 presenter 帧号变化时打一行"这一帧的墙钟去哪了"。
     //   只读：不改变执行结果；shim 计时由 `shims_.setTiming(true)` 打开。
     void flushFrameTrace();
@@ -235,6 +252,17 @@ private:
     NativeOverrideTable overrides_;
     NativeBlockTable block_overrides_;
     InputScript input_script_;
+    // ★ 区间 profiler（`runtime/window_profile.h`）：armed = 脚本里有 profile_begin/end 动作。
+    //   ⛔ 没有这些动作时它整条路径都是 no-op（两次 steady_clock 也不会有）。
+    WindowProfiler window_prof_;
+    bool profile_begin_pending_ = false;
+    bool profile_end_pending_ = false;
+    std::string profile_begin_label_;
+    std::string profile_end_label_;
+    std::chrono::steady_clock::time_point wall_start_{};
+    bool wall_start_valid_ = false;
+    // ★ 影子调用栈：上一个 block 以 `call` 结束时的返回地址（下一个迭代压帧时用）。
+    std::uint32_t pending_call_ret_ = 0;
     WindowManager windows_;
     ComRegistry com_;
     SurfaceArena surfaces_;
@@ -262,8 +290,7 @@ private:
     std::uint32_t skip_logo_object_ = 0;
     std::string exe_path_;
     // ★ 诊断状态（`LIFT_FRAME_TRACE=1`）；默认全不参与执行。
-    bool frame_trace_ = false;
-    std::chrono::steady_clock::time_point frame_trace_last_{};
+    bool frame_trace_ = false;    std::chrono::steady_clock::time_point frame_trace_last_{};
     std::uint64_t frame_trace_last_insns_ = 0;
     std::vector<std::uint64_t> frame_trace_prev_shim_ns_;
     // ★ 逐帧 shim **调用次数**增量（与 ns 同源）：只看墙钟会把"一次很慢"和"很多次很快"混为一谈。

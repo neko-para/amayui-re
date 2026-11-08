@@ -3,7 +3,7 @@
 - id: REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS
 - type: bug
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - repro: apps/emulator-lift/src/runtime/com.cpp#ComRegistry::release
 - severity: S3
 - tags: [emulator-lift, com, lifetime, m2]

@@ -38,11 +38,14 @@ bool GuestHeap::init(GuestMemory* mem, std::uint32_t begin, std::uint32_t size, 
         return false;
     }
     blocks_.clear();
+    free_offsets_.clear();
+    pending_merge_.clear();
     Block b;
     b.off = 0;
     b.size = size;
     b.used = false;
     blocks_.emplace(0, b);
+    free_offsets_.insert(0);
     in_use_ = 0;
     peak_ = 0;
     alloc_count_ = 0;
@@ -84,9 +87,17 @@ std::uint32_t GuestHeap::alloc(std::uint32_t bytes, bool zero) {
         std::snprintf(last_error_, sizeof(last_error_), "guest 堆请求对齐后溢出（%u 字节）", bytes);
         return 0;
     }
-    for (auto it = blocks_.begin(); it != blocks_.end(); ++it) {
-        Block& b = it->second;
+    // ★ 首次适配**只扫空闲块**（`free_offsets_` 按偏移有序 ⇒ 命中的仍是"偏移最小的那一块"，
+    //   与"扫整张块表取第一个能装下的"**结果逐字相同**）。为什么必须改：实测过渡帧里
+    //   7131 个块只有 15 个空闲 ⇒ 每次 alloc 平均扫 5.5K 个**已用**块（一帧 1.04e7 次节点访问）。
+    for (auto fo = free_offsets_.begin(); fo != free_offsets_.end(); ++fo) {
+        const std::uint32_t cand = *fo;
+        auto fit = blocks_.find(cand);
+        if (fit == blocks_.end()) continue;  // 索引与块表短暂不同步 ⇒ 跳过（防御，不是常态）
+        Block& b = fit->second;
+        ++scan_iters_;  // 可观测计数：首次适配真正比较过的**空闲**块数（供 A/B）
         if (b.used || b.size < need) continue;
+        free_offsets_.erase(fo);
         if (b.size - need >= opt_.min_split) {
             Block rest;
             rest.off = b.off + need;
@@ -94,12 +105,20 @@ std::uint32_t GuestHeap::alloc(std::uint32_t bytes, bool zero) {
             rest.used = false;
             b.size = need;
             blocks_.emplace(rest.off, rest);
+            free_offsets_.insert(rest.off);
+            // 切分造出来的相邻：rest 的右邻若**空闲**且紧邻，旧实现靠"下次 free 整表扫"并掉 ⇒
+            // 记进 pending_merge_（⛔ 不能在这里就地并：那会让本次/后续 alloc 多出一块更大的空闲块，
+            // 与旧实现的中间态不同 ⇒ 分配地址会变）。
+            const auto nxt = blocks_.find(rest.off + rest.size);
+            if (nxt != blocks_.end() && !nxt->second.used && nxt->second.off == rest.off + rest.size)
+                pending_merge_.push_back(rest.off);
         }
         b.used = true;
         b.req = bytes;
         mem_->wr32(begin_ + b.off, kMagic);
         mem_->wr32(begin_ + b.off + 4, bytes);
         if (zero) std::memset(payloadOf(b.off), 0, b.size - opt_.header);
+        if (zero) zero_bytes_ += b.size - opt_.header;  // 可观测计数（清零字节，供 A/B）
         in_use_ += b.size;
         if (in_use_ > peak_) peak_ = in_use_;
         ++alloc_count_;
@@ -130,9 +149,10 @@ bool GuestHeap::free(std::uint32_t ptr) {
     b.used = false;
     b.req = 0;
     in_use_ -= b.size;
+    free_offsets_.insert(off);
     mem_->wr32(begin_ + off, 0);
     mem_->wr32(begin_ + off + 4, 0);
-    coalesce();
+    coalesce(off);
     return true;
 }
 
@@ -193,19 +213,39 @@ std::uint32_t GuestHeap::largestFreeBlock() const {
     return best;
 }
 
-void GuestHeap::coalesce() {
-    for (auto it = blocks_.begin(); it != blocks_.end();) {
-        if (it->second.used) {
-            ++it;
-            continue;
-        }
-        auto next = std::next(it);
-        if (next != blocks_.end() && !next->second.used && it->second.off + it->second.size == next->second.off) {
-            it->second.size += next->second.size;
-            blocks_.erase(next);
-            continue;  // 再试一次：可能还能往后并
-        }
-        ++it;
+// ★ 收口只碰**可能相邻**的那几块，不再扫整张块表（旧实现每次 free 扫 7131 个节点 ⇒
+//   过渡帧里 1.01e7 次访问）。等价性靠两件事保住：
+//   ① 从被释放块出发**向左走到这一串的最左块**，再向右逐块并 —— 得到的是同一段"极大连续空闲"；
+//   ② alloc 切分留下的 rest 可能**恰好贴在右邻空闲块上**（这种相邻只有切分能造出来），旧实现靠
+//      "下次 free 时整表扫"把它并掉 ⇒ 这里把它记进 `pending_merge_`，在下次 free 收口时一起处理。
+//   ⇒ 每次操作结束后块表**与旧实现逐字相同**（同一组块、同一组偏移、同一组大小）。
+void GuestHeap::coalesce(std::uint32_t off) {
+    coalesceAround(off);
+    // 先把候选拷出来：合并过程会改 pending_merge_（不，这里它只被清空）/ blocks_。
+    const std::vector<std::uint32_t> pending(pending_merge_.begin(), pending_merge_.end());
+    pending_merge_.clear();
+    for (const std::uint32_t o : pending) coalesceAround(o);
+}
+
+void GuestHeap::coalesceAround(std::uint32_t off) {
+    auto it = blocks_.find(off);
+    if (it == blocks_.end() || it->second.used) return;
+    // ① 走到这一串的最左块（不要改 key：map 的 key 必须等于 Block::off）
+    for (;;) {
+        if (it == blocks_.begin()) break;
+        auto p = std::prev(it);
+        if (p->second.used || p->second.off + p->second.size != it->second.off) break;
+        it = p;
+    }
+    // ② 从最左块向右吞掉所有"空闲且紧邻"的块
+    for (;;) {
+        auto n = std::next(it);
+        if (n == blocks_.end()) break;
+        if (n->second.used || it->second.off + it->second.size != n->second.off) break;
+        free_offsets_.erase(n->second.off);
+        it->second.size += n->second.size;
+        blocks_.erase(n);
+        ++coalesce_iters_;  // 可观测计数：合并掉的相邻空闲块数（供 A/B）
     }
 }
 

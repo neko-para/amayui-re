@@ -46,6 +46,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -61,7 +62,6 @@
 
 namespace lift {
 namespace {
-
 namespace fs = std::filesystem;
 
 // 1601-01-01 → 1970-01-01 的 100 ns 数（与 kernel32_time.cpp 的 kFiletimeEpochDelta 同一个常数）
@@ -308,6 +308,7 @@ SegLookup lookupSegment(const fs::path& dir, const std::string& seg, bool exact_
         *error = "[invalid] 空路径段";
         return SegLookup::Error;
     }
+
     std::error_code ec;
     const fs::path exact = dir / pathFromUtf8(seg);
     if (fs::exists(exact, ec) && !ec) {
@@ -329,8 +330,10 @@ SegLookup lookupSegment(const fs::path& dir, const std::string& seg, bool exact_
         *error = "[io] 枚举 \"" + pathToUtf8(dir) + "\" 失败：" + ec.message();
         return SegLookup::Error;
     }
+
     const fs::directory_iterator end;
     while (it != end) {
+
         const std::string name = pathToUtf8(it->path().filename());
         if (asciiEqualNoCase(name, seg)) hits.push_back(name);
         it.increment(ec);
@@ -847,6 +850,7 @@ bool Vfs::shadowExistingForSegments(const std::vector<std::string>& segs, std::s
 
 bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::string* error,
                   bool must_exist, bool resolve_case, VfsAccess access) const {
+
     if (host_path) host_path->clear();
     if (error) error->clear();
     if (!ready()) {
@@ -965,6 +969,7 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
 
 bool Vfs::resolveForWrite(const std::string& guest_path, std::string* host_path,
                           bool* install_tree, std::string* error, const VfsWriteOptions& opts) const {
+
     if (host_path) host_path->clear();
     if (install_tree) *install_tree = false;
     if (error) error->clear();
@@ -1563,5 +1568,4 @@ bool Vfs::makeSureDirectoryPathExists(const std::string& guest_path, std::string
     }
     return true;
 }
-
 }  // namespace lift

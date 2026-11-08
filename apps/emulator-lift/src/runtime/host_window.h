@@ -179,6 +179,34 @@ public:
     std::uint32_t capture() const { return capture_; }
 
     // =====================================================================================
+    // ★ 输入采样计数（2026-11-08；**注入层的判据**，不是 guest 语义）
+    // ★ 为什么需要它：`--input-script` 的 `click` 曾经把 down / up 放在同一 tick（实测相隔
+    //   20k 条指令 ≈ 0.7 ms guest 时间），而该界面的输入采样只有 ~20 Hz（实测 `GetCursorPos`
+    //   880 次 / 43.96 s）⇒ **按下被完全漏掉**（`.tmp/exitstall/report.md`：frames 100–108
+    //   逐字节相同）。修法不是让写脚本的人手算 hold，而是让注入层自己回答"guest 到底有没有
+    //   看过按下状态" ⇒ 在 guest 侧的**电平读点**上维护一个单调计数，`mouse_up` / `key_up`
+    //   等到它 +1 之后才落地。
+    // ★ 计数点只有**电平读点**（见 `user32_input.cpp` 的 GetCursorPos / `user32_window.cpp`
+    //   的 GetAsyncKeyState）：
+    //   · ⛔ **不含 PeekMessageA** —— 它在这条实现线里被调 219,164 次 / 400M 条指令（实测，
+    //     `.tmp/exitstall/logs/prof-stall.log` 第 16 名，≈ 每 1.8k 条指令一次），把它算成采样点
+    //     会让"等一次采样"退化成 ~0.2 ms ⇒ 等于没等；而且它取走的 `WM_*` 在队列里**不会丢**，
+    //     "按下被漏掉"从来不是它的问题。
+    //   · `GetKeyState` 本线**没有实现**（`rg GetKeyState src/` = 0 命中）⇒ 没有这个计数点。
+    //   · 实测这条实现线里 GetAsyncKeyState 一次也没被这条 UI 调用（同上一份 profile）⇒ 真正
+    //     提供 20 Hz 心跳的是 `GetCursorPos`（引擎每迭代的位置采样）。
+    // ★ 计数**不改任何返回值**（⛔ 不是 guest 语义 / 不是采样率）；它只回答"注入层还要不要等"。
+    // =====================================================================================
+    std::uint64_t inputSampleCount() const { return input_samples_; }
+    // 采样周期估计（guest ms；0 = 样本不足，还不知道）。自动 hold 的**安全下限**用它，
+    // 规则 = **最近若干个采样间隔的最大值**（见 `noteInputSample` 的实现注释）。
+    std::uint64_t inputSamplePeriodMs() const { return input_sample_period_ms_; }
+    // 最近一次采样的 guest 时刻（自动 hold 的"看到之后又等了一个周期"从它算）。
+    std::uint64_t lastInputSampleMs() const { return last_input_sample_ms_; }
+    // guest 侧读点调用一次。返回**新**计数。`guest_ms` = guest 虚拟时钟（采样间隔估计用）。
+    std::uint64_t noteInputSample(std::uint64_t guest_ms);
+
+    // =====================================================================================
     // 无效区（update region；M2 · P4 / B7）
     // ★ 语义（Win32 文档）：`InvalidateRect` 往无效区里**并**矩形、`ValidateRect` / `ValidateRgn`
     //   从中**减**矩形；`GetUpdateRgn` 只读（**不**改变无效区）；`UpdateWindow` 发完 WM_PAINT 后清空。
@@ -213,6 +241,18 @@ private:
     std::int32_t cursor_x_ = 0;
     std::int32_t cursor_y_ = 0;
     int cursor_show_count_ = 0;
+    // ★ 输入采样计数（见 `inputSampleCount` 那一段）：单调计数 + 最近间隔
+    std::uint64_t input_samples_ = 0;
+    std::uint64_t input_sample_period_ms_ = 0;  // 最近 K 个采样间隔的**最大值**（周期估计）
+    std::uint64_t last_input_sample_ms_ = 0;
+    bool have_input_sample_ = false;
+    // 上一次采样间隔的小环（K = 8）：同一个"输入迭代"里往往有**多次**读点
+    // （GetAsyncKeyState + GetCursorPos…），它们之间的间隔只有 0~1 ms；取**最大值**才代表
+    // "迭代周期"，取最近一次会被这种同迭代内的小间隔污染成 1 ms（⇒ 安全下限失效）。
+    static constexpr std::size_t kInputIntervalRing = 8;
+    std::uint64_t input_intervals_[kInputIntervalRing] = {};
+    std::uint32_t input_interval_count_ = 0;
+    std::uint32_t input_interval_next_ = 0;
 };
 
 }  // namespace lift

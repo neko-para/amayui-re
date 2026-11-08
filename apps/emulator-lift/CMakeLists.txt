@@ -83,6 +83,7 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/native_block.cpp
     src/runtime/native_affine.cpp
     src/runtime/shims.cpp
+    src/runtime/window_profile.cpp
     src/corpus/lst_index.cpp
     src/shims/register.cpp
     src/shims/register_import_gaps.cpp
@@ -275,6 +276,14 @@ target_link_libraries(lift-dispatch PRIVATE emulator-lift-runtime)
 add_test(NAME dispatch COMMAND lift-dispatch)
 
 # ---- pure：guest 页提交 / 退回（宿主页可能大于 guest 页；Apple Silicon = 16 KiB）----
+add_executable(lift-heap-layout tests/heap_layout.cpp)
+target_link_libraries(lift-heap-layout PRIVATE emulator-lift-runtime)
+add_test(NAME heap-layout COMMAND lift-heap-layout)
+
+add_executable(lift-input-tick tests/input_tick.cpp)
+target_link_libraries(lift-input-tick PRIVATE emulator-lift-runtime)
+add_test(NAME input-tick COMMAND lift-input-tick)
+
 add_executable(lift-memory-pages tests/memory_pages.cpp)
 target_link_libraries(lift-memory-pages PRIVATE emulator-lift-runtime)
 add_test(NAME memory-pages COMMAND lift-memory-pages)
@@ -667,6 +676,16 @@ add_test(NAME pixel-format COMMAND lift-pixel-format)
 add_executable(lift-profile-shims tests/profile_shims.cpp)
 target_link_libraries(lift-profile-shims PRIVATE emulator-lift-runtime)
 add_test(NAME profile-shims COMMAND lift-profile-shims)
+
+# =====================================================================================
+# 可定界的区间 profiler（`profile_begin` / `profile_end`；pure：裸 Machine + 自造字节 + 一个已知 shim）
+# ★ 判据见 tests/profile_window.cpp 文件头：① 分项 + unattributed == 窗口墙钟；
+#   ② 窗口外的 shim 调用不计入（窗口内/外各烧一次，量级差 10×）；③ 未闭合 ⇒ 自动收口 + 告警。
+# ★ 顶层无条件注册 ⇒ pure 档。
+# =====================================================================================
+add_executable(lift-profile-window tests/profile_window.cpp)
+target_link_libraries(lift-profile-window PRIVATE emulator-lift-runtime)
+add_test(NAME profile-window COMMAND lift-profile-window)
 
 # =====================================================================================
 # 宿主侧 MPEG-1 影片解码（vendor pl_mpeg；无 COM / 无 guest / 无 SDL / 无线程）

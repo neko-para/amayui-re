@@ -3,7 +3,7 @@
 - id: REQ-01M6WW9V9N863FDTMK6BRMDK1K
 - type: spike
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - tags: [emulator-lift d3d9]
 
 ## 已知（父级验收实测）

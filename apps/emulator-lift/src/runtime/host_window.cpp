@@ -324,6 +324,32 @@ std::uint32_t WindowManager::setCapture(std::uint32_t hwnd) {
     return old;
 }
 
+// ---- 输入采样计数（guest 侧电平读点的单调计数；见 host_window.h 那一段的"为什么"）----
+std::uint64_t WindowManager::noteInputSample(std::uint64_t guest_ms) {
+    if (have_input_sample_) {
+        const std::uint64_t dt = guest_ms > last_input_sample_ms_ ? guest_ms - last_input_sample_ms_ : 0;
+        // ★ 只采"正常采样间隔"：0（同一毫秒内的多次读）会给出 0 的下限，>1 s 的样本是
+        //   加载 / 卡顿（拿它当周期会把下限推到秒级 ⇒ 每次点击都像挂住）。
+        if (dt > 0 && dt <= 1000) {
+            input_intervals_[input_interval_next_] = dt;
+            input_interval_next_ = (input_interval_next_ + 1) % kInputIntervalRing;
+            if (input_interval_count_ < kInputIntervalRing) ++input_interval_count_;
+            // ★ 周期 = 环里的**最大值**而不是最近一次：同一个输入迭代里通常有多次读点
+            //   （GetAsyncKeyState 读按钮 + GetAsyncKeyState 读键 + GetCursorPos），它们之间
+            //   只隔 0~1 ms；取最近一次会把"迭代周期"污染成 1 ms ⇒ 安全下限形同虚设。
+            //   取最大值 ≈ 迭代周期（真实界面的采样周期是**稳定**的，单个伪样本只会让它偏保守）。
+            std::uint64_t period = 0;
+            for (std::uint32_t i = 0; i < input_interval_count_; ++i) {
+                if (input_intervals_[i] > period) period = input_intervals_[i];
+            }
+            input_sample_period_ms_ = period;
+        }
+    }
+    have_input_sample_ = true;
+    last_input_sample_ms_ = guest_ms;
+    return ++input_samples_;
+}
+
 // ---- 无效区（update region；M2 · P4 / B7）----
 //
 // ★ 口径见 host_window.h。这里只保证两件事：

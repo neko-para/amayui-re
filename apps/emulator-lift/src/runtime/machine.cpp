@@ -438,8 +438,15 @@ bool Machine::loadInputScript(const std::string& path, std::string* err) {
     // 换脚本前先把旧脚本仍按着的输入抬起来（⛔ 不静默留下"卡住的键"）。
     if (input_script_.active()) input_script_.abandon(*cpu_.windows, clock_.nowMs());
     if (!input_script_.loadFile(path, err)) return false;
-    std::printf("input-script: %s（%zu 条动作；触发 = at frame / at guest_ms / after / wait）\n",
+    std::printf("input-script: %s（%zu 条动作；触发 = at frame / at guest_ms / at insn / at wall_ms / after / wait）\n",
                 path.c_str(), input_script_.actionCount());
+    return true;
+}
+
+bool Machine::loadInputScriptText(const std::string& text, const std::string& origin, std::string* err) {
+    if (input_script_.active()) input_script_.abandon(*cpu_.windows, clock_.nowMs());
+    if (!input_script_.loadText(text, origin, err)) return false;
+    std::printf("input-script: %s（%zu 条动作）\n", origin.c_str(), input_script_.actionCount());
     return true;
 }
 
@@ -447,7 +454,30 @@ void Machine::tickInputScript(X86& cpu) {
     if (!input_script_.active()) return;
     if (cpu.windows == nullptr) return;
     // ★ 唯一状态源就是 `cpu.windows`（与 SDL 真实事件同一份）：这里只推进时间线。
-    input_script_.tick(*cpu.windows, presenter_.frameCount(), clock_.now100ns());
+    //   四个量分别对应四种触发条件（frame / guest_ms / insn / wall_ms）—— 调度只认"条件到期"。
+    std::uint64_t wall_ms = 0;
+    if (wall_start_valid_) {
+        wall_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wall_start_)
+                .count());
+    }
+    input_script_.tick(*cpu.windows, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wall_ms);
+    // ★ profiler 窗口的边界请求：**只在这里登记**，真正开/关在下一个 block 边界的迭代起点
+    //   （⇒ 同一脚本重复跑得到同一个边界；⛔ 不在动作应用点上就地开关）。
+    std::string label;
+    if (input_script_.takeProfileBegin(&label)) {
+        if (profile_begin_pending_) {
+            std::fprintf(stderr,
+                         "[profile-window] ⚠ 同一 tick 里有两个 profile_begin（%s / %s）⇒ 后者会顶掉前者\n",
+                         profile_begin_label_.c_str(), label.c_str());
+        }
+        profile_begin_pending_ = true;
+        profile_begin_label_ = label;
+    }
+    if (input_script_.takeProfileEnd(&label)) {
+        profile_end_pending_ = true;
+        profile_end_label_ = label;
+    }
     // ★ `quit` 还要**唤醒 guest**：窗口模式下 guest 可能正阻塞在 `GetMessageA`，它的循环里
     //   没有块边界 ⇒ 只置标志永远到不了 `Machine::run` 的那条检查。投一次 WM_QUIT 让它走退出路
     //   （没有事件源时这条无副作用：`peek` 只是把 WM_QUIT 当成队尾虚拟项）。
@@ -471,7 +501,12 @@ RunResult Machine::run(const RunOptions& opts) {
     // ★ `--profile` 也要 shim 墙钟：`dumpProfile` 里的 shim 表读的就是这份累计（否则恒 0）。
     //   代价 = 每次 shim 调用多两次 steady_clock（`--bench --profile` 同用时 MIPS 不可当基准）。
     frame_trace_ = std::getenv("LIFT_FRAME_TRACE") != nullptr;
-    shims_.setTiming(frame_trace_ || opts.profile);
+    // ★ 区间 profiler：只有脚本里真的写了 `profile_begin/end` 才 armed（⇒ 没有这些动作时
+    //   整条记账路径都是 no-op：不会因为"加了 profiler"给所有运行多两次 steady_clock）。
+    window_prof_.setArmed(input_script_.hasProfileActions());
+    shims_.setTiming(frame_trace_ || opts.profile || window_prof_.armed());
+    wall_start_ = std::chrono::steady_clock::now();
+    wall_start_valid_ = true;
     if (frame_trace_) {
         frame_trace_last_ = std::chrono::steady_clock::now();
         frame_trace_last_insns_ = cpu_.insns;
@@ -505,6 +540,21 @@ RunResult Machine::run(const RunOptions& opts) {
     std::uint32_t next_call_target = 0;
 
     while (cpu_.running) {
+        // ★ 区间 profiler 的**窗口边界只在这里**开/关：上一个 block 边界的脚本 tick 只登记请求
+        //   ⇒ 同一脚本重复跑得到同一个边界（⛔ 不在动作应用点上就地开关）。
+        if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+        // ★ 迭代守卫：一次 dispatcher 迭代的墙钟里，**没被显式记进任何段**的剩余部分记成 interp
+        //   （解释器自身：块缓存查找 / 令牌 / 时钟 / profile 记账 …）。析构在 continue/break 时也会跑。
+        struct IterScope {
+            WindowProfiler& p;
+            bool on;
+            explicit IterScope(WindowProfiler& prof) : p(prof), on(prof.armed()) {
+                if (on) p.iterationBegin(std::chrono::steady_clock::now());
+            }
+            ~IterScope() {
+                if (on) p.iterationEnd(std::chrono::steady_clock::now());
+            }
+        } iter_scope(window_prof_);
         // ★ 单令牌：**每个块边界取一次、块结束放**（guest_token.h）。
         //   块内的一切 guest 执行（块指令 / shim / 嵌套 guest 调用 / 定时器回调）都在令牌里；
         //   feeder 真线程只能在这两条语句之间拿到令牌。
@@ -529,8 +579,18 @@ RunResult Machine::run(const RunOptions& opts) {
         //   ⛔ 嵌套 guest 调用（WndProc / 音频 fill）与定时器回调进行中不注入：那些帧的 eip 不是
         //   主循环的块边界，插进去会把"一帧内 down+up"这类节流语义搅乱。
         if (input_script_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
+            const auto t_input = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
             tickInputScript(cpu_);
+            if (window_prof_.active())
+                window_prof_.addHost(WindowProfiler::HostInput,
+                                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                    std::chrono::steady_clock::now() - t_input)
+                                                                    .count()));
             if (input_script_.quitRequested()) {
+                // ★ 先处理本 tick 登记的窗口边界：否则脚本最后一条 `profile_end` 会被 `quit`
+                //   吞掉（那一段统计就静默丢了）。
+                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
                 r.reason = StopReason::Stopped;
                 r.detail = "input script: quit";
                 cpu_.running = false;
@@ -542,7 +602,14 @@ RunResult Machine::run(const RunOptions& opts) {
         //   代码，这时再铺一个 WndProc 帧会改坏它仍活着的 x87/XMM 上下文（真机上它们是两个线程）。
         const bool nested_guest_active = guest_calls_.active();
         if (!nested_guest_active && presenter_.hasSink() && cpu_.insns >= next_present_check) {
+            const auto t_pump = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                      : std::chrono::steady_clock::time_point{};
             presenter_.pumpHostEvents();
+            if (window_prof_.active())
+                window_prof_.addHost(WindowProfiler::HostEventPump,
+                                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                    std::chrono::steady_clock::now() - t_pump)
+                                                                    .count()));
             if (presenter_.stopRequested()) {
                 r.reason = StopReason::Stopped;
                 r.detail = "present: 窗口关闭";
@@ -636,7 +703,15 @@ RunResult Machine::run(const RunOptions& opts) {
         //      在 fill 的 x87 活值中间插入回调会静默改坏 ST0..ST7。
         if (!guest_calls_.active() && !cpu_.shim.timer_firing && !cpu_.shim.timers.empty() &&
             !cpu_.shim.callback.active) {
-            if (fireDueTimer(r)) continue;
+            const auto t_timer = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
+            const bool fired = fireDueTimer(r);
+            if (window_prof_.active())
+                window_prof_.addHost(WindowProfiler::HostTimer,
+                                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                    std::chrono::steady_clock::now() - t_timer)
+                                                                    .count()));
+            if (fired) continue;
             if (r.reason != StopReason::None) break;
         }
 
@@ -645,12 +720,28 @@ RunResult Machine::run(const RunOptions& opts) {
         //   ⛔ 不 patch guest 字节（SMC / 代码页保护都不用管）。
         //   ⛔ 只认"上一条是 call 且目标 = 当前 eip"：jmp / 尾调用 / 定时器和回调的合成帧
         //      都不是 call 帧，必须回退解释器（否则会弹掉一个不存在的返回地址）。
+        // ★ guest 影子调用栈（inclusive）：上一个 block 以 `call` 结束 ⇒ 这一帧从这里开始计时。
+        //   ⛔ 只在 profiler 窗口内记账（窗口外 no-op）；窗口结束由 `closeAllFrames` 收口。
+        //   压帧发生在 override 之前：函数级 override **不会执行 ret**，由那条分支显式弹帧。
+        if (window_prof_.active() && call_target != 0 && cpu_.eip == call_target) {
+            window_prof_.pushCall(fnKeyOf(call_target), pending_call_ret_);
+        }
         if (!overrides_.empty() && call_target != 0 && cpu_.eip == call_target) {
             if (NativeOverride* ov = overrides_.find(cpu_.eip)) {
                 const char* why = nullptr;
                 const std::uint64_t before = ov->fallbacks;
                 bool suspended = false;
-                if (overrides_.invoke(*ov, cpu_, mem_, &why, &suspended)) {
+                const auto t_native = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                            : std::chrono::steady_clock::time_point{};
+                const bool took = overrides_.invoke(*ov, cpu_, mem_, &why, &suspended);
+                if (window_prof_.active())
+                    window_prof_.addNative(
+                        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                       std::chrono::steady_clock::now() - t_native)
+                                                       .count()));
+                if (took) {
+                    // override 替代了整个函数体（没有 ret 指令）⇒ 这里显式弹帧。
+                    if (window_prof_.active()) window_prof_.popNoReturn(fnKeyOf(ov->ea));
                     if (suspended) continue;
                     if (opts.trace_blocks) std::fprintf(stdout, "[native] %08X %s\n", ov->ea, ov->name.c_str());
                     cpu_.noteInsn(ov->ea, "[native]");
@@ -672,7 +763,14 @@ RunResult Machine::run(const RunOptions& opts) {
             if (NativeBlockOverride* bo = block_overrides_.find(cpu_.eip)) {
                 const std::uint32_t entry = cpu_.eip;
                 std::uint64_t replaced = 0;
+                const auto t_blockov = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                             : std::chrono::steady_clock::time_point{};
                 const BlockOverrideOutcome outcome = bo->fn(cpu_, mem_, &replaced);
+                if (window_prof_.active())
+                    window_prof_.addNative(
+                        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                       std::chrono::steady_clock::now() - t_blockov)
+                                                       .count()));
                 if (outcome == BlockOverrideOutcome::Replaced) {
                     if (opts.trace_blocks)
                         std::fprintf(stdout, "[native-block] %08X %s\n", entry, bo->name.c_str());
@@ -707,7 +805,14 @@ RunResult Machine::run(const RunOptions& opts) {
         //   ⛔ 放在函数级/段级 override **之后**：否则会吞掉 `call_target`，让本次 native override
         //      被跳过（性能退化，不是语义错，但没必要）。
         if (audio_.enabled() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
+            const auto t_audio = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
             const AudioPump ap = audio_.pump();
+            if (window_prof_.active())
+                window_prof_.addHost(WindowProfiler::HostAudio,
+                                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                    std::chrono::steady_clock::now() - t_audio)
+                                                                    .count()));
             if (ap == AudioPump::Suspended) continue;
             if (ap == AudioPump::Error) {
                 r.reason = StopReason::Unimplemented;
@@ -797,7 +902,18 @@ RunResult Machine::run(const RunOptions& opts) {
             }
             const bool had_impl = def->fn != nullptr;
             const std::uint64_t frame_before = presenter_.frameCount();
+            const auto t_shim = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                      : std::chrono::steady_clock::time_point{};
             shims_.invoke(cpu_, *def);
+            if (window_prof_.active()) {
+                window_prof_.addShim(
+                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - t_shim)
+                                                   .count()));
+                // shim 不执行 `ret` 指令 ⇒ 压进来的那一帧在这里弹掉（含 take_control 的回调帧：
+                // 回调自己的 call/ret 是独立的一帧，晚些时候由 ret 正常弹）。
+                window_prof_.popNoReturn(fnKeyOf(def->stub_ea));
+            }
             if (frame_trace_ && presenter_.frameCount() != frame_before) flushFrameTrace();
             if (!cpu_.running) {
                 // ★ 两种"停"要分清：**未实现**是缺口（红），**实现里主动停**（ExitProcess / ExitThread）
@@ -861,20 +977,40 @@ RunResult Machine::run(const RunOptions& opts) {
             clock_.tick();
             if (control) {
                 next_call_target = (in.op == Op::Call) ? cpu_.eip : 0;
+                if (in.op == Op::Call) {
+                    // 影子调用栈的压帧在**下一个迭代**（那时才认得出目标是不是 shim）。
+                    pending_call_ret_ = in.ea + in.length;
+                } else if (in.op == Op::Ret) {
+                    // ★ 弹帧判据 = 返回地址与栈上的帧一致（`popRet` 里做，对不上只计数不瞎弹）。
+                    window_prof_.popRet(cpu_.eip);
+                }
                 left_block = true;
                 break;
             }
         }
-        if (opts.profile) {
-            b->ns += static_cast<std::uint64_t>(
+        // ★ 区间 profiler 的 `guest` 桶 = **块执行**墙钟（与 shim / native / host 互斥）。
+        //   `b->ns` 复用同一份计时（就是 `--profile` 与逐帧 trace 用的那一份，⛔ 不造第二套）。
+        {
+            const std::uint64_t block_ns = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - block_start)
                     .count());
+            if (opts.profile || window_prof_.armed()) b->ns += block_ns;
+            window_prof_.addGuest(block_ns);
         }
         if (left_block) continue;
     }
     if (r.reason == StopReason::UntilEa && opts.until_ea == 0xFFFFFFFFu) {
         // 岗哨返回地址 = 夹具的正常结束，不改口径（调用方自己看 reason）
     }
+    // ★ 运行停止时窗口还开着（脚本里忘了 profile_end / 脚本没跑完）⇒ **明确**收口 + 告警 + 打印。
+    //   ⛔ 不许静默丢数据：漏掉一个 end 不该让整段统计消失。
+    if (window_prof_.active()) {
+        std::fprintf(stderr,
+                     "[profile-window] ⚠ 窗口 \"%s\" 未闭合（运行停止：%s）⇒ 自动收口并打印（差一段就是漏账）\n",
+                     window_prof_.label().c_str(), stopReasonName(r.reason));
+        closeProfileWindow("未闭合");
+    }
+    wall_start_valid_ = false;
     r.ea = cpu_.eip;
     r.insns = cpu_.insns;
     audio_.end();  // 关闭 SDL / 回填 WAV；此后不再写 guest
@@ -882,6 +1018,147 @@ RunResult Machine::run(const RunOptions& opts) {
     //   只是之后的 Machine 析构（COM/surface 回收 guest 堆）不再算进本轮账。
     guestToken().disarm();
     return r;
+}
+
+void Machine::applyPendingProfileWindow() {
+    // ★ 窗口边界 = 本 block 边界（迭代起点）。同一脚本重复跑 ⇒ 同一个边界。
+    if (profile_begin_pending_) {
+        profile_begin_pending_ = false;
+        if (window_prof_.active()) {
+            std::fprintf(stderr,
+                         "[profile-window] ⚠ 上一个窗口 \"%s\" 还没结束就又来 profile_begin(\"%s\") ⇒ "
+                         "先把上一个自动收口\n",
+                         window_prof_.label().c_str(), profile_begin_label_.c_str());
+            closeProfileWindow("被新的 begin 顶掉");
+        }
+        window_prof_.begin(profile_begin_label_, presenter_.frameCount(), cpu_.insns, clock_.nowMs());
+        // ★ 基线快照必须在**任何一段执行之前**取（全局累计量的差 = 窗口内的量）。
+        window_prof_.snapshotBlocks(cache_);
+        window_prof_.snapshotShims(shims_);
+        window_prof_.snapshotPresent();
+        std::printf("[profile-window] begin \"%s\" @ frame=%llu insns=%llu guest_ms=%llu\n",
+                    profile_begin_label_.c_str(), static_cast<unsigned long long>(presenter_.frameCount()),
+                    static_cast<unsigned long long>(cpu_.insns), static_cast<unsigned long long>(clock_.nowMs()));
+        std::fflush(stdout);
+    }
+    if (profile_end_pending_) {
+        profile_end_pending_ = false;
+        if (!window_prof_.active()) {
+            std::fprintf(stderr,
+                         "[profile-window] ⚠ profile_end(\"%s\") 没有打开的窗口 ⇒ 忽略（⛔ 不静默：这就是"
+                         "\"begin 丢了\"的信号）\n",
+                         profile_end_label_.c_str());
+            return;
+        }
+        if (!profile_end_label_.empty() && profile_end_label_ != window_prof_.label()) {
+            std::fprintf(stderr,
+                         "[profile-window] ⚠ profile_end(\"%s\") 与打开的窗口 \"%s\" label 不一致 ⇒ 仍然收口\n",
+                         profile_end_label_.c_str(), window_prof_.label().c_str());
+        }
+        closeProfileWindow(nullptr);
+    }
+}
+
+void Machine::closeProfileWindow(const char* why) {
+    (void)why;
+    window_prof_.end(presenter_.frameCount(), cpu_.insns, clock_.nowMs());
+    window_prof_.finishBlocks(cache_);
+    window_prof_.finishShims(shims_);
+    window_prof_.finishPresent();
+    WindowReport rep;
+    const auto fn_key = [this](std::uint32_t ea) { return fnKeyOf(ea); };
+    if (!window_prof_.takeReport(fn_key, &rep)) return;
+    // 窗口内 Present 次数（GPU 拆解的分母）
+    for (const WindowShimRow& row : rep.shims) {
+        const ShimDef* d = shims_.byId(row.id);
+        if (d == nullptr) continue;
+        if (d->module == "com" && d->name == "IDirect3DDevice9::Present") {
+            rep.gpu_frames = row.calls;
+            break;
+        }
+    }
+    printWindowReport(rep);
+}
+
+std::uint32_t Machine::fnKeyOf(std::uint32_t ea) const {
+    if (lst_.loaded()) {
+        if (const LstFunction* f = lst_.functionAt(ea)) return f->ea;
+    }
+    return ea;
+}
+
+void Machine::printWindowReport(const WindowReport& r) const {
+    const double wall_ms = static_cast<double>(r.wall_ns) / 1e6;
+    auto pct = [&](std::uint64_t ns) {
+        if (r.wall_ns == 0) return 0.0;
+        return static_cast<double>(ns) * 100.0 / static_cast<double>(r.wall_ns);
+    };
+    auto ms = [](std::uint64_t ns) { return static_cast<double>(ns) / 1e6; };
+    const std::uint64_t sum =
+        r.guest_ns + r.shim_ns + r.native_ns + r.interp_ns + r.host_total_ns;
+
+    std::fprintf(stdout, "\n=== profile window: %s ===\n", r.label.c_str());
+    std::fprintf(stdout,
+                 "window    : wall=%.1fms frame %llu→%llu insns %llu→%llu guest_ms %llu→%llu iterations=%llu\n",
+                 wall_ms, (unsigned long long)r.begin_frame, (unsigned long long)r.end_frame,
+                 (unsigned long long)r.begin_insns, (unsigned long long)r.end_insns,
+                 (unsigned long long)r.begin_guest_ms, (unsigned long long)r.end_guest_ms,
+                 (unsigned long long)r.iterations);
+    // ★ 闭式：这一行就是判据（sum + unattributed == wall）。
+    std::fprintf(stdout,
+                 "buckets   : wall=%.1fms guest=%.1fms shim=%.1fms native=%.1fms interp=%.1fms host=%.1fms "
+                 "sum=%.1fms unattributed=%.1fms\n",
+                 wall_ms, ms(r.guest_ns), ms(r.shim_ns), ms(r.native_ns), ms(r.interp_ns), ms(r.host_total_ns),
+                 ms(sum), static_cast<double>(r.unattributed_ns) / 1e6);
+    std::fprintf(stdout,
+                 "            （unattributed = wall − (guest+shim+native+interp+host)；正 = 有没归因的时间，"
+                 "负 = 有重叠/重计 ⇒ 都不许吞掉）\n");
+    std::fprintf(stdout, "  host    : audio=%.1fms(%.1f%%) event-pump=%.1fms(%.1f%%) input-script=%.1fms(%.1f%%) "
+                         "timer=%.1fms(%.1f%%)\n",
+                 ms(r.host_ns[WindowProfiler::HostAudio]), pct(r.host_ns[WindowProfiler::HostAudio]),
+                 ms(r.host_ns[WindowProfiler::HostEventPump]), pct(r.host_ns[WindowProfiler::HostEventPump]),
+                 ms(r.host_ns[WindowProfiler::HostInput]), pct(r.host_ns[WindowProfiler::HostInput]),
+                 ms(r.host_ns[WindowProfiler::HostTimer]), pct(r.host_ns[WindowProfiler::HostTimer]));
+    if (!r.fns.empty()) {
+        std::fprintf(stdout,
+                     "guest fns :（self 互斥 ⇒ 求和 = guest；inclusive 是调用树 ⇒ ⛔ 不可相加；前 %zu）\n",
+                     r.fns.size() < 12 ? r.fns.size() : static_cast<std::size_t>(12));
+        for (std::size_t i = 0; i < r.fns.size() && i < 12; ++i) {
+            const WindowFnRow& f = r.fns[i];
+            const LstFunction* fn = lst_.loaded() ? lst_.functionAt(f.key) : nullptr;
+            if (fn != nullptr && fn->ea == f.key) {
+                std::fprintf(stdout, "  %2zu. %-24s self=%8.3fms(%5.1f%%) incl=%8.3fms(%5.1f%%) calls=%llu\n", i + 1,
+                             fn->name.c_str(), ms(f.self_ns), pct(f.self_ns), ms(f.inclusive_ns),
+                             pct(f.inclusive_ns), (unsigned long long)f.calls);
+            } else {
+                std::fprintf(stdout, "  %2zu. sub_%08X             self=%8.3fms(%5.1f%%) incl=%8.3fms(%5.1f%%) "
+                                     "calls=%llu\n",
+                             i + 1, f.key, ms(f.self_ns), pct(f.self_ns), ms(f.inclusive_ns), pct(f.inclusive_ns),
+                             (unsigned long long)f.calls);
+            }
+        }
+        std::fprintf(stdout,
+                     "            （inclusive 影子栈：unbalanced=%llu 次 ret 对不上 / 收口时仍开着 %llu 帧 ⇒ "
+                     "非 0 就说明那几段 inclusive 不可全信，self 仍准）\n",
+                     (unsigned long long)r.unbalanced, (unsigned long long)r.open_at_end);
+    }
+    if (!r.shims.empty()) {
+        std::fprintf(stdout, "shims     :（⊂ shim 桶；前 %zu）\n",
+                     r.shims.size() < 12 ? r.shims.size() : static_cast<std::size_t>(12));
+        for (std::size_t i = 0; i < r.shims.size() && i < 12; ++i) {
+            const WindowShimRow& s = r.shims[i];
+            const ShimDef* d = shims_.byId(s.id);
+            std::fprintf(stdout, "  %2zu. %-42s ns=%8.1fms(%5.1f%%) calls=%llu\n", i + 1,
+                         d ? (d->module + "!" + d->name).c_str() : "?", ms(s.ns), pct(s.ns),
+                         (unsigned long long)s.calls);
+        }
+    }
+    std::fprintf(stdout,
+                 "gpu       : frames=%llu readback=%.1fms hash=%.1fms stats=%.1fms sink=%.1fms"
+                 "（Present 的内部拆解 ⇒ ⊂ shim 的 Present 行，⛔ 不重复计入 buckets）\n",
+                 (unsigned long long)r.gpu_frames, ms(r.gpu_readback_ns), ms(r.gpu_hash_ns), ms(r.gpu_stats_ns),
+                 ms(r.gpu_sink_ns));
+    std::fflush(stdout);
 }
 
 bool Machine::fireDueTimer(RunResult& r) {
@@ -1105,6 +1382,39 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                  shims_.calledUnimplemented().size());
     std::fprintf(out, "heap      : in_use %u peak %u allocs %u\n", heap_.bytesInUse(), heap_.peak(),
                  heap_.allocCount());
+    // ★ 分配器 / 内存账的**可观测计数**（不是墙钟）：
+    //   `first-fit-scans` = 首次适配真正比较过的空闲块数；`coalesce-merges` = 收口时并掉的相邻空闲块；
+    //   `zero-bytes` = HEAP_ZERO_MEMORY 清零写过的字节（⛔ 语义面，不是优化目标）；
+    //   `commit` = `GuestMemory::commit` 的**API 次数/字节** 与**真正落到系统调用**的次数/字节。
+    //   ⇒ "每次 alloc 都在提交页"这类猜测可以直接用这几个数证伪/证实。
+    std::fprintf(out,
+                 "heapstat  : first-fit-scans %llu coalesce-merges %llu zero-bytes %llu blocks %zu\n",
+                 (unsigned long long)heap_.firstFitScans(), (unsigned long long)heap_.coalesceMerges(),
+                 (unsigned long long)heap_.zeroBytes(), heap_.blockCount());
+    std::fprintf(out, "commit    : api %llu/%lluB system %llu/%lluB\n",
+                 (unsigned long long)mem_.commitApiCalls(), (unsigned long long)mem_.commitApiBytes(),
+                 (unsigned long long)mem_.platformCommitCalls(),
+                 (unsigned long long)mem_.platformCommitBytes());
+    // ★ 输入时间线的可观测计数：`ticks` = 块边界 tick 次数；`action-scans` = 逐条比较动作的次数。
+    //   后者只随"动作集变化"增长，**不随块数增长**（守卫 `profile-window` 钉着）。
+    if (input_script_.active()) {
+        std::fprintf(out, "inputstat : ticks %llu action-scans %llu\n",
+                     (unsigned long long)input_script_.tickCount(),
+                     (unsigned long long)input_script_.actionScans());
+        // ★ "按下→抬起"账（README §4.2c 的自动 hold）：`auto` = 等过 guest 采样的抬起；
+        //   `deferred-ups` = 显式 mouse_up/key_up 因为"还没被采样"被推迟的次数；
+        //   `bounded-no-sample` = 到上限仍没采样 ⇒ 强制抬起（同时有 stderr 告警）；
+        //   `waited-samples-max` / `hold-ms-max` = 单次最多等了几次采样 / 最长跨度（guest ms）。
+        //   ⛔ 这些不是墙钟：判据是"guest 有没有观察过按下"，不是"等了多久"。
+        const InputScript::ReleaseStats& rs = input_script_.releaseStats();
+        std::fprintf(out,
+                     "            release : total %llu auto %llu explicit %llu deferred-ups %llu "
+                     "bounded-no-sample %llu waited-samples-max %llu hold-ms-max %llu\n",
+                     (unsigned long long)rs.releases, (unsigned long long)rs.auto_releases,
+                     (unsigned long long)rs.explicit_releases, (unsigned long long)rs.deferred_ups,
+                     (unsigned long long)rs.bounded_no_sample, (unsigned long long)rs.waited_samples_max,
+                     (unsigned long long)rs.hold_ms_max);
+    }
     // ★ arena 是**独立**的 GuestHeap（`init` 的 0x28000000..0x30000000，128 MiB），不并进上面那行：
     //   纹理像素 / 后缓冲 / 深度块只在这里，主堆的 in_use 对"纹理没回收"完全不可见。
     std::fprintf(out, "arena     : surfaces %zu in_use %u peak %u largest-free %u\n", surfaces_.surfaceCount(),

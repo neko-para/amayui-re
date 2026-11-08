@@ -395,6 +395,8 @@ bool GuestMemory::commitPages(std::uint32_t begin, std::uint64_t end) {
         while (q < last && !bit(q)) ++q;
         const std::size_t off = static_cast<std::size_t>(p) * kPage;
         const std::size_t len = static_cast<std::size_t>(q - p) * kPage;
+        ++platform_commit_calls_;              // 临时诊断
+        platform_commit_bytes_ += len;         // 临时诊断
         if (!platformCommit(base_, off, len)) {
             std::snprintf(last_error_, sizeof(last_error_), "commit(%08X..%08X) 失败", p * kPage, q * kPage);
             return false;
@@ -415,6 +417,8 @@ bool GuestMemory::commit(std::uint32_t ea, std::size_t size, RegionKind kind, co
     }
     const std::uint32_t begin = ea & ~kPageMask;
     const std::uint64_t end = (end64 + kPageMask) & ~static_cast<std::uint64_t>(kPageMask);
+    ++commit_api_calls_;       // 临时诊断
+    commit_api_bytes_ += size; // 临时诊断
     if (!commitPages(begin, end)) return false;
     if (kind != RegionKind::Other || (name && name[0]))
         annotate(begin, static_cast<std::size_t>(end - begin), kind, name);

@@ -200,6 +200,12 @@ public:
     bool committed(std::uint32_t ea, std::size_t size = 1) const;
     std::uint64_t committedBytes() const;
 
+    // —— 临时诊断（A/B 测量用；测完删除）——
+    std::uint64_t commitApiCalls() const { return commit_api_calls_; }
+    std::uint64_t commitApiBytes() const { return commit_api_bytes_; }
+    std::uint64_t platformCommitCalls() const { return platform_commit_calls_; }
+    std::uint64_t platformCommitBytes() const { return platform_commit_bytes_; }
+
     std::uint8_t* host(std::uint32_t ea) { return base_ + ea; }
     const std::uint8_t* host(std::uint32_t ea) const { return base_ + ea; }
 
@@ -273,6 +279,11 @@ private:
     VaRangeTable va_ranges_;
     bool safe_ = false;
     char last_error_[160] = {};
+    // —— 临时诊断（A/B 测量用；测完删除）——
+    std::uint64_t commit_api_calls_ = 0;
+    std::uint64_t commit_api_bytes_ = 0;
+    std::uint64_t platform_commit_calls_ = 0;
+    std::uint64_t platform_commit_bytes_ = 0;
 };
 
 // 宿主页大小（guest 页恒为 4 KiB，见 GuestMemory::kPage）。

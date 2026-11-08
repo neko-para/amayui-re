@@ -3,7 +3,7 @@
 - id: REQ-01M6X4MSCMMFEXYXCSK6V61QR2
 - type: bug
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - repro: apps/emulator-lift/src/runtime/d3d9.cpp#destroyTextureState
 - severity: S3
 - tags: [emulator-lift, d3d9, leak, m2]

@@ -3,7 +3,7 @@
 - id: REQ-01M6WS9G1EQRZ0EYM21V0DPZVY
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M6XVZ4ANQRC215ACG90A35NR
 - tags: [emulator-lift input script 取证]
 
 ## 问题

@@ -91,9 +91,13 @@ void usage() {
         "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
         "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
         "  --present-screenshot-frame <N>  只回读第 N 个 Present（1 起；缺省 0 = 每帧都写）\n"
-        "  --input-script <path>  指令式输入时间线（`at frame N` / `at guest_ms T` / after / wait；\n"
-        "                     动作 = mouse_move / mouse_down / mouse_up / click / key_down / key_up / quit）。\n"
+        "  --input-script <path>  指令式输入时间线（`at frame N` / `at insn N` / `at guest_ms T` / `at wall_ms T` / after / wait；\n"
+        "                     动作 = mouse_move / mouse_down / mouse_up / click / key_down / key_up / profile_begin / profile_end / quit）。\n"
         "                     注入**不需要窗口焦点、也不移动真实光标**；格式见 README §4.2c\n"
+        "  --input-stall-ms <ms>      帧号停住多久之后把剩余 frame 条件折成 wall_ms（缺省 10000；0 = 关闭兜底）\n"
+        "  --input-stall-boot-ms <ms> 还没出现第一帧（boot）时的宽限（缺省 30000；⛔ boot 不算停滞）\n"
+        "  --input-max-hold <ms>      自动 hold 的上限（guest ms，缺省 1000；0 = 不设限）：`click` / 显式 up\n"
+        "                             等 guest 采样，到上限仍未采样 ⇒ 抬起 + 告警（⛔ 不挂死）；见 README §4.2c\n"
         "  --audio off|sdl|virtual  音频后端（缺省 sdl = 真设备；virtual = 确定性设备时钟；off = silent）\n"
         "  --audio-dump <path>  把混音结果写成 WAV（44.1k/16/2；与 sdl 同时用 = tee）\n"
         "  --sound              允许出声（缺省静音：设备/混音/喂料/guest DS 调用照跑，只在交付前置 0）\n"
@@ -160,6 +164,14 @@ int main(int argc, char** argv) {
     std::string present_screenshot;
     std::uint64_t present_screenshot_frame = 0;
     std::string input_script_path;
+    // ★ 帧停滞兜底（README §4.2c）：帧不推进时把剩余 frame 触发条件折算成 wall_ms。
+    //   0 = 关闭（显式选择"宁可挂死也不提前"）。
+    std::uint64_t input_stall_ms = 10000;
+    // 还没出现第一帧时的宽限（boot 期间没有 Present 不算停滞）。
+    std::uint64_t input_stall_boot_ms = 30000;
+    // ★ 自动 hold 的上限（README §4.2c）：`click` / 显式 up 等 guest 采样，等不到就到这里抬起 + 告警。
+    //   0 = 不设限（显式选择"宁可挂死"）。
+    std::uint64_t input_max_hold_ms = 1000;
     // ★ 方案 D：默认 SDL 后端 + **静音**（`--sound` 才出声；设备 / 混音 / 喂料照跑）；
     //   `--audio=virtual` = 确定性设备时钟（CTest / dump）；`--audio=off` = 旧 silent 口径。
     //   `--audio-dump` 与真输出可同时用（tee）。
@@ -285,6 +297,35 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "--input-script 需要一个非空路径\n");
                 return 2;
             }
+        } else if (std::strcmp(a, "--input-stall-ms") == 0 && i + 1 < arg_count) {
+            // 帧停滞兜底阈值（0 = 关闭）。见 README §4.2c。
+            const char* text = args[++i].c_str();
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(text, &end, 10);
+            if (end == text || *end != '\0') {
+                std::fprintf(stderr, "--input-stall-ms 需要非负整数（收到 %s）\n", text);
+                return 2;
+            }
+            input_stall_ms = static_cast<std::uint64_t>(v);
+        } else if (std::strcmp(a, "--input-stall-boot-ms") == 0 && i + 1 < arg_count) {
+            const char* text = args[++i].c_str();
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(text, &end, 10);
+            if (end == text || *end != '\0') {
+                std::fprintf(stderr, "--input-stall-boot-ms 需要非负整数（收到 %s）\n", text);
+                return 2;
+            }
+            input_stall_boot_ms = static_cast<std::uint64_t>(v);
+        } else if (std::strcmp(a, "--input-max-hold") == 0 && i + 1 < arg_count) {
+            // 自动 hold 的上限（guest ms；0 = 不设限）。见 README §4.2c。
+            const char* text = args[++i].c_str();
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(text, &end, 10);
+            if (end == text || *end != '\0') {
+                std::fprintf(stderr, "--input-max-hold 需要非负整数（收到 %s）\n", text);
+                return 2;
+            }
+            input_max_hold_ms = static_cast<std::uint64_t>(v);
         } else if (std::strcmp(a, "--audio") == 0 && i + 1 < arg_count) {
             audio_mode = args[++i];
             if (audio_mode != "off" && audio_mode != "sdl" && audio_mode != "virtual") {
@@ -656,6 +697,9 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "emulator-lift: --input-script 解析失败\n  %s\n", script_err.c_str());
             return 2;
         }
+        machine.setInputStallMs(input_stall_ms);
+        machine.setInputStallBootGraceMs(input_stall_boot_ms);
+        machine.setInputMaxHoldMs(input_max_hold_ms);
     }
     // ★ guest 眼里的主模块路径（用户 2026-11-05 口径）：`<guest 根>\AGE.EXE`，
     //   打开它拿到的是**我们真正在跑的那份字节**（拆壳件），不是 `--game-dir` 下的加壳原件。

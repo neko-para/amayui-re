@@ -383,17 +383,65 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 
 | 写法 | 含义 |
 |---|---|
-| `at frame N` | 时间线锚点 = 第 N 个 Present（1 起；headless 也计数） |
-| `at guest_ms T` | 锚点 = guest 虚拟时钟 T 毫秒 |
-| `after N frames` / `after N ms` | 锚点 = 上一个同单位锚点 + N |
-| `wait N frames` / `wait N ms` | 推进锚点，并记一个 **no-op 动作**（脚本要等它到期才收口 ⇒ 尾部 `wait` 能"保持按住 / 保持等待"） |
+| `at frame N` | 触发条件 = 第 N 个 Present（1 起；headless 也计数） |
+| `at guest_ms T` | 触发条件 = guest 虚拟时钟 T 毫秒 |
+| `at insn N` | 触发条件 = guest 累计执行指令数 N（**帧内也能切**；确定性） |
+| `at wall_ms T` | 触发条件 = 宿主墙钟 T 毫秒（自 run 起） |
+| `after N frames` / `after N ms` / `after N insn` | 触发条件 = 上一个**同单位**锚点 + N |
+| `wait N frames` / `wait N ms` / `wait N insn` | 推进锚点，并记一个 **no-op 动作**（脚本要等它到期才收口 ⇒ 尾部 `wait` 能"保持按住 / 保持等待"） |
+| `... stall MS` | （只对 frame）帧停滞兜底阈值；见下 |
 | `mouse_move X Y` | 客户区坐标；脚本由此**拥有光标**（`GetCursorPos` 立即是它） |
-| `mouse_down [left\|right\|middle]` / `mouse_up [...]` | 用脚本上一次的坐标 |
-| `click X Y [button] [hold N]` | move + down 在触发帧，up 在 +N 帧（缺省 1；一帧内 down+up 会被 guest 漏掉） |
-| `key_down VK` / `key_up VK` | Win32 虚拟键码（1..255，十进制或 `0x`） |
+| `mouse_down [left\|right\|middle]` / `mouse_up [...]` | 用脚本上一次的坐标；`mouse_up` 若按下**还没被 guest 采样**过 ⇒ 自动推迟（见下） |
+| `click X Y [button] [hold N [frames\|ms]]` | move + down 在触发点；up **自动**等到被采样（不带 `hold`），显式 `hold` 则按帧 / ms（见下） |
+| `key_down VK` / `key_up VK` | Win32 虚拟键码（1..255，十进制或 `0x`）；`key_up` 与 `mouse_up` 走同一条"至少被采样一次"保证 |
+| `profile_begin <label>` / `profile_end <label>` | 打开 / 关闭一个**区间 profiler** 窗口（§4.3.2）；边界 = 本动作的触发条件 |
 | `quit` | 触发时结束本次运行（`StopReason::Stopped`） |
 
 动作前必须先给时间（`at` / `after` / `wait`），否则解析失败（带行号，exit 2）。
+
+**触发条件是一个"条件"，不是帧号。** 内部只有 `Trigger{kind, value}` 四种 kind（frame / guest_ms /
+insn / wall_ms），调度只问"到期了吗"，不关心是哪一种。⇒ 以后加"具名标记"（`wait marker <name>`，
+标记来源 = 某 EA 命中、或某文件被打开 glob）只需要**加一种 kind + 一个解析词**，
+`Machine` 的调度与 profiler 的窗口边界**都不用改形状**。（标记来源的接口是单独一张单：
+需求树里标题含"引擎脚本可观察事件"的那条。）
+
+**`click` 会自动等到被采样（⛔ 不要手算 hold）**：一次 `click` 仍然是"按下 + 抬起"（不重试、不变两次、
+不改 guest 采样率），但**抬起的最早时刻由注入层保证**，不是由写脚本的人猜：
+
+- **判据**：按下之后 guest 的输入**采样计数**至少 +1（`WindowManager::inputSampleCount()`），
+  并且从"看到按下"的那次采样起再等**一个采样周期**（= 最近一次采样间隔，夹在 1..200 ms）。
+  第二条是安全下限：引擎可能先取位置、下一句才读按钮电平（避开采样边界的竞态）。
+- **采样点只算电平读点**：`GetCursorPos` 与 `GetAsyncKeyState`（`src/shims/user32_input.cpp` /
+  `src/shims/user32_window.cpp`）。⛔ **不算 `PeekMessageA`** —— 它在这条实现线里是每 ~1.8k 条指令一次
+  （实测 profile，比 20 Hz 的采样点快三个数量级），算进去等于没等；而且消息在队列里不会丢。
+  `GetKeyState` 本线没有实现。
+- **上限**：`--input-max-hold <ms>`（guest 时间，缺省 **1000**；`0` = 不设限 = 显式选择"宁可挂死"）。
+  guest 一直不采样（画面静止 / 在别的循环里）⇒ 到上限**仍然抬起 + stderr 告警**（⛔ 不静默、⛔ 不挂死），
+  脚本继续往下跑。
+- **显式覆盖**：`click X Y [button] hold N`（帧，旧写法）/ `hold N frames` / `hold N ms`（guest 时间）
+  ⇒ **完全按用户说的做**，不看采样。手写的 `mouse_down` … `mouse_up` / `key_down` … `key_up`
+  走同一条保证：对应的按下还没被采样过 ⇒ `mouse_up` / `key_up` 自动推迟（`deferred-ups`）。
+- **可观测**：每次抬起打
+  `click-release … auto=1 waited_samples=N hold_ms=M post_sample_ms=K`（`auto=0` = 显式 hold），
+  run summary 的 `inputstat` 行下面再给一行
+  `release : total … auto … explicit … deferred-ups … bounded-no-sample … waited-samples-max … hold-ms-max …`。
+  ⇒ 判断"是不是又没点中"先看这两处，别先猜。
+- **守卫**（顶层 pure CTest，`tests/input_injection.cpp`）：`input-injection/click-spans-sample`
+  （伪造一个 50 ms 周期的消费者：down 与 up 之间必须跨过采样点，且 guest 侧 `kDownSeenPolls ≥ 1`）·
+  `input-injection/click-honors-explicit-hold`（显式 `hold 2` 在 +2 帧落地，guest 一次没采样也照做）·
+  `input-injection/click-bounded-without-sampling`（完全不采样 ⇒ 到 1000 ms 抬起 + `bounded-no-sample`
+  + 脚本继续）。★ 变异实测会红：把自动判据改回"同一 tick 内 up" ⇒ 上面三条全红，
+  `kDownSeenPolls = 0`（正是用户看到的现象）。
+
+**帧停滞兜底（为什么必须有）**：`at frame` / `wait N frames` 的前提是"帧在推进"，而实测
+**EU-ROOM 界面稳定后不再 Present**（帧号停住）—— 纯帧锚点会永远不触发。规则：
+
+- 有未到期的 frame 条件、且帧号已 `stall` ms 没变 ⇒ 打一条**告警**，把剩下所有 frame 条件按
+  "最近帧间隔均值（夹在 1..100 ms）"折算成 `wall_ms` 条件后**继续**（⛔ 不挂死）。
+- `stall` 可逐条给（`wait 5 frames stall 8000`），缺省取 `--input-stall-ms`（缺省 10000，`0` = 关闭）。
+- **还没出现第一帧（boot）不算停滞**：那一段本来就没有 Present，宽限取 `--input-stall-boot-ms`
+  （缺省 30000）。⛔ 否则长 boot 会被误判成"卡住"并把整条时间线折算乱。
+- 兜底只在"帧真的停住"时生效：帧正常推进时它一次也不触发（守卫 `tests/profile_window.cpp`）。
 
 **一条命令**（实测：`--skip-logo` 到 TITLE → 点 Option → 停在第 155 帧 → 截图）
 
@@ -415,6 +463,31 @@ cd apps/emulator-lift
 产物 `option-window.bmp` 就是 OPTION（系统设定）界面。`--max-frames 200` / `quit` 二者都只是兜底；
 `--present-screenshot-frame` 让截图只写一张。把 `--present window --present-hidden --raster gpu` 换成
 `--present headless` 就得到**不建任何窗口**的同一条时间线（CPU 光栅，慢，但确定性）。
+
+**退出 EU-ROOM 的一行命令**（回归"点一次就能回 TITLE"；不需要任何 hold）：
+
+```bash
+cd apps/emulator-lift
+# .tmp/clickfix/exit-click.txt：
+#   at frame 90
+#   mouse_move 944 562
+#   wait 3 frames
+#   click 944 562
+#   at insn 300000000
+#   mouse_move 1227 680
+#   at insn 300020000
+#   click 1227 680
+#   at insn 600000000
+#   quit
+LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install \
+  --present window --present-hidden --raster gpu --native-overrides all --skip-logo \
+  --input-script ../../.tmp/clickfix/exit-click.txt --time-limit 200
+```
+
+判据（三步都看 `[frame]` 行）：点击帧出现 `click-release … auto=1 waited_samples>0 hold_ms≈一个采样周期`
+⇒ 其后有一帧是**单帧 ~1.5×10^8 条指令 / 8~9 s**（TITLE 重载）⇒ 再往后回到 ~2.8×10^5 条/帧（TITLE 动画）。
+这就是"一次 click 就回 TITLE"的机械判据（不需要肉眼认同一个画面）。
+运行日志与逐帧 BMP 是**本地证据**（`.tmp/` 不入库）：判据本身在上面这两行日志里。
 
 
 ## 4.2b GPU 光栅化（`--raster auto|cpu|gpu`）
@@ -641,6 +714,49 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 - 回退原因还按字符串聚合进 `dumpRunSummary` 的 `gpu       :` / `fallback top:` 行
   （见 §4.2b）；`--gpu-strict` 把"还有回退"变成 exit 3，而不是靠读日志判断。
 - 两个环境变量都只读、默认关；⛔ 不改变执行结果，也不进 A4 的逐字节基线。
+
+### 4.3.2 可定界的区间 profiler（`profile_begin` / `profile_end`）
+
+`--profile` 是**整轮**的、逐帧 trace 是**按 Present** 的。要回答"某一段里谁吃的"（例如"点进 EU-ROOM
+的那几秒"），用脚本把一段墙钟**框起来**：窗口边界 = 脚本动作被触发的那一个 **block 边界**，
+所以边界可以落在帧上（`at frame N`）、也可以落在**帧内**（`at insn N` / `at guest_ms T`）。
+
+```bash
+# .tmp/room/enter.txt：
+#   at frame 88
+#   profile_begin enter        # 窗口开始
+#   at frame 90
+#   mouse_move 944 562
+#   wait 3 frames
+#   click 944 562
+#   at frame 106
+#   profile_end enter          # 窗口结束 ⇒ 立刻打印一次表
+#   at insn 500000000
+#   quit
+LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe ... --input-script .tmp/room/enter.txt
+```
+
+- **只用脚本里有 `profile_*` 时才计时**（没有这些动作 ⇒ 整条记账路径是 no-op）。
+  `--profile` 的输出格式**不变**（`tests/profile_shims.cpp` 仍在解析它）。
+- **闭式**：`wall = guest + shim + native + interp + host + unattributed`。各项互斥，量都来自
+  dispatcher 的同一条时间轴：`guest` = 块执行；`shim` = `ShimRegistry::invoke` 整段；
+  `native` = 函数级/段级 override；`host` = 音频泵 / 事件泵 / 脚本 tick / 定时器；
+  `interp` = 一次迭代里**剩下的全部**（缓存查找 / 令牌 / 时钟 / 记账）；`unattributed = wall − 其余`。
+  ⛔ 不吞掉差额：正 = 有没归因的时间，负 = 有重叠/重计。
+- **`gpu :` 那一行是 Present 的内部拆解（readback / hash / stats / sink），⊂ `shim` 的 Present 行**，
+  ⛔ 不再加一遍（否则闭式立刻破）。
+- **guest 函数表区分 self / inclusive**：`self` = 该函数的块执行墙钟（互斥 ⇒ 求和 = `guest`）；
+  `inclusive` = 该函数**在栈上**的墙钟（`call` 进入 → `ret` 离开，同一函数只算最外层一帧 ⇒ 递归不重复计）。
+  inclusive 是调用树（父含子）⇒ ⛔ 不可相加、⛔ 不进闭式。影子栈的 `unbalanced` / `open_at_end`
+  会打印出来：非 0 说明那几段 inclusive 不可全信（`self` 仍准）。
+- 窗口**未闭合**（脚本没写 `profile_end` / run 提前停止）⇒ **自动收口 + 告警 + 照样打印**
+  （⛔ 不静默丢数据）；`profile_end` 没有对应 begin 也会告警。
+- ⚠ **测量本身有开销**（每块一次 `steady_clock` + 每块边界的脚本 tick）。要做"真实墙钟多少"的判断，
+  用同一脚本把 `profile_*` 两行去掉跑一遍做 A/B；数字只在这两者之间比较才有意义。
+- 窗口内的函数/块归属复用 `--profile` 那一套（块级计时 + `.lst` 函数入口聚合），⛔ 没有第二套计时。
+
+**怎么查**：窗口表在 `profile_end` 时打印一次（`=== profile window: <label> ===`）；
+逐帧的粗分仍是 §4.3.1 的 `LIFT_FRAME_TRACE=1`。守卫 = `tests/profile_window.cpp`（CTest `profile-window`）。
 
 ## 4.4 音频（方案 C：真 feeder 线程 + 独立 mixer）
 
