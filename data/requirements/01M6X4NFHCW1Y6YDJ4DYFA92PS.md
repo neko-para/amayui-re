@@ -1,0 +1,35 @@
+# emulator-lift · 修 ComRegistry::release 的对象表：加 generation 代际（EA 复用后陈旧 Release 会打到新对象）
+
+- id: REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS
+- type: bug
+- status: open
+- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- repro: apps/emulator-lift/src/runtime/com.cpp#ComRegistry::release
+- severity: S3
+- tags: [emulator-lift, com, lifetime, m2]
+
+## 判据（存在性 + 观测）
+
+- 位置：`repo:apps/emulator-lift/src/runtime/com.cpp` 的 `ComRegistry::release`（`repro` 的锚）：按 **EA** 在对象表里查，
+  而 guest 堆会**复用** EA。
+- 判据：`create A → release A（refcount 到 0，表里删掉）→ create B（逼它拿到与 A 相同的 EA）→ 对旧 EA 再 Release`
+  ⇒ B 的 refcount 被减（B 被提前释放 / 计数漂移）。正确行为是"陈旧 Release 打不到 B"。
+- 怎么造：夹具里循环 create / release 直到新对象拿到旧 EA（guest 堆复用是常态），再对旧 EA 调一次 Release；
+  判据是"B 的引用计数与后续行为不受影响"。
+- 现状为什么不可复现：游戏路径里没观测到陈旧 Release ⇒ 缺陷存在、暂无观测到的分歧。
+
+## 为什么现在不做（guest 域后果）
+
+- 后果落在 **guest 域**：宿主不崩；表现是对象被提前析构 / refcount 漂移 ⇒ 之后某个 shim 看到半死对象，
+  报"不是本 Registry 的对象"或给出错误结果 —— 归因成本远高于修它的成本。
+- 严重度按"现在不触发"取 S3；一旦触发就是难归因的 guest 域错误，优先级随之上调。
+
+## 修法边界（给将来的 agent）
+
+- 对象表加**代际**（EA + generation），Release 时校验代际；guest 侧 ABI 不变（EA 仍是 EA，代际只活在宿主表里）。
+- ⛔ 不要把"查不到"改成静默返回：现在查不到会出声，那条诊断必须留着（它是重复释放唯一可见的信号）。
+
+## 与别的单的关系
+
+- 同一条生命周期线三张单：**回收路径**（`REQ-01M6WTRF0X6362NK8BNK8DHHWJ`，已收口）、
+  **绑定引用**（`SetRenderTarget` 的 arena 那张）、**对象表代际**（本单）。三者互不重叠。

@@ -42,8 +42,43 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CTEST_BUILD_DIR = 'apps/emulator-cxx/out';
 const ctestStdio = (logFd) => (logFd === null ? 'ignore' : ['ignore', logFd, logFd]);
 
-function buildCtestTargets(logFd, buildDir = CTEST_BUILD_DIR) {
-  return spawnSync('cmake', ['--build', buildDir], { cwd: ROOT, stdio: ctestStdio(logFd) });
+/** 同步睡 `ms`（用 Atomics.wait 而不是 Promise：本工具的主流程是同步的 spawnSync 序列） */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * 重建构建目录。
+ *
+ * ★ 为什么要**重试**（实测，2026-11-08）：Windows 上同一个 exe 在几秒内被链接两次时，
+ *   `lld-link` 偶尔会因为**别人还开着刚写出的 exe**（实时防护扫描 / `vcpkg z-applocal`
+ *   后处理 / 上一个刚跑完的测试进程还没完全释放句柄）而失败，报
+ *   `The process cannot access the file because it is being used by another process.`。
+ *   症状是**抖动**：同一份源文件、同一条命令，手工跑绿、在 harness 里跑红，而且红在不同 target 上
+ *   （实测 `lift-gpu-mapping.exe` / `lift-*` 轮换）。CTest 类条目一轮里要构建 3 次
+ *   （基线 / 变异 / 还原），撞上的概率更高 —— 而"构建抖动"会被读成"守卫没红"或"还原失败"，
+ *   那是最糟的误判（前者会被当成假守卫，后者会让整轮中止）。
+ *   ⇒ 重试是安全的：构建是幂等的，真编译错误重试也不会变绿（只是慢一点）。
+ *   ⛔ 不要用重试掩盖**判据**层面的失败 —— 它只包 `cmake --build`，不包 ctest / node --test。
+ */
+function buildCtestTargets(logFd, buildDir = CTEST_BUILD_DIR, { attempts = 3, delayMs = 800 } = {}) {
+  let last = null;
+  let prev = null;
+  for (let i = 1; i <= attempts; i += 1) {
+    last = spawnSync('cmake', ['--build', buildDir], { cwd: ROOT, stdio: ctestStdio(logFd) });
+    if (!last.error && last.status === 0) {
+      if (i > 1) {
+        console.error(
+          `（重建 ${buildDir} 第 ${i} 次才成功；上一次 ${prev?.error ? prev.error.message : `退出码 ${prev?.status}`}，` +
+            '按 Windows 文件占用抖动重试）',
+        );
+      }
+      return last;
+    }
+    prev = last;
+    if (i < attempts) sleepSync(delayMs);
+  }
+  return last;
 }
 
 /**
@@ -4717,6 +4752,87 @@ const MUTATIONS = [
     ctest: 'conformance',
     buildDir: 'apps/emulator-lift/out',
     what: '串操作忽略 DF ⇒ conformance 的 rep-movsd-df 红（DF=1 分支以前从未执行过）',
+  },
+  // ── emulator-lift：本轮新落的 5 组守卫（input-injection / guest-token-stress /
+  //    gdi-font-metrics-cache / audio-device / gpu-batch-*）──
+  //   ★ 它们都是**顶层无条件注册**的 CTest（判据 = 注册位置 ⇒ pure 档），所以 `buildDir`
+  //     指到 `apps/emulator-lift/out`、`ctest` 名与 `apps/emulator-lift/CMakeLists.txt` 的
+  //     `add_test(NAME …)` 逐字一致。
+  {
+    file: 'apps/emulator-lift/src/shims/user32_window.cpp',
+    from:
+      '    const std::uint32_t vk = call.u32(0) & 0xFFu;\n' +
+      '    call.result = cpu.windows->keyDown(vk) ? 0x8000u : 0u;',
+    to:
+      '    const std::uint32_t vk = call.u32(0) & 0xFFu;\n' +
+      '    (void)vk;\n' +
+      '    call.result = 0u;  // 变异：恒报"未按下"（注入的键态读不到）',
+    guard: 'ctest:input-injection',
+    ctest: 'input-injection',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'GetAsyncKeyState 恒返回 0（丢掉 keyDown 的最高位）⇒ input-injection 的 ' +
+      '`testEaxImm(0x8000)` 那几条当场红（注入路径的"按键真的被看见"没有别的判据）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/guest_token.cpp',
+    from:
+      '    mutex_.lock();\n' +
+      '    owner_.store(me, std::memory_order_relaxed);\n' +
+      '    depth_ = 1;\n' +
+      '    noteTake();\n}',
+    to:
+      '    // 变异：`acquire` 空实现 —— 不取锁、不登记持有者、不记并发\n' +
+      '    (void)me;\n}',
+    guard: 'ctest:guest-token-stress',
+    ctest: 'guest-token-stress',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`GuestToken::acquire` 空实现（不取锁）⇒ 两线程并发改 `GuestHeap::blocks_`：' +
+      'guest-token-stress 的 `maxConcurrent()==1`（令牌把执行流串起来的唯一判据）与 `violations()==0` 当场红',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/font.cpp',
+    from: '    const auto cached = impl_->metrics_cache.find(key);',
+    to:
+      '    // 变异：忽略键 —— 恒返回表里第一条\n' +
+      '    const auto cached = impl_->metrics_cache.empty() ? impl_->metrics_cache.end() : impl_->metrics_cache.begin();',
+    guard: 'ctest:gdi-font-metrics-cache',
+    ctest: 'gdi-font-metrics-cache',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`metrics()` 的缓存忽略键（恒返回第一条）⇒ 小字号的度量复用给大字号 ⇒ ' +
+      'gdi-font-metrics-cache 的 `cache/size-change` 红（键里少一维正是这条守卫守的东西）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from: '        std::memset(out.data(), 0, out.size());',
+    to: '        // 变异：不覆盖最终交付缓冲（默认静音失效，音频原样送出）',
+    guard: 'ctest:audio-device',
+    ctest: 'audio-device',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '去掉最终交付缓冲那一次 `memset` ⇒ 默认静音失效（处理照跑、缓冲没被置 0）⇒ ' +
+      'audio-device 的 `default-muted-delivery` 红（`muted_bytes=` 与 dump 的零值判据）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
+    from:
+      '        draw.vertex_offset = static_cast<std::uint32_t>(queued_vertices_);\n' +
+      '        queued_vertices_ += count;\n' +
+      '        queue_.push_back(std::move(draw));\n' +
+      '        return true;\n    }',
+    to:
+      '        draw.vertex_offset = static_cast<std::uint32_t>(queued_vertices_);\n' +
+      '        queued_vertices_ += count;\n' +
+      '        queue_.push_back(std::move(draw));\n' +
+      '        return rasterFlush(err);  // 变异：每条 draw 一提交（合批退回逐条）\n    }',
+    guard: 'ctest:gpu-batch-barrier',
+    ctest: 'gpu-batch-barrier',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`rasterQueue` 入队后立刻 flush（合批退回"每条一提交"）⇒ 队列里攒不到两条 ⇒ ' +
+      'gpu-batch 的 `content-change` 当场红（`rasterQueuedDraws()==2` 与 `submits` 增量 == 2）',
   },
 ];
 

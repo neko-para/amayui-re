@@ -125,7 +125,10 @@ struct SpriteInfo {
 // ---------------------------------------------------------------------------------------
 // 建 Sprite 状态块（guest 堆）+ 默认单位阵 + 空批次；返回状态块 EA（0 = 失败，why 点名）。
 // ⛔ 不在这里建 COM 对象（shim 拿到 state 后调 ComRegistry::createObject）。
-std::uint32_t createSpriteState(X86& cpu, std::uint32_t device_object, std::string* why);
+// ★ `out_of_memory`（可选出参）：失败原因是 guest 堆不够（状态块 / 批次数组）⇒ 调用方必须报
+//   "资源耗尽"，⛔ 不许记成 "unimplemented"（与 `d3d9::createTextureState` 同一口径）。
+std::uint32_t createSpriteState(X86& cpu, std::uint32_t device_object, std::string* why,
+                                bool* out_of_memory = nullptr);
 
 bool spriteInfoOfState(X86& cpu, std::uint32_t state, SpriteInfo* out, std::string* why);
 bool spriteInfo(X86& cpu, std::uint32_t object, SpriteInfo* out, std::string* why);

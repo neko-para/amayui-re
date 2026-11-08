@@ -27,10 +27,17 @@ namespace lift {
 // =======================================================================================
 // 宿主字体配置（CLI `--font` / `--baseline-lift` / `--font-engine-name`；main.cpp 调一次）
 // =======================================================================================
+// ★ **基线补偿量**（宿主视觉策略，⛔ 不是引擎语义）：**唯一一处常量**，名字对齐 cxx 的对应量。
+//   cxx 真源 = `apps/emulator-cxx/src/core/text_raster.cpp:647` 的 `lift = 2`
+//   （env 覆盖 `EMULATOR_CXX_BASELINE_LIFT` 在 `:648-651`；**唯一应用点** `:675`
+//   `baseline = y_effective + current_ascent - lift`；生效条件 `:643-646` = "宿主字体在用"）。
+//   这里是**缺省值**；运行时以 `--baseline-lift`（`FontConfig::baseline_lift`）为准，`0` = 关。
+constexpr int kBaselineLift = 2;
+
 struct FontConfig {
     std::string regular_path;      // 宿主常规字体（CMake 注入 `LIFT_HOST_FONT_PATH`）
     std::string bold_path;         // 同上 `-Bold.ttf`（空 = 由 regular_path 派生）
-    int baseline_lift = 2;         // 宿主视觉策略：画字前把基线抬 N px（0 = 关）
+    int baseline_lift = kBaselineLift;  // 宿主视觉策略：把墨迹整体抬 N px（0 = 关；见 `kBaselineLift`）
     bool use_engine_name = false;  // A/B 对照档：按引擎字面名取字（默认关）
 };
 
@@ -114,14 +121,31 @@ public:
     void setSyntheticForTest(bool on);
     bool syntheticForTest() const { return synthetic_; }
 
+    // ★ 纯档接缝（不读字体文件）：替换 `metrics()` 里**FT 派生段**的计算。
+    //   只给 pure 档守卫用（缓存 / 失效逻辑照旧走 `metrics()` 的真实路径）；生产路径永不安装。
+    //   `user` 原样回传（测试用它数"真算了几次"）。
+    using MetricsSourceForTest = bool (*)(void* user, int pixel_size, bool bold, HostTextMetrics* out);
+    void setMetricsSourceForTest(MetricsSourceForTest fn, void* user);
+
     void clearCache();
+
+    // `metrics()` 缓存的可观测计数（`--profile` 打印；⛔ 不是墙钟，也不含 synthetic 分支）。
+    std::uint64_t metricsHits() const;
+    std::uint64_t metricsMisses() const;
 
     // 取一个字形（metrics + 覆盖率）。false = **没有字体后端**（宿主字体缺失 / FT 起不来）
     //   —— 调用方必须按失败返回（⛔ 不许静默画空白）。
+    //   ★ `origin_y` 已含宿主基线补偿 `FontConfig::baseline_lift`（`kBaselineLift`）：**位移在 origin，
+    //     不在度量** —— 这样 `gmptGlyphOrigin.y` 与 guest 自己算的基线一起把墨迹抬 N px，而
+    //     `tmAscent` / 行高仍是 FT 真值（⛔ 不动 guest 的行距）。
     bool glyph(char32_t cp, int pixel_size, bool bold, GlyphMask* out);
 
     // 由 FT face 的 `size` 算 TEXTMETRICA 要的几格（tmHeight/tmAscent/tmDescent/...）。
-    bool metrics(int pixel_size, bool bold, std::int32_t weight, HostTextMetrics* out);
+    //   ★ 结果按 `(clamp 后像素字号, bold, 字体路径)` 缓存（上限 64 条，到顶整表 clear）。
+    //   **只出 FT 派生段**：`weight` / `italic` / `underlined` / `struck_out` 不在这里，也不进键 ——
+    //   它们由 `GdiFontDesc` 派生，只由 `gdiTextMetrics` 每次覆盖（唯一一处；⛔ 别在这里再写一遍：
+    //   两处写同一字段时删掉任一处守卫都照样绿）。`setSyntheticForTest` / `fontSetConfig` 会清表（见 .cpp）。
+    bool metrics(int pixel_size, bool bold, HostTextMetrics* out);
 
     // 诊断 / assets 测试：宿主字体文件在不在（不加载）
     bool fontFileAvailable(bool bold) const;

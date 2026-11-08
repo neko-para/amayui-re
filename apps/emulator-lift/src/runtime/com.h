@@ -22,7 +22,9 @@
 //   （guest 看到同一份值；我们的 AddRef / Release shim 都通过本类改它）。
 //   ⚠ 如果 guest 自己写 `obj+4`（本仓没有这种代码），宿主镜像不会跟着变。
 //
-// ★ 释放：`release` 到 0 ⇒ `heap->free(vtable)` + `heap->free(obj)` 并从对象表里删掉。
+// ★ 释放：`release` 到 0 ⇒ **先跑 `onZero` 钩子**（回收对象独占的子资源：纹理状态块 + arena 像素），
+//   再 `heap->free(vtable)` + `heap->free(obj)` 并从对象表里删掉。这是对象销毁的**唯一收敛点**
+//   （内部裸 release 与 iface Release shim 没有区别）。
 //   重复 release / 未知对象 ⇒ 打一行 + 返回 false（⛔ 不静默）。
 //
 // ★ 本类**不**放进 `Machine`：`cpu.com` 由装配方（主代理）指向一台机器持有的实例；
@@ -62,6 +64,17 @@ void comTrampoline(X86& cpu, ShimCall& call);
 // 未实现的 vtable 槽的 loud trap（同样是一条 ShimFn）。打印 iface + 偏移后停机器。
 void comUnsupported(X86& cpu, ShimCall& call);
 
+// refcount 到 0 时的**析构钩子**（在 `ComRegistry::release` 的唯一收敛点上调用）。
+//   `user` = createObject 时登记的扩展块 EA（obj+8；0 = 没有）。
+// ★ 为什么要有它：`Release` 只说明"引用到 0"，但对象**拥有**的 guest 资源（纹理状态块 +
+//   arena 像素块）必须在这时回收。以前这一步挂在"调用者是否走 iface 的 Release shim"上 ——
+//   而内部有 11 处裸 `cpu.com->release`（SetTexture 换绑 / SetRenderTarget 换绑 /
+//   destroyForDevice / Sprite 批次）绕过 shim ⇒ **所有权挂在调用点**，漏一处就漏一块像素。
+//   钩子把它挪回对象：无论谁把引用降到 0，子资源都跟着回收。
+// ★ 钩子只能回收**对象独占**的资源。`IDirect3DSurface9` 的 `user` 常指向**别人**的状态块
+//   （`GetSurfaceLevel` 复用纹理状态块）⇒ 那种对象**不登记**钩子（⛔ 会提前释放纹理像素）。
+using ComOnZero = void (*)(X86& cpu, std::uint32_t user);
+
 class ComRegistry {
 public:
     // 在 guest 内存里建对象：[0] = vtable EA，[4] = refcount(1)。返回对象 guest EA；失败 ⇒ 0 + 一行日志。
@@ -78,14 +91,16 @@ public:
     //   为什么要有它：对象的宿主侧状态若放在 ComRegistry 之外，就会撞上"一台机器一份 + 生命周期"
     //   的问题（测试里 Machine 反复建在同一栈地址）；放进 guest 块则由对象的 refcount 生命周期管。
     std::uint32_t createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
-                               std::uint32_t user = 0);
+                               std::uint32_t user = 0, ComOnZero on_zero = nullptr);
 
     // 对象的扩展块 EA（**宿主编表里的权威值**，不读 guest 内存）；未知对象 / 没挂扩展 ⇒ 0。
     std::uint32_t userOf(std::uint32_t obj) const;
 
     // refcount +1 / -1；未知对象 ⇒ false + 一行日志。
     bool addRef(X86& cpu, std::uint32_t obj);
-    // 到 0 ⇒ 释放 vtable 与对象（guest 堆）并从对象表里删掉。未知对象 / 重复 release ⇒ false + 日志。
+    // 到 0 ⇒ **先跑 on_zero 钩子**（回收对象独占的子资源），再释放 vtable 与对象（guest 堆）
+    // 并从对象表里删掉。未知对象 / 重复 release ⇒ false + 日志。
+    // ★ 这是对象销毁的**唯一收敛点**：内部裸 release 与 guest 走 iface Release 在这里没有区别。
     bool release(X86& cpu, std::uint32_t obj);
     // 这个 guest EA 是我们建出来的对象吗（不再看内存里写的是什么）
     bool find(std::uint32_t obj) const;
@@ -107,6 +122,7 @@ private:
         std::uint32_t refcount = 0;  // 权威值（同步写 obj+4）
         std::uint32_t bytes = 8;     // 对象头大小（8 = P0 布局；12 = 挂了扩展块 EA）
         std::uint32_t user = 0;      // 扩展块 EA（obj+8；0 = 没有）
+        ComOnZero on_zero = nullptr;  // refcount 到 0 时回收子资源（见文件头；nullptr = 没有子资源）
         std::string iface;
     };
     struct MethodEntry {

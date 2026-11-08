@@ -28,6 +28,7 @@
 #include "runtime/handles.h"
 #include "runtime/heap.h"
 #include "runtime/image.h"
+#include "runtime/input_script.h"
 #include "runtime/memory.h"
 #include "runtime/native_overrides.h"
 #include "runtime/shims.h"
@@ -137,7 +138,8 @@ public:
     const NativeOverrideTable& overrides() const { return overrides_; }
     // ★ 方案 D（docs/thread-model-feasibility.md §5.1）：音频设备模型 + 喂料泵。
     //   `mode=Off` = 旧 silent 口径；`Sdl` = 真设备（默认 CLI）；`Virtual` = 确定性时钟（CTest/dump）。
-    bool configureAudio(AudioMode mode, const std::string& dump_path, std::string* err);
+    //   ★ `sound=false`（缺省）= 静音：全流程照跑，只在最终交付点把缓冲置 0（`--sound` 才出声）。
+    bool configureAudio(AudioMode mode, const std::string& dump_path, bool sound, std::string* err);
     AudioEngine& audio() { return audio_; }
     const AudioEngine& audio() const { return audio_; }
     // ★ 段级 override（函数中段；固定 EA）—— 与函数级分开两张表，语义不同：
@@ -151,6 +153,15 @@ public:
     void setSkipLogo(bool on) { skip_logo_ = on; }
     bool skipLogo() const { return skip_logo_; }
     bool skipLogoApplied() const { return skip_logo_applied_; }
+
+    // ★ 指令式输入时间线（`--input-script`）：见 `runtime/input_script.h`。
+    //   加载失败 ⇒ false + err（带行号）；⛔ 不静默跳过。可以在 run 之前 / 两次 run 之间替换。
+    bool loadInputScript(const std::string& path, std::string* err);
+    InputScript& inputScript() { return input_script_; }
+    const InputScript& inputScript() const { return input_script_; }
+    // 每个块边界推进一次注入时间线（`Machine::run` 内部调用；`GetMessageA` 阻塞时的宿主事件泵
+    // 也调用它，否则 guest 卡在等消息时脚本永远不触发）。
+    void tickInputScript(X86& cpu);
 
     // ---- 访问器 ----
     GuestMemory& mem() { return mem_; }
@@ -223,6 +234,7 @@ private:
     CriticalSectionTable critical_sections_;
     NativeOverrideTable overrides_;
     NativeBlockTable block_overrides_;
+    InputScript input_script_;
     WindowManager windows_;
     ComRegistry com_;
     SurfaceArena surfaces_;

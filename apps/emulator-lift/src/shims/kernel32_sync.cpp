@@ -69,6 +69,7 @@
 
 #include "runtime/audio.h"
 #include "runtime/critical_sections.h"
+#include "runtime/guest_token.h"
 #include "runtime/sync_guest.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
@@ -1329,6 +1330,10 @@ bool CriticalSectionTable::enter(X86& cpu, std::uint32_t ea, std::uint32_t threa
     }
     auto m = lockFor(ea);
     if (blocking) {
+        // ★ 单令牌（guest_token.h）：**持令牌阻塞在 guest CS 上会与另一条 guest 执行流互等**
+        //   （它要令牌才能跑到 LeaveCriticalSection）。⇒ 阻塞前让出令牌，拿到 CS 之后再取回。
+        //   本线程没持令牌时（纯单线程夹具 / 无 Machine 的调用）Yield 是无操作。
+        GuestToken::YieldGuard yield(guestToken());
         m->lock();
     } else if (!m->try_lock()) {
         return false;  // TryEnter：被别人持有 ⇒ FALSE（不写 guest 字段）
@@ -1406,6 +1411,27 @@ std::uint32_t guestCriticalSectionOwner(X86& cpu, std::uint32_t ea) {
 
 bool guestEnterCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err) {
     if (cpu.cs_table) return cpu.cs_table->enter(cpu, ea, owner_thread, /*blocking=*/true, err);
+    if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) {
+        if (err) *err = "临界区不在已提交内存里";
+        return false;
+    }
+    const std::uint32_t rc = cpu.mem->rd32(ea + kCsRecursionCount);
+    if (rc == 0) {
+        cpu.mem->wr32(ea + kCsOwningThread, owner_thread);
+        cpu.mem->wr32(ea + kCsRecursionCount, 1);
+        return true;
+    }
+    const std::uint32_t owner = cpu.mem->rd32(ea + kCsOwningThread);
+    if (owner != owner_thread) {
+        if (err) *err = "临界区已被 thread 0x" + std::to_string(owner) + " 持有";
+        return false;
+    }
+    cpu.mem->wr32(ea + kCsRecursionCount, rc + 1);
+    return true;
+}
+
+bool guestTryEnterCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err) {
+    if (cpu.cs_table) return cpu.cs_table->enter(cpu, ea, owner_thread, /*blocking=*/false, err);
     if (!cpu.mem || !cpu.mem->committed(ea, kCsSize)) {
         if (err) *err = "临界区不在已提交内存里";
         return false;

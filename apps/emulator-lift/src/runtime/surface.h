@@ -61,12 +61,16 @@ public:
     const char* lastError() const { return last_error_; }
     std::size_t surfaceCount() const { return surfaces_.size(); }
     std::uint32_t bytesInUse() const { return heap_.bytesInUse(); }
+    // ★ 诊断（运行摘要 / 端到端守卫用）：峰值活跃字节 + 当前最大**连续**空闲块。
+    //   两者一起才能区分"总量满"与"碎片化"（首次适配只认连续块，`heap.cpp` 的失败文本同理）。
+    std::uint32_t peak() const { return heap_.peak(); }
+    std::uint32_t largestFreeBlock() const { return heap_.largestFreeBlock(); }
 
 private:
     GuestMemory* mem_ = nullptr;
     GuestHeap heap_;
     std::map<std::uint32_t, GuestSurface> surfaces_;
-    char last_error_[160] = {};
+    char last_error_[256] = {};
 };
 
 }  // namespace lift

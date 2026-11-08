@@ -67,6 +67,25 @@ void d3dxLog(const char* method, const char* fmt, ...) {
     va_end(ap);
 }
 
+// 诊断：把 "w×h / D3DFORMAT / 预计像素字节" 拼成一句（所有建纹理失败路径共用）。
+// ★ 字节数用与 `SurfaceArena::create` **同一条**公式（`(w*bpp+3)&~3` 后乘 h），
+//   这样 trap / OOM 日志里的数字能与 `surface.cpp` / `heap.cpp` 的输出直接对账。
+//   格式不在支持集 ⇒ bpp 未知，只报 w×h / format（⛔ 不猜字节数）。
+std::string textureShapeNote(std::uint32_t width, std::uint32_t height, std::uint32_t format) {
+    char buf[192];
+    SurfaceFormat fmt;
+    if (d3d9::surfaceFormatForD3DFormat(format, &fmt)) {
+        const std::uint64_t row = (static_cast<std::uint64_t>(width) * fmt.bytesPerPixel() + 3u) & ~3ull;
+        const std::uint64_t bytes = row * static_cast<std::uint64_t>(height);
+        std::snprintf(buf, sizeof(buf), "%ux%u D3DFORMAT=%u（%ubpp，像素 %llu 字节）", width, height, format,
+                      fmt.bpp, static_cast<unsigned long long>(bytes));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%ux%u D3DFORMAT=%u（格式不在支持集 ⇒ 像素字节未知）", width, height,
+                      format);
+    }
+    return std::string(buf);
+}
+
 // loud trap：参数形态 / 状态崩坏 ⇒ 打印现场并停机器（与 d3d9 的 d3d9Trap 同形）
 void d3dxTrap(X86& cpu, const char* method, const char* fmt, ...) {
     std::fprintf(stderr, "\n=== unimplemented D3DX9 call ===\n  %s\n  reason: ", method);
@@ -80,6 +99,31 @@ void d3dxTrap(X86& cpu, const char* method, const char* fmt, ...) {
     cpu.running = false;
     cpu.stop_why = "unimplemented D3DX9 call";
     ++cpu.shim.unimplemented_calls;
+}
+
+// 资源耗尽（**不是** unimplemented）：我们这边的 arena / guest 堆不够。
+// ★ 为什么单独一个函数而不是复用 d3dxTrap：误诊链就在这里 —— 同一句
+//   "=== unimplemented D3DX9 call ===" 会让"容量/碎片问题"看起来像"guest 用了没实现的导出"，
+//   并把 `unimplemented_calls` 的账做脏。这里：独立标签 + 独立 `stop_why` + **不计数**。
+// ★ 为什么仍然是硬停（不返回真机的 E_OUTOFMEMORY 继续跑）——实测（2026-11-08，见需求单 repro）：
+//   返回 E_OUTOFMEMORY 后 guest 确实走失败分支（0x48AD0C `test eax,eax / jnz`），但随后在
+//   `0x4E8AB6` 处 `throw`（RaiseException 参数里是 C++ 异常码 0xE06D7363）⇒ 撞上**未实现**
+//   `kernel32!RaiseException`（SEH 展开不在本线）⇒ 停在一个更假的 gap 上、进程 exit 2。
+//   ⇒ 保留硬停：至少停因是真的（我们没内存），而不是"没实现 RaiseException"。
+void d3dxResourceStop(X86& cpu, const char* method, const char* fmt, ...) {
+    std::fprintf(stderr, "\n=== D3DX 资源耗尽（不是 unimplemented）===\n  %s\n  reason: ", method);
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    std::fprintf(stderr,
+                 "\n  （真机语义 = E_OUTOFMEMORY；本线在此硬停：guest 的失败分支会 throw C++ 异常"
+                 "（0xE06D7363）⇒ 撞上未实现的 kernel32!RaiseException）\n");
+    dumpRegisters(cpu, stderr);
+    dumpGuestStack(cpu, stderr, 24);
+    cpu.running = false;
+    cpu.stop_why = "D3DX 资源耗尽";
+    // ⛔ 不 ++cpu.shim.unimplemented_calls：这不是缺口。
 }
 
 bool sameGuid(X86& cpu, std::uint32_t ea, const std::uint8_t (&want)[16]) {
@@ -400,13 +444,14 @@ void shimTextureRelease(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    const std::uint32_t user = cpu.com->userOf(self);
+    // ★ 状态块 + arena 像素块的回收**不在这里**：`ComRegistry::release` 到 0 时会跑对象的
+    //   析构钩子（`createObject` 时登记 = `destroyTextureState`）。以前挂在这里 ⇒ 内部裸
+    //   release 走到 0 时像素块永久留在 arena（OPTION 往返一次漏一屏的量）。
     const bool last = cpu.com->refCount(self) == 1u;
     if (!cpu.com->release(cpu, self)) {
         call.result = 0;
         return;
     }
-    if (last && user != 0) d3d9::destroyTextureState(cpu, user);
     call.result = last ? 0u : cpu.com->refCount(self);
 }
 
@@ -960,15 +1005,30 @@ void shimD3DXCreateTextureFromFileInMemory(X86& cpu, ShimCall& call) {
         return;
     }
     std::string make_why;
+    bool out_of_memory = false;
     const std::uint32_t state = d3d9::createTextureState(cpu, device, info.width, info.height, 1u, 0u,
-                                                         info.format, 1u /*D3DPOOL_MANAGED*/, &make_why);
+                                                         info.format, 1u /*D3DPOOL_MANAGED*/, &make_why,
+                                                         &out_of_memory);
     if (state == 0) {
-        d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory", "%s %ux%u：%s", info.kind, info.width, info.height,
-                 make_why.c_str());
+        if (out_of_memory) {
+            // ★ 我们自己的容量问题 ≠ "这条导出没实现"：独立措辞 + 独立 stop_why，⛔ 不记缺口。
+            d3dxResourceStop(cpu, "D3DXCreateTextureFromFileInMemory", "%s %s：%s", info.kind,
+                             textureShapeNote(info.width, info.height, info.format).c_str(),
+                             make_why.c_str());
+            call.result = d3d9::kOutOfMemory;
+            return;
+        }
+        // ★ 失败点必须自带 w×h / format / 预计字节数：`why` 只说"分配失败"时，
+        //   不跑第二次就没法把 5898240 这类数字对回到具体一张纹理。
+        d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory", "%s %s：%s", info.kind,
+                 textureShapeNote(info.width, info.height, info.format).c_str(), make_why.c_str());
         call.result = d3d9::kFail;
         return;
     }
-    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DTexture9", textureMethods(), state);
+    // ★ 析构钩子：纹理对象**独占**状态块 + arena 像素块 ⇒ 引用降到 0 时由 ComRegistry 的
+    //   唯一收敛点回收（内部裸 release 也覆盖）。⛔ 不要再在 Release shim 里单独调一次。
+    const std::uint32_t obj =
+        cpu.com->createObject(cpu, "IDirect3DTexture9", textureMethods(), state, &d3d9::destroyTextureState);
     if (obj == 0) {
         d3d9::destroyTextureState(cpu, state);
         d3dxTrap(cpu, "D3DXCreateTextureFromFileInMemory", "在 guest 内存里建 IDirect3DTexture9 对象失败");
@@ -1008,14 +1068,28 @@ void shimD3DXCreateTexture(X86& cpu, ShimCall& call) {
         return;
     }
     std::string why;
+    bool out_of_memory = false;
     const std::uint32_t state =
-        d3d9::createTextureState(cpu, device, width, height, levels, usage, format, pool, &why);
+        d3d9::createTextureState(cpu, device, width, height, levels, usage, format, pool, &why,
+                                 &out_of_memory);
     if (state == 0) {
-        d3dxTrap(cpu, "D3DXCreateTexture", "%s", why.c_str());
+        if (out_of_memory) {
+            // ★ 我们自己的容量问题 ≠ "这条导出没实现"：D3DX 真机在这里返回 E_OUTOFMEMORY，
+            //   但本线返回它会让 guest 走去 throw C++ 异常（实测，见 d3dxResourceStop 的注释）
+            //   ⇒ 独立措辞 + 独立 stop 原因硬停；⛔ 不写 "unimplemented"、⛔ 不 ++unimplemented_calls。
+            d3dxResourceStop(cpu, "D3DXCreateTexture", "%s：%s",
+                             textureShapeNote(width, height, format).c_str(), why.c_str());
+            call.result = d3d9::kOutOfMemory;
+            return;
+        }
+        d3dxTrap(cpu, "D3DXCreateTexture", "%s：%s", textureShapeNote(width, height, format).c_str(),
+                 why.c_str());
         call.result = d3d9::kFail;
         return;
     }
-    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DTexture9", textureMethods(), state);
+    // ★ 析构钩子：见 D3DXCreateTextureFromFileInMemory 处的同一条说明。
+    const std::uint32_t obj =
+        cpu.com->createObject(cpu, "IDirect3DTexture9", textureMethods(), state, &d3d9::destroyTextureState);
     if (obj == 0) {
         d3d9::destroyTextureState(cpu, state);
         d3dxTrap(cpu, "D3DXCreateTexture", "在 guest 内存里建 IDirect3DTexture9 对象失败");
@@ -1259,8 +1333,15 @@ void shimD3DXCreateSprite(X86& cpu, ShimCall& call) {
         return;
     }
     std::string why;
-    const std::uint32_t state = d3dx9::createSpriteState(cpu, device, &why);
+    bool out_of_memory = false;
+    const std::uint32_t state = d3dx9::createSpriteState(cpu, device, &why, &out_of_memory);
     if (state == 0) {
+        if (out_of_memory) {
+            // ★ 同一口径：guest 堆不够 ≠ "D3DXCreateSprite 没实现"（⛔ 不记缺口、不写 unimplemented）。
+            d3dxResourceStop(cpu, "D3DXCreateSprite", "%s", why.c_str());
+            call.result = d3dx9::kFail;
+            return;
+        }
         d3dxTrap(cpu, "D3DXCreateSprite", "%s", why.c_str());
         call.result = d3dx9::kFail;
         return;

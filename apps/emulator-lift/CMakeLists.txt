@@ -44,6 +44,10 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/guest_call.cpp
     src/runtime/audio.cpp
     src/runtime/host_window.cpp
+    # ★ 输入：`input.cpp` = SDL 真实事件与 `--input-script` 注入的**唯一**汇合点；
+    #   `input_script.cpp` = 指令式时间线（`at frame N` / `at guest_ms T` / click / key ...）。
+    src/runtime/input.cpp
+    src/runtime/input_script.cpp
     src/runtime/pe_resource.cpp
     src/runtime/surface.cpp
     src/runtime/present.cpp
@@ -53,6 +57,8 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/ddraw_surface.cpp
     src/runtime/com.cpp
     src/runtime/machine.cpp
+    # ★ 单令牌（guest 执行互斥）：主线程按块取、音频 feeder 每块取；违规计数见 guest_token.h
+    src/runtime/guest_token.cpp
     src/runtime/exec.cpp
     src/runtime/exec_integer.cpp
     src/runtime/exec_control.cpp
@@ -210,6 +216,33 @@ if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_AS
         TIMEOUT 180)
 endif()
 
+# ---- assets：TITLE ⇄ OPTION 往返 2 轮 —— 纹理 arena 不许增长（第 2 次仍能进入）----
+# 判据见 tests/option_roundtrip.cpp 的头注释（红了意味着什么 / 容差从哪来）。
+# 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；
+# GPU / 窗口不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
+# ★ **opt-in**：这条要真启模拟器、真跑 TITLE ⇄ OPTION（子进程按**墙钟秒**计，本测试 2 轮），
+#   是默认门禁里最贵的一条 ⇒ 默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_ASSETS}`）：
+#     $env:LIFT_ASSETS=1; ctest --test-dir out -R option-roundtrip --output-on-failure
+#   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
+#   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
+# ★ `add_executable` 也在同一个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连这个 target 都不编。
+# ★ 子进程走 `--present window --present-hidden --raster gpu`：headless 的 CPU 光栅化实测
+#   490 帧要 10 分钟以上；窗口隐藏仍无焦点、无真实光标。
+if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+    add_executable(lift-option-roundtrip tests/option_roundtrip.cpp)
+    target_link_libraries(lift-option-roundtrip PRIVATE emulator-lift-runtime)
+    add_test(NAME option-roundtrip COMMAND lift-option-roundtrip
+        $<TARGET_FILE:emulator-lift>
+        "E:/Games/Eushully/天結/install"
+        "${CMAKE_CURRENT_BINARY_DIR}/option-roundtrip-work")
+    set_tests_properties(option-roundtrip PROPERTIES
+        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按**相对当前目录**找的
+        #   （`../../corpus/assets/age/…sectfix.EXE`）⇒ 停在 `out/` 会找不到执行源、被测试 SKIP。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 420)
+endif()
+
 # =====================================================================================
 # 测试分级（AGENTS.md §5「CTest 那一档不写 pragma，判据是注册位置」）：#   - **顶层无条件注册** ⇒ 默认 ctest 就跑（不需要游戏 / LFS）⇒ pure
 #   - 落在 if(...) / foreach / function 里 ⇒ 需要 LFS 资产或游戏安装 ⇒ assets
@@ -269,6 +302,20 @@ add_test(NAME user32-window COMMAND lift-user32-window)
 add_executable(lift-window-events tests/window_events.cpp)
 target_link_libraries(lift-window-events PRIVATE emulator-lift-runtime)
 add_test(NAME window-events COMMAND lift-window-events)
+
+# =====================================================================================
+# pure：**注入通道不依赖 OS**（2026-11-08）
+# ★ 判据（红了意味着什么）：一份 `--input-script` 时间线在**没有 SDL 视频、没有窗口焦点、
+#   没有任何人挪过真实光标**的进程里跑完之后，guest 通过它自己的读点看到注入：
+#   `GetAsyncKeyState` 返回 0x8000、`GetCursorPos` 返回注入坐标 + 窗口原点、`PeekMessageA`
+#   取到 WM_LBUTTONDOWN / WM_KEYDOWN / WM_LBUTTONUP；而 `click` 的按下与抬起跨了一帧
+#   （guest 必须两态都采到）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（不建 SDL 窗口、不需要游戏 / LFS）。
+# ⛔ 不许给它 `SDL_VIDEODRIVER=dummy` 之类的环境：那会掩盖"注入其实靠 SDL 事件泵"的回归。
+# =====================================================================================
+add_executable(lift-input-injection tests/input_injection.cpp)
+target_link_libraries(lift-input-injection PRIVATE emulator-lift-runtime)
+add_test(NAME input-injection COMMAND lift-input-injection)
 
 # ---- pure：`--skip-logo` 的字段写入（T_Command+0x5EB5C；锚 0x004BAA37）----
 add_executable(lift-skip-logo tests/skip_logo.cpp)
@@ -516,12 +563,23 @@ add_executable(lift-gdi tests/gdi.cpp)
 target_link_libraries(lift-gdi PRIVATE emulator-lift-runtime)
 add_test(NAME gdi COMMAND lift-gdi)
 
+# ---- pure：`FontEngine::metrics` 的度量缓存（键 / 失效 / 命中率；用假源，不读字体文件）----
+add_executable(lift-gdi-font-metrics-cache tests/gdi_font_metrics_cache.cpp)
+target_link_libraries(lift-gdi-font-metrics-cache PRIVATE emulator-lift-runtime)
+add_test(NAME gdi-font-metrics-cache COMMAND lift-gdi-font-metrics-cache)
+
 # ---- assets：真 Amayui CN（缺字体文件时整个测试不注册 ⇒ ⛔ 不假绿）----
 if(EXISTS "${LIFT_HOST_FONT_PATH}")
     add_executable(lift-gdi-font tests/gdi_font.cpp)
     target_link_libraries(lift-gdi-font PRIVATE emulator-lift-runtime)
     add_test(NAME gdi-font COMMAND lift-gdi-font)
     set_tests_properties(gdi-font PROPERTIES SKIP_RETURN_CODE 77)
+
+    # 宿主基线补偿：位移在 `gmptGlyphOrigin.y`（2px 方向 + 度量不动 + 墨迹像素数/质心）
+    add_executable(lift-text-baseline-lift tests/text_baseline_lift.cpp)
+    target_link_libraries(lift-text-baseline-lift PRIVATE emulator-lift-runtime)
+    add_test(NAME text-baseline-lift COMMAND lift-text-baseline-lift)
+    set_tests_properties(text-baseline-lift PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # =====================================================================================
@@ -656,3 +714,16 @@ target_sources(emulator-lift-runtime PRIVATE
 add_executable(lift-dshow-graph tests/dshow_graph.cpp)
 target_link_libraries(lift-dshow-graph PRIVATE emulator-lift-runtime)
 add_test(NAME dshow-graph COMMAND lift-dshow-graph)
+
+# =====================================================================================
+# 并发契约：**单令牌**（`src/runtime/guest_token.h`）
+# ★ 判据（红了意味着什么，见 tests/guest_token.cpp 文件头）：两条宿主线程各 200000 次
+#   guest 堆 alloc/free（真实 `GuestHeap` + 真实令牌）⇒ 不崩、`in_use == 0`、
+#   `violations == 0`、`max-concurrent == 1`。
+# ★ 把 `GuestToken::acquire/release` 短路成空操作 ⇒ 违规计数 / 并发持有者数当场红
+#   （2026-11-08 实测，见任务记录的 mutation）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（不碰游戏 / LFS / SDL）。
+# =====================================================================================
+add_executable(lift-guest-token tests/guest_token.cpp)
+target_link_libraries(lift-guest-token PRIVATE emulator-lift-runtime)
+add_test(NAME guest-token-stress COMMAND lift-guest-token)

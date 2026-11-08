@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "runtime/guest_token.h"
 #include "runtime/host_encoding.h"
 
 namespace lift {
@@ -32,6 +33,9 @@ const char* handleKindName(HandleKind kind) {
 }
 
 std::uint32_t HandleTable::add(HandleKind kind, const char* name, void* payload, std::uint32_t aux) {
+    // ★ `push_back` 会让已发出去的 `HandleEntry*`（get()）悬垂 ⇒ 必须与拿指针的人串行：
+    //   单令牌不变式（guest_token.h）。违规只计数，不 abort（见 heap.cpp 同一口径）。
+    guestToken().check("HandleTable::add");
     Slot s;
     s.value = kFirst + kStep * static_cast<std::uint32_t>(entries_.size());
     s.entry.kind = kind;

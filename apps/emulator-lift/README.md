@@ -115,9 +115,19 @@
   - **feeder 线程**有自己的 `X86`（GPR/x87/XMM/EIP/ESP/FS/thread_id）、专用 guest 栈、
     私有 `BlockCache`/`Decoder`，直接在自己的线程里跑 `sub_4B6C30`；
   - **mixer 线程**独立按设备游标读 guest 环并推 SDL，主线程卡在 Present/长 shim 也不会断音频；
-  - 同步边界就是引擎自己的**每槽 `CRITICAL_SECTION`**：guest 的 `Enter/LeaveCriticalSection`
-    现在映射到宿主 per-EA 递归锁（`CriticalSectionTable`），feeder 会**真的阻塞**；
-    `ComRegistry` / `ShimRegistry` 的宿主表加锁；设备模型用 `AudioEngine::mutex_`。
+  - **令牌（`runtime/guest_token.h`）是 guest 可见共享容器的并发边界**：任一时刻最多一个宿主
+    线程持有令牌；`GuestHeap` / `HandleTable` / `Vfs` / `ComRegistry` / `SurfaceArena` / guest
+    内存账本只在令牌里被访问。**guest 指令执行可以并行**（主线程 / feeder 各跑各的），互斥点在
+    **每次 shim 调用**（`ShimRegistry::invoke`）—— 容器访问全部发生在 shim 实现里。主线程另在
+    每个**块边界**取/放。任何会阻塞的宿主等待（guest `CRITICAL_SECTION`、`GetMessageA` 的宿主
+    事件泵、join feeder）先 `Yield` 再等 —— ⛔ 持令牌阻塞会与另一条执行流互等。
+    ⚠ 为什么不是"整次 fill 持令牌"：feeder 一次 fill ~0.3–0.4 s CPU，与主线程 CPU 相加 ≈ 单核
+    上界 ⇒ wall 不可能低于两者之和（实测 34.8–39.1 s；并行 15.1 s）。见需求单
+    `REQ-01M6X64J338E6YDQXJB9RKAFSG`。
+  - 同步边界还有引擎自己的**每槽 `CRITICAL_SECTION`**：guest 的 `Enter/LeaveCriticalSection`
+    映射到宿主 per-EA 递归锁（`CriticalSectionTable`）。feeder 到点会等这个槽：实现是
+    `tryEnter` + **放开令牌** 1 ms 重试（⛔ 不是持令牌阻塞）；主线程的 `Enter` 若撞上 feeder
+    持有的槽，也先 `Yield` 令牌再等宿主锁。
   - `--audio=sdl` 且宿主时钟（窗口模式/`--real-time`）⇒ 方案 C；否则（`--audio=virtual`、
     纯 CTest）自动回退到方案 D 的主线程泵，保持确定性。
 - 其余服务线程（DirectShow 读文件 / MF 回调）仍是**伪线程**：`CreateThread` 只发线程句柄，
@@ -159,6 +169,12 @@
 - **对齐 / 清零**：`HeapAlloc` 8 字节、`VirtualAlloc` 64 KB；`HEAP_ZERO_MEMORY` / `LMEM_ZEROINIT` /
   `VirtualAlloc` 清零；`realloc` 保内容。`fs` 段基址指向 guest TEB（SEH / TLS 用）。
 - ⛔ guest 槽里不许出现宿主指针；⛔ 不把宿主 `malloc` 的返回值当 guest 地址。
+- **怎么查**：fault 归因（`guest memory fault` / `host fault`，退出码 3 / 4）由本层的 VEH 决定；
+  Windows 上 `LIFT_VEH_PASSTHROUGH=1` 让本层对**非 guest 地址**的异常返回 `EXCEPTION_CONTINUE_SEARCH`
+  （把异常让给下一位 handler —— ASAN 的 shadow 惰性提交、调试器的第一机会异常都要靠它）。**默认关**：
+  不设该环境变量时行为不变（host 诊断 + `_Exit(4)`，守卫 `tests/fault_report.cpp` 的
+  `host-av-attributed-to-host`）。跑 ASAN 版二进制时必须开它，否则 ASAN 起不来 ——
+  成因与该分支的边界写在 `src/runtime/memory.cpp` 的 `vectoredHandler` 注释里。
 
 ## 3. 目录（落点）
 
@@ -175,11 +191,14 @@ apps/emulator-lift/
                                         --profile --profile-top --native-overrides
                                         --present headless|window|auto --present-driver
                                         --present-vsync --present-hidden --present-screenshot
+                                        --present-screenshot-frame --input-script
   src/runtime/log.h                   ← 日志分级 / 分类 / 模式（默认 warn；Error 永远显示）
   src/runtime/host_encoding.{h,cpp}   ← 进程入口编码契约：UTF-8 argv（GetCommandLineW）/ 控制台码页
   src/runtime/native_overrides.{h,cpp}← guest 函数级 native override（试点；默认关）
   src/runtime/present.{h,cpp}         ← 唯一记录点（hash / frameCount / BMP）+ 可选 PresentSink
   src/runtime/present_sdl.{h,cpp}     ← 真实 SDL 窗口 + GPU API 呈现（pimpl；头文件不暴露 SDL 类型）
+  src/runtime/input.{h,cpp}           ← ★ 输入应用层：SDL 真实事件与 `--input-script` 注入的**唯一**汇合点
+  src/runtime/input_script.{h,cpp}    ← ★ 指令式输入时间线（at frame / at guest_ms / click / key ...）
   src/runtime/frame_blit.{h,cpp}      ← guest 后缓冲 masks → 宿主纹理格式（六种；纯函数）
   src/runtime/memory.{h,cpp}          ← 4 GiB 预留 + 按需提交 + 提交位图 + 区域表 + fault 诊断
   src/runtime/image.{h,cpp}           ← PE 节表/导入表/入口 + 映射 + 栈(1 MiB+guard) + TEB/PEB
@@ -251,6 +270,9 @@ $env:LIFT_STOP_AFTER_MOVIE = "1"
   `out/lift-movie-logo.exe`（参数见 `CMakeLists.txt` 的 `add_test`）而不设该变量、也不传那个开关。
 - 测试据此断言钩子生效（两个子进程的 run summary 都得是 `stop      : stopped`）—— 钩子失效时它不会
   静默退回"变慢但仍绿"。判据挂在 CMake 传的那个参数上，**不挂在环境变量**上（env 被删掉时也要红）。
+- 另一条 assets 用例是 `option-roundtrip`（`tests/option_roundtrip.cpp`）：注册条件**只有**
+  `SYS4INI.BIN` 存在，**不要求** `LIFT_ASSETS`（它是"OPTION 往返后纹理 arena 不增长"的端到端判据，
+  默认门禁里必须真跑）。它自己起三次模拟器（1 / 2 / 3 轮往返），判据与容差写在该文件头注释里。
 
 ## 4.1 渲染产物导出
 D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena::dumpBmp`，支持 16/32bpp）：
@@ -326,6 +348,74 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   关窗（或 ESC）先发 `WM_CLOSE`，宽限 3 帧 / 500ms 后 `StopReason::Stopped`（`detail="present: 窗口关闭"`）。
   headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
+- `--present-screenshot-frame N`：只回读第 N 个 Present（0/缺省 = 每帧都写）。配合 `--max-frames N`
+  就是"定帧截图"（只产出一张，不写 N 份 BMP）。见 §4.2c 的一行命令。
+
+## 4.2c 脚本化输入（`--input-script`）
+
+**为什么有它**：要"点一下 OPTION"曾经必须 `SetForegroundWindow` → 把真实光标挪进窗口 →
+`SendInput` → 等几百毫秒。那套动作的前提全是**OS 侧条件**：SDL 只把键盘事件给**有焦点**的窗口、
+鼠标事件给**光标下面**的窗口，而且 `WINDOW_FOCUS_LOST` 会把键电平清掉。下面这条通道把这些前提全去掉：
+**注入不需要焦点、不移动真实光标、可一条命令复现**。
+
+**机制（判据：注入路径不依赖任何只有 OS 能提供的条件）**
+
+- `src/runtime/input.cpp` 是 SDL 真实事件与注入的**唯一汇合点**：两者都只改 `WindowManager` 的同一份
+  状态（影子键电平 / 鼠标按钮位图 / 虚拟光标）并 post **同一组** `WM_*`。guest 的全部读点
+  （`GetAsyncKeyState`、`GetCursorPos`、`PeekMessageA`/`GetMessageA` → `DispatchMessageA` → WndProc）
+  因此读的是同一份状态；⛔ 不存在"注入只发消息、`GetAsyncKeyState` 仍读 OS"的第二份状态。
+- 注入**不经过 SDL**、不读 OS 键鼠、不需要窗口焦点；`--present headless`（不初始化 SDL 视频）也能注入。
+- 坐标是 **guest 客户区坐标**（引擎的 1280×720 虚拟屏）。`client → screen` 只经过
+  `WindowManager::setCursorClientPos`（+ 窗口原点），与 SDL 路径**同一处**；⛔ 注入侧没有第二套映射。
+- 时间线在**块边界**推进（`Machine::run`）；guest 阻塞在 `GetMessageA` 时由**窗口模式的宿主事件泵**
+  推进（`--present headless` 没有事件源：guest 真阻塞在 `GetMessageA` 时仍按既有语义 abort）。
+  `quit` 会同时投一条 `WM_QUIT` 把阻塞中的 guest 唤醒。
+- **优先级（显式，互不污染）**：脚本按下的键 / 按钮归脚本，期间 OS 的按下 / 抬起 / **焦点丢失清键**
+  都不生效（注入不因失焦而丢）；脚本 `key_up` / `mouse_up` 即交还 OS；反过来，脚本接管光标期间
+  **真人松开按钮仍被接受**（否则 `VK_LBUTTON` 电平会卡在按下）。脚本结束（动作跑完 / `quit`）时，
+  仍按着的键 / 按钮会**按同一组 WM_* 抬起**（WndProc 收得到 `WM_KEYUP` / `WM_LBUTTONUP`）再把所有权
+  交还 —— 真人接着玩不会撞上"卡住的键"。
+- ⚠ `--present window` 走 real-time 时钟 ⇒ **毫秒**触发不可复现，用**帧**；`--present headless`
+  两档都确定性。headless 的帧是纯 CPU 光栅（比 GPU 路径慢一个量级以上）⇒ 要跑长脚本 / 看画面用
+  `--present window --present-hidden --raster gpu`（仍然无焦点、无光标，仍可脚本化）。
+
+**语法**（一行一条；`#` 起注释；换行或 `;` 分隔）
+
+| 写法 | 含义 |
+|---|---|
+| `at frame N` | 时间线锚点 = 第 N 个 Present（1 起；headless 也计数） |
+| `at guest_ms T` | 锚点 = guest 虚拟时钟 T 毫秒 |
+| `after N frames` / `after N ms` | 锚点 = 上一个同单位锚点 + N |
+| `wait N frames` / `wait N ms` | 推进锚点，并记一个 **no-op 动作**（脚本要等它到期才收口 ⇒ 尾部 `wait` 能"保持按住 / 保持等待"） |
+| `mouse_move X Y` | 客户区坐标；脚本由此**拥有光标**（`GetCursorPos` 立即是它） |
+| `mouse_down [left\|right\|middle]` / `mouse_up [...]` | 用脚本上一次的坐标 |
+| `click X Y [button] [hold N]` | move + down 在触发帧，up 在 +N 帧（缺省 1；一帧内 down+up 会被 guest 漏掉） |
+| `key_down VK` / `key_up VK` | Win32 虚拟键码（1..255，十进制或 `0x`） |
+| `quit` | 触发时结束本次运行（`StopReason::Stopped`） |
+
+动作前必须先给时间（`at` / `after` / `wait`），否则解析失败（带行号，exit 2）。
+
+**一条命令**（实测：`--skip-logo` 到 TITLE → 点 Option → 停在第 155 帧 → 截图）
+
+```bash
+cd apps/emulator-lift
+# .tmp/input/click-option.txt：
+#   at frame 120
+#   mouse_move 812 622
+#   wait 5 frames
+#   click 812 622
+#   wait 30 frames
+#   quit
+./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install \
+  --present window --present-hidden --raster gpu --native-overrides all --skip-logo \
+  --input-script ../../.tmp/input/click-option.txt --max-frames 200 \
+  --present-screenshot ../../.tmp/option-window.bmp --present-screenshot-frame 155
+```
+
+产物 `option-window.bmp` 就是 OPTION（系统设定）界面。`--max-frames 200` / `quit` 二者都只是兜底；
+`--present-screenshot-frame` 让截图只写一张。把 `--present window --present-hidden --raster gpu` 换成
+`--present headless` 就得到**不建任何窗口**的同一条时间线（CPU 光栅，慢，但确定性）。
+
 
 ## 4.2b GPU 光栅化（`--raster auto|cpu|gpu`）
 
@@ -535,6 +625,11 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   `std::map` 很贵 ⇒ 按**日志可见性**门控：缺省 `warn` 级别下不计算（`stats=0.0ms`），
   `--log-level info`（或 `--log-cat d3d9 --log-level info`）时照旧计算并逐字打印同一行。
   ⛔ 这不是删功能：hash / frameCount / `--dump-frame` 都在别处，照旧每帧算。
+- `--profile` 的 shim 表末尾还有一行 `font!TEXTMETRIC-cache hits=… misses=… hit=…%`
+  （`FontEngine::metrics` 的**度量缓存**命中率）：`gdi32!GetTextMetricsA` 的花费是现象，
+  这一行才是"缓存到底有没有用"；它不是墙钟、**不进**上面那张表（两表不可相加）。
+  命中率低 ⇒ 调用方在字号 / 字体之间来回跳，先查 guest 的 `CreateFontIndirectA` + `SelectObject`
+  分布，别先改缓存。
 - 只有 shim 慢、guest 不慢 ⇒ 先看 `--profile` 的 `=== profile: shims` 表（哪一项、调用几次、平均多少），
   不要再到 guest 函数表里找热点；`shim :` 行仍用于"这一帧"的归因。
 - `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS=<ms>`，缺省 20）会为每次慢 `Draw*` 打一行
@@ -548,10 +643,12 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 ## 4.4 音频（方案 C：真 feeder 线程 + 独立 mixer）
 
 ```bash
-# 默认 = SDL3 真设备（能听到）；--audio=off 回到旧 silent；--audio=virtual 用虚拟设备时钟
+# 默认 = SDL3 真设备但**静音**（--sound 才出声）；--audio=off 回到旧 silent；
+# --audio=virtual 用虚拟设备时钟（确定性；dump 与 --sound 正交）
 emulator-lift --game-dir <install> --skip-logo --native-overrides all --present window
+emulator-lift --game-dir <install> --skip-logo --native-overrides all --present window --sound
 emulator-lift --game-dir <install> --skip-logo --native-overrides all --present headless \
-              --audio virtual --audio-dump .tmp/title.wav --max-insns 400000000
+              --audio virtual --sound --audio-dump .tmp/title.wav --max-insns 400000000
 ```
 
 口径（`docs/audio-implementation.md` 是唯一真源）：
@@ -563,14 +660,26 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
   `sub_4B6C30`；`--native-overrides` 的 `_memcpy/_memset` 也在 feeder 私有一份。
 - **谁混音**：独立 `mixer` 线程按设备游标读 guest 环并推 `SDL_PutAudioStreamData`。主线程卡在
   Present / 长 shim 不再导致音频断裂。
-- **同步边界**：引擎自己的**每槽 `CRITICAL_SECTION`** —— guest `Enter/LeaveCriticalSection`
-  映射到宿主 per-EA 递归锁（`CriticalSectionTable`），feeder 会真的阻塞；`ComRegistry` /
-  `ShimRegistry` 的宿主表加锁；设备模型用 `AudioEngine::mutex_`。⛔ 不是全局单令牌：fill 期间
-  mixer / 主线程仍可运行。
+- **同步边界**：**令牌**（`runtime/guest_token.h`）—— 任一时刻最多一个宿主线程持有令牌；
+  guest 可见容器只在令牌里访问。互斥点在**每次 shim 调用**（`ShimRegistry::invoke`）：
+  feeder 的整次 fill **不**持令牌（guest 指令与主线程并行），只有它的 shim 调用持令牌；
+  主线程按块取/放；guest `Enter/LeaveCriticalSection` 映射到宿主 per-EA 递归锁（阻塞前让出
+  令牌）；设备模型另有 `AudioEngine::mutex_`。⛔ 不要绕开令牌直接碰 `GuestHeap` /
+  `HandleTable` / `ComRegistry` / `Vfs`。可观测检查点覆盖 `GuestHeap::alloc/free/realloc`、
+  `HandleTable::add`、`machine.block`、`shim.invoke`（未持令牌 ⇒ 违规计数，`--assert-guest-token`
+  判红）；`Vfs` / `ComRegistry` 没有单独计数点，靠"访问都在 shim 里"这条结构约束。
 - **时钟档**：`sdl` + 宿主时钟（窗口模式/`--real-time`）= **方案 C 真线程**；`virtual` 或没有
   `--real-time` 的 sdl = **方案 D 主线程泵**（确定性回退，CTest 用）。窗口模式会强制 `--real-time`。
 - **输出格式固定 48k / 16 bit / 2 ch**；每条缓冲按自己的 `WAVEFORMATEX` 做采样率/声道转换
   （实测引擎会建 44.1k mono SE、48k stereo BGM、44.1k stereo 静音垫）。
+- **静音开关**：缺省 `muted=1`（`--sound` 才出声）。它与 `--audio`（后端选择）**正交**：
+  设备创建 / 混音器 / feeder 线程 / 格式协商 / guest 的 DirectSound 调用 / underrun·dropped
+  统计**全部照跑**，只在最终交付点（`out` 生成之后、`pushMixed` 之前）把缓冲覆盖为 0。
+  怎么查：运行摘要的 `audio     :` 行有 `device=ok|fallback|none muted=1|0 muted_bytes=
+  fills= fill_bytes=`；`muted_bytes == mixed > 0` = "确实有内容被静音"，
+  `muted_bytes=0` 且 `device=none` = "没有交付 / 没有设备"。`begin()` 的 Info 行也会写
+  `muted=1（缺省；--sound 可听）`。⛔ 要看 dump 里的 PCM 必须带 `--sound`（缺省时 dump 也全 0，
+  因为门在 `pushMixed` 之前的唯一交付点）。
 - **通知/游标**：每条缓冲的 `played` 以它自己的 `nAvgBytesPerSec` 折算；通知按位置排序后入队
   （一次推进跨多个点时，⛔ 不能按 quarter 序号入队，否则回绕 0 会排在 3/4 前）。
 - **lead**：真线程 **100ms**（mixer 线程独立，fill ≈400ms 不再需要覆盖它）；泵回退 **600ms**。
@@ -583,6 +692,41 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
 - **CTest**：`audio-device`（`tests/audio.cpp`）覆盖逐缓冲格式 / 通知次序 / dump 逐字节 / 泵的整份
   上下文交换 / CS 与在飞计数成对收尾。⛔ 它不打开 SDL 设备（pure 档）；真线程路径由真实运行验收
   （`LIFT_AUDIO_TRACE=1` 打每次 feeder fill 的墙钟）。
+
+### 怎么查（单令牌 / 并发）
+
+- `--assert-guest-token`：每次运行的摘要里有 `token     : violations=0 max-concurrent=1`；
+  违规 > 0 或同时持有者 > 1 ⇒ 退出码 4。没用令牌的纯单线程夹具不会 arm（不误报）。
+- `ctest -R guest-token-stress`：两条宿主线程 × 200000 次真实 `GuestHeap` alloc/free 的压力守卫；
+  把 `GuestToken::acquire/release` 短路成空操作 ⇒ 它红。
+- `LIFT_AUDIO_TRACE=1`：每次 feeder fill 的墙钟 / override 命中；摘要里的
+  `audio : ... underruns=N` 是设备欠载账（⛔ 弱指标：只在 SDL 队列 == 0 时计；跨版本不可比 ——
+  并发修复的 A/B 用同一份代码的"令牌开/关"对照，数据见需求单
+  `REQ-01M6X64J338E6YDQXJB9RKAFSG`）。
+- 违规的**第一个**现场：摘要 `token` 行的 `first=<site>`（`GuestHeap::alloc` /
+  `HandleTable::add` / `machine.block` …；这些 check 都在 shim 里执行 ⇒ 覆盖 feeder 的容器访问）。
+
+## 4.5 运行摘要怎么读（`stop` / `detail` / `heap` / `arena`）
+
+每次运行结束打一份摘要（`Machine::dumpRunSummary`）。诊断按这个顺序看：
+
+- `stop      : <reason> @ eip=…` + `detail    : …`：**停因**。`detail` 优先用 shim 写的 `stop_why`
+  （形如 `<原因>（shim <module>!<name>）`）⇒「未实现」「资源耗尽」「guest 主动退出」在摘要里分得开。
+- `heap      : in_use … peak … allocs …`：**主 guest 堆**（Win32 / CRT 分配走它）。
+- `arena     : surfaces N in_use U peak P largest-free F`：**surface arena**（D3D9 纹理 / 后缓冲 /
+  深度的独立 GuestHeap）。★ 它不与主堆共享 ⇒"纹理没回收"在主堆那行**完全看不见**。
+  `largest-free` 是当前最大**连续**空闲块：`in_use` 还没满但 `largest-free` 很小 = 碎片化
+  （首次适配只认连续块，见 `runtime/heap.cpp`）。
+- `shims     : imported … / called-unimplemented …`：后者只数**被调用过、且没有实现**的导入。
+
+★ **两类停不许混**（否则会把我方容量问题记成"guest 用了没实现的导出"）：
+
+| stderr 标题 | 含义 | 进 `called-unimplemented` / `stop_why` 吗 |
+|---|---|---|
+| `=== unimplemented <模块> call ===` | 真的还没实现（缺口） | 是（缺口的账） |
+| `=== D3DX 资源耗尽（不是 unimplemented）===` | **我方** arena / guest 堆不够（容量或碎片） | 否；独立 `stop_why = "D3DX 资源耗尽"` |
+
+D3DX 建纹理失败的 reason 里带 `w×h / D3DFORMAT / 像素字节`，与 `surface.cpp` / `heap.cpp` 的数字能直接对账。
 
 ## 5. 真源
 

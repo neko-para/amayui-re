@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -529,6 +530,13 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
         if (why) *why = buf;
         return kInvalidCall;
     }
+    // ★ 深度清必须**真的落到 GPU**：D3D9 的深度缓冲在 guest 内存里只有一份 CPU 镜像
+    //   （`clearDepth` 写它），宿主的 D32 是另一块纹理。这里把"清深度"的请求交给后端，
+    //   由它在下一个 render pass 用 CLEAR 落地 —— ⛔ 不要指望"颜色同步顺带清"。
+    //   ★ 放在 TARGET 位的早退之前：`Clear(0,NULL,D3DCLEAR_ZBUFFER,..)` 也要生效。
+    if ((flags & kClearZBuffer) != 0) {
+        if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive()) gpu->rasterRequestDepthClear();
+    }
     const std::uint32_t color_arena = dev.pipeline != 0 ? renderTargetArena(cpu, dev.pipeline) : 0u;
     GuestSurface* gs = m->surfaces().find(color_arena != 0 ? color_arena : dev.arena);
     if (!gs) {
@@ -681,6 +689,36 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
         if (why) *why = "D3D9：HeadlessPresenter.present 失败：" + err;
         return kFail;
     }
+    // ★ 诊断（`LIFT_GPU_SUBMITS=1`，缺省关、零成本）：每帧的 GPU 提交/切段/上传计数。
+    //   "提交次数"是合批改造的判据 ⇒ 把它变成可观测数字，⛔ 不靠"从 End 次数推导"。
+    //   记在 present 之后 ⇒ 本帧的 delta 含"画的那一次 + 读回那一次 + 直出那一次"。
+    if (gpu_active && std::getenv("LIFT_GPU_SUBMITS") != nullptr) {
+        static std::uint64_t last_submits = 0;
+        static std::uint64_t last_flush = 0;
+        static std::uint64_t last_readback = 0;
+        static std::uint64_t last_upload = 0;
+        static std::uint64_t last_present = 0;
+        static std::uint64_t last_cuts = 0;
+        const GpuRasterStats now = gpuRasterStats();
+        std::fprintf(stderr,
+                     "[gpu-submits] frame=%llu submits=%llu (flush=%llu readback=%llu upload=%llu "
+                     "present=%llu) cuts=%llu uploads=%llu full=%llu\n",
+                     static_cast<unsigned long long>(m->presenter().frameCount()),
+                     static_cast<unsigned long long>(now.submits - last_submits),
+                     static_cast<unsigned long long>(now.submits_flush - last_flush),
+                     static_cast<unsigned long long>(now.submits_readback - last_readback),
+                     static_cast<unsigned long long>(now.submits_upload - last_upload),
+                     static_cast<unsigned long long>(now.submits_present - last_present),
+                     static_cast<unsigned long long>(now.cuts - last_cuts),
+                     static_cast<unsigned long long>(now.uploads),
+                     static_cast<unsigned long long>(now.full_uploads));
+        last_submits = now.submits;
+        last_flush = now.submits_flush;
+        last_readback = now.submits_readback;
+        last_upload = now.submits_upload;
+        last_present = now.submits_present;
+        last_cuts = now.cuts;
+    }
     if (!dump_path.empty()) d3d9Log("Present", "帧 BMP 已写入 %s", dump_path.c_str());
     cpu.mem->wr32(dev.state + kDvPresents, dev.presents + 1u);
     // ★ 第一帧的**像素判据**：后缓冲里"非背景像素数"（背景 = 出现次数最多的那个像素值）。
@@ -744,7 +782,18 @@ enum TexOff : std::uint32_t {
     kTxVersion = 52,
     kTxVersionSeq = 56,  // 下一个可发的序列号（⛔ 永不复用已发过的号；0 保留给"未知"）
     kTxSerial = 60,      // 进程级单调纹理身份（GPU 缓存键；⛔ 不复用 guest 指针/状态块 EA）
-    kTxBytes = 64,
+    // ★ 内容写入区域（方案 C 的脏矩形判据）：最近一次 UnlockRect 的写入矩形 + 版本链。
+    kTxWriteX0 = 64,
+    kTxWriteY0 = 68,
+    kTxWriteX1 = 72,
+    kTxWriteY1 = 76,
+    kTxWriteVersion = 80,      // 这次写的版本号（0 = 写区不可信：没解锁 / RT 降级）
+    kTxPrevWriteVersion = 84,  // 上一次写的版本号（0 = 没有）
+    kTxPendingX0 = 88,         // 本次 LockRect 的矩形（解锁时搬到 kTxWrite*）
+    kTxPendingY0 = 92,
+    kTxPendingX1 = 96,
+    kTxPendingY1 = 100,
+    kTxBytes = 104,
 };
 constexpr std::uint32_t kTxMagicValue = 0x31584554u;  // 'TEX1'
 
@@ -756,7 +805,9 @@ bool surfaceFormatForD3DFormat(std::uint32_t format, SurfaceFormat* out) {
 
 std::uint32_t createTextureState(X86& cpu, std::uint32_t device_object, std::uint32_t width,
                                  std::uint32_t height, std::uint32_t levels, std::uint32_t usage,
-                                 std::uint32_t format, std::uint32_t pool, std::string* why) {
+                                 std::uint32_t format, std::uint32_t pool, std::string* why,
+                                 bool* out_of_memory) {
+    if (out_of_memory) *out_of_memory = false;
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return 0;
     if (!cpu.heap || !cpu.heap->ready()) {
@@ -794,12 +845,15 @@ std::uint32_t createTextureState(X86& cpu, std::uint32_t device_object, std::uin
     }
     const std::uint32_t arena = m->surfaces().create(static_cast<int>(width), static_cast<int>(height), fmt);
     if (arena == 0) {
+        // ★ 资源耗尽（不是"这条导出没实现"）：调用方必须报 E_OUTOFMEMORY / 独立措辞。
+        if (out_of_memory) *out_of_memory = true;
         if (why) *why = std::string("D3D9：SurfaceArena.create 失败：") + m->surfaces().lastError();
         return 0;
     }
     const GuestSurface* gs = m->surfaces().find(arena);
     const std::uint32_t state = cpu.heap->alloc(kTxBytes, /*zero=*/true);
     if (state == 0) {
+        if (out_of_memory) *out_of_memory = true;
         m->surfaces().destroy(arena);
         if (why) *why = std::string("D3D9：guest 堆分配纹理状态块失败：") + cpu.heap->lastError();
         return 0;
@@ -865,6 +919,11 @@ bool textureInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::st
     t.locked = cpu.mem->rd32(state + kTxLocked) != 0;
     t.version = cpu.mem->rd32(state + kTxVersion);
     t.serial = cpu.mem->rd32(state + kTxSerial);
+    t.write_version = cpu.mem->rd32(state + kTxWriteVersion);
+    t.prev_write_version = cpu.mem->rd32(state + kTxPrevWriteVersion);
+    for (int i = 0; i < 4; ++i) {
+        t.write_rect[i] = static_cast<std::int32_t>(cpu.mem->rd32(state + kTxWriteX0 + static_cast<std::uint32_t>(i) * 4u));
+    }
     *out = t;
     return true;
 }
@@ -1016,6 +1075,12 @@ bool lockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::uint32
     cpu.mem->wr32(locked_rect_ea + 4, bits);
     cpu.mem->wr32(tex.state + kTxLocks, tex.locks + 1u);
     cpu.mem->wr32(tex.state + kTxLocked, 1u);
+    // ★ 记下本次锁允许写的矩形（GPU 后端只上传这块；`rect==NULL` = 整幅）。
+    //   ⚠ 语义根据：D3D9 契约只允许 guest 写锁定矩形内的像素；矩形外直写是未定义行为。
+    cpu.mem->wr32(tex.state + kTxPendingX0, static_cast<std::uint32_t>(left));
+    cpu.mem->wr32(tex.state + kTxPendingY0, static_cast<std::uint32_t>(top));
+    cpu.mem->wr32(tex.state + kTxPendingX1, static_cast<std::uint32_t>(right));
+    cpu.mem->wr32(tex.state + kTxPendingY1, static_cast<std::uint32_t>(bottom));
     // ★ 锁期间内容 = "未知"：guest 拿到 pBits 之后可能随时改像素，而它**不一定**会 Unlock 再被采样。
     //   置 0 ⇒ 采样退回内容哈希（未优化前的行为）。⛔ 不要留旧版本号：那会让"锁内写"被缓存跳过。
     cpu.mem->wr32(tex.state + kTxVersion, 0u);
@@ -1065,6 +1130,18 @@ bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::stri
         cpu.mem->wr32(tex.state + kTxVersionSeq, seq + 1u);
     }
     cpu.mem->wr32(tex.state + kTxVersion, version);
+    // ★ 写区历史（方案 C）：解锁 ⇒ 本次 LockRect 的矩形成为"这一版内容"的写入区域；
+    //   上一次的版本号退到 prev。RT 降级（version==0）⇒ 整条链作废：后端必须按整幅处理。
+    if (version != 0) {
+        cpu.mem->wr32(tex.state + kTxPrevWriteVersion, cpu.mem->rd32(tex.state + kTxWriteVersion));
+        for (std::uint32_t i = 0; i < 4u; ++i) {
+            cpu.mem->wr32(tex.state + kTxWriteX0 + i * 4u, cpu.mem->rd32(tex.state + kTxPendingX0 + i * 4u));
+        }
+        cpu.mem->wr32(tex.state + kTxWriteVersion, version);
+    } else {
+        cpu.mem->wr32(tex.state + kTxWriteVersion, 0u);
+        cpu.mem->wr32(tex.state + kTxPrevWriteVersion, 0u);
+    }
 
     return true;
 }
@@ -1075,6 +1152,12 @@ void markTextureContentUnknown(X86& cpu, std::uint32_t state) {
     TextureInfo ti;
     if (!textureInfoOfState(cpu, state, &ti, nullptr)) return;
     cpu.mem->wr32(state + kTxVersion, 0u);
+    // ★ 写区链也要**一起作废**：宿主（Clear / CPU 光栅回退 / GPU 读回）会往这块像素写而不经过
+    //   `unlockRect`。留着旧链的话，下一次"只锁一小块 + Unlock"会拿到 `prev = 旧 write_version`，
+    //   后端据此只上传那一小块 ⇒ RT 期间改过的其余像素**永远不进缓存**（静默旧纹理）。
+    //   作废之后 `prev = 0` ⇒ `gpuContentDirtyRegion` 退整幅（保守但不猜）。
+    cpu.mem->wr32(state + kTxWriteVersion, 0u);
+    cpu.mem->wr32(state + kTxPrevWriteVersion, 0u);
 }
 
 }  // namespace d3d9

@@ -4,6 +4,8 @@
 #include <cstdio>
 
 #include "runtime/clock.h"
+#include "runtime/guest_token.h"
+#include "runtime/input.h"  // 按钮 ↔ VK / MK_* 位（**唯一一份**映射）
 #include "runtime/x86.h"
 
 namespace lift {
@@ -13,6 +15,8 @@ constexpr std::uint32_t kWmQuit = 0x0012u;
 constexpr std::uint32_t kWmTimer = 0x0113u;
 constexpr std::uint32_t kTimerIdAutoBase = 0x00010000u;
 }  // namespace
+
+const char* inputSourceName(InputSource src) { return src == InputSource::Script ? "script" : "os"; }
 
 std::uint32_t WindowManager::registerClass(const std::string& name, std::uint32_t proc, std::uint32_t style) {
     for (const WindowClassInfo& c : classes_)
@@ -128,7 +132,13 @@ bool WindowManager::get(X86& cpu, WinMessage* out) {
         pumpTimers(cpu);
         if (peek(out, true)) return true;
         if (!host_event_pump_) return false;
-        host_event_pump_(cpu);
+        // ★ 单令牌（guest_token.h）：事件泵在窗口模式下会 `SDL_WaitEventTimeout(5ms)`；主线程
+        //   若持令牌睡觉，feeder 就拿不到令牌去解码 ⇒ 音频欠载。让出令牌再等，醒来取回。
+        //   纯单线程夹具（没持令牌 / 没事件源）里 Yield 是无操作。
+        {
+            GuestToken::YieldGuard yield(guestToken());
+            host_event_pump_(cpu);
+        }
     }
 }
 
@@ -147,16 +157,78 @@ std::uint32_t WindowManager::primaryWindow() const {
     return 0;
 }
 
-void WindowManager::setKeyDown(std::uint32_t vk, bool down) {
-    if (vk < 256u) key_down_[vk] = down ? 1u : 0u;
+void WindowManager::setKeyDown(std::uint32_t vk, bool down) { setKeyDown(InputSource::Os, vk, down); }
+
+bool WindowManager::setKeyDown(InputSource src, std::uint32_t vk, bool down) {
+    if (vk >= 256u) return false;
+    // ★ 所有权规则（文件上方 `InputSource`）：脚本拥有的键，OS 的按下 / 抬起都不生效。
+    if (src == InputSource::Os && key_owner_[vk] == static_cast<std::uint8_t>(InputSource::Script)) {
+        return false;
+    }
+    // 脚本抬起 ⇒ 该键交还 OS（`down == false` 时所有者清空）。
+    key_owner_[vk] = down ? static_cast<std::uint8_t>(src) : static_cast<std::uint8_t>(InputSource::Os);
+    key_down_[vk] = down ? 1u : 0u;
+    return true;
 }
 
-bool WindowManager::keyDown(std::uint32_t vk) const {
-    return vk < 256u && key_down_[vk] != 0;
+bool WindowManager::keyDown(std::uint32_t vk) const { return vk < 256u && key_down_[vk] != 0; }
+
+bool WindowManager::keyOwnedByScript(std::uint32_t vk) const {
+    return vk < 256u && key_owner_[vk] == static_cast<std::uint8_t>(InputSource::Script);
+}
+
+bool WindowManager::mouseButtonOwnedByScript(MouseButton b) const {
+    const auto idx = static_cast<std::size_t>(b);
+    return idx < kMouseButtonCount && button_owner_[idx] == static_cast<std::uint8_t>(InputSource::Script);
+}
+
+bool WindowManager::setMouseButton(MouseButton b, bool down, InputSource src) {
+    const auto idx = static_cast<std::size_t>(b);
+    if (idx >= kMouseButtonCount) return false;
+    const std::uint32_t vk = input::vkForMouseButton(b);
+    if (!setKeyDown(src, vk, down)) return false;
+    button_owner_[idx] = down ? static_cast<std::uint8_t>(src) : static_cast<std::uint8_t>(InputSource::Os);
+    if (down) {
+        mouse_buttons_ |= input::flagForMouseButton(b);
+    } else {
+        mouse_buttons_ &= ~input::flagForMouseButton(b);
+    }
+    return true;
 }
 
 void WindowManager::clearKeys() {
-    for (std::uint8_t& k : key_down_) k = 0;
+    for (std::size_t i = 0; i < 256u; ++i) {
+        key_down_[i] = 0;
+        key_owner_[i] = 0;
+    }
+    for (std::uint8_t& o : button_owner_) o = 0;
+    mouse_buttons_ = 0;
+}
+
+void WindowManager::clearOsInput() {
+    for (std::size_t i = 0; i < 256u; ++i) {
+        if (key_owner_[i] == static_cast<std::uint8_t>(InputSource::Script)) continue;
+        key_down_[i] = 0;
+    }
+    for (std::size_t i = 0; i < kMouseButtonCount; ++i) {
+        if (button_owner_[i] == static_cast<std::uint8_t>(InputSource::Script)) continue;
+        mouse_buttons_ &= ~input::flagForMouseButton(static_cast<MouseButton>(i));
+        button_owner_[i] = 0;
+    }
+}
+
+void WindowManager::releaseScriptOwnership() {
+    for (std::size_t i = 0; i < 256u; ++i) {
+        if (key_owner_[i] != static_cast<std::uint8_t>(InputSource::Script)) continue;
+        key_down_[i] = 0;
+        key_owner_[i] = 0;
+    }
+    for (std::size_t i = 0; i < kMouseButtonCount; ++i) {
+        if (button_owner_[i] != static_cast<std::uint8_t>(InputSource::Script)) continue;
+        mouse_buttons_ &= ~input::flagForMouseButton(static_cast<MouseButton>(i));
+        button_owner_[i] = 0;
+    }
+    cursor_script_owned_ = false;
 }
 
 void WindowManager::postQuit(std::uint32_t code) {
@@ -223,10 +295,21 @@ void WindowManager::setCursorPos(int x, int y) {
     cursor_y_ = y;
 }
 
-void WindowManager::setCursorClientPos(std::uint32_t hwnd, int x, int y) {
+bool WindowManager::setCursorClientPos(std::uint32_t hwnd, int x, int y, InputSource src) {
+    // ★ 脚本拥有光标期间，OS 的鼠标移动不生效（见 InputSource）：这样 `GetCursorPos` 与
+    //   `WM_MOUSEMOVE` 的 lParam 永远说同一个位置。
+    if (src == InputSource::Os && cursor_script_owned_) return false;
+    if (src == InputSource::Script) cursor_script_owned_ = true;
     const HostWindow* w = find(hwnd);
     cursor_x_ = x + (w ? w->x : 0);
     cursor_y_ = y + (w ? w->y : 0);
+    return true;
+}
+
+void WindowManager::cursorClientPos(std::uint32_t hwnd, int* x, int* y) const {
+    const HostWindow* w = find(hwnd);
+    if (x) *x = cursor_x_ - (w ? w->x : 0);
+    if (y) *y = cursor_y_ - (w ? w->y : 0);
 }
 
 int WindowManager::showCursor(bool show) {

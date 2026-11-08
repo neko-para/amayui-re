@@ -64,6 +64,27 @@ struct HostTimer {
     std::uint32_t elapse_ms = 0;
 };
 
+// =====================================================================================
+// 输入来源（★ **唯一输入状态源**：guest 侧所有输入 API 都读 `WindowManager` 的那一份）
+// ★ 2026-11-08：这里有两个来源 —— `Os`（SDL 真实事件）与 `Script`（`--input-script` 注入）。
+//   两者**走同一段应用代码**（`runtime/input.h`），所以不存在"注入只发消息、GetAsyncKeyState 仍读
+//   OS"的第二份状态。
+// ★ **优先级（显式规则，互相不污染）**：
+//   · 每个 VK 有一个所有者（`Os` 默认 / `Script`）。脚本按下某键 ⇒ 该键归脚本；期间 OS 的
+//     按下 / 抬起 / **焦点丢失清键** 一律**不生效**（注入不因窗口失焦而丢）。
+//   · 脚本 `key_up` / `mouse_up` 把该键**交还** OS（状态置抬起、所有者清空）。
+//   · 光标：脚本第一次 `mouse_move` 起归脚本；期间 OS 的鼠标移动**不生效**（不更新也不发消息，
+//     保持 `GetCursorPos` 与 `WM_MOUSEMOVE` 的 lParam 一致）；OS 的鼠标按键同样不生效
+//     （它们的坐标来自 OS 光标，而那份位置没有被采用 —— 半截输入比拒绝更糟）。
+//   · 脚本**结束**（动作跑完 / `quit`）⇒ `releaseScriptOwnership()`：释放脚本按下的键 / 按钮、
+//     交还光标所有权 —— 真人接着玩不会撞上"卡住的键"。
+// =====================================================================================
+enum class InputSource : std::uint8_t { Os = 0, Script = 1 };
+enum class MouseButton : std::uint8_t { Left = 0, Right = 1, Middle = 2 };
+constexpr std::size_t kMouseButtonCount = 3;
+
+const char* inputSourceName(InputSource src);
+
 class WindowManager {
 public:
     static constexpr std::uint32_t kFirstWindow = 0x00010000u;
@@ -102,9 +123,19 @@ public:
     // 主窗口（第一个未销毁；本作单窗口；0 = 还没有窗口）。关窗消息的 hwnd 用它。
     std::uint32_t primaryWindow() const;
     // 影子键盘状态：WM_KEYDOWN/UP 与 GetAsyncKeyState 同源（⛔ 两套状态会打架）。
+    // ★ 来源规则见文件上方 `InputSource`；`setKeyDown(vk,down)` = OS（旧调用口径）。
     void setKeyDown(std::uint32_t vk, bool down);
+    bool setKeyDown(InputSource src, std::uint32_t vk, bool down);  // false = 被所有者拒绝
     bool keyDown(std::uint32_t vk) const;
-    void clearKeys();
+    bool keyOwnedByScript(std::uint32_t vk) const;
+    void clearKeys();      // 全部清（旧口径 / 测试）
+    void clearOsInput();   // 焦点丢失：只清 **OS 拥有** 的键与按钮电平
+    // 脚本结束：释放脚本按下的键 / 按钮（置抬起）并把所有权交还 OS。
+    void releaseScriptOwnership();
+    // 鼠标按钮位图（WM_* 的 wParam / `mouse_buttons` 的**唯一**一份；SDL 与脚本共用）。
+    std::uint32_t mouseButtons() const { return mouse_buttons_; }
+    bool setMouseButton(MouseButton b, bool down, InputSource src);  // 同时写 VK 电平
+    bool mouseButtonOwnedByScript(MouseButton b) const;
     void postQuit(std::uint32_t code);
     bool quitPosted() const { return quit_; }
     std::uint32_t quitCode() const { return quit_code_; }
@@ -130,11 +161,15 @@ public:
     // =====================================================================================
     std::uint32_t setCursor(std::uint32_t hcursor);  // 返回**旧** HCURSOR（Win32 语义）
     std::uint32_t cursor() const { return cursor_; }
-    void setCursorPos(int x, int y);
-    // ★ P3：SDL 的鼠标事件给的是**客户区**坐标，而 `GetCursorPos` / `SetCursorPos` 的 Win32
-    //   口径是**屏幕**坐标 ⇒ 这里加上窗口原点再落进同一格。⛔ 不要把客户区坐标直接写进
-    //   `cursor_x_`：guest 随后还会 `ScreenToClient` 一次，会再减一遍原点。
-    void setCursorClientPos(std::uint32_t hwnd, int x, int y);
+    // ★ 第 4 个参数是来源：`Script` 一旦写过位置就拥有光标，之后 `Os` 的移动被拒绝（见 InputSource）。
+    void setCursorPos(int x, int y);  // guest 自己调 SetCursorPos（不改所有权）
+    bool setCursorClientPos(std::uint32_t hwnd, int x, int y, InputSource src);
+    void setCursorClientPos(std::uint32_t hwnd, int x, int y) {
+        setCursorClientPos(hwnd, x, y, InputSource::Os);
+    }
+    bool cursorOwnedByScript() const { return cursor_script_owned_; }
+    // 屏幕坐标 → 客户区坐标（`SetCursorPos` / `GetCursorPos` 的反向；与 setCursorClientPos 同一份原点）。
+    void cursorClientPos(std::uint32_t hwnd, int* x, int* y) const;
     void getCursorPos(int* x, int* y) const {
         if (x) *x = cursor_x_;
         if (y) *y = cursor_y_;
@@ -167,6 +202,11 @@ private:
     std::uint32_t quit_code_ = 0;
     HostEventPump host_event_pump_;
     std::uint8_t key_down_[256] = {};
+    // 每个 VK / 按钮的所有者（InputSource 的整数值；0 = OS，1 = 脚本）
+    std::uint8_t key_owner_[256] = {};
+    std::uint8_t button_owner_[kMouseButtonCount] = {};
+    std::uint32_t mouse_buttons_ = 0;
+    bool cursor_script_owned_ = false;
     // 光标 / 捕获（见上面的方法注释）
     std::uint32_t cursor_ = 0;
     std::uint32_t capture_ = 0;

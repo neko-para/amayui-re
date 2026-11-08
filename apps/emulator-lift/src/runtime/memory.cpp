@@ -181,6 +181,30 @@ LONG CALLBACK vectoredHandler(EXCEPTION_POINTERS* info) {
                                                       : 0;
     // ★ 归因看**异常地址**（每平台同一条判据 inGuestSpace），不看 `g_access`（宿主 AV 时那是陈旧值）。
     const void* guest_base = (g_memory && g_memory->reserved()) ? static_cast<const void*>(g_memory->host(0)) : nullptr;
+    // ★ 调试基建（**默认关**）：`LIFT_VEH_PASSTHROUGH=1` ⇒ 非 guest 地址的异常**交回下一位 handler**，
+    //   而不是在这里判成宿主 bug。存在的理由：ASAN 的 shadow 是 MEM_RESERVE 后**惰性提交**的，它首次
+    //   碰某页会合法地 AV（由 ASAN 自己的 VEH 提交）；本 handler 是 `AddVectoredExceptionHandler(1, …)`
+    //   注册的 ⇒ 先于 ASAN 执行 ⇒ 没有这个开关时 ASAN 版二进制起不来（实测：那些 fault 的地址全落在
+    //   ASAN 自己打印的 LowShadow / HighShadow 区间内，却被判成 host fault 而 `_Exit(4)`）。调试器要
+    //   第一机会异常时同理。
+    //   ⛔ 默认路径**不变**（无该环境变量 ⇒ 下面照旧 hostFault → `_Exit(4)`）；`tests/fault_report.cpp`
+    //     的 `host-av-attributed-to-host`（期望退出码 4）就是这条语义的守卫。⛔ 不要把它改成无条件
+    //     passthrough：那会把"宿主自己的 AV 给出一份可读诊断 + 退出码 4"的契约删掉（3 vs 4 有守卫依赖）。
+    static const bool passthrough = std::getenv("LIFT_VEH_PASSTHROUGH") != nullptr;
+    if (passthrough && !inGuestSpace(guest_base, fault_addr)) {
+        // 让开时留一行痕迹：否则"ASAN 里为什么多/少一次 AV"无从判断（这一行只在开关打开时出现）。
+        // ★ Rip 也打出来：栈/符号化拿不到时，至少能看出"这一次 AV 是**谁**在访谁"。
+        std::fprintf(stderr, "[veh] passthrough: 0x%08lX %s @ host 0x%llX  rip=0x%llX（交给下一位 handler）\n",
+                     static_cast<unsigned long>(code),
+                     (info->ExceptionRecord->NumberParameters >= 1 &&
+                      info->ExceptionRecord->ExceptionInformation[0] == 1)
+                         ? "WRITE"
+                         : "READ",
+                     static_cast<unsigned long long>(fault_addr),
+                     info->ContextRecord ? static_cast<unsigned long long>(info->ContextRecord->Rip) : 0ull);
+        std::fflush(stderr);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     char why[200];
     if (inGuestSpace(guest_base, fault_addr)) {
         std::snprintf(why, sizeof(why), "平台异常 0x%08lX @ host 0x%llX（guest 空间内未提交页）",
@@ -314,15 +338,22 @@ bool GuestMemory::reserve() {
 
 bool GuestMemory::bit(std::uint32_t page) const {
     if (page >= commit_bits_.size() * 64u) return false;
-    return (commit_bits_[page >> 6] >> (page & 63u)) & 1u;
+    // ★ 并发：feeder 的 Decoder 在读提交位（decode.cpp 的页边界检查），主线程可能同时在
+    //   commit/decommit（VirtualAlloc）。`commit_bits_` 在 reserve 时就定长（不会扩容）⇒
+    //   用 atomic_ref 做位读写即可，不需要锁（safe mode 的每访问检查也不加锁）。
+    const std::uint64_t word =
+        std::atomic_ref<std::uint64_t>(const_cast<std::uint64_t&>(commit_bits_[page >> 6]))
+            .load(std::memory_order_relaxed);
+    return (word >> (page & 63u)) & 1u;
 }
 
 void GuestMemory::setBit(std::uint32_t page, bool on) {
     if (page >= commit_bits_.size() * 64u) return;
+    auto ref = std::atomic_ref<std::uint64_t>(commit_bits_[page >> 6]);
     if (on) {
-        commit_bits_[page >> 6] |= (1ull << (page & 63u));
+        ref.fetch_or(1ull << (page & 63u), std::memory_order_relaxed);
     } else {
-        commit_bits_[page >> 6] &= ~(1ull << (page & 63u));
+        ref.fetch_and(~(1ull << (page & 63u)), std::memory_order_relaxed);
     }
 }
 

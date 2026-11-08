@@ -33,6 +33,9 @@ public:
     std::uint32_t bytesInUse() const { return in_use_; }
     std::uint32_t peak() const { return peak_; }
     std::uint32_t allocCount() const { return alloc_count_; }
+    // 最大**空闲**块的总字节数（含块头）。★ 诊断用：`alloc` 失败时"总量满"与"碎片化"在
+    //   `lastError()` 里本来是同一句话，这个数把两者分开（首次适配只认**连续**块）。
+    std::uint32_t largestFreeBlock() const;
     std::uint32_t sizeOf(std::uint32_t ptr) const;
     bool owns(std::uint32_t ptr) const;
 
@@ -62,7 +65,7 @@ private:
     std::uint32_t in_use_ = 0;
     std::uint32_t peak_ = 0;
     std::uint32_t alloc_count_ = 0;
-    char last_error_[128] = {};
+    char last_error_[256] = {};
 };
 
 }  // namespace lift

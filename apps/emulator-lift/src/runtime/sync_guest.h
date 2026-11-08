@@ -16,6 +16,10 @@ struct X86;
 
 // 返回 false + err：`ea` 未提交 / 已被**别的**线程持有 / RecursionCount 形态坏。
 bool guestEnterCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err);
+// 非阻塞版（真线程 feeder 用）：拿不到 ⇒ false，**不阻塞**、不写 guest 字段。
+// ★ 为什么 feeder 要用它：feeder 持令牌时不能阻塞在 CS 上（主线程可能握着该 CS 的另一侧，
+//   而它要令牌才能往下走 ⇒ 死锁）。拿不到 ⇒ 放开令牌重试（见 audio.cpp feederEvent）。
+bool guestTryEnterCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err);
 bool guestLeaveCriticalSectionAs(X86& cpu, std::uint32_t ea, std::uint32_t owner_thread, std::string* err);
 std::uint32_t guestCriticalSectionOwner(X86& cpu, std::uint32_t ea);
 

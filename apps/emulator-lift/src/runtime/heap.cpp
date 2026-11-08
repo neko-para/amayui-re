@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "runtime/guest_token.h"
 #include "runtime/host_encoding.h"
 
 namespace lift {
@@ -62,6 +63,10 @@ bool GuestHeap::findBlock(std::uint32_t ptr, std::uint32_t* off) const {
 }
 
 std::uint32_t GuestHeap::alloc(std::uint32_t bytes, bool zero) {
+    // ★ 单令牌不变式（guest_token.h）：改 `blocks_` / `in_use_` 的线程必须持有令牌。
+    //   违规 **不**在这里 abort：计数要能活着进 run summary（`--assert-guest-token` 判红），
+    //   而且真实的并发损坏本来就会在后续堆操作上响亮失败。
+    guestToken().check("GuestHeap::alloc");
     if (!ready()) {
         std::snprintf(last_error_, sizeof(last_error_), "堆未初始化");
         return 0;
@@ -100,11 +105,17 @@ std::uint32_t GuestHeap::alloc(std::uint32_t bytes, bool zero) {
         ++alloc_count_;
         return begin_ + b.off + opt_.header;
     }
-    std::snprintf(last_error_, sizeof(last_error_), "guest 堆耗尽（请求 %u 字节）", bytes);
+    // ★ 失败点必须能区分"总量满"与"碎片化"：首次适配只认**一块连续**空间，
+    //   所以把「最大空闲块」与「请求量（含块头对齐）」并排打出来（`in_use/peak` 说明总量）。
+    std::snprintf(last_error_, sizeof(last_error_),
+                  "guest 堆耗尽（请求 %u 字节，含块头对齐需 %u；最大空闲块 %u 字节；in_use=%u peak=%u；"
+                  "区间 0x%08X..0x%08X）",
+                  bytes, need, largestFreeBlock(), in_use_, peak_, begin_, end_);
     return 0;
 }
 
 bool GuestHeap::free(std::uint32_t ptr) {
+    guestToken().check("GuestHeap::free");
     std::uint32_t off = 0;
     if (!findBlock(ptr, &off)) {
         std::fprintf(stderr,
@@ -126,6 +137,7 @@ bool GuestHeap::free(std::uint32_t ptr) {
 }
 
 std::uint32_t GuestHeap::realloc(std::uint32_t ptr, std::uint32_t bytes, bool zero) {
+    guestToken().check("GuestHeap::realloc");
     if (ptr == 0) return alloc(bytes, zero);
     std::uint32_t off = 0;
     if (!findBlock(ptr, &off)) {
@@ -170,6 +182,15 @@ std::uint32_t GuestHeap::sizeOf(std::uint32_t ptr) const {
 bool GuestHeap::owns(std::uint32_t ptr) const {
     std::uint32_t off = 0;
     return findBlock(ptr, &off);
+}
+
+std::uint32_t GuestHeap::largestFreeBlock() const {
+    std::uint32_t best = 0;
+    for (const auto& kv : blocks_) {
+        if (kv.second.used) continue;
+        if (kv.second.size > best) best = kv.second.size;
+    }
+    return best;
 }
 
 void GuestHeap::coalesce() {

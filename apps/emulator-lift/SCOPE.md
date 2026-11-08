@@ -18,7 +18,7 @@
 | 延后实现 | **模态**（有限） | 延后实现：只做**关闭窗口的二次确认**（`MessageBoxA` 的 OK / Cancel 语义）；⛔ 不做 AGERC 提供的复杂设置对话框。**AGERC.DLL 按真实 guest 模块装载**（PE 节映射进 guest / 真实 HINSTANCE=ImageBase / 资源与版本从该镜像解析）；它的三个导出（`_GetInstance@0` / `_ShowDialog@12` / `_OperateMenu@16`）仍按本文 §1 的模态 no-op stub；镜像不存在 ⇒ `LoadLibrary` 返回 0 + 126（⛔ 不造假句柄），未实现的 AGERC 代码被执行 = **loud failure**（未实现导入 / fault 诊断，⛔ 不静默）。**镜像来源只有两段：默认 `--game-dir/AGERC.DLL`（安装树里那份=汉化免壳件，40/40 资源可映射），`--agerc` 可显式覆盖；两段都拿不到 ⇒ `LoadLibrary` 0 + 126**（⛔ 不造假句柄、⛔ 不回退 `DATA1.ALF` 的条目 —— 引擎本身也不回退，那条约只作取证对照）。**不需要拆壳件** —— 加壳只发生在正版根件（AsProtect，26/40 条资源在文件里没有字节）。伪 HICON 只作 `.rsrc` 映射真的失败时的**应急**（loud log），⛔ 不是预期路径、⛔ 不 fake 资源内容 | 当前仍是 `IDOK` no-op；关闭确认直接继续；设置对话框不生效；窗口图标可能是伪 HICON（不显示在客户区） | 配置读写的**文件**路径（INI / SYS4REG.INI）、存档本身；`_GetInstance` 的返回值 = **真实模块基址**（可当 HINSTANCE 传给 `LoadIconA`） |
 | 永久 no-op | **注册表** | 整体 no-op：`RegOpenKeyExA` / `RegCreateKeyExA` 成功 + 非空假句柄；`RegQueryValueExA` 恒 `ERROR_FILE_NOT_FOUND(2)`（调用方回落默认值）；`RegSetValueExA` 成功但不落盘；`RegEnumValueA` 恒 `ERROR_NO_MORE_ITEMS(259)`；`RegCloseKey` 成功 | 注册表里的设置**不持久**；每次按默认值启动 | 句柄形态与错误码（成功 / 2 / 259）；配置读写的**文件**路径（INI / SYS4REG.INI）仍真写 |
 | 永久 no-op | **摇杆** | 无设备：`joyGetNumDevs` 返回 0、`joyGetPosEx` 返回 `JOYERR_UNPLUGGED(167)`、`joyGetDevCapsA` 返回 `MMSYSERR_NODRIVER(6)` | 游戏若必须用摇杆则不可用（键盘 / 鼠标不受影响） | 键盘 / 鼠标输入（M2）；摇杆枚举的返回码 |
-| **已实现（方案 C，2026-11-07）** | **音频** | **真 feeder 线程 + 独立 mixer 线程**：`AudioEngine` 实现游标 / 4 个位置通知 / 状态机 / 逐缓冲 `WAVEFORMATEX` 转换 / 混音 / SDL3 输出；`CreateThread(sub_4B5AA0)` 由 `ResumeThread` 启动真宿主线程，feeder 有自己的 `X86` / guest 栈 / 私有块缓存并执行 `sub_4B6C30`（PCM 仍由 guest 解码器产生）；guest 的每槽 `CRITICAL_SECTION` 映射到宿主递归锁。`--audio=virtual`/无 `--real-time` 时回退到方案 D 的主线程泵。**WAV 头 / 缓冲层是真的**（`REQ-01M6QSVR5NJDQVFHY6RX3934DN`）：`mmio*` 沿 guest 文件句柄真解析 RIFF；`IDirectSoundBuffer8` 的 `QI(IDirectSoundNotify)` / `SetNotificationPositions` 真存真投递。MCI / mixer 仍是成功 stub。默认 `--audio=sdl`；`--audio=off` 回到旧 silent。 | 能听到 BGM / SE / 语音；SE 延迟 ≈ 100 ms；主线程不再被 fill 卡住 | 设备游标 / 通知次序 / 逐缓冲格式 / 混音 PCM；`timeGetTime` / `timeSetEvent` / `timeKillEvent` / `timeGetDevCaps` 不变 |
+| **已实现（方案 C，2026-11-07）** | **音频** | **真 feeder 线程 + 独立 mixer 线程**：`AudioEngine` 实现游标 / 4 个位置通知 / 状态机 / 逐缓冲 `WAVEFORMATEX` 转换 / 混音 / SDL3 输出；`CreateThread(sub_4B5AA0)` 由 `ResumeThread` 启动真宿主线程，feeder 有自己的 `X86` / guest 栈 / 私有块缓存并执行 `sub_4B6C30`（PCM 仍由 guest 解码器产生）；guest 的每槽 `CRITICAL_SECTION` 映射到宿主递归锁。`--audio=virtual`/无 `--real-time` 时回退到方案 D 的主线程泵。**WAV 头 / 缓冲层是真的**（`REQ-01M6QSVR5NJDQVFHY6RX3934DN`）：`mmio*` 沿 guest 文件句柄真解析 RIFF；`IDirectSoundBuffer8` 的 `QI(IDirectSoundNotify)` / `SetNotificationPositions` 真存真投递。MCI / mixer 仍是成功 stub。默认 `--audio=sdl` + **静音**（`--sound` 才出声：设备 / 混音 / 喂料 / guest DS 调用照跑，只在交付前覆盖缓冲）；`--audio=off` 回到旧 silent。 | `--sound` 时能听到 BGM / SE / 语音；SE 延迟 ≈ 100 ms；主线程不再被 fill 卡住 | 设备游标 / 通知次序 / 逐缓冲格式 / 混音 PCM；`timeGetTime` / `timeSetEvent` / `timeKillEvent` / `timeGetDevCaps` 不变 |
 | **已实现（方案 A，2026-11-07 用户批准）** | **视频**（纹理影片 / DirectShow 模式） | **真画面**：`CoCreateInstance(CLSID_FilterGraph)` 建**真宿主图** —— `IGraphBuilder::AddFilter` 接管引擎的 `CMovieTextureRenderer` 与源 filter（`AddRef` + `JoinFilterGraph`），`Render` 走 D1 接线（`EnumPins` → `QueryDirection` → `ReceiveConnection` → `QI(IMemInputPin)` → `NotifyAllocator(宿主分配器)`），**字节从引擎自己的源 pin 取**：`QI(IAsyncReader)`（本引擎 IID = `56A868AA-…`，槽 `Length +0x20` / `SyncRead +0x1C`）分块 `SyncRead`，宿主用 `video::MovieDecoder` 解 MPEG-1（1280×720 RGB24，自底向上 DIB），每帧把 one-shot 样本 `Receive` 给渲染器；`IMemAllocator` / `IMediaSample` / `IMediaSample2` / `IReferenceClock` 都是宿主 COM 对象（`pMediaType` 必须 NULL，否则渲染器每帧泄露一平面）。`Run` 前对两个 filter `SetSyncSource(宿主时钟)`。**② 渲染器服务线程事件由宿主合成**（显式平台偏差）：`sub_4D5710` 对 `[this+0x58]/[this+0x54]` 两个匿名 Event 做 `WaitForMultipleObjects(2,…,10000)` 重试；伪线程不跑线程体 ⇒ shim 把 **#1 句柄**当成已 signaled（`WAIT_OBJECT_0+1` ⇒ `sub_4D3E40` 的成功分支），默认生效，`LIFT_DSHOW_NO_SIGNAL=1` 可关。**影片音频已接**（2026-11-07）：`dshow::AudioRenderer` 就是 quartz 那条音频支路的输出端 —— 同步机制在它里面（时间 = `cpu.clock`，与视频同一份；`pts <= 流now + 200 ms` 交给设备、迟到 300 ms 丢弃、队列空记 underrun），`pl_mpeg` 解 MP2 / 44.1k→48k 重采样后经 `AudioEngine::pushHostPcm` 混进同一路 SDL 输出，音量走 `IBasicAudio::put_Volume`（−100 dB = 静音）。**仍然不做**：MF（`MFStartup` / `MFCreate*` / `MFGetService` / EVR / DXVA2 仍 no-op 或 `E_FAIL`）、**窗口影片族**（`IMediaEvent` + `IVideoWindow` 的窗口播放仍走形状层）。**保留**：影片 opcode 的状态推进与结束通知（`Run`/`WaitForCompletion`/`EC_COMPLETE` 语义不变） | 真实 LOGO/OP/剧情影片能播（实测 LOGO 8.642 s / 259 帧跑完、音轨 fed=383616 帧 / pushed=417582 帧、dropped=0 / underruns=0）；窗口级影片（非纹理）仍是形状层 | 帧的**来路**（引擎源 pin 的 `IAsyncReader`，⛔ 不解析 ALF、不猜文件名）、`ReceiveConnection` 的 media type 约定、样本时间戳的时钟域、影片 opcode 的状态推进与结束通知；**不是** MF/EVR/DXVA2 等价性  ★ 渲染器必须 **Running**（`Run`）且样本时间是**流时间**（相对片头）—— 否则引擎只挂样本不渲染、纹理全黑（doc §8.13）；像素由 `[dshow] tex movie` 抽样守（`tests/movie_logo.cpp`）。 |
 | 延后实现 | **Live2D** | 关闭（游戏内开关）作为第一可交付状态 | 模型不显示（固定立绘） | 如果开关只是脚本级跳过，SDK 仍链接但不被调用 |
 | 延后实现 | **3D** | **D3D9 最小设备簇 + D3DX Sprite/纹理 + fixed-function 流水线已落地**（`REQ-01M6MH5M975Q63AH85F03RVQFD` / `REQ-01M6MJRC587XWXR325K4N2JXMF` / `REQ-01M6MNR9M7S5M5711J79F9K32A`：`Direct3DCreate9` / `CreateDevice` / `Clear` / `Present` / `GetBackBuffer` / `SetRenderTarget`，`D3DXCreateSprite` 的 Begin/Draw/End、`D3DXCreateTexture`、纹理 surface、`D3DXMatrix*`、软件光栅）；**已到 Present 第一帧**；D3DX effect / `.x` 层级 / 完整 3D 战斗场景仍不做，未取证槽 = loud trap | 无 3D 战斗/场景；未取证的 D3DX effect / `.x` / 3D 状态仍会在命中时响亮失败 | 2D/ADV 主路径（D3D9 + GDI；DDraw 只作备用后端） |
@@ -124,3 +124,65 @@
 
 ★ **测试档位**：`tests/gdi.cpp` 顶层注册（pure，合成字形源）；`tests/gdi_font.cpp` 在
 `if(EXISTS "${LIFT_HOST_FONT_PATH}")` 里（assets，`SKIP_RETURN_CODE 77`）。
+
+## 5.1 修订（2026-11-08）：基线补偿的**位移点**从 TextOutA 搬到 `gmptGlyphOrigin.y`
+
+> ★ 本节**追加**，不改上面任何一行原文；与 §1 / §5 冲突时以本节为准（口径不变，改的是落点）。
+> 起因与证据：`.tmp/task3-report.md` §4 + 父级 2026-11-08 裁决。
+
+**为什么要改**
+
+- §5 的补偿（`--baseline-lift`，缺省 2）原先**只在 `TextOutA` 的绘制基线**上生效
+  （`gdiDrawText` 的 `baseline = y + tm.ascent - lift`）。但引擎正文**不走 `TextOutA`**：它调
+  `GetGlyphOutlineA` 拿灰度位图，再用 `tmAscent` 自己算基线合成
+  （`0x46F893`：字形顶 = 基线 − `gmptGlyphOrigin.y`）⇒ 那个 2px 对正文**完全没生效**，
+  guest 可见的 ascent 仍是 FT 真值 20，而 cxx 的有效值 = 20 − 2 = 18 ⇒ lift 的字比 cxx **低 2px**。
+- cxx 的 `lift`（`apps/emulator-cxx/src/core/text_raster.cpp:647`，唯一应用点 `:675`）减的是"每次绘制的
+  最终基线"，等价于**只移墨迹、不改行高**。要同一个效果，就只能移"引擎自己也会用的那个量"。
+
+**移在哪（唯一落点）**
+
+- `src/runtime/font.cpp` 的 `FontEngine::glyph`：`origin_y = slot->bitmap_top + fontConfig().baseline_lift`。
+  常量只有一处：`src/runtime/font.h` 的 `kBaselineLift`（注释指向 cxx 的 `text_raster.cpp:647`），
+  运行时仍由 `--baseline-lift`（`FontConfig::baseline_lift`）决定，`0` = 关。
+- 同时把 `gdiDrawText` 里的 `- lift` **删掉**（否则 `TextOutA` 会抬 2N px）。两处的合成结果逐像素等于旧行为：
+  旧 `baseline = y + ascent − lift` + 原 origin；新 `baseline = y + ascent` + (origin + lift) —— 墨迹位置相同。
+- 由此 §5 表格里"`tmAscent` 仍是 FT 真值（补偿**不**写进度量）"**依然成立且是硬约束**：
+  这次只动 `gmptGlyphOrigin.y`，`TEXTMETRICA` 的 56 B 逐字节不变（守卫 `lift/metrics-unchanged`）。
+- §5 表格里"`gmptGlyphOrigin` 自洽"这条**含义收窄为**：`gmptGlyphOrigin.y` 与**实际落墨位置**自洽
+  （字形顶 = 基线 − `origin.y`），而**不再**等于 FT 的裸 `bitmap_top`。这是有意的：宿主字体替换后，
+  引擎那份"参考字体的 ascent"与 Amayui 的 FT ascent 有差（实测差 2–3px，见 `ops-forensics` §73），
+  `lift = 2` 是**按 2px 经验值补偿**，不是"把差还到 0"的精确值。
+  ★ 谁能扛这条：合成档的 `origin_y == black_box_y` 由 `tests/gdi.cpp` 钉住（合成档不吃补偿）；
+  **真字体档**只有 `tests/text_baseline_lift.cpp` 的 ②（钉"补偿 = +2 且方向正确"）+ ⑤（钉"整块墨迹
+  平移、无裁剪"）—— 它钉的是**差值**，不是绝对像素值（绝对 `bitmap_top` 随字体文件变）。
+
+**可观测 / 防裁剪证据（守卫，都会红）**
+
+- `tests/text_baseline_lift.cpp`（assets，缺字体 ⇒ SKIP 77）：
+  ① 缺省 `baseline_lift` == 2；② `--baseline-lift 0` 与缺省下 guest 读到的 `gmptGlyphOrigin.y` 差**正好 2**
+  且方向正确（origin.y 更大 ⇒ 墨迹更高）；③ 两次 `TEXTMETRICA`（写**两块不同**的缓冲）56 B 逐字节相同、
+  `GetTextExtentPoint32A` 的宽/高不变；④ 开关设 5 ⇒ origin 差正好 5（位移量不是硬编码常数）；⑤ 同一段文本
+  画两次 ⇒ **墨迹像素总数不变**（容差 0，证明没有被字形格 / 表面裁掉）+ **垂直质心正好移动 2px**；
+  ⑥ `gdi32!TextOutA`（**经 shim 跑 guest 代码**）也仍然只随开关移动 2px，且 DC 的 `text_calls` /
+  `pixels_written` 真的涨了。★ ⑤ 走的是宿主 helper `gdiDrawText`、⑥ 走 Win32 形状层，两者**都**跑同一条
+  绘制路径（`TextOutA` 的宿主实现就是 `gdiDrawText`），差别只在"经过 shim"。
+- 端到端（**OPTION** 帧 155，`--present-screenshot` + `--dump-frame`，`.tmp/task3-impl/`）：
+  `--baseline-lift 0` 与缺省两档的差异**只落在文本行的墨迹上**（其余 483/720 行逐字节相同）；
+  在变化像素集上做垂直平移匹配 ⇒ **`k=+2` 均差 3.57/255、`k=0` 均差 108.16**（墨迹整体上移 2px）。
+  残差 3.57 的来源是"字形半透明混在**静止**纹理背景上"（背景那 2 行不同），**不是**裁剪。
+  ⚠ 这是**一次性证据、不可在 ctest 里回归**（要游戏安装 + CPU 光栅化 5 分钟/次）；能回归的判据是上面那条
+  assets CTest。另：**TITLE 帧三张两两逐字节相同** —— 该画面没有经 GGO 合成的可见文本（标题 / 按钮是素材
+  sprite），所以整机对照只能在 OPTION 这类画面上做，⛔ 别拿 TITLE 当"文本基线对齐"的判据。
+
+**怎么回退**
+
+- 只想关掉补偿：`--baseline-lift 0`（= 改动前二进制在 `--baseline-lift 0` 下的逐字节行为）。
+- 想连代码一起回退：把 `kBaselineLift` 改 0 **并**把 `glyph()` 里的 `+ fontConfig().baseline_lift` 去掉、
+  把 `gdiDrawText` 的 `- lift` 加回来 —— 这三处是同一个改动。**哪些守卫会红（按实际测过的）**：
+  ①（缺省值 ≠ 2）、**②**（origin 差没了）、**④**（开关差没了）会红；⚠ ⑤ / ⑥ **仍然绿** —— 它们走的就是
+  `gdiDrawText`，把 lift 挪回去那条路的墨迹照样只随开关动 2px ⇒ "回退不完整"不会被 ⑤/⑥ 发现，
+  只有 ② 会（这就是为什么 ② 是这条改动的**唯一**方向判据）。
+
+★ **测试档位不变**：`tests/gdi_font_metrics_cache.cpp` 顶层注册（pure）；`tests/text_baseline_lift.cpp`
+在 `if(EXISTS "${LIFT_HOST_FONT_PATH}")` 里（assets，`SKIP_RETURN_CODE 77`）。

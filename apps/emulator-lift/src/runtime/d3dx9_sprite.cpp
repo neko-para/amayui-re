@@ -254,7 +254,9 @@ struct DrawInput {
 // ---------------------------------------------------------------------------------------
 // 状态块
 // ---------------------------------------------------------------------------------------
-std::uint32_t createSpriteState(X86& cpu, std::uint32_t device_object, std::string* why) {
+std::uint32_t createSpriteState(X86& cpu, std::uint32_t device_object, std::string* why,
+                                bool* out_of_memory) {
+    if (out_of_memory) *out_of_memory = false;
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return 0;
     (void)m;
@@ -274,11 +276,13 @@ std::uint32_t createSpriteState(X86& cpu, std::uint32_t device_object, std::stri
     }
     const std::uint32_t state = cpu.heap->alloc(kSpBytes, /*zero=*/true);
     if (state == 0) {
+        if (out_of_memory) *out_of_memory = true;
         if (why) *why = std::string("D3DX9：guest 堆分配 Sprite 状态块失败：") + cpu.heap->lastError();
         return 0;
     }
     const std::uint32_t batch = cpu.heap->alloc(kInitialBatchCapacity * kBatchEntryBytes, /*zero=*/true);
     if (batch == 0) {
+        if (out_of_memory) *out_of_memory = true;
         cpu.heap->free(state);
         if (why) *why = std::string("D3DX9：guest 堆分配 Sprite 批次数组失败：") + cpu.heap->lastError();
         return 0;
@@ -656,6 +660,10 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         std::uint32_t tbpp = 0;
         std::uint32_t tversion = 0;  // 纹理内容版本（GPU 上传缓存用）
         std::uint32_t tserial = 0;   // 纹理身份（GPU 缓存键用）
+        // ★ 方案 C 的脏区输入：最近一次写入的矩形 + 版本链（`d3d9::TextureInfo`）。
+        std::uint32_t twrite_version = 0;
+        std::uint32_t tprev_write_version = 0;
+        std::int32_t twrite_rect[4] = {0, 0, 0, 0};
         if (texture != 0) {
             d3d9::TextureInfo ti;
             if (!d3d9::textureInfo(cpu, texture, &ti, why)) {
@@ -664,6 +672,9 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             }
             tversion = ti.version;
             tserial = ti.serial;
+            twrite_version = ti.write_version;
+            tprev_write_version = ti.prev_write_version;
+            for (int k = 0; k < 4; ++k) twrite_rect[k] = ti.write_rect[k];
             GuestSurface* tgs = m->surfaces().find(ti.arena);
             if (!tgs) {
                 if (why) *why = "D3DX9：合成时纹理像素不在 arena 里";
@@ -767,6 +778,14 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     gt.key = tbase;
                     gt.generation = tversion;
                     gt.serial = tserial;
+                    // ★ 方案 C：把"最近一次写的矩形 + 版本链"交给后端 —— 由它判要不要切段。
+                    //   `write_version == version` 才算"写区与当前内容版本对得上"。
+                    gt.content_change_known = twrite_version != 0 && twrite_version == tversion;
+                    gt.content_change_rect = GpuTexelRect{twrite_rect[0], twrite_rect[1],
+                                                          twrite_rect[2] - twrite_rect[0],
+                                                          twrite_rect[3] - twrite_rect[1]};
+                    gt.content_change_version = twrite_version;
+                    gt.content_change_prev_version = tprev_write_version;
                 } else {
                     // pTexture=0 的 D3DX 语义 = 白色源；GPU 用 1×1 白纹理 + 顶点色。
                     gt.pixels = nullptr;

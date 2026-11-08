@@ -108,7 +108,7 @@ std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, cons
 }
 
 std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
-                                       std::uint32_t user) {
+                                       std::uint32_t user, ComOnZero on_zero) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::string face = iface ? iface : "";
     if (face.empty()) {
@@ -226,6 +226,7 @@ std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::
     o.refcount = 1;
     o.bytes = obj_bytes;
     o.user = user;
+    o.on_zero = on_zero;
     o.iface = face;
     objects_.emplace(obj, std::move(o));
     comLog(face.c_str(), "建对象 0x%08X（vtable 0x%08X，%u 槽，refcount=1%s）", obj, vtable, slots,
@@ -269,12 +270,20 @@ bool ComRegistry::release(X86& cpu, std::uint32_t obj) {
     if (cpu.mem) cpu.mem->wr32(obj + kRefcountOffset, it->second.refcount);
     if (it->second.refcount != 0) return true;
 
-    // ④ 到 0：释放 vtable + 对象（guest 堆），并从表里删掉
+    // ④ 到 0：**先跑析构钩子**（回收对象独占的子资源：纹理 = 状态块 + arena 像素块），
+    //    再释放 vtable + 对象（guest 堆），并从表里删掉。
+    //    ★ 顺序保持"子资源在前、对象头在后"（旧代码也是这个顺序）。
+    //    ★ 这里是唯一收敛点 ⇒ 内部裸 `cpu.com->release`（SetTexture 换绑 / 设备销毁 /
+    //      Sprite 批次）与 guest 走 iface Release 的路径在这一步之后**没有任何区别**。
     const std::uint32_t vtable = it->second.vtable;
     const std::uint32_t slots = it->second.slots;
     const std::uint32_t obj_bytes = it->second.bytes;
+    const std::uint32_t user = it->second.user;
+    const ComOnZero on_zero = it->second.on_zero;
     const std::string iface = it->second.iface;
     objects_.erase(it);
+    // 钩子在对象表删除**之后**跑：它只该回收子资源，⛔ 不许再按 this 回调到本对象。
+    if (on_zero) on_zero(cpu, user);
     if (!cpu.heap) {
         comLog(iface.c_str(), "release(0x%08X)：cpu.heap 为空 ⇒ vtable 0x%08X 与对象都泄漏", obj, vtable);
         return false;

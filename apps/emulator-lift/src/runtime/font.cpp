@@ -49,6 +49,11 @@ FontConfig makeDefaultConfig() {
 
 FontConfig g_config = makeDefaultConfig();
 
+// ★ 配置代际：`fontSetConfig` 每次 +1。各 FontEngine 在自己的取字 / 度量入口比对它 ——
+//   不一致就清掉两级缓存（字形 + 度量）。这是 `fontSetConfig` **唯一的**失效钩子：
+//   它没有引擎清单可遍历（配置是进程级、引擎是每 Machine 一台），所以用代际而不是回调。
+std::uint64_t g_config_epoch = 1;
+
 bool hostFileExists(const std::string& path) {
     if (path.empty()) return false;
     std::FILE* f = openHostFileUtf8(path, "rb");
@@ -137,6 +142,7 @@ FontConfig fontDefaultConfig() { return makeDefaultConfig(); }
 void fontSetConfig(const FontConfig& cfg) {
     g_config = cfg;
     if (g_config.bold_path.empty()) g_config.bold_path = boldPathFor(g_config.regular_path);
+    ++g_config_epoch;  // ★ 换配置 ⇒ 所有 FontEngine 的缓存作废（在各自入口比对，见 `syncConfigEpoch`）
 }
 
 const FontConfig& fontConfig() { return g_config; }
@@ -150,11 +156,33 @@ struct FontEngine::Impl {
     std::map<std::string, FT_Face> faces;   // host path → face（生命周期 = 本对象）
     std::map<std::string, int> face_size;   // host path → 当前 pixel size
     std::map<std::tuple<std::uint32_t, int, int>, GlyphMask> cache;  // (cp, size, bold) → mask
+    // ★ `metrics()` 的缓存：键 = `metrics` 的**输入集** `(clamp 后像素字号, bold, 字体路径)`。
+    //   ⛔ 不用 HDC 做键 —— 同一个屏幕 DC 上会被换字体量不同字号（`gdi32_object.cpp` 的 SelectObject
+    //   路径），键里少一维就把小字号的 ascent 复用给大字号（差 8px，见 `.tmp/task3-report.md` §2）。
+    //   值只放 FT 派生段（weight / italic / underlined / struck_out 每次仍从 desc 覆盖）。
+    std::map<std::tuple<int, int, std::string>, HostTextMetrics> metrics_cache;
+    std::uint64_t metrics_hits = 0;
+    std::uint64_t metrics_misses = 0;
+    std::uint64_t config_epoch = 0;  // 与 `g_config_epoch` 不一致 ⇒ 清表（见 `syncConfigEpoch`）
+    FontEngine::MetricsSourceForTest metrics_source = nullptr;  // 纯档接缝（生产恒 nullptr）
+    void* metrics_source_user = nullptr;
     bool warned_missing = false;
     bool warned_bold = false;
 };
 
+// 度量缓存上限：条目数天然是个位数（字号 × regular/bold），到顶**整表 clear**（不做 LRU、不引依赖）。
+constexpr std::size_t kMetricsCacheMax = 64;
+
 namespace {
+
+// 代际变了（= `fontSetConfig` 跑过）⇒ 两级缓存全清。`baseline_lift` 也在这里面（它被烘进字形的
+// `origin_y`），所以改 lift 之后必须清字形缓存，否则 A/B 对照档会拿到旧 origin。
+void syncConfigEpoch(FontEngine::Impl& impl) {
+    if (impl.config_epoch == g_config_epoch) return;
+    impl.config_epoch = g_config_epoch;
+    impl.cache.clear();
+    impl.metrics_cache.clear();
+}
 
 FT_Library ensureLibrary(FontEngine::Impl& impl) {
     if (!impl.lib_tried) {
@@ -179,11 +207,21 @@ FT_Face faceFromPath(FontEngine::Impl& impl, const std::string& path) {
     return face;
 }
 
-// 取（并切换）一个字号的 face。bold 缺字体文件时回退常规字面（与 emulator-cxx 同口径）。
-FT_Face faceForSize(FontEngine::Impl& impl, bool bold, int pixel_size) {
+// `metrics` 缓存键里的"字体路径" = 这次**请求**要用的那份 face 的路径（与 `faceForSize` 的取法一致：
+// bold 且 bold 为空 ⇒ 常规；bold 文件**存在但加载失败**时 `faceForSize` 会回退常规字面，而这里仍是
+// bold_path ⇒ 那种情况下会多出一条**重复条目**（值由同一个 face 算出，数值不会串）。
+// ⛔ 但**不能**把这一维去掉改成裸字号当键：bold/常规是两份 face（ascent 与 'M'/漢/あ 的 advance 都不同）。
+std::string facePathFor(bool bold) {
     const FontConfig& cfg = fontConfig();
     std::string path = bold ? cfg.bold_path : cfg.regular_path;
     if (path.empty()) path = cfg.regular_path;
+    return path;
+}
+
+// 取（并切换）一个字号的 face。bold 缺字体文件时回退常规字面（与 emulator-cxx 同口径）。
+FT_Face faceForSize(FontEngine::Impl& impl, bool bold, int pixel_size) {
+    const FontConfig& cfg = fontConfig();
+    std::string path = facePathFor(bold);
     FT_Face face = faceFromPath(impl, path);
     if (face == nullptr && bold) {
         if (!impl.warned_bold) {
@@ -249,12 +287,28 @@ FontEngine::~FontEngine() {
 
 void FontEngine::setSyntheticForTest(bool on) {
     synthetic_ = on;
-    if (impl_) impl_->cache.clear();
+    if (!impl_) return;
+    // ★ 合成档与真字体档的**签名不同**（合成：height=size+2 / ascent=size / ave=6）⇒ 切档必须把
+    //   **两级**缓存都清掉，否则合成的度量会被真字体调用复用（反之亦然）。
+    impl_->cache.clear();
+    impl_->metrics_cache.clear();
 }
 
 void FontEngine::clearCache() {
-    if (impl_) impl_->cache.clear();
+    if (!impl_) return;
+    impl_->cache.clear();
+    impl_->metrics_cache.clear();
 }
+
+void FontEngine::setMetricsSourceForTest(MetricsSourceForTest fn, void* user) {
+    if (!impl_) return;
+    impl_->metrics_source = fn;
+    impl_->metrics_source_user = user;
+    impl_->metrics_cache.clear();  // 换源 ⇒ 旧结果作废（否则守卫会先命中旧条目）
+}
+
+std::uint64_t FontEngine::metricsHits() const { return impl_ ? impl_->metrics_hits : 0; }
+std::uint64_t FontEngine::metricsMisses() const { return impl_ ? impl_->metrics_misses : 0; }
 
 bool FontEngine::fontFileAvailable(bool bold) const {
     const FontConfig& cfg = fontConfig();
@@ -266,10 +320,14 @@ bool FontEngine::glyph(char32_t cp, int pixel_size, bool bold, GlyphMask* out) {
     if (out == nullptr) return false;
     const int size = std::clamp(pixel_size, 1, 512);
     if (synthetic_) {
+        // ★ 合成档**不**吃基线补偿：它的 `origin_y = black_box_y` 是格式算术的契约
+        //   （`tests/gdi.cpp` 逐值钉住），不是 FT 的 `bitmap_top`，也没有"Amayui 与参考字体的
+        //   ascent 差"这回事（补偿的理由见 `kBaselineLift`）。真字体档才位移。
         *out = syntheticMask(cp, size);
         return true;
     }
     if (!impl_) return false;
+    syncConfigEpoch(*impl_);
     const std::tuple<std::uint32_t, int, int> key{static_cast<std::uint32_t>(cp), size, bold ? 1 : 0};
     const auto cached = impl_->cache.find(key);
     if (cached != impl_->cache.end()) {
@@ -295,7 +353,11 @@ bool FontEngine::glyph(char32_t cp, int pixel_size, bool bold, GlyphMask* out) {
     m.black_box_x = static_cast<int>(bitmap.width);
     m.black_box_y = static_cast<int>(bitmap.rows);
     m.origin_x = slot->bitmap_left;
-    m.origin_y = slot->bitmap_top;
+    // ★ 宿主基线补偿的**唯一位移点**（`kBaselineLift` / `--baseline-lift`）：把 `gmptGlyphOrigin.y`
+    //   抬 N px ⇒ guest 用它算的"字形顶 = 基线 − origin.y"整体上移 N px。等价于 cxx 在
+    //   `text_raster.cpp:675` 的 `baseline = ... - lift`（那边减基线、这边加 origin，屏幕位置同一），
+    //   但**不改度量**：`tmAscent` / `tmHeight` 保持 FT 真值 ⇒ guest 的行距 / 排版不变。
+    m.origin_y = slot->bitmap_top + fontConfig().baseline_lift;
     // ★ 推进 = **floor**(26.6)：`>> 6`（不是四舍五入）。extent / GGO / TextOut 共用它。
     m.advance = advancePixels(slot->advance.x);
     const std::size_t count =
@@ -322,26 +384,19 @@ bool FontEngine::glyph(char32_t cp, int pixel_size, bool bold, GlyphMask* out) {
     return true;
 }
 
-bool FontEngine::metrics(int pixel_size, bool bold, std::int32_t weight, HostTextMetrics* out) {
-    if (out == nullptr) return false;
-    const int size = std::clamp(pixel_size, 1, 512);
-    if (synthetic_) {
-        out->height = size + 2;
-        out->ascent = size;
-        out->descent = 2;
-        out->internal_leading = 0;
-        out->external_leading = 0;
-        out->ave_char_width = 6;
-        out->max_char_width = 6;
-        out->weight = weight;
-        out->overhang = 0;
-        return true;
+namespace {
+
+// FT 派生段（**缓存的就是这一段**）：TEXTMETRICA 里随字体 / 字号变化的那些格子。
+// 返回 false = 没有可用的 face（调用方按失败返回，⛔ 不画空白冒充成功）。
+bool computeFaceMetrics(FontEngine::Impl& impl, bool bold, int size, HostTextMetrics* out) {
+    if (impl.metrics_source != nullptr) {
+        // 纯档接缝：只替换"FT 怎么算"，缓存 / 键 / 失效全部照旧走 `metrics()`。
+        return impl.metrics_source(impl.metrics_source_user, size, bold, out);
     }
-    if (!impl_) return false;
-    FT_Face face = faceForSize(*impl_, bold, size);
+    FT_Face face = faceForSize(impl, bold, size);
     if (face == nullptr) {
-        if (!impl_->warned_missing) {
-            impl_->warned_missing = true;
+        if (!impl.warned_missing) {
+            impl.warned_missing = true;
             std::fprintf(stderr,
                          "[font] 没有可用的宿主字体（LIFT_HOST_FONT_PATH / --font）⇒ "
                          "GetGlyphOutlineA / GetTextMetricsA / TextOutA 会返回失败\n");
@@ -358,8 +413,54 @@ bool FontEngine::metrics(int pixel_size, bool bold, std::int32_t weight, HostTex
     out->ave_char_width = advanceOf(face, 'M');
     out->max_char_width = std::max({out->ave_char_width, advanceOf(face, 0x6F22u),  // 漢
                                     advanceOf(face, 0x3042u)});                       // あ
-    out->weight = weight;
     out->overhang = 0;
+    return true;
+}
+
+}  // namespace
+
+bool FontEngine::metrics(int pixel_size, bool bold, HostTextMetrics* out) {
+    if (out == nullptr) return false;
+    const int size = std::clamp(pixel_size, 1, 512);
+    if (synthetic_) {
+        // ★ synthetic **不进缓存**（它不读字体文件，也没有 3 次 `FT_Load_Char` 的成本）。
+        out->height = size + 2;
+        out->ascent = size;
+        out->descent = 2;
+        out->internal_leading = 0;
+        out->external_leading = 0;
+        out->ave_char_width = 6;
+        out->max_char_width = 6;
+        out->overhang = 0;
+        return true;
+    }
+    if (!impl_) return false;
+    syncConfigEpoch(*impl_);
+    // ★ 键 = `metrics` 的输入集：clamp 后的像素字号 / bold / 字体路径（⛔ 不是 HDC：同一个屏幕 DC
+    //   上会被 SelectObject 换字体、量不同字号）。**desc 派生的四格（weight / italic / underlined /
+    //   struck_out）不在这里** —— 它们不是 FT 派生物，只由 `gdiTextMetrics` 每次从 desc 覆盖。
+    //   ★ 只留**一处**写这四个字段：两处写同一个字段时，删掉任一处守卫都照样绿（实测见交付说明 M4）。
+    const std::tuple<int, int, std::string> key{size, bold ? 1 : 0, facePathFor(bold)};
+    const auto cached = impl_->metrics_cache.find(key);
+    if (cached != impl_->metrics_cache.end()) {
+        ++impl_->metrics_hits;
+        *out = cached->second;
+        return true;
+    }
+    ++impl_->metrics_misses;
+    if (!computeFaceMetrics(*impl_, bold, size, out)) return false;
+    // ★ **入表的值只放 FT 派生段**：`weight/italic/underlined/struck_out` 是 desc 派生物、不归这一层
+    //   （否则"表里那格"= 首个请求者的 desc 值，命中时又盖回调用方 —— 那正是"两处写同一字段"的隐式版：
+    //   今天靠 `gdiTextMetrics` 无条件重写才不出错）。显式清零 = 缓存里根本没这四格。
+    out->weight = 0;
+    out->italic = 0;
+    out->underlined = 0;
+    out->struck_out = 0;
+    if (impl_->metrics_cache.size() >= kMetricsCacheMax) {
+        // 到顶**整表 clear**（不做 LRU：条目天然个位数，引一个淘汰策略只会多一条要测的路径）。
+        impl_->metrics_cache.clear();
+    }
+    impl_->metrics_cache.emplace(key, *out);
     return true;
 }
 
@@ -498,7 +599,7 @@ bool gdiGlyph(FontEngine& fonts, const GdiFontDesc& desc, char32_t cp, GlyphMask
 }
 
 bool gdiTextMetrics(FontEngine& fonts, const GdiFontDesc& desc, HostTextMetrics* out) {
-    if (!fonts.metrics(gdiPixelSize(desc), gdiBold(desc), desc.weight, out)) return false;
+    if (!fonts.metrics(gdiPixelSize(desc), gdiBold(desc), out)) return false;
     out->weight = desc.weight;
     out->italic = desc.italic;
     out->underlined = desc.underline;
@@ -599,8 +700,10 @@ TextDrawResult gdiDrawText(FontEngine& fonts, const GdiFontDesc& desc, const Gdi
         }
     }
 
-    const int lift = fontConfig().baseline_lift;  // ★ 宿主视觉策略（SCOPE 登记；0 = 关）
-    const int baseline = y + tm.ascent - lift;
+    // ★ 基线补偿**不在这里**：它已经烘进 `mask.origin_y`（见 `FontEngine::glyph` 里
+    //   `slot->bitmap_top + baseline_lift`）。这里再减一次就是抬 2N px —— 而引擎正文走
+    //   GGO + guest 自己合成，压根不经这条路径，所以补偿必须落在**两者共用**的 origin 上。
+    const int baseline = y + tm.ascent;
     const Rgb fg = decodeColor(dc.text_color);
     const Rgb bg = decodeColor(dc.bk_color);
     int pen = x;

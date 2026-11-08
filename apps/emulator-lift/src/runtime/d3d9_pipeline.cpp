@@ -356,6 +356,10 @@ struct TextureView {
     std::uint32_t pitch = 0;
     std::uint32_t version = 0;  // 内容版本（TextureInfo::version）；GPU 上传缓存用
     std::uint32_t serial = 0;   // 纹理身份（TextureInfo::serial）；GPU 缓存键用
+    // ★ 方案 C 的脏区输入（TextureInfo 的写入矩形 + 版本链）
+    std::uint32_t write_version = 0;
+    std::uint32_t prev_write_version = 0;
+    std::int32_t write_rect[4] = {0, 0, 0, 0};
 };
 
 bool resolveTexture(X86& cpu, Machine* m, std::uint32_t object_ea, TextureView* out, std::string* why) {
@@ -375,6 +379,9 @@ bool resolveTexture(X86& cpu, Machine* m, std::uint32_t object_ea, TextureView* 
     out->pitch = gs->pitch;
     out->version = ti.version;
     out->serial = ti.serial;
+    out->write_version = ti.write_version;
+    out->prev_write_version = ti.prev_write_version;
+    for (int k = 0; k < 4; ++k) out->write_rect[k] = ti.write_rect[k];
     out->present = out->pixels != nullptr && out->format.bytesPerPixel() != 0;
     return true;
 }
@@ -2799,6 +2806,13 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
         p.texture.key = tv.pixels;
         p.texture.generation = tv.version;
         p.texture.serial = tv.serial;
+        // ★ 方案 C：把"最近一次写的矩形 + 版本链"交给后端 —— 由它判要不要切段。
+        p.texture.content_change_known = tv.write_version != 0 && tv.write_version == tv.version;
+        p.texture.content_change_rect = GpuTexelRect{tv.write_rect[0], tv.write_rect[1],
+                                                     tv.write_rect[2] - tv.write_rect[0],
+                                                     tv.write_rect[3] - tv.write_rect[1]};
+        p.texture.content_change_version = tv.write_version;
+        p.texture.content_change_prev_version = tv.prev_write_version;
     } else {
         // 无纹理（CPU 采样为白色），或 stage0 两 op 都 DISABLE（CPU 直接 break ⇒ 顶点色）：
         // 只接受"结果恒等于顶点色"的组合（见 untexturedResolvesToDiffuse）。

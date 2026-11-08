@@ -5,7 +5,9 @@
 //   ② 输出 48k/16/2；设备游标 %bytes；dump 的前 0.5s 与 guest 环的斜坡**逐字节**相等；
 //   ③ 44.1k **单声道**缓冲：正确重采样到 48k，左右声道相同（引擎真的会建 mono 流）；
 //   ④ 喂料线程身份：register/resume/quit/join 的状态机（不跑 guest 线程体）；
-//   ⑤ Stop 后游标冻结、SetCurrentPosition 重排、Release 清掉 pending。
+//   ⑤ Stop 后游标冻结、SetCurrentPosition 重排、Release 清掉 pending；
+//   ⑥ 静音门：缺省 `sound=false` 时 dump 全 0 但 fills / mixed / 通知照跑；`sound=true` 逐字节
+//      等于 guest 斜坡（见文件末尾的 runDelivery）。
 //
 // ★ 会红：把 `fireCrossings` 的 sort 去掉 ⇒ ① 的回绕 0 会排在 3 之前；
 //   把 `generateTo` 的声道/采样率转换去掉 ⇒ ③ 红；把 removeBuffer 的 pending 清理去掉 ⇒ ⑤ 红。
@@ -37,7 +39,7 @@ void testDeviceModel() {
     }
     const std::string dump = "lift-audio-dump-test.wav";
     std::remove(dump.c_str());
-    if (!m.configureAudio(lift::AudioMode::Virtual, dump, &err)) {
+    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -151,7 +153,7 @@ void testMonoResample() {
     }
     const std::string dump = "lift-audio-mono-test.wav";
     std::remove(dump.c_str());
-    if (!m.configureAudio(lift::AudioMode::Virtual, dump, &err) || !m.audio().begin(&err)) {
+    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -220,7 +222,7 @@ void testFeederLifecycle() {
         LIFT_CHECK(false);
         return;
     }
-    if (!m.configureAudio(lift::AudioMode::Virtual, "", &err) || !m.audio().begin(&err)) {
+    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -260,7 +262,7 @@ void testFeederContext() {
         LIFT_CHECK(false);
         return;
     }
-    if (!m.configureAudio(lift::AudioMode::Virtual, "", &err) || !m.audio().begin(&err)) {
+    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -381,7 +383,7 @@ void testCrossingSort() {
         LIFT_CHECK(false);
         return;
     }
-    if (!m.configureAudio(lift::AudioMode::Virtual, "", &err) || !m.audio().begin(&err)) {
+    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -419,6 +421,190 @@ void testCrossingSort() {
     a.end();
 }
 
+// ---- 静音门（缺省静音 / `--sound` 才出声）-------------------------------------------
+//
+// ★ 判据（红了意味着什么）：
+//   ① 缺省（`sound=false`）：dump 的 data 区**逐字节全 0**，且长度 == 期望 B；
+//   ② `--sound`（`sound=true`）：**不是**全 0，且逐字节 == guest 环的斜坡（同 :139 的 memcmp 口径）
+//      ⇒ 排除"全 0 恒真"；
+//   ③ 两遍都 `fills == 1`、`mixed_bytes` 相等且 == 期望 B、`notifications >= 1`、交付字节数相等
+//      ⇒ 默认静音**没有**跳过喂料 / 混音 / 交付；
+//   ④ 缺省 `muted_bytes == mixed_bytes`（有内容被静音），`--sound` 时 `muted_bytes == 0`。
+//
+// ★ 场景复用 `testFeederContext` 的假 `sub_4B6C30`（11 条指令、`ret 4`）+ 真 feeder 身份，
+//   以及 `testDeviceModel` 的 384000 B 斜坡环；0.25 s 虚拟时钟正好混出 48000 B，且不跨任何
+//   新通知点（所以 fill 恰好一次）。
+// ★ 这条守卫只用 `AudioMode::Virtual` ⇒ 不需要声卡（pure 档）。
+struct DeliveryRun {
+    bool begun = false;
+    bool filled = false;
+    std::uint64_t fills = 0;
+    std::uint64_t mixed = 0;
+    std::uint64_t muted = 0;
+    std::uint64_t notifications = 0;
+    std::uint32_t data_declared = 0;      // WAV 头里声明的 data 区长度
+    std::vector<std::uint8_t> data;       // 实际读到的 data 区
+};
+
+constexpr std::uint32_t kDeliveryBytes = 48000u;  // 0.25 s @ 48k / 16 / 2
+
+std::vector<std::int16_t> makeRamp(std::uint32_t bytes) {
+    std::vector<std::int16_t> pcm(bytes / 2);
+    for (std::size_t i = 0; i < pcm.size(); ++i) pcm[i] = static_cast<std::int16_t>((i % 2000) - 1000);
+    return pcm;
+}
+
+DeliveryRun runDelivery(bool sound, const char* tag) {
+    DeliveryRun r;
+    std::string err;
+    lift::Machine m;
+    if (!initMachine(m, &err)) return r;
+    const std::string dump = std::string("lift-audio-mute-") + tag + ".wav";
+    std::remove(dump.c_str());
+    if (!m.configureAudio(lift::AudioMode::Virtual, dump, sound, &err)) return r;
+    lift::AudioEngine& a = m.audio();
+    if (!a.begin(&err)) return r;
+    r.begun = true;
+
+    const std::uint32_t code_ea = 0x004B6C30u;
+    const std::uint32_t sound_obj = 0x00460000u;
+    const std::uint32_t stream = 0x00461000u;
+    const std::uint32_t state = 0x00462000u;
+    const std::uint32_t data = 0x00400000u;
+    const std::uint32_t obj = 0x00463000u;
+    const std::uint32_t bytes = 384000u;
+    const std::uint32_t slot = 11u;
+    const std::uint32_t quit = 0x00001234u;
+
+    // 假 `sub_4B6C30`：11 条指令后 `ret 4`（与 testFeederContext 同一份夹具）。
+    const std::uint8_t stub[] = {
+        0xB8, 0x11, 0x11, 0x11, 0x11, 0xB9, 0x22, 0x22, 0x22, 0x22, 0xBA, 0x33, 0x33, 0x33,
+        0x33, 0xBB, 0x44, 0x44, 0x44, 0x44, 0xBE, 0x55, 0x55, 0x55, 0x55, 0xBF, 0x66, 0x66,
+        0x66, 0x66, 0xBD, 0x77, 0x77, 0x77, 0x77, 0x83, 0xC0, 0x01, 0xD9, 0xE8, 0x66, 0x0F,
+        0x6E, 0xC0, 0xC2, 0x04, 0x00,
+    };
+    if (!m.placeCode(code_ea, stub, sizeof(stub), &err)) return r;
+    std::vector<std::uint8_t> zeros(0x1000, 0);
+    if (!m.placeData(sound_obj, zeros.data(), zeros.size(), &err)) return r;
+    if (!m.placeData(stream, zeros.data(), zeros.size(), &err)) return r;
+    if (!m.placeData(state, zeros.data(), 16, &err)) return r;
+    const std::vector<std::int16_t> pcm = makeRamp(bytes);
+    if (!m.placeData(data, pcm.data(), bytes, &err)) return r;
+    m.mem().wr32(sound_obj + 0x514u, quit);
+    m.mem().wr32(sound_obj + 0x654u + 4u * slot, stream);
+    m.mem().wr32(stream + 0x40Cu, obj);
+    m.mem().wr32(stream + 0x444u, bytes);
+
+    lift::AudioFormat fmt;
+    fmt.sample_rate = 48000;
+    fmt.channels = 2;
+    fmt.bits = 16;
+    fmt.block_align = 4;
+    fmt.avg_bytes = 192000;
+    a.addBuffer(state, obj, data, bytes, 0x181C8u, fmt);
+    const std::uint32_t offsets[4] = {0u, 96000u, 192000u, 288000u};
+    a.setNotify(state, 4, offsets);
+    a.play(state, true);
+    if (!a.registerFeeder(0x004B5AA0u, sound_obj, 0x00001008u, 0x000002D0u)) return r;
+    a.resumeFeeder();
+
+    // ★ 顺序很重要：`Machine::run` 结束时会 `audio_.end()`（回填 WAV 头并关闭 dump），
+    //   所以先推进虚拟时钟让 pump 混出 48000 B（dump 还开着），再把 quarter 0 铺成一帧 guest。
+    //   0.25 s 不跨任何通知点 ⇒ 不会产生第二次 fill。
+    m.clock().advance100ns(2'500'000);
+    if (a.pump() != lift::AudioPump::Suspended) return r;
+    lift::RunOptions opt;
+    opt.max_insns = 11;
+    const lift::RunResult rr = m.run(opt);  // 结束时 audio_.end() 回填 WAV 头
+    if (rr.reason != lift::StopReason::MaxInsns) return r;
+    r.filled = true;
+
+    const lift::AudioStats& st = a.stats();  // end() 不清统计
+    r.fills = st.fills;
+    r.mixed = st.mixed_bytes;
+    r.muted = st.muted_bytes;
+    r.notifications = st.notifications;
+
+    std::FILE* f = std::fopen(dump.c_str(), "rb");
+    if (f) {
+        std::uint8_t hdr[44] = {};
+        if (std::fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) && std::memcmp(hdr, "RIFF", 4) == 0 &&
+            std::memcmp(hdr + 8, "WAVEfmt ", 8) == 0 && std::memcmp(hdr + 36, "data", 4) == 0) {
+            r.data_declared = static_cast<std::uint32_t>(hdr[40]) |
+                              (static_cast<std::uint32_t>(hdr[41]) << 8) |
+                              (static_cast<std::uint32_t>(hdr[42]) << 16) |
+                              (static_cast<std::uint32_t>(hdr[43]) << 24);
+            r.data.resize(r.data_declared);
+            if (std::fread(r.data.data(), 1, r.data.size(), f) != r.data.size()) r.data.clear();
+        }
+        std::fclose(f);
+    }
+    std::remove(dump.c_str());
+    return r;
+}
+
+bool allZero(const std::vector<std::uint8_t>& v) {
+    for (std::uint8_t b : v)
+        if (b != 0) return false;
+    return true;
+}
+
+void testDefaultMutedDelivery() {
+    lift_test::g_current_case = "audio-device/default-muted-delivery";
+    const DeliveryRun r = runDelivery(/*sound=*/false, "muted");
+    LIFT_CHECK(r.begun);
+    LIFT_CHECK(r.filled);
+    // ① 长度 == 期望，且 data 区逐字节全 0。
+    LIFT_CHECK_EQ_U32(r.data_declared, kDeliveryBytes);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.data.size()), kDeliveryBytes);
+    LIFT_CHECK(allZero(r.data));
+    // ③④ 喂料 / 混音照跑；静音字节数 == 混音字节数（= 确实有内容被覆盖，而不是没数据）。
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.fills), 1u);
+    LIFT_CHECK(r.notifications >= 1);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.mixed), kDeliveryBytes);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.muted), static_cast<std::uint32_t>(r.mixed));
+    LIFT_CHECK(r.muted > 0 && r.muted == r.mixed);
+}
+
+void testSoundOnDelivery() {
+    lift_test::g_current_case = "audio-device/sound-on-delivery";
+    const DeliveryRun r = runDelivery(/*sound=*/true, "sound");
+    LIFT_CHECK(r.begun);
+    LIFT_CHECK(r.filled);
+    LIFT_CHECK_EQ_U32(r.data_declared, kDeliveryBytes);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.data.size()), kDeliveryBytes);
+    // ② 不是全 0，且逐字节 == guest 环的斜坡（照抄 tests/audio.cpp:139 的 memcmp 口径）。
+    LIFT_CHECK(!allZero(r.data));
+    const std::vector<std::int16_t> pcm = makeRamp(384000u);
+    LIFT_CHECK(r.data.size() <= pcm.size() * sizeof(std::int16_t));
+    LIFT_CHECK(std::memcmp(r.data.data(), pcm.data(), r.data.size()) == 0);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.fills), 1u);
+    LIFT_CHECK(r.notifications >= 1);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.mixed), kDeliveryBytes);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.muted), 0u);
+}
+
+// ③ 同一条输入跑两遍、只差 `sound`：喂料 / 混音 / 交付字节数必须相等 ⇒ 静音没走捷径。
+void testMutedDeliveryParity() {
+    lift_test::g_current_case = "audio-device/muted-delivery-parity";
+    const DeliveryRun muted = runDelivery(/*sound=*/false, "parity-muted");
+    const DeliveryRun sound = runDelivery(/*sound=*/true, "parity-sound");
+    LIFT_CHECK(muted.begun && muted.filled);
+    LIFT_CHECK(sound.begun && sound.filled);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(muted.fills), 1u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(sound.fills), 1u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(muted.mixed), static_cast<std::uint32_t>(sound.mixed));
+    LIFT_CHECK(muted.mixed == kDeliveryBytes);
+    LIFT_CHECK(muted.notifications >= 1);
+    LIFT_CHECK(sound.notifications >= 1);
+    LIFT_CHECK_EQ_U32(muted.data_declared, sound.data_declared);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(muted.data.size()),
+                      static_cast<std::uint32_t>(sound.data.size()));
+    // ④ 再钉一次计数语义（两个方向都钉，防止"恒等成立"）。
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(muted.muted), static_cast<std::uint32_t>(muted.mixed));
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(sound.muted), 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -427,5 +613,8 @@ int main() {
     testFeederLifecycle();
     testFeederContext();
     testCrossingSort();
+    testDefaultMutedDelivery();
+    testSoundOnDelivery();
+    testMutedDeliveryParity();
     return lift_test::finish("audio-device");
 }

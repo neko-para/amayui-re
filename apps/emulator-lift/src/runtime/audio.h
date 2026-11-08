@@ -75,6 +75,9 @@ struct AudioFormat {
 struct AudioStats {
     std::uint64_t played_bytes = 0;
     std::uint64_t mixed_bytes = 0;
+    // 交付点被静音门覆盖掉的字节数（缺省 == mixed_bytes；`--sound` 时 0）。
+    // 用来区分"有内容被静音"与"没数据 / 没设备" ⇒ 见 dumpSummary 的 muted_bytes。
+    std::uint64_t muted_bytes = 0;
     std::uint64_t pushed_bytes = 0;
     std::uint64_t notifications = 0;
     std::uint64_t fills = 0;
@@ -97,12 +100,17 @@ public:
     void attach(X86* cpu, GuestMemory* mem, VirtualClock* clock);
 
     // 由 `Machine::configureAudio()` / CLI 调用；可在 run 前反复调用（run 开始后改无效）。
-    bool configure(AudioMode mode, const std::string& dump_path, std::string* err);
+    // ★ `sound=false`（缺省）= 静音：设备 / 混音 / 喂料 / guest 的 DS 调用全部照跑，
+    //   只在**最终交付点**（`generateTo` 里 `out` 生成之后、`pushMixed` 之前）把缓冲置 0。
+    //   ⛔ 不是"不建设备 / 不起 feeder / 提前退出 / 改 guest SetVolume"。
+    bool configure(AudioMode mode, const std::string& dump_path, bool sound, std::string* err);
 
     bool begin(std::string* err);  // 打开 SDL 设备 / dump 文件；幂等
     void end();                    // 关闭设备、回填 WAV 大小；幂等
     bool enabled() const { return mode_ != AudioMode::Off; }
     AudioMode mode() const { return mode_; }
+    // 缺省 true = 静音；`--sound` 时 false。与后端（`--audio`）正交。
+    bool muted() const { return mute_; }
     bool threadMode() const { return thread_mode_; }
     const AudioStats& stats() const { return stats_; }
     const std::string& lastError() const { return last_error_; }
@@ -230,6 +238,12 @@ private:
     std::string last_error_;
     bool begun_ = false;
     bool sdl_ok_ = false;
+    // `begin()` 时 SDL 设备**曾经**打开成功（summary 在 `end()` 之后打印，那时 `sdl_ok_` 已清）。
+    bool sdl_device_opened_ = false;
+    // `--audio sdl` 打不开设备、`begin()` 退回 virtual 时置位（summary 的 device=fallback）。
+    bool sdl_fallback_ = false;
+    // 缺省静音：见 `configure` / `generateTo` 的交付点门。与 `--audio` 后端正交。
+    bool mute_ = true;
     bool dump_ok_ = false;
     bool logged_sdl_fail_ = false;
     bool warned_slot_mismatch_ = false;

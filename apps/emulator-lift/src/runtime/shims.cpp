@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "runtime/exec.h"
+#include "runtime/guest_token.h"
 #include "runtime/image.h"
 #include "runtime/memory.h"
 #include "runtime/sha256.h"
@@ -382,7 +383,18 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     }
 
     const auto time_begin = timing_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    local.fn(cpu, call);
+    {
+        // ★ 并发契约（guest_token.h）：**所有 guest 可见的共享容器访问都发生在 shim 实现里**
+        //   （GuestHeap / HandleTable / Vfs / ComRegistry / SurfaceArena / guest 内存账本 …
+        //   都经由 shim 的 `fn` 走到）。⇒ shim 边界就是"容器临界区"：
+        //   主线程本来就按块持有令牌；feeder 线程**不**在整次 fill 期间持令牌（那样等于单核
+        //   串行，实测 wall ≥ 两侧 CPU 之和），只在每次 shim 调用时取 —— 与主线程的块互斥。
+        //   ⛔ 不要在 `fn` 里再手写"绕过令牌"的共享容器访问：新增容器入口要么走 shim，要么单独加锁。
+        GuestToken::Guard shim_token(guestToken());
+        // ★ 检查点：Guard 被删/短路时，**第一次 shim 调用**就计数（不依赖 heap 恰好被碰到）。
+        guestToken().check("shim.invoke");
+        local.fn(cpu, call);
+    }
     if (timing_on) {
         const std::uint64_t ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - time_begin)

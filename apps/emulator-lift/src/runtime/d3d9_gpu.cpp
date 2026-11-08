@@ -11,15 +11,19 @@
 //   Windows = D3DCompile → DXBC；macOS = MSL 源码（Metal）。⛔ 不把 DXBC 带进 Metal。
 //
 // ★ 合批（2026-11）：`rasterQueue` 只入队（顶点 CPU 拷贝、纹理在入队时就把像素拷成 staging），
-//   `rasterFlush` 一次做完：一个 copy pass（所有待上传纹理 + 所有顶点）→ 一个 render pass
-//   （逐条切 pipeline/viewport/scissor/sampler/纹理，顺序不变）→ 一次 `SDL_SubmitGPUCommandBuffer`。
-//   ⛔ 只合并提交，不合并 draw；⛔ 不跨 target 共用一个 render pass。
+//   `rasterFlush` 一次做完：按段 `[copy 上传][render 画]` 交替 → 只 `SDL_SubmitGPUCommandBuffer`
+//   一次。★ 方案 C（先脏矩形判、再切段）：纹理内容在队列里被引用期间变化时，先判"写入矩形 × 本段
+//   已入队 draw 的采样矩形"是否相交；相交才在边界处切段，不相交就不切（上传并进本段开头）。
+//   ⛔ 只有合并提交，不合并 draw；⛔ 不跨 target 共用一个 render pass。
 // ★ 屏障清单（凡是要读/写 target 或换 target 的，先 flush；要 guest 像素的再 syncToGuest）：
 //   · 读 target：`rasterSyncToGuest`（Present / CPU 回退 / dump）、SDL_GPU 的 `directReadback`；
 //   · 写 target（CPU 侧）：`d3d9::clear`（TARGET 位）、`d3d9::lockRect`（锁的是当前镜像目标时）；
 //   · 换 target：`rasterPrepare`（基址/尺寸/格式任一变化）、`d3d9_pipeline::setRenderTarget`；
 //   · 呈现：`d3d9::present`（读回）、SDL_GPU 的 `directPresent`。
-//   ★ `rasterSyncFromGuest` 反过来：调用方保证 guest 是权威 ⇒ 队列非空是**错误**（⛔ 不静默覆盖）。
+//   ★ `rasterSyncFromGuest` 反过来：调用方保证 guest 是权威 ⇒ 队列非空 / 有未提交上传是**错误**
+//     （⛔ 不静默覆盖）。
+//   ★ 失败口径：所有 staging 都在 CPU 侧（`PendingUpload::bytes`），命令缓冲只在 flush 里录、录完
+//     立刻提交 ⇒ 失败时把队列与段**原样保留**重试即可，⛔ 不会留下"已录进 CB 却没提交"的半成品。
 // ★ 能力边界（准入在 d3d9_pipeline.cpp 的 gpuEligible；这里只负责"画得出"）：
 //   · 混合 = SDL_GPUColorTargetBlendState 的 **color / alpha 两段**（支持 D3D 的 separate alpha）；
 //     映射不了的因子/op 明确失败（d3d9_pipeline 会先拒绝，这里再兜一层）。
@@ -48,6 +52,9 @@
 
 namespace lift {
 namespace {
+
+// ★ 进程级诊断计数（理由见 gpu_raster.h 的 `GpuRasterStats`）：同一时刻只有一个 SDL_GPU 后端。
+GpuRasterStats g_stats;
 
 #if defined(_WIN32)
 const char* kShaderSource = R"(
@@ -320,6 +327,8 @@ public:
         alpha_ = alpha;
         target_format_ = format;
         target_base_ = color_base;
+        // ★ 注意：这里先记身份；下面建纹理失败时 destroyTargets() 会把 target_ 清掉 ⇒ 必须同时
+        //   把 target_base_ 清回去，否则 rasterTargetBase() 会指向一块**不存在**的镜像。
         target_pitch_ = static_cast<std::uint32_t>(width) * 4u;
         SDL_GPUTextureCreateInfo ci{};
         ci.type = SDL_GPU_TEXTURETYPE_2D;
@@ -337,6 +346,9 @@ public:
         if (target_ == nullptr || depth_ == nullptr) {
             if (err) *err = std::string("SDL_CreateGPUTexture 失败：") + SDL_GetError();
             destroyTargets();
+            target_base_ = nullptr;
+            width_ = 0;
+            height_ = 0;
             return false;
         }
         need_depth_clear_ = true;
@@ -348,10 +360,10 @@ public:
 
     bool rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
                              std::string* err) override {
-        // ★ guest 是权威 ⇒ 队列里未提交的 draw 会被这次上传覆盖。调用方必须先 flush（约定见
-        //   gpu_raster.h）；这里明确拒绝，⛔ 不静默丢像素。
-        if (!queue_.empty()) {
-            if (err) *err = "SDL_GPU：队列非空时不能从 guest 覆盖镜像（先 rasterFlush）";
+        // ★ guest 是权威 ⇒ 队列里未提交的 draw / 未提交的纹理上传都会被这次覆盖。调用方必须先
+        //   flush（约定见 gpu_raster.h）；这里明确拒绝，⛔ 不静默丢像素。
+        if (!queue_.empty() || hasPendingUploads()) {
+            if (err) *err = "SDL_GPU：队列非空（或有未提交的纹理上传）时不能从 guest 覆盖镜像（先 rasterFlush）";
             return false;
         }
         if (target_ == nullptr || width != width_ || height != height_) {
@@ -363,7 +375,10 @@ public:
             return false;
         }
         if (!uploadGuest(pixels, pitch, width, height, err)) return false;
-        need_depth_clear_ = true;
+        // ★ 这里**不**置 need_depth_clear_：只换颜色内容（guest 后缓冲是权威）不改深度。
+        //   D3D9 里只有 `Clear(ZBUFFER)`（⇒ rasterRequestDepthClear）与"新 target"会清深度；
+        //   旧实现每次颜色同步都清 ⇒ 帧内 Clear(TARGET)/CPU 回退之后的下一批 draw 会把先前的
+        //   深度一起清掉（多段渲染下就是"先画的深度写失效"）。
         dirty_ = false;
         target_current_ = true;
         return true;
@@ -409,6 +424,10 @@ public:
         SDL_DownloadFromGPUTexture(copy, &src, &dst);
         SDL_EndGPUCopyPass(copy);
         SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+        if (fence != nullptr) {
+            ++g_stats.submits;
+            ++g_stats.submits_readback;
+        }
         if (fence == nullptr) {
             SDL_ReleaseGPUTransferBuffer(device_, tb);
             if (err) *err = "SDL_SubmitGPUCommandBufferAndAcquireFence 失败";
@@ -460,13 +479,7 @@ public:
         draw.vertices.assign(vertices, vertices + count);
         draw.state = state;
         draw.textured = texture != nullptr;
-        // ★ 纹理在**入队时**就交给后端（像素拷进 staging；⛔ 不存 guest 指针）。
-        if (texture != nullptr) {
-            if (!ensureTexture(*texture, &draw.texture, err)) return false;
-            draw.sampler = samplerFor(texture->sampler, err);
-            if (draw.sampler == nullptr) return false;
-        }
-        // ★ pipeline 也在入队时解析：flush 里只剩"录命令"，把可失败点前移（失败 ⇒ 调用方回退 CPU）。
+        // ★ pipeline 在入队时解析：flush 里只剩"录命令"，把可失败点前移（失败 ⇒ 调用方回退 CPU）。
         draw.pipeline = pipelineFor(state, draw.textured, err);
         if (draw.pipeline == nullptr) return false;
         // 顶点缓冲在入队时就长够（flush 里不再创建 GPU 缓冲）。
@@ -476,30 +489,55 @@ public:
             return false;
         }
         if (!ensureVertexBuffer(static_cast<Uint32>(need_bytes), err)) return false;
+        // ★ 纹理在**入队时**就交给后端（像素拷进 staging；⛔ 不存 guest 指针）。
+        //   采样矩形先算好（后面的内容变更要拿它判"要不要切段"）；`ensureTexture` 可能因此
+        //   在本段后面切开一个新段。
+        if (texture != nullptr) {
+            const int tex_w = texture->pixels != nullptr ? texture->width : 1;
+            const int tex_h = texture->pixels != nullptr ? texture->height : 1;
+            const bool wrap_u = texture->sampler.address_u != GpuAddress::Clamp;
+            const bool wrap_v = texture->sampler.address_v != GpuAddress::Clamp;
+            draw.sample_rect = gpuDrawSampleRect(vertices, count, tex_w, tex_h, wrap_u, wrap_v);
+            if (!ensureTexture(*texture, &draw.texture, err)) return false;
+            draw.sampler = samplerFor(texture->sampler, err);
+            if (draw.sampler == nullptr) return false;
+        }
         draw.vertex_offset = static_cast<std::uint32_t>(queued_vertices_);
         queued_vertices_ += count;
         queue_.push_back(std::move(draw));
         return true;
     }
 
-    // ★ 一次 flush = 一个 command buffer：copy pass（纹理 + 顶点）→ render pass（逐条 draw）→ submit。
-    //   队列空 ⇒ 零成本 true（⛔ 不提交空 command buffer）。
+    // ★ 一次 flush = **一个** command buffer，内部按段 `[copy 上传][render 画]` 交替，最后只 Submit 一次。
+    //   · 队列为空且没有待上传内容 ⇒ 零成本 true（⛔ 不提交空 command buffer）；
+    //   · depth 只在**本次 flush 的第一个 render pass** 清（一帧一次；分段后第二段起必须 LOAD，
+    //     ⛔ 不能每段都清 —— 那会把前面已画进去的颜色/深度一起丢掉）；
+    //   · 所有段的上传合到**一个** transfer buffer，每块各自 512 对齐 offset、**只写一次**
+    //     ⇒ 同一 command buffer 内不会覆盖仍在途的数据（SDL 在提交之后才执行 upload）。
     bool rasterFlush(std::string* err) override {
-        if (queue_.empty()) return true;
-        if (target_ == nullptr || depth_ == nullptr) {
+        const bool has_uploads = hasPendingUploads();
+        const bool had_draws = !queue_.empty();
+        if (!had_draws && !has_uploads) return true;
+        if (had_draws && (target_ == nullptr || depth_ == nullptr)) {
             if (err) *err = "SDL_GPU target 未准备";
             return false;
         }
+        // 统一按"段序 = 编码序"遍历所有待上传块
+        auto for_each_upload = [&](auto&& fn) {
+            for (Segment& s : segments_) {
+                for (PendingUpload& u : s.uploads) fn(u);
+            }
+        };
 
-        // ---- 1) 待上传纹理：把所有 staging 合到**一个** transfer buffer ----
-        std::vector<TextureEntry*> uploads;
+        // ---- 1) 待上传纹理：所有段的所有块合到**一个** transfer buffer ----
         std::size_t texture_bytes = 0;
-        for (auto& kv : textures_) {
-            if (!kv.second.pending) continue;
-            uploads.push_back(&kv.second);
-            texture_bytes += kv.second.staged.size();
-            // SDL_GPU 建议 transfer buffer 内的偏移按 512 对齐（D3D12 否则会再拷一份）。
+        for_each_upload([&](PendingUpload& u) {
             texture_bytes = (texture_bytes + 511u) & ~static_cast<std::size_t>(511u);
+            texture_bytes += u.size;
+        });
+        if (texture_bytes > 0xFFFFFFFFull) {
+            if (err) *err = "SDL_GPU：一帧待上传的纹理字节数超过 4 GiB";
+            return false;
         }
         SDL_GPUTransferBuffer* tex_tb = nullptr;
         SDL_GPUTransferBuffer* vtx_tb = nullptr;
@@ -509,15 +547,14 @@ public:
             tex_tb = nullptr;
             vtx_tb = nullptr;
         };
-        std::vector<std::uint32_t> tex_offsets(uploads.size(), 0);
-        if (!uploads.empty()) {
+        if (texture_bytes > 0) {
             SDL_GPUTransferBufferCreateInfo ti{};
             ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
             ti.size = static_cast<Uint32>(texture_bytes);
             tex_tb = SDL_CreateGPUTransferBuffer(device_, &ti);
             if (tex_tb == nullptr) {
                 if (err) *err = std::string("SDL_CreateGPUTransferBuffer(textures) 失败：") + SDL_GetError();
-                return false;  // 队列保留：下次还能重试
+                return false;  // 队列/段保留：下次还能重试
             }
             auto* mapped = static_cast<std::uint8_t*>(SDL_MapGPUTransferBuffer(device_, tex_tb, false));
             if (mapped == nullptr) {
@@ -526,16 +563,16 @@ public:
                 return false;
             }
             std::size_t cursor = 0;
-            for (std::size_t i = 0; i < uploads.size(); ++i) {
+            for_each_upload([&](PendingUpload& u) {
                 cursor = (cursor + 511u) & ~static_cast<std::size_t>(511u);
-                tex_offsets[i] = static_cast<std::uint32_t>(cursor);
-                std::memcpy(mapped + cursor, uploads[i]->staged.data(), uploads[i]->staged.size());
-                cursor += uploads[i]->staged.size();
-            }
+                u.transfer_offset = static_cast<std::uint32_t>(cursor);
+                std::memcpy(mapped + cursor, staging_.data() + u.staging_offset, u.size);
+                cursor += u.size;
+            });
             SDL_UnmapGPUTransferBuffer(device_, tex_tb);
         }
 
-        // ---- 2) 所有顶点合到**一个** transfer buffer（对应一个 GPU vertex buffer）----
+        // ---- 2) 所有顶点合到**一个** transfer buffer（在第一个 copy pass 里上传）----
         const std::size_t vertex_bytes = static_cast<std::size_t>(queued_vertices_) * sizeof(Vertex);
         if (vertex_bytes > 0) {
             SDL_GPUTransferBufferCreateInfo ti{};
@@ -576,113 +613,146 @@ public:
         if (cmd == nullptr) {
             release_tbs();
             if (err) *err = std::string("SDL_AcquireGPUCommandBuffer 失败：") + SDL_GetError();
-            return false;  // 队列保留
+            return false;  // 队列/段保留
         }
-        // ---- 3) 一个 copy pass：纹理 + 顶点 ----
-        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
-        for (std::size_t i = 0; i < uploads.size(); ++i) {
-            TextureEntry* e = uploads[i];
-            SDL_GPUTextureTransferInfo src{};
-            src.transfer_buffer = tex_tb;
-            src.offset = tex_offsets[i];
-            src.pixels_per_row = e->width;
-            src.rows_per_layer = e->height;
-            SDL_GPUTextureRegion dst{};
-            dst.texture = e->texture;
-            dst.w = e->width;
-            dst.h = e->height;
-            dst.d = 1;
-            SDL_UploadToGPUTexture(copy, &src, &dst, true);
-        }
-        if (vertex_bytes > 0) {
-            SDL_GPUTransferBufferLocation src{};
-            src.transfer_buffer = vtx_tb;
-            src.offset = 0;
-            SDL_GPUBufferRegion dst{};
-            dst.buffer = vertex_buffer_;
-            dst.offset = 0;
-            dst.size = static_cast<Uint32>(vertex_bytes);
-            SDL_UploadToGPUBuffer(copy, &src, &dst, true);
-        }
-        SDL_EndGPUCopyPass(copy);
 
-        // ---- 4) 一个 render pass：按入队顺序逐条切状态 + draw ----
-        SDL_GPUColorTargetInfo color{};
-        color.texture = target_;
-        color.load_op = SDL_GPU_LOADOP_LOAD;
-        color.store_op = SDL_GPU_STOREOP_STORE;
-        SDL_GPUDepthStencilTargetInfo depth{};
-        depth.texture = depth_;
-        depth.clear_depth = 1.0f;
-        depth.load_op = need_depth_clear_ ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
-        depth.store_op = SDL_GPU_STOREOP_STORE;
-        depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
-        depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &color, 1, &depth);
-        for (const QueuedDraw& d : queue_) {
-            SDL_BindGPUGraphicsPipeline(pass, d.pipeline);
-            SDL_GPUViewport vp{};
-            vp.x = static_cast<float>(d.state.viewport_x);
-            vp.y = static_cast<float>(d.state.viewport_y);
-            vp.w = static_cast<float>(d.state.viewport_w);
-            vp.h = static_cast<float>(d.state.viewport_h);
-            vp.min_depth = 0.0f;
-            vp.max_depth = 1.0f;
-            SDL_SetGPUViewport(pass, &vp);
-            SDL_Rect scissor{d.state.scissor_x0, d.state.scissor_y0, d.state.scissor_x1 - d.state.scissor_x0,
-                             d.state.scissor_y1 - d.state.scissor_y0};
-            if (!d.state.scissor_enabled ||
-                (d.state.scissor_x0 == 0 && d.state.scissor_y0 == 0 && d.state.scissor_x1 == width_ &&
-                 d.state.scissor_y1 == height_)) {
-                scissor = SDL_Rect{0, 0, width_, height_};
+        // ---- 3) 逐段：copy pass（本段的上传）→ render pass（本段区间的 draw）----
+        bool first_render_pass = true;
+        bool encoded_render_pass = false;
+        for (std::size_t seg_index = 0; seg_index < segments_.size(); ++seg_index) {
+            Segment& seg = segments_[seg_index];
+            const std::size_t draw_end =
+                (seg_index + 1 < segments_.size()) ? segments_[seg_index + 1].first_draw : queue_.size();
+            const bool seg_has_draws = seg.first_draw < draw_end;
+            const bool first_copy_pass = seg_index == 0;
+            if (first_copy_pass || !seg.uploads.empty()) {
+                SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+                for (PendingUpload& u : seg.uploads) {
+                    SDL_GPUTextureTransferInfo src{};
+                    src.transfer_buffer = tex_tb;
+                    src.offset = u.transfer_offset;
+                    src.pixels_per_row = static_cast<Uint32>(u.row_pitch / 4u);
+                    src.rows_per_layer = static_cast<Uint32>(u.rect.h);
+                    SDL_GPUTextureRegion dst{};
+                    dst.texture = u.texture;
+                    dst.x = static_cast<Uint32>(u.rect.x);
+                    dst.y = static_cast<Uint32>(u.rect.y);
+                    dst.w = static_cast<Uint32>(u.rect.w);
+                    dst.h = static_cast<Uint32>(u.rect.h);
+                    dst.d = 1;
+                    SDL_UploadToGPUTexture(copy, &src, &dst, /*cycle=*/u.whole);
+                }
+                if (first_copy_pass && vertex_bytes > 0) {
+                    SDL_GPUTransferBufferLocation src{};
+                    src.transfer_buffer = vtx_tb;
+                    src.offset = 0;
+                    SDL_GPUBufferRegion dst{};
+                    dst.buffer = vertex_buffer_;
+                    dst.offset = 0;
+                    dst.size = static_cast<Uint32>(vertex_bytes);
+                    SDL_UploadToGPUBuffer(copy, &src, &dst, true);
+                }
+                SDL_EndGPUCopyPass(copy);
             }
-            SDL_SetGPUScissor(pass, &scissor);
-            SDL_GPUBufferBinding binding{vertex_buffer_, d.vertex_offset * static_cast<Uint32>(sizeof(Vertex))};
-            SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
-            if (d.textured) {
-                SDL_GPUTextureSamplerBinding tsb{d.texture, d.sampler};
-                SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
+            if (!seg_has_draws) continue;
+            // render pass：color 始终 LOAD（第二段起必须保留前面画的内容）
+            SDL_GPUColorTargetInfo color{};
+            color.texture = target_;
+            color.load_op = SDL_GPU_LOADOP_LOAD;
+            color.store_op = SDL_GPU_STOREOP_STORE;
+            // ★ depth：**一帧只清一次**（本 flush 的第一个 render pass）。分段后第二段必须 LOAD，
+            //   ⛔ 每段都 CLEAR 会把先画进去的深度清掉（后画的内容就会被错误接受）。
+            SDL_GPUDepthStencilTargetInfo depth{};
+            depth.texture = depth_;
+            depth.clear_depth = 1.0f;
+            depth.load_op = (need_depth_clear_ && first_render_pass) ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+            depth.store_op = SDL_GPU_STOREOP_STORE;
+            depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+            depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+            SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &color, 1, &depth);
+            for (std::size_t i = seg.first_draw; i < draw_end; ++i) {
+                const QueuedDraw& d = queue_[i];
+                SDL_BindGPUGraphicsPipeline(pass, d.pipeline);
+                SDL_GPUViewport vp{};
+                vp.x = static_cast<float>(d.state.viewport_x);
+                vp.y = static_cast<float>(d.state.viewport_y);
+                vp.w = static_cast<float>(d.state.viewport_w);
+                vp.h = static_cast<float>(d.state.viewport_h);
+                vp.min_depth = 0.0f;
+                vp.max_depth = 1.0f;
+                SDL_SetGPUViewport(pass, &vp);
+                SDL_Rect scissor{d.state.scissor_x0, d.state.scissor_y0, d.state.scissor_x1 - d.state.scissor_x0,
+                                 d.state.scissor_y1 - d.state.scissor_y0};
+                if (!d.state.scissor_enabled ||
+                    (d.state.scissor_x0 == 0 && d.state.scissor_y0 == 0 && d.state.scissor_x1 == width_ &&
+                     d.state.scissor_y1 == height_)) {
+                    scissor = SDL_Rect{0, 0, width_, height_};
+                }
+                SDL_SetGPUScissor(pass, &scissor);
+                SDL_GPUBufferBinding binding{vertex_buffer_,
+                                             d.vertex_offset * static_cast<Uint32>(sizeof(Vertex))};
+                SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
+                if (d.textured) {
+                    SDL_GPUTextureSamplerBinding tsb{d.texture, d.sampler};
+                    SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
+                }
+                SDL_DrawGPUPrimitives(pass, static_cast<Uint32>(d.vertices.size()), 1, 0, 0);
             }
-            SDL_DrawGPUPrimitives(pass, static_cast<Uint32>(d.vertices.size()), 1, 0, 0);
+            SDL_EndGPURenderPass(pass);
+            first_render_pass = false;
+            encoded_render_pass = true;
         }
-        SDL_EndGPURenderPass(pass);
         if (!SDL_SubmitGPUCommandBuffer(cmd)) {
             release_tbs();
             if (err) *err = std::string("SDL_SubmitGPUCommandBuffer 失败：") + SDL_GetError();
-            return false;  // 队列保留（没提交成功 ⇒ 下次还能重试，⛔ 不静默丢像素）
+            return false;  // 队列/段保留（没提交成功 ⇒ 下次还能重试，⛔ 不静默丢像素）
         }
         release_tbs();
+        ++g_stats.submits;
+        ++g_stats.submits_flush;
 
-        // ---- 5) 记账：pending 纹理已落盘、队列清空 ----
-        for (TextureEntry* e : uploads) {
-            e->pending = false;
-            e->staged.clear();
-            e->staged.shrink_to_fit();
-        }
+        // ---- 4) 记账：上传已落盘、段与队列清空、depth 已经清过 ----
+        for (auto& kv : textures_) kv.second.pending = false;
+        segments_.assign(1, Segment{});
+        staging_used_ = 0;  // 已全部落进 transfer buffer ⇒ arena 还给下一帧（容量留着）
         queue_.clear();
         queued_vertices_ = 0;
-        need_depth_clear_ = false;
-        dirty_ = true;
+        // ★ 只有本次 flush **真的录过 render pass** 才算"深度已经清过"：只录 copy pass 的 flush
+        //   （上传批次没配成 draw 的失败边）不许把 pending 的深度清吃掉。
+        if (encoded_render_pass) need_depth_clear_ = false;
+        if (had_draws) dirty_ = true;
         evictTextures();
         return true;
     }
 
-    bool rasterDirty() const override { return dirty_ || !queue_.empty(); }
+    // ★ 语义 = 「镜像/纹理缓存 != guest」：队列非空 **或** 已提交但尚未读回 **或** 还有已入队
+    //   但没提交的纹理上传。缺了最后一项，屏障会漏判（已录未提交的上传被当成已落地）。
+    bool rasterDirty() const override { return dirty_ || !queue_.empty() || hasPendingUploads(); }
     const void* rasterTargetBase() const override { return target_base_; }
     std::size_t rasterQueuedDraws() const override { return queue_.size(); }
+    // 有没有"已入队但还没提交"的纹理上传（段里的 uploads）。
+    bool hasPendingUploads() const {
+        for (const Segment& s : segments_) {
+            if (!s.uploads.empty()) return true;
+        }
+        return false;
+    }
+
+    void rasterRequestDepthClear() override { need_depth_clear_ = true; }
 
     void rasterDiscardTarget() override {
         // ★ 设备销毁前调用：队列与镜像都指向即将释放的 guest 像素 ⇒ 丢掉，⛔ 不回读。
         queue_.clear();
         queued_vertices_ = 0;
+        segments_.assign(1, Segment{});
+        staging_used_ = 0;
+        staging_.clear();
+        staging_.shrink_to_fit();
         for (auto& kv : textures_) {
-            if (!kv.second.pending) continue;
-            // staging 没上传过 ⇒ 内容版本作废（下次按内容哈希重传）
+            // 内容没上传过 ⇒ 缓存里的版本作废（下次按内容哈希重传 / 整幅上传）
             kv.second.pending = false;
-            kv.second.staged.clear();
-            kv.second.staged.shrink_to_fit();
             kv.second.hash = 0;
-            kv.second.generation = 0;
+            kv.second.recorded_generation = 0;
         }
         destroyTargets();
         width_ = 0;
@@ -822,7 +892,7 @@ public:
             }
             if (!uploadGuest(bgra.data(), static_cast<std::uint32_t>(width) * 4u, width, height, err)) return false;
         }
-        need_depth_clear_ = true;
+        // ★ 同 rasterSyncFromGuest：整块颜色上传不等于"深度要清"。
         dirty_ = false;
         target_current_ = true;  // 上传完 target == guest
         return true;
@@ -852,13 +922,19 @@ public:
         Uint32 sh = 0;
         if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &swap, &sw, &sh)) {
             std::string why = std::string("SDL_WaitAndAcquireGPUSwapchainTexture 失败：") + SDL_GetError();
-            SDL_SubmitGPUCommandBuffer(cmd);  // 不 Cancel：Cancel 与 swapchain 的状态机容易踩边界
+            if (SDL_SubmitGPUCommandBuffer(cmd)) {  // 不 Cancel：Cancel 与 swapchain 的状态机容易踩边界
+                ++g_stats.submits;
+                ++g_stats.submits_present;
+            }
             if (err) *err = why;
             return false;
         }
         if (swap == nullptr || sw == 0 || sh == 0) {
             // 最小化 / 隐藏到零尺寸：这一帧没有可呈现的目标。⛔ 不算失败，也不冒充"画上去了"。
-            SDL_SubmitGPUCommandBuffer(cmd);
+            if (SDL_SubmitGPUCommandBuffer(cmd)) {
+                ++g_stats.submits;
+                ++g_stats.submits_present;
+            }
             ++present_skipped_;
             return true;
         }
@@ -885,6 +961,8 @@ public:
             if (err) *err = std::string("SDL_SubmitGPUCommandBuffer 失败：") + SDL_GetError();
             return false;
         }
+        ++g_stats.submits;
+        ++g_stats.submits_present;
         ++presented_;
         return true;
     }
@@ -1001,7 +1079,10 @@ private:
         dst.d = 1;
         SDL_UploadToGPUTexture(copy, &src, &dst, true);
         SDL_EndGPUCopyPass(copy);
-        SDL_SubmitGPUCommandBuffer(cmd);
+        if (SDL_SubmitGPUCommandBuffer(cmd)) {
+            ++g_stats.submits;
+            ++g_stats.submits_upload;
+        }
         SDL_ReleaseGPUTransferBuffer(device_, tb);
         return true;
     }
@@ -1032,6 +1113,10 @@ private:
         SDL_DownloadFromGPUTexture(copy, &src, &dst);
         SDL_EndGPUCopyPass(copy);
         SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+        if (fence != nullptr) {
+            ++g_stats.submits;
+            ++g_stats.submits_readback;
+        }
         if (fence == nullptr) {
             SDL_ReleaseGPUTransferBuffer(device_, tb);
             if (err) *err = "SDL_SubmitGPUCommandBufferAndAcquireFence 失败";
@@ -1068,15 +1153,46 @@ private:
 
     struct TextureEntry {
         SDL_GPUTexture* texture = nullptr;
-        std::uint64_t hash = 0;         // 已上传 / 待上传内容的哈希
+        // 整幅内容哈希（0 = 不可用）。★ 只在"上次上传的是整幅"或"算过整幅哈希"时有效：
+        // 一次脏矩形上传之后 GPU 内容与 guest 一致但没重算哈希 ⇒ 置 0（下次整幅一律重传）。
+        std::uint64_t hash = 0;
         std::uint32_t width = 0;
         std::uint32_t height = 0;
-        std::uint32_t generation = 0;   // 上传时的 guest 内容版本（0 = 未知）
+        // ★ 已**录进命令缓冲**的内容版本（= 这份内容执行完以后的 guest 版本）。0 = 未知。
+        std::uint32_t recorded_generation = 0;
         std::uint64_t use = 0;
-        // ★ 入队阶段拷下来的 BGRA 像素（⛔ 不保存 guest 指针；D3DXSprite 在 End 末尾就 Release
-        //   纹理）。flush 时把所有 pending 合到**一个 copy pass** 上传。
+        // 有已录但未提交的上传（LRU 回收保护；flush 完清掉）。
         bool pending = false;
-        std::vector<std::uint8_t> staged;
+    };
+
+    // 一段"内容变更边界"的上传：目标纹理的一块 **texel 子矩形** + 紧排的 BGRA 字节。
+    // ★ 入队时就从 guest 像素拷走（⛔ 不保存 guest 指针）；flush 时按各自 **独立的 transfer
+    //   buffer offset** 写入 ⇒ 同一 command buffer 内不会覆盖仍在途的数据。
+    // ★ 字节放在**帧内 staging arena**（`staging_`）里、只记 (offset, size)：arena 的容量只增，
+    //   扩容时零初始化一次就够（⛔ 不要每块 `std::vector::resize` —— 那会先 memset 再 memcpy，
+    //   一帧十几 MB 的整幅上传会白白多付一倍带宽）。
+    struct PendingUpload {
+        SDL_GPUTexture* texture = nullptr;
+        GpuTexelRect rect;            // 目标子矩形（texel；右/下开）
+        std::size_t staging_offset = 0;  // `staging_` 内偏移
+        std::size_t size = 0;            // 字节数 = row_pitch * rect.h
+        // staging 里每行的字节数：按 **256 对齐**（D3D12 的 texture row pitch 要求 256 字节对齐；
+        // 不对齐时 SDL 会替我们做一次临时拷贝 —— 那正是"只传脏区"想省的带宽）。
+        std::uint32_t row_pitch = 0;
+        // flush 时算出来的 transfer buffer 内偏移（512 对齐；每次 flush 重算）。
+        std::uint32_t transfer_offset = 0;
+        // 这块上传是否覆盖**整幅**纹理。★ 只有整幅才能给 `SDL_UploadToGPUTexture` 传 cycle=true
+        //   （cycle = 丢弃该纹理原有内容）；子矩形上传传 true 会把矩形外的内容**清成未定义**
+        //   —— 实测：整幅蓝 + 子矩形红 ⇒ 矩形外全变黑（真后端像素用例当场红）。
+        bool whole = false;
+    };
+
+    // 方案 C 的"段"：`uploads` 在本段第一个 draw 之前用 copy pass 上传，然后 render pass 画
+    // `[first_draw, 下一段的 first_draw)`。切段只在内容变更边界发生，且**不提交**。
+    // `segments_` 恒非空（`segments_[0].first_draw == 0`）；可能出现空段（只有 copy 没有 draw）。
+    struct Segment {
+        std::size_t first_draw = 0;
+        std::vector<PendingUpload> uploads;
     };
 
     // 一条已入队的 draw：状态/句柄逐条保留（⛔ 不合并两条状态不同的 draw）。
@@ -1087,8 +1203,32 @@ private:
         SDL_GPUSampler* sampler = nullptr;
         SDL_GPUGraphicsPipeline* pipeline = nullptr;
         bool textured = false;
+        // 这条 draw 采样到的 texel 区域（`gpuDrawSampleRect`；textured 且非空）——切段判据用它。
+        GpuTexelRect sample_rect;
         std::uint32_t vertex_offset = 0;  // 在 flush 的顶点缓冲里（单位 = Vertex）
     };
+
+    // 帧内 staging arena：容量只增、**只在扩容时**付一次零初始化（摊薄）。
+    // ★ 返回的是"本次写入起点"（调用方自己 memcpy 进去）；`staging_used_` 同时前移。
+    // ★ `staging_.data()` 可能被下一次扩容搬家 ⇒ 只记 offset、⛔ 不存指针。
+    bool reserveStaging(std::size_t bytes, std::uint8_t** out, std::string* err) {
+        if (bytes == 0) {
+            *out = staging_.data();
+            return true;
+        }
+        if (bytes > 0xFFFFFFFFull || staging_used_ + bytes > 0xFFFFFFFFull) {
+            if (err) *err = "SDL_GPU：一帧的 staging 超过 4 GiB";
+            return false;
+        }
+        if (staging_used_ + bytes > staging_.size()) {
+            std::size_t want = staging_.size() != 0 ? staging_.size() : (1u << 20);
+            while (want < staging_used_ + bytes) want *= 2u;
+            staging_.resize(want);
+        }
+        *out = staging_.data() + staging_used_;
+        staging_used_ += bytes;
+        return true;
+    }
 
     // GPU 顶点缓冲 grow-only：入队时就长够，flush 里不再创建（把可失败点前移）。
     bool ensureVertexBuffer(Uint32 bytes, std::string* err) {
@@ -1116,7 +1256,11 @@ private:
     }
 
     // 纹理缓存：key = 纹理身份（serial / 指针）+ 尺寸 + alpha 语义；内容版本/哈希不变 ⇒ 不重传。
-    // ★ 合批后：**入队时**把 guest 像素拷进 staging（⛔ 不保存 guest 指针），flush 时统一上传。
+    // ★ 入队时把要上传的像素拷成 staging（⛔ 不保存 guest 指针），并**就地判**要不要切段：
+    //   · 版本没变 ⇒ 不哈希、不重传（TITLE 的历史快路径，⛔ 不许砍）；
+    //   · 版本变了 + 写区/版本链对得上 ⇒ 只传脏矩形（方案 C，字节数从"整幅"降到"这块"）；
+    //   · 写区未知 ⇒ 整幅，并按整幅内容哈希比较（"版本变了但像素没变" ⇒ 不重传）；
+    //   · 脏区与本段已入队、采样**同一纹理**的 draw 的采样矩形相交 ⇒ 在本边界**切段**（不提交）。
     bool ensureTexture(const GpuRasterTexture& t, SDL_GPUTexture** out, std::string* err) {
         if (t.format.bpp != 32) {
             if (err) *err = "SDL_GPU 纹理只支持 32bpp";
@@ -1147,30 +1291,37 @@ private:
         const bool same_size = it != textures_.end() && it->second.texture != nullptr &&
                                it->second.width == static_cast<std::uint32_t>(width) &&
                                it->second.height == static_cast<std::uint32_t>(height);
-        // ★ 快路径：guest 给了内容版本且没变 ⇒ **不哈希、不重传**（TITLE 的 Sprite 曾因每 draw
-        //   完整 upload 而 ~118–206 ms；哈希本身在 2048² 纹理上也要 ~100 ms/帧）。
-        if (same_size && !it->second.pending && t.generation != 0 && it->second.generation == t.generation) {
+        const std::uint32_t recorded = same_size ? it->second.recorded_generation : 0u;
+        // ① 版本快路径：已**录进命令缓冲**的内容就是这个版本 ⇒ 不哈希、不重传。
+        //   ★ 这里**不**看"还有没有未提交的上传"：本段里已入队 draw 看到的就是 staging 里的
+        //     那份内容（录进命令缓冲后按提交序执行）⇒ 版本相同就意味着采样结果相同。
+        if (same_size && t.generation != 0 && recorded == t.generation) {
             it->second.use = ++texture_use_;
             *out = it->second.texture;
             return true;
         }
-        const std::uint64_t hash = hashPixels(pixels, pitch, width, height);
-        if (same_size && it->second.hash == hash) {
-            // 版本变了但像素内容没变（例如 Unlock 后没改）⇒ 只更新版本，不重传。
-            it->second.generation = t.generation;
-            it->second.use = ++texture_use_;
-            *out = it->second.texture;
-            return true;
+        // ② 脏区判定（真后端与 Mock 共用 `gpuContentDirtyRegion`，⛔ 不要各写一份）。
+        const GpuDirtyRegion dirty = gpuContentDirtyRegion(t, recorded, width, height);
+        // ③ 整幅（或"够大"）时先做整幅内容哈希比较：版本变了但像素没变 ⇒ 不重传。
+        //   ★ 小脏区故意**不**哈希（一整幅哈希正是历史 0.64 ms/条里的固定成本之一）；
+        //   ★ `!same_size`（新纹理）也**不**哈希：没有可比对的旧哈希，算了也只能丢掉。
+        std::uint64_t hash = 0;
+        bool hash_valid = false;
+        const std::size_t texel_area = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        const std::size_t dirty_area =
+            static_cast<std::size_t>(dirty.rect.w) * static_cast<std::size_t>(dirty.rect.h);
+        if (same_size && (dirty.whole || (texel_area != 0 && dirty_area * 2u >= texel_area))) {
+            hash = hashPixels(pixels, pitch, width, height);
+            hash_valid = true;
+            if (it->second.hash != 0 && it->second.hash == hash) {
+                // 版本变了但像素内容没变（例如 Unlock 后没改）⇒ 只更新版本，不重传。
+                it->second.recorded_generation = t.generation;
+                it->second.use = ++texture_use_;
+                *out = it->second.texture;
+                return true;
+            }
         }
-        // ★ 同一个 GPU 纹理句柄的内容变了，而它**正被队列里的 draw 引用**（含已上传、pending=false
-        //   的情况：这批更早的 sprite 已经入队，句柄还在 queue_ 里）⇒ 必须先把队列 flush 掉。
-        //   理由：upload 是 GPU 时间线上 render pass 之前才完成的，如果不切命令缓冲，先入队的 draw
-        //   会采样到**新**上传的内容（⛔ 不是它入队时的那份像素）。
-        if (it != textures_.end() && (it->second.pending || !queue_.empty())) {
-            if (!rasterFlush(err)) return false;
-            // flush 可能顺手回收缓存项（LRU）⇒ 重新查找；找不到就走"新建纹理"路径。
-            it = textures_.find(key);
-        }
+        // ④ 取/建 GPU 纹理
         SDL_GPUTexture* tex = it != textures_.end() ? it->second.texture : nullptr;
         if (tex == nullptr) {
             SDL_GPUTextureCreateInfo ci{};
@@ -1191,28 +1342,65 @@ private:
             TextureEntry& created = textures_[key];
             created.texture = tex;
             created.hash = 0;
+            created.recorded_generation = 0;
             created.width = static_cast<std::uint32_t>(width);
             created.height = static_cast<std::uint32_t>(height);
         }
-        // ★ 入队时就把像素拷成 staging（BGRA；无 alpha 的 X8 格式把 A 填 255）。
-        TextureEntry& e = textures_[key];
-        e.texture = tex;
-        e.hash = hash;
-        e.width = static_cast<std::uint32_t>(width);
-        e.height = static_cast<std::uint32_t>(height);
-        e.generation = t.generation;
-        e.use = ++texture_use_;
-        e.pending = true;
-        e.staged.resize(static_cast<std::size_t>(width) * 4u * static_cast<std::size_t>(height));
-        for (int y = 0; y < height; ++y) {
-            std::uint8_t* dst_row = e.staged.data() + static_cast<std::size_t>(y) * width * 4;
-            std::memcpy(dst_row, pixels + static_cast<std::size_t>(y) * pitch,
-                        static_cast<std::size_t>(width) * 4);
-            if (!has_alpha) {
-                // guest X8R8G8B8：X 字节不是 alpha。CPU 侧按 amask==0 ⇒ alpha=255。
-                for (int x = 0; x < width; ++x) dst_row[x * 4 + 3] = 255;
+        // ⑤ 切段判定：只比**本段**已入队、且采样同一 GPU 纹理的 draw（纯函数判交）。
+        //   ★ 新纹理不可能被已入队 draw 引用 ⇒ 首次上传天然不切。
+        bool need_cut = false;
+        {
+            const Segment& seg = segments_.back();
+            for (std::size_t i = seg.first_draw; i < queue_.size(); ++i) {
+                const QueuedDraw& d = queue_[i];
+                if (!d.textured || d.texture != tex) continue;
+                if (gpuTexelRectsIntersect(dirty.rect, d.sample_rect)) {
+                    need_cut = true;
+                    break;
+                }
             }
         }
+        if (need_cut) {
+            // ★ 切段 ≠ 提交：只是把命令缓冲在后面切开一个 copy 边界（新段从下一条 draw 起）。
+            segments_.push_back(Segment{queue_.size(), {}});
+            ++g_stats.cuts;
+        }
+        // ⑥ staging：**只拷脏区**（行按 256 字节对齐；无 alpha 的 X8 格式把 A 填 255）。
+        const std::uint32_t row_pitch = (static_cast<std::uint32_t>(dirty.rect.w) * 4u + 255u) & ~255u;
+        const std::size_t stage_size = static_cast<std::size_t>(row_pitch) * static_cast<std::size_t>(dirty.rect.h);
+        std::uint8_t* stage = nullptr;
+        if (!reserveStaging(stage_size, &stage, err)) return false;
+        PendingUpload up;
+        up.texture = tex;
+        up.rect = dirty.rect;
+        up.staging_offset = staging_used_ - stage_size;
+        up.size = stage_size;
+        up.row_pitch = row_pitch;
+        up.whole = dirty.whole;
+        for (int y = 0; y < dirty.rect.h; ++y) {
+            const std::uint8_t* src_row = pixels +
+                                          static_cast<std::size_t>(dirty.rect.y + y) * pitch +
+                                          static_cast<std::size_t>(dirty.rect.x) * 4u;
+            std::uint8_t* dst_row = stage + static_cast<std::size_t>(y) * static_cast<std::size_t>(row_pitch);
+            std::memcpy(dst_row, src_row, static_cast<std::size_t>(dirty.rect.w) * 4u);
+            if (!has_alpha) {
+                // guest X8R8G8B8：X 字节不是 alpha。CPU 侧按 amask==0 ⇒ alpha=255。
+                for (int x = 0; x < dirty.rect.w; ++x) dst_row[x * 4 + 3] = 255;
+            }
+        }
+        segments_.back().uploads.push_back(std::move(up));
+        ++g_stats.uploads;
+        if (dirty.whole) ++g_stats.full_uploads;
+        // ⑦ 记账：这一版的内容**即将**进 GPU（录进命令缓冲），所以 recorded = 这个版本。
+        TextureEntry& e = textures_[key];
+        e.texture = tex;
+        e.width = static_cast<std::uint32_t>(width);
+        e.height = static_cast<std::uint32_t>(height);
+        e.recorded_generation = t.generation;
+        // ★ 脏矩形上传后 GPU 内容 == guest 内容，但没重算整幅哈希 ⇒ 0（下次整幅一律重传）。
+        e.hash = hash_valid ? hash : 0;
+        e.pending = true;
+        e.use = ++texture_use_;
         *out = tex;
         return true;
     }
@@ -1491,9 +1679,11 @@ private:
         //   设备销毁也必须在 release 之后。
         queue_.clear();
         queued_vertices_ = 0;
+        segments_.assign(1, Segment{});
+        staging_used_ = 0;
+        staging_.clear();
         for (auto& kv : textures_) {
             kv.second.pending = false;
-            kv.second.staged.clear();
         }
         directDetachWindow();
         destroyTargets();
@@ -1541,10 +1731,16 @@ private:
     SurfaceFormat target_format_{};    // 建 target 时的完整格式（⛔ 只比 bpp+alpha 会漏通道差异）
     // ★ 合批队列：只保存 CPU 拷贝的顶点 + 状态 + GPU 句柄（⛔ 不保存 guest 像素指针）。
     std::vector<QueuedDraw> queue_;
+    // ★ 方案 C 的段：内容变更边界把命令缓冲切开（copy→render→copy→render…），但只有 flush 才提交。
+    //   `segments_` 恒非空；`segments_[0].first_draw == 0`。
+    std::vector<Segment> segments_ = std::vector<Segment>(1);
+    // 帧内 staging arena（见 reserveStaging）；flush 成功或 discard 后 `staging_used_ = 0`。
+    std::vector<std::uint8_t> staging_;
+    std::size_t staging_used_ = 0;
     std::size_t queued_vertices_ = 0;
     bool need_depth_clear_ = true;
-    // ★ dirty_ = 「**已提交**但尚未读回 guest」；队列本身也算脏 —— 对外只暴露
-    //   `rasterDirty() = dirty_ || !queue_.empty()`（见 gpu_raster.h 的语义）。
+    // ★ dirty_ = 「**已提交**但尚未读回 guest」；队列/未提交上传也算脏 —— 对外只暴露
+    //   `rasterDirty() = dirty_ || !queue_.empty() || hasPendingUploads()`（见 gpu_raster.h 的语义）。
     bool dirty_ = false;
     std::string name_;
     // ---- GPU 直出（窗口 swapchain）----
@@ -1560,6 +1756,8 @@ private:
 };
 
 }  // namespace
+
+GpuRasterStats gpuRasterStats() { return g_stats; }
 
 std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err) {
     auto r = std::make_unique<SdlGpuRaster>();

@@ -17,6 +17,7 @@
 
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/exec.h"
+#include "runtime/guest_token.h"
 #include "runtime/present.h"
 #include "runtime/sha256.h"
 #include "runtime/watch.h"
@@ -433,8 +434,35 @@ void Machine::flushFrameTrace() {
     std::fflush(stdout);
 }
 
+bool Machine::loadInputScript(const std::string& path, std::string* err) {
+    // 换脚本前先把旧脚本仍按着的输入抬起来（⛔ 不静默留下"卡住的键"）。
+    if (input_script_.active()) input_script_.abandon(*cpu_.windows, clock_.nowMs());
+    if (!input_script_.loadFile(path, err)) return false;
+    std::printf("input-script: %s（%zu 条动作；触发 = at frame / at guest_ms / after / wait）\n",
+                path.c_str(), input_script_.actionCount());
+    return true;
+}
+
+void Machine::tickInputScript(X86& cpu) {
+    if (!input_script_.active()) return;
+    if (cpu.windows == nullptr) return;
+    // ★ 唯一状态源就是 `cpu.windows`（与 SDL 真实事件同一份）：这里只推进时间线。
+    input_script_.tick(*cpu.windows, presenter_.frameCount(), clock_.now100ns());
+    // ★ `quit` 还要**唤醒 guest**：窗口模式下 guest 可能正阻塞在 `GetMessageA`，它的循环里
+    //   没有块边界 ⇒ 只置标志永远到不了 `Machine::run` 的那条检查。投一次 WM_QUIT 让它走退出路
+    //   （没有事件源时这条无副作用：`peek` 只是把 WM_QUIT 当成队尾虚拟项）。
+    if (input_script_.quitPostPending()) {
+        input_script_.markQuitPosted();
+        cpu.windows->postQuit(0);
+    }
+}
+
 RunResult Machine::run(const RunOptions& opts) {
     RunResult r;
+    // ★ 单令牌（guest_token.h）：本函数起的执行循环是 guest 指令的**唯一**主执行流；
+    //   音频 feeder 真线程（thread_mode_）走同一把令牌。arm 打开违规计数（未持有令牌就
+    //   改 GuestHeap / HandleTable 或执行 guest 代码 ⇒ ++），`--assert-guest-token` 读它。
+    guestToken().arm();
     // ★ GPU 覆盖账本按**这一轮**重算（`--gpu-strict` / dumpRunSummary 读的就是它）。
     d3d9::gpuCoverageReset();
     shims_.setTrace(opts.trace_shims, opts.trace_out ? opts.trace_out : stdout);
@@ -477,6 +505,13 @@ RunResult Machine::run(const RunOptions& opts) {
     std::uint32_t next_call_target = 0;
 
     while (cpu_.running) {
+        // ★ 单令牌：**每个块边界取一次、块结束放**（guest_token.h）。
+        //   块内的一切 guest 执行（块指令 / shim / 嵌套 guest 调用 / 定时器回调）都在令牌里；
+        //   feeder 真线程只能在这两条语句之间拿到令牌。
+        //   ⛔ 不要把它挪进某个分支：漏一条路径 = 那条路径与 feeder 并发改宿主容器。
+        GuestToken::Guard token_guard(guestToken());
+        // ★ 检查点：Guard 被删掉/短路时这里立刻计数（`--assert-guest-token` 判红）。
+        guestToken().check("machine.block");
         const std::uint32_t call_target = next_call_target;
         next_call_target = 0;
         if (opts.time_limit_sec > 0.0 && cpu_.insns >= next_time_check) {
@@ -488,6 +523,19 @@ RunResult Machine::run(const RunOptions& opts) {
                 break;
             }
             next_time_check = cpu_.insns + 4096u;
+        }
+        // ★ 指令式输入时间线（`--input-script`）：在**块边界**推进。不依赖窗口 sink / OS 焦点 /
+        //   真实光标：它只写 `cpu_.windows` 的那一份状态并发同组 WM_*（见 runtime/input.h）。
+        //   ⛔ 嵌套 guest 调用（WndProc / 音频 fill）与定时器回调进行中不注入：那些帧的 eip 不是
+        //   主循环的块边界，插进去会把"一帧内 down+up"这类节流语义搅乱。
+        if (input_script_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
+            tickInputScript(cpu_);
+            if (input_script_.quitRequested()) {
+                r.reason = StopReason::Stopped;
+                r.detail = "input script: quit";
+                cpu_.running = false;
+                break;
+            }
         }
         // ★ 显示后端：块边界也要 pump（否则两次 Present 之间窗口假死）。无 sink ⇒ 零成本。
         //   ⛔ 嵌套 guest 调用进行中不 pump：音频 fill（或任何 native 嵌套调用）正在跑 guest
@@ -759,7 +807,11 @@ RunResult Machine::run(const RunOptions& opts) {
                     r.detail = std::string("未实现的导入 ") + def->module + "!" + def->name;
                 } else {
                     r.reason = StopReason::Stopped;
-                    r.detail = std::string("shim 主动结束运行：") + def->module + "!" + def->name;
+                    // ★ `stop_why` 非空时**优先用它**：否则"资源耗尽"与"未实现"在运行摘要里
+                    //   都长成"shim 主动结束运行"，误诊只是从 stderr 挪到了 stdout。
+                    r.detail = cpu_.stop_why
+                                   ? std::string(cpu_.stop_why) + "（shim " + def->module + "!" + def->name + "）"
+                                   : std::string("shim 主动结束运行：") + def->module + "!" + def->name;
                 }
                 break;
             }
@@ -826,6 +878,9 @@ RunResult Machine::run(const RunOptions& opts) {
     r.ea = cpu_.eip;
     r.insns = cpu_.insns;
     audio_.end();  // 关闭 SDL / 回填 WAV；此后不再写 guest
+    // ★ run 结束：关掉违规计数。⚠ 计数本身**保留**（summary / `--assert-guest-token` 还要读），
+    //   只是之后的 Machine 析构（COM/surface 回收 guest 堆）不再算进本轮账。
+    guestToken().disarm();
     return r;
 }
 
@@ -1036,12 +1091,27 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
     }
     std::fprintf(out, "blocks    : %zu (insns cached %zu, hits %zu, misses %zu)\n", cache_.blockCount(),
                  cache_.insnCount(), cache_.hits(), cache_.misses());
+    // ★ 单令牌不变式的**可观测**面（guest_token.h）：`violations` 非 0 ⇒ 有线程没拿令牌就
+    //   执行 guest 代码 / 改 GuestHeap / HandleTable。`--assert-guest-token` 把它变成退出码。
+    {
+        const GuestToken& token = guestToken();
+        std::fprintf(out, "token     : violations=%llu max-concurrent=%u%s%s\n",
+                     static_cast<unsigned long long>(token.violations()), token.maxConcurrent(),
+                     token.violations() == 0 ? "" : " first=",
+                     token.violations() == 0 ? "" : (token.firstViolationSite() ? token.firstViolationSite() : "?"));
+    }
     std::fprintf(out, "committed : %llu KiB\n", (unsigned long long)(mem_.committedBytes() / 1024));
     std::fprintf(out, "shims     : imported %zu / called-unimplemented %zu\n", shims_.importedCount(),
                  shims_.calledUnimplemented().size());
     std::fprintf(out, "heap      : in_use %u peak %u allocs %u\n", heap_.bytesInUse(), heap_.peak(),
                  heap_.allocCount());
-    if (audio_.enabled()) audio_.dumpSummary(out);
+    // ★ arena 是**独立**的 GuestHeap（`init` 的 0x28000000..0x30000000，128 MiB），不并进上面那行：
+    //   纹理像素 / 后缓冲 / 深度块只在这里，主堆的 in_use 对"纹理没回收"完全不可见。
+    std::fprintf(out, "arena     : surfaces %zu in_use %u peak %u largest-free %u\n", surfaces_.surfaceCount(),
+                 surfaces_.bytesInUse(), surfaces_.peak(), surfaces_.largestFreeBlock());
+    // ★ 不按 `enabled()` 门：`--audio off` 也打一行，好让"没设备"与"静音"在同一处可读
+    //   （`device=none muted=1 muted_bytes=0` ⇒ 确实没有交付，而不是被静音）。
+    audio_.dumpSummary(out);
     if (presenter_.sinkFailures() != 0) {
         std::fprintf(out, "present   : sink 失败 %llu 次（最后：%s）\n",
                      (unsigned long long)presenter_.sinkFailures(),
@@ -1255,6 +1325,20 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
                          (unsigned long long)r.calls, avg_us);
         }
     }
+    // ★ 字体度量缓存（`FontEngine::metrics`）的**命中率**：`gdi32!GetTextMetricsA` 的墙钟只是现象，
+    //   这一行才是"缓存到底有没有用"的判据。**不是墙钟、不与上面两张表相加**，所以单起一格标题
+    //   （格式与 shim 行相近，混在表里会被当成表内一行）。计数恒记，但本函数只在 `--profile` 时被调
+    //   （`main.cpp` 的 `if (profile)`）⇒ 不打 `--profile` 看不到它。
+    std::fprintf(out, "\n=== profile: font metrics cache（命中率；不是墙钟）===\n");
+    {
+        const std::uint64_t hits = fonts_.metricsHits();
+        const std::uint64_t misses = fonts_.metricsMisses();
+        const std::uint64_t total = hits + misses;
+        const double rate = total ? 100.0 * static_cast<double>(hits) / static_cast<double>(total) : 0.0;
+        std::fprintf(out, "  font!TEXTMETRIC-cache hits=%llu misses=%llu hit=%5.1f%%\n",
+                     (unsigned long long)hits, (unsigned long long)misses, rate);
+    }
+
     // ★ override 的函数体**不会**进块 profile（被宿主实现整段替代）⇒ 显式说明，否则 profile 会误导
     //   "这个热点已经不在"。
     if (!overrides_.empty() || !block_overrides_.empty()) {
@@ -1272,8 +1356,8 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
     }
 }
 
-bool Machine::configureAudio(AudioMode mode, const std::string& dump_path, std::string* err) {
-    return audio_.configure(mode, dump_path, err);
+bool Machine::configureAudio(AudioMode mode, const std::string& dump_path, bool sound, std::string* err) {
+    return audio_.configure(mode, dump_path, sound, err);
 }
 
 bool Machine::configureNativeOverrides(const std::string& list, std::string* err) {

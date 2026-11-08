@@ -82,7 +82,9 @@ pnpm tools requirements set <前缀> --status done --done-reason "文档类：�
 
 ## 6. 预算（"人看的"靠它）
 
-单节点 **≤ 80 行**；**活节点**（`open` / `doing` / `blocked`）**≤ 40**。两个数都在 `pnpm tools requirements describe` 里，
+单节点 **≤ 80 行**；**活节点**（`open` / `doing` / `blocked`）**≤ 100**。
+★ 两个数的**唯一真源**是 `pnpm tools requirements describe`（模型里 `BUDGET` 的两个字段）；
+本处只是转述 —— 不一致时**以 `describe` / `validate` 的 #5 为准**（两者共用同一份措辞，不会各说各话）。
 改它们 = 改 `tools/lib/requirements.mjs` 的 `BUDGET`（改完守卫立刻按新预算判）。
 超了**不要放宽**，先问："这一层是不是塞了本该更低层或本该进知识台账的东西？"
 

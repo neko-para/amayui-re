@@ -33,6 +33,9 @@ struct SdlWindowOptions {
     bool raster_gpu = false;  // 同一 SDL_GPUDevice 上的 GPU 光栅化（`--raster gpu`）
     bool raster_sprites = true;  // D3DXSprite 也走 GPU（A/B 可关）
     std::string screenshot_path;  // 支持 {frame}
+    // ★ 只回读**这一帧**（1 起；0 = 每帧都写）。配合 `--max-frames N` 就是"定帧截图"：
+    //   `--present-screenshot out.bmp --present-screenshot-frame N --max-frames N` 只产出一张。
+    std::uint64_t screenshot_frame = 0;
 };
 
 class SdlWindow final : public PresentSink, public GpuRaster {

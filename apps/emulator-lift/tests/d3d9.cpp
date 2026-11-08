@@ -47,6 +47,8 @@ constexpr std::uint32_t kDataStride = 0x1000u;
 constexpr std::uint32_t kStubPage = 0x7FF80000u;
 constexpr std::uint32_t kStubSlots = 0x1000u;
 constexpr std::uint32_t kProcDirect3DCreate9 = 0x7FF81000u;
+// D3DXCreateTexture 的固定桩地址（与 tests/d3dx9.cpp / d3d9_pipeline.cpp 同一约定）
+constexpr std::uint32_t kProcD3DXCreateTexture = 0x7FF81040u;
 constexpr std::uint32_t kSentinel = 0xFFFFFFFFu;
 constexpr std::uint32_t kFixtureHeapBytes = 0x00100000u;
 
@@ -784,6 +786,92 @@ void caseUnimplementedSlotTraps() {
     }
 }
 
+// D3DXCreateTexture(pDevice, Width, Height, MipLevels, Usage, Format, Pool, ppTexture)
+// 走 guest 代码 + 已注册的 D3DX 导出桩（stdcall 参数从右到左压栈）。
+std::uint32_t callD3DXCreateTexture(Fixture& f, std::uint32_t device, std::uint32_t w, std::uint32_t h,
+                                    std::uint32_t format, std::uint32_t out_ea) {
+    Asm a;
+    a.pushImm(out_ea);  // ppTexture
+    a.pushImm(0u);      // Pool = D3DPOOL_DEFAULT
+    a.pushImm(format);
+    a.pushImm(1u);  // Usage = D3DUSAGE_RENDERTARGET
+    a.pushImm(1u);  // MipLevels
+    a.pushImm(h);
+    a.pushImm(w);
+    a.pushImm(device);
+    a.callRel(f.code_ea, kProcD3DXCreateTexture);
+    a.ret();
+    return f.runAsm(a);
+}
+
+// ⑩ 纹理生命周期：**最后一次 Release 是内部裸 release**（设备销毁解绑）时，也必须回收
+//    arena 像素块。
+//
+// 判据（红了意味着什么）：同一台机器上"建设备 → 释放设备"跑两遍；第二遍中间多一张
+//   **已从采样器解绑**的 1280×1152 纹理（= 复现里分配失败的那个尺寸 5,898,240 B）。
+//   两遍结束后的 arena 必须**逐字节相同**（surfaceCount / bytesInUse）。
+//   ★ 修前：纹理对象由 `ComRegistry::release` 到 0 时只 free vtable+obj（无析构）⇒
+//     像素块留在 arena，第二遍比第一遍多 5,898,248 B、surfaceCount 多 1。
+//   ★ 这里刻意让**不是** iface Release shim 的那次 release 当"最后一根"：
+//     `SetTexture` AddRef（1→2）→ guest `Release`（2→1）→ 设备销毁里裸 `cpu.com->release`（1→0）。
+//     ⛔ 别改成"只走 shim"的写法，那测不到所有权挂在调用点上的那个洞。
+void caseTextureBoundThenGuestRelease() {
+    lift_test::g_current_case = "d3d9/texture-bound-then-guest-release";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    // d3dx9 的导出登记进同一份 ShimRegistry（本用例自己用一个 Machine，不影响其它用例）
+    lift::registerD3DX9Shims(f.m.shims());
+    lift::ShimDef* dx = f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
+    LIFT_CHECK(dx != nullptr);
+    if (!dx) return;
+    dx->stub_ea = kProcD3DXCreateTexture;
+    f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
+
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+
+    // 基线 = **还没建设备**的空 arena（设备销毁后必须回到这里）
+    const std::size_t surfaces_base = f.m.surfaces().surfaceCount();
+    const std::uint32_t bytes_base = f.m.surfaces().bytesInUse();
+
+    // ---- 第 1 遍：只有设备（后缓冲 + 深度）----
+    Fixture::Device dev1;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev1));
+    if (dev1.object == 0) return;
+    LIFT_CHECK_EQ_U32(f.method(dev1.object, 0x08u, {}), 0u);
+    const std::size_t surfaces_no_tex = f.m.surfaces().surfaceCount();
+    const std::uint32_t bytes_no_tex = f.m.surfaces().bytesInUse();
+
+    // ---- 第 2 遍：设备 + 纹理 ----
+    Fixture::Device dev2;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev2));
+    if (dev2.object == 0) return;
+    const std::size_t surfaces_before_tex = f.m.surfaces().surfaceCount();
+    const std::uint32_t bytes_before_tex = f.m.surfaces().bytesInUse();
+    const std::uint32_t out_ea = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(callD3DXCreateTexture(f, dev2.object, 1280u, 1152u, lift::d3d9::kFmtA8R8G8B8, out_ea),
+                      0u);
+    const std::uint32_t tex = f.m.mem().rd32(out_ea);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_before_tex + 1);
+    LIFT_CHECK(f.m.surfaces().bytesInUse() >= bytes_before_tex + 5898240u);
+    // 绑到采样器 ⇒ AddRef（1→2）；guest 自己 Release（2→1）
+    LIFT_CHECK_EQ_U32(f.method(dev2.object, 0x104u, {0u, tex}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(tex), 2u);
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 1u);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(tex), 1u);
+    // 设备销毁 ⇒ 流水线 destroyForDevice 做**最后一次** release（1→0，内部裸 release）
+    LIFT_CHECK_EQ_U32(f.method(dev2.object, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(tex));
+    // ★ 判据：像素块必须跟着对象一起回收 ⇒ 两遍之后完全一致，且回到空 arena 基线
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_no_tex);
+    LIFT_CHECK_EQ_U32(f.m.surfaces().bytesInUse(), bytes_no_tex);
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_base);
+    LIFT_CHECK_EQ_U32(f.m.surfaces().bytesInUse(), bytes_base);
+}
+
 }  // namespace
 
 int main() {
@@ -798,6 +886,7 @@ int main() {
         caseVertexStreamBinding();
         caseVertexDeclaration();
         caseGetBackBufferAndRenderTarget();
+        caseTextureBoundThenGuestRelease();
         caseUnimplementedSlotTraps();
         return finish("d3d9");
     } catch (const std::exception& e) {

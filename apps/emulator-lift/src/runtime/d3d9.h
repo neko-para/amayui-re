@@ -59,6 +59,7 @@ constexpr std::uint32_t kOk = 0x00000000u;
 constexpr std::uint32_t kNoInterface = 0x80004002u;      // E_NOINTERFACE
 constexpr std::uint32_t kInvalidArg = 0x80070057u;       // E_INVALIDARG
 constexpr std::uint32_t kFail = 0x80004005u;             // E_FAIL
+constexpr std::uint32_t kOutOfMemory = 0x8007000Eu;      // E_OUTOFMEMORY
 constexpr std::uint32_t kNotAvailable = 0x8876086Au;     // D3DERR_NOTAVAILABLE
 constexpr std::uint32_t kInvalidCall = 0x8876086Cu;      // D3DERR_INVALIDCALL
 constexpr std::uint32_t kInvalidDevice = 0x88760868u;    // D3DERR_INVALIDDEVICE
@@ -350,15 +351,28 @@ struct TextureInfo {
     // 进程级纹理身份（createTextureState 分配的单调 serial，永不复用；0 = 不是本模块的纹理）。
     // ★ 缓存键必须用它：guest 指针 / 状态块 EA 都可能被 arena·堆复用，只有 serial 不会。
     std::uint32_t serial = 0;
+    // ---- 内容写入区域（方案 C 的脏区判据输入；GPU 后端只上传这一块）----
+    // ★ 口径：guest 只在 `LockRect` 允许的矩形内写像素（D3D9 API 契约；矩形外的直写是未定义行为）。
+    //   · `write_rect` = 最近一次 `UnlockRect` 发的那一版内容对应的写入矩形（全纹理锁 = 整幅）；
+    //   · `write_version` = 那次发的版本号，`prev_write_version` = 它之前的版本号（0 = 没有）；
+    //   · 只有 `write_version == version && version != 0` 时"写区已知"才成立（RT 降级 / 正在锁
+    //     期间 version 是 0 ⇒ 后端必须按整幅处理，⛔ 不许猜）。
+    std::uint32_t write_version = 0;
+    std::uint32_t prev_write_version = 0;
+    std::int32_t write_rect[4] = {0, 0, 0, 0};  // x0, y0, x1, y1（右/下开区间）
 };
 
 // D3DFORMAT → SurfaceFormat（= Clear / Sprite 用的同一份换算；⛔ 不另写一份）
 bool surfaceFormatForD3DFormat(std::uint32_t format, SurfaceFormat* out);
 
 // 建纹理状态块（'TEX1'）+ 像素块。返回状态块 EA（0 = 失败，why 点名）。
+// ★ `out_of_memory`（可选出参）：失败原因是**我们这边的资源不够**（arena 连续块不够 / guest 堆
+//   分配状态块失败）⇒ 调用方必须报"资源耗尽"，⛔ 不许记成 "unimplemented"。判据由本函数给，
+//   不做字符串前缀嗅探（`why` 是给人读的）。
 std::uint32_t createTextureState(X86& cpu, std::uint32_t device_object, std::uint32_t width,
                                  std::uint32_t height, std::uint32_t levels, std::uint32_t usage,
-                                 std::uint32_t format, std::uint32_t pool, std::string* why);
+                                 std::uint32_t format, std::uint32_t pool, std::string* why,
+                                 bool* out_of_memory = nullptr);
 bool textureInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::string* why);
 bool textureInfo(X86& cpu, std::uint32_t object, TextureInfo* out, std::string* why);
 

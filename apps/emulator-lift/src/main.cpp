@@ -20,6 +20,7 @@
 #include "corpus/lst_index.h"
 #include "runtime/d3d9_pipeline.h"  // GPU 覆盖账本（--gpu-strict 的机械判据）
 #include "runtime/font.h"
+#include "runtime/guest_token.h"  // --assert-guest-token（单令牌违规计数）
 #include "runtime/host_encoding.h"
 #include "runtime/log.h"
 #include "runtime/machine.h"
@@ -89,12 +90,19 @@ void usage() {
         "  --present-vsync 0|1       窗口垂直同步（缺省 0；1 会改变墙钟）\n"
         "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
         "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
+        "  --present-screenshot-frame <N>  只回读第 N 个 Present（1 起；缺省 0 = 每帧都写）\n"
+        "  --input-script <path>  指令式输入时间线（`at frame N` / `at guest_ms T` / after / wait；\n"
+        "                     动作 = mouse_move / mouse_down / mouse_up / click / key_down / key_up / quit）。\n"
+        "                     注入**不需要窗口焦点、也不移动真实光标**；格式见 README §4.2c\n"
         "  --audio off|sdl|virtual  音频后端（缺省 sdl = 真设备；virtual = 确定性设备时钟；off = silent）\n"
         "  --audio-dump <path>  把混音结果写成 WAV（44.1k/16/2；与 sdl 同时用 = tee）\n"
+        "  --sound              允许出声（缺省静音：设备/混音/喂料/guest DS 调用照跑，只在交付前置 0）\n"
         "  --raster <mode>    auto（缺省）/ cpu / gpu：D3D9 fixed-function 光栅化后端\n"
         "                      auto = headless⇒cpu、window⇒gpu；window 下 GPU 初始化失败 ⇒ exit 2\n"
         "  --gpu-strict       GPU 启用时，运行结束若仍有 Draw/ sprite 回退 CPU ⇒ 打印错误并 exit 3\n"
         "                      （先打印 summary；需要 GPU 光栅化模式，--raster cpu 会被拒绝）\n"
+        "  --assert-guest-token  运行结束若单令牌违规计数 > 0（或有 >1 个令牌持有者）⇒ exit 4\n"
+        "                      （判据 = summary 的 `token : violations=0`；见 runtime/guest_token.h）\n"
         "  --raster-sprites 0|1      D3DXSprite 是否也走 GPU（缺省 1；A/B 用）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
         "  --native-overrides <list>  逗号分隔的 guest 函数名 / 段级项名（如 sub_414AC0）；all = 已验证项；\n"
@@ -150,10 +158,15 @@ int main(int argc, char** argv) {
     std::string present_mode = "headless";
     std::string present_driver = lift::SdlWindowOptions{}.driver_list;
     std::string present_screenshot;
-    // ★ 方案 D：默认开 SDL 音频（能听到）；`--audio=virtual` = 确定性设备时钟（CTest / dump）；
-    //   `--audio=off` = 旧 silent 口径。`--audio-dump` 与真输出可同时用（tee）。
+    std::uint64_t present_screenshot_frame = 0;
+    std::string input_script_path;
+    // ★ 方案 D：默认 SDL 后端 + **静音**（`--sound` 才出声；设备 / 混音 / 喂料照跑）；
+    //   `--audio=virtual` = 确定性设备时钟（CTest / dump）；`--audio=off` = 旧 silent 口径。
+    //   `--audio-dump` 与真输出可同时用（tee）。
+    // ★ `--sound` 是**输出门**，与后端正交：缺省静音（全流程照跑、只在交付前置 0）。
     std::string audio_mode = "sdl";
     std::string audio_dump;
+    bool sound = false;
     int present_vsync = 0;
     bool present_hidden = false;
     bool present_driver_set = false;
@@ -162,7 +175,8 @@ int main(int argc, char** argv) {
     std::string raster_mode = "auto";
     bool raster_sprites = true;
     bool gpu_strict = false;
-    int baseline_lift = 2;
+    bool assert_guest_token = false;
+    int baseline_lift = lift::kBaselineLift;  // 宿主视觉策略；单一常量在 font.h（对齐 cxx 的 text_raster.cpp:647）
     bool font_engine_name = false;
 
     for (int i = 1; i < arg_count; ++i) {
@@ -255,6 +269,22 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "--present-screenshot 需要一个非空路径\n");
                 return 2;
             }
+        } else if (std::strcmp(a, "--present-screenshot-frame") == 0 && i + 1 < arg_count) {
+            const char* text = args[++i].c_str();
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(text, &end, 10);
+            if (end == text || *end != '\0' || v == 0) {
+                std::fprintf(stderr, "--present-screenshot-frame 需要正整数（收到 %s）\n", text);
+                return 2;
+            }
+            present_screenshot_frame = static_cast<std::uint64_t>(v);
+            present_screenshot_set = true;  // 同属窗口参数：headless 下拒绝
+        } else if (std::strcmp(a, "--input-script") == 0 && i + 1 < arg_count) {
+            input_script_path = args[++i];
+            if (input_script_path.empty()) {
+                std::fprintf(stderr, "--input-script 需要一个非空路径\n");
+                return 2;
+            }
         } else if (std::strcmp(a, "--audio") == 0 && i + 1 < arg_count) {
             audio_mode = args[++i];
             if (audio_mode != "off" && audio_mode != "sdl" && audio_mode != "virtual") {
@@ -267,12 +297,16 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "--audio-dump 需要一个非空路径\n");
                 return 2;
             }
+        } else if (std::strcmp(a, "--sound") == 0) {
+            sound = true;
         } else if (std::strcmp(a, "--raster") == 0 && i + 1 < arg_count) {
             raster_mode = args[++i];
         } else if (std::strcmp(a, "--raster-sprites") == 0 && i + 1 < arg_count) {
             raster_sprites = std::atoi(args[++i].c_str()) != 0;
         } else if (std::strcmp(a, "--gpu-strict") == 0) {
             gpu_strict = true;
+        } else if (std::strcmp(a, "--assert-guest-token") == 0) {
+            assert_guest_token = true;
         } else if (std::strcmp(a, "--trace-shims") == 0) {
             trace_shims = true;
         } else if (std::strcmp(a, "--trace-blocks") == 0) {
@@ -345,6 +379,10 @@ int main(int argc, char** argv) {
     }
     const bool present_window_flag =
         present_driver_set || present_vsync_set || present_hidden || present_screenshot_set;
+    if (present_screenshot_frame != 0 && present_screenshot.empty()) {
+        std::fprintf(stderr, "--present-screenshot-frame 需要同时给 --present-screenshot <path>\n");
+        return 2;
+    }
     if (present_mode == "headless" && present_window_flag) {
         std::fprintf(stderr, "--present headless 不接受窗口参数（--present-driver / --present-vsync / "
                              "--present-hidden / --present-screenshot）\n");
@@ -489,7 +527,7 @@ int main(int argc, char** argv) {
         const lift::AudioMode am = audio_mode == "off" ? lift::AudioMode::Off
                                   : audio_mode == "virtual" ? lift::AudioMode::Virtual
                                                             : lift::AudioMode::Sdl;
-        if (!machine.configureAudio(am, audio_dump, &err)) {
+        if (!machine.configureAudio(am, audio_dump, sound, &err)) {
             std::fprintf(stderr, "emulator-lift: 音频配置失败：%s\n", err.c_str());
             return 2;
         }
@@ -610,6 +648,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     machine.setSkipLogo(skip_logo);
+
+    // ---- 指令式输入时间线（`--input-script`）：启动前解析，失败立刻拒绝（⛔ 不跑一半）----
+    if (!input_script_path.empty()) {
+        std::string script_err;
+        if (!machine.loadInputScript(input_script_path, &script_err)) {
+            std::fprintf(stderr, "emulator-lift: --input-script 解析失败\n  %s\n", script_err.c_str());
+            return 2;
+        }
+    }
     // ★ guest 眼里的主模块路径（用户 2026-11-05 口径）：`<guest 根>\AGE.EXE`，
     //   打开它拿到的是**我们真正在跑的那份字节**（拆壳件），不是 `--game-dir` 下的加壳原件。
     std::printf("exe(guest): %s（VFS overlay ⇒ %s）\n", machine.vfs().overlayGuestPath().c_str(),
@@ -677,6 +724,7 @@ int main(int argc, char** argv) {
         wopt.vsync = present_vsync != 0;
         wopt.hidden = present_hidden;
         wopt.screenshot_path = present_screenshot;
+        wopt.screenshot_frame = present_screenshot_frame;
         wopt.raster_gpu = raster_wants_gpu;
         wopt.raster_sprites = raster_sprites;
         auto sdl = std::make_unique<lift::SdlWindow>();
@@ -713,7 +761,12 @@ int main(int argc, char** argv) {
             lift::SdlWindow* sdl_raw = sdl.get();
             machine.presenter().setSink(std::move(sdl));
             sdl_raw->attachWindowManager(machine.cpu().windows);
-            machine.cpu().windows->setHostEventPump([sdl_raw](lift::X86&) { sdl_raw->pumpHostEvents(5); });
+            // ★ 注入脚本也要在这里推进：guest 可能阻塞在 `GetMessageA`（等消息）——那时
+            //   `Machine::run` 的块边界循环不在跑，只有宿主事件泵会被调用。
+            machine.cpu().windows->setHostEventPump([sdl_raw, &machine](lift::X86& cpu) {
+                sdl_raw->pumpHostEvents(5);
+                machine.tickInputScript(cpu);
+            });
             present_window_active = true;
         }
     }
@@ -772,6 +825,19 @@ int main(int argc, char** argv) {
                     secs > 0 ? static_cast<double>(r.insns) / secs / 1e6 : 0.0);
     }
     machine.reportBaseGaps(stdout);
+    // ★ 单令牌不变式的机械判据（guest_token.h）：summary 的 `token :` 行已经先打印，
+    //   这里只把"违规 > 0"变成退出码（测试子进程用它判红）。⛔ 不是"跑完没崩就算对"：
+    //   并发改宿主容器**可能**这次没炸，但违规计数一定会留下证据。
+    if (assert_guest_token) {
+        const lift::GuestToken& token = lift::guestToken();
+        if (token.violations() != 0 || token.maxConcurrent() > 1) {
+            std::fprintf(stderr,
+                         "emulator-lift: --assert-guest-token FAIL：violations=%llu max-concurrent=%u first=%s\n",
+                         static_cast<unsigned long long>(token.violations()), token.maxConcurrent(),
+                         token.firstViolationSite() ? token.firstViolationSite() : "-");
+            return 4;
+        }
+    }
     if (gpu_strict) {
         // ★ `--gpu-strict`：给 CTest / 真实 boot 用的**机械判据**（summary 已先打印）。
         if (!r.ok()) return 2;

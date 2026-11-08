@@ -11,6 +11,7 @@
 
 #include "runtime/frame_blit.h"
 #include "runtime/host_window.h"
+#include "runtime/input.h"
 
 namespace lift {
 namespace {
@@ -43,20 +44,9 @@ bool hasDriver(const std::string& list, const char* name) {
 }
 
 // ---- SDL → Win32 消息（P3 输入泵）----
+// ★ 输入消息 / 鼠标键位 / WM_* 常量在 `runtime/input.h`（**唯一一份**：SDL 与注入脚本共用）。
+//   本文件只保留 SDL 平台特有的映射（SDL_Keycode → VK）与关窗宽限。
 constexpr std::uint32_t kWmClose = 0x0010u;
-constexpr std::uint32_t kWmKeyDown = 0x0100u;
-constexpr std::uint32_t kWmKeyUp = 0x0101u;
-constexpr std::uint32_t kWmMouseMove = 0x0200u;
-constexpr std::uint32_t kWmLButtonDown = 0x0201u;
-constexpr std::uint32_t kWmLButtonUp = 0x0202u;
-constexpr std::uint32_t kWmRButtonDown = 0x0204u;
-constexpr std::uint32_t kWmRButtonUp = 0x0205u;
-constexpr std::uint32_t kWmMButtonDown = 0x0207u;
-constexpr std::uint32_t kWmMButtonUp = 0x0208u;
-constexpr std::uint32_t kWmMouseWheel = 0x020Au;
-constexpr std::uint32_t kMkLButton = 0x0001u;
-constexpr std::uint32_t kMkRButton = 0x0002u;
-constexpr std::uint32_t kMkMButton = 0x0010u;
 constexpr int kCloseGraceFrames = 3;
 constexpr std::uint64_t kCloseGraceNs = 500ull * 1000ull * 1000ull;
 
@@ -91,35 +81,13 @@ std::uint32_t vkFromSdlKey(SDL_Keycode key) {
     }
 }
 
-std::uint32_t mouseBit(Uint8 button) {
+// SDL 鼠标按钮 → 应用层的 `MouseButton`；不认识的按钮 ⇒ 没有对应值（调用方跳过）。
+bool mouseButtonFromSdl(Uint8 button, MouseButton* out) {
     switch (button) {
-        case SDL_BUTTON_LEFT: return kMkLButton;
-        case SDL_BUTTON_RIGHT: return kMkRButton;
-        case SDL_BUTTON_MIDDLE: return kMkMButton;
-        default: return 0;
-    }
-}
-
-// SDL 鼠标键 → VK_LBUTTON/VK_RBUTTON/VK_MBUTTON/VK_XBUTTON1/2。
-// ★ 与键盘共用**同一份**影子键状态（`WindowManager::key_down_`）：引擎的
-//   `GetAsyncKeyState(1/2)` 轮询（`.lst` 0x47716D/0x477195/0x477241）只认这一份。
-std::uint32_t vkFromMouseButton(Uint8 button) {
-    switch (button) {
-        case SDL_BUTTON_LEFT: return 0x01u;   // VK_LBUTTON
-        case SDL_BUTTON_RIGHT: return 0x02u;  // VK_RBUTTON
-        case SDL_BUTTON_MIDDLE: return 0x04u; // VK_MBUTTON
-        case SDL_BUTTON_X1: return 0x05u;     // VK_XBUTTON1
-        case SDL_BUTTON_X2: return 0x06u;     // VK_XBUTTON2
-        default: return 0;
-    }
-}
-
-std::uint32_t win32MouseMessage(Uint8 button, bool down) {
-    switch (button) {
-        case SDL_BUTTON_LEFT: return down ? kWmLButtonDown : kWmLButtonUp;
-        case SDL_BUTTON_RIGHT: return down ? kWmRButtonDown : kWmRButtonUp;
-        case SDL_BUTTON_MIDDLE: return down ? kWmMButtonDown : kWmMButtonUp;
-        default: return 0;
+        case SDL_BUTTON_LEFT: *out = MouseButton::Left; return true;
+        case SDL_BUTTON_RIGHT: *out = MouseButton::Right; return true;
+        case SDL_BUTTON_MIDDLE: *out = MouseButton::Middle; return true;
+        default: return false;
     }
 }
 
@@ -139,6 +107,7 @@ struct SdlWindow::Impl {
     bool device_lost = false;
     std::uint64_t frame_no = 0;
     std::string screenshot_path;
+    std::uint64_t screenshot_frame = 0;  // 0 = 每帧；N = 只在第 N 个 Present 回读
     std::string renderer_name;
     std::string video_driver;
     std::string gpu_driver;
@@ -169,8 +138,9 @@ struct SdlWindow::Impl {
     int raster_tex_h = 0;
     frame_blit::HostPixelFormat raster_tex_fmt = frame_blit::HostPixelFormat::Unsupported;
     // P3：guest 消息泵 / 键鼠状态 / 关窗宽限
+    // ★ 键电平 / 按钮位图 / 虚拟光标**不在**这里：它们只在 `WindowManager`（唯一状态源），
+    //   本类只把 SDL 事件翻译过去（`runtime/input.h`）。⛔ 不要再加一份 `mouse_buttons`。
     WindowManager* windows = nullptr;
-    std::uint32_t mouse_buttons = 0;
     bool close_pending = false;
     int close_frames_left = 0;
     std::uint64_t close_deadline_ns = 0;
@@ -182,6 +152,8 @@ struct SdlWindow::Impl {
     void handleEvent(const SDL_Event& event);
     void pumpEvents(int wait_ms);
     void mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const;
+    // 本帧要不要回读（截图 / 测试捕获）。frame_no 必须已经自增。
+    bool shotWanted() const;
     // 截图 + 捕获（两条呈现路径共用；`shot` 归调用方销毁）。frame_no 必须已经自增。
     bool saveShot(SDL_Surface* shot, std::string* err);
     // GPU 直出的一帧（不经过 SDL_UpdateTexture / SDL_Renderer）。
@@ -225,6 +197,12 @@ void SdlWindow::Impl::advanceCloseFrame() {
     if (close_frames_left <= 0 || SDL_GetTicksNS() >= close_deadline_ns) requestStop();
 }
 
+bool SdlWindow::Impl::shotWanted() const {
+    if (capture) return true;
+    if (screenshot_path.empty()) return false;
+    return screenshot_frame == 0 || frame_no == screenshot_frame;
+}
+
 void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const {
     int ww = 1280;
     int wh = 720;
@@ -251,6 +229,7 @@ void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_
 }
 
 void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
+    const std::uint32_t now_ms = static_cast<std::uint32_t>(SDL_GetTicks());
     switch (event.type) {
         case SDL_EVENT_QUIT:
             // 应用级退出：直接 post WM_QUIT（不再走 guest 的 WM_CLOSE 确认）。
@@ -260,19 +239,18 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             if (window != nullptr && event.window.windowID == SDL_GetWindowID(window)) requestClose();
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
-            mouse_buttons = 0;
-            if (windows != nullptr) windows->clearKeys();
+            // ★ 焦点丢失只清 **OS 拥有** 的键 / 按钮（见 host_window.h 的 InputSource）：
+            //   脚本注入的按下不因窗口失焦而丢 —— 那正是"注入不依赖焦点"的一半。
+            if (windows != nullptr) windows->clearOsInput();
             break;
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP: {
             const bool down = event.type == SDL_EVENT_KEY_DOWN;
             const std::uint32_t vk = vkFromSdlKey(event.key.key);
             if (vk == 0) break;
-            if (windows != nullptr) windows->setKeyDown(vk, down);
             const std::uint32_t scan = event.key.scancode ? static_cast<std::uint32_t>(event.key.scancode) : 0u;
-            std::uint32_t lparam = 1u | (scan << 16);
-            if (!down) lparam |= 0xC0000000u;  // previous state + transition
-            postMessage(down ? kWmKeyDown : kWmKeyUp, vk, lparam);
+            // ★ 注入路径与真人路径在**同一段代码**里：状态 + WM_* 一起落地（所有权判定在里面）。
+            if (windows != nullptr) input::key(*windows, vk, down, scan, InputSource::Os, now_ms);
             if (down && vk == 0x1B) requestClose();  // ESC = 用户要退出（与旧行为一致）
             break;
         }
@@ -280,34 +258,22 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.motion.x, event.motion.y, &x, &y);
-            if (windows != nullptr) windows->setCursorClientPos(windows->primaryWindow(), x, y);
             if (std::getenv("LIFT_TRACE_INPUT") != nullptr) {
                 std::fprintf(stderr, "[input] motion sdl=(%.1f,%.1f) -> guest=(%d,%d)\n",
                              event.motion.x, event.motion.y, x, y);
             }
-            postMessage(kWmMouseMove, mouse_buttons,
-                        (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
+            if (windows != nullptr) input::mouseMove(*windows, x, y, InputSource::Os, now_ms);
             break;
         }
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP: {
             const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-            const std::uint32_t bit = mouseBit(event.button.button);
-            if (bit == 0) break;
-            if (down) mouse_buttons |= bit;
-            else mouse_buttons &= ~bit;
+            MouseButton b = MouseButton::Left;
+            if (!mouseButtonFromSdl(event.button.button, &b)) break;
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.button.x, event.button.y, &x, &y);
-            if (windows != nullptr) {
-                windows->setCursorClientPos(windows->primaryWindow(), x, y);
-                // ★ 按键电平：引擎 `GetAsyncKeyState(VK_LBUTTON/VK_RBUTTON)` 只读影子键状态，
-                //   不写这里 ⇒ 轮询恒 0（实测 1827 次全 0）。消息通道照旧。
-                const std::uint32_t vk = vkFromMouseButton(event.button.button);
-                if (vk != 0) windows->setKeyDown(vk, down);
-            }
-            postMessage(win32MouseMessage(event.button.button, down), mouse_buttons,
-                        (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
+            if (windows != nullptr) input::mouseButton(*windows, x, y, b, down, InputSource::Os, now_ms);
             break;
         }
         case SDL_EVENT_MOUSE_WHEEL: {
@@ -315,10 +281,7 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.wheel.mouse_x, event.wheel.mouse_y, &x, &y);
-            if (windows != nullptr) windows->setCursorClientPos(windows->primaryWindow(), x, y);
-            const std::uint32_t wp = (static_cast<std::uint32_t>(delta) << 16) | mouse_buttons;
-            postMessage(kWmMouseWheel, wp,
-                        (static_cast<std::uint32_t>(y) << 16) | static_cast<std::uint32_t>(x));
+            if (windows != nullptr) input::mouseWheel(*windows, x, y, delta, InputSource::Os, now_ms);
             break;
         }
         case SDL_EVENT_RENDER_DEVICE_LOST:
@@ -352,6 +315,7 @@ SdlWindow::~SdlWindow() { shutdown(); }
 bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     if (impl_->window != nullptr) return true;
     impl_->screenshot_path = options.screenshot_path;
+    impl_->screenshot_frame = options.screenshot_frame;
     impl_->raster_gpu = options.raster_gpu;
     impl_->raster_sprites = options.raster_sprites;
 
@@ -501,12 +465,12 @@ void SdlWindow::shutdown() {
     impl_->device_lost = false;
     impl_->capture = false;
     impl_->windows = nullptr;
-    impl_->mouse_buttons = 0;
     impl_->close_pending = false;
     impl_->close_frames_left = 0;
     impl_->close_deadline_ns = 0;
     impl_->frame_no = 0;
     impl_->screenshot_path.clear();
+    impl_->screenshot_frame = 0;
     impl_->renderer_name.clear();
     impl_->video_driver.clear();
     impl_->gpu_driver.clear();
@@ -591,7 +555,7 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
     SDL_RenderTexture(impl_->renderer, impl_->texture, nullptr, nullptr);
     ++impl_->frame_no;
 
-    if (!impl_->screenshot_path.empty() || impl_->capture) {
+    if (impl_->shotWanted()) {
         SDL_Surface* shot = SDL_RenderReadPixels(impl_->renderer, nullptr);
         if (shot == nullptr) {
             if (err) *err = std::string("SDL_RenderReadPixels 失败：") + SDL_GetError();
@@ -617,7 +581,7 @@ bool SdlWindow::Impl::saveShot(SDL_Surface* shot, std::string* err) {
         if (err) *err = "截图 surface 为空";
         return false;
     }
-    if (!screenshot_path.empty()) {
+    if (!screenshot_path.empty() && (screenshot_frame == 0 || frame_no == screenshot_frame)) {
         const std::string path = replaceFrameToken(screenshot_path, frame_no);
         if (!SDL_SaveBMP(shot, path.c_str())) {
             if (err) *err = std::string("SDL_SaveBMP(") + path + ") 失败：" + SDL_GetError();
@@ -673,7 +637,7 @@ bool SdlWindow::Impl::submitDirect(const SurfaceArena& arena, const GuestSurface
     if (!direct->directPresent(err)) return false;
     // 一帧用过就消费掉：下一位调用方（DDraw Flip / 直接 submitFrame）仍然会先上传 guest。
     direct->directSetTargetCurrent(false);
-    if (!screenshot_path.empty() || capture) {
+    if (shotWanted()) {
         // ★ swapchain 是 write-only ⇒ 窗口像素从**同一份 target** 回读，再套同一份 letterbox。
         std::vector<std::uint8_t> xrgb;
         int rw = 0;
