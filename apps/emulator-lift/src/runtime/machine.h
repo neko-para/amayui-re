@@ -29,6 +29,7 @@
 #include "runtime/heap.h"
 #include "runtime/image.h"
 #include "runtime/input_script.h"
+#include "runtime/interaction_graph.h"
 #include "runtime/memory.h"
 #include "runtime/native_overrides.h"
 #include "runtime/shims.h"
@@ -48,6 +49,9 @@ enum class StopReason : std::uint8_t {
     Stopped,       // guest 自己停（hlt / 停机）
     NoCode,        // eip 落在没有代码的地方
     TimeLimit,     // 墙钟上限（--time-limit；探索用，不用于确定性比对）
+    // ★ 识别驱动的交互任务**失败**（三种失败：timeout / no-sample / expect_change）。
+    //   ⛔ 不进 `ok()`：它必须是非 0 退出（真源 `docs/03-emulator/interaction-model.md` §2）。
+    InteractionFailed,
 };
 const char* stopReasonName(StopReason r);
 
@@ -163,15 +167,39 @@ public:
     InputScript& inputScript() { return input_script_; }
     const InputScript& inputScript() const { return input_script_; }
     // ★ 帧停滞兜底阈值（`--input-stall-ms`；0 = 关闭）。必须在 `run()` 之前设。
-    void setInputStallMs(std::uint64_t ms) { input_script_.setDefaultStallMs(ms); }
+    // ★ 这三个旋钮**同时**作用到两条通道（时间线 + 交互图的 actuator）：图把动作追加进自己的
+    //   actuator，用户传 `--input-max-hold` / `--input-stall-ms` 时**必须**也生效 ——
+    //   否则那三个 flag 对图静默无效（复审发现）。
+    void setInputStallMs(std::uint64_t ms) {
+        input_script_.setDefaultStallMs(ms);
+        interaction_.actuator().setDefaultStallMs(ms);
+    }
     // 还没出现第一帧时的宽限（`--input-stall-boot-ms`；boot 期间没有 Present 不算停滞）。
-    void setInputStallBootGraceMs(std::uint64_t ms) { input_script_.setDefaultBootGraceMs(ms); }
+    void setInputStallBootGraceMs(std::uint64_t ms) {
+        input_script_.setDefaultBootGraceMs(ms);
+        interaction_.actuator().setDefaultBootGraceMs(ms);
+    }
     // ★ 自动 hold 的上限（`--input-max-hold`，guest ms；0 = 不设限）。必须在 `run()` 之前设。
     //   到上限仍未采样 ⇒ 抬起 + 告警（见 `runtime/input_script.h`）；⛔ 不挂死。
-    void setInputMaxHoldMs(std::uint64_t ms) { input_script_.setMaxAutoHoldMs(ms); }
+    void setInputMaxHoldMs(std::uint64_t ms) {
+        input_script_.setMaxAutoHoldMs(ms);
+        interaction_.actuator().setMaxAutoHoldMs(ms);
+    }
     // 每个块边界推进一次注入时间线（`Machine::run` 内部调用；`GetMessageA` 阻塞时的宿主事件泵
     // 也调用它，否则 guest 卡在等消息时脚本永远不触发）。
     void tickInputScript(X86& cpu);
+
+    // ★ 识别驱动的交互任务（`--interaction-graph`）：见 `runtime/interaction_graph.h`，
+    //   真源 `docs/03-emulator/interaction-model.md`。与时间线**并存**（真源 §7 第 3 期才合并）。
+    bool loadInteractionGraph(const std::string& path, std::string* err);
+    // 直接给文本（测试 / 内嵌用）：与 `loadInteractionGraph` 走同一个解析器。
+    bool loadInteractionGraphText(const std::string& text, const std::string& origin, std::string* err);
+    InteractionGraph& interactionGraph() { return interaction_; }
+    const InteractionGraph& interactionGraph() const { return interaction_; }
+    // 画面特征采样器：加载图时挂到 presenter 上（没加载图 ⇒ 不采样、零成本）。
+    FrameSampler& sampler() { return sampler_; }
+    // 每个块边界推进一次交互图（顺序：先图 tick（它 append 动作）再 actuator tick（真正发 WM_*））。
+    void tickInteraction(X86& cpu);
 
     // ---- 访问器 ----
     GuestMemory& mem() { return mem_; }
@@ -234,6 +262,10 @@ private:
     // ★ 诊断（`LIFT_FRAME_TRACE=1`）：每次 presenter 帧号变化时打一行"这一帧的墙钟去哪了"。
     //   只读：不改变执行结果；shim 计时由 `shims_.setTiming(true)` 打开。
     void flushFrameTrace();
+    // ★ 一份 `InputScript` 的公共推进（时间线与交互图的 actuator **共用**这条路径：
+    //   tick / profiler 窗口边界登记 / `quit` 唤醒 WM_QUIT）。⛔ 不要给两条通道各写一遍。
+    void pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms);
+    std::uint64_t wallMs() const;
     // winmm 定时器：找到期最早的一个并把控制权交给 guest 回调（协作式；见 x86.h 的 GuestTimer）。
     // 返回 true = 已铺好回调帧（调用方应 continue）；false = 没有到期项或铺帧失败（后者设 r）。
     bool fireDueTimer(RunResult& r);
@@ -252,6 +284,12 @@ private:
     NativeOverrideTable overrides_;
     NativeBlockTable block_overrides_;
     InputScript input_script_;
+    // ★ 识别驱动的交互任务（`--interaction-graph`）+ 它的画面采样器。
+    //   采样器只在这张图被加载时挂到 presenter 上（`loadInteractionGraph`），否则一次也不采样。
+    InteractionGraph interaction_;
+    FrameSampler sampler_;
+    // 图失败 / 完成时投 WM_QUIT 唤醒阻塞中的 guest（只投一次）。
+    bool interaction_stop_posted_ = false;
     // ★ 区间 profiler（`runtime/window_profile.h`）：armed = 脚本里有 profile_begin/end 动作。
     //   ⛔ 没有这些动作时它整条路径都是 no-op（两次 steady_clock 也不会有）。
     WindowProfiler window_prof_;

@@ -51,8 +51,9 @@ public:
         std::uint64_t memHash = 0;
         std::uint64_t x87Hash = 0;
         std::uint64_t xmmHash = 0;  // ★ 只改 XMM 的用例必须能被看见（否则恒等夹具会误判成"通过"）
-        bool operator==(const Snapshot& o) const;
-        bool operator!=(const Snapshot& o) const { return !(*this == o); }
+        // 恒等判据（判据 A1 的唯一入口）：除哨兵 `ret` 的栈效果外**全状态相同** ⇒ 夹具什么都没做。
+        // ★ 签名刻意写成"对 before 的谓词"而不是 `operator==`：唯一的合法差异是 `esp`（见实现）。
+        bool sameStateIgnoringSentinelRet(const Snapshot& before) const;
     };
     Snapshot snapshot() const;
 

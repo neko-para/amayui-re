@@ -73,3 +73,14 @@
 - **取舍**：帧记录的读法一律写成"**语料基址 + 偏移**"（`.tmp/anchor-design.md:28-36` 那 5 行读地址链）；形状模型把同一条记录锚在另一个基址（`0x5D894` = 语料基址 + 0x14，其实是"脚本体堆缓冲"字段）。
 - **备选**：直接抄模型的记录基址与字段偏移。**没选**：**整体错 0x14 字节**，而读错的字段在大多数帧上"看起来合理"（BUG-13 的形态）。两个视图**都对**，差别是"记录从哪里算起"；我们选"语料基址"是因为它同时是 `cur` 与身份格的锚点，一处基址覆盖三个字段。
 - **重写必须保持不变**：① 记录基址/步长/字段偏移只在一处定义；② 守卫同时钉"基址 / 记录大小 / 不许把记录之外的 Engine 级标量当 per-cur 字段读"；③ 换视图（重新导出）时**只重建 `EA → 行号` 映射**，不改锚。
+
+### L3-sse-01 · `movsd` 按**操作数形态**分派；MXCSR **只**建模 IE（其余一律不建模）
+- **取舍**：① `F2 0F 10 / 11`（SSE2 标量 double `movsd`）与 `A5`（串操作 `movsd`）共用 Zydis 助记符，而 `F2` **不置** Zydis 的 REPNE 属性（实测 `rep=00`）⇒ 前缀拿不到信息，只能按**操作数形态**分派：可见操作数里出现 XMM ⇒ `Op::Sse` + `SseOp::Movsd`（`apps/emulator-lift/src/runtime/decode.cpp` 的 `sseMovsdByOperands()`）。⛔ 不把 `movsd` 登记进 `kSseMap`：那张表按**助记符**查，会把 `A5` 串操作也一起吞成 SSE。② MXCSR 只保留复位值 `0x1F80`（异常全屏蔽 + 就近舍入）并**只**置 IE（bit0，`src/runtime/exec_fpu.cpp` 的 `sseRaiseInvalid()`）；DE/ZE/OE/UE/PE、掩码位、RC、`#XM` 投递**一律不建模**。
+- **备选**：① 按前缀分派（`F2` vs `F3`/`A5`）；② 把 `movsd` 塞进 `kSseMap`；③ 给 MXCSR 建完整寄存器模型并投递 `#XM`。**没选** ①：实测 `F2` 不置 REPNE ⇒ 前缀没有可用信息。**没选** ②：会把 `A5` 串操作（语料 `rep movsd` 267 + 裸 `movsd` 12 条，见 `docs/s4-fpu-audit.md` §1）静默改成 SSE。**没选** ③：今天**没有消费者**（见下读数）—— 建了也只是"看起来对"的模型，改坏了没人知道。
+- **读数**（2026-11-09，`apps/emulator-lift` 的 `macos-arm64` 预设 = **RelWithDebInfo**，`out-debt` 树）：
+  - `rg -n 'ldmxcsr|stmxcsr|fxsave|fxrstor' apps/emulator-lift/src` ⇒ **1 行，且是注释**（`src/runtime/x86.h:188` 的"本仓没有 …"）⇒ **0 个实现**。
+  - 同一 grep 打到语料 `.lst`（`corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst`，18,418,951 字节）⇒ **0 行**；`rg -c 'xmm[0-9]' <lst>` ⇒ **0**（语料里一个 XMM 操作数都没有）。
+  - 解码器侧：`rg -n 'ldmxcsr|stmxcsr|fxsave' apps/emulator-lift/src/runtime/decode.cpp` ⇒ **0 行** ⇒ 闭集合外的助记符一律 `Op::Other`，执行即 `unimplemented()` **响亮失败**（机制守卫：`tests/dispatch.cpp` 的 `unimplemented-is-loud`）。
+  - `rg -n 'mxcsr' apps/emulator-lift/src/runtime/audio.h apps/emulator-lift/src/runtime/audio.cpp` ⇒ **0 行**：`AudioEngine::Context`（`audio.h:200-211`，含 `r[8]/eip/eflags/seg/fpu/xmm`）与 `capture()` / `restore()`（`audio.cpp:506` / `:521`）**没有** `mxcsr`；pump 借用主 `cpu_`（`attach(X86* …)`，`audio.h:100`）。
+- **重写必须保持不变**：① `movsd` 的分派按**操作数形态**（⛔ 不按前缀、⛔ 不按助记符查表）；② 串操作 `A5` 永远留在 `Op::Movs`；③ MXCSR 复位值 = `0x1F80` 且只置 IE（`comiss` / `ucomiss` 的 QNaN / SNaN 差别靠它）；④ 未建模的异常**不投递**、也不假装置位。
+- **重开条件（三条，任一条成立就重开）**：① 语料或 `src` 出现 `ldmxcsr` / `stmxcsr` / `fxsave` / `fxrstor`（机械触发器：assets 档 `corpus-mnemonics` 会红）；② 要投递 `#XM` 或实现掩码 / 舍入控制（RC）；③ feeder 可达任何 XMM 指令 —— 那时 `AudioEngine::Context` **必须**一起加 `mxcsr`，否则 pump 路径会**静默**泄漏 IE（save/restore 借的是主 `cpu_` 的寄存器）。

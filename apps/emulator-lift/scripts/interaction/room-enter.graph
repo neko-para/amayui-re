@@ -1,0 +1,29 @@
+# 进 Eushully-chan Room：TITLE → EU-ROOM（识别驱动的节点图）
+#
+# 真源（schema / 三种失败 / 判定口径）：`docs/03-emulator/interaction-model.md`
+# 跑法：
+#   ./out/emulator-lift --game-dir <安装> --skip-logo --audio off \
+#       --interaction-graph scripts/interaction/room-enter.graph \
+#       --interaction-trace /tmp/room-enter.trace --dump-frame /tmp/room-enter.bmp
+#
+# ★ 为什么一个帧号都不写：房间装载要 ~5×10^8 条指令（guest 时间 ~50 s），
+#   而**房间空闲时 Present 会稀疏**（实测 0.5 s 一帧，实测 `.tmp` 里的时间线脚本
+#   正是靠帧号锚点才点不到「戻る」）。这里只等"画面是那一屏"。
+#
+# 两个 hash 是实测读数（2026-11-09，macOS arm64 / RelWithDebInfo，`--skip-logo`）：
+#   TITLE 稳定画面   0x94CB492BF7F1AEEB
+#   EU-ROOM 稳定画面 0x96E51755F00B2E9E
+entry title
+
+node title
+  when screen hash 0x94CB492BF7F1AEEB
+  action click 944 562
+  next room
+  timeout 180000
+  expect screen changed
+
+node room
+  when screen hash 0x96E51755F00B2E9E
+  action quit
+  next
+  timeout 180000

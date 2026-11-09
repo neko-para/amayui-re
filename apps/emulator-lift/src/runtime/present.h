@@ -16,6 +16,8 @@
 
 namespace lift {
 
+class FrameSampler;
+
 class PresentSink {
 public:
     virtual ~PresentSink() = default;
@@ -70,6 +72,17 @@ public:
     std::uint64_t lastHash() const { return last_hash_; }
     std::string lastDump() const { return last_dump_; }
 
+    // ★ 画面特征采样（`runtime/screen_sample.h`）：采样点只能在这里 —— Present 是**唯一**呈现汇点。
+    //   没挂 sampler ⇒ 一次也不读像素（零成本）；⛔ 不要在别的层另找一个"采样时机"。
+    void setFrameSampler(FrameSampler* sampler) { sampler_ = sampler; }
+    FrameSampler* frameSampler() const { return sampler_; }
+
+    // ★ 补写"最后呈现的那一帧"（交互模型 §2：三种失败都要存最后画面）。
+    //   只留**描述符**（几十字节），不拷像素 ⇒ 每帧零成本；代价是像素可能已经是下一帧的绘制中状态，
+    //   所以 `hash_still_matches` 如实报告"这些像素还是不是被采样到的那一帧"（不一致也照样写，供诊断）。
+    bool dumpLastFrame(const std::string& host_path, bool* hash_still_matches, std::string* err) const;
+    bool hasLastFrame() const { return have_last_surface_; }
+
     // 诊断：sink 失败次数 / 最后一次错误 / sink 描述（latch 后仍保留）。
     std::uint64_t sinkFailures() const { return sink_failures_; }
     const std::string& lastSinkError() const { return last_sink_error_; }
@@ -85,6 +98,12 @@ private:
     std::uint64_t sink_failures_ = 0;
     std::string last_sink_error_;
     bool sink_latched_ = false;
+    // 最后帧的描述符 + 当时的 hash（`dumpLastFrame` 用；不持有像素）。
+    FrameSampler* sampler_ = nullptr;
+    const SurfaceArena* last_arena_ = nullptr;
+    GuestSurface last_surface_{};
+    std::uint64_t last_surface_hash_ = 0;
+    bool have_last_surface_ = false;
 };
 
 }  // namespace lift

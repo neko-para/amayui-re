@@ -186,6 +186,20 @@ public:
     bool loadFile(const std::string& path, std::string* err);
     // 直接解析文本（测试 / 内嵌用）；origin 只进报错与日志。
     bool loadText(const std::string& text, const std::string& origin, std::string* err);
+    // ★ 追加：把 `text` 解析成动作接到**末尾**（⛔ 不 clear、⛔ 不动已应用的账）。
+    //   为什么需要它：交互状态机（`runtime/interaction_graph.h`）在**运行中**才知道"下一个动作在哪个
+    //   时刻"（块边界上的 frame / guest_ms），而动作的注入与"一次按下一定被 guest 观察到"的语义
+    //   已经全在 `InputScript` 里 —— 状态机只追加，不另写一套按下 / 抬起。
+    //   前置（全部可由本类自己的账判定；违反 ⇒ false + err 带原因）：
+    //     ① 现有动作**全部已应用**（`applied_ == actions_.size()`）—— 否则新动作会排在未应用动作
+    //        之间，"应用顺序 == 文件顺序"这条不再成立；
+    //     ② **没有未完成的抬起**（`releases_` 为空）—— 否则新按下会被上一次的 up 立刻清掉；
+    //     ③ 新动作的触发值**不早于**现有最后一条**同单位**动作（`now >= value` 的到期语义 ⇒
+    //        倒序会让后面的动作先到期，与文件顺序不一致）。
+    //   ⚠ 追加段里的 `after` / `wait` 用的是**追加段自己**的锚点（不是整条脚本的）：要接在前面
+    //     已有时刻之后，请写绝对 `at <单位> <值>`（状态机就是这么写的）。
+    //   返回值语义与 `loadText` 一致（同一个解析器 / 同一份报错格式）。
+    bool appendText(const std::string& text, const std::string& origin, std::string* err);
     void clear();
 
     bool active() const { return !actions_.empty(); }

@@ -19,7 +19,8 @@
 //   在 `X86::xmm[8][4]`。`emms` 把 tag word 置全 empty（Intel 语义）。
 // ★ SSE 浮点 / 128 位搬移是独立一族（`Op::Sse` + `execSse()`，见文件下半部）；语料 0 条，
 //   但按 Intel SDM 实现（不再是"未实现 ⇒ 响亮失败"）。
-// ⛔ 未实现形态（例如 SSE 的 packed 浮点 addps / mulps 等不在 14 条闭集合里的）仍然走
+// `movsd`（SSE2 标量 double）与串操作 `movsd` 同名 ⇒ 由解码器按操作数形态分派（见 decode.cpp）。
+// ⛔ 未实现形态（例如 SSE 的 packed 浮点 addps / mulps 等不在 15 条闭集合里的）仍然走
 //   `unimplemented()` 响亮失败（`addps` 仍落 `Op::Other`，守卫见 tests/dispatch.cpp）。
 #include <cmath>
 #include <cstdio>
@@ -923,8 +924,8 @@ bool execPacked(X86& cpu, const Insn& in) {
 // =====================================================================================
 // SSE 标量单精度 + 128 位搬移 / 位运算（`Op::Sse`）
 //
-// ★ 为什么单独一族：这 14 条形态里，`xorps` 是**按位**的、`movaps` 是**整份 128 位**的，
-//   而 `movss` / `cvtsi2ss` / `addss` 一族是**标量**的（只动低 32 位）。它们的共同点只是
+// ★ 为什么单独一族：这 15 条形态里，`xorps` 是**按位**的、`movaps` 是**整份 128 位**的，
+//   而 `movss` / `movsd` / `cvtsi2ss` / `addss` 一族是**标量**的（只动低 32 / 低 64 位）。它们的共同点只是
 //   "操作数是 XMM"；塞进 `PkOp` 的整数 lane 语义会把这几类混成一套（NaN / 舍入 / invalid
 //   与整数溢出 / 饱和根本不是一回事）。
 //
@@ -932,6 +933,9 @@ bool execPacked(X86& cpu, const Insn& in) {
 //   · `MOVSS xmm1, xmm2`（legacy，寄存器源）：DEST[31:0] := SRC[31:0]；DEST[MAXVL-1:32] **Unmodified**。
 //   · `MOVSS xmm1, m32`（legacy，内存源）：DEST[31:0] := SRC[31:0]；**DEST[127:32] := 0**。
 //   · `MOVSS m32, xmm1`：只写 4 字节（DEST[31:0] := SRC[31:0]）。
+//   · `MOVSD xmm1, xmm2`（legacy，寄存器源）：DEST[63:0] := SRC[63:0]；DEST[127:64] **Unmodified**。
+//   · `MOVSD xmm1, m64`（legacy，内存源）：DEST[63:0] := SRC；**DEST[127:64] := 0**。
+//   · `MOVSD m64, xmm1`：只写 8 字节。
 //   · `CVTSI2SS xmm1, r/m32`（legacy）：DEST[31:0] := Convert；**DEST[MAXVL-1:32] Unmodified**
 //     —— 这正是"现行 SDM 文本"的口径（VEX 形态才复制 SRC1 的高位并清 MAXVL:128；本仓只解 legacy）。
 //   · `ADDSS` / `SUBSS` / `MULSS` / `DIVSS xmm1, xmm2/m32`：只改 DEST[31:0]，高 96 位不动。
@@ -1081,6 +1085,45 @@ bool execSse(X86& cpu, const Insn& in) {
                 return true;
             }
             return unimplemented(cpu, in, "movss 的目标操作数形态不支持");
+        }
+
+        // ---- movsd：SSE2 标量 double（legacy；与串操作 `movsd` 的碰撞见解码器的形态分派）----
+        // ★ SDM：reg-reg ⇒ DEST[63:0] := SRC[63:0]、DEST[127:64] **Unmodified**；
+        //         m64 源 ⇒ DEST[63:0] := SRC、**DEST[127:64] := 0**；
+        //         m64 目标 ⇒ 只写 8 字节（邻近字节一个都不许动）。
+        case SseOp::Movsd: {
+            const Operand& dst = in.op0();
+            const Operand& src = in.op1();
+            if (dst.kind == OpKind::Xmm) {
+                if (dst.vec >= 8) return unimplemented(cpu, in, "movsd 的目标 xmm 下标越界");
+                if (src.kind == OpKind::Xmm) {
+                    if (src.vec >= 8) return unimplemented(cpu, in, "movsd 的源 xmm 下标越界");
+                    cpu.xmm[dst.vec][0] = cpu.xmm[src.vec][0];  // 低 64 位
+                    cpu.xmm[dst.vec][1] = cpu.xmm[src.vec][1];
+                    return true;  // 高 64 位原样保留
+                }
+                if (src.kind == OpKind::Mem) {
+                    if (src.mem.size != 8) return unimplemented(cpu, in, "movsd 的源必须是 m64");
+                    const std::uint32_t ea = cpu.eaOf(src.mem);
+                    cpu.xmm[dst.vec][0] = cpu.mem->rd32(ea);
+                    cpu.xmm[dst.vec][1] = cpu.mem->rd32(ea + 4u);
+                    cpu.xmm[dst.vec][2] = 0;  // legacy mem 源：DEST[127:64] 清 0
+                    cpu.xmm[dst.vec][3] = 0;
+                    return true;
+                }
+                return unimplemented(cpu, in, "movsd 的源操作数形态不支持");
+            }
+            if (dst.kind == OpKind::Mem) {
+                if (src.kind != OpKind::Xmm || src.vec >= 8) {
+                    return unimplemented(cpu, in, "movsd 存内存时源必须是 xmm");
+                }
+                if (dst.mem.size != 8) return unimplemented(cpu, in, "movsd 的内存目标必须是 m64");
+                const std::uint32_t ea = cpu.eaOf(dst.mem);
+                cpu.mem->wr32(ea, cpu.xmm[src.vec][0]);       // 只写 8 字节
+                cpu.mem->wr32(ea + 4u, cpu.xmm[src.vec][1]);
+                return true;
+            }
+            return unimplemented(cpu, in, "movsd 的目标操作数形态不支持");
         }
 
         // ---- xorps：整份 128 位按位异或（不写 flag）----

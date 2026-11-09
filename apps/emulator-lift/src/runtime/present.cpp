@@ -5,6 +5,8 @@
 #include <exception>
 #include <utility>
 
+#include "runtime/screen_sample.h"
+
 namespace lift {
 namespace {
 constexpr std::uint64_t kLatchAfterFailures = 3;
@@ -54,6 +56,15 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
     ++frame_count_;
     last_dump_.clear();
 
+    // ★ 采样点（交互模型的 `screen` 源）：**只在这里**。帧号 / hash 已经算好 ⇒ 判定侧拿到的
+    //   就是"这一次呈现"的真实观测值；没挂 sampler 时整段是零成本。
+    if (sampler_ != nullptr) sampler_->observe(arena, surface, frame_count_, last_hash_);
+    // 最后帧的**描述符**（不拷像素）：失败时要补写一张画面，见 dumpLastFrame()。
+    last_arena_ = &arena;
+    last_surface_ = surface;
+    last_surface_hash_ = last_hash_;
+    have_last_surface_ = true;
+
     if (sink_ && !sink_latched_) {
         std::string sink_err;
         bool ok = false;
@@ -99,5 +110,20 @@ bool HeadlessPresenter::stopRequested() const {
 }
 
 std::string HeadlessPresenter::sinkDescription() const { return sink_ ? sink_->describe() : std::string(); }
+
+bool HeadlessPresenter::dumpLastFrame(const std::string& host_path, bool* hash_still_matches,
+                                      std::string* err) const {
+    if (!have_last_surface_ || last_arena_ == nullptr) {
+        if (err) *err = "还没有 Present 过（没有最后帧可写）";
+        return false;
+    }
+    // ★ 如实报告像素是否仍是**被采样到的那一帧**：guest 可能已经在对这块后缓冲画下一帧了。
+    //   ⛔ 不一致也照样写（诊断价值大于"干净"），但调用方要把这句话打出来。
+    if (hash_still_matches != nullptr) {
+        *hash_still_matches = last_arena_->hash(last_surface_) == last_surface_hash_;
+    }
+    return last_arena_->dumpBmp(last_surface_, host_path, err);
+}
+
 
 }  // namespace lift

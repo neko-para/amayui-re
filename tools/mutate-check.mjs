@@ -896,6 +896,56 @@ const MUTATIONS = [
       '`testEaxImm(0x8000)` 那几条当场红（注入路径的"按键真的被看见"没有别的判据）',
   },
 
+  // ── 交互 / 识别 / SSE 的三条新守卫（每条一处已知破坏，红了才说明守卫真的会红）──
+  {
+    file: 'apps/emulator-lift/src/runtime/interaction_graph.cpp',
+    from: '            return sampler.changeCount() > changes_at_start;',
+    // ⚠ `(void)changes_at_start;` 是必须的：变异后那个形参没人用了，而本工程开着
+    //   `-Wunused-parameter -Werror` ⇒ 少了这一行就会"构建失败"，变异自检判"无法判定"（实测）。
+    to:
+      '            (void)changes_at_start;\n' +
+      '            return sampler.last().changed;  // 变异：只看最后两帧',
+    guard: 'ctest:interaction-graph',
+    ctest: 'interaction-graph',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`screen changed` 退回 `last().changed`（两次判定之间帧会推进好几帧 ⇒ 漏掉中间那次变化）' +
+      '⇒ interaction-graph 的 `changed-counts-window` 当场红',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/decode.cpp',
+    from: '    if (sseMovsdByOperands(zi, zops, key)) {',
+    to: '    if (false && sseMovsdByOperands(zi, zops, key)) {  // 变异：不按操作数形态分派',
+    guard: 'ctest:conformance',
+    ctest: 'conformance',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`F2 0F 10`（SSE2 标量 movsd）退回 `Op::Movs` ⇒ 静默按串操作执行（改 [edi] / 推进 esi·edi）；' +
+      'conformance 的 `sse-movsd-*` 三条红',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/exec_fpu.cpp',
+    from: '    if ((cpu.eaOf(op.mem) & 15u) == 0u) return true;',
+    to: '    if (true) return true;  // 变异：对齐检查恒真（未对齐静默按 movups 搬）',
+    guard: 'ctest:dispatch',
+    ctest: 'dispatch',
+    buildDir: 'apps/emulator-lift/out',
+    what: '未对齐 movaps / movdqa 不再响亮失败 ⇒ dispatch 的 `unaligned-*` 两条红（内存被静默改写）',
+  },
+
+  {
+    file: 'apps/emulator-lift/tests/conformance.cpp',
+    from: '    return r[lift::kEsp] == before.r[lift::kEsp] + 4u;',
+    to: '    return r[lift::kEsp] == before.r[lift::kEsp];  // 变异：哨兵 ret 的栈效果没被排除',
+    guard: 'ctest:conformance-rejects-hollow-case',
+    ctest: 'conformance-rejects-hollow-case',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '恒等判据退回"含哨兵 ret"的旧口径 ⇒ 空心夹具不再被判红（负控 CTest `conformance-rejects-hollow-case` 红）',
+  },
+
   {
     file: 'apps/emulator-lift/src/runtime/guest_token.cpp',
     from:

@@ -96,6 +96,10 @@ void usage() {
         "                     注入**不需要窗口焦点、也不移动真实光标**；格式见 README §4.2c\n"
         "  --input-stall-ms <ms>      帧号停住多久之后把剩余 frame 条件折成 wall_ms（缺省 10000；0 = 关闭兜底）\n"
         "  --input-stall-boot-ms <ms> 还没出现第一帧（boot）时的宽限（缺省 30000；⛔ boot 不算停滞）\n"
+        "  --interaction-graph <path>  识别驱动的交互任务（节点图：when → action → next）。与 --input-script **并存**；\n"
+        "                     格式与三种失败见 docs/03-emulator/interaction-model.md。⛔ 不写帧号\n"
+        "  --interaction-trace <path>  交互任务的 trace（一行一事件；确定性字段，可逐行 diff）\n"
+        "  --interaction-fail-dump <path>  失败时补写「最后呈现的那一帧」BMP（缺省 <graph>.fail.bmp）\n"
         "  --input-max-hold <ms>      自动 hold 的上限（guest ms，缺省 1000；0 = 不设限）：`click` / 显式 up\n"
         "                             等 guest 采样，到上限仍未采样 ⇒ 抬起 + 告警（⛔ 不挂死）；见 README §4.2c\n"
         "  --audio off|sdl|virtual  音频后端（缺省 sdl = 真设备；virtual = 确定性设备时钟；off = silent）\n"
@@ -164,6 +168,13 @@ int main(int argc, char** argv) {
     std::string present_screenshot;
     std::uint64_t present_screenshot_frame = 0;
     std::string input_script_path;
+    // ★ 识别驱动的交互任务（`--interaction-graph`）：见 docs/03-emulator/interaction-model.md。
+    std::string interaction_graph_path;
+    std::string interaction_trace_path;
+    std::string interaction_fail_dump;
+    // 图是否成功加载：`interactionGraph().active()` 在 `abandon()`/清空后会变假，而"任务没走完"
+    // 的判定要的是"本次运行**本来**有个任务"。
+    bool interaction_graph_loaded = false;
     // ★ 帧停滞兜底（README §4.2c）：帧不推进时把剩余 frame 触发条件折算成 wall_ms。
     //   0 = 关闭（显式选择"宁可挂死也不提前"）。
     std::uint64_t input_stall_ms = 10000;
@@ -297,6 +308,16 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "--input-script 需要一个非空路径\n");
                 return 2;
             }
+        } else if (std::strcmp(a, "--interaction-graph") == 0 && i + 1 < arg_count) {
+            interaction_graph_path = args[++i];
+            if (interaction_graph_path.empty()) {
+                std::fprintf(stderr, "--interaction-graph 需要一个非空路径\n");
+                return 2;
+            }
+        } else if (std::strcmp(a, "--interaction-trace") == 0 && i + 1 < arg_count) {
+            interaction_trace_path = args[++i];
+        } else if (std::strcmp(a, "--interaction-fail-dump") == 0 && i + 1 < arg_count) {
+            interaction_fail_dump = args[++i];
         } else if (std::strcmp(a, "--input-stall-ms") == 0 && i + 1 < arg_count) {
             // 帧停滞兜底阈值（0 = 关闭）。见 README §4.2c。
             const char* text = args[++i].c_str();
@@ -697,9 +718,29 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "emulator-lift: --input-script 解析失败\n  %s\n", script_err.c_str());
             return 2;
         }
+    }
+    // ---- 识别驱动的交互任务（`--interaction-graph`）：同样启动前解析，失败立刻拒绝 ----
+    //   ★ 与时间线并存（真源 §7 第 3 期才把时间线并入）；两条通道都写同一份 WindowManager 状态。
+    if (!interaction_graph_path.empty()) {
+        std::string graph_err;
+        if (!machine.loadInteractionGraph(interaction_graph_path, &graph_err)) {
+            std::fprintf(stderr, "emulator-lift: --interaction-graph 解析失败\n  %s\n", graph_err.c_str());
+            return 2;
+        }
+        interaction_graph_loaded = true;
+    }
+    // ★ 输入旋钮对**两条通道**同时生效（时间线 + 交互图的 actuator）。放在两处加载之后：
+    //   图的动作是追加进它自己的 actuator 的，用户传的 `--input-max-hold` / `--input-stall-ms`
+    //   必须也落在那里 —— 否则那几个 flag 对图静默无效。
+    //   自动 hold 的上限还要**小于**节点 timeout：否则上一条 click 的抬起会一直挡住下一条追加。
+    if (!input_script_path.empty() || interaction_graph_loaded) {
         machine.setInputStallMs(input_stall_ms);
         machine.setInputStallBootGraceMs(input_stall_boot_ms);
         machine.setInputMaxHoldMs(input_max_hold_ms);
+    }
+    if (!interaction_fail_dump.empty() && !interaction_graph_loaded) {
+        std::fprintf(stderr, "--interaction-fail-dump 需要同时给 --interaction-graph\n");
+        return 2;
     }
     // ★ guest 眼里的主模块路径（用户 2026-11-05 口径）：`<guest 根>\AGE.EXE`，
     //   打开它拿到的是**我们真正在跑的那份字节**（拆壳件），不是 `--game-dir` 下的加壳原件。
@@ -810,6 +851,9 @@ int main(int argc, char** argv) {
             machine.cpu().windows->setHostEventPump([sdl_raw, &machine](lift::X86& cpu) {
                 sdl_raw->pumpHostEvents(5);
                 machine.tickInputScript(cpu);
+                // ★ 交互图也要在这里推进：理由与时间线同一条 —— guest 阻塞在 `GetMessageA` 时
+                //   没有块边界，只有宿主的这个泵会被调用。
+                machine.tickInteraction(cpu);
             });
             present_window_active = true;
         }
@@ -856,8 +900,29 @@ int main(int argc, char** argv) {
                      "emulator-lift: ⚠ --bench + 窗口呈现：MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐\n");
     }
 
+    // ★ 交互 trace：首行必须标 `NON-DIFFABLE` 与否 ⇒ 只能在**知道呈现档位之后**开
+    //   （`--present window` 是 real-time 时钟，那一档的 trace 不参与 diff）。见真源 §4。
+    std::FILE* interaction_trace = nullptr;
+    if (!interaction_trace_path.empty()) {
+        if (!machine.interactionGraph().active()) {
+            std::fprintf(stderr, "--interaction-trace 需要同时给 --interaction-graph\n");
+            return 2;
+        }
+        interaction_trace = lift::openHostFileUtf8(interaction_trace_path, "wb");
+        if (interaction_trace == nullptr) {
+            std::fprintf(stderr, "emulator-lift: 打不开 --interaction-trace 输出：%s\n",
+                         interaction_trace_path.c_str());
+            return 2;
+        }
+        machine.interactionGraph().setTrace(interaction_trace, !present_window_active);
+    }
+
     const std::uint64_t t0 = SDL_GetTicksNS();
     const lift::RunResult r = machine.run(opt);
+    if (interaction_trace != nullptr) {
+        std::fclose(interaction_trace);
+        interaction_trace = nullptr;
+    }
     const std::uint64_t t1 = SDL_GetTicksNS();
     if (present_window_active) machine.cpu().windows->clearHostEventPump();
 
@@ -909,6 +974,50 @@ int main(int argc, char** argv) {
         std::printf("gpu-strict: OK（draws=%llu gpu=%llu fallback=0 sprite=%llu/%llu）\n",
                     (unsigned long long)cov.draw_calls, (unsigned long long)cov.gpu_draws,
                     (unsigned long long)cov.sprite_gpu_draws, (unsigned long long)cov.sprite_draws);
+    }
+    // ★ 交互任务**没走完**就必须响亮：`Stopped` 是"实现里主动停"（`ok()` 为真，退出 0），
+    //   但任务图只认自己的 `done()` —— guest 侧硬停（d3dxTrap 的"未实现方法槽" / 资源耗尽 /
+    //   ExitProcess）会让运行"看起来成功"而任务其实停在半路。实测：EU-ROOM 里按 ESC ⇒
+    //   `stop: stopped` + `detail: unimplemented … LockRect` + **exit 0**（静默当成成功）。
+    //   ⛔ 这里不猜是哪一种停：任务没到 `task done` 就是失败（退出码与三种失败同一个 5）。
+    if (interaction_graph_loaded && !machine.interactionGraph().done() &&
+        r.reason != lift::StopReason::InteractionFailed) {
+        const lift::InteractionGraph& g = machine.interactionGraph();
+        std::fprintf(stderr,
+                     "[interaction] 任务没有走完（不是 0 点）：stop=%s detail=%s\n"
+                     "  最后状态：state=%s node=%s（trace 里最后一条事件就是断点）\n",
+                     lift::stopReasonName(r.reason), r.detail.c_str(), g.stateName(),
+                     g.current() != nullptr ? g.current()->id.c_str() : "-");
+        const std::string dump_path = interaction_fail_dump.empty()
+                                          ? lift::InteractionGraph::defaultFailDumpPath(interaction_graph_path)
+                                          : interaction_fail_dump;
+        bool still = true;
+        std::string dump_err;
+        if (machine.presenter().dumpLastFrame(dump_path, &still, &dump_err)) {
+            std::fprintf(stderr, "[interaction] 最后画面：%s（像素仍等于最后一次 Present 的 hash：%s）\n", dump_path.c_str(),
+                         still ? "是" : "否 —— guest 可能已经画了下一帧，只作诊断");
+        } else {
+            std::fprintf(stderr, "[interaction] 最后画面写不出来：%s\n", dump_err.c_str());
+        }
+        return 5;
+    }
+    // ★ 交互任务的三种失败（真源 §2）：**非 0 退出**（5，可与 2 = 未实现缺口区分）+ stderr 打
+    //   "最后状态与全部候选" + 存最后画面。⛔ 不许 warning-only、⛔ 不许当 0 点继续跑。
+    if (r.reason == lift::StopReason::InteractionFailed) {
+        const lift::InteractionGraph& g = machine.interactionGraph();
+        std::fputs(g.failureReport().c_str(), stderr);
+        const std::string dump_path = interaction_fail_dump.empty()
+                                          ? lift::InteractionGraph::defaultFailDumpPath(interaction_graph_path)
+                                          : interaction_fail_dump;
+        bool still = true;
+        std::string dump_err;
+        if (machine.presenter().dumpLastFrame(dump_path, &still, &dump_err)) {
+            std::fprintf(stderr, "[interaction] 最后画面：%s（像素仍等于最后一次 Present 的 hash：%s）\n", dump_path.c_str(),
+                         still ? "是" : "否 —— guest 可能已经画了下一帧，只作诊断");
+        } else {
+            std::fprintf(stderr, "[interaction] 最后画面写不出来：%s\n", dump_err.c_str());
+        }
+        return 5;
     }
     return r.ok() ? 0 : 2;
 }

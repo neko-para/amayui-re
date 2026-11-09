@@ -2,39 +2,62 @@
 
 - id: REQ-01M6XVYY5TCKSAS80WS7PADF8P
 - type: req
-- status: open
+- status: doing
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 1
 - tags: [emulator-lift, interaction, state-machine]
 
-## 要换掉的是什么
+## 现在到哪了（2026-11-09：第一期落地，出房间卡在另一条单）
 
-现在的"脚本"是**定时器时间线**：`at frame N` / `at guest_ms T` 到点就发动作，发完不管有没有生效。它已经证明不可靠 —— 点击被静默漏掉时下游照样跑，于是两轮优化基于假数据。
+- **节点图 runner**：`repo:apps/emulator-lift/src/runtime/interaction_graph.h` + `repo:apps/emulator-lift/src/runtime/interaction_graph.cpp`（行写法解析 / 状态机 / 三种失败 /
+  trace / `failureReport()` / `defaultFailDumpPath`）。
+- **画面采样**：`repo:apps/emulator-lift/src/runtime/screen_sample.h` + `repo:apps/emulator-lift/src/runtime/screen_sample.cpp`，采样点 = Present（唯一呈现汇点）；
+  整帧 hash / 矩形均值 / 矩形 hash / "与上一次采样不同"的**单调计数**。
+- **CLI**：`--interaction-graph` / `--interaction-trace` / `--interaction-fail-dump`；三种失败 **exit 5**；
+  "任务没走完"（guest 侧硬停）也 **exit 5** —— 见 `repo:apps/emulator-lift/README.md` §4.2d。
+- **动作仍走时间线那套注入**：图把动作**追加**进 `InputScript`（新 `appendText`），自动 hold / 延迟抬起 /
+  profiler 窗口 / `quit` 只有一份实现（⛔ 不另写一套按下抬起）。
+- **守卫**：`repo:apps/emulator-lift/tests/interaction_graph.cpp`（14 条 pure 用例）+ 变异条目 `ctest:interaction-graph`
+  （`--match interaction_graph.cpp` 实测红后还原）。
+- **脚本**：`repo:apps/emulator-lift/scripts/interaction/room-enter.graph` 与 `room-exit.graph`；
+  后者用 `screen rect … avg` + 框中心（ESC）而不是写死坐标，两条都**零帧号**。
 
-要换的是**交互模型**：识别 → 操作 → 再识别。★ 节点 schema / 三种失败 / 与 Maa 的差异 / 确定性口径的**唯一真源是 `repo:docs/03-emulator/interaction-model.md`**；本单只留判据与进度，**不复述 schema**（两份 schema 必漂，见 `AGENTS.md` §10）。
+## 判据对照
 
-## 与 Maa 的关系（只留一句口径）
+| 判据 | 现状 |
+|---|---|
+| 进 Eushully-chan Room，且**不依赖帧号** | ✅ 真机实测（`--interaction-graph room-enter.graph` ⇒ exit 0；trace：title 命中 → click → `expect screen changed` → room 命中 → `task done`） |
+| 三种失败全部响亮 | ✅ 各一条 pure 用例（`timeout-loud` / `no-sample-blind` / `expect-change-loud`，另有 `rect-blind-is-no-sample` / `acting-expires` / `expect-needs-new-sample` 三条回归）+ stderr 打"最后状态与全部候选"；⚠ **exit 5 只有真机实测**（`room-exit` 跑出 exit 5），退出码路径在 `main` 里，pure CTest 看不见 |
+| `next` 是单个 id；写不存在的 id ⇒ 解析期失败（带行号） | ✅ `parse-errors`（13 条错误各带 `origin:行:`） |
+| 节点图可在 pure CTest 里用合成输入跑 | ✅ 14 条：`parse-ok` / `parse-errors` / `only-next-target` / `timeout-loud` / `no-sample-blind` / `expect-change-loud` / `changed-counts-window` / `stall-fallback-expires` / `quit-marks-task-done` / `acting-expires` / `expect-needs-new-sample` / `rect-blind-is-no-sample` / `trace-diff-stable` / `graph-scripts-parse` |
+| trace 可 diff | ✅ `trace-diff-stable`（逐字节相同）；`--present window` 首行 `# NON-DIFFABLE` |
+| ⛔ 不以"帧号到 X"当判据 | ✅ 两条脚本里 0 个帧号（房间空闲时 Present 稀疏到 ~0.5 s/帧） |
+| **出** Eushully-chan Room（同一终态） | ⛔ **卡住**（见下） |
 
-Maa 的用例是"很多节点 + 保守策略干**一个**任务"；我们是"**成批生成任务**"，每条节点少、路径近似线性 ⇒ 参考思路、按实际情况简化。逐条"不抄什么"见真源 §3（本单不复述）。
+## 卡住的（都不是本单能修的，各有一条单）
 
-## 判据
+1. `REQ-01M6ZDSGQY1RXX3N3WJKA8D26H` —— 后缓冲 surface 的 `LockRect`/`UnlockRect` 未实现：房间的退出路径
+   900 条指令后就停在那里。⇒ `room-exit.graph` 现在**必然**以"任务没走完"结束（**exit 5** + stderr 打断点 +
+   最后画面），这是本单要的"响亮"，但终态判据要等那条单。
+2. `REQ-01M6ZDSPVYS3R78TK8TFKVBC8N` —— 房间里「戻る」按钮对**注入点击**无反应（hover 有高亮、点 CG 鑑賞 有效、
+   ESC 有效）。⇒ 脚本暂时用 `key 0x1B` 走同一条退出路径；那条单修好后换回 `click center`。
 
-- **第一步必须覆盖进 / 出 Eushully-chan Room**：两条脚本都在**不依赖帧号**的前提下到达同一终态（进、出各一次，重复到稳定）。
-- **三种失败全部响亮**：`timeout` / `no-sample`（识别源失明）/ `expect_change`（动作后没变）⇒ 该次运行**非 0 退出** + 存最后画面 + 打出最后状态与全部候选。识别不到**不是**"可忽略、继续轮询"的状态 —— 它最终必须表现为上面三种失败之一。
-- `next` 是**单个**节点 id：一条用例证明"只前进到它写的那一个"；写了不存在的 id ⇒ 解析期失败（带行号）。
-- 节点图 + 识别器可在 **pure CTest** 里用合成输入（假识别源 + 假动作）跑：节点跳转 / `timeout` / `no-sample` / `expect_change` 各至少一条用例。
-- trace 可 diff：同一条路径两次运行的事件流逐行相同（时间戳除外）。
-- ⛔ 不以"帧号到 X"当判据（房间里帧号不推进）。
+## 实测记录（2026-11-09，macOS arm64 / RelWithDebInfo，`--skip-logo`，`--audio off`）
 
-## 迁移路径（⛔ 不一夜全红）
-
-1. 节点图与现有 `input-script` **并存**：时间线仍是**过渡形态**，新脚本用节点图；
-2. 先只换两条路径：**进 / 出 Eushully-chan Room**（现有时间线脚本在 `.tmp/room/`）；
-3. 同一目标各有旧 / 新脚本 ⇒ 比"到达的终态"，不比中间时序；
-4. 旧路径只有在同一路径连续多次稳定后，才删该路径的旧脚本（删一条记一条）；时间线并入节点图见真源 §7 的第 3 期。
+- `room-enter.graph`：**两次运行各 exit 0**，且两份 trace **逐字节相同**（`diff` 无输出）。
+  trace 全文：`task start nodes=2 entry=title` → `node title enter frame=0` → `when screen hash 0x94CB492BF7F1AEEB samples=31 hit`
+  → `action click 944 562 applied` → `expect screen changed samples=33 hit` → `node title done` → `node room enter frame=33`
+  → `when screen hash 0x96E51755F00B2E9E samples=44 hit` → `action quit applied` → `node room done`
+  → `task done nodes=2 transitions=6 actions=2`（insns ≈ 1.30e9）。
+  ⇒ "不依赖帧号 / 重复到稳定 / trace 可 diff"三条都在真机上成立。
+- `room-exit.graph`：exit 5；`stop=stopped detail=unimplemented D3DX9 call（…LockRect）`，
+  `最后状态：state=acting node=room`，最后画面写出且 `hash_still_matches=是`。
+  ★ 注意这条的"停"在运行摘要里是 `Stopped`（`ok()` 为真、退出码 0）—— 那是 `REQ-01M6WW9R6SJ7P8XA4522XCR48A`
+  记的口径问题；本单在 `main` 里按"任务没到 `task done` 就是失败"把它拦成 exit 5。
 
 ## 不做
 
 - ⛔ 不在此单重新设计 profiler / 吞吐（各有单）。
-- ⛔ 不把画面识别做成通用 CV 框架：只做本作需要的几种特征（整帧 hash / 区域均值 / 变化检测），够用即止；今天只有整帧 hash（缺口见真源 §6）。
+- ⛔ 不把画面识别做成通用 CV 框架：只做本组需要的几种特征；模板匹配不做。
 - ⛔ 不用 OCR / 泛化模型：不可复现、不可 diff。
+- ⛔ 不把时间线并进节点图（真源 §7 第 3 期）。

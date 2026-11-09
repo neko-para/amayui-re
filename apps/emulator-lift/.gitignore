@@ -3,3 +3,7 @@ out/
 out-*/
 vcpkg_installed/
 CMakeUserPresets.json
+
+# 交互任务的失败快照（`--interaction-fail-dump` 的缺省落点 = <graph>.fail.bmp）：
+# 它是**诊断产物**（3.6 MB BMP），⛔ 不入库。判据是"失败时能看那一帧"，不是"仓库里有那一帧"。
+*.fail.bmp

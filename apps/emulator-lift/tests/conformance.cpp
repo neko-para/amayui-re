@@ -1,11 +1,14 @@
 // emulator-lift · 纯档 conformance 的 runner（判据 A1）
 //
 // 夹具本体在 `conformance_cases.cpp`。这里只做三件事：
-//   ① 每条用例前后各拍一次全状态快照，**前后相同 = 恒等夹具 = 红**（plan §8.2）；
+//   ① 每条用例前后各拍一次全状态快照，**除哨兵 ret 的 esp+4 外完全相同 = 恒等夹具 = 红**（plan §8.2）；
 //   ② `verify` 里必须至少有一次断言（否则"什么都没验"也是红）；
 //   ③ 汇总失败数并给出可复现的用例名。
+// ★ `LIFT_CONFORMANCE_SELFCHECK=1` 时额外跑一条**负控**（空心夹具必须只因①红）——
+//   那是本判据"会红"的机械证据（CTest：`conformance-rejects-hollow-case`）。
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -13,6 +16,9 @@
 #include "harness.h"
 
 namespace lift_test {
+
+// 恒等判据的失败计数（单独记：负控要断言"红的原因**只**是这条判据"）。
+int g_identity_failures = 0;
 
 namespace {
 
@@ -51,19 +57,22 @@ bool parseHex(const char* hex, std::vector<std::uint8_t>* out) {
 
 }  // namespace
 
-bool Fixture::Snapshot::operator==(const Snapshot& o) const {
+bool Fixture::Snapshot::sameStateIgnoringSentinelRet(const Snapshot& before) const {
     // ★ `eip` **不**参与比较：`run()` 的终点是哨兵 `kSentinelEa`，而快照是在 setup 之后、
     //   run 之前拍的（那时 eip = 第一条指令的 EA）⇒ 前后 eip **必然**不同。
     //   把它算进"恒等"只会让这条判据多一个恒假的输入（`harness.h` 列的"全状态"也不含 eip）。
-    // ⚠ 已知残留：夹具末尾的 `ret` 会把哨兵弹掉 ⇒ **esp 也必然 +4**，所以"恒等夹具"这条判据
-    //   实际上仍然**几乎**恒假（实测：把 `xmmHash` 从比较里去掉，236 条用例一条都不红）。
-    //   ⇒ 要真守住"夹具什么都没做"，得让 runner 把哨兵 `ret` 的栈效果排除掉 —— 那是另一条单；
-    //   本单的 14 条 SSE 形态**不依赖**它：每条都在 `verify` 里显式断言 XMM / MXCSR。
-    if (eflags != o.eflags || memHash != o.memHash || x87Hash != o.x87Hash) return false;
-    if (mxcsr != o.mxcsr || xmmHash != o.xmmHash) return false;
-    for (int i = 0; i < 8; ++i)
-        if (r[i] != o.r[i]) return false;
-    return true;
+    // ★ 哨兵 `ret` 的唯一合法副作用 = **esp 恰好 +4**（弹出哨兵）。实测空心夹具（setup 只有一条
+    //   `C3`）跑完只有 esp 变：6FFFFFFC → 70000000，而 memHash / x87Hash / xmmHash / eflags /
+    //   mxcsr 全不变（栈页本来就被清零，弹出的 4 字节写回去还是 0）⇒ 早先"memHash 必变"的说法是错的。
+    //   esp 在这里**单独**检查：净 0 / ±8 都说明夹具自己动了栈，仍算"状态变了"。
+    // ⛔ 不许把 memHash / xmmHash 移出比较：那会让"只改内存 / 只改 XMM"的恒等夹具静默通过。
+    if (eflags != before.eflags || memHash != before.memHash || x87Hash != before.x87Hash) return false;
+    if (mxcsr != before.mxcsr || xmmHash != before.xmmHash) return false;
+    for (int i = 0; i < 8; ++i) {
+        if (i == lift::kEsp) continue;  // esp **单独**判（哨兵 ret 的 +4），不参与"逐位相等"
+        if (r[i] != before.r[i]) return false;
+    }
+    return r[lift::kEsp] == before.r[lift::kEsp] + 4u;
 }
 
 bool Fixture::init() {
@@ -181,15 +190,42 @@ int runCases(const Case* cases, std::size_t count) {
             failf(__FILE__, __LINE__, "verify 里一次断言都没有（这条用例什么都没验）");
             continue;
         }
-        if (f.snapshot() == before) {
+        if (f.snapshot().sameStateIgnoringSentinelRet(before)) {
+            // ★ 单独计数：负控要断言"红的原因**只**是这条判据"（见 main 的 LIFT_CONFORMANCE_SELFCHECK）。
+            ++g_identity_failures;
             failf(__FILE__, __LINE__,
-                  "夹具前后状态完全相同 —— 恒等夹具（代码没执行 / expected 抄成了 actual）");
+                  "夹具前后状态完全相同（只差哨兵 ret 的 esp+4）—— 恒等夹具（代码没执行 / expected 抄成了 actual）");
             continue;
         }
         (void)checks_before_all;
         ++ran;
     }
     return g_failures;
+}
+
+namespace {
+
+// ---- 负控夹具（`LIFT_CONFORMANCE_SELFCHECK=1`）----
+// ★ 必须是"**能到哨兵但什么都没改**"的形状：字面"setup/verify 都空"的夹具会先红在别处
+//   （`run did not reach the sentinel` / `verify 里一次断言都没有`）⇒ 那证明不了恒等判据会红。
+//   这条：setup 只放一条 `ret`（run 直接到哨兵），verify 一条恒真断言。
+void setup_hollow(Fixture& f) { f.codeHex(kCodeEa, "C3"); }
+void verify_hollow(Fixture& f) { LIFT_CHECK_EQ_U32(f.cpu().eax(), 0u); }
+
+const Case kHollowCase = {"hollow-fixture", setup_hollow, verify_hollow};
+
+}  // namespace
+
+// 负控：`real_failures` = 真用例表的失败数（必须 0）。再跑空心夹具，要求它**只**因恒等判据红
+// —— 总失败恰好 +1、identity 恰好 +1。返回 true = 自检通过。
+bool runIdentitySelfCheck(int real_failures) {
+    const int before_failures = g_failures;
+    const int before_identity = g_identity_failures;
+    runCases(&kHollowCase, 1);
+    const int total_delta = g_failures - before_failures;
+    const int identity_delta = g_identity_failures - before_identity;
+    std::printf("conformance-selfcheck: hollow fixture red by identity=%d\n", identity_delta);
+    return real_failures == 0 && total_delta == 1 && identity_delta == 1;
 }
 
 }  // namespace lift_test
@@ -203,5 +239,15 @@ int main() {
     }
     const int failures = lift_test::runCases(cases, count);
     std::printf("conformance: %zu cases, %d checks, %d failures\n", count, lift_test::g_checks, failures);
+    // ★ 负控：`LIFT_CONFORMANCE_SELFCHECK=1` ⇒ 先要求真用例表 **0 红**，再要求空心夹具只因恒等判据红
+    //   （总失败 +1 / identity +1）。把 esp 规范化改回 `== before` 时这条会红 —— 那就是"判据会红"的证据。
+    const char* selfcheck = std::getenv("LIFT_CONFORMANCE_SELFCHECK");
+    if (selfcheck && *selfcheck && std::strcmp(selfcheck, "0") != 0) {
+        if (!lift_test::runIdentitySelfCheck(failures)) {
+            std::fprintf(stderr, "conformance-selfcheck: 负控失败（空心夹具没有被恒等判据判红）\n");
+            return 1;
+        }
+        return 0;
+    }
     return failures == 0 ? 0 : 1;
 }

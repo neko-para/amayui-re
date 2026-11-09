@@ -216,10 +216,12 @@ PkOp pkFromMnemonic(const char* name) {
 }
 
 // ---- SSE 标量单精度 + 128 位搬移 / 位运算（`Op::Sse` + `SseOp` 子码）----
-// ★ 这 14 条在 `.lst` 里都是 0 条（判据：全文件 `xmm<数字>` 操作数 = 0），但 A2 的别名表登记了
+// ★ 这 15 条在 `.lst` 里都是 0 条（判据：全文件 `xmm<数字>` 操作数 = 0），但 A2 的别名表登记了
 //   它们；真撞到时按 Intel SDM 执行，而不是落到 `Op::Other` 响亮失败。
-// ★ `movsd`（F2 0F 10，标量 double）**没有**登记：它和串操作 `movsd`（A5）共用同一个 Zydis 助记符，
-//   归一化后会落到 `Op::Movs` —— 那是既有口径，本单不碰（见 S4 审计 §1：语料里 `movsd` 全是串操作）。
+// ★ `movsd`（F2 0F 10 / F2 0F 11，SSE2 标量 double）**不在**这张表里：它和串操作 `movsd`（A5）
+//   共用同一个 Zydis 助记符，而 `F2` **不置** Zydis 的 REPNE 属性（实测 `rep=00`）⇒ 前缀帮不上忙。
+//   ⇒ 按**操作数形态**分派（`decode()` 里 `sseMovsdByOperands()`）：可见操作数里有 XMM 才是 SSE。
+//   ⛔ 不要把它登记进 `kSseMap`：那张表只查助记符，会把 `A5` 串操作也一起吞成 SSE。
 struct SseRow {
     const char* name;
     SseOp sse;
@@ -239,6 +241,17 @@ SseOp sseFromMnemonic(const char* name) {
     for (const SseRow& r : kSseMap)
         if (std::strcmp(name, r.name) == 0) return r.sse;
     return SseOp::None;
+}
+
+// `movsd` 的**操作数形态**分派（见上一条注释）：可见操作数里出现 XMM 寄存器 ⇒ SSE2 标量 double。
+// ★ 只看**可见**操作数：串操作 `A5` 的操作数是隐式的 esi/edi，Zydis 不算作可见操作数 ⇒ 留在 `Op::Movs`。
+bool sseMovsdByOperands(const ZydisDecodedInstruction& zi, const ZydisDecodedOperand* zops, const char* key) {
+    if (std::strcmp(key, "movsd") != 0) return false;
+    const std::uint8_t visible = zi.operand_count_visible;
+    for (std::uint8_t i = 0; i < visible && i < 3; ++i) {
+        if (zops[i].type == ZYDIS_OPERAND_TYPE_REGISTER && xmmIndex(zops[i].reg.value) >= 0) return true;
+    }
+    return false;
 }
 
 // `rep` / `lock` 前缀后的规范名（A3 要跟 `.lst` 的 `rep movsd` / `lock xadd` 对上）
@@ -357,7 +370,13 @@ bool Decoder::decode(const GuestMemory& mem, std::uint32_t ea, Insn* out, std::s
     const char* key = canon ? canon : raw;
     ins.mnemonic = prefixedName(key, ins.rep, ins.lock);
     const PkOp pk = pkFromMnemonic(key);
-    if (pk != PkOp::None) {
+    if (sseMovsdByOperands(zi, zops, key)) {
+        // ★ 助记符碰撞的**唯一**分派点（本单 ②）：`F2 0F 10 / 11`（SSE2 标量 double）落这里；
+        //   `A5`（串操作）没有 XMM 操作数 ⇒ 仍走下面的原分支（`Op::Movs`）。
+        ins.op = Op::Sse;
+        ins.sse = SseOp::Movsd;
+        ins.mnemonic = "movsd";
+    } else if (pk != PkOp::None) {
         ins.op = Op::Packed;
         ins.pk = pk;
     } else {

@@ -490,6 +490,43 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 运行日志与逐帧 BMP 是**本地证据**（`.tmp/` 不入库）：判据本身在上面这两行日志里。
 
 
+## 4.2d 识别驱动的交互任务（`--interaction-graph`）
+
+**要换掉的是什么**：`--input-script` 是**定时器时间线** —— `at frame N` 到点就发动作，发完不管有没有生效。
+它已经骗过人：点击被静默漏掉时下游照样跑，于是基于假数据做了两轮优化。这里换的是**交互模型**：
+识别 → 操作 → 再识别；失败**响亮**。★ schema / 三种失败 / 判定口径的**唯一真源**是
+`docs/03-emulator/interaction-model.md`（本节不复述，两份 schema 必漂）。
+
+```bash
+./out/emulator-lift --game-dir <安装> --skip-logo --audio off \
+  --interaction-graph scripts/interaction/room-enter.graph \
+  --interaction-trace /tmp/room.trace \
+  [--interaction-fail-dump /tmp/room-fail.bmp] [--time-limit 900]
+```
+
+| 退出码 | 含义 | 判据 |
+|---|---|---|
+| `0` | 任务**走完**（或用户任务里写了 `quit`） | trace 末尾有 `task done nodes=… transitions=…` |
+| `5` | 三种失败之一（`timeout` / `no-sample` / `expect_change`），**或者任务没走完**（guest 侧硬停：未实现的方法槽 / 资源耗尽 / `ExitProcess`） | 三种失败 ⇒ stderr 有 `failureReport()`（节点 / 等的是什么 / 等了多久 / 每个受监视矩形的最后采样值）；"没走完" ⇒ 打 `stop=` / `detail=` 与最后状态。两种都补写最后画面 BMP |
+| `2` | 参数 / 解析失败（带 `文件:行`），或其它既有的非 0 结束 | 启动阶段就拒绝，⛔ 不跑一半 |
+
+- **与 `--input-script` 并存**（真源 §7 第 3 期才把时间线并入节点图）。两条通道都只写
+  `WindowManager` 的同一份状态、都走 `runtime/input.cpp` 那一层 ⇒ 真人 / 时间线 / 节点图三者同一语义。
+- **⛔ 不写帧号**：房间装载要 ~5×10^8 条指令，而房间空闲时 Present 会稀疏到 ~0.5 s 一帧 ⇒
+  帧锚点在这种路径上会**永远等不到**（这是时间线在 EU-ROOM 上点不到「戻る」的实证原因）。
+- **画面采样点 = Present**（`HeadlessPresenter::present`，唯一呈现汇点）：`screen hash` 用已有的整帧 hash，
+  `screen rect … avg` / `screen changed` 由 `runtime/screen_sample.h` 在同一个点取样。
+  ⇒ 没加载图时一次也不采样（零成本）。
+- **trace 可以逐行 diff**：同一路径两次运行逐字节相同（时间戳除外；`origin=` 只写文件名，
+  ⛔ 不写宿主路径）；`--present window` 是 real-time ⇒ trace 头部（第 2 行）标 `# NON-DIFFABLE`，
+  那一档的 trace 不参与 diff。
+- ⚠ **两条通道并存时不要同时"按着"输入**：脚本的键 / 按钮所有权是**全局一份**（`WindowManager` 按 vk 记），
+  任一份脚本收口都会把它按下的键抬起来。现在图的动作是"追加进它自己的 actuator"，所以两条脚本
+  **同时各按一个键**不安全 —— 要么只用一条，要么把两条的动作时间错开。
+- 现成的两条路径脚本在 `scripts/interaction/`（进 / 出 EU-ROOM）；需求单的判据与进度见需求树
+  （`pnpm tools requirements show REQ-01M6XVYY5TCKSAS80WS7PADF8P`）。
+
+
 ## 4.2b GPU 光栅化（`--raster auto|cpu|gpu`）
 
 缺省 `--raster auto`：**`--present headless` ⇒ CPU**（保持 headless 逐字节确定性 / CTest 口径），

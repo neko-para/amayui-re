@@ -50,6 +50,7 @@ const char* stopReasonName(StopReason r) {
         case StopReason::Stopped: return "stopped";
         case StopReason::NoCode: return "no-code";
         case StopReason::TimeLimit: return "time-limit";
+        case StopReason::InteractionFailed: return "interaction-failed";
     }
     return "?";
 }
@@ -450,22 +451,42 @@ bool Machine::loadInputScriptText(const std::string& text, const std::string& or
     return true;
 }
 
-void Machine::tickInputScript(X86& cpu) {
-    if (!input_script_.active()) return;
+bool Machine::loadInteractionGraph(const std::string& path, std::string* err) {
+    // 换图前先把旧图仍按着的输入抬起来（⛔ 不静默留下"卡住的键"），并把采样器摘下来。
+    if (interaction_.active()) interaction_.actuator().abandon(*cpu_.windows, clock_.nowMs());
+    if (!interaction_.loadFile(path, err)) return false;
+    sampler_.reset();
+    interaction_.bindSampler(sampler_);
+    presenter_.setFrameSampler(&sampler_);
+    std::fprintf(stderr,
+                 "[interaction] 图：%s（%zu 个节点，entry=%s；采样 = Present，矩形 %zu 个）\n",
+                 path.c_str(), interaction_.nodes().size(), interaction_.entry().c_str(),
+                 sampler_.rectCount());
+    return true;
+}
+
+bool Machine::loadInteractionGraphText(const std::string& text, const std::string& origin, std::string* err) {
+    if (interaction_.active()) interaction_.actuator().abandon(*cpu_.windows, clock_.nowMs());
+    if (!interaction_.loadText(text, origin, err)) return false;
+    sampler_.reset();
+    interaction_.bindSampler(sampler_);
+    presenter_.setFrameSampler(&sampler_);
+    return true;
+}
+
+// 一份 `InputScript` 的公共推进：tick + profiler 窗口边界登记 + `quit` 唤醒。
+// ★ 时间线（`--input-script`）与交互图的 actuator 走**同一条**路径：两条通道的动作
+//   （自动 hold / 延迟抬起 / profiler / quit）只有一份实现，⛔ 不要各写一遍。
+void Machine::pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms) {
+    if (!script.active()) return;
     if (cpu.windows == nullptr) return;
     // ★ 唯一状态源就是 `cpu.windows`（与 SDL 真实事件同一份）：这里只推进时间线。
     //   四个量分别对应四种触发条件（frame / guest_ms / insn / wall_ms）—— 调度只认"条件到期"。
-    std::uint64_t wall_ms = 0;
-    if (wall_start_valid_) {
-        wall_ms = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wall_start_)
-                .count());
-    }
-    input_script_.tick(*cpu.windows, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wall_ms);
+    script.tick(*cpu.windows, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wall_ms);
     // ★ profiler 窗口的边界请求：**只在这里登记**，真正开/关在下一个 block 边界的迭代起点
     //   （⇒ 同一脚本重复跑得到同一个边界；⛔ 不在动作应用点上就地开关）。
     std::string label;
-    if (input_script_.takeProfileBegin(&label)) {
+    if (script.takeProfileBegin(&label)) {
         if (profile_begin_pending_) {
             std::fprintf(stderr,
                          "[profile-window] ⚠ 同一 tick 里有两个 profile_begin（%s / %s）⇒ 后者会顶掉前者\n",
@@ -474,15 +495,43 @@ void Machine::tickInputScript(X86& cpu) {
         profile_begin_pending_ = true;
         profile_begin_label_ = label;
     }
-    if (input_script_.takeProfileEnd(&label)) {
+    if (script.takeProfileEnd(&label)) {
         profile_end_pending_ = true;
         profile_end_label_ = label;
     }
     // ★ `quit` 还要**唤醒 guest**：窗口模式下 guest 可能正阻塞在 `GetMessageA`，它的循环里
     //   没有块边界 ⇒ 只置标志永远到不了 `Machine::run` 的那条检查。投一次 WM_QUIT 让它走退出路
     //   （没有事件源时这条无副作用：`peek` 只是把 WM_QUIT 当成队尾虚拟项）。
-    if (input_script_.quitPostPending()) {
-        input_script_.markQuitPosted();
+    if (script.quitPostPending()) {
+        script.markQuitPosted();
+        cpu.windows->postQuit(0);
+    }
+}
+
+std::uint64_t Machine::wallMs() const {
+    if (!wall_start_valid_) return 0;
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wall_start_)
+            .count());
+}
+
+void Machine::tickInputScript(X86& cpu) {
+    if (!input_script_.active()) return;
+    pumpScript(input_script_, cpu, wallMs());
+}
+
+void Machine::tickInteraction(X86& cpu) {
+    if (!interaction_.active()) return;
+    if (cpu.windows == nullptr) return;
+    // ★ 顺序是判据的一部分：先让图判定并在命中时**追加**动作（`at frame <F+1>`，本块边界内绝不生效），
+    //   再由 actuator 推进（真正发 WM_* + 自动 hold + 延迟抬起）。
+    interaction_.tick(*cpu.windows, sampler_, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wallMs());
+    pumpScript(interaction_.actuator(), cpu, wallMs());
+    // ★ 图在**宿主事件泵**里失败 / 完成时，guest 可能正阻塞在 `GetMessageA`（那时没有块边界）
+    //   ⇒ 不叫醒它就永远到不了 `Machine::run` 的那条检查（`quit` 早就是这么做的，图没有理由不）。
+    //   只投一次：投过就记账，避免每 5 ms 往队列里塞一条 WM_QUIT。
+    if (!interaction_stop_posted_ && (interaction_.failed() || interaction_.done())) {
+        interaction_stop_posted_ = true;
         cpu.windows->postQuit(0);
     }
 }
@@ -593,6 +642,35 @@ RunResult Machine::run(const RunOptions& opts) {
                 if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
                 r.reason = StopReason::Stopped;
                 r.detail = "input script: quit";
+                cpu_.running = false;
+                break;
+            }
+        }
+        // ★ 识别驱动的交互任务（`--interaction-graph`）：同样的门控（嵌套 guest 调用 / 定时器回调
+        //   进行中不推进）。三种失败 = **非 0 退出**（StopReason::InteractionFailed 不进 `ok()`）；
+        //   任务走完（`next` 空）与时间线的 `quit` 一样收口成 `Stopped`（那是**成功**结束，
+        //   判据是 trace 最后的 `task done`，不是退出码）。
+        if (interaction_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
+            const auto t_graph = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
+            tickInteraction(cpu_);
+            if (window_prof_.active())
+                window_prof_.addHost(WindowProfiler::HostInput,
+                                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                    std::chrono::steady_clock::now() - t_graph)
+                                                                    .count()));
+            if (interaction_.failed()) {
+                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                r.reason = StopReason::InteractionFailed;
+                r.detail = std::string("interaction: ") + graphFailureName(interaction_.failure()) + " · " +
+                           interaction_.failureDetail();
+                cpu_.running = false;
+                break;
+            }
+            if (interaction_.done() || interaction_.actuator().quitRequested()) {
+                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                r.reason = StopReason::Stopped;
+                r.detail = interaction_.done() ? "interaction: task done" : "interaction: quit";
                 cpu_.running = false;
                 break;
             }
@@ -1414,6 +1492,20 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      (unsigned long long)rs.explicit_releases, (unsigned long long)rs.deferred_ups,
                      (unsigned long long)rs.bounded_no_sample, (unsigned long long)rs.waited_samples_max,
                      (unsigned long long)rs.hold_ms_max);
+    }
+    // ★ 交互图（`--interaction-graph`）：状态 / 迁移次数 / 发出的动作数 / 采样量 / 失败类别。
+    //   失败类别单独一行（`FAIL`），因为它必须与"跑完了"（done）在读输出时一眼分开。
+    if (interaction_.active()) {
+        std::fprintf(out, "interaction: state=%s node=%s transitions=%llu actions=%llu samples=%llu changes=%llu\n",
+                     interaction_.stateName(),
+                     interaction_.current() != nullptr ? interaction_.current()->id.c_str() : "-",
+                     (unsigned long long)interaction_.stateChanges(),
+                     (unsigned long long)interaction_.actionsIssued(),
+                     (unsigned long long)sampler_.sampleCount(), (unsigned long long)sampler_.changeCount());
+        if (interaction_.failed()) {
+            std::fprintf(out, "FAIL      : %s（%s）\n", graphFailureName(interaction_.failure()),
+                         interaction_.failureDetail().c_str());
+        }
     }
     // ★ arena 是**独立**的 GuestHeap（`init` 的 0x28000000..0x30000000，128 MiB），不并进上面那行：
     //   纹理像素 / 后缓冲 / 深度块只在这里，主堆的 in_use 对"纹理没回收"完全不可见。

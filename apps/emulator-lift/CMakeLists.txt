@@ -50,6 +50,10 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/input_script.cpp
     src/runtime/pe_resource.cpp
     src/runtime/surface.cpp
+    # ★ 画面特征采样（交互模型的 `screen` 源）：采样点 = Present。
+    src/runtime/screen_sample.cpp
+    # ★ 识别驱动的交互状态机（节点图 when → action → next；判定只读采样计数，动作经 InputScript 追加）。
+    src/runtime/interaction_graph.cpp
     src/runtime/present.cpp
     src/runtime/present_sdl.cpp
     src/runtime/frame_blit.cpp
@@ -271,6 +275,15 @@ add_test(NAME conformance COMMAND lift-conformance)
 add_test(NAME conformance-safe COMMAND lift-conformance)
 set_tests_properties(conformance-safe PROPERTIES ENVIRONMENT "LIFT_SAFE_MEMORY=1")
 
+# ---- pure：恒等判据的负控 —— 空心夹具必须被 conformance 判红 ----
+# ★ 判据（红了意味着什么）：`LIFT_CONFORMANCE_SELFCHECK=1` 先要求真用例表 **0 红**，再要求一条
+#   "能到哨兵但什么都没改"的夹具**只**因恒等判据失败（总失败恰好 +1、identity 恰好 +1）。
+#   ⇒ 把 `sameStateIgnoringSentinelRet` 的 `esp+4` 规范化退回 `== before`，这条当场红 ——
+#   那是"恒等判据真的会红"的机械证据（⛔ 不是"判据恒假但一直绿"）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（自造字节、不碰游戏 / LFS）。
+add_test(NAME conformance-rejects-hollow-case COMMAND lift-conformance)
+set_tests_properties(conformance-rejects-hollow-case PROPERTIES ENVIRONMENT "LIFT_CONFORMANCE_SELFCHECK=1")
+
 add_executable(lift-dispatch tests/dispatch.cpp)
 target_link_libraries(lift-dispatch PRIVATE emulator-lift-runtime)
 add_test(NAME dispatch COMMAND lift-dispatch)
@@ -283,6 +296,16 @@ add_test(NAME heap-layout COMMAND lift-heap-layout)
 add_executable(lift-input-tick tests/input_tick.cpp)
 target_link_libraries(lift-input-tick PRIVATE emulator-lift-runtime)
 add_test(NAME input-tick COMMAND lift-input-tick)
+
+# ---- pure：识别驱动的交互状态机（节点图解析 / 三种失败 / trace 可 diff）----
+# ★ 顶层无条件注册 ⇒ pure 档：判定是观测值的纯函数，测试自己给 frame / guest_ms / wall_ms
+#   （⛔ 不靠真实墙钟推进），采样用 `FrameSampler::observeValues()` 注入。
+# ★ `LIFT_SOURCE_DIR` 只给 `graph-scripts-parse` 用：它要去源码树里找 `scripts/interaction/*.graph`
+#   （cwd 找不到时的备用路径；⛔ 不拿它当唯一来源）。
+add_executable(lift-interaction-graph tests/interaction_graph.cpp)
+target_link_libraries(lift-interaction-graph PRIVATE emulator-lift-runtime)
+target_compile_definitions(lift-interaction-graph PRIVATE LIFT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME interaction-graph COMMAND lift-interaction-graph)
 
 add_executable(lift-memory-pages tests/memory_pages.cpp)
 target_link_libraries(lift-memory-pages PRIVATE emulator-lift-runtime)

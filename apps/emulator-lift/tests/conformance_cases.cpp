@@ -11,9 +11,9 @@
 //   三操作数 imul / mul·div 位宽 / setcc·jcc·cmovcc 多条件 / bt·bts·btr·btc / bsf·bsr /
 //   xchg 内存 / movzx·movsx 16→32 / lea index*scale / 串操作 / x87 的 fsub·fdiv·fmul·
 //   fcompp·fucompp·fldcw·fild·fistp·fchs·fabs·fsqrt·frndint·ffree。
-// ★ SSE 浮点 / 128 位搬移（`Op::Sse`，14 条形态）在文件下部单列一节：每条标量形态都同时断言
+// ★ SSE 浮点 / 128 位搬移（`Op::Sse`，15 条形态）在文件下部单列一节：每条标量形态都同时断言
 //   "低 32 位的值"与"高 96 位按 SDM 保留 / 清 0"，`comiss`/`ucomiss` 还断言 MXCSR.IE 的
-//   QNaN / SNaN 差别（用例名 `sse-*`）。
+//   QNaN / SNaN 差别（用例名 `sse-*`）；`movsd`（F2 0F 10 / 11）另有一条碰撞说明与三条用例。
 #include "harness.h"
 
 namespace lift_test {
@@ -82,11 +82,15 @@ void verify_push_pop(Fixture& f) {
 
 void setup_leave(Fixture& f) {
     // esp = stack_top-4（哨兵）；构造一个帧：ebp = esp；[ebp] 放一个"上一帧"
+    // ★ ebp 必须**非 0**：栈页已被清零（`prepareStack`），`push ebp` 压 0 与"没写过"不可区分
+    //   ⇒ 恒等判据会（正确地）判这条夹具什么都没做。压一个可辨认的值，`leave` 的 pop 才可观测。
+    f.cpu().ebp() = 0xDEADBEEFu;
     f.codeHex(kCodeEa, "55 89 E5 C9 C3");  // push ebp; mov ebp,esp; leave; ret
 }
 void verify_leave(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eip, kSentinelEa);
     LIFT_CHECK_EQ_U32(f.cpu().esp(), f.m().layout().stack_top);
+    LIFT_CHECK_EQ_U32(f.cpu().ebp(), 0xDEADBEEFu);  // leave 的 pop 把帧里的旧 ebp 弹回来了
 }
 
 // ---------- 算术 / 逻辑 / 标志 ----------
@@ -1627,6 +1631,10 @@ void verify_x87_fstsw(Fixture& f) {
 }
 
 void setup_x87_finit(Fixture& f) {
+    // ★ 缺省控制字是 0x037F ⇒ "在缺省值上跑 finit"前后不可区分（恒等夹具）。先把控制字**预置**成
+    //   非缺省值 0x027F：`finit` 会把它改回 0x037F，于是这条用例真的改了一个可观测字段。
+    //   （下面的 `fldcw 0x027F` 保留：它证明 finit 不是"只把 fldcw 的效果撤回"这类侥幸通过。）
+    f.cpu().fpu.control = 0x027Fu;
     f.dataHex(kDataEa, "7F02");
     f.codeHex(kCodeEa, "D9 2D 00 00 48 00 9B DB E3 C3");  // fldcw 0x027F; finit
 }
@@ -2067,6 +2075,72 @@ void verify_sse_movss_store_4bytes(Fixture& f) {
     LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x04u, 0x3F800000u);
     LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x00u, 0xAAAAAAAAu);  // 前一个 dword 没被写
     LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x08u, 0xCCCCCCCCu);  // 后一个 dword 没被写
+}
+
+// =====================================================================================
+// `movsd` 的助记符碰撞（`F2 0F 10 / 11` = SSE2 标量 double vs `A5` = 串操作）
+//
+// ★ 两者共用 Zydis 助记符 `movsd`，而 `F2` **不置** Zydis 的 REPNE 属性（实测 `rep=00`）
+//   ⇒ 只能在解码时按**操作数形态**分派（可见操作数里有 XMM ⇒ SSE；`A5` 的操作数是 esi/edi，没有 XMM）。
+// ★ 修好前这三条会**静默**按串操作执行（`[edi]` 被写、esi/edi 各 +4、xmm 一个都不动）⇒ 三条都红。
+//   除了 xmm 的期望值，每条都断言 `esi` / `edi` 未推进、`[edi]` 未被写 —— 那是"没走成串操作"的证据。
+// =====================================================================================
+
+// ★ `movsd xmm0, xmm1`（legacy reg-reg）：低 64 位搬运，高 64 位**保留**（SDM：DEST[127:64] Unmodified）。
+void setup_sse_movsd_reg_keep_high(Fixture& f) {
+    f.dataHex(kDataEa, "AAAAAAAA BBBBBBBB");  // 串操作若真跑了，会把它覆盖成 esi 那边的字节
+    f.cpu().esi() = kDataEa + 0x20u;
+    f.cpu().edi() = kDataEa;
+    sseXmmSet(f, 0, 0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u);
+    sseXmmSet(f, 1, 0x89ABCDEFu, 0x01234567u, 0x55555555u, 0x66666666u);  // 低 64 = 0x0123456789ABCDEF
+    f.codeHex(kCodeEa, "F2 0F 10 C1" "C3");  // movsd xmm0, xmm1
+}
+void verify_sse_movsd_reg_keep_high(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0x89ABCDEFu);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0x01234567u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0x33333333u);  // 高 64 位原样（不是"整份覆盖"）
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x44444444u);
+    LIFT_CHECK_EQ_U32(f.cpu().esi(), kDataEa + 0x20u);  // 没走成串操作 ⇒ esi/edi 不动
+    LIFT_CHECK_EQ_U32(f.cpu().edi(), kDataEa);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa, 0xAAAAAAAAu);  // [edi] 没被写
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x04u, 0xBBBBBBBBu);
+}
+
+// ★ `movsd xmm0, m64`（legacy）：低 64 位搬过来，**高 64 位清 0**（SDM：DEST[127:64] := 0）。
+void setup_sse_movsd_load_zero_high(Fixture& f) {
+    f.dataHex(kDataEa, "11223344 55667788");  // 低 64 = 0x8877665544332211
+    sseXmmSet(f, 0, 0xFFFFFFFFu, 0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu);
+    f.cpu().esi() = kDataEa + 0x20u;
+    f.cpu().edi() = kDataEa + 0x40u;
+    f.codeHex(kCodeEa, "F2 0F 10 05 00 00 48 00" "C3");  // movsd xmm0, [0x480000]
+}
+void verify_sse_movsd_load_zero_high(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0x44332211u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0x88776655u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0u);  // 高 64 位清 0 —— 不是"保留"
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0u);
+    LIFT_CHECK_EQ_U32(f.cpu().esi(), kDataEa + 0x20u);  // 串操作会把两者各 +4
+    LIFT_CHECK_EQ_U32(f.cpu().edi(), kDataEa + 0x40u);
+}
+
+// ★ `movsd m64, xmm0`：只写 **8 字节**（后 8 字节 / 前 8 字节一个都不许动）。
+void setup_sse_movsd_store_8bytes(Fixture& f) {
+    f.dataHex(kDataEa, "AAAAAAAA BBBBBBBB CCCCCCCC DDDDDDDD");
+    sseXmmSet(f, 0, 0x3FF00000u, 0x00000000u, 0x77777777u, 0x88888888u);  // 低 64 = 1.0（double）
+    // ★ esi/edi 指向**已提交**的地址：真走成串操作时它写进 [edi] 而不是撞未提交页 ——
+    //   "静默算错"要能被断言看见，不该变成一次访存 fault（那会掩盖断言）。
+    f.cpu().esi() = kDataEa + 0x20u;
+    f.cpu().edi() = kDataEa + 0x40u;
+    f.codeHex(kCodeEa, "F2 0F 11 05 04 00 48 00" "C3");  // movsd [0x480004], xmm0
+}
+void verify_sse_movsd_store_8bytes(Fixture& f) {
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x04u, 0x3FF00000u);  // 低 64 的前 4 字节
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x08u, 0x00000000u);  // 低 64 的后 4 字节
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x00u, 0xAAAAAAAAu);  // 前 8 字节没被写
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x0Cu, 0xDDDDDDDDu);  // 后 8 字节原样（⛔ 不是写 16 字节）
+    LIFT_CHECK_EQ_U32(f.cpu().esi(), kDataEa + 0x20u);          // 没走成串操作（否则各 +4）
+    LIFT_CHECK_EQ_U32(f.cpu().edi(), kDataEa + 0x40u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x40u, 0u);           // [edi] 没被写
 }
 
 // ★ `xorps` 是**整份 128 位按位**异或：高位也必须参与（不是只算低 32 位）。
@@ -2759,6 +2833,10 @@ const Case* conformanceCases(std::size_t* count) {
         {"sse-movss-load-zero-high", setup_sse_movss_load_zero_high, verify_sse_movss_load_zero_high},
         {"sse-movss-reg-keep-high", setup_sse_movss_reg_keep_high, verify_sse_movss_reg_keep_high},
         {"sse-movss-store-4bytes", setup_sse_movss_store_4bytes, verify_sse_movss_store_4bytes},
+        // ---- `movsd` 碰撞（`F2 0F 10 / 11` vs `A5`）：形态分派 + 三条 SDM 语义 ----
+        {"sse-movsd-reg-keep-high", setup_sse_movsd_reg_keep_high, verify_sse_movsd_reg_keep_high},
+        {"sse-movsd-load-zero-high", setup_sse_movsd_load_zero_high, verify_sse_movsd_load_zero_high},
+        {"sse-movsd-store-8bytes", setup_sse_movsd_store_8bytes, verify_sse_movsd_store_8bytes},
         {"sse-movdqa", setup_sse_movdqa, verify_sse_movdqa},
         {"sse-movdqu", setup_sse_movdqu, verify_sse_movdqu},
         {"sse-xorps", setup_sse_xorps, verify_sse_xorps},

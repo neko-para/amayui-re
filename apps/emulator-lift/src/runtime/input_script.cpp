@@ -388,6 +388,66 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
     return true;
 }
 
+bool InputScript::appendText(const std::string& text, const std::string& origin, std::string* err) {
+    // 报错前缀：`origin` 是"哪一份文本"，`: append:` 说明是追加而不是首次解析
+    //（`loadText` 的报错仍是 `origin:行: 原因`，两者一眼可分）。
+    const std::string where = origin.empty() ? std::string("append") : origin + ": append";
+    // ---- 前置 ①：现有动作全部已应用 ----
+    if (applied_ != actions_.size()) {
+        if (err) {
+            *err = where + ": 现有动作还没全部应用（applied=" + std::to_string(applied_) + "/" +
+                   std::to_string(actions_.size()) +
+                   "）—— 追加会让新动作排在未应用动作之间，应用顺序就不再等于文件顺序";
+        }
+        return false;
+    }
+    // ---- 前置 ②：没有未完成的抬起 ----
+    if (!releases_.empty()) {
+        if (err) {
+            *err = where + ": 还有 " + std::to_string(releases_.size()) +
+                   " 个未完成的抬起（等 guest 采样 / 等 hold 到期）—— 现在按下会被上一次的 up 立刻清掉";
+        }
+        return false;
+    }
+    // ---- 前置 ②'：脚本已经收口（quit）⇒ 追加的动作**永远不会被应用** ----
+    //   ⛔ 不静默接受：那会让调用方以为"动作排上了"，而 tick 里的 `if (quit_requested_) continue`
+    //   一条都不会执行。这是"吵赢静默"的同一口径（见 input_script.h 顶部）。
+    if (quit_requested_) {
+        if (err) *err = where + ": 脚本已经请求 quit（追加的动作不会被应用）";
+        return false;
+    }
+    // ---- 解析到临时脚本：复用 loadText 的全部语法与报错（⛔ 不复制一份解析器）----
+    InputScript tmp;
+    if (!tmp.loadText(text, origin, err)) return false;
+    // ---- 前置 ③：同单位单调（新动作的触发值不许早于现有最后一条同单位动作）----
+    std::uint64_t last_value[4] = {0, 0, 0, 0};
+    bool have_unit[4] = {false, false, false, false};
+    for (const Action& a : actions_) {
+        const int k = static_cast<int>(a.trigger.kind);
+        last_value[k] = a.trigger.value;  // 文件顺序 ⇒ 最后一条同单位的
+        have_unit[k] = true;
+    }
+    for (const Action& a : tmp.actions_) {
+        const int k = static_cast<int>(a.trigger.kind);
+        if (have_unit[k] && a.trigger.value < last_value[k]) {
+            if (err) {
+                *err = where + ": 触发值倒退（`" + a.text + "` 的 " + triggerUnitName(a.trigger.kind) + "=" +
+                       std::to_string(a.trigger.value) + " 早于现有最后一条同单位动作的 " +
+                       std::to_string(last_value[k]) + "）—— 倒序会让应用顺序与文件顺序不一致";
+            }
+            return false;
+        }
+    }
+    // ---- 追加（⛔ 不 clear：已应用的账、按下记录、抬起账全部保留）----
+    if (source_.empty()) source_ = origin;
+    for (const Action& a : tmp.actions_) actions_.push_back(a);
+    profile_actions_ += tmp.profile_actions_;
+    // 又有了活 ⇒ 收口那一遍（抬键 + 交还所有权 + 日志）要能再走一次。
+    finish_logged_ = false;
+    pending_dirty_ = true;  // 动作集变了 ⇒ 聚合缓存作废
+    return true;
+}
+
 bool InputScript::takeProfileBegin(std::string* label) {
     if (!profile_begin_pending_) return false;
     profile_begin_pending_ = false;

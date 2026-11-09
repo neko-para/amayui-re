@@ -2,8 +2,9 @@
 
 - id: REQ-01M6WSANRPND80XW52QY4Y5WA8
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6XVZE3AN0FKFZA52VV23WD9
+- verify: tools/test/lift-diff.test.mjs#diff-changed
 - tags: [emulator-lift tooling]
 
 ## 缺口

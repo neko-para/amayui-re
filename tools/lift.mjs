@@ -48,6 +48,7 @@ export const OPERATIONS = [
   { name: 'report', argv: ['--report'], mutates: false, summary: '覆盖报告：implemented / stub / bare / never-imported 四类计数 + 逐条清单；`--bench N` 顺带把 MIPS 写进报告（S8）' },
   { name: 'sync', argv: ['--sync'], mutates: true, summary: '把 C++ 注册表与 PE 导入表派生到 `overrides.json` + `register_import_gaps.cpp`（缺省 dry-run，`--write` 落盘）' },
   { name: 'corpus-report', argv: ['--corpus-report'], mutates: false, summary: '`.lst` 语料报告：指令行 / 助记符形态 / 段 / collapsed / x87·MMX·SSE 计数' },
+  { name: 'diff', argv: ['--diff'], mutates: false, summary: '两张 BMP 逐像素比对：max-diff / diff-pixels / diff-ratio / at=x,y；退出码 0=全在 tolerance 内 · 1=有像素超差 · 2=参数/读文件/格式错' },
 ];
 
 export const OVERRIDES_FILE = 'data/lift/overrides.json';
@@ -656,6 +657,193 @@ export function corpusReport({ lstPath = LST_FILE } = {}) {
 }
 
 // ---------------------------------------------------------------------------------------
+// diff：两张 BMP 的逐像素比对（REQ-01M6WSANRPND80XW52QY4Y5WA8）
+//
+// ★ 为什么自己写 BMP 解析：本仓不引图像库（`npm i` 一个解码器只为读 4×4 的帧不值得，
+//   而且它会把"写出侧是什么字节"变成第三方库的实现细节）。写出口径是
+//   `apps/emulator-lift/src/runtime/surface.cpp` 的 `dumpBmp`：BI_RGB · 24/32bpp ·
+//   行按 4 字节对齐 · 自底向上；读入必须能字节级吃回这份输出（并顺手支持自顶向下
+//   `biHeight < 0` 与 16bpp 565 —— 后者是 DDraw 的常见 present 格式）。
+// ★ 为什么逐通道取绝对值、不换算成感知差：要回答的是"两次运行从哪一帧开始不一样"，
+//   不是"人眼看不看得出来"。任何 gamma / 加权都会让判据依赖一个没人拍板的口径。
+// ---------------------------------------------------------------------------------------
+
+/** 命令行用法（错误信息与自描述共用一份，⛔ 不抄第二份） */
+export const DIFF_USAGE = 'node tools/lift.mjs diff <a.bmp> <b.bmp> [--tolerance <0..255>] [--json]';
+
+/**
+ * 解一份 BMP 成**自顶向下**的 RGB 平面（`rgb[(y*width+x)*3 + {0,1,2}]` = R/G/B）。
+ * ★ 只认 `BI_RGB`（`biCompression=0`）：调色板 / RLE / BI_BITFIELDS 都是另一套语义，
+ *   猜错时会静默换成"看起来像差异"的数字 ⇒ 明确拒绝（退出码 2），⛔ 不猜。
+ * ★ 32bpp 的 A 通道**不进比对**：`dumpBmp` 对 32bpp 固定写 0；若拿 A 参与比较，
+ *   同一张画面存成 24bpp（无 A）与 32bpp（A=0）会被判成"全帧差异"。
+ */
+export function decodeBmp(bytes) {
+  const bad = (why) => {
+    throw new Error(why);
+  };
+  if (bytes.length < 54) bad(`文件太短（${bytes.length} 字节，连 BITMAPFILEHEADER + BITMAPINFOHEADER 都不够）`);
+  if (bytes[0] !== 0x42 || bytes[1] !== 0x4d) bad('缺 "BM" 签名');
+  const u16 = (o) => bytes.readUInt16LE(o);
+  const u32 = (o) => bytes.readUInt32LE(o);
+  const i32 = (o) => bytes.readInt32LE(o);
+  const headerSize = u32(14);
+  if (headerSize < 40) bad(`不支持的 BMP 头（biSize=${headerSize}；只认 BITMAPINFOHEADER 及以后的 40+ 字节头）`);
+  const width = i32(18);
+  const rawHeight = i32(22);
+  const bpp = u16(28);
+  if (u16(26) !== 1) bad(`biPlanes=${u16(26)}（应为 1）`);
+  if (width <= 0) bad(`宽度非法：${width}`);
+  if (rawHeight === 0) bad('高度非法：0');
+  if (bpp !== 16 && bpp !== 24 && bpp !== 32) bad(`不支持的位深：${bpp}bpp（只认 16 / 24 / 32）`);
+  if (u32(30) !== 0) bad(`不支持的压缩方式：biCompression=${u32(30)}（只认 BI_RGB=0）`);
+
+  // `biHeight < 0` = 自顶向下（Windows 的合法变体；早期 BMP 约定不明确，这里的判据是符号）
+  const topDown = rawHeight < 0;
+  const height = Math.abs(rawHeight);
+  const bytesPerPixel = bpp / 8;
+  const stride = (width * bytesPerPixel + 3) & ~3; // 行按 4 字节对齐（dumpBmp 的 out_row 同式）
+  const offBits = u32(10);
+  if (offBits < 14 + headerSize) bad(`bfOffBits=${offBits} 落在头部里（应 ≥ ${14 + headerSize}）`);
+  if (offBits + stride * height > bytes.length) {
+    bad(`像素数据被截断（要 ${offBits + stride * height} 字节，文件只有 ${bytes.length}）`);
+  }
+
+  const rgb = new Uint8Array(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    // 归一成"y=0 是最上面一行"：自底向上时文件里的第一行是**最后**一行
+    const srcRow = topDown ? y : height - 1 - y;
+    const row = offBits + srcRow * stride;
+    for (let x = 0; x < width; x += 1) {
+      const p = row + x * bytesPerPixel;
+      const o = (y * width + x) * 3;
+      if (bpp === 16) {
+        // 565（与 dumpBmp 的写出换算同一条公式：乘 255 再整除 31/63；
+        // 换一条"四舍五入"的公式会让 16bpp 的 round-trip 假红）
+        const v = bytes.readUInt16LE(p);
+        rgb[o] = (((v >> 11) & 0x1f) * 255 / 31) | 0;
+        rgb[o + 1] = (((v >> 5) & 0x3f) * 255 / 63) | 0;
+        rgb[o + 2] = ((v & 0x1f) * 255 / 31) | 0;
+      } else {
+        // BMP 的像素顺序是 B,G,R(,A)，不是 RGB
+        rgb[o] = bytes[p + 2];
+        rgb[o + 1] = bytes[p + 1];
+        rgb[o + 2] = bytes[p];
+      }
+    }
+  }
+  return { width, height, rgb };
+}
+
+/**
+ * 纯比对（已解码的两帧）。
+ * ★ `diffPixels` 的判据是 **`单像素最大通道差 > tolerance`**（不是"有任何字节不同"）：
+ *   退出码就按它判；若把"差 1 但在 tolerance 内"也算进 diff-pixels，输出会自相矛盾
+ *   （"有差异却绿"）。`maxDiff` 仍然如实报告最大值，不受 tolerance 影响。
+ * ★ `at` = **第一个**超差像素（按行优先，y 自上而下），tolerance 内 ⇒ null。
+ */
+export function diffDecoded(a, b, tolerance = 0) {
+  if (a.width !== b.width || a.height !== b.height) {
+    return { sizeMismatch: true, aSize: `${a.width}×${a.height}`, bSize: `${b.width}×${b.height}` };
+  }
+  const total = a.width * a.height;
+  let maxDiff = 0;
+  let diffPixels = 0;
+  let at = null;
+  for (let i = 0; i < total; i += 1) {
+    const o = i * 3;
+    const dr = Math.abs(a.rgb[o] - b.rgb[o]);
+    const dg = Math.abs(a.rgb[o + 1] - b.rgb[o + 1]);
+    const db = Math.abs(a.rgb[o + 2] - b.rgb[o + 2]);
+    const d = Math.max(dr, dg, db); // 单像素 = 三通道里最大的那个（"最大单通道差"的定义）
+    if (d > maxDiff) maxDiff = d;
+    if (d > tolerance) {
+      diffPixels += 1;
+      if (at === null) at = { x: i % a.width, y: Math.floor(i / a.width) };
+    }
+  }
+  // 保留 4 位：比例进 JSON 是数字（尾随 0 会被 JSON 吃掉），人读行用 toFixed(4)
+  const diffRatio = Number((total ? diffPixels / total : 0).toFixed(4));
+  return { sizeMismatch: false, width: a.width, height: a.height, totalPixels: total, maxDiff, diffPixels, diffRatio, at };
+}
+
+/** 人读的一行（字段顺序固定：宽高 → 最大差 → 差异像素 → 比例 → 首个超差点 → 口径） */
+export function formatDiffLine(r) {
+  return (
+    `lift diff: ${r.width}×${r.height}  max-diff=${r.maxDiff}  diff-pixels=${r.diffPixels}  ` +
+    `diff-ratio=${r.diffRatio.toFixed(4)}  at=${r.at ? `${r.at.x},${r.at.y}` : '-'}  tolerance=${r.tolerance}`
+  );
+}
+
+/**
+ * `diff` 子命令的全部逻辑（**不打印**，返回 {code, result|error}，方便纯档测试直接断言出口码）。
+ * 退出码：0 = 所有像素差 ≤ tolerance；1 = 有像素超差；2 = 参数 / 读文件 / 格式错误。
+ * ★ 后两类**必须分开**：把"读不到"混成"有差异"会让 CI 把基础设施故障当成画面回归。
+ */
+export function bmpDiff(argv) {
+  const pos = [];
+  let tolerance = 0;
+  let json = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--json') {
+      json = true;
+    } else if (arg === '--tolerance' || arg.startsWith('--tolerance=')) {
+      const raw = arg === '--tolerance' ? argv[(i += 1)] : arg.slice('--tolerance='.length);
+      if (raw === undefined || !/^\d+$/.test(raw)) {
+        return { code: 2, error: `--tolerance 需要 0..255 的整数（收到 ${JSON.stringify(raw ?? '')}）` };
+      }
+      tolerance = Number(raw);
+      if (tolerance > 255) return { code: 2, error: `--tolerance 越界：${raw}（只认 0..255）` };
+    } else if (arg.startsWith('-')) {
+      return { code: 2, error: `未知参数：${arg}（用法：${DIFF_USAGE}）` };
+    } else {
+      pos.push(arg);
+    }
+  }
+  if (pos.length !== 2) {
+    return { code: 2, error: `要恰好两张 BMP（收到 ${pos.length} 个）—— 用法：${DIFF_USAGE}` };
+  }
+  const [aPath, bPath] = pos;
+  const decoded = [];
+  for (const p of [aPath, bPath]) {
+    // 用户给的路径按 **cwd** 解析（不是 REPO_ROOT）：相对路径就是"在当前目录跑"的直觉
+    const absPath = path.resolve(p);
+    let bytes;
+    try {
+      bytes = fs.readFileSync(absPath);
+    } catch (e) {
+      return { code: 2, error: `读不到 ${p}：${e.code === 'ENOENT' ? '文件不存在' : e.message}` };
+    }
+    try {
+      decoded.push(decodeBmp(bytes));
+    } catch (e) {
+      return { code: 2, error: `${p} 不是可读的 BMP：${e.message}` };
+    }
+  }
+  const [a, b] = decoded;
+  const d = diffDecoded(a, b, tolerance);
+  if (d.sizeMismatch) {
+    // ⛔ 不做缩放对齐：缩放会引入一个"怎么缩"的口径，而两张尺寸不同的帧本来就不是同一个观测
+    return { code: 2, error: `尺寸不同：${aPath} 是 ${d.aSize}，${bPath} 是 ${d.bSize} —— 不做缩放对齐` };
+  }
+  // 只把报告字段带出去（`sizeMismatch` 是内部判据，不进输出）
+  const result = {
+    a: aPath,
+    b: bPath,
+    width: d.width,
+    height: d.height,
+    totalPixels: d.totalPixels,
+    maxDiff: d.maxDiff,
+    diffPixels: d.diffPixels,
+    diffRatio: d.diffRatio,
+    at: d.at,
+    tolerance,
+  };
+  return { code: d.diffPixels === 0 ? 0 : 1, json, result };
+}
+
+// ---------------------------------------------------------------------------------------
 // check / report
 // ---------------------------------------------------------------------------------------
 export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } = {}) {
@@ -1010,13 +1198,15 @@ export function sync({ write = false, exePath = EXE_FILE } = {}) {
   return { gaps, entries };
 }
 
-const HELP = `tools/lift.mjs — emulator-lift 覆盖清单（describe / check / report / corpus-report / sync）
+const HELP = `tools/lift.mjs — emulator-lift 覆盖清单（describe / check / report / corpus-report / sync / diff）
 
   pnpm tools lift describe       字段 / 不变量 / 操作（schema 真源）
   pnpm tools lift check          全量校验（红 ⇒ 退出码 1）
   pnpm tools lift report         覆盖报告（实现 / stub / 裸缺口 / 从未被引用；--bench N 出 MIPS）
   pnpm tools lift corpus-report  .lst 语料报告
   pnpm tools lift sync [--write] 派生 overrides.json + register_import_gaps.cpp（缺省 dry-run）
+  pnpm tools lift diff <a.bmp> <b.bmp> [--tolerance N] [--json]
+                                 两张 BMP 逐像素比对（缺省 tolerance=0；0=全在容差内 / 1=有超差 / 2=参数或读文件错）
 `;
 
 export async function main(argv = process.argv.slice(2)) {
@@ -1082,6 +1272,17 @@ export async function main(argv = process.argv.slice(2)) {
     console.log('  top 15      :');
     for (const { mnemonic, count } of r.mnemonics.slice(0, 15)) console.log(`    ${mnemonic.padEnd(10)} ${count}`);
     return 0;
+  }
+  if (has('--diff') || argv[0] === 'diff') {
+    // 两种入口：`node tools/lift.mjs diff …`（人读用法）与派发器的 `--diff …`（`pnpm tools lift diff …`）
+    const rest = argv[0] === 'diff' ? argv.slice(1) : argv.filter((a) => a !== '--diff');
+    const r = bmpDiff(rest);
+    if (r.error) {
+      process.stderr.write(`lift diff: ${r.error}\n`);
+      return 2;
+    }
+    process.stdout.write(r.json ? `${JSON.stringify(r.result, null, 2)}\n` : `${formatDiffLine(r.result)}\n`);
+    return r.code;
   }
   if (has('--sync')) {
     sync({ write: has('--write') });

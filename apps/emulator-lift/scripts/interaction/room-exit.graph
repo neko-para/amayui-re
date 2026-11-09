@@ -1,0 +1,31 @@
+# 出 Eushully-chan Room：TITLE → EU-ROOM → TITLE（进、出各一次）
+#
+# 真源：`docs/03-emulator/interaction-model.md`；跑法同 `room-enter.graph`。
+# ★ 终态判据 = 回到进入前那一屏（`screen hash` 与 `room-enter.graph` 的 title 节点同一个值）。
+# ★ 房间节点用 `screen rect … avg` + `click center`：**不写坐标**，点的是识别到的框中心
+#   （真源 §1：`screen rect` 命中时产出框，`click center` 唯一的坐标来源就是它）。
+entry title
+
+node title
+  when screen hash 0x94CB492BF7F1AEEB
+  action click 944 562
+  next room
+  timeout 180000
+  expect screen changed
+
+node room
+  when screen rect 1200 665 80 45 avg 0xB6957E
+  # ⚠ 房间里的「戻る」按钮在**注入点击**下没有反应（hover 有高亮、点 CG 鑑賞 有效、点它无变化；
+  #   右键 / Enter 也无变化）—— 已登记缺陷。ESC（VK=0x1B）走的是**同一条退出路径**，实测有效。
+  #   等那条缺陷收口后把这一行换回 `click center`（那时它还会顺带证明"框中心"能用）。
+  #   action click center
+  action key 0x1B
+  next back
+  timeout 180000
+  expect screen changed
+
+node back
+  when screen hash 0x94CB492BF7F1AEEB
+  action quit
+  next
+  timeout 180000

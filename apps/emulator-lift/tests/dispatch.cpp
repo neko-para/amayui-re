@@ -1,10 +1,12 @@
 // emulator-lift · 派发 / 块缓存（pure：自造机器码字节）
 //
-// ★ 它盯的是四件事：
+// ★ 它盯的是五件事：
 //   ① 块缓存真的**缓存**（同一块第二次不重新解码）；
 //   ② `jcc / call / ret` 只改 eip 并回 dispatcher（块的边界正确，循环能跑回来）；
 //   ③ 没实现的指令**响亮失败**（返回 Unimplemented，而不是静默 no-op）；
-//   ④ SMC（guest 写已解码的代码页）**只丢 guest 指令块**，⛔ 不连带丢掉 `installShim` 的 shim 块。
+//   ④ SMC（guest 写已解码的代码页）**只丢 guest 指令块**，⛔ 不连带丢掉 `installShim` 的 shim 块；
+//   ⑤ **SSE 对齐违例必须响亮失败**（`movaps` / `movdqa` 的 m128 未 16 字节对齐 ⇒ Unimplemented，
+//      一条都不执行、目标一个字节都不写 —— ⛔ 不许静默按 movups / movdqu 处理）。
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -292,6 +294,61 @@ int main() {
             // 幂等：同一条 shim 再装一次 ⇒ 同一个块，⛔ 不新建、不改 id
             LIFT_CHECK(m.cache().installShim(def->stub_ea, def->id) == installed);
         }
+    }
+
+    // ⑪ 未对齐 `movaps xmm0, m128` ⇒ **响亮失败**（SDM：对齐违例 #GP；本仓没有 guest 异常投递，
+    //   所以落在 `unimplemented()`）。修掉守卫（`sseRequireAligned` 恒 true）时这条会红：
+    //   它会静默按 movups 搬 —— 把"程序有 bug"变成静默的数据搬运。
+    {
+        g_current_case = "unaligned-movaps-is-loud";
+        lift::Machine m;
+        // 0F 28 /r = movaps xmm0, m128；绝对地址 0x480003 **不是** 16 的倍数。
+        const std::vector<std::uint8_t> code = {0x0F, 0x28, 0x05, 0x03, 0x00, 0x48, 0x00,  // movaps xmm0,[0x480003]
+                                                0xC3};                                      // ret
+        LIFT_CHECK(boot(m, code));
+        std::string err;
+        // ★ 源区域**先提交**（16 字节可辨认的字节）：守卫若被改成恒 true，这条会"静默搬成功"然后
+        //   死在断言上（reason/insns/eip/xmm），而不是死在一次访存 fault 上 —— 那才看得清红的原因。
+        const std::vector<std::uint8_t> pattern(16, 0x5A);
+        LIFT_CHECK(m.placeData(0x00480003u, pattern.data(), pattern.size(), &err));
+        m.cpu().xmm[0][0] = 0x11111111u;
+        m.cpu().xmm[0][1] = 0x22222222u;
+        m.cpu().xmm[0][2] = 0x33333333u;
+        m.cpu().xmm[0][3] = 0x44444444u;
+        const lift::RunResult r = run(m);
+        LIFT_CHECK(r.reason == lift::StopReason::Unimplemented);
+        LIFT_CHECK_EQ_I64(r.insns, 0);  // 一条都没执行（⛔ 不是"先搬了再报错"）
+        LIFT_CHECK_EQ_U32(m.cpu().eip, 0x00401000u);
+        LIFT_CHECK_EQ_U32(m.cpu().xmm[0][0], 0x11111111u);  // 目标 xmm 四个 lane 全未动
+        LIFT_CHECK_EQ_U32(m.cpu().xmm[0][1], 0x22222222u);
+        LIFT_CHECK_EQ_U32(m.cpu().xmm[0][2], 0x33333333u);
+        LIFT_CHECK_EQ_U32(m.cpu().xmm[0][3], 0x44444444u);
+    }
+
+    // ⑫ 未对齐 `movdqa m128, xmm0`（**store** 路径）⇒ 同样响亮失败，且目标 16 字节**一个都没写**。
+    //   store 与 load 是两条独立路径（各查一次 `sseRequireAligned`）⇒ 只测 load 会漏掉一条。
+    {
+        g_current_case = "unaligned-movdqa-store-is-loud";
+        lift::Machine m;
+        // 66 0F 7F /r = movdqa m128, xmm0；目标 0x480003 未对齐。
+        const std::vector<std::uint8_t> code = {0x66, 0x0F, 0x7F, 0x05, 0x03, 0x00, 0x48, 0x00,  // movdqa [0x480003],xmm0
+                                                0xC3};                                            // ret
+        LIFT_CHECK(boot(m, code));
+        std::string err;
+        const std::vector<std::uint8_t> pattern(16, 0xCC);  // 目标区域先铺可辨认的字节
+        LIFT_CHECK(m.placeData(0x00480003u, pattern.data(), pattern.size(), &err));
+        m.cpu().xmm[0][0] = 0x11111111u;
+        m.cpu().xmm[0][1] = 0x22222222u;
+        m.cpu().xmm[0][2] = 0x33333333u;
+        m.cpu().xmm[0][3] = 0x44444444u;
+        const lift::RunResult r = run(m);
+        LIFT_CHECK(r.reason == lift::StopReason::Unimplemented);
+        LIFT_CHECK_EQ_I64(r.insns, 0);
+        LIFT_CHECK_EQ_U32(m.cpu().eip, 0x00401000u);
+        for (std::uint32_t i = 0; i < 16; ++i) {
+            LIFT_CHECK_EQ_U32(m.mem().rd8(0x00480003u + i), 0xCCu);  // 目标 16 字节逐字节未写
+        }
+        LIFT_CHECK_EQ_U32(m.cpu().xmm[0][0], 0x11111111u);  // 源也没被动（本来就不该写源）
     }
 
     return finish("dispatch");

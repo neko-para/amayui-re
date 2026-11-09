@@ -48,12 +48,19 @@ const SKIP_DIRS = new Set([
   '.npm-cache',
   'dist',
   'tmp',
-  'out',
   '.cache',
   '.vscode',
   // 第三方依赖树（vcpkg submodule）：里面的 JSON 不属于本仓自有结构化数据。
   'vcpkg',
 ]);
+
+/**
+ * 派生构建目录的判据：`out` / `out-<x>` / `out_<x>`。
+ * ★ 判据写成**前缀**而不是字面量 `out`：`apps/emulator-lift/.gitignore` 忽略的是 `out-*`，
+ *   多开一条构建线（如 `out-debt`）时，字面量会把里面 `vcpkg_installed` 下的 vcpkg JSON
+ *   当成"本仓自有结构化数据"而红 —— 那和这条守卫要守的东西无关（实测：加一个 out-debt 就 20 条红）。
+ */
+const isDerivedBuildDir = (name) => name === 'out' || name.startsWith('out-') || name.startsWith('out_');
 
 /** 说明书必须覆盖的三件事（正是"只讲查询不讲编辑"的反面）；最后一项是"指向脚本自描述" */
 const REQUIRED = ['## 怎么查', '## 怎么改', 'describe'];
@@ -61,7 +68,7 @@ const REQUIRED = ['## 怎么查', '## 怎么改', 'describe'];
 function walkJson(dir, out = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     if (e.isDirectory()) {
-      if (SKIP_DIRS.has(e.name)) continue;
+      if (SKIP_DIRS.has(e.name) || isDerivedBuildDir(e.name)) continue;
       walkJson(path.join(dir, e.name), out);
     } else if (e.isFile() && e.name.endsWith('.json')) {
       out.push(path.join(dir, e.name));

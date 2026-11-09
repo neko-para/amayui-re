@@ -2,8 +2,9 @@
 
 - id: REQ-01M6WSAGESXYYZ6QR919J2NFWC
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6XVZE3AN0FKFZA52VV23WD9
+- done_reason: 条目本来就在仓里（tools/mutate-check.mjs 的 ctest:input-injection：GetAsyncKeyState 恒返回 0 ⇒ input-injection 红），本轮把它跑绿了：node tools/mutate-check.mjs --match input-injection ⇒ 守卫红了（CTest 退出码 8），还原逐字回写。判据（buildDir=apps/emulator-lift/out、ctest 名与 add_test 逐字一致、还原全文比对）都已满足；本条只欠一次实跑。
 - tags: [emulator-lift mutation guard]
 
 ## 缺口

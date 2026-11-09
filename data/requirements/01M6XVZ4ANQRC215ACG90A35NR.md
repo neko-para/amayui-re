@@ -37,3 +37,26 @@
 ## 与 A 为什么分开
 
 B 的证据链**全部在 guest 内存与 VM 循环**里 ⇒ 纯 CTest 可钉；A 的消费者必须**真安装 + 真画面**。放进同一张单，B 就会因为"要跑游戏"而永远没有绿灯判据。
+
+## 探测补记（2026-11-09：仓内哪些锚在、哪一段真的缺）
+
+判据不变，但下面这份"证据分布"要先看，免得照着上面那张表直接开工：
+
+| 要的东西 | 仓内状态 |
+|---|---|
+| 当前帧号 `cur` 的偏移（`Engine+0x5D880`） | ✅ 在仓：`repo:packages/age-format/src/engine/layout.mts`（`FRAME_ENGINE_SCALARS.cur`） |
+| 帧记录基址 `0x5D894` / 步长 `0x78` / 40 槽 | ✅ 在仓：同文件 `FRAME_LAYOUT` |
+| 身份格 = 记录 `+0x3c`（旧记法 `+0x50` = `0x5D8D0`） | ✅ 在仓：`layout.mts` 的 `frameArg` + `repo:data/ledger/observation/2026-10.jsonl` 的观察行 |
+| 身份 = "统一文件 id"（高 8 位区号 / 低 24 位下标） | ✅ 在仓：`repo:data/spec/chapters/60-ops-input.md` 与 `60-ops-frame.md` |
+| **`cur` / `frame[cur]` 所在的基址对象** | ⚠ 只在本单上面那张表里（"VM 循环头 / `Engine` 基址"）⇒ **`.tmp/anchor-design.md` 已丢失且不入库**；要重新取证 |
+| **id→名字表基址**（`read32(索引+0x414) + 80×id`） | ⚠ 同上，只有公式没有基址 |
+| **VM 循环头的 EA** | ⛔ 仓内零处（`rg` 无命中） |
+
+⇒ 能立刻做的：**边沿检测 / 名字降级 / 超时响亮失败**这三件纯 CTest 可钉的（判据见上，语料不需要）。
+做不了的：把 `when script <名字>` 接到**真画面** —— 缺的是"基址对象"与"循环头 EA"两次取证，不是实现。
+
+★ 顺带一条可用推断（**未核**，别当事实）：`layout.mts` 记的帧区之后那个成员 `0x5EB54`，与 `--skip-logo`
+用的 `T_Command + 0x5EB5C` 只差 8 字节且同属一个对象 ⇒ `T_Command` 很可能就是 `layout.mts` 里的那个 `Engine` 基址。
+若成立，`cur` = `mem.rd32(base+0x5D880)`、身份 = `mem.rd32(base+0x5D894 + 0x78*cur + 0x3c)`，`base = mem.rd32(0x55E1BC)`。
+核它的判据：LOGO 帧的身份应等于 `0x5262`（`data/ledger/observation/2026-10.jsonl` 里那条 SYS4INI 观察），
+或 `cur ∈ [0,39]` 且记录 `+0x00` 指向已提交内存。
