@@ -1105,6 +1105,101 @@ int caseGpuDepthSegments() {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------------------
+// --gpu：**纹理宽度**不是 256 字节整数倍时的上传行距（真后端像素 oracle）
+// ---------------------------------------------------------------------------------------
+// ★ 判据会红的情形（实测过一次）：上传的 staging 行距按 256 对齐（`(w*4+255)&~255`），而
+//   SDL_GPU / Metal 实际按**目标区域的宽度**算源行距 ⇒ 每行错开 (对齐后 − w*4) 字节，
+//   整张纹理被削成横条（1120x672 的角色层就是这样，房间/OPTION 看上去像"背景撕裂"）。
+//   ★ 1280 / 1664 / 2048 宽的纹理 `w*4` 恰好是 256 的倍数 ⇒ 这个坑对它们**不可见**；
+//   ★ 纹理**必须带逐像素图案**：纯色纹理即使被削也看不出来（旧用例 `subrect-upload` 的盲点）。
+int caseGpuUnalignedRowPitch() {
+    lift_test::g_current_case = "gpu-batch/unaligned-row-pitch";
+    Fixture f;
+    LIFT_CHECK(f.boot(true));
+    const std::uint32_t d3d = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d, 0u);
+    if (d3d == 0) return 0;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d, 64, 64, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return 0;
+
+    if (!SDL_Init(SDL_INIT_VIDEO)) LIFT_SKIP("SDL_Init(VIDEO) 失败");
+    std::string err;
+    std::unique_ptr<lift::GpuRaster> gpu = lift::createSdlGpuRaster(&err);
+    if (gpu == nullptr) {
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        LIFT_SKIP(err.c_str());
+    }
+    lift::GuestSurface* back_surface = f.m.surfaces().find(dev.info.arena);
+    LIFT_CHECK(back_surface != nullptr);
+    if (back_surface == nullptr) return 0;
+    std::uint8_t* back = f.m.surfaces().pixels(*back_surface);
+    const lift::SurfaceFormat fmt = back_surface->format;
+    const std::uint32_t pitch = back_surface->pitch;
+    LIFT_CHECK(gpu->rasterPrepare(fmt, 64, 64, &err, back));
+    LIFT_CHECK(gpu->rasterSyncFromGuest(back, pitch, 64, 64, &err));
+
+    // 40x20 ⇒ 40*4 = 160 字节/行（**不是** 256 的倍数）
+    constexpr int kTw = 40;
+    constexpr int kTh = 20;
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(f.createTexture(dev.object, kTw, kTh, lift::d3d9::kFmtX8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return 0;
+    {
+        lift::d3d9::TextureInfo ti;
+        std::string why;
+        LIFT_CHECK(lift::d3d9::textureInfo(f.m.cpu(), tex, &ti, &why));
+        lift::GuestSurface* tgs = f.m.surfaces().find(ti.arena);
+        LIFT_CHECK(tgs != nullptr);
+        if (tgs == nullptr) return 0;
+        std::uint8_t* px = f.m.surfaces().pixels(*tgs);
+        for (int yy = 0; yy < kTh; ++yy) {
+            for (int xx = 0; xx < kTw; ++xx) {
+                std::uint8_t* p = px + static_cast<std::size_t>(yy) * tgs->pitch +
+                                  static_cast<std::size_t>(xx) * 4u;
+                p[0] = static_cast<std::uint8_t>(0x10 + xx * 5);                 // B
+                p[1] = static_cast<std::uint8_t>(0x20 + yy * 7);                 // G
+                p[2] = static_cast<std::uint8_t>(0x30 + (xx + yy) * 3);          // R
+                p[3] = 0;
+            }
+        }
+    }
+    lift::GpuRasterTexture view;
+    LIFT_CHECK(f.textureView(tex, &view));
+    // 1:1 画到左上角（uv 0..1 ⇒ 目标像素 == 纹理像素；顶点色白 ⇒ MODULATE 不改变它）
+    queueTextured(*gpu, view, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, static_cast<float>(kTw),
+                  static_cast<float>(kTh), &err);
+    LIFT_CHECK(gpu->rasterSyncToGuest(back, pitch, 64, 64, &err));
+
+    int mismatches = 0;
+    for (int yy = 0; yy < kTh; ++yy) {
+        for (int xx = 0; xx < kTw; ++xx) {
+            const std::uint32_t got = f.pixelAt(xx, yy) & 0x00FFFFFFu;
+            const std::uint32_t want =
+                ((static_cast<std::uint32_t>(0x30 + (xx + yy) * 3) & 0xFFu) << 16) |
+                ((static_cast<std::uint32_t>(0x20 + yy * 7) & 0xFFu) << 8) |
+                (static_cast<std::uint32_t>(0x10 + xx * 5) & 0xFFu);
+            if (got != want) {
+                if (mismatches == 0) {
+                    std::fprintf(stderr, "[unaligned-row-pitch] 第一处不同 (%d,%d)：got=0x%06X want=0x%06X\n", xx, yy,
+                                 got, want);
+                }
+                ++mismatches;
+            }
+        }
+    }
+    LIFT_CHECK_EQ_I64(mismatches, 0);
+    LIFT_CHECK_EQ_U32(f.pixelAt(kTw + 2, 2) & 0x00FFFFFFu, 0u);  // 纹理**外**没被写
+
+    gpu.reset();
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    LIFT_CHECK_EQ_U32(SDL_WasInit(SDL_INIT_VIDEO), 0u);
+    std::printf("gpu-batch-unaligned-row-pitch: 40x20 纹理逐像素一致（%d 处不同）\n", mismatches);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const bool gpu = argc > 1 && std::string(argv[1]) == "--gpu";
     if (gpu) {
@@ -1115,6 +1210,8 @@ int main(int argc, char** argv) {
         rc = caseGpuSubRectUpload();
         if (rc != 0) return rc;
         rc = caseGpuDepthSegments();
+        if (rc != 0) return rc;
+        rc = caseGpuUnalignedRowPitch();
         if (rc != 0) return rc;
         return lift_test::finish("gpu-batch-barrier");
     }

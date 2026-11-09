@@ -631,8 +631,9 @@ public:
                     SDL_GPUTextureTransferInfo src{};
                     src.transfer_buffer = tex_tb;
                     src.offset = u.transfer_offset;
-                    src.pixels_per_row = static_cast<Uint32>(u.row_pitch / 4u);
-                    src.rows_per_layer = static_cast<Uint32>(u.rect.h);
+                    // 0 = 由 SDL 按 dst 区域的 w/h 推"紧密排列"（见上面 ⑥ 的注释）。
+                    src.pixels_per_row = 0;
+                    src.rows_per_layer = 0;
                     SDL_GPUTextureRegion dst{};
                     dst.texture = u.texture;
                     dst.x = static_cast<Uint32>(u.rect.x);
@@ -1365,8 +1366,17 @@ private:
             segments_.push_back(Segment{queue_.size(), {}});
             ++g_stats.cuts;
         }
-        // ⑥ staging：**只拷脏区**（行按 256 字节对齐；无 alpha 的 X8 格式把 A 填 255）。
-        const std::uint32_t row_pitch = (static_cast<std::uint32_t>(dirty.rect.w) * 4u + 255u) & ~255u;
+        // ⑥ staging：**只拷脏区**，行**紧密排列**（pitch = w*4）。
+        //   ⛔ 不要自己按 256 对齐：SDL 的 **Metal** 后端在 `METAL_UploadToTexture` 里**根本不读**
+        //   `source->pixels_per_row` —— 它用 `BytesPerRow(destination->w, …)`（目标区域宽度）当行距
+        //   （`src/gpu/metal/SDL_gpu_metal.m` @ release-3.4.18；同一个文件的 Download 路径**是**读的）。
+        //   ⇒ staging 行距一旦比 w*4 宽，每行就错开 (行距 − w*4) 字节，整张纹理被削成横条
+        //   （1280/1664/2048 宽的纹理 w*4 恰好 256 对齐 ⇒ 看不出来；1120x672 就必现）。
+        //   ✅ **D3D12 反过来是读的**（`D3D12_UploadToTexture` 用 `pixels_per_row` 算 rowPitch，
+        //   不对齐时它自己临时拷贝一份 256 对齐的）⇒ 这个坑只在 Metal 上炸。
+        //   ⇒ 统一发**紧密**布局：Metal 正确、D3D12 走它自己的 temp-copy 路径（正确，代价是那次拷贝）。
+        //   翻回去的判据：SDL 修好 `METAL_UploadToTexture` 之后才允许再依赖"有富余的行距"。
+        const std::uint32_t row_pitch = static_cast<std::uint32_t>(dirty.rect.w) * 4u;
         const std::size_t stage_size = static_cast<std::size_t>(row_pitch) * static_cast<std::size_t>(dirty.rect.h);
         std::uint8_t* stage = nullptr;
         if (!reserveStaging(stage_size, &stage, err)) return false;

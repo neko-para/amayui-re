@@ -134,3 +134,37 @@
 - **读数（2026-11-09，同机）**：三次独立运行（纯 click / move 后 click / `mouse_down` 4 s 后 `mouse_up`），房间帧 hash 稳定在 `0xF13F23F24EEEE636`（hover 态）不变。
 - **代表守卫**：暂无（`room-exit.graph` 若把这行换回 `click center`，会以 `expect_change` **响亮失败** —— 那就是它的判据形状）。
 - **复现**：`apps/emulator-lift/scripts/interaction/room-exit.graph` 的 `room` 节点把 `action key 0x1B` 换回 `action click center`。
+
+### BUG-17 · 纹理上传的行距按 256 对齐、SDL/Metal 按目标宽度算源行距 ⇒ 整张纹理被削成横条（**已修**）
+- **现象**：`--raster gpu --raster-sprites 1`（本次改动前的缺省）进 **OPTION** 或 **EU-ROOM** 后，整块大背景（房间的糕点店照片、OPTION 列表文字）呈**横向条带 / 撕裂**；同一帧里的小 UI 面板（按钮框、图标）正常。同一帧把 sprite 交给 CPU（`--raster-sprites 0`）画面**完全正确**。
+- **不是哪次提交引入的（已用重建证伪）**：在 `2bd8eaf`（`5e4fca3` / `8141659` 之前）重建后跑同一路径，得到**逐字节相同**的撕裂帧（sha256 `d0e0af01…`）。⇒ 这是 `--raster gpu` 的**既有**缺陷，与那两次提交无关。
+- **已排除（每条都实测）**：
+  - **不是 CPU/GPU 光栅不等价**：`LIFT_GPU_VERIFY=1` 的逐批 CPU 参考 vs GPU 读回对照，42 批**全部 `diff_pixels=0`**。
+  - **不是这几张纹理的上传错**：把 1280x720 / 1664x1536 / 1280x1664 / 2048x2048 的 GPU 纹理**从 GPU 读回成 BMP**，与 guest 源像素**逐字节相同**（sha256 相同）。⚠ 这四张的 `w*4` **恰好都是 256 的倍数** ⇒ 它们本来就走不出下面那个行距 bug（真正的坏样本是 1120x672，读回时才发现被削成横条）。
+  - **不是脏区 / 版本缓存**：强制整幅重传（`content_change_known=false`、`generation=0`）结果不变。
+  - **不是合批 / 屏障**：每条 sprite 后立即 flush 结果不变；每帧先 flush + 读回再从 guest 上传结果也不变。
+  - **不是混合开关**：把 sprite 的 `blend` 关掉后 sprite 变成不透明黑块（说明 blend 生效、语义正常）。
+  - **不是几何 / UV**：日志里 sprite 的 quad、uv、纹理尺寸、serial/version **全部正确**（全屏 quad + uv 0..1）。
+- **读数（2026-11-09，macOS arm64 / RelWithDebInfo，真安装，headless 也复现）**：`--raster-sprites 1` ⇒ 房间帧 sha256 `d0e0af01…`（撕裂）；`--raster-sprites 0` ⇒ `708c1ccc…`（与 CPU 光栅帧一致）。撕裂帧在 `--present window` 与 `--present headless` 下相同 ⇒ 与呈现路径无关。
+- **处置**：缺省改成 `--raster-sprites 0`（取**正确**的那一侧，`src/main.cpp` 的 `raster_sprites`）；`--raster-sprites 1` 保留给复现 / A-B。**翻回缺省 1 的判据** = 上面"已排除"里剩下的那一处定位到并修好后，`room-enter` 的 `--raster-sprites 1` 帧 sha256 等于 `--raster-sprites 0` 帧。
+- **代表守卫**：无（要真安装 + GPU；`gpu-batch-*` 的 CTest 只测后端，不覆盖 D3DXSprite 的合成路径）。
+- **复现**：`--raster gpu --raster-sprites 1 --interaction-graph apps/emulator-lift/scripts/interaction/room-enter.graph --dump-frame x.bmp`（headless 即可）。
+
+**根因（2026-11-09 定位并修好）**：`src/runtime/d3d9_gpu.cpp` 的纹理上传把 staging 行距按 256 字节对齐
+（`row_pitch = (rect.w*4 + 255) & ~255`），并把 `pixels_per_row = row_pitch/4` 交给 SDL_GPU —— 而 Metal 后端
+**按目标区域的宽度**算源行距（实测 `pixels_per_row` 的"有富余行距"不生效）⇒ 每行错开
+`(对齐后 − w*4)` 字节，整张纹理被斜切成横条。
+**为什么只有 macOS 炸**：SDL 3.4.18 的 **Metal** 后端 `METAL_UploadToTexture` **不读** `source->pixels_per_row`，
+它用 `BytesPerRow(destination->w)`（目标区域宽度）当行距（`src/gpu/metal/SDL_gpu_metal.m`；
+同一个文件的 `METAL_DownloadFromTexture` **是**读的）；而 **D3D12** 的 `D3D12_UploadToTexture`
+**读** `pixels_per_row` 并在不对齐时自己临时拷贝对齐（`src/gpu/d3d12/SDL_gpu_d3d12.c`）
+⇒ **Windows 一直是正确的**，这条只在 Metal 上炸。
+
+**这条只在 `w*4` 不是 256 的倍数时可见**：1280 / 1664 / 2048 宽的纹理恰好对齐（所以"背景"纹理是干净的、
+我们几次读回都验不出问题）；**1120x672 的角色层**（EU-ROOM 立绘）与 800x600 / 350x35 才必现 ——
+它被画在背景之上，看上去就像"背景撕裂"。
+**修法**：staging 改成**紧密排列**（`row_pitch = rect.w*4`）且 `pixels_per_row = rows_per_layer = 0`
+（让 SDL 自己按 dst 区域推；SDK 文档明确：行距不对齐由 SDL 临时拷贝对齐，见 `SDL_gpu.h` 的 WARNING）。
+**守卫**：`apps/emulator-lift/tests/gpu_batch.cpp#gpu-batch/unaligned-row-pitch`（40x20 纹理 + 逐像素图案 +
+1:1 采样 ⇒ 目标像素必须逐字节等于纹理）。实测：**修前 800 个像素里 760 个不同**，修后 0 个。
+★ 旧的 `subrect-upload` 用例看不到这件事，因为它用的是**纯色**纹理（削了也看不出来）——新用例特意用图案。
