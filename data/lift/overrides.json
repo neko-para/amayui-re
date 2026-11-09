@@ -540,41 +540,6 @@
       "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 音频 no-op：mixerSetControlDetails 接受音量 / 控制设置但不作用于宿主"
-    },
-    {
-      "target": "winmm!mmioAscend",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
-      "boundary": "import",
-      "reason": "SCOPE §1 音频 no-op：mmioAscend 返回成功"
-    },
-    {
-      "target": "winmm!mmioClose",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
-      "boundary": "import",
-      "reason": "SCOPE §1 音频 no-op：mmioClose 返回成功"
-    },
-    {
-      "target": "winmm!mmioDescend",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
-      "boundary": "import",
-      "reason": "SCOPE §1 音频 no-op：mmioDescend 返回成功（空流没有 chunk）"
-    },
-    {
-      "target": "winmm!mmioOpenA",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
-      "boundary": "import",
-      "reason": "SCOPE §1 音频 no-op：mmioOpenA 返回非空假 HMMIO（空流）"
-    },
-    {
-      "target": "winmm!mmioRead",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
-      "boundary": "import",
-      "reason": "SCOPE §1 音频 no-op：mmioRead 返回 0 字节（空流）"
     }
   ]
 }

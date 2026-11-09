@@ -287,16 +287,14 @@ void registerWinmmAudioShims(ShimRegistry& s) {
               "SCOPE §1 音频 no-op：mixerClose 返回成功");
     s.addStub("winmm", "mixerSetControlDetails", Conv::Stdcall, 3, &shimMixerSetControlDetails,
               "SCOPE §1 音频 no-op：mixerSetControlDetails 接受音量 / 控制设置但不作用于宿主");
-    s.addStub("winmm", "mmioOpenA", Conv::Stdcall, 3, &shimMmioOpenA,
-              "SCOPE §1 音频 no-op：mmioOpenA 返回非空假 HMMIO（空流）");
-    s.addStub("winmm", "mmioRead", Conv::Stdcall, 3, &shimMmioRead,
-              "SCOPE §1 音频 no-op：mmioRead 返回 0 字节（空流）");
-    s.addStub("winmm", "mmioClose", Conv::Stdcall, 2, &shimMmioClose,
-              "SCOPE §1 音频 no-op：mmioClose 返回成功");
-    s.addStub("winmm", "mmioAscend", Conv::Stdcall, 3, &shimMmioAscend,
-              "SCOPE §1 音频 no-op：mmioAscend 返回成功");
-    s.addStub("winmm", "mmioDescend", Conv::Stdcall, 4, &shimMmioDescend,
-              "SCOPE §1 音频 no-op：mmioDescend 返回成功（空流没有 chunk）");
+    // ★ 这一组是**真实现**（沿 guest 文件句柄读 RIFF，见上面 mmio 段的注释）⇒ 用 `add` 而不是
+    //   `addStub`。⛔ 别因为"SCOPE 里写的是 no-op"就把它登记成 stub：登记是"我们现在是什么"的
+    //   声明，理由里写"空流"会让人（和 `pnpm tools lift report`）以为 WAV 头解析还没做。
+    s.add("winmm", "mmioOpenA", Conv::Stdcall, 3, &shimMmioOpenA);
+    s.add("winmm", "mmioRead", Conv::Stdcall, 3, &shimMmioRead);
+    s.add("winmm", "mmioClose", Conv::Stdcall, 2, &shimMmioClose);
+    s.add("winmm", "mmioAscend", Conv::Stdcall, 3, &shimMmioAscend);
+    s.add("winmm", "mmioDescend", Conv::Stdcall, 4, &shimMmioDescend);
 }
 
 }  // namespace lift

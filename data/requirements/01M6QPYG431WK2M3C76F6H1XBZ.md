@@ -2,11 +2,12 @@
 
 - id: REQ-01M6QPYG431WK2M3C76F6H1XBZ
 - type: bug
-- status: doing
+- status: done
 - parent: REQ-01M6K84KHPA1XF3B1HSHXME6W0
 - verify: apps/emulator-lift/tests/quartz_video.cpp#quartz-video
 - repro: apps/emulator-lift/tests/quartz_video.cpp#quartz-cocreate-filtergraph
 - severity: S1
+- done_reason: 形状层已落地并挂在 quartz-video（134 checks / 0）：CLSID_FilterGraph / FilterGraphNoThread / AMultiMediaStream 返回 guest 可见对象，Run/Stop/GetState/WaitForCompletion(EC_COMPLETE) 真实现，未知 CLSID ⇒ CLASS_E_CLASSNOTAVAILABLE、未知 IID ⇒ E_NOINTERFACE（不冒充支持）；其余站点（Live2D/GIT/MemoryAllocator）走真实「类未注册」失败。★ 此后更进一步：影片不再只是形状层 —— 真 DirectShow 服务端已实现（repo:apps/emulator-lift/docs/movie-dshow-protocol.md：图管理器 + 宿主解码 filter 把帧送进引擎自己的 CMovieTextureRenderer），2026-11-09 在本机真安装上跑到 LOGO 影片自然结束：stop=stop-after-movie、[dshow] 首帧已送渲染器、tex movie #1..#120 的 hash 逐段变化（nonzero 0→1366→4328→14400）、called-unimplemented 0、exit 0。唯一边界：Windows 实机复测仍只有用户能做（本机 macOS 不能替），以及 IAMMultiMediaStream 的 DDraw 媒体流接口按原判据不伪造（让 Movie::Init 走失败分支）。
 
 ## 复现
 

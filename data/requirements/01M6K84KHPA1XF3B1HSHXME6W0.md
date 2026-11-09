@@ -2,8 +2,9 @@
 
 - id: REQ-01M6K84KHPA1XF3B1HSHXME6W0
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- done_reason: 范围裁决（2026-11-09）：两条腿都已交付 —— ① **音频**走 DirectSound 流式缓冲 + 真 feeder 线程 + 独立 mixer（REQ-01M6RXQ0A1B2C3D4E5F6G7H8J9 / 并发契约 / 默认静音三单全 done），SE 与 BGM 同一条 Play→notify→fill→混音 路径；② **视频**走 DirectShow 真服务端（REQ-01M6T07SC0XN81G1MZJYJXXGV9：宿主解码 filter 把帧送进引擎自己的 CMovieTextureRenderer）。本机 2026-11-09 实测 LOGO 影片自然放完：stop=stop-after-movie、[dshow] 首帧已送渲染器、tex movie #1..#120 的 hash 逐段变化（nonzero 0→1366→4328→14400）、called-unimplemented 0、exit 0。★ 范围里原列的 MF 7 / MFPlat 6 / EVR 1 / DXVA2 1 **不做**（记为超出范围）：引擎的影片路径是 DirectShow（quartz），这些 MF 导出在 boot→TITLE→影片→EU-ROOM→OPTION 的所有实跑里**一次都没被调用**（日志 grep 计数 0；run summary 恒为 imported 310 / called-unimplemented 0），它们仍是带理由的显式 stub（reason 见 data/lift/overrides.json）。MCI / mixer 同理：引擎不调用（audio-feasibility.md 的调用点扫描 + 实跑日志），保持 no-op stub；mmio 则早已是真实现，登记此前误标 stub，已在 REQ-01M6ZSF6RH014QZ907WN6WRFJW 修正。边界：Windows 实机复测仍只能由用户做（本机 macOS），音频在 Windows 上的设备/延迟读数未在本次收口内。
 - tags: [emulator-lift, m4]
 
 ## 一句话

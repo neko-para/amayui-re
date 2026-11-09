@@ -2,11 +2,12 @@
 
 - id: REQ-01M6QSVR5NJDQVFHY6RX3934DN
 - type: bug
-- status: doing
+- status: done
 - parent: REQ-01M6K84KHPA1XF3B1HSHXME6W0
 - verify: apps/emulator-lift/tests/dsound.cpp#dsound-edge-create-buffers-and-get-format
 - repro: apps/emulator-lift/src/shims/winmm_audio.cpp
 - severity: S1
+- done_reason: 两处根因都已修并各有守卫：① mmio 不再是空流（RIFF/fmt /data 真读 guest 文件）—— 证据是引擎能报出真 WAV 格式：本机 2026-11-09 带声音跑到 TITLE，CreateSoundBuffer #2=176400B/2ch/44.1k、#3=176400B/1ch/44.1k（SE 单声道）、#4=384000B/48k 流式缓冲，全部 DS_OK；② IDirectSoundBuffer8::QueryInterface(IID_IDirectSoundNotify) 返回真对象、SetNotificationPositions 真存并投递（日志 count=4 offsets=0,44100,…），挂在 dsound-edge-create-buffers-and-get-format。同一条路径再没有任何 RaiseException / Command_ShowMessage_Exception / 「WAVファイル…読み込みに失敗」（grep 计数 0），exit 0、called-unimplemented 0。★ 留下的边界只有原本就写明的：mmio 没有 pure 夹具（需要真 guest 文件句柄），由这条实机路径覆盖。
 
 ## 复现
 
