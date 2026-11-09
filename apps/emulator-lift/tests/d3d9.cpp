@@ -130,6 +130,16 @@ struct Fixture {
     }
     std::uint32_t placeU32(std::uint32_t v) { return placeData(&v, 4); }
     std::uint32_t placeBytes(const std::vector<std::uint8_t>& v) { return placeData(v.data(), v.size()); }
+    // 16 B 的 RECT（4×i32；右/下开区间）
+    std::uint32_t placeRect(std::uint32_t left, std::uint32_t top, std::uint32_t right, std::uint32_t bottom) {
+        std::vector<std::uint8_t> v(16, 0);
+        const std::uint32_t fields[4] = {left, top, right, bottom};
+        for (std::size_t i = 0; i < 4; ++i) {
+            for (int k = 0; k < 4; ++k)
+                v[i * 4 + static_cast<std::size_t>(k)] = static_cast<std::uint8_t>((fields[i] >> (8 * k)) & 0xFF);
+        }
+        return placeBytes(v);
+    }
 
     std::vector<std::uint8_t> bytesOf(std::uint32_t ea, std::size_t n) {
         std::vector<std::uint8_t> out(n, 0);
@@ -156,7 +166,9 @@ struct Fixture {
         const lift::RunResult r = m.run(o);
         if (out) *out = r;
         if (r.reason == lift::StopReason::UntilEa) return m.cpu().eax();
-        return r.reason == lift::StopReason::Stopped || r.reason == lift::StopReason::Unimplemented
+        // ★ 白名单 = "调用返回了 EAX"（不是"成功"）；新增原因必须在内，见 tests/d3dx9.cpp 同款注释。
+        return r.reason == lift::StopReason::Stopped || r.reason == lift::StopReason::Unimplemented ||
+                       r.reason == lift::StopReason::Trap || r.reason == lift::StopReason::ResourceExhausted
                    ? m.cpu().eax()
                    : 0;
     }
@@ -191,8 +203,12 @@ struct Fixture {
         std::uint32_t params_ea = 0;
     };
 
+    // `present_flags` / `multisample_type` 缺省 = 真机实测值（Flags=1 = LOCKABLE_BACKBUFFER、MSAA=NONE）；
+    // 后缓冲锁的失败面守卫用非缺省值构造"不可锁的后缓冲"。
     bool createDevice(std::uint32_t d3d9_obj, std::uint32_t device_type, std::uint32_t behavior, int width,
-                      int height, std::uint32_t format, Device* out) {
+                      int height, std::uint32_t format, Device* out,
+                      std::uint32_t present_flags = lift::d3d9::kPresentFlagLockableBackbuffer,
+                      std::uint32_t multisample_type = 0u) {
         std::vector<std::uint8_t> pp(lift::d3d9::kPresentParamsBytes, 0);
         auto wr = [&pp](std::uint32_t off, std::uint32_t v) {
             for (int i = 0; i < 4; ++i)
@@ -202,12 +218,13 @@ struct Fixture {
         wr(lift::d3d9::kPpBackBufferHeight, static_cast<std::uint32_t>(height));
         wr(lift::d3d9::kPpBackBufferFormat, format);
         wr(lift::d3d9::kPpBackBufferCount, 1u);
+        wr(lift::d3d9::kPpMultiSampleType, multisample_type);
         wr(lift::d3d9::kPpSwapEffect, 1u);            // D3DSWAPEFFECT_DISCARD
         wr(lift::d3d9::kPpHDeviceWindow, 0x00001234u);
         wr(lift::d3d9::kPpWindowed, 1u);
         wr(lift::d3d9::kPpEnableAutoDepthStencil, 1u);
         wr(lift::d3d9::kPpAutoDepthStencilFormat, 75u);  // D3DFMT_D24S8
-        wr(lift::d3d9::kPpFlags, 1u);
+        wr(lift::d3d9::kPpFlags, present_flags);
         wr(lift::d3d9::kPpPresentationInterval, 0x80000000u);
         const std::uint32_t pp_ea = placeBytes(pp);
         const std::uint32_t out_ea = placeU32(0u);
@@ -754,7 +771,9 @@ void caseUnimplementedSlotTraps() {
         // ★ 机器必须**停**：不是跑到哨兵（UntilEa），也不是继续用 EAX=0 往下走
         LIFT_CHECK(r.reason != lift::StopReason::UntilEa);
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.reason),
-                          static_cast<std::uint32_t>(lift::StopReason::Stopped));
+                          static_cast<std::uint32_t>(lift::StopReason::Trap));
+        // ★ 已注册的槽走到 loud trap ⇒ **非 ok**（本单之前落 `Stopped`(ok) ⇒ exit 0）。
+        LIFT_CHECK(!r.ok());
         LIFT_CHECK(f.m.cpu().running == false);
         LIFT_CHECK(std::string(f.m.cpu().stop_why ? f.m.cpu().stop_why : "") == "unimplemented COM vtable slot");
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(f.m.cpu().shim.unimplemented_calls), 1u);
@@ -872,6 +891,189 @@ void caseTextureBoundThenGuestRelease() {
     LIFT_CHECK_EQ_U32(f.m.surfaces().bytesInUse(), bytes_base);
 }
 
+// ⑪ 回收资格与 `activeMachine()` 解耦：**另一台 Machine 抢走 g_active** 之后，
+//    这台 cpu 的纹理 / 设备销毁仍必须把 arena 像素块与状态块收回去。
+//
+// 判据（红了意味着什么）：
+//   `destroyTextureState` / `destroyDeviceState`（含流水线的 depth）以前是"**先清 magic 再判**
+//   `activeMachine()==这台 cpu 的 Machine`"⇒ 判据不成立时 magic 已经没了、状态块已经 free 了，
+//   像素块**再也没有第二次回收入口**（本单 REQ-01M6X4MSCMMFEXYXCSK6V61QR2）。
+//   ★ 这里刻意造出"判据不成立"的局面（不是绕过它）：
+//     Machine A 建 d3d9 / 设备 / 纹理 → Machine B `initBare`（`Machine::init` 会把 g_active 改成 B）
+//     → 用 **A 的 cpu** 走销毁路径。
+//   ⇒ 修后：纹理释放后 arena 的 surfaceCount / bytesInUse 与 guest 堆 bytesInUse 都回到
+//     "只有设备"的基线；设备再销毁回到空 arena 基线。
+//   ★ 修前：**arena 的 surfaceCount / bytesInUse 停在高位**（纹理 5,898,240 B 的像素块 +
+//     后缓冲 + 深度永不回收）；两条 `heap().bytesInUse()` 断言修前**也能过** —— 状态块无论如何
+//     都会被 free，它们只防"回收了像素却漏了状态块"的回归。这正是"④⑥ 干了、⑤ 没干"的证据。
+void caseArenaReclaimUnderOtherMachine() {
+    lift_test::g_current_case = "d3d9/arena-reclaim-under-other-machine";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    lift::registerD3DX9Shims(f.m.shims());
+    lift::ShimDef* dx = f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
+    LIFT_CHECK(dx != nullptr);
+    if (!dx) return;
+    dx->stub_ea = kProcD3DXCreateTexture;
+    f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
+
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+
+    // 空 arena 基线（设备销毁后必须回到这里）
+    const std::size_t surfaces_base = f.m.surfaces().surfaceCount();
+    const std::uint32_t bytes_base = f.m.surfaces().bytesInUse();
+    const std::uint32_t heap_base = f.m.heap().bytesInUse();
+
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+    // "设备还在"的基线：纹理释放后 arena / guest 堆都必须回到这里
+    const std::size_t surfaces_dev = f.m.surfaces().surfaceCount();
+    const std::uint32_t bytes_dev = f.m.surfaces().bytesInUse();
+    const std::uint32_t heap_dev = f.m.heap().bytesInUse();
+    LIFT_CHECK(surfaces_dev > surfaces_base);  // 后缓冲 + 深度
+    LIFT_CHECK(heap_dev > heap_base);          // 设备 / 流水线状态块
+
+    const std::uint32_t out_ea = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(callD3DXCreateTexture(f, dev.object, 1280u, 1152u, lift::d3d9::kFmtA8R8G8B8, out_ea), 0u);
+    const std::uint32_t tex = f.m.mem().rd32(out_ea);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_dev + 1);
+    LIFT_CHECK(f.m.surfaces().bytesInUse() >= bytes_dev + 1280u * 1152u * 4u);
+    LIFT_CHECK(f.m.heap().bytesInUse() > heap_dev);  // 纹理对象 + 状态块
+
+    // ★ 第二台 Machine 抢走 g_active —— 这就是本单"Machine 判据不成立"的那个局面
+    lift::Machine other;
+    std::string other_err;
+    LIFT_CHECK(other.initBare(&other_err));
+    LIFT_CHECK(lift::activeMachine() == &other);
+
+    // 用 **A 的 cpu** 释放纹理（最后一次 release ⇒ ComRegistry 的析构钩子 destroyTextureState）
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(tex), 1u);
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(tex));
+    // ★ 判据：纹理的 arena 像素块 + 状态块都必须真的回收（回到"只有设备"的基线）
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_dev);
+    LIFT_CHECK_EQ_U32(f.m.surfaces().bytesInUse(), bytes_dev);
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_dev);
+
+    // 兄弟路径：设备状态块同样是"先清后判" ⇒ 后缓冲 / 深度 / 状态块也都必须回收
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_base);
+    LIFT_CHECK_EQ_U32(f.m.surfaces().bytesInUse(), bytes_base);
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_base);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑫ 后缓冲 surface 的 LockRect / UnlockRect（D3D9 契约；真机 `0x4A4F8B` 调用点）
+//
+// 判据（红了意味着什么）：
+//   ① `Pitch` = **整幅**行距、`pBits` 偏到**矩形左上**（真机逐行 memcpy 的源行距就是 Pitch，
+//      `0x4A5018 add edi,[ebp+var_44]`；写错 ⇒ guest 备份图错行）；
+//   ② 子矩形**不改** Pitch；③ 写 `pBits` 真的穿透到后缓冲像素（⛔ 不是假指针）；
+//   ④ 已锁再锁 / 未锁就解锁 / 越界 / DISCARD / 无 LOCKABLE / MSAA ⇒ `D3DERR_INVALIDCALL` 且**不占锁**；
+//   ⑤ 解锁后可再锁（`rect=NULL` ⇒ `pBits` = arena 基址）；
+//   ⑥ 这条路**不再 trap**（修前 `unimplemented_calls` = 1 ⇒ 本用例当场红）。
+// ★ 参数顺序：`IDirect3DSurface9::LockRect(this, pLockedRect, pRect, Flags)`；`Fixture::method` 的
+//   `args[0]` 是第一个实参（逆序压栈）⇒ `{lr_ea, rect_ea, flags}`（⛔ 不是 `{rect, flags, lr}`）。
+void caseBackBufferLockRect() {
+    lift_test::g_current_case = "d3d9/backbuffer-lockrect";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x48u, {0u, 0u, 0u, out}), 0u);  // GetBackBuffer
+    const std::uint32_t surf = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(surf, 0u);
+    if (surf == 0) return;
+
+    const std::uint32_t L = 17, T = 23, R = 48, B = 32;  // ★ 子矩形（不是整幅）
+    const std::uint32_t rect_ea = f.placeRect(L, T, R, B);
+    const std::uint32_t lr_ea = f.placeBytes(std::vector<std::uint8_t>(8u, 0xCC));  // 初值非 0
+
+    // ① 锁子矩形 ⇒ S_OK，Pitch = 整幅行距，pBits 偏到矩形左上
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x34u, {lr_ea, rect_ea, 0u}), 0u);
+    const std::uint32_t pitch = f.m.mem().rd32(lr_ea + 0u);
+    const std::uint32_t bits = f.m.mem().rd32(lr_ea + 4u);
+    LIFT_CHECK_EQ_U32(pitch, dev.info.pitch);  // ★ 锁小矩形**不改** Pitch
+    LIFT_CHECK_EQ_U32(bits, dev.info.arena + T * pitch + L * 4u);
+
+    // ② 像素穿透：按 pBits 写一个像素，后缓冲对应位置必须读回同一个值；相邻像素不动
+    //   ★ 先确认 pBits 在范围内再写：锁失败时出参是 guest 的初值（0xCC…），盲写会把机器打成
+    //     guest memory fault，后面的断言就看不到了（修前的 repro 正是这样）。
+    if (bits == dev.info.arena + T * pitch + L * 4u) {
+        f.m.mem().wr32(bits, 0x00123456u);
+        LIFT_CHECK_EQ_U32(f.pixelAt(dev.info, static_cast<int>(L), static_cast<int>(T)), 0x00123456u);
+        LIFT_CHECK_EQ_U32(f.pixelAt(dev.info, static_cast<int>(L + 1), static_cast<int>(T)), 0u);
+        // ★ 下一行必须隔**整幅行距**：真机的逐行 memcpy 正是按 Pitch 推进源指针（0x4A5018）。
+        f.m.mem().wr32(bits + pitch, 0x00654321u);
+        LIFT_CHECK_EQ_U32(f.pixelAt(dev.info, static_cast<int>(L), static_cast<int>(T + 1)), 0x00654321u);
+        LIFT_CHECK_EQ_U32(f.pixelAt(dev.info, static_cast<int>(L), static_cast<int>(T)), 0x00123456u);
+    }
+
+    // ③ 已锁再锁 ⇒ D3DERR_INVALIDCALL（⛔ 不许静默重入）；失败的锁**不写出参**
+    const std::uint32_t lr2 = f.placeBytes(std::vector<std::uint8_t>(8u, 0xCC));
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x34u, {lr2, 0u, 0u}), 0x8876086Cu);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(lr2 + 0u), 0xCCCCCCCCu);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(lr2 + 4u), 0xCCCCCCCCu);
+
+    // ④ 解锁 ⇒ S_OK；未锁再解锁 ⇒ D3DERR_INVALIDCALL
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x38u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x38u, {}), 0x8876086Cu);
+
+    // ⑤ Unlock 之后能再锁（这次整幅 rect=NULL）⇒ pBits = arena、Pitch 仍 = 整幅行距
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x34u, {lr2, 0u, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(lr2 + 0u), dev.info.pitch);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(lr2 + 4u), dev.info.arena);
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x38u, {}), 0u);
+
+    // ⑥ 越界矩形 ≠ 静默夹取；DISCARD 对非 dynamic 的后缓冲非法；面没有 NOOVERWRITE；
+    //    pLockedRect 不可写；这些失败后**仍能正常锁**（失败不占锁）
+    const std::uint32_t bad = f.placeRect(0u, 0u, 1281u, 720u);
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x34u, {lr2, bad, 0u}), 0x8876086Cu);
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x34u, {lr2, rect_ea, lift::d3d9::kLockDiscard}), 0x8876086Cu);
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x34u, {lr2, rect_ea, 0x00001000u}), 0x8876086Cu);  // NOOVERWRITE
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x34u, {0u, 0u, 0u}), 0x8876086Cu);                // pLockedRect=NULL
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x34u, {lr2, 0u, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(surf, 0x38u, {}), 0u);
+
+    // ⑥b 没有 D3DPRESENTFLAG_LOCKABLE_BACKBUFFER 的后缓冲 ⇒ 锁必失败（真机 `0x498F98` 明确设了 1）
+    Fixture::Device no_lock;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 640, 480, lift::d3d9::kFmtX8R8G8B8, &no_lock, 0u));
+    const std::uint32_t out2 = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(no_lock.object, 0x48u, {0u, 0u, 0u, out2}), 0u);
+    const std::uint32_t surf2 = f.m.mem().rd32(out2);
+    const std::uint32_t lr3 = f.placeBytes(std::vector<std::uint8_t>(8u, 0xCC));
+    LIFT_CHECK_EQ_U32(f.method(surf2, 0x34u, {lr3, 0u, 0u}), 0x8876086Cu);
+
+    // ⑥c multisample != NONE ⇒ 锁必失败。本线 CreateDevice 会先拒绝 MSAA（D3DERR_NOTAVAILABLE），
+    //     所以正常路径构造不出这种设备 ⇒ 这里直接置像素块上的字段，验证 LockRect 侧的**独立**检查。
+    Fixture::Device msaa;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 64, 64, lift::d3d9::kFmtX8R8G8B8, &msaa));
+    lift::GuestSurface* ms = f.m.surfaces().find(msaa.info.arena);
+    LIFT_CHECK(ms != nullptr);
+    if (ms != nullptr) {
+        ms->d3d9_multisample = 2u;  // D3DMULTISAMPLE_2_SAMPLES
+        const std::uint32_t out3 = f.placeU32(0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(f.method(msaa.object, 0x48u, {0u, 0u, 0u, out3}), 0u);
+        const std::uint32_t surf3 = f.m.mem().rd32(out3);
+        const std::uint32_t lr4 = f.placeBytes(std::vector<std::uint8_t>(8u, 0xCC));
+        LIFT_CHECK_EQ_U32(f.method(surf3, 0x34u, {lr4, 0u, 0u}), 0x8876086Cu);
+    }
+
+    // ⑦ ★ 这条路径不再 trap：修好前这里会是 Trap + `unimplemented_calls=1`
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(f.m.cpu().shim.unimplemented_calls), 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -886,7 +1088,9 @@ int main() {
         caseVertexStreamBinding();
         caseVertexDeclaration();
         caseGetBackBufferAndRenderTarget();
+        caseBackBufferLockRect();
         caseTextureBoundThenGuestRelease();
+        caseArenaReclaimUnderOtherMachine();
         caseUnimplementedSlotTraps();
         return finish("d3d9");
     } catch (const std::exception& e) {

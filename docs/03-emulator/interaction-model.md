@@ -53,9 +53,11 @@ JSON 文件入口留到"生成器落地"时再加，重开条件写在同一张�
 | `expect_change` | 动作已应用，但 `expect_change` 到点仍不成立 | 动作没生效；正是"没点中「戻る」却继续跑"那一坑 |
 
 ★ 还有一条**不在上表里、但同样是失败**：**任务没走完**。三种失败都是"任务还在走、但走不动了"；
-而 guest 侧硬停（未实现的方法槽 / 资源耗尽 / `ExitProcess`）会让运行**正常结束**（退出 0），
-任务却停在半路。⇒ 判据只有一条：**没有到达 `task done` 就不是成功**（同一个非 0 退出码 + 同样的现场输出）。
-这条必须自己判，因为"停机原因 → 退出码"那套映射把"实现里主动停"当成了正常结局（另有一条单在管那个口径）。
+而 guest 侧硬停（`unimplemented-slot` = 已注册的槽 / 形态没实现、`resource-exhausted` = 我方容量不够、
+`ExitProcess`）会让任务停在半路。⇒ 判据只有一条：**没有到达 `task done` 就不是成功**（同一个非 0 退出码 + 同样的现场输出）。
+★ 退出码口径（`REQ-01M6WW9R6SJ7P8XA4522XCR48A` 落地后）：`unimplemented-slot` / `resource-exhausted`
+**不是**正常结局 ⇒ 没有交互图时 exit 2（`--gpu-strict` 也先判 2）；`ExitProcess` 仍是正常结局
+（`Stopped` ⇒ `ok()` 真 ⇒ 0）。所以这条必须**自己判**：只看退出码时，`ExitProcess` 停在任务半路仍然看起来成功。
 
 三种一律：**非 0 退出** + 存最后画面（`--interaction-fail-dump`，缺省 `<graph>.fail.bmp`；⛔ 不是
 `--dump-frame` —— 那条是"每次 Present 导出一张"）+ stderr 打出**最后状态与全部候选**（哪个节点、等的是什么、

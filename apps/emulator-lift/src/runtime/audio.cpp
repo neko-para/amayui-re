@@ -1120,6 +1120,12 @@ bool AudioEngine::setupFeederContext(std::string* err) {
         return false;
     }
     audio_cache_ = std::make_unique<BlockCache>(audio_decoder_.get(), mem_);
+    // ★ 这份拷贝**继承 `X86::machine`（宿主侧 Machine 归属）**，是有意的：
+    //   feeder 是同一台 Machine 的另一个 X86 视图（同一份 mem / com / 堆），若它执行到释放
+    //   COM 对象的路径，回收必须落到同一个 SurfaceArena，而不是因为 `activeMachine()` 变空/易主
+    //   就把 arena 永久漏掉（REQ-01M6X4MSCMMFEXYXCSK6V61QR2）。
+    //   并发安全：所有容器访问都在 `ShimRegistry::invoke` 里发生，而它持 guest 令牌
+    //   （见 runtime/guest_token.h 的不变式）—— feeder 的 guest 指令执行本身不持令牌。
     audio_cpu_ = *cpu_;
     if (cpu_->native_overrides) audio_overrides_ = *cpu_->native_overrides;
     audio_cpu_.cache = audio_cache_.get();

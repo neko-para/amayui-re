@@ -7,6 +7,15 @@
 - order: 0
 - tags: [emulator-lift, interaction, performance]
 
+# emulator-lift · 交互可靠性 + 装载性能：未收口工作汇总（识别驱动状态机 / 装载帧 / 吞吐 / 分析工具）
+
+- id: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- type: req
+- status: doing
+- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- order: 0
+- tags: [emulator-lift, interaction, performance]
+
 ## 这张单收什么
 
 这一轮（emulator-lift 交互 / 性能）插进来的**所有待处理工作**收在一处：交互（识别驱动状态机 · 脚本身份事件源 · 点击真的被 guest 采到）、装载帧与指令吞吐、测量与分析工具，以及本轮已经开出来的缺陷单。新发现先挂这里再往下拆 —— 不再散在树各处。
@@ -49,19 +58,13 @@
 | `REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9` 令牌等待 | 等锁 = 并行契约的代价，修法与"查得太勤"完全不同 |
 | `REQ-01M6XVZH2HA6VYTV0X6F3QAGHB` 点击必须被 guest 采到 | **测量前提**：点击没落地 ⇒ 之后所有优化都在假数据上（已经发生过两轮） |
 
-## 本轮遗留缺陷（收编进来的原单）
+## 本批结果与下一轮入口（2026-11-09）
 
-| 原单 | 原父 | 一句话 |
-|---|---|---|
-| `REQ-01M6X4MSCMMFEXYXCSK6V61QR2` | M2 | 纹理 arena 永不回收（先判后清） |
-| `REQ-01M6X4N7C0PAF6XT7EAC172V85` | M2 | RT 像素块缺语义 addRef |
-| `REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS` | M2 | ComRegistry 无 generation |
-| `REQ-01M6WW9R6SJ7P8XA4522XCR48A` | M1 | 资源耗尽仍 exit 0 |
-| `REQ-01M6WW9V9N863FDTMK6BRMDK1K` | M2 | TITLE 往返一次性残留（spike） |
-| `REQ-01M6WW9YR4WGSBZ47DEYHYS42R` | M2 | D3DXCreateSprite OOM 夹具 |
-| `REQ-01M6WS9975PXRSXHEHCMZPWXB9` | M2 | 输入脚本语法两套 |
-
-★ `REQ-01M6WS9G1EQRZ0EYM21V0DPZVY`（`--anchor-script` 消费者）挂在子单 B 下；`REQ-01M6WSANRPND80XW52QY4Y5WA8`（BMP diff）与 `REQ-01M6WSAGESXYYZ6QR919J2NFWC`（变异条目）挂在子单 E 下。
+- 收编的 7 张原单：6 张已收口（三个 lifetime / 资源耗尽退出码 / OOM 夹具；语法统一 dropped），只剩 TITLE spike。
+- **已收口 9 张**：13 / 14 / 15 / 12 / 10 / E / 16 / B + A 的卡点 1（后缓冲 `LockRect`）。
+- **仍在 6 张**：A（`blocked`：戻る + C++ EH）· C · D（已裁 `X=4.0 s`）· F1 · F2 · TITLE spike。
+- **新开 5 张**：ddraw 同形泄漏 · surface 非 RT 寿命 · EA 认对象残余 · 图 profiler 静默残表 · C++ EH 展开。
+  下一轮入口：C/D/F1/F2 的设计要点已写进各自单正文；TITLE 需 4 条真机读数；A 只等两张前置单。
 
 ## 明确不做什么
 

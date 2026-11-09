@@ -1575,23 +1575,71 @@ std::uint32_t createForDevice(X86& cpu, std::uint32_t device_state, int width, i
     return pe;
 }
 
+namespace {
+// 释放流水线**当前绑定的渲染目标**，并把 `kPlColorSurface` / `kPlColorArena` 一起清成"后缓冲"。
+//
+// ★ 成对的两份引用（REQ-01M6X4N7C0PAF6XT7EAC172V85）：
+//   ① `surface` 对象 —— 绑定时 `addRef` 过；
+//   ② **像素块 owner**（= 父纹理对象，`ComRegistry::ownerOf(surface)`）—— 也 `addRef` 过。
+//   ⛔ 只 addRef ① 不够：surface 没有析构钩子（`com.h` 文件头），像素块 + `'TEX1'` 状态块的唯一
+//   回收入口是**纹理对象** refcount 到 0 时的 `d3d9::destroyTextureState` ⇒ 纹理在"仍被绑定为 RT"
+//   时被 guest Release 会把像素块回收掉，流水线继续往已释放 / 已被别人复用的 arena 写。
+// ★ 顺序：**先 owner 再 surface**（同一张纹理的两个表面互切时，新 owner 已在调用点先 addRef，
+//   先放旧 owner 也不会把它降到 0）；owner 先到 0 会回收像素块，那时 surface 的 `user` 已经是
+//   悬空 EA，但 release(surface) 不读 `user`，所以顺序安全。
+// ★ **owner 为什么要走 `releaseIf`（带代际）**（REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）：
+//   `Object::owner` 是宿主表里**唯一一个不持引用**的 EA 缓存 —— surface 不拥有父纹理
+//   （`GetSurfaceLevel` 不替纹理持引用是**有意**的，见 `com.h` 的 `owner` 说明），所以
+//   "guest 合法地放掉纹理、surface 还活着"这条时序里，owner 的 EA 会被**下一个对象**拿走
+//   （guest 堆首次适配，确定性）。绑定期那份 addRef 让它平时减不到别人身上；但引用记账
+//   只是"数值上钉住"，不是"身份校验" ⇒ 一旦谁少放一次、或将来出现别的非钉住缓存，
+//   按 EA 的 `release` 就会减到**当前占有者**身上。代际在**建 surface 时**固化，与 EA 一起
+//   过 release→reuse 都还有效 ⇒ `releaseIf` 不符时只出声、不减引用。
+//   ⚠ 边界：`kPlColorSurface` 自己（下面那一行 `release(surface)`）**不带代际** —— 它由绑定期的
+//   addRef 钉住（对象在表里 ⇒ EA 不会被复用），只有 guest 越界 Release 才可能陈旧；那一类
+//   对所有"已钉住"的缓存一样（见报告里的审计表），且流水线块在 guest 内存里、没有宿主侧
+//   per-surface 槽位可放代际 ⇒ 本单不为它新造一张宿主映射表。
+//   ★ `owner_generation != 0` 是**绑定的前提**（`setRenderTarget` 的判据拒绝 0）⇒ 进到这里时它一定非 0，
+//     所以不存在"没有代际 ⇒ 退化成不可校验的 release"这条路。
+// ★ ⛔ 只在"换 target / 解绑到后缓冲 / 设备销毁"三处调用。**不在纹理 Release 处**调用 ——
+//   那会把仍在绑定中的 RT 静默换成后缓冲（改语义）。
+void releaseRenderTarget(X86& cpu, std::uint32_t pe) {
+    const std::uint32_t surface = plGet(cpu, pe, kPlColorSurface);
+    const std::uint32_t owner = (cpu.com != nullptr && surface != 0) ? cpu.com->ownerOf(surface) : 0u;
+    const std::uint32_t owner_generation =
+        (cpu.com != nullptr && surface != 0) ? cpu.com->ownerGenerationOf(surface) : 0u;
+    plSet(cpu, pe, kPlColorSurface, 0u);
+    plSet(cpu, pe, kPlColorArena, 0u);
+    if (cpu.com == nullptr) return;
+    if (owner != 0 && !cpu.com->releaseIf(cpu, owner, owner_generation)) {
+        // 代际不符（EA 已被新对象拿走）或 owner 已不在表里 ⇒ ⛔ 不减任何人的引用。
+        pipeLog("releaseRenderTarget",
+                "owner 0x%08X（建 surface 时的代际 %u）已不是那个对象 ⇒ ⛔ 不释放它（新占有者不受影响）",
+                owner, owner_generation);
+    }
+    if (surface != 0) cpu.com->release(cpu, surface);
+}
+}  // namespace
+
 void destroyForDevice(X86& cpu, std::uint32_t device_state) {
     if (device_state == 0 || !cpu.mem || !cpu.mem->committed(device_state, 64u)) return;
     const std::uint32_t pe = pipeEaOf(cpu, device_state);
     if (pe == 0 || !cpu.mem->committed(pe, kPlBytes)) return;
     if (cpu.mem->rd32(pe + kPlMagic) != kPlMagicValue) return;
-    // 绑定的纹理在 SetTexture 时 AddRef 过 ⇒ 这里对称释放；渲染目标同理。
+    // ★ 先取 owner，再清 magic（REQ-01M6X4MSCMMFEXYXCSK6V61QR2）：清完 magic 就不会有第二次
+    //   回收机会；owner 来自装配（`machineOf`），不是"最近 init 的那台"。
+    Machine* m = machineOf(cpu);
+    // 绑定的纹理在 SetTexture 时 AddRef 过 ⇒ 这里对称释放；渲染目标同理（surface 对象 + 像素块 owner）。
     if (cpu.com) {
         for (std::uint32_t s = 0; s < kMaxSamplers; ++s) {
             const std::uint32_t t = plGet(cpu, pe, kPlTextures + s * 4u);
             if (t != 0) cpu.com->release(cpu, t);
         }
-        const std::uint32_t rt = plGet(cpu, pe, kPlColorSurface);
-        if (rt != 0) cpu.com->release(cpu, rt);
+        releaseRenderTarget(cpu, pe);
     }
     const std::uint32_t depth = plGet(cpu, pe, kPlDepthArena);
     cpu.mem->wr32(pe + kPlMagic, 0u);
-    if (Machine* m = activeMachine(); m && &m->cpu() == &cpu && depth != 0) m->surfaces().destroy(depth);
+    if (m != nullptr && depth != 0) m->surfaces().destroy(depth);
     if (cpu.heap) cpu.heap->free(pe);
     cpu.mem->wr32(device_state + 56u, 0u);
 }
@@ -1691,9 +1739,7 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
         }
     }
     if (target == 0) {
-        if (old_surface != 0 && cpu.com) cpu.com->release(cpu, old_surface);
-        plSet(cpu, pe, kPlColorArena, 0u);
-        plSet(cpu, pe, kPlColorSurface, 0u);
+        if (cpu.com) releaseRenderTarget(cpu, pe);
         pipeLog("SetRenderTarget", "目标 = 后缓冲（0）");
         return kOk;
     }
@@ -1705,6 +1751,9 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
     const std::uint32_t tex_state = cpu.com->userOf(target);
     TextureInfo ti;
     if (!surfaceInfoOfState(cpu, tex_state, &ti, why)) return kInvalidCall;
+    // 这块表面是不是**纹理**表面（像素块归纹理对象）；后缓冲表面的状态是设备状态块（'D9D1'）。
+    TextureInfo tex_probe;
+    const bool is_texture_surface = textureInfoOfState(cpu, tex_state, &tex_probe, nullptr);
     if (zstencil != 0) {
         // 本线只有一个设备深度缓冲；纹理与后缓冲同尺寸时共用它。不同尺寸会错，但不静默。
         pipeLog("SetRenderTarget", "pNewZStencil=0x%08X **被忽略**（本线共用设备深度缓冲；⛔ 不静默）",
@@ -1715,7 +1764,51 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
             if (why) *why = "D3D9 流水线：SetRenderTarget AddRef 失败";
             return kInvalidCall;
         }
-        if (old_surface != 0) cpu.com->release(cpu, old_surface);
+        // ★ 语义 addRef 的第二份：**像素块的 owner**（父纹理对象，建 surface 时固化；
+        //   `d3dx9.cpp` 的 GetSurfaceLevel 传的是 `self`）。只保住 surface 对象不够 —— 见
+        //   `releaseRenderTarget` 的注释（REQ-01M6X4N7C0PAF6XT7EAC172V85）。
+        // ★ guest 可见差异（有意）：绑定期间对这张纹理 `Release` 会返回 +1（设备的 RT 引用算在纹理
+        //   的公开 refcount 上），对象活到解绑 / 换绑。真机是 surface 内部替纹理持一份资源引用、
+        //   公开 refcount 仍可能到 0；本线的 surface **不持有**父纹理（`com.h` 文件头），所以只能用
+        //   纹理 refcount 表达"设备绑着它"。不绑定就观察不到差异。
+        const std::uint32_t owner = cpu.com->ownerOf(target);
+        const std::uint32_t owner_generation = cpu.com->ownerGenerationOf(target);
+        // ★ 陈旧 owner 的判据 = **代际**，⛔ 不是"owner 的状态块 EA 对不对得上"
+        //   （REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）。旧判据是 `userOf(owner) != tex_state`，它认对象用的是
+        //   "EA + guest 派生状态"，而 EA 复用往往**同时**复用那个状态块（`kTxBytes` 是常量 ⇒
+        //   同尺寸的下一张纹理拿到同一个 `'TEX1'` EA）⇒ 判据通过 ⇒ 静默把 RT 绑到**别人的像素**上，
+        //   还会对那张纹理 `markTextureContentUnknown`。代际在宿主表里、建 surface 时固化 ⇒ 骗不过。
+        //   ⚠ `owner == 0`（后缓冲表面 / 建 surface 时没传 owner）不走这条判据：后缓冲表面是
+        //   合法目标（`shims/d3d9.cpp` 的 GetBackBuffer 表面 owner 就是 0）。
+        if (owner != 0) {
+            const std::uint32_t owner_now = cpu.com->generationOf(owner);
+            // 两种都拒绝：① `owner_generation == 0`（建 surface 时 owner 就不在表里）；
+            // ② 该 EA 已经被**另一个**对象拿走（代际变了）。绑下去会保住错的对象，而像素块照样被回收。
+            if (owner_generation == 0 || owner_now != owner_generation) {
+                cpu.com->release(cpu, target);
+                pipeLog("SetRenderTarget",
+                        "surface 0x%08X 的 owner 0x%08X 已不是建 surface 时的那个对象"
+                        "（缓存代际 %u / 当前 %u，状态块 0x%08X）⇒ D3DERR_INVALIDCALL",
+                        target, owner, owner_generation, owner_now, tex_state);
+                if (why) *why = "D3D9 流水线：SetRenderTarget 的 surface owner 已被对象表复用（代际不符）";
+                return kInvalidCall;
+            }
+        }
+        if (owner != 0 && !cpu.com->addRef(cpu, owner)) {
+            cpu.com->release(cpu, target);
+            if (why) *why = "D3D9 流水线：SetRenderTarget 的像素块 owner AddRef 失败";
+            return kInvalidCall;
+        }
+        if (owner == 0 && is_texture_surface) {
+            // 纹理表面却没有 owner ⇒ 绑定后像素块没有任何引用保着它（本单的缺陷会回来）。
+            // ⛔ 不静默放过：这是"建 surface 时漏传 owner"的实现错误。
+            cpu.com->release(cpu, target);
+            pipeLog("SetRenderTarget", "纹理表面 0x%08X 没有像素块 owner ⇒ D3DERR_INVALIDCALL", target);
+            if (why) *why = "D3D9 流水线：SetRenderTarget 的纹理表面没有 owner（建 surface 时漏传？）";
+            return kInvalidCall;
+        }
+        // 旧目标的两份引用成对释放（先新 owner 的 addRef、再旧 owner 的 release ⇒ 同纹理互切安全）
+        releaseRenderTarget(cpu, pe);
         plSet(cpu, pe, kPlColorSurface, target);
         plSet(cpu, pe, kPlColorArena, ti.arena);
     }

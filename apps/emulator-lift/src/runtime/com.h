@@ -68,8 +68,10 @@ void comUnsupported(X86& cpu, ShimCall& call);
 //   `user` = createObject 时登记的扩展块 EA（obj+8；0 = 没有）。
 // ★ 为什么要有它：`Release` 只说明"引用到 0"，但对象**拥有**的 guest 资源（纹理状态块 +
 //   arena 像素块）必须在这时回收。以前这一步挂在"调用者是否走 iface 的 Release shim"上 ——
-//   而内部有 11 处裸 `cpu.com->release`（SetTexture 换绑 / SetRenderTarget 换绑 /
-//   destroyForDevice / Sprite 批次）绕过 shim ⇒ **所有权挂在调用点**，漏一处就漏一块像素。
+//   而内部有多处裸 `cpu.com->release`（SetTexture 换绑 / SetRenderTarget 换绑 /
+//   destroyForDevice / Sprite 批次 / dshow 宿主对象）绕过 shim ⇒ **所有权挂在调用点**，
+//   漏一处就漏一块像素。⛔ 不在这里写"共 N 处"：那个数会随实现漂（`rg -n "com->release\(" src`
+//   才是真源）。
 //   钩子把它挪回对象：无论谁把引用降到 0，子资源都跟着回收。
 // ★ 钩子只能回收**对象独占**的资源。`IDirect3DSurface9` 的 `user` 常指向**别人**的状态块
 //   （`GetSurfaceLevel` 复用纹理状态块）⇒ 那种对象**不登记**钩子（⛔ 会提前释放纹理像素）。
@@ -90,18 +92,57 @@ public:
     //   `user == 0` ⇒ 对象仍是 P0 的 8 字节布局（⛔ 既有语义一字不改）；非 0 ⇒ 12 字节。
     //   为什么要有它：对象的宿主侧状态若放在 ComRegistry 之外，就会撞上"一台机器一份 + 生命周期"
     //   的问题（测试里 Machine 反复建在同一栈地址）；放进 guest 块则由对象的 refcount 生命周期管。
+    // ★ `owner`（宿主侧**父对象**的 guest EA；⛔ 不写进 guest 内存、不进对象布局）：
+    //   "这个对象代表谁"。目前只有一种用法：`IDirect3DSurface9`（`GetSurfaceLevel` 建的）记下
+    //   **父纹理对象**。为什么需要它：surface 的 `user` 指向纹理状态块（`'TEX1'`），但 surface
+    //   **不拥有**那块像素（见文件头：surface 不登记 on_zero 钩子）；像素块 + 状态块的寿命挂在
+    //   **纹理对象**的 refcount 上。`SetRenderTarget` 把表面绑成渲染目标 ⇒ 必须对"像素块的 owner"
+    //   做语义 addRef/release，而 owner 要在建对象时固化（⛔ 不能解绑时按 `user` 反查：那个 EA
+    //   会随对象表复用而指向别人）。
+    //   `release` 到 0 **不会**去释放 owner（这不是所有权转移，只是"我代表谁"）。
+    //
+    // ★ **代际**（`generation`：宿主表内单调自增、非 0；REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）：
+    //   对象表的键是 guest EA，而 guest 堆会**复用** EA —— `create A → release A（到 0 删表 + 归还堆）
+    //   → create B` 之后 B 常常拿到 A 的 EA（首次适配，确定性）。于是"对旧 EA 再 Release"与
+    //   "Release 新对象"在宿主看来**完全一样**：Release shim 只拿得到 `this` 这个 EA。
+    //   ⇒ 代际**不能**用于 guest 发的 Release（那条路径不可校验，见 `release`）；它只服务
+    //   **宿主侧缓存**：谁缓存了一个 EA，就把它的代际一起缓存，释放时走 `releaseIf(EA, 代际)`。
+    //   ★ 代际只在宿主表里：⛔ 不写进 guest 内存、不改对象布局、不改 guest ABI。
+    //   ★ 与 `GpuRasterTexture::generation`（`gpu_raster.h:207`，"序列号只增不复用"）是同一个理由。
     std::uint32_t createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
-                               std::uint32_t user = 0, ComOnZero on_zero = nullptr);
+                               std::uint32_t user = 0, ComOnZero on_zero = nullptr,
+                               std::uint32_t owner = 0);
 
     // 对象的扩展块 EA（**宿主编表里的权威值**，不读 guest 内存）；未知对象 / 没挂扩展 ⇒ 0。
     std::uint32_t userOf(std::uint32_t obj) const;
+
+    // 对象的父对象 EA（`createObject` 的 `owner`；0 = 没有 / 未知对象）。**不判活** ——
+    // 调用方要用它做释放，必须自己保证"绑定期间持有它的一份引用"（见 `d3d9_pipeline.cpp`）。
+    std::uint32_t ownerOf(std::uint32_t obj) const;
+
+    // 对象的**代际**（宿主表内单调自增；未知对象 ⇒ 0）。见 `createObject` 的说明。
+    // ★ 这是"宿主侧缓存 (EA, 代际)"里的那一半：把代际和 EA 一起存下来，释放时走 `releaseIf`。
+    std::uint32_t generationOf(std::uint32_t obj) const;
+
+    // `owner` 在**建这个对象那一刻**的代际（0 = 没有 owner，或建的时候 owner 不在表里）。
+    // ★ 这是本类里唯一一个**不持引用的 EA 缓存**（`Object::owner`）配套的代际：
+    //   surface 不拥有父纹理（`GetSurfaceLevel` 不替纹理持引用是**有意**的，见上面 `owner`），
+    //   所以"guest 合法地把纹理放掉、surface 还活着"这条时序里 owner 一定已经死了 / EA 已被复用。
+    std::uint32_t ownerGenerationOf(std::uint32_t obj) const;
 
     // refcount +1 / -1；未知对象 ⇒ false + 一行日志。
     bool addRef(X86& cpu, std::uint32_t obj);
     // 到 0 ⇒ **先跑 on_zero 钩子**（回收对象独占的子资源），再释放 vtable 与对象（guest 堆）
     // 并从对象表里删掉。未知对象 / 重复 release ⇒ false + 日志。
     // ★ 这是对象销毁的**唯一收敛点**：内部裸 release 与 guest 走 iface Release 在这里没有区别。
+    // ★ ⚠ **这个重载不可校验**：它只拿得到 EA。guest 自己持旧 EA 发 Release（use-after-release，
+    //   真机同样 UB）在这里与"Release 新对象"无法区分 ⇒ 会减到当前占有者身上。宿主侧缓存
+    //   请用下面的 `releaseIf`。
     bool release(X86& cpu, std::uint32_t obj);
+    // **带代际校验的 release（宿主侧缓存专用）**：只有 `obj` 当前表项的代际 == `generation` 才减引用。
+    // 代际不符（EA 已被复用）⇒ 一行 loud 日志 + false，**不碰**当前占有该 EA 的对象。
+    // `generation == 0` ⇒ 调用方没有代际 ⇒ 退化成 `release`（只有"从来没缓存过代际"的调用点才该这么用）。
+    bool releaseIf(X86& cpu, std::uint32_t obj, std::uint32_t generation);
     // 这个 guest EA 是我们建出来的对象吗（不再看内存里写的是什么）
     bool find(std::uint32_t obj) const;
 
@@ -122,6 +163,10 @@ private:
         std::uint32_t refcount = 0;  // 权威值（同步写 obj+4）
         std::uint32_t bytes = 8;     // 对象头大小（8 = P0 布局；12 = 挂了扩展块 EA）
         std::uint32_t user = 0;      // 扩展块 EA（obj+8；0 = 没有）
+        std::uint32_t owner = 0;     // 父对象 EA（见 createObject 的 `owner`；0 = 没有）
+        // ★ 下面两个只在宿主表里（⛔ 不进 guest 内存；见 createObject 的代际说明）。
+        std::uint32_t generation = 0;        // 本对象的代际（单调自增、非 0）
+        std::uint32_t owner_generation = 0;  // 建这个对象时 `owner` 的代际（0 = 没有 owner / 当时就不在表里）
         ComOnZero on_zero = nullptr;  // refcount 到 0 时回收子资源（见文件头；nullptr = 没有子资源）
         std::string iface;
     };
@@ -142,8 +187,14 @@ private:
     // iface + 方法名 → 注册名（`<iface>::<name>`；已经带前缀就不重复加）
     static std::string qualifiedName(const std::string& iface, const char* name);
 
+    // `release` / `releaseIf` 的**唯一实现**：`expect_generation == 0` ⇒ 不校验代际（guest 路径）。
+    // ★ 代际比较必须与"减引用"在同一把 `mutex_` 里（否则 feeder 线程可以在两步之间让对象换人）。
+    bool releaseImpl(X86& cpu, std::uint32_t obj, std::uint32_t expect_generation);
+
     std::unordered_map<std::uint32_t, Object> objects_;        // key = obj guest EA
     std::unordered_map<std::uint32_t, MethodEntry> methods_;   // key = stub EA（桩页地址）
+    // 下一个要发的代际（只增不复用；0 保留给"没有代际"）。
+    std::uint32_t next_generation_ = 1;
     // ★ 方案 C：feeder 线程与主线程都会查/建 COM 对象（主线程建 SE、feeder 查 buffer 状态）。
     //   宿主表必须真互斥；dispatch 里会重入 userOf/release ⇒ recursive。
     mutable std::recursive_mutex mutex_;

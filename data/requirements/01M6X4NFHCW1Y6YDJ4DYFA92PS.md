@@ -2,8 +2,9 @@
 
 - id: REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: apps/emulator-lift/tests/mechanism.cpp#com-generation-stale-holder
 - repro: apps/emulator-lift/src/runtime/com.cpp#ComRegistry::release
 - severity: S3
 - tags: [emulator-lift, com, lifetime, m2]
@@ -33,3 +34,22 @@
 
 - 同一条生命周期线三张单：**回收路径**（`REQ-01M6WTRF0X6362NK8BNK8DHHWJ`，已收口）、
   **绑定引用**（`SetRenderTarget` 的 arena 那张）、**对象表代际**（本单）。三者互不重叠。
+
+## 收口（2026-11-09，macOS arm64 / RelWithDebInfo）
+
+**父级裁决（判据口径）**：本单的"代际校验"只适用于**宿主侧缓存** `(EA, generation)`。
+`Release` 在 guest ABI 上只带 `this`（EA），guest 拿旧 EA 发 Release **不可校验**——真机 D3D9 同样未定义；
+这条是**边界**，不是未满足项。⛔ 为此改 guest ABI 不在本单（也不在白名单里）。
+
+- 审计（可复跑）：`rg -n "com->release\(" apps/emulator-lift/src | wc -l` = 28；其中 `release(cpu, self)` 12
+  ⇒ 内部裸 release 16；**修前 17**，差的那一处正是 `releaseRenderTarget` 对 owner 的 `release` → `releaseIf`。
+  ⇒ 只有那一处读的是"可能陈旧的宿主缓存 EA"，其余靠缓存时 addRef 钉住。
+- 修法：`ComRegistry` 宿主对象表加 `generation` / `owner_generation`（**只在宿主表**，guest ABI / `kObjectBytes` 不变）
+  + `releaseIf(EA, gen)`（代际比较与减引用同一把锁）；`setRenderTarget` 的陈旧判据从
+  `userOf(owner) != tex_state` 换成代际（旧判据会被"对象 EA + `'TEX1'` 状态块 EA 同时复用"骗过——实测换回旧判据 ⇒ 8 条红）。
+- 守卫：`verify` 那条；端到端备选 `apps/emulator-lift/tests/d3d9_pipeline.cpp#d3d9p/stale-owner-generation-known-deviation`。
+  变异：`tools/mutate-check.mjs` 两条（代际短路 ⇒ mechanism 红；判据短路 ⇒ d3d9-pipeline 红），`--match 代际` 2/2 红。
+- 已知偏离（**不是**真机语义）：`GetSurfaceLevel → Release(纹理) → SetRenderTarget` 在本线被拒成 INVALIDCALL，
+  因为 surface 不持父纹理；跟踪 `REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`，修 04C 后该断言必须翻面。
+  可达性：**未在游戏路径观测到**该顺序。
+- 同根残余另开 `REQ-01M701NYF2B3YV1YFSZBMPQZ41`（Get* 借出陈旧 EA / Sprite 批次未钉住 / 流与索引假匹配）。

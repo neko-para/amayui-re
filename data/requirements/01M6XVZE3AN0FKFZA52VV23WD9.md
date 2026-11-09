@@ -2,9 +2,11 @@
 
 - id: REQ-01M6XVZE3AN0FKFZA52VV23WD9
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 5
+- verify: apps/emulator-lift/tests/input_expect.cpp#expect-change-not-changed
+- done_reason: 判据 2 的『断言膨胀量级』按 AGENTS.md §10 改为口径不变量（开/关 profiler 的 insns 相等）+ 文档读数；三件（profiler 口径 / 时间线静默失败检测 / 变异条目）已落地，两条变异实测红。
 - tags: [emulator-lift, tooling, measurement]
 
 ## 这个单收什么
@@ -28,3 +30,17 @@
 - ⛔ 不为了"工具好看"把 `.tmp/` 的手写脚本搬成仓库里的半成品：要么做成有退出码、能当门禁的基建，要么不搬。
 - ⛔ 不让工具依赖游戏安装（能造夹具就造夹具）。
 - ⛔ 不把工具做成"顺带跑一遍游戏"的集成测试（那属于 C / A）。
+
+## 收口（2026-11-09，macOS arm64 / RelWithDebInfo）
+
+- **判据 2 的口径变更（裁决）**：需求单原文要"一条断言**膨胀量级**的守卫"，与 `AGENTS.md` §10（⛔ 用 test 断言当前数值）冲突
+  ⇒ 由**口径不变量**替代：开/关 profiler 的**指令数相等**（`tests/profile_window.cpp#profile-instrumentation-invariant`，四臂各一台新 Machine），
+  膨胀读数只进文档（`docs/03-emulator/measurement.md` M-02 已重写：三开关 / 口径标签 / N=5 中位数 / ⛔ 开/关混表 / 旧 +33~40% 标成不可复现的历史读数）。
+- profiler：运行摘要新增 `instr : profile=… frame-trace=… window-prof=… expect=…`，`window-prof` 读 `WindowProfiler::armed()` **真值**；
+  M-02 更正了一处归因（每块 `steady_clock` 是基线也付的，不是 `--profile` 的边际）。
+- 静默失败（旧时间线脚本）：`--expect-change-after click[,key,mouse]` + `--expect-change-window <samples>`；
+  `not-changed` / `no-sample` / `unclosed` 三种都响亮失败（复用 `InteractionFailed` + `detail` 写种类 + exit 5 + `<脚本>.expect-fail.bmp`）。
+  ⛔ 不改旧 `--input-script` 语法、⛔ 不加枚举成员。
+- 变异：`ctest:profile-window` / `ctest:input-expect` 两条（各 1/1 红，实测）；`tools/mutate-check.mjs` 的 `DOMAIN.data` 过期自描述已修。
+- 未做（在本单边界外）：真安装 N=5 A/B 与 `scripts/profile/` 脚本对（M-02 给了命令与落点，但本机无安装、`apps/emulator-lift/scripts/**` 不在本单）；
+  时间线 expect **缺省开**（父级裁：不做，默认关）；`--tolerance` 保留真名（不加 `--allow-max-diff` 别名）。

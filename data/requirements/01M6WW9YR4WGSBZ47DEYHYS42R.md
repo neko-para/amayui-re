@@ -2,16 +2,10 @@
 
 - id: REQ-01M6WW9YR4WGSBZ47DEYHYS42R
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: apps/emulator-lift/tests/d3dx9.cpp#d3dx9/create-sprite-oom
 - tags: [emulator-lift d3dx9 test]
-
-## 缺什么
-
-`D3DXCreateSprite` 的**资源耗尽分支**已经修好（分配 guest 堆状态块 / 批次数组失败 ⇒ 走独立的资源耗尽
-口径，⛔ 不记 unimplemented、⛔ 不 ++ 缺口计数），但**没有夹具**：`d3dx9` 现有用例只覆盖
-① 正常建 sprite、② 参数 trap 三条（`d3dx9/trap-slot` / `d3dx9/trap-null-size` / `d3dx9/trap-bad-device`）。
-⇒ 这条分支今天是"改坏了也没人知道"。
 
 ## 判据
 
@@ -43,3 +37,13 @@
 - ⛔ 不改 `D3DXCreateSprite` 的失败语义（真机返回 `E_OUTOFMEMORY`；本线为什么改成硬停，理由在
   `REQ-01M6WTRF0X6362NK8BNK8DHHWJ` 的实测里，⛔ 不要在这里重新论证）。
 - ⛔ 不把"夹具能造 OOM"做成产品参数（那是测试侧的事，不给用户一个能调小 heap 的开关）。
+
+## 收口（2026-11-09，macOS arm64 / RelWithDebInfo）
+
+- 夹具：`apps/emulator-lift/tests/d3dx9.cpp#d3dx9/create-sprite-oom`。**不改任何默认尺寸**：占满夹具自己那 1 MiB `GuestHeap`
+  到最大空闲块 **136 B** ⇒ 状态块（136 B 块）成功、批次数组（需 1032 B）失败 ⇒ 走 `free(state)` 那条真失败路径。
+- 五条断言全过：① 出参 `ppSprite` 仍是 NULL（槽预填 `0xDEADBEEF` 哨兵，防"没调"）；② `stop_why` = `D3DX 资源耗尽`（不是 unimplemented）；
+  ③ `unimplemented_calls` 前后相等；④ 释放占块后 `bytesInUse` 逐字节回基线；⑤ `allocCount()+1` 且 `peak()` 上升
+  （**覆盖率警戒线**：证明走的是"状态块成功、批次失败"那一支，而不是状态块自己失败 ⇒ ④ 才不是空断言）。
+- 变异：`tools/mutate-check.mjs` 一条（`d3dxResourceStop → d3dxTrap`）⇒ 只红 ②×2 + ③（①④⑤ 仍绿，与分支判别一致），实测后逐字节还原。
+- 两层复审：设计复核 + 变更复审（不同 subagent）；后者另测 4 处变异（②③ / 仅③ / ④ / 仅⑤）全红。

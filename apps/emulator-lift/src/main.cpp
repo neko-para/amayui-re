@@ -10,6 +10,7 @@
 //                   [--skip-logo] [--max-insns N] [--trace-shims] [--trace-blocks] [--safe-memory] [--bench N]
 #include <SDL3/SDL.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -91,9 +92,11 @@ void usage() {
         "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
         "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
         "  --present-screenshot-frame <N>  只回读第 N 个 Present（1 起；缺省 0 = 每帧都写）\n"
-        "  --input-script <path>  指令式输入时间线（`at frame N` / `at insn N` / `at guest_ms T` / `at wall_ms T` / after / wait；\n"
+        "  --input-script <path>  指令式输入时间线（`at frame N` / `at insn N` / `at guest_ms T` / `at wall_ms T` / at marker <名字> / after / wait；\n"
         "                     动作 = mouse_move / mouse_down / mouse_up / click / key_down / key_up / profile_begin / profile_end / quit）。\n"
         "                     注入**不需要窗口焦点、也不移动真实光标**；格式见 README §4.2c\n"
+        "  --input-marker-timeout-ms <ms>  `at marker <名字>` 等不到的超时（**宿主墙钟** ms，缺省 30000；0 = 不设限）；\n"
+        "                             到点 ⇒ InteractionFailed + `marker-timeout:` detail + exit 5（⛔ 不静默继续）\n"
         "  --input-stall-ms <ms>      帧号停住多久之后把剩余 frame 条件折成 wall_ms（缺省 10000；0 = 关闭兜底）\n"
         "  --input-stall-boot-ms <ms> 还没出现第一帧（boot）时的宽限（缺省 30000；⛔ boot 不算停滞）\n"
         "  --interaction-graph <path>  识别驱动的交互任务（节点图：when → action → next）。与 --input-script **并存**；\n"
@@ -102,6 +105,11 @@ void usage() {
         "  --interaction-fail-dump <path>  失败时补写「最后呈现的那一帧」BMP（缺省 <graph>.fail.bmp）\n"
         "  --input-max-hold <ms>      自动 hold 的上限（guest ms，缺省 1000；0 = 不设限）：`click` / 显式 up\n"
         "                             等 guest 采样，到上限仍未采样 ⇒ 抬起 + 告警（⛔ 不挂死）；见 README §4.2c\n"
+        "  --expect-change-after <list>  时间线的**效果级判据**（缺省关）：动作应用之后必须在窗口内看到\n"
+        "                             画面变化；list = click[,key,mouse]。三种失败（没变 / 没采样 /\n"
+        "                             跑完未判定）一律 stderr `[expect-change]` + exit 5；见 README §4.2c\n"
+        "  --expect-change-window <samples>  观测窗长度（**采样数**，一次 Present = 一个样本；缺省 30）。\n"
+        "                             ⛔ 不是毫秒：`--present window` 是 real-time 时钟，毫秒窗口不可复现\n"
         "  --audio off|sdl|virtual  音频后端（缺省 sdl = 真设备；virtual = 确定性设备时钟；off = silent）\n"
         "  --audio-dump <path>  把混音结果写成 WAV（44.1k/16/2；与 sdl 同时用 = tee）\n"
         "  --sound              允许出声（缺省静音：设备/混音/喂料/guest DS 调用照跑，只在交付前置 0）\n"
@@ -183,6 +191,14 @@ int main(int argc, char** argv) {
     // ★ 自动 hold 的上限（README §4.2c）：`click` / 显式 up 等 guest 采样，等不到就到这里抬起 + 告警。
     //   0 = 不设限（显式选择"宁可挂死"）。
     std::uint64_t input_max_hold_ms = 1000;
+    // ★ marker 超时（`at marker <名字>` 等不到）：**宿主墙钟** ms；0 = 不设限。
+    //   到点 ⇒ `InteractionFailed` + `marker-timeout:` detail + exit 5（⛔ 不静默继续）。
+    std::uint64_t input_marker_timeout_ms = 30000;
+    // ★ 时间线的效果级判据（README §4.2c）：`--expect-change-after` 的原始写法 + 窗口长度（采样数）。
+    //   缺省关（打开会改变既有脚本的退出码）。窗口缺省 30 个采样（60 fps 下 ≈0.5 s）。
+    std::string expect_change_after;
+    std::uint64_t expect_change_window = 30;
+    bool expect_change_window_set = false;
     // ★ 方案 D：默认 SDL 后端 + **静音**（`--sound` 才出声；设备 / 混音 / 喂料照跑）；
     //   `--audio=virtual` = 确定性设备时钟（CTest / dump）；`--audio=off` = 旧 silent 口径。
     //   `--audio-dump` 与真输出可同时用（tee）。
@@ -347,6 +363,55 @@ int main(int argc, char** argv) {
                 return 2;
             }
             input_max_hold_ms = static_cast<std::uint64_t>(v);
+        } else if (std::strcmp(a, "--input-marker-timeout-ms") == 0 && i + 1 < arg_count) {
+            // `at marker <名字>` 等不到的超时（宿主墙钟 ms；0 = 不设限）。见 README §4.2c。
+            // ★ 只收十进制非负整数：`strtoull` 会把 `-1` 回绕成 ULLONG_MAX（那是非法参数，不是"不设限"）。
+            const char* text = args[++i].c_str();
+            bool digits = text[0] != '\0';
+            for (const char* p = text; *p != '\0'; ++p) {
+                if (*p < '0' || *p > '9') {
+                    digits = false;
+                    break;
+                }
+            }
+            char* end = nullptr;
+            errno = 0;
+            const unsigned long long v = digits ? std::strtoull(text, &end, 10) : 0ull;
+            if (!digits || end == text || *end != '\0' || errno == ERANGE) {
+                std::fprintf(stderr, "--input-marker-timeout-ms 需要非负整数（收到 %s）\n", text);
+                return 2;
+            }
+            input_marker_timeout_ms = static_cast<std::uint64_t>(v);
+        } else if (std::strcmp(a, "--expect-change-after") == 0 && i + 1 < arg_count) {
+            // 效果级判据：动作之后必须观测到画面变化（见 README §4.2c）。
+            expect_change_after = args[++i];
+            if (expect_change_after.empty()) {
+                std::fprintf(stderr, "--expect-change-after 需要一个非空列表（click[,key,mouse]）\n");
+                return 2;
+            }
+        } else if (std::strcmp(a, "--expect-change-window") == 0 && i + 1 < arg_count) {
+            // ★ 只收**十进制正整数**：`std::strtoull` 会接受 `-1`（回绕成 ULLONG_MAX）与溢出值，
+            //   而那是"参数非法"（必须 exit 2），不是"窗口 2^64-1"。⇒ 先逐字符查数字，再查范围。
+            const char* text = args[++i].c_str();
+            expect_change_window_set = true;
+            bool digits = text[0] != '\0';
+            for (const char* p = text; *p != '\0'; ++p) {
+                if (*p < '0' || *p > '9') {
+                    digits = false;
+                    break;
+                }
+            }
+            char* end = nullptr;
+            errno = 0;
+            const unsigned long long v = digits ? std::strtoull(text, &end, 10) : 0ull;
+            if (!digits || end == text || *end != '\0' || errno == ERANGE || v == 0) {
+                std::fprintf(stderr,
+                             "--expect-change-window 需要正整数（单位 = 采样数，一次 Present = 一个样本；"
+                             "收到 %s）\n",
+                             text);
+                return 2;
+            }
+            expect_change_window = static_cast<std::uint64_t>(v);
         } else if (std::strcmp(a, "--audio") == 0 && i + 1 < arg_count) {
             audio_mode = args[++i];
             if (audio_mode != "off" && audio_mode != "sdl" && audio_mode != "virtual") {
@@ -738,9 +803,43 @@ int main(int argc, char** argv) {
         machine.setInputStallBootGraceMs(input_stall_boot_ms);
         machine.setInputMaxHoldMs(input_max_hold_ms);
     }
+    // ★ marker 只是**时间线**的事件源（交互图的 actuator 生成的是 `at frame`，没有 marker 动作）。
+    if (!input_script_path.empty()) machine.setInputMarkerTimeoutMs(input_marker_timeout_ms);
     if (!interaction_fail_dump.empty() && !interaction_graph_loaded) {
         std::fprintf(stderr, "--interaction-fail-dump 需要同时给 --interaction-graph\n");
         return 2;
+    }
+    // ★ 时间线的效果级判据（`--expect-change-after` / `--expect-change-window`）：解析 + 配置。
+    //   缺省关；四条拒绝都是 exit 2（⛔ 不静默退化成"关"—— 静默失败正是本单要消灭的东西）：
+    //   ① 没给 `--input-script`（判的是时间线的动作；没有脚本 = 一个动作都不会被看）；
+    //   ② 与 `--interaction-graph` 同用（图有自己的 `expect` 语义 ⇒ 两套口径）；
+    //   ③ 类别 / 数字写错（窗口只收十进制正整数）；
+    //   ④ 脚本里**没有匹配的动作**（否则一个观测窗都开不了 ⇒ "静默绿"，与"发完不管"同类）；
+    //      只给 `--expect-change-window` 而不给 `--expect-change-after` 也拒绝（它只在策略开时生效）。
+    if (expect_change_window_set && expect_change_after.empty()) {
+        std::fprintf(stderr,
+                     "--expect-change-window 只在 --expect-change-after 开启时生效；单独给它不会看任何动作\n");
+        return 2;
+    }
+    if (!expect_change_after.empty()) {
+        if (input_script_path.empty()) {
+            std::fprintf(stderr,
+                         "--expect-change-after 需要同时给 --input-script（它判的是时间线动作有没有生效）\n");
+            return 2;
+        }
+        lift::ExpectChangePolicy policy;
+        std::string policy_err;
+        if (!lift::parseExpectChangeActions(expect_change_after, &policy, &policy_err)) {
+            std::fprintf(stderr, "emulator-lift: --expect-change-after 解析失败：%s\n", policy_err.c_str());
+            return 2;
+        }
+        policy.window_samples = expect_change_window;
+        if (!machine.configureExpectChange(policy, &policy_err)) {
+            std::fprintf(stderr, "emulator-lift: --expect-change-after 配置失败：%s\n", policy_err.c_str());
+            return 2;
+        }
+        std::printf("expect    : after=%s（窗口 %llu 个采样；失败 ⇒ stderr [expect-change] + exit 5）\n",
+                    policy.text.c_str(), (unsigned long long)policy.window_samples);
     }
     // ★ guest 眼里的主模块路径（用户 2026-11-05 口径）：`<guest 根>\AGE.EXE`，
     //   打开它拿到的是**我们真正在跑的那份字节**（拆壳件），不是 `--game-dir` 下的加壳原件。
@@ -1004,6 +1103,32 @@ int main(int argc, char** argv) {
     // ★ 交互任务的三种失败（真源 §2）：**非 0 退出**（5，可与 2 = 未实现缺口区分）+ stderr 打
     //   "最后状态与全部候选" + 存最后画面。⛔ 不许 warning-only、⛔ 不许当 0 点继续跑。
     if (r.reason == lift::StopReason::InteractionFailed) {
+        // ★ marker 超时（`at marker <名字>` 等不到）：**先于** expect-change / 交互图两条分流。
+        //   复用同一个 `InteractionFailed`（退出码 5），但 `detail` 是 `marker-timeout:` 那一行；
+        //   ⛔ 不许落到交互图分支：图没加载时 `failureReport()` 是空串、还会往 CWD 写 `.fail.bmp`。
+        if (r.marker_timeout) {
+            std::fprintf(stderr, "[marker] %s\n", r.detail.c_str());
+            return 5;
+        }
+        // ★ 时间线的效果级判据与交互图**共用**这一个停因（⛔ 不新增枚举成员），但报告出口不同：
+        //   图有 `failureReport()`（节点 / 等的是什么 / 采样值），时间线只有 `RunResult.detail`
+        //   （三种之一：not-changed / no-sample / unclosed）。⛔ 不许落到下面图那条分支上：
+        //   图没加载时 `failureReport()` 是空串、dump 路径会变成 `".fail.bmp"`（往 CWD 写）。
+        if (machine.expectChangeEnabled()) {
+            std::fprintf(stderr, "[expect-change] %s\n", r.detail.c_str());
+            const std::string dump_path = input_script_path + ".expect-fail.bmp";
+            bool still = true;
+            std::string dump_err;
+            if (machine.presenter().dumpLastFrame(dump_path, &still, &dump_err)) {
+                std::fprintf(stderr,
+                             "[expect-change] 最后画面：%s（像素仍等于最后一次 Present 的 hash：%s）\n",
+                             dump_path.c_str(),
+                             still ? "是" : "否 —— guest 可能已经画了下一帧，只作诊断");
+            } else {
+                std::fprintf(stderr, "[expect-change] 最后画面写不出来：%s\n", dump_err.c_str());
+            }
+            return 5;
+        }
         const lift::InteractionGraph& g = machine.interactionGraph();
         std::fputs(g.failureReport().c_str(), stderr);
         const std::string dump_path = interaction_fail_dump.empty()
@@ -1019,5 +1144,7 @@ int main(int argc, char** argv) {
         }
         return 5;
     }
-    return r.ok() ? 0 : 2;
+    // ★ 兜底退出码抽到 `lift::exitCodeForRun`（纯函数，tests/mechanism.cpp 直接断言）：
+    //   上面几道消费者闸门（token / gpu-strict / 交互图）**优先**，它们没拦下才落到这里。
+    return lift::exitCodeForRun(r);
 }

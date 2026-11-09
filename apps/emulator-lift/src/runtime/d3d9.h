@@ -51,6 +51,22 @@ constexpr std::uint32_t kClearTarget = 0x00000001u;
 constexpr std::uint32_t kClearZBuffer = 0x00000002u;
 constexpr std::uint32_t kClearStencil = 0x00000004u;
 
+// D3DLOCK_*（IDirect3DSurface9::LockRect 的合法 flags；★ 面**没有** NOOVERWRITE）
+// ★ 面 LockRect 的合法集 = DISCARD / DONOTWAIT / NO_DIRTY_UPDATE / NOSYSLOCK / READONLY。
+//   后缓冲上：合法集之外的位 / DISCARD（对非 dynamic 资源非法）都答 D3DERR_INVALIDCALL；
+//   合法但本线没有像素语义的位（READONLY / NOSYSLOCK / ...）只记录。
+constexpr std::uint32_t kLockReadOnly = 0x00000010u;
+constexpr std::uint32_t kLockNoSysLock = 0x00000800u;
+constexpr std::uint32_t kLockDiscard = 0x00002000u;
+constexpr std::uint32_t kLockDoNotWait = 0x00004000u;
+constexpr std::uint32_t kLockNoDirtyUpdate = 0x00008000u;
+constexpr std::uint32_t kLockSurfaceAllowed =
+    kLockReadOnly | kLockNoSysLock | kLockDiscard | kLockDoNotWait | kLockNoDirtyUpdate;
+
+// D3DPRESENTFLAG_LOCKABLE_BACKBUFFER（本安装的实测：`0x498F1B mov edx,1` → `0x498F98 [esi+440h]`
+// = D3DPRESENT_PARAMETERS::Flags(+0x2C)）⇒ 引擎显式要求"后缓冲可锁"。
+constexpr std::uint32_t kPresentFlagLockableBackbuffer = 0x00000001u;
+
 // D3D_SDK_VERSION（Direct3DCreate9 的唯一参数；引擎 `0x498D0D push 20h`）
 constexpr std::uint32_t kSdkVersion = 32u;
 
@@ -399,6 +415,22 @@ bool writeTextureDesc(X86& cpu, const TextureInfo& tex, std::uint32_t level, std
 bool lockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::uint32_t locked_rect_ea,
               std::uint32_t rect_ea, std::uint32_t flags, std::string* why);
 bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::string* why);
+
+// ---- 后缓冲 surface 的锁（状态块是 `'D9D1'` 走这条；纹理表面仍走上面的 lockRect/unlockRect）----
+// 口径（D3D9 文档 + 真机调用点 `0x4A4DC0` 的逐行 memcpy）：
+//   · `pBits` = 像素首字节 + top*pitch + left*bpp（**矩形左上**；rect==NULL ⇒ 整幅起点）
+//   · `Pitch` = **整幅**行距（锁子矩形**不改**；真机 `0x4A5018 add edi,[ebp+var_44]` 就按它推进源指针）
+//   · 契约级 guest 错误 ⇒ false + `*broken=false`（调用方答 D3DERR_INVALIDCALL，⛔ 不 trap）：
+//     已锁再锁 / 未锁就解锁 / 矩形越界或空 / DISCARD（后缓冲不是 dynamic 资源）/ 没有
+//     `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` / `MultiSampleType != NONE` / 未定义的 flags 位 /
+//     `pLockedRect` 或 RECT 不可写。
+//   · 本仓状态崩坏（状态块/arena 对不上、GPU 读回失败、bpp/pitch 为 0）⇒ false + `*broken=true`（调用方 trap）。
+//   · 锁前屏障：这块 guest 像素若是当前 GPU 镜像目标且有未读回的绘制 ⇒ 先 flush + 读回；
+//     不是目标 ⇒ 只 flush（队列里的 draw 不写这块像素，⛔ 不把别的 target 读回来）。
+//   · 解锁**不**标脏 / 不发版本号：guest 是权威，由下一次绘制的 `!rasterDirty() ⇒ rasterSyncFromGuest` 兑现。
+bool lockBackBuffer(X86& cpu, std::uint32_t state, std::uint32_t locked_rect_ea, std::uint32_t rect_ea,
+                    std::uint32_t flags, bool* broken, std::string* why);
+bool unlockBackBuffer(X86& cpu, std::uint32_t state, bool* broken, std::string* why);
 
 // ★ 把一块状态块的**内容版本降级为"未知"**（0）：它被当成了 render target（`SetRenderTarget`
 //   绑到纹理表面），之后宿主可能经 Clear / CPU 光栅回退 / GPU 读回写它的像素 —— 这些路径不经过

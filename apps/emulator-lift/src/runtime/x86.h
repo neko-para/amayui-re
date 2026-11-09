@@ -27,6 +27,7 @@ namespace lift {
 
 struct X86;
 struct PeImage;
+class Machine;
 class BlockCache;
 class LstIndex;
 class Vfs;
@@ -167,6 +168,20 @@ struct ShimState {
     TimerSavedRegs timer_saved_regs;               // 被打断的通用寄存器（见 TimerSavedRegs）
 };
 
+// ★ 停机**种类**（纯宿主状态，`X86` 上的一份提示）：`shim` 置 `running=false` 时顺手写下
+//   "这不是正常结局"，`Machine::run` 在 shim 返回后据此把 `RunResult::reason` 归到
+//   `StopReason::ResourceExhausted` / `StopReason::Trap`。
+//   ★ 为什么必须有它：`machine.cpp` 的汇入点只能看 `def->fn != nullptr`（`had_impl`），
+//     而 `ExitProcess` 与 `d3dxResourceStop` / `comUnsupported` 的 `had_impl` **都是真** ——
+//     没有这份提示就只能一律落 `Stopped`（ok ⇒ exit 0，正是本单要消掉的缝）。
+//   ★ 生命周期：`Machine::run` 每轮开头重置成 `None`（同一台 Machine 可以跑多轮，tests 的
+//     `runAsmRaw` 就是）；**只有** shim 的停机点写它，⛔ 不进 guest 内存、不影响 guest 布局 / API。
+enum class HostStopKind : std::uint8_t {
+    None = 0,           // 正常主动停（ExitProcess / TerminateProcess / --max-frames / 影片放完 …）
+    ResourceExhausted,  // 我方 arena / guest 堆不够
+    Trap,               // 已注册但方法槽 / 形态没实现（含 COM 装配错）
+};
+
 struct X86 {
     // ---- 通用寄存器（下标见 GprIndex）----
     std::uint32_t r[8] = {};   // EAX ECX EDX EBX ESP EBP ESI EDI
@@ -216,6 +231,15 @@ struct X86 {
     // ★ 方案 C：feeder 的私有 dispatcher 也要跑 `--native-overrides`（_memcpy/_memset 在
     //   Ogg 解码里是热路径）；指向 Machine 的只读表，AudioEngine 在启动线程时**拷贝**一份。
     const NativeOverrideTable* native_overrides = nullptr;
+    // ★ 宿主侧归属：这台 cpu 属于哪台 Machine（`Machine::wire()` 装配时设置，`machineOf()` 读）。
+    //   为什么不能只靠 `activeMachine()`：那是"**最后 init 的那台**"的进程级全局，会被别的 Machine
+    //   合法改写（连 `~Machine` 也会把它清成 nullptr）⇒ 销毁路径拿它当"该不该回收"的判据时，
+    //   判据一失败资源就**永久**失去回收入口（REQ-01M6X4MSCMMFEXYXCSK6V61QR2）。
+    //   ★ 纯宿主指针：不进 guest 内存、不改 guest 布局 / 地址 / arena 容量 / COM ABI。
+    //   ★ X86 的副本（`AudioEngine` 的 `audio_cpu_ = *cpu_`）继承它 —— 副本是**同一台 Machine**
+    //     的另一个 X86 视图，回收仍然落到同一个 SurfaceArena（容器只在持令牌的 shim 里访问，
+    //     见 runtime/guest_token.h 的不变式）。
+    Machine* machine = nullptr;
 
     // ---- 最近执行过的指令（诊断用环形缓冲；停在 eip=0 这类地方时能看见"从哪来"）----
     static constexpr int kLastInsns = 24;
@@ -236,6 +260,9 @@ struct X86 {
     bool running = true;
     std::uint64_t insns = 0;      // 已执行指令数（确定性 trace / bench 用）
     const char* stop_why = nullptr;
+    // ★ 停机种类提示（见上面的 `HostStopKind`）：只由 shim 的停机点写，`Machine::run` 每轮重置；
+    //   纯宿主状态，⛔ 不进 guest 内存 / 不改 guest 可见地址。
+    HostStopKind stop_kind = HostStopKind::None;
 
     // ---- 命名寄存器便捷访问 ----
     std::uint32_t& eax() { return r[kEax]; }

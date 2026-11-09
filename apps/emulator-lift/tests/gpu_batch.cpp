@@ -148,7 +148,9 @@ struct Fixture {
         o.max_insns = 200000;
         const lift::RunResult r = m.run(o);
         if (r.reason == lift::StopReason::UntilEa) return m.cpu().eax();
-        if (r.reason == lift::StopReason::Stopped || r.reason == lift::StopReason::Unimplemented) {
+        // ★ 白名单 = "调用返回了 EAX"（不是"成功"）；新增原因必须在内，见 tests/d3dx9.cpp 同款注释。
+        if (r.reason == lift::StopReason::Stopped || r.reason == lift::StopReason::Unimplemented ||
+            r.reason == lift::StopReason::Trap || r.reason == lift::StopReason::ResourceExhausted) {
             return m.cpu().eax();
         }
         return 0;
@@ -195,6 +197,9 @@ struct Fixture {
         wr(lift::d3d9::kPpHDeviceWindow, 0x00001234u);
         wr(lift::d3d9::kPpWindowed, 1u);
         wr(lift::d3d9::kPpAutoDepthStencilFormat, 75u);
+        // ★ 真机实测值（`0x498F1B mov edx,1` → `0x498F98 [esi+440h]`）：后缓冲必须可锁，
+        //   否则 `IDirect3DSurface9::LockRect` 按契约答 D3DERR_INVALIDCALL。
+        wr(lift::d3d9::kPpFlags, lift::d3d9::kPresentFlagLockableBackbuffer);
         wr(lift::d3d9::kPpPresentationInterval, 0x80000000u);
         const std::uint32_t pp_ea = placeBytes(pp);
         const std::uint32_t out_ea = placeU32(0u);
@@ -299,6 +304,22 @@ struct Fixture {
     std::uint32_t setRenderTarget(std::uint32_t surface) {
         return method(device_info.object, kOffSetRenderTarget, {surface, 0u});
     }
+
+    // 后缓冲 surface（GetBackBuffer(0,0,MONO,&out)）
+    std::uint32_t backBufferSurface() {
+        const std::uint32_t out = placeU32(0xDEADBEEFu);
+        const std::uint32_t hr = method(device_info.object, 0x48u, {0u, 0u, 0u, out});
+        LIFT_CHECK_EQ_U32(hr, 0u);
+        return m.mem().rd32(out);
+    }
+    // IDirect3DSurface9::LockRect(this, pLockedRect, pRect, Flags)；`args[0]` 是第一个实参。
+    std::uint32_t surfaceLockRect(std::uint32_t surface, std::uint32_t rect_ea, std::uint32_t* locked_rect_ea) {
+        const std::uint32_t lr = placeBytes(std::vector<std::uint8_t>(8u, 0));
+        const std::uint32_t hr = method(surface, 0x34u, {lr, rect_ea, 0u});
+        if (locked_rect_ea) *locked_rect_ea = lr;
+        return hr;
+    }
+    std::uint32_t surfaceUnlockRect(std::uint32_t surface) { return method(surface, 0x38u, {}); }
 
     std::uint32_t textureLockRect(std::uint32_t texture, std::uint32_t* locked_rect_ea) {
         const std::vector<std::uint8_t> zero(8, 0);
@@ -582,6 +603,78 @@ void caseOrder() {
     LIFT_CHECK_EQ_U32(f.endScene(), 0u);
     f.m.setGpuRaster(nullptr);
     std::printf("gpu-batch-order: driver=mock\n");
+}
+
+// ---------------------------------------------------------------------------------------
+// pure：后缓冲 LockRect 前的 **GPU 屏障**（`MockRaster` 记 flush / syncToGuest）
+//
+// 判据（红了意味着什么）：
+//   · 后缓冲**就是**当前镜像目标且有未读回的绘制 ⇒ 锁前必须 `rasterSyncToGuest`（内部先 flush）
+//     —— 少了它 guest 拿到的是过期像素（备份图/画面错，且没有任何报错）；
+//   · 锁的像素**不是**当前目标（当前目标是纹理 RT）⇒ 只 flush 队列，**不**把别的 target 读回来
+//     —— 多读回会把纹理镜像写进后缓冲（静默写错 surface）。
+//   ★ `MockRaster::rasterSyncToGuest` 内部先 `rasterFlush`（与真后端同序）⇒ "flush 在 sync 前"可断言。
+//   ★ 这条**必须**在 pure CTest（`gpu-batch-order`）里：`--gpu` 那条在无 GPU 机器上 SKIP 77，
+//     M5（删屏障）会静默逃逸。
+void caseBackBufferLockBarrier() {
+    lift_test::g_current_case = "gpu-batch/backbuffer-lock-barrier";
+    Fixture f;
+    LIFT_CHECK(f.boot(false));
+    const std::uint32_t d3d = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d, 0u);
+    if (d3d == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d, 64, 64, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    MockRaster mock;
+    f.m.setGpuRaster(&mock);
+    lift::GuestSurface* back = f.m.surfaces().find(dev.info.arena);
+    LIFT_CHECK(back != nullptr);
+    if (back == nullptr) return;
+    std::uint8_t* back_px = f.m.surfaces().pixels(*back);
+    std::string err;
+    LIFT_CHECK(mock.rasterPrepare(back->format, back->width, back->height, &err, back_px));
+    LIFT_CHECK(mock.rasterSyncFromGuest(back_px, back->pitch, back->width, back->height, &err));
+
+    LIFT_CHECK_EQ_U32(f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    LIFT_CHECK_EQ_U32(f.setViewport(0, 0, 64, 64), 0u);
+    const std::uint32_t surf = f.backBufferSurface();
+    LIFT_CHECK_NE_U32(surf, 0u);
+
+    // ---- ① 后缓冲 = 当前镜像目标：锁前必须 flush + 读回（syncToGuest）----
+    for (int i = 0; i < 2; ++i) LIFT_CHECK_EQ_U32(f.drawTriangle(10.0f, 0xFFFF0000u), 0u);
+    LIFT_CHECK(mock.rasterDirty());
+    const std::size_t flush0 = mock.flush_count;
+    const std::size_t sync0 = mock.sync_to_count;
+    std::uint32_t lr = 0;
+    LIFT_CHECK_EQ_U32(f.surfaceLockRect(surf, 0u, &lr), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count - sync0), 1);  // ★ 读回真的发生了
+    LIFT_CHECK(mock.flush_count > flush0);                                        // ★ 读回内部先 flush
+    LIFT_CHECK(!mock.rasterDirty());
+    LIFT_CHECK_EQ_U32(f.surfaceUnlockRect(surf), 0u);
+
+    // ---- ② 锁的像素**不是**当前目标：只 flush 队列，不把别的 target 读回来 ----
+    // ★ 这是白盒分支判据：本线的 GPU 目标只有默认后缓冲（纹理 RT 走 CPU 回退）⇒ 生产路径上
+    //   "锁后缓冲时目标又是纹理"不出现；这里直接把 mock 的目标身份换成另一块缓冲，验证分支方向
+    //   （⛔ 不读回别的 target —— 那会把那块镜像写进后缓冲，静默写错 surface）。
+    for (int i = 0; i < 2; ++i) LIFT_CHECK_EQ_U32(f.drawTriangle(10.0f, 0xFF00FF00u), 0u);
+    LIFT_CHECK(mock.rasterDirty());
+    std::vector<std::uint8_t> other(64u * 64u * 4u, 0);
+    LIFT_CHECK(mock.rasterPrepare(back->format, back->width, back->height, &err, other.data()));
+    const std::size_t flush1 = mock.flush_count;
+    const std::size_t sync1 = mock.sync_to_count;
+    LIFT_CHECK_EQ_U32(f.surfaceLockRect(surf, 0u, &lr), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.flush_count - flush1), 1);   // 队列被提交
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count - sync1), 0);  // ⛔ 不读回别的 target
+    LIFT_CHECK_EQ_U32(f.surfaceUnlockRect(surf), 0u);
+
+    LIFT_CHECK_EQ_U32(f.endScene(), 0u);
+    f.m.setGpuRaster(nullptr);
+    std::printf("gpu-batch-backbuffer-lock-barrier: sync=%llu flush=%llu\n",
+                static_cast<unsigned long long>(mock.sync_to_count),
+                static_cast<unsigned long long>(mock.flush_count));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1216,6 +1309,7 @@ int main(int argc, char** argv) {
         return lift_test::finish("gpu-batch-barrier");
     }
     caseOrder();
+    caseBackBufferLockBarrier();
     caseDirtyRect();
     return lift_test::finish("gpu-batch-order");
 }

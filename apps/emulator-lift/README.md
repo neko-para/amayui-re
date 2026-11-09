@@ -387,6 +387,7 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 | `at guest_ms T` | 触发条件 = guest 虚拟时钟 T 毫秒 |
 | `at insn N` | 触发条件 = guest 累计执行指令数 N（**帧内也能切**；确定性） |
 | `at wall_ms T` | 触发条件 = 宿主墙钟 T 毫秒（自 run 起） |
+| `at marker <名字>` | 触发条件 = 引擎**进入**某个脚本（脚本身份 `(cur, id)` 的**边沿**；采样点 = VM 循环头）。载荷 = 名字：读不到就降级成 `id:0xXXXXXXXX` **仍触发**并打一条警告；同一 `(cur,id)` 重复出现不重复发，首个样本只播种。等不到 ⇒ `InteractionFailed` + `marker-timeout:` detail + exit 5（超时 = `--input-marker-timeout-ms`，缺省 30000 **宿主墙钟** ms；0 = 不设限） |
 | `after N frames` / `after N ms` / `after N insn` | 触发条件 = 上一个**同单位**锚点 + N |
 | `wait N frames` / `wait N ms` / `wait N insn` | 推进锚点，并记一个 **no-op 动作**（脚本要等它到期才收口 ⇒ 尾部 `wait` 能"保持按住 / 保持等待"） |
 | `... stall MS` | （只对 frame）帧停滞兜底阈值；见下 |
@@ -399,8 +400,9 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 
 动作前必须先给时间（`at` / `after` / `wait`），否则解析失败（带行号，exit 2）。
 
-**触发条件是一个"条件"，不是帧号。** 内部只有 `Trigger{kind, value}` 四种 kind（frame / guest_ms /
-insn / wall_ms），调度只问"到期了吗"，不关心是哪一种。★ **这条时间线现在只是过渡形态**：
+**触发条件是一个"条件"，不是帧号。** 内部只有 `Trigger{kind, value, name}` 五种 kind（frame / guest_ms /
+insn / wall_ms / marker），调度只问"到期了吗"，不关心是哪一种（`marker` 不按数字到期：只有边沿会应用它）。
+★ **这条时间线现在只是过渡形态**：
 要换的交互模型（任务 = 节点图，节点 = `when` → `action` → `next`；三种失败全部响亮；两种识别源
 为什么都要）以 `docs/03-emulator/interaction-model.md` 为**唯一真源**。本文件**不复述**它的 schema，
 也不写"未来的 marker / 状态机"长什么样；`script` 事件源与时间线怎么并入见那份文档的"分期"。
@@ -489,6 +491,48 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 这就是"一次 click 就回 TITLE"的机械判据（不需要肉眼认同一个画面）。
 运行日志与逐帧 BMP 是**本地证据**（`.tmp/` 不入库）：判据本身在上面这两行日志里。
 
+**效果级判据（`--expect-change-after` / `--expect-change-window`，缺省关）**
+
+时间线原本只管"动作发出去"，**不管 guest 有没有看见**（BUG-16 的房间「戻る」就是这么静默过的：点击无反应、
+退出码 0）。这两个 flag 把"动作之后必须观测到变化"变成运行期判据 —— **旧脚本一个字都不用改**：
+
+```bash
+./out/emulator-lift ... --input-script <脚本> \
+  --expect-change-after click[,key,mouse] --expect-change-window <采样数>
+```
+
+| 参数 | 语义 |
+|---|---|
+| `--expect-change-after click[,key,mouse]` | 只对这几类动作开观测窗。`click` = `click`；`key` = `key_down`/`key_up`；`mouse` = `mouse_down`/`mouse_up`。`mouse_move` **不**要求变化（hover 可能本来就不改像素） |
+| `--expect-change-window <采样数>` | 观测窗长度，**单位 = 采样数**（一次 Present = 一个样本；缺省 30）。⛔ 不是毫秒：`--present window` 是 real-time 时钟，毫秒窗口不可复现；采样数才是"guest 又画了几帧"的确定性计数 |
+
+- **判据**：动作被应用之后，运行期读 `FrameSampler::changeCount()`；窗口内增长过 ⇒ 满足（日志
+  `[expect-change] ok "…"`）。三种失败**一律响亮**（stderr `[expect-change] FAIL …` + 退出码 **5**，
+  与交互图的三种失败同一个停因 `InteractionFailed`，`detail` 里写明是哪种）：
+  - `not-changed`：采样在增长、窗口也走满了，但画面**一次都没变**（动作没生效？）；
+  - `no-sample`：动作之后**一次采样都没有**（识别源失明：没接采样器 / guest 一直没 Present）
+    —— 与"没变"分开报（修法完全不同）；
+  - `unclosed`：运行结束时窗口**还没判定**（⛔ "跑完就算过"正是要消灭的）。⇒ 开着这个策略时，
+    给观测窗留时间（`wait` / 更长的窗口 / 别在 click 后立刻 `quit`）。
+- **与 `--interaction-graph` 互斥**（exit 2）：图有自己的 `expect` 语义，两套判据同时开会出两套口径。
+- **启动期拒绝**（exit 2，⛔ 不静默开局）：没给 `--input-script`；脚本里**没有匹配的动作**
+  （否则一个观测窗都开不了 = 静默绿）；只给 `--expect-change-window` 而不给 `--expect-change-after`；
+  类别 / 数字非法（窗口只收十进制正整数）。
+- **其它消费者闸门**（`--gpu-strict` / `--assert-guest-token`）仍**先判**：它们的退出码优先于这里的 5
+  （既有优先级，未因本策略改变）。
+- **与自动 hold 的关系**：`click` 的抬起由自动 hold 决定（等 guest 的输入采样点，上限 `--input-max-hold`）。
+  窗口在**按下**那一刻开，但在这次动作的抬起发出之前**不判失败** —— 否则一次合法点击会在 up 之前被窗口判死。
+  ⇒ 窗口要**大于一次自动 hold 花掉的采样数**（缺省 30 个采样在 60 fps 下 ≈0.5 s，通常够；太小会误报）。
+  运行结束时抬起还没发出的窗口归 `unclosed`（⛔ 不归成 `not-changed`：那是"没给动作留时间"，不是"动作没生效"）。
+- **它只回答"动作之后 guest 有没有画出新帧"**，⛔ 不回答"是这次动作造成的"：TITLE 动画 / 淡入会掩盖漏点，
+  一次变化也会同时满足重叠的窗口。要**因果**就用 `screen rect … avg`（交互图）或 BMP diff
+  （`pnpm tools lift diff`，见 §4.1）。
+- 失败时还会补写**最后呈现的那一帧**：`<脚本路径>.expect-fail.bmp`
+  （像素仍等于最后一次 Present 的 hash 与否会如实打印；从未 Present 过则明说写不出来）。
+- 守卫（顶层 pure CTest `input-expect`，`tests/input_expect.cpp`）：变 / 不变 / 一次采样都没有 / 策略关 /
+  跑完未判定 / 解析拒绝 / 配置后换脚本导致零窗 七例；另断言"策略开时采样器真的挂上了、关着时没挂"
+  （没接采样器会让 `sampleCount` 恒 0 ⇒ 全判 `no-sample`）。
+
 
 ## 4.2d 识别驱动的交互任务（`--interaction-graph`）
 
@@ -507,8 +551,12 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 | 退出码 | 含义 | 判据 |
 |---|---|---|
 | `0` | 任务**走完**（或用户任务里写了 `quit`） | trace 末尾有 `task done nodes=… transitions=…` |
-| `5` | 三种失败之一（`timeout` / `no-sample` / `expect_change`），**或者任务没走完**（guest 侧硬停：未实现的方法槽 / 资源耗尽 / `ExitProcess`） | 三种失败 ⇒ stderr 有 `failureReport()`（节点 / 等的是什么 / 等了多久 / 每个受监视矩形的最后采样值）；"没走完" ⇒ 打 `stop=` / `detail=` 与最后状态。两种都补写最后画面 BMP |
-| `2` | 参数 / 解析失败（带 `文件:行`），或其它既有的非 0 结束 | 启动阶段就拒绝，⛔ 不跑一半 |
+| `5` | 三种失败之一（`timeout` / `no-sample` / `expect_change`），**或者任务没走完**（guest 侧硬停：`unimplemented-slot` / `resource-exhausted` / `ExitProcess` 等）；**时间线的效果级判据**失败（`--expect-change-after` 的 `not-changed` / `no-sample` / `unclosed`）也用 5；**`at marker <名字>` 等不到**（`marker-timeout:`）也是 5 | 三种失败 ⇒ stderr 有 `failureReport()`（节点 / 等的是什么 / 等了多久 / 每个受监视矩形的最后采样值）；"没走完" ⇒ 打 `stop=` / `detail=` 与最后状态；时间线 ⇒ stderr 前缀是 `[expect-change]`（不是 `[interaction]`）；marker 超时 ⇒ 前缀是 `[marker]`、detail 形如 `marker-timeout: waited=<名字> last=<名字或 id> waited_ms=<n>`（⛔ 不写 BMP：等的是**事件**，不是画面）。前三种都补写最后画面 BMP —— **能写就写**：从未 Present 过时会明说"写不出来"（那时没有画面可存） |
+| `2` | 参数 / 解析失败（带 `文件:行`），或运行期**非 ok 的停因**（`unimplemented-slot` = 已注册但槽/形态没实现、`resource-exhausted` = 我方 arena / guest 堆不够、`unimplemented` / `decode-error` / `no-code` …） | 启动阶段就拒绝，⛔ 不跑一半；运行期停因看摘要 `stop` / `detail` 行 |
+
+- ★ 退出码的**兜底口径**只有一条：`lift::exitCodeForRun(r)`（`RunResult::ok()` ⇒ 0，否则 2）。
+  `--gpu-strict` 在它之前也判 2（并可能给 3），交互图的"任务没走完 / 三种失败"仍是 5 —— 那些**优先**。
+  两个新停因 `resource-exhausted` / `unimplemented-slot` **不在 `ok()` 里** ⇒ 没有别的闸门时退出码是 2。
 
 - **与 `--input-script` 并存**（真源 §7 第 3 期才把时间线并入节点图）。两条通道都只写
   `WindowManager` 的同一份状态、都走 `runtime/input.cpp` 那一层 ⇒ 真人 / 时间线 / 节点图三者同一语义。
@@ -516,7 +564,8 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
   帧锚点在这种路径上会**永远等不到**（这是时间线在 EU-ROOM 上点不到「戻る」的实证原因）。
 - **画面采样点 = Present**（`HeadlessPresenter::present`，唯一呈现汇点）：`screen hash` 用已有的整帧 hash，
   `screen rect … avg` / `screen changed` 由 `runtime/screen_sample.h` 在同一个点取样。
-  ⇒ 没加载图时一次也不采样（零成本）。
+  ⇒ 既没加载图、也没开 `--expect-change-after` 时一次也不采样（零成本；时间线的效果级判据
+  会在策略开时把同一个采样器挂上，见 §4.2c）。
 - **trace 可以逐行 diff**：同一路径两次运行逐字节相同（时间戳除外；`origin=` 只写文件名，
   ⛔ 不写宿主路径）；`--present window` 是 real-time ⇒ trace 头部（第 2 行）标 `# NON-DIFFABLE`，
   那一档的 trace 不参与 diff。
@@ -788,8 +837,10 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe ... --input-script .tmp/room/enter.tx
   会打印出来：非 0 说明那几段 inclusive 不可全信（`self` 仍准）。
 - 窗口**未闭合**（脚本没写 `profile_end` / run 提前停止）⇒ **自动收口 + 告警 + 照样打印**
   （⛔ 不静默丢数据）；`profile_end` 没有对应 begin 也会告警。
-- ⚠ **测量本身有开销**（每块一次 `steady_clock` + 每块边界的脚本 tick）。要做"真实墙钟多少"的判断，
-  用同一脚本把 `profile_*` 两行去掉跑一遍做 A/B；数字只在这两者之间比较才有意义。
+- ⚠ **测量本身有开销**，但**归因要按 `measurement.md` M-02**：每块那两次 `steady_clock` 是**无条件**的
+  （基线也付），窗口 profiler 的边际是"每迭代两次时钟 + 每块边界的宿主段计时 + `addGuest`"。
+  要做"真实墙钟多少"的判断，用同一脚本把 `profile_*` 两行去掉跑一遍做 **A/B**（只差一个开关、
+  N=5 取中位数、两臂各带 `instr=` 标签）；⛔ 开/关两臂的数字**不许混进同一张表**。
 - 窗口内的函数/块归属复用 `--profile` 那一套（块级计时 + `.lst` 函数入口聚合），⛔ 没有第二套计时。
 
 **怎么查**：窗口表在 `profile_end` 时打印一次（`=== profile window: <label> ===`）；
@@ -865,8 +916,15 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
 
 每次运行结束打一份摘要（`Machine::dumpRunSummary`）。诊断按这个顺序看：
 
+- `instr     : profile=<on/off> frame-trace=<on/off> window-prof=<on/off> expect=<n|off>`：**仪器口径标签**
+  （`measurement.md` M-02）。读的是**本轮真实生效**的位（`window-prof` = `WindowProfiler::armed()`），
+  ⛔ 不是 CLI 回显；`expect=` 是时间线效果级判据这一轮真的开了几个观测窗（`off` = 没启用）。
+  要给读数做 A/B 或写进 `observations.md`，**照抄这一行**，⛔ 不要凭参数回填。
 - `stop      : <reason> @ eip=…` + `detail    : …`：**停因**。`detail` 优先用 shim 写的 `stop_why`
   （形如 `<原因>（shim <module>!<name>）`）⇒「未实现」「资源耗尽」「guest 主动退出」在摘要里分得开。
+  ★ `reason` 本身也分开：`resource-exhausted`（我方 arena / guest 堆不够）· `unimplemented-slot`
+  （已注册但方法槽 / 形态没实现）· `unimplemented`（注册表里根本没有 fn）· `stopped`（正常主动停：
+  `ExitProcess` / `--max-frames` / 影片放完 / 窗口关闭）。前三个**非 ok** ⇒ 退出码 2（见 §4.2d）。
 - `heap      : in_use … peak … allocs …`：**主 guest 堆**（Win32 / CRT 分配走它）。
 - `arena     : surfaces N in_use U peak P largest-free F`：**surface arena**（D3D9 纹理 / 后缓冲 /
   深度的独立 GuestHeap）。★ 它不与主堆共享 ⇒"纹理没回收"在主堆那行**完全看不见**。
@@ -874,14 +932,17 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
   （首次适配只认连续块，见 `runtime/heap.cpp`）。
 - `shims     : imported … / called-unimplemented …`：后者只数**被调用过、且没有实现**的导入。
 
-★ **两类停不许混**（否则会把我方容量问题记成"guest 用了没实现的导出"）：
+★ **三类停不许混**（否则会把我方容量问题记成"guest 用了没实现的导出"）：
 
-| stderr 标题 | 含义 | 进 `called-unimplemented` / `stop_why` 吗 |
+| stderr 标题 | 含义 | 摘要 `stop` / 计数 |
 |---|---|---|
-| `=== unimplemented <模块> call ===` | 真的还没实现（缺口） | 是（缺口的账） |
-| `=== D3DX 资源耗尽（不是 unimplemented）===` | **我方** arena / guest 堆不够（容量或碎片） | 否；独立 `stop_why = "D3DX 资源耗尽"` |
+| `=== unimplemented <模块> call ===` | 已注册的导出 / 槽走到 loud trap（方法体没实现） | `unimplemented-slot`（**非 ok**）；进 `called-unimplemented` |
+| `=== unimplemented import (base gap) ===` | 导入表里有、但注册表里没有 fn（`had_impl=false`） | `unimplemented`（**非 ok**）；进 `called-unimplemented` |
+| `=== D3DX 资源耗尽（不是 unimplemented）===` | **我方** arena / guest 堆不够（容量或碎片） | `resource-exhausted`（**非 ok**）；⛔ **不**进 `called-unimplemented`（不是缺口） |
 
 D3DX 建纹理失败的 reason 里带 `w×h / D3DFORMAT / 像素字节`，与 `surface.cpp` / `heap.cpp` 的数字能直接对账。
+★ COM 的两条**装配错**（`=== COM thunk 不在路由表里 ===` / `=== COM thunk 被调到，但 cpu.com 为空 ===`）
+同归 `unimplemented-slot`（非 ok）：它们不是"缺口"而是"装配对不上"，但修法同样不是改容量。
 
 ## 5. 真源
 

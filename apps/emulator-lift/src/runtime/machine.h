@@ -23,6 +23,7 @@
 #include "runtime/present.h"
 #include "runtime/surface.h"
 #include "runtime/decode.h"
+#include "runtime/engine_marker.h"
 #include "runtime/guest_call.h"
 #include "runtime/host_window.h"
 #include "runtime/handles.h"
@@ -52,6 +53,15 @@ enum class StopReason : std::uint8_t {
     // ★ 识别驱动的交互任务**失败**（三种失败：timeout / no-sample / expect_change）。
     //   ⛔ 不进 `ok()`：它必须是非 0 退出（真源 `docs/03-emulator/interaction-model.md` §2）。
     InteractionFailed,
+    // ★ 我方 arena / guest 堆不够（`d3dxResourceStop`）。⛔ 不是正常结局、不进 `ok()`。
+    //   与下面的 `Trap` **分开**：容量/碎片问题的修法是改容量或回收，补实现修不了它
+    //   （BUG-02 已经把"资源耗尽"与"unimplemented"分开，⛔ 不许合并回一个原因）。
+    ResourceExhausted,
+    // ★ 已注册但方法槽 / 形态没实现（`comUnsupported` / `d3dxTrap` / `d3d9Trap` / `ddrawTrap` /
+    //   `dsTrap` / COM 装配错）。⛔ 不是正常结局、不进 `ok()`。
+    //   为什么不复用 `Unimplemented`：那条的判据是"注册表里没有 fn"（`had_impl == false`），
+    //   而这里 `had_impl == true` —— 导出 / 槽**已注册**，只是方法体是 loud trap。
+    Trap,
 };
 const char* stopReasonName(StopReason r);
 
@@ -96,9 +106,59 @@ struct RunResult {
     std::uint32_t ea = 0;        // 停下来的 eip
     std::uint64_t insns = 0;
     std::string detail;
+    // ★ 这次 `InteractionFailed` 是**marker 超时**（不是 expect-change 的三种失败，也不是交互图失败）。
+    //   ⛔ 不新增 `StopReason` 成员：退出码契约里 `InteractionFailed` 已经是 5；这里只做**分流标志**，
+    //   让 `main.cpp` 打对的那条 stderr、⛔ 不落到交互图的 `failureReport()` / `.fail.bmp`。
+    bool marker_timeout = false;
+    // ★ 只有"正常结局"为真。`ResourceExhausted` / `Trap` / `Unimplemented` / `DecodeError` /
+    //   `NoCode` / `None` / `InteractionFailed` 都是非 ok ⇒ 退出码非 0（见 `exitCodeForRun`）。
     bool ok() const { return reason == StopReason::UntilEa || reason == StopReason::MaxInsns ||
                              reason == StopReason::FirstShim || reason == StopReason::Stopped ||
                              reason == StopReason::TimeLimit; }
+};
+
+// ★ `main` 最后那道兜底退出码（**只**回答"这次 run 本身成不成功"：ok ⇒ 0，否则 2）。
+//   ⛔ 不是完整映射：`main.cpp` 先跑几道消费者策略闸门（--assert-guest-token ⇒ 4、
+//   --gpu-strict ⇒ 2/3、--interaction-graph 没走完 / 三种失败 ⇒ 5），它们**优先于**本函数。
+//   抽成函数是为了让纯档用例能断言"新停机原因 ⇒ 非 0"（真正的黑盒进程退出码需要 CLI 造 OOM，
+//   而兄弟单已裁"⛔ 不把夹具造 OOM 做成产品参数"）。
+int exitCodeForRun(const RunResult& r);
+
+// ★ 时间线（`--input-script`）的**效果级判据**（`--expect-change-after` / `--expect-change-window`）：
+//   "动作发出去" ≠ "guest 看见了"（BUG-04 的点击被吞、BUG-16 的房间「戻る」无反应，都是它漏掉的）。
+//   策略：动作被**应用**之后开一个观测窗，要求窗口内 `FrameSampler::changeCount()` 增长。
+//   ★ 窗口单位 = **采样数**（一次 Present = 一个样本），⛔ 不是墙钟：`--present window` 是 real-time
+//     时钟（不可复现），采样数是"guest 又画了几帧"的确定性计数。
+//   ⛔ 缺省关：打开会改变既有脚本的退出码（"点了确实没反应"的已知缺陷会立刻红 ⇒ 需要单独裁决）。
+struct ExpectChangePolicy {
+    bool enabled = false;
+    bool click = false;  // `click`（Kind::Click）
+    bool key = false;    // `key_down` / `key_up`
+    bool mouse = false;  // `mouse_down` / `mouse_up`（`MouseMove` 不要求变化：hover 本来就可能不改像素）
+    // 观测窗长度（采样数；> 0）。窗口里"采样在增长但画面一次都没变" ⇒ not-changed 失败。
+    std::uint64_t window_samples = 0;
+    std::string text;  // 规范化写法（启动日志 / 失败信息；⛔ 不参与判定）
+};
+
+// `--expect-change-after` 的闭集合解析：`click[,key][,mouse]`（逗号分隔、可换序、⛔ 不许重复）。
+// 拼错 / 空项 ⇒ false + err（⛔ 不静默退化成"全关"——那正是本单要消灭的静默失败）。
+bool parseExpectChangeActions(const std::string& spec, ExpectChangePolicy* out, std::string* err);
+
+// 观测窗的可观测账（守卫 / 运行摘要用；⛔ 不是墙钟）。
+struct ExpectChangeStats {
+    std::uint64_t windows_opened = 0;
+    std::uint64_t windows_satisfied = 0;
+    std::uint64_t windows_failed = 0;
+};
+
+// ★ 本轮**真实生效**的仪器位（⛔ 不是 CLI 回显：`window-prof` 读的是 `WindowProfiler::armed()`）。
+//   运行摘要的 `instr :` 行就是它 —— `docs/03-emulator/measurement.md` M-02 的**口径标签**。
+struct InstrumentationState {
+    bool profile = false;
+    bool frame_trace = false;
+    bool window_prof = false;
+    bool expect_change = false;
+    std::uint64_t expect_windows = 0;  // 本轮真的开了几个观测窗（0 = 没有一个匹配的动作）
 };
 
 class Machine {
@@ -185,6 +245,15 @@ public:
         input_script_.setMaxAutoHoldMs(ms);
         interaction_.actuator().setMaxAutoHoldMs(ms);
     }
+    // ★ marker 超时（`--input-marker-timeout-ms`，**宿主墙钟** ms；0 = 不设限）。只作用到时间线：
+    //   交互图的 actuator 没有 marker 动作源（图生成的是 `at frame`）。必须在 `run()` 之前设。
+    void setInputMarkerTimeoutMs(std::uint64_t ms) { input_script_.setMarkerTimeoutMs(ms); }
+    // ★ 在 VM 循环头的**块入口**采一次样并喂给时间线（`Machine::run` 的钩子调它；纯档夹具也直接调）。
+    //   返回 true = 这次产生了边沿（有新事件）。⛔ 它**不是**通用块边界采样入口：调用点必须已经
+    //   确认 `cpu_.eip` 是 `kMarkerLoopHeadEa` / `kMarkerPumpReturnEa`（见 `runtime/engine_marker.h`）。
+    bool sampleMarker();
+    const MarkerSample& lastMarkerSample() const { return last_marker_sample_; }
+    const MarkerSampler& markerSampler() const { return marker_sampler_; }
     // 每个块边界推进一次注入时间线（`Machine::run` 内部调用；`GetMessageA` 阻塞时的宿主事件泵
     // 也调用它，否则 guest 卡在等消息时脚本永远不触发）。
     void tickInputScript(X86& cpu);
@@ -200,6 +269,18 @@ public:
     FrameSampler& sampler() { return sampler_; }
     // 每个块边界推进一次交互图（顺序：先图 tick（它 append 动作）再 actuator tick（真正发 WM_*））。
     void tickInteraction(X86& cpu);
+
+    // ★ 时间线的效果级判据（见上面的 `ExpectChangePolicy`）：必须在 `run()` 之前、**在
+    //   `loadInputScript*` 之后**配置一次（策略要扫一遍脚本的动作；零匹配 = 拒绝 ⇒ 不许静默开局）。
+    //   与 `--interaction-graph` **互斥**（图有自己的 `expect_change` 语义；两套判据同时开 = 两套口径）。
+    bool configureExpectChange(const ExpectChangePolicy& p, std::string* err);
+    bool expectChangeEnabled() const { return expect_policy_.enabled; }
+    const ExpectChangePolicy& expectChangePolicy() const { return expect_policy_; }
+    const ExpectChangeStats& expectChangeStats() const { return expect_stats_; }
+    // ★ 区间 profiler 的**真实** armed 位（`WindowProfiler::armed()`，不是"脚本里有没有 profile 动作"）：
+    //   运行摘要 `instr :` 行与守卫都读它。
+    bool profilerArmed() const { return window_prof_.armed(); }
+    const InstrumentationState& instrumentation() const { return instrument_; }
 
     // ---- 访问器 ----
     GuestMemory& mem() { return mem_; }
@@ -265,6 +346,22 @@ private:
     // ★ 一份 `InputScript` 的公共推进（时间线与交互图的 actuator **共用**这条路径：
     //   tick / profiler 窗口边界登记 / `quit` 唤醒 WM_QUIT）。⛔ 不要给两条通道各写一遍。
     void pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms);
+    // ---- 时间线的效果级判据（`--expect-change-*`；见 `ExpectChangePolicy`）----
+    //   ★ 开窗**就地**在 `tickInputScript` 里做（⛔ 不延迟到块边界）：`InputScript::tick` 里
+    //     `quit` 之后的同 tick 动作不会再被应用，而块边界的 `quit` 分支会先 break ——
+    //     延迟开窗会让 `click` + `quit` 静默通过（正是本单要消灭的"发完不管"）。
+    struct ExpectWindow {
+        std::string action_text;
+        std::uint64_t changes_at_start = 0;
+        std::uint64_t samples_at_start = 0;
+        std::uint64_t start_frame = 0;
+        std::uint64_t start_insns = 0;
+        std::uint64_t start_guest_ms = 0;
+    };
+    bool expectWatches(InputScript::Kind kind) const;
+    void openExpectWindows(std::size_t applied_before);
+    void evaluateExpectWindows();
+    void failExpectWindow(const ExpectWindow& w, const char* kind, const char* why);
     std::uint64_t wallMs() const;
     // winmm 定时器：找到期最早的一个并把控制权交给 guest 回调（协作式；见 x86.h 的 GuestTimer）。
     // 返回 true = 已铺好回调帧（调用方应 continue）；false = 没有到期项或铺帧失败（后者设 r）。
@@ -284,6 +381,9 @@ private:
     NativeOverrideTable overrides_;
     NativeBlockTable block_overrides_;
     InputScript input_script_;
+    // ★ marker 采样器 + 最近一次样本（只在脚本里有 marker 动作时才会被 run 钩子调用）。
+    MarkerSampler marker_sampler_;
+    MarkerSample last_marker_sample_;
     // ★ 识别驱动的交互任务（`--interaction-graph`）+ 它的画面采样器。
     //   采样器只在这张图被加载时挂到 presenter 上（`loadInteractionGraph`），否则一次也不采样。
     InteractionGraph interaction_;
@@ -297,6 +397,13 @@ private:
     bool profile_end_pending_ = false;
     std::string profile_begin_label_;
     std::string profile_end_label_;
+    // ★ 时间线的效果级判据（`--expect-change-*`）：窗 / 账 / 本轮真实生效的仪器位。
+    ExpectChangePolicy expect_policy_;
+    std::vector<ExpectWindow> expect_windows_;
+    ExpectChangeStats expect_stats_;
+    bool expect_failed_ = false;     // 已判死（三种之一）；detail 在 `expect_failure_`
+    std::string expect_failure_;     // 进 `RunResult.detail`（main 据此 exit 5）
+    InstrumentationState instrument_;  // 运行摘要 `instr :` 行（⛔ 不是 CLI 回显）
     std::chrono::steady_clock::time_point wall_start_{};
     bool wall_start_valid_ = false;
     // ★ 影子调用栈：上一个 block 以 `call` 结束时的返回地址（下一个迭代压帧时用）。
@@ -345,5 +452,13 @@ private:
 // 纯档夹具用：`Machine` 的全局实例指针（fault 诊断要拿到寄存器与 `.lst`）
 Machine* activeMachine();
 void setActiveMachine(Machine* m);
+
+// 这台 cpu **所属的** Machine（宿主侧归属，`Machine::wire()` 捕获的 `X86::machine`）。
+//   ★ 与 `activeMachine()` 的区别：那是"最后 init 的那台"的进程级全局，可被别的 Machine 合法改写
+//     （`~Machine` 也会清空）；本函数回答的是"**谁装配了这台 cpu**"，因此销毁路径可以靠它回收
+//     arena —— 哪怕此刻 `activeMachine()` 是另一台（REQ-01M6X4MSCMMFEXYXCSK6V61QR2）。
+//   ★ 兜底：没走 `Machine::wire()` 的 X86（直接构造的纯夹具）只有"全局那台且真是这台 cpu"才算数；
+//     否则返回 nullptr（宿主不知道 arena 归谁 ⇒ 调用方只能清状态块，⛔ 不许猜）。
+Machine* machineOf(const X86& cpu);
 
 }  // namespace lift

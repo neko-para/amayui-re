@@ -22,6 +22,9 @@
 //      的像素级断言；源矩形越界裁剪；纹理在批次里 AddRef / 合成后对称 Release。
 //   ⑥ D3DX math：Multiply/Scaling/Translation/RotationAxis/RotationYawPitchRoll/OrthoLH/
 //      PerspectiveFovLH/LookAtLH/Vec4Transform/Vec3Normalize 的**手算值**断言。
+//   ⑦ 资源耗尽 **≠** unimplemented：把夹具自己那 1 MiB guest 堆占满到
+//      "状态块能成、批次数组不够"（⛔ 不改任何默认尺寸 / 夹具堆尺寸）⇒ 出参仍是 NULL、
+//      `stop_why` 是独立的"D3DX 资源耗尽"、`unimplemented_calls` 不涨、释放占块后堆用量回基线。
 //
 // ★ 所有方法调用都从 **guest 代码** 经 vtable 调（`mov eax,[vtbl]; push …; call [eax+off]`），
 //   测的是"guest 可见的对象"，不是宿主直接调函数。
@@ -190,7 +193,11 @@ struct Fixture {
         const lift::RunResult r = m.run(o);
         if (out) *out = r;
         if (r.reason == lift::StopReason::UntilEa) return m.cpu().eax();
-        return r.reason == lift::StopReason::Stopped || r.reason == lift::StopReason::Unimplemented
+        // ★ 白名单 = "调用返回了 EAX"的停机原因（不是"成功"）。新增的 `Trap` /
+        //   `ResourceExhausted` 必须在内：否则 `create-sprite-oom` 的 `hr`（= 这里返回的 eax）
+        //   会从 shim 写的 `kFail` 静默变成 0，把"调用真的发生了"这条判据弄坏。
+        return r.reason == lift::StopReason::Stopped || r.reason == lift::StopReason::Unimplemented ||
+                       r.reason == lift::StopReason::Trap || r.reason == lift::StopReason::ResourceExhausted
                    ? m.cpu().eax()
                    : 0;
     }
@@ -269,6 +276,21 @@ struct Fixture {
         a.callRel(code_ea, kProcD3DXCreateSprite);
         a.ret();
         const std::uint32_t hr = runAsm(a);
+        if (out_obj) *out_obj = m.mem().rd32(out_ea);
+        return hr;
+    }
+
+    // D3DXCreateSprite(device, &out) + 把 RunResult 交出来（上面的 createSprite 只返回 eax，
+    // 看不出"停在哪"）。⑦ 用它区分"资源耗尽硬停"与"调用失败"。
+    std::uint32_t createSpriteRaw(std::uint32_t device, std::uint32_t* out_obj, lift::RunResult* rr) {
+        // ★ 哨兵：出参槽预填 0xDEADBEEF ⇒ "调用根本没发生"（槽还是哨兵）不会伪装成"被写成 0"。
+        const std::uint32_t out_ea = placeU32(0xDEADBEEFu);
+        Asm a;
+        a.pushImm(out_ea);
+        a.pushImm(device);
+        a.callRel(code_ea, kProcD3DXCreateSprite);
+        a.ret();
+        const std::uint32_t hr = runAsmRaw(a, rr);
         if (out_obj) *out_obj = m.mem().rd32(out_ea);
         return hr;
     }
@@ -884,7 +906,9 @@ void caseTraps() {
         r.f.runAsmRaw(a, &rr);
         LIFT_CHECK(rr.reason != lift::StopReason::UntilEa);
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
-                          static_cast<std::uint32_t>(lift::StopReason::Stopped));
+                          static_cast<std::uint32_t>(lift::StopReason::Trap));
+        // ★ 已注册的槽走到 loud trap ⇒ **非 ok**（本单之前这里落 `Stopped`(ok) ⇒ 进程 exit 0）。
+        LIFT_CHECK(!rr.ok());
         LIFT_CHECK(r.f.m.cpu().running == false);
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.f.m.cpu().shim.unimplemented_calls), 1u);
         LIFT_CHECK(rr.detail.find("ID3DXSprite") != std::string::npos);
@@ -912,7 +936,9 @@ void caseTraps() {
         r.f.runAsmRaw(a, &rr);
         LIFT_CHECK(rr.reason != lift::StopReason::UntilEa);
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
-                          static_cast<std::uint32_t>(lift::StopReason::Stopped));
+                          static_cast<std::uint32_t>(lift::StopReason::Trap));
+        // ★ 已注册的槽走到 loud trap ⇒ **非 ok**（本单之前这里落 `Stopped`(ok) ⇒ 进程 exit 0）。
+        LIFT_CHECK(!rr.ok());
         LIFT_CHECK(r.f.m.cpu().running == false);
         LIFT_CHECK(std::string(r.f.m.cpu().stop_why ? r.f.m.cpu().stop_why : "") == "unimplemented D3DX9 call");
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.f.m.cpu().shim.unimplemented_calls), 1u);
@@ -938,7 +964,9 @@ void caseTraps() {
         lift::RunResult rr;
         r.f.runAsmRaw(a, &rr);
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
-                          static_cast<std::uint32_t>(lift::StopReason::Stopped));
+                          static_cast<std::uint32_t>(lift::StopReason::Trap));
+        // ★ 已注册的槽走到 loud trap ⇒ **非 ok**（本单之前这里落 `Stopped`(ok) ⇒ 进程 exit 0）。
+        LIFT_CHECK(!rr.ok());
         LIFT_CHECK(std::string(r.f.m.cpu().stop_why ? r.f.m.cpu().stop_why : "") == "unimplemented D3DX9 call");
     }
     // (d) 非设备对象当 pDevice ⇒ loud trap（⛔ 不静默返回 S_OK）
@@ -956,10 +984,120 @@ void caseTraps() {
         lift::RunResult rr;
         r.f.runAsmRaw(a, &rr);
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
-                          static_cast<std::uint32_t>(lift::StopReason::Stopped));
+                          static_cast<std::uint32_t>(lift::StopReason::Trap));
+        // ★ 已注册的槽走到 loud trap ⇒ **非 ok**（本单之前这里落 `Stopped`(ok) ⇒ 进程 exit 0）。
+        LIFT_CHECK(!rr.ok());
         LIFT_CHECK(std::string(r.f.m.cpu().stop_why ? r.f.m.cpu().stop_why : "") == "unimplemented D3DX9 call");
         LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(out_ea), 0u);  // 失败时出参清 0
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑦ 资源耗尽 ≠ unimplemented：把**夹具自己**那 1 MiB guest 堆占满到
+//    "状态块（128 B 载荷 → 136 B 块）能成、批次数组（1024 B → 1032 B 块）不够"的窗口。
+//    · ⛔ 不改 `kFixtureHeapBytes` / `heap().init(...)`：占满的对象就是 guest 侧用的**同一个**
+//      `GuestHeap` ⇒ `createSpriteState` 里的 `cpu.heap->alloc` 真的失败（不是伪造前提）。
+//    · 取窗口下沿 `L = need_state`（那 136 B 正好被状态块吃满 ⇒ 批次数组一个字节都不剩）：
+//      再宽一点会把"失败路径上多了一次小分配"静默吸收掉 ⇒ `allocCount()+1` 把"多一次就红"变成判据。
+// ---------------------------------------------------------------------------------------
+void caseCreateSpriteOom() {
+    lift_test::g_current_case = "d3dx9/create-sprite-oom";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.dev.object == 0) return;
+
+    auto& h = r.f.m.heap();
+
+    // 一块 payload 在 guest 堆里**真正占**多少（块总大小 = 块头 + 对齐后的载荷）。
+    // ★ 不在这里重抄块头 / 对齐（`heap.h` 的 Options 默认值）：用 `bytesInUse()` 的差值实测
+    //   ⇒ 分配器改了对齐 / 块头，这里跟着走（口径只留在 `heap.cpp` 一处）。
+    auto footprint = [&](std::uint32_t payload) -> std::uint32_t {
+        const std::uint32_t b0 = h.bytesInUse();
+        const std::uint32_t p = h.alloc(payload);
+        if (p == 0) return 0;
+        const std::uint32_t used = h.bytesInUse() - b0;
+        h.free(p);
+        return used;
+    };
+
+    const std::uint32_t baseline = h.bytesInUse();
+    // 载荷 = `createSpriteState` 真会申请的两次：
+    //   状态块 `kSpBytes` = 128（`d3dx9_sprite.cpp:60`）；
+    //   批次数组 `kInitialBatchCapacity`(16) × `kBatchEntryBytes`(64) = 1024（`:64` / `d3dx9_sprite.h:91`）。
+    // ★ 这两个字面量漂了不会静默失去覆盖：下面的窗口断言与 `allocCount()+1` 会当场红。
+    const std::uint32_t need_state = footprint(128u);
+    const std::uint32_t need_batch = footprint(1024u);
+    const std::uint32_t header = footprint(0u);
+    LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);  // 探针没留下块
+    LIFT_CHECK_NE_U32(need_state, 0u);
+    LIFT_CHECK(need_batch > need_state);  // 前提：批次块比状态块大
+    LIFT_CHECK(header >= 8u);             // 前提：块头至少 8 B
+
+    // 占满：反复从**最大空闲块**里切，直到它落进 [need_state, need_batch)。
+    // ★ 只依赖 `largestFreeBlock()`（不假设"堆里只有一个空闲块"）：每轮切掉 `need_state` 之外的
+    //   全部（`biggest - need_state`，最少 `need_batch - need_state` = 896 B）⇒ 收敛。
+    // ★ 窗口的**保证**是下面两条范围断言，不是这个循环：多碎片时最大空闲块可能落在
+    //   (need_state, need_batch) 而不是正好 need_state。
+    std::vector<std::uint32_t> fillers;
+    for (int guard = 0; guard < 64; ++guard) {
+        const std::uint32_t biggest = h.largestFreeBlock();
+        if (biggest < need_batch) break;            // 已落进窗口
+        if (biggest <= need_state + header) break;  // 切不动（下面的范围断言会报）
+        const std::uint32_t p = h.alloc(biggest - need_state - header);
+        LIFT_CHECK_NE_U32(p, 0u);
+        if (p == 0) break;
+        fillers.push_back(p);
+    }
+    LIFT_CHECK_NE_U32(static_cast<std::uint32_t>(fillers.size()), 0u);
+    LIFT_CHECK(h.largestFreeBlock() >= need_state);  // 状态块放得下
+    LIFT_CHECK(h.largestFreeBlock() < need_batch);   // 批次数组放不下
+
+    const std::uint32_t filled = h.bytesInUse();
+    const std::uint32_t allocs_before = h.allocCount();
+    const std::uint32_t peak_before = h.peak();
+    const std::uint32_t traps_before = r.f.m.cpu().shim.unimplemented_calls;
+
+    lift::RunResult rr;
+    std::uint32_t obj = 0xDEADBEEFu;
+    const std::uint32_t hr = r.f.createSpriteRaw(r.dev.object, &obj, &rr);
+
+    // ★ 从 `fillers.push_back` 之后**不许 early return**：`LIFT_CHECK` 不中止，占块必须被释放，
+    //   否则"回到基线"那条会变成假红。
+    // ① 出参 ppSprite 仍是 NULL（`shims/d3dx9.cpp` 在分配之前就把它清了 0）
+    LIFT_CHECK_EQ_U32(obj, 0u);
+    // ② 停机口径是**独立**的资源耗尽，不是 unimplemented，也不是正常结局
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
+                      static_cast<std::uint32_t>(lift::StopReason::ResourceExhausted));
+    LIFT_CHECK(!rr.ok());  // ★ 非 ok ⇒ `exitCodeForRun` 给 2（本单之前 `Stopped`(ok) ⇒ 0）
+    LIFT_CHECK(std::string(lift::stopReasonName(rr.reason)) == "resource-exhausted");
+    // ★ 映射级"真实停机 ⇒ 非 0"：不是只断言枚举值，退出码也一起钉住。
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::exitCodeForRun(rr)), 2u);
+    LIFT_CHECK(r.f.m.cpu().running == false);
+    LIFT_CHECK(std::string(r.f.m.cpu().stop_why ? r.f.m.cpu().stop_why : "") == "D3DX 资源耗尽");
+    LIFT_CHECK(rr.detail.find("D3DX 资源耗尽") != std::string::npos);  // 运行摘要也带这个标签
+    // ③ 缺口计数**没有**增加（"误诊回归"的唯一机械判据）
+    LIFT_CHECK_EQ_U32(r.f.m.cpu().shim.unimplemented_calls, traps_before);
+    // ⑤ 分支真的走对了：状态块成功（正好 +1 次成功分配）→ 批次数组失败 ⇒ `free(state)`
+    //    ★ 没有这一条，若状态块自己就失败，④ 会因为"一个字节都没动"而恒真。
+    //    ★ 这是本用例的**覆盖率警戒线**（夹具前提），不是堆的策略断言：它只读 `allocCount()` /
+    //      `peak()`，不读块表形状。失败路径上将来若多/少一次成功分配 ⇒ 它红是**信号**
+    //      （那说明窗口要按失败路径上的分配数量重推），不是产品回归。
+    LIFT_CHECK_EQ_U32(h.allocCount(), allocs_before + 1u);
+    LIFT_CHECK(h.peak() > peak_before);
+    LIFT_CHECK_EQ_U32(hr, lift::d3dx9::kFail);  // 辅助：两支都给 kFail ⇒ 它本身不是判据
+    // ④ 失败路径没留半建：状态块建了又还 ⇒ 调用一返回就等于占满后的量
+    LIFT_CHECK_EQ_U32(h.bytesInUse(), filled);
+
+    // 释放占块 ⇒ `bytesInUse` 逐字节回到基线
+    for (const std::uint32_t p : fillers) LIFT_CHECK(h.free(p));
+    LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);
+
+    // （行为，不是策略）现在建得出来 ⇒ 刚才的红是"堆满了"，不是"堆坏了"
+    std::uint32_t obj2 = 0;
+    LIFT_CHECK_EQ_U32(r.f.createSprite(r.dev.object, &obj2), 0u);
+    LIFT_CHECK_NE_U32(obj2, 0u);
+    if (obj2 != 0) LIFT_CHECK_EQ_U32(r.f.method(obj2, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);
 }
 
 }  // namespace
@@ -973,6 +1111,7 @@ int main() {
         caseTextureDraw();
         caseMatrix();
         caseTraps();
+        caseCreateSpriteOom();
         return finish("d3dx9");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());

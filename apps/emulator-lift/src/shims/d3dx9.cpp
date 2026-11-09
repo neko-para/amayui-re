@@ -98,6 +98,8 @@ void d3dxTrap(X86& cpu, const char* method, const char* fmt, ...) {
     dumpGuestStack(cpu, stderr, 24);
     cpu.running = false;
     cpu.stop_why = "unimplemented D3DX9 call";
+    // ★ 停机种类（纯宿主）：已注册的导出 / 槽走到 loud trap ⇒ 非正常结局（`StopReason::Trap`）。
+    cpu.stop_kind = HostStopKind::Trap;
     ++cpu.shim.unimplemented_calls;
 }
 
@@ -123,6 +125,8 @@ void d3dxResourceStop(X86& cpu, const char* method, const char* fmt, ...) {
     dumpGuestStack(cpu, stderr, 24);
     cpu.running = false;
     cpu.stop_why = "D3DX 资源耗尽";
+    // ★ 停机种类（纯宿主）：容量/碎片问题，⛔ 与上一族（`Trap`）合并 —— 修法完全不同。
+    cpu.stop_kind = HostStopKind::ResourceExhausted;
     // ⛔ 不 ++cpu.shim.unimplemented_calls：这不是缺口。
 }
 
@@ -576,6 +580,7 @@ void shimTextureUnlockRect(X86& cpu, ShimCall& call) {
 }
 
 void shimTextureGetSurfaceLevel(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);  // 父纹理对象（surface 的像素块 owner）
     const std::uint32_t state =
         requireTexture(cpu, call, "IDirect3DTexture9::GetSurfaceLevel(+0x48)");
     if (state == 0) {
@@ -602,7 +607,9 @@ void shimTextureGetSurfaceLevel(X86& cpu, ShimCall& call) {
         call.result = d3d9::kFail;
         return;
     }
-    const std::uint32_t surface = createD3dxSurfaceObject(cpu, state);
+    // ★ owner = 父纹理对象（`self`）：像素块 + 'TEX1' 状态块的寿命挂在纹理对象的 refcount 上，
+    //   surface 自己**没有**析构钩子（见 com.h 文件头）⇒ 绑定为 RT 时必须经 `ownerOf` 保住它。
+    const std::uint32_t surface = createD3dxSurfaceObject(cpu, state, self);
     if (surface == 0) {
         d3dxTrap(cpu, "IDirect3DTexture9::GetSurfaceLevel(+0x48)", "在 guest 内存里建 surface 对象失败");
         call.result = d3d9::kFail;
@@ -742,10 +749,24 @@ void shimSurfaceLockRect(X86& cpu, ShimCall& call) {
     }
     d3d9::DeviceInfo dev;
     if (d3d9::deviceInfoOfState(cpu, state, &dev, nullptr)) {
-        // 后缓冲 surface 的 state 就是设备状态块；⛔ 不能按纹理锁字段去写（会改坏设备状态）。
-        d3dxTrap(cpu, "IDirect3DSurface9::LockRect(+0x34)",
-                 "后缓冲 surface 的 LockRect 尚未实现（⛔ 不把锁字段写进设备状态块）");
-        call.result = d3d9::kInvalidCall;
+        // ★ 后缓冲 surface 的 state 就是设备状态块（'D9D1'）：锁字段落在像素块 `GuestSurface` 上，
+        //   ⛔ 不写状态块（64 B 全满）/ 纹理的 'TEX1'（+44/+48 会踩别人的）。
+        // ★ 失败面：契约级 guest 错误 ⇒ D3DERR_INVALIDCALL + Warn（guest 自己对 `0x4A4F8D test eax,eax`
+        //   做了分支）；本仓状态崩坏（`broken`）⇒ 照旧 loud trap。
+        // ★ 参数序号（真机 `0x4A4F73 push 0` / `0x4A4F89 push &var_44` / `0x4A4F8A push eax`）：
+        //   u32(1)=pLockedRect、u32(2)=pRect、u32(3)=Flags。
+        bool broken = false;
+        std::string why;
+        if (!d3d9::lockBackBuffer(cpu, state, call.u32(1), call.u32(2), call.u32(3), &broken, &why)) {
+            if (broken) {
+                d3dxTrap(cpu, "IDirect3DSurface9::LockRect(+0x34)", "%s", why.c_str());
+            } else {
+                d3dxWarn("IDirect3DSurface9::LockRect(+0x34)", "%s", why.c_str());
+            }
+            call.result = d3d9::kInvalidCall;
+            return;
+        }
+        call.result = d3d9::kOk;
         return;
     }
     d3d9::TextureInfo ti;
@@ -771,9 +792,19 @@ void shimSurfaceUnlockRect(X86& cpu, ShimCall& call) {
     }
     d3d9::DeviceInfo dev;
     if (d3d9::deviceInfoOfState(cpu, state, &dev, nullptr)) {
-        d3dxTrap(cpu, "IDirect3DSurface9::UnlockRect(+0x38)",
-                 "后缓冲 surface 的 UnlockRect 尚未实现（⛔ 不把锁字段写进设备状态块）");
-        call.result = d3d9::kInvalidCall;
+        // 同 LockRect：契约级失败（未锁就解锁）答 D3DERR_INVALIDCALL；本仓状态崩坏才 trap。
+        bool broken = false;
+        std::string why;
+        if (!d3d9::unlockBackBuffer(cpu, state, &broken, &why)) {
+            if (broken) {
+                d3dxTrap(cpu, "IDirect3DSurface9::UnlockRect(+0x38)", "%s", why.c_str());
+            } else {
+                d3dxWarn("IDirect3DSurface9::UnlockRect(+0x38)", "%s", why.c_str());
+            }
+            call.result = d3d9::kInvalidCall;
+            return;
+        }
+        call.result = d3d9::kOk;
         return;
     }
     d3d9::TextureInfo ti;
@@ -1385,9 +1416,9 @@ const std::vector<ComMethod>& spriteMethods() {
 
 }  // namespace
 
-std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user) {
+std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user, std::uint32_t owner) {
     if (!cpu.com) return 0;
-    return cpu.com->createObject(cpu, "IDirect3DSurface9", surfaceMethods(), user);
+    return cpu.com->createObject(cpu, "IDirect3DSurface9", surfaceMethods(), user, nullptr, owner);
 }
 
 void registerD3DX9Shims(ShimRegistry& shims) {

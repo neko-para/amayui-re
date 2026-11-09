@@ -2,28 +2,11 @@
 
 - id: REQ-01M6ZDSGQY1RXX3N3WJKA8D26H
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- verify: apps/emulator-lift/tests/d3d9.cpp#d3d9/backbuffer-lockrect
 - repro: docs/03-emulator/defects.md#BUG-15
 - tags: [emulator-lift, d3d9]
-
-## 现象
-
-在 `EU-ROOM` 里按 ESC（走"退出房间"的同一条路径）⇒ 900 条指令后停：
-
-```
-stop      : stopped @ eip=004A4F8D
-detail    : unimplemented D3DX9 call（shim com!IDirect3DSurface9::LockRect）
-```
-
-⇒ **出房间的路径今天走不完**；交互任务 `repo:apps/emulator-lift/scripts/interaction/room-exit.graph` 的
-终态判据因此不可达（它会响亮失败，而不是静默通过）。
-
-## 根因
-
-`repo:apps/emulator-lift/src/shims/d3dx9.cpp` 的 `shimSurfaceLockRect` / `shimSurfaceUnlockRect`
-对"后缓冲 surface（state == 设备状态块）"**明确 trap**（"⛔ 不把锁字段写进设备状态块"）。
-房间退出路径要读后缓冲（转场 / 缩略图），于是停在这里。
 
 ## 判据（修好后）
 
@@ -45,3 +28,17 @@ detail    : unimplemented D3DX9 call（shim com!IDirect3DSurface9::LockRect）
 
 - ⛔ 不把 `LockRect` 改成静默返回成功（房间会读到垃圾像素，比停住更难查）。
 - ⛔ 不为了这条改 `.lst` / 语料。
+
+## 收口（2026-11-09，macOS arm64 / RelWithDebInfo）
+
+- **"未实现"这个缺陷本身已消除**：`LockRect(backbuffer)` 真机调用成功 2 次（`Pitch=5120`、`pBits=0x28000008`、矩形 0,0..1280,720）
+  + `UnlockRect` 2 次，旧 trap 消失。锁字段落 `GuestSurface`（⛔ 未进 `'D9D1'` / `'TEX1'`）；
+  `Pitch` = 整幅行距、`pBits` = 矩形左上；锁前 GPU 屏障（镜像目标 ⇒ `syncToGuest`，否则 `flush`）；解锁不标脏。
+  契约失败（已锁 / 未锁 / 越界 / DISCARD / 无 LOCKABLE / MSAA / 未定义 flags / 坏出参）⇒ `D3DERR_INVALIDCALL` + Warn；本仓崩坏才 trap。
+- 守卫：`apps/emulator-lift/tests/d3d9.cpp#d3d9/backbuffer-lockrect`（修前恢复 trap ⇒ 11 failures）·
+  `apps/emulator-lift/tests/gpu_batch.cpp#gpu-batch/backbuffer-lock-barrier`（含补注册的 `gpu-batch-order`）。
+- 变异：`--match backbuffer` 5/5 实测红后还原（pBits 去偏移 / Pitch 用子矩形宽 / 删已锁检查 / 删屏障 / 删 LOCKABLE）；
+  复审另手工验 M4（Unlock 不清）红。
+- ★ **端到端判据仍不成立，但不是本单的缺口**：`room-exit.graph` 现在停在新 gap
+  `kernel32!RaiseException`（`Command_Exit_Exception` 的 C++ EH 展开，`eip=0x4123C4` 返回 `0x004123C9`）
+  ⇒ 已另开 `REQ-01M708DF24KY0QZNEHY66S0HYW`；本单不再承载 e2e 终态，A 单的终态判据挂在那一单上。

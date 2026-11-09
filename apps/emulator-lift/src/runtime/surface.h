@@ -31,7 +31,20 @@ struct GuestSurface {
     std::int32_t height = 0;
     std::uint32_t pitch = 0;    // 每行字节数（DWORD 对齐）
     SurfaceFormat format;
+    // ★ DDraw 的**嵌套**锁计数（最多 8 层）；D3D9 的锁是"非嵌套、0→1"，
+    //   ⛔ 不要混用这个变量（混在一起就分不清"DDraw 嵌了 8 层"与"D3D9 锁着"）。
     std::uint32_t lock_count = 0;
+
+    // ---- ★ D3D9 后缓冲 surface 专属（只有 `d3d9::createDeviceState` 会填；纹理 / DDraw 恒 0）----
+    // ★ 为什么不放设备状态块：`'D9D1'` 的 64 B 全占满（`runtime/d3d9.cpp` 的 DevOff，+44/+48/+52/
+    //   +56/+60 各有主人）；`'TEX1'` 的锁字段在 +44/+48 —— 两处都会被踩坏。⛔ 不许"挤一挤"。
+    // ★ 为什么不放宿主 map：键只能是状态块 EA 或 arena EA，两者都会被堆/arena 复用 ⇒ 得自己造
+    //   生命周期；而锁的生命周期**就是像素块的生命周期** ⇒ 挂在 GuestSurface 上由 `destroy` 自动收。
+    bool d3d9_locked = false;                       // IDirect3DSurface9::LockRect 期间
+    std::int32_t d3d9_lock_rect[4] = {0, 0, 0, 0};  // x0,y0,x1,y1（右/下开区间；诊断用）
+    std::uint32_t d3d9_lock_serial = 0;             // 累计锁次数（纯诊断）
+    bool d3d9_lockable = false;                     // D3DPRESENTFLAG_LOCKABLE_BACKBUFFER
+    std::uint32_t d3d9_multisample = 0;             // PresentParams::MultiSampleType（≠ NONE ⇒ 锁必失败）
 };
 
 class SurfaceArena {

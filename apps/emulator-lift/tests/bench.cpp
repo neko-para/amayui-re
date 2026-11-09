@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -51,7 +52,16 @@ std::vector<std::uint8_t> makeLoop(std::uint32_t n) {
 int main(int argc, char** argv) {
     using namespace lift_test;
     std::uint32_t n = 5000000;
-    if (argc > 1) n = static_cast<std::uint32_t>(std::strtoul(argv[1], nullptr, 10));
+    // ★ `--profile`（可选）：给 `docs/03-emulator/measurement.md` M-02 的**无安装 A/B** 用。
+    //   它只开"块命中 + 块墙钟 + shim 墙钟"那三笔账；⛔ 这不是性能门槛，读数只作两臂对照。
+    bool profile = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--profile") == 0) {
+            profile = true;
+            continue;
+        }
+        n = static_cast<std::uint32_t>(std::strtoul(argv[i], nullptr, 10));
+    }
 
     lift::Machine m;
     std::string err;
@@ -69,6 +79,7 @@ int main(int argc, char** argv) {
     lift::RunOptions o;
     o.until_ea = 0xFFFFFFFFu;
     o.max_insns = static_cast<std::uint64_t>(n) * 4ull + 1000ull;
+    o.profile = profile;
     const auto t0 = std::chrono::steady_clock::now();
     const lift::RunResult r = m.run(o);
     const auto t1 = std::chrono::steady_clock::now();
@@ -82,5 +93,8 @@ int main(int argc, char** argv) {
     const double mips = secs > 0 ? static_cast<double>(r.insns) / secs / 1e6 : 0.0;
     std::printf("bench     : %llu insns in %.3f s = %.2f MIPS（循环 %u 次；纯档自造字节）\n",
                 (unsigned long long)r.insns, secs, mips, n);
+    // ★ 口径标签（M-02）：`--profile` 两臂必须能被一眼分开，⛔ 不许把两臂的 ms/M 混进同一张表。
+    m.dumpRunSummary(r, stdout);
+    if (profile) m.dumpProfile(stdout, 12);
     return finish("bench");
 }

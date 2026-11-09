@@ -6,6 +6,14 @@
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - tags: [emulator-lift d3d9]
 
+# emulator-lift · TITLE 往返后的一次性 +2 surfaces / +1.3 MB：判「预期缓存」还是「真残留」（两种结局都落结论）
+
+- id: REQ-01M6WW9V9N863FDTMK6BRMDK1K
+- type: spike
+- status: open
+- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- tags: [emulator-lift d3d9]
+
 ## 已知（父级验收实测）
 
 进 OPTION → 右键回 TITLE 之后，相对 TITLE 静止态多 **+2 surfaces / +1,299,856 B**；而 1 / 2 / 3 轮往返的
@@ -48,3 +56,9 @@
 
 - ⛔ 不用"调大容差"或"调大 arena"把它盖掉。
 - 终点必须都是"回到 TITLE 之后"：终点不同就没法比（TITLE 静止态与 OPTION 屏的工作集本来就不同）。
+
+## 本轮状态（2026-11-09）
+
+**未处理**（父级按用户要求暂停了后续派发）。它是本子树里唯一一张**既没有实现、也没有只读分析**的未收口单 ——
+前置是**真机三次独立子进程**（0 轮 / 1 轮 / 2 轮 / 3 轮往返）读 `arena : surfaces N in_use U peak P largest-free F`，
+不接受静态推断。下一轮的第一步就是跑那四条命令并落读数（`.tmp/` 不算交付，读数要点写回本节）。

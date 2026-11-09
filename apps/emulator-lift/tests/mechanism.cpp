@@ -141,6 +141,14 @@ void shimAdd(lift::X86&, lift::ShimCall& call) {
     call.result = g_com_arg0 + g_com_arg1;
 }
 
+// 模拟 `ExitProcess` 那类"实现里主动停"：只置 running/stop_why，**不**写 `stop_kind`
+// （⇒ 汇入点必须归 `Stopped`）。用于钉"停机种类按轮重置"。
+void shimNormalStop(lift::X86& cpu, lift::ShimCall& call) {
+    call.result = 0;
+    cpu.running = false;
+    cpu.stop_why = "fixture: normal stop";
+}
+
 // ---------------------------------------------------------------------------------------
 // ③ 运行期导出（模拟 ddraw!DirectDrawCreate）
 // ---------------------------------------------------------------------------------------
@@ -354,11 +362,34 @@ int main() {
         const std::uint32_t traps_before = m.cpu().shim.unimplemented_calls;
         m.cpu().eip = code3;
         r = run(m);
-        // fn 非空 ⇒ machine.cpp 把它归成"shim 主动结束运行"；关键是它**真的停了**
-        LIFT_CHECK(r.reason == lift::StopReason::Stopped);
+        // ★ 已注册的槽（thunk 的 fn 就是 comUnsupported）⇒ **非正常结局**：`Trap`（非 ok）。
+        //   本单之前这里落 `Stopped`(ok) ⇒ 进程 exit 0，正是要消掉的缝。
+        LIFT_CHECK(r.reason == lift::StopReason::Trap);
+        LIFT_CHECK(!r.ok());
         LIFT_CHECK(!m.cpu().running);
         LIFT_CHECK_EQ_U32(m.cpu().shim.unimplemented_calls, traps_before + 1u);
         LIFT_CHECK(m.cpu().stop_why != nullptr);
+
+        // ---- 同一台 Machine 的**下一轮**：宿主停机种类必须按轮重置 ----
+        //   ★ 上一轮是 `Trap`。若 `Machine::run` 开头不重置 `stop_kind`，这一轮的正常主动停
+        //     （模拟 ExitProcess：shim 只置 running=false + stop_why）会被误判成 `Trap` ⇒ 红。
+        g_current_case = "stop-kind-reset-per-run";
+        lift::ShimDef* stop_def = m.shims().addRuntime("test", "NormalStop", lift::Conv::Stdcall, 0, &shimNormalStop);
+        LIFT_CHECK(stop_def != nullptr);
+        if (stop_def != nullptr) {
+            const std::uint32_t stop_ea = stop_def->stub_ea;
+            LIFT_CHECK(hook(m, "test", "NormalStop", stop_ea));
+            const std::uint32_t code4 = kCodeEa + 3u * kCodeStride;
+            Asm d;
+            d.callRel(code4, stop_ea);
+            d.ret();
+            LIFT_CHECK(m.placeCode(code4, d.b.data(), d.b.size(), &err));
+            reprimeStack(m);
+            m.cpu().eip = code4;
+            r = run(m);
+            LIFT_CHECK(r.reason == lift::StopReason::Stopped);  // 正常主动停，不是上一轮的 Trap
+            LIFT_CHECK(r.ok());
+        }
 
         // ---- refcount：addRef / release / 到 0 释放 ----
         g_current_case = "com-refcount-release";
@@ -395,6 +426,64 @@ int main() {
         LIFT_CHECK_EQ_U32(m.shims().nextStubSlot(), slots_before);  // 没有新占槽
         LIFT_CHECK_EQ_U32(com.refCount(obj2), 1u);
         LIFT_CHECK(com.release(m.cpu(), obj2));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
+        LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);
+
+        // ---- 对象表代际：EA 被复用后，**陈旧持有者**的释放不许动新对象 ----
+        //   （REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）guest 堆是首次适配 ⇒ `create A → release A → create B`
+        //   之后 B **一定**拿到 A 的 EA（同一个 8 B 对象块 + 同一个 vtable 块，见上面那条 ⚠）。
+        //   Release shim 只拿得到 `this` 这个 EA ⇒ guest 路径**不可校验**（那是 guest 自己的
+        //   use-after-release，真机同样 UB）；宿主侧缓存必须自己带代际。
+        g_current_case = "com-generation-stale-holder";
+        const std::uint32_t gen_obj_a = com.createObject(m.cpu(), "ITest", methods);
+        LIFT_CHECK_NE_U32(gen_obj_a, 0u);
+        const std::uint32_t gen_a = com.generationOf(gen_obj_a);
+        LIFT_CHECK_NE_U32(gen_a, 0u);  // 代际非 0（0 保留给"没有代际"）
+        LIFT_CHECK(com.release(m.cpu(), gen_obj_a));  // 到 0 ⇒ 删表 + 归还 guest 堆
+        LIFT_CHECK(!com.find(gen_obj_a));
+        LIFT_CHECK_EQ_U32(com.generationOf(gen_obj_a), 0u);  // 表里没有 ⇒ 0（不是"记住旧代际"）
+
+        const std::uint32_t gen_obj_b = com.createObject(m.cpu(), "ITest", methods);
+        LIFT_CHECK_NE_U32(gen_obj_b, 0u);
+        // ★ 前提必须**硬断言**：否则下面的 releaseIf 会因为"表里没这个 EA"而返回 false，
+        //   代际校验被短路也照样绿（恒真守卫）。★ 前提红了 ⇒ 先按 `runtime/heap.cpp` 的分配策略
+        //   重造夹具，⛔ 不是删断言。
+        LIFT_CHECK_EQ_U32(gen_obj_b, gen_obj_a);  // EA 被复用（判据本身）
+        const std::uint32_t gen_b = com.generationOf(gen_obj_b);
+        LIFT_CHECK_NE_U32(gen_b, 0u);
+        LIFT_CHECK_NE_U32(gen_b, gen_a);  // 同一个 EA、**不同的代际**
+
+        // ① 陈旧持有者按 (EA, 旧代际) 释放 ⇒ 拒绝，且新对象一个引用都不掉
+        LIFT_CHECK(!com.releaseIf(m.cpu(), gen_obj_b, gen_a));
+        LIFT_CHECK(com.find(gen_obj_b));
+        LIFT_CHECK_EQ_U32(com.refCount(gen_obj_b), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(gen_obj_b + 4), 1u);  // guest 可见的镜像也没被动
+        LIFT_CHECK_EQ_U32(com.ifaceOf(gen_obj_b) != nullptr ? 1u : 0u, 1u);
+        // ② 代际对得上 ⇒ 真的减（校验不是"永远拒绝"）
+        LIFT_CHECK(com.releaseIf(m.cpu(), gen_obj_b, gen_b));
+        LIFT_CHECK(!com.find(gen_obj_b));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
+        LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);
+
+        // ③ `owner`（宿主表里唯一**不持引用**的 EA 缓存）把"建它时的父代际"一起固化
+        const std::uint32_t gen_parent = com.createObject(m.cpu(), "ITest", methods);
+        LIFT_CHECK_NE_U32(gen_parent, 0u);
+        const std::uint32_t gen_child = com.createObject(m.cpu(), "ITest", methods, /*user=*/0u,
+                                                         /*on_zero=*/nullptr, /*owner=*/gen_parent);
+        LIFT_CHECK_NE_U32(gen_child, 0u);
+        LIFT_CHECK_EQ_U32(com.ownerOf(gen_child), gen_parent);
+        LIFT_CHECK_EQ_U32(com.ownerGenerationOf(gen_child), com.generationOf(gen_parent));
+        LIFT_CHECK_NE_U32(com.ownerGenerationOf(gen_child), 0u);
+        LIFT_CHECK_EQ_U32(com.ownerGenerationOf(gen_parent), 0u);  // 没有 owner ⇒ 0（不编一个）
+        // 父对象被复用后，子对象固化的代际**仍然指向建它时那个**（这正是 releaseIf 的判据）
+        const std::uint32_t gen_parent_gen = com.generationOf(gen_parent);
+        LIFT_CHECK(com.release(m.cpu(), gen_child));
+        LIFT_CHECK(com.find(gen_parent));  // 释放子对象**不**释放 owner（不是所有权转移）
+        LIFT_CHECK(com.release(m.cpu(), gen_parent));
+        const std::uint32_t gen_parent2 = com.createObject(m.cpu(), "ITest", methods);
+        LIFT_CHECK_EQ_U32(gen_parent2, gen_parent);       // 同 EA
+        LIFT_CHECK_NE_U32(com.generationOf(gen_parent2), gen_parent_gen);  // 不同代际
+        LIFT_CHECK(com.release(m.cpu(), gen_parent2));
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
         LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);
     }
@@ -591,6 +680,27 @@ int main() {
         LIFT_CHECK(table.get(c)->kind == lift::HandleKind::Timer);
         LIFT_CHECK(table.get(d)->kind == lift::HandleKind::Mutex);
         LIFT_CHECK(table.get(b) == nullptr);
+    }
+
+    // =====================================================================================
+    // ⑤ 退出码映射：`main` 的兜底（`exitCodeForRun`）必须把两个新停机原因判成非 0
+    //   ★ 这是**映射级**判据，不是端到端进程退出码：真黑盒要能从 CLI 造出 OOM，而兄弟单已裁
+    //     "⛔ 不把夹具造 OOM 做成产品参数"。`main.cpp` 的出口就是调用这个函数 ⇒ 构造即保证。
+    // =====================================================================================
+    {
+        g_current_case = "exit-code-for-run";
+        lift::RunResult r;
+        r.reason = lift::StopReason::ResourceExhausted;
+        LIFT_CHECK(!r.ok());
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::exitCodeForRun(r)), 2u);
+        LIFT_CHECK(std::string(lift::stopReasonName(r.reason)) == "resource-exhausted");
+        r.reason = lift::StopReason::Trap;
+        LIFT_CHECK(!r.ok());
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::exitCodeForRun(r)), 2u);
+        LIFT_CHECK(std::string(lift::stopReasonName(r.reason)) == "unimplemented-slot");
+        r.reason = lift::StopReason::Stopped;
+        LIFT_CHECK(r.ok());
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::exitCodeForRun(r)), 0u);
     }
 
     return finish("mechanism");

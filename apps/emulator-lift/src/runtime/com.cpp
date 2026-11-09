@@ -108,7 +108,7 @@ std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, cons
 }
 
 std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
-                                       std::uint32_t user, ComOnZero on_zero) {
+                                       std::uint32_t user, ComOnZero on_zero, std::uint32_t owner) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::string face = iface ? iface : "";
     if (face.empty()) {
@@ -226,11 +226,23 @@ std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::
     o.refcount = 1;
     o.bytes = obj_bytes;
     o.user = user;
+    o.owner = owner;
+    // ★ 代际（宿主表内，⛔ 不进 guest 内存）：建对象时固化 owner 的**当前**代际。
+    //   `generationOf(owner) == 0` ⇒ 建 surface 时父对象已经不在表里（调用方传了个死 EA）。
+    //   ⛔ 不静默：那是调用点的实现错误，之后 `SetRenderTarget` 的代际判据会拒绝绑定。
+    o.owner_generation = owner != 0 ? generationOf(owner) : 0u;
+    if (owner != 0 && o.owner_generation == 0) {
+        comLog(face.c_str(),
+               "createObject 的 owner 0x%08X 不在对象表里（已释放 / 野指针）⇒ 这个对象没有可校验的父代际",
+               owner);
+    }
+    o.generation = next_generation_++;  // 只增不复用（0 保留给"没有代际"）
     o.on_zero = on_zero;
     o.iface = face;
+    const std::uint32_t generation = o.generation;
     objects_.emplace(obj, std::move(o));
-    comLog(face.c_str(), "建对象 0x%08X（vtable 0x%08X，%u 槽，refcount=1%s）", obj, vtable, slots,
-           user != 0 ? "，带扩展块" : "");
+    comLog(face.c_str(), "建对象 0x%08X（vtable 0x%08X，%u 槽，refcount=1%s%s；代际 %u）", obj, vtable, slots,
+           user != 0 ? "，带扩展块" : "", owner != 0 ? "，带父对象" : "", generation);
     return obj;
 }
 
@@ -238,6 +250,24 @@ std::uint32_t ComRegistry::userOf(std::uint32_t obj) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = objects_.find(obj);
     return it == objects_.end() ? 0u : it->second.user;
+}
+
+std::uint32_t ComRegistry::ownerOf(std::uint32_t obj) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = objects_.find(obj);
+    return it == objects_.end() ? 0u : it->second.owner;
+}
+
+std::uint32_t ComRegistry::generationOf(std::uint32_t obj) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = objects_.find(obj);
+    return it == objects_.end() ? 0u : it->second.generation;
+}
+
+std::uint32_t ComRegistry::ownerGenerationOf(std::uint32_t obj) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = objects_.find(obj);
+    return it == objects_.end() ? 0u : it->second.owner_generation;
 }
 
 bool ComRegistry::addRef(X86& cpu, std::uint32_t obj) {
@@ -253,12 +283,32 @@ bool ComRegistry::addRef(X86& cpu, std::uint32_t obj) {
 }
 
 bool ComRegistry::release(X86& cpu, std::uint32_t obj) {
+    // ⚠ 这个重载**不可校验**：它只拿得到 EA ⇒ 陈旧 EA（guest 的 use-after-release，真机同样 UB）
+    //   与"Release 当前占有该 EA 的新对象"无法区分。宿主侧缓存请用 `releaseIf`。
+    return releaseImpl(cpu, obj, /*expect_generation=*/0u);
+}
+
+bool ComRegistry::releaseIf(X86& cpu, std::uint32_t obj, std::uint32_t generation) {
+    // `generation == 0` ⇒ 调用方没缓存代际 ⇒ 退化成不可校验的 `release`（见 com.h 的说明）。
+    return releaseImpl(cpu, obj, generation);
+}
+
+bool ComRegistry::releaseImpl(X86& cpu, std::uint32_t obj, std::uint32_t expect_generation) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = objects_.find(obj);
     if (it == objects_.end()) {
         // ★ 重复 release / 未知对象**必须出声**：静默 false 会让"释放两次"看起来像"正常释放"。
         comLog("?", "release(0x%08X)：不是 ComRegistry 建出来的对象（重复 release / 野指针）⇒ 返回 false",
                obj);
+        return false;
+    }
+    // ★ 代际校验（与"减引用"在同一把锁里 ⇒ feeder 线程不能在这两步之间让 EA 换人）：
+    //   不符 ⇒ 这是一次**陈旧持有者的释放**，当前占有该 EA 的是**别人** ⇒ ⛔ 一个引用都不许减。
+    if (expect_generation != 0 && it->second.generation != expect_generation) {
+        comLog(it->second.iface.c_str(),
+               "releaseIf(0x%08X)：缓存代际 %u ≠ 当前 %u（EA 已被复用，当前占有者是 %s）"
+               "⇒ 拒绝释放（新对象一个引用都不减）",
+               obj, expect_generation, it->second.generation, it->second.iface.c_str());
         return false;
     }
     if (it->second.refcount == 0) {
@@ -274,7 +324,8 @@ bool ComRegistry::release(X86& cpu, std::uint32_t obj) {
     //    再释放 vtable + 对象（guest 堆），并从表里删掉。
     //    ★ 顺序保持"子资源在前、对象头在后"（旧代码也是这个顺序）。
     //    ★ 这里是唯一收敛点 ⇒ 内部裸 `cpu.com->release`（SetTexture 换绑 / 设备销毁 /
-    //      Sprite 批次）与 guest 走 iface Release 的路径在这一步之后**没有任何区别**。
+    //      Sprite 批次）、带代际校验的 `releaseIf`、与 guest 走 iface Release 的路径
+    //      在这一步之后**没有任何区别**。
     const std::uint32_t vtable = it->second.vtable;
     const std::uint32_t slots = it->second.slots;
     const std::uint32_t obj_bytes = it->second.bytes;
@@ -375,6 +426,8 @@ void ComRegistry::dispatch(X86& cpu, ShimCall& call) {
         call.result = 0;
         cpu.running = false;
         cpu.stop_why = "COM thunk 不在路由表里";
+        // ★ 装配错 ⇒ 非正常结局（已注册的 thunk 但路由表对不上）：归 `Trap`，⛔ 不是 Stopped。
+        cpu.stop_kind = HostStopKind::Trap;
         ++cpu.shim.unimplemented_calls;
         return;
     }
@@ -406,6 +459,8 @@ void comTrampoline(X86& cpu, ShimCall& call) {
         call.result = 0;
         cpu.running = false;
         cpu.stop_why = "cpu.com 为空";
+        // ★ 装配错 ⇒ 非正常结局：归 `Trap`（与 thunk 不在路由表同一类）。
+        cpu.stop_kind = HostStopKind::Trap;
         return;
     }
     cpu.com->dispatch(cpu, call);
@@ -439,6 +494,8 @@ void comUnsupported(X86& cpu, ShimCall& call) {
     call.result = 0;
     cpu.running = false;
     cpu.stop_why = "unimplemented COM vtable slot";
+    // ★ 已注册的槽（thunk 的 fn 就是本函数）⇒ 非正常结局：归 `Trap`。
+    cpu.stop_kind = HostStopKind::Trap;
     ++cpu.shim.unimplemented_calls;
 }
 

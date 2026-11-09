@@ -402,12 +402,12 @@ export const DOMAIN = {
   id: 'mutate',
   title: '守卫自检（变异测试）：改坏一处关键常量 ⇒ 确认指定守卫**当场红**',
   data: [
-    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.ts` · `apps/emulator-new/src/**` · `apps/emulator-cxx/src/core/*.cpp`）—— ★ **临时改写后必还原**',
+    '**工作树里被守卫覆盖的源文件**（`packages/age-format/src/asm/*.mts` · `apps/emulator/src/model/*.ts` · `apps/emulator-new/src/**` · `apps/emulator-cxx/src/core/*.cpp` · `apps/emulator-lift/src/**`）—— ★ **临时改写后必还原**',
     '`tools/mutate-check.mjs` 里的**变异清单**（本工具的真源：一处破坏 + 该抓它的守卫）',
-    '**CTest 类条目**（`guard: \'ctest:<名字>\'`）额外依赖 `apps/emulator-cxx/out` 已配置：会重建 + 跑那一条 CTest（还原后也重建成基线）',
+    '**CTest 类条目**（`guard: \'ctest:<名字>\'`）会重建 + 跑那一条 CTest（还原后也重建成基线）；★ 看条目的 `buildDir` 决定构建哪个工程（缺省 `apps/emulator-cxx/out`，emulator-lift 条目显式写 `apps/emulator-lift/out`）',
     '**预写日志** `.tmp/mutate-check/journal.json`（gitignored；动文件前原子落盘，逐条还原后移除，全清时删除）—— 中途被 SIGKILL / 断电打断后，下次启动靠它自愈或拒绝运行',
   ],
-  access: 'r（读原文进内存）→ **w journal（预写日志，原子：临时文件 + rename）**→ rw（写入变异）→ **w（还原，且比对全文）**；CTest 类条目额外重建 `apps/emulator-cxx/out`（生成物，已 gitignore）；★ 启动时先自愈 journal（判不了就拒绝运行，退出码 3，journal 保留）；★ 不碰旧仓',
+  access: 'r（读原文进内存）→ **w journal（预写日志，原子：临时文件 + rename）**→ rw（写入变异）→ **w（还原，且比对全文）**；CTest 类条目额外重建该条目的 `buildDir`（缺省 `apps/emulator-cxx/out`；生成物，已 gitignore）；★ 启动时先自愈 journal（判不了就拒绝运行，退出码 3，journal 保留）；★ 不碰旧仓',
   tool: 'tools/mutate-check.mjs',
 };
 
@@ -774,6 +774,22 @@ const MUTATIONS = [
     what: 'commit 的排他上界退回 uint32 ⇒ 最后一页（end=4 GiB）截断成 0 ⇒ memory-pages 的 commit-last-page 红',
   },
 
+  // ── D3D9 生命周期：**回收资格**不能来自"最近 init 的那台 Machine"（`activeMachine()`）──
+  //   ★ 退回 `activeMachine()` ⇒ 另一台 Machine 抢走 g_active（或 `~Machine` 清空）时，
+  //     纹理 / 后缓冲 / 深度的 arena 像素块永久失去回收入口。
+  //   判据：`tests/d3d9.cpp` 的 `d3d9/arena-reclaim-under-other-machine`（修前 4 条红）。
+  {
+    file: 'apps/emulator-lift/src/runtime/machine.cpp',
+    from: '    if (cpu.machine != nullptr) return cpu.machine;',
+    to: '    if (false) return cpu.machine;  // 变异：退回 activeMachine() 判据',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '回收资格退回 activeMachine() ⇒ 另一台 Machine 抢走 g_active 后纹理 / 后缓冲 / 深度的 arena ' +
+      '像素块永不回收 ⇒ d3d9 的 arena-reclaim-under-other-machine 红',
+  },
+
   {
     file: 'apps/emulator-lift/tests/base_coverage.cpp',
     from: '    o.until_ea = 0x004BA890u;',
@@ -1005,6 +1021,282 @@ const MUTATIONS = [
     ctest: 'mnemonics',
     buildDir: 'apps/emulator-lift/out',
     what: '裸标识符（如未映射的 `cld`）又默认判数据 ⇒ mnemonics 的 lst-classify 红（A2 的假绿口子回来了）',
+  },
+
+  // ── D3D9 渲染目标的生命周期：**绑定期间像素块不许被回收** ──
+  //   ★ 只 addRef surface 对象（本仓修前的样子）⇒ 纹理在"仍被绑定为 RT"时被 guest Release 会走
+  //     `destroyTextureState` 回收像素块，流水线继续往已释放 / 已被别人复用的 arena 写。
+  //   判据：`tests/d3d9_pipeline.cpp` 的 `d3d9p/render-target-lifetime`（本变异实测 10 条红：
+  //   ① 像素块还活着、② 新占用者的 4 个 texel 不被改写、④ 换 target 时成对回收、⑥ 同 owner 互切）。
+  //   ★ 变异**只短路"对 owner 的 addRef"**（`if (false && ...)`）：owner 仍然找得到、失效检查
+  //     也仍然通过 ⇒ 退化成的正是"绑定只保 surface 对象"那种形状，而不是顺手命中"没有 owner"的
+  //     防御分支（后者证明的是另一个不变量）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '        if (owner != 0 && !cpu.com->addRef(cpu, owner)) {',
+    to: '        if (false && !cpu.com->addRef(cpu, owner)) {  // 变异：RT 绑定不再保像素块',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'RT 绑定不再对像素块 owner 做语义 addRef ⇒ 绑定期间 Release 纹理就把 arena 回收了 ⇒ ' +
+      'd3d9-pipeline 的 render-target-lifetime 红（`find(a_arena)` / 新占用者像素 / 成对回收）',
+  },
+
+  // ── 对象表**代际**：陈旧持有者（缓存了 (EA, 代际)）不许打到"复用同一 EA"的新对象 ──
+  //   （REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）两条变异分别短路两处消费点，判据各在同名 CTest 里。
+  {
+    file: 'apps/emulator-lift/src/runtime/com.cpp',
+    from: '    if (expect_generation != 0 && it->second.generation != expect_generation) {',
+    to: '    if (false && expect_generation != 0 && it->second.generation != expect_generation) {  // 变异：短路代际校验',
+    guard: 'ctest:mechanism',
+    ctest: 'mechanism',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`releaseIf` 不再校验代际（按 EA 直接减引用）⇒ 陈旧持有者会把**复用同一 EA 的新对象**Release 掉 ⇒ ' +
+      'mechanism 的 com-generation-stale-holder 红（新对象的 refcount / 对象表项被减）',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '            if (owner_generation == 0 || owner_now != owner_generation) {',
+    to: '            if (false) {  // 变异：短路 owner 代际校验',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'SetRenderTarget 不再校验 owner 的代际 ⇒ 与"复用同一对象 EA + 同一 `\'TEX1\'` 状态块 EA"的新纹理' +
+      '静默绑上、对它 addRef 并 markTextureContentUnknown ⇒ d3d9-pipeline 的' +
+      ' stale-owner-generation-known-deviation 红（① 那条断言本身就标了**已知偏离**：真机应当绑成功）',
+  },
+
+  // ── D3DX 资源耗尽 **≠** unimplemented（误诊回归）──────────────────────────────────────
+  //   ★ `from` 必须带上下文：单行 `        if (out_of_memory) {` 在该文件出现 **3** 次
+  //     （纹理 / 纹理由内存 / sprite），`replace` 只换第一处 ⇒ 单行片段会把变异施加到**别**的分支上。
+  //   ★ 退回 `d3dxTrap` ⇒ `stop_why` 变成 "unimplemented D3DX9 call" 且 `unimplemented_calls` ++
+  //     ⇒ `d3dx9` 的 `create-sprite-oom` 只在 ②③ 红（①④ 仍绿：出参在分配前就清了 0、状态块在
+  //     `createSpriteState` 内部就还掉了）—— 红点精确指向误诊，不是靠"调用失败"这种恒真条件。
+  //   ⚠ 本条目用 `d3dxTrap` 形态，而不是短路成 `if (false)`：要演的**正是**"退回 unimplemented 口径"；
+  //     顺带避开常量条件（`/W4 /WX` 下 C4127 的风险未在本机 Windows 验证 ⇒ 断言成"一定会构建失败"是不诚实的）。
+  {
+    file: 'apps/emulator-lift/src/shims/d3dx9.cpp',
+    from:
+      '    const std::uint32_t state = d3dx9::createSpriteState(cpu, device, &why, &out_of_memory);\n' +
+      '    if (state == 0) {\n' +
+      '        if (out_of_memory) {\n' +
+      '            // ★ 同一口径：guest 堆不够 ≠ "D3DXCreateSprite 没实现"（⛔ 不记缺口、不写 unimplemented）。\n' +
+      '            d3dxResourceStop(cpu, "D3DXCreateSprite", "%s", why.c_str());',
+    to:
+      '    const std::uint32_t state = d3dx9::createSpriteState(cpu, device, &why, &out_of_memory);\n' +
+      '    if (state == 0) {\n' +
+      '        if (out_of_memory) {\n' +
+      '            // 变异：资源耗尽退回 unimplemented 口径（误诊回归）\n' +
+      '            d3dxTrap(cpu, "D3DXCreateSprite", "%s", why.c_str());',
+    guard: 'ctest:d3dx9',
+    ctest: 'd3dx9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'D3DXCreateSprite 的资源耗尽分支退回 d3dxTrap ⇒ stop_why 变成 "unimplemented D3DX9 call" 且 ' +
+      'unimplemented_calls ++ ⇒ d3dx9 的 create-sprite-oom 在 ②③ 红（①④ 仍绿：出参早已清 0、' +
+      '状态块在 createSpriteState 内部就还掉了），正好证明判据不是靠"调用失败"这种恒真条件',
+  },
+
+  // ── 汇入点的**新停机原因分类**：资源耗尽不许再被归成 `Stopped`(ok) ─────────────────────
+  //   ★ 变异把 `ResourceExhausted` 分支短路掉（用 `&& cpu_.running`：进这段时 running 必为 false，
+  //     所以等价于 `if (false)`，但**不是**编译期常量 —— 避开 `/W4 /WX` 的 C4127 风险）。
+  //   ★ 走 Trap 分支也不命中（stop_kind 是 ResourceExhausted）⇒ 退化成旧行为 `Stopped`(ok)。
+  //   判据：`create-sprite-oom` 的 ②（reason / !ok / 名字 / exitCodeForRun）当场红；
+  //   这条同时守住"新原因真的会从汇入点流出来"，而不只是"枚举里多了一个值"。
+  {
+    file: 'apps/emulator-lift/src/runtime/machine.cpp',
+    from: '                    if (cpu_.stop_kind == HostStopKind::ResourceExhausted) {',
+    to:
+      '                    if (cpu_.stop_kind == HostStopKind::ResourceExhausted && cpu_.running) {  ' +
+      '// 变异：短路资源耗尽分支',
+    guard: 'ctest:d3dx9',
+    ctest: 'd3dx9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '汇入点跳过 ResourceExhausted ⇒ 资源耗尽退化成 Stopped(ok) ⇒ d3dx9 的 create-sprite-oom ' +
+      '在 rr.reason / !rr.ok() / stopReasonName / exitCodeForRun 四处红（旧行为回归）',
+  },
+
+  // ── emulator-lift：**仪器化不许改执行流**（口径不变量；measurement.md M-02）───────────────
+  //   ★ 这是**敏感性变异**（不是"可能发生的 bug"）：它证明 `profile-instrumentation-invariant`
+  //     的断言有牙 —— 块计时顺手改掉 `cpu_.insns`，等于"仪器把被测量的指令数也改了"。
+  //   ★ 该行被 `opts.profile` 短路 ⇒ **B 臂（仅 --profile）就命中**，不必依赖窗口 profiler armed；
+  //     A（全关）不命中 ⇒ A≠B ⇒ 四臂全等的断言当场红。
+  //   ★ `from` 逐字（12 空格缩进 + 整行）在同一文件里只出现 1 次；⛔ 别缩成
+  //     `if (opts.profile || window_prof_.armed())`（那样以后多一处复制就会静默改错地方）。
+  {
+    file: 'apps/emulator-lift/src/runtime/machine.cpp',
+    from: '            if (opts.profile || window_prof_.armed()) b->ns += block_ns;',
+    to:
+      '            if (opts.profile || window_prof_.armed()) {\n' +
+      '                b->ns += block_ns;\n' +
+      '                --cpu_.insns;  // 变异：让"仪器"顺带改掉被测量的指令数（敏感性变异）\n' +
+      '            }',
+    guard: 'ctest:profile-window',
+    ctest: 'profile-window',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '块计时顺手改 cpu_.insns ⇒ profile-window 的 profile-instrumentation-invariant 红' +
+      '（同一程序开/关 profiler 的 insns 必须全等；仪器只许花时间、不许改执行流）',
+  },
+
+  // ── emulator-lift：时间线的**效果级判据**不许恒真 ─────────────────────────────────────
+  //   ★ "先判满足"的短路：任何观测窗在第一个块边界就"看到变化"⇒ `not-changed` / `unclosed`
+  //     两例都再也不会失败 ⇒ input-expect 当场红。
+  //   ★ 用**运行时恒真**（`sampleCount() >= samples_at_start`，单调计数）而不是 `if (true)`：
+  //     `/W4 /WX` 下 C4127（条件恒真）会让"变异体编译失败"，harness 记的是"无法判定"不是红。
+  //   ★ `w` 在后面还要用（ok 日志），所以不需要 `(void)w;`；也不新增任何未用局部量。
+  {
+    file: 'apps/emulator-lift/src/runtime/machine.cpp',
+    from: '        if (sampler_.changeCount() > w.changes_at_start) {',
+    to:
+      '        if (sampler_.sampleCount() >= w.samples_at_start) {  ' +
+      '// 变异：任何窗都立即算"看到变化"',
+    guard: 'ctest:input-expect',
+    ctest: 'input-expect',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '观测窗恒判"已变化" ⇒ input-expect 的 expect-change-not-changed / expect-change-unclosed ' +
+      '红（"动作没生效"这一类再也不会被抓住）',
+  },
+
+  // ── emulator-lift：后缓冲 surface 的 LockRect / UnlockRect（REQ-01M6ZDSGQY1RXX3N3WJKA8D26H）──
+  //   ★ 每一条的 `from` 都带**只属于后缓冲路**的上下文（纹理 lockRect 里有同名行 ⇒ 单行会改错地方）。
+  //   ★ 判据在 `tests/d3d9.cpp` 的 `backbuffer-lockrect` 与 `tests/gpu_batch.cpp` 的
+  //     `backbuffer-lock-barrier`；后者注册在 pure 的 `gpu-batch-order`（顶层 add_test）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from:
+      '    const std::uint32_t bits = gs->ea + static_cast<std::uint32_t>(top) * gs->pitch +\n' +
+      '                               static_cast<std::uint32_t>(left) * bpp;',
+    to: '    const std::uint32_t bits = gs->ea;  // 变异：pBits 不偏到矩形左上',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'backbuffer LockRect 的 pBits 去掉矩形偏移（写成像素首字节）⇒ 真机的逐行 memcpy 会把整幅 ' +
+      '备份图写错位置；d3d9 的 backbuffer-lockrect 在 pBits 与像素穿透两处红',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from:
+      '    const std::uint32_t bits = gs->ea + static_cast<std::uint32_t>(top) * gs->pitch +\n' +
+      '                               static_cast<std::uint32_t>(left) * bpp;\n' +
+      '    cpu.mem->wr32(locked_rect_ea + 0, gs->pitch);',
+    to:
+      '    const std::uint32_t bits = gs->ea + static_cast<std::uint32_t>(top) * gs->pitch +\n' +
+      '                               static_cast<std::uint32_t>(left) * bpp;\n' +
+      '    cpu.mem->wr32(locked_rect_ea + 0, static_cast<std::uint32_t>((right - left) * bpp));  ' +
+      '// 变异：Pitch 用子矩形宽',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'backbuffer LockRect 的 Pitch 写成子矩形宽（真机 `0x4A5018 add edi,[ebp+var_44]` 依赖整幅行距）' +
+      '⇒ d3d9 的 backbuffer-lockrect 的 Pitch 与 pBits 断言红',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from:
+      '    if (gs->d3d9_locked) {\n' +
+      '        if (why) *why = "D3D9：LockRect 在已锁的后缓冲上（D3DERR_INVALIDCALL）";\n' +
+      '        return false;\n' +
+      '    }',
+    to: '    // 变异：删掉"已锁再锁"检查',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'backbuffer LockRect 不再拒绝"已锁再锁"⇒ d3d9 的 backbuffer-lockrect ③ 红（真机会答 ' +
+      'D3DERR_INVALIDCALL；静默允许会让 guest 在解锁时丢掉第一次锁的矩形语义）',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from:
+      '    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {\n' +
+      '        std::uint8_t* base = m->surfaces().pixels(*gs);\n' +
+      '        if (base == nullptr) {\n' +
+      '            if (broken) *broken = true;\n' +
+      '            if (why) *why = "D3D9：后缓冲像素指针为空（状态崩坏）";\n' +
+      '            return false;\n' +
+      '        }\n' +
+      '        std::string gerr;\n' +
+      '        if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() == base) {\n' +
+      '            if (!gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &gerr)) {\n' +
+      '                if (broken) *broken = true;\n' +
+      '                if (why) *why = "D3D9：LockRect 前 GPU 像素读回失败：" + gerr;\n' +
+      '                return false;\n' +
+      '            }\n' +
+      '        } else if (!gpu->rasterFlush(&gerr)) {\n' +
+      '            // 队列里的绘制不写这块像素 ⇒ flush 失败不影响本次锁的像素；但要出声（⛔ 不静默）。\n' +
+      '            d3d9Warn("LockRect(backbuffer)", "GPU 队列 flush 失败：%s（锁的像素不是当前目标，继续）",\n' +
+      '                     gerr.c_str());\n' +
+      '        }\n' +
+      '    }',
+    to: '    // 变异：删掉锁前的 GPU 屏障（guest 可能拿到过期像素 / 别的 target 的镜像）',
+    guard: 'ctest:gpu-batch-order',
+    ctest: 'gpu-batch-order',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'backbuffer LockRect 删掉锁前 GPU 屏障 ⇒ gpu-batch-order 的 backbuffer-lock-barrier 红' +
+      '（syncToGuest 不再发生；⚠ 只注册 `--gpu` 那条会在无 GPU 机器上 SKIP 77 逃逸）',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from:
+      '    if (!gs->d3d9_lockable) {\n' +
+      '        if (why) *why = "D3D9：后缓冲没有 D3DPRESENTFLAG_LOCKABLE_BACKBUFFER ⇒ 不能锁";\n' +
+      '        return false;\n' +
+      '    }',
+    to: '    // 变异：删掉 LOCKABLE_BACKBUFFER 检查',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'backbuffer LockRect 不再检查 D3DPRESENTFLAG_LOCKABLE_BACKBUFFER ⇒ d3d9 的 ' +
+      'backbuffer-lockrect 的 no-lockable 变体红（真机 `0x498F98` 明确设了 1）',
+  },
+
+  // ── emulator-lift · marker 事件源（`TriggerKind::Marker`）──
+  //   ★ 三条判据各一条：边沿（值变才发）/ 降级不静默（读不到名字仍按 id 触发）/ 超时响亮失败。
+  {
+    file: 'apps/emulator-lift/src/runtime/input_script.cpp',
+    from: '    if (s.cur == marker_cur_ && s.id == marker_id_) return false;  // 同一 (cur,id) 重复出现 ⇒ 0 事件',
+    to: '    if (false && s.cur == marker_cur_ && s.id == marker_id_) return false;  // 变异：恒触发',
+    guard: 'ctest:input-marker',
+    ctest: 'input-marker',
+    buildDir: 'apps/emulator-lift/out',
+    what: '边沿判据去掉（同一 (cur,id) 也发事件）⇒ input-marker 的 `marker-no-change-zero-events` 红',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/input_script.cpp',
+    from: '    if (!s.valid) {\n        ++marker_invalid_;\n        return false;\n    }',
+    to: '    if (!s.valid || s.name_degraded) {  // 变异：名字降级 ⇒ 不触发\n        ++marker_invalid_;\n        return false;\n    }',
+    guard: 'ctest:input-marker',
+    ctest: 'input-marker',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '名字降级改成"不触发"⇒ input-marker 的 `marker-name-base-zero-degrades` / ' +
+      '`marker-id-out-of-range-degrades` 红（降级必须仍按 id 触发 + 一条警告）',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/input_script.cpp',
+    from: '    if (marker_timeout_ms_ != 0 && waited >= marker_timeout_ms_) {',
+    to: '    if (false && marker_timeout_ms_ != 0 && waited >= marker_timeout_ms_) {  // 变异：超时永不触发',
+    guard: 'ctest:input-marker',
+    ctest: 'input-marker',
+    buildDir: 'apps/emulator-lift/out',
+    what: '超时分支短路 ⇒ input-marker 的 `marker-timeout-loud-failure` 红（等不到名字却继续跑 = 静默）',
   },
 ];
 

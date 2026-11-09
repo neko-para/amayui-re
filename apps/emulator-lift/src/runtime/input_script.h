@@ -11,6 +11,7 @@
 //     at guest_ms T           触发条件 = guest 虚拟时钟 T 毫秒
 //     at insn N               触发条件 = guest 累计执行指令数 N（**帧内也能切**；确定性）
 //     at wall_ms T            触发条件 = 宿主墙钟 T 毫秒（自 run 起）
+//     at marker <名字>        触发条件 = 引擎**进入**某个脚本（脚本身份 (cur, id) 的**边沿**）
 //     after N frames|ms|insn  触发条件 = 上一个**同单位**锚点 + N
 //     wait N frames|ms|insn   同上，并记一个 **no-op 动作**（脚本要等它到期才收口）
 //     ... [stall MS]          （只对 frame 有效）帧停滞兜底：见下
@@ -42,9 +43,11 @@
 //     profile_end <label>     关闭窗口并打印一次表（label 只用于对齐/报错，必须是同一个词）
 //     quit                    本动作触发时结束这次运行（`RunResult.reason = Stopped`）
 //
-// ★ 触发条件是**一个条件**，不是"帧号"：`Trigger{kind, value}` 只有四种 kind。
-//   将来要加"场景 / 脚本标记"（引擎脚本真的被加载了）只需加一种 kind + 解析词
-//   （`wait marker <name>`）—— `tick()` 与 profiler 的窗口边界都不用改形状。
+// ★ 触发条件是**一个条件**，不是"帧号"：`Trigger{kind, value, name}` 有多种 kind（帧 / guest_ms /
+//   insn / wall_ms / **marker**）。`tick()` 与 profiler 的窗口边界都只认"条件到期"。
+//   ★ marker = 引擎脚本身份的**边沿**（`(cur, id)` 变化，取样点 = VM 循环头；见 `engine_marker.h`）：
+//   `at marker <名字>` 等一个脚本被**进入**；同名重复出现不重复发，首个样本只播种。
+//   ⛔ 它不按数字到期 ⇒ `after marker` / `wait marker` 一律解析失败（没有意义）。
 //
 // ★ **帧停滞兜底**（为什么必须有）：`at frame` / `wait N frames` 的前提是"帧在推进"。
 //   实测（2026-11-08）EU-ROOM 界面稳定后**不再 Present**（帧号停住），纯帧锚点会**永远不触发**。
@@ -72,6 +75,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/engine_marker.h"
 #include "runtime/host_window.h"
 
 namespace lift {
@@ -83,7 +87,14 @@ enum class TriggerKind : std::uint8_t {
     GuestMs = 1, // guest 虚拟时钟
     Insn = 2,    // guest 累计指令数
     WallMs = 3,  // 宿主墙钟（自 run 起）
+    // ★ 引擎脚本身份的**边沿**（`(cur, id)` 变化）：追加在末尾（⛔ 不重排既有值）。
+    //   它不是"按数字到期"：`due()` 恒 false，`tick()` 永远不应用它 —— 只有
+    //   `noteMarker()`（由 `Machine::run` 在 VM 循环头的块入口采样）会。
+    Marker = 4,
 };
+// 触发条件的个数（`have_anchor_` / `pend_min_` / `pend_count_` 的格数）。
+// ⚠ 漏改任何一处按 4 写的循环 ⇒ 第 5 格越界写 / 永不清零（UB 或静默失明）。
+inline constexpr int kTriggerKindCount = static_cast<int>(TriggerKind::Marker) + 1;
 
 const char* triggerKindName(TriggerKind k);
 const char* triggerUnitName(TriggerKind k);  // 脚本里写的单位（frame / guest_ms / insn / wall_ms）
@@ -93,6 +104,9 @@ struct Trigger {
     std::uint64_t value = 0;
     // 只对 Frame 有意义：帧停滞多少 ms 之后兜底。0 = 用全局缺省（`--input-stall-ms`）。
     std::uint64_t stall_ms = 0;
+    // 只对 Marker 有意义：要等的脚本名（单个 token；比对时 ASCII 大小写不敏感）。
+    //   ★ 名字表降级时事件名是 `id:0x%08X`；两种形态**始终都接受**（见 `noteMarker`）。
+    std::string name;
 
     bool due(std::uint64_t frame, std::uint64_t guest_ms, std::uint64_t insns, std::uint64_t wall_ms) const;
 };
@@ -205,6 +219,10 @@ public:
     bool active() const { return !actions_.empty(); }
     bool finished() const { return active() && applied_ == actions_.size() && releases_.empty(); }
     bool quitRequested() const { return quit_requested_; }
+    // ★ 还有**没交付完**的抬起（`click` 的自动 hold 等 guest 采样 / 显式 down 的延迟 up）。
+    //   "动作后"对一次点击要算到抬起为止：观测窗若在这之前到期，会把一次**合法**点击判成
+    //   "画面没变"（自动 hold 会花掉若干个采样）。`--expect-change-*` 的判据读它。
+    std::size_t pendingReleaseCount() const { return releases_.size(); }
     // `quit` 的 WM_QUIT 只投一次（guest 可能正阻塞在 GetMessageA）。由 `Machine::tickInputScript` 消费。
     bool quitPostPending() const { return quit_requested_ && !quit_posted_; }
     void markQuitPosted() { quit_posted_ = true; }
@@ -221,6 +239,36 @@ public:
     bool hasProfileActions() const { return profile_actions_ > 0; }
     bool takeProfileBegin(std::string* label);
     bool takeProfileEnd(std::string* label);
+
+    // ---- ★ marker 事件源（`TriggerKind::Marker`；取样见 `runtime/engine_marker.h`）----
+    // 脚本里有没有 marker 动作：`Machine::run` 的块入口钩子只在它为真时才采样（**零成本**）。
+    bool hasMarkerActions() const { return marker_actions_ > 0; }
+    // 喂一次采样（由 `Machine::sampleMarker()` 在 VM 循环头的块入口调用；纯档夹具也直接调它）。
+    //   返回 true = 这次样本产生了**一个边沿**（有新事件），不代表有动作被应用。
+    //   · 首个有效样本只**播种**（记下 (cur,id)，不发事件）；
+    //   · `(cur,id)` 与上次相同 ⇒ 0 事件（⛔ 不重复发）；
+    //   · 变化 ⇒ 扫未应用的 Marker 动作，名字 / `id:0x%08X` 任一形态匹配即走**同一条** apply 路径。
+    bool noteMarker(WindowManager& wm, const MarkerSample& s, std::uint64_t frame, std::uint64_t guest_ms);
+    // 超时（缺省 30000 **宿主墙钟** ms；0 = 不设限 ⇒ 显式选择"宁可挂死"）。
+    //   ★ 用墙钟而不是 guest_ms：guest 阻塞在 `GetMessageA` 时虚拟时钟不推进，guest_ms 超时等于永不触发。
+    void setMarkerTimeoutMs(std::uint64_t ms) { marker_timeout_ms_ = ms; }
+    std::uint64_t markerTimeoutMs() const { return marker_timeout_ms_; }
+    bool markerTimedOut() const { return marker_timeout_fired_; }
+    const std::string& markerTimeoutDetail() const { return marker_timeout_detail_; }
+    // ★ 超时还要**唤醒**可能阻塞在 `GetMessageA` 的 guest（与 `quit` 同一条理由：只置标志时
+    //   `Machine::run` 的检查点永远到不了）⇒ `pumpScript` 消费这条一次性请求投 WM_QUIT。
+    bool markerTimeoutPostPending() const { return marker_timeout_fired_ && !marker_timeout_posted_; }
+    void markMarkerTimeoutPosted() { marker_timeout_posted_ = true; }
+    // 可观测账（run summary / CTest）：有效样本 / 边沿 / 无效采样 / 最近一次身份。
+    std::uint64_t markerSamples() const { return marker_samples_; }
+    std::uint64_t markerEdges() const { return marker_edges_; }
+    std::uint64_t markerInvalidSamples() const { return marker_invalid_; }
+    std::uint32_t lastMarkerCur() const { return marker_last_cur_; }
+    std::uint32_t lastMarkerId() const { return marker_last_id_; }
+    const std::string& lastMarkerName() const { return marker_last_name_; }
+    bool lastMarkerNameDegraded() const { return marker_last_name_degraded_; }
+    // 每轮 run 重置 seed / 边沿 / 计数 / 超时（同一台 Machine 可以跑多轮，⛔ 不许把上轮 (cur,id) 当基线）。
+    void resetMarkerState();
     // 帧停滞兜底是否已经生效（测试 / 诊断用）
     bool stallFallbackFired() const { return stall_fired_; }
     // 缺省帧停滞阈值（ms；0 = 关闭兜底）。由 main 从 `--input-stall-ms` 设。
@@ -256,6 +304,11 @@ public:
 
 private:
     void apply(WindowManager& wm, Action& a, std::uint64_t frame, std::uint64_t guest_ms);
+    // ★ 应用一条动作的**公共记账**（applied / applied_ / 缓存作废 / apply）。`tick()` 与 `noteMarker()`
+    //   必须走同一条：⛔ 裸调 `apply()` 会让动作永远 pending（重复发 / 超时误报 / finished() 永假）。
+    void applyAction(WindowManager& wm, Action& a, std::uint64_t frame, std::uint64_t guest_ms);
+    // marker 超时：每 tick 算一次"文件序第一条未应用 Marker 动作"的等待基线（基线一变就重置）。
+    void updateMarkerTimeout(std::uint64_t wall_ms);
     // 收口：把脚本仍按着的键 / 按钮按同一组 WM_* 抬起（⛔ 只清状态不发消息会让 guest 的事件锁存卡住）。
     void releaseOwnedInputs(WindowManager& wm, std::uint32_t time_ms);
     // 帧停滞兜底：把剩下的 Frame 条件折算成 WallMs（只做一次）。
@@ -303,13 +356,33 @@ private:
     std::uint64_t anchor_guest_ms_ = 0;
     std::uint64_t anchor_insn_ = 0;
     std::uint64_t anchor_wall_ms_ = 0;
-    bool have_anchor_[4] = {false, false, false, false};
+    bool have_anchor_[kTriggerKindCount] = {};
     // 脚本自己的光标（**client** 坐标）：`mouse_down/up` 不带坐标时用它。
     bool have_pos_ = false;
     int last_x_ = 0;
     int last_y_ = 0;
     // profiler 窗口请求（由 `Machine::tickInputScript` 消费）
     int profile_actions_ = 0;
+    // ★ marker：动作数（零成本门控）+ 边沿状态 + 超时账。
+    int marker_actions_ = 0;
+    bool marker_seeded_ = false;
+    std::uint32_t marker_cur_ = 0;
+    std::uint32_t marker_id_ = 0;
+    std::uint64_t marker_samples_ = 0;   // 有效采样（含播种那一次）
+    std::uint64_t marker_edges_ = 0;     // 边沿次数（= 事件数）
+    std::uint64_t marker_invalid_ = 0;   // 采样器给出 valid=false 的次数（boot / cur 越界 / 记录不可用）
+    std::uint32_t marker_last_cur_ = 0;
+    std::uint32_t marker_last_id_ = 0;
+    std::string marker_last_name_;
+    bool marker_last_name_degraded_ = false;
+    std::uint64_t marker_timeout_ms_ = 30000;  // 宿主墙钟 ms；0 = 不设限
+    bool marker_timeout_fired_ = false;
+    bool marker_timeout_posted_ = false;  // WM_QUIT 只投一次（唤醒 GetMessageA）
+    std::string marker_timeout_detail_;
+    bool marker_waiting_ = false;
+    std::size_t marker_wait_action_ = static_cast<std::size_t>(-1);  // 基线对应的"第一条未应用 Marker 动作"下标
+    std::uint64_t marker_wait_ms_ = 0;  // 等待基线（墙钟；第一次看见这条 pending 时记）
+    std::string marker_wait_name_;
     bool profile_begin_pending_ = false;
     bool profile_end_pending_ = false;
     std::string profile_begin_label_;
@@ -325,8 +398,8 @@ private:
     std::uint64_t frame_interval_sum_ms_ = 0;
     std::uint32_t frame_interval_count_ = 0;
     // ★ 未应用动作的聚合缓存（见 rebuildPending）。`pending_dirty_` 在动作集变化时置位。
-    std::uint64_t pend_min_[4] = {0, 0, 0, 0};
-    std::uint32_t pend_count_[4] = {0, 0, 0, 0};
+    std::uint64_t pend_min_[kTriggerKindCount] = {};
+    std::uint32_t pend_count_[kTriggerKindCount] = {};
     std::uint64_t pend_frame_limit_ = 0;  // pending Frame 动作里最小的非 0 停滞阈值；0 = 没有
     bool pending_dirty_ = true;
     // 可观测计数（tick 次数 / 逐条动作比较次数）

@@ -14,17 +14,90 @@
 - **另一个反例**：窗口模式会**自动**开 real-time（启动行 `⚠ 窗口模式（自动 real-time）`），
   于是 `--present window` 的读数天然带宿主时钟；`--present headless` 不带 ⇒ 两者不可混。
 - **怎么量**：口径四件事写进日志第一屏 —— 构建（`cmake --preset`）/ `present :` 那一行 / `raster :` 那一行 /
-  有没有 `--profile`。`apps/emulator-lift` 的启动行已经把它们都打出来了，**抄它，不要凭记忆**。
+  **运行摘要的 `instr :` 行**（三个仪器位 + `expect=`，见 M-02）。这些行 `apps/emulator-lift` 都会打出来，
+  **抄它，不要凭记忆**。
 
-### M-02 · `--profile` 与 `LIFT_FRAME_TRACE` 的膨胀量级
-**能比**：① 关 profiler 的两次运行之间；② 开 profiler 的两次运行之间。**不能比**：两者交叉。
-- **读数**：`--profile` 实测膨胀 **+33~40%**（`.tmp/req-bodies/E.md` 第 2 条）；空转段有一次被 profiler 抬到真速的 **1.7×**
-  （那部分被归因给"每块 `steady_clock` + 每块边界的脚本 tick"，`.tmp/exitstall/report.md:29`）。
-  `LIFT_FRAME_TRACE=1` 另加"每帧一行 + 每帧的分项计时"，量级比 `--profile` 小但**不为 0**。
-- **怎么 A/B**：同一份脚本准备两版，只差 `profile_begin/profile_end` 两行
-  （现成的：`.tmp/room/enter-prof.txt` ↔ `.tmp/room/enter-noprof.txt`），
-  `LIFT_FRAME_TRACE` 也只在其中一版开。差异 = 纯仪器开销。
-- ⛔ 不许把"开 profiler 的 `ms/M`"当"这份实现多快"；它只能用于**同一档内的相对归因**（谁占大头）。
+### M-02 · **仪器化读数**：三个开关、口径标签、N=5 中位数（⛔ 开/关不许混进同一张表）
+**能比**：同一档（同一二进制 / 同一 `present`+`raster` / 同一 `clock` / 同一输入脚本）里，**只差一个开关**的两臂。
+**不能比**：跨构建、跨 `present` 档、跨时钟档、以及把"开着的 `ms/M`"与"关着的 `ms/M`"排成同一条序列。
+
+- **"开没开仪器"不是一个布尔量，是三个开关**（只写"带 profiler"不足以描述读数）：
+
+  | 开关 | 打开方式 | 量的是什么 | 相对"全关"的**边际** |
+  |---|---|---|---|
+  | `--profile` | CLI flag（`RunOptions.profile`） | 整轮热点：块命中 / 块墙钟 / shim 墙钟（跑完打表） | 每块 `++hits` + 每块 `b->ns +=` + **每次 shim 调用两次 `steady_clock`** |
+  | 窗口 profiler | 脚本里的 `profile_begin` / `profile_end` | 一段区间的闭式（guest/shim/native/interp/host） | 每迭代两次时钟 + 每块边界最多 3 处宿主段计时（各两次）+ `addGuest` |
+  | `LIFT_FRAME_TRACE=1` | 环境变量 | 逐帧"墙钟去哪了"一行 | shim 计时 + 每次 Present 一次汇总 + 一行输出 |
+
+  三者**共享** shim 计时开关（`shims_.setTiming`）⇒ 任意组合都可能出现 ⇒ 标签必须三位都写。
+
+- **膨胀从哪来**（2026-11-09 读代码更正；旧归因是错的）：
+  - **"每块两次 `steady_clock`"不是 `--profile` 的开销**：块计时**无条件**取（基线同样付这笔钱）。
+  - **"每块边界的脚本 tick"也不是**：没有脚本时它根本不跑；有脚本时基线也跑同一条 tick。
+  - `--profile` 真正的边际 = 每块 `++hits` + 每块 `b->ns +=` + **每次 shim 调用两次时钟**；
+    纯解释器回路上前两项接近零 ⇒ 膨胀应接近零，shim 密集路径上由第三项主导。
+  - 窗口 profiler 的边际见上表；`LIFT_FRAME_TRACE` 比 `--profile` 小但**不为 0**。
+  - ⇒ **窗口 profiler 与 `--profile` 是两种仪器**，它们的膨胀比不可互换；`lift-bench` 的读数只代表
+    "解释器 + 块缓存"（没有 shim / Present / 宿主泵），⛔ 不能拿它推断真实 boot 的膨胀。
+
+- **口径标签（唯一写法；一行、字段顺序固定、可 grep）**：
+  ```
+  build=<preset>/<RelWithDebInfo|Debug> · git=<sha> · present=<headless|window> · raster=<cpu|gpu> · clock=<virtual|REAL-TIME> · instr=<运行摘要 instr: 行逐字>
+  ```
+  `instr :` 行由**运行摘要无条件打印**（`profile=… frame-trace=… window-prof=… expect=…`），
+  读的是**本轮真实 armed 位**（`window-prof` = `WindowProfiler::armed()`，⛔ 不是"脚本里写了 `profile_begin`"）。
+  ⇒ 照抄它，⛔ 不要凭命令行参数回填。
+
+- **N=5 中位数**（至少 3 次）：报 **median + min/max**；两臂比值 = **中位数之比**。
+  ⛔ 用均值、⛔ 挑最好的一次、⛔ 只跑一次就下结论。
+
+- **A/B 的唯一合法形状**：同一 build（**同一个二进制**）/ 同一 `present`+`raster` / 同一 `clock` /
+  同一输入脚本，**只差一个开关**；一次只 A/B 一个开关。两臂读数**分行写，各带自己的 `instr=` 标签**。
+
+- ⛔ **禁止把开 / 关 profiler 的数字混进同一张表**：同一张表只放**同一口径**的读数。一次 A/B 报告里
+  两臂可以同时出现，但必须**分成两行 / 两组**、各自带标签；⛔ 不许排成一条序列、⛔ 不许把"开着的
+  `ms/M`"当"这份实现多快"（那只是"这份实现 + 这台仪器"的读数）。
+
+- **怎么量（无安装，实验室）**：`tests/bench.cpp` 的 `lift-bench`（顶层 pure，自造字节，不建窗口）：
+  ```
+  cd apps/emulator-lift && mkdir -p ../../.tmp/profile-ab
+  for i in 1 2 3 4 5; do ./out/lift-bench 50000000          > ../../.tmp/profile-ab/bench-off-$i.log 2>&1; done
+  for i in 1 2 3 4 5; do ./out/lift-bench 50000000 --profile > ../../.tmp/profile-ab/bench-on-$i.log  2>&1; done
+  grep '^bench' ../../.tmp/profile-ab/bench-*.log   # 每臂 5 个 MIPS 读数 ⇒ 取中位数
+  grep '^instr' ../../.tmp/profile-ab/bench-*.log   # 两臂的标签必须只差 profile=
+  ```
+
+- **怎么量（有安装，真实工作负载）**：两臂 = 同一份时间线，只差一个开关；宿主墙钟 N=5 取中位数：
+  ```
+  # ① 窗口 profiler 的 A/B：.tmp/profile-ab/room-off.txt 与 room-on.txt **只差**这两行
+  #      at insn <A> / profile_begin enter / at insn <B> / profile_end enter
+  #    ⚠ 锚点按 M-05 在真安装上录（`at insn`），⛔ 不要抄别人的帧号。
+  # ② --profile 的 A/B：同一份脚本，on 那一臂只多一个 --profile（⛔ 不要同时开窗口 profiler）。
+  for i in 1 2 3 4 5; do
+    /usr/bin/time -p ./out/emulator-lift --game-dir <安装> --skip-logo ... \
+      --input-script ../../.tmp/profile-ab/room-off.txt \
+      > ../../.tmp/profile-ab/room-off-$i.log 2> ../../.tmp/profile-ab/room-off-$i.time
+    /usr/bin/time -p ./out/emulator-lift --game-dir <安装> --skip-logo ... \
+      --input-script ../../.tmp/profile-ab/room-on.txt \
+      > ../../.tmp/profile-ab/room-on-$i.log  2> ../../.tmp/profile-ab/room-on-$i.time
+  done
+  ```
+  Windows 用 `Measure-Command { ... }` 取墙钟。⛔ Debug 构建的墙钟一律不许当判据（AGENTS §5）。
+  开跑前先核对两臂的 `instr :` 行**只差一个字段**；不满足 ⇒ 这次 A/B **作废**（⛔ 不"尽量比"）。
+
+- **读数落点**：命令输出与 `time` 落 `.tmp/profile-ab/`（gitignored）；**结论文本**进
+  `observations.md` 的新 `OBS-<yyyymmdd>-NN`（旧条不删，按该文件头注规则）。本 M-02 不保存任何读数。
+
+- **旧读数（历史，⛔ 不是不变量）**：`OBS-20261108-09` 记的 **+33~40%**（另有一次 1.7×）是**那次构建 /
+  那份脚本**的读数，它引用的复现路径（`.tmp/room/enter-prof.txt` ↔ `enter-noprof.txt`、`.tmp/req-bodies/E.md`）
+  **今天已不存在** ⇒ 按本文件自己的判据（"两个人各自按这条跑，读数能对齐"）它**不可复现**。
+  保留它作历史；⛔ 不许把它写成"当前膨胀 X%"。它的**归因**（"每块 `steady_clock` + 每块边界的脚本 tick"）
+  已由上面"膨胀从哪来"更正 —— 那两项在基线同样付。
+
+- **守卫（不变量，不是量级）**：CTest `profile-window` 的 `profile-instrumentation-invariant`：
+  四臂（全关 / 仅 `--profile` / 仅窗口 profiler / 两者）跑同一份程序，
+  **`insns` 必须全等**、C/D 两臂的窗口 begin/end insns 相等、窗口报告只在 C/D 出现。
+  ⇒ 它守的是"**仪器不许改执行流**"（改了 ⇒ 两个读数根本不是同一条路径上的）；⛔ 它不断言耗时或百分比。
 
 ### M-03 · profiler 窗口表的闭式怎么读
 - **闭式**：`wall = guest + shim + native + interp + host + unattributed`，六项**互斥**、来自 dispatcher 的同一条时间轴。

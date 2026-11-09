@@ -120,13 +120,58 @@
 - **复现**：`node tools/mutate-check.mjs --list`（看清单里有多少条改的是内部常量）；逐单元分类见 `.tmp/test-audit/inventory.tsv`（`label=DROP-L3` 那批）。
 - **现状（2026-11-09 复核，以仓为准）**：上面点名的四件事**都还在仓里** —— `tests/input_tick.cpp:43`（`actionScans() <= 16` 仍在）、`tests/gpu_batch.cpp:923`（`cuts - s0.cuts == 1` 仍在），`tests/{heap_layout,gdi_font_metrics_cache,profile_window}.cpp` 三个文件也都在、且都注册在默认门禁里。⇒ 这条审计的**知识侧**（落 `L3-*` / `measurement.md`）已落地，**测试侧的删除还没做**；要删是单独一条单，⛔ 不顺手删证据（`AGENTS.md` §11）。
 
-### BUG-15 · 出 EU-ROOM 的路径停在后缓冲 surface 的 `LockRect`（未实现），且**退出码 0**
+### BUG-15 · 出 EU-ROOM 的路径停在后缓冲 surface 的 `LockRect`（未实现），且**退出码 0**（**LockRect 一跳已修 + 有守卫**；端到端仍被新的 SEH gap 挡住）
 - **现象**：在 `EU-ROOM`（房间稳定帧 hash `0x96E51755F00B2E9E`）里按 **ESC**（VK `0x1B`）⇒ 900 条指令后停：`stop: stopped @ eip=004A4F8D`、`detail: unimplemented D3DX9 call（shim com!IDirect3DSurface9::LockRect）`，而**进程 exit 0**。⇒ 自动化会把它当成"任务成功"。
-- **根因**：两次叠加。① `src/shims/d3dx9.cpp` 的 `shimSurfaceLockRect` / `shimSurfaceUnlockRect` 对"后缓冲 surface（`state` == 设备状态块）"**明确 trap**（"⛔ 不把锁字段写进设备状态块"）⇒ 房间退出路径要读后缓冲，这里没有实现。② `src/runtime/machine.cpp:991-1005`：`had_impl` 为真但 shim 自己 `stop_why` 的停机被归成 `StopReason::Stopped`（`ok()` 为真）⇒ **未实现的方法槽被当成正常结束**。
+- **根因**：两次叠加。① `src/shims/d3dx9.cpp` 的 `shimSurfaceLockRect` / `shimSurfaceUnlockRect` 对"后缓冲 surface（`state` == 设备状态块）"**明确 trap**（"⛔ 不把锁字段写进设备状态块"）⇒ 房间退出路径要读后缓冲，这里没有实现。② `src/runtime/machine.cpp:1030-1059`：`had_impl` 为真但 shim 自己 `stop_why` 的停机被归成 `StopReason::Stopped`（`ok()` 为真）⇒ **未实现的方法槽被当成正常结束**（本单已把这类停改成 `Trap`，见下面的"现状"）。
 - **读数（2026-11-09，macOS arm64 / RelWithDebInfo，`--skip-logo`）**：ESC 在 insn `1,400,000,000` 落下 ⇒ 停于 `1,400,000,900`；同一次运行 `--max-frames 600` 只呈现到第 318 帧（房间稳定帧从第 141 帧起）。对照：同一房间点 **CG 鑑賞**（`1100,150`）会正常切画面（hash 连变 3 帧）⇒ 不是"房间完全不吃输入"。
-- **代表守卫**：无 pure 守卫（要真装才复现）。机械复现 = `--interaction-graph apps/emulator-lift/scripts/interaction/room-exit.graph`（任务没走完 ⇒ **exit 5**，stderr 打出断点与最后画面）。
+- **代表守卫**：`d3d9/backbuffer-lockrect`（CTest `d3d9`）· `gpu-batch/backbuffer-lock-barrier`
+  （CTest `gpu-batch-order`）—— 见下面的处置。端到端复现 = `--interaction-graph
+  apps/emulator-lift/scripts/interaction/room-exit.graph`（任务没走完 ⇒ **exit 5**，stderr 打出断点与最后画面）。
 - **复现**：`--game-dir <安装> --skip-logo --audio off --input-script <at frame 130 / click 944 562 / at insn 1400000000 / key_down 0x1B>`（房间入口 = TITLE 的 `Eushully-chan Room` 按钮，中心 `944 562`）。
-- **同族**：退出码口径另见需求单 `REQ-01M6WW9R6SJ7P8XA4522XCR48A`（"资源耗尽硬停仍 exit 0"）—— 本条给那条单补了一个同类读数。
+- **现状（2026-11-09，`REQ-01M6WW9R6SJ7P8XA4522XCR48A` 落地后）**：退出码这一半**已修** —— 这类停因现在归
+  `StopReason::Trap`（摘要 `stop      : unimplemented-slot`，**非 ok**）⇒ 没有交互图时 **exit 2**
+  （`--gpu-strict` 也先判 2；交互图下"任务没走完"仍是 5）。
+- **处置（2026-11-09，`REQ-01M6ZDSGQY1RXX3N3WJKA8D26H`）**：后缓冲 surface 的 `LockRect` / `UnlockRect`
+  **已实现**（`runtime/d3d9.cpp` 的 `lockBackBuffer` / `unlockBackBuffer`，shim 在 `shims/d3dx9.cpp` 分派）。
+  口径（每条都绑可再校验观察）：
+  - **锁字段落点 = 后缓冲的 `GuestSurface`**（`runtime/surface.h`，`d3d9_locked/lock_rect/lock_serial/
+    lockable/multisample`）。⛔ 不进 `'D9D1'` 设备状态块（64 B 全占满）；⛔ 不进 `'TEX1'`（锁字段在
+    +44/+48，会踩别人的）；生命周期随像素块（`SurfaceArena::destroy` 自动收）。
+  - `D3DLOCKED_RECT`：`Pitch` = **整幅**行距（锁子矩形不改），`pBits` = 像素首字节 + `top*pitch +
+    left*bpp`（**矩形左上**）。依据 = D3D9 文档 + 真机 `0x4A4DC0` 的逐行 memcpy
+    （`0x4A5016 call _memcpy`、源指针 `0x4A5021 add edi,[ebp+var_44]` 按 `Pitch` 推进、行宽 = `w*bpp/8`）。
+  - 锁前 GPU 屏障：这块像素是当前镜像目标 ⇒ `rasterSyncToGuest`（flush + 读回）；不是目标 ⇒ 只
+    `rasterFlush`（⛔ 不把别的 target 读回来）。解锁**不**标脏 / 不发版本号 —— "guest 是权威"由下一次
+    绘制的 `!rasterDirty() ⇒ rasterSyncFromGuest` 兑现。
+  - 契约级 guest 错误 ⇒ `D3DERR_INVALIDCALL`(0x8876086C) + Warn（**不 trap**，guest 自己对 `0x4A4F8D
+    test eax,eax` 分支）：已锁再锁 / 未锁就解锁 / 矩形越界或空 / `DISCARD`（后缓冲不是 dynamic）/
+    无 `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` / `MultiSampleType != NONE` / 未定义 flags 位 /
+    `pLockedRect`/RECT 不可写。本仓状态崩坏（状态块/arena 对不上、GPU 读回失败、bpp/pitch 为 0）仍 trap。
+    ⚠ 与纹理路的**已知分歧**：同一 COM 方法在纹理 surface 上失败仍 trap（含"已锁"），后缓冲上返回错误码。
+    `MultiSampleType != NONE` 的锁字段只能白盒构造（`CreateDevice` 对 MSAA 先答 `D3DERR_NOTAVAILABLE`）；
+    这条是 `LockRect` 侧的独立兜底，不是可达的生产路径。
+  - **守卫**：`tests/d3d9.cpp` 的 `d3d9/backbuffer-lockrect`（CTest `d3d9`，pure）断言 `Pitch`/`pBits`、
+    子矩形不改 Pitch、写 `pBits` 穿透、已锁再锁/未锁先解/越界/DISCARD/无 LOCKABLE/MSAA 各
+    `INVALIDCALL`、解锁后可再锁（`rect=NULL` ⇒ `pBits=arena`）、`unimplemented_calls == 0`；
+    `tests/gpu_batch.cpp` 的 `gpu-batch/backbuffer-lock-barrier`（CTest `gpu-batch-order`，pure）断言
+    锁前 `syncToGuest` +1 且 flush 在前、目标不是这块像素时只 flush 不回读。
+    ★ `gpu-batch-order` 原先**没有** `add_test`（只剩 `--gpu` 的 `gpu-batch-barrier`）⇒ 已补回顶层注册，
+    否则无 GPU 机器上会 SKIP 77，"删屏障"静默逃逸。
+  - **变异**：`tools/mutate-check.mjs` 的 `--match backbuffer` 五条（pBits 去偏移 / Pitch 用子矩形宽 /
+    删已锁检查 / 删锁前屏障 / 删 LOCKABLE 检查）实测 5/5 变红后还原。
+  - **真机读数（2026-11-09，macOS arm64 / RelWithDebInfo，`--present headless --raster cpu`）**：
+    `./out/emulator-lift --game-dir /Users/nekosu/Documents/Projects/amayui-cn/raw --skip-logo --audio off --present headless --raster cpu --log-level info --log-cat d3d9 --interaction-graph scripts/interaction/room-exit.graph --time-limit 900`
+    ⇒ `LockRect(backbuffer): Pitch=5120 pBits=0x28000008（矩形 0,0..1280,720）· 第 1/2 次锁` 两次 +
+    `UnlockRect(backbuffer)` 两次，**没有** `unimplemented D3DX9 call` ⇒ 这一跳已经通了。
+    ⚠ 任务仍**没走完**：trace 末尾是 `action key 0x1B applied`（没有 `task done`），进程 **exit 5**，
+    `stop=unimplemented detail=未实现的导入 kernel32!RaiseException`（`0x4123C4 __CxxThrowException
+    (Command_Exit_Exception)`，从 `sub_412290` / WM_TIMER 2 抛出、返回地址 `0x004123C9`）。
+    ⇒ **新 gap = SEH / C++ EH 展开不在 M1**，不是本单没修好；终点 TITLE hash 这一轮**没拿到**。
+  - **残余**：`LockRect` 只是这条路上的第一个 gap；后面还有 `operator new(0x540)`、逐行 memcpy、
+    `UnlockRect`、`Release`（全 guest 代码），再往后是上面那条 `RaiseException`（新读数）。
+- **同族**：`resource-exhausted`（`d3dxResourceStop` 的资源耗尽硬停）同样从 `Stopped` 拆出、非 ok；
+  名字与分类的真源是 `apps/emulator-lift/src/runtime/machine.h` 的 `StopReason` + `machine.cpp` 的
+  `stopReasonName` / `exitCodeForRun`。
 
 ### BUG-16 · `EU-ROOM` 里的「戻る」按钮对**注入点击**没有反应（hover 有高亮）
 - **现象**：把光标移到右下角「戻る」（约 `1200..1272 × 652..711`，框内均值 `0xB6957E`）⇒ 画面**会**变（按钮高亮，hash `0x96E5…` → `0xF13F…`）；但在同一位置点击 / 长按 4 s 再抬 / 双击，画面**一次都不再变**，也不产生任何停因。同一次运行里点 CG 鑑賞（`1100,150`）有效、TITLE 上点 OPTION（`812,622`）有效。

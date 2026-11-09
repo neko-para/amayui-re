@@ -93,6 +93,16 @@ void d3d9Log(const char* what, const char* fmt, ...) {
     va_end(ap);
 }
 
+// 契约级失败（guest 违约）用它：默认 warn 级别就看得见（Info 要 --verbose）。
+void d3d9Warn(const char* what, const char* fmt, ...) {
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", what ? what : "?");
+    va_list ap;
+    va_start(ap, fmt);
+    logV(LogLevel::Warn, LogD3d9, prefix, fmt, ap);
+    va_end(ap);
+}
+
 // 与 DDraw 的 requireMachine 同形（同一条装配口径：activeMachine 必须是这台 cpu 的 Machine）
 bool requireMachine(X86& cpu, Machine** out, std::string* why) {
     Machine* m = activeMachine();
@@ -332,7 +342,15 @@ std::uint32_t createDeviceState(X86& cpu, const CreateRequest& req, std::string*
         if (why) *why = std::string("D3D9：SurfaceArena.create 失败：") + m->surfaces().lastError();
         return 0;
     }
-    const GuestSurface* gs = m->surfaces().find(arena);
+    GuestSurface* gs = m->surfaces().find(arena);
+    // ★ 两个 D3DPRESENT_PARAMETERS 字段今天**被丢弃**，而它们决定后缓冲能不能锁：
+    //   · Flags & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER（本安装实测 = 1，`0x498F1B/0x498F98`）
+    //   · MultiSampleType != NONE ⇒ 多重采样后缓冲**不能**锁（D3D9 文档明说）
+    //   落点只能是**像素块**（`GuestSurface`）：`'D9D1'` 64 B 全满、`'TEX1'` 的锁字段会踩别人的。
+    if (gs != nullptr) {
+        gs->d3d9_lockable = (req.present.flags & kPresentFlagLockableBackbuffer) != 0;
+        gs->d3d9_multisample = req.present.multi_sample_type;
+    }
     // ③ 状态块（guest 堆；EA 挂在对象 obj+8 的扩展位上）
     const std::uint32_t state = cpu.heap->alloc(kDvBytes, /*zero=*/true);
     if (state == 0) {
@@ -423,14 +441,19 @@ bool deviceInfo(X86& cpu, std::uint32_t object, DeviceInfo* out, std::string* wh
 void destroyDeviceState(X86& cpu, std::uint32_t state) {
     if (state == 0 || !cpu.mem || !cpu.mem->committed(state, kDvBytes)) return;
     if (cpu.mem->rd32(state + kDvMagic) != kDvMagicValue) return;
-    d3d9::destroyForDevice(cpu, state);  // 流水线状态块 + 深度缓冲（含 SetTexture AddRef 的纹理）
-    const std::uint32_t arena = cpu.mem->rd32(state + kDvArena);
+    // ★ 先取 owner 再动 magic（本单）：清 magic 与 free 状态块都是不可逆的，判据只能在此之前成立。
+    //   用 `machineOf`（装配时捕获的归属）而不是 `activeMachine()`（会被别的 Machine / 析构改写）。
+    Machine* m = machineOf(cpu);
     // ★ 设备销毁：GPU 队列与镜像指向即将释放的 guest 像素 ⇒ 丢掉（⛔ 不回读到已释放/复用的 arena）。
-    if (Machine* m = activeMachine(); m && &m->cpu() == &cpu) {
+    //   放在 destroyForDevice 之前：它可能 release 掉"当 RT 用的纹理"（其像素与镜像目标相关）。
+    //   `rasterDiscardTarget()` 只碰宿主态（队列 / staging / 缓存），不读 guest ⇒ 顺序安全。
+    if (m != nullptr) {
         if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr) gpu->rasterDiscardTarget();
     }
+    d3d9::destroyForDevice(cpu, state);  // 流水线状态块 + 深度缓冲（含 SetTexture AddRef 的纹理）
+    const std::uint32_t arena = cpu.mem->rd32(state + kDvArena);
     cpu.mem->wr32(state + kDvMagic, 0);
-    if (Machine* m = activeMachine(); m && &m->cpu() == &cpu && arena != 0) m->surfaces().destroy(arena);
+    if (m != nullptr && arena != 0) m->surfaces().destroy(arena);
     if (cpu.heap) cpu.heap->free(state);
 }
 
@@ -991,8 +1014,12 @@ void destroyTextureState(X86& cpu, std::uint32_t state) {
     if (state == 0 || !cpu.mem || !cpu.mem->committed(state, kTxBytes)) return;
     if (cpu.mem->rd32(state + kTxMagic) != kTxMagicValue) return;
     const std::uint32_t arena = cpu.mem->rd32(state + kTxArena);
+    // ★ 先取 owner，**再**清 magic / free 状态块（本单 REQ-01M6X4MSCMMFEXYXCSK6V61QR2）：
+    //   这两步不可逆（magic 清了就再进不了本函数、状态块会随堆复用），所以"该不该回收"的判据
+    //   必须在它们之前成立。owner 来自 `Machine::wire()`，不受 `activeMachine()` 被改写的影响。
+    Machine* m = machineOf(cpu);
     cpu.mem->wr32(state + kTxMagic, 0);
-    if (Machine* m = activeMachine(); m && &m->cpu() == &cpu && arena != 0) m->surfaces().destroy(arena);
+    if (m != nullptr && arena != 0) m->surfaces().destroy(arena);
     if (cpu.heap) cpu.heap->free(state);
 }
 
@@ -1143,6 +1170,186 @@ bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::stri
         cpu.mem->wr32(tex.state + kTxPrevWriteVersion, 0u);
     }
 
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------
+// 后缓冲 surface 的 LockRect / UnlockRect（状态块 = 'D9D1'）
+// ---------------------------------------------------------------------------------------
+namespace {
+
+// 状态块 → 像素块。判据不成立 = **本仓状态崩坏**（`*broken=true`），不是 guest 违约。
+// ★ 这个判据必须在 `deviceInfoOfState` 之后：调用方（shim）已经用它区分了纹理路（'TEX1'）与后缓冲路。
+bool backBufferSurface(X86& cpu, std::uint32_t state, Machine** m_out, GuestSurface** gs_out, bool* broken,
+                       std::string* why) {
+    if (broken) *broken = false;
+    if (m_out) *m_out = nullptr;
+    if (gs_out) *gs_out = nullptr;
+    Machine* m = nullptr;
+    if (!requireMachine(cpu, &m, why)) {
+        if (broken) *broken = true;
+        return false;
+    }
+    DeviceInfo dev;
+    if (!deviceInfoOfState(cpu, state, &dev, why)) {
+        if (broken) *broken = true;
+        return false;
+    }
+    GuestSurface* gs = m->surfaces().find(dev.arena);
+    if (gs == nullptr) {
+        if (broken) *broken = true;
+        if (why) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "D3D9：后缓冲像素块 0x%08X 不在 arena 里（设备状态与 arena 不一致）",
+                          dev.arena);
+            *why = buf;
+        }
+        return false;
+    }
+    *m_out = m;
+    *gs_out = gs;
+    return true;
+}
+
+}  // namespace
+
+bool lockBackBuffer(X86& cpu, std::uint32_t state, std::uint32_t locked_rect_ea, std::uint32_t rect_ea,
+                    std::uint32_t flags, bool* broken, std::string* why) {
+    if (broken) *broken = false;
+    Machine* m = nullptr;
+    GuestSurface* gs = nullptr;
+    if (!backBufferSurface(cpu, state, &m, &gs, broken, why)) return false;
+
+    // ---- 契约级检查（D3D9 的正常失败面 ⇒ 调用方答 D3DERR_INVALIDCALL；⛔ 不 trap）----
+    // ① 后缓冲只有 swap chain 带 D3DPRESENTFLAG_LOCKABLE_BACKBUFFER 才可锁。
+    if (!gs->d3d9_lockable) {
+        if (why) *why = "D3D9：后缓冲没有 D3DPRESENTFLAG_LOCKABLE_BACKBUFFER ⇒ 不能锁";
+        return false;
+    }
+    // ② 多重采样后缓冲不能锁（文档明说；本线 CreateDevice 先拒绝了 MSAA，这里是 LockRect 侧的兜底）。
+    if (gs->d3d9_multisample != 0) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "D3D9：后缓冲是多重采样（MultiSampleType=%u）⇒ 不能锁",
+                      gs->d3d9_multisample);
+        if (why) *why = buf;
+        return false;
+    }
+    // ③ 面 LockRect 的合法 flags 里没有 NOOVERWRITE；未定义的位也不静默吞掉。
+    if ((flags & ~kLockSurfaceAllowed) != 0) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "D3D9：后缓冲 LockRect 的 Flags=0x%08X 含面不认识的位（合法集 = "
+                                        "DISCARD/DONOTWAIT/NO_DIRTY_UPDATE/NOSYSLOCK/READONLY）",
+                      flags);
+        if (why) *why = buf;
+        return false;
+    }
+    // ④ DISCARD 只对 dynamic 资源合法；后缓冲不是 dynamic ⇒ 必失败（且 DISCARD 还禁止带子矩形）。
+    if ((flags & kLockDiscard) != 0) {
+        if (why) *why = "D3D9：后缓冲不是 dynamic 资源 ⇒ D3DLOCK_DISCARD 非法";
+        return false;
+    }
+    // ⑤ 非嵌套：已锁再锁 = INVALIDCALL（纹理路同义，但那边失败会 trap —— 见 defects.md 的已知分歧）。
+    if (gs->d3d9_locked) {
+        if (why) *why = "D3D9：LockRect 在已锁的后缓冲上（D3DERR_INVALIDCALL）";
+        return false;
+    }
+    if (!committedOut(cpu, locked_rect_ea, 8u, "D3DLOCKED_RECT", why)) return false;
+    int left = 0;
+    int top = 0;
+    int right = gs->width;
+    int bottom = gs->height;
+    if (rect_ea != 0) {
+        if (!committedOut(cpu, rect_ea, 16u, "LockRect 的 RECT", why)) return false;
+        left = static_cast<int>(cpu.mem->rd32(rect_ea + 0));
+        top = static_cast<int>(cpu.mem->rd32(rect_ea + 4));
+        right = static_cast<int>(cpu.mem->rd32(rect_ea + 8));
+        bottom = static_cast<int>(cpu.mem->rd32(rect_ea + 12));
+        if (left < 0 || top < 0 || right > gs->width || bottom > gs->height || right <= left || bottom <= top) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "D3D9：LockRect 的 RECT=(%d,%d,%d,%d) 越界 / 空（后缓冲 %dx%d）", left,
+                          top, right, bottom, gs->width, gs->height);
+            if (why) *why = buf;
+            return false;
+        }
+    }
+    const std::uint32_t bpp = gs->format.bytesPerPixel();
+    if (bpp == 0 || gs->pitch == 0) {
+        if (broken) *broken = true;
+        if (why) *why = "D3D9：后缓冲的像素格式 / 行距非法（状态崩坏）";
+        return false;
+    }
+
+    // ★ 屏障（屏障清单「LockRect」，与纹理路同一形状）：这块 guest 像素若是当前 GPU 镜像目标，
+    //   guest 拿到 pBits 之前必须把未读回的绘制落回 guest；不是目标 ⇒ 队列里的 draw 不写这块像素，
+    //   只 flush（⛔ 不把别的 target 读回来）。
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+        std::uint8_t* base = m->surfaces().pixels(*gs);
+        if (base == nullptr) {
+            if (broken) *broken = true;
+            if (why) *why = "D3D9：后缓冲像素指针为空（状态崩坏）";
+            return false;
+        }
+        std::string gerr;
+        if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() == base) {
+            if (!gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &gerr)) {
+                if (broken) *broken = true;
+                if (why) *why = "D3D9：LockRect 前 GPU 像素读回失败：" + gerr;
+                return false;
+            }
+        } else if (!gpu->rasterFlush(&gerr)) {
+            // 队列里的绘制不写这块像素 ⇒ flush 失败不影响本次锁的像素；但要出声（⛔ 不静默）。
+            d3d9Warn("LockRect(backbuffer)", "GPU 队列 flush 失败：%s（锁的像素不是当前目标，继续）",
+                     gerr.c_str());
+        }
+    }
+
+    // ★ D3DLOCKED_RECT = { INT Pitch; void* pBits; }（32 位进程 ⇒ 8 B）
+    //   · Pitch = **整幅**行距（锁子矩形不改）—— 真机逐行 memcpy 的源行距就是它（0x4A5018）
+    //   · pBits = 像素首字节 + top*pitch + left*bpp ⇒ **矩形左上**（真机把它当目标首指针）
+    const std::uint32_t bits = gs->ea + static_cast<std::uint32_t>(top) * gs->pitch +
+                               static_cast<std::uint32_t>(left) * bpp;
+    cpu.mem->wr32(locked_rect_ea + 0, gs->pitch);
+    cpu.mem->wr32(locked_rect_ea + 4, bits);
+    gs->d3d9_locked = true;
+    gs->d3d9_lock_rect[0] = left;
+    gs->d3d9_lock_rect[1] = top;
+    gs->d3d9_lock_rect[2] = right;
+    gs->d3d9_lock_rect[3] = bottom;
+    ++gs->d3d9_lock_serial;
+    if (flags != 0) {
+        d3d9Log("LockRect(backbuffer)", "Flags=0x%08X 被记录（guest 像素没有 READONLY/NOSYSLOCK 语义）", flags);
+    }
+    d3d9Log("LockRect(backbuffer)",
+            "Pitch=%u pBits=0x%08X（矩形 %d,%d..%d,%d）· 第 %u 次锁", gs->pitch, bits, left, top, right, bottom,
+            gs->d3d9_lock_serial);
+    return true;
+}
+
+bool unlockBackBuffer(X86& cpu, std::uint32_t state, bool* broken, std::string* why) {
+    if (broken) *broken = false;
+    Machine* m = nullptr;
+    GuestSurface* gs = nullptr;
+    if (!backBufferSurface(cpu, state, &m, &gs, broken, why)) return false;
+    if (!gs->d3d9_locked) {
+        if (why) *why = "D3D9：UnlockRect 在未锁的后缓冲上（D3DERR_INVALIDCALL）";
+        return false;
+    }
+    gs->d3d9_locked = false;
+    // ★ 解锁**不**标脏 / 不发版本号：guest 是权威。下一次绘制在 `!rasterDirty()` 时会
+    //   `rasterSyncFromGuest` 把 guest 像素上传（d3d9_pipeline / d3dx9_sprite 的既有口径）。
+    //
+    // ★ 锁期间竟然画了东西（D3D9 契约外）⇒ 出声。判据只在"这块像素就是当前镜像目标"时成立：
+    //   非目标分支的 flush 也会把 dirty 置回 true（`d3d9_gpu.cpp` 的 rasterFlush 语义），那不是
+    //   "锁期间有人改像素"。
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+        const std::uint8_t* base = m->surfaces().pixels(*gs);
+        if (base != nullptr && gpu->rasterTargetBase() == base) {
+            d3d9Warn("UnlockRect(backbuffer)",
+                     "锁期间有未读回的 GPU 绘制 ⇒ guest 的写入可能在下一次读回时被覆盖");
+        }
+    }
+    d3d9Log("UnlockRect(backbuffer)", "解锁（第 %u 次锁的矩形 %d,%d..%d,%d）", gs->d3d9_lock_serial,
+            gs->d3d9_lock_rect[0], gs->d3d9_lock_rect[1], gs->d3d9_lock_rect[2], gs->d3d9_lock_rect[3]);
     return true;
 }
 

@@ -2,8 +2,9 @@
 
 - id: REQ-01M6X4MSCMMFEXYXCSK6V61QR2
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: apps/emulator-lift/tests/d3d9.cpp#d3d9/arena-reclaim-under-other-machine
 - repro: apps/emulator-lift/src/runtime/d3d9.cpp#destroyTextureState
 - severity: S3
 - tags: [emulator-lift, d3d9, leak, m2]
@@ -32,3 +33,15 @@
 - `REQ-01M6WTRF0X6362NK8BNK8DHHWJ`（S1，已收口）修的是"根本没有回收路径"；本单是它留下的**残余**：
   回收路径有了，但判据失败时先把回收资格毁掉了。
 - 同一条生命周期线上另两张：绑定引用（`kPlColorArena`）、对象表代际（`ComRegistry::release`），互不重叠。
+
+## 收口（2026-11-09，macOS arm64 / RelWithDebInfo）
+
+- 缺陷已复现：`Machine A` 建纹理 → 再建 `Machine B`（抢走 `g_active`）→ 用 A 的 cpu Release ⇒ 修前 d3d9 用例 4 条断言红
+  （arena `surfaces` / `bytesInUse` 停高位，而 guest 堆断言绿 = 状态块已 free、像素块没入口）。
+- 修法：`X86` 加**宿主侧归属** `machine`（`Machine::wire()` 装配、`~Machine` 清空）+ `machineOf(cpu)`；
+  三处销毁（纹理 / 设备后缓冲 + GPU discard / 流水线 depth）改成**先取 owner 再清 magic**。
+  ⛔ 未引入 live machine 注册表；guest ABI / 地址 / arena 容量未动。
+- 守卫：`apps/emulator-lift/tests/d3d9.cpp#d3d9/arena-reclaim-under-other-machine`（新 23 条断言，基线在用例内捕获）；
+  变异 `tools/mutate-check.mjs` 把 `machineOf` 的 owner 分支短路 ⇒ `ctest:d3d9` 红（实测）。
+- 同形未修：`ddraw_surface.cpp` 的 `destroySurfaceState` 也是"先清 magic 后判 Machine" ⇒ 已另开
+  `REQ-01M6ZY8SZRR3KA92ZC9QBNQ349`（各单各锚，不并进来）。

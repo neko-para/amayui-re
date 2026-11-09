@@ -13,6 +13,17 @@
 //   ③ **未闭合**：脚本只写 `profile_begin` 不写 `profile_end` ⇒ 运行结束时必须**自动收口 +
 //      告警 + 照样打印**（⛔ 不许静默丢数据）。断言 stdout 有表 + stderr 有"未闭合"。
 //
+// ★ **`profile-instrumentation-invariant`（口径不变量）**：四臂（A 全关 / B 仅 `--profile` /
+//   C 仅窗口 profiler / D 两者）跑**同一份程序**，`RunResult.insns` 必须**全等**。
+//   ⇒ 它守的是"仪器不许改执行流"（改了就说明读数是另一条路径上的读数）。这是**关系**断言，
+//   ⛔ 不断言任何耗时 / 百分比：膨胀量级是读数，进 `measurement.md` M-02，不进 test。
+//   ⚠ 四臂成立的前提（⛔ 改测试时不要破坏）：① 裸 Machine、`real_time=false`（裸机缺省；
+//   `--present window` 会自动 real-time ⇒ 那一档不成立）；② 锚点只用 `at insn`（裸机没有 Present，
+//   `at frame` 会走帧停滞兜底、`wall_ms` 会读宿主墙钟）；③ 无 sink / 音频 Off / 不读宿主时钟的 shim；
+//   ④ **每臂一台新 Machine**（`run()` 不重置 `cpu_.insns`，复用会累加）；⑤ 只有窗口那两臂多两行
+//   `profile_*`；⑥ 清掉 `LIFT_FRAME_TRACE`（否则"全关"臂其实开着逐帧 trace）。
+//   变异（`pnpm test:mutation`）：让块计时顺带改 `cpu_.insns` ⇒ 本用例当场红。
+//
 // ★ 还钉了触发条件的两条口径：
 //   - `at insn N` 能当窗口边界（**帧内也能切**）⇒ 同一脚本重复跑边界相同（断言 insns 范围）。
 //   - 帧停滞兜底：帧号不推进时 `at frame` 不会永远不触发（`--input-stall-ms` 的语义）。
@@ -21,6 +32,7 @@
 // ⛔ 不依赖游戏 / LFS：自造机器码 + 一个宿主 shim，纯 pure。
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -230,6 +242,24 @@ std::string lineWith(const std::string& hay, const std::string& needle) {
     return hay.substr(line_begin, (end == std::string::npos ? hay.size() : end) - line_begin);
 }
 
+// 数一段文本出现几次（"窗口只在预期的两处"用；⛔ 不做子串猜测之外的事）。
+std::size_t countOf(const std::string& hay, const std::string& needle) {
+    if (needle.empty()) return 0;
+    std::size_t n = 0;
+    for (std::size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + needle.size())) ++n;
+    return n;
+}
+
+// `profile-instrumentation-invariant` 的"全关"臂要求 `LIFT_FRAME_TRACE` 真的没开：
+// CTest 一般是干净的，但"从带该环境变量的 shell 里跑"不该让这条不变量变成另一种口径。
+void clearFrameTraceEnv() {
+#ifdef _WIN32
+    _putenv_s("LIFT_FRAME_TRACE", "");
+#else
+    unsetenv("LIFT_FRAME_TRACE");
+#endif
+}
+
 struct Buckets {
     double wall_ms = 0;
     double guest_ms = 0;
@@ -368,6 +398,110 @@ int main() {
                     LIFT_CHECK(calls == 1ull);
                 }
             }
+        }
+    }
+
+    // =================================================================================
+    // ①b 口径不变量：仪器**不许改执行流**（四臂 insns 全等；窗口只在开了窗口的两臂）
+    //     A 全关 / B 仅 --profile / C 仅窗口 profiler / D 两者。同一份程序、四台新 Machine。
+    //     ⛔ 这里不断言任何耗时：膨胀量级是读数（measurement.md M-02），不是不变量。
+    // =================================================================================
+    {
+        g_current_case = "profile-instrumentation-invariant";
+        clearFrameTraceEnv();
+        struct Arm {
+            const char* name = "";
+            bool use_profile = false;
+            bool use_window = false;
+            bool ran = false;
+            bool ok = false;
+            lift::RunResult r;
+            std::string log;
+            bool armed = false;
+            bool profile_on = false;
+            std::uint64_t begin_insns = 0;
+            std::uint64_t end_insns = 0;
+            std::uint64_t iterations = 0;
+        };
+        auto runArm = [](Arm* arm) -> bool {
+            lift::Machine m;
+            Program prog = buildProgram(200000u);
+            if (!boot(m, prog)) return false;
+            if (!attach(m, "burn", lift::Conv::Stdcall, 1, &shimBurn, kStubEa)) return false;
+            if (arm->use_window) {
+                // 与 ① 同一组 `at insn` 锚点：窗口覆盖第二次慢调用 + guest 子函数 + loop2 一段。
+                const char* script =
+                    "at insn 50\n"
+                    "profile_begin enter\n"
+                    "at insn 300000\n"
+                    "profile_end enter\n";
+                std::string err;
+                if (!m.loadInputScriptText(script, "inline:invariant", &err)) return false;
+                if (!m.inputScript().hasProfileActions()) return false;
+            }
+            lift::RunOptions o;
+            o.until_ea = 0xFFFFFFFFu;
+            o.max_insns = 200000000;
+            o.profile = arm->use_profile;
+            Capture cap;
+            if (!cap.begin()) return false;
+            arm->r = m.run(o);
+            // ★ `instr :` 行在运行摘要里（main 打的就是这一份）⇒ 捕获它才能断言"读的是真实 armed 位"。
+            m.dumpRunSummary(arm->r, stdout);
+            arm->log = cap.finish();
+            arm->armed = m.profilerArmed();
+            arm->profile_on = m.instrumentation().profile;
+            arm->ok = arm->r.reason == lift::StopReason::UntilEa;
+            parseWindowSpan(arm->log, &arm->begin_insns, &arm->end_insns, &arm->iterations);
+            arm->ran = true;
+            return true;
+        };
+
+        Arm arms[4] = {{"A-off", false, false}, {"B-profile", true, false},
+                       {"C-window", false, true}, {"D-both", true, true}};
+        for (Arm& a : arms) LIFT_CHECK(runArm(&a));
+        for (const Arm& a : arms) {
+            LIFT_CHECK(a.ran);
+            LIFT_CHECK(a.ok);  // 同一份程序、同一个哨兵结尾 ⇒ 四臂都该是 UntilEa
+        }
+        // ★ 口径不变量：四条路径的**指令数必须相等**（仪器只许花时间，不许改执行流）。
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[0].r.insns),
+                          static_cast<std::int64_t>(arms[1].r.insns));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[0].r.insns),
+                          static_cast<std::int64_t>(arms[2].r.insns));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[0].r.insns),
+                          static_cast<std::int64_t>(arms[3].r.insns));
+        LIFT_CHECK(arms[0].r.insns > 0);
+        // ★ 窗口只在**开了窗口 profiler** 的两臂出现（A/B 一次也不许有）。
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOf(arms[0].log, "=== profile window: enter ===")), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOf(arms[1].log, "=== profile window: enter ===")), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOf(arms[2].log, "=== profile window: enter ===")), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOf(arms[3].log, "=== profile window: enter ===")), 1);
+        // ★ 窗口边界也是执行流的函数：同一份脚本、同一份程序 ⇒ C/D 的 begin/end insns 必须相等
+        //   （⛔ 不断言具体数字：那条会随程序改而红，而红的含义不是"仪器改坏了执行流"）。
+        LIFT_CHECK(arms[2].begin_insns > 0 && arms[2].end_insns > arms[2].begin_insns);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[2].begin_insns),
+                          static_cast<std::int64_t>(arms[3].begin_insns));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[2].end_insns),
+                          static_cast<std::int64_t>(arms[3].end_insns));
+        LIFT_CHECK(arms[2].end_insns <= arms[2].r.insns);
+        LIFT_CHECK(arms[2].iterations > 0 && arms[3].iterations > 0);
+        // ★ 窗口不是**残表**：窗口内既有 shim（第二次慢调用）也有 guest 函数（`sub`）的账。
+        LIFT_CHECK(arms[2].log.find("test!burn") != std::string::npos);
+        LIFT_CHECK(arms[2].log.find("sub_00401200") != std::string::npos);
+        // ★ `instr :` 读的是**真实 armed 位**（⛔ 不是 CLI 回显）：B 臂 profile=on / window-prof=off；
+        //   C 臂反过来。这条同时钉住 `Machine::profilerArmed()` 就是摘要里那个位。
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[0].armed), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[1].armed), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[2].armed), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(arms[3].armed), 1);
+        for (const Arm& a : arms) {
+            const std::string line = lineWith(a.log, "instr     :");
+            LIFT_CHECK(!line.empty());
+            if (line.empty()) continue;
+            LIFT_CHECK(line.find(a.use_profile ? "profile=on" : "profile=off") != std::string::npos);
+            LIFT_CHECK(line.find(a.use_window ? "window-prof=on" : "window-prof=off") != std::string::npos);
+            LIFT_CHECK(a.profile_on == a.use_profile);
         }
     }
 

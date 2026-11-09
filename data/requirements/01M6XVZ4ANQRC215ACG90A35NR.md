@@ -2,6 +2,16 @@
 
 - id: REQ-01M6XVZ4ANQRC215ACG90A35NR
 - type: req
+- status: done
+- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- order: 2
+- verify: apps/emulator-lift/tests/input_marker.cpp#marker-value-change-one-event
+- tags: [emulator-lift, interaction, marker]
+
+# emulator-lift · 脚本身份 marker 事件源：TriggerKind::Marker（VM 循环头采样 cur + frame[cur].+0x50 → id→名字 → 边沿触发 → 超时响亮失败）
+
+- id: REQ-01M6XVZ4ANQRC215ACG90A35NR
+- type: req
 - status: open
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 2
@@ -38,25 +48,20 @@
 
 B 的证据链**全部在 guest 内存与 VM 循环**里 ⇒ 纯 CTest 可钉；A 的消费者必须**真安装 + 真画面**。放进同一张单，B 就会因为"要跑游戏"而永远没有绿灯判据。
 
-## 探测补记（2026-11-09：仓内哪些锚在、哪一段真的缺）
+## 探测补记（已被收口取代）
 
-判据不变，但下面这份"证据分布"要先看，免得照着上面那张表直接开工：
+三项缺口（VM 循环头 `0x4123F0` / 基址 `0x55E1BC` / 名字表 `FileDB`）已在收口前补齐，证据链见分析报告。
+`.tmp/anchor-design.md` 早已丢失，不再作为依据。
 
-| 要的东西 | 仓内状态 |
-|---|---|
-| 当前帧号 `cur` 的偏移（`Engine+0x5D880`） | ✅ 在仓：`repo:packages/age-format/src/engine/layout.mts`（`FRAME_ENGINE_SCALARS.cur`） |
-| 帧记录基址 `0x5D894` / 步长 `0x78` / 40 槽 | ✅ 在仓：同文件 `FRAME_LAYOUT` |
-| 身份格 = 记录 `+0x3c`（旧记法 `+0x50` = `0x5D8D0`） | ✅ 在仓：`layout.mts` 的 `frameArg` + `repo:data/ledger/observation/2026-10.jsonl` 的观察行 |
-| 身份 = "统一文件 id"（高 8 位区号 / 低 24 位下标） | ✅ 在仓：`repo:data/spec/chapters/60-ops-input.md` 与 `60-ops-frame.md` |
-| **`cur` / `frame[cur]` 所在的基址对象** | ⚠ 只在本单上面那张表里（"VM 循环头 / `Engine` 基址"）⇒ **`.tmp/anchor-design.md` 已丢失且不入库**；要重新取证 |
-| **id→名字表基址**（`read32(索引+0x414) + 80×id`） | ⚠ 同上，只有公式没有基址 |
-| **VM 循环头的 EA** | ⛔ 仓内零处（`rg` 无命中） |
+## 收口（2026-11-09）
 
-⇒ 能立刻做的：**边沿检测 / 名字降级 / 超时响亮失败**这三件纯 CTest 可钉的（判据见上，语料不需要）。
-做不了的：把 `when script <名字>` 接到**真画面** —— 缺的是"基址对象"与"循环头 EA"两次取证，不是实现。
-
-★ 顺带一条可用推断（**未核**，别当事实）：`layout.mts` 记的帧区之后那个成员 `0x5EB54`，与 `--skip-logo`
-用的 `T_Command + 0x5EB5C` 只差 8 字节且同属一个对象 ⇒ `T_Command` 很可能就是 `layout.mts` 里的那个 `Engine` 基址。
-若成立，`cur` = `mem.rd32(base+0x5D880)`、身份 = `mem.rd32(base+0x5D894 + 0x78*cur + 0x3c)`，`base = mem.rd32(0x55E1BC)`。
-核它的判据：LOGO 帧的身份应等于 `0x5262`（`data/ledger/observation/2026-10.jsonl` 里那条 SYS4INI 观察），
-或 `cur ∈ [0,39]` 且记录 `+0x00` 指向已提交内存。
+- 已实现 `TriggerKind::Marker` + `at marker <名字>`：边沿 = `(cur,id)` 值变（首采样只播种）；名字读不到 ⇒ 降级 `id:0x…` **仍触发** + 每类一次警告；
+  超时 ⇒ `InteractionFailed` + `detail = marker-timeout: waited/last/waited_ms` + exit 5（复用，未加枚举）。
+- ★ 订正分析 §1.4：采样点 = 块入口 `eip ∈ {0x4123F0, 0x4123E5}`（块缓存按 `Jcc` 切块，只挂前者会漏消息泵回来的 pass；用例 `marker-pump-return-entry` 钉住）；
+  超时要 `postQuit` 唤醒阻塞在 `GetMessageA` 的 guest。
+- 守卫：`apps/emulator-lift/tests/input_marker.cpp`（16 例 / 631 checks），`verify` 挂 `#marker-value-change-one-event`；
+  变异 3 条（边沿恒触发 / 降级不触发 / 超时短路）⇒ 3/3 红。
+- ⛔ 未实现 `--anchor-script`（消费者 `REQ-01M6WS9G1EQRZ0EYM21V0DPZVY` 仍未收口）。
+- 已知差异（不改 spec）：`Engine+0xCA6C` 只有 1 处读、**0 个写者**，而 `60-ops-frame.md` 说 `0x199` 写；本实现不用该格。
+  spec 线自 2026-11 冻结 ⇒ 记此处，不单独开单。
+- 分析全文 `.tmp/reveq/01M6XVZ4ANQRC215ACG90A35NR/analysis.md`（**不入库**；入库的是本节要点）。

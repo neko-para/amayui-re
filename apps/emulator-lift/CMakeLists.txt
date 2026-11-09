@@ -48,6 +48,9 @@ add_library(emulator-lift-runtime STATIC
     #   `input_script.cpp` = 指令式时间线（`at frame N` / `at guest_ms T` / click / key ...）。
     src/runtime/input.cpp
     src/runtime/input_script.cpp
+    #   `engine_marker.cpp` = 脚本身份（marker）采样器：`TriggerKind::Marker` 的**唯一**取数口
+    #   （VM 循环头 `0x4123F0` / 消息泵回来的块入口 `0x4123E5`；常量与 EA 锚在头文件）。
+    src/runtime/engine_marker.cpp
     src/runtime/pe_resource.cpp
     src/runtime/surface.cpp
     # ★ 画面特征采样（交互模型的 `screen` 源）：采样点 = Present。
@@ -297,6 +300,14 @@ add_executable(lift-input-tick tests/input_tick.cpp)
 target_link_libraries(lift-input-tick PRIVATE emulator-lift-runtime)
 add_test(NAME input-tick COMMAND lift-input-tick)
 
+# ---- pure：脚本身份 marker 事件源（`TriggerKind::Marker`）----
+# ★ 顶层无条件注册 ⇒ pure 档：假 guest 内存布置 Engine 单例 / cur / frame[cur].+0x3C / 名字表；
+#   另有一条真 `Machine::run` 的集成用例（自造字节放在 `0x4123F0` / `0x4123E5` 两个采样 EA），
+#   钉住"钩子真的在循环头采样"。⛔ 不需要游戏安装 / LFS。
+add_executable(lift-input-marker tests/input_marker.cpp)
+target_link_libraries(lift-input-marker PRIVATE emulator-lift-runtime)
+add_test(NAME input-marker COMMAND lift-input-marker)
+
 # ---- pure：识别驱动的交互状态机（节点图解析 / 三种失败 / trace 可 diff）----
 # ★ 顶层无条件注册 ⇒ pure 档：判定是观测值的纯函数，测试自己给 frame / guest_ms / wall_ms
 #   （⛔ 不靠真实墙钟推进），采样用 `FrameSampler::observeValues()` 注入。
@@ -360,6 +371,18 @@ add_executable(lift-input-injection tests/input_injection.cpp)
 target_link_libraries(lift-input-injection PRIVATE emulator-lift-runtime)
 add_test(NAME input-injection COMMAND lift-input-injection)
 
+# =====================================================================================
+# pure：时间线的**效果级判据**（`--expect-change-after` / `--expect-change-window`）
+# ★ 判据（红了意味着什么）：动作被应用之后，运行期必须在 N 个**采样**内看到画面变化；
+#   到点没变 / 一次采样都没有 / 跑完未判定 ⇒ `InteractionFailed`（`main` 走 exit 5）。
+#   ⛔ 不许"发完不管却 exit 0"——BUG-16 就是这么漏掉的。
+# ★ 夹具：裸 Machine + 自造 guest 循环 + 采样注入 shim（⛔ 不依赖游戏安装 / 窗口 / LFS）。
+# ★ 顶层无条件注册 ⇒ **pure** 档。
+# =====================================================================================
+add_executable(lift-input-expect tests/input_expect.cpp)
+target_link_libraries(lift-input-expect PRIVATE emulator-lift-runtime)
+add_test(NAME input-expect COMMAND lift-input-expect)
+
 # ---- pure：`--skip-logo` 的字段写入（T_Command+0x5EB5C；锚 0x004BAA37）----
 add_executable(lift-skip-logo tests/skip_logo.cpp)
 target_link_libraries(lift-skip-logo PRIVATE emulator-lift-runtime)
@@ -405,8 +428,12 @@ set_tests_properties(gpu-direct-present PROPERTIES SKIP_RETURN_CODE 77)
 # 且 syncFromGuest 在队列非空时被拒绝（⛔ 静默覆盖）。去掉 flush ⇒ 队列不清空 ⇒ 当场红。
 add_executable(lift-gpu-batch tests/gpu_batch.cpp)
 target_link_libraries(lift-gpu-batch PRIVATE emulator-lift-runtime)
+# ★ 顶层无条件注册 ⇒ pure 档（`AGENTS.md` §5：判据是注册位置）。
+#   这条同时承载后缓冲 LockRect 的屏障用例（`caseBackBufferLockBarrier`）—— 只注册 `--gpu` 那条的话，
+#   在无 GPU 机器上它会 SKIP 77 ⇒ "删屏障"的变异静默逃逸。
+add_test(NAME gpu-batch-order COMMAND lift-gpu-batch)
 
-# ---- 同一份夹具的真后端判据：Clear / 纹理 LockRect / SetRenderTarget 之后像素对、队列空 ----
+# ---- 同一份夹具的真后端判据：Clear / 纹理 LockRect / SetRenderTarget 之后像素块对、队列空 ----
 # dummy 视频下建不出 SDL_GPU 设备 ⇒ SKIP 77（⛔ 不拿 pure 档冒充真后端绿）。
 add_test(NAME gpu-batch-barrier COMMAND lift-gpu-batch --gpu)
 set_tests_properties(gpu-batch-barrier PROPERTIES
@@ -671,7 +698,9 @@ add_test(NAME pixel-format COMMAND lift-pixel-format)
 # =====================================================================================
 # 可定界的区间 profiler（`profile_begin` / `profile_end`；pure：裸 Machine + 自造字节 + 一个已知 shim）
 # ★ 判据见 tests/profile_window.cpp 文件头：① 分项 + unattributed == 窗口墙钟；
-#   ② 窗口外的 shim 调用不计入（窗口内/外各烧一次，量级差 10×）；③ 未闭合 ⇒ 自动收口 + 告警。
+#   ② 窗口外的 shim 调用不计入（窗口内/外各烧一次，量级差 10×）；③ 未闭合 ⇒ 自动收口 + 告警；
+#   ④ `profile-instrumentation-invariant`：四臂（全关 / 仅 --profile / 仅窗口 / 两者）的 insns
+#      必须全等 ⇒ **仪器不许改执行流**（口径不变量；⛔ 不断言耗时）。
 # ★ 顶层无条件注册 ⇒ pure 档。
 # =====================================================================================
 add_executable(lift-profile-window tests/profile_window.cpp)

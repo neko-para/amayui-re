@@ -107,6 +107,8 @@ void ddrawTrap(X86& cpu, const char* method, const char* fmt, ...) {
     dumpGuestStack(cpu, stderr, 24);
     cpu.running = false;
     cpu.stop_why = "unimplemented DDraw call";
+    // ★ 停机种类（纯宿主）：loud trap ⇒ 非正常结局（`StopReason::Trap`）。
+    cpu.stop_kind = HostStopKind::Trap;
     ++cpu.shim.unimplemented_calls;
 }
 

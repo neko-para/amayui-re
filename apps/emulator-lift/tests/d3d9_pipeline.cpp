@@ -69,6 +69,9 @@ constexpr std::uint32_t kOffSetStreamSource = 0x190u;
 constexpr std::uint32_t kOffTextureLockRect = 0x4Cu;
 constexpr std::uint32_t kOffTextureUnlockRect = 0x50u;
 constexpr std::uint32_t kOffSetViewport = 0xBCu;
+constexpr std::uint32_t kOffSetRenderTarget = 0x94u;         // ★ 0x4A778B
+constexpr std::uint32_t kOffTextureGetSurfaceLevel = 0x48u;  // ★ 0x4A7755
+constexpr std::uint32_t kOffRelease = 0x08u;                 // IUnknown::Release（所有 COM 对象同槽）
 
 constexpr std::uint32_t kFvfXyzDiffuse = 0x0042u;              // D3DFVF_XYZ | D3DFVF_DIFFUSE
 constexpr std::uint32_t kFvfXyzRhwDiffuse = 0x0044u;           // D3DFVF_XYZRHW | D3DFVF_DIFFUSE
@@ -163,7 +166,9 @@ struct Fixture {
         const lift::RunResult r = m.run(o);
         if (out) *out = r;
         if (r.reason == lift::StopReason::UntilEa) return m.cpu().eax();
-        return r.reason == lift::StopReason::Stopped || r.reason == lift::StopReason::Unimplemented
+        // ★ 白名单 = "调用返回了 EAX"（不是"成功"）；新增原因必须在内，见 tests/d3dx9.cpp 同款注释。
+        return r.reason == lift::StopReason::Stopped || r.reason == lift::StopReason::Unimplemented ||
+                       r.reason == lift::StopReason::Trap || r.reason == lift::StopReason::ResourceExhausted
                    ? m.cpu().eax()
                    : 0;
     }
@@ -937,6 +942,374 @@ void caseClipPlanes() {
     LIFT_CHECK_EQ_U32(info.rasterized, 4u);
 }
 
+// ---------------------------------------------------------------------------------------
+// ⑩ 渲染目标的生命周期：纹理当 RT 之后**不换 target** 就 Release 它
+//   （REQ-01M6X4N7C0PAF6XT7EAC172V85）
+// ---------------------------------------------------------------------------------------
+// 时序（照需求单造，也是"游戏数据决定的顺序"，⛔ 不是本仓能担保的不变量）：
+//   绑定纹理 A 的表面为 RT → **不换 target** → Release 纹理 A → 再画一笔（Clear(TARGET)）。
+// ★ 判据（每条都在破坏时红）：
+//   ① 释放 A 之后流水线属性仍指 A 的像素块，且那块**还活着**（绑定 = 对像素块的语义 addRef）；
+//   ② 同尺寸的新占用者 B 的像素一个都不许变（修前 arena 把 A 的地址复用给 B ⇒ Clear 写进 B）；
+//   ③ Clear(TARGET) 落到仍在绑定的 RT（A 的像素块），⛔ 不是后缓冲；
+//   ④ 换 target 时成对释放：旧的 owner + surface 一起放，A 的像素块回收（重复设同一 target 不多占一份）；
+//   ⑤ 换回后缓冲时成对释放；
+//   ⑥ 同一纹理的两个 surface 互切（guest 已放掉纹理）⇒ 新 owner 的 addRef 必须先于旧 owner 的 release
+//     （否则旧 owner 当场到 0、状态块/像素块被回收，换绑直接失败）；
+//   ⑦ 设备销毁时仍在绑定 ⇒ owner + surface 成对释放、像素块回收（⛔ 不是泄漏）。
+// ★ 修前：① 的 `find(a_arena)` 为 null（`destroyTextureState` 已经把像素块回收了；surface 对象的
+//   AddRef 只保住对象、保不住像素块）⇒ ② 的 Clear 写进拿到同一地址的 B ⇒ ② 红。
+void caseRenderTargetLifetime() {
+    lift_test::g_current_case = "d3d9p/render-target-lifetime";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+    auto& mem = r.f.m.mem();
+
+    constexpr std::uint32_t kTexel = 0x11223344u;  // A 的哨兵 texel（A8R8G8B8 ⇒ 原样存）
+    constexpr std::uint32_t kRtClearColor = 0xFF102030u;
+    constexpr std::uint32_t kRtClearPixel = 0xFF102030u;  // A8R8G8B8 ⇒ 保留 alpha 通道
+
+    // ---- A：2×2 纹理，4 个 texel 写成哨兵（走 guest 的 LockRect / UnlockRect）----
+    std::uint32_t tex_a = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_a), 0u);
+    LIFT_CHECK_NE_U32(tex_a, 0u);
+    if (tex_a == 0) return;
+    lift::d3d9::TextureInfo ta;
+    LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), tex_a, &ta, nullptr));
+    const std::uint32_t a_arena = ta.arena;
+    LIFT_CHECK_NE_U32(a_arena, 0u);
+    const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0u));
+    LIFT_CHECK_EQ_U32(r.f.method(tex_a, kOffTextureLockRect, {0u, locked, 0u, 0u}), 0u);
+    const std::uint32_t a_pitch = mem.rd32(locked + 0u);
+    const std::uint32_t a_bits = mem.rd32(locked + 4u);
+    LIFT_CHECK_NE_U32(a_bits, 0u);
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            mem.wr32(a_bits + static_cast<std::uint32_t>(y) * a_pitch + static_cast<std::uint32_t>(x) * 4u,
+                     kTexel);
+        }
+    }
+    LIFT_CHECK_EQ_U32(r.f.method(tex_a, kOffTextureUnlockRect, {0u}), 0u);
+    // 哨兵真的落在 A 的像素块里（否则后面"Clear 落到 A"断言恒真）
+    {
+        const lift::GuestSurface* gs = r.f.m.surfaces().find(a_arena);
+        LIFT_CHECK(gs != nullptr);
+        if (gs != nullptr) LIFT_CHECK_EQ_U32(mem.rd32(gs->ea), kTexel);
+    }
+
+    // ---- 绑定为 RT（GetSurfaceLevel(0) 与真实游戏的 ReadFrameTex 时序一致）----
+    const std::uint32_t surface_out = r.f.placeU32(0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex_a, kOffTextureGetSurfaceLevel, {0u, surface_out}), 0u);
+    const std::uint32_t surface = mem.rd32(surface_out);
+    LIFT_CHECK_NE_U32(surface, 0u);
+    if (surface == 0) return;
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);
+    lift::d3d9::PipelineInfo pi;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_arena, a_arena);
+    LIFT_CHECK_EQ_U32(pi.color_surface, surface);
+
+    // ---- ★ 不换 target，直接 Release 纹理 A（guest 的那份引用）----
+    r.f.method(tex_a, kOffRelease, {});
+
+    // ① 流水线属性仍指 A 的像素块；那块像素必须**还活着**（绑定 = 语义 addRef）
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_arena, a_arena);
+    LIFT_CHECK_EQ_U32(pi.color_surface, surface);
+    LIFT_CHECK(r.f.m.surfaces().find(a_arena) != nullptr);
+
+    // ---- 逼 arena 复用同一地址：同尺寸的新占用者 B ----
+    std::uint32_t tex_b = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_b), 0u);
+    LIFT_CHECK_NE_U32(tex_b, 0u);
+    lift::d3d9::TextureInfo tb;
+    LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), tex_b, &tb, nullptr));
+    const std::uint32_t b_arena = tb.arena;
+    LIFT_CHECK_NE_U32(b_arena, 0u);
+    // 记下 B 的初始像素（4 个 texel 都应为 0），Clear 之后逐字比对
+    std::uint32_t b_before[4] = {0xDEADBEEFu, 0xDEADBEEFu, 0xDEADBEEFu, 0xDEADBEEFu};
+    {
+        const lift::GuestSurface* gs = r.f.m.surfaces().find(b_arena);
+        LIFT_CHECK(gs != nullptr);
+        if (gs != nullptr) {
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 2; ++x) {
+                    b_before[y * 2 + x] =
+                        mem.rd32(gs->ea + static_cast<std::uint32_t>(y) * gs->pitch +
+                                 static_cast<std::uint32_t>(x) * 4u);
+                }
+            }
+        }
+    }
+
+    // ---- 再画一笔：Clear(TARGET) 必须落到仍在绑定的 RT（A 的像素块）----
+    const std::uint32_t backbuffer_before = r.f.pixelAt(0, 0);
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kRtClearColor), 0u);
+    // ③ 后缓冲没被写（⛔ 不许把仍在绑定中的 RT 静默换成后缓冲）
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), backbuffer_before);
+    // ③ Clear 真的写进 A 的像素块
+    {
+        const lift::GuestSurface* gs = r.f.m.surfaces().find(a_arena);
+        LIFT_CHECK(gs != nullptr);
+        if (gs != nullptr) LIFT_CHECK_EQ_U32(mem.rd32(gs->ea), kRtClearPixel);
+    }
+    // ② 新占用者 B 的像素一个都没变
+    {
+        const lift::GuestSurface* gs = r.f.m.surfaces().find(b_arena);
+        LIFT_CHECK(gs != nullptr);
+        if (gs != nullptr) {
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 2; ++x) {
+                    LIFT_CHECK_EQ_U32(mem.rd32(gs->ea + static_cast<std::uint32_t>(y) * gs->pitch +
+                                               static_cast<std::uint32_t>(x) * 4u),
+                                      b_before[y * 2 + x]);
+                }
+            }
+        }
+    }
+
+    // ---- ④ 成对释放①：**换 target**（不经 0）⇒ 旧 owner + 旧 surface 一起放，A 的像素块回收 ----
+    //   ★ 先让 guest 把 surface 的那份引用也放掉（绑定期间 surface 只剩流水线那一份）：
+    //     "GPU 绑着、guest 两份引用都不在了" 是这条生命周期线最紧的时序。
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);  // 重复设同一 target
+    r.f.method(surface, kOffRelease, {});
+    LIFT_CHECK(r.f.m.cpu().com->find(surface));  // surface 仍被流水线持有（对象还在）
+    std::uint32_t tex_c = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_c), 0u);
+    lift::d3d9::TextureInfo tc;
+    LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), tex_c, &tc, nullptr));
+    const std::uint32_t c_arena = tc.arena;
+    const std::uint32_t c_surface_out = r.f.placeU32(0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex_c, kOffTextureGetSurfaceLevel, {0u, c_surface_out}), 0u);
+    const std::uint32_t c_surface = mem.rd32(c_surface_out);
+    LIFT_CHECK_NE_U32(c_surface, 0u);
+    // 直接 A 的表面 → C 的表面（不经后缓冲）：旧 owner（A 的纹理）与旧 surface 成对释放
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {c_surface, 0u}), 0u);
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_arena, c_arena);
+    LIFT_CHECK_EQ_U32(pi.color_surface, c_surface);
+    LIFT_CHECK(r.f.m.surfaces().find(a_arena) == nullptr);   // A 的像素块随旧 owner 释放而回收
+    LIFT_CHECK(r.f.m.surfaces().find(c_arena) != nullptr);   // C（新 RT）的像素块活着
+    LIFT_CHECK(!r.f.m.cpu().com->find(surface));             // 旧 surface 对象已释放（guest 早放了它那份）
+
+    // ---- ⑤ 成对释放②：换回后缓冲 ⇒ C 的像素块也回收 ----
+    //   ★ 同 ④：先把 guest 的两份引用放掉，让流水线成为唯一持有者。
+    r.f.method(tex_c, kOffRelease, {});
+    r.f.method(c_surface, kOffRelease, {});
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, 0u}), 0u);
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_arena, 0u);
+    LIFT_CHECK_EQ_U32(pi.color_surface, 0u);
+    LIFT_CHECK(r.f.m.surfaces().find(c_arena) == nullptr);
+    LIFT_CHECK(!r.f.m.cpu().com->find(c_surface));
+
+    // ---- ⑥ 同一纹理的两个 surface 互切（释放**顺序**不变量）----
+    //   ★ 时序：guest 已经放掉纹理 E（只剩流水线那一份 owner 引用）⇒ 再绑 E 的**另一个** surface。
+    //     如果实现先 release 旧 owner 再 addRef 新 owner，旧 owner 会当场降到 0 ⇒
+    //     `destroyTextureState` 回收像素块 + 状态块 ⇒ 绑定直接失败（本用例红）。
+    //     ⇒ 判据：绑 E2 必须成功、像素块还在、属性指向 E2 的 arena。
+    std::uint32_t tex_e = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_e), 0u);
+    lift::d3d9::TextureInfo te;
+    LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), tex_e, &te, nullptr));
+    const std::uint32_t e_arena = te.arena;
+    const std::uint32_t e1_out = r.f.placeU32(0u);
+    const std::uint32_t e2_out = r.f.placeU32(0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex_e, kOffTextureGetSurfaceLevel, {0u, e1_out}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex_e, kOffTextureGetSurfaceLevel, {0u, e2_out}), 0u);
+    const std::uint32_t e1 = mem.rd32(e1_out);
+    const std::uint32_t e2 = mem.rd32(e2_out);
+    LIFT_CHECK_NE_U32(e1, 0u);
+    LIFT_CHECK_NE_U32(e2, 0u);
+    LIFT_CHECK(e1 != e2);  // 每次 GetSurfaceLevel 都建一个新 surface 对象（同一 owner）
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {e1, 0u}), 0u);
+    r.f.method(tex_e, kOffRelease, {});  // ← 只剩流水线那一份 owner 引用
+    r.f.method(e1, kOffRelease, {});     //   旧 surface 只剩流水线那一份
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {e2, 0u}), 0u);
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_surface, e2);
+    LIFT_CHECK_EQ_U32(pi.color_arena, e_arena);
+    LIFT_CHECK(r.f.m.surfaces().find(e_arena) != nullptr);  // owner 没被旧 owner 的 release 降到 0
+    LIFT_CHECK(!r.f.m.cpu().com->find(e1));                 // 旧 surface 已随换绑释放
+    r.f.method(e2, kOffRelease, {});                        // E2 也只剩流水线那一份
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, 0u}), 0u);
+    LIFT_CHECK(r.f.m.surfaces().find(e_arena) == nullptr);
+    LIFT_CHECK(!r.f.m.cpu().com->find(e2));
+
+    // ---- ⑦ 成对释放③：设备销毁时仍在绑定 ⇒ owner + surface 都要放，像素块要回收 ----
+    std::uint32_t tex_d = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_d), 0u);
+    lift::d3d9::TextureInfo td;
+    LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), tex_d, &td, nullptr));
+    const std::uint32_t d_arena = td.arena;
+    const std::uint32_t d_surface_out = r.f.placeU32(0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex_d, kOffTextureGetSurfaceLevel, {0u, d_surface_out}), 0u);
+    const std::uint32_t d_surface = mem.rd32(d_surface_out);
+    LIFT_CHECK_NE_U32(d_surface, 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {d_surface, 0u}), 0u);
+    // guest 把两份引用都放掉（纹理 + surface），只剩流水线那一份
+    r.f.method(tex_d, kOffRelease, {});
+    r.f.method(d_surface, kOffRelease, {});
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffRelease, {}), 0u);  // 设备到 0 ⇒ destroyDeviceState
+    LIFT_CHECK(r.f.m.surfaces().find(d_arena) == nullptr);  // D 的像素块随 RT 解绑回收（⛔ 不是泄漏）
+    LIFT_CHECK(!r.f.m.cpu().com->find(d_surface));
+
+    // 清理：B（guest 的引用；A/C/D/E 的引用在 ③④⑤⑥⑦ 里已经放掉 / 随 RT 回收）
+    LIFT_CHECK_EQ_U32(r.f.method(tex_b, kOffRelease, {}), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑪ 陈旧 owner：EA 被复用后，宿主侧缓存的那个 owner **不许**打到新对象
+//   （REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）
+// ---------------------------------------------------------------------------------------
+// ⚠⚠ **本用例的 ① 是一条"已知偏离"，不是真机语义** —— 读断言之前先读这段：
+//   · 真机 D3D9（引擎的口径，A 方案）：`GetSurfaceLevel` 建的 surface **替父纹理持一份资源引用**
+//     ⇒ `Release(纹理)` 之后 surface 仍代表那张纹理，`SetRenderTarget(surface)` **应当成功**。
+//   · 本线（**有意的偏离**）：surface **不持有**父纹理（`com.h` 的 `owner` 说明、`shims/d3dx9_surface.h`）
+//     ⇒ guest 合法地把纹理 Release 到 0 之后，surface 缓存的 owner EA 已经死了 / 可以被复用，
+//     所以本线**只能拒绝**绑定（`D3DERR_INVALIDCALL`）。跟踪单：`REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`
+//     （= 让 surface 持父纹理 / A 方案）。
+//   · ⇒ **修 04C（若按 04C 正文的候选 A：surface 持有父纹理）之后，① 这条断言会翻面**
+//     （同一时序应当**成功**、`color_arena` 指向该纹理的 arena）。
+//     ⛔ 那时不要"改断言换绿"：按 04C 的判据把 ① 的期望值改成 kOk，并把症状描述留在 04C 里。
+//   · 可达性：本仓**未在游戏路径观测到**该顺序（需求单 repro 也这么记："游戏路径里没观测到陈旧 Release"）；
+//     本用例是用夹具按判据造出来的最小重现，**不**代表"游戏里必然发生"。
+// ★ 判据（每条都在破坏时红）：
+//   ① 同尺寸的新纹理 T2 会**同时**拿到 T1 的对象 EA **与** `'TEX1'` 状态块 EA（`kTxBytes` 是常量）
+//      ⇒ 旧判据 `userOf(owner) != tex_state` 在这一格**通过**（它认对象靠 "EA + guest 派生状态"）
+//      ⇒ 旧实现会**静默**把 RT 绑到 T2 的像素上；代际判据下必须是上面的 INVALIDCALL（已知偏离）。
+//   ② 拒绝之后 T2 一个引用都不多、像素块不写、流水线属性停在"后缓冲"；
+//   ③ 解绑时流水线缓存的 owner **走 `releaseIf`**：代际不符 ⇒ 拒绝，T2 的 refcount 不动、对象还在。
+//      ⚠ ③ 要造出"绑定中 owner 已死"的状态 ⇒ 只能让 guest **越过自己的引用计数**释放（越界），
+//      所以它是**防御纵深**，不是合法时序路径（合法路径见 ⑩⑥：绑定期的 addRef 让纹理活到解绑）。
+void caseStaleOwnerGeneration() {
+    // 用例名带 `known-deviation`：红的时候输出里就能看出"这条断言是本线的偏离，不是真机语义"。
+    lift_test::g_current_case = "d3d9p/stale-owner-generation-known-deviation";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+    auto& mem = r.f.m.mem();
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    // ---- 夹具：造一组"宿主侧缓存了 (EA, 代际)"的持有者 ----
+    // 顺序是判据的一部分（guest 堆 = 首次适配 + `min_split`，见 `runtime/heap.cpp`）：
+    //   owner 纹理 → **哑纹理** → owner 的 level-0 表面。
+    // ★ 为什么要那张哑纹理：owner 释放后，它自己的三块（`'TEX1'` 状态块 112 B / vtable 96 B /
+    //   对象 24 B）连成的洞是 232 B —— 下一个同尺寸纹理要先切走 112+96，剩下的 24 B **小于**
+    //   `min_split`(32) ⇒ 对象块会落到堆顶、拿不到原 EA。哑纹理（同尺寸）紧跟在 owner 后面 ⇒
+    //   两者一起释放时洞连成 464 B ⇒ 新纹理的三块**逐个回到** owner 的那三个地址。
+    //   ⛔ 这不是"为了让断言变绿"：前提（EA 复用）本身在下面**硬断言**，不成立就红。
+    //   ★ 若那几条"前提"断言红了：先按 `runtime/heap.cpp` 的分块/`min_split` **重造夹具**，
+    //     ⛔ 不是删断言 —— 删了用例就恒真（`load-bearing` 的前提）。
+    struct StaleOwnerSet {
+        std::uint32_t owner = 0;        // owner 纹理的对象 EA（之后会被释放）
+        std::uint32_t owner_gen = 0;    // 它的代际（建 surface 时固化进 surface 的那一份）
+        std::uint32_t owner_state = 0;  // 它的 `'TEX1'` 状态块 EA
+        std::uint32_t owner_arena = 0;  // 它的像素块（SurfaceArena）
+        std::uint32_t dummy = 0;        // 撑开复用窗口的哑纹理
+        std::uint32_t surface = 0;      // owner 的 level-0 表面（owner = 上面的 EA）
+    };
+    auto prepare = [&](StaleOwnerSet* s) -> bool {
+        LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &s->owner), 0u);
+        LIFT_CHECK_NE_U32(s->owner, 0u);
+        if (s->owner == 0) return false;
+        lift::d3d9::TextureInfo ti;
+        LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), s->owner, &ti, nullptr));
+        s->owner_state = ti.state;
+        s->owner_arena = ti.arena;
+        s->owner_gen = com->generationOf(s->owner);
+        LIFT_CHECK_NE_U32(s->owner_gen, 0u);
+        LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &s->dummy), 0u);
+        LIFT_CHECK_NE_U32(s->dummy, 0u);
+        const std::uint32_t out = r.f.placeU32(0u);
+        LIFT_CHECK_EQ_U32(r.f.method(s->owner, kOffTextureGetSurfaceLevel, {0u, out}), 0u);
+        s->surface = mem.rd32(out);
+        LIFT_CHECK_NE_U32(s->surface, 0u);
+        // surface 记下的是"我代表谁"，而且**不持有**它（`GetSurfaceLevel` 有意不替纹理持引用）
+        LIFT_CHECK_EQ_U32(com->ownerOf(s->surface), s->owner);
+        LIFT_CHECK_EQ_U32(com->ownerGenerationOf(s->surface), s->owner_gen);
+        return s->dummy != 0 && s->surface != 0;
+    };
+    // 放掉哑纹理 + 对 owner 做 `releases` 次 Release（1 = 合法；2 = **越界**，把绑定中的那份也放掉）。
+    // ⚠ 各次 Release 的返回值不看（第一次是 rc-1 的返回值、最后一次才是 0）：判据是"对象真的没了"。
+    auto retire = [&](const StaleOwnerSet& s, std::uint32_t releases) {
+        LIFT_CHECK_EQ_U32(r.f.method(s.dummy, kOffRelease, {}), 0u);
+        for (std::uint32_t i = 0; i < releases; ++i) r.f.method(s.owner, kOffRelease, {});
+        LIFT_CHECK(!com->find(s.owner));  // owner 真死了（EA 可被复用）
+    };
+    // 建一张同尺寸纹理，并**硬断言**它落在 owner 的那一格（对象 EA + `'TEX1'` 状态块 EA）
+    auto reuseOwnerSlot = [&](const StaleOwnerSet& s) -> std::uint32_t {
+        std::uint32_t tex = 0;
+        LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+        LIFT_CHECK_NE_U32(tex, 0u);
+        LIFT_CHECK_EQ_U32(tex, s.owner);                    // ← 前提 1：对象 EA 复用
+        LIFT_CHECK_EQ_U32(com->userOf(tex), s.owner_state);  // ← 前提 2：状态块 EA 也复用（旧判据就是被这格骗过）
+        return tex;
+    };
+
+    // ---- ① **已知偏离**（不是真机语义；见上面那段 ⚠⚠）：owner 与哑纹理一起被 guest 放掉，
+    //   新纹理拿到同一个 EA；随后绑 S 必须被拒。真机（A 方案）这里**应当成功** ——
+    //   修 REQ-01M6ZZZ6PEVSFB93C6VJPKC04C 之后，本段的 INVALIDCALL 要按 04C 翻成 kOk。
+    StaleOwnerSet a;
+    if (!prepare(&a)) return;
+    retire(a, /*releases=*/1);
+    const std::uint32_t tex2 = reuseOwnerSlot(a);
+    if (tex2 == 0) return;
+    const std::uint32_t tex2_gen = com->generationOf(tex2);
+    LIFT_CHECK_NE_U32(tex2_gen, a.owner_gen);  // 同一个 EA、不同代际
+    LIFT_CHECK(r.f.m.surfaces().find(a.owner_arena) != nullptr);  // 像素块已被 T2 接手
+
+    // 绑 S：owner 的 EA 现在是 T2，但 surface 记住的代际是旧 owner 的 ⇒ 必须拒绝。
+    //   ⚠ 旧判据（`userOf(owner) != tex_state`）在这一格**会通过** ⇒ 静默把 RT 绑到 T2 的像素上，
+    //   还会对 T2 调 `markTextureContentUnknown`（内容版本降级）。
+    //   ⚠ 这里的 `kInvalidCall` 是**本线的已知偏离**（surface 不持父纹理）⇒ 修 04C（候选 A）后翻面；
+    //   ⛔ 别为了让它一直绿去改断言方向（见函数头那段）。
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {a.surface, 0u}),
+                      lift::d3d9::kInvalidCall);
+    LIFT_CHECK(com->find(tex2));
+    LIFT_CHECK_EQ_U32(com->refCount(tex2), 1u);  // ⛔ 绑被拒绝 ⇒ 没有 addRef 到 T2
+    LIFT_CHECK_EQ_U32(com->generationOf(tex2), tex2_gen);
+    lift::d3d9::PipelineInfo pi;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_surface, 0u);  // 没绑上
+    LIFT_CHECK_EQ_U32(pi.color_arena, 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex2, kOffRelease, {}), 0u);   // T2 可以正常用：释放自己
+    LIFT_CHECK(!com->find(tex2));
+    LIFT_CHECK_EQ_U32(r.f.method(a.surface, kOffRelease, {}), 0u);  // S 的 guest 引用
+
+    // ---- ② 防御纵深（**不是**合法时序）：绑定中 owner 被越界释放 ⇒ 解绑时 `releaseIf` 拒绝 ----
+    //   合法 guest 走不到这里：绑定期那份 addRef 让 owner 活到解绑（见 ⑩ ⑥）。
+    StaleOwnerSet b;
+    if (!prepare(&b)) return;
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {b.surface, 0u}), 0u);  // 这时代际匹配
+    // ⚠ `refCount == 2` 锁的是 `REQ-01M6X4N7C0PAF6XT7EAC172V85` **有意选择**的 guest 可见差异
+    //   （设备把 RT 引用算在纹理的公开 refcount 上）—— 不是引擎语义；那条单改了这里要跟着改。
+    LIFT_CHECK_EQ_U32(com->refCount(b.owner), 2u);  // guest 的 + 设备的（owner 语义引用）
+    retire(b, /*releases=*/2);  // 越界：连设备那份也放掉 ⇒ owner 死
+    const std::uint32_t tex4 = reuseOwnerSlot(b);
+    if (tex4 == 0) return;
+    const std::uint32_t tex4_gen = com->generationOf(tex4);
+    LIFT_CHECK_NE_U32(tex4_gen, b.owner_gen);
+
+    // 解绑 ⇒ 流水线释放它那两份引用：owner 代际不符 ⇒ **拒绝**；surface 照常释放
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, 0u}), 0u);
+    LIFT_CHECK(com->find(tex4));                 // ⛔ 新占有者还在
+    LIFT_CHECK_EQ_U32(com->refCount(tex4), 1u);  // ⛔ 一个引用都没被减（陈旧持有者打不到它）
+    LIFT_CHECK_EQ_U32(com->generationOf(tex4), tex4_gen);
+    LIFT_CHECK(com->ifaceOf(tex4) != nullptr);
+    LIFT_CHECK_EQ_U32(com->refCount(b.surface), 1u);  // surface 的那份引用正常放掉（guest 的那份还在）
+    LIFT_CHECK(com->find(b.surface));
+
+    // 清理
+    LIFT_CHECK_EQ_U32(r.f.method(tex4, kOffRelease, {}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(b.surface, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(tex4));
+    LIFT_CHECK(!com->find(b.surface));
+}
+
 }  // namespace
 
 int main() {
@@ -951,6 +1324,8 @@ int main() {
         caseAlphaBlend();
         caseDrawStateSnapshot();
         caseClipPlanes();
+        caseRenderTargetLifetime();
+        caseStaleOwnerGeneration();
         return finish("d3d9-pipeline");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());

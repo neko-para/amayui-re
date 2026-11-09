@@ -39,6 +39,19 @@ constexpr std::uint32_t kShowLogoFieldOffset = 0x0005EB5Cu;
 Machine* activeMachine() { return g_active; }
 void setActiveMachine(Machine* m) { g_active = m; }
 
+// ★ 这台 cpu 的**归属**（不是"最近 init 的那台"）：`Machine::wire()` 在装配时把 owner 写进
+//   `X86::machine`，所以另建一台 Machine（或 `~Machine` 清空 g_active）都不会改变它。
+//   ⇒ 销毁路径（`d3d9::destroyTextureState` / `destroyDeviceState` / 流水线 `destroyForDevice`）
+//     用它回收 arena，而不是拿可被合法改写的 `activeMachine()` 当判据
+//     （REQ-01M6X4MSCMMFEXYXCSK6V61QR2：判据失败一次，arena 就永远没有回收入口）。
+//   兜底：没 wire 的 X86（直接构造的纯夹具）只有"全局那台且真是这台 cpu"才算数；否则 nullptr
+//   ⇒ 调用方只能清状态块 / 不猜 arena 归属（生产路径不存在这种 X86）。
+Machine* machineOf(const X86& cpu) {
+    if (cpu.machine != nullptr) return cpu.machine;
+    Machine* m = g_active;
+    return (m != nullptr && &m->cpu() == &cpu) ? m : nullptr;
+}
+
 const char* stopReasonName(StopReason r) {
     switch (r) {
         case StopReason::None: return "none";
@@ -51,9 +64,202 @@ const char* stopReasonName(StopReason r) {
         case StopReason::NoCode: return "no-code";
         case StopReason::TimeLimit: return "time-limit";
         case StopReason::InteractionFailed: return "interaction-failed";
+        // ★ 两个非 ok 的停机原因（`ok()` 里没有它们）：名字就是运行摘要 / 交互失败信息里印的
+        //   那一串。`resource-exhausted` = 我方容量问题；`unimplemented-slot` = 已注册的槽/形态没实现。
+        case StopReason::ResourceExhausted: return "resource-exhausted";
+        case StopReason::Trap: return "unimplemented-slot";
     }
     return "?";
 }
+
+// ★ 见 machine.h：**只**是 `main` 最后那道兜底。消费者闸门（token / gpu-strict / 交互图）
+//   在 `main.cpp` 里先于本函数返回，别把它们的码并进来。
+int exitCodeForRun(const RunResult& r) { return r.ok() ? 0 : 2; }
+
+// ---------------------------------------------------------------------------------------
+// 时间线的效果级判据（`--expect-change-after` / `--expect-change-window`）
+// ★ 真源口径：`docs/03-emulator/interaction-model.md` §2 的 `expect_change`（这里只换触发者：
+//   图的动作由节点状态机发，时间线的动作由祖先 `at …` 条件发）。⛔ 不另写一套"变没变"。
+// ---------------------------------------------------------------------------------------
+bool parseExpectChangeActions(const std::string& spec, ExpectChangePolicy* out, std::string* err) {
+    if (out == nullptr) return false;
+    auto fail = [err](const std::string& why) {
+        if (err) *err = why;
+        return false;
+    };
+    ExpectChangePolicy p;
+    if (spec.empty()) return fail("是空的（只认 click / key / mouse，逗号分隔）");
+    auto trimToken = [](std::string s) {
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+        return s;
+    };
+    std::size_t start = 0;
+    while (start <= spec.size()) {
+        const std::size_t comma = spec.find(',', start);
+        std::string token = trimToken(spec.substr(
+            start, comma == std::string::npos ? std::string::npos : comma - start));
+        if (token.empty()) return fail("有空项（`click,,key` 不是合法写法）");
+        for (char& c : token) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (token == "click") {
+            if (p.click) return fail("重复项：click");
+            p.click = true;
+        } else if (token == "key") {
+            if (p.key) return fail("重复项：key");
+            p.key = true;
+        } else if (token == "mouse") {
+            if (p.mouse) return fail("重复项：mouse");
+            p.mouse = true;
+        } else {
+            return fail("不认识的类别 \"" + token + "\"（只认 click / key / mouse）");
+        }
+        if (!p.text.empty()) p.text += ',';
+        p.text += token;
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    p.enabled = true;
+    *out = p;
+    if (err) err->clear();
+    return true;
+}
+
+bool Machine::configureExpectChange(const ExpectChangePolicy& p, std::string* err) {
+    if (interaction_.active()) {
+        if (err) {
+            *err = "与 --interaction-graph 互斥：图有自己的 `expect` 语义，两套判据同时开会出两套口径";
+        }
+        return false;
+    }
+    if (p.enabled && !(p.click || p.key || p.mouse)) {
+        if (err) *err = "--expect-change-after 至少要一个动作类别（click / key / mouse）";
+        return false;
+    }
+    if (p.enabled && p.window_samples == 0) {
+        if (err) *err = "--expect-change-window 必须是正整数（单位 = 采样数，一次 Present = 一个样本）";
+        return false;
+    }
+    // ★ 零匹配动作 ⇒ 一个观测窗都开不了 ⇒ "策略开着却什么也没看"（静默绿，与"发完不管"同类）。
+    //   在**配置期**就拒绝（main ⇒ exit 2）；调用方必须先 `loadInputScript*`，再配置。
+    if (p.enabled) {
+        if (!input_script_.active()) {
+            if (err) *err = "需要先 loadInputScript（策略要看时间线动作）；⛔ 不许配置完再换脚本";
+            return false;
+        }
+        expect_policy_ = p;  // 先落值，才能复用 expectWatches（它只读策略）
+        bool any = false;
+        for (const InputScript::Action& a : input_script_.actions()) {
+            if (expectWatches(a.kind)) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
+            expect_policy_ = ExpectChangePolicy{};
+            if (err) {
+                *err = "时间线里没有匹配的动作（after=" + p.text +
+                       "）⇒ 这个策略一个观测窗都开不了（⛔ 不静默开局；改 after 或改脚本）";
+            }
+            return false;
+        }
+        return true;
+    }
+    expect_policy_ = p;
+    return true;
+}
+
+// 这条动作类别要不要"动作后必须看到画面变化"。`MouseMove` / `Wait` / `ProfileBegin` / `profile_end` /
+// `quit` 不在集合里：hover 本来就可能不改像素（强行要求会制造假红），后三种不是输入动作。
+bool Machine::expectWatches(InputScript::Kind kind) const {
+    if (!expect_policy_.enabled) return false;
+    switch (kind) {
+        case InputScript::Kind::Click: return expect_policy_.click;
+        case InputScript::Kind::KeyDown:
+        case InputScript::Kind::KeyUp: return expect_policy_.key;
+        case InputScript::Kind::MouseDown:
+        case InputScript::Kind::MouseUp: return expect_policy_.mouse;
+        default: return false;
+    }
+}
+
+void Machine::openExpectWindows(std::size_t applied_before) {
+    const std::vector<InputScript::Action>& actions = input_script_.actions();
+    const std::size_t applied_after = input_script_.appliedCount();
+    for (std::size_t i = applied_before; i < applied_after && i < actions.size(); ++i) {
+        const InputScript::Action& a = actions[i];
+        if (!expectWatches(a.kind)) continue;
+        ExpectWindow w;
+        w.action_text = a.text;
+        w.changes_at_start = sampler_.changeCount();
+        w.samples_at_start = sampler_.sampleCount();
+        w.start_frame = presenter_.frameCount();
+        w.start_insns = cpu_.insns;
+        w.start_guest_ms = clock_.nowMs();
+        ++expect_stats_.windows_opened;
+        std::printf("[expect-change] watch \"%s\"（窗口 %llu 个采样；samples=%llu changes=%llu frame=%llu insns=%llu）\n",
+                    w.action_text.c_str(), (unsigned long long)expect_policy_.window_samples,
+                    (unsigned long long)w.samples_at_start, (unsigned long long)w.changes_at_start,
+                    (unsigned long long)w.start_frame, (unsigned long long)w.start_insns);
+        expect_windows_.push_back(w);
+    }
+}
+
+// 每个块边界判一次：满足 ⇒ 记 ok 并摘掉；到窗口 ⇒ 判死（not-changed）。
+//   ⛔ 不判 `--expect-change-window` 的另一种"没采样"：那个只能等到运行结束（`samples` 不增长 ⇒
+//   窗口永远不到）—— 在 run 尾部按同一组谓词分类（no-sample / not-changed / unclosed）。
+void Machine::evaluateExpectWindows() {
+    if (expect_failed_ || expect_windows_.empty()) return;
+    // ★ 动作还没**交付完**（`click` 的抬起 / 显式 down 的延迟 up 还在队列里）⇒ 先不判**失败**，
+    //   但"看到了变化"照旧立刻算满足。自动 hold 会花掉若干个采样（等 guest 的输入采样点，
+    //   上限 `--input-max-hold`）；窗口若在这之前到期，一次**合法**点击会被判成"画面没变"。
+    //   抬起发出之后（或到上限强制抬起）立刻恢复到期判定。
+    const bool deliverable = input_script_.pendingReleaseCount() == 0;
+    const std::uint64_t samples = sampler_.sampleCount();
+    const std::uint64_t changes = sampler_.changeCount();
+    for (std::size_t i = 0; i < expect_windows_.size();) {
+        ExpectWindow& w = expect_windows_[i];
+        if (sampler_.changeCount() > w.changes_at_start) {
+            ++expect_stats_.windows_satisfied;
+            std::printf("[expect-change] ok \"%s\"（窗口内看到了变化：samples=%llu changes=%llu）\n",
+                        w.action_text.c_str(), (unsigned long long)samples, (unsigned long long)changes);
+            expect_windows_.erase(expect_windows_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (!deliverable) {
+            ++i;
+            continue;
+        }
+        if (samples >= w.samples_at_start &&
+            samples - w.samples_at_start >= expect_policy_.window_samples) {
+            failExpectWindow(w, "not-changed", "窗口内的采样在增长，但画面一次都没变（动作没生效？）");
+            return;
+        }
+        ++i;
+    }
+}
+
+void Machine::failExpectWindow(const ExpectWindow& w, const char* kind, const char* why) {
+    ++expect_stats_.windows_failed;
+    expect_failed_ = true;
+    char buf[640];
+    std::snprintf(buf, sizeof(buf),
+                  "expect-change: %s（动作 \"%s\"；%s；samples %llu→%llu changes %llu→%llu "
+                  "window=%llu 个采样；frame=%llu insns=%llu guest_ms=%llu）",
+                  kind, w.action_text.c_str(), why, (unsigned long long)w.samples_at_start,
+                  (unsigned long long)sampler_.sampleCount(), (unsigned long long)w.changes_at_start,
+                  (unsigned long long)sampler_.changeCount(),
+                  (unsigned long long)expect_policy_.window_samples, (unsigned long long)w.start_frame,
+                  (unsigned long long)w.start_insns, (unsigned long long)w.start_guest_ms);
+    expect_failure_ = buf;
+    std::fprintf(stderr, "[expect-change] FAIL %s\n", expect_failure_.c_str());
+    cpu_.running = false;
+    // ★ 唤醒可能正阻塞在 `GetMessageA` 的 guest（与交互图失败同一条理由）：只置标志的话，
+    //   没有块边界就永远到不了 `run()` 的检查点。
+    if (cpu_.windows != nullptr) cpu_.windows->postQuit(0);
+}
+
 
 // fault 诊断钩子：只读**符号表/字符串**（不反汇编 —— 反汇编要读内存，可能再 fault）。
 // ★ **零分配**（REQ-01M6JFZFN15MBPG7Y89WNZACFW #4）：本函数在平台异常 / 信号上下文里被调用，
@@ -75,6 +281,13 @@ void liftFaultHook(const AccessSite& site) {
 
 Machine::Machine() : cache_(&decoder_, &mem_) {}
 Machine::~Machine() {
+    // ★ 摘掉本机 cpu 的归属（防御性）：`cpu_` 本身比 `surfaces_` / `com_` **先**析构
+    //   （声明顺序的逆序），所以真正的 teardown 不变式是「⛔ 销毁阶段不许有按 owner 回收 arena 的
+    //   回调」——今天没有（`ComRegistry` 没有析构钩子）。清 owner 只保证任何**意外**解析到的
+    //   是 nullptr 而不是半死的 this；它救不了悬垂的 `X86&`，⛔ 别把它当成 teardown 保护。
+    //   ★ `AudioEngine::audio_cpu_` 那份 X86 副本**有意保留** owner（见 audio.cpp）：
+    //   `~AudioEngine` 早于 `surfaces_` / `presenter_` 执行，那时按 owner 回收仍是安全的。
+    cpu_.machine = nullptr;
     if (g_active == this) g_active = nullptr;
 }
 
@@ -92,6 +305,7 @@ void Machine::wire() {
     cpu_.windows = &windows_;
     cpu_.com = &com_;
     cpu_.fonts = &fonts_;
+    cpu_.machine = this;  // ★ 宿主侧归属（销毁路径的可回收判据；见 machineOf）
     audio_.attach(&cpu_, &mem_, &clock_);
     cpu_.audio = &audio_;
     cpu_.cs_table = &critical_sections_;
@@ -506,6 +720,13 @@ void Machine::pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms) {
         script.markQuitPosted();
         cpu.windows->postQuit(0);
     }
+    // ★ marker 超时**同样要唤醒**：超时经常是在宿主事件泵里（guest 正阻塞在 `GetMessageA`）
+    //   被 `tick()` 发现的，此时 run 的块边界检查点根本不在跑 —— 只置标志 = 永远挂住，
+    //   "响亮失败"退化成"静默挂死"。与 `quit` 同一条处置：一次性投 WM_QUIT。
+    if (script.markerTimeoutPostPending()) {
+        script.markMarkerTimeoutPosted();
+        cpu.windows->postQuit(0);
+    }
 }
 
 std::uint64_t Machine::wallMs() const {
@@ -517,7 +738,36 @@ std::uint64_t Machine::wallMs() const {
 
 void Machine::tickInputScript(X86& cpu) {
     if (!input_script_.active()) return;
+    // ★ 开窗**就地**做（⛔ 不延迟到块边界）：`InputScript::tick` 里 `quit` 之后的同 tick 动作
+    //   不会再被应用，而块边界的 `quit` 分支会先 break —— 延迟开窗会让 `click` + `quit`
+    //   静默通过（那正是本策略要抓的"发完不管"）。
+    const std::size_t applied_before = input_script_.appliedCount();
     pumpScript(input_script_, cpu, wallMs());
+    if (expect_policy_.enabled && !expect_failed_) {
+        if (input_script_.appliedCount() > applied_before) openExpectWindows(applied_before);
+        evaluateExpectWindows();
+    }
+}
+
+// ★ marker 采样（`TriggerKind::Marker` 的事件源）：读 VM 循环头的引擎身份并喂给时间线。
+//   ★ 调用点**只有** `run()` 在块入口（`cpu_.eip` == 循环头 / 消息泵回来的块入口）时调它，
+//     以及纯档夹具直接驱动一次采样。⛔ 不要在任意块边界调：帧装载器把 `cur` 当临时值用。
+bool Machine::sampleMarker() {
+    if (cpu_.windows == nullptr) return false;
+    // ★ 采样点在 VM 循环头 ⇒ **每条主循环指令一次**。同一个 `(cur,id)` 且名字表状态没变时**不重解析名字**
+    //   （否则每条指令都要付两次 std::string + CP932 转换，marker 脚本会把解释器拖慢一个量级）。
+    //   ★ 名字表状态要一起比（`name_table_sig`）：TOC 从"未装载"变成"已装载"而身份没变时，
+    //     名字必须重新解析（否则会永远停在 `id:0x…` = 静默失明）。
+    const MarkerSample ident = marker_sampler_.sampleIdentity(mem_);
+    if (ident.valid && last_marker_sample_.valid && ident.cur == last_marker_sample_.cur &&
+        ident.id == last_marker_sample_.id &&
+        last_marker_sample_.name_table_sig == marker_sampler_.nameTableSignature(mem_, ident.id)) {
+        return input_script_.noteMarker(*cpu_.windows, last_marker_sample_, presenter_.frameCount(), clock_.nowMs());
+    }
+    MarkerSample s = ident;
+    if (s.valid) marker_sampler_.resolveName(mem_, &s);
+    last_marker_sample_ = std::move(s);
+    return input_script_.noteMarker(*cpu_.windows, last_marker_sample_, presenter_.frameCount(), clock_.nowMs());
 }
 
 void Machine::tickInteraction(X86& cpu) {
@@ -553,7 +803,53 @@ RunResult Machine::run(const RunOptions& opts) {
     // ★ 区间 profiler：只有脚本里真的写了 `profile_begin/end` 才 armed（⇒ 没有这些动作时
     //   整条记账路径都是 no-op：不会因为"加了 profiler"给所有运行多两次 steady_clock）。
     window_prof_.setArmed(input_script_.hasProfileActions());
+    // ★ marker：每轮重置 seed / 边沿 / 超时 / 采样计数（同一台 Machine 可以跑多轮 ——
+    //   ⛔ 不许把上一轮的 (cur,id) 当基线，否则第二轮的第一个样本就可能误发一次边沿）。
+    input_script_.resetMarkerState();
+    marker_sampler_.resetCounters();
+    last_marker_sample_ = MarkerSample{};
     shims_.setTiming(frame_trace_ || opts.profile || window_prof_.armed());
+    // ★ 运行摘要 `instr :` 行（`docs/03-emulator/measurement.md` M-02 的**口径标签**）：
+    //   记的是**这一轮真正生效**的位，⛔ 不是 CLI 回显 —— `window-prof` 读 `WindowProfiler::armed()`
+    //   的真值（脚本里写了 `profile_begin` 但没 arm 的缺陷会在这里如实暴露，见 §2.5 单）。
+    instrument_ = InstrumentationState{};
+    instrument_.profile = opts.profile;
+    instrument_.frame_trace = frame_trace_;
+    instrument_.window_prof = window_prof_.armed();
+    instrument_.expect_change = expect_policy_.enabled;
+    // ★ 时间线的效果级判据要读**画面采样**：没接线时 `sampleCount()` 恒 0 ⇒ 会把"没接采样器"
+    //   误报成"识别源失明"。只在本策略开时接（缺省零成本）；交互图的采样器由 `loadInteractionGraph`
+    //   在解析期接好，⛔ 这里不碰它（`sampler_.reset()` 会把图的矩形登记清掉）。
+    if (!interaction_.active()) {
+        if (expect_policy_.enabled) {
+            sampler_.reset();  // 跨 run 时清掉 `last_.hash`（否则第一个样本会被记成 changed）
+            sampler_.setWatchFrame(true);
+        }
+        presenter_.setFrameSampler(expect_policy_.enabled ? &sampler_ : nullptr);
+    }
+    expect_windows_.clear();
+    expect_stats_ = ExpectChangeStats{};
+    expect_failed_ = false;
+    expect_failure_.clear();
+    // ★ 防御性：策略开着但**当前脚本里没有匹配的动作**（配置之后又换了脚本，或脚本被清空）
+    //   ⇒ 一个观测窗都不会开。⛔ 不许"策略开着却 exit 0"：这里直接判死，run 尾部照常改判
+    //   `InteractionFailed`（detail 写明 `no-action`）。配置期的正规拦截在 `configureExpectChange`。
+    if (expect_policy_.enabled) {
+        bool any = false;
+        for (const InputScript::Action& a : input_script_.actions()) {
+            if (expectWatches(a.kind)) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
+            expect_failed_ = true;
+            expect_failure_ =
+                "expect-change: no-action（脚本里没有匹配 --expect-change-after " + expect_policy_.text +
+                " 的动作 ⇒ 一个观测窗都开不了；⛔ 不静默算过）";
+            std::fprintf(stderr, "[expect-change] FAIL %s\n", expect_failure_.c_str());
+        }
+    }
     wall_start_ = std::chrono::steady_clock::now();
     wall_start_valid_ = true;
     if (frame_trace_) {
@@ -580,6 +876,11 @@ RunResult Machine::run(const RunOptions& opts) {
     // 诊断开关：LIFT_TRACE_FULL=1 ⇒ `--trace-blocks` 每条带操作数文本 + 寄存器快照（缺省关）
     const bool traceFull = std::getenv("LIFT_TRACE_FULL") != nullptr;
     cpu_.running = true;
+    // ★ 停机种类**按轮重置**：同一台 Machine 可以跑多轮（tests 的 `runAsmRaw` 就是），
+    //   上一轮 trap / 资源耗尽的提示绝不许漏进这一轮的正常主动停（否则 ExitProcess 会被
+    //   误判成 `Trap`）。置位点只有 shim 的停机函数；这里不碰 `stop_why`（既有行为：它跨轮
+    //   保留，本单只负责新字段）。
+    cpu_.stop_kind = HostStopKind::None;
     const auto wall_start = std::chrono::steady_clock::now();
     std::uint64_t next_time_check = 0;
     std::uint64_t next_present_check = 0;
@@ -630,12 +931,42 @@ RunResult Machine::run(const RunOptions& opts) {
         if (input_script_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
             const auto t_input = window_prof_.active() ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point{};
+            // ★ marker 采样点 = VM 循环头的**块入口**（`0x4123F0`）与消息泵回来的块入口
+            //   （`0x4123E5`；它线性跨过循环头，见 runtime/engine_marker.h 的头注）。
+            //   ⛔ 不是任意块边界：帧装载器（`sub_40ED40` 的 `0x6` 路径）会把目标槽号临时写进
+            //   `cur` 再还原 ⇒ 在装载器内部的块边界采样会读到**错的 cur**。
+            //   没有 Marker 动作时这一段一次也不进（零成本）。
+            if (input_script_.hasMarkerActions() &&
+                (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
+                sampleMarker();
+            }
             tickInputScript(cpu_);
             if (window_prof_.active())
                 window_prof_.addHost(WindowProfiler::HostInput,
                                      static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                                                     std::chrono::steady_clock::now() - t_input)
                                                                     .count()));
+            // ★ 时间线的效果级判据：失败**优先于** quit（同一 tick 里动作判死 + quit 到期时，
+            //   不能把"没生效"读成正常收口）。复用 `InteractionFailed`（⛔ 不新增枚举成员）；
+            //   `detail` 里写清是三种里的哪一种，`main` 走 exit 5。
+            if (expect_failed_) {
+                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                r.reason = StopReason::InteractionFailed;
+                r.detail = expect_failure_;
+                cpu_.running = false;
+                break;
+            }
+            // ★ marker 超时 ⇒ **响亮失败**（复用 `InteractionFailed` + 分流标志；⛔ 不新增枚举成员）。
+            //   `!quitRequested()`：同 tick 里用户显式 `quit` 赢 —— ⛔ 不把"脚本自己要走"报成超时。
+            if (input_script_.markerTimedOut() && !input_script_.quitRequested()) {
+                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                r.reason = StopReason::InteractionFailed;
+                r.detail = input_script_.markerTimeoutDetail();
+                r.marker_timeout = true;
+                std::fprintf(stderr, "[marker] FAIL %s\n", r.detail.c_str());
+                cpu_.running = false;
+                break;
+            }
             if (input_script_.quitRequested()) {
                 // ★ 先处理本 tick 登记的窗口边界：否则脚本最后一条 `profile_end` 会被 `quit`
                 //   吞掉（那一段统计就静默丢了）。
@@ -994,13 +1325,28 @@ RunResult Machine::run(const RunOptions& opts) {
             }
             if (frame_trace_ && presenter_.frameCount() != frame_before) flushFrameTrace();
             if (!cpu_.running) {
-                // ★ 两种"停"要分清：**未实现**是缺口（红），**实现里主动停**（ExitProcess / ExitThread）
-                //   是正常结局。混在一起会让 ExitProcess 看起来像缺 shim。
+                // ★ 三种"停"要分清：
+                //   ① `!had_impl` ⇒ 注册表里没有 fn = 缺口（`Unimplemented`，红）；
+                //   ② `had_impl` + 宿主停机种类非 None ⇒ **不是正常结局**：
+                //      `ResourceExhausted`（我方 arena / guest 堆不够）/ `Trap`（已注册的槽/形态没实现）；
+                //   ③ `had_impl` + 种类 None ⇒ 实现里主动停（`ExitProcess` / `TerminateProcess` /
+                //      `--max-frames` / 影片放完 / 窗口关闭 …）⇒ `Stopped`（正常结局）。
+                //   ★ 为什么不能只看 `had_impl`：它对 ② 与 ③ **都是真** —— `ExitProcess` 与
+                //     `d3dxResourceStop` / `comUnsupported` 的 fn 都非空。这就是置位点额外写
+                //     `X86::stop_kind`（纯宿主字段；`Machine::run` 每轮开头重置）的原因。
+                //   ★ 顺序固定：`!had_impl` 必须在种类判断之前（未实现的导入也带 `stop_why`，
+                //     但它是 `Unimplemented`，不是 `Trap`）。
                 if (!had_impl) {
                     r.reason = StopReason::Unimplemented;
                     r.detail = std::string("未实现的导入 ") + def->module + "!" + def->name;
                 } else {
-                    r.reason = StopReason::Stopped;
+                    if (cpu_.stop_kind == HostStopKind::ResourceExhausted) {
+                        r.reason = StopReason::ResourceExhausted;
+                    } else if (cpu_.stop_kind == HostStopKind::Trap) {
+                        r.reason = StopReason::Trap;
+                    } else {
+                        r.reason = StopReason::Stopped;
+                    }
                     // ★ `stop_why` 非空时**优先用它**：否则"资源耗尽"与"未实现"在运行摘要里
                     //   都长成"shim 主动结束运行"，误诊只是从 stderr 挪到了 stdout。
                     r.detail = cpu_.stop_why
@@ -1088,6 +1434,62 @@ RunResult Machine::run(const RunOptions& opts) {
                      window_prof_.label().c_str(), stopReasonName(r.reason));
         closeProfileWindow("未闭合");
     }
+    // ★ 时间线的效果级判据：跑完仍未判定的观测窗**必须响亮**（⛔ 不许"跑完就算过"——
+    //   `--max-frames` / 脚本尾部 `quit` 提前停都会让"点了没反应"静默通过）。
+    //   三种分类（互斥，判据只读采样器的两个单调计数）：
+    //     no-sample   ：动作之后**一次采样都没有**（识别源失明：没接采样器 / 一直没 Present）；
+    //     not-changed ：采样在增长、窗口也走满了，但 `changeCount` 一次没动（动作没生效）；
+    //     unclosed    ：采样增长过但没攒够窗口（⛔ 不判定 = 不算过）。
+    //   ★ 只在 `r.ok()` 时改判：run 已经以 Unimplemented / DecodeError / Trap / ResourceExhausted
+    //     结束时，那个停因更具体，⛔ 不许被 expect 吞掉（只打一条告警，退出码已非 0）。
+    if (expect_failed_) {
+        if (r.ok()) {
+            r.reason = StopReason::InteractionFailed;
+            r.detail = expect_failure_;
+        }
+    } else if (!expect_windows_.empty()) {
+        // ★ 防御性收口：采样器已经增长、但最后一个块边界没来得及判（理论上不会走到 ——
+        //   `evaluateExpectWindows` 在每个块边界都跑）⇒ 按**满足**摘掉，⛔ 不算失败。
+        const std::uint64_t samples = sampler_.sampleCount();
+        const std::uint64_t changes = sampler_.changeCount();
+        while (!expect_windows_.empty() && changes > expect_windows_.front().changes_at_start) {
+            ++expect_stats_.windows_satisfied;
+            expect_windows_.erase(expect_windows_.begin());
+        }
+        if (!expect_windows_.empty() && !r.ok()) {
+            std::fprintf(stderr,
+                         "[expect-change] ⚠ 运行以 %s 结束（已是非 0），仍有 %zu 个观测窗未判定；"
+                         "不覆盖原停因（%s）\n",
+                         stopReasonName(r.reason), expect_windows_.size(), r.detail.c_str());
+        } else if (!expect_windows_.empty()) {
+            const ExpectWindow& w = expect_windows_.front();
+            // ★ 动作还没**交付完**（抬起还在队列里）就结束了 ⇒ 归因改成 `unclosed`：
+            //   说成"窗口走满但画面没变"（not-changed）会把"没给观测窗留时间"误报成"动作没生效"。
+            const bool delivered = input_script_.pendingReleaseCount() == 0;
+            const char* kind = "unclosed";
+            const char* why =
+                "运行结束时窗口还没攒够采样 / 还没判定（⛔ 不判定 = 不算过；给观测窗留时间，"
+                "如 wait / 更长的 --expect-change-window）";
+            if (samples == w.samples_at_start) {
+                kind = "no-sample";
+                why =
+                    "动作之后一次采样都没有（识别源失明：没接采样器 / guest 一直没 Present）"
+                    "⇒ 无法确认变化";
+            } else if (delivered && changes == w.changes_at_start &&
+                       samples - w.samples_at_start >= expect_policy_.window_samples) {
+                kind = "not-changed";
+                why = "窗口内的采样在增长，但画面一次都没变（动作没生效？）";
+            } else if (!delivered) {
+                why =
+                    "运行结束时这次动作的抬起还没发出（动作没交付完）⇒ 窗口不做\"没变\"的归因；"
+                    "给观测窗与自动 hold 留时间（`wait` / 别在 click 后立刻 quit）";
+            }
+            failExpectWindow(w, kind, why);
+            r.reason = StopReason::InteractionFailed;
+            r.detail = expect_failure_;
+        }
+    }
+    instrument_.expect_windows = expect_stats_.windows_opened;
     wall_start_valid_ = false;
     r.ea = cpu_.eip;
     r.insns = cpu_.insns;
@@ -1422,6 +1824,21 @@ void Machine::reportCoverageJson(std::FILE* out) const {
 
 void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
     const TraceInputs ti = traceInputs();
+    // ★ 仪器口径标签（M-02）：一行、字段顺序固定、机器可读。读的是**本轮真实生效**的位
+    //   （`window-prof` = `WindowProfiler::armed()`），⛔ 不是 CLI 参数回显 —— 所以
+    //   "脚本里写了 profile_begin 但没 arm" 这类缺陷会在这里被如实打出来。
+    {
+        char expect_field[32];
+        if (instrument_.expect_change) {
+            std::snprintf(expect_field, sizeof(expect_field), "%llu",
+                          (unsigned long long)instrument_.expect_windows);
+        } else {
+            std::snprintf(expect_field, sizeof(expect_field), "off");
+        }
+        std::fprintf(out, "instr     : profile=%s frame-trace=%s window-prof=%s expect=%s\n",
+                     instrument_.profile ? "on" : "off", instrument_.frame_trace ? "on" : "off",
+                     instrument_.window_prof ? "on" : "off", expect_field);
+    }
     std::fprintf(out, "trace-in  : exe=%s | clock=%s | hash=%016llX\n", ti.exe_path.c_str(),
                  ti.real_time ? "REAL-TIME" : "virtual", (unsigned long long)traceInputsHash());
     if (r.reason != StopReason::UntilEa && r.reason != StopReason::MaxInsns && cpu_.last_count > 0) {
@@ -1492,6 +1909,23 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      (unsigned long long)rs.explicit_releases, (unsigned long long)rs.deferred_ups,
                      (unsigned long long)rs.bounded_no_sample, (unsigned long long)rs.waited_samples_max,
                      (unsigned long long)rs.hold_ms_max);
+        // ★ marker 事件源的可观测账（只有脚本里写了 marker 动作才打）：
+        //   `samples` = 有效采样（含播种那一次）· `edges` = 事件数 · `invalid` = **已发布但这一格不能读**
+        //   的次数（`MarkerSampler::invalid()`，不重复计 unpublished）· `published` / `unpublished` =
+        //   Engine 单例非 0 / 为 0 的采样次数（后者 = boot 前 / 退出后，正常）· `last` = 最近一次身份。
+        //   ⇒ `samples=0` 是"采样点没命中 / 钩子接错"与"名字写错"的唯一区分判据。
+        if (input_script_.hasMarkerActions()) {
+            std::fprintf(out,
+                         "            marker  : samples %llu edges %llu invalid %llu published %llu unpublished %llu "
+                         "last (cur=%u id=0x%08X name=%s%s)\n",
+                         (unsigned long long)input_script_.markerSamples(),
+                         (unsigned long long)input_script_.markerEdges(),
+                         (unsigned long long)marker_sampler_.invalid(),
+                         (unsigned long long)marker_sampler_.published(),
+                         (unsigned long long)marker_sampler_.unpublished(), input_script_.lastMarkerCur(),
+                         input_script_.lastMarkerId(), input_script_.lastMarkerName().c_str(),
+                         input_script_.lastMarkerNameDegraded() ? "（降级）" : "");
+        }
     }
     // ★ 交互图（`--interaction-graph`）：状态 / 迁移次数 / 发出的动作数 / 采样量 / 失败类别。
     //   失败类别单独一行（`FAIL`），因为它必须与"跑完了"（done）在读输出时一眼分开。

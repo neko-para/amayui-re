@@ -2,6 +2,16 @@
 
 - id: REQ-01M6XVYY5TCKSAS80WS7PADF8P
 - type: req
+- status: blocked
+- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- order: 1
+- blocked_by: [01M6ZDSPVYS3R78TK8TFKVBC8N, 01M708DF24KY0QZNEHY66S0HYW]
+- tags: [emulator-lift, interaction, state-machine]
+
+# emulator-lift · 识别驱动交互状态机：任务 = 节点图（when → action → next），三种失败全部响亮；两种识别源（脚本身份 / 画面特征）
+
+- id: REQ-01M6XVYY5TCKSAS80WS7PADF8P
+- type: req
 - status: doing
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 1
@@ -36,9 +46,10 @@
 
 ## 卡住的（都不是本单能修的，各有一条单）
 
-1. `REQ-01M6ZDSGQY1RXX3N3WJKA8D26H` —— 后缓冲 surface 的 `LockRect`/`UnlockRect` 未实现：房间的退出路径
-   900 条指令后就停在那里。⇒ `room-exit.graph` 现在**必然**以"任务没走完"结束（**exit 5** + stderr 打断点 +
-   最后画面），这是本单要的"响亮"，但终态判据要等那条单。
+1. ~~`REQ-01M6ZDSGQY1RXX3N3WJKA8D26H`~~ —— 后缓冲 `LockRect`/`UnlockRect` **已实现并收口**
+   （2026-11-09；真机 `LockRect(backbuffer)` 调用成功、旧 trap 消失）。⇒ 但出房间仍 **exit 5**：停在新 gap
+   `kernel32!RaiseException`（`Command_Exit_Exception` 的 C++ EH 展开）⇒ 终态判据移到
+   `REQ-01M708DF24KY0QZNEHY66S0HYW`（S2，open）。
 2. `REQ-01M6ZDSPVYS3R78TK8TFKVBC8N` —— 房间里「戻る」按钮对**注入点击**无反应（hover 有高亮、点 CG 鑑賞 有效、
    ESC 有效）。⇒ 脚本暂时用 `key 0x1B` 走同一条退出路径；那条单修好后换回 `click center`。
 
@@ -50,8 +61,10 @@
   → `when screen hash 0x96E51755F00B2E9E samples=44 hit` → `action quit applied` → `node room done`
   → `task done nodes=2 transitions=6 actions=2`（insns ≈ 1.30e9）。
   ⇒ "不依赖帧号 / 重复到稳定 / trace 可 diff"三条都在真机上成立。
-- `room-exit.graph`：exit 5；`stop=stopped detail=unimplemented D3DX9 call（…LockRect）`，
-  `最后状态：state=acting node=room`，最后画面写出且 `hash_still_matches=是`。
+- `room-exit.graph`：**仍 exit 5**，但停在**另一个 gap**（2026-11-09 复测）：`LockRect(backbuffer)` 已成功 2 次
+  （Pitch=5120 / pBits=0x28000008 / 0,0..1280,720）+ `UnlockRect` 2 次，随后 `eip=0x4123C4` 的
+  `__CxxThrowException(Command_Exit_Exception)` 撞上未实现的 `kernel32!RaiseException` ⇒ 见 `REQ-01M708DF24KY0QZNEHY66S0HYW`。
+  旧读数（停 LockRect）保留在 git 历史里。
   ★ 注意这条的"停"在运行摘要里是 `Stopped`（`ok()` 为真、退出码 0）—— 那是 `REQ-01M6WW9R6SJ7P8XA4522XCR48A`
   记的口径问题；本单在 `main` 里按"任务没到 `task done` 就是失败"把它拦成 exit 5。
 

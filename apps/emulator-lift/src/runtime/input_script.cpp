@@ -29,6 +29,34 @@ std::string lowerCopy(const std::string& s) {
     return out;
 }
 
+// ---- marker 名字比对 ----
+// ASCII 大小写不敏感（TOC 名字的大小写未取证，脚本作者也不该被大小写卡住）。
+// ⛔ 不做 locale / Unicode 折叠：两个都来自 UTF-8 的 ASCII 段时这条就是全部规则。
+bool asciiEqualsIgnoreCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        char ca = a[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb - 'A' + 'a');
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
+std::string degradedIdName(std::uint32_t id) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "id:0x%08X", id);
+    return std::string(buf);
+}
+
+// 两种形态**始终都接受**：解析出的名字 / `id:0x%08X`。
+//   ★ 不对称会让"名字表某个时刻读不到"变成一条静默失明的链（父级裁决 2：降级仍按 id 触发）。
+bool markerNameMatches(const std::string& want, const MarkerSample& s) {
+    if (asciiEqualsIgnoreCase(want, s.name)) return true;
+    return asciiEqualsIgnoreCase(want, degradedIdName(s.id));
+}
+
 bool parseU64(const std::string& text, std::uint64_t* out) {
     if (text.empty()) return false;
     std::size_t i = 0;
@@ -114,6 +142,7 @@ const char* triggerKindName(TriggerKind k) {
         case TriggerKind::GuestMs: return "guest_ms";
         case TriggerKind::Insn: return "insn";
         case TriggerKind::WallMs: return "wall_ms";
+        case TriggerKind::Marker: return "marker";
     }
     return "?";
 }
@@ -127,6 +156,9 @@ bool Trigger::due(std::uint64_t frame, std::uint64_t guest_ms, std::uint64_t ins
         case TriggerKind::GuestMs: return guest_ms >= value;
         case TriggerKind::Insn: return insns >= value;
         case TriggerKind::WallMs: return wall_ms >= value;
+        // ★ Marker **不按数字到期**：它只由 `noteMarker()` 在边沿上应用。
+        //   ⛔ 不要把它算进 `tick()` 的到期快路径（那会让它每一 tick 都触发）。
+        case TriggerKind::Marker: return false;
     }
     return false;
 }
@@ -142,7 +174,7 @@ void InputScript::clear() {
     quit_requested_ = false;
     quit_posted_ = false;
     finish_logged_ = false;
-    for (int i = 0; i < 4; ++i) have_anchor_[i] = false;
+    for (int i = 0; i < kTriggerKindCount; ++i) have_anchor_[i] = false;
     anchor_frame_ = 0;
     anchor_guest_ms_ = 0;
     anchor_insn_ = 0;
@@ -151,6 +183,9 @@ void InputScript::clear() {
     last_x_ = 0;
     last_y_ = 0;
     profile_actions_ = 0;
+    // ★ marker：动作数 + 边沿 / 超时账（超时**配置** `marker_timeout_ms_` 不随脚本清空）。
+    marker_actions_ = 0;
+    resetMarkerState();
     profile_begin_pending_ = false;
     profile_end_pending_ = false;
     profile_begin_label_.clear();
@@ -238,20 +273,39 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
                     ++i;
                 }
                 if (core.size() != 3) {
-                    return fail(line_no, body + " ⇒ 需要 3 个词（如 `at frame 600`）");
+                    return fail(line_no, body + " ⇒ 需要 3 个词（如 `at frame 600` / `at marker LOGO.BIN`）");
                 }
-                // ★ 词序不同：`at <单位> <值>`（at frame 600 / at insn 5000），而
+                // ★ 词序不同：`at <单位> <值>`（at frame 600 / at insn 5000 / at marker 名字），而
                 //   `after|wait <值> <单位>`（after 30 frames / wait 2 ms）——按 Win32 记法的习惯。
                 const bool at_form = (head == "at");
                 const std::string unit = lowerCopy(at_form ? core[1] : core[2]);
+                // ★ `marker` **不是**数字单位（⛔ 不进 `parseTriggerUnit`：那会污染
+                //   `click … hold N` 的单位解析，hold 只认 frames / ms）。
+                //   只在 `at` 分支单独吃一个名字 token；`after` / `wait` 没有意义（没有数值到期）。
+                const bool marker_word = (lowerCopy(core[1]) == "marker" || lowerCopy(core[2]) == "marker");
+                if (marker_word) {
+                    if (!at_form || unit != "marker") {
+                        return fail(line_no,
+                                    "`marker` 只能写成 `at marker <名字>`（边沿触发、不按数字到期；"
+                                    "`after` / `wait` 没有意义）");
+                    }
+                    if (have_stall) {
+                        return fail(line_no, "`at marker` 不接受 `stall`（它只对 frame 有意义）");
+                    }
+                    trigger = Trigger{};
+                    trigger.kind = TriggerKind::Marker;
+                    trigger.name = core[2];
+                    have_trigger = true;
+                    continue;
+                }
                 std::uint64_t value = 0;
                 if (!parseU64(at_form ? core[2] : core[1], &value)) {
                     return fail(line_no, "不是合法数字：" + (at_form ? core[2] : core[1]));
                 }
                 TriggerKind kind = TriggerKind::Frame;
                 if (!parseTriggerUnit(unit, &kind)) {
-                    return fail(line_no, "`" + head + "` 只认 frame(s) / ms / guest_ms / insn(s) / wall_ms（收到 " +
-                                             unit + "）");
+                    return fail(line_no, "`" + head + "` 只认 frame(s) / ms / guest_ms / insn(s) / wall_ms；"
+                                             "marker 只能写成 `at marker <名字>`（收到 " + unit + "）");
                 }
                 std::uint64_t* anchor = nullptr;
                 bool* have = &have_anchor_[static_cast<int>(kind)];
@@ -260,7 +314,11 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
                     case TriggerKind::GuestMs: anchor = &anchor_guest_ms_; break;
                     case TriggerKind::Insn: anchor = &anchor_insn_; break;
                     case TriggerKind::WallMs: anchor = &anchor_wall_ms_; break;
+                    case TriggerKind::Marker:
+                        // 上面已单独处理（`marker_word`）⇒ 走到这里是矛盾；响亮失败，⛔ 不猜。
+                        return fail(line_no, "内部错误：Marker 不该走到数值触发分支");
                 }
+                trigger.name.clear();  // ⛔ 上一条 `at marker X` 的名字不许漏进后面的数值触发
                 if (at_form) {
                     *anchor = value;
                     *have = true;
@@ -379,6 +437,7 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
                 return fail(line_no, "未知指令：" + tok[0]);
             }
             if (a.kind == Kind::ProfileBegin || a.kind == Kind::ProfileEnd) ++profile_actions_;
+            if (a.trigger.kind == TriggerKind::Marker) ++marker_actions_;
             actions_.push_back(a);
         }
     }
@@ -420,14 +479,17 @@ bool InputScript::appendText(const std::string& text, const std::string& origin,
     InputScript tmp;
     if (!tmp.loadText(text, origin, err)) return false;
     // ---- 前置 ③：同单位单调（新动作的触发值不许早于现有最后一条同单位动作）----
-    std::uint64_t last_value[4] = {0, 0, 0, 0};
-    bool have_unit[4] = {false, false, false, false};
+    //   ★ Marker **跳过**这条检查：名字之间没有大小关系（`last_value` 对它没有意义）。
+    std::uint64_t last_value[kTriggerKindCount] = {};
+    bool have_unit[kTriggerKindCount] = {};
     for (const Action& a : actions_) {
+        if (a.trigger.kind == TriggerKind::Marker) continue;
         const int k = static_cast<int>(a.trigger.kind);
         last_value[k] = a.trigger.value;  // 文件顺序 ⇒ 最后一条同单位的
         have_unit[k] = true;
     }
     for (const Action& a : tmp.actions_) {
+        if (a.trigger.kind == TriggerKind::Marker) continue;
         const int k = static_cast<int>(a.trigger.kind);
         if (have_unit[k] && a.trigger.value < last_value[k]) {
             if (err) {
@@ -442,6 +504,7 @@ bool InputScript::appendText(const std::string& text, const std::string& origin,
     if (source_.empty()) source_ = origin;
     for (const Action& a : tmp.actions_) actions_.push_back(a);
     profile_actions_ += tmp.profile_actions_;
+    marker_actions_ += tmp.marker_actions_;
     // 又有了活 ⇒ 收口那一遍（抬键 + 交还所有权 + 日志）要能再走一次。
     finish_logged_ = false;
     pending_dirty_ = true;  // 动作集变了 ⇒ 聚合缓存作废
@@ -624,6 +687,14 @@ void InputScript::emitRelease(WindowManager& wm, const Release& r, std::uint64_t
 
 void InputScript::pushRelease(const Release& r) { releases_.push_back(r); }
 
+void InputScript::applyAction(WindowManager& wm, Action& a, std::uint64_t frame, std::uint64_t guest_ms) {
+    // ★ 一条动作只应用一次：账在这里记（tick 与 noteMarker 共用同一条路径；⛔ 裸调 apply()）。
+    a.applied = true;
+    ++applied_;
+    markPendingDirty();
+    apply(wm, a, frame, guest_ms);
+}
+
 void InputScript::apply(WindowManager& wm, Action& a, std::uint64_t frame, std::uint64_t guest_ms) {
     const std::uint32_t time_ms = static_cast<std::uint32_t>(guest_ms);
     switch (a.kind) {
@@ -743,9 +814,116 @@ void InputScript::apply(WindowManager& wm, Action& a, std::uint64_t frame, std::
 // ★ 缓存"未应用动作"的聚合量。动作集只在三处变：动作被 apply、frame 条件被折算成 wall、
 //   脚本重载/清空 ⇒ 那三处置 dirty，tick 里至多重算一次。等价性判据：`due()` 就是 `now >= value`
 //   ⇒ "该单位至少有一条到期" ⇔ `min(value) <= now`。
+// ★ marker 边沿与事件（父级裁决 1/2）：值变才发；同名重复不重复发；首个样本只播种。
+//   ★ 动作的应用走 `applyAction()`（与 tick 的到期路径**同一条**）—— 否则 applied / 账 /
+//     缓存作废全漏，表现为"同一名字每边沿重复发 + 动作永远 pending + 超时误报"。
+bool InputScript::noteMarker(WindowManager& wm, const MarkerSample& s, std::uint64_t frame,
+                             std::uint64_t guest_ms) {
+    if (!s.valid) {
+        ++marker_invalid_;
+        return false;
+    }
+    ++marker_samples_;
+    // 同身份重复采样：名字一定没变 ⇒ ⛔ 不做一次 std::string 拷贝（采样点 = 每条主循环指令）。
+    //   ⚠ 唯一例外：降级状态变了（TOC 从"未装载"变成"已装载"）⇒ 名字要刷新（否则 timeout 的 `last=` 会停在 `id:…`）。
+    if (s.cur != marker_last_cur_ || s.id != marker_last_id_ || !marker_seeded_ ||
+        s.name_degraded != marker_last_name_degraded_) {
+        marker_last_cur_ = s.cur;
+        marker_last_id_ = s.id;
+        marker_last_name_ = s.name;
+        marker_last_name_degraded_ = s.name_degraded;
+    }
+    if (!marker_seeded_) {
+        // 首个有效样本只播种：没有"上一个值"就没有边沿（⛔ 不发事件）。
+        marker_seeded_ = true;
+        marker_cur_ = s.cur;
+        marker_id_ = s.id;
+        return false;
+    }
+    if (s.cur == marker_cur_ && s.id == marker_id_) return false;  // 同一 (cur,id) 重复出现 ⇒ 0 事件
+    marker_cur_ = s.cur;
+    marker_id_ = s.id;
+    ++marker_edges_;
+    for (Action& a : actions_) {
+        if (a.applied) continue;
+        if (a.trigger.kind != TriggerKind::Marker) continue;
+        if (quit_requested_) break;
+        if (!markerNameMatches(a.trigger.name, s)) continue;
+        std::printf("[input-script] frame=%llu guest_ms=%llu marker edge: cur=%u id=0x%08X name=%s%s ⇒ %s\n",
+                    static_cast<unsigned long long>(frame), static_cast<unsigned long long>(guest_ms), s.cur, s.id,
+                    s.name.c_str(), s.name_degraded ? "（降级）" : "", a.text.c_str());
+        applyAction(wm, a, frame, guest_ms);
+    }
+    return true;
+}
+
+void InputScript::updateMarkerTimeout(std::uint64_t wall_ms) {
+    if (marker_timeout_fired_) return;
+    if (pend_count_[static_cast<int>(TriggerKind::Marker)] == 0) {
+        marker_waiting_ = false;
+        marker_wait_action_ = static_cast<std::size_t>(-1);
+        marker_wait_name_.clear();
+        return;
+    }
+    // 文件序第一条未应用 Marker 动作 = 这次"在等谁"（动作集只追加 ⇒ 下标稳定）。
+    std::size_t first_idx = static_cast<std::size_t>(-1);
+    const Action* first = nullptr;
+    for (std::size_t i = 0; i < actions_.size(); ++i) {
+        const Action& a = actions_[i];
+        if (!a.applied && a.trigger.kind == TriggerKind::Marker) {
+            first_idx = i;
+            first = &a;
+            break;
+        }
+    }
+    if (first == nullptr) {
+        marker_waiting_ = false;
+        marker_wait_action_ = static_cast<std::size_t>(-1);
+        return;
+    }
+    // ★ 基线一变就重置：① 前一条等到了、现在等**另一条**（哪怕同名 —— 同名两条各有各的预算）；
+    //   ② 新追加了一条更早的（appendText 只会追加，所以正常不会）。⛔ 否则 B 的预算会被 A 吃掉。
+    if (!marker_waiting_ || marker_wait_action_ != first_idx) {
+        marker_waiting_ = true;
+        marker_wait_action_ = first_idx;
+        marker_wait_name_ = first->trigger.name;
+        marker_wait_ms_ = wall_ms;
+        return;
+    }
+    const std::uint64_t waited = wall_ms >= marker_wait_ms_ ? wall_ms - marker_wait_ms_ : 0;
+    if (marker_timeout_ms_ != 0 && waited >= marker_timeout_ms_) {
+        marker_timeout_fired_ = true;
+        // ★ 三个数必须打：等的是哪个名字、实际看到的是什么、等了多久（父级裁决 3 的 detail 格式）。
+        const std::string last = marker_seeded_ ? marker_last_name_ : std::string("none");
+        marker_timeout_detail_ = "marker-timeout: waited=" + marker_wait_name_ + " last=" + last +
+                                 " waited_ms=" + std::to_string(waited);
+        std::fprintf(stderr, "[marker] ⚠ %s\n", marker_timeout_detail_.c_str());
+    }
+}
+
+void InputScript::resetMarkerState() {
+    marker_seeded_ = false;
+    marker_cur_ = 0;
+    marker_id_ = 0;
+    marker_samples_ = 0;
+    marker_edges_ = 0;
+    marker_invalid_ = 0;
+    marker_last_cur_ = 0;
+    marker_last_id_ = 0;
+    marker_last_name_.clear();
+    marker_last_name_degraded_ = false;
+    marker_timeout_fired_ = false;
+    marker_timeout_posted_ = false;
+    marker_timeout_detail_.clear();
+    marker_waiting_ = false;
+    marker_wait_action_ = static_cast<std::size_t>(-1);
+    marker_wait_ms_ = 0;
+    marker_wait_name_.clear();
+}
+
 void InputScript::rebuildPending() {
     pending_dirty_ = false;
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < kTriggerKindCount; ++k) {
         pend_min_[k] = 0;
         pend_count_[k] = 0;
     }
@@ -754,7 +932,11 @@ void InputScript::rebuildPending() {
         if (a.applied) continue;
         ++action_scans_;  // 可观测：这里是**真正的逐条比较**（每次动作集变化才发生）
         const int k = static_cast<int>(a.trigger.kind);
-        if (pend_count_[k] == 0 || a.trigger.value < pend_min_[k]) pend_min_[k] = a.trigger.value;
+        // ★ Marker 没有数值到期：只累条数，**不参与** `pend_min_` / `any_due`。
+        //   ⛔ 别写成 `pend_min_[Marker] = 0` —— 那会让它每一 tick 都"到期"。
+        if (a.trigger.kind != TriggerKind::Marker) {
+            if (pend_count_[k] == 0 || a.trigger.value < pend_min_[k]) pend_min_[k] = a.trigger.value;
+        }
         ++pend_count_[k];
         if (a.trigger.kind == TriggerKind::Frame) {
             const std::uint64_t lim = a.trigger.stall_ms != 0 ? a.trigger.stall_ms : default_stall_ms_;
@@ -770,6 +952,11 @@ bool InputScript::tick(WindowManager& wm, std::uint64_t frame, std::uint64_t gue
     const std::uint32_t time_ms = static_cast<std::uint32_t>(guest_ms);
     noteFrameForAverage(frame, wall_ms);
     if (pending_dirty_) rebuildPending();
+
+    // ★ marker 超时：**必须放在下面那条快路径 `return false` 之前** —— 只有 marker 动作时
+    //   `any_due` 为假、`releases_` 空、`finished()` 假，放后面就永远不检查（静默挂死）。
+    //   ★ 基线用**宿主墙钟**：guest 阻塞在 `GetMessageA` 时 `guest_ms` 不推进。
+    updateMarkerTimeout(wall_ms);
 
     // ★ 帧停滞兜底：只在"还有 frame 条件在等"且"帧号真的停住"时触发一次。
     //   ⛔ 帧正常推进时这一段**一次也不触发**（CTest 的 `stall-not-fired` 用例钉着）。
@@ -835,13 +1022,10 @@ bool InputScript::tick(WindowManager& wm, std::uint64_t frame, std::uint64_t gue
         ++action_scans_;  // 可观测：到期的那一次才真正逐条比较
         if (quit_requested_) continue;
         if (!a.trigger.due(frame, guest_ms, insns, wall_ms)) continue;
-        a.applied = true;
-        ++applied_;
-        markPendingDirty();
         std::printf("[input-script] frame=%llu guest_ms=%llu insns=%llu %s\n",
                     static_cast<unsigned long long>(frame), static_cast<unsigned long long>(guest_ms),
                     static_cast<unsigned long long>(insns), a.text.c_str());
-        apply(wm, a, frame, guest_ms);
+        applyAction(wm, a, frame, guest_ms);
         any = true;
     }
     // ★ 收口（动作跑完 / `quit`）：把仍按着的键 / 按钮**按同一组 WM_* 抬起**再交还所有权。

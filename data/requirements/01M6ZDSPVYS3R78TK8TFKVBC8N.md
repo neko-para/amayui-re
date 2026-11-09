@@ -7,6 +7,15 @@
 - repro: docs/03-emulator/defects.md#BUG-16
 - tags: [emulator-lift, input]
 
+# 🐞S3 emulator-lift · EU-ROOM 的「戻る」按钮对注入点击无反应（hover 有效、ESC 有效）
+
+- id: REQ-01M6ZDSPVYS3R78TK8TFKVBC8N
+- type: bug
+- status: open
+- parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- repro: docs/03-emulator/defects.md#BUG-16
+- tags: [emulator-lift, input]
+
 ## 现象
 
 `EU-ROOM` 右下角「戻る」按钮（约 `1200..1272 × 652..711`，框内均值 `0xB6957E`）对**注入点击没有反应**：
@@ -38,3 +47,27 @@
 
 三次独立运行（纯 click / move 后 click / down 4 s 后 up）：房间帧 hash 稳定在 hover 态 `0xF13F23F24EEEE636` 不变。
 缺陷史 `repo:docs/03-emulator/defects.md` 的 BUG-16。
+
+## 只读取证（2026-11-09，**未实施**；来自 `.lst` 的 EA 级阅读）
+
+★ 先纠正本单"已排除②（注入按钮电平在工作）"：`waited_samples` 的计数点只有 `GetCursorPos` 与 `GetAsyncKeyState`，
+而这条 UI 的 20 Hz 心跳来自 `GetCursorPos` ⇒ 它只证明"读了 3 次位置"；`GetAsyncKeyState` **一行日志都没有**，
+今天无法用 trace 判死"电平被读到"。
+
+- WndProc = `sub_4B92F0`（`0x4BA973`；类 "ARCGameEngine"）。`WM_MOUSEMOVE`(0x4B9B27) 只做 `_TrackMouseEvent` + 光标自动隐藏 SetTimer，
+  **不做命中测试、不派发点击**。
+- `WM_LBUTTONDOWN`→`0x4B9D66`：`if (dword_55E1D4 != 0) return;` → `sub_4B8DC0(0)`；`WM_LBUTTONUP`→`0x4B9D18`：`if (dword_55E1D4 == 0) return;`
+  → `sub_4B8DC0(0)`。**两个 case 都不读 lParam**（坐标另取）。
+- `dword_55E1D4` = 配置 **`set:ClickOnUp`**（`0x4BB428/0x4BB432`），本机配置 = **1** ⇒ **DOWN 被有意丢弃，只有 UP 派发一次事件**
+  ⇒ 之前"长按 4 s"与"纯 click"是同一路，不能拿来排除时序。
+- `sub_4B8DC0`：`[engine+0x1E70] != 0` ⇒ **吞掉这一次点击**（清位直接 return）；否则 `[engine+0x1620] |= 1<<btn`。
+  该锁存由 `sub_477280` 消费成输入字第 4 位；另有**电平路** `sub_477150`（GetAsyncKeyState 当前按下也置同一位）
+  ⇒ "吞一次"只解释一次点击，不解释"永远点不动"。
+- 已判死：坐标映射（`setCursorClientPos`/`cursorClientPos` 与 `ScreenToClient`/`ClientToScreen` 同一原点）、
+  "DOWN/UP 同一次采样"（ClickOnUp=1 + 电平每帧置位）、消息没送到（其它按钮同路径有效）。
+- 剩余候选（按代价）：C1 命中区 ≠ 绘制区（一次 run 点 5 个点）；C2 该按钮在房间顶层不是点击目标（先点 CG 鑑賞 1100,150 再点它）；
+  C3 被 `+0x1E70` 吞一次（同一 run 连点两次）；C4 另一读点 / 定时器（`--trace-shims --log-cat shim --log-level info` 抓 SetTimer/KillTimer/SetCursor）。
+- **探针判据要改**：原先"停在 `0x4A4F8D`（LockRect）"已不成立（后缓冲 LockRect 已收口）。今天点中「戻る」会走退出路径，
+  在 C++ EH 修复前表现为停在 `0x4123C4`（`RaiseException`，见 `REQ-01M708DF24KY0QZNEHY66S0HYW`）；EH 修好后表现为 `task done`。
+  修复形状：C1 ⇒ 只校正 room 节点的 `screen rect`（`click center` 不动）；C2/C3 需裁决。
+- 分析全文 `.tmp/reveq/01M6XVYY5TCKSAS80WS7PADF8P/analysis.md`（**不入库**；卡点 2 部分）。
